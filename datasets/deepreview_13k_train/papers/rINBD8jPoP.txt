@@ -1,0 +1,323 @@
+\title{Curriculum reinforcement learning for quantum architecture search under hardware errors}
+
+\begin{abstract}
+
+The key challenge in the noisy intermediate-scale quantum era is finding useful circuits compatible with current device limitations.
+Variational quantum algorithms (VQAs) offer a potential solution by fixing the circuit architecture and optimizing individual gate parameters in an external loop. 
+However, parameter optimization can become intractable, and the overall performance of the algorithm depends heavily on the initially chosen circuit architecture. 
+Several quantum architecture search (QAS) algorithms have been developed to design useful circuit architectures automatically.
+In the case of parameter optimization alone, noise effects have been observed to dramatically influence the performance of the optimizer and final outcomes, which is a key line of study. 
+However, the effects of noise on the architecture search, which could be just as critical, are poorly understood.  
+This work addresses this gap by introducing a curriculum-based reinforcement learning QAS (CRLQAS) algorithm designed to tackle challenges in realistic VQA deployment. 
+The algorithm incorporates (i) a 3D architecture encoding and restrictions on environment dynamics to explore the search space of possible circuits efficiently, (ii) an episode halting scheme to steer the agent to find shorter circuits, and (iii) a novel variant of simultaneous perturbation stochastic approximation as an optimizer for faster convergence. 
+To facilitate studies, we developed an optimized simulator for our algorithm, significantly improving computational efficiency in simulating noisy quantum circuits by employing the Pauli-transfer matrix formalism in the Pauli-Liouville basis. 
+Numerical experiments focusing on quantum chemistry tasks demonstrate that CRLQAS outperforms existing QAS algorithms across several metrics in both noiseless and noisy environments.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+The past decade has witnessed dramatic progress in the study and development of quantum processing units, prompting extensive exploration of the capabilities of Noisy Intermediate-Scale Quantum (NISQ) hardware~\citep{preskillNISQ}.
+To account for the stringent limitations of NISQ devices, variational quantum algorithms (VQAs)~\citep{peruzzo2014variational, farhi2014quantum, mcclean2016theory, cerezoVQA2021} were developed as a suitable way to exploit them.
+In essence, VQAs consist of three building blocks: a parameterized quantum circuit (PQC) or ansatz, a quantum observable allowing the definition of a cost function, and a classical optimization routine that tunes the parameters of the PQC to minimize the cost function.
+Each of the building blocks corresponds to an active area of research to understand the capabilities of VQAs.
+
+One such promising VQA with an application in quantum chemistry is variational quantum eigensolver (VQE).
+In VQE, the objective is to find the ground state energy of a chemical Hamiltonian $H$ by minimizing the energy 
+\begin{equation}
+    E(\vec{\theta}) = \min_{\Vec{\theta}}\left(\langle\psi(\Vec{\theta})|H|\psi(\Vec{\theta})\rangle \right).
+    \label{eq:vqe_cost}
+\end{equation}
+The trial state $|\psi(\Vec{\theta})\rangle$ is prepared by applying a PQC $U(\vec{\theta})$ to the initial state $|\psi_{\text{initial}}\rangle$, where $\vec{\theta}$ specify the rotation angles of the local unitary operators in the circuit. The structure of this circuit significantly impacts the success of the algorithm.
+Traditionally, in VQAs, the structure of the PQC is fixed before initiating the algorithm and is often motivated by physical~\citep{peruzzo2014variational} or hardware~\citep{kandala2017hardware} considerations. 
+However, fixing the structure of the PQC within VQA may impose a substantial limitation on exploring the relevant parts of the Hilbert space.
+To circumvent such limitations, recent attention has turned towards automatically constructing PQC through quantum architecture search (QAS)~\citep{grimsley2019adaptive, tang2021qubit,anastasiou2022tetris, zhang2022differentiable}. 
+This approach removes the necessity for domain-specific knowledge and often yields superior PQCs tailored for specific VQAs.
+Given a finite pool of quantum gates, the objective of QAS is to find an optimal arrangement of quantum gates to construct a PQC (and its corresponding unitary $U(\vtheta_{opt})$, where $\vtheta_{opt}$ are optimal parameters) which minimizes the cost function (see Eq.~\ref{eq:vqe_cost}).
+\begin{figure}
+    \centering
+    \includegraphics[width=\columnwidth]{big_picture_v2_2024.pdf}
+    \caption{\small Illustration of the architecture of the double deep-Q network utilized by the reinforcement learning (RL) agent. The RL state $s$ here describes the quantum circuit encoded as a tensor-based 3D grid whose axes correspond to the qubit index, depth (moment) and gate type.     
+    This information is processed through a multi-layer perceptron. For the output, the agent computes the policy, according to which the actions $a$ (as gates) in state $s$ are probabilistically chosen. 
+    A classical optimizer optimizes the circuit and, upon completion, provides a reward that guides the agent to select subsequent actions.
+    }
+    \label{fig:scheme_qas}
+\end{figure}
+
+One such proposal to tackle the QAS problem is to employ reinforcement learning (RL)~\citep{ostaszewski2021reinforcement,ye2021quantum}, where the PQCs are defined as a sequence of actions generated by a trainable policy.
+The value of the quantum cost function (optimized independently via a classical optimizer) serves as an intermittent signal for the final reward function. 
+This reward function then guides policy updates to maximize expected returns and select optimal actions for subsequent steps.
+
+Up to the completion of this work, most algorithms for QAS have been formulated under the assumption of an idealized quantum computer, free from physical noise and endowed with all-to-all qubit connectivity. 
+However, it is essential to recognize that the QAS problem becomes even more daunting in light of the constraints imposed by current NISQ devices~\citep{du2022quantum}. 
+According to~\citep{wang2021noise}, the impact of noise on the trainability of VQAs in the context of QAS is multifaceted. 
+
+First and foremost, noise induces the phenomenon of barren plateaus, causing gradients within the cost function landscapes to vanish, thereby impeding optimization.
+Moreover, quantum noise
+introduces additional complexity by transforming certain instances of exponentially occurring global minima into local optima, posing a substantial challenge to trainability~\citep{fontana2022non}.
+Additionally, noise alters the cost landscape to an extent that the optimal parameters for the noisy landscape
+may no longer align with the optimal parameters for the noiseless landscape~\citep{sharma2020noise}. 
+In addition to the influence of physical noise on the landscape, the finite sampling noise hinders the performance of classical optimizers working on that landscape, raising the necessity of optimizers robust to such conditions~\citep{bonet2023performance}. 
+Overall, the adverse effects induced by the quantum noise demand swift simulation of numerous queries from noisy landscapes and robust classical optimization strategies operating under these conditions.
+
+Performing experiments that assess the performance of QAS algorithms in the presence of noise, though computationally demanding, is a critical step toward understanding and ultimately overcoming the challenges presented by real-world quantum hardware. 
+
+The contribution of our work is two-fold. 
+Firstly, we introduce the curriculum-based reinforcement learning QAS (CRLQAS) method depicted in Fig.~\ref{fig:scheme_qas}. 
+Secondly, we provide an optimized machinery for CRLQAS that effectively simulates realistic noise—a crucial element for testing and enhancing our method for quantum chemistry problems on larger system sizes.
+The machinery uses offline computation of Pauli-transfer matrices (PTM) and GPU based JAX framework to accelerate computations by up to six-fold.
+To further improve the learning process of CRLQAS, we introduce several key components:
+\begin{enumerate}[noitemsep, topsep=0pt]
+    \item[(1)] A mechanism, namely, illegal actions preventing invalid sequences of gates.
+    \item[(2)] A random halting procedure to steer the agent to learn gate-efficient circuits.
+    \item[(3)] A tensor-based binary circuit encoding that captures the essence of the depth of the PQC and enables all-to-all qubit connectivity.
+    \item[(4)] Two variants of simultaneous perturbation stochastic approximation (SPSA) algorithm that use adaptive momentum (Adam) and a variable measurement sample budget for faster convergence rate and robustness.
+\end{enumerate}
+By leveraging strategies (1)--(4), we achieve chemical accuracy for a class of chemical Hamiltonians with better accuracy by maintaining both gate and depth efficiency in noisy and noiseless scenarios.
+Our numerical demonstrations often establish CRLQAS as the superior approach compared to existing QAS methods within the context of VQE across a spectrum of metrics.
+
+
+
+\section{Related Work}
+
+There is a growing body of research in the field of QAS aimed at enhancing the efficiency and performance of quantum algorithms. Several key themes emerge from related works, encompassing QAS, optimization strategies, and the application of RL to quantum computing. 
+
+\textbf{Evolutionary and Genetic algorithms}
+Existing literature has explored various strategies to automate the design of quantum circuits. Evolutionary algorithms (EAs), particularly genetic algorithms (GAs), have been utilized to evolve quantum circuits~\citep {williams1998automated}. While GAs demonstrate the capability to evolve simple quantum circuits, such as quantum error correction codes or quantum adders~\citep{bang2014genetic,potovcek2018multi,chivilikhin2020mog,bilkis2021semi}, they face limitations in handling parameterized rotation gates. 
+They are also known to be sensitive to gene length and candidate gate set size.
+
+\textbf{Sampling-based algorithms} As a step forward, sampling-based learning algorithms have been introduced to sample circuits from candidate sets, addressing the QAS problem for ground state energy estimation~\citep{grimsley2019adaptive,tang2021qubit}.In~\citep{zhang2022differentiable}, the authors utilize Monte Carlo sampling to search for PQCs on QFT and Max-Cut problems.
+In~\citep{du2022quantum}, a QCAS method based on supernet and weight sharing strategy was introduced to better estimate energy for quantum chemistry tasks. 
+However, in the presence of hardware noise, this method fails to estimate the ground state energy within a precision to make realistic chemistry predictions.
+Meanwhile, \citep{wu2023quantumdarts} uses the Gumbel-Softmax technique~\citep{gumbel1948statistical} to sample quantum circuits and benchmark their algorithm on VQAs, including quantum chemistry tasks.
+
+\textbf{Reinforcement-learning-based algorithms} RL techniques have also been applied to tackle the QAS problem for VQAs.
+Typically, such approaches employ a carefully designed reward function to train the agent to choose suitable gates.
+~\citep{ostaszewski2021rotosolve} employed double deep Q-network (DDQN) to estimate the ground state of the $4$- and $6$-qubit $\ce{LiH}$ molecules.
+RL has also been used to address the qubit routing problem~\citep{li2019tackling, sinha2022qubit, pozzi2022using}.
+These works aim to minimize circuit depth through qubit routing using RL techniques. 
+Additionally, \citep{ye2021quantum} have employed RL to test their algorithms on $2$-qubit Bell state and $3$-qubit GHZ state in the presence of hardware noise.
+
+
+
+\section{Curriculum Reinforcement Learning Algorithm}
+
+
+We give an overview of the CRLQAS algorithm to construct PQCs for a VQA task, wherein we present state and action representations and the reward function used in this work. Later, we also describe the features of CRLQAS, which yields better performance across several metrics.
+
+In the CRLQAS environment, the agent starts every episode with an empty circuit. 
+It then sequentially appends the gates to the intermediate circuit until the maximum number of actions has been reached. 
+At every time step of the episode, the state corresponds to a circuit and an action to append a gate to that circuit. 
+As we employ deep RL methods, we encode states and actions in a way that is amenable to neural networks. 
+Thus, each state is represented by a newly introduced \emph{tensor-based binary encoding} of the gate structure of the PQC, which we describe in Sec.~\ref{sec:encoding}. 
+For our simulations to construct the circuits, we consider the gate set consisting of Controlled-NOT ($\texttt{CNOT}$) and $1$-qubit parameterized rotation gates ($\texttt{RX}, \texttt{RY}, \texttt{RZ}$). 
+We consciously omit the use of the continuous parameters of rotation gates and only utilize the estimated energy of the circuit in the state representation of the RL agent.
+
+To encode the actions, we use a one-hot encoding scheme as in~\citep{ostaszewski2021reinforcement} with $\texttt{CNOT}$ and rotation gates represented by two integers. For $\texttt{CNOT}$, these values specify the positions of control and target qubits, respectively. In contrast, for the rotation gates, the first value specifies the qubit register, and the second indicates the rotation axis (the enumeration of the position starts from $0$). For an $N$-qubit quantum state, the total number of actions is 
+$3N + 2 {N \choose 2}$, 
+where the first term comes from the choice of selecting the rotation gates and the latter from choosing $\texttt{CNOT}$s. 
+
+To steer the agent towards the target, we use the same reward function $R$ at every time step $t$ of an episode, as in~\citep{ostaszewski2021reinforcement}.
+The reward function $R$ defined as, 
+\begin{equation}
+R= \begin{cases}5 & \text { if } C_t<\xi, \\ 
+-5 & \text { if } t \geq T_s^e \text { and } C_t \geq \xi, \\ 
+\max \left(\frac{C_{t-1} - C_t}{C_{t-1} - C_{\min }},-1\right) & \text { otherwise }\end{cases}
+\end{equation}
+where $C_t$ refers to the value of the cost function $C$ at each step, $\xi$ is a user-defined threshold value and $T_s^e$ denotes the total number of steps $s$ allowed for an episode $e$. 
+$T_s^e$ can also be understood as the maximum number of actions allowed per episode.
+Note that the extreme reward values ($\pm5$) signal the end of an episode, leading to two stopping conditions: exceeding the threshold $\xi$ or reaching the maximum number of actions.
+For quantum chemistry tasks, the threshold $\xi$ is typically set to $1.6 \times 10^{-3}$ as it defines the precision such that realistic chemical predictions can be made.
+The goal of the agent is to obtain an estimated value of $C_{\min}$ within such precision.
+
+The continuous parameters $\vtheta$ of the quantum circuit that describes the cost function $C$ are optimized separately using a classical optimizer to obtain the reward $R$. The choice of the classical optimizer is critical for the RL agent's success in the environment.
+The nature of the CRLQAS reward function depends on the cost function evaluation. 
+The cost function evaluation can be deterministic or stochastic based on both the classical optimizer and quantum noise. 
+Stochastic optimizers, like SPSA, tend to converge toward different parameters, resulting in different function values across multiple trials, even when initialized identically. 
+Moreover, the quantum noise may also lead to different function values even with the same parameters.
+
+We consider both environment types (details discussed in Sec.~\ref{sec:experiments}) and successfully validate the effectiveness of novel features introduced in this work for the CRLQAS method. 
+
+In the next section, we describe the features of this method.
+
+\subsection{Illegal actions for the RL agent}\label{sec:illegal-actions}
+As QAS is a hard combinatorial problem with a large search space, pruning the search space is beneficial for the agent to find circuits with different structures.
+Hence, we introduce a simple mechanism, namely, \textit{illegal actions} to narrow down the search space significantly.
+The mechanism uses the property that quantum gates are unitary, and hence, when two similar gates act on the same qubit(s), they cancel out.
+\subsection{Random Halting of the RL environment}\label{sec:random_halting}
+In the CRLQAS algorithm, the total number of actions executed by the agent within an episode, denoted as $T_s^{e}$, is set using multiple hyperparameters. 
+The hyperparameter, $n_{\text{act}}$, determines an upper limit on the total actions in an episode, meaning $T_s^{e} \leq n_{\text{act}}$. If the agent is not interrupted by
+any of the schemes mentioned in the paper, it selects a maximum of $T_s^{e} = n_{\text{act}}$ actions (gates).
+
+If the RL agent finds a circuit that estimates an energy value (upon optimizing parameters) lower than this threshold, the episode is halted abruptly leading to $T_s^{e} < n_{\text{act}}$. 
+When employing the \textit{random halting} (RH) scheme, both the curricula and a stochastic sampling procedure then influence the episode length.
+We use samples from the negative binomial distribution to determine the cap on the total number of actions per episode, $T_s^{e}$, at the beginning of each episode~\citep{dougherty1990probability}. The probability mass function of this distribution is
+\begin{equation}
+    \Pr\left(X = n_{\text{fail}} \right) = \binom{n_{\text{act}}-1}{n_\text{fail}}p^{n_{\text{fail}}}(1-p)^{n_{\text{act}}- n_{\text{fail}} },\label{eq:neg_binom_dist}
+ \end{equation}
+where $n_{\text{act}}$ represents the hyperparameter for the total number of allowed actions per episode, and in this context, it is the total number of Bernoulli trials as well.
+Also, $n_{\text{fail}}$ denotes the number of failed Bernoulli trials, and the $p$ denotes the probability of a Bernoulli trial to fail, which we provide as another hyperparameter. 
+The probability mass function given above yields the probability of having $n_{\text{fail}}$ failed Bernoulli trials given $n_{\text{act}}$ total trials and $p$ failure probability. 
+In practice, we sample $T_s^e \sim n_{\text{fail}}$ as a random number based on the failure probability, and the total number of experiments is determined via inverse transform sampling implemented in NumPy~\citep{harris2020array}. 
+This inverse sampling generates a number within the range $T_s^e \sim [0,n_{\text{act}}]$, and we obtain this number at the outset of each episode.
+
+The primary motivation for integrating RH into CRLQAS is to enable the agent to adapt to shorter-length episodes, thereby facilitating the agent's ability to discover more compact circuits in early successful episodes, even if it occasionally leads to a delay in achieving the first successful episode.
+
+\subsection{Tensor-based binary circuit encoding}\label{sec:encoding}
+Several QAS algorithms often require the compact representation of the circuit, also commonly known as encoding, as it allows for modification, comparison, and exploration of quantum circuits. Hence, the choice of encoding plays a vital role in efficiently maneuvering the search space and uncovering efficient and novel quantum circuits. 
+
+We provide the agent with a complete description of the circuit by employing a binary encoding scheme that captures the structural aspects of the PQC, specifically, the ordering of the gates. To keep the dimension of the input tensor constant throughout an episode, the tensor must be prepared for the deepest quantum circuit that can be generated.
+
+For constructing a tensor representation of the circuit, we initially specify the hyperparameter $n_{\text{act}}$, which determines the maximum number of allowed actions (i.e., gates) in all episodes. 
+We now define the moment of a PQC, which is crucial for understanding the tensor representation.
+The moment or layer of a quantum circuit represents all gates that can execute simultaneously; essentially, it is a set of operations acting on different qubits in parallel. The number of these moments determines the depth of the circuit.
+We represent PQCs with $3$D tensors such that each matrix ($2$D ``slice'') represents a different moment of the circuit, and the other dimension represents the depth (see Fig.~\ref{fig:scheme_qas}).
+We use the maximum number of actions parameter, $n_{\text{act}}$, at a given episode as an upper bound on the depth of the circuit.
+We give this upper bound for the extreme case where all the actions are implemented as $1$-qubit gates appended to the same qubit.
+As a result, at each episode, we initialize an empty circuit of depth $n_{\text{act}}$ by defining a $\left[n_{\text{act}} \times \left((N+3)\times N\right)\right]$ dimensional tensor of all zeros.
+Here $N$ is the number of qubits.
+{\color{black}Each moment or layer in the circuit is depicted through a matrix of dimensions $((N + 3) \times N)$. 
+In this matrix, the initial $N$  rows showcase the locations of the control and target qubits for the \texttt{CNOT} gates applied during that specific moment. 
+Following these, the subsequent three rows indicate the positions of $1$-qubit rotation gates \texttt{RX}, \texttt{RY}, and \texttt{RZ}, respectively. 
+} 
+
+\subsection{Adam-SPSA Algorithm with Varying Samples}
+In the realm of VQE within a limited measurement sample budget, several variants of simultaneous perturbation stochastic approximation (SPSA) have displayed robustness towards finite sample (shot) noise~\citep{cade2020strategies,bonet2023performance}. 
+One such family of variants, multi-stage SPSA, reset the decaying parameters while tuning the allowed measurement sample (shot) budget between stages. 
+Implementing a moment adaptation subroutine in classical ML, such as Adam~\citep{kingma2014adam}, alongside standard gradient descent, increases robustness and convergence rates. 
+This combination has also shown promise in the domain of quantum optimal control for pulse optimization \citep{leng2019robust}.
+
+We investigate multi-stage variants of such an Adam-SPSA algorithm, exploring different shot budgets and continuous versus reset of decay parameters (after every stage).
+In doing so, we empirically observed increased robustness and faster convergence rates of a $3$-stage Adam-SPSA with continuously decaying parameters.
+We note that this particular observation is novel and was not discovered before to the best of our knowledge.
+ 
+Leveraging these enhancements, we managed to halve the number of function evaluations, thereby significantly reducing the evaluation time for RL training under physical noise.
+
+\subsection{Fast GPU Simulation of Noisy Environments}
+Most QAS algorithms require a considerable amount of noisy function evaluations unless a training-free algorithm is used.
+However, computing these evaluations becomes challenging within modern-day simulation frameworks, particularly due to the method of noise simulation known as the Kraus operator sum formalism. 
+This formalism hinders the use of fast simulation methods tailored for noiseless scenarios. 
+Consequently, with an increase in qubits and gates, simulations are hindered not only by the curse of dimensionality associated with dense matrix multiplications but also by the exponential increase in the number of noise channels and their corresponding Kraus operators.
+
+ 
+To mitigate this, the Pauli-transfer matrix (PTM) formalism is applied, allowing the fusion of noise channels with their respective gates to be precomputed offline, eliminating the need for recompilation at each step.
+
+
+\section{Experiments}
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[width=\columnwidth]{rl_vqe_big_picture_noise_camera_ready.pdf}
+    \caption{\small \textbf{Achieving the chemical accuracy for $\ce{H2}$ (with $2$-, $3$- and $4$-qubits), and $\ce{LiH}$ (with $4$-qubits) molecules via a systematic study under realistic physical noise where the noise model mimics the $\texttt{IBM Quantum}$ devices.} In the initial episodes, the probability of choosing random actions is very high, and to avoid this, we consider the statistics from $2000$ episodes onward and plot the median of the minimum over $3$ different seeds. The different colours denote the different levels of noise (increasing from bottom to top), and the patterns (from left to right) denote the number of parameters, the depth and the number of gates, respectively. We reach the chemical accuracy for $\ce{H2}-2$ and $\ce{H2}-3$ (except the $10$ times max noise of $\texttt{IBM Mumbai}$ device) molecule for all levels of noise. Meanwhile, $\ce{H2}-4$ molecule reaches the chemical accuracy with the noise profile of $\texttt{IBM Ourense}$ even with qubit-connectivity constraints. Finally, with $\ce{LiH}-4$, we achieve the chemical accuracy with shot and 1-qubit depolarizing noise. Note that, for $\ce{H2}$, we decreased the threshold (usually set to chemical accuracy) to $2.2\times 10^{-4}$ because the problem is straightforward to solve.}
+    \label{fig:one_plot_to_rule_all}
+\end{figure}
+
+Our objective is to assess the performance of CRLQAS described in Sec.~\ref{sec:crlqas} to find circuits that are accurate and can overcome hardware noise.
+We benchmark CRLQAS for the task of finding ground-state energies via variational quantum eigensolvers (VQE) of three molecules, Hydrogen (\ce{H2}), Lithium Hydride (\ce{LiH}) and Water (\ce{H2O}).
+For all three molecules, we use their representation in the minimal STO-$3$G basis, mapped to qubits through Jordan-Wigner and Parity transformations~\citep{ostaszewski2021reinforcement, wu2023quantumdarts}.
+
+Additionally, we use hardware noise profiles from publicly available resources \texttt{IBM}~\citep{ibmcompute} to implement noisy models of varying complexity and run experiments on the first three qubit systems. 
+In the subsequent subsection outlining noisy simulations, the RL agent consistently receives signals as noisy energies during training, guiding its action choices.
+However, while post-processing the data of the trained agent, we only assess energies in a noiseless scenario to determine the success or failure of an episode.
+
+Our analysis reveals that incorporating illegal actions without random halting prompts the agent to achieve a positive signal (a successful episode) early on, albeit resulting in larger circuits. 
+Conversely, introducing random halting encourages the agent to discover shorter circuits, there is a trade-off as the agent receives the positive signal at a later stage.
+
+\subsection{Noisy simulation}
+ 
+
+When noise is present, estimated cost function values for given parameters differ from those in noiseless scenarios. 
+This discrepancy challenges leveraging prior domain knowledge (like ground state energies) for configuring rewards and curriculum mechanisms in RL training. 
+Notably, our CRLQAS algorithm does not rely on prior knowledge of the true ground state energy value. 
+Instead, it employs a curriculum-based learning method that dynamically adapts to the problem difficulty based on the performance of the agent. 
+This approach makes the agent self-sufficient and allows it to accumulate knowledge at a pace determined by its performance.
+
+We first simulate all the molecules in the noiseless scenario and then in the presence of shot noise. 
+Subsequently, we incorporate the noise profile from the $\texttt{IBM Mumbai}$ device, setting the $1$-, and $2$-qubit depolarizing noise to (i) the median, (ii) the maximum value, and (iii) $10$ times the maximum noise value.
+Our findings, illustrated in Fig.~\ref{fig:one_plot_to_rule_all}, demonstrate the impact of noise levels on the quantum circuit statistics (like depth, number of gates, and parameter count) to solve the ground state energy estimation problem via VQE for $\ce{H2}-2$, $\ce{H2}-3$, $\ce{H2}-4$ and $\ce{LiH}-4$.
+Our results empirically verify a commonly expressed hypothesis: an increase in noise levels corresponds to an increase in the number of gates and parameters in the circuit~\citep{sharma2020noise, fontana2021evaluating}.
+
+Moreover, we conduct a comparative analysis between CRLQAS and the QCAS method~\citep{du2022quantum}. 
+With equivalent noise settings and connectivity constraints of \texttt{IBM Ourense}, our findings indicate that CRLQAS efficiently determines the ground state energy of $\ce{H2}-4$, yielding $-1.136$Ha, in contrast to the reported minimum energy of $-0.963\textrm{Ha}$ in~\citep{du2022quantum}.
+Detailed data in Table~\ref{tab:QAS_RL_compare} outlines the minimum energy and the number of gates for $\ce{H2}-4$. 
+We also perform a noiseless simulation of the circuit presented in~\citep{du2022quantum}, yielding an energy error of $1.9\times10^{-2}$ (with $16$ gates). 
+In contrast, CRLQAS achieves significantly superior energy errors of $8\times10^{-5}$ (with RH, $32$ gates) and $1.5\times10^{-5}$ (without RH, $40$ gates), demonstrating improvements by three orders of magnitude.
+Upon closer inspection of all the successful episodes during post-processing of the trained agent's data (i.e., searching for an intermediate step where the energy error is just below chemical accuracy) for $\ce{H2}-4$, we observed that CRLQAS indeed achieves an energy error of $2.8\times10^{-4}$ (with RH) and $5.5\times10^{-4}$ (without RH) respectively, while utilizing only $10$ gates.
+
+In Fig.~\ref{fig:noisy_learning_curve}, we present the learning curves of the agent from our simulations for $\ce{LiH}-4$ with $1$-qubit depolarizing noise strength of $0.1 \times 10^{-2}$ and $10^{6}$ sampling noise. The illustration tracks two crucial values using the optimal parameters discovered in the noisy setting: the noisy and noiseless energies, obtained by evaluating their respective cost functions for those parameters.
+The left panel depicts that in the presence of noise, the energy error closely aligns with the threshold curve and decreases with it. This trend indicates the learning trajectory of the agent, where it learns to construct circuits that minimize the noisy energy error. 
+Conversely, in the right panel, the energy behaviour does not mimic the threshold curve for the noiseless scenario. 
+Notably, it even passes chemical accuracy despite the threshold being well above it. 
+This divergence suggests that minimizing the noisy energy does not necessarily result in minimizing the noiseless energy, and vice versa.
+
+We also trained RL agents to solve the ground state energy estimation problem via VQE for $\ce{LiH}-4$ in two additional noisy settings. 
+In the first setting, we employ $1$-, and $2$-qubit depolarizing channels of strength $0.1 \times 10^{-2}$ and $0.5 \times 10^{-2}$, respectively. 
+In the second, we utilized the median noise profile of $\texttt{IBM Mumbai}$ device. 
+Unfortunately, the agent fails to achieve chemical accuracy in these noisy settings. 
+In the first setting, the agent attained a minimum noiseless error of $3.4 \times 10^{-3}$ (trained for only $5000$ episodes). 
+In the latter scenario, it reached $3.3 \times 10^{-3}$ (trained for $15000$ episodes).
+\begin{figure}[!tb]
+    \centering
+    \includegraphics[width=0.993\columnwidth]{learning_curve_lih_camera_ready.pdf}
+    \caption{\small \textbf{Learning curve of the $\ce{LiH}$ (with 4-qubits) experiment.}
+    The agent is trained with a noise model with $1$-qubit depolarizing noise of strength $0.1 \times 10^{-2}$, and sampling of the expectation values of $10^{6}$ repetitions. The left panel shows the training curve under noise, the right panel is the evaluation of the points on the left panel but without noise. The red
+dashed line indicates the chemical accuracy.}
+    \label{fig:noisy_learning_curve}
+\end{figure}
+
+\subsection{Noiseless simulation}
+
+We now present the analyses for noiseless settings. This is due to the considerable challenge of scaling noisy QAS beyond four qubits within the scope of this work.
+The exponential increase in computational cost with the number of qubits makes it exceptionally difficult to handle billions of queries to the noisy cost functions.
+
+To analyze the scaling performance of CRLQAS method, we assess its performance for $\ce{H2}-4$, $\ce{LiH}-4$, $\ce{LiH}-6$ and $\ce{H2O}-8$ molecules in comparison to quantumDARTS~\citep{wu2023quantumdarts} and modified variant of qubit-ADAPT-VQE~\citep{tang2021qubit}.  
+The results are presented in Table~\ref{tab:all_methods_molecules_table_noiseless}.
+Our results demonstrate that for $\ce{H2}-4$, $\ce{LiH}-4$, and $\ce{LiH}-6$, CRLQAS surpasses these other QAS methods, producing not only more compact circuits but also achieving lower absolute energy errors.
+Furthermore, in~\citep{ostaszewski2021reinforcement}, for the $\ce{LiH}-6$ molecule, their RL algorithm achieves chemical accuracy only in $7$ out of $10$ independent seeds. Conversely, utilizing CRLQAS with the same molecule, we achieve solutions across all seeds, showcasing the enhanced stability of CRLQAS in contrast to the RL method of~\citep{ostaszewski2021reinforcement}.
+
+It should be noted that we utilized a modified qubit-ADAPT-VQE in our simulations for comparative analysis.
+Specifically, we replace the typically large fermionic pool of operators with a parameterized gate set consisting of 
+\begin{equation}
+    \{ \texttt{RX}, \texttt{RY}, \texttt{RZ}, \texttt{RZZ}, \texttt{RYXXY}, \texttt{RXXYY}, \texttt{Controlled-RYXXY}, \texttt{Controlled-RXXYY} \}.
+\end{equation}
+The energy errors reported in Table~\ref{tab:all_methods_molecules_table_noiseless} were computed by simulating qubit-ADAPT-VQE in Hartree Fock state~\citep{slater1951simplification} for $100$ ADAPT-VQE iterations with Adam optimizer (learning rate = $0.1 \times 10^{-2}$, and $500$ optimization iterations). 
+Notably, for $\ce{LiH}-6$ and $\ce{H2O}-8$, it fails to improve over the Hartree Fock state, repetitively applying the same gate in all iterations, thus resulting in zero values for parameters, depth, and gates.
+Finally, we emphasize that we exempt ourselves from doing a fine hyperparameter tuning of qubit-ADAPT-VQE, which might improve its performance.
+\begin{table}[t!]
+\centering
+\caption{\small A tabular representation of noiseless simulation for $\ce{H2}-4$, $\ce{LiH}-4$, $\ce{LiH}-6$, and $\ce{H2O}-8$ molecules. We simulate them in the noiseless scenario for the modified variant of qubit-ADAPT-VQE~\citep{tang2021qubit}, quantumDARTS~\citep{wu2023quantumdarts} and compare it with our CRLQAS. $(\bigstar)$ denotes that the simulation is done using 1-, 2- and 3-qubit parameterized gates, which can be further decomposed into $\{\texttt{RX},\texttt{RY},\texttt{RZ},\texttt{CNOT}\}$. $\text{N.A.}$ is the abbreviation for Not Applicable, implying that the algorithm failed to improve over the Hartree Fock state energy.}
+\small
+\resizebox{\textwidth}{!}{%
+
+\begin{tabular}{@{}ccccccccccccccccc@{}}
+\toprule
+Molecule &    \multicolumn{4}{c}{Modified qubit-ADAPT-VQE $(\bigstar)$}         & \multicolumn{4}{c}{CRLQAS}                                                     & \multicolumn{4}{c}{quantumDARTS}                                \\ \midrule
+                   & Energy Error & \# Params & Depth & \# Gates & Energy Error                  & \# Params & Depth         & \# Gates       & Energy Error         & \# Params & Depth         & \# Gates \\
+$\ce{H2}-4$       &      $1.9\times10^{-2}$        &      $38$         &   $29$     &    $38$      & $\mathbf{7.2 \times 10^{-8}}$         & $\mathbf{7}$  & $\mathbf{17}$ & $\mathbf{21}$  & $4.3 \times 10^{-6}$ & $26$          & $18$          & $34$     \\
+$\ce{LiH}-4$    &   $4.6\times10^{-6}$  &      $47$       &  $38$      &   $47$       & $\mathbf{2.6 \times 10^{-6}}$ & $\mathbf{29}$ & $\mathbf{22}$ & $\mathbf{40}$  & $1.7 \times 10^{-4}$ & $50$          & $34$          & $68$     \\
+$\ce{LiH}-6$          &    $3.7\times10^{-2}$   &    $\text{N.A.}$           &    $\text{N.A.}$   &     $\text{N.A.}$     & $6.7 \times 10^{-4}$         & $\mathbf{29}$ & $\mathbf{40}$ & $\mathbf{67}$  & $\mathbf{2.9 \times 10^{-4}}$ & $80$          & $54$          & $132$    \\
+$\ce{H2O}-8$         &       $2.6\times10^{-3}$       &  $\text{N.A.}$             &   $\text{N.A.}$    &     $\text{N.A.}$     & $\mathbf{1.8 \times 10^{-4}}$         & $\mathbf{35}$ & $75$          & $\mathbf{140}$ & $3.1 \times 10^{-4}$ & $151$         & $\mathbf{64}$ & $219$    \\ \bottomrule
+\end{tabular}}
+
+\label{tab:all_methods_molecules_table_noiseless}
+\end{table}
+
+
+
+\section{Conclusion}
+
+We developed a curriculum-based reinforcement learning QAS (CRLQAS) algorithm, specifically optimized to tackle the unique challenges of deploying VQE in realistic noisy quantum environments.
+Our main contribution lies in introducing CRLQAS and analyzing its performance across different quantum noise profiles sourced from real \texttt{IBM} quantum devices like \texttt{IBM Ourense} and \texttt{IBM Mumbai}. 
+Our method achieved the ground-state energy within the precision defined by chemical accuracy while suggesting circuits characterized by minimal gate counts and depths, thereby establishing state-of-the-art performance in the sub-field of quantum architecture search (QAS).
+
+We introduced a depth-aware tensor-based $3$D encoding for the agent's state description of the quantum circuit, illegal actions to reduce the agent's search space and to avoid consecutive application of similar quantum gate, a random halting mechanism steering the agent to find shorter circuits, and a novel variant of the simultaneous perturbation stochastic approximation (SPSA) algorithm to reduce the energy function evaluations in the presence of noise.
+
+Our numerical experiments focused on quantum chemistry tasks and demonstrated that CRLQAS outperforms existing QAS algorithms across noiseless and noisy environments for $\ce{H2}$ ($2$-, $3$-, and $4$-qubit), $\ce{LiH}$ ($4$-, and $6$-qubit) and $\ce{H2O}$ ($8$-qubit) molecule. In pursuit of these experiments, we significantly enhanced the efficiency of simulating realistic noisy quantum circuits by employing the PTM formalism in the Pauli-Liouville basis, thereby fusing gates with their respective noise models and values.
+
+In essence, owing to the notable adaptability of our approach and a significant six-fold speed-up due to PTM formalism, our approach holds potential for applications in QAS for combinatorial optimization, quantum machine learning, reinforcement learning for quantum computing and quantum reinforcement learning.
+
+
+
+

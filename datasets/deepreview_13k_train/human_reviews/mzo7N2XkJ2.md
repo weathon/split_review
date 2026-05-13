@@ -1,0 +1,141 @@
+# Corrupting Unbounded Unlearnable Datasets with Pixel-based Image Transformations
+
+- Decision: Reject
+- Scores: 6, 3, 3
+
+## Abstract
+Convolution-based \textit{unlearnable examples} (UEs) employ class-wise multiplicative convolutional noise to training samples, severely compromising model performance. 
+This fire-new type of UEs have successfully countered all defense mechanisms against UEs. 
+The failure of such defenses can be attributed to the absence of norm constraints on convolutional noise, leading to severe blurring of image features. 
+To address this, we first design an \underline{\textbf{E}}dge \underline{\textbf{P}}ixel-based \underline{\textbf{D}}etector (\textbf{EPD}) to identify convolution-based UEs. 
+Upon detection of them, we propose the first defense scheme against convolution-based UEs, \underline{\textbf{CO}}rrupting these samples via random matrix multiplication by employing bilinear \underline{\textbf{IN}}terpolation (\textbf{COIN}) such that disrupting the distribution of class-wise multiplicative noise. 
+To evaluate the generalization of our proposed COIN, we newly design two convolution-based UEs called VUDA and HUDA to expand the scope of  convolution-based UEs. 
+Extensive experiments demonstrate the effectiveness of detection scheme EPD and that our defense COIN outperforms 11 \textit{state-of-the-art} (SOTA) defenses, achieving a significant improvement on the CIFAR and ImageNet datasets.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+Since recent defense methods are proven to be unsuccessful for resisting unbounded unlearnable examples, authors in this paper specifically design a defense called COIN to eliminate this threat. In detail, the authors first express unbounded UDs as a matrix-multiplication problem and propose the intra-class inconsistency and inter-class consistency matter based on empirical observation. Furthermore, they propose to employ randomly multiplicative transformation via interpolation operation as their method to defend unbounded unlearnable examples. The experiments demonstrate that COIN can achieve SOTA performance against on both small and large dataset across multiple architectures.
+
+### Strengths
+1 The technical novelty of this paper is good.
+
+2 The writing of this paper is easy to follow.
+
+3 The experiments are relatively convincing and comprehensive.
+
+### Weaknesses
+1 I think the observation about intra-class matrix inconsistency and inter-class matrix consistency is not closely correlated with the property of unbounded unlearnable attack. From my perspective, it essentially has no difference with the findings widely discussed in previous works: linearity separability is a important factor for crafting powerful unlearnable examples. Increasing intra-class matrix inconsistency or inter-class matrix consistency actually impair this separability to defend unlearnable examples.
+
+2 Though the authors claim performing experiments on ImageNet, they only select a very small fraction of vanilla dataset (20 class, 2%) and resize the image to $64\times64$ which is still a low-resolution and small dataset. To further demonstrate the effectiveness of COIN on large dataset and considering the computational cost during pre-processing, I would recommend performing experiments on ImageNet-100 with $224\times224$ image size to further demonstrate the superiority of the proposed method. 
+
+3 From the perspective of integrity, I would suggest testing the performance of COIN  against OPS on CIFAR-100 dataset . Furthermore, combing Table 1 and Table 2 together to a large table will enhance the visual representation of experimental results for easy comparison.  
+
+4 It seems that the performance of COIN  is worse than those of ISS-J against OPS attack (-5%). However, COIN outperforms ISS-J a lot against CUDA. Why is that? Can you give more explanation?
+
+### Questions
+1 Acknowledging that COIN is a defense methods designed for unbounded UDs, however, in real situation, defenders do not have any knowlege about the kind of attacks adopted by attackers. Thus, I am curious whether COIN is effctive to defend bounded UDs.
+
+2 Is COIN still effective when the perturbation for OPS is sample-wise [1]?
+
+For other question, please refer to the weakness section.
+
+[1] What Can We Learn from Unlearnable Datasets?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper addresses the challenge posed by unbounded Unlearnable Datasets (UDs) that severely affect the generalization performance of machine learning models. The authors propose a novel defense mechanism called COIN (COrruption via INterpolation), which employs random pixel-based image transformations to counteract the effects of unbounded UDs. The paper formalizes the concepts of intra-class matrix inconsistency and inter-class matrix consistency and demonstrates through extensive experiments that COIN significantly outperforms existing state-of-the-art defenses, achieving an improvement of 23.55%-48.11% in average test accuracy on the CIFAR-10 dataset.
+
+### Strengths
+1. Given the emerging nature of this challenge, the paper's focus is both timely and novel. It fills a gap in the literature by providing a defense mechanism specifically tailored for unbounded UDs.
+2. COIN is claimed as the first defense mechanism effective against unbounded Unlearnable Datasets (UDs). Utilizing random pixel-based image transformations, COIN stands as an addition to the existing arsenal of defense strategies aimed at combating UDs.
+
+### Weaknesses
+1. The paper mentions the efficiency of the COIN method but falls short of providing a detailed computational analysis. Understanding the computational overhead is important for assessing the practicality of the method. Specifically, the paper should include a breakdown of the time complexity for each step of the COIN algorithm, including the pixel-based transformations and the calculation of intra-class and inter-class matrix inconsistencies. This analysis should also consider the impact of varying image sizes and batch sizes on the overall computational cost.
+
+2. While the paper makes a significant contribution to image-based tasks, it does not explore the applicability of the COIN method to other model architectures and other types of data. This limitation narrows the paper's impact and leaves questions about its generalizability. The paper should investigate the performance of COIN on different architectures beyond ResNet18, such as VGG or transformer-based models. Furthermore, the paper should discuss the potential challenges and modifications required to apply COIN to non-image data, such as time-series data or text data, and consider whether the pixel-based transformation approach is directly transferable.
+
+### Questions
+1. What is the computational overhead for the intra-class matrix inconsistency and inter-class matrix consistency, compared with the computation cost of the baselines?
+2. What's the performance of the proposed COIN on other tasks or other datasets?
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+This paper studies the problem of defending against unlearnable datasets (UDs). Specifically, the authors identify that existing defenses that were developed against bounded UDs are not effective against unbounded UDs, and they propose COIN, a new defense tailored for unbounded UDs. This defense is based on left-multiplying a carefully designed random matrix with the unlearnable sample. The authors claim that COIN is motivated by the fact that defending against unbounded UDs should enhance intra-class matrix inconsistency ($\Theta_{imi}$) and inter-class matrix consistency ($\Theta_{imc}$).
+
+### Strengths
+- Defending against unbounded UDs was indeed not specifically explored in existing work.  
+- The paper is very well written, especially in terms of the detailed explanations of specific algorithm design.
+- The experiments are extensive, in terms of the compared baselines, datasets, and ablation studies.
+
+### Weaknesses
+ - Overclaim. 1. It is not true that existing defenses are not effective against unbounded UDs. For example, as can be seen from Table 2, ISS-J is consistently the best defense across all model architecture and largely surpasses COIN. Related to this point, the authors are highly recommended to highlight the superiority of ISS-J in the table and the text. Currently, it is completely not mentioned at all. In addition, the authors of OPS have also admitted that OPS is clearly vulnerable to median filtering (see the concerns from multiple reviewers about this and the authors’ response in https://openreview.net/forum?id=p7G8t5FVn2h). 2. A defense that claims robustness under a specific threat model (here, the Lp bound) is not meant to be robust under another threat model (here, the unbounded). Therefore, it is expected that existing bounded defenses are not effective against unbounded UDs. The authors should tune down the claim that such a finding is a blind spot in existing work. Instead, it is enough that the authors say they are the first work to focus on defenses against unbounded UDs.
+
+- Questionable idea. Actually, it is obvious that intra-class consistency and inter-class inconsistency are needed for any classification problem (simply say a dog is consistent with another dog but inconsistent with a cat). This is also the natural reason why previous work on (bounded) UDs has started their studies with the so-called class-wise perturbations, which directly satisfy both intra-class consistency and inter-class inconsistency. Recent work of Segura et. al has specifically explored the vulnerability of such class-wise UDs and proposed orthogonal projection (OP) to counter them. It is somehow strange OP does no work against unbounded UDs (CUDA) because it follows the same idea of disrupting intra-class consistency and inter-class inconsistency. Can the authors provide any explanations? This question motivates my following point about the design of COIN. Specifically, I suppose the reason why COIN works (but OP does not) on CUDA is that COIN is specifically designed to disrupt the matrix structure in CUDA. If this is the case, intra-class matrix inconsistency and inter-class matrix consistency become irrelevant to the success and should be removed from the paper.
+
+- Lack of motivation for COIN. Although intra-class matrix inconsistency and inter-class matrix consistency are indeed demonstrated to be relevant to the accuracy recovery, it is not clear why the specific design of COIN, i.e., random matrix multiplication, explicitly addresses these two factors. Instead, its design is specifically tailored for CUDA, based on the matrix operations the authors have explained. In general, this is also a problem that the defense is designed based on the knowledge of a specific attack. This suggests that the defense may not be generalizable to other possible attacks (under the same threat model but with a different way of matrix formulation).
+
+### Questions
+Please see the above weaknesses.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

@@ -1,0 +1,319 @@
+\title{FLOPS: Forward Learning with OPtimal Sampling}
+
+\begin{abstract}
+
+Given the limitations of backpropagation, perturbation-based gradient computation methods have recently gained focus for learning with only forward passes, also referred to as queries. Conventional forward learning consumes enormous queries on each data point for accurate gradient estimation through Monte Carlo sampling, which hinders the scalability of those algorithms. However, not all data points deserve equal queries for gradient estimation. In this paper, we study the problem of improving the forward learning efficiency from a novel perspective: how to reduce the gradient estimation variance with minimum cost? For this, we propose to allocate the optimal number of queries over each data in one batch during training to achieve a good balance between estimation accuracy and computational efficiency. Specifically, with a simplified proxy objective and a reparameterization technique, we derive a novel plug-and-play query allocator with minimal parameters. Theoretical results are carried out to verify its optimality. We conduct extensive experiments for fine-tuning Vision Transformers on various datasets and further deploy the allocator to two black-box applications: prompt tuning and multimodal alignment for foundation models. All findings demonstrate that our proposed allocator significantly enhances the scalability of forward-learning algorithms, paving the way for real-world applications.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Ever since the success of backpropagation (BP)~\citep{bp}, researchers have sought alternate biologically plausible methods as the brain doesn't perform backward computation to learn high-level representation~\citep{hsic, FA, ntk}. Moreover, existing practical scenarios urge for scalable forward learning methods, when the black-box nature renders taking the derivative infeasible or difficult. For example, as the model parameters increase, machine learning (ML) systems usually integrate with third-party black-box APIs~\citep{gpt4}. 
+There have been continuous efforts to develop learning algorithms that rely solely on the forward pass~\citep{bp_brain}. The forward learning uses multiple queries on one data point to estimate the gradient~\citep{SPSA, benchmark}. The high dimensionality and the rugged loss landscape of ML problems pose arduous challenges for deriving a low-variance gradient estimator. Current Literature has demonstrated that a sufficient number of queries on each data point is necessary for successful training~\citep{deepzero, benchmark}. To achieve good gradient estimation and task performance, all existing methods equally assign a large number of queries to different data points, neglecting the varying difficulty of gradient estimation at these data.
+
+However, it is not always helpful for the forward learning algorithms to increase the number of queries.  Especially for the large model training on a large dataset,  it usually requires an extensive number of queries, which poses great challenges to the memory and computation cost. For example, The forward-forward (FF)~\citep{FF} algorithm and the feedback alignment (FA)~\citep{FA} are only capable of training multilayer perceptrons on MNIST~\citep{mnist}. To scale up the forward algorithm to large model training on large datasets,  DeepZero~\citep{deepzero} and Mezo~\citep{mezo} explore the use of  SPSA~\citep{SPSA} in training the convolution network from scratch and fine-tune the language model, respectively. But with such ``large'' scale optimization problem, DeepZero requires $192$ queries to train a pruned ResNet-20 with only $12K$ parameters. Mezo needs meticulously selected prompts to ensure performance, and its gradient estimator is too noisy due to insufficient query numbers, thus suffering from highly unstable performance. 
+
+There is a great challenge required to be considered carefully in forward learning. On the one hand, consuming large amounts of queries on every data point results in high computational costs and long training time. On the other hand, using insufficient queries can save memory and computational costs but lead to unstable performance. Efficiently utilizing the queries with limited memory and computation budget is at the core of the scalability for forward learning to reduce the gradient estimation variance and improve the model training efficiency. 
+To achieve a good balance between the query cost and gradient estimation variance, we propose to study the query allocation problem under the forward learning framework. In our paper, we first unify the different estimators under the perturbation-based framework and formulate the allocation problems. Then, we propose the optimal allocation by constructing a query budget allocator to assign queries adaptively following a data-aware paradigm.
+An overview of our method and the comparison with previous work can be found in Figure \ref{fig:_lr}. Specifically, our contribution can be summarized as follows,
+
+\begin{enumerate}
+    \item We find a simplified objective for the allocation problem and solve it via the likelihood ratio method in a lightweight style. With the optimal allocation, we can compress the queries to the minimum number of $20$.
+    \item We theoretically deduce that the enhancement in allocation is assured by a defined lower bound. The allocator would assign the queries for different data in a mini-batch according to the variance of the gradient estimation. Intuitively, the estimator with high variance would be assigned with more queries, and vice versa.
+    \item Extensive experiments are conducted on fine-tuning  Vision Transformer~\citep{vit} on various challenging datasets including the  ImageNet-1K~\cite{imagenet}, achieving the SOTA performance in the realm of forward learning. 
+    \item We leverage the proposed method to solve two real-world black-box problems, including black-box prompt tuning and alignment between foundation models, showing its scalability and efficiency improvement versus a series of optimization methods, including the BP. 
+\end{enumerate}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{figure/pipeline.pdf}
+    \caption{Illustration of allocating the query budget of the forward learning paradigm. As shown in (a), previous methods equally allocate the query across different data. Our method, as shown in (b), adaptively allocate the queries under theoretically guaranteed optimality.}
+    \label{fig:_lr}
+\end{figure}
+
+
+\section{Related Work}
+
+\textbf{Backpropagation-free learning.} Without BP, people have designed algorithms drawing inspiration from biological social behavior and evolution theory~\cite{nes}. Swarm intelligent algorithms, for example, particle swarm optimization~\citep{pso}, optimize a black-box problem by iteratively tracking the best candidate in the population. Evolutionary algorithms, for example, natural evolutionary strategies, inject random noise into the model and optimize along the optimal direction along the noise~\citep{salimans2017evolution}. Both swarm intelligence algorithms and evolution algorithms lack sufficient theoretical analysis and the performance would drop as the parameters increase. Forward gradient~\citep{grad_wobp, directional_grad}, applying the chain rule from a different direction than BP, utilizes forward-mode automatic differentiation (AD) to train the ML model. Forward-mode AD needs specific AD software and full access to the model structure. Therefore, training the deep model under black-box scenarios is not feasible by the forward gradient~\citep{fg_local}. 
+
+\textbf{Perturbation-based forward learning.} Besides the heuristic algorithms, researchers have devised surrogate methods to approximate the first-order gradients, such as SPSA. The SPSA injects noise with opposite signs into the model parameters to form a finite-difference style estimator. Recently, Mezo~\citep{mezo} applied SPSA to fine-tune the language model. DeepZero~\citep{deepzero} integrates SPSA with sparsity and trains the network from scratch with many queries. However, their methods still have some limitations and their query budgets are equally allocated, neglecting the data difference. \citet{oneforward} extends the likelihood ratio estimator to train a wide range of neural networks, i.e. CNN~\citep{resnet}, RNN~\citep{gru}, GNN~\citep{gnn}, SNN~\citep{snn}, whereas they don't verify their method on modern architecture, i.e., Transformers~\citep{transformer}. There is still a huge research gap for improving the scalability of forward learning.
+
+\textbf{Machine learning for black box scenarios.}
+The applications to real-world black-box scenarios call for scalable BP-free algorithms. When deploying ML algorithms on specific hardware systems, computation resources are limited and BP becomes infeasible. In the fields of physics and chemistry, ML models have to interact with environments that include non-differentiable operations~\citep{bp_free_physical, onchip}. Moreover, extremely large models are often only accessible through third-party API~\citep{bbt}. Evolutionary algorithms and reinforcement learning have been applied to tune the prompt for the black-box language model~\citep{bbl}. 
+
+
+
+\section{Preliminary on Forward Learning}
+
+
+Given a generic neural network with no assumption on its architecture, the input is denoted as $x\in\mathbb{R}^{d_x}$, and the output is given by
+$y = \phi_2(\varphi(\phi_1(x);\theta))\in\mathbb{R}^{d_y}$, where $\phi_1(\cdot)$ and $\phi_2(\cdot)$ are black-box parts, and $\varphi(\cdot;\theta)$ is the trainable structure parameterized by $\theta\in \Theta\subset\mathbb{R}^{d_\theta}$. Training the neural network is to solve such an optimization:
+$\min_{\theta\in\Theta} \frac{1}{\vert\mathcal{X} \vert}\sum_{x\in\mathcal{X}}\mathcal{L}(y)$, where $\mathcal{X}$ is the dataset for training, and $\mathcal{L}(\cdot)$ is an evaluation procedure yielding the loss feedback. Due to the growing scale of parameters in modern neural networks and the dataset, stochastic gradient descent has essentially become the only feasible solution method.
+The primary challenge remains in computing the gradients for each batch efficiently. 
+
+In addition to approaches relying on computation graphs like BP, forward-learning algorithms estimate gradients by perturbing the neural activity and observing the correlation between the injected perturbation and the final loss value, thereby solving the stochastic version of the problem:
+$\min_{\theta\in\Theta} \frac{1}{\vert\mathcal{X} \vert}\sum_{x\in\mathcal{X}}\mathbb{E}[\mathcal{L}(y)]$.
+For instance, \citet{oneforward} perturb the intermediate result to perform LR estimation, i.e., 
+$y = \phi_2(\varphi(\phi_1(x);\theta)+z)$, where $z$ is the injected noise with a density $f(\cdot)$. Denote the Jacobian matrix of $a\in \mathbb{R}^{d_a}$ with respect to $x\in\mathbb{R}^{d_b}$ as $D_b a\in\mathbb{R}^{d_a\times d_b}$. The loss gradient can be estimated by 
+\begin{align}
+    \nabla_{\theta}\mathbb{E}[\mathcal{L}(y)] = \mathbb{E}[-\mathcal{L}(y) D_{\theta}^{\top} \varphi(\phi_1(x);\theta) \nabla_{\theta}\ln f(z)]. \label{eq: lr_grad}
+\end{align}
+The SPSA family injects noise to the parameters \citep{SPSA, salimans2017evolution}, i.e., $y = \phi_2(\varphi(\phi_1(x);\theta+z))$.
+For continuous noise distributions, the gradient estimation can be derived as a special case of equality (\ref{eq: lr_grad}) as follows:
+\begin{align}
+    \nabla_{\theta}\mathbb{E}[\mathcal{L}(y)] = \mathbb{E}[-\mathcal{L}(y)   \nabla_{\theta}\ln f(z)]. \label{eq: spsa_grad}
+\end{align}
+It can also be interpreted as a method for randomized finite differences in high-dimensional space if we use Gaussian noise $z\sim\mathcal{N}(0,\sigma^2 I_d)$ and apply an antithetic variable trick for variance reduction to equality (\ref{eq: spsa_grad}), i.e.,
+\begin{align*}
+    \nabla_{\theta}\mathbb{E}[\mathcal{L}(y)] = \mathbb{E}\big[\frac{z}{2\sigma}(\mathcal{L}(\phi_2(\varphi(\phi_1(x);\theta+z)) - \mathcal{L}(\phi_2(\varphi(\phi_1(x);\theta-z)))\big]. 
+\end{align*}
+Both equations (\ref{eq: lr_grad}) and (\ref{eq: spsa_grad}) use Monte-Carlo simulation with $A>0$ queries to compute the loss gradient, and the corresponding estimates take the common form $\nabla_{\theta} \hat{\mathcal{L}}(y)=\frac{1}{A} \sum_{i=1}^A G(x,\theta,z_i)$, where $z_i$ is sampled independently from $f(\cdot)$.
+Given the limited computational resources, the parameter is updated iteratively with randomly sampled mini-batches of data denoted as $\{x_{1},\cdots,x_{B}\}$, where $B$ is the batch size.
+For readability, we abbreviate $\nabla_{\theta}\hat{\mathcal{L}}(y_{j})=\frac{1}{A_j} \sum_{i=1}^{A_j} G(x_{j},\theta,z_{i,j})$ as $\nabla_{\theta}\hat{\mathcal{L}}_j(\theta)$ and denote the batch-wise gradient estimates as $ \nabla_\theta\hat{\mathcal{L}}(\theta_t)$.
+The updated recursion can be written as 
+\begin{equation}
+    \begin{aligned}
+       \theta_{t+1}=\theta_t-\eta_t \nabla_\theta\hat{\mathcal{L}}(\theta_t)=\theta_t-\frac{\eta_t}{B} \sum_{j=1}^B\nabla_\theta\hat{\mathcal{L}}_j(\theta_t),
+    \end{aligned}
+\end{equation}
+where $\theta_{t}$ is the network parameter at the $t$-th step, and $\eta_t$ is the learning rate. 
+By default, the query amount $A_j$ allocated to estimate the gradient associated with each data point is equally allocated. However, the difficulty of gradient estimation and the model performance differ over data points. To conserve computational resources while maintaining the quality of gradient estimation, the number of queries should be properly allocated across data within the mini-batch. 
+Utilizing the likelihood ratio technique, we propose a universal accelerator for all perturbation-based training methods from a data-aware perspective.
+
+
+\section{Method}
+
+\subsection{Optimal allocation via likelihood ratio method}
+
+\textbf{Definition.} 
+The query allocator is defined as a random vector $\bm{A}=(A_1,\cdots,A_B)$, where each component $A_j$ represents the (relative) number of queries allocated to the $j$-th data point in the batch. The allocator is assumed to follow a probability measure $\bm{A}\sim P(\bm{A}|\bm{\lambda};\Phi)$, which is parameterized by $\bm{\lambda}\in\Lambda$ and conditioned on features $\Phi$, such as the loss. At each step of neural network training, a sample of $\bm{A}$ is drawn from this distribution, and queries are allocated to data points based on the sample.
+In this work, we select a Gaussian Allocator (GA)
+\begin{equation}
+    \begin{aligned}
+        \bm{A}\sim N(\bm{\mu},\Sigma|\bm{\lambda};\Phi),
+    \end{aligned}
+\end{equation}
+where $\bm{\lambda}=(\bm{\mu},\Sigma)\in\mathbb{R}^B\times\mathbb{R}^{B\times B}$. The matrix $\Sigma$ captures the correlation structure between data points and facilitates the allocation of queries. Intuitively, structurally similar data points possess similar levels of importance, leading to a similar trend in query allocation.
+It is important to note that GA has a positive probability of generating negative samples. In practice, any data point receiving a negative allocation is assigned zero queries.
+
+Bernoulli Allocator (BA) is another lightweight alternative, similar to the idea in \cite{qin2023infobatch}. In an equal allocation scenario, each data in the batch receives $\overline{A}$ queries. The BA introduces a probabilistic mechanism where, with probability $p$, the number of queries assigned to a data point is reduced to $\overline{A}/2$; otherwise, it remains at $\overline{A}$. The probability $p$ is the only parameter of the allocator. 
+    
+It is important to note that $\bm{A}$ represents the relative number of queries, and thus the actual allocation proportion to the 
+$j$-th data point is given by $A_j/{\sum_{i=1}^BA_i}$. This definition eliminates the need for imposing a fixed total budget constraint in the following allocator optimization problem. However, as a consequence, we must specify that the total query budget per step is fixed at $A_0=\overline{A}\cdot B$ during the training process.
+Note that, since the data points selected in the mini-batch differ at each step, $A_j^t$ is actually a function of $t$. For simplicity of notation, we omit this dependency in the remainder of the paper.
+\textbf{Optimization of the Query Allocator.} 
+We employ a gradient-based method to optimize the allocator parameters $\bm{\lambda}$, introducing an additional optimization step before each iteration of neural network training. However, by formulating an equivalent optimization objective and utilizing reparameterization techniques, we ensure that this auxiliary optimization remains computationally lightweight and incurs minimal overhead.
+Our objective is to maximize the performance improvement at this step, i.e.,
+\begin{equation}\label{eq_objective}
+    \begin{aligned}
+       \arg\max_{\bm{\lambda}\in\Lambda} PI_t(\bm{\lambda})\triangleq \E_{\bm{A}\sim P(\cdot|\bm{\lambda})} [ \sum_{j=1}^B \big|\mathcal{L}_j(\theta_{t+1})-\mathcal{L}_j(\theta_{t})\big|\big],
+    \end{aligned}
+\end{equation}
+where $\mathcal{L}_j$ is the loss corresponding to the $j$-th data point. Assuming that $\mathcal{L}_j$ is $L$-smooth, $\forall j=1,\cdots,B$, and $\Theta$ is a convex set, we can derive a lower bound of the optimization objective $PI_t(\bm{\lambda})$. 
+\begin{equation}\label{lower_bound}
+    \begin{aligned}
+     PI_t(\bm{\lambda})\geq LB_t(\bm{\lambda}) \triangleq\E_{\bm{A}\sim P(\cdot|\bm{\lambda})}\sum_{j=1}^B\bigg[ \big(\eta_t\nabla_\theta \hat{\mathcal{L}}(\theta_t))^{\top}\nabla_\theta \mathcal{L}_j(\theta_t)-\frac{1}{2}\eta_t^2L\|\nabla_\theta \hat{\mathcal{L}}(\theta_t)\|^2 \bigg].
+    \end{aligned}
+\end{equation}
+ The lower bound $LB_t$ is often utilized as a surrogate optimization objective in the literature on adaptive step size \citep{pirotta2013adaptive} and adaptive batch size \citep{papini2017adaptive}.
+Since our decision variable is $\bm{\lambda}$ now, we can further simplify the form of $LB_t(\bm{\lambda})$. Before proceeding, according to the Central Limit Theorem, it is canonical to assume that the perturbation-based gradient estimator $\nabla_\theta\hat{\mathcal{L}}_j(\theta_t)=\frac{1}{A_j} \sum_{i=1}^{A_j} G(x_{j},\theta_t,z_{i,j})$, $z_{i,j}\sim f(\cdot)$, $\forall j=1,\cdots,B,$ approximately follows a $d$-dimensional Gaussian distribution.
+
+\begin{assumption}\label{gaussian_assump} $\forall j=1,\cdots,B$, 
+$\nabla_\theta\hat{\mathcal{L}}_j(\theta_t)\sim N(\mu^{j,t}_{G},\frac{\Sigma^{j,t}_{G}}{A_j})$,
+where $\mu^{j,t}_{G}$ and $\Sigma^{j,t}_{G}$ are the expectation and the covariance matrix of $G(x_{j},\theta_t,z)$, $z\sim f(\cdot)$, respectively.
+\end{assumption}
+ 
+
+\begin{theorem}[\textbf{Equivalent Objective}]\label{theorem_1}
+    Suppose that the Assumption \ref{gaussian_assump} holds, maximizing the lower bound $LB_t(\bm{\lambda})$ over $\bm{\lambda}\in\Lambda$ is equivalent to minimizing
+    \begin{equation}\label{lower_bound2}
+    J_t(\bm{\lambda})\triangleq\E_{\bm{A}\sim P(\cdot|\bm{\lambda})}\bigg[\sum_{j=1}^B\mathrm{Tr}(\frac{\Sigma_{G}^{j,t}}{A_j})\bigg]
+    \end{equation}
+    over $\bm{\lambda}\in\Lambda$, i.e.,
+$$\max_{\bm{\lambda}\in\Lambda}LB_t(\bm{\lambda})\Longleftrightarrow \min_{\bm{\lambda}\in\Lambda}J_t(\bm{\lambda}).$$
+\end{theorem}
+ First, it demonstrates that the optimization of the allocator is independent of both the smoothness parameter $L$ and the expectation $\mu^{j,t}_{G}$ of the estimator sample. Consequently, we can avoid estimating these unknown and bias-inducing high-dimensional parameters.
+More importantly, the optimization of the allocator \textbf{does not} require estimating the off-diagonal elements of the covariance matrix $\Sigma_{G}^{j,t}$, which can be statistically and computationally challenging \citep{fan2008high}, especially since $\Sigma_{G}^{j,t}$ is of dimension $d^2$. It only requires estimating the trace of $\Sigma_{G}^{j,t}$, i.e., the sum of the diagonal variances, which significantly reduces the computational complexity. 
+
+Moreover, we adopt a subsampling technique in which the trace of the covariance matrix corresponding to the parameters of the deep layers of the neural network serves as an approximation for the overall trace. This approximation is justified as these layers typically account for the majority of the variance in the model. In practice, prior to the optimization process of the allocator, we sample a small number of initial queries for each data point to estimate $\mathrm{Tr}(\Sigma^{j,t}_{G})$. In the subsequent computations, 
+$\mathrm{Tr}(\Sigma^{j,t}_{G})$ is replaced by its estimate in a plug-in manner.
+In addition, from Theorem \ref{theorem_1}, we can see that generally data points with higher variance should be allocated more query resources.
+
+Then, the gradient of $J_t(\bm{\lambda})$ with respect to allocator parameter $\bm{\lambda}$ is given by 
+\begin{equation}\label{LR_1}
+    \begin{aligned}
+     \nabla_{\bm{\lambda}}J_t(\bm{\lambda})=\nabla_{\bm{\lambda}}\E\bigg[\sum_{j=1}^B\mathrm{Tr}(\frac{\Sigma^{j,t}_{G}}{A_j})\bigg]=\E\bigg[\sum_{j=1}^B\mathrm{Tr}(\frac{\Sigma^{j,t}_{G}}{A_j})\nabla_{\bm{\lambda}}\ln(P(\bm{A}))\bigg].
+    \end{aligned}
+\end{equation}
+
+The LR gradient estimator
+\begin{equation}
+    \begin{aligned}
+     \nabla_{\bm{\lambda}}\hat{J}(\bm{\lambda})=\frac{1}{K}\sum_{k=1}^K\bigg[\sum_{j=1}^B\mathrm{Tr}(\frac{\Sigma^{j,t}_{G}}{A^{(k)}_j})\nabla_{\bm{\lambda}}\ln(P(\bm{A}^{(k)}))\bigg],
+    \end{aligned}
+    \label{eq:alloc_grad}
+\end{equation}
+where $\bm{A}^{(k)}=(A_1^{(k)},\cdots,A_B^{(k)})$ are i.i.d samples from $P(\cdot|\bm{\lambda})$. At each step $t$ of neural network training, we employ the above gradient estimator to search for the optimal allocator parameter $\bm{\lambda}_t^\ast\triangleq\arg\max_{\bm{\lambda}\in\Lambda} J(\bm{\lambda})$. 
+Let $LB^{\ast}_{1:T}$ and $LB_{1:T}^{\mathrm{equal}}$ represent the lower bound of the cumulative performance improvement of the neural network after $T$ steps of training when using the optimal allocator $\bm{A}^{\ast}\sim P(\cdot|\lambda^\ast_t)$ and using an equal allocator $\bm{A}^{\mathrm{equal}}$, respectively. Then the difference between these two allocation strategies is lower bound by the following expression.
+\begin{theorem}[\textbf{Theoretical Improvement}]\label{theorem_2}
+Suppose that the Assumption \ref{gaussian_assump} holds, then we have
+$$\E \big(LB^{\ast}_{1:T}-LB_{1:T}^{\mathrm{equal}}\big)\geq \sum_{t=1}^{T} \frac{\eta_t^2L}{2BA_0} \sum_{j<k} \left( \sqrt{\mathrm{Tr}(\Sigma^{j,t}_{G})} - \sqrt{\mathrm{Tr}(\Sigma^{k,t}_{G})} \right)^2\geq 0. $$
+\end{theorem}
+ The greater the differences in \(\mathrm{Tr}(\Sigma^{j,t}_{G})\) across different data points (i.e., the stronger the heterogeneity), the more pronounced the superiority of the optimal allocator, and this difference equals zero if and only if all \(\mathrm{Tr}(\Sigma^{j,t}_{G})\) are equal. 
+
+\textbf{Reparameterization of the Gaussian allocator.}
+The original parameter dimension of the Gaussian allocator is $B+\frac{B(B+1)}{2}$, which might be problematic due to its high dimensionality. To reduce the dimensionality of the allocator's optimization problem and to incorporate more relevant features, we adopt a reparameterization approach, i.e., imposing a specific structure to the parameter $\bm{\lambda}$. 
+
+Drawing inspiration from the literature on data pruning~\citep{qin2023infobatch}, the loss value serves as a strong indicator of the data point's characteristics. Therefore, we assume that the mean of the allocator follows a linear structure:
+$$\bm{\mu}=\beta_0+\beta_1\Phi,$$
+where $\Phi=\mathrm{Tanh}(\mathcal{L}(x; \bm{\theta}; \cdot))$ is the ``clean" loss without injected noise. The original loss value is processed through a $\mathrm{Tanh}$ function to constraint $\Phi$ within the range $[-1,1]$. The initial value for $\beta_0$ and $\beta_1$ are set to $\overline{A}$ and $\overline{A}/2$, respectively. 
+
+For the covariance structure $\Sigma$, based on the observation that similar data may have similar influences on the training of neural networks, we reparameterize the covariance matrix as follows: the covariance between the allocation of the $i$-th data point and the $j$-th data point is 
+$$\Sigma(i,j)=\sigma^2\mathrm{exp}\bigg(-\frac{d_{i,j}}{2\gamma^2}\bigg),$$
+where $d_{i,j}$ is the cosine similarity of the embedding between the $i$-th and the $j$-th data points. $\sigma^2$ and $\gamma^2$ are two parameters that control the scale and decay of the covariance, respectively. The $\sigma$ is initialized as $\overline{A}/5$ and $\gamma$ is initialized as $1$. This kernel-based reparameterization form, also known as the Radial Basis Function (RBF), is widely used in Gaussian process regression and Bayesian Optimization literature \citep{shahriari2015taking}. It enables us to model dependencies between data based on their pairwise distances. 
+
+By applying the reparameterization techniques to the covariance matrix $\Sigma$ and mean vector 
+$\bm{\mu}$, the original high-dimensional optimization problem for these parameters has been effectively transformed into a more manageable optimization problem for 4 variables $\bm{\lambda}=(\beta_0,\beta_1,\sigma,\gamma)$.
+
+
+
+\section{Experiments}
+
+\subsection{Finetuning Vision Transformer}
+\textbf{Experimental setting:} We evaluate our model's performance using a diverse set of widely used benchmark datasets, each chosen for its unique characteristics and specific challenges contributing to a comprehensive analysis of our method’s generalization across different domains: ImageNet~\citep{imagenet}, Caltech101~\citep{Caltech101}, Food101~\citep{food101}, Flowers102~\citep{flowers102}, CIFAR10/100~\citep{cifar}, and EuroSAT~\citep{eurosat}.
+
+\textbf{Evaluation metrics}: We focus on image classification and evaluate the performance by accuracy in different training contexts: BP, LR, and SPSA. We compare the performance with and without the query allocation. The GA is employed for all experiments.
+
+\begin{table}[h]
+    \caption{Classification accuracy ($\%$) for finetuning vit on downstream dataset.}
+    \setlength{\tabcolsep}{4pt}
+    \small
+    \centering
+    \begin{adjustbox}{max width=\linewidth}
+    \begin{tabular}{c|c|ccccccc}
+    \toprule
+    model & Method & ImageNet & Caltech101 & Food101 & Flowers102 & CIFAR10/100 & EuroSAT\\
+    \midrule
+    \cellcolor{white}\multirow{6}{*}{ViT-base}
+    &BP (upper bound) & 80.5 & 92.2 & 92.4 & 93.5 & 96.3 / 90.7 & 91.9 \\
+    \cmidrule(lr){2-8}
+    &Mezo (2 queries) & 9.3 & 42.6 & 37.3 & 38.2 & 42.1 / 37.5 & 39.8 \\
+    &DeepZero ($n$-SPSA) & 55.6 & 78.4 & 77.8 & 78.4 & 85.6 / 70.2 & 78.8 \\
+    &OPS-SPSA & 60.8 & 87.3 & 87.6 & 85.6 & 89.5 / 82.2 & 83.2 \\
+    &LR & 57.3 & 85.5 & 87.6 & 86.5 & 87.7 / 80.8 & 82.9 \\
+    &\cellcolor{mygray} OPS-LR (Ours)&\cellcolor{mygray} \textbf{65.8} &\cellcolor{mygray} \textbf{88.9} &\cellcolor{mygray} \textbf{88.4} &\cellcolor{mygray} \textbf{91.6} &\cellcolor{mygray} \textbf{93.2} / \textbf{88.7} &\cellcolor{mygray} \textbf{89.3} \\
+    \midrule
+    \multirow{6}{*}{ViT-Large}
+    &BP (upper bound) & 81.7 & 93.4 & 93.3 & 94.2 & 98.2 / 93.5 & 93.4 \\
+    \cmidrule(lr){2-8}
+    &Mezo (2 queries) & 10.7 & 45.6 & 38.8 & 40.5 & 45.9 / 38.3 & 41.7 \\
+    &DeepZero ($n$-SPSA) & 56.4 & 79.5 & 78.9 & 79.6 & 86.3 / 73.7 & 80.1  \\
+    &OPS-SPSA & 62.2 & 88.6 & 88.1 & 87.3 & 91.3 / 83.9 & 87.6 \\
+    &LR & 58.2 & 87.2 & 87.7 & 86.8 & 88.4 / 81.4 & 85.7 \\
+    &\cellcolor{mygray} OPS-LR (Ours) &\cellcolor{mygray} \textbf{67.6} &\cellcolor{mygray} \textbf{90.2} &\cellcolor{mygray} \textbf{89.5} &\cellcolor{mygray} \textbf{92.3} &\cellcolor{mygray} \textbf{95.5} / \textbf{90.8} &\cellcolor{mygray} \textbf{90.1}  \\
+    \bottomrule
+    \end{tabular}\end{adjustbox}
+    \label{tab:vit}
+\end{table}
+
+Using different gradient estimators, we conduct full-parameters fine-tuning for the Vision Transformer (both base and large model). We include DeepZero (SPSA with $n$ queries, denoted as $n$-SPSA), Mezo (SPSA with only $2$ queries), and LR with equally allocated query budgets as baselines in our experiments. For the SPSA-based methods, we include a version with the optimal allocator (OPS-SPSA) to compare with their corresponding baselines. We apply the same settings to the LR, comparing the optimally allocated version (OPS-LR) with the vanilla version. 
+We train the network for 100 epochs with the learning rate of $1 \times 10^{-4}$ and the Adam optimizer. The batch size is 64. All the methods in our experiments use the same query budgets, except for Mezo, which uses only 2 queries per data point in accordance with its original memory-efficient settings. As shown in Table \ref{tab:vit}, OPS-LR outperforms all other methods. In contrast, Mezo with only 1 query performs poorly in the experiment. On the contrary, DeepZero achieves acceptable accuracy compared with Mezo. The phenomenon suggests that an adequate number of queries is crucial for the success of perturbation-based methods since the gradient's variance must be properly controlled. The OPS-SPSA achieves better accuracy than the DeepZero with an equally allocated budget. Our proposed optimal allocator provides universal acceleration across all perturbation-based methods. Moreover, LR achieves higher accuracy than DeepZero, suggesting that LR is a better gradient estimator than the SPSA in this experiment context.
+
+\subsection{Black-box tuning for Model as a Service}
+\begin{wrapfigure}{r}{0.35\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figure/demo2.pdf}
+    \caption{illustration paradigm of fine-tuning the prompt for black-box vision language model}
+    \label{fig:bbvlm}
+\end{wrapfigure}
+We can tune the prompts for vision-language models (VLMs) in a Model-as-a-Service (MaaS) environment using the OPS-LR framework, as shown in Figure \ref{fig:bbvlm}. We address the challenge of fine-tuning VLMs without access to model internals or gradient information through a scalable black-box optimization approach. We use CLIP~\citep{CLIP}, with embedding dimensions of $D_T=512$ for the text encoder and $D_I=756$ for the image encoder, as the backbone foundation model. Both the text encoder and the image encoder are kept frozen as black-box modules. 
+Tunable prefix or suffix prompt tokens are injected into the text and image token sequences, respectively: $S_T=[cls, {\color{blue}p_T}, e_T] \in \mathbb{R}^{(1+n_T+m_T) \times D_T}$ is the input sequence for the text encoder, $S_I=[cls, e_I, {\color{blue}p_I}] \in \mathbb{R}^{(1+m_I+n_I) \times D_I}$ for the image counterpart. Previous researches have suggested that large foundation models have low intrinsic dimensions. Therefore, it is plausible to project the original embedding space onto a low-dimension subspace: $p_T=z_T \cdot W_T; W_T \in \mathbb{R}^{d_T \times D_T}, z_T \in \mathbb{R}^{m_T \times d_T}$ and $p_I=z_I \cdot W_I; W_I \in \mathbb{R}^{d_I \times D_I}, z_I \in \mathbb{R}^{m_I \times d_I}$. $W_T$ and $W_I$ are the projection matrix. The projection matrix is kept frozen after being initialized with a Gaussian distribution. With the projection, our black-box tuning problem is reduced to dimensions of $d_T+d_I \ll D_T+D_I$. The optimization problem, using the cross-entropy loss, takes the form:
+\begin{equation}\label{LR_2}
+    \begin{aligned}
+     Z^*=\mathop{\arg\max}\limits_{z_T,z_I} \mathcal{L}([e_T,e_I];\bm{\theta} = [z_T \cdot D_T, z_I \cdot D_I];\cdot),
+    \end{aligned}
+\end{equation}
+
+\begin{wraptable}{r}{0.5\linewidth}
+  \centering
+  \caption{Classification accuracy ($\%$) for black-box prompt tuning.}   
+  \begin{adjustbox}{max width=\linewidth}
+  \begin{tabular}{c|ccc}
+    \toprule
+    methods & ImageNet & Caltech101 & Food101\\
+    \midrule 
+    OPS-LR & \textbf{65.1} & \textbf{90.5} & \textbf{82.7} \\
+    OPS-SPSA & 64.2 & 89.3 & 81.5 \\
+    LR & 62.5 & 87.4 & 79.2 \\
+    SPSA & 60.7 & 85.3 & 77.6 \\
+    Manual Prompt & 57.9 & 83.3 & 76.4 \\
+    \bottomrule
+  \end{tabular}
+  \end{adjustbox}
+\end{wraptable}
+
+where $Z$ is the unified formulation of $[z_T, z_I]$. By applying the OPS-LR framework, we can optimize the black-box prompt tuning problems without access to the model structure. We can achieve an accuracy of $69.7\%$ on ImageNet by tuning only a few thousand parameters, surpassing the performance of other black-box methods and Manual Prompting~\citep{CLIP}.
+
+\subsection{Alignment between black-box foundation model}
+
+\begin{wrapfigure}{r}{0.35\textwidth}
+    \centering
+    \subfloat[Wall clock time for feature alignment between different methods]{\includegraphics[width=0.8\linewidth]{figure/wall_clock_time.pdf}\label{fig:2a}}
+    \caption{Scalable perturbation-based method can reduce the training time for feature alignment.}
+    \label{fig:align_time}
+\end{wrapfigure}
+
+Foundation models like GPT~\citep{gpt3}, LLaMa~\cite{llama}, Vicuna~\citep{vicuna}, and CLIP~\citep{CLIP} contain rich domain knowledge from the pretraining. Multimodal tasks, such as video captioning~\citep{dense_video_cap} and video grounding\citep{video_grounding}, require models to have sufficient cross-domain understanding, and proper alignment between different modalities is essential. 
+Aligning foundation models from a single modality is a more economical approach than pretraining from scratch using multimodal data. It is a common practice to add an adapter between the visual encoder and the Large Language model. The adapter is a linear projector, $g(\cdot)$, that projects the visual embedding to the textual embedding space. Since foundation models contain billions of parameters, the backward pass through the model requires extra memory for storing the computation graph, and recursive computations through such a large pre-trained model are time-consuming. Our OPS-LR framework efficiently bypasses the need for recursive computation to estimate the gradient with a large foundation model in between, as shown in Figure \ref{fig:1a}.
+The training paradigm for the multimodal alignment follows an autoregressive style using image-text pairs $<I,T>$. We use a frozen CLIP ViT-L/14 as the visual encoder, denoted as $ViT$. The CLS tokens of the output sequence of $ViT$ are utilized as the global feature for the frame. We denote the visual token after the projection as $Z_v=g(ViT(I)^{CLS})$. The visual token is then concatenated with the text tokens sequence: $[Z_v, t_1, t_2, ..., t_m]$, where $[t_1, t_2, ..., t_m]$ is the text tokens sequence with a length of $m$. Consequently, we can train the adapter on the concatenated sequence with the autoregressive objective of the LLM. We report the wall time for the feature alignment procedure on the LCS-558K dataset~\citep{visual_ins_tun}. Our OPS-LR framework can reduce almost half of the training time since the recursive backward computation is skipped. From Figure \ref{fig:2a}, the wall time with or without the allocator is almost the same, which further illustrates that our allocator is lightweight and has minimal impact on runtime.
+
+\subsection{Abation study}
+
+\begin{figure}[htbp]
+\centering 
+\includegraphics[trim=0cm 0.2cm 0cm 0cm, width=0.6\textwidth]{figure/ablation/legend.pdf}\\
+
+\subfloat[Key matrix of layer-1.]{
+\label{abl:1}
+\includegraphics[trim=0cm 0.5cm 0cm 0cm, width=0.3\textwidth]{figure/ablation/layer2.pdf}}
+\subfloat[Key matrix of layer-12.]{
+\label{abl:2}
+\includegraphics[trim=0cm 0.5cm 0cm 0cm, width=0.3\textwidth]{figure/ablation/layer0.pdf}}
+\subfloat[FFN of layer-1.]{
+\label{abl:3}
+\includegraphics[trim=0cm 0.5cm 0cm 0cm, width=0.3\textwidth]{figure/ablation/layer5.pdf}}
+\subfloat[Key matrix of layer-1.]{
+\label{abl:4}
+\includegraphics[trim=0cm 0.5cm 0cm 0cm, width=0.3\textwidth]{figure/ablation/layer1.pdf}}
+\subfloat[Key matrix of layer-12.]{
+\label{abl:5}
+\includegraphics[trim=0cm 0.5cm 0cm 0cm, width=0.3\textwidth]{figure/ablation/layer3.pdf}}
+\subfloat[FFN of layer-12.]{
+\label{abl:6}
+\includegraphics[trim=0cm 0.5cm 0cm 0cm, width=0.3\textwidth]{figure/ablation/layer4.pdf}}
+
+\caption{Ablation study on the effect of different allocators and estimation difficulty at different layers. We show the cosine similarity between the estimated and true gradients. We estimate the gradient of the Key matrix in multi-head attention (MHA) and the first linear layer in the feed-forward network (FFN)). Layer 1 is adjacent to the embedding and the layer 12 is adjacent to the classification head.}
+\label{Fig:ablation}
+\end{figure}
+We conduct an ablation study using ViT-base on the CIFAR100 dataset. We investigate the necessity of the allocation policy for the forward-learning training and determine whether GA or BA is the better allocator. Furthermore, we discern the varying degrees of difficulty in estimation across different network components. The results are shown in Figure \ref{Fig:ablation}.
+
+\textbf{Impact of different query budgets.} To further investigate the necessity of the procedure of query budget allocation, we compare the performance increment under various query budgets for different allocation policies. Traditionally, the queries are equally allocated (EA) across different data. The performance improvements offered by GA and BA are considerably more significant than those of EA. When the number of queries per data is small, the benefit from the allocation is still non-ignorable. In other words, the more query budget you have, the greater the improvement gains from allocation. Meanwhile, the ablation on different transformer layers indicates that the variance of the gradient increases as the layer goes deeper, which validates our subsampling technique. 
+
+\textbf{Impact of different allocators, Gaussian or Bernoulli.} We compare different allocators in Figure \ref{abl:1}, \ref{abl:2},\ref{abl:4}, and \ref{abl:5}. GA controls the allocation with the mean vectors and the covariance matrix. The covariance matrix captures the similarity between different data points.
+Structurally similar data points possess
+similar levels of importance. Therefore, the allocation policy for those data points should be correlated. If the covariance matrix is diagonal, the similarity between data points is ignored, which could undermine the performance of the allocation strategy. Compared with the GA, the BA is a simpler strategy. Intuitively, it prunes the queries on unimportant data points to eliminate unnecessary computation. Our ablation study suggests that GA is superior to BA.
+
+\textbf{Estimation on different components of Transformer.} We present the cosine similarity results on the multi-head attention (MHA) and the feed-forward network (FFN) in Figure \ref{abl:1}, \ref{abl:2}, \ref{abl:3}, and \ref{abl:6}. Estimation on the FFN is easier than on the MHA. In the Transformer block, the MHA precedes the FFN, which may explain this phenomenon. The low cosine similarity on MHA attention of deep layers may lead to the performance gap on large-scale dataset like ImageNet. 
+It is also worth noting that a large number of queries when training Transformer can improve the estimation quality. However, the memory cost of increasing queries is extremely high since the complexity of the attention module is $\mathcal{O}(n^2)$. Integrating efficient MHA techniques, such as Flash Attention~\citep{flashattention}, is left for future work.
+
+
+\section{Conclusions}
+
+In this paper, we unify different forward learning under the perturbation-based framework. We propose an optimal allocation method to accelerate forward learning by controlling the gradient variance in the mini-batch. Theoretical results show that the allocation can be conducted in a lightweight style and the optimality of the allocation is proved. Compared with other forward learning methods, we achieve the SOTA performance in fine-tuning ViT. With the improved scalability, we apply our method to two black-box scenarios for the foundation model. However, there is still a non-neglectable gap compared with BP. Other techniques of accelerating forward learning are left to future work. Moreover, forward learning can optimize black-box objectives, such as human preference, where taking derivative is infeasible. It is also an interesting future direction.
+
+
+
+
+

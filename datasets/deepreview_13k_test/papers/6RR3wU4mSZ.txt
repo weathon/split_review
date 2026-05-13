@@ -1,0 +1,334 @@
+\title{IceFormer: Accelerated Inference with Long-Sequence Transformers on CPUs}
+
+\begin{abstract}
+  One limitation of existing Transformer-based models is that they cannot handle very long sequences as input since their self-attention operations exhibit quadratic time and space complexity. This problem becomes especially acute when Transformers are deployed on hardware platforms equipped only with CPUs. To address this issue, we propose a novel method for accelerating self-attention at inference time that works with pretrained Transformer models out-of-the-box without requiring retraining. We experiment using our method to accelerate various long-sequence Transformers, including a leading LLaMA 2-based LLM, on various benchmarks and demonstrate a speedup of $2.73\times - 7.63\times$ while retaining $98.6\% - 99.6\%$ of the accuracy of the original pretrained models. The code is available on our project website at~\url{https://yuzhenmao.io/IceFormer/}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Transformers~\citep{vaswani2017attention} have powered incredible advances in NLP, as exemplified by large language models (LLMs) such as GPT-4 and LLaMA 2. Increasingly LLMs are applied to exceptionally long input sequences, which enables many exciting applications such as long-form content creation, extended conversations, and large document search and analysis~\citep{openai-gpt-4, anthropic-100k-context-windows}. While LLMs can be feasibly trained with expensive hardware accelerators (e.g. GPUs), they need to be deployed on  commodity devices, which may only be equipped with CPUs. 
+
+However, it is currently challenging to deploy LLMs on CPUs due to their high computation cost~\citep{dice2021optimizing}. A significant computational bottleneck arises from the self-attention mechanism that is integral to Transformers -- both time and space complexity are quadratic in the sequence length. This problem is exacerbated in the context of LLMs, which are often used on very long sequences.
+
+To handle long input sequences, there has been substantial research into reducing the quadratic time complexity of self-attention -- these methods are collectively known as \emph{efficient Transformers}. However, many do not meet the needs of LLMs and are therefore difficult to apply to LLMs. 
+
+An ideal acceleration method for LLMs should satisfy four criteria: (1) \textbf{No retraining} -- the method should not require the model to be retrained, given the enormous computational expense of training LLMs; (2) \textbf{Generality} -- the method should be applicable to a variety of LLMs, rather than just those trained with particular constraints built-in; (3) \textbf{High accuracy} -- the method should not introduce large approximation errors, since LLMs have many attention layers and so errors from earlier layers can compound; (4) \textbf{Fast inference} -- the method should achieve fast test-time performance.
+
+Satisfying all these criteria simultaneously is difficult, and to our knowledge no existing methods can do so. For example, Transformers with fixed attention patterns, e.g., Longformer~\citep{beltagy2020longformer}, require retraining the model before they can be used. Reformer~\citep{nikita2020reformer} requires keys to be normalized -- this requirement is not met in most pretrained models. Nystr\"{o}mformer~\citep{xiong2021nystromformer} and LARA~\citep{zheng2022linear} do not support causal masks, which are commonly found in LLMs. Low-rank methods such as Performer~\citep{choromanski2020rethinking} introduce substantial approximation errors, especially when they are not retrained/finetuned. 
+
+In this paper, we propose an acceleration method, which we dub \textbf{\toolName}  due to its ability to be applied directly in frozen models without retraining, that simultaneously satisfies the above four criteria. Specifically, \toolName (1) does not require retraining, (2) can be applied to most LLMs, (3) can approximate vanilla attention accurately, and (4) achieves significantly faster inference speeds compared to existing methods. We illustrate our method in comparison to the Transformer in Figure~\ref{fig:pipe}. As shown, the Transformer computes the attention weights $a_{ij}$ for every possible combination of query $q_i$ and key $k_j$ (Phase 1) and exhaustively enumerates all value vectors $v_j$ for each query (Phase 2). In contrast, our method takes advantage of sparsity of the attention matrix and only computes the highest attention weights and enumerates only the value vectors associated with them. %optimizes both its time and space complexity by only computing the multiplication of limited pairs of query \& key and limited pairs of attention weights \& value, utilizing $k$-Nearest Neighbor Search ($k$-NNS).
+\begin{figure}
+  \centering
+\includegraphics[width=1.0\linewidth]{pipe.png}
+  \caption{Comparison between Transformer~\citep{vaswani2017attention} (top row) and the proposed
+method, \toolName (bottom row). We illustrate with one query and $k=2$ in $k$-NNS. In the two attention matrices presented, the top-2 largest attention weights in each row are represented by a dark color. The remaining attention weights are shown in a pale color in the vanilla attention matrix, and are set to zero (depicted in white) in the sparse attention matrix.}
+  \label{fig:pipe}
+\end{figure}
+
+We conduct experiments on CPUs on the LRA~\citep{tay2020long}, ZeroSCROLLS~\citep{shaham2023zeroscrolls}, and LongEval~\citep{longchat2023} benchmarks. Across all three benchmarks, \toolName demonstrates substantially faster inference speeds than existing methods while attaining almost no accuracy loss compared to the Transformer. On the LRA benchmark, on average \toolName achieves a $7.63\times$ speedup relative to the Transformer while retaining $98.6\%$ of its accuracy. Compared to the best efficient Transformer with comparable accuracy for each task, \toolName is on average $3.04\times$ faster. On the ZeroSCROLLS benchmark, \toolName achieves a $2.73\times$ speedup on average compared to a leading LLaMA 2-based LLM while retaining $99.6\%$ of its accuracy. 
+
+
+
+\section{Related Work}
+
+Efficient Transformers can be categorized along two axes: method type and retraining requirement. Along the first axis are sparsity-based methods and low-rank methods. Along the second axis are methods that can and cannot be applied to common pretrained Transformers without retraining. 
+
+Sparsity-based methods employ a sparsified attention mechanism to capture global information and integrate it with local attention results. Some approaches aim to improve the space complexity compared to the vanilla attention mechanism without improving the time complexity, e.g., top-$k$ Attention~\citep{gupta2021memory}. Other approaches aim to improve both, e.g., Sparse Transformer~\citep{child2019generating}, Longformer~\citep{beltagy2020longformer}, and ETC~\citep{ainslie2020etc}. A substantial limitation of these models is that the tokens that are attended to are predefined and remain static, which do not adapt to varying input sequences. Because the original attention operation is permitted to attend to any token, these models must be trained with their respective predefined constraints on tokens to be attended to. Reformer~\citep{nikita2020reformer} can attend to different sets of tokens for different input sequences by using Locality Sensitive Hashing (LSH)~\citep{andoni2015practical} to group tokens into chunks and subsequently attending only to tokens within the same chunk as each query and adjacent chunks. However, Reformer imposes two constraints that are not in the original attention operation: keys must be normalized and queries and keys must be the same. Therefore, Reformer must be trained with these constraints built-in. As a result, these methods cannot be applied to pretrained, non-modified, models directly; instead, the models must be retrained with the required constraints before these methods can be used. 
+
+Low-rank methods approximate the attention weight matrix with a low-rank matrix to reduce the quadratic time and space complexity. Examples include Linformer~\citep{wang2020linformer} and Performer~\citep{choromanski2020rethinking}, which decompose the attention weight matrix into a product of tall and wide matrices consisting of learned linear features or random features of the keys and queries, respectively. However, these Transformers typically introduce significant approximation errors because attention weight matrices produced by the original attention operation, especially in the case of long input sequences, typically have high rank. Consequently, models that use these approaches must be trained with low-rank approximations built-in, in order to learn to be robust to the associated approximation errors. As a result, these approaches cannot be applied to pretrained, non-modified, models directly; instead, the models must be retrained with the required approximations before these methods can be used. 
+Other approaches provide more general methodologies that can leverage weights pretrained with standard Transformers without retraining. These Transformers accelerate the execution of the standard attention operation without altering the underlying architecture. Two examples are Nystr\"{o}mformer~\citep{xiong2021nystromformer} and LARA~\citep{zheng2022linear}, which replace the softmax structure in the self-attention mechanism with the product of separately activated query and key matrices. Nystr\"{o}mformer utilizes the Nystr\"{o}m method, while LARA combines randomized attention (RA) and random feature attentions (RFA)~\citep{peng2021random} to reconstruct the attention weight matrix. In another example, H-Transformer-1D~\citep{zhu-soricut-2021-h} recursively divides the attention weight matrix into blocks and truncates the small singular values of each off-diagonal blocks. All these approaches leverage low-rank approximations, as opposed to sparsity. 
+
+Other works propose hardware-specific optimizations without aiming to improve the computational complexity. Examples include FlashAttention~\citep{dao2022flashattention}, which optimizes reads and writes between levels of GPU memory, and H2O~\citep{zhang2023h}, which dynamically retains a balance of recent and heavy hitters tokens by a KV cache eviction policy. These strategies are dependent on implementation and are specific to particular hardware platforms (e.g. GPU).
+
+
+\section{Notation and Preliminaries}
+
+}
+
+Mathematically, the attention operation takes three matrices as input, $\mathbf{K} \in \mathbb{R}^{m \times d}, \mathbf{Q} \in \mathbb{R}^{n \times d}, \mathbf{V} \in \mathbb{R}^{m \times d'}$, which denote keys, queries and values respectively, and outputs a matrix $\mathbf{O} \in \mathbb{R}^{n \times d'}$. Optionally, it may also take in a mask as input, $\mathbf{S} \in \mathbb{R}^{n \times m}$, whose entries are either 0 or 1. The $i$th rows of $\mathbf{K}$, $\mathbf{Q}$, $\mathbf{V}$ and $\mathbf{O}$, denoted as $\mathbf{k}_i$, $\mathbf{q}_i$, $\mathbf{v}_i$ and $\mathbf{o}_i$, represent the $i$th key, query, value and output respectively. The entry of $\mathbf{S}$ in the $i$th row and $j$th column, denoted as $s_{i,j}$, represents whether the $i$th query is allowed to attend to the $j$th key --- if it is $1$, it would be allowed; if it is $0$, it would not be. A common masking scheme is the causal mask, where $s_{i,j}$ is $1$ if $i \geq j$ and $0$ otherwise. Keys and queries have the same dimension $d$, and each key is associated with a value, and so the number of keys and values is the same and denoted as $m$. 
+
+First the attention operation computes the attention weight matrix $\mathbf{A} \in \mathbb{R}^{n \times m}$. Its entry in the $i$th row and $j$th column, denoted as $a_{i,j}$, is computed with the following formula:
+
+\begin{equation}\label{eq:attn_weights}
+a_{i,j}=\frac{s_{i,j} \exp \left( \frac{\mathbf{q}_i^\top \mathbf{k}_{j}}{\sqrt{d}} \right)}{\sum_{j'=1}^{m} s_{i,j'} \exp \left( \frac{\mathbf{q}_i^\top \mathbf{k}_{j'}}{\sqrt{d}} \right)}
+\end{equation}
+
+Then the attention operation combines the values with the attention weights in the following way:
+\begin{equation}\label{eq:value_comb}
+\mathbf{o}_i = \sum_{j=1}^{m} a_{i,j} \mathbf{v}_j
+\end{equation}
+
+The attention matrix $\mathbf{A}$ is typically sparse~\citep{nikita2020reformer, gupta2021memory}, i.e., in each row of $\mathbf{A}$, only a few attention weights have significant (large) values, while the majority of the remaining values are close to zero. Suppose we can somehow identify the $k$ unmasked keys that receive the highest attention weights for each query $\mathbf{q}_i$ without computing the attention weights for all keys. Then, the original attention matrix $\mathbf{A}$ can be approximated by only computing the inner product for the identified keys, which can save significant amount of time and computational resource.
+
+
+
+
+
+\section{IceFormer: Accelerated Self-Attention for General Keys without Retraining}
+
+
+
+To build a general-purpose retraining-free acceleration method, our approach must not require modifications to the attention mechanism to change attention patterns or the introduction of new model parameters to capture regularities in the attention patterns. This precludes popular strategies such as attention mechanisms with predefined sparse attention patterns, e.g., \citep{child2019generating,beltagy2020longformer,ainslie2020etc}, and learned dimensionality reduction of keys and queries, e.g., \citep{wang2020linformer,choromanski2020rethinking}. 
+
+Consequently, it is difficult to design an acceleration method that exploits known regularities in the attention patterns without imposing the retraining requirement. We therefore aim to design an acceleration method that does not make assumptions on the existence of regularity in the attention patterns. In order to improve on the $O(mn)$ complexity of vanilla attention, we need to adaptively identify the most important keys (i.e., those that receive the highest attention weights) without computing all attention weights. This seems like a chicken-and-egg problem: how can we know which attention weights are highest without comparing them to all the other attention weights?
+
+Remarkably, in the special case of normalized keys, as proposed in~\citet{nikita2020reformer}, this can be done by leveraging $k$-nearest neighbour search ($k$-NNS) to identify the $k$ most important keys for each query. This relies on the following mathematical fact, whose derivation is in included in Sect. 
+
+However, this fact only holds when all the keys have the same norm -- it is not true when different keys differ in their norms. Intuitively, this is because the norms of keys can modulate the attention weights they receive, all else being equal. So if key A has a larger norm than key B, key A can receive a higher attention weight than key B even if key A is farther from the query than key B. As a result, na\"{i}vely applying $k$-NNS in the general case would fail to identify the most important keys.
+
+In this paper, we develop an acceleration method that does not require retraining or impose any constraints on keys. It is both accurate and computationally efficient, and can also work with attention masks that are common in Transformers, such as causal masks. Below we will describe the details.
+
+
+
+
+
+\subsection{General Retraining-Free Accelerated Attention}\label{sec:math}
+Instead of applying $k$-NNS to the original keys directly, we will first embed the keys and queries into a higher dimensional space. Inspired by \citet{neyshabur2015symmetric}, we choose the following key and query embedding functions, which we denote as $T_K: \mathbb{R}^d \rightarrow \mathbb{R}^{d+1}$ and $T_Q: \mathbb{R}^d \rightarrow \mathbb{R}^{d+1}$:
+
+\begin{align}
+T_K(\mathbf{k}_j) & =\begin{bmatrix}\mathbf{k}_j / c & 
+\sqrt{1-\|\mathbf{k}_j\|_2^2 / c^2}\end{bmatrix}^\top \\
+T_Q(\mathbf{q}_i) & =\begin{bmatrix}
+\mathbf{q}_i / \|\mathbf{q}_i\|_2 &
+0
+\end{bmatrix}^\top
+\end{align}
+where $c \geq \max _{j'}\|\mathbf{k}_{j'}\|_2$ is at least the maximum norm across all keys. 
+It turns out that the $k$ most important keys can be identified by performing $k$-NNS on the key embeddings using the query embedding. We will show this below:
+\begin{align}
+\arg\max_j a_{i,j} & = \arg\max_j \mathrm{softmax}_j\left( \left\{\frac{\mathbf{q}_i^\top \mathbf{k}_{j'}}{\sqrt{d}}\right\}_{j'=1}^{m} \right)\hphantom{ c\Vert \mathbf{q}_i \Vert_2 + \mathbf{k}_{j}^\top \mathbf{k}_{j} / c^2 + 1 - \|\mathbf{k}_{j}\|_2^2 / c^2}
+\end{align}
+
+\begin{align}
+& = \arg\max_j \frac{\mathbf{q}_i^\top \mathbf{k}_{j}}{\sqrt{d}} \\
+& = \arg\min_j 1 -  2\mathbf{q}_i^\top\mathbf{k}_{j} / c\Vert \mathbf{q}_i \Vert_2 + 1 \\
+& = \arg\min_j \mathbf{q}_i^\top \mathbf{q}_i / \Vert \mathbf{q}_i \Vert_2^2 -  2\mathbf{q}_i^\top\mathbf{k}_{j} / c\Vert \mathbf{q}_i \Vert_2 + \mathbf{k}_{j}^\top \mathbf{k}_{j} / c^2 + 1 - \|\mathbf{k}_{j}\|_2^2 / c^2 \\
+& = \arg\min_j \Vert \mathbf{q}_i / \Vert \mathbf{q}_i\Vert_2 - \mathbf{k}_{j} / c \Vert_2^2 + 1 - \|\mathbf{k}_{j}\|_2^2 / c^2 \\
+& = \arg\min_j \Vert T_Q(\mathbf{q}_i) - T_K(\mathbf{k}_{j}) \Vert_2^2
+\end{align}
+
+\subsection{Accurate $k$-NNS for Accelerated Attention}
+
+The problem of $k$-NNS is one of the most well studied problems in theoretical computer science. Many algorithms have been developed, and often significant speedups can be obtained by allowing for mistakes with some probability. Such algorithms are known as randomized algorithms. 
+
+In the context of LLMs, the number of attention layers is typically high and so errors from earlier layers can compound. Therefore, it is essential for the $k$-NNS algorithm to achieve high accuracy. Choosing an appropriate $k$-NNS algorithm is therefore crucial. 
+
+
+Most $k$-NNS algorithms are bucketing-based, which places keys into discrete buckets and searches over buckets that contain the query. On the other hand, ranking-based algorithms compares the rankings of different keys relative to the query and searches over highly ranked keys. A bucketing-based algorithm effectively uses a fixed threshold on similarity, and so a variable number (including zero) of keys can meet the threshold; on the other hand, a ranking-based algorithm returns a fixed number of keys, which effectively amounts to choosing a variable threshold on similarity based on the distribution of keys, as shown in Figure~\ref{fig:lsh}. An example of a bucketing-based algorithm is locality-sensitive hashing (LSH)~\citep{indyk1998approximate}, and an example of a ranking-based algorithm is Prioritized DCI~\citep{li2017fast}. As shown in Figure~\ref{fig:lsh}, LSH hashes each key into a bucket associated with the hash value, whereas Prioritized DCI ranks keys along random directions. 
+For accelerating attention, we posit that ranking-based algorithms are better suited than bucketing-based algorithms, because attention weights depend on how different keys compare to one another, rather than an absolute evaluation of each key against a fixed threshold. Therefore, ranking-based algorithms can yield better recall of truly important keys. 
+\begin{figure}[htb]
+\centering
+\includegraphics[width=0.93\linewidth]{knn.png}
+  \caption{Difference between ranking-based and bucketing-based $k$-NNS. Left: illustration of two $k$-NNS methods, Prioritized DCI (ranking-based) and LSH (bucketing-based). Right: the number of keys whose projections are less than a threshold. Ranking-based algorithms return a fixed number of keys are most similar to the query under projection (shown as a fixed-size row), which effectively filters out points outside a variable-sized window on the projections. Bucketing-based algorithms use a fixed-size window (shown as a fixed-size column) and return all keys whose projections lie within it. }
+  \label{fig:lsh}
+\end{figure}
+
+
+\subsection{Fast $k$-NNS for Accelerated Attention}
+
+In a Transformer, the keys in an attention layer depend on the output from the preceding attention layer. Therefore, a database needs to be constructed for each attention layer. Therefore, it is important to choose a $k$-NN algorithm that attains both fast construction and querying. 
+Moreover, in the context of LLMs, many popular models use decoder-only architectures. The attention layers in such architectures use causal masks to prevent the currently generated token to depend on future yet-to-be-generated tokens. Such masked attention is equivalent to excluding the masked out keys from the set of keys the $k$-NNS algorithm operates over. So each time a token is generated, one key becomes unmasked. Instead of constructing a new database each time a token is generated, it is more efficient to add keys incrementally to the database for $k$-NNS. 
+
+Fortunately, Prioritized DCI is efficient at both the construction and querying stages. If the number of random projection directions $p$ is nearly as large as the intrinsic dimensionality of the data $d' \geq 1$ and the number of nearest neighbours $k$ to look for is small, Prioritized DCI can return the exact $k$-nearest neighbours for a query with high probability within approximately $\tilde{O}(d k^{p / \tilde{d}} m^{1-p / \tilde{d}})$ time, where $\tilde{O}(\cdot)$ suppresses log factors. Its preprocessing is lightweight, and so only needs $O(dpm)$ time. If we compare this to the computational complexity of vanilla attention of $O(dmn)$, observe that there is no longer a term that depends on $mn$, and so there is no longer the quadratic dependence on sequence length. Later in section~\ref{sec:knn}, we also empirically validate the efficiency of Prioritized DCI and found it to be faster than \revise{eleven} other leading $k$-NNS algorithms. 
+To support causal masking, we extended the implementation of Prioritized DCI to support incremental database updates. This can be done efficiently, since the data structure consists of sorted lists, so insertions and deletions can be done in $O(\log m)$ time if they are implemented as binary search trees. 
+
+
+
+
+
+\section{Experiments}
+
+
+
+\begin{wrapfigure}{r}{0.39\textwidth}
+  \centering
+  \includegraphics[width=1\linewidth]{fashion-mnist-784-euclidean-batch.png}
+  \caption{Comparison between \revise{twelve} $k$-NNS algorithms on fashion-mnist-784 dataset. There are in total 60,000 keys and 10,000 queries with 784 dimensions. The task is to find top-10 closest neighbours from the entire set of keys for every query. X-axis: Average recall across all the queries; Y-axis: Total latency (seconds) including database construction and querying.}
+  \label{fig:knns}
+\end{wrapfigure}
+In this section, we will compare the recall-latency trade-off between different $k$-NNS algorithms and then analyze the performance of \toolName on the LRA benchmark~\citep{tay2020long}, which is a popular benchmark for long-context Transformers~\citep{zhu-soricut-2021-h, xiong2021nystromformer, zheng2022linear}. Next we will demonstrate the advantages of \toolName applied to LLMs with long prompts as input on the ZeroSCROLLS benchmark~\citep{shaham2023zeroscrolls} and the LongEval benchmark~\citep{longchat2023}. To ensure robustness of results, we used a variety of CPUs for our experiments -- we used Intel(R) Core(TM) i7-6850K 6-Core for the LRA experiments, AMD Ryzen 9 5950X 16-Core for the ZeroSCROLLS experiments, and AMD Ryzen 9 5900X 12-Core for the LongEval experiments.
+
+\subsection{Different $k$-NNS algorithms comparison}\label{sec:knn}
+We compare the recall of true nearest neighbours and total construction and querying time of 12 $k$-NNS algorithms, including Prioritized DCI and the best performing algorithms from ANN benchmarks~\citep{aumuller2017ann}, on the Fashion MNIST dataset in Figure~\ref{fig:knns}. As shown, Prioritized DCI achieves the best recall-latency trade-off compared to other algorithms, which demonstrates its suitability in our setting, which requires fast construction and querying.
+
+\subsection{Evaluation on Long Range Arena (LRA) Benchmark}
+\paragraph{Datasets and Metrics.}
+LRA consists of five different tasks: ListOps~\citep{nangia2018listops}, document retrieval (Retrieval)~\citep{radev2013acl}, text classification (Text)~\citep{maas-EtAl:2011:ACL-HLT2011}, CIFAR-10 image classification (Image)~\citep{krizhevsky2009learning} and Pathfinder~\citep{linsley2018learning}.  Specifically, all the five tasks consist of sequences with at most 4k tokens. In this experiment, we follow the train/test splits from~\citet{tay2020long} and report the test dataset classification accuracy, average running time of the attention module, and CPU memory usage during inference for each task. 
+\paragraph{Baselines.}
+In addition to the vanilla Transformer, we compare with Nystr\"{o}mformer~\citep{xiong2021nystromformer}, H-Transformer-1D~\citep{zhu-soricut-2021-h}, LARA~\citep{zheng2022linear}, Reformer~\citep{nikita2020reformer}, \revise{Longformer~\citep{beltagy2020longformer}, Performer~\citep{choromanski2020rethinking}, and Linformer~\citep{wang2020linformer}}. In order to compare with Reformer, we train a Transformer model with shared $\mathbf{Q}$ and $\mathbf{K}$ according to~\citet{nikita2020reformer}. \revise{For Longformer and Linformer, as they introduce additional parameters, we randomly initialize these parameters when loading the pre-trained weight from the vanilla Transformer.} For fair comparisons, we use
+the LRA evaluation benchmark implemented in PyTorch by~\citep{xiong2021nystromformer}, and only replace the self-attention module while making other parts of each model exactly the same as the vanilla Transformer. 
+\paragraph{Implementation Details.}
+For each task, we begin by training a base model using GPU with a vanilla Transformer architecture. Then we replace the vanilla attention module with one of the eight efficient attention modules mentioned earlier and directly apply the pre-trained weights for inference.  To ensure fair comparison, we adjust the batch size to 1, eliminating the need for a padding mask since our proposed \toolName automatically ignores padding masks during inference. Note that because of the additional shared-KQ constraint, for the Pathfinder task, our attempts to train a shared-KQ Transformer were unsuccessful. As a result, we have excluded the corresponding results from the subsequent analysis. Additionally, during the inference, we utilize a total of 4 CPU threads.
+\paragraph{Inference Results.}
+Ideally, the accuracy of the vanilla Transformer (non-shared-KQ) serves as an upper bound for the approximated accuracy of the other seven models (\toolName (non-shared-KQ), Nystr\"{o}mformer, H-Transformer-1D, LARA, \revise{Longformer, Performer, and Linformer}). Similar for the shared-KQ Transformer. Also, the attention module inference time of the vanilla Transformer would be the longest, with other efficient Transformers achieving shorter inference times at the cost of sacrificing prediction accuracy. Table~\ref{tab:2} presents the prediction accuracy and inference time of the attention module for each method. In general, our proposed \toolName consistently outperforms all efficient Transformers, offering the best accuracy approximation while requiring the least inference time across all five tasks. This demonstrates the generalizability and effectiveness of our model.
+
+\begin{table}[htb]
+\caption{\revise{The performance of vanilla Transformer, and eight approximate attention methods on the LRA benchmarks.}}
+\centering
+\scalebox{0.621} {
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{c|c|cc|cc|cc|cc|cc}
+\toprule \multirow{2}{*}{Method}  & \multirow{2}{*}{shared-KQ}   &  \multicolumn{2}{c|}{ListOps}  &  \multicolumn{2}{c|}{Text} & \multicolumn{2}{c|}{Retrieval} & \multicolumn{2}{c|}{Image} &  \multicolumn{2}{c}{Pathfinder}   \\
+\cline { 3 - 12 }
+& &  Acc & Time (s) & Acc & Time (s) & Acc & Time (s) & Acc &  Time (s) & Acc & Time (s) \\
+\midrule
+\midrule
+\multirow{2}{*}{Transformer~\citep{vaswani2017attention}}  
+& \xmark & 0.4255 & 2.9208 & 0.6019 & 0.6933 & 0.6586 & 8.3588 & 0.4132 & 4.9303 & 0.7514 & 0.9620 \\ 
+& \cmark  & 0.4145 & 2.9134  & 0.5986 &  0.6603 & 0.6681 & 6.7946 & 0.3844 & 5.9804 & / & / \\ 
+\midrule
+\midrule
+{Reformer~\citep{nikita2020reformer}} & \cmark & 0.4121 &  1.4281 &  0.5941 & 0.2288  & 0.6467 & 1.4751 & 0.3726 & 3.6927 & / & / \\
+{LARA~\citep{zheng2022linear}} & \xmark  &  0.4125 &  0.6146 & 0.5831 & 0.2348 & 0.6401 & 1.8605 & 0.3094 & 2.6720 & 0.7380 & 0.5961 \\
+{Nystr\"{o}mformer~\citep{xiong2021nystromformer}} & \xmark & 0.4128 & 0.7994 & 0.5838 & 0.3542 & 0.6540 & 2.4179 &  0.3754 & 1.7644 & 0.7176 & 0.9927 \\
+{H-Transformer-1D~\citep{zhu-soricut-2021-h}} & \xmark & 0.3265 & 1.9301 &  0.5944 & 0.4811 & 0.5808 & 3.5605 & 0.2286 & 1.2586 & 0.5286 & 0.5708 \\
+\revise{{Longformer~\citep{beltagy2020longformer}}} & \revise{\xmark} & 
+\revise{0.1975} & 
+\revise{0.7406} &  
+\revise{0.5236} & 
+\revise{0.9862} & \revise{0.4918} & 
+\revise{1.0443} & 
+\revise{0.1488} & 
+\revise{0.5451} & \revise{0.5009} & 
+\revise{0.5899} \\
+\revise{{Performer~\citep{choromanski2020rethinking}}} & \revise{\xmark} & \revise{0.1975} & 
+\revise{0.6571} &  
+\revise{0.5000} & 
+\revise{0.3327} & 
+\revise{0.4974} & 
+\revise{1.2058} & \revise{0.1345} & 
+\revise{0.6404} & \revise{0.5056} & 
+\revise{0.6395} \\
+\revise{{Linformer~\citep{wang2020linformer}}} & \revise{\xmark} & \revise{0.1975} & \revise{3.1532} & 
+\revise{0.5088} & \revise{1.8912} & \revise{0.4940} & \revise{1.6878} & \revise{0.1064} & \revise{0.7387} & \revise{0.5022} & \revise{1.3141} \\
+\midrule
+\midrule
+\multirow{2}{*}{\toolName (ours)}  
+& \xmark  & \textbf{0.4153} & \textbf{0.3766} & \textbf{0.5978} & \textbf{0.0921} & \textbf{0.6541} & \textbf{0.8337} & \textbf{0.4046} & \textbf{0.5076} & \textbf{0.7442} & \textbf{0.3058} \\
+& \cmark & \textbf{0.4124} & \textbf{0.4678}  &  \textbf{0.6001} & \textbf{0.0903} &  \textbf{0.6602} & \textbf{0.8480} & \textbf{0.3752} & \textbf{0.9581} & / & /  \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:2}
+\end{table}
+
+\paragraph{Speed \& Accuracy Trade-off.}
+
+For \toolName, increasing the extent of approximation generally improves model efficiency but can lead to a decrease in prediction performance. Here, we study how the extent of approximation affects inference speed and accuracy by varying the number of returned candidates of \toolName, $k$, from 3 to 10 for each task and present the results in Figure~\ref{fig:tradeoff}. From the figure, we observe that across all tasks, when $k$ becomes larger, \toolName achieves improved prediction accuracy but becomes less efficient.  
+\begin{figure}
+  \centering
+\includegraphics[width=1\linewidth]{tradeoff.png}
+  \caption{Tradeoff between speed and accuracy as $k$ varies on five LRA tasks. The horizontal axis of each plot is the averaged wall clock time of attention module, and the vertical axis is the model prediction accuracy. Each point corresponds to a value of $k$ in the following set: \{3, 5, 8, 10\}.}
+  \label{fig:tradeoff}
+\end{figure}
+
+
+\paragraph{Memory Complexity Analysis.}
+Table~\ref{tab:4} summarizes the maximum memory usage for each method during inference. We employ the same hyper-parameters as in Table~\ref{tab:2} and maintain a batch size of 1 to eliminate the need for padding masks. The table reveals that \toolName consistently exhibits the lowest peak memory usage across all tasks. In comparison to the vanilla Transformer, \toolName achieves memory savings of up to 0.862 GB.
+\begin{table}[H]
+\caption{Peak memory usage (GB) on LRA benchmark. The peak memory usage is the total memory usage of the whole program, which includes the memory for the Prioritized DCI database/index.}
+\centering
+\scalebox{0.621} {
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{c|c|c|c|c|c|c}
+\toprule {Method}  & {shared-KQ}   &  {ListOps}  &  {Text} & {Retrieval} & {Image} & {Pathfinder}  \\
+\midrule
+\midrule
+\multirow{2}{*}{Transformer~\citep{vaswani2017attention}}  
+& \xmark & 3.729 & 4.327 & 5.031 & 3.778 & 3.926 \\ 
+& \cmark  & 3.631 & 4.265 & 4.877 & 3.740 & / \\
+\midrule
+\midrule
+{Reformer~\citep{nikita2020reformer}} & \cmark & 3.623 & 3.983 & 4.250 & 3.687 & / \\
+{LARA~\citep{zheng2022linear}} & \xmark   & 3.584 & 4.129 & 4.566 & 3.772 & 3.943\\
+{Nystr\"{o}mformer~\citep{xiong2021nystromformer}} & \xmark & 3.478 & 3.982  & 4.375 & 3.463 & 3.845 \\
+{H-Transformer-1D~\citep{zhu-soricut-2021-h}} & \xmark & 3.883 & 4.328 & 4.543 & 3.553 & 3.603 \\
+\midrule
+\midrule
+\multirow{2}{*}{\toolName (ours)}  
+& \xmark  & \textbf{3.374 }& \textbf{3.834} &\textbf{ 4.169} & \textbf{3.304} & \textbf{3.465} \\
+& \cmark & \textbf{3.306} & \textbf{3.756} & \textbf{4.053} & \textbf{3.286} & / \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:4}
+\end{table}
+
+\subsection{Evaluation on Large Language Model (LLM)}\label{sec:llm-exp}
+We evaluate \toolName in the LLM setting as well. Specifically, we utilize \toolName to accelerate the prompt processing process in LLMs. We pick Vicuna-7b-v1.5-16k~\citep{zheng2023judging}, which is fine-tuned from LLaMA 2~\citep{touvron2023llama2} and is one of the top-performing open-source LLMs with a context length up to 16K tokens, for the following experiment.
+
+For the following LLM experiments, we do not compare \toolName with Reformer, LARA and Nystr\"{o}mformer for the following reasons: Reformer requires keys and queries to be shared, which is not the case in pre-trained LLMs; Longformer only proposed a way to speed up
+the encoder part of the Transformer, thus cannot be applied to decoder-only LLMs; LARA and Nystr\"{o}mformer group different tokens into different clusters and so cannot handle causal masks in LLMs, which use decoder-only architectures. All baselines that require retraining (Longformer, Performer and Linformer) are also excluded from the comparison.
+
+\paragraph{ZeroSCROLLS Results.}
+We compare \toolName with \revise{the vanilla Vicuna-7b-v1.5-16k model} and H-Transformer-1D \revise{applied to Vicuna-7b-v1.5-16k} on the ZeroSCROLLS benchmark~\citep{shaham2023zeroscrolls} which is specifically designed for LLMs and contains ten diverse natural language tasks that require understanding long input contexts, including summarization, question answering, aggregated sentiment classification and information reordering. Each task has a different sequence length varying between 3k and 10k. We measure ZeroSCROLLS scores and latency of the attention module. Table~\ref{tab:zeroscroll} shows that \toolName achieves up to 3.0$\times$ speed-up compared to standard self-attention while attaining at least 99.0\% of the vanilla unaccelerated model performance at the same time. 
+
+\begin{table}[h]
+  \caption{The performance of \revise{the vanilla Vicuna-7b-v1.5-16k model}, H-Transformer-1D and \toolName on the ZeroSCROLLS benchmarks. Numbers in parentheses indicate the relative comparison to the vanilla unaccelerated model, denoted as \revise{Vicuna-7b-v1.5-16k}. We employ the same abbreviations for metric and task names as specified in the original paper~\citep{shaham2023zeroscrolls}. We refer interested readers to the original paper for the details.}
+  \centering
+  \scalebox{0.621} {
+  \begin{tabular}{lc|c|c|c}
+    \toprule
+    {Task (\#tokens)} & {Metric} & \revise{Vicuna-7b-v1.5-16k} & H-Transformer-1D  &\textbf{\toolName} \\
+    \midrule
+    \midrule
+    \multirow{2}{*}{GvRp (8k)} & $R_{geo} \uparrow$ & 11.0 (100\%) & 6.8 (61.8\%) & \textbf{11.0 (100\%)} \\
+    & Time (s) & 5.07 (1.0$\times$) & 4.22 (1.2$\times$) &  \textbf{1.89 (2.7$\times$)} \\
+    \midrule
+    \multirow{2}{*}{SSFD (8k)} & $R_{geo} \uparrow$ & 13.5 (100\%) & 6.3 (46.7\%) & \textbf{13.5 (100\%)} \\
+    & Time (s) & 5.02 (1.0$\times$) & 4.18 (1.2$\times$) & \textbf{1.81 (2.8$\times$)} \\
+    \midrule
+    \multirow{2}{*}{QMsm (9k)} & $R_{geo} \uparrow$ & 16.9 (100\%) & 10.7 (63.3\%) & \textbf{16.8 (99.4\%)} \\
+    & Time (s) & 6.47 (1.0$\times$) & 4.62 (1.4$\times$) & \textbf{2.51 (2.6$\times$)} \\
+    \midrule
+    \multirow{2}{*}{SQAL (8k)} & $R_{geo} \uparrow$ & 18.9 (100\%) & 7.3 (38.6\%) & \textbf{18.9 (100\%)} \\
+    & Time (s) & 5.01 (1.0$\times$) & 2.27 (2.2$\times$) & \textbf{1.92 (2.6$\times$)} \\
+    \midrule
+    \multirow{2}{*}{Qspr (5k)} & F1 $\uparrow$& 34.2 (100\%) & 6.2 (18.1\%) & \textbf{34.0 (99.4\%)} \\
+    & Time (s) & 2.03 (1.0$\times$) & 1.70 (1.2$\times$) & \textbf{0.89 (2.3$\times$)} \\
+    \midrule
+    \multirow{2}{*}{Nrtv (10k)} & F1 $\uparrow$& 14.7 (100\%) & 2.0 (13.6\%) & \textbf{14.7 (100\%)} \\
+    & Time (s) & 6.82 (1.0$\times$) & 4.55 (1.5$\times$) & \textbf{2.85 (2.4$\times$)} \\
+    \midrule
+    \multirow{2}{*}{QALT (7k)} & AC $\uparrow$& 48.8 (100\%) & 6.8 (13.9\%) & \textbf{48.6 (99.6\%)} \\
+    & Time (s) & 3.76 (1.0$\times$) & 2.09 (1.8$\times$) & \textbf{1.26 (3.0$\times$)} \\
+    \midrule
+    \multirow{2}{*}{MuSQ (3k)} & F1 $\uparrow$& 18.6 (100\%) & 16.9 (90.9\%) & \textbf{18.5 (99.5\%)} \\
+    & Time (s) & 0.70 (1.0$\times$) & 0.63 (1.1$\times$) & \textbf{0.37 (1.9$\times$)} \\
+    \midrule
+    \multirow{2}{*}{SpDg (7.5k)} & ES $\uparrow$ & 42.5 (100\%) & 2.9 (6.8\%) & \textbf{42.3 (99.5\%)} \\
+    & Time (s) & 4.43 (1.0$\times$) & 2.22 (2.0$\times$) & \textbf{1.47 (3.0$\times$)} \\
+    \midrule
+    \multirow{2}{*}{BkSS (7.5k)} & $C_{idx} \uparrow$ & 19.5 (100\%) & 11.7 (60.0\%) & \textbf{19.3 (99.0\%)} \\
+    & Time (s) & 4.52 (1.0$\times$) & 2.26 (2.0$\times$) & \textbf{1.55 (2.9$\times$)} \\
+    \midrule
+    \midrule
+    \multirow{2}{*}{Avg. (7.5k)} & / $\uparrow$ & 23.9 (100\%) & 7.8 (32.5\%) & \textbf{23.8 (99.6\%)} \\
+    & Time (s) & 4.38 (1.0$\times$) & 2.92 (1.5$\times$) & \textbf{1.60 (2.7$\times$)} \\
+    \bottomrule
+  \end{tabular}
+  }
+  \label{tab:zeroscroll}
+\end{table}
+\paragraph{LongEval Results \& Scalability Analysis.}
+To provide a more comprehensive analysis of \toolName's scalability in the LLM setting, we conducted additional experiments on the LongEval benchmark~\citep{longchat2023}, which is designed to measure long-context performance and consists of two tasks: topic retrieval task with prompt length varying from 3k to 16k, and line retrieval task with prompt length varying from 5k to 16k. In Figure~\ref{fig:LongEval}, we present the averaged latency of the attention module corresponding to different input prompt length as well as the inference accuracy using the \revise{vanilla Vicuna-7b-v1.5-16k model} and \toolName. From the figure, \toolName can achieve nearly identical inference accuracy compared with the vanilla Vicuna-7b-v1.5-16k. Notably, as the prompt length increases, there is a corresponding increase in the inference latency for both methods and for both tasks. However, even with very long prompt lengths, \toolName maintains its scalability and consistently outperforms the vanilla Transformer. Furthermore, as the length of the prompt increases, the difference in the latency between \toolName and the vanilla Transformer becomes larger, demonstrating the superior scalability and efficiency of \toolName in the context of LLMs. 
+
+\begin{figure}
+  \centering
+\includegraphics[width=0.99\linewidth]{LongEval.png}
+  \caption{Scalability analysis for \toolName on the LongEval benchmark. The left figure shows the results of the topic retrieval task; the right figure shows the results of the line retrieval task. X-axis: length of the input prompt; Y-axis (Left): retrieval accuracy; Y-axis (Right): averaged process wall clock time (second) of the attention module.}
+  \label{fig:LongEval}
+\end{figure}
+
+
+
+\section{Conclusion}
+
+In this paper, we present \toolName, a new method for improving the inference time efficiency of pretrained Transformers on the CPU. Notably, in contrast to other methods, \toolName does not require retraining, does not require special constraints imposed on the attention mechanism and simultaneously achieves high accuracy and fast inference. These advantages make \toolName very well-suited to LLM deployment on CPUs, especially when the LLM needs to handle very long sequences as input. The experimental findings on three benchmarks compellingly illustrate the effectiveness of our approach in reducing the quadratic time and space complexity of Transformers both in cases with bi-directional and causal attention mechanisms.
+
+
+
+

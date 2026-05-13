@@ -1,8 +1,8 @@
 # Planning in Natural Language Improves LLM Search for Code Generation
 
 - Decision: Accept
-- Avg Score: 3.25
-- Scores: 1, 0, 6, 6
+- Avg Score: 7.33
+- Scores: 10, 6, 6
 
 ## Abstract
 While scaling training compute has led to remarkable improvements in large language models (LLMs), scaling inference compute has not yet yielded analogous gains.

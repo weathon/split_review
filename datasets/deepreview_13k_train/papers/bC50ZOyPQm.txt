@@ -1,0 +1,267 @@
+\title{READ: Recurrent Adaptation of Large Transformers}
+
+\begin{abstract}
+
+In the realm of Natural Language Processing (NLP), large-scale transformers have established themselves as pivotal, achieving unparalleled results across numerous tasks. The conventional approach involves pre-training these models on extensive web-scale data, followed by fine-tuning them for specific downstream tasks. However, the burgeoning size of these models, which has surged almost two orders of magnitude faster than GPU memory since 2018, has rendered their fine-tuning financially and computationally exorbitant, limiting this capability to a select few well-funded institutions. Parameter-efficient transfer learning (PETL) has emerged as a potential solution, aiming to efficiently adapt pre-trained model parameters to target tasks using smaller, task-specific models. Nonetheless, existing PETL methods either introduce additional inference latency or marginally reduce memory requirements during training, thus not fully addressing the primary motivation behind PETL. This paper introduces REcurrent ADaption (READ), a novel, lightweight, and memory-efficient fine-tuning method that incorporates a small RNN network alongside the backbone model. READ not only achieves comparable model quality to traditional fine-tuning, saving over 84\% in energy consumption, but also demonstrates scalability and independence from the backbone model size. Through extensive experiments on various NLP benchmarks, including the GLUE benchmark, READ showcases robust performance and high efficiency, reducing model training memory consumption by 56\% and GPU energy usage by 84\% relative to full-tuning, without significantly impacting inference latency and memory. We provide a theoretically justified, scalable solution for fine-tuning large transformers. 
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+
+
+
+\begin{figure}[hbt!]
+    \centering
+    \begin{minipage}[t]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/quality_energy.pdf}
+    \end{minipage}
+    \begin{minipage}[t]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/quality_memory.pdf}
+    \end{minipage}
+    \begin{minipage}[t]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/normalized_energy.pdf}
+    \end{minipage}
+    \caption{(Left) Comparison of READ and other fine-tuning methods over GLUE tasks on training energy. (Center) Peak training memory relative to full-tuning. (Right) Normalized energy consumption relative to full-tuning on GLUE tasks.}
+    \label{fig:combined_figures}
+\end{figure}
+Large-scale transformers architecture have achieved state-of-the-art results in several Natural Language Processing (NLP) tasks \cite{gpt_3, flan, T5, roberta, lu2019vilbert, bao2021beit}. Scaling up the size of these models has been shown to confer various benefits, such as improved model prediction performance and sample efficiency \cite{chung2022scaling, wei2023larger, howard2018universal}. The conventional paradigm is to pre-train large-scale models on generic web-scale data and fine-tune the models to downstream tasks. However, fine-tuning these models has become prohibitively expensive. 
+
+Since 2018, the model size has increased by almost two orders of magnitude faster than GPU memory \cite{petl_survey}, resulting in prohibitively high cost to advance AI technologies~\cite{sustainable-ai}. Only a few well-funded institutions have the resources to fine-tune these models. Parameter-efficient transfer learning (PETL) \cite{adapters, lora, prefix, bitfit, prompt, compacter, aghajanyan2020intrinsic} has emerged as a promising solution to overcome the challenges of full fine-tuning. Parameter-efficient transfer learning techniques aim to address these challenges by leveraging smaller and more task-specific models to efficiently adapt the pre-trained model's parameters to the target task. 
+
+However, all these methods either come with additional inference latency \cite{adapters} or reduces only a small amount of memory requirement during training --- the primary motivation of PETL. Figure \ref{fig:combined_figures} illustrates that parameter-efficient methods, while tuning only a small percentage of the overall parameters, still consume significant energy to fine-fine. Since the updated parameters are inside the backbone language models, to calculate gradients for these parameters for backpropagation, PETL methods need to run the backward pass through the sizeable pre-trained language models. This prevents PETL methods from being applied to many real-world applications with limited computational resources.
+Recent works of Side-Tuning \cite{side_tuning} and Ladder-Side Tuning (LST) \cite{lst} propose to use a side network that takes intermediate activations from the backbone networks to reduce the need to backpropagate through the large backbone layer. It thus reduces training memory requirement. However, both Side-Tuning and LST have significant drawbacks. In Side-Tuning, the side network only consumes the original inputs, leaving the informative intermediate results from the backbone unused. LST overcomes this problem by using a side Transformer. However, Transformers are challenging to train \cite{Liu2020UnderstandingTD}. Moreover, LST requires an extra pretraining stage to extract a sub-Transformer from the backbone and use it to initialize the side network, increasing the cost of fine-tuning. Additionally, the size of the side-Transformer and the backbone increase, making this approach hard to scale (Figure \ref{adapted_size_backbone_size}). 
+In this work, we introduce \textbf{RE}current \textbf{AD}aptation (READ), a novel, lightweight, and efficient fine-tuning method that incorporates a small Recurrent Neural Network (RNN) alongside the backbone model. READ not only achieves comparable model quality to traditional fine-tuning but also realizes more than 84\% energy savings during the process.
+
+\textbf{Contributions}
+
+We present READ, a memory and parameter-efficient fine-tuning method that:
+\begin{enumerate}
+    \item Introduces a side-tuning design that requires no pretraining of the side network, addressing limitations of previous PETL and side-tuning methods.
+    \item Demonstrates robust performance and efficiency across various NLP benchmarks, reducing model training memory consumption by $56\%$ and GPU energy usage by $84\%$ relative to full-tuning.
+    \item Proves scalable for fine-tuning large transformers, independent of the backbone model size.
+    \item Offers theoretical justification for utilizing the backbone hidden state for side-tuning.
+\end{enumerate}
+
+
+
+\section{Breaking Down REcurrent ADaptation (READ)}
+
+\subsection{What is READ?}
+\label{sec:read}
+
+\begin{figure}[htbp]
+    \begin{minipage}[t]{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/read_arch.pdf}
+        \caption{READ Fine-Tuning Mechanism.}
+        \label{fig:read_arch}
+    \end{minipage}
+    \hfill % To add a space between the two minipages
+    \begin{minipage}[t]{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/comm.pdf}
+        \caption{Commuting diagram for \emph{correction}.}
+        \label{fig:comm}
+    \end{minipage}
+\end{figure}
+
+Figure \ref{fig:read_arch} illustrates the READ fine-tuning mechanism on an encoder-decoder transformer backbone, \(\mathcal{T}\), which is frozen during training. READ, initialized at both encoder and decoder, primarily consists of a standard RNN and a \emph{Joiner} network, facilitating the amalgamation of multiple information sources to generate RNN inputs. The forward pass through \(\mathcal{T}\) is independent of READ, with intermediate results cached at each transformer layer, followed by iterative computation of RNN hidden states and the addition of RNN and \(\mathcal{T}\) outputs to derive the final state.
+
+Key properties of READ include:
+\begin{enumerate}
+    \item \textbf{Isolation from Backbone}: Forward pass is separate from \(\mathcal{T}\), preventing backward propagation through it and reducing training memory \cite{lst}.
+    \item \textbf{Simplicity and Efficiency}: Involves only RNNs and FFNs, enhancing usability and training efficiency without requiring pre-training.
+    \item \textbf{Parameter Scalability}: The recurrent nature ensures trainable parameters do not increase with backbone layers, exhibiting sub-linear growth with backbone size.
+    \item \textbf{Unmodified Intermediate Results Consumption}: READ utilizes without altering the backbone's intermediate results\footnote{Notably, although not detailed in this paper, READ enables \emph{multi-tasking} with multiple networks, necessitating only a single backbone pass, thereby reducing training and inference costs.}.
+\end{enumerate}
+\subsection{How does READ work?}
+Figure \ref{fig:read_arch} provides a visual representation of the READ fine-tuning mechanism, applied to an encoder-decoder transformer backbone, denoted as \(\mathcal{T}\). In simpler terms, READ learns the necessary adjustments, or corrections, to the output hidden states at each layer of \(\mathcal{T}\) to adapt it for a new task.
+
+\begin{definition}[\emph{Correction}]
+\label{correction}
+\emph{If \(\mathcal{T}^\prime\) is a modified version of \(\mathcal{T}\) and \(\phi_i^\prime\) represents the hidden states at layer \(\mathcal{L}^\prime_i\) of \(\mathcal{T}^\prime\), the difference \(\phi_i^\prime - \phi_i\) is termed a \emph{correction} to \(\phi_i\), and is denoted as \(\delta\phi_i\).}
+\end{definition}
+
+In essence, a correction (\(\delta\phi_i\)) represents the difference between the hidden states of the original and modified transformer layers, as illustrated in Figure \ref{fig:comm}.
+\textbf{Key Insights into READ}
+
+\textbf{Separation from Other Methods:} Unlike many fine-tuning methods that directly alter \(\phi_i\) by updating backbone weights or injecting learnable parameters, READ focuses on learning the \emph{correction} needed for a new task.
+
+\textbf{Practical Application:} In practice, we utilize a neural network, named READ, to model the equation system. This involves employing a \emph{Joiner} network to compute \(x_i\), substituting various mathematical entities in the equation with Feed-Forward Networks (FFNs) or linear layers and merging learnable parameters across all indices \(i\) for efficiency and scalability. Additionally, Recurrent Neural Networks (RNN) are utilized to model part of the equation system.
+This approach does not involve attention mechanisms and operates only on the column space of \(\phi\), ensuring that all operations are executed efficiently and effectively.
+
+
+
+
+
+
+\section{Experiment Setup}
+
+\textbf{Baseline and Other State-of-the-Art Designs}
+We compare READ against full tuning and other commonly-used PETL methods. \textit{Full tuning} is not an efficient fine-tuning method but serves as a strong baseline for performance. \textit{BitFit~\cite{BenZaken2021BitFitSP}} tunes only bias terms of the model during training. \textit{Prompt-tuning~\cite{Lester2021ThePO}} inserts trainable prompt vectors to the inputs' embedding vectors. \textit{Adapters \cite{adapters}} appends a small residual MLP after every attention and feed-forward layer. We experiment with the sequential adapter version by \citet{adapters}. \textit{LoRA~\cite{lora}} inserts trainable low-rank matrices into each layer of the backbone Transformer model to parameterize the weights' changes. \textit{LST~\cite{lst}} hierarchically adds multiple side networks, with each side network responsible for modulating the activations of a specific layer in the pre-trained model. For all PETL methods and READ, we keep the backbone transformer frozen throughout the training and only update the new parameters. 
+
+
+\textbf{Datasets.}
+We evaluate READ and the baselines on the GLUE \cite{Wang2018GLUEAM} benchmarks.
+These benchmarks cover a variety of NLP tasks, including linguistic acceptability (CoLA \cite{Warstadt2018NeuralNA}), paraphrase detection (MRPC \cite{Dolan2005AutomaticallyCA}, QQP \cite{Chen2017QuoraQP}, STS-B \cite{Cer2017SemEval2017T1}), natural language inference (MNLI \cite{Williams2017ABC}, QNLI \cite{Rajpurkar2016SQuAD1Q}), %, RTE), 
+and sentiment classification (SST-2)\footnote{We exclude RTE from GLUE due to its small size compared to other tasks}.
+In GLUE, the original test set labels are not publicly available. Instead, we follow \cite{Zhang2020RevisitingFB} and \cite{compacter} to create a test set for each task as follows: if the training set contains less than 10k samples, we equally split the original validation set into two subsets and treat them as new validation and test sets; otherwise, we use the original validation set as the test set, and split 1k from the training set as the new validation set. For MNLI, we use the mismatched set as the validation set and the matched set as the test set.
+
+\textbf{Model Specification and Experimental Details.}
+We adopt the encoder-decoder T5 \cite{Raffel2019ExploringTL} model as our backbone transformer. We use $\text{T5}_{\text{BASE}}$ for all of our experiments, and also use $\text{T5}_{\text{LARGE}}$ for READ experiments, which we denote by READ-large. We perform fine-tuning on each dataset for up to 30 epochs and do an early stop once validation metric stops improving. For READ, we experiment with $\{128, 256\}$ as RNN hidden dimensions, $\{\text{RNN, LSTM, GRU}\}$ as RNN architectures. For PETL baselines, we experiment with $\{32, 64\}$ as Adapters' bottleneck sizes, $\{8, 32\}$ as LoRA's ranks, and $\{10, 20, 30\}$ as Prompt-tuning's prompt sizes. For all experiments, we conduct a grid search for learning rates in between $[1\times 10^{-6}, 3\times 10^{-3}]$ on log scale for up to 32 rounds. We choose the hyperparameters that achieve the best validation scores and report their test scores.
+
+
+
+
+\section{Evaluation Results}
+
+\label{results_section}
+
+
+We train and evaluate each method on all the GLUE tasks. We take the cumulative energy consumption and measure the peak GPU during training. In this section, we report and analyze the results on the GLUE Benchmarks. 
+
+\textbf{READ outperforms other methods while consuming significantly lower energy:} 
+Figure \ref{fig:combined_figures} (left) shows that READ can reduce GPU energy consumption by up to 90\% compared to full-tuning. READ lowers the GPU memory footprint by 56\% while retaining the same model accuracy when retraining. While other parameter-efficient transfer learning (PETL) methods like LoRA, BitFit or Adapter reduce the number of trainable parameters, they do not reduce the compute cost required to fine-tune. We believe the underlying optimization objective for PETL is to reduce this compute cost. Table \ref{tab:glue_results} shows the performance of all methods on GLUE with $\text{T5}{\text{BASE}}$. Excluding Adapter, READ outperforms all parameter-efficient methods while consuming at least 68\% less energy. Compared to Adapter, READ achieves nearly the same model accuracy (less than 0.1\% lower) while using 70\% less energy. More interestingly, READ with $\text{T5}{\text{LARGE}}$ (i.e. READ-large) achieves better performance than all other methods and consumes similar or less energy compared to other methods. For example, READ-large outperforms Full-tuning and Adapter by 1.4\% and 0.8\% with 69\% and 5\% less energy, respectively. These results show that by using READ, we can scale up the model size while keeping the same hardware and memory constraints.
+\begin{table}[] 
+\caption{Performance and energy consumption results of all methods on GLUE tasks. We report the accuracy for SST-2, MNLI, QNLI, and Matthew’s Correlation for CoLA. For STS-B we report the average of Pearson correlation and Spearman correlation. For MRPC and QQP, we report the average of F1 score and accuracy. For all tasks, we report the average score on 3 different seeds. Bold fonts indicate the best results of that column.}
+\label{tab:glue_results}
+\centering\small
+\setlength\tabcolsep{2.9pt}
+\begin{tabular}{l|c|cc|ccccccc|c}
+\toprule
+\multirow{2}{*}{Method} & \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}}Trainable \\ Params (\%)\end{tabular}} & \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}}Power\\     (kW)\end{tabular}} & \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}}Energy \\    (kWh)\end{tabular}} & \multirow{2}{*}{CoLA} & \multirow{2}{*}{MNLI} & \multirow{2}{*}{QNLI} & \multirow{2}{*}{MRPC} & \multirow{2}{*}{QQP} & \multirow{2}{*}{SST-2} & \multirow{2}{*}{STS-B} & \multirow{2}{*}{Avg.} \\
+                    &                                                                                   &                                                                               &                                                                                 &                       &                       &                       &                       &                      &                        &                        &                       \\
+\midrule
+\multicolumn{12}{c}{\cellcolor[HTML]{EFEFEF}\emph{\textbf{Baselines}}}\\     
+\midrule
+Full-tuning             & 100                                                                               & 0.77                                                                         & 12.52                                                                           & 53.97                 & 86.17                 & 90.87                 & 86.88                 & 89.71                & 92.89                  & 88.19                  & 84.52                 \\ 
+Adapter                 & 0.96                                                                               & 0.50                                                                         & 6.99                                                                           & 52.56                 & 85.68                 & 92.89                 & 87.84                 & 88.95                & 93.12                  & 87.51                  & 85.04                 \\ 
+LoRA                    & 0.48                                                                               & 0.68                                                                         & 10.58                                                                           & 51.70                 & 85.20                 & 92.72                 & \textbf{88.07}                 & 88.92                & 93.46                  & 86.97                  & 84.89                 \\ 
+BitFit                  & 0.06                                                                               & 0.47                                                                         & 7.68                                                                           & 50.92                 & 85.28                 & 92.58                 & 86.32                 & 88.70                & \textbf{94.15}                  & 86.94                  & 84.43                 \\ 
+Prompt-tuning           &  \textbf{0.01}                                                                             & 0.50                                                                         & 6.45                                                                           & 42.71                 & 79.38                 & 91.73                 & 86.04                 & 88.74                & 93.12                  & 84.96                  & 82.38                 \\
+LST           & 2.00 & 0.44 & 10.59 & 53.38 & 84.53 & 92.43 & 87.38 & 88.31 & 92.09 & 87.37 & 84.58 \\
+\midrule
+\multicolumn{12}{c}{\cellcolor[HTML]{EFEFEF}\emph{\textbf{Our method}}}\\     
+\midrule
+READ                    & 0.80                                                                               & \textbf{0.43}                                                                         & \textbf{2.06}                                                                          & 52.59                 & 85.25                 & 92.93                 & 87.09                 & 89.10                & 93.80                  & 87.77                  & 84.97                 \\
+READ-large              & 0.32                                                                               & 0.62                                                                         & 6.62                                                                           & \textbf{54.05}                 & \textbf{87.29}                 & \textbf{93.68}                 & 87.70                 & 89.34                & \textbf{93.92}                  & \textbf{88.58}                  & \textbf{85.73}              \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\begin{table}[]
+\centering
+\caption{READ with and without recurrency}
+\label{read_recurrency}
+\resizebox{\textwidth}{!}{
+    \begin{tabular}{c
+    >{\columncolor[HTML]{FFFFFF}}c
+    >{\columncolor[HTML]{FFFFFF}}c
+    >{\columncolor[HTML]{FFFFFF}}c
+    >{\columncolor[HTML]{FFFFFF}}c 
+    >{\columncolor[HTML]{FFFFFF}}c 
+    >{\columncolor[HTML]{FFFFFF}}c 
+    >{\columncolor[HTML]{FFFFFF}}c
+    >{\columncolor[HTML]{FFFFFF}}c
+    >{\columncolor[HTML]{FFFFFF}}c}
+
+    \toprule
+    Method & CoLA & MNLI & QNLI & MRPC & QQP & SST-2 & STS-B & Avg. & Trainable Params (\%) \\
+    \midrule
+    READ (with Recurrency) & 52.59 & 85.25 & 92.93 & 87.09 & 89.10 & 93.80 & 87.77 & 84.97 & 0.8 \\
+    READ (w/o. Recurrency) & 53.24 & 84.10 & 91.51 & 89.02 & 89.18 & 94.04 & 87.10 & 85.15 & 9.6 \\
+    READ-large (with Recurrency) & 54.05 & 87.29 & 93.68 & 87.70 & 89.34 & 93.92 & 88.58 & 85.73 & 0.32 \\
+    READ-large (w/o Recurrency) & 50.17 & 86.90 & 93.00 & 87.61 & 89.12 & 94.15 & 87.46 & 85.02 & 6.4 \\
+    \bottomrule
+\end{tabular}
+}
+\end{table}
+
+\textbf{READ consumes less training memory:} Figure \ref{fig:combined_figures} (right) shows the design space trade-off between  model quality performance and memory footprint. READ improves the training memory requirement by at least 25\% compared to all the other baselines while achieving similar or better performance. READ with $\text{T5}_{\text{LARGE}}$ consumes similar amount of memory as full-tuning with $\text{T5}_{\text{BASE}}$. As the backbone size increases, the memory savings achieved by READ become increasingly significant in comparison to the other PETL methods, as depicted in Figure \ref{adapted_size_backbone_size} (right). Notably, at the $\text{T5}_{\text{3B}}$ backbone level, these savings reach as high as 43\%. This observation suggests that READ is remarkably effective in the regime of fine tuning large Transformers.
+\textbf{READ is scalable:} As shown in Figure \ref{adapted_size_backbone_size} (left), the number of trainable parameters of READ scale more slowly as compared to the other PETL methods. READ's number of parameters exhibits a log-linear growth pattern as the T5 backbone model size increases. In fact, the recurrent nature of READ makes its tunable size independent from the number of backbone layers, making READ a more suitable choice for fine-tuning large Transformers in practice.
+
+\textbf{The importance of recurrency}
+We perform ablation analysis on the importance of recurrence in READ in Table \ref{read_recurrency}. We find that the removal of recurrence does not significantly enhance READ quality and even diminishes quality for the T5 large backbone. However, without recurrence leads to over 12 times more trainable parameters, compromising scalability.
+
+\textbf{Comparison with Ladder-Side-Tuning (LST)}
+We compare our methods with Ladder-Side-Tuning (LST), another memory efficient fine-tuning approach \cite{lst}. We follow the pruning method introduced in \cite{lst} to extract a smaller transformer from the backbone transformer and use it to initialize the side transformer, and re-implement LST. Table \ref{tab:glue_results} lists the results of LST (using $\text{T5}_{\text{BASE}}$) on GLUE benchmarks and its energy efficiency.The results indicate that READ (base) outperforms LST (base) on most tasks (except for a tiny task MRPC), using $\boldsymbol{80\%}$ \textbf{less energy consumption} and $\boldsymbol{60\%}$ \textbf{less trainable parameters}. While LST consumes $15\%$ less peak training memory relative to READ, it takes $\boldsymbol{40\%}$ \textbf{more inference memory} and $\boldsymbol{77\%}$ \textbf{longer inference time} than READ, a consequence of its attention-based side-network architecture. It is also noteworthy that when compared to LST even READ-large saves $38\%$ GPU energy and yields a similar inference latency, with $1.4\%$ relative gain on the averaged GLUE score. Furthermore, the "pre-training stage" refers to the process described in LST paper section 2.2, where distillation is performed with T5 pre-training objective. It is important to note that caching the attention outputs does not involve updating any model parameters and should not be considered as a form of training.
+
+\begin{figure*}[ht]
+    \centering
+    \begin{minipage}[t]{0.495\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/num_params.pdf}
+        \caption{The number of trainable parameters as the backbone model size increases.}
+        \label{adapted_size_backbone_size}
+    \end{minipage}
+    \hfill % This will add a horizontal space between the two minipages
+    \begin{minipage}[t]{0.495\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/inference_latency.pdf}
+        \caption{Inference latency as backbone model size increases.}
+        \label{no_inference_decay}
+    \end{minipage}
+\end{figure*}
+\iffalse
+\begin{table}[]
+\caption{Accuracy and energy consumption results of all methods on the SuperGLUE tasks.}
+\label{tab:superglue_results}
+\centering\small
+\setlength\tabcolsep{6pt}
+\begin{tabular}{c|cc|ccccc|c}
+\toprule
+\multicolumn{1}{l|}{}                         &                                                                         & \multicolumn{1}{l|}{}                                                                          &                         &                       &                        &                       &                       &                        \\
+\multicolumn{1}{l|}{\multirow{-2}{*}{Method}} & \multirow{-2}{*}{\begin{tabular}[c]{@{}c@{}} Power\\ (W)\end{tabular}} & \multicolumn{1}{l|}{\multirow{-2}{*}{\begin{tabular}[c]{@{}c@{}}Energy \\  (Wh)\end{tabular}}} & \multirow{-2}{*}{BoolQ} & \multirow{-2}{*}{RTE} & \multirow{-2}{*}{COPA} & \multirow{-2}{*}{WiC} & \multirow{-2}{*}{WsC} & \multirow{-2}{*}{Avg.} \\
+\midrule
+\multicolumn{9}{c}{\cellcolor[HTML]{EFEFEF}\emph{\textbf{Baselines}}}\\     
+\midrule
+\multicolumn{1}{l|}{Full-tuning}              & 120                                                                     & \multicolumn{1}{l|}{429}                                                                       & 78.74                   & 71.22                 & 60.00                  & 69.91                 & 57.69                 & 67.51                  \\
+\multicolumn{1}{l|}{Adapter}                  & 76                                                                      & \multicolumn{1}{l|}{197}                                                                       & 77.63                   & 73.38                 & 48.00                  & 65.20                 & 63.46                 & 65.53                  \\
+\multicolumn{1}{l|}{LoRA}                     & 77                                                                      & \multicolumn{1}{l|}{227}                                                                       & 76.04                   & 66.91                 & 42.00                  & 63.32                 & 63.46                 & 62.35                  \\
+\multicolumn{1}{l|}{BitFit}                   & 79                                                                      & \multicolumn{1}{l|}{279}                                                                       & 72.18                   & 52.52                 & 0.00                   & 66.77                 & 0.00                  & 38.29                  \\
+\multicolumn{1}{l|}{Prompt-tuning}            & 103                                                                     & \multicolumn{1}{l|}{289}                                                                       & 67.95                   & 47.48                 & 0.00                   & 54.55                 & 0.00                  & 34.00                  \\
+\midrule
+\multicolumn{9}{c}{\cellcolor[HTML]{EFEFEF}\emph{\textbf{Our method}}}                                                                                                                                                                                                                                                          \\ \midrule
+\multicolumn{1}{l|}{READ}                     & 76                                                                      & \multicolumn{1}{l|}{201}                                                                       & 75.55                   & 68.19                 & 60.00                  & 65.20                 & 63.46                 & 64.94                  \\
+\multicolumn{1}{l|}{READ-large}               & 91                                                                      & \multicolumn{1}{l|}{363}                                                                       & 77.08                   & 71.94                 & 64.00                  & 68.65                 & 63.36                 & 68.26                  \\
+\bottomrule
+\end{tabular}
+\end{table}
+\fi
+
+
+\section{Related Work}
+
+
+
+\textbf{Parameter-efficient Transfer Learning.}
+The surge in generative AI applications \cite{stable_diffusion, flan, llama, biderman2023pythia} has been hindered by the computational and memory costs of fine-tuning large transformers. Parameter-efficient transfer learning (PETL) \cite{bitfit, adapters, aghajanyan2020intrinsic, prefix, prompt, petl_survey, lst} addresses this by training a minimal parameter set, with various methods like Adapter-based approaches, Low-Rank Adaptation (LoRA), BitFit, and Prompt-tuning. Unlike these, READ introduces memory efficiency by incorporating a small recurrent network into the backbone, focusing on reducing memory usage over parameter minimization.
+
+\textbf{Memory-Efficient Training.}
+Memory-efficient training strategies, such as gradient checkpointing \cite{grad_check}, reversible layers \cite{reversible}, ZeRO \cite{zero}, and Layer-wise Adaptive Rate Scaling (LARS) \cite{lars}, aim to mitigate memory consumption by optimizing the storage and computation of intermediate activations and model states, particularly in distributed training environments.
+
+\textbf{Sidenet Tuning.}
+Side-tuning \cite{side_tuning} and Ladder side-tuning \cite{lst} employ lightweight side networks to adapt pre-trained model activations for new tasks without modifying the base model. READ, while inspired by these, distinguishes itself by utilizing a single RNN block that processes the backbone network's hidden state recurrently, ensuring the fine-tuning parameter count does not scale with the backbone size. Unlike Side-Tuning, READ iteratively calculates its RNN states across all layers and exclusively employs RNN and Feed-Forward Network (FNN) structures, negating the need for transformers or attention mechanisms and enabling use without pre-training.
+
+
+
+\section{Conclusion and Limitations}
+
+\textbf{Limitations.} Due to our limited computing resources, we could not scale the backbone to an even larger scale. A future direction is to fine-tune READ on Llama-7B \cite{llama} or even larger variants. Another direction can be studied if READ can generalize well in a low-data regime. A drawback of READ is its tendency to require more epochs to converge on small datasets than other PETL methods. Consequently, although READ is more efficient in per-unit time computations, it may not yield significant overall consumption gains when a task has few data points. We leave investigating READ on the low-data regime as future work. 
+
+\textbf{Conclusion.}
+In this paper, we propose REcurrent ADaption (READ), a lightweight and efficient parameter and memory-efficient fine-tuning method, for large-scale transformers. We show that READ achieves comparable accuracy to full fine-tuning while saving more than 84\%  of energy consumption and reducing training memory consumption by 56\% relative to full-tuning. We demonstrate the scalability of READ because READ is independent of backbone model size. We hope that READ can make fine-tuning large models more accessible to a broader range of researchers and applications.
+
+
+
+
+

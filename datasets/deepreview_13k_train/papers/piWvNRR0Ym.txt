@@ -1,0 +1,360 @@
+\title{Towards Minimal Targeted Updates of Language Models with Targeted Negative Training}
+
+\begin{abstract}
+Generative models of language exhibit impressive capabilities but still place non-negligible probability mass over undesirable outputs. In this work, we address the task of updating a model to avoid unwanted outputs while minimally changing model behavior otherwise, a challenge we refer to as a minimal targeted update. We first formalize the notion of a minimal targeted update and propose a method to achieve such updates using negative examples from a model's generations. Our proposed Targeted Negative Training (TNT) results in updates that keep the new distribution close to the original, unlike existing losses for negative signal which push down probability but do not control what the updated distribution will be. In experiments, we demonstrate that TNT yields a better trade-off between reducing unwanted behavior and maintaining model generation behavior than baselines, paving the way towards a modeling paradigm based on iterative training updates that constrain models from generating undesirable outputs while preserving their impressive capabilities.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Despite their impressive achievements, language models still 
+output undesirable text. Examples include
+hallucinations \citep{maynez-etal-2020-faithfulness, martindale-etal-2019-identifying, raunak-etal-2021-curious, Ji2022SurveyOH, yichong-factual-inconsistency}, toxic language \citep{gehman-etal-2020-realtoxicityprompts}, and
+context-specific forms of unwanted outputs,
+from  improper style (e.g. informal language in contexts where formality is expected) to inappropriate content (e.g. advanced topics in applications for children). 
+
+In recent years, various strategies have been proposed to 
+control the generations of an existing language model by changing the sampling process during inference time, e.g. via a guided decoding strategy based on rules \citep{Paulus2017ADR,hokamp-liu-2017-lexically}, auxiliary models \citep{Dathathri2019PlugAP,krause-etal-2021-gedi-generative,yang-klein-2021-fudge,liu-etal-2021-dexperts}, or prompt design \citep{brown}.\footnote{For a given starting input $\mbc$, prompt design strategies sample from $p(\mbx \g \mbc'), \mbc' \neq \mbc$ instead of $p(\mbx \g \mbc)$.} 
+Such techniques, however, add latency or complexity to the prediction, as they push all desired model changes to inference time; 
+moreover, the costs to the prediction pipeline only increase as the list of changes grows, whether that is maintaining a codebase of decoding rules and specialized prompts, or running multiple auxiliary models to guide the original model's decoding. 
+As language models become more ubiquitous across product 
+stacks, 
+their ease of use and speed during prediction will be increasingly important, and
+the strategy of pushing all model changes to inference time will become increasingly impractical.
+In this work, we instead consider training-time strategies for improving a model's generations.
+The most naive way to address problems with an existing model is to train a new one on modified data or with an alternative training strategy. However, 
+retraining 
+to address one problem can result in a model that exhibits new problems. 
+As an example, \citet{welbl-etal-2021-challenges-detoxifying} show that training on data filtered to be less toxic hurts model perplexity, disproportionately so for text associated with minority groups. 
+The same can be said about finetuning, which does not start the modeling process from scratch
+but can still result in models that are substantially different from their base versions, e.g., due to catastrophic forgetting \citep{McCloskey1989CatastrophicII,Kirkpatrick2016OvercomingCF,luo2023empirical}. Thus, finetuning can also suffer from the same problems as retraining from scratch, namely that new problems emerge in the endeavor to address existing ones; for instance, \citet{Xu2021DetoxifyingLM} find that finetuning an existing language model on detoxified data also hurts model perplexity disproportionately on text with minority group mentions, and the degradation increases the longer the finetuning. 
+\emph{Is there a way to adapt finetuning to make more targeted changes to a model?}
+
+In this work, we 
+propose
+a finetuning strategy
+for minimal targeted updates to an existing autoregressive generative model. 
+Minimal targeted updates constrain an existing model 
+to avoid certain behavior
+while keeping the resulting model close to the original.
+The proposed approach in this work, called \glsreset{tnt}\gls{tnt}, uses only the original model and annotations of its generations to target a new model that is a minimal targeted update of the original. \gls{tnt} does not affect inference time, unlike decoding-time procedures for controllable generation, and its focus on negative examples allows it to target changes (i.e., avoiding outputs) that would be much more difficult for methods which focus on other data types, from ``positive'' demonstrations to preference data.
+
+We first discuss the challenge of constraining model generations and why existing common finetuning strategies fall short (\Cref{sec:challenge}). Then we propose \gls{tnt}, a finetuning solution for avoiding undesirable outputs via a minimal targeted change (\Cref{sec:tnt}). We next compare \gls{tnt} to other related work in the literature (\Cref{sec:related}) and 
+show in experiments that \gls{tnt} enables more precise control than baselines over the trade-off between reducing unwanted behavior and maintaining existing model behavior (\Cref{sec:experiments}). 
+
+
+
+
+\section{The Challenge of Constraining Model Generations}
+
+\label{sec:challenge}
+
+In this section, we motivate and define a minimal targeted update. First, we discuss the limitations of coarse data filtering, motivating the use of token-level annotations (\Cref{sec:filter_coarse}). Then, we explain how existing losses for negative signal fail to govern where probability mass should be redispersed, motivating the need for objectives that not only push down probability mass but also control what the resulting distribution should look like (\Cref{sec:neg_loss}). Then, we define the solution to a minimal targeted update (\Cref{sec:mtuneg}).
+
+\subsection{Data Filtering is a Coarse Solution}
+\label{sec:filter_coarse}
+In general, a text sequence is undesirable not because every single token in the text is bad, but rather because some subset of the text conveys unwanted content. Data filtering however removes not only bad content but all of the text that co-occurs with bad content. As a result, language and concepts that happen to be correlated with bad behavior become under-represented in the finetuning distribution. The toxicity examples in the introduction provide one such example, and our own experiments on reducing hallucination (details in \Cref{sec:experiments}), we also find that retraining or finetuning on filtered data can significantly change the generation behavior of a model beyond the change of interest (results in \Cref{sec:comparison}). Methods which build on finetuning with filtered data (e.g., \cite{ilharco2023editing}) are also susceptible to this same issue.
+
+Finetuning on token-level annotations can ameliorate the above issue by enabling a training loss that treats unwanted tokens differently from others.
+Such an approach allows all acceptable text to contribute to model training, even text that is correlated with unwanted text. The effort required to collect such token-level annotations can be expensive but in some cases may be comparable to that of collecting sequence-level annotations---for instance, labeling an overall sequence with “has hallucination” or
+“has offensive language” generally requires identifying the hallucination or offensive language itself. In fact, \citet{wu2023fine} find that annotation time is similar for fine-grained and sequence-level labels in a long-form QA task, but finetuning a model on the former yields substantial performance benefits over finetuning on the latter.
+Next, we consider existing losses that operate on token-level negative signal.
+
+\subsection{Existing Negative Losses do not Control the Resulting Distribution}
+\label{sec:neg_loss}
+Here we show that existing objectives that take into account negative signal are insufficient to enforce targeted updates.
+Given a distribution of negative (i.e. unwanted) examples $p^\text{neg}$, 
+\gls{nl} \citep{He2020NegativeTF} 
+negates the log-likelihood objective for this distribution: $\mathcal{L}_{\text{NL}}(\theta) = \minus\mathbb{E}_{p^\text{neg}}[\minus\log p_\theta(x)].$
+\Gls{ul} \citep{Welleck2020NeuralTG} instead maximizes $\log (1 - p(x))$ over the distribution of negatives: $\mathcal{L}_{\text{UL}}(\theta) = \minus \mathbb{E}_{p^\text{neg}}[\log (1 - p_\theta(x))].$ These token-level losses for negative signal are typically combined with log-likelihood (\gls{ll}) on acceptable tokens as positive signal: for instance, for \gls{ul}, we have $\mathcal{L}(\theta) = \minus \sum_{t} \big( \mathbf{1}[\mbx_t \in \text{supp}(p^\text{neg}_{\mbc, \mbx_{<t}})] \log [1 - p_\theta(\mbx_t|\mbc, \mbx_{<t})] + \mathbf{1}[\mbx_t \not\in \text{supp}(p^\text{neg}_{\mbc, \mbx_{<t}})] \log p_\theta(\mbx_t|\mbc, \mbx_{<t}) \big)$. We first consider the negative token-level losses by themselves and then objectives that combine these negative losses with log-likelihood on positive tokens (i.e., \gls{nl} $+$ \gls{ll} and \gls{ul} $+$ \gls{ll}).
+First, both \gls{nl} and \gls{ul} alone are optimized when all negative examples have zero probability under the model distribution. However, because both losses are defined as expectations with respect to the distribution of negatives $p^\text{neg}$, neither \gls{nl} or \gls{ul} account for how mass is dispersed outside of the negative tokens. In other words, both \gls{nl} and \gls{ul} reduce the probability of the target negative tokens but do not control what the new probability distribution will look like at that token index, since tokens $x \not\in p^\text{neg}$ do not factor into the expectation for either loss. For instance, under these objectives, a distribution that places all of its mass on one particular element outside the support of negative examples is indistinguishable from a distribution that spreads its probability mass arbitrarily across all non-negative examples. In other words, these negative losses push down probability mass but do not specify how probability mass should be redistributed.
+
+Even when we combine these negative losses with log-likelihood over positive tokens, the overall objectives still do not specify the solution an update should target in the context of finite data. For \gls{nl} $+$ \gls{ll}, the negative likelihood is unbounded (lowest value is $\minus \infty$) and thus can outweigh the log likelihood components of the loss (lowest value is $0$) that encourage pushing up probability over acceptable tokens. Unlike \gls{nl}, \gls{ul} is bounded (lowest value is $0$), but without specifying what the token distributions should be for indices with negative examples, the resulting \gls{ul} $+$ \gls{ll} loss does not sufficiently control the target of the update.
+In fact, we find that utilizing these objectives increases the prevalence of disfluencies in generated sequences relative to the original model; for instance, using \gls{nl} on negative tokens and \gls{ll} on positive tokens increases the frequency of word repeats by 17x and 38x on the datasets we test, while using \gls{ul} introduces a ?? disfluency to 1.1\% and 5.4\% of the generations respectively (see \Cref{tab:ul_nl} for details). These occurrences highlight the need to define the solution to a minimal targeted update for negative examples, which we do next.\footnote{For clarification, we note that the original implementations of these losses paired them with positive signal not just on other token indices, but also on the same index as the negative signal. This is not available in the context of an update with negative examples, as it would require providing corrections for the unwanted tokens.}
+\subsection{Defining the Solution to a Minimal Targeted Update}
+\label{sec:mtuneg}
+While losses such as negative likelihood and unlikelihood do not define where probability mass should be dispersed in a negative update, here we define the 
+solution to a minimal targeted update:
+Given an original distribution $p^o(\mbx)$, a minimal targeted update results in a new distribution $p^\text{new}(\mbx)$ that is closest to $p^o(\mbx)$ in reverse KL-divergence while meeting a desired criterion, namely to avoid certain unwanted outputs. The choice of reverse KL-divergence is a natural one in this setting since the goal is to constrain the support of the original distribution, and the forward KL-divergence is infinite when the support of the new distribution is a strict subset of the original.
+Let the distribution of unwanted elements be $p^\text{neg}$. The model should not output negative examples, i.e., $\mbx \in \text{supp}(p^\text{neg})$. Let $\mathcal{P}_k$ denote the set of distributions $p_k$ which satisfy the criterion $\forall \mbx \in \text{supp}(p^\text{neg}),\; p^k(\mbx) = 0$. Then, we define result under a minimal targeted change as
+\begin{equation}
+    p^\text{new} = \min_{p^k \in \mathcal{P}_{k}} \text{KL}(p^k || p^o)
+    \label{eq:p_d}.
+\end{equation}
+
+The distribution $p^\text{new}$ is also known as the information projection of the original distribution $p^o$ onto $\mathcal{P}_k$ and is guaranteed to be unique given $\mathcal{P}^k$ is a closed, convex set \citep{Csiszr2004InformationTA}. Its solution is
+\begin{equation}\label{eq:p_new}
+p^\text{new}(\mbx) \propto p^o(\mbx)\mathbf{1}[{\mbx\not\in\text{supp}(p^\text{neg})}].
+\end{equation}
+See \Cref{sec:iproj} for details. 
+\Cref{eq:p_new} is a special case of the information projection for pointwise constraints (i.e., constraints that are applied to every element in the distribution) and offers a simple mathematical form for a minimal targeted change. 
+Namely, $p^\text{new}$ is the distribution that would be obtained by pushing the probability of the negative examples down to zero under the original distribution and renormalizing. 
+This solution encompasses a wide range of applications, as the set of negative examples
+$\text{supp}(p^\text{neg})$ can generalize to any set one wishes to avoid, from factual inaccuracies to offensive language to text in a certain style.
+\paragraph{Relationship to Conditioning.}
+The distribution in \Cref{eq:p_new} is equivalently the distribution of the original model conditioned on the criterion $\mbx\not\in\text{supp}(p^\text{neg})$:
+\begin{equation} \label{eq:bayes}
+    p^o(\mbx \g \mbx\not\in\text{supp}(p^\text{neg})) \propto p^o(\mbx)p^o(\mbx\not\in\text{supp}(p^\text{neg}) \g \mbx) = p^o(\mbx)\mathbf{1}[{\mbx\not\in\text{supp}(p^\text{neg})}].
+\end{equation}
+This correspondence implies that methods which use Bayes' Rule to condition on a constraint \citep{krause-etal-2021-gedi-generative,yang-klein-2021-fudge}
+are performing a minimal targeted update during inference.\footnote{The aforementioned cases do not force the constraint to be hard, i.e. $p(\mbx\not\in\text{supp}(p^\text{neg}) \g \mbx)$ can lie between 0 and 1, but in practice, the types of control desired for generation implies hard constraints that the text either meets or does not, i.e. $p(\mbx\not\in\text{supp}(p^\text{neg}) \g \mbx) \in \{0, 1\}.$} Conversely, any minimal targeted update can also be viewed via the lens of conditioning. 
+We now define \gls{tnt} to target this solution directly.
+
+
+
+\section{Targeted Negative Training}
+
+\label{sec:tnt}
+\Gls{tnt} seeks to approximate the desired generator $p^\text{new}$ (\Cref{eq:p_new}) directly via a model $p_\theta$, rather than change the sampling procedure for the original model $p^o$ during inference.
+
+To encourage targeted probability removal, \gls{tnt} uses the following insight: 
+a single forward pass through a language model provides a single sample from a high-dimensional distribution over sequences, but the same forward pass provides a fully specified distribution over tokens for every prefix that makes up the sequence. In other words, while one can only estimate $\mathbb{E}_{\mbx \sim p^\text{new}}[\log p_\theta(\mbx)]$ via a Monte Carlo approximation of the high-dimensional distribution $p^\text{new}$, it is possible to analytically compute the analogous expression for the constituent token distributions $p^\text{new}_{\mbc, \mbx_{<t}}$ defined by input $\mbc$ and output prefix $\mbx_{<t}$. 
+$p^\text{new}_{\mbc, \mbx_{<t}}$ is obtained by taking original token distribution $p^o_{\mbc, \mbx_{<t}}$, removing probability mass from all elements in the negative token distribution $p^\text{neg}_{\mbc, \mbx_{<t}}$, and renormalizing. 
+
+\Gls{tnt} simply minimizes a divergence between the model distribution $p_{\theta, \mbc, \mbx_{<t}}$ and desired distribution $p^\text{new}_{\mbc, \mbx_{<t}}$
+for every token distribution $p_{\mbc, \mbx_{<t}}$ encountered in the training set, given examples from $p^\text{neg}_{\mbc, \mbx_{<t}}$.
+In this work negative examples come from annotations of the original model's generations, e.g. spans that are labeled bad, but they can also be specified up front without referencing model generations, as has been done previously to reduce repetition and contradictions in neural text generation \citep{Welleck2020NeuralTG,li-etal-2020-dont}, or given by external classifiers that operate on text prefixes \citep{yang-klein-2021-fudge}.
+When there are no negative examples for a given $p_{\mbc, \mbx_{<t}}$, then $p^\text{new}_{\mbc, \mbx_{<t}} =p^o_{\mbc, \mbx_{<t}}$.
+
+Because a language model can be defined by its constituent distributions $p_{\mbc, \mbx_{<t}}$, if all distributions $p_{\mbc, \mbx_{<t}}$ match the desired $p^\text{new}_{\mbc, \mbx_{<t}}$, then the overall model matches $p^\text{new}$.
+However, because 
+it is computationally impractical to enumerate every constituent distribution $p_{\mbc, \mbx_{<t}}$,
+we instead opt to constrain the distributions that are more likely to be relevant in the generations for a given task, as 
+approximated by 
+the original model's generations.
+Thus, given a task specified by a distribution over input queries $p(\mbc)$, \gls{tnt} optimizes for a sequence-to-sequence model that approximates $p^\text{new}_{\mbc, \mbx_{<t}}$ as well as possible on average, where the average is defined by the original model's generation process. 
+In other words, the distributions $p_{\mbc, \mbx_{<t}}$ that are more likely in decoding under the original model are also more likely for training the new model. 
+For a given choice of divergences $\text{D}_p$ and $\text{D}_n$, \gls{tnt}'s objective is
+\begin{equation}
+\begin{aligned}\label{eq:tnt}
+        \mathcal{L}(\theta) = \mathbb{E}_{\mbc \sim p(\mbc)} \mathbb{E}_{\mbx \sim p^{o}_\mbc(\mbx)}\Big[\sum_{t=1}^{\text{len}(\mbx)} &\mathbf{1}[\mbx_t \in p^\text{neg}_{\mbc, \mbx_{<t}}]\text{D}_{n}\big({p^{\text{new}}_{\mbc, \mbx_{<t}}(\mbx_t)} || p_{\theta, \mbc, \mbx_{<t}}(\mbx_t)\big)\\
+        + &\mathbf{1}[\mbx_t \not\in p^\text{neg}_{\mbc, \mbx_{<t}}]\text{D}_{p}\big({p^{\text{new}}_{\mbc, \mbx_{<t}}(\mbx_t)} || p_{\theta, \mbc, \mbx_{<t}}(\mbx_t)\big)\Big].
+\end{aligned}
+\end{equation}
+To implement this loss, we generate outputs from the original model and annotate them for undesirable text. Then, 
+we obtain $p^o_{\mbc, \mbx_{<t}}$ and $p_{\theta,\mbc, \mbx_{<t}}$ for all $t \in (1, \text{len}(\mbx))$ via one forward pass of the original and current model and compute $p^\text{new}_{\mbc, \mbx_{<t}}$ based on the annotation for the given token.
+For divergences $\text{D}_f$, we consider both the forward and reverse KL divergence, noting that the two encode difference preferences.  Minimizing the former is equivalent to minimizing token-level cross entropy, which can be computed analytically. To minimize the latter, we smooth the desired distribution $p^{\text{new}}$ 
+by adding
+1e-6 to all elements 
+and renormalizing.
+We perform gradient-based optimization by summing over the per-sequence losses in a minibatch and calculating the relevant gradients (See Algorithm 1). Note that the Monte Carlo nature of \gls{tnt} is only to choose which distributions $p_{\mbc, \mbx_{<t}}$ to update, as the constituent target distributions $p^\text{new}_{\mbc, \mbx_{<t}}$ can be given exactly and thus the divergences computed analytically.
+
+\begin{figure}[H]
+    \centering
+    \subfigure[TNT given a negative example token]{\includegraphics[trim={255mm 255mm 255mm 255mm},clip,width=60mm]{figures/fig1_neg.png}}
+    \subfigure[TNT given no negative token]{\includegraphics[trim={255mm 255mm 255mm 255mm},clip,width=60mm]{figures/fig1_pos.png}}
+    \caption{Summary of \glsfirst{tnt} (\gls{tnt}): For negative tokens (i.e. those flagged as undesirable given the preceding tokens), \gls{tnt} optimizes for a distribution that matches the original, renormalized after the offending token probability is set to zero. For all other tokens, \gls{tnt} encourages the new distribution to match the original.}
+    \label{fig:tnt}
+\end{figure}
+\subsection{The Commutative Property of Negative Updates}
+A practical benefit of \gls{tnt} for iterative model updates is that not all negative tokens need to be specified up front. Because of the deterministic nature of the operation to zero out probability mass, one can apply negative examples in any order, both across different $p_{\mbc, \mbx_{<t}}$ distributions as well as within a given $p_{\mbc, \mbx_{<t}}$ distribution. 
+This commutative nature of negative updates typically does not apply to ``positive'' updates---that is, training on samples from the distribution of interest---except for the scenario where the distributions of interest places all their mass on a single token. Negative examples are unique in that they have a known probability mass associated with them under the distribution of interest, i.e. 0. Given an existing distribution and a positive example, on the other hand, there is not enough information to know the probability that an updated distribution should assign to elements in the support of the existing distribution, presumably itself derived from previously training on other positive examples.
+\begin{algorithm}
+\label{alg:algo}
+\begin{algorithmic}[1]
+\caption{Targeted Negative Training}
+\STATE \textbf{Input}: initial model $p^o$ (already trained), inputs $\{\mbc\}_1^n$, model outputs $\{\mbx\}_1^n$, token annotations $\{\mba\}_1^n$ denoting $\mbx_t \in \text{supp}(p_{\mbc, \mbx_{<t}}^\text{neg})$
+\STATE $p^m \leftarrow p^o$
+\FOR{each iteration}
+\STATE Get $p_{\mbc, \mbx_{<t}}^m$ for all $\mbc, \mbx_{<t}$ in batch (forward pass of $p^m$)
+\STATE Get $p_{\mbc, \mbx_{<t}}^o$ for all $\mbc, \mbx_{<t}$ in batch (forward pass of $p^o$)
+\STATE Compute $p_{\mbc, \mbx_{<t}}^{\text{new}}$ for all $\mbc, \mbx_{<t}$ in batch (\Cref{eq:p_new})
+\STATE Calculate \gls{tnt} loss (\Cref{eq:tnt})
+\STATE Calculate gradients for weights in $p^m$ and update $p^m$ 
+\ENDFOR
+\STATE {\textbf{Return} $p^m$}
+\end{algorithmic}
+\end{algorithm}
+\subsection{Annotating Data for Targeted Negative Training}
+Ideally, the token-level annotations should align with the autoregressive structure of \gls{tnt} methods; namely, a negative token should indicate that the subsequence up to and including token $\mbx_t$ is no longer acceptable such that $p(\mbx_t | \mbx_{<t}, \mbc)$ should be 0. For one, this means that not all tokens in an unwanted multi-token word or expression should necessarily be marked negative---an example includes word or phrase prefixes that could potentially be continued in a manner that is acceptable. For simplicity in the annotations, we make the assumption that for any undesirable phrase, the tokens are undesirable immediately. This is generally a reasonable assumption as long as there are good replacements for the undesirable content which do not overlap in prefix.  
+
+In addition, in certain cases a given $p_{\mbc, \mbx_{<t}}$ will not be relevant in the optimal model. For instance, for a sequence such that $p^{\text{new}}_{\mbc, \mbx_{<t}}(\mbx_t) = 0$, the sequence $[\mbc, \mbx_{\leq t}]$ is out-of-support under $p^{\text{new}}$ meaning $p_{\mbc, \mbx_{\leq t}}$ is not a relevant distribution. 
+However, in initial study, we found that including such distributions (e.g. all the constituent distributions that occur at time steps after a negative token) still helped constrain the model towards its original. Thus, we chose to include them in the loss. 
+
+
+
+\section{Related Work}
+
+\label{sec:related}
+\paragraph{Inference-time procedures for controllable generation.}
+Many works consider alternative decoding strategies to constrain model outputs, either with hard-coded rules such as length penalties and lexical constraints \citep{Paulus2017ADR, hokamp-liu-2017-lexically, Wu2016GooglesNM,lu2021neurologic} or auxiliary models such as classifiers or other conditional generative models
+\citep{Dathathri2019PlugAP,krause-etal-2021-gedi-generative,yang-klein-2021-fudge,liu-etal-2021-dexperts,meng2022controllable}.
+These approaches do not change the original model but change the sampling process to effectively sample from an alternative distribution. 
+These approaches can incur non-trivial complexity to the inference process: guided decoding based on rules can result in significant maintenance overhead as the rule set gets more complicated, and controllable generation via auxiliary models involves at least an additional forward pass by the auxiliary model at every decoding time step. In contrast, we propose finetuning approach which does not require a specialized inference pipeline.
+
+\paragraph{Controllable generation using moment constraints.}
+The solution of a minimal targeted update is equivalent to that of a pointwise moment constraint defined previously in \citet{Khalifa2020ADA, korbak22a}. 
+However, the proposed algorithms differ substantially. Namely, the above works generally consider both distributional and pointwise constraints and employ a two-stage training procedure to build a model to satisfy both: first, they train an energy-based model (EBM) to match the desired solution, and second they train an autoregressive generative model to approximate the distribution implied by the EBM via importance weighting using samples from the model being trained. In contrast, this work considers pointwise constraints only and derives a finetuning procedure which only requires training one model via analytically computable token-level divergences (\Cref{sec:tnt}). Like previous work, \citet{meng2022controllable} also consider sequence-level constraints but prove that this setting can be translated into token-level guidance (i.e., relating $p_{new}(x_t | x_{<t}, c)$ to $p_0(x_t | x_{<t}, c)$) via the approximation of $\Pr_{y\sim p(y|x)}[C(x, y)|y_{<t}]$ for all $y_{<t}$ and sequence-level boolean constraint function $C$. Consequently, \citet{meng2022controllable} are able to propose a simpler algorithm than existing work, and by combining ideas in their work with this work, it is possible to define a finetuning algorithm that optimizes analytical token-level divergences even given only sequence-level annotations (define $p^\text{new}_{\mbc, \mbx_{<t}}$ using results from \citet{meng2022controllable}, optimize using \gls{tnt}).
+
+The solution to a minimal targeted update differs from the solution of other objectives which incorporate some form of KL divergence penalty to the loss, as the latter interpolate between the competing objectives of maximizing reward and minimizing KL divergence 
+\citep{Ziegler2019FineTuningLM,wu2023fine,lu2022quark}. However, some objectives, e.g., \citep{Ziegler2019FineTuningLM,wu2023fine}, can be rewritten as minimizing the reverse KL divergence between the current model and a target distribution that reweights the original model according to $\exp(\frac{1}{\beta}r(\mathbf{x}))$ for sequence-level rewards (see \citet{korbak2022rl,rafailov2023direct}) or $\exp(\frac{1}{\beta}\sum_t r_t(\mathbf{x}_{\leq t}))$ for token-level rewards (see \Cref{sec:token_level}), both of which are approximately equal to the solution of minimal targeted update when rewards denote whether a constraint is met and $\beta$ is small.
+
+\paragraph{Model editing approaches.} Model editing \citep{DeCao2021EditingFK, Zhu2020ModifyingMI, Hase2021DoLM, Mitchell2021FastME, pmlr-v162-mitchell22a} focuses on 
+updating a language model to output a corrected fact (e.g. updating the answer to ``Who is the Prime Minister of the UK?'' when someone new is appointed), rather than constraining a model to avoid certain generations. In fact, most model editing techniques do not even take into account the negative example (i.e. the outdated or incorrect fact),
+instead focusing on maximizing the likelihood of correct facts.
+The reliance on corrected outputs distinguishes the model editing setup from minimal targeted updates. 
+Whereas corrections may be a natural source of supervision for updating facts, they can be overly prescriptive for tasks such as detoxification where there is a wide range of possible ``corrections'' to an undesirable output.
+In addition, maximizing the likelihood over a sample of corrected outputs does not preclude the resulting model from placing non-negligible probability mass over undesirable examples, so a method for avoiding certain outputs can still be useful even when corrections exist.
+\paragraph{Parameter-efficient finetuning.} 
+Parameter-efficient finetuning
+\citep{Houlsby2019ParameterEfficientTL,chen2023parameterefficient,li-liang-2021-prefix,ben-zaken-etal-2022-bitfit,hu2022lora}
+is orthogonal to minimal targeted updates, as it is possible to both change a small number of parameters but greatly modify model behavior (as evidenced by the parameter-efficient finetuning literature), as well as change all parameters without changing the model distribution (due to the non-identifiability of neural networks).
+Parameter-efficient finetuning can be used in tandem with an objective for minimal targeted updates.
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+We consider two use cases for targeted negative training, reducing hallucinations and toxicity. All experiments utilize T5 base (220M parameters). First, we finetune T5 on the original training set. 
+Then, we generate from the model given training and validation inputs and annotate the generations. Next, we use the annotated generations to update the model. 
+To evaluate,
+we compute the prevalence of the unwanted behavior among the new model's generations on the test inputs, as well as similarity between the old and new model's generations. We use greedy decoding for all generations. 
+
+Next, we describe the datasets and methods. See \Cref{sec:setup} for full dataset and experimental details.
+
+\subsection{Reducing Hallucinations in Summarization}
+We train a summarization model using the XSUM dataset \citep{xsum-emnlp} consisting of articles as inputs and summaries as outputs. Models trained on this dataset are known to hallucinate in their generations \citep{Ji2022SurveyOH}, and we see the same behavior in the model we train. Using the automated heuristic for detecting hallucination in \citet{nan-etal-2021-entity}, we see that approximately 21\% of the model's generations contain some form of hallucination. We use the same hallucination detection logic to annotate the model's generations on the training inputs and 
+identify hallucinations in the test generations for evaluation.
+
+\subsection{Avoiding Toxicity in Response Generation}
+We train a response generation model using the Civil Comments dataset of online comments \citep{Borkan2019NuancedMF}. 
+Due to the nature of online forums, the comments and responses occasionally contain toxic language. To label text spans as toxic, we train a token-level toxicity classifier on the Civil Comments Spans dataset \cite{pavlopoulos-etal-2021-semeval}, a subset of the Civil Comments dataset (same splits) where individual spans were labeled ``insulting, threatening, an identity-based attack, profane/obscene, or otherwise toxic." We  finetune Spacy's CNN-based named entity recognition (NER) model, following \cite{pavlopoulos-etal-2022-acl}, and use the finetuned model (65.1/59.5/65.8 F1 on train/val/test) to annotate our language model's generations. Among the initial T5 model's generations, 8.2\% contain toxic spans as labeled by our toxicity classifier.
+
+We recognize that our notion of hallucination and toxicity in these tasks is simplistic, as both are based on automated heuristics rather than human annotations and evaluations. However, the goal in these experiments is not to solve the open problems of hallucination and toxicity in text generation but rather to evaluate \gls{tnt} as a method for producing a minimal targeted update given examples of outputs to avoid, in comparison to other finetuning approaches.
+
+\subsection{Methods}
+
+We consider two baseline finetuning procedures that consider token-level negative signal: negative likelihood
+for negative tokens and \gls{ll} for all other tokens in the generations (\gls{nl} + \gls{ll}) and unlikelihood
+for negative tokens and log-likelihood for all other tokens in the generations (\gls{ul} + \gls{ll}).\footnote{We find that 
+without \gls{ll} terms on the non-negative tokens, 
+the model degrades to outputting purely disfluent text after a few steps of finetuning. Our results are corroborated by \citet{He2020NegativeTF}, who also acknowledge that they cannot retain model performance without positive signals.}
+
+We consider the following targeted negative training methods: \Gls{tnff} uses the forward KL divergence for both positive and negative signals and \gls{tnrr} uses the reverse KL divergence for both. \Gls{tnrf} uses the reverse KL for negative tokens and forward KL for positive token indices. Finally, to compare more closely to the \gls{ul} and \gls{nl}, we consider \gls{tnfll} and \gls{tnrll}, which utilize forward and reverse KL divergence for negative tokens and maximum likelihood of the token sample for positive tokens, i.e., a single-sample Monte Carlo estimate of the forward KL divergence.
+
+Following \cite{Welleck2020NeuralTG}, we introduce a hyperparameter $\alpha$ on the negative losses for all methods. We consider alpha values 1e-4 to 1e4 (every power of ten). For each method, we perform a hyperparameter sweep for learning rate at $\alpha=1$ and use the chosen learning rate across all values of $\alpha$. For each run, we perform model selection using validation loss.
+\subsection{Results}
+\paragraph{Main results.} Inspired by precision-recall curves, we construct a curve for each objective's similarity score across different rates of unwanted behavior reduction (\Cref{fig:auc_curves}(a) and (c)). Namely, for each method we plot the highest BLEU achieved across $\alpha$ values that achieve less than the given level of hallucination or toxicity. We consider hallucination and toxicity values in increments of 0.1 percentage points. We also plot the composite curve between baseline methods and \gls{tnt} methods (\Cref{fig:auc_curves}(b) and (d)). Selection is performed on validation data. 
+
+For both tasks, we see that the targeted negative training losses allow for a greater flexibility in the trade-off between maintaining similarity with original generations and reducing unwanted behavior.  Notably, while the baseline methods cannot achieve a BLEU score above 54 for XSUM and 40 for Civil Comments, regardless of what level alpha is set to, \gls{tnt} methods which compute an exact divergence on the positive tokens (\gls{tnff}, \gls{tnrr}, \gls{tnrf}) can trade off how much hallucination or toxicity is reduced to achieve significantly higher BLEU scores. In fact, for the task of reducing toxicity, several of the targeted negative training losses are strictly better than the baseline methods at targeted updates across all levels of toxicity rate reduction. In general, \gls{tnff} is the \gls{tnt} loss that yields the least amount of change overall but can only reduce unwanted behavior up to a certain level, while \gls{tnrr} and \gls{tnrf} can yield even further reductions with large enough $\alpha$ while still being more targeted than baselines. Overall, the area under the similarity-reduction curves for \gls{tnt} methods far outstrips that of the baseline methods (55.5 vs. 44.6 for hallucination, 73.9 vs. 32.9 for toxicity). We include similarity vs. reduction plots for other measures of similarity in \Cref{sec:similarity_metrics} and see that \gls{tnt} methods continue to outperform baselines.
+
+Once we also consider the amount of introduced disfluencies (see \Cref{sec:disfluencies} for details and examples), even \gls{tnt} methods that achieve comparable similarity and reduction rates as baselines are shown to be significantly better at avoiding the introduction of new disfluencies to the generations (see \Cref{tab:ul_nl} for combined similarity and disfluency results at a fixed rate of reduction, and \Cref{fig:disfluency_main} for disfluency results across multiple rates of reduction). Note that \gls{tnfll} and \gls{tnrll} introduce fewer disfluencies relative to baselines despite only differing their loss terms for negative tokens, empirically corroborating the analysis in \Cref{sec:neg_loss} that a targeted  negative loss constrains the resulting update in a way existing negative losses do not. 
+
+\paragraph{Increasing model size.} We repeat the hallucination experiment on the 1-billion parameter variant of PaLM-2, a decoder-only model (see \Cref{fig:palm2}). For rates of reduction up to 50\%, \gls{tnt} methods offer a better trade-off between similarity and reduction than baseline methods; beyond this point, baseline methods look better with respect to the similarity vs. reduction trade-off but introduce many more obvious disfluencies.   
+Compared to the results in \Cref{fig:auc_curves} on T5-base, the results on PaLM 2 are worse for similarity vs. reduction but better for disfluencies vs. reduction. On one hand, the larger and better model seems harder to update.
+On the other hand, given larger models are generally better to begin with, it arguably becomes even more important to focus on targeting an update versus fully removing unwanted behavior, and this regime is where TNT methods shine over baselines. 
+
+
+\paragraph{Ablations.} On the toxicity reduction task, we also report the results of an ablation where methods are trained on external data (i.e., labeled spans from the original Civil Comments spans dataset) rather than model generations (\Cref{sec:external_data}); all methods yield more targeted updates when using model generations, highlighting the benefit of prioritizing more common token conditional distributions, yet \gls{tnt} still methods outperform baselines, highlighting the benefit of the proposed losses regardless of the set of token conditionals that are targeted.
+
+We also vary the dataset size used for the update to assess how different \gls{tnt} methods perform at lower data volumes. Results are presented in \Cref{fig:pct_ablation}. Overall, less data results in a smaller reduction in unwanted behavior, and the more a \gls{tnt} loss constrains the outputs, the better the trade-off with similarity metrics as dataset size decreases. Namely, while \gls{tnfll} and \gls{tnrll} get strictly worse in both similarity and hallucination as dataset size decreases, \gls{tnff}, \gls{tnrf}, and \gls{tnrr} are able to better trade-off between similarity and reduction as dataset size decreases. \Gls{tnff} shows a strictly positive trend implying that generations change less in general, suggesting its promise as a method even at small dataset sizes.
+\begin{figure}
+    \centering
+    \subfigure[XSUM similarity vs. reduction curves]{\includegraphics[width=.46\linewidth]{new_figures/xsum_bleu.png}}
+    \subfigure[XSUM composite similarity vs. reduction curves]{\includegraphics[width=.5\linewidth]{new_figures/xsum_bleu_overall.png}}
+    \subfigure[Civil similarity vs. reduction curves]{\includegraphics[width=.46\linewidth]{new_figures/civil_bleu.png}}
+  \subfigure[Civil composite similarity vs. reduction curves]{\includegraphics[width=.5\linewidth]{new_figures/civil_bleu_overall.png}}
+    \caption{Across nearly all values of reducing unwanted behavior, the suite of \gls{tnt} objectives is able to achieve a comparable or better trade-off than baseline methods (\gls{nl} + \gls{ll} and \gls{ul} + \gls{ll}) between reducing unwanted behavior and minimizing change relative to the original model's generations. On the y-axis, higher is better.}
+    \label{fig:auc_curves}
+\end{figure}
+
+\begin{figure}
+  \centering
+
+  \subfigure[XSUM disaggregated  disfluencies vs. reduction]{\includegraphics[width=.4\linewidth]{2024figures/xsum_t5_total.png}}
+  \subfigure[XSUM aggregated  disfluencies vs. reduction]{\includegraphics[width=.4\linewidth]{2024figures/xsum_t5_total_overall.png}}
+
+  \subfigure[Civil disaggregated  disfluencies vs. reduction]{\includegraphics[width=.4\linewidth]{2024figures/civil_t5_total.png}}
+  \subfigure[Civil aggregated  disfluencies vs. reduction]{\includegraphics[width=.4\linewidth]{2024figures/civil_t5_total_overall.png}}
+
+  \caption{Baseline methods introduce more obvious disfluencies (word repeats and random ?? tokens) than \gls{tnt} methods, especially as the rate of unwanted behavior is reduced to small amounts. For readability and a more direct comparison to \Cref{fig:auc_curves}, only points that are located on the frontier of the similarity vs. reduction curves are plotted.}
+  \label{fig:disfluency_main}
+\end{figure}
+
+\begin{table}
+    \centering
+    \caption{
+    Comparison of methods  when the rate of hallucination or toxicity has been reduced by at least 75\% (i.e., to less than 5.25\% hallucination rate and 2.06\% toxicity rate). BLEU, ROUGE-L and Seq Acc measure similarity to the original generations; Hallucination and Toxicity measure the rate of unwanted behavior; and Repeats and Random ?? give counts of obvious disfluencies. Results are bolded if better than all baseline methods. See \Cref{sec:disfluencies} for examples of disfluencies, and \Cref{fig:disfluency} for disfluency results for each of Repeats and Random ?? across different reduction rates.}
+\begin{tabular}{lrrrrrr}
+\toprule
+ &    BLEU &  ROUGE-L &  Seq Acc &  Hallucination & Repeats &  Random ?? \\
+ \midrule
+  Original & 100.0000 & 100.0000 & 100.0000 & 21.3432 & 76 & 0\\
+  \gls{nl}+\gls{ll} ($\alpha=1.0$) & 32.8334 &    52.2349 &             1.5397 &              3.1148 &          1297 &                        92 \\
+  \gls{ul}+\gls{ll} ($\alpha=10.$) & 50.2975 &    65.8047 &             8.2117 &              3.4068 &           127 &                       324 \\
+  \midrule
+  \gls{tnrll} ($\alpha=1.0$) & 49.2464 &    64.9200 &             7.3268 &              3.7342 &            \textbf{99} &                        \textbf{67} \\
+  \bottomrule
+  \end{tabular}
+\vskip 5pt
+\centering
+\begin{tabular}{lrrrrrr}
+\toprule
+            &    BLEU &  ROUGE-L &  Seq Acc &  Toxicity & Repeats &  Random ?? \\
+\midrule
+Original & 100.0000 & 100.0000 & 100.0000 & 8.1830 & 16 & 4 \\
+  \gls{nl}+\gls{ll} ($\alpha=.01$) & 13.6497 &    32.6104 &             2.0661 &         1.8150 &           287 &                       136 \\
+  \gls{ul}+\gls{ll} ($\alpha=1.0$) & 37.1265 &    59.9806 &            20.4405 &         1.6784 &            23 &                      1122 \\
+ \midrule
+    \gls{tnfll} ($\alpha=1.0$) & 33.7884 &    57.1009 &            18.1630 &         1.7577 &            36 &                         \textbf{1} \\
+\gls{tnrll} ($\alpha=0.1$) & \textbf{39.1922} &    \textbf{61.4776 }&            \textbf{22.9207} &         1.9471 &            23 &                         \textbf{1} \\
+  \gls{tnrr} \; ($\alpha=0.1$) & \textbf{55.9532} &    \textbf{71.5365} &            \textbf{35.1366} &        \textbf{ 1.4493} &            34 &                         \textbf{3} \\
+ \gls{tnrf} \; ($\alpha=1.0$) & \textbf{60.2071} &    \textbf{74.8574 }&            \textbf{39.6167} &         \textbf{1.0396} &            \textbf{21} &                         \textbf{3} \\
+   \gls{tnff} \;\, ($\alpha=10.$) & \textbf{61.0565} &   \textbf{ 74.2388} &            \textbf{40.0749} &         1.9031 &            33 &                         \textbf{3} \\
+\bottomrule
+\end{tabular}
+    \label{tab:ul_nl}
+\end{table}
+\begin{figure}
+    \centering
+    \subfigure[PaLM 2 1B, Disaggregated similarity vs. reduction curve]{\includegraphics[width=.46\linewidth]{2024figures/xsum_ulm_bleu.png}}
+    \subfigure[PaLM 2 1B, Aggregated similarity vs. reduction curve]{\includegraphics[width=.52\linewidth]{2024figures/xsum_ulm_bleu_overall.png}}
+    \subfigure[PaLM 2 1B, Disaggregated disfluency vs. reduction plot]{\includegraphics[width=.48\linewidth]{2024figures/xsum_ulm_total.png}}
+    \subfigure[PaLM 2 1B, Aggregated disfluency vs. reduction plot]{\includegraphics[width=.5\linewidth]{2024figures/xsum_ulm_total_overall.png}}
+    \caption{Results on XSUM and PaLM 2 1B. \Gls{tnt} methods yield a better trade-off between similarity vs. reduction than baselines up to a 50\% reduction rate. \Gls{tnt} methods struggle to reduce the hallucination rate past this point, while baseline methods do so but at the expense of increasing obvious disfluencies. For readability and a more direct comparison to \Cref{fig:auc_curves}, only points that are located on the frontier of the similarity vs. reduction curves are plotted.}
+    \label{fig:palm2}
+\end{figure}
+
+\begin{figure}[]
+    \centering
+    \includegraphics[width=.47\linewidth]{new_figures/pct_ablation.png}
+    \includegraphics[width=.47\linewidth]{2024figures/pct_ablation_rouge.png}
+    \caption{Similarity vs. reduction results as dataset size varies (results are on PaLM 2 1b with $\alpha=1$). Numbers signify percentage of the original dataset used for training and validation, with test set for evaluation held constant. With less data, \gls{tnt} methods are generally less effective at reducing hallucination rate. However, \gls{tnff} stands out as method that is able to minimize the changes to the original model behavior even with less data (positive slope in the results), suggesting its practical efficacy for minimal targeted updates in low-data regimes. Black dot signifies the original model's metrics.}
+    \label{fig:pct_ablation}
+\end{figure}
+
+
+
+\section{Discussion}
+
+\label{sec:discussion}
+In this work, we propose targeted negative training, a suite of methods for finetuning a language model to avoid unwanted behavior in a targeted fashion, 
+ given token-level annotations of the model's generations.
+While baseline finetuning objectives do not sufficiently constrain how probability mass is dispersed in a negative update, \gls{tnt} methods
+directly optimize for a model whose constituent token distributions are the solutions to a minimal targeted update.
+
+Broadly, \gls{tnt} could be a useful tool for improving the safety of autoregressive generative models
+by 
+offering a means to iteratively refine a model after it has been initially trained.
+
+\Gls{tnt} is not without its limitations, however. First, 
+\gls{tnt} requires keeping the original model during training, meaning a larger memory footprint. 
+The additional forward pass through the original model also incurs additional computational cost at each gradient step. Fortunately, however, \gls{tnt} does not require any extra computational or memory cost during inference. Plus, given the growing interest in finetuning methods that utilize multiple models to regularize towards the original (e.g., RLHF-PPO \cite{Ziegler2019FineTuningLM} utilizes three), strategies for mitigating these extra costs during finetuning could be useful broadly.
+
+\Gls{tnt} also requires token-level annotations which may be hard to acquire in certain cases. 
+Next, 
+\gls{tnt} only targets negative examples that have been specified
+and could increase the presence of other similar bad words that were present in the generations but not flagged. This result highlights the importance of high-quality annotations.
+Luckily, 
+the commutative property of negative updates makes it easy to apply \gls{tnt} iteratively for different sets of negatives to address unwanted behavior as it is noticed.
+Finally, our experiments show that even though all \gls{tnt} methods target the same updated model, the choice of objective matters for where on the spectrum between a complete reduction vs. minimal change the resulting model ends up. The methods that allow for the most targeted changes struggle to reach the highest levels of rate reduction and vice versa, suggesting that the optimization strategies in this suite of methods still have room for improvement. For instance, future work could consider other choices of divergences as well as additional optimization tricks to see if it is possible to achieve a more Pareto optimal trade off between reducing unwanted behavior and minimally changing the original model.
+
+
+\subsubsection*{Broader Impact Statement}
+This work aims to update a language model to reduce the generation of unwanted outputs. However, we note that the experiments consider simplified definitions of unwanted text, and more sophisticated definitions should be annotated and considered in real-world uses of \gls{tnt}.   
+
+
+

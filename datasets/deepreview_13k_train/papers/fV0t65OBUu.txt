@@ -1,0 +1,627 @@
+\title{Improving Probabilistic Diffusion Models With Optimal Covariance Matching}
+
+\begin{abstract}
+The probabilistic diffusion model has become highly effective across various domains. Typically, sampling from a diffusion model involves using a denoising distribution characterized by a Gaussian with a learned mean and either fixed or learned covariances. In this paper, we leverage the recently proposed covariance moment matching technique and introduce a novel method for learning the diagonal covariances. Unlike traditional data-driven covariance approximation approaches, our method involves directly regressing the optimal analytic covariance using a new, unbiased objective named Optimal Covariance Matching (OCM). This approach can significantly reduce the approximation error in covariance prediction. We demonstrate how our method can substantially enhance the sampling efficiency, recall rate and likelihood of both diffusion models and latent diffusion models.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Diffusion models~\citep{sohl2015deep,ho2020denoising,song2019generative} have achieved remarkable success in modeling complex real-world data across various domains~\citep{rombach2022high,li2022diffusion,poole2022dreamfusion,ho2022video,hoogeboom2022equivariant,liu2023audioldm}. A conventional diffusion model operates in two stages: a forward noising process, indexed by $t \in [1, T]$, which progressively corrupts the data distribution into a Gaussian distribution via Gaussian convolution, and a reverse denoising process, which generates images by gradually transforming Gaussian noise back into coherent data samples. In traditional diffusion models, the generation process typically predicts only the mean of the denoising distribution while using a fixed, pre-defined variance~\citep{ho2020denoising}. This approach often requires a very large number of steps, $T$, to produce high-quality, diverse samples or to achieve reasonable model likelihoods, leading to inefficiencies during inference.
+
+To address this inefficiency, several works have proposed estimating the posterior covariance instead of relying on pre-defined variance values. For instance, \cite{bao2022analytic} introduces an analytical form of isotropic, state-independent covariance that can be estimated from the data. This analytical solution achieves an optimal form under the constraints of isotropy and state independence. A more flexible approach involves learning a state-dependent diagonal covariance. \cite{nichol2021improved} propose learning this form by optimizing the variational lower bound (VLB). Similarly, \cite{bao2022estimating} explore learning a state-dependent diagonal covariance directly from data, also examining its analytical form. These methods have demonstrated improved image quality with fewer denoising steps. Learning the covariance through VLB optimization~\citep{nichol2021improved} has become a widely adopted strategy in state-of-the-art image and video generative models.
+
+Building on this line of research, the goal of our paper is to develop an improved denoising covariance strategy that enhances both the generation quality and likelihood evaluation while reducing the number of total time steps. Recently, \cite{zhang2024moment} derived the optimal state-dependent full covariance for the denoising distribution. While this method offers greater flexibility than state-dependent diagonal covariance, it requires $O(D^2)$ storage for the Hessian matrix and $O(D)$ network evaluations per denoising step, where $D$ is the data dimension. This makes it impractical for high-dimensional applications, such as image generation.
+To address this limitation, we propose a novel, unbiased covariance matching objective that enables a neural network to match the diagonal of the optimal state-dependent diagonal covariance. Unlike previous methods~\citep{bao2022estimating, nichol2021improved}, which learn the diagonal covariance directly from the data, our approach estimates the diagonal covariance from the learned score function. We show that this method significantly reduces covariance estimation errors compared to existing techniques. Moreover, we demonstrate that our approach can be applied to both Markovian (DDPM) and non-Markovian (DDIM) diffusion models, as well as latent diffusion models. This results in improvements in generation quality, recall, and likelihood evaluation, while also reducing the number of function evaluations (NFEs).
+
+
+
+
+\section{Background of Probabilistic Diffusion Models}
+
+We first introduce two classes of diffusion models that will be explored further in our paper.
+
+\subsection{Markovian Diffusion Model: DDPM} 
+Let $q(x_0)$ be the true data distribution, denoising diffusion probabilistic models (DDPM) \citep{ho2020denoising} constructs the following Markovian diffusion process
+\begin{align}\label{eq:forward}
+    q(x_{0:T})=q(x_0)\prod_{t=1}^T q(x_{t}|x_{t-1}), 
+\end{align}
+where $q(x_t|x_{t-1})=\mathcal{N}(\sqrt{1-\beta_t} x_{t-1},\beta_tI)$ and $0{<}\beta_1{<}\cdots{<}\beta_T{<}1$ is the pre-defined noise schedule. We can also derive the following skip-step noising distribution in a closed form
+\begin{align}
+    q(x_t|x_0)=\mathcal{N}(\sqrt{\bar{\alpha}_t}x_0,(1-\bar{\alpha}_t)I),
+\end{align}
+where $\bar{\alpha}_t\equiv\prod_{s=1}^t(1-\beta_s)$. When $T$ is sufficiently large, we have the marginal distribution $q(x_T)\rightarrow \mathcal{N}(0,I)$. The generation process utilizes an initial distribution $q(x_T)$ and the denoising distribution $q(x_{t-1}|x_t)$. We assume for a large $T$ and variance preversing schedule discussed in Equation~\ref{eq:forward}, we can approximate $q(x_T)\approx p(x_T)=\mathcal{N}(0,I)$. The true $q(x_{t-1}|x_t)$ is intractable and is approximated as a variational distribution $p_\theta (x_{t-1}|x_t)$ within a  Gaussian family, which defines the  reverse denoising process  as
+\begin{align}
+p_\theta (x_{t-1}|x_t)=\mathcal{N}(x_{t-1}|\mu_{t-1}(x_t;\theta),\Sigma_{t-1}(x_t;\theta)).
+\end{align}
+Using the Tweedie's Lemma \citep{efron2011tweedie,robbins1992empirical}, we can obtain the score representation of the $\mu_{t-1}(x_t;\theta)$
+\begin{align}
+\mu_{t-1}(x_t;\theta)=(x_t+\beta_t\nabla_{x_t}\log p_\theta (x_t))/\sqrt{1-\beta_t},
+\end{align}
+where the approximated score function $\nabla_{x_t}\log p_\theta (x_t)\approx \nabla_{x_t}\log q(x_t)$ can be learned by the denoising score matching (DSM)~\citep{vincent2011connection,song2019generative}.  
+
+For the covariance $\Sigma_{t-1}(x_t;\theta)$, two heuristic choices were proposed in the original DDPM paper: 1. $\Sigma_{t-1}(x_t;\theta)=\beta_t$, which is equal to the variance of $q(x_{t}|x_{t-1})$ and 2. $\Sigma_{t-1}(x_t;\theta)=\tilde{\beta}_t$  where $\tilde{\beta}_t=\frac{1-\bar{\alpha}_{t-1}}{1-\bar{\alpha}_t}\beta_t$ is the variance of $q(x_{t-1}|x_t,x_0)$. Although heuristic, \citet{ho2020denoising} show that when $T$ is large, both options yield similar generation quality.
+
+\subsection{Non-Markovian Diffusion Model: DDIM}  
+In additional to the Markovian diffusion process, denoising diffusion implicit models (DDIM)~\citep{song2020denoising} only defines the  condition $q(x_t|x_0)=\mathcal{N}(\sqrt{\bar{\alpha}_t}x_0,(1-\bar{\alpha}_t)I)$ and  let
+\begin{align}
+q(x_{t-1}|x_t) \approx \int q(x_{t-1}|x_t,x_0) p_\theta(x_0|x_t)dx_0,
+\end{align}
+where $q(x_{t-1}|x_t,x_0)=\mathcal{N}(\mu_{t-1}, \sigma^2_{t-1})$ 
+ with
+\begin{align}
+\mu_{t{-}1}=\sqrt{\Bar{\alpha}_{t{-}1}}x_0+ \frac{x_t{-}\sqrt{\Bar{\alpha}_t}x_0}{\sqrt{1-\Bar{\alpha}_t}}\sqrt{1{-}\Bar{\alpha}_{t{-}1}{-}\sigma_{t{-}1}^2}. \label{eq:ddim}
+\end{align}
+When $\sigma_{t-1}=\sqrt{(1-\bar{\alpha}_{t-1})/(1-\bar{\alpha}_t)\beta}_t$, the diffusion process becomes Markovian and equivalent to DDPM. Specifically, DDIM chooses $\sigma\rightarrow 0$, which implicitly defines a non-Markovian diffusion process. In the original paper~\citep{song2020denoising}, the $q(x_0|x_t)$ is heuristically chosen as a delta function $p_\theta (x_0|x_t)=\delta(x_0-\mu_{0}(x_t;\theta))$ where
+\begin{align}
+\mu_{0}(x_t;\theta)=(x_t+(1-\bar{\alpha}_t)\nabla_{x_t}\log p_\theta(x_t))/\sqrt{\bar{\alpha}_t}.
+\end{align}
+In both DDPM and DDIM, the covariance of $p_\theta(x_{t-1}|x_t)$ or $p_\theta(x_0|x_t)$  are chosen based on heuristics. \cite{nichol2021improved} have shown that the choice of covariance makes a big impact when $T$ is small. Therefore, for the purpose of accelerating the diffusion sampling, our paper will focus on how to improve the covariance estimation quality in these cases. We will first introduce our method in the next section and then compare it with other methods in  Section~\ref{sec:related}.
+
+
+\section{Diffusion Models with Optimal Covariance Matching}
+
+Recently, \cite{zhang2024moment} introduce the optimal covariance form of the denoising distribution $q(x|\tx)\propto q(\tx|x)q(x)$ for the Gaussian convolution $q(\tx|x)=\mathcal{N}(x,\sigma^2I)$, which can be seen as a high-dimensional extension of the second-order Tweedie's Lemma~\citep{efron2011tweedie, robbins1992empirical}. We further extend the formula to \textbf{scaled} Gaussian convolutions in the following theorem.
+\begin{restatable}[Generalized Analytical Covariance Identity]{theorem}{restatheoremone}\label{theo:cov}
+Given a joint distribution $q(\tx,x)=q(\tx|x)q(x)$ with $q(\tx|x)=\mathcal{N}(\alpha x,\sigma^2 I)$, 
+ then the covariance of the true posterior $q(x|\tx)\propto q(x)q(\tx|x)$, 
+ which is defined as $\Sigma(\tx)=\mathbb{E}_{q(x|\tx)} [x^2] - \mathbb{E}_{q(x|\tx)} [x]^2$, has a closed form:
+\begin{align}
+\Sigma(\tx)=\left(\sigma^4\nabla_{\tilde{x}}^2\log q(\tilde{x})+\sigma^2I\right)/\alpha^2.\label{eq:fullcov}
+\end{align}
+\end{restatable}
+ This covariance form can also be shown as the optimal covariance form under the KL divergences~\citep{bao2022analytic,zhang2024moment}. We can see that the exact covariance in this case only depends on the score function, which indicates the exact covariance can be derived from the score function. In general, the score function already contains all the information of the denoising distribution $q(x|\tx)$,  see~\citet{zhang2024moment} for further discussion. We here only consider the covariance for simplicity.
+
+\begin{wraptable}{R}{0.6\linewidth}
+\caption{Comparison of different covariance choices on CIFAR10 (CS). We use Rademacher estimator ($M=100$) for the diagonal covariance approximation in OCM-DDPM.}
+\label{tab:ocm_rademacher_estimate_results}
+\centering
+\setlength{\tabcolsep}{1.6pt}
+\resizebox{1.0\linewidth}{!}{
+\begin{tabular}{lcccccccc}
+    \toprule
+    & \multicolumn{4}{c}{FiD $\downarrow$} & \multicolumn{4}{c}{NLL $\downarrow$} \\
+    \cmidrule(lr){2-5} \cmidrule(lr){6-9} 
+    \# timesteps & 5 & 10 & 15 & 20 & 5 & 10 & 15 & 20 \\
+    \midrule
+    DDPM, $\tilde{\beta}$ & 58.28 & 34.76 & 24.02 & 19.00 & 203.29 & 74.95 & 44.94 & 32.20 \\
+    DDPM, ${\beta}$ & 254.07 & 205.31 & 149.67 & 109.81 & 7.33 & 6.51 & 6.06 & 5.77 \\
+    \rowcolor{gray!20}
+    \cellcolor{white}OCM-DDPM & \textbf{38.88} & \textbf{21.60} & \textbf{13.35} & \textbf{9.75} & \textbf{6.82} & \textbf{4.98} & \textbf{4.62} & \textbf{4.43} \\
+\bottomrule
+\end{tabular}
+}
+\end{wraptable}
+In the case of the diffusion model, we use the learned score function as a plug-in approximation in \cref{eq:fullcov}. 
+Although the optimal covariance can be directly calculated from the learned score function, but it requires calculating the Hessian matrix, which is the Jacobian of the score function. This requires $O(D^2)$ storage and $D$ number of network evaluation~\citep{martens2012estimating} for each denoising step at the time $t$.  \citet{zhang2024moment} propose to use the following consistent diagonal 
+approximation~\citep{bekas2007estimator} to remove the $O(D^2)$ storage requirement
+\begin{align}
+    \mathrm{diag}(H(\tx)) \approx 1/M \sum\nolimits_{m=1}^M v_m \odot H(\tx)v_m, \label{eq:diag:approx}
+\end{align}
+where $H(\tx)\equiv \nabla_{\tilde{x}}^2\log q(\tilde{x})$ and $v_m{\sim}p(v)$ is a Rademacher random variable~\citep{hutchinson1990stochastic} with entries $\pm 1$ and $\odot$ denotes the element-wise product.
+In \cref{tab:ocm_rademacher_estimate_results}, we compare the generation quality of DDPM using different covariance choices. The results demonstrate that generation quality improves significantly when using the Rademacher estimator to estimate the optimal covariance, compared to the heuristic choices of $\beta$ and $\tilde{\beta}$.
+However, as shown in \cref{fig:est_hessian_matrix}, achieving a desirable approximation on the CIFAR10 dataset necessitates $M \geq 100$ Rademacher samples.
+Each calculation of $ v_m \odot H(\tx)v_m$ requires two network passes, resulting in a total of $2M$ network evaluations. This significantly slows down the generation speed, making it impractical for diffusion models.
+Inspired by \citet{nichol2021improved,bao2022estimating} and also the amortization technique used in variational inference~\citep{kingma2013auto,dayan1995helmholtz}, \emph{we propose to use a network to match the diagonal Hessian, which only requires one network pass to predict the diagonal Hessian in the generation time and can be done in parallel with the score/mean predictions with no extra time cost.} In the next section, we introduce a novel unbiased objective to learn the diagonal Hessian from the learned score, which improves the covariance estimation accuracy and leads to better generation quality and higher likelihood estimations.
+
+\subsection{Unbiased Optimal Covariance Matching}
+\begin{figure}
+\centering
+    \begin{minipage}{0.19\textwidth}
+    \centering
+    \scriptsize
+    Data \\
+    \includegraphics[width=1.\textwidth]{figures/samples/hes_est_error/data.png}
+    \end{minipage}
+    \begin{minipage}{0.19\textwidth}
+    \centering
+    \scriptsize
+    $K=1$ \\
+    \includegraphics[width=1.\textwidth]{figures/samples/hes_est_error/hes_est_1.png}
+    \end{minipage}
+    \begin{minipage}{0.19\textwidth}
+    \centering
+    \scriptsize
+    $K=10$ \\
+    \includegraphics[width=1.\textwidth]{figures/samples/hes_est_error/hes_est_10.png}
+    \end{minipage}
+    \begin{minipage}{0.19\textwidth}
+    \centering
+    \scriptsize
+    $K=100$ \\
+    \includegraphics[width=1.\textwidth]{figures/samples/hes_est_error/hes_est_100.png}
+    \end{minipage}
+    \begin{minipage}{0.19\textwidth}
+    \centering
+    \scriptsize
+    $K=1000$ \\
+    \includegraphics[width=1.\textwidth]{figures/samples/hes_est_error/hes_est_1000.png}
+    \end{minipage}
+\caption{Diagonal covariance estimation visualisation with different Rademacher sample numbers.}
+\label{fig:est_hessian_matrix}
+\end{figure}
+To train a network $h_\phi(\tx)$ to match the Hessian diagonal $\text{diag}(H(\tx))$, a straightforward solution is to directly regress Equation~\ref{eq:diag:approx} for all the noisy data
+\begin{align}
+   \min_{\phi}\mathbb{E}_{q(\tx)} ||h_\phi(\tx) \!-\! \frac{1}{M}\sum_{m=1}^M v_m \!\odot\! H(\tx)v_m ||_2^2,
+\end{align}
+where $v_m\sim p(v)$. Although this objective is consistent when $M\rightarrow \infty$, it will introduce additional bias when $M$ is small. To avoid the  bias, we propose the following unbiased optimal covariance matching  (OCM) objective
+\begin{align}
+L_{\text{ocm}}(\phi)=\mathbb{E}_{q(\tx)p(v)} ||h_\phi(\tx) -  v \odot H(\tx)v ||_2^2, \label{eq:ocm}
+\end{align} 
+which does not include an expectation within the non-linear L2 norm.
+The following theorem shows the validity of the proposed OCM objective.
+\begin{restatable}[Validity of the OCM objetcive]{theorem}{restatheoremtwo}\label{theo:validity-of-cov}
+    The objective in \cref{eq:ocm} upper bounded the grounded objective. Moreover, it attains optimal when $h_\phi(\tx)=\text{diag}(H(\tx))$ for all $\tx\sim q(\tx)$.
+\end{restatable}
+See the \cref{app:ocm} for a proof. The integration over $v$  in \cref{eq:ocm} can be unbiasedly approximated by the Monte-Carlo integration given $M$ Rademacher samples $v_m\sim p(v)$. In practice, we found $M=1$ works well, which also shows the training efficiency of the proposed OCM objective.
+The learned $h_\phi$ can form the covariance approximation 
+\begin{align}
+    \Sigma(\tx; \phi)= (\sigma^4 h_\phi(\tx)+\sigma^2I)/\alpha^2.
+\end{align}
+
+We then discuss how to apply the learned covariance to diffusion models.
+
+\begin{figure*}[!t]
+\centering
+    \begin{minipage}[t]{0.45\linewidth}
+    \centering
+    \begin{algorithm}[H]
+    \setstretch{1.33}
+    \caption{OCM-DDPM} \small
+    \label{alg:OCM-DDOM} 
+    \begin{algorithmic}[1] %[1] enables line numbers
+        \STATE Compute $\mu_{t'}(x_t)$ with \cref{eq:skip-ddpm-mean};
+        \STATE Compute  $\Sigma_{t'}(x_t)$ with \cref{eq:skip-ddpm-variance};
+        \STATE Sample  $\epsilon  \!\sim\! \mathcal{N}(0,I)$;
+        \STATE Let $x_{t'} \leftarrow \mu_{t'}(x_t) + \Sigma_{t'}(x_t)^{1/2} \epsilon$.
+    \end{algorithmic}
+    \end{algorithm}
+    \end{minipage}
+    \quad
+    \begin{minipage}[t]{0.45\linewidth}
+    \centering
+    \begin{algorithm}[H]
+    \setstretch{1.25}
+    \caption{OCM-DDIM} \small
+    \label{alg:OCM-DDIM} 
+    \begin{algorithmic}[1] %[1] enables line numbers
+        \STATE Compute $\mu_{0}(x_t)$  with \cref{eq:skip-ddim-mean};
+        \STATE Compute  $\Sigma_{0}(x_t)$ with \cref{eq:skip-ddim-cov};
+        \STATE Sample $x_0 \!\sim \! \mathcal{N}(\mu_{0}(x_t),\!\Sigma_{0}(x_t))$; 
+        \STATE Let $x_{t'} \leftarrow\sqrt{\bar{\alpha}}_{t'}x_0\!+\sqrt{1-\bar{\alpha}_{t'}}\frac{x_t-\sqrt{\bar{\alpha}_t}x_0}{\sqrt{1-\bar{\alpha}_t}}$.
+    \end{algorithmic}
+    \end{algorithm}
+    \end{minipage} 
+\caption{The sampling procedure OCM-DDPM and OCM-DDIM. We only demonstrate one step from $t\rightarrow t'$ for simplicity.}
+\label{fig:training-sampling-algs}
+\end{figure*}
+
+\subsection{Diffusion Models Applications\label{sec:app:diffusion}}
+Given that we have access to a learned score function $\nabla_{x_t}\log p_\theta(x_t)$, which can be obtained from any pre-trained diffusion model, we denote the Jacobian of the score by $H_t(x_t)$. Assuming $M=1$ in the OCM training objective, the covariance learning objective for diffusion models  can then be expressed as follows
+\begin{align} \label{eq:diffusion:loss}
+   \min_{\phi} \frac{1}{T} \sum_{t=1}^T \mathbb{E}_{q(x_t,x_0)p(v)} \lVert h_\phi(x_t) - v {\odot} H_t(x_t)v \rVert_2^2 ,
+\end{align}
+where $v\sim p(v)$ and $h_\phi(x_t)$ is a network that conditioned on the state $x_t$ and time $t$. After training this objective, the learned $h_\phi(x_t)$ can be used to form the diagonal Hessian approximation
+$h_\phi(\tx)\approx \mathrm{diag}(H(\tx))$ which further forms our approximation of covariance. We then derive its use cases in skip-step DDPM and DDIM for Diffusion acceleration.
+
+\textbf{Skip-Step DDPM:}
+For the general skip-step DDPM with denoising distribution $q(x_{t'}|x_t)$ with $t'<t$. When $t'=t-1$, this becomes the classic one-step DDPM. We further denote $\Bar{\alpha}_{t':t}=\prod_{s=t'}^{t} \alpha_s$, and thus $\bar{\alpha}_{0:t} = \bar{\alpha}_{t}$,  $\Bar{\alpha}_{t':t}=\bar{\alpha}_{t}/\bar{\alpha}_{t'}$. We can write the forward process as
+ \begin{align}
+    q(x_{t}|x_{t'})=\mathcal{N}(x_{t}|\sqrt{\bar{\alpha}_{t':t}} x_{t'}, (1-\bar{\alpha}_{t':t})I).
+ \end{align}
+ The corresponding Gaussian denoising distribution $p_{\theta,\phi}(x_{t'}|x_t)= \mathcal{N}(\mu_{t'}(x_t;\theta),\Sigma_{t'}(x_t;\phi))$ has the following mean and covariance functions:
+\begin{align}
+\mu_{t'}(x_t;\theta)&\!=\!(x_t+(1-\bar{\alpha}_{t':t})\nabla_{x_t}\log p_\theta (x_t))/\sqrt{\bar{\alpha}_{t':t}}, \label{eq:skip-ddpm-mean}\\ 
+\Sigma_{t'}(x_t;\phi)&\!=\!({(1\!-\!\bar{\alpha}_{t':t})}^2 h_\phi(x_t)\!+\!(1\!-\!\bar{\alpha}_{t':t})I)/\bar{\alpha}_{t':t}. \label{eq:skip-ddpm-variance}
+\end{align}
+The skip-step denoising sample $x_{t'}\sim p_{\theta,\phi}(x_t'|x_t)$ can be obtained by $x_{t'}=\mu_{t'}(x_t;\theta)+\epsilon \Sigma^{1/2}_{t'}(x_t;\phi)$.
+
+\textbf{Skip-Step DDIM:}
+Similarly, we give the skip-step formulation of DDIM, where we set the $\sigma_{t-1}=0$ in \cref{eq:ddim} which is also used in the original paper~\cite{song2020denoising}. We can use the approximated covariance of $p_{\theta,\phi}(x_0|x_t)$ to replace the delta function used in the vanilla DDIM,  
+which gives the skip-steps DDIM sample
+\begin{align} \label{eq:skip-ddim-posterior-mean}
+x_{t'}&=\sqrt{\bar{\alpha}}_{t'}x_0+\sqrt{1-\bar{\alpha}_{t'}}\cdot\frac{x_t-\sqrt{\bar{\alpha}_t}x_0}{\sqrt{1-\bar{\alpha}_t}}, 
+\end{align}
+where $x_0\sim p_{\theta,\phi}(x_0|x_t)=\mathcal{N}(\mu_0(x_t;\theta),\Sigma_0(x_t;\phi))$ and 
+\begin{align}
+\mu_{0}(x_t;\theta)&=(x_t+(1-\bar{\alpha}_{t})\nabla_{x_t}\log p_\theta (x_t))/\sqrt{\bar{\alpha}_{t}}, \label{eq:skip-ddim-mean} \\
+\Sigma_{0}(x_t;\phi)&=({(1-\bar{\alpha}_{t})}^2 h_\phi(x_t,t)+(1-\bar{\alpha}_{t})I)/\bar{\alpha}_{t}.\label{eq:skip-ddim-cov}
+\end{align}
+The sample $x_0\sim p_{\theta,\phi}(x_0|x_t)$ can be obtained by $x_{0}=\mu_{0}(x_t;\theta)+\epsilon \Sigma^{1/2}_{0}(x_t;\phi)$.
+In the next section, we give an overview of other covariance estimation methods and compare their performance in practical examples.
+\begin{table*}[t]
+\centering
+\caption{Overview of different covariance estimation methods. Methods are ranked by increasing modeling capability from top to bottom. We also include the intuition of the methods and how many additional network passes are required for estimating the covariance.}
+\label{tab:methods}
+\begin{tikzpicture}
+    \draw[thick,<-] (0.1,0.5) -- (0.1,4.5); \node at (-0.2, 2.5) [rotate=90] {Modeling Capability};
+    \node[right] at (0.5, 2.5) {
+    \resizebox{.91\linewidth}{!}{
+        \begin{tabular}{l c c l}
+        \hline
+        \textbf{Covariance Type}  & \textbf{+\#Passes} & \textbf{Intuition}\\
+        \hline
+        $x_t$-independent Isotropic $\beta$~\citep{ho2020denoising}  & 0 & Cov. of $q(x_{t}|x_{t-1})$\\
+        $x_t$-independent Isotropic $\tilde{\beta}$~\citep{ho2020denoising}   & 0 & Cov. of $q(x_{t}|x_{t-1}, x_0)$\\
+        $x_t$-independent Isotropic Estimation~\citep{bao2022analytic}  & 0 & Estimate from data\\
+        \hline
+        $x_t$-dependent Diagonal VLB~\citep{nichol2021improved}  & 1 & Learn from data\\
+        $x_t$-dependent Diagonal NS~\citep{bao2022estimating}  & 1 & Learn from data\\
+        $x_t$-dependent Diagonal OCM (Ours)  & 1 & Learn from score\\
+        $x_t$-dependent Diagonal Estimation~\citep{zhang2024moment}  & $2M$ &Estimate from score\\
+        $x_t$-dependent Diagonal Analytic~\citep{zhang2024moment}  & $D$ & Calculate from score\\
+        \hline
+        $x_t$-dependent Full Analytic~\citep{zhang2024moment} & $D$ &Calculate from score\\
+        \hline
+        \end{tabular}}
+    };
+\end{tikzpicture}
+\end{table*}
+
+\subsection{Details of Training and Inference}
+Our model comprises two components: a score prediction network $s_\theta$ and a diagonal Hessian prediction network $h_\phi$. 
+In line with \cite{bao2022estimating}, we parameterize the score prediction network using a pretrained diffusion model, and the Hessian prediction network is parameterized by sharing parameters as follows:
+\begin{align}
+    s_\theta (x_t) &= \mathrm{NN}_1 (\mathrm{BaseNet}(x_t, t; \theta_1); \theta_2) \\
+    h_\phi (x_t) &= \mathrm{NN}_2 (\mathrm{BaseNet}(x_t, t; \theta_1); \phi )
+\end{align}
+where $\mathrm{BaseNet}$ represents the commonly used architecture in diffusion models, such as UNet and DiT \citep{ho2020denoising,peebles2023scalable}. 
+ 
+In our experiment, we fix the parameter $\theta = \{\theta_1, \theta_2\}$ and train the Hessian prediction network exclusively with the proposed OCM objective.
+After training, samples can be generated using the algorithms summarized in \cref{fig:training-sampling-algs}.
+
+
+\section{Related Covariance Estimation Methods\label{sec:related}
+
+We then discuss different choices of $\Sigma_{t'}(x_t)$ used in the diffusion model literature, see also Table~\ref{tab:methods} for an overview.
+For brevity, we mainly focus on DDPM here, in which the mean $\mu_{t'}(x_t)$ can be computed as in \cref{eq:skip-ddpm-mean}. 
+
+\paragraph{1. $x_t$-independent isotropic covariance: $\beta$/$\tilde{\beta}$-DDPM~\citep{ho2020denoising}.}
+The $\beta$-DDPM  uses the variance of $p(x_{t'}|x_{t})$, which is $\Sigma_{t'}(x_t)=(1-\bar{\alpha}_t/\bar{\alpha}_{t'})I$, when $t'=t-1$, we have $\Sigma_{t-1}(x_t)=\beta_t$. The $\tilde{\beta}$-DDPM uses the covariance of $p(x_{t'}|x_0,x_t)$, which is $\frac{(1-\bar{\alpha}_{t'})}{(1-\bar{\alpha}_{t})}(1 - \bar{\alpha}_{t':t})$. 
+
+\paragraph{2. $x_t$-independent isotropic covariance: A-DDPM~\citep{bao2022analytic}.}
+A-DDPM assumes a state-independent isotropic covariance $\Sigma_{t'}(x_t)=\sigma_{t'}^2 I$ with the following analytic form of
+\begin{align}
+\sigma_{t'}^{2}=\frac{1 \!-\! \bar{\alpha}_{t':t}}{\bar{\alpha}_{t':t}} \!-\! \frac{(1 \!-\! \bar{\alpha}_{t':t})^2}{d\bar{\alpha}_{t':t}} \mathbb{E}_{q(x_t)}\left[\norm{\nabla_{\!x_t} \!\log p_\theta (x_t)}_2^2\right],\nonumber
+\end{align}
+where the integration of $q(x_t)$ requires a Monte Carlo estimation before conducting generation. This variance choice is optimal under the KL divergence within a constrained isotropic state-independent posterior family.
+    
+\paragraph{3. $x_t$-dependent diagonal covariance: I-DDPM~\citep{nichol2021improved}.} In I-DDPM, the diagonal covariance matrix is modelled as the interpolation between $\beta_t$ and $\tilde{\beta_t}$
+\begin{align}
+    \Sigma_{t-1} (x_t;\psi) = \exp (v_\psi (x_t) \log \beta_t + (1 - v_\psi (x_t)) \log \tilde{\beta}_t),
+\end{align}
+where $v_\psi$ is parametrized via a neural network. The covariance is learned with the variational lower bound (VLB).
+In the optimal training, the covariance learned by VLB will recover the true covariance in \eqref{eq:fullcov}.
+Notably, \cite{nichol2021improved} heuristically obtain the covariance of skip sampling $\Sigma_{t'}(x_t;\psi)$ by rescaling $\beta_t$ and $\tilde{\beta_t}$ accordingly: $\beta_t \rightarrow 1 - \bar{\alpha}_{t':t}, \tilde{\beta}_t \rightarrow \frac{(1-\bar{\alpha}_{t'})}{(1-\bar{\alpha}_{t})}(1 - \bar{\alpha}_{t':t})$. However, when $t' = 0$, $\Sigma_{0}(x_t;\psi)$ is ill-defined; thus, iDDPM is inapplicable within the DDIM framework.
+
+\paragraph{4. $x_t$-dependent diagonal covariance: SN-DDPM~\citep{bao2022estimating}.}
+SN-DDPM learns the covariance by training a neural network $g_\psi$ to estimate the second moment of the noise $\epsilon_t = (x_t - \sqrt{\bar{\alpha}_t} x_0) / \sqrt{1 - \bar{\alpha}_t}$:
+\begin{align} \label{eq:sn-ddpm-obj}
+    \min_\psi \mathbb{E}_{t, q(x_0, x_t)} \lVert \epsilon^2_t - g_\psi (x_t) \rVert_2^2.
+\end{align}
+After training, the covariance $\Sigma_{t'}(x_t;\psi)$ can be estimated via 
+\begin{align} \label{eq:sn-cov}
+    \!\!\!\!\Sigma_{t'}(x_t;\psi) \!=\! \frac{(1\!-\!\bar{\alpha}_{t'})}{(1-\bar{\alpha}_{t})}\bar{\beta}_{t':t} I \!+\! \frac{\beta_t^2}{\alpha_t} \!\left(\! \frac{g_{\psi}(x_t)}{1\!-\!\bar{\alpha}_t} \!-\! \nabla_{x_t} \log \!p_\theta (x_t)^2 \!\right)\!.
+\end{align}
+where $\bar{\beta}_{t':t} = 1 - \bar{\alpha}_{t':t}$. 
+In optimal, $\Sigma_{t'}(x_t;\psi)$ in \cref{eq:sn-cov} will recover the true covariance in \cref{eq:fullcov}. We demonstrate the equivalence between COM-DDPM and SN-DDPM in \cref{app:equiv-ocm-sn}.
+However, due to the appearance of the quadratic noise term in \cref{eq:sn-ddpm-obj}, SN-DDPM tends to amplify the estimation error as $t \rightarrow 0$, leading to suboptimal solutions. To mitigate this issue, \cite{bao2022estimating} also propose NPR-DDPM, which models the noise prediction residual instead. We recommend referring to their paper for detailed explanations.
+
+Notably, almost all these methods can be applied within the DDIM framework by setting \(t' = 0\).
+Specifically, \(p(x_{t'} | x_t)\) can be sampled using \cref{eq:skip-ddim-posterior-mean} with \(x_0 \sim \mathcal{N}(\mu_0 (x_t), \Sigma_0 (x_t))\), where \(\mu_0 (x_t)\) is the same as in \eqref{eq:skip-ddim-mean}, but \(\Sigma_0 (x_t)\) differs for various methods as discussed previously.
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}{0.24\textwidth}
+        \includegraphics[width=\linewidth]{figures/toy/cov_err_true_score.png}
+        \caption{\scriptsize Cov Error with True Score}
+        \label{fig:cov:true:score}
+    \end{subfigure}
+    \hfill % Adds horizontal space between figures
+    \begin{subfigure}{0.24\textwidth}
+        \includegraphics[width=\linewidth]{figures/toy/cov_err_learned_score.png}
+        \caption{\scriptsize Cov Error with Learned Score}
+        \label{fig:cov:learned:score}
+    \end{subfigure}
+    \hfill % Adds horizontal space between figures
+    \begin{subfigure}{0.2218\textwidth}
+        \includegraphics[width=\linewidth]{figures/toy/mmd_ddpm_final.png}
+        \caption{\scriptsize DDPM MMD v.s. Steps}
+        \label{fig:toy:ddpm}
+    \end{subfigure}
+    \hfill % Adds horizontal space between figures
+    \begin{subfigure}{0.2218\textwidth}
+        \includegraphics[width=\linewidth]{figures/toy/mmd_ddim_final.png}
+        \caption{\scriptsize DDIM MMD v.s. Steps}
+        \label{fig:toy:ddim}
+    \end{subfigure}
+    \caption{Comparisons of different covariance estimation methods based on estimation error and sample generation quality. Figures (a) and (b) show the mean square error of the estimated diagonal covariance under the assumptions: (a) access to the true score, and (b) learned score of the data distribution at various noise levels. Figures (c) and (d) present the MMD evaluation against the total sampling steps in the DDPM (c) and DDIM (d) settings. We can find the proposed  OCM method can achieve the lowest estimation error and consistently outperform other methods when fewer generation steps are applied.}
+    \label{fig:combined}
+\end{figure*}
+
+
+
+\section{Experimental Results}
+
+To support our theoretical discussion, we first evaluate the performance of optimal covariance matching by training diffusion probabilistic models on 2D toy examples. We then demonstrate its effectiveness in enhancing image modelling in both pixel and latent spaces, focusing on the comparison between optimal covariance matching and other covariance estimation methods, and showing that the proposed approach has the potential to scale to large image generation tasks.
+
+\subsection{Toy Demonstration}
+We first demonstrate the effectiveness of our method by considering the data distribution as a two-dimensional mixture of nine Gaussians (MoG) with means located at $[-3,0,3] \otimes [-3,0,3]$ and a standard deviation of $\sigma=0.1$, where $\otimes$ denotes Cartesian product. In this case, both the true score $\nabla_{x_t}\log p(x_t)$ and the optimal covariance $\Sigma_{t'}(x_t)$ are available, allowing us to compare the covariance estimation error.
+All methods, including I-DDPM, A-DDPM, SN-DDPM, and our OCM-DDPM, assume accurate score estimation.  We first learn the covariance using the true scores. Specifically, we train the covariance networks for these methods over 50,000 iterations with a learning rate of $0.001$ using an Adam optimizer \citep{kingma2014adam}. \cref{fig:cov:true:score} shows the $L_2$ error of the estimated diagonal covariance $\Sigma_{t{-}1}(x_t)$, and our method, OCM-DDPM, consistently achieves the lowest error compared to the other methods.
+In practice, the true score is not accessible. Therefore, we also conduct a comparison using a score function learned with DSM. We then apply different covariance estimation methods under the same settings. In Figure~\ref{fig:cov:learned:score}, we plot the same $L_2$ error for the learned score setting and find that our method achieves the lowest error for all $t$ values.
+
+We further use the learned score and the covariance estimated by different methods to conduct DDPM and DDIM sampling for this MoG problem. For evaluation, we employ the Maximum Mean Discrepancy (MMD)~\citep{gretton2012kernel}, which utilizes five kernels with bandwidths $\{2^{-2}, 2^{-1}, 2^{0}, 2^{1}, 2^{2}\}$. In \cref{fig:toy:ddpm,fig:toy:ddim}, we show the MMD comparison among different methods. Specifically, we choose to conduct different diffusion steps with the skip-step scheme as discussed in \cref{sec:app:diffusion}. We find that our method consistently outperforms the others when the total time step is small, demonstrating the importance of accurate covariance estimation in the context of diffusion acceleration.
+
+
+\subsection{Image Modelling with Diffusion Models}
+Following the experimental setting in \cite{bao2022estimating}, we then evaluate our method across varying pre-trained score networks provided by previous works \citep{ho2020denoising,nichol2021improved,song2020denoising,bao2022analytic,peebles2023scalable}. 
+In this experiment, we mainly focus on four datasets: CIFAR10 \citep{krizhevsky2009learning} with the linear schedule (LS) of $\beta_t$ \citep{ho2020denoising} and the cosine schedule (CS) of $\beta_t$ \citep{nichol2021improved}; CelebA \citep{liu2015deep}; LSUN Bedroom \citep{yu2015lsun}.
+
+
+\subsubsection*{Improving Likelihood Results}
+We first evaluate the negative log-likelihood (NLL) of the diffusion models by calculating the negative evidence lower bound (ELBO): $-\log q(x_0) \leq \mathbb{E}_q \log \frac{p(x_{0:T})}{q(x_{1:T} | x_0)} \equiv -L_{\mathrm{elbo}}(x_0)$ with the same mean yet varying covariances. As per \cite{bao2022analytic}, we report results only for the DDPM forward process, as $-L_{\mathrm{elbo}} = \infty$ under the DDIM forward process. As shown in \cref{tab:bpd}, our OCM-DDPM demonstrates the best or second-best performance in most scenarios, highlighting the effectiveness of our covariance estimation approach. 
+We also note that SN-DDPM performs poorly on likelihood results in small-scale datasets like CIFAR10 and CELEBA, likely due to the amplified error of the quadratic term in \cref{eq:sn-ddpm-obj}. 
+Although NPR-DDPM achieves slightly better performance in certain scenarios, it falls short in terms of sample quality, as measured by FID, shown in \cref{tab:fid}.
+ The results show that our method achieves better likelihood estimation with a small number of timesteps, while achieving comparable results with full timesteps.
+\subsubsection*{Improving Sample Quality}
+Next, we compare sample quality quantitatively using the FID score, with results reported for both the DDPM and DDIM forward processes. 
+As shown in \cref{tab:fid}, our OCM-DPM consistently achieves either the best or second-best results across most settings.
+
+Notably, while SN-DDPM often demonstrates slightly better FID performance in certain cases, it struggles with likelihood estimation, as shown in \cref{tab:bpd}. Conversely, as discussed in the previous section, NPR-DDPM sometimes achieves superior likelihood results in \cref{tab:bpd}, but its image generation quality is significantly worse than OCM-DDPM. Therefore, the proposed OCM-DDPM provides a more balanced model, offering a better trade-off between generation quality and likelihood estimation. 
+
+\begin{table*}[t]
+\centering
+\caption{The NLL (bits/dim) $\downarrow$ across various datasets using different sampling steps.}
+\label{tab:bpd}
+\vskip -0.1in
+\begin{small}
+\begin{sc}
+\setlength{\tabcolsep}{3.4pt}{
+\begin{tabular}{lrrrrrrrrrrrrr}
+\toprule
+& \multicolumn{6}{c}{CIFAR10 (LS)} & \multicolumn{6}{c}{CIFAR10 (CS)} \\
+\cmidrule(lr){2-7} \cmidrule(lr){8-13}
+{\# timesteps $K$} & 
+10 & 25 & 50 & 100 & 200 & 1000 &
+10 & 25 & 50 & 100 & 200 & 1000 \\
+\midrule
+DDPM, $\tilde{\beta}$ & 
+74.95 & 24.98 & 12.01 & 7.08 & 5.03 & 3.73 & 
+75.96 & 24.94 & 11.96 & 7.04 & 4.95 & 3.60 \\
+DDPM, $\beta$ & 
+6.99 & 6.11 & 5.44 & 4.86 & 4.39 & 3.75 & 
+6.51 & 5.55 & 4.92 & 4.41 & 4.03 & 3.54 \\
+A-DDPM & 
+\underline{5.47} & 4.79 & 4.38 & 4.07 & 3.84 & 3.59 & 
+5.08 & 4.45 & 4.09 & 3.83 & 3.64 & 3.42 \\
+NPR-DDPM & 
+{5.40} & \underline{4.64} & \textbf{4.25} & \underline{3.98} & \underline{3.79} & \textbf{3.57} & 
+\underline{5.03} & \textbf{4.33} & \textbf{3.99} & \textbf{3.76} & \textbf{3.59} & \textbf{3.41} \\
+SN-DDPM & 
+30.79 & 11.83 & 7.13 & 5.24 & 4.39 & 3.74 & 
+90.85 & 19.81 & 9.72 & 6.72 & 5.58 & 4.73 \\
+\rowcolor{gray!20}
+\cellcolor{white}OCM-DDPM & 
+\textbf{5.32} & \textbf{4.63} & \textbf{4.25} & \textbf{3.97} & \textbf{3.78} & \textbf{3.57} & 
+\textbf{4.99} & \underline{4.34} & \textbf{3.99} & \textbf{3.76} & \textbf{3.59} & \textbf{3.41}  \\
+\arrayrulecolor{black}\midrule
+\end{tabular}}
+\end{sc}
+\end{small}
+\vskip -0.01in
+\begin{small}
+\begin{sc}
+\setlength{\tabcolsep}{3.4pt}{
+\begin{tabular}{lrrrrrrrrrrrrr}
+& \multicolumn{6}{c}{CelebA 64x64} & \multicolumn{6}{c}{ImageNet 64x64} \\
+\cmidrule(lr){2-7} \cmidrule(lr){8-13}
+{\# timesteps $K$} & 
+10 & 25 & 50 & 100 & 200 & 1000 &
+25 & 50 & 100 & 200 & 400 & 4000 \\
+\midrule
+DDPM, $\tilde{\beta}$ &
+33.42 & 13.09 & 7.14 & 4.60 & 3.45 & 2.71 & 
+105.87 & 46.25 & 22.02 & 12.10 & 7.59 & 3.89 \\
+DDPM, $\beta$ & 
+6.67 & 5.72 & 4.98 & 4.31 & 3.74 & 2.93 & 
+5.81 & 5.20 & 4.70 & 4.31 & 4.04 & 3.65 \\
+A-DDPM & 
+4.54 & 3.89 & 3.48 & 3.16 & 2.92 & \underline{2.66} &
+4.78 & 4.42 & 4.15 & 3.95 & 3.81 & 3.61 \\
+NPR-DDPM &
+\textbf{4.46} & \textbf{3.78} & \textbf{3.40} & \textbf{3.11} & \textbf{2.89} & \textbf{2.65} &
+{4.66} & {4.22} & {3.96} & \underline{3.80} & \underline{3.71} & \underline{3.60} \\
+SN-DDPM & 
+18.09 & 8.05 & 5.29 & 4.05 & 3.40 & 2.84 & 
+\underline{4.56} & \underline{4.18} & \underline{3.95} & \underline{3.80} & \underline{3.71} &  3.63\\
+\rowcolor{gray!20}
+\cellcolor{white}OCM-DDPM & 
+\underline{4.69} & \underline{3.86} & \underline{3.43} & \underline{3.13} & \underline{2.90} & \underline{2.66} &
+\textbf{4.45} & \textbf{4.15} & \textbf{3.93} & \textbf{3.79} &\textbf{3.70} & \textbf{3.59} \\
+\arrayrulecolor{black}\bottomrule
+\end{tabular}}
+\end{sc}
+\end{small}
+\end{table*}
+\subsection{Image Modelling with Latent Diffusion Models}
+
+In this section, we apply our methods to latent diffusion models \citep{vahdat2021score,rombach2022high} and with ImageNet $256{\times}256$ to demonstrate the scalability of our method. Specifically, we compare our methods to other approaches within the DiT architecture \citep{peebles2023scalable}, evaluating sample quality using the FID score and diversity using the Recall score \citep{sajjadi2018assessing}. We focus on conditional generation with classifier-free guidance (CFG), which is consistent to~\cite{peebles2023scalable}. 
+
+It is important to note that DiT was initially trained using the Improved DDPM (I-DDPM) algorithm \citep{nichol2021improved}.} provided by \cite{peebles2023scalable}. For DDPM and DDIM sampling, we discard the learned covariance in DiT and use only the learned noise prediction neural network for the posterior mean. In contrast, our OCM-DPM retains the same mean function while learning the covariance using the optimal covariance matching objective.
+We then generate samples with 10 sampling steps and report FID and Recall scores across different CFG coefficients on the ImageNet 256x256 dataset. The results are displayed in \cref{fig:fid_recall_imagenet256}, with DDPM-$\beta$ excluded due to its poor performance.
+It shows that our OCM-DPM method achieves the best FID performance with $\text{CFG}=2.0$. Although DDPM-$\tilde{\beta}$ and DDIM perform better in terms of FID at $\text{CFG}=1.5$, their Recall scores are lower than those of the proposed OCM methods.
+This discrepancy arises partly because DDPM and DDIM model 
+\begin{wrapfigure}{r}{0.6\linewidth}
+    \centering
+    \begin{subfigure}{0.49\linewidth}
+        \includegraphics[width=\linewidth]{figures/imagenet256/fid_imagenet256.pdf}
+    \end{subfigure}
+    \hfill % Adds horizontal space between figures
+    \begin{subfigure}{0.49\linewidth}
+        \includegraphics[width=\linewidth]{figures/imagenet256/recall_imagenet256.pdf}
+    \end{subfigure}
+    \caption{Results of DiT training on ImageNet 256x256. We generate samples using 10 timesteps with varying CFG coefficients (see \cref{tab:dit-fid-recall} for exact numerical values).}
+    \label{fig:fid_recall_imagenet256}
+\end{wrapfigure}
+the inverse process with deterministic variance, whereas OCM methods explicitly learn the variance from data, allowing for more accurate density estimation and generating more diverse results.
+As \cite{peebles2023scalable} report that DiT achieves the best FID performance with $\text{CFG}=1.5$, we further evaluate performance with different sampling steps under $\text{CFG}=1.5$, as shown in \cref{tab:dit-fid-different-steps}. The results indicate that our OCM-DPM methods offer a great improvement in sample quality and diversity.
+
+\begin{table*}[t]
+\centering
+\caption{The least number of timesteps $\downarrow$ required to achieve an FID around 6 (along with the corresponding FID).}
+\label{tab:minimum-timesteps}
+\vskip -0.1in
+\begin{small}
+\begin{sc}
+\setlength{\tabcolsep}{3.4pt}{
+\begin{tabular}{lrrrr}
+\toprule
+    Method & CIFAR10 & CelebA 64x64 & LSUN Bedroom & ImageNet 256x256 \\
+\midrule
+   DDPM & 90 (6.12) & $>$ 200 & 130 (6.06) & 21 (5.89) \\
+   DDIM & 30 (5.85) & $>$ 100 &  Best FID > 6 & 11 (5.58) \\
+   Improved DDPM & 45 (5.96) & Missing model & \textbf{90} (6.02) & 22 (6.08) \\
+   Analytic-DPM & 25 (5.81) & 55 (5.98) & 100 (6.05) & Missing model \\
+   NPR-DPM  & 1.002$\times$23 (5.76) & 1.013$\times$50 (6.04) & 1.021$\times$\textbf{90} (6.01) & Missing model \\
+   SN-DPM & 1.005$\times${17} (5.81) & 1.019$\times${22} (5.96) &  1.114$\times$92 (6.02) & Missing model \\
+    \rowcolor{gray!20}
+    \cellcolor{white}OCM-DPM (ours) & 1.003$\times$\textbf{16} (5.83) & 1.015$\times$\textbf{21} (5.94) & 1.112$\times$\textbf{90} (6.04) & 1.007$\times$\textbf{10} (5.33)\\
+\bottomrule
+\end{tabular}}
+\end{sc}
+\end{small}
+\end{table*}
+ As shown in \cref{tab:minimum-timesteps}, our method requires the fewest denoising steps in most settings.
+Moreover, 
+we emphasize that compared to recent advanced methods like SN-DPM and NPR-DPM, \textit{our approach is the only one that consistently delivers both competitive likelihood and FID}.
+\begin{table}[t]
+\centering
+\caption{FID score $\downarrow$ across various datasets using different sampling steps.}
+\label{tab:fid}
+\vskip -0.1in
+\begin{small}
+\begin{sc}
+\setlength{\tabcolsep}{2.4pt}{
+\begin{tabular}{lrrrrrrrrrrrr}
+\toprule
+& \multicolumn{6}{c}{CIFAR10 (LS)} & \multicolumn{6}{c}{CIFAR10 (CS)} \\
+\cmidrule(lr){2-7} \cmidrule(lr){8-13}
+\# timesteps $K$ & 
+10 & 25 & 50 & 100 & 200 & 1000 &
+10 & 25 & 50 & 100 & 200 & 1000 \\
+\midrule
+DDPM, $\tilde{\beta}$ & 
+44.45 & 21.83 & 15.21 & 10.94 & 8.23 & 5.11 & 
+34.76 & 16.18 & 11.11 & 8.38 & 6.66 & 4.92 \\
+DDPM, $\beta$ & 
+233.41 & 125.05 & 66.28 & 31.36 & 12.96 & \textbf{3.04} &
+205.31 & 84.71 & 37.35 & 14.81 & 5.74 & \textbf{3.34} \\
+A-DDPM & 
+34.26 & 11.60 & 7.25 & 5.40 & 4.01 & 4.03 &
+22.94 & 8.50 & 5.50 & 4.45 & 4.04 & 4.31 \\
+NPR-DDPM  & 
+32.35 & 10.55 & 6.18 & 4.52 & 3.57 & 4.10 &
+19.94 & 7.99 & 5.31 & 4.52 & 4.10 & 4.27 \\
+SN-DDPM &
+\textbf{24.06} & \textbf{6.91} & \textbf{4.63} & \textbf{3.67} & \textbf{3.31} & \underline{3.65} & 
+\underline{16.33} & \underline{6.05} & \underline{4.17} & \textbf{3.83} & \textbf{3.72} & 4.07 \\
+\rowcolor{gray!20}
+\cellcolor{white}OCM-DDPM & 
+\underline{24.94} & \underline{9.19} & \underline{5.95} & \underline{4.36} & \underline{3.48} & 3.98 & 
+\textbf{14.32} & \textbf{5.54} & \textbf{4.10} & \underline{3.84} & \underline{3.75} & \underline{4.18} \\
+\arrayrulecolor{black!30}\midrule
+DDIM & 
+21.31 & 10.70 & 7.74 & 6.08 & 5.07 & 4.13 &
+34.34 & 16.68 & 10.48 & 7.94 & 6.69 & 4.89 \\
+A-DDIM & 
+14.00 & 5.81 & 4.04 & 3.55 & 3.39 & 3.74 &
+26.43 & 9.96 & 6.02 & 4.88 & 4.92 & 4.66 \\
+NPR-DDIM  & 
+13.34 & 5.38 & 3.95 & 3.53 & 3.42 & \underline{3.72} &
+22.81 & 9.47 & 6.04 & 5.02 & 5.06 & 4.62 \\
+SN-DDIM & 
+\underline{12.19} & \textbf{4.28} & \textbf{3.39} & \textbf{3.23} & \textbf{3.22} & \textbf{3.65} &
+\underline{17.90} & \underline{7.36} & \underline{5.16} & \underline{4.63} & \underline{4.63} & \textbf{4.51} \\
+\rowcolor{gray!20}
+\cellcolor{white}OCM-DDIM & 
+\textbf{10.66} & \underline{4.35} & \underline{3.48} & \underline{3.27} & \underline{3.29} & 3.74 & 
+\textbf{16.70} & \textbf{6.71} &\textbf{4.72} & \textbf{4.30} & \textbf{4.54} & \underline{4.53} \\
+\arrayrulecolor{black}\midrule
+\end{tabular}}
+\setlength{\tabcolsep}{2.1pt}{
+\begin{tabular}{lrrrrrrrrrrrr}
+& \multicolumn{6}{c}{CelebA 64x64} & \multicolumn{6}{c}{ImageNet 64x64} \\
+\cmidrule(lr){2-7} \cmidrule(lr){8-13}
+\# timesteps $K$ & 
+10 & 25 & 50 & 100 & 200 & 1000 &
+25 & 50 & 100 & 200 & 400 & 4000 \\
+\midrule
+DDPM, $\tilde{\beta}$ & 
+36.69 & 24.46 & 18.96 & 14.31 & 10.48 & 5.95 & 
+29.21 & 21.71 & 19.12 & 17.81 & 17.48 & 16.55 \\
+DDPM, $\beta$ & 
+294.79 & 115.69 & 53.39 & 25.65 & 9.72 & \textbf{3.16} &
+170.28 & 83.86 & 45.04 & 28.39 & 21.38 & 16.38 \\
+A-DDPM & 
+28.99 & 16.01 & 11.23 & 8.08 & 6.51 & 5.21 &
+32.56 & 22.45 & 18.80 & 17.16 & 16.40 & 16.34 \\
+NPR-DDPM & 
+28.37 & 15.74 & 10.89 & 8.23 & 7.03 & 5.33 &
+28.27 & 20.89 & 18.06 & 16.96 & \textbf{16.32} & 16.38 \\
+SN-DDPM & 
+\textbf{20.60} & \textbf{12.00} & \textbf{7.88} & \textbf{5.89} & \textbf{5.02} & \underline{4.42} &
+\textbf{27.58} & \textbf{20.74} & \underline{18.04} & \textbf{16.61} & 16.37 & \textbf{16.22}
+\\
+\rowcolor{gray!20}
+\cellcolor{white}OCM-DDPM & 
+\underline{21.55} & \underline{12.71} & \underline{9.24} & \underline{6.97} & \underline{5.92} & 5.04 & 
+\underline{28.02} & \underline{20.81} & \textbf{17.98} & \underline{16.74} & \textbf{16.32} & \underline{16.31} \\
+\arrayrulecolor{black!30}\midrule
+DDIM & 
+20.54 & 13.45 & 9.33 & 6.60 & 4.96 & 3.40 &
+\underline{26.06} & 20.10 & 18.09 & 17.84 & 17.74 & 19.00 \\
+A-DDIM & 
+15.62 & 9.22 & 6.13 & 4.29 & 3.46 & 3.13 &
+\textbf{25.98} & \textbf{19.23} & 17.73 & 17.49 & 17.44 & 18.98 \\
+NPR-DDIM & 
+14.98 & 8.93 & 6.04 & 4.27 & 3.59 & 3.15 &
+28.84 & 19.62 & \underline{17.63} & \underline{17.42} & 17.30 & \underline{18.91} \\
+SN-DDIM &
+\textbf{10.20} & \textbf{5.48} & \textbf{3.83} & \textbf{3.04} & \textbf{2.85} & \textbf{2.90} &
+28.07 & \underline{19.38} & \textbf{17.53} & \textbf{17.23} & \textbf{17.23} & \textbf{18.89} \\
+\rowcolor{gray!20}
+\cellcolor{white}OCM-DDIM & 
+\underline{10.28} & \underline{5.72} & \underline{4.42} & \underline{3.54} & \underline{3.17} & \underline{3.03} & 
+28.28 & 19.62 & 17.71 & \underline{17.42} & \underline{17.26} & 19.02 \\
+\arrayrulecolor{black}\bottomrule
+\end{tabular}}
+\end{sc}
+\end{small}
+\end{table}
+
+
+
+\section{Related Work and Future Directions}
+
+In addition to the covariance estimation methods discussed in \cref{sec:related}, there are other approaches to accelerate sampling in diffusion models.
+One approach involves using faster numerical solvers for differential equations with continuous timesteps \citep{jolicoeur2021gotta,liu2022pseudo,lu2022dpm}. Another strategy, inspired by Schr{\"o}dinger bridge \citep{wang2021deep,de2021diffusion}, is to introduce a nonlinear, trainable forward diffusion process. Additionally, combining diffusion models with GANs enhances GAN sample quality while speeding up diffusion model sampling \citep{xiao2021tackling,wang2022diffusion}. 
+
+Recently, distillation techniques have gained popularity, achieving state-of-the-art in one-step generation \citep{zhou2024score}. There are two prominent types of distillation methods. The first is trajectory distillation~\citep{salimans2022progressive,berthelot2023tract,song2023consistency,heek2024multistep,kim2023consistency,li2024bidirectional}, which focuses on accelerating the process of solving differential equations. The second type involves distillation techniques that utilize a one-step implicit latent variable model as the student model~\citep{luo2024diff,salimans2024multistep,xie2024distillation,zhou2024score} and distills the diffusion process into the student model by minimizing the spread divergence family~\citep{zhang2020spread,zhang2019variational} through score estimation~\citep{poole2022dreamfusion,wang2024prolificdreamer}.
+
+Although these distillation methods typically offer faster generation speeds (fewer NFEs) compared to covariance estimation methods, they often lack tractable density or likelihood estimation. This presents a challenge for generative modeling applications where likelihood or density estimation is crucial. For example, in AI4Science problems involving energy-based data, accurate model density estimation is essential for enabling importance sampling to correct sample bias, as discussed in~\citep{zhang2024efficient,vargas2023denoising,chen2024diffusive, akhound2024iterated}. Another example is diffusion model-based data compression, where better likelihood corresponds to better compression rates~\citep{townsend2019practical,zhang2021out,ho2020denoising,kingma2021variational}. In these cases, the proposed OCM-DDPM can be used to provide better likelihood estimates, resulting in improved task performance. 
+Additionally, a recent paper~\citep{salimans2024multistep} shows how moment-matching improves distillation, achieving state-of-the-art diffusion quality with first-order matching. Our method could extend this to higher-order moment matching, potentially accelerating distillation training. We leave it as a promising direction for future work.
+
+Beyond image modelling, our method can be straightforwardly applied to accelerate large-scale video diffusion models \citep{blattmann2023stable,chen2023videocrafter1}, which are based on latent diffusion models. Furthermore, a recent study \citep{zhao2024identifying} shows that covariance estimation is crucial in addressing the image-leakage issue in image-to-video generation problems, which presents another important application of our method that we will explore in future work. 
+
+
+
+\section{Conclusion}
+
+ In this paper, we proposed a novel method for learning the optimal diagonal covariance of the denoising distribution, which offers improved accuracy compared to other covariance learning approaches. Our results demonstrate that enhanced covariance estimation leads to better generation quality and diversity, all while reducing the number of required generation steps. We validated the scalability of our method across different problem domains and scales. Additionally, we discussed its connection to various acceleration techniques and highlighted several promising application areas for future exploration.
+
+
+
+
+\clearpage
+
+

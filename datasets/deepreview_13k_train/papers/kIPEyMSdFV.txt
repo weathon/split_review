@@ -1,0 +1,565 @@
+\title{Reverse Diffusion Monte Carlo}
+
+\begin{abstract}
+We propose a Monte Carlo sampler from the reverse diffusion process.
+Unlike the practice of diffusion models, where the intermediary updates---the score functions---are learned with a neural network, we transform the score matching problem into a mean estimation one.
+By estimating the means of the regularized posterior distributions, we derive a novel Monte Carlo sampling algorithm called reverse diffusion Monte Carlo (rdMC), which is distinct from the Markov chain Monte Carlo (MCMC) methods. We determine the sample size from the error tolerance and the properties of the posterior distribution to yield an algorithm that can approximately sample the target distribution with any desired accuracy. Additionally, we demonstrate and prove under suitable conditions that sampling with rdMC can be significantly faster than that with MCMC. 
+For multi-modal target distributions such as those in Gaussian mixture models, rdMC greatly improves over the Langevin-style MCMC sampling methods both theoretically and in practice. 
+The proposed rdMC method offers a new perspective and solution beyond classical MCMC algorithms for the challenging complex distributions.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Recent success of diffusion models has shown great promise for the the reverse diffusion processes in generating samples from a complex distribution~\citep{song2020score,rombach2022high}.
+In the existing line of works, one is given samples from the target distribution and aims to generate more samples from the same target. 
+One would diffuse the target distribution into a standard normal one, and use score matching to learn the transitions between the consecutive intermediary distributions~\citep{ho2020denoising,song2020score}.
+Reversing the learned diffusion process leads us back to the target distribution.
+The benefit of the reverse diffusion process lies in the efficiency of convergence from any complex distribution to a normal one~\citep{chen2022sampling,lee2023convergence}.
+For example, diffusing a target multi-modal distribution into a normal one is not harder than diffusing a single mode.
+Backtracking the process from the normal distribution directly yields the desired multi-modal target.
+If one instead adopts the forward diffusion process from a normal distribution to the multi-modal one, there is the classical challenge of mixing among the modes, as illustrated in Figure ~\ref{fig:gmm_intro}.
+This observation motivates us to ask:
+\begin{center}
+{\it Can we create an efficient, general purpose Monte Carlo sampler from reverse diffusion processes?}
+\end{center}
+
+For Monte Carlo sampling, while we have access to an unnormalized density function $p_*(\vx)\propto\exp(-f_*(\vx))$, samples from the target distribution are unavailable~\citep{neal1993probabilistic,jerrum1996markov,robert1999monte}.
+As a result, we need a different and yet efficient method of score estimation to perform the reverse SDE.
+This leads to the first contribution of this paper.
+We leverage the fact that the diffusion process from our target distribution $p_*$ towards a standard normal one $p_{\infty}$ is an Ornstein-Uhlenbeck (OU) process, which admits explicit solutions.
+We thereby transform the score matching problem into a non-parametric mean estimation one, \emph{without} training a parameterized diffusion model.
+We name this new algorithm as  {\emph{reverse diffusion Monte Carlo} (\textsc{rdMC})}.
+
+To implement \textsc{rdMC} and solve the aforementioned mean estimation problem, we propose two approaches.
+One is to sample from a normal distribution $\rho_t$---determined at each time $t$ by the transition kernel of the OU process---then compute the mean estimates weighted by the target $p_*$.
+This approach translates all the computational challenge to the sample complexity in the importance sampling estimator.
+The iteration complexity required to achieve an overall $\epsilon$ TV accuracy is $O(\epsilon^{-2})$, under minimal assumptions.
+Another approach is to use Unadjusted Langevin Algorithm (ULA) to generate samples from the product distribution of the target density $p_*$ and the normal one $\rho_t$.
+This approach greatly reduces sample complexity in high dimensions, and yet is a better conditioned algorithm than ULA over $p_*$ due to the multiplication of the normal distribution.
+In our experiments, we find that a combination of the two approaches excels at distributions with multiple modes.
+
+We then analyze the efficacy and efficiency of our \textsc{rdMC} method.
+We study the benefits of the reverse diffusion approach for both  \emph{multi-modal distributions} and high dimensional heavy-tail distributions that \emph{breaks the isoperimetric properties}~\citep{gross1975logarithmic,poincare1890equations,vempala2019rapid}.
+In multi-modal distributions, the Langevin algorithm based MCMC approaches suffer from an exponential cost for the need of barrier crossing, which makes mixing time extremely long.
+The \textsc{rdMC} approach can circumvent the hurdle and solve the problem.
+For high-dimensional heavy-tail distributions, our \textsc{rdMC}  method circumvents the often-required isoperimetric properties of the target distributions, thereby avoiding the curse of dimensionality.
+\begin{figure}
+    \centering
+    \begin{tabular}{ccccc}
+          \includegraphics[width=2.35cm]{figs/gmm_forward_1.pdf} & \includegraphics[width=2.35cm]{figs/gmm_forward_2.pdf} & 
+          \includegraphics[width=2.35cm]{figs/gmm_forward_3.pdf} &
+             \includegraphics[width=2.35cm]{figs/gmm_forward_4.pdf} &
+          \includegraphics[width=2.35cm]{figs/gmm_forward_5.pdf} \\
+          \includegraphics[width=2.35cm]{figs/gmm_backward_1.pdf} &  
+      \includegraphics[width=2.35cm]{figs/gmm_backward_2.pdf} & \includegraphics[width=2.35cm]{figs/gmm_backward_3.pdf} & 
+          \includegraphics[width=2.35cm]{figs/gmm_backward_4.pdf} &
+          \includegraphics[width=2.35cm]{figs/gmm_backward_5.pdf} \\
+    \end{tabular}
+    \caption{ Langevin dynamics (first row) versus reverse SDE (second row). The first and second rows depict the intermediate states of the Langevin algorithm and the reverse SDE, respectively, illustrating the transition from a standard normal $p_0$ to a Gaussian mixture $p_*$. It can be observed that due to the local nature of the information contained in $\nabla \ln p_*$, the Langevin algorithm tends to get stuck in modes close to the initializations. In contrast, the reverse SDE excels at transporting particles to different modes proportional to the target densities.}
+    \label{fig:gmm_intro}
+\end{figure}
+
+
+\noindent\textbf{Contributions.} 
+{
+We propose a non-parametric sampling algorithm that leverages the reverse SDE of the OU process. 
+Our proposed approach involves estimating the score function by a mean estimation sub-problem for posteriors, enabling the efficient generation of samples through the reverse SDE.
+We focus on the complexity of the sub-problems and
+establish the convergence of our algorithm. We found that our approach effectively tackles sampling tasks with ill-conditioned log-Sobolev constants. For example, it excels in challenging scenarios characterized by multi-modal and long-tailed distributions.
+Our analysis sheds light on the varying complexity of the sub-problems at different time points, providing a fresh perspective for revisiting score estimation in diffusion-based models.
+}
+
+
+
+\section{Preliminaries}
+
+
+In this section, we begin by introducing related work from the perspectives of Markov Chain Monte Carlo (MCMC) and diffusion models, and we discuss the connection between these works and the present paper. 
+Next, we provide a notation for the reverse process of diffusion models, which specifies the stochastic differential equation (SDE) that particles follow in \textsc{rdMC}.
+
+We first introduce the related works as below.
+
+\noindent\textbf{Langevin-based MCMC.} The mainstream gradient-based sampling algorithms are mainly based on the continuous Langevin dynamics (LD) for sampling from a target distribution $p_*\propto \exp(-f_*)$.
+The Unadjusted Langevin Algorithm (ULA) discretizes LD using the Euler-Maruyama scheme and obtains a biased stationary distribution.
+Due to its simplicity, ULA is widely used in machine learning.
+Its convergence has been investigated for different criteria, including Total Variation (TV) distance, Wasserstein distances \citep{durmus2019high}, and Kullback-Leibler (KL) divergence \citep{dalalyan2017further, cheng2018convergence, ma2019sampling, freund2021convergence}, in different settings, such as strongly log-concave, log-Sobolev inequality (LSI) \citep{vempala2019rapid}, and Poincar\'e inequality (PI) \citep{chewi2021analysis}. 
+Several works have achieved acceleration convergence for ULA by decreasing the discretization error with higher-order SDE, e.g., underdamped Langevin dynamics \citep{cheng2018underdamped, ma2021there,mou2021high}, and aligning the discretized stationary distribution to the target $p_*$, e.g., Metropolis-adjusted Langevin algorithm \citep{dwivedi2018log} and proximal samplers \citep{lee2021structured,chen2022improved,chen2022improved,altschuler2023faster}. \cite{liu2016stein,dong2023particlebased} also attempt to perform sampling tasks with deterministic algorithms whose limiting ODE is derived from the Langevin dynamics.
+
+Regarding the convergence guarantees, most of these works have landscape assumptions for the target distribution $p_*$, e.g., strong log-concavity, LSI, or PI.
+For more general distributions, \citet{erdogdu2021convergence} and \citet{mousavi2023towards} consider KL convergence in modified LSI and weak PI.
+These extensions allow for slower tail-growth of negative log-density $f_*$, compared to the quadratic or even linear case.
+Although these works extend ULA to more general distributions, the computational burden of ill-conditioned isoperimetry still exists, e.g., exponentially dependent on the dimension \citep{raginsky2017non}.  
+In this paper, we introduce another SDE to guide the sampling algorithm, which is  non-Markovian and time-inhomogeneous.
+Our algorithm discretizes such an SDE and can reduce the isoperimetric and dimension dependence wrt TV convergence. 
+
+\noindent\textbf{Diffusion Models and Stochastic Localization.}
+In recent years, diffusion models have gained significant attention due to their ability to generate high-quality samples~\citep{ho2020denoising,rombach2022high}.
+The core idea of diffusion models is to parameterize the score, i.e., the gradient of the log-density, during the entire forward OU process from the target distribution $p_*$.
+In this condition, the reverse SDE is associated with the inference process in diffusion models to perform unnormalized sampling for intricate target distributions.
+Apart from conventional MCMC trajectories, the most desirable property of this process is that, if the score function can be well approximated, it can sample from a general distribution~\cite{chen2022sampling,lee2022convergence,lee2023convergence}.
+This implies the reverse SDE has a lower dependency on the isoperimetric requirement for the target distribution, which inspires the designs of new sampling algorithms. On the other hand, stochastic localization framework \citep{eldan2013thin,eldan2020taming,eldan2022analysis,el2022sampling,montanari2023sampling} formalizes the general reverse diffusion and discusses the relationship with current diffusion models.
+Along this line, \citet{montanari2023posterior} consider the unnormalized sampling for the symmetric spiked model. However, for the properties of the general unnormalized sampling,  the investigation is limited. 
+
+
+This work employs the backward path of diffusion models to design a sampling strategy which we can prove to be more effective than the forward path of Langevin algorithm under suitable conditions. Several other recent studies \citep{vargas2023denoising,berner2022optimal,zhang2023diffusion,vargas2023expressiveness,vargas2023bayesian} 
+have also utilized the diffusion path in their posterior samplers. 
+Instead of the closed form MC sampling approach, the above works learns an approximate score function via a parametrized model, following the standard practice of the diffusion generative models.
+The resulting approximate distribution following the backward diffusion path is akin to the ones obtained from variational inference, and contains errors that depend on the expressiveness of the parametric models for the score functions.
+ It remains open how to bound sample complexity of such approaches, due to the need for bounding the error of the learned score function along the entire trajectory.
+
+In contrast, \textsc{rdMC} proposed in this paper can be directly analyzed.
+Specifically, our algorithm draws samples from the unnormalized distribution without training data and the algorithm is designed to avoid learning based score function estimation.
+We are interested in the comparisons between \textsc{rdMC} and conventional MCMC algorithms.
+Thus, we analyze the complexity to estimate the score by drawing samples from the posterior distribution and found that our proposed algorithm is much more efficient in certain cases when the log-Sobolev constant of the target distribution is small. 
+
+
+\noindent\textbf{Reverse SDE in Diffusion Models.}
+In this part, we introduce the notations and formulation of the reverse SDE associated with the inference process in diffusion models, which will also be commonly used in the following sections. We begin with an OU process starting from $p_*$ formulated as
+
+\begin{equation}
+    \label{eq:ou_sde}
+    \der \vx_t = -\vx_t \der t + \sqrt{2}\der B_t,\quad \vx_0\sim p_0 \propto e^{-f_*},
+\end{equation}
+
+where $(B_t)_{t\ge 0}$ is Brownian motion and $p_0$ is assigned as $p_*$. 
+This is similar to the forward process of diffusion models~\citep{song2020score} whose stationary distribution is $\cN\left(\vzero,\mI\right)$ and
+we can track the random variable $\vx$ at time $t$ with density function $p_t$.
+
+According to \cite{cattiaux2021time}, under mild conditions in the following forward process
+$
+    \der \vx_t = b_t(\vx_t)\der t + \sqrt{2}\der B_t,
+$
+the reverse process also admits an SDE description. If we fix the terminal time $T>0$ and set
+$
+    \tilde{\vx}_t = \vx_{T-t},\ \mathrm{for}\ t\in[0, T],
+$
+ the process $(\tilde{\vx}_t)_{t\in[0,T]}$ satisfies the SDE
+$
+    \der \tilde{\vx}_t = \tilde{b}_t(\tilde{\vx}_t)\der t+ \sqrt{2} \der B_t,
+$
+where the reverse drift satisfies the relation
+$
+    b_t + \tilde{b}_{T-t} = 2 \grad \ln p_t,  \vx_t\sim p_t.$
+In this condition, the reverse process of Eq.~\eqref{eq:ou_sde} is as $
+   \der \tilde{\vx}_t = \left(\tilde{\vx}_t + 2\grad\ln p_{T-t}(\tilde{\vx}_t)\right)\der t +\sqrt{2} \der B_t, \tilde{\vx}_t\sim \tilde{p}_t.
+$
+Thus, once the score function $\nabla\ln p_{T-t}$ is obtained, the reverse SDE induce a sampling algorithm.
+
+\noindent\textbf{Discretization and realization of the reverse process. }
+To numerically solve the previous SDE, suppose $k\coloneqq \floor{t/\eta}$ for any $t\in[0,T]$, we approximate the score function $\grad\ln p_{T-t}$ with $\vv_{k}$ for $t\in [k\eta, (k+1)\eta]$. 
+This modification results in a new SDE, given by
+
+\begin{equation}
+    \label{sde:readl_prac_bps}
+    \der \tilde{\vx}_t = \left(\tilde{\vx}_t + \vv_k(\tilde{\vx}_{k\eta})\right)\der t + \sqrt{2} \der B_t, \quad t\in\left[k\eta, (k+1)\eta\right].
+\end{equation}
+
+Specifically, when $k=0$, we set $\tilde{\vx}_0$  to be sampled from $\tilde{p}_0$, which can approximate $p_T$.%the normal distribution $\cN\left(\vzero,\mI\right)$ \xunp{the initialization should be different, e.g., $p_T$ in mixture models}.
+To find the closed form of the solution by setting an auxiliary random variable as $\rvr_i\left(\tilde{\vx}_t,t\right)\coloneqq \tilde{\vx}_{t,i} e^{-t}$, we have
+
+{\footnotesize
+\begin{equation*}
+    \begin{aligned}
+        \der \rvr_i(\tilde{\vx}_t,t) = &\left(\frac{\partial \rvr_i}{\partial t} + \frac{\partial \rvr_i}{\partial \tilde{\vx}_{t,i}}\cdot \left[\vv_{k,i} + \tilde{\vx}_{t,i}\right] +   \Tr \left(\frac{\partial^2 \rvr_i}{\partial \tilde{\vx}_{t,i}^2}\right)\right)\der t + \frac{\partial \rvr_i}{\partial \tilde{\vx}_{t,i}}\cdot \sqrt{2} \der B_t\\
+        = & \vv_{k,i}e^{-t}\der t + \sqrt{2} e^{-t}\der B_t,
+    \end{aligned}
+\end{equation*}
+}
+
+where the equalities are derived by the It\^o's Lemma.
+Then, we set the initial value $\rvr_0(\tilde{\vx}_t,0)=\tilde{\vx}_{t,i}$, 
+and integral on both sides of the equation. We have
+
+\begin{equation}
+    \label{eq:par_update}
+    \begin{aligned}
+         \tilde{\vx}_{t+s} 
+         = e^{s}\tilde{\vx}_t + \left(e^{s}-1\right)\vv_k + \mathcal{N}\left(0,  \left(e^{2s}-1\right)\mI_d\right).
+    \end{aligned}
+\end{equation}
+
+For the specific construction of $\vv_k$ to approximate the score, we defer it to Section~\ref{sec:rdmc_imp}.
+
+
+
+
+
+
+\section{The Reverse Diffusion Monte Carlo Approach}
+
+\label{sec:rdmc_imp}
+
+As shown in SDE~\eqref{sde:readl_prac_bps}, we introduce an estimator $\vv_k\approx \grad_{\vx} \ln p_{T-t}(\vx)$ to implement the reverse diffusion. This section is dedicated to exploring viable estimators and the benefits of the reverse diffusion process.
+We found that we can reformulate the score as an expectation with the transition kernel of the forward OU process. We also derive the intuition that \textsc{rdMC} can reduce the isoperimetric dependence of the target distribution compared with conventional Langevin algorithm.
+Lastly, we introduce the detailed implementation of \textsc{rdMC} in real practice with different score estimators.
+
+\subsection{Score function is the expectation of the posterior}
+
+We start with the formulation of $\grad_{\vx} \ln p_{t}(\vx)$. 
+In general SDEs, the score functions $\grad\ln p_{t}$ do not have an analytic form.
+However, our forward process is an OU process (SDE~\eqref{eq:ou_sde}) whose transition kernel is given as {\footnotesize $p_{t|0}(\vx|\vx_0)= \left(2\pi \left(1-e^{-2t}\right)\right)^{-d/2}
+     \cdot \exp \left[\frac{-\left\|\vx -e^{-t}\vx_0 \right\|^2}{2\left(1-e^{-2t}\right)}\right].$}
+Such conditional density presents the probability of obtaining $\vx_{t}=\vx$ given $\vx_0$ in SDE~\eqref{eq:ou_sde}.
+Note that $p_t(\vx) = \EE_{p_0(\vx_0)} p_{t|0}(\vx|\vx_0)$, we can use the property to derive other score formulations.
+Bayes' theorem demonstrates that the score can be reformulated as an expectation by the following Lemma.
+\begin{lemma} \label{lem:reform}
+Assume that Eq.~\eqref{eq:ou_sde} defines the forward process. The score function can be rewritten as
+{\footnotesize
+\begin{equation}
+    \begin{aligned}
+        &\grad_{\vx} \ln p_{T-t}(\vx) =  \mathbb{E}_{\vx_0 \sim q_{T-t}(\cdot|\vx)}\frac{ e^{-(T-t)}\vx_0-\vx}{\left(1-e^{-2(T-t)}\right)},\\&q_{T-t}(\vx_0|\vx)  \propto \exp\left(-f_{*}(\vx_0)-\frac{\left\|\vx - e^{-(T-t)}\vx_0\right\|^2}{2\left(1-e^{-2(T-t)}\right)}\right).
+    \end{aligned}\label{eq:distribution_q}
+    \end{equation}}
+\end{lemma}
+
+For any \( t > 0 \), we observe that \( -\log q_{T-t} \) incorporates an additional quadratic term. In scenarios where \( p_* \) adheres to the log-Sobolev inequality (LSI), this term enhances \( q_{T-t} \)'s log-Sobolev (LSI) constant, thereby accelerating convergence. Conversely, with heavy-tailed \( p_* \) (where \( f_* \)'s growth is slower than a quadratic function), the extra term retains quadratic growth, yielding sub-Gaussian tails and log-Sobolev properties. Notably, as \( t \) approaches \( T \), the quadratic component becomes predominant, rendering \( q_{T-t} \) strongly log-concave and facilitating sampling.
+In summary, every \( q_{T-t} \) exhibits a larger LSI constant than \( p_* \). As \( t \) increases, this constant grows, ultimately leading \( q_{T-t} \) towards strong convexity. Consequently, this provides a sequence of distributions with LSI constants surpassing those of \( p_* \), enabling efficient score estimation for \( \nabla\ln p_{T-t} \). }
+ 
+From Lemma \ref{lem:reform}, the expectation formula of  $q_{T-t}(\cdot|\vx)$ can be obtained by empirical mean estimator with sufficient samples from $q_{T-t}(\cdot|\vx)$.
+Thus, the gradient complexity required in this sampling subproblem becomes the bottleneck of our algorithm. 
+Suppose $\{\vx_k^{(i)}\}$ is samples drawn from $q_{T-k\eta}(\cdot|\vx)$ when $\tilde{\vx}_{k\eta}=\vx$ for any $\vx\in\R^d$, the construction of $\vv_k(\vx)$ in Eq.~\eqref{sde:readl_prac_bps} can be presented as
+\begin{equation}
+    \label{eq:construction_of_v}
+    \textstyle
+    \vv_k(\vx) = \frac{1}{n_k}\sum_{i=1}^{n_k}  \vv_k^{(i)}(\vx)\quad \mathrm{where}\quad \vv^{(i)}_k(\vx) =  2\left(1-e^{-2(T-k\eta)}\right)^{-1}\cdot \left(e^{-(T-k\eta)}{\vx^{(i)}_k} - \vx\right).
+\end{equation}
+\begin{algorithm}[t]
+    \caption{\textsc{rdMC}: reverse diffusion Monte Carlo }
+    \label{alg:bpsa}
+    \begin{algorithmic}[1]
+            \STATE {\bfseries Input:} Initial particle $\tilde{\vx}_0$ sampled from $\tilde{p}_0$, Terminal time $T$, Step size $\eta, \eta'$, Sample size $n$.%, Fine-grain iters $T_0$;
+            \FOR{$k = 0$ to $\lfloor T/\eta \rfloor-1$}
+                \STATE Set $\vv_k=\vzero$;
+                \STATE Create $n$ Monte Carlo  samples to estimate 
+                {\\\small ${\vv_k\approx\ } \mathbb{E}_{\vx \sim q_{T-t}}\left[-\frac{\tilde{\vx}_{k\eta} - e^{-(T-k\eta)}\vx}{\left(1-e^{-2(T-k\eta)}\right)}\right],\text{ where } q_{T-t}(\vx|\tilde{\vx}_{k\eta})  \propto \exp\left(-f_{*}(\vx)-\frac{\left\|\tilde{\vx}_{k\eta} - e^{-(T-k\eta)}\vx\right\|^2}{2\left(1-e^{-2(T-k\eta)}\right)}\right).$} \label{alg:inner_MC}
+                \STATE $\tilde{\vx}_{{(k+1)\eta}}=e^\eta\tilde{\vx}_{k\eta}+\left(e^\eta - 1\right)\vv_k +\xi \quad \text{where $\xi$ is sampled from }  \mathcal{N}\left(0,  \left(e^{2\eta}-1\right)\mI_d\right)$. \label{alg:rdMC_update}
+            \ENDFOR
+            \iffalse
+            \STATE $\vy_0 = \tilde{\vx}_{\lfloor T/\eta \rfloor \eta }$
+            \FOR{$k = 0$ to $T_1-1$}
+             \STATE $\vy_{k+1}=\vy_k-\eta'\nabla f_*(\vy_k) +\sqrt{2\eta'}\xi \quad \text{where $\xi$ is sampled from } \mathcal{N}\left(0,  \mI_d\right)$
+            \ENDFOR
+            \fi
+            \STATE {\bfseries Return: $ \tilde{\vx}_{\lfloor T/\eta \rfloor \eta}$} .
+    \end{algorithmic}
+\end{algorithm}
+
+
+\begin{figure}
+    \centering
+    \begin{tabular}{ccc}
+          \includegraphics[width=4.cm]{figs/p_t.pdf} & 
+          \includegraphics[width=4.cm]{figs/q_t.pdf} & \includegraphics[width=4.cm]{figs/log_sob.pdf}  \\
+    \end{tabular}
+    \caption{Illustrations of $p_t$, $q_t$, and their log-Sobolev (LSI) constants. The target distribution $p_*$ is a Gaussian mixture. We choose  $q_t(\cdot|x=0)$ for illustration.
+    As $t$ increases, the modes of $p_t$ collapse to zero rapidly, corresponding to an improving LSI constant. For $q_t$, the barrier height of $q_t$ remains small, resulting in a relatively large LSI constant as long as $T=O(1)$.
+    Thus initializing with $p_T$ and performing \textsc{rdMC} reduces computation complexity for multi-modal $p_*$.
+    }
+    \label{fig:log_sobolev}
+\end{figure}
+\subsection{Reverse SDE vs Langevin dynamics: Intuition}
+
+From Figure \ref{fig:gmm_intro}, we observe that the \textsc{rdMC} method deviates significantly from the conventional gradient-based MCMC techniques, such as Langevin dynamics. 
+It visualizes the paths from a Gaussian distribution to a mixture of Gaussian distributions.
+It can be observed that Langevin dynamics, being solely driven by the gradient information of the target density $p_*$, tends to get trapped in local regions, resulting in uneven sampling of the mixture of Gaussian distribution.  
+More precisely, $p_*$ admits a small LSI constant due to the separation of the modes \citep{ma2019sampling,schlichting2019poincare,menz2014poincare}. Consequently, the convergence of conventional MCMC methods becomes notably challenging in such scenarios \citep{tosh2014lower}.
+
+To better demonstrate the effect of our proposed SDE, 
+we compute the LSI constant estimates for $1$-$d$ case in Figure \ref{fig:log_sobolev}.
+Due to the shrinkage property of the forward process, the LSI constant of $p_t$ can be exponentially better than the original one.
+Meanwhile, for a $T=O(1)$, the LSI constant of $q_t$ is also well-behaved.
+In our algorithm, a well-conditioned LSI constant for both $p_T$ and $q_T$ reduces the computation overhead.
+Thus, we can choose a intermediate $T$ to connect those local modes and perform reverse SDE towards $p_*$. 
+\textsc{rdMC} can distribute samples more evenly across different modes and enjoy faster convergence in those challenging cases. %\xunp{The logic here is not very smooth. You may first say what conditions will cause a faster convergence rate, e.g., well-conditioned isoperimetry for both $p_t$ and $q_t$. Then, you can demonstrate that such well-conditioned isoperimetry can be achieved by choosing proper $T$.}
+ Moreover, if the growth rate of $-\log p_*$ is slower than the quadratic function (heavy tail), we can choose a large $T$ and use $p_\infty$ to estimate $p_T$. Then, all $-\log q_t$ have quadratic growth, which implies log-Sobolev property.
+These intuitions also explain why diffusion models excel in modeling complex distributions in high-dimensional spaces. We will provide the quantitative explanation in Section \ref{sec:exp}.
+
+\subsection{Algorithms for score estimation with $q_{T-t}(\cdot|x)$}
+\label{sec:score}
+
+According to the expectation form of scores shown in Lemma~\ref{lem:reform}, a detailed reverse sampling algorithm can be naturally proposed in Algorithm~\ref{alg:bpsa}.
+Specifically, it can be summarized as the following steps: (1) choose proper $T$ and $\tilde{p}_0$ such that $p_T\approx\tilde{p}_0$
+(4) repeat until $t\approx T$. After (4), we can also perform Langevin algorithm to fine-tune the steps when the gradient complexity limit is not reached.
+
+The key of implementing Algorithm~\ref{alg:bpsa} is to estimate the scores $\grad \ln p_{T-t}$ via Step~\ref{alg:inner_MC} with samples from $q_{T-t}$.
+In what follows, we discuss the implementation that combines the importance weight sampling with the adjusted Langevin algorithm (ULA).
+
+\noindent\textbf{Importance weighted score estimator.}
+We first consider importance sampling approach for estimating the score $\grad\ln p_{T-t}$.
+From Eq.~\eqref{eq:distribution_q}, we know that the key is to estimate:
+{\footnotesize
+\begin{align*}
+&\grad_{\vx} \ln p_{T-t}(\vx) 
+= \mathbb{E}_{\vx_0 \sim q_{T-t}(\cdot|\vx)}\left[\frac{e^{-(T-t)}\vx_0 - \vx}{\left(1-e^{-2(T-t)}\right)}\right]
+= \frac{1}{Z_*} \mathbb{E}_{\vx_0 \sim \rho_{T-t}(\cdot|\vx)}\left[\frac{ e^{-(T-t)}\vx_0-\vx }{\left(1-e^{-2(T-t)}\right)} \cdot e^{-f_*(\vx_0)}\right],
+\end{align*}}
+and
+$
+Z_* = \mathbb{E}_{\vx_0 \sim \rho_{T-t}(\cdot|\vx)}\left[ \exp(-f_*(\vx_0))\right],
+$
+where 
+$
+\rho_{T-t}(\cdot|\vx) \propto \exp\left(\frac{-\left\|\vx - e^{-(T-t)}\vx_0\right\|^2}{2\left(1-e^{-2(T-t)}\right)}\right). 
+$  Note that sampling from $\rho_{T-t}$ takes negligible computation resource.
+The main challenge is the sample complexity of estimating the two expectations. %:$\mathbb{E}_{\vx_0 \sim \rho_{T-t}(\cdot|\vx)}\left[-\frac{\vx - e^{-(T-t)}\vx_0}{\left(1-e^{-2(T-t)}\right)} \cdot e^{-f_*(\vx_0)}\right]$ and $\mathbb{E}_{\vx_0 \sim \rho_{T-t}(\cdot|\vx)}[e^{-f_*(\vx_0)}]$
+
+Since $\rho_{T-t}(\vx_0|\vx)$ is Gaussian with variance $\sigma_t^2 = \frac{1-e^{-2(T-t)}}{e^{-2(T-t)}}$, we know that as long as $-\frac{\vx - e^{-(T-t)}\vx_0}{\left(1-e^{-2(T-t)}\right)} \cdot \exp(-f_*(\vx_0))$ is $G$-Lipschitz, the sample complexity scales as $N=\tilde{O}\left({\sigma_t^2} \frac{G^2}{\epsilon^2} \right)$ for the resulting errors of the two mean estimators to be less than $\epsilon$~\citep{wainwright2019high}. However, the sample size required of the importance sampling method to achieve an overall small error is known to scale exponentially with the KL divergence between $\rho_{T-t}$ and $q_{T-t}$~\citep{persi2018importancesampling}, which can depend on the dimension. 
+In our current formulation, this is due to the fact that the true denominator $Z_*=\mathbb{E}_{\vx_0 \sim \rho_{T-t}(\cdot|\vx)}[e^{-f_*(\vx_0)}]$ can be as little as $\exp(-d)$. 
+As a result, to make the overall score estimation error small, the error tolerance and in turn the sample size required for estimating $Z_*$ can scale exponentially with the dimension.
+
+\noindent\textbf{ULA score estimator.}
+An alternative score estimator considers that the mean of the underlying distribution $q^\prime_{T-t}(\cdot|\vx)$ of these samples needs to sufficiently approach $q_{T-t}(\cdot|\vx)$, which can be achieved by closing the gap of KL divergence or Wasserstein distance between $q^\prime_{T-t}(\cdot|\vx)$ and $q_{T-t}(\cdot|\vx)$.
+Since the additional quadratic term shown in Eq.~\eqref{eq:distribution_q} helps improve a quadratic tail growth for $q_{T-t}(\cdot|\vx)$, which implies the establishment of the isoperimetric condition.
+We expect the convergence can be achieved by performing the ULA on a sampling subproblem whose target distribution is $q_{T-t}(\cdot|\vx)$.
+We provide the detailed implementation in Algorithm~\ref{alg:inner}.
+\begin{algorithm}[t]
+    \caption{ULA inner-loop for the $q_t(\cdot|\vx)$ sampler (Step~\ref{alg:inner_MC} of Algorithm~\ref{alg:bpsa})}
+    \label{alg:inner}
+    \begin{algorithmic}[1]
+            \STATE {\bfseries Input:} Condition $\vx$ and time $t$, Sample size $n$, Initial particles $\{{\vx}^i_0\}_{i=1}^n$, Iters $K$, Step size $\eta$.
+            \FOR{$k = 1$ to $K$}
+            \FOR{$i = 1$ to $n$}
+            \STATE  {\small$\vx_k^i =\vx_{k-1}^{i} - \eta\left(\nabla f_*(\vx_{k-1}^{i})+ \frac{e^{-t}\left(e^{-t}\vx_{k-1}^i-\vx \right)}{1-e^{-2t}}\right) + \sqrt{2\eta}\xi_k$, where $\xi_k\sim\mathcal{N}\left(0,  \mI_d\right)$}
+            \ENDFOR
+        \ENDFOR
+        \STATE {\bfseries Return: $\{{\vx}^i_K\}_{i=1}^n$} .
+    \end{algorithmic}
+\end{algorithm}
+\noindent\textbf{ULA score estimator with importance sampling initialization.} 
+Inspired by the previous estimators, we can combine the importance sampling approach with the ULA.
+In particular, we first implement the importance sampling method to form a rough score estimator. We then perform ULA at the mean estimator and obtain a refined accurate score estimate. 
+Via this combination, we are able to efficiently obtain accurate score estimation by virtue of the ULA algorithm when $t$ is close to $T$. When $t$ is close to $0$, we are able to quickly obtain rough score estimates via the importance sampling approach.
+We discover empirically that this combination generally perform well when $t$ interpolates the two regimes (Figure \ref{fig:gmm_mmd} in Section~\ref{sec:exp}). 
+ 
+
+
+
+
+\section{Analyses and Examples of the rdMC Approach}
+
+\label{sec:exp}
+
+In this section, we analyze the overall complexity of the \textsc{rdMC} via ULA inner loop estimation. 
+Since the complexity of the importance sampling estimate is discussed in Section~\ref{sec:score}, we only consider Algorithm~\ref{alg:bpsa} with direct ULA sampling of $q_{T-t}(\cdot|\vx)$ rather than the smart importance sampling initialization to make our analysis clear.
+
+
+To provide the analysis of the convergence of \textsc{rdMC}, we make the following assumptions.
+    \item \label{ass:lips_score} For all $t\ge 0$, the score $\grad \ln p_{t}$ is $L$-Lipschitz.
+    \item \label{ass:second_moment} The second moment of the target distribution $p_*$ is upper bounded, i.e., $\mathbb{E}_{p_*}\left[\left\|\cdot\right\|^{2}\right]=m_2^2$.
+\end{enumerate}
+
+
+These assumptions are standard in diffusion analysis to guarantee the convergence to the target distribution~\citep{chen2022sampling}.
+Specifically, Assumption \ref{ass:lips_score} governs the smoothness characteristics of the forward process, which ensure the feasibility of numerical discretization methods used for approximating the solution of continuous SDE. 
+In addition, Assumption \ref{ass:second_moment} introduces essential constraints on the moments of the target distribution. These constraints effectively prevent an excessive accumulation of probability mass in the tail region, thereby ensuring a more balanced and well-distributed target distribution. 
+
+
+
+
+\subsection{Outer loop complexity}
+According to Algorithm~\ref{alg:bpsa}, the overall gradient complexity depends on the number of outer loops $k$, as well as the complexity to achieve accurate score estimations (Line 5 in Algorithm~\ref{alg:bpsa}).
+When the score is well-approximated and satisfies $\E_{p_{T-k\eta}}\left[\left\|\vv_k - \grad\ln p_{T-k\eta}\right\|^2\right] \le \epsilon^2$,
+the overall error in TV distance, $\TVD(p_*, \tilde{p}_T)$, can be made $\tilde{\mathcal{O}}(\epsilon)$ by choosing a small $\eta$.
+Under this condition, the number of outer loops satisfies $k=\Omega(L^2 d\epsilon^{-2})$, which shares the same complexity as that in diffusion analysis~\citep{chen2022sampling,lee2022convergence,lee2023convergence}.
+Such a complexity of the score estimation oracles is independent of the log-Sobolev (LSI) constant of the target density $p_*$, which means that the isoperimetric dependence of \textsc{rdMC} is dominated by the subproblem of sampling from $q_{T-t}$. 
+Specifically, the following theorem demonstrates the conditions for achieving $\TVD(p_*,\tilde{p}_T)=\tilde{\mathcal{O}}(\epsilon)$.
+\begin{theorem}
+\label{thm:converge}
+For any $\epsilon>0$, assume that $\KL(p_T\Vert \tilde{p}_0)<\epsilon$ for some $T>0$, $\hat p$ as suggested in Algorithm \ref{alg:bpsa}, $\eta = C_1(d+m_2^2)^{-1}\epsilon^2$.
+    If the OU process induced by $p_*$ satisfies Assumption \ref{ass:lips_score}, \ref{ass:second_moment}, and $q_{T-k\eta}$ satisfies the log-Sobolev inequality (LSI) with constant $\mu_k$ ($k\eta\leq T$).
+    We set
+    \begin{equation}
+\label{eq:setting}
+    \begin{aligned}
+     n_k = 64Td\mu_k^{-1}\eta^{-3}\epsilon^{-2}\delta^{-1},\quad \mathcal{E}_k = 2^{-13}\cdot T^{-4} d^{-2}\mu_k^2\eta^8\epsilon^{4}\delta^{4}
+    \end{aligned}
+\end{equation}
+where $n_k$ is the number of samples to estimate the score, and $\mathcal{E}_k$ is the KL error tolerence for the inner loop. With probability at least
+$1-\delta$, 
+Algorithm \ref{alg:bpsa} converges in TV distance with $\tilde{\mathcal{O}}(\epsilon)$ error.
+\end{theorem}
+Therefore, the key points for the convergence of \textsc{rdMC} can be summarized as
+\begin{itemize}
+    \item  The LSI of target distributions of sampling subproblems, i.e., $q_{T-k\eta}$ is maintained.
+      \item  The initialization of the reverse process $\tilde{p}_0$ is sufficiently close to $p_T$.
+\end{itemize}
+\subsection{Overall computation complexity}
+In this section, we consider the overall computation complexity of \textsc{rdMC}.
+{Note that the LSI constants of $q_{T-k\eta}$ depend on the properties of $p_*$. 
+As a result we consider more specific assumptions that bound the LSI constants for $q_{T-k\eta}$. 
+In particular, we demonstrate the benefits of using $q_{T-k\eta}$ for targets $p_*$ with infinite or exponentially large LSI constants.
+Compared with ULA, \textsc{rdMC} improves the gradient complexity, due to the improved LSI constant of $q_{T-k\eta}$ over that of $p_*$ in finite $T$.
+Even for heavy-tailed $p_*$ that does not satisfy the Poincar\'e inequality, target distributions of sampling subproblems, i.e., $q_{T-k\eta}$, can still preserve the LSI property, which helps \textsc{rdMC} to alleviate the exponential dimension dependence of gradient complexity for achieving TV distance convergence.}
+
+{
+Specifically, Section \ref{sec:lsi} consider the case that the LSI constant of $p_*$ depend on the radius $R$ exponentially, which can usually be found in mixture models. Our proposed \textsc{rdMC} can reduce the exponent by a factor. Section \ref{sec:heavy} consider the case that $p_*$ is not LSI, but \textsc{rdMC} can create an LSI subproblem sequence which makes the dimension dependency polynomial.
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+We first provide an estimate for the LSI constant of $q_t$ under general Lipschitzness assumption~\ref{ass:lips_score}.
+
+\begin{lemma}\label{lem:log_sob1} Under \ref{ass:lips_score}, the LSI constant for $q_t$ in the  forward OU process is $\frac{e^{-2t}}{2 \left(1-e^{-2t}\right)}$ 
+when 
+$0\leq t\leq\frac{1}{2} \ln\left(1+\frac{1}{2L}\right)$.
+This estimation indicate that when quadratic term dominate the log-density of $q_t$, the log-Sobolev property is well-guaranteed. 
+\end{lemma}
+
+\subsubsection{Improving the LSI constant dependence for mixture models}\label{sec:lsi}
+Apart from Assumption \ref{ass:lips_score}, \ref{ass:second_moment}, we study the case where $p_*$ satisfies the following assumption:
+\begin{enumerate}[label=\textbf{[\Subscript{{\text{A}}}{\arabic*}]}]
+  \setcounter{enumi}{2}
+  \item \label{ass:convex_outside_ball} There exists $R>0$, such that  $f_*(\vx)$ is $m$-strongly convex when $\Vert \vx\Vert\geq R$.
+\end{enumerate}
+In this case, the target density $p_*$ admits an LSI constant which scales exponentially with the radius of the region of nonconvexity $R$, i.e., $\frac{m}{2}\exp(-16LR^2)$, as shown in~\citep{ma2019sampling}. 
+This implies that if we draw samples from $p_*$ with ULA, the gradient complexity will have exponential dependency with respect to $R^2$.
+However, in \textsc{rdMC} with suitable choices of $T=O(\log R)$ and $\tilde{p}_0$, the exponential dependency on $R$ is removed, which is a bottleneck for mixture models.  
+
+In the Proposition~\ref{prop:log_sob_exp} below, we select values of \(T\) and \(\tilde{p}_0\) to achieve the desired level of accuracy. Notably, Lemma \ref{lem:log_sob1} suggest that we can choose a $O(1)$ termination time to make the LSI constant of $q_t$ well-behehaved and $p_T$ is much simpler than $p_0$. {That is to say, \textsc{rdMC} can exhibit lower isoperimetric dependency compared to conventional MCMC techniques.} Thus,
+We find that the overall computation complexity of \textsc{rdMC} reduces the dependency on $R$.
+
+
+
+\begin{proposition}
+    \label{prop:log_sob_exp}
+    Assume that the OU process induced by $p_*$ satisfies \ref{ass:lips_score}, \ref{ass:second_moment}, \ref{ass:convex_outside_ball}. 
+    We estimate $p_T$ with $\tilde{p}_0$ by  ULA, where the iterations wrt LSI constant is $\Omega\left(m^{-1}\exp(16 LR^2 e^{-2T}-2T)\right)$.
+    For any $\epsilon>0$ and $T\leq \frac{1}{2}\ln\left(1+\frac{1}{2L}\right)$, the Algorithm \ref{alg:bpsa} from $\tilde{p}_0$ to target distribution convergence with a probability at least $1-\delta$ and total gradient complexity $\Omega\left(\mathrm{poly}(\epsilon,\delta)\right)$ independent of $R$.
+
+   
+\end{proposition}
+
+
+
+\noindent\emph{Example: Gaussian Mixture Model.} We consider an example that {\small$$p_*(x)\propto \exp\left(-\frac{1}{2}\Vert x\Vert^2\right)+
+\exp\left(-\frac{1}{2}\Vert x-y\Vert^2\right),\quad y\gg1.$$}
+
+The LSI constant is $\Theta(e^{-C_0\Vert y\Vert^2})$ \citep{ma2019sampling,schlichting2019poincare,menz2014poincare}, corresponding to the complexity of the target distribution.
+\citet{tosh2014lower} prove that the lower bound iteration complexity
+by MCMC-based algorithm to sample from the Gaussian mixture scales exponentially with the squared distance $\|y\|^2$ between the two modes: $\Omega(\exp(\Vert y\Vert^2/8))$.  Note that \textsc{rdMC} is not a type of conventional MCMC.
+
+The computation overhead of the outer-loop process does not depend on $y$.  For the inner-loop score estimation we can choose $T = \frac{1}{2}\log \frac{3}{2}$ to make the LSI constant of $q_t$ to be $O(1)$. We can perform ULA to initialize $p_T$, which reduces the barrier between modes significantly. 
+Specifically, the LSI constant of $p_T$ is $\Theta(e^{-C_0\Vert e^{-T}y\Vert^2})$, which improves the dependence on $\|y\|^2$ by a $e^{-2T} = \frac{2}{3}$ factor. 
+Since this factor is on the exponent, the reduction is exponential.
+
+
+Figure \ref{fig:gmm_mmd} is a demonstration for this example. We choose different $r$ to represent the change of $R$ in \ref{ass:convex_outside_ball}. We compare the convergence of Langevin Monte Carlo (LMC), Underdamped LMC (ULMC) and \textsc{rdMC} in terms of gradient complexity. As \( r \) increases, we find that LMC fails to converge within a limited time. ULMC, with the introduction of velocity, can alleviate this situation. Notably, our algorithm can still ensure fast mixing for large \( r \). The inner loop is initialized with importance sampling mean estimator.}
+
+
+\subsubsection{Improving the dimension dependence in heavy-tailed target distributions}\label{sec:heavy}
+\begin{figure}[t]
+    \centering
+    \small
+    \begin{tabular}{ccc}
+          \includegraphics[width=3.3cm]{figs/R_0.5_.pdf} & \includegraphics[width=3.3cm]{figs/R_1_.pdf} & 
+          \includegraphics[width=3.3cm]{figs/R_2_.pdf} \\
+          \includegraphics[width=3.3cm]{figs/r05_gmm.pdf} & \includegraphics[width=3.3cm]{figs/r1_gmm.pdf} & 
+          \includegraphics[width=3.3cm]{figs/r2_gmm.pdf} \\
+           $r=0.5$& $r=1.0$&$r=2.0$
+    \caption{Maximum Mean Discrepancy (MMD) convergence of LMC, ULMC, \textsc{rdMC}. \emph{First row} shows different target distributions, with increasing mode separation \( r \) and barrier heights, leading to reduced log-Sobolev (LSI) constants. \emph{Second row} displays the algorithms' convergence, revealing \textsc{rdMC}'s pronounced advantage convergence compared to ULMC/LMC, especially for large \( r \).%\textcolor{red}{Add a few sentences to explain the figure. Walk the readers through the figure: what do the top and bottom panels show etc.} 
+    }
+    \label{fig:gmm_mmd}
+\end{figure}
+In this subsection, we study the case where $p_*$ satisfies Assumption \ref{ass:lips_score}, \ref{ass:second_moment}, and
+\begin{enumerate}[label=\textbf{[\Subscript{{\text{A}}}{\arabic*}]}]
+  \setcounter{enumi}{3}
+  \item \label{ass:curve_outside_ball} For any $r>0$, we can find some $R(r)$ satisfying $f_*(\vx)+r\left\|\vx\right\|^2$ is convex for $\left\|\vx\right\|\ge R(r)$. Without loss of generality, we suppose $R(r) = c_R/r^n$ for some $n>0,c_R>0$.
+\end{enumerate}
+Assumption~\ref{ass:curve_outside_ball} can be considered as a soft version of \ref{ass:convex_outside_ball}.
+Specifically, it permits the tail growth of the negative log-density $f_*$ to be slower than quadratic functions.
+This encompasses certain target distributions that fall outside the constraints of LSI and PI. Furthermore, given that the additional quadratic term present in Eq.~\eqref{eq:distribution_q} dominates the tail, $q_{T-k\eta}$ satisfies LSI for all $t>0$.
+\begin{lemma}\label{lem:log_sob2} Under \ref{ass:lips_score}, \ref{ass:curve_outside_ball}, the LSI constant for $q_t$ in the forward OU process is $\frac{e^{-2t}}{6(1-e^{-2t})}\cdot e^{-16\cdot 3L\cdot R^2\left(\frac{e^{-2t}}{6(1-e^{-2t})}\right)}$ 
+for any 
+$ t\geq 0$.
+The tail property guarantees a uniform LSI constant.
+\end{lemma}
+The uniform bound on the LSI constant enables us to estimate the score for any $p_t$.
+We can consider cases that are free from the constraints on the properties of $p_T$ and let $T$ be sufficiently large. 
+By setting $T$ at $\tilde{\mathcal{O}}(\ln 1/\epsilon)$ level, we can approximate $p_T$ with $p_\infty$ --- the stationary distribution of the forward process.
+Furthermore, since $q_{t}$ are log-Sobolev, we can perform \textsc{rdMC} to sample from heavy-tailed \(p^*\) in the absence of a log-Sobolev inequality.
+The explicit computational complexity of \textsc{rdMC}, needed to converge to any specified accuracy, is detailed in the subsequent proposition.
+\begin{proposition}
+    \label{thm:main_con}
+    Assume that the target distribution $p_*$ satisfies Assumption \ref{ass:lips_score}, \ref{ass:second_moment}, and \ref{ass:curve_outside_ball}. 
+    We take $p_\infty$ to be $\tilde{p}_0$.
+    For any $\epsilon>0$, by performing Algorithm \ref{alg:bpsa} with ULA inner loop and hyper-parameters in Theorem \ref{thm:converge}, with a probability at least $1-\delta$, we have  $\TVD\left(\tilde{p}_t, p_*\right) \le  \tilde{O}(\epsilon)$ with 
+    $\Omega\left(d^{18}\epsilon^{-16n-83}\delta^{-6}\exp\left(\epsilon^{-16n}\right)\right)$
+ gradient complexity.
+\end{proposition}
+
+\emph{Example: Potentials with Sub-Linear Tails.}
+We consider an example that {\small
+\begin{equation*}
+    p_*(x)\propto \exp\left(-\left(\Vert x\Vert^2+1\right)^a\right)\quad \mathrm{where}\quad a\in(0,0.5).
+\end{equation*}}    
+
+Lemma~\ref{ass_sublinear_tail} demonstrates that this $p_*$ satisfies Assumption~\ref{ass:curve_outside_ball} with $n=(2-2a)^{-1}\le 1$.
+Moreover, these target distributions with sub-linear tails also satisfy weak Poincare inequality (wPI) introduced in~\citet{mousavi2023towards}, in which the dimension dependence of ULA to achieve the convergence in TV distance is proven to be $\tilde{\Omega}(d^{4a^{-1}+3})$.
+Compared with this result, the complexity of \textsc{rdMC} shown in Proposition~\ref{thm:main_con} has a lower dimension dependence when $a\le 4/15$.
+
+
+
+
+
+
+
+
+
+\iffalse
+$$
+q_{T-t}(x_0|x) \propto \exp\left(\log \left(\exp\left(-\frac{1}{2\sigma^2}\Vert x_0\Vert^2\right)+
+\exp\left(-\frac{1}{2\sigma^2}\Vert x_0-y\Vert^2\right)\right)
+- \frac{\Vert x-e^{-(T-t)}x_0\Vert^2}{2(1-e^{-2(T-t)})}
+\right)
+$$
+The corresponding LSI constant is 
+$$
+\mu^{-1}_T \lesssim
+$$
+
+
+$$
+p_{T-t} = \left(\exp\left(-\frac{1}{2(1-(1-\sigma^2)e^{-2(T-t)})}\Vert   x\Vert^2\right)+
+\exp\left(-\frac{1}{2(1-(1-\sigma^2)e^{-2(T-t)})}\Vert  x-ye^{-(T-t)}\Vert^2\right)\right) 
+$$
+The corresponding LSI constant is 
+$$
+\nu_T^{-1}\lesssim \exp\left(
+\frac{e^{-2T}\Vert y\Vert^2}{1-(1-\sigma^2)e^{-2T}}
+\right)\leq 
+\exp\left(
+\frac{e^{-2T}\Vert y\Vert^2}{1-e^{-2T}}
+\right)
+$$
+\fi
+
+
+
+\noindent\textbf{Conclusion.} This paper presents a novel sampling algorithm based on the reverse SDE of the OU process. The algorithm efficiently generates samples by utilizing the mean estimation of a sub-problem to estimate the score function. It demonstrates convergence in terms of total variation distance and proves efficacy in general sampling tasks with or without isoperimetric conditions. The algorithm exhibits lower isoperimetric dependency compared to conventional MCMC techniques, making it well-suited for multi-modal and high-dimensional challenging sampling. The analysis provides insights into the complexity of score estimation within the OU process, given the conditional posterior distribution.
+
+\clearpage
+\subsection*{Acknowledgements}
+The research is partially supported by the NSF awards: SCALE MoDL-2134209, CCF-2112665 (TILOS). 
+It is also supported in part by the DARPA AIE program, the U.S. Department of Energy, Office of Science, the Facebook Research Award, as well as CDC-RFA-FT-23-0069 from the CDC’s Center for Forecasting and Outbreak Analytics.
+
+
+
+
+

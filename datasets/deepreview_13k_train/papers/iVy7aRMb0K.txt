@@ -1,0 +1,785 @@
+\title{Mimetic Initialization Helps State Space Models Learn to Recall}
+
+\begin{abstract}
+Recent work has shown that state space models such as Mamba are significantly worse than Transformers on recall-based tasks due to the fact that their state size is constant with respect to their input sequence length.
+But in practice, state space models have fairly large state sizes, and we conjecture that they should be able to perform much better at these tasks than previously reported.
+We investigate whether their poor copying and recall performance could be due in part to training difficulties rather than fundamental capacity constraints.
+Based on observations of their ``attention'' maps, we propose a structured initialization technique that allows state space layers to more readily mimic self-attention. Across a variety of architecture settings, our initialization makes it substantially easier for Mamba to learn to copy and do associative recall from scratch.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+State Space Models (SSMs) show promise as a potential replacement for Transformers~\citep{vaswani2017attention}
+with substantially lower inference costs~\citep{mamba,mamba2}.
+While Transformer memory grows linearly with the input sequence length,
+SSMs use only a constant amount, compressing all the context into a fixed-size state.
+SSMs perform comparably to Transformers on a variety of common benchmarks.
+However, recent research has highlighted a set of tasks on which SSMs perform substantially worse than Transformers~\citep{empirical-mamba},
+particularly those involving copying or recall~\citep{copying, based}.
+This is perhaps unsurprising, as it is harder to recall from a compressed, fixed-size representation, particularly as its length grows.
+Nevertheless, SSMs use relatively large state sizes in practice, and we wonder if their
+poor performance on tasks such as copying could be due to training difficulties 
+rather than fundamental capacity constraints.
+We present a qualitative study of the failure modes of SSMs on the copying task.
+In particular, we inspect the time-dependent linear transformation matrix of Mamba layers,
+which is analogous to the attention map of self-attention layers.
+We compare these layers to their counterparts in self-attention/Mamba
+hybrid architectures that successfully learn to copy,
+and based on these comparisons,
+we propose a structured initialization
+technique that allows Mamba layers to more readily mimic self-attention.
+Our technique makes use of the fact that state space layers
+can be seen as a form of linear attention with a learnable, structured
+causal mask.
+We find evidence that such linear-attention-like Mamba layers arise
+naturally after large-scale pretraining, suggesting that this
+pattern may be fundamental to the recall abilities of SSMs.
+\textbf{The proposed mimetic initialization allows Mamba to quickly learn
+to copy and do associative recall on up to
+$\mathbf{4\times}$ longer strings}, and we show for the first
+time that \textbf{SSMs can achieve $\mathbf{2\times}$ length generalization} or more.
+Mimetic initialization is \textbf{essentially compute-free},
+but we show \textbf{it is comparable to pretraining}
+in allowing Mamba to learn to copy and recall.
+Our work helps to better understand
+the capacity of SSMs relative to Transformers in practice 
+and can assist in further studies of their capabilities,
+which may have been underestimated by previous research.
+\paragraph{Related work}
+
+Recently, \cite{copying} did a thorough investigation of the ability
+of state space models (in particular Mamba 1) to copy in comparison to Transformers.
+Their theoretical results demonstrate that SSMs with a fixed state size have fundamentally
+limited copying capacity,
+unlike Transformers which can strongly generalize. 
+Empirically, they find that Transformers (especially with their
+proposed custom position embeddings) vastly outperform
+SSMs on copying, both in terms of learning and length generalization.
+They note that in practice, SSMs may be better at copying than expected
+due to their relatively large state sizes, but do not observe very good
+copying performance in their experiments.
+Similarly, \cite{based} note that SSMs struggle on recall tasks
+due to their limited state size.
+They propose an effective
+intervention in the form of interleaved kernelized linear attention layers
+that boost recall performance.
+The second, improved version of the Mamba architecture improves upon
+associative recall ability, although the authors note that this task remains
+difficult for SSMs~\citep{mamba2}.
+Initialization has been important for SSMs since
+their introduction to deep sequence modeling by~\cite{s4};
+a structured initialization of the state matrix was crucial
+to the performance of these earlier time-invariant SSMs~\citep{gu2020hippo,gupta2022diagonal,gu2022parameterization,smith2023simplified}.
+Our work further demonstrates the importance of initialization for SSMs,
+taking inspiration from \emph{mimetic initialization}~\citep{mimetic,mimetic2},
+which uses pretrained models as case studies of good initialization.
+For example, previous work noted that self-attention layers in pretrained
+Vision Transformers may try to imitate the local mixing ability of convolutions,
+which is reflected in the correlations between query/key and value/projection weights;
+initializing weights with statistical structure that mimics this pattern
+greatly improved trainability.
+We follow a similar methodology to propose a novel mimetic initialization technique for state space layers
+based on our observations that (1) these layers can represent linear attention, which
+can improve recall and (2) they sometimes approximate linear attention in pretrained models.
+\begin{figure}
+    \centering
+    \begin{subfigure}[t]{\linewidth}
+        \includegraphics[width=\linewidth]{gfx/Visual-Plain-2.pdf}
+        \caption{Training a Mamba with default initialization to copy.}
+        \label{fig:mamba-fail}
+    \end{subfigure}
+    \begin{subfigure}[t]{\linewidth}
+        \includegraphics[width=\linewidth]{gfx/Visual-Mimetic-2.pdf}
+        \caption{Mamba with mimetic initialization learns to use its attention-like abilities.}
+        \label{fig:mamba-success}
+    \end{subfigure}
+    \caption{Mambas initialized with our technique learn to copy more effectively
+    than those with default initialization. We see evidence of copying ability
+    in the Mamba attention maps; see \hll{Layer 1}.}
+    \label{fig:visual-4layer}
+\end{figure}
+
+
+
+\section{Preliminaries}
+
+
+\looseness=-1
+Recently, state space models have become popular as a choice
+of token mixing layer, \ie, as a replacement for self-attention.
+We refer to layers that use state space models for this purpose as \emph{state space layers}.
+As it is common in the literature, with a slight abuse of definitions, we refer to architectures like Mamba 1 \& 2 that use state space layers only for sequence mixing as \emph{state space models}.
+
+\paragraph{State space models} For a scalar sequence $x \in \Real{\Tokens}$, 
+SSMs are linear recurrences of the form
+\begin{equation}
+h_{\Tk+1} = \bar{A} h_{\Tk} + \bar{B} x_{\Tk},\quad y_{\Tk} = C h_{\Tk},
+\end{equation}
+where $h_{\Tk} \in \Real{\States}$ is a hidden state,
+and $\bar{A} \in \Rl{\States}{\States}$,
+$\bar{B} \in \Rl{\States}{1}$,
+$C \in \Rl{1}{\States}$
+are the state space model parameters.
+Traditionally, SSMs are continuous systems, and the bar notation
+refers to the \emph{discretized} form of parameters $A$ and $B$,
+which depend on the step size $\Delta$ that is used
+to sample an implicit underlying continuous signal $x_t = x(\Delta t)$.
+Typically,
+some structure is imposed on $A \in \Rl{\States}{\States}$,
+such as diagonal-plus-low-rank (S4), diagonal (Mamba), 
+or scalar-times-identity (Mamba 2).
+
+\looseness=-1
+In contrast, \emph{selective} SSMs such as the S6 layer in Mamba allow
+the parameters $\bar{A}_{\Tk}, \bar{B}_{\Tk}, C_\Tk$ to vary with time,
+\ie, depend on $x_{\Tk}$.
+The particular state space layer in Mamba operates on sequences of $\Channels$-dimensional tokens
+$X \in \Rl{\Channels}{\Tokens}$. Indexing tokens with $t$ and \emph{channels} with d, it computes 
+\begin{equation}
+h_{(\Tk+1),\Ch} = \bar{A}_{\Tk d} h_{\Tk \Ch} + \bar{B}_{\Tk \Ch} X_{\Tk \Ch},\quad y_{\Tk \Ch} = C_{\Tk} h_{\Tk \Ch},
+\end{equation}
+where $\bar{A}_{\Tk d}, \bar{B}_{\Tk d}, C_{\Tk}$
+depend on \emph{all} channels of input $x_t$, but with different discretization parameters $\Delta_{\Tk \Ch}$, hence the dependence of $\bar{A}_{\Tk d}$ and $\bar{B}_{\Tk d}$ on $d$.
+Define the underlying
+parameters $W_B, W_C \in \Rl{\States}{\Channels}$,
+and $A \in \Rl{\Channels}{\States}$.
+Let $W_\Delta \in \Rl{\Channels}{\Channels}$ be a rank-$r$ matrix,
+and bias $b_\Delta \in \Real{\Channels}$.
+Then the continuous state space model parameters are computed as $B_{\Tk} = W_B^T X_{:,\Tk}$ and  $C_{\Tk} = W_C^T X_{:,\Tk}$.
+The parameters of the discretized state space models are then computed as follows:
+\begin{equation}
+\Delta_{\Tk,\Ch} = \mathsf{softplus}(W_{\Delta \Ch}^T X_{:,\Tk} + b_{\Delta, \Ch}),\quad
+\bar{A}_{\Tk d} = \exp( A_{\Ch} \Delta_{\Tk,\Ch}),\quad
+\bar{B}_{\Tk d} = B_{\Tk} \Delta_{\Tk,\Ch}.
+\label{eq:discretization}
+\end{equation}
+Please refer to \cite{mamba2} for a more detailed discussion on selective SSMs.
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\linewidth]{gfx/Hybrid-Basic-All-2.pdf}
+    \caption{A hybrid Mamba architecture with one Self-Attention layer easily learns to copy. Dotted lines: performance on training length (50), solid: $2\times$ length generalization (100).}
+    \label{fig:copy-hybrid}
+\end{figure}   
+\paragraph{Matrix form of SSMs}
+The operations of Eq.~\ref{eq:discretization} can be written concisely in matrix form:
+\begin{align}
+    \Delta & \coloneqq \mathsf{softplus}\left( W_\Delta X + b_\Delta \right) &&\in \Rl{\Channels}{\Tokens} \label{eq:D}\\
+    \bar{B}_{\Ch} & \coloneqq W_B X \odot \mathbf{1}_{\St} \Delta_{\Ch} &&\in \Rl{\States}{\Tokens} \label{eq:Bc} \\
+    C & \coloneqq W_C X &&\in \Rl{\States}{\Tokens} \\
+    \bar{A}_{\Ch} & \coloneqq \exp \left( A_{\Ch}^T \Delta_{\Ch} \right) &&\in \Rl{\States}{\Tokens} \label{eq:Ac} 
+\end{align}
+As noted first by \cite{hidden}, the time-varying discrete recurrence $h_{\Tk+1} = \bar{A}_t h_{\Tk} + \bar{B}_t x_{\Tk},\ y_{\Tk} = C h_{\Tk}$ can be unrolled and viewed as a matrix operation.
+Namely, channel $d$ of the output of an SSM layer, denoted with $Y_{\Ch} \in \Real{\Tokens}$, can be written as $Y_{\Ch} \coloneqq M_{\Ch} X$, where $M_{\Ch} \in \Rl{\Tokens}{\Tokens}$ is a matrix transformation dependent on $d$.
+Each matrix $M_d$ represents a time-dependent linear transformation, much like
+attention maps in self-attention.
+For $i, j \in [\Tokens]$, the $M_d$ matrix of the Mamba state space layer for channel $\Ch$ can be expressed as follows, where $\mathbf{1}\{i \leq j\}$ 
+does causal masking:
+\begin{align}
+    M_{\Ch,i,j} = C_{:,i}^T \left( \Prod_{k = j + 1}^{i} \diag(\bar{A}_{\Ch,:,k})  \right) \bar{B}_{\Ch,:,j} \times \mathbf{1}\{i \leq j\}. \label{eq:Mc} 
+\end{align}
+Eq.~\ref{eq:Mc} can be viewed as a
+linear attention matrix computed from $\bar{B}$ and $C$
+with a learnable causal mask parameterized by $\bar{A}$~\citep{mamba2}.
+As it will be useful later, we note
+that in practice, $A$ is 
+parameterized as $A \coloneqq -\exp ( A_{\Slog} )$ with $A_{\Slog} \in \Rl{\Channels}{\States}$.
+The selective state space layer of Mamba 2 is broadly similar to that of Mamba 1;
+it follows equations \ref{eq:D}--\ref{eq:Ac}, but instead of having $\Channels$ different $A_\Ch$ and $\Delta_\Ch$, it has $\mathtt{H}$ independent $A$ and $\Delta$, each of which are repeated $\Channels / \mathtt{H}$ times to construct $A_\Ch$ and $\Delta_\Ch$.
+Each of these $\mathtt{H}$ independent $A$ are parameterized as scalar-times-identity matrices, resulting in just $H$ parameters.
+These $\mathtt{H}$ components correspond to ``heads'', 
+leading to only $\mathtt{H}$ unique $\bar{A}_\Ch$ and $\bar{B}_\Ch$ parameters, and only $\mathtt{H}$ ``attention matrices'' $M_d$ (\emph{c.f.} Eq.~\ref{eq:Mc}),
+as in multi-head attention.
+
+\looseness=-1
+\paragraph{Mamba architecture} Mamba 1 and 2 are prominent sequence modeling architectures that combine selective state space layers (as the sequence mixer) with more standard layers.
+We describe below the Mamba 1 block, and refer the reader to \citep{mamba2} for details on Mamba 2, which are not essential to our work.
+Omitting the final LayerNorm, the Mamba block is a composition of two sequence mixer layers (1D convolution and a selective SSM layer) a gated linear block:
+\begin{align}
+     W_3 \{ \mathtt{SSM}\left[ \sigma( \mathsf{DepthwiseConv1d}( W_1 X) ) \right] \odot \sigma( W_2 X) \} + X, \label{eq:Mamba}
+\end{align}
+where $\sigma$ is SiLU~\citep{hendrycks2016gaussian}.
+Mamba 2 simplifies this block, merging all projections into $W_1$.
+For both, the convolution layer before the 
+SSM will be considered in our initialization.
+
+
+\paragraph{Mamba attention maps}
+Throughout this work, we visually inspect $M_{\Ch}$
+to better understand the operation implemented by Mamba layers.
+However, it is infeasible to look at all $\Channels$ maps, and we instead
+visualize and report the average over channels
+$\tfrac{1}{\Channels} \sum_{\Ch=1}^{\Channels} M_\Ch $, which we hereafter refer to as the \emph{attention map} of a Mamba layer.
+In practice, the inter-channel variation in maps is relatively
+small, as the behavior of $M_{\Ch}$ is dominated
+by $\bar{B}_{\Ch}$ and $C$.
+We also sometimes find it useful to inspect
+the \emph{average attention mask}
+$\tfrac{1}{\Channels  \States} \sum_{\Ch=1}^{\Channels} \sum_{\St=1}^{\States} ( \Prod_{k = j + 1}^{i} \diag(\bar{A}_{\Ch,:,k}) )_{\St,\St}$
+to approximately determine the effective receptive field
+of the Mamba layer (\ie, how far into the past it can look).
+
+\paragraph{Copying task}
+Most of our experiments focus on copying, a simple
+task where SSMs are known to fall far behind Transformers.
+We train the model to predict the paste string given the copy string,
+emitting a stop token at completion.
+\begin{equation}
+    \underbrace{\mathtt{abcdefghijk}}_{\mathsf{copy\ string}}\quad \mathtt{|}\;\;\; \underbrace{\mathtt{abcde} \,\underline{\mathtt{?}}}_{\mathsf{paste\ string}} \cdots \square
+\end{equation}
+Since Transformers cache the whole sequence,
+it is easy for them to learn the task and to generalize
+far beyond the training length.
+However, since SSMs compress tokens into a fixed-size state,
+it is hard for them to store and decode back long sequences.
+We consider copying sequences of varying length and of different vocabulary size, drawing tokens uniformly at random.
+We also investigate \emph{stack-order} copying, 
+where the paste string needs to be generated in the reverse order.
+
+\paragraph{Multi-query associative recall}
+Another synthetic task that has been shown to be an important
+discriminator between Transformer and SSM abilities
+is multi-query associative recall,
+which tests models' ability to store and recall
+many key-value pairs.
+Transformers are well-suited for this task, as they can implement induction heads easily~\citep{olsson2022context}.
+\begin{equation}
+    \underbrace{\mathtt{a 1\ b 2\ c 3\ d 4}}_{\mathsf{key-value\ pairs}}\quad \mathtt{|}\;\;\; \underbrace{\mathtt{c 3\ b } \,\underline{\mathtt{?}}}_{\mathsf{queries}} \cdots \square
+\end{equation}
+Similarly to copying, we investigate length generalization
+on multi-query associative recall.
+In our implementation, each key may occur only once,
+\ie, it cannot be overwritten by later key/value pairs.
+
+
+
+\section{Initializing state space layers to be more like attention}
+
+
+To better understand why Mamba often fails to learn to copy, we start by examining a small model
+trained to copy 50-character strings.
+In Figure~\ref{fig:mamba-fail}, we can see that Mamba plateaus.
+Visual inspection of its attention maps reveals that it has probably failed to learn
+an interpretable copying operation.
+ 
+
+\paragraph{Attention enables copying}
+To explore what Mamba might be missing to allow it to copy,
+we trained a hybrid eight-layer Mamba whose fourth layer is single-head self-attention.
+As shown in Fig.~\ref{fig:copy-hybrid},
+this one layer enables perfect copying performance, both
+on in-distribution length-50 strings (dotted lines) and generalizing
+to length-100 strings (solid lines).
+The softmax attention head learns a sharp ``look-behind'' operation,
+constructing the paste string by directly attending to the copy string,
+likely exploiting an implicit position embedding learned by the preceding Mamba layers.
+We propose two initialization changes that allow state space layers
+to better use their state capacity.
+
+\paragraph{1. State space layers can be linear attention}
+While there is likely more than one way to learn to copy,
+we suspected that Mamba's copying ability is tied to its ability to represent
+a similar operation to the one in this self-attention layer.
+Notably, in Figure~\ref{fig:mamba-fail}, the Mamba layers tend to look only into the recent
+past, while the self-attention layer in Figure~\ref{fig:copy-hybrid} can attend all the way
+to the beginning of the string.
+While SSMs cannot look arbitrarily far into the past because of their fixed state size,
+even in the simplest time-invariant SSMs, 
+the amount of history stored in the state is controlled by the parameter $A$,
+whose initialization was crucial to the initial success of these models~\citep{s4}.
+
+\looseness=-1
+Consequently, we focus on the state matrix $A$, which controls the
+``receptive field'' of the state space layer.
+Note in Eq.~\ref{eq:Mc} that if $\bar{A}_{\Ch} \approx 1$,
+then $M_{\Ch,i,j} \approx C_{:,i}^T \bar{B}_{\Ch,:,j}$.
+That is, the state space layer's attention map resembles a product of \emph{queries} and \emph{keys}.
+The only inter-channel variation in this equation is 
+from $\Delta_{\Ch}$ in Eq.~\ref{eq:Bc},
+so that if $\Delta_{\Ch} \approx 1$ then 
+$\bar{B}_{\Ch} \approx W_B X$, which results
+in  $M = X^T W_C^T W_B X$, which is simple linear attention before applying
+the causal mask.
+Thus, if we set parameters so that
+$\Delta_{\Ch}, \bar{A}_{\Ch} = 1$,
+the state space transformation is the same for every channel,
+and it is simple (non-kernelized) linear attention
+with head dimension $\States$ and no value/projection matrices:
+\begin{equation}
+\Delta_{\Ch}, \bar{A}_{\Ch} \approx 1 \quad \Longrightarrow \quad  Y \approx X \cdot \Tril \left( X^T W_C^T W_B X \right) \in \Rl{\Channels}{\Tokens} \label{eq:lin-attn}.
+\end{equation}
+However, both $\bar{A}_{\Ch}$ and $\Delta_{\Ch}$
+are parameterized and input-dependent, so we cannot directly set them to one.
+We use details of the Mamba implementation: To make $\bar{A}_\Ch = \exp( A_{\Ch}^T \Delta_{\Ch} ) \approx 1$, we parameterize $A = -\exp ( -c A_{\Slog} )$, which is nearly 0 for large $c$, making $A_{\Ch}^T \Delta_{\Ch} \approx 0$ in Eq.~\ref{eq:Ac}.
+We choose $c$ from  $\{2, 4, 8\}$.
+We then set $W_\Delta \approx 0$ and $b_\Delta = \mathsf{softplus}^{-1}(1) \approx 0.54$
+in Eq.~\ref{eq:D} so $\Delta_\Ch \approx 1$. 
+\textbf{This makes the state space layer close to its linear attention counterpart at initialization.}
+
+\looseness=-1
+\paragraph{2. Correlated tokens should attend to each other}
+Having shown that state space layers can mimic
+linear attention,
+we now try to make them mimic attention layers that can copy,
+such as the one in Fig.~\ref{fig:copy-hybrid},
+which implements a look-behind operation.
+We focus on a single linear attention/state space layer,
+\emph{assuming} the layers before it learned a representation
+amenable to copying.
+Consider a copying example of length $n$, 
+where we have already copied $k < n$ 
+of the $\Channels$-dim. tokens past the delimiter 
+$x_{\parallel}$
+and want to copy the $(k+1)^{\mathsf{st}}$ one:
+$
+X = (x_1, \cdots, x_n, x_{\parallel}, x_1, \cdots, x_k) \in \Rl{(n+k+1)}{\Channels}
+$.
+We assume that preceding layers $f$ have learned to superimpose
+a position embedding as follows:
+$$
+f(X) = (x_1 + p_1, \cdots, x_n + p_n, x_{\parallel} + p_1, x_1 + p_2, \cdots, x_k + p_{k+1}) = X+P \in \Rl{(n+k+1)}{\Channels},
+$$
+so that token with index $k$ in the paste string
+will attend to token $k+1$ in the copy string
+because $(x_{i+1} + p_{i+1})^T(x_i + p_{i+1}) > 0$,
+assuming $x_{i+1}^T x_i, x_j^T p_j \approx 0$ (uncorrelated)
+and $p_{j}^Tp_{j} = 1$ (correlated).
+That is, $f(X)^Tf(X) \approx P^T P$ will
+have similar structure to that in Fig.~\ref{fig:copy-hybrid}.
+In this case, copying behavior will arise
+in our state space/linear attention layer if 
+$P^T W_C^T W_B P \approx P^T P$,
+\ie, when $W_C^T W_B \approx I$.
+Since $W_C, W_B$ are low rank ($\States < \Channels$), their product
+cannot be exactly the identity;
+using the fact that random Gaussian matrices are semi-orthogonal,
+we could set $W_C \coloneqq W_B$ to get $W_C^T W_B \approx I$.
+Initializing the queries and keys to be correlated
+was also noted by \citet{mimetic}, who suggest
+these weights should not be strictly equal,
+so we instead set $W_C \coloneqq \tfrac{1}{2}(W_C^\prime + W_B)$.
+In summary, assuming the model has learned a useful correlation
+structure between tokens, setting $W_C^T W_B \approx I$
+ensures this structure can be leveraged by attention.
+For similar reasons, we experiment with initializing the convolution
+in Mamba layers to the identity.
+\begin{figure}[t]
+    \centering
+    \includegraphics[height=5.5cm]{"gfx/InitParams-Mamba1-TestLen100.pdf.pdf"}
+    \includegraphics[height=5.5cm]{"gfx/InitParams-Mamba2-TestLen100.pdf.pdf"}
+    \includegraphics[height=5.5cm]{"gfx/InitParams-Mamba2-TestLen300.pdf.pdf"}
+    \caption{Testing the four components of our initialization on Mamba 1 \& 2 for 10 seeds.}
+  \label{fig:init-params}
+\end{figure}
+
+\begin{wraptable}[6]{r}[0pt]{3.5cm}
+    \centering
+    \scriptsize
+    \begin{tabular}{c|c}
+        \toprule
+        \makecell{Initialization} & Purpose \\
+        \midrule
+        $A\approx1$ & \multirowcell{2}{Approximate \\ linear attn} \\
+        $\Delta\approx1$  \\
+        \midrule
+        $W_C^T W_B \approx I$ & \multirowcell{2}{Encourage \\ recall}   \\
+        $\mathsf{Conv1d} \approx I$ \\
+        \bottomrule
+    \end{tabular}
+\end{wraptable}
+\paragraph{Which of these components matter?}
+In Fig.~\ref{fig:init-params}, we investigate the interaction of these
+four possible mimetic initialization components, displaying all sixteen possible
+off/on combinations. We investigate copying on 50-long strings and generalizing
+to 100- and 300-long strings for a 24-layer Mamba with hidden size 1024
+as in~\cite{copying}.
+For the $A$ and $\Delta$ initializations, we fix $c = 8$ and $b_\Delta = 0.54$.
+For Mamba 1, we see that there is only a significant effect when 
+setting $A \approx 1$,
+with no apparent benefit to setting $\Delta \approx 1$;
+while setting $W_C^T W_B \approx 1$ has only a tiny effect,
+using identity convolution initialization seems somewhat harmful.
+
+For Mamba 2, we see a similar 
+advantage to using $A \approx 1$ initialization,
+and a advantage to $W_C^T W_B \approx 1$
+even without $A \approx 1$,
+and the two interact to create even better models.
+Adding identity convolution initialization
+leads to much better performance still, reaching 100\% accuracy
+in many cases.
+The positive interaction between $A \approx 1$
+and $W_C^T W_B \approx 1$ and identity convolution
+is especially apparent for 300-long strings.
+
+The difference in the best initialization strategy
+for the two architectures is likely explained by
+the removal of linear blocks after the convolutional layer
+in Mamba 2, as well as the addition of multiple state space heads.
+Unless otherwise noted, we use the observations above
+to determine our initialization strategy depending on the Mamba version:
+For Mamba 1, we use $A, \Delta \approx 1, W_C^T W_B \approx I$,
+and for Mamba 2 we add identity convolution initialization.
+
+
+\section{State Space Models want to be Transformers:\\ Mimetic Initialization lets them get closer}
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\linewidth,trim={0 23 0 0}, clip]{gfx/Hybrid-Stack-All-2.pdf}
+    \includegraphics[width=0.9\linewidth,trim={0 23 0 0}, clip]{gfx/Hybrid-MQAR-All-2.pdf}
+    \includegraphics[width=0.9\linewidth]{gfx/Hybrid-Sort-All-2.pdf}
+
+     \caption{
+     Mimetic-initialized Mamba layers learn similar operations
+     to Self-Attention layers in the same location \emph{naturally} with no
+     additional supervision on several tasks. Dotted lines: accuracy at training length (50),
+     solid lines: generalizing to length 100.}
+    \label{fig:mimic-attn}
+\end{figure}
+
+Mimetic initialization leads to immediate and significant improvements
+in copying ability.
+In Fig.~\ref{fig:mamba-success}, we
+can see that mimetic initialization allows a small 4-layer Mamba
+to learn to copy strings with twice the training length with reasonable accuracy in just a few hundred steps,
+which is far better than the tens of thousands of steps reported in previous work~\citep{copying}.
+Note that mimetic initialization leads to Mamba learning
+a state space layer whose attention map replicates the structure of
+that of self-attention in Fig~\ref{fig:copy-hybrid};
+\ie, this layer has learned to (continue to) implement linear attention.
+\result{Mimetic initialization allows Mamba to quickly learn to copy from scratch.}
+
+\looseness=-1
+\paragraph{One mimetic init is all you need?}
+We continue our investigation of using mimetic initialization
+to help Mamba learn recall tasks:
+Given our observations that a single self-attention
+layer is sufficient to learn these tasks to high fidelity,
+and that a single Mamba layer can roughly approximate this
+attention, we use mimetic init for \emph{just one layer}
+in the same position (Layer 4) of an 8-layer Mamba.
+
+\looseness=-1
+In addition to copying (Fig.~\ref{fig:copy-hybrid}),
+we present results for additional three 
+synthetic tasks in
+Fig.~\ref{fig:mimic-attn}.
+First, we investigate copying in stack order, 
+as
+unpacking the compressed string in most-recently-added order
+is potentially easier for SSMs.
+Unlike normal copying, baseline Mamba is able to fit to the training length,
+but it fails to generalize.
+Mamba with mimetic init fits the training length much faster and generalizes better,
+while the self-attention hybrid generalizes nearly immediately.
+The story is similar for multi-query associative recall --
+mimetic initialization leads to rapid learning and generalization to twice the length.
+We also consider the sorting task, where tokens are sampled without replacement from a vocab of size 512.
+Surprisingly, Mamba with mimetic init does even better than self-attention.
+\result{Mimetic initialization results in large improvements for all synthetic tasks considered.}
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\linewidth]{gfx/LinearAttn-All.pdf}
+     \caption{Simple linear attention
+     underperforms Mamba even for very high head dimension,
+     especially at generalization.
+     Dotted lines: accuracy at length 100,
+     solid: at length 200; train length: 50.}
+    \label{fig:linear-attn} % TODO 
+\end{figure}
+\paragraph{Is Mamba with mimetic init \emph{just} linear attention?}
+In Figures~\ref{fig:copy-hybrid} \& \ref{fig:mimic-attn},
+notice that the mimetic initialized Mamba layer tends to mimic the
+corresponding self-attention layer in the hybrid model;
+the resemblance is clear for copying in normal and stack order.
+For associative recall, it is less clear, but the Mamba layer
+looks significantly more like it could implement a induction-head-like
+function than typical Mamba layers.
+Similarly, the interpretation is unclear for sorting, but the overall
+structure matches.
+At a high level, it seems like Mamba attempts to learn an approximation
+to self-attention, but has much less capacity and sharpness.
+Consequently, we ask if our initialization merely turns
+state space layers into single-head linear attention layers.
+
+In Figure~\ref{fig:linear-attn}, we present an ablation
+study where we replace the target Mamba layer in our copying experiment
+with simple causal linear attention with various head dimensions.
+According to Eq.~\ref{eq:lin-attn}, we may expect mimetic init
+to make Mamba layers equivalent to unkernelized linear attention layers
+with head dimension equal to the state dimension.
+Consequently, we compare Mamba with state size 32 to linear attention
+with head dimension 32, which comes relatively close.
+We plot generalization to $2\times$ and $4\times$-length in Fig.~\ref{fig:linear-attn},
+as the difference for fitting to the training length is small.
+Nonetheless, Mamba still performs somewhat better than linear attention.
+Linear attention performance depends on the head dimension,
+with dimension 8 severely underperforming Mamba and dimension 1024
+barely exceeding the performance of 32.
+In contrast, doubling the state dimension of Mamba to 64
+substantially improves generalization performance.
+We visualize the difference in attention maps for the two operations;
+we can see that Mamba's is perhaps sharper/more consistent like that of self-attention.
+Combined with better performance on copying, we conclude that mimetic init Mamba
+layers are not \emph{just} linear attention, but rather a related and superior
+(for this task) non-linear operation.
+The correlation between this ``sharpness'' and linear attention performance
+has been exploited by recent work~\citep{hedgehog}.
+
+
+
+\section{Further Experiments on Mimetic Initialization}
+
+
+Mimetic initialization improves the recall abilities of Mamba 1 and 2 over a variety
+of architecture settings and sequence lengths.
+For all Mamba 1 experiments, we use state size 32, though we explore
+different state sizes for Mamba 2, which has state size 128 unless otherwise noted.
+For Mamba 2, we use head dimension 64 for all experiments.
+All trials are for 5000 steps unless otherwise noted,
+and we swept over a small set of learning rates;
+our training pipeline is taken from~\cite{copying}.
+\emph{Note:} While mimetic initialization has a strong effect size for Mamba 1, the architecture
+generally struggles to copy for larger vocab sizes in the training lengths studied,
+so we present Mamba 2 results for most larger-scale experiments in the paper.
+Error bars are computed over five seeds.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[height=3.75cm]{gfx/new-things/Vocab-Search-Mamba1-100.pdf}
+    \includegraphics[height=3.75cm,trim={40 0 0 0},clip]{gfx/new-things/Vocab-Search-Mamba2-100.pdf}
+    \caption{Mamba 2 with mimetic init
+    can learn to copy even for large vocabulary sizes.}
+    \label{fig:vocab-sizes}
+\end{figure}
+
+
+\paragraph{Vocabulary sizes}
+The larger the vocabulary, the more bits it should take to encode 
+content of a token to enable copying, and the harder it may be to memorize and copy the sequence.
+While the previous work on copying focused on small vocabularies,
+we showcase the ability of mimetic init to improve copying even for large vocabularies
+in Fig.~\ref{fig:vocab-sizes}.
+For Mamba 1, mimetic init allows decent copying performance up until a point,
+and then degrades.
+In contrast, baseline never learns to generalize.
+For Mamba 2, mimetic init enables consistent $2\times$ length generalization
+across sequence lengths, preventing the degradation with  vocab size demonstrated by the baseline.
+\begin{figure}
+    \centering
+   \begin{subfigure}[t]{0.5\linewidth}
+        \includegraphics[height=3.5cm,trim={5 20 0 0},clip]{gfx/BetterGeneral-Mamba2-1024-4-VSize1024.pdf}
+        \caption{State size vs. evaluation length}
+        \label{fig:state-eval}
+    \end{subfigure}%
+    \hfill%
+    \begin{subfigure}[t]{0.45\linewidth}
+        \includegraphics[height=3.5cm,trim={0 30 0 5},clip]{gfx/new-things/best/2-StateVsGen999-Mamba2-1024-VS1024.pdf}
+        \caption{State size vs. max $>99\%$ gen. length }
+        \label{fig:state-bits}
+
+    \end{subfigure}
+   \caption{Mimetic initialization allows for better use
+        of the state size for copying; capacity grows roughly linearly with state size,
+        compared to almost not at all with default init.}
+\end{figure}
+\paragraph{State dimension}
+The copying ability of Mamba should be directly related to its state size,
+according to~\cite{copying}.
+This allows Mamba to more easily approximate self-attention-like maps,
+as we saw earlier.
+We show this is indeed the case in Fig.~\ref{fig:state-eval}.
+Indeed, for baseline Mamba 2, perfect copying at training length 50 is only possible for sufficiently large state size.
+However, if we use mimetic initialization,
+the additional capacity from the state size is much more efficiently used,
+and generalization (measured with the area under the curve) is far stronger --
+$\States=32$ with mimetic init achieves performance comparable to
+$\States=512$ with baseline init, a $16\times$ improvement in the use of capacity.
+We show another view on this data in Fig.~\ref{fig:state-bits};
+generalization length hardly grows with the log of the state size using baseline initialization,
+while \result{it grows linearly only after using mimetic initialization.}
+Mimetic init allows Mamba 2 to get closer to its true compression/copying capacity.
+
+\begin{figure}[t]
+    \centering
+     \includegraphics[width=0.85\textwidth,trim={0 30 0 0},clip]{gfx/arch/Horiz-Arch-Search-Mamba2-100-16.pdf}
+     \includegraphics[width=0.85\textwidth,trim={0 30 0 0},clip]{gfx/arch/Horiz-Arch-Search-Mamba2-300-16.pdf}
+     \includegraphics[width=0.85\textwidth]{"gfx/arch/Horiz-MQAR-Mamba2-Arch-200-1.pdf"}
+     \caption{Mimetic initialization vs. Mamba 1/2 architecture sizes.}
+     \label{fig:arch-copying}
+\end{figure}
+
+\paragraph{Architecture size}
+In Figure~\ref{fig:arch-copying}, we investigate
+mimetic init over different Mamba sizes (dimension, layers).
+Surprisingly, a mere two layers seems to be sufficient,
+with deeper networks improving generalization beyond $2\times$ length.
+With embedding size 1024, Mamba 2 can copy very well for a variety of depths;
+for multi-query associative recall, slightly deeper networks seem preferable.
+In almost all cases, mimetic initialization leads to superior generalization
+performance.
+\begin{figure}
+    \centering
+    \begin{subfigure}[t]{0.49\textwidth}
+        \centering
+         \includegraphics[width=0.85\textwidth,trim={0 40 0 0},clip]{gfx/updated/Final-copygraphs-traineqtest-str_loss.pdf}
+            \includegraphics[width=0.85\textwidth]{gfx/updated/Final-copygraphs-traineqtest.pdf}
+    \end{subfigure}%
+    \hfill%
+    \begin{subfigure}[t]{0.49\textwidth}
+        \centering
+        \includegraphics[width=0.85\textwidth,trim={0 40 0 0},clip]{gfx/new-things/best/Aspect2-MQAR-Lengths-VS8192-str_loss.pdf}
+        \includegraphics[width=0.85\textwidth]{gfx/new-things/best/Aspect2-MQAR-Lengths-VS8192-2x_len.pdf}
+    \end{subfigure}%
+    \caption{Mimetic init lets us nearly perfectly fit in-distribution
+    even for long sequences on copying (left) and MQAR (right),
+    and also boosts generalization performance (1024-dim 2-layer Mamba 2). }
+    \label{fig:seqlen}
+\end{figure}
+
+\looseness=-1
+\paragraph{Sequence length}
+Mimetic initialization lets us nearly perfectly fit to the training length
+even for longer strings for both copying and multiquery associative recall (Fig.~\ref{fig:seqlen}).
+While baseline tends to struggle to learn to copy even
+1000-long strings,
+mimetic initialization allows fitting to around 4000-long
+strings.
+For MQAR, baseline breaks down around 900-long
+strings, while mimetic initialization allows fitting to 1800-long or more.
+The benefits apply for better generalization as well,
+though Mamba still cannot strongly generalize to much longer strings than trained on.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\textwidth]{gfx/Pretrained-Exp-3.pdf}
+    \caption{Pretrained 768-dim. 24-layer Mamba 1 vs. from-scratch training (w/ mimetic init).}
+    \label{fig:pretrained}  
+\end{figure}
+
+\begin{figure}[t]
+    \begin{subfigure}[t]{0.45\textwidth}
+        \includegraphics[width=6.5cm]{gfx/Single-Pretrained-Init-2.pdf}
+        \caption{The weights of some pretrained Mamba layers serve as a good initialization
+        for copying, even when those weights are repeated uniformly for all layers in
+        the ``student'' model. The layers that work well as an initialization for copying
+        tend to have correlated $C$, $B$ weights and nearly-all-ones masks, such as Layer 31.}
+        \label{fig:teacher-init}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.5\textwidth}
+            \includegraphics[width=7cm]{gfx/Pretrained-Layer-31-2.pdf}
+            \includegraphics[width=7cm]{gfx/Pretrained-Layer-7-2.pdf}
+        \caption{Some pretrained Mamba layers have structure conducive to copying (Layer 31);
+        others merely mix tokens with their nearby neighbors;
+        from a 26-char test string.}
+        \label{fig:pretrained-structure}
+    \end{subfigure}
+    \caption{The copying ability of a pretrained Mamba may be attributable to a fraction of its layers.}
+    \label{fig:pretrained-prelim}
+\end{figure}
+
+
+
+\section{Comparing Mimetic Initialization to Pretraining}
+
+
+\looseness=-1
+\paragraph{Mimetic init mimics benefits of pretraining}
+We hypothesized that Mamba's difficulty in copying may be an optimization issue
+rather than fundamental capacity limitations.
+That is, a Mamba that was first pretrained on 
+a general text corpus
+may be a better representation of true copying abilities;
+\ie, one should never train from scratch~\citep{scratch}.
+In Fig.~\ref{fig:pretrained}, we see that finetuning a pretrained 130M
+Mamba to copy or do associative recall on 50-character strings
+results in good generalization, but
+training from scratch with
+mimetic init achieves similar results.
+Note that the pretrained Mamba had a much longer $(>1\text{k})$ training length
+than our from-scratch trials.
+Considering this, our mimetic init results
+get impressively close (esp. for shorter strings; dotted lines).
+
+\looseness=-1
+\paragraph{Localizing the benefit of pretrained weights}
+Based on our linear attention observations,
+the copying abilities of a pretrained Mamba may be localized to 
+a few layers, so we explore the capabilities of individual layers:
+We use a pretrained teacher Mamba with layers $T_i: i \in [L]$, and then train $L$ student Mambas
+where each of the $S_j: j \in [M]$ layers is initialized with $S_j \coloneq T_i$ for $i \in [L]$.
+In this case, $L = 48$ and $M = 12$.
+Using these pretrained weights can make it much easier to learn to copy (Fig.~\ref{fig:teacher-init}),
+but the effect size stands out for some particular layers, such as $T_{31}$.
+
+We inspected the weights and attention maps of these layers
+to see what might be behind the improved performance;
+see some examples in Fig.~\ref{fig:pretrained-structure}.
+Some layers such as $T_{31}$ look like our mimetic initialized layers,
+with nearly all-ones average attention masks, correlated $W_C, W_B$ weights,
+and lower diagonal structure, similarly to self-attention layers in hybrid
+Mambas earlier.
+That is, the structure our initialization provides
+seems to arise \emph{naturally} in Mambas trained on sufficiently large and varied corpora,
+and may be fundamental to Mamba's copying and recall abilities.
+
+
+\section{Conclusion}
+
+
+We presented mimetic initialization for state space layers,
+a simple and closed-form technique to greatly improve the copying and recall abilities
+of state space models.
+Mimetic initialization makes state space layers mimic linear attention
+at initialization time,
+and also mimics the structure of state space layers that contribute to copying and recall
+abilities in pretrained models.
+Our technique allows to estimate capabilities of SSMs more accurately, which have been alternatively over- and under-estimated in the literature~\citep{copying,empirical-mamba}.
+Using a better initialization such as ours may assist
+in developing new architectures starting from a smaller scale,
+allowing for better predictions of their full-scale performance,
+as is often done in practice in testbeds~\citep{mad}.
+From a theoretical perspective,
+our particular construction may provide insights into the tradeoffs between
+state space layers and attention,
+and may help to study the recall vs. non-recall capabilities of state space layers.
+Improving the ability of state space layers to approximate attention
+has already been noted in followup work to the original Mamba architecture~\citep{mamba2},
+and our initialization supports this concept.
+More broadly and together with previous work on mimetic initialization,
+our work helps to better understand pretraining,
+to some extent disentangling its dual purposes of storing knowledge and serving as a good initialization.
+
+
+\section{Reproducibility Statement}
+
+We have provided all the necessary details
+to reproduce our findings in the main text.
+All experiments were done with multiple
+random seeds, reporting the average and error bars.
+We swept learning rates over
+$\{0.001, 0.0005, 0.0001\}$.
+We used the code from \cite{copying},
+
+and used pretrained weights
+from \url{https://huggingface.co/state-spaces/mamba-130m}
+and \url{https://huggingface.co/state-spaces/mamba-370m}
+in some experiments.
+For multiquery associative recall,
+
+On two A100 GPUs, most training runs take
+around 30-60m to complete,
+with longer training times for very deep
+models or those trained on very long sequences.
+Source code will be released after publication.
+
+
+
+
+
+
+

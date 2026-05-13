@@ -1,0 +1,471 @@
+\title{Sparse Repellency for Shielded Generation in Text-to-Image Diffusion Models}
+
+\begin{abstract}
+The increased adoption of diffusion models in text-to-image generation has triggered concerns on their reliability.
+Such models are now closely scrutinized under the lens of various metrics, notably calibration, fairness, or compute efficiency.
+We focus in this work on two issues that arise when deploying these models: a lack of diversity when prompting images, and a tendency to recreate images from the training set.
+To solve both problems, we propose a method that coaxes the sampled trajectories of pretrained diffusion models to land on images that fall \textit{outside} of a reference set.
+We achieve this by adding \textit{repellency} terms to the diffusion SDE throughout the generation trajectory, which are triggered whenever the path is \textit{expected} to land too closely to an image in the \textit{shielded} reference set.
+Our method is \textit{sparse} in the sense that these repellency terms are zero and inactive most of the time, and even more so towards the end of the generation trajectory.
+Our method, named \textbf{SPELL} for \textit{sparse repellency}, can be used either with a static reference set that contains protected images, or dynamically, by updating the set at each timestep with the expected images concurrently generated within a batch.
+We show that adding SPELL to popular diffusion models improves their diversity while impacting their FID only marginally, and performs comparatively better than other recent training-free diversity methods. We also demonstrate how SPELL can ensure a shielded generation away from a very large set of protected images by considering all 1.2M images from ImageNet as the protected set.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+\begin{figure}[h!]
+\hspace{-2.2mm}  %
+\begin{tikzpicture}
+
+    \def\imgwidth{1.45cm}
+    \def\imgheight{1.45cm}
+    \def\xspacing{1.5cm} %
+    \def\yspacing{1.5cm} %
+
+    \node[anchor=south] at (1.5cm, 0.3cm) {\textbf{Stable Diffusion 3}}; 
+    \node[anchor=south] at (1.5cm, -0.2cm) {\textit{A close-up of an apple}}; 
+    \foreach \x in {0,1} {
+        \foreach \y in {0,1,2} {
+            \pgfmathtruncatemacro{\imageindex}{\x * 3 + \y}
+            \node at (\y*\xspacing, -\x*\yspacing-1cm) {\includegraphics[width=\imgwidth, height=\imgheight]{figs/sd3_\imageindex.jpg}};
+        }
+    }
+
+    \node[anchor=south] at (6.3cm, 0.24cm) {\textbf{Simple Diffusion}};
+    \node[anchor=south] at (6.3cm, -0.2cm) {\textit{The Eiffel Tower}};
+    \foreach \x in {0,1} {
+        \foreach \y in {0,1,2} {
+            \pgfmathtruncatemacro{\imageindex}{\x * 3 + \y}
+            \node at (4.8cm + \y*\xspacing, -\x*\yspacing-1cm) {\includegraphics[width=\imgwidth, height=\imgheight]{figs/simplediffusion_\imageindex.jpg}};
+        }
+    }
+
+    \node[anchor=south] at (11.1cm, 0.3cm) {\textbf{MDTv2}};
+    \node[anchor=south] at (11.1cm, -0.2cm) {\textit{ImageNet class 145}};
+    \foreach \x in {0,1} {
+        \foreach \y in {0,1,2} {
+            \pgfmathtruncatemacro{\imageindex}{\x * 3 + \y}
+            \node at (9.6cm + \y*\xspacing, -\x*\yspacing-1cm) {\includegraphics[width=\imgwidth, height=\imgheight]{figs/mdt_\imageindex.jpg}};
+        }
+    }
+
+    \node[anchor=south] at (1.5cm, -4.16cm) {\textbf{+ SPELL (Ours)}}; %
+    \foreach \x in {0,1} {
+        \foreach \y in {0,1,2} {
+            \pgfmathtruncatemacro{\imageindex}{\x * 3 + \y}
+            \node at (\y*\xspacing, -3.9cm-\x*\yspacing-1cm) {\includegraphics[width=\imgwidth, height=\imgheight]{figs/sd3_ours_\imageindex.jpg}};
+        }
+    }
+
+    \node[anchor=south] at (6.3cm, -4.16cm) {\textbf{+ SPELL (Ours)}}; %
+    \foreach \x in {0,1} {
+        \foreach \y in {0,1,2} {
+            \pgfmathtruncatemacro{\imageindex}{\x * 3 + \y} 
+            \node at (4.8cm + \y*\xspacing, -3.9cm-\x*\yspacing-1cm) {\includegraphics[width=\imgwidth, height=\imgheight]{figs/simplediffusion_ours_\imageindex.jpg}};
+        }
+    }
+
+    \node[anchor=south] at (11.1cm, -4.16cm) {\textbf{+ SPELL (Ours)}}; %
+    \foreach \x in {0,1} {
+        \foreach \y in {0,1,2} {
+            \pgfmathtruncatemacro{\imageindex}{\x * 3 + \y}
+            \node at (9.6cm + \y*\xspacing, -3.9cm-\x*\yspacing-1cm) {\includegraphics[width=\imgwidth, height=\imgheight]{figs/mdt_ours_\imageindex.jpg}};
+        }
+    }
+
+\end{tikzpicture}
+
+    \caption{SPELL interventions can change the diffusion trajectory of any pre-trained diffusion model, by self-avoiding other images generated within the same batch (here of size 6). SPELL achieves a higher intra-batch diversity using the same models, prompts and noise seeds.}
+    \label{fig:fig1}
+\end{figure}
+Diffusion models~\citep{song2021scorebased,NEURIPS2020_ho} are by now widely used for engineering and scientific tasks, to generate realistic signals~\citep{esser2024scaling} or structured data~\citep{jo2022score,pmlr-v139-chamberlain21a}.
+Diffusion models build upon a strong theoretical foundation used to guide parameter tuning~\citep{kingma2023understanding} and network architectures~\citep{rombach2022high}, and are widely adopted thanks to cutting-edge open-source implementations. %
+As these models gain applicability to a wide range of problems, their deployment reveals important challenges. In the specific area of text-to-image diffusion~\citep{nichol2022glide,saharia2022photorealistic}, these challenges can range from an expensive compute budget~\citep{salimansprogressive} to a lack of diversity~\citep{ho2022classifier,shipard2023diversity} and/or fairness~\citep{cho2023dall,shen2024finetuning}.
+
+\textbf{Controllable Generation.} We focus on the problem of ensuring that images obtained from a model are sufficiently different from a reference set. This covers two important use-cases: \textit{(i)} the purveyor of the model wants images generated with its model to fall \textit{outside} of a reference set of protected images; \textit{(ii)} the end-user wants high diversity when generating multiple images with the same prompt, in which case the reference set could consist of all previously generated images, or even other images generated concurrently in a batch.
+While the problem of avoiding generating images in a protected training set~\citep{carlini2023extracting} originates naturally when deploying products, that of achieving diversity within a batch of generated images with the same prompt should not arise, in theory, if diffusion models were perfectly trained. %
+However, as shown for instance by \citet{sadat2024cads}, state-of-the-art models that incorporate classifier-free guidance \citep[CFG]{ho2022classifier} do a very good job at outputting a first picture when provided with a prompt, but will typically resort to slight variations of that same image when re-prompted multiple times. This phenomenon is illustrated in \Cref{fig:fig1} for three popular diffusion models, Stable Diffusion 3 \citep{esser2024scaling}, Simple Diffusion \citep{hoogeboom2023simple} and MDTv2 \citep{gao2023mdtv2}. 
+
+\textbf{Contributions.} We propose a guidance mechanism coined \emph{sparse repellency} (SPELL), which repels the backward diffusion at generation time away from a reference set of images.
+\begin{itemize}[leftmargin=.3cm,itemsep=.05cm,topsep=0cm,parsep=2pt]
+\item The SPELL mechanism adjusts diffusion trajectories when the generation of an image is \textit{expected} to land close to a \textit{shielded} region (defined as balls around the latent representation of images in the reference set). These regions can be static or updated dynamically, when used to obtain diversity, by using the \textit{expectation} of other generation trajectories within the same batch. 
+\item SPELL interventions are sparse in that they only consider \textit{by design} very few active shielded images (typically one) in the reference set at each time $t$. They are \textit{future} looking in the sense that they are driven by geometric considerations on the \textit{expected} final generation output at time $0$, given position at time $t$, rather than on the position at time $t$ only as considered in~\citep{corso2024particle,zilberstein2024repulsive}. As a result, they are mostly active at the \textit{start} of the backward diffusion.
+\item We show that applying SPELL to numerous state-of-the-art open-sourced diffusion models leads to images that better reflect the diversity of the true data (see \Cref{fig:fig1}) with a marginal or even no increase in the Fréchet inception distance (FID) between geenrated images and training dataset.
+\item SPELL is simply parameterized by $r$, the shields' radius. We show that increasing $r$ increases accordingly the output's diversity, with a better diversity-precision trade-off than other recently proposed methods~\citep{sadat2024cads,corso2024particle,kynkaanniemi2024applying}.
+\item We showcase that SPELL can be scaled to a static reference set of millions of images, thanks to fast nearest-neigbor search tools. We use the whole ImageNet-1k %
+dataset as the protected reference set, and generate images that are novel, \textit{without} ever requiring to filter and/or regenerate images. 
+\end{itemize}
+
+
+
+\section{Background}
+
+\textbf{Diffusion Models,} also known as score-based generative models \citep{song2021scorebased, song2019generative, NEURIPS2020_ho}, enable sampling from data distribution $p_\textrm{data}$ on support $\mathcal{X}\subset\mathbb{R}^d$, such as an image dataset, by simulating the reverse stochastic differential equation (SDE) \citep{haussmann1986time, anderson1965iterative}, initialised from some easy to sample prior $p_1\in\mathcal{P}(\mathbb{R}^d)$:
+\begin{align}\label{eq:bwd_sde}
+    \mathrm{d}\mathbf{X}_t &= [f(t, \mathbf{X}_t) - g^2(t) \nabla \log p_t(\mathbf{X}_t)]\mathrm{d}t + g(t) \mathrm{d}B_t & \mathbf{X}_1 &\sim p_1, 
+\end{align}
+ where $(B_t)_t$ denotes Brownian motion and $p_t$ is defined as the density of $\mathbf{X}_t $ from forward process:
+\begin{align}\label{eq:fwd_sde}
+    \mathrm{d}\mathbf{X}_t &= f(t,\mathbf{X}_t)\mathrm{d}t + g(t) \mathrm{d}B_t & \mathbf{X}_0 &\sim p_0 := p_\textrm{data},
+\end{align}
+for drift $f: [0, 1] \times \mathcal{X} \rightarrow \mathcal{X}$ and diffusion scale $g: [0, 1] \rightarrow \mathbb{R}$, where the time $t$ is increasing in \eqref{eq:fwd_sde} and time decreasing in \eqref{eq:bwd_sde}. The score term $\nabla \log p_t(\mathbf{X}_t)$ is typically approximated by a neural network through denoising score matching \citep{vincent2011connection}.
+
+\textbf{Training.} The solution to forward diffusion in \eqref{eq:fwd_sde} for an affine drift is of the form $\mathbf{X}_t = \alpha_t\mathbf{X}_0 + \sigma_t \varepsilon$, where $\varepsilon \sim \mathcal{N}(\mathbf{0}, \mathbb{I})$ for some coefficients $\alpha_t \in \mathbb{R}$, $\sigma_t \in \mathbb{R}$ \citep{song2021scorebased, sarkka2019applied}. 
+The intractable score term may be expressed via denoiser using Tweedie's formula \citep{efron_tweedie, Robbins1956AnEB}: $\nabla \log p_t(x_t) = \frac{\alpha_t \mathbb{E}[\mathbf{X}_0|\mathbf{X}_t=x_t] -x_t}{\sigma_t^2}$.
+Hence rather than estimating the score directly, one may approximate $\mathbb{E}[\mathbf{X}_0|\mathbf{X}_t=x_t]$ via regression, by minimizing:
+\begin{equation}\label{eq:cond_training}
+    \theta^\star := \arg\min_{\theta} \mathbb{E}_{\mathbf{X}_t, \mathbf{X}_0}\|D_{\theta}(t,\mathbf{X}_t, y) -\mathbf{X}_0 \|^2
+\end{equation}
+known as \textit{mean}-prediction, for optional condition denoted $y$, then estimate the score via $\nabla \log p_t(x_t \mid y) \approx s_{\theta^\star}(t, x_t,y) := (\alpha_t D_{\theta^\star}(t,x_t, y) -x_t)/\sigma_t^2$. Notice that we do not train model parameters in this work, and will always assume that $\theta^\star$ is given by the purveyor of a model.
+
+\textbf{Conditioning and Guidance.} Conditional generation of diffusion generative models requires access to the conditional score $\nabla \log p_t(x_t \mid  y)$ for some condition $y$ such as text or label. It is typically approximated either with explicit conditioning during training of the score / denoising network using \eqref{eq:cond_training} or as post-hoc additional guidance term added to the score.
+Given diffusion models have lengthy training procedures, likely due to their high variance loss \citep{jeha2024variance}, it is desirable to guide diffusion models with inexpensive post-training guidance \citep{dhariwal2021diffusion, zhang2023adding, denker2024deft}, using e.g. classifier guidance \citep{dhariwal2021diffusion} %
+\begin{equation}
+    \nabla \log p_t(x_t \mid  y) =  \nabla \log p_t(x_t) + \gamma \nabla \log p_t(y \mid x_t)
+\end{equation}
+whereby the gradient $\nabla \log p(y \mid x_t)$ of classifier $p(y \mid x_t)$ for label $y$ is added to the score, heuristically multiplied by a scalar $\gamma \geq 1$ for increased guidance strength. Another approach which circumvents training a time-indexed classifier is using the approximation $p(y \mid x_t) \approx {p}(y|\mathbf{X}_0=D_{\theta^\star}(t,x_t))$, for a pretrained denoiser $D_{\theta^\star}$ alias Diffusion Posterior Sampling \citep{chungdiffusion}.
+
+\textbf{Classifier-Free Guidance and Lack of Diversity in text-to-image Diffusion Models.}
+Classifier-free guidance (CFG) \citep{ho2022classifier} is the dominant conditioning mechanism in text-to-image diffusion models, sharing properties with both explicit training and guidance. Similar to classifier guidance, CFG may be used to increase guidance strength but without resorting to approximating density $p(y \mid x_t)$. Instead, the difference $\nabla \log p(y \mid x_t)=\nabla \log p(x_t \mid y) - \nabla \log p_t(x_t)$ is used as a guidance term, where each term is approximated with the same conditional network: $\nabla \log p(x_t \mid y) \approx s_\theta(t, x_t, y)$ and $\nabla \log p(x_t) \approx s_\theta(t, x_t, \emptyset)$, for null condition $\emptyset$, trained as in \eqref{eq:cond_training}. Adding CFG to the unconditional score yields $\nabla \log p_t(x_t \mid  y) \approx \gamma s_\theta(t, x_t, y) - (\gamma-1) s_\theta(t, x_t, \emptyset)$.
+Despite its widespread popularity and good performance, CFG weighting is heuristic. It is not clear what final distribution is being generated; and practitioners observe a lack of diversity in generated samples~\citep{somepalli2023diffusion,chang2023muse,wang2024analysis}.  
+In order to combat the lack of diversity from CFG, \citet{corso2024particle} add to the score a repulsive interacting potential $\Phi$ evaluated on the whole batch, $(x^{(i)}_t)_i$, coined particle guidance: 
+$\nabla \log \Phi_t((x^{(i)}_t)_i)$. This repulsive potential is parameterised through a kernel as $\log \Phi_t((x^{(i)}_t)_i) = - \sum_{i,j} k_t(x_t^{(i)}, x_t^{(j)})$. They specifically study the Gaussian kernel, Green's function $k(x, y)\propto 1/ \|x- y\|^N$ or kernels combined with a feature extractor $e_\phi$ such as DINO \citep{caron2021emerging} $k_t(x, y)= k^e_t(e_\phi(x^{(i)}), e_\phi(y^{(j)}))$.
+
+\begin{figure}[t]
+    \centering
+    \!\!\!\includegraphics[width=1.04\textwidth]{figs/slides_SPELL3.pdf}
+    \caption{(a) At time $t$, we detect that the trajectory is headed (in expectation) into the shield of radius $r$ centered around $z_2$.
+    Namely, we can compute $\mathbb{E}[\mathbf{X}_0 \mid\mathbf{X}_t=x_t]$ using the pretrained denoiser evaluated on $x_t$, $D_{\theta^\star}(t,x_t)$ to predict where the trajectory will land.
+    Our sparse repellency (SPELL) term depicted as a black arrow adds a correction when generating $x_{t-\Delta t}^{\,}$ to ensure that the trajectory is pushed out of the shield. This is again in the case in the next step, when starting from $x_{t-
+    \Delta t}$. (b) In batched generation, the shields / repellency balls are dynamically recreated at every iteration around each trajectory's expected output. This prevents two elements in the batch, $x^{(1)}_t$ and $x^{(2)}_t$, from generating the same output thanks to corrections applied throughout their trajectory. (c) Both approaches can be combined to yield a diverse set of images, through intra-batch repellency, that won't fall into protected images and/or previously generated images.} 
+    \label{fig:overview}
+\end{figure}
+
+
+
+\section{Sparse Repellency}
+
+We propose a mechanism to sample from the data density $p_0$ having the important requirement that generated samples $\mathbf{X}_0\sim p_0$ are far enough from each element of the reference set of \textit{repellency} images $z_i \in \mathcal{X}, k=1, \dots, K$. That set may be populated by real-world protected images, samples generated in earlier batches to increase diversity, images expected to be generated by other trajectories in the current batch, or a mix of all these types. More formally, we wish to sample a conditioned trajectory $\mathbf{X}_t \mid (\mathbf{X}_0 \!\notin\! S)$, where $S$ is the collection of \textit{shields}, i.e. balls of radius $r>0$ around repellency images, $S := (\cup_k B_k)$ with ${B_k = \{ x \in \mathcal{X}\; :\; \|x-z_k\|_2\leq r\}}$. A blunt mechanism to guarantee generation outside of $S$ is to generate and discard: resample multiple times both initial noise and Brownian samples, follow the diffusion trajectory and repeat until a generated image falls outside of $S$. In the context of computationally expensive diffusion models, this would be wasteful and inefficient. We propose instead SPELL, a fairly simple approach that can be described from geometric principles and linked to DPS~\citep{chungdiffusion} and particle guidance~\cite{corso2024particle}.
+
+\textbf{A Geometric Interpretation of SPELL.}
+To ensure that generation falls outside of the shielded set $S$, our aim is to modify the diffusion trajectory at each time step, as presented in \Cref{fig:overview}, without having to discard any generation. To do so, we will rely at each time $t$ on the \textit{expected} final output of the diffusion $\mathbb{E}[\mathbf{X}_0 \mid\mathbf{X}_t=x_t]$ given current state $x_t$, as approximated by the diffusion network $D_{\theta^\star}(t,x_t)$. We correct the trajectory whenever that expected vector falls within a shield. 
+Using the notation $\hat{x}_0=D_{\theta^\star}(t,x_t)$, we 
+test whether for any index $k$ one has $\|\hat{x}_0-z_k\|_2<r$. If that is the case, the minimal modification $\delta$ that can ensure $\|\hat{x}_0+\delta-z_k\|_2\geq r$ is $$\delta_k(\hat{x}_0):=\frac{(\hat{x}_0-z_k)r}{\|\hat{x}_0-z_k\|_2} - (\hat{x}_0-z_k).$$
+Across all $k=1,\dots,K$, we modify the trajectory only for those $k$ that $\hat{x}_0$ is too close to, giving 
+\begin{equation}\label{eq:spell}
+\Delta = \sum_{k=1}^{K} \mathbf{1}_{\hat{x}_0\in B_k}\cdot\delta_k(\hat{x}_0) = \sum_{k=1}^{K}\relu\left(\frac{r}{\|\hat{x}_0 - z_k\|_2} - 1 \right) \cdot (\hat{x}_0 - z_k) \in\mathbb{R}^d
+\end{equation}
+where the set of indices $k$ that the ReLU is non-zero for at each individual timestep is usually very small. Under the assumption that all of their shields $B_k$ are disjoint, for example when the radius $r$ is small enough, this update strictly ensures that $\hat{x}_0+\Delta\notin S$. When shields overlap, we do not have such a guarantee. While more complicated projection operators might still yield exact updates in that case, they would involve the resolution of quadratic program. We take the view in this paper that $\Delta$ strikes a good balance between accuracy and simplicity. 
+
+\Cref{fig:overview}(a) visualizes the repellence mechanism away from protected images while \Cref{fig:overview}(b)  shows how it repels from trajectories within the same batch to enhance diversity. The batch generation produces $B$ samples $x^{(b)}_0$ in parallel and its repellency mechanism uses a time-evolving set of repellency points $z_{k,t}=\mathbb{E}[\mathbf{X}_0 \mid\mathbf{X}_t=x^{(k)}_t]$ corresponding to the currently predicted end-state of each sample in the batch. As we made no further assumptions on $z_k$, these mechanisms can be mixed as in \Cref{fig:overview}(c) to enable diverse generation across arbitrary numbers of batches. This makes it possible to generate large numbers of diverse images even when the VRAM for each batch is limited.  
+Note that SPELL is a post-hoc method that does not require retraining and can be applied to any diffusion score, in RGB space or latent space, unguided or classifier-free guided. \Cref{app:implementation} provides pseudo code and further implementation details.
+\textbf{SPELL as a DPS guidance term}.
+We propose to derive SPELL as a guidance mechanism that can be tightly related to Doob's $h$-transform. By Bayes' rule 
+$${\nabla_{x_t} \log p_t( x_t \mid x_0 \notin S) = \nabla_{x_t} \log p_t( x_t) + \nabla_{x_t} \log p_{0|t}(x_0\notin S\mid x_t)}.$$
+Hence, we may sample $\mathbf{X}_t\mid x_0 \notin S$ by adjusting a pretrained score function and simulating:
+\begin{align}\label{eq:adj_bwd}
+    \mathrm{d}\mathbf{X}_t = \left[f(t,\mathbf{X}_t) - g(t)^2 ( \nabla \log p_t( \mathbf{X}_t) + \nabla \log p_{0|t}(\mathbf{X}_0\notin S\mid x_t))\right]\mathrm{d}t + g(t) \mathrm{d}B_t .
+\end{align}
+The term $\log p_{0|t}(x_0\notin S\mid x_t)$ in the score adjustment is known as Doob's $h$ transform, and provides a broadly applicable approach to conditioning and guiding diffusions. Unfortunately, Doob's $h$ transform is generally intractable. We may however appeal to diffusion posterior sampling~\citep{chungdiffusion} and approximate $p_{0|t}$ as a Gaussian with mean $\hat{x}_0 \approx \mathbb{E}[\mathbf{X}_0\mid x_t]$, which is available from diffusion model pre-training, see \Cref{sec:background}. This approximation results in the following correction:
+\begin{align}
+    \nabla \log p_{0|t}(\mathbf{X}_0\notin S\mid x_t) \approx \sum_{k=1}^K \omega(||\hat{x}_0 - z_k||_2, r)\cdot (\hat{x}_0 - z_k),
+\end{align}
+where $\omega(\cdot, r)$ is a weighting factor detailed in \Cref{sec:doob} that decreases in its first variable. This DPS approximation is similar to SPELL in that both push away trajectories in the directions $(\hat{x}_0-z_k)$, weighted by a factor that depends on $r$ and the distance $\|\hat{x}_0-z_k\|_2$. The difference is that DPS based on Gaussians provides a soft guidance that slowly vanishes as $\hat{x}_0$ moves away from $z_k$, and not a hard guarantee that we respect the protection radii around each $z_k$. We have struggled in preliminary experiments to set hyperparameters of such "softer" DPS schemes, because the weight factor to scale the Gaussian by ultimately depends on the magnitude of the likelihood of the shields, which is unknown, and because the Gaussian's weight never becomes exactly zero, hindering sparsity. This is why we focus our attention on the simpler and much cheaper SPELL.
+
+\textbf{(Intra-batch) SPELL as Particle Guidance}. When used to promote diversity within the generation of a single batch, SPELL can be related to the self-interacting principle guidance (PG) proposed by \cite{corso2024particle}. That approach defines an interacting energy potential $\phi_t$ at time $t$, using the locations in space of all $B$ particles within a batch at time $t$. The gradient of that potential w.r.t. each particle, $\Delta^{(i)}=\nabla_{x^{(i)}_t} \log \Phi_t(x^{(1)}_t,\ldots, x^{(B)}_t)$ is then used to correct each individual trajectory to guarantee diversity. In contrast to this approach, SPELL draws insight on the expected \textit{future} locations of points, at the end of the trajectory, i.e on the \textit{expected denoised} images $\hat{x}_0^{(i)}$ and $\hat{x}_0^{(k)}$, where $\hat{x}_0=D_{\theta^\star}(t,x_t)$. Indeed, the correction for each particle is explicitly given as:  
+\begin{align}\label{eq:pg_interp}
+      \Delta^{(i)} := \sum_{k=1}^{K} \relu\left(\frac{r}{\|\hat{x}_0^{(i)} - \hat{x}_0^{(k)}\|_2} - 1 \right) \cdot (\hat{x}_0^{(i)} - \hat{x}_0^{(k)}).
+\end{align}
+ It is not clear yet whether the $B$ correction terms $\Delta^{(i)}$ considered by SPELL can be seen as the gradients of an interacting potential. While we can prove that $h(x)=\relu(\frac{r}{\|x\|}-1)x$ is indeed a conservative field (i.e.
+\textbf{Overcompensation}. While our method gives the exact weight required to land outside the shielded areas in \Cref{eq:pg_interp,eq:spell}, we have experimented with scaling these $\Delta$ terms by an \textit{overcompensation} multiplier $\lambda$. Intuitively, the larger that multiplier, the earlier the trajectory will be lead out of the shielded areas, with the possible downside of getting more hectic dynamics. We illustrate this addition in \Cref{fig:repellence_main} with a value $\lambda=1.6$, which we find to work favorably across multiple models.\looseness=-1
+
+
+
+
+\section{Experiments}
+
+
+We now show that SPELL increases the diversity of modern text-to-image and class-to-image diffusion models (\Cref{sec:sota}), with a better trade-off than other recent diversity methods (\Cref{sec:comparison}). We quantify the sparsity of SPELL interventions in \Cref{sec:ablation} and utilize it to scale up to using all 1.2 million ImageNet-1k train images as a shielded set in \Cref{sec:copyright}. 
+
+\subsection{Experimental Setup} \label{sec:setup}
+
+We add SPELL to both class-to-image and text-to-image diffusion models. In the class-to-image setup, we use Masked Diffusion Transformers (MDTv2) \citep{gao2023mdtv2}, EDMv2 \citep{Karras2024edm2}, and Stable Diffusion 3 Medium (SD3) \citep{esser2024scaling}. Since SD3 is a text-to-image model, we follow their template \textit{``a photo of a class\_name''}. We use the pretrained model checkpoints to generate 50,000 256x256 images of ImageNet-1k classes\citep{deng2009imagenet} without and with SPELL and compare them to the original ImageNet-1k images. We use the validation dataset as a comparison, since we will conduct experiments that repel from the training dataset in \Cref{sec:copyright}, which would render comparisons to the training dataset meaningless.
+
+In our text-to-image setup, we use SD3, Latent Diffusion \citep{rombach2022high}, and RGB-space Simple Diffusion \citep{song2021scorebased} in resolution 256x256. For the latter two, we use the checkpoints of \citet{gu2023matryoshka}. Details on hyperparameters are provided in \Cref{app:implementation}. We evaluate these models on CC12M \citep{changpinyo2021cc12m}. As we target the ground truth diversity of images related to each prompt, we select a subset of captions with multiple corresponding images. This gives a one-to-many setup with 5000 captions and 4 to 128 images each (in total 41,596 images). We explain the construction of this dataset in \Cref{app:cc12m}.
+
+\def\fddino{$\text{FD}_\text{DINOv2}$}
+\def\fddinoc{$\text{FD}_\text{DINOv2}^\text{cond}$}
+
+To evaluate diversity, we track the recall \citep{kynkaanniemi2019improved}, coverage \citep{ferjad2020icml}, and Vendi score \citep{friedman2023the}. To evaluate image quality, we use precision \citep{kynkaanniemi2019improved} and density \citep{ferjad2020icml}. We track these metrics per class/prompt and average across classes/prompts. To measure whether the generated images match the true image distributions, we use the marginal Fréchet Inception Distance (FID) \citep{heusel2017gans} and the more recent marginal Fréchet Distance with DINOv2 features (\fddino, \citet{stein2024exposing,oquab2024dinov}).
+
+
+\subsection{Benchmark} \label{sec:sota}
+\begin{table}[t]
+    \centering
+    \caption{SPELL improves the diversity of text-to-image and class-to-image diffusion models considerably, at only a small trade-off in terms of precision. The results are reported as mean $\pm$ std, computed over 5 independent runs with different seeds over the full dataset.}
+    \label{tab:benchmark}
+    \small
+    \resizebox{\textwidth}{!}{
+    \begin{tabular}{llccccccc}
+    \toprule
+         Model & Setup & $\text{Recall}$ $\uparrow$& $\text{Vendi}$ $\uparrow$& $\text{Coverage}$ $\uparrow$& $\text{Precision}$ $\uparrow$ & $\text{Density}$ $\uparrow$& FID $\downarrow$ & \fddino{} $\downarrow$ \\
+         \midrule
+         Latent Diffusion & text-to-image & 0.236 $\pm$ 0.003 & 2.527 $\pm$ 0.005 & 0.447 $\pm$ 0.001 & \textbf{0.559} $\pm$ 0.000 & \textbf{0.768} $\pm$ 0.002 & \textbf{9.501} $\pm$ 0.024 & 106.244 $\pm$ 0.384\\
+        + SPELL (Ours) & text-to-image & \textbf{0.289} $\pm$ 0.003 & \textbf{2.695} $\pm$ 0.002 & \textbf{0.457} $\pm$ 0.001 & 0.551 $\pm$ 0.001 & 0.745 $\pm$ 0.002 & 9.554 $\pm$ 0.043 & \textbf{98.761} $\pm$ 0.441\\
+        \midrule
+        SD3-Medium & text-to-image & 0.379 $\pm$ 0.004 & 3.749 $\pm$ 0.005 & \textbf{0.294} $\pm$ 0.000 & \textbf{0.313} $\pm$ 0.001 & \textbf{0.345} $\pm$ 0.001 & \textbf{20.103} $\pm$ 0.090 & \textbf{230.248} $\pm$ 0.812\\
+        + SPELL (Ours) & text-to-image & \textbf{0.483} $\pm$ 0.002 & \textbf{4.711} $\pm$ 0.013 & 0.229 $\pm$ 0.001 & 0.211 $\pm$ 0.002 & 0.213 $\pm$ 0.002 & 35.174 $\pm$ 0.153 & 482.246 $\pm$ 0.948\\
+        \midrule
+        Simple Diffusion & text-to-image & 0.230 $\pm$ 0.003 & 2.799 $\pm$ 0.006 & 0.355 $\pm$ 0.002 & \textbf{0.441} $\pm$ 0.001 & \textbf{0.556} $\pm$ 0.002 & \textbf{19.879} $\pm$ 0.003 & \textbf{245.138} $\pm$ 0.586\\
+        + SPELL (Ours) & text-to-image & \textbf{0.248} $\pm$ 0.002 & \textbf{2.886} $\pm$ 0.005 & 0.355 $\pm$ 0.001 & 0.433 $\pm$ 0.002 & 0.541 $\pm$ 0.002 & 19.959 $\pm$ 0.033 & 245.748 $\pm$ 0.562\\
+        \midrule
+        EDMv2 & class-to-image & 0.589 $\pm$ 0.002 & 11.645 $\pm$ 0.022 & \textbf{0.551} $\pm$ 0.002 & \textbf{0.518} $\pm$ 0.002 & \textbf{1.404} $\pm$ 0.005 & \textbf{3.377} $\pm$ 0.022 & \textbf{68.452} $\pm$ 0.298\\
+        + SPELL (Ours) & class-to-image & \textbf{0.600} $\pm$ 0.002 & \textbf{11.806} $\pm$ 0.013 & 0.547 $\pm$ 0.001 & 0.508 $\pm$ 0.001 & 1.364 $\pm$ 0.005 & 3.456 $\pm$ 0.021 & 68.909 $\pm$ 0.161\\
+        \midrule
+        SD3-Medium-Class & class-to-image & 0.143 $\pm$ 0.002 & 8.861 $\pm$ 0.028 & \textbf{0.202} $\pm$ 0.002 & \textbf{0.323} $\pm$ 0.002 & \textbf{0.801} $\pm$ 0.005 & \textbf{22.246} $\pm$ 0.020 & \textbf{328.032} $\pm$ 0.571\\
+        + SPELL (Ours) & class-to-image & \textbf{0.206} $\pm$ 0.002 & \textbf{12.190} $\pm$ 0.032 & 0.146 $\pm$ 0.001 & 0.181 $\pm$ 0.002 & 0.420 $\pm$ 0.006 & 38.709 $\pm$ 0.054 & 478.286 $\pm$ 0.553\\
+        \midrule
+        MDTv2 & class-to-image & 0.623 $\pm$ 0.002 & 12.546 $\pm$ 0.021 & 0.505 $\pm$ 0.001 & 0.401 $\pm$ 0.002 & 1.020 $\pm$ 0.002 & 4.884 $\pm$ 0.052 & 133.175 $\pm$ 0.721\\
+        + SPELL (Ours) & class-to-image & \textbf{0.634} $\pm$ 0.002 & \textbf{12.772} $\pm$ 0.027 & 0.505 $\pm$ 0.001 & \textbf{0.407} $\pm$ 0.001 & \textbf{1.029} $\pm$ 0.005 & \textbf{4.381} $\pm$ 0.047 & \textbf{122.125} $\pm$ 0.291\\
+        \bottomrule
+    \end{tabular}
+    }
+\end{table}
+
+We first examine whether adding SPELL post-hoc increases the diversity of trained diffusion models. To this end, we quantitatively compare each diffusion model to the same model run with the same random generation seeds but with SPELL. In particular, we use intra-batch repellency together with repellency from previously generated batches, to enable repellency across the up to 128 images per prompt/class. \Cref{tab:benchmark} shows that SPELL consistently increases the diversity, both in terms of recall and Vendi score, across all text-to-image and class-to-image diffusion models. This demonstrates that SPELL works independently from the model architecture and the space the models diffuse in (RGB space for Simple Diffusion, VAE space for all others). Coverage remains within -1\% to +2\% of its original value in all models except SD3. The difference between coverage and recall is that coverage uses a more tight neigborhood radius to determine whether an image of the original dataset is covered by the generated ones. In other words, coverage measures a form of dataset match, which can counter-intuitively be decreased by more diverse outputs if the diversity takes different forms or is higher than in the reference dataset. This stands out most for SD3, which was not trained on the reference datasets ImageNet-1k/CC12M. We find that SPELL correctly helps SD3 generate images that are generally more diverse, as evidenced by the 26\% and 37\% increases in the reference-dataset-free Vendi score, but in other attributes than in the reference datasets, explaining the decrease in coverage. Precision and density decrease slightly in five out of the six models, but stay within -3\% to +2\% of the original values, the exception again being SD3. This tradeoff between diversity and precision is common in the literature \citep{kynkaanniemi2024applying,sadat2024cads,corso2024particle}, and we show in the next section that our method provides more favorable Pareto fronts than alternative recent methods. This tradeoff improves the overall \fddino{} score considerably in Latent Diffusion and MDTv2, while staying within 3\% of the original value on Simple Diffusion and EDMv2, and increasing on SD3. Overall, we find that SPELL increases the diversity considerably across all models, with only minor tradeoffs in precision.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/pareto_repellence_weight_outer_fid.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/pareto_repellence_weight_gen_vendi.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/pareto_repellence_weight_recall.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.24\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/pareto_repellence_weight_precision.pdf}
+    \end{subfigure}
+    \caption{Effect of SPELL's hyperparameter $r$ on Latent Diffusion metrics on CC12M. A small radius ($r=15$) improves the Vendi score, recall, and \fddino{} without compromising precision. The radius can be further increased to trade-off precision for additional diversity.} 
+    \label{fig:sweep}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{\textwidth}
+        \centering
+        \includegraphics[width=\textwidth,trim= 2cm 0.8cm 2cm 1.0cm,clip]{figs/legend.pdf}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.327\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/final_pareto_precision_recall.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.327\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/final_pareto_density_coverage.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.327\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/final_pareto_clip_gen_vendi.pdf}
+    \end{subfigure}
+    \caption{\textbf{Latent Diffusion on CC12M}. The hyperparameters of diversity methods allow trading off image quality (x-axes) for diversity metrics (y-axes). Our repellency provides a better trade-off than other concurrent approaches. IG is not visible on all plots as it strongly decreases image quality.} 
+    \label{fig:tradeoff_comparison}
+\end{figure}
+
+\subsection{Comparison to Other Diversity-inducing Methods} \label{sec:comparison}
+
+We now take a closer look at SPELL's hyperparameter, the repellency radius $r$. \Cref{fig:sweep} shows that we can use repellency in two ways. A low radius ($r=15$) increases the diversity (Vendi score and recall) without compromising on precision. Intuitively, such a small radius only serves to prevent generating the nearly-same image twice. The resulting output set also better reflects the true image distribution, yielding an enhanced \fddino. The second option is to further increase the repellency radius, which as \Cref{fig:sweep} shows further enhances diversity at the cost of precision. 
+
+There are other current proposals in the literature that enable to control this trade-off. Namely, Interval Guidance \citep[IG]{kynkaanniemi2024applying} only applies CFG in a limited time interval in the middle of the backward diffusion. Condition-annealed diffusion sampling \citep[CADS]{sadat2024cads} noises the text or class condition that guides the CFG, lowering the noise in later timesteps. Particle Guidance \cite[PG]{corso2024particle} adds a gradient potential to the backward diffusion such that the diversity of a batch as a whole is increased. We reimplement and tune the hyperparameters of all of these approaches and compare them against SPELL.
+
+\Cref{fig:tradeoff_comparison} shows that SPELL achieves a more favorable trade-off curve than each of these methods, in three different diversity vs quality Pareto fronts, namely recall vs precision, coverage vs density, and Vendi score vs CLIP Score. One reason for this is SPELL's sparsity. SPELL only intervenes if images are going to be too similar to one another. Due to its ReLU weighting, it remains exactly zero if an image's trajectory is already headed to a diverse output. This leads to increased diversity while leaving high-precision images unchanged. We study this sparsity further in the following section.
+
+\subsection{Sparsity Analysis} \label{sec:ablation}
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[t]{0.48\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figs/repellence_strength_per_timestep_mixed.pdf}
+        \subcaption{Repellency Strength}
+        \label{fig:repellence_strength}
+    \end{minipage}%
+    \hfill%
+    \begin{minipage}[t]{0.48\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figs/repellence_binary_main_paper.pdf}
+        \subcaption{Diffusion steps with repellency}
+        \label{fig:repellence_duration}
+    \end{minipage}%
+    \caption{(a) The gradient that SPELL adds is only a fraction of the magnitude of the diffusion's score, thus adjusting it without drowning it out. (b) Repellency happens primarily in early backwards steps ($t \in  [0.6, 1.0])$ and then often remains zero, thus making it sparse. Overcompensation allows finishing the repellency earlier, whereas runs with high repellency radius repel longer. Latent Diffusion trajectories with repellency from both previous generations and intra-batch.}
+    \label{fig:repellence_main}
+\end{figure}
+
+We focus in this section on the dynamics of SPELL interventions and investigate when and how SPELL corrective terms arise. \Cref{fig:repellence_strength} tracks the magnitude of the SPELL correction vector $\| \Delta \|_2$ normalized by that of the diffusion score vector $\| \nabla \log p_t(x_t| y) \|_2$. We track this relative magnitude throughout 452 backward trajectories for 50 prompts of CC12M. Because our experiment considers both intra-batch repellency and repellency, as in \Cref{tab:benchmark}, the SPELL correction is equal to the addition of past comparison terms~(\Cref{eq:spell}) and within batch corrections (\Cref{eq:pg_interp}).  \Cref{sec:ablation_repellency} gives corresponding plots for further setups. First, we find that repellency only adds a small correction term in most cases. Its magnitude is most often less than 5\% of the magnitude of the diffusion score and never exceeds 35\%. This explains why our repellency does not reduce image quality or introduce artifacts. A second reason for this is that SPELL corrections happen mostly in the early stages of the backward diffusion, which literature claims to be when the rough image is outlined, rather than in late steps, where the image is refined \citep{biroli2024dynamical,kynkaanniemi2024applying}. Recall that the backwards diffusion starts at $t=1$ and outputs the final image at $t=0$. \Cref{fig:repellence_duration} shows that at $t=0.8$, only 40\% of the trajectories have a non-zero repellency term anymore, further declining to 21\% at $t=0.6$. If we impose a higher repellency radius, the repellency acts for longer. Especially in this cases, adding overcompensation helps. As intended, the repellency strength is increased and in return stops earlier. These stops are often final: The repellency stays zero for the remainder of the generation, verifying that the trajectories do not bounce back into the repellency radii, as shown in \Cref{sec:ablation_repellency}, and reaffirming SPELL's sparsity. 
+
+\subsection{Qualitative Example of SPELL Interventions} \label{sec:gentraj}
+\Cref{fig:iterative} shows 16 images generated iteratively using SD3 with and without SPELL interventions. Images are generated one by one $(B=1)$, and when generating the $i+1$-th image, SPELL repels from the reference set of all images $1$ to $i$ it has generated thus-far. Images are highlighted in orange if SPELL enforced changes during their generation trajectory. When SPELL does not intervene, the SD3 + SPELL image (bottom row) coincides with the SD3 output (top row), since we use the same seeds. For images 1 to 3, SPELL did not intervene as it did not detect similarities when generating the 2nd image when compared to the 1st, nor when generating the 3rd w.r.t. 1st and 2nd. On the contrary, the 4th image was expected to come out too close to the 3rd at some time during generation, triggering SPELL interventions that altered ultimately the ball color, dog, and background. As more images are added to the reference set, SPELL intervenes more often. For example, image 14 is headed towards an image of a dog on a grassy ground with trees in the background, which is too similar to multiple previous images. Hence, SPELL intervenes and leads the diffusion trajectory to an entirely new mode, with both a new dog race and a previously unseen tartan surface. A similarly strong intervention happens in image 15. Still, SPELL's sparsity means that it does not always intervene, even when there are already many shielded images. For example, image 16 is novel enough to remain unchanged.
+
+\begin{figure}[t]
+    \centering
+\begin{tikzpicture}
+    \def\imgwidth{1.66cm}
+    \def\imgheight{1.66cm}
+    \def\xspacing{1.69cm} %
+    \def\yspacing{4cm} %
+
+    \foreach \x in {0,1} {
+        \foreach \y in {0,...,7} {
+            \pgfmathtruncatemacro{\imageindex}{\x * 8 + \y}
+            \node at (\y*\xspacing, -\x*\yspacing-1cm) {\includegraphics[width=\imgwidth, height=\imgheight]{figs/gen_\imageindex_original.jpg}};
+        }
+    }
+    \foreach \x in {0,1} {
+        \foreach \y in {0,...,7} {
+            \pgfmathtruncatemacro{\imageindex}{\x * 8 + \y}
+            \node at (\y*\xspacing, -\x*\yspacing-1cm-\xspacing) {\includegraphics[width=\imgwidth, height=\imgheight]{figs/gen_\imageindex_repellence.jpg}};
+        }
+    }
+
+    \draw[orange, line width=2.5pt] (3*\xspacing - \imgwidth/2, -0*\yspacing - 1.04cm - \imgheight/2) rectangle
+                                            (3*\xspacing + \imgwidth/2, -0*\yspacing - 1.04cm - 3*\imgheight/2);
+    \node[anchor=north] at (3*\xspacing, -0*\yspacing - 2*\imgheight - 0.2cm) {\small \textcolor{orange}{\{3\}}};
+    \draw[orange, line width=2.5pt] (5*\xspacing - \imgwidth/2, -0*\yspacing - 1.04cm - \imgheight/2) rectangle
+                                            (5*\xspacing + \imgwidth/2, -0*\yspacing - 1.04cm - 3*\imgheight/2);
+    \node[anchor=north] at (5*\xspacing, -0*\yspacing - 2*\imgheight - 0.2cm) {\small \textcolor{orange}{\{4\}}};
+    \draw[orange, line width=2.5pt] (6*\xspacing - \imgwidth/2, -0*\yspacing - 1.04cm - \imgheight/2) rectangle
+                                            (6*\xspacing + \imgwidth/2, -0*\yspacing - 1.04cm - 3*\imgheight/2);
+    \node[anchor=north] at (6*\xspacing, -0*\yspacing - 2*\imgheight - 0.2cm) {\small \textcolor{orange}{\{3, 6\}}};    
+    \draw[orange, line width=2.5pt] (7*\xspacing - \imgwidth/2, -0*\yspacing - 1.04cm - \imgheight/2) rectangle
+                                            (7*\xspacing + \imgwidth/2, -0*\yspacing - 1.04cm - 3*\imgheight/2);
+    \node[anchor=north] at (7*\xspacing, -0*\yspacing - 2*\imgheight - 0.2cm) {\small \textcolor{orange}{\{4\}}};         
+    \draw[orange, line width=2.5pt] (1*\xspacing - \imgwidth/2, -1*\yspacing - 1.04cm - \imgheight/2) rectangle
+                                            (1*\xspacing + \imgwidth/2, -1*\yspacing - 1.04cm - 3*\imgheight/2);
+    \node[anchor=north] at (1*\xspacing, -1*\yspacing - 2*\imgheight - 0.2cm) {\small \textcolor{orange}{\{2, 8\}}};       
+    \draw[orange, line width=2.5pt] (2*\xspacing - \imgwidth/2, -1*\yspacing - 1.04cm - \imgheight/2) rectangle
+                                            (2*\xspacing + \imgwidth/2, -1*\yspacing - 1.04cm - 3*\imgheight/2);
+    \node[anchor=north] at (2*\xspacing, -1*\yspacing - 2*\imgheight - 0.2cm) {\small \textcolor{orange}{\{4, 8\}}};    
+    \draw[orange, line width=2.5pt] (3*\xspacing - \imgwidth/2, -1*\yspacing - 1.04cm - \imgheight/2) rectangle
+                                            (3*\xspacing + \imgwidth/2, -1*\yspacing - 1.04cm - 3*\imgheight/2);
+    \node[anchor=north] at (3*\xspacing, -1*\yspacing - 2*\imgheight - 0.2cm) {\small \textcolor{orange}{\{4, 6, 7, 8\}}};   
+    \draw[orange, line width=2.5pt] (4*\xspacing - \imgwidth/2, -1*\yspacing - 1.04cm - \imgheight/2) rectangle
+                                            (4*\xspacing + \imgwidth/2, -1*\yspacing - 1.04cm - 3*\imgheight/2);
+    \node[anchor=north] at (4*\xspacing, -1*\yspacing - 2*\imgheight - 0.2cm) {\small \textcolor{orange}{\{2, 6\}}}; 
+    \draw[orange, line width=2.5pt] (5*\xspacing - \imgwidth/2, -1*\yspacing - 1.04cm - \imgheight/2) rectangle
+                                            (5*\xspacing + \imgwidth/2, -1*\yspacing - 1.04cm - 3*\imgheight/2);
+    \node[anchor=north] at (5*\xspacing, -1*\yspacing - 2*\imgheight - 0.2cm) {\small \textcolor{orange}{\{2, 3, 4, 5, 6, 12\}\,\,}}; 
+    \draw[orange, line width=2.5pt] (6*\xspacing - \imgwidth/2, -1*\yspacing - 1.04cm - \imgheight/2) rectangle
+                                            (6*\xspacing + \imgwidth/2, -1*\yspacing - 1.04cm - 3*\imgheight/2);
+    \node[anchor=north] at (6*\xspacing, -1*\yspacing - 2*\imgheight - 0.2cm) {\small \textcolor{orange}{\,\,\{2, 4, 6, 8\}}}; 
+
+    \foreach \x in {0,1} {
+        \foreach \y in {0,...,7} {
+            \pgfmathtruncatemacro{\imageindex}{\x * 8 + \y + 1}
+            \node at (\y*\xspacing - 0.39*\imgwidth, -\x*\yspacing-1cm + 0.39*\imgheight) {\textcolor{white}{\small \imageindex}};
+            \node at (\y*\xspacing - 0.39*\imgwidth, -\x*\yspacing-1cm-\xspacing + 0.39*\imgheight) {\textcolor{white}{\small \imageindex}};
+        }
+    }
+    
+    \node[anchor=east] at (-0.5*\imgwidth, -0.5*\imgheight - 0.18cm) {\rotatebox{90}{\small SD3}}; 
+    \node[anchor=east] at (-0.5*\imgwidth, -0.5*\imgheight - 0.18cm - \xspacing) {\rotatebox{90}{\small SD3 + SPELL}}; 
+    \node[anchor=north west] at (-0.57*\imgwidth, -0*\yspacing - 2*\imgheight - 0.2cm) {\textcolor{orange}{Repelled from}}; 
+\end{tikzpicture}
+
+    \caption{Images for the prompt \textit{``a dog plays with a ball''} generated one-by-one ($B=1$) with SD3 (top) and SD3 + SPELL (bottom), using the same random seeds. SPELL intervenes on 10 of the 16 images, marked with orange borders, because they are too similar to previously generated images. Images that SPELL repelled from are listed below each image. Early images are adjusted less often and mostly in details because they are still novel enough. Later images repel from more previous images and more strongly to ensure they are different enough.}
+    \label{fig:iterative}
+\end{figure}
+
+\subsection{Image Protection Benchmark} \label{sec:copyright}
+We scale SPELL to a repellency set of 1.2 million ImageNet-1k train images via approximate nearest neighbor search \citep{douze2024faiss}, with the goal of generating novel images. We generate 50k images, track how often they fall into a protected shield, as well as the precision, recall, and runtime. This is similar to machine unlearning for generative models~\citep{wang2024replication,liu2024machine}, with the main differences that we wish to shield a set of specific images rather than global concepts~\citep{wu2024unlearning,park2024direct}, and that SPELL is a training-free intervention.     
+
+\Cref{tab:imagenetprotection} shows that 7.6\% of the 50k images that MDTv2 generates without SPELL are within an $L_2$ distance of $r=60$ of their nearest neighbor on ImageNet. \Cref{fig:protection} shows examples and verifies that such images indeed are nearly copies of existing images. Adding SPELL with $r=60$ reduces this rate down to 0.16\%. \Cref{fig:protection} shows that the images are indeed changed in such a way that they are not too close to their ImageNet neighbors anymore. Searching for shields in less Voronoi cells of the approximate nearest neighbor algorithm allows to speed up the generation time, at the cost of a catching less shields. This runtime, and the fact that there are still images within the shields, can largely be attributed to the approximate next neighbor search algorithm. Further improvements in $L_2$ based neighbor search techniques will further increase SPELL's protection rate and compute overhead. Expectedly, the recall decreases when repelling from all training images, because validation images may fall into the shield radius around train images. However, the precision remains largely unaffected. This demonstrates again that SPELL does not introduce visual artifacts, even when repelling from many images. To add qualitative evidence to this point, we show a random set of images where SPELL intervened in \Cref{app:examples}. Finally, the last two images in \Cref{fig:protection} give more insight into the workings of the $L_2$ similarity in the VAE latent space that MDTv2 diffuses in. Apparently, image distances inside the VAE space encode a visual similarity where images with similar colors and compositions are close to one another. We leave applications of SPELL with more semantic similarities, e.g., by comparing not the expected image outputs but the DINOv2 embeddings of expected image outputs, for future works.
+
+  
+\begin{table}[t]
+    \centering
+    \caption{SPELL almost always generates images outside the shields of the ImageNet-1k train set. Searching for shields in more Voronoi cells during the nearest neighbor lookup improves the protection rate at a higher inference-time runtime. The runtime is reported on a single A100-40GB GPU.}
+    \small
+    \begin{tabular}{lccccc}
+    \toprule
+        Model & \makecell{Searched\\ cells} & \makecell{Generated images too close\\to ImageNet neighbors} $\downarrow$ & Precision $\uparrow$ & Recall $\uparrow$ & Time per image (s) $\downarrow$ \\
+    \cmidrule(lr){1-6}
+        EDMv2 &  & 7.60\% & 0.792 & 0.242 & 2.434\\
+        + SPELL & 1 & 1.08\% &  0.792 & 0.181 & 4.633\\
+        + SPELL & 2 & 0.55\% &  0.788 & 0.175 & 6.057\\
+        + SPELL & 3 & 0.33\% & 0.777 & 0.162 & 7.790 \\
+        + SPELL & 5 & 0.22\% & 0.771 & 0.163 & 9.949 \\
+        + SPELL & 10 & 0.16\% &  0.768 & 0.160 & 13.545\\
+    \bottomrule
+    \end{tabular}
+    \label{tab:imagenetprotection}
+\end{table}
+
+\begin{figure}[t]
+\hspace{-2.2mm}  %
+\begin{tikzpicture}
+
+    \def\imgwidth{1.21cm}
+    \def\imgheight{1.21cm}
+    \def\xspacing{1.24cm} %
+    \def\yspacing{1.24cm} %
+
+    \node[anchor=north, align=center] at (-1.2*\xspacing, -0.3*\yspacing -0.2cm) {\footnotesize EDMv2\\ \footnotesize  samples}; 
+    \foreach \x in {0} {
+        \foreach \y in {0,...,9} {
+            \node at (\y*\xspacing, -\x*\yspacing-1cm) {\includegraphics[width=\imgwidth, height=\imgheight]{figs/\y_base_unprotected.jpg}};
+        }
+    }
+    \node[anchor=north, align=center] at (-1.2*\xspacing, -1.3*\yspacing -0.2cm) {\footnotesize ImageNet\\ \footnotesize neighbor}; 
+    \foreach \x in {1} {
+        \foreach \y in {0,...,9} {
+            \node at (\y*\xspacing, -\x*\yspacing-1cm) {\includegraphics[width=\imgwidth, height=\imgheight]{figs/\y_neighbor.jpg}};
+        }
+    }
+
+    \node[anchor=north, align=center] at (-1.2*\xspacing, -2.3*\yspacing -0.7cm) {\footnotesize EDMv2 \\ \footnotesize + SPELL};
+    \foreach \x in {2} {
+        \foreach \y in {0,...,9} {
+            \node at (\y*\xspacing, -\x*\yspacing-1.5cm) {\includegraphics[width=\imgwidth, height=\imgheight]{figs/\y_protected.jpg}};
+        }
+    }
+    \node[anchor=north, align=center] at (-1.2*\xspacing, -3.3*\yspacing -0.7cm) {\footnotesize ImageNet\\ \footnotesize neighbor};
+    \foreach \x in {3} {
+        \foreach \y in {0,...,9} {
+            \node at (\y*\xspacing, -\x*\yspacing-1.5cm) {\includegraphics[width=\imgwidth, height=\imgheight]{figs/\y_neighbor_protected.png}};
+        }
+    }
+\end{tikzpicture}
+
+    \caption{The images generated by EDMv2 in the first row are too close to existing images in the ImageNet-1k train set, which EDMv2 was trained on. SPELL adapts their diffusion trajectories to ensure that they maintain a protection radius. The images in third row, generated from the same seeds but with SPELL, are sufficiently different from their nearest neighbor.}
+    \label{fig:protection}
+\end{figure}
+
+
+
+\section{Discussion}
+
+This work introduces sparse repellency (SPELL), a training-free post-hoc method to guide diffusion models \emph{away} from a certain set of images. This both prevents repeating images that were already generated, thereby increasing diversity, and allows protecting a certain set of reference images, with applications like machine unlearning. SPELL can be applied to any diffusion model, whether it is class-to-image or text-to-image, and whether it is unconditional or classifier(-free) guided. We see two main ways in how future work can extend SPELL. First, SPELL can currently be proven to guarantee to generate images outside the shields if all shields are disjoint. If there are overlapping shields, there can be cases where the guarantee is not strict anymore, and the algorithm could be improved to find a direction that points out of the convex hull of all points, at the cost of decreased scalability. Second, we currently apply SPELL with respect to the $L_2$ distance inside the diffusion model's latent spaces, which lead to \emph{visually} different outputs. Using a distance inside a semantically structured space could lead to generating more \emph{semantically} different images. This has the potential to further increase metrics like FID and recall, which evaluate generated images in semantic spaces.
+
+
+
+
+
+
+
+
+

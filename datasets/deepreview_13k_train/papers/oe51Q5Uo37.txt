@@ -1,0 +1,280 @@
+\title{Towards Scalable Exact Machine Unlearning Using Parameter-Efficient Fine-Tuning}
+
+\begin{abstract}
+  Machine unlearning is the process of efficiently removing the influence of a training data instance from a trained machine learning model without retraining it from scratch. A popular subclass of unlearning approaches is \textit{exact machine unlearning}, which focuses on techniques that explicitly guarantee the removal of the influence of a data instance from a model.
+  Exact unlearning approaches use a machine learning model in which individual components are trained on disjoint subsets of the data. During deletion, exact unlearning approaches only retrain the affected components rather than the entire model. While existing approaches reduce retraining costs, it can still be expensive for an organization to retrain a model component as it requires halting a system in production, which leads to service failure and adversely impacts customers.  To address these challenges, we introduce an exact unlearning framework -- {\name} ({\X}), which is designed to enhance the deletion capabilities of an exact unlearning system while minimizing the impact on model's performance. At the core of {\X}, we utilize a lightweight parameter-efficient fine-tuning approach that enables parameter isolation by sequentially training layers with disjoint data \textit{slices}. This enables efficient unlearning by simply deactivating the layers affected by data deletion. Furthermore, to reduce the retraining cost and improve model performance, we train the model on multiple data sequences, which allows {\X} to handle an increased number of deletion requests. Both theoretically and empirically, we demonstrate that {\X} attains superior deletion capabilities and enhanced performance compared to baselines across a wide range of settings.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+In recent years, the growing success of machine learning (ML) has led to its widespread deployment across a range of applications~\citep{gpt4, team2023gemini, qayyum2020secure, surden2021machine}. 
+Once a machine learning model has been trained, it is often necessary to \textit{unlearn} specific training data instances for various reasons, like complying with user data deletion requests~\citep{mantelero2013eu, EuropeanParliament2016a, shastri2019seven, achille2024ai}, removing stale or corrupt data~\citep{biggio2012poisoning, steinhardt2017certified}, etc. Retraining an ML model entirely from scratch with each deletion request is expensive, especially for modern large-scale models~\citep{gpt3, gpt4, team2023gemini}. Machine unlearning~\citep{nguyen2022survey, musurvey} techniques focus on efficiently unlearning the influence of a data instance from a trained machine learning model.
+Machine unlearning techniques are classified into two broad categories: approximate and exact unlearning~\citep{xu2024machine}. Approximate unlearning techniques~\citep{guo2020certified, liu2024certified} modify the parameters of a trained model to reduce the influence of the deleted data instance. While cost-effective in practice, approximate unlearning cannot guarantee the complete removal of an instance's influence and it may still retain non-zero influence on the model. Moreover, auditing approximate unlearning is challenging due to the stochastic nature of ML optimization~\citep{thudi2022necessity}. An alternative to this approach is exact unlearning~\citep{cao2015towards, bourtoule2021machine, golatkar2023training}, which can guarantee the removal of a data instance's influence from a trained model. Exact unlearning techniques use a modular system, where different components within the system are trained on disjoint data subsets (Section~\ref{sec:background}). When a deletion request occurs, only the affected component needs to be retrained. However, in real-world settings,  halting a production system to even retrain a single component can result in service failure and significant expenses.
+ The alternative is to function without the affected component, which may result in reduced performance, ultimately impacting end users. To address these challenges, we introduce {\name} ({\X}), which can exactly unlearn private fine-tuning data efficiently while minimizing the impact on performance.
+
+ The key idea behind our {\X} framework is to perform additional offline training before deploying the initial model to reduce retraining costs.
+At the core of {\X}, we leverage a novel lightweight fine-tuning approach that allows parameter isolation by sequentially training model layers using disjoint data slices (Section~\ref{sec:training}).
+ Due to this parameter isolation, it is possible to efficiently perform exact unlearning by deactivating the layers associated with the deleted instance, rather than discarding the entire checkpoint. 
+ We efficiently train multiple models using different sequences of the same data slices depending on a training budget. The training budget decides the number of models we can train.
+ We show that increasing the training budget before deployment can significantly reduce retraining costs and improve the model's performance. 
+We also observe that it is important to train the model using diverse sequences and provide several approaches for selecting diverse sequences (Section~\ref{sec:budget}).
+Furthermore, we formalize the notion of deletion rate for exact unlearning systems and theoretically show that {\X} achieves provably better deletion guarantees than existing approaches (Section~\ref{sec:theory}).
+We conduct extensive empirical evaluations to evaluate the effectiveness of {\X} using Transformers with parameter counts ranging from 86M to 13B on a range of tasks. Finally, in Section~\ref{sec:exp}, we empirically validate the sequence selection algorithm and show that {\X} has superior deletion performance compared to existing methods in real-world settings.
+
+
+
+
+
+
+
+
+
+\section{Background}
+
+\label{sec:background}
+Machine unlearning techniques for deep learning is broadly classified into two categories: \textit{approximate} and \textit{exact}  unlearning~\citep{xu2024machine}. Approximate unlearning techniques focus on reducing the influence of a deleted instance from a model after it has been trained. Exact unlearning techniques provide unlearning guarantees by ensuring model components trained on a deleted instance are not used during inference.  In this section, we discuss each of these categories in detail. 
+
+\textbf{Approximate Machine Unlearning}. These techniques focus on approximating the model parameters as if the deleted data instance was not there in the training set from the beginning~\citep{guo2020certified}. These techniques typically quantify the influence of an instance~\citep{koh2017understanding} and perform gradient ascent for unlearning~\citep{golatkar2020eternal, golatkar2020forgetting, neel2021descent, sekhari2021remember, gupta2021adaptive, suriyakumar2022algorithms, liu2024certified}. In contrast to these approaches, \citep{graves2021amnesiac} 
+ stores the exact gradients encountered during training and uses them directly for gradient ascent. Another line of work~\citep{tarun2023fast, tarun2023deep, jia2023model, chen2023unlearn, eldan2023s, patil2023can, kurmanji2024towards, liu2024rethinking, park2024direct, zhang2024negative} focuses on unlearning in a batch setting, where they assume access to both a retention set and a forget set of data instances for approximate unlearning.
+ While efficient in practice, auditing approximate unlearning techniques is challenging due to the stochastic nature of the optimization process \citep{thudi2022necessity, wang2024has} and may have weak privacy guarantees in practice~\citep{hayes2024inexact, lucki2024adversarial}.
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\textwidth, keepaspectratio]{figures/SISA.pdf}
+    \caption{Schematic diagram of the Sharded, Isolated, Sliced, and Aggregated training (SISA)~\citep{bourtoule2021machine}  framework. An ensemble of models is individually trained on disjoint shards. (\textit{Left}) Each shard is further divided into slices. (\textit{Right}) Each model is sequentially trained on the slices and checkpoints are stored. After deletion, retraining resumes from the best available checkpoint. }
+    \label{fig:sisa}
+\end{figure}
+\textbf{Exact Machine Unlearning}. These techniques focus on developing a modular machine learning system, where individual components are trained using disjoint subsets of the data. 
+Such a system offers the advantage that when a deletion request is received for an input instance, we only need to retrain the affected component rather than the entire model. However, these systems require modifying the original training process of the model.
+The seminal work for such a modular unlearning system is  Sharded, Isolated, Sliced, and Aggregated training (SISA)~\citep{bourtoule2021machine}. SISA uses an ensemble of models each trained on a disjoint shard of the dataset as shown in Figure~\ref{fig:sisa} (left). To further reduce retraining costs, each shard is divided into slices, and the models are incrementally trained on these slices, with their checkpoints stored sequentially (shown in Figure~\ref{fig:sisa} (right)). If a deletion request affects a data instance within the 4\textsuperscript{th} slice of a shard, we must retrieve the checkpoint after the 3\textsuperscript{rd} slice and retrain using the remaining data within that shard. Several approaches focus on improving the components within SISA in application-specific settings like enhancing the dataset partitioning mechanism~\citep{aldaghri2021coded, yan2022arcane}, the retraining efficiency using light-weight adapters~\citep{kumar2023privacy, dukler2023safe}, or extending the modular approach for vision tasks by using compartmentalized diffusion models~\citep{golatkar2023training}. However, these approaches are orthogonal to our work since they do not fundamentally modify the functioning of SISA. These modifications can be easily incorporated within our proposed framework.
+
+SISA is a well-known framework that can guarantee exact unlearning and has found widespread applications. However, using SISA within production systems is challenging because retraining even a single component would result in downtime, thereby reducing the service level agreement (SLA).
+Furthermore, in the worst-case scenario, if deletion requests impact the first slice in all the shards, the entire service goes down, necessitating retraining the model from scratch. In this work, we leverage parameter-efficient fine-tuning to introduce a framework that improves upon the service availability and deletion capabilities of the SISA framework.
+
+
+
+\section{{\name}
+
+
+In this section, we describe the functioning of our proposed exact unlearning framework, {\name} (\X). This framework leverages parameter-efficient fine-tuning (PEFT) to build an exact unlearning framework. 
+
+\subsection{Problem Setting}
+\label{sec:problem} 
+
+We consider the general setting where the user fine-tunes a pre-trained model like BERT~\citep{bert} or Llama~\citep{touvron2023llama} on private data using PEFT techniques. 
+We assume that the deletion requests affect only the private fine-tuning data, not the pre-training data.
+In {\X}, we partition a dataset $\mathcal{D} = \{\mathcal{D}_1, \ldots, \mathcal{D}_m\}$ into $m$ disjoint shards. Each shard is further divided into $L$ slices: $\mathcal{D}_i = \{S_1, \ldots, S_L\}$. 
+{\X} trains a separate model per shard and uses their aggregate decision.
+
+Existing unlearning frameworks SISA~\citep{bourtoule2021machine} use a similar setup described above. In SISA, within each shard, the model is trained in multiple stages sequentially on the slices (training stages are Slice 1, Slice 1+2, and so on), and their checkpoints are stored. However, a key weakness of SISA is that if deletion requests affect Slice 1 of all shards, then the entire service goes down necessitating retraining from scratch. Another drawback of SISA is that individual models within the ensemble need to be retrained whenever a deletion request is executed. Retraining even on a single slice is expensive for large-scale models in production serving a huge customer base. A naive alternative would be to use the last known usable checkpoint and perform retraining after regular intervals. For example, in Figure~\ref{fig:sisa} (right), if a deletion request arrives for a data instance in Slice 4, the model in production can be replaced with the checkpoint obtained after Slice 3. It is easy to see that the performance of the overall model will degrade with the number of deletion requests. 
+
+We present an exact unlearning framework, {\X}, to address these challenges. The core idea involves training several copies of each model (within the ensemble) using different slice sequences. When deletion requests occur, we utilize the model that minimizes performance degradation. To further reduce the training cost, we leverage PEFT techniques and present a novel sequential slice-wise fine-tuning strategy in Section~\ref{sec:training}. Our training strategy allows us to use the same model by deactivating certain layers without the need to swap checkpoints in case of a deletion. 
+In the following sections, we introduce the fine-tuning strategy and sequence selection process.
+\begin{figure}
+    \centering
+    \includegraphics[width=0.99\textwidth, keepaspectratio]{figures/lora_deletion.pdf}
+    \caption{ (\textit{Left}) We show the schematic diagram of the slice-wise training strategy in {\X}. We incrementally train the model -- $i$\textsuperscript{th} layer (from the top) using slices $S_{1:i}$ while keeping the other layers fixed. (\textit{Right}) We show the impact of deletion on models trained on different permutations of slices.}
+    \label{fig:layer_train}
+\end{figure}
+\subsection{Sequential Slice-wise Training}
+\label{sec:training}
+In this section, we introduce {\name} (\X) a lightweight fine-tuning approach using parameter-efficient fine-tuning (PEFT) for efficient exact unlearning. This fine-tuning approach enables parameter isolation 
+by sequentially training PEFT layers using different data slices. 
+Due to this parameter isolation, it is possible to efficiently handle deletion requests by deactivating layers associated with the instance. 
+We describe {\X} using the PEFT technique, LoRA~\citep{hu2021lora}, but our method is general can be easily extended to other PEFT techniques. LoRA introduces a small number of trainable low-rank ($r \ll d$) parameters, $(\bf X, \bf Y)$, while the pre-trained weights $\mathbf{\overline{W}}$ remains fixed as shown below:
+\begin{equation}
+    \mathbf{W} = \mathbf{\overline{W}} + \mathbf{X}^\top \mathbf{Y}, \text{ where } \mathbf{X}, \mathbf{Y} \in \mathbb{R}^{r \times d}, \mathbf{\overline{W}} \in \mathbb{R}^{d \times d}.
+\end{equation}
+Our key idea involves training different LoRA layers using different data slices.
+This approach allows us to selectively deactivate (zero out) the LoRA parameters ($\bf X$ or $\bf Y$) associated with a particular layer in the event of data deletion from that slice.  In Figure~\ref{fig:layer_train} (left), we illustrate the training process in detail, where we follow a sequential top-to-bottom training approach. At stage 1, we train the final model layer (Layer 1 in the figure) 
+using slice 1 while LoRA parameters from all other layers are switched off. In the next stage, we train second last layer (Layer 2) using slices 1 \& 2, while keeping the LoRA parameters from the Layer 1 frozen. This process continues for the rest of the layers.  Note that the training does not need to proceed in a single layer-wise fashion, we can even train multiple LoRA layers per slice. 
+
+
+ 
+ 
+ The sequential slice-wise training process ensures that the LoRA parameter updates at the $i$-th layer are a function of the data instances within slices $\{1, \ldots, i\}$. Therefore, if a deletion request affects the $i$-th slice, the same model can still be used by deactivating the LoRA parameters corresponding to slices $\{i, \ldots, L\}$ (see details in Algorithm~\ref{alg:delete}). For example, if a deletion request affects slice $S_3$ only the subsequent LoRA layers need to be deactivated to ensure exact unlearning, as shown in the first example of Figure~\ref{fig:layer_train} (right). This is because during training the parameters of layers 1 \& 2  were not affected by instances in $S_3$. During this deletion process, we use the same model checkpoint and switch off LoRA layers, resulting in an $L$-time reduction in storage cost compared to SISA.
+ 
+ Now we consider the scenario where deletion requests affect multiple slices. This is shown in the 2\textsuperscript{nd} sequence of Figure~\ref{fig:layer_train} (right), where slices $S_1$ and $S_3$ are affected. In this case, we observe that a model trained on the default ordering of the sequence $\{S_1, \ldots, S_5\}$ is rendered useless when $S_1$ and $S_3$ are affected. 
+ This motivates us to train multiple models using different permutations of the slices. This would enhance the service time and system performance by selecting a model trained with the most effective ordering (e.g., the 3\textsuperscript{rd} sequence in Figure~\ref{fig:layer_train} (right) yields the best-performing model). However, training on all $L!$ slice permutations is prohibitively expensive. In the following section~\ref{sec:budget}, we present strategies to select a diverse set of permutations under budget constraints. Using these selection approaches, in Section~\ref{sec:theory} we theoretically show that we do not need more than $L$ sequences to achieve the optimal deletion performance. 
+
+ 
+
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.95\textwidth, keepaspectratio]{figures/perm_selection.pdf}
+    \caption{Illustration of the slice sequence selection problem with uniform deletion prior under a budget constraint, $B$. (\textit{Left}) An example of a permutation tree with $L=3$ and a diverse set of sequences for budget $B=3$ is shown in green. (\textit{Center}) We show the functioning of the cyclic rotation algorithm, where we generate cyclic permutations of the original sequence. (\textit{Right}) We iteratively extend the algorithm when budget $B > L$ by generating cyclic rotations of the subsequences.}
+    \label{fig:selection}
+\end{figure}
+\subsection{Training under Budget Constraints}
+\label{sec:budget}
+The training strategy discussed in the previous section requires training the same model on $L!$ slice sequences, which is expensive in practice. In this section, we discuss strategies to select sequences under a budget, $B$ (maximum number of sequences that can trained). 
+First, we show that there exists an optimal subset of $B$ slice sequences and randomly selecting $B$ sequences may not be effective.
+ To illustrate this idea, we use a permutation tree~\citep{bhattacharya1994representation}, where all possible permutation sequences are embedded into a tree structure. 
+ 
+ In Figure~\ref{fig:selection} (left), we show an example of a permutation tree with $L=3$ slices, paths from the root to the leaves correspond to unique permutation sequences $(S_1, S_2, S_3)$, $(S_1, S_3, S_2)$, and so on. From the previous section, we know that the topmost slice is the most sensitive because if a deletion request affects the topmost slice the entire model needs to be retrained (shown in Figure~\ref{fig:layer_train} (right)). To address this and reduce the retraining cost, we should ensure we train models on sequences with different top slices. Building on this intuition, in the general setting we should train the model on diverse permutation sequences. Two sequences are considered \textit{diverse if no element appears at the same position}, e.g., $(S_1, S_2, S_3)$ and $(S_2, S_3, S_1)$. An example is illustrated in Figure~\ref{fig:selection} (left), where a diverse set of 3 sequences is marked in green (where no identical slices occupy the same position). Selecting diverse permutations is challenging as relying solely on random sampling may not always yield the best results.
+ Moreover, in certain scenarios, it is possible to have prior knowledge about the deletion probabilities of data slices; for example, younger users might be more likely to request data deletion than older users.
+ Therefore, we present two strategies for selecting diverse permutation sequences for a budget $B$, depending on whether or not prior deletion probabilities are available.
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.95\textwidth, keepaspectratio]{figures/bms.pdf}
+    \caption{Illustration of the BMS algorithm. BMS selects one element for each permutation at a time. This is done by constructing a bipartite graph with all feasible edges to the next node, where edge weights are the current sequence scores. We compute the maximum weight matching on this graph. The {dark gray} arrows ($\rightarrow$) indicate the selected edges and dotted arrows (\textcolor{gray}{$\xdashrightarrow{}$}) the feasible ones. }
+    \label{fig:bms}
+\end{figure}
+
+ \textbf{Uniform Deletion Prior}. In the setting, where each slice has a uniform (or unknown) deletion prior, we can generate diverse sequences by using cyclic permutations of the original sequence. Given a sequence $(S_1, S_2, S_3)$, the cyclic permutations are (shown in Figure~\ref{fig:selection} (middle)):
+ \begin{equation}
+     (S_1, S_2, S_3) \rightarrow (S_3, S_1, S_2) \rightarrow (S_2, S_3, S_1).
+     \label{eqn:div-seq}
+ \end{equation}
+ The above approach guarantees that no element is repeated in the same position. However, it can only generate up to $L$ different sequences. For budget $B>L$, we extend the cyclic rotation algorithm to generate more sequences. In Figure~\ref{fig:selection} (right), we generate new sequences by iterating over the existing sequences and performing cyclic rotations of the subsequences. For example, for $(S_1, S_2, S_3)$ we perform cyclic rotation of the 2\textsuperscript{nd} and 3\textsuperscript{rd} element to obtain the sequence: $(S_1, S_3, S_2)$ (more examples in Figure~\ref{fig:cyclic-selection}).
+
+\textbf{Non-uniform Deletion Prior}. In scenarios, where we have prior knowledge of the deletion probabilities, sequences generated by cyclic rotation may not be ideal. For example, consider the deletion probabilities are: ($S_1$: 0.5, $S_2$: 0.4, $S_3$: 0.1). Then, the first sequence in Eq.~\ref{eqn:div-seq} is a bad choice because two of the slices most likely to be deleted are placed at the top. It is possible to select better sequences while satisfying the diversity criteria (no repeated slices at the same position). Before describing the selection algorithm, we show how to evaluate the quality of a sequence. We evaluate a sequence with deletion probabilities: $\mathcal{S} = (p_1, \ldots, p_L)$ by computing the expected number of functioning slices after $t$ deletions: $\mathrm{score}[\mathcal{S}, t] = \sum_{i=1}^L i.\left(1-\sum_{j=1}^i p_j\right)^t$, where $t$ is a hyperparameter.
+
+We present a bipartite-matching based sequence (BMS) selection algorithm.
+An illustration of BMS is shown in Figure~\ref{fig:bms}.  BMS iteratively selects elements of sequences by constructing a bipartite graph between one level to the next one (where edges are incident on feasible elements for the current sequence). The edges are weighted by the score of the current sequence, $\mathrm{score}[\mathcal{S}, t]$. 
+ Selecting the next element then is equivalent to finding a maximum weight perfect matching~\citep{galil1986efficient} using the Hungarian algorithm~\citep{kuhn1955hungarian} shown by the bold lines in Figure~\ref{fig:bms}. This continues till all sequences have $L$ elements. The BMS algorithm can generate up to $L$ sequences.
+
+ \textbf{Overall Workflow}. 
+So far, we have discussed the sequential training procedure and the sequence selection approach within a budget. Here, we will bring all of the components together and illustrate the functioning of {\X} using a simple example. We consider a setting with $m=3$ shards, $L=4$ slices, and budget $B=4$. Initially, for every shard, the available models are trained on sequences:
+\begin{align*}
+ (1, 2, 3, 4), (4, 1, 2, 3), (3, 4, 1, 2), (2, 3, 4, 1)
+\end{align*}
+Next, if a deletion request affects slice 1 for the 3\textsuperscript{rd} shard. Then, the available models for the 3\textsuperscript{rd} shard are: $(4), (3, 4), (2, 3, 4)$. Notice how all the PEFT layers at or below slice 1 have been switched off.  In this scenario, {\X} doesn't perform any retraining but continues to function with the best available model: $(2, 3, 4)$ (as it is trained on maximum slices). If the following deletion requests affect slice 2, then the available models are: $(4), (3, 4)$. {\X} continues to function with the best model $(3, 4)$. This continues until no models are available in any shard, at which point {\X} is retrained from scratch.
+
+ \subsection{Theoretical Analysis}
+ \label{sec:theory}
+
+In this section, we theoretically analyze the performance of exact unlearning system. For this, we draw inspiration from approximate unlearning literature~\citep{sekhari2021remember} and introduce the definition of \textit{deletion rate} for exact unlearning systems.
+\begin{definition}[Deletion Rate]
+    The {deletion rate}, $\delta(S)$, of an exact unlearning system $S$, is the expected number of deletion requests until the system needs to be retrained from scratch. 
+\end{definition}
+The deletion rate captures the effectiveness of an exact unlearning system by quantifying the expected number of deletion requests it can handle. 
+Next, we theoretically quantify the deletion rate for {\X} and compare it with that of SISA.
+\begin{lem}
+     For uniform deletion prior and dataset size $N \gg r$, where $r$ is the number of deletion requests,  the deletion rate of {\X} is $\delta(\X) \sim O(mL\log(m\min(B, L)))$ and for SISA it is $\delta(\mathrm{SISA}) \sim O(mL\log m)$, where $m$ is the number of shards and $L$ is the number of slices per shard.
+     \label{lem:del-rate}
+\end{lem}
+The above result states that the deletion rate doesn't improve by increasing the budget $B$ beyond $L$. This shows that the optimal deletion rate can be achieved using {\textit{only $L$ sequences}} (instead of $L!$).
+Next, we analyze the impact of deletion requests on the system's performance. We perform a fine-grained analysis focusing on the performance of an individual shard. In this setting, we consider the real-world scenario where we do not retrain every time a slice is impacted instead work with the best available model. For {\X}, this means switching off the necessary PEFT layers, while for SISA, it means reverting to the best available checkpoint. The unlearning system experiences performance degradation with an increasing number of deletion requests, as we are compelled to utilize a model trained on fewer data slices (we show this empirically in Section~\ref{sec:deletion}). To quantify the performance retention we use a monotonically increasing function $F(k)$, which indicates a model's performance when trained on $k$ slices. The exact formulation of $F(\cdot)$ depends on several factors like the dataset, model size, etc. We analyze the performance retention while processing deletion requests.
+\begin{lem}[Performance Retention]
+    Given a set of randomly selected $B > 1$ sequences and uniform deletion prior of slices, the difference in the probability that a shard retains a performance, $F_r(\cdot)$ of at least $F(k)$ after  $r$ deletion requests, between {\X} and SISA, is shown below
+    \begin{equation}
+        \forall k \in [1 \ldots L],\; \mathbb P\left[F_r(\X) \geq F(k)\right] - \mathbb P\left[F_r(\mathrm{SISA}) \geq F(k)\right] = \zeta (1-\zeta^{B'-1}),
+        \label{eqn:gap}
+    \end{equation}
+    where $\zeta = 1-(1-k/L)^r$ is a positive fraction and $B'=\min\left\{B, \frac{L!}{(L-k)!}\right\}$.
+    \label{lem:perf}
+\end{lem}
+The above result demonstrates that compared to SISA,  {\X} significantly enhances performance by increasing the probability that the system maintains at least $F(k)$ performance. 
+Eq.~\ref{eqn:gap} shows that increasing the training budget $B$ helps improve the performance of the unlearning system. Another takeaway from the above lemma is that to ensure the system performance of $F(k)$, there is no point in increasing the budget $B$ beyond $\frac{L!}{(L-k)!}$.
+
+
+\section{Experiments}
+
+\label{sec:exp}
+In this section, we outline the experimental setup and evaluate the unlearning performance of {\X} across various setups. The goal of the experiments is to evaluate the functioning of individual components and the unlearning capabilities of {\X}. Specifically, we design experiments to answer the following research questions: 
+\begin{itemize}[topsep=0pt, leftmargin=11mm, noitemsep]
+    \itemsep0.5mm
+    \item[(\textbf{RQ1})] Does {\X} training (Section~\ref{sec:training}) impact the model's performance compared to full training?
+    \item[(\textbf{RQ2})] Does {\X} enhance the deletion capabilities of unlearning, and what is its cost tradeoff?
+    \item[(\textbf{RQ3})] Is the sequence permutation selection algorithm (Section~\ref{sec:budget}) effective in practice?
+\end{itemize}
+
+
+
+\subsection{Sequential Slice-wise Training Performance}
+In this section, we evaluate the effectiveness of slice-wise training. The objective of the experimental setup is to demonstrate that {\X} can achieve performance comparable to full training. Note that {\X} is not designed as a new fine-tuning technique that outperforms the baselines. The goal of {\X} is to achieve parameter isolation for data slices without impacting the overall performance. We perform a range of experiments with different Transformer model sizes ranging from 86M up to 13B.
+
+In Figure~\ref{fig:glue-spglue}, we report the performance of fine-tuning on vision, GLUE, and SuperGLUE benchmarks. We use {ViT\textsubscript{BASE}}~\citep{vit} (for CIFAR10 \& CIFAR100~\citep{cifar}), {ViT\textsubscript{LARGE}} (for Tiny ImageNet~\citep{tinyimagenet}), and {RoBERTa\textsubscript{LARGE}}~\citep{roberta} (for GLUE~\citep{wang2018glue} \& SuperGLUE~\citep{wang2019superglue}).  We observe that {\X} achieves comparable performance to full training (FT) across all settings. In some of the settings, we also observe that {\X} is able to outperform FT (e.g., {\X} obtains 2.5\% accuracy gain on TinyImagenet using \texttt{ViT-large}).   Next, we conduct experiments to evaluate the effectiveness of {\X} while using large language models (LLMs). Specifically, we perform instruction tuning of Llama2-7B \citep{touvron2023llama}, Llama2-13B, and Llama3-8B using Alpaca dataset~\citep{alpaca}. Then, we evaluate each instruction-tuned model on a range of tasks to evaluate the model's general/world knowledge (MMLU~\citep{hendrycks2020measuring}, OpenBookQA~\citep{openbookqa}), truthfulness in QA (TruthfulQA~\citep{truthfulqa}), and commonsense reasoning (PIQA~\citep{bisk2020piqa}, HellaSwag~\citep{zellers2019hellaswag}, Winogrande~\citep{sakaguchi2021winogrande}, ARC~\citep{clark2018think}). We use LLM-evaluation suite~\citep{eval-harness} report the zero-shot performance  for all datasets. Similar to the previous setup, in Table~\ref{tab:alpaca}, we observe that {\X} achieves comparable performance to full finetuning across all datasets and even outperforms FT on many datasets across different model sizes. These experiments provide the answer to (\textbf{RQ1}) demonstrating that {\X} is an effective way to fine-tune Transformer models, enabling us to achieve parameter isolation for data slices without impacting the model's performance.
+
+\begin{table}[t!]
+    \centering
+\resizebox{\textwidth}{!}{
+\addtolength{\tabcolsep}{-0.15em}
+\begin{tabular}{l c c c c c c c c}
+    \toprule
+       {\textbf{Model}}  & \textbf{MMLU} & \textbf{HellaSwag} & \textbf{PIQA} & \textbf{Winogrande} & \textbf{ARC-c} & \textbf{ARC-e}  & \textbf{TruthfulQA} & \textbf{OBQA}\\
+    \midrule
+       Llama2-7B  & \light{41.3\textsubscript{(0.4)}} & \light{76.0\textsubscript{(0.4)}} & \light{79.1\textsubscript{(1.0)}} & \light{69.1\textsubscript{(1.3)}} & \light{46.3\textsubscript{(1.5)}} & \light{74.6\textsubscript{(0.9)}} & \light{39.0\textsubscript{(1.4)}} & \light{44.2\textsubscript{(2.2)}} \\
+       Llama2-7B (FT)  & 43.3\textsubscript{(0.4)} & 77.4\textsubscript{(0.4)} & \textbf{79.9}\textsubscript{(0.9)} & 69.6\textsubscript{(1.3)} & 50.4\textsubscript{(1.5)} & \textbf{74.7}\textsubscript{(0.9)}& \textbf{46.3}\textsubscript{(1.6)} & \textbf{46.8}\textsubscript{(2.2)} \\
+       Llama2-7B (\X)  & \textbf{43.6}\textsubscript{(0.4)} & \textbf{77.7}\textsubscript{(0.4)} & \underline{79.7}\textsubscript{(0.9)} & \textbf{70.5}\textsubscript{(1.3)} & \textbf{51.4}\textsubscript{(1.5)} & \underline{74.1}\textsubscript{(0.9)} & 43.0\textsubscript{(1.5)} & \underline{46.4}\textsubscript{(2.2)} \\
+    \midrule
+    Llama2-13B & \light{50.5\textsubscript{(0.4)}} & \light{79.4\textsubscript{(0.4)}} & \light{80.5\textsubscript{(0.9)}} & \light{72.2\textsubscript{(1.3)}} & \light{49.0\textsubscript{(1.5)}} & \light{77.5\textsubscript{(0.9)}} & \light{36.9\textsubscript{(1.4)}} & \light{45.2\textsubscript{(2.2)}}\\
+    Llama2-13B (FT) & \textbf{51.8}\textsubscript{(0.4)} & \textbf{81.3}\textsubscript{(0.4)} & \textbf{82.0}\textsubscript{(0.9)} & 72.2\textsubscript{(1.3)} & \textbf{55.0}\textsubscript{(1.5)} & 79.3\textsubscript{(0.8)} & 38.8\textsubscript{(1.5)} & \textbf{46.6}\textsubscript{(2.2)}\\
+    Llama2-13B (\X) & \underline{51.6}\textsubscript{(0.4)} & \underline{80.9}\textsubscript{(0.4)} & \underline{81.8}\textsubscript{(0.9)} & \textbf{72.8}\textsubscript{(1.3)} & 54.5\textsubscript{(1.5)} & \textbf{80.6}\textsubscript{(0.8)} & \textbf{39.6}\textsubscript{(1.5)} & \underline{46.2}\textsubscript{(2.2)}\\
+    \midrule
+    Llama3-8B  & \light{62.2\textsubscript{(0.4)}} & \light{79.1\textsubscript{(0.4)}} & \light{80.6\textsubscript{(0.9)}} & \light{73.6\textsubscript{(1.2)}} & \light{53.2\textsubscript{(1.5)}} & \light{77.6\textsubscript{(0.9)}} & \light{43.9\textsubscript{(1.4)}} & \light{45.0\textsubscript{(2.2)}}\\
+    Llama3-8B (FT) & 59.2\textsubscript{(0.4)} & \textbf{80.8}\textsubscript{(0.4)} & 80.9\textsubscript{(0.9)} & 72.2\textsubscript{(1.3)} & \textbf{59.0}\textsubscript{(1.4)} & 79.6\textsubscript{(0.8)} & 46.6\textsubscript{(1.6)} & 46.8\textsubscript{(2.2)}\\
+    {Llama}3-8B (\X) & \textbf{59.6}\textsubscript{(0.4)} & \underline{80.2}\textsubscript{(0.4)} & \textbf{82.4}\textsubscript{(0.9)} & \textbf{73.8}\textsubscript{(1.2)} & 57.0\textsubscript{(1.5)} & \textbf{80.5}\textsubscript{(0.8)} & \textbf{48.5}\textsubscript{(1.6)} & \textbf{47.0}\textsubscript{(2.2)}\\
+    \bottomrule
+\end{tabular}
+}
+    \caption{ Performance comparison of LLMs before and after instruction tuning using Alpaca dataset. We report the performance of Llama2-7B, Llama2-13B, and Llama3-8B models for the following settings: pre-trained model, full training (FT), and slice-wise training (\X).  We observe {\X} achieves comparable performance to FT, even outperforming FT's performance in several datasets. This shows that {\X} allows parameter isolation without affecting the task performance.}
+    \label{tab:alpaca}
+\end{table}
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\textwidth, keepaspectratio]{results/glue_superglue.pdf}
+    \caption{ Comparison of the performance between slice-wise training and full training on vision datasets and GLUE \& SuperGLUE benchmarks. We report the overall Matthew’s correlation for CoLA, Pearson correlation for STS-B, and accuracy for other tasks. We observe that slice-wise training achieves similar performance to full training across all datasets. }
+    \label{fig:glue-spglue}
+\end{figure}
+
+\subsection{Deletion Performance}
+\label{sec:deletion}
+In this section, we evaluate the performance of {\X} as deletion requests are received.  In Figure~\ref{fig:del-performance} (left), we report the performance of {\X}, SISA~\citep{bourtoule2021machine}, and ProtoSISA~\citep{yan2022arcane}  on CIFAR-10 and CIFAR-100 datasets (all systems use $m=5$ shards, $L=4$ slices). In this experiment, we consider a uniform deletion prior over all slices. We also report the performance of full re-training, which retrains the model after each deletion request and serves as an upper performance bound. We report {\X}'s performance under various budgets. We observe that {\X} can achieve very close performance to the full budget ($B=24$) with a significantly smaller budget, $B=4$. For SISA and ProtoSISA, we observe that the plot ends after approximately 40 deletion requests as these systems do not have functioning models beyond this point. We observe that {\X} can handle more deletion requests while consistently outperforming the baseline approaches. Note that increasing the budget $B > L$ does not help improve the deletion rate but increases the probability of a better-performing model (as observed in Lemma~\ref{lem:del-rate}). 
+
+Next, we extensively evaluate the impact of increasing the training budget $B$ on the deletion rate (with $m=5$ shards \& $L=64$ slices). In Figure~\ref{fig:del-performance} (right), we observe that there is a steady growth in the deletion rate with an increasing budget. The growth is slightly higher in the initial stages when the budget is low and slows down gradually. This experiment provides empirical evidence to our theoretical result in Lemma~\ref{lem:perf}, which claims that the performance improves with an increased budget. 
+
+\subsection{Analysis}
+\label{sec:analysis}
+In this section, we conduct analysis experiments to evaluate different components within {\X}.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\textwidth, keepaspectratio]{results/del_performance.pdf}
+    \caption{ (\textit{Left}) We report the impact on performance of {\X} and baselines with an increasing number of deletion requests. We observe that {\X} can handle a higher number of deletion requests while maintaining high performance with a relatively low budget (\textcolor{red}{$\mathbf{\bigotimes}$} indicates the failure points). (\textit{Right}) We report the deletion rate of {\X} with an increasing budget and observe steady growth.}
+    \label{fig:del-performance}
+\end{figure}
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\textwidth, keepaspectratio]{results/deletion.pdf}
+    \caption{We report the deletion rate of {\X} and compare it with baselines. (\textit{Left}) We compare the deletion rates of {\X} under varying budgets with {SISA} and observe significant gains. (\textit{Center}) We report the deletion rates with an increasing number of shards and (\textit{Right}) an increasing number of slices. In both scenarios, we observe that {\X}'s deletion rate grows significantly faster than SISA.}
+    \label{fig:deletion}
+\end{figure}
+
+\textbf{Deletion Ablations}. 
+We evaluate the deletion capabilities of {\X} and compare with the theoretical bounds. In Figure~\ref{fig:deletion} (left), we report the deletion rate of {\X} and SISA for the setup (with $m=5$ shards, $L=32$ slices). We observe that with a small budget $B=8$, {\X} can achieve 1.6x gains in the number of deletion requests handled. We also plot the theoretical bounds derived in Section~\ref{sec:theory} and show that they hold in practice. 
+
+In Figure~\ref{fig:deletion} (center \& right), we report the model performance with varying shard and slice counts. As expected, we observe that both increasing the shards and slicing the data more helps in improving the deletion performance. 
+However, the rate of growth in deletion rate is more significant for {\X} resulting in up to 2.3x and 3x gains over SISA for the same number of shards and slices respectively.
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.98\textwidth, keepaspectratio]{results/perm_selection.pdf}
+    \caption{ We evaluate the performance of iterative cyclic rotation and  bipartite matching-based selection (BMS). (\textit{Left}) We observe that cyclic rotation selection consistently outperforms random sampling for all budgets, $1 \leq B \leq 120$ (with fixed $L=5$). (\textit{Center}) We evaluate the average edit distance of the sequences generated by BMS and observe that it achieves the optimal edit distance ($L$). (\textit{Right}) We also observe that sequences from BMS achieves higher scores than random sampling.  }
+    \label{fig:seq-exp}
+\end{figure}
+
+{
+\parfillskip=0pt
+\parskip=0pt
+\par}
+\begin{wrapfigure}[17]{R}{0.43\textwidth}
+\includegraphics[width=0.41\textwidth, keepaspectratio]{results/total_deletion_time.pdf}
+\caption{We compare the deletion time as the number of deletion requests increases. {\X} requires the lowest deletion time compared to SISA and full re-training.}
+\label{fig:del_time}
+\end{wrapfigure}
+\textbf{Sequence Selection}. We evaluate the quality of the sequences generated by the iterative cyclic rotation and BMS algorithm (Section~\ref{sec:budget}). Ideally, we want the selected sequences to be diverse and should have a high edit distance between sequences. Therefore, we report the average edit distance within a selected subset, $O$: $\mathbb{E}_{o \in O}[d_{\mathrm{edit}}(o, o')]$. First, we consider the setting where the deletion prior is uniform and compare cyclic rotation with random sampling.  In Figure~\ref{fig:seq-exp} (left), we report the average edit distance with varying budget ($B$) while the slice count ($L$) is fixed. We observe that cyclic rotation produces significantly better sequences than random sampling. Second, we consider slices associated with a deletion prior. We present the results by averaging over 10 deletion priors sampled from a Dirichlet distribution.
+ In Figure~\ref{fig:seq-exp} (center \& right), we observe that BMS consistently outperforms random sampling both in terms of diversity (avg. edit distance) and chosen sequence scores ($\mathrm{score}[\mathcal{S}, t]$). 
+\textbf{Deletion Time}. Unlearning in {\X} is cost-effective; it primarily involves selecting the best checkpoint and swapping with the current one. The main cost is incurred when a large number of deletion requests necessitate re-training the system from scratch. In Figure~\ref{fig:del_time}, we report the total deletion time as the number of deletion requests increases, which includes the checkpoint swapping and re-training time. In this experiment, we compare the deletion time of {\X} with SISA and full re-training on CIFAR10 dataset. Full re-training retrains the model after each deletion request.   For SISA and {\X}, the step jumps indicate that the system requires retraining. Overall, {\X} achieves the lowest deletion time. {\X} reduces the total deletion time (after 1000 requests) by 2.8x compared to SISA and 25x compared to full retraining. This experiment shows the efficacy of {\X} in reducing the overall deletion time.
+
+
+
+\section{Conclusion}
+
+In this paper, we introduced {\X}, an effective framework for performing exact unlearning. {\X} uses a modular machine learning model that is trained using disjoint shards of the data. Each shard is used to train a different model using a lightweight fine-tuning approach that enables parameter isolation, which allows us to execute unlearning requests efficiently. The key idea behind {\X} is to train multiple models using different sequences of slices before deploying the system. This helps reduce retraining costs and improve the model's performance while the model is in production. Both theoretically and empirically, we show that {\X} has significantly improved deletion capabilities compared to existing approaches. Future work can focus on developing techniques for finer-grained parameter isolation to further improve {\X}'s performance.
+
+
+
+

@@ -1,0 +1,504 @@
+\title{Realistic Evaluation of Model Merging for Compositional Generalization}
+
+\begin{abstract}
+Merging has become a widespread way to cheaply combine individual models into a single model that inherits their capabilities and attains better performance.
+This popularity has spurred rapid development of many new merging methods, which are typically validated in disparate experimental settings and frequently differ in the assumptions made about model architecture, data availability, and computational budget.
+In this work, we characterize the relative merits of different merging methods by evaluating them in a shared experimental setting and precisely identifying the practical requirements of each method.
+Specifically, our setting focuses on using merging for \textit{compositional generalization} of capabilities in image classification, image generation, and natural language processing.
+Additionally, we measure the computational costs of different merging methods as well as how they perform when scaling the number of models being merged. 
+Taken together, our results clarify the state of the field of model merging and provide a comprehensive and rigorous experimental setup to test new methods.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+The release of performant pretrained models like LLaMA \cite{touvron2023llama, touvron2023llama2}, Stable Diffusion \cite{rombach2022high,podell2023sdxl}, and CLIP \cite{radford2021learning}, alongside the development of efficient ways to fine-tune large models \cite{dettmers2024qlora}, has led to a widespread proliferation of fine-tuned models that are specialized to specific use cases.
+Hundreds of thousands of these specialized models are shared in repositories like the HuggingFace Hub.\footnote{\url{https://huggingface.co/docs/hub/en/index}}
+\textit{Model merging} \citep{raffel2023building} aims to recycle specialized models to create new improved models that generalize to new settings.
+Merging methods vary in sophistication from simply averaging the model parameters \cite{choshen2022fusing} to solving a linear system of equations that captures the importance of each parameter \cite{tam2023merging}.
+Beyond retaining---or improving---performance on tasks the constituent models were trained on, merging aims to compositionally combine the capabilities of the constituent models, thus enabling generalization to new tasks.
+Model merging has exploded in popularity as it provides an effective and extremely low-cost way to create new models---for example, many of the top models on the Open LLM Leaderboard\footnote{\url{https://huggingface.co/spaces/HuggingFaceH4/open_llm_leaderboard}} were created through model merging.
+The growing popularity of merging has led to the recent development of many new merging methods \cite[\textit{inter alia}]{tam2023merging, matena2022merging, ilharco2022editing, yadav2023resolving, jin2022dataless,  yang2023adamerging, yu2023language, zhao2024adamergex, shah2023ziplora}.
+This proliferation naturally raises the question: Which method works best in a particular settings?
+However, different merging methods are rarely evaluated in the same experimental setting, which makes comparison challenging.
+Additionally, merging methods impose different requirements in terms of computational costs, data availability, and hyperparameter tuning.
+
+Our goal in this work is to better characterize the performance and merits of different merging methods by providing a rigorous comparison in a shared experimental setting.
+Most past work evaluates merging methods using the merged model's multitask performance on held-in tasks (\ie on the tasks the original constituent models were trained on).
+Instead, we primarily focus on measuring generalization to new tasks that require the compositional combination of capabilities.
+Apart from being a more challenging, we argue compositional generalization provides a more realistic motivation for merging:
+Assuming that merging does not improve performance on the held-in tasks (which it seldom does), the primary benefit of using merging to creat a multitask model is storage savings because one can always use the corresponding constituent model for a held-in task.
+On the other hand, compositional generalization can unlock new capabilities and applications that the individual models lack.
+
+To ensure our results are not modality-specific, we benchmark across image classification, image generation, and natural language processing.
+Since merging methods can be used to combine an arbitrary number of models, we also measure how each method scales with the number of merged models.
+In addition, we explicitly enumerate extra requirements of each method, including hyperparameters that require tuning, the amount of compute required, and whether auxiliary data is required for merging.
+Finally, to better contextualize the performance of merging methods, we compare to the often-neglected baselines of multitask training, single-model performance, and the performance of the pretrained base model.
+
+Our experimental results provide new insights that shed light on the promises and shortcomings of existing merging methods.
+Overall, we find that merging performance depends on the application---for example, we find that held-in task performance and generalization task performance are correlated in image classification but are \textit{anticorrelated} for natural language processing.
+Additionally, we find that increasing the number of models being merged tends to result in \textit{worse} multitask performance on held-in tasks but \textit{better} generalization performance on unseen tasks.
+As a whole, our results clarify the state of the field and highlight many paths forward for improving model merging.
+To encourage realistic and comprehensive evaluation of future merging methods, we release our code
+
+
+
+\section{Background}
+
+
+Model merging aims to cheaply combine models that share an architecture and an initialization (\ie a pretrained model) in order to create an aggregate model that retains the capabilities of the individual models.
+We refer to the models being merged as the ``constituent'' models, which typically are fine-tuned on different datasets that cover different tasks and/or domains and therefore have complementary capabilities.
+We refer to the datasets, tasks, and/or domains that the constituent models are trained on as ``held-in''.
+The specific goal of merging can vary, but can include improving performance on a target task, creating a multitask model, retaining the capabilities of a base model, or generalizing to new tasks.
+A popular use case of merging involves combining fine-tuned variants of Stable Diffusion that have been specialized to improve the quality of a particular style or object type (\eg merging a ``lego style'' model with a ``cute cat'' model to generate cats made out of legos) \cite{shah2023ziplora,zhong2024multi,gu2023mixofshow,yang2024loracomposer}.
+Merging has also been widely applied to combining fine-tuned variants of open-source language models to improve and broaden the capabilities of the base language model \citep{yadav2023resolving,yu2023language}.
+
+\subsection{Merging Methods}
+\label{sec:methods}
+
+An exhaustive comparison of merging methods is beyond the scope of this work, so we focus on eight popular merging methods that represent the diversity of approaches.
+We discuss additional methods in \cref{sec:related}.
+We use $\theta_m$ to denote the parameters of the merged model, $\theta_i\, i \in \{1, \ldots, M\}$ as the $M$ constituent models being merged, and $\theta_p$ as the base model which we assume all constituent models are fine-tuned from.
+Throughout this work, we assume all models are ``open vocabulary'', \ie they use natural language for classification or generation and do not require task-specific classification heads.
+
+\textbf{Simple Averaging} \cite{mcmahan2017communication,wortsman2022robust,choshen2022fusing} uses an element-wise average of constituent model parameters $\theta_m = \frac{1}{M}\sum_i \theta_i$.
+
+\textbf{SLERP} \cite{shoemake1985slerp} interpolates models along the curved path connecting them (instead of along the direct line used in simple averaging). To merge more than two models, we use MLERP \cite{kim2024token}, which computes a norm-preserving average.
+
+\textbf{Task Arithmetic} \cite{ilharco2022editing} constructs a ``task vector'' $\tau_i = \theta_i - \theta_p$ for each constituent model.
+The merged model is created by adding the sum of the task vectors, scaled by a hyperparameter $\lambda$, to the the pretrained model, $\theta_m = \theta_p + \lambda \sum_i \tau_i$.
+
+\textbf{DARE} \cite{yu2023language} extends Task Arithmetic by applying dropout to the task vectors.
+Parameters from each task vector are randomly zeroed out with probability $p$ using mask $M_i \sim \mathrm{Bernoulli}(p)$ and rescaled such that the expected value of the task vector is maintained.
+The modified task vectors $\tau'_i = \frac{(1 - M_i) \tau_i}{1-p}$ are then used as in Task Arithmetic.
+
+\textbf{TIES} \cite{yadav2023resolving} improves Task Arithmetic by zeroing out values in each task vector with low magnitude.
+A aggregate sign for parameter is chosen based on if the positive or the negative parameters have higher total magnitude.
+Finally, the parameters from each model that match the aggregate sign are added as in Task Arithmetic.
+    
+\textbf{Fisher Merging} \cite{matena2022merging} merges models by finding a set of parameters that maximizes the joint posterior distribution of the constituent models.
+Posteriors are estimated via the Laplace approximation---a normal distribution with mean $\theta_i$ and the inverse of the Fisher information matrix \cite{amari1998natural} for covariance.
+Fisher merging uses the closed-form solution $\theta_m = \sum_i F_i \odot \theta_i / \sum_i F_i$ where $F_i$ is the diagonal Fisher of model $i$.
+
+\textbf{RegMean} \cite{jin2022dataless} merges each linear layer by finding a weight matrix that minimizes the L2 distance between the activations of constituent models and the merged model.
+This can be cast as least squares regression between the input and output activations for each linear layer.
+Let $Z_i \in \mathbb{R}^{L_i \times k}$ be the collection of $L_i$ activations, each of dimensionality $k$, computed over examples from the dataset used to train constituent model $i$, and let $W_i$ be the parameters of some particular linear layer in model $i$.
+The closed form solution for least squares regression yields the the merged weight matrix, $W_m = \bigl(\sum_i \frac{1}{L_i} Z_i^{\top} Z_i \bigr)^{-1} \bigl(\sum_i \frac{1}{L_i}(Z_i ^{\top} Z_i)  W_i\bigr)$.
+Other parameters are merged via simple averaging.
+Note that only the gram matrix of the input activations for each model $Z_i^{\top}Z_i$ are required to compute the merge.
+
+\textbf{MaTS} \cite{tam2023merging} unifies Fisher Merging and RegMean by solving a linear system that implicitly upweights models along the most important directions in parameter subspace for performing the fine-tuning task.
+The linear system is solved using the conjugate gradient \cite{hestenes1952methods} method, which allows for better approximations of the Fisher Information Matrix.
+Parameters not in the linear layers are merged via simple averaging.
+
+\subsection{Challenges in Comparing Merging Methods}
+
+The rapid pace of development of merging methods has led to a lack of standardization around the experimental setup used to validate each method as well as the practical assumptions each method makes. To motivate our work, we begin by highlighting these differences.
+
+\textbf{Different Goals}
+Papers presenting new merging methods often perform evaluation with different goals.
+For example, \citet{matena2022merging} explored an intermediate-task setup that aims to improve performance on a ``downstream'' task by merging with a model trained on a ``donor'' task, whereas \citet{ilharco2022editing} study the problem of creating a multitask model by merging models fine-tuned on different tasks.
+In our work, we primarily focus on whether merging can enable compositional generalization of the capabilities of the constituent models. 
+We argue that compositional generalization realistic goal because it reflects typical use cases of merging (\eg combining styles or objects in image generation models or enabling zero-shot generalization to new tasks for language models \citep{sanh2021multitask}).
+In addition, as we will demonstrate, current merging methods often struggle to provide compositional generalization, making it a challenging and meaningful evaluation setting.
+\textbf{Different Experimental Setups:}
+Past works on merging rarely use a common experimental setup---\ie they differ in terms of the models and datasets they consider.
+For example, \citet{jin2022dataless} validate RegMean by merging fully fine-tuned variants of DeBERTa-large \cite{he2020deberta}, while \citet{yadav2023resolving} merged variants of T5-XL-LM-Adapt \cite{lester2021power} that were fine-tuned using $\mathrm{(IA)}^3$ \cite{liu2022few}.
+Furthermore, \citet{jin2022dataless} merged models trained on $8$ GLUE \cite{wang2018glue} datasets whereas \citet{yadav2023resolving} considered $11$ prompted datasets from the Public Pool of Prompts (P3) \cite{bach2022promptsource}.
+While sharing an experimental setup is rare, there are some exceptions---for example, \citet{tam2023merging} and \citet{yadav2023resolving} both replicate the setup of \citet{ilharco2022editing} for their vision experiments.
+
+\textbf{Different Prerequisites}:
+Simple merging methods like parameter averaging require only the constituent model parameters to perform a merge.
+More sophisticated merging methods can require access to additional models or statistics.
+For example, Task Arithmetic requires access to the pretrained model that all the constituent models were fine-tuned from and Fisher Merging requires access to the diagonal of the Fisher Information Matrix for each constituent model.
+Since fine-tuned models are typically shared as parameter values alone, these prerequisites are often not available and/or must be separately computed.
+
+\textbf{Different Compute}:
+The computational expense of different merging methods can also vary.
+Parameter averaging, Task Arithmetic, TIES Merging, DARE, and Fisher Merging primarily involve elementwise addition and multiplication of parameter values and therefore have relatively low computational costs.
+On the other hand, RegMean requires a matrix inverse for each linear layer (whose cost scales cubically with the activation dimension) and MaTS solves a linear system of equations with the conjugate gradient method.
+These operations incur a significant increase in computational cost, an oft neglected consideration when new merging methods are proposed.
+Merging can also involve significant memory costs. Na\"ive implementations requires loading all model parameters into memory at once.
+For many merging methods, it is possible to load and merge each parameter ``group'' (\eg a weight matrix or bias vector) individually, as done in Git-Theta \cite{kandpal-etal-2023-git-theta}.
+For other merging methods, such as AdaMerging \cite{yang2023adamerging}, the entire of each model must be loaded simultaneously to perform a merge, preventing its use when memory is scarce.
+    
+\textbf{Different hyperparameter requirements}:
+Merging methods typically have hyperparameters---for example, the weight of each model for simple averaging and Fisher Merging, the scale of the task vectors in Task Arithmetic, TIES, and DARE, the scale of the non-diagonal entries of the gram matrix in RegMean, and the number of conjugate gradient iterations in MaTS.
+The sensitivity of each method to its corresponding hyperparameters is an important consideration in terms of its practical utility.
+
+
+
+\section{Comprehensive and Unified Evaluation of Merging}
+
+\label{sec:setup}
+
+Given the aforementioned challenges of comparing merging methods, we propose a rigorous and comprehensive evaluation setup.
+In this work, evaluate different merging methods' ability to both create multitask model that retains performance on constituent model training tasks (``held-in'') as well as generalize to new tasks or domains composed of the original tasks (``generalization'').
+Our focus on compositional generalization stems from the common use of merging to compose capabilities from different models.
+For example, given a model fine-tuned to learn skills \textit{A} and \textit{B} and a second model that learned skills \textit{C} and \textit{D}, can the merged model solve a task requiring skills \textit{A} and \textit{C}? 
+We test multitask performance and compositional generalization for cross-domain image classification and generation as well as cross-lingual language processing.
+While we only experiment with a single backbone model for each modality, the models we used in each settings are currently widespread for their specific settings. 
+Additionally, the specific models we used in each setting are the same as those used in past evaluations \cite{ilharco_gabriel_2021_5143773, yadav2023resolving, tam2023merging}.
+Wherever possible, we include the performance of three oft-neglected baselines: the original pretrained model, individual-task models, and a multitask model trained on all constituent-model datasets simultaneously.
+For held-in tasks, the individual-task baseline is the performance of constituent models before merging.
+For generalization tasks, individual-task performance represents the performance attainable from \textit{training} on held-out task-specific data (which is not available to the constituent models or merging methods).
+
+\subsection{Cross-Domain Image Classification and Generation}
+
+For our vision experiments, we use the DomainNet \cite{peng2019moment} dataset, which consists of $586$K images from $345$ classes (\eg ``apple'', ``shovel'', each of which has roughly 15 classes) grouped into $24$ categories (\eg ``fruit'', ``tool'') and $6$ domains (\eg ``drawing'', ``clipart''), and the splits from \citet{muqeeth2023soft}.
+We note that two classes occur in two different groups, as listed in \cref{app:tasks-and-domains}.
+\cref{fig:domainnet_setup} has examples of (task,~domain) combinations for DomainNet.
+
+\begin{figure}[!t]
+  \begin{minipage}[c]{0.34\textwidth}
+    \includegraphics[width=\textwidth]{figures/domainet_categories.pdf}
+  \end{minipage}\hfill
+  \begin{minipage}[c]{0.64\textwidth}
+    \caption{\textbf{Tasks that our image classification and generation models are trained on.}
+Each row denotes objects within a certain category (\eg fruit, bird, and tool) and the columns denotes different domains (\eg sketch, real, and clipart).
+Each (category,~domain) pair forms a different task---for example, the ``fruit sketch'' task involves generating or classifying sketches of fruits (\ie apples, bananas, etc).
+Each constituent model is trained on one of the held-in tasks along the diagonal (solid border).
+Compositional generalization is measured via the performance on the generalization tasks off of the diagonal (dashed border).
+}
+  \label{fig:domainnet_setup}
+  \end{minipage}
+\end{figure}
+
+For each of the $24$ tasks, we train a constituent model on images from a single domain and category.
+We measure compositional generalization on the remaining $5$ domains for each category, resulting in 120 (category,~domain) combinations for evaluation.
+See \cref{app:tasks-and-domains} for the full list of categories and domains.
+For classification, we fine-tune the CLIP ViT-B/32 vision encoder \cite{radford2021learning}, as done in previous merging work \cite{ilharco2022editing, yadav2023resolving}. 
+To avoid task-specific classification heads, we construct a unified classification head by stacking CLIP's text embeddings for each label.
+More details are available in \cref{app:training-details-domainnet}. 
+For generation we fine-tune Stable Diffusion 2.1 \cite{rombach2022high} using LoRA \cite{hu2021lora} as this is currently the de facto way to fine-tune image generation models.
+More training and evaluation details are available in \cref{app:training-details-image-generation}. 
+\subsection{Cross-Lingual Natural Language Processing}
+
+\begin{table*}[!b]
+\centering
+\ra{1.2}
+\setlength{\tabcolsep}{5.5pt}
+\footnotesize
+\rowcolors{2}{white}{gray!25}
+\begin{tabular}{l c c c c c}
+    \toprule
+    \textbf{NLP Task $\downarrow$ / Language $\rightarrow$ } & \textbf{English} & \textbf{Arabic} & \textbf{Thai} & \textbf{German} & \textbf{Korean} \\
+    Question-Answering (SQuaD/XQuaD) & \student   &  \scientist  &  \scientist  & \scientist & \\
+    Natural Language Inference (XNLI) & \scientist  &  \student   &  \scientist  &  \scientist  & \\
+    Summarization (WikiLingua) &  \scientist  &  \scientist  & \student    & \scientist    &  \scientist  \\
+    Word Sense Disambiguation (WiC/XLWiC) &  \scientist  & & & \student    & \scientist   \\
+    Is question answerable? (TyDiQA) &  \scientist  &  \scientist  &  \scientist  & & \student    \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{(task,~language) pairs used to evaluate cross-lingual compositional generalization.} Pairs marked \protect\student{} were used for fine-tuning; those marked \protect\scientist{} were used for evaluation. Ideally, every (task,~language) pair would have been used for evaluation, but not all combinations available.}
+\label{tab:cross_lingual_setup}
+\end{table*}
+
+For natural language processing, we consider $5$ distinct tasks (\eg question-answering, summarization, etc.) that have datasets available in different languages.
+We focus on cross-lingual generalization as it is only possible through compositional generalization due to differing writing systems, vocabulary, grammatical rules, etc.\ across languages.
+\Cref{tab:cross_lingual_setup} shows the chosen tasks and their available languages.
+To avoid ``leakage'' of language-specific capabilities, we intentionally chose disparate tasks---i.e., we avoided including similar tasks such as paraphrase identification and natural language inference.
+Not all tasks are available in all languages, so we only evaluate cross-lingual generalization on unseen (task,~language) pairs that are available.
+We use mT5-xl-lm-adapt \cite{xue2020mt5} as our base model, a multilingual version of T5 \cite{raffel2020exploring} that was adapted for language modeling by \citet{vu2022overcoming} since it is the only pretrained language model that supports all the languages we consider and comes from the same model family as previous merging papers \cite{yadav2023resolving}.
+We first fully fine-tune mT5-xl-lm-adapt on different tasks, each in a different language. After merging the constituent models, we evaluate performance on the held-in (task,~language) combinations in addition to unseen (task,~language) pairs to evaluate compositional cross-lingual generalization. 
+For all tasks, we use the standard evaluation metric and report average performance across all tasks.
+See \cref{app:training-details-cross-lingual} for more details on training procedures and evaluation metrics.
+
+
+
+\section{Results}
+
+\label{sec:results}
+
+Having described our experimental setup and practical considerations that differentiate merging methods, we now conduct an in-depth evaluation to provide a comprehensive picture of the field.
+Our evaluation covers generalization performance, method requirements, computational costs, hyperparameter sensitivity, scaling behaviour, and model size.  
+\subsection{Held-in and Generalization Performance}
+
+\begin{figure}[!h]
+  \centering
+  \begin{subfigure}[c]{\textwidth}
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/performance_legend.pdf}
+  \end{subfigure}\vfill
+  \begin{subfigure}[t]{0.31\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/domainnet_acc.pdf}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.31\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/domainnet_imagen_clip.pdf}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.31\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/cross_lingual_generalization.pdf}
+  \end{subfigure}\hfill
+
+ \caption{\textbf{Performance of different merging methods in the image classification, image generation, and natural language processing settings described in \cref{sec:setup}.}
+ For each method, we plot the performance on the held-in datasets against the performance on unseen datasets that require compositional generalization.
+ Additionally, we report the performance of the pretrained model, a multitask model trained on all held-in datasets at once, and the performance attained by training on a single task's data alone.
+Numerical values are provided in \cref{app:numerical-values}. }
+\label{fig:generalization}
+\end{figure}
+
+\paragraph{Comparing Methods}
+The held-in and generalization performance of each merging method we consider is shown in \cref{fig:generalization}.
+For each method, we plot the performance of the merged model on held-in datasets against the performance on datasets that require compositional generalization.
+For held-in performance, RegMean and MaTS work well on image classification and NLP, matching trends in previous benchmarks \cite{tam2023merging}, while for image generation, TIES works well.
+We note that Fisher Merging tends to generalize than RegMean and MaTS despite all three of methods implicitly minimizing the same objective \cite{tam2023merging}.
+This discrepancy could be due to Fisher Merging's looser approximation of the Fisher, which could improve generalization by reducing overfitting to the held-in tasks.
+For image classification and generation, we observe a loose positive correlation between a merging method's held-in and generalization performance. 
+This suggests that improving multitask performance of a model leads to improved general capabilities in this setting.
+Furthermore, for image generation, many merging methods outperform multitask training in terms of both held-in and generalization performance, highlighting the applicability and benefits of merging in this setting.
+In contrast, for NLP, the held-in and generalization performance is \textit{anticorrelated}---most merge methods underperform the pretrained model in terms of generalization.
+This discrepancy could stem from cross-lingual generalization being more difficult than cross-domain generalization; we may expect vision models that can classify drawn images to be able to reasonably classify clipart images, but we would not expect a model trained on English text to be able to generate text in Arabic (which does not even share a writing system with English). 
+In line with past work \cite{wortsman2022robust}, we find that while merging lags behind multitask models in terms of held-in performance, merged models can exhibit \textit{better} generalization to new domains than the multitask and pretrained models.
+Taken together, our results highlight the different behaviors of merging methods in different experimental settings and elucidate which settings pose challenges that could be tackled in future research on merging.
+
+\subsection{Prerequisites}
+\label{sec:prereq}
+
+\begin{table}[t!]
+    \centering
+    \footnotesize
+    \rowcolors{3}{gray!25}{white}
+    \begin{tabular}{l c c c c c c}
+      \toprule
+                                                & \multicolumn{3}{c}{\textbf{Prerequisites}}           &                                         & \multicolumn{2}{c}{\textbf{Computational cost (FLOPs)}} \\
+      \cmidrule{2-4}\cmidrule{6-7}
+       & $\mathbf{\theta_p}$ & \textbf{Stats} & \textbf{Data} & \multirow{-2}{*}{\textbf{Hparams?}} & \textbf{Merging} & \textbf{Statistics}\\
+      Average         &                      &            &                      &                          &                      $Mdk$ &                    \\
+      SLERP           &                      &            &                      &                          &  $\mathcal{O}((5M - 2)dk)$ &                    \\
+      Task Arith. & \xmark\phantom{$^*$} &            & \xmark\phantom{$^*$} & \checkmark\phantom{$^*$} &                 $(2M+1)dk$ &                    \\
+      DARE            & \xmark\phantom{$^*$} &            & \xmark\phantom{$^*$} & \checkmark\phantom{$^*$} &                 $(6M+1)dk$ &                    \\
+      TIES            & \xmark\phantom{$^*$} &            & \xmark$^*$           & \checkmark$^*$           &               $(4M + 1)dk$ & $\mathcal{O}(MKdk)$ \\
+      Fisher          &                      & \xmark$^*$ & \xmark$^*$           &                          &               $(3M - 1)dk$ &           $4MTd^2k$ \\
+      RegMean         &                      & \xmark$^*$ & \xmark$^*$           & \checkmark\phantom{$^*$} & $\mathcal{O}((M + 2)d^2k)$ &            $MTd^2k$ \\
+      MaTS            &                      & \xmark$^*$ & \xmark$^*$           & \checkmark\phantom{$^*$} & $\mathcal{O}((M + N)d^2k)$ &           $4MTd^2k$ \\
+      \bottomrule
+    \end{tabular}
+    \caption{\textbf{Practical differences between merging methods along different axes.} \textbf{Prerequisites:} An \xmark{} denotes merging methods that require the pretrained model parameters, statistics from the pretrained model and/or fine-tuning dataset, or access to data during the merge. Some requirements are optional, denoted as \xmark$^*$, \eg if model statistics are distributed in conjunction with parameters then data is not required. \textbf{Hyperparameters:} Merging methods with a \checkmark{} require tuning their hyperparameters. TIES includes performant default hyperparameters, making tuning optional, denoted \checkmark$^*$. The hyperparameter values we used can be found in \cref{tab:hyperparameters}. \textbf{Computational Cost:} Different methods also have different computational costs. ``Merging'' costs are incurred during each merge, while ``Statistic'' costs can be computed once and reused. The tables show the cost of merging a single $d \timestight k$ linear layer across $M$ models. See \cref{app:computational-cost} for exact costs.}
+    \label{tab:prereq+compute+hp}
+\end{table}
+
+While performance is often the main focus of new merging methods, we highlight other practical requirements that make different merging methods more or less attractive or applicable.
+To better elucidate these requirements, in \cref{tab:prereq+compute+hp} we categorize each merging method in terms of whether it requires access to the shared \textbf{pretrained model}, requires auxiliary model \textbf{statistics} (\eg the diagonal of the Fisher Information Matrix or the Gram matrix of input activations), and/or requires \textbf{data access} to perform a merge.
+On the whole, the merging methods we study fall into three categories:
+Simple averaging has no prerequisites, which may explain its continued popularity.
+Task Arithmetic and its derivative methods (DARE and TIES) require access to the pretrained model and data to tune hyperparameters (although \citet{yadav2023resolving} report a single value that generally works well).
+Finally, Fisher Merging, RegMean, and MaTS require constituent model statistics or data to compute required statistics.
+Such statistics are a form of auxiliary information that is rarely shared along with fine-tuned models which may explain why these methods are rarely used in practice despite their relatively strong performance.
+Methods that require access to data typically use a small validation set of \mytilde$1{,}000$ examples. 
+While the theoretical motivations of Fisher Merging require computing the Fisher on the training set, we follow \citet{tam2023merging} and use the validation set since performance is comparable and it simplifies comparison to methods that require a validation set.
+
+\subsection{Computational costs}
+
+\begin{figure}[!h]
+  \begin{subfigure}[c]{\textwidth}
+    \centering
+    \includegraphics[width=0.65\textwidth]{figures/compute_legend.pdf}
+  \end{subfigure}\vfill
+  \begin{subfigure}[t]{0.33\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/domainnet_in_dist_compute.pdf}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.31\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/generation_in_dist_compute.pdf}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.31\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/cross_lingual_in_dist_compute.pdf}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.31\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/domainnet_out_dist_compute.pdf}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.31\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/generation_out_dist_compute.pdf}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.31\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/cross_lingual_out_dist_compute.pdf}
+  \end{subfigure}\hfill
+  \caption{\textbf{The computational cost \vs performance for each merging method.} For the computational cost, we report the upper bound of the number of FLOPs required to merge a single layer (see \cref{app:hyperparameter-details} for details).}
+  \label{fig:performance-vs-compute}
+\end{figure}
+
+Another consideration when applying model merging is the amount of compute required to perform a merge.
+\cref{tab:prereq+compute+hp} shows the cost of various methods to merge a single linear layer.
+We see two classes of methods emerge: ones that run in $\mathcal{O}(dk)$ time and others that run in $\mathcal{O}(d^2k)$, where $d$ and $k$ refer to the input and output dimensions of a given linear layer.
+Since \cref{tab:prereq+compute+hp} deals with the limiting behavior, we examine the real-world costs by plotting the number of FLOPs required for each method against performance in \cref{fig:performance-vs-compute}.
+We see that, loosely speaking, more expensive merging methods tend to work better.
+In particular, the relatively expensive RegMean and MaTS methods are the most performant for held-in tasks, matching previous findings that focus on multitask performance.
+However, when measuring generalization performance, we note that the benefits of MaTS and RegMean can vanish (particularly when targetting cross-lingual generalization).
+Notably, the cost of different merging methods varies by almost two orders of magnitude, suggesting that the computational cost of a given merging method is an important consideration.
+Details of our FLOPs calculations can be found in \cref{app:computational-cost}.
+\subsection{Hyperparameter Sensitivity}
+\label{sec:hyperparameters}
+\begin{figure}[!h]
+  \centering
+  \begin{subfigure}[c]{\textwidth}
+    \centering
+    \includegraphics[width=0.73\textwidth]{figures/hyperparameter_legend.pdf}
+  \end{subfigure}\vfill
+  \begin{subfigure}[t]{0.31\textwidth}
+  \centering
+    \includegraphics[width=\textwidth]{figures/domainnet_in_dist_hyperparameter.pdf}
+  \end{subfigure}\hfill
+  \centering
+  \begin{subfigure}[t]{0.31\textwidth}
+  \centering
+    \includegraphics[width=\textwidth]{figures/domainnet_in_dist_hyperparameter_imagen_clip.pdf}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.31\textwidth}
+  \centering
+    \includegraphics[width=\textwidth=]{figures/cross_lingual_in_dist_hyperparameter.pdf}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.31\textwidth}
+  \centering
+    \includegraphics[width=\textwidth]{figures/domainnet_generalization_hyperparameter.pdf}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.31\textwidth}
+  \centering
+    \includegraphics[width=\textwidth]{figures/domainnet_generalization_hyperparameter_imagen_clip.pdf}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.31\textwidth}
+  \centering
+    \includegraphics[width=\textwidth]{figures/cross_lingual_generalization_hyperparameter.pdf}
+  \end{subfigure}\hfill
+ \caption{\textbf{Hyperparameter sensitivity of each merging method.} We plot the performance of each merging method as we sweep their respective hyperparameters. We index possible hyperparameter values from $0$ to $10$ as the specific hyperparameters and their ranges differ between merging methods. 
+ This captures the robustness of merging methods to different hyperparameters, regardless of the specific values.
+ See \cref{app:hyperparameter-details} for a description of the hyperparameters. 
+}
+    \label{fig:hyperparameters}
+\end{figure}
+
+Merging methods with hyperparameters (highlighted in \cref{tab:prereq+compute+hp}) often have different sensitivities to hyperparameter choice.
+This can heavily impact the practical utility of a given merging method.
+Previous works generally report performance for the best hyperparameter values, which can obscure their sensitivity.
+Additionally, hyperparameter tuning requires more compute and access to data, which may not always be available. 
+Therefore we compare the robustness of different merging methods to hyperparameter choice.
+We sweep the hyperparameters as described in \cref{app:hyperparameter-details} using values from \cref{tab:hyperparameters} for each method.
+Note that some merging implementations introduce per-model scaling hyperparameters, but we set these weights to $1/M$ and therefore omit their consideration as a hyperparameter.
+
+The results of our sweep are shown in \cref{fig:hyperparameters}.
+We find that merging methods vary significantly in their hyperparameter sensitivity.
+For example, Task Arithmetic and TIES both exhibited significant sensitivity to the scaling hyperparameter $\lambda$, whereas DARE was robust to changes in the dropout probability $p$ (provided a good $\lambda$ is reused).
+Notably, held-in and generalization accuracy tend to be correlated across hyperparameters, suggesting that it is safe to tune hyperparameters on held-in datasets while aiming to maximize generalization performance.
+Simple Averaging and Fisher Merging generally attained reasonable performance, suggesting that they are a good choice when hyperparameter tuning is not possible.
+
+\subsection{Scaling}
+\label{sec:scaling}
+
+\begin{figure}[!h]
+  \centering
+  \begin{subfigure}[c]{\textwidth}
+    \centering
+    \includegraphics[width=0.73\textwidth]{figures/domainnet_scaling_legend_2row.pdf}
+  \end{subfigure}\vfill
+  \begin{subfigure}[t]{0.31\textwidth}
+  \centering
+    \includegraphics[width=\textwidth]{figures/domainnet_scaling_in_distribution.pdf}
+  \end{subfigure}\hfill
+  \centering
+  \begin{subfigure}[t]{0.31\textwidth}
+  \centering
+    \includegraphics[width=\textwidth]{figures/domainnet_scaling_in_distribution_imagen.pdf}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.31\textwidth}
+  \centering
+    \includegraphics[width=\textwidth=]{figures/cross_lingual_scaling_in_distribution.pdf}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.31\textwidth}
+  \centering
+    \includegraphics[width=\textwidth]{figures/domainnet_scaling_generalization.pdf}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.31\textwidth}
+  \centering
+    \includegraphics[width=\textwidth]{figures/domainnet_scaling_generalization_imagen.pdf}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.31\textwidth}
+  \centering
+    \includegraphics[width=\textwidth]{figures/cross_lingual_scaling_generalization.pdf}
+  \end{subfigure}\hfill
+ \caption{
+ \textbf{Performance of merging methods as the number of constituent tasks increases.}
+ Along the x-axis, we sample a subset of tasks $10$ times and report the mean held-in and generalization performance.
+ We additionally evaluate a pretrained model and a multitask model trained on all the held-in tasks on the sampled subsets.
+ Since the generalization datasets and the pretrained model are fixed, its generalization performance is shown as horizontal line.}
+    \label{fig:scaling}
+\end{figure}
+
+Thus far, we have merged all possible models in each experiment.
+In practice, the number of models being merged may vary in different applications.
+Therefore, we evaluate the performance of each merging method as the number of constituent models $M$ varies from $2$ to $24$.
+For each value of $M$, we draw $10$ samples of $M$ constituent models, perform a hyperparameter sweep for each method, and report the average performance on the held-in and applicable generalization tasks.
+See \cref{app:scaling-tasks-sampling} for more details.
+We only report the multitask performance of training on all tasks due to lack of computational resources.
+
+\cref{fig:scaling} shows the performance on as we scale the number of models being merged.
+We observe a clear trend across all methods: Held-in performance tends to \textit{decrease} as the number of constituent models increases, whereas the generalization performance generally \textit{increases}.
+This is likely because increasing the number of models results in increased interference but expands the range of underlying capabilities, thereby improving generalization.
+This suggests that merging suffers from negative interference and/or insufficient capacity for held-in tasks.
+Conversely, merging can provide a promising way to improve generalization compared to multitask performance, especially when the number of constituent models is large.
+
+\subsection{Takeaways}
+\label{sec:takeaways}
+
+To summarize our empirical study, we highlight the following findings:
+
+\textbf{Merging performance can vary significantly across applications.}
+In particular, merging enables meaningful cross-domain generalization for image generation but still has lots of room for improvement for cross-lingual generalization.
+
+\textbf{Held-in performance and generalization performance are correlated for cross-domain generalization but anticorrelated for for cross-lingual generalization}, possibly because cross-lingual generalization is more challenging.
+
+\textbf{When scaling up the number of models being merged, held-in performance decreases whereas generalization performance increases}, though these trends plateau after around 10 models.
+
+\textbf{TIES generally provides a good trade-off between performance and practical considerations} such as prerequisites, compute, and hyperparameter tuning.
+
+\textbf{The prerequisites and computation requirements of a given merging method should be clearly stated}, as they can have a large impact on its applicability in different practical scenarios. For example, though RegMean and MaTS perform well (particularly for held-in performance), their need for statistics or data and higher computational cost probably explains why they are rarely used in practice.
+
+\textbf{Some merging methods such as Task Arithmetic and TIES exhibit significant hyperparameter sensitivity}, which should be seen as a limitation given that hyperparameter tuning requires data access and incurs nontrivial computational costs.
+
+
+
+\section{Related Work}
+
+\label{sec:related}
+
+In this work, we focus solely on the merging methods discussed in \cref{sec:methods}, which we chose based on their popularity and diversity.
+However, the popularity of model merging has led to a larger and ever-growing body of merging methods.
+Since we omitted many of these methods from this study due to practical considerations, we briefly survey them here.
+Tangent Task Arithmetic \cite{ortiz2023task} fine-tunes models in the tangent space for better weight disentanglement when using Task Arithmetic. 
+\citet{daheim2023elastic} combine Fisher Merging with Task Arithmetic which is shown to help prevent the mismatch in gradients.
+\citet{akiba2024evolutionary} explore using evolutionary algorithms to choose which layers to merge.
+\citet{tang2023concrete} learn a mask to select parameters that are important for the merged model. 
+\citet{jiang2023effective} propose pruning task vectors to allow for efficiently loading during inference. 
+\citet{ye2023merging} trains a gating network that predicts the weights of a weighted average of examples during inference.  
+\citet{tang2024merging} train a router between the different models using unlabeled data.
+Several works focused on merging models with different initializations via permutation \cite{ainsworth2022git,yamada2023revisiting,singh2020model,jordan2022repair}. 
+These are baesed on the hypothesis that although models lie in different basins of the loss landscape (\ie are not linear mode connected \cite{frankle2020linear,juneja2022linear}), once permutational invariances are accounted for, the models will lie in the same basin \cite{entezari2021role}. 
+\citet{stoica2023zipit} extend this idea to merging models with different dimensions by expanding and permuting features. 
+Other applications of model merging include intermediate-task training \cite{choshen2022fusing,gueta2023knowledge} and merging models with different modalities \cite{sung2023empirical}.
+
+Combining individual-task models to attain compositional generalization is the focus of much related work.
+For example, both \citet{pfeiffer2020mad} and \citet{vu2022overcoming} tackle cross-lingual generalization by training separate ``task'' and ``language'' adapters. They then swap out adapters during inference to generalize to new (task,~language) combinations.
+Similarly, AdaMergex uses task/language vector arithmetic for cross-lingual generalization \cite{zhao2024adamergex}.
+CALM trains a cross-attention module to compose constituent model skills, however, it requires access to a (small) generalization data \cite{bansal2024llm}.
+
+
+
+\section{Conclusion}
+
+Our work has clarified the state of model merging by conducting an empirical study of merging methods in a comprehensive and rigorous experimental setting.
+Specifically, we evaluate eight merging methods across three settings covering natural language processing and image classification and generation.
+We compare both the performance of merging methods and the practical considerations that make them more or less attractive in different applications.
+Our findings, summarized in \cref{sec:takeaways}, identify important paths and best practices for future work on model merging.
+We hope our findings and released code will help accelerate and unify future work on model merging.
+
+
+

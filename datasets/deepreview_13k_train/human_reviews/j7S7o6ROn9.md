@@ -1,0 +1,139 @@
+# Distributional Structured Pruning by Lower bounding the Total Variation Distance using Witness functions
+
+- Decision: Reject
+- Scores: 3, 6, 6
+
+## Abstract
+Recent literature introduced the notion of distributional structured pruning (DSP) in Deep Neural Networks by retaining discriminative filters that can effectively differentiate between classes.  Crucial to  DSP is the ability to estimate the discriminative ability of a filter, which is defined by the minimum pairwise Total Variation (TV) distance between the class-conditional feature distributions. Since the computation of TV distance is generally intractable, existing literature assumes the class-conditional feature distributions are Gaussian, thereby enabling the use of the tractable Hellinger lower bound to estimate discriminative ability. However, the Gaussian assumption is not only restrictive but also does not typically hold. In this work, we address this gap by deriving a lower bound on TV Distance which depends only on the moments of witness functions. Using linear witness functions, the bound establishes new relationships between the TV Distance and well-known discriminant-based classifiers, such as Fisher Discriminants and Minimax Probability machines. The lower bounds are used to produce a variety of pruning algorithms called WitnessPrune by varying the choice of witness function. We empirically show that we can achieve up to 7\% greater accuracy for similar sparsity in hard-to-prune layers using a polynomial witness function as compared to the state-of-the-art.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper presents a simple lower bound on the total variation (TV) distance between two distributions, and uses it to design novel pruning algorithms. To illustrate the basic idea in neural network pruning algorithms, consider a binary classification setup and class-conditional “feature” distributions (i.e., distribution of activations for each layer in the neural network). The approach considers a neuron “uninformative” if the TV distance between its conditional distribution for label 0 and label 1 is small, and prunes it. TV distance between high-dimensional distributions is in general difficult to compute, and the fact that we usually only have samples, not the densities, makes this issue even worse. The authors claim that their simple lower bound provides a more “tractable” alternative, though it is not clear what they mean by “tractable” in this context.
+
+### Strengths
+Overall, the paper is well-written. The ideas are clearly presented and I appreciate the simplicity of the TV lower bound and the straightforward application to pruning.
+
+### Weaknesses
+The paper leaves a lot of issues, both theoretical and practical, unaddressed. Thus, I am inclined to reject this paper at the moment, but I do see substantial potential in it should the authors address the issues mentioned below.
+
+The most glaring issue is that the TV lower bound is stated only in terms of populational quantities, such as exact moments of the distribution. In practice, these quantities have to be *estimated* from finitely many samples. The regime the authors seem to have in mind is the fixed-dimension infinite-samples setting. However, for neural network pruning, their main application, a *high-dimensional* scaling in which the data dimension and the number of samples grow proportionally would be a more pertinent setting to analyze. This greatly complicates the analysis for their lower bound since one would need to analyze the estimation error in their moment functional. Even the simple task of estimating moment tensors of high-dimensional distributions can be tricky. Hence, a finite sample analysis of their lower bound is warranted.
+
+Another issue, which is mostly of theoretical interest, is that the lower bound can be extremely loose in some cases. It would be helpful if the authors could provide some insights on the weakness of their lower bounds to provide a more balanced perspective. For example, it is well-known that for any positive integer k, there exists a discrete distribution that exactly matches the first k moments of the standard Gaussian (see e.g., [DKS17]). If P is this moment matching discrete distribution and Q is   the standard Gaussian, then TV(P,Q) = 1 but the lower bound is 0.
+
+### Questions
+- Can the authors explain why a “witness function” is named as such? My guess is that it comes from the general form of the lower bound from A.1 and the authors view it as the function that achieves the supremum (a “witness” of the supremum), but it would be helpful to explain the term in the introduction.
+- The use of descriptor “robust” when they say “robust lower bound” is somewhat misleading. “Robust” is typically used in the context of estimation, but there is no estimation analysis in this paper.
+- Can \varphi be non-polynomial? The defining condition for \varphi: R^d \to R^n is that its expectation is a function of only the first k moments. Are there any non-polynomial functions that satisfy this condition?
+- p.6 saliency score r_j^\ell subscript and superscript are reversed before Eq.(7).
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The paper discusses distributional structured pruning in deep neural networks by introducing new lower bounds on TV Distance that depends on moments of witness functions. The paper introduces a new algorithm "WitnessPrune" that utilizes the lower bounds for pruning. The paper discusses both theoretical justification of this algorithm and provides some experimental evidence supporting the effectiveness of WitnessPrune in pruning.
+
+### Strengths
+Originality and significance: While the topic of pruning has existed within the literature, the paper presents interesting contributions, both theoretically and empirically, that were shown to improve upon state of the art. Judging from this, the paper presents good originality and significance, and the topic is relevant to ICLR.
+
+Quality and clarity: Overall, the quality and clarity of the paper is decent, but can be improved with further revision. The paper effectively guides the reader via usage of questions and discussions. There are some issues surrounding the formatting of references, typos, etc., though. More suggestions regarding quality and clarity are presented in the following section.
+
+Interesting-ness of results: The proofs and techniques presented within the paper is also interesting and insightful by itself. For example, the proofs stated in sections A.1 and A.2 in the appendix are simple, clean and to the point.
+
+### Weaknesses
+Overall, there are not too many major weaknesses. Some additional questions regarding technicalities are listed in the following "Questions" section. Here, only weaknesses in overall presentation are discussed.
+
+Potential breach of anonymity: In Table 1, there is a column with header "TVSPrune(Murti et al., 2022) (our work)". 
+
+Clarity issues: In certain parts of the paper, clarity issues cause confusion when reading. Some examples include:
+- Formatting of references. The paper chooses to use references without separations from text. While this is suitable for some scenarios, in other situations it obstructs the flow of the reading, and it may be beneficial to update the references in these situations. This can likely be changed quite easily.
+- Unclear definitions. There are multiple sections of the paper that can be revised to make definitions clearer. One example is in Section 2.2: the very first sentence abruptly ends with a "..., and let."
+Formatting issues and typos throughout the paper should be revised and updated.
+
+### Questions
+Some minor questions for clarification and discussions:
+
+1. In Section 4.1, there is an assumption that that functions "g" and "G" exist. How strict is this assumption and how does it affect the main results?
+
+2. Are there theoretical justifications on whether WitnessPrune is generally preferable over previous methods such as TVSPrune?
+
+3. Regarding Table 1, why is CHIP unavailable for VGG19? Is it possible to produce the numbers for that experiment? Also, regarding Table 1, how are the sparsity levels in the "Param. Sparsity" selected? 
+
+4. While there are some discussions on the variants of WitnessPrune in the appendix, it is not discussed thoroughly and the clarity there is lacking. Are there additional experiments to discuss the effectiveness of these variants?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper introduces an innovative concept of 'witness functions,' providing a more accurate and reliable framework for estimating the Total Variation (TV) distance between probability distributions. This theoretical insight has practical implications, particularly in the realm of neural network pruning. By applying the witness function methodology, the authors develop 'WitnessPrune' which is an algorithm that efficiently identifies and eliminates redundant elements in neural networks, thereby optimizing their performance without sacrificing accuracy. The paper also bridges theoretical understanding and practical application by establishing insightful connections between discriminant-based classifiers and the TV distance, enhancing the robustness of machine learning models.
+
+### Strengths
+1. The paper introduces a pioneering approach to neural network pruning that deviates from the standard assumption of Gaussian-distributed class-conditional features. By employing a witness function-based strategy for lower bounding the Total Variation (TV) distance, the research not only addresses the limitations of previous methodologies but also enhances the precision of distributional pruning.
+2. The introduction of the WITNESSPRUNE algorithms, derived from these theoretical foundations, which could optimize neural network performance significantly, particularly in resource-sensitive applications.
+
+### Weaknesses
+1.  The paper seems to lack extensive testing across a diverse range of neural network architectures and data distributions. This limitation raises concerns about the applicability of the proposed methods in various real-world scenarios and different neural network models. Specifically, the experiments are limited to the VGG-16 architecture, which is not representative of modern architectures, and the datasets used are not varied enough to demonstrate the robustness of the method.
+2. The paper's methodologies rely on certain assumptions regarding witness functions and distribution moments, necessary for theoretical formulations but potentially unrealistic in practice. The assumptions regarding the existence of moments and the boundedness of witness functions, while mathematically convenient, may not hold for all real-world data distributions, potentially limiting the practical applicability of the proposed method. The paper doesn't thoroughly explore the sensitivity of the method to violations of these assumptions.
+3. VGG-16 is a very old NN architecture. It would be better if the authors could demonstrate that their approach works for newer NN architecture.
+
+### Questions
+1. How do these methods scale with increasingly complex and deep neural networks? Is there an in-depth analysis of the computational overhead and efficiency trade-offs when applying the proposed pruning techniques to larger-scale networks, especially compared to traditional pruning methods?
+2. Could the authors provide further evidence on how the proposed pruning strategies perform across a wider range of scenarios? For instance, how do these methods fare with different types of neural network architectures, and varying data modalities?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

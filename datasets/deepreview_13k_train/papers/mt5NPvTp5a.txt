@@ -1,0 +1,609 @@
+\title{Improved Operator Learning by Orthogonal Attention}
+
+\begin{abstract}
+This work presents orthogonal attention for constructing neural operators to serve as surrogates to model the solutions of a family of Partial Differential Equations (PDEs). 
+The motivation is that the kernel integral operator, which is usually at the core of neural operators, can be reformulated with orthonormal eigenfunctions. 
+Inspired by the success of the neural approximation of eigenfunctions~\cite{deng2022neuralef}, we opt to directly parameterize the involved eigenfunctions with flexible neural networks (NNs), based on which the input function is then transformed by the rule of kernel integral. 
+Surprisingly, the resulting NN module bears a striking resemblance to regular attention mechanisms, albeit without softmax. 
+Instead, it incorporates an orthogonalization operation that provides regularization during model training and helps mitigate overfitting, particularly in scenarios with limited data availability. 
+In practice, the orthogonalization operation can be implemented with minimal additional overheads.
+Experiments on six standard neural operator benchmark datasets comprising both regular and irregular geometries show that our method can outperform competing baselines with decent margins.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Partial Differential Equations (PDEs) are essential tools for modeling and describing intricate dynamics in scientific and engineering domains~\cite{zachmanoglou1986introduction}. 
+Solving the PDEs routinely rely on well-established numerical approaches such as finite element methods (FEM)~\cite{zienkiewicz2005finite}, finite difference methods (FDM)~\cite{thomas2013numerical}, spectral methods~\cite{ciarlet2002finite,courant1967partial}, etc. %
+Due to the infinite-dimensional nature of the function space, traditional numerical solvers often rely on discretizing the data domain. However, this introduces a balance between efficiency and accuracy: finer discretization offers higher precision but at the expense of greater computational complexity.
+
+Deep learning methods have shown promise in lifting such a trade-off \cite{li2020fourier} thanks to their high inference speed and expressiveness. 
+Specifically, physics-informed neural networks (PINNs)~\cite{raissi2019physics} first combine neural networks (NNs) with physical principles for PDE solving. 
+Yet, PINNs approximate the solution associated with a certain PDE instance and hence cannot readily adapt to problems with different yet similar setups. 
+By learning a map between the input condition and the PDE solution in a data-driven manner, neural operators manage to solve a family of PDEs, with the DeepONet \cite{lu2019deeponet} as a representative example. %
+Fourier Neural Operators (FNOs)~\cite{li2020fourier,tran2023factorized,li2022fourier,wen2022u,grady2022towards,gupta2021multiwavelet,xiong2023koopman} shift the learning to Fourier space to enhance speed while maintaining efficacy through the utilization of the Fast Fourier Transform (FFT). %
+Since the development of attention mechanism~\cite{vaswani2017attention}, considerable effort has been devoted to developing attention-based neural operators to improve expressiveness and address irregular mesh~\cite{cao2021choose,li2023transformer,ovadia2023vito,fonseca2023continuous,hao2023gnot,li2023scalable}. 
+
+Despite the considerable progress made in neural operators, there remain non-trivial challenges in its practical applications. 
+On the one hand, the training targets of neural operators are usually acquired from classical PDE solvers, which can be computationally demanding. 
+For instance, simulations for tasks like airfoils can require about 1 CPU-hour per sample~\cite{li2022fourier}. 
+On the other hand, complex deep models are prone to deteriorate when confronted with limited training data.
+
+This work aims to develop a novel neural operator that inherently accommodates proper regularization to cope with the challenges in the processing of PDE data. 
+We start from the observations that the kernel integral operator, a core module of the solving operator of PDEs, can be rewritten with orthonormal eigenfunctions.
+Such an expansion substantially resembles the attention mechanism without softmax while incorporating the orthogonal regularization (detailed in Section~\ref{sec:theo}). 
+Empowered by this, we follow the notion of neural eigenfunctions~\cite{deng2022neuralef,deng2022neural} to implement an orthogonal attention module and stack it repeatedly to construct \textit{orthogonal neural operator (ONO)}. 
+As shown in Figure~\ref{fig:ono}, ONO is structured with two disentangled pathways. 
+The bottom one approximates the eigenfunctions through expressive NNs, while the top one specifies the evolvement of the PDE solution. 
+In practice, the orthogonalization operation can be implemented by cheap manipulation of the exponential moving average (EMA) of the feature covariance matrix.
+It is empirically proven that ONO can generalize substantially better than competitive baselines across both spatial and temporal axes. %
+To summarize, our contributions are:
+\begin{itemize}
+    \setlength{\itemsep}{5pt}
+    \item We introduce the novel orthogonal attention, which is inherently integrated with orthogonal regularization while maintaining moderate complexity, and detail the theoretical insights. %
+    \item We introduce ONO, a neural operator built upon orthogonal attention. ONO employs two disentangled pathways for approximating the eigenfunctions and PDE solutions separately. 
+    \item We conduct comprehensive experiments on six challenging operator learning benchmarks and achieve satisfactory results: ONO reduces prediction errors by up to $30 \%$ compared to baselines and achieves $80 \%$ reduction of test error for zero-shot super-resolution on Darcy.
+\end{itemize}
+
+
+\section{Related Work}
+
+\subsection{Neural Operators}
+Neural operators map infinite-dimensional input and solution function spaces, allowing them to handle multiple PDE instances without retraining.
+Following the advent of DeepONet~\cite{lu2019deeponet}, the domain of operator learning
+has recently gained much attention.
+Specifically, DeepONet employs a branch network and a trunk network to separately encode input functions and location variables, subsequently merging them for output computation. 
+Numerous alternative variants have been proposed from various perspectives thus far ~\cite{grady2022towards,wen2022u,xiong2023koopman}.
+FNO~\cite{li2020fourier} learns the integral operator in the spectral domain to conjoin accuracy and inference speed. 
+Geo-FNO~\cite{li2022fourier} employs a map connecting irregular domains and uniform latent meshes to address arbitrary geometries effectively. 
+F-FNO~\cite{tran2023factorized} improves FNO by integrating dimension-separable Fourier layers and residual connections.
+However, FNOs are grid-based, leading to increased computational demands for both training and inference as PDE dimensions expand. 
+
+Considering the input sequence as a function evaluation within a specific domain, attention operators can be seen as learnable projection or kernel integral operators.
+These operators have gained substantial research attention due to their scalability and effectiveness in addressing PDEs on irregular meshes. 
+\citet{kovachki2021neural} demonstrates that the standard attention mechanism can be considered as a neural operator layer.
+Galerkin Transformer~\cite{cao2021choose} proposes two self-attention operators without softmax and provides theoretical interpretations for them.
+HT-Net~\cite{liu2022ht} proposes a hierarchical attention operator to solve multi-scale PDEs.
+GNOT~\cite{hao2023gnot} proposes a linear cross-attention block to facilitate the encoding of diverse input types.
+However, despite their promising potential, attention operators are susceptible to overfitting, especially when the available training data are rare.
+\subsection{Efficient Attention Mechanisms}
+The Transformer model~\cite{vaswani2017attention} has gained popularity in diverse domains~\cite{chen2018best,parmar2018image,rives2021biological}.
+However, the vanilla softmax attention encounters scalability issues due to its quadratic space and time complexity. 
+To tackle this, several methods with reduced complexity have been proposed~\cite{child2019generating,zaheer2020big,wang2020linformer,katharopoulos2020transformers,xiong2021nystromformer}. 
+Concretely, Sparse Transformer~\cite{child2019generating} reduces complexity by sparsifying the attention matrix.
+Linear Transformer~\cite{katharopoulos2020transformers} achieves complexity by replacing softmax with a kernel function.
+Nystr{\"o}mformer~\cite{xiong2021nystromformer} employs the Nystr{\"o}m method to approximate standard attention, maintaining linear complexity.
+
+In the context of PDE solving, 
+Galerkin Transformer~\cite{cao2021choose} proposes the linear Galerkin-type attention mechanism, which can be regarded as a trainable Petrov–Galerkin-type projection.
+OFormer~\cite{li2023transformer} develops a linear cross-attention module for disentangling the output and input domains.
+FactFormer~\cite{li2023scalable} employs axial computation in the attention operator to reduce computational costs.
+Compared to them, we not only introduce an attention mechanism without softmax at linear complexity but also include an inherent regularization mechanism. 
+
+
+\section{Methodology}
+
+This section begins with an overview of the orthogonal neural operator and subsequently delves into the orthogonal attention mechanism and its theoretical foundations.
+
+\label{sec:mode}
+\begin{figure*}[t]
+    \begin{center}
+    \includegraphics[width=0.83\textwidth]{model.pdf}
+    \end{center}
+    \caption{Model overview. There are two flows in ONO. %
+    The bottom one extracts expressive features for input data, forming an approximation to the eigenfunctions associated with the kernel integral operators for defining ONO.
+    The top one updates the PDE solutions based on orthogonal attention, which involves linear attention and orthogonal regularization.}%
+    \label{fig:ono}    
+\end{figure*}
+
+\subsection{Problem Setup}
+Operator learning involves learning the mapping from the space of input functions $f: D\to \mathbb{R} ^{d_{f}} \in \mathcal{F}$ to the space of PDE solutions $u: D\to \mathbb{R} ^{d_{u}} \in \mathcal{U}$, %
+where $D$ is a bounded open set. 
+Let $\mathcal{G}:\mathcal{F}\rightarrow\mathcal{U}$ denotes the ground-truth solution operator.
+Our objective is to train a $\bm{\theta}$-parameterized neural operator $\mathcal{G}_{\bm{\theta}}$ to approximate $\mathcal{G}$.  
+The training is driven by a collection of function pairs $\{f_{i},u_{i}\}_{i=1}^{N}$. %
+Deep models routinely cannot accept an infinite-dimensional function as input or output, so we discretize $f_{i}$ and $u_{i}$ on mesh $\mathbf{X} := \{ \bm{x}_{j} \in D \}_{1\leq j \leq M }$, yielding $\bm{f}_i :=\{(\bm{x}_j, f_{i}(\bm{x}_j))\}_{1 \leq j \leq M}$ and $\bm{u}_i := \{(\bm{x}_j, u_{i}(\bm{x}_j) )\}_{1 \leq j \leq M}$.
+We use $\bm{f}_{i,j}$ to denote the element in $\bm{f}_i$ that corresponds to $\bm{x}_j$. 
+The data fitting is usually achieved by optimizing the following problem:
+\begin{equation}
+\min\limits_{\bm{\theta}}\frac{1}{N}\sum_{i=1}^{N}\frac{\Vert \mathcal{G}_{\bm{\theta}}(\bm{f}_{i})-\bm{u}_{i}\Vert_{2}}{\Vert \bm{u}_{i}\Vert_{2}},
+\label{eq:optim}
+\end{equation}
+where the regular mean-squared error (MSE) is augmented with a normalizer $\Vert \bm{u}_{i}\Vert_{2}$ to account for variations in absolute scale across benchmarks.
+We refer to this error as $l_{2}$ relative error in the subsequent sections.
+
+\subsection{Orthogonal Neural Operator }
+\textbf{Overview.} %
+Basically, an $L$-stage ONO takes the form of 
+\begin{equation}
+\label{eq:archi}
+    \mathcal{G}_{\bm{\theta}} := \mathcal{P} \circ \mathcal{K}^{(L)} \circ \sigma \circ \mathcal{K}^{(L-1)} \circ \dots \circ \sigma\circ \mathcal{K}^{(1)} \circ \mathcal{E},
+\end{equation}
+where $\mathcal{E}$ maps $\bm{f}_i$ to hidden states $\bm{h}^{(1)}_i \in \mathbb{R}^{M\times d}$, $\mathcal{P}$ projects the states to solutions, and $\sigma$ denotes the non-linear transformation. 
+$\mathcal{K}^{(l)}$ %
+refer to parameterized kernel integral operators following the prior arts in neural operator~\cite {kovachki2021neural}, which is motivated by the link between kernel integral operator and Green's function for solving linear PDEs. 
+
+Note that $\mathcal{K}^{(l)}$ accepts hidden states $\bm{h}^{(l)}_i \in \mathbb{R}^{M \times d}$ as input instead of infinite-dimensional functions as in the traditional kernel integral operator. 
+It should also rely on some parameterized configuration of a kernel. 
+FNO addresses this by employing linear transformations on truncated frequency modes in the Fourier domain, albeit with potential limitations in effectively handling high-frequency information~\cite{li2020fourier}.
+Instead, we advocate directly parameterizing the kernel in the original space with the help of neural eigenfunctions~\cite{deng2022neuralef,deng2022neural}.
+Specifically, we leverage an additional NN to extract hierarchical features from $\bm{f}_i$, which, after orthogonalization and normalization, suffice to define $\mathcal{K}^{(l)}$. 
+The orthogonalization serves as a regularization to enhance the model generalization ability.
+
+We outline the overview of ONO in Figure~\ref{fig:ono}, where the two-flow structure is clearly displayed. 
+We pack the orthonormalization step and eigenfunctions-based kernel integral into a module named \emph{orthogonal attention}. 
+The decoupled architecture offers significant flexibility in specifying the NN blocks within the bottom flow.
+
+\textbf{Encoder.}
+The encoder is multi-layer perceptrons (MLPs) that accept $\bm{f}_i$ as input for dimension lifting.
+Features at every position $\bm{x}_j$ are extracted separately. 
+
+\textbf{NN Block.}
+In the bottom flow, the NN blocks are responsible for extracting features, which subsequently specify the kernel integral operators in the orthogonal attention modules. 
+We can leverage any existing architecture here but focus on transformers due to their great expressiveness.
+In detail, we formulate the NN block as follow:
+\begin{equation}
+\begin{aligned}
+    \tilde{\bm{g}}^{(l)}_i &= \bm{g}^{(l)}_i + \mathrm{Attn}(\mathrm{LN}(\bm{g}^{(l)}_i),\\
+    \bm{g}^{(l+1)}_i &= \tilde{\bm{g}}^{(l)}_i + \mathrm{FFN}(\mathrm{LN}(\tilde{\bm{g}}^{(l)}_i)),    
+\end{aligned}
+\end{equation}
+where $\bm{g}^{(l)}_i \in \mathbb{R}^{M \times d'}$ denotes the output of $l$-th NN block for the data $\bm{f}_i$. 
+$\mathrm{Attn}(\cdot)$ represents a self-attention module applied over the $M$ positions. 
+$\mathrm{LN}(\cdot)$ indicates layer normalization~\cite{ba2016layer}. %
+$\mathrm{FFN}(\cdot)$ refers to a two-layer feed forward network. 
+Here, we can freely choose well-studied self-attention mechanisms, e.g., standard attention~\cite{vaswani2017attention} and other variants that enjoy higher efficiency to suit specific requirements.%
+\begin{figure}[t]
+    \begin{center}
+    \includegraphics[width=\linewidth]{attenlayer.pdf}
+    \end{center}
+    \caption{Orthogonal attention: the module incorporates matrix multiplications (``mm") and an orthogonalization process (``ortho"). The output of the NN block, denoted as $\bm{g}_{i}^{(l)}$, and the hidden state of the input function, represented as $\bm{h}_{i}^{(l)}$, undergo processing as shown in Equation~\ref{eq:attnwithmu}. Following this, the module includes a residual connection, layer normalization, and a two-layer FFN.}
+    \label{fig:AttnLayer}    
+\end{figure}
+\textbf{Orthogonal Attention.} 
+We introduce the orthogonal attention module with orthogonal regularization to remediate the potential overfitting in the context of operator learning. 
+This module characterizes the evolution of PDE solutions. %
+It transforms the deep features from the NN blocks to orthogonal eigenmaps, based on which the kernel integral operators are constructed and the hidden states of PDE solutions are updated. 
+Concretely, we first project the NN features $\bm{g}^{(l)}_i \in \mathbb{R}^{M \times d'}$ to: %
+\begin{equation}
+    \hat{\bm{\psi}}^{(l)}_i = \mathrm{ort}(\hat{\bm{g}}^{(l)}_i) = \mathrm{ort}(\bm{g}^{(l)}_i \bm{w}^{(l)}_Q) \in \mathbb{R}^{M \times k},
+\end{equation}
+where $\bm{w}^{(l)}_Q \in \mathbb{R}^{d' \times k}$ is a trainable weight. 
+$\mathrm{ort}(\cdot)$ is the orthonormalization operation which renders each column of $\hat{\bm{\psi}}^{(l)}_i$ correspond to the evaluation of a specific neural eigenfunction on $\bm{f}_i$. 
+
+Given these, the orthogonal attention update the hidden states $\bm{h}^{(l)}_i$ of PDE solutions via:
+\begin{equation}
+    \label{eq:attnwithmu}
+    \tilde{\bm{h}}^{(l+1)}_{i}= \hat{\bm{\psi}}^{(l)}_i\mathrm{diag}(\hat{\boldsymbol{\mu}}^{(l)})[{\hat{\bm{\psi}}^{(l)}_i}{}^{\top} (\bm{h}^{(l)}_i \bm{w}^{(l)}_V)],
+\end{equation}
+where $\bm{w}^{(l)}_V \in \mathbb{R}^{d\times d}$ is a trainable linear weight to refine the hidden states, and $\hat{\boldsymbol{\bm{\mu}}}^{(l)} \in \mathbb{R}_+^{k}$ denote positive eigenvalues associated with the induced kernel and are trainable in practice. 
+This update rule is closely related to Mercer's theorem, as will be detailed in Section~\ref{sec:theo}. 
+
+The non-linear transformation $\sigma$ is implemented following the structure of the traditional attention mechanism, which involves residual connections~\cite{he2016deep} and FFN:
+\begin{equation}
+    {\bm{h}}^{(l+1)}_{i} = \mathrm{FFN}(\mathrm{LN}(\tilde{\bm{h}}^{(l+1)}_{i} + {\bm{h}}^{(l)}_{i})).
+\end{equation}
+The FFN in the final orthogonal attention serves as $\mathcal{P}$ to map hidden states to PDE solutions. 
+
+\textbf{Implementation of  $\mathrm{ort}(\cdot)$.} 
+As mentioned, we leverage $\mathrm{ort}(\cdot)$ to make $\hat{\bm{g}}^{(l)}_i$ follow the structure of the outputs of eigenfunctions. 
+We highlight that the orthonormalization lies in the function space, i.e., among the output dimensions of the function $\hat{g}^{(l)}: \bm{f}_{i,j} \mapsto \hat{\bm{g}}^{(l)}_{i,j} \in \mathbb{R}^{k}$ instead of the column vectors. 
+Thereby, we should not orthonormalize matrix $\hat{\bm{g}}^{(l)}_i$ over its columns but manipulate $\hat{g}^{(l)}$. 
+
+To achieve this, we first estimate the covariance over the output dimensions of $\hat{g}^{(l)}$, which can be approximated by Monte Carlo (MC) estimation:
+\begin{equation}
+\begin{aligned}
+    \mathbf{C}^{(l)} &\approx \frac{1}{NM} \sum_{i=1}^N \sum_{j=1}^M [\hat{g}^{(l)}(\bm{f}_{i,j})^\top \hat{g}^{(l)}(\bm{f}_{i,j})] \\
+    &= \frac{1}{NM} \sum_{i=1}^N [\hat{\bm{g}}^{(l)}_i{}^\top \hat{\bm{g}}^{(l)}_i].
+\end{aligned}
+\end{equation}
+Then, we orthonormalize $\hat{g}^{(l)}$ by right multiplying the matrix $\mathbf{L}^{(l)}{}^{-\top}$, where $\mathbf{L}^{(l)}$ is the lower-triangular matrix arising from the Cholesky decomposition of $\mathbf{C}^{(l)}$, i.e., $\mathbf{C}^{(l)} = \mathbf{L}^{(l)} \mathbf{L}^{(l)}{}^\top$. 
+In the vector formula, there is
+\begin{equation}
+    \hat{\bm{\psi}}^{(l)}_i := \hat{\bm{g}}^{(l)}_i \mathbf{L}^{(l)}{}^{-\top}. 
+\end{equation}
+The covariance of the functions producing $\hat{\bm{\psi}}^{(l)}_i$ can be approximately estimated:
+\begin{equation}
+\begin{aligned}
+    \frac{1}{NM} \sum_{i=1}^N &\left[\left(\hat{\bm{g}}^{(l)}_i\mathbf{L}^{(l)}{}^{-\top}\right)^\top \hat{\bm{g}}^{(l)}_i \mathbf{L}^{(l)}{}^{-\top}\right]\\
+    &= \mathbf{L}^{(l)}{}^{-1} \mathbf{C}^{(l)} \mathbf{L}^{(l)}{}^{-\top} 
+    = \mathbf{I},  
+\end{aligned}
+\end{equation}
+which conforms that these functions can be regarded as orthonormal eigenfunctions that implicitly define a kernel. 
+
+However, in practice, the model parameters evolve repeatedly, we cannot trivially estimate $\mathbf{C}^{(l)}$, which involves the whole training set, at a low cost per training iteration. 
+Instead, we propose to approximately estimate $\mathbf{C}^{(l)}$ via 
+the exponential moving average trick---similar to the update rule in batch normalization~\cite{ioffe2015batch}, we maintain a buffer tensor $\mathbf{C}^{(l)}$ and update it with training mini-batches. 
+We reuse the recorded training statistics to ensure the stability of inference. 
+
+The aforementioned process involves a cubic complexity with respect to $k$ due to the Cholesky decomposition.
+However, it is worth noting that empirically, $k$ is significantly smaller than the number of measurement points $M$.
+Consequently, the overall complexity of the proposed orthogonal attention mechanism remains moderate (see the empirical results in Table~\ref{tab:runtime}).
+
+\subsection{Theoretical Insights} 
+\label{sec:theo}
+This section provides the theoretical insights behind orthogonal attention. 
+We abuse notations when there is no misleading. 
+Consider a kernel integral operator $\mathcal{K}$ as follow:
+\begin{align}
+    (\mathcal{K}h)(\bm{x}) := \int_{D} \kappa(\bm{x}, \bm{x}') h(\bm{x}') \, d\bm{x}', \quad \forall \bm{x} \in D,
+\end{align}
+where $\kappa$ is a positive semi-definite kernel and $h$ is the input function. 
+Given $\psi_i$ as the eigenfunction of $\mathcal{K}$ corresponding to the $i$-th largest eigenvalue $\mu_i$, we have:
+\begin{equation}
+    \begin{aligned}
+    \int_{D} \kappa(\bm{x}, \bm{x}') \psi_{i}(\bm{x}') \, d\bm{x}' &= \mu_i \psi_i(\bm{x}),\; \quad \forall i \geq 1 ,  \forall \bm{x} \in D  \\
+    \langle\psi_i, \psi_j\rangle & = \mathbbm{1}[i = j], \quad \forall i, j \geq 1,
+    \end{aligned}
+\end{equation}
+where $\langle a, b\rangle := \int a(\bm{x}) b(\bm{x})\,d\bm{x}$ denotes the inner product in $D$. 
+By Mercer's theorem, there is:
+\begin{equation}
+\label{eq:motivation}
+\begin{aligned}
+    (\mathcal{K}h)(\bm{x}) &= \int_{D} \kappa(\bm{x}, \bm{x}') h(\bm{x}') \, d\bm{x}' \\
+    &= \int \sum_{i \geq 1} \mu_i \psi_i(\bm{x}) \psi_i(\bm{x}') h(\bm{x}') \, d\bm{x}' \\
+    &= \sum_{i \geq 1} \mu_i \langle\psi_i, h\rangle \psi_i(\bm{x}).    
+\end{aligned}
+\end{equation}
+Although we cannot trivially estimate the eigenfunctions $\psi_i$ in the absence of $\kappa$'s expression, 
+Equation \ref{eq:motivation} offers us new insights on how to parameterize a kernel integral operator.
+In particular, we can truncate the summation in Equation~\ref{eq:motivation} and introduce a parametric model $\hat{\psi}(\cdot): D \to \mathbb{R}^k$ with orthogonal outputs and build a neural operator $\hat{\mathcal{K}}$ with the following definition:
+\begin{equation}
+\label{eq:imodel}
+    (\hat{\mathcal{K}}h)(\bm{x}) := \sum_{i = 1}^k \langle\hat{\psi}_i, h\rangle \hat{\psi}_i(\bm{x}). 
+\end{equation}
+ 
+In practice, we first consider $\mathbf{X} := \{\bm{x}_j\}_{1\leq j \leq M}$ and $\mathbf{Y} := \{\bm{x}_j\}_{1 \leq j \leq M'}$ as two sets of measurement points to discretize the input and output functions. 
+We denote $\hat{\bm{\psi}} \in \mathbb{R}^{M \times k}$ and $\hat{\bm{\psi}}' \in \mathbb{R}^{M' \times k}$ as the evaluation of the model $\hat{\psi}$ on $\mathbf{X}$ and $\mathbf{Y}$ respectively. 
+Let $\bm{h} \in \mathbb{R}^{M}$ represent the evaluation of $h$ on $\mathbf{X}$. 
+There is: %
+\begin{equation}
+\begin{aligned}
+\label{eq:attn}
+    (\hat{\mathcal{K}}h)(\mathbf{Y}) \approx \sum_{i = 1}^k [\hat{\psi}_i(\mathbf{X})^\top h(\mathbf{X})] \hat{\psi}_i(\mathbf{Y}) = \hat{\bm{\psi}}' \hat{\bm{\psi}}^\top \bm{h}.
+\end{aligned}
+\end{equation}
+Comparing Equation~\ref{eq:motivation} and Equation~\ref{eq:imodel}, we can see that the scaling factors $\mu_i$ are omitted, which may undermine the model flexibility in practice. 
+To address this, we introduce a learnable vector $\hat{\boldsymbol{\mu}} \in \mathbb{R}_+^{k}$ to Equation~\ref{eq:attn}, resulting in:
+\begin{equation}
+    (\hat{\mathcal{K}}h)(\mathbf{Y}) \approx \hat{\bm{\psi}}' \mathrm{diag}(\hat{\boldsymbol{\mu}}) \hat{\bm{\psi}}^\top \bm{h}.
+\end{equation}
+As shown, there is an attention structure---$\hat{\bm{\psi}}' \mathrm{diag}(\hat{\boldsymbol{\mu}}) \hat{\bm{\psi}}^\top$ corresponds to the attention matrix that defines how the output function evaluations attend to the input. 
+Besides, the orthonormalization regularization arises from the nature of eigenfunctions, benefitting to alleviate overfitting and boost generalization.
+When $\mathbf{X} = \mathbf{Y}$, the above attention structure is similar to regular self-attention mechamism with a symmetric attention matrix.
+Otherwise, 
+it boils down to a cross-attention, which enables our approach to query output functions at arbitrary locations independent of the inputs. 
+ 
+
+
+
+\section{Experiments}
+
+We conduct extensive experiments on diverse and challenging benchmarks across various domains to showcase the effectiveness of our method.
+
+\begin{table*}[t]
+\
+\caption{The main results on six benchmarks compared with seven baselines. Lower scores indicate superior performance, and the best results are highlighted in bold. ``*" means that the results of the method are reproduced by ourselves. ``-" means that the baseline cannot handle this benchmark.}
+\label{table:res}
+\begin{center}
+\begin{tabularx}{\linewidth}{X >{\centering\arraybackslash}X >{\centering\arraybackslash}X >{\centering\arraybackslash}X >{\centering\arraybackslash}X >{\centering\arraybackslash}X >{\centering\arraybackslash}X}
+\toprule
+\bf {MODEL}  &\bf{NS2d}  &\bf{Airfoil}  &\bf{Pipe}  &\bf {Darcy}  &\bf{Elasticity}  &\bf{Plasticity}
+\\ \midrule 
+FNO         &0.1556     &-     &-     &0.0108     &-     &- \\
+Galerkin    &0.1401     &-     &-          &0.0084     &-     &- \\
+Geo-FNO     &0.1556     &0.0138     &0.0067     &0.0108     &0.0229     &0.0074 \\
+U-FNO*       &0.2182     &0.0137     &0.0050     &0.0266     &0.0226     &\textbf{0.0028} \\
+F-FNO*       &0.1213     &0.0079     &0.0063     &0.0318     &0.0316     &0.0048 \\
+LSM*         &0.1693     &0.0062     &0.0049     &\textbf{0.0069}     &0.0225     &0.0035 \\
+GNOT        &0.1380     &0.0076     &-     &0.0105     &\textbf{0.0086}     &- \\
+ONO        &\textbf{0.1195}  &\textbf{0.0056}  &\textbf{0.0034}  &0.0072  &0.0118  &0.0048 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+\end{table*}
+
+
+\textbf{Benchmarks.} 
+We first evaluate our model's performance on Darcy and NS2d~\cite{li2020fourier} benchmarks to evaluate its capability on regular grids.
+Subsequently, we extend our experiments to benchmarks with irregular geometries, including Airfoil, Plasticity, and Pipe, which are represented in structured meshes, as well as Elasticity, presented in point clouds~\cite{li2022fourier}.
+
+\textbf{Baselines.} 
+We compare our model with several baseline models, including the well-recognized FNO~\cite{li2020fourier} and its variants Geo-FNO~\cite{li2022fourier}, F-FNO~\cite{tran2023factorized}, and U-FNO~\cite{wen2022u}.
+Furthermore, we consider other models such as Galerkin Transformer~\cite{cao2021choose}, LSM~\cite{wu2023LSM}, and GNOT~\cite{hao2023gnot}.
+It's worth noting that LSM and GNOT are the latest state-of-the-art (SOTA) neural operators.
+\textbf{Implementation details.}
+We use the $l_{2}$ relative error in Equation~\ref{eq:optim} as the training loss and evaluation metric.
+We train all models for 500 epochs.
+Our training process employs the AdamW optimizer~\cite{loshchilov2018decoupled} and the OneCycleLr scheduler~\cite{smith2019super}.
+We initialize the learning rate at $10^{-3}$ and explore batch sizes within the range of $\{2, 4, 8, 16\}$.
+The model's width is set to $128$, while the orthogonalization process employs dimension $d$ as either $8$ or $16$.
+Unless specified otherwise, we choose either the Linear Transformer block from~\cite{katharopoulos2020transformers} or the Nystr{\"o}m Transformer block from~\cite{xiong2021nystromformer} as the NN block in our model.
+
+We also provide a run-time comparison of different neural operators in Table~\ref{tab:runtime}.
+Our experiments are conducted on a single NVIDIA RTX 3090 GPU.
+
+\subsection{Main Results}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.7\linewidth]{scaledata.pdf}
+  \caption{Comparison on the $l_2$ relative error for different training data amounts on Elasticity.}
+  \label{fig:dataamount}
+\end{figure}
+
+Table~\ref{table:res} reports the results. 
+Remarkably, our model achieves SOTA performance on three of these benchmarks, reducing the average prediction error by $13\%$. Specifically, it reduces the error by $31\%$ and $10\%$ on Pipe and Airfoil, respectively.
+In the case of NS2d, which involves temporal predictions, our model surpasses all baselines.
+We attribute it to the temporal generalization enabled by our orthogonal attention.
+We conjecture that the efficacy of orthogonal regularization contributes to our model's excellent performance in these three benchmarks by mitigating overfitting the limited training data.
+These three benchmarks encompass both regular and irregular geometries, demonstrating the versatility of our model across various geometric settings.
+
+Our model achieves the second-lowest prediction error on Darcy and Elasticity benchmarks, albeit with a slight margin compared to the SOTA baselines.
+We notice that our model and the other attention operator (GNOT) demonstrate a significant reduction in error when compared to other operators that utilize a learnable mapping to convert the irregular geometries into or back from uniform meshes.
+This mapping process can potentially introduce errors.
+However, attention operators naturally handle irregular meshes for sequence input without requiring mapping, leading to superior performance.
+Our model also exhibits competitive performance on plasticity, involving the mapping of a shape vector to the complex mesh grid with a dimension of deformation.
+These results highlight the versatility and effectiveness of our model as a framework for operator learning.
+
+
+
+\textbf{Training on limited data.} We investigate the influence of limited training data using the Elasticity dataset and make comparisons with FNO and DeepONet, two widely recognized neural operators. 
+To demonstrate the effectiveness of the orthogonalization process, we additionally utilize ONO without the orthogonalization, referred to as ONO$^{-}$.
+
+
+\begin{table}[t]
+\centering
+\caption{Runtime comparison. ``LT" refers to using the Linear Transformer block for specifying the NN block. 
+All models use a batch size of 8. FNO, LSM, and ONO are fixed as 4 layers. 
+The width of ONO $d$ is set to 128, and the number of eigenfunctions $k$ is 16.}
+\label{tab:runtime}
+\begin{tabular}{lcccc}
+\toprule
+\bfseries MODEL & \bfseries FNO & \bfseries Galerkin  & \bfseries LSM & \bfseries ONO (LT)  \\
+\midrule 
+Runtime (s) & 3.81 & 9.88  & 9.05 & 7.87 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\begin{table*}
+\centering
+  \begin{minipage}[t]{0.6\linewidth}
+    \centering
+    \setlength{\tabcolsep}{8pt}
+    \caption{Comparison on the $l_2$ relative error for Zero-shot super-resolution on darcy benchmark. s denotes the resolution of the evaluation data. The models are trained on data of $43\times 43$ resolution (s=43).}
+    \begin{tabularx}{\linewidth}{lccccc}
+      \toprule
+      {\bf MODEL}  & $s = 61$  & $s = 85$  & $s = 141$  & $s = 211$  & $s = 421$ \\
+      \midrule
+      FNO     &0.1164   &0.1797   &0.2679   &0.3160   &0.3631 \\
+      Ours    &\textbf{0.0204}   &\textbf{0.0259}   &\textbf{0.0315}   &\textbf{0.0349}   &\textbf{0.0386} \\
+      \bottomrule
+    \end{tabularx}
+
+    \label{table:spatial}
+  \end{minipage}%
+  \quad\quad%
+  \begin{minipage}[t]{0.3\linewidth}
+    \caption{Comparison on the $l_2$ relative error for seen and unseen timesteps on NS2d. }
+    \centering
+    \setlength{\tabcolsep}{8pt}
+    \begin{tabularx}{\linewidth}{lcc}
+      \toprule
+      {\bf MODEL}  & Seen  &  Unseen \\
+      \midrule
+      FNO     &0.0982   &0.2446 \\
+      Ours    &\textbf{0.0889}   &\textbf{0.2143} \\
+      \bottomrule
+    \end{tabularx}
+
+    \label{table:temporal}
+  \end{minipage}
+\end{table*}
+
+
+The results are shown in Figure~\ref{fig:dataamount}.
+ONO outperforms the baselines with different training data amounts, followed by Geo-FNO, ONO$^{-}$, and DeepONet.
+Each of the neural operators demonstrates a degradation in performance as the training data amount decreases.
+The reduction in training data from 1200 to 400 results in significant increases in prediction error for ONO$^{-}$ (97.1$\%$, $0.0352 \rightarrow 0.0694$) and Geo-FNO (92$\%$, $0.0215 \rightarrow 0.0413$). 
+DeepONet demonstrates a 68$\%$ increase ($0.0215 \rightarrow 0.0413$), while ONO demonstrates the lowest increase of 58$\%$ ($0.0114 \rightarrow 0.0181$).
+Notably, ONO$^{-}$ exhibits considerable performance deterioration when trained on reduced training data compared to ONO.
+The superior generalization ability of ONO, relative to the baselines, highlights the effectiveness of the orthogonalization operation for deep learning-based operator learning. 
+
+\textbf{Runtime comparison}. Table~\ref{tab:runtime} provides a comparison on the runtime of different neural operators, revealing that ONO with a Linear Transformer block has a comparable computational cost to the linear Galerkin Transformer.
+
+\begin{figure}[t]
+\centering
+  \begin{minipage}[b]{.3\columnwidth}
+    \centering
+    \includegraphics[width=\linewidth]{ns19gnd.png}
+  \end{minipage}%
+  \hspace{1pt}
+  \begin{minipage}[b]{.3\columnwidth}
+    \centering
+    \includegraphics[width=\linewidth]{ns19fno.png}
+  \end{minipage}%
+  \hspace{1pt}
+  \begin{minipage}[b]{.3\columnwidth}
+    \centering
+    \includegraphics[width=\linewidth]{ns19ono.png}
+  \end{minipage}
+  \begin{minipage}[b]{.3\columnwidth}
+    \centering
+    \includegraphics[width=\linewidth]{ns20gnd.png}
+  \end{minipage}%
+  \hspace{1pt}
+  \begin{minipage}[b]{.3\columnwidth}
+    \centering
+    \includegraphics[width=\linewidth]{ns20fno.png}
+  \end{minipage}%
+  \hspace{1pt}
+  \begin{minipage}[b]{.3\columnwidth}
+    \centering
+    \includegraphics[width=\linewidth]{ns20ono.png}
+  \end{minipage}
+    
+  \caption{The two rows refer to the results of models, trained to predict timesteps 11-18, for timesteps 19 and 20 on NS2d. 
+From left to right: ground truth, prediction of FNO, and that of ONO.}
+\label{fig:timegen}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \begin{minipage}{0.3\columnwidth}
+    \centering
+    \includegraphics[width=\linewidth]{darcygnd.png}
+    \label{fig:subfig1}
+  \end{minipage}%
+  \hspace{1pt}
+  \begin{minipage}{0.3\columnwidth}
+    \centering
+    \includegraphics[width=\linewidth]{darcyfno.png}
+    \label{fig:subfig2}
+  \end{minipage}%
+  \hspace{1pt}
+  \begin{minipage}{0.3\columnwidth}
+    \centering
+    \includegraphics[width=\linewidth]{darcyono.png}
+    \label{fig:subfig3}
+  \end{minipage}
+  \caption{Zero-shot super-resolution results on Darcy. Models are trained on $43 \times 43$ data and evaluated on $421 \times 421$. From left to right: ground truth, prediction of FNO, and that of ONO. }
+  \label{fig:zeroshot}
+\end{figure}
+
+\subsection{Generalization Experiments}
+We conduct experiments on the generalization performance in both the spatial and temporal axes. 
+First, a zero-shot super-resolution experiment is conducted on Darcy.
+The model is trained on $43 \times 43$ resolution data and evaluated on resolutions up to nearly ten times that size ($421 \times 421$).
+Subsequently, we train the model to predict timesteps 11-18 and evaluate it on two subsequent intervals: timesteps 11-18, denoted as ``Seen", and timesteps 19-20, denoted as ``Unseen".
+We choose the FNO~\cite{li2020fourier} as the baseline due to its well-acknowledged mesh-invariant property and is use of the orthogonal Fourier basis functions, which may potentially offer regularization benefits.
+
+
+The results are shown in Table~\ref{table:spatial} and Table~\ref{table:temporal}. 
+On Darcy, the prediction error of FNO increases dramatically as the evaluation resolution grows.
+In contrast, our model exhibits a much slower increase in error and maintains a low prediction error even with excessively enlarged resolution,
+notably reducing the prediction error by $89\%$ compared to FNO on the $421 \times 421$ resolution.
+On NS2d, Our model outperforms in both time intervals, reducing the prediction error by $9 \%$ and $12 \%$.
+We further visualize some generalization results in these two scenarios in Figure~\ref{fig:zeroshot} and Figure~\ref{fig:timegen}.
+The results are consistent with the reported values. 
+These results demonstrate that our model exhibits remarkable generalization capabilities in both temporal and spatial domains. 
+Acquiring high-resolution training data can be computationally expensive.
+Our model's mesh-invariant property enables effective high-resolution performance after being trained on low-resolution data, potentially resulting in significant computational cost savings.
+
+\begin{figure*}
+    \centering
+    \begin{minipage}{0.35\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{scalelayer.pdf}
+    \end{minipage}
+    \hspace{35pt}
+    \begin{minipage}{0.35\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{scalewidth.pdf}
+        \label{fig:width}
+    \end{minipage}
+    \caption{$l_2$ relative error varies w.r.t. the number of layers (Left) and width (right) of ONO on Pipe and Elasticity benchmarks. }
+    \label{fig:abla}
+\end{figure*}
+\subsection{Ablation experiments}
+To assess the effectiveness of various components in ONO, we conduct a comprehensive ablation study on three benchmarks: Airfoil, Elasticity, and Pipe.
+
+
+\textbf{Influence of NN Block.}
+To show the compatibility of our model, we conduct experiments with different NN blocks.
+We choose the Galerkin Transformer block in operator learning~\cite{cao2021choose} and two linear transformer blocks in other domains, including the Linear Transformer block in~\cite{xiong2021nystromformer} and the Nystr{\"o}m Transformer block in~\cite{katharopoulos2020transformers}. 
+
+\begin{table}[t]
+\centering
+\setlength{\tabcolsep}{4pt}
+\caption{Comparison on the $l_2$ relative error for different NN blocks on Airfoil, Elasticity, and Pipe benchmarks.}  
+\label{table:nnblock}
+\setlength{\tabcolsep}{10pt}
+\begin{tabular}{lccc}
+  \toprule
+  {\bf DESIGNS}  & Airfoil  & Elasticity & Pipe \\
+  \midrule
+  Linear     &0.0079   &0.0137   &0.0060 \\
+  Nystrom    &\textbf{0.0056}   &\textbf{0.0118}   &\textbf{0.0034} \\
+  Galerkin   &0.0122   &0.0133   &0.0075 \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{table:nnblock} showcases the results. The Nystr{\"o}m Transformer block performs better on all three benchmarks and reduces the error up to 43$\%$ on Pipe.
+Linear Transformer block exhibits superior performance on Airfoil and Pipe compared to the Galerkin Transformer block while demonstrating similar performance on Elasticity.
+We notice that the Linear Transformer block and Galerkin Transformer block are both kernel-based methods transformer methods.
+The Nystr{\"o}m attention uses a downsampling approach to approximate the softmax attention, which aids in capturing positional relationships and contributes to the feature extraction.
+However, all the variants consistently exhibit competitive performance, showcasing the flexibility and robustness of our model.
+
+\begin{table}[t] 
+\centering
+\caption{Comparison on the $l_2$ relative error for orthogonalization and normalization techniques on Airfoil, Elasticity, and Pipe.}
+\label{table:ort}
+\setlength{\tabcolsep}{10pt}
+\begin{tabular}{lccc}
+  \toprule
+  {\bf DESIGNS}  & Airfoil  & Elasticity  & Pipe \\
+  \midrule
+  BN       &0.0808   &0.0149   &0.2151   \\
+  LN       &0.0288   &0.0387   &0.0056   \\
+  Ortho    & \textbf{0.0056}   & \textbf{0.0118}   & \textbf{0.0034}  \\
+  \bottomrule
+\end{tabular}
+\end{table}%
+
+\textbf{Influence of Orthogonalization.}
+To further investigate the impact of the orthogonalization process, we carry out a series of experiments on three benchmarks.
+``BN" and ``LN" denote the batch normalization~\cite{ioffe2015batch} and the layer normalization~\cite{ba2016layer}, while ``Ortho" signifies the orthogonalization process in the attention module.
+It's worth noting that the attention mechanism coupled with layer normalization assumes a structure resembling Fourier-type attention~\cite{cao2021choose}.
+As shown in Table~\ref{table:ort}, our orthogonal attention consistently outperforms other attention mechanisms across all benchmarks, resulting in a remarkable reduction of prediction error, up to $81\%$ on Airfoil and $39\%$ on Pipe.
+We conjecture that the orthogonalization may benefit model training through feature scaling.
+Additionally, the inherent linear independence among orthogonal eigenfunctions aids the model in effectively distinguishing between various features, contributing to its superior performance compared to conventional normalizations.
+\subsection{Scaling Experiments}
+Our model's architecture offers scalability, allowing adjustments to both its depth and width for enhanced performance or reduced computational costs.
+We conduct scaling experiments to examine how the prediction error changes with the number of layers and the width.
+
+Figure~\ref{fig:abla} shows the results.
+The left one depicts the change in prediction error with an increasing number of layers, while the right one shows how the error responds to a growth in the width of ONO.
+It is evident that error reduction correlates positively with both the number of layers and width.
+Nevertheless, diminishing returns become apparent when exceeding four layers or a width of 64 on Elasticity.
+We recommend employing a model configuration consisting of four layers and a width of 64 due to its favorable balance between performance and computational cost.
+
+\begin{table}[t] %
+    \centering
+    \setlength{\tabcolsep}{10pt}
+    \caption{Comparison on the $l_2$ relative error for ONO with different depths on Elasticity and Plasticity benchmarks.}
+    \begin{tabular}{ccc}
+    \toprule
+    \bf{Model} & Elasticity & Plasticity \\
+    \midrule
+    ONO-8  & 0.0118 & 0.0048 \\
+    ONO-30 & \bf{0.0047} & \bf{0.0013} \\
+    \bottomrule
+    \end{tabular}
+    \label{table:ono30}
+\end{table}
+
+To further assess the scalability of our model, we increase the number of layers to 30 and the learnable parameters to 10 million while keeping the width at 128. 
+We compare it to the 8-layer model, which has approximately 1 million parameters.
+The results are in Table~\ref{table:ono30}.
+We denote the models as ``ONO-30" and ``ONO-8" respectively.
+The prediction of ONO-30 exhibits a remarkable decrease in both benchmarks, achieving reductions of $37\%$ and $76\%$.
+The results demonstrate the potential of ONO as a large pre-trained neural operator.
+
+
+\section{Conclusion}
+
+This paper aims to address the performance decline stemming from the limited training data from classical PDE solvers and the complexity of deep models.
+Our main contribution is the introduction of regularization mechanisms for neural operators, which effectively enhance generalization performance with reduced training data.
+We propose an attention mechanism with orthogonalization regularization based on the kernel integral rewritten by orthonormal eigenfunctions.
+We further present a neural operator called ONO, built upon this attention mechanism.
+Extensive experiments demonstrate the superiority of our approach compared to baselines.
+The study aims to mitigate the challenges associated with the small data regime and enhance the robustness of large PDE-solving models.
+
+

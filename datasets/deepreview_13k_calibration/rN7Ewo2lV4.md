@@ -1,8 +1,8 @@
 # Generating Synthetic Genotypes using Diffusion Models
 
 - Decision: Reject
-- Avg Score: 3.33
-- Scores: 1, 0, 8, 5, 1, 5
+- Avg Score: 5.80
+- Scores: 10, 8, 5, 1, 5
 
 ## Abstract
 In this paper, we introduce the first diffusion model designed to generate \emph{complete} synthetic human genotypes, which, by standard protocols, one can straightforwardly expand into full-length, DNA-level genomes.

@@ -1,0 +1,358 @@
+\title{Denoising Autoregressive Transformers for Scalable Text-to-Image Generation}
+
+\begin{abstract}
+Diffusion models have become the dominant approach for visual generation. They are trained by denoising a Markovian process which gradually adds noise to the input. We argue that the Markovian property limits the model’s ability to fully utilize the generation trajectory, leading to inefficiencies during training and inference. In this paper, we propose DART, a transformer-based model that unifies autoregressive (AR) and diffusion within a non-Markovian framework.  DART iteratively denoises image patches spatially and spectrally using an AR model that has the same architecture as standard language models. DART does not rely on image quantization, which enables more effective image modeling while maintaining flexibility. Furthermore, DART seamlessly trains with both text and image data in a unified model. Our approach demonstrates competitive performance on class-conditioned and text-to-image generation tasks, offering a scalable, efficient alternative to traditional diffusion models. Through this unified framework, DART sets a new benchmark for scalable, high-quality image synthesis.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.965\textwidth]{figures/pipeline_dart4.jpg}
+    \caption{($\leftarrow$) A general illustration of the proposed \modelname{}. The model autoregressively denoises image through a Transformer until a clean image is generated. Here, whole images are shown for visualization purpose; %\protect\footnotemark. 
+    ($\rightarrow$) We show the architecture details which integrates state-of-the-art designs similar to common language models~\citep{dubey2024llama}.
+    }%It can also generate text through next token prediction. Both images and texts are generated in an autoregressive manner. Conditions like text prompt are also added through a cross-attention.}
+    \label{fig:dart_pipeline}
+\end{figure}
+Recent advancements in deep generative models have led to significant breakthroughs in visual synthesis, with diffusion models emerging as the dominant approach for generating high-quality images~\citep{rombach2022high,esser2024scaling}. Diffusion models~\citep{sohl2015deep, ho2020denoising} operate by progressively adding Gaussian noise to an image and learning to reverse this process in a sequence of denoising steps. 
+Despite their success, these models are difficult to train on high resolution images directly, requiring either cascaded models~\citep{ho2022cascaded}, or multiscale approaches~\citep{gu2023matryoshka} or preprocessing of images to autoencoder codes at lower resolutions~\citep{rombach2022high}. These limitations can stem from their reliance on the Markovian assumption, which simplifies the generative process but restricts the model only to see the generation from the previous step. 
+This often leads to inefficiencies during training and inference, as the individual steps of denoising are unaware of the trajectory of generations from prior steps.
+
+In parallel, autoregressive models, such as GPT-4~\citep{achiam2023gpt}, have shown great success in modeling long-range dependencies in sequential data, particularly in the field of natural language processing. 
+These models efficiently cache computations and manage dependencies across time steps, which has also inspired research into adapting autoregressive models for image generation. Early efforts such as PixelCNN~\citep{Oord2016} suffered from high computational costs due to pixel-wise generation. More recent models like VQ-GAN~\citep{esser2021taming} and related work~\citep{yu2022scaling,team2024chameleon,tian2024visual} learn models of quantized images in a compressed latent space; 
+\citet{li2024autoregressive} propose to generate directly in such space without quantization by employing a diffusion-based loss function.
+However, these methods fail to fully leverage the progressive denoising benefits of diffusion models, resulting in limited global context and error propagation during generation.
+
+To address these limitations, we propose \underline{D}enoising \underline{A}uto\underline{R}egressive \underline{T}ransformer (\modelname{}), a novel generative model that integrates autoregressive modeling within a non-Markovian diffusion framework~\citep{song2021denoising} (Fig.~\ref{fig:dart_pipeline}). 
+The non-Markovian formulation in \modelname{} enables the model to leverage the full generative trajectory during training and inference, while retaining the progressive modeling benefits of diffusion models, resulting in more efficient and flexible generation compared to traditional diffusion and autoregressive approaches.
+Additionally, \modelname{} introduces two key improvements to address the limitations of the non-Markovian approach: (1) token-level autoregressive modeling (\modelname{}-AR), which captures dependencies between image tokens autoregressively, enabling finer control and improved generation quality, and (2) a flow-based refinement module (\modelname{}-FM), which enhances the model’s expressiveness and smooths transitions between denoising steps. These extensions make \modelname{} a flexible and efficient framework capable of handling a wide range of tasks, including class conditional, text-to-image, as well as multimodal generation.
+
+\modelname{} offers a scalable, efficient alternative to traditional diffusion models, achieving competitive performance on standard benchmarks for class-conditioned (e.g., ImageNet~\citep{Deng2009ImageNet:Database}) and text-to-image generation. % This unified framework sets a new benchmark for high-quality image synthesis. and demonstrates the potential of combining the strengths of diffusion and autoregressive approaches.
+To summarize, major contributions of our work include: 
+\begin{itemize}[leftmargin=*]
+	\item  We propose \modelname{}, a novel non-Markovian diffusion model that leverages the full denoising trajectory, leading to more efficient and flexible image generation compared to traditional approaches.
+	\item  We propose two key improvements: \modelname{}-AR and \modelname{}-FM, which improve the expressiveness and coherence throughout the non-Markovian generation process.
+	\item  \modelname{} achieves competitive performance in both class-conditioned and text-to-image generation tasks, offering a scalable and unified approach for high-quality, controllable image synthesis.
+    
+    
+\end{itemize}
+
+
+\section{Background}
+
+\subsection{Diffusion Models}
+
+Diffusion models~\citep{sohl2015deep,ho2020denoising,song2020score} are latent variable models with a fixed posterior distribution, and trained with a denoising objective. These models have gained widespread use in image generation~\citep{rombach2021highresolution, podell2023sdxl,esser2024scaling}. Diffusion models produce the entire image in a non-autoregressive manner through iterative processes. Specifically, given an image $\vx_0 \in\mathbb{R}^{3\times H\times W}$, we define a series of latent variables $\vx_{t}$ ($ t=1,\cdots, T$) with a \emph{Markovian process} which gradually adds noise to the original image $\vx_0$. The transition $q(\vx_t|\vx_{t-1})$ and the marginal $q(\vx_t|\vx_0)$ probabilities are defined as follows, respectively:
+\begin{equation}
+    q(\vx_{t}|\vx_{t-1}) = \mathcal{N}(\vx_{t}; \sqrt{1-\beta_t}\vx_{t-1},\beta_t\mathbf{I}), \;\; q(\vx_t|\vx_0)=\mathcal{N}(\vx_{t}; \sqrt{\bar{\alpha}_t}\vx_0,\left(1-\bar{\alpha}_t\right)\mathbf{I}),
+    \label{eq.DDPM_forward}
+\end{equation}
+where $\bar{\alpha}_t = \prod_{\tau=1}^t(1-\beta_\tau), 0 < \beta_t < 1$ are determined by the noise schedule.
+The model learns to reverse this process with a backward model $p_\theta(\vx_{t-1}|\vx_{t})$, which aims to denoise the image. The training objective for the model is:
+\begin{equation}
+    \min \mathcal{L}_{\theta}^{\text{DM}} = \mathbb{E}_{t\sim[1,T], \vx_t\sim q(\vx_t|\vx_0)} [\omega_t\cdot \|\vx_\theta(\vx_t, t) - \vx_0\|_2^2],
+    \label{eq.DM_loss}
+\end{equation}
+where $\vx_\theta(\vx_t, t)$ is a time-conditioned denoiser that learns to map the noisy sample $\vx_t$ to its clean version $\vx_0$; $\omega_t$ is a time-dependent loss weighting, which usually uses SNR~\citep{ho2020denoising} or SNR+1~\citep{salimans2022progressive}.
+Practically, $\vx_t$ can be re-parameterized with noise- or v-prediction~\citep{salimans2022progressive} for enhanced performance, and can be applied on pixel space~\citep{gu2023matryoshka, saharia2022photorealistic} or latent space, encoded by a VAE encoder~\citep{rombach2021highresolution}.
+However, standard diffusion models are computationally inefficient, requiring numerous denoising steps and extensive training data. Moreover, they lack the ability to leverage generation context effectively, hindering scalability to complex scenes and long sequences like videos. %\jg{check}
+
+\subsection{Autoregressive Models}
+
+In the field of natural language processing, Transformer models have achieved notable success in autoregressive modeling~\citep{vaswani2017attention, raffel2020exploring}. Building on this success, similar approaches have been applied to image generation~\citep{parmar2018image, esser2021taming, chen2020generative,yu2022scaling,sun2024autoregressive,team2024chameleon}. Different from diffusion-based methods, these methods typically focus on learning the dependencies among discrete image tokens (e.g., through Vector Quantization~\citep{van2017neural}).
+To elaborate, consider an image $\vx\in\mathbb{R}^{3\times H\times W}$. 
+The process begins by encoding this image into a sequence of discrete tokens $\vz_{1:N} = \mathcal{E}(\vx)$. These tokens are designed to approximately reconstruct the original image through a learned decoder $\hat{\vx} = \mathcal{D}(\vz_{1:N})$. An autoregressive model is then trained by maximizing the cross-entropy as follows:
+\begin{equation}
+    \max\mathcal{L}_{\theta}^{\textrm{CE}} = \sum_{n=1}^N \log P_\theta(\vz_n | \vz_{0:n-1}),
+    \label{eq.ar}
+\end{equation}
+where $\vz_0$ is the special start token.
+During the inference phase, the autoregressive model is first used to sample tokens from the learned distribution, and then decode them into image space using $\mathcal{D}$.
+
+As discussed in \citet{kilian2024computational}, autoregressive models offer significant efficiency advantages over diffusion models by caching previous steps in memory and enabling the entire generation process to be computed in a single parallel forward pass. This reduces computational overhead and accelerates training and inference. However, the reliance on quantization can lead to information loss, potentially degrading generation quality. Additionally, the linear, step-by-step nature of token prediction may overlook the global structure, making it challenging to capture long-range dependencies and holistic coherence in complex scenes or sequences.
+
+
+\section{\modelname{}
+
+\subsection{Non-Markovian Diffusion Formulation}
+\label{sec.nomad}
+We start by revisiting the basics of diffusion models from the perspective of hierarchical variational auto-encoders~\citep[HVAEs,][]{kingma2013auto,child2020very}. Given a data-point $\vx_0$, a HVAE process $p_\theta$ of a sequence of latent variables $\{\vx_t\}_t$\footnote{We follow the same notation of time indexing $1\ldots T$ in diffusion models for consistency.} by maximizing a evidence lower bound (ELBO):
+\begin{equation}
+    \max \mathcal{L}^{\text{ELBO}}_{\theta,\phi} = \mathbb{E}_{\vx_{1:T}\sim q_\phi(\vx)} \left[\sum_{t=1}^T\log p_\theta(\vx_{t-1}| \vx_{t:T}) + \log p_\theta(\vx_T) - \log q_\phi(\vx_{1:T}|\vx_0)\right],
+\label{eq:elbo}
+\end{equation}
+where $\vx_0$ is the real data, and $q_\phi$ is a learnable inference model. As pointed out in VDM~\citep{kingma2021variational}, diffusion models can essentially be seen as HVAEs with three specific modifications: 
+\begin{enumerate}
+    \item A fixed inference process $q$ which gradually adds noise to corrupt data $\vx_0$;
+    \item Markovian forward and backward process where $\vx_t$ depends only on $\vx_{t+1}$ (\cref{eq.DDPM_forward});
+    \item Noise-dependent loss weighting that reweighs ELBO with a focus on perception.
+\end{enumerate}
+Only with all above simplifications combined, standard diffusion models can be formulated as \cref{eq.DM_loss} where the generator becomes Markovian $p_\theta(\vx_{t-1}|\vx_{t:T}) = p_\theta(\vx_{t-1}|\vx_t)$ so that one can randomly sample $t$ to learn each transition independently. This greatly simplifies modeling, enabling training models with sufficiently large number of steps (e.g., $T=1000$ for original DDPM~\citep{ho2020denoising}) without suffering from memory issues. 
+
+In prior research, these aspects are highly coupled, and few works attempt to disentangle them. We speculate that the Markovian assumption might not be a necessary requirement for a high generation quality, as long as the fixed posterior distribution and flexible loss weightings are maintained. As a side evidence, one can achieve reasonable generation with much fewer steps (e.g., $100$) at inference time using non-Markovian HVAE.
+On the contrary, the Markovian modeling forces all information compressed solely in the corrupted data from previous noise level which could be an obstacle preventing efficient learning and require more inference steps. 
+\paragraph{\underline{NO}n-\underline{MA}rkovian \underline{D}iffusion Models (NOMAD)}
+In this paper, we reconsider the original form of generator $p_\theta(\vx_{t-1}|\vx_{t:T})$ of HVAEs while maintaining the modifications, 1 and 3, made by diffusion models. More precisely, we learn the following weighted ELBO loss (\cref{eq:elbo}) with adjustable $\tilde{\omega}_t$:
+\begin{equation}
+    \max \mathcal{L}^\textrm{NOMAD}_\theta = \mathbb{E}_{\vx_{1:T}\sim q(\vx_0)}\left[
+        \sum_{t=1}^T\tilde{\omega}_t\cdot\log p_\theta(\vx_{t-1}|\vx_{t:T})
+    \right],
+    \label{eq:nomad}
+\end{equation}
+where  $q$ is the pre-defined inference process. This formulation shares many similarities as autoregressive (AR) models in \cref{eq.ar}, where in our case, each token represents a noisy sample $\vx_t$. Therefore, it is natural to implement such process with autoregressive Transformers~\citep{vaswani2017attention}. 
+
+However, the Markovian inference process of standard diffusion models makes it impossible for the generator $\theta$ to use the entire context except for $\vx_t$. That is to say, even if we initiate our generator as $p_\theta(\vx_{t-1}|\vx_{t:T})$, the model only needs information in $\vx_t$ in order to best denoise $\vx_{t-1}$. 
+Therefore, it is critical to design a \textbf{fixed} and \textbf{non-Markovian}\footnote{The term non-Markovian refers to $\vx_t$ is not only related to the previous step $\vx_{t-1}$.} inference process $q(\vx_t|\vx_{0:t-1})$ to sample the noisy sequences $\vx_{1:T}\sim \vx_0$.
+The simplest approach is to perform an \textit{independent} noising process:
+\begin{equation}
+    q(\vx_t|\vx_{0:t-1}) = q(\vx_t|\vx_0) = \mathcal{N}(\vx_t; \sqrt{\gamma_t} \vx_0, (1-\gamma_t)\mathbf{I}), \;\; \forall t \in [1, T],
+    \label{eq.n}
+\end{equation}
+where $\gamma_t$ represents the non-Markovian noise schedule. 
+Note that, while \cref{eq.n} may look close to the marginal distribution of the original diffusion models (\cref{eq.DDPM_forward}), the underlying meaning is different as $\vx_t$ is conditionally independent given $\vx_0$. In practice, one can also choose a more complex non-Markovian process as presented in DDIM~\citep{song2021denoising}, and we leave this exploration in future work.
+Additionally, we can show the following proposition:
+\begin{proposition}
+A non-Markovian diffusion process $\{\vx_t\}_t$ with independent noising \(\gamma_t\) has a bijection to a Markovian diffusion process $\{\vy_t\}_t$  with the same number of steps and noise level $\{\bar\alpha_t\}_t$; $\{\vy_t\}_t$ achieves the maximal signal-to-noise ratio when its noise level satisfies \(\frac{\bar{\alpha}_t}{1-\bar{\alpha}_t} = \sum_{\tau=t}^T \frac{\gamma_\tau}{1-\gamma_\tau}\).
+\label{prop.1}
+\end{proposition}
+ The above proposition indicates that we can carefully choose a set of noise level $\gamma_t$ to model the same information-destroying process as a comparable diffusion baseline, while modeling with the entire generation trajectory.
+
+
+\begin{figure}[t]
+\centering
+\setlength{\tabcolsep}{5pt}
+    \begin{tabular}{ccc}
+    \centering
+    \includegraphics[width=0.26\textwidth]{figures/attn_mask.jpg} & 
+    \includegraphics[width=0.26\textwidth]{figures/attn_mask_ar.jpg} &
+    \includegraphics[width=0.33\textwidth]{figures/compare_with_ar.jpg}
+    \\
+    (a) & (b) & (c)
+    \end{tabular}
+    \caption{Attention masks for (a) \modelname{} and (b) \modelname{}-AR, highlighting their different structures. (c) Comparison of learning curves, demonstrating the superior performance of \modelname{}-AR.}
+    \label{fig:attn_mask}
+\end{figure}
+\subsection{Proposed Methods}
+\label{sec:model}
+
+\paragraph{\underline{D}enoising \underline{A}uto\underline{R}egressive \underline{T}ransformer (\modelname{})}
+We propose \modelname{} -- a Transformer-based generative model that implements non-Markovian diffusion with an independent noising process (see \cref{fig:dart_pipeline}). 
+First, following DiT~\citep{peebles2022scalable}, we represent each image by first extracting the latent map with a pretrained VAE~\citep{rombach2021highresolution}, patchify, and flatten the map into a sequence of continuous tokens $\vx_t\in \mathbb{R}^{K\times C}$, where $K$ is the length, and $C$ is the channel dimension. When considering multiple noise levels,  we concat tokens along the length dimension. 
+Then, \modelname{} models the generation as $p_\theta(\vx_{t-1}|\vx_{t:T}) = \mathcal{N}\left(\vx_{t-1}; \sqrt{\gamma_{t-1}}\vx_\theta(\vx_{t:T}), (1-\gamma_{t-1})\mathbf{I}\right)$, where $\vx_\theta(.)$ is a Transformer network that takes in the concatenated sequence $\vx_{t:T} \in \mathbb{R}^{K(T-t)\times C}$, and predicts the ``mean'' of the next noisy image. By combining with \cref{eq.n}, we simplify \cref{eq:nomad} as:
+\begin{equation}
+    \min \mathcal{L}^{\textrm{\modelname{}}}_\theta = \mathbb{E}_{\vx_{1:T}\sim q(\vx_0)}\left[
+        \sum_{t=1}^T\omega_t\cdot\|\vx_\theta(\vx_{t:T}) - \vx_0\|^2_2
+    \right],
+    \label{eq.dart}
+\end{equation}
+where we define $\omega_t = \frac{\gamma_{t-1}}{1-\gamma_{t-1}} \tilde{\omega}_t$ to simplify the notation. Similar to standard AR models, training of $T$ denoising steps is in parallel, where computations across different steps are shared. A chunk-based causal mask is used to maintain the autoregressive structure (see \cref{fig:attn_mask}(a)). 
+
+It is evident from \cref{eq.dart} that the objective is similar to the original diffusion objective (\cref{eq.DM_loss}), demonstrating that \modelname{} can be trained as robustly as standard diffusion models. Additionally, by leveraging the diffusion trajectory within an autoregressive framework, \modelname{} allows us to incorporate the proven design principles of large language models~\citep{gpt3, dubey2024llama}.
+Furthermore, \cref{prop.1} indicates that we can select $\omega_t$ according to its associated diffusion process. For instance, with SNR weighting~\citep{ho2020denoising}, $\omega_t$ can be defined as $\omega_t = \sum_{\tau=t}^T \frac{\gamma_\tau}{1-\gamma_\tau}$.
+    
+Sampling from \modelname{} is straightforward: we simply predict the mean $\vx_\theta(\vx_{t:T})$, add Gaussian noise to obtain the next step $\hat{\vx}_{t-1}$, and feed that to the following iteration. Unlike diffusion models, no complex solvers are needed. Similar to diffusion models, classifier-free guidance~\cite[CFG,][]{ho2021classifier} is applied to the prediction of $\vx_\theta$ for improved visual quality.
+Additionally, KV-cache is employed to enhance decoding efficiency. %\jg{add cfg}
+
+
+\paragraph{Limitations of Naive \modelname{}} Unlike diffusion models, which can be trained with a large number of steps $T$, non-Markovian modeling is constrained by memory consumption as $T$ increases. For example, using $T=16$ on $256\times 256$ images will easily create over $4000$ tokens even in the latent space.
+This fundamentally limits the modeling capacity on complex tasks such as text-to-image generation.
+However, the flexibility of the autoregressive structure allows us to enhance the capacity without compromising scalability. In this work, we propose two methods on top of \modelname{}:
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/dart_fm.jpg}
+    \caption{An illustration for the generation process of \modelname{}-FM. }%It can also generate text through next token prediction. Both images and texts are generated in an autoregressive manner. Conditions like text prompt are also added through a cross-attention.}
+    \label{fig:dart_fm}
+\end{figure}
+
+\paragraph{1. \modelname{} with Token Autoregressive (\modelname{}-AR)}
+As similarly discussed by \citet{xiao2021tackling}, the independent Gaussian assumption of $p_\theta(\vx_{t-1}|\vx_{t:T})$ is inaccurate to approximate the complex true distribution of $q(\vx_{t-1}|\vx_{t:T})$, especially when $T$ is small. A straightforward solution to model image  denoising as an additional autoregressive model $p_\theta(\vx_{t-1}|\vx_{t:T}) = \prod_{k=1}^K p_\theta(\vx_{k, t-1}|\vx_{<k, t-1},\vx_{t:T})$:
+\begin{equation}
+    \min \mathcal{L}^{\textrm{\modelname{}-AR}}_\theta = \mathbb{E}_{\vx_{1:T}\sim q(\vx_0)}\left[
+    \sum_{t=1}^T\omega_t
+    \sum_{k=1}^K
+    \|\vx_\theta(\vx_{<k, t-1}, \vx_{t:T}) - \vx_{k, 0}\|^2_2
+    \right],
+    \label{eq.dart-ar}
+\end{equation}
+where $\vx_{1,t-1},\ldots, \vx_{K,t-1}$ are the $K$ flatten tokens of $\vx_{t-1}$. 
+The autoregressive decomposition ensures each tokens are not independent, which is strictly stronger than the original \modelname{}. We demonstrate this by visualizing the training curve in \cref{fig:attn_mask} (c).
+Training of \modelname{}-AR takes essentially the same amount of computation as standard \modelname{} with two additional modifications at the input and attention masks (see comparison in \cref{fig:attn_mask} (a) (b)).
+At sampling time, \modelname{}-AR is relatively much more expensive as it requires $K\times T$ AR steps before it outputs the final prediction.
+\paragraph{2. \modelname{} with Flow Matching (\modelname{}-FM)}
+The above approach models dependency across tokens, while maintaining Gaussian modeling at each step. Alternatively, we can improve the expressiveness of $p_\theta(\vx_{t-1}|\vx_{t:T})$ by abandoning the Gaussian assumption, similar to \citet{li2024autoregressive}. 
+More precisely, we first sample $\tilde{\vx}_t$ as in regular \modelname{}. Then, we recursively apply a continuous flow network, $\vv_\phi(\tilde{\vx}_t, \vc_t, \tau_t)$, over multiple iterations to bridge the gap between $\tilde{\vx}_t$ and $\vx_{t-1}$ (see \cref{fig:dart_fm}). Here, $\vv_\phi(\tilde{\vx}_t, \vc_t, \tau)$ models the velocity field for the probabality flow between the distributions of $\tilde{\vx}_t$ and $\vx_{t-1}$, $\tau \in [0,1]$ denotes the auxiliary flow timestep, and $\vc_t = \vc_\theta(\vx_{t:T})$ represents the features from the last Transformer block, providing contextual information across the noisy image. Consequently, a simple MLP suffices to model $\vv_\phi$, adding only a minimal overhead to the total training cost.
+We train $\vv_\phi$ via flow matching~\citep{liu2022flow,lipman2023flow,albergo2023stochastic} due to its simplicity:
+\begin{equation}
+    \min \mathcal{L}^{\textrm{FM}}_{\phi,\theta} = \mathbb{E}_{\vx_{1:T}\sim q(\vx_0)}\sum_{t=1}^T\mathbb{E}_{\tau \in [0, 1]}\|\vv_\phi((1-\tau)\tilde{\vx}_t + \tau\vx_{t-1}, \vc_t, \tau) - (\vx_{t-1} - \tilde{\vx}_t)\|^2_2,
+    \label{eq.fm}
+\end{equation}
+where $\tilde{\vx}_t = \sqrt{\gamma_{t-1}}\texttt{SG}\left[\vx_\theta(\vx_{t:T})\right] + \sqrt{1-\gamma_{t-1}}\mathbf{\epsilon}$, and $\mathbf{\epsilon} \sim \mathcal{N}(0, \mathbf{I})$. $\texttt{SG}\left[\right]$ is the stop-gradient operator to avoid trivial solutions in optimization.
+In practice, we combine \cref{eq.fm} with the original \modelname{} objectives, which can be seen as an additional refinement on top of the Gaussian-based prediction.
+
+
+
+
+\subsection{Multi-resolution Generation}
+\label{sec:multi-scale}
+\modelname{} (including both the -AR and -FM variants) is a highly flexible framework that can be easily extended and applied in various scenarios with minimal changes in the formulation.
+For example, instead of learning a fixed resolution of images, one can learn a joint distribution of $p_\theta(\{\vx^i_0\}_{i=1}^N)$ where $\vx^i_0\in \mathbb{R}^{K_i\times C}$ is $\vx_0$ with a different resolution. Following the approaches proposed in \citet{gu2022f,gu2023matryoshka,zheng2023learning} for diffusion models, a single \modelname{} — referred to as \emph{Matryoshka-\modelname{}} — can model multiple resolutions by representing each image with its corresponding noisy sequence $\{\vx^k_t\}_t$ separately, then flattening and concatenating these sequences for sequential prediction. 
+As a special case shown in \cref{fig:dart_extension} ($\leftarrow$), we  model the NOMAD objective in \cref{eq:nomad} as 
+\begin{equation}
+    \max \mathcal{L}^\textrm{Matryoshka}_\theta = \mathbb{E}_{\{\{\vx^i_t\}_{t=0}^{T_i}\}_{i=1}^N\sim q(\vx_0)}\left[
+    \sum_{i=1}^N
+    \sum_{t=1}^T\tilde{\omega}_t^i\cdot\log p_\theta(\vx_{t-1}^i | \vx^i_{t:T}, \vx^{<i}_{1:T})
+    \right],
+    \label{eq:multi_scale}
+\end{equation}
+where the above can be implemented using any \modelname{} variant. Note that $\vx^i_0$ is not directly conditioned on $\vx^{<i}_0$, which not only avoids the need to handle shape changes at the boundaries but also mitigates potential error propagation, a common issue in learning cascaded diffusion~\citep{ho2022cascaded}. All low-resolution information is processed through self-attention.
+
+By this approach, the model can balance the number of noise levels with the total number of tokens to achieve better efficiency. Additionally, learning resolutions can be progressively increased by finetuning low-resolution models with extended sequences.
+
+
+\subsection{Multi-modal Generation}
+\label{sec:application}
+Our proposed framework, built on an autoregressive model, naturally extends to discrete token modeling tasks. This includes discrete latent modeling for image generation~\citep{gu2024kaleido} and multi-modal generation~\citep{team2024chameleon}. By leveraging a shared architecture, we jointly optimize for both continuous denoising and next-token prediction loss using cross-entropy for discrete latents which we call \emph{Kaleido-\modelname{}} considering its architectural similarity as \citet{gu2024kaleido} (see \cref{fig:dart_extension}). To balance inference across modalities, we reweight the discrete loss (\cref{eq.ar}) according to the relative lengths between the discrete and image tokens:
+\begin{equation}
+    \mathcal{L}^{\textrm{Kaleido}}_\theta = \lambda\mathcal{L}^{\textrm{CE}}_\theta + \mathcal{L}^{\textrm{DART}}_\theta,
+\end{equation}
+where $\lambda = \frac{\textrm{\# text tokens}}{\textrm{\# image tokens}}$. 
+It is important to note that our approach is markedly distinct from several concurrent works aimed at unifying autoregressive and diffusion models within a single parameter space~\citep{zhou2024transfusion,xie2024show,zhao2024monoformer,xiao2024omnigen}. In these efforts, the primary goal is to adapt language model architectures to perform diffusion tasks, without modifying the underlying diffusion process itself to account for the shift in model design. As we have discussed, the Markovian nature of diffusion models inherently limits their ability to leverage generation history, a feature that lies at the core of autoregressive models. In contrast, \modelname{} is designed to merge the advantages of both autoregressive and diffusion frameworks, fully exploiting the autoregressive capabilities. This formulation also allows for seamless integration into LLM pipelines.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/dart_multires_text_new.jpg}
+    \caption{Illustrations of \emph{Matryoshka-\modelname{}} ($\leftarrow$) and \emph{Kaleido-\modelname{}} ($\rightarrow$). By joint training models, \modelname{} can perform various applications such as multi-resolution and multi-modal generation. }%It can also generate text through next token prediction. Both images and texts are generated in an autoregressive manner. Conditions like text prompt are also added through a cross-attention.}
+    \label{fig:dart_extension}
+\end{figure}
+
+
+
+
+\section{Experiments}
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.96\linewidth]{figures/dart_t2i2.jpg}
+    \caption{\small Samples generated by text-to-image \modelname{}-FM at $256\times 256$ and $512\times 152$ pixels}
+    \label{fig:main_results}
+\end{figure}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/dart_imagenet.jpg}
+    \caption{\small Comparison for class-conditioned image generation with \modelname{} and baselines trained on ImageNet.}
+    \label{fig:imagenet_compare}
+\end{figure}
+\subsection{Experimental Settings}
+
+\paragraph{Dataset} We experiment with \modelname{} on both class-conditioned image generation on ImageNet~\citep{Deng2009ImageNet:Database} and text-to-image generation on CC12M~\citep{changpinyo2021cc12m}, where each image is accompanied by a descriptive caption. All images are center-cropped and resized.
+All models, except those used for Matryoshka-\modelname{} finetuning, are trained to synthesize images at $256 \times 256$ resolution, while the latter are trained at $512 \times 512$. For multimodal generation tasks, we  augment CC12M with synthetic captions as the discrete ground-truth.
+
+to quantify the the realism and diversity of generated images. %Besides, we employ Recall~\citep{kynkaanniemi2019improved} to measure the diversity of samples. 
+For text-to-image generation, we also use the CLIP score~\citep{hessel2021clipscore} to measure how well the generated images align with the given text instructions. To assess the zero-shot capabilities of the models, we report scores based on the MSCOCO 2017~\citep{Lin2014} validation set.
+
+Following \cref{sec:model}, we experimented with three variants of the proposed model: the default \modelname{}, along with two enhanced versions, \modelname{}-AR and \modelname{}-FM. All variants are implemented using the same Transformer blocks for consistency. As illustrated in \cref{fig:dart_pipeline}, our design is similar to \citet{dubey2024llama}, incorporating rotary positional encodings~\citep[RoPE,][]{su2024roformer} within the self-attention layers and SwiGLU activation~\citep{shazeer2020glu} in the FFN layers. For class-conditioned generation, we follow~\citep{peebles2022scalable}, adding an AdaLN block to each Transformer block to integrate class-label information. For text-to-image generation, we replace AdaLN with additional cross-attention layers over pretrained T5-XL encoder~\citep{raffel2020exploring}. Since \modelname{} uses a fixed noise schedule, there is no need for extra time embeddings as long as RoPE is active. 
+In addition, for \modelname{}-FM, we incorporate a small flow network, implemented as a 3-layer MLP, which increases the total parameter count by only about 1\%. 
+
+\cref{prop.1} not only makes a connection between \modelname{} and diffusion models, but also allows us to define the noise schedule based on any existing diffusion schedule $\{\bar{\alpha}_t\}_t$, which can be inversely mapped to the \modelname{} schedule $\{\gamma_t\}_t$ using the bijection. In this paper, we adopt the cosine schedule $\bar{\alpha}_t=\cos{\left({\pi }/{2}\cdot{t}/{T}\right)}$. We set $T=16$ while $K=256$\footnote{$K=256$ from encoding $256 \times 256$ images with StableDiffusion v1.4 VAE (\url{https://huggingface.co/stabilityai/sd-vae-ft-ema}) with a patch size of 2 and $C=16$ channels.} throughout all experiments unless otherwise specified.
+We train all models with a batch size of 128 images, resulting in a total of 0.5M image tokens per update. 
+For finetuning Matryoshka-\modelname{}, we additionally set the high-resolution part $T=4$ with $K=1024$.
+We use the AdamW optimizer~\citep{loshchilov2017decoupled} with a cosine learning rate schedule, setting the maximum learning rate to $3\textrm{e-}4$. 
+During inference, we enable KV-cache with memory pre-allocated based on the total sequence length. \modelname{} performs the same number of steps for inference as in training. For the FM variants, we additionally apply $100$ flow matching steps between each autoregressive step, following \citet{li2024autoregressive}.
+
+
+
+\subsection{Results}
+\paragraph{Class-conditioned Generation}
+We report the FID scores for conditional ImageNet generation in \cref{fig:fid_clip}(a), following the approach of previous works. In line with \cite{li2024autoregressive}, we apply a linear CFG scheduler to \modelname{} and its variants. As shown in the figure, both -AR and -FM variants consistently outperform the default \modelname{} across all guidance scales, demonstrating the effectiveness of the proposed improvement strategies. We also compare our methods with DiT~\citep{peebles2022scalable}, using both 16 sampling steps (to match \modelname{}) and 250 steps (the suggested best setting). Notably, \modelname{}-AR achieves the best FID score of \textbf{3.98} among all variants and significantly surpasses DiT when using 16 steps, highlighting its advantage in leveraging generative trajectories, particularly when the number of sampling timesteps is limited. Not surprisingly, DiT with 250 steps performs better than \modelname{}. However, it is important to note that the official DiT model is trained for 7M steps, which is substantially more training iterations than those used for \modelname{}.
+
+\cref{fig:imagenet_compare} also presents examples of generated results on ImageNet from all models using 16 sampling steps. \modelname{}-FM tends to produce sharper images with higher fidelity at higher CFG values. In contrast, \modelname{}-AR demonstrates an ability to generate more realistic samples at lower CFG values when compared to both the baselines and other variants.
+\begin{figure}[t]
+\centering
+\setlength{\tabcolsep}{0pt}
+    \begin{tabular}{ccc}
+    \centering
+    \includegraphics[width=0.333\textwidth]{figures/ImageNet_comparison.png} & 
+    \includegraphics[width=0.333\textwidth]{figures/COCO_comparison.png} &
+    \includegraphics[width=0.333\textwidth]{figures/COCO_CLIP.png}
+    \\
+    {\small (a) FID50K on ImageNet} &  {\small(b) FID30K on COCO}&  {\small(c) CLIP score on COCO}
+    \end{tabular}
+    \caption{\small Comparison of \modelname{}, \modelname{}-AR, \modelname{}-FM and baseline models with different CFG guidance scale on different benchmarks. * denotes models implemented and trained by us.}
+    \label{fig:fid_clip}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\setlength{\tabcolsep}{0pt}
+    \begin{tabular}{ccc}
+    \centering
+    \begin{minipage}[t]{0.333\textwidth} % Align table at the top
+    \raisebox{50pt}{%
+        \small
+        \setlength{\tabcolsep}{4pt} % Adjust this value as needed
+        \begin{tabular}{lrr}
+        \toprule
+        Model & Gflops & Speed (s) \\
+        \midrule
+        \modelname{} & 2.157  & 0.075\\
+        \modelname{}-AR & 2.112 & 7.44 \\
+        \modelname{}-FM & 2.177 & 0.32 \\
+        \midrule
+        DiT (16) & 2.073 & 0.065\\
+        DiT (256) & 32.384 & 0.84\\
+        \bottomrule
+        \end{tabular} 
+        \setlength{\tabcolsep}{0pt}
+        }
+        \end{minipage}
+        & 
+    \includegraphics[width=0.333\textwidth]{figures/model_size_comparison.png} &
+    \includegraphics[width=0.333\textwidth]{figures/noise_level_comparison.png}
+    \\
+    {\small (a) Inference speed \& flops} &  {\small(b) Comparison of model sizes}&  {\small(c) Comparison of \# of steps}
+    \end{tabular}
+    \caption{\small (a) Inference flops and speed (caulated as second per image) of different models. (b) Performance of \modelname{} of different sizes. (c) Effect of number of noise levels on \modelname{}.} %\textcolor{blue}{TODO: specify benchmark setting \& change time to sample/sec}}
+    \label{fig:fid_sizes_steps}
+\end{figure}
+\paragraph{Text-to-Image Generation}
+To demonstrate the capability of \modelname{} at scale, we train the model for text-to-image generation. 
+We also implement an in-house DiT with cross attention to text condition in comparison to our models, where we evaluate the performance on both $16$ and $250$ steps. 
+As shown in \cref{fig:fid_clip}, while both -AR and -FM variants still show clear improvements against the default \modelname{}, FM achieves the best FID of \textbf{11.12}, indicating its ability of handling diverse generation tasks.
+
+To validate the scalability of high-resolution image generation, we further finetune \modelname{} by jointly modeling $256\times 256$ and $512\times 512$ resolutions within a single autoregressive process (\cref{sec:multi-scale}).
+
+\paragraph{Efficiency}
+We compare both the actual inference speed (measured by wall-clock time with batch size 32 on a single H100) as well as the theoretical computation (measured by GFlops) in \ref{fig:fid_sizes_steps}(a). Since \modelname{}, \modelname{}-AR, \modelname{}-FM share the same encoder-decoder Transformer architecture, their flops are roughly the same. However, \modelname{}-AR has high wall clock inference time due to its large autoregressive steps, which have not been well parallelized in our current implementation. Integrated with recent advances in autoregressive LLMs, \modelname{}-AR can be deployed in a more efficient and we leave this for future investigations. \modelname{}-FM also have a inference time overhead due to the iterations of flow net in inference. Compared to \modelname{}, DiT has less flops for a single pass. However, it requires sufficient many number of iterations to generate high quality samples. \modelname{} has comparable flops and inference time as DiT with 16 sampling timesteps, while \modelname{} achieves better performance than DiT (16) on ImageNet and COCO, showing the efficiency benefits of \modelname{}. 
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/text_image_co.jpg}
+    \label{fig:kaleido}
+\end{figure}
+
+
+ Figure~\ref{fig:fid_sizes_steps}(b) illustrates how the performance changes as model size increase. Across all the four models, CLIP score significantly improves by increasing the number of parameters in \modelname{}. Besides, the perform steadily increases as more training iterations are applied. This demonstrates that our proposed generative paradigm benefits from scaling as previous generative models like diffusion~\citep{peebles2022scalable} and autoregressive models~\citep{li2024autoregressive}.
+
+\paragraph{Effects of noise levels.} We experiment with different noise levels, where we vary the number of total noise levels in our denoising framework (Figure~\ref{fig:fid_sizes_steps}(c)). A total of $T=4$ or $8$ noise levels are trained in comparison with standard $16$ noise levels. Not surprisingly, less noise levels lead to gradually degraded performance. However, with as few as 4 noise levels, \modelname{} can still generate plausible samples, indicating the capabilities of deploying \modelname{} in a more efficient way. Variants in noise levels provides a potential option for finding the optimal computation and performance trade-off especially when compute is limited. 
+
+
+\paragraph{Multimodal Generation} We showcase the capabilities of our proposed method in the joint generation of discrete text and continuous images, as introduced in \cref{sec:application}. \cref{fig:kaleido} provides examples of multimodal generation using the Kaleido-\modelname{} framework. Given an input, the model generates rich descriptive texts along with corresponding realistic images, demonstrating its ability to produce diverse samples with intricate details. Notably, unlike \citet{gu2024kaleido}, our approach processes both text and images through the same model, utilizing a unified mechanism to handle both modalities. This unified framework can potentially be integrated into any multimodal language models.
+
+
+
+\section{Related Work}
+
+
+
+\section{Conclusion}
+
+We presented \modelname{}, a novel model that integrates autoregressive denoising with non-Markovian diffusion to improve the efficiency and scalability of image generation. By leveraging the full generation trajectory and incorporating token-level autoregression and flow matching, \modelname{} achieves competitive performance on class-conditioned and text-to-image tasks. This approach offers a unified and flexible solution for high-quality visual synthesis. 
+
+Our current model is restricted by the number of tokens in the denoising process. One direction is to explore more efficient architectures for long context modeling~\citep{gu2023mamba,yan2024diffusion} which enables application to problems like video generations. Also, current work only conduct preliminary investigates on multimodal generation. Future work may train a multimodal generative model based on the framework of the decoder-only language model to handle a wide variety of problems with one unified model. 
+
+
+
+
+

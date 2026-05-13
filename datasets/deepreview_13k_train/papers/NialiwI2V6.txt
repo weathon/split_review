@@ -1,0 +1,272 @@
+\title{MOTOR: A Time-to-Event Foundation Model For Structured Medical Records}
+
+\begin{abstract}
+We present a self-supervised, time-to-event (TTE) foundation model called MOTOR (Many Outcome Time Oriented Representations) which is pretrained on timestamped sequences of events in electronic health records (EHR) and health insurance claims. TTE models are used for estimating the probability distribution of the time until a specific event occurs, which is an important task in medical settings. TTE models provide many advantages over classification using fixed time horizons, including naturally handling censored observations, but are challenging to train with limited labeled data. MOTOR addresses this challenge by pretraining on up to 55M patient records (9B clinical events). We evaluate MOTOR's transfer learning performance on 19 tasks, across 3 patient databases (a private EHR system, MIMIC-IV, and Merative claims data). Task-specific models adapted from MOTOR improve time-dependent C statistics by 4.6\% over state-of-the-art, improve label efficiency by up to 95\% ,and are more robust to temporal distributional shifts. We further evaluate cross-site portability by adapting our MOTOR foundation model for six prediction tasks on the MIMIC-IV dataset, where it outperforms all baselines. MOTOR is the first foundation model for medical TTE predictions and we release a 143M parameter pretrained model for research use at [redacted URL].
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Many applications in medicine require predicting not only the overall likelihood of an event, but also when that event will occur.
+\textit{Time-to-event (TTE) models} (also called \textit{survival models}) are commonly used to estimate the probability distribution of TTE data given a set of features. TTE models have two primary advantages over standard classification approaches using fixed time horizons. 
+First, they can estimate temporal quantities of interest such as the hazard rate or the median time until an event occurs. 
+Second, TTE models account for various types of censoring induced by different data collection mechanisms, which is critical for obtaining accurate estimates and fair models \citep{fairness}. %which in turn is important for creating 
+TTE models are commonly used, \textit{inter alia}, in medicine \citep{alaa2017deep,fernandez2016gaussian,lambert2010estimating,lin2014time}, churn prediction \citep{churn}, real time advertisement bidding \citep{ads}, recommendation systems \citep{recommend}, and other business analytics.
+
+Despite the benefits of TTE models, they come with the downside of requiring large training sets in order to estimate TTE probability distributions without bias \citep{nonparametric}.
+High censoring rates, common in medical events with long time horizons, further limit the available training data and exacerbate the risk of overfitting.
+A variety of methods have been proposed to mitigate this issue, generally by making assumptions about the TTE distribution such as proportional hazards \citep{cox1972regression} or parametric distributions \citep{martinsson2016wtte, avati2020countdown}. These assumptions significantly reduce the number of learnable parameters, but may also degrade predictive performance when they do not hold \citep{ph_fail}. 
+
+Recent work in deep learning has approached the challenge of limited training data by relying on transfer learning via increasingly powerful \textit{foundation models} \citep{bommasani2021opportunities}. 
+Foundation models leverage advances in self-supervised learning to train models using large collections of unlabeled data. 
+The resulting pretrained models can be quickly adapted to new tasks while improving accuracy, using less labeled training data, and being more robust to distributional shifts \citep{DBLP:journals/corr/abs-2211-09110} -- key \textit{desiderata} in medical machine learning.
+Prior research has explored self-supervised pretraining with structured medical records (procedure and diagnosis codes, lab results, etc.) by using autoregressive or "next code"-style pretraining objectives \citep{steinberg2021language}, however significant gaps remain when considering TTE modeling.
+First, large-scale pretraining using heterogeneous patient data is underexplored for TTE modeling, with prior work focusing on models trained from scratch, using limited input features, small numbers of target tasks, and disease-specific patient cohorts \citep{multitask, survtrace}.
+Second, standard autoregressive pretraining objectives may not be effective for TTE modeling, as they do not directly capture long-term time horizons commonly found in patient medical records.
+Finally, existing pretrained foundation models for structured medical record data are generally not released to researchers \citep{wornow2023shaky}, creating serious reproducibility challenges when evaluating transfer learning, the primary benefit afforded by foundation models.
+
+To address these challenges, we introduce MOTOR (Many Outcome Time Oriented Representations), a foundation model for medical TTE trained on up to 55M patient records (comprising 9B clinical events). Our main contributions are: 
+
+\begin{enumerate}
+    \item A self-supervised pretraining objective that uses thousands of TTE tasks (8,192 in our experiments) during pretraining to learn broadly useful features for TTE modeling. This novel pretraining task outperforms auto-regressive pretraining by 2.0\%.
+    
+    \item An efficient Transformer-based piecewise exponential model architecture that leverages shared time-dependent weights and sparsity to scale to thousands of TTE pretraining tasks while reducing memory usage by up to 35\%.
+
+    \item Experiments demonstrating that TTE pretraining improves accuracy by an average of 4.6\% over state-of-the-art methods for 19 evaluation tasks. We further verify that MOTOR has many important foundation model properties, including robustness over time, the ability to transfer a pretrained model for reuse in another dataset, and the ability to fine-tune task models with limited labeled data.
+
+    \item A 143M parameter MOTOR model pretrained on EHR data, released for non-commercial research use. To our knowledge, this is the first release of a medical foundation model for TTE.
+ 
+\end{enumerate}
+
+
+
+\section{Related Work}
+
+
+\textbf{Time-to-Event Models:} Accelerated failure time (AFT) models are a fully parametric approach for modeling TTE outcomes where the TTE distribution is parameterized with a specified probability distribution. AFT models assume that the parameters of that specified probability distribution are a learnable function of the features. Common probability distributions include exponential, gamma, log-normal, log-logistic, and Weibull. Piecewise distributions enable the use of different distribution parameters across different regions of time and thus provide additional flexibility, with the piecewise exponential distribution \citep{friedman1982piecewise} being a popular choice. More recently, AFT models have been combined with deep learning by using a neural network to map between input features and distribution parameters \citep{peann, martinsson2016wtte, deeprecurrent, piecewise, avati2020countdown, pmid34618267, deephit, dsm, dynamicdeephit}.
+
+Cox proportional hazards models (PH) \citep{cox1972regression} reduce the complexity of the model space by assuming a constant hazard ratio between instances. Cox models can also be combined with deep learning by using a neural network to map between the input features and the learned hazard ratio \citep{deepsurv}. 
+Random survival forests (RSF) \citep{Ishwaran2008} are an extension of random forests to the time-to-event setting.  The key features of RSF are that it supports non-linear feature interactions and is non-parametric.
+
+Some work has explored using multi-task learning to better fit TTE models in cases with limited data. \citet{multitask} proposed treating the pieces in piecewise TTE models as instances of related tasks and regularizing models to share weights across pieces. \citet{related} explored choosing ``compatible'' clinical tasks (i.e., clinical tasks with similar risk structure) to better learn neural network featurized Cox models. \citet{survtrace} evaluated learning mortality and length of stay models simultaneously while training cancer models. \citet{atlas} combined a TTE task with two continuous and twenty binary tasks to learn better models for cystic fibrosis. \citet{vae} used existing VAE techniques to pretrain cancer survival models.
+
+MOTOR differs from these approaches in several ways. First, we focus on a self-supervised pretraining objective that captures temporal structure from clinical events. Second, we massively increase the scale of patients (up to 55M) and tasks (8,192 tasks) used for pretraining and outline methods required to efficiently train at this scale. Finally, we explore the benefits of this pretraining on various downstream adaptation tasks.
+
+\textbf{Deep Learning for Structured Medical Record Data:}
+There is considerable prior work using deep learning with structured medical records for medical classification tasks.
+State-of-the-art work directly incorporates the temporal structure of medical record data by using recurrent neural networks (RNNs) \citep{grud, retain} or Transformers \citep{behrt}. 
+While initial deep learning efforts focused on end-to-end training using small, task-specific cohorts, more recent work has explored using self-supervised learning to pretrain models using millions of patient records.
+Various self-supervised objectives have been proposed for learning meaningful patterns in structured medical record data, including denosing autoencoders \citep{deeppatient}, autoregressive ``next day'' code prediction \citep{steinberg2021language}, and masked language modeling \citep{behrt, medbert, CEHR-BERT, claimpt}.
+
+The majority of recent architectures are formulated for classification tasks with fixed time horizons, e.g., 3-12 month mortality \citep{avati2018improving}.
+However, there are several efforts that combine deep learning with TTE modeling on EHR data. 
+\citet{avati2020countdown} used RNNs and feedforward neural networks to power AFT models for estimating time until death. 
+\citet{covrnn} used RNNs to train Cox models for hospital mortality and ventilation need.
+\citet{lengthofstay} used feedforward networks to parameterize Cox and DeepHit models for predicting time until discharge. 
+MOTOR differs from these prior works in two ways: 1) We use a Transformer-based piecewise exponential model to handle complex and nonlinear relationships in data, and 2) we leverage TTE pretraining at a massive scale to estimate model parameters more effectively.
+
+
+\section{Methods}
+
+
+\textbf{Problem Setup:} We consider a set of $N$ patients and their medical records $X$, where $X_i$ denotes patient $i$'s information and consists of a sequence of timestamped events, where each event is defined by a code that is a symbol drawn from a finite set defined by standard medical ontologies \citep{ohdsi_ontology}.
+Let $X_{ij}$ denote the $j$-th event in the sequence, where each event consists of a code for that event and the corresponding timestamp for when that event occurs.
+ 
+We are interested in learning models to predict the time-to-event for various tasks. Let $T_i$ denote the event time and let $C_i$ denote the censoring time for patient $i$. Our goal is to estimate the probability distribution of event times $\mathbb{P}(T_i = t)$, accounting for censoring. We make the standard non-informative censoring assumption (i.e. that censoring times are independent of event times).
+
+\textbf{MOTOR Overview:} We introduce MOTOR, a Transformer-based neural network model that is pretrained with a self-supervised, TTE objective defined using structured medical records data. Figure \ref{fig:p_motor} provides an overview of our approach, where inputs are patient timelines of time stamped clinical events. %patient records are fed into a Transformer backbone and converted into latent representations that are then used during TTE pretraining. 
+Once pretrained, MOTOR is combined with a linear head to train downstream models for particular tasks of interest such as predicting the time until a heart attack. % that compute TTE probabilities. 
+
+\begin{figure}[ht!]
+\centering
+\includegraphics[width=0.85\textwidth]{Figures/arch-diagram-rebuttal-v11.pdf}
+\caption{MOTOR architecture and TTE pretraining tasks, as applied to a patient. Note how tasks (survival curves) vary at each time step $j$, e.g., atorvastatin risk increases given a history of cardiovascular disorders.}
+\label{fig:p_motor}
+\end{figure}
+\textbf{Transformer:} We use a standard Transformer with local attention and causal masking \citep{roy-etal-2021-efficient} to compute embeddings for every patient at every time step.
+
+\textbf{Piecewise Exponential Time-to-Event Model:} Given the representations computed by the Transformer, MOTOR constructs a large-scale TTE model that can generate survival predictions for thousands of tasks. We derive and implement a scalable approach based on the Piecewise Exponential Artificial Neural Networks (PEANN) \citep{peann} framework that can work with a large number of tasks.
+
+Piecewise exponential models approximate the TTE distribution with a piecewise exponential function using a total number of pieces, $P$. Each piece $p$ covers the time period starting at $S_{p}$ and ending at $E_{p}$. For every patient $i$, event $j$, task $k$, and piece $p$, a hazard $\lambda_{ijkp}$ must be estimated to formulate a piecewise exponential TTE distribution for each patient. Formally, the piecewise exponential distribution is defined by the hazard function $H_{ijk}(t) =\sum_{p=1}^P I(S_p \leq t < E_p) \lambda_{ijk}$ and the survival function $S_{ijk}(t) = \prod_{p=1}^P e^{-\lambda_{ijkp} *(min(t, E_p) - S_p) * I(t \geq S_p)}$.
+
+This piecewise exponential model is combined with the event indicator tensor $\delta$ (defined as $\delta_{ijkp}$ indicating whether or not subject $i$ at the time of event $j$ has an event for task $k$ within the piece $p$) and event time tensor $U$ (defined as $U_{ijkp}$ being the time to either the task event or censorship within piece $p$ for patient $i$, event $j$ and task $k$) to construct the standard piecewise exponential likelihood loss function:
+\begin{equation}
+    L(U_{ijkp} | \lambda_{ijkp}) =\{\lambda_{ijkp}\,\mathrm{exp}(-\lambda_{ijkp}\,U_{ijkp})\}^{\delta_{ijkp}}\{\mathrm{exp}(-\lambda_{ijkp}\,U_{ijkp})\}^{1-\delta_{ijkp}}
+    \label{eq:likelihood}
+\end{equation}
+
+\textbf{Large Scale Piecewise Exponential Optimizations:} Computing this loss requires the evaluation of large matrix operations due to the dependence on $i$, $j$, $k$, and $p$
+, so we employ three optimizations to make this more tractable. First, we assume that the transformation $R_{ij}\mapsto{\log(\lambda_{ijkp})}$ is a linear mapping of low rank, and compute it with two smaller matrix multiplications. This is done by learning a time-independent task embedding $\beta_k$ of size $b$ for each pretraining task $k$ and learning a time-dependent linear transformation to $M_{ijp}$ from patient representation $R_{ij}$, in which $M_{ijp}$ represents the state of patient $i$ at event $j$ within piece $p$. We can then compute $\log(\lambda_{ijkp}) = M_{ijp} \cdot \hat{\beta}_k$. This requires $P$ times fewer parameters per task compared to a full rank transformation from $R_{ij}$ to $\lambda_{ijkp}$.
+The intuition here is that tasks should be largely time-independent as the risk factors for diseases mostly remain constant. 
+Tasks further exhibit a high degree of censorship, with a low probability for any particular event in a time bin, meaning $\delta$ and $U$ can be implemented using sparse matrix operations to significantly reduce compute and memory.
+For example, in our EHR-OMOP experiments, only 0.6\% of entries are non-duplicate, reducing the memory required to store and process $\delta$ and $U$ from 4 GB to 0.05 GB per batch.  
+Finally, as we only require the product of the likelihood loss function and not the individual terms, we fuse most operations into a single kernel such that large matrix intermediates like $\lambda$ and $\mathrm{exp}(-\lambda_{ijkp}\,U_{ijkp})\}$ are never fully materialized. 
+This reduces memory by a further 4 GB per batch. As our largest trained architecture (12 layers) itself requires 14.59 GB of memory, these optimizations combine to reduce our memory requirements by 35\%.
+\textbf{Time-to-Event Pretraining:} Given our Transformer encoder and piecewise exponential TTE setup, we define a pretraining task of predicting the time to the next time a code is assigned for various codes.
+To achieve a general TTE model, we train on a larger number of codes.
+To provide a more conservative measure of performance on novel TTE tasks, we explicitly removed codes for our evaluation target tasks from the set of pretraining tasks. 
+Note that removing codes for evaluation is not strictly necessary for correctness as we are using a patient split to ensure no leakage between pretraining and evaluation.
+We pretrain our model end-to-end using the likelihood in Equation (\ref{eq:likelihood}).
+\textbf{Adapting MOTOR to Target Tasks:} Given the pretrained model above, we can then train models for new target tasks of interest through the process of adaptation. Specifically, we need to estimate a new vector of parameters $\hat{\beta}_k^{\mathrm{\,new}}$ which will be used to provide piecewise exponential estimates for the new task.
+We evaluate two methods of adapting MOTOR, using a linear probe (MOTOR-Probe) and full finetuning (MOTOR-Finetune). In the linear probe setup, only $\hat{\beta}_k^{\mathrm{\,new}}$ are tuned for the new task and no other weights are modified. This simple approach allows models to be trained rather quickly as gradients only have to be evaluated over a small fraction of the model. Alternatively, in the full finetuning setup, all of MOTOR's weights are updated when finetuning. This is a flexible approach that can enable higher prediction accuracy but comes at the cost of requiring increased runtime as gradients have to be computed throughout the entire model. As an ablation, we also evaluate training MOTOR from scratch, without any adaptation (MOTOR-Scratch). In this setup, we randomly initialize MOTOR and train the whole model on the target task.
+
+
+\section{Experiments}
+
+We evaluate the effectiveness of MOTOR by comparing the performance of MOTOR-derived models to several state-of-the-art TTE models and under various ablations. Our code can be found in the supplement.
+
+\textbf{Datasets and Compute}\label{sec:data} We use two healthcare datasets for our main experiments: EHR-OMOP, a de-identified EHR dataset from an academic medical center, and MERATIVE, the 2017 release of the de-identified Merative\texttrademark\ MarketScan\textregistered\ Commercial Claims and Encounters Database \citep{merative}. EHR-OMOP contains longitudinal EHR data for adult and pediatric populations with a total of 2.7M patient records (2.4B clinical events) spanning 2014 - 2022. 
+Each record includes demographics (age, sex, ethnicity) and medical codes for diagnoses, labs, medications, procedures, and visits. 
+MERATIVE contains claims information (i.e., billing diagnoses, medications, procedures, and visits) for 78M patients (12.8B clinical events) spanning 2007 - 2017.
+
+
+\textbf{Setup of Target Tasks:}\label{sec:tasks} We derive 19 target tasks for evaluating models. Our evaluation set consists of six code-based target tasks (predicting the time to a particular diagnosis code is assigned) and 13 text-based target tasks (predicting the time to the creation of a radiology note that refers to a particular condition). For all tasks, a prediction time is defined by choosing the end of a random visit after at least a year of medical history. We use one sample per patient to better match the structure of existing cohort datasets frequently used for evaluating TTE models (such as SUPPORT, METABRIC, or SEER) and avoid issues related to baselines overfitting on highly correlated samples from the same patient.
+For simplicity, we assume death is the only competing risk and censor each record at death. 
+The six code-based tasks are Celiac Disease, Heart Attack (HA), Lupus, Nonalcoholic Fatty Liver Disease (NAFLD), Pancreatic Cancer, and Stroke. These tasks were chosen to cover a spectrum of acute and chronic health conditions where a prediction model is believed to have clinical utility \citep{celiac, lupus, nafld, cancer, ascvd}. These clinical events are defined by a set of ICD-10 codes that are expanded using OMOP SNOMED based ontology mappings \citep{ohdsi_ontology}. 
+We remove these codes and related concepts from pretraining to better evaluate performance on unseen tasks. 
+One limitation of code-based tasks is that coded data may be incomplete and thus many useful tasks can only be defined using information derived from text \citep{structured}. 
+To evaluate this setting, we additionally perform a separate analysis on EHR-OMOP with 13 text-based tasks, using the 13 radiology note NLP labeling functions provided by \citet{chexbert}. 
+ 
+
+\textbf{Baselines:} \label{sec:method_compare} We compare MOTOR-derived models with five other TTE approaches: Cox PH, DeepSurv, DeepHit, DSM, and RSF.
+
+\textbf{Evaluation Metrics:} We evaluate model performance using four metrics, the time-dependent C statistic \citep{heagerty2005survival}, Harrell's C-index \citep{harrell}, the Nam-D'Agostino (ND) calibration metric \citep{nd_test}, and the Integrated Brier Score (IBS) \citep{ibs}. The C statistic metrics provide an estimate of ranking performance, i.e., the ability of the model to correctly rank higher-risk patients over lower-risk patients. IBS and ND calibration provide information on whether the estimated survival curves contain correct probabilities.
+
+
+
+\section{Results}
+
+
+\textbf{Overall Performance:} Table \ref{t:overall_C} provides the time-dependent concordance performance of the various methods for the code-based tasks. 
+ 
+ 
+The comparison between MOTOR-Scratch (where the model is trained from scratch only on the target task without any pretraining) versus MOTOR-Finetune is a particularly important comparison, as it directly tests the importance of pretraining. As MOTOR combines a sophisticated neural network model with pretraining, it is important to evaluate whether pretraining itself provides value. MOTOR-Scratch uses the same piecewise exponential setup, Transformer backbone, and hyperparameter grid as MOTOR-Finetune, with the only difference being that MOTOR-Scratch is trained only on the target tasks. MOTOR-Scratch performs worse, demonstrating the importance of pretraining, especially on the smaller, more feature-rich EHR-OMOP dataset.
+\begin{table}[ht]
+\centering
+\caption{Time-dependent C statistic on the code-based tasks. Bolding indicates the best performing model. }
+\label{t:overall_C}
+\begin{tabular}{lcccccccc}
+  \toprule
+        Method & Dataset  & Celiac &  HA & Lupus & NAFLD & Cancer & Stroke  \\\midrule
+Cox PH & EHR-OMOP & 0.689 & 0.761 & 0.770 & 0.726 & 0.793 & 0.779\\
+DeepSurv & - & 0.704 & 0.823 & 0.790 & 0.800 & 0.811 & 0.830\\
+DSM & - &  0.707 & 0.828 & 0.784 & 0.805 & 0.809 & 0.835\\
+DeepHit & - &  0.695 & 0.826 & 0.807 & 0.805 & 0.809 & 0.833\\
+RSF & - & 0.729 & 0.836 & 0.787 & 0.802 & 0.824 & 0.840\\
+MOTOR-Scratch & - & 0.696 & 0.795 & 0.803 & 0.821 & 0.777 & 0.831\\
+MOTOR-Probe & - &  0.802 & 0.884 & 0.850 & 0.859 & 0.865 & 0.874\\ 
+MOTOR-Finetune & - & \textbf{0.802} & \textbf{0.887} & \textbf{0.863} & \textbf{0.864} & \textbf{0.865} & \textbf{0.875}\\
+\midrule
+Cox PH & MERATIVE & 0.538 & 0.783 & 0.749 & 0.799 & 0.628 & 0.693\\
+DeepSurv & - & 0.719 & 0.814 & 0.809 & 0.828 & 0.801 & 0.753\\
+DSM & - & 0.725 & 0.814 & 0.812 & 0.833 & 0.805 & 0.758\\
+DeepHit & - &  0.722 & 0.815 & 0.809 & 0.828 & 0.802 & 0.753\\
+RSF & - & 0.705 & 0.810 & 0.805 & 0.838 & 0.798 & 0.746\\
+MOTOR-Scratch &  - &  0.737 & 0.821 & 0.826 & 0.850 & 0.821 & 0.775\\
+MOTOR-Probe & -  & 0.755 & 0.828 & 0.833 & 0.856 & 0.825 & 0.789\\
+MOTOR-Finetune & - & \textbf{0.762} & \textbf{0.831} & \textbf{0.838} & \textbf{0.862} & \textbf{0.834} & \textbf{0.794} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}
+\centering
+\includegraphics[width=0.5\textwidth]{Figures/pretraining_grid.pdf}
+\caption{Per-time horizon performance differences (in time-dependent C statistic) when replacing autoregressive pretraining with TTE pretraining. Blue indicates better performance with TTE pretraining and red indicates worse.} 
+\label{f:next_code_decile}
+\end{figure}
+
+\textbf{Choice of Pretraining Objective:} One of the main novel components of MOTOR is our TTE pretraining objective. 
+To investigate how TTE pretraining contributes to MOTOR's performance, we perform a comparison with the common pretraining task of next code prediction.
+ 
+We perform this ablation on the smaller EHR-OMOP dataset where pretraining is the most impactful.
+
+Table \ref{t:objective} compares the next code pretraining task to our TTE pretraining task on EHR-OMOP. The TTE pretraining task outperforms the next code pretraining task, as indicated by the statistically significant higher C statistics on four of the target tasks (confidence intervals in Table \ref{t:objective_delta}).
+
+ We observe benefits of TTE pretraining for most time horizons and tasks. 
+\begin{table}[H]
+\centering
+\caption{Impact of the pretraining objective on model performance in terms of the time-dependent C statistic.}
+\label{t:objective}
+\begin{tabular}{lcccccc}
+  \toprule
+         Objective & Celiac & HA & Lupus & NAFLD & Cancer & Stroke  \\\midrule
+Next Code & 0.774 & 0.862 & 0.842 & 0.860 & 0.860 & 0.857\\%\hline
+Time-to-Event & \textbf{0.802} & \textbf{0.887} & \textbf{0.863} & \textbf{0.864} & \textbf{0.865} & \textbf{0.875}\\
+\bottomrule
+
+\end{tabular}
+\end{table}
+\begin{figure}
+\centering
+\includegraphics{Figures/hyperparameter_plot_larger.pdf}
+\caption{Performance for code-based tasks on EHR-OMOP when tuning the number of piecewise pieces, attention width, and number of pretraining tasks. Lines are average performance (solid line) and per-task performance (dashed line).}
+\label{f:hyperparam}
+\end{figure} 
+
+
+\textbf{Hyperparameter Ablations:} MOTOR has a variety of important hyperparameters that all potentially contribute to performance. In order to better understand MOTOR, we have performed a series of hyperparameter ablations on the EHR-OMOP dataset using linear probe adaption on the code-based tasks. Figure \ref{f:hyperparam} shows the performance when ablating the following: the number of pretraining tasks, the attention width, and the number of pieces in the piecewise exponential model. We find that MOTOR is robust to small changes in these hyperparameters but that performance degrades when all three are significantly reduced, showing the validity of our chosen hyperparameters.
+
+
+\textbf{Robustness Across Time And Portability Across Datasets:} Two key questions are whether MOTOR is robust to shifts over time and whether it is portable to other sites (e.g., whether a pretrained MOTOR model can be reused on data from other hospitals). We test robustness across time by performing an out-of-time evaluation using a prospective sample constructed from nine months of the most recent EHR-OMOP data. Likewise, to address model portability, we perform experiments on MIMIC-IV \citep{mimic4} where we transfer a MOTOR model that was pretrained on EHR-OMOP to MIMIC-IV using linear probe adaptation (MOTOR-Transfer Probe). Note that this is a rather extreme case of model transfer as 55\% of our features that were present in EHR-OMOP are absent in MIMIC-IV. We compare that adapted model to baselines trained from scratch on MIMIC-IV.  Table \ref{t:transfer_light} contains the best baseline and MOTOR time-dependent C statistics for each of these experiments. We find that MOTOR outperforms all baselines. Further details and the full tables for these experiments can be found in Appendices \ref{a:prospective} and \ref{a:mimic}. 
+
+
+\begin{table}[H]
+\centering
+\caption{Time-dependent C statistic on an out-of-time EHR-OMOP sample and MIMIC-IV.}
+\label{t:transfer_light}
+\begin{tabular}{lccccccccc}
+  \toprule
+        Method & Dataset  & Celiac &  HA & Lupus & NAFLD & Cancer & Stroke  \\\midrule
+
+Best Baseline & Out-of-time EHR-OMOP & 0.682 & 0.776 & 0.810 & 0.750 & 0.786 & 0.768 \\ 
+Best MOTOR   & - &  \textbf{0.792}&\textbf{0.843}&\textbf{0.880}&\textbf{0.809} &	\textbf{0.870}&	\textbf{0.836}\\
+ \midrule
+ Best Baseline & MIMIC-IV & 0.625 & 0.820 & 0.807 & 0.736 & 0.748 & 0.780\\
+Best MOTOR & - &  \textbf{0.628} & \textbf{0.850} & \textbf{0.819} & \textbf{0.802} & \textbf{0.828} & \textbf{0.812}\\ 
+\bottomrule
+
+\end{tabular}
+\end{table}
+
+\textbf{Sample Efficiency:} A key benefit of foundation models is improved sample efficiency, being able to learn task models with few labels. We evaluate MOTOR's sample efficiency in two ways: first, how performance changes as we pretrain with fewer patients and, second, how it changes as we adapt with fewer patients.
+
+\begin{figure}
+\centering
+\includegraphics{Figures/subsample_larger.pdf}
+\caption{Performance when MOTOR is pretrained or adapted with less data. Lines are average performance (solid line) and per-task performance (dashed line). }
+\label{f:finetune}
+\end{figure}
+Figure \ref{f:finetune} contains the results of these experiments using the linear probe adaptation strategy. We use 5\%, 10\%, and 25\% samples of the dataset for both the pretraining and fine-tuning experiments.
+We find that MOTOR is robust to the amount of adaptation data available, performing well with limited task labels. 
+However, MOTOR performance degrades quite rapidly when the pretraining dataset is reduced. 
+This aligns with the intuition on the importance of pretraining in foundation models. %is the critical component that requires learning millions of weights, while adaption only requires learning 512 weights. 
+ 
+
+
+
+\section{Discussion}
+
+
+We used TTE pretraining to create the MOTOR foundation model and have reported its performance for a wide variety of time-to-event tasks across datasets. The process of pretraining allows us to use a high-parameter (143M parameters) MOTOR model even in limited data settings. Our results show that MOTOR-derived models outperform state-of-the-art approaches and provide estimators with strong ranking and calibration performance across a range of clinical tasks. This success is owed to the novel TTE pretraining objective that enables MOTOR to learn sophisticated interactions and event distributions.
+
+We have also verified that MOTOR has many of the desirable foundation model properties. It is computational and label efficient in that it can be adapted to downstream TTE tasks with minimal compute and labeled data (only requiring 1/10th the time and 5\% of the labeled task data to match RSF). It is robust over both time and can be reused in other datasets, with out-of-time and MIMIC-IV experiments showing better predictive performance than all baselines. Finally, MOTOR is general purpose, with demonstrated performance for 19 tasks, including text based tasks that are completely out of the domain of the pretraining tasks.
+
+This work has limitations. First, pretraining MOTOR is expensive, requiring up to two GPU weeks for MERATIVE. Third, our handling of competing risks (censoring at death) may not be appropriate for every setting.
+
+Finally, to enable reproducibility, which is hampered \citep{mcdermott2021reproducibility,tsima2023reproducibility} by challenges in releasing datasets and large pretrained models \citep{wornow2023shaky}, we release a 143M parameter MOTOR model pretrained on EHR-OMOP under a research DUA, which prohibits re-identifying patients as well as commercial and non-research use.
+
+
+
+\section{Conclusion}
+
+
+Time-to-event prediction is an important but challenging problem in the medical setting. A foundation model pre-trained with the TTE objective can enable transfer learning across datasets. We have pretrained such a model - MOTOR - on 55M patient records spanning 9B events and demonstrated transfer learning ability for 19 tasks across 3 datasets. The use of pretraining, and in particular specialized TTE pretraining, allows us to learn a TTE foundation model that can be adapted even in low label settings. Task-specific models based on MOTOR improved time-dependent C statistic by 4.6\% over state-of-the-art, were more robust to temporal distributional shifts, and outperformed all baselines when porting across datasets.
+
+\clearpage
+
+
+
+

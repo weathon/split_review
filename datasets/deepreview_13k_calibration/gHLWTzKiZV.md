@@ -1,8 +1,8 @@
 # Composing Unbalanced Flows for Flexible Docking and Relaxation
 
 - Decision: Accept
-- Avg Score: 5.17
-- Scores: 8, 6, 8, 8, 1, 0
+- Avg Score: 8.00
+- Scores: 8, 6, 8, 8, 10
 
 ## Abstract
 Diffusion models have emerged as a successful approach for molecular docking, but they often cannot model protein flexibility or generate nonphysical poses. We argue that both these challenges can be tackled by framing the problem as a transport between distributions. Still, existing paradigms lack the flexibility to define effective maps between such complex distributions. To address this limitation we propose Unbalanced Flow Matching, a generalization of Flow Matching (FM) that allows trading off sample efficiency with approximation accuracy and enables more accurate transport. Empirically, we apply Unbalanced FM on flexible docking and structure relaxation, demonstrating our ability to model protein flexibility and generate energetically favorable poses. On the PDBBind docking benchmark, our method FlexDock improves the docking performance while increasing the proportion of energetically favorable poses from 30% to 73%.

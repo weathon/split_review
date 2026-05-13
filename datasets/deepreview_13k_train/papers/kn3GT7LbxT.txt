@@ -1,0 +1,457 @@
+\title{Value Residual Learning For Alleviating  Attention Concentration In Transformers}
+
+\begin{abstract}
+
+
+Transformers can capture long-range dependencies using self-attention, allowing tokens to attend to all others directly. However, stacking multiple attention layers leads to attention concentration. One natural way to address this issue is to use cross-layer attention, allowing information from earlier layers to be directly accessible to later layers. However, this approach is computationally expensive. To address this problem, we propose Transformer with residual value (ResFormer) which approximates cross-layer attention through adding a residual connection from the values of the the first layer to all subsequent layers. Based on this method, one variant is the Transformer with single layer value (SVFormer), where all layers share the same value embedding from first layer. Comprehensive empirical evidence demonstrates ResFormer achieves equivalent validation loss with 10.4\% fewer model parameters and 13.6\% less training data compared to Transformer, while maintaining similar memory usage and computational cost. Besides, SVFormer reduces KV cache size by nearly half with only a small performance penalty and can be integrated with other KV-efficient methods, yielding further reductions in KV cache, with performance influenced by sequence length and cumulative learning rate. Further visualization results suggest that Resformer and SVFormer alleviate attention concentration in deeper layers through avoiding value-state drains and enhance representation across most layers.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[!ht]
+    \begin{minipage}{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/random_similarity_entropy_468M.pdf}
+    \end{minipage}
+    \hspace{1mm}
+    \begin{minipage}{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/entropy_analysis_llm.pdf}
+    \end{minipage}
+    \hspace{1mm}
+    \begin{minipage}{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/entropy_analysis_length20_468M.pdf}
+    \end{minipage}
+    \caption{\textcolor{re}{(Left) The average entropy of token importance and the average hidden-state similarity for a randomly initialized 468M model. (Middle) The average entropy of token importance across layers in Llama (8B) \citep{dubey2024llama} and Mistral (7B) \citep{jiang2023mistral}.} (Right) The average entropy of token importance across layers in ResFormer  \textbf{\textit{vs.}} the vanilla Transformer, where token importance is derived from the attention matrix. Lower entropy indicates more focused attention on specific tokens. More details can be found in Eqn.~\ref{eqn:entropy}. }
+    \label{fig:main}
+\end{figure}
+The Transformer \citep{vaswani2017attention} model has become one of the leading architectures in recent years, excelling in both language modeling \citep{devlin2018bert, lan2019albert, brown2020language} and computer vision tasks \citep{dosovitskiy2020image}. The discovery of scaling laws \citep{hoffmann2022training, kaplan2020scaling} has driven the pursuit of larger Transformer models by increasing network depth and width.
+\begin{figure}[!t]
+  \centering
+\begin{subfigure}{0.32\linewidth}
+\centering
+\includegraphics[trim=0 0 0 0,clip,width=\linewidth]{figures/attentionsink_analysis_length100_468M.pdf}
+\caption{Token importance.}
+\end{subfigure}
+\begin{subfigure}{0.32\linewidth}
+\centering
+\includegraphics[trim=0 0 0 0,clip,width=\linewidth]{figures/valuenorm_analysis_length100_468M_wonormalize.pdf}
+\caption{Norms of value states.}
+\end{subfigure}
+\begin{subfigure}{0.32\linewidth}
+\centering
+\includegraphics[trim=0 0 0 0,clip,width=\linewidth]{figures/resnorm_analysis_length100_468M_wonormalize.pdf}
+\caption{Norms of hidden states.}
+\end{subfigure}
+\caption{\textcolor{re}{The token importance~\citep{xiao2023efficient}, value-state norms~\citep{guo2024attention}, and hidden-state norms~\citep{sun2024massive} of the first token across layers of 468M models.}}
+\label{fig:sink-value-hidden}
+\end{figure}
+Training large models presents significant challenges. Balancing the depth and width of a Transformer model within a fixed parameter budget is particularly difficult. While research indicates that deeper models generalize more compositionally than shallower ones \citep{petty2024impact}, the training and deployment of deep models remain problematic. Although Transformers use residual connections \citep{he2016deep} to address the vanishing gradient issue, training very deep Transformers is still challenging. For example, a 32-layer Vision Transformer (ViT) may perform worse than a 24-layer one \citep{zhou2021deepvit}. This is mainly due to the smoothing mechanism of attention \citep{shi2022revisiting}, which can lead to an over-smoothing effect \citep{nguyen2023mitigating} where the token representations become the same as the model's depth increases. 
+
+Existing solutions to alleviate the over-smoothing problem in Transformer include adding extra regularizers \citep{nguyen2023mitigating, shi2022revisiting} and optimizing the information flow within the model \citep{pagliardini2024denseformer}. During the era of convolutional neural network architectures, Stochastic Depth \citep{huang2016deep} reduces the likelihood of over-smoothing by randomly dropping layers during training and DenseNet \citep{huang2017densely} mitigates the impact of over-smoothing by allowing each layer to directly access the hidden states of all preceding layers. Recently, DenseFormer \citep{pagliardini2024denseformer} adopts the idea of DenseNet when training Transformer. Additionally, NeuTRENO \citep{nguyen2023mitigating} alleviates over-smoothing through incorporating the difference between the value vectors of the first layer and the current layer to the attention output.
+
+In this paper, we address the problem of multi-layer attention from another perspective. We introduce the phenomenon of attention concentration, which describes how a model's attention increasingly focuses on fewer tokens. We quantify the degree of attention concentration using the entropy of the distribution of token importance, where lower entropy indicates a more pronounced concentration. \textcolor{re}{Unlike over-smoothing, which is inherent to model architecture, attention concentration emerges during training. Fig.~\ref{fig:main} (Left) shows that randomly initialized models exhibit over-smoothing but not attention concentration. Trained ViT models often focus on low-informative background areas \citep{darcet2023vision}, while language models concentrate on low-semantic tokens \citep{sun2024massive}, particularly the start token (attention sink \citep{xiao2023efficient}). While previous studies analyzed single-layer attention patterns, our research reveals a ``concentration - dispersion - concentration" pattern in deep models, as shown in Fig.~\ref{fig:main} (Middle), suggesting potential loss of information during concentrated phases.}
+
+\textcolor{re}{Mitigating attention concentration can lead to more interpretable attention maps and potentially improve downstream task performance~\citep{darcet2023vision}. This phenomenon typically emerges after the second or third network layer and is associated with value-state drains (decreased magnitude of value states)~\citep{guo2024attention}, and hidden-state peaks (increased magnitude of hidden states)~\citep{sun2024massive}. \cite{guo2024active} shows a mutual reinforcement mechanism exists between value-state drains and attention concentration. Recent studies have linked this to implicit biases during pretraining, with most existing solutions focusing on the use of additional tokens (registers)~\citep{darcet2023vision} or additional keys and values (explicit attention bias)~\citep{sun2024massive} to redirect this.}
+
+\textcolor{re}{Given that the first layer always shows no attention concentration, an effective method is to use cross-layer attention on information from this layer. However, due to computational costs, we propose ResFormer as an efficient alternative. ResFormer applies a residual connection between the value vectors of the current layer and the first layer before the attention operation. Unlike cross-layer attention, ResFormer indirectly mitigates attention concentration. It leverages the absence of value-state drains in the first layer by introducing a value residual connection. This alleviates value-state drains in deeper layers, thereby disrupting the mutual reinforcement between attention concentration and value-state drains, as shown in Fig.~\ref{fig:main} (Right) and Fig.~\ref{fig:sink-value-hidden}.} 
+
+During inference, deep networks require substantial $KV$ cache, severely impacting model deployment \citep{xiao2023efficient}. Existing $KV$-efficient methods often process keys and values simultaneously. Building on ResFormer, we decouple the value from the attention operation and propose a new kind of Transformer with single layer value (SVFormer). In SVFormer, the queries and keys of all layers share the value from the first layer, \textcolor{re}{and thus it can also alleviate attention concentration.}
+
+We experiment on a 20B SlimPajama sub-sampled dataset, using settings similar to popular large language models \citep{wei2023skywork, dubey2024llama, kaplan2020scaling}. We compare different models by their relative training curves against the vanilla Transformer. Results show that ResFormer outperforms the vanilla Transformer, DenseFormer, and NeuTRENO. \textcolor{re}{ResFormer achieves equivalent validation loss with 10.4\% fewer model parameters and 13.6\% less training data compared to Transformer, while maintaining similar memory usage and computational cost. Besides, SVFormer, while reducing the $KV$-cache by nearly half, requires a 12.2\% increase in parameters to achieve the same validation loss as Transformer.}
+And the performance of SVFormer is better when the training sequence length is longer. It further reduces the $KV$ cache when integrated with classical method GQA~\citep{GQA}.
+
+\begin{figure}[!t]
+  \centering
+\begin{subfigure}{0.19\linewidth}
+\centering
+\includegraphics[trim=0 0 5 0,clip,width=\linewidth]{figures/transformer.pdf}
+\caption{Transformer}
+\end{subfigure}
+\begin{subfigure}{0.19\linewidth}
+\centering
+\includegraphics[trim=0 0 0 0,clip,width=\linewidth]{figures/neutreno.pdf}
+\caption{NeuTRENO}
+\end{subfigure}
+\begin{subfigure}{0.19\linewidth}
+\centering
+\includegraphics[trim=0 0 0 0,clip,width=\linewidth]{figures/denseformer.pdf}
+\caption{DenseFormer}
+\end{subfigure}
+\begin{subfigure}{0.19\linewidth}
+\centering
+\includegraphics[trim=0 0 0 0,clip,width=\linewidth]{figures/resformer.pdf}
+\caption{ResFormer}
+\end{subfigure}
+\begin{subfigure}{0.19\linewidth}
+\centering
+\includegraphics[trim=0 0 0 0,clip,width=\linewidth]{figures/SVFormer.pdf}
+\caption{SVFormer}
+\end{subfigure}
+\caption{Simplified illustration of the vanilla Transformer, NeuTRENO, DenseFormer, ResFormer, and SVFormer, with only three-layer structures and no operations other than attention. $A^{i}$, $V^{i}$, and $H^{i}$ denote the attention matrix, value vectors, and attention outputs at the $i$-th layer, respectively. $\oplus$, $\ominus$, and $\otimes$ represent standard matrix addition, subtraction, and multiplication, respectively. 
+}
+\label{fig:Transformer_NeuTRENO_denseformer_ResFormer}
+\end{figure}
+
+
+
+\section{Related Work}
+
+
+\subsection{Shortcut Connections For Better Information Flow}
+Deep learning models often consist of multiple layers, posing a challenge to minimize information loss during transmission. ResNet \citep{he2016deep} mitigates the vanishing gradient problem with identity connections. Stochastic Depth \citep{huang2016deep} enhances training by randomly dropping layers. DenseNet \citep{huang2017densely} allows subsequent layers to directly access the hidden states of all preceding layers. These two methods further enhance the information flow after ResNet. 
+
+Related research indicates that for advanced Transformer architectures, although increasing depth continues to yield performance improvements in language modeling tasks, the gains become less significant with further increases \citep{petty2024impact}. Furthermore, \cite{zhou2021deepvit} illustrates that a 32-layer ViT underperforms a 24-layer ViT. Depth-Wise Attention \citep{elnokrashy2024depth} allows each query to access the key and value at the same position from previous layers through an attention-like mechanism before the output layer. DenseFormer \citep{pagliardini2024denseformer} integrates weighted fusion of outputs from all preceding layers after each layer. To explore why increasing depth in Transformers does not yield expected gains, \cite{wang2022anti} finds that self-attention acts as a low-pass filter, smoothing token representations in ViTs. Additionally, \cite{shi2022revisiting} investigates over-smoothing from a graph perspective in BERT-based language modeling tasks. NeuTRENO \citep{nguyen2023mitigating} adds the difference between the value vectors of the first and current layers to each layer's attention output and significantly alleviates the over-smoothing problem. 
+
+In contrast to these methods, ResFormer accesses and integrates information from previous layers prior to the attention operation, as illustrated in Fig.~\ref{fig:Transformer_NeuTRENO_denseformer_ResFormer}. Moreover, it does not require the selection or tuning of additional hyperparameters.
+
+\subsection{\texorpdfstring{$KV$}{KV} cache compressing}
+
+The $KV$ cache is a key factor limiting the efficiency of long-text model inference. Research in this area can be broadly classified into Transformer-based methods, which target redundant information in Transformer models, and non-Transformer methods, which mainly addresses the quadratic time complexity of attention with respect to sequence length.
+
+For non-Transformer methods, Mamba \citep{gu2023mamba} and RWKV \citep{peng2023rwkv} are two popular works. They replace the original softmax-based attention with SSM \citep{gu2021efficiently} and AFT \citep{zhai2021attention} mechanisms, respectively. Besides, several approaches have been proposed to enhance models' ability to process long texts while reducing the reliance on $KV$ cache. \cite{dai2019transformer} advocates segmenting long texts into smaller parts for attention computation. Furthermore, \cite{munkhdalai2024leave} uses a fixed-size memory matrix for storing and retrieving past information.
+Transformer-based methods can be categorized into three main groups. The first group consists of post-training methods like SnapKV \citep{li2024snapkv} and ThinK \citep{xu2024think}, which compress $KV$ cache during inference based on attention matrices at token or hidden dimension levels. The second group focuses on quantization and adopts low-precision $KV$ cache quantization rather than completely eliminating them \citep{hooper2024kvquant}. The third group aims to maximize the efficiency of attention-based models via parameter or activation value sharing. The most representative works include Multi-Query Attention \citep{MQA} and Grouped-Query Attention \citep{GQA} which suggest to share key and value across a group of queries. MLKV \citep{zuhri2024mlkv} further suggest to share keys and values for queries across layers and MLA \citep{liu2024deepseek} introduces low-rank projection when processing keys and values. Besides, CLA \citep{brandon2024reducing} and LISA \citep{mu2024cross} respectively point out that we can reuse keys, values, or the attention matrix across layers to reduce redundancy between layers. While these methods typically process both key and value simultaneously, SVFormer is the first approach to decouple value from query and key during attention computation. Moreover, it is compatible with other methods like GQA.
+
+
+
+\section{Method}
+
+
+\subsection{Motivation: Information Transfer Via Cross Layer Attention}
+Let $\mathbf{H}_{n} \in \mathbb{R}^{l \times d}$ be the input hidden state of the $n$-th layer, where $l$ denotes the sequence length and $d$ is the dimension size. In standard attention, the hidden state $\mathbf{H}_{n}$ will be firstly projected into $\mathbf{Q}_{n}, \mathbf{K}_{n}, \mathbf{V}_{n} \in \mathbb{R}^{l \times d}$ through three linear projections $\mathbf{W^{\mathbf{Q}}}, \mathbf{W^{\mathbf{K}}}, \mathbf{W^{\mathbf{V}}} \in \mathbb{R}^{d \times d}$ respectively. For simplicity, we introduce dot-product attention of layer $n$ as
+\begin{align}
+\label{eqn:attention}
+\operatorname{Attention}(\mathbf{Q}_{n},\mathbf{K}_{n},\mathbf{V}_{n})
+&= \operatorname{Softmax}(\frac{\mathbf{Q}_{n}\mathbf{K}_{n}^T}{\sqrt{d}}) \mathbf{V}_{n}.
+\end{align}
+An ideal way to incorporate previous layers' information is cross layer attention. The attention mechanism naturally extracts relevant information from previous layers. If these layers contain low-quality information, the similarity between the current layer's query and the previous layers' keys will be low, thus minimizing negative impacts. Given $m < n$ and the information $(\mathbf{Q}_{m},\mathbf{K}_{m},\mathbf{V}_{m})$ of $m$-th layer, the cross layer mechanism calculates the attention output $\mathbf{U}_{n}$ of $n$-th layer by the following attention formula:
+\begin{align}
+\label{eqn:cross_layer_attention}
+\mathbf{U}_{n}
+&= \operatorname{Softmax}\Big({\mathbf{Q}_{n}\operatorname{Concat}(\mathbf{K}_{n},\mathbf{K}_{m})^T}/{\sqrt{d}}\Big) \operatorname{Concat}(\mathbf{V}_{n},\mathbf{V}_{m}).
+\end{align}
+In practice, cross-layer attention enhances feature fusion by allowing information to flow between layers, capturing both intra-layer and inter-layer dependencies. However, this approach introduces additional computational overhead due to the concatenation of keys and values from multiple layers. For example, in scenarios described by Eqn.~\ref{eqn:cross_layer_attention}, the overall computational complexity of the model nearly doubles compared with vanilla attention described in Eqn.~\ref{eqn:attention}.
+
+\subsection{Efficient Cross Layer Attention}
+To solve this problem, we propose to replace the $\mathbf{K}_m$ with $\mathbf{K}_n$ in Eqn.~\ref{eqn:cross_layer_attention}, as shown in Eqn.~\ref{eqn:cross_layer_attention_approximate}. 
+\begin{align}
+\label{eqn:cross_layer_attention_approximate}
+\mathbf{U}_{n}
+&\approx \operatorname{Softmax}\Big({\mathbf{Q}_{n}\operatorname{Concat}(\mathbf{K}_{n},\mathbf{K}_{n})^T}/{\sqrt{d}}\Big) \operatorname{Concat}(\mathbf{V}_{n},\mathbf{V}_{m})
+\\
+\label{eqn:resattention}
+&= \frac{1}{2}\operatorname{Softmax}\Big({\mathbf{Q}_{n}\mathbf{K}_{n}^T}/{\sqrt{d}}\Big) ({\mathbf{V}_{n}}+{\mathbf{V}_{m}}).
+\end{align}
+Utilizing the concept of block matrices, Eqn.~\ref{eqn:cross_layer_attention_approximate} can be further simplified into Eqn.~\ref{eqn:resattention}. This simplification converts the concatenation operation of the two value matrices into an addition operation. Compared to Eqn.~\ref{eqn:attention}, this new method only brings a minimal increase in computational complexity while still leveraging the information from the $m$-th layer in the $n$-th layer. Furthermore, Eqn.~\ref{eqn:resattention} can be generalized to incorporate cross-layer attention across all preceding $n - 1$ layers as follows:
+\begin{align}
+\label{eqn:resattention_dense}
+\mathbf{U}_{n}
+&\approx \frac{1}{n}\mathbf{A}_{n} \sum_{i = 1}^{n}{\mathbf{V}_{i}}.
+\end{align}
+where $\mathbf{A}_n$ denotes the original attention matrix for layer $n$. From the perspective of information propagation, model described by Eqn.~\ref{eqn:cross_layer_attention_approximate} projects the historical values into the current layer's embedding space using the current layer's attention as a weight matrix. For example, a naive approach would be to perform identity mapping, as described by
+\begin{minipage}{0.61\linewidth}
+\begin{align}
+\label{eqn:resattention_identity_mapping}
+\mathbf{U}_{n}
+&= \mathbf{A}_{n}\mathbf{V}_{n} + \frac{1}{n-1}\sum_{i = 1}^{n-1}{\mathbf{V}_{i}}.
+\end{align}
+To evaluate the approximation effect of replacing the $\mathbf{K}_m$ with $\mathbf{K}_n$, we randomly select 1,000 pre-training data samples. For each layer of a trained baseline model, assuming cross-layer attention is required for each layer with respect to the previous one, we calculate the cosine similarity between the outputs from Eqn.~\ref{eqn:cross_layer_attention} and Eqn.~\ref{eqn:resattention}. We also calculate the cosine similarity between the outputs from Eqn.~\ref{eqn:cross_layer_attention} and Eqn.~\ref{eqn:resattention_identity_mapping} for comparison. Fig.~\ref{fig:similarity_analysis} shows that our proposed method provides a good approximation for cross-layer attention.
+\end{minipage}%
+\hspace{0.02\linewidth}
+\begin{minipage}{0.36\linewidth}
+\centering
+\includegraphics[width=0.96\linewidth]{figures/similarity_analysis.pdf}
+\captionof{figure}{\textcolor{re}{Average token similarity between layer outputs. Lines show similarity of outputs using current attention (Eqn.~\ref{eqn:resattention}) or identity attention (Eqn.~\ref{eqn:resattention_identity_mapping}) compared to the one using cross-layer attention (Eqn.~\ref{eqn:cross_layer_attention}).}}
+\label{fig:similarity_analysis}
+\end{minipage}
+\subsection{Transformer with Residual Value}
+Based on Eqn.~\ref{eqn:resattention_dense}, we propose a variant of Transformer with residual value (ResFormer) which only chooses first layer as the target of cross layer attention since the first layer contains all basic information of each token. The analysis of entropy in Fig.~\ref{fig:main} (Right) supports this point, indicating that attention tends to be relatively dispersed across different tokens in the initial layers of the model. The attention mechanism of ResFormer can be formulated as
+\begin{align}
+\label{eqn:resattention_v0}
+\mathbf{U}_{n}
+&= \frac{1}{2}\mathbf{A}_{n} ({\mathbf{V}_{n}}+{\mathbf{V}_{1}}).
+\end{align}
+where $n \geq 2$ and standard attention is applied in the first layer. From the training perspective, it explicitly learns a residual mapping instead of directly learning the desired underlying mapping and that's why we call it ResFormer. 
+\subsection{A unified View Of NeuTRENO and DenseFormer}
+Using our framework, the NeuTRENO can be defined as
+\begin{align}
+\label{eqn:NeuTRENO}
+\mathbf{U}_{n}
+&= \Big(\mathbf{A}_{n} - \bm{\lambda}\mathbf{I}\Big){\mathbf{V}_{n}}+\bm{\lambda}{\mathbf{V}_{1}}.
+\end{align}
+where $\mathbf{I}$ denotes the identity matrix and $\bm{\lambda}$ is a hyper-parameter. It can be found that the term of $ \bm{\lambda}\mathbf{I}$ may have certain negative impact on the learning of original attention. If we ignore the attention output projection and the MLP layer, DenseFormer can also be modeled within our framework as
+\begin{align}
+\label{eqn:denseformer}
+\mathbf{U}_{n}
+&= \sum_{i = 1}^{n}{\bm{\alpha}_{i}\mathbf{A}_{i}\mathbf{V}_{i}}.
+\end{align}
+where $\{\bm{\alpha}_i\}_{i=1}^{n}$ is a set of hyper-parameters. DenseFormer uses attention matrix of previous layer as the weight matrix of projecting values but this is not aligned with the concept shown in Eqn.~\ref{eqn:cross_layer_attention_approximate}.
+\subsection{SVFormer: Single-layer Value For Half \texorpdfstring{$KV$}{KV} Cache}
+After ResFormer, a natural idea is whether we can remove the value vectors in each layer and have all layers share the value vectors from the first layer. We call this method SVFormer. Similar to ResFormer, SVFormer still adopts standard attention in the first layer and obtain the attention output $\mathbf{U_n}$ for $n$-th layer where $n \geq 2$ through
+
+\begin{minipage}{0.61\linewidth}
+\begin{align}
+\label{eqn:svattention}
+\mathbf{U}_{n}
+&= \mathbf{A}_{n} {\mathbf{V}_{1}}.
+\end{align}
+Compared to previous methods, SVFormer is the first method that decouple value vectors from attention. Its main advantage is that it only requires computing and storing the value vectors for the first layer, saving nearly half of the $KV$ cache during inference. Similar methods like CLA reduce $KV$ cache by sharing both of the key and value vectors every two layers. However, the results in Fig.~\ref{fig:CLAttention_ablation_kv} show that sharing values has less negative impact compared with sharing keys. 
+\end{minipage}%
+\hspace{0.02\linewidth}
+\begin{minipage}{0.36\linewidth}
+\centering
+\includegraphics[width=0.96\linewidth]{figures/CLAttention_ablation_kv.pdf}
+\captionof{figure}{Ablation study of sharing different parts of attention every two layers.}
+\label{fig:CLAttention_ablation_kv}
+\end{minipage}
+
+
+\section{Pretrain Experiments}
+
+\subsection{Setting}
+\subsubsection{Training Details}
+\label{sec:train_details}
+Following \cite{brandon2024reducing}, we choose the Llama-like architecture and SlimPajama \citep{cerebras2023slimpajama} data for main experiments. Specifically, the architecture includes pre-normalization, SwiGLU activations \citep{shazeer2020glu}, rotary position embedding \citep{su2024roformer}, and no dropout. For slimpajama, we randomly sample nearly 20B tokens according to the original data distribution of seven domains during training and adopt tokenizer used for ``RedPajama-INCITE-7B-Base".
+
+Unless otherwise noted, we train all models using AdamW optimizer with 0.1 weight decay, $\beta_1=0.9$, $\beta_2=0.95$ and the max grad norm 1.0.
+The batch size is set to be around 2M tokens \citep{zhang2024tinyllama} with a sequence length of 2,048 and the total steps is fixed 10,000 steps \citep{kaplan2020scaling}. We adopt linear learning rate warmup for the first 1,200 steps with the initial learning rate and the peak learning rate to be 1e-7 and 6e-4 respectively. The cosine decay schedule gradually decays to 10\% of the peak learning rate by
+the end of training \citep{zhou2024lima, wei2023skywork}.} Moreover, All models are trained with 8 Nvidia A100 80G GPUs using mixed-precision training in FP16. We adopt deepspeed zero-2 optimizer and flash attention mechanism.
+
+\subsubsection{Relative Training Loss Curve On SlimPajama}
+\label{sec:relative_loss}
+We trained all models for only one epoch on SlimPajama subsets, and primarily use training loss to compare different models. 
+Furthermore, we use the relative training loss curve for better visualizing the difference among different models from the perspective of loss landscape. Specifically, for each method, we will subtract the smoothed training curve of the vanilla Transformer, obtained under the same experimental settings, from the smoothed training curves of the method. The smoothing is done using a window size of 10 steps or 100 steps.
+\subsubsection{Entropy For Analyzing Attention Concentration Effects}
+\label{sec:entropy}
+Given the attention matrix $\mathbf{A}  \in \mathbb{R}^{l \times l}$ at one layer, we use entropy $\bm{e}$ to represent its concentration effect. To obtain entropy $\bm{E}$, calculate the importance vector $\mathbf{a} = \frac{1}{l}\sum_{j = 1}^{l}A_{ij}$ firstly where $\mathbf{A}$ is a lower triangular matrix. The entropy can be formulated as follows:
+\begin{align}
+\label{eqn:entropy}
+\bm{e}
+&= - \sum_{i=1}^{l} \bm{a}_i^{\prime} \log{\bm{a}^{\prime}_i}.
+\end{align}
+where $a_i^{{\prime}_i} = {a_i}/\Big({\sum_{i=1}^{l}{a_i}}\Big)$ for $i = 1, 2, \dots, l$ and the higher the entropy $\bm{e}$, the greater the degree of clustering in $\bm{a}$, i.e., attention matrix $\mathbf{A}$ is more likely to focus on several specific tokens.
+\subsubsection{Spectral Decomposition For Analyzing Representations}
+\label{sec:svd}
+Spectral Decomposition is a classical method to analyze the representations of models. \cite{zhu2021class} suggests that the eigenvectors with larger eigenvalues are more transferable. Here we use spectral decomposition to analyze the feature space of value $\bm{v}$ of one layer as following:
+\begin{align}
+\label{eqn:svd}
+\frac{1}{l}\sum_{i=1}^{l} \bm{v}_i \bm{v}_i^{T}
+&= \sum_{j=1}^{d} \bm{w}_j \bm{\lambda}_j \bm{w}_j^{T}.
+\end{align}
+where $\bm{w}_j$ is the $j$-th eigenvector with eigenvalue $\bm{\lambda}_j$ for $j = 1, 2, \dots, d$ and $d$ is the dimensionality of the value's feature space. 
+\begin{figure}[!t]
+    \begin{minipage}{0.49\textwidth}
+    \centering
+      \begin{subfigure}{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/loss_scaling_valid_modelsize.pdf}
+      \end{subfigure}
+      \begin{subfigure}{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/loss_scaling_valida_datasize.pdf}
+      \end{subfigure}
+    \caption{
+       \textcolor{re}{(Left) Validation loss as model size scales from 82M to 468M parameters. (Right) Validation loss for the 468M parameter model evaluated every 2B tokens. ResFormer achieves approximately 10.4\%-13.6\% reduction in both model parameters and training data.}
+    }
+    \label{fig:scaling_loss}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.49\textwidth}
+    \centering
+      \begin{subfigure}{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/Resattention_vs_attention_seqlength.pdf}
+      \end{subfigure}
+      \begin{subfigure}{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/Resattention_vs_denseformer.pdf}
+      \end{subfigure}
+    \caption{
+     (Left) The relative training curve between a 82M ResFormer and Transformer across different training sequence lengths. (Right) Relative training loss of various Transformer variants compared to the vanilla Transformer model, with model size fixed at 82M parameters.
+    }
+    \label{fig:Resattention_vs_attention_seqlength}
+    \end{minipage}
+\end{figure}
+
+\subsection{ResFormer \textbf{\textit{vs.}} vanilla Transformer}
+We trained ResFormer and vanilla Transformer with different model size on data with different sequence lengths. In Fig.~\ref{fig:Resattention_vs_attention_seqlength} (Left), ResFormer consistently outperforms vanilla Transformer throughout training across different training sequence lengths. Additionally, the results in Fig.~\ref{fig:Resattention_vs_attention_seqlength} (Right) illustrate that ResFormer outperforms DenseFormer and NeuTRENO. Furthermore, integrating ResFormer with NeuTRENO leads to additional performance improvements.
+
+\textcolor{re}{We also analyzed how ResFormer and Transformer scale at model size and data size. ResFormer and Transformer are trained on similar experiment setting. On the one hand, we trained model with 82M, 180M, 320M and 468M parameters on 20B training tokens and evaluated them on a separate validation set. As shown in Fig.\ref{fig:scaling_loss} (Left), ResFormer achieves equivalent validation loss to the Transformer while utilizing 10.4\% fewer model parameters. On the other hand, we evaluated the 468M models every 2B tokens and ResFormer needs 13.6\% fewer training tokens to achieve the same validation loss as Transformer.}
+
+\begin{minipage}{0.61\linewidth}
+\textcolor{re}{We further test the variant of ResFormer defined as $\mathbf{U}_{n} = \mathbf{A}_{n}({\mathbf{V}_{n}}+{\bm \lambda}{\mathbf{V}_{1}})$. As shown in Fig.\ref{fig:resformer_lambda}, ResFormer can accommodate a wide range of $\bm \lambda$ values and the performance improves as $\bm \lambda$ increases, achieving the best results at ${\bm \lambda}=2$. Regardless of the value of $\bm \lambda$, ResFormer consistently outperforms Transformers. It suggests that the success of ResFormer lies in the use of $\mathbf{V}_{1}$ and the mapping by $ \mathbf{A}_{n}$.}
+\end{minipage}%
+\hspace{0.02\linewidth}
+\begin{minipage}{0.36\linewidth}
+\centering
+\includegraphics[width=0.96\linewidth]{figures/resformer_lambda.pdf}
+\captionof{figure}{\textcolor{re}{Ablation study of different $\bm \lambda$ for ResFormer.}}
+\label{fig:resformer_lambda}
+\end{minipage}
+
+\begin{figure}[!t]
+    \begin{minipage}{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/Resattention_ablation_qk.pdf}
+        \caption{Ablation study of adding residual connection to queries or keys.}
+        \label{fig:Resattention_ablation_qk}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/Resattention_ablation_mapping.pdf}
+        \caption{Ablation study of adding residual connection using different mapping matrix.}
+        \label{fig:Resattention_ablation_mapping}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/Resattention_from_different_layer_place.pdf}
+        \caption{Ablation studies on which historical layer's value to include in residual connections.}
+        \label{fig:Resattention_from_different_layer_place}
+    \end{minipage}
+\end{figure}
+
+\subsection{Ablation study of residual connection}
+In Eqn.~\ref{eqn:resattention}, we employ residual connections for the values. We compare this approach with models that add residual connections to queries or keys. The results, shown in Fig.~\ref{fig:Resattention_ablation_qk}, indicate that only residual connections for values yield positive effects. One possible explanation is that attention mechanisms are sensitive to perturbations, and modifying queries or keys significantly impacts it.
+
+Moreover, we compare with the models based on Eqn.~\ref{eqn:cross_layer_attention} and Eqn.~\ref{eqn:resattention_identity_mapping}. The results in Fig.~\ref{fig:Resattention_ablation_mapping} align with Fig.~\ref{fig:similarity_analysis}, showing that identity mapping causes significant perturbations, leading to poor performance. Interestingly, ResFormer achieves an even lower final loss than ResFormer. \textcolor{re}{It suggests that ResFormer's impact on the attention optimization is better by mitigating value-state drains.}
+
+When determining the mapping method and target value, it is crucial to consider which historical layers' values should be included in the residual connection. Fig.~\ref{fig:Resattention_from_different_layer_place} shows that each Transformer layer should add a shortcut to the first layer's value rather than to the nearest preceding layer or all previous layers, highlighting the first-layer value's critical importance. A potential explanation is that incorporating values from other layers may dilute the impact of the first-layer value.
+
+\subsection{Downstream Evaluations}
+We compare the different models on several classical reasoning tasks following \citep{zhang2024tinyllama} in a zero-shot way. The tasks include Hellaswag \citep{zeller2019hellaswag}, OpenBookQA \citep{mihaylov2018suit}, WinoGrande \citep{sakaguchi2019winogrande}, ARC-Easy and ARC-Challenge \citep{clark2018think} and PIQA \citep{bisk2020piqa}. The results in Table~\ref{tab:downstream} show that ResFormer achieved an average accuracy improvement of nearly 3\% compared to the vanilla Transformer.
+
+\begin{table*}[!ht]
+\centering
+\small
+\begin{tabular}{@{}lcccccccc@{}}
+\toprule
+Model     & Max Length              & HellaSwag & Obqa & WinoGrande & ARC-c & ARC-e  & PIQA  & Avg   \\ \midrule
+Transformer    & 2,048          & 0.263 & 0.142 & 0.492 & 0.199 & 0.331 & 0.572 & 0.333  \\
+ResFormer     & 2,048      &  0.273 & 0.148 & 0.512 & 0.182 & 0.414 & 0.604 & 0.355 \\ 
+Transformer     & 64,000          & 0.267 & 0.142 & 0.485 & 0.179 & 0.322 & 0.570 & 0.328  \\
+ResFormer    & 64,000       &  0.274 & 0.136 & 0.513 & 0.184 & 0.407 & 0.588 & 0.350 \\ 
+\bottomrule
+\end{tabular}
+\caption{Zero-shot accuracy on commonsense reasoning tasks.}
+\label{tab:downstream}
+\end{table*}
+\begin{figure}[!t]
+  \centering
+  \begin{subfigure}{0.3\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/eigen_first_analysis.pdf}
+  \end{subfigure}
+  \begin{subfigure}{0.3\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/eigen_max_analysis.pdf}
+  \end{subfigure}
+    \caption{Left: Distribution of eigenvalues for the value vectors in the first layer of ResFormer and Transformer. Right: Maximum eigenvalue for each layer of ResFormer and Transformer.}
+  \label{fig:eigen_analysis}
+\end{figure}
+
+\subsection{Visualization of ResFormer}
+
+To figure out why ResFormer can achieve better performance on language modeling tasks than vanilla Transformer, we conduct visualization based on the eigenvalue decomposition discussed in Section~\ref{sec:svd}. After sorting the eigenvalues in descending order, we compute the average eigenvalue for each layer across 1,000 randomly sampled pre-train data examples. The results in Fig.~\ref{fig:eigen_analysis} indicate that the value states generated by most layers of the ResFormer exhibit stronger representational capacity compared to those of the vanilla Transformer.
+
+We also analyze the attention concentration effects mentioned in Section~\ref{sec:entropy} using the same batch of test data. Fig.~\ref{fig:main} (Right) illustrates that the clustering effect of attention increases significantly with the number of layers for the vanilla Transformer, whereas the clustering effect is relatively less pronounced for the ResFormer. Given that attention clustering often occurs on the first token, we primarily show its results in Fig.~\ref{fig:sink-value-hidden}. The results indicate that using ResFormer significantly mitigates attention sinks \citep{xiao2023efficient}, value-state drains \citep{guo2024attention} and residual-state peaks \citep{sun2024massive}. \cite{guo2024active} attributes these phenomena to the mutual reinforcement mechanism of model and we suggest that the value shortcut disrupts this mechanism by alleviating value-state drains. Specifically, for tokens lacking semantic information like start tokens, a large value state magnitude can adversely affect the prediction of subsequent tokens if they are overly attended to. When there is no value-state drains, models will reduce attention clustering to these tokens to minimize loss.}
+\subsection{SVFormer \textbf{\textit{vs.}} GQA}
+\begin{figure}[!t]
+    \begin{minipage}{0.49\textwidth}
+      \centering
+      \begin{subfigure}{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/SVattention_halfkv.pdf}
+      \end{subfigure}
+      \begin{subfigure}{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/SVattention_halfquaterkv.pdf}
+      \end{subfigure}
+      \caption{The relative training loss for SVFormer and other $KV$ efficient model compared with vanilla attention. The numbers in parentheses represent the training sequence length. Left: Model with nearly ${1}/{2}$ $KV$ cache. Right: Model with nearly ${1}/{8}$ $KV$ cache.}
+      \label{fig:SVattention_kvcache}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.49\textwidth}
+      \centering
+      \begin{subfigure}{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/SVattention_seqlength.pdf}
+      \end{subfigure}
+      \begin{subfigure}{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/SVattention_seqlength_scatter.pdf}
+      \end{subfigure}
+      \caption{Left: The relative training loss for SVFormer under different sequence lengths with a fixed batch size of 2M tokens. Right: Analysis of critical point, and we predict it for length 64,000 using linear regression with the last 1,000 data points.}
+      \label{fig:SVattention_seqlength}
+    \end{minipage}
+\end{figure}
+In the Fig.~\ref{fig:SVattention_kvcache}, at a training sequence length of 64,000, SVFormer demonstrates lower final loss compared to existing $KV$-efficient methods such as CLA and GQA. Moreover, it can be used concurrently with GQA to enhance $KV$ efficiency further. However, we observed that with a training sequence length of 2,048, SVFormer underperforms compared to GQA. The results indicate that sequence length significantly affects SVFormer's performance. Thus, we conducted more comprehensive experiments on sequence length.
+
+Results in Fig.~\ref{fig:SVattention_seqlength} (Left) demonstrate that SVFormer will always be gradually surpassed by vanilla attention during training while its training speed is faster than vanilla Transformer at the early stage. However, as the training sequence length increases, the SVFormer model performs better. In this way, we focus on the critical point, defined as the number of training steps exceeded. Fig.~\ref{fig:SVattention_seqlength} (Right) illustrates that the relationship between the critical point and sequence length exhibits an exponential trend. We argue that it's due to the challenge deep models face in fully optimizing the increasingly larger first-layer value matrix as the training sequence length grows.
+
+\subsection{Other Factors Influencing SVFormer}
+Intuitively, the training effectiveness of SVFormer is influenced by factors such as the maximum learning rate, warmup steps, model size, and other factors beyond just the training sequence length. We conducted experiments to explore these relationships. 
+Based on the results shown in Fig.~\ref{fig:svformer_lr} and Fig.~\ref{fig:svformer_warmup}, a smaller learning rate benefits SVFormer more, with warmup's impact being comparatively small. This could be attributed to the model's outcomes being closely tied to the total summed learning rate, which has weak connection with warmup steps \citep{kaplan2020scaling}. Moreover, larger models often require smaller learning rates to ensure training stability, making them more suitable for using SVFormer.
+
+ Llama-like models and GPT2-like models exhibit similar critical points and final losses (see Fig.~\ref{fig:svformer_architecture}). This suggests that the difference between SVFormer and the vanilla Transformer is not sensitive to architecture. \textcolor{re}{Compared with Transformer, SVFormer requires a 12.2\% increase in parameters to achieve the same validation loss while reducing the $KV$-cache by nearly half.}
+\begin{figure}[!t]
+  \centering
+  \begin{subfigure}{0.24\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/SVattention_learningrate.pdf}
+    \caption{Learning Rate.}
+    \label{fig:svformer_lr}
+  \end{subfigure}
+  \begin{subfigure}{0.24\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/SVattention_warmup.pdf}
+    \caption{Warmup Steps.}
+    \label{fig:svformer_warmup}
+  \end{subfigure}
+  \begin{subfigure}{0.24\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/SVattention_architecture.pdf}
+    \caption{Architecture.}
+    \label{fig:svformer_architecture}
+  \end{subfigure}
+  \begin{subfigure}{0.24\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/loss_scaling_valid_modelsize_isova.pdf}
+    \caption{\textcolor{re}{Model Size.}}
+    \label{fig:svformer_modelsize}
+  \end{subfigure}
+  \caption{The relative training loss for SVFormer under different hyper-parameter setting and the validation loss as model size
+scales from 82M to 468M parameters.}
+  \label{fig:SVattention_learningrate_warmup}
+\end{figure}
+\subsection{Ablation study of SVFormer}
+\begin{figure}[!ht]
+    \centering
+    \begin{minipage}{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/SVattention_ablation_kv.pdf}
+        \caption{Ablation study of sharing first layer's query(key) across all layers.}
+        \label{fig:SVattention_ablation_kv}
+    \end{minipage}
+    \hspace{0.02\textwidth}
+    \begin{minipage}{0.3\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/SVattention_ablation_layers.pdf}
+        \caption{Ablation study on sharing values from different numbers of layers.}
+        \label{fig:SVattention_ablation_layers}
+    \end{minipage}
+\end{figure}
+To better understand SVFormer, we conduct several ablation experiments. We first observe the effects of sharing the first layer's queries or keys across all layers in Fig.~\ref{fig:SVattention_ablation_kv}, finding that this significantly impacts model performance, similar to the results in Fig.~\ref{fig:CLAttention_ablation_kv}. Additionally, sharing the first layer's values in a multi-layer network may reduce the network's ``effective depth." By updating the shared values using intermediate layers as ``anchors," we find that increasing the number of ``anchors" improves performance, as shown in Fig.~\ref{fig:SVattention_ablation_layers}.
+
+
+\section{Conclusion}
+
+In this paper, we propose the concept of attention concentration, a problem that arises from stacking multiple attention layers. From the perspective of cross-layer attention, we derive ResFormer, which adds a residual connection between the value vectors of the current layer and those of the first layer before the attention operation to alleviate attention concentration. Additionally, we introduce SVFormer, based on ResFormer, which reduces the $KV$ cache by nearly half. We conducted comprehensive experiments on the language modeling task to validate the advantages of these two Transformer variants in different scenarios.
+
+
+

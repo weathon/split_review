@@ -1,0 +1,478 @@
+\title{Two-stage LLM Fine-tuning with Less Specialization and More Generalization}
+
+\begin{abstract}
+
+
+Pretrained large language models (LLMs) are general purpose problem solvers applicable to a diverse set of tasks with prompts. They can be further improved towards a specific task by fine-tuning on a specialized dataset. However, fine-tuning usually makes the model narrowly specialized on this dataset with reduced general in-context learning performances, which is undesirable whenever the fine-tuned model needs to handle additional tasks where no fine-tuning data is available. 
+In this work, we first demonstrate that fine-tuning on a single task indeed decreases LLMs' general in-context learning performance. We discover one important cause of such forgetting, format specialization, where the model overfits to the format of the fine-tuned task.
+We further show that format specialization happens at the very beginning of fine-tuning. To solve this problem, we propose Prompt Tuning with MOdel Tuning (ProMoT), a simple yet effective two-stage fine-tuning framework that reduces format specialization and improves generalization.
+ProMoT offloads task-specific format learning into additional and removable parameters by first doing prompt tuning and then fine-tuning the model itself with this soft prompt attached. 
+With experiments on several fine-tuning tasks and 8 in-context evaluation tasks, we show that ProMoT achieves comparable performance on fine-tuned tasks to standard fine-tuning, but with much less loss of in-context learning performances across a board range of  out-of-domain evaluation tasks. More importantly, ProMoT can even enhance generalization on in-context learning tasks that are semantically related to the fine-tuned task, e.g. ProMoT on En-Fr translation significantly improves performance on other language pairs, and ProMoT on NLI improves performance on summarization.
+Experiments also show that ProMoT can improve the generalization performance of  multi-task training. 
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+Natural language processing (NLP) has recently been revolutionized by scaling up transformer based large language models (LLMs) together with large-scale pretraining \citep{transformer, bert, t5, gpt3, gopher, palm, megatron, touvron2023llama}. In addition to improved downstream performances, these pretrained LLMs can perform a broad array of unforeseen tasks when provided with a prompt. This in-context learning capability allows users to flexibly re-purpose LLMs for specific tasks with a minimum amount of supervised data, making it extremely convenient for fast prototyping and experimentation, especially in the low data regime.
+
+However, even the largest and most advanced LLMs leave a lot to be improved. Grounding and eliminating hallucinations \citep{maynez-etal-2020-faithfulness}, reasoning and logical clarity \citep{LLMReasoningDeepMind}, mathematics \citep{gpt3, noorbakhsh2021pretrained} are just a few examples where LLMs still lag behind the best human performances, or in some cases, the fine-tuned performances of the same model. 
+
+The most common practice to improve a pretrained model is to fine-tune it on a specialized task or several tasks.
+However, fine-tuning on LLM usually causes over-specialization to the fine-tuning tasks, and harm the model's pre-existing generalization ability on unseen tasks via in-context learning.
+As we show later, an mT5 model finetuned on a single task loses its few-shot performance on unseen tasks within one thousand steps of fine-tuning. When faced with hundreds of downstream tasks and even unknown tasks, we expect to have a single fine-tuned model that is both superior on supervised fine-tuned tasks and general unseen tasks. Thus, it becomes very important to develop new techniques for finetuning that prevent over-specialization of these fine-tuned models only to a few tasks.
+\begin{table*}[h!]
+    \centering
+    \adjustbox{max width=0.80\linewidth}{
+    \begin{tabular}{c|c}
+    \toprule
+          Ground-Truth Output& Mercedes' Lewis Hamilton took the outright \\&championship lead for the first time this season \\&with a dominant victory in the \textbf{Italian} Grand Prix.
+ \\
+ \midrule
+         Pretrained mT5& Hamilton won the {\color{red}\textbf{British}} Grand Prix.\\
+\hline
+         Fine-tuned mT5 on RTE & {\color{red}\textbf{True}}\\
+\hline
+         Fine-tuned mT5 with ProMoT (Ours) on RTE & Lewis Hamilton won the {\color{blue}\textbf{Italian}} Grand Prix.
+\\
+    \bottomrule
+    \end{tabular}
+    }
+    \caption{Output comparison of pretrained and fine-tuned mT5 models vs. fine-tuned with ProMoT on the RTE binary classification NLI dataset, performing in-context 1-shot summarization.}
+    \label{tab:example}
+\end{table*}
+
+
+In this work, we discover that the loss of general in-context learning abilities during fine-tuning is, to a large extent, caused by format specialization, which makes model overfitting to the specific task format. For example, an mT5 \citep{xue2020mt5} model learns in the output space with only ``True'' and ``False'' if we fine-tune it on a binary classification dataset, losing its ability to flexibly generate different output styles according to the in-context prompts of other tasks. We show that format specialization tends to happen at the very beginning of fine-tuning, before the model fully learns the semantic content of the task.
+
+Based on these observations, we propose a simple solution to alleviate format specialization: PROmpt Tuning with MOdel Tuning (ProMoT), which off-loads format learning to a small amount of task-specific parameters that are external to the model. 
+ProMoT is a two-stage fine-tuning process. At the first stage, we freeze the pretrained model and tune a small set of additional parameters, where we find adding soft prompt before the input \citep{lester-etal-2021-power} is a good choice. At the second stage, we freeze the additional parameters and tune the main model.
+Since format information is learned first, it mostly enters the small set of additional parameters. At inference time, we 
+can decide whether to remove the additional parameters depending on whether the incoming task share the same format as the fine-tuned task.
+
+Our experiments show that ProMoT significantly alleviates specialization during fine-tuning, while boosting generalization on semantically related tasks with different formats. 
+For example, fine-tuning the model only on an NLI binary classification dataset, a mT5 XXL model consistently obtains improved in-context learning performance on summarization compared with the pretrained model, possibly due to improved grounding learned from NLI. See Table \ref{tab:example} for a concrete example.  
+With ProMoT, we can obtain models with both better supervised performance compared to pretrained models and better general in-context learning performance compared to standard finetuning.
+
+To summarize, our contributions are 4-fold: 
+\begin{compactitem}
+   \item We show empirically that general in-context learning capabilities decrease during single-task fine-tuning for T5 models. We identify format specialization as one of the important causes which mostly happens at the beginning of fine-tuning. 
+    \item  We propose a novel 2-stage fine-tuning framework: PROmpt Tuning with MOdel Tuning (ProMoT) to reduce format specialization during fine-tuning. 
+    \item Experiments on 10+ NLP tasks show that ProMoT significantly reduces specialization of fine-tuned models compared to standard fine-tuning, while reaching similar supervised performance. The reduction in specialization opens up opportunities to enhance generalization across very dissimilar tasks when they share some semantic aspects.
+    
+    \item ProMoT can be combined with many existing fine-tuning and parameter-efficient fine-tuning methods. We show examples where ProMoT is combined with multi-task fine-tuning and fine-tuning with 1-shot prompts to further boost the generalization on unseen tasks.
+
+\end{compactitem}
+
+
+
+\section{Related Work}
+
+Pretrained LLMs are general problem solvers with in-context prompts \citep{raffel2020exploring, xue2020mt5, radford2018improving, palm, min2022rethinking, touvron2023llama}. \citet{zhai2023investigating} evaluates the catastrophic forgetting in multimodal language model fine-tuning, which is limited to image classification tasks. \citet{DataDistributionalProperties22, gao2020making} study the effect of pretraining data distribution on in-context learning on image recognition tasks, where the tension between in-context learning tasks and fine-tuning tasks is discussed. They propose changing the data distribution to ease such tension, which could be difficult for generative NLP tasks. ProMoT is an orthogonal method that does not require changes in data distribution. 
+
+In a recent study, \citet{ramasesh2022effect} found that as model size increases, the model becomes less prone to catastrophic forgetting. 
+However such studies are mostly focused on tasks of similar format, e.g. a sequence of different classification tasks.
+In this work we explore vastly different tasks, e.g. classification v.s. long form generation where the format itself is critical.
+
+Different from full fine-tuning, prompt-tuning \citep{lester-etal-2021-power, zhang2021differentiable}, adapters and LoRA \citep{hu2021lora, he2021towards, houlsby2019parameter} adapt a pretrained model to a task with a small set of tunable parameters. Parameter-efficient methods like these largely leave the pretrained model intact, which can preserve the pre-existing in-context learning abilities. However, they also miss the opportunity to further improve the pretrained model with a small, high quality dataset that generalizes beyond the fine-tuned task. Besides, these parameter-efficient methods also underperform fine-tuning on the supervised task in many cases, as shown in \citep{lester-etal-2021-power, liu2021p} and in our results. 
+Another line of work uses multi-task fine-tuning to improve generalization on unseen in-context learning tasks.
+\cite{wei2021fine-tuned, chung2022scaling} fine-tune PaLM and T5 on large-scale multitask datasets with diverse natural language prompts, improving the zero- and few-shot performance on unseen tasks. 
+\citet{min2021metaicl} incorporate the in-context learning objective into fine-tuning on multitask datasets with few-shot prompts.
+This approach relies on multi-task training to generalize, while orthogonally, ProMoT improves the generalization of each single fine-tuning task, whether used in a multi-task setting or not. ProMoT can indeed be combined with multi-task training to obtain better generalization as we demonstrate in Sec.~\ref{sec:SequentialTrainingAndMultitaskTraining}.
+In addition, such approaches often require human engineered instructions or prompts for each task to partly alleviate format specialization, while ProMoT uses prompt tuning, which has two advantages: 1) ProMoT does not require the elaborate trial and error of prompt engineering as it optimizes the soft prompts with data. 2) Soft prompts are more effective at absorbing the format compared to natural language prompts, as shown in Table ~\ref{tab:ablation}.
+
+
+
+\section{Format specialization in fine-tuning causes the loss of in-context learning capabilities}
+
+\label{sec:observation}
+In this section, we first show empirically with an mT5 XXL model that 1) in-context learning abilities are lost during fine-tuning; 2) format specialization is an important cause for such loss; 3) format specialization happens at the very beginning of fine-tuning. 
+\subsection{Loss of in-context learning capabilities during fine-tuning} 
+\label{sec:forget}
+In this subsection, we first show that the in-context learning performance usually drops significantly after standard fine-tuning. 
+In our experiments, we fine-tune a pretrained mT5 XXL model (13B parameters) \citep{xue2020mt5} on the Recognizing Textual Entailment (RTE)  dataset~\citep{wang2019superglue}. In RTE tasks, the model is required to predict ``True'' or ``False'' for whether the two given sentences are entailed. We fine-tune the mT5 model with default hyper-parameters and input/output template used in PaLM \citep{palm}. 
+
+\begin{figure}[ht]
+    \centering
+    \begin{minipage}[t]{.42\textwidth}
+        \centering
+        \includegraphics[ width=\linewidth]{images/QA_plot.pdf}
+        \caption{Loss of in-context learning abilities during fine-tuning. We show the learning curve of a model being fine-tuned on RTE dataset while being tested on 1-shot QA datasets. Left axis: Accuracy on RTE. Right axis: Exact match rate on 1-shot QA.
+        }
+        \label{fig:rte_qa}
+    \end{minipage}%
+    \hspace{0.05\textwidth}
+    \begin{minipage}[t]{0.42\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/rte_format.pdf}
+        \caption{
+        Format specialization in fine-tuning: showing the frequency of "True/False" style outputs when evaluated on 1-shot TriviaQA. The model is being fine-tuned on RTE. Left axis: Accuracy on RTE. Right axis: Ratio of True/False. 
+        }
+        \label{fig:true_false}
+    \end{minipage}
+\end{figure}
+
+We want to see whether the model lost its in-context learning abilities on unseen task during fine-tuning. Therefore, we evaluate the fine-tuned model with two 1-shot QA tasks, TriviaQA \citep{joshi2017triviaqa} and web\_questions \citep{berant2013semantic}. The results are illustrated  in Figure \ref{fig:rte_qa}, where we can see that when the accuracy on RTE dataset increases with fine-tuning, performance on few-shot QA tasks drops drastically. 
+This phenomenon is general and not a result of specific fine-tuning or evaluation tasks (more results in Section \ref{sec:exp_single}).
+
+\subsection{Format specialization}
+\label{sec:format}
+Why are the in-context learning abilities of an LLM so easily lost after a few hundred steps of fine-tuning? A natural hypothesis is that due to the homogeneity of output formats in fine-tuning datasets, the model quickly specializes to this task format and learns to follow it no matter what the input sequence is. This leads to the loss of in-context learning abilities on other tasks that do not share the same format. here by ``format'' we refer to the common characteristics of the sequences in fine-tuning task as a subset of all possible sequences, such as the language used, typical input/output lengths and styles, special tokens or punctuation, upper/lower case styles etc. For example, the output format of RTE is a set of two labels, ``True'' or ``False'', among all possible sequences of tokens of various lengths. Since all data points share the same format in single-task fine-tuning, the model receives a strong gradient signal that the output should follow this format, thus its in-context learning performance on other tasks with different formats will drop, even when they share important semantic similarities with the fine-tuned task. 
+
+To verify this hypothesis, we evaluate the RTE fine-tuned mT5 model on 1-shot TriviaQA task and count the percentage of outputs which are ``True'' or ``False''. Figure \ref{fig:true_false} shows that as the fine-tuning proceeds, the model outputs more ``True'' or `False' even with a 1-shot prompted input from TriviaQA. In particular, after 300 fine-tuning steps, $90\%$ of the output becomes ``True'' or ``False''. The same phenomenon happens on other in-context learning tasks. With a 1-shot WMT16 En-De translation prompt, after 500 steps of RTE fine-tuning, more than $99\%$ of the output becomes ``True'' or ``False''. 
+This indicates that format specialization is a possible reason for the loss of general in-context learning capabilities during fine-tuning.
+
+\subsection{Format learning happens first during standard fine-tuning}
+\label{sec:format2}
+\begin{wrapfigure}{R}{0.4\linewidth}
+  \centering
+    \includegraphics[width=\linewidth]{images/gradient_400.pdf}
+    \caption{Format specialization happens at the beginning of fine-tuning: we show the cosine similarity between the full gradient $g$ and the format gradient $g_\text{format}$ on the MLP kernel, Query, Key and Value on the attention module. The $g$ and $g_{\text{format}}$ are much better aligned at the start of training, compared to at 400 steps.
+  }
+  \label{fig:gradient}
+\end{wrapfigure}  
+
+Next, we show experimental evidence that format learning happens first during standard fine-tuning. This is not surprising as the overwhelming majority of fine-tuning data points have very similar formats, causing a gradient signal that dominates over others, more nuanced elements such as the semantic content of the task. 
+
+More concretely, for the RTE dataset, the ``format'' refers to the fact that the $\text{output} \in \{\text{True}, \text{False}\}$, while the semantic content refers to the correlation between the input sequence and the output label. We isolate format learning from semantic learning by creating a randomized RTE dataset where the output labels are randomly shuffled, thus are no longer correlated with the input sequences. 
+The gradients of format learning, $g_{\text{format}}$, are then given by the gradients on the randomized RTE dataset. By comparing with the full gradient $g$ on the original RTE we can detect when format learning happens during fine-tuning. We compute the gradients on the same batches of inputs for the two different settings.
+ 
+Since randomized RTE and original RTE share the format information only and contain totally different semantic content, this alignment implies that the model is mostly learning the format. 
+After 400 fine-tuning steps, this alignment disappears where the cosine similarity drops to around $0.2$\footnote{We compute the format gradient at 400 steps, $g_{\text{format},400}$, by first fine-tuning the model on RTE for 400 steps, then computing the gradient on the randomized RTE dataset with the same batch of input sequences.}, when the True/False ratio reaches nearly 100\%.
+
+
+
+
+
+
+
+
+\section{Proposed Method: PROmpt  tuning  with MOdel Tuning (ProMoT)}
+
+\label{sec:method}
+The observations from Section \ref{sec:observation} inspire us to decouple format learning from fine-tuning, in order to alleviate specialization to the fine-tuned task and preserve general in-context learning abilities. The key idea is to offload format learning to a separate small set of parameters during early fine-tuning, and allow the model's own parameter changes afterwards to focus more on the semantic content of the task. We propose a two-stage fine-tuning strategy called ProMoT, illustrated in Figure \ref{fig:overview}. At the first stage, ProMoT uses prompt tuning to capture the format in a trainable soft prompt while the model itself is frozen. At the second stage, ProMoT freezes the learned soft prompt and fine-tunes the model itself to focus on semantic skills that might be more transferable.
+
+\begin{figure}
+    \centering
+    \includegraphics[clip, trim=1.1cm 6.8cm 1.9cm 0.6cm, width=0.9\linewidth]{images/overview.pdf}
+    \caption{Overview of ProMoT, our two-stage fine-tuning strategy. We run prompt tuning at Stage 1 and model fine-tuning with the trained prompt at Stage 2. Green denotes trainable parameters and blue means frozen.
+    }
+    \label{fig:overview}
+\end{figure}
+
+\paragraph{Stage 1: Prompt Tuning.}
+Here we use a continuous trainable prompt (soft prompt)~\citep{lester-etal-2021-power} prepended before the embedded inputs as the separate small set of tunable parameters.
+The soft prompt for a given fine-tuned task $P_e \in \mathbb{R}^{p\times e}$  is a small set of free parameters taking the form of a few trainable embeddings, where $p$ is the prompt length and $e$ is the embedding size.  
+Given an input sequence, prompt tuning first embeds it with the text embedding layer of the pretrained model, and then prepends it with the soft trainable prompt. 
+The soft prompt is then optimized to reduce the loss while the pretrained model is frozen.  
+As indicated in Section \ref{sec:format2}, fine-tuning first learns the format. We expect that by  prompt tuning first, the soft prompt will learn the format. 
+Although it is not guaranteed that the soft prompt only learns the format, the small capacity can prevent the soft prompt from learning all semantic skills in most realistic NLP tasks, as demonstrated by the performance gap between prompt tuning and standard fine-tuning.
+
+
+\paragraph{Stage 2: Fine-tuning with trained prompt.}
+After prompt-tuning, we expect the trained prompt now storing most of the format information. We then freeze the soft prompt and fine-tune the pretrained model. Importantly, as shown in Figure \ref{fig:overview}, the soft prompt is still prepended before the input during this stage, forcing the model to learn things not captured already by the soft prompt. 
+
+\paragraph{Other parameter-efficient and fine-tuning methods.}
+ProMoT is a general framework that can be combined with different parameter-efficient tuning and fine-tuning techniques in respective stages.
+Conceptually, the prompt-tuning at the first stage can be replaced by other commonly used parameter-efficient methods such as LoRA~\cite{hu2021lora}. However, empirically we found prompt-tuning is much better than LoRA on absorbing format information in early fine-tuning. For fine-tuning methods, we show examples to combine ProMoT with multi-task fine-tuning (Section \ref{sec:SequentialTrainingAndMultitaskTraining}) and 1-shot in-context learning prompt (Section \ref{sec:exp_single}, Section \ref{sec:SequentialTrainingAndMultitaskTraining}). 
+Training with 1-shot prompt is introduced by \citet{min2021metaicl} in a multi-task training setting.
+\paragraph{Evaluation.}
+After the two-stage fine-tuning, we obtain a fine-tuned model checkpoint and a trained soft prompt for a specific fine-tuning target task. We expect the soft prompt stores most of the format information, and we only use this prompt during inference when the inference task has the same format as the fine-tuned target task. 
+Otherwise, we remove the learned prompt and simply feed the original input into the fine-tuned model.
+
+
+
+\section{Experiments}
+
+\subsection{Settings}
+\paragraph{Datasets.}
+We use RTE \citep{wang2019superglue, bentivogli2009fifth} and WMT14 En-Fr \citep{wmt14} as two fine-tuning tasks in our main experiments. 
+They are selected as examples of classification (RTE) and generative tasks (WMT14 En-Fr translation).
+
+We use 8 tasks unseen during fine-tuning to evaluate the model's generalization abilities.
+The 8 evaluation tasks are chosen to represent four types of tasks:
+\begin{compactitem}
+    \item Natural language inference: CB \citep{marneff_simons_tonhauser_2019} and WiC \citep{pilehvar2018wic} from superGLUE \citep{wang2019superglue}
+    \item Closed book QA: TriviaQA \citep{joshi2017triviaqa}, web\_questions \citep{berant2013semantic}
+    \item Translation: WMT16 En-Ro, WMT16 En-De \citep{wmt16}
+    \item Summarization: XSum \citep{narayan2018don}, WikiLingua \citep{ladhak-etal-2020-wikilingua}
+\end{compactitem}
+ 
+
+\paragraph{Metrics.}
+We report accuracy for classification tasks, exact match ratio for QA tasks, BLEU score~\citep{papineni-etal-2002-bleu} for translation tasks and Rouge-2 score~\citep{lin2004rouge} for summarization tasks.
+We evaluate the model on development set for superGLUE sub-tasks (RTE, CB and WiC) and on test set for all other tasks. 
+Besides per-task performance, we also report the normalized average (Norm. Avg.) performance on all evaluation tasks by averaging the performances normalized to [0,100], following the "normalized preferred metric" in BIG-bench \citep{srivastava2022beyond} and \citet{chung2022scaling}.
+\paragraph{Models.}
+We primarily use mT5 \citep{xue2020mt5} XXL model \citep{raffel2020exploring} in our main experiments, which is pretrained on multi-lingual corpus and contains 13B parameters. This is to accommodate multi-lingual scenarios among our training and evaluation tasks. To show the effectiveness of our method on different pretraining corpus, model sizes and architectures, we also include experiments on mT5 XL, T5.1. T5 based models are shown to have meaningful few-shot performance as shown in \citet{chung2022scaling}. We do not consider FLAN-T5~\citep{chung2022scaling} as a base model in our experiments because it has already been fine-tuned on a large amount of supervised datasets, including our evaluation datasets.
+
+\paragraph{Comparing methods.}
+We compare our ProMoT with several different configurations, including
+\begin{compactitem}
+    \item \textbf{Pretrained model:} We evaluate the pretrained model on all tasks without any fine-tuning. 
+    \item \textbf{Standard fine-tuning:} Fine-tune the pretrained model without trainable prompts. We also include a multi-task version in Section \ref{sec:SequentialTrainingAndMultitaskTraining} which is commonly used to boost model generalization on unseen tasks.
+    \item \textbf{Prompt tuning}: Tune the trainable prompt with pretrained model frozen. As the model is fixed, prompt tuning will not change the pretrained model's performance on in-context learning tasks comparing when the prompt is removed.
+    \item \textbf{Our proposed method: ProMoT}: Our proposed two-stage fine-tuning strategy.
+    \item \textbf{Our proposed method: ProMoT+1-shot}: 
+    To further boost in-context learning performance, we prepend a 1-shot example to the input in  Figure \ref{fig:overview}  during training.
+
+\end{compactitem}
+
+\subsection{Supervised Performance on Fine-tuning Tasks}
+We first show that ProMoT training can achieve similar or even better performance on fine-tuning tasks compared to standard fine-tuning. We apply three different fine-tuning methods on four different tasks and report the result in Table \ref{tab:finetune_result}. ProMoT outperforms standard fine-tuning on supervised performance on 3 out of 4 fine-tuning target tasks and outperforms prompt-tuning on 4 out of 4 tasks. 
+Therefore the improved in-context learning performance on unseen tasks (better generalization ability), as will be demonstrated in the next few sections, comes without sacrificing the fine-tune task's performance.
+
+\begin{threeparttable}[h]
+    \centering
+    \adjustbox{max width=0.65\textwidth}{
+    \begin{tabular}{c|c|c|c|c|c|c|c|c|c}
+    \toprule
+          &\multicolumn{2}{c|}{Prompt tuning} & \multicolumn{2}{c|}{Standard Fine-tuning} & \multicolumn{2}{c}{ProMoT (Ours)}\\
+    \midrule
+         RTE & \multicolumn{2}{c|}{91.34} & \multicolumn{2}{c|}{\underline{92.06}} & \multicolumn{2}{c}{\textbf{92.78}}\\
+         WMT14 En-Fr & \multicolumn{2}{c|}{39.28} & \multicolumn{2}{c|}{\textbf{41.80}} & \multicolumn{2}{c}{\underline{41.30}}\\
+         SNLI & \multicolumn{2}{c|}{88.53} & \multicolumn{2}{c|}{\underline{88.91}} & \multicolumn{2}{c}{\textbf{89.62}}\\
+         OpenbookQA&\multicolumn{2}{c|}{73.60} & \multicolumn{2}{c|}{\underline{77.2}} & \multicolumn{2}{c}{\textbf{81.6}}\\
+    \bottomrule
+    \end{tabular}
+    }
+    
+    \caption{Comparison of supervised performances of a mT5 XXL model on fine-tuning target tasks. We use 0-shot in fine-tuning tasks. We report accuracy for RTE, SNLI and OpenbookQA, and BLEU score for WMT14 En-Fr.
+    }
+    \label{tab:finetune_result}
+\end{threeparttable}
+\subsection{Generalization with Single Task Fine-tuning}
+\label{sec:exp_single}
+\begin{threeparttable}[h]
+    \centering
+    
+    \adjustbox{max width=0.9\textwidth}{
+    \begin{tabular}{c|c|c|c|c|c|c|c|c|c}
+    \toprule
+         && \multicolumn{2}{c|}{Pretrained}  & \multicolumn{2}{c|}{Standard Fine-tuning} & \multicolumn{2}{c|}{ProMoT (Ours)} &\multicolumn{2}{c}{ProMoT + 1-shot (Ours)}\\
+    \midrule
+         Fine-tuning&RTE & \multicolumn{2}{c|}{47.653}  & \multicolumn{2}{c|}{92.06} & \multicolumn{2}{c|}{\underline{92.78}}&\multicolumn{2}{c}{\textbf{93.86}}\\
+    \midrule
+         && 1-shot & 4-shots & 1-shot & 4-shots & 1-shot & 4-shots & 1-shot & 4-shots\\
+    \cmidrule{2-10}
+         &\multirow{2}{*}{Norm. Avg.} & \multirow{2}{*}{17.52} &\multirow{2}{*}{18.75}&	15.43 &	16.56 &20.10 &21.24 & 22.26 &	22.33\\
+          & & & &  {\color{red}(-2.10)} & {\color{red}(-2.19)} & {\color{blue}(+2.58)} & {\color{blue}(+2.49)} & {\color{blue}(+4.74)} & {\color{blue}(+3.58)}\\
+    \cmidrule{2-10}
+         &CB &46.43 & 51.79 & 73.21 & 82.14 & 66.07 & 67.86&83.93&82.14\\
+         &WiC  & 49.69 & 49.69 &50.00 & 50.16 & 51.41 & 53.61&51.25&50.63\\
+         \cmidrule{2-10}
+         Evaluation&triviaQA   &17.58 & 19.02 & 0.15 & 0.11 & 17.64 & 18.66&17.82&19.62\\
+         &web\_questions &9.70 & 13.04 & 0.05 & 0.05 & 11.07 & 13.19&10.14&12.11\\
+         \cmidrule{2-10}
+         &WMT16\_ende & 3.97 & 8.83 & 0.00 & 0.00 & 2.02 & 3.69&2.26&4.89\\
+         &WMT16\_enro & 1.82 & 3.92 & 0.00 & 0.00 & 0.70 & 0.96&0.87&1.87\\
+         \cmidrule{2-10}
+         &XSum & 6.41 & 2.35 & 0.00 & 0.00 & 7.02 & 7.01&6.94&3.93\\
+         &WikiLingua/en & 4.59 & 1.33 & 0.00 & 0.00 & 4.84 & 4.90&4.87&3.43\\
+    \bottomrule
+    \end{tabular}
+    }
+    
+    \caption{Performances of a mT5 XXL model finetuned on RTE and evaluated on 8 different tasks to verify the generalization ability. The accuracy on fine-tuned task (RTE) is in the first row. We compare the Norm. Avg. (normalized average performance) with pretrained model and report the relative difference, where red denotes decreased performance and blue denotes increased performance. CB and WiC are also NLI tasks, very similar to RTE.
+    }
+    
+    \label{tab:single_rte}
+\end{threeparttable}
+
+
+\begin{threeparttable}[h]
+    \centering
+    
+    \adjustbox{max width=0.9\textwidth}{
+    \begin{tabular}{c|c|c|c|c|c|c|c|c|c}
+    \toprule
+         && \multicolumn{2}{c|}{Pretrained}  & \multicolumn{2}{c|}{Standard Fine-tuning} & \multicolumn{2}{c|}{ProMoT (Ours)} &\multicolumn{2}{c}{ProMoT + 1-shot (Ours)}\\
+    \midrule
+         Fine-tuning&RTE & \multicolumn{2}{c|}{47.653}  & \multicolumn{2}{c|}{92.06} & \multicolumn{2}{c|}{\underline{92.78}}&\multicolumn{2}{c}{\textbf{93.86}}\\
+    \midrule
+         && 1-shot & 4-shots & 1-shot & 4-shots & 1-shot & 4-shots & 1-shot & 4-shots\\
+    \cmidrule{2-10}
+         &\multirow{2}{*}{Norm. Avg.} & \multirow{2}{*}{17.52} &\multirow{2}{*}{18.75}&	15.43 &	16.56 &20.10 &21.24 & 22.26 &	22.33\\
+          & & & &  {\color{red}(-2.10)} & {\color{red}(-2.19)} & {\color{blue}(+2.58)} & {\color{blue}(+2.49)} & {\color{blue}(+4.74)} & {\color{blue}(+3.58)}\\
+    \cmidrule{2-10}
+         &CB &46.43 & 51.79 & 73.21 & 82.14 & 66.07 & 67.86&83.93&82.14\\
+         &WiC  & 49.69 & 49.69 &50.00 & 50.16 & 51.41 & 53.61&51.25&50.63\\
+         \cmidrule{2-10}
+         Evaluation&triviaQA   &17.58 & 19.02 & 0.15 & 0.11 & 17.64 & 18.66&17.82&19.62\\
+         &web\_questions &9.70 & 13.04 & 0.05 & 0.05 & 11.07 & 13.19&10.14&12.11\\
+         \cmidrule{2-10}
+         &WMT16\_ende & 3.97 & 8.83 & 0.00 & 0.00 & 2.02 & 3.69&2.26&4.89\\
+         &WMT16\_enro & 1.82 & 3.92 & 0.00 & 0.00 & 0.70 & 0.96&0.87&1.87\\
+         \cmidrule{2-10}
+         &XSum & 6.41 & 2.35 & 0.00 & 0.00 & 7.02 & 7.01&6.94&3.93\\
+         &WikiLingua/en & 4.59 & 1.33 & 0.00 & 0.00 & 4.84 & 4.90&4.87&3.43\\
+    \bottomrule
+    \end{tabular}
+    }
+    
+    \caption{Performances of a mT5 XXL model finetuned on RTE and evaluated on 8 different tasks to verify the generalization ability. The accuracy on fine-tuned task (RTE) is in the first row. We compare the Norm. Avg. (normalized average performance) with pretrained model and report the relative difference, where red denotes decreased performance and blue denotes increased performance. CB and WiC are also NLI tasks, very similar to RTE.
+    }
+    
+    \label{tab:single_rte}
+\end{threeparttable}
+
+
+
+In this section, we evaluate and compare the few-shot performance on unseen tasks after fine-tuning. We show the evaluation results of fine-tuning on RTE and WMT14 En-Fr in Table \ref{tab:single_rte} and Table \ref{tab:single_enfr}, respectively. Experiments on additional fine-tuning tasks SNLI/OpenbookQA and additional base models including mT5 XL, T5.1. 
+
+\begin{threeparttable}[!h]
+    \centering
+    \adjustbox{max width=0.9\textwidth}{
+    \begin{tabular}{c|c|c|c|c|c|c|c|c|c}
+    \toprule
+         & & \multicolumn{2}{c|}{Pretrained} & \multicolumn{2}{c|}{Standard Fine-tuning} & \multicolumn{2}{c|}{ProMoT (Ours)} & \multicolumn{2}{c}{ProMoT + 1-shot (Ours)}\\
+    \midrule
+         Fine-tuning&WMT14 En-Fr & \multicolumn{2}{c|}{1.98}& \multicolumn{2}{c|}{\textbf{41.80}} & \multicolumn{2}{c|}{\underline{41.30}} & \multicolumn{2}{c}{41.19}\\
+    \midrule
+         && 1-shot & 4-shots & 1-shot & 4-shots & 1-shot & 4-shots & 1-shot & 4-shots\\
+    \cmidrule{2-10}
+        &\multirow{2}{*}{Norm. Avg.} & \multirow{2}{*}{17.52}	&\multirow{2}{*}{18.75}	&9.15&11.67	&18.87&20.64&19.91&21.99\\
+         & & & & {\color{red}(-8.37)}&{\color{red}(-7.07)}&{\color{blue}(+1.35)}&{\color{blue}(+1.89)}&{\color{blue}(+2.39)}&{\color{blue}(+3.24)}\\
+        \cmidrule{2-10}
+         &CB& 46.43 & 51.79 & 16.07  & 32.14 & 41.07 & 57.14 & 41.07&53.57\\
+         &WiC & 49.69 & 49.69 & 50.63 & 49.06 & 50.16 & 50.31&49.84 &50.63\\
+         \cmidrule{2-10}
+         Evaluation&triviaQA  & 17.58 & 19.02 & 3.20 & 3.15& 13.63 & 15.20&16.93&18.19 \\
+         &web\_questions & 9.70 & 13.04 &0.89 & 6.15 & 9.40 & 7.92&10.14&12.01\\
+         \cmidrule{2-10}
+         &WMT16\_ende & 3.97 & 8.83 & 0.81 & 0.18 & 15.52 & 15.55&16.14&15.63\\
+         &WMT16\_enro &1.82 & 3.92 & 1.53 & 0.42 & 18.54 & 17.80&17.57&16.81\\
+         \cmidrule{2-10}
+         &XSum & 6.41 & 2.35 & 0.05 & 1.86 & 1.49 & 0.65&3.41&4.36\\
+         &WikiLingua/en & 4.59 & 1.33 & 0.03 & 0.43 & 1.14 & 0.52&4.22&4.73\\
+    \bottomrule
+    \end{tabular}
+    }
+    \caption{Performances of a mT5 XXL model finetuned on WMT14 En-Fr and evaluated on 8 few-shot tasks to verify the generalization ability. BLEU on the fine-tuned task is in the first row. We compare the Norm. Avg. (normalized average performance) with pretrained model and report the relative difference, where red denotes decreased performance and blue denotes increased performance. WMT16 En-De and En-Ro are translation tasks with different language pairs from WMT14 En-Fr.
+    }
+    \label{tab:single_enfr}
+\end{threeparttable}
+
+From both tables, we first observe that the model's in-context learning performance drops significantly after standard fine-tuning. In particular, the few-shot learning performances drop to near zero for 6 over 8 tasks in Table \ref{tab:single_rte}, with the only exceptions being CB and WiC where they share the same format as the RTE fine-tuning task. 
+On the contrary, ProMoT reduces the loss of the in-context learning performance on unseen few-shot evaluation tasks, and even boosts some evaluation tasks that are semantically related to the fine-tuning task but with totally different task formats, resulting in an increasing in-context learning performance on average. In Table \ref{tab:single_rte}, ProMoT on the binary NLI dataset dataset consistently improves few-shot performances on two summarization tasks beyond the pretrained model. In Table \ref{tab:single_enfr}, ProMoT training on English-French translation substantially improves few-shot performance on other language translation pairs such as English to German and Romanian. This cross-task generalization across different task formats are infeasible with previous fine-tuning techniques.
+The improvement with less specialization and more generalization can be further boosted when we combine ProMoT with 1-shot prompt to incorporate in-context learning objective during fine-tuning. 
+
+
+It is however not surprising that even ProMoT cannot completely eliminate specialization and may still negatively influence some unseen in-context learning tasks compared to the pretrained model, depending on the characteristics of the fine-tuning task. In the next section, we show that a multi-task setup further improves the already strong generalization of ProMoT.
+
+
+\subsection{More Generalization with Multitask Training}
+\label{sec:SequentialTrainingAndMultitaskTraining}
+
+Multi-task training is commonly used to improve model's generalization ability \citep{wei2021finetuned, chung2022scaling}. As a general fine-tuning framework, ProMoT can be combined with multi-tasking and achieves better generalization compared to standard multi-task fine-tuning.
+
+\begin{table*}[!h]
+    \centering
+   \adjustbox{max width=0.85\textwidth}{
+    \begin{tabular}{c|c|c|c|c|c|c}
+    \toprule
+            && \multirow{2}{*}{Pretrained} & \multirow{2}{*}{multi-task FT} & \multirow{2}{*}{Multi ProMoT} &multi-task FT& Multi-ProMoT\\
+            && &&  & + 1-shot& + 1-shot\\
+    \midrule
+         Multi-task&RTE&47.65 &90.25&91.34&91.70&93.14\\
+         Fine-tuning&WMT14 En-Fr& 1.982 &41.34&40.73&40.87&40.55\\
+    \midrule
+    \cmidrule{2-7}
+        &\multirow{2}{*}{Norm. Avg.} & \multirow{2}{*}{17.52}&20.06&		25.88&	22.62&		26.17\\
+        && & {\color{blue}(+2.54)}  & {\color{blue}\textbf{(+8.35)}} & {\color{blue}(+5.10)}  &{\color{blue}\textbf{(+8.65)}} \\
+        \cmidrule{2-7}
+         &CB & 46.43&80.36&83.93&87.50&85.71\\
+    &WiC & 49.69&51.10&51.41&53.29&52.04\\
+    \cmidrule{2-7}
+    Evaluation&TriviaQA & 17.58&15.76&16.99&16.53&17.18\\
+    &Web\_questions & 9.70&9.70&10.04&9.40&10.38\\
+    \cmidrule{2-7}
+         &WMT16 En-De & 3.97&0.88&18.83&2.50&17.57\\
+         &WMT16 En-Ro & 1.82&1.52&18.41&5.62&18.57\\
+         \cmidrule{2-7}
+         &XSum & 6.41&0.44&4.50&1.82&4.32\\
+         &WikiLingua/en & 4.59&0.72&2.89&4.33&3.56\\
+    \bottomrule
+    \end{tabular}
+    }
+    \caption{Comparison of multi-task training on a mixed dataset of RTE and WMT14 En-Fr. We compare the evaluation results of pretrained mT5 model, standard multi-task fine-tuning (FT) and  multitask (Multi) ProMoT training. 
+    We compare the Norm. Avg. (normalized average performance) with pretrained model and report the relative difference, where blue denotes increased performance.}
+    \label{tab:multi_promot}
+\end{table*}
+
+We apply multi-task ProMoT training on mixed RTE and WMT14 En-Fr translation dataset. At the prompt-tuning stage, we train a soft prompt for each task. At the fine-tuning stage, we mix different tasks and prepend the corresponding soft task prompt to each training example. We keep other configurations the same as Section \ref{sec:exp_single} and report the results in Table \ref{tab:multi_promot}. We compare multi-task ProMoT with standard multi-task fine-tuning. 
+The results show that Multi-task ProMoT significantly outperforms standard multi-task fine-tuning on enhancing generalization with larger improvement on average on unseen 1-shot evaluation tasks.
+Similar to the single task setting, adding 1-shot prompt before each training input in the fine-tuning stage further boosts the performance of both multi-task fine-tuning and multi-task ProMoT. 
+
+\begin{table*}[ht]
+    \centering
+    \caption{Results for sequentially training first on RTE and then on En-Fr with ProMoT + 1-shot.
+    }
+    \adjustbox{max width=0.8\linewidth}{
+    \begin{tabular}{c|cc|c|c|c|c|c|c}
+    \toprule
+         Datasets & \multicolumn{2}{c|}{Pretrained Model} & \multicolumn{2}{c|}{ProMoT} & \multicolumn{2}{c|}{ProMoT} & \multicolumn{2}{c}{ProMoT + 1-shot}\\
+         & \multicolumn{2}{c|}{}&\multicolumn{2}{c|}{+ 1-shot RTE} & \multicolumn{2}{c|}{+ 1-shot En-Fr} & \multicolumn{2}{c}{En-Fr after RTE} \\
+    \midrule
+         WMT14 En-Fr & \multicolumn{2}{c|}{1.98} & \multicolumn{2}{c|}{0.92} & \multicolumn{2}{c|}{41.19} & \multicolumn{2}{c}{41.33}\\
+         RTE & \multicolumn{2}{c|}{47.65} & \multicolumn{2}{c|}{93.86} & \multicolumn{2}{c|}{53.43} & \multicolumn{2}{c}{90.98}\\
+    \midrule
+         & 1-shot & 4-shots &1-shot & 4-shots & 1-shot & 4-shots & 1-shot & 4-shots\\
+    \midrule
+         CB& 46.43 & 51.79 &83.93&82.14&41.07&53.57&82.14&80.36\\
+         WiC & 49.69 & 49.69 &51.25 & 50.63 & 49.84&50.63&51.10&57.37\\
+         triviaQA  & 17.58 & 19.02 &17.82 & 19.62 & 16.93 & 18.19 & 14.08 & 16.98\\
+         web\_questions & 9.70 & 13.04 &10.14 & 12.11 & 10.14 & 12.01 & 9.40 & 11.71\\
+         WMT16\_ende &  3.97 & 8.83 &2.26 & 4.89 & 16.14 & 15.63 & 18.13 & 17.90 \\
+         WMT16\_enro & 1.82 & 3.92 &0.87 & 1.87 & 17.57 & 16.81 & 20.64 & 21.51\\
+         XSum & 6.41 & 2.35 &6.94 & 3.94 & 3.41 & 4.36 & 3.19 & 3.96\\
+         WikiLingua/en & 4.59 & 1.33 & 4.87 & 3.43 & 4.22 & 4.73&3.42&3.14\\
+    \bottomrule
+    \end{tabular}
+    }
+    \label{tab:seq_training}
+\end{table*}
+\subsection{Ablation Study}
+\label{sec:ablation}
+\begin{table*}[!h]
+    \centering
+    \adjustbox{max width=0.8\linewidth}{
+    \begin{tabular}{c|c|c|c|c|c}
+    \toprule
+         & & \multicolumn{1}{c|}{Joint} & \multicolumn{1}{c|}{Fine-tuning} & \multicolumn{1}{c|}{Fine-tuning} & \multicolumn{1}{c}{ProMoT}\\
+         && \multicolumn{1}{c|}{Fine-tuning} & \multicolumn{1}{c|}{+ 1-shot}& \multicolumn{1}{c|}{with random prompt} & \multicolumn{1}{c}{+ 1-shot (Ours)}\\
+    \midrule
+         Fine-tuning& RTE & \multicolumn{1}{c|}{90.97} & \multicolumn{1}{c|}{90.97} & \multicolumn{1}{c}{92.06} & \multicolumn{1}{c}{93.86}\\
+    \midrule
+         &CB& \textbf{83.93} & 78.57 & \textbf{83.93} &\textbf{83.93} \\
+         &WiC & 50.47 & 51.41 & \textbf{51.72} &51.25 \\
+         &TriviaQA  & 0.75 & 0.03 & 0.83&\textbf{17.82} \\
+         Evaluation&web\_questions & 0.64 & 0.00 & 0.30&\textbf{10.14}\\
+         &WMT16\_ende & 0.00 &0.00 & 0.00&\textbf{2.26} \\
+         &WMT16\_enro & 0.00 & 0.00 & 0.00 &\textbf{0.87} \\
+         &XSum & 0.00 & 0.00 & 0.00 &\textbf{6.94}\\
+         &WikiLingua/en & 0.00 & 0.00 & 0.00 &\textbf{4.87}\\
+    \bottomrule
+    \end{tabular}
+    }
+    \caption{The ablation study results. Joint fine-tuning: fine-tuning the soft prompt and the main model together. Fine-tuning + 1-shot: standard fine-tuning with a 1-shot natural language prompt attached to every input sequence. Fine-tuning with random prompt: fine-tuning with a fixed soft prompt randomly initialized with uniform distribution. ProMoT + 1-shot: ProMoT is applied with an attached 1-shot natural language prompt before each training input.}
+    \label{tab:ablation}
+\end{table*}
+We conduct several ablation studies in Table \ref{tab:ablation}. First, instead of fine-tuning in a two-stage process, we consider ``jointly fine-tuning'' both the soft prompt and the model parameters in one stage. As shown in Table \ref{tab:ablation}, this method still results in specialization and severe loss of in-context learning abilities.
+Thus the benefit of ProMoT comes from its two-stage nature instead of merely adding more learnable parameters (soft prompt).
+In addition, fine-tuning the models with a fixed random soft prompt does not help - as it does not help to remove format specialization.
+Another important baseline is to fine-tune the model with natural language prompts in place instead of soft prompts, which also capture the format to some extend. 
+In a 1-shot scenario, this approach is still far worse compared to ProMoT, showing that learned soft prompts work better than natural language prompts in reducing format specialization in fine-tuning.
+
+
+
+\section{Conclusions and Limitations}
+
+In this paper, we identify format specialization as one important cause of the loss of general in-context learning abilities during LLM fine-tuning, which tends to happen at the beginning of fine-tuning. We are motivated to develop ProMoT, a simple yet effective two-stage fine-tuning framework that utilizes soft trainable prompts to absorb task-specific formats before model fine-tuning. Experiments on a diverse set of NLP tasks show that ProMoT reduces format specialization and results in surprising generalization across very different tasks, making it a promising method to build general-purpose capabilities into LLMs with small fine-tuning datasets.
+Although we have shown the effectiveness of ProMoT in our main paper, there is no theoretical guarantee on how much format specialization can be absorbed by the soft prompt during the first stage of ProMoT. Besides, our experiments are done with models smaller than 15B due to limited computation resources. It can be interesting to test ProMoT on larger models. 
+
+
+

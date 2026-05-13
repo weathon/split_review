@@ -1,0 +1,494 @@
+\title{KaSA: Knowledge-Aware Singular-Value Adaptation of Large Language Models}
+
+\begin{abstract}
+The increasing sizes of large language models (LLMs) result in significant computational overhead and memory usage when adapting these models to specific tasks or domains. 
+Various parameter-efficient fine-tuning (PEFT) methods have been devised to mitigate these challenges by training a small set of parameters for the task-specific updates of the model weights.
+Among PEFT methods, LoRA stands out for its simplicity and efficiency, inspiring the development of a series of variants.
+However, LoRA and its successors disregard the knowledge that is noisy or irrelevant to the targeted task, detrimentally impacting model performance and leading to suboptimality.
+To address this limitation, we introduce Knowledge-aware Singular-value Adaptation (KaSA), a PEFT method that leverages singular value decomposition (SVD) with knowledge-aware singular values to dynamically activate knowledge based on its relevance to the task at hand. 
+We conduct extensive experiments across a range of LLMs on tasks spanning natural language understanding (NLU), generation (NLG), instruction following, and commonsense reasoning. The experimental results demonstrate that KaSA consistently outperforms FFT and \revise{14} popular PEFT baselines \revise{across 16 benchmarks} and 4 synthetic datasets, underscoring our method's efficacy and adaptability.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large language models (LLMs) pretrained on massive general domain data have shown remarkable generalization ability, facilitating their application across diverse tasks \citep{zhao2023survey,touvron2023llama2,OpenAI_GPT4_2023,yoo2024hyperclova,jiang2024survey}.
+The adaptation of these pretrained language models (PLMs) to specific downstream tasks generally involves full fine-tuning (FFT), where all model parameters are updated and distinct replicas of model parameters are saved for each task \citep{guo2021parameter,mao2022unipelt,gaoparameter}.
+However, the increasing size of LLMs significantly raises the computational and memory costs associated with FFT, making FFT impractical in resource-constrained environments \citep{lester2021power,cai2024survey,meng2024pissa}.
+Consequently, a surge of parameter-efficient fine-tuning (PEFT) methods \citep{zaken2021bitfit,li2021prefix,hu2021lora,liu2023gpt,pfeiffer2021adapterfusion,houlsby2019parameter,liu2024dora} have emerged, aiming to reduce the computational and memory costs by only updating a small set of parameters while fixing the base model \citep{mao2022unipelt, lialin2023scaling}.
+
+Notably, LoRA \citep{hu2021lora} \revise{is} popular for its simplicity and effectiveness \citep{wang2024milora,liu2024dora,gaoparameter}.
+It reparameterizes the task-specific update $\Delta \mathbf{W} \in \mathbb{R}^{n \times m}$ with a couple of low-rank matrices, $\mathbf{A}$ and $\mathbf{B}$, while keeping the base model $\mathbf{W}^{(0)} \in \mathbb{R}^{n \times m}$ unchanged during fine-tuning.
+Without loss of generality, we suppose $n \ge m$ to simplify the notation.
+The fine-tuning process of LoRA can be formally expressed as $\mathbf{W}^{(0)}+ \Delta \mathbf{W} = \mathbf{W}^{(0)} + \frac{\alpha}{r} \mathbf{B} \mathbf{A}^{\top}$, where $\mathbf{B} \in \mathbb{R}^{n \times r}$, $\mathbf{A} \in \mathbb{R}^{m \times r}$, $\mathbf{A}^{\top}$ is the transpose of $\mathbf{A}$, $\alpha$ is a scaling constant, and the rank $r \ll m$.
+A significant advantage of LoRA is its practicality in integrating the low-rank matrices back into the base model, thereby preserving the model architecture and avoiding additional inference latency \citep{hu2021lora,han2024parameter,meng2024pissa}.
+
+Despite LoRA's success, its initialization strategy, which employs random Gaussian noise for $\mathbf{A}$ and zeros for $\mathbf{B}$, creates an unguided subspace for the trainable parameters, causing slow convergence and suboptimal performance \citep{meng2024pissa,wang2024milora}.
+To address this problem, PiSSA \citep{meng2024pissa} and MiLoRA \citep{wang2024milora} use singular value decomposition (SVD) for optimizing initialization.
+SVD can decompose any matrix into three distinct matrices $(\mathbf{U}$, $\mathbf{\Sigma}$, $\mathbf{V})$, where $\mathbf{U}$ and $\mathbf{V}$ are semi-orthogonal matrices, and $\mathbf{\Sigma}$ is a diagonal matrix containing singular values sorted in descending order.
+In particular, the magnitude of singular values represents the importance of parametric knowledge encapsulated in their corresponding singular vectors, with large values indicating important world knowledge and small values indicating noisy or long-tail knowledge \citep{yan2021truncated,wang2024milora,yang2023singular,sharmatruth}.
+PiSSA and MiLoRA apply SVD to decompose the base model into two components: the principal components correlated with major singular values, and the residual components associated with minor singular values.
+Specifically, PiSSA fine-tunes the low-rank matrices, $\mathbf{B}$ and $\mathbf{A}$, initialized with principal components, while preserving the residual components frozen, resulting in faster convergence and improved model performance \citep{meng2024pissa}. 
+In contrast, MiLoRA focuses on fine-tuning $\mathbf{B}$ and $\mathbf{A}$ initialized with the minor singular value components, while fixing the principal components, aiming to boost performance and alleviate world knowledge forgetting \citep{wang2024milora}.
+
+However, PiSSA and MiLoRA disregard two issues that can detrimentally affect model performance.
+Firstly, a portion of the task-specific updates targets the weight changes of the noisy knowledge encoded in the base model, potentially leading to suboptimal performance.
+Secondly, the low-rank matrices, whether initialized with the principal or residual components, inherit knowledge from the base model. These components may include information that is irrelevant to the specific downstream task, leading to conflicts within the parametric knowledge and degrading the model's representational capability.
+
+To address these problems, we propose a PEFT method, named \textit{KaSA} (\underline{K}nowledge-\underline{a}ware \underline{S}ingular-value \underline{A}daptation), which leverages SVD with knowledge-aware singular values to dynamically activate parametric knowledge according to its relevance to downstream tasks.
+Specifically, KaSA begins by performing knowledge-based SVD truncation to the base model $\mathbf{W}^{(0)}$ for removing the minor singular components $\mathbf{W}_{noise} \in \mathbb{R}^{n \times m}$ that contain noisy and long-tail knowledge \citep{gu2024sara,wang2024svd,meng2024pissa}.
+This process results in an SVD-truncated model $\mathbf{W}_{world} \in \mathbb{R}^{n \times m}$ that retains essential world knowledge.
+To maintain a consistent representational space between $\mathbf{W}_{world}$ and its task-specific updates $\Delta\mathbf{W}$, KaSA reparameterizes $\Delta\mathbf{W}$ in the SVD form, $\Delta\mathbf{W} = \Delta\mathbf{U} \Delta\mathbf{\Sigma} {\Delta\mathbf{V}}^{\top}$, where $\Delta\mathbf{\Sigma}$ comprises knowledge-aware singular values $(\Delta \sigma_1,...,\Delta \sigma_r)$.
+The singular-value adaptation offers twofold advantages: 1) reparameterizing the task-specific updates in SVD form ensures that these updates and $\mathbf{W}_{world}$ share the same representational space, thereby preserving knowledge consistency; 2) the knowledge-aware singular values learn to activate the parametric knowledge based on its relevance to specific downstream tasks, reducing the intervention of irrelevant knowledge and enhancing model performance.
+
+We conduct extensive experiments to fine-tune LLMs of varying sizes and architectures across a wide range of tasks, including natural language understanding (NLU), natural language generation (NLG), instruction following, and commonsense reasoning tasks.
+Substantial experimental results demonstrate that our KaSA consistently outperforms FFT and \revise{14} existing popular PEFT baselines across a variety of LLMs on \revise{16 benchmarks} and 4 synthetic datasets, highlighting its efficacy and adaptability.
+To summarize, in this work, our key contributions are as follows:
+\begin{itemize}
+    \item We propose a novel PEFT method, KaSA, which leverages SVD with knowledge-aware singular values to activate parametric knowledge based on its relevance to downstream tasks, achieving superior performance over FFT and existing popular PEFT techniques across various tasks.
+    \item KaSA features a linear framework that allows seamless integration of the singular value adaptation module with the SVD truncated model architecture, inducing no inference latency. Our method also supports training distinct adaptation modules for different tasks, all sharing a single base model, thereby reducing the storage needs for task-switching.
+    \item We conduct extensive experiments on NLU, NLG, instruction following, and commonsense reasoning tasks using popular LLMs on well-known benchmarks. Our method consistently outperforms FFT and 14 PEFT baselines across different benchmarks and synthetic datasets, demonstrating its efficacy and adaptability.
+    \item We make all high-quality synthetic instruction-following datasets generated by GPT4o publicly available \footnote{\href{https://huggingface.co/llama-duo}{https://huggingface.co/llama-duo}}, enabling the community to enhance the functionality of PEFT and support future research endeavors.
+\end{itemize}
+
+
+
+\section{Related Work}
+
+\subsection{Parameter-Efficient Fine-tuning}
+The increasing LLM scale presents significant challenges to efficiently adapting these models to specific tasks \citep{lialin2023scaling, zhao2023survey}.
+In response, \revise{a surge of PEFT methods has emerged, reducing the computation burden by updating a minimal set of parameters during fine-tuning \citep{mao2022unipelt,karimi2021compacter,han2024parameter}. }
+PEFT methods can be generally categorized into selective, additive, and re-parameterized methods \citep{ding2022delta,lialin2023scaling,xu2023parameter}.
+Selective methods \citep{zaken2021bitfit,sung2021training,guo2021parameter,he2023sensitivity} train a predetermined set of the model's existing parameters while keeping the rest of the model intact.
+Additive methods \citep{houlsby2019parameter,he2022towards,li2021prefix,liu2023gpt,lester2021power} introduce extra modules or parameters to fine-tune and maintain the original base model frozen.
+Reparametrized methods \citep{hu2021lora,dettmers2023qlora,zhang2022adaptive,valipour2023dylora,liu2024dora} reparameterize the model's weight updates into an equivalent low-rank form for fine-tuning.
+Among reparameterized approaches, LoRA stands out for its simple yet efficient mechanism of employing two low-rank matrices to approximate task-specific updates.
+The fine-tuned LoRA matrices can be integrated with the base model, ensuring no inference latency.
+LoRA has inspired a series of variants, each targeting specific improvements.
+For instance, DyLoRA \citep{valipour2023dylora} trains the low-rank matrices across a spectrum of ranks by sorting the representation learned at different ranks during training, shortening the training time.
+QLoRA \citep{dettmers2023qlora} combines 4-bit quantization with LoRA for enhanced resource efficiency. 
+DoRA \citep{liu2024dora} decomposes the base model into magnitude and direction components for fine-tuning, reducing the number of trainable parameters and improving performance over LoRA.
+Our method, KaSA, diverges from these reparametrized methods by employing a knowledge-aware SVD structure, enhancing the fine-tuning efficacy further.
+
+\subsection{Singular Value Decomposition in Natural Language Processing} \label{SVD_NLP}
+SVD plays a crucial role in Natural Language Processing (NLP) domain for various applications, such as model compression \citep{yuan2023asvd, wang2024svd, hsu2021language, chen2021drone}, dimensionality reduction of word embeddings \citep{tanwar2018dimensionality, shyamasundar2016twitter}, and latent semantic structure analysis \citep{deerwester1990indexing, kou2015application, horasan2019alternate}.
+In the rapidly growing realm of LLMs, SVD emerges as a promising, yet relatively underexplored, technique for PEFT.
+A series of SVD-based PEFT methods exploit the relationship between SVD and matrix rank to ascertain optimal ranks for specific downstream tasks.
+For example, AdaLoRA \citep{zhang2022adaptive} employs SVD to reparameterize task-specific updates and adaptively determines the suitable rank through importance scoring, thus improving the model performance and parameter efficiency.
+SARA \citep{gu2024sara} conducts SVD at the initialization phase to identify the appropriate rank for each layer, thereby maintaining the benefits of LoRA and boosting performance.
+PiSSA \citep{meng2024pissa} and MiLoRA \citep{wang2024milora}, as mentioned in Section \ref{Introduction}, utilize SVD to optimize LoRA's initialization.
+Specifically, PiSSA \citep{meng2024pissa} only fine-tunes the low-rank matrices initialized with the principal components associated with \revise{a few largest} singular values, while preserving the residual frozen. This initialization strategy facilitates faster convergence and enhanced performance. 
+Conversely, MiLoRA \citep{wang2024milora} fine-tunes \revise{the minor components associated with minimal singular values}, enhancing model performance while preserving the model's world knowledge.
+Unlike these methods, our method emphasizes the adaptive adjustment of singular values, allowing nuanced and dynamic activation of parametric knowledge based on its importance to downstream tasks.
+
+\begin{figure*}[t]
+	\centering
+	\includegraphics[width=0.98\linewidth]{images/KaSA_Final_v6.pdf}
+	\caption{The architecture of our proposed KaSA encompasses two stages: (\textbf{Left}) knowledge-based SVD truncation to \revise{remove the noisy knowledge from the base model;}
+    (\textbf{Right}) knowledge-aware singular-value adaptation to adjust singular values that dynamically activate knowledge across $\Delta \mathbf{W}$ model parameters based on its relevance to downstream tasks.}
+\label{fig:kasa}
+\end{figure*}
+
+
+
+\section{Methodology}
+
+\revise{In this section, we commence with modeling the general PEFT process and training objective in Section \ref{sec:problem_statement}.
+We subsequently provide a detailed introduction of KaSA in Section \ref{method_kasa}, followed by the description of its training objective in Section \ref{sec:training_objective}.}
+\subsection{Problem Statement} \label{sec:problem_statement}
+\revise{Before introducing KaSA, it is essential to delineate and model the process and objective of PEFT for LLMs based on the Transformer architecture \citep{vaswani2017attention}.
+Fundamentally, PEFT is the process of training a pretrained model to a targeted task using a task-specific dataset.
+It aims to minimize the divergence between the predicted probability distribution of the fine-tuned model and the actual distribution of the training data, while only modifying a small set of parameters.
+
+Consider a pretrained model $\mathbf{W}^{(0)}$, initially parameterized by $\Theta_0$. 
+To adapt this model to a particular task, we employ PEFT using a dataset $D = \{(x_l, y_l)\}_{l=1}^{Q}$ comprising $Q$ input-output instances.
+The PEFT process utilizes a limited set of parameters, denoted as $\mathbf{\Psi}$, to learn the task-specific update $\triangle \Theta$, ensuring that $\vert\mathbf{\Psi}\vert\ll \vert \Theta_0\vert$.
+This results in a fine-tuned model $\mathbf{W}$, parameterized by $\Theta_0 + \triangle \Theta(\mathbf{\Psi})$.
+The objective is to align the predicted probability distribution of $\mathbf{W}$ with the actual distribution of training data, thereby enhancing the fine-tuned model's task performance.
+The primary objective of PEFT is thus centered on the optimization of $\mathbf{\Psi}$:}
+\begin{align}
+\label{eq:L1}
+    \mathcal{L}_1(\mathbf{\Psi}) = \sum_{(x,y)\in D}  \sum_{t=1}^{|y|} -\log({\revise{P}_{\Theta_0+\triangle \Theta(\mathbf{\Psi})}}(y_{t} | x, y_{<t}))
+\end{align}
+
+\subsection{Knowledge-Aware Singular-Value Adaptation} \label{method_kasa}
+As depicted in Fig.\ref{fig:kasa}, KaSA encompasses two primary stages: 1) the knowledge-based SVD truncation, \revise{which removes the noisy knowledge from the base model}; and 2) knowledge-aware singular-value adaptation, which involves adjustment of singular values that dynamically activates parametric knowledge based on its relevance to the targeted task.
+
+KaSA begins with a knowledge-based SVD truncation to the base model $\mathbf{W}^{(0)} \in \mathbb{R}^{n \times m}$. For simplicity of denotation, we suppose $n \ge m$. \revise{This process factories $\mathbf{W}^{(0)}$ using SVD and subsequently truncates the minor singular components $\mathbf{W}_{noise} \in \mathbb{R}^{n \times m}$, removing noisy and long-tail knowledge and resulting in a lower-rank model $\mathbf{W}_{world} \in \mathbb{R}^{n \times m}$.}
+\revise{We use this refined model $\mathbf{W}_{world}$ to approximate the base model, making the adaptation of $\mathbf{W}^{(0)}$ to be resembled by that of $\mathbf{W}_{world}$:}
+\begin{align}
+    \mathbf{W} &= \mathbf{W}^{(0)} + \Delta \mathbf{W} = \mathbf{U}\mathbf{\Sigma}{\mathbf{V}}^{\top} + \revise{\Delta(\mathbf{U} \mathbf{\Sigma} \mathbf{V}^{\top})} = \sum_{i=1}^{m} {u_i \sigma_i {v_i}^{\top}} + \revise{\sum_{i=1}^{m} {\Delta (u_i \sigma_i v_{i}^{\top})}}\\
+    &= (\mathbf{W}_{world} + \mathbf{W}_{noise}) + (\Delta \mathbf{W}_{world} + \Delta \mathbf{W}_{noise}) \\
+    &= (\sum_{i=1}^{m-r} {u_i \sigma_i {v_i}^{\top}} + \sum_{i=1}^{r} {u_i \sigma_i {v_i}^{\top}}) +
+    \revise{(\sum_{i=1}^{m-r} {\Delta (u_i \sigma_i v_i^{\top})} + \sum_{i=1}^{r} {\Delta (u_i \sigma_i  v_i^{\top})})}\\
+    &\approx \mathbf{W}_{world} + \Delta \mathbf{W}_{world} = \sum_{i=1}^{m-r} {u_i \sigma_i {v_i}^{\top}} + \revise{\sum_{i=1}^{m-r} {\Delta (u_i \sigma_i v_i^{\top})}}
+\label{truncation}
+\end{align}
+where $\mathbf{U} \in \mathbb{R}^{n \times m}$, $\mathbf{V} \in \mathbb{R}^{m \times m}$, and $\mathbf{V}^{\top}$ is the transpose of $\mathbf{V}$.
+$\mathbf{U} = [u_1,...,u_{m}]$ and $\mathbf{V} = [v_1,...,v_{m}]$ are the corresponding left and right singular vector matrices, respectively.
+The diagonal matrix $\mathbf{\Sigma} \in \mathbb{R}^{m \times m}$ contains positive singular values $(\sigma_1,...,\sigma_{m})$ sorted from high to low $({\sigma _1} \ge {\sigma _2} \ge \dotsb \geq {\sigma _ m} \ge 0)$.
+The hyperparameter $r$ represents the number of \revise{truncated minor singular values}, with $r \ll m$.
+The left and right singular vector matrix, $\mathbf{U}$ and $\mathbf{V}$, are semi-orthogonal:
+\begin{align}
+    \mathbf{U}^{\top} \mathbf{U} = \mathbf{V}^{\top} \mathbf{V} = \mathbf{I}_{m}
+\label{semi_orthogonal}
+\end{align}
+where the identity matrix $\mathbf{I}_{m} \in \mathbb{R}^{m \times m}$.
+Following the knowledge-based SVD truncation, we employ the knowledge-aware singular-value adaptation, which reparameterizes the task-specific updates of $\mathbf{W}_{world}$ in the SVD form with knowledge-aware singular values. Therefore, \revise{the weight of a model fine-tuned with KaSA} can be formally expressed as:
+\begin{align}
+    \mathbf{W} = \mathbf{W}^{(0)} + \Delta \mathbf{W}  
+    & \approx \mathbf{W}_{world} + \eta\Delta\mathbf{U}\Delta\mathbf{\Sigma}\Delta\mathbf{V}^\top 
+    = \textcolor{black}{\sum_{i=1}^{m-r} {u_i (\sigma_i) {v_i}^{\top}}} + \textcolor{black}{\eta\sum_{j=1}^{r}{\Delta u_j(\Delta \sigma_j){\Delta v_j}^{\top}}} \nonumber\\
+    & \mathrm{s.t. }\quad \Delta \mathbf{U}^{\top} \Delta\mathbf{U} = \Delta \mathbf{V}^{\top} \Delta \mathbf{V} = \mathbf{I}_{r}
+\end{align}
+where \revise{$\mathbf{I}_{r}\in\mathbb{R}^{r \times r}$,} $\eta > 0$ is a constant scaler, the diagonal matrix $\Delta\mathbf{\Sigma} \in  \mathbb{R}^{r \times r}$ comprising \revise{learnable} knowledge-aware singular values $(\Delta\sigma_{1},...,\Delta\sigma_{r})$. \revise{The matrices $\Delta\mathbf{U}$ and $\Delta\mathbf{V}$ are semi-orthogonal, ensuring that the updates retain necessary structural properties.}
+
+\subsection{Training Objective}
+\label{sec:training_objective}
+\revise{FFT typically serves as a comparative performance upper bound for PEFT methods \citep{valipour2023dylora}. Consequently, we expect that the performance of the model fine-tuned with KaSA will closely approximate that of FFT. 
+We denote the FFT model as $\mathbf{W}_{fft} = \mathbf{W}^{(0)}+\Delta\mathbf{W}$.}
+We impose a regularization $\Vert \mathbf{W}_{fft} - \mathbf{W}_{world} \Vert_F$, represented by the Frobenius norm, \revise{to constrain the task-specific updates.}
+Based on the properties of Frobenius norms, we can further explore the boundary of the task-specific updates:
+\begin{equation}
+    \Vert \mathbf{W}_{fft}\Vert_F + \Vert \mathbf{W}_{world} \Vert_F \ge \Vert \mathbf{W}_{fft} - \mathbf{W}_{world} \Vert_F \ge  \Vert\Delta\mathbf{U}\Delta\mathbf{\Sigma}\Delta\mathbf{V}^\top\Vert_F = \Vert\sum_{j=1}^{r}{\Delta u_j(\Delta\sigma_j){\Delta v_j}^{\top}} \Vert_F
+\label{eq:svd-loss}
+\end{equation}
+To stabilize the model training and extend the searching space, we introduce $\mathcal{L}_{2}$ to minimize the lower boundary of $\Vert \mathbf{W}_{fft} - \mathbf{W}_{world} \Vert_F$:
+\begin{align}
+    \mathcal{L}_{2}(\Delta\mathbf{\Sigma}) =  \Vert\Delta\mathbf{U}\Delta\mathbf{\Sigma}\Delta\mathbf{V}^\top\Vert_{F}^{2}
+\label{l2_loss}
+\end{align}
+According to the Eckart–Young–Mirsky theorem \citep{eckart1936approximation}, $\mathcal{L}_{2}$ is reformulated as:
+\begin{align}
+     \mathcal{L}_{2}(\Delta\mathbf{\Sigma}) =  \Vert\Delta\mathbf{U}\Delta\mathbf{\Sigma}\Delta\mathbf{V}^\top\Vert_{F}^{2} = \Vert \sum_{j=1}^{r}{\Delta u_j(\Delta\sigma_j){\Delta v_j}^{\top}} \Vert_{F}^{2} = \sum_{j=1}^{r}{(\Delta\sigma_j)^2}
+\label{Eckart_tbeorem}
+\end{align}
+Our method proposes knowledge-aware singular-value adaptation, which reparameterizes the task-specific update in the SVD form and guides $\Delta\mathbf{U}$ and $\Delta\mathbf{V}$ to conform to orthogonality.
+Given this, we introduce $\mathcal{L}_{3}$ to constrain $\Delta\mathbf{U}$ and $\Delta\mathbf{V}$ adhere to orthogonality, such that:
+\begin{equation}
+    \mathcal{L}_{3}(\mathbf{\Psi}) = {\left\Vert \Delta\mathbf{U}^{\top} \Delta\mathbf{U} - \revise{\mathbf{I}_r}\right\Vert}_F + {\left\Vert \Delta\mathbf{V}^{\top} \Delta\mathbf{V} - \revise{\mathbf{I}_r} \right\Vert}_F
+\end{equation}
+Overall, our methods leverage $\mathcal{L}_1$, $\mathcal{L}_2$, and $\mathcal{L}_3$ to serve jointly for optimizing the model's task performance while adhering to SVD structure. For adjusting $\mathcal{L}_2$ and $\mathcal{L}_3$, we introduce $\beta > 0$ and $\gamma >0$ as their corresponding scalers. The overall training objective of KaSA can be expressed as:
+\begin{equation}
+    \mathcal{L}(\mathbf{\Psi},\Delta\mathbf{\Sigma}) = \min_{\mathbf{\Psi},\Delta\mathbf{\Sigma}} (\mathcal{L}_1(\mathbf{\Psi},\Delta\mathbf{\Sigma}) + \beta \mathcal{L}_2(\Delta\mathbf{\Sigma}) + \gamma \mathcal{L}_3(\mathbf{\Psi}))
+\end{equation}
+}
+
+
+
+\section{Experiments}
+
+In this section, we evaluate KaSA's efficacy across different downstream tasks, including natural language understanding (NLU), natural language generation (NLG), instruction following, and commonsense reasoning.
+For NLU tasks, we evaluate KaSA with RoBERTa \citep{liu2021robustly} and DeBERTaV3 \citep{he2022debertav3} on the GLUE \citep{wang2018glue} benchmark. 
+For NLG tasks, we assess our method with GPT-2 \citep{radford2019language} on the E2E NLG Challenge \citep{novikova2017e2e} benchmark.
+We further assess instruction following performance with popular LLMs, including LLaMA3 8B \citep{llama3}, Mistal 7B \citep{jiang2023mistral}, Gemma 7B \citep{team2024gemma}, \revise{and LLaMA2 13B \citep{touvron2023llama2}}.
+These models are fine-tuned with different PEFT methods using four synthetic datasets generated by GPT4o, each tailored to summarization, classification, coding, and closed QA.
+GPT4o is then employed as a judge to evaluate the fine-tuned models' performance, assigning scores on a scale of 10.
+\revise{We also follow \citep{kopiczko2023vera} and \citep{gaoparameter} to fine-tune the four models on the Alpaca dataset \citep{taori2023stanford} and report evaluation results on MT-Bench, with GPT4 serving as the judge, yielding scores within 10.}
+Additionally, we substantiate KaSA's generality by fine-tuning LLaMA2 7B and LLaMA3 8B models on the Commonsense170K dataset \citep{hu2023llm}, which includes training sets from eight commonsense reasoning datasets, and evaluating them on individual test sets of these constituent datasets.
+Finally, we conduct ablation studies to investigate the impacts of different components, budget parameter scalability, and the distribution of knowledge-aware singular values across various layers.
+All experiments are conducted on NVIDIA A100-SXM4 (80GB) GPUs, except for the NLU experiments, which are conducted on NVIDIA GeForce RTX 3090 (24GB) GPUs.
+
+\subsection{Baselines}
+\revise{We compare KaSA with FFT and 14 PEFT baselines to substantiate its efficacy and robustness: \\
+$ \bullet $ \textbf{Adapter-based methods} We consider four representative Adapter tuning methods as baselines: 1) $\text{Adapter}^{\text{H}}$ \citep{houlsby2019parameter}; 2) $\text{Adapter}^{\text{D}}$ \citep{ruckle2021adapterdrop}; 3) $\text{Adapter}^{\text{L}}$ \citep{lin2020exploring}; and 4) $\text{Adapter}^{\text{P}}$ \citep{pfeiffer2021adapterfusion}. \\
+$ \bullet $ \textbf{LoRA-based methods} We select LoRA and its variants: 1) LoRA \citep{hu2021lora}; 2) DyLoRA \citep{valipour2023dylora}; 3) VeRA \citep{kopiczko2023vera}; and 4) DoRA \citep{liu2024dora}. \\
+$ \bullet $ \textbf{SVD-based methods} Considering that our method is associated with SVD, we chose other SVD-based PEFT baselines: 1) AdaLoRA \citep{zhang2022adaptive}; 2) PiSSA \citep{meng2024pissa}; 3) MiLoRA \citep{wang2024milora}; 4) SARA \citep{gu2024sara}; and 5) CorDA \citep{yangcorda}. \\
+$ \bullet $ \textbf{Other methods} Apart from the aforementioned baselines, we also consider other important fine-tuning methods: 1) FFT; and 2) BitFit \citep{zaken2021bitfit}. \\
+To ensure a fair comparison with these baselines, we meticulously replicate the experimental configurations as described in previous studies \citep{hu2021lora,zhang2022adaptive,gu2024sara}.
+ \\}
+\begin{table}[t]
+\centering
+\caption{Performance of RoBERTa-base ($\text{RoB}_\text{base}$) and RoBERTa-large ($\text{RoB}_\text{large}$) with different adaptation methods on 6 datasets of the GLUE benchmark. 
+We report the overall (matched and mismatched) accuracy for MNLI, Matthew’s correlation coefficient (Mcc.) for CoLA, Pearson correlation coefficient (Pcc.) for STS-B, and accuracy (Acc.) for all the remaining tasks. 
+We report the average result of five runs with different random seeds.
+The best results for each dataset are shown in \textbf{bold}.
+Higher is better for all metrics.
+}
+\label{tab:glue_datasets}
+\resizebox{0.85\linewidth}{!}{
+\begin{tabular}{l|r|ccccccc}
+\toprule
+\multirow{2}*{\textbf{ Model(Method)}} & \textbf{\multirow{2}*{\makecell[r]{\# Trainable \\Parameters}}} & {\textbf{ SST-2}} & {\textbf{ MRPC}}  & {\textbf{ CoLA}} & {\textbf{ QNLI}} & {\textbf{ RTE}} & {\textbf{ STS-B}} & {\textbf{ All}} \\
+~ & ~ & {(Acc.)} & {(Acc.)} &  {(Mcc.)} & {(Acc.)} & {(Acc.)} & {(Pcc.)} & {Avg.} \\
+\midrule 
+$\text{RoB}_\text{base}$(FFT) & 125.0M  & 94.8     & 90.2         & 63.6     & 92.8    & 78.7   & 91.2   & 85.2     \\ 
+$\text{RoB}_\text{base}$(BitFit) &   0.1M  & 93.7     & \textbf{92.7}         & 62.0     & 91.8      & {81.5}   & 90.8   &  85.4    \\ 
+$\text{RoB}_\text{base}$($\text{Adpt}^{\text{D}}$)  &   0.3M  & 94.2     & 88.5         & 60.8     & 93.1        & 71.5   & 89.7   & 83.0     \\ 
+$\text{RoB}_\text{base}$($\text{Adpt}^{\text{D}}$) &   0.9M  & 94.7     & 88.4         & 62.6     & 93.0       & 75.9   & 90.3   & 84.2     \\ 
+$\text{RoB}_\text{base}$(LoRA) &   0.3M & 95.1     & 89.7         & 63.4     & \textbf{93.3}        & 78.4   & \textbf{91.5}   & 85.2     \\ 
+$\text{RoB}_\text{base}$(AdaLoRA) & 0.3M & 94.5 & 88.7 & 62.0 & 93.1 & 81.0 & 90.5 & 85.0 \\
+$\text{RoB}_\text{base}$(DyLoRA) & 0.3M &  94.3 & 89.5 & 61.1 & 92.2 & 78.7 & 91.1 & 84.5 \\
+$\text{RoB}_\text{base}$(PiSSA) & 0.3M & 95.0 &  88.2 &  65.5 &  92.0 &  75.1 & 90.4 & 84.4 \\ 
+$\text{RoB}_\text{base}$(MiLoRA)  & 0.3M  & 94.6 & 88.7 & 63.1 & 92.8 & 80.5 & {91.3}  & 85.2 \\
+$\text{RoB}_\text{base}$($\text{KaSA})$  & 0.3M & \textcolor{black}{\textbf{95.2}} & \textcolor{black}{{90.7}} & \textcolor{black}{\textbf{65.8}} & \textcolor{black}{\textbf{93.3}} & \textcolor{black}{\textbf{81.6}} & \textcolor{black}{91.1} & \textbf{86.3}\\
+\midrule
+$\text{RoB}_\text{large}$(FFT) &   355.0M  & 96.4    & 90.9         & 68.0    & 94.7      & 86.6   & 92.4   & 88.2     \\ 
+$\text{RoB}_\text{large}$($\text{Adpt}^{\text{P}}$) &   3.0M  & 96.1     & 90.2         & 68.3     & {94.8}    & 83.8   & 92.1   & 87.6    \\ 
+$\text{RoB}_\text{large}$($\text{Adpt}^{\text{P}}$) &   0.8M  & 96.6     & 89.7         & 67.8     & {94.8}      & 80.1   & 91.9   & 86.8     \\ 
+$\text{RoB}_\text{large}$($\text{Adpt}^{\text{H}}$) &   6.0M  & 96.2     & 88.7         & 66.5     & 94.7      & 83.4   & 91.0   & 86.8     \\ 
+$\text{RoB}_\text{large}$($\text{Adpt}^{\text{H}}$) &   0.8M  & 96.3     & 87.7         & 66.3     & 94.7       & 72.9   & 91.5   & 84.9    \\ 
+$\text{RoB}_\text{large}$(LoRA) &   0.8M & 96.2     & 90.2         & 68.2     & {94.8}      & 85.2   & {92.3}   & 87.8     \\ 
+$\text{RoB}_\text{large}$($\text{KaSA}$)  & 0.8M & \textcolor{black}{\textbf{96.9}} & \textcolor{black}{\textbf{91.2}} &  \textcolor{black}{\textbf{69.4}} & \textcolor{black}{\textbf{94.9}}  & \textcolor{black}{\textbf{88.8}} & \textcolor{black}{\textbf{92.5}} & \textbf{89.0}\\
+\bottomrule 
+\end{tabular}
+}
+\end{table}
+\begin{table}[t]
+\centering
+\caption{Performance of DeBERTaV3-base ($\text{DeB}_\text{v3}$) with different adaptation methods on 6 datasets of the GLUE benchmark.  
+We report the average result of five runs with different random seeds.
+The best results for each dataset are shown in \textbf{bold}.
+Higher is better for all metrics.
+}
+\label{tab:glue_datasets_deberta}
+\resizebox{0.85\linewidth}{!}{
+\begin{tabular}{l|r|cccccccc}
+\toprule
+\multirow{2}*{\textbf{ Model(Method)}} & \textbf{\multirow{2}*{\makecell[r]{\# Trainable \\Parameters}}} & {\textbf{ SST-2}} & {\textbf{ MRPC}}  & {\textbf{ CoLA}} & {\textbf{ QNLI}} & {\textbf{ RTE}} & {\textbf{ STS-B}} & {\textbf{ All}} \\
+~ & ~ & {(Acc.)} & {(Acc.)} &  {(Mcc.)} & {(Acc.)} & {(Acc.)} & {(Pcc.)} & {Avg.} \\
+\midrule 
+$\text{DeB}_\text{v3}$(FFT) & 184.0M        & 95.63     & 89.46        & 69.19     & 94.03     & 83.75   & 91.60   & 87.28    \\ 
+$\text{DeB}_\text{v3}$($\text{Adpt}^{\text{H}}$) &0.6M        & 95.30     & 89.22        & 67.87     & 93.76     & 85.56   & 91.30   & 87.17    \\ 
+$\text{DeB}_\text{v3}$($\text{Adpt}^{\text{P}}$) &0.6M     & 95.53     & 89.22        & 69.48     & 93.98      & 84.12   & 91.52   & 87.31    \\ 
+$\text{DeB}_\text{v3}$(LoRA) &0.3M      & 94.95     & 89.71        & 68.71     & 94.03    & 85.56   & \textbf{91.68}   & 87.44     \\ 
+$\text{DeB}_\text{v3}$(AdaLoRA) &0.3M        & 95.80     & 90.44         & 70.04    & {94.49}  & 87.36   & 91.63   & 88.29    \\ 
+$\text{DeB}_\text{v3}$($\text{PiSSA}$)  & 0.3M  & 95.30 & \textbf{91.42} & 70.29 & 93.59 & 84.84 &  91.37 & 87.80 \\
+$\text{DeB}_\text{v3}$($\text{MiLoRA}$)  & 0.3M  & 95.99 &  89.71 & 70.34 & {94.14} & 85.92 & 90.28  & 87.73 \\
+$\text{DeB}_\text{v3}$($\text{KaSA}$)  & 0.3M & \textcolor{black}{\textbf{96.22}} & \textcolor{black}{\textbf{91.42}} & \textcolor{black}{\textbf{70.41}} & \textcolor{black}{\textbf{94.55}}  & \textcolor{black}{\textbf{88.09}} & \textcolor{black}{91.62} & \textbf{88.72}\\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\subsection{Natural Language Understanding}\label{sec:nlu}
+\textbf{Models and Datasets.} 
+For NLU tasks, our method involves fine-tuning foundation models such as RoBERTa-base (125M), RoBERTa-large (355M) \citep{liu2021robustly}, and DeBERTaV3-base \citep{he2022debertav3} using the GLUE (General Language Understanding Evaluation) benchmark \citep{wang2018glue}. 
+The GLUE benchmark encompasses a wide array of datasets designed to test various aspects of NLU, including question answering, natural language inference, sentiment analysis, and textual entailment.
+In this context, our evaluation is conducted \revise{across 6 datasets from the GLUE: SST-2, MRPC, CoLA, QNLI, RTE, and STS-B.}
+
+\textbf{Implementation Details.}
+Basically, we follow the experimental setup applied in \citep{hu2021lora,zhang2022adaptive} to ensure a fair comparison. 
+We randomly initialize the knowledge-aware singular values without bias, which only introduces negligible $r$ coefficients in each layer. 
+For all evaluated datasets in GLUE, we meticulously tune the hyperparameters, including the learning rates $lr \in [\text{1E-5}, \text{1E-3}]$, the rank of SVD truncation $k \in \{1, 2, 4, 8, 16, 32, 64, 128\}$, and two trade-off loss coefficients $\beta \in [\text{1E-5}, 1]$ and $\gamma \in [\text{1E-5}, 1]$. 
+The results we present are the median outcomes from 5 runs, each conducted with a distinct random seed. 
+To maintain fair trainable parameters, we fine-tune the \texttt{query} and \texttt{value} weights in each Transformer block and set a rank $r = 8$ across all datasets. 
+\textbf{Main Results.}
+Table \ref{tab:glue_datasets} presents the performance of RoBERTa-base and RoBERTa-large models fine-tuned using our KaSA in contrast to PEFT baselines.
+KaSA achieves the best performance across all datasets except MRPC and STS-B for the RoBERTa-base model. 
+Notably, KaSA registers the highest average performances for both RoBERTa models: 86.3\% for RoBERTa-base and 89.0\% for RoBERTa-large. 
+This underscores the effectiveness, adaptability, and scalability of our proposed approach.
+In a significant comparison with FFT, our KaSA, which utilizes merely up to 0.24\% (approximately 0.3M/125.0M) of trainable parameters, outperforms FFT in 13 out of 14 scenarios and matches its performance on the STS-B dataset for the RoBERTa-base model.
+Furthermore, as demonstrated in Table \ref{tab:glue_datasets_deberta}, the DeBERTaV3-base results consistently surpass all baseline performances across the datasets, with the exception of STS-B, achieving the highest average performance of 88.72\%. This further validates the efficacy of our method across different model architectures.
+
+\subsection{Natural Language Generation}
+\textbf{Models and Datasets.}
+For NLG tasks, we employ KaSA and other PEFT baselines to fine-tune both GPT-2 Medium (355M) and GPT-2 Large (774M) models \citep{radford2019language} on the well-established E2E (End-to-End) NLG Challenge benchmark \citep{novikova2017e2e}, \revise{which focuses on restaurant domain information.}
+}
+
+\textbf{Implementation Details.}
+We adopt the experimental configurations delineated in \citep{hu2021lora,gu2024sara} for the fine-tuning of \texttt{query} and \texttt{value} weights within each Transformer block, setting a rank of $r = 4$. The AdamW optimizer is employed, paired with a linear learning rate schedule over 5 epochs. 
+The reported results represent the mean outcomes from 3 runs, each initialized with a distinct random seed, selecting the performance at the last epoch of each run for comparison.
+\textbf{Main Results.}
+\begin{table}[t]
+\centering
+\caption{Performance of GPT-2 Medium and Large models with different adaptation methods on the E2E NLG Challenge.
+For all metrics, higher values indicate better performance. $^*$ indicates that the results are reported in prior works. Best results are shown in \textbf{bold}.
+}
+\label{tab:gpt2_e2e}
+\resizebox{0.85\linewidth}{!}{
+\begin{tabular}{l|r|ccccc}
+\toprule
+\textbf{Model(Method)} & \textbf{\makecell[r]{\# Trainable \\Parameters}}  & \textbf{BLEU} & \textbf{NIST} & \textbf{METEOR} & \textbf{ROUGE-L} & \textbf{CIDEr} \\
+\midrule
+$\text{GPT-2}_\text{Medium}$(FFT*)                      & 354.92M  & 68.2   & 8.62   & 46.2 & 71.0 
+& 2.47         \\ 
+$\text{GPT-2}_\text{Medium}$($\text{Adpt}^{\text{L}}$*) &   0.37M  & 66.3   & 8.41   & 45.0 & 69.8     & 2.40         \\ 
+$\text{GPT-2}_\text{Medium}$($\text{Adpt}^{\text{L}}$*) &  11.09M  & 68.9   & 8.71   & 46.1 & 71.3     & 2.47         \\ 
+$\text{GPT-2}_\text{Medium}$($\text{Adpt}^{\text{H}}$*) &  11.09M  & 67.3  & 8.50   & 46.0 & 70.7    & 2.44        \\  
+$\text{GPT-2}_\text{Medium}$(LoRA*) &   0.35M  & 70.4   & 8.85 & 46.8 & 71.8    & 2.53         \\ 
+$\text{GPT-2}_\text{Medium}$(AdaLoRA) & 0.38M & 68.2 & 8.58 & 44.1 & 70.7 & 2.35\\ 
+$\text{GPT-2}_\text{Medium}$(DyLoRA) & 0.39M & 69.2 & 8.75 & 46.3 & 70.8 & 2.46\\ 
+$\text{GPT-2}_\text{Medium}$(VeRA) & 0.098M & 69.1 & 8.71 & 46.3 & 70.8 & 2.43 \\ 
+$\text{GPT-2}_\text{Medium}$(SARA) & 0.33M & 70.4 & 8.84 & 46.7 & \textbf{72.3} & \textbf{2.55} \\  
+$\text{GPT-2}_\text{Medium}$(KaSA) & 0.35M & \textbf{70.6} & \textbf{8.86} & \textbf{46.9}  & 72.1 & \textbf{2.55} \\ 
+\midrule 
+$\text{GPT-2}_\text{Large}$(FFT*)  & 774.03M  & 68.5   & 8.78   & 46.0 & 69.9     & 2.45         \\ 
+$\text{GPT-2}_\text{Large}$($\text{Adpt}^{\text{L}}$*) &   0.88M  & 69.1   & 8.68  & 46.3 & 71.4     & 2.49         \\ 
+$\text{GPT-2}_\text{Large}$($\text{Adpt}^{\text{L}}$*) &  23.00M  & 68.9   & 8.70   & 46.1 & 71.3    & 2.45          \\ 
+$\text{GPT-2}_\text{Large}$(LoRA*)                    &   0.77M  & 70.4   & 8.89   & 46.8 &  \textbf{72.0}     & 2.47          \\  
+$\text{GPT-2}_\text{Large}$(KaSA) & 0.77M & \textbf{70.5} & \textbf{8.90} & \textbf{47.0} & \textbf{72.0} & \textbf{2.50} \\ 
+\bottomrule
+\end{tabular}
+}
+\end{table}
+We present the performance comparison in Table \ref{tab:gpt2_e2e}. As can be seen, our method consistently outshines the baselines in language generation capabilities across various evaluated metrics.
+More specifically, regarding the GPT-2 Medium model, KaSA outperforms the baselines in 4 out of 5 metrics and achieves comparable performance (72.1 vs. 72.3) in the ROUGE-L metric with the top-performing baseline, SARA. In the GPT-2 Large model, KaSA surpasses the baselines across all metrics, further confirming its superior performance and scalability.
+
+\subsection{Instruction Following}
+\textbf{Models and Datasets.}
+To validate KaSA's adaptability and versatility, we extend our experiments to include instruction tuning of LLaMA3 8B \citep{llama3}, Mistral 7B \citep{jiang2023mistral}, Gemma 7B \citep{team2024gemma}, and \revise{LLaMA2 13B \citep{touvron2023llama2}}.
+We fine-tune the models using four synthetic instruction-following datasets produced by GPT4o, each containing 128K samples, covering tasks such as summarization, classification, coding, and closed QA.
+\revise{Additionally, we fine-tune using the Alpaca dataset \citep{taori2023stanford} and report the evaluation results on MT-Bench \citep{zheng2023judging}, with GPT4 serving as the judge, yielding scores within 10.}
+}
+\begin{table}[t]
+\centering
+\caption{\revise{Instruction following evaluation results with average scores for the most popular LLMs fine-tuned on the 128k synthetic datasets and the Alpaca dataset, and evaluated by GPT4o and GPT4 with the scores within 10 on test subsets and MT-Bench, respectively. Significance is tested at the $\alpha=0.05$ level, and the p-value of the significance tests is reported.}} 
+\label{tab:instruction_tuning}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{l|l|r|cccc|c}
+\toprule
+\textbf{Model} & \textbf{Method} & \textbf{\makecell[r]{\# Trainable \\Parameters}} & \textbf{Classification} & \textbf{Summarization} & \textbf{Coding} & \textbf{Closed QA} & \textbf{MT-Bench}  \\ 
+\midrule
+\multirow{6}{*}{Gemma 7B} 
+& w/o FT & - & 2.41 & 2.28 & 3.07 & 2.95 & 2.56 \\
+& FFT  & 8.54B & 5.58   & 7.78 & 7.61 & \textbf{8.88} & 4.69 \\
+& LoRA & 3.21M & 5.98$\pm$0.3 (p=0.001) & 7.29$\pm$0.2 (p=0.002) & 7.75$\pm$0.2 (p=0.049) & 8.18$\pm$0.2 (p=0.002)  & 4.32$\pm$0.4 (p=0.032) \\
+& PiSSA & 3.21M & 6.23$\pm$0.2 (p=0.002)  & 7.88$\pm$0.1 (p=0.730) & 7.80$\pm$0.1 (p=0.018) & 8.22$\pm$0.2 (p=0.003) & 4.66$\pm$0.3 (p=0.182) \\
+& MiLoRA & 3.21M & 6.30$\pm$0.1 (p=0.001) & 7.62$\pm$0.2 (p=0.067) & 7.71$\pm$0.2 (p=0.028) & 8.27$\pm$0.3 (p=0.029) & 4.53$\pm$0.2 (p=0.041) \\
+& \textbf{KaSA} & 3.22M & \textbf{6.88$\pm$0.2} & \textbf{7.92$\pm$0.2} & \textbf{8.01$\pm$0.1} & 8.69$\pm$0.1 & \textbf{4.97$\pm$0.3} \\
+\midrule
+\multirow{6}{*}{Mistral 7B} 
+& w/o FT & - & 2.31 & 2.81 & 2.32 & 3.02 & 1.16 \\
+& FFT  & 7.25B & \textbf{6.73} & \textbf{7.18} & \textbf{7.53} & \textbf{8.75} & 4.22 \\
+& LoRA & 3.40M & 5.07$\pm$0.3 (p=0.007) & 5.72$\pm$0.2 (p=0.000) & 6.17$\pm$0.4 (p=0.034) & 7.39$\pm$0.2 (p=0.034) & 4.18$\pm$0.3 (p=0.057) \\
+& PiSSA & 3.40M & 5.46$\pm$0.2 (p=0.103) & 5.86$\pm$0.3 (p=0.002)& 6.41$\pm$0.2 (p=0.048) & 7.24$\pm$0.2 (p=0.007) & 4.24$\pm$0.2 (p=0.043) \\
+& MiLoRA & 3.40M & 5.33$\pm$0.2 (p=0.025) & 5.89$\pm$0.4 (p=0.006)& 6.52$\pm$0.2 (p=0.158) & 7.28$\pm$0.3 (p=0.031) & 4.29$\pm$0.2 (p=0.074) \\
+& \textbf{KaSA} & 3.41M & 5.72$\pm$0.2 & 6.82$\pm$0.3 & 6.74$\pm$0.2 & 7.75$\pm$0.2 & \textbf{4.58$\pm$0.2} \\
+\midrule
+\multirow{6}{*}{LLaMA3 8B} 
+& w/o FT & - & 2.04 & 2.03 & 2.86 & 3.33 & 3.11 \\
+& FFT  & 8.03B & 5.44 & 7.80 & 7.59 & \textbf{8.90} & 4.11 \\
+& LoRA & 3.40M & 6.12$\pm$0.3 (p=0.019) & 7.20$\pm$0.4 (p=0.016) & 7.37$\pm$0.2 (p=0.006) & 6.02$\pm$0.2 (p=0.002) & 4.19$\pm$0.3 (p=0.020) \\
+& PiSSA & 3.40M & 6.35$\pm$0.1 (p=0.028) & 7.31$\pm$0.3 (p=0.011) & 7.59$\pm$0.1 (p=0.028) & 6.18$\pm$0.3 (p=0.018) & 4.26$\pm$0.2 (p=0.013) \\
+& MiLoRA & 3.40M & 6.37$\pm$0.2 (p=0.083) & 7.61$\pm$0.1 (p=0.014) & 7.65$\pm$0.2 (p=0.128) & 6.39$\pm$0.1 (p=0.029) & 4.32$\pm$0.2 (p=0.025) \\
+& \textbf{KaSA} & 3.41M & \textbf{6.55$\pm$0.2} & \textbf{7.83$\pm$0.1} & \textbf{7.89$\pm$0.2} & 6.81$\pm$0.3 & \textbf{4.71$\pm$0.2} \\
+\midrule
+\multirow{6}{*}{LLaMA2 13B} 
+& w/o FT & - & 1.00 & 1.08 & 1.01 & 1.27 & 1.01 \\
+& FFT  & 13.02B & 5.86         & \textbf{7.93} & 7.88 & \textbf{8.97} & 4.37 \\
+& LoRA & 6.55M & 6.23$\pm$0.4 (p=0.023)         & 7.38$\pm$0.2 (p=0.005) & 7.54$\pm$0.2 (p=0.005) & 6.25$\pm$0.3 (p=0.001) & 4.43$\pm$0.3 (p=0.011)\\
+& PiSSA & 6.55M & 6.47$\pm$0.3  (p=0.062)       & 7.45$\pm$0.3 (p=0.031) & 7.83$\pm$0.1 (p=0.049) & 6.54$\pm$0.3 (p=0.006) & 4.39$\pm$0.2 (p=0.001) \\
+& MiLoRA & 6.55M & 6.45$\pm$0.2 (p=0.020)       & 7.63$\pm$0.1 (p=0.032) & 7.85$\pm$0.1 (p=0.064) & 6.82$\pm$0.2 (p=0.028) & 4.51$\pm$0.3 (p=0.024) \\
+& \textbf{KaSA} & 6.56M & \textbf{6.86$\pm$0.2} & 7.92$\pm$0.2 & \textbf{8.09$\pm$0.2} & 7.12$\pm$0.1 & \textbf{4.95$\pm$0.1} \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\textbf{Implementation Details.}
+Following the experimental setup in \citep{park2024llamaduo}, we use the summarization, classification, coding, and closed QA subsets from the ``No Robots'' \citep{no_robots} dataset as seeds to create distinct synthetic datasets via GPT4o.
+We fine-tune the mentioned LLMs using these datasets and then prompt each fine-tuned model to generate four responses based on prompts sampled from the test subsets of the seed dataset. 
+To ensure fair comparisons, we maintain a consistent fine-tuning and inference configuration across all fine-tuned models. 
+We subsequently use GPT4o as a judge to apply single-answer grading strategies to evaluate the response quality of the fine-tuned LLMs on a scale from \revise{1 to 10}. 
+\revise{For the Alpaca dataset, we fine-tune the specified models and prompt them to generate responses to questions from MT-Bench, with GPT4 serving as a judge, assigning scores within 10.}
+\textbf{Main Results.}
+\revise{In Table \ref{tab:instruction_tuning}, the results show that KaSA consistently surpasses LoRA, PiSSA, and MiLoRA across four 128k synthetic datasets, regardless of the model used.
+Notably, Gemma 7B and LLaMA3 8B, fine-tuned with KaSA, even surpass FFT in the classification, summarization, and coding datasets.
+In the evaluation using MT-Bench, KaSA consistently outperforms FFT and PEFT baselines on all models, showing remarkable efficacy.
+With p-values less than 0.05 in 9 out of 12 experimental settings on MT-Bench, KaSA demonstrates significant performance improvements over LoRA, PiSSA, and MiLoRA.
+These results further highlight the effectiveness, robustness, and adaptability of our method.}
+
+\subsection{Commonsense Reasoning}
+\textbf{Models and Datasets.}
+Following \citep{wang2024milora}, we fine-tune the LLaMA2 7B \citep{touvron2023llama} and the LLaMA3 8B \citep{llama3} models using the Commonsense170K dataset, aiming to conduct a comprehensive evaluation across eight well-known commonsense reasoning tasks: BoolQ \citep{clark2019boolq}, PIQA \citep{bisk2020piqa}, SIQA \citep{sap2019socialiqa}, HellaSwag \citep{zellers2019hellaswag}, WinoGrande \citep{sakaguchi2021winogrande}, ARC-e, ARC-c \citep{clark2018think}, and OBQA \citep{mihaylov2018can}.
+
+\textbf{Implementation Details.}
+ We adhere strictly to the hyperparameter configurations for training and evaluation as specified by \citep{wang2024milora} and \citep{hu2023llm}, \textbf{without any tuning}, such as tuning the training epochs and learning rate.
+\begin{table}[t] 
+\centering 
+\caption{Performance comparison of LLaMA2 7B and LLaMA3 8B with different adaptation methods on eight 
+commonsense reasoning datasets. The symbol $\dag$ indicates that the results are taken from \citep{wang2024milora}. The best results are shown in \textbf{bold}. Higher is better for all tasks. $*$ denotes that the best results do not surpass ChatGPT.
+}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{ll|ccccccccc}
+\toprule
+\textbf{Model} & \textbf{Method} & \textbf{BoolQ} & \textbf{PIQA} & \textbf{SIQA} & \textbf{HellaSwag}& \textbf{WinoGrande} & \textbf{ARC-e} & \textbf{ARC-c} & \textbf{OBQA} & \textbf{Avg.} \\ 
+\midrule
+ChatGPT$\dag$ & - & 73.1 & 85.4 & 68.5  & 78.5 & 66.1 & 89.8 & 79.9 & 74.8 & 77.0 \\
+\midrule
+\multirow{4}*{LLaMA2 7B} & LoRA$\dag$ & 69.8 & 79.9  & 79.5  & 83.6  & 82.6  & 79.8  & 64.7  & 81.0 & 77.6  \\
+& PiSSA$\dag$ & 67.6  & 78.1  & 78.4  & 76.6  & 78.0  & 75.8  & 60.2  & 75.6  & 73.8   \\
+& MiLoRA$\dag$ & 67.6  & 83.8  & 80.1  & 88.2  & 82.0  & 82.8  & 68.8  & 80.6  & 79.2  \\
+& KaSA & \textbf{73.6} & \textbf{84.4}$^*$ & \textbf{80.2} & \textbf{91.5} & \textbf{84.5} & \textbf{84.7}$^*$ & \textbf{72.1}$^*$ & \textbf{81.2} & \textbf{81.5}   \\
+\midrule
+\multirow{4}*{LLaMA3 8B} & LoRA$\dag$ & 70.8 & 85.2 & 79.9 & 91.7 & 84.3 & 84.2 & 71.2 & 79.0 & 80.8 \\
+& PiSSA$\dag$ & 67.1 & 81.1 & 77.2 & 83.6 & 78.9 & 77.7 & 63.2 & 74.6 & 75.4 \\
+& MiLoRA$\dag$ & 68.8 & 86.7 & 77.2 & 92.9 & \textbf{85.6} & 86.8 & 75.5 & 81.8 & 81.9 \\
+& KaSA & \textbf{73.6} & \textbf{88.1} & \textbf{80.4} & \textbf{94.7} & 85.5 & \textbf{89.7}$^*$ & \textbf{79.4}$^*$ & \textbf{85.6} & \textbf{84.6} \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:commonsense_reasoning}
+\end{table}
+
+\textbf{Main Results.}
+As illustrated in Table \ref{tab:commonsense_reasoning}, KaSA consistently surpasses all established baselines for both LLaMA2 7B and LLaMA3 8B across all eight benchmarks when using identical hyperparameter settings. 
+Notably, KaSA achieves the highest average score, reflecting significant performance improvements across a diverse range of reasoning tasks. 
+These results, obtained from rigorously controlled comparisons, align with our observations in NLU, NLG, and instruction following tasks. This consistency further corroborates the robustness and superiority of our method.
+\begin{figure*}[t]
+	\centering
+	\includegraphics[width=0.95\linewidth]{images/ablation_bar.pdf}
+	\caption{Components ablation study about knowledge-based SVD truncation, knowledge-aware singular value adaptation, singular value regularization $\mathcal{L}_{2}$, and orthogonal regularization $\mathcal{L}_{3}$ on MRPC, CoLA, and RTE datasets.
+ }
+\label{fig:ablation}
+\end{figure*}
+
+\begin{figure*}[t]
+	\centering
+	\includegraphics[width=0.95\linewidth]{images/parameter_budget_full_methods_v3.pdf} 
+	\caption{Budget parameter scalability of fine-tuning RoBERTa-base with LoRA, PiSSA, MiLoRA, and KaSA on MRPC, CoLA, and RTE datasets.}
+\label{fig:budget}
+\end{figure*}
+
+\subsection{In-depth Analysis} \label{In-depth}
+\textbf{Components Ablation Study.}
+Our method encompasses four principle components: knowledge-based SVD truncation, knowledge-aware singular value adaptation, singular value regularization $\mathcal{L}_{2}$, and orthogonal regularization $\mathcal{L}_{3}$.
+To examine the collective contributions of these components, we conduct ablation experiments on MRPC, CoLA, and RTE datasets from GLUE \revise{using the RoBERTa-base}.
+Specifically, we compare KaSA with the following variants: 
+(1) standard LoRA (as the base); 
+(2) SVD truncation $+$ LoRA; 
+(3) SVD truncation $+$ knowledge-aware singular-value adaptation; 
+(4) SVD truncation $+$ knowledge-aware singular-value adaptation $+$ $\mathcal{L}_{2}$; 
+(5) SVD truncation $+$ knowledge-aware singular-value adaptation $+$ $\mathcal{L}_{2}$ $+$ $\mathcal{L}_{3}$.
+From the results in Figure \ref{fig:ablation}, we observe that the model performances continually increase as more components are involved in the fine-tuning. 
+The fifth bar in Figure \ref{fig:ablation} shows that variant (5), the full implementation of KaSA, achieves significant performance improvements across all three datasets.
+Conversely, excluding any of these components results in performance declines ranging from 2.05\% to 3.25\%, underscoring their collective importance in enhancing KaSA's effectiveness.
+}
+
+\textbf{Budget Parameter Scalability.}
+We compare the performance of fine-tuning RoBERTa-base with \revise{LoRA, PiSSA, MiLoRA, and KaSA} across various scales of trainable parameters.
+Specifically, we employ \revise{these methods} to the \texttt{query} and \texttt{value} weights of the transformer block and use a range of ranks $r = \{1,2,4,8,16,32,64,128\}$ to control the parameter scales.
+Figure \ref{fig:budget} shows that KaSA consistently outperforms LoRA, \revise{as well as the SVD-based baselines,} at equivalent parameter scales across various datasets, indicating our method's efficacy and robustness.
+Moreover, we observe that enlarging trainable parameter scales does not invariably result in performance improvement.
+Notably, both methods peak in performance at $r = 8$, with KaSA enhancing LoRA by 1.96\% on MRPC, 2.05\% Mcc. on CoLA, and 2.53\% Acc. on RTE.
+
+\begin{figure*}[t]
+\centering
+    \includegraphics[width=\linewidth]{images/viridis_svd_diag_heatmap_final.pdf}
+    \caption{The final distribution of knowledge-aware singular values for $\mathbf{W}_q$ and $\mathbf{W}_v$ upon fine-tuning the RoBERTa-base model on the MNLI and QQP benchmarks.
+    In this context, the $x$-axis corresponds to the layer index, and the $y$-axis denotes the position index. Each value signifies the relevance of the associated knowledge.}
+\label{fig:svd_diag}
+\end{figure*}
+
+\textbf{Knowledge-Aware Singular-Value.}
+The conventional FFT, which updates all parameters indiscriminately, often incorporates irrelevant or minimally contributory knowledge to the task at hand, leading to overfitting and a decline in model generalization capability \citep{valipour2023dylora}. 
+To this end, we propose a novel knowledge-aware singular value module to adaptively activate the relevant task-specific knowledge. 
+To validate our motivation, we visualize the knowledge-aware singular values of $\mathbf{W}_q$ and $\mathbf{W}_v$ when fine-tuning RoBERTa-base on the MNLI and QQP benchmarks, as depicted in Figure \ref{fig:svd_diag}. 
+We can clearly observe that different scales of singular values are allocated across different layers, indicating that it dynamically prioritizes knowledge across parameters. 
+
+
+
+\section{Conclusion}
+
+In this paper, we introduce a PEFT method, KaSA, which incorporates SVD with knowledge-aware singular values for dynamic knowledge activation of parametric knowledge according to their relevance to a given task.
+\revise{KaSA commences knowledge-based SVD truncation of minor singular value components to remove noisy knowledge within the base model. 
+Subsequently, it reparameterizes task-specific updates in the SVD form, leveraging knowledge-aware singular values for dynamic knowledge activation according to relevance.
+Our extensive experiments on various LLMs across tasks in NLU, NLG, instruction following, and commonsense reasoning reveal that KaSA consistently surpasses FFT and a variety of popular PEFT baselines across well-known benchmarks and our synthetic datasets, highlighting the superiority of our method.}
+
+
+
+
+

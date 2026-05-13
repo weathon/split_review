@@ -1,0 +1,154 @@
+\title{Dense Backpropagation Improves Routing for Sparsely-Gated Mixture-of-Experts}
+
+\begin{abstract}
+Mixture of Experts (MoE) pretraining is more scalable than dense Transformer pretraining, because MoEs learn to route inputs to a sparse set of their feedforward parameters. However, this means that MoEs only receive a sparse backward update, leading to problems such as router load imbalance where some experts receive more tokens than others. We present a lightweight approximation method that gives the MoE a dense gradient while only sparsely activating its parameters. A key insight into the design of our method is that at scale, many tokens not routed to a given expert may nonetheless lie in the span of tokens that were routed to that expert, allowing us to create an approximation for the expert output of that token from existing expert outputs. Our dense backpropagation outperforms standard TopK routing across multiple settings without significantly increasing runtime.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large-scale pretraining hinges on scaling up the number of parameters in a model, because models with more parameters are more sample-efficient and require less training to reach the same performance as smaller models (Kaplan et al., 2020; Hoffmann et al., 2022). The most common model architecture is a dense Transformer architecture (Vaswani et al., 2023) because its performance scales well with parameters and data. However, a sparsely activated Mixture-of-Experts (MoE) Transformer architecture (Shazeer et al., 2017) has been used by many industry deployments (Team et al.,  
+
+2024; xAI, 2024; Databricks, 2024; Jiang et al., 2024; Snowflake, 2024; DeepSeek-AI et al., 2024) because MoEs have been shown to scale even better than dense Transformers (Clark et al., 2022; Du et al., 2022; Lepikhin et al., 2020; Fedus et al., 2022). MoEs learn a routing function that selectively activates the TopK subset of their modules, or experts, most relevant to a given input. This conditionally sparse activation (Jacobs et al., 1991; Jordan & Jacobs, 1994) allows us to multiplicatively increase the model parameter count without significantly increasing the cost of training or inference.  
+
+The sparse router enables MoEs to scale, but it also presents a challenge, because the router does not receive a gradient update from experts that it does not activate, and may not learn to route a token to its appropriate expert. This may cause load imbalance— where a few experts are over-utilized — leading to inefficient training and resource usage (Zoph et al., 2022; Zhou et al., 2022).  
+
+In this work we propose a new router that can receive a dense gradient update from a sparse forward pass to address the instability issues arising from sparse routing. Our method adds minimal overhead, but improves on the common Top-K routing in both performance and load balance.  
+
+
+
+\section{2 BACKGROUND & RELATED WORK  }
+
+
+MoEs. The MoE layer replaces the feedforward networks (FFN) of transformers and consists of two components $:1$ ) $N$ FFNs (experts), $E_{0}(x),E_{1}(x),\allowbreak...E_{N}(x)$ and 2) a router that assigns tokens to experts. Each input to the MoE layer is processed by $K$ experts where $K<N$ , and this is the source of sparsity in MoEs. The $K$ experts are chosen by the router, which is a learnable component that maps each token to a set of weights over the experts. The router performs a linear transformation $\mathbb{R}^{d_{\mathrm{token}}}\ \stackrel{\cdot}{\to}\mathbb{R}^{N}$ which produces logits; these are normalized using softmax, resulting in a probability distribution over the experts. With the router’s linear transformation parameterized by a matrix $W$ , we can represent the expert weights $\pi$ in the following way:  
+
+$$
+\pi\in\mathbb{R}^{N}=\mathrm{Softmax}(W x)
+$$  
+
+Once we have these expert weights, we apply a routing function to decide which of $K$ experts to route and process this token through. We consider TopK because it is the most popular.  
+
+Top-K routing. A standard method to select $K$ out of $N$ experts given the expert weights is to select the experts corresponding to the $K$ highest weights. Top-K routing (Fedus et al., 2022) passes the token to the $K$ selected experts and averages the expert outputs using these weights to produce the final output. Experts not selected by the Top-K routing function do not process the token, and this introduces sparsity in MoEs. By representing the $K$ chosen experts as the set $A$ , we can express the output of the MoE layer as an average of expert outputs weighted by the router scores:  
+
+$$
+y=\Sigma_{i\in A}\pi_{i}E_{i}(x)
+$$  
+
+The expert weights serve two roles. They are used by the routing function to decide which of the $K$ experts to process a token through, and also provide the weights for combining the outputs of the expert. The Top-K routing scheme makes the MoE layer desirable for training large, computeefficient neural networks. It allows models to be scaled up, by way of increasing the total number of experts, while keeping the compute per token constant (as it is a function of $K$ and not $N$ ).  
+
+The Router Gradient. Consider the gradient of the MoE layer’s output $y$ with respect to the router parameters $W$ . We express $y$ as a function of $W$ by combining Eq. (1) and Eq. (2). With the chain rule, we can backpropagate through this function by considering the gradient at each respective step:  
+
+$$
+{\frac{\partial y}{\partial W}}={\frac{\partial y}{\partial\pi}}{\frac{\partial\pi}{\partial W}}
+$$  
+
+The first term in Eq. (3), $\frac{\partial y}{\partial\pi}$ , is straightforward to compute because the steps in Eq. (1) are easily differentiable, as they consist of linear operations and activations. But Eq. (2) is not differentiable because Top- $\mathbf{\nabla}\cdot\mathbf{K}$ expert selection transforms the continuous router weights $\bar{\pi}\in\mathbb{R}^{N}$ into a discrete set of selected experts $A$ with $\binom{N}{K}$ possible values. One way to get around backpropagation of nondifferentiable operations is to use the straight-through estimator (Bengio et al., 2013), which treats the operator as the identity function. With straight-through we bypass the Top-K routing function and Eq. (2) becomes the dot product between $\pi$ and the vector of all $E_{i}(x)$ with the following gradient:  
+
+![](images/cbbaf0879c4b75baad2ba69dfbfc787ce5e0b160a15a3a5455f78c1dae1e061f.jpg)  
+(a) Original Router  
+
+![](images/325eba18a231ed53c69c855755ea5707581bee1c11766988a7a55d5f1db16683.jpg)  
+(b) Dense Approximation Router (ours)  
+
+Figure 2: Overview of Routing with Dense Approximations. The original mixture of experts router only receives gradients corresponding to experts the token is routed to, because there is no output from other experts. Our approach provides the router with a complete (dense) gradient, by approximating the activations of experts that a token is not routed to. As indicated by the dashed green arrows, the approximated gradients are not actually connected to the token in the computation graph; instead, they are artificially applied in the backward pass.  
+
+$$
+{\frac{\partial y}{\partial\pi}}=[E_{1}(x),\quad E_{2}(x)\quad\cdot\cdot\quad E_{N}(x)]
+$$  
+
+This gradient requires the output of all of the experts for that token. Passing a token through all the experts will destroy the sparsity of the MoE layer, ruining the scalability of this architecture. In this work, we develop methods for applying the straight-through estimator while maintaining the sparsity of the MoE layer by approximating the output of the experts not selected by Top-K routing.  
+
+Related Works. Previous work has tried to address the issue of routing in MoEs. Separate from Top-K is the Sinkhorn routing method (Clark et al., 2022). Fedus et al. (2022) propose an auxiliary loss that encourages load balancing. Dai et al. (2024) propose multiple additional auxiliary loss terms. Recently, Wang et al. (2024b) propose learning biases rather than an auxiliary load balancing loss. Even more recently, Phi-3.5-MoE (Abdin et al., 2024) uses SparseMixer (Liu et al., 2024; 2023), another estimator for $\partial y/\partial\pi$ not involving straight-through. We provide a comparison between our approach and SparseMixer later in Section 4.3. Our approach is to still use straightthrough, but approximate these additional expert outputs. We now present our method.  
+
+
+
+\section{3 DESIGNING DENSE BACKPROPAGATION  }
+
+
+In this section we design a new backpropagation method that can send a dense gradient to the sparsely activated router and expert parameters without doing additional forward passes. In a standard MoE, both the embedding corresponding to expert $i$ in the routing layer (i.e. the ith row of the routing weight matrix) and the weights of expert $i$ receive no gradient update from a token $x$ if $x$ is not routed to expert $i$ . This is because $E_{i}(x)$ is never computed, so it provides no upstream gradient. This corresponds to experts that are not in the top $K$ being omitted in Eq. (2). We apply an approximation $\hat{E}_{i}(x)$ as a substitute for the upstream gradient so that the router and expert weights can receive some non-zero signal corresponding to this expert. Then, the router can factor in outputs from all experts when learning to route each token, and the expert can be updated based on all tokens. Ultimately, instead of $K/N$ expert parameters being updated per token, every token will update more parameters in both the router and the experts. Updating the router should improve load balance and the routing distribution.  
+
+![](images/dc51e2d44474ba701d75ebff022f1e6787a0ef6732910df7f6243d55458bd0a6.jpg)  
+
+Figure 3: Motivation for approximating expert outputs. Consider an expert $E_{i}$ . In every training batch, some fraction of tokens $Y$ will be routed to $E_{i}$ . With a large training batch size, we expect more tokens $y_{j}$ to be routed to $E_{i}$ . It is likely, then, that the outputs $E_{i}(y_{j})$ will span the output space of this expert. Thus we expect that at the pretraining scale, a linear combination of expert outputs $\textstyle\sum_{j}\alpha_{j}E_{i}(y_{j})$ can approximate $E_{i}(x)$ , for a token $x$ which was not routed to $E_{i}$ .  
+
+3.1 APPROXIMATING EXPERT ACTIVATIONS WITH DENSE BACKPROPAGATION  
+
+To approximate the dense gradient in Eq. (4), we must approximate $E_{i}(x)$ for every expert $i$ that a token $x$ was not passed to. Although we have no information about what the function $E_{i}$ looks like for $x$ , when training with large token batch sizes it is very likely that we have outputs of $E_{i}$ for many other tokens. We hypothesize that although $E_{i}(x)$ is not computed for a given $x$ , the output lies in the span of other tokens’ activations for $E_{i}$ . In other words, $\begin{array}{r}{\hat{E}_{i}(x)=\sum_{j}c_{j}E_{i}(x_{j})}\end{array}$ for some other tokens $x_{j}$ . Our approximation method relies on finding these relevant $x_{j}$ and the corresponding weights $c_{j}$ to develop an approximation for a token. We visualize this general approach in Fig. 3.  
+
+Dense Backpropagation via Expert Group Approximation. Our dense backpropagation method that we dub expert group approximation produces an estimator $\hat{E}_{i}(x)$ from the expert outputs of other relevant tokens. We apply a single approximation to a large group of tokens that were not routed to expert $i$ . This is efficient, but it may not be a good approximation for any specific $x$ . Instead, this is an estimator for the expert output across the entire batch - this is sufficient as we will only need an approximation for the batch gradient to update the router during training. In dense backprop, we select relevant $x_{j}$ and $c_{j}$ purely based on the router output.  
+
+This expert approximation is used solely to estimate the dense gradient in equation 4. We do not use this dense approximation in the forward pass, as that is inconsistent with the sparse forward pass we expect at inference. Additionally, applying this approximation at inference is infeasible because of the much smaller batch size. However, we do use this approximation to update the experts along with the router. As we will show, updating all the experts is a crucial component of our method, and something prior work has not done. In particular, Liu et al. (2023) focuses on the router gradient.  
+
+3.2 NOTATION ON EXPERT ROUTING  
+
+Let $R(x)$ be the set of indices corresponding to the $K$ experts that a token $x$ is routed to. This can be thought of as the routing decision for $x$ , based on the selected experts $A$ in Eq. (2). For example, in a top- $\cdot\mathbf{k}$ sparse mixture of experts layer with $N=8$ experts and $K=2$ , $x$ routed to the first and last experts will have $R(x)=\{1,8\}$ . Note that $R(x)$ can have $\binom{N}{K}$ possible discrete outputs. With this notation, we can partition all tokens $X$ based on their routing decisions and denote $X_{R}$ as the subset of tokens routed to experts indexed by $R$ . In the preceding example, the token routed to the first and last experts would belong to the set $X_{\{1,8\}}$ . Some of our methods involve denoting whether a token was routed to a set of experts instead of its exact routing decision. We denote tokens routed to expert $i$ along with any other experts as $X_{\{i,\cdot\}}$ . For example, ${X_{\{1,8\}}}=X_{\{1,\cdot\}}\bigcap X_{\{8,\cdot\}}$  
+
+![](images/49c596bd7b508516509699815ca38cc7bd3fd3c50373c7d46317b210381ca39f.jpg)  
+Figure 4: Architecture of the Expert Group Approximation method. In this example, we have 4 experts with $K=2$ . Consider all inputs routed to experts 1 and 3, characterized by the routing decision $R=\{1,3\}$ . As described in Figure 2b, we need to approximate these inputs’ activations for all other experts. In approximating expert 2, for example, we collect all inputs $x^{\prime}$ with a routing decision similar to $R$ specifically including expert 2: $R^{\prime}=\{1,2\}$ and $R^{\prime}=\{2,3\}$ . In general there will be $K$ such adjacent groups. The aggregation of these inputs’ activations for expert 2 is used to approximate expert 2 for all inputs routed to experts 1 and 3.  
+
+
+
+\section{3.3 EXPERT GROUP APPROXIMATION  }
+
+
+Our method is based on approximating the expert output $E_{i}(x)$ for a group of multiple tokens at once. For a token $x$ , we want to approximate outputs of experts that $x$ was not routed to, i.e. $E_{i}(x)$ where $i\not\in R(x)$ . We hypothesize that tokens being routed to the same expert is a strong indicator of similarity between the tokens. This is because tokens routed to the same expert $E_{i}$ both yield high dot products with the embedding $W_{i}$ corresponding to that expert in the routing layer (see Eq. (1)). We develop an approximation for $E_{i}(x)$ by aggregating outputs of $E_{i}$ for tokens that were routed to both expert $i$ , and other experts that $x$ was routed to. Formally, we consider an alternate routing decision $\bar{R}^{\prime}=\{i,j,\cdot\},j\,\in\,\bar{R}(x)$ that consists of one expert $j$ that $x$ is routed to, the expert $i$ we wish to approximate, and any other experts (if $K>2$ ). Then, the adjacent token space $X_{R^{\prime}}$ will consist of tokens that are very similar to $x$ by virtue of having similar routing decisions. Moreover, they will have an output for expert $i$ , and we hypothesize that their outputs $\sum_{x^{\prime}\in X_{R^{\prime}}}E_{i}(x^{\prime})$ will approximately represent $E_{i}(x)$ . We can aggregate such outputs over all possible routing decisions:  
+
+$$
+\forall x\in X_{R}:\hat{E}_{i}(x)=\frac{1}{K}\sum_{j\in R}\frac{1}{|X_{\{i,j,\cdot\}}|}\sum_{x^{\prime}\in X_{\{i,j,\cdot\}}}E_{i}(x^{\prime})
+$$  
+
+We apply a single aggregate approximation for each routing decision to all tokens with that routing decision. In other words, each token belongs to $K$ “groups” corresponding to the $K$ experts it was routed to. Each expert has $N$ groups, and each group $j$ receives an approximation for expert $i$ based on tokens routed to experts $i,j$ . This gives us $N^{\dot{2}}$ total approximations. When we approximate expert $i$ , a token receives one approximation from each group, scaled by $\textstyle{\frac{1}{K}}$ to take the average. In Fig. 4 we visualize this method for $K\,=\,2$ . We can pick different constants for the number of activated experts and the number of groups, so our method is applicable to $K\,=\,1$ , but we keep these constants at $K=2$ throughout the paper because it is a common choice across prior work.  
+
+As mentioned above, we use this approximation to update both the router and the experts. This is necessary to maintain consistency, as updating the router densely but the experts sparsely can cause them to diverge. We also omit the approximation from the forward pass to only apply it in the backward pass. Consider an expert approximation based on other token outputs $\hat{E}_{i}(x)\,=$ $\textstyle\sum_{j}c_{j}E_{i}(x_{j})$ assuming $\textstyle\sum_{j}c_{j}=1$ . We produce such approximations for all experts in $R(x)^{C}$ that $x$ was not routed to: $\begin{array}{r}{y^{\prime}=\sum_{i\in R(x)^{C}}\hat{E}_{i}(x)}\end{array}$ . We update the original MoE output $y$ from Eq. (2):  
+
+![](images/52ce75a10a9e695ca518c463719aaac2973ddcac2e602131944acf47ec923dc3.jpg)  
+Figure 5: Training and Validation Results. We train a $2B$ total parameter MoE with 32 finegrained experts, using the standard Top- $K{=}2$ router $470M$ active params) and our expert group approximation method, each on 200B tokens of the Fineweb dataset. Without incurring significant overhead, we improve over the baseline.   
+(a) Train Loss   
+(b) Validation Perplexity  
+
+$$
+y:=y+y^{\prime}-\operatorname{sg}(y^{\prime})
+$$  
+
+where $\mathrm{sg}$ is the stop-gradient operator. As a result, our forward pass output is unchanged. During backpropagation, the expert approximations $\hat{E}_{i}(x)$ fill in the missing entries of the dense router gradient in equation 4. Moreover, the gradient to an expert $i$ from the token $x_{j}$ used to approximate $\hat{E}_{i}(x)$ is increased by the upstream gradient ${\partial\hat{E}_{i}(x)}$ times the weight $c_{j}$ . In expectation, roughly $K/N$ tokens are routed to an expert $i$ so $(N-K)/N$ tokens will add gradients $\partial\hat{E}_{i}$ based on their approximations. Overall, this will lead to a dense gradient approximation for each expert since it will receive gradients as if it processed $K/N+(N\stackrel{\cdot}{-}K)/N\stackrel{\cdot\cdot}{=}N/N$ of all tokens instead of $K/N$ . We all-reduce the approximation gradients across data parallel workers. This gives us a large sample size to estimate the dense gradient, regardless of the micro batch size on each worker.  
+
+
+
+\section{4 EVALUATION  }
+
+
+We train a fine-grained (DeepSeek-AI et al., 2024) MoE with 32 experts. The model has a hidden dim of 1024, with 2B total parameters. Each expert is a bottleneck MLP that has intermediate size 704. 470M parameters are activated when doing the standard $K\,=\,2$ top-K routing (Zoph et al., 2022). We ablate the model architecture, hidden dim, number of total experts, and number of active experts through the course of the evaluation in Table 2 and Table 3. We train on 200B tokens from FineWeb (Penedo et al., 2024) with the Llama3 tokenizer (Dubey et al., 2024). We split it into train, validation, and test splits and report the validation perplexity.  
+
+4.1 MAIN RESULTS  
+
+Main Result. Our main result compares the Expert Group Approximation, which performs a dense update of the router weights by approximating the dense gradient, to baseline Top-K routing. In Fig. 5 we plot both training loss and validation set perplexity over the course of training. Our Expert Group Approximation method yields improvements over the baseline Top-K routing method throughout training, and this improvement is still present after training on 200B tokens. We further evaluate the performance of our Expert Group Approximation on standard benchmark tasks (that Penedo et al. (2024) notes are “high signal” for models trained on Fineweb) in Table 1 and find that our method provides a modest improvement over Top-K across multiple benchmarks.  
+
+Table 1: Benchmarks. Our method improves over the baseline across a set of benchmarks.  
+
+![](images/5773772bdf4fa89c64392fd4d24bf4a4519aa398db9790e71818327810a68666.jpg)  
+(b) Gradient Similarity (Experts)  
+
+Figure 6: Approximation fidelity. We train MoEs with 32 fine-grained experts, recording the similarity with the true dense gradient (for the router and the experts) for the standard Top- $K{=}2$ baseline and our method. The gradients returned from our method are significantly closer to the true dense gradient. While prior work such as Liu et al. (2023) only aimed to densely update the router, we also densely update the experts, and we see that we actually do a better job of updating the experts than the router. Because Liu et al. (2023) do not design their method to approximate the true dense gradient of the router, we do not report their gradient similarity here (although it is low, their method achieves routing imbalance and performance in an entirely different mechanism to ours). Our method faithfully reconstructs the true dense gradient signals.  
+
+4.2 EMPIRICAL ANALYSIS  
+
+Gradient Approximation. We verify that our method is indeed faithfully approximating the dense router gradient i.e. the gradient to the router if all experts were activated. We track the dense gradient by routing to all experts and backpropagating only on the MoE output (independent of the full forward pass). In Fig. 6a we compare this dense gradient to the actual router gradient for each of our approaches and the standard Top-K router, and similarly for the expert weights in Fig. 6b. We plot the cosine similarity between the dense gradient and our approximated gradient, where the relatively high similarities our methods achieve indicate we are more accurately approximating the dense gradient. We also observe a major difference between the gradient of the standard Top-K router and our approach in later layers. We record the gradient similarity from the start of training until the trends stabilize; if we were to extend these plots out, we would see the similarities stay relatively stable. This validates our motivation to try and approximate the true dense gradient.  
+
+Load Balance. One reason for our method’s superior performance is in how it improves the routing distribution. Without a gradient signal for unactivated experts, top-K routing may not learn a balanced distribution across experts, and route more tokens to some experts than others. On the other hand, our method sends a signal to the router even for experts that a specific token was not routed to. The router now receives more information to make better decisions on how to route inputs. Load imbalancing leads to some experts processing a larger fraction of tokens than others, and thus having to learn a representation for more tokens. although all experts share the same number of parameters. Balancing expert load thus allows for more efficient utilization of MoE parameters.  
+
+
+
+\section{5 DISCUSSION  }
+
+
+We propose a training method for MoEs to improve load balancing and language modeling performance. By approximating the signal of a dense mixture-of-experts layer, the MoE router is able to learn a better distribution of routing inputs to different experts. This approximated dense signal unlocks the possibility for more sparse MoEs at training and inference time. Whereas typical Top-K routing would provide too sparse of a signal to learn a stable routing distribution, our method demonstrates significant improvements in load balancing in very sparse configurations. This unlocks better performance on standard language benchmarks, and has little overhead.  
+
+
+
+\section{6 REPRODUCIBILITY STATEMENT  }
+
+
+We provide detailed explanations of all our proposed methods in order to encourage reproducibility of our work: see Fig. 4 and Fig. 14. We use open-source LLM training libraries (Andonian et al., 2023; Gale et al., 2022) for implementing our experiments, and we train our models using a publicly available dataset (Penedo et al., 2024). Our methods are built on top of these open-source libraries, and we plan to release our code publicly in the future.  
+
+
+

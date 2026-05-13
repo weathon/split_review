@@ -1,8 +1,8 @@
 # On Speeding Up Language Model Evaluation
 
 - Decision: Accept
-- Avg Score: 3.80
-- Scores: 1, 0, 6, 6, 6
+- Avg Score: 7.00
+- Scores: 10, 6, 6, 6
 
 ## Abstract
 Developing prompt-based methods with Large Language Models (LLMs) requires making numerous decisions,  which give rise to a combinatorial search problem.

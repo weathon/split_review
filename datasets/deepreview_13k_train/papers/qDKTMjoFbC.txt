@@ -1,0 +1,370 @@
+\title{BurstAttention: An Efficient Distributed Attention Framework for Extremely Long Sequences}
+
+\begin{abstract}
+Effective attention modules have played a crucial role in the success of Transformer-based large language models 
+(LLMs), but the quadratic time and memory complexities of these attention modules also pose a challenge when processing long sequences. 
+One potential solution for the long sequence problem is to utilize distributed clusters to parallelize the computation of attention modules across multiple devices 
+(e.g., GPUs). 
+However, adopting a distributed approach inevitably introduces extra memory overheads to store local attention results and incurs additional communication costs to aggregate local results into global ones. 
+In this paper, we propose a distributed attention framework named ``BurstAttention'' to optimize memory access and communication operations at both the global cluster and local device levels by partitioning attention along the sequence dimension across device.
+Through our experiments, we compare BurstAttention with other competitive long-sequence distributed attention solutions. 
+The experimental results under different lengths demonstrate that BurstAttention offers significant advantages for processing long sequences compared with these competitive baselines, especially tensor parallelism (Megatron-V3) with FlashAttention, reducing 40\% communication overheads and achieving 1.37 $\times$ speedup during training 128K sequence length on 32$\times$A100.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{intro}
+
+Transformers~\citep{vaswani2017attention} have emerged as the dominant architectures for large language models (LLMs)~\citep{brown2020language,chowdhery2022palm} due to their remarkable capacities to understand complex text and generate controllable responses. Empirically, the power of Transformers lies largely in their multi-head attention modules, which enable Transformers to capture rich semantic information from textual contexts effectively. For every plus, there is a minus. Despite the success of Transformers' attention modules, these modules exhibit quadratic time and memory complexity concerning sequence length, posing challenges in terms of both computing time and memory overheads as sequence length increases.
+
+Various efforts have been devoted to making attention modules more efficient and enabling LLMs to process longer sequences. 
+One direction is taking full advantage of a single device's compute and storage units (e.g., a GPU) to process long sequences, such as FlashAttention~\citep{dao2022flashattention}. FlashAttention can significantly accelerate the computation of attention modules by using more efficient static random access memory (SRAM) instead of high-bandwidth memory (HBM) in devices to store intermediate attention states.
+Another direction is using distributed clusters containing multiple devices (e.g., multiple GPUs) to process long sequences, such as RingAttention~\citep{li2021sequence}. RingAttention divides sequences into multiple subsequences and processes subsequences separately on different devices.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.85\textwidth]{images/intro-v3.pdf}
+  \caption{BurstAttention undertakes a two-step partitioning: dividing the sequence across multiple devices (inter-device), and then splitting the subsequences within each single device (intra-device). First, BurstAttention partitions the query, key, and value across  devices and pass each sliced subsequence through all devices in a ring-like communication. This allows each device to process only a local attention at a time, and avoids the burden on memory caused by processing extremely long sequence at once. 
+  By transmitting $\mathbf{K},\mathbf{V}$ and aggregating local attention results using online softmax, BurstAttention avoids storing the intermediate result $\mathbf{QK}^T$, which has quadratic memory complexity, and instead recomputes it during the backward pass, which we call global attention optimization (GAO). 
+  BurstAttention further partitions the subsequences into smaller tiles, aiming to perform block-wise computations within local attention. This can utilize the high bandwidth of SRAM while minimizing access to the lower bandwidth HBM, which we call local attention optimization (LAO). Also, by using double-buffer, the communication can be overlapped with computation in BurstAttention.
+  }
+  \label{fig:framework}
+\end{figure*}
+
+All the above improvements orienting to speedup attention operation have achieved promising results, each targeting different bottleneck. However an intuitive problem is raised --- whether we can combine these improvements to achieve a more efficient attention solution.
+The concept is straightforward, yet in a distributed setting, simple combination of two methods may not benefit from their strength. Moreover ,  the RingAttention approach cannot directly incorporate with online softmax, and the FlashAttention implementation focuses exclusively on optimizing the computation of attention on a single device. To address these challenges,this paper introduces an efficient distributed attention framework to handle extremely long sequences named ``BurstAttention''. BurstAttention can take full advantage of the power of both distributed clusters and single devices within clusters. 
+Specifically, given an extremely long sequence, BurstAttention first divides the sequence into partitions according to the number of devices in distributed clusters, and each partition is assigned to one of these devices. Then, each device projects the partitioned sequence into query, value, and key embedding partitions. The query partitions are pinned, and all key-value partitions are passed through all devices to compute their local attention scores with each pinned query partition. Based on the local attention scores, a global attention operation is adopted to aggregate the local results into the final global results.
+
+By fine-grained scheduling the computation and communication operations of devices during computing attention modules, as well as introducing online softmax~\citep{milakov2018online}, BurstAttention proposes global attention optimization (GAO) and local attention optimization (LAO), which can fully optimize the input-output (I/O) and communication procedures in distributed clusters. These two strategies offer substantial benefits for computing local attention scores in each device and aggregating local results into global ones in the whole cluster, including improved memory consumption, reduced communication overhead, and enhanced cache utilization. 
+Owing to just splitting sequences, BurstAttention is orthogonal to other distributed methods and can be integrated with them for training and inferring Transformer-based LLMs, such as data parallelism~\citep{valiant1990bridging}, tensor parallelism~\citep{narayanan2021efficient}, pipeline parallelism~\citep{huang2019gpipe}, and zero redundancy optimizer~\citep{rajbhandari2020zero,ren2021zero}.
+
+We evaluate BurstAttention and current competitive distributed attention solutions~\citep{dao2022flashattention,li2021sequence} under various sequence length settings. Comparing to tensor parallelism (Megatron-V3) with FlashAttention methods, our method reducing 40\% communication overheads and achieving 2$\times$ speedup during training 128K sequence length on 8$\times$A100. The experimental results show that BurstAttention is a memory-efficient solution for attention modules to process long sequences and achieve good data throughputs. Moreover, since BurstAttention greatly optimizes the communication operations during the computation process of attention modules, BurstAttention makes it more difficult for device's communication to become a bottleneck as the devices in distributed clusters increase, and thus can better utilize distributed clusters than other distributed solutions.
+
+
+
+\section{Methodology}
+
+
+
+\subsection{Preliminary}
+As the key module in Transformers~\citep{vaswani2017attention}, an attention module can be formalized as
+\begin{equation}
+\small
+\begin{aligned}
+\label{eq:attention}
+\mathbf{S} = \frac{\mathbf{Q}\mathbf{K}^T}{\sqrt{d}}, \quad
+\mathbf{P} = \text{softmax}(\mathbf{S}), \quad
+\mathbf{O} = \mathbf{P}\mathbf{V},
+\end{aligned}
+\end{equation}
+where $\mathbf{Q} \in \mathbb{R}^{N \times d}$ indicates the embeddings of the query sequence, $N$ is the length of the query sequence, and $d$ is the embedding dimension. 
+$\mathbf{K} \in \mathbb{R}^{N \times d}$ and $\mathbf{V} \in \mathbb{R}^{N \times d}$ indicate the embeddings of the key sequence and the value sequence, respectively. $\mathbf{S} \in \mathbb{R}^{N \times N}$ and $\mathbf{P} \in \mathbb{R}^{N \times N}$ indicate the attention scores and the attention probabilities, respectively. 
+$\mathbf{O} \in \mathbb{R}^{N \times d}$ is the final attention result, which is the average of the value sequence embeddings weighted by the similarities between the query and key sequences. In this paper, we mainly use self-attention modules to illustrate BurstAttention, but BurstAttention can be easily extended to cross-attention modules.
+For more details of various attention modules in the Transformer architecture, we recommend referring to the original paper of Transformers~\citep{vaswani2017attention}, and we will not go into details.
+
+\begin{algorithm}[t]
+\footnotesize
+\caption{The forward pass of GAO}\label{alg:gao_forward}
+\begin{algorithmic}[1] % Enable line numbers
+\REQUIRE Matrices $\mathbf{Q}_i, \mathbf{K}_i, \mathbf{V}_i \in \mathbb{R}^{{\frac{N}{G}}\times d}$ on the $i$-th device
+\STATE Initialize $\mathbf{O}_i=(0)_{{\frac{N}{G}}\times d}, l_i = (0)_{\frac{N}{G}}, m_i = (-\infty)_{\frac{N}{G}}$
+\STATE Put $\mathbf{K}_i, \mathbf{V}_i$ into communication ring
+\FOR{$j=1$ \textbf{to} $G$}
+    \STATE Conduct one step of ring communication;
+    \STATE Get $\mathbf{K}_j, \mathbf{V}_j$ from communication ring; 
+    \STATE \COMMENT{The forward pass of local attention (w/o LAO).}
+    \STATE $\mathbf{S}_{i,j} = \mathbf{Q}_i\mathbf{K}_j^T$;
+    \STATE $m_{i,j} = \text{rowmax}(\mathbf{S}_{i,j})$;
+    \STATE $\mathbf{P}_{i,j} = \text{exp}(\mathbf{S}_{i,j} - m_{i,j})$;
+    \STATE $l_{i,j} = \text{rowsum}(\mathbf{P}_{i,j})$;
+    \STATE $\mathbf{O}_{i,j} = \mathbf{P}_{i,j}\mathbf{V}_j$; 
+    \STATE \COMMENT{The end of the forward pass of local attention.}
+    \STATE $m_{\text{new}}\leftarrow \max{\{m_i, m_{i,j}\}}$;\label{alg:m_scale}
+    \STATE $\mathbf{l}_i = e^{m_i-m_{\text{new}}} l_i + e^{m_{i,j}-m_{\text{new}}} l_{i,j}$;\label{alg:l_scale}
+    \STATE $\mathbf{O}_i = e^{m_i-m_{\text{new}}} \mathbf{O}_i + e^{m_{i,j}-m_{\text{new}}} \mathbf{O}_{i,j}$;\label{alg:o_scale}
+    \STATE $m_i = m_{\text{new}}$;
+    \STATE Put $\mathbf{K}_j, \mathbf{V}_j$ into communication ring;
+\ENDFOR
+\STATE $\mathbf{O}_i = \text{diag}(l_i)^{-1} \mathbf{O}_i$;
+\STATE $lse_i = m_i + \log{l_i}$;
+\OUTPUT $\mathbf{O}_i, lse_i$;
+\end{algorithmic}
+\end{algorithm}
+\begin{algorithm}[t]
+\footnotesize
+\begin{algorithmic}[1]
+\caption{The backward pass of GAO}\label{alg:gao_backward}
+\REQUIRE{Matrices $\mathbf{Q}_i,\mathbf{K}_i, \mathbf{V}_i, \mathbf{O}_i,\mathbf{dO}_i \in \mathbb{R}^{{\frac{N}{G}}\times d}$, $lse_i\in\mathbb{R}^{\frac{N}{G}}$ on the $i$-th device
+\STATE Initialize $\mathbf{dQ}_i,\mathbf{dK}_i,\mathbf{dV}_i=(0)_{{\frac{N}{G}}\times d}$\
+\STATE $D_i = \text{rowsum}(\mathbf{dO}_i \circ \mathbf{O}_i)$ 
+ (elementwise multiplication)
+\STATE Put $\mathbf{Q}_i, \mathbf{dQ}_i, \mathbf{dO}_i, D_i, lse_i$ into communication ring
+}
+\FOR{$j=1$ to $G$}
+    \STATE Conduct one step of ring communication;
+    \STATE Get $\mathbf{Q}_j, \mathbf{dQ}_j, \mathbf{dO}_j, D_j, lse_j$ from communication ring;
+    \STATE
+    \COMMENT{The backward pass of local attention (w/o LAO).}
+    \STATE $\mathbf{S}_{j,i} = \mathbf{Q}_j\mathbf{K}_i^T$;
+    \STATE $\mathbf{P}_{j,i} = \text{exp}(\mathbf{S}_{j,i} - lse_j)$;
+    \STATE $\mathbf{dV}_i = \mathbf{dV}_i + \mathbf{P}_{j,i}^T\mathbf{dO}_j$;
+    \STATE $\mathbf{dP}_{j,i} = \mathbf{dO}_j~\mathbf{V}_i^T$;
+    \STATE $\mathbf{dS}_{j,i} = \mathbf{P}_{j,i}\circ(\mathbf{dP}_{j,i}-D_j)$;
+    \STATE $\mathbf{dK}_i = \mathbf{dK}_i + \mathbf{dS}_{j,i}^T \mathbf{Q}_j$;
+    \STATE $\mathbf{dQ}_j = \mathbf{dQ}_j + \mathbf{dS}_{j,i}~\mathbf{K}_i$ ;
+    \STATE \COMMENT{The end of the backward pass of local attention.}
+    \STATE Put $\mathbf{Q}_j, \mathbf{dQ}_j, \mathbf{dO}_j, D_j, lse_j$ into communication ring;
+\ENDFOR
+\OUTPUT $\mathbf{dQ}_i, \mathbf{dK}_i, \mathbf{dV}_i$;
+\end{algorithmic}
+\end{algorithm}
+\subsection{The Whole Framework of BurstAttention}
+
+In BurstAttention, $\mathbf{Q}$, $\mathbf{K}$ and $\mathbf{V}$ are divided into multiple partitions along the sequence dimension according to the number of devices (e.g., GPUs) in a distributed cluster. Each device in the cluster will be assigned a query partition, a key partition, and a value partition.
+Formally, given the device number $G$, the $i$-th device will be assigned $\mathbf{Q}_i, \mathbf{K}_i, \mathbf{V}_i \in \mathbb{R}^{\frac{N}{G} \times d}$. As shown in Figure~\ref{fig:framework}, at each step, 
+the $i$-th device receives a key partition $\mathbf{K}_j$ and a value partition $\mathbf{V}_j$ from its previous neighbor and performs local attention operations. After that, the $i$-th device sends its received key and value partitions $\mathbf{K}_j$ and $\mathbf{V}_j$ to its next neighbor for the use of the next step, which forms a ring-style communication process. This ring-style communication process continues until all $\mathbf{K}$ and $\mathbf{V}$ partitions have made a full circle around the ring, completing local attention operations on all devices.
+The local attention operations can be formalized as
+\begin{equation}
+\small
+\label{eq:local-attention}
+\mathbf{S}_{i,j} = \frac{\mathbf{Q}_i\mathbf{K}_j^T}{\sqrt{d}}, \;
+\mathbf{P}_{i,j} = \text{softmax}(\mathbf{S}_{i,j}), \;
+\mathbf{O}_{i,j} = \mathbf{P}_{i,j}\mathbf{V}_j,
+\end{equation}
+where $\mathbf{O}_{i,j} \in \mathbb{R}^{\frac{N}{G} \times d}$ indicates the local attention results between the device-assigned query partition $\mathbf{Q}_i$ and the device-received partitions $\mathbf{K}_j$ and $\mathbf{V}_j$. 
+$\mathbf{S}_{i,j} \in \mathbb{R}^{\frac{N}{G} \times \frac{N}{G}}$ and $\mathbf{P}_{i,j} \in \mathbb{R}^{\frac{N}{G} \times \frac{N}{G}}$ indicate the local attention scores and the local attention probabilities, respectively. 
+Obviously, Eq.~(\ref{eq:attention}) and Eq.~(\ref{eq:local-attention}) are not equivalent, we thus introduce global attention operations to aggregate all local attention results 
+$\{\mathbf{O}_{i,j}\}_{i=1,j=1}^{\frac{N}{G},\frac{N}{G}}$ into the final partitioned attention results $\mathbf{O}_i\in\mathbb{R}^{\frac{N}{G}\times d}$, and $\{\mathbf{O}_{i}\}_{i=1}^{\frac{N}{G}}$ is the final global attention results. To make both the global and local attention operations more efficient, we introduce Global Attention Optimization (GAO) and Local Attention Optimization (LAO), respectively. Next, we will introduce these attention optimization strategies in detail.
+\subsection{Global Attention Optimization (GAO)}
+
+Global attention operations are to aggregate $\mathbf{O}_{i,j}$ in Eq.~(\ref{eq:local-attention}) into $\mathbf{O}_i$. 
+For some conventional methods such as RingAttention~\citep{li2021sequence}, for the $i$-th query partition, they store the intermediate results $\mathbf{S}_{i,j}$ and $\mathbf{P}_{i,j}$ for every $j$. This introduces a non-negligible memory overhead. 
+To get rid of this memory overhead, we introduce GAO.
+
+As shown in Figure~\ref{fig:framework}, GAO consists of two main steps. First, devices are organized in a ring for communication. Each round, $\mathbf{K}, \mathbf{V}$ partitions are shifted along the ring to the next adjacent device. Second, after each round of $\mathbf{K}, \mathbf{V}$ transmission, each device $i$ performs a local attention operation using the partitions $\mathbf{Q}_{i}$ and its received partition $\mathbf{K}_{j}$, and $\mathbf{V}_{j}$, as described in Eq.~(\ref{eq:local-attention}). The local attention result $\mathbf{O}_{i,j}$ are then dynamically accumulated into global attention result $\mathbf{O}_i$ by employing online softmax~\citep{milakov2018online}, which eliminates the need to store intermediate results $\mathbf{S}_{i,j}$ and $\mathbf{P}_{i,j}$.
+
+As depicted in Algorithm~\ref{alg:gao_forward}, in the forward pass, we dynamically maintain the row-wise maximum value $m_i$ of $\mathbf{S_{i,j}}$ as in Line~\ref{alg:m_scale} and the row-wise sum $l$ of $\mathbf{P_{i,j}}$ as in Line~\ref{alg:l_scale} to avoid storing $\mathbf{S}$ and $\mathbf{P}$, and use $m_i$ and $l_i$ for scaling during the aggregation of $\mathbf{O}_i$ as in Line~\ref{alg:o_scale}. Note that, the functions $\text{rowmax}(\cdot)$ and $\text{rowsum}(\cdot)$ can be formalized as
+\begin{equation}
+\small
+\begin{aligned}
+[\text{rowmax}(\mathbf{W})]_i &= \max_j \{[\mathbf{W}]_{i,j}\}, \\
+[\text{rowsum}(\mathbf{W})]_i &= \sum_j [\mathbf{W}]_{i,j},
+\end{aligned}
+\end{equation}
+where $[\cdot]_i$ is the $i$-th element of the vector, $[\cdot]_{i,j}$ is the element in the $i$-th row and $j$-th column of the matrix.
+To make the subsequent backward pass more efficient, we store $lse_i$ besides the global results $\mathbf{O}_i$ after the forward pass. During the backward pass, as depicted in Algorithm~\ref{alg:gao_backward}, 
+we employ the same strategy for the forward pass to obtain gradients based only on recomputed $\mathbf{S}$ and $\mathbf{P}$.
+\subsection{Local Attention Optimization (LAO)}
+
+Given $\mathbf{Q}_i$, $\mathbf{K}_j$, and $\mathbf{V}_j$, the local attention operations that involve these partitions are performed only on a single device (e.g., a GPU).
+When computing $\mathbf{O}_{i,j}$ in Eq.~(\ref{eq:local-attention}), $\mathbf{S}_{i,j}$ and $\mathbf{P}_{i,j}$ are computed and stored on the HBM of the device.
+To avoid frequent I/O operations of $\mathbf{S}_{i,j}$ and $ \mathbf{P}_{i,j}$ on the HBM, the local attention operations of BurstAttention further divide $\mathbf{Q}_i$, $\mathbf{K}_j$, and $\mathbf{V}_j$ into tiles along the sequence dimension, with each tile $\frac{M}{4d}$ sequence length, where $M$ represents the SRAM size of the device, $d$ represents the attention head dimension.
+
+As shown in Figure~\ref{fig:framework}, during computing $\mathbf{O}_{i,j}$, each thread block reads the tiles of $\mathbf{Q}_i, \mathbf{K}_j, \mathbf{V}_j$ from the HBM to SRAM, the tiles of $\mathbf{S}_{i,j}$ and $\mathbf{P}_{i,j}$ are computed and then written on the SRAM instead of the HBM, $\mathbf{O}_{i,j}$ are dynamically accumulated based on online softmax operations and written back to the HBM. Since the SRAM has a much higher I/O bandwidth than the HBM, the above optimization can make local attention operations more efficient.
+Although the memory of the SRAM is tiny, further dividing $\mathbf{Q}_i$, $\mathbf{K}_j$, and $\mathbf{V}_j$ into many fine-grained tiles ensure the intermediate results $\mathbf{S}_{i,j}$ and $\mathbf{P}_{i,j}$ can be entirely stored into the SRAM.
+
+Intuitively, when BurstAttention is running on a single device rather than a distributed cluster, there is no need to use GAO, and LAO will play the same role as FlashAttention~\cite{dao2022flashattention}, i.e., FlashAttention can be viewed as a specialization of BurstAttention using a single device.
+\begin{table*}[t]
+\centering
+\small
+\scalebox{0.9}{
+\begin{tabular}{l|c|cc|cc|c}
+\toprule
+\multirow{2}{*}{Method} & \multirow{2}{*}{FlashATT/LAO} & \multicolumn{2}{c}{Memory Overheads} & \multicolumn{2}{|c}{Communication Overheads}\\ 
+& & \multicolumn{1}{|c}{Parameter} & \multicolumn{1}{c}{Activation}  & \multicolumn{1}{|c}{Forward} & \multicolumn{1}{c}{Backward} \\
+\midrule
+RingAttention & w/o & $4HZd$ & ${4\frac{BZNd}{G}} + \frac{BZN^2}{G} + {\frac{BNH}{G}}$ & \multicolumn{1}{|l}{\multirow{2}{*}{$2BZNd$}} & \multicolumn{1}{|c}{\multirow{2}{*}{$6BZNd$}}\\
+RingAttention$^{\dagger}$ & $-$ & $-$ & $-$ & \multicolumn{1}{|l}{} & \multicolumn{1}{|l}{} \\
+\midrule
+Tensor Parallelism & w/o & \multirow{2}{*}{${4\frac{HZd}{G}}$} & ${4\frac{BZNd}{G}} + \frac{BZN^{2}}{G} + BNH$ & \multicolumn{1}{|l}{\multirow{2}{*}{$4BZNd$}} & \multicolumn{1}{|c}{\multirow{2}{*}{$4BZNd$}} \\
+Tensor Parallelism & w/ FlashATT &  & ${4\frac{BZNd}{G}} + \frac{BZN^{2}}{(M/4d)^{2}G} + BNH$ & \multicolumn{1}{|l}{} & \multicolumn{1}{|l}{}\\
+\midrule
+BurstAttention & w/o & \multirow{2}{*}{$4HZd$} & ${4\frac{BZNd}{G}} + \frac{BZN^{2}}{G^{2}} + {\frac{BNH}{G}}$ & \multicolumn{1}{|l}{\multirow{2}{*}{$2BZNd$}} & \multicolumn{1}{|c}{\multirow{2}{*}{$3BZNd+2BZN$}} \\
+BurstAttention & w/ LAO & & ${4\frac{BZNd}{G}} + {\frac{BZN^{2}}{(M/4d)^{2}G^{2}}} + {\frac{BNH}{G}}$ & \multicolumn{1}{|l}{} & \multicolumn{1}{|l}{} \\
+\bottomrule
+\end{tabular}}
+\caption{The overheads of different distributed attention solutions. $G$ is the device number, $B$ denotes the batch size, $N$ represents the sequence length, $Z$ signifies the number of attention heads, $d$ corresponds to the hidden dimension per head, $H$ represents the model dimension of Transformers, and $M$ represents the device SRAM size. $^{\dagger}$ means from an implementation perspective, RingAttention's separating $\mathbf{K}$ and $\mathbf{V}$ into two independent rounds of communication cannot be combined with FlashAttention to improve efficiency. 
+} 
+\label{tab:memory_usage}
+\end{table*}
+
+\subsection{Overlapping Communication and Computation}
+
+Although splitting sequences can efficiently utilize distributed clusters to handle the long-sequence attention, this also inevitably introduces additional time costs to transmit partitions between devices. To this end, BurstAttention leverages the potential of devices (e.g., GPUs) for overlapping communication and computation. 
+This contrasts with some other typical distributed methods like tensor parallelism~\cite{narayanan2021efficient}, where such overlapping is not feasible due to the dependency of subsequent layers' computations on preceding layers' outputs.
+
+To address this, BurstAttention adopts a double-buffer technique, enabling concurrent execution of communication and computation. 
+The technique designs two buffers for each device, one is used as input to local attention operations, and the other is used to receive data from other devices. As depicted in Figure \ref{fig:framework}, each element (query, key, or value) involved in the ring-style communication process is allocated a dedicated buffer. Concurrent with the initiation of each local attention round, the double-buffer technique triggers the transmission of the corresponding buffer tensor. This preemptive action ensures that, by the commencement of the subsequent local attention round, the required data is already available on each device, having been carried over by the buffer. The process is then repeated until all local attention operations are completed, with each round of local attention operations initiating the transmission of data required for the next round of local attention operations.
+\subsection{Integrating Sparse Attention Methods}
+
+Various sparse attention methods, including low-rank methods~\citep{winata2020lightweight,wang2020linformer}, kernel-based methods~\citep{katharopoulos2020transformers,choromanski2020rethinking, qin2022devil} and downsampling methods~\citep{lee2019set,jaegle2021perceiver} are also widely explored. These methods reduce the time and memory costs of attention modules by computing a limited selection of similarity scores from a sequence rather than all possible pairs, resulting in sparse attention softmax logits rather than dense ones. Recently, \citet{ding2023longnet} have explored  sparse attention based on distributed clusters and achieved promising results.
+
+The sequence parallelism mechanism makes BurstAttention easy to cooperate with sparse attention methods. During the computation process of BurstAttention, given $\mathbf{Q}_i$, $\mathbf{K}_j$, $\mathbf{V}_j$, if there is no need to compute the similarities between these partitions, then the local attention operations on these partitions can be skipped directly. If just some tokens in $\mathbf{Q}_i$, $\mathbf{K}_j$ and $\mathbf{V}_j$ are required to compute their similarities for final attention results, we can similarly skip unnecessary operations in local attention operations. Note that these sparse attention methods inevitably lead to significant performance degradation, along with reducing the time and memory overheads. Although BurstAttention is well compatible with sparse attention methods, in the actual processing of long sequences, the use of these lossy methods needs to be cautious. 
+
+
+
+\section{Overhead Analysis}
+
+
+In this section, we will analyze the memory, I/O, and communication overheads of BurstAttention as compared to existing competitive distributed attention solutions.
+As data parallelism and pipeline parallelism are often used as the most basic distributed strategies and cannot reduce the cost of long sequence processing, we focus here on comparing BurstAttention, tensor parallelism~\citep{narayanan2021efficient}, and the typical sequence parallelism method RingAttention~\citep{li2021sequence}.
+
+\subsection{Memory and I/O Overheads}
+
+When we split the input along the sequence dimension across devices for global operations and further split them in each device for local operations, the memory overheads caused by $\mathbf{QK}^T$ will be reduced to $\frac{1}{(M/d)^{2}G^{2}}$ of the original ones. Table~\ref{tab:memory_usage} shows the memory overheads of various distributed attention solutions.
+The table shows that BurstAttention has lower activation memory while tensor parallelism has lower parameter memory. 
+This means that the longer the sequence, the more pronounced the advantage of BurstAttention. Moreover, by combining BurstAttention with some parallelism strategies like zero redundancy optimizer~\citep{rajbhandari2020zero,ren2021zero} to partition parameters, BurstAttention can easily obtain the same parameter memory overheads as tensor parallelism.
+In terms of I/O overheads, RingAttention requires $\Theta(\frac{BZN^{2}}{G}+BZNd)$ memory accesses on every single device of the whole cluster; tensor parallelism and BurstAttention only require $\Theta(\frac{BZN^2}{(M/d^2)G})$ memory accesses. 
+This indicates that BurstAttention can significantly reduce I/O time costs compared to other distributed attention baselines.
+
+\subsection{Communication Overheads}
+
+In the forward pass, BurstAttention involves one round of ring-style peer-to-peer communications on the $\mathbf{K},\mathbf{V}\in\mathbb{R}^{B\times Z\times\frac{N}{G}\times d}$, with a total cost of $\Theta(2BZNd)$.
+In the backward pass, BurstAttention requires one round of ring-style communication on tensors $\mathbf{Q},\mathbf{dQ},\mathbf{dO} \in \mathbb{R}^{B\times\frac{N}{G}\times Z\times d}$ and $D, lse\in\mathbb{R}^{B\times\frac{N}{G}\times Z}$, with a total cost of $\Theta(3BZNd + 2\frac{BNZ}{G})$.
+Table~\ref{tab:memory_usage} shows the communication overheads of various distributed attention solutions. The forward communication of RingAttention is the same as BurstAttention, which is $\Theta(2BZNd)$, but without GAO and LAO, RingAttention requires a total cost of $\Theta(6BZNd)$ in the backward pass, which is about twice that of BurstAttention. Therefore, BurstAttention has great advantage of communication overheads during training than RingAttention.
+The forward communication of tensor parallelism is $\Theta(4BZNd)$ and the total communication is $\Theta(8BZNd)$, thus BurstAttention also has higher communication efficiency during both inferring and training than tensor parallelism.
+
+
+\begin{table*}[t]
+\centering
+\small
+\caption{The first token latency of the LLaMA-7b inference (s).}
+\centering
+\scalebox{0.9}{
+\begin{tabular}{lccccccc}
+\toprule
+\multicolumn{1}{l}{Sequence Length} & \multicolumn{1}{c}{4,096} & \multicolumn{1}{c}{8,192} & \multicolumn{1}{c}{16,384} & \multicolumn{1}{c}{32,768} & \multicolumn{1}{c}{65,536} & \multicolumn{1}{c}{131,072} & \multicolumn{1}{c}{262,144} \\
+\midrule
+RingAttention & 0.42±0.01 & 0.87±0.01 & 2.00±0.01 & 5.13±0.05  & OOM & OOM & OOM \\
+TP(Megatron V1) w/ Flash & 0.67±0.01 & 1.29±0.01 & 2.58±0.01 & 5.27±0.01 & 11.63±0.02 & 27.54±0.01 & 71.52±0.06 \\
+TP(Megatron V3) w/ Flash & 0.73±0.02 & 1.36±0.01 & 2.68±0.01 & 5.67±0.01  & 12.25±0.01 & 28.73±0.03 & 75.52±0.05 \\
+BurstAttention w/o LAO & 0.46±0.01 & 0.88±0.01 & 1.79±0.01 & 3.88±0.01 & 10.78±0.01 & OOM & OOM \\
+BurstAttention & \textbf{0.44±0.01} & \textbf{0.84±0.01} & \textbf{1.68±0.01} & \textbf{3.27±0.01} & \textbf{6.49±0.01} & \textbf{16.01±0.01} & \textbf{49.32±0.11} \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:infer-7b}
+\end{table*}
+
+\begin{table*}[t]
+\centering
+\small
+\caption{The first token latency of the LLaMA-13b inference (s).}
+\centering
+\scalebox{0.9}{
+\begin{tabular}{lccccccc}
+\toprule
+\multicolumn{1}{l}{Sequence Length} & \multicolumn{1}{c}{4,096} & \multicolumn{1}{c}{8,192} & \multicolumn{1}{c}{16,384} & \multicolumn{1}{c}{32,768} & \multicolumn{1}{c}{65,536} & \multicolumn{1}{c}{131,072} & \multicolumn{1}{c}{262,144} \\
+\midrule
+RingAttention & 0.66±0.01 & 1.36±0.01 & 3.08±0.01 & 7.98±0.02  & OOM & OOM & OOM \\
+TP(Megatron V1) w/ Flash & 1.05±0.01 & 2.01±0.01 & 4.03±0.01 & 8.41±0.01 & 18.56±0.02 & 44.39±0.04 & OOM \\
+TP(Megatron V3) w/ Flash & 1.07±0.01 & 2.09±0.01 & 4.20±0.01 & 8.76±0.01 & 19.06±0.06 & 45.46±0.03 & 119.03±0.04 \\
+BurstAttention w/o LAO & 0.72±0.01 & 1.39±0.01 & 2.77±0.05 & 5.99±0.01 & 16.95±0.01 & OOM & OOM \\
+BurstAttention & \textbf{0.69±0.01} & \textbf{1.40±0.05} & \textbf{2.57±0.03} & \textbf{5.08±0.02} & \textbf{9.92±0.01} & \textbf{25.91±0.01} & \textbf{78.80±0.07} \\
+\bottomrule
+\end{tabular}
+}
+
+\label{tab:infer-13b}
+\end{table*}
+
+\begin{figure*}[t]
+  \centering
+  \subcaptionbox{Training time\label{fig:train-7b-time}}{
+    \includegraphics[width=0.38\textwidth]{exp_images/train-7b-bs1-8gpu.pdf}
+  }
+  \subcaptionbox{Training memory\label{fig:train-7b-mem}}{
+    \includegraphics[width=0.38\textwidth]{exp_images/train_8gpu_memory.pdf}
+  }
+  \caption{The training time and memory of LLaMA-7b on 8$\times$A100.}
+  \label{fig:train-7b}
+\end{figure*}
+
+
+
+\section{Experiments}
+
+
+\subsection{Experimental Settings}
+
+We perform experiments in two configurations: one involves a single node equipped with 8 A100 GPUs linked via PCI-E, and the other is a distributed setup comprising four identical nodes, each with the same 8 A100 GPU configuration, interconnected by a 600 Gb/s RoCE network. We adopts two LLMs' settings in our experiments, LLaMA-2 with 7 billion parameters (7b) and LLaMA-2 with 13 billion parameters (13b)~\citep{touvron2023llama2}. 
+Our experiments consist of the following methods:
+
+(1) \textbf{TP}, which refers to tensor parallelism~\citep{narayanan2021efficient}, a commonly used distributed strategy in the stages of both training and inference. Note that here we futher classify TP into \textbf{TP (Megatron V1)} and \textbf{TP (Megatron V3)} based on the detail communication operations (Megatron V1 uses the all-reduce operation while Megatron V3 uses the combination of the all-gather and reduce-scatter operations).
+(2) \textbf{TP w/ FlashAttention}, which combines FlashAttention V2~\citep{dao2023flashattention} with tensor parallelism as a strong baseline. \textbf{Note that this is a commonly used strategy in current LLM pre-training and inference.}
+(3) \textbf{RingAttention}, a typical sequence parallelism baseline.
+(4) \textbf{BurstAttention}, our distributed attention method includes both GAO and LAO strategies.
+(5) \textbf{BurstAttention w/o LAO}, where we remove the LAO strategy for ablation studies.
+(6) \textbf{BurstAttention+ZeRO} , where we futher optimize the memory overhead of BurstAttention by adopting the ZeRO\citep{rajbhandari2020zero} technique to shard model parameters across devices.
+
+As we mentioned before, data parallelism and pipeline parallelism cannot effectively reduce the cost of long sequence processing, and we do not use them as baselines. In fact, we conduct some experiments to adapt data parallelism and pipeline parallelism for long-sequence attention, but unfortunately, these two parallelism methods cannot process extremely long sequences. \textbf{From our pilot experiments, directly adopting data parallelism or pipeline parallelism can only handle sequences shorter than 8192, much shorter than RingAttention and TP.}
+
+Our experiments does not specifically focus on any particular attention masking mechanism. However, for the methods we compared against, such as Tensor Parallelism (Megatron V3) with FlashAttention, we adopt its causal implementation in these experiments. This means that our baselines can bypass half of the attention computations owing to the causal attention structure. We observe that this approach yields only a marginal improvement, as communication remains the bottleneck in our experimental environment. Notably, in our implementation of BurstAttention, the computation is overlapped by the communication, which is a key factor in the observed performance gains. This distinction is crucial to understand the context and the specific conditions under which our method demonstrates its advantages.
+\subsection{Inference Latency}
+
+In this section, we focus on the latency needed for generating the first token (i.e., the first token latency) in the inference process. We concentrate on the time of the first token generation because the long-sequence attention computation mainly exists in the inference encoding process. Since the first token latency is much higher than the latency of generating subsequent tokens, the first token latency thus becomes one of the most critical targets existing works seek to optimize. 
+
+In real-time AI services such as ChatGPT, the system's responsiveness significantly impacts the user experience, and these applications usually output results in a streaming manner to improve responsiveness. Since the first token latency is the longest, the first token latency directly influences the perceived responsiveness and efficiency of the model in these streaming scenarios. %Some LLM tutorials have shown the importance of the first token latency~\footnote{\small{https://www.databricks.
+
+As shown in Table~\ref{tab:infer-7b} and Table~\ref{tab:infer-13b}, we can see that, compared with tensor parallelism, sequence parallelism methods are more suitable to infer long sequences. Compared with the RingAttention method, by using GAO, BurstAttention can support longer sequences. By further using LAO, BurstAttention can achieve more latency improvements and support much longer sequences. Note that, although TP (Megatron V3) is more memory efficient than TP (Megatron V1), the all-reduce operation used by TP (Megatron V1) is better optimized than the reduce-scatter and all-gather operations used by TP(Megatron V3). In the actual inference, TP(Megatron V1) is slightly faster than TP (Megatron V3). Since TP (Megatron V3) has a similar time to TP (Megatron V1) but better memory efficiency, we mainly compare our method with TP (Megatron V3) in subsequent experiments.
+
+\begin{figure*}[t]
+  \centering
+  \subcaptionbox{Training time\label{fig:train-7b-time-32gpu}}{
+    \includegraphics[width=0.38\textwidth]{exp_images/train-7b-bs1-32gpu.pdf}
+  }
+  \subcaptionbox{Training memory\label{fig:train-7b-mem-32gpu}}{
+    \includegraphics[width=0.38\textwidth]{exp_images/train_32gpu_memory.pdf}
+  }
+  \caption{The training time and memory of LLaMA-7b on 32$\times$A100.}
+  \label{fig:train-7b-32gpu}
+\end{figure*}
+\begin{figure*}[t]
+  \centering
+  \subcaptionbox{LLaMA-13b latency - GPU number\label{fig:infer-gpu}}{
+    \includegraphics[width=0.38\textwidth]{exp_images/inference_latency_scale_65536.pdf}
+  }
+  \subcaptionbox{LLaMA-7b throughput - batch size \label{fig:train-batch}}{
+    \includegraphics[width=0.38\textwidth]{exp_images/train_throughput_batch_scale_4096.pdf}
+  }
+  \caption{Scaling abilities on different GPU numbers and batch sizes.}
+  \label{fig:scale-7b}
+\end{figure*}
+
+\subsection{Training Performance}
+
+For training LLMs, a batch is required to have 2 to 4 million tokens, otherwise, the model performance may be degraded, i.e., the longer the sequence length is, the smaller the batch size is. Due to this, several GPUs may need to process one example together. 
+For example, using 2048 GPUs to train 128-layer GPT-3, the sequence length is 4096, the batch size is 1024, data parallelism is 16, pipeline parallelism is 32, and tensor parallelism is 4. In this scenario, the optimal setup is to divide a batch into 64 micro-batches with a micro-batch size of 1. 
+In this case, four GPUs under the same tensor parallelism group are inevitably required to process one piece of data together. In view of this, we fix the batch size to 1 for experimental convenience and vary the input sequence length from 1K to 32K. 
+
+ As can be seen from Figure~\ref{fig:train-7b-time}, although tensor parallelism adopts FlashAttention to improve its processing of long sequences, both RingAttention and BurstAttention have better training time than tensor parallelism when processing long sequences. This is also why existing works using tensor parallelism to train LLMs usually set the training length between 2048 and 4096. Compared with BurstAttention, RingAttention is limited by the sequence length since it stores too many intermediate states, but BurstAttention can support the longest input length. On the other hand, BurstAttention without LAO has a similar trend of training time as RingAttention and tensor parallelism. 
+From Figure~\ref{fig:train-7b-32gpu}, BurstAttention achieves nearly 2.0$\times$ speedup when the sequence is longer than 128K. Also combining BurstAttention with ZeRO optimization brings significant improvements in memory efficiency. Although BurstAttention+ZeRO brings little additional communication overheads, BurstAttention+ZeRO still achieves memory efficiency comparable to Megatron V3 and demonstrates superior speed in both multi-node and single-node setups than Megatron V3. This suggests that BurstAttention, with its current optimizations, offers a more efficient solution in terms of speed, even when faced with a memory-efficient competitor like Megatron V3.
+\subsection{Scaling Ability}
+
+In this section, we further verify the scaling ability of BurstAttention.
+In Figure~\ref{fig:infer-gpu}, we set batch size to 1 and sequence length to 65,536, and then evaluate the latency changes with increasing GPU numbers. As shown in the figure, in the single-GPU scenario, BurstAttention with LAO is equivalent to FlashAttention, and its inference latency is on par with the baseline using FlashAttention. Tensor parallelism cannot further decrease the latency when the number of GPUs increases from 4 to 8 due to the communication overhead with increased batch-size, while BurstAttention can achieve better scaling trends. Note that RingAttention requires storing $\Theta(\frac{BZN^2}{G})$ memory for each layer, which is extremely large and cannot fit into GPUs even sharded on 8 GPUs. In Figure~\ref{fig:train-batch}, we fix the sequence length to 4096 and the number of GPUs to 8 to evaluate the training throughput changes with increasing batch sizes. The experimental results show that BurstAttention can support a larger batch size, and the throughput grows with the increase of batch sizes in training scenario.
+
+
+\section{Related Work}
+
+
+Transformer-based LLMs such as GPT~\citep{brown2020language,ouyang2022training}, LLaMA~\citep{touvron2023llama,touvron2023llama2}, and PaLM~\citep{chowdhery2022palm,anil2023palm} have achieved great success~\citep{han2021pre,bommasani2021opportunities,zhao2023survey}. Despite the success of these LLMs, they still face efficiency challenges: one is that as these models continue to grow in size, the time and memory costs associated with training and inference have become bottlenecks. Another is that the quadratic attention computational complexity of the Transformer architecture makes these LLMs difficult to handle long sequences. Up to now, various parallelism strategies~\citep{valiant1990bridging,huang2019gpipe,rajbhandari2020zero,narayanan2021efficient} and memory optimization strategies~\citep{ren2021zero,chen2016training,korthikanti2023reducing}, 
+have well solved the bottleneck caused by the model size growth, but it is still challenging to solve the efficiency issue caused by the sequence growth.
+
+To enable LLMs to process longer sequences more efficiently, several attention solutions have been proposed. \citet{korthikanti2023reducing} adopt selective activation recomputation to avoid storing attention softmax logits during the forward pass, and then recompute these logits during the backward pass to build a computation graph for backpropagation, significantly reducing memory overheads of attention modules to process long sequences. \citet{rabe2021self} formalize the computation of attention modules at the block level and make each thread block in devices handle the attention computation of a subsequence, further reducing temporary memory consumptions and achieving a logarithmic memory complexity relative to the sequence length. Based on these works, \citet{dao2022flashattention} introduce FlashAttention, a CUDA implementation of attention modules that leverages the fast I/O capabilities of the SRAM in devices for further speedup. FlashAttention optimizes the attention algorithm by introducing I/O complexity analysis and minimizing the I/O costs on the HBM in devices, offering a new perspective on attention optimization.
+
+While the above solutions focus on optimizing the long-sequence attention problem using a single device, they still struggle to handle extremely long sequences due to the limitations of a single device's performance. Some efforts have therefore aimed to address this long-sequence challenge using distributed clusters. 
+Adopting general parallelism strategies is most straightforward method, such as data parallelism~\citep{valiant1990bridging}, tensor parallelism~\citep{narayanan2021efficient}, pipeline parallelism~\citep{huang2019gpipe}, and zero redundancy optimizer~\citep{rajbhandari2020zero,ren2021zero}. To better process long sequences using distributed clusters, \citet{li2021sequence} propose the sequence parallelism method RingAttention, which splits the computation and memory overheads of attention modules across multiple devices following the sequence dimension.
+
+
+
+
+\section{Conclusion}
+
+
+We present an efficient distributed attention framework named BurstAttention, which can enhance performance in terms of memory consumption and running speed when processing extremely long sequences. When running on a single device, BurstAttention can achieve comparable efficiency to FlashAttention. When running on a distributed cluster, BurstAttention can outperform existing competitive distributed attention solutions, including RingAttention and tensor parallelism. Moreover, the experimental results show that BurstAttention also has greater scaling abilities than existing solutions as increasing devices and batch sizes. 
+
+
+

@@ -1,0 +1,336 @@
+\title{Conformal Language Modeling}
+
+\begin{abstract}
+
+In this paper, we propose a novel approach to conformal prediction for  language models (LMs) in which we produce prediction sets with performance guarantees. 
+LM responses are typically sampled from a predicted distribution over the large, combinatorial output space of  language. Translating this to conformal prediction, we calibrate a \emph{stopping rule} for sampling LM outputs  that get added to a growing set of candidates until we are confident that the set covers at least one acceptable response. Since some samples may be low-quality, we also simultaneously calibrate a \emph{rejection rule} for removing candidates from the output set to reduce noise.
+Similar to conformal prediction, we  can prove that the final output set obeys certain desirable distribution-free guarantees. Within these sets of candidate responses, we also show that we can also identify subsets of individual components---such as phrases or sentences---that are each independently correct (e.g., that are not ``hallucinations''), again with guarantees.   
+Our method can be applied to any LM API that supports sampling. Furthermore, we empirically demonstrate that we can achieve many desired coverage levels within a limited number of total samples when applying our method to  multiple tasks in open-domain question answering, text summarization, and radiology report generation using different LM variants.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+Language models (LMs) have emerged as powerful tools for solving  natural language processing (NLP) tasks. Given an input prompt, LMs generate a response from some predicted distribution over output text sequences. For modern models, these generations are often coherent and contextually relevant. At the same time, these generations can still contain mistakes, and  lack certain aspects of robustness and reliability in terms of providing accurate, trustworthy predictions~\cite{jones2022capturing, krishna-etal-2021-hurdles, lin-etal-2022-truthfulqa, mallen2023llm_memorization, srivastava2022imitation, wang2023selfconsistency}. Unfortunately,  quantifying the uncertainty in LM outputs has remained a major challenge.\looseness=-1
+
+Conformal prediction  is a popular model-agnostic and distribution-free method for creating prediction sets that contain the correct answers with high probability~\cite{angelopoulos2023conformal, anastasios-learning-2021,  angelopoulos2021sets, bates-rcps, lei2018distribution, romano2019quantile, vovk2005algorithmic}. 
+Applying conformal prediction to generative models such as LMs, however, is challenging due to (a) the unbounded nature of their output space (i.e., all possible text sequences), and (b) the limited available (tractable) mechanisms for exploring all possible predictions. In particular, LMs can typically only approximately search or sample candidate responses. Furthermore, while several possible responses might be acceptable (e.g., correct or factual), small differences can result in abrupt changes in coherence or meaning.\looseness=-1
+In this paper, we propose an extension of conformal prediction  that is tailored specifically to  generative LMs. We only assume that the (potentially black-box) LM that is given to us can be used to sample diverse output sequences, together with their evaluated model likelihoods (i.e., the output token sequence logits). Like conformal prediction, our method offers a rigorous coverage guarantee by constructing prediction sets that, in our case, provably contain at least one acceptable response with high probability. Unlike conformal prediction, however, we do not enumerate the entire output space (which is impossible). Instead, we derive a calibrated \emph{stopping rule} for sampling different outputs from the LM that get added to a growing output set of candidates, until we are confident that the output set is sufficient. Since not all samples from the LM may be high quality (e.g., some may be redundant, incoherent, or have lower confidence),  we also simultaneously calibrate a \emph{rejection rule} for removing candidates from the output set---while still ensuring that our coverage bound is not violated. This gives the benefit of making our output sets not only accurate, but also precise (i.e., small).\looseness=-1
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=1\linewidth]{figures/main-figure.pdf}
+    \caption{Our conformal procedure samples candidate outputs from some blackbox LM until a \emph{stopping rule} is reached. 
+  Each sample is added to the output conformal set if it meets both a minimum estimated {quality} and a {diversity} criterion. 
+    The procedure is calibrated to stop when at least one candidate $y$ from the conformal set is admissible $(A(y) = 1)$ with high probability. In this example, samples $y_1$ and $y_2$ are in-admissible because they hallucinate the presence of ``edema'' (in orange) and ``hilar congestion'' (in magenta), respectively. The minimal output set includes $y_3$, which is  admissible.\looseness=-1}
+    \label{fig:intro}
+\end{figure}
+
+To more concretely describe the exact type of guarantee that we provide,  suppose we have been given a calibration set $\mathcal{D}_\mathrm{cal} = (X_i, A_i) \in \mathcal{X} \times \mathcal{A}$, $i = 1, \ldots, n$ of independent and identically distributed (i.i.d.) prompts and ``admission'' functions (see also \cite{fisch2021admission}). Here, $A_i$ is a binary random function that measures whether or not a generation $y \in \mathcal{Y}$ for prompt $X_i$ is ``good enough'' (i.e., $A_i(y) = 1$). Note that randomness in $A_i$ can come from implicit random covariates---such as relying on a random annotated reference, $Y_i^\mathrm{ref}$, to compare the candidate $y$ to. Figure~\ref{fig:intro} illustrates a setting where $X_i$ is an X-ray to automatically analyze and produce a report for, while $A_i$ extracts individual findings from each generated report and checks if they correspond to those given by an expert radiologist.
+Let $X_\mathrm{test}$ be a new i.i.d.\ test prompt. Using $\mathcal{D}_\mathrm{cal}$ to guide our choice of hyper-parameters $\lambda \in \Lambda$, for any  $\epsilon, \delta \in (0, 1)$, our goal is to generate a set of samples $\mathcal{C}_\mathcal{\lambda}(X_\mathrm{test}) \subseteq 2^\mathcal{Y}$ that satisfies\looseness=-1
+\begin{equation}
+    \label{eq:coverage}
+    \mathbb{P}\Big(\mathbb{P}\Big(\exists y \in \mathcal{C}_\lambda(X_\mathrm{test}) \colon A_\mathrm{test}(y) = 1 \mid \mathcal{D}_\mathrm{cal}\Big) \geq 1-\epsilon  \Big) \geq 1 - \delta.
+\end{equation}
+The outer and inner probabilities are over the draws of $\mathcal{D}_\mathrm{cal}$ and $(X_\mathrm{test}, A_\mathrm{test})$, respectively. $\epsilon$ is our error tolerance, while $\delta$ controls for the sensitivity of our algorithm with respect to calibration data.
+
+While Eq.~\eqref{eq:coverage} stipulates the existence of at least one ``acceptable'' generation in $\mathcal{C}_\lambda(X_\mathrm{test})$, it does not tell us much about individual responses, $y \in \mathcal{C}_\lambda(X_\mathrm{test})$. 
+Additionally, longer generations are often composed of multiple statements. In our radiology setting,  a report may contain multiple findings, such as \emph{``Cardiomegaly is moderate. There is mild pulmonary interstitial edema.''}
+We futher identify a subset of confident components that would independently be categorized as being correct (given another admission function $A^c_\mathrm{test}$, this time operating over generation fragments). For example, we might predict that \emph{``Cardiomegaly is moderate.''} is correct, but perhaps not \emph{``There is mild pulmonary interstitial edema.''} 
+This can not only be useful in catching incorrect statements, but can also help identify independently correct parts of a larger generation, even when the overall quality of the full  generation is poor.
+Like Eq.~\eqref{eq:coverage}, we calibrate this process such that it gives accurate results with high probability.\looseness=-1
+
+
+\textbf{Contributions.} In summary, our main results are as follows:
+\begin{itemize}[leftmargin=*]
+    \item We bridge the gap between conformal prediction and LMs by calibrating the \emph{sampling} of output sets, rather than enumerating and selecting candidate responses directly from the output space;
+    \item We extend multi-label conformal prediction to identify confident components of long generations;\looseness=-1
+    \item Though limitations apply, we demonstrate valid risk control on multiple diverse tasks with different LMs, while still retaining meaningful output sets that are efficient and precise compared to baselines.\looseness=-1
+\end{itemize}
+
+
+\section{Related work}
+
+
+\textbf{Conformal prediction and risk control.} Our work adds to the rich collection of tools for uncertainty estimation and risk control for machine learning algorithms~\cite[][\emph{inter alia}]{angelopoulos2023conformal, anastasios-learning-2021,barber2021predictive, bates-rcps, fisch2022false_positives, gupta2020binary, lei-robins-wasserman-dfps, lei2018distribution,vovk2002calibration,vovk2015probabilistic,pmlr-v60-vovk17a}. 
+These techniques were previously extended and applied in the language domain to classification with finitely-many classes~\citep{fisch2021admission,fisch2021fewshot,jones2022capturing}, to token-level predictions~\citep{dey_conf_inf_2022,ravfogel2023conformal}, and to reliably accelerate LMs~\citep{goldshtein2023efficiently,schuster-etal-2021-consistent,schuster2022confident}. Here, we address the emerging challenge of providing reliable prediction sets for unbounded, free-text generation---which previous methods are unequipped for.
+The distribution-free, finite-sample performance guarantees that we derive  
+are similar to those given by prediction sets or regression intervals in standard conformal prediction~\cite{angelopoulos2023conformal, papadopoulos2002inductive, vovk2005algorithmic}, but with slightly relaxed ``correctness'' criterions~\cite{cauchois2022predictive, fisch2021admission}. 
+In particular, we build on the groundwork set by \citet{anastasios-learning-2021}, which provides a general methodology for calibrating any risk function that is controllable via some low-dimensional hyper-parameter configuration. We extend their framework to handle sampling-based algorithms that can effectively be used for LMs, and that, critically, do not require enumerating the full output space (which is intractable in our case). 
+Most relevant to our work in LMs, other recent approaches have built on conformal principles to construct confidence intervals for generative diffusion models over images~\citep{horwitz2022conffusion,Teneggi2023HowTT}. These methods do not directly translate to LMs, however, as they only provide non-combinatorial confidence intervals at the pixel-level.\looseness=-1
+ 
+
+\textbf{Uncertainty estimation in LMs.}
+As the use of LMs in-the-wild quickly grows, there is increasing interest in obtaining and expressing meaningful confidence estimates for each output. Recent studies show that the logits of out-of-the-box LMs tend to exhibit overconfidence, even when wrong~\citep{desai-durrett-2020-calibration, kadavath2022language,miao2021prevent, vasconcelos2023generation}. Recent alignment techniques degrade this even further~\citep{kadavath2022language,openai2023gpt4}. Most current mitigation approaches focus on introducing linguistic cues~\citep{Lin2022TeachingMT,Zhou2023NavigatingTG} or post-hoc logit calibration~\citep{jiang-etal-2021-know,kadavath2022language,mielke-etal-2022-reducing,zablotskaia2023uncertainty}.  In this work, we develop similar techniques to improve the output of the underlying LM. Our methods are model agnostic and provide rigorous guarantees.
+Our conformal component selection (\S\ref{sec:comp_selection}) also relates to recent self-consistency work that builds on the empirical observation that repeated similar samples are more likely to be correct~\citep{mitchell-etal-2022-enhancing,wang2023selfconsistency}, and cross-sample entailment can approximate uncertainty~\citep{kuhn2023semantic}.  Unlike previous work that uses a fixed number of re-samples and compares full outputs, we (a) introduce a dynamic stopping rule to reduce the number of samples, (b) extend this concept to semantically compare sub-components of long text outputs, and (c) conformalize the process to provide formal guarantees.\looseness=-1
+\textbf{Reliable generation.}
+It is common practice to post-hoc apply classifiers and filters on top of LM generations for various quality goals such as preventing toxicity~\citep{gehman-etal-2020-realtoxicityprompts,rauh2022characteristics,Welbl2021ChallengesID}, verifying grounding against sources~\citep{bohnet2023attributed,liu2023evaluating,yue2023automatic}, or re-ranking the set of decoded outputs~\citep{jiang2022pairreranker}. Our work provides a systematic and reliable approach for filtering or flagging  poor-quality outputs---both at a full generation and component level---and can also readily incorporate additional signal from auxiliary classifiers. For example,  we demonstrate in our experiments using off-the-shelf natural language inference (NLI) models~\citep{bowman-etal-2015-large,Khot2018SciTaiLAT,schuster-etal-2021-get,thorne-etal-2018-fever,williams-etal-2018-broad,zhang-etal-2019-paws} to help guide the selection of individual, confident components in text summarization (i.e., sentences that are fully entailed by the larger text~\citep{fabbri-etal-2022-qafacteval,honovich-etal-2022-true,laban-etal-2022-summac,schuster-etal-2022-stretching}).\looseness=-1
+
+
+
+\section{Background}
+
+\label{sec:background}
+
+We begin with a review of conformal prediction and risk control (see also~\cite{angelopoulos2022gentle}).
+We use upper-case letters ($X$) to denote random variables; lower-case letters ($x$) to denote constants, and script letters ($\mathcal{X}$) to denote sets, unless otherwise specified.
+Given a new example $x$, for every candidate label $y \in \mathcal{Y}$ standard conformal prediction either accepts or rejects the null hypothesis that the pairing $(x, y)$ is correct. The test statistic for this test is a \emph{nonconformity measure}, $\mathcal{M}((x, y), \mathcal{D})$, where $\mathcal{D}$ is a dataset of labeled examples. Informally, a lower value of $\mathcal{M}$ reflects that point $(x, y)$ ``conforms'' to $\mathcal{D}$, whereas a higher value of $\mathcal{M}$ reflects that $(x, y)$ does not.
+For example, a practical choice for $\mathcal{M}$ could be the model-based negative log likelihood,  ${-}\log p_\theta(y | x)$, where $\theta$ are parameters fit to $\mathcal{D}$. 
+Split conformal prediction~\cite{Papadopoulos08} uses a separate training set $\mathcal{D}_{\mathrm{train}}$ to learn a fixed  $\mathcal{M}$ that is not modified during calibration or prediction. 
+To construct a {prediction} set for the new test point $x$, the conformal classifier outputs all $y$ for which the null hypothesis (that pairing $(x, y)$ is correct) is not rejected. This is achieved by comparing the scores of the test candidate pairs to the scores computed over  $n$ calibration examples.
+
+\begin{theorem}[Split conformal prediction~\cite{Papadopoulos08, vovk2005algorithmic}]
+\label{thm:conformalprediction}
+Let $(X_i, Y_i)$, $i=1,\ldots, n+1$ be exchangeable random variables. %\footnote{Technically, standard conformal prediction only requires exchangeablity---a weaker requirement than i.i.d.} 
+Let random variable $V_{i} = \mathcal{M}(X_i, Y_i)$ be the nonconformity score of $(X_i, Y_i)$, where $\mathcal{M}$ is fixed. For $\epsilon \in (0, 1)$, define the prediction (based on the first $n$ examples) at  $x \in \mathcal{X}$ as\looseness=-1
+\begin{align}
+\label{eq:csetconstruction}
+\mathcal{C}_\epsilon(x) := \big \{ y \in \mathcal{Y} \colon 
+    \mathcal{M}(x, y) \leq \mathrm{Quantile}(1 - \epsilon;\, V_{1:n} \cup \{\infty\}) \big\}
+\end{align}
+Then $\mathbb{P}(Y_{n+1} \in \mathcal{C}_{\epsilon}(X_{n+1})) \geq 1 - \epsilon$.
+\end{theorem}
+
+Note that the coverage expressed in Theorem~\ref{thm:conformalprediction} is \emph{marginal} over the draw of calibration and test data. The recent Learn Then Test (LTT) framework of \citet{anastasios-learning-2021} extends conformal prediction to control the expectation of any loss function (conditional on the draw of calibration data) by reframing hyper-parameter selection as a multiple hypothesis testing problem.
+Specifically, let  $L : \Lambda \rightarrow \mathbb{R}$ be any random function using a hyper-parameter configuration $\lambda$ in some space $\Lambda$. For example, we might have $L(\lambda) := \ell(X, Y; \lambda)$ for some fixed loss function $\ell$ with random inputs $(X, Y)$. Unlike conformal prediction, however, $\lambda$ can be multi-dimensional (e.g., consist of multiple thresholds). Let $L_i$, $i = 1, \ldots, n$ be an i.i.d. calibration set $\mathcal{D}_\mathrm{cal}$ of random functions, and $L_\mathrm{test}$ a random test function. Let $\epsilon \in \mathbb{R}$ be a tolerance for the test risk, $\mathbb{E}[L_\mathrm{test}(\lambda)] \leq \epsilon$. 
+LTT then identifies a random (depending on $\mathcal{D}_\mathrm{cal}$) subset of parameters, $\Lambda_\mathrm{valid} \subseteq \Lambda$, with the goal of guaranteeing\looseness=-1% $\Lambda_\mathrm{valid}$ to satisfy\looseness=-1
+\begin{equation}
+    \label{eq:ltt_fwer_threshold}
+    \mathbb{P}\bigg(\sup_{\lambda \in \Lambda_\mathrm{valid}} \mathbb{E}[L_\mathrm{test}(\lambda) \mid \mathcal{D}_\mathrm{cal}] \leq \epsilon  \bigg) \geq 1 - \delta,
+\end{equation}
+where the outer probability is over the draw of $\mathcal{D}_\mathrm{cal}$, and the inner expectation is over draws of $L_\mathrm{test}$. This then implies that any $\lambda \in \Lambda_\mathrm{valid}$ can be selected to control the risk of $L_\mathrm{test}$.
+In short, this is achieved by associating the null hypothesis $\mathcal{H}_\lambda \colon \mathbb{E}[L_\mathrm{test}(\lambda)] > \epsilon$ to each $\lambda \in \Lambda$. For each null hypothesis, we then use the calibration set to compute a super-uniform p-value  $p_\lambda$ using concentration inequalities. Any multiple testing algorithm $\mathcal{T}(p_\lambda \colon \lambda \in \Lambda)$ that controls the family-wise error rate (FWER) can then be used to identify the subset of non-rejected $\lambda$, i.e., $\Lambda_\mathrm{valid}$.\footnote{A FWER-controlling algorithm at level $\delta$ is any procedure that accepts or rejects null hypotheses $\mathcal{H}_{\lambda}$, while ensuring that the probability of falsely rejecting any $\mathcal{H}_\lambda$, $\forall \lambda \in \Lambda$, is less than $\delta$.} Note that it is possible that $\Lambda_\mathrm{valid} = \varnothing$, in the case that we fail to identify any statistically valid solutions (and the desired risk may not even be achievable with any $\lambda$). In this situation, we set $\lambda = \texttt{null}$, and either reject the task, or provide a trivial solution (e.g., a classifier that provides all possible labels $\mathcal{Y}$).
+
+\begin{theorem}[Learn Then Test~\cite{anastasios-learning-2021}]
+\label{thm:ltt}
+Suppose  $p_\lambda$ is super-uniform under $\mathcal{H}_\lambda$ for all $\lambda$. Let $\mathcal{T}$ be any FWER-controlling algorithm at level $\delta$. Then $\Lambda_\mathrm{valid}$ satisfies Eq.~\eqref{eq:ltt_fwer_threshold}.
+\end{theorem}
+Defining $\mathcal{C}_\lambda(x) := \{y \in \mathcal{Y} \colon \mathcal{M}(x, y) \leq \lambda\}$, $\Lambda \subset \mathbb{R}$, and  $L(\lambda) := \mathbf{1}\{Y \not\in \mathcal{C}_\lambda(X)\}$  recovers a criterion similar to that of conformal prediction (though not marginal over $\mathcal{D}_\mathrm{cal}$).  Unfortunately, in either instantiation (LTT vs. conformal prediction) iterating over $y \in \mathcal{Y}$ is intractable for LMs, regardless of whatever calibration technique is ultimately used. Instead, in \S\ref{sec:method}, we introduce our method for generating uncertainty sets by casting $\lambda$ as a configuration of a \emph{sampling} algorithm, rather than a filter on the output space $\mathcal{Y}$. We then show that this randomized algorithm can still be calibrated with LTT.\looseness=-1
+
+
+\section{Conformal language modeling}
+
+\label{sec:method}
+
+We now introduce our method for generating uncertainty sets for LMs. At a high level, our procedure consists of three main steps to sample and return a collection of plausible output predictions:
+\begin{enumerate}[leftmargin=*, noitemsep]
+    \item{\textbf{Stop or repeat.} Using a set-based scoring function, we check if the confidence in the current set is  $\geq \lambda_3$. If it is, then we stop and return the current set. Otherwise we return to Step 1.\looseness=-1}
+\end{enumerate}
+$\lambda = (\lambda_1, \lambda_2, \lambda_3)$ is a configuration that we calibrate to find a valid setting, $\hat{\lambda} = (\hat{\lambda}_1, \hat{\lambda}_2, \hat{\lambda}_3)$, that controls the risk of our output sets. In the following, we more carefully define our setting and notation (\S\ref{sec:setting}), and then describe our sampling (\S\ref{sec:algorithm}) and calibration algorithms (\S\ref{sec:calibration}). Then, in \S\ref{sec:comp_selection}, we provide an additional extension for highlighting confident generation components---i.e., subsections of our full generations that are independently likely to be correct, even if the full generation is not.\looseness=-1
+
+\subsection{Formal setting and notation}
+\label{sec:setting}
+\rev{Let $\mathcal{V}$ be an alphabet (a non-empty, finite set of tokens such as $\{\text{``a''}, \text{``b''},\text{``c''}, \ldots\}$) from which all possible output strings, $y$, are composed, i.e. $\mathcal{Y} := \bigcup_{n=0}^{\infty} \mathcal{V}^n$.}
+We assume that we are given a generative model $p_\theta(y \mid x)$ that defines a conditional probability distribution given some input prompt $x \in \mathcal{X}$  which we can sample from to obtain output strings, $y \sim p_\theta(y \mid x)$. 
+Following \citet{fisch2021admission}, for every input prompt $x$, we also further assume access to some ``admission'' function $A \colon \mathcal{Y} \rightarrow \{0, 1\}$ that is used to measure the acceptability of a given sample $y$. Intuitively, $A$ tells us if an output is  ``good enough''.
+We explore different tasks and admission functions in our experiments in \S\ref{sec:setup}.
+ Given a sampled calibration set $\mathcal{D}_\mathrm{cal}$, our goal is then to derive a configurable algorithm with input parameters $\lambda \in \Lambda$ for constructing a prediction  $\mathcal{C}_{{\lambda}}$ that we can calibrate to satisfy Eq.~\eqref{eq:coverage}.
+In the framework of LTT (refer to \S\ref{sec:background}), this is equivalent to defining $L_i(\lambda) = \mathbf{1}\{\nexists y \in \mathcal{C}_\lambda({X}_{i}) \colon A_{i}(y) = 1\}$,
+and using $\mathcal{D}_\mathrm{cal}$ to find a value $\hat{\lambda}$ such that $\mathbb{E}[L_\mathrm{test}(\hat{\lambda})] \leq \epsilon$, with probability at least  $1 - \delta$ over the draw of $\mathcal{D}_\mathrm{cal}$.
+
+\input{algorithms/generations}
+\subsection{Conformal sampling with rejection}
+\label{sec:algorithm}
+Let $\mathcal{F} \colon 2^{\mathcal{Y}} \rightarrow \mathbb{R}$ be a set-based function that, for any set $\mathcal{C} \in 2^{\mathcal{Y}}$, gives a \textbf{set confidence score} for  the event $\mathbf{1}\{\exists y \in \mathcal{C} \colon A(y) = 1\}$. $\mathcal{F}$ should not depend on $\mathcal{D}_\mathrm{cal}$.
+Furthermore, let $\mathcal{S} \colon \mathcal{Y} \times \mathcal{Y} \rightarrow \mathbb{R}$ be a text-based similarity function (e.g., \texttt{BLEU} or \texttt{ROUGE}) that we use to \textbf{detect duplicates and preserve diversity} in $\mathcal{C}$, and $\mathcal{Q} \colon \mathcal{X} \times \mathcal{Y} \rightarrow \mathbb{R}$ an input-conditional text-based measure of an \textbf{individual response's quality}---such as the LM's likelihood function, $p_\theta(y \mid x)$. We define and test different instances of these functions in \S\ref{sec:scoring_functions}. We then adopt a sampling-based procedure that \emph{grows} an output set, $\mathcal{C}_1 \subseteq \mathcal{C}_2 \subseteq \ldots \subseteq \mathcal{C}_{k-1}$, by repeatedly taking samples $y_{k} \sim p_\theta(y \mid x)$, and updating
+
+\begin{equation}
+\label{eq:early-exiting}
+    \mathcal{C}_{k} := \left\{
+     \begin{array}{@{}l@{\thinspace}l}
+       \multirow{1}{*}{$\mathcal{C}_{k-1} \cup \{y_{k}\}$}  &\hspace{8mm} \text{if }\max\{\mathcal{S}(y_{k}, y_j) \colon y_j \in \mathcal{C}_{k-1}\} \leq \lambda_1 \\
+       & \hspace{8mm}\text{and }\mathcal{Q}(x, y_{k}) \geq \lambda_2,\\[4pt]
+       \mathcal{C}_{k-1}  &\hspace{8mm}  \text{otherwise}. \\
+     \end{array}
+   \right.
+\end{equation}
+
+until the confidence after $k$ samples, $\mathcal{F}(\mathcal{C}_{k})$, is $ \geq \lambda_3$ (or some  sampling budget $k_\mathrm{max}$ is reached).\looseness=-1
+
+As an intuitive, but toy, example, suppose we modeled $y_k \sim p_\theta({y} \mid {x}), k = 1, 2, \ldots$ as a Bernoulli process, where each $y_k$ has the same probability of success $p$ that we assume (albeit unrealistically) that we know. For $X_{\mathrm{test}}$, ``success'' is determined by the admission function, $A_{\mathrm{test}}$. The confidence that our current set  $\mathcal{C}_k$ contains at least one admissible answer (without rejection) then follows a geometric distribution, $\mathrm{Geo}(p)$: all that remains is to compute the minimum number of samples  to take such that Eq.~\eqref{eq:coverage} is satisfied. This is achieved by taking $\mathcal{F}(\mathcal{C}_k) = k$ and $\lambda_3 = \lceil\log(\epsilon) / \log (1 - p) \rceil$.\looseness=-1
+
+Of course, in reality we do not know the probability of success $p$ for test examples. Furthermore, the samples $y_k$ are not independent, and since we are also able to observe their values, better strategies may exist to conditionally estimate $A(y_k) = 1$.
+Therefore, we allow $\mathcal{F}$ to be \emph{any} set-based function---that we also pair with similarity function $\mathcal{S}$, and sample quality function $\mathcal{Q}$, for handling rejections. Pseudocode is given in Algorithm~\ref{alg:sampling}. We derive, calibrate, and test different variations of $\mathcal{F}$, $\mathcal{S}$, and  $\mathcal{Q}$ in \S\ref{sec:setup} and \S\ref{sec:experiments}, respectively. Using $\lambda = (\lambda_1, \lambda_2, \lambda_3)$, we write $\mathcal{C}_\lambda(X_\mathrm{test})$ to denote the final output set.\looseness=-1 %In the next section, we derive how to calibrate $\hat{\lambda}$ using the LTT framework.\looseness=-1
+
+
+
+\subsection{Calibration with Learn Then Test}
+\label{sec:calibration}
+Let $\Lambda$ be a finite set of configurations. For example, if searching for a value of $\lambda = (\lambda_1, \lambda_2, \lambda_3) \in [0, 1]^3$, we might consider the evenly-spaced set $\Lambda = \{\frac{i}{\kappa} \colon i = 1, \ldots, \kappa\}^3$ for some finite $\kappa \in \mathbb{N}$. For each $\lambda \in \Lambda$, LTT then requires computing a valid p-value $p_\lambda$, where $p_\lambda$ is a super-uniform random variable under $\mathcal{H}_\lambda$. Here, we can obtain valid p-values from the empirical risk on $\mathcal{D}_\mathrm{cal}$,\looseness=-1
+\begin{equation}
+\label{eq:binomial_risk}
+    \widehat{R}_n(\lambda) := \frac{1}{n}\sum_{i=1}^n L_i(\lambda),\quad \text{where~~} L_i(\lambda) = \mathbf{1}\big\{\nexists y \in \mathcal{C}_\lambda({X}_{i}) \colon A_{i}(y) = 1\big\},
+\end{equation}
+\begin{lemma}[Binomial tail bound p-values]
+\label{lemma:bin}
+Let $\widehat{R}_n(\lambda)$ be the empirical risk in Eq.~\eqref{eq:binomial_risk}, and let $\mathrm{Binom}(n, \epsilon)$ denote a binomial random variable with sample size $n$ and success probability $\epsilon$. Then
+\begin{equation}
+    p_\lambda^\mathrm{BT} := \mathbb{P}(\mathrm{Binom}(n, \epsilon) \leq  n \widehat{R}_n(\lambda))
+\end{equation}
+is a valid p-value for $\mathcal{H}_\lambda \colon \mathbb{E}[L_\mathrm{test}(\lambda)] > \epsilon$.
+\end{lemma}
+When paired with any FWER-controlling algorithm $\mathcal{T}$ at level $\delta$, we obtain the set $\Lambda_\mathrm{valid} \subseteq \Lambda$ by selecting all configurations for hypotheses $\mathcal{H}_\lambda$ that are rejected by $\mathcal{T}(p^\mathrm{BT}_\lambda \colon \lambda \in \Lambda)$. If $\Lambda_\mathrm{valid}$ is empty, then we abstain (i.e., return \texttt{null}). Otherwise, we are free to use any configuration in $\Lambda_\mathrm{valid}$. We then select the one that empirically minimizes a weighted combination of the average final set size (after rejection) as well as the relative number of ``excess'' samples taken from our model  (i.e., how many extra samples our algorithm takes \emph{after} the first admissible answer has already been surfaced, proportional to the total number of samples). Specifically, let $S_\lambda(x)$ be the total number of samples taken, $S^*(x)$ be the oracle sample index $j$ of the first admissible generation (where $A(y_{j}) = 1$), and $\mathcal{C}_\lambda(x)$ be the final prediction set. Then, reusing $\mathcal{D}_\mathrm{cal}$, we take\looseness=-1
+\begin{equation}
+\label{eq:lambda_min}
+    \hat{\lambda} = \underset{\lambda \in \Lambda_\mathrm{valid}}{\arg\!\min}~~ \frac{1}{n} \sum_{i=1}^n \left( \rho_1|\mathcal{C}_\lambda(X_i)| + \rho_2\frac{[S_\lambda(X_i) - S^*(X_i)]^+}{S_\lambda(X_i)}\right)
+\end{equation}
+where $\rho_1, \rho_2 \in \mathbb{R}_{\geq 0}$ are hyper-parameters and $[\cdot]^+ \triangleq \max(\cdot, 0)$. We choose $\rho_1 = \rho_2 = 0.5$.
+As a consequence of LTT, the chosen $\hat{\lambda}$ (which is a random variable that depends on $\mathcal{D}_\mathrm{cal}$) is risk-controlling.\looseness=-1
+
+\begin{theorem}[Sampling-based LTT]
+\label{prop:ltt_sample}
+Let $\hat{\lambda}$ be defined according to Eq.~\eqref{eq:lambda_min}. Then the prediction $\mathcal{C}_{\hat{\lambda}}(X_\mathrm{test})$ computed by Algorithm~\ref{alg:sampling} satisfies Eq.~\eqref{eq:coverage}.
+\end{theorem}
+
+\begin{remark}
+Given a finite $k_\mathrm{max}$, Algorithm~\ref{alg:sampling} is guaranteed to terminate. Smaller $k_\mathrm{max}$ will, however, shrink the range of achievable $\epsilon$ (i.e., with $\hat{\lambda} \neq \texttt{null}$).\looseness=-1
+\end{remark}
+
+To efficiently search and test the higher dimensional $\lambda = (\lambda_1, \lambda_2, \lambda_3)$, we use the Pareto Testing procedure from \citet{goldshtein2023efficiently}. Pareto Testing exploits structure in $\Lambda$ by first using a proportion of $\mathcal{D}_\mathrm{cal}$ to find $\Lambda$'s Pareto-optimal frontier, and then iteratively validates  promising configurations using Fixed Sequence Testing~\cite{holm1979simple} on the remaining calibration data.\looseness=-1
+
+
+
+\subsection{Conformal selection of individual components}\label{sec:comp_selection} 
+
+A caveat of language generation is that  LM responses can be verbose, and composed of multiple components. We consider a ``component'' to be a logically defined subpart of a larger response, such as a series of phrases or propositions.  For example, a radiology report like \emph{``The heart is mildly enlarged. The lungs are clear.''}  can be broken down into two  findings: \emph{``The heart is mildly enlarged.''} and \emph{``The lungs are clear.''} \rev{While Theorem~\ref{prop:ltt_sample} guarantees that complete, admissible generations do \emph{exist} within our prediction sets, we cannot use it to make statements about the relative reliability of individual components within each response contained within that prediction set.}
+Let $\mathcal{E} \colon \mathcal{Y} \rightarrow 2^{\mathcal{Y}}$ be a deterministic function that takes a text string  and breaks it down into components. We implement $\mathcal{E}$ to be a simple sentence splitter. For every input $x$, we assume access to some \emph{component-based} admission function $A^\mathrm{c} \colon \mathcal{Y} \rightarrow \{0, 1\}$ that is used to judge \textbf{individual components for correctness}. For example, $A^\mathrm{c}$ may check if $e$ is entailed by  another component $e' \in \mathcal{E}(y^\mathrm{ref})$, where $y^\mathrm{ref}$ is a human reference. Let  $\mathcal{F}^\mathrm{c} \colon \mathcal{Y} \rightarrow \mathbb{R}$ be a function that, for component $e \in \mathcal{Y}$, gives a \textbf{ confidence score} for the event $A^\mathrm{c}(e) = 1$. We then define the subset of components $\mathcal{C}_{\gamma}^{\mathrm{inner}} \subseteq 2^{\mathcal{Y}}$ as \looseness=-1
+\begin{equation}
+    \mathcal{C}_{\gamma}^{\mathrm{inner}}(x) := \Big\{e \in \bigcup_{y \in \mathcal{C}_\lambda(x)} \mathcal{E}(y) \colon \mathcal{F}^\mathrm{c}(e) \geq \gamma \Big\}.
+\end{equation}
+Using $\mathcal{D}_\mathrm{cal}$, we seek to calibrate $\gamma \in \Gamma$, such that for test pair $(X_\mathrm{test}, A^\mathrm{c}_\mathrm{test})$ and $\alpha, \delta \in (0, 1)$,\looseness=-1
+\begin{equation}
+    \label{eq:component_coverage}
+    \mathbb{P}\Big(\mathbb{P}\Big(A_\mathrm{test}^\mathrm{c}(e) = 1 ,\forall e \in \mathcal{C}_\gamma^{\mathrm{inner}}(X_\mathrm{test}) \mid \mathcal{D}_\mathrm{cal} \Big) \geq 1-\alpha \Big) \geq 1 - \delta.
+\end{equation}
+The outer and inner probabilities are over the draws of $\mathcal{D}_\mathrm{cal}$ and $(X_\mathrm{test}, A^\mathrm{c}_\mathrm{test})$, respectively. The new parameter $\alpha$ can be interpreted as the maximum rate of making \emph{any} false positive predictions in which we select a component that is not in fact acceptable. \rev{Like $\mathcal{C}_\mathrm{\lambda}$, we calibrate $\mathcal{C}_{\gamma}^{\mathrm{inner}}$  using LTT, but seek to make $\mathcal{C}_{\gamma}^{\mathrm{inner}}$  as \emph{large} as possible, in order to maximize recall of correct components.}
+Concretely, let $L^\mathrm{c}_i(\gamma) = \mathbf{1}\{\exists e \in \mathcal{C}_\gamma^\mathrm{inner} \colon A_i^\mathrm{c}(e) = 0\}$ and let $\Gamma_\mathrm{valid}$ be the set of non-rejected configurations found by LTT (again using binomial tail p-values). During calibration we define $\mathcal{C}_\gamma^\mathrm{inner}(X_i)$ using an upper bound to $\mathcal{C}_\lambda(X_i)$, by simply taking the first $k_\mathrm{max}$ samples, $\{y_1, \ldots, y_{k_\mathrm{max}}\}$. \rev{This will allow us to conveniently decouple component calibration from set calibration.} We then use the configuration that empirically maximizes the average number of confident components (where we again  reuse $\mathcal{D}_\mathrm{cal})$:\looseness=-1
+\begin{equation}
+\label{eq:lambda_max}
+    \hat{\gamma} = \underset{\gamma \in \Gamma_\mathrm{valid}}{\arg\!\max}~~ \frac{1}{n} \sum_{i=1}^n |\mathcal{C}_\gamma(X_i)|.
+\end{equation}
+\begin{proposition}[Component-based LTT]
+\label{prop:components}
+Let $\hat{\gamma}$ be defined according to Eq.~\eqref{eq:lambda_max}, where $\mathcal{C}_\gamma(X_i)$ uses $\mathcal{C}_\lambda(X_i) \equiv \{y_1, \ldots, y_{\mathrm{k}_\mathrm{max}}\}$ during calibration. Then the prediction set of components, $\mathcal{C}_{\hat{\gamma}}(X_\mathrm{test})$ computed by Algorithm~\ref{alg:components} paired with any $\mathcal{C}_\lambda$ at test time with $\sup_x |\mathcal{C}_\lambda(x)| \leq k_\mathrm{max}$  satisfies Eq.~\eqref{eq:component_coverage}.
+\end{proposition}\looseness=-1
+By the union bound, Eq.~\eqref{eq:coverage} and Eq.~\eqref{eq:component_coverage} hold simultaneously with probability $1 - 2\delta$.
+
+\input{algorithms/components}
+
+
+
+\section{Experimental setup}
+
+In this section, we briefly describe our experimental setup, including tasks, scoring functions, and metrics. We set $k_\mathrm{max} = 20$ for all experiments.\looseness=-1
+\pagebreak[2]
+\subsection{Tasks}
+
+\textbf{Radiology report generation.} As motivated in \S\ref{sec:intro}, we apply our method to chest X-ray radiology report generation using the \textbf{MIMIC-CXR}~\citep{johnson2019mimic} dataset.  For our LM, we fine-tune an encoder-decoder architecture based on a pretrained ViT~\citep{dosovitskiy2021image} image encoder and a GPT2-small~\citep{radford2019language}  text decoder. To judge admission, we use the popular Clinical Efficacy metric~\citep{liu2019clinically, nicolson2022improving} to check if the 14 labels predicted by an auxiliary CheXbert~\citep{smit2020chexbert} model on the generated report exactly match the labels predicted by the same CheXbert model for a reference report from a radiologist. Similarly, a component (here a sentence including a finding) is defined to be admissible if it has a  \texttt{ROUGE-L}~\cite{lin-2004-rouge} score $\geq 0.4$ (picked empirically), when compared to any component directly extracted from the reference.\looseness=-1
+
+\textbf{News summarization.} We also apply our method to news article text summarization using  the \textbf{CNN/DM}~\citep{NIPS2015_afdec700} dataset. For our LM,  we finetune a T5-XL~\citep{raffel2020exploring} model. We define a candidate generation to be admissible if it has a \texttt{ROUGE-L} score $\geq 0.35$, when compared to all available reference summaries from human annotators. Like MIMIX-CXR, we define a component to be admissible if it has a \texttt{ROUGE-L} score $\geq 0.4$ when compared to components extracted from human summaries. These thresholds are picked through manual validation.\looseness=-1
+
+\textbf{Open-domain question answering.} Finally, we apply our method to open-domain QA using the \textbf{TriviaQA}~\citep{joshi2017triviaqa} dataset. Here we sample answers from LLaMA-13B~\citep{touvron2023llama} in the few-shot setting $(k=32)$, without any additional fine-tuning. Since answers are limited to one or few tokens, a candidate output generation is acceptable only if it exactly matches an annotated reference answer (after removing articles, casing, and punctuation). Furthermore, since the expected answers are short and fairly atomic, we do not evaluate component-level confidence for this dataset.\looseness-1
+
+\subsection{Scoring functions} 
+\label{sec:scoring_functions}
+Our method can support different quality functions $\mathcal{Q}$, similarity functions $\mathcal{S}$, and set scoring functions $\mathcal{F}$. We show that a straightforward approach is to simply use transformations on the model likelihoods (from token logits). %\footnote{While straightforward, note that potentially better measures can be derived through other means like~\cite{kadavath2022language, wang2023selfconsistency}.} 
+We define $\mathcal{Q}(x, y) = p_{\theta}(y \mid x)$ using the likelihood function of the base LM, with length-normalization~\citep{wu2016google}. We use \texttt{ROUGE-L} for $\mathcal{S}$. For $\mathcal{F}$, we experiment with:\looseness=-1
+
+ 
+ \item \textsc{Sum.}
+ Alternatively, we also use the sum of item-level scores:
+ $\mathcal{F_{\text{\textsc{Sum}}}(\mathcal{C}}) = \sum_{y\in C}\mathcal{Q}(y)$.
+\end{itemize}
+\subsection{Metrics} Our main motivation is to produce valid confidence sets that are also precise. %A desirable procedure should output smaller sets on easy examples, and dedicate a larger budget to harder examples. 
+To reflect this, we measure both the \textbf{loss} of our sets (which is guaranteed to satisfy our prescribed limits), as well as both (a) the \textbf{relative number of ``excess'' samples} taken from our model (including rejected samples, see also Eq.~\eqref{eq:lambda_min}), and (b) the ultimate \textbf{output size} of the prediction set (after rejection). Both metrics are important, as over-sampling wastes computation (or expensive API calls), while  large output sets can be unwieldy to use and overall less helpful as an uncertainty quantification tool. We measure results and compute the normalized\footnote{Specifically, we compute $\mathrm{AUC}(f; a, b) = \frac{1}{b - a} \int_{a}^{b} f(\epsilon) d\epsilon$, where $[a, b]$ is the range of evaluated $\epsilon$ (or $\alpha$).} AUC over the range of \textbf{achievable} $\epsilon$ or $\alpha$ (using a \textbf{fixed} $\mathbf{\delta=0.05}$), \textbf{excluding trivial} values (e.g., that a policy that always returns the first generation would satisfy).
+
+
+\iffalse
+Tasks
+- The dataset used:
+  - QA: TriviaQA
+  - Summarization: CNN/DM
+  - Radiology: MIMIC-CXR
+- The model used:
+  - TriviaQA: LLaMA-13B, few-shot setting, k =32
+  - CNN/DM: T5-XL
+  - MIMIC: ViT + GPT2
+- Admission function
+  - TriviaQA: exact match
+  - CNN/DM: Rouge score > 0.65
+  - MIMIC: Clinical efficacy score = 1 (i.e. findings match)
+- Scoring function
+  - We use normalized probabilities for all three tasks
+- Splits
+  - We use 2000 for calibration, 2000 for validation and the remaining for testing. That's about \~10k for each task.
+- Metrics
+  - By using a stopping rule, we can condition the confidence set on the example at hand. When using a fixed threshold for the number of samples, we can achieve the desired marginal coverage by giving better guarantees to easy example at the expense of harder ones. To measure the efficacy of our method at providing a more even coverage, we plot the relative excess size.
+\fi
+\begin{figure}[!t]
+    \centering
+    \begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=1.0\linewidth]{figures/plots/cxr_loss.png} 
+    \end{subfigure}
+    \begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=1.0\linewidth]{figures/plots/cnndm_loss.png}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=1.0\linewidth]{figures/plots/triviaqa_loss.png} 
+    \end{subfigure}
+    
+    \begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=1.0\linewidth]{figures/plots/cxr_samples.png} 
+    \end{subfigure}
+    \begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=1.0\linewidth]{figures/plots/cnndm_samples.png}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=1.0\linewidth]{figures/plots/triviaqa_samples.png} 
+    \end{subfigure}
+    
+    \begin{subfigure}[b]{0.32\textwidth}
+     \includegraphics[width=1.0\linewidth]{figures/plots/cxr_size.png} 
+    \caption{MIMIC-CXR}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=1.0\linewidth]{figures/plots/cnndm_size.png}
+    \caption{CNN/DM}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=1.0\linewidth]{figures/plots/triviaqa_size.png} 
+    \caption{TriviaQA} \label{fig:conformal-sampling-trivia}
+    \end{subfigure}
+    \caption[]{Conformal sampling results for $\mathcal{C}_\lambda$ a function of $\epsilon$. We report the loss, relative excess samples, and overall size (normalized by $k_\mathrm{max}$). We also report the AUC over achieved/non-trivial $\epsilon$.\looseness=-1}
+     \label{fig:conformal-sampling}
+\end{figure}
+
+
+
+\section{Experimental results}
+
+\label{sec:experiments}
+We now present our main results. 
+In all plots, solid lines give the mean over 100 trials and shaded regions show $+/-$ the standard deviation. 
+\textbf{Validity of conformal sampling with rejection.} We demonstrate in Figure~\ref{fig:conformal-sampling} that our conformal sampling approach matches our theory in practice, as the average set loss often matches but never exceeds the target risk level. Methods that have access to the model logits (\textsc{Max}, \textsc{Sum}, \textsc{First-K-reject}) are close to, but still below, the diagonal line, indicating that they are valid, but not conservative.\looseness=-1
+
+\textbf{Prediction efficiency.}  
+The likelihood-based approaches outperform the uniform \textsc{First-K} baseline across all three tasks. For example, as Figure~\ref{fig:conformal-sampling-trivia} shows, the AUC of expected set size of \textsc{Max} and \textsc{Sum} are both less than half the AUC of \textsc{First-K} in the QA task.
+In tasks with longer output texts, \textsc{First-K} produces competitive set sizes across all achievable $\epsilon$. However, on the relative number of excess samples metric, the  \textsc{Max} scoring function largely outperforms \textsc{Sum} and \textsc{First-K}. \rev{ \textsc{First-K+reject} achieves similar size efficiency to the other rejection algorithms, but still lacks sampling efficiency.}\looseness=-1
+
+\textbf{Individual components.}  
+We evaluate two scoring functions $\mathcal{F}^c$ for conformal component selection. \textsc{Span-logits} extracts the likelihood of a component using the base language model. However, as that likelihood is also conditioned on previous context, it may underestimate the score of a correct component that follows an incorrect component. We therefore also test an application-specific \textsc{Classifier} to assign a conformity score to each component. We compare  to a \textsc{Random} baseline which attributes a random score to any $(x,e)$ pair. Figure~\ref{fig:conformal-components} shows that by modeling components independently, we produce better (larger) sets.
+
+
+
+
+\section{Conclusion}
+
+Reliably using language models (LMs) in real-world tasks inevitably requires meaningful uncertainty quantification.
+In this paper, we introduced an approach to conformal prediction that allows a user to sample prediction sets from generative LMs with infinite, combinatorial output spaces, while retaining desirable statistical guarantees. %bridges the gap between standard conformal prediction and LMs by the two, overcomming the finite output space limitation of conformal prediction, by
+Our method bridges the gap between standard conformal prediction and LM inference by calibrating a stopping rule for an algorithm that iteratively grows an output prediction set by sampling new generations (with rejection).
+Moreover, we can separately identify confident answer subcomponents. This can help users better understand the quality of long responses, which often include both correct and incorrect aspects.
+Empirically, we demonstrated that we can obtain efficient prediction sets, both in terms of size and total required samples.
+
+
+
+

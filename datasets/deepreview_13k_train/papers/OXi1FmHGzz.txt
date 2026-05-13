@@ -1,0 +1,578 @@
+\title{Vertical Federated Learning with Missing Features During Training and Inference}
+
+\begin{abstract}
+	Vertical federated learning trains models from feature-partitioned datasets across multiple clients, who collaborate without sharing their local data. Standard approaches assume that all feature partitions are available during both training and inference. Yet, in practice, this assumption rarely holds, as for many samples only a subset of the clients observe their partition. However, not utilizing incomplete samples during training harms generalization, and not supporting them during inference limits the utility of the model. Moreover, if any client leaves the federation after training, its partition becomes unavailable, rendering the learned model unusable. Missing feature blocks are therefore a key challenge limiting the applicability of vertical federated learning in real-world scenarios. To address this, we propose \texttt{LASER-VFL}, a vertical federated learning method for efficient training and inference of split neural network-based models that is capable of handling arbitrary sets of partitions. Our approach is simple yet effective, relying on the strategic sharing of model parameters and on task-sampling to train a family of predictors. We show that \texttt{LASER-VFL} achieves a $\mathcal{O}(\sfrac{1}{\sqrt{T}})$ convergence rate for nonconvex objectives in general, $\mathcal{O}(\sfrac{1}{T})$ for sufficiently large batch sizes, and linear convergence under the Polyak-{\L}ojasiewicz inequality. Numerical experiments show improved performance of \texttt{LASER-VFL} over the baselines. Remarkably, this is the case even in the absence of missing features. For example, for CIFAR-100, we see an improvement in accuracy of $21.4\%$ when each of four feature blocks is observed with a probability of 0.5 and of $12.2\%$  when all features are observed.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+		
+
+In federated learning (FL), a set of clients collaborates to jointly train a model using their local data without sharing it~\citep{kairouz2021advances}. In horizontal FL, data is distributed by samples, meaning each client holds a different set of samples but shares the same feature space. In contrast, vertical FL (VFL) involves data distributed by features, where each client holds different parts of the feature space for overlapping sets of samples. Whether an application is horizontal or vertical FL is dictated by how the data arises, as it is not possible to redistribute the data. This work focuses on VFL.
+
+In VFL~\citep{liu2024vertical}, the global dataset~$\mathcal{D}\coloneqq\{\bm{x}^1,\dots,\bm{x}^N\}$, where $N$ is the number of samples, is partitioned across clients $ \mathcal{K}\coloneqq \{1, \dots, K\} $. Each client $k\in\mathcal{K}$ typically holds a local dataset $ \mathcal{D}_k \coloneqq \{ \bm{x}_k^1,\dots,\bm{x}_k^N \} $, where $  \bm{x}_k^n $ is the block of features of sample $n$ observed by client $k$. We have that $\bm{x}^n = (\bm{x}_1^n, \dots, \bm{x}_K^n)$. Unlike horizontal FL, in VFL, different clients collect local datasets with distinct types of information (features). Such setups—e.g., an online retail company and a social media platform holding different features on shared users—typically involve entities from different sectors, reducing competition and increasing the incentive to collaborate. To train VFL models without sharing the local datasets, split neural networks~\citep{ceballos2020splitnn} are often considered.
+In split neural networks, each client~$k$ has a \textit{representation model} $\bm{f}_k$, parameterized by $\bm{\theta}_{\bm{f}_k}$. The representations extracted by the clients are then used as input to a \textit{fusion model} $g$, parameterized by $\bm{\theta}_{g}$. This fusion model can be at one of the clients or at a server. We thus want to learn the parameters $\bm{\theta}_{\mathcal{K}}\coloneqq(\bm{\theta}_{\bm{f}_1},\dots,\bm{\theta}_{\bm{f}_K},\bm{\theta}_{g})$ of the resulting \textit{predictor} $h$. To achieve this, we aim to solve:
+\begin{equation} \label{eq:svfl_predictor}
+	\min_{\bm{\theta}_\mathcal{K}}
+	\quad
+	\frac{1}{N}
+	\sum_{n=1}^{N}
+	\ell(h(\bm{x}^n;\bm{\theta}_\mathcal{K}),y^n)
+	\quad
+	\text{where}
+	\quad
+	h(\bm{x}^n;\bm{\theta}_\mathcal{K})
+	\coloneqq
+	g\left(\left\{\bm{f}_k(\bm{x}_{k}^n;\bm{\theta}_{\bm{f}_k})\right\}_{k=1}^K;\bm{\theta}_{g}\right)
+	,
+\end{equation}
+with $\ell$ denoting a loss function and $y^n$ the label of sample $n$, which we assume to be held by the same entity (client or server) as the fusion model. We illustrate this family of models in Figure~\ref{fig:splitnn}.
+
+\paragraph{Generalization and availability in standard VFL.}
+We see in~\eqref{eq:svfl_predictor} that, even for a single sample $n$, predictor $h$ depends on all the blocks of features, $\{\bm{x}^n_k: \forall k\}$. Thus, for both training and inference, \eqref{eq:svfl_predictor} requires the observations of all the clients to be available.\footnote{This contrasts with horizontal FL, where the local data of one client suffices to estimate mini-batch gradients and perform inference.} Building on our example of an online retailer and a social media company sharing users, each company is also likely to have unique users. This applies to both training and test data. Further, if any client drops from the federation during inference, its block will permanently stop being observed. In both the case of nonshared users and of clients leaving the federation, standard VFL predictors become unusable. Figure~\ref{fig:data-availability-and-usage} illustrates this phenomenon: for both training and inference, if each of $K=3$ clients observes its block of features with an (independent) probability of $0.5$, only $0.5^3=12.5\%$ of the original data is usable. Thus, restricting training to fully-observed samples hinders generalization, while restricting inference to such samples limits the availability and utility of the model.
+
+\paragraph{Dealing with missing features.}
+To handle missing features in training data, some approaches expand the dataset, filling the missing features before collaborative training~\citep{kang2022fedcvt}, while others use their partition of partially-observed samples for local representation learning but exclude them from collaboration~\citep{he2024hybrid}. These methods can outperform standard VFL when partially observed samples are present, but they add new training stages and auxiliary modules, making them more complex. Moreover, they train a joint predictor that requires the collaboration of all clients during inference. On the other hand, to improve robustness against missing blocks at inference, each client can train a local predictor using only its own features, avoiding collaboration altogether. This also addresses missing features in the training data. Alternatively, collaborative methods can employ techniques such as knowledge distillation~\citep{huang2023vertical} and data augmentation~\citep{gao2024complementary} to train local predictors, also adding complexity with multiple stages. However, while robust to missing features, these local predictors cannot utilize additional feature blocks if available at test time, resulting in wasted data and reduced predictive power. We illustrate this in Figure~\ref{fig:data-availability-and-usage}.
+
+\begin{figure}[t]
+	\centering
+	\begin{subfigure}[b]{0.24\textwidth}
+		\centering
+		\includegraphics[width=\textwidth]{./figures/splitnn}
+	\end{subfigure}
+	\hfill
+	\begin{subfigure}[b]{0.45\textwidth}
+		\centering
+		\includegraphics[width=\textwidth]{./figures/data-availability-usage}
+	\end{subfigure}
+	\hfill
+	\begin{subfigure}[b]{0.28\textwidth}
+		\centering
+\resizebox{\textwidth}{!}{
+		\begin{tabular}{lcc}
+			\toprule
+			\noalign{\vskip 1mm}
+			\cmidrule(lr){2-3}
+			& 0.0 & 0.5 \\
+			\midrule
+			\noalign{\vskip 1mm}
+			& \multicolumn{2}{c}{($F_1$-score$\times 100$)} \\
+			\noalign{\vskip 1mm}
+			Local & $74.9$ & $73.0$ \\
+			Standard VFL & $91.6$ & $51.8$ \\
+			\texttt{LASER-VFL} (ours) & $\textbf{92.0}$ & $\textbf{82.0}$ \\
+			\bottomrule
+		\end{tabular}
+	}
+	\end{subfigure}
+	\\
+	\begin{subfigure}[t]{0.22\textwidth}
+		\centering
+		\caption{Split neural network.}
+		\label{fig:splitnn}
+	\end{subfigure}
+	\hfill
+	\begin{subfigure}[t]{0.5\textwidth}
+		\centering
+		\caption{Dataset availability and usage.}
+		\label{fig:data-availability-and-usage}
+	\end{subfigure}
+	\hfill
+	\begin{subfigure}[t]{0.25\textwidth}
+		\centering
+		\caption{Results preview.}
+		\label{fig:local-vs-svfl}
+	\end{subfigure}
+	\caption{
+		In Figure~\ref{fig:splitnn}, we illustrate a split neural network. In Figure~\ref{fig:data-availability-and-usage}, we show the availability of a dataset with $K=3$ blocks of features, each with a $0.5$ probability of being observed, and its usage and waste by three key methods: standard VFL, a local approach, and our method. Standard VFL trains a single predictor, while the local approach and our method train different predictors at different clients (we show the data usage for client 1). In Figure~\ref{fig:local-vs-svfl}, we present a preview of our results: a mortality prediction task using the MIMIC-IV dataset, when the probability of each block of features missing, $p_{\text{miss}}$, is in $\{0.0, 0.5\}$, for both data and test data.}
+\end{figure}
+
+Therefore, there is a gap in the literature when it comes to leveraging all the available data without either dropping incomplete samples or ignoring existing features. This raises the following question:
+\begin{center}
+	\emph{Can we design an efficient VFL method that is robust to missing features at both training and inference with provable convergence guarantees, without wasting data?}
+\end{center}
+
+In this work, we answer this question in the affirmative. We propose \texttt{LASER-VFL} (\textbf{L}everaging \textbf{A}ll \textbf{S}amples \textbf{E}fficiently for \textbf{R}eal-world \textbf{VFL}), a novel method that enables both training and inference using any and all available blocks of features. To the best of our knowledge, this is the first method to achieve this. Our approach avoids the multi-stage pipelines that are common in this area, providing a simple yet effective solution that leverages strategic sharing of model parameters alongside a task-sampling mechanism. By fully utilizing all data (see Figure~\ref{fig:data-availability-and-usage}), our method leads to significant performance improvements, as demonstrated in Figure~\ref{fig:local-vs-svfl}. Remarkably, our approach even surpasses standard VFL when all samples are fully observed. We attribute this to a dropout-like regularization effect introduced by task sampling.
+\paragraph{Our contributions.}
+The main contributions of this work are as follows.
+\begin{itemize} [leftmargin=1.5em]
+	\item We propose \texttt{LASER-VFL}, a simple, hyperparameter-free, and efficient VFL method that is flexible to a varying number of feature blocks during both training and inference. To the best of our knowledge, this is the first method to achieve such flexibility and avoid wasting either training data or test data.
+	\item We show that \texttt{LASER-VFL} converges at a $\mathcal{O}(\sfrac{1}{\sqrt{T}})$ rate for nonconvex objectives in general, and at a $\mathcal{O}(\sfrac{1}{T})$ rate for a sufficiently large batch size. Further, under the Polyak-{\L}ojasiewicz (PL) inequality, we achieve linear convergence.
+	\item Numerical experiments show that \texttt{LASER-VFL} consistently outperforms baselines across multiple datasets and varying data availability patterns. It demonstrates superior robustness to missing features and, notably, when all features are available, it still outperforms even standard VFL.
+\end{itemize}
+
+\paragraph{Related work.}
+VFL shares challenges with horizontal FL, such as communication efficiency~\citep{Liu2022,valdeira2024communication} and privacy preservation~\citep{yu2024survey}, but also faces unique obstacles, such as missing feature blocks. During training, these unavailable partitions render the observed blocks of other clients unusable, and at test time, they can prevent inference altogether. Therefore, most VFL literature assumes that all features are available for both training and inference—an often unrealistic assumption that has hindered broader adoption of VFL~\citep{liu2024vertical}.
+
+To address the problem of missing features during VFL training, some works use nonoverlapping, or nonaligned, samples (that is, samples with missing feature blocks) to improve generalization. In particular, \citet{feng2022vertical} and \citet{he2024hybrid} apply self-supervised learning to leverage nonaligned samples locally for better representation learning, while using overlapping samples for collaborative training of a joint predictor. Alternatively, \citet{kang2022fedcvt}, \citet{yang2022multi}, and \citet{sun2023communication} employ semi-supervised learning to take advantage of nonaligned samples. Although these methods enable VFL to utilize data that conventional approaches would discard, they still train a joint predictor and thus require all features to be available for inference, which remains a limitation.
+
+A recent line of research leverages information from the entire federation to train local predictors. This can be achieved via transfer learning, as in~\citet{feng2020multi,kang2022privacy} for overlapping training samples and in~\citet{Liu_2020,feng2022semi} for handling missing features. Knowledge distillation is another approach, as used by~\citet{ren2022improving,li2023vfedssdpracticalverticalfederated} for overlapping samples and by~\citet{li2023verticalsemifederatedlearningefficient,huang2023vertical} which leverage nonaligned samples when training local predictors (only the latter considers scenarios with more than two clients). \citet{xiao2024distributed} recently proposed using a distributed generative adversarial network for collaborative training on nonoverlapping data and synthetic data generation. These methods yield local predictors that outperform naive local approaches but fail to utilize valuable information when other feature blocks are available during inference.
+Two recent works enable a varying number of clients to collaborate during inference. \citet{sun2023robust} employs party-wise dropout during training to mitigate performance drops from missing feature blocks at inference, while \citet{gao2024complementary} introduces a multi-stage approach with complementary knowledge distillation, enabling inference with different client subsets. Both methods, however, require fully-observed training data and lack convergence guarantees.
+In contrast to prior work, \texttt{LASER-VFL} can handle any subset of feature blocks being present during both training and inference without wasting data, while requiring only minor modifications to the standard VFL approach. It differs from conventional VFL solely in its use of strategic sharing of model parameters and task-sampling mechanisms, without the need for additional stages.
+
+		
+
+
+\section{Definitions and Preliminaries}
+
+
+Our global dataset~$ \mathcal{D} $ is drawn from an input space~$\mathcal{X}$ which is partitioned into $K$ feature spaces $\mathcal{X}=\mathcal{X}_1\times\dots\times\mathcal{X}_K$ such that $\mathcal{D}_k\subseteq\mathcal{X}_k$, where, recall, $\mathcal{D}_k$ is the local dataset of client~$k$. Ideally, we would train a general, unconstrained predictor $\tilde{h}\colon\mathcal{X}\mapsto\mathcal{Y}$, where $\mathcal{Y}$ is the label space, by solving
+$ \min_{\tilde{\bm{\theta}}} 
+\frac{1}{N}
+\sum_{n=1}^{N}
+\ell(\tilde{h}(\bm{x}^n;\tilde{\bm{\theta}}),y^n)$. However, VFL brings the additional constraint that this must be achieved without sharing the local datasets. That is, for all $k$, the local dataset $\mathcal{D}_k$ must remain at client~$k$. As mentioned in Section~\ref{sec:intro}, standard VFL methods approximate $\tilde{h}$ by $h\colon\mathcal{X}\mapsto\mathcal{Y}$, as defined in~\eqref{eq:svfl_predictor}, allowing for collaborative training without sharing the local datsets, but they cannot handle missing features during training nor inference.
+
+Another way to train predictors without sharing local data is to learn local predictors. In particular, each client~$k\in\mathcal{K}$ can learn the parameters $\bm{\theta}_k$ of a predictor $h_k:\mathcal{X}_k\mapsto\mathcal{Y}$ to approximate $\tilde{h}$:
+\begin{equation} \label{eq:standalone_predictor}
+	h_k(\bm{x}^n_{k};\bm{\theta}_k)
+	\coloneqq
+	g_k(\bm{f}_{k}(\bm{x}^n_{k};\bm{\theta}_{\bm{f}_k});\bm{\theta}_{g_k})
+	\quad
+	\text{where}
+	\quad
+	\bm{\theta}_k\coloneqq(\bm{\theta}_{\bm{f}_k},\bm{\theta}_{g_k}).
+\end{equation}
+The  representation models $\bm{f}_k:\mathcal{X}_k\mapsto\mathcal{E}_k$, where $\mathcal{E}_k$ is the representation space of client $k$, are as in~\eqref{eq:svfl_predictor}, yet the fusion models $g_k:\mathcal{E}_k\mapsto\mathbb{R}$ differ from $g:\mathcal{E}_1\times\cdots\times\mathcal{E}_K\mapsto\mathbb{R}$ in~\eqref{eq:svfl_predictor} and $h_k$ differs from $h$. This approach is useful in that $h_k$ allows client~$k$ to perform inference (and be trained) independently from all the other clients, but it does not make use of the features observed by clients $j\not=k$.
+
+More generally, to achieve robustness to missing blocks in the test data while avoiding wasting other features, we wish to be able to perform inference based on any possible subset of blocks, $\mathscr{P}(\mathcal{K}) \setminus \{\varnothing\}$, where $ \mathscr{P}(\mathcal{K}) $ denotes the power set of $\mathcal{K}$. Standard VFL allows us to obtain a predictor for the blocks $\mathcal{K}$ and the local approach provides us with predictors for the singletons $\{\{i\}\colon i\in\mathcal{K} \}$ in the power set. However, none of the other subsets of $\mathcal{K}$ is covered by either approach.
+
+A naive way to achieve this would be to train a predictor for each set in $\mathscr{P}(\mathcal{K}) \setminus \{\varnothing\}$ in a decoupled manner. That is, we could train each of the following predictors $\{h_{\mathcal{J}}\colon \prod_{k \in \mathcal{J}} \mathcal{X}_k\mapsto\mathcal{Y}\}$ independently, using the collaborative training approach of standard VFL for $\mathcal{J}$:
+\begin{equation} \label{eq:naive_predictors}
+	\left\{
+	h_{\mathcal{J}}(\bm{x}^n_{\mathcal{J}};\bm{\theta}_{\mathcal{J}})
+	\coloneqq
+	g_{\mathcal{J}}
+	(
+	(\bm{f}_k(\bm{x}_{k}^n;\bm{\theta}_{\bm{f}_k(\mathcal{J})})\colon k\in\mathcal{J})
+	;
+	\bm{\theta}_{g_{\mathcal{J}}}
+	)
+	\colon
+	\mathcal{J}\in\mathscr{P}(\mathcal{K})\setminus\{\varnothing\}
+	\right\},
+\end{equation}
+where $\bm{\theta}_{\mathcal{J}} = ((\bm{\theta}_{\bm{f}_k}(\mathcal{J})\colon k\in\mathcal{J}) , \bm{\theta}_{g_{\mathcal{J}}} )$ and $\bm{x}^n_{\mathcal{J}}=(\bm{x}^n_k\colon k\in\mathcal{J})$. These predictors can either be at one of the clients or at the server. The set of predictors in~\eqref{eq:naive_predictors} includes the local predictors $\{h_k\}$ and the standard VFL predictor $h$, but also all the other nonempty sets in the power set $\mathscr{P}(\mathcal{K})$.\footnote{
+	The notation in~\eqref{eq:naive_predictors} differs slightly from~\eqref{eq:svfl_predictor} and~\eqref{eq:standalone_predictor}, which use a simpler, more specific formulation.
+}
+This approach addresses the issue of limited flexibility and robustness in prior methods, which struggle with varying numbers of available or participating clients during inference. However, by requiring the independent training of $2^K - 1$ distinct predictors, it introduces a new challenge: the number of models would grow exponentially with the number of clients, $K$. Consequently, the associated memory, computation, and communication costs would also increase exponentially.
+
+Further, if the predictors in~\eqref{eq:naive_predictors} are all held by a single entity, this setup introduces a dependency of all clients on that entity. To enhance robustness against clients dropping from the federation, we would like each client to be able to ensure inference whenever it has access to its corresponding block of the sample. That is, we want each client~$k \in \mathcal{K}$ to train a predictor for every nonempty subset of $\mathcal{K}$ that includes $k$, defined as $
+\mathscr{P}_k(\mathcal{K})\coloneqq \{\mathcal{J} \in \mathscr{P}(\mathcal{K}) \colon k \in \mathcal{J}\}$. This allows $k$ to make predictions regardless of whether the information on the blocks observed by other clients is available and can be leveraged to improve performance.
+
+In the next section, we present our method, \texttt{LASER-VFL}, which enables the efficient training of a family of predictors that can handle scenarios where features from an arbitrary set of clients are missing.
+
+		
+
+
+\section{Our method}
+
+
+
+\paragraph{Key idea.}
+When striving to have a predictor at each client to perform inference using any subset of blocks that includes its own, the main challenge is to circumvent the exponential complexity that can ensue from the exponential number of possible combinations of available blocks. To address this, in \texttt{LASER-VFL}, we \textit{share model parameters} across the predictors leveraging different subsets of blocks and train them so that the representation models allow for good performance across the different combinations of blocks. Further, we train the fusion model at each client to handle any combination of representations that includes its own. To train the predictors on an exponential number of combinations of missing blocks while avoiding an exponential computational complexity, we employ a \textit{sampling} mechanism during training, which allows us to essentially estimate an exponential combination of objectives with a subexponential complexity.
+
+\subsection{A tractable family of predictors sharing model parameters} \label{sec:our_model}
+
+In our approach, each client $k \in \mathcal{K}$ has a set of predictors $\{h_{(k,\mathcal{J})} \colon \mathcal{J} \in \mathscr{P}_k(\mathcal{K}) \}$.
+Each predictor $ h_{(k,\mathcal{J})} \colon \prod_{k \in \mathcal{J}} \mathcal{X}_k \mapsto \mathcal{Y}$ has the same target, but a different domain. Therefore, we say that each predictor performs a distinct \textit{task}. We define the predictors of client $k$ as follows:
+\begin{equation} \label{eq:our_predictors}
+	\left\{
+	h_{(k,\mathcal{J})}\left(\bm{x}^n_{\mathcal{J}};\bm{\theta}_{(k,\mathcal{J})}\right)
+	\coloneqq
+	g_{k}
+	\left(
+	\frac{1}{|\mathcal{J}|}
+	\sum_{{j\in\mathcal{J}}}
+	\bm{f}_j(\bm{x}_{j}^n;\bm{\theta}_{\bm{f}_j})
+	;
+	\bm{\theta}_{g_{k}}
+	\right)
+	\colon
+	\mathcal{J} \in \mathscr{P}_k(\mathcal{K})
+	\right\}
+	,
+\end{equation}
+where $\bm{\theta}_{(k,\mathcal{J})}=
+((\bm{\theta}_{\bm{f}_j}\colon j\in\mathcal{J}) , \bm{\theta}_{g_{k}} )$ and $|\mathcal{J}|$ denotes the cardinality of set $\mathcal{J}$.
+
+\paragraph{Model parameter sharing.}
+Note that, although we can see~\eqref{eq:our_predictors} as $|\mathscr{P}_k(\mathcal{K})|=2^{K-1}$ different predictors, the predictors are made up of different combinations of only $K$ representation models and $K$ fusion models.
+That is, we only require parameters $\bm{\theta} \coloneqq (\bm{\theta}_{\bm{f}_1},\dots,\bm{\theta}_{\bm{f}_K},\bm{\theta}_{g_1},\dots,\bm{\theta}_{g_K})$. In particular, in contrast to~\eqref{eq:naive_predictors}, where the predictors used different representation models for each task, in~\eqref{eq:our_predictors}, we share the representation models across predictors. Similarly to the representation models, we have a single fusion model per client.
+
+It is also important to note that each fusion model takes the specific form
+$
+g_{k}
+\left(
+(\bm{f}_i(\bm{x}_{i}^n;\bm{\theta}_{\bm{f}_i})\colon i\in\mathcal{J})
+;
+\bm{\theta}_{g_{k}}
+\right)
+=
+g_{k}
+(
+\frac{1}{|\mathcal{J}|}
+\sum_{{i\in\mathcal{J}}}
+\bm{f}_i(\bm{x}_{i}^n;\bm{\theta}_{\bm{f}_i})
+;
+\bm{\theta}_{g_{k}}
+)
+$. By employing a nonparameterized aggregation mechanism on the extracted representations whose output does not depend on the number of aggregated representations, the same fusion model can handle different sets of representations of different sizes. In particular, we opt for an average (rather than, say, a sum) because neural networks perform better when their inputs have similar distributions~\citep{ioffe2015batchnormalizationacceleratingdeep}. %  and, when averaging the embeddings, if different embeddings have the same expected value, so will their aggregation
+With this approach, we have avoided an exponential memory complexity by sharing the weights across an exponential number of predictors such that we have $K$ representation models and $K$ fusion models. In the next subesection, we will go over the efficient training of this family of predictors.
+
+\subsection{Efficient training via task-sampling}
+
+The family of predictors introduced in Section~\ref{sec:our_model} can efficiently perform inference for an exponential number of tasks. We will now discuss how to train this family of predictors while avoiding exponential computation and communication complexity during the training process. The key to this approach lies in carefully sampling tasks at each gradient step of model training.
+
+\paragraph{Our optimization problem.}
+As mentioned in Section~\ref{sec:intro}, we are not only interested in dealing with missing blocks of features during inference, but also during training. In particular, we assume that the availability of each block $k$ in sample $n$ follows a random distribution and denote by $\mathcal{K}_{o}^{n}$ the (random) subset of blocks of features of sample~$n$ that is observed in the training data. Let the loss corresponding to fusion model~$k$ using blocks of features~$\mathcal{I}$ for prediction be denoted as $\tilde{\mathcal{L}}_{k,\mathcal{I}}^{}
+(\bm{\theta};n)
+\coloneqq
+\ell\left(h_{(k,\mathcal{I})}\left(\bm{x}^{n}_{\mathcal{I}};\bm{\theta}_{(k,\mathcal{I})}\right),y^{n}\right)$, to train our predictors~\eqref{eq:our_predictors}, we consider the following optimization problem:
+\begin{equation} \label{eq:our_loss}
+	\min_{\bm{\theta}}
+	\,
+	\left\{\mathcal{L}(\bm{\theta})
+	\coloneqq
+	\mathbb{E}
+	\left[
+	\tilde{\mathcal{L}}(\bm{\theta})\coloneqq
+	\frac{1}{N}
+	\sum_{n=1}^{N}
+	\tilde{\mathcal{L}}_n(\bm{\theta})
+	\right]\right\}
+	\;\;\text{where}\;\;
+	\tilde{\mathcal{L}}_n(\bm{\theta})
+	\coloneqq
+	\sum_{k\in\mathcal{K}_o^n}^{}
+	\sum_{\mathcal{I}\in\mathscr{P}_k(\mathcal{K}_{o}^{n})}^{}
+	\frac{1}{|\mathcal{I}|}\cdot
+	\tilde{\mathcal{L}}_{k,\mathcal{I}}^{}
+	(\bm{\theta};n)
+	.
+\end{equation}
+where the expectation is over the set of available feature blocks $\{\mathcal{K}_{o}^{n}\colon \forall n \}$. In \eqref{eq:our_loss}, we employ the normalization ${1}/{|\mathcal{I}|}$ to avoid having a larger weight  being assigned to prediction tasks concerning a larger number of blocks, as these will show up at $|\mathcal{I}|$ different clients. Further, note that, if different blocks of features have different probabilities of being observed, we can also normalize the loss with respect to the different probabilities which can be computed during the entity alignment stage of VFL (see below), before taking the expectation in~\eqref{eq:our_loss}. We omit this here for simplicity.
+
+Looking at~\eqref{eq:our_loss}, we see that, while we are interested in tackling $K\times 2^{K-1}$ different tasks, which falls in the realm of multi-objective optimization and multi-task learning~\citep{caruana1997multitask}, we opt for combining them into a single objective, rather than employing a specialized multi-task optimizer. This corresponds to a weighted form of unitary scalarization~\citep{kurin2022defense}.
+
+\IncMargin{1.5em}
+\begin{algorithm}[t]
+	\DontPrintSemicolon
+	\SetKwInOut{KwIn}{Input}
+	\KwIn{initial point $\bm{\theta}^0$, train data $ \mathcal{D} $.}
+	\For{$t=0,\dots,T-1$}{
+		Clients $\mathcal{K}$ sample the same mini-batch~$\mathcal{B}^t$ with $\mathcal{K}^{\mathcal{B}^t}_{o}=\mathcal{K}^{n}_{o}$, $\forall n\in\mathcal{B}^t$, via a shared seed.\;
+		\For{$k\in\mathcal{K}_o^{\mathcal{B}^t}$ \emph{\textbf{in parallel}}}{
+			Broadcast $\bm{f}_k(\mathcal{B}^t_{k};\bm{\theta}^t_{\bm{f}_k})$ and receive $\bm{f}_i(\mathcal{B}^t_{i};\bm{\theta}^t_{\bm{f}_i})$, for all $i \in \mathcal{K}_o^{\mathcal{B}^t} \setminus\{k\}$.\;
+			Sample a task-defining set of blocks $ \mathcal{S}_{kj}^t \sim \mathcal{U}(\mathscr{P}_k^j(\mathcal{K}_o^{\mathcal{B}^t})) $,
+			for all $j\in [|\mathcal{K}_o^{\mathcal{B}^t}|]$
+			.\;
+			Compute $ \tilde{\mathcal{L}}_{k,\mathcal{S}_k^t}(\bm{\theta}^t;\mathcal{B}^t) $, as in~\eqref{eq:local-forward}, and backpropagate over fusion model $g_k$.\;
+			Send derivative of $ \tilde{\mathcal{L}}_{k,\mathcal{S}_k^t}(\bm{\theta}^t;\mathcal{B}^t) $ with respect to each $k\in\mathcal{K}_o^{\mathcal{B}^t}$ and receive theirs.\;
+			Sum the received gradients and backpropagate over $\bm{f}_k$.\;
+		}
+	Update the weights $\bm{\theta}^{t+1}=\bm{\theta}^t-\eta \nabla\tilde{\mathcal{L}}_{\mathcal{B}^t\mathcal{S}^t}(\bm{\theta}^t)$, where $\nabla\tilde{\mathcal{L}}_{\mathcal{B}^t\mathcal{S}^t}(\bm{\theta}^t)$ is as in~\eqref{eq:rfl-update}.
+	}
+	\caption{\texttt{LASER-VFL} Training}
+	\label{alg:robust_vfl_training}
+\end{algorithm}
+\DecMargin{1.5em}
+
+\paragraph{Our optimization method.}
+We learn parameters $\bm{\theta}$ using a gradient-based method, summarized in Algorithm~\ref{alg:robust_vfl_training}, that we now describe. At the start of step~$t$, we have $\bm{\theta}^t \coloneqq (\bm{\theta}^t_{\bm{f}_1},\dots,\bm{\theta}^t_{\bm{f}_K},\bm{\theta}^t_{g_1},\dots,\bm{\theta}^t_{g_K})$ and choose a mini-batch $\mathcal{B}^t\subseteq[N]\coloneqq\{1,\dots,N\}$ such that $\mathcal{K}_o^n$ is the same for all $n$ in the same mini-batch~$\mathcal{B}^t$ (we elaborate on this below) and define $\mathcal{K}^{\mathcal{B}^t}_{o}\coloneqq\mathcal{K}^{n}_{o}$. Then, each client $k\in\mathcal{K}_o^{\mathcal{B}^t}$ broadcasts its representation $\bm{f}_k(\mathcal{B}^t_{k};\bm{\theta}^t_{\bm{f}_k})$, where $\mathcal{B}^t_k\coloneqq\{\bm{x}_k^n\colon \forall n\in \mathcal{B}^t\}$, to the other clients in $\mathcal{K}_o^{\mathcal{B}^t}$.
+
+At this point, each client $k\in\mathcal{K}_o^{\mathcal{B}^t}$ holds the representations corresponding to the set of observed features of the current mini-batch, $ \mathcal{K}^{\mathcal{B}^t}_{o} $. Now, to train for all the possible combinations of feature blocks while avoiding an exponential complexity, each client $k$ samples $K_o^t\coloneqq | \mathcal{K}^{\mathcal{B}^t}_{o} |$ tasks (the number of blocks observed for the samples in $ \mathcal{B}^t $) from $\mathscr{P}_k\left(\mathcal{K}^{\mathcal{B}^t}_{o}\right)$ to be used to update the model parameters at iteration $t$ (note that $K_o^t\leq K$) and weights their losses, so that we get an unbiased estimator of the gradient. This allows us to train the model in such a way that it can perform inference for any subset of available blocks of features.
+
+More precisely, the task-defining feature blocks sampled at client $k$ are given by $\mathcal{S}_k^t\coloneqq \left\{\mathcal{S}_{k1}^t,\dots,\mathcal{S}_{kK_o^t}^{n}\right\}$, where $\mathcal{S}_{kj}^t$ is a set containing $j$ feature blocks. Each set $\mathcal{S}_{kj}^{t}$ is sampled from a uniform distribution over a subset of $\mathscr{P}_k\left(\mathcal{K}_{o}^{\mathcal{B}^t}\right)$ that contains its sets of size $j$. That is:
+\[
+\mathcal{S}_{kj}^{t}\sim\mathcal{U}\left(\mathscr{P}_k^j\left(\mathcal{K}_{o}^{\mathcal{B}^t}\right)\right)
+\quad\text{where}\quad
+\mathscr{P}_k^j\left(\mathcal{K}_{o}^{\mathcal{B}^t}\right)\coloneqq \left\{\mathcal{J}\in\mathscr{P}_k(\mathcal{K}_{o}^{\mathcal{B}^t})\colon |\mathcal{J}|=j \right\}.
+\]
+This task-sampling mechanism provides us with $K_o^t\leq K$ representations that correspond to the blocks in $\mathcal{S}_k^t$. This allows us to efficiently estimate the loss (linear complexity), whose exact computation would lead to an exponential complexity. Based on these sampled representations, we compute the following estimate for the loss:
+\begin{equation} \label{eq:local-forward}
+	\tilde{\mathcal{L}}_{k,\mathcal{S}_k^t}(\bm{\theta}^t;\mathcal{B}^t)
+	\coloneqq
+	\frac{1}{|\mathcal{B}^t|}
+	\sum_{n\in\mathcal{B}^t}^{}
+	\sum_{j\in[K_o^t]}^{}
+	a_{j}^{n}\cdot
+	\tilde{\mathcal{L}}_{k,\mathcal{S}_{kj}^{t}}^{}
+	(\bm{\theta}^t;n)
+	\quad\text{where}\quad
+	a_{j}^{n}={\binom{K_o^t-1}{j-1}}/j
+	.
+\end{equation}
+The weighting $a_{j}^{n}$ counteracts the probability of each task being sampled, allowing us to obtain an unbiased estimate of the gradient. Now, we use this to minimize~\eqref{eq:our_loss} by doing the following update:
+\begin{equation} \label{eq:rfl-update}
+	\bm{\theta}^{t+1}=\bm{\theta}^t-\eta \nabla\tilde{\mathcal{L}}_{\mathcal{B}^t\mathcal{S}^t}(\bm{\theta}^t),
+\end{equation}
+where $ \mathcal{S}^t\coloneqq \left\{\mathcal{S}_1^t,\dots,\mathcal{S}_K^t\right\} $ and
+\[
+	\nabla\tilde{\mathcal{L}}_{\mathcal{B}^t\mathcal{S}^t}(\bm{\theta}^t)
+	\coloneqq
+	\frac{1}{|\mathcal{B}^t|}
+	\sum_{n\in\mathcal{B}^t}^{}
+	\sum_{k\in\mathcal{K}_{o}^{n}}
+	\sum_{j\in[|\mathcal{K}_{o}^{n}|]}^{}
+	a_{j}^{n}\cdot
+	\nabla\tilde{\mathcal{L}}_{k,\mathcal{S}_{kj}^{t}}^{}
+	(\bm{\theta}^t;n).
+\]
+After completing the training in Algorithm~\ref{alg:robust_vfl_training}, we can perform inference, as described in Algorithm~\ref{alg:robust_vfl_inference}. This algorithm consists simply of sharing of representations of the observed blocks test sample $\bm{x}^\prime$ by the clients which observe their partitions for this sample, $\mathcal{K}^\prime_o$, following by each of these clients $k\in\mathcal{K}^\prime_o$ using $h_{(k,\mathcal{K}^\prime_o)}$ to predict the label.
+
+\IncMargin{1.5em}
+\begin{algorithm}[t]
+	\DontPrintSemicolon
+	\SetKwInOut{KwIn}{Input}
+	\KwIn{test sample $\bm{x}^\prime$, trained parameters $\bm{\theta}^T$.}
+	The blocks of features $\mathcal{K}^\prime_o$ of sample $\bm{x}^\prime$ are observed.\;
+	\For{$k\in\mathcal{K}^\prime_o$ \emph{\textbf{in parallel}}}{
+		Broadcast $\bm{f}_k(\bm{x}^\prime_{k};\bm{\theta}^T_{\bm{f}_k})$ and receive $\bm{f}_i(\bm{x}^\prime_{i};\bm{\theta}^T_{\bm{f}_i})$, for all $i \in \mathcal{K}_o^{\prime} \setminus\{k\}$.\;
+		Client~$k$ predicts the label using $h_{(k,\mathcal{K}^\prime_o)}\left(\bm{x}^n_{\mathcal{K}^\prime_o};\bm{\theta}_{(k,\mathcal{K}^\prime_o)}\right)$.
+	}
+	\caption{\texttt{LASER-VFL} Inference}
+	\label{alg:robust_vfl_inference}
+\end{algorithm}
+\DecMargin{1.5em}
+
+\paragraph{Aligning the samples based on block availability.}
+Entity alignment is a process the precedes training in VFL where the samples of the different local datasets are matched so that their features are correctly aligned, thus allowing for collaborative model training~\citep{liu2024vertical}. The identification of the available blocks for each sample can be performed during this prelude to VFL training, allowing for a batch selection procedure that ensures that each batch contains samples with the same observed blocks, which we use in our method.
+
+\paragraph{Extensions.}
+It is important to highlight that our method can also be easily employed in situations where different clients hold different labels, as it naturally fits multi-task learning problems. Further, it can easily be applied to setups where any subset of $\mathcal{K}$ holds the labels, sufficing to drop fusion models from the clients which do not hold the labels or have them tackle unsupervised or self-supervised learning tasks instead.
+
+		
+
+
+\section{Convergence guarantees}
+
+\label{sec:conv-guar}
+
+In this section, we present convergence guarantees for our method. Let us start by stating the assumptions used in our results.
+
+\begin{assumption}[$L$-smoothness and finite infimum] \label{ass:L-smoothness}
+	Function~$\tilde{\mathcal{L}}\colon \bm{\Theta} \mapsto\mathbb{R}$ is differentiable and there exists a constant $L\in(0,\infty)$ such that:
+	\begin{equation} \label{eq:L-smoothness}
+		\forall\;\bm{\theta}_1,\bm{\theta}_2\in\bm{\Theta}\colon\quad
+		\lVert \nabla \tilde{\mathcal{L}}(\bm{\theta}_1) - \nabla \tilde{\mathcal{L}}(\bm{\theta}_2) \rVert
+		\leq
+		L
+		\lVert \bm{\theta}_1 - \bm{\theta}_2\rVert.
+		\tag{A\ref*{ass:L-smoothness}}
+	\end{equation}
+	The inequality above holds if $ \mathcal{L} $ is $L^\prime$-smooth.
+	We assume and define $ \mathcal{L}^\star \coloneqq \inf_{\bm{\theta}} \mathcal{L}(\bm{\theta}) > -\infty $.
+\end{assumption}
+
+\begin{assumption}[Unbiased]
+	\label{ass:unbiased}
+	The mini-batch gradient estimate is unbiased. That is, let $\tilde{\mathcal{L}}_{\mathcal{B}^t}(\bm{\theta})\coloneqq\frac{1}{|\mathcal{B}^t|}\sum_{n\in\mathcal{B}^t}^{}\tilde{\mathcal{L}}_n(\bm{\theta})$, we have for any mini-batch $\mathcal{B}^t\subseteq[N]$ that:
+	\begin{equation} \label{eq:unbiased}
+		\forall (\bm{\theta},t) \in \bm{\Theta} \times \{0,1,\dots,T-1\}
+		\colon\quad
+		\mathbb{E} \left[\nabla \tilde{\mathcal{L}}_{\mathcal{B}^t}(\bm{\theta})\right]
+		=
+		\nabla \tilde{\mathcal{L}}(\bm{\theta}),
+		\tag{A\ref*{ass:unbiased}}
+	\end{equation}
+	where the expectation is with respect to the mini-batch~$\mathcal{B}$.
+\end{assumption}
+
+\begin{assumption}[Bounded variance]
+	\label{ass:bounded_var}
+	There exists a constant $\sigma\in(0,\infty)$ such that, for any mini-batch $\mathcal{B}^t\subseteq[N]$ of size $B$ and any set of task-defining blocks $\mathcal{S}^t$:
+	\begin{equation} \label{eq:bounded_var}
+		\forall (\bm{\theta},t) \in \bm{\Theta} \times \{0,1,\dots,T-1\}
+		\colon\quad
+		\mathbb{E}
+		\left\lVert \nabla\tilde{\mathcal{L}}_{\mathcal{B}^t\mathcal{S}^t}(\bm{\theta}^t) -\nabla \tilde{\mathcal{L}}(\bm{\theta}) \right\rVert^2
+		\leq
+		\frac{\sigma^2}{B},
+		\tag{A\ref*{ass:bounded_var}}
+	\end{equation}
+	where the expectation is with respect to $\mathcal{B}^t$ and $\mathcal{S}^t$.
+\end{assumption}
+
+Using the assumptions above, we can derive the results below, where we use the following filtration:
+\[
+\mathcal{F}^t\coloneqq
+\sigma(\mathcal{B}^0, \mathcal{S}^0, \mathcal{B}^1, \mathcal{S}^1,
+\dots,
+\mathcal{B}^{t-1}, \mathcal{S}^{t-1}).
+\]
+We also define a random variable $I_k^n$ that is equal to one if block $k$ of sample $n$ is observed and zero otherwise. Further, we let $\bm{I}^n=(I^n_1,\dots,I^n_K)$ and $\bm{I}=(I^1,\dots,I^N)$.
+
+We use the following lemma, showing the unbiasedness of our update vector, in our proof of Theorem~\ref{thm:main_theorem}.
+\begin{lemma}[Unbiased update vector] \label{lemma:unbiased_update}
+	If the mini-batch gradient estimate is unbiased~\eqref{eq:unbiased}, then, for all $t\geq0$:
+	\begin{equation} \label{eq:lemma1}
+		\mathbb{E}
+		\left[\nabla\tilde{\mathcal{L}}_{\mathcal{B}^t\mathcal{S}^t}(\bm{\theta}) \mathrel{|} \sigma(\bm{I},\mathcal{F}^t)\right]
+		=
+		\nabla
+		\tilde{\mathcal{L}}(\bm{\theta}^t),
+	\end{equation}
+	where the expectation is with respect to mini-batch~$\mathcal{B}^t$ and the sampled set of tasks~$\mathcal{S}^t$.
+\end{lemma}
+\begin{theorem}[Main result] \label{thm:main_theorem}
+	Let $\{\bm{\theta}^t\}$ be a sequence generated by Algorithm~\ref{alg:robust_vfl_training}, if $\mathcal{L}$ is $L$-smooth and has a finite infimum~\eqref{eq:L-smoothness}, the mini-batch estimate of the gradient is unbiased~\eqref{eq:unbiased}, and our update vector has a bounded variance~\eqref{eq:bounded_var}, we then have that, for $\eta\in(0,1/L]$:
+	\begin{equation} \label{eq:main_theorem}
+		\frac{1}{T}
+		\sum_{t=0}^{T-1}
+		\mathbb{E}\left\lVert \nabla\mathcal{L}(\bm{\theta}^t) \right\rVert^2
+		\leq
+		\frac{2\Delta
+		}{\eta T}
+		+\frac{\eta L\sigma^2}{B},
+	\end{equation}
+	where $\Delta\coloneqq\mathcal{L}(\bm{\theta}^{0})
+	-\mathcal{L}^\star$ and the expectation is with respect to $\{\mathcal{B}^t\}$, $\{\mathcal{S}^t\}$, and $ \bm{I} $.
+\end{theorem}
+
+If we take the stepsize to be $\eta=\sqrt{\frac{2\Delta B}{L \sigma^2 T}}$, we get from~\eqref{eq:main_theorem} that
+\[
+\frac{1}{T}
+\sum_{t=0}^{T-1}
+\mathbb{E}\left\lVert \nabla\mathcal{L}(\bm{\theta}^t) \right\rVert^2
+\leq
+\sqrt{\frac{8 \Delta L \sigma^2}{2 BT}}
+,
+\]
+thus achieving a $\mathcal{O}(\sfrac{1}{\sqrt{T}})$ convergence rate. Yet, if we assume that the batch size is sufficiently large, $B=\Omega(\sfrac{\sigma^2}{\epsilon})$, we get from~\eqref{eq:main_theorem} that we can achieve an error level $\frac{1}{T}
+\sum_{t=0}^{T-1}
+\mathbb{E}\left\lVert \nabla\mathcal{L}(\bm{\theta}^t) \right\rVert^2\leq\epsilon$ in $\mathcal{O}(\sfrac{1}{T})$ iterations.
+
+We can further establish linear convergence under the Polyak-{\L}ojasiewicz inequality~\cite{polyak1963gradient}.
+\begin{assumption}[PL inequality] \label{ass:pl}
+	We assume that there exists a positive constant $\mu$ such that
+	\begin{equation} \label{eq:pl}
+		\forall \bm{\theta} \in\bm{\Theta}
+		\colon
+		\quad
+		\lVert \nabla \mathcal{L}(\bm{\theta}) \rVert^2
+		\geq
+		2\mu(\mathcal{L}(\bm{\theta})-\mathcal{L}^\star).
+		\tag{A\ref*{ass:pl}}
+	\end{equation}
+\end{assumption}
+
+We use the expected suboptimality $\delta^t\coloneqq \mathbb{E}\mathcal{L}(\bm{\theta}^t) - \mathcal{L}^\star$, where the expectation is with respect to $\{\mathcal{B}^t\}$, $\{\mathcal{S}^t\}$, and $ \bm{I} $, as our Lyapunov function in the following result.
+
+\begin{theorem}[Linear convergence] \label{thm:linear-convergence}
+
+Let $\{\bm{\theta}^t\}$ be a sequence generated by Algorithm~\ref{alg:robust_vfl_training}, if $\mathcal{L}$ is $L$-smooth and has a finite infimum~\eqref{eq:L-smoothness}, the mini-batch estimate of the gradient is unbiased~\eqref{eq:unbiased}, our update vector has a bounded variance~\eqref{eq:bounded_var}, and the PL inequality~\eqref{eq:pl} holds for $\mathcal{L}$, we then have that, for $\eta\in(0,1/L]$:
+\[
+\delta^{T}
+\leq
+(1-\mu\eta)^T
+\delta^{0}
++
+\frac{\eta L\sigma^2}{2\mu B}
+.
+\]
+\end{theorem}
+It follows from $\mu\leq L$ that $1-\mu\eta\in(0,1)$. Therefore, we have linear convergence to the global optimum for the full-batch case ($\sigma=0$) and, more generally, we have linear convergence to a $\mathcal{O}(\sigma^2)$ neighborhood around it.
+
+		
+
+
+\section{Experiments}
+
+
+In this section, we describe the experiments and analyze the results to empirically evaluate the performance of \texttt{LASER-VFL} and compare it against baseline approaches. We first provide a brief overview of the baseline methods and tasks considered. Next, we discuss the metrics used for evaluation and present the experimental results, followed by a brief discussion.
+
+We compare our method to the following baselines:
+\begin{itemize} [leftmargin=1.5em]
+	\item \texttt{Local}: as can be seen in~\eqref{eq:standalone_predictor}, the local approach leverages its block for training and inference whenever it is observed, but ignores the remaining blocks.
+	\item \texttt{Standard VFL}~\citep{Liu2022}: as can be seen in~\eqref{eq:svfl_predictor}, the standard VFL model can only be trained on and used for inference for fully-observed samples. When the model is unavailable for prediction, a random prediction is made.
+	\item \texttt{VFedTrans}~\citep{huang2023vertical}: VFedTrans introduces a multi-stage VFL training pipeline to collaboratively train local predictors. (We give more details about VFedTrans below.)
+	\item \texttt{Ensemble}: in the ensemble approach, we train local predictors as in \texttt{Local}. However, instead of performing decoupled inference, the clients share their predictions and select a joint prediction by majority vote. Ties are broken at random.
+\end{itemize}
+
+Our experiments focus on the following tasks:
+\begin{itemize} [leftmargin=1.5em]
+	\item \textbf{HAPT}~\citep{reyes2016transition}\textbf{:} a human activity recognition dataset.
+	\item \textbf{Credit}~\citep{yeh2009comparisons}\textbf{:} a dataset for predicting credit card payment defaults.
+	\item \textbf{MIMIC-IV}~\citep{johnson2020mimic}\textbf{:} a time series dataset concerning healthcare data. We focus on the task of predicting in-hospital mortality from ICU data corresponding to patients admitted with chronic kidney disease. We resort to the data processing pipeline in~\citep{gupta2022extensive}.
+	\item \textbf{CIFAR-10 \& CIFAR-100}~\citep{krizhevsky2009learning}\textbf{:} are two popular image datasets, the former containing 10 classes and the latter containing 100.
+	
+\end{itemize}
+
+For all datasets, we split the samples into $K=4$ feature blocks. For example, for the CIFAR datasets, each image is partitioned into four quadrants, each assigned to a different client. Given our interest in ensuring that all clients perform well at inference time, we average the metrics across clients.
+
+\begin{table}[t!]
+	\caption{Test metrics for $K=4$ clients across different datasets and varying probabilities of missing blocks during training and inference, averaged over five seeds ($\pm$ standard deviation).
+		\label{tab:comparison_w_baselines}
+	}
+	\centering
+	\resizebox{\textwidth}{!}{
+		\begin{tabular}{l*{9}{c}}
+			\specialrule{1.2pt}{0pt}{0pt} % Thick horizontal line
+			Training $p_{\text{miss}}$ & \multicolumn{3}{c}{0.0} & \multicolumn{3}{c}{0.1} & \multicolumn{3}{c}{0.5} \\
+			\hline
+			Inference $p_{\text{miss}}$ & 0.0 & 0.1 & 0.5 & 0.0 & 0.1 & 0.5 & 0.0 & 0.1 & 0.5 \\
+			\specialrule{1.2pt}{0pt}{0pt} % Thick horizontal line
+			\noalign{\vskip 1mm}
+			\multicolumn{10}{c}{$\qquad\qquad\qquad\quad$HAPT (accuracy, \%)}\\
+			\noalign{\vskip 1mm}
+			\texttt{Local}  & $82.1\pm0.6$ & $82.2\pm0.7$ & $81.9\pm1.6$ & $82.3\pm0.4$ & $82.4\pm0.4$ & $81.8\pm1.0$ & $80.7\pm1.0$ & $80.8\pm1.3$ & $80.3\pm1.7$ \\
+			\texttt{Standard VFL} & $92.7\pm0.4$ & $61.9\pm3.8$ & $17.8\pm5.1$ & $91.3\pm1.0$ & $61.1\pm3.7$ & $17.6\pm5.0$ & $81.7\pm2.2$ & $54.9\pm3.4$ & $16.4\pm4.2$ \\
+			\texttt{VFedTrans} & $82.5\pm0.4$ & $82.5\pm0.4$ & $82.3\pm0.7$ & $82.9\pm0.3$ & $82.9\pm0.2$ & $82.8\pm0.7$ & $82.2\pm0.5$ & $82.2\pm0.5$ & $82.2\pm0.8$ \\
+			\texttt{Ensemble} & $90.5\pm0.9$ & $90.0\pm0.7$ & $84.3\pm1.4$ & $90.9\pm0.7$ & $90.2\pm1.0$ & $84.4\pm1.1$ & $88.7\pm1.3$ & $88.5\pm1.6$ & $82.6\pm1.7$ \\
+			\texttt{LASER-VFL} (ours) & $\textbf{92.9}\pm0.6$ & $\textbf{92.2}\pm0.6$ & $\textbf{87.0}\pm1.2$ & $\textbf{93.6}\pm0.5$ & $\textbf{93.1}\pm0.5$ & $\textbf{88.2}\pm1.2$ & $\textbf{92.3}\pm1.1$ & $\textbf{91.7}\pm0.9$ & $\textbf{86.0}\pm1.8$ \\
+			\specialrule{1.2pt}{0pt}{0pt} % Thick horizontal line
+			\noalign{\vskip 1mm}
+			\multicolumn{10}{c}{$\qquad\qquad\qquad\quad$Credit ($F_1$-score$\times 100$)}\\
+			\noalign{\vskip 1mm}
+			\texttt{Local}  & $37.7\pm3.1$ & $37.6\pm3.1$ & $37.5\pm3.2$ & $37.6\pm3.0$ & $37.6\pm2.9$ & $37.5\pm3.2$ & $36.2\pm3.5$ & $36.2\pm3.6$ & $36.0\pm3.6$ \\
+			\texttt{Standard VFL}  & $45.7\pm2.6$ & $38.8\pm2.5$ & $31.0\pm0.7$ & $42.4\pm1.2$ & $38.3\pm0.7$ & $31.0\pm0.7$ & $32.4\pm2.4$ & $32.5\pm1.3$ & $30.3\pm0.5$ \\
+			\texttt{VFedTrans}  & $37.7\pm1.5$ & $37.6\pm1.4$ & $37.2\pm1.6$ & $39.5\pm0.8$ & $39.4\pm0.8$ & $39.2\pm0.9$ & $35.7\pm0.3$ & $35.6\pm0.3$ & $35.6\pm0.4$ \\
+			\texttt{Ensemble}  & $42.1\pm1.0$ & $42.1\pm1.0$ & $40.1\pm0.8$ & $41.4\pm1.3$ & $40.8\pm0.9$ & $39.2\pm1.1$ & $\textbf{42.4}\pm2.1$ & $\textbf{41.8}\pm1.7$ & $40.1\pm1.1$ \\
+			\texttt{LASER-VFL} (ours)  & $\textbf{46.5}\pm2.8$ & $\textbf{45.0}\pm2.5$ & $\textbf{43.7}\pm1.2$ & $\textbf{43.1}\pm4.2$ & $\textbf{41.9}\pm4.0$ & $\textbf{41.3}\pm1.9$ & $41.5\pm4.2$ & $40.9\pm4.0$ & $\textbf{41.4}\pm1.7$ \\
+			\specialrule{1.2pt}{0pt}{0pt} % Thick horizontal line
+			\noalign{\vskip 1mm}
+			\multicolumn{10}{c}{$\qquad\qquad\qquad\quad$MIMIC-IV ($F_1$-score$\times 100$)}\\
+			\noalign{\vskip 1mm}
+			\texttt{Local}  & $74.9\pm0.5$ & $74.9\pm0.5$ & $74.8\pm0.5$ & $75.0\pm0.3$ & $75.0\pm0.2$ & $75.0\pm0.3$ & $73.0\pm0.5$ & $73.0\pm0.5$ & $73.0\pm0.5$ \\
+			\texttt{Standard VFL}  & $91.6\pm0.2$ & $77.0\pm1.3$ & $52.5\pm2.2$ & $90.9\pm0.3$ & $76.8\pm1.3$ & $52.5\pm2.2$ & $81.1\pm0.4$ & $70.2\pm0.8$ & $51.8\pm1.8$ \\
+			\texttt{Ensemble}  & $84.2\pm0.3$ & $83.9\pm0.3$ & $77.9\pm1.6$ & $84.1\pm0.4$ & $83.7\pm0.5$ & $78.1\pm1.1$ & $82.1\pm0.3$ & $81.8\pm0.5$ & $76.4\pm1.1$ \\
+			\texttt{LASER-VFL} (ours) & $\textbf{92.0}\pm0.2$ & $\textbf{91.2}\pm0.3$ & $\textbf{85.5}\pm1.0$ & $\textbf{91.1}\pm0.5$ & $\textbf{90.2}\pm0.3$ & $\textbf{84.7}\pm0.9$ & $\textbf{87.7}\pm0.2$ & $\textbf{86.9}\pm0.2$ & $\textbf{82.0}\pm1.0$ \\
+			\specialrule{1.2pt}{0pt}{0pt} % Thick horizontal line
+			\noalign{\vskip 1mm}
+			\multicolumn{10}{c}{$\qquad\qquad\qquad\quad$CIFAR-10 (accuracy, \%)}\\
+			\noalign{\vskip 1mm}
+			\texttt{Local}  & $72.4\pm0.1$ & $72.5\pm0.2$ & $72.5\pm0.9$ & $71.8\pm0.2$ & $72.0\pm0.3$ & $72.0\pm0.7$ & $67.6\pm0.3$ & $67.7\pm0.4$ & $68.0\pm1.1$ \\
+			\texttt{Standard VFL} & $87.8\pm0.2$ & $59.5\pm12.0$ & $11.6\pm3.5$ & $85.6\pm0.8$ & $58.0\pm11.2$ & $11.5\pm3.4$ & $52.3\pm10.2$ & $37.0\pm9.0$ & $10.9\pm2.1$ \\
+			\texttt{Ensemble} & $83.8\pm0.2$ & $82.5\pm0.6$ & $74.9\pm0.5$ & $83.2\pm0.3$ & $82.0\pm0.8$ & $74.3\pm0.7$ & $79.5\pm0.5$ & $78.1\pm0.5$ & $70.3\pm0.3$ \\
+			\texttt{LASER-VFL} (ours)  & $\textbf{90.3}\pm0.2$ & $\textbf{89.3}\pm0.3$ & $\textbf{81.6}\pm1.2$ & $\textbf{89.7}\pm0.2$ & $\textbf{88.6}\pm0.3$ & $\textbf{81.1}\pm1.1$ & $\textbf{85.5}\pm0.3$ & $\textbf{84.6}\pm0.4$ & $\textbf{77.0}\pm1.1$ \\
+			\specialrule{1.2pt}{0pt}{0pt} % Thick horizontal line
+			\noalign{\vskip 1mm}
+			\multicolumn{10}{c}{$\qquad\qquad\qquad\quad$CIFAR-100 (accuracy, \%)}\\
+			\noalign{\vskip 1mm}
+			\texttt{Local}  & $46.4\pm0.2$ & $46.5\pm0.1$ & $46.5\pm0.1$ & $45.5\pm0.3$ & $45.4\pm0.4$ & $45.3\pm0.8$ & $37.4\pm0.6$ & $37.7\pm0.5$ & $37.7\pm0.9$ \\
+			\texttt{Standard VFL}  & $62.1\pm0.3$ & $40.0\pm9.3$ & $2.3\pm2.8$ & $55.6\pm1.8$ & $35.6\pm7.6$ & $2.3\pm2.7$ & $15.6\pm6.5$ & $10.2\pm4.3$ & $1.4\pm0.9$ \\
+			\texttt{Ensemble} & $58.5\pm0.5$ & $56.3\pm0.9$ & $48.6\pm0.3$ & $57.5\pm0.6$ & $55.3\pm0.7$ & $47.4\pm0.7$ & $48.2\pm0.9$ & $46.3\pm0.7$ & $40.1\pm0.7$ \\
+			\texttt{LASER-VFL} (ours)  & $\textbf{69.7}\pm0.4$ & $\textbf{68.2}\pm0.8$ & $\textbf{58.4}\pm1.5$ & $\textbf{68.3}\pm0.2$ & $\textbf{66.8}\pm0.5$ & $\textbf{57.0}\pm1.5$ & $\textbf{58.5}\pm0.9$ & $\textbf{57.3}\pm0.7$ & $\textbf{48.7}\pm0.8$ \\
+			\specialrule{1.2pt}{0pt}{0pt} % Thick horizontal line
+		\end{tabular}
+	}
+\end{table}
+
+We do not run \texttt{VFedTrans} for MIMIC-IV, CIFAR-10, and CIFAR-100 due to its greater complexity. In particular, the training pipeline of \texttt{VFedTrans} includes three stages: federated representation learning, a local representation distillation, and training a local model. The first two stages are performed per pair of clients and are thus repeated $K-1$ times. This means that experiments with \texttt{VFedTrans} take significantly longer to run (and to tune the hyperparameters of each stage of the training pipeline). Thus, given how \texttt{VFedTrans} performs similarly to \texttt{Local} in the first two experiments, we limit our experiments with \texttt{VFedTrans} to these simpler tasks.
+
+\paragraph{Analyzing the empirical results.} 
+In Table~\ref{tab:comparison_w_baselines}, we see that the methods with local predictors (\texttt{Local} and \texttt{VFedTrans}) are robust to missing blocks during both training and inference, yet they fall behind when all the blocks are observed. In contrast, \texttt{Standard VFL} performs well when all the blocks are observed, yet its performance degrades very quickly in the presence of missing blocks. The \texttt{Ensemble} method improves upon \texttt{Standard VFL} significantly in the presence of missing blocks, as it leverages the robustness its local predictors. Yet, when all the blocks are observed, although \texttt{Ensemble} improves over the local predictors significantly, it still cannot match the performance of \texttt{Standard VFL}. \texttt{LASER-VFL} consistently outperforms the baselines across the different probabilities of missing blocks during training and inference.\footnote{With the exception of two setups for the Credit dataset where Ensemble outperforms our method slightly, but this minimal difference falls well within the standard deviation.} In particular, even when the samples are fully-observed, \texttt{LASER-VFL} outperforms \texttt{Standard VFL}. We believe this is due to the regularization effect of the task-sampling mechanism in our method, which effectively behaves as a form of dropout.
+
+		
+
+
+\section{Conclusions}
+
+In this work, we introduced \texttt{LASER-VFL}, a novel method for efficient training and inference in vertical federated learning that is robust to missing blocks of features without wasting data. This is achieved by carefully sharing model parameters and by employing a task-sampling mechanism that allows us to efficiently estimate a loss whose computation would otherwise lead to an exponential complexity. We provide convergence guarantees for \texttt{LASER-VFL} and present numerical experiments demonstrating the improved performance of \texttt{LASER-VFL}, not only in the presence of missing features but, remarkably, even when all samples are fully observed. For future work, it would be interesting to explore applications of our method to multi-task learning, seeing how our method behaves when different clients tackle different tasks, as this fits very naturally into our setup.
+
+
+		
+
+

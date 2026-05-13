@@ -1,0 +1,480 @@
+\title{Human-Aligned Chess With a Bit of Search}
+
+\begin{abstract}
+Chess has long been a testbed for AI's quest to match human intelligence, and in recent years, chess AI systems have surpassed the strongest humans at the game.
+However, these systems are \textit{not human-aligned}; they are unable to match the skill levels of all human partners or model human-like behaviors beyond piece movement.
+In this paper, we introduce \Allie, a chess-playing AI designed to bridge the gap between artificial and human intelligence in this classic game.
+\Allie is trained on log sequences of real chess games to model the behaviors of human chess players across the skill spectrum, including non-move behaviors such as pondering times and resignations
+In offline evaluations, we find that \Allie exhibits humanlike behavior: it outperforms the existing state-of-the-art in human chess move prediction and ``ponders'' at critical positions.
+The model learns to reliably assign reward at each game state, which can be used at inference as a reward function in a novel {\em time-adaptive} Monte-Carlo tree search (MCTS) procedure, where the amount of search depends on how long humans would think in the same positions.
+Adaptive search enables remarkable {\em skill calibration}; in a large-scale online evaluation against players with ratings from 1000 to 2600 Elo, our adaptive search method leads to a skill gap of only 49 Elo on average, substantially outperforming search-free and standard MCTS baselines.
+Against grandmaster-level (2500 Elo) opponents, \Allie with adaptive search exhibits the strength of a fellow grandmaster, all while learning {\em exclusively from humans}.}
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Computer chess is among the most studied problems in Artificial Intelligence.
+In the pursuit of stronger chess engines, decades of hardware and algorithmic improvements since the first computer chess programs~\citep{turingTurochamp1948,shannonXXII1950} have led to the development of increasingly strong chess engines~\citep{campbellDeep2002}.
+Current state-of-the-art systems, such as Stockfish~\citep{Stockfish} and AlphaZero~\citep{silverMastering2017} have reached strength far beyond even the best human players.
+However, these systems are not calibrated to play at levels matching human strength, and they make moves that are inscrutable even to human experts.
+
+In this work, we revisit the classic challenge of computer chess, but with a new objective: developing a {\em skill-calibrated} and {\em human-aligned} chess AI.
+By {\em skill-calibrated}, we mean an system that is evenly matched (i.e., winning approximately 50\% of games) against players across the skill spectrum, while maintaining humanlike play.
+Skill calibration of AI systems is an open research challenge, and could prove valuable for domains requiring {\em superhuman} AI systems to collaborate with and be overseen by imperfect human partners.
+We define {\em human-aligned} as whether the model behaves indistinguishably from a human player.
+This definition extends beyond just move selection: other key aspects, such as time spent pondering a move and the decision to resign in losing positions, are fundamental to how humans play chess.
+By incorporating these humanlike behaviors, our chess engine \Allie aims to serve as an engaging and realistic sparring partner for human players.%
+\footnote{Pondering in chess means spending time to make a move --- humans usually spend more time at critical positions. Resignation is the act of conceding a game out of respect for the other player in a losing position.}
+
+Our approach draws upon recent success in language modeling.
+Large decoder-only Transformer models, when trained on vast text corpora~\citep{radfordLanguage2019,touvronLlama2023a}, learn to generate text that is sometimes indistinguishable to human-written content~\citep{duganReal2023}.
+Similar to language, chess has a natural sequential representation---with moves taking the place of tokens.
+It is therefore natural to model chess like language: we train a decoder-only Transformer model~\citep{vaswaniAttention2017} on a large dataset of human chess game trajectories to model how humans play chess.
+Our resulting model predicts human moves at a state-of-the-art level (competitive with GPT-3.5 despite many fewer parameters), and demonstrates humanlike behavior in other aspects of chess play, such as pondering and resigning, which previous systems are incapable of modeling.
+The model also demonstrates a remarkable ability to predict game outcomes at intermediate board positions, achieved solely through supervision on human game outcomes.
+
+Using \Allie's next move distribution and value estimation {\em learned exclusively from humans}, we add \textit{a bit of} search at inference time.
+Specifically, our {\em time-adaptive} Monte-Carlo tree search (MCTS) method allocates limited inference budget proportional to the predicted human ponder time, enabling more intensive search at critical positions.
+In a large-scale human study of 7,483 games with 2,412 human players, we find that our adaptive search method enables skill calibration to strengths ranging from beginner to expert levels with a skill gap of only 49 Elo points on average across the skill spectrum.
+Against 2500 Elo opponents, our adaptive search method enables \Allie to achieve near-perfect skill calibration, substantially outperforming both search-free baselines and a traditional MCTS approach with equal computational budget.%
+\footnote{Elo is a standard measure of strength in two-player games (higher is stronger). A 2500 Elo level corresponds to 99.6\% percentile of players on the popular chess website \href{https://lichess.org/}{Lichess}.}
+
+
+
+
+\section{Related Work}
+
+
+Most existing approaches in chess engine development have focused on creating the \textit{best possible} system. Early successful engines like Deep Blue relied on hand-coded rules and extensive search algorithms~\citep{campbellDeep2002}. In contrast, AlphaZero~\citep{silverMastering2017} used self-play and Monte-Carlo tree search (MCTS) to learn a probability distribution over actions ({\em policy}) and estimate game outcomes with a {\em value function}.
+AlphaZero also employed MCTS at inference time to select winning moves.
+We explore a variation of this MCTS in Section~\ref{sec:adaptive-search}, using policy and value functions learned directly from human games, and inference time search budget allocated proportional to human ponder time.
+More recently, \citet{mcilroy-youngAligning2020} introduced `\Maia', a neural network trained on human chess games rather than through self-play.
+In contrast with \Maia, we utilize move history, which proves more effective for predicting human behavior, instead of solely relying on the current game state.
+\citet{jacobModeling2022} showed that policy and value functions learned from humans can be combined with MCTS to improve policy strength, and we extend upon their work and demonstrate that adaptive search enables \Allie to almost perfectly match the strengths of human players up to the grandmaster level.
+By learning value estimates generated by an oracle search engine, \citet{ruossGrandmasterLevel2024} showed that neural networks can achieve grandmaster-level performance without inference-time search.
+Our approach differs in that our networks are supervised on human data {\em alone}.
+
+Our proposed method is inspired by \citet{toshniwalChess2022}'s idea of treating chess like a language modeling task.
+\citet{fengChessGPT2023} fine-tuned a language model on chess games, books and commentary and demonstrated that the model can track pieces throughout games and solve chess puzzles, and \citet{karvonenEmergent2024} demonstrated that a language model trained to predict chess moves exhibits emergent understanding of chess concepts.
+\citet{zhangTranscendence2024} similarly showed that a Transformer model trained on human games can be made to play at a higher skill level than the games in its training data by using a low sampling temperature.
+
+
+
+\section{Building \Allie, a human-aligned chess model}
+
+
+Here, we describe how we represent a chess game, and our training and inference methods. 
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.99\textwidth]{figures/main_figure.pdf}  
+  \caption{
+  \textbf{(a)}
+    The current game state can be represented as the sequence of moves that produced it. This sequence, which also includes metadata on the players' skill and the time setting (e.g. a blitz game), is inputted to a Transformer, which predicts the next move, pondering time for this move, and a value assessment of the move. \textbf{(b)} At inference time, we employee Monte-Carlo Tree Search with the value predictions from the model. The number of rollouts $N_\mathrm{sim}$ is chosen dynamically based on the predicted pondering time.
+  }
+  \label{fig:board}
+\end{figure}
+
+\subsection{Representing a chess game sequentially}
+
+\paragraph*{Vocabulary}
+To apply language modeling techniques to chess, we need a sequential representation of a chess game.
+To this end, we view a chess game as a sequence of moves.
+We encode moves using Universal Chess Interface (UCI) notation, which specifies every chess move as its starting and ending square (see example in Figure~\ref{fig:board}).
+We initialize the language model's vocabulary $\Sigma$ as the set of possible moves under UCI notation (1968 in total).
+A board state is implied by the sequence of moves that led to that board state.
+Game metadata, including the two players' skill levels, time control (how much time each player is allowed to take over all the moves in a game), and a termination condition (e.g., whether the game ends with a resignation or checkmate) are added to the vocabulary as special tokens.%
+\footnote{Time control and skill level are prepended to the start of the game sequence, and termination condition tokens are appended to the end of the game sequence.}
+This representation is compact for training: contextualized by the previous tokens in a sequence, each token in the dataset implicitly maps to a single board state, making training on a dataset with billions of chess positions feasible and efficient.
+
+\paragraph*{Strength conditioning}
+Player skill in chess is computed using the Elo rating system \citep{eloUSCF1967}.
+Elo scores normally fall in the range of 500 (beginner players) to 3000 (top chess professionals).
+To calibrate the playing strength of \Allie to different levels of players, we model gameplay under a conditional generation framework~\citep{keskarCTRL2019}, where encodings of the Elo ratings of both players are prepended to the game sequence.
+
+The obvious way to encode Elo ratings as tokens would be to add items to our vocabulary representing each Elo score between 500 and 3000.
+However, this approach runs into data sparsity issues (a small number of games for each individual Elo rating), and this discrete representation fails to encode the fact that scalar distances between Elo scores are meaningful (a difference of 5 between two players' Elo ratings indicates they are much closer in ability than a difference of 500).
+To address these issues,
+we introduce {\em soft} control tokens, which interpolate between a {\em weak} token, representing 500 Elo, and a {\em strong} token, representing 3000 Elo.
+For a player with Elo rating $k$, we compute a soft token $e_{k}$ by linearly interpolating between the weak and strong tokens: $e_k = \gamma e_\text{weak} + (1 - \gamma) e_\text{strong}$, where $\gamma = \frac{3000 - k}{2500}$.
+During training, we prefix each game with two soft tokens corresponding to the two players' strengths.
+\subsection{Training \Allie to move, ponder and evaluate}
+
+Using a sequential representation of a chess game, we can naturally apply standard sequence modeling techniques to model how human players make moves and when they decide to resign (we treat ``resignation'' as just another move token the model can assign probability to).
+\Allie is built using a decoder-only Transformer model (architecture details in Section~\ref{sec:architecture}) which inputs the game history as a sequence and has three output heads:
+(1) a policy head $p_\theta$ that outputs a probability distribution over possible next moves, (2) a pondering-time head $t_\theta$ that outputs the number of seconds a human player would take to come up with this move, and (3) a value assessment head $v_\theta$ that outputs a scalar value representing who is expected to win the game.
+The pondering-time and value assessment heads are crucial for the \textit{human-aligned} chess play that we aim to capture.
+The former allows \Allie to behave like a human, taking more time to make decisions in complex game states than simple ones, and the latter allows the model to discriminate between good moves and blunders.
+All three heads combined enable the adaptive MCTS procedure, detailed in Section~\ref{sec:adaptive-search}.
+
+All three prediction heads are individually parameterized as linear layers applied to the outputs of the final decoder layer.
+Given a dataset $\mathcal{D} = \{ (\mathbf{m}, \mathbf{t}, v) \}$ of chess games, each represented as a sequence of moves $\mathbf{m} \in \Sigma^N$, human think time before each move $\mathbf{t} \in \mathbb{R}^N$ and the ultimate game outcome $v\in\{-1 [\text{\it black wins}], 0 [\text{\it draw}], 1 [\text{\it white wins}]\}$, we train the model to minimize the log likelihood of the next move and mean squared errors of time and value predictions:
+
+\begin{align*}
+  \mathcal{L}(\theta) = \sum_{(\mathbf{m}, \mathbf{t}, v) \in \mathcal{D}} \left( \sum_{1 \le i \le N} \left( -\log p_\theta(m_i \,|\, \mathbf{m}_{<i}) + \left(t_\theta(\mathbf{m}_{<i}) - t_i\right)^2 + \left(v_\theta(\mathbf{m}_{<i}) - v\right)^2 \right) \right) \text{.}
+\end{align*}
+
+A similar objective of jointly learning policy and value can be found in MCTS-based reinforcement learning algorithms~\citep{silverMastering2017,schrittwieserMastering2020}.
+
+\subsection{Policy improvement under time constraints with adaptive search}
+\label{sec:adaptive-search}
+Virtually all strong chess engines~\citep{Stockfish,lc0} rely on {\em search}, a process of exploring possible future moves to pick the best move.
+Past work has shown that search is crucial for achieving strong gameplay~\citep{silverMastering2017,jonesScaling2021}.
+Since \Allie produces both policy and value estimators, planning algorithms such as Monte-Carlo tree search (MCTS)~\citep{coulomEfficient2007} can be applied off-the-shelf for policy improvement.
+As shown in Figure~\ref{fig:board}b, MCTS works by rolling out multiple moves into the future, selecting paths that are most likely to lead to a win.
+
+State-of-the-art search-based chess engines such as AlphaZero use a constant number of rollout steps for each move, leading to them assessing tens of thousands to millions of positions before playing a move.
+Such large amounts of search are incompatible with our goal of human-alignment; in blitz games, humans frequently makes moves with $<$1 second of time usage, and it is practically infeasible to search through such a large number of rollouts on consumer hardware in this timeframe.
+On the other hand, in critical game states where the model predicts a human would spend more time to ponder, it is plausible that running deeper simulations would allow for better modeling of the elevated depth of human reasoning in such positions and improve policy strength.
+
+To this end, we propose a time-adaptive MCTS procedure that aligns MCTS with human reasoning: at each position $\mathbf{m}$, we dynamically set the number of rollouts $N_\mathrm{sim} = \lfloor c \cdot t_\theta(\mathbf{m}) \rfloor$, where $t_\theta(\mathbf{m})$ is the predicted human pondering-time at the position $\mathbf{m}$ and $c$ a constant.%
+\footnote{Our MCTS implementation and hyperparams follow AlphaZero~\citep{silverMastering2017}.}
+Another alternative implementation of time-adaptive MCTS would be to keep searching until a timeout is reached, but we opted against doing this in order to make our implementation independent of hardware efficiency.
+
+
+
+
+\section{Experimental setup}
+
+
+\subsection{Dataset}
+
+We constructed a raw dataset of chess games using all blitz\footnote{A blitz game is one where each player usually can take 3-5 minutes across all their moves.} games played in 2022 on Lichess, a popular online chess platform.%
+\footnote{\url{https://database.lichess.org/}}
+To address the data's skew toward low-skill-level games, we downsampled the dataset to have roughly equal numbers of games in bins in increments of 100 Elo.
+From this downsampled dataset, we use 18 thousand games for testing, and the remaining games for training and validation.
+In total, the training set contains 91 million games and 6.6 billion tokens.
+
+Our primary automatic evaluation metric is  move-matching accuracy---how often does the model correctly predict the next move in the game.
+Following \citet{mcilroy-youngAligning2020}, when evaluating accuracy, we discard the first 5 moves of each game, which reduces the impact of opening memorization (there are only so many ways to begin a chess game).
+We further omit from evaluation any moves made under time pressure (when there is less than 30 seconds on the clock) to avoid the influence of random moves made due to being low on time.
+This leaves us with 884,049 positions from an evaluation test set.
+To further evaluate the abilities of \Allie to produce valid chess moves under {\em out-of-distribution} game states, we also constructed a dataset of {\em random} chess games, where each game contains moves that are randomly sampled among legal moves in each position.
+
+\subsection{Model architecture}
+\label{sec:architecture}
+
+Our model uses a standard decoder-only Transformer  architecture~\citep{vaswaniAttention2017} with 355M parameters.
+We initialize model parameters (excluding embeddings) using weights from the pre-trained GPT-2 medium model~\citep{radfordLanguage2019}, and embeddings are trained from scratch since the vocabulary is not shared with natural language.
+It may seem surprising that that learned model weights for language modeling are useful for a non-linguistic task like chess, but this transfer technique is shown effective in other domains~\citep{papadimitriouLearning2020,shenCrossModal2023}.
+The value prediction head is followed by a tanh activation layer that squeezes the value prediction to the range $[-1, 1]$, with the extreme values corresponding to wins for each of the two players.
+The model is trained for 2M steps with a global batch size of 131,072 tokens on our training set.
+This corresponds to roughly 40 epochs over the training data.
+We find that our setting is mostly {\em data-constrained}---model performance is limited by the number of human chess games available on the Internet---and doubling model size has only a small effect on the model's ability of predicting human moves.
+
+\subsection{Baselines}
+
+We compare our \Allie's learned policy against \Maia~\citep{mcilroy-youngAligning2020}, which, like \Allie, is trained on human-games to make next-move predictions.
+\Maia is a family of nine individual models, each trained on Lichess games from players with Elo ratings in a given range.
+We refer to these as \Maia-${\{1100, 1200, \dots, 1900\}}$.
+The \Maia network architecture is a residual CNN, and their move prediction objective used during training is similar to our approach, but the input representation is board state without full move history information.
+To unify the different Maia models into a single strong baseline, we define a \MaiaStar model by adaptively choosing the Maia model with the closest Elo rating to the players' ratings.
+For example, a 1480-rated game would be evaluated using the Maia-1500 model.
+
+The primary comparative metric we use for automatic evaluation is move-matching accuracy: what fraction of the time does the system correctly predict the move a human would have made.
+Other aspects of {\em human-aligned} chess play (e.g., modeling human moves vs. time usage) require different evaluation metrics, which we detail in Section~\ref{sec:results}.
+To the best of our knowledge, there are no existing chess engines that model how humans play chess in terms of pondering and resigning, so we do not have a direct comparison with a baseline system for these behaviors.
+
+Though large language models (LLMs) such as OpenAI's GPT-3.5(-turbo-instruct) have not (to our knowledge) been explicitly trained to play chess, they have been shown to reliably produce humanlike next moves.\footnote{\url{https://nicholas.carlini.html}}
+This is accomplished by prompting the LLM with a textual representation of the game state using PGN notation.\footnote{The Portable Game Notation (PGN) is a popular human-readable and human-writable textual notation for chess games.}
+Due to dependency on the textual PGN notation, this approach is not compatible with OpenAI's latest chat-based LLMs (e.g.
+It is difficult to make a fair comparison between \Allie and GPT-3.5 because on the one hand, GPT-3.5 has many more parameters and potentially observed much more chess data during pre-training.
+On the other hand, GPT-3.5 was never intended to play chess, and the fact that it can play chess is somewhat remarkable.
+We report GPT-3.5 results just to provide context on performance achievable by a frontier large language model.
+
+\begin{table}[]
+    \caption{All configurations of our chess-engine, \Allie.}
+    \label{tab:versions}
+    \centering
+    \small
+    \begin{tabular}{l|p{3.5in}}
+    \toprule
+    Config. & Description \\
+    \midrule
+         \AlliePolicy &  Softmax sampling according to $p_\theta$ with unit temperature. \\
+         \AllieStrong &  Greedy decoding according to $p_\theta$ conditioned on a 2,500 Elo level. \\
+         \AllieSearch & \AlliePolicy with non-adaptive MCTS (50 rollouts). \\
+         \AllieAdaptiveSearch & \AlliePolicy with adaptive MCTS ($c$ set such that MCTS performs 50 rollouts on average across all positions).\\
+        \bottomrule
+    \end{tabular}
+  \end{table}
+  
+\subsection{Large-scale Human Study}
+In addition to conducting offline evaluation, we deployed the four configurations of \Allie described in Table~\ref{tab:versions} as well as \MaiaStar, to play blitz games on the website Lichess.
+\AlliePolicy was conditioned to play adaptively at the opponent's strength, and moves were sampled from the model distribution $p_\theta$.
+\AllieStrong was conditioned to play at a 2,500 skill level, and top moves under the model distribution are played.
+This setting allowed us to measure the upper bound of the policy strength.%
+\footnote{A rating of 2500 is typically considered as the threshold for grandmaster level play.}
+\AllieSearch and \AllieAdaptiveSearch employ inference-time MCTS to improve move selection, with the latter using an adaptive number of rollouts.
+Overall, we collected 7,483 blitz games with 2,412 human players over a multi-week period.
+After each game, players were invited to fill out a survey about their experience. 
+
+
+\section{Results}
+
+\label{sec:results}
+To apply inference-time search to \Allie, we first need to understand if chess is at all learnable from human-generated data (Section~\ref{sec:rules}), and if so, how well \Allie models human gameplay (Section~\ref{sec:humanlike}).
+We discuss our main results on adaptive MCTS and skill calibration in a large-scale study against human players in Section~\ref{sec:skill-calibration}.
+
+\begin{table}[t]
+    \small
+    \begin{minipage}{0.35\linewidth}
+        \caption{{\em \Allie learns to play valid chess moves.} 95\% confidence intervals are shown.}
+        \label{tab:valid}
+        \centering
+        \begin{tabular}{@{}lc@{}}
+            \toprule
+            Evaluation set & Top-1 move  \\
+            & is  valid (\%) \\ \midrule
+            Lichess & $100.0 \pm 0.0$  \\
+            Lichess (under {\em check}) & $100.0 \pm 0.0$ \\
+            Random & $99.9 \pm 0.0$ \\
+            Random (under {\em check})& $96.6 \pm 0.0$ \\
+            \bottomrule
+        \end{tabular}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.59\linewidth}
+        \caption{
+            {\em \AlliePolicy outperforms state-of-the-art methods in human move prediction.}
+            Move prediction accuracy with 95\% confidence intervals are reported in the table.}
+        \label{tab:accuracy}
+        \begin{tabular}{@{}lccc@{}}
+        \toprule
+        Human plays... & \Allie (\%) & Maia$^\star$ (\%) & GPT-3.5 (\%) \\ \midrule
+        All moves & $55.7 \pm 0.1$ & $51.6 \pm 0.1$ & $53.7 \pm 0.1$ \\
+        {\em Castling} & $74.3 \pm 0.5$ & $73.3 \pm 0.6$ & $72.4 \pm 0.6$ \\
+        {\em En passant} & $70.4 \pm 4.1$ & $67.7 \pm 4.2$ & $71.4 \pm 4.0$ \\
+        {\em Pawn promotion} & $86.9 \pm 1.7$ & $85.1 \pm 1.8$ & $86.0 \pm 1.7$ \\
+        {\em Threefold repetition} & $92.0 \pm 4.6$ & $87.0 \pm 5.7$ & $92.8 \pm 4.4$ \\
+        \bottomrule
+        \end{tabular}
+    \end{minipage}
+\end{table}
+
+\subsection{Does \Allie learn the rules of chess?}
+\label{sec:rules}
+First, we ask whether the rules of chess are learnable from human-generated chess data.
+The model produces a softmax distribution over roughly two thousand possible chess moves, and we can test if the model has indeed learned the rules of chess by checking if model assigns high probability to valid moves, and low probability to invalid moves.
+While we evaluate the model's behavior on actual human games, it is also important to test if the model can generalize to {\em out-of-distribution} positions that are rare in human games but are nevertheless valid: a model that has learned the rules of chess should play legal moves in randomly generated games as well.
+Beyond testing the model behavior in the aggregate, we further examine the model's behavior when special chess rules restricting valid moves (e.g., {\em check}) are in effect.%
+}
+
+In Table~\ref{tab:valid}, we report how often the top move from the model distribution is valid.
+On both the human and random evaluation sets, we find that the top move is {\em almost always} valid: 100\% of the time on human games, and 99.9\% of the time on random games.
+Softmax distributions by definition assign non-zero probabilities to all (including invalid) moves, but this probability is vanishingly small: 0.
+In positions where the king is under {\em check},\footnote{This is a game state where the set of valid moves is more restricted than usual; the player must make a move that prevents the opponent from capturing their king piece.} the model still only assigns 0.2\% of probability to all invalid moves.
+Our results suggest that the model has indeed learned the rules of chess from observing human chess games, and generalizes reasonably well to out-of-distribution positions.
+
+\subsection{How well does \Allie model human gameplay?}
+\label{sec:humanlike}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.87\linewidth]{figures/move-matching-accuracy.pdf}
+    \caption{{\em Adaptive search enables matching human moves at expert levels.}
+        Move-matching accuracy of \AlliePolicy, \AllieAdaptiveSearch, \Maia and GPT-3.5 are reported across skill levels.
+        \AllieSearch has virtually the same move matching accuracy as  \AllieAdaptiveSearch and is omitted from the figure.}
+    \label{fig:accuracy}
+    \centering
+\end{figure}
+
+The ideal human-aligned chess bot should behave indistinguishably from a human chess player.
+A major aspect of humanlikeness is in the moves played: for a given game state, a humanlike chess bot should play the same move as a human would in the same position.
+Beyond moves played, we argue that it is important to match the time humans ponder their moves before taking them, and resign when appropriate---these are also essential components of how humans play chess.
+
+\paragraph*{Moves.}
+
+On the Lichess evaluation set, we compare how often \Allie, GPT-3.5, and the \Maia models play the same moves as humans.
+Following \citet{mcilroy-youngAligning2020}, we consider the {\em move-matching accuracy} metric, defined as the fraction of top-1 moves under the model distribution that matches human moves at the same positions.
+Over the entire test set, the top move produced by \Allie matches human moves 55.7\% of the time, compared to \MaiaStar's 51.6\% and GPT-3.5's 53.7\% (Table~\ref{tab:accuracy}).
+Shown in Figure~\ref{fig:accuracy}, we find that \Allie matches human moves more accurately than \Maia and GPT-3.5 models across almost the entire skill spectrum.
+Notably, \AllieAdaptiveSearch outperforms \AlliePolicy at 2300 Elo and above, providing evidence that search is crucial for modeling the behavior of expert-level human players~\citep{jacobModeling2022}.
+
+We further report move-matching accuracy of special moves such as {\em castling}, {\em en passant}, {\em pawn promotion}, and {\em threefold repetition} in Table~\ref{tab:accuracy}.
+\Allie reaches higher move-matching accuracy than \MaiaStar for all four types of special moves, and is competitive with GPT-3.5 overall.
+
+\paragraph*{Pondering time and resignation.}
+
+Additional dimensions of human behavior, including pondering time and resignation, are also key aspects in humanlike gameplay.
+We find a strong correlation between the model's predicted think time and human think time, with Pearson's $r =$ 0.697.
+This suggests that \Allie successfully learns to predict when humans do and do not ponder in a position.
+Figure~\ref{fig:time} shows the distribution of \Allie's predicted think time for different amounts of time spent by humans.
+There is a clear monotonic relationship, but interestingly \Allie tends to predict lower pondering times than humans do.
+This is probably because of the skew in pondering time distribution: the majority of moves in blitz games is played under 5 seconds, and the model is incentivized to ``hedge'' its prediction and output shorter pondering times.
+
+We further evaluate whether \Allie can resign in losing positions like humans.
+We define resignation as when a special resignation token {\tt <resign>} is assigned higher likelihood than all valid moves on the board, and the predicted board value is below -0.9 from the perspective of \Allie.
+We focus our analysis on both the true positive rate (TPR), i.e., the number of positions where the model resigns when humans resign,
+and false positive rate (FPR), i.e., the number of positions where the model resigns when humans do not resign.
+Over the evaluation set, we observe a TPR of 86.4\%, indicating \Allie usually resigns when a human would.
+\Allie almost never resigns when a human wouldn't, with a FPR of 0.1\%.
+Our results highlight that \Allie models human chess play holistically, not only in terms of moves played, but also in pondering time and resignation when approriate.
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{.47\textwidth}
+      \includegraphics[height=5cm]{figures/time.pdf}
+      \captionof{figure}{
+          {\em \Allie's time predictions are strongly correlated with ground-truth human time usage.}
+          In the figure, we show median and interquartile range of \Allie's predicted think time for different amount of time spent by humans and observe a clear monotonic relationship.
+      }
+      \label{fig:time}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{.47\textwidth}
+    \centering
+    \includegraphics[height=5cm]{figures/value-corr.pdf}
+    \captionof{figure}{
+        {\em \Allie learns to assign reliable value estimates to board states by observing game outcomes alone}.
+        We report Pearson's $r$ correlation of value estimates by \Allie and Stockfish with game outcomes.
+        Game outcomes are increasingly predictable as the game progresses.
+    }
+    \label{fig:value}
+    \end{minipage}%
+    \centering
+\end{figure}
+
+\paragraph*{Reliable board value estimate.}
+Before applying a search algorithm such as Monte-Carlo tree search (MCTS), we need a value function that guides exploration of promising game states.
+Recall that \Allie is trained to predict the outcome of games at each position---which can be conveniently interpreted as a board value function.
+In Figure~\ref{fig:value}, we show how well \Allie's value function and an oracle value function correlate with game outcomes.%
+\footnote{We use evaluations of Stockfish~\citep{Stockfish} after $10^6$ nodes searched.}
+By observing only outcomes of games without additional supervision, we find that \Allie learns to assign surprisingly reliable value estimates to chess board states:
+\Allie's value estimates closely match that of the oracle, and predicts game outcomes just as well.
+Notably, \Allie has access to game metadata (in particular, player skill levels) that Stockfish does not, which may explain why it even outperforms Stockfish sometimes.
+Our results suggest that \Allie learns credit assignment in chess by observing game outcomes alone, and provides the foundation for applying value-guided search methods such as MCTS.
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{.47\textwidth}
+      \includegraphics[height=5cm]{figures/rating-diff-square-inline-legend-v2}
+      \captionof{figure}{
+        {\em Search-free methods fail to match skill level of strong players.}
+        We estimate difference in strength of various systems to online players.
+        Values close to 0 indicate good skill calibration.
+    }
+    \label{fig:ratings}
+    \centering
+    \end{minipage}
+    \hfill
+    \begin{minipage}{.47\textwidth}
+    \centering
+    \includegraphics[height=5cm]{figures/progress-acc.pdf}
+    \captionof{figure}{Human move prediction accuracy increases consistently across models as the game progresses and jumps up sharply in the last portion of the game.
+    }
+    \label{fig:progress-acc}
+    \end{minipage}%
+    \centering
+\end{figure}
+  
+
+\subsection{Evaluating Skill Calibration via Games with Humans}
+\label{sec:skill-calibration}
+
+Our offline evaluations suggest that \Allie predicts human behavior well, but to study whether \Allie could calibrate to strength of human players, we had \Allie play against real humans at a variety of skill levels.
+A chess engine that is perfectly {\em skill-calibrated} should win 50\% of games against players regardless of their skill level. 
+Inspired by the expected calibration error metric~\citep{naeiniObtaining2015,guoCalibration2017}, we define a {\em skill calibration error} (SCE) metric.
+Games between the chess engine and humans are first partitioned into equally spaced bins based on skill level (player Elo).
+For a bin of games $B$ between the evaluated system and human players, we take the absolute difference between the system's estimated performance on the set of games, and the average Elo of the human players as the calibration error:%
+\footnote{
+}
+\begin{align*}
+    \mathrm{SCE}(B) = \left|  \mathrm{SystemElo}(B) - \mathrm{HumanElo}(B) \right|.
+\end{align*}
+
+\paragraph*{Search-free methods do not match the strength of experts.}
+In Figure~\ref{fig:ratings}, we show estimated ratings of the systems against human players across different strength levels, and well-calibrated systems should have a rating difference close to 0.
+Mean and maximum skill calibration errors are reported in Table~\ref{tab:calibration-error}.
+We find that \AlliePolicy, \AllieStrong and \MaiaStar  are {\em not calibrated} to opponent strength.
+\AlliePolicy and \Maia are more or less evenly matched against players below 2100 Elo, but against players above 2400 Elo, both models perform poorly, with \AlliePolicy scoring 11.1\% and \MaiaStar scoring 12.5\% on average.
+\AllieStrong is considerably stronger than weak players ($<$ 2100 Elo), and yet still loses 75\% of games to players above 2400 Elo.
+All search-free systems perform progressively worse against stronger players, suggesting that strength conditioning, sampling temperature (\AllieStrong) or multiple expert models for different skill levels (\MaiaStar) may not be sufficient to match the strength of strong human players.
+
+\begin{table}[tb]
+    \centering
+    \caption{
+        {\em Adaptive search enables remarkable skill calibration.}
+        Mean and maximum skill calibration errors are computed by binning human players into 200-Elo groups.
+        We also report systems' estimated performance against players at the lower and upper Elo ends of the skill spectrum.
+    }
+    \label{tab:calibration-error}
+    \small
+    \begin{tabular}{lcc|cc}
+    \toprule
+    & \multicolumn{2}{c|}{\small \em Skill Calibration Error} & \multicolumn{2}{c}{\small \em Online performance vs. ...}
+    \\ System                & Mean $\downarrow$ & Max $\downarrow$ & 1100-rated & 2500-rated \\ \midrule
+    {\em Search-free} \\
+    \MaiaStar             & $146$ & $336$ & $1251$ & $2138$ \\
+    \AlliePolicy          & $127$ & $351$ & $1134$ & $2136$ \\
+    \AllieStrong          & $328$ & $677$ & $1799$ & $2260$ \\ \midrule
+    {\em Search-based} \\
+    \AllieSearch          & $80$  & $166$ & $1180$ & $2318$ \\
+    \AllieAdaptiveSearch  & $49$  & $95$ & $1196$ & $2528$  \\\bottomrule
+    \end{tabular}
+\end{table}
+
+\paragraph*{Skill-calibrated chess play with adaptive search.}
+Despite being a strong human move prediction model, search-free \Allie configurations do not match the level of gameplay of strong ($\ge$ 2000 Elo) players.
+Qualitatively, models blunder pieces and make suboptimal moves in ways that strong players do not (see online players' feedback in Section~\ref{fig:subjective}).
+In this section, we discuss how we can improve the skill calibration of \Allie---in particular its performance against strong players---and maintain humanlike play by incorporating an adaptive search method.
+Recall that \AllieAdaptiveSearch uses an adaptive search budget allocated linearly according to predicted human pondering time at each position, and we compare it with an equal-compute MCTS baseline, \AllieSearch.
+
+We find that \AllieAdaptiveSearch improves skill calibration remarkably, achieving an average skill calibration error of 49 Elo, and a maximum skill calibration error of 95 Elo.
+Figure~\ref{fig:ratings} helps contextualize this finding, where we see the performance ratings of \AllieAdaptiveSearch exhibit a near-linear relationship with opponent ratings.
+This is a substantial improvement over all search-free systems, all of which underperform $\ge$ 2400 Elo players by at least 200 Elo points.
+
+More surprisingly, \AllieAdaptiveSearch outperforms standard AlphaZero-like MCTS (\AllieSearch), in both overall skill calibration and performance against 2500 Elo human players.
+Our findings suggest that humanlike reasoning at ``critical'' positions is useful for reaching expert-level chess.
+Crucially, \AllieSearch and \AllieAdaptiveSearch maintain humanlike play, both achieving a move-matching accuracy of 55.9\% compared to 55.7\% for \AlliePolicy and 51.6\% for \MaiaStar.
+
+\begin{table}[]
+    \caption{Some examples of the qualitative feedback we received in our post-game survey.}
+    \label{tab:feedback}
+    \centering
+    \small
+    \begin{tabular}{p{0.6in}|p{4.2in}}
+\toprule
+System & Feedback \\
+\hline
+\AllieAdaptiveSearch & 
+{
+I liked the fact Allie plays like a human, and makes human mistakes. She's not like, let's say, Stockfish level 1 making absurd mistakes, nor an inhuman AI with perfect play, but a humanlike player that fights for a win and makes human-reasonable moves.
+
+Honestly, I'm not a top player, but I like to play with similar opponents and I'm also a programmer with interest in AI, and I feel satisfied with Allie's behaviour. Great job :)
+}
+        \\
+\hline
+\AlliePolicy
+& 
+{
+I really felt like I was playing against a human, but I have some opinions on this robot:
+Firstly, I noticed that he plays the opening well, which is a very good thing
+Secondly, I also noticed that in the middle of the game his accuracy decreases somewhat, he makes mistakes and inaccurate moves, and this is just like a human.
+} \\
+\bottomrule
+    \end{tabular}
+\end{table}
+
+
+
+\section{Discussion}
+
+In this work, we demonstrate a method for training a state-of-the-art chess AI that models how humans play chess: our system \Allie exhibits remarkable precision in playing humanlike moves, as well as pondering and resigning like humans.
+Through a time-adaptive Monte-Carlo tree search algorithm, \Allie can be evenly matched with players from beginner (1100 Elo) to expert level (2500 Elo) with almost no skill gap, by learning chess {\em exclusively from humans} without the need of distilling from a strong chess engine.
+We believe the techniques developed in this paper have broad applicability for other settings where aligning AI models with {\em imperfect} human reasoning is crucial, and we look forward to future explorations in other complex settings, such as the alignment and oversight of superhuman AI systems.
+
+While offline evaluation metrics and quantitative analysis of games with real human players reveal \Allie's strengths, especially relative to prior approaches, more progress is still necessary to fully realize our goal of a human-aligned chess engine.
+In qualitative feedback, many players were positive about \Allie (see Table \ref{tab:feedback}), but several shortcomings were also repeatedly emphasized. 
+Players especially noted \Allie's propensity toward late-game blunders and that its pondering times were sometimes long in positions where there is only one reasonable move.
+However, since players all knew they were playing against a bot, it is hard to disentangle their perspectives from this knowledge.
+For example, contrasting with the qualitative feedback, we empirically observed that move prediction accuracy actually improves as games progress, especially in the last few turns (see Figure~\ref{fig:progress-acc}).
+For future work, it would be interesting to conduct a proper Turing test, where players do not know whether they are playing against an AI or a human-player of a similar Elo level.
+
+Our approach relies on pre-training, which is limited by available data: the vast majority of online chess games are played at fast time controls, and therefore it is more challenging to use data-driven methods to model human behavior in slower games.
+Future work should explore methods to model human reasoning in slower games, where players have more time to think and make more accurate moves, and test the generalization of our approach to different time controls and game formats.
+
+
+

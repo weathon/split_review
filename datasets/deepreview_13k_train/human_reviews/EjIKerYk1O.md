@@ -1,0 +1,136 @@
+# Enhancing Airside Monitoring: Multi-view Approach for Accurate Aircraft Distance-To-Touchdown Estimation in Digital Towers
+
+- Decision: Reject
+- Scores: 1, 3, 3
+
+## Abstract
+A digital tower, a cost-effective alternative to physical air traffic control towers, is expected to provide video-sensor-based surveillance, which is particularly advantageous for small airports. To fully realize this potential, advanced computer vision algorithms play a crucial role in effective airside monitoring. While current research primarily focuses on tracking aircraft on airport surfaces, an equally vital aspect is the real-time observation of approaching aircraft on the runway. This capability holds a pivotal role in augmenting both airport and runway operations. In this context, the study introduces a real-time deep learning approach to accurately estimate the distance-to-touchdown of approaching aircraft, covering distances of up to 10 nautical miles. The approach overcomes the limitations of monoscopic and stereoscopic methods by utilizing multi-view video feeds from digital towers. It integrates Yolov7, an advanced real-time object detection model, with auxiliary regression auto-calibration, enabling real-time tracking and feature extraction from diverse camera viewpoints. Subsequently, an ensemble approach utilizing an LSTM model is proposed to combine input vectors, resulting in precise distance estimation. Notably, this approach is designed for easy adaptation to various camera system configurations within digital towers. The model's effectiveness is assessed using simulated and real video data from Singapore Changi Airport, demonstrating stability across scenarios with low predictive errors (Mean Absolute Percentage Error = 0.18%) up to 10 nautical miles under visual meteorological conditions. These capabilities within a digital tower environment can significantly enhance the controller's ability to manage runway sequencing and final approach spacing, ultimately leading to remarkable airport efficiency and safety improvements.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+1
+
+### Rating Number
+1
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper proposes a deep learning solution that uses images captured by cameras installed at airport runways to monitor aircraft traffic around an airport to estimate distance-to-touchdown for incoming (i.e., landing) aircrafts.  Distance-to-touchdown is an important piece of information that is used by airtraffic controllers to manage the air traffic.  The work proposed here develops a key enabling technology for the future digital (air taffic control) towers.  The proposed method is able to integrate information captured by multiple cameras in order to carry out the task at hand.  Each camera feed is processed independently to detect and segment the incoming aircrafts.  Camera network layers process features computed at each camera and the result is sent to an LSTM+inference network.  An auxiliary regression task is used to improve training.  The work is evalauted on both synthetic data, rendered using the popular X-Plane 11 flight simulator and on real data collected at the Singapore Changi airport.
+
+### Strengths
+The paper tackles an important problem in aircraft traffic management and control.  Clearly, vision-based automated schemes for detecting, identifying, and tracking air traffic in and around an airport is of immense value.  The paper cogently argues the need for such a system.  The paper also makes a clever use of synthetic data to train and evaluate the distance-to-touchdown estimation model.  The paper also makes use of TensorRT engine to speed up inference.  This is important due to the real-time nature of the task that the paper wants to solve.
+
+### Weaknesses
+The work as presented suffers from a number of weaknesses.
+
+First off, majority of training and evaluation takes place in a setting that uses only two cameras.  This is unsatisfactory given that the multi-view analysis is one of the central claims of this work.
+
+It is not immediately obvious how the architecture depicted in Figure 1 manages to integrate the information from multiple cameras.  It seems that the "calibration network" is tasked with transforming the features captured by multiple cameras into a shared space where these can be reasoned with jointly.  I feel that we need a lot more discussion around this "calibration network" and how it helps integrate information from multiple cameras. 
+
+Part of the "inference" network contains an LSTM.  It is not clear to me if LSTM is needed to deal with a single frame from multiple cameras or if LSTM is needed to process video feeds.  It appears to me that temporal information may be helpful in regularizing the distance-to-touchdown estimates.  Does the system uses temporal information?
+
+What role does auxiliary network play?  And more importantly how does it play the said role?  What is a reversed network?  
+
+The overall scheme seems rather ad hoc.  YOLO is used as an object detector here.  What if it fails to record a plane?  What if planes are mis-labelled in multiple views?  At a distance most planes look similar!  
+
+Some of the discussion around results raises questions.  On page 8, why does the system perform better in low-light conditions.  This is very counter-intuitive.  This is a safety critical application, so the bar of scientific rigour is very high.  It is not sufficient that the proposed system achieves good results.  It is also important that we understand the limits of this system.  We should be able to explain good (or bad) results.  Perhaps an ablative study will help explain the roles played by individual components of the system.
+
+### Questions
+1. What happens if the N_views are set to more than 2 in Algorithm 1?
+2. Why max_epoches are set to 225K in Algorithm 1?  This seems an arbitrary number.
+3. Why does the system perform better in low-light conditions?    Do we know why?
+4. How does the system deal with the object association problem in multiple images?
+5. Not sure I can understand the second sentence in the Conclusions section.  It refers to stochastic number of input videos ...  What does it actually mean?
+6. The paper refers to TensortRT?  Do you mean TensorRT?
+7. What is a reversed network?
+8. Can you provide some details of the auxiliary regression network?
+9. Can you provide some details of the calibration network?  It may be useful to provide an ablative study on this, since it plays a central role in integrating information from multiple cameras.
+10. What role does LSTM play?  Is it used to combine information from multiple cameras?  Or it integrates information over time to provide better distance-to-touchdown estimates.
+
+### Soundness
+1 poor
+
+### Presentation
+2 fair
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 2
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This work proposes a multi-view deep learning approach for distance-touchdown (DTD) estimation. Yolov7 is utilized here to detect the aircraft in image. Input vecotrs from different views are further combined in an LSTM model, resulting the estimated distance.
+
+### Strengths
+1. The experiments on simulated and real video data demonstrate that the proposed method can favorably extimate the distance of the aircraft.
+
+### Weaknesses
+1. This manuscript sounds more like a technique report instead of a research paper. The proposed approach simply utilize an off-the-shelf detection model and an LSTM network to train a distance estimation model.
+2. The authors are encourged to evaluate the performance of baselines with different detection models and network structures.
+
+### Questions
+When there are more than one aircrafts in the frame, how do you associate the aircrafts across different views?
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 3
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper propose a method to estimate the distance for aircraft in digital towers. Distance/depth estimation is an interesting topic in 3D vision.
+
+### Strengths
+1. Distance estimation is a challenging task.  
+2. This paper is easy to understand.
+
+### Weaknesses
+1. The model design is not novel, which has limited technical learning.   
+2. The dataset is not available. Then it cannot be a part of contribution.  
+3. Calibaration network is a little strange. Why it can align two views without knowing the related position for the two cameras? If the two camera's position is changed, can this model still work?   
+4. The number of views in the dataset is only 2.  The statement of "multi-view" is unsoundness. Author should increase the view number.  
+5. The paper writing should be further improved. Besides, figure in the manuscript should be the vector figure (Most figures are blur).
+
+### Questions
+Refer to the weakness.
+
+### Soundness
+2 fair
+
+### Presentation
+1 poor
+
+### Contribution
+2 fair

@@ -1,0 +1,417 @@
+\title{FiRST: Finetuning Router-Selective Transformers for Input-Adaptive Latency Reduction}
+
+\begin{abstract}
+Auto-regressive Large Language Models (LLMs) 
+demonstrate remarkable performance across domanins such as vision and language processing. However, due to sequential processing through a stack of transformer layers, autoregressive decoding faces significant computation/latency challenges, particularly in resource-constrained environments like mobile and edge devices. Existing approaches in literature that aim to improve latency via skipping layers have two distinct flavors - 1) Early exit   2) Input-agnostic heuristics where tokens exit at pre-determined layers irrespective of input sequence. Both the above strategies have limitations - the former cannot be applied to handle KV Caching necessary for speed-ups in modern framework and the latter does not capture the variation in layer importance across tasks or more generally, across input sequences.   
+To address both limitations, we propose \textsc{FiRST}, an algorithm that reduces inference latency by using layer-specific routers to select a subset of transformer layers adaptively for each input sequence - the prompt (during prefill stage) decides which layers will be skipped during decoding.  \textsc{FiRST} preserves compatibility with KV caching enabling faster inference while being quality-aware. \textsc{FiRST} is model-agnostic and can be easily enabled on any pre-trained LLM. We further improve performance by incorporating LoRA adapters for fine-tuning on external datasets, enhancing task-specific accuracy while maintaining latency benefits. Our approach reveals that input adaptivity is critical - indeed, different task-specific middle layers play a crucial role in evolving hidden representations depending on task. Extensive experiments  show that \textsc{FiRST} significantly reduces latency while retaining competitive performance (as compared to baselines), making our approach an efficient solution for LLM deployment in low-resource environments.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large Language Models (LLM's) have revolutionized the fields of Natural Language Processing and Computer Vision achieving incredible performance on a diverse set of benchmark tasks. %For many downstream tasks, LLM's have provided a simplified and unified interface for inserting as input a small number of complex input/output pairs and achieving stellar performance. 
+However, the scale of these LLM's characterized by billions of parameters hinder their adoption in resource-constrained environments with memory, latency and compute serving as the main challenges. In this work, we focus on the latency aspect which becomes the most significant bottleneck for tasks such as machine translation, question answering, summarization particularly on %edge 
+devices, such as laptops and mobile phones. As mentioned in \citep{schuster2022confident}, the auto-regressive nature of decoding in LLM's further pronounces the latency bottleneck. Our main interest lies in the resource-constrained on-device setting where resolving this bottleneck is of particular importance.
+
+Transformer based LLMs have several stacks of layers (including attention and FFN layers) leading to high latency and compute requirements, making inference very slow or even infeasible in resource constrained settings. This is because of the sequential processing of tokens through all the layers for \emph{every input sequence and task}. However, it is important to note that in the real world, there is a lot of heterogeneity in input sequences and tasks. \citep{schuster2022confident, sun2022simple} noted that the generations made by LLMs can have varying levels of difficulty and certain generations can be solved with reduced compute, by exiting the transformer stack early. At the same time, it has been noted in recent works \citep{llamas} that inference forward pass proceeds in phases through the layers of transformer based models, with different types of information being extracted or mapped at different phases (sequences of layers) for certain tasks such as translation. Motivated by these and other related works, we hypothesize that \emph{different sequential combinations of layers are important for different input sequences and tasks}. Learning the right sequential combination of layers can help reduce inference latency and compute for on-device scenarios. However, there are several challenges. Any algorithm for determining the ``right'' combination of layers should minimize any quality loss, be compatible with other latency reduction strategies such as KV cache handling and batch inference, should not introduce any additional latency or compute and and be learnable with minimal compute and training overhead. 
+
+In the last few years, several promising approaches have been proposed in literature that adaptively prune layers at each decoding step. Token-level early exit proposed in \citep{schuster2022confident, sun2022simple} allow tokens to exit the transformer layer stack early based on different strategies to compute the confidence or saturation level. \citep{elhoushi2024layer, elbayad2019depth, zhang2019scan} extended this idea to incorporate layer skipping at a token level during training. % since pre-trained transformer layers spread their compute across layers. COULD WE EXPLAIN THIS? NOT VERY CLEAR.}
+While token level early exit is a useful idea in theory, it suffers from a major limitation of incompatible KV Caching in practice \citep{del2023skipdecode}. The incompatibility stems from having to recompute KV caches for preceding tokens if we have a delayed exit point for latter tokens often resulting in loss of early exit advantages. Since KV cache is crucial in significantly speeding up auto-regressive decoding, inappropriate handling of KV cache limits practical adoption. 
+
+Recently, \citep{liu2024accelerating,del2023skipdecode} have proposed  input-agnostic layer skipping at token level, that handle KV cache appropriately as well as retain the advantage of adaptive partial computation. In these solutions, tokens exit at pre-determined layers irrespective of the input sequence, and for all sequences in a batch, tokens at the same position in a sequence exit at the same layer. Furthermore, tokens at latter parts of the sequence are constrained to exit earlier than the previous tokens to ensure that there is no redundant KV cache re-computation. These solutions are heuristic based and impose hard rules and constraints irrespective of input sequences, which can lead to drop in output quality. Others \citep{jaiswal2024ffn} have proposed circumventing the KV cache issue entirely by skipping only FFN layers, but such a strategy cannot reduce redundancy in transformer layer computations. Moreover, they propose an input adaptive skipping heuristic based on cosine similarity of outputs: if two adjacent layers have a similarity greater than a threshold,  then all subsequent layers except the last few are skipped. However, such a strategy does not take into account that several middle layers are crucial (see \citep{liu2024accelerating}) and furthermore, final prediction capability of full model is not taken into account while deciding which layers to skip.
+
+Our goal is to design an input-adaptive \textbf{learnable layer selection strategy} with quality aware latency gains that is also able to handle the KV Cache appropriately. Ideally, for every input sequence and task, we want to predict the optimal (sequential) combination of layers at inference time, such that quality loss is minimum and the latency gains are as high as possible. We want to do this with expending very little compute/additional training, with no or minimal additional latency (for inference) and handle KV cache appropriately. Since there are exponential number of possible layer sequences, this seems like a hard goal computationally and otherwise - however, we have addressed this layer selection challenge partially in this work. We propose an approach for learning and predicting the layer selections based on the input sequence and task, via training \textbf{routers}. Based on the output of each layer for a sequence, a router will decide whether or not to skip the subsequent layer in the transformer architecture. Since the decision is at a sequence level, KV cache issues do not arise, as all tokens in a sequence would pass through the same set of layers. Moreover, we further generalize our approach to handle batch inference by making the layer selection unified for all sequences in a batch. Finally, we fine-tune the model combined with trained routers using LoRA adapters to improve the quality significantly while retaining the latency gains. As an added bonus, LoRA finetuning smoothens the layer skipping \footnote{Depending on the task, after LoRA finetuning, task-specific sequences skip a certain set of middle layers significantly more than other middle layers}, reduces the amount of performance degradation and further highlights the varied importance of layers based on input sequence. 
+We summarize our contributions below:
+\begin{enumerate}[noitemsep, nolistsep, leftmargin=*]
+    \item We propose a training and inference algorithm \textsc{FiRST} that incorporates layer-specific routers for selecting layers in an input-adaptive manner. The layer selection is uniform for all tokens in a sequence, thus handling KV caching and batch decoding without introducing additional compute and latency. This can be applied on top of any pre-trained model.
+    
+    \item We further incorporate LoRA adapters on top of the router-based layer selection for finetuning on external dataset - the goal is to improve the quality of performance of the router-augmented model on the task-specific data while retaining latency gains. This further smoothens the layer selection and an important insight emerges: certain layers including several middle layers (sequence-dependent) are significantly more important for evolving the hidden representation.
+    
+    \item Finally, we demonstrate extensive experimental evidence on multiple datasets on Machine Translation and Summarization tasks
+    answering the efficacy of \textsc{FiRST} in achieving good latency gains while retaining comparable quality of performance.
+\end{enumerate}
+
+
+
+\section{Related Work}
+
+
+\textbf{Early Exit:} Several works have been proposed in the early exit theme \citep{zhu2021leebert,zhou2020bert,xin2020deebert,liu2020fastbert,li2020cascadebert,hou2020dynabert,schuster2022confident} where adaptive compute is used for different parts of the token sequence. While these approaches have been popular for encoder-only models which processes the entire sequence as a whole, they have faced challenges in generation tasks. The main limitation of these set of techniques are their inability to handle KV caching appropriately which is crucial for multi-fold speed-ups in current LLM architectures. We emphasize that in our work, we assign varying compute to sequences in different batches but within the same sequence, we assign the same compute to every token. 
+
+\textbf{Input Agnostic Heuristics:} 
+In Skip Decoding \citep{del2023skipdecode}, initial tokens pass through more layers than later ones, contradicting the observation that later tokens are harder to decode \citep{liu2024accelerating}. Additionally, Skip Decoding skips several bottom layers for most tokens, causing undesirable sub-network imbalance. To address this, Unified Layer Skipping \citep{liu2024accelerating} proposes a discrete skipping strategy that is uniform for all tokens in a sequence. Based on a latency budget, retained layer ids are passed through by all tokens, ensuring KV Cache handling and retaining key layers. However, the limitation of this approach is that skipping is independent of the input sequence. In contrast, early exit strategies adapt layer skipping to the input sequence, offering more flexibility. In \citep{fan2019reducing}, a method akin to dropout randomly skips layers during training, but this leads to performance decline during the pre-fill stage. FFN-SkipLLM \citep{jaiswal2024ffn} constrains skipping to FFN layers to avoid KV Cache issues but fails to fully exploit redundancy as discussed already.
+\textbf{Model Compression and Quantization Aware Training:} 
+Orthogonal approaches to explore the latency/memory-performance trade-off in Large Language Models aim to build smaller models that approximate the performance of larger ones with reduced memory and latency costs. Key techniques include: 1) compressing model parameters into fewer bits \citep{frantar2022gptq,lin2024awq,lee2024owq,saha2023matrix}; 2) pruning the network by removing components like attention heads or neurons based on heuristics \citep{frantar2023sparsegpt,ma2023llm}; and 3) distilling the large model into a smaller, faster counterpart \citep{agarwal2023gkd,gu2024minillm}. For further details, we refer to the survey by \citep{zhu2023survey}. A significant body of work \citep{dettmers2024qlora,liu2023llm,peri2020deploying,li2023loftq} has focused on quantization-aware training to reduce memory footprints and mitigate performance loss, starting with QLoRA \citep{dettmers2024qlora}. In a similar vein, our work proposes fine-tuning router-augmented models to improve layer skipping and reduce performance degradation, as pre-trained models do not account for layer skipping, leading to higher degradation with vanilla skipping.
+
+
+\section{Problem Statement}
+
+
+Our goal is to exploit the heterogeneity in inputs and tasks to selectively use LLM layers in a quality aware manner for reducing inference latency and compute for on-device constraints. 
+Ideally, we want to select an \emph{optimal} sub-sequence of layers within a transformer architecture for a given input and task, such that the overall latency as well as expended computation are both low, while quality is comparable to the un-modified case where every input sequence passes through every layer.
+For ease of explanation, without loss of generality, we assume the task is same and simply consider an input sequence for describing the problem. 
+
+Let us consider an an input sequence $\mathcal{X} = \{x_1, x_2, \ldots, x_n\}$ with $n$ tokens. Let there be $m$ transformer layers in the model, where the $i^{th}$ transformer layer is represented as the function $\phi_i()$. 
+As stated lucidly in \citep{llamas}, $\mathcal{X}$ is first converted to an initial latent representation $\mathcal{H}_0 = \{H^1_0, H^2_0, \ldots, H^n_0\}$, where $H^0_{j} \in \mathbb{R}^D, \forall j \in [n]$ is a look-up from a learned embedding dictionary corresponding to the $j^{th}$ token. Thereafter, every transformer layer 
+$\phi_i()$ operates on the latent vectors $\mathcal{H}_{i}$ to generate the embedding for the $i^{th}$ layer as follows. For the $j^{th}$ token, 
+\begin{align}
+\label{eq:autoregressive}
+    H^j_i &= H^{j}_{i-1} + \phi_i(H^1_{i-1}, H^2_{i-1}, \ldots, H^j_{i-1})
+\end{align}
+
+Let the (golden) output or generated sequence for an input sequence $\mathcal{X}$ that passed through all $m$ layers of the model with full computation be $\mathcal{Y}^*_\mathcal{X}$. 
+Our hypothesis is that for a given input sequence (and task), there exists an optimal subsequence of functions $\mathcal{F}_{OPT}(\mathcal{X})$ out of the full sequence $\{\phi_i, i \in [m]\}$ such that the output generated by passing through this subsequence:  $\mathcal{Y}_{OPT,\mathcal{X}} \approx \mathcal{Y}^*_\mathcal{X}$. 
+More formally, if $Q$ is a quantitative quality measure on $\mathcal{Y}$, and $\epsilon \rightarrow 0$ is tolerance in deviation in quality from the golden output,  then 
+we hypothesize that there exists an optimal subsequence, using the minimum number of layers, $\mathcal{F}_{OPT}(\mathcal{X})$, 
+such that: 
+\begin{align}
+Q\left(\mathcal{Y}_{OPT, \mathcal{X}}\right) &\geq (1-\epsilon) Q\left(\mathcal{Y}^*_\mathcal{X}\right), \forall \mathcal{X}.
+\end{align}
+
+The optimality above is with respect to the minimum subsequence of layers that can help achieve the above, to minimize latency while keeping quality unaffected. 
+Note that, the optimal subsequence $\mathcal{F}_{OPT}(\mathcal{X})$ need to be obey the same autoregressive computation on previous tokens as given in Equation \ref{eq:autoregressive}. Hence, any algorithm that determines the optimal subsequence, need to be compatible with KV cache handling, to avoid the re-computation of values for tokens preceding the current token (which is a drawback with some existing work, especially in the Early Exit literature, that choose computation or layer skipping at token level). 
+
+The potential number of subsequences for $m$ layers is $2^m$, hence a brute force approach is not only infeasible, but would also beat the purpose of such a layer selection in the first place: reducing latency and compute. In the absence of any known substructure in the behaviour of the latent layers on each input sequence, it is difficult to arrive at such an optimal solution polynomially or with low additional latency or compute, and in fact is likely to be NP-hard. 
+
+We propose to learn an approximation of the optimal subsequence of layers for any input sequence with low additional latency and minimal training. 
+
+
+
+\section{Proposed Solution: \textsc{FiRST}
+
+Let us first understand what it entails to learn an optimal subsequence of layers for any input. Consider the full transformer sequence to be $F^* = \{\phi_1, \phi_2, \ldots, \phi_m\}$. Any optimal subsequence for an input $\mathcal{X}$: $F_{OPT, \mathcal{X}}$ could be thought of as finding an optimal path through a binary tree of functions. Formally, let every level in the binary tree correspond to a transformer layer and the $0^{th}$ layer corresponds to the initial embedding look up; i.e., at depth $i \in [m]$, there would be $2^i$ nodes, each corresponding to either $\phi_{i}$ or $\overline{\phi_{i}}$, where the former denotes that a particular transformer layer is included in the optimal path whereas the latter denotes that it is not included.  
+Each (of the $2^{i-1}$ nodes) $\phi_i$ or $\overline{\phi_i}$ has two children, corresponding to the next transformer layer: $\phi_{i+1}$ and $\overline{\phi_{i+1}}$ (See Figure \ref{fig:binary}). 
+In such a tree structure, for example, the path 
+$\{\phi_{i-1}, \overline{\phi_{i}}, \overline{\phi_{i+1}}, \phi_{i+2}\}$ indicates the subsequence of transformer layers $\{\phi_i, \phi_{i+2}\}$. 
+For any transformer layer $\phi_{i}$ in this tree, let $Anc(\phi_i) = k, 0<k<i$ denote the the lowest ancestor node where the corresponding transformer node $\phi_k$ is included in the sequence. In the above example, $Anc(\phi_{i+2}) = \phi_{i-1}$.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.5\linewidth]{Images/binary_tree.png}
+    \caption{Binary Tree representation of the subsequence of layer selection.}
+    \label{fig:binary}
+\end{figure}
+
+For any such sequence of functions $\mathcal{F}$, at level $i$, the autoregressive computations for the $j^{th}$ position corresponding to the $j^{th}$ token in the input sequence, Equation \ref{eq:autoregressive}, would now be modified as follows. 
+\begin{align}
+\label{eq:modified}
+    H^j_i &= 
+    \begin{cases}
+        H^j_k \quad \text{if } \phi_i\notin \mathcal{F}, \ k = Anc(\phi_i)\\
+        H^j_k+ \phi_i(H^1_k, H^2_k, \ldots, H^j_k), \quad \text{if } \phi_i \in \mathcal{F}, \ k = Anc(\phi_i)\\
+    \end{cases}
+\end{align}
+
+Our problem translates to navigating this binary tree to find the optimal path $\mathcal{F}_{OPT}$ for any given input sequence and task. 
+Since there are $2^m$ paths in this tree, we propose to approximate the optimal choice by  making this decision in a greedy fashion at each node. Formally, we propose to add a (lightweight and fast) router $R_i$ before every transformer layer $\phi_i$ in the model, that will predict whether $\phi_i$ will be selected or not. 
+
+Our aim is to learn to predict the layer choice at each level (myopically) so that the overall path (or, sequence of functions) $\mathcal{F}(\mathcal{X}) \approx \mathcal{F}_{OPT}(\mathcal{X})$ for any given input sequence $\mathcal{X}$ (and task). 
+We want to decide this at a sequence level, and not at a token level to maintain compatibility with the autoregressive computations and avoid re-computation of values (use KV cache efficiently). Moreover, we want to spend minimal compute and training for learning these functions $R_i$ and finally, $R_i$ functions should be lightweight and low compute so that that do not add any significant latency to the overall computation, helping realize the latency gains. 
+
+Our proposed algorithm \textsc{FiRST} modifies any off-shelf pre-trained transformer based model by incorporating and training a router or probability function $R_i$ before every transformer layer $\phi_i$. For a given input sequence $\mathcal{X}$, the output of the router $R_i$ is a probability score $\rho_i$ denoting the probability of selecting $\phi_i$ in the layer sequecne.  
+We can think of layer $i$ as a modified function $\phi^R_i(\mathcal(X))$ such that the output is $\rho_i \cdot \phi_i(\mathcal{X}) + (1 - \rho_i)\cdot \phi_i(\mathcal{X})$. 
+Formally, the autoregressive computation in Equation \ref{eq:autoregressive} would now be modified as follows. 
+\begin{align}
+\label{eq:first}
+    H^j_i & = H^j_{i-1} + \rho_i \cdot \phi_i(H^1_k, H^2_k, \ldots, H^j_k) + (1 - \rho_i)\cdot \phi_i((H^1_k, H^2_k, \ldots, H^j_k))
+\end{align}
+The above equation, applied recursively would be approximating the Equation \ref{eq:modified} for the optimal $\mathcal{F}$ in a probabilistic, greedy manner. 
+We train the functions $\rho_i$ on datasets and task, and further fine tune using LoRA adapters to make the layer selections smooth and improve the output quality. 
+We explain the framework for \textsc{FiRST} algorithm in details in the following section. 
+
+
+
+\section{\textsc{FiRST}
+
+In this section we describe the training and inference frameworks and procedure for \textsc{FiRST} in details. We first describe how to train Routers to be adaptive to input sequences. Given an off-the-shelf pre-trained LLM, we propose two training phases (Figure: \ref{fig:modules}). In the first phase, we train a router for each layer that decides whether the tokens in the input sequence should skip the layer or not. In the second phase, to tackle the issue of unseen skipping during pre-training, we fine-tune the router-augmented LLM keeping router weights fixed using LoRA (low rank adapters) to ensure the model learns to perform well on the target dataset without reducing the skipping level. In other words, the LoRA fine-tuning ensures that the gap in performance with and without skipping is significantly reduced when compared to the base model. Below, we provide the details of each phase.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.5\linewidth]{Images/our_solution_modules.png}
+    \caption{Layer diagram of the two training phases}
+    \label{fig:modules}
+\end{figure}
+
+\subsection{Adaptive Router Module}
+The adaptive router module is a single-layer neural network without bias, positioned before every layer in the model. During training of the router, all model parameters except the router weights remain frozen. For the first layer, it takes the tokenized input, and for each of the subsequent layers, it takes the output of the preceding layer as input. Mathematically speaking, for any layer $i$, given a batch of $B$ tokenized inputs sequences, where each sequence has $n$ tokens and is embedded in to $\mathbb{R}^D$, 
+the adaptive router module  takes as input a $B\times n\times D$ tensor output of layer $(i-1)$ and outputs a $B\times n \times 1$ tensor. Subsequently, corresponding to each value (or, token) in the $B\times n\times 1$ tensor, we apply a sigmoid function to ensure that all entries in the tensor are in the interval $[0,1]$. Following this, we take a mean operation at the sequence level - we take a mean of all the weights in a sequence to output a $B\times 1\times 1$ tensor. For each sequence in the batch, the corresponding entry is the probability $\rho_i$ with which the sequence passes through the layer $i$. The input sequence skips the layer $i$ with probability $1-\rho_i$.  
+
+In summary, after applying router $R_i$ to an input sequence at each layer $i$, a single probability value $\rho_i$ is produced, indicating whether to pass the sequence through the layer. During training, the output of a layer is modified as in Equation \ref{eq:first} using a skip connection, incorporating the probability $\rho_i$ (see Figure: \ref{fig:layer_train_inference}). 
+The routers are trained to encourage skipping by reducing the probabilities $\rho$ using a regularizer, to approximate the optimal subsequence for minimizing the latency. Note that the entire model is frozen except for the routers. The training task is modeled as a language modeling task, specifically next token prediction.
+The total loss function comprises of 3 terms namely - 
+\begin{itemize}[noitemsep, nolistsep, leftmargin=*]
+    \item \textbf{Cross-entropy loss:} This measures the difference between the actual and predicted probability distributions, to ensure the quality of the generations. 
+    $\mathcal{L}_{\s{CE}} = - \sum_{x \in \mathcal{X}}{\mathcal{Y}^*_\mathcal{X} \log{(\hat{\mathcal{Y}})}}$. 
+    \item \textbf{Regularization loss:} This adds a penalty term to the loss function so that the router parameters are not too large, to minimize the added latency and training compute, as well as minimizing overfitting to noise. 
+    $\mathcal{L}_{\s{Reg}} = \sum_{i \in [m]}{||R_i||^2}$, where $||R_i||^2$ denotes the $\ell_2$ norm of the router weights for the $i^{th}$ layer router, and there are $m$ layers in the model. 
+    \item \textbf{Non-skip Penalization loss:} Summation of probability values across all layers of the model architecture. It encourages the model to favor skipping at the cost of cross-entropy loss to reduce latency, with the coefficient $\alpha$, managing the extent of skipping to approximate the optimal trade-off of quality and latency. 
+    $\mathcal{L}_{\s{PP}} = \sum_{i \in [m]}{\rho_i}$. 
+\end{itemize}
+The total loss is a linear combination of these three terms namely $\mathcal{L} = \mathcal{L}_{\s{CE}} + \lambda \cdot \mathcal{L}_{\s{Reg}} + \alpha \cdot \mathcal{L}_{\s{PP}}$.
+
+
+\subsection{LoRA Compensation Module}
+Selecting a subsequence of layers in a model to improve the latency during inference will naturally come with some performance loss - especially so since the pre-trained model was not trained to skip layers given any input sequence.
+To compensate for the loss in performance caused by skipping in the model, we finetune the router-augmented pre-trained model on the downstream task. We are inspired by Quantization Aware Training - QLoRA in particular - a training method which compensates for performance loss due to model compression. To finetune, we use Low Rank Adapters (LoRA) to modify the weights of the pre-trained model while keeping the router weights frozen. While using LoRA, the difference in weights for each trainable weight matrix is restricted to be a low rank matrix. During training, the router parameters are frozen while trainable LoRA adapters are added to both the FFN (Feed-Forward Network) and the attention modules of each layer of the pre-trained model. During the finetuning phase, to maintain the skipping level, we again add a similar loss component as in phase 1, namely $(\alpha/3) \mathcal{L}_{\s{PP}} = (\alpha/3) \sum_{i \in [m]}{\rho_i}$. This is essential during the LoRA finetuning even though the router weights are fixed in this phase - this is because the finetuning mechanism alters the hidden representations of the input sequence in a manner such that the probability score for each layer is always more than $0.5$ implying that no layers are skipped. We have noticed that the Non-skip Penalization Loss coefficient $\alpha$ scaled down by a factor of 3-4 is well-suited for the finetuning process while maintaining the same skipping level as in phase 1 of the training. During training the LoRA adapters, responses are appended to the prompt to train the model to predict tokens from the response. For inference, the model weights are merged with the original weights to prevent any latency overhead. 
+\subsection{Inference for \textsc{FiRST}}
+During inference, given an input sequence, the decision to skip or pass through a layer is determined by a threshold. For the input sequence, each router (corresponding to a layer) outputs a number in the interval $[0,1]$. If this number (corresponding to the probability of not skipping the layer) is greater than or equal to 0.5, the sequence passes through the layer. On the other hand, if the output from the router is less than 0.5, the sequence skips the layer (Figure: \ref{fig:layer_train_inference}).
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.2\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{Images/training.png}
+    \end{minipage}
+    \hspace{0.02\textwidth}
+    \begin{minipage}{0.2\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{Images/inference.png}
+    \end{minipage}
+    
+    \caption{\small Skip connection used for router training. With probability $p$, the sequence is processed by the layer and with probability $1-p$, the layer is skipped. During inference, routers make the decision of whether a sequence will skip a particular layer or pass through it.}
+    \label{fig:layer_train_inference}
+\end{figure}
+Below, we describe some salient points about the functioning of the router during inference to handle KV Cache appropriately to retain the modern latency speed-ups:
+\begin{enumerate}[nolistsep, noitemsep, leftmargin=*]
+    \item \textbf{Prefill phase handling:} Skipping is not allowed during prefill phase. This ensures the first token is generated correctly, which is crucial for WMT tasks, as they are highly sensitive to the correct generation of the first token in the target language. It has been observed in prior works \citep{liu2024accelerating} that skipping during prefill phase is detrimental to performance during inference.
+    \item \textbf{Fixed router decisions during decoding and handling KV Cache:} During the prefill phase, the decisions made by the routers are cached. During the decoding phase, every token adheres to the cached decision made during prefill. In other words, for a particular layer, if a router outputs a number less than 0.5 during prefill, the number is fixed for the decoding steps and therefore the same layer will be skipped by all tokens during decoding. Similarly, if the router outputs a number more than 0.5 during prefill, the same layer will be processing all tokens during decoding. Such a step ensures that for each decoding step and each layer that is not skipped, the KV cache for all previous tokens is available for that layer -  this is because a fixed set of layers (decided during the prefill phase) will be skipped for all tokens during the decoding phase of inference. This approach effectively addresses the caching issues encountered in early exit strategies, ensuring consistent decisions across the decoding process. 
+\end{enumerate}
+
+
+
+\section{Experiments}
+
+
+We conduct experiments on two benchmark tasks: Machine Translation and Text Summarization on several publicly available datasets demonstrating both robustness and scalability of \textsc{FiRST}. 
+\subsection{Datasets}
+
+\textbf{Machine Translation:} For translation tasks, namely English-to-Chinese and English-to-German, we employ the WMT development sets from 2017 to 2020 for training/fine-tuning following the methodology outlined in previous studies \citep{liu2023instructionpositionmatterssequence, jiao2023parrottranslatingchatusing}. Translation performance is evaluated using the test set from the WMT 2022 dataset \citep{Kocmi_Bawden_Bojar_Dvorkovich_Federmann_Fishel_Gowda_Graham_Grundkiewicz_Haddow_et_al._2022} which was developed using recent content from diverse domains. These domains include news, social media, e-commerce, and conversational contexts.
+
+
+
+        
+
+\textbf{Summarization:} We use the popular CNN-DailyMail (CNN-DM) \citep{NIPS2015_afdec700} dataset which is a large collection (over 300k) of text summarization pairs, created from CNN and Daily Mail news articles. Each datapoint in this dataset comprises of an \textbf{article} (the body of the news article with 683 words on average) and the corresponding  \textbf{highlights} (article summary as written by the article author).
+While the training set contains more than 287k samples, we have randomly chosen 4k samples for training both routers and LoRA. During training in our framework, the number of trainable parameters is small in both phases - therefore a small subset of data points is sufficient for training. 
+Inference is performed on the standard test set with 11,490 samples. 
+
+\subsection{Evaluation Metrics}
+\textbf{Quality-Based Metrics for Translation task:}
+\begin{itemize}[noitemsep, nolistsep, leftmargin=*]
+        \item \textbf{BLEU Score:} BLEU (Bilingual Evaluation Understudy) scores are used to measure the quality of translations. BLEU compares n-grams of the candidate translation to n-grams of the reference translation, providing a score between 0 and 1, with higher scores indicating better translations. In this evaluation, NLTK BLEU is employed, focusing on BLEU-1 and BLEU-2 scores. 
+        
+        \item \textbf{COMET:} COMET (Cross-lingual Optimized Metric for Evaluation of Translation) is used to assess translation quality further. COMET evaluates translations using a model trained to correlate well with human judgments. COMET provides a more nuanced assessment of translation quality by considering the intricacies of both source and target languages, beyond the n-gram matching used in BLEU.
+    \end{itemize}
+\textbf{Quality based Metrics for Summarization Task:} 
+\begin{itemize}[noitemsep, nolistsep, leftmargin=*]
+     \item \textbf{BERTScore:} This metric quantifies semantic similarity between texts by leveraging contextual word embeddings.
+     BERTScore captures meaning-based similarity rather than relying on exact word matches, providing a nuanced evaluation of text generation quality.
+        \item \textbf{ROUGE:}  (Recall-Oriented Understudy for Gisting Evaluation) is a common metric - ROUGE-1 refers to overlap of unigrams between the system summary and reference summary. Similarly, ROUGE-L measures longest matching sequence of words. 
+    \end{itemize}
+Finally, for benchmarking latency, we look at the \textbf{TPOT (Time Per Output Token):} This metric evaluates the average time taken to produce each output token and is calculated for GPU to gauge overall decoding performance.
+
+\subsection{Training and Inference Setup}
+\begin{itemize}[noitemsep, nolistsep, leftmargin=*]
+\item \textbf{Training settings:} For our experiments, we use Llama-3-8B base model from Meta, which comprises of 32 layers. Training of routers and LoRA adapters is conducted on A100 80GB GPUs, with training/inference is performed in full precision to avoid performance degradation due to quantization. The training process employs our custom loss function and continues for a fixed number of epochs, terminating when the validation loss fails to improve over 4 consecutive steps. The learning rate is set between $1e^{-4}$ and $3e^{-4}$ - a cosine scheduler is used to adjust the learning rate. Gradients are accumulated after 5 steps and the regularization coefficient $\lambda$ is fixed at 0.01. For LoRA fine-tuning, we employ a rank of 8, a dropout rate of 0.1, and a scaling factor (lora\_alpha) of 32. For translation, the maximum sequence length is set to 128 for router training and 256 for LoRA training. Similarly, for summarization, the maximum sequence length is set to 500 and 700 respectively.
+    \item \textbf{Inference settings:} For both translation and summarization, we set the temperature to 0.8 and enable top-k sampling over 10 tokens. The maximum number of tokens to be generated is set to 80 and 200 respectively. Caching is turned on during inference.
+\end{itemize}
+\subsection{Baselines for comparison}
+\begin{itemize}[noitemsep, nolistsep, leftmargin=*]
+    \item \textbf{Original Model:} We compare the performance of the base model (Llama-3-8B) with and without LoRA fine-tuning as our baseline. We then train routers and the LoRA module for various values of the coefficient $\alpha$\ associated with the non-skip penalization loss. This allows us to report the time per output token (TPOT) and quality at different levels of skipping, with and without LoRA. Latency speedups are reported relative to the LoRA-fine-tuned model, which natively supports key-value (KV) caching.
+
+    \item \textbf{Unified Skipping: }This method relies on using a heuristic-based strategy for retaining layers at fixed intervals. We replicate their algorithm \citep{liu2024accelerating}and compare performance both with and without LoRA fine-tuning across various skipping percentages. We do not consider other input-agnostic heuristic-based strategy for skipping layers since Unified Skipping has empirically established itself to be the state-of-the-art.
+
+\end{itemize}
+
+\subsection{Detailed Results}
+
+\textbf{Layer-wise Skipping Patterns:} First, we present some layer-wise skipping statistics across the 3 tasks that we experiment with. Note that layer-wise skipping significantly vary across tasks, indicating that the importance of each layer depends on the nature of the task and dataset. For a 15\% skipping rate, we observe the following patterns. In the WMT Machine Translation task, for English-to-German translation, layers 7–9 and 21 are fully skipped, while layer 18 is partially skipped. For English-to-Chinese translation, layers 7–9, 16, and 21 are fully skipped, with partial skipping in layer 20. In the summarization task, layers 20, 22, and 23 are fully skipped, and layers 19, 21, and 26 are partially skipped. Some layers are skipped less than 5\% of the time, suggesting these layers are only necessary for specific sequences, highlighting the input-dependent and task-specific nature of layer importance.
+
+Now, we present detailed analysis of our experiments on the WMT Translation and CNN Summarization datasets. We start with highlighting the salient points:
+
+\textbf{English-to-German:} 
+\begin{enumerate}[noitemsep, nolistsep, leftmargin=*]
+        \item We observe a performance degradation of less than 15\% in COMET scores which accounts for the semantics part of the translated text. Less than 10 \% and 20\% degradations are observed in BLEU-1 and BLEU-2 (syntax-based metrics) respectively for approximately 15\% skipping (Table: \ref{tab:wmt_reduced}). The corresponding latency improvement is 10\% on TPOT. (Table: \ref{tab:tpot_total}).
+        
+        
+        \item Our approach significantly outperforms the input-agnostic layer skipping method \citep{liu2024accelerating}, referred to as Unified Skipping. For approximately 15\% skipping, our method achieves a BLEU-1 score of 38.01, compared to 28.92 for the unified skipping approach (Table: \ref{tab:wmt_reduced}). In terms of COMET scores, our method attains a score of 82.14, while unified skipping achieves a score of 59.34. This demonstrates the superiority of our approach in preserving semantic integrity.
+        \end{enumerate}
+        
+\textbf{English-to-Chinese:} 
+\begin{enumerate}[noitemsep, nolistsep, leftmargin=*]
+        \item For approximately 15\% skipping, we observe a 12\% improvement in TPOT (Table: \ref{tab:tpot_total}), accompanied by a performance degradation of less than 20\% in COMET scores. Concurrently, we observe close to 15\% and 25\% degradation in BLEU-1 and BLEU-2 respectively (see Table: \ref{tab:wmt_reduced}). 
+        \item Our results for English-to-Chinese translation demonstrate competitive performance compared to the Unified Skipping baseline - at $15\%$ skipping, the evaluation metrics on BLEU-1, BLEU-2 and COMET scores for our FiRST framework are equivalent to the Unified Skipping baseline. 
+        \end{enumerate}
+\textbf{CNN/DailyMail Dataset:} 
+    \begin{enumerate}[noitemsep, nolistsep, leftmargin=*]
+        \item There is an improvement in ROUGE-1, ROUGE-L scores (Table: \ref{tab:sum_scores}) over LoRA fine-tuned base model suggesting that strategically skipping certain layers may even led to improved model performance. A 12\% improvement in TPOT is observed for roughly 15\% skipping. (Table: \ref{tab:tpot_total})
+        \item Our method outperforms Unified Skipping approach with more than 30\% improvement in ROUGE-1 and ROUGE-L scores at 15\% skipping rate.
+    \end{enumerate}
+   Our experiments conclude the optimal skipping rate is around 15\%, which maintains more than 80\% of the original model performance (for WMT English-to-German and CNN/DM) and 75\% of the original model performance for WMT English-to-Chinese - such a skipping level yields approximately 10-12\% improvement in TPOT. 
+    
+        
+        
+    
+    
+
+            
+            
+
+
+
+
+\begin{table}[htbp]
+\centering
+\tiny
+\begin{tabular}{| c |c |c |c |c | c | c | c | c |}
+\hline
+\multicolumn{2}{|c|}{\textbf{Model Type}} & \textbf{$\sim$Skipping (\%)} & \multicolumn{3}{c|}{\textbf{English-to-German}}& \multicolumn{3}{c|}{\textbf{English-to-Chinese}} \\
+
+\multicolumn{2}{|c|}{\textbf{}} & \textbf{} & \textbf{BLEU-1} & \textbf{BLEU-2} & \textbf{COMET}  & \textbf{BLEU-1}& \textbf{BLEU-2}&\textbf{COMET}\\
+\hline
+\multirow{2}{*}{\textbf{Original Model (no skip)}} & \textbf{Base + LoRA} & 0 & 41.78 & 21.74 & 93.00  & 56.94& 35.56&82.66\\
+ & \textbf{Base} & 0 & 37.17 & 18.57 & 87.13  & 38.02& 22.46&68.95\\ \hline
+\multirow{6}{*}{\textbf{Unified Layer Skipping}} & \textbf{R + L} & 15 & 28.92 & 10.64 & 59.34  & 46.61& 25.01&69.58\\ 
+ & \textbf{R} & 15 & 23.24 & 7.85 & 59.26  & 27.28& 13.35&54.57\\ \cline{2-9} 
+ & \textbf{R + L} & 25 & 15.67 & 3.36 & 31.69  & 34.90& 15.75&50.59\\
+ & \textbf{R} & 25 & 12.58 & 2.65 & 32.15  & 17.74& 7.35&38.74\\ \cline{2-9} 
+ & \textbf{R + L} & 35 & 6.44 & 0.77 & 22.05  & 7.51& 2.10&20.25\\
+ & \textbf{R} & 35 & 3.92 & 0.51 & 22.88  & 3.87& 1.05&21.24\\ \hline
+\multirow{6}{*}{\textbf{Our Solution (FiRST)}} & \textbf{R + L} & 15 & 38.01 & 17.89 & 82.14  & 48.35& 26.57&68.63\\
+ & \textbf{R} & 15 & 28.83 & 11.80 & 67.74  & 17.55& 8.68&42.76\\ \cline{2-9} 
+ & \textbf{R + L} & 25 & 17.84 & 4.14 & 34.95  & 35.79& 15.66&56.92\\
+ & \textbf{R} & 25 & 9.67 & 1.37 & 26.01  & 11.01& 3.23&25.45\\ \cline{2-9} 
+ & \textbf{R + L} & 35 & 6.39 & 0.42 & 19.96  & 15.66& 3.95&26.8\\
+ & \textbf{R} & 35 & 3.70 & 0.14 & 21.41  & 6.13& 1.54&22.89\\ \hline
+
+\end{tabular}
+\caption{
+\small Quality Analysis on WMT (English-to-German and English-to-Chinese): BLEU-1, BLEU-2 and COMET scores for varying skipping \% have been reported. Here, R + L corresponds to Router Augmentation followed by LoRA fine-tuning and R corresponds to router only (in the proposed FiRST framework). FiRST with finetuning, improves upon the input-agnostic baseline of Unified Skipping for all skipping levels - the improvement is more pronounced for English-to-German.}
+\label{tab:wmt_reduced}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\scriptsize
+\begin{minipage}{0.35\textwidth}
+    \centering
+    \begin{tabular}{| c |c |c |c|}
+    \hline
+    \textbf{Model Type} & \textbf{$\sim$ Skipping (\%)} & \textbf{English-to-German}  &\textbf{English-to-Chinese} \\
+    \textbf{} & \textbf{} & \textbf{TPOT}  &\textbf{TPOT} \\
+    \hline
+    \textbf{Base + LoRA} & 0 & 1x  &1x \\
+    \hline
+    \textbf{R + L} & 15 & 0.90x &0.88x\\
+    \hline
+    \textbf{R + L} & 25 & 0.82x &0.83x\\
+    \hline
+    \textbf{R + L} & 35 & 0.69x &0.68x\\
+    \hline
+    \end{tabular}
+\end{minipage}
+\hfill
+\begin{minipage}{0.35\textwidth}
+    \centering
+    \begin{tabular}{| c | c | c |}
+    \hline
+    \textbf{Model Type} & \textbf{$\sim$Skipping (\%)} & \textbf{CNN/DM} \\
+    \textbf{} & \textbf{} & \textbf{TPOT} \\
+    \hline
+    \textbf{Base + LoRA} & 0 & 1x \\
+    \hline
+    \textbf{R + L} & 15 & 0.88x\\
+    \hline
+    \textbf{R + L} & 20 & 0.81x\\
+    \hline
+    \textbf{R + L} & 27 & 0.76x\\
+    \hline
+    \end{tabular}
+\end{minipage}
+\caption{
+\small TPOT variation on WMT (left) and CNN/DM (right) for FiRST. These values are relative to LoRA fine-tuned base model. Fine-tuning is able to improve both TPOT and quality significantly.}
+\label{tab:tpot_total}
+\end{table}
+\begin{table}[htbp]
+\centering
+\scriptsize
+\begin{tabular}{| c  |c  |c  |c  |c  |c |}
+\hline
+\multicolumn{2}{|c|}{\textbf{Model Type}} & \textbf{$\sim$Skipping (\%)} & \textbf{BERT F1}& \textbf{Rouge-1}& \textbf{Rouge-L}\\
+\hline
+\multirow{2}{*}{\textbf{Original Model (no skip)}} & \textbf{Base + LoRA} & \multirow{2}{*}{0} & 84.87& 28.46& 16.99\\
+
+ & \textbf{Base} &  & 82.29& 23.49& 14.66\\ \hline
+\multirow{6}{*}{\textbf{Unified Layer Skipping}} & \textbf{R + L} & \multirow{2}{*}{15} & 84.25& 24.35& 14.30\\
+
+ & \textbf{R} &  & 80.30& 16.61& 10.95\\ \cline{2-6} 
+ & \textbf{R + L} & \multirow{2}{*}{20} & 82.93& 22.30& 13.37\\
+ & \textbf{R} &  & 80.32& 16.51& 11.15\\ \cline{2-6} 
+ & \textbf{R + L} & \multirow{2}{*}{27} & 80.28& 15.94& 9.89\\
+ & \textbf{R} &  & 77.43& 10.97& 7.68\\ \hline
+\multirow{6}{*}{\textbf{Our Solution (FiRST)}} & \textbf{R + L} & \multirow{2}{*}{15} & 85.14& 31.80& 20.13\\
+
+ & \textbf{R} &  & 81.25& 20.20& 13.01\\ \cline{2-6} 
+ & \textbf{R + L} & \multirow{2}{*}{20} & 82.80& 27.65& 17.84\\
+ & \textbf{R} &  & 79.32& 16.28& 10.85\\ \cline{2-6} 
+ & \textbf{R + L} & \multirow{2}{*}{27} & 77.50& 14.65& 10.45\\
+ & \textbf{R} &  & 75.60& 9.39& 6.92\\
+\hline
+\end{tabular}
+\caption{
+\small Quality Analysis on Summarization (CNN/DM dataset): BERT F1, Rouge-1 and Rouge-L scores are reported for varying skipping levels. %Note that R + L corresponds to Router Augmentation followed by LoRA fine-tuning and R corresponds to router only (in the proposed FiRST framework). 
+FiRST with fine-tuning, improves upon Unified Skipping for all skipping levels on both Rouge-1 and Rouge-L and is competitive on BERT F1.}
+\label{tab:sum_scores}
+\end{table}
+
+
+
+
+        
+        
+
+        
+    
+        
+        
+    
+
+        
+        
+
+        
+\iffalse
+
+\begin{itemize}
+    \item \textbf{Conclusion:}
+        \begin{enumerate}
+            \item Across different tasks and datasets, we observe approximately 80\% performance retention relative to the base model with around 15\% skipping. This translates to a latency improvement of 10-20\%, depending on the number of output tokens generated.
+            
+            \item layer-wise skipping patterns vary across tasks and datasets, highlighting the importance of learning these patterns dynamically rather than using a hard-coded approach.
+            
+            \item Optimal Skipping Rate Performance: For an optimal skipping rate of approximately 15\%, our solution significantly outperforms the heuristic-based unified layer skipping approach. At higher skipping rates, the performance of unified skipping either approaches that of our solution or shows slight degradation due to the increased number of skipped layers.
+ 
+        \end{enumerate}
+\end{itemize}
+\fi
+
+
+
+\section{Conclusion}
+
+We provide a new algorithm and framework \textsc{FiRST} for layer selection corresponding to input sequence and task towards reducing latency in a quality aware manner. This operates in a KV cache compatible manner and handles batches of sequences, which are drawbacks in many existing work on early exit. We show significant reduction in latency with low degradation of quality on multiple tasks on well known open source datasets and demonstrate superior quality and latency over input agnostic baselines. In the future, we would like to extend our method to 1) improve the optimality of selection of layers, and 2) learn dynamically as new input sequences and tasks arrive. 
+
+\iffalse
+
+
+\section{Discussion}
+
+As in \citep{liu2024accelerating}, we find in our experiments that the top layers and bottom layers in an architecture are hardly skipped by any sequence across tasks and datasets. For instance, in the Llama 3 8B Model fine-tuned with routers, we find that the first 4 layers and last 2 layers are not skipped by any sequence. Regarding the middle layers there is a significant variation across input sequences on which layers in the architecture are skipped. In other words, for each input sequence, a different set of middle layers are responsible for evolving the hidden representation. As mentioned in Skip Decode and the Unified Layer Skipping works, an input dependent skipping strategy might lead to reduced gains during batch inference - this is because, each sequence will have a different skipping level implying that in a batch, the latency is bottlenecked by the sequence for which the minimum number of layers are skipped. However, in our setting, we generalize our approach very simply to make the skipping strategy unified for all the sequences in a batch - thus leading to appropriate handling of batch inference while still retaining the latency gains. Finally, we also demonstrate a training strategy to further fine-tune the model combined with trained routers using LoRA adapters to improve the quality significantly while retaining the latency gains. As an added bonus, LoRA finetuning smoothens the layer skipping, reduces the amount of performance degradation for similar skipping levels and further highlights the varied importance of layers based on input sequence.
+\textit{This is because we consider a pre-trained model in the first place which has not seen layer skipping during its training phase.}
+Our training methods are simple and easy to build on top of any pre-trained language model. 
+\fi 
+
+
+
+
+

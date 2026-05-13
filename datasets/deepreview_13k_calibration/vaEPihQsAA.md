@@ -1,8 +1,8 @@
 # CyberHost: A One-stage Diffusion Framework for Audio-driven Talking Body Generation
 
 - Decision: Accept
-- Avg Score: 4.83
-- Scores: 8, 6, 6, 1, 0, 8
+- Avg Score: 7.60
+- Scores: 8, 6, 6, 10, 8
 
 ## Abstract
 Diffusion-based video generation technology has advanced significantly, catalyzing a proliferation of research in human animation. While breakthroughs have been made in driving human animation through various modalities for portraits, most of current solutions for human body animation still focus on video-driven methods, leaving audio-driven taking body generation relatively underexplored. In this paper, we introduce CyberHost, a one-stage audio-driven talking body generation framework that addresses common synthesis degradations in half-body animation, including hand integrity, identity consistency, and natural motion.

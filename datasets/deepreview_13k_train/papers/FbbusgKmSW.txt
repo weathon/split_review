@@ -1,0 +1,404 @@
+\title{Improving Gaussian Splatting with Localized Points Management}
+
+\begin{abstract}
+\label{sec:abb}
+Point management is a critical component in optimizing 3D Gaussian Splatting (3DGS) models, as the point initiation (e.g., via structure from motion) is distributionally inappropriate.
+Typically, the Adaptive Density Control (ADC) algorithm is applied, leveraging view-averaged gradient magnitude thresholding for point densification, opacity thresholding for pruning,
+and regular all-points opacity reset.
+However, we reveal that this strategy is limited in tackling intricate/special image regions (\emph{e.g.}, transparent) as it is unable to identify all the 3D zones that require point densification, and lacking an appropriate mechanism to handle the ill-conditioned points with negative impacts (\eg, occlusion due to false high opacity).
+To address these limitations, we propose a {\em\bf Localized Point Management} ({\shortname{}}) strategy, capable of identifying those error-contributing zones in the highest demand for both point addition and geometry calibration.
+Zone identification is achieved by leveraging the underlying multiview geometry constraints, with the guidance of image rendering errors.
+We apply point densification in the identified zone, whilst resetting the opacity of those points residing in front of these regions so that a new opportunity is created to correct ill-conditioned points.
+Serving as a versatile plugin, {\shortname} can be seamlessly integrated into existing 3D Gaussian Splatting models.
+Experimental evaluation across both static 3D and dynamic 4D scenes validate the efficacy of our \shortname{} strategy in boosting a variety of existing 3DGS models both quantitatively and qualitatively. 
+Notably, \shortname{} improves both vanilla 3DGS and SpaceTimeGS to achieve state-of-the-art rendering quality while retaining real-time speeds, outperforming on challenging datasets such as Tanks \& Temples and the Neural 3D Video Dataset.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+Neural rendering has emerged as a generalizable, flexible, and powerful approach for photorealistic novel view synthesis (NVS) of any camera poses \cite{mildenhall2021nerf},
+underpinning a wide variety of applications in 
+augmented/virtual/mixed reality \cite{deng2022fov}, robotics \cite{yang2023unisim}, and generation \cite{poole2022dreamfusion}, among more others.
+
+For example, taking a learning-based parametric idea, Neural Radiance Fields (NeRFs)~\cite{mildenhall2021nerf} implicitly represent the scene radiance of varying complexity using neural networks (\eg, MLPs), without the tedious requirements of model design handcrafting for accounting the scene variations in geometry, texture, illumination.
+Despite the high-quality representational performances, they are typically inefficient computationally in view rendering due to heavy ray sampling, thus suffer in scaling to high-resolution content applications and large scale scene modeling \cite{tancik2022block, turki2022mega}.
+\begin{figure}[htb]
+  \centering
+  \includegraphics[width=1.\textwidth]{figures/fig1.pdf}
+  \caption{
+  Visualization of points behavior.
+  3DGS produces ill-conditioned Gaussians (red box) that occlude other valid points, resulting in noticeably incorrect depth estimation.  
+ \textbf{\shortname{}} handles these ill-conditioned points to reduce negative impacts and further calibrate the geometry.
+}
+  \label{fig:display}
+\end{figure}
+
+In this context, 3D Gaussian Splatting (3DGS)~\cite{kerbl20233d} has come as a more efficient alternative with much faster model optimization and real-time neural rendering. 
+As an explicit representation model, this approach begins by initializing a set of 3D Gaussian points with Structure from Motion (SfM), 
+followed by optimizing the parameters of these points 
+via view reconstruction loss, with the view output produced using a differentiable splatting-based rasterization. 
+As the point initialization is coarse and error-prone,
+in optimization, a point management mechanism, Adaptive Density Control (ADC), is typically applied for dealing with point distributional issues such as under-population (\eg, no enough points) or over-population (\eg, too many points) in the 3D space.
+However, we find several limitations with ADC:
+(1) Thresholding simply the average gradient for deciding the regions for point densification tends to {{\em overlook}} under-optimized points. 
+For example, larger Gaussian points typically exhibit lower average gradients, frequently appearing across various views in screen space.
+(2) Point sparsity makes it difficult to add sufficient and reliable points to comprehensively cover the scene.
+(3) Falsely optimized Gaussian points could cause negative effects, \eg, {occluding} other good points and leading to incorrect depth estimates (see erroneous placements on windows Fig. ~\ref{fig:display}).
+
+To overcome the aforementioned limitations, in this paper we propose a novel {\em Localized Point Management} ({\shortname}) approach.
+Our idea is intuitive -- identifying those 3D Gaussian points leading to rendering errors. 
+Thus we start with an image rendering error map of a specific view.
+To obtain the error contributing 3D points, we leverage the region correspondence between different views via feature mapping, subject to the multiview geometry constraint.
+For each pair of corresponded regions,
+we cast the rays through them at their respective camera views in the cone shape,
+and consider their {\em intersection} as the error source zone.
+Within each such zone, we consider two situations:
+(1) At presence of points, we further apply point densification at a lower threshold to complement the original counterpart locally; 
+(2) In case no point due to point sparsity, we add new Gaussian points.
+{concurrently, we reset the opacity of points with high estimated opacity and residing in front of these zones, as they could impose high impact on view rendering.}
+This provides an opportunity of correcting those potentially ill-conditioned points whilst tuning those newly added ones in the following optimization.
+{To minimize model expansion, we prune the points 
+by opacity in a density aware manner.
+}
+
+We summarize the {\bf\em contributions} as follows:
+(1) With in-depth analysis, we have discovered that the standard point management mechanism used in 3DGS has several limitations that impede model optimization. 
+(2) We present {\bf\em \fullname} (\shortname) for these issues by identifying error-contributing 3D zones and implementing appropriate operations for point densification and opacity reset.
+(3) 
+Extensive experiments validate the benefits of our \shortname{} in improving a diversity of existing 3DGS models in novel view synthesis on both static and dynamic scenes.
+
+
+\section{Related Work}
+
+
+{\bf Neural Scene Representations} has always been an important direction in novel view synthesis. Previous methods allocate neural features to structures such as volume \cite{lombardi2019neural, sitzmann2019deepvoxels}, texture \cite{thies2019deferred}, and point cloud \cite{aliev2020neural}. 
+The pioneering work of NeRF \cite{mildenhall2021nerf} proposes integrating neural networks with 3D volumetric representations to convert a 3D scene into a learnable density field, enabling high-quality novel view synthesis without requiring explicit modeling of the 3D scene and illumination. 
+Later on, numerous works emerge to boost the quality and efficiency of volume rendering, \cite{barron2021mip, xu2022point, barron2023zip} refine the point sampling strategy in ray marching, \cite{barron2022mip, wang2023f2} reparameterize the scene to produce a more compact representation. Additionally, regularization terms \cite{deng2022depth, yu2022monosdf} can be incorporated to constrain the scene representation, resulting in a closer approximation to real-world geometry.
+Despite their high-quality representational performance, these methods are typically computationally inefficient for view rendering due to the extensive ray sampling required and the use of Multi-Layer Perceptrons (MLPs) to represent the scene, complicating the computation and optimization of any point within the scene. 
+To address this, several works have proposed novel scene representations aimed at accelerating the rendering process. These representations replace MLPs with sparse voxels \cite{liu2020neural}, hash tables \cite{muller2022instant}, or triplanes \cite{chen2022tensorf}, significantly enhancing rendering speed. However, real-time rendering remains challenging due to the inherent complexity of the ray marching strategy in volume rendering.
+
+{\bf 3D Gaussian Splatting} represents a recent advancement in novel view synthesis, enabling real-time high-quality rendering. 
+It contributes to splatting-based rasterization by computing pixel colors through depth sorting and $\alpha$-blending of projected 2D Gaussians, thereby avoiding the complex sampling strategies of ray marching and achieving real-time performance. 
+It is precisely due to its real-time high-quality rendering capabilities that 3DGS has been applied to various domains, including autonomous driving, content generation \cite{tang2023dreamgaussian}, and 4D dynamic scenes \cite{li2023spacetime, wu20234d, yang2023real}, among others.
+Despite these advancements, 3DGS still has some drawbacks, such as the storage of Gaussians and handling multi-resolution, and so on. 
+Several works have enhanced 3DGS by improving Gaussian representation, including techniques such as low-pass filtering \cite{yu2023mip}, multiscale Gaussian representations \cite{yan2023multi}, and interpolating Gaussian attributes from structured grid features \cite{lu2023scaffold}. 
+However, these works often overlook the importance of point management, specifically Adaptive Density Control, which is typically applied during optimization to address issues like under-population or over-population in the 3D space.
+Only a few works have focused on point management. For example, GaussianPro \cite{cheng2024gaussianpro} directly tackles densification limitations, bridging gaps from SfM-based initialization.
+Pixel-GS \cite{zhang2024pixel} proposes a gradient scaling strategy to suppress artifacts near the camera. Additionally, \cite{rota2024revising} introduces an auxiliary per-pixel error function to implicitly supervise point contributions.
+
+Although these methods improve densification, they are still unable to identify all the 3D zones that require point densification and lack a proper mechanism to handle ill-conditioned points with negative impacts. In our paper, we propose a novel approach, \fullname, capable of identifying error-contributing zones with the highest demand for both point addition and geometry calibration.
+
+
+\section{Method}
+
+\subsection{ Preliminaries: 3D Gaussian Splatting}
+Gaussian Splatting builds upon concepts from EWA ~\cite{zwicker2001ewa} splatting and proposes modeling a 3D scene as a collection of 3D Gaussian points $\{G_i \mid i = 1, \ldots, K\}$, rendered through volume splatting. Each 3D Gaussian $G$ is defined by the equation:
+\[
+G(x) = e^{-\frac{1}{2}(x-\mu)^T \Sigma^{-1} (x-\mu)},
+\]
+where $\mu \in \mathbb{R}^{3 \times 1}$ represents the mean vector, and $\Sigma \in \mathbb{R}^{3 \times 3}$ denotes its covariance matrix. To maintain the positive semi-definite nature of $\Sigma$ during optimization, it is represented as $\Sigma = RSS^T R^T$, with the orthogonal rotation matrix $R \in \mathbb{R}^{3 \times 3}$ and the diagonal scale matrix $S \in \mathbb{R}^{3 \times 3}$.
+
+To render an image from a specific viewpoint, the color of each pixel $p$ is determined by blending $N$ ordered Gaussians $\{G_i \mid i = 1, \ldots, N\}$ that overlap $p$, using the formula:
+\[
+c(p) = \sum_{i=1}^N c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j),
+\]
+where $\alpha_i$ is derived by evaluating a projected 2D Gaussian from $G_i$ at pixel $p$ combined with a learned opacity for $G_i$, and $c_i$ is the learnable, view-dependent color modeled using spherical harmonics in 3DGS. Gaussians that influence $p$ are arranged in ascending order based on their depth from the current viewpoint. Employing differentiable rendering techniques allows for the end-to-end optimization of all Gaussian attributes through training view reconstruction.
+
+{\bf Point management} 
+Since existing 3DGS variants 
+
+start by initializing 3D Gaussian points using Structure from Motion (SfM), the points are often coarse and error-prone. During optimization, a point management mechanism, Adaptive Density Control (ADC), is typically applied to manage point distribution issues.
+
+Specifically, thresholding the average gradient is used to decide on point densification.
+For each Gaussian point $G_i$, 
+3DGS tracks the magnitude of the positional gradient $\frac{\partial L_{\pi}}{\partial \mu_i}$ across all rendered views, which is then averaged to a quantity $T_i$.
+During each training iteration, if the gradient $T_i$ surpasses a predefined threshold, it considers this point as inadequately representing the corresponding 3D region. 
+With the scale of the Gaussian as the size measure, 
+a large Gaussian will be split into two, while a small one leads to point cloning. 
+However, this commonly used ADC strategy is unable to identify all the 3D zones with the underlying need for point densification.
+This is becuase, often the local complexity of scene geometry varies significantly, which beyond the reach of any single-value based thresholding.
+Besides, there is lacking of a proper mechanism to handle ill-conditioned points with negative impacts (e.g., wrong opacity values estimated during training with points distributed here and there).
+
+\subsection{Localized Gaussian Point Management} 
+To address the aforementioned issues, we introduce a novel model agnostic point management approach, {\em \fullname} (\shortname), which leverages multiview geometry constraints to identify error contributing 3D points, with the guidance of image rendering errors.
+This approach can be seamlessly integrated with existing 3DGS models without the need for architectural modification. 
+
+As illustrated in Figure ~\ref{fig:framework}, we begin with an image rendering error map for a specific view. 
+Under the multiview geometry constraint, the corresponding regions in the referred view are matched via feature mapping.
+For each pair of corresponding regions, we then cast rays through them from their respective camera views in a cone and identify their intersection as the error source zone. 
+Within each zone, we perform localized point manipulation.
+
+\paragraph{Error map generation}
+To accurately localize those zones in the 3D space that require point densification and geometry calibration, we initiate our process by rendering the current view image through the splatting of 3D Gaussians. 
+This is followed by generating an error map (Figure \ref{fig:framework}(a)) for this specific view against the grounth-truth image using an error function \cite{li2023spacetime}.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=1.\textwidth]{figures/fig2.pdf}
+  \caption{
+Overview of the Localized Point Management (\shortname). 
+(a) We start with an image rendering error map against the current view (the ground-truth).
+Concurrently, matching points are identified between the current view and a refereed view sampled as an adjacent view via off-the-shelf feature mapping.
+(b)Subsequently, cross-view region mapping is then employed to locate the correspondence region in the refereed view.
+(c)For each pair of corresponded regions, we cast the rays through them at their respective camera views in the cone shape, and consider their
+{\em intersection} as the error source zone.
+The final step involves identifying under-optimized or ill-conditioned  points within these zones, where 
+under-optimized/empty places are densified, ill-conditioned  points are reset.
+}
+  \label{fig:framework}
+\end{figure}
+\paragraph{Error contributing 3D zone identification}
+To project this rendering error back to the 3D space, we leverage the region correspondence between different views under multiview geometry constraints.
+This involves the following two key steps.
+
+{\bf \em (i) Cross-view region mapping}
+We select a neighboring view as the referred image. 
+Following LightGlue~\cite{lindenberger2023lightglue} that  predicts a partial assignment between two sets of local features extracted from two view images \(A\) and \(B\). 
+Each feature consists of sets of 2D features position  $\{F_i \mid (x_i, y_i) \in [0,1]^2\}$, normalized by the image size. The images \(A\) and \(B\) contain \(M\) and \(N\) local features. LightGlue outputs a set of correspondences \(\mathcal{M} = \{(i,j)\} \subseteq A \times B\). 
+Since the 2D rendering error regions in the current view may not all appear in the referenced image, we select the paired region \((R_e, R_e')\) (Figure \ref{fig:framework}(b)) through the matching points. 
+Additionally, this paired region undergoes multiview adaptive adjustments based on the error map  throughout the optimization process.
+
+{\bf\em (ii) 2D-to-3D projection}
+After obtaining the paired regions with render errors, we project each 2D error region  to the 3D space via multiview geometry constraints.
+Specifically, we cast the rays $\mathcal{C}$ in cone shape for region $R_e$ from the camera’s center of projection $o$ along the direction $d$, which aligns with the pixel's center (Figure \ref{fig:framework}(c)). 
+The apex of this cone is located at $o$, and its radius at the image plane.
+Hence, $o+d$  is parameterized as $\mathcal{C}$.
+The radius $r_{Cone}$ is set to match the radius of the smallest circumscribed circle of the 2D plane error region, creating a cone on the 3D space that can trace the Gaussian points contributing to the 2D error region. 
+Concurrently, a corresponding cone, denoted as $\mathcal{C'}$, belong to region $R_e'$ is similarly projected. 
+Subsequently, we compute the intersection points of these rays.
+In order to regionalize these points, we directly use a smallest sphere that can contain these points as error source 3D zone $R_{zone}$.
+
+\paragraph{Points manipulation}
+\label{step_4}
+Recall that in existing 3DGS, points management only relies on the view-averaged gradient magnitude \( \tau \) to determine point densification {\em globally}. 
+In addition to this, we {\em further} perform  localized points addition and geometry calibration within the identified error source 3D zone $R_{zone}$. 
+For the point addition, we consider two common situations:
+(1) In the presence of points, we apply point densification to locally complement the original counterparts. 
+We set a lower threshold to select the points that need densification, aiming to enhance the geometric details. The densification rule is consistent with 3DGS, but it focuses on local 3D zones that need it most. Specifically, for small Gaussians, our strategy involves cloning the Gaussians while maintaining their size and repositioning them along the positional gradient to better capture emerging geometrical features. 
+Conversely, larger Gaussians situated in areas of high variance are split into smaller points to more accurately represent the underlying geometry. 
+(2) In cases of point sparsity, we add new Gaussian points at the center of the 3D zone.
+
+In the context of \(\alpha\)-blending in 3DGS, if the points at the forefront of the identified 3D zone $R_{zone}$ have the highest opacity, they may occlude valid points, leading to incorrect depth estimation, as shown in Figure~\ref{fig:display}. 
+To deal with such issues, we treat these points as potentially ill-conditioned. We reset these points to provide an opportunity for correction, further calibrating the geometry.
+
+To minimize model expansion, we adaptively prune points based on their opacity values, starting from low to high. The number of points pruned is determined by the density of points in the zone. This strategic reduction ensures that our point management remains cost efficient and adaptive to the evolving needs of the scene representation.
+
+
+
+\section{Experiment}
+
+
+\paragraph{Datasets and metrics}
+We conducted an extensive evaluation using both static and dynamic scenes derived from publicly datasets.
+For static scenes, our approach was applied to a total of 11 scenes as specified in the 3DGS framework \cite{kerbl20233d}, which includes nine scenes from Mip-NeRF360 \cite{barron2021mip}, two from Tanks\&Temples \cite{knapitsch2017tanks}, and two from DeepBlending \cite{hedman2018deep}. 
+In the context of dynamic scenes, our approach was tested across six scenes from the Neural 3D Video Dataset \cite{li2022neural}.
+
+To evaluate novel view synthesis performance, we follow standard protocols by selecting one out of every eight images as test images, with the remaining used for training in static scenes. 
+For each dynamic scene within the Neural 3D Video Dataset, one view was designated for testing while the others were allocated for training purposes. 
+Evaluation metrics included the peak signal-to-noise ratio (PSNR), structural similarity index measure (SSIM), and the learned perceptual image patch similarity (LPIPS), which are broadly recognized standards in the field.
+\paragraph{Baseline and Implementation}
+\label{sec:implement}
+Vanilla 3D Gaussian Splatting(3DGS)~\cite{kerbl20233d} and its variants SpacetimeGS(STGS) ~\cite{li2023spacetime} are selected as our main baseline for its established SOTA performance in
+novel view synthesis.
+For the Static 3D benchmark, We also record the results of Mip-NeRF360~\cite{barron2021mip},  iNGP ~\cite{muller2022instant} and Plenoxels ~\cite{fridovich2022plenoxels} as in ~\cite{kerbl20233d}.
+For the Dynamic 4D benchmark, we also performed system comparison, such as DyNeRF~\cite{9878989}, StreamRF~\cite{105555}, K-planes~\cite{10204118} and so on.
+In alignment with the approach described in 3DGS an STGS, our models are trained for 30k iterations across all scenes, following the same training schedule and hyperparameters. In addition to the original Gaussian densification strategies used in 3DGS and SpaceTime Gaussian, we also perform localized points management, including addition, reset, and pruning. We maintain the same thresholds for splitting and cloning points as in the original 3DGS and SpaceTime Gaussian. For point matching, we perform offline extraction to save computational cost. All experiments were conducted on an RTX 3090 GPU with 24GB of memory.
+\begin{figure}[htb]
+  \centering
+  \includegraphics[width=1.\textwidth]{figures/fig3_1.pdf}
+  \caption{Qualitative evaluation of our \shortname{} across diverse static datasets \cite{barron2022mip, hedman2018deep, knapitsch2017tanks}. 
+  Our \shortname{} improves 3DGS \cite{kerbl20233d} on these challenging scenarios, e.g. (a) \textbf{Light effect}, (b) \textbf{Completeness in the distance}, (c) \textbf{Intricate details} and (d) \textbf{Transparent}.
+  Patches that highlight the visual differences are emphasized with red insets for clearer visibility. 
+}
+  \label{fig:3d_display}
+\end{figure}
+
+\newpage
+\subsection{Main Results}
+\paragraph{Results on static 3D datasets}
+\begin{table}[ht]
+\setlength\tabcolsep{4pt} 
+\centering
+\caption{Comparison of various methods across different scenes on the Mip-NeRF 360 dataset, Tanks\&Temples and Deep Blending. 3DGS* indicates the retrained model from the official implementation. \textbf{Bold} represents best, \underline{underline} indicates second best.}
+\label{tab:3dresults}
+\begin{tabular}{@{}lccccccccc@{}}
+\toprule
+\textbf{Method} & \multicolumn{3}{c}{\textbf{Mip-NeRF 360}} & \multicolumn{3}{c}{\textbf{Tanks\&Temples}} & \multicolumn{3}{c}{\textbf{Deep Blending}} \\ 
+\cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10}
+& PSNR & SSIM & LPIPS & PSNR & SSIM & LPIPS & PSNR & SSIM & LPIPS \\
+\midrule
+Plenoxels ~\cite{fridovich2022plenoxels}    & 23.08 & 0.625 & 0.463 &  21.08  & 0.719 &  0.379 & 23.06 & 0.795 &  0.510  \\
+INGP-Big ~\cite{muller2022instant}    & 25.59 & 0.699 & 0.331 &21.92 & 0.745 & 0.305 & 24.96 & 0.817 & 0.390 \\
+Mip-NeRF 360 ~\cite{barron2021mip}  & \textbf{27.69} & 0.792 & 0.237 & 22.22 & 0.759 &0.257& 29.40 & 0.901 & 0.245   \\
+3DGS   ~\cite{kerbl20233d}     & 27.21 & 0.815 & \textbf{0.214}  & 23.14 & 0.841&  0.183 &29.41  &0.903 & \underline{0.243} \\
+3DGS*       &  27.47 & \underline{0.816} & 0.216 &\underline{23.67} & \underline{0.849} & \textbf{0.177} &\underline{29.55} & \underline{0.904} & 0.245  \\
+{3DGS} + \textbf{\shortname{}}   & \underline{27.59} & \textbf{0.820} & \underline{0.216} & \textbf{23.83} & \textbf{0.850} & \underline{0.181}&\textbf{29.76} & \textbf{0.908}& \textbf{0.241}\\
+\bottomrule
+\end{tabular}
+\end{table}
+The quantitative results (PSNR, SSIM, and LPIPS) on the Mip-NeRF 360 and Tanks \& Temples datasets are presented in Tables \ref{tab:3dresults}. 
+We retrained the 3DGS model (referred to as 3DGS*) as it yields better performance compared to the original 3DGS. Our approach achieves results comparable to the state-of-the-art on the Mip-NeRF360 dataset and further enhances 3DGS using our point management technique. Additionally,  ~\shortname{} improve 3DGS to set new state-of-the-art results on the Tanks \& Temples and DeepBlending datasets, effectively capturing more challenging environments (\emph{e.g.}, light effects, transparency).
+These results quantitatively validate the effectiveness of our method in improving the quality of reconstruction.
+
+In Figures~\ref{fig:3d_display}, we present a comparison between 3DGS~\cite{kerbl20233d} and the 3DGS+\shortname{}.
+A variety of improvements can be observed, particularly in challenging cases such as light effects, completeness at a distance, intricate details, and transparency. Our \shortname{} significantly reduces artifacts in specific regions on top of 3DGS, particularly in the tree and flowers in the second and third rows. These regions require more points for accurate population, leading to a more precise and detailed reconstruction. Additionally, the tablecloth and window regions in the first and last rows are affected by ill-conditioned points. 
+Our geometry calibration with \shortname{} provides an opportunity to correct these potentially ill-conditioned points, enhancing the overall reconstruction accuracy.
+\paragraph{Results on dynamic 4D datasets}
+
+\begin{figure}[htb]
+  \centering
+  \includegraphics[width=1.\textwidth]{figures/fig5_1.pdf}
+  \caption{Qualitative evaluation on dynamic Neural 3D Video dataset \cite{li2022neural}. 
+  \shortname{} improves
+  STGS~\cite{li2023spacetime}
+  for both scenes \textbf{Transparent} (\emph{e.g.}, window)  and \textbf{Dynamic movements}  (\emph{e.g.}, dog's tongue).
+}
+  \label{fig:4d_display}
+\end{figure}
+
+\begin{table}[ht]
+\centering
+\caption{Quantitative comparisons on the Neural 3D Video dataset. “FPS” is measured at a resolution of 1352 $\times$ 1014. Some methods only report results for a subset of scenes. For a fair comparison, we report \shortname's results under two pre-existing settings. $^1$ Only includes the \textit{Flame Salmon} scene.
+\textbf{Bold} represents best, \underline{underline} indicates second best.}
+\begin{tabular}{l|c|c|c|c|c}
+\toprule
+\textbf{Method} & \textbf{PSNR} & \textbf{DSSIM\textsubscript{1}} & \textbf{DSSIM\textsubscript{2}} & \textbf{LPIPS} & \textbf{FPS} \\
+\hline
+LLFF~\cite{101145} $^1$ & 23.24 & - & 0.076 & 0.235 & - \\
+DyNeRF~\cite{9878989} $^1$  & 29.58 & \textbf{0.020} & 0.083 & 0.063 & 0.015 \\
+Dynamic-4DGS~\cite{wu20234d}  $^1$  & - & - & - & - & 30 \\
+4DGS ~\cite{yang2023real} $^1$  & 29.38 & - & - & - & \textbf{114} \\
+STGS ~\cite{li2023spacetime} $^1$  & \underline{29.58} & 0.038 & 0.022 & \underline{0.063} & 103 \\
+STGS*  $^1$  & 29.48 & 0.038 & \underline{0.023} & 0.066 & \underline{110} \\
+STGS $^1$ + \textbf{\shortname{}} & \textbf{29.84} & \underline{0.036} & \textbf{0.022} & \textbf{0.062} & 105 \\
+\hline
+StreamRF~\cite{105555}  & 28.26 & - & - & \textbf{0.039} & 10.9 \\
+NeRFPlayer~\cite{10049689}& 30.69 & 0.034 & - & 0.111 & 0.05 \\
+HyperReal~\cite{Attal_2023_CVPR} & 31.10 & 0.036 & - & 0.096 & 2 \\
+K-planes~\cite{10204118}  & 31.63 & \underline{0.018} & - & 0.31 & 3 \\
+MixVoxels-X ~\cite{10377294}  & 31.73 & \textbf{0.015} & - & 0.064 & 4.6 \\
+Dynamic-4DGS ~\cite{wu20234d}  & 31.15 & - & 0.016 & 0.049 & 30 \\
+4DGS ~\cite{yang2023real} & 32.01 & - & - & 0.055 & 114 \\
+STGS ~\cite{li2023spacetime} & \underline{32.05} & 0.026 & 0.014 & \underline{0.044} & 140 \\
+STGS*  & 31.99 & 0.026  & \underline{0.015} & 0.045 & \textbf{145} \\
+STGS+ \textbf{\shortname{} } & \textbf{32.40} & 0.025 & \textbf{0.014} & 0.045 & \underline{140}\\
+\bottomrule
+\end{tabular}
+\label{tab:4dresult}
+\end{table}
+
+Table ~\ref{tab:4dresult} presents a quantitative evaluation on the Neural 3D Video Dataset. 
+Following established practices, training and evaluation are conducted at half resolution, with the first camera held out for evaluation ~\cite{9878989}. Integrating our \textbf{\shortname{}} into SpaceTimeGS yields the best performance across all comparisons.
+Notably, our method demonstrates significant improvements in the challenging \textit{Flame Salmon} scene compared to STGS~\cite{li2023spacetime}. 
+Our approach not only surpasses previous methods in rendering quality but also maintains comparable rendering speed.
+
+In addition to the quantitative assessment, we provide qualitative comparisons on the \textit{Flame Salmon} and \textit{Flame Steak} scenes, as illustrated in Figure~\ref{fig:4d_display}. The quality of synthesis in both static and dynamic regions markedly outperforms STGS. 
+Several intricate details, including the tree behind the window and the fine features like the dog's tongue, are faithfully reproduced with higher accuracy compared to STGS~\cite{li2023spacetime}. Both examples indicate that \shortname{} improves upon STGS for superior scene modeling.
+
+\subsection{Ablation study}
+
+\begin{figure}[htb]
+  \centering
+  \includegraphics[width=1.\textwidth]{figures/fig4_1.pdf}
+  \caption{Effect of key operations of \shortname{}. 
+  We show that the \textit{point addition} operation effectively captures the geometric details in the scene; The \textit{point reset} operation based on the error map further calibrate the geometry.
+}
+  \label{fig:ablation1}
+\end{figure}
+
+We conducted ablation studies on the more challenging scene: PlayRoom from Deep Blending~\cite{hedman2018deep} and Truck from Tanks\&Temples  ~\cite{knapitsch2017tanks}. 
+\paragraph{Effectiveness and efficiency of the \shortname{}}
+We hypothesize that the Adaptive Density Control (ADC) tends to overlook under-optimized points due to its simplistic approach of thresholding the average gradient. 
+The straight way to identify the all points is  lowering threshold to densification process. 
+Although this solution can reduce blurring in specific regions, such as the toy (red box) illustrated in Figure~\ref{fig:ablation1}, it still has limitations. As shown in Table~\ref{tab:eff_ana}, lowering the threshold for 3DGS significantly increases the number of Gaussian points and decreases rendering speed. Additionally, the PSNR of the quantitative results decreases due to the introduction of unnecessary points in already dense areas.
+In contrast, \textbf{\textit{\shortname{}}} effectively generates points in areas indicated by the error map, leading to more accurate and detailed reconstructions while maintaining real-time rendering speed. As demonstrated by the qualitative comparison in Figure~\ref{fig:ablation1}, 3DGS with ~\shortname{} achieves superior qualitative results.
+\begin{table}[ht]
+\centering
+\caption{Efficiency analysis. Rendering speed of both methods are measured on our machine.}
+\label{tab:eff_ana}
+\begin{tabular}{@{}ccccccc@{}}
+\toprule
+Scene & Method & PSNR & LPIPS & Gaussians & Training time \\ 
+\midrule
+  & 3DGS* ~\cite{kerbl20233d}& 30.03 & 0.244 & 232k & 22min  \\
+PlayRoom & 3DG* (lower threshold)  & 29.69 & 0.240 & 523k & 36min  \\
+& 3DGS + \textbf{{\shortname{}}} & {30.22 }& 0.241 & 186k & 23min  \\
+ \midrule
+ & 3DGS*~\cite{kerbl20233d} & 25.42 & 0.146 & 257k & 19 min \\
+Truck & 3DGS* (lower threshold) & 25.45 & 0.127 & 635k & 35min  \\
+ & 3DGS + \textbf{{\shortname{}}} & {25.61} & 0.154& 265k & 21min  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Individual points manipulation}
+We study the effect of individual points manipulation of \shortname{}{}, including the \textit{point addition}  and \textit{ reset ill-conditional points}.
+The results in Table~\ref{tab:module_ab} show that, (1) each manipulation is useful with positive gain, suggesting that the ~\shortname{} is meaningful.
+(2) The \textit{point addition} operation densify the under-optimized points which may be overlook in the 3DGS
+, further captures the geometry details (\eg, detail of toy and leaf of the tree, see Fig. \ref{fig:ablation1}).
+(3) Reset points in ceratin zone  
+provide the opportunity of correct the ill-conditioned points to achieve geometry calibration, (\eg, window of the trunk, see Fig. \ref{fig:ablation1}).
+
+\begin{table}[ht]
+\centering
+\caption{Performance comparison for different configurations}
+\label{tab:module_ab}
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+\multicolumn{1}{c}{} & \multicolumn{3}{c}{PlayRoom} & \multicolumn{3}{c}{Truck} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+\multirow{1}{*}{\centering Method} & PSNR & LPIPS & SSIM & PSNR & LPIPS & SSIM \\
+\midrule
+\textbf{Full \shortname{}} & 30.22 & 0.241 & 0.910 & 25.61 & 0.154 &0.883 \\
+wo/ point addition & 30.10 & 0.241 & 0.910 & 25.43 & 0.153 & 0.883 \\
+wo/ reset & 30.07 & 0.243 & 0.908 &25.52 & 0.144 & 0.883 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Robustness to sparse training images}
+We conducted further ablation studies to verify the impact of the number of training images. In Table~\ref{tab:sparse}, we present the results of training 3DGS and our method using randomly selected subsets comprising 25\%, 50\%, 75\%, and 100\% of the training images. Remarkably, our method consistently achieves superior rendering results compared to 3DGS across different percentages of training images.
+
+
+\begin{table}[ht]
+\setlength\tabcolsep{4pt} 
+\centering
+\caption{Effect of different training view ratios in the \textit{PlayRoom} and \textit{Truck}. }
+\label{tab:sparse}
+\begin{tabular}{@{}lcccccccccc@{}}
+\toprule
+Scene & Method & \multicolumn{2}{c}{25\%} & \multicolumn{2}{c}{50\%} & \multicolumn{2}{c}{75\%} & \multicolumn{2}{c}{100\%} \\ 
+\cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8} \cmidrule(lr){9-10}
+& & PSNR & LPIPS & PSNR & LPIPS  & PSNR& LPIPS& PSNR& LPIPS\\ 
+\midrule
+\multirow{2}{*}{\centering PlayRoom} & 3DGS~\cite{kerbl20233d} & 25.33 & 0.313 & 27.37 & 0.270 & 29.16 & 0.253& 30.03& 0.244 \\
+ & 3DGS+ \textbf{\shortname{}} & 25.43 & 0.313 & 27.42 & 0.267 & 29.06& 0.252 & 30.22& 0.241 \\ 
+\midrule
+\multirow{2}{*}{\centering Trunk} & 3DGS~\cite{kerbl20233d} & 22.46 & 0.177 &  24.15 & 0.154 & 24.86& 0.150 & 25.42& 0.146 \\
+ & 3DGS + \textbf{\shortname{}} & 22.95 &0.173 &  24.55 & 0.157 & 25.14& 0.152& 25.61& 0.154\\ 
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+
+\section{Conclusions and limitations}
+
+\label{sec:limi_con}
+We propose \fullname{} (\shortname{}), a novel point management approach to address the limitations of the Adaptive Density Control (ADC) mechanism in 3D Gaussian Splatting (3DGS).
+The core idea of \shortname{} is identifying the error-contributing 3D zones that require both point addition and geometry calibration under multiview geometry constraints, guided by image rendering errors. We implement appropriate operations for point densification and opacity reset. As a versatile plugin, \shortname{} can be seamlessly integrated into existing 3DGS-based rendering methods. Extensive experiments across both static 3D and dynamic 4D scenes validate the efficacy of \shortname{} in enhancing existing ADC mechanisms both quantitatively and qualitatively.
+While our method identifies the 3D Gaussian points that lead to rendering errors, it still follows the densification rules of 3DGS~\cite{kerbl20233d}.
+This approach may not be optimal for under-optimized points, and we leave this aspect for further investigation.
+
+
+
+
+
+
+
+

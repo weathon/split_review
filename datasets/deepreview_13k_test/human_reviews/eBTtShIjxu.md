@@ -1,0 +1,187 @@
+# Prompt Tuning Is All We Need?
+
+- Decision: Reject
+- Scores: 5, 6, 3, 3
+
+## Abstract
+Recent advances in pre-trained vision-language models, e.g., CLIP, have demonstrated remarkable success in domain generalization (DG) by tuning prompts. To promote DG, one promising method is to explore how to design or learn more sweet prompts, i.e., prompt learning. The implicit intuition of it is that a more elaborate prompt learning method can lead to higher generalization performance. The foundation intuition motivates us to raise a question: Prompt tuning is all we need? To verify whether the intuition holds for DG, we design comprehensive experiments on DG benchmarks. However, our experiments demonstrate a pessimistic conclusion that simply tuning prompts using training sets can achieve comparable performance with that using test sets. Namely, even the optimal prompts can hardly bring significant performance gain than a simple tuning strategy. Our experiments show that this results from the non-separability of features extracted by the image encoder. Thus, we propose image encoder tuning, named Im-Tuning, for more separable image features. We conduct extensive experiments on multiple DG benchmarks, demonstrating that Im-Tuning can consistently outperform the relevant state-of-the-art methods.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposed a method to improve the domain generalization ability of the CLIP model. Specifically, they proposes image encoder tuning, where the learnable contextual representation vectors also control the scale and bias of the image encoder layers. The experimental results performed on few-shot learning, generalization from base to new classes, and cross-dataset transfer, domain generalization results showing the effectiveness of the proposed method.
+
+### Strengths
+- The paper is well-written and easy to understand
+- The proposed method is simple and effective
+- Extensive experiments showing the effectiveness of the proposed method.
+
+### Weaknesses
+- Better to provide detailed analysis about why image features of a pre-trained CLIP model is less separable. Are they related to training data or loss functions? Do you observed similar phenomenons in other CLIP-like models?
+
+### Questions
+I'm thinking about the scope of this paper. The proposed method is more like an incremental improvement over a pre-trained CLIP model. It is unknown if the drawback mentioned in the paper is only stands for this model checkpoint, for the training dataset, or for all CLIP-style models. It is interesting to see more analysis and comparisons with other multimodality models
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper investigates methods for domain generalization using pretrained vision-language models. The authors introduce a novel image encoder tuning method called Im-Tuning, aimed at enhancing the separability of image features by adjusting the parameters of the image encoder. The empirical results demonstrate that the Im-Tuning method outperforms existing approaches across multiple domain generalization benchmarks.
+
+### Strengths
+1. The paper addresses an important research question regarding the effectiveness of prompt tuning in domain generalization for vision-language models.
+
+2. The authors propose a new method, Im-Tuning, which improves the separability of image features by adjusting the image encoder, thereby enhancing domain generalization performance. 
+
+3. Extensive experiments on multiple domain generalization benchmarks validate the effectiveness of the Im-Tuning method. 
+
+4. The paper is well-structured, provides a thorough review of relevant literature, and presents a comparison of the proposed method with existing approaches.
+
+### Weaknesses
+1. The paper provides a rather brief description of experimental details, which lacks depth and may hinder reproducibility. 
+
+2. The clarity of the argument could be improved, as some parts are not expressed clearly enough, making it challenging for readers to understand. 
+
+3.  The interpretability of the method is poor, requiring further explanation on why adjusting the image encoder enhances the separability of image features. 
+
+4. The paper contains some formatting errors, such as in Section 3.3, the first sentence ("see Figure ??").
+
+### Questions
+1. Could the authors provide more detailed experimental settings and implementation details for reproducibility? 
+
+2. Could further explanation be provided on why adjusting the image encoder enhances the separability of image features? 
+
+3. Have other domain generalization tasks been considered, such as zero-shot learning or domain adaptation?
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+Recent advancements in pre-trained vision-language models, such as CLIP, have shown impressive success in domain generalization (DG) by fine-tuning prompts. One promising approach to enhance DG is prompt learning, which aims to design or learn more effective prompts. The underlying idea is that a more sophisticated prompt learning method can lead to better generalization performance. To investigate the impact of prompt learning on DG, comprehensive experiments were conducted on DG benchmarks.
+
+Surprisingly, the experiments yielded a pessimistic finding. It was discovered that simply tuning prompts using training sets achieved comparable performance to using test sets. In other words, even with optimal prompts, significant performance improvement compared to a simple tuning strategy was difficult to achieve. This observation was attributed to the non-separability of features extracted by the image encoder.
+
+To address this limitation, the researchers proposed a method called Im-Tuning, which focuses on tuning the image encoder to generate more separable image features. Extensive experiments were conducted on multiple DG benchmarks to evaluate the effectiveness of Im-Tuning. The results consistently demonstrated that Im-Tuning outperformed the state-of-the-art methods in DG tasks.
+
+In summary, while previous work emphasized the importance of prompt learning for DG, this research revealed that prompt tuning alone is insufficient to achieve significant performance gains. Instead, the proposed Im-Tuning method, which focuses on enhancing the separability of image features through image encoder tuning, proved to be more effective in improving DG performance across various benchmarks.
+
+### Strengths
+1)  This work presents a seemingly new opinion: it challenges the necessity of prompt tuning, and shows that an optimal prompt provides limited performance gain compared to a simple prompt. This can be attributed
+to the separability of image features, which suggests a promising direction for promoting
+domain generalization with clip models.
+
+2) The designed method is simple yet effective and meets intuition.
+
+### Weaknesses
+1) One main work [1] to compare in experiments is missing, as it focuses on multi-modal tuning. To convince the conclusion that tuning prompt and image enocder is better than multi-modal prompt tuning, more empirical results are required.
+
+2) The presentation is not clear. The abstract is hard to understand.
+
+3) Some writing errors, like "As demonstrated in the introduction section (see Figure ??)" in Sec 3.3
+
+[1] MaPLe: Multi-modal Prompt Learning. CVPR23
+
+### Questions
+Please see weakness.
+
+The design of modulating image features based on the prompts,  should be studied more by ablation.
+
+### Soundness
+2 fair
+
+### Presentation
+1 poor
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+The authors present in-tuning that fine-tunes the CLIP text and visual backbones on downstream tasks. The authors add learnable tokens and the scale and bias parameters for the transformer block of the CLIP image encoder. The authors provide a detailed analysis on 11 image recognition and 3 domain generalization benchmarks.
+
+### Strengths
+1. The idea of this paper is easy to understand and easy to follow
+
+### Weaknesses
+- 1. Title Clarity. The current title appears too broad and potentially misleading readers. Initially, one might assume the paper provides an analysis of the pros and cons of prompt tuning across various tasks. However, the main content focuses on the present new method of tuning the CLIP image encoder, which is not reflected in the title.
+
+- 2. Lack of novelty. Some previous work, such as MaPLe (Khattak et al., 2023) and CLIP-Adapter Gao et al. (2021) have already delved into tuning the CLIP image encoder and making the CLIP image features separable. 
+
+- 3. Missing baselines. The authors only compare with CoOp/CoCoOp in Table 1 and Table 2, which are not enough. CoOp/CoCoOp are published two years ago and not the SOTA method. A series of methods mentioned in the related work section are suggested to compare with, such as ProGrad (Zhu et al., 2022), Test-time prompt tuning (Shu et al. (2022) and MaPLe (Khattak et al., 2023). They also provide the results on the base-to-new evaluation and cross-dataset transfer settings. Some recent prompt tuning approaches that are not listed in the related work section are also suggested to compare with, such as
+
+  - LASP Language Aware Soft Prompting for Vision-Language Models, CVPR 2023
+
+- 4. Efficiency concerns. The introduction of the in-tuning network adds more parameters, possibly affecting the training and inference times and raising the efficiency concern. The authors may consider adding an efficiency analysis and providing a comprehensive view of the trade-offs involved.
+
+### Questions
+1. What's the meaning of L_{f} in Eq (3)?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good

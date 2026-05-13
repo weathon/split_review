@@ -1,0 +1,360 @@
+\title{A Long Way To Go: Investigating Length Correlations in RLHF}
+
+\begin{abstract}
+Great success has been reported using Reinforcement Learning from Human Feedback (RLHF) to align large language models, with open preference datasets enabling wider experimentation, particularly for ``helpfulness'' in tasks like dialogue and web question answering. Alongside these improvements, however,
+RLHF also often drives models to produce longer outputs. This paper demonstrates, on three diverse settings, that optimizing for response length is, much more than previously thought, a significant factor behind RLHF.
+Studying the strategies RL optimization uses to maximize reward, we find improvements in reward to largely be driven by 
+increasing response length, instead of other features. Indeed, we find that even a \emph{purely} length-based reward reproduces most downstream RLHF improvements over supervised fine-tuned models. Testing a comprehensive set of length-countering interventions, we identify the dominant source of these biases to be reward models, which, by studying training dynamics, we find are non-robust and easily influenced by length biases in preference data.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure*}[h!]
+    \centering
+    \includegraphics[width=0.95\linewidth, trim=20 450 20 20,clip]{figures/ICRLv2.pdf}
+    \caption{Log-scaled heatmap of lengths of SFT outputs vs. learned reward model scores for WebGPT (left). The graph shows that reward scores are strongly correlated with length. RLHF with these consistently leads to longer outputs (right).}
+    \label{fig:fig1overview}
+\end{figure*}
+
+\label{sec_intro}
+
+Reinforcement Learning from Human Feedback (RLHF) is widely used to align large language models (LLMs) with desired downstream properties such as helpfulness or harmlessness \citep{Ouyang2022TrainingLM,Bai2022TrainingAH}. %Specifically, starting from supervised fine-tuned (SFT) LLMs, the paradigm generally consists of (1) training a \emph{reward model} (RM) on a labeled set of preferences over output pairs on the same inputs, and (2) optimizing the policy model with respect to the reward model via an RL algorithm like proximal policy optimization (PPO) \citep{Schulman2017ProximalPO}.
+This procedure entails (1) learning a reward model to estimate human preferences and (2) using RL to maximize that reward. Its success relies on two things. First, the reward model must be correctly specified and not misaligned with human preferences \citep{Zhuang2021ConsequencesOM, Pang2022RewardGI,Bobu2023AligningRA}. Second, the optimization algorithm must successfully maximize reward without straying too far from a sensible initial distribution. 
+
+Not meeting these conditions can lead to over-optimization of the reward model at the expense of human judgments \citep{dubois2023alpacafarm} or pathological ``reward hacking'' \citep{Skalse2022DefiningAC}. Ad hoc adjustments \citep{Touvron2023Llama2O, Zheng2023SecretsOR} to PPO have stabilized the process, but there is still little work examining what features improve in policy models, and to what extent these correspond to meaningful improvements in quality versus optimizing shallow reward correlations \citep{Pang2022RewardGI}.%\tanya{some repetition between this and next paragraph. cut at one of the two.}\gd{I think it's fine?}
+
+In this work, we focus on one such feature: output length. Prior work in RLHF has noted that the length of sampled outputs increases after RLHF \citep{Stiennon2020LearningTS,Nakano2021WebGPTBQ,dubois2023alpacafarm, Zheng2023SecretsOR, Sun2023ExploringTI, Wu2023FineGrainedHF} but largely dismissed it as an artifact of PPO. In this paper, we study this phenomenon in depth to understand its underlying causes, and to what extent length is a meaningful feature vs.~a spurious correlation that PPO optimizes for.
+
+We organize our main findings into three parts. First, we compare vanilla PPO and SFT models in three diverse settings (WebGPT~\citep{Nakano2021WebGPTBQ}, Stack~\citep{h4stackexchange} and RLCD~\cite{Yang2023RLCDRL}) and show that length dominates reward optimization in PPO to a surprising extent. In fact, for two settings, we find that the \textbf{PPO improvements disappear if we restrict our comparison to similar length outputs from PPO and SFT}. 
+
+We then run a controlled experiment with the PPO pipeline, but replacing learned reward models with a purely length-based heuristic score. We find that PPO performance with this length-only reward is close to standard PPO (56\% vs 58\% win-rate of standard PPO on WebGPT and 64\% vs 63\% win-rate of standard PPO on RLCD). This \textbf{shows shortcomings of current reward models, which fail to convincingly outperform simple heuristics}, but more broadly questions the recent ``progress'' reported with popular metrics. 
+
+Exploring a comprehensive set of anti-length interventions, including changing preference datasets, reward model training, policy rollout strategies, reward scores and KL loss, we find that no strategy works for all settings. However, we find that interventions generally brings length closer to the base model, sometimes without degrading performance. %\gd{I rewrote this a bit. Don't the WRG experiments show that most improvements are due to length? and in table 2 improvements over SFT are kinda so-so from all of these interventions?}\gd{removed the ``future work'' sentence, gives reviewers ammo to say we should've done it} %We hope that future work can build on our analysis to train more robust reward models and PPO training pipelines.
+
+Output length may be a legitimate feature to optimize for, as it may correspond to greater informativeness;
+however our results hint at a concerning scenario wherein PPO struggles to improve reward without increasing length, %or more importantly,
+failing optimize for important non-length features. We find that this is because learned reward models themselves exhibit very strong correlations with length (see Figure~\ref{fig:fig1overview}) at the cost of other features, from training itself.%, providing PPO with an easy ``shortcut'' to optimize on. 
+
+Taken together, our findings: (1) show that current reward models %cannot correctly capture human preferences and impact downstream PPO training;
+only model shallow aspects of human preferences;
+(2) call into question PPO ``improvements'' using reward models on the datasets we study; and (3) show what interventions are effective and call for better preference data and downstream evaluation.%\gd{I rewrote this} %we call into question the validity of standard winrate-based downstream LLM evaluation, %that have become standardized in the research community
+
+
+
+
+
+
+
+\section{Background and Task Setup}
+
+\label{sec_background}
+
+Text generation models \citep{sutskever2014sequence,bahdanau2014neural} place a distribution over target output $\mathbf{y} = (y_1,\ldots,y_n)$ given input sequences of tokens $\mathbf{x}$, i.e., $\pi_\theta$: $p(\mathbf{y} \mid \mathbf{x}; \pi_\theta) = \prod_{k=1}^n p(y_{k} \mid \mathbf{y}_{<k}, \mathbf{x}; \pi_\theta)$. Typically, these models are trained with both language modeling pre-training (learning to predict the next word given context) and supervised fine-tuning (SFT; learning to generate outputs to maximize the likelihood of references on some dataset).
+
+\textbf{RLHF} can then be broken into two stages. First, preference data of the form $P = \{(x_1, y_1^+, y_1^-), \ldots, (x_n, y_n^+, y_n^-)\}$ is collected, where $x_i$ is the prompt, $y_i^+$ is the preferred continuation, and $y_i^-$ is the dispreferred continuation. This dataset is used to train a scalar \textbf{reward model} $R(x, y)$ such that for any preference, $R(x_i, y_i^+) > R(x_i, y_i^-)$. We use the standard Bradley-Terry preference model \citep{Bradley1952RankAO}, that is, $P(y_1 \succ y_2 \mid x) = \frac{\exp(R(x, y_1))}{\exp(R(x, y_1)) + \exp(R(x, y_2))}$, to maximize the log likelihood of the observed preferences.
+
+Second, \textbf{proximal policy optimization (PPO)} \citep{Schulman2017ProximalPO} is used further train the SFT model ($\pi_\theta^\mathrm{SFT}$) to get $\pi_\theta^\mathrm{RL} = \mathrm{PPO} (\pi_\theta^\mathrm{SFT}, R)$. This training maximizes the reward $R(x_i, y_i \sim \pi_\theta(y | x_i))$ on training data $(x_1,\ldots,x_m)$, while not deviating too strongly from the initial distribution. Specifically, it maximizes the following objective, where $\lambda$ controls the strength of a Kullback-Leibler (KL) penalty between SFT and the current policy: 
+\begin{equation}
+\label{eq:PPO}
+R_{\mathrm{ppo}}(x, y) = R(x, y) - \lambda D_\mathrm{KL}(\pi_\theta^{RL}(y|x) \Vert \pi_\theta^\mathrm{SFT}(y|x))
+\end{equation}
+
+\begin{figure*}[t!]
+    \centering
+    \includegraphics[width=0.98\textwidth,trim=0 10 0 0,clip]{figures/distcomps/fig_1_hist_length.pdf}
+    \caption{Output lengths of \textsc{sft} model before (blue) and after (red) standard PPO (\textsc{std}); averages shown with dashed lines. Across all settings, PPO leads to large length increases.}
+    \label{fig:lenhists}
+\end{figure*}
+
+\subsection{Experimental Setup}
+\label{sec:expersetup}
+
+} 
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{WebGPT (Question answering; human labels)}~\citet{Nakano2021WebGPTBQ} contains human annotated preference labels for the open-domain long-form question answering task \citep{fan-etal-2019-eli5}. It includes 19.6K examples (mean tokens per $y =169$).
+    \item \textbf{Stack (Technical question answering; upvotes)}~\citet{h4stackexchange} contains technical StackExchange questions, with preference labels between two answers derived automatically from the number of upvotes. We use 100K (mean tokens per $y = 236$) pairs from the dataset following the Hugging Face implementation \citep{vonwerra2022trl}.
+    \item \textbf{RLCD (Multi-turn conversation; synthetic preferences)}~\citet{Yang2023RLCDRL} includes multi-turn dialogue data. Starting from input instructions in the Helpful/Harmless dataset by Anthropic \citep{Bai2022TrainingAH}, preferred and not-preferred outputs are automatically generated using prompt heuristics, e.g. appending ``generate unhelpful outputs'' to the prompt. We use the helpfulness subset (40K preferences; mean tokens per $y = 45$).
+\end{enumerate}
+
+\paragraph{Implementation Details} %We use the standard implementation and hyperparameters for the three components of RLHF to maintain consistency. 
+We use Huggingface TRL \citep{vonwerra2022trl} with hyperparameters we find to work best based on reward and downstream evaluation ($\lambda=0. We use Llama-7B models~\citep{Touvron2023LLaMAOA} as our base for all experiments, and use LoRA (rank$=16$) \citep{Hu2021LoRALA} to enable PPO training with limited GPU resources. We choose publicly available SFT models for each setting: AlpacaFarm SFT for WebGPT and RLCD, and TRL SFT for Stack.
+ 
+
+\paragraph{Evaluation Metrics} We evaluate with (1) (intrinsic) \textbf{reward scores} from task-specific reward models used in the PPO process; and (2) (downstream) \textbf{AlpacaFarm simulated preferences} \citep{dubois2023alpacafarm}, popularly used as a proxy for humans in most recent work \citep{dubois2023alpacafarm, Zheng2023JudgingLW}. This queries 12 OpenAI API-based ``annotators''  to choose between two outputs, and reports pairwise ``win rate'' of a model over another (e.g. SFT's win-rate over PPO), testing on 500 held-out datapoints for each task. While useful for additional context, we qualify this metric by noting that it itself may have length biases, which we partially examine in Table~\ref{tab:len_only}, hence why we focus more on other metrics in our experiments.
+
+
+
+\section{Does PPO Only Optimize Length?}
+
+\label{sec_ppoexperimen}
+To motivate this section, we first re-establish \citep{Stiennon2020LearningTS,dubois2023alpacafarm, Zheng2023SecretsOR} that on our settings, indeed, \textbf{PPO significantly increases output length.} Figure~\ref{fig:lenhists} compares output lengths on our test set when sampling from the initial SFT model (blue) and the post-PPO model (red). We note clear length increases across settings. We also report (Table~\ref{tab:lenstratify_stats}) that reward indeed increases after PPO ($\Delta R$) and as in prior work, PPO beats the SFT model on simulated preference (\textsc{sim pref}, Table~\ref{tab:ppo_interventions}); we'll discuss more later, but for now we just use them to establish PPO improves over SFT as expected. 
+As we find that reward scores and length are positively correlated (Figure~\ref{fig:fig1overview} shows this for WebGPT), it is possible for PPO to improve on intrinsic reward metrics by simply producing longer outputs. Based on this possibility, we investigate the following question: to what extent are PPO improvements explained by the increase in length? 
+
+
+
+\begin{figure*}[t!]
+    \centering
+    \includegraphics[width=0.98\textwidth]{figures/hkl_lengthbins.pdf}
+    \caption{Output length vs reward in 20 token buckets. Black dots indicate SFT, and arrows indicate improvement (up) or degradation (down) after \textsc{high kl} PPO for each bin. Size and color intensity is proportional to number of examples in the bin. Reward scores are strongly correlated with length. On WebGPT and RLCD, reward improvement within bins is small, showing that overall improvement after PPO is primarily due to shifting to longer outputs.}
+    \label{fig:binscatters}
+\end{figure*}
+
+\subsection{Length-stratified analysis of reward improvement}
+\label{sec:length_inc_during_ppo}
+\paragraph{Experimental Setup} We analyze whether overall reward improvements from PPO still hold when comparing outputs of similar length. Specifically, we stratify outputs based on length (using 20 token buckets) and report the average reward score of each bucket for initial SFT and post-PPO models. Note that Figure~\ref{fig:lenhists} shows little overlap in length buckets between SFT and standard PPO outputs for WebGPT and Stack; therefore, we additionally report results for a variant of PPO with high KL penalty ( $\lambda$ in equation~\ref{eq:PPO}).  \begin{wraptable}{r}{0.55\linewidth}
+
+    \centering
+
+    \renewcommand{\tabcolsep}{1.3mm}
+    \footnotesize
+    \caption{Non-length reward gain (\textsc{nrg}), reward improvement ($\Delta R$) and their ratio for standard (\textsc{std}) and high $\lambda$ (\textsc{high $\lambda$}) PPO. Low ratios on \textsc{wgpt} and \textsc{rlcd} (\textsc{stack} to weaker extend) indicate high dependence on length for reward improvement.}
+    \begin{tabular}{l|cc|cc|cc}
+        \toprule 
+        \multicolumn{1}{l|}{} & \multicolumn{2}{c|}{\sc wgpt} & \multicolumn{2}{c|}{\sc stack} & \multicolumn{2}{c}{\sc rlcd} \\
+        \multicolumn{1}{l|}{} & {\sc std} & {\sc high $\lambda$} & {\sc std} & {\sc high $\lambda$} &  {\sc std} & {\sc high $\lambda$} \\
+        \midrule
+         {\sc $\Delta R$} & 0.82 & 0.20 & 0.89 & 0.67 & 0.94 & 0.61 \\
+        {\sc nrg} & 0.02 & 0.03 & 0.48 & 0.37 & 0.25 & 0.12 \\
+        ratio & 2.0\% & 15.1\% & 53.4\% & 56.5\% & 27.2\% & 19.1\%  \\
+        \bottomrule
+    \end{tabular}
+    
+    \label{tab:lenstratify_stats}
+\end{wraptable}
+First, we show \emph{overall reward gain} ($\Delta R$) from PPO compared to SFT. Second, we compute \emph{non-length reward gain} (NRG), the average $\Delta R$ within each bucket weighted by the number of examples in each bucket (SFT and PPO combined). This estimates the reward improvement attributable to the within-bucket reward increases as opposed to shifting the distribution over buckets. Finally, we report the \emph{ratio of NRG and $\Delta R$}, i.e. the fraction of reward gain due to non-length features. %\gd{I added some prose here, feel like we didn't explain NRG enough before?} 
+\paragraph{Results} Table~\ref{tab:lenstratify_stats} reports our results for both standard and high $\lambda$ cases. We observe that although all settings report overall reward gains, non-length reward gains are substantially lower. For WebGPT and RLCD, \textbf{70\%--90\% of the improvement on WebGPT and RLCD can be explained by length shifts}. Particularly, NRG is almost negligible for WebGPT and contributes only 2\% to overall reward gain in the standard PPO setting. 
+
+Note \textsc{stack} reports higher contribution of NRG to overall reward gains, likely because \textsc{stack} SFT outputs are already close to the length limit, so gain from increasing length is not possible to achieve. As a  technical QA setting, it may also rely more on non-length features.
+
+We visualize length-stratified reward scores for the high $\lambda$ case in Figure~\ref{fig:binscatters}. Black dots represent SFT outputs, and the arrow tips denote the PPO outputs. The figure further supports Table~\ref{tab:lenstratify_stats}: while reward scores do increase within each bin on average, the increases are uneven and much smaller than reward increases from purely shifting to longer outputs. 
+\subsection{Can a length-only reward improve performance?}
+\label{section:hacklen}
+
+We find PPO primarily to optimizes length, yet we (and the rest of the community) still see wide improvements on downstream simulated preference evaluation. Here, we show that \emph{only} optimizing for length still lead to improvements with this evaluation%This suggests one of 2 possibilities\tanya{Can we move this to the end of this section and just say that we think (2) is true without stating (1). Reads a bit disconnected after 3.2}: (1) humans and models like GPT-4 have a bias towards preferring longer outputs in the settings we study \citep{Zheng2023JudgingLW}, and thus preference evaluation is unreliable, or (2) optimizing for length with PPO intrinsically improves the quality of generation even in the absence of other features.\tanya{should we say "potentially by inadvertantly optimizing for correlated features" instead of "absense of other features"}
+:
+
+\textbf{1. (\textsc{lppo})} \hspace{0.3cm} Use output length as the reward during PPO. We define $R^*(y) = 1- \left|\frac{len(y)}{L}-1 \right|$ where $L$ is a target length hyperparameter (set to 156, 120, and 250 on \textsc{webgpt}, \textsc{rlcd}, and \textsc{stack} respectively, which we found allowed desired length increases without becoming too long). We also report a variant with KL coefficient $\lambda$ set to 0.
+
+\textbf{2. (\textsc{sft-long})} \hspace{0.3cm}  Sample 8 outputs from the SFT model and \textbf{select the longest one} 
+
+
+\begin{table*}
+    \centering
+    \renewcommand{\tabcolsep}{1.15mm} 
+    \footnotesize
+    \caption{Simulated preferences (against SFT) from \emph{purely} optimizing for higher length (\textsc{lppo}) with and without ($\lambda=0$) KL penalty, and a longest-of-8 sampling baseline (\textsc{sft-long}); $^*$ indicates a statistically significant delta from \textsc{sft} ($p<0.05$ , paired bootstrap test). \textbf{\textsc{lppo} is comparable to standard PPO}, supporting our hypothesis that RLHF improvements are largely length-based. Interestingly, \textbf{\textsc{lppo} beats $\lambda=0$, \textsc{sft-long} even when shorter} which shows that this method causes qualitative changes beyond just extending output length.}
+    \scalebox{0.67}{
+        \begin{tabular}{l|ccccc|ccccc|ccccc}
+                \toprule \multicolumn{1}{l|}{}
+                          &  \multicolumn{5}{c|}{W-GPT} & \multicolumn{5}{c|}{STACK} & \multicolumn{5}{c}{RLCD} \\
+             \multicolumn{1}{l|}{} & {\sc sft} & {\sc ppo} & {\sc sft-long} & {\sc lppo} & {\sc lppo $\lambda=0$} & {\sc sft}& {\sc ppo}& {\sc sft-long} & {\sc lppo} & {\sc lppo $\lambda=0$} & {\sc sft}& {\sc ppo} & {\sc sft-long} &{\sc lppo} & {\sc lppo $\lambda=0$} \\
+    
+
+             \midrule
+             {\sc len} & 100 & 230 & 141 & \textbf{118} & 167 & 203 & 257 & \textbf{249} & 252 & 248 & 59 & 94 & 117 & \textbf{98} & 163 \\
+             \midrule
+             {\sc Sim Pref} & 50\% & \textbf{58\%$^*$}  & 48\% & 56\%$^*$ & 53\% &  50\% & 58\%$^*$ & 57\%$^*$ & \textbf{59\%}$^*$ & 58\%$^*$ & 50\% & 63\%$^*$& 52\% & \textbf{64\%}$^*$ & 51\% \\
+             \bottomrule
+        \end{tabular}
+    }
+    
+    \label{tab:len_only}
+\end{table*} 
+
+\paragraph{Results} Table~\ref{tab:len_only} contains results. \textsc{sft-long} sometimes improves performance significantly (57\% winrate vs \textsc{sft} on Stack), but when we compare \textsc{lppo} against PPO and SFT, we find that \textbf{purely
+optimizing for length actually reproduces most of the simulated preference improvements of PPO with the learned reward models}. %\tanya{Why are the SFT-Long vs sim pref (PPO) columns -? I really think this can be simplified by adding a column for PPO and removing this sim pref PPO row.}\tanya{can we also have the PPO length somewhere in this table?}
+
+Notably, \textsc{lppo} yields win rate improvements over
+\textsc{sft-long}, which has even longer outputs, controlling for evaluation length bias. \textsc{lppo} also outperforms \textsc{lppo $\lambda = 0$}. Our hypothesis is that the KL term is an important constraint on the optimization for allowing length-only PPO to learn good features. Since repetitive, pathological outputs would likely have a higher KL divergence from the initial policy, this term possibly forces the model to learn how to generate more descriptive outputs while \emph{also} maximizing length. 
+
+This may explain some of RLHF's recent success in spite of the major limitations we uncover. Win-rate based evaluation may be useful for understanding overall improvements in LLMs. However, this experiment reveals that it isn't sufficient: with a complex technique like RLHF, a simple judgement on whether outputs have ``improved'' fundamentally doesn't tell us whether things are actually behaving as expected. 
+
+
+
+\section{Interventions on RLHF}
+
+\label{sec:optiminterventions}
+
+\newcommand{\lgr}{\cellcolor[HTML]{D3D3D3}}
+\newcommand{\lre}{\cellcolor[HTML]{AA3939}}
+\newcommand{\lir}{\cellcolor[HTML]{FFAAAA}}
+\newcommand{\llr}{\cellcolor[HTML]{f7cdcd}}
+\newcommand{\llb}{\cellcolor[HTML]{A3B8EE}}
+\newcommand{\lllb}{\cellcolor[HTML]{d3dbf0}}
+\newcommand{\lllr}{\cellcolor[HTML]{f5e4e4}}
+
+
+    
+    
+    
+\begin{figure*}[h!]
+    \centering
+    \includegraphics[scale=0.45, trim=30 690 100 150,clip]{figures/intervention_fig.pdf}
+    \caption{Interventions to test the effects of various RLHF components on length}
+    \label{fig:intervention}
+\end{figure*}
+
+Our results up to this point show that the RLHF pipeline leads to longer outputs. Next, we study which components of the pipeline, between reward modeling and PPO optimization, contribute to this behavior and whether carefully designed interventions can mitigate it.  
+Figure~\ref{fig:intervention} shows the overall RLHF pipeline and the different stages we intervene on. These experiments allow us to test whether length continues to increase during PPO \emph{even} with strong interventions in place against it. We study PPO objectives and rollout interventions in Section~\ref{sec:intervention_ppo} (right half of Figure~\ref{fig:intervention}) and discuss preference data and reward modeling interventions in Section~\ref{sec:examining_rm} (left half of Figure~\ref{fig:intervention}).
+
+\subsection{Interventions on PPO optimization}
+\label{sec:intervention_ppo}
+
+\emph{(KL loss; I.7)} A simple intervention is to use a \textbf{\textsc{high $\lambda$}} KL coefficient (Equation~\ref{eq:PPO}), with the intuition that closer to the initial distribution should mean closer to the initial length. Here, we set $\lambda$ to 0.12 instead of 0.04; we find that larger values impede model convergence.
+
+\emph{(rollouts; I.4)} A simple option is to altogether \textbf{\textsc{omit long outputs}} beyond a length threshold from PPO, so that no update is made to encourage these. In practice we swap these examples with randomly sampled outputs from the batch. 
+
+\begin{table*}[t!]
+    \centering
+    \renewcommand{\tabcolsep}{1.2mm}
+    \footnotesize
+    \caption{Tokens (\textsc{len}), \textsc{reward} , simulated preference (\textsc{sim pref}, Section~\ref{sec:expersetup}) vs.~standard PPO across interventions (blue if better, red if worse than \textsc{ppo}). Rows with failed reward optimization excluded ($-$). $^*$ indicates statistically significant deltas from \textsc{ppo} ($p<0.05$m, paired bootstrap test). Interventions \textbf{mitigate length increases vs \textsc{sft}, but at cost to reward.}}
+    \scalebox{0.83}{
+        \begin{tabular}{l|c|c|c|c|c|c|c|c|c}
+            \toprule
+            & \multicolumn{3}{c|}{W-GPT} & \multicolumn{3}{c|}{STACK} & \multicolumn{3}{c}{RLCD} \\
+            & {\sc Length} & {\sc Reward} & {\sc sim pref} & {\sc Length} & {\sc Reward} & {\sc sim pref} & {\sc Length} & {\sc Reward} & {\sc sim pref} \\
+            \midrule
+            {\sc sft} (starting point) & \lgr100 & \lgr-0.45 & \lgr42\%$^*$ & \lgr203 & \lgr0.05 & \lgr42\%$^*$ & \lgr59 & \lgr4.4 & \lgr37\%$^*$ \\
+            {\sc standard ppo} & 230 & \textbf{0.25} & 50\% & 257 & \textbf{0.74} & 50\% & 94 & \textbf{5.50} & 50\% \\
+            {\sc reward scale} & \llb128 & \llr-0.05 & \llr49\% & \lllb249 & \llr0.40 & \llr46\%$^*$ & \lllb82 & \lir5.00 & \lir41\%$^*$ \\
+            {\sc penalize length} & \llr$-$ & \llr$-$ & \llr$-$ & \llr$-$ & \llr$-$ & \llr$-$ & \llb\textbf{72} & \llr5.20 & \llr44\%$^*$ \\
+            {\sc high-$\lambda$} & \llb\textbf{120} & \llr-0.06 & \lir45\%$^*$ & \lllb250 & \llr0.30 & \lir45\%$^*$ & \llr97 & \llr5.20 & \lir43\%$^*$ \\
+            {\sc omit long outputs} & \llb127 & \lir-0.13 & \llr48\% & \llr$-$  & \llr$-$  & \llr$-$  & \llr$-$  & \llr$-$  & \llr$-$  \\
+            \bottomrule
+        \end{tabular}
+    }
+    \label{tab:ppo_interventions}
+\end{table*}
+
+\emph{(RM score; I.5)} We also experiment with a scalar penalty added to the reward model to \textbf{\textsc{penalize length}}. We set $R' = R +  \left(1- \frac{\mathrm{len}(y)} {N}\right) \sigma$, where $N$ is a maximum length that we don't want PPO to exceed, and $\sigma$ is a moving average of batch reward standard deviation.\footnote{We try several variants of this idea, such as a scalar penalty past a length threshold, and note similar convergence failures. Generally stricter versions of these constraints hamper convergence.}
+\emph{(RM score; I.6)} Prior work uses \textbf{\textsc{reward scaling} } to ``control training fluctuations'' and over-optimization \citep{Zheng2023SecretsOR}. Similar to batch normalization \citep{Ioffe2015BatchNA}, for each batch $X, Y$ of sampled outputs, we compute the mean ($\mu$) and standard deviation ($\sigma$) of $R$. We then take a moving average of these values across $N$ previous batches and ``scale'' $R$ to become $R' = \frac{R-\mu}{\sigma}$ ($\sigma$ remains relatively constant across training).
+\paragraph{Results} We report results in Table~\ref{tab:ppo_interventions}. For context, we report simulated preferences vs~\textsc{ppo}: $<50\%$ indicates worse than standard PPO downstream quality. Intuitively, our interventions should encourage reward to be optimized by targeting non-length features, and \textsc{len} should remain similar, if not shorter than the \textsc{sft} starting point. Note that each setting has a different \textsc{reward}, so these rewards shouldn't be compared across settings.%\tanya{what does this last line mean?}\gd{I think that reward values aren't comparable, added something} 
+\textsc{len} often decreases substantially compared to standard \textsc{ppo}, confirming length \emph{is} related to these parts of PPO, and that we \emph{can} mitigate the extreme dependence on length during optimization while retaining moderate downstream improvement. For practitioners, this establishes our interventions as legitimate approaches for controlling length in RLHF.
+
+However, \textbf{length still always increases relative to \textsc{sft}}, and \textbf{reward model score is always worse} than standard PPO. Moreover, omission and penalizing length often cause convergence failure (reward not increasing during training), supporting length's major role in PPO.%\tanya{I dont understand this, this cannot be claimed after these experiments, can it?}\gd{I'm actually not sure what this means...I don't get the ``not a function of PPO'' part}
+
+\subsection{Interventions on Reward Modeling}
+\label{sec:examining_rm}
+           
+        
+         
+    
+
+
+\begin{wraptable}{r}{0.61\linewidth}
+    \centering
+    \footnotesize
+    \caption{Eval accuracy (\textsc{acc}) and Pearson within batch (\textsc{corr}) for RM interventions (\textsc{rand} is random baseline, \textsc{stnd} normal RM). RM accuracies are often low. Few approaches \emph{both} reduce correlation and maintain good accuracy: length is tied to RM success. Length bias remains on RLCD despite balancing.}
+    \begin{tabular}{l|cc|cc|cc}
+        \toprule 
+        \multicolumn{1}{l|}{} & \multicolumn{2}{c|}{\sc wgpt} & \multicolumn{2}{c|}{\sc stack} & \multicolumn{2}{c}{\sc rlcd} \\
+        \multicolumn{1}{l|}{} & {\sc acc} & {\sc corr} & {\sc acc} & {\sc corr} &  {\sc acc} & {\sc corr} \\
+        \midrule
+         {\sc rand} & 50\% & 0 & 50\%  & 0 & 50\% & 0 \\
+        {\sc stnd} & 61.5\% & 0.72 & 70\%  & 0.55 & 80\% & 0.67 \\
+        {\sc bal} & 52.6\% & \textbf{-0.13} & 61.9\% & \textbf{-0.09} & 73.1\% & 0.62  \\
+        {\sc c-tr} & 58.8\% & 0.67 & 59.5\% & 0.31 & 77.2\% & 0.57  \\
+        {\sc r-da} & \textbf{62.5\%} & 0.35 & \textbf{72.6\%} & 0.37 & \textbf{80\%} & \textbf{0.43}  \\
+        \bottomrule
+    \end{tabular}
+
+    \label{tab:rm_stats}
+\end{wraptable}Section~\ref{sec:optiminterventions} showed length-dominance to be largely invariant to PPO interventions, pointing instead to strong reward correlations with length. We investigate here to what extent reward models prefer longer outputs, starting with a simple analysis: is preference data imbalanced towards longer outputs? We can measure this with \textbf{length heuristic agreement}: the accuracy of always predicting that the longer output is the gold preferred output (see Table~\ref{tab:lenheur}), indeed finding all datasets are slightly imbalanced towards longer outputs, but we this doesn't reveal the full story. To understand things better, we'll first examine \textbf{reward interventions} (Figure~\ref{fig:intervention}), and later analyze underlying causes: 
+
+\label{section:rms}
+
+\begin{wraptable}{r}{0.25\linewidth}
+    \centering
+    \footnotesize
+    \caption{Accuracy of always preferring longer response. Above random (50\%) accuracy indicates length bias.}
+    \begin{tabular}{c|c|c}
+        \toprule 
+        \multicolumn{1}{c|}{\sc wgpt} & \multicolumn{1}{c|}{\sc stack} & \multicolumn{1}{c}{\sc rlcd} \\
+        \midrule
+         55.7\% & 59.6\% & 63.1\%  \\
+        \bottomrule
+    \end{tabular}
+    
+    \label{tab:lenheur}
+\end{wraptable}
+
+\emph{(preferences; I.1)} \textbf{Length Balancing (\textsc{bal}):} One option is to balance data by length. Specifically we balance data such that the distribution of pair length differences are symmetric by bins of 10. Suppose there are more examples where preferred responses are 20 tokens longer than dispreferred ones compared to the reverse case; to balance data we subsample the cases which are 20 tokens longer until they match the number of cases which are 20 tokens shorter. 
+
+\emph{(preferences; I.2)} \textbf{Reward Data Augmentation (\textsc{r-da}):} Data augmentation can encourage models to learn robust features. We use ``random pairing'', pairing matching prompt output pairs  $q_i, p_i^-$ from $P$ with $p_i^-$ serving as a ``prefered'' example, and a randomly sampled $p^+_j$ from another prompt serving as a ``dispreferred'' example. Although this data augmentation doesn't target length per se, in preliminary experiments, we found it to improve RM robustness and reduce length correlation.
+
+\emph{(RM training; I.3)} \textbf{Confidence-Based Truncation (\textsc{c-tr}):} What if length biases go beyond data imbalance? For example, a set of ``easy'' examples may be corrupting the data, and removing them may help \cite{Swayamdipta2020DatasetCM}. Given we've trained some $R_\mathrm{base}$, and computed a ``confidence'' $\overline{c_i}$ of the model on each training example on dataset $P$ (we describe the setup for this in Section~\ref{section:lendatanalysis}), we can test this idea by training a new RM $R_\mathrm{trunc}$ on a subset of $P$ where $\overline{c_i} < \theta_1$ and $\overline{c_i} > \theta_2$, with threshold hyper-parameters $\theta_1$, and $\theta_2$.  
+
+
+\paragraph{Reesults} We report in Table~\ref{tab:rm_stats} reward evaluation, as well as correlation within batch (\textsc{corr}), which measures, given sets of 8 generations from the same input, the mean Pearson correlation between output length and reward. Note that the standard reward model (\textsc{stnd}) accuracy is not high for the binary task, while the length correlations \emph{are} high. 
+\begin{wraptable}{r}{0.58\linewidth}
+
+    \centering
+    \renewcommand{\tabcolsep}{1.2mm} % changes column widths
+    \footnotesize
+    \caption{Simulated preference (\textsc{sim pref}) vs \textsc{stnd} PPO for the \textsc{sft} model, length (\textsc{len}), \textsc{std} PPO, and interventions. \textbf{\textsc{stack} \textsc{bal} shows strong results} possible without length increase via RM interventions (more influential vs PPO interventions), though results are inconsistent.}
+    \scalebox{.93}{
+    \begin{tabular}{l|cc|cc|cc}
+        \toprule
+        & \multicolumn{2}{c|}{\textsc{wgpt}} & \multicolumn{2}{c|}{\textsc{stack}} & \multicolumn{2}{c}{\textsc{rlcd}} \\
+        Method & \textsc{Len} & \textsc{sim pref} & \textsc{Len} & \textsc{sim pref} & \textsc{Len} & \textsc{sim pref} \\
+        \midrule
+        \textsc{sft} & \lgr 100 & \lgr42\%$^*$ & \lgr203 & \lgr42\%$^*$ & \lgr59 & \lgr37\%$^*$ \\
+        \textsc{stnd} &  230 & 50\% & 257 & 50\% & 94 & 50\% \\
+        \textsc{bal} & \llr $-$ & \llr $-$ & \llb 148 & \llb 57\%$^*$ & \llb 82 & \llr 44\%$^*$ \\
+        \textsc{r-da} & \llb 139 & 49\% & \lllb 256 & \llb \textbf{58\%}$^*$ & \llr 112 & \llr 44\%$^*$ \\
+        \textsc{c-tr} & \llb 141 & \llr 44\%$^*$ & \lllb 244 & \llr 44\%$^*$ & 97 & 50\% \\
+        \bottomrule
+    \end{tabular}
+    }
+    \label{tab:pref_interventions}
+\end{wraptable}
+Many interventions, such as \textsc{bal}, reduce correlations, but all except \textsc{r-da} damage eval accuracy. Interestingly, \textbf{on \textsc{rlcd} strong correlations remain \emph{despite} balancing}, suggesting the bias may be more challenging to eliminate. \textsc{stack}, however, where balancing lowers correlation with above-random accuracy, suggests that reward models \emph{can} learn features independent of length. %These patterns indicate that, perhaps because RMs fail to learn on most examples, they are particularly brittle, and can learn spurious correlations easily.
+
+We then show \emph{downstream} results for adjustments to preference data in Table~\ref{tab:pref_interventions}. Similar to the PPO interventions (Table~\ref{tab:ppo_interventions}), length still usually increases from the SFT starting point, though generally shorter relative to Standard PPO. However, \textsc{bal} on \textsc{stack}, perhaps due to there being other easy non-length features to learn, \textbf{leads to shorter outputs than \textsc{sft} (with higher downstream preference)}, confirming the importance of preference data in RLHF. %\gd{this paragraph is convoluted...}
+
+
+
+\section{Analyzing Preferences over Training}
+
+\label{section:lendatanalysis}
+
+Why do length biases emerge in RMs, even after balancing? To understand this better, we study \emph{training dynamics} and datapoint-level learnability of reward modeling. We compute statistics over several epochs of training: given reward model $R$ being trained on preference dataset $P$ for $E$ epochs, we can track each data point $(x_i, y_i^+, y_i^-) \in P$ where we compute the distribution of \emph{confidence} (RM score of ``preferred'' subtracted from ``dispreferred''), at each epoch $c_i = \{ (e, R(x_i, y_i^+) - R(x_i, y_i^-)): e \in \{2, \ldots, E\}\}$, excluding epoch 1 to mitigate noise. 
+
+ 
+With this hypothesis that length may be related to a set of ``easy'' examples, we use length heuristic accuracy again, but this time, we compute it on slices where we bin training examples based on $\overline{c_i}$, plotting these bins by confidence (x-axis) against length heuristic accuracy (y-axis) on each slice as scatter plots in Figure~\ref{fig:datacartolheur}. 
+\begin{figure*}[t!]
+    \centering
+    \includegraphics[width=1.0\textwidth]{figures/carto_scatters_1.pdf}
+    \caption{Training example confidence ($c_i$) vs length heuristic, bucketed based on $c_i$, size shows amount in bucket. \textbf{Most examples are near-zero confidence}: RMs have trouble learning on most data. \textbf{Strong predictions (including incorrect) follow length heuristic} with clean proportionality: RMs may over-rely on small sets of ``easy'' length-biased examples}
+    \label{fig:datacartolheur}
+\end{figure*}
+
+The figure shows strikingly clean patterns, with the mean confidence $\overline{c_i}$ for data in an interval of training examples correlating strongly with the length heuristic. This means that (1) the length heuristic applies to most examples that are easy, and (2) \textbf{the overwhelming majority of strong negative predictions are cases where the model follows the length heuristic to confidently predict the wrong answer}. Note that WebGPT, with the strongest pattern, also displayed the lowest \textsc{nrg} from Table~\ref{tab:lenstratify_stats}, implying that these correlations propagate through all stages. Thus reward models likely struggle to learn deeper features from preferences, and even with balancing are vulnerable to being dominated by ``easiy'' features like length.
+
+
+\section{Related Work}
+
+
+\textbf{RL}\hspace{0.3cm} Reinforcement learning from human feedback has been explored extensively \citep{knoxtamer}, often in robotics tasks, to extrapolate reward signal beyond initial preference sets \citep{NiekumTrex}. While past RL in NLP faced different issues \citep{Ammanabrolu2018PlayingTG, Martinammanobrolu2017EventRFMethods,ramamurthy2023reinforcement}, recent work in NLP has explored implementations \citep{Zheng2023SecretsOR, Touvron2023Llama2O} and objectives  \citep{Wu2023FineGrainedHF} of RLHF, largely dismissing length increases. Past uses of RL in NLP haven't used preference-based reward, facing different issues. Our work is orthogonal to these, using the issue of length to analyze RM robustness and other properties of RLHF. 
+
+\textbf{Reward Model}\hspace{0.3cm} Given data biases, do reward models learn robust features reflecting underlying preferences? Dataset artifacts are a prevalent issue in NLP even on simpler settings like natural language inference \citep{Gururangan2018AnnotationAI,poliak-etal-2018-hypothesis}. In RLHF, \cite{Stiennon2020LearningTS} notes that over-optimizing for a reward model leads to pathological summaries, \citet{dubois2023alpacafarm} notes human preference drops after a certain reward, and \citet{Pang2022RewardGI} presents cases where such hacking can be produced within synthetic settings. Our work, in comparison, studies over-optimization in \emph{realistic}, ``working'' settings, exploring diagnostics and solutions. 
+
+\textbf{Length control and length biases}\hspace{0.3cm} Techniques outside of RLHF for controlling length of NLP models have been explored \citep{neubiglencontrol,ficler-goldberg-2017-controlling}, with train-test length divergences
+\citep{riley-chiang-2022-continuum} attributed to inference techniques and label bias in text generation, which is quite different from our open-ended generation problems. \citet{murray-chiang-2018-correcting} use a per-word reward similar to our per-word penalty in RL, though to solve the opposite problem of outputs being too short. Finally, in discriminative ``text matching'' tasks like paraphrasing, past work has observed similar length heuristics, \cite{jiang-etal-2022-length}, but the sentence-pair format is quite different.
+
+
+
+\section{Conclusion}
+
+
+
+We contribute several new techniques for evaluating, analyzing and intervening on RLHF. Across a multi-faceted set of experiments on three datasets, we show that RLHF, to a surprising extent, relies on optimizing response length. Our results call into question improvements in PPO, the ability of reward models to learn effectively from preferences, and the recent evaluation paradigms that have overlooked the findings we now reveal. 
+
+In the short term, we encourage much greater attention to preference data, and wider adoption of more feature-oriented evaluation approaches, such as \textsc{nrg}. More broadly however, we believe that more substantial improvements to RLHF's vulnerability to simple features, particularly in reward modeling, will be necessary for RLHF to become a more widely-applicable technique: RLHF still has a long way to go. 
+
+
+

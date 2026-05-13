@@ -1,0 +1,273 @@
+\title{HiBO: Hierarchical Bayesian Optimization via Adaptive Search Space Partitioning}
+
+\begin{abstract}
+Optimizing black-box functions in high-dimensional search spaces has been known to be challenging for traditional Bayesian Optimization (BO). In this paper, we introduce HiBO, a novel hierarchical algorithm integrating global-level search space partitioning information into the acquisition strategy of a local BO-based optimizer. HiBO employs a search-tree-based global-level navigator to adaptively split the search space into partitions with different sampling potential. The local optimizer then utilizes this global-level information to guide its acquisition strategy towards most promising regions within the search space.  A comprehensive set of evaluations demonstrates that HiBO outperforms state-of-the-art methods in high-dimensional synthetic benchmarks and presents significant practical effectiveness in the real-world task of tuning configurations of database management systems (DBMSs). 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Bayesian Optimization (BO) has emerged as a powerful approach for optimizing \textbf{\textit{black-box functions}} that exhibit little information of its form and requires iterative evaluations for reaching the optima with significant computational cost. BO has been applied to a wide range of real-world scenarios requiring optimization over black-box functions within a limited budget of sampling times, such as Neural Architecture Search \citep{kandasamy2018bo-nas, ru2020inter-bo}, hyperparameter tuning \citep{hvarfner2022pi-bo, zimmer2021auto-pytorch} and automatic database management system (DBMS) configuration tuning \citep{van2017otter, zhang2021restune, zhang2022onlinetune}. Typically, BO iteratively builds a probabilistic surrogate model on the objective function and uses an acquisition function to decide where to sample next, balancing exploration and exploitation to efficiently locate the optimum. However, it is well known that BO struggles to scale in high-dimensional search spaces \citep{binois2022HDGPBO, malu2021brief-HDBO}. As dimensionality increases, the size of the search space grows exponentially and uniformly sampled points are more likely to be distant from each other \citep{rashidi2024CTS}. Such sparsity of nearby data increases uncertainty in the posterior distribution, which can cause the acquisition function to favor unexplored regions excessively, leading to over-exploration.
+
+Even worse, optimization over high-dimensional search spaces in real-world systems is more challenging. The task of DBMS configuration tuning exemplifies this challenge, which involves a high-dimensional configuration knob space, complex interdependencies between knobs, and noisy performance observations \citep{zhao2023dbms-survey}. Existing approaches towards this problem either rely on extensive pre-collected random samples \citep{van2017otter} or metadata of prior workloads \citep{zhang2021restune}, or restrict evaluations to manually selected low-dimensional spaces \citep{zhang2022onlinetune, cereda2021cgptuner}. Moreover, methods aiming to scale BO to high dimensionalities (to be discussed below) often lack evaluation on real-world systems, limiting insights into their practical effectiveness.
+
+Various approaches have been proposed towards mitigating the curse-of-dimensionality. Some rely on additive models applied to separate groups of dimensions \citep{duvenaud2011additiveGP, kandasamy2015high-add}, while others project the high-dimensional input space into a lower-dimensional subspace using linear transformations \citep{wang2016rembo, letham2020re, nayebi2019hesbo}. But these methods assume specific structural properties, such as decomposability of the objective function or the existence of a hidden low-dimensional active subspace. Another line of work avoids these assumptions by restricting the sampling scope into a promising region at each iteration. Among them, some define this region as the trust region (TR) maintained around the best samples found so far \citep{eriksson2019turbo, daulton2022MORBO} while others partition the search space and focus on the most promising regions \citep{wang2020lamcts, munos2011doo, bubeck2011hoo, kim2020voo}. However, these methods greedily confine the sampling scope to the only region with highest immediate potential, underutilizing the structural information generated during the partitioning process, such as the way the search space is partitioned. 
+Such inefficient utilization of generated structural information and inflexible sampling scope confinement can lead to suboptimal performance. Moreover, with a limited initial sample budget, the constructed tree may lack reliability, and strict confinement can further prevent effective exploration of the search space. Our experiments empirically demonstrate the suboptimal performance of such approaches, where our proposed method offers $\sim$28\% performance improvement in real-world systems than them. While incorporating such structural information into the original BO algorithm for optimal performance introduces challenges, including designing an effective hierarchy to combine the extra module extracting structural information with the original BO, and ensuring that the structural information are utilized optimally. On the other hand, the way of partitioning the search space is critical in terms of exploitation-and-exploration trade-offs and the computational cost. Splitting the search space into coarser or fine partitions directly impacts the generated structural information and the computational overhead in this process. An adaptive mechanism for adjusting the partitioning process is needed. 
+Motivated by the limitations of existing high-dimensional BO methods and the need for effective real-world system tuning, we have the following contributions: 
+
+\textbf{Hierarchical Framework for Bayesian Optimization}. We propose \textbf{Hi}erarchical \textbf{B}ayesian \textbf{O}ptimization (HiBO), a hierarchical BO variant that is the first to integrate global-level space partitioning information into the local BO model’s acquisition strategy instead of rigidly confining the sampling scope. HiBO is shown to provide $\sim$28\% more performance improvements than only using the local optimizer in high-dimensional DBMS configuration tuning tasks with limited sample budget. 
+
+\textbf{Search Space Partitioning with Adaptive Control}. We introduce the search-tree-based space partitioning for the global-level navigator, recursively splitting the search space into the partitions with different sampling potential.  Besides, an adaptive mechanism on controlling the maximum search tree depth is proposed for effective exploration-and-exploitation trade-offs and computational cost reduction.
+
+\textbf{Practical Evaluation on Real-world Benchmark}. Besides experiments on synthetic and simulated ``real-world" benchmarks \citep{jones2008mopta, wang2017rover}, we demonstrate HiBO's effectiveness and practical value via evaluation on a real-world DBMS configuration tuning task, comprehensively considering performance improvement, tuning time cost and failure rate. 
+
+
+\section{Background}
+
+\subsection{Preliminaries}
+
+Bayesian Optimization (BO) is an effective technique for optimization that iteratively refines a probabilistic surrogate model of the objective function and employs an acquisition function to determine the next sampling points \citep{candelieri2021gentle-bo}.
+
+The goal is to solve the following problem:
+\begin{equation}
+    x^* = \underset{x \in X}{arg\: max} \; f(x)
+\end{equation}
+
+where $f(x)$ is a black-box function mapping the input data into the performance metric of interest. This function is typically computationally expensive to evaluate and provides limited explicit information, hence the term "black-box."
+
+A typical BO-based algorithms begins with an initial random sampling of data points. In each iteration of its optimization loop, it fits a surrogate model to estimate the posterior probability distribution over the objective function based on the collected data. It then selects the next point maximizing the acquisition function, evaluates this point by the objective function and updates the history dataset. As iterations progress, the surrogate model becomes increasingly accurate at estimating the distribution of the objective function, leading to better sampling decisions.
+
+Though BO has been recognized as a powerful approach across various problem domains, vanilla BO is known to be inherently vulnerable to the "curse-of-dimensionality" \citep{binois2022HDGPBO} when the search space has a large number of dimensions. As dimensionality increases, the average squared distance between uniformly sampled points grows, making it harder for distance-based surrogate models to capture correlations between data points \citep{rashidi2024CTS}.  Additionally, the increased distance can result in greater uncertainty assigned to data points by the estimated posterior, increasing acquisition functions unreasonably and trapping BO algorithms in cycles of excessive exploration ("over-exploration"; \citet{siivola2018correcting}).
+\subsection{Related Work}
+Several paradigms of approaches have been developed to scale Bayesian Optimization (BO) to high-dimensional search spaces. As discussed in Section \ref{sec:intro}, some methods leverage structural assumptions about the objective function, such as additive kernels \citep{duvenaud2011additiveGP, kandasamy2015high-add, wang2018ebo} or subspace embeddings \citep{wang2016rembo, letham2020re, nayebi2019hesbo, papenmeier2022baxus}. Alternatively, variable-selection-based strategies are employed to identify the most important dimensions \mbox{\citep{li2017dropoutBO, spagnol19hsic, shen2023vsbo, song2022mctsvs}}. However, these methods often rely on assumptions of the input space that may not always hold in practice, or involve uncertain user-estimated parameters for these assumptions, such as the existence of the latent subspace and its dimensionality respectively. 
+
+Another line of work focuses on optimizing the sampling scope without such assumptions, which can be further divided into 1) local modeling \citep{eriksson2019turbo, daulton2022MORBO} and 2) space partitioning \citep{munos2011doo, bubeck2011hoo, wang2021la-nas, wang2020lamcts}. TuRBO, a representative of local modeling, maintains trust regions around the best samples to mitigate over-exploration. While prior space-partitioning-based methods focus on splitting the search space into different partitions and limiting the sampling scope to the most promising one. A detailed comparison space-partitioning-based optimization is presented in Table \ref{table:algo-comp}, which includes HOO \citep{bubeck2011hoo}, LA-NAS \citep{wang2021la-nas}, LA-MCTS \citep{wang2020lamcts} and HiBO. HOO traditionally applies axis-aligned K-nary partitioning for splitting the space while LA-NAS extends it by leveraging linear regression to learn the linear decision boundary for bifurcation. As a more recent work, LA-MCTS applies MCTS-inspired ideas to partition the search space based on clustering and classification for more flexible space bifurcation, and becomes the state-of-the-art (SOTA) approach among space-partitioning-based work. In our work, HiBO extends these MCTS-based concepts in LA-NAS and LA-MCTS by formalizing the notion of sampling potential and employing a general search tree instead of MCTS. HiBO's partitioning search tree can be adaptively adjusted during the search to balance exploration-exploitation trade-off, and reduce unnecessary computational cost. Additionally, HiBO does not restrict sampling scope to the only specific region, allowing greater flexibility and more comprehensive consideration collected samples. 
+
+\begin{table}[t]
+\vskip 0.15in
+\begin{center}
+\begin{small}
+
+\bgroup
+\def\arraystretch{1.16}%
+\begin{tabular}{p{2.8cm}p{1.4cm}p{1.6cm}p{2.7cm}p{3.2cm}}
+\toprule
+& HOO	& LA-NAS	& LA-MCTS	& \textbf{HiBO}    \\ 
+\midrule
+\textbf{Partitioning Op.}	& K-nary & LR	&\textcolor{ForestGreen}{Clustering \& Classification}	&\textcolor{ForestGreen}{Clustering \& Classification} \\ 
+
+\textbf{Depth Control}	&$\times$	&$\times$	&$\times$	&\textcolor{ForestGreen}{Adaptive Control} \\ 
+\textbf{Restricted Sampling}     & Yes	& Yes	& Yes	& \textcolor{ForestGreen}{No}	\\ 
+
+\textbf{Sampling Strategy} & Random	& Random/BO	& BO	&\textcolor{ForestGreen}{BO with augmented acqf.}\\ 
+\bottomrule
+\end{tabular}
+\egroup
+
+\end{small}
+\end{center}
+\caption{Comparison between optimization algorithms based on space partitioning, where \textit{LR} refers to Linear Regression and \textit{acqf.} refers to acquisition function. \textit{Partitioning Op.} is the operation for splitting the search space (see Section \ref{sec:space-part} for more details).}
+\label{table:algo-comp}
+\end{table}
+
+
+
+\section{System Overview}
+
+
+In this section, we will introduce the high-level design of HiBO. HiBO is a \textbf{hierarchical} BO approach consisting of two parts: 1) a \textbf{global-level navigator}, which conducts search-tree-based search space partitioning based on collected data with dynamic and adaptive constraints posed when constructing the search tree; 2) a \textbf{local optimizer} with a BO-based algorithm as its core. Specifically we choose TuRBO (TuRBO-1; \citet{eriksson2019turbo}) as the local optimizer throughout this paper considering its practical effectiveness and simplicity for implementation. 
+
+Before the optimization loop starts, similar to typical BO-based algorithms, HiBO collects an initial set of data points (\textit{history dataset}) based on random sampling, ensuring the basic coverage of the search space. The initial dataset allows the global-level navigator to construct the initial search tree and enables the local optimizer to train the initial surrogate model. After the initial sampling, HiBO enters the main optimization loop. During each iteration of the loop, the global-level navigator partitions the search space based on the history dataset, and the local optimizer integrates the global-level information into its acquisition strategy for biasing the sample selection towards data points from most promising regions. The high-level workflow for each iteration is outlined below, where Figure \ref{fig:HiBO-overview} illustrates this procedure:
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.02\linewidth]{figs/HiBO_Architecture.pdf}
+    \caption{Illustration of the high-level workflow of HiBO within each optimization iteration.}
+    \label{fig:HiBO-overview}
+\end{figure}
+
+\begin{itemize}
+    \setlength\itemsep{0.1em}
+    \item \textbf{Step \circled{1}}: Based on the history dataset, the global-level navigator constructs the search tree to partition the search space and generates a distribution of partition scores. While the local optimizer trains its surrogate model. The details of search space partitioning is explained in Section \ref{sec:space-part}.
+    \item \textbf{Step \circled{2}}: The local optimizer randomly samples a set of candidate points within the trust region and calculates the modified acquisition function values based on the trained surrogate model and partition-based scores.
+    \item \textbf{Step \circled{3}}: The candidate with the highest adapted acquisition function value is selected for objective function evaluation, and the new observation is added to the history dataset.
+\end{itemize}
+
+The key components of HiBO mentioned in the procedure above will be explained in the following sections.
+
+
+
+\section{Global-level Navigator: Adaptive Search Space Partitioning}
+
+
+This section presents the design of our global-level navigator, which recursively and adaptively partitions the search space with machine learning techniques and evaluates the sampling potential of partitions balancing exploration and exploitation. We intuitively describe the \textbf{\textit{sampling potential}} of a search space partition as the potential of sampling high-performing data points within this partition in the following sections.
+
+The core motivation of introducing this global-level navigator is to partition the search space in a way maximizing the difference in sampling potential across resulting partitions. It generates a distribution of sampling potential over these partitions, which will be utilized by the local optimizer for augmenting its acquisition strategy to boost its optimization efficiency in high-dimensional search spaces (see Section \ref{sec: weighted-acqf}). Besides the space partitioning itself, the design of the global-level navigator includes mechanisms for reducing computational cost and balancing trade-offs between exploration and exploitation.
+\subsection{Data-Driven Search-Tree-based Space Partitioning}\label{sec:space-part}
+
+The navigator constructs a search tree in a data-driven manner, where each node represents a partition of the original search space and is associated with the samples falling into this partition. Starting from the root node representing the entire search space, this method recursively splits the space into smaller and more specific partitions, as illustrated in \textbf{Step \circled{1}} of Figure \ref{fig:HiBO-overview}. 
+
+To partition a node, clustering techniques like K-Means \citep{macqueen1967kmeans} are used to group the samples from the history dataset that fall within this node's partition into two clusters, assigning each sample a binary label. Given each sample has its cluster label, a classification model is trained on the sample features to predict the cluster labels. This classifier hence learns a decision boundary dividing the current search space partition into two parts. Each of these two parts thus forms a bifurcation of the original partition.
+
+By bifurcating the original partition into two sub-partitions, two child nodes are generated, each corresponding to one of the sub-partitions and containing the samples that fall within them. Recursively repeating this ML-based bifurcation starting from the root node will finally result in a binary tree of nodes, where each node represents a progressively refined region of the search space.
+
+A key aspect of this approach is that clustering is performed on both sample features and their performance data. As a result, samples in the two resulting sub-partitions are expected to differ significantly in terms of both performance and feature similarity, enabling the differentiation of valuable data points within different partitions. Once the tree is fully constructed, each leaf node corresponds to a sequence of split operations, and represents a highly specific partition of the original search space. These refined partitions provide global-level insights into which regions of the search space are likely to be valuable for further sampling.
+
+\subsection{Sampling Potential Evaluation via UCT}
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.5\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/HiBO-Features.pdf}
+        \caption{Calculation of partition scores from an example search tree.}
+        \label{fig:temp-softmax}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/HiBO-weighted-acqf.pdf}
+        \caption{Calculation of the weighted acquisition function value corresponding to a sample point (see Section \ref{sec: weighted-acqf}).}
+        \label{fig:weighted-acqf}
+    \end{subfigure}
+    \caption{Illustration of how the constructed search tree is integrated into the local optimizer's acquisition strategy.}
+    \label{fig:hibo}
+\end{figure}
+
+Once the search tree is constructed, HiBO utilizes Upper Confidence bounds applied to Trees (UCT; \citet{kocsis2006UCT}) to evaluate each node's sampling potential by balancing exploitation and exploration:
+\begin{equation} \label{eq:UCT}
+    UCT_j = \hat{v_j} + 2C_p\sqrt{2\log n_p /n_j}
+\end{equation}
+Here, $C_p$ is a hyperparameter controlling the exploration-exploitation trade-off, $n_j$ and $n_p$ denote the number of visits to node $j$ and its parent node respectively, and $\hat{v}_j$ represents the average objective value within node $j$. By integrating UCT, HiBO prioritizes data points from partitions with higher average performance while still exploring less-visited regions of the search space, striking a balance between exploitation and exploration. 
+
+In summary, the essence of HiBO's search-tree-based partitioning strategy involves: 1) utilizing machine learning techniques to partition the search space, aiming to maximize the difference of sampling potential across partitions; and 2) applying UCT to quantitatively assess such potential of each partition while balancing the exploration and exploitation.
+\subsection{Dynamic and Adaptive Search Tree Construction}\label{sec:ssp-rules}
+In addition to the procedures described for search space partitioning, we address two additional concerns regarding the proposed strategies:
+
+\begin{itemize} 
+    \setlength\itemsep{0em}
+    \item \textbf{Computational Cost}. Building a search tree at each iteration can be computationally expensive, where multiple classifiers such as Support Vector Machines \citep{boser1992svm} need to be trained and are used for inferring labels of thousands of candidate data points. 
+    \item \textbf{Balance of Exploration and Exploitation} The depth of the tree, determined by the number of bifurcations from root to leaf, affects the range of the search space represented by each leaf node. As the tree deepens, leaf nodes represent smaller and more specific partitions, potentially leading to insufficient exploration.
+\end{itemize}
+
+The two concerns necessitate a dynamic and adaptive strategy to control the maximum depth of the constructed search tree during optimization. Towards this target, inspired by TuRBO's approach \citep{eriksson2019turbo} for exploration control via dynamic trust region adjustment, HiBO allows the tree to expand or shrink based on consecutive successes or failures. Consecutive successes reduces the number of bifurcation and hence increases the range covered by each leaf node, thereby promoting more exploration by considering a broader set of samples with equal partition-score weights.
+
+The additional rules for building the tree are explained as follows:
+
+\textbf{Rule 1} (Breadth-First Search Tree Construction)  Strictly follow the breadth-first order to build the tree layer by layer. Track the depth of each newly split child node and stop splitting once they reaches the current maximum tree depth, which is shown by the red line in Figure \ref{fig:temp-softmax}.
+
+\textbf{Rule 2} (Adaptive Maximum Tree Depth) After a certain number of consecutive successes (improvements over the current best), reduce the maximum tree depth to broaden the range covered by each leaf node. Conversely, increase the maximum depth after consecutive failures for more focused biasing and hence more exploitation. 
+
+\textbf{Rule 3} (Restart When Too Deep) If the maximum tree depth goes beyond a predefined threshold, instruct the local optimizer to restart with a new round of initial sampling and reset the maximum tree depth.
+This dynamic and adaptive control on the maximum depth of the search tree aims to prevent unnecessary tree growth, reducing computational cost while maintaining a balance between exploration and exploitation.
+
+
+\section{Local Optimizer: Partition-Score-Weighted Acquisition}
+
+This section presents the design for the local optimizer to integrate the global space partitioning information into its acquisition strategy, with key operations illustrated in Figure \ref{fig:hibo}.
+
+Given all leaf nodes represent the entire search space, each leaf node serves as an information source of the global partitioning. The UCT score of each leaf node reflects the sampling potential of each partition of the whole search space and should be effectively utilized. As illustrated in Figure \ref{fig:temp-softmax}, after the tree is built, each leaf node $j$ is assigned with a UCT score $UCT_j$ following Equation \ref{eq:UCT}. To scale all scores into a positive and reasonable range, we calculate the \textit{partition score} $P_i$ for each node $\Omega_i$ by a temperature-controlled softmax function:
+\begin{equation}\label{eq: softmax}
+    P_{j} = \frac{exp(UCT_j / \tau)}{\sum_{j'}exp(UCT_{j'} / \tau)}
+\end{equation}
+where $\tau$ is a temperature parameter controlling the smoothness of the output distribution \citep{hinton2015distilling}. Lower $\tau$ values make the distribution sharper and strengthen the bias towards samples from partitions with greater UCT values.  
+
+Given the partition score, the local optimizer modifies its the acquisition function value $\alpha(x;D)$  for $i$-th candidate data point $x_i$, conditioned on the history dataset $D$, as shown in Figure \ref{fig:weighted-acqf} and below:
+\begin{equation}
+    \alpha_P(x_i; D) = \alpha (x_i; D) \cdot P_{leaf_{x_i}}
+\end{equation}
+where $leaf_{\bf{x}}$ denotes the leaf node containing $\bf{x}$. With the weighted acquisition function value, the next sample $x_{next}$ to be evaluated is the one maximizing it:
+\begin{equation}
+    x_{next} = \underset{x \in X}{arg\: max} \; \alpha_P(x;D)
+\end{equation}
+
+By weighing the acquisition function with the partition scores, the method prioritizes points from regions of the search space with higher sampling potential informed by the global-level navigator, while still considering the posterior estimated by the local surrogate model without constraining sampling to certain partitions. Such an augmentation of the original acquisition is aimed to make the search both globally informed and locally refined, and hence leads to a more effective exploration of the search space. 
+
+
+\section{Evaluation}
+
+In this section, we present our experiments including: 1) evaluation on synthetic benchmarks, to investigate the basic effectiveness of HiBO and compare it with related works; 2) a real-world case study of automatic DBMS configuration tuning to demonstrate its performance and practical value on high-dimensional, real-world problems; and 3) a visual analysis of the distribution of resulting partition-score-weighted acquisition function values to validate the behaviours of HiBO.  The choice of real-world benchmark is discussed in Section \ref{sec:dbms-back}.
+\subsection{Synthetic Benchmarks}
+\subsubsection{Experiment Setup}
+To evaluate HiBO on synthetic benchmarks, we compare it with several related approaches, including vanilla GP-based BO, TuRBO \citep{eriksson2019turbo}, LA-MCTS \mbox{\citep{wang2020lamcts}}, MCTS-VS \citep{song2022mctsvs} and CMA-ES \citep{lozano2006cma-es}.  TuRBO is selected for validating the effects of the extra space partitioning information. We compare with LA-MCTS, the current SOTA in space-partitioning-based high-dimensional BO, to validate our design's efficiency, while excluding prior methods like HOO and LA-NAS for simplicity. We also include MCTS-VS, which uses MCTS for variable selection, and CMA-ES as a baseline evolutionary algorithm. Besides, for evaluating the effectiveness of HiBO on guiding other local optimizer, we introduce HiBO-GP, where HiBO coordinates with the vanilla GP-based BO as the local optimizer. 
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figs/synthetic_benchmarks_re.pdf}
+    \caption{Evaluation results of algorithms on selected synthetic benchmarks.}
+    \label{fig:synthetic}
+\end{figure}
+
+We evaluate these algorithms on six high-dimensional synthetic benchmarks, including 200-dimensional synthetic functions Rastrigin and Levy with 200 dimensions. To evaluate how well the algorithms focus on relevant dimensions in sparse tasks, we evaluate Branin2-500D, Hartmann6-300D, Rastrigin20-200D, and Levy20-200D\footnote{'Benchmark(x)-(y)D' indicates $x$ effective dimensions out of $y$, with the remaining $(y-x)$ being dummy dimensions.}. We run 1000 iterations for Branin2-500D and 500 iterations for the others, starting with 40 and 20 iterations of random sampling, respectively.
+
+
+\subsubsection{Results}
+As observed from results on all these benchmarks (Figure \ref{fig:synthetic}), HiBO consistently achieves the best result across all benchmarks. Its superior performance compared to TuRBO demonstrates the advantage of incorporating global space partitioning information into the local model's acquisition strategy. HiBO also outperforms LA-MCTS on most benchmarks, indicating the effectiveness of navigating the local optimizer with partitioning information rather than limiting the sampling scope to the most promising partition. The performance gap with other algorithms widens on sparse benchmarks and becomes greatest on Hartmann6-300D, where HiBO achieves over two magnitudes lower regrets than others. This indicates HiBO's strong capacity to identify the most promising regions in high-dimensional tasks.  While HiBO shows similar performance to LA-MCTS on benchmarks where all dimensions are relevant, like Levy-200D, it finally finds higher-quality solutions. This suggests that HiBO may require additional iterations to adjust its partitioning strategy to cover all dimensions in dense benchmarks but can still outperform in finding optimal solutions afterwards. On the other hand, HiBO-BO is also observed to perform better than GP-BO to different extents on varying benchmarks. It can even achieve the second best and surpasses LA-MCTS in Branin2-500D task. But the improvement of HiBO-GP over GP-BO is not as stable as HiBO over TuRBO. We attribute this to differences in the local optimizer and the further guidance from HiBO can more likely produce consistent improvements over better local optimizers.
+
+\subsection{Real-world Case Study: DBMS Configuration Tuning}
+\subsubsection{Evaluation Background}\label{sec:dbms-back}
+
+Besides evaluation on synthetic benchmarks, we evaluate the practical value of HiBO on a more complex real-world application, specifically automatic DBMS configuration tuning. The performance of DBMS highly depends on the settings of their configuration knobs, which control various aspects of their behaviours such as memory allocation, I/O behaviors, and query optimization. However, default configurations are typically suboptimal and require further tuning for optimal performance \citep{zhao2023dbms-survey}. We select DBMS configuration tuning as a critical evaluation scenario due to its significant practical importance and inherent complexities, especially for the following considerations:
+\begin{itemize}
+  \setlength\itemsep{0em}
+  \item (High-dimensionality) DBMS configuration tuning involves a high-dimensional search space with over 100 configuration knobs;
+  \item (Knob Correlation) Many of these configuration parameters are interdependent, where certain knobs are correlated and can lead to combined effects on the performance;
+  \item (Noisy Observations) Measurements of performance data in real-world environments are much noiser compared to cases in synthetic benchmarks.
+\end{itemize}
+
+These factors make manual and heuristic tuning impractical \citep{huang2019survey-tuning-heur, zhao2023dbms-survey}, making DBMS configuration tuning an ideal target for evaluating practical values of algorithms in real-world applications. In comparison, though not limited to simple mathematical synthetic functions, commonly-seen ``real-world" benchmarks in literature are still large based on simulation \citep{jones2008mopta, wang2017rover, eriksson2021saasbo}. For example, Mopta08 \citep{jones2008mopta} originates from real-world problems in vehicle design but is abstracted into a mathematical optimization problem in practice.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.88\linewidth]{figs/sys_both.pdf}
+    \caption{\textbf{Left}: Performance (throughput) evaluation of PostgreSQL being tuned by different algorithms on SysBench. Note that the figure for SysBench omits the low-performing part (throughput \textless \space 250 EPS) for readability. \textbf{Right}: S-PITR measurements of experiments done with the selected algorithms, which is explained with details in Section \ref{sec:db-res}.}
+    \label{fig:dmbs-res}
+\end{figure}
+
+\subsubsection{Experiment Setup}\label{sec:dbms-setup}
+
+Our evaluation focuses on the effectiveness of HiBO for DBMS configuration tuning without relying on extra sampling besides its own basic initial sampling. We choose PostgreSQL (version 16.3) as the target DBMS considering its accessibility and general applicability. From \citet{PostgreSQLCO.NF}, we manually selected 110 knobs for tuning, excluding those related to debugging, network connections, and authorization. SysBench \citep{kopytov2004sysbench} is applied as a standard OLTP workload in the experiment throughput (measured in events per second, EPS) as the target metric to be maximized. We used a limited sample budget of 50 iterations for simulating scenarios in production environments.
+
+Selected algorithms for comparison include related BO methods and approaches specifically designed for DBMS configuration tuning: 1) Random search with uniform sampling; 2)  OtterTune \citep{van2017otter} without workload characterization and knob selection, noted as OtterTune$^*$; 3) TuRBO, 4) LA-MCTS, and 5) LlamaTune \citep{kanellis2022llamatune}.
+\subsection{Visual Analysis}
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/ackley2d_navig_dist.pdf}
+        \caption{Distribution of partition-score-weighted acquisition scores (HiBO).}
+        \label{fig:navig-dist}
+    \end{subfigure}
+    \vfill
+    \begin{subfigure}[b]{\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/ackley2d_vanilla_dist.pdf}
+        \caption{Distribution of vanilla acquisition scores (TuRBO).}
+        \label{fig:vanilla-dist}
+    \end{subfigure}
+    \caption{Visualization of distribution of partition-score-weighted acquisition scores (HiBO) and vanilla acquisition scores (TuRBO) on the first two dimensions of Ackley2-200D across iterations. Lighter color indicates greater acquisition values and the green 'X' represents the optimal point (0, 0).}
+    \label{fig:visual}
+\end{figure}
+\subsubsection{Results and Analysis} \label{sec:db-res}
+
+Figure \ref{fig:dmbs-res} (Left) summarizes the performance improvements of PostgreSQL on SysBench achieved by different algorithms. HiBO shows the highest throughput gains in greatest improvement rate, achieving about 28\% of performance improvements over the default performance (200 EPS) than LA-MCTS and TuRBO do in 50 iterations. The comparison between HiBO and TuRBO highlights HiBO's effectiveness in guiding local models, even in complex and noisy real-world scenarios. LA-MCTS falls behind HiBO and is close to TuRBO, further indicating that simply limiting the sampling scope is insufficient, especially with limited sample budgets. Moreover, without additional pre-sampling, OtterTune* and LlamaTune also fall behind space-partitioning-based approaches.
+
+Besides performance improvements, in real-world scenarios, tuning time and the rate of suggesting failure-causing configurations must be considered towards better practicality. A failure-causing configuration, defined as \textit{unsafe} \citep{zhang2022onlinetune}, can degrade the performance of critical DBMS-dependent processes in the system. Therefore, we introduce the Safety-weighted Performance Improvement-Time Ratio (\textbf{S-PITR}): $S\text{-}PITR = \frac{PI}{TT + NF \cdot PE}$,  where $PI$ is \textbf{p}erformance \textbf{i}mprovement, $TT$ refers to \textbf{t}uning \textbf{t}ime, $NF$ represents the \textbf{n}umber of \textbf{f}ailed (unsafe) configurations during the search and $PE$ is a the \textbf{pe}nalty value for failed configurations. This metric quantitatively measures the practicality of tuning algorithms by considering both tuning time and safety.
+
+Figure \ref{fig:dmbs-res} (Right) presents the S-PITR values for the selected algorithms while tuning PostgreSQL's configurations towards SysBench. Again, HiBO achieves the highest S-PITR value and outperforms LA-MCTS by over 20\%, demonstrating its capability to navigate towards promising regions while accounting for both failure rate and computational cost. In comparison, LA-MCTS even falls behind TuRBO in terms of S-PITR, suggesting that its added complexity does not efficiently translate into practical benefits. Besides, HiBO presents $\sim$25\% greater S-PITR scores than OtterTune$^*$ and LlamaTune. These findings highlight HiBO's adequate ability to strike a balance between performance improvement, safety, and efficiency in complex real-world DBMS tuning scenarios.
+We visualize the acquisition function values generated by HiBO and TuRBO during optimization of the Ackley2-200D synthetic function over 100 iterations. Starting with 20 initial samples, we plot the distribution of acquisition values on the two effective dimensions as the optimization progresses. For clarity, the top 1000 acquisition values from 100x100 uniformly distributed samples are shown in each iteration. Figure \ref{fig:visual} illustrates these results. The comparison shows that HiBO, with the extra information of space partitioning, more rapidly converges its acquisition distribution towards the optimal point, as indicated by the brightest areas near the optima. In contrast, while also moving toward the optimal region, the convergence speed of TuRBO is way slower and exhibits a less concentrated and noisier final distribution, with significant acquisition values still dispersed far from the optima. This visual analysis further validates the effectiveness of HiBO by integrating space partitioning into the acquisition strategy of the local optimizer.
+
+
+
+\section{Conclusion}
+
+
+
+
+
+\newpage
+
+
+
+

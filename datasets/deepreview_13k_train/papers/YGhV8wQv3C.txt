@@ -1,0 +1,883 @@
+\title{Unsupervised-to-Online Reinforcement Learning}
+
+\begin{abstract}
+
+Offline-to-online reinforcement learning (RL),
+a framework that trains a policy with offline RL
+and then further fine-tunes it with online RL,
+has been considered a promising recipe for data-driven decision-making.
+While sensible, this framework has drawbacks: it requires domain-specific offline RL pre-training for each task,
+and is often brittle in practice.
+In this work, we propose \textbf{unsupervised-to-online RL} (\textbf{U2O RL}),
+which replaces domain-specific \emph{supervised} offline RL with \emph{unsupervised} offline RL,
+as a better alternative to offline-to-online RL.
+U2O RL not only enables reusing a single pre-trained model for multiple downstream tasks,
+but also learns better representations, which often result in \emph{even better} performance and stability
+than \emph{supervised} offline-to-online RL.
+To instantiate U2O RL in practice, we propose a general recipe for U2O RL
+to bridge task-agnostic unsupervised offline skill-based policy pre-training and supervised online fine-tuning.
+Throughout our experiments in nine state-based and pixel-based environments,
+we empirically demonstrate that U2O RL achieves strong performance
+that matches or even outperforms previous offline-to-online RL approaches,
+while being able to reuse a single pre-trained model for a number of different downstream tasks.
+
+
+
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Across natural language processing (NLP), computer vision (CV), and speech processing,
+ubiquitous in the recent successes of machine learning is
+the idea of adapting an expressive model pre-trained on large-scale data to domain-specific tasks via fine-tuning.
+In the domain of reinforcement learning (RL),
+offline-to-online RL has been considered an example of such a recipe for leveraging offline data for efficient online fine-tuning.
+Offline-to-online RL first trains a task-specific policy on a previously collected dataset with offline RL,
+and then continues training the policy with additional environment interactions to further improve performance.
+
+But, is offline-to-online RL really the most effective way to leverage offline data for online RL?
+Indeed, offline-to-online RL has several limitations.
+First, it pre-trains a policy with a \emph{domain-specific task reward},
+which precludes sharing a single pre-trained model for multiple downstream tasks.
+This is in contrast to predominant pre-training recipes in large language models or visual representation learning,
+where they pre-train large models with self-supervised or \emph{unsupervised} objectives
+to learn useful representations, which can facilitate learning a wide array of downstream tasks.
+Second, na\"ive offline-to-online RL is often brittle in practice~\citep{lee2022offline, nakamoto2024cal}.
+This is mainly because pre-trained offline RL agents suffer the distributional shift
+between the offline and online interaction data~\citep{lee2022offline, nakamoto2024cal}
+or experience feature collapse (Section~\ref{sec:analysis_feature}),
+which necessitates specialized, potentially complicated techniques.
+
+In this work, our central hypothesis is that \emph{unsupervised pre-training of diverse policies} from offline data
+can serve as an effective data-driven recipe for \emph{online} RL,
+and can be more effective than even domain-specific (``supervised'') offline pre-training.
+We call this framework \textbf{unsupervised-to-online RL} (\textbf{U2O RL}).
+U2O RL has two appealing properties.
+First, unlike offline-to-online RL, a single pre-trained model can be fine-tuned for different downstream tasks.
+Since offline unsupervised RL does not require task information,
+we can pre-train diverse policies on unlabeled data before knowing downstream tasks.
+Second, by pre-training multi-task policies with diverse intrinsic rewards,
+the agent extracts rich representations from data,
+which often helps achieve \emph{even better} final performance and stability than \emph{supervised} offline-to-online RL.
+This resembles how general-purpose unsupervised pre-training in other domains,
+such as with LLMs or self-supervised representations~\citep{brown2020language, devlin2018bert, radford2019language, he2021masked, he2020momentum, henaff2020data},
+improves over the performance of domain-specific specialist pre-training.
+
+Our U2O RL framework consists of three stages:
+unsupervised offline policy pre-training, bridging, and online fine-tuning (Figure~\ref{fig:concept}).
+In the first unsupervised offline pre-training phase,
+we employ a skill-based offline unsupervised RL or offline goal-conditioned RL method, which
+trains diverse behaviors (or \emph{skills}) with intrinsic rewards
+and provides an efficient mechanism to identify the best skill for a given task reward.
+In the subsequent bridging and fine-tuning phases,
+we adapt the best skill among the learned policies to the given downstream task reward with online RL.
+Here, to prevent a potential mismatch between the intrinsic and task rewards,
+we propose a simple yet effective reward scale matching technique that bridges the gap between the two training schemes
+and thus improves performance and stability.
+
+Our main contributions in this work are twofold.
+First, to the best of our knowledge, this is the first work that makes
+the (potentially surprising) observation that it is often better to replace supervised offline RL with unsupervised offline RL in the offline-to-online RL setting.
+We also identify the reason behind this phenomenon:
+this is mainly because offline unsupervised pre-training learns better \emph{representations} than task-specific supervised offline RL.
+Second, we propose a general recipe to bridge skill-based unsupervised offline RL pre-training and online RL fine-tuning.
+Through our experiments on nine state-based and pixel-based environments,
+we demonstrate that U2O RL
+often outperforms standard offline-to-online RL
+both in terms of sample efficiency and final performance,
+while being able to reuse a single pre-trained model for multiple downstream tasks.
+
+
+ 
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\textwidth]{figures/concept4.pdf}
+    \caption{
+    \footnotesize
+    \textbf{Illustration of U2O RL.}
+    In this work, we propose to replace supervised offline RL with \emph{unsupervised offline RL}
+    in the offline-to-online RL framework. We call this scheme \textbf{unsupervised-to-online RL} (\textbf{U2O RL}). U2O RL consists of three stages: (1) unsupervised offline RL pre-training, (2) bridging, and (3) online RL fine-tuning. In unsupervised offline RL pre-training, we train a multi-task skill policy $\pi_{\theta}(a \mid s, z)$ instead of a single-task policy $\pi_{\theta}(a \mid s)$. Then, we convert the multi-task policy into a task-specific policy in the bridging phase. Finally, we fine-tune the skill policy with online environment interactions.
+    }
+    \label{fig:concept}
+\end{figure}
+
+
+
+\section{Related work}
+
+\label{sec:related_work}
+
+\textbf{Online RL from prior data}.
+Prior works have proposed several ways to leverage a previously collected offline dataset to accelerate online RL training.
+They can be categorized into two main groups: offline-to-online RL and off-policy online RL with offline data.
+Offline-to-online RL first pre-trains a policy and a value function with offline RL~\citep{lange2012batch, levine2020offline, fujimoto2021minimalist, fujimoto2019off, kumar2019stabilizing, tarasov2024revisiting, wu2019behavior, kostrikov2021offline, kumar2020conservative, hansen2023idql, kostrikov2022offline, nair2020awac, peng2019advantage, wang2020critic},
+and then continues to fine-tune them with additional online interactions~\citep{lee2022offline, nair2020awac, nakamoto2024cal, yu2023actor, lei2023uni, zheng2022online, mark2022fine, zhao2023improving}.
+Since na\"ive offline-to-online RL is often unstable in practice
+due to the distributional shift between the dataset and online interactions,
+prior works have proposed several techniques,
+such as balanced sampling~\citep{lee2022offline}, actor-critic alignment~\citep{yu2023actor},
+adaptive conservatism~\citep{wang2023train}, and return lower-bounding~\citep{nakamoto2024cal}.
+In this work, unlike offline-to-online RL, which trains a policy with the target task reward,
+we offline pre-train a multi-task policy with unsupervised (intrinsic) reward functions.
+This makes our single pre-trained policy reusable for any downstream task and learn richer representations.
+The other line of research, off-policy online RL,
+trains an online RL agent from scratch on top of a replay buffer filled with offline data,
+without any pre-training~\citep{ball2023efficient, li2024accelerating,  luo2024serl, song2022hybrid}.
+While this simple approach often leads to improved stability and performance~\citep{ball2023efficient},
+it does not leverage the benefits of pre-training;
+in contrast, we do leverage pre-training by learning useful features via offline unsupervised RL,
+which we show leads to better fine-tuning performance in our experiments.
+
+\textbf{Unsupervised RL.}
+The goal of unsupervised RL is to leverage unsupervised pre-training to facilitate downstream reinforcement learning.
+Prior works have mainly focused on unsupervised representation learning and unsupervised behavior learning.
+Unsupervised representation learning methods~\citep{sermanet2018time, shah2021rrl, parisi2022unsurprising, xiao2022masked, nair2022r3m, ma2023vip, ghosh2023reinforcement, seo2022reinforcement, seo2022masked, seo2023multi} aim to extract useful (visual) representations from data.
+These representations are then fed into the policy to accelerate task learning.
+In this work, we focus on unsupervised behavior learning,
+which aims to pre-train policies that can be directly adapted to downstream tasks.
+Among unsupervised behavior learning methods,
+online unsupervised RL pre-trains useful policies
+by either maximizing state coverage~\citep{pathak2017curiosity, pathak2019self, mendonca2021discovering, liu2021behavior}
+or learning distinct skills ~\citep{gregor2016variational, eysenbach2018diversity, sharma2019dynamics, park2024metra}
+via reward-free interactions with the environment.
+In this work, we consider \emph{offline} unsupervised RL,
+which does not allow 
+any environment interactions during the pre-training stage.
+
+\textbf{Offline unsupervised RL.}
+Offline unsupervised RL methods focus on learning diverse policies (\ie, skills) from the dataset,
+rather than exploration, as online interactions are not permitted in this problem setting.
+There exist three main approaches to offline unsupervised RL.
+Behavioral cloning-based approaches extract skills from an offline dataset by training a generative model
+(\eg, variational autoencoders~\citep{kingma2013auto}, Transformers~\citep{vaswani2017attention}, etc.)~\citep{ajay2021opal, pertsch2021accelerating, singh2021parrot}.
+Offline goal-conditioned RL methods learn diverse goal-reaching behaviors with goal-conditioned reward functions~\citep{chebotar2021actionable, eysenbach2022contrastive, ma2022offline, park2024hiql, wang2023optimal, yang2023essential, fang2022planning, fang2023generalization}.
+Offline unsupervised skill learning approaches learn diverse skills based on intrinsically defined reward functions~\citep{park2024foundation, touati2022does, hu2024unsupervised}.
+Among these approaches, we use methods in the second and third categories (\ie, goal- or skill-based unsupervised offline RL) as part of our framework.
+
+Our goal in this work is to study how unsupervised offline RL,
+as opposed to supervised task-specific offline RL, can be employed to facilitate online RL fine-tuning.
+While somewhat similar unsupervised pre-training schemes have been explored in prior works,
+they either consider hierarchical RL (or zero-shot RL) with frozen learned skills without fine-tuning~\citep{ajay2021opal, pertsch2021accelerating, touati2022does, park2024foundation, hu2024unsupervised},
+assume online-only RL~\citep{laskin2021urlb},
+or are limited to the specific setting of goal-conditioned RL~\citep{fang2022planning, fang2023generalization}.
+To the best of our knowledge, this is the first work that considers the \emph{fine-tuning} of skill policies
+pre-trained with unsupervised offline RL \emph{in the context of offline-to-online RL}.
+Through our experiments, we show that our fine-tuning framework leads to significantly better performance than
+previous approaches based on hierarchical RL, zero-shot RL, and standard offline-to-online RL.
+
+
+
+\section{Preliminaries}
+
+\label{sec:preliminaries}
+
+We formulate a decision making problem as a Markov decision process (MDP)~\citep{sutton2018reinforcement}, which is defined by a tuple of $(\mathcal{S}, \mathcal{A}, P, r, \rho, \gamma)$,
+where $\mathcal{S}$ is the state space, $\mathcal{A}$ is the action space,
+$P: \gS \times \gA \to \Delta(\gS)$ is the transition dynamics,
+$r: \gS \times \gA \times \gS \to \sR$ is the task reward function,
+$\rho \in \Delta(\gS)$ is the initial state distribution,
+and $\gamma \in (0,1)$ is the discount factor.
+Our aim is to learn a policy $\pi: \mathcal{S} \to \Delta(\mathcal{A})$ that maximizes the expectation of cumulative task rewards, $\mathbb{E}_{\pi} [\sum_{t=0}^{\infty} \gamma^{t} r(s_{t}, a_{t}, s_{t+1})]$.
+
+\textbf{Offline RL and implicit Q-learning (IQL).}
+The goal of offline RL is to learn a policy solely from an offline dataset $\mathcal{D}_{\mathtt{off}}$,
+which consists of transition tuples $(s, a, s', r)$.
+One straightforward approach to offline RL is to simply employ an off-policy RL algorithm (\eg TD3~\citep{fujimoto2018addressing}).
+For instance, we can minimize the following temporal difference (TD) loss to learn an action-value function (Q-function) from data:
+\begin{align}
+\label{eq:temp_diff}
+\mathcal{L}_{\mathtt{TD}} (\phi) = \mathbb{E}_{(s,a,s',r) \sim \mathcal{D}_{\mathtt{off}}} \left[ (r + \gamma \max_{a'} Q_{\bar{\phi}} (s', a') - Q_{\phi} (s, a))^2 \right],
+\end{align}
+where $Q_{\phi}$ denotes the parameterized action-value function, and $Q_{\bar{\phi}}$ represents the target action-value function~\citep{mnih2013playing}, whose parameter $\bar{\phi}$ is updated via Polyak averaging~\citep{polyak1992acceleration} using $\phi$.
+We can then train a policy $\pi$ to maximize $\mathbb{E}_{a \sim \pi} \left[ Q_{\phi} (s,a) \right]$.
+
+While this simple off-policy TD learning can be enough when the dataset has sufficiently large state-action coverage,
+offline datasets in practice often have limited coverage, which makes the agent susceptible to value overestimation and exploitation, as the agent cannot get corrective feedback from the environment~\citep{levine2020offline}.
+To address this issue, \citet{kostrikov2022offline} proposed implicit Q-learning (IQL),
+which fits an optimal action-value function without querying out-of-distribution actions: %
+IQL replaces the $\argmax$ operator,
+which potentially allows the agent to exploit Q-values from out-of-distribution actions,
+with an expectile loss that implicitly approximates the maximum value.
+Specifically, IQL minimizes the following losses:
+\begin{align}
+\label{eq:iql_q}
+\mathcal{L}^Q_{\mathtt{IQL}} (\phi) &= \mathbb{E}_{(s,a,s',r) \sim \mathcal{D}_{\mathtt{off}}} \left[ (r + \gamma V_\psi (s') - Q_{\phi} (s, a))^2 \right], \\
+\label{eq:iql_v}
+\mathcal{L}^V_{\mathtt{IQL}} (\psi) &= \mathbb{E}_{(s,a) \sim \mathcal{D}_{\mathtt{off}}} \left[ \ell_\tau^2(Q_{\bar{\phi}} (s, a) - V_\psi(s)) \right],
+\end{align}
+where
+$Q_\phi$ and $Q_{\bar{\phi}}$ respectively denote the action-value and target action-value functions,
+$V_\psi$ denotes the value function,
+$\ell_\tau^2(x) = |\tau - \mathds{1}(x < 0)| x^2$ denotes the expectile loss~\citep{newey1987asymmetric}
+and $\tau$ denotes the expectile parameter.
+Intuitively, the asymmetric expectile loss in Equation~\ref{eq:iql_v}
+makes $V_\psi$ implicitly approximate $\max_a Q_{\bar{\phi}}(s, a)$
+by penalizing positive errors more than negative errors.
+
+\textbf{Hilbert foundation policy (HILP).}
+Our unsupervised-to-online framework requires an offline unsupervised RL algorithm that
+trains a skill policy $\pi_\theta(a \mid s, z)$ from an unlabeled dataset,
+and we mainly use HILP~\citep{park2024foundation} in our experiments.
+HILP consists of two phases.
+In the first phase, HILP trains a feature network $\xi: \gS \to \gZ$
+that embeds temporal distances (\ie, shortest path lengths) between states
+into the latent space by enforcing the following equality:
+\begin{align}
+\label{eq:hilp_feature}
+d^*(s, g) = \|\xi(s) - \xi(g)\|_2
+\end{align}
+for all $s, g \in \gS$,
+where $d^*(s, g)$ denotes the temporal distance (the minimum number of steps required to reach $g$ from $s$)
+between $s$ and $g$.
+In practice,
+given the equivalence between goal-conditioned values and temporal distances,
+$\xi$ can be trained with any offline goal-conditioned RL algorithm~\citep{park2024hiql}
+(see \citet{park2024foundation} for further details).
+After training $\xi$, HILP trains a skill policy $\pi_\theta(a \mid s, z)$
+with the following intrinsic reward
+using an off-the-shelf offline RL algorithm~\citep{kostrikov2022offline,fujimoto2018addressing}:
+\begin{align}
+\label{eq:int_rew}
+r^{\mathtt{int}} (s, a, s', z) = (\xi(s') - \xi(s))^\top z,
+\end{align}
+where $z$ is sampled from the unit ball, $\{ z \in \mathcal{Z}: \| z \| = 1 \}$.
+Intuitively,
+Equation~\ref{eq:int_rew} encourages the agent to learn
+behaviors that move in every possible latent direction,
+resulting in diverse state-spanning skills~\citep{park2024foundation}.
+Note that Equation~\ref{eq:int_rew} can be interpreted as
+the inner product between the task vector $z$ and the feature vector $f(s, a, s') := \xi(s') - \xi(s)$
+in the successor feature framework~\citep{dayan1993improving,barreto2017successor}.
+
+
+
+
+\section{Unsupervised-to-online RL (U2O RL)}
+
+
+Our main hypothesis in this work is that
+task-agnostic offline RL pre-training of \emph{unsupervised} skills can be more effective
+than task-specific, supervised offline RL for online RL fine-tuning.
+We call this framework
+\textbf{unsupervised-to-online RL} (\textbf{U2O RL}).
+In this section,
+we first describe the three stages of our U2O RL framework (Figure~\ref{fig:concept}):
+unsupervised offline policy pre-training (Section~\ref{sec:offline_rl_pretraining}),
+bridging (Section~\ref{sec:bridging}),
+and online fine-tuning (Section~\ref{sec:online_rl_finetuning}).
+We then explain why \emph{unsupervised}-to-online RL is potentially better than standard \emph{supervised}
+offline-to-online RL (Section~\ref{sec:why}).
+
+
+
+\subsection{Unsupervised offline policy pre-training}
+\label{sec:offline_rl_pretraining}
+
+In the first unsupervised offline policy pre-training phase (Figure~\ref{fig:concept} (bottom left)),
+we train diverse policies (or \emph{skills}) with intrinsic rewards
+to extract a variety of useful behaviors as well as rich features
+from the offline dataset $\gD_\mathtt{off}$.
+In other words,
+instead of training a single-task policy $\pi_\theta(a \mid s)$ with task rewards $r(s, a, s')$
+as in standard offline-to-online RL,
+we train a \emph{multi-task} skill policy $\pi_\theta(a \mid s, z)$ with
+a family of unsupervised, \emph{intrinsic} rewards $r^\mathtt{int}(s, a, s', z)$,
+where $z$ is a skill latent vector sampled from a latent space $\gZ = \sR^d$.
+Even if $\gD_\mathtt{off}$ contains reward labels, we do not use any reward information in this phase.
+
+Among existing unsupervised offline policy pre-training methods (Section~\ref{sec:related_work}),
+we opt to employ successor feature-based methods~\citep{dayan1993improving,barreto2017successor,wu2019laplacian,touati2022does,park2024foundation} or offline goal-conditioned RL methods~\citep{chebotar2021actionable, park2024hiql}
+for our unsupervised pre-training,
+since they provide a convenient mechanism to identify the best skill latent vector given a downstream task,
+which we will utilize in the next phase.
+More concretely, we mainly choose to employ HILP~\citep{park2024foundation} (Section~\ref{sec:preliminaries}) as an unsupervised offline policy pre-training method in our experiments
+for its state-of-the-art performance in previous benchmarks~\citep{park2024foundation}.
+We note, however, that any other unsupervised offline successor feature-based skill learning methods~\citep{touati2022does}
+or offline goal-conditioned RL methods~\citep{park2024hiql}
+
+
+
+
+\begin{algorithm}[t]
+   \caption{U2O RL: Unsupervised-to-Online Reinforcement Learning}
+   \label{alg:framework}
+\begin{algorithmic}
+\State {\bfseries Require}: offline dataset $\mathcal{D}_{\texttt{off}}$, reward-labeled dataset $\mathcal{D}_{\texttt{reward}}$, empty replay buffer $\mathcal{D}_{\texttt{on}}$, offline pre-training steps $N_{\texttt{PT}}$, online fine-tuning steps $N_{\texttt{FT}}$, skill latent space $\mathcal{Z}$
+\State Initialize the parameters of policy $\pi_{\theta}$ and action-value function ${Q_{\phi}}$
+\For{$t=0, 1, 2, \ldots N_{\texttt{PT}} - 1$}
+\State Sample transitions $(s, a, s')$ from $\mathcal{D}_{\mathtt{off}}$
+\State Sample latent vector $z \in \mathcal{Z}$ and compute intrinsic rewards $r^{\mathtt{int}}$
+\State Update policy $\pi_{\theta}(a \mid s, z)$ and $Q_{\phi}(s, a, z)$ using normalized intrinsic rewards $\tilde{r}^{\mathtt{int}}$
+\EndFor
+\State Compute the best latent vector $z^*$ with Equation~\ref{eq:skill_lr} using samples $(s, a, s', r)$ from $\mathcal{D}_{\texttt{reward}}$
+\For{$t=0, 1, 2, \ldots N_{\texttt{FT}} - 1$} 
+\State Collect transition $(s, a, s', r)$ via environment interaction with $\pi_{\theta}$ and add to replay buffer $\mathcal{D}_{\mathtt{on}}$
+\State Sample transitions $(s, a, s', r)$ from $\mathcal{D}_{\mathtt{off}} \cup 
+\mathcal{D}_{\mathtt{on}}$
+\State Update policy $\pi_{\theta}(a \mid s, z^*)$ and $Q_{\phi}(s, a, z^*)$ using normalized task rewards $\tilde{r}$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+\subsection{Bridging offline unsupervised RL and online supervised RL}
+\label{sec:bridging}
+
+After finishing unsupervised offline policy pre-training,
+our next step is to convert the learned multi-task skill policy into a task-specific policy
+that can be fine-tuned to maximize a given downstream reward function $r$ (Figure~\ref{fig:concept} (bottom middle)).
+There exist two challenges in this step:
+(1) we need a mechanism to identify the skill vector $z$ that best solves the given task
+and (2) we need to reconcile the gap between intrinsic rewards and downstream task rewards
+for seamless online fine-tuning.
+
+\textbf{Skill identification.}
+Since we chose to use a successor feature- or goal-based unsupervised pre-training method in the previous phase,
+the first challenge is relatively straightforward.
+For goal-oriented tasks (\eg, AntMaze~\citep{fu2020d4rl} and Kitchen~\citep{gupta2020relay}), we assume the task goal $g$ to be available,
+and we either directly use $g$ (for goal-conditioned methods) or infer the skill $z^*$ that corresponds to $g$
+based on a predefined conversion formula (for successor feature-based methods that support such a conversion~\citep{touati2022does,park2024foundation}).
+For general reward-maximization tasks, we employ successor feature-based unsupervised pre-training methods,
+and use the following linear regression to find the skill latent vector $z^*$ that best approximates
+the downstream task reward function $r: \gS \times \gA \times \gS \to \sR$:
+\begin{align}
+\label{eq:skill_lr}
+z^* = \argmin_{z \in \mathcal{Z}} \mathbb{E}_{(s, a, s') \sim \mathcal{D}_{\mathtt{reward}}} \left[\left(r(s, a, s') - f(s, a, s')^\top z \right)^2 \right],
+\end{align}
+where $f$ is the feature network in the successor feature framework (Section~\ref{sec:preliminaries})
+and $\mathcal{D}_{\texttt{reward}}$ is a reward-labeled dataset.
+This reward-labeled dataset $\mathcal{D}_{\texttt{reward}}$ can be
+either the full offline dataset $\mathcal{D}_\texttt{off}$ (if it is fully reward-labeled),
+a subset of the offline dataset (if it is partially reward-labeled),
+or a newly collected dataset with additional environment interactions.
+In our experiments, we mainly use a small number (\eg, $0.2\%$ for DMC tasks) of reward-labeled samples from the offline dataset for $\mathcal{D}_\texttt{reward}$,
+following previous works~\citep{touati2022does,park2024foundation},
+but we do not require $\mathcal{D}_{\texttt{reward}}$ to be a subset of $\mathcal{D}_\texttt{off}$
+\textbf{Reward scale matching.}
+After identifying the best skill latent vector $z^*$,
+our next step is to bridge the gap between intrinsic and extrinsic rewards.
+Since these two reward functions can have very different scales,
+na\"ive online adaptation can lead to abrupt shifts in target Q-values,
+potentially causing significant performance drops in the early stages of online fine-tuning.
+While one can employ sophisticated reward-shaping techniques to deal with this issue~\citep{ng1999policy, gleave2021quantifying},
+in this work, we propose a simple yet effective reward scale matching technique
+that we find to be effective enough in practice.
+Specifically, we compute the running mean and standard deviation of intrinsic rewards during the pre-training phase, 
+and normalize the intrinsic rewards with the calculated statistics.
+Similarly, during the fine-tuning phase, we compute the statistics of task rewards and normalize the task rewards
+so that they have the same scale and mean as normalized intrinsic rewards.
+This way, we can prevent abrupt shifts in reward scales
+without altering the optimal policy for the downstream task.
+In our experiments, we find that this simple technique is crucial for achieving good performance,
+especially in environments with dense rewards (Section~\ref{sec:ablation_study}).
+
+
+\subsection{Online fine-tuning}
+\label{sec:online_rl_finetuning}
+
+Our final step is to fine-tune the skill policy with online environment interactions (Figure~\ref{fig:concept} (bottom right)).
+This step is straightforward:
+since we have found $z^*$ in the previous stage,
+we can simply \emph{fix} the skill vector $z^*$ in the policy $\pi_\theta(a \mid s, z^*)$
+and the Q-function $Q_\phi(s, a, z^*)$,
+and fine-tune them with the same (offline) RL algorithm used in the first phase
+(\eg, IQL~\citep{kostrikov2022offline}, TD3~\citep{fujimoto2018addressing})
+with additional online interaction data.
+While one can employ existing specialized techniques for offline-to-online RL for better online adaptation in this phase,
+we find in our experiments that, thanks to rich representations learned by unsupervised pre-training,
+simply using the same (offline) RL algorithm is enough to achieve strong performance
+that matches or even outperforms state-of-the-art offline-to-online RL techniques.
+
+\subsection{Why is U2O RL potentially better than offline-to-online RL?}
+\label{sec:why}
+
+Our main claim is that \emph{unsupervised} offline RL is better than supervised offline RL for online fine-tuning.
+However, this might sound very counterintuitive.
+Especially, if we know the downstream task ahead of time,
+how can unsupervised offline RL potentially lead to better performance than supervised offline RL,
+despite the fact that the former does \emph{not} use any task information during the offline phase?
+
+We hypothesize that this is because unsupervised multi-task offline RL enables better \emph{feature learning}
+than supervised single-task offline RL.
+By training the agent on a number of diverse intrinsically defined tasks,
+it gets to acquire rich knowledge about the environment, dynamics, and potential tasks in the form of representations,
+which helps improve and facilitate the ensuing task-specific online fine-tuning.
+This resembles the recent observation in machine learning that
+large-scale unsupervised pre-training improves downstream task performances over task-specific supervised pre-training~\citep{brown2020language, devlin2018bert, radford2019language, he2021masked, he2020momentum, henaff2020data}.
+In our experiments, we empirically show that U2O RL indeed learns better features than its supervised counterpart (Section~\ref{sec:analysis_feature}).
+
+Another benefit of U2O RL is that it does not use any task-specific information during pre-training.
+This is appealing because we can reuse a single pre-trained policy for a number of different downstream tasks.
+Moreover,
+it enables leveraging potentially very large, task-agnostic offline data during pre-training,
+which is often much cheaper to collect than task-specific, curated datasets~\citep{lynch2019learning}.
+
+
+
+\section{Experiments}
+
+\label{sec:exp}
+In our experiments, we evaluate the performance of U2O RL in the context of offline-to-online RL.
+We aim to answer the following research questions:
+(1) Is U2O RL better than previous offline-to-online RL strategies?
+(2) What makes unsupervised offline RL result in better fine-tuning performance than supervised offline RL?
+(3) Which components of U2O RL are important?
+\begin{figure*}[t]
+\centering
+\begin{subfigure}{1.0\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/envs2.pdf}
+\end{subfigure}
+\caption{
+\footnotesize
+\textbf{Environments.}
+We evaluate U2O RL on nine state-based or pixel-based environments.
+}
+\label{fig:env}
+\end{figure*}
+
+\begin{figure*}[t]
+\centering
+\begin{subfigure}[t]{1.0\textwidth}
+\centering
+  \includegraphics[width=0.55\linewidth]{figures/legend.pdf}
+\end{subfigure}
+\hspace*{\fill}
+
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/antmaze_ultra_diverse.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/antmaze_ultra_play.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/antmaze_large-diverse.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/antmaze_large-play.pdf}
+\end{subfigure}
+
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/kitchen_partial.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/kitchen_mixed.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/visual_kitchen_partial.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/visual_kitchen_mixed.pdf}
+\end{subfigure}
+
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/walker_run.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/cheetah_run.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/quadruped_run.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/jaco_reach_top_left.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/pen_binary.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/door_binary.pdf}
+\end{subfigure}
+
+\caption{
+\footnotesize
+\textbf{Online fine-tuning plots of U2O RL and previous offline-to-online RL frameworks (8 seeds).}
+Across the benchmarks, our U2O RL mostly shows consistently better performance than
+standard offline-to-online RL and off-policy online RL with offline data.
+}
+\label{fig:main}
+\end{figure*}
+
+\subsection{Experimental setup}
+\label{subsec:experimental_setup}
+\textbf{Environments and offline datasets.}
+In our experiments, we consider nine tasks across five benchmarks (Figure~\ref{fig:env}).
+\textbf{ExORL}~\citep{yarats2022don} is a benchmark suite that consists of offline datasets collected by exploratory policies (\textit{e.g.}, RND~\citep{burda2018exploration}) on the DeepMind Control Suite~\citep{tassa2018deepmind}. We consider four embodiments (Walker, Cheetah, Quadruped, and Jaco), each of which has four tasks. 
+\textbf{AntMaze}~\citep{fu2020d4rl, jiang2023efficient} is a navigation task,
+whose goal is to control an $8$-DoF quadruped agent to reach a target position. We consider the two most challenging mazes with the largest sizes, \texttt{large} and \texttt{ultra}, and two types of offline datasets, \texttt{diverse} and \texttt{play}.
+\textbf{Kitchen}~\citep{gupta2020relay,fu2020d4rl} is a robotic manipulation task, where the goal is to control a $9$-DoF Franka robot arm to achieve four subtasks sequentially. The environment has four subtasks in total. We consider two types of offline datasets from the D4RL suite~\citep{fu2020d4rl}, \texttt{partial} and \texttt{mixed}. 
+\textbf{Visual Kitchen}~\citep{gupta2020relay, fu2020d4rl, park2024foundation} is a pixel-based variant of the Kitchen environment, 
+where an agent must achieve four subtasks purely from $64 \times 64 \times 3$ pixel observations instead of low-dimensional state information.
+\textbf{Adroit}~\citep{fu2020d4rl} is a dexterous manipulation benchmark,
+where the goal is to control a $24$-DoF robot hand to twirl a pen or open a door.
+
+\textbf{Implementation.}
+In our experiments, we mainly employ HILP~\citep{park2024foundation}
+as the unsupervised offline policy pre-training algorithm in U2O RL.
+For the offline RL backbone, we use TD3~\citep{fujimoto2018addressing} for ExORL
+and IQL~\citep{kostrikov2021offline} for others
+following previous works~\citep{touati2022does,park2024foundation}.
+Since both IQL and TD3+BC~\citep{fujimoto2021minimalist,tarasov2024revisiting}
+have been known to achieve strong performance in the offline-to-online RL setting~\citep{tarasov2024corl},
+we use them for the online fine-tuning phase in U2O RL as well.
+For sparse-reward tasks (AntMaze, Kitchen, and Adroit), we do not apply reward scale matching.
+For AntMaze, Kitchen, and Adroit, we report normalized scores, following \citet{fu2020d4rl}.
+In our experiments, we use $\mathbf{8}$ \textbf{random seeds} and report standard deviations with shaded areas, unless otherwise stated.
+
+\subsection{Is U2O RL better than previous offline-to-online RL frameworks?}
+
+We begin our experiments by comparing our approach, unsupervised-to-online RL, with two previous offline-to-online RL \emph{frameworks} (Section~\ref{sec:related_work}):
+\textbf{offline-to-online RL} (\textbf{O2O RL}) and \textbf{off-policy online RL with offline data} (\textbf{Online w/ Off Data}).
+To recall, offline-to-online RL~\citep{lee2022offline, nair2020awac, nakamoto2024cal, yu2023actor, lei2023uni}
+first pre-trains a policy with \emph{supervised} offline RL using the task reward,
+and then continues training it with online rollouts.
+Off-policy online RL~\citep{ball2023efficient, luo2024serl, song2022hybrid} trains a policy from scratch on top of a replay buffer filled with offline data.
+Here, we use the \emph{same} offline RL backbone (\ie, TD3 for ExORL and IQL for AntMaze, Kitchen, and Adroit)
+to ensure apples-to-apples comparisons between the three frameworks.
+We will compare U2O RL with previous specialized offline-to-online RL techniques in Section~\ref{sec:special_o2o}.
+    
+    
+
+Figure~\ref{fig:main} shows the online fine-tuning curves on $14$ different tasks.
+The results suggest that U2O RL generally leads to better performance than both offline-to-online RL and off-policy online RL across the environments, despite not using any task information during pre-training.
+Notably, U2O RL significantly outperforms these two previous frameworks
+in the most challenging AntMaze tasks (\texttt{antmaze-ultra-\{diverse, play\}}).
+\subsection{How does U2O RL compare to previous specialized offline-to-online RL techniques?}
+\label{sec:special_o2o}
+Next, we compare U2O RL with $13$ previous specialized offline-to-online RL methods,
+including \textbf{CQL}~\citep{kumar2020conservative}, \textbf{IQL}~\citep{kostrikov2022offline}, \textbf{AWAC}~\citep{nair2020awac}, \textbf{O3F}~\citep{mark2022fine}, \textbf{ODT}~\citep{zheng2022online}, \textbf{CQL+SAC}~\citep{kumar2020conservative, haarnoja2018soft}, \textbf{Hybrid RL}~\citep{song2022hybrid}, \textbf{SAC+od (offline data)}~\citep{haarnoja2018soft, ball2023efficient}, \textbf{SAC}~\citep{haarnoja2018soft}, \textbf{IQL+od (offline data)}~\citep{kostrikov2022offline, ball2023efficient}, \textbf{RLPD}~\citep{ball2023efficient}, \textbf{FamO2O}~\citep{wang2023train} and \textbf{Cal-QL}~\citep{nakamoto2024cal}.
+We show the comparison results in Table~\ref{tab:performance},
+where we take the scores from \citet{nakamoto2024cal, wang2023train} for the tasks that are common to ours.
+Since Cal-QL achieves the best performance in the table,
+we additionally make a comparison with Cal-QL on \texttt{antmaze-ultra-\{diverse, play\}} as well,
+by running their official implementation with tuned hyperparameters.
+
+Table~\ref{tab:performance} shows that U2O RL achieves strong performance that matches or sometimes even outperforms
+previous offline-to-online RL methods,
+even though U2O RL does \emph{not} use any task information during offline pre-training
+nor any specialized offline-to-online techniques.
+In particular, in the most challenging \texttt{antmaze-ultra} tasks,
+U2O RL outperforms the previous best method (Cal-QL) by a significant margin.
+This is very promising because,
+even if U2O RL does not necessarily outperform the state-of-the-art methods on every single task
+(though it is at least on par with the previous best methods),
+U2O RL enables reusing a single unsupervised pre-trained policy for multiple downstream tasks,
+unlike previous offline-to-online RL methods that perform \emph{task-specific} pretraining.
+
+\begin{table*}[t]
+\caption{
+\footnotesize
+\textbf{Comparison between U2O RL and previous 
+offline-to-online RL methods.}
+We denote how performances change before and after online fine-tuning with arrows. 
+Baseline scores except RLPD~\citep{ball2023efficient} are taken from~\citet{nakamoto2024cal, wang2023train}.
+Scores within the $5\%$ of the best score are highlighted in bold,
+as in \citet{kostrikov2022offline}.
+We use 8 random seeds for each task for U2O RL.
+}
+\scriptsize{
+\begin{center}
+
+\resizebox{\textwidth}{!}{
+\setlength{\tabcolsep}{3pt}  %
+\begin{tabular}{lcccccc}
+\toprule
+Task & \texttt{antmaze-ultra-diverse} & \texttt{antmaze-ultra-play} & \texttt{antmaze-large-diverse} & \texttt{antmaze-large-play} & \texttt{kitchen-partial} & \texttt{kitchen-mixed} \\ 
+\midrule 
+CQL & - & - & 25 $\rightarrow$ 87 & 34 $\rightarrow$ 76 & 71 $\rightarrow$ \textbf{75} & 56 $\rightarrow$ 50 \\ 
+IQL & 13 $\rightarrow$ 29 & 17 $\rightarrow$ 29 & 40 $\rightarrow$ 59 & 41 $\rightarrow$ 51 & 40 $\rightarrow$ 60 & 48 $\rightarrow$ 48 \\ 
+AWAC & - & - & 00 $\rightarrow$ 00 & 00 $\rightarrow$ 00 & 01 $\rightarrow$ 13 & 02 $\rightarrow$ 12 \\ 
+O3F & - & - & 59 $\rightarrow$ 28 & 68 $\rightarrow$ 01 & 11 $\rightarrow$ 22 & 06 $\rightarrow$ 33 \\ 
+ODT & - & - & 00 $\rightarrow$ 01 & 00 $\rightarrow$ 00 & - & - \\ 
+CQL+SAC & - & - & 36 $\rightarrow$ 00 & 21 $\rightarrow$ 00 & 71 $\rightarrow$ 00 & 59 $\rightarrow$ 01 \\ 
+Hybrid RL & - & - & $\rightarrow$ 00 & $\rightarrow$ 00 & $\rightarrow$ 00 & $\rightarrow$ 01 \\ 
+SAC+od & - & - & $\rightarrow$ 00 & $\rightarrow$ 00 & $\rightarrow$ 07 & $\rightarrow$ 00 \\ 
+SAC & - & - & $\rightarrow$ 00 & $\rightarrow$ 00 & $\rightarrow$ 03 & $\rightarrow$ 02 \\ 
+IQL+od & $\rightarrow$ 04 & $\rightarrow$ 05 & $\rightarrow$ 71 & $\rightarrow$ 56 & $\rightarrow$ 74 & $\rightarrow$ 61 \\ 
+FamO2O & - & - & $\rightarrow$ 64 & $\rightarrow$ 61 & - & - \\
+RLPD & 00 $\rightarrow$ 00 & 00 $\rightarrow$ 00 & 00 $\rightarrow$ \textbf{94} & 00 $\rightarrow$ 81 & - & - \\
+Cal-QL & 05 $\rightarrow$ 05 & 15 $\rightarrow$ 13 & 33 $\rightarrow$ \textbf{95} & 26 $\rightarrow$ \textbf{90} & 67 $\rightarrow$ \textbf{79} & 38 $\rightarrow$ \textbf{80} \\ 
+\textbf{U2O (Ours)} & 22 $\rightarrow$ \textbf{54} & 17 $\rightarrow$ \textbf{58} & 11 $\rightarrow$ \textbf{95} & 14 $\rightarrow$ \textbf{88} & 48 $\rightarrow$ \textbf{75} & 48 $\rightarrow$ 74 \\ 
+\bottomrule
+\end{tabular}}
+
+\label{tab:performance}
+\end{center}
+}
+\end{table*}
+
+
+
+\begin{figure*}[t]
+\centering
+\begin{subfigure}[t]{1.0\textwidth}
+\centering
+  \includegraphics[width=0.55\linewidth]{figures/legend.pdf}
+\end{subfigure}
+\hspace*{\fill}
+
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/walker_run.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/cheetah_run.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/quadruped_run.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/jaco_reach_top_left.pdf}
+\end{subfigure}
+
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/walker_flip.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/cheetah_run_backward.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/quadruped_jump.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/jaco_reach_top_right.pdf}
+\end{subfigure}
+
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/walker_stand.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/cheetah_walk.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/quadruped_stand.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/jaco_reach_bottom_left.pdf}
+\end{subfigure}
+
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/walker_walk.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/cheetah_walk_backward.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/quadruped_walk.pdf}
+\end{subfigure}
+\begin{subfigure}{0.245\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/jaco_reach_bottom_right.pdf}
+\end{subfigure}
+
+\caption{
+\footnotesize
+\textbf{
+Learning curves during online RL fine-tuning (8 seeds).} 
+A single pre-trained model from U2O can be fine-tuned to solve multiple downstream tasks. Across the embodiments and tasks, our U2O RL matches or outperforms standard offline-to-online RL and off-policy online RL with offline data even though U2O RL uses a single task-agnostic pre-trained model. 
+}
+\label{fig:dmc_full}
+\end{figure*}
+
+\subsection{Can a single pre-trained model from U2O be fine-tuned to solve multiple tasks?}
+
+\label{subsec:full_exorl_experiments}
+One important advantage of U2O RL is that it can reuse a single task-agnostic dataset for multiple different downstream tasks,
+unlike standard offline-to-online RL.
+To demonstrate this, we train U2O RL with four different tasks from the same task-agnostic ExORL dataset on each DMC environment,
+and report the full training curves in Figure~\ref{fig:dmc_full}.
+The results show that, for example, a single pre-trained model on the Walker domain can be fine-tuned for all four tasks (Walker Run, Walker Flip, Walker Stand, and Walker Walk).
+Note that even though U2O RL uses a single task-agnostic pre-trained model, the performance of U2O RL matches or even outperforms O2O RL, which pre-trains a model with task-specific rewards.
+\subsection{Why does U2O RL often outperform supervised offline-to-online RL?}
+\label{sec:analysis_feature}
+
+\begin{figure*}[h]
+    \hfill
+    \begin{subfigure}[b]{0.24\linewidth}
+    \includegraphics[width=\linewidth]{figures/walker_run_dot_prod.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.24\linewidth}
+    \includegraphics[width=\linewidth]{figures/cheetah_run_dot_prod.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.23\linewidth}
+    \includegraphics[width=\linewidth]{figures/antmaze_large_diverse_dot_prod.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.23\linewidth}
+    \includegraphics[width=\linewidth]{figures/kitchen_partial_dot_prod.pdf}
+    \end{subfigure}
+    \hfill
+\caption{
+\footnotesize
+\textbf{Feature dot products during offline RL pre-training (lower is better, 8 seeds).}
+The plots show that \emph{unsupervised} offline pre-training effectively prevents
+feature collapse (co-adaptation),
+yielding better representations than supervised offline pre-training.
+}
+\label{fig:dot_prod}
+\end{figure*}
+
+In the above experiments, we showed that our unsupervised-to-online RL framework
+often even outperforms previous supervised offline-to-online RL methods.
+We hypothesized in Section~\ref{sec:why} that this is because unsupervised offline pre-training yields
+better \emph{representations} that facilitate online task adaptation.
+To empirically verify this hypothesis,
+we measure the quality of the value function representations using the method proposed by \citet{kumar2022dr}.
+Specifically, we define the value features $\zeta_\phi(s, a)$
+as the penultimate layer of the value function $Q_{\phi}$,
+\ie, $Q_{\phi}(s, a) = w_\phi^\top \zeta_\phi(s, a)$,
+and measure the dot product between consecutive state-action pairs, $\zeta_\phi(s, a)^\top \zeta_\phi(s', a')$~\citep{kumar2022dr}.
+Intuitively, this dot product represents the degree to which these two representations are ``collapsed'' (or ``co-adapted''),
+which is known to be correlated with poor performance~\citep{kumar2022dr} (\ie, the lower the better).
+
+Figure~\ref{fig:dot_prod} compares the dot product metrics of
+unsupervised offline RL (in U2O RL) and supervised offline RL (in O2O RL) on four benchmark tasks.
+The results suggest that our unsupervised multi-task pre-training effectively prevents feature co-adaptation
+and thus indeed yields better representations across the environments.
+This highlights the benefits of unsupervised offline pre-training,
+and (partially) explains the strong online fine-tuning performance of U2O RL.
+We additionally provide further analyses with different offline unsupervised RL algorithms
+
+\subsection{Is fine-tuning better than other alternative strategies (\eg, hierarchical RL)?}
+\label{subsec:hrl}
+
+In this work, we focus on the \emph{fine-tuning} of offline pre-trained skill policies,
+but this is not the only way to leverage pre-trained skills for downstream tasks.
+To see how our fine-tuning scheme compares to other alternative strategies,
+we compare U2O RL with three previously considered approaches:
+\textbf{hierarchical RL} (\textbf{HRL}, \eg, \textbf{OPAL}~\citep{ajay2021opal}, \textbf{SPiRL}~\citep{pertsch2021accelerating})~\citep{ajay2021opal, pertsch2021accelerating, touati2022does, park2024foundation, hu2024unsupervised},
+\textbf{zero-shot RL}~\citep{touati2022does, park2024foundation},
+and \textbf{PEX}~\citep{zhang2023policy}.
+HRL additionally trains a high-level policy that combines fixed pre-trained skills in a sequential manner.
+Zero-shot RL simply finds the skill policy that best solves the downstream task, with no fine-tuning or hierarchies.
+PEX combines fixed pre-trained multi-task policies and a newly initialized policy with a multiplexer that chooses the best policy.
+
+\begin{wrapfigure}{R}{0.5\linewidth}
+    \begin{subfigure}[t]{1.0\linewidth}
+    \centering
+      \includegraphics[width=1.0\linewidth]{figures/legend_ft.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.475\linewidth}
+    \includegraphics[width=\linewidth]{figures/walker_run_pex.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.475\linewidth}
+    \includegraphics[width=\linewidth]{figures/antmaze_large_diverse_hrl.pdf}
+    \end{subfigure}
+    \hfill
+\caption{
+\footnotesize
+\textbf{Fine-tuning is better than previous strategies, such as hierarchical RL, zero-shot RL, and PEX (8 seeds).}
+}
+\label{fig:hrl}
+\end{wrapfigure}
+
+Figure~\ref{fig:hrl} shows the comparison results
+on top of the same pre-trained unsupervised skill policy.
+Since PEX is not directly compatible with IQL, we evaluate PEX only on the tasks with TD3 (\eg, ExORL tasks).
+The plots suggest that our fine-tuning strategy leads to
+significantly better performance than previous approaches.
+This is because pre-trained offline skill policies are often not perfect
+(due to the limited coverage or suboptimality of the dataset),
+and thus using a fixed offline policy
+is often not sufficient to achieve strong performance in downstream tasks.
+
+\subsection{Ablation study}
+\label{sec:ablation_study}
+\begin{figure}[h]
+    \centering
+    \begin{minipage}[t!]{0.49\textwidth}
+        \centering
+        \includegraphics[width=0.55\linewidth]{figures/legend_reward.pdf}
+        \includegraphics[width=0.49\textwidth]{figures/walker_run_rew_scale.pdf}
+        \includegraphics[width=0.49\textwidth]{figures/cheetah_run_rew_scale.pdf}
+        \caption{\footnotesize \textbf{Ablation study of reward scale matching (4 seeds).}}
+        \label{fig:reward_scale}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t!]{0.49\textwidth}
+        \centering
+        \includegraphics[width=0.75\linewidth]{figures/legend_transfer.pdf}
+        \includegraphics[width=0.49\textwidth]{figures/walker_run_phi_val_abl.pdf}
+        \includegraphics[width=0.49\textwidth]{figures/antmaze_large-diverse_phi_val_abl.pdf}
+        \caption{
+            \footnotesize
+            \textbf{Ablation study of value transfer and policy transfer (4 seeds).}
+            }
+        \label{fig:abl_policy_val}
+    \end{minipage}
+\end{figure}
+\textbf{Reward scale matching.}
+In Section~\ref{sec:bridging}, we propose a simple reward scale matching technique that bridges the gap between intrinsic rewards and downstream task rewards.
+We ablate this component, and report the results in Figure~\ref{fig:reward_scale}.
+The results suggest that our reward scale matching technique
+effectively prevents a performance drop at the beginning of the online fine-tuning stage,
+leading to substantially better final performance on dense-reward tasks (\eg, Walker Run and Cheetah Run).
+\textbf{Value transfer vs. policy transfer.}
+In our U2O RL framework, we transfer \emph{both} the value function and policy from unsupervised pre-training to supervised fine-tuning.
+To dissect the importance of each component, we conduct an ablation study,
+in which we compare four settings: (1) without any transfer,
+(2) value-only transfer, (3) policy-only transfer,
+and (4) full transfer.
+Figure~\ref{fig:abl_policy_val} demonstrates the ablation results on Walker and AntMaze.
+The results suggest that both value transfer and policy transfer matter in general,
+but value transfer is more important than policy transfer.
+This aligns with our findings in Section~\ref{sec:analysis_feature} as well as \citet{kumar2022dr},
+which says that the quality of value features often correlates
+with the performance of TD-based RL algorithms.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+
+In this work, we investigated how unsupervised pre-training of diverse policies
+enables better online fine-tuning
+than standard supervised offline-to-online RL.
+We showed that our U2O RL framework often achieves even better performance and stability
+than previous offline-to-online RL approaches,
+thanks to the rich representations learned by pre-training on diverse tasks.
+We also demonstrated that U2O RL enables reusing a single offline pre-trained policy for multiple downstream tasks.
+
+\textbf{Do we expect U2O RL to be \emph{always} better than O2O RL?}
+While we showed strong results of U2O RL throughout the paper, our framework does have limitations.
+One limitation is that U2O RL may not be as effective
+
+which leaves little room for improvement for unsupervised offline RL compared to task-specific supervised offline RL.
+We believe U2O RL can be most effective (compared to standard offline-to-online RL)
+when the dataset is highly diverse so that unsupervised offline RL methods can learn a variety of behaviors and thus learn better features and representations.
+Nonetheless, given the recent successes in large-scale self-supervised and unsupervised pre-training from unlabeled data,
+we believe our U2O RL framework serves as a step toward a general recipe for scalable data-driven decision-making.
+
+
+
+
+
+
+
+\begin{ack}
+We thank Qiyang Li, Mitsuhiko Nakamoto, Kevin Frans, Younggyo Seo, Changyeon Kim, and Juyong Lee for insightful discussions and helpful feedback on earlier drafts of this work.
+This work was partly supported by the Korea Foundation for Advanced Studies (KFAS), ONR N00014-21-1-2838, and Intel.
+This research used the Savio computational cluster resource provided by the Berkeley Research Computing program at UC Berkeley. 
+\end{ack}
+
+
+
+
+

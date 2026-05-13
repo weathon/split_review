@@ -1,0 +1,326 @@
+\title{Chain-of-Knowledge: Grounding Large Language Models via Dynamic Knowledge Adapting over Heterogeneous Sources}
+
+\begin{abstract}
+
+We present chain-of-knowledge (CoK)
+, a novel framework that augments large language models (LLMs) by dynamically incorporating grounding information from heterogeneous sources. It results in more factual rationales and reduced hallucination in generation. 
+Specifically, CoK consists of three stages: reasoning preparation, dynamic knowledge adapting, and answer consolidation. 
+Given a knowledge-intensive question, CoK first prepares several preliminary rationales and answers while identifying the relevant knowledge domains.
+If there is no majority consensus among the answers from samples, CoK corrects the rationales step by step by adapting knowledge from the identified domains.
+These corrected rationales can plausibly serve as a better foundation for the final answer consolidation.
+Unlike prior studies that primarily use unstructured data, CoK also leverages structured knowledge sources such as Wikidata and tables that provide more reliable factual information.
+To access both unstructured and structured knowledge sources in the dynamic knowledge adapting stage, we propose an adaptive query generator that allows the generation of queries for various types of query languages, including SPARQL, SQL, and natural sentences. Moreover, to minimize error propagation between rationales, CoK corrects the rationales progressively using preceding corrected rationales to generate and correct subsequent rationales. %  dynamically grounds each rationale, \ie iteratively 
+Extensive experiments show that CoK consistently improves the performance of LLMs on knowledge-intensive tasks across different domains.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+In recent years, large language models (LLMs) such as ChatGPT \citep{openai2023gpt4} have demonstrated impressive language generation capabilities \citep{cheng2023gpt4,ding2022gpt,chen2024chatgpts}.
+However, one major challenge of LLMs lies in hallucination, which is their tendency to confidently generate plausible but factually incorrect texts \citep{Ji_2023,zhao2023chatgptlike}.
+As shown in Figure \ref{fig:cok_intro}, given a question, 
+{``What year was the Argentine actor who directed El Tio Disparate born?''} which requires factual knowledge to answer, the most advanced LLMs often provide an incorrect answer. 
+While LLMs have the remarkable capability to recall information from their training data, effectively updating or controlling the factual knowledge within these models remains challenging \citep{Luo2023AugmentedLL}.
+
+A promising direction to address hallucination in generation is to augment the LLMs with external knowledge  \citep{Mialon2023AugmentedLM}. These methods involve incorporating LLMs with a retrieval system, which seeks to utilize external factual knowledge to guide the generation process. Instead of relying solely on the internal training knowledge of LLMs, these methods can fetch relevant information from external knowledge sources, such as web documents \citep{shi2023replug} and knowledge bases \citep{xie-etal-2022-unifiedskg}. Furthermore, to tackle more complex questions that require intricate reasoning, \citet{zhao2023verifyandedit} recently proposed a Verify-and-Edit (VE) framework, which improves chain-of-thought (CoT) reasoning \citep{wei2023chainofthought} of LLMs by incorporating a retrieval system.
+
+However, these methods have three inherent limitations.
+First, they use a fixed knowledge source for all questions, which may fail to retrieve specialized and domain-specific knowledge. For instance, it may not be effective to query Wikipedia for a medical question. 
+Second, to generate retrieval queries, existing methods primarily rely on LLMs, which are predominantly pre-trained on natural language sentences, and thus 
+may not be effective in generating structured queries like SPARQL, which is used to query knowledge graphs. 
+Third, existing retrieval-augmented methods lack {progressive correction capability}, leading to potential error propagation. For example, in Figure \ref{fig:cok_intro}, {we define each rationale to be a thought step (sentence) within the CoT.} {Verify-and-Edit}
+retrieves knowledge for each rationale in parallel {and independently}. Since the second rationale depends on the first, errors can carry over from {the \emph{verification} step} to the {\emph{edit} step}, making the retrieved knowledge misaligned with each other and the actual question, resulting in an incorrect final answer. 
+{Similarly, ReAct \citep{yao2023react} also leaves errors {from prior (\emph{reason} or \emph{act}) steps} in the prompt, causing potential noise and bias {for LLM inference}.}
+\input{assets/cok_intro}
+
+To address these limitations, we propose chain-of-knowledge (CoK), a framework that augments LLMs dynamically using heterogeneous {knowledge} sources. 
+An example of how CoK functions is shown in Figure \ref{fig:cok_intro}, for the question, 
+{``What year was the Argentine actor who directed El Tio Disparate born?'',}
+CoT with self-consistency \citep{wei2023chainofthought} is first utilized to generate preliminary rationales, pinpoint the relevant knowledge domains, and select answers that lack a majority consensus for further processing. 
+In the subsequent dynamic knowledge adapting stage, an adaptive query generator (AQG) is employed to generate queries for the knowledge sources within the selected domains. To effectively retrieve knowledge with heterogeneous formats, AQG can adaptively generate queries of the corresponding types, such as SPARQL and natural sentence (see Figure \ref{fig:cok_method}). 
+Subsequently, by executing the generated queries, supporting knowledge is obtained and utilized to edit the first rationale 
+{(\ie rectify the director from Fernando Birri to Palito Ortega);}
+it ensures mistakes do not propagate into the subsequent generation {of the second rationale}.
+The same process is then applied to edit the second rationale.
+Finally, with the corrected chain of rationales, CoK derives the final answer.
+
+\input{assets/cok_method}
+Given that different knowledge sources require distinct query languages, AQG holds a crucial role in generating queries.
+AQG is versatile and can either be a fine-tuned model like Llama-2 \citep{touvron2023llama} with LoRA \citep{hu2021lora} or an off-the-shelf LLM like ChatGPT. 
+By leveraging both unstructured and structured knowledge sources, CoK allows for better factual accuracy, improved reliability, and easier information updates.
+
+To summarize, our key contributions are the following: 
+(1) We introduce chain-of-knowledge (CoK), a novel framework to enhance the factual correctness of LLMs with heterogeneous knowledge sources; 
+(2) We propose an adaptive query generator (AQG), specially designed to generate queries tailored to each knowledge source. AQG is versatile and can seamlessly transition between fine-tuned models and black-box LLMs;
+(3) CoK corrects the rationales progressively, ensuring that inaccuracies from preceding rationales do not propagate into the subsequent steps;
+(4) We perform extensive experiments on knowledge-intensive tasks spanning a range of domains, including factual, medical, physical, and biological. 
+CoK outperforms the CoT baseline by 4.3\% on average.
+
+
+
+\section{The Chain-of-Knowledge Framework}
+
+
+
+As shown in Figure \ref{fig:cok_method}, the CoK framework consists of three stages: (1) reasoning preparation, (2) dynamic knowledge adapting, and (3) answer consolidation. {In the first stage,} given a knowledge-intensive question, CoK 
+generates preliminary rationales, \ie reasoning units/sentences in the reasoning chain of CoT, and answers while identifying the relevant knowledge domains.
+Questions that do not yield a majority consensus 
+in their answers enter the dynamic knowledge adapting stage, in which 
+an adaptive query generator (AQG) is employed to generate queries to retrieve knowledge from the knowledge sources of the identified domain.
+The rationales are progressively revised and generated based on the retrieved knowledge.
+The final answer is then derived based on the corrected rationales.
+
+\subsection{Reasoning Preparation Stage}
+\label{sec:reason_prepare}
+In real-world scenarios, when facing a complex knowledge-intensive question, it is necessary to generate intermediate rationales before producing the final answer \citep{wei2023chainofthought}. 
+Moreover, before delving into external knowledge sources to address the question, it is crucial to identify the relevant knowledge domains for effective retrieval.
+Thus, the reasoning preparation stage consists of two essential components, namely, reasoning generation and knowledge domain selection.
+
+\paragraph{Reasoning Generation} 
+Previous studies have demonstrated the importance of intermediate rationales for LLMs to answer complex reasoning questions \citep{wei2023chainofthought}.
+In this work, we utilize the {few-shot} chain-of-thought (CoT) prompting to generate rationales \citep{wei2023chainofthought}. 
+Moreover, we employ the self-consistency method {\citep{wang2023selfconsistency}} to determine whether external knowledge is necessary to answer the question.
+In sampling various reasoning paths and answers, self-consistency is found to be highly correlated with accuracy. Thus, predictions with high consistency are preserved without modification. Only questions with ``uncertain'' answers, \ie their consistency falls below a specified threshold, undergo further stages of processing. 
+Such filtering technique is found to be useful in identifying incorrect predictions by previous works \citep{yao2023react, zhao2023verifyandedit}.
+
+\paragraph{Knowledge Domain Selection}
+To ensure the retrieval of the most pertinent knowledge to the question, we introduce the knowledge domain selection step.
+As shown in Figure \ref{fig:cok_method}, CoK integrates four distinct knowledge domains: factual, medical, physics, and biology.
+Moreover, multiple domains can be identified for answering a single question. 
+To illustrate, when presented with the question ``Who proposed the theory which explains the cause of tides?'', both physics (gravitational force of the Moon causes tides) and factual (Isaac Newton first proposed the universal gravitation and explained tidal forces exerted by celestial bodies) domain knowledge are required to answer the question.
+The knowledge domain selection is completed through in-context learning. 
+
+\subsection{Dynamic Knowledge Adapting Stage}
+Once the preliminary rationales and the identified knowledge domains are obtained, the next stage is dynamic knowledge adapting, \ie rectifying rationales based on the retrieved knowledge. To minimize error propagation, CoK conducts knowledge retrieval and correction of the rationales sequentially. The preceding corrected rationales are used to generate the next rationale, which then undergoes the same knowledge retrieval and correction step. 
+\paragraph{Knowledge Retrieval}
+Upon identifying relevant domains to the question in the reasoning preparation stage, all knowledge sources within these domains are utilized for knowledge retrieval.
+The knowledge retrieval consists of two steps: query generation and execution.
+
+\forceindent \textbf{A) Query Generation}
+{Depending on the nature of the knowledge sources,} each {source} is linked to {the most appropriate} query language, which could either be structured, {such as} SPARQL or SQL, or unstructured, {such as} natural language sentences.
+For instance, Wikidata is linked to the SPARQL query as it consists of knowledge graphs. The flashcard source is linked to the natural sentence query as it takes the format of natural sentence pairs.
+An example of generated queries for SPARQL is shown in Table \ref{tab:aqg_example}.
+}
+{For instance, given a sentence ``Souleyman Sané's son, Leroy Sané, is a professional football player'', a SPARQL query, ``\texttt{SELECT ?answer WHERE \{wd:/Souleymane Sané/ wdt:/child/ ?answer.\}}'', is generated to retrieve relevant knowledge from Wikidata.}
+To facilitate the generation of both structured and unstructured queries, an adaptive query generator (AQG) is used. AQG is a versatile plug-in component,
+which can be either a tailor-finetuned model or an off-the-shelf LLM. Details of AQG will be elaborated in Section \ref{sec:aqg}.
+
+\input{assets/query_lang_table}
+
+\forceindent \textbf{B) Query Execution}
+{Once the queries are generated, the subsequent step is their execution to acquire and convert the knowledge into formatted knowledge (see Table \ref{tab:aqg_example}).}
+A specialized method is devised to execute queries and format the results for each query language.
+For SPARQL queries, entity linking is initially performed to substitute entity spans with IDs, followed by acquiring results by invoking the API of \texttt{wikidata.org}. 
+Regarding SQL queries, they are executed directly to fetch the results, which could be a singular value or a subset of the original table.
+The outcomes from both SPARQL and SQL are then formatted into markdown text.
+For natural sentence queries, knowledge is retrieved from domain-specific knowledge sources either through sentence similarity matching or by utilizing a search engine.
+}
+\paragraph{Rationale Correction} 
+Existing methods such as ReAct \citep{yao2023react} and Verify-and-Edit \citep{zhao2023verifyandedit} keep {all retrieved information}  in the context throughout the process, no matter if it contains reasoning mistakes. This often leads to error propagation and misguides further generations.
+To overcome this weakness, CoK involves a
+{progressive} rationale correction step.
+{Given the current rationale and the formatted knowledge from various knowledge sources, a corrected rationale is generated to replace the current one.}
+This step helps in rectifying any factual incorrectness and preventing error propagation.
+
+\paragraph{Next Rationale Generation} Using the question and preceding corrected rationales, the next rationale is generated, and the process is reiterated for the new rationale until a final answer is produced.
+
+\subsection{Answer Consolidation Stage} 
+Ultimately, the LLM is prompted with the question and corrected rationales to generate a consolidated answer, which is expected leading to a more accurate answer. 
+This hypothesis is further examined through a series of experiments, as detailed in Section \ref{sec:exps}.
+
+
+
+\section{The Adaptive Query Generator}
+
+\label{sec:aqg}
+CoK incorporates heterogeneous knowledge sources from four different domains, including factual, medical, physics, and biology. 
+Each of these knowledge sources necessitates the use of a unique query language for retrieval, which could be either structured or unstructured.
+Therefore, we design the adaptive query generator (AQG) to facilitate query generation for different knowledge sources.
+
+\paragraph{\textbf{Unstructured Query Languages}} Natural language sentences are the most natural way that human beings search for information.
+AQG utilizes two distinct approaches for generating unstructured queries based on the knowledge sources.
+\textbf{A)} {For general factual knowledge sources, such as Wikipedia, }
+ChatGPT is utilized.
+\textbf{B)} 
+For domain-specific knowledge sources
+(\eg Flashcard, ScienceQA Physics, and ScienceQA Biology), using ChatGPT may lead to hallucination 
+{as it may not have comprehensive knowledge of the specific domains.}
+Therefore, we instruction-tune LLaMA-2-7B using LoRA 
+{with pairs of input texts and output queries}.
+{
+Furthermore, the domain of the training data is on par with the respective knowledge source. Consequently, the AQG is equipped with the requisite knowledge for generating queries with greater precision.
+}
+\paragraph{\textbf{Structured Query Languages}} Querying unstructured knowledge sources often leads to the retrieval of irrelevant and redundant information.
+On the other hand, structured knowledge sources (\eg Wikidata and tables) provide {direct}
+factual results.
+To generate structured queries, AQG utilizes two approaches based on the query languages.
+\textbf{A)} When generating commonly used query languages like SQL, we employ ChatGPT. It is empirically inferred that ChatGPT included SQL during its pre-training, providing it with advantages in generating SQL queries \citep{openai2023gpt4}. 
+{
+All pertinent details are incorporated into the prompt to enhance the precision of query generation. 
+For instance, when generating SQL queries, we include both the table schema and data snippets.
+}
+\textbf{B)} For less common languages like SPARQL, we instruction-tune LLaMA-2-7B using LoRA with sentence-SPARQL pairs. 
+{
+The training data is collected to match the logical granularity of the rationales, thereby facilitating more accurate query generation. For example in SPARQL, both training data and rationales contain single entity and relation within each sentence.
+}
+Inspired by chain-of-hindsight \citep{liu2023chain}, besides giving the correct queries, we also append negative examples such as ``incorrect queries:..'' during instruction-tuning.
+
+
+
+
+\section{Experiments}
+
+\label{sec:exps}
+\input{assets/main_results}
+\subsection{Setup}
+
+\paragraph{Models}
+In our experiments, we utilize ChatGPT (\texttt{gpt-3.5-turbo-0613}) as the black-box LLM for the reasoning preparation and answer consolidation stages.
+To ensure reproducibility, we fixed the decoding temperature to 0 for all generations.
+Except for the self-consistency step, we set the temperature to 0.7, allowing for the sampling of five rationales and answers, as recommended by \citet{wang2023selfconsistency}. {When less than half of the answers agree \footnote{On FEVER, as the output space is limited to 3 answer choices, we always have high consistency. Thus, we use less than 4 out of 5 of the answers agree.}, we edit the results with CoK.}
+
+\paragraph{Knowledge Sources} 
+We choose authoritative knowledge sources for each domain. Specifically, for the factual domain, we use Wikidata, Wikipedia, and Wikitables; for the medical domain, we use medical Flashcard and UpToDate; for physics, we refer to ScienceQA Physics and PhysicsClassroom; and for biology, we utilize ScienceQA Biology and CK-12.
+\paragraph{Tasks}
+We collect a set of knowledge-intensive tasks from various domains, including
+FEVER \citep{thorne-etal-2018-fever}, HotpotQA \citep{yang-etal-2018-hotpotqa}, and FeTaQA \citep{nan-etal-2022-fetaqa} in the factual domain; MedMCQA \citep{pal2022medmcqa} in the medical domain; Physics and Biology tests from MMLU \citep{hendryckstest2021} in the physics and biology domains.
+\paragraph{Baselines}
+We compare CoK with 
+{both} widely used 
+{baselines and }state-of-the-art methods to provide a more comprehensive overview:
+A) Standard prompting (\textbf{Standard}) directly predicts the answer \citep{ouyang2022training}.
+B) Chain-of-thought (\textbf{CoT}) \citep{wei2023chainofthought} generates several intermediate rationales before the final answer to improve the complex reasoning capability of LLMs.
+C) CoT with self-consistency (\textbf{CoT-SC}) \citep{wang2023selfconsistency} replaces the naive greedy decoding in CoT with sampling a diverse set of rationales and outputs the most consistent \footnote{Note that self-consistency is not applicable for FeTaQA as it is an open-ended generation task, and we can have near-equivalent generations that are nevertheless not exact matches
+\ref{app:more_experiment_details}.} 
+answers.
+D) Verify-and-Edit (\textbf{VE}) \citep{zhao2023verifyandedit} is a {state-of-the-art, CoT-based} 
+framework that seeks to improve the prediction factuality by post-editing rationales with external knowledge. 
+E) \textbf{ReAct} \citep{yao2023react} combines agent thoughts and open-domain knowledge search to reach a final answer.
+\footnote{We report the results for ReAct separately in Table \ref{tab:fever_hotpotqa_exp} as it uses the PaLM model \citep{chowdhery2022palm}.}
+{Following the baselines, we evaluate using the few-shot setting and ensure that all methods use the same number of demonstration samples.}
+\footnote{
+
+Our work focuses on few-shot settings, thus not including supervised methods as baselines.}
+
+\subsection{Results}
+\paragraph{\textbf{CoK Consistently Outperforms CoT}}
+As shown in Table \ref{tab:main_exp}, CoK consistently outperforms CoT {and CoT-SC} on each dataset.
+{On factual-domain tasks, the average improvement on 3-shot and 6-shot is prominent} on HotpotQA {and FEVER}, registering at {2.6\%} and {4.3\%} respectively. 
+{This suggests that CoK is not only effective on multi-step reasoning datasets (HotpotQA), but benefits less single-hop datasets (FEVER) as well with its accurate retrieval abilities.}
+On domain-specific datasets, such as MedMCQA, and MMLU Physics and Biology, CoK achieves an average accuracy improvement of {4.9\%} over the CoT baseline on 3-shot and 6-shot settings.
+We notice that CoT has worse performances than standard prompting on {FetaQA,} MedMCQA, and MMLU Physics.
+This illustrates that, while CoT is effective for addressing complex reasoning tasks, it struggles with hallucination in its rationales when handling knowledge-intensive tasks, 
+leading to incorrect answers.
+This outcome aligns with the findings of \citet{yao2023react} and \citet{zhao2023verifyandedit} as well.
+With dynamic knowledge adapting, CoK can effectively reduce hallucination in the rationales and 
+{we include analysis on the factual accuracy in Section \ref{sec:factuality}.} 
+
+\paragraph{CoK vs. Other Retrieval-based Methods}
+As shown in Table \ref{tab:main_exp}, CoK consistently outperforms state-of-the-art retrieval-based method Verify-and-Edit (VE) \citep{zhao2023verifyandedit}.
+For FEVER and HotpotQA,
+we additionally compare with the results reported in ReAct \citep{yao2023react} in Table \ref{tab:fever_hotpotqa_exp}.
+Since the results in ReAct are reported on the PaLM model \citep{chowdhery2022palm}, to add a more justified perspective, we report the performance improvement gained on top of the CoT-SC baseline.
+{Compared with ReAct, CoK demonstrates a more substantial improvement over CoT-SC{, especially on HotpotQA. More specifically, for HotpotQA, CoK exhibits improvements of 2.0\% compared to 0.8\% by ReAct. On FEVER, CoK shows a 3.5\% improvement, which is on par with the 4.2\% improvement gained by ReAct. This is attributed to the fact that FEVER is less multi-hop compared to HotpotQA, thus benefitting less from an improved CoT.}
+VE conducts knowledge retrieval and editing for all rationales in parallel, and ReAct leaves past errors in the prompt, potentially leading to error propagation.
+CoK alleviates this issue with progressive knowledge adapting
+
+\paragraph{Effect of Number of Demonstrations
+}
+\input{assets/heatmap}
+As shown in Table \ref{tab:main_exp}, CoK consistently exhibits enhanced performance across multiple datasets under both 3-shot and 6-shot settings.
+Several studies show that increasing the number of 
+{demonstrations}
+(shots) in the prompt can potentially lead to better performances on reasoning tasks \citep{wei2023chainofthought}.
+However, this is not {universally} true for knowledge-intensive tasks. 
+For example, as shown in Table \ref{tab:main_exp}, the performance of CoT on MMLU Biology with six shots (81.7\%) is nearly identical to that with three shots (81.5\%).
+This occurs because the bottleneck for LLMs in answering knowledge-intensive questions accurately is their insufficient knowledge, not their reasoning capability. {The performance on FEVER
+for all reasoning-based methods decrease with six shots. This is likely due to the fact that FEVER questions are single-hop and require less reasoning. Thus, increased guidance on reasoning could lead to potential noise.
+This finding is consistent with ReAct \citep{yao2023react}, where the authors state that increasing beyond 3-shot for FEVER does not lead to better performance.}
+
+\input{assets/single_multiple_domain_source}
+\input{assets/last_three_tables}
+
+
+\section{Analysis}
+
+\subsection{Single vs. Multiple Knowledge Domains and Sources}
+As outlined in Section \ref{sec:reason_prepare}, CoK integrates a step to select the appropriate knowledge domains for each question.
+This step is crucial to ensure that CoK can retrieve the most pertinent knowledge to correct the rationales and answer the questions accurately.
+It is possible that multiple knowledge domains can be chosen for one question, and within each domain, there are several knowledge sources.
+In this subsection, we investigate the necessity of utilizing multiple knowledge domains and sources. 
+}
+
+\paragraph{Single vs. Multiple Knowledge Domains}
+We show the domain distributions identified for each dataset in Figure \ref{fig:heatmap}.
+{Notably, we find that CoK predominantly selects one knowledge domain for each dataset, while a small number of cases call for multiple domains.}
+{For instance, the primary knowledge domain for MedMCQA is Medical, and 17.8\% of the questions identify Biology as a relevant domain as well.}
+Furthermore, we conduct ablation experiments to demonstrate the necessity of utilizing multiple domains.
+As shown in Table \ref{tab:single_multiple}, compared to only using Medical domain knowledge, CoK using additional knowledge from the Biology domain further improves the performance by {1.3\%}.
+This indicates that knowledge spanning multiple domains is needed for answering some questions, underscoring the necessity of incorporating various knowledge domains.
+\paragraph{Single vs. Multiple Knowledge Sources}
+Within one domain, numerous credible knowledge sources exist, and it is unfeasible for a single source to encompass all knowledge from the domain.
+Therefore, it is important to utilize multiple knowledge sources within one domain. 
+For instance, as shown in Table \ref{tab:single_multiple}, the performance of CoK improves by {2.1\%} when utilizing both Flashcard and UpToDate as medical knowledge sources, compared to using only Flashcard.
+\footnote{Note that using external sources may have limitations such as noise or conflicts between different sources
+
+\subsection{Parallel vs. Dynamic Knowledge Adapting}
+As aforementioned, dynamic knowledge adapting helps CoK prevent error propagation, here we take a closer look at how much improvement it brings in. 
+As shown in Table \ref{tab:para_dyn}, the performance of CoK improves by 4.2\% compared with CoT when dynamic knowledge adapting is applied.
+However, parallel editing leads to poorer performance due to error propagation for rationales.
+
+\subsection{Evaluating Factuality Improvement of the Rationales}
+\label{sec:factuality}
+{While the main results have shown that CoK effectively improves the performance of LLMs in knowledge-intensive tasks, we are also interested in reducing hallucination for the generated rationales.
+Hence, we conduct quantitative and qualitative evaluations to assess the factual accuracy.}
+
+\paragraph{Quantitative Evaluation}
+
+To automatically evaluate how CoK can reduce hallucination in the model outputs, we employ an existing fact-checking method to compare the original and corrected rationales.
+Specifically, we use ProgramFC \citep{pan-etal-2023-fact} which is a state-of-the-art method 
+for judging the factuality of claims with respect to Wikipedia.
+As shown in Table \ref{tab:programfc}, we observe that CoK has improved factual accuracy compared to the CoT-SC baseline on the HotpotQA dataset.
+Notably, the factual accuracy of CoT-SC decreases for rationale 2 compared to rationale 1, which could be due to error propagation. 
+On the other hand, the factual accuracy of CoK improves slightly for the second rationale, which indicates that correcting previous rationales helps the LLM to generate more factual rationales in future steps.
+
+\paragraph{Human Evaluation}
+To qualitatively examine whether CoK could output factually consistent reasoning chains, we also conducted a human study. Specifically, two volunteers are given 100 outputs randomly selected from HotpotQA and FEVER datasets. The selected outputs are balanced, where 50 CoK outputs resulted in incorrect answers, and the other 50 resulted in correct answers. The volunteers are asked to select which reasoning chain is factually correct, or if there is a tie. {Then, they are asked to answer whether the better CoT should lead to better results. The results are given in Table \ref{tab:human_study}. 
+We could observe that volunteers consistently confirm that CoK-generated reasoning chains are factually consistent while the CoT-SC chains are not. For incorrect predictions, 
+humans still believe that 44\% of the time, the CoK-generated CoT is {improved on factual consistency, although it may not contain the necessary information for a correct answer}. Among these instances, humans believe 73\%
+{of the time that these improved CoTs} should have led to better answers. This implies that, even though the CoT quality has been improved, many failure cases are caused by reasoning errors. In general, the two volunteers show a Cohen Kappa's agreement of 0.43, which is considered moderate agreement \citep{landis1977measurement}.
+
+
+
+\section{Related Work}
+
+
+
+\paragraph{Knowledge-Intensive NLP}
+While language models can generate highly coherent text and demonstrate {reasoning abilities}, many real-world tasks require knowledge beyond the local context.
+For example, fact-checking tasks may require models to locate suitable evidence on the internet or refer to external knowledge \citep{thorne-etal-2018-fever}.
+In the realm of natural language processing (NLP), a task is deemed to be knowledge-intensive when it exceeds the reasonable expectation of human capability to solve it without access to external knowledge. 
+The resolution of such knowledge-intensive NLP tasks typically involves the utilization of retriever-reader systems. 
+Initially, a retriever extracts a limited collection of pertinent documents from the knowledge source, after which a reader employs the context extracted to generate an appropriate response \citep{chen-etal-2017-reading,lewis2020retrieval,guu2020retrieval}. 
+Hence, there is an urgent need to develop effective models for knowledge-intensive tasks \citep{petroni-etal-2021-kilt}.
+\paragraph{Augmented Language Models}
+The discipline of augmented language models (ALMs) addresses hallucinations of traditional LLMs by equipping them with improved reasoning capabilities and the capacity to utilize external resources \citep{chung2022scaling}.
+Furthermore, LLMs can learn to leverage external tools or models to accomplish the relevant tasks \citep{schick2023toolformer, shen2023hugginggpt}. 
+ALMs can employ these enhancements independently or combine them in a specific order to complete a given task, ultimately resulting in enhanced 
+capabilities \citep{Mialon2023AugmentedLM,zhao2023retrieving}.
+However, previous works do not consider knowledge from multiple domains and lack progressive editing throughout the generation process, which could lead to error propagation.
+In this work, we propose an efficient framework to solve knowledge-intensive tasks by progressively augmenting them with diverse sources of external knowledge.
+
+
+
+\section{Conclusions}
+
+In this paper, we introduce chain-of-knowledge (CoK), a novel framework designed to enhance the factual correctness of large language models (LLMs).
+CoK represents a promising and comprehensive solution to progressive knowledge-grounded generation by incorporating heterogeneous sources in multiple domains.
+We address the challenge of accurate query generation by proposing the adaptive query generator (AQG) which supports both unstructured and structured query languages.
+The AQG can be easily transitioned between fine-tuned models and black-box LLMs.
+Our experimental results on knowledge-intensive tasks demonstrate the substantial improvement achieved by CoK.
+Furthermore, the modularity of CoK allows its application to various LLMs and different formats of knowledge sources, which addresses important challenges, including privacy concerns, knowledge source reliance, and rapid information updates.
+
+
+
+

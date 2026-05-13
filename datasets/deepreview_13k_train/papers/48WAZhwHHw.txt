@@ -1,0 +1,330 @@
+\title{Planning in Natural Language Improves LLM Search for Code Generation}
+
+\begin{abstract}
+While scaling training compute has led to remarkable improvements in large language models (LLMs), scaling inference compute has not yet yielded analogous gains.
+We hypothesize that a core missing component is a lack of diverse LLM outputs, leading to inefficient search due to models repeatedly sampling highly similar, yet incorrect generations.
+We empirically demonstrate that this lack of diversity can be mitigated by searching over candidate plans for solving a problem in natural language.
+Based on this insight, we propose \method{PlanSearch},
+a novel search algorithm which shows strong results across HumanEval+, MBPP+, and LiveCodeBench (a contamination-free benchmark for competitive coding).
+\method{PlanSearch} generates a diverse set of observations about the problem and uses these observations to construct plans for solving the problem. By searching over plans in natural language rather than directly over code solutions, \method{PlanSearch} explores a significantly more diverse range of potential solutions compared to baseline search methods.
+Using \method{PlanSearch} on top of Claude 3.5 Sonnet achieves a pass@200 of 77.0\% on LiveCodeBench, outperforming both the best pass-rate achieved without any search (pass@1 = 41.4\%) and using standard repeated sampling on top of existing non-search models (pass@200 = 60.6\%).
+Finally, we show that, across all models, search algorithms, and benchmarks analyzed, we can accurately predict performance gains from search as a function of the diversity over generated ideas.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{flushright}
+\textit{``If you fail to plan, you plan to fail.''} \
+--- Mastermind, Taylor Swift
+\end{flushright}
+
+\begin{figure}[!htb]
+    \centering
+    \includegraphics[width=0.75\linewidth]{search-monkey/assets/pass_k_scores_by_model_method_livecodebench_lite_v3.pdf}
+    \caption{Comparison of \method{Repeated Sampling}, both pass@1 and pass@k, and our novel method \method{PlanSearch}. On every model, our method outperforms baselines by a wide margin, with the best model-method combination of Claude 3.5 Sonnet / \method{PlanSearch} achieving performance nearly double that of the best model without search.}
+    \label{fig:bar_chart_livecodebench}
+\end{figure}
+
+The bitter lesson \citep{sutton2019bitter} famously posits that two forms of scaling trump everything else: learning and search. 
+While recent advances in large language models (LLMs) have shown that learning is extremely effective, search has not yet proven its value for LLMs, despite its success with classical machine learning techniques \citep{CAMPBELL200257, silver2016mastering, silver2017mastering, brown2018superhuman, brown2019superhuman, bakhtin2022mastering, metafundamentalairesearchdiplomacyteamfair2022humanlevel}. %
+
+Here, we refer to search as any method of spending compute at inference time to improve overall performance \citep{AISearchBitterLesson}. In this work, we focus our efforts on improving LLM search for code generation, one of the most important current applications of LLMs.
+We hypothesize the major bottleneck preventing widespread use of search at inference time for code is a lack of high-level diversity in model outputs. This lack of diversity is likely in part due to specific post-training objectives commonly used to train LLMs as chatbots, in which models are oftentimes optimized to produce a single correct answer \citep{rafailov2024dpo, ouyang2022rlhf}.
+We empirically demonstrate that this is the case for many open-source language models which have undergone significant post-training. Specifically, we show that in many cases, despite instruction tuned models outperforming base models by large margins on a single sample regime (pass@1), this trend disappears---sometimes even reversing---when generating many samples. We refer to Figure~\ref{fig:basevinstruct_deepseek_mbpp_plus} as an example of this phenomenon.
+
+Furthermore, the lack of diversity is particularly harmful for search algorithms. In the most egregious of cases with little to no diversity, such as greedy decoding, repeated sampling from the model returns highly similar programs, resulting in minimal gain from additional inference-time compute. 
+This diversity problem is also not reflected in many public leaderboards (e.g. LMSYS Chatbot Arena \citep{chiang2024chatbotarenaopenplatform}, LiveCodeBench~\citep{jain2024livecodebench}, OpenLLMLeaderboard \citep{myrzakhan2024openllmleaderboard}), which often report only the pass rate from a single sample of the model, ignoring an entire dimension along which to compare models.
+While the performance of one sample is the primary metric of relevance for applications such as chatbots, as users typically are sensitive to latency, this single scalar is insufficient to fully capture the quality of a model when it is allowed to use more inference-time compute.
+
+\begin{figure}[!h]
+    \centering
+    \includegraphics[width=0.9\linewidth]{search-monkey/assets/openweights_v2.pdf}
+    \caption{An example trajectory of \mname{}, which searches over plans in natural language as a method of increasing diversity in the search process. \mname{} first generates observations, then combinatorially samples subsets of these observations to generate the next step in the search process. To generate the next layer of observations, the combinations derived from the first observations are used as a stepping stone to generate the next observations, and the process repeats. After generating both the first and second order observations, \mname{} then generates a natural language description of a strategy to solve the problem. For additional diversity, the model is prompted to regenerate its strategy as an additional sample before generating code. See Section~\ref{sec:cobs} for additional discussion.}
+    \label{fig:maindiagram}
+\end{figure}
+
+In this paper, we explore several directions for improving the diversity of LLMs at inference time. We hypothesize that the right axis of diversity to search over is the natural language conceptual/idea space, and we validate our hypothesis across several experiments. First, we show that models can produce the correct final program when fed correct solution sketches, where these sketches have been ``backtranslated'' from passing solution code into sketches in idea space (Section~\ref{sec:backtranslation}).
+Second, we show that when models are asked to generate their own ideas before implementing them on LiveCodeBench (\method{IdeaSearch}), their accuracy conditioned on a particular sketch trends towards either 0\% or 100\%, suggesting that most of the variance in passing a particular problem is captured by whether the sketch is correct rather than any other factor.
+These two experiments suggest a natural method to improving LLM search for code generation: by searching for the correct idea to implement.
+Guided by this principle of \emph{maximizing exploration of ideas}, we propose \mname{}. In contrast to many existing search methods that search over individual tokens \citep{zhang2024restmctsllmselftrainingprocess, zhang2023planning}, lines of code \citep{kulal2019spocsearchbasedpseudocodecode}, or even entire programs \citep{li2022alphacode}, \mname{} searches over possible \emph{plans} for solving the problem at hand, where a plan is defined as a collection of high level observations and sketches helpful to solve a particular problem (Figure~\ref{fig:maindiagram}). To generate novel plans, \mname{} generates a number of observations about the problem, before combining these observations into a candidate plan for solving the problem. This is done for every possible subset of the generated observations to maximally encourage exploration in idea space, before the codes are eventually all translated into a final code solution (Section~\ref{sec:cobs}). We find that searching over plans outperforms both standard repeated sampling and directly searching over ideas (\method{IdeaSearch}, introduced in Section~\ref{simple_idea_method}) in terms of effectively using compute at inference time.%
+
+Applying \mname{} on top of Claude 3.5 Sonnet achieves a pass@200 of 77.0\% on LiveCodeBench, outperforming both the best score achieved without search (pass@1 = 41.4\%) and the standard best-of-n sampling score on non-search models (pass@200 = 60.6\%). Furthermore, consistent with recent findings on the effectiveness of search on top of small models \citep{chen2024llmcallsneedscaling, brown2024largelanguagemonkeysscaling, bansal2024smallerweakerbettertraining, wu2024empiricalanalysiscomputeoptimalinference}, running \mname{} on top of a small model (GPT-4o-mini) outperforms larger models not augmented with search after merely 4 attempts. Evaluations of \mname{} across two other coding benchmarks, HumanEval+ and MBPP+~\citep{evalplus}, suggest similar improvements.
+Finally, we measure the diversity of output code over the idea space of all search methods via an LLM-as-a-judge procedure (Section~\ref{measuring_diversity}) and show that the resulting diversity score is highly correlated with the performance gains generated by that search method. This provides further support for our hypothesis that the effective exploration of plans in idea space is key to LLM search for code generation (Figure~\ref{fig:diversity_rel_improvement_livecodebench}).
+
+
+
+
+
+
+
+
+
+\section{Related Work}
+
+We reiterate that search as defined in the context of our paper refers to any method which expends inference time compute to improve performance. We further specify planning as any form of high level observation or abstract thought that assists a model in generating a final solution.
+Our work builds off a long history of work in scaling search and planning.
+\subsection{Search in Classical AI}
+
+Classical search algorithms like breadth-first search, depth-first search, and A* search have been widely used for pathfinding, planning, and optimization \citep{russell2002artificial}. More advanced search techniques like Monte Carlo Tree Search (MCTS) have achieved remarkable success in domains like game playing, enabling superhuman performance in Go \citep{silver2016mastering, silver2017mastering}, Poker \citep{brown2018superhuman,brown2019superhuman} and Diplomacy \citep{metafundamentalairesearchdiplomacyteamfair2022humanlevel}.
+More recently, scaling laws have been found for the performance of AI systems in board games, where ELO improves logarithmically with the amount of compute spent at inference~\citep{jones2021scalinglawsboard}.
+
+\subsection{Search with Language Models}
+\label{sec:related_searchwithlanguagemodels}
+Applying search on top of LLMs has been a topic of much interest, especially with an eye towards code generation \citep{chen2021codex,li2022alphacode}. Historically, methods such as beam search significantly improved performance for translation systems \citep{Freitag_2017}. Closer to the present day, several recent works have explored repeated sampling \citep{chen2024llmcallsneedscaling, brown2024largelanguagemonkeysscaling, bansal2024smallerweakerbettertraining, wu2024empiricalanalysiscomputeoptimalinference} as a search method for improving performance. Repeated sampling is a method which directly generates candidate code solutions from the model many times at moderate to high temperatures in hopes that one of the resulting generations will be correct. However, although these works address the roughly linear increase in pass@k with respect to $\log k$, they only focus on the most basic version of repeated sampling, without searching in idea space.
+
+When combined with a verifier, reward model, or other filtering algorithm to select the best generation (in cases where pass@k is not a viable metric due to lack of test cases), it is also known under the name of best-of-n sampling \citep{mudgal2024controlleddecodinglanguagemodels}. Many works show somewhat good results under intelligent selection of such a filtering algorithm \citep{chen2022codet, chen2024llmcallsneedscaling}.
+Recently, several approaches have demonstrated the power of repeated sampling. For example, repeated sampling from a small model can sometimes outperform taking a single sample from a large model on an equalized compute bases \citep{snell2024scalingllmtesttimecompute}.
+Unlike algorithms such as repeated sampling, which search over the output space, the key insight of \method{PlanSearch} is that it is far more effective to instead search plans over the \emph{latent idea space}. By explicitly searching over different natural language plans before generating the code, we significantly increase the diversity of the final code outputs and thus, the resulting pass@k scores for sufficiently large k.
+
+Regarding searching over plans in natural language, several approaches have also proposed generalizing chain-of-thought~\citep{wei2022chainofthought} reasoning into a search-like process, such as Tree of Thoughts \citep{yao2023tree} and Reasoning via Planning \citep{hao2023reasoninglanguagemodelplanning}.
+However, prior methods have largely demonstrated effectiveness on somewhat contrived problems designed to highlight the power of search, such as the game of 24, or classic planning benchmarks such as Blocksworld~\citep{McDermott_2000}, where both benchmarks are easier to solve by explicitly considering many options, and where the `steps' over which to search over are fairly obvious.
+By contrast, most real-world planning is used to assist in domains that are complex enough to benefit from, but not require, the additional exploration of plans. We demonstrate that \mname, which plans in natural language, outperforms baseline search methods in one such domain: code generation.
+Moreover, our analysis reveals the underlying reason that such search is effective: it increases the diversity of the generated ideas, allowing more efficient search relative to other methods which repeatedly submit highly similar, incorrect solutions. This is consistent with prior work suggesting the importance of diversity in natural language generation \citep{hashimoto2019unifying, zhang2021trading}. Other directions for search include decomposing programs down into smaller parts before solving each one individually \citep{zelikman2023parselalgorithmicreasoninglanguage, zhou2023leasttomostpromptingenablescomplex, gao2023palprogramaidedlanguagemodels}.
+
+\mname{} is also distinct from other methods which explicitly train a model to search or on reasoning traces sampled from the model \citep{zelikman2022star, zhang2023chainofthoughtreasoningpolicyimprovement, zelikman2024quietstarlanguagemodelsteach, openai2024learning} in that \mname{} induces diversity at inference-time and converts an LLM API not designed for search into one that is capable of showing strong gains from search. Separately, there is a large family of work in the agent space, in which outputs from terminal commands or other tools are fed back into the model before the agent is queried for the next step \citep{shinn2023reflexionlanguageagentsverbal, yao2023reactsynergizingreasoningacting, schick2023toolformerlanguagemodelsteach, chen2022codetcodegenerationgenerated}.
+
+
+
+
+\section{Motivation}
+
+
+\begin{figure}[!tb]
+    \centering
+    \includegraphics[width=0.81\linewidth]{search-monkey/assets/basevinstruct_mbpp_plus_DeepSeek-Coder-V2-Lite.pdf}
+    \caption{Despite DeepSeek-Coder-V2-Lite-Base having significantly lower pass@1 than its instruct counterpart, we observe that this trend reverses as $k$ increases, suggesting that the instruct model has less diversity than its base model counterpart.}
+    \label{fig:basevinstruct_deepseek_mbpp_plus}
+\end{figure}
+
+Coding is a powerful area in which search should excel. While search in other domains requires both generating many solutions \emph{and} selecting the correct solution amongst all the resulting generations, coding often only requires the former, as any valid piece of code can be tested via code execution against given test cases. This allows code search algorithms to sidestep many of the issues that plague search algorithms for more open-ended domains (e.g. generating poetry) due to difficulty in selecting correct solutions out of all the generated solutions.
+\begin{figure}[!htb]
+    \centering
+    \begin{subfigure}[t]{0.49\textwidth}
+        \centering
+        \includegraphics[height=0.6\textwidth]{search-monkey/assets/backtranslation_performance.pdf}
+        \caption{Performance of GPT-4o-mini on LiveCodeBench when provided with backtranslated solutions of varying lengths. The baselines plot performance without backtranslated solutions. Providing the model with a compressed solution in natural language, even as short as 10 tokens, significantly increases performance.}
+        \label{fig:backtranslation}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.49\textwidth}
+        \centering
+        \includegraphics[height=0.6\textwidth]{search-monkey/assets/idea_solve_rates_distribution.pdf}
+        \caption{We plot the distribution of solve rates conditioned on being given a solution sketch and without. When conditioning on a given sketch, we notice that downstream solve rates polarize towards either $0\%$ or $100\%$. Most of the variance in performance is predicted by whether a given idea is correct or not.}
+        \label{fig:bimodal_idea}
+    \end{subfigure}
+    \caption{Backtranslation shows the promise of providing good sketches, and conditioning on idea shows the presence of a solution sketch polarizes performance.}
+\end{figure}
+
+\subsection{Defining the Search Space}
+Perhaps the most important question for eliciting strong search capacities is determining which space to search over, as finding the proper layer of abstraction is critical to progress in the field. Prior approaches have varied, with many people searching over individual tokens \citep{zhang2024restmctsllmselftrainingprocess, zhang2023planning}, lines of code \citep{kulal2019spocsearchbasedpseudocodecode}, or even entire programs \citep{li2022alphacode}.
+We hypothesize that the key factor is obtaining \emph{the correct solution sketch}, which we define as a description of the correct program in natural language space. Intuitively, conducting the reasoning process in natural language space allows us to effectively harness the training process of LLMs, which have observed many human reasoning traces in both pre- and post-training. Prior work \citep{wei2022chainofthought} \todolater{cite}has observed strong positive effects from being allowed to conduct such reasoning in natural language, making it a natural place to search over. We describe two experiments providing evidence for this hypothesis by testing on the LiveCodeBench benchmark using GPT-4o-mini as our model. 
+
+\subsection{Backtranslation}
+\label{sec:backtranslation}
+To investigate the hypothesis whether the idea space, instantiated as solution sketches, is the right area of exploration, a natural question is whether LLMs can correctly implement a correct code solution given a correct sketch. Inspired by approaches to backtranslation in machine learning \citep{sennrich2016improvingneuralmachinetranslation, pham2021metabacktranslation, edunov2018understandingbacktranslationscale}, we experiment with ``backtranslating'' passing code solutions back into idea space.
+First, we generate code solutions using GPT-4o to generate $1000$ attempts to solve the problem and filter out problems without any passing solutions.
+As we also do not have a dataset of correct solution sketches associated with each solution, we generate a candidate correct idea via backtranslation. 
+We do this by feeding an LLM both the problem and code solution and asking the LLM to convert said solution into a natural language description of the solution. Additionally, we vary the detail of the backtranslated idea via instructions to the LLM in the prompt (e.g. `in $w$ words').
+
+We observe that prompting a model with a backtranslated idea significantly improves accuracy, increasing with the length of the translated idea (Figure~\ref{fig:backtranslation}), which suggests that having a correct sketch is sufficient to produce the correct final solution with relatively high accuracy, even only after $10$ tokens of backtranslated solution. This suggests that the correct direction of search is to explore through idea space to maximize the chance of arriving at a correct idea.
+
+
+\subsection{Conditioning on Idea Quality}
+In a follow-up experiment, we prompt an LLM to generate its own sketches to solve LiveCodeBench problems instead of providing it with golden ones via backtranslation. First, we generate $5$ ideas per problem using \method{IdeaSearch}, defined in Section~\ref{simple_idea_method}. For each idea, we then sample $25$ candidate solutions and measure their pass rate.
+For this experiment, we filter out any problem that GPT-4o-mini solves with either a $100\%$ or a $0\%$ solve rate, since such problems are either too easy or too hard for the model and would not be informative for this experiment. We end with $75$ problems and $375$ sketches.
+
+To test our hypothesis that generating a correct sketch is a critical factor for solving problems, we compare the distribution of solve rates for generating correct code solutions \emph{conditioned} on a given sketch to the distribution over solve rates given a sketch drawn at random, i.e., just the distribution over solve rates. 
+
+Formally, for a problem $P_i$, \method{IdeaSearch} samples a sketch $I$ from some conditional distribution with probability mass $P(I\vert P_i)$. The probability of solving $P_i$ is then $P(\mathrm{solve}\vert P_i, I)$. In this experiment, we compare the solve-rate distribution $P(\mathrm{solve} \vert P_i, I)$ over all problems and all sketches \emph{versus} the solve-rate distribution of $\sum_I P(\mathrm{solve} \vert P_i, I) \cdot P(I \vert P_i) = P(\mathrm{solve} \vert P_i)$ over all problems.
+
+While verifying whether a sketch is correct or incorrect is difficult without access to external labels, a key insight is that if generating the correct idea is a critical factor in solving the problem, then conditioning on a particular sketch should polarize the distribution of solve rates towards $\{0, 1\}$. If the model is given a correct sketch, it should consistently generate correct solutions, while if given a bad sketch, it should consistently generate incorrect solutions.
+
+Our results confirm this to be the case. Figure~\ref{fig:bimodal_idea} shows the distribution of solve rates across problems, both unconditionally (in red) and conditioned on each sketch (in blue). We notice that when grouping by sketches, the solve rates indeed become polarized towards $\{0, 1\}$.
+This result has important implications for improving code generation, suggesting that a large portion of variance in performance can be explained by whether the model is able to generate a correct idea or not. Therefore, a natural path for improvement is to focus on the sketch generation step and search for correct sketches and observations in idea space before generating solution code.
+
+
+
+\section{Methods}
+
+\label{sec:methods}
+We provide a description of the various methods of search we explore in our work.
+\subsection{\method{Repeated Sampling}}\label{basic_prompting_section}
+We consider the basic prompting approach as a baseline, in which we use few-shot prompting by providing the LLM with a number of problem-solution pairs before asking it to solve the desired question \citep{brown2020language}. In code generation, the most common variant of search utilized is repeated sampling, where models are repeatedly sampled from until they generate an output that passes the test or the maximum number of samples is reached. Refer to the Related Work for more information (Section~\ref{sec:related_searchwithlanguagemodels}).
+\subsection{\method{IdeaSearch}}\label{simple_idea_method}
+A natural extension of the \method{Repeated Sampling} approach discussed in Section~\ref{basic_prompting_section} is to avoid prompting the LLM for the solution code immediately.
+In \method{IdeaSearch}, the LLM is given the problem $P$ and is asked to output a natural language solution $S$ of the problem. Then, a separate instance of the LLM is given $P$ and $S$, and tasked to follow the proposed solution $S$ to solve the problem $P$. The purpose of \method{IdeaSearch} is to isolate the effectiveness of having the correct ``idea/sketch'' for solving the problem. Empirically, we find that explicitly forcing the search algorithm to articulate an idea for solving the problem increases diversity.
+\subsection{\method{PlanSearch}}
+\label{sec:cobs}
+While both \method{Repeated Sampling} and \method{IdeaSearch} are successful and lead to improvement in the results on benchmark results, we observe that in many of the cases,
+prompting multiple times (pass@k) (even at high temperatures) will only lead to small, narrow changes in the output code that change minor aspects but fail to improve upon pitfalls in idea. \todolater{fix}%
+
+\subsubsection{Prompting for Observations}\label{prompting_for_observations}
+
+Starting from the problem statement $P$, we prompt an LLM for ``observations''/hints to the problem.
+}
+We denote these observations as $O^1_i$, where, $i \in \{1, \dots, n_1\}$ due to the fact that they are first-order observations. Typically, $n_1$ is on the order of $3$ to $6$. The exact number depends on the LLM output.
+To use these observations to inspire future idea generation, we create all subsets with size at most $S=2$ of $s^1=\left\{O^1_1, \dots, O^1_{n_1}\right\}$. Each of these subsets is a combination of observations, and for clarity we denote each subset as $C^1_i, i \in \{1, \dots, l_1\}$, where $l_1 = 1 + n_1 + \binom{n_1}{2}$.
+
+\subsubsection{Deriving New Observations}
+The set of all observations can be thus defined as a directed tree with depth $1$, where the root node is $P$, and an edge exists for each $C^1_i$ pointing from $P$ to $C^1_i$. We then repeat this procedure from Section~\ref{prompting_for_observations} on each leaf node $C^1_i$ to generate a set of second order observations, $s^2_i=\{O^2_{i,1}, \dots, O^2_{i,n_{i, 2}}\}$. To obtain second order observations, we prompt the model with both the original problem $P$ and all observations contained in $C^1_i$, framed as primitive observations that are necessary in order to solve $P$. The LLM is then prompted to use/merge the observations found in $C^1_i$ in order to derive new ones. 
+
+The same procedure as Section~\ref{prompting_for_observations} is used to create all subsets $C^2_{i, j}$, for all $i \in \{1, \dots, l_1\}$. This process may be arbitrarily repeated, but we truncate the tree at depth $L=2$ for computational constraints.
+Note that there is no assumption any of the observations generated are correct. In fact, it is critical to note that many of them may be incorrect.}
+The observations merely serve to elicit the model to search over a more diverse set of ideas.
+
+\subsubsection{Observations to Code}
+After the observations have been made, they must be implemented as ideas before being translated into code. For each leaf node, we prompt the model with all observations, along with the original problem $P$, in order to generate a natural language solution to the problem $P$. 
+To add more diversity, for each generated idea, we generate an additional idea by supposing the idea is wrong, and asking an LLM to give criticisms/feedback, thus increasing our proposed ideas by a factor of $2$.
+
+These natural language solutions are then translated into pseudocode, which are subsequently translated into actual Python code. We take a more granular approach to reduce the translation error (which may cause the model to revert to its original mode, disregarding the reasoned-through observations).
+
+
+
+
+
+\section{Experimental Results}
+
+\begin{table}[h]
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{llcccc}
+\hline
+Model & Eval & Pass@1 & Pass@200 & \method{IS}@200 (ours) & \method{PS}@200 (ours) \\
+\hline
+GPT-4o-mini & LCB & 39.0 & 53.3 & 59.4 & 64.9 \\
+GPT-4o & LCB &41.3 & 60.6 & 70.4 & 73.0 \\
+DeepSeek-Coder-V2 & LCB &41.4 & 53.2 & 65.9 & 70.3 \\
+Claude-Sonnet-3.5 & LCB &40.3 & 55.6 & 70.2 & 77.0 \\
+\hline
+GPT-4o-mini & HE+ & 83.7 & 95.0 & 97.5 & 98.2 \\
+GPT-4o & HE+ &86.4 & 98.2 & 97.6 & 99.5 \\
+DeepSeek-Coder-V2 & HE+ &82.8 & 91.4 & 97.2 & 99.3 \\
+Claude-Sonnet-3.5 & HE+ &81.6 & 88.9 & 95.6 & 98.5\\
+\hline
+GPT-4o-mini & M+ & 73.5 & 83.8 & 87.3 & 91.0 \\
+GPT-4o & M+ & 77.2 & 87.4 & 89.3 & 92.2 \\
+DeepSeek-Coder-V2 & M+ & 76.3 & 81.9 & 89.1 & 92.6 \\
+Claude-Sonnet-3.5 & M+ & 77.1 & 83.0 & 87.8 & 93.7 \\
+\hline
+\hline
+o1-mini (search model) & LCB & 69.5 & 90.8 & 91.2 & 91.3 \\
+
+\end{tabular}
+\caption{LCB, HE+, M+ short for LiveCodeBench, HumanEval+, and MBPP+, respectively. \method{IS} short for \method{IdeaSearch} and \method{PS} short for \method{PlanSearch}. We find that \mname{} and \method{IdeaSearch} improve upon search baselines across all models, with \mname{} achieving the best results across all models and benchmarks considered. Notably, using \method{PlanSearch} on top of Claude 3.5 Sonnet~\citep{claude35sonnet} has a pass@200 of $77.0$ on LiveCodeBench, which is nearly double the performance of the top model without using search ($41.4$). \mname{} also outperforms basic pass@200 on o1-mini for LiveCodeBench, though since o1-mini already uses inference-time compute, the gap is much smaller than compared to non-search models. }
+\label{tab:model_performance_results}
+\end{table}
+
+\begin{figure}[!hbt]
+    \centering
+    \includegraphics[width=0.85\linewidth]{search-monkey/assets/public_pass_at_k_livecodebench_lite_v3.pdf}
+    \caption{Performance of all models and methods on LiveCodeBench with public test filtering. The purpose of filtering is to shift pass@k curves leftward (i.e., bringing performance high $k$ to low $k$), so we plot curves in detail over $k \in \{1, \dots, 20\}$. Dotted lines are provided for reference of the base method pass@k before filtering. Even at 10 completions, \method{PlanSearch} outperforms \emph{filtered} \method{Repeated Sampling} by a flat 30 to 40\%.}
+    \label{fig:public_pass@k_livecodebench}
+\end{figure}
+
+\subsection{Datasets}
+
+We evaluate our search methods on three benchmarks: MBPP+, HumanEval+ ~\citep{evalplus}, and LiveCodeBench~\citep{jain2024livecodebench}. MBPP \citep{austin2021programsynthesislargelanguage} and HumanEval \citep{chen2021codex} are some of the most widely used code benchmarks in the field. However, since both benchmarks provide only a few test cases, \cite{evalplus} updates both benchmarks with additional test cases that increase the benchmarks' robustness to reward hacking. LiveCodeBench is a benchmark for coding that consists of competitive programming problems which typically require advanced reasoning capabilities.
+
+Given the reality that coding data is often highly upsampled during pre-training~\citep{openai2024gpt4, dubey2024llama}, LiveCodeBench differentiates itself from other benchmarks by taking care to segregate problems by date to avoid data contamination concerns. For this paper, we use only the subset of problems between May 2024 and September 2024 to avoid possibilities of contamination.
+We choose May 2024 as the cutoff date to ensure that our results with our best performing model (Claude 3.5 Sonnet) are not due to contamination, because Claude 3.5 Sonnet has a knowledge cutoff of April 2024.
+To ensure fair comparison, we use the same cutoff for all models evaluated, even though the precise cutoff dates for other models may vary slightly from May 2024.
+
+\subsection{Experiment Details}
+For all search algorithms, we require that all output code be in the correct format specified, and we mark a solution as incorrect if it does not follow the intended formatting. The extracted code is then run through all tests of the program and marked as correct if and only if it passes all tests.
+ 
+All models are run with temperature $0.9$ and top-$p$ of $0.95$. (o1-mini was run with temperature $1.0$ and top-$p$ of $1.0$ because of API constraints.) Temperature was determined through a coarse hyperparameter sweep on \method{Repeated Sampling} and \method{IdeaSearch} from $T\in \{0.0, 0.1, 0.2, \dots, 1.
+
+Both \method{Repeated Sampling} and \method{IdeaSearch} generate exactly $n$ codes, whereas \method{PlanSearch} generates a variable number of codes, usually ranging on the order of 300 to 400. To compute pass@k, we use the unbiased estimator in Equation~\ref{eq:passatk_unbiased}~\citep{chen2021codex}\footnote{Note that the estimator in Equation~\ref{eq:passatk_unbiased} theoretically requires that the number of successes follows a binomial distribution. \method{Repeated Sampling} and \method{IdeaSearch} obey this, but \method{PlanSearch} generations may not be independent.}.
+If $k > n$, we assume the remaining generations did not pass.
+To compute pass@k for filtering, we limit the pool of codes to those that are filtered, meaning that both $n$ and $c$ may shrink in size. This can be thought of as a conditional probability, where the condition is that the code passes public tests. For more information on public test filtering, see Section~\ref{sec:public_test_filtering}.
+
+\subsection{Results}
+
+Our summarized results for \method{Repeated Sampling}, \method{IdeaSearch}, and \method{PlanSearch} can be found in Table~\ref{tab:model_performance_results}, Figure~\ref{fig:bar_chart_livecodebench}, and Figure~\ref{fig:public_pass@k_livecodebench}. We find that PlanSearch improves over existing methods for all models and benchmarks considered.
+Due to prohibitively high costs, we only evaluate o1-mini on LiveCodeBench, as HumanEval+ and MBPP+ show strong saturation effects even with weaker models like GPT4o-mini.
+ For a compute-normalized comparison between \method{Repeated Sampling} and \method{PlanSearch}, see Figure~\ref{fig:compute_normalized_plansearch}.
+\subsection{Public Test Filtering}
+\label{sec:public_test_filtering}
+Public test filtering is a method which only chooses samples out of the original pool $n$ which pass the public tests.
+This is particularly useful in settings such as code deployment where executing the full suite of tests may be computationally costly or otherwise undesirable (e.g. in a coding contest where every incorrect submission is penalized).
+Thus, instead of submitting all $n$ codes, after public test filtering, only codes $c_i$ would be submitted such that $c_i(x_j) = y_j$ for all $j \in \{1, \dots, u\}$, where $c_i(x)$ refers to the output from running the code on some input $x$. The primary effect of public test filtering is to shift the pass@k curve leftward, since public test filtering will discard low quality candidate solutions that either fail to compile or fail elementary test cases for the problem.
+
+All problems in MBPP+, HumanEval+, and LiveCodeBench come with a few public tests which are usually used to sanity check any submissions. We can further improve performance by filtering on these public tests before a final submission, as described.
+Applying public test filtering reduces the number of samples to achieve the same accuracy by tenfold: \mname{} to achieve a 77.1\% accuracy on LiveCodeBench after just 20 submissions (pass@20) compared to a pass@200 of 77.0\% without using public filtering (see Figure~\ref{fig:public_pass@k_livecodebench}).
+
+
+\section{Analysis}
+
+
+Our results suggest that both \mname{} and \method{IdeaSearch} outperform basic sampling by a wide margin (Figures~\ref{fig:avg_perf_gain_human_eval_plus},~\ref{fig:avg_perf_gain_mbpp_plus},~\ref{fig:avg_perf_gain_livecodebench}), with \mname{} achieving the best score across all methods and models considered.
+We show the detailed pass@k results for each dataset in Figures~\ref{fig:pass@k_human_eval_plus},~\ref{fig:pass@k_mbpp_plus} and~\ref{fig:pass@k_livecodebench}.
+ Interestingly, we find that \method{IdeaSearch} performs somewhat better, which we speculate comes from differences in splitting solution sketch into \emph{two} model responses, instead of doing both chain-of-thought and code solution in one model response.
+
+Investigating the differences in specific models, we notice that trends exhibited by the pass@k curves are not uniform across all models; in fact, each curve seems unique.
+We hypothesize that these differences are in part due to changes in idea diversity, as investigated in Figures~\ref{fig:diversity_rel_improvement_livecodebench},~\ref{fig:diversity_rel_improvement_human_eval},~\ref{fig:diversity_rel_improvement_mbpp}. Figure~\ref{fig:diversity_rel_improvement_livecodebench} includes o1-mini diversities, which also follow the observed trend. From the figures, we can see that our approximate diversity score accounts for much of the variance we see in the relative improvement that arrives from scaling-up inference-time compute. This correlation holds across all methods and models on the same dataset, thus suggesting that diversity score can be used as a proxy to predict for relative pass@k improvement. For further discussion on the specifics of the diversity score, see Section~\ref{measuring_diversity}.
+
+One interesting point of observation is that \mname{} often hurts pass@1 for several models, including most notably Sonnet 3.5 on LiveCodeBench, our best performing combination. 
+Intuitively, this is because increasing the diversity across ideas likely dilutes the probability that any \emph{particular} idea is generated, while simultaneously increasing the chance of having \emph{at least one} correct idea within said pool. Therefore, pass@1 may be slightly lower than usual, yet pass@k will likely surpass ``pools'' of ideas lacking diversity for this reason. See Figure~\ref{fig:simple_pass@k_sets_curves} for a graphical intuition.
+
+Finally, in Table~\ref{tab:model_performance_results} and Figure~\ref{fig:bar_chart_livecodebench}, we present our main results normalized across attempts/completion, where each search method is allowed $k$ attempts to solve each problem. An alternative method of normalizing across methods is to equalize the amount of compute spent on each method. Since \mname{} and \method{IdeaSearch} first plan out an idea before implementing the final solution, they both spend more compute at inference time per solution generated. Our findings are highly similar and suggest that \mname{} outperforms all other methods if sufficient compute is expended at inference time.
+
+\subsection{Measuring Diversity}
+\label{measuring_diversity}
+
+\begin{figure}[!htb]
+    \centering
+    \includegraphics[width=0.85\linewidth]{search-monkey/assets/diversity_vs_improvement_livecodebench_lite_v3_o1.pdf}
+    \caption{We observe a strong positive correlation between the measured amount of idea diversity (higher score is better) in a search algorithm and the resulting improvements due to search. See Section~\ref{measuring_diversity} for information regarding the diversity score. 
+    }
+    \label{fig:diversity_rel_improvement_livecodebench}
+\end{figure}
+
+We find that diversity as measured in idea space is highly predictive of search performance, as measured by the relative improvement between a model/method's pass@1 and its pass@200 (Figure~\ref{fig:diversity_rel_improvement_livecodebench}).
+While entropy is a common diversity measure \citep{shannon1948mathematical}, it is oftentimes insufficient for LLM settings~\citep{hashimoto2019unifying, zhang2021trading}. For instance, consider two different language models, one of which generates minor variations of the same program while another generates a variety of programs with different underlying ideas. Even if both models have the same entropy, the latter model will perform significantly better if augmented with search.
+
+In our setting, we measure diversity in idea space via pairwise comparisons across all generated programs. Let $\{c_1, \dots, c_n\}$ be the pool of $n$ generated codes from a model, each corresponding to some latent idea. 
+We consider two sketches similar if they are within $\epsilon$ of each other in this latent space, for some choice of $\epsilon$. As such, in this space, $c_i$ having a similar idea to $c_j$ and similarly for $c_j$ and $c_k$ \emph{does not imply} $c_i$ and $c_k$ share a similar idea. 
+
+To compute the diversity of such a model, we construct the $\binom n 2$ pairs and evaluate their similarity using an LLM. We define $S(c_i, c_j) \in \{0, 1\}$, where $S(c_i, c_j) = 1$ iff $c_i$ and $c_j$ are similar.
+Our overall diversity score for a particular problem is then defined as:
+\begin{align}
+    D = 1 - \frac{\sum_{i < j}S(c_i, c_j)}{\binom n 2}
+\end{align}
+A model that produces programs that all implement identical ideas will have a diversity score of $D=0$, whereas one generating codes with all unique ideas have $D=1$. Notably, a method with a score of $D$ is equivalent to the probability that two randomly selected programs from the method are similar to each other, as measured by the LLM.
+For a particular method, our reported diversity score is simply the diversity score averaged over all problems in the considered dataset.
+For large $n$, we sample a subset of $40$ codes and compare all pairs from said subset. To evaluate $S$, we first backtranslate both codes to express each code in natural language before comparing each pair using both the code and its corresponding backtranslated idea.
+ We use OpenAI's GPT-4o-mini as the supporting LLM. 
+
+
+
+\section{Limitations and Future Work}
+
+\label{sec:limitations}
+While \method{PlanSearch} substantially improves diversity over idea space at inference-time, fundamentally, improvements in diversity should come at the post-training stage, like with methods such as o1~\cite{openai2024learning}. This likely requires re-imagining the post-training pipeline for LLMs around search, instead of the current paradigm optimized for a single correct response.
+We are optimistic about future work in designing improved post-training objectives to maximize both quality and diversity, while specifically optimized to use inference-time compute to maximum effectiveness.
+\mname{} and \method{IdeaSearch} tradeoff a slight deterioration of pass@1 performance for a large improvement in pass@k performance. However, in many such cases outside of code generation, it is infeasible to run an LLM-based model for more than a few attempts at most. For example, in Figure~\ref{fig:pass@k_livecodebench}, \method{PlanSearch} does not significantly outperform \method{Repeated Sampling} until $k \geq 4$.
+
+Fortunately, many filtering algorithms exist, which mitigates this tradeoff by implicitly bringing pass@k (for high $k$) to pass@1 (or lower $k$), i.e. shifting the original pass@k curve leftward. Even the simplest filtering---public test filtering---improves \mname{}'s pass@1 significantly above \method{Repeated Sampling}'s pass@1, which continues as $k$ increases.
+
+Since base models' pass@1 is known to be worse than instruct models to trade off for higher diversity, we suggest a new paradigm---developing search algorithms which tradeoff pass@1 performance for much stronger pass@k performance, then filtering the generated solutions to extract the pass@k \emph{back into} pass@1. 
+
+With good filtering methods, which we demonstrate can be simple in nature, pass@k, for medium $k$, can be effectively brought down to pass@1, emphasizing a similar paradigm of increasing diversity, then strengthening existing filtering methods, even for domains outside of code generation that are out of scope of this paper.
+
+Finally, a natural extension of this work is training the underlying model itself on successful plans and code solutions obtained from \method{PlanSearch}. This has the potential to distill the pass@k into the pass@1---without inference-time methods like filtering---by reducing the likelihood of the model going down unfavorable branches of the search tree.
+We believe that such training is likely to significantly improve the model and look forward to future work in this direction.
+
+
+
+
+\section{Acknowledgements}
+
+We would like to thank Jason Wei, Charlie Snell, Miles Turpin, Sail Wang, Horace He, Kenneth Li, Celia Chen, Rahul Chalamala, Alan Wu, Kevin Chang, and Jerry Wei for their helpful comments, suggestions and discussion over the course of this project.
+
+
+
+
+
+

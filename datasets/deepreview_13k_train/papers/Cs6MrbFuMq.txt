@@ -1,0 +1,276 @@
+\title{HexGen-2: Disaggregated Generative Inference of LLMs in Heterogeneous Environment}
+
+\begin{abstract}
+Disaggregating the prefill and decoding phases represents an effective new paradigm for generative inference of large language models (LLM). This approach offers some significant system advantages, such as eliminating prefill-decoding interference and optimizing resource allocation. However, it is still an challenging open problem about how to deploy the disaggregated inference paradigm across a group of heterogeneous GPUs, which can be an economic alternative of the deployment over the homogeneous high performance GPUs.
+Towards this end, we introduce HexGen-2, a distributed system for high throughput and cost-efficient LLM serving on heterogeneous GPUs following the disaggragated paradigm. Built on top of HexGen, the core component of HexGen-2 is a sophisticated scheduling algorithm that formalizes the allocation of disaggregated LLM inference computations and communications over heterogeneous GPUs and network connections as a constraint optimization problem. We leverage the graph partitioning and max-flow algorithm to co-optimize resource allocation, parallel strategies for distinct inference phases, and the efficiency of inter-phase key-value (KV) cache communications. We conduct extensive experiments to evaluate HexGen-2, i.e., on OPT (30B) and Llama-2 (70B) models in various real-world settings, the results reveal that HexGen-2 delivers up to a 2.0$\times$ and on average a 1.3$\times$ improvement in serving throughput, reduces the average inference latency by 1.5$\times$ compared with state-of-the-art systems given the same price budget, and achieves comparable inference performance with a 30% lower price budget.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large Language Models (LLMs), such as OPT (Zhang et al., 2022), LLAMA (Touvron et al., 2023), GPT (OpenAI, 2024), GEMINI (Reid et al., 2024), CLAUDE (Anthropic, 2024) and MIXTRAL (Jiang et al., 2024a) have shown exceptional performance across various advanced applications. However, deploying the generative inference service for such LLMs can be costly, typically requiring a substantial number of homogeneous, high-performance GPUs to meet the service demands, such as first token latency and generation throughput. In this paper, we explore an alternative solution that deploys the most advanced disaggregated generative inference paradigm over a set of heterogeneous GPUs to provide an efficient and economical LLM service.  
+
+Disaggregated inference is currently the most efficient framework for serving the generative inference requests of LLMs (Zhong et al., 2024; Patel et al., 2024). By splitting the prefill phase (compute-bounded) and decoding phase (HBM IO-bounded) across different GPUs, the disaggregation significantly reduces interference between different requests and enables more flexible parallel configurations for the two phases. When compared with colocating the prefill and decoding computations, the disaggregated approach optimizes resource usage and enhances the scalability and efficiency of the LLM inference service. Recent efforts (Jiang et al., 2024b; Griggs et al., 2024; Zhao et al., 2024; Miao et al., 2024) have shown that serving LLMs with heterogeneous GPUs can be a economical alternative to deploying over homogeneous high-performance GPUs. Heterogeneous deployments offer significant opportunities to reduce inference service costs by leveraging the wide availability of diverse GPU types across commercial and private computing platforms. Note that Nvidia typically releases new GPU generations every 24 months, e.g., Turing in 2018, Ampere in 2020, Hopper in 2022, and Blackwell scheduled for Q4 2024; but one particular version of GPU general remains in use for a much longer period.1.  
+
+The wide availability of heterogeneous GPU pools presents significant opportunities to adapt the   
+most advanced disaggregated inference paradigms. However, effectively adapting the disaggregated   
+paradigm to this heterogeneous setting is much harder to implement than to ask for. Traditional   
+implementation of co-locating prefill and decoding phases only leverage standard tensor model par  
+allelism (Narayanan et al., 2021) and pipeline parallelism (Huang et al., 2019) for LLM inference,   
+where only the activations are communicated. In the disaggregated paradigm, transferring the key  
+value (KV) cache between prefill and decoding model replicas introduces significant data movement,   
+potentially creating a communication bottleneck that must be carefully managed in a heterogeneous   
+setting. Additionally, the flexibility of parallel configurations among prefill and decoding model   
+replicas also introduces new complexity in the heterogeneity-aware scheduling.   
+Towards efficiently adapting the disaggregated paradigm under the heterogeneous setting, we iden  
+tify two types of new challenges and opportunities that previous heterogeneity-aware scheduling   
+approaches (Jiang et al., 2024b) fail to integrate:   
+• Accommodate the computation flexibility in disaggregated paradigm. In a heterogeneous setting, each GPU type has distinct peak FLOPS, HBM memory bandwidth, and HBM memory limit, even making optimal computation allocation for the colocating paradigm a difficult problem. The disaggregated paradigm adds further complexity, as the prefill and decoding phases have different resource requirements and favor specific parallel strategies depending on varying LLM inference workloads, such as arrival rates and input/output sequence lengths.   
+• Accommodate additional KV cache movement over heterogeneous connections. GPU communication bandwidth also varies widely, from different NVLink and PCIe generations within a server to InfiniteBand(IB), RoCE, TCP, and Ethernet connections among different servers. Along with communication demands from parallel strategies within each model replica, disaggregated inference requires extensive KV cache transmissions, which are especially sensitive to low-bandwidth links. Therefore, an effective scheduling algorithm is essential to manage communication across heterogeneous GPU connections and minimize costs.   
+In order to overcome these challenges, we propose HEXGEN-2, a disaggregated LLM inference   
+system that coordinates distributed LLM inference computations and communications over a set of   
+GPUs with different computation capabilities and heterogeneous network connections. Our contri  
+butions are summarized as:   
+Contribution 1: We formulate the scheduling problem of allocating disaggregated LLM inference   
+computations over a set of heterogeneous GPU devices as a constraint optimization problem. To   
+solve this problem efficiently, we propose a sophisticated scheduling algorithm that employs a com  
+bination of graph partitioning and max-flow algorithm to coordinate the resource allocations and   
+parallelism plans for the prefill and decoding phases of LLM inference. Concretely, the graph par  
+titioning algorithm partitions the available GPUs into multiple model serving groups, where each   
+group should be dedicated to serving a prefill or decoding model replica; and the max-flow algo  
+rithm guides the iterative refinement of the graph to optimize model placement.   
+Contribution 2: We implement HEXGEN-2, a heterogeneous LLM inference system that facilitates   
+tensor model parallelism and pipeline parallelism with a disaggregated paradigm. HEXGEN-2 al  
+lows the two phases of LLM inference to be split onto separate GPUs with different parallel plans,   
+effectively eliminating prefill-decoding interference and boosting inference performance.   
+Contribution 3: We evaluate HEXGEN-2 through extensive experiments, where we compare   
+HEXGEN-2’s system efficiency across various LLM inference workloads with HEXGEN on sev  
+eral heterogeneous settings and DISTSERVE on a standard homogeneous setting. We conduct these   
+comparisons on the popular LLM models OPT (30B) and LLAMA-2 (70B). We show that given   
+the same budget in terms of cloud service fees, HEXGEN-2 can choose to achieve up to a $2.0\times$   
+and on average a $1.3\times$ higher serving throughput or reduce the average inference latency by $1.5\times$ .   
+Additionally, when given only $70\%$ of the budget, HEXGEN-2 can still maintain a comparable level   
+of inference service compared to the homogeneous baseline.   
+2 PRELIMINARY   
+LLM generative inference. Given the input request, the LLM inference process typically contains   
+two phases: prefill and decoding. The prefill phase processes the request to compute the KV cache  
+
+and generates the first token for the response in a single step. The decoding phase then takes the last input token and KV cache as inputs to generate subsequent tokens by one token at each step.  
+
+The distinct characteristics of both phases lead to differing GPU resource utilization: the prefill phase is compute-bound, whereas the decoding phase is HBM memory I/O-bound. Naive implementation of the inference engines colocates the two phases on the same group of GPUs, despite their distinct computational characteristics. Two standard strategies are applied to parallelize the LLM inference computation: tensor model parallelism and pipeline parallelism. Tensor model parallelism (TP) (Narayanan et al., 2021) distributes inference computations across multiple GPUs by partitioning the weight matrices of transformer layers both row-wisely and column-wisely, each layer’s output activations are aggregated through two AllReduce operations. Pipeline parallelism (PP) (Huang et al., 2019) divides the model into multiple stages, each assigned to a specific GPU or group of GPUs for execution, the inter-layer activations are communicated between stages.  
+
+Inference serving goal. There are two essential metrics to evaluate LLM serving: throughput and inference latency. Throughput refers to the number of tokens a system can generate within a specified time period. Inference latency is the time required to complete each inference request from start to finish. We assess system performance on inference latency using service level objective (SLO) attainment, which gauges the proportion (e.g., $99\%$ ) of requests fulfilled within a time frame predefined by the SLO. This SLO is adjusted to various multiples of single device execution latency (termed as SLO scale) to measure performance under different degrees of SLO stringency.  
+
+Batching. Due to the computational difference of the prefill and decoding phases, integrating batching strategies leads to varying performance outcomes. As shown in Figure 1, in the prefill phase, a small batch size quickly saturates the GPU’s computation capacity — Once the total number of batched tokens reaches 2048, no further improvement in throughput is observed but the prefill latency escalates with batch size. Conversely, in the decoding phase, where the system bottleneck lies in scanning the LLM parameters, the throughput increases linearly as the total number of batched tokens rises, highlighting the effectiveness of batching in this phase for performance enhancement. The current state-of-the-art LLM serving system employs a batching optimization called continuous batching (Yu et al., 2022), which batches the prefill of new requests with the decoding of ongoing requests to enhance GPU utilization. However, this leads to severe prefill-decoding interference. Adding a single prefill job to a batch of decoding requests significantly slows down both processes, with the slowdown intensifying as the prefill length increases.  
+
+![](images/cf57f0ed831eb4b202e3fd7d2371dcbdae5044892d188430bc92e65f3cf3cd1d.jpg)  
+Figure 1: Effects of batching on different phases (LLAMA-2 (7B) inference with an input length Figure 2: Illustration of disaggregated paradigm. of 512 on a single A100 GPU).  
+
+Disaggregated architecture. As the two phases in LLM inference have distinct characteristics, recent efforts (Zhong et al., 2024; Patel et al., 2024; Jin et al., 2024; Qin et al., 2024; Hu et al., 2024) propose a disaggregated inference architecture that splits the two phase in separate hardware resources. In the disaggregated inference architecture (See Figure 2), there are two types of model replicas: prefill model replica is responsible for taking the incoming request, generating the first token and KV cache; decoding model replica takes the generated token and KV cache as inputs, and generates the subsequent tokens. This separation enhances LLM serving by: (1) Eliminate the prefill-decoding interference; (2) Allow prefill and decoding model replicas to use different batching and parallelism strategies — Prefill replicas benefit from tensor model parallelism and smaller batches to reduce per-request latency, while decoding replicas perform better with larger batches to maximize throughput. (3) Accommodate varying LLM serving workloads by adjusting resource allocations between the two phases, e.g., the coding workload characterized in (Patel et al., 2024) with typically longer prefill and shorter decoding sequence lengths requires more resources for prefill to optimize performance. As prefill and decode model replicas operate independently, it is crucial to transmit the KV cache from the prefill to the decode model replicas. Given the large volume of KV cache in LLM serving, current implementations necessitate a high-bandwidth communication link to facilitate the transmission of the KV cache. (Patel et al., 2024) utilize InfiniteBand (IB) for internode KV cache transmission, while (Qin et al., 2024) deploy their system on GPU clusters equipped with RDMA network cards, and (Zhong et al., 2024) collocate prefill and decode model replicas on GPUs within the same node to expedite KV cache transmission via NVLink.  
+
+![](images/3ef8853791cc41355bd0d4320825ba41f4c356898064d5b666ef71b1590749cf.jpg)  
+Figure 3: Illustration of each scheduling step.  
+
+
+
+\section{3 SCHEDULING ALGORITHM IN HEXGEN-2  }
+
+
+The core technique component in HEXGEN-2 is a scheduling module that can efficiently allocate the heterogeneous GPUs to serve prefill or decoding model replicas. In this section, we formulate the scheduling problem and introduce our solution.  
+
+
+
+\section{3.1 PROBLEM FORMALIZATION  }
+
+
+To support LLM serving with the disaggregated paradigm under heterogeneity, the scheduling algorithm should determine four essential allocations: (1) the group partition, i.e., how to partition the GPUs to multiple groups, where each responsible for serving one model replica; (2) the group type, i.e., whether a group serves a prefill or decoding model replica. (3) the parallel strategy for each model serving group, i.e., the combination of TP and PP under the heterogeneous setting (Jiang et al., 2024b); (4) the KV cache communication strategy among prefill and decoding model replicas. We term a solution to these four components as a model placement strategy.  
+
+Given the exponential search space, determining the optimal model placement is an NP-hard problem. To solve the problem, we adopt a two-phase search algorithm, which can be summarized as:  
+
+• Graph partition: Given a set of heterogeneous GPU devices D, the first phase (§3.2) aims to partition them into multiple model serving groups, and determines the group type. • Max flow: Based on the outputs from the first phase, the second phase (§3.3) find the current optimal parallel strategies for prefill and decoding model replicas, and generates the optimal KV cache communication strategy among them. • Iterative refinement: We iteratively repeat the two-phase algorithm to find the optimal model placement strategy (§3.4) that maximizes the end-to-end system performance.  
+
+
+
+\section{3.2 FIRST PHASE: GRAPH PARTITION  }
+
+
+The first phase of our scheduling algorithm aims to partition the GPU devices $\mathbf{D}$ into multiple model serving groups and determine whether each group is a prefill or decoding model replica. We first formulate the GPU device set $\mathbf{D}$ as a global graph $\mathbf{G}=(\mathbf{D},\mathbf{E})$ , with each GPU $d\in\mathbf{D}$ representing a graph node, and the GPU memory limit $m_{d}$ defined as the node weight. The communication link $e_{d,d^{\prime}}\in{\bf E}$ between GPU $d$ and $d^{\prime}$ , $\forall d,d^{\prime}\in\mathbf{D}$ , is defined as the graph edge, with communication bandwidth $\beta_{d,d^{\prime}}$ as the edge weight. Then, we partition the formulated graph $\mathrm{G}$ into partition $\mathbf{P}=$ $\{p_{1}\,.\,.\,.\,p_{K}\}$ , where $p_{k}$ denotes the $k$ -th model serving group, and determine the type for each group. Concretely, there are three steps in the first phrase:  
+
+Step (i) - Initial partition: We first partition the global graph into multiple model serving groups based on edge weights (bandwidths), and balance the node weights (memory capacities) across groups. We leverage the spectral partitioning method (Alpert & Yao, 1995) to partition the graph $\mathrm{G}$ into $K$ groups, which uses the eigenvectors of the Laplacian matrix to guide partitioning and minimize inter-group edge weights. Then we adopt the Kernighan-Lin algorithm (Kernighan & Lin, 1970) to iteratively refine the partition $\mathbf{P}$ by swapping node pairs between groups, which further reduces edge weights and balances node weights (memory capacities) across groups. Figure 3 demonstrates the process. Note that we balance memory rather than compute capacity to avoid potential OOM issues and provide a solid starting point for further optimization.  
+
+Step (ii) - Coarsen & secondary partition: We then determine the group type, where the graph is coarsened and partitioned again to determine the model replica type for each group. Note that coarsen is a common operation that merges nodes and edges to simplify graph partition (Hendrickson et al., 1995). Here, the coarsening operation merges graph nodes (GPUs) within the same group (model replica) into super nodes, which ensures the graph only includes relationships among the super nodes. The coarsened graph is then partitioned to distinguish between prefill and decoding model replicas. As illustrated in Figure 3, the four super nodes are divided into two parts: the two super nodes on the left are designated as prefill model replicas, while the two on the right are designated as decoding model replicas. Different from initial partition, the secondary partition focuses on maximizing inter-partition edge weights (i.e., the edge weights between prefill and decoding model replicas) to support frequent KV cache communications between different group types.  
+
+Step (iii) - Projection: Once we allocate the super nodes into prefill and decoding model replicas, we need to apply project operation, i.e., the reverse operation of the coarsen operation described in step (ii), to recover the GPU information within each super node. Note that after the projection, we can leave the problem of determining the optimal parallel strategies for each prefill or decoding model replica based on the GPU information within each super node during the second phase.  
+
+
+
+\section{3.3 SECOND PHASE: MAX-FLOW  }
+
+
+The second phase of our scheduling algorithm determines the parallel strategies within each super node and KV cache communication strategies between each super node. We leverage max-flow, as a promising method, to formulate the disaggregated inference pradiagm. Taking the partitioned graph from the first phase as input, we transform it into a directed graph with compute nodes and network connections. We define the source and sink of the directed graph to be the coordinator node $h$ , which is responsible for request dispatching and completion. Formally, we define:  
+
+Compute nodes. The prefill and decoding model replicas are defined as compute nodes $\mathcal{C}$ , with $\phi_{i}\in{\mathcal{C}}$ denoting a prefill model replica and $\delta_{i}\,\in\,\mathcal{C}$ denoting a decoding model replica. For each compute node $\bar{\phi_{i}}/\bar{\delta_{i}}\in\mathcal{C}$ , we force it connect with two other nodes in the graph, named $\phi_{i}^{i n}/\delta_{i}^{i n}$ and $\phi_{i}^{o u t}/\delta_{i}^{o u t}$ . The capacity of the directed edge $\left(\phi_{i}^{i n}/\delta_{i}^{i n},\phi_{i}^{o u t}/\delta_{i}^{o u t}\right)$ represents the maximum number of requests this node can process within a certain time period T (e.g., 10 minutes). We adopt the inference cost model from HEXGEN (Jiang et al. To optimize capacity, the optimal parallel strategy should be selected for each node. As discussed in $\S2$ , given the distinct computational characteristics of different phases, their optimal parallel strategies also vary. For prefill model replicas, we aim to determine the latency-optimal parallel configurations, as they are computation-intensive and batching does not enhance efficiency. In contrast, for decoding model replicas, we aim to deduce the throughputoptimal parallel configurations, since this phase is memory I/O-bound and benefits from batching more requests. Based on these considerations, we iterate through all possible model parallelism combinations for each model replica and select the optimal one. For compute node $\phi_{i}/\delta_{i}$ , the amount of flow that passes through $(\phi_{i}^{i\bar{n}}/\delta_{i}^{i n},\phi_{i}^{o u t}/\delta_{i}^{o u t})$ should be no larger than its maximum capacity.  
+
+Network connections. A node in the directed graph might be connected with any other nodes, while only a subset of those connections are valid. A valid connection should satisfy one of the following criteria: (1) the connection is from coordinator node $h$ to compute node $\phi_{i}$ , we represent the connection with directed edge (source, $\phi_{i}^{i n}$ ); (2) the connection is from $\delta_{i}$ to coordinator node $h$ , we represent the connection with directed edge $(\delta_{i}^{o u t},s i n k)$ ; (3) the connection is from a compute node $\phi_{i}$ to another compute node $\delta_{i}$ , we represent the connection with directed edge $(\phi_{i}^{o u t},\delta_{i}^{i n})$ . The edge capacity equals the maximum number of requests this connection can process within the time period T. Note that for connection type (3), between any two prefill and decoding model replicas $\phi_{i}$ and $\delta_{i}$ with an edge connection, each GPU containing the $j$ -th layer within $\phi_{i}$ should transmit its KV cache to the matching GPU housing the $j$ -th layer within $\delta_{i}$ . The edge capacity is determined by the collective performance of all GPU-to-GPU transmission connections, as each connection is responsible for a portion of the KV cache transmission. We only permit flow to pass through valid network connections, and the transmitted flow should not exceed the maximum capacity of the connection.  
+
+After constructing the directed graph, we run preflow-push algorithm (Cheriyan & Maheshwari, 1989) to get the max flow between source and sink node, with one unit of flow representing one request that can pass through a compute node or network connection per unit time. This algorithm continuously pushes the maximum allowable flow up to the edge’s capacity to maximize the flow through the direct connection. The generated flow assignments between compute nodes $\phi_{i}$ and $\delta_{i}$ are used to guide the KV cache communication. The communication frequency is set to be proportional to these flow values to follow the max flow of the directed graph without creating bursts, as illustrated in Figure 3. However, the algorithm may not fully utilize edge capacities as flows within the directed graph are interdependent; upstream and downstream edges can restrict total flow, preventing the full utilization of higher-capacity edges due to bottlenecks or imbalanced capacities. For instance, a low capacity on the edge $(\bar{\phi}_{i}^{o u t},\bar{\delta}_{i}^{i n})$ can restrict the flow on edge $(\delta_{i}^{i n},\mathring{\delta_{i}^{o u t}})$ from reaching node capacity. Therefore, iteratively refining the directed graph is essential.  
+
+
+
+\section{3.4 ITERATIVE REFINEMENT  }
+
+
+$\S3.3$ presented how we obtain the max flow for a given graph partition; now we introduce how we can iteratively refine the graph partition to maximize the flow. We refine the graph iteratively based on edge swapping, which is a common approach for optimizing graph partition (Hendrickson et al., 1995; Vaishali et al., 2018), and we further propose a max-flow guided edge swap operation, which uses max-flow outputs to guide the iterative refinement of the graph.  
+
+The preflow-push algorithm mentioned in $\S3.3$ provides the detailed flow assignments necessary to analyze edge utilization (Waissi, 1994). By comparing the flow through each edge with its capacity, we can identify bottleneck and underutilized edges. Bottleneck edges are defined as those where the flow reaches capacity limits, preventing the directed graph from achieving a higher overall flow. Underutilized edges are those where the flow falls short of capacity and could accommodate more data flow. As long as these imbalances exist, we attempt to swap edges. Therefore, we implement local swaps of edges guided by the max-flow outputs to form a new graph partition, as illustrated in Figure 3. This swap operation is essential in terms of: (i) balancing the inter- and intra-group edge weights to maintain high intra-group capacities while enabling efficient inter-group KV cache communicating; and (ii) adjusting the node and edge weights across intra-groups to optimize resource allocation. After the swaps, we rerun the two-phase algorithm to obtain the optimal model placement strategy and max flow of the new graph partition. We then refine the partition again. This iterative process continues until no further improvements can be made. Evaluation in $\S5.3$ highlights the necessity of our design, the max flow guided edge swap overcomes local minima and accelerates optimization compared with other approaches.  
+
+
+
+\section{4 SYSTEM IMPLEMENTATION  }
+
+
+HEXGEN-2 is a distributed system designed to support efficient LLM inference service under the disaggregated paradigm in heterogeneous environments. HEXGEN-2 uses a task coordinator to handle the dispatch of incoming LLM inference requests, which is based on an open-source implementation of decentralized computation coordination (Yao, 2023) that utilizes libP2P (LibP2P, 2023) to establish connections among the work groups in a peer-to-peer network. All parallel communications in HEXGEN-2 are implemented using NVIDIA Collective Communication Library (NCCL) (NVIDIA, 2024), and all required communication groups for different parallelism plans are established in advance to avoid the overhead associated with constructing NCCL groups. HEXGEN2 utilizes asynchronous NCCL SendRecv/CudaMemcpy for KV cache communication to enable overlapping between computation and communication. Furthermore, HEXGEN-2 integrates popular features for optimizing LLM inference such as continuous batching (Yu et al., 2022), FlashAtten  
+
+![](images/d1391fb9370a058f47dffdc65b2e0087a3c88cc786d50352d6aea9fe3c158a62.jpg)  
+
+Figure 4: Communication bandwidth (Gbps) matrix for different settings. Homogeneous setting contains $8\!\times\!\mathrm{Hl00}$ GPUs with a budget of $29.5~\mathfrak{F}/h$ ; heterogeneous setting 1 contains $2\!\times\!\mathrm{Hl00}$ , $6\!\times\!\mathrm{Al00}$ , $4\!\times\!\mathrm{L40}$ and $8\!\times\!\mathrm{A6000}$ GPUs with a budget of $28.8~\Bar{\mathbb{S}}/h$ ; heterogeneous setting 2 contains $3\!\times\!\mathrm{Hl00}$ and A100, $6\!\times\!\mathrm{L40}$ and A6000 GPUs with a budget of $26.9~\mathfrak{F}/h$ ; heterogeneous setting 3 contains $6\!\times\!\mathrm{Al00}$ and A6000, $12\!\times\!\mathrm{L40}$ GPUs with a budget of $27.1~\mathfrak{F}/h$ ; heterogeneous setting 4 contains $3\!\times\!\mathrm{Hl00}$ and $9\!\times\!\mathrm{Al00}$ GPUs with a budget of $26.3~\mathfrak{F}/h$ ; heterogeneous setting 5 contains $4\!\times\!\mathrm{Al00}$ , $6\!\times\!\mathrm{L40}$ and $10\!\times\!\mathrm{A}6000$ with a $70\%$ budget of $20.5\;\mathfrak{F}/h$ .  
+
+tion (Dao et al., 2022; Dao, 2024), PagedAttention (Kwon et al., 2023), and supports open-source LLMs such as OPT (Zhang et al., 2022) and LLAMA (Touvron et al., 2023).  
+
+5 EVALUATION  
+
+To evaluate the design and implementation of HEXGEN-2, we ask the following essential questions:  
+
+• What is the end-to-end performance comparison in terms of throughput and latency between HEXGEN-2 and the state-of-the-art homogeneous or heterogeneous generative inference systems?  
+
+• How effective is our scheduling algorithm in terms of finding the optimal assignment of the inference workflow compared with existing methods?  
+
+5.1 EXPERIMENTAL SETUP  
+
+Distributed environment. We rent GPUs from RunPod (RunPod, 2023), a GPU cloud provider with services for various GPUs, and perform evaluation in the following setups:  
+
+• Homogeneous setup: We rent one on-demand instance equipped with 8×NVIDIA H100-80G GPUs, with a budget of $\mathbb{S}29.52.$ /hour to represent the standard homogeneous case.  
+
+• Heterogeneous setups: We utilize four types of GPUs: H100, A100, L40, and A6000, to construct five different heterogeneous cluster setups, where the first four settings use a similar budget as the homogeneous setting, while the last setting use a $70\%$ budget of the homogeneous settings. The detailed configuration is illustrated in Figure 4.  
+
+We measure the communication bandwidth between each pair of GPUs via NCCL for all above mentioned environments. As shown in Figure 4, the heterogeneous environments demonstrate notable bandwidth limitation and heterogeneity.  
+
+LLM inference workloads. To evaluate the performances in different LLM inference workloads, we run four different types of workloads: heavy prefill with light decoding (HPLD), heavy prefill with heavy decoding (HPHD), light prefill with heavy decoding (LPHD), light prefill with light decoding (LPLD). Prefill requests that have more than 512 tokens are categorized as heavy, others are light, and decoding requests with more than 128 tokens are categorized as heavy (Hu et al., 2024). We generate these workloads using samples from the Azure Conversation dataset (Patel et al., 2024).  
+
+![](images/20295d3d02b920b9861f4b8f9c86fb75460dca031598c9a9f47cbdf7bfffd50d.jpg)  
+Figure 5: Request traces for online testing.  
+
+Online and offline testing. We test two different arrival rates: In the online setting, we scale the average arrival rate to $75\%$ of the cluster’s peak throughput to prevent request bursts that could cause system outages due to out-of-memory (OOM) errors, Figure 5 illustrates the distribution of input and output lengths in our trace. In the offline setting, we permit requests to arrive at a rate that fully utilizes the cluster, testing all four types of workloads (HPLD, HPHD, LPHD, LPLD).  
+
+![](images/5c139d2dd2b233cbef917cfcc52eeeba63f5e272fb675561e8177be700c513d9.jpg)  
+Figure 6: Throughput results to evaluate HEXGEN-2 on LLAMA-2 (70B). Each row corresponds to a particular heterogeneous setting. The first four columns demonstrates the offline inference results on different LLM workloads. The last column represents the online inference results.  
+
+![](images/cb8a5734a122b71bae3ce69ad2e985c0dea2f02d56fc8934fa063a2eb152bec8.jpg)  
+Figure 7: Throughput results to evaluate HEXGEN-2 on OPT (30B).  
+
+Models. We evaluate HEXGEN-2 on OPT (30B) (Zhang et al., 2022) and LLAMA-2 (70B) (Touvron et al., 2023) models, both are representative and popular open-source transformer models, to study the system performance on models of different sizes.  
+
+Baselines. We carefully select state-of-the-art approaches as baselines. To understand end-to-end performance, we compare HEXGEN-2 with DISTSERVE (Zhong et al., 2024) as the state-of-the-art approach under the homogeneous setting, which enhances LLM serving by disaggregating prefill and decoding computations across different GPUs, allowing different resource allocation and parallelism for each phase. And HEXGEN (Jiang et al., 2024b) as the state-of-the-art approach under heterogeneous settings, which is a distributed inference engine that efficiently manages LLM inference across heterogeneous environments, leveraging asymmetric parallelism with a scheduling algorithm to optimize resource allocation. To understand the efficiency of the proposed scheduling algorithm, we compare its convergence with the truncated variant of our scheduling algorithm and genetic algorithm.  
+
+Evaluation metrics. For offline serving, we report the average decoding throughput, measured as the number of tokens generated per second. For online serving, we additionally report the SLO attainments as detailed in $\S2$ .  
+
+5.2 END-TO-END EXPERIMENTAL RESULTS  
+
+End-to-end performances. Figure 6 and Figure 7 demonstrate the end-to-end throughput results of HEXGEN-2 compared with HEXGEN with different models, workloads, and heterogeneous settings, and DISTSERVE in the homogeneous setting. Given the same price budget, HEXGEN-2 outperforms its counterparts in almost all cases. In fact, compared with HEXGEN, HEXGEN-2 achieves up to a $1.5\times$ and, on average, a $1.4\times$ increase in serving throughput. Compared with DISTSERVE,  
+
+432   
+433   
+434   
+435   
+436   
+437   
+438   
+439   
+440   
+441   
+442   
+443   
+444   
+445   
+446   
+447   
+448   
+449   
+450   
+451   
+452   
+453   
+454   
+455   
+456   
+457   
+458   
+459   
+460   
+461   
+462   
+463   
+464   
+465   
+466   
+467   
+468   
+469   
+470   
+471   
+472   
+473   
+474   
+475   
+476   
+477   
+478   
+479   
+480   
+481   
+482   
+483   
+484   
+485  
+
+![](images/991f88ee607614df7269b8702424efaa52d26b7bc1d09566b91d395a197380a6.jpg)  
+Figure 8: Latency results in online experiments.  
+
+HEXGEN-2 achieves up to a $2\times$ and, on average, a $1.3\times$ higher serving throughput. We also demonstrate the latency results of HEXGEN-2 compared with HEXGEN in different heterogeneous settings and with DISTSERVE in the homogeneous setting. As shown in Figure 8, HEXGEN-2 achieves on average a $1.5\times$ lower latency deadlines than its counterparts. Specifically, analyzing the scheduling results2under different heterogeneous settings and LLM workloads, we find that: (1) our scheduling approach prioritizes tensor model parallelism for prefill model replica to minimize latency and hybrid parallelism for decoding model replica to maximize throughput; (2) the scheduled result also employs pipeline parallelism to reduce the inter-machine communication over limited bandwidth, and avoid ultra-low cross data center communication; (3) relatively more resources are assigned for prefill and decoding in the HPLD and LPHD workloads to balance the resource demands for different phases; (4) our approach always schedules KV cache communications through high-bandwidth links such as NVLink and PCIe to prevent them from becoming system bottlenecks.  
+
+Cost efficiency. To evaluate costefficiency in terms of serving throughput between homogeneous and heterogeneous setup, we reduce the budget in the heterogeneous setting by $30\%$ . As shown in Figure 9, HEXGEN-2 in heterogeneous setting  
+
+![](images/08e5b25ccdbcc39ffd9d1c72c5806bd63dcc2de5f46a579f28cf007f5a4819f1.jpg)  
+
+5 still reveals similar performance Figure 9: Throughput results with 70% price budget. to DISTSERVE in the homogeneous setting, and even outperforms it by $30\%$ in some specific workloads. We believe that this is strong evidence to illustrate that a heterogeneous system such as HEXGEN-2 is capable of managing heterogeneous GPUs to provide more economical LLM inference services without compromising service quality.  
+
+
+
+\section{5.3 EFFECTIVENESS OF THE SCHEDULING ALGORITHM  }
+
+
+To evaluate the effectiveness of our scheduling algorithm, we compared its convergence behavior with some truncated variants, which disables the max-flow guided edge swap operation mentioned in $\S3.4$ by replacing it with a random swap operation, and with the genetic algorithm. The genetic algorithm, designed to optimize model deployment, uses a population-based approach involving merge, split, and swap operations to iteratively refine GPU groupings (Jiang et al., 2024b). In our comparison, we replaced the group generation step in the graph partition phase and the iterative refinement phases of our algorithm with the genetic algorithm to enable HEXGEN-2 with this method. We benchmarked heterogeneous setting 1 across all four types of workloads. Figure 10 and Figure 11 illustrate the convergence curves and experimental results. Our scheduling algorithm identifies optimal assignments for all scenarios within 90 to 120 seconds, which significantly outperforms both the truncated variant and the genetic algorithm, finds assignments that deliver on average a $1.8\times$ higher serving throughput and converges much faster, while the others get stuck in local minima. Additionally, we verified that in all cases, the estimated serving throughput closely aligns with the actual throughput.  
+
+6 RELATED WORKS  
+
+LLM inference serving and disaggregated inference paradigm. There are plenty of recent researches focused on optimizing LLM inference and serving (Li et al., 2023; Kwon et al., 2023;  
+
+![](images/265a081bf0f9d2067e2f36e8f81aa88b7b8f1d80ea7c599e2613139de03c665b.jpg)  
+Figure 10: Convergence comparison of our proposed search strategy, our strategy without edge swap, and genetic algorithm, where all run 15 times.  
+
+![](images/53cc04b4b92678e46d854a28c4b7c95e473366bf9d49066b6e4bfb5e7c9f584d.jpg)  
+Figure 11: Throughput comparison in heterogeneous setting 1 among HEXGEN-2, HEXGEN-2 without edge swap, and HEXGEN-2 empowered by genetic algorithm.  
+
+Agrawal et al., 2024; Liu et al., 2023; Wu et al., 2023; Zhou et al., 2022; Yu et al., 2022). Among them, vLLM (Kwon et al., 2023) proposes paged-attention to improve the memory efficiency of the system. Orca (Yu et al., 2022) introduces continuous batching to improve inference throughput. AlpaServe (Li et al., 2023) adopts model parallelism to optimize LLM serving performance. SARATHI (Agrawal et al., 2024) introduces a chunked-prefill approach and piggybacks decoding requests to improve hardware utilization. Deja Vu (Liu et al., 2023) predicts contextual sparsity onthe-fly and uses an asynchronous and hardware-aware implementation to enhance LLM inference. On the other hand, many very recent works have been produced using disaggregated paradigm. Splitwise (Patel et al., 2024) splits the prefill and decoding phases onto separate machines to optimize hardware utilization. DistServe (Zhong et al., 2024) further implements distinct parallel strategies for different phases. TetriInfer (Hu et al., 2024) partitions prompts into fixed-size chunks and adopts a two-level scheduling algorithm to improve the performance of disaggregated inference. Mooncake (Qin et al., 2024) features a KV cache-centric disaggregated architecture that enhances inference by fully leveraging the underutilized resources of GPU clusters, excelling in long-context scenarios. These works further confirm the effectiveness of the disaggregated architecture.  
+
+Heterogeneous GPU computing. Recent efforts have investigated diverse approaches to deploying LLMs in heterogeneous environments. LLM-PQ (Zhao et al., 2024) supports adaptive model quantization and phase-aware partitioning to boost LLM serving efficiency on heterogeneous GPU clusters. Helix (Mei et al., 2024) formulates heterogeneous GPUs and network connections as a maxflow problem, and adopts a mixed integer linear programming algorithm to discover highly optimized strategies for serving LLMs. HexGen (Jiang et al., 2024b) proposes asymmetric parallelism and an advanced scheduling algorithm to deploy generative inference in decentralized and heterogeneous environments. Me´lange (Griggs et al., 2024) formulates the GPU allocation task as a cost-aware bin packing problem and optimizes cost efficiency for LLM services by leveraging heterogeneous GPU types. Note that our work shares a similar objective and but is the first to adapt the disaggregated inference architecture for heterogeneous environments.  
+
+
+
+\section{7 CONCLUSION  }
+
+
+We explore the potential of implementing a disaggregated inference framework in heterogeneous environments with devices of diversified computational capacities connected over a heterogeneous network. Toward this end, we propose HEXGEN-2, a generative inference framework that incorporates a disaggregated architecture alongside an efficient scheduling algorithm tailored for such deployments. Our empirical study suggests that, given the same budget, HEXGEN-2 can outperform state-of-the-art homogeneous and heterogeneous inference frameworks by up to $2.0\times$ and on average $1.3\times$ in serving throughput, and reduces the average inference latency by $1.5\times$ . Additionally, HEXGEN-2 maintains competitive inference performance relative to leading frameworks with a $\mathrm{j0\%}$ lower price budget. We believe that such an effort from HEXGEN-2 to provide efficient economical LLM inference could potentially democratize the usage of generative AI.  
+
+
+

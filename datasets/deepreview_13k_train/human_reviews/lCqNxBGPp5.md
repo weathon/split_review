@@ -1,0 +1,194 @@
+# vVLM: Exploring Visual Reasoning in VLMs against Language Priors
+
+- Decision: Reject
+- Scores: 8, 3, 6, 3
+
+## Abstract
+The intersection of vision and language presents challenges, as vision language models (VLMs) may exploit language biases, reducing their reliance on visual input. To examine this, we introduce a benchmark that prioritizes visual reasoning in visual question answering (VQA). Our dataset generated using image generative models consists of visually intricate images that vary in texture, shape, conceptual combinations, hallucinated components, and proverb. Each question is paired with three answers and three corresponding images: one that can be easily inferred from the text, and two that must rely on visual cues. While humans can effortlessly discern all three answers, existing VLMs struggle as GPT-4o achieving only 66.17\%. Furthermore, we propose enhancing VLMs by self-generating VQA pairs and images via pre-trained image generation and editing models. These images are then subjected to pixel-level and semantic corruptions, creating good-bad image pairs for DPO training. This approach encourages models to rely more on visual input, and has shown to improve performance on LLaVA-v1.5 and Cambrian.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4
+
+### Summary
+This paper introduces vVLM, a benchmark to address the issues of language biases in existing VQA benchmarks. vVLM consists of 300 questions, where each question is accompanied by a distractor fact and three image-answer pairs, where only one pair agrees with the distractor fact and the other two contradict the distractor. The intuition is that a VLM that is not guided by language priors should be able to ignore the distractor fact and answer. The authors show that existing SOTA VLMs such as GPT-4o struggle with this benchmark. To improve the performance of VLMs, the authors also propose a DPO-based method that self-generates VQA pairs for training using image generation and editing models, and then creates dispreferred pairs for DPO training by introducing pixel-level and semantic corruptions in the images.
+
+### Strengths
+- Impressive data collection and curation effort for the benchmark, with multiple iterations of human filtering and human-AI collaboration. Manual creation of synonym set for the answers is a good
+- Evaluated VLMs on both OOD and prior subsets separately, both with and without the distractor facts
+- Good baselines for ImageDPO method, and also evaluated on multiple datasets
+
+### Weaknesses
+ - **The Image-DPO method is weakly motivated:** DPO is used to identify which is the preferred response out of two different responses for the same input, but the proposed method does the opposite — says which is the preferred input for the same output? Model is being trained to learn what is the preferred input, what is the intuition connecting this to the proposed goal (improving visual reasoning)?
+    - repeat Text-DPO baseline, but with the generated images used for DPO as images for additional image-question-answer triplets (i.e. if you had a pair of triplets (Q, I, A_w) and (Q, I, A_l) for TextDPO, then for your perturbed images I’ with the blurring and pixelation perturbations, create a new triplet pair (Q, I’, A_w) and (Q, I’, A_l) ). My suspicion is that training with perturbed images at all is what is providing the additional performance benefit for your method, rather than the specific DPO objective you’re using.
+
+- **Missing multiple seeds and significance testing:** The numbers in Tables 2 and 3 are the result of a single training run. Reporting the mean and standard deviation of 3 training runs would be much more informative about how reliable these results are.
+
+- Language biases from internet-scale data (used to motivate the problem) is different from how language bias is operationalized here (distractor text included into the model context)
+
+### Questions
+- Eq2 should have I as a conditioning variable, π(a_test | Q, I) ≥ δ
+- Unclear how the alternate answers are selected; are they manually selected by the people designing the dataset?
+- the acronym for VLM is expanded twice in L170
+- What does vVLM stand for? It's never mentioned
+- For the conclusion that images that were more challenging to generate were more difficult to answer for the VLMs (L464-469) — are there any numbers/tables pointing to the same? How is “easily generated” evaluated?
+- Wrong citation for MMEC in L527: I think you meant this paper https://arxiv.org/pdf/2306.13394
+
+### Soundness
+3
+
+### Presentation
+4
+
+### Contribution
+4
+
+---
+
+## Human Reviewer 2
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+3
+
+### Summary
+This paper introduces a VQA benchmark that aims to ask visual questions that challenge the linguistic biases of vision–language models. This benchmark contains 300 questions with 3 image–answer pairs each. The questions are first generated by humans using OpenAI o1 and Claude-3.5-Sonnet. The three (single-word) answers are then written, such that the first $a_\text{prior}$ is likely and the latter two are unlikely given the question alone. An image is then synthetically generated for each question–answer pair using DALL-E 3 and Flux. Finally, a distractor fact is also included that reinforces the language prior in $a_\text{prior}$.
+
+Many open- and closed- vision–language models are tested on this benchmark and show poor performance (< 70%) on the "unlikely" test examples. Human (98%) and text-only (GPT-4o; 0%) baselines are also provided.
+
+This paper proposes a method for generating more VQA training examples (seeded from COCO, Text2VQA, Visual Genome) that are used for fine-tuning the models using DPO-based methods (the images are perturbed with pixel-level transformations to create negative examples). This method improves performance on the proposed benchmark by 1-3%.
+
+### Strengths
+I believe the examples in this benchmark are very creative! The synthetic nature of this data permits very interesting and challenging combinations of concepts: e.g. houses built from pitayas or zebras with checkerboard patterns (Figure 1).
+
+I appreciate that the benchmark is evaluated on a large set of vision–language models (Table 1). The benchmark is also sufficiently challenging.
+
+The writing in this paper is reasonably clear.
+
+### Weaknesses
+I have a few criticisms of this work. Unfortunately, I believe these are fundamental issues, but I would sincerely appreciate it if the authors could comment further.
+
+1. While this work suggests that existing VQA benchmarks do not sufficiently "defy language priors", Winoground (Thrush 2022), (Hessel 2023), and Whoops! (Bitton-Guetta 2023) are vision–language benchmarks that do have this focus. Moreover, I believe these benchmarks remain sufficiently challenging, e.g. GPT-4v is SOTA and scores 60% on Winoground (Wu 2023).
+
+2. I am quite concerned by the quality and content of the generated images. For example, in Figure 3: there is a flamingo present (alongside the tiger) in the image where "tiger" is the correct answer (and "flamingo" is supposed to be $a_\text{prior}$). Likewise, the "round" moon is actually boxed in a hexagon. Is the "horse with humps" sufficiently different from a camel? Horses don't have humps: is it fair to say that image is indeed a "horse"? Is the image of Paris with the Red Square really "Paris", or could it be "Moscow" with the Eiffel Tower? And so forth. I have looked at many examples and feel this issue is pervasive in this dataset.
+
+3. The "Image DPO" method is not clearly motivated by the topic of "linguistic bias" that is explored in this paper. Why are the perturbations pixel-level and not linguistic? And, I am not sure that this benchmark demonstrates a particular need for more VQA training data. Altogether, the gains (1-3%) from the introduced methods are relatively small compared to the complex system involved (e.g. including image-editing and fine-tuning).
+
+### Questions
+Could the authors please elaborate on how they constructed their dataset? In particular, it is not obvious how questions, answers, and images are specifically generated. E.g. what prompts are used for generating questions and images? I believe answers are entirely written by humans: is that correct? These are really important details that are unclear from my reading.
+
+I am not sure that Sec. 3.1 needs to rely on mathematical formulations and the three objectives. I think this actually makes reading the following sections a bit confusing. Could the authors please clarify how these objectives specifically relate to the construction of the questions/answers/images (if at all)? E.g. Sec. 3.2 just says "we designed answers [for/against] language priors" but does not relate this to a particular objective.
+
+### Soundness
+2
+
+### Presentation
+2
+
+### Contribution
+2
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4
+
+### Summary
+This paper discusses the issue of language biases in Vision Language Models (VLMs) and introduces a benchmark that prioritizes visual reasoning in visual question answering (VQA). Additionally, it uses good-bad image pairs for DPO training, leading to improved performance on models like LLaVA-v1.5 and Cambrian.
+
+### Strengths
+This paper addresses a significant and currently trending issue in VLMs: language bias. It proposes a scalable data generation pipeline, and the introduced DPO training method also appears to be intriguing. The writing of the paper is fluent and the sections are clearly structured.
+
+### Weaknesses
+The examples presented in the paper appear somewhat confusing, such as the image corresponding to the question "In what city does the image depict the Statue of Liberty?" and the image for "What is the largest long-necked animal shown in the image?" These examples seem counterintuitive and are even not easy for humans to answer correctly. Additionally, the paper lacks a discussion on the quality control of the dataset.
+
+The abstract claims that “our dataset consists of visually intricate images that vary in texture, shape, conceptual combinations, hallucinated components, and proverbs,” but the paper lacks discussion on different categories. The paper also does not discuss the potential for the dataset to introduce biases, despite the authors' stated intention to address language biases in VLMs. This could lead to a situation where the model learns to exploit new dataset-specific biases, rather than improving its general visual reasoning capabilities.
+
+
+### Questions
+1. How is the quality of the dataset ensured during the generation process to avoid discriminate, incorrect images and the awkward and meaningless questions? Are the dataset and code open source?
+
+2. The abstract claims that “our dataset consists of visually intricate images that vary in texture, shape, conceptual combinations, hallucinated components, and proverbs,” but the paper lacks discussion on different categories.
+
+3. In the experiments, it might be better to include experiments on benchmarks that eliminate bias, such as [NaturalBench](https://arxiv.org/pdf/2410.14669?) .
+
+### Soundness
+3
+
+### Presentation
+3
+
+### Contribution
+2
+
+---
+
+## Human Reviewer 4
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4
+
+### Summary
+This paper investigates the bias of Vision-Language Models (VLMs) towards language by creating a synthetic Visual Question Answering (VQA) dataset of 900 images using state-of-the-art (SOTA) image generation models DALL.E-3 and Flux. The authors demonstrate that VLMs tend to rely heavily on language cues when interpreting visual questions, which can limit their performance in truly visual reasoning tasks. To address this issue, they apply Direct Preference Optimization (DPO) training on top of VLMs, using self-generated VQA pairs and corresponding images from pre-trained image generation and editing models. This approach aims to mitigate the language bias and improve the alignment of VLMs with visual content.
+
+### Strengths
+1. This paper introduces an automatic way to check language bias of VLMs by synthetically generating images using SOTA image generation models.
+2. This paper proposes Vision-Centered DPO by running DPO on automatically generated good/bad data where a QIA pairs, the QA remains the same and the Image is perturbed.
+
+### Weaknesses
+1. The vVLM benchmark is interesting but there is no comparison with other datasets (e.g., HallusionBench[a]). The paper mentions that the generated​​ images vary in texture, shape, conceptual combinations, hallucinated components, and proverb. However, the distribution of these features in the data is not specified. It would be insightful to the community to learn in which dimension the existing VLMs are failing mostly.
+2. The DPO experiment and result section seems incomplete and is hard to follow through as there are little details of the training data, benchmarks and the purpose of choosing these benchmarks. It is unclear what amount of data has been synthetically generated for DPO training and what is the quality of the data. Image DPO works in some cases and not the best choice in others and there is no insight or empirical analysis to justify when Image DPO is useful.
+
+### Questions
+Q1. "Interestingly, we observe a strong correlation between the difficulty VLMs face in interpreting images and the challenges encountered by image generation models in producing those images. For example, when an image is easily generated, even weaker VLMs can correctly answer the associated QIA with relative ease." - What is the definition of difficulty here? Could you share some qualitative and quantitative analysis here?
+
+Q2. "On vVLM$^P$-Score, the Image-DPO method achieved the second-best performance which indicates that with only question image combination, Image DPO is less effective. Is there any insight why this is the case?
+
+Q3. In addition, in presence of prior, Image DPO is worse than RLHF-V. Is this because of the quality of the data? It would have been better to provide insights and empirical analysis on why Image DPO works on certain cases and why not in other.
+
+Q4. It is not clear from the paper which VLMs have been used to create the DPO training data. Additionally, there has been no qualitative analysis on the quality of the generated  image and question-answer pairs.
+
+Q5. It would be interesting to see a combination of both Image and Text-DPO and their impact on downstream tasks.
+
+Q6. In table 3, we can see that with increasing model size the performance gap between Image DPO training and non-Image DPO training is reducing. It would be great to see any experiment that addresses the effectiveness of various DPO training with scaling the model size.
+
+Q7. What is the performance of Image DPO on complex compositionality tasks (e.g., Winoground [1]) that checks image understanding ability of VLMs?
+
+1. https://arxiv.org/abs/2204.03162
+
+### Soundness
+1
+
+### Presentation
+2
+
+### Contribution
+2

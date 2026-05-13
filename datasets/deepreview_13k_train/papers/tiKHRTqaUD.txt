@@ -1,0 +1,237 @@
+\title{Handling Cost and Constraints with Off-Policy Deep Reinforcement Learning}
+
+\begin{abstract}
+Methods for off-policy deep reinforcement learning (DRL) offer improved sample efficiency relative to their on-policy counterparts, due to their ability to reuse data throughout the training process. For continuous action spaces, the most popular approaches to off-policy learning include policy improvement steps where a learned state-action ($Q$) value function is maximized over selected batches of data. These updates are often paired with regularization to combat associated overestimation of $Q$ values. With an eye toward safety, we revisit this strategy in environments with ``mixed-sign'' reward functions; that is, with reward functions that include independent positive (incentive) and negative (cost) terms. This setting is common in real-world applications, and may be addressed with or without constraints on the cost terms. We find the combination of function approximation and a term that maximizes $Q$ in the policy update to be problematic in such environments, because systematic errors in value estimation impact the contributions from the competing terms asymmetrically. This results in overemphasis of either incentives or costs and may severely limit learning. We explore two remedies to this issue. First, consistent with prior work, we find that periodic resetting of $Q$ and policy networks can be used to reduce value estimation error and improve learning in this setting. Second, we formulate novel off-policy actor-critic methods for both unconstrained and constrained learning that do not maximize $Q$ in the policy update.  We find that this second approach, when applied to continuous action spaces with mixed-sign rewards, consistently and significantly outperforms state-of-the-art methods augmented by resetting. We further explore the applicability of our approach to more frequently-studied control problems that do not have mixed-sign rewards, finding it to both more reliably produce competent performance and be competitive in terms of overall performance.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Model-free deep reinforcement learning (DRL) algorithms have shown significant potential in numerous domains, from robotic manipulation \citep{openai2019solving} to complex games \citep{MnKaSiRuVeBeGrRiFiOsPeBeAnKiKuWiLeHa15} to plasma control \citep{degrave_magnetic_2022}. To become more widely used in real-world applications, however, further improvements in both training efficiency and agent safety are necessary.
+
+Improved sample efficiency of DRL reduces training costs, whether through computation or runtime on physical systems. Off-policy methods for DRL reuse data collected throughout the training process, offering sample efficiency superior to that of on-policy approaches. State-of-the-art off-policy approaches typically leverage a replay buffer of experiences, learn a state-action value ($Q$) function, and find a policy that maximizes the learned $Q$ function. When applied to continuous action spaces, either a stochastic \citep{sac_newer} or deterministic \citep{fujimoto2018td3} policy representation may be used. Various approaches to regularizing learning in this setting have enabled significant increases in efficiency by enabling more network updates to be made per step of training data collected \citep{li2023efficient, d'oro2023sampleefficient}.
+
+Beyond training requirements, agents intended for real-world use must be safe. Environments where safety is critical typically include competing positive (incentive) and negative (cost) terms in their reward functions.  The two may be considered together, or separately through constraints on the cost terms. In this work, we observe deficient behavior of state-of-the-art off-policy approaches for continuous control in such ``mixed-sign'' environments.  This scenario occurs in numerous application spaces, from robotics (navigation in the presence of obstacles, robotic surgery) to resource allocation (when both performance and efficiency must be considered), to financial decision-making (where the risk of losses exists in the pursuit of gains). 
+
+Our contributions in this work are the following:
+\begin{itemize}
+    \item We diagnose the cause of the aforementioned poor performance, finding that it stems from value estimation error impacting contributions from different reward terms asymmetrically.
+    \item To address the issue, we provide a novel algorithm building around the off-policy actor-critic originally proposed by \cite{degris2012off}.  We empirically demonstrate that our method is not prone to harmful levels of value estimation error, and that it provides effective learning in both the unconstrained and constrained settings.
+\end{itemize}
+We find that in environments with mixed-sign rewards, our method significantly outperforms existing approaches where $Q$ is maximized in the policy update  \citep{sac_newer, fujimoto2018td3}, even when they are augmented by resetting \citep{nikishin2022primacy}.  We further find that our algorithm is competitive with these approaches, as well as more reliable in the sense of producing at least moderate competence, on tasks that do not include mixed-sign rewards.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.325\textwidth]{figures/PointGoal2/rewards_small_p.png}
+    \includegraphics[width=0.325\textwidth]{figures/DoggoButton2/rewards_small_p.png}
+    \includegraphics[width=0.325\textwidth]{figures/CarPush2/rewards_small_p.png}
+    \includegraphics[width=0.9\textwidth]{figures/legend_1.png}
+    \includegraphics[width=0.325\textwidth]{figures/PointGoal2/rewards_large_p.png}
+    \includegraphics[width=0.325\textwidth]{figures/DoggoButton2/rewards_large_p.png}
+    \includegraphics[width=0.325\textwidth]{figures/CarPush2/rewards_large_p.png}
+    \includegraphics[width=0.9\textwidth]{figures/legend_2.png}
+    \caption{Sample unconstrained Learning on Safety Gym.  \textbf{Top row}: learning with relatively small cost weights.  \textbf{Bottom row}: learning with larger cost weights.  SAC and TD3 struggle to learn without resetting, particularly as the weight on cost terms increases. Even with periodic resets, they do not match the performance of OPAC$^2$.}
+    \label{fig:unc_rew}
+\end{figure}
+
+
+\section{Preliminaries: Off-Policy RL for Continuous Action Spaces}
+
+Reinforcement learning (RL) considers the problem of maximizing discounted returns in a Markov Decision Process (MDP) $(\mathcal{S}, \mathcal{A}, \mathcal{P}, r, \gamma)$, where $\mathcal{S}$ is the state space, $\mathcal{A}$ is the action space, $\mathcal{P}$ are the transition dynamics, $r$ is the reward function, and $\gamma\ \in [0,1)$ is the discount factor.  RL maximizes the value function $V(\bs_t) := \sum_{t'=t}^\infty \mathbb{E}_{\pi} [ \gamma^{t'-t} r(\bs_{t'}, \ba_{t'}) | \mathbf{s_t} ]$ at initial ($t=0$) states for trajectories encountered by an agent with policy $\pi(\ba_t|\bs_t)$ in an environment. The state-action value function $Q(\bs_t, \ba_t) :=  \sum_{t'=t}^\infty \mathbb{E}_{\pi} [ \gamma^{t'-t} r(\bs_{t'}, \ba_{t'}) | \mathbf{s_t}, \ba_t ]$ is the expected future discounted reward from a state $\mathbf{s_t}$, given that action $\ba_t$ is taken at time $t$. 
+
+Practical approaches to off-policy deep reinforcement learning maintain a replay buffer $\mathcal{D}$ of transition tuples $(\bs, \ba, r, \bs', d)$, where $d$ indicates episode termination, and interleave data collection with network updates based on samples from the buffer. The network updates include both policy evaluation and policy improvement steps. 
+
+Policy evaluation typically involves estimation of the $Q$ function via a Bellman backup with loss
+\begin{equation}
+L(\phi) = \mathbb{E}_{(\bs, \ba, r, \bs', d)\sim \mathcal{D}} \left[\left(r + \gamma(1-d)Q^{\pi}_{\mathrm{targ}}(\bs', \ba') -Q^{\pi}(\bs, \ba) \right)^2\right],
+\label{eq1}
+\end{equation}
+where $\ba' \sim \pi_\theta(\ba|\bs')$ is sampled from the current policy evaluated at the next state $\bs'$.   A target network $Q^\pi_{\mathrm{targ}}$, delayed from the current estimate for $Q^{\pi}$, is often used to promote learning stability \citep{MnKaSiRuVeBeGrRiFiOsPeBeAnKiKuWiLeHa15}.
+
+Policy improvement aims to maximize expected reward. The difference between the density of states encountered by the current policy and the totality of the replay buffer is often ignored in this step, introducing a bias in the policy estimate that is often manageable \citep{fu2019}. In practice this amounts to learning a more general policy, applicable to the full range of scenarios encountered by the agent throughout the training process.  The RL objective, for policy parameterized by variables $\theta$, may then be written as
+\begin{equation}
+J(\theta) \approx E_{\bs\sim\mathcal{D}} V^{\pi_\theta}(\bs) = E_{\bs\sim\mathcal{D}, \ba\sim\pi_\theta(\ba|\bs)} Q^{\pi_\theta}(\bs, \ba)
+\end{equation}
+The chain rule may be used to compute a policy gradient for this expression, and a more tractable form obtained by ignoring the second term:
+\begin{equation}
+\begin{split}
+\nabla_\theta J(\theta) &\approx E_{\bs\sim\mathcal{D}, \ba\sim\pi_\theta(\ba|\bs)}
+\left[\nabla_\theta\log(\pi_\theta(\ba|\bs))Q^{\pi_\theta}(\bs, \ba) + \nabla_\theta Q^{\pi_\theta}(\bs, \ba) \right]\\
+&\approx E_{\bs\sim\mathcal{D}, \ba\sim\pi_\theta(\ba|\bs)} \left[\nabla_\theta\log(\pi_\theta(\ba|\bs))Q^{\pi_\theta}(\bs, \ba)\right]
+\label{pg}
+\end{split}
+\end{equation}
+Neglect of the second term, which may be difficult to compute off-policy, is shown to preserve the local minima to which the policy converges in the tabular case in \cite{degris2012off}. To reduce variance of the policy gradient estimate, \cite{degris2012off} recommend removing a state dependent baseline, resulting in
+\begin{equation}
+\nabla_\theta J(\theta) \approx E_{\bs\sim\mathcal{D}, \ba\sim\pi_\theta(\ba|\bs)} \Big[\nabla_\theta \log(\pi_\theta(\ba|\bs)) A^{\pi_\theta}(\bs, \ba)\Big],
+\label{opac}
+\end{equation}
+where $A^{\pi_\theta}(\bs, \ba) = Q^{\pi_\theta}(\bs, \ba) - V^{\pi_\theta}(\bs)$ is the advantage function.   
+
+There are two common alternatives to (Eq. \ref{pg}), both more commonly used today. The first is the deterministic policy gradient (DPG; \cite{dpg}), which represents the policy as a deterministic function $\mu_{\theta}(\bs)$. With that representation, the policy may be updated according to 
+\begin{equation}
+\nabla_\theta J(\theta) \approx \mathbb{E}_{\bs\sim\mathcal{D}} \left[\nabla_\theta \mu_\theta(\bs) \nabla_{\ba}Q^{\mu_\theta}(\bs, \ba)\vert_{\ba=\mu_\theta(\bs)}\right]
+\label{dpg}
+\end{equation}
+The second is the reparameterization trick, which encodes the stochasticity of the policy in an independent noise variable. The resulting form has provably lower variance than (\ref{pg}) \citep{reparam}, and is used by Soft Actor-Critic (SAC; \cite{sac_original, sac_newer}). SAC also uses a ``squashed'' action representation for enforcing control bounds: $\ba_\theta(\bs, \xi) = \tanh(\mathbf{\mu_\theta}(\bs) + \mathbf{\sigma_\theta}(\bs)\odot\xi)$,  where $\xi \sim \mathcal{N}(\mathbf{0}, I)$ and $\mu_\theta$, $\sigma_\theta$ are the state-dependent mean and variance, respectively. Including a second term to encourage policy entropy, SAC performs soft policy improvement via
+\begin{equation}
+\nabla_\theta J(\theta) = \mathbb{E}_{\bs\sim\mathcal{D}, \mathbf{\xi} \sim\ \mathcal{N} (\mathbf{0}, \mathbf{1})} \left[ \nabla_\theta Q^{\pi_\theta}(\bs, \ba_\theta(\bs, \mathbf{\xi})) - \alpha \nabla_\theta \log(\pi_\theta(\ba_\theta(\bs, \mathbf{\xi})|\bs) \right].
+\label{rp}
+\end{equation}
+Modern off-policy approaches using the deterministic policy gradient  (e.g., TD3; \cite{fujimoto2018td3}) and reparameterization trick (e.g., SAC) consider multiple $Q$ functions to combat overestimation of $Q$ originating in its maximization in the policy update steps (\ref{dpg}) and (\ref{rp}). This mechanism was addressed for discrete action spaces in \cite{double_q} and explained in detail for continuous action spaces in \cite{fujimoto2018td3}.  It is rooted in overestimation errors in the value update being propagated by the policy update. To combat this effect, both TD3 and SAC employ the ``clipped double $Q$ trick'' in the policy evaluation step
+\begin{equation}
+L(\phi) = \mathbb{E}_{(\bs, \ba, r, \bs', d)\sim \mathcal{D}} \left[\left(r + \gamma(1-d)\min_{i=1,2} Q^\pi_{\phi_i, \mathrm{targ}}(\bs', \ba') -Q^\pi_\phi(\bs, \ba) \right)^2\right]
+\end{equation}
+to train two $Q$ functions with different initial parameters $\phi_1, \phi_2$ toward the minimum of their outputs, for each sampled experience.  SAC also uses the minimum of the two $Q$ functions in the policy update. Other methods \citep{redq, droq} go further, training larger ensembles of $Q$ functions. These adjustments  mitigate $Q$ overestimation, but do not fully solve the problem. In some cases, $Q$ may still be overestimated; in others, it may be underestimated. As noted in \cite{fujimoto2018td3}, underestimation is preferred because it is not propagated by the policy update.  
+
+Notably, we find that these corrections are unnecessary with the off-policy actor-critic (Eq. \ref{pg}). While $Q$ may still be slightly overestimated, we find that the ``gentler'' updates provided by the off-policy actor-critic remove the tendency for large inaccuracies.  The addition of the value function in Eq. \ref{opac} both provides variance reduction and weakens the feedback between the policy and Q updates, leading to learning that we find to be both reliable and performant.
+
+\begin{wrapfigure}[30]{r}{0.325\textwidth}
+    \includegraphics[width=0.325\textwidth]{figures/200k_tot_e_opac.png}
+     \includegraphics[width=0.325\textwidth]{figures/200k_ratio.png}
+    \caption{\textbf{Top:} Total (cost and incentive) reward per-episode of fully-trained agents as a function of cost adjustment relative to reward adjustment early in Safety Gym training. \textbf{Bottom:} SAC and TD3 perform best when prioritizing cost similarly to OPAC$^2$.}
+    \label{fig:200k}
+\end{wrapfigure}
+
+
+\section{The Impact of Competing Objectives}
+
+
+As explained in \cite{fujimoto2018td3}, the tendency of $Q$ to be systematically overestimated when maximized in the policy update occurs because of the pairing of that update with the use of $Q$ (albeit delayed) in the target of its own update (Eq. \ref{eq1}). SAC and TD3 combat this upward bias by learning two $Q$ functions, using each as the target for the other's update. To make sure this target is never a worse overestimate than just using the same $Q$ function, the target is set to the minimum of the two $Q$ functions (the ``clipped double $Q$ trick''). SAC also uses this minimum in the policy update. Unfortunately, it is unlikely that any form of regularization will exactly balance the intrinsic tendency of $Q$ to be overestimated when maximized in the policy update.
+
+Now consider a continuous control problem where the reward function is a sum of multiple independent objectives. A special case of this is when rewards are ``mixed-sign;'' that is, contain independent incentive ($>0$) and cost ($<0$) terms. As recently explored \citep{nikishin2022primacy, li2023efficient}, off-policy DRL agents are prone to overemphasizing experiences collected early in training.  In the context of multiple independent objectives, this corresponds to excessive focus on the reward terms most easily accessed by an agent of low capability. Fixation on some terms may lead to others being neglected entirely, as has been observed for entire \emph{tasks} in multi-task learning \citep{grad_surgery, cagrad}. The situation is more likely to become acute with mixed-sign rewards; favoring a given reward term early in training may cause the agent to ignore terms designed to counterbalance it. Even if overemphasis of particular terms does not lead to wholesale neglect of others, it is likely to impact the relative consideration of different terms by the agent and thereby impact behavior.
+To explore this issue, we evaluated the performance of different off-policy algorithms on the OpenAI Safety Gym \citep{ray2019safetygym}, a ``mixed-sign'' suite of robotic navigation tasks with obstacles.  In the top panel of Figure \ref{fig:200k}, each marker represents 5 training runs on a given configuration, where a configuration is a combination of robot, obstacle set, task, and penalty assessed each time an obstacle is contacted.  Each algorithm tackled the same set of 24 configurations, covering significant range in the ease of accessing incentive and cost terms early in training.  The $x$-axis reflects how much an agent adjusts its cost levels relative to incentives early on: it is the \emph{change} in average costs accumulated by the agent at the start of training compared to what it accumulates 200k steps in, divided by that same difference for incentives. Points with $x=0$ were configured to have $0$ penalty (ignore costs).  The $y$-axis is the average total reward (including costs and incentives) per-episode of the fully trained agent, normalized by the level achieved by our updated off-policy actor-critic (OPAC$^2$) agent.  We observe that SAC and TD3 are typically able to accumulate incentives well only when cost is close to ignored, and tend to prioritize cost more highly than OPAC$^2$. In the bottom panel, we plot all configurations with nonzero penalty weights.  We normalize the x and y values for each point by those obtained by OPAC$^2$ in the environment configuration corresponding to the point. We observe that SAC and TD3 are able to compete with OPAC$^2$ only when they adjust cost and reward similarly to OPAC$^2$ early in training, suggesting improper balancing in other runs.
+
+
+
+\section{Addressing Erroneous $Q$ Estimates}
+
+We investigate two routes for addressing this problem. Section \ref{sec:resetting} examines the efficacy of a popular regularization strategy in this setting. In Section \ref{sec:algorithm}, we propose a novel algorithm with desirable properties for this problem.
+
+\subsection{Regularization via Resetting} \label{sec:resetting}
+One method recently shown to be effective for improving off-policy learning is to periodically reset policy and value networks throughout training, while preserving accumulated experience \citep{nikishin2022primacy}. This method has been shown to enable learning that is extremely sample-efficient, by allowing many network updates to be conducted per collected data point (learning at high ``replay ratios''). \cite{li2023efficient} observed that resetting reduces temporal difference (TD) error on validation (i.e., not seen in training) transitions. We find this observation to be particularly relevant in mixed-sign environments; in many cases, resetting is seen to enable learning with SAC and TD3 when it would not otherwise be possible. However it is not seen to provide optimal performance, and could be inappropriate in scenarios where \emph{cumulative} cost is a consideration\footnote{\cite{d'oro2023sampleefficient} incorporated offline training after resets to mitigate this issue.}.
+
+\subsection{Updating the Off-Policy Actor-Critic} \label{sec:algorithm}
+To more directly address erroneous $Q$ estimates in environments with competing objectives, we revisit the off-policy actor-critic (Eq. \ref{opac}). We seek to build a practical algorithm around it, leveraging techniques from more recent methods as well as novel extensions to reduce the variance on the policy gradient estimate while leveraging its potentially less biased value estimation. Differing from \cite{degris2012off}, we neglect importance weights in our gradient estimates,  an approximation that significantly reduces variance and amounts to learning a more general policy over all states in the buffer (rather than one tailored to the current density of states). We adopted several aspects of Soft Actor-Critic, including $Q$ and $V$ updates that match the original version of SAC (though we require only a single $Q$ network) and ``squashing'' of actions with a hyperbolic tangent to respect control bounds.  The latter tactic reduces policy gradient bias relative to methods that allow the environment to clip actions \citep{clipped_action_policy_gradient}. Finally, we normalized advantage estimates prior to use in the policy gradient (Eq. \ref{opac}).
+
+Incentivizing policy entropy has been shown to improve learning in complex problems and with high-dimensional control spaces \citep{sac_original}. One existing approach is the ``maximum-entropy'' framework of \cite{sac_newer}, wherein entropy is bundled with the reward. While this strategy is compatible with our approach, we also considered the use of an entropy bonus to be added directly to the policy loss.  Empirically, we found this entropy bonus to outperform the ``max-entropy'' strategy (Figure \ref{fig:diagnostics}) in environments with mixed-sign rewards. To accommodate squashing, our bonus used an action sampled with the reparameterization trick and was optimized towards a target entropy level, similar to \cite{sac_newer}. 
+
+\subsubsection{Constrained Approach}
+Reinforcement learning with costs may alternatively be formulated with constraints. Differing from the unconstrained setting discussed above, Constrained Markov Decision Processes (CMDPs) have positive rewards $r(\bs, \ba)$ and costs $c(\bs, \ba)$ provided separately for each time step, as well as an overall constraint $C(\tau) = F(c(\bs_1, \ba_1), \ldots, c(\bs_T, \ba_T))$ defined over the whole trajectory $\tau \equiv \bs_1, \ba_1, \ldots,  \bs_T, \ba_T $. The associated learning problem is to maximize the value function $V^{\pi}(\bs_t)$ associated with rewards, such that the expected value of the constraint over trajectories sampled by the agent will not exceed a fixed threshold $M$: $J_C(\theta) = E_{\tau \sim p_\theta(\tau)}C(\tau) < M$. Here $p_\theta(\tau)$ is the probability distribution of trajectories $\tau$ encountered by an agent parameterized by $\theta$. While other functions are possible, here we will be concerned with constraints on total trajectory cost: $C(\tau) = \sum_{t=1}^T c(\bs_t, \ba_t)$.
+
+Constrained RL is often conducted using dual methods \citep{bert, Boyd2004}, and has previously been explored off-policy with SAC \citep{Ha_etal_2020, zhou_c_sac, wcsac}. The goal is to learn a Lagrange multiplier $\beta$ that scales cost relative to reward during policy optimization in order to satisfy the constraint. This circumvents the need for reward shaping, as the weight of the cost terms is learned. As $\beta$ changes throughout training, it is beneficial to train separate $Q$ and $V$ networks for reward ($Q_r$, $V_r$) and cost ($Q_c$, $V_c$). To facilitate cost matching in the states currently frequented by the agent, we update $\beta$ toward the average cost incurred by the agent \emph{over only the last epoch of training}. This update, like those on other quantities, is conducted every time step. Our full constrained approach, Constrained Off-Policy Actor-Critic, SQUAshed and REgularizeD (C-OPAC$^2$), is given in Algorithm \ref{alg:copac2}. This differs from the unconstrained approach in two ways: we now learn two $Q$ and $V$ networks, one each for rewards and costs, and we also learn $\beta$ in order to satisfy the constraint.
+\begin{algorithm}[ht]
+\caption{Constrained Off-Policy Actor-Critic, SQUAshed and REgularizeD (C-OPAC$^2$) \label{alg:copac2}}
+\begin{algorithmic}[1]
+\State \textbf{Input:} Initial policy parameters $\theta$; $Q_r$, $Q_c$ parameters $\phi_{r}, \phi_{c}$; $V_r$, $V_c$ parameters $\psi_{r}, \psi_{c}$
+\State \textbf{Input:} Initial entropy weight $\alpha$, penalty weight $\beta$
+\State Initialize $V_r$, $V_c$ target network parameters: $\psi_{r, \mathrm{targ}} \leftarrow \psi_r; \psi_{c, \mathrm{targ}} \leftarrow \psi_c$
+\State Initialize replay buffer $\mathcal{D} = \emptyset$,  a ring buffer of fixed size
+\For{iteration $k \in [0, \dots, K-1$}
+\For{step $s \in [0, \dots, S-1]$}  \Comment{Typically take just one step ($S=1$)}
+\State Sample $\ba \sim \pi_{\theta_k}(\ba|\bs)$; observe $\bs' \sim p(\bs' | \bs, \ba)$  \Comment{One step in CMDP}
+\State Store transition tuple $ (\bs,\ba,\bs', r(\bs,\ba), c(\bs, \ba))$ in $\mathcal{D}$ 
+\EndFor
+\For{gradient step $g \in [0, \dots, G-1]$}
+\State Sample batch $B = \{(\bs_i, \ba_i, \bs'_i, r_i, c_i, d_i) \}$ from $\mathcal{D}$ 
+\State Update $\beta$: $\beta \leftarrow \beta - \lambda_\beta\nabla_\beta \beta(M-J_C(\theta) )$ \Comment{$J_C(\theta)$ computed over most recent epoch}
+\State Compute Q error: $\mathcal{E}_Q(B) = \sum_i \left[Q_r(\bs_i, \ba_i) - (r_i + \gamma(1-d_i) V_{r, \mathrm{targ}}(\bs_i))\right]^2 + $ \\ $\hspace{162pt}\left[Q_c(\bs_i, \ba_i) - (c_i + \gamma(1-d_i) V_{c, \mathrm{targ}}(\bs_i))\right]^2$
+\State Update Q: $\phi_r \leftarrow \phi_r - \lambda_\phi \nabla_{\phi_r} \mathcal{E}_Q(B)$; $\phi_c \leftarrow \phi_c - \lambda_\phi \nabla_{\phi_c} \mathcal{E}_Q(B)$
+\State Sample $\ba_{i,\pi} \sim \pi(\ba|\bs_i)$, using $\tanh$ squashing
+\State Compute $V$ error: $\mathcal{E}_V(B) = \sum_i \left[V_r(\bs_i )- Q_r(\bs_i, \ba_{i, \pi})\right]^2 + \left[V_c(\bs_i) - Q_r(\bs_i, \ba_{i,\pi})\right]^2$
+\State Update $V$: $\psi_r \leftarrow \psi_r - \lambda_\psi \nabla_{\psi_r} \mathcal{E}_V(B)$; $\psi_c \leftarrow \psi_c - \lambda_\psi \nabla_{\psi_c} \mathcal{E}_V(B)$
+\State Compute $A(\bs_i, \ba_{i,\pi}) = Q_r(\bs_i, \ba_{i,\pi}) - V_r(\bs_i) - \beta [Q_c(\bs_i, \ba_{i,\pi}) - V_c(\bs_i)]$ \Comment{Normalize}
+\State Sample $\ba_{\mathrm{rp},\pi} \sim \pi(\ba|\bs_i)$ with reparameterization trick (for $\tanh$ squashing)
+\State Compute $\pi$ loss: $\mathcal{E}_\pi(B) = \sum_i\left[ \alpha\log \pi_\theta(\ba_{\mathrm{rp},\pi} | \bs_i) - A(\bs_i, \ba_{i,\pi})\log(\pi_\theta(\ba_{i,\pi} | \bs_i) \right] $
+\State Update $\pi$: $\theta \leftarrow \theta - \lambda_\theta \nabla_\theta \mathcal{E}_\pi(B)$
+\State Update $\alpha$ : $\alpha \leftarrow \alpha - \lambda_\alpha\nabla_\alpha \left[ -\alpha\log(\pi(\ba_{i,\pi}|\bs_i)) -\alpha\mathcal{H}_{\mathrm{target}}\right]$
+\State Update value targets: $\psi_{r, \mathrm{targ}} \leftarrow \rho \psi_{r, \mathrm{targ}} + (1-\rho)\psi_{r}; \psi_{c, \mathrm{targ}} \leftarrow \rho \psi_{c, \mathrm{targ}} + (1-\rho)\psi_{c}$
+\EndFor
+
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+
+
+\section{Experiments}
+
+We used the  OpenAI Safety Gym \citep{ray2019safetygym} to explore off-policy learning for environments with continuous action spaces and mixed-sign rewards. Safety Gym is a configurable set of robotic navigation tasks, wherein different robots must navigate through courses containing multiple obstacle types to perform different tasks as many times as possible in a fixed time window. The locations of goals and obstacles are randomized, leading to outcome variability and necessitating the learning of a generalized control strategy. For unconstrained experiments, each cost event incurred a fixed, negative reward. For constrained experiments, the weight coefficient for cost events was learned. We evaluated all robots and tasks for the most obstacle-rich (level 2) publicly available environments.
+
+ 
+\subsection{Unconstrained Learning}
+To explore the effect of mixed-sign rewards on unconstrained off-policy learning, we considered both small and large static cost weights in our target environments. The larger penalty weights matched those used on-policy in \cite{aaai_paper}, while the smaller weights were reduced by a factor of 2. We compared OPAC$^2$ with SAC and TD3, both with and without resets. A  sample of the resulting learning curves is shown in Figure \ref{fig:unc_rew}. We find SAC and TD3 to be generally unable to reach adequate performance, particularly as the penalty weight increases. The situation is improved when resetting is applied; however, it often does not result in performance that reaches the level of OPAC$^2$. Attesting to the sample efficiency of off-policy methods, we find that OPAC$^2$ is typically able to reach performance comparable to that of Proximal Policy Optimization (PPO; \cite{ScWoDhRaKl17}) and Trust Region Policy Optimization (TRPO; \cite{schulman2017trust}) using 20--50 times fewer samples (based on results reported by \cite{aaai_paper}). On the Doggo environments, OPAC$^2$ exceeds the positive reward accumulation of PPO and TRPO trained \emph{without cost terms} and with twice as many samples \citep{ray2019safetygym}.
+
+To explore the issues affecting SAC and TD3, we examined the validation TD error as well as the $Q$ function error. As in \cite{li2023efficient}, ``validation'' refers to a held-out set of transitions not in the replay buffer. This phenomenon was observed by \cite{li2023efficient} in the context of learning at high replay ratios. 
+We also compared $Q$ function estimates to discounted Monte Carlo returns to measure $Q$ function accuracy.  We found that SAC and TD3 \emph{underestimate} the true $Q$ value in all ``Car'' and ``Point'' environments, while the trend was more variable in the ``Doggo'' environments. 
+
+ ``Doggo'' is a higher-dimensional control problem than ``Car'' and ``Point'' (12-dimensional vs. 2-dimensional), potentially leading it to require more exploration.  In all environments with mixed-sign rewards tested, we observed better performance with our entropy bonus than with a  maximum entropy approach. 
+
+\begin{figure}
+\includegraphics[width=0.325\textwidth]{figures/CarButton2/td1.png}
+\includegraphics[width=0.325\textwidth]{figures/PointGoal2/q_diff1.png}
+\includegraphics[width=0.325\textwidth]{figures/DoggoButton2/rewards_small_p_e.png}
+\caption{Unconstrained learning with mixed-sign rewards. \textbf{Left}: TD error in validation is generally higher with SAC and TD3 than OPAC$^2$, but may be reduced with resetting. \textbf{Middle}: $Q$ is underestimated by SAC and TD3 in all ``Car'' and ``Point'' environments, but may be improved by resetting. \textbf{Right}: Our entropy bonus (blue) outperforms max-entropy and no regularization when used with OPAC$^2$ on the higher-dimensional Doggo control problems.}
+\label{fig:diagnostics}
+\end{figure}
+
+\subsection{Constrained Learning}\label{constrained_results}
+We further compared all methods in the constrained setting, again on Safety Gym. In all environments, we chose a target cost level equal to half the cost accumulated by a fully-trained TRPO agent unaware of cost (as reported by \cite{ray2019safetygym}). We chose this target to force the agent to strongly consider safely, but not be constrained to the point of being unable to complete the task. All agents learned separate value networks for reward and cost, to accommodate the variability of the penalty weight throughout training. We offer comparison with \textit{constrained versions} of SAC and TD3. 
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.325\textwidth]{figures/CarButton2/rewards_con.png}
+    \includegraphics[width=0.325\textwidth]{figures/DoggoGoal2/rewards_con.png}
+    \includegraphics[width=0.325\textwidth]{figures/CarPush2/rewards_con.png}
+    \includegraphics[width=0.325\textwidth]{figures/CarButton2/cost_con.png}
+    \includegraphics[width=0.325\textwidth]{figures/DoggoGoal2/cost_con.png}
+    \includegraphics[width=0.325\textwidth]{figures/CarPush2/cost_con.png}
+    \includegraphics[width=.9\textwidth]{figures/legend_3.png}
+    \caption{Representative sample of constrained learning on Safety Gym. \textbf{Top Row}: Positive reward accumulated by agents. Note that reward accumulation initially increases sharply while $\beta$, the penalty weight, is low. It dips and then rises again as $\beta$ increases and stabilizes, allowing performance to be optimized at the appropriate cost level. \textbf{Bottom Row}: Cost converges to the target level (yellow).}
+    \label{fig:con_rew}
+\end{figure}
+
+ We found all methods capable of reaching the target cost level, with OPAC$^2$ achieving the highest positive rewards in all environments tested.  Sample efficiency was again greatly improved relative to on-policy approaches, with performance matching that of state-of-the-art on-policy methods using roughly 50 times less data \citep{aaai_paper}. TD3 and SAC were both seen to benefit from resetting, allowing them to reduce the error on their cost and reward value estimates.  However, this improvement is not always enough to match the performance of OPAC$^2$. Finally, we note that this approach is highly configurable; the initial value and learning rate of the cost weight $\beta$ may be adjusted upward to provide faster convergence to the prescribed  cost 
+ \begin{wrapfigure}[21]{r}{0.325\textwidth}
+    \includegraphics[width=0.325\textwidth]{figures/dmc_new/sample_efficiency.png}
+     \includegraphics[width=0.325\textwidth]{figures/dmc_new/performance_profile_5M.pdf}
+    \caption{\textbf{Top}: Rewards aggregated over 10 tasks from the DeepMind Control Suite.  \textbf{Bottom}: Frequency of reward accumulation matching given performance levels.}
+    \label{fig:dmc_agg}
+\end{wrapfigure}
+target or downward to enable more early exploration and potentially higher final positive rewards. 
+\subsection{Evaluation on DeepMind Control}
+
+Given the consistently strong performance of OPAC$^2$ in Safety Gym, we chose to additionally evaluate it on 10 tasks without mixed-sign rewards from the DeepMind Control Suite \citep{tunyasuvunakool2020dmc}. We used the same 10 tasks as the authors of \cite{nikishin2022primacy}, motivated by the fact that they provide some challenge for SAC.  Following the practice of \cite{rliable}, we aggregate performance across tasks using the interquartile mean (IQM), calculated as the mean score of the middle 50\% of runs.  We also computed performance profiles for each method, tabulating the fraction of experiments that exceeded each possible performance level.
+
+ This is to be expected, given the likely lower variance of the policy gradient estimates of SAC. However, OPAC$^2$ was found to be more reliable than the other methods at producing at least some learning in each environment, as evidenced by the left side of the performance profile plot.
+
+
+
+\section{Related Work}
+
+Our methods build on the off-policy actor-critic introduced in \cite{degris2012off}, applied in differing forms over the past decade \citep{wang2017sample, espeholt2018impala, gu2017qprop}, and summarized in \cite{levine_offline}. We compare it with more popular methods for off-policy DRL with continuous action spaces \citep{fujimoto2018td3, sac_newer}.  The resetting strategy that we employ was explored by \cite{nikishin2022primacy} and subsequently further evaluated and extended \citep{d'oro2023sampleefficient, schwarzer23aBBF}. Its ability to curtail TD error, as well as the role of TD error in limiting off-policy DRL more generally, was discussed in \cite{li2023efficient}.  To our knowledge, its impact on environments with mixed-sign rewards had not previously been quantified.
+
+Constrained DRL has previously been explored on-policy \citep{BHATNAGAR2010760, achiam2017cpo, ray2019safetygym, Chow2019, TeMaMa19, gap, zhang20, aaai_paper, Moskovitz_etal_2023}, typically leveraging dual gradient descent \citep{bert, Boyd2004}. Constraints have recently been applied off-policy \citep{Ha_etal_2020, zhou_c_sac} for specific applications and with a distributional critic \citep{wcsac}. They have also been applied to probabilistically ensure safety \emph{during training} \citep{bharadhwaj2021conservative}, a useful requirement that we do not consider here. To our knowledge, this work is the first to apply constraints with the off-policy actor-critic, the first to explore the use of resetting in this context, and the first to specify constraints via consideration of only the most recent epoch in the replay buffer.
+
+
+
+\section{Discussion}
+
+
+The success of OPAC$^2$ relative to SAC and TD3 in environments with mixed-sign rewards underscores the necessity of managing function approximation error in off-policy deep reinforcement learning.  Off-policy DRL agents are known to be sensitive to experience gained early in training \citep{nikishin2022primacy}, tending to exploit any initial success they have. When multiple independent reward terms are present, this translates to some terms being favored over others.  In environments with mixed-sign rewards, the explicit competition between incentives and costs exacerbates this tendency. This effect is fundamentally a result of overfitting in $Q$ estimation.  While OPAC$^2$ does not fully eliminate $Q$ estimation errors, we empirically observe it to significantly dampen them.  Further, the likely higher variance of the policy gradient estimate in OPAC$^2$ may actually be beneficial in this setting: while not being large enough to preclude learning, it may help to address competition between reward terms by preventing the policy from converging too quickly to one that ignores some terms. This combination gives OPAC$^2$ a significant advantage over methods that update the policy to maximize the $Q$ function estimate when competing reward terms are present, even when the latter are periodically ``course corrected'' by resetting.
+
+Several additional observations may be made based on these findings.  First, they argue for the use of a policy-gradient-based approach whenever mixed-sign rewards are present (including constrained learning).  This is particularly true when resetting is impractical, for instance when cumulative cost is a consideration or for offline learning.  When rewards do not include terms of mixed signs, we may expect OPAC$^2$ to perform competently and reliably, but often not as well as SAC. It is interesting to note that OPAC$^2$ showed strong learning on the \texttt{acrobot-swingup} task, the only DeepMind Control environment we tested that SAC and TD3 both failed to solve. Finally, we note that a policy-gradient-based approach may prove beneficial for multi-task or meta-learning, where competing reward terms from multiple tasks must be considered.  
+
+
+
+\section{Conclusions}
+
+
+In this work, we examine the tendency of state-of-the-art approaches to off-policy DRL for continuous action spaces to struggle when applied to environments with mixed-sign rewards. We elucidate the role of function approximation error in the process; in particular, the sensitivity of off-policy methods to experience gathered early in training may lead to the neglect of some terms of the reward function. To remedy the situation, we consider both a popular regularization strategy (periodic resetting) and a novel approach that produces more reliable value estimates (OPAC$^2$). Empirically we find the latter, which represents an update to the off-policy actor critic \citep{degris2012off} and related methods, to produce more performant learning in the presence of costs.
+
+
+
+

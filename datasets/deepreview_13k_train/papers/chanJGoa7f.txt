@@ -1,0 +1,305 @@
+\title{Towards Interpreting Visual Information Processing in Vision-Language Models}
+
+\begin{abstract}
+Vision-Language Models (VLMs) are powerful tools for processing and understanding text and images. We study the processing of visual tokens in the language model component of LLaVA, a prominent VLM. Our approach focuses on analyzing the localization of object information, the evolution of visual token representations across layers, and the mechanism of integrating visual information for predictions. Through ablation studies, we demonstrated that object identification accuracy drops by over 70\% when object-specific tokens are removed. We observed that visual token representations become increasingly interpretable in the vocabulary space across layers, suggesting an alignment with textual tokens corresponding to image content. Finally, we found that the model extracts object information from these refined representations at the last token position for prediction, mirroring the process in text-only language models for factual association tasks. These findings provide crucial insights into how VLMs process and integrate visual information, bridging the gap between our understanding of language and vision models, and paving the way for more interpretable and controllable multimodal systems.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Vision-Language Models (VLMs) take an image and text as input, and generate a text output. They have become powerful tools in processing and understanding text and images, enabling a wide range of applications from question answering to image captioning \citep{liu2023llava, li2023blip, alayrac2022flamingo}. Among VLM architectures, the ``adapter" style has demonstrated impressive state-of-the-art performance, notable for its simplicity. These models combine a pre-trained image encoder, a pre-trained language model (LM), and a learned adapter network that maps image encoder outputs to soft prompts for LM inputs  \citep{merullo2022linearly, liu2023llava, liu2023improvedllava}. Despite their importance and potential, the inner workings of VLMs remain poorly understood as compared to their text-only counterparts. While significant progress has been made in understanding language models \citep{elhage2021mathematical, wang2023interpretability, bricken2023monosemanticity} and, to a lesser extent, vision transformers \citep{palit2023towards, vilas2023analyzing, pan2024dissecting}, there is a notable gap in our understanding of VLMs, where both modalities operate in the same space. A deeper comprehension of VLMs could lead to practical advances in safety, robustness, and functionality, similar to the progress made in language models, such as model editing \citep{meng2022locating} or identifying specific components responsible for certain behaviors \citep{arditi2024refusallanguagemodelsmediated}.
+
+In this paper, we investigate the LM component of VLMs as they serve as the ``brain'' of the system, comprising more than 95\% of the total parameters for models like LLaVA 1.5 7B. LLMs pre-trained on large text datasets are likely to remain the foundation of VLMs because of their powerful reasoning capabilities. Therefore, understanding how these LMs process and integrate visual information is crucial for advancing VLM interpretability.
+
+Many open questions remain regarding the inner workings of VLMs. The nature and structure of visual representations fed into the LM remain unclear, as these visual inputs are soft prompts that do not correspond to language tokens and cannot be interpreted as such \citep{lester-etal-2021-power, merullo2022linearly}. This raises questions about how visual information is encoded in these representations. Furthermore, the spatial distribution of information within the image encoder's feature maps remains unclear, leaving open the question of whether and how much object-specific details are localized or dispersed across the entire representation.
+
+Furthermore, the mechanisms by which the language model processes these visual inputs are not well understood. A significant modality gap exists between visual and textual input \citep{jiang2024hallucinationaugmentedcontrastivelearning}, and it is unclear whether our mechanistic understanding of text processing in language models generalizes to the processing of visual input in VLMs. 
+
+To understand the representations in the visual inputs for VLM and how the VLM processes them, we study LLaVA 1.5 7B \citep{liu2023improvedllava}, a popular open-source VLM with competitive performance that uses CLIP \citep{radford2021learningtransferablevisualmodels} as an image encoder and Vicuna 13B \citep{chiang2023vicuna} as its language model. We also study LLaVA-Phi\footnote{Sourced from the \href{https://huggingface.co/xtuner/llava-phi-3-mini-hf}{xtuner HuggingFace model}.} for our ablation experiments. We focus on a set of object identification tasks and \textbf{our main contributions} are as follows:
+
+\begin{enumerate}
+    \item Using ablation techniques, we demonstrate that the information for an object is highly localized to the token positions corresponding to their original location in the image.
+    \item By extending the \emph{logit lens} technique primarily used for language models \citep{nostalgebraist2020interpreting}, we find that the representations of the visual input in the LM are refined towards the embedding of interpretable tokens in the vocabulary, despite the LM not being explicitly trained to do so.
+    \item By blocking the attention flow between tokens, we show that the model extracts object information from the object tokens in the middle to late layers.
+    
+\end{enumerate}
+
+Our findings are first steps in understanding the internal mechanisms of VLMs, paving the way for more interpretable and controllable multimodal systems. % Comment out for ANONYMITY
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\linewidth]{iclr25-multimodal.pdf}
+    \caption{In adapter-style Vision-Language Models (VLMs), the visual tokens (in green) are soft prompts for the language model (LM), and are not interpretable through the vocabulary embedding.
+    Through a set of object identification tasks, we find that (1) object information can be localized to a subset of visual tokens, (2) the representations of the visual tokens evolve towards interpretable text embeddings, and (3) the model extracts some information from the visual tokens to the last token position in the middle to late layers, to identify the object.}
+    \label{fig:temp-main}
+\end{figure}
+
+
+\section{Background}
+
+\textbf{Transformer Architecture.} Transformer-based autoregressive Large Language Models (LLMs) process sequences of input tokens to predict the next token in the sequence \citep{vaswani2017attention}. These models achieved state-of-the-art performance across various natural language processing tasks \citep{gpt3-2020}, even though they are merely trained on next-token prediction \citep{radford2019language}. A LLM takes an input sequence $X = (x_1, ..., x_n)$ and outputs a probability distribution over the vocabulary $V$ to predict the next token $x_{n+1}$.
+
+To do so, the model refines token representations layer by layer through a series of computations. Each token $x_i$ is initially represented by an embedding vector $h^0_i$ of dimension $d_m$, obtained from a lookup operation in an embedding matrix $W_E \in \mathbb{R}^{|V|\times d_m}$. This representation is then updated through successive layers using multi-head self-attention (MHSA) and feed-forward (FF) sublayers:
+\begin{equation}
+h^l_i = h^{l-1}_i + a^l_i + f^l_i
+\end{equation}
+where $h^l_i$ is the representation of token $x_i$ at layer $l$, $a^l_i$ is the output from the MHSA sublayer, and $f^l_i$ is the output from the FF sublayer. All vectors $h^l_i, a^l_i, f^l_i \in \mathbb{R}^{d_m}$.
+
+The MHSA sublayer consists of $H$ attention heads working in parallel, each implemented as follows:
+\begin{equation}
+\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}} + M\right)V
+\end{equation}
+where $Q, K, V \in \mathbb{R}^{n \times d_k}$ are query, key, and value matrices derived from learned linear projections of the input, and $M \in \mathbb{R}^{n \times n}$ is a causal mask. The causal mask $M$ is set to $-\infty$ in the upper right triangle, meaning $M_{ij} = 0 \text{ if } i \geq j, \text{ else } -\infty$. This ensures that each position can only attend to previous positions and itself, thus preserving the autoregressive property in language models. These outputs are then concatenated and linearly projected to produce the final output of the multi-head attention sublayer.
+
+The FF sublayer applies two linear transformations with an element-wise non-linear function $\sigma$ between them:
+\begin{equation}
+f^l_i = W^l_v\sigma(W^l_ka^l_i + b^l_k) + b^l_v,
+\end{equation}
+where $W^l_v$, $W^l_k$, $b^l_k$, and $b^l_v$ are learned parameters.
+Finally, the representation of the last token $x_n$ at the final layer, $h^L_n$, is projected into a probability distribution over $V$ using an unembedding matrix $W_U \in \mathbb{R}^{d\times|V|}$ and a softmax operation.
+
+\textbf{Image Encoders}. The transformer architecture has been successfully adapted for state-of-the-art image encoders, as demonstrated by \citet{dosovitskiy2021an}. In this approach, input images are divided into fixed-size patches, flattened, and linearly embedded before being processed as a sequence of tokens, analogous to word embeddings in NLP tasks. Unlike text-based models, the attention mechanism in these image encoders is bidirectional (i.e., no masking is applied). The input sequence includes a special \texttt{class} token, whose final embedding is typically used for image classification tasks. The representations at the other token positions form what is called the \emph{feature map} of the image. 
+
+Building upon this foundation, \citet{radford2021learningtransferablevisualmodels} introduced Contrastive Language-Image Pre-training (CLIP), which jointly trains a vision transformer and a text trasnsformer to produce similar embeddings for matching image-text pairs. CLIP's image encoder is currently being used for state-of-the-art performance on many downstream tasks like zero-shot image classification and vision-language models like LLaVA.
+
+\textbf{Connecting Text and Image Models.} \citet{tsimpoukelli2021multimodal} pioneered the concept of training an image encoder such that its output can be used by a frozen language model for multimodal few-shot reasoning. \citet{merullo2022linearly} advanced this approach by freezing both the pre-trained image encoder and pre-trained language model, training only a linear map that converts image features into inputs for the text model. This introduced the ``adapter style'' approach, utilizing pre-trained components for both modalities. 
+
+Building on this foundation, \citet{liu2023llava} introduced LLaVA, which combined a CLIP ViT-L/14 image encoder with a Vicuna-13B language model, connected by a trained linear projection, or an MLP for improved performance \citep{liu2023improvedllava}. Crucially, LLaVA's training process focuses solely on fine-tuning for multimodal conversation, without any next-token pretraining on image-text pairs. This approach allows LLaVA to leverage the strong pre-trained capabilities of both the vision and language models while efficiently adapting to multimodal tasks. 
+
+\subsection{Notation}
+In this section, we describe how an image and query is processed through LLaVA.
+
+\textbf{Image Processing.} The input \textit{image} $I$ is processed by first being cropped into a square, then suitably resized before being divided into 576 image patches. The CLIP ViT-L/14 image encoder $f_{\text{CLIP}}$ processes this image to produce a \textit{feature map} $E_I = f_{\text{CLIP}}(I) \in \mathbb{R}^{N \times d_{\text{CLIP}}}$, where $N = 576$ is the number of image patches and $d_{\text{CLIP}}$ is the dimensionality of CLIP's embeddings. An \emph{adapter network} $A$ then maps these CLIP embeddings to the language model's input space, yielding a set of \textit{visual tokens} $E_A = A(E_I) \in \mathbb{R}^{N \times d}$, where $d_m$ is the dimensionality of the language model's input embeddings. We call $E_A$ \textit{visual tokens} to distinguish them from the image tokens.
+
+\textbf{Text Processing and Combined Input}. For the text input, given a tokenized prompt sequence $T = (t_1, \ldots, t_M)$, the embedding layer of the language model $E_{\text{LM}}$ maps these tokens to embeddings: $E_T = E_{\text{LM}}(T) \in \mathbb{R}^{M \times d_{\text{LM}}}$. The full input to the language model is the concatenation of the adapted image embeddings and the text embeddings: $X = [E_A; E_T] \in \mathbb{R}^{(N+M) \times d_{\text{LM}}}$, from which the language model can generate output autoregressively.
+
+\subsection{Open Questions and Hypotheses}
+One might expect that the output of the adapter $E_A$ would produce embeddings corresponding to image information. For example, if the image contained a car, we might expect the adapter to produce tokens that correspond to the embedding of ``car''. However, the output of the adapter forms soft prompts that have no semantic meaning when decoded through the vocabulary \citep{merullo2022linearly,bailey2023soft}. 
+
+\subsubsection{Localization of Object-Specific Information}
+
+A key question of our investigation is: \textbf{Where is object-specific information located in visual tokens?} Two conflicting hypotheses emerge from recent research:
+\begin{enumerate}
+    \item \textbf{Object-Centric Localization:} \citet{joseph2024laying} found that in classical vision transformers, token representations corresponding to specific object locations tended to align with  those objects' class embeddings in the late layers, even without explicitly training for this behavior. This suggest that object information might be localized to the tokens corresponding to the spatial location of the object in the original image. However, their findings were on a vision transformer trained on ImageNet classes, and not the vision transformer in CLIP. 
+    \item \textbf{Global Information in Register Tokens:} In contrast, \citet{darcetvision} identified \emph{register tokens} in vision transformers, including a CLIP variant. These are background patch tokens with unusually high norms that appear to encode global image features. 
+    It follows that the LM in an adapter-style VLM could primarily rely on these information-rich register tokens for its output. 
+\end{enumerate}
+
+We investigate these hypotheses in Section \ref{sec:ablation} using ablation techniques in a set of object identification tasks.
+
+\subsubsection{Processing of Object-Specific Representation}
+
+The processing of visual tokens may differ from text tokens. 
+Soft prompts are very different from normal prompts: \citep{bailey2023soft}, there is a \textit{modality gap} between textual and visual representations in VLMs \citep{jiang2024hallucinationaugmentedcontrastivelearning}. Furthermore, LLaVA is fine-tuned exclusively on visual question-answering (VQA) prompt-response pairs, without pre-training on next-token prediction. This may affect how the model processes visual information as compared to text. In Section \ref{sec:logit-lens}, we attempt the \emph{logit lens} method to see how the representations of visual tokens evolve through the layers.
+
+Recent studies have shed light on how LMs process information. \citet{geva2023dissecting} identified a refine-then-extract process in factual association prompts, where the model first refines information at subject tokens through MLP sublayers before transferring it to the last token position via attention sublayers. Similar mechanisms have been observed in arithmetic tasks \citep{stolfo2023mechanistic}, suggesting that this (sequencing of functions) might be a general mechanism in LMs.
+
+However, \citet{Basu2024} adapted the factual association setup to VLMs and found preliminary evidence that the LM may first summarize image information in text tokens, instead of extracting the image information to the last token position from the image tokens directly. While we do not study factual association -- rather we choose to focus on a simpler object identification task, we study how information flows from the image tokens in Section \ref{sec:attn-block}.
+
+
+
+\section{Investigating the representations in mapped visual tokens}
+
+\label{sec:ablation}
+
+In this section, we use ablation experiments to test if object information is concentrated in specific visual tokens. By ablating selected tokens and observing degradations in the model's ability to identify the object, we map how object information is distributed across the visual tokens.
+
+\textbf{Dataset.} We use images from the COCO Detection Training set \citep{lin2014microsoft}. To ensure the reliability of our results, we employ two filtering steps:
+(1) \textit{Choosing Simpler Images}. As a heuristic to focus on simpler images, we choose images where (a) there is an object whose size is between 1,000-2,000 square pixels, or about 2-4\% of the image by area, (b) only one instance of the that object is present in the image, and (c) there are less than 4 annotated objects. We present a few examples of the images in Figure \ref{fig:filtered-images}.  
+    
+ (2) \textit{Controlling for Hallucination}. Model can sometimes hallucinate objects based on context, even when the object's visual information is removed. To address this, we create two versions of each image: the original and one where the target object is masked with noise. We only keep images where the model correctly identifies the object in the original image but fails to identify it in the masked version. This ensures that the model's object identification relies on the object's visual information.
+After applying both filtering steps, our final dataset comprises 4,318 images.
+\textbf{Method.} We present a high level overview of our methodology in Figure \ref{fig:ablation-overview}. Let $E_A = \{e_1, ..., e_N\}$ be the set of visual tokens. 
+We define a subset $S \subset \{1, ..., N\}$ consisting of the indices of tokens hypothesized to contain information about a particular object $o$ in the image.
+
+For each ablation experiment, we create a modified set of embeddings $E_A'$:
+$$
+e_i' = \begin{cases}
+    \bar{e} & \text{if } i \in S \\
+    e_i & \text{otherwise}
+\end{cases}
+$$
+where $\bar{e} = \frac{1}{N} \sum_{i=1}^N e_i$ is the mean embedding across all visual tokens from 50,000 images from the ImageNet validation split \citep{5206848}. This replaces the hypothesized object-relevant tokens with an average token, effectively ablating their specific information. We then evaluate the impact of token ablation using three methods:
+\newpage
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\linewidth]{multimodal-ablation-method.pdf}
+    \caption{Overview of our ablation experiments. (1) We ablate some visual tokens that potentially contain object-specific information, (2)~prompt the model to describe the image, or answer object-specific questions, then (3)~measure the impact of token ablation by calculating the percentage of initially correct object identifications that become incorrect after ablation.}
+    \label{fig:ablation-overview}
+\end{figure}
+
+\begin{enumerate}
+    \item \textbf{Generative Description}: We prompt the model with ``Describe the image'' using both the original ($E_A$) and ablated embeddings ($E_A'$). We then ascertain whether the target object $o$ is mentioned in the model's generated description before and after ablation. If $o$ is mentioned with $E_A$ and not $E_A'$, it indicates that the ablated tokens were crucial for the model to identify and include the object in its description.
+    \item \textbf{Binary Polling}: We ask the model ``Is there a [o] in this image?'' using both $E_A$ and $E_A'$. We then compare whether the model's next generated token changes from ``Yes''  to ``No'' after ablation, which indicates that the ablated tokens were crucial for identifying the object.
+    \item \textbf{Visual Question-Answering}: We manually curate a set of 100 images with specific questions about objects, such as ``What is on the bed?''. We choose questions with unambiguous answers and avoid objects directly related to the question (e.g., avoiding ``pillow'' for a bed-related question). We prefill the model's response with ``It is a'' and compare the next generated token before and after ablation. A set of examples is in Figure \ref{fig:curate-examples}.
+\end{enumerate}
+
+We choose the subset $S$ of tokens to ablate in five ways:
+
+(1)~\textit{Object Tokens}. We choose the visual tokens whose positions correspond to the image patches that originally contained that object. (2)~\textit{Object Tokens with Buffer.} In addition to the object tokens, we include neighboring tokens. We test with two buffer sizes: 1 Buffer (including immediately adjacent tokens) and 2 Buffer (including tokens up to 2 positions away from object tokens). (3)~\textit{Register Tokens}. We select visual tokens with norms more than 2 standard deviations from the mean norm. These correspond to the register tokens identified by \citet{darcetvision}, which are thought to encode global image features. (4)~\textit{Random Tokens}. As a baseline, we ablate $n$ random tokens. (5)~\textit{High-Gradient Tokens}. As a stronger baseline, we use the Integrated Gradients attribution method \citep{sundararajan2017axiomatic} to identify tokens most important for the model's decision. For a given object $o$, we prompt the model with ``Is there a [o] in the image?'' and compute integrated gradients with respect to the logit for the ``Yes'' token over 50 steps. We then ablate the $n$ tokens with the highest attribution scores.
+
+\textbf{Results.} Our results are presented in Table~\ref{tab:ablation-results}. We find that ablating the object tokens significantly impairs the model's ability to identify the object. For comparable numbers of ablated tokens, object token ablation consistently results in larger performance decreases across all settings as compared to the gradient-based and random baselines. This suggests that the information about that object is localised to the region of the object token. Furthermore, hese findings are consistent across all three experimental settings and applicable to both LLaVA 1.5 and LLaVA-Phi.
+
+\begin{table}[h]
+\centering
+\caption{\textbf{Performance degradation after token ablation.} A lower percentage indicates a greater impact of the ablation, meaning the model is more likely to answer incorrectly, thus suggesting that the ablated tokens contain more localized object information. Average token counts apply to both the generative and polling settings for LLaVA 1.5. We find that ablating the object tokens with adjacent tokens (1 Buffer) significantly causes object identification performance to drop (in \textbf{\underline{bold}}), more so than the integrated gradients and random baselines for a comparable number of tokens (in \textbf{bold}).}
+\label{tab:ablation-results}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lccc|ccc}
+\toprule
+ & \multicolumn{3}{c}{\textbf{LLaVA 1.5}} & \multicolumn{3}{c}{\textbf{LLaVA-Phi}} \\
+\textbf{Ablation Type} & \textbf{Generative} & \textbf{Polling} & \textbf{VQA} & \textbf{Generative} & \textbf{Polling} & \textbf{VQA} \\
+\textit{(Avg Token Count)} & \textbf{Decrease} (\%) & \textbf{Decrease} (\%) & \textbf{Decrease} (\%) & \textbf{Decrease} (\%) & \textbf{Decrease} (\%) & \textbf{Decrease} (\%) \\
+\midrule
+Object \textit{(12.6)} & 33.33 & 15.38 & 33.33 & 47.46 & 28.48 & 41.51 \\
++ 1 Buffer (33.4) & \textbf{\underline{71.79}} & \textbf{\underline{51.28}} & \textbf{\underline{86.67}} & \textbf{\underline{82.89}} & \textbf{\underline{86.48}} & \textbf{\underline{96.23}} \\
++ 2 Buffer (60) & 76.92 & 64.10 & 92.22 & 89.56 & 95.49 & 100.00 \\
+\midrule
+Register tokens (3.1) & 5.13 & 0.00 & 3.33 & 7.63 & 0.00 & 1.89 \\
+\midrule
+Int.~Gradients (5) & 2.56 & 0.00 & 6.67 & 17.11 & 1.23 & 28.30 \\
+Int.~Gradients (10) & 20.51 & 2.56 & 6.67 & 25.26 & 4.30 & 24.53 \\
+Int.~Gradients (20) & 33.33 & 20.51 & 17.78 & 41.14 & 9.63 & 37.74 \\
+Int.~Gradients (40) & \textbf{48.72} & \textbf{35.90} & \textbf{50.00} & \textbf{61.49} & \textbf{26.64} & \textbf{56.60} \\
+Int.~Gradients (60) & 58.97 & 48.72 & 71.11 & 70.61 & 40.98 & 69.81 \\
+Int.~Gradients (100) & 76.92 & 51.28 & 84.44 & 81.23 & 61.68 & 83.02 \\
+Int.~Gradients (250) & 76.92 & 69.23 & 97.78 & 91.93 & 90.16 & 98.11 \\
+\midrule
+Random (5) & 0.00 & 0.00 & 1.11 & 3.68 & 0.00 & 0.00 \\
+Random (10) & 4.88 & 0.00 & 0.00 & 3.95 & 0.00 & 1.89 \\
+Random (20) & 2.44 & 0.00 & 2.22 & 5.88 & 0.00 & 0.00 \\
+Random (40) & \textbf{2.44} & \textbf{0.00} & \textbf{0.00} & \textbf{8.51} & \textbf{0.00} & \textbf{0.00} \\
+Random (60) & 7.32 & 0.00 & 1.11 & 9.39 & 0.41 & 3.77 \\
+Random (100) & 7.32 & 0.00 & 4.44 & 11.23 & 0.20 & 7.55 \\
+Random (250) & 24.39 & 0.00 & 16.67 & 20.61 & 1.84 & 15.09 \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+
+\section{Investigating visual information processing}
+
+\subsection{Analyzing the Residual Stream through Embedding Space}
+\label{sec:logit-lens}
+Can we interpret how the representations at the visual token positions evolve through the layers? To do so, we employ the \emph{logit lens} technique \citep{nostalgebraist2020interpreting}: for each layer, we decode the activation at each token position using the unembedding. 
+Formally, for each hidden state $h_i^l$ at each token position $i$ and layer $l$, we project it into a probability distribution over $V$ using $W_U$ and take the token with the highest logit. We do this for LLaVA 1.5.
+
+\textbf{Results.} We find that the activations in the late layers at each visual token position correspond to token embeddings that describe its original patch object in its corresponding image token. We provide some case studies in Figure \ref{fig:logit-lens}, and an \href{http://clementneo. 
+
+We found that the tokens decoded often correspond to concepts more specific than the object-level. For example, in Figure \ref{fig:logit-lens-girl}, the tokens go beyond identifying the sweater worn (``swe") and describe the specific patterns on the sweater with tokens like ``diam''(ond) and ``cross''.
+
+In some instances, okens correspond to their corresponding concepts in other languages, like in Figure \ref{fig:logit-lens-switch} where the tokens correspond to ``year'' and ``month'' but in Chinese and Korean instead. This is somewhat surprising given that previous work has shown that Llama used for non-English languages tend to have English tokens in their intermediate activations when interpreted through the logit lens \citep{wendler-etal-2024-llamas}.
+
+\begin{figure}[ht!]
+    \centering
+    \begin{subfigure}[b]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{logit-lens-figure-1.pdf}
+        \caption{An image of a lady in the sweater. The logit lens identifies tokens that correspond to specific detail of the sweater, such as ``pattern'' and ``diam''(ond).}
+        \label{fig:logit-lens-girl}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{logit-lens-figure-2.pdf}
+        \caption{An image of a child in a go-kart. The representations sometimes encode specific details, such as ``look'' and ``gaz''(e) instead of just ``face''. }
+        \label{fig:logit-lens-kart}
+    \end{subfigure}
+    
+    
+    \begin{subfigure}[b]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{logit-lens-figure-3.pdf}
+        \caption{An image of a switch. In the intermediate layers, the year and month tokens are encoded in non-English characters.}
+        \label{fig:logit-lens-switch}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{logit-lens-figure-4.pdf}
+        \caption{An image of a bunch of apples. Global features, like count, show up in background tokens, though this may be an artifact of the LM processing.}
+        \label{fig:logit-lens-apple}
+    \end{subfigure}
+    \caption{Examples of tokens and their positions that the logit lens yields in the late layers. In our labelling for an image, tokens that are part of a word are completed with an educated guess e.g. ``diam''\underline{(ond)}}
+    \label{fig:logit-lens}
+\end{figure}
+Overall, it is surprising that the logit lens work on VLMs! This technique works on auto-regressive LLMs because they are \textit{pretrained on next-token prediction}, meaning their activations will be iteratively refined towards the unembedding of the predicted next token. However, VLMs are merely fine-tuned on multimodal tasks. 
+The effectiveness of the logit lens here suggests that the hypothesis that transformers build predictions by promoting concepts in vocabulary space \citep{geva2022transformer} may generalise to VLMs, even when only fine-tuned on multimodal tasks.
+
+\textbf{Case Study: Global Features.} We sometimes find global-level features appearing in unexpected places, such numbers seemingly counting apples in background tokens (Figure \ref{fig:logit-lens-apple}). When we tried ablating these specific visual tokens, the model's description remained largely unchanged. Interestingly, the numbers persisted in some token positions in the logit lens even after ablation.  These findings suggest that the global features revealed by the logit lens could be artifacts of the language model's processing rather than direct information from the visual tokens. We hypothesise this to be one of the reasons as to why VLMs based on CLIP often have worse performance on image classification tasks than CLIP itself \citep{zhang2024visually}.
+
+\textbf{Potential Applications}. This may be useful for getting coarse segmentation maps for little to no extra computation, which could lead to downstream applications. For example, \citet{liu2024payingattentionimagetrainingfree} suggests to adjust the attention weights towards the visual tokens in the LM to reduce hallucinations. We speculate that directing attention towards specific objects may improve this method, though we leave further exploration to future work.
+
+\subsection{Tracing Attention Flow}
+\label{sec:attn-block}
+To understand how visual information is processed and integrated within the language model, we investigate the flow of critical information through the network. Specifically, we examine whether the model directly extracts information from relevant visual tokens, or whether it aggregates information from visual tokens before transferring it to the final output token.
+
+\textbf{Method.} We employ the \emph{attention knockout} technique introduced by \citet{geva2023dissecting}. This method involves selectively blocking attention between specific tokens at different layers of the model, allowing us to assess the importance of various connections for the model to identify the object. Our process is as follows: 
+
+(1) For a given input and target layer $\ell$, we artificially block specific attention connections in the multi-head self-attention (MHSA) sublayer by setting the corresponding attention mask values to negative infinity: $M^{\ell+1,j}_{rc} = -\infty \quad \forall j \in [1, H]$ where $M^{\ell+1,j}$ is the attention mask for head $j$ at layer $\ell+1$, and $r$ and $c$ are the indices of the tokens between which we want to block attention. 
+
+(2) We apply this blocking over a window of consecutive layers, including early layers (L1-10), early to middle layers (L5-14), middle layers (L11-20), middle to late layers (L15-24), and late layers (L21-31). 
+
+(3) For each window, we measure the decrease in accuracy and prediction probability for the correct token when blocking attention under three scenarios: (i) From object tokens and their surrounding buffer to the final token. (ii) From all non-object tokens to the final token. (iii) From all visual tokens except the last row to the last row of visual tokens.
+We conduct this experiment using LLaVA 1.5 on our curated Visual Question Answering (VQA) dataset of 100 images.
+
+\textbf{Findings.} Our results are presented in Table \ref{tab:attention_blocking}. 
+
+We find that blocking attention from the object tokens (and their buffers) to the final token in mid-late layers leads to noticeable performance degradation. This suggests that the model directly extracts object-specific information in these later stages. Blocking attention from non-object tokens to the final token in early layers also causes some performance drop. This indicates that contextual information from the broader image is processed and integrated in the earlier stages of the model.
+
+Interestingly, blocking attention from visual tokens to the last row of visual tokens has minimal effect on performance. This contrasts with findings by \citet{Basu2024}, who suggested that the model might summarize image information in the last row of visual tokens before using it. Our results indicate that, at least for our object identification tasks, the model doesn't rely on such a summarization step.
+\begin{table}[ht!]
+\centering
+\caption{Results of blocking attention between different token groups across various layers of the LLaVA 1.5 model. The values represent the relative performance on the correct token being predicted when blocking attention, with 1.00 being no impact and 0.00 being all questions wrong post-ablation.
+}
+\label{tab:attention_blocking}
+\begin{tabular}{cc|cccccc}
+\toprule
+\multicolumn{2}{c|}{\textbf{Attention Blocking}} & \multicolumn{6}{c}{\textbf{Layer}} \\
+\textbf{From}\textsuperscript{*} & \textbf{To}\textsuperscript{†} & \textbf{Early} & \textbf{Early-Mid} & \textbf{Mid} & \textbf{Mid-Late} & \textbf{Late} & \textbf{All} \\
+\midrule
+O & LTP & 1.00 & 1.00 & 0.96 & 0.88 & 0.93 & 0.82 \\
+O+1 & LTP & 1.00 & 0.99 & 0.90 & 0.82 & 0.89 & 0.67 \\
+O+2 & LTP & 1.00 & 1.00 & 0.91 & 0.80 & 0.91 & 0.68 \\
+I-(O+1) & LTP & 0.88 & 1.00 & 0.97 & 0.96 & 0.98 & 0.82 \\
+\midrule
+O+1 & LVR & 1.00 & 1.00 & 1.00 & 1.00 & 1.00 & 1.00 \\
+I-LVR & LVR & 1.00 & 1.00 & 1.00 & 1.00 & 1.00 & 1.00 \\
+\bottomrule
+\end{tabular}
+
+\textsuperscript{*}\textbf{From:} O = Object Tokens, O+$n$ = O + $n$ Buffer, \\I-(O+1) = All visual tokens except O+1, I-LVR = All visual tokens except last row
+\newline
+\textsuperscript{†}\textbf{To:} LTP = Last Token Position, LVR = Last Visual Token Row
+\end{table}
+
+
+\section{Related Work}
+
+\textbf{Explainability.} Classical techniques like GRAD-Cam \citep{selvaraju2017grad} and Integrated Gradients \citep{sundararajan2017axiomatic}, focus on explaining model outputs based on inputs. Recent tools like LVLM-Interpret \citep{ben2024lvlm} extend these methods to VLMs. While these approaches are valuable for understanding input-output relationships, they primarily focus on input attribution. Our work complements these by investigating the model's internal processing mechanisms.
+
+\textbf{Mechanistic Interpretability (MI) for LLMs.}
+Recent techniques such as causal tracing \citep{meng2022locating} and sparse coding methods \citep{bricken2023monosemanticity, huben2023sparse, marks2024sparse} have advanced our understanding of how LLMs perform tasks despite being primarily trained for next-token prediction. However, VLMs are not trained on next-token prediction for visual inputs \citep{liu2023llava}, raising questions about the generalizability of LLM processing mechanisms to visual inputs in VLMs. Our work extends some of these interpretability techniques to the multimodal domain to understand how they process visual inputs.
+
+\textbf{MI for Multimodal Models}. In CLIP, \citep{goh2021multimodal} discovered multimodal neurons in the image encoder that respond to concepts across different modalities. \citet{gandelsman2023interpreting, gandelsman2024neurons} developed methods to decompose CLIP's image representation, revealing property-specific roles for attention heads and polysemantic behavior in neurons. \citet{rajaram2024automaticdiscoveryvisualcircuits} introduced a method to identify network subgraphs in CLIP that had interpretable functions. \citet{rao2024discoverthennametaskagnosticconceptbottlenecks, daujotas2024controlling, fry2024towards} used sparse coding methods to yield interpretable features in the image encoder. However, CLIP's architecture and training objectives differ substantially from generative VLMs, which our work focuses on.
+
+For generative VLMs, \citet{schwettmann2023multimodal} found neurons in the LM that corresponded to visual concepts, while \citet{palit2023towards} adapted causal tracing for BLIP. While these studies provide valuable insights to specific components in the VLM, our work aims to investigate the representation in visual inputs and how those representations evolve in the LM.
+
+\cite{Basu2024} used causal tracing and attention contributions in a visual question-answering setup to find that VLMs such as LLaVA retrieve information from earlier causal layers of the LM (i.e.~layers 1-4 vs layers 4-7 in an LLM) when answering a multi-modal question. Their analysis  suggests that the visual information may be summarised in a consistent subset of late visual tokens. In contrast, we study VLMs in a more straightforward object-identification setting. We also examine their information transfer hypothesis through our attention blocking experiments in Section \ref{sec:attn-block}.
+
+
+
+\section{Conclusion}
+
+In this work, we investigated the processing of visual information in Vision-Language Models, focusing on the LLaVA architecture. Our study reveals that object-specific information is highly localized within visual tokens corresponding to the object's spatial location in the original image. This challenges the hypothesis that VLMs primarily rely on global image features encoded in register tokens.
+
+Surprisingly, we found that representations at visual token positions evolve through the model's layers to align with interpretable textual concepts, suggesting that VLMs may refine visual information towards language-like representations even without explicit pretraining on next-token prediction for visual inputs. Our attention blocking experiments further showed that VLMs directly extract object-specific information from relevant visual tokens in mid to late layers, while also processing broader contextual information from non-object tokens in earlier layers.
+
+These findings advance our understanding of VLMs, bridging the gap between our knowledge of language and vision models. Our work provides a foundation for more interpretable and controllable multimodal systems. We hope to further investigate how our insights can be used to improve VLM performance, particularly in reducing hallucinations, model editing, and enhancing factual accuracy.
+
+
+

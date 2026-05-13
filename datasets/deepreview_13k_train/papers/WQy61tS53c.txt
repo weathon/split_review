@@ -1,0 +1,338 @@
+\title{Deep Bayesian Filter for Bayes-Faithful Data Assimilation}
+
+\begin{abstract}
+State estimation for nonlinear state space models (SSMs) is a challenging task. Existing assimilation methodologies predominantly assume Gaussian posteriors on physical space, where true posteriors become inevitably non-Gaussian. We propose Deep Bayesian Filtering (DBF) for data assimilation on nonlinear SSMs. DBF constructs new latent variables $h_t$ in addition to the original physical variables $z_t$ and assimilates observations $o_t$. By (i) constraining the state transition on the new latent space to be linear and (ii) learning a Gaussian inverse observation operator $r(h_t|o_t)$, posteriors remain Gaussian. Notably, the structured design of test distributions enables an analytical formula for the recursive computation, eliminating the accumulation of Monte Carlo sampling errors across time steps. DBF trains the Gaussian inverse observation operators $r(h_t|o_t)$ and other latent SSM parameters (e.g., dynamics matrix) by maximizing the evidence lower bound. Experiments demonstrate that DBF outperforms model-based approaches and latent assimilation methods in tasks where the true posterior distribution on physical space is significantly non-Gaussian.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Data assimilation (DA) is a crucial technique across various scientific domains. Its primary objective is to estimate the trajectory and current state of a system by integrating an imperfect model with partially informative observations. Specifically, given a series of observations $T$ time steps $o_{1:T}$, the goal is to infer the posterior distribution of the system’s physical variables $z_t$: $p(z_t|o_{1:t})$. DA has been widely applied in fields such as weather forecasting~\citep{2007Hunt, 4Dvar, Metnet3}, ocean research analysis~\citep{JAXA_LORA}, sea surface temperature prediction~\citep{seasurface}, seismic wave analysis~\citep{Seismicdata}, multi-sensor fusion localization~\citep{localization}, and visual object tracking~\citep{Tracking23}.
+
+A key challenge in DA arises from the non-Gaussian nature of the posterior distributions $p(z_t|o_{1:t})$, which results from the inherent nonlinearity in both the system dynamics and observation models. Despite this, many operational DA systems, such as those used in weather forecasting, rely on methods like the ensemble Kalman Filter (EnKF)~\citep{1994Evensen, 2001Bishop} for sequential state filtering (i.e., $p(z_t|o_{1:t})$) and the four-dimensional variational method (4D-Var) for retrospective state analysis (i.e., $p(z_t|o_{1:T}), t<T$). These approaches assume Gaussianity in their test distributions $q(z_t|o_{1:t})$ or $q(z_t|o_{1:T})$, a simplification driven by computational constraints.
+While exact methods such as bootstrap Particle Filters (PF) or sequential Monte Carlo (SMC)~\citep{SMC_book, PFF07, PFF21} could compute the true posterior, their performance degrades significantly when the number of particles is insufficient~\citep{SMC_review_1}. This issue is exacerbated in high-dimensional systems, making SMC approaches impractical for many physical problems.
+To address these limitations, we propose a novel variational inference approach called Deep Bayesian Filtering (DBF) for posterior estimation. Our strategy consists of two main components: (i) constraining the test distribution to remain Gaussian to ensure computational tractability, and, in cases where the original dynamics are nonlinear, (ii) leveraging a nonlinear mapping to enhance the expressive capability of the test distribution. The DBF methodology diverges into two paths depending on the nature of the system dynamics, whether linear Gaussian or nonlinear:
+
+\paragraph{Linear dynamics} When the system's dynamics $p(z_{t+1}|z_t)$ are linear, DBF assumes Gaussianity in the original space, similar to traditional methods. However, DBF introduces the concept of the inverse observation operator (IOO; see also \citealt{frerix2021}) to construct Gaussian test distributions $q(z_t|o_{1:t})$. The IOO, along with any unknown system parameters, are trained to minimize the Kullback-Leibler divergence between the test distribution $q(z_t|o_{1:t})$ and the true posterior $p(z_t|o_{1:t})$. The IOO and the system parameters are trained without teacher signals $z_t$.
+
+\paragraph{Nonlinear dynamics} In the more common case of nonlinear dynamics, DBF operates in a latent space, assuming Gaussianity in the latent variables $h_t$. The original physical variables are recovered through a nonlinear mapping function $\phi$, implemented via neural networks (NNs). This nonlinear mapping allows for a more flexible representation of the test distribution $q(z_t|o_{1:t})$. The IOO and other parameters are trained in a supervised manner (i.e., $z_t$ is used during training).
+
+For state space models (SSMs) with nonlinear dynamics, DBF functions as a variational autoencoder (VAE) that adheres to the Markov property. Posterior distributions of the latent variables $h_t$ are expressed in a Bayesian framework. This approach is closely related to dynamical VAEs (DVAEs, \citealt{DVAE_review} for a review), which use VAEs to model time-series data. However, DBF distinguishes itself by its posterior design. Unlike DVAEs, where Monte Carlo sampling is required for inference (see Sec.~\ref{sec: DVAE}), DBF allows for the analytical computation of the prediction step, recursively computing posteriors through closed-form expressions.
+
+When applied to problems with nonlinear or unknown dynamics, DBF can be interpreted as learning the Koopman operator~\citep{1931Koopman} using NNs. The discovery of such latent spaces and operators through machine learning has been extensively studied~\citep{Takeishi2017, Lusch2018, Azencot2020} and will be experimentally validated through the handling of nonlinear filtering tasks involving chaotic dynamics.
+
+Key contributions of the proposed DBF methodology include:
+\begin{itemize}
+    \item DBF is the first VAE-based model for time-series data that maintains a posterior structure faithful to the Markov property in SSMs.
+    \item For systems with linear dynamics, DBF extends the Kalman Filter (KF) to handle nonlinear observations through learnable NNs. The training process enables the model to infer unknown system parameters directly from data (see Section~3.1).
+    \item For nonlinear dynamics, DBF constructs a new latent space for data assimilation, allowing for the analytical integration of time steps and preventing the accumulation of Monte Carlo sampling errors. This is accomplished through the application of Koopman operator theory, which ensures that the model’s representational power is maintained, as long as the latent space is sufficiently high-dimensional (see Sections 3.2 and 3.3).
+    \item As a generative model, DBF estimates the uncertainty of the physical variables $z_t$, in contrast to regression methods that yield only point estimates (see Section 3.2 and Fig.~\ref{fig:pendulum_figure}). 
+    \item The linear constraint on dynamics stabilizes the training process, which is known to be unstable in standard recurrent NNs (see Section 3.3 and Fig.~\ref{tab:eigenvalues}).
+\end{itemize}
+DBF has demonstrated superior performance over classical DA algorithms and latent assimilation methods in scenarios with highly non-Gaussian posteriors, particularly in the presence of strongly nonlinear observation operators or large observation noise.
+
+
+\section{Method}
+
+
+\subsection{Inference of physical variables in a state-space model}
+A physical system is defined by variables $z_t$, with its evolution described by the dynamics model $p(z_{t+1}|z_t) = \mathcal{N}(z_{t+1}; f(z_t), Q)$, where $\mathcal{N}(x|\mu, \Sigma)$ denotes a Gaussian whose mean and covariance are $\mu$ and $\Sigma$. The nonlinear function $f$ is the dynamics operator and $Q$ is the system covariance. The Markov property holds, as $z_{t+1}$ depends only on $z_t$. An observation model $p(o_t|z_t) = \mathcal{N}(o_t; h(z_t), R)$ relates observations to physical variables via the observation operator $h$ and covariance $R$. The panel (a) of Fig.~\ref{fig:SSMs} shows the system’s graphical model. The objective of sequential DA is to compute the posterior of $z_t$ given $o_{1:t}$.
+\subsection{KF for linear dynamics, linear observations}
+In the KF, the dynamics and observation models are both linear Gaussian, with the mean being linear with respect to the conditional variable and a constant covariance matrix.
+Given that the dynamics and observation operators $f, h$ are linear, we can represent them using matrices $A$ and $C$, respectively. All matrices ($A, C, Q$, and $R$) are constant. The filter distribution $p(z_{t}|o_{1:t})$ remains Gaussian, provided that the initial distribution $p(z_1)$ is Gaussian. We can recursively compute the posterior parameters (means $\mu_{t}$ and covariance matrices $\Sigma_{t}$) using the following equations:
+\begin{eqnarray}
+   \mu_t &=& \Sigma_t (A\Sigma_{t-1}A^T + Q)^{-1}A\mu_{t-1} + K_t(o_t-H\mu_t),\label{eq: update formula KF 1} \\
+ \Sigma_t^{-1}  &=& (A \Sigma_{t-1}A^T + Q)^{-1} + HR^{-1}H^{T},\label{eq: update formula KF 2}
+\end{eqnarray}
+where $K_t=(A\Sigma_{t-1}A^T + Q) H^{T} (H(A\Sigma_{t-1}A^T + Q) H^T + R^{-1})^{-1}$ is the Kalman Gain.
+
+\subsection{DBF for linear dynamics, nonlinear observations}
+In this scenario, Gaussianity of the test distribution is lost during the KF update step. We introduce an inverse observation operator (IOO) $r(z_t|o_t)$ (see also \citealt{frerix2021}):
+\begin{eqnarray}
+    p(z_{t}|o_{1:t}) &=& \frac{p(o_t|z_t)p(z_t|o_{1:t-1})}{p(o_t|o_{1:t-1})}
+    \propto \frac{r(z_t|o_t)}{\rho(z_t)}p(z_t|o_{1:t-1}),\label{eq:DBF update, short}
+\end{eqnarray}
+where $r(z_t|o_t) = \frac{p(o_t|z_t)\rho(z_t)}{\int p(o_t|z_t)\rho(z_t)dz_t}$ and $\rho(z_t)$ is a virtual prior. By approximating both the IOO and the virtual prior as Gaussians, $r(z_t|o_t) = \mathcal{N}(f_\theta(o_t), G_\theta(o_t))$ and $\rho(z_t) = \mathcal{N}(m, V)$, respectively, the posterior $q(z_t|o_{1:t})$ can be analytically computed as a Gaussian, where the mean $\mu_t$ and covariance $\Sigma_t$ are given as:
+\begin{eqnarray}
+   \mu_t &=& \Sigma_t (A\Sigma_{t-1}A^T + Q)^{-1}A\mu_{t-1} + G_\theta(o_t)^{-1}f_\theta(o_t) - V^{-1}m,\label{eq: update formula 1} \\
+ \Sigma_t^{-1}  &=& (A \Sigma_{t-1}A^T + Q)^{-1} + G_\theta(o_t)^{-1} - V^{-1}, \label{eq: update formula 2}
+\end{eqnarray}
+where $f_\theta(o_t)$ and $G_\theta(o_t)$ are NNs with parameters $\theta$, and $m$ and $V$ are constants set to $m=0$ and $V=10^8I$. These values bias the NNs' outputs without affecting performance.
+
+The recursive formula for the exact posterior (Equation~\ref{eq:DBF update, short}) requires no approximation. Thus, DBF computes the exact posterior when the true IOO $r_{\rm true}(h_t|o_t)$ is Gaussian, i.e., the SSM is a LGSS. In that case, the posterior update formula agrees with the KF (see Equations~\ref{eq: update formula KF 1}, \ref{eq: update formula KF 2} and \ref{eq: update formula 1}, \ref{eq: update formula 2}). 
+The key difference is that nonlinear functions are applied to both the mean, $f_{\theta}(o_t)$, and the covariance, $G_{\theta}(o_t)$. In the KF, $f_{\theta}(o_t)$ is linear, and $G_{\theta}(o_t)$ is a constant covariance matrix (see Equations~\ref{eq: update formula KF 1} and \ref{eq: update formula KF 2}).
+The dependence of $G_{\theta}(o_t)$ on observations provides flexibility in adjusting the impact of the new observation on the state estimation. The importance of adjusting the internal state updates based on observations has also been discussed in recent SSM-based approaches \citep{gu2023mamba}.
+\begin{figure}
+    \hspace{4mm}
+    \includegraphics[width=0.3\columnwidth]{SSM_z_and_o.pdf}
+    \includegraphics[width=0.3\columnwidth]{SSM_hzo.pdf}
+    \includegraphics[width=0.3\columnwidth]{SSM_hzo_inference.pdf}
+    \caption{Panel (a) shows the graphical model for the simplest SSM. If the dynamics of the original SSM is linear, DBF assimilates on that space. Panel (b) shows the graphical model for the SSM assumed for SSM with nonlinear dynamics. Panel (c) shows the inference structure of our methodology for SSM with nonlinear dynamics.}
+    \label{fig:SSMs}
+\end{figure}
+
+\subsection{DBF for nonlinear dynamics, linear/nonlinear observations}
+
+In this scenario, the Gaussianity of the test distribution is lost during the predict step, making it impossible to apply the original dynamics over the physical variables $z_t$. Therefore, we introduce a new set of latent variables $h_t$ and assume a dynamics model over $h_t$: $p(h_{t+1}|h_t) = \mathcal{N}(h_{t+1}|Ah_t,Q)$ (see panel (b) in Fig.~\ref{fig:SSMs}). The IOO maps observations into the latent variables $h_t$: $r(h_t|o_t)$. The recursive formula follows Equations~\ref{eq: update formula 1} and \ref{eq: update formula 2}.
+To retrieve the distribution of the original physical variables $z_t$, we introduce an emission model $p(z_t|h_t) = \mathcal{N}(z_t; \phi(h_t), R)$, where $\phi$ is represented by a NN. By marginalizing over $h_t$ with this emission model, a trained DBF can generate samples of $z_t$ that follow the test distribution $q(z_t|o_{1:t})$ given observations $o_{1:t}$.
+Although the dynamics operator $A$ for the latent variables $h_t$ is linear, it is able to express any nonlinear dynamics if the latent space is sufficiently high-dimensional. The Koopman operator \citep{1931Koopman} provides a framework for representing nonlinear systems by mapping observables—functions of the system’s state—into a higher-dimensional space where the dynamics become linear. Mathematically, for a dynamical system $z_{t+1}=f(z_t)$, the Koopman operator $\mathcal{K}$ is a linear operator acting on a set of observables $g(z)$, such that $\mathcal{K}g(z_t) = g(f(z_t))$. This allows the system to be represented as $h_{t+1} = Ah_t$ in the latent space $h_t$, where $A$ is the dynamics matrix learned by DBF. While the physical dynamics $f(z)$ are nonlinear, the Koopman operator ensures the existence of an embedding that linearizes the dynamics, enabling recursive computation of test distributions. Discovering such embeddings in finite dimensions has been widely studied \citep{Takeishi2017, Lusch2018, Azencot2020}. 
+In high-dimensional simulations, the true degrees of freedom are often far fewer than the simulated variables, making surrogate modeling with the Koopman operator a promising approach to reducing computational costs. 
+\subsection{Training} \label{sec: training}
+When assimilating in the physical space (i.e., when the dynamics are linear), we train the IOO (i.e., $f_{\theta}$ and $G_{\theta}$) by optimizing the evidence lower bound (ELBO) without using the teacher signal $z_t$:
+\begin{eqnarray}
+    \log p(o_{1:T}) &=& \sum_{t=1}^T \log p(o_t | o_{1:t-1}) \geq -\mathcal{L}_{\rm ELBO}, \nonumber \\
+    \mathcal{L}_{\rm ELBO} &=& -\sum_{t=1}^T\int q(h_t|o_{1:t})\log p(o_t|h_t) dh_t + KL[q(h_t|o_{1:t})||q(h_t|o_{1:t-1})],
+    \label{eq:elbo}
+\end{eqnarray} where $KL[p || q]$ denotes the Kullback-Leibler divergence between distributions $p$ and $q$. If the SSM contains any unknown parameters, we can train these parameters as well.
+
+For SSMs with nonlinear or unknown dynamics, we have two approaches:
+\paragraph{Strategy 1} Pretrain the Koopman operator, which consists of the nonlinear mapping from $z_t$ to $h_t$, the linear dynamics between $h_t$ and $h_{t+1}$ represented by matrix $A$, and the reverse nonlinear mapping from $h_t$ to $z_t$ denoted by $\phi$. With these components ($A$ and $\phi$) of the Koopman operator, the method designed for linear dynamics can be applied. For pretraining, we require samples of $z_t$ or the SSM for the physical variables to generate these samples. Pairs of $z_t$ and $o_t$ are not necessary, as the training for the linear dynamics ($A$ and $\phi$) and the IOO ($r(h_t|o_t)$) can be performed separately.
+\paragraph{Strategy 2} Train all components (the matrix $A$, the stochastic mapping $p(z_t|h_t)=\mathcal{N}(z_t;\phi(h_t),{\rm diag}[\sigma^2])$, and the IOO) simultaneously. In this case, samples of ($z_t$, $o_t$) pairs or the SSM for both physical and observation variables to generate these sample pairs are required. The parameters are optimized by maximizing a joint ELBO, $\mathcal{L}_{\rm ELBO, {\rm joint}}$, via supervised training:
+\begin{eqnarray}
+\log p(o_{1:T}, z_{1:T})
+&=& \sum_{t=1}^T \log p(o_t, z_t | o_{1:t-1}, z_{1:t-1}) \geq -\mathcal{L}_{\rm ELBO, {\rm joint}}, \hspace{35mm} \nonumber \\
+\mathcal{L}_{\rm ELBO, {\rm joint}} &=& -\sum_t \int q(h_t|o_{1:t})\log p(z_t|h_t) dh_t + KL[q(h_t|o_{1:t})||q(h_t|o_{1:t-1})].
+\label{eq:elbo_phys}
+\end{eqnarray}
+
+Here, we have neglected $\log p(o_t | z_t)$ from $\log p(o_t, z_t | h_t) = \log p(o_t | h_t, z_t) + \log p(z_t | h_t) = \log p(o_t | z_t) + \log p(z_t | h_t)$. Since $\log p(o_t | z_t)$ does not depend on $h_t$ and its distributions, it is sufficient to include $\log p(z_t | h_t)$. We have replaced $q(h_t|o_{1:t}, z_{1:t})$ with its special case $q(h_t|o_{1:t})$ as our objective is to give the best estimate of $z_t$ given observations $o_{1:t}$.
+\subsection{Related works}
+
+We discuss related works in the order of relevance.
+\subsubsection{Dynamical variational autoencoders}
+\label{sec: DVAE}
+
+DVAEs (see \citealt{DVAE_review} for a review) are models closely related to DBF for nonlinear dynamics. Both incorporate time-series architecture in a VAE, but there are two key differences: (i) the posterior design and realization of the dynamics step, and (ii) the loss function.
+
+\paragraph{posterior design}
+Our strategy for the test distribution is to incorporate an appropriate architecture that reflects the Markov property in the time dimension of the test distribution. The IOO, $r(h_t|o_t)$, and the linear dynamics model serve as key instruments in constructing the test posterior distributions. A distinguishing feature of our methodology is that each component's role is defined with respect to the Markov property of the state-space model (SSM) and is clearly differentiated from other components involved in posterior construction. For example, the IOO influences only the update step and does not affect the prediction step. We refer to this methodology as "Bayes-Faithful" due to its tailored design for SSMs that exhibit the Markov property.
+
+In contrast, the test posterior distributions in DVAEs are constructed using RNNs. The complexity of the transition model prevents the analytical computation of latent variables across time steps. As a result, these values can only be estimated via Monte Carlo sampling. Consequently, during inference, successive Monte Carlo sampling (``cascade trick''; \citealt{DVAE_review}) becomes unavoidable.
+
+\paragraph{loss function}
+DBF takes the ELBO from factorized density $\log p(o_t|o_{1:t-1})$ in $\log p(o_{1:T}) = \sum_t \log p(o_t|o_{1:t-1})$:
+\begin{eqnarray}
+     \log p(o_{1:T}) &\geq& \sum_{t=1}^T (E_{q(h_t|o_{1:t})}[\log p(o_t|h_t)]
+- KL[q(h_t|o_{1:t})|q(h_t|o_{1:t-1})]).
+\end{eqnarray}
+On the other hand, DVAEs take the ELBO from probability density with all the observations at once.
+\begin{eqnarray}
+    \log p(o_{1:T}) &\geq& E_{q(h_{1:T}|o_{1:T})}[\log p(h_{1:T}, o_{1:T}) - \log q(h_{1:T}|o_{1:T})]. \label{eq:DVAE_ELBO}
+\end{eqnarray}
+Therefore, DBF seeks for the filtered distributions $q(h_t|o_{1:t})$ whereas DVAEs model the smoother distributions $q(h_t|o_{1:T})$. Again, for DVAEs, to evaluate the expected values in \Eqref{eq:DVAE_ELBO}, we need to undergo successive Monte-Carlo sampling over $T$ variables ($h_{1:T}$). 
+
+Assuming linear Gaussian dynamics and a Gaussian IOO, DBF allows for the analytical integration of $q(h_t|o_{1:t-1})$, resulting in a structured encoder. This structured posterior enables the recursive computation of the filtered distribution $q(h_t|o_{1:t})$ without relying on Monte Carlo sampling, setting it apart from other DVAEs. By constraining the dynamics to be linear, DBF ensures exact integration without the accumulation of Monte Carlo sampling errors across time steps.
+
+Moreover, the linear assumption helps DBF mitigate the instability issues commonly faced when training standard RNNs. SSMs are increasingly favored for modeling long-range dependencies \citep{gu2023mamba}. S4~\citep{S4} utilizes linear dynamics in the latent space and learns the dynamics, proposing an efficient computation algorithm that outperforms transformers on datasets with long-range dependencies. LS4~\citep{LS4} extends S4 by introducing stochasticity through a VAE-like structure. 
+Both LS4 and DBF employ linear SSMs and Gaussian posterior approximations, but DBF updates the mean and covariance using a recursive formula based on Bayes' rule, while LS4 replaces recurrence with convolutions, forgoing a recursive approach.
+
+\subsubsection{KF-based methods}
+
+Various approaches have been explored to address LGSS limitations, including linearizing the model via first-order approximations like the extended Kalman Filter (EKF), approximating populations with a Gaussian distribution in the ensemble Kalman Filter (EnKF; \citealt{1994Evensen}), and using NNs to approximate the Kalman gain~\citep{KalmanNet}. The EnKF and its variants (e.g., ETKF; \citealt{2001Bishop}) are commonly used in real-time data assimilation for weather forecasting. However, these methods rely on the KF’s posterior update equations, limiting the expressivity of the distributions they can represent. Additionally, computations for covariance matrices become challenging in high-dimensional spaces, requiring specialized techniques for computational efficiency.
+
+\subsubsection{Sampling-based methods}
+The Particle Filter is a popular method for assimilating any posterior. However, achieving adequate particle density in high-dimensional state spaces poses significant challenges. Insufficient density of particles leads to particle degeneracy, where few particles explain the observed data~\citep{SMC_review_1}. In contrast, DBF directly learns to position density through the IOO, offering advantages for high-dimensional tasks. The Particle Flow Filter (PFF; \citealt{PFF07, PFF21}) addresses particle degeneracy by moving particles according to gradient flow and effectively scales to nonlinear SSMs with hidden state dimensions up to 1000 \citep{PFF21}.
+\subsubsection{Approximate MAP estimation method}
+MAP estimation is used to identify the high-density point of the posterior in high-dimensional space, such as in weather forecasting~\cite{4Dvar, frerix2021}. Even if the computation of the posterior $p(h_t | o_{1:t})$ is intractable, we can optimize $\log p(h_t | o_{1:t}) = \log p(o_t | h_t) + \log p(h_t | o_{1:t-1})$ if we can describe $p(o_t | h_t)$ and $p(h_t | o_{1:t-1}) = \int p(h_t | h_{t-1}) p(h_{t-1} | o_{1:t-1}) dh_{t-1}$ explicitly. In practice, we cannot access $p(h_{t-1} | o_{1:t-1})$ and therefore the integral $\int p(h_t | h_{t-1}) p(h_{t-1} | o_{1:t-1}) dh_{t-1}$, so we only compute the mean. The downside is that sequential computation of the covariance matrix of $p(h_t | o_{1:t-1})$ is impossible.
+\subsubsection{NN-based PDE surrogate}
+Recently, there have been attempts to approximate partial differential equations (PDEs) using NNs. We also tried one of the latest methods, PDE-refiner ~\citep{PDE-refiner}, in the experiments of this study. However, its performance was poor, and we decided not to include it in the experiments. We suspect this is because PDE-refiner was designed for constructing PDE surrogates and did not account for noisy observations, making it susceptible to noise. We confirmed that it produces good predictions under noiseless observations.
+
+
+
+\section{Experiments}
+
+
+We evaluate the performance of DBF on three tasks: a linear dynamics problem (moving MNIST) and two nonlinear dynamics problems (double pendulum and Lorenz96). 
+
+\paragraph{Linear dynamics: moving MNIST}
+In the moving MNIST task, the goal is to identify the images, positions, and velocities of two handwritten digits as they move within the observed frames. While the dynamics of these digit images and their observation processes are provided, the actual images, positions, and velocities are not available, making supervised learning impossible.
+DBF assimilates directly in the physical space. It trains the parameters of the IOO, $f_\theta$ and $G_\theta$, which are represented by NNs, along with the pixel values of the embedded images. The results are compared against conventional DA methods (EnKF, ETKF, PF) that also operate in the physical space.
+
+\paragraph{Nonlinear dynamics: double pendulum and Lorenz96}
+For nonlinear dynamics problems, such as the double pendulum and Lorenz96, DBF constructs a new latent space in addition to the original physical space. Here, we took Strategy 2 in Sec.\ref{sec: training} for the training: we simultaneously train NNs for the IOO, nonlinear observation operator $\phi$, the dynamics matrix $A$, and the emission model's standard deviation. 
+We compare the performance of DBF with the classical DA algorithms (EnKF, ETKF, PF), state-of-the-art assimilation methodologies (PFF~\citealt{PFF07, PFF21}, KalmanNet~\citealt{KalmanNet}), and DVAE-based approaches (deep Kalman Filter; DKF, \citealt{DKF1, DKF2}, variational recurrent neural network; VRNN, \citealt{VRNN}, and stochastic recurrent neural network; SRNN, \citealt{SRNN}). 
+DBF and other DVAEs are trained by optimizing the evidence lower bound (ELBO), as described in Sec.~\ref{sec: training}. 
+
+For all the experiments, we generate random initial conditions and let them evolve via the dynamics of the problem. Synthetic observation data are generated by applying the observation operator and additive noise. 
+
+\subsection{Linear dynamics: two-body moving MNIST}
+
+This experiment demonstrates DBF’s ability to handle linear dynamics where key parameters of the observation operator are unknown. The dataset consists of 2D figures containing two embedded images, each moving at a constant speed and bouncing off frame edges. The system's physical state is described by eight variables: the positions $(x, y)$ and velocities $(v_x, v_y)$ of the two embedded images. The dynamics matrix is block-diagonal, composed of four (two-body times two dimensions) translation matrices, $A_{tr}$:
+$A_{tr} =
+    \begin{pmatrix}
+        1 & 1 \\
+        0 & 1 \\
+    \end{pmatrix},
+    z_t = \begin{pmatrix}
+        x_t \\
+        v_{x_t} \\
+    \end{pmatrix}$. 
+Observations are corrupted by additive Gaussian noise with a standard deviation of $\sigma=50$ per pixel, where the original pixel values range from $0$ to $255$ (see panel (a) of Fig.~\ref{fig:MNIST} for an example of the data provided).
+
+The aim is to show that DBF can track the linear dynamics while estimating unknown system parameters. DBF learns the pixel values of the embedded images from noisy observations, while maintaining consistency with physical motion. The observation model contains $1{,}568$ unknown parameters, corresponding to the number of pixels in the images.
+In classical DA algorithms, it is not possible to train unknown system parameters. However, it may be possible to infer these parameters by incorporating them as new physical dimensions. We have adopted this strategy for classical DA algorithms (EnKF, ETKF, and PF). We tested at three different noise levels ($\sigma_{sys}$ of $1$, $0.1$, and $0.01$). DVAEs are not comparable as they need to undergo supervised training. We were unable to compare with KalmanNet, as its input dimensionality, $x_{\rm dim}^2 = (44\times 44)^2$, exceeded the available GPU memory.
+
+Fig.~\ref{fig:MNIST} summarizes the experiment. Panel (a) shows an example from the test set, illustrating the challenges posed by strong noise and overlapping images. Panel (b) presents the DBF learning process. In the rightmost table, we compare the success rates of DBF against model-based approaches (EnKF, ETKF, PF). We define success as achieving a root-mean-square error (RMSE) of less than 1.0 for both position ($x_1, y_1, x_2, y_2$) and velocity ($v_{x_1}, v_{y_1}, v_{x_2}, v_{y_2}$) of the two digits over the final ten steps. 
+DBF successfully performs assimilation without explicit knowledge of the images, while all the other model-based approaches fail. The KF-inspired approaches (EnKF, ETKF) failed because of very strong non-Gaussianity in the observation process and the high system dimension. Similarly, PF underperformed because the number of particles ($10{,}000$) was insufficient for the problem dimension ($z_{\rm dim} = 8$ and two digits images $2 \times 28\times 28 = 1{,}568$).
+
+Panel (b) of Fig.~\ref{fig:MNIST} illustrates the evolution of the estimated figures. Initially, DBF assumes two random shapes. As training progresses, it first identifies one of the numbers (``9'') and subsequently detects the second shape (``5''). By the end of the training process, DBF nearly perfectly estimates the parameters of the observation model, including the positions of the figures, which is crucial for adjusting their reflective behavior. The ability to learn system parameters through gradient descent sets DBF apart from traditional model-based approaches.
+
+\begin{figure}[htbp]
+    \hspace{4mm}
+    \includegraphics[width=0.3\columnwidth]{movingMNIST_fig_small.pdf}
+    \includegraphics[width=0.4\columnwidth]{movingMNIST_learning.pdf}
+    \begin{minipage}[t]{0.1\columnwidth}
+    \begin{tabular}{cc}
+        Method & Success rate \\ \hline
+        DBF & 100\% (50/50) \\
+        EnKF & 0\% (0/50) \\
+        ETKF & 0\% (0/50) \\
+        PF & 0\% (0/50) 
+    \end{tabular}
+    \end{minipage}    \caption{Figures from the two-body Moving MNIST experiments. Panel (a) displays examples of the observation data. Panel (b) illustrates the evolution of the observation model parameters (the embedded images) during training. The table compares the success rates of four methodologies.} 
+    \label{fig:MNIST}
+\end{figure}
+
+\subsection{Nonlinear dynamics 1: double pendulum}
+\label{sec: double pendulum}
+
+\begin{figure}[htbp]
+    \begin{minipage}[t]{0.165\columnwidth}
+    \includegraphics[width=\columnwidth]{double_pendulum_schematic.pdf}
+    \end{minipage}
+    \begin{minipage}[t]{0.385\columnwidth}
+    \includegraphics[width=\columnwidth]{omegas_yerr.pdf}
+    \end{minipage}
+    \hspace{-2mm}
+    \begin{minipage}[t]{0.11\columnwidth}
+    \includegraphics[width=\columnwidth]{DBF_DblP_diff_cond3_data9.pdf}
+    \end{minipage}
+    \hspace{-3mm}
+    \begin{minipage}[t]{0.11\columnwidth}
+    \includegraphics[width=\columnwidth]{ETKF_DblP_diff_cond3_data9.pdf}
+    \end{minipage}
+    \begin{minipage}[t]{0.1\columnwidth}
+    \begin{tabular}{cc}
+        $\sigma=0.1$ & KL$_{sym}$ \\ \hline
+        DBF & 0.02 \\
+        EnKF & 10.2 \\
+        ETKF & 0.12
+    \end{tabular}
+    \end{minipage}
+    \caption{A schematic figure (panel a) and results for double pendulum experiments. Panel (b) shows the RMSE evolution during assimilation. Panels (c) and (d) show example histograms for normalized errors in DBF and ETKF samples compared against the unit Gaussian $\mathcal{N}(x; \mu=0, \sigma^2=1)$. The small table compares the Jeffreys divergence of normalized errors and the unit Gaussian between DBF, EnKF, and ETKF predictions.}
+    \label{fig:pendulum_figure}
+\end{figure}
+
+\begin{table}[htbp]
+    \caption{RMSE at the final ten steps of assimilation in double pendulum experiments.}
+    \label{tab:DblPtable}
+    \centering
+    \begin{tabular}{ccccccc}
+     & \multicolumn{2}{c}{$\sigma=0.1$} & \multicolumn{2}{c}{$\sigma=0.3$} & \multicolumn{2}{c}{$\sigma=0.5$} \\ \cline{2-7}
+
+     & $\theta$ & $\omega$ & $\theta$ & $\omega$ & $\theta$ & $\omega$  \\ \hline
+    DBF & {\bf 0.03 $\pm$ 0.01} & {\bf 0.21 $\pm$ 0.04} & {\bf 0.05 $\pm$ 0.02} & {\bf 0.26 $\pm$ 0.05} & {\bf 0.06 $\pm$ 0.01} & {\bf 0.36 $\pm$ 0.04} \\
+    EnKF & $0.05 \pm 0.00$ & $0.33 \pm 0.07$ & $0.14 \pm 0.01$ & $0.71\pm 0.09$ & $0.24 \pm 0.01$ & $1.17 \pm 0.22$ \\
+    ETKF & $0.05 \pm 0.01$ & $0.46 \pm 0.08$ & $0.22 \pm 0.05$ & $1.41\pm 0.41$ & $0.36 \pm 0.08$ & $2.70 \pm 1.25$ \\
+    PF & $0.05 \pm 0.00$ & $0.63 \pm 0.24$ & $0.21 \pm 0.14$ & $1.41 \pm 1.30$ & $0.32 \pm 0.08$ & $2.36 \pm 2.29$ \\
+    PFF & $1.27 \pm 0.29$ & $1.04 \pm 0.15$ & NA & $5.99 \pm 1.09$ & $5.88 \pm 0.67$ & NA \\
+    KNet & NA & NA & NA & NA & NA & NA \\
+    VRNN & $0.04 \pm 0.01$ & $0.44 \pm 0.19$ & $0.06 \pm 0.02$ & $0.35 \pm 0.14$ & $0.08 \pm 0.04$ & $0.40 \pm 0.16$ \\
+    SRNN & $0.05 \pm 0.02$ & $0.52 \pm 0.18$ & $0.06 \pm 0.02$ & $0.44 \pm 0.08$ & $0.08 \pm 0.03$ & $0.52 \pm 0.22$ \\
+    DKF & $0.12 \pm 0.02$ & $2.70 \pm 0.28$ & $0.17 \pm 0.03$ & $2.61 \pm 0.74$ & $0.23 \pm 0.04$ & $2.61 \pm 0.56$ \\
+    \end{tabular}
+\end{table}
+This section presents our experiments with a double pendulum system, selected for its nonlinear and chaotic behavior. The pendulum consists of two 1 kg masses, P1 and P2, connected by two 1 meter bars, B1 and B2. One end of the bar B1 is fixed at the origin (``O''), with the other end attached to P1. Mass P2 is connected to P1 via bar B2. A schematic of the setup is shown in panel (a) of Fig.~\ref{fig:pendulum_figure}.
+We use the angles $\theta_1$ and $\theta_2$, and the two angular velocities, $\omega_1$ and $\omega_2$, as target physical variables. The latent dimension for DBF, VRNN, SRNN, and DKF is set to 50. Observation data consists of the two-dimensional spatial positions of masses $P_1$ and $P_2$, corrupted by Gaussian noise. The observation operator combines trigonometric functions for $\theta_1$ and $\theta_2$, creating a highly nonlinear relationship. Experiments are conducted with noise levels of $\sigma = 0.1, 0.3$, and $0.5$ meters, with a time step of 0.03 seconds between observations. In the emission model $p(z_t|h_t)$, we assume von Mises distributions for $\theta_1$ and $\theta_2$, while $\omega_1$ and $\omega_2$ follow Gaussian distributions.
+
+Table~\ref{tab:DblPtable} presents the RMSE between the physical variables and the mean of the filtered distribution. Training for KalmanNet was unsuccessful under all conditions. For the DVAEs, we exclude failed initial conditions when calculating the RMSE. DBF outperforms both model-based and latent assimilation methods across all settings, showing significant improvements in estimating $\omega$, which cannot be inferred from a single observation. Fig.~\ref{fig:pendulum_figure} (b) illustrates an example of RMSE evolution during assimilation, where DBF consistently outperforms the other methods. The assimilation of $\omega$ occurs within the first $\sim 20$ steps, maintaining an excellent estimation accuracy throughout the experiment.
+A key feature of DBF is its ability to generate samples of $z_t$ and assess the uncertainty in state estimates. To evaluate this capability, we analyze the distributions of normalized errors defined as $\epsilon_{norm, t, i} = (z_{t, sample, i} - z_{t, i}) / \delta_i$, where $z_{t, i}$ represents the true value of dimension $i$ at time $t$, and $\delta_i$ is the standard deviation of $z_{t, sample, i}$. We collect $\epsilon_{norm, t, i}$ across all time steps, focusing on $i = \omega_1$ and $i = \omega_2$, since $\theta_1$ and $\theta_2$ follow von Mises distributions. If the uncertainty estimates are accurate, $\epsilon_{norm, t, i}$ should approximate a Gaussian distribution with a standard deviation of one. To quantify the accuracy, we compute the symmetric KL divergence (Jeffreys divergence) $KL_{sym}[p, q] = (KL[p||q] + KL[q||p]) / 2$ between the histogram of $\epsilon_{norm, t, i}$ and a unit Gaussian. DBF exhibits very low $KL_{sym}$ values, indicating accurate error estimation. Panels (c) and (d) display example histograms of $\epsilon_{norm, t, i}$ for DBF and ETKF.
+\subsection{Nonlinear dynamics 2: Lorenz96}
+\label{sec: Lorenz96}
+\begin{wrapfigure}{r}[0pt]{0.4\columnwidth}
+    \includegraphics[width=0.4\columnwidth]{240919_obsnoise1_dt003_fhKGR_iter50000__data0_label.pdf}
+    \caption{A Hovmöller diagram for one of data in the test set. The observation operator is nonlinear, $o_{t,j} = min(z_{t,j}^4, 10)+\epsilon$.}
+    \label{fig:Lorenz96 nonlinear observation}
+\end{wrapfigure}
+
+In the final experiment, we focus on state estimation in the Lorenz96 model \citep{Lorenz96}, a benchmark for testing data assimilation algorithms on noisy, nonlinear observations.
+The Lorenz96 model describes the evolution of a one-dimensional array of variables, each representing a physical quantity over a spatial domain, like an equilatitude circle. The dynamics are governed by the following coupled ordinary differential equations: \begin{eqnarray}
+    \frac{dz_i}{dt}=(z_{i+1}-z_{i-2})z_{i-1}-z_i+F,\hspace{3mm} i=1,\ldots,N, 
+\end{eqnarray}
+where $z_i$ is the value at grid point $i$, $N$ is the number of grid points, and $F$ is external forcing. For our experiments, we take $F=8$ and $N=40$.
+We consider two observation operators. The first adds Gaussian noise to direct observations: $o_{t,j} = z_{t,j}+\epsilon$, with noise levels $\sigma = 1, 3, 5$. The second uses a nonlinear operator: $o_{t,j} = \min(z_{t,j}^4, 10) + \epsilon$, with the same noise levels. The dynamic range of $z_{t,j}$ is around $\pm 10$, and observations are capped at 10 when $z_{t,j}$ exceeds 1.8. This makes it highly challenging for classical DA methods, as each observation offers limited information. The filter must integrate data over long timesteps, where nonlinear dynamics distort the probability distribution. Fig.~\ref{fig:Lorenz96 nonlinear observation} illustrates observations and target values. All models use 80 observation steps with a 0.03 time interval. The latent dimension for DBF, VRNN, SRNN, and DKF is set to 800. For further details for the experiment, see Sec.
+\begin{table}[htbp]
+    \centering
+    \caption{RMSE at the final ten steps of assimilation in Lorenz96 experiments.}
+    \label{tab:LR96table}
+    \begin{tabular}{cccccccc}
+     & \multicolumn{3}{c}{direct observation} & \multicolumn{3}{c}{nonlinear observation} \\ \cline{2-7}
+     & $\sigma=1$ & $\sigma=3$ & $\sigma=5$ & $\sigma=1$ & $\sigma=3$ & $\sigma=5$ \\ \hline
+    DBF & $0.53 \pm 0.04$ & {\bf 0.82 $\pm$ 0.03} & {\bf 1.16 $\pm$ 0.07} & {\bf 1.08$\pm$ 0.15} & {\bf 1.29 $\pm $ 0.18} & {\bf 1.65 $\pm$ 0.17} \\
+    EnKF & $0.31 \pm 0.01$ & $0.83 \pm 0.10$ & $1.73 \pm 0.12$ & $4.69 \pm 0.14$ & $3.93 \pm 0.08$ & $3.81 \pm 0.07$ \\
+    ETKF & {\bf 0.30 $\pm$ 0.01} & $1.06 \pm 0.15$ & $2.42 \pm 0.11$ & $4.57 \pm 0.25$ & $4.28 \pm 0.04$ & $4.23 \pm 0.07$ \\
+    PF & $2.80 \pm 0.04$ & $3.12 \pm 0.06$ & $3.62 \pm 0.13$ & $6.05 \pm 0.16$ & $4.95 \pm 0.12$ & $4.58 \pm 0.14$ \\
+    PFF & $0.60 \pm 0.02$ & $1.00 \pm 0.05$ & $2.20 \pm 0.09$ & $3.75 \pm 0.09$ & $3.85 \pm 0.04$ & $3.83 \pm 0.11$ \\
+    KNet & $0.60 \pm 0.02$ & $1.81 \pm 0.05$ & $3.02 \pm 0.09$ & $2.97 \pm 0.21$ & $3.47 \pm 0.17$ & $3.99 \pm 0.25$ \\
+    VRNN & $3.67 \pm 0.06$ & $3.67 \pm 0.06$ & $3.67 \pm 0.06$ & $3.69 \pm 0.04$ & $2.51 \pm 0.79$ & $3.67 \pm 0.06$ \\
+    SRNN & $3.08 \pm 0.56$ & $3.63 \pm 0.05$ & $3.40 \pm 0.29$ & $3.30 \pm 0.81$ & $3.62 \pm 0.41$ & $2.96 \pm 0.32$ \\
+    DKF & 3.70 & NA & NA & NA & NA & NA \\
+    \end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+    \hspace{2mm}
+    \includegraphics[width=0.32\columnwidth]{LR96_obsindex0.pdf}
+    \includegraphics[width=0.32\columnwidth]{LR96_obsindex2.pdf}
+    \includegraphics[width=0.32\columnwidth]{LR96_nonlin_obsindex0.pdf}
+    \begin{minipage}[b]{0.7\columnwidth}
+    \end{minipage}
+    \caption{RMSE results for Lorenz96 experiments. Panels (a), (b) show results for direct observation with $\sigma=1$ and $\sigma=5$. Panel (c) shows results for nonlinear observation with $\sigma=1$.}
+\end{figure}
+
+Table~\ref{tab:LR96table} presents the assimilation performance across different noise levels and observation settings. DBF outperforms existing methods in direct observations with $\sigma = 3, 5$, and across all noise levels for nonlinear observation cases. In the $\sigma = 1$ setting with direct observation, traditional algorithms like EnKF and ETKF outperform DBF. 
+The superior performance of EnKF and ETKF with direct observations at the lowest noise level can be attributed to the minimal non-Gaussianity in the posteriors within physical space. Non-Gaussianity can originate from both the dynamics model (predict step) and the observation model (update step). In this setting, the linearity of the observation operator prevents non-Gaussianity from being introduced during the update step, provided that the prior $q(z_{t} | o_{1:t-1})$ is Gaussian. Additionally, state estimation from each observation is highly accurate due to small noise. As a result, the prior $p(z_{t+1} | o_{1:t})$ remains close to a Gaussian distribution, as the locally linear approximation of the dynamics adequately captures the time evolution of probability distributions. The poorer performance of EnKF and ETKF in the $\sigma = 5$ experiment is attributed to the increased non-Gaussianity introduced during each predict step. Similarly, when the observation operator is nonlinear, each update step introduces substantial non-Gaussianity. This results in a significant drop in performance for traditional filtering methods across all noise levels. In these scenarios, DBF consistently maintains an advantage over classical DA algorithms.
+\begin{wrapfigure}{r}[0pt]{0.44\columnwidth}
+ \begin{minipage}[b]{0.15\columnwidth}
+    \includegraphics[width=\columnwidth]{eigs_cond1_iter50000.pdf}
+ \label{fig:histogram}
+ \end{minipage}
+ \begin{minipage}[t]{0.15\columnwidth}
+ \begin{tabular}{cc}
+        setting & max[abs(eig)] \\ \hline
+        D, $\sigma=1$ & $1.016\pm 0.002$ \\
+        D, $\sigma=3$ & $1.014\pm 0.002$ \\
+        D, $\sigma=5$ & $1.011\pm 0.001$ \\ \hline
+        N, $\sigma=1$ & $1.012\pm 0.003$ \\
+        N, $\sigma=3$ & $1.008\pm 0.004$ \\
+        N, $\sigma=5$ & $1.004\pm 0.001$
+ \end{tabular}
+ \end{minipage}
+ \caption{Histogram of 800 eigenvalues of the dynamics matrix in Lorenz96. D for direct and N for nonlinear observations.}
+ \label{tab:eigenvalues}
+\end{wrapfigure}
+We observe that training DVAE-based methods is highly unstable, while that for DBF exhibits stability. Dynamics in DVAEs are modeled by RNNs, which often suffer from unstable training due to exploding or vanishing gradients. In contrast, DBF employs matrix multiplication for dynamics. If the eigenvalues of the matrix exceed one by a large margin, the model predictions, and consequently the loss function, would explode irrespective of inputs. 
+Fig.~\ref{tab:eigenvalues} shows the histogram of the absolute values of eigenvalues at the end of training, which are distributed around or below one, indicating stable training.
+
+
+\section{Limitation}
+
+DBF's learning of IOO requires a training phase, unlike classical model-based data assimilation methods. Specifically, when dealing with nonlinear dynamics, DBF requires either: (i) a pair of $(z_t, o_t)$ generated from the original SSM, (ii) a pair of $(z_t, o_t)$ obtained via, e.g., retrospective reanalysis (ERA5; \citealt{ERA5} in weather forecasting), or (iii) a pretrained Koopman operator and observed data $o_t$. 
+In the Lorenz96 experiment, DBF's performance with direct observation with $\sigma=1$ falls short compared to EnKF and ETKF. In this setting, the non-Gaussianity of posteriors is weak, resulting in minor approximation errors due to Gaussian assumptions. Consequently, a model-based approach may be more advantageous in such situations, as it leverages complete SSM knowledge without introducing training biases.
+
+
+
+\section{Conclusion}
+
+We propose DBF, a novel DA method. DBF is a NN-based extension of the KF designed to handle nonlinear observations. While constraining the test distributions to remain Gaussian, DBF enhances their representational capacity by leveraging nonlinear transform expressed by a NN. 
+DBF is the first ``Bayes-Faithful'' amortized variational inference methodology, constructing test distributions that mirror the inference structure of a SSM with the Markov property.
+This structured inference enables analytical computation of test distributions, preventing the accumulation of Monte Carlo sampling errors over time steps. DBF exhibits superior performance over existing methods in scenarios where posterior distributions become highly non-Gaussian, such as in the presence of nonlinear observation operators or significant observation noise.
+
+\clearpage
+
+
+
+
+

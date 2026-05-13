@@ -1,0 +1,254 @@
+\title{Unstable Unlearning: The Hidden Risk of Concept Resurgence in Diffusion Models}
+
+\begin{abstract}
+Text-to-image diffusion models rely on massive, web-scale datasets.
+Training them from scratch is computationally expensive, and as a result, developers often prefer to make incremental updates to existing models. These updates often compose fine-tuning steps (to learn new concepts or improve model performance) with ``unlearning'' steps (to ``forget'' existing concepts, such as copyrighted works or explicit content). In this work, we demonstrate a critical and previously unknown vulnerability that arises in this paradigm: even under benign, non-adversarial conditions, fine-tuning a text-to-image diffusion model on seemingly unrelated images can cause it to ``relearn'' concepts that were previously ``unlearned.'' We comprehensively investigate the causes and scope of this phenomenon, which we term \emph{concept resurgence}, by performing a series of experiments which compose ``mass concept erasure'' (the current state of the art for unlearning in text-to-image diffusion models \citep{lu2024mace}) with subsequent fine-tuning of Stable Diffusion v1.4. Our findings underscore the fragility of composing incremental model updates, and raise serious new concerns about current approaches to ensuring the safety and alignment of text-to-image diffusion models. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+Modern generative models are not static.
+In an ideal world, developing new models would require minimal resources, allowing users to tailor unique, freshly trained models to every downstream use case. In practice, making incremental updates to existing models is far more cost-effective, which is why it is common for models developed for one context to be updated for use in another \citep{Wu2019LargeSI, Houlsby2019ParameterEfficientTL, Hu2021LoRALA}. This paradigm of updating pre-trained models is widely considered beneficial, as it promotes broader and more accessible development of AI. However, for sequential updates to become a sustainable standard, it is critical to ensure that these updates compose in predictable ways. 
+\blfootnote{$^\star$Equal Contribution; Corresponding authors: $\{$\texttt{vinithms@mit.edu, ralur@mit.edu}$\}$} 
+
+Developers commonly update models to acquire new information or to improve performance---for example, by fine-tuning an existing model on a novel dataset tailored to a particular use case. But developers sometimes seek to \textit{remove} information from an existing model. One prominent example is {\em machine unlearning}, which aims to efficiently update a trained model to ``forget'' portions of its training data \citep{cao2015towards, tam2022unlearning, belrose2024leace}, in order to respond to privacy concerns. This is especially important for compliance with regulations like the General Data Protection Regulation (GDPR) ``right to be forgotten'' \citep{gdpr2016}.
+
+Here, we focus on the related notion of ``concept unlearning'' in the context of text-to-image diffusion models (hereafter, referred to as ``diffusion models'').
+In contrast to machine unlearning, which targets particular data points, concept unlearning seeks to erase general categories of content,
+such as offensive or explicit images. There has been substantial recent progress in this area. For example, the current state-of-the-art in ``mass concept erasure'' (MACE) can now effectively erase dozens of concepts from a pre-trained diffusion model \citep{lu2024mace}. This is useful in contexts where undesired concepts cannot be comprehensively identified during the pre-training phase, and thus instead must be erased after the model is deployed or as it is adapted for different downstream applications.
+
+Our work begins with a surprising observation: \textbf{fine-tuning a diffusion model can re-introduce previously erased concepts} and this can occur even when fine-tuning is performed on seemingly unrelated concepts  (see \Cref{fig:jennifer_aniston} for a striking yet representative example).
+This hidden vulnerability, which we call \textit{concept resurgence}, poses a challenge to the current paradigm of composing model updates via incremental fine-tuning.
+
+In particular, while the current state of the art in concept unlearning may initially suppress the generation of unwanted concepts (e.g., harmful, biased or copyrighted images), a developer cannot presently guarantee that concept unlearning will prevent the accidental reintroduction of these concepts in later updates to the model. As a consequence, consumers who fine-tune a ``safe'' model might inadvertently reintroduce undesirable content.
+ This paper systematically explores concept resurgence, identifying it as a critical and previously unrecognized vulnerability in diffusion models. Our primary contributions are as follows:
+
+\begin{itemize}[leftmargin=*]
+    \item {\bf Demonstrating the prevalence of concept resurgence.} Through a series of systematic \awcomment{methodical? extensive? thorough? we already used systematic in the sentence before...} experiments, we investigate the conditions under which concept resurgence occurs. We show that concept resurgence does not require fine-tuning on data which is similar to the unlearned concept(s), or that the fine-tuning set is chosen adversarially to ``jailbreak'' the model. Instead, we show that concept resurgence can occur under common and benign usage patterns. Even well-meaning engineers may unintentionally expose users to unsafe or unwanted content that was previously removed. %\Cref{fig:jennifer_aniston} presents a representative example of this phenomenon. 
+    \item {\bf Understanding the causes of concept resurgence.} We conduct a thorough examination of both the unlearning algorithms and the fine-tuning data involved in concept resurgence. We quantify the extent of the problem across a range of standard benchmarks, finding that the degree of concept resurgence is closely related to the choice of mapping concept (i.e., the more generic / unrelated the concept, the less resurgence) and degree of regularization imposed during unlearning.
+\end{itemize} 
+
+\paragraph{Organization of the paper.} 
+\Cref{sec:related_work} is dedicated to background and related work. In \Cref{sec:warmup}, we quantify the extent of concept resurgence across a variety of standard benchmarks. 
+We investigate the influence of unlearning and fine-tuning algorithms in \Cref{sec:algo_role}, followed by an analysis of the role of fine-tuning data in \Cref{sec:data_role}. Finally, \Cref{sec:discussion} discusses limitations and outlines directions for future research. 
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.3\textwidth}
+    \centering
+        \includegraphics[width=1\textwidth]{figures/jennifer_aniston_original.png}
+        \subcaption{Stable Diffusion v1.4}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.3\textwidth}
+    \centering
+        \includegraphics[width=1\textwidth]{figures/jennifer_aniston_mace.png}
+        \subcaption{MACE}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.3\textwidth}
+    \centering
+        \includegraphics[width=1\textwidth]{figures/jennifer_aniston_finetuned.png}
+        \subcaption{Additional Fine-tuning}
+    \end{subfigure}
+    \caption{Images generated by the prompt ``A portrait of Jennifer Aniston.'' Stable Diffusion v1.4 successfully generates this image (a), and Mass Concept Erasure (MACE) successfully induces the pretrained model to ``forget'' this concept (b). However, subsequent fine-tuning on an unrelated set of randomly selected celebrity images reintroduces the ability to generate the target concept (c).}
+     \label{fig:jennifer_aniston}
+\end{figure}
+
+
+
+\section{Background and Related Work}
+
+\label{sec:related_work} 
+
+\textbf{Machine unlearning.} We build on a growing literature on \emph{machine unlearning}~\citep{bourtoule2021machine, nguyen2022survey, kurmanji2023unbounded, cao2015towards, gupta2021adaptive, suriyakumar2022algorithms, sekhari2021remember, ghazi23aticketed, kurmanji2023unbounded,lev2024faster, lucki2024adversarial}, which develops methods for efficiently modifying a trained machine learning model to \emph{forget} some portion of its training data. In the context of classical discriminative models, machine unlearning is often motivated by a desire to preserve the privacy of individuals who may appear in the training data. A key catalyst for this work was the introduction of Article 17 of the European Union General Data Protection Regulation (GDPR), which preserves an individual's ``right to be forgotten'' \citep{gdpr2016}. More recent work in machine unlearning has expanded to include modern generative AI models, which may reproduce copyrighted material, generate offensive or explicit content, or leak sensitive information which appears in their training data \citep{zhang2023diffusionsurvey, carlini2023extracting}. Our work focuses specifically on unlearning in the context of diffusion models~\citep{ho2020denoising, rombach2021diffusion}. The literature on diffusion models has grown rapidly over the last few years; though we cannot provide a comprehensive overview here, we refer to \cite{zhang2023diffusionsurvey} for an excellent recent survey.
+\paragraph{Concept unlearning.} Our work is directly inspired by a line of recent research that proposes methods for inducing models to forget abstract \emph{concepts}~\citep{belrose2024leace, lu2024mace, fuchi2024erasing, gandikota2024unified}, as opposed to simply unlearning specific training examples.
+A key challenge in this context is maintaining acceptable model performance on concepts that are not targeted for unlearning, especially those closely related to the erased concepts. At the time of this work, \citet{lu2024mace} (MACE) is the state of the art in terms of both erasure performance and image generation quality after unlearning.
+\paragraph{MACE: Mass Concept Erasure in diffusion models.} We build directly on the recent work of \citet{lu2024mace} for Mass Concept Erasure (MACE) in diffusion models. 
+Broadly speaking, MACE fine-tunes a model to erase certain target phrase (e.g., ``an image of a ship'') and their related concepts (e.g., ``an image of a boat'') by using a combination of cross-attention refinement and low rank adaptation (LoRA) \citep{Hu2021LoRALA}. Cross-attention refinement modifies the ``key'' embeddings associated with each token co-existing in the target phrase with the corresponding ``key'' embedding of co-existing words in a more generic phrase. The second step, LoRA fine-tuning, perturbs the weights of the model to minimize activations in regions which correspond to the target phrase; these regions are identified by segmenting the image using Grounded-SAM \citep{2304.02643, 2303.05499}. These perturbations are learned via low rank adapatation (LoRA) of the model parameters \citep{Hu2021LoRALA}. Finally, the LoRA modules corresponding to each erased concept are combined to produce a final model by formulating the ``fusion'' of multiple LoRA modules as a quadratic programming problem. For additional detail on MACE we refer the reader to \cite{lu2024mace}. 
+\paragraph{Attacking machine unlearning systems.} 
+Finally, a recent line of research explores data poisoning attacks targeting machine unlearning systems, including \citet{ChenZWBHZ21,MarchantRA22,CarliniJZPTT22,DiDAKS23,qian2023towards,liu2024backdoor}. These works show that certain new risks, such as camouflaged data poisoning attacks and backdoor attacks, can be implemented via the ``updatability'' functionality in machine unlearning, even when the underlying algorithm unlearns perfectly (i.e., simulates retraining-from-scratch). In contrast, our work exposes a qualitatively new kind of vulnerability in machine unlearning, where a previously forgotten concept may be reacquired as a consequence of \emph{additional} learning. 
+
+
+
+\section{Composing Updates Causes Concept Resurgence}
+
+\label{sec:warmup}
+As discussed in \Cref{sec:intro}, the scale of modern diffusion models has motivated a new paradigm in which updates to pretrained models are incrementally composed to avoid retraining models from scratch. These updates broadly take the form of one of two interventions: either the model is updated to learn a new concept, or it is updated to ``unlearn'' an unwanted concept. The standard procedure for learning new concepts is to curate a dataset of images representing the new concept of interest and fine-tune the model on this dataset. Similarly, to unlearn an unwanted concept(s), an ``unlearning'' algorithm will typically update the weights of the pretrained model in an attempt to ensure that the model no longer generates content associated with that concept.
+
+These two steps may be repeatedly composed over the lifetime of a deployed model. This paradigm raises an important question:
+\begin{center}
+    \emph{To what extent is concept erasure robust to compositional updates?} 
+\end{center}
+
+\begin{figure}[t!]
+\includegraphics[width=1\textwidth]{figures/qualitative/celeb_qualitative_warmup.png}
+    \centering
+    \caption{Representative images generated by SD v1.4 in each celebrity unlearning task. We first apply MACE to erase a set of 1,5,10 or 100 celebrities from the pretrained model; e.g., to ``forget'' how to generate images of Angelina Jolie (top row). We then fine-tune the resulting model on images of unrelated celebrities (bottom row). While the model initially ``unlearns'' how to generate each erased celebrity, subsequent fine-tuning reintroduces some of the unlearned concepts.}
+    \label{fig:celebrity_warmup_qualitative}
+\end{figure}
+
+We begin our investigation with Stable Diffusion v1.4, and separately apply MACE to perform a celebrity erasure and object erasure task. We describe these tasks in detail below. For each task, we fine-tune the model on a random set of in-domain concepts after MACE has been applied. For example, in the context of celebrity erasure --- where the goal of the erasure task is to ``unlearn'' the ability to generate images of a particular celebrity --- we further fine-tune the resulting model on a random set of celebrity images (which exclude the unlearned celebrity). This is intended to simulate the real world paradigm of composing unlearning with unrelated fine-tuning steps, the latter of which are intended to help the model learn new concepts or otherwise improve performance. In particular, we do not fine-tune the model on adversarially chosen concepts, as our goal is to understand whether \emph{benign} updates can degrade or otherwise alter performance. For work on adversarial attacks and/or jailbreaking of text-to-image diffusion models, see~\cite{ma2024jailbreaking,yang2024sneakyprompt,dong2024jailbreaking}.
+Via these experiments, we uncover a phenomenon we term {\em concept resurgence}: composing unlearning and fine-tuning may cause a model to regain knowledge of previously erased concepts.  Below we provide further details on each of these tasks and quantify the degree of concept resurgence. 
+
+\paragraph{Celebrity erasure.} Following \cite{lu2024mace}, the first benchmark we consider is inducing the model to forget how to generate certain celebrities (the ``erase set'') while retaining the ability to generate others (the ``retain set''). We benchmark Stable Diffusion v1.4 on four subtasks in which we apply MACE to unlearn $1$, $5$, $10$ or $100$ celebrities, and then evaluate whether the model succeeds in generating images of these celebrities (e.g., after being prompted with ``A portrait of [erased celebrity name]''). To ensure consistency, both the subtasks and prompts are identical to those in \cite{lu2024mace}; the full set of celebrities in each subtask, along with the prompts used to evaluate the model, are provided in \Cref{sec:app_random_dataset}. We quantify model performance across three random seeds by separately computing the mean top-1 accuracy of the Giphy Celebrity Detector (GCD) \citep{GCD} on both erased and retained celebrities.\footnote{The GCD is a popular open source model for classifying celebrity images; \cite{lu2024mace} document that the GCD achieves $>99\%$ top-1 accuracy on celebrity images sampled from Stable Diffusion v1.4.} Additionally, for one random seed, we quantify the model's ability to continue to generate general concepts using the CLIP Score (i.e. the cosine similarity between the prompts and generated images) computed on a random sample of 5000 captions from MSCOCO~\citep{Lin2014MicrosoftCC} (COCO-5K) and the FID between the generated images from pretrained Stable Diffusion and those from our experiments for COCO-5K.
+
+\begin{figure}[t!]
+\includegraphics[width=1\textwidth]{figures/qualitative/object_qualitative_warmup.png}
+    \centering
+    \caption{Representative images generated by SD v1.4 in each object unlearning task before (top row) and after (bottom row) subsequent fine-tuning on images of unrelated objects. In the ``Erase 5 Objects'' task, the model simultaneously unlearns five concepts (one of which is the ability to generate images of trucks). Unlike the celebrity erasure task (\Cref{fig:celebrity_warmup_qualitative}), none of the unlearned concepts reappear in this set of representative images. However, as \Cref{fig:specific_warmup_qualitative} demonstrates, the vulnerability persists on certain concepts and prompts.}
+    \label{fig:object_warmup_qualitative}
+\end{figure}
+
+\paragraph{Object erasure.} Following \cite{lu2024mace}, the second benchmark we consider is inducing the model to forget how to generate certain types of objects from the CIFAR10 dataset (the ``erase set'') while retaining the ability to generate others (the ``retain set''). We apply MACE to Stable Diffusion v1.4 across four subtasks. In the first three, we apply MACE to erase knowledge of a single object (automobiles, ships and bird, respectively). In the fourth, we apply MACE to a more challenging task in which the goal is to \emph{simultaneously} unlearn a set of five concepts (automobiles, ships, birds, cats, and trucks). In each subtask, we then evaluate whether the model can generate images of these objects and their synonyms (e.g., after being prompted with ``a photo of the [erased object]''). Both the full set of erased objects and retained objects, along with the prompts used to evaluate the model, are provided in \Cref{sec:app_random_dataset}. As in the celebrity erasure task, we adopt the set of concepts to be erased, evaluation prompts and other hyperparameters from \cite{lu2024mace}.\footnote{The only exception is the Erase 5 Objects task, which we add to evaluate simultaneous erasure of multiple concepts.} We quantify model performance by computing the CLIP accuracy across three random seeds on the set of evaluation prompts. Following~\cite{lu2024mace}, we do not compute FID-5K and CLIP-5K for the object erasure task; COCO-5K is itself composed of common objects, and the goal of this evaluation is to assess performance on generic concepts unrelated to the erasure task. 
+
+As discussed above, object erasure and celebrity erasure are two of the four tasks considered in \cite{lu2024mace}. We discuss our choice to exclude the other two (artistic style and explicit content erasure) in \Cref{app:excluding_benchmarks}.
+
+\paragraph{Evaluating concept resurgence.} We present representative examples to characterize the degree of ``typical'' concept resurgence in \Cref{fig:celebrity_warmup_qualitative} and \Cref{fig:object_warmup_qualitative}, and curate specific examples of this vulnerability in \Cref{fig:specific_warmup_qualitative}.\footnote{We say these are ``representative'' examples because we choose the \emph{first} image generated for each prompt after fixing the random seed at $0$, and use the same set of unlearned concepts, hyperparameters and prompts studied in \cite{lu2024mace}. Thus, these figures highlight the degree of concept resurgence in a ``typical'' case.} 
+ 
+\begin{figure}[h!]
+\includegraphics[width=1\textwidth]{figures/qualitative/all_tasks_qualitative_specific.png}
+    \centering
+    \caption{Selected images generated by SD v1.4 in each unlearning task before (top row) and after (bottom row) subsequent fine-tuning. In each task, the model initially unlearns the target concept; e.g., how to generate images of Melania Trump. However, fine-tuning on unrelated images can inadvertently reintroduce the erased concepts. In the ``Erase 5 Objects'' task, the model simultaneously unlearns five concepts (one of which is the ability to generate images of cats).} 
+    \label{fig:specific_warmup_qualitative}
+\end{figure}
+ 
+As \Cref{fig:celebrity_warmup_qualitative} demonstrates, concept resurgence can occur \emph{in degrees}, as some concepts are not reintroduced at all (e.g., Melania Trump), and others are only partially reintroduced (e.g., Barack Obama). Furthermore, \Cref{fig:object_warmup_qualitative} demonstrates that concept resurgence can be rare in some contexts; indeed, none of the representative images we sample reintroduce the unlearned concepts in the object erasure task. However, as both \Cref{fig:celebrity_warmup_qualitative} and \Cref{fig:specific_warmup_qualitative} demonstrate, concept resurgence can occur in striking and seemingly unpredictable ways, running the risk that developers or users can inadvertently reintroduce harmful or unwanted content.
+
+\begin{figure}[h!]
+\includegraphics[width=.9\textwidth]{figures/warmup/all_tasks_warmup_impact.png}
+    \centering
+    \caption{Quantifying the degree of concept resurgence in object and celebrity erasure. The celebrity erasure task demonstrates particularly severe resurgence as the number of unlearned celebrities grows large. Resurgence occurs to a more limited degree in the object erasure task.}
+    \label{fig:warmup}
+\end{figure}
+
+In \Cref{fig:warmup}, we quantify the degree of resurgence across both the object and celebrity erasure tasks using the metrics described above. As suggested by the qualitative results, the degree of resurgence is substantially larger in the celebrity erasure task, particularly as the number of unlearned celebrities grows large (intuitively, such tasks are ``harder'' than unlearning a smaller number of celebrities, as the model must simultaneously unlearn many concepts without degrading model performance on other, unrelated tasks). The vulnerability appears in the object erasure task as well, albeit to a lesser degree. We emphasize however that in many contexts, even rare concept resurgence presents unacceptable risks. In the remainder of this work, we seek to systematically characterize \emph{when} and \emph{why} this resurgence occurs, focusing first on algorithmic choices (\Cref{sec:algo_role}) and then on characteristics of the fine-tuning dataset (\Cref{sec:data_role}).
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=.85\textwidth]{figures/mapping_concept/all_tasks_mapping_concept.png}
+   
+    \caption{Effect of different generic mapping concepts on concept resurgence. More generic and unrelated concepts greatly reduce resurgence in both tasks, with near-total elimination in the celebrity erasure task when using objects as the mapping concept.}
+    \label{fig:mapping_concepts}
+\end{figure}
+
+
+
+\section{Algorithmic Factors Driving Concept Resurgence}
+
+\label{sec:algo_role}
+The compositional updating pipeline involves several algorithmic choices that can either contribute to or mitigate the risk of concept resurgence. We focus on common choices made across most concept unlearning algorithms for diffusion models, using MACE as our baseline technique to assess their impact. These choices include regularization in the cross-attention refinement update, mapping the embedding of the concept to be unlearned to  more general concepts, and the selection of the algorithm used for fine-tuning. In the following two sections we focus our attention on the \texttt{erase 10 celebrities} and \texttt{erase ship} tasks as we vary other components of the training pipeline. 
+
+At a high level, we hypothesize that resurgence occurs because unlearning does not update the model parameters to be sufficiently ``far away'' from the pretrained weights. Thus, although unlearning may initially suppress the generation of unwanted concepts, even a modest degree of fine-tuning tends to shift model weights towards their initial state, and thus reintroduce seemingly erased concepts. To validate this hypothesis, we first assess the impact of three algorithmic factors on concept resurgence: choice of mapping concept, regularization, and the fine-tuning algorithm.
+
+\subsection{Mapping Concepts} 
+\label{sec:mapping_concepts}
+
+A key algorithmic component in many approaches to concept unlearning in diffusion models, including MACE and Unified Concept Editing (UCE)~\citep{gandikota2024unified} is modifying the cross-attention mechanism. This mechanism is responsible for encoding the prompt into an embedding that the diffusion process conditions on. In particular, MACE proposes to modify the cross-attention weights found via the solution to the following optimization problem: 
+
+\begin{equation}
+    \min_{\mathbf{W}_{k}^{'}} \underset{\shortstack[c]{\text{guides embeddings of model} \\ \text{towards those of generic concept}}}{\underbrace{\sum_{i=1}^{n} \|\mathbf{W}_{k}^{'} \cdot \mathbf{e}_{i}^{\text{co}} - \mathbf{W}_{k} \cdot \mathbf{e}_{i}^{\text{gen}}\|_{2}^{2}}} + \lambda_{1} \underset{\shortstack[c]{\text{ensures embeddings of other concepts} \\ \text{remain accurate}}}{\underbrace{\sum_{i=n+1}^{n+m} \|\mathbf{W}_{k}^{'} \cdot \mathbf{e}_{i}^{\text{prior}} - \mathbf{W}_{k}\cdot \mathbf{e}_{i}^{\text{prior}}\|_{2}^{2}}},
+    \label{eqn:car_obj}
+\end{equation}
+
+where $\mathbf{W}_{k}$ is the set of pretrained weights, $\mathbf{e}_{i}^{\text{co}}$ is the embedding of the $i^\text{th}$ word that co-exists in the prompt with the concept to be unlearned (e.g. the photo of \{concept\}), and $\mathbf{e}_{i}^{\text{gen}}$ is the embedding of the $i^\text{th}$ word that co-exists with the concept to be unlearned if that concept was replaced with its more generic concept (e.g. \emph{the photo of \{generic concept\}}). Finally, $\mathbf{e}_{i}^{\text{prior}}$ is an embedding for a concept that we would like to preserve. Typically, the preserved concepts are generic ones that the model should still be able to generate after unlearning. The second term acts as a regularizer that keeps the new weights close to the original weights and thus prevent performance degradation on unrelated concepts.
+
+In this section we focus on the choice of the generic \emph{mapping concept}. This impacts both the cross-attention refinement objective and the final update applied to the model, which fuses multiple LoRA modules corresponding to each unlearned concept. As described in~\cref{eqn:car_obj}, the embeddings of the words which co-occur with the concept to be unlearned are mapped to the corresponding embeddings for the mapping concept. To test our initial hypothesis, we select mapping concepts which are increasingly unrelated to the concept to be unlearned. This acts as a proxy for moving the initial model farther and farther away from its initial pretrained weights. For \texttt{erase 10 celebrities} we experiment with the following mapping concepts: ``a person'' (the baseline), ``an object'' and ``a $\{$male, female$\}$ celebrity,'' the latter two of which correspond to more general and more specific concepts, respectively. For \texttt{erase ship} we experiment with ``ground'' (the baseline) and ``object.'' We present these results in \Cref{fig:mapping_concepts}. 
+
+As illustrated in \Cref{fig:mapping_concepts}, concept resurgence is quite sensitive to the choice of mapping concept. In the object erasure task, mapping ``ship'' to a different but \emph{specific} concept (``ground'') reduces resurgence more effectively than mapping it to a general concept like  (``object''). In the celebrity erasure task, mapping each celebrity to a more specific concept (e.g., Jennifer Aniston $\rightarrow$ ``a female celebrity'') leads to more severe resurgence than if erased celebrities are mapped to more generic concepts. These findings are consistent with the hypothesis that while unlearning can initially suppress the generation of the unlearned concepts, it may do so through small changes in the parameter space, which can be easily undone by even modest degrees of further fine-tuning. 
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=.85\textwidth]{figures/regularization/all_tasks_regularization_impact.png}
+   
+    \caption{Impact of regularization in the cross-attention refinement weight update in both the object erasure (left) and celebrity erasure (right) tasks. Increasing regularization increases concept resurgence in the celebrity erasure task, but has little impact on the object erasure task.}
+    \label{fig:regularization}
+\end{figure}
+\subsection{Regularization}
+
+In this section we study the impact of the regularization parameter $\lambda_1$ (recall \Cref{eqn:car_obj}) and assess its impact in the degree of concept resurgence. We run the MACE algorithm with $\lambda_1 \in \{0, .0001, .001, .01, .1, 1\}$ in the \texttt{erase 10 celebrities} and \texttt{erase ship} tasks. Intuitively, small values of $\lambda_1$ allow for large model updates, and thus prioritize unlearning the unwanted concepts at the expense of possibly degrading overall model performance. In contrast, large values of $\lambda_1$ only allow the unlearning algorithm to make small perturbations to the initial model weights.
+
+As \Cref{fig:regularization} demonstrates, the degree of regularization is correlated with the degree of concept resurgence, particularly in the celebrity erasure task. Once the regularization parameter surpasses $\lambda = 1\text{e-03}$ we see that more than half of the images generated in the forget set are accurately classified as their concept, indicating that larger updates to the initial pretrained weights are needed to ensure the prevention of concept resurgence. In the object task, we find that the regularization does not impact concept resurgence. Based on our results in~\cref{sec:mapping_concepts}, it is clear that the impact of mapping concepts on the phenomena of concept resurgence is first order. The object erasure task uses the mapping concept \textit{ground} which is completely unrelated to ship. Celebrity erasure uses \textit{person} as the mapping concept, which is much more related. Decreasing regularization helps prevent concept resurgence when the mapping concepts chosen are more related to the unlearned concepts. 
+
+\subsection{Fine-Tuning Algorithm} 
+
+Finally, we investigate the impact of fine-tuning the unlearned models with low rank adaptation (LoRA) instead of traditional full-parameter fine-tuning algorithms. LoRA is the most common method for fine-tuning large scale diffusion models (like Stable Diffusion v1.4). Although full parameter fine-tuning is far less efficient than LoRA, and thus not always feasible to implement in practice, this experiment seeks to investigate the effect of full parameter fine-tuning on concept resurgence. In particular, full parameter fine-tuning will tend to make larger incremental updates to the model parameters than LoRA under otherwise similar starting conditions.
+\begin{figure}[t!]
+     \centering
+    \includegraphics[width=.85\textwidth]{figures/finetuning/all_tasks_finetuning_comparison.png}
+   
+    \caption{The choice of fine-tuning algorithm, whether using LoRA or full parameter fine-tuning, does not affect the extent of concept resurgence in either the object erasure tasks (left) or celebrity erasure tasks (right).}
+    \label{fig:finetuning}
+\end{figure}
+
+\cref{fig:finetuning} demonstrates that concept resurgence is largely insensitive to the choice of fine-tuning algorithm, and, if anything, that full fine-tuning can \emph{exacerbate} the degree of concept resurgence in some cases. This provides additional evidence that vulnerability to concept resurgence is largely due to the initial unlearning algorithm rather than choices made at the fine-tuning stage. In particular, these results, in conjunction with the regularization and mapping concept experiments above, lend support to the hypothesis that larger parameter updates are required in the unlearning phase to prevent concept resurgence. 
+
+
+\section{Data-Dependent Factors Driving Concept Resurgence}
+
+\label{sec:data_role}
+
+The second component of the pipeline we investigate is the data the unlearned models are fine-tuned on. As discussed in \Cref{sec:warmup}, we choose not to focus on adversarial dataset constructions (including e.g., simply directly fine-tuning a model on concepts which were previously unlearned); We refer the reader to \cite{ma2024jailbreaking,yang2024sneakyprompt,dong2024jailbreaking} for works on attacking or jailbreaking text-to-image diffusion models.
+Instead, we consider the kind of dataset constructions that occur as part of common and benign use. For example, the end user of an open source diffusion model may want to fine-tune the model to acquire new concepts which were excluded from the pretraining set and/or improve its performance on particular tasks of interest. In \Cref{sec:warmup}, we demonstrated that fine-tuning on random in-domain concepts (e.g., fine-tuning on randomly chosen celebrities that were not part of the erased set) can lead to concept resurgence. In this section, we seek to further investigate the role of dataset construction in concept resurgence. First, we consider fine-tuning on in-domain concepts with varying levels of similarity to the concepts which are initially unlearned. Intuitively, it may be that fine-tuning on more related concepts can exacerbate the degree of concept resurgence. We then turn to fine-tuning on \emph{out-of-domain} concepts; e.g., fine-tuning on images of randomly chosen objects after a celebrity unlearning task. We describe these experiments in more detail below.
+
+\subsection{CLIP Distance}
+
+First, we consider fine-tuning on unrelated but in-domain concepts as described above. We further segment these concepts by thresholding the CLIP distance to the unlearned concepts, which we use as a proxy for how ``related'' the fine-tuning dataset is to the unlearned concepts. In particular, for each task we find a publicly available dataset with hundreds of concepts in the same domain (e.g., for the celebrity unlearning task, this is a dataset of celebrity images). We describe these datasets in detail in \Cref{sec:app_clip_distance}. For each concept in the corresponding dataset, we compute its minimum CLIP cosine similarity over the set of unlearned concepts. We then partition this fine-tuning set into three evenly sized subsets based on the percentiles of the CLIP cosine similarity. Finally, we randomly sample 10 concepts from each tercile to create different fine-tuning datasets which vary in their degree of ``relatedness'' to the unlearned concepts. We present these results in \Cref{fig:clip_distance}.
+
+\begin{figure}[t!]
+     \centering
+    \includegraphics[width=.85\textwidth]{figures/clip_distance/all_tasks_clip_distance.png}
+   
+    \caption{The degree of concept resurgence remains constant in both tasks, object (left) and celebrity (right) erasure regardless of the similarity (as measured by CLIP distance) of the fine-tuning dataset to the unlearned concepts. }
+    \label{fig:clip_distance}
+\end{figure}
+
+As \Cref{fig:clip_distance} demonstrates, the degree to which the fine-tuning set is related to the unlearned concepts --- at least as measured by CLIP cosine similarity --- does not appear to meaningfully correlate with the degree of concept resurgence. This finding underscores the danger of concept resurgence even when fine-tuning on relatively unrelated data. 
+
+\subsection{Out-of-Domain Concepts}
+
+Finally, to better understand the scope of concept resurgence, we curate an additional set of fine-tuning datasets which contain ``out-of-domain'' concepts which are wholly unrelated to those in the unlearning task. In particular, for each unlearning task, we fine-tune the resulting model on the random concept datasets from the other two unlearning tasks (e.g., for the celebrity unlearning task we further fine-tune the resulting model on the same randomly selected objects used as the initial fine-tuning set in the object erasure task). 
+\begin{figure}[t!]
+     \centering
+    \includegraphics[width=.85\textwidth]{figures/in_vs_out_domain/all_tasks_in_vs_out_domain.png}
+   
+    \caption{Concept resurgence is much less prevalent when fine-tuning on out-of-domain concepts. In both the object (left) and celebrity (right) tasks the degree of concept resurgence reduces when fine-tuning on out-of-domain concepts compared to in domain ones.}
+    \label{fig:in_vs_out_domain}
+\end{figure}
+
+As \Cref{fig:in_vs_out_domain} demonstrates, the degree of concept resurgence does vary with the domain of the fine-tuning set, particularly for the celebrity task. In particular, fine-tuning on in-domain images appears to exacerbate the risk of concept resurgence, while fine-tuning on out-of-domain images can mitigate it. Thus, although we found in the previous section that the degree of concept resurgence is relatively insensitive to variation in the fine-tuning set \emph{within} each domain, it appears that fine-tuning on images which are wholly unrelated to the unlearned concepts can be safer than fine-tuning on more closely related images. This finding thus lends additional support to the hypothesis laid out in \Cref{sec:algo_role}.
+
+
+\section{Discussion and Limitations}
+
+\label{sec:discussion}
+
+The scale of generative models introduces new challenges, including the risk of learning concepts that are unsuitable or undesirable for certain downstream applications.
+Ideally, unlearning methods would allow model developers to precisely and permanently remove unwanted concepts while preserving the model's overall utility. Reality, however, is more complex.
+
+
+Our work uncovers a critical limitation of current unlearning methods, which we term {\em concept resurgence}. 
+ We demonstrate this phenomenon through rigorous empirical evaluations, highlighting the practical limitations of state-of-the-art unlearning techniques. These findings emphasize the need to rethink current approaches to concept erasure, especially in contexts where maintaining the integrity of model updates is essential. 
+
+Our investigation opens up several important avenues for future work. For example, we do not
+ provide a theoretical characterization of concept resurgence, nor do we present a strategy designed to prevent it from happening. Both developments could help to enhance the robustness of unlearning methods. 
+ Additionally, though our evaluations focus on well-known academic benchmarks, 
+ further research is necessary to assess the prevalence of concept resurgence in real-world deployments (particularly the effect of interleaving a large number of compositional updates, which may exacerbate the vulnerabilities we demonstrate here).
+
+Concept resurgence also raises important questions about responsibility for downstream harms. 
+Despite a developer's best efforts to sanitize a model using these techniques, a downstream user who fine-tunes a published model might be surprised to discover that guardrails put in place by the developer no longer exist.
+This creates a dilemma: is the developer obligated to permanently and irrevocably erase problematic concepts, or does responsibility shift to the downstream if they (inadvertently) reintroduce them?
+
+Despite these challenges, concept unlearning remains a valuable tool for model developers. By identifying its vulnerabilities, our work aims to drive the development of erasure techniques that remain robust throughout a model's life-cycle or develop tools that can help developers anticipate when concept resurgence is likely to happen. Addressing these weaknesses will be essential for ensuring the safety and alignment of generative models as they are fine-tuned and adapted for diverse applications.
+
+\subsubsection*{Acknowledgements}
+A.W. was funded in part by the Lister Brothers Career Development Professorship at MIT. V.S was funded in part by an MIT GenAI impact grant. A.S. acknowledges support from the Simons Foundation and NSF through award DMS-2031883, as well as from the DOE through award DE- SC0022199. R.A. and M.R acknowledge support from A Stephen A Schwarzman College of Computing Seed Grant.
+
+
+
+
+
+

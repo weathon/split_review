@@ -1,8 +1,8 @@
 # Gymnasium: A Standard Interface for Reinforcement Learning Environments
 
 - Decision: Reject
-- Avg Score: 4.00
-- Scores: 5, 1, 0, 6, 8
+- Avg Score: 7.25
+- Scores: 5, 10, 6, 8
 
 ## Abstract
 Reinforcement Learning (RL) is a continuously growing field that has the potential to revolutionize many areas of artificial intelligence. However, despite its promise, RL research is often hindered by the lack of standardization in environment and algorithm implementations. This makes it difficult for researchers to compare and build upon each other's work, slowing down progress in the field.

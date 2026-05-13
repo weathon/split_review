@@ -1,0 +1,560 @@
+\title{SageAttention: Accurate 8-Bit Attention for Plug-and-play Inference Acceleration}
+
+\begin{abstract}
+The transformer architecture predominates across various models. As the heart of the transformer, attention has a computational complexity of $O(N^2)$, compared to $O(N)$ for linear transformations. When handling large sequence lengths, attention becomes the primary time-consuming component. Although quantization has proven to be an effective method for accelerating model inference, existing quantization methods primarily focus on optimizing the linear layer.
+In response, we first analyze the feasibility of quantization in attention detailedly. Following that, we propose \our, a highly efficient and accurate quantization method for attention. The OPS (operations per second) of our approach outperforms FlashAttention2 and xformers by about \textbf{2.1x} and \textbf{2.7x}, respectively. \our also achieves superior accuracy performance over FlashAttention3. Comprehensive experiments confirm that our approach incurs almost \textbf{no end-to-end metrics loss across diverse models}—including those for large language processing, image generation, and video generation.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begin{figure}[h]
+    \begin{center}
+    \includegraphics[width=0.99\textwidth]{figs/Intro.pdf}
+    \caption{An example of \our on video generation (CogvideoX on RTX4090).}
+    \end{center}
+    \label{fig:intro}
+\end{figure}
+
+
+Attention is the fundamental component of transformers~\citep{vaswani2017attention}, and efficiently computing attention is crucial for transformer-based applications. 
+Moreover, there is a recent trend in processing longer sequences, which further strengthens the need for faster attention. In tasks like video generation~\citep{yang2024cogvideox} and language model prefilling~\citep{llama31model}, the sequence length can easily go up to 8K$\sim$ 128K. Due to its quadratic complexity, the cost of attention dominates all other operations in such scenarios, as illustrated in Figure~\ref{fig:motivation}. 
+
+\begin{figure}[h]
+    \centering 
+    \begin{minipage}[b]{0.42\linewidth} 
+        \centering
+        \includegraphics[width=0.93\linewidth]{figs/motivation.pdf} 
+        \caption{Latency of attention.}
+        \label{fig:motivation}
+    \end{minipage}
+    \hspace{0.05\textwidth} 
+    \begin{minipage}[b]{0.37\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/challenge.pdf} 
+        \caption{A comparison example.}
+        \label{fig:challenge}
+    \end{minipage}
+\end{figure}
+Quantization is an effective strategy for enhancing neural networks' computational and memory efficiency by reducing the numerical precision. There are abundant works on accelerating training~\citep{sun2019hybrid,xijetfire,peng2023fp8} and inference~\citep{jacob2018quantization,xiao2023smoothquant} with low-precision numerical formats such as FP8, INT8, or INT4. However, existing works primarily focused on quantizing the \emph{linear} layer, where \emph{attention} is left unaccelerated in high-precision, such as FP16. There is not yet a work that systematically investigates the quantization of attention. 
+Moreover, many quantization methods require extra training, and the cost can be prohibitive for large-scale models. 
+While \jt{FlashAttention3}~\citep{shah2024flashattention} was released recently and offers an FP8 version \jt{tailored and only can be used for the Nvidia Hopper architecture}, this exclusive optimization limits its broader applicability. Furthermore, our analysis demonstrates that directly implementing the FP8 version can lead to performance degradation, as detailed in Table~\ref{tab:quant_type_analysis}.
+Quantizing attention is challenging. The computation of attention is more complex than that of linear operations. Attention includes a softmax operation and two matrix multiplication (Matmul) operations: $QK^\top$ and $PV$. Direct 8-bit quantization and dequantization of the matrices $(Q, K, P, V)$ in attention will result in significantly degraded performance across various models. For example, the text-to-image model Unidiffuser~\citep{bao2022uni} will generate a completely blurry image with both INT8 and FlashAttention3's FP8 implementation (See Figure~\ref{fig:challenge}), and Llama2 only achieves a random-guessing-level accuracy of 25.5\% on the MMLU dataset with INT8 attention. After investigating deeply, we identified two primary challenges: 
+\textbf{(C1)} The matrix $K$ exhibits a significant channel-wise outlier, leading to substantial accuracy loss during quantization.
+\textbf{(C2)} Simply quantizing $(P, V)$ into INT8 does not consistently ensure the accuracy of $PV$ across various scenarios.
+
+In this paper, we propose \our, a quantization method to accelerate attention while \emph{preserving accuracy}. \our is easy-to-use. As a post-training quantization method, it can be \emph{used in a plug-and-play manner in inference time} by simply replacing the original high-precision implementation. We propose several techniques to achieve this goal. 
+First, we opt to quantize the tensors in attention to INT8 rather than FP8. This decision is based on the fact that INT8 Matmul on some commonly used GPUs, e.g., RTX4090 and 3090, are four times faster than in FP16 and two times faster than FP8. Moreover, INT8 quantization for matrices $(Q, K)$ is more precise than FP8 in attention (See Table~\ref{tab:quant_precision_analysis1}).
+To address \textbf{(C1)}, we propose a method to smooth the $K$ matrix. This method significantly enhances accuracy with a negligible time overhead ($<$0.2\%). 
+To address \textbf{(C2)}, alternative to quantizing $(P, V)$ to 8-bit, we propose a more accurate yet efficient method for the Matmul $PV$: we maintain $(P, V)$ in FP16 and use a low-precision FP16 accumulator. This strategy doubles Matmul's speed without sacrificing any accuracy.
+Finally, we implement several versions of attention with different speed-accuracy tradeoffs and propose a method to select the fastest attention implementation for each layer while preserving accuracy. 
+
+We offer a high-performance implementation of \our on RTX4090 and 3090 GPUs using Triton~\citep{openaitriton}. Our implementation contains a fused kernel combining ROPE with quantization and a fast self-attention kernel inspired by FlashAttention-style tiling. The implementation utilizes the fast INT8 \emph{mma(u8.u8.s32)} and FP16-with-FP16-accumulator \emph{mma(f16.f16.f16)} instructions of Nvidia Tensor Core.
+Our kernel is about $2.1 \times$ and $2.7 \times$ faster than FlashAttention2 and xformers, respectively.
+Notably, it achieves 340 TOPS on RTX4090 at headdim=64 and headdim=128, reaching 52\% of the theoretical INT8 throughput. In contrast, the peak for the state-of-the-art FlashAttention2 is only 165 TOPS. Moreover, at headdim=64, our throughput on RTX 4090 is even close to the 490 TOPS throughput of FlashAttention3, which is exclusive to the much more powerful and expensive Hopper GPUs.
+We extensively evaluate the end-to-end metrics of our approach on state-of-the-art image/video generation, image classification, and language models. On all tasks, \our can be directly adopted in a plug-and-play manner with negligible loss in model performance, while offering more than 2$\times$ speedup than FlashAttention2 and xformers.
+
+
+
+\section{Related Work}
+
+
+We categorize efficient Attention works into three groups: 
+\textbf{(1) Sparse Attention.} This strategy only selects parts of a sequence from a given context for processing with standard Attention. Implementations like Swin transformer~\citep{liu2021swin}, Twins~\citep{chu2021twins}, UniFormer~\citep{liuniformer}, Attentionsinks~\citep{xiao2023efficient}, InfLLM~\citep{xiao2024infllm}, LongLora~\citep{chen2023longlora}, Minference~\citep{jiang2024minference}, and SkipAttention~\citep{venkataramanan2023skip} show promise. However, these methods' limitations are that they only work in a few scenarios because omitted calculations are not always useless.
+\textbf{(2) Linear Attention.} Techniques that transform Attention computation to reduce time complexity, for example, Linformer~\citep{wang2020linformer}, Performer~\citep{choromanski2020rethinking}, MetaFormer~\citep{yu2022metaformer}, and LinearAttention~\citep{katharopoulos2020transformers}, which lower the time complexity of Attention from $O(N^2)$ into $O(N)$. These methods excel in specific scenarios while standard Attention remains prevalent.
+\textbf{(3) Kernel Optimization.} Rather than simplifying calculations, these methods exploit hardware capacities to enhance speed. The xformers~\citep{xFormers2022} platform accelerates Attention with customizable blocks and dedicated CUDA kernels. FlashAttention~\citep{dao2022flashattention} proposes tiling to reduce the memory reads/writes between GPU global memory and on-chip SRAM for significant speedups. FlashAttention2~\citep{dao2023flashattention} refine the parallelism and warps partition of FlashAttention. \citet{bikshandi2023case} further optimize FlashAttention2 by kernel fusion. FlashAttention3~\citep{shah2024flashattention} is proposed for Hopper architecture. However, FlashAttention3 is exclusive to the Hopper GPU architecture, and the accuracy of its quantization version is significantly lower than our method (See Table~\ref{tab:quant_type_analysis}). RingAttention~\citep{liuringattention} scales FlashAttention across multiple GPUs. I-bert~\citep{kim2021bert} quantizes all tensors in a transformer block into INT8 but is restricted to RoBERTa.
+Our method falls under the third category, and is \underline{\textbf{orthotopic}} with the first and second categories. 
+
+
+\section{Preliminary}
+
+
+Our method builds on FlashAttention-2 and adopts dynamic quantization.  We will begin by reviewing FlashAttention-2, followed by a brief introduction to dynamic quantization techniques.
+\subsection{FlashAttention} \label{sec:flash_attn}
+
+The computation of self-attention can be formulated as follows: $S = Q K^\top/\sqrt{d},~P = \sigma(S),~O = P V$, where $\sigma(S)_{ij} = \exp(S_{ij})/\sum_{k} \exp(S_{ik})$ is the softmax operation.
+The matrices $Q$, $K$, and $V$ each have dimensions $N \times d$, while the matrix $S$, $P$ are $N \times N$. While $d$ is typically small, e.g., 64 or 128, $N$ can be thousands if not millions. Therefore, the $N\times N$ matrices $(S, P)$ are much larger than $(Q, K, V)$, and a naive implementation suffers from the huge amount of global memory I/O for $(S, P)$ reads/writes. FlashAttention~\citep{dao2023flashattention} proposes to tile $Q$, $K$, and $V$ from the token dimension into blocks $\{Q_i\}, \{K_i\}, \{V_i\}$ with block size of $b_q$, $b_{kv}$, $b_{kv}$, respectively. Then, to avoid the memory I/O for $(S, P)$, it uses online softmax~\citep{milakov2018online} to progressively compute each block of $O$, i.e., $O_i$:
+
+First, for each block of $\{K_i\}, \{V_i\}$, it computes the following equations iteratively:
+
+\begin{align}
+ S^j_i = Q_i K_j^\top / \sqrt{d},& ~~~(m^{j}_i, \widetilde P^j_i) = \tilde\sigma(m^{j-1}_i, S^j_i),  \\
+ l_i^j = \exp(m^j_i-m^{j-1}_i) l_i^{j-1} + \mathrm{rowsum}(\widetilde P^j_i),& ~~O^j_i=\diag{\exp(m^j_i-m^{j-1}_i)} O^{j-1}_i + \widetilde P^j_i V_j 
+\end{align}
+
+Where $m_i^j$ and $l_i^j$ are $b_q \times 1$ vectors, which are initialized to $- \infty$ and $0$ respectively. $\tilde \sigma()$ is an online softmax operator: $m^j_i = \max\{m^{j-1}_i, \rowmax(S^j_i)\},~\widetilde P_j^i=\exp(S^j_i-m^j_i)$.
+Finally, the output $O_i$ can be computed by $O_i = \mathrm{diag}(l_i^j)^{-1} O_i^j$.
+
+\subsection{Dynamic Quantization} \label{sec:dynamic_quant}
+
+A matrix multiplication $C=AB$ can be accelerated with quantization as:
+\begin{align}
+(\delta_A, \hat A) = \psi(A),~~~~(\delta_B, \hat B) = \psi(B),~~~~\hat C=\hat A\hat B,~~~~C=\psi^{-1}_{\delta_A\delta_B}(\hat C)
+\end{align}
+Here, $\psi$ is a \emph{quantizer} which converts a high-precision (e.g., FP32) matrix $A$ to a low-precision format $\hat A$ (e.g., INT8 or FP8) with a \emph{scale} $\delta_A$, and $\psi^{-1}$ is a \emph{dequantizer} to convert back to high-precision. We should have $\psi^{-1}_{\delta_A}(\hat A)\approx A$. The actual matrix multiplication $\hat A\hat B$ is carried in low-precision. In modern GPUs, low-precision matrix multiplication is usually multiple times faster than higher-precision ones. 
+
+Many quantizers depend on the numerical format and granularity, e.g., how many elements share a common scale factor. For example, an INT8 \emph{per-tensor dynamic quantizer} first computes the scale as the maximum absolute value of the entire tensor, scales the elements to the maximum representable range of INT8 [-127, +127], and then casts to INT8 with rounding: $\hat A = \lceil A/\delta_A \rfloor, \delta_A=\max(|A|)/127$. 
+Likewise, \emph{per-token quantizer} assigns a scale factor for each token of a tensor: $\hat A[i,:] = \lceil A[i,:]/\delta_A \rfloor, \delta_A[i,:] = \max(|A[i,:]|)/127$. 
+Also, \emph{per-channel quantizer} assigns a scale factor for each channel of the tensor, i.e., along the channel dimension: $A[:, i] = \lceil A[:, i] / \delta_A \rfloor, \delta_A = \max(|A[:, i]|) / {127}$.
+Based on the tiling approach of FlashAttention, we can apply per-block quantization correspondingly. \emph{per-block quantizer} asigns a scale factor for every $b=m-n$ tokens: $\hat A[m:n,:] = \lceil A[m:n,:]/\delta_A \rfloor, \delta_A = \max(|A[m:n,:]|)/127$. 
+Dequantization simply involves a element-wise scaling: $\psi_{\delta_A}^{-1}(\hat A)=\delta_A \hat A$.
+
+
+
+\section{SAGE attention}
+
+
+
+In this section, we propose \our, a fast yet accurate method to accelerate attention computation with 8-bit quantization. Considering that most networks are not natively trained with quantized attention, \our is designed to be plug-and-play. 
+
+Unlike linear layers, which are easy to quantize, quantizing attention is more complicated. Extra treatment is required to ensure both good accuracy and fast speed. 
+First, we will formulate quantized attention in Section~\ref{sec:formula}, followed by introducing our approach.
+\subsection{Formulation} \label{sec:formula}
+Based on the description of FlashAttention and dynamic quantization in Section~\ref{sec:flash_attn} and~\ref{sec:dynamic_quant}, we formulate the quantized attention as follows.
+{
+\small
+\begin{align}
+\label{equ:quant}
+\textbf{Quantization: } \jt{(\delta_Q, \hat Q)} = \jt{\psi_Q}(Q/\sqrt{d}),~~\jt{(\delta_K, \hat K)} = \jt{\phi_K}(K),~~\jt{(\delta_P, \hat P)} = \jt{\psi_P}(\widetilde P),~~\jt{(\delta_V, \hat V)} = \jt{\psi_V}(V)\\
+\label{equ:dequant}
+\textbf{Attention: } ~~S = \jt{\psi^{-1}_{\delta_Q\delta_K}(\hat Q \hat K^\top)},~~(m^\prime, P) = \tilde\sigma(m, S),
+~~O=\diag{\exp(m^\prime-m)} O + \jt{\psi^{-1}_{\delta_P\delta_V}(\hat P \hat V)}
+\end{align}
+}
+$\phi_K$ is a transformation to obtain quantized $K$, which we shall discuss in subsequent sections. 
+For simplicity, we omit all superscripts and subscripts, but the matrices used in attention are still tiles, and the computation is still organized as FlashAttention described in Section~\ref{sec:flash_attn}. Compared to the original full-precision version, as shown in Eq.~\ref{equ:quant},~\ref{equ:dequant}, \our adds quantizers to $Q,K,P,V$ and dequantizers to the product to accelerate both Matmuls of $QK\top$ and $PV$. Online softmax is left in full-precision.
+
+\begin{figure}[htb!]
+    \begin{center}
+    \includegraphics[width=1.0\textwidth]{./figs/combined_heatmap.pdf}
+    \caption{Typical examples of data distribution of (Q, K, V).}
+    \end{center}
+    \label{fig:heatmap}
+\end{figure}
+
+\begin{table}[htb!]
+    \caption{End-to-end metrics comparison of different quantization methods.}
+    \label{tab:quant_type_analysis}
+    \setlength\tabcolsep{2.8pt}
+    \begin{center}
+    \scalebox{0.97}{
+    \begin{tabular}{c|c|c|c|c|c|c}
+    \toprule
+    \bf\makecell{Quantization \\ (Q, K)} & \bf\makecell{Smoothing \\ K} & \bf\makecell{Llama \\ WikiText} $\downarrow$ & \bf\makecell{CogVideo \\ (Fscore)} $\uparrow$ & \bf\makecell{Unidiffuser \\ (FID)} $\downarrow$ & \bf\makecell{UltraPixel \\ (FID)} $\downarrow$ & \bf\makecell{TIMM \\ ImageNet} $\uparrow$ \\
+    \hline
+    \bf{Full-Precision} &         -             & 5.823 & 3.768 & 163.33 & 179.78 & 84.79\%    \\ \hline
+    \bf\multirow{2}{*}{Per-token}  & \ding{55}  & 5.824 & \dred{1.924} & \dred{221.18} & \dred{193.36} & \dred{84.21\%} \\
+                                & \cellcolor{gray!24}\checkmark & \cellcolor{gray!24}5.824 & \cellcolor{gray!24}\textbf{\dgreen{3.734}} & \cellcolor{gray!24}\textbf{\dgreen{166.52}} & \cellcolor{gray!24}\textbf{\dgreen{179.79}} & \cellcolor{gray!24}\dgreen{84.74\%} \\ \hline
+    \bf\multirow{2}{*}{Per-block}  & \ding{55}  & 5.825 & \dred{2.014} & \dred{229.08} & \dred{195.67} & \dred{84.18\%} \\
+                                & \cellcolor{gray!24}\checkmark & \cellcolor{gray!24}5.824 & \cellcolor{gray!24}\textbf{\dgreen{3.718}} & \cellcolor{gray!24}\textbf{\dgreen{166.93}} & \cellcolor{gray!24}\textbf{\dgreen{179.98}} & \cellcolor{gray!24}\dgreen{84.76\%} \\ \hline
+    \bf\multirow{2}{*}{Per-tensor} & \ding{55}  & 5.826 & \dred{1.902} & \dred{267.06} & \dred{196.26} & \dred{84.12\%} \\
+                                & \cellcolor{gray!24}\checkmark & \cellcolor{gray!24}5.824 & \cellcolor{gray!24}\textbf{\dgreen{3.640}} & \cellcolor{gray!24}\textbf{\dgreen{167.65}} & \cellcolor{gray!24}\textbf{\dgreen{180.21}} & \cellcolor{gray!24}\dgreen{84.69\%} \\ \hline
+    \multicolumn{2}{c|}{\bf FlashAttn3 (with quant)}  & \dred{5.850} &  \dred{3.394}  & \dred{394.13} & \dred{383.61} &  84.70\% \\
+    \bottomrule
+    \end{tabular}
+    }
+    \end{center}
+\end{table}
+
+\subsection{Smooth Matrix K} \label{sec:smooth_k}
+ 
+Directly quantizing $Q, K$  often results in a large error. Particularly, quantizing $Q, K$ to INT8 yields completely blurry image/video in text-to-image/video tasks. 
+As shown in Figure~\ref{fig:heatmap}, we visualize two typical groups of $Q, K, V$ from a text-to-image model \unidiffuser~\citep{bao2022uni} and a text-to-video model \cogvideo~\citep{yang2024cogvideox}. Notably, $K$ exhibits distinct channel-wised outlier. However, per-channel quantization cannot be applied for $K$, because quantization can only be performed at the outer axis (token dim) of the Matmul $QK^\top$. Moreover, the previous smoothing technique proposed for linear layers ~\citep{xiao2023smoothquant} cannot be applied since $Q$ is also heavily affected by outliers. Fortunately, the channel outliers of $K$ have a pattern: Each token's key is actually a \emph{large bias shared by all tokens}, plus a small token-wise signal. Therefore, the outlier is not from large variation across tokens, but simply the large bias. 
+Based on this observation, we propose to smooth the matrix $K$ by a transform $\gamma$, which subtracts averaged $K$ across all tokens:
+\begin{align} 
+    \gamma(K) = K - \mean(K)
+\end{align}
+where $\mean(K) = \frac{1}{N}\sum_{t=1}^N K[t,:]$ is the average key, with a shape $1\times d$.
+Note that such a transformation does not change the attention score $P$, because for any query $q$, we have $\sigma(q (K-\mean(K)^\top)) = \sigma(q K^\top - q\cdot \mean(K)) = \sigma(qK^\top)$. Finally, the transformation from full-precision $K$ to quantized $\hat K$ can be written as $\phi_K(K) = \psi_K\circ \gamma$, where $\psi_K$ is a quantizer. In other words, a full-precision $K$ is substracted with the mean, before eventually being quantized. 
+Table~\ref{tab:quant_type_analysis} presents end-to-end metrics for different quantization methods with and without \textit{smoothing K} on various models. The results demonstrate that \textit{smoothing K} offers significant benefits of accuracy. Moreover, the speed overhead of smoothing $K$ for attention is less than \textbf{0.2\%} (See Table\ref{exp:overhead_km}).
+
+\begin{table}[htb!]
+    \centering
+    \begin{minipage}{0.49\textwidth}
+        \raggedright
+        \caption{\textbf{Average accuracy} using different data types across all layers of real models.}
+        \label{tab:quant_precision_analysis1}
+        \setlength\tabcolsep{2.1pt}
+        \scalebox{0.91}{
+        \begin{tabular}{c|c|c|c|c}
+            \toprule
+            $Q, K$ & $\widetilde P, V$ & \textbf{Cos Sim $\uparrow$} & \textbf{Relative L1 $\downarrow$} & \textbf{RMSE $\downarrow$} \\
+            \hline
+            & E4M3 & 99.94\% & 0.0345 & 3.53e-3 \\
+            \cellcolor{gray!24}\textbf{INT8} & E5M2 & 99.81\% & 0.0572 & 6.11e-3 \\
+                                              & INT8 & 99.70\% & 0.1035 & 6.82e-3 \\
+            \hline
+            \multirow{3}{*}{E4M3} & E4M3 & 99.81\% & 0.0607 & 5.93e-3 \\
+                                              & E5M2 & 99.68\% & 0.0769 & 7.72e-3 \\
+                                              & INT8 & 99.58\% & 0.1199 & 8.31e-3 \\
+            \hline
+            \multirow{3}{*}{E5M2} & E4M3 & 99.37\% & 0.1107 & 1.09e-2 \\
+                                              & E5M2 & 99.22\% & 0.1213 & 1.20e-2 \\
+                                              & INT8 & 99.13\% & 0.1583 & 1.24e-2 \\
+            \bottomrule
+        \end{tabular}
+        }
+    \end{minipage}
+    \hspace{0.01\textwidth} 
+    \begin{minipage}{0.46\textwidth}
+        \raggedleft
+        \caption{\textbf{Worst accuracy} using different data types across all layers of real models.}
+        \label{tab:quant_precision_analysis2}
+        \setlength\tabcolsep{2.1pt}
+        \scalebox{0.91}{
+        \begin{tabular}{c|c|c|c|c}
+            \toprule
+            $Q, K$ & $\widetilde P, V$ & \textbf{Cos Sim $\uparrow$} & \textbf{Relative L1 $\downarrow$} & \textbf{RMSE $\downarrow$} \\
+            \hline
+            \multirow{4}{*}{INT8}  & E4M3 & 76.36\%	   & 0.5899	   & 0.4311 \\
+                                   & E5M2 & 78.98\%	& 0.4233	& 0.4371 \\
+                                   & INT8 & 56.40\%	& 0.7921	& 0.5405 \\ \cline{2-5}
+                                   & \cellcolor{gray!21}\bf{FP16} & \cellcolor{gray!24}\dgreen{99.99\%}	& \cellcolor{gray!24}\dgreen{0.0116}	& \cellcolor{gray!24}\dgreen{0.0091} \\
+            \bottomrule
+                                       
+        \end{tabular}
+        }
+    \end{minipage}
+\end{table}
+\subsection{Quantization for Q, K, P, V} \label{sec:qkpv_quant}
+
+\textbf{Quantization granularity for $Q, K$}: $\psi_Q(Q)$ and $\psi_K(K)$ are set with the granularity of per-token, per-block or per-tensor. This is because per-channel quantization is not feasible, since the scale factors of the inner axis of $Q K^T$ cannot be used to do dequantization~\citep{xiao2023smoothquant}.
+\textbf{Data type of $Q, K$}: We choose INT8 for $\psi_Q(Q)$ and $\psi_K(K)$ for two reasons. First, Table~\ref{tab:quant_precision_analysis1} shows the average accuracy using different data types (INT8, E4M3, E5M2) for $Q, K, \widetilde P, V$ across all layers of \llama(7B)~\citep{touvron2023llama2} and \unidiffuser. It shows that quantizing $Q, K$ to INT8 performs higher accuracy than using E4M3 and E5M2.
+Second, Matmul using INT8 is two times faster than using FP8 in many commonly used GPUs, e.g., RTX4090.
+ 
+        
+
+\textbf{Quantization granularity for $\widetilde P, V$}: We propose to use $\psi_P(\widetilde P)$ in per-block and $\psi_V(V)$ in per-channel for three reasons. First, per-channel quantization for $\widetilde P$ and per-token quantization for $V$ are not viable because dequantization requires scale factors of outer axis. Second, $\widetilde P = \mathrm{exp}(S_i - \mathrm{rowmax}(S_i))$, where $S_i$ is the Matmul result of a block of $Q$ and $K^T$, the max value in each row of $\widetilde P$ is 1. Hence, we can assign a single static scale $s = \frac{1}{127}$ to a block $\widetilde P$, whose accuracy equals per-token quantization. Third, per-channel quantization can address the channel-wised outlier of $V$.
+
+\textbf{Data type of $\widetilde P, V$}: We choose INT8 for $\psi_P(\widetilde P)$ and $\psi_V(V)$ because Matmul using INT8 is two times faster than using FP8 in some commonly used GPUs, and although the accuracy using $\psi_P(\widetilde P)$ and $\psi_V(V)$ in INT8 is worse than E4M3 and E5M2, the average accuracy is similar (See Table~\ref{tab:quant_precision_analysis1}).
+
+\textbf{Accuracy metrics.} We use three metrics to assess the accuracy of quantized attention output $O'$ compared to attention output in full-precision $O$: First, we flatten $O'$ and $O$ into vectors in the shape of $1\times n$. Then, Cosine Sim$=\sum OO' / \smash{\sqrt{\sum O^2}} \smash{\sqrt{\sum O'^2}}$, Relative L1$=\sum |O - O'| / \sum |O|$, RMSE$=\sqrt{(1/n) \sum (O - O')^2}$.
+
+\begin{table}[htb!]
+    \centering
+    \begin{minipage}{0.46\textwidth}
+        \raggedright
+        \caption{\textbf{Average accuracy} using different accumulators across all layers of real models.}
+        \label{tab:quant_accu_analysis1}
+        \setlength\tabcolsep{5pt}
+        \scalebox{0.93}{
+        \begin{tabular}{c|c|c|c}
+            \toprule
+            \textbf{Accum.} & \textbf{Cos Sim $\uparrow$} & \textbf{Relative L1 $\downarrow$} & \textbf{RMSE $\downarrow$} \\
+            \hline
+            \textbf{FP32} & 99.98\% & 0.0156 & 2.94e-3 \\
+            \cellcolor{gray!24}\textbf{FP16} & \cellcolor{gray!24}99.98\% & \cellcolor{gray!24}0.0156 & \cellcolor{gray!24}2.94e-3 \\
+            \bottomrule
+        \end{tabular}
+        }
+    \end{minipage}
+    \hspace{0.025\textwidth} 
+    \begin{minipage}{0.5\textwidth}
+        \raggedleft
+        \caption{\textbf{Worst accuracy} using different accumulators across all layers of real models.}
+        \label{tab:quant_accu_analysis2}
+        \setlength\tabcolsep{5pt}
+        \scalebox{0.93}{
+        \begin{tabular}{c|c|c|c}
+            \toprule
+            \textbf{Accum.} & \textbf{Cos Sim $\uparrow$} & \textbf{Relative L1 $\downarrow$} & \textbf{RMSE $\downarrow$} \\
+            \hline
+            \textbf{FP32} & 99.84\% & 0.0511 & 4.229e-3 \\
+            \cellcolor{gray!24}\textbf{FP16} & \cellcolor{gray!24}99.84\% & \cellcolor{gray!24}0.0511 & \cellcolor{gray!24}4.229e-3 \\
+            \bottomrule
+        \end{tabular}
+        }
+    \end{minipage}
+\end{table}
+
+\subsection{FP16 accumulator: much more accurate and efficient solution} \label{sec:fp16_acc}
+
+The above solution for $\psi_P(\widetilde P)$ and $\psi_V(V)$ has one problem, that is, the accuracy using INT8 is very poor in some model layers. Table~\ref{tab:quant_precision_analysis2} shows the worst accuracy using different data types for $Q, K, \widetilde P, V$ across all layers
+of \llama and \unidiffuser. It shows that INT8 $\psi_P(\widetilde P)$ and $\psi_V(V)$ bring an unacceptable error. 
+
+In response, we propose a very accurate and also efficient solution. Specifically, we propose to use FP16 as the data type of Matmul $\widetilde P V$ with an FP16 accumulator. 
+
+The benefit of such a solution is obvious. First, in the context of some commonly used GPUs, e.g., RTX4090 and 3090, the speed of Matmul in FP16 with an FP16 accumulator is \textbf{2x} faster than that with an FP32 accumulator. Moreover, using FP16 accumulators can save more register resources than using FP32 accumulators, accelerating the computation speed. 
+Second, Table~\ref{tab:quant_precision_analysis2} shows that using FP16 for $\widetilde P, V$ is much more accurate than using all the other 8-bit data types. Moreover, using FP16 accumulators incurs no accuracy loss than using FP32 accumulators. Specifically, Table~\ref{tab:quant_accu_analysis1} and~\ref{tab:quant_accu_analysis2} show the average and worst accuracy using FP16 or FP32 accumulators on all layers of \llama and \unidiffuser, showing that there is no accuracy loss of using the FP16 accumulator.
+
+\begin{table}[htb!]
+    \centering
+    \caption{Four kernel implementations of \our.}
+    \label{tab:adaptive_types}
+    \setlength\tabcolsep{5pt}
+    \scalebox{0.91}{
+    \begin{tabular}{c|c|c|c}
+        \toprule
+        \textbf{Kernel} & $\psi_Q(Q)$, $\psi_K(K)$ & $\psi_P(P)$ & $\psi_V(V)$ \\
+        \hline
+        \ourt  & per-token, INT8	 & FP16, FP16 Accumulator  & FP16, FP16 Accumulator \\
+        \ourb (Algorithm~\ref{alg:ourb}) & per-block, INT8	 & FP16, FP16 Accumulator  & FP16, FP16 Accumulator\\
+        \ourvt (Figure~\ref{fig:method_overview}(a)) & per-token, INT8	 & per-block, INT8	       & per-channel, INT8	 \\ 
+        \ourvb & per-block, INT8     & per-block, INT8	       & per-channel, INT8 \\
+        \bottomrule                  
+    \end{tabular}
+    }
+\end{table}
+\begin{figure}[h]
+    \begin{center}
+    \includegraphics[width=0.95\textwidth]{./figs/final_overview.pdf}
+    \caption{Workflow of SageAttention.}
+    \label{fig:method_overview}
+    \end{center}
+\end{figure}
+\setlength{\textfloatsep}{5pt}
+\begin{algorithm}[htb]  
+    \small
+    \caption{Implementation of \ourb.}
+    \label{alg:ourb} 
+
+    \KwIn{Matrices $Q(\text{FP16}), K(\text{FP16}), V(\text{FP16}) \in \mathbb{R}^{N \times d}$, block size $b_q, b_{kv}$.}
+    
+
+    \textbf{Preprocessing:} \jt{$K=K-\mathrm{mean}(K)$} ; \tcp{\annotate{Subtracting the mean value across tokens}}
+
+    \textbf{Quantization:} $\jt{(\delta_Q, \hat Q)} = \jt{\psi_Q}(Q/\sqrt{d}),~~\jt{(\delta_K, \hat K)} = \jt{\psi_K}(K)$ ; \tcp{\annotate{INT8 per-block quant}}
+
+    Divide \jt{$\hat Q$} into $T_m = {N}/{b_q}$ blocks \jt{$\{\hat Q_i\}$}, and divide \jt{$\hat K$}, $V$ into $T_n = {N}/{b_{kv}}$ blocks \jt{$\{\hat K_i\}$} and $\{V_i\}$;  
+
+        Load \jt{$\hat Q_i$} and \jt{$\delta_Q[i]$} into a SM ;
+
+        \For {$\textbf{j}$ in [1, $T_n$]} { 
+            Load \jt{$\hat K_j$}, $V_j$, and \jt{$\delta_K[j]$} into the SM ;
+
+            \jt{$S_i^j = \mathrm{Matmul}(\hat Q_i, \hat K_j^T) \times \delta_Q[i] \times \delta_K[j]$;}
+
+            $m_i^j = \mathrm{max}(m_i^{j-1}, \mathrm{rowmax}(S_i^j))$, $ \widetilde P_i^j = \mathrm{exp}(S_i^j - m_i^j)$, $l_i^j = e^{m_i^{j-1}-m_i^j} + \mathrm{rowsum}(\widetilde P_i^j)$ ;
+
+            $O_i^j = \mathrm{diag}(e^{m_i^{j-1}-m_i^j})^{-1} O_i^{j-1} +$ \jt{$\mathrm{Matmul}(\widetilde P_i^j\text{.to(FP16)}, V_j, \text{Accum\_type = FP16})$} ;
+        }
+
+        $O_i = \mathrm{diag}(l_i^{T_n}) O_i^{T_n}$ ;
+
+        Write $O_i$ ;  
+    }
+    \textbf{return} $O = \{O_i\}$;
+\end{algorithm}
+\subsection{Adaptive Quantization} \label{sec:adaptive}
+
+Based on the discussion in Section~\ref{sec:qkpv_quant} and ~\ref{sec:fp16_acc}, we implement four attention kernels (See Table~\ref{tab:adaptive_types}) based on two sets of choices: (1) Using $\psi_Q(Q)$ and $\psi_K(K)$ in per-token or per-block. (2) Using $\psi_P(\widetilde P)$ and $\psi_V(V)$ in INT8 or retaining $\widetilde P, V$ in FP16 with an FP16 accumulator.
+The speed of these kernels is in the order ($\ourvb > \ourvt > \ourb > \ourt$), but the accuracy order is opposite. Generally, \ourb is accurate enough for all models (see Table~\ref{tab:quant_type_analysis}) and can achieve a 2x speedup (See Figure~\ref{fig:kf_h64_baseline} and~\ref{fig:kf_h128_baseline}). However, \ourvb and \ourvt are also accurate for some layers in a model. Therefore, we use various inputs to test the cosine similarity of \ourb and \ourt for each layer of a model. Then, we will select \ourvb or \ourvt if their cosine similarity is bigger than 99.8\% (the worst similarity of \ourb).
+
+\subsection{Fusion Tricks and Performance Analysis} \label{sec:fuse_and_performance}
+
+\textbf{Fusion Tricks.} To reduce the overhead of quantization, we fuse the quantization process with the operator preceding the attention layer. For instance, we fuse quantization within the ROPE (Rotary Position Embedding)~\citep{su2021roformer} layer. Specifically, before the ROPE result ($A$) is written from shared memory into global memory, we perform $\delta_A, \hat A = \psi(A)$. Subsequently, the $\delta_A, \hat A$ are written into global memory. Additionally, we also fuse the coefficient ($1/{\sqrt{d}}$) of $Q K^T$ into the quantization process rather than leaving it in the attention layer. Specifically, we multiply $Q$ by ($1/{\sqrt{d}}$) on chip before quantizating $Q$.
+
+\textbf{Performance Analysis.} We will take \ourb as an example to discuss the acceleration effects on actual hardware:
+(1) \underline{Matmul acceleration.} Utilizing INT8 matrix multiplication units on current mainstream hardware can achieve \textbf{2-4}$\times$ throughput. While FP16 accumulators do not offer throughput improvements on most compute cards, on-edge accelerators, such as the RTX4090, can still achieve a 2x improvement over FP32 accumulators.
+(2) \underline{Quantization overhead.}
+Quantization and dequantization are considered the main overhead in current quantization methods~\citep{lin2024qservew4a8kv4quantizationcodesign}. The computational overhead can not be avoided, but through fusing the quantization of $Q, K$ with ROPE, we avoid the IO overhead of quantization. 
+(3) \underline{Cache and registers.} Currently, mainstream accelerators need to store data in cache (such as SharedMemory) during computation. Using 8-bit data for calculations can reduce the usage of the general cache, and using fp16 accumulators can also reduce the usage of accumulation registers. 
+(4) \underline{Dram access.} Using 8-bit data can halve the tensors transfer overhead from DRAM to the compute units. Although quantization introduces additional FP32 scales, these scales can be considered negligible compared to the tensors.
+
+
+\section{Experiments}
+
+
+\noindent \textbf{Main results.} The speed of \our is approximately $\textbf{2.1}\times$ faster than FlashAttention-2. Furthermore, \our achieves an average real speedup of $\textbf{2.83}\times$ compared to the original attention in various models, with \textbf{negligible loss in end-to-end metrics}.
+
+\subsection{Experimental Setup} \label{sec:exp_set_up}
+
+\noindent \textbf{Models.} 
+We validate the effectiveness of \our across a diverse set of representative models from the fields of language, image, and video generation.
+Specifically, we conduct experiments on five models: \llama(7B)~\citep{touvron2023llama2} for text2text, \cogvideo~\citep{yang2024cogvideox} for text2video, \unidiffuser~\citep{bao2022uni} and \ultrapixel~\citep{ren2024ultrapixel} for text2image, \timm~\citep{rw2019timm} for image classification. 
+
+\noindent \textbf{Datasets.}   
+\llama is evaluated on three zero-shot tasks: WikiText~\citep{merity2022pointer} to assess the model's prediction confidence, LAMBADA~\citep{paperno2016lambada} evaluate contextual understanding, and MMLU~\citep{2020mmlu} for measuring knowledge across various subjects.
+\cogvideo is evaluated using the open-sora~\citep{opensora} prompt sets.
+Both \ultrapixel and \unidiffuser are assessed on the COCO annotations~\citep{lin2014microsoft}, featuring (prompt, image) pairs.
+\timm is evaluated on on three image datasets: ImageNet~\citep{deng2009imagenet}, ImageNet-Sketch (Sketch)~\citep{wang2019sketch}, and ImageNet-Rendition (ImageNet-r)~\citep{hendrycks2021rendition}. 
+\noindent \textbf{Metrics.}   
+For \llama, we use perplexity (ppl.)~\citep{jelinek1977perplexity} for WikiText, and Accuracy (Acc.) for LAMBADA and MMLU.
+For \cogvideo, folowing~\citep{zhao2024viditq}, we evaluate the quality of generated videos on five metrics: CLIPSIM and CLIP-Temp (CLIP-T)~\citep{liu2024evalcrafter} to measure the text-video alignment; (VQA-a) and (VQA-t) to assess the video aesthetic and technical quality, respectively; and Flow-score (FScore) for temporal consistency~\citep{wu2023exploring}. 
+For \ultrapixel and \unidiffuser, generated images are compared with the images in COCO annotations dataset in three aspects: FID~\citep{heusel2017gans} and sFID~\citep{salimans2016improved} for fidelity evaluation, \textit{Clipscore} (CLIP)~\citep{hessel2021clipscore} for text-image alignment, and \textit{ImageReward} (IR)~\citep{xu2024imagereward} for human preference.
+For \timm, we use Accuracy.
+
+\begin{figure}[htb!]
+    \centering
+    \includegraphics[width=1.0\textwidth]{figs/hd64_baselines_kernel_flops.pdf}
+    \caption{Speed comparison between \our and baselines (RTX4090, headdim=64).}
+    \label{fig:kf_h64_baseline}
+\end{figure}
+
+\begin{figure}[htb!]
+    \centering
+    \includegraphics[width=1.0\textwidth]{figs/hd128_baselines_kernel_flops.pdf}
+    \caption{Speed comparison between \our and baselines (RTX4090, headdim=128).}
+    \label{fig:kf_h128_baseline}
+\end{figure}
+
+\begin{figure}[htb!]
+    \centering
+    \includegraphics[width=1.0\textwidth]{figs/3090_hd64_baselines_kernel_flops.pdf}
+    \caption{Speed comparison between \our and baselines (RTX3090, headdim=64).}
+    \label{fig:kf_h64_baseline_3090}
+\end{figure}
+
+\begin{figure}[htb!]
+    \centering
+    \includegraphics[width=1.0\textwidth]{figs/3090_hd128_baselines_kernel_flops.pdf}
+    \caption{Speed comparison between \our and baselines (RTX3090, headdim=128).}
+    \label{fig:kf_h128_baseline_3090}
+\end{figure}
+
+
+\subsection{Speed and Accuracy of attention Kernels}
+
+\noindent \textbf{Speed.} We conduct experiments to compare the Speed of \our against baselines using configurations with headdim=64 or headdim=128, both with and without Causal Mask~\cite{vaswani2017attention}. Specifically, Figure~\ref{fig:kf_h64_baseline} and Figure~\ref{fig:kf_h128_baseline} show the Speed of \our and baselines across varying sequence lengths on RTX4090. These results indicate that \our achieves a peak of \textbf{341} TOPS and is \textbf{2x} faster than FlashAttention2 and \textbf{2.9x} faster than xformers on average.
+Figure~\ref{fig:kf_h64_baseline_3090} and Figure~\ref{fig:kf_h128_baseline_3090} illustrate the results on RTX3090, showing a similar speedup performance.
+\noindent \textbf{Accuracy.} 
+Table~\ref{tab:error of sage} shows the numerical error of four implementations of \our compared with attention in full-precision. This experiment is conducted using a set of (Q, K, V) conforming to a normal distribution. We find that the error of the four implementations is rather small. Notably, \ourt and \ourb achieve 100\% cosine similarity and RMSE in e-4 level.
+\begin{table}[htb!]
+    \caption{Real speedup (TOPS) of \our on RTX4090.}
+    \label{exp:real_flops}
+    \setlength\tabcolsep{6.5pt}
+    \begin{center}
+    \begin{tabular}{l|c|l|c|c}
+    \toprule
+    {\bf Model}  & {\bf Shape of Q, K, V}  & {\bf Original attention}  & {\bf SageAttention}  & {\bf Speedup}
+    \\ \hline
+    \cogvideo    & (2, 30, 17776, 64) &  163.37 (FlashAttn2)  &  \cellcolor{gray!20}\textbf{327.57}  & \cellcolor{gray!21}\textbf{2.01x}  \\
+    \llama       & (4, 32, 1536, 128) &  130.99 (FlashAttn2)  &  \cellcolor{gray!20}\textbf{231.74}  & \cellcolor{gray!21}\textbf{1.77x}  \\ 
+    \ultrapixel  & (2, 32, 7285, 64)  &  152.03 (FlashAttn2)  &  \cellcolor{gray!20}\textbf{325.18}  & \cellcolor{gray!21}\textbf{2.14x}  \\ 
+    \unidiffuser & (4, 24, 1105, 64)  &  105.68 (xformers)    &  \cellcolor{gray!20}\textbf{246.93}  & \cellcolor{gray!21}\textbf{2.34x}  \\ 
+    \timm        & (12, 64, 197, 64)  &  18.910 (Torch)       &  \cellcolor{gray!20}\textbf{111.41}  & \cellcolor{gray!21}\textbf{5.89x}  \\ \bottomrule
+    \end{tabular}
+    \end{center}
+\end{table}
+
+\begin{table}[htb!]
+    \caption{End-to-end metrics loss across text, image, and video generation models.}
+    \label{exp:metrics_loss_t2t}
+    \setlength\tabcolsep{4.25pt}
+    \begin{center}
+    \begin{tabular}{p{2.1cm}|p{2.55cm}|c|c|c}
+    \toprule
+    {\bf Model}  & {\bf attention}  & {\bf WikiText (Ppl.) $\downarrow$}  & {\bf Lambda (Acc.) $\uparrow$}  & {\bf MMLU (Acc.) $\uparrow$}  \\ \hline
+    \multirow{2}{*}{\llama} & Full-Precision & 5.823 & 0.886  & 0.46   \\  % \cline{2-5}
+    & \cellcolor{gray!24}\textbf{SageAttention} & \cellcolor{gray!24}\textbf{\dgreen{5.824}} &  \cellcolor{gray!24}\textbf{\dgreen{0.887}}  & \cellcolor{gray!24}\textbf{\dgreen{0.46}}   \\ \bottomrule
+    \end{tabular}
+    \end{center}
+    
+    \begin{center}
+    \setlength\tabcolsep{3.6pt}
+    \begin{tabular}{p{2.2cm}|p{2.55cm}|c|c|c|c|c}
+    \toprule
+    {\bf Model}  & {\bf attention}  & {\bf CLIPSIM $\uparrow$}  & {\bf CLIP-T $\uparrow$}  & {\bf VQA-a $\uparrow$}  & {\bf VQA-t $\uparrow$}  & {\bf FScore $\uparrow$} \\ \hline
+    \multirow{2}{*}{\cogvideo} & Full-Precision & 0.1837 & 0.9976  & 68.962  & 75.925  &  3.7684  \\  % \cline{2-7}
+    & \cellcolor{gray!24}\textbf{SageAttention} & \cellcolor{gray!24}\textbf{\dgreen{0.1836}} &  \cellcolor{gray!24}\textbf{\dgreen{0.9976}}  & \cellcolor{gray!24}\textbf{\dgreen{68.839
+    }}  &  \cellcolor{gray!24}\textbf{\dgreen{75.037}}  &  \cellcolor{gray!24}\textbf{\dgreen{3.8339}} \\ \bottomrule
+    \end{tabular}
+    \end{center}
+    
+    \begin{center}
+    \setlength\tabcolsep{15.5pt}
+    \begin{tabular}{p{1.4cm}|p{1.725cm}|c|c|c|c}
+    \toprule
+    {\bf Model}  & {\bf attention}  & {\bf FID $\downarrow$}  & {\bf sFID $\downarrow$}  & {\bf CLIP $\uparrow$}  & {\bf IR $\uparrow$}
+    \\ \hline
+    \multirow{2}{*}{\hspace{-1.2em}\unidiffuser} & \hspace{-1.2em}Full-Precision & 163.33 & 145.08  & 0.3152  & 0.1609  \\  % \cline{2-6} 
+    & \cellcolor{gray!24}\hspace{-1.2em}\textbf{SageAttention} &  \cellcolor{gray!24}\textbf{\dgreen{166.49}} & \cellcolor{gray!24}\textbf{\dgreen{143.18}}  & \cellcolor{gray!24}\textbf{\dgreen{0.3154}}  &  \cellcolor{gray!24}\textbf{\dgreen{0.1521}} \\ \hline
+    \multirow{2}{*}{\hspace{-1.2em}\ultrapixel} & \hspace{-1.2em}Full-Precision & 179.78 & 141.35  & 0.3132  & 0.6169  \\  % \cline{2-6}
+    & \cellcolor{gray!24}\hspace{-1.2em}\textbf{SageAttention} & \cellcolor{gray!24}\textbf{\dgreen{179.79}} &  \cellcolor{gray!24}\textbf{\dgreen{141.63}} & \cellcolor{gray!24}\textbf{\dgreen{0.3131}}  &  \cellcolor{gray!24}\textbf{\dgreen{0.6110}} \\ \bottomrule
+    \end{tabular}
+    \end{center}
+    
+    \begin{center}
+    \setlength\tabcolsep{2.3pt}
+    \begin{tabular}{p{2.35cm}|p{2.65cm}|c|c|c}
+    \toprule
+    {\bf Model}  & {\bf attention}  & {\bf ImageNet (Acc.) $\uparrow$}  & {\bf Sketch (Acc.) $\uparrow$}  & {\bf ImageNet-r (Acc.) $\uparrow$}  \\ \hline
+    \multirow{2}{*}{\timm} & Full-Precision &  84.79\% & 45.32\%  & 59.55\%   \\  % \cline{2-5}
+            & \cellcolor{gray!24}\textbf{SageAttention} & \cellcolor{gray!24}\textbf{\dgreen{84.74\%}}  &  \cellcolor{gray!24}\textbf{\dgreen{45.78\%}}  & \cellcolor{gray!24}\textbf{\dgreen{60.32\%}}   \\ \bottomrule
+    \end{tabular}
+    \end{center}
+\end{table}
+
+\subsection{End-to-end Performance}
+\textbf{Speedup.} We measure the real speed of \our and the original attention on \unidiffuser, \ultrapixel, \cogvideo, \llama and \timm on RTX4090. 
+Table~\ref{exp:real_flops} shows that \our outperforms original attention across all models. Specifically, \our yields \textbf{2.83x} speedup compared to the original attentions on average.
+
+\textbf{Metrics loss.} We assessed the end-to-end metrics of various models using \our compared to using attention in full-precision.
+Detailed evaluation results are presented in Table~\ref{exp:metrics_loss_t2t} for \llama, \cogvideo, \unidiffuser, \ultrapixel, and \timm, respectively. The results indicate that \our successfully matches the performance of attention in full-precision across all models. Specifically, on \llama, \cogvideo, \ultrapixel, and \unidiffuser, \our resulted in only a minor average degradation of 0.2\% compared to attention in full-precision. Moreover, on \timm, \our even surpasses attention in full-precision.
+\begin{table}[htb!]
+    \centering
+    \begin{minipage}{0.54\textwidth}
+        \raggedright
+        \caption{Accuracy of SageAttention kernels.}
+        \label{tab:error of sage}
+        \setlength\tabcolsep{2.7pt}
+        \scalebox{0.95}{
+        \begin{tabular}{c||c|c|c}
+            \toprule
+            {\bf attention}  & {\bf Cos Sim $\uparrow$}  & {\bf Relative L1 $\downarrow$}  & {\bf RMSE $\downarrow$}  \\ \hline
+            \ourt   &   1.0    & 0.019  & 6.8e{-4}  \\ 
+            \cellcolor{gray!24}\ourb   &   \cellcolor{gray!24}1.0   & \cellcolor{gray!24}0.021  & \cellcolor{gray!24}7.3e{-4}  \\ 
+            \ourvt  &  99.9\%   & 0.064  & 0.065  \\ 
+            \ourvb  &  98.9\%   & 0.138  & 0.067  \\ \bottomrule
+        \end{tabular}
+        }
+    \end{minipage}
+    \hspace{0.03\textwidth} 
+    \begin{minipage}{0.39\textwidth}
+        \raggedleft
+        \caption{Overhead of smoothing K.}
+        \label{exp:overhead_km}
+        \setlength\tabcolsep{3pt}
+        \scalebox{0.95}{
+        \begin{tabular}{l|c|c}
+        \toprule
+        {\bf Model}  & {\bf Smooth K}  & {\bf TOPS $\uparrow$} \\
+        \hline
+        \multirow{2}{*}{\cogvideo} &  \ding{55}  & 327.57 \\
+                                    & \cellcolor{gray!24}\checkmark  & \cellcolor{gray!24}\textbf{327.52} \\ \hline
+        \multirow{2}{*}{\ultrapixel} & \ding{55}  & 325.18 \\
+                                    & \cellcolor{gray!24}\checkmark  & \cellcolor{gray!24}\textbf{324.56} \\ 
+        \bottomrule
+        \end{tabular}
+        }
+    \end{minipage}
+\end{table}
+
+\begin{table}[h!]
+    \caption{Benefit of adaptive quantization.}
+    \label{exp:adaptive_quant}
+    \setlength\tabcolsep{3.9pt}
+    \begin{center}
+    \scalebox{0.96}{
+    \begin{tabular}{l||l|c|c||l|c|c}
+    \toprule
+    {\bf attention}  & {\bf model}  & {\bf CLIPSIM $\uparrow$} & {\bf TOPS $\uparrow$}  & {\bf Model} & {\bf MMLU $\uparrow$} & {\bf TOPS $\uparrow$}    \\ \hline
+    \ourt  & \multirow{2}{*}{\cogvideo} &  0.1827  &  292.17 & \multirow{2}{*}{\llama}  & 0.46   &  208.59 \\  % \cline{2-5}
+    \cellcolor{gray!24}\our   &   & \cellcolor{gray!24}\textbf{0.1835}  & \cellcolor{gray!24}\textbf{327.57}  &   &  \cellcolor{gray!24}\textbf{0.46}   &  \cellcolor{gray!24}\textbf{231.74} \\ \bottomrule
+    \end{tabular}
+    }
+    \end{center}
+\end{table}
+
+\subsection{Ablation Study}
+
+\textbf{Overhead of smoothing K.} Table~\ref{exp:overhead_km} presents the overhead associated with smoothing K on the attention speed in real models. The results indicate a minimal reduction, less than 0.2\%.
+\textbf{Benefit of adaptive quantization.} We analyzed the performance differences between using only \ourt and employing an adaptive strategy (\our). Table~\ref{exp:adaptive_quant} presents the metrics and average speed of attention on \cogvideo and \llama. The results indicate that the adaptive strategy increases the speed of attention by 11.7\% without any loss in metrics.
+
+
+
+\section{Conclusion and Future Work}
+
+
+We introduce \our, an efficient and precise INT8 quantization method for attention. First, we propose a method to smooth matrix K, enhancing the accuracy with under 0.2\% speed overhead. Second, we use FP16 accumulators in the Matmul of (P, V) to boost both accuracy and speed. Third, we use adaptive quantization to further improve OPS by 12\% without sacrificing accuracy. Our method surpasses FlashAttention2 and xformers by approximately \textbf{2.1x} and \textbf{2.7x}, respectively. Extensive testing confirms that our approach maintains end-to-end metrics across various models, including language, image, and video generation models. 
+
+
+\textbf{Future Work.} We leave the implementation in Hopper architecture for future work. 
+
+
+
+
+
+

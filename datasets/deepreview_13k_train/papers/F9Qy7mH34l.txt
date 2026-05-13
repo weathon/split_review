@@ -1,0 +1,281 @@
+\title{Key-Graph Transformer for Image Restoration}
+
+\begin{abstract}
+While it is crucial to capture global information for effective image restoration (IR), integrating such cues into transformer-based methods becomes computationally expensive, especially with high input resolution. Furthermore, the self-attention mechanism in transformers is prone to considering unnecessary global cues from unrelated objects or regions, introducing computational inefficiencies. 
+In response to these challenges, we introduce the Key-Graph Transformer (KGT) in this paper. 
+Specifically, KGT views patch features as graph nodes. The proposed Key-Graph Constructor efficiently forms a sparse yet representative Key-Graph by selectively connecting essential nodes instead of all the nodes.
+Then the proposed Key-Graph Attention is conducted under the guidance of the Key-Graph only among selected nodes with linear computational complexity within each window.
+Extensive experiments across 6 IR tasks confirm the proposed KGT's state-of-the-art performance, showcasing advancements both quantitatively and qualitatively. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+Image restoration (IR), a fundamental task in the realm of low-level computer vision, is dedicated to the quality improvement of images that have been compromised by various factors such as noise, blur, low resolution, compression artifact, mosaic, adverse weather, or other forms of distortion. 
+This capability finds diverse applications, including information recovery (such as retrieving obscured data in medical imaging, surveillance, and satellite imagery) and supporting downstream vision tasks like object detection, recognition, and tracking~\cite{sezan1982image,molina2001image}. Despite significant advancements in recent years, it is noteworthy that current popular image restoration methods still face challenges in effectively handling complex distortions or preserving/recovering essential image details~\cite{li2023efficient}. To recover high-quality images, the rich information exhibited in the degraded counterparts needs to be exquisitely explored.
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/dog_demo.png}
+    \caption{(a) The CNN filter captures information only within a local region. (b) The standard MLP/Transformer architectures take full input in a long sequence manner. (c) The window-size multi-head self-attention (MSA) mechanism builds a fully connected dense graph within each window. (d) Position-fixed sparse graph. (e) The proposed Key-Graph connects only the essential nodes.}
+    \label{fig:dog_demo}
+\end{figure}
+
+In modern computer vision systems, representative networks for learning rich image information in IR are primarily constructed using 3 fundamental architectural paradigms. \ie the convolutional neural networks (CNNs)~\cite{lecun1998gradient,zamir2021multi}, Multilayer perceptrons (MLPs)~\cite{bishop2006pattern,tu2022maxim}, and Vision Transformers (ViTs)~\cite{vaswani2017attention,dosovitskiy2020image}. The input image is treated as a regular grid of pixels in the Euclidean space for CNNs (Fig.~\ref{fig:dog_demo}(a)) or a sequence of patches for MLPs and ViTs (Fig.~\ref{fig:dog_demo}(b)). However, the degraded input usually contains irregular and complex objects. These choices perform admirably in specific scenarios characterized by regular or well-organized object boundaries but have limitations when applied to images with more flexible and complex geometrical contexts.
+
+Additionally, CNNs are struggling to model the long-range dependencies because of their limited receptive field (Fig.~\ref{fig:dog_demo}(a)). MLPs/ViTs are widely validated for capturing the long-range relation but at the cost of losing the ability for inductive bias or heavy computation burden (\eg quadratic complexity increases with the increase of the input resolution)~\cite{tu2022maxim,vaswani2017attention,dosovitskiy2020image,ren2023masked}.). 
+To overcome these limitations, recent methods investigate strategies for complexity reduction. One common approach is to implement MSA within local image regions~\cite{liu2021swin}, \eg a full MSA or a region-fixed anchored stripe MSA is conducted by SwinIR~\cite{liang2021swinir} or GRL~\cite{li2023efficient}, which still struggles to capture inherent connections among irregular objects. Additionally, an earlier study~\cite{zontak2011internal} highlights that smooth image contents occur more frequently than complex image details, suggesting the need for differentiated treatment for different contents.
+
+In this paper, we introduce a novel approach, the Key-Graph Transformer (KGT), to address the limitations above. Our method comprises two core components: the k-nearest neighbors (KNN) based \textit{Key-Graph Constructor} and a \textit{Key-Graph Transformer layer} integrated with a novel Key-Graph attention block. Specifically, starting with the low-level feature obtained from the convolutional feature extractor, each patch is treated as a node of a graph. Since capturing long-range dependencies among all nodes (Fig.~\ref{fig:dog_demo}(c)) can be highly computationally demanding, we selectively choose $k$ essential nodes (Fig.~\ref{fig:dog_demo}(e)) based on the proposed Key-Graph constructor rather than establishing connections in a sparse yet position-fixed manner. (Fig.~\ref{fig:dog_demo}(d)). This leads to a sparse yet representative graph that connects only the essential nodes, which allows our method to achieve the same receptive field as previous ViTs-based methods while maintaining lower computational costs.
+The criteria for selecting these nodes are determined by the self-similarity calculated at the beginning of each KGT layer. 
+Then the chosen nodes undergo processing by all the successive Key-Graph transformer layers.
+It's worth noting that the implementation of the Key-Graph attention block within each KGT layer is achieved in three interesting manners (\ie the Triton~\cite{dao2022flashattention}\footnote{Open-source GPU programming tool \url{https://openai.}, torch-mask, and torch-gather), which will be discussed in our ablation studies.
+Based on these two components, together with a convolutional operation at the end of each KGT stage, the global information that exists in all the selected nodes is well-aggregated and updated. 
+
+In summary, our main contributions are listed as follows:
+\begin{enumerate}[nosep]
+    \item We propose a Key-Graph constructor that provides a sparse yet representative \textit{Key-Graph} with the most relevant $k$ nodes considered, which works as a reference for the subsequent attention layer, facilitating more efficient attention operations.
+
+    \item Based on the constructed Key-Graph, we introduce a Key-Graph Transformer layer with a novel Key-Graph attention block integrated. Notably, the computational complexity can be significantly reduced compared to conventional attention operations.
+    
+    \item We propose the KGT for IR. Extensive experimental results show that the proposed KGT achieves state-of-the-art performance on 6 IR tasks, \ie deblurring, JPEG compression artifact removal (JPEG CAR), denoising, IR in adverse weather conditions (AWC), demosaicking, and classic image super-resolution (SR).
+\end{enumerate}
+
+
+\section{Related Work}
+
+\label{sec:related-work}
+\noindent{\textbf{Image Restoration (IR),}} as a long-standing ill-posed inverse problem, is designed to reconstruct the high-quality image from the corresponding degraded counterpart. It has been brought to various real-life scenarios due to its valuable application property~\cite{richardson1972bayesian,banham1997digital,li2023lsdir}. Initially, IR was addressed through model-based solutions, involving the search for solutions to specific formulations. However, with the remarkable advancements in deep neural networks, learning-based approaches have gained increasing popularity. These approaches have been explored from various angles, encompassing both regression-based~\cite{lim2017enhanced,liang2021swinir,chen2021learning,li2023efficient} and generative model-based pipelines~\cite{gao2023implicit,wang2022zero,luo2023image,yue2023resshift}. Our focus in this work is to investigate IR under the former pipeline. 
+
+\noindent{\textbf{Non-Local Priors Modeling in IR.}} Tradition model-based IR methods reconstruct the image by regularizing the results (\emph{e.g.}, Tikhonov regularization~\cite{golub1999tikhonov}) with formulaic prior knowledge of natural image distribution. However, it's challenging for these model-based methods to recover realistic detailed results with hand-designed priors. Besides, some other classic method finds that self-similarity is an effective prior which leads to an impressive performance~\cite{buades2005non,dabov2007image}. Apart from the traditional methods, the non-local prior also has been utilized in modern deep learning networks~\cite{liu2018non,wang2018non,li2023efficient,zhang2019residual}, and it was usually captured by the self-attention mechanism. Especially, KiT~\cite{lee2022knn} proposed to increase the non-local connectivity between patches of different positions via a KNN matching to better capture the non-local relations between the base patch and other patches in every attention operation, this brings huge extra computation costs. DRSformer~\cite{chen2023learning} proposed a topk selection strategy that chooses the most relevant tokens to model the non-local priors for draining after each self-attention operation without reducing the computation complexity. We aim to further improve the effectiveness of the non-local priors from a more efficient graph perspective.
+
+\noindent{\textbf{Graph-Perspective Solutions for IR.}} Graph is usually used to deal with irregular data structures such as point clouds~\cite{wang2019dynamic,li2021towards}, social networks~\cite{myers2014information}, or protein~\cite{ingraham2019generative}. Recently, it was adapted to process the images in a more flexible manner~\cite{gori2005new,scarselli2008graph,mou2021dynamic,han2022vision,jiang2023graph} on various IR tasks, like facial expression restoration~\cite{liu2020facial}, image denoising~\cite{simonovsky2017dynamic}, and artifact reduction~\cite{mou2021dynamic}. However, most of these solutions for IR mainly extend from graph neural networks (GNNs), which mainly focus on very close neighbor nodes. Merely increasing the depth or width of GNNs proves inadequate for expanding receptive fields~\cite{xu2018representation}, as larger GNNs often face optimization challenges like vanishing gradients and over-smoothing problems. \cite{jiang2023graph} construct the graph with transformer-based architecture but in a very expensive manner where each node is connected to all other nodes. In this paper, we integrate graph properties into ViTs by employing a \textit{Key-Graph} for efficient capture of effective non-local priors for IR.
+\begin{figure*}[!t]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/framework.png}
+    \caption{The proposed KGT mainly consists of a convolutional feature extractor, the main body of the proposed KGT for representation learning, and an image reconstructor. The main body shown here is for SR, while the U-shaped structure (Shown in \textit{Appx.}) is used for other IR tasks. (b) The illustration of the Key-Graph Transformer layer within each KGT stage.}
+    \label{fig:framework}
+\end{figure*}
+
+
+\section{Preliminary: Graph Transformer}
+
+\label{sec:preliminaries}
+Graph Transformers generalize Transformers to graphs with all nodes fully connected. Specifically, given input feature $F_{in} \in \mathbb{R}^{H \times W \times C}$, where $H$, $W$, and $C$ denote the height, the width, and the channel, respectively. $F_{in}$ is split into $N$ patches, and the graph nodes are typically assigned based on these patches, forming an unordered node representation $\mathcal{V} = \{v_{i}| v_{i} \in \mathbb{R}^{ hw \times c}, i = 1, 2, 3, ..., N\}$, where $h$, $w$, and $c$ are the height, the width, and the channel of each node. A weighted graph  $\mathcal{G} = (\mathcal{V, E})$, usually described by the weighted adjacency matrix $\mathcal{A}$, is constructed by adding an edge $e_{ji}$ from $v_j$ to $v_i$ among all the neighbors of $v_i$ in $\mathcal{V}$. 
+
+To get $\mathcal{A}$, $\mathcal{V}$ is linearly projected
+into Query ($Q$), Key ($K$), and Value ($V$) matrices ($V$ will be used to conduct the node aggregation with the help of $\mathcal{A}$ later), which are denoted as $Q=\mathcal{V}\mathbf{W}_{qry}$, $K=\mathcal{V}\mathbf{W}_{key}$, and $V=\mathcal{V}\mathbf{W}_{val}$. $\mathbf{W}_{qry/key/val}$ represents the learnable projection weights. Then $\mathcal{A}$ is performed by a softmax function as follows:
+\begin{equation}
+    \mathcal{A}_{ij} = \frac{\operatorname{exp}(Q_{i}K_{j}^{T})}{\sum_{k = 1...j} \operatorname{exp}(Q_{i}K_{k}^{T}/\sqrt{d})}, 
+    \label{eq:eq1}
+\end{equation}
+where $d$ represents the dimension of $Q$ and $K$. Then the node feature can be aggregated to $\hat{v_i}$ by:
+\begin{equation}
+ \hat{v_i} = \mathcal{A}_{ij} V_{i} = \mathcal{A}_{ij}\mathcal{V}\mathbf{W}_{val}.
+ \label{eq:eq2}
+\end{equation}
+However, $\mathcal{A}_{ij}$ in standard ViTs describes a fully connected graph, \eg given a sub-graph with a green dog root node shown in Fig.~\ref{fig:dog_demo}(c), the tree-related nodes are also considered. Such dense connection largely limits the efficiency of ViTs on large-scale input. To mitigate this problem, we assumed that for each node, a sub-graph with only the necessary connection is sufficient to find the balance between performance and efficiency. To this end, we aim to achieve a sparse yet representative adjacency matrix $\mathcal{A}_{K}$ which describes a flexible and sparse graph $\mathcal{G}_{K}$ ( Fig.~\ref{fig:dog_demo}(e)) that connect the essential nodes for a destination node.
+
+\begin{algorithm}[!t]
+    \small
+    \renewcommand{\algorithmicrequire}{\textbf{Input:}}
+    \renewcommand{\algorithmicensure}{\textbf{Output:}}
+    \caption{Key-Graph Transformer Stage}
+    \label{alg:kgt_stage}
+    \begin{algorithmic}[1]
+        \REQUIRE input feature ${F_{in}}$, numbers of KGT layer $N_{layer}$, KNN value $k$, the patched node feature $\mathcal{V}$
+	\ENSURE aggregated feature $F_{out}$
+            \STATE $\mathcal{G}_{K} \leftarrow \operatorname{KeyGraph\_Constructor}(\mathcal{V}, k)$ // Sec.~\ref{subsec:KG_cons}
+            \FOR{$i=1$ to $N_{layer}$}
+                \STATE $Q, K, V \leftarrow \operatorname{Linear\_Proj}(\mathcal{V})$ 
+                \STATE $\hat{\mathcal{V}} \leftarrow \operatorname{KeyGraph\_Att}(Q, K, \mathcal{G}_{K})$ // Sec.~\ref{subsec:kgt_layer}
+                \STATE $\mathcal{Z} \leftarrow \hat{\mathcal{V}} + \operatorname{FFN}(\hat{\mathcal{V}})$ // Sec.~\ref{subsec:kgt_layer}
+            \ENDFOR
+            \STATE $F_{out} \leftarrow F_{in} + \operatorname{Conv}(\mathcal{Z})$ 
+		\STATE \textbf{return} $F_{out}$
+    \end{algorithmic}  
+\end{algorithm}
+
+We adopted the window-wise MSA throughout our method, to streamline our explanation, we select a single window for illustration when discussing the proposed Key-Graph Constructor and Key-Graph Transformer layer. Notations such as $F_{in}$ and $\mathcal{V}$ are also window-size adapted for clarity.
+
+
+
+\section{Methodology}
+
+\label{sec:method}
+Unlike conventional approaches that treat $F_{in}$ after the feature extractor as a regular grid of pixels (typical in CNNs) or as a sequence of patches (common in MLPs and ViTs), we adopt a flexible graph representation manner. The overall architecture of the proposed Key-Graph Transformer (KGT) is shown in Fig.~\ref{fig:framework}, and we formalize the pipeline of each KGT stage in Alg.~\ref{alg:kgt_stage}. Each step will be introduced in the corresponding subsections in detail. Specifically, at the beginning of each KGT stage, a sparse yet representative graph $\mathcal{G}_{K}$ will be constructed. The efficiency of graph updating is ensured by the Key-Graph Constructor (Sec.~\ref{subsec:KG_cons}) in a shared manner within each stage. Simultaneously, the effectiveness is achieved by the Key-Graph Transformer Layer (Sec.~\ref{subsec:kgt_layer}). $\operatorname{Conv()}$ is applied together with a residual connection as the last step of Alg.~\ref{alg:kgt_stage}. Two interesting discussions (Sec.\ref{subsec:discuss}) are introduced regarding the implementation style of the Key-Graph attention and two topk settings during the training.
+
+\subsection{Key-Graph Constructor}
+\label{subsec:KG_cons}
+The proposed Key-Graph constructor aims to construct a sparse yet representative graph $\mathcal{G}_{K}$ which will be used for conducting the efficient Key-Graph attention operation for all the following KGT layers within the same stage in a shared manner. Specifically, given $\mathcal{V}$, an initial fully connected graph $\mathcal{G}$ is constructed by calculating the self-similarity $\operatorname{Sim()}$ of $\mathcal{V}$ via naive dot product operation and outputs the corresponding adjacency matrix $\mathcal{A}$ as below:
+\begin{equation}
+\mathcal{A} = \operatorname{Sim}(i, j ) = v_i \cdot v_j^{T},
+\end{equation}
+which describes the correlation among all the nodes. A higher value indicates a higher correlation. However, in this context, $\mathcal{A}$ represents a fully connected dense graph, wherein all nodes $v_j$ within $\mathcal{V}$ are included in the connectivity of the destination node $v_i$, irrespective of the degree of semantic relatedness between $v_i$ and $v_j$.
+
+To mitigate the side effects of nodes with low correlation (\eg the tree-related nodes at the upper left part in Fig.~\ref{fig:dog_demo} (c)) for the green background dog destination node, we keep only $k$ highly related nodes of the destination node $v_i$ and exclude the remainings.
+This is achieved by a KNN algorithm from $\mathcal{A}$ as follows:
+\begin{equation}
+\mathcal{A}_{K}(i, j) = 
+    \begin{cases}
+    \mathcal{A}(i, j),~\mathcal{A}(i, j) \geq \operatorname{Sim}(i, )_{k} ~and~ i \neq j
+    \\ 
+    0,~~~~~~~~~~otherwise,
+    \end{cases}
+\end{equation}
+where $\operatorname{Sim}(i, )_{k}$ denotes the $k_{th}$ largest connective value of node $v_{i}$ with the corresponding node. As a result, $\mathcal{G}_{K}$ is achieved which contains only the nodes with high correlation (\eg dog-related nodes in Fig.~\ref{fig:dog_demo}(e)) for the destination node (\eg the green dog node). We formalize the graph constructor process as $\operatorname{KeyGraph\_Constructor}()$ in Alg.~\ref{alg:kgt_stage}.
+
+Owing to the permutation-invariant property inherent in both the MSA and the FFN within each transformer layer~\cite{vaswani2017attention,lee2019set}, the KGT layer consistently produces identical representations for nodes that share the same attributes, regardless of their positions or the surrounding structures~\cite{chen2022structure}. In other words, nodes at the same location are consistently connected to other nodes possessing the same attributes as they traverse through the various layers within the same stage. This enables $\mathcal{G}_{K}$ as a reference for each attention block in the subsequent KGT layers within each stage, facilitating efficient attention operations. This is different from the sparse graph (See Fig.~\ref{fig:dog_demo}(d)) that only activates the nodes in a fixed coordinate of a given feature~\cite{zhang2023accurate}.
+\subsection{Key-Graph Transformer Layer}
+\label{subsec:kgt_layer}
+The proposed Key-Graph Transformer Layer is shown in Fig.~\ref{fig:framework}(b), which mainly consists of a Key-Graph attention block followed by a feed-forward network (FFN).
+
+Fig.~\ref{fig:k_graph}(b) shows the detailed workflow of the proposed Key-Graph attention block. 
+Initially, the node $\mathcal{V}$ is linear projected via $\operatorname{Linear\_Proj()}$ (The 3rd step in Alg.~\ref{alg:kgt_stage}) into $Q$, $K$, and $V$.
+Then for each node $v_i$ in $Q$, instead of calculating the self-attention with all the $hw$ nodes in $K$, only $k$ essential nodes in $K$ are selected under the guidance of $\mathcal{G}_{K}$, forming the $\hat{K}$. 
+We intuitively show such a process in Fig.~\ref{fig:k_graph} (a) and (b). Then the current spare yet representative adjacency matrix $\mathcal{A}_{K}$ is obtained by:
+\begin{equation}
+    \mathcal{A}_{K}^{att} = \operatorname{Softmax_{K}}(Q\hat{K}^{T}/ \sqrt{d}),
+    \label{eq:atten}
+\end{equation}
+which captures the pair-wise relation between each destination node $v_i$ in $Q$ with only the $k$ nodes in $K$ that are semantically highly related to $v_i$ in the current KGT layer. For other nodes apart from the selected $k$ nodes, our idea is to keep their position in their corresponding places without any computation. Based on $\mathcal{A}_{K}^{att}$, the Key-Graph attention outputs the updated node feature $\hat{\mathcal{V}}$ via Eq.~\ref{eq:eq2}. This is different from the conventional MSA which calculates the relation of each node in $Q$ and all nodes in $K$ (See the difference between (c) \& (e) in Fig.~\ref{fig:dog_demo}). Meanwhile, our Key-Graph attention is also different from the sparse attention~\cite{zhang2023accurate} where the nodes that need to be collected are always in a fixed position (See the difference between (d) \& (e) in Fig.~\ref{fig:dog_demo}). Conversely, our Key-Graph attention block not only significantly reduces the computational complexity from $\mathcal{O}((hw)^{2})$ to $\mathcal{O}((hw) \times k)$ within each window, where $k < hw$, but also provides a more flexible approach to capturing semantically highly related nodes.
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/K_Graph.png}
+    \caption{The toy example of $k$=3 for the illustration of Key-Graph Constructor (a) and the Key-Graph attention (b) within each KGT Layer.}
+    \label{fig:k_graph}
+\end{figure}
+
+Finally, as over-smoothing is prevalent in graph-structured data, it becomes particularly pronounced in deep models~\cite{chen2020measuring,keriven2022not} even for Transformers~\cite{zhai2023stabilizing,noci2022signal}. 
+To relieve such loss of distinctive representation~\cite{oono2019graph} and encourage the node feature transformation capacity, we adopted the FFN on each node feature together with a residual connection operation. 
+This process can be formalized as follows:
+\begin{equation}
+\mathcal{Z} = \hat{\mathcal{V}} + \operatorname{FFN}(\hat{\mathcal{V}}) = \hat{\mathcal{V}} + \sigma(\mathcal{\hat{V}}\mathbf{W_{1}})\mathbf{W_{2}},
+\end{equation}  
+where $\mathcal{Z} \in \mathbb{R}^{hw \times c}$ is the transformed node feature. $\sigma$ is the activation function. $\mathbf{W_{1}}$ and $\mathbf{W_{2}}$ are the learnable weights of two MLPs in $\operatorname{FFN()}$.
+
+\subsection{Discussion}
+\label{subsec:discuss}
+\noindent \textbf{Implementation of Key-Graph Attention.} To achieve the proposed Key-Graph attention operation,  
+we explored three different manners for the detailed implementation, \ie 
+(i) \textit{Triton}, (ii) \textit{Torch-Gather}, and (iii) \textit{Torch-Mask}. Specifically, (i) is based on FlashAttention~\cite{dao2022flashattention}, and a customized GPU kernel is written for the operators proposed in this paper. Parallel GPU kernels are called for the nodes during run time. (ii) means that we use the `torch.gather()' function in PyTorch to choose the corresponding $Q_{gather}$ and $K_{gather}$ based on $\mathcal{G}_{K}$, then the attention operation shown in Eq.~\ref{eq:atten} is conducted between $Q_{gather}$ and $K_{gather}$. (iii) denotes that we keep only the value of selected nodes of $\mathcal{A}_{K}$ and omitting other nodes with low correlation via assigning those values to $-\infty$ guided by $\mathcal{G}_{K}$. We will discuss the pros and cons of these manners in Sec.~\ref{subsec:ablatin}.
+
+\noindent \textbf{Fixed topk \vs Random topk Training Strategies.} For fixed topk strategy, $k$ is fixed to 512 during training. For random topk, $k$ is randomly selected from the values $[64, 128, 192, 256, 384, 512]$ during training. Note that during inference $k$ is configured to the specified value according to the computational budget.
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=1\linewidth]{figs/main_fig_K.png}
+    \caption{Ablation study on the impact of $k$. 
+ The size of the circle denotes the FLOPs. The $k$ on the horizontal axis is the one used during inference.}
+    \label{fig:main_figure_K}
+\end{figure}
+
+\input{tables/motion_deblur}
+\begin{table}[!t]
+    \centering
+    \caption{The comparison of different methods regarding the parameters, runtime, and PSNR on Urban100 for $\times4$ SR.}
+    \label{tab:ab_efficiency1}
+    \setlength{\tabcolsep}{8pt}
+    \setlength{\extrarowheight}{0.5pt}
+    \scalebox{0.8}{
+    \begin{tabular}{cccc}
+        \toprule[0.15em]
+        Method & Params (M) & Runtime (ms) & PSNR \\ \hline
+        SwinIR~\cite{liang2021swinir} & 11.90 & 152.24 & 27.45 \\
+        ART~\cite{zhang2023accurate} & 16.55 & 248.26 & 27.77 \\
+        CAT~\cite{chen2022cross} & 16.60 & 357.97 & 27.89 \\
+        HAT-S~\cite{chen2023activating} & 9.62 & 306.30 & 27.87 \\
+        HAT~\cite{chen2023activating} & 20.62 & 368.61 & 28.37 \\
+        KGT-S (Ours) & 12.02 & 211.42 & 28.34 \\ 
+        \bottomrule[0.15em]
+    \end{tabular}
+    }
+\end{table}
+In this section, we first analyze three important ablation studies of the proposed KGT, followed by extensive experiments on \textbf{6} IR tasks, which include image deblurring, JPEG CAR, image denoising, IR in AWC, image demosaicking, and image SR. Note that we adopt two base architectures, \ie the multi-stage one for image SR and the U-shaped one for the rest IR tasks.)}. In addition, the best and the second-best quantitative results are reported in \textcolor{red}{red} and \textcolor{blue}{blue}, respectively. Note that \textcolor{magenta}{\textdagger} denotes a single model that is trained to handle multiple degradation levels \ie noise levels, and quality factors.
+\subsection{Ablation Study}
+\label{subsec:ablatin}
+
+\noindent\textbf{The impact of the implementation of Key-Graph Attention} is assessed in terms of (i) \textit{Triton}, (ii) \textit{Torch-Gather}, and (iii) \textit{Torch-Mask} under different numbers of N (various from 512 to 8192) and K (various from 32 to 512). The results of the GPU memory footprint are shown in Tab.~\ref{table:ablation_implementation}, which indicate that \textit{Torch-Gather} brings no redundant computation while requiring a large memory footprint. Though \textit{Torch-Mask} brings the GPU memory increase, the increment is affordable compared to \textit{Torch-Gather} and also easy to implement. \textit{Triton} largely saves the GPU memory while at the cost of slow inference and difficult implementation for the back-propagation process. To optimize the efficiency of our KGT, we recommend employing \textit{Torch-Mask} during training and \textit{Triton} during inference, striking a balance between the efficiency and the GPU memory requirement.
+
+\noindent\textbf{The Impact of the $k$ in Key-Graph Constructor.} Two interesting phenomena are observed from the results shown in Fig.~\ref{fig:main_figure_K} regarding the two topk training strategies (See Sec.~\ref{subsec:discuss}). (1) The randomly sampled strategy has a very stable and better performance compared to the fixed topk manner especially when the $k$ is fixed to a small number (\emph{i.e.}, 64, 128, 256). (2) The PSNR can largely increase with the increase of $k$ in a fixed manner. We conclude that a random sampled strategy is more general and stable. It can also make the inference process more flexible regarding different computation resources. More ablation results can be found in our \textit{Appx.} about the effect of the noise level and quality factor for denoising and JPEG CAR. 
+
+\begin{table}[!t]
+    \centering
+    \caption{The parameters and FLOPs comparison between SwinIR~\cite{liang2021swinir} and KGT for image denoising.}
+    \label{tab:ab_efficiency2}
+    \setlength{\tabcolsep}{4pt}
+    \setlength{\extrarowheight}{0.5pt}
+    \scalebox{0.9}{
+    \begin{tabular}{cccc}
+        \toprule[0.15em]
+        Method & Input Size & Params (M) & FLOPs (B)\\ \hline
+        SwinIR~\cite{liang2021swinir} & [1, 3, 256, 256] & 11.75 & 752.13 \\
+        KGT (Ours) & [1, 3, 256, 256] & 25.85 & 134.57 \\
+        \bottomrule[0.15em]
+    \end{tabular}
+    }
+\end{table}
+\input{tables/jpeg_compression_artifacts_removal}
+\input{tables/demosaicking}
+
+\noindent\textbf{Efficiency Analysis.} We compare our KGT with 4 recent promising methods SwinIR, ART, CAT, and HAT-S, and HAT for x4 SR on the Urban100 dataset. The trainable parameters, the runtime, and the PSNR are reported in Tab.~\ref{tab:ab_efficiency1}. It shows that: 1) Among all the methods, HAT and KGT-S achieve 1st-class PSNR performances, reaching 28.37dB and 28.34dB, while KGT-S is much faster and has 41.7\% fewer parameters than HAT. 2) SwinIR runs a bit faster than KGT-S but with a PSNR loss of 0.89 dB. Compared with ART, HAT, and HAT-S, our KGT-S is faster and more accurate. In addition, the parameters and the FLOPs comparison between SwinIR and our KGT for denoising are reported in Tab.~\ref{tab:ab_efficiency2}. It reveals that despite SwinIR having fewer training parameters, its FLOPs significantly surpass our KGT.
+\noindent\textbf{The Impact of One Model is Trained to Handle Multiple Degradation Levels.} Denoising and JPEG CAR are adopted for both the color and grayscale images. For denoising, Sigma is set to 15, 25, 50, and 75. For JEPG CAR, QF is set to 10, 20, 30, 40, 50, 60, 70, 80, and 90. The results in Fig.~\ref{fig:one4m} indicate that the PSNR for both tasks across all the datasets, under both color and grayscale settings, decreases when the degraded level increases. However, the proposed KGT can still outperform other comparison methods on various methods (See Tab.~\ref{table:denoising} and Tab.~\ref{table:jpeg_compression_artifacts_removal_color}). It's clear that training a single model to handle multiple degradation levels results in enhanced generalization, albeit with a slight trade-off in performance compared to its counterpart, where a distinct model is trained for each degradation level.
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/one4multi_main.png}
+    \caption{One model is trained to handle multiple degradation levels for denoising (a-b) and JPEG CAR (c-d).}
+    \label{fig:one4m}
+\end{figure}
+
+\subsection{Evaluation of KGT on Various IR Tasks}
+\noindent\textbf{Evaluation on Image deblurring.} Tab.~\ref{table:motion_deblurring} shows the quantitative results for single image motion deblurring on synthetic datasets ({GoPro} \cite{nah2017deep}, {HIDE} \cite{shen2019human}). 
+Compared to the previous state-of-the-art Restormer~\cite{zamir2022restormer}, the proposed KGT achieves significant PSNR improvement of 0.52 dB on the GoPro dataset and the second-best performance on HIDE dataset. Visual results are shown in the \textit{Appx.}.
+\input{tables/denoising}
+
+\noindent\textbf{Evaluation on JPEG CAR.} The experiments for both grayscale and color images are conducted with 4 image quality factors ranging from 10 to 40 under two settings (\ie \textcolor{magenta}{\textdagger} a single model is trained to handle multiple quality factors, and each model for each quality). 
+The quantitative results for color images in \textit{Appx.} show that our KGT achieves the best results on all the test sets and quality factors among all compared methods like QGAC, FBCNN, DRUNet, SwinIR, and GRL-S. For grayscale, the results are shown in \textit{Appx.} also validate that our KGT outperforms all other methods like DnCNN-3, DRUNet, GRL-S, SwinIR, ART, and CAT under both settings. The visual comparisons in the \textit{Appx.} further supports the effectiveness of our method.
+
+\noindent\textbf{Evaluation on Image Denoising.} We show color and grayscale image denoising results in Tab.~\ref{table:denoising} under two settings (\emph{i.e.}, \textcolor{magenta}{\textdagger} one model for all noise levels $\sigma = \{15, 25, 50\}$ and each model for each noise level). 
+For a fair comparison, both the parameter and accuracy are reported for all the methods.
+For \textcolor{magenta}{\textdagger}, our KGT performs better on all test sets for color and grayscale image denoising compared to others. 
+It's worth noting that we outperform DRUNet and Restormer with lower trainable parameters. For another setting, our KGT also archives better results on CBSD68 and Urban100 for color image denoising, and on Set12 and Urban100 for grayscale denoising. 
+These interesting comparisons validate the effectiveness of the proposed KGT and also indicate that KGT has a higher generalization ability. The visual results in \textit{Appx.} also support that the proposed KGT can remove heavy noise corruption and preserve high-frequency image details, resulting in sharper edges and more natural textures without over-smoothness or over-sharpness problems.
+\input{tables/super_resolution}
+\begin{figure*}[!t]
+    \centering
+    \includegraphics[width=0.99\linewidth]{figs/kgt_visual_results_sr_main_1.png}
+    \caption{Visual comparison of classical image SR (x4) on Urban100. Best viewed by zooming.}
+    \label{fig:sr_x4}
+\end{figure*}
+
+\noindent\textbf{Evaluation in AWC.}
+We validate KGT in adverse weather conditions like rain+fog (Test1), snow (SnowTest100K), and raindrops (RainDrop). 
+PSNR is reported in Tab.~\ref{table:weather}. Our method achieves the best performance on Test1 (\emph{i.e.}, 5.76\% improvement) and SnowTest100k-L (\emph{i.e.} 8.01\% improvement), while the second-best PSNR on RainDrop compared to all other methods. The visual comparison is in our \textit{Appx.}. 
+
+\noindent\textbf{Evaluation on Image Demosaicking.} The quantitative results shown in \ref{table:demosaicking} indicate that the proposed KGT archives the best performance on both the Kodak and MaMaster test sets. Especially, 0.05dB and 0.45dB absolute improvement compared to the current state-of-the-art. 
+
+\noindent\textbf{Evaluation on SR.} For the classical image SR, we compared our KGT with both recent lightweight and accurate SR models, and the quantitative results are shown in Tab.~\ref{tab:sr_results}. Compared to EDT, KGT-base achieves significant improvements on Urban100 (\emph{i.e.}, 0.72 dB and 0.76dB for x2 and x4 SR) and Manga109 datasets (\emph{i.e.}, 0.22dB and 0.17 dB for x2 and x4 SR). Furthermore, even the KGT-small consistently ranks as the runner-up in terms of performance across the majority of test datasets, all while maintaining a reduced number of trainable parameters. The visual results shown in Fig.~\ref{fig:sr_x4} also validate the effectiveness of the proposed KGT in restoring more details and structural content.
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+In this paper, for the first time, we utilize ViTs from the graph perspective specifically tailored for IR with the proposed KGT for both the widely-used multi-stage (For image SR) and the U-shaped architectures (For other IR tasks). In particular, a Key-Graph is constructed that can capture the complex relation of each node feature with only the most relevant topk nodes with the proposed Key-Graph constructor instead of a dense fully connected graph. Then the Key-Graph is shared with all the KGT layers within the same stage, which enables the Key-Graph Attention to capture fewer but the key relation of each node.
+As a result, KGT leads to the window-wise computation complexity reduced from $\mathcal{O}((hw)^{2})$ to $\mathcal{O}((hw) \times k)$, which largely released the potential of ViTs in a sparse yet representative manner. Extensive experiments on 6 IR tasks validated the effectiveness of the proposed KGT and the results demonstrate that the proposed KGT achieves new state-of-the-art performance. Our KGT reveals that the global cues are essential, but not all the global cues are necessary. The code will be available.
+
+{
+    \small
+    
+
+
+

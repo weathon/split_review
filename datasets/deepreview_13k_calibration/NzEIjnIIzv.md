@@ -1,8 +1,8 @@
 # Bitune: Leveraging Bidirectional Attention to Improve Decoder-Only LLMs
 
 - Decision: Reject
-- Avg Score: 4.00
-- Scores: 6, 1, 0, 5, 8
+- Avg Score: 7.25
+- Scores: 6, 10, 5, 8
 
 ## Abstract
 Decoder-only large language models typically rely solely on masked causal attention, which limits their expressiveness by restricting information flow to one direction. We propose Bitune, a method that enhances pretrained decoder-only LLMs by incorporating bidirectional attention into prompt processing. We evaluate Bitune in instruction-tuning and question-answering settings, showing significant improvements in performance on commonsense reasoning, arithmetic, and language understanding tasks. Furthermore, extensive ablation studies validate the role of each component of the method, and demonstrate that Bitune is compatible with various parameter-efficient finetuning techniques and full model finetuning.

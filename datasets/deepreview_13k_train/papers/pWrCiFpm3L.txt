@@ -1,0 +1,704 @@
+\title{VeriFlow: Modeling Distributions for Neural Network Verification}
+
+\begin{abstract}
+Formal verification has emerged as a promising method to ensure the safety and reliability of neural networks.
+Naively verifying a safety property amounts to ensuring the safety of a neural network for the whole input space irrespective of any training or test set.
+However, this also implies that the safety of the neural network is checked even for inputs that do not occur in the real-world and have no meaning at all, often resulting in spurious errors.
+To tackle this shortcoming, we propose the VeriFlow architecture as a flow based density model tailored to allow any verification approach to restrict its search to the some data distribution of interest.
+We argue that our architecture is particularly well suited for this purpose because of two major properties. 
+First, we show that the transformation and log-density function that are defined by our model are piece-wise affine. Therefore, the model allows the usage of verifiers based on SMT with linear arithmetic.
+Second, upper density level sets (UDL) of the data distribution take the shape of an $L^p$-ball in the latent space. As a consequence, representations of UDLs specified by a given probability are effectively computable in latent space. This allows for SMT and abstract interpretation approaches with fine-grained, probabilistically interpretable, control regarding on how (a)typical the inputs subject to verification are. 
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\newcommand{\target}{\tau}
+The outstanding performance of neural networks in tasks such as object detection \cite{zhao2019object} image classification \cite{rawat2017deep}, anomaly detection \cite{pang2021deep} and natural language processing \cite{goldberg2016primer} made them a popular solution for many real-world-applications, including safety-critical ones.
+With the increasing popularity of neural networks, defects and limitations of these systems have been witnessed by the general public. The AI incident database~\footnote{\url{https://incidentdatabase.ai/}} keeps track of harms and near-harms caused by AI-Systems in the real world.
+
+Ideally, safety and fairness properties of such inherently opaque neural networks should be formally guaranteed when used in safety-critical applications.
+As a solution, formal verification can be used to check whether a neural network satisfies a given safety property for the entire input space, or whether there exists some (synthetic) input for which the desired property is violated.
+This is in contrast to the statistical testing methods classically employed in Machine learning, where the output of the neural network is checked for a finite set of samples, usually from a held-out test set.
+
+However, state-of-the-art formal verification methods only allow for verifying either global or local properties. 
+Global properties ensure a specific behaviour of the neural network on the whole input space. 
+As an example, fairness properties require the neural network to predict the same output for any two inputs that only differ in some sensitive attribute.
+Local properties, on the other hand, ensure a specific behaviour of the neural network only in some part of the input space that is usually restricted using the training set. 
+One well-studied example for a local property is \textit{adversarial robustness} which requires the neural network to classify any point from the data set as the same class as any minor perturbation of that point.
+However, both global and local properties have a shortcoming: As global properties verify the property for the whole input space, we may not want or need to verify the property for noise-inputs or on regions of the input space for which there were no training samples available (epistemic uncertainty). 
+Local properties, on the other hand, suffer from the same problem as statistical testing, i.e., they rely on a high-quality data set that the verification property is based on.
+
+To overcome this problem, we design a flow model tailored towards the application in neural network verification and leverage it to restrict the input space of the neural network under verification to the underlying data distribution. 
+In contrast to generative adversarial networks (GANs) and variational autoencoders, flow models do not only allow for efficient sampling but also provide probabilistic interpretability \cite{papamakarios_normalizing_2021,goodfellow2014generative,rezende2015variational,dinh_nice_2015,tabak2010density}.
+That is an important feature to facilitate fine-grained probabilistic control when restricting the input space to typical inputs when specifying the verification property. 
+This approach makes the verification property less reliant on the dataset, while still keeping the input space focused on meaningful data.
+
+To illustrate this idea, consider a neural network trained to classify images of handwritten digits.
+We want the classifier to always be confident about it's classification of a certain digit.
+More precisely, our verification property is that the neural network's confidence is high if it classifies an image as $0$ or $9$, respectively.
+If the neural network does not satisfy the verification property, the verification tool will return an image that is classified as $0$ or $9$ with low confidence.
+Such counterexamples are illustrated in Figure~\ref{intro_flow_example}.
+The two counterexamples on the left side in Figure~\ref{intro_flow_example} were found with a traditional verifier without leveraging our flow model. 
+These counterexample are noise images without any meaning and come from a region of the input space with high epistemic uncertainty.
+However, the counterexamples on the right side of Figure~\ref{intro_flow_example} were obtained by leveraging our flow model to restrict the input space of the verification property to typical inputs.
+In the context of Figure~\ref{intro_flow_example}, the right side restricts the input space to a UDL of given probability and therefore, the counterexamples come from within the data distribution and provide a deeper understanding of the classifiers' weakness when used in a real-world scenario. 
+We refer to Section~\ref{sec:experiments} for more details on this experiment.
+
+
+\begin{figure}[b]
+     \centering
+     \begin{subfigure}[b]{0.49\textwidth}
+         \centering
+        \includegraphics[width=2.5cm]{conf_9_digit_0_without_flow.png}
+        \includegraphics[width=2.5cm]{conf_9_digit_9_without_flow.png}
+        \caption*{Counterexamples without flow model.}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.49\textwidth}
+         \centering
+        \includegraphics[width=2.5cm]{conf_9_digit_0_with_flow.png}
+        \includegraphics[width=2.5cm]{conf_9_digit_9_with_flow.png}
+         \caption*{Counterexamples with flow model.}
+     \end{subfigure}
+     \caption{Comparison of counterexamples.}
+    \label{intro_flow_example}
+\end{figure}
+
+We briefly list our main theoretical results. We design a novel flow model with $L_1$-radially monotonic base distributions that provides the following theoretical properties crucial for the verification domain while outperforming its normalizing counterparts in nearly all benchmarks.
+Specifically, we design a flow model that:
+\begin{enumerate}
+    \item \label{contribution_log_level} Maps upper/lower (log-)density level sets of the target distribution to upper/lower \mbox{(log-)density} level sets of the base distribution allowing for fine-grained probabilistic control during sampling.
+    \item \label{laten_udl} Allows the definition of the pre-image of a density level set in the latent space via linear constraints.
+    \item \label{contribution_affine} Has a piece-wise affine log-density function for the case of a Laplacian base distribution, facilitating efficient computation and analysis.
+\end{enumerate}
+
+We identify sufficient conditions for a flow layer to have the aforementioned properties and survey the literature and present a set of several layers - with its most representative members being additive coupling layers and bijective affine layers - that can be arbitrarily combined to yield a flow with the desired properties.
+
+
+
+\section{Verification Background}
+
+Verification of neural networks refers to checking whether a given network~$f$ satisfies a given semantic property~$P$ for all possible inputs $x$. 
+This semantic property~$P$ may consist of a precondition $\phi$ and a postcondition $\psi$ usually related as an implication $\phi(x) \implies \psi(f(x))$.
+There are two conceptually different approaches for verifying such properties for neural networks, namely \textit{SMT based verification} and \textit{abstract interpretation}. 
+\paragraph{SMT based Verification}
+An SMT based verification approach typically involves translating~$f$ along with~$P$ to a logical formula~$\Psi_{f,P}$ that is designed to be valid if and only if the network~$f$ satisfies the property~$P$. For an understanding on how the neural network along with the verification condition is compiled into the formula, we refer to prior works such as the book by Albarghouthi \cite{albarghouthi-book,xie_neurosymbolic_2022}.
+
+On a technical level, the validity of such logical formulas can be checked using off-the-shelf Satisfiability Modulo Theorem (SMT) Solvers. The runtime of such solvers depends on the pre-/post- and verification condition which in turn depends on the architecture of the neural networks that are compiled into the formula. 
+If the verification condition falls into a quantifier free fragment of linear arithmetic, efficient solvers such as Marabou can be used \cite{katz2019marabou}. 
+This is the case if the network only used linear components, as we ensure in our case with ReLu-activation functions. 
+If, however, the formula contains non-linearities (e.g., due to the neural network containing non-linear activation functions such as tanh), then one may need to use more powerful but slower solvers such as dReal~\cite{gao2012delta}.
+
+On a conceptual level, we check the validity of $\Psi_{f,P}$ by checking the unsatisfiability of the negated verification condition $\neg\Psi_{f,P}$.
+If the negated verification condition $\neg \Psi_{f,P}$ is unsatisfiable, then $\Psi_{f,P}$ is valid and by construction $f$ satisfies $P$. 
+If, however, $\neg \Psi_{f,P}$ is satisfiable, then $\Psi_{f,P}$ is invalid and the neural network is incorrect. In that case, the assignment $x$ for satisfying $\neg \Psi_{f,P}$ is a counterexample that shows the violation of the verification property by the neural network.
+More precisely, the counterexample $x$ satisfies the precondition $\phi(x)$ but violates postcondition $\psi(f(x))$.
+Such a counterexample was presented in Figure~\ref{intro_flow_example}.
+While a main advantage of SMT based verification tools is their precision and ability to provide counterexamples for when the verification property is violated by the neural network, their drawback is the computational runtime for generating positive proof certificates.
+In contrast to verifying unsafe neural networks that merely require a counterexample to be found, which terminates the verification process, safe neural networks require fully rejecting the satisfiability of $\neg \Psi_{f,P}$.
+This gap is closed with a less precise and conceptually different verification approach called abstract interpretation. Abstract interpretation can provide fast positive proof certificates for safe neural networks.
+
+\paragraph{Abstract Interpretation}\label{sec:background:abstract_interpretation}
+The main idea of abstract interpretation is to symbolically run a neural network on an abstract domain. 
+An abstract domain provides the basic structure of the symbolic elements that in turn represent a subspace of the input, latent or output space.
+Examples for abstract domains are polytopes and widely-used zonotopes \cite{chen2008sound,singh2018fast}.
+In this paper, we exclusively consider the latter.
+
+The zonotope in the input space of the neural network represents the set of all inputs satisfying the precondition.
+This is a the geometric representation of the aforementioned logical precondition.
+During the symbolic execution procedure, the input zonotope is iteratively passed through each layer of the neural network by over-approximating the behaviour of each layer.
+This results in an over-approximation of all possible outputs of the neural network to the given input-level zonotope.
+
+Until now, the aforementioned postcondition of our logical verification property has been disregarded.
+However, similar to the precondition, the postcondition also induces a subspace in the output space.
+Therefore, it is sufficient to check whether the output-level zonotope provided by the abstract interpretation procedure lays inside the zonotope induced by the postcondition. The latter is called \textit{safe space}. If the output-level zonotope lays inside the safe space, the verification property is guaranteed by the neural network and the verification was successful.
+If the output-level zonotope lays fully outside safe space, then the verification property is guaranteed to not hold.
+If, however, the output-level zonotope partially lays outside the safe space, no assertion can be made due to the over-approximation of the abstract interpreter. This means, the neural network may or may not satisfy the verification property.
+
+There exists several verification frameworks that implement abstract interpretation. \cite{singh2018fast,wang2021beta}.
+Unlike the aforementioned SMT based verifiers, abstract interpretation frameworks do not conceptually rely on piecewise affinity of the neural network, may allow more divers neural network architectures but are not able to return counterexamples if the verification condition is violated \cite{albarghouthi-book,ERAN_website}.
+
+
+
+\section{Flow Models}
+
+Flow models provide an elegant way to define a density estimator and a generative model by a single network.  
+More precisely, we train a flow to transform a
+simple base (or latent) distribution $B$ into the data (or target) distribution $D$ using a continuous invertible map with continuous inverse,
+i.e. a diffeomorphism \footnote{Note that we define the flows in the direction from base distribution to data distribution. This is inverse to the direction suggested by the common name "Normalizing Flow", but better suited for our analysis. Apart from that, the two definitions are obviously equivalent.}. The map $F$ is implemented by an invertible neural
+network. We obtain a a density estimator and a generative model by applying the flow in both directions:
+\begin{enumerate}
+  \item Sampling is performed by first sampling $z \sim B$ and then computing
+  the map $F(z)$.
+  
+  \item Computing the likelihood
+   $p_D(x)$ can be done using the change of variables formula
+  {\cite{folland_real_1999}}:
+  \begin{eqnarray} \label{eqnnice}
+    p_D (x) & = & \left| \textrm{det}\frac{\partial F^{-1}}{\partial x^T} \right| p_B (F^{-1} (x)).
+  \end{eqnarray}
+\end{enumerate}
+While most neural networks are intrinsically differentiable, they do not represent
+bijections in general. One needs to design specific architectures
+that restrict the hypothesis space to diffeomorphisms. Note that the existence of an inverse does not necessarily imply
+that the inverse can be easily computed. There are
+flow architectures that allow only one of the above operations to be efficiently performed
+\cite{kobyzev_normalizing_2020,papamakarios_normalizing_2021}. However, it is also not uncommon that both operation have the same complexity \cite{dinh_nice_2015}. The major goal of this work is to design a flow architecture that does not only allow to perform both operations efficiently, but it also allows an efficient analysis of the flow in a verification context.
+
+For the latter, it is often required to not only sample individually, but verify on a space of sampled objects. 
+We define the spaces containing high-density and low-density samples as upper- and lower density level sets.
+
+\begin{definition}
+Given the density of the input distribution $p_D:\mathbb{R}^d \rightarrow \mathbb{R}_+$. The set of points whose density exceeds a given threshold $t$ is called the upper density level set (UDL) and is defined as ${L^{\uparrow}_D
+(t) \coloneqq \{ x \in \mathbb{R}^d \mid p_D (x) > t \}}$.
+Respectively, the lower density level set (LDL) contains the set of points deceeding the density threshold: ${{L^{\downarrow}_D (t)\coloneqq\{ x \in \mathbb{R}^d \mid p_D (x) \leq t \}}= \mathbb{R}^d\setminus L^{\uparrow}_D}$. If for $q\in[0,1]$ there is a unique UDL of $D$ with probability $q$, then we denote this set by $\text{UDL}_D(q)$.
+\end{definition}
+Upper density level sets naturally capture the center of the distribution while LDLs capture the tail.
+Note that the existence and uniqueness of the UDL with given probability is guaranteed if $P_D(\{x\mid p(x)_D =t\}) = 0$ for all $t>0$ and the image of the density function $p_D$ is a (possibly infinite) initial segment of the positive reals.
+
+\paragraph{Base Distributions}
+An isotropic Gaussian is the by far most common choice for the base distribution of a flow model. In this case, we refer to the model as a normalizing flow. A normal distribution might seem to be the natural choice, but it is definitely not the only option.
+In fact, the Knothe-Rosenblatt Rearrangement Theorem \cite{knothe_contributions_1957,rosenblatt_remarks_1952} guarantees that any two absolutely continuous distributions can be transformed into one another via a diffeomorphism between their supports.
+In the next section, we will show that under certain conditions $p$-radial monotonic base distributions with $p\in\{1,\infty\}$, especially the Laplacian distributions, provide some merits that allow efficient analysis of our flow model in verification scenarios. In our case, it even turned out that changing the base distribution boosted the performance of the model and the stability of the training.
+\begin{definition}
+    Let $X$ be random variable over $\mathbb{R}^d$. We say that $X$ is $p$-radially distributed if there is a function $g:\mathbb{R}_+\to\mathbb{R}_+$ such $p(x) = g(|x|_p)$.
+    If $g$ is also strictly monotonically decreasing, then we say that $X$ is $p$-radial monotonic.
+\end{definition}
+Moreover, $p$-radial distributions are easily definable starting from the corresponding distribution of $p$-norms.  
+In the following, let $V^d_p(r)$ is the hyper volume of the $L^p$-ball of radius $r$ in $\mathbb{R}^d$. 
+\begin{definition}
+  Let $\rho: \RR_+\to\RR_+$ be a probability density and $p\in \NN_{>0}\cup\{\infty\}$. 
+  Then we call $R_{\rho,p,d}$ the $p$-radial distribution with $p$-norm distribution $\rho$ in $d$-dimensional space, which is given by the probability density function 
+  $p_{R_{\rho,p,d}}(x) = \rho(|x|_p) \left(\frac{\partial V^d_p(r)}{\partial r}(|x|_p)\right)^{-1}$.
+\end{definition}
+In other words, a $p$-radial distribution is completely determined by the distribution of the $p$-norm. 
+Note that if $X$ is radial monotonic, it does not imply that $p_{|X|_p}$ is monotonic. For instance, if $X$ is a $d$-dimensional standard Gaussian, then $X$ is $2$-radial monotonic but $|X|_2$ is $\chi(d)$ distributed and hence not monotonic for $d>1$.
+
+The following observation is crucial for our application: The density level sets of a $p$-radial monotonic distribution are $L^p$-balls. By choosing $r(q) \coloneqq \textrm{quantile}_{|X|_p}\left(q\right)$, we obtain the following result:
+\begin{restatable}{prop}{lp_ball_udl}\label{prop:lp_ball_udl}
+    Let $X$ be a $p$-radial monotonic random variable on $\mathbb{R}^d$. Then there is a function $r:[0,1)\to\mathbb{R}_+$ such that for any $q\in[0,1)$, the upper density level set of probability $q$ is given by $\textrm{UDL}_X(q) = \mathbb{B}^d_p(r(q))$, where $\mathbb{B}^d_p(r)$ is the $L^p$-ball of radius $r$ with center at the origin. 
+\end{restatable}
+
+\subsection{Good Properties for Verification}\label{sec:good_props_verification}
+As we argued earlier, piece-wise affinity is crucial for efficient SMT based verification. For the usage of our flow model this means that the transformation as well as the (log-)likelihood of the model should be piece-wise affine.
+A natural approach to start off is therefore the use of piece-wise affine networks, represented e.g. by ReLU networks. If we can ensure that the defined function is bijective, then we obtain a continuous piece-wise affine bijection where
+the affine regions can be represented as intersections of open and closed half-spaces \cite{moser_tessellationfiltering_2022}. Hence, the regions are contained in
+in the Borel algebra $\mathcal{B}(\mathbb{R}^d)$. It is straight forward to 
+show that the change of variables formula applies piece-wise. We include a proof for the sake of self-containedness.
+
+ \begin{restatable}{prop}{paflow}\label{prop:pa-flow}
+     Let $F:\mathbb{R}^n\to\mathbb{R}^n$ be a piece-wise affine bijection with affine partition $R_1,\ldots,R_n\in \mathcal{B}(\mathbb{R}^d)$ of the input space and corresponding affine functions $f_1,\ldots, f_n$.
+     Let $X$ be an absolutely continuous random variable. Then 
+     $p_{F(X)}(y) = p_{X}(F^{-1}(y))\left|\det\frac{\partial F^{-1}}{\partial y}\right|$,
+     where the Jacobean of $F^{-1}$ is evaluated piece-wise. More precisely,
+     $\left|\det\frac{\partial F^{-1}}{\partial y}\right| = \sum_i \left|\det\frac{\partial f_i^{-1}}{\partial y}\right| \cdot \mathbb{I}\left[F^{-1}(x)\in R_i\right]$, where $
+    \mathbb{I}$ is the indicator function.
+ \end{restatable}
+ 
+\begin{proof}
+We define the random variable 
+$$C: \mathbb{R}^d\to \{1,\ldots, n\}; x\mapsto \sum_{k=1}^n k\cdot \mathbb{I}\left[x \in R_k\right]$$ and consider the conditional probability densities
+$p_{X}(x\mid C=i) = P(X\in R_i)^{-1} p_X(x) \cdot \mathbb{I}[x\in R_i]$. Since $F$ is an affine bijection on $R_i$,
+the support of $p_X(\cdot | C=i)$, we can employ the change of variables formula and obtain that $p_{F(X)}(y\mid C=i)= P(X\in R_i)^{-1} p_X(f_i^{-1}(y)) \left|\det\frac{\partial f_i^{-1}}{\partial y}\right| \cdot \mathbb{I}[F^{-1}(y)\in R_i]$. Finally, we obtain by the sum rule that 
+\begin{align*}
+    p_{F(X)}(y) &= \sum_{i=1}^n P(C=i) p_{F(X)}(y\mid C=i) \\
+                &=\sum_{i=1}^n P_X(X\in R_i) p_{F(X)}(y\mid C=i) \\
+                &= \sum_{i=1}^n p_X(f_i^{-1}(y)) \left|\det\frac{\partial f_i^{-1}}{\partial y}\right| \cdot \mathbb{I}[F^{-1}(y)\in R_i] \\
+                &\stackrel{\ast}{=} \sum_{i=1}^n \left(\underbrace{\sum_{j=1}^n p_X(f_i^{-1}(y))\mathbb{I}[F^{-1}(y)\in R_j]}_{=p_X(F^{-1}(y))}\right) \left|\det\frac{\partial f_i^{-1}}{\partial y}\right| \cdot \mathbb{I}[F^{-1}(y)\in R_i] \\
+                &= p_X(F^{-1}(y)) \sum_{i=1}^n \left|\det\frac{\partial f_i^{-1}}{\partial y}\right| \cdot \mathbb{I}[F^{-1}(y)\in R_i] \\
+                &= p_{X}(F^{-1}(y))\left|\det\frac{\partial F^{-1}}{\partial y}\right|,
+\end{align*}
+where $(\ast)$ holds since 
+$\mathbb{I}[F^{-1}(y)\in R_i]\cdot \mathbb{I}[F^{-1}(y)\in R_j]=\delta_{ij} \mathbb{I}[F^{-1}(y)\in R_i]$, where $\delta_{ij}=\begin{cases} 1; i=j \\ 0; \text{ else}\end{cases}$ is the Kronecker-Delta.\qed
+\end{proof}
+
+Next, we consider the choice of the base distribution.
+
+\begin{restatable}{prop}{padensity}\label{prop:pw_affine}
+  Let $p_D$ be defined by a piece-wise affine flow $F$ and a log-piece-wise affine base distribution $p_B$. Then $\log p_D$ is piece-wise affine. \ 
+\end{restatable}
+
+\begin{proof}
+  As we have seen,
+  
+  \begin{align*}
+    \log p_D (\mathbf{x}) &= \log
+    p_{B} (F (x)) + \log \left| \textrm{det}\frac{\partial
+  F}{\partial x}  \right|
+  \end{align*}
+  
+  Since $F$ and $\log p_B(\cdot)$ are piece-wise affine, $\log p_{B} (F (x))$ is also piece-wise affine. Similarly, $\left|\textrm{det}\frac{\partial F}{\partial x} \right|$ is piece-wise constant, which implies that $\log\left|\textrm{det}\frac{\partial F}{\partial x} \right|$ is piece-wise constant too. The claim follows immediately.\qed
+\end{proof}
+If restrict the flow model to further have a constant Jacobian determinant, then we obtain an even more intriguing way defining density level sets by the flow.
+\begin{restatable}{prop}{pudl}
+  \label{prop:levelsets}
+  If the determinant of the Jacobian of a flow $F$ on $\mathbb{R}^d$ is constant, then $F$ maps upper density level sets of the target distribution to upper density level sets of the base distribution.
+  Hence, if $B$ is a $p$-radial monotonic distribution over the domain of $F$, then there is a function $r:[0,1)\to \mathbb{R}_+$ such that $\textrm{UDL}_{F(B)}(q) = F(\mathbb{B}^d_p(r(q)))$.
+\end{restatable}
+
+\begin{proof}
+  This is a direct consequence of the change of variables formula.
+  \begin{eqnarray*}
+    F (\{ x \mid \log p_D (x) > t \}) & = & \{ F (x) \mid \log p_D (x) > t
+    \}\\
+    &= & \left\{ F (x) \mid \log p_B (F
+    (x)) > t - \underbrace{\log \left| \textrm{det}\frac{\partial
+  F}{\partial x}  \right|}_{\text{const}} \right\}\\
+    & = & \{ y \mid \log p_B (y) > t'\},
+  \end{eqnarray*}
+  which is obviously an upper log-density level set w.r.t. the latent
+  distribution $B$. The last equation holds since $F$ is a bijection and $\log \left| \textrm{det}\frac{\partial
+  F}{\partial x}  \right|$ is constant. We combine the observation with the idea from \ref{prop:lp_ball_udl} and conclude that for radial monotonic $B$ and $r(q) = \textrm{quantile}_{|B|_p}(q)$ the identity
+  $\textrm{UDL}_{F(B)}(q) = F\left(\mathbb{B}^d_p(r(q))\right)$ is indeed correct.\qed
+\end{proof}
+
+The latter proposition is especially attractive for abstract interpretation methods.
+For a radial monotonic base distribution w.r.t. the $1$- or the $\infty$-norm, density level sets are definable by linear constraints.
+They can therefore act as an initial
+set that is propagated through the flow to obtain an approximation
+of the upper density level set of the data distribution. As we can derive from Proposition \ref{prop:lp_ball_udl}, the function $r$ is simply the quantile function of the $p$-norm distribution of $B$. Hence, Proposition \ref{prop:levelsets} yields an effective procedure. The approach is summarized in Figure \ref{fig:abstact-interpretation}. A major challenge in the application, however, will be the tightness of the approximation of the non-linearity. There is a delicate trade off to be made between tightness of approximation and complexity of the description. Interesting work in this direction has been done by Stanley Bak \cite{bak_nnenum_2021}.
+
+\begin{figure}
+  \centering
+
+  
+
+\tikzset{every picture/.style={line width=0.75pt}} %set default line width to 0.75pt  
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[x=0.75pt,y=0.75pt,yscale=-1,xscale=1]
+
+\draw   (317.78,87.93) -- (392.54,109.46) -- (392.71,138.73) -- (318.2,161.11) -- cycle ;
+\draw    (110.02,51.5) -- (151.12,52.07)(109.98,54.5) -- (151.08,55.07) ;
+\draw [shift={(160.1,53.7)}, rotate = 180.8] [fill={rgb, 255:red, 0; green, 0; blue, 0 }  ][line width=0.08]  [draw opacity=0] (10.72,-5.15) -- (0,0) -- (10.72,5.15) -- (7.12,0) -- cycle    ;
+\draw[color={rgb, 255:red, 184; green, 233; blue, 134 }] (47.86,85.25) -- (87.81,129.25) -- (43.82,169.19) -- (3.87,125.2) -- cycle ;
+\draw   (102,105.07) .. controls (102,107.7) and (109.32,109.84) .. (118.35,109.84) .. controls (127.39,109.84) and (134.71,107.7) .. (134.71,105.07) .. controls (134.71,102.44) and (142.03,100.3) .. (151.06,100.3) .. controls (160.09,100.3) and (167.42,102.44) .. (167.42,105.07) -- (167.42,143.23) .. controls (167.42,140.6) and (160.09,138.46) .. (151.06,138.46) .. controls (142.03,138.46) and (134.71,140.6) .. (134.71,143.23) .. controls (134.71,145.86) and (127.39,148) .. (118.35,148) .. controls (109.32,148) and (102,145.86) .. (102,143.23) -- cycle ;
+\draw    (320.41,53) -- (360.79,52.75)(320.43,56) -- (360.81,55.75) ;
+\draw [shift={(369.8,54.2)}, rotate = 179.65] [fill={rgb, 255:red, 0; green, 0; blue, 0 }  ][line width=0.08]  [draw opacity=0] (10.72,-5.15) -- (0,0) -- (10.72,5.15) -- (7.12,0) -- cycle    ;
+\draw  [fill={rgb, 255:red, 184; green, 233; blue, 134 }  ,fill opacity=1 ] (261.42,69.5) -- (299.32,124.67) -- (222.42,177.5) -- (184.52,122.33) -- cycle ;
+\draw  [fill={rgb, 255:red, 255; green, 255; blue, 255 }  ,fill opacity=1 ] (203.96,130.14) .. controls (200.79,125.64) and (200.42,119.75) .. (202.98,114.97) .. controls (205.55,110.2) and (210.62,107.36) .. (216.03,107.68) .. controls (216.02,104.11) and (217.69,100.78) .. (220.51,98.69) .. controls (223.34,96.6) and (227,96) .. (230.38,97.08) .. controls (230.3,93.88) and (231.85,90.9) .. (234.49,89.18) .. controls (237.12,87.47) and (240.47,87.27) .. (243.34,88.65) .. controls (244.18,84.78) and (247.17,81.78) .. (251.01,80.94) .. controls (254.84,80.11) and (258.84,81.6) .. (261.28,84.77) .. controls (264.43,84.1) and (267.74,84.85) .. (270.35,86.83) .. controls (272.97,88.82) and (274.62,91.83) .. (274.89,95.1) .. controls (279.49,97.29) and (282.62,101.77) .. (283.14,106.85) .. controls (283.65,111.93) and (281.46,116.87) .. (277.39,119.81) .. controls (279.41,123.78) and (279.18,128.51) .. (276.77,132.18) .. controls (274.37,135.85) and (270.17,137.89) .. (265.79,137.51) .. controls (266.86,142.97) and (264.73,148.5) .. (260.33,151.72) .. controls (255.93,154.94) and (250.05,155.26) .. (245.22,152.55) .. controls (242.99,156.29) and (239.34,158.93) .. (235.11,159.87) .. controls (230.88,160.82) and (226.42,159.99) .. (222.73,157.57) .. controls (219.58,159.73) and (215.4,159.64) .. (212.27,157.36) .. controls (209.14,155.08) and (207.73,151.09) .. (208.73,147.37) .. controls (204.79,147.13) and (201.4,144.35) .. (200.32,140.48) .. controls (199.24,136.61) and (200.72,132.53) .. (203.99,130.36) ; \draw   (208.73,147.37) .. controls (210.59,147.48) and (212.43,147.01) .. (213.99,146.03)(222.73,157.57) .. controls (223.39,157.12) and (223.99,156.59) .. (224.51,155.98)(245.22,152.55) .. controls (244.33,152.05) and (243.5,151.45) .. (242.73,150.78)(265.79,137.51) .. controls (265.6,136.51) and (265.3,135.54) .. (264.91,134.6)(277.38,119.81) .. controls (275.23,115.59) and (270.88,112.95) .. (266.21,113.04)(274.89,95.1) .. controls (275.04,96.85) and (274.78,98.6) .. (274.15,100.21)(261.28,84.77) .. controls (261.68,85.29) and (262.03,85.85) .. (262.33,86.45)(243.34,88.65) .. controls (243.13,89.62) and (243.06,90.61) .. (243.13,91.6)(230.38,97.08) .. controls (230.4,97.85) and (230.52,98.61) .. (230.72,99.35)(216.03,107.68) .. controls (217.17,107.75) and (218.31,107.96) .. (219.4,108.3)(203.96,130.14) .. controls (204.39,130.76) and (204.88,131.34) .. (205.4,131.89) ;
+\draw    (416.42,84.5) -- (436.42,84.5) ;
+\draw    (426.42,84.5) -- (426.05,163.15) ;
+\draw    (416.23,163.7) -- (435.23,163.7) ;
+\draw  [fill={rgb, 255:red, 184; green, 233; blue, 134 }  ,fill opacity=1 ] (421.02,93.7) -- (431.25,93.7) -- (431.25,140) -- (421.02,140) -- cycle ;
+\draw  [fill={rgb, 255:red, 255; green, 255; blue, 255 }  ,fill opacity=1 ] (421.01,101.25) -- (431.26,101.25) -- (431.26,132.45) -- (421.01,132.45) -- cycle ;
+\draw   (484,13) -- (658.27,13) -- (658.27,83.3) -- (484,83.3) -- cycle ;
+\draw   (492.7,23) -- (512,23) -- (512,42.3) -- (492.7,42.3) -- cycle ;
+\draw  [color={rgb, 255:red, 0; green, 0; blue, 0 }  ,draw opacity=1 ][fill={rgb, 255:red, 184; green, 233; blue, 134 }  ,fill opacity=1 ] (492.7,54) -- (512,54) -- (512,73.3) -- (492.7,73.3) -- cycle ;
+\draw    (439.35,102.02) -- (448.13,102.27) ;
+\draw    (448.13,102.27) -- (448.25,132.88) ;
+\draw    (439.25,132.88) -- (448.25,132.88) ;
+\draw    (448.19,117.57) -- (456.33,117.6) ;
+
+\draw (15,42) node [anchor=north west][inner sep=0.75pt]   [align=left] {Latent UDL};
+\draw (115.1,120.2) node [anchor=north west][inner sep=0.75pt]   [align=left] {Flow};
+\draw (203,41) node [anchor=north west][inner sep=0.75pt]   [align=left] {Data UDL};
+\draw (208.29,114.18) node [anchor=north west][inner sep=0.75pt]  [rotate=-1.33] [align=left] {$\displaystyle UDL_{D}( q)$};
+\draw (20,116) node [anchor=north west][inner sep=0.75pt]   [align=left] {$\displaystyle \mathbb{B}_{p}^{d} (r(q))$};
+\draw (324,116) node [anchor=north west][inner sep=0.75pt]   [align=left] {Classifier};
+\draw (397.95,33) node [anchor=north west][inner sep=0.75pt]   [align=left] {Classifier\\Range};
+\draw (443,74) node [anchor=north west][inner sep=0.75pt]   [align=left] {$\displaystyle 1$};
+\draw (439,154) node [anchor=north west][inner sep=0.75pt]   [align=left] {$\displaystyle 0$};
+\draw (522,27) node [anchor=north west][inner sep=0.75pt]   [align=left] {Exact Set};
+\draw (522.4,56) node [anchor=north west][inner sep=0.75pt]   [align=left] {Over-approximation};
+\draw (457.6,109) node [anchor=north west][inner sep=0.75pt]   [align=left] {$\displaystyle C( UDL_{D}( q))$};
+\end{tikzpicture}
+} % resizebox
+  \caption{Visualization of an abstract interpretation approach to in-distribution verification of a classifier using a flow model with constant Jacobian determinant and a $p$-radial monotonic base distribution. The procedure starts by defining the UDL exactly in the latent space. The true classification range w.r.t. the UDL equals the result of pushing the set consecutively through the flow and the classifier. An over-approximation can be obtained via abstract interpretation.}\label{fig:abstact-interpretation}
+\end{figure}
+
+   
+Interestingly, already the restrictions to piece-wise affine bijections leads us to classes of flows with a constant Jacobian determinant. 
+We provide an architectural survey in following section.
+
+
+\section{An Architectural Survey}
+
+We survey the literature to identify learnable components that satisfy our needs. Most prominently, additive conditioning layers, like additive coupling, turn out to yield exactly the networks that we envision. This encompasses the seminal NICE architecture \cite{dinh_nice_2015}, additive auto-regressive layers \cite{kingma_improved_2016,huang_neural_2018,papamakarios_masked_2017}, and masked additive convolutions \cite{ma_macow_2019}. 
+
+Additionally, bijective affine transformations represented by LU-decomposed affine layers (LUNets \cite{chan_lunet_2023}) turn out to be equally well suitable. These layers also constitute a powerful replacement for the permutations or masks that are usually employed before a coupling-like layer. Although this addition turned out to be very beneficial, we note that the number of parameters scales quadratically with the dimension, which can be a performance bottleneck on high dimensional data.
+
+\subsection{Additive Transformations}
+As it turns out, additive transformations yield precisely the properties that we need in order to guarantee the good properties of the previous section.
+The simplest such architecture is realized by so called additive coupling, which was first introduced for
+the NICE architecture by Dinh et al. {\cite{dinh_nice_2015}}.
+\subsection{Additive Coupling (NICE)}\label{sec:additive_coupling}
+NICE belongs to the first flow architectures. 
+Nevertheless, it is a popular benchmark which has shown good performance on multiple data sets.
+
+\paragraph{Additive Coupling Layers}
+
+A NICE flow is build from additive coupling layers. Each such layer $L$
+consists of a partition $I_1, I_2$ of $[D]$, where $D$ is the data dimension,
+and a conditioning function $m : \mathbb{R}^d \rightarrow \mathbb{R}^{D - d}$,
+where $d = | I_1 |$. The layer $L$ maps $x$ to $y$ where
+\begin{eqnarray*}
+  y_{I_1} & = & x_{I_1}\\
+  y_{I_2} & = & x_{I_2} + m (x_{I_1}) .
+\end{eqnarray*}
+It is easy to see that the Jacobean $\frac{\partial y}{\partial x} =
+\left(\begin{array}{cc}
+  I_d & 0\\
+  \frac{\partial y_{I_2}}{\partial x_{I_1}} & I_{D-d}
+\end{array}\right)$ is triangular and that all entries on the diagonal
+are $1$. As the first $d$ components of the input remain unchanged, it is
+usually necessary to employ multiple layers with varying partitions of the
+input vector. It is straight forward to see that a coupling layer defines a piece-wise affine function if the conditioner $m$ is piece-wise affine.
+
+\paragraph{Allowing Rescaling}
+
+As all additive coupling layers have Jacobean determinant $1$, the same will
+hold for their composition. That means the space is never stretched or compressed through the transformation, which potentially limits the expressiveness. In order to account for this issue, NICE allows
+for a final  component-wise rescaling, i.e. multiplication with a matrix
+$S$, where $S_{{ij}} \begin{cases}
+  \neq 0 & \text{if } i = j\\
+  = 0 & \text{else}
+\end{cases}$. \
+
+\paragraph{Computing log-Densities}
+
+Because of the simple additive coupling, computing log-densities is
+particularly simple. Let $F$ be a NICE flow with base distribution $B$, layers
+$L_1, \ldots, L_n$, and scaling matrix S. Then
+\begin{align*}
+  \log (p_D (\mathbf{x})) & = & \log \left( p_B (F (x)) \left|
+  \textrm{det}\frac{\partial F}{\partial x} \right| \right) \nonumber\\
+  & = & \log \left( p_B (F (x)) \cdot \prod \left| \textrm{det}\frac{\partial
+  L_i}{\partial x} \right| \cdot |\det S | \right) \nonumber\\
+  & = & \log p_B (F (x)) + \underbrace{\sum \log \left| \textrm{det}\frac{\partial
+  L_i}{\partial x}  \right|}_{= 0} + \log |\det S | \nonumber\\
+  & = & \log p_B (F (x)) + \sum \log S_{ii} 
+\end{align*}
+
+Computing $F^{- 1} (z)$ has exactly the same complexity as computing a forward
+pass $F (x)$. Because in order to invert the flow we only need to multiply
+with the inverse scaling matrix and then pass the input to through the inverse
+coupling layer in reverse order. Note that for an additive coupling layer $L =
+((I_1, I_2), m)$ the inverse function can be implemented by $L^{- 1} = ((I_1,
+I_2), - m)$.
+
+\subsubsection{Masked Additive Coupling}
+It is also possible to rewrite the additive coupling equation in order to implement the NICE architecture as a fully connected neural network with masking and skip connections. An additive 
+coupling layer $\ell: \genfrac(){0pt}{2}{x_{I_1}}{x_{I_2}} \mapsto  \genfrac(){0pt}{2}{x_{I_1}}{x_{I_2}+c(x_{I_1})}$, whose conditioner is implemented by a neural network $c$ can equivalently be written as 
+\begin{align}
+\ell(x) = x + (1-\textrm{mask})\cdot c'(\textrm{mask}\cdot x),\label{eqn:mask}
+\end{align}
+where $\textrm{mask}$
+is a $\{0, 1\}$-vector with $\textrm{mask}_i = 1 \Leftrightarrow i\in I_1$ and the multiplication is computed component wise. Further, $c'$ is a fully connected network obtained by adding dummy inputs for the components in $I_2$ and dummy outputs for the components of $I_1$ to $m$, which are effectively eliminated by the mask in Equation \ref{eqn:mask}. 
+
+\subsubsection{Additive Auto-Regression}
+A general way to increase the expressiveness of the  based flow models is the use of auto-regression instead of coupling \cite{kingma_improved_2016,huang_neural_2018,papamakarios_masked_2017}. In this case the conditioner is implemented as an RNN $c$, which couples the input component by component. More precisely, an additive auto-regressive flow layer $\ell$ computes a transformation $\ell(x) = y$ with
+\begin{align*}
+    &h_1, z_1 = 0;\hspace{1em} (h_{i + 1},z_{i+1}) = c(x_i, h_{i}) \\
+    &y_i = x_i + z_i 
+\end{align*}
+Observe that the structure of the auto-regression still leads to a lower triangular shape of the Jacobean and the additive auto-regressive coupling ensures that all diagonal entries are $1$. With these properties one easily checks Proposition \ref{prop:pa-flow}, \ref{prop:pw_affine} and \ref{prop:levelsets} remain valid if additive coupling is replaced by additive auto-regression.
+
+\subsubsection{Masked Additive Convolutions}
+The idea of masking was used in \cite{ma_macow_2019} in order to transfer coupling to convolutional architectures where the input is a higher-order tensor. We can also employ this idea in our situation and still maintain the desired properties. In this case, Equation \ref{eqn:mask} is applied to a convolutional network, e.g. with a checker board and/or a channel-wise mask. As the reader readily verifies, the analogues of Proposition \ref{prop:pa-flow} - \ref{prop:levelsets} hold also for this layer.
+\subsubsection{LUNets}
+Recently, bijective fully-connected layers have been proposed in \cite{chan_lunet_2023} as LUNet. The idea is to ensure that that both, the affine transformation of a fully connected layer and the non-linearity are bijections. Bijectivity is ensured by representing the linear transform of the layer by an LU-factorization $A = LU$ with lower/upper triangular Matrices $L$ and $U$. Bijectivity is ensured by adding the constraints that the diagonal of $L$ contains only ones and diagonal of $U$ is always non-zero. In this case, Propositions \ref{prop:pa-flow} and \ref{prop:pw_affine} will still hold if we replace the layer architecture and use leaky ReLU instead of ReLU, but Proposition \ref{prop:levelsets} will in general not hold anymore as the determinant of the layer Jacobean is not constant anymore. 
+
+LUNet is a very different approach to guaranteeing the bijectivity of the transformation compared to additive coupling. It has the advantage that the entire input can be transformed by a single layer.
+The restriction that the affine transform needs to be bijective, however, fixes the capacity of the transformation to $d^2$ parameters where $d$ is the input dimension. This can be problematic, especially when working with high-dimensional data. 
+
+\subsubsection{Bijective Affine Layers}
+The bijective affine transform $T(x) = (LU)x + b$ at the heart of an LU-layer deserves special attention. Note that the determinant of the Jacobean is is constant for $T$. Since computing the inverse of an affine transform also has the complexity of computing the affine transform it follows that we can add bijective affine layers to the list of layers in Proposition \ref{prop:addtrans} without loosing the validity of the statement. Bijective affine layers can be an interesting alternative to the intermediate permutation layers of the NICE architecture. Using an affine bijection instead of a simple fixed permutation of the dimensions allows the architecture to correlate the components of $I_1$ and $I_2$ in the subsequent coupling layer in a learnable fashion. As an example, consider the extreme case where all components of the target distribution are independent. In this case, the components $I_1$ and $I_2$ will be independent, no matter which permutation of the components we have applied beforehand. An affine bijection, however, can be capable of combining the variables in a way such that the components $I_1$ and $I_2$ become correlated.    
+
+\subsection{The VeriFlow Architecture}
+We summarize the good properties of flows build from these layers in the following proposition, which also defines our proposed architecture. 
+
+\begin{restatable}[VeriFlow]{prop}{veriflow}\label{prop:addtrans}
+    Let $F$ be a network that is purely build from the layer types (masked) additive coupling, additive autoregression, masked additive convolution, LU layers, component-wise scaling, and permutation of input dimensions. If the first three layer types only use piece-wise affine conditioning networks, then $F$ is a piece-wise affine flow with constant Jacobean determinant. In particular, any density $p_D$ defined by $F$ has the following properties:
+    \begin{enumerate*}[label=(\arabic*)]
+        \item If $\log p_B(\cdot)$ is piece-wise affine, then $\log p_D$ is piece-wise affine.
+        \item For any $p$-radial monotonic base distribution $B$ there is a function $r:[0,1)\to \mathbb{R}_+$ such that $\textrm{UDL}_{F(B)}(q) = F(\mathbb{B}^d_p(r(q)))$.
+        \item Computing log-densities has the same computational complexity as sampling.
+    \end{enumerate*}
+\end{restatable}
+
+
+
+\section{Experiments}
+
+
+The goal of our experiments is twofold.
+Firstly, in Section~\ref{sec:verification_experiments}, we show that the architecture of our flow model can be integrated with common verification frameworks for scalable verification and for obtaining more representative counterexamples when the neural network is unsafe.
+Secondly, in Section~\ref{experiment:ablation_study} we show that combining LU-layers with additive coupling significantly improves over the baseline performance of the NICE architecture and that certain $1$-radial base distributions outperform their normalizing counterparts in the majority of benchmarks.
+\subsection{Verification}\label{sec:verification_experiments}
+We train a flow model for each digit $i$ on rescaled MNIST ($\text{MNIST}^{10\times 10}_i$) and denote them by $g_1, \ldots, g_9$.
+Each flow model in our experiments has $3$ additive coupling layers with $100$ neurons and ReLu activation functions.
+Furthermore, we train classifiers with varying depth $f_\ell$, where $\ell$ corresponds to the number of layers $1\leq \ell\leq 15$, with each layer consisting of a matrix multiplication, addition and ReLU activation, in the network.
+We trained the networks with Adam-optimizer obtaining an accuracy score of around $90\%$ for all classifiers. We did not aim at making the classifiers particularly safe or unsafe w.r.t. the verification tasks at hand.
+The final classification then corresponds to the respective digit with the highest score.
+
+As verification tools, we use the Python interface of the C++ implemented verification framework Marabou 2~\cite{wu2024marabou} for deductive verification and ERAN, a pure Python implementation, for abstract interpretation~\cite{ERAN_website}.
+Since both verifiers only allow for one network to be parsed, we merge both networks together by piping the output of the flow model $g_\tau$ into the classifier $f_\ell$, resulting in one neural network that computes the composition $f_\ell \circ g_{\tau}: \mathbb{R}^{10\times 10} \rightarrow \mathbb{R}^{10}$.
+We run all our verification-experiments environment on a Ubuntu 22.04 machine with an i7-1365U 1.80 GHz, 32 GB RAM and Intel Iris Xe Graphics.
+
+\subsubsection{Verification within data distribution}
+In this section, we want to verify the (unsafe) MNIST classifier $f_1$. In particular, we want to show that the counterexamples obtained when leveraging our flow model for verifying the classifier is more representative of real-world inputs than the counterexamples obtained without leveraging a flow model.
+As a toy property, we verify that $f_\ell$ always has a high confidence for all images that are classified as a specific digit~$\target$.
+Counterexamples to this property contain images that are classified as $\target$ but with a confidence lower than $\delta$. Such images are shown in Figure~\ref{fig:verification:more_indist}.
+
+The top row of Figure~\ref{fig:verification:more_indist} contains the precondition, assignment and postcondition that were used for the corresponding experiments.
+The postcondition $\psi$ is the same for all experiments: given the output $\vec{y}$ of the neural network $f_1$, a digit $\target$ and and arbitrary but fixed confidence threshold $\delta$ we want to verify whether the output of the classifier $\vec{y}\coloneqq f_1(x)$ satisfies the postcondition ${\psi(\vec{y})}$.
+The confidence is defined as $\mathit{conf}(\vec{y},\target)\coloneqq \nicefrac{(|\vec{y}|\cdot \vec{y}[\target] - \sum_{j\neq \target}\vec{y}[j]))}{|\vec{y}|}$ with $|\vec{y}|$ denoting the number of elements in $\vec{y}$.
+
+The results in Figures~\ref{fig:verification:more_indist_without_flow} and~\ref{fig:verification:more_indist_with_flow} mainly differ in the precondition $\phi$. In Figure~\ref{fig:verification:more_indist_without_flow} the precondition restricts the input to be \textit{any} grayscale pixel image with resolution~$10\times 10$. That image is then applied to the classifier $f_1$ to obtain the scores $\vec{y}$.
+In Figure~\ref{fig:verification:more_indist_with_flow}, on the other hand, the precondition restricts the input $\vec{x}$ to the UDL in the latent space. The threshold $t$ is determined such that~$p_D (L^{\uparrow}_D (t_p)) = p$ where $p=0.01$.
+Applying the flow $g_\target$ yields a top $1\%$ typical image which is then applied to the classifier $f_1$ to obtain the score $\vec{y}$.
+In all experiments, the network does not satisfy the property and the images in Figure~\ref{fig:verification:more_indist} correspond to the counterexamples provided by the solver.
+ 
+As can be seen, the images on the left, which do not utilize a flow model, are noise and come from a region of the input space with high epistemic uncertainty.
+This provides almost no insight to the weakness of the classifier when used in real world.
+However, the images on the right, that do utilize a flow model, come from within the data distribution and provide a deeper insight to the classifier's weakness as the images indeed resemble the digits $7$ and $8$. 
+As an alternative to using flow models, autoencoders also yield similar visual results \cite{xie_neurosymbolic_2022}. 
+However, autoencoders lack probabilistic interpretability and fine-grained probabilistic control of the input-space, which are essential parts of our flow-model \cite{xie_neurosymbolic_2022}.
+
+\begin{figure}[b]
+     \centering
+     \begin{subfigure}[b]{0.49\textwidth}
+         \centering
+         \begin{gather*}
+            \phi\colon\bigl\{\vec{x}  \in [0,255]^{10\times 10} \bigr\} \\
+            \mathrel{ \vec{y} \gets f_1(\vec{x})} \\
+            \psi\colon\bigl\{ argmax(\vec{y}) = \target \rightarrow \mathit{conf}(\vec{y},\target)>\delta \bigr\}
+        \end{gather*}
+        \includegraphics[width=2.5cm]{digit_7_without_flow_in_dist.png}
+        \includegraphics[width=2.5cm]{digit_8_without_flow_in_dist.png}
+        \caption{Counterexamples without flow model.}
+        
+    \label{fig:verification:more_indist_without_flow}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.49\textwidth}
+         \centering
+        \begin{gather*}
+            \phi\colon\bigl\{\vec{x}  \in L^{\uparrow}_D(t) \bigr\} \\
+            \mathrel{  \vec{y} \gets f_1(g_\tau(\vec{x}))} \\
+            \psi\colon\bigl\{argmax(\vec{y}) = \target \rightarrow\mathit{conf}(\vec{y},\target)>\delta \bigr\}
+        \end{gather*}
+        \includegraphics[width=2.5cm]{conf_17_in_dist_digit_7.png}
+        \includegraphics[width=2.5cm]{conf_17_in_dist_8.png}
+         \caption{Counterexamples with flow model.}
+    \label{fig:verification:more_indist_with_flow}
+     \end{subfigure}
+     \caption{The formulas at the top correspond to the verification conditions with $\target=7$ for each left side and $\target=8$ for each right side and $\delta=17$. The images at the bottom are counter-examples as provided by the solver. Note that for obtaining the images on the right, the assignment $x$ is reapplied to the flow $g_\target(x)$.}
+    \label{fig:verification:more_indist}
+\end{figure}
+\subsubsection{Epistemic Uncertainty Verification}\label{subsec:epistemic_verification}
+For the far tail of the data distribution there are usually no samples available. 
+Hence, any model trained purely from data has never gotten information about these areas (epistemic uncertainty). 
+In that context, we can verify that a classifier was trained with a vanishing inductive bias by moving away from the training data. 
+In this case the uncertainty estimates given by a classifier should converge towards a prior distribution, e.g., uniform,  as we move further outwards in the tail {\cite{kendall_what_2017,hullermeier_aleatoric_2021}}. 
+However, it is known that many deep neural network training methods produce badly calibrated networks with overconfident predictions, especially in areas of high epistemic
+uncertainty {\cite{guo_calibration_2017,minderer_revisiting_2021}}.
+In that context, we want to verify that our classifier is not overconfident in the far tail of the data distribution.
+More precisely, we leverage our flow model to restrict the input to the $9\%$ tail of the data distribution, trimming the last $1\%$ to avoid an unbounded input space and verify that the classifier has a low confidence for all atypical inputs.
+
+Similar to the in-distribution verification task, we conduct four experiments to compare the counterexamples without and with leveraging a flow model for restricting the input space and and present them in Figure~\ref{fig:epistemic_verifcation} along with the verification properties.
+
+The left upper side of Figure~\ref{fig:epistemic_verifcation} is the same as for the in-distribution verification task, except for the postcondition $\psi$, that now checks for the confidence to be \textit{low}, if the image is classified as the digit $\target$.
+In the right upper side of Figure~\ref{fig:epistemic_verifcation}, the precondition $phi$ restricts the input space to the top one percent of most typical examples by first determining the threshold $t$ such that~$p_D (L^{\uparrow}_D (t_p)) = p$ where $p=0.01$ and setting the precondition $\phi\colon\{\vec{x}\in L^{\uparrow}_D(t)\}$.
+The postcondition on the right side $\psi$ checks for the confidence to be low, if the image is classified as $\target$.
+
+The counterexamples on the left side of Figure~\ref{fig:epistemic_verifcation}, that do not utilize a flow model, are noise-images that do not resemble even atypical digits, despite being classified with high confidence.
+The counterexamples on the right side of Figure~\ref{fig:epistemic_verifcation}, however, are atypical images of the digits that are classified with high confidence.
+The latter is more useful for a user as it shows exactly the type of images where the classification itself is reasonable but the high confidence shows a wrong calibration of the neural network.
+\begin{figure}
+    \centering
+     \begin{subfigure}[b]{0.49\textwidth}
+        \begin{gather*}
+            \phi\colon\bigl\{\vec{x}  \in [0,255]^{10\times 10} \bigr\} \\
+            \mathrel{ y \gets f(\vec{x})} \\
+            \psi\colon\bigl\{ argmax(y) = \target \rightarrow \mathit{conf}(\vec{y},\target)\leq\delta \bigr\}
+        \end{gather*}
+        \centering
+        \includegraphics[width=2.5cm]{0_conf_8_noflow.png}
+        \includegraphics[width=2.5cm]{9_conf_8_noflow.png}
+        \caption{Counterexamples without flow model}
+     \end{subfigure}
+     \begin{subfigure}[b]{0.49\textwidth}
+        \begin{gather*}
+            \phi\colon\bigl\{\vec{x}  \in L^{\downarrow}_D
+(t) \bigr\} \\
+            \mathrel{\vec{y} \gets f(g_\target(x))} \\
+            \psi\colon\bigl\{argmax(y) = 0 \rightarrow\mathit{conf}(\vec{y},\target)\leq\delta \bigr\}
+        \end{gather*}
+        \centering
+        \includegraphics[width=2.5cm]{0_conf_8.png}
+        \includegraphics[width=2.5cm]{9_conf_8.png}
+         \caption{Counterexamples with flow model}
+     \end{subfigure}
+    \caption{The formulas at the top correspond to the verification conditions with $\target=0$ for each left side and $\target=9$ for each right side and $\delta=8$. The images at the bottom are counter-examples as provided by the solver. Note that for obtaining the images on the right, the assignment $x$ is reapplied to the flow $g_\target(x)$.}
+    \label{fig:epistemic_verifcation}
+\end{figure}
+
+One aspect that influences the quality of the counter examples of the verifier is the selected confidence threshold in the verification property.
+More precisely, running an in-distribution verification task on the same UDL but with different confidence thresholds for the classifier may also return more atypical images as shown in Figure~\ref{fig:confidence_impact}.
+There, the UDL in the precondition is the same in every experiment, only the confidence threshold $\delta$ in the postcondition $argmax(y) = \target \rightarrow \mathit{conf}(\vec{y},\target)>\delta$ is assigned values increasing from $1$ to $15$ (with gaps in between). 
+\begin{figure}[b!]
+    \centering
+    \includegraphics[width=0.9\textwidth]{out.png}
+    \caption{Counterexamples for in-distribution verification tasks with increasing confidence thresholds in the postcondition.}
+    \label{fig:confidence_impact}
+\end{figure}
+
+\subsubsection{Scalability}
+In this experiment, we assess the scalability of our flow model in the verification domain. To this end, we consider both the deductive verification tool Marabou 2~\cite{wu2024marabou} and the abstract interpretation tool ERAN~\cite{ERAN_website}.
+In order to assess the scalability reliably, we focus on verifying properties that are satisfied by the neural network. Otherwise, the deductive verifier could terminate early after finding a counterexample while barely touching the search space.
+We verify for a classifier $f_\ell$ that for a subspace of the $1\%$ UDL, the network $f_\ell$ classifies the whole output space of the flow model $g_0$ restricted by the UDL as the digit $0$.
+We show this property only for a subspace of the UDL because the full UDL does not constitute a zonotope which is required when working on the deepzono domain \cite{singh2018fast}. 
+One could eliminate this problem by either choosing an $\infty$-radial base distribution for the flow or by using abstract interpretation algorithms that can handle more general initial sets. 
+However, we decided to live with this shortcoming for now, since first experiments indicated that both the above mentioned approaches bear additional challenges in terms of quality of the fit and efficiency, respectively, that we cannot fully address in this work.
+For observing potential effects of the size of the neural network on the runtime, we conduct experiments with several classifiers varying in depth $f_1,\ldots,f_{15}$ as indicated on the X-Axis of Figure~\ref{subfig:eran-marabou-depth} and repeat each experiment three times taking the median value. Note that the y-axes are discontinuous in Figure~\ref{eran-marabou-cmp}.
+
+The results in Figure~\ref{subfig:eran-marabou-depth} indicate that the runtime of both tools is linear in the depth of the neural network. And even though Marabou is slower by a factor of up to $70$ compared to ERAN, both verifiers accomplish the verification tasks within seconds. 
+In a second experiment, we fix the neural network to $f_1$ and only increase the size of the input space.
+We present the results of the second experiment in Figure~\ref{subfig:eran-marabou-input-space}.
+Clearly, ERAN scales better than Marabou in both absolute values with a factor of around $50$ for the smallest tested input size as seen before, as well as in the overall trend when increasing the size of the input space to search in.
+In particular, we can now also observe a strong non-linear increase in the runtime of Marabou, as it reaches the timeout limit of $200$ seconds for an input size that is proved by the abstract interpreter within $20$ milliseconds.
+We conjecture that it is because Marabou also uses abstract interpretation methods as a preprocessing step for inferring bounds for each node in the network and use these bounds to simplifying or even trivialize the satisfiability problem. This, however, may no longer be feasible when the input space gets overly increased.
+We conclude that both ERAN and Marabou scales well for deeper neural networks and ERAN also scales well for increased input sizes.
+
+\begin{figure}
+     \centering
+     \begin{subfigure}[b]{0.49\textwidth}
+     
+         \centering
+         \includegraphics[width=\textwidth]{marabou-eran-network-depth.png}
+         \caption{Comparison increasing depth of the classifier}
+         \label{subfig:eran-marabou-depth}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.49\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{SMT-Abstract-runtime.png}
+         \caption{Comparison increasing input sizes}
+         \label{subfig:eran-marabou-input-space}
+     \end{subfigure}
+     \caption{Comparison of the runtime between ERAN (blue) and Marabou (red) for a complete proof.}
+     \label{eran-marabou-cmp}
+\end{figure}
+
+\subsection{Machine Learning}
+Besides the efficient applicability of our model in neuro-symbolic verification, our model needs to be versatile enough to capture the concepts of interest. 
+We show the effectiveness of our architecture as density estimator and generative model. 
+\subsubsection{Ablation Study} \label{experiment:ablation_study}
+We perform several ablation studies to compare our choice of the base distribution against the most commonly used Gaussian distribution as well as our architecture against the original NICE architecture. Our most surprising finding is that $1$-radial base distributions are not only competitive but outperform their Normal counterparts in the vast majority of benchmarks. Overall, we observed that the training with an $1$-radial base distribution, especially a Laplacian, is more stable (note the bad performance and high standard deviations for some digits with the normal distribution in Figure \ref{exp:ablation:digits} (left)). 
+
+As benchmarks, we mostly focus on tasks of moderate dimensionality and small sized networks since this scenario is approachable with the contemporary verification software on standard hardware. We pick up the example from the verification experiments and fit the models to each individual MNIST digit $i$ where the images are rescaled to $10\times 10$ pixels ($\text{MNIST}^{10\times 10}_i$) and we use three classic synthetic 2D datasets (circles, moons, blobs). All these experiments have been performed on a Macbook pro with M2 chip and 16GB of RAM. Additionally, we also scale our architecture to higher dimensions and more challenging datasets by performing a base distribution comparison on the full MNIST. Performance metric in all experiments is the negative log-likelihood (NLL). The scaled experiments have been performed on a DGX2 with 8 V100 GPUs. For all image datasets we used uniform dequantization and report the NLL of dequantized images.
+
+\begin{figure}
+    \begin{minipage}{0.5\textwidth}
+        \centering
+        \includegraphics[width=0.95\textwidth]{mnist_digit_ablation.png}
+        
+    \end{minipage}
+    \begin{minipage}{0.5\textwidth}
+        \centering
+        \begin{tabular}{@{}llr@{}} \toprule
+        \multicolumn{2}{c}{Benchmark} \\ \cmidrule(r){1-2}
+        Dataset & Base Distribution & NLL\\ \midrule
+        MNIST & Normal & $-1679.132$ \\
+        & Laplace & $-1879.869$ \\
+        & $\mathbf{R}_{\textbf{logN(1, .5),1,784}}$ & $\mathbf{-2013.079}$ \\
+        Circles & Normal & $-0.910$ \\
+        & \textbf{Laplace} & $\mathbf{-1.113}$ \\
+        & ${R}_{\text{logN(1, .5), 1, 2}}$ & $\mathbf{-0.604}$ \\ 
+        Moons & Normal & $-1.899$ \\
+         & \textbf{Laplace} & $\mathbf{-2.279}$ \\
+         & ${R}_{\text{logN(1, .5)}, 1, 2}$ & $-1.084$ \\  
+        Blobs & \textbf{Normal} & $\mathbf{2.287}$  \\
+         & \text{Laplace} & $2.500$ \\ 
+         & ${R}_{\text{logN(1, .5)}, 1, 2}$ & $2.596$ \\                   
+         \bottomrule
+        \end{tabular}
+    \end{minipage}
+    \caption{(\textbf{Left}) Ablation study on $\text{MNIST}^{10\times 10}_i$. We fit our flow architecture with Normal and Laplacian base distributions and additive coupling layers, which are alternated either with random masking layers or with LU-layers. We perform a random hyperparameter optimization with $20$ samples for each configuration and report the average top-$3$ performance. The remaining experiment parametrization is fixed across all models and datasets. We use the average negative log-likelihood on the test set (lower is better) as performance measure. (\textbf{Right}) Negative log-likelihood (lower is better) of VeriFlow with varying base distribution on multiple benchmark datasets. The architecture is always based on alternating LU layers and additive coupling layers.The remaining experiment parametrization is fixed per dataset.}\label{exp:ablation:digits}
+\end{figure}
+
+\subsubsection{Regularization and Advanced Training Methodology}
+ Following the description given in \cite{chan_lunet_2023}, we regularize the parameters of the LU layers. Without any form regularization, we observed exploding determinants on many tasks when working with LU layers.
+ Additionally, we adopt the technique of soft training \cite{kim_softflow_2020}. During training, We sample a noise scale $\sigma$ from a prior distribution $P$ for each training sample and perturb the sample with noise sampled from from the base distribution (Gaussian or Laplacian) with covariance $\sigma I$. For the noise scale prior we use a Laplacian with small standard deviation. We fit a conditional flow on the perturbed data where the conditioning variable is the noise scale $\sigma$. During inference with unperturbed data, the noise scale is set to $0$. We observed significant improvements through soft training, in terms of test likelihoods but also in terms of subjective visual quality as evaluated by the authors. 
+
+\subsubsection{Calibration of Density Level Sets}
+A major challenge that we faced when conducting verification experiments was the calibration of the density level sets. When testing for satisfiability within a given density level set, we turn the distribution of interest into an uncertainty set in the latent space without preference for more likely examples. Current solvers tend to produce counter examples from extreme points within the uncertainty set. Since the geometry of the space often enforces that little probability is centered around these areas, we found that sampling from such point in the latent space often produces OOD data, even when considering a set that is supposed to represent the top e.g. one percent of most typical examples. Following this intuition, it seems that the properties of distributions like the Laplacian and Gaussian distribution in high dimensions lead to particularly unfavorable results for our purposes. Indeed, in high dimensional spaces, the corresponding $p$-norm distributions are strongly concentrated around the relatively large values of $d$ and $\sqrt{d}$, respectively.
+\begin{figure}
+  \centering
+  \includegraphics[width = \textwidth]{high_dim_norm_quantiles.png}
+  \caption{Quantiles of the $p$-norm distributions for $d$-dimensional Gaussian, Laplacian, and a custom $1$-radial distribution. While the $\infty$-norm is always relatively low, the $p$-Norm of the $p$ radial distributions Laplacian and Gaussian are relatively large. That means that even on very high density contours, there are points on contour (e.g. $\alpha e_i$ for a standard basis vector $e_i$ and suitably chosen $\alpha$) that are very far away from the data that is seen during training (assuming that the empirical latent distribution approximately follows that base distribution relatively soon during training). Hence, it is not surprising that sampling from such areas in the latent space is likely to produce poor quality samples. The custom radial distribution mitigates this effect by keeping the $p$-norm distribution constant without dependency on the dimension.}\label{fig:norm-distribution-comparisson}
+\end{figure}
+Therefore, we conjecture that more concentrated base distributions help to mitigate this issue to some extend, see Figure \ref{fig:norm-distribution-comparisson} for an intuition. In order to avoid that the infinity norm of vectors becomes to small by concentrating the probability mass closer to the origin, we choose a unimodal radius distribution where the density converges to $0$ when approaching both, $0$ and $\infty$. Among our initial trials with multiple such distributions, like e.g. scaled Normal and Laplacian or distributions based on EVT norm distributions, a log-normal distribution with $\mu=1.0$ and $\sigma=0.5$ has shown most promising results. A qualitative and quantitative comparison with the Laplace base distribution is shown in the figures \ref{fig:laplace_udls} -- \ref{fig:logN_laplace_qq}. We remark here that, strictly speaking, the resulting distribution is not radial monotonic. However, in high dimension it holds that the corresponding function $g$ with $g(|x|_1) = p(x)$ is unimodal with it's mode extremely close to $0$. In an SMT setting, it would not be very hard to correct the formulas and exclude the small $L^p$ ball that does not belong to the density level set, but in our experiments with a dimensionality of $100$, the additionally included area is so vanishingly small, both in probability and in volume, that we decided ignore this issue here. Based on our initial experience with more exotic radial distributions, we believe that a thorough investigation of this class of distributions is potentially interesting also in other application areas such as anomaly detection. More generally, the calibration of density level sets remains a challenge that we think has gotten too little attention in past. Therefore, we stress the need for more systematic research in that area.
+
+\begin{figure}
+
+  \includegraphics[width = 1.0\textwidth]{model_laplace_udls.png}
+  \caption{Laplace base distribution}\label{fig:laplace_udls}
+  \includegraphics[width = 1.0\textwidth]{model_lognormal_decay_udls.png}
+  \caption{Base distribution with Log-Normal $1$-norm distribution.\\Samples from two models trained on $\text{MNIST}^{10\times 10}_0$. Samples are drawn from different region of the latent space. Each column considers a UDL of a given probability.
+  The first row samples conditioned on being in the UDL. The second row samples uniformly from the density contour in the latent space, and the third row samples samples uniformly from the density contour in the latent space intersected with the union of the $1$-dimensional subspaces induced by the standard basis vectors. Note that counter examples or often preferably chosen from the latter. }
+\end{figure}
+
+\begin{figure}
+  \centering
+  \includegraphics[width = 0.5\textwidth]{latent_radial_qq_logN_laplace.png}
+  \caption{$QQ$-plot of the empirical latent $1$-norm distribution under the flow, $p_{\left|F^{-1}(X)\right|_1}$, against the theoretical $1$-norm distribution induced by the base distribution. With both base distributions, the model struggles to match the empirical with the optimal latent $1$-norm distribution in the low quantiles (although in opposite directions). However, with the log-normal distribution, the $QQ$-plot indicates approximately proportional tail behavior, while the empirical distribution is too wide in both directions with a Laplacian base distribution}.\label{fig:logN_laplace_qq}
+\end{figure}
+
+\subsubsection{Sample Quality and Additional Benchmarks}
+Figure \ref{fig:digit-ablation} shows random samples from the MNIST digit ablation study. Additionally, we also tested our architecture on the FashionMNIST dataset. Results are depicted in table \ref{tab:add-benchmarks}
+\begin{figure}
+  \centering
+  \includegraphics[width = 1.0\textwidth]{digit_ablation.png}
+  \caption{Random samples from the ablation study on the MNIST digits. The $i$th column shows samples of the flow architectures trained on $\text{MNIST}^{10\times 10}_i$. Each row shows a different architecture (Top to bottom: $\text{MNIST}^{10\times 10}_i$ ground truth, LU $+$ Laplace distribution, LU $+$ Normal distribution, Random mask $+$ Laplace distribution, Random mask $+$ Normal distribution).}\label{fig:digit-ablation}
+\end{figure}
+
+\begin{table}
+    \centering
+        \begin{tabular}{@{}llr@{}} \toprule
+        \multicolumn{2}{c}{Benchmark} \\ \cmidrule(r){1-2}
+        Dataset & Base Distribution & NLL\\ \midrule
+        FashionMNIST & Normal & $-1264.539$ \\
+        & Laplace & $-1341.916$ \\
+        & $\mathbf{R}_{\textbf{logN(1, .5),1.784}}$ & $\mathbf{-1386.659}$ \\
+         \bottomrule
+        \end{tabular}
+    \caption{Additional Benchmarks comparing VeriFlow with various base distributions. For each trial, a model with 10 alternations of LU- and additive coupling layers has been trained. Each coupling layers consists of a conditioner with 3 hidden layers. Each layer consists of 300 neurons. The same setup was used for the MNIST benchmark.}
+    \label{tab:add-benchmarks}
+\end{table}
+
+
+
+\section{Related Work}
+
+In the verification domain, our paper is conceptually in-line with the recently introduced Neuro-Symbolic verification framework by Xie et al.~\cite{xie_neurosymbolic_2022}. 
+They propose verifying high-level semantics of neural network by using other specialized networks for capturing the semantics in the specification. 
+In our case, the specialized network is our flow model that we use for verifying another neural network, for example an MNIST-classifier.
+
+Similar to our concern of designing a flow model such that it can be verified using existing verification infrastructure, there are recent works on automated preprocessing of neural network via pruning \cite{guidotti2020verification} or via regularization techniques \cite{leofante2023verification,boing2022training} for the same goal, namely making them more suitable for verification with state-of-the-art verifiers.
+
+Flow models are on the forefront of modern density estimation techniques and have received significant attention over the last decade \cite{papamakarios_normalizing_2019}. A constant Jacobian determinant is usually observed at the time of the introduction of the respective layer in the context of the likelihood computation \cite{dinh_nice_2015,ma_macow_2019,kingma_improved_2016,huang_neural_2018,papamakarios_masked_2017}, although typically without further investigation of the induced properties. The role of the Jacobian determinant in general has been investigated in the context of the exploding determinant phenomenon \cite{kim_softflow_2020,DBLP:journals/corr/abs-2102-06539,lyu_paracflows_2022}. There is also a notable application of flow architectures with constant Jacobian determinant for anomaly detection. OneFlow uses a constant Jacobian determinant to compute and minimize the volume the image of a unit hyper sphere around the origin in the latent space, drawing a connection between flows and deep one-class SVMs \cite{maziarka_oneflow_2022}.
+
+
+
+\section{Further Directions}
+
+We summarize the research and engineering challenges that we belief to be important for the advancement of the field:
+    (1) Verification tools need to provide more complete support for the capabilities of deep learning frameworks such as torch, including support for scenarios that involve more than one network. 
+    (2) Theoretical and practical understanding of the expressivity of piece-wise affine uniformly scaling flows. To the best of our knowledge there is no known universal approximation theorem that applies to our architectures \cite{teshima_couplingbased_2020,lyu_paracflows_2022,lee_universal_2021,koehler_representational_2021,zhang_approximation_2020}.
+    (3) Well calibrated density level sets are crucial for interpretable verification results. Improving the consistency of density level sets of deep learning models is an important challenge.
+
+
+
+\section{Acknowledgements}
+
+This work has been financially supported by Deutsche Forschungsgemeinschaft, DFG Project number 459419731, and the Research Center Trustworthy Data Science and Security (\url{https://rc-trust.ai}), one of the Research Alliance centers within the UA Ruhr (\url{https://uaruhr.de}).
+
+
+
+

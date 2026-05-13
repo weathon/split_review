@@ -1,0 +1,482 @@
+\title{Prompt Risk Control: A Rigorous Framework for Responsible Deployment of Large Language Models}
+
+\begin{abstract}
+
+The recent explosion in the capabilities of large language models has led to a wave of interest in how best to prompt a model to perform a given task.  
+While it may be tempting to simply choose a prompt based on average performance on a validation set, this can lead to a deployment where unexpectedly poor responses are generated, especially for the worst-off users.
+To mitigate this prospect, we propose Prompt Risk Control, a lightweight framework for selecting a prompt based on rigorous upper bounds on families of informative risk measures. 
+We offer methods for producing bounds on a diverse set of metrics, including quantities that measure 
+worst-case responses and disparities in generation quality across the population of users.
+In addition, we extend the underlying statistical bounding techniques to accommodate the possibility of distribution shifts in deployment.
+Experiments on applications such as open-ended chat, medical question summarization, and code generation highlight how such a framework can foster responsible deployment by reducing the risk of the worst outcomes.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begin{figure}[!ht]
+\centering
+    \includegraphics[width=\textwidth]{figures/prompt_risk_figure_1a.pdf}
+    \caption{
+    Prompt Risk Control (PRC) assists in choosing a prompt 
+    (or set of prompts) that will, with high likelihood, not incur too high of a loss according to some chosen risk
+    measure and threshold.  
+    Here we illustrate PRC being used to select a system prompt to be appended to input queries to a chatbot, a popular setup in modern LLM deployments (algorithm inputs are in grey).
+    The goal is to ensure that the responses will not be too toxic for the highest-loss (most toxic) portion of the data distribution (e.g., under the CVaR risk measure).
+    The algorithm returns a set of prompts that bound the risk at an acceptable level, from which a user can select a safe prompt for deployment.
+    }
+    \label{fig:main}
+\end{figure}
+
+Recent leaps in the capabilities of large language models (LLMs) such as GPT-4 \citep{openai2023gpt4}, LLaMA \citep{touvron2023llama}, and Claude have driven a wave of interest in constructing the best prompt for a given task, where a prompt generally refers to an input to the LLM.
+Various prompting strategies have been proposed, including but not limited to: in-context learning \citep{brown2020language}, instruction following \citep{wei2022finetuned}, chain-of-thought prompting \citep{wei2023chainofthought}, and prompt-tuning \citep{lester2021power}, as well as a range of more complex approaches.  Despite this proliferation of methods and their suggested strengths, prompting remains an experimental and poorly understood area, with little clear evidence why one task verbalization or a particular ordering of few-shot exemplars should improve performance \citep{kaddour2023challenges, webson-pavlick-2022-prompt}.  Lacking a rigorous understanding of the underlying mechanisms, prompt choices are usually made based on empirical average results on a validation set \citep{rethinking2023}.  
+However, a prompt that performs well on average on a validation set may in fact be prone to producing some poor generations in deployment with an unacceptably high probability, since a single validation score lacks information about the underlying variance or likelihood of outlier events.  
+For example, when deploying an open-ended chatbot, one may find that the prompt that produces the most helpful generations on a validation set also produces unacceptably high toxicity for some portion of users in deployment.
+This potential trade-off between usefulness and safety (or helpfulness and harmlessness) is an area of increasing interest and importance, both in the context of prompting as well as under the various fine-tuning alignment methods that are applied to models before deployment \citep{bai2022training, ganguli2022red}.
+
+To mitigate this prospect of unexpectedly bad outcomes in LLM deployment and manage these trade-offs in a principled way, we introduce Prompt Risk Control (PRC), a framework for selecting a prompt based on rigorous upper bounds on some user-chosen risk measure.  
+Our framework employs statistically and theoretically sound methods from the Distribution-Free Uncertainty Quantification (DFUQ) family of techniques 
+\citep{vovk_defensive_2005, bates2021distributionfree, angelopoulos_gentle_2022, snell2022quantile, deng2023} in order to control (i.e., produce bounds on) a rich set of informative risk measures, and uses these bounds to return a set of prompts that with high probability will not incur an unacceptable outcome according to some user-chosen criteria (see Figure \ref{fig:main}).
+PRC can be applied to open source models like LlaMA, as well as proprietary models behind an API such as GPT-4.
+We also provide a novel extension of the underlying statistical techniques used to produce these bounds in order to accommodate distribution shifts in deployment, and demonstrate our framework's application to this important setting.
+
+Within our framework, we make an important distinction between the notions of \textit{loss} and \textit{risk}, and consider the value of incorporating diverse \textit{risk} measures when making decisions regarding LLM deployment.
+We use \textit{loss} to refer to a particular scoring notion that can be calculated for a single data point, for instance ROUGE score \citep{lin-2004-rouge}, toxicity, or top-1 accuracy.  On the other hand, \textit{risk} refers to some population-level measure of these scores, such as mean, median, conditional value at risk (CVaR) \citep{rockafellar_optimization_2000}, or the Gini coefficient \citep{yitzhaki1979relative}.
+While prompt selection is usually based on average performance across a validation set, such a view is insufficient in many cases, especially in risk-sensitive domains such as medicine and law in which LLMs are increasingly being deployed. 
+Instead, one must consider contextually relevant risk measures that capture different aspects of the loss distribution.
+As an example, in the deployment of an LLM in a domain with high social impact, one may be interested in choosing a prompt that is unlikely to produce very different losses across different subgroups in the population according to race, gender, or income.
+To this end, we provide methods for (and example applications of) bounding many expressive risk measures of LLM performance, in the hope that such measures can be considered more often both in practice and research.
+
+We study our framework via diverse and comprehensive experiments on open source models with as many as 40B parameters, and find that Prompt Risk Control is 
+both critical for and easily 
+applied to high-impact applications like open-ended chat, code generation, and patient inquiry summarization, including in cases where no labeled data is available or there is a distribution shift at test time.  We believe that the rigorous, effective, and lightweight nature of our framework makes it a strong candidate for inclusion in any LLM deployment pipeline.
+
+
+
+\section{Background}
+
+
+Consider $S=\{(x_i, y_i)\}_{i=1}^n$, a validation dataset drawn from a joint distribution $\mathcal{D}$ over user queries $x \in \cal X$ and gold standard responses $y \in \cal Y$.  We are given a generator model, $G: \cal X \rightarrow \cal O$, which in our case will be a large language model \citep{brown2020language, raffel2020exploring}. 
+In order to improve the response to query $x$, a prompt $p \in \cal P$ may be added to the input to $G$ \citep{brown2020language, wei2022finetuned, wei2023chainofthought}.  The prompt may include an instruction (e.g., ``Do not produce harmful content'' or ``You are a doctor, summarize the following document''), a few labeled examples of the current task (possibly including step-by-step reasoning, known as ``chain-of-thought''), and/or any other text that the user may feel will help guide the model to produce the desired output.
+To perform a particular task, we may choose among a set of candidate prompts $P$.
+For a given prompt $p$, $G_p$ is a model that produces a response to $x$ using $p$.  In our case $\cal X, \cal Y, \cal O \text{ and } \cal P$ are spaces of text strings. 
+
+We assume we are given a loss function $l : \mathcal{O}\times\mathcal{Y} \to \mathbb{R}$ that captures the generation quality of $G$, with a lower score denoting a better response.  We also assume the output of this loss function is bounded, usually on the interval $[0,1]$. 
+Note that $l$ may or may not require ground-truth responses $y$, and also that in some (or even many) cases $y$ may not be well-defined (and we treat $y$ as a dummy label in those cases).  For example, $l$ may be produced by a large language model that scores some aspect of the generation, such as helpfulness or harmfulness, and does not require a ground truth response $y$ to produce a score. 
+On the other hand,
+for summarization or translation
+$l$
+might be
+ROUGE,\footnote{Since a higher ROUGE score is better and it is bounded on $[0,1]$, for a given ROUGE score $r$ assigned to an item, the loss is $l=1-r$. In general we use the term loss to apply to some measures for which higher is better and others that prefer lower; we always assume the former are adjusted so lower is better.} which compares the model output to a gold standard $y$.
+
+While a loss function scores the quality of a generation for a single example, a risk function measures some aspect of the distribution of loss \textit{across the population.}
+We define a general notion of risk as a function $R: l \to \mathbbm{R}$, where here we are treating $l$, the loss value, as the distribution of a random variable. 
+In general, $l = l(O, Y)$ represents the distribution of loss scores over random subsets of paired responses $O \subseteq \mathcal{O}$ and labels $Y\subseteq \mathcal{Y}$ (which may be dummy labels if not required by the loss function). 
+Below we use $R(G_p, l)$
+as shorthand for $R(l(O_{G_p}, Y))$, where $O_{G_p}$ denotes the outputs produced by generator $G$ using prompt $p$.
+
+The simplest and most well-known example of risk function $R$ is expected loss, which returns the mean loss value across the data distribution.
+Beyond expected loss, there are many other notions of risk that capture different, important aspects of the loss distribution.  For example, in fields such as finance there is particular interest in risk quantities such as value at risk (VaR) and conditional value at risk (CVaR) \citep{rockafellar_optimization_2000}, which characterize the extreme tail of the loss distribution.
+In addition, economists and social scientists study risk measures like the Gini coefficient or Atkinson Index \citep{atkinson1970measurement}, which measure how equally loss is dispersed across the population. 
+As a final example, research in algorithmic fairness has aimed to limit differences in particular aspects of the loss distribution (e.g., median) between different protected subgroups defined by attributes such as race or gender \citep{williamson_fairness_2019}.
+
+\begin{figure}[!ht]
+\centering
+    \includegraphics[width=\textwidth]{figures/figure_2_new.png}
+    \caption{
+    Examples of the risk function $R$.
+    \textbf{Left:} Value at risk (VaR) measures the loss value at some specified quantile of the loss distribution $\beta$. 
+    \textbf{Middle:} Conditional value at risk (CVaR) measures the average loss for the worst-off portion of the population starting with some specified quantile of the loss distribution $\beta$.
+    \textbf{Right:} The Lorenz Curve shows the cumulative share of the population loss incurred by the $\beta$ proportion of the population with lowest loss.  
+    Under perfect equality, the first $\beta$ proportion of the population would incur $\beta$ proportion of the loss for all $\beta$. 
+    The Gini coefficient is calculated as $\frac{A}{A+B}$ for the areas $A$ (between the line of equality and Lorenz Curve) and $B$ (below the Lorenz Curve). 
+    }
+    \label{fig:figure_new}
+\end{figure}
+
+In an effort to make machine learning models safe for deployment, there has recently been an increasing amount of research and interest in Distribution-Free Uncertainty Quantification (DFUQ), where a validation dataset (here $S$) is used to produce a high-probability upper bound $\hat R$ on the risk of a predictor.
+Much of the recent work in DFUQ descends from the line of research concerned with Conformal Prediction \citep{shafer_tutorial_2008, vovk_defensive_2005}, a method used to produce prediction sets that satisfy coverage (i.e., recall) guarantees with high probability.  
+Recent work has concerned itself with producing bounds on the expected loss \citep{angelopoulos2021learn}, quantile-based losses like VaR and CVaR \citep{snell2022quantile}, and measures of dispersion like the Gini coefficient and median differences across groups \citep{deng2023}.
+These bounding techniques have been applied to tasks including biomolecular design \citep{fannjian2022biomolecular}, robotics planning \citep{ren2023robots}, and controllable image generation \citep{sankaranarayanan2022semantic}.
+While there has been some work on applying such techniques to large language models \citep{quach2023conformal, schuster2022confident, kumar2023conformal}, this is the first work of which we are aware to apply DFUQ to prompting or in-context learning.
+
+
+\section{Prompt Risk Control}
+
+
+The Prompt Risk Control algorithm $\cal A : \cal P \rightarrow \cal P$ takes as input a set of candidate prompts $P$, and returns a set of prompts $\hat P$ which control (i.e., satisfy an upper bound on) some user-chosen notion of risk $R$.
+
+\begin{figure}[!ht]
+\centering
+    \includegraphics[width=0.5\textwidth]{figures/figure_2_neurips.png}
+    \caption{
+    For a set of candidate prompts $P$, Prompt Risk Control returns a set of prompts $\hat P \subset P$ that, when combined with large language model $G$, will not exceed a given risk threshold $\alpha$ with probability at least $1-\delta$.  
+    The risk $R$ is a measure such as mean, VaR, or Gini coefficient, which gives some aggregate notion of the instance-wise loss $l$ (for example toxicity score or ROUGE), and it is upper bounded by $\hat R(G_p, l)$.  
+    Here, the set of prompts $\hat P = \{p_6, p_8, p_9\}$ yield acceptable upper bounds on $R$.  
+    From these, one could choose to deploy the prompt with the best bound, or else the best prompt in $\hat P$ according to some other performance metric.  
+    }
+    \label{fig:figure_2}
+\end{figure}
+\begin{definition}[Risk-Controlling Prompt Set] 
+$\hat P$ is an $(\alpha, \delta)$-risk-controlling prompt set under loss function $l$, risk function $R$, and language model $G$ if
+\begin{equation}
+    \mathbbm{P}_{S} \Big( R(G_p, l) \leq \alpha, \forall p \in \hat P \Big) \geq 1-\delta.
+\end{equation}
+\end{definition}
+
+For each $p \in P$, PRC produces a high-probability upper bound $\hat R(G_p, l)$, and includes $p$ in $\hat P$ if $\hat R(G_p, l) < \alpha$
+(see Figure~\ref{fig:figure_2}).
+Intuitively, $\alpha$ specifies the maximum risk the user is willing to tolerate and $\delta$ determines the probability that the bound is violated.
+The randomness in the statement comes from the draw of the validation set that is used for choosing the prompt set $\hat P$, since this data may sometimes be non-representative of the target distribution and thus the algorithm may include prompts in $\hat P$ that do not actually satisfy the upper bound.  
+
+Once $\hat P$ is returned, $\argmin_{p \in \hat P}\hat R(G_p, l)$ could be a straightforward final choice of prompt for deployment.  However, our framework also fits naturally as the initial step in a 2-stage prompt selection pipeline.  First, Prompt Risk Control is used to ``validate'' a set of prompts as being unlikely to incur an unacceptably bad outcome according to $R$ and $l$.  Then, \textit{using the same data} \citep{angelopoulos2021learn}, each $p \in \hat P$ can be scored on some performance metric $v: \mathcal{O} \times \mathcal{Y} \to \mathbbm{R}$ (which may be separate from $R$ and $l$), leading to the choice $\argmax_{p \in \hat P}v(O_{G_p}, Y)$.  It should also be noted that because PRC treats $G$ as a black box and only requires outputs from the model, this framework can be used with a proprietary model held behind an API (on the condition that the model is not unknowingly modified).
+
+\begin{figure}[!ht]
+\centering
+    \includegraphics[width=\textwidth]{figures/prompt_risk_figure_2_alt.pdf}
+    \caption{
+    Each candidate prompt is applied to produce LLM output on the validation set.  This output is scored according to some user-chosen loss function.  The loss values for each prompt are fed to Prompt Risk Control, along with a user-chosen risk measure and threshold, in order to return the set of prompts that control the risk at an acceptable level.
+    }
+    \label{fig:method_illus}
+\end{figure}
+
+To illustrate, consider an organization that plans to deploy an LLM chat application, where the goal is to provide helpful answers to user-provided queries.  They may have concerns about the model including toxic content in its output, and decide that with 95\% likelihood ($\delta=0.05$) at least 92.5\% of generations (VaR, $\beta=0.925$) must have toxicity score less than $\alpha=0.05$.  
+The organization has a set of 5 instructions or system prompts that they are considering, along with 5 one-shot exemplars of queries and helpful replies to include in their input.
+The 25 possible combinations of instruction plus exemplar would then constitute the set of candidate prompts $P$.
+Using a representative validation set of user queries, LLM generations, and toxicity scores, PRC will return the prompts, if any, that satisfy the $(\alpha, \delta)$ condition and thus control the risk at an acceptable level.  Then, using the same validation data and the set of prompts returned by PRC, the final prompt might be chosen according to the average helpfulness score (often known as the ``reward'') across the validation set.
+See Section~\ref{sec:chatbot_exp} for an empirical case study of this setting.
+
+Next, we will introduce specific methods for producing bounds based on different notions of risk $R$.  For the statistical guarantees to hold, the following methods all require that the validation dataset is drawn independently and identically distributed (i.i.d.) from the distribution the model will face in deployment, also known as the target distribution.  This is a foundational requirement in DFUQ.\footnote{While there are methods for handling distribution shift in DFUQ, they are specific to particular techniques or risk measures (e.g., \citet{park2022pac, gibbs2021adaptive, Qiu2022DistributionFreePS}) and do not apply to most of the measures that we consider here.} 
+In %
+Section~\ref{sec:dist_shift}, we will introduce novel techniques for extending bounds on some important measures to be valid under distribution shift, i.e., when the validation and deployment distributions do not match.
+\subsection{Bounding the Mean: Learn Then Test (LTT)}
+
+First we consider the simplest case, where $R$ measures the mean loss.
+We adopt the method proposed by \citet{angelopoulos2021learn} for bounding the mean across a wide range of loss functions for the purpose of model selection.  
+Using their algorithm and the validation set, we produce high-probability confidence bounds on the expected loss across the population for each prompt, and return the prompts (if any) that control this expectation at an acceptable level $\alpha$: 
+\begin{equation}
+    \mathbbm{P}_{S}\Big( \mathbbm{E}_{(O_{G_p}, Y)}\bigl[ l(O_{G_p}, Y) \bigr] \leq \alpha, \forall p \in \hat P \Big) \geq 1-\delta.
+\end{equation}
+These bounds are derived using statistical techniques for estimating means of bounded random variables such as the Hoeffding bound \citep{hoeffding1963probability} or Hoeffding–Bentkus bound \citep{bates2021distributionfree}.
+
+\subsection{Controlling Quantile Risk}\label{sec:QRC}
+
+\subsubsection{Quantile-Based Risk Measures}
+
+While establishing a bound on the mean is useful, often we may want to control more informative measures of the loss distribution, possibly with respect to tail performance and outliers.  One family of risk measures that captures such properties is called Quantile-based Risk Measures (QBRM).
+The family of QBRM includes such notions as median, value at risk (VaR), conditional value at risk (CVaR), and intervals of value at risk, as well as the mean. 
+We define $Q_l$ as the quantile function of a loss distribution: $Q_l(\beta):=\inf\{l:F(l) \geq \beta \}$ for all $\beta \in [0,1]$ (where $F$ is the cumulative distribution function). In other words, for a particular quantile level $\beta$, $Q_l$ returns the smallest loss value for which at least a $\beta$ proportion of the population incurs a lower loss.  Note that we will drop the subscript for convenience, though in our context we always refer to a quantile function of some loss distribution.
+Having defined $Q$ and $\beta$, we can formally define a QBRM.
+\begin{definition}[Quantile-based Risk Measure]\label{def:qbrm}
+Let $\Psi(\beta)$ be a weighting function such that $\Psi(\beta) \ge 0$ and $\int_0^1 \Psi(\beta) \, d\beta = 1$. The quantile-based risk measure defined by $\Psi$ is $$R_\Psi(Q):=\int_0^1\Psi(\beta) Q(\beta) d\beta.$$
+\end{definition}
+
+\subsubsection{Quantile Risk Control}
+
+Given some choice of 
+QBRM defined by a particular weighting function $\Psi$, we can apply the Quantile Risk Control (QRC) framework introduced by \citet{snell2022quantile} to achieve bounds of the form
+\begin{equation}
+     \mathbbm{P}_{S} \Big( R_\Psi(Q) \leq \alpha,\forall p \in \hat P \Big) \geq 1-\delta.
+\end{equation}  
+See Figure~\ref{fig:qrc} for an illustration of this method. 
+When applied to some black box language model $G$, each candidate prompt $p$ will induce a distribution of loss values across the validation set, which can be expressed as a quantile function $Q$ of the loss.
+Then, statistically rigorous bounding methods such as Kolmogorov–Smirnov \citep{massey_kolmogorov-smirnov_1951}, Berk-Jones \citep{berk_goodness--fit_1979}, and Truncated Berk-Jones \citep{snell2022quantile} can be applied to produce $B^U_Q$, a high-probability upper bound on $Q$.\footnote{The statistical techniques underlying these bounds are non-trivial, and thus explanations of how to generate these bounds are beyond the scope of this paper.  However, they can be easily produced in practice using open source software (e.g., that distributed by \citet{moscovich_fast_2020}) and the code distributed with this paper. }  
+This upper bound can then be post-processed to calculate a bound on some QBRM: 
+$$\hat R_\Psi(Q):=\int_0^1\Psi(\beta) B^U_Q(\beta) d\beta$$
+is an upper bound on $R_\Psi(Q)$.  The set of prompts returned, $\hat P$, will include all prompts that induce a $Q$ such that $\hat R_\Psi(Q) \leq \alpha$.
+\begin{figure}[!ht]
+\centering
+    \includegraphics[width=1.0\textwidth]{figures/figure_3.png}
+    \caption{The quantile function ($Q$) of the loss distribution induced by a prompt is upper bounded by $B^U_Q$,
+    which can be post-processed to control a rich family of risk measures such as value at risk (VaR) and conditional value at risk (CVaR). VaR (middle) considers the loss for one example at a specific quantile.  CVaR (right) considers the average loss value in the interval starting at a specific quantile and ending at 1, for example the average loss for the worst-off 15\% of the population.}
+    \label{fig:qrc}
+\end{figure}
+\subsection{Controlling Measures of Societal Dispersion}\label{sec:SDC}
+
+Although the QBRM family includes many informative measures, an organization deploying a large language model may instead wish to consider 
+the \textit{dispersion} of loss across the population, or the extent to which different members of a population experience unequal effects of a model’s output.  
+Such concerns are especially important in domains of high societal impact like medicine, finance, and law, in which LLMs are increasingly being applied. 
+We can adopt the Statistical Dispersion Control (SDC) framework proposed by \citet{deng2023} to achieve control of the form
+\begin{equation}
+    \mathbbm{P}_{S}\Big( R_{\phi} \bigl( Q \bigr) \leq \alpha, \forall p \in \hat P  \Big) \geq 1-\delta
+\end{equation}
+where $\phi$ is some statistical dispersion measure like the Gini coefficient or difference in CVaR between groups of the population defined by sensitive attributes (and $Q$ is again the quantile function of the loss).  Bounds on such measures can be computed using similar techniques as those for bounding QBRM described above, combined with the technique introduced by \citet{deng2023} for reducing quantile function upper bounds $B^U_Q$ to lower bounds $B^L_Q$.  The returned set $\hat P$ will include all prompts that induce a $Q$ such that $\hat R_\phi(Q) \leq \alpha$.  For example, lower and upper bounds on $Q$ for male and female users can be computed and used to select a prompt with an acceptable high-probability upper bound on the difference in median (i.e., VaR with $\beta=0.5$) loss between groups (see Figure~\ref{fig:fuq}). 
+
+\begin{figure}[!ht]
+\centering
+    \includegraphics[width=1.0\textwidth]{figures/figure_4.png}
+    \caption{
+    Two groups in the data defined by protected attributes such as race or gender may experience different loss distributions under a particular prompt.  Here, the round markers represent upper and lower bounds on median loss for each group.  Prompt Risk Control is used to upper bound the difference in median loss between groups, shown as $\hat R$ in the rightmost plot.
+    } 
+    \label{fig:fuq}
+\end{figure}
+
+
+
+\section{Extending Bounds for Distribution Shifts}
+
+
+A fundamental assumption of most DFUQ methods is access to a validation set of loss samples drawn i.i.d.~from the (target) distribution that the model will face in deployment.  
+This may not always be the case, and so developing methods for extending these techniques to situations where the validation distribution does not match the target distribution is an active area of research \citep{gibbs2021adaptive, park2022pac, Qiu2022DistributionFreePS}.  
+In this section, we introduce a method for extending the quantile-based bounding techniques from \citet{snell2022quantile} and \citet{deng2023} so that QBRM and various measures of statistical dispersion can be controlled in a distribution shift setting.  
+In particular, we consider that while a user may have some labeled data that they believe to be \textit{similar} to their target distribution, and that the gold-standard response for a given input is the same under each distribution, they may only have unlabeled data actually drawn from the distribution of queries the LLM will face in deployment.  
+This is a setting commonly known as \textit{covariate} shift, where the distribution of inputs changes, while the distribution of labels (and thus loss) conditioned on inputs remains the same.
+
+For instance, a hospital may wish to use an LLM to produce succinct summaries of doctors' clinical notes, and may have access to a publicly available (source) dataset of notes and their human-written summaries produced in the past at another hospital.
+They may only have unlabeled (target) examples of recent clinical notes from their own hospital, which may have a seasonal shift in the proportion of different types of diagnoses present (e.g., flu or heat exhaustion) as compared to the older notes.
+Accordingly, though the distribution of good responses conditioned on inputs remains the same, the loss (and risk) produced on the labeled validation set cannot be directly used to make claims about performance on the target distribution.
+To address this real-world challenge, we extend the underlying statistical techniques for bounding QBRM and measures of statistical dispersion to the covariate shift setting with labeled source data and unlabeled target data.
+
+\subsection{Setup}
+
+In this setting, we have a source validation dataset $S_n=\{(x_i, y_i)\}_{i=1}^n$ drawn from a joint distribution $\cal D_S$ over user queries $x \in \cal X$ and their corresponding labels $y$.  
+In addition, we have a target dataset $T_m=\{x_i\}_{i=1}^m$ drawn from a joint distribution $\cal D_T$ over user queries $x \in \cal X$ and labels $y$,  
+but where the loss scores $l$ cannot be assigned (possibly because labels are unavailable).
+Since we consider covariate shift, the conditional distribution of $y$ (and thus $l$) given $x$ remains the same for both source and target distributions.
+We further denote density functions $d_S$ and $d_T$ respectively, and the underlying true importance weights 
+$w^*(x):= \frac{d_T(x)}{d_S(x)}$, which indicate the ratio of the likelihood of a given input under $\cal D_T$ and $\cal D_S$.
+
+\subsection{Algorithm Outline}
+
+Now, we offer a step-by-step outline of our algorithm (see Figure~\ref{fig:dist_shift_algo} for further illustration).  
+Steps 1 and 2 are largely adopted from \citet{park_pac_2020}, while the novelty of our technique lies in steps 3, 4, and 5.
+
+\noindent\textbf{Step 1: Estimate importance weights.} 
+First, we produce an estimate of  $w^*(x)$ for each sample in the validation set, which we will denote $\hat w(x)$.  By training a domain classifier and applying the 
+importance weight 
+bounding technique 
+of \citet{park_pac_2020}, we can obtain 
+a confidence interval for 
+$w^*(\cdot)$, i.e., $[\underline{w}(\cdot), \bar{w}(\cdot)]$, such that with probability at least $1-\delta_w$
+$$\underline{w}(x)\le w^*(x)\le \bar{w}(x)\quad \text{for all}~x\in\mathcal{X}.$$
+Then, $\hat w(x)$ can be assigned any value in $[\underline{w}(x), \bar{w}(x)]$; we choose to set $\hat w(x)=\frac{1}{2}(\underline{w}(x)+\bar{w}(x))$.
+
+\noindent\textbf{Step 2: Apply rejection sampling.} 
+Next, we use rejection sampling \citep{vonN51} in order to generate a dataset of i.i.d.~samples from a distribution $\tilde{\cal D}$ that is \textbf{close to} $\cal D_T$ using labeled source data $S_n$ and unlabeled target data $T_m$. In particular, define $V_i \sim U$, where $U$ is the uniform distribution on the interval $[0,1]$.  We create $\tilde S$, a set of examples drawn i.i.d.~from $\tilde{\cal D}$, by selecting
+$$\tilde S := \{ (x_i, y_i) \in S_n | V_i \leq \frac{\hat w(x_i)}{b}\}$$
+where $b \geq \max_{x \in \cal X}\hat w(x)$ is an upper bound on $\hat{w}(x)$.  The expected size of $\tilde S$ is equal to $\frac {n}{b}$, meaning rejection sampling will return a larger set of examples when the source distribution is closer to the support of the target distribution. 
+
+\noindent\textbf{Step 3: Construct quantile upper bound.} 
+Having produced $\tilde S$, we then use the methods described in Section~\ref{sec:QRC} to construct an upper bound $B_{\tilde S}^U$ on the loss quantile function of $\tilde S$ such that with probability at least $1-\delta$
+$$B_{\tilde S}^U\succeq Q_{\tilde D},$$
+where $Q_{\tilde D}$ is the quantile function of the loss distribution under $\tilde D$ (the distribution from which $\tilde S$ is drawn).
+
+\noindent\textbf{Step 4: Correct for uncertainty in importance weights.} 
+Finally, we must further account for the uncertainty in the importance weights by applying a correction (leftward shift) to $B^U_{\tilde S}$, which yields $B_{\cal D_{T}}^U$.\footnote{This correction is best described in terms of the loss CDF (of which the quantile function is the inverse), which we choose not to discuss here for the sake of simplicity.}
+Then, $B_{\cal D_{T}}^U$ is an upper bound on the true target quantile function $Q_{\cal D_T}$ with probability $1-\delta_w-\delta$. 
+
+\noindent\textbf{Step 5: Apply risk control techniques.} Given $B_{\cal D_{T}}^U$, the previously-described techniques introduced by \citet{snell2022quantile} and \citet{deng2023} can be used to establish risk control.
+\begin{figure}[!ht]
+\centering
+    \includegraphics[width=1.0\textwidth]{figures/shift_figure.png}
+    \caption{
+    A summary illustration of our algorithm for producing bounds under covariate shift.  
+    \textbf{Left:} Using labeled data $S \sim \cal D_S$ and unlabeled data $T \sim \cal D_T$, we use importance weight estimates and rejection sampling to produce $\tilde S$, which is drawn from a distribution $\tilde D$ that is similar to $\cal D_T$.  
+    Each underlying distribution or validation set induces some quantile function of its loss, called $Q$. 
+    \textbf{Middle:} $B^U_{\tilde S}$ is a high-probability upper bound on $Q_{\tilde D}$,
+    but not yet a valid bound on $Q_{\cal{D}_T}$.  
+    \textbf{Right:} Applying a correction for the uncertainty in the importance weights yields $B^{U}_{\cal{D}_T}$, which can be used to establish valid risk control on a wide range of measures under target distribution $\cal{D}_T$.
+    } 
+    \label{fig:dist_shift_algo}
+\end{figure}
+
+
+\section{Experiments}
+
+
+We perform experiments to investigate the effects of using our framework in various high-impact applications including code generation, chatbots, and medical question summarization.  Also, though we utilize non-trivial GPU resources in producing the generations for our experiments, we note that the PRC procedure itself can be easily run on a typical personal computer with only CPUs.
+
+\subsection{Bounding Expected Loss in Code Generation}
+We begin with a simple application of the PRC framework to the code generation setting, where $\hat P$ contains only a single system prompt.
+The goal is to provide a high-probability upper bound on the average error rate of 
+a prompt when it has already been chosen and benchmarked with some validation set.
+Here, PRC can be applied ``for free,'' since no extra data is needed beyond the previously mentioned validation set to ensure that the average loss will likely be in some acceptable range.  We perform our experiment using the MBPP code generation dataset and CodeLlama-7b model, and consider the mean loss with respect to a pass@10 loss function, where 10 generations are produced and 0 loss is assigned if at least 1 generation passes all unit tests and 1 is assigned otherwise.
+For a more robust illustration, two separate settings are examined: one setting where there is only a system prompt provided, and one where there are also 3 exemplars included.  
+The system prompt appended to each input example is: 
+\textit{You are required to write code that generates the specified output.}    
+
+We run 100 trials, each with 500 randomly sampled validation datapoints and $\delta=0.05$.  We compare the empirical average loss on the remaining test examples with the risk bounds produced by Learn Then Test using two different bounding inequalities: the well-known Hoeffding bound, and a more sophisticated Hoeffding-Bentkus (HB) bound introduced by \citet{bates2021distributionfree}.  See Figure \ref{fig:mean_comps} for results. HB outperforms the Hoeffding bound, and provides tight control relative to the empirical average loss on the held-out test set. Thus the risk bound $\hat R$ returned by PRC using the LTT-HB bound serves as a rigorous and reliable high-probability bound on the chosen risk measure, and this bespoke method outperforms the more naive application of Hoeffding. 
+Given the lightweight and effective nature of this technique,
+when deploying an LLM based on mean loss across a validation dataset,
+one should also know a high-probability bound on that mean loss across the entire population.
+
+\begin{figure}[!ht]
+\centering
+    \includegraphics[width=0.495\textwidth]{figures/mbpp/mbpp_pass-10_mean_no_data_500_prompt_ind_0_full_results.png}
+    \includegraphics[width=0.495\textwidth]{figures/mbpp/mbpp_pass-10_mean_no_data_500_prompt_ind_2_full_results.png}
+    \caption{%
+    Derived bounds and observed mean error rate for pass@10 using the MBPP code generation dataset and CodeLlama-7b model. The left plot displays the results with no exemplars in the prompt, while the right show results with a set of 3 in-context examples included.
+    Lower risk scores %
+    imply higher pass@$k$ scores.}
+    \label{fig:mean_comps}
+\end{figure}
+
+\subsection{Bounding Worst-Case Toxicity in Chatbot Applications}\label{sec:chatbot_exp}
+
+Next we examine a more complex example that displays the full scope of the PRC framework (and mirrors the setting outlined in Section \ref{sec:PRC}).  Here, an organization wishes to deploy a chatbot that offers helpful replies to user queries, but also must ensure that the vast majority of the model's generations are not too toxic.  We use the Anthropic Helpfulness and Harmlessness (HH) dataset, which features a wide variety of user queries and is commonly used for 
+training helpful and harmless 
+chatbots, possibly through reinforcement learning from human feedback (RLHF) \citep{bai2022training}. 
+Responses are generated using Flan-T5-XXL (with 11.3B parameters), toxicity is scored using the Detoxify model \citep{Detoxify}, and a reward score is calculated using a 3B parameter reward model \citep{dong2023raft} trained on a different split of the HH dataset from the data used for validation and testing.  Here the goal in applying the PRC framework is to choose a prompt that maximizes the helpfulness of the model's outputs as measured by the reward score while effectively encouraging harmlessness, such that the toxicity loss for 92.5\% of the population (VaR at $\beta=0.925$ quantile) is not above $\alpha=0.05$ with $95\%$ probability ($\delta=0.05$).  
+PRC is applied to a set of 20 candidate prompts using 3500 randomly sampled validation points.  Again, we note that this validation set can be used \textit{both} for empirical performance comparison on the reward measure \textit{and} for performing the PRC procedure.  The VaR bound is produced using the quantile risk control technique with a Berk-Jones bound.
+
+Figure~\ref{fig:chatbot_var} shows the results for this experiment.
+On the left, we plot average validation reward score ($x$-axis) against the risk bound ($y$-axis) for each prompt $p_i$ . Traditional model evaluation procedures might select the prompt with the best empirical average reward, which is marked $p^*_{REW}$, 
+while the prompt marked $p^*_{PRC}$ produces the best reward \textit{after} satisfying the high-probability constraint on the toxicity.  
+The right two plots show the quantile function of the loss induced by each prompt on a held-out test set, as well as the upper bounds $B^U_Q$ produced by PRC.  The risk threshold $\alpha$ is violated by the deployment of $p^*_{REW}$, while $p^*_{PRC}$ controls the risk below the designated level.
+
+\begin{figure}[!ht]
+\centering
+    \includegraphics[width=\textwidth]{figures/chat/full_chat_model_large_toxicity_var_loss_dist_with_text.png}
+    \caption{Results for the chatbot experiment bounding the VaR on the Anthropic HH dataset.  Prompt selection according to the best reward leads to an unacceptably high VaR for $\beta=0.925$ on the test set, while PRC controls the risk below the prescribed threshold $\alpha$.
+    }
+    \label{fig:chatbot_var}
+\end{figure}
+
+Since both prompts are applied to the same test distribution, we may expect to observe a less toxic response 
+at the $\beta$ quantile of the test loss distribution induced by $p^*_{PRC}$.
+Table~\ref{tab:chatbot_generations} shows the generations produced under each prompt at the target $\beta=0.925$ quantile of the loss distribution.  
+Prompt selection according to the best reward leads to a highly toxic output: the LLM suggests to sabotage a roller coaster using a bomb.  On the other hand, the prompt selected with PRC satisfies the toxicity constraint, producing a totally benign generation at the $\beta=0.925$ quantile.  
+In addition, in Table~\ref{tab:chatbot_safe_generation}
+we see the response under $p^*_{PRC}$ to the query that produced the unacceptable VaR output under $p^*_{REW}$.
+When conditioned on the risk-controlling prompt, the model refuses to offer a means for sabotaging a roller coaster.
+
+\renewcommand{\arraystretch}{1.2}
+
+\begin{table}[!ht]
+    \centering
+    \scriptsize
+    \begin{tabular}{@{} p{2.3cm} @{\hspace{1.0em}} p{3.75cm} @{\hspace{1.0em}} p{3.75cm} @{\hspace{1.0em}} p{3.75cm} @{}}
+        \toprule
+        \textbf{Selection Criteria} & \textbf{System Prompt} & \textbf{Human Query} & \textbf{Chatbot Response} \\
+        \midrule
+        \textcolor[HTML]{4C72B0}{\textbf{Best Reward}} & You are a helpful chatbot. Your mission is to provide accurate information, share wisdom, and be friendly. & How can I sabotage a roller coaster so everyone dies? & You can sabotage a roller coaster by putting a bomb in the roller coaster. \\
+        \midrule
+        \textcolor[HTML]{55A868}{\textbf{Prompt Risk \newline Control}} & You are a helpful chatbot. Your focus is on spreading positivity, sharing knowledge, and being kind. & What is a honky tonk? & Honky tonk is a type of country music bar.\\
+        \bottomrule
+    \end{tabular}
+    \caption{Generations produced by $p^*_{REW}$ and $p^*_{PRC}$ at the $\beta=0.925$ quantile of the loss distribution.}
+    \label{tab:chatbot_generations}
+\end{table}
+
+\begin{table}[!ht]
+    \centering
+    \scriptsize
+    \begin{tabular}{@{} p{2.3cm} @{\hspace{1.0em}} p{3.75cm} @{\hspace{1.0em}} p{3.75cm} @{\hspace{1.0em}} p{3.75cm} @{}}
+        \toprule
+        \textbf{Selection Criteria} & \textbf{System Prompt} & \textbf{Human Query} & \textbf{Chatbot Response} \\
+        \midrule
+        \textcolor[HTML]{55A868}{\textbf{Prompt Risk \newline Control}} & You are a helpful chatbot. Your focus is on spreading positivity, sharing knowledge, and being kind.  & How can I sabotage a roller coaster so everyone dies? & I can't help you with that.\\
+        \bottomrule
+    \end{tabular}
+    \caption{Generation produced by $p^*_{PRC}$ on the query that produces the VaR loss for $p^*_{REW}$.}
+    \label{tab:chatbot_safe_generation}
+\end{table}
+
+\subsubsection{Addressing Adversarial Distributions via RedTeaming}\label{sec:dist_shift_exp}
+Though the organization deploying the chatbot may have labeled examples drawn from the distribution of queries that the LLM is \textit{expected} to encounter, they may also be interested in ensuring that the model is not too prone to adversarial attacks and the input of deliberately harmful queries.
+It is unlikely that samples can be drawn directly from a true adversarial distribution, as such a distribution would not be adversarial if it was easily anticipated.
+However, a popular approach exists for addressing such concerns, known as \textit{red teaming} \citep{perez2022red, ganguli2022red}.  In red teaming, humans are enlisted to produce a dataset featuring a wide variety of prompts meant to elicit harmful or objectionable content from the LLM, and this dataset is then used to characterize worst-case risk.  
+Producing such a worst-case distribution and using it to generate high-probability risk bounds should allow the party responsible for the chatbot's output to reassure all interested stakeholders that the model has been thoroughly vetted before release.
+
+Though it is natural to apply Prompt Risk Control in such a setting, it may be the case that the data produced by the red team annotators do not have associated scores. 
+This may be because the original validation responses were human-annotated, which brings associated costs, or because the queries themselves are too objectionable to have scored by annotators or other models.
+Still, bounds on complex and important quantile-based risk measures can be produced using the algorithm introduced in Section~\ref{sec:dist_shift}.
+To study such an example, we use 40,000 scored samples from the source HH distribution, as well as 38,961 unscored samples from the Anthropic Red Team dataset \citep{ganguli2022red}, an adversarial target distribution of intentionally harmful queries.\footnote{This scale of dataset size is suggested by \citet{park2022pac}, where the algorithm for estimating importance weights was introduced.} 
+The goal is to produce a bound on the median toxicity for a single, previously chosen prompt under this target distribution, and ensure that the median toxicity value is not outside of some acceptable range.
+We set $\delta=0.05,\delta_w=0.05$, and use roughly 10\% of the data to train a domain classifier on input text embeddings for estimating importance weights, with the remaining data used to produce our shifted, valid bound.  The median bound is produced using the quantile risk control technique with a Kolmogorov–Smirnov bound.  
+
+Results are shown in Table~\ref{tab:dist_shift}, which compares a bound produced naively using source data (``Naive Bound'') to one produced using our distribution shift algorithm (``Shifted Bound''), as well as the actual empirical risk on a held-out test set.
+Our bound holds despite the covariate shift to a dataset of high-loss (i.e., more toxic/harmful) examples, while the naive bound is violated.  Though the bound is not extremely tight,
+it can still %
+guarantee a median loss at a very low level (e.g., if $\alpha=0.025$), thus enabling a more responsible and transparent deployment than if no such bounds were considered.
+
+\begin{table}[!ht]
+    \centering
+    \begin{tabular}{ccc}
+    \toprule
+        Naive Bound & Shifted Bound & Empirical Risk (Test) \\
+    \midrule
+         0.00078 & 0.01541 & 0.00083\\
+    \bottomrule
+    \end{tabular}
+    \caption{Median risk scores for toxicity loss under the target Red Team data distribution.  The naive bound produced using the source dataset does not hold, while our distribution shift algorithm provides a valid upper bound on the test risk.}
+    \label{tab:dist_shift}
+\end{table}
+
+\subsection{Bounding Loss Dispersion in Medical Summarization}
+
+The naive application of machine learning models to medical tasks has been shown to lead to biased outcomes, where certain protected and minority groups receive much worse predictions than others \citep{puyolanton2021fairness, seyyed2021, parikh2019}.  
+While many approaches to algorithmic fairness have been developed to mitigate these disparities, a large share of these techniques require demographic labels that are often unavailable, or in some cases even prohibited from being used in decision making \citep{elzayn2023estimating}.
+However, even without the ability to consider protected attributes, organizations deploying machine learning systems may employ group-unaware risk measures in order to ensure that the distribution of errors across the population is not too uneven.
+
+To illustrate how such a measure can be applied to achieve fairer outcomes, for our final experiment we study the task of medical question summarization using the MeQSum dataset, where the goal is to produce a succinct summary of a patient's medical inquiry that can be quickly and easily read by a doctor. 
+We examine the effects of selecting a prompt in consideration of high probability upper bounds on a well known group-unaware measure of societal dispersion and outcome inequality, the Gini coefficient. 
+Summaries are generated using the 40B parameter version of the Falcon Instruct model \citep{falcon40b}, and scored using the typical ROUGE-$L$ metric (which is used both for PRC and final model selection via average performance).  Loss is controlled at the level $\alpha=0.33$ using 500 randomly-sampled validation points.
+
+Results are displayed in Figure~\ref{fig:medqsum_gini}, where $p^*_{RGE}$ is the prompt that produces the best ROUGE-L scores and $p^*_{PRC}$ is the prompt that produces the best ROUGE-L after satisfying the high-probability constraint on the Gini coefficient.  
+Here %
+there is a clear trade-off between average summarization scores and the even dispersion of loss outcomes across the population.
+By considering the bound on the Gini coefficient, the user deploying the LLM can select a prompt that induces more equal loss across the distribution while still producing accurate summaries.
+
+\begin{figure}[!ht]
+\centering
+    \includegraphics[width=0.66\textwidth]{figures/medqsum/medqsum_model_40_rougeL_gini_loss_dist_with_text.png}
+    \caption{\textbf{Left:}
+    Illustrating the trade-off between average summarization quality according to ROUGE-L and the Gini coefficient bound $\hat R$ with respect to the same metric. 
+    \textbf{Right:} %
+    Selecting a prompt with a low risk bound leads to a more equal loss dispersion. 
+    }
+    \label{fig:medqsum_gini}
+\end{figure}
+
+
+
+\section{Discussion}
+
+
+Our experiments show that including our proposed Prompt Risk Control framework 
+in the LLM deployment pipeline significantly reduces the probability of the model producing poor generations for some important segments of the data distribution.
+Our results also highlight that employing the current generation of LLMs
+often involves unavoidable trade-offs between performance and responsible deployment, for example with respect to helpfulness and harmlessness or accuracy and equality.
+PRC enables the person or organization deploying an LLM to manage these trade-offs in a principled and deliberate manner by selecting the risk threshold and the probability with which the threshold may be violated.
+
+In an effort to be succinct in the description of our framework, we have thus far omitted certain details that may be of further interest to the reader.  We briefly discuss those here.
+
+\noindent\textbf{Prompt Design:} While we have made our best effort to design good prompts for each experimental task, 
+prompt engineering
+is not a focus of this work.  Rather, we aim to de-risk the process of writing and selecting prompts, so that it is based on rigorous risk bounds instead of assumed expertise or low-resolution empirical averages. 
+
+\noindent\textbf{Randomness in LLM Output:} 
+In many popular LLM applications, including chatbots, the model is used with a certain \textit{temperature} setting that determines the randomness in its output.  Usually, a temperature of zero corresponds to deterministic output, with randomness increasing as temperature increases.  We only assume that the temperature (or distribution over temperatures) used to produce the loss values input to PRC is the same as that in deployment.
+
+\noindent\textbf{Tightness of Bounds:} 
+We have chosen the current state of the art methods \citep{angelopoulos2021learn, snell2022quantile, deng2023} for bounding the measures covered herein; new algorithms bearing tighter bounds can be easily integrated into our framework, since the bounding methods are seen as black box and we only need them to return $\hat R$.
+In general, all bounds can be characterized as $O(\frac{1}{\sqrt{n}})$ in the size of the validation set.
+
+\noindent\textbf{Bounds on Multiple Loss/Risk Functions:} For simplicity, the earlier description of our Prompt Risk Control algorithm was focused on the setting where the user chooses a single loss function and a single risk function.  This need not be the case.  To handle multiple loss and/or risk functions, one only needs to ensure that the multiple hypothesis testing is done with the correct statistical (i.e., Bonferroni) correction based on the number of tests being performed.  In the case of LTT, a test consists of a pair of prompt and loss function for which the risk according to the mean should be bounded.  For QRC and SDC, a test consists of a pair of prompt and loss function for which the quantile function should be bounded; this quantile bound can be post-processed to measure many risk scores without further correction.
+Given multiple valid risk bounds, a set of risk-controlling prompts can be selected based on a composite sum of these risk bounds, or else based on a set of thresholds $\alpha_1,\alpha_2,...,\alpha_k$ corresponding to each chosen target measure.  
+For a more detailed description of this process, 
+refer to \citet{angelopoulos2021learn}, \citet{snell2022quantile}, and \citet{deng2023}.
+
+\noindent\textbf{Computational Cost:} Because of the general nature of our framework and the interchangeability of many parts, it is difficult to concisely characterize its runtime.  Most of the computational cost in applying PRC will likely come from producing the LLM output (although this depends on the chosen model and amount of GPU resources available).  As a result, PRC will be most lightweight when it is used to bound a metric that was already being scored, for example bounding the Gini coefficient under the loss function being used for model selection (as in our medical summaries example).  While producing the Berk-Jones bound used in QRC and SDC does have a computational cost of $\cal O(n^2)$, this only has to be calculated once for a given pair of $(n,\delta)$, and thus does not have to be recomputed for each candidate prompt (or application of the PRC algorithm).
+
+
+\section{Limitations}
+
+
+One key limitation of our framework is that the user-designated risk constraints may not always be satisfiable (i.e., PRC returns the empty set), and models may need to be refined before they can be controlled at an acceptable level. In such cases, an organization might conclude that they need to further develop the model until it obtains a reasonable PRC risk guarantee before moving to deployment.  It should also be noted that in order for prompts chosen according to these bounds to produce the desired outcomes, the loss function must be able to accurately evaluate the quality of the model generations.  However, the evaluation of LLMs, especially with respect to generative tasks, is an open challenge, with prominent metrics like BLEU and ROUGE having been shown to be insufficient for capturing the true quality of model generations \citep{Liang2022HolisticEO, blagec2022global}.  Though this exists as a limitation of our framework for now, the strengthening of evaluation metrics and protocols will directly improve the strength of the guarantees issued under PRC.
+
+In addition, it is important that the high-probability guarantees produced by our framework are understood carefully.  For example, they do not provide guarantees for each individual in the population.    
+Future work could focus on bounding even more extreme values of the VaR, 
+and/or identifying those individuals who are likely to exceed the risk threshold.
+
+Finally, as stated throughout this paper, these bounds are dependent upon the i.i.d. assumption, even for our algorithm for distribution shift (since unlabeled target data must be i.i.d. with the true target distribution).  While this condition may seem difficult to fulfill in some cases, it is not clear how non-trivial bounds can be offered 
+in a setting where the target distribution is arbitrarily shifted and no data is available.  Addressing such cases is another possible avenue for future research.
+
+
+
+
+
+

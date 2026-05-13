@@ -1,0 +1,591 @@
+\title{ExPLoRA: Parameter-Efficient Extended Pre-Training to Adapt Vision Transformers under Domain Shifts}
+
+\begin{abstract}
+  Parameter-efficient fine-tuning (PEFT) techniques such as low-rank adaptation (LoRA) can effectively adapt large pre-trained foundation models to downstream tasks using only a small fraction (0.1\%-10\%) of the original trainable weights. 
+  An under-explored question of PEFT is in extending the pre-training phase without supervised labels; that is, can we adapt a pre-trained foundation model to a new domain via efficient self-supervised pre-training on this new domain? 
+  In this work, we introduce \model{}, a 
+  highly effective technique to improve transfer learning 
+  of pre-trained vision transformers (ViTs) under domain shifts.
+  Initializing a ViT with pre-trained weights on large, natural-image datasets such as from DinoV2 or MAE, \model{} continues the unsupervised pre-training objective on a new domain, unfreezing 1-2 pre-trained ViT blocks and tuning all other layers with LoRA.
+  We then fine-tune the resulting model only with LoRA on this new domain for supervised learning. 
+  Our experiments demonstrate state-of-the-art results on satellite imagery, even outperforming fully pre-training and fine-tuning ViTs. 
+  Using the DinoV2 training objective, we demonstrate up to 7.5\% improvement in linear probing top-1 accuracy on downstream tasks while using <10\% of the number of parameters that are used in prior fully-tuned state-of-the art approaches. 
+  Our ablation studies confirm the efficacy of our approach over other baselines, including PEFT and unfreezing more ViT blocks. 
+  Code is available on the project website: \url{https://samar-khanna.io/ExPLoRA/}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+Pre-training foundation models~\citep{bommasani2021foundation_model} for natural language~\citep{gpt3, chowdhery2023palm, touvron2023llama, jiang2024mixtral} and natural images~\citep{oquab2023dinov2,he2022mae,zhou2021ibot,stablediffusion} has historically been computationally intensive, often limited to organizations with substantial resources.
+However, recent advancements in parameter-efficient fine-tuning (PEFT) techniques including low-rank adaptation (LoRA) and others~\citep{lora,adalora,glora,oft,boft,vpt} have sparked significant interest. 
+These methods aim to adapt foundation models to downstream supervised-learning tasks using a small fraction (0.1\%-10\%) of the model's trainable weights, with many based on the hypothesis that the required weight updates to the pre-trained model have a ``low intrinsic rank"~\citep{lora,li2018measuring,aghajanyan2020intrinsic}.
+In this paper, we focus on visual foundation models (VFMs) such as DinoV2 or MAE~\citep{oquab2023dinov2,he2022mae}, which were trained on large-scale natural-image datasets.
+Despite the large investments in developing such models for natural images, they underperform when applied to other domains with visual data (e.g. medical or satellite images). For example, fine-tuning a model pre-trained on natural images on satellite image classification tasks 
+is not as effective as 
+fine-tuning one that was pre-trained on satellite images~\citep{satmae,gassl}.
+To bridge this gap, prevailing approaches invest similarly large levels of compute to pre-train VFMs on new domains, inspired by techniques developed for natural images~\citep{satmae,scalemae,cross_scale_mae,diffusionsat,retina_foundation,raydino,wmae}.
+
+In this work, we challenge this paradigm (\cref{fig:explora_explainer}), asking whether pre-training from scratch on each new domain is strictly necessary, since doing so is expensive (in compute and time) and precludes knowledge transfer from natural images.
+Instead, we wish to more efficiently leverage the rich semantic information encoded in natural-image vision foundation models to adapt them to new domains. 
+Our proposed solution addresses these concerns using PEFT techniques for domain adaptation via self-supervised learning.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/explora_explainer.pdf}
+    \caption{
+    Consider two different image domains, $D_S$ and $D_T$. \textbf{Left}: the traditional paradigm of pre-training from scratch on each domain to yield $W_{D_S}$ and $W_{D_T}$, and then fine-tuning on target datasets $i$ to yield $\Delta_{s_i}, \Delta_{t_i}$, for domains $D_S$ and $D_T$, respectively. \textbf{Right}: our approach, which is to initialize with pre-trained weights from domain $D_S$ and then learn unsupervised weights $\Delta_{D_T}$ for domain $D_T$ in a parameter-efficient manner.}
+    \label{fig:explora_explainer}
+\end{figure}
+
+We introduce \textbf{\model{}}, which generalizes vision foundation models to new domains by extending the pre-training phase with parameter-efficient techniques. 
+We initialize a vision transformer (ViT)~\citep{vit} with pre-trained weights from natural-image datasets such as MAE or DinoV2. 
+Selectively unfreezing 1-2 transformer blocks, we tune remaining weights with LoRA and continue unsupervised pre-training on the new domain. 
+Subsequently fine-tuning with linear probing or LoRA on this new domain for supervised learning outperforms prior state-of-the-art (SoTA) approaches while training under 6-10\% of the original weights.
+On satellite imagery, for example, we demonstrate an 8\% improvement in linear probing top-1 accuracy, and even an improvement over prior SoTA fully pre-trained and fine-tuned techniques. 
+We conduct an extensive study on RGB, temporal, and multi-spectral satellite images, either matching or outperforming prior methods that fully pre-train from scratch. 
+\model{} also generalizes to different domains such as wildlife, medical, and agricultural imagery on the WILDS~\citep{koh2021wilds} benchmark. 
+Our contributions include:
+\begin{enumerate}
+\itemsep=0em
+\item Introducing \model{}, a novel parameter-efficient method that extends unsupervised pre-training on target domains, achieving state-of-the-art supervised-learning performance using a fraction of the original ViT weights (\cref{sec:method}).
+\item Conducting a comprehensive case study on satellite imagery, showcasing improvements in linear probing top-1 accuracy and outperforming existing techniques on datasets like fMoW. We also demonstrate generalization to multiple other domains within WILDS (\cref{sec:experiments}).
+\item Demonstrating \model{}'s efficacy via ablation studies and by analyzing the differences in local (eg: positional) and global (eg: class) information encoded in the patch representations output by each ViT block (\cref{sec:explora_analysis}).
+\end{enumerate}
+
+
+\section{Related Work}
+
+\label{sec:related}
+
+\paragraph{VFMs}
+\label{par:related_vision_foundation}
+VFMs such as DinoV2 or masked autoencoders (MAE) that pre-train with self-supervised learning (SSL) have demonstrated remarkable performance across downstream tasks such as classification or semantic segmentation~\cite{oquab2023dinov2,he2022mae,byol,mocov2}. 
+However, there has also been a rise in domain-specific VFMs~\citep{satmae,scalemae,raydino,medsam,zhang2023text2seg}. 
+For instance, SatMAE handles temporal or multi-spectral satellite image inputs. 
+Since these models contain hundreds of millions of parameters, efficient adaptation to downstream tasks has become a key research focus.
+\paragraph{PEFT}
+\label{par:related_peft}
+PEFT methods have gained widespread adoption for efficiently adapting large models to various downstream tasks, mitigating the prohibitive costs of full model tuning by updating only a fraction of the parameters. 
+For example, LoRA learns low-rank weight updates to frozen weights, while other methods modify the frequency or number of trainable parameters per layer~\citep{lora, adalora, glora, empirical_lora_analysis}. 
+\citet{relora} introduce LoRA for pre-training via adding multiple low-rank matrices, but require full parameter tuning as a ``warm start''.
+Others use multiplicative orthogonal weight updates, effectively retaining pre-training knowledge in frozen weights~\citep{oft, boft}. 
+Another family of PEFT techniques include visual prompt tuning (VPT), which concatenate learnable prompt tokens to the sequence of image patch tokens, trading improved fine-tuning performance with increased inference-time latency and memory usage~\citep{vpt,gated_vpt,sa2vpt,evpt}.
+Our \model{} method aims to supplement existing PEFT methods rather than replace them, and thus can be configured with any existing or future PEFT method intended for fine-tuning ViT backbones.
+\paragraph{Domain Adaptation}
+\label{par:related_domain_adaptation}
+Domain adaptation approaches have attempted to bridge the train-test data distribution shift from several perspectives~\citep{singhal2023domain}. 
+Discrepancy-based methods minimize the difference between feature distributions of the source and target domains using discrepancy metrics~\citep{gretton2012kernel, kang2019contrastive, sun2016return} for domain loss. 
+Adversarial methods are trained to amplify domain confusion while simultaneously distinguishing between different domains~\citep{ganin2016domain, li2018domain, tzeng2017adversarial}. 
+Group DRO minimizes the loss in the worst-case domain, specifically addressing subpopulation shift, where data distributions differ but may have some overlap~\citep{hu2018does, oren2019distributionally}.
+
+
+
+
+\section{Background}
+
+\label{sec:background}
+
+\paragraph{MAE}
+\label{par:mae}
+The masked-autoencoder (MAE)~\citep{he2022mae} is an effective SSL technique for ViTs that uses an asymmetric encoder-decoder architecture on images $\rvx \in \sR^{C\times H \times W}$, where patches are masked before being processed by the ViT encoder $\gL$.
+The masked patches are then reconstructed by a smaller decoder $\gL_D$, with both trained jointly using mean-squared error on the reconstructed visible pixels.
+While effective across domains~\citep{satmae,bachmann2022multimae}, MAEs typically require full fine-tuning for downstream tasks, which makes them computationally expensive.
+
+\paragraph{DinoV2}
+\label{par:dinov2}
+DinoV2~\citep{oquab2023dinov2} is a robust SSL method for ViTs. Unlike MAE, DinoV2 features have demonstrated strong zero-shot performance, enabling adaptation to downstream tasks even with a frozen ViT backbone. During pre-training, DinoV2 maintains two copies of a ViT encoder: the student (trainable) and the teacher, which is updated using an exponential-moving average of the student's parameters. The training objective incorporates a global, image-level loss from Dino~\citep{dino}, a patch-based loss from iBOT~\citep{zhou2021ibot}, and regularizers including KoLeo~\citep{koleo} and Sinkhorn-Knopp centering~\citep{swav}.
+
+\paragraph{LoRA} 
+\label{par:lora}
+Low-rank adaptation (LoRA)~\citep{lora} assumes that the weight update to change a set of unsupervised pre-trained weights to supervised fine-tuned weights lives in a low-rank subspace,
+\begin{equation}
+    W \approx W_0 + \Delta_W = W_0 + BA
+\end{equation}
+where $W \in \mathbb{R}^{k_2 \times k_1}$ are the final, task-specific fine-tuned weights, $W_0 \in \mathbb{R}^{k_2 \times k_1}$ are the pre-trained weights, $\Delta_W \in \mathbb{R}^{k_2 \times k_1}$ is the weight update required to translate the pre-trained weights $W_0$ to the fine-tuned weights $W$. The key is that $\Delta_W = BA $ where $B \in \mathbb{R}^{k_2 \times r}$ and $A \in \mathbb{R}^{r \times k_1}$. That is, $A$ and $B$ form a low-rank factorization of $\Delta_W$, where the rank $r \ll \min(k_1, k_2)$.
+
+
+\section{Problem Setup}
+
+\label{sec:problem_setup}
+
+Consider a set of image domains $\gD = \{1, 2, \dots \}$, where each domain $d \in \gD$ is associated with a data distribution $p_d(\rvx)$, and images $\rvx \in \sR^{C_d \times H_d \times W_d}$ have domain-specific channel, height, and width.
+Let $D_S \subset \gD$ represent a set of source domains (e.g., internet-scale natural image data) and $D_T \subset \gD$ represent target domains (e.g., satellite imagery). 
+The data from the source domains follow a distribution $p_{D_S}(\rvx)$, and the target domain data come from $p_{D_T}(\rvx)$. 
+For some target domains $d_T \in D_T$, the joint distributions $p_{d_T}(\rvx, \rvy)$ describe images $\rvx$ with associated supervised labels $\rvy$ used for downstream tasks.
+We then assume access to the following: 
+\begin{enumerate}[label=(\roman*)]
+\itemsep=0em
+    \item $W_{D_S}$, pre-trained weights obtained via unsupervised pre-training on images from $p_{D_S}(\rvx)$
+    \item $\gX_{D_T} = \{ \rvx_i \}_{i=1}^N \sim p_{D_T}(\rvx)$, an unlabeled dataset of $N$ images from new domains $D_T$
+    \item $\gY_{d_T} = \{ \rvx_j, \rvy_j \}_{j=1}^{M_{d_T}} \sim p_{d_T}(\rvx, \rvy)$ a labeled dataset of $M_{d_T}$ images from domain $d_T \in D_T$
+\end{enumerate}
+Our objective is to learn optimal weights $W_{d_T}$ for each supervised-learning dataset $\gY_{d_T}$ in a parameter-efficient manner while leveraging the knowledge stored in $W_{D_S}$.
+
+Traditionally, the approach (\cref{fig:explora_explainer}) has been to begin pre-training from scratch on the new domains of interest in $\gX_{D_T}$, and then fine-tune for each dataset $\gY_{d_T}$, representing the following:
+\begin{equation}
+    W_{d_T} \approx W_{D_T} + \Delta_{d_T}
+\end{equation}
+where $W_{D_T}$ represents the weights learned from unsupervised pre-training on $\gX_{D_T}$, and $\Delta_{d_T}$ are the weights learned from supervised fine-tuning on $\gY_{d_T}$. 
+However, this method is computationally expensive: fully pre-training $W_{D_T}$ from scratch for every new domain requires prohibitively large amounts of additional compute.
+
+On the other hand, LoRA addresses this inefficiency in the following way:
+\begin{equation}
+    W_{d_T} \approx W_{D_S} + \Delta_{d_T} = W_{D_S} + B_{d_T}A_{d_T}
+\end{equation}
+
+The LoRA hypothesis is that the update $\Delta_{d_T}$ resides in a low-rank subspace when adapting pre-trained weights $W_{D_S}$ to fine-tuned weights $W_{d_T}$. 
+This hypothesis holds well when pre-training and fine-tuning distributions are similar, or where $d_T \in D_S$. 
+However, when there is significant domain shift, such as between natural images and multi-spectral satellite data, the low-rank assumption often breaks down (see \cref{sec:fmow_sentinel}).
+
+Our goal is to learn $W_{D_T}$ in a parameter-efficient manner to bridge the large domain shift to $D_T$ while leveraging the knowledge encoded in $W_{D_S}$.
+We propose the following factorization of $W_{d_T}$:
+\begin{equation}
+\label{sec:explora_eq}
+    W_{d_T} \approx W_{D_S} + \Delta_{D_T} + \Delta_{d_T}
+\end{equation}
+where $\Delta_{D_T} \in \mathbb{R}^{k_2 \times k_1}$ is an additional update matrix learned from unsupervised pre-training on $\gX_{D_T}$. 
+Crucially, $\Delta_{D_T}$ requires only a fraction of the $k_1k_2$ parameters of $W_{D_S}$, making it significantly more efficient than full-rank pre-training. The resulting model, $W_{D_T}^{\ast} = W_{D_S} + \Delta_{D_T} \approx W_{D_T}$, retains the benefits of unsupervised pre-trained VFMs, including strong feature extraction, effective linear probing, KNN classification, and generalization to downstream tasks.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/explora_arch.pdf}
+    \caption{An overview of \model{}. The set $\gL$ of \texttt{L} ViT blocks is partitioned into two sets: $\gU$, which denotes blocks whose parameters are completely unfrozen, and $\gL \setminus \gU$ which denotes blocks that undergo LoRA tuning (only on the $Q, V$ attention matrices). Note that the normalization layers are always unfrozen across all blocks.} 
+    \label{fig:explora_main}
+\end{figure}
+
+\begin{algorithm}[t]
+\caption{\model{}} 
+\label{algo:explora}
+\begin{algorithmic}[1] 
+\State \textbf{Input:} $W_{D_S} \coloneq$ pre-trained ViT with $\texttt{L}$ layers $\gL = \{\texttt{1}, \dots, \texttt{L}\}$; $\gX_{D_T} \coloneq$ unlabeled dataset
+\State Initialize a frozen ViT with $W_{D_S}$ from source domains $D_S$ (e.g., DinoV2 or MAE weights). 
+\State Unfreeze all parameters of a subset of blocks $\gU \subset \gL$. (e.g., $\gU = \{ \texttt{L}\}$ or $\gU = \{ \texttt{1,L}\}$).
+\State Apply LoRA (with rank $r$) on $Q$ and $V$ weights in attention layers of frozen blocks in $\gL \setminus \gU$ and unfreeze normalization layers in these blocks. 
+\State Train all unfrozen parameters $\Delta_{D_T}$ on the unlabeled dataset $\gX_{D_T}$ using the same unsupervised objective as what was used for $W_{D_S}$ (e.g., DinoV2 or MAE). 
+\State \textbf{Output:} A new pre-trained model $W_{D_T}^{\ast} = W_{D_S} + \Delta_{D_T}$ for target domains $D_T$. 
+\end{algorithmic} 
+\end{algorithm}
+
+
+\section{Method}
+
+\label{sec:method}
+To learn $\Delta_{D_T}$, we propose \model{} (i.e. \textbf{Ex}tended \textbf{P}re-training with \textbf{LoRA}), a method that efficiently adapts pre-trained ViTs for new target domains $D_T$, described in \cref{algo:explora}.
+In terms of notation, D-[\texttt{L}]-$r64$ refers to a ViT initialized with DinoV2 weights (denoted by D), where $\gU = \{\texttt{L}\}$, and LoRA rank 64 is applied to the $Q, V$ matrices of attention layers in $\gL \setminus \gU$. 
+Thus, $\Delta_{D_T}$ comprises of all weights in $\gU$, LoRA matrices in $\gL \setminus \gU$, and normalization layers. 
+For $\gU = \{\texttt{L}\}$, $\Delta_{D_T}$ consists of only 5\% of the original ViT parameters. 
+As we show in \cref{sec:experiments}, our extended pre-training approach can match or even outperform full pre-training on new domains from scratch.
+
+\paragraph{\model{} for DinoV2}
+\label{par:explora_dinov2}
+We initialize a ViT-L with $W_{D_S}$ from the DinoV2 ViT-L encoder, without registers \citep{vit_registers}. 
+Since the DinoV2 pre-trained checkpoints don't contain the Dino or iBOT linear heads, we initialize a shared Dino-iBOT linear head from scratch.
+This shared head is fully trained during extended pre-training, adding only a minimal number of trainable parameters.
+\paragraph{\model{} for MAE}
+\label{par:explora_mae}
+We initialize a ViT-L with $W_{D_S}$ from the MAE ViT-L encoder. 
+Since MAE provides the pre-trained decoder, we use these weights to initialize our MAE decoder~\cite{he2022mae}.
+During extended pre-training, in addition to the \model{} recipe in \cref{algo:explora}, we apply LoRA with rank $r'$ on the $Q, V$ matrices of each attention layer in the frozen decoder. 
+Note that the LoRA rank $r'$ may differ from the LoRA rank $r$ used in the ViT encoder (\cref{sec:mae_decoder_experiments}). 
+All other decoder weights, apart from the layer-normalization layers, are kept frozen. 
+No block is fully unfrozen in the MAE decoder, as it will be discarded after extended pre-training. 
+This helps to minimize the number of additional parameters trained in the decoder.
+\paragraph{\model{} for Multi-Spectral Inputs}
+\label{par:explora_multi_spectral}
+For the multi-spectral ViT introduced by SatMAE we need to additionally unfreeze the positional encoding and the patch embedding weights for each group of channels.
+These cannot be initialized from $W_{D_S}$, as $W_{D_S}$ is trained on RGB inputs, whereas multi-spectral inputs can have more or different channels.
+As part of $\Delta_{D_T}$ in \cref{algo:explora}, the positional encodings and patch embeddings for multi-spectral data are adapted during extended pre-training.
+Aside from this, the approach remains unchanged from that of DinoV2 or MAE described earlier. 
+
+\paragraph{Storage Considerations}
+\label{par:explora_storage}
+After running \model{}, we receive a new unsupervised model $W_{D_T}^{\ast} = W_{D_S} + \Delta_{D_T}$ for the target domains $D_T$.
+Any components that are not part of the ViT encoder (eg: the Dino linear head or the MAE decoder) are discarded. 
+Post-\model{}, only $\Delta_T$, consisting of 1-2 unfrozen ViT blocks, LoRA matrices, and layer-normalization weights, are stored for each $D_T$. 
+Like LoRA and other PEFT methods, \model{} significantly reduces additional storage requirements compared to fully training $W_{D_T}$ from scratch.
+
+\paragraph{Fine-Tuning post-\model{}}
+\label{par:explora_finetuning}
+After extended pre-training with \model{}, the output weights $W_{D_T}^{\ast}$ behave as any fully pre-trained model $W_{D_T}$. 
+We can now use the ViT for feature extraction, PEFT, or fine-tuning as desired. 
+For instance, we could initialize a linear head for classification or a decoder for segmentation, either of which is fully trainable. 
+We can then freeze all ViT weights and apply LoRA-$r8$ on the $Q, V$ matrices of the attention layers (or use another PEFT method).
+Lastly, we use supervised fine-tuning on each labeled dataset $\gY_{d_T}$ to train the unfrozen parameters $\Delta_{d_T}$.
+This yields our final model $W_{d_T}$ (\cref{sec:explora_eq}), which can be used for classification, segmentation, detection etc.
+
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+Our experimental results consist of a case study on satellite imagery (\cref{sec:case_study_satellite}), with an ablation study in \cref{sec:ablation} and analysis in \cref{sec:explora_analysis}. We evaluate on multiple downstream tasks in \cref{sec:fmow_sentinel,sec:results_satellite_additional,sec:results_wilds}. 
+Additional experiments and ablations are provided in \cref{sec:additional_experiments} and training hyperparameter and compute configurations are mentioned in \cref{sec:training_details}. 
+Our results achieve a new SoTA top 1 accuracy of 79.2\% ($\uparrow$1.4\%) on the competitive fMoW-RGB benchmark, outperforming fully pre-trained and fine-tuned models while using 6\% of the ViT encoder parameters. We also achieve a $\uparrow$8.2\% improvement in linear probing accuracy on the same dataset. Across other satellite datasets, we match fully-pretrained prior state-of-the-art methods, and demonstrate competitive performance on WiLDS benchmark datasets as well.
+
+\subsection{Case Study: Satellite Imagery}
+\label{sec:case_study_satellite}
+We examine satellite images given their importance towards multiple societal applications (\cref{sec:broader_impact}) and since they represent a significant domain shift from natural images. 
+There is a large and growing body of research on developing foundational models for satellite imagery from scratch~\cite{gassl,satmae,scalemae,cross_scale_mae}, thus presenting a good benchmark for \model{}.
+
+\subsubsection{RGB Satellite Images}
+\label{sec:fmow_results}
+\paragraph{Dataset} We first consider the functional map of the world (fMoW) dataset of high-resolution satellite images, each paired with one of 62 classification labels~\citep{fmow}. fMoW is used as a benchmark for many satellite-image foundation models~\citep{satmae,scalemae}.
+
+\begin{table}[ht!]
+    \small
+    \centering
+    \begin{tabular}{ccccccc}
+    \hline
+    Model & Arch. & PEFT & \tabincell{c}{Pre-train\\\#Params} & \tabincell{c}{Fine-tune\\\#Params} & Top 1 Acc. \\
+    \hline
+    ScaleMAE \citepnum{scalemae}          & ViT-L  & Full     & 303.3M & 303.3M & 77.80 \\
+    SatMAE  \citepnum{satmae}             & ViT-L  & Full     & 303.3M & 303.3M & 77.78 \\
+    \hline
+    SatMAE \citepnum{satmae}              & ViT-L  & LoRA-$r8$ \citepnum{lora}        & 303.3M & 0.8M  & 76.10 \\
+    MAE  \citepnum{he2022mae}             & ViT-L  & LoRA-$r8$ \citepnum{lora}        & -      & 0.8M  & 76.21 \\
+    MAE  \citepnum{he2022mae}             & ViT-L  & DVPT-10 \citepnum{vpt}         & -      & 0.4M  & 72.35 \\
+    MAE  \citepnum{he2022mae}             & ViT-L  & GVPT-100 \citepnum{gated_vpt}  & -      & 0.4M  & 70.86  \\
+    MAE  \citepnum{he2022mae}             & ViT-L  & SA$^2$VP \citepnum{sa2vpt}     & -      & 1.1M  & 73.55  \\
+    MAE  \citepnum{he2022mae}             & ViT-L  & AdaLoRA-$r8$ \citepnum{adalora}  & -      & 1.2M  & 75.25 \\
+    M-\texttt{[L]}-$r64$              & ViT-L  & LoRA-$r8$ \citepnum{lora}        & 18.7M  & 0.8M  & 76.55 \\
+    DinoV2 \citepnum{oquab2023dinov2}     & ViT-L  & LoRA-$r8$ \citepnum{lora}        & -      & 0.8M  & 78.08 \\
+    DinoV2 \citepnum{oquab2023dinov2}     & ViT-L  & BOFT-$b2m8$ \citepnum{boft}      & -      & 0.9M  & 72.40 \\
+    DinoV2 \citepnum{oquab2023dinov2}     & ViT-L  & VPT-100  \citepnum{vpt}        & -      & 0.4M  & 77.29 \\
+    DinoV2 \citepnum{oquab2023dinov2}     & ViT-L  & GVPT-100 \citepnum{gated_vpt}  & -      & 0.4M  & 76.22 \\
+    DinoV2 \citepnum{oquab2023dinov2}     & ViT-L  & AdaLoRA-$r8$ \citepnum{adalora}  & -      & 1.2M  & 78.87 \\
+    DinoV2 \citepnum{oquab2023dinov2}     & ViT-L  & SA$^2$VP \citepnum{sa2vpt}     & -      & 1.1M  & 77.53 \\
+    D-\texttt{[L]}-$r64$              & ViT-L   & SA$^2$VP \citepnum{sa2vpt}     & 18.7M  & 1.1M  & 78.51 \\
+    D-\texttt{[L]}-$r64$              & ViT-L   & LoRA-$r8$ \citepnum{lora}        & 18.7M  & 0.8M  & \textbf{79.15} \\
+    \hline
+    \end{tabular}
+    \caption{Results on the fMoW-RGB validation dataset. The ``Pre-train \#Params" and ``Fine-tune \#Params" refer to the trainable parameters of the ViT encoder required on the \textit{new} domain, i.e. satellite images. M-\texttt{[L]}-$r64$ and D-\texttt{[L]}-$r64$ refer to \model{} models initialized with MAE and DinoV2 weights, respectively (\cref{sec:method}).}
+    \label{tab:fmow_main}
+\end{table}
+
+We compare our results in \cref{tab:fmow_main} against both prior fully pre-trained SoTA foundation models as well as PEFT techniques applied on ViTs pre-trained with MAE and/or DinoV2 weights.
+Our results demonstrate that D-\model{}-$\tt{[L]}$-$r64$ is SoTA in terms of fMoW-RGB average accuracy at 79.15\%. 
+\model{} outperforms techniques that require fully pre-training ViTs on fMoW while using 6\% of the original ViT encoder parameters. 
+
+\model{}-initializations with LoRA fine-tuning outperform other unsupervised initializations paired with PEFT techniques by 1-3\%, including SoTA matrix-adaptation methods like AdaLoRA~\citep{adalora}, BOFT~\citep{boft}, and VPT-based approaches such as GVPT~\citep{gated_vpt} and SA$^2$VP~\citep{sa2vpt}. 
+Additionally, applying SA$^2$VP to ExPLoRA-initialized ViTs improves performance over a DinoV2 initialization by ~1\%, showcasing \model{}'s compatibility with other PEFT methods and its versatility as an initialization for new domains.
+Using our strongest performing variant (i.e. \model{} with DinoV2), we investigate linear-probing performance on fMoW-RGB compared with prior SoTA methods in \cref{tab:fmow_linprobe}. Linear-probing represents freezing the backbone and then training a linear head on the features extracted from the frozen backbone, serving as a desirable metric of the quality of extracted embeddings. Our results demonstrate an improvement of over $\uparrow$8.2\% in top 1 average accuracy over prior SoTA methods, demonstrating that \model{} learns robust unsupervised representations for its target domain without requiring expensive from-scratch pre-training. Importantly, \model{} outperforms domain-specific prior SoTA solutions (rows 1-4), as well as DinoV2, which suggests successful transfer learning on the target domain by leveraging knowledge from pre-training on natural images.
+\subsubsection{Ablation study}
+\label{sec:ablation}
+
+\begin{table}[t]
+\small
+\centering
+\begin{minipage}[c]{.37\linewidth}
+\centering
+    \begin{tabular}{ccc}
+        \hline
+        Method                   &  Arch.     & \tabincell{c}{Top 1\\Acc.} \\
+        \hline
+        GASSL \citepnum{gassl}                    & ResNet     & 68.32 \\
+        SatMAE \citepnum{satmae}                  & ViT-L      & 65.94 \\
+        ScaleMAE \citepnum{scalemae}              & ViT-B      & 67.30 \\
+        CScaleMAE \citepnum{cross_scale_mae}      & ViT-B      & 69.20 \\
+        \hline
+        DinoV2 \citepnum{oquab2023dinov2}         & ViT-L      & 67.60 \\
+        DinoV2$\dagger$ \citepnum{oquab2023dinov2}& ViT-L      & 69.00 \\
+        D-\texttt{[L]}-$r64$                      & ViT-L      & \textbf{76.86} \\
+        D-\texttt{[L]}-$r64$$\dagger$             & ViT-L      & \textbf{77.48} \\
+        \hline
+    \end{tabular}
+    \caption{Linear-probing on fMoW-RGB. The first four rows fully pre-train on the dataset. $\dagger$ denotes concatenating features from the last 4 ViT blocks. All other rows use the features of the last ViT block.}
+    \label{tab:fmow_linprobe}
+\end{minipage}%
+\hfill
+\begin{minipage}[c]{.61\linewidth}
+\centering
+    \begin{tabular}{cccccc}
+        \hline
+         \tabincell{c}{Blocks\\Unfrozen} & \tabincell{c}{LoRA\\Rank} & \tabincell{c}{Norm\\Unfrozen} & \tabincell{c}{LoRA\\Layers} & \tabincell{c}{Num.\\Params} & \tabincell{c}{Top 1\\Acc.} \\
+         \hline
+         \texttt{[L]}     & 0 & \checkmark & \texttt{[]} & 12.7M  & 74.83 \\
+         \texttt{[L-1,L]} & 0 & \checkmark & \texttt{[]} & 25.3M  & 75.97 \\
+         \texttt{[]}  & 256 & \checkmark & \texttt{[Q,V]} & 25.9M & 75.51 \\
+         \texttt{[]}  & 128 & \checkmark & \texttt{All}  & 33.1M & 55.03\\
+         \texttt{[1]} & 64 & \checkmark & \texttt{[Q,V]} & 18.7M & 75.97\\
+         \texttt{[9]} & 64 & \checkmark & \texttt{[Q,V]} & 18.7M & 75.45 \\
+         \texttt{[L-1]} & 64 & \checkmark & \texttt{[Q,V]} & 18.7M & 77.40 \\
+         \texttt{[L]} & 0  & \checkmark & VPT-100        & 12.8M &  70.14 \\
+         \texttt{[L]} & 64  & \xmark & \texttt{[Q,V]}    & 18.6M & 76.78 \\
+         \texttt{[L]} & 8 & \checkmark & \texttt{[Q,V]}  & 13.4M & 76.31 \\
+         \texttt{[L]} & 32 & \checkmark & \texttt{[Q,V]} & 15.7M & 76.40 \\
+         \texttt{[L]} & 64 & \checkmark & \texttt{[Q,V]} & 18.7M & \textbf{77.48} \\
+         \hline
+    \end{tabular}
+    \caption{Ablation study using DinoV2-\model{}, measuring linear-probing accuracy on fMoW-RGB. 
+    All results are obtained by using concatenated features from the last 4 ViT blocks. }
+    \label{tab:fmow_ablation}
+\end{minipage}
+\end{table}
+
+We perform an ablation study (\cref{tab:fmow_ablation}) on linear-probing performance for fMoW-RGB to determine whether our proposed configuration performs optimally.
+A natural question is whether the improvement in performance stems primarily from unfreezing blocks, or from LoRA-tuning the rest of the ViT. We investigate this by unfreezing blocks $\{\texttt{L,L-1}\}$ in row 2 (with no LoRA), and comparing that with \model{}-\texttt{L}-$r8$ in row 10. As seen, unfreezing an extra block consumes almost double the number of parameters, but fails to yield the same improvement in performance $\downarrow0.34\%$. Thus, simply increasing the number of unfrozen blocks will likely improve performance, but will not do so as effectively as \model{}, and will also significantly and sharply decrease the parameter-efficiency. 
+
+Next, we investigate whether high LoRA ranks used on all ViT layers (i.e. all attention and MLP matrices, not just $Q,V$) is beneficial. Surprisingly, this significantly harms learning (row 4). In fact, it is much less effective than using just LoRA-$r256$ on the $Q,V$ matrices of all $\gL$ blocks (row 3). However, both rows 3 and 4 are much less parameter-efficient than \model{} (rows 5-7, 10-12).
+
+The choice of $\gU$ matters as well. As seen in rows 4, 5, 6, and 12, for the DinoV2 objective, $\gU = \{\texttt{1}\}$ or $\gU = \{\texttt{9}\}$ are not as effective as $\gU = \{\texttt{L-1}\}$ or $\gU = \{\texttt{L}\}$, ceteris paribus. To understand this result further, see \cref{sec:explora_analysis}. We also notice a slight drop in accuracy from leaving the normalization layers across the ViT frozen, seen in row 5.
+
+Lastly, we investigate the impact of LoRA rank on \model{}. Changing the rank from 8 to 32 has a small improvement ($\uparrow0.09\%$), but changing from 32 to 64 brings about a much larger improvement ($\uparrow1.08\%$), with only a relatively small increase in trainable parameters. 
+This demonstrates that higher ranks are necessary during pre-training for effective learning on the new domain. 
+Further ablations on data efficiency (\ref{sec:convergence}), MAE decoder rank (\ref{sec:mae_decoder_experiments}), and ViT backbone size (\ref{sec:vit_backbone_size}) are in \cref{sec:additional_experiments}.
+
+\subsubsection{Multi-Spectral Satellite Images}
+\label{sec:fmow_sentinel}
+\paragraph{Dataset} Next, we consider the fMoW-Sentinel dataset, a large dataset of Sentinel-2 images used in~\cite{satmae}. Each image consists of 13 spectral bands and is paired with one of 62 classes.
+
+With fMoW-Sentinel, we evaluate the challenge of transferring from natural images to multi-spectral, low-resolution satellite images-- a much harder task than fMoW-RGB due to the absence of sensor data beyond RGB bands in $D_S$. We use the SatMAE group-channel ViT-L model from \citet{satmae}, initialized with MAE weights from natural images. Since the patch embedding layers differ, we unfreeze and train them from scratch during \cref{algo:explora}, adding minimal parameter overhead.
+\begin{table}[ht!]
+    \small
+    \centering
+    \begin{tabular}{cccccc}
+        \toprule
+        Model & Backbone & PEFT & \tabincell{c}{Pre-train\\\#Params} & \tabincell{c}{Fine-tune\\\#Params} & Top 1 Acc. \\
+        \hline
+        ImgNet-Supervised  & ResNet152 & Full     & 60.3M & 60.3M  & 54.46 \\
+        MAE \citepnum{he2022mae} & ViT-L    & Full     & -     & 303.3M & 51.61 \\
+        SatMAE~\citepnum{satmae} & ViT-L    & Full     & 303.3M & 303.3M  & \textbf{61.48} \\
+        \hline
+        MAE~\citepnum{he2022mae} & ViT-L    & LoRA-r8  & -      & 0.8M   & 46.97 \\
+        SatMAE~\citepnum{satmae} & ViT-L    & LoRA-r8  & 303.3M  & 0.8M   & 59.48 \\
+        MAE-\texttt{[1,2,L-1,L]} & ViT-L    & LoRA-r8  & 51.5M  & 0.8M   & 54.12 \\
+        M-\model{}-\texttt{[L]}-$r32$& ViT-L   & LoRA-r8  & 16.2M  & 0.8M   & 51.84 \\
+        M-\model{}-\texttt{[1,L]}-$r32$& ViT-L  & LoRA-r8 & 29.7M  & 0.8M   & \textbf{60.15} \\
+        \bottomrule
+    \end{tabular}
+    \caption{Results on the fMoW-Sentinel validation set. The ``Pre-train \#Params" and ``Fine-tune \#Params" refer to the trainable parameters required on the \textit{new} domain, i.e. multi-spectral satellite images. ``MAE-\texttt{[1,2,L-1,L]}" refers to initializing the group-channel SatMAE model with MAE weights, unfreezing blocks 1,2,23,24 for ViT-L, and then continuing pre-training on fMoW-Sentinel. 
+    }
+    \label{tab:fmow_sentinel}
+\end{table}
+
+\Cref{tab:fmow_sentinel} highlights the difficulty of this domain transfer. Fully fine-tuning from MAE weights leads to a nearly 10\% drop in accuracy (row 2), and LoRA tuning from MAE alone performs even worse (row 4). Simply unfreezing four transformer blocks during pre-training (row 6) fails to close the gap. 
+However, \model{}, with $\gU = \{\tt{1, L}\}$, yields excellent results, even outperforming full pre-training from scratch for LoRA fine-tuning (row 5 vs. last row). 
+This demonstrates \model{}'s effectiveness in bridging large domain gaps while using just a fraction (here, <10\%) of the parameters.
+\subsubsection{Additional Satellite Datasets}
+\label{sec:results_satellite_additional}
+We perform extensive experiments on downstream satellite datasets, with further results in \ref{sec:additional_datasets}.
+
+\paragraph{fMoW-Temporal}
+\label{par:fmow_temporal_results}
+Each input is a sequence of up to 3 fMoW-RGB~\citep{fmow} images of the same location, distributed temporally, and paired with one of 62 classes. 
+Since the inputs are now temporal sequences,
+we initialize the temporal MAE architecture from~\citet{satmae} with MAE weights, and pre-train on $\gX_{D_T}$ with $\gU = \tt[L]$ and LoRA rank 32. \model{} then outperforms temporal SatMAE for PEFT (\cref{tab:fmow_temporal}), demonstrating successful transfer learning at a fraction of the pre-training parameters.
+\paragraph{SpaceNet-v1}
+\label{par:spacenet_results}
+This dataset contains high resolution satellite images, each paired with a segmentation mask for buildings~\citep{van2018spacenet}. 
+The training and test sets consist of 5000 and 1940 images, respectively. 
+For \model{}, we pre-train on the training set. 
+However, many images in the dataset contain extensive blacked-out regions, indicating limits of the visible region.
+Considering this limitation and the small dataset size, it is not clear whether additional pre-training is effective. 
+We find that, despite this, \model{} remains on par with the LoRA-tuned DinoV2 model and remains competitive with the fully pre-trained and fully fine-tuned domain-specific models (\cref{tab:spacenet_and_resisc}).
+\paragraph{RESISC-45}
+\label{par:resisc_results}
+The RESISC-45~\citep{resisc45} benchmark dataset consists of 31,500 satellite images of varying resolution (0.2m-30m GSD), with 45 classes. The data is split into 25,200 training and 6,300 validation images, as per \citet{scalemae}. In \cref{tab:spacenet_and_resisc}, our D-\model{} pre-trained on only high-resolution fMoW-RGB images achieves SoTA results of 97.32\% on multi-resolution RESISC-45 images, with just linear-probing. Since we use the same pre-trained model as in the last row of \cref{tab:fmow_main}, we demonstrate successful transfer learning from \model{} pre-training, without requiring any additional modifications for scale-aware representation learning~\citep{scalemae}.
+
+\begin{table}
+\small
+\begin{minipage}[c]{.35\linewidth}
+\centering
+\setlength{\tabcolsep}{0.95mm}{
+\begin{tabular}{ccc}
+\toprule
+Method & PEFT & \tabincell{c}{Top 1 Acc.} \\
+\hline
+GASSL~\citepnum{gassl}             & Full    &  74.11 \\
+SatMAE~\citepnum{satmae}           & Full    &  79.69 \\
+\hline 
+MAE~\citepnum{he2022mae}           & LoRA-r8 & 69.30 \\
+SatMAE~\citepnum{satmae}           & LoRA-r8 &  75.27    \\
+M-\texttt{[L]}-$r32$           & LoRA-r8  &  \textbf{75.98}    \\
+\bottomrule
+\end{tabular}}
+\caption{fMoW-Temporal validation set results}
+\label{tab:fmow_temporal}
+\end{minipage}%
+\hfill
+\begin{minipage}[c]{.63\linewidth}
+\centering
+\setlength{\tabcolsep}{0.95mm}{
+\begin{tabular}{cccc}
+\toprule
+Method & PEFT & \tabincell{c}{SpaceNet\\mIoU} & \tabincell{c}{Resisc45\\Top 1 Acc.} \\
+\hline
+SatMAE~\citepnum{satmae}           & Full        & 78.07          & 94.80\\
+ScaleMAE~\citepnum{scalemae}       & Full        & \textbf{78.90} & 95.70     \\
+\hline
+DinoV2~\citepnum{oquab2023dinov2}  & LoRA-r8     & 76.69          & 97.60 \\
+D-\tt{[L]}-$r64$               & LoRA-r8     & 76.69          & \textbf{97.65} \\
+\hline 
+SatMAE~\citepnum{satmae}           & Lin. Probe  & 50.89          & 88.30   \\
+ScaleMAE~\citepnum{scalemae}       & Lin. Probe  & 47.17          & 89.60   \\
+DinoV2~\citepnum{oquab2023dinov2}  & Lin. Probe  & 76.21          & 96.34   \\
+D-\tt{[L]}-$r64$               & Lin. Probe  & 76.34          & \textbf{97.32}\\
+\bottomrule
+\end{tabular}}
+\caption{SpaceNet and Resisc-45 validation set results}
+\label{tab:spacenet_and_resisc}
+\end{minipage}
+\label{tab:downstream_satellite}
+\end{table}
+
+\subsection{WiLDS Datasets}
+\label{sec:results_wilds}
+We test \model{} on the WILDS~\citep{koh2021wilds} benchmark, specifically on Camelyon17~\citep{camelyon17}, iWildcam~\citep{iwildcam} and GlobalWheat \cite{globalwheat,globalwheat2021} datasets, representing domain transfers to medical, wildlife, and agricultural imagery, respectively. 
+
+\begin{table}
+\small
+\begin{minipage}[c]{.3\linewidth}
+\centering
+\setlength{\tabcolsep}{0.95mm}{
+\begin{tabular}{ccc}
+\toprule
+Method & PEFT & \tabincell{c}{Top 1\\Acc.} \\
+\hline
+CLater~\citepnum{qu2024connect}      & Full    &  93.90 \\
+ICON                                  & Full    &  90.10 \\
+\hline 
+DinoV2~\citepnum{oquab2023dinov2}         & Lin. Probe & 93.27 \\
+DinoV2~\citepnum{oquab2023dinov2}         & LoRA-r8    & 92.97 \\
+D-\tt{[L]}-$r32$                      & Lin. Probe & \textbf{94.41}    \\
+D-\tt{[L]}-$r32$                      & LoRA-r8    & 94.21    \\
+\bottomrule
+\end{tabular}}
+\caption{Classification results on the validation set of Camelyon17.}
+\label{tab:camelyon_wilds}
+\end{minipage}%
+\hfill
+\begin{minipage}[c]{.3\linewidth}
+\centering
+\setlength{\tabcolsep}{0.75mm}{
+\begin{tabular}{ccc}
+\toprule
+Method & PEFT & \tabincell{c}{Top 1\\Acc.} \\
+\hline
+DinoV2~\citepnum{oquab2023dinov2}         & Lin. Probe & 66.04 \\
+DinoV2~\citepnum{oquab2023dinov2}         & LoRA-r8    & 67.10   \\
+D-\tt{[L]}-$r32$                      & Lin. Probe & 62.95    \\
+D-\tt{[L]}-$r32$                      & LoRA-r8    & \textbf{68.07}    \\
+\bottomrule
+\end{tabular}}
+\caption{Classification results on the validation set of iWildcam.}
+\label{tab:iwildcam_wilds}
+\end{minipage}%
+\hfill
+\begin{minipage}[c]{.37\linewidth}
+\centering
+\setlength{\tabcolsep}{0.95mm}{
+\begin{tabular}{cccc}
+\toprule
+Method & \tabincell{c}{Top 1\\Acc.} & \tabincell{c}{AP@\\0.5:0.95}  & \tabincell{c}{AR@\\0.5:0.95} \\
+\hline
+ICON~\citepnum{koh2021wilds}               & 68.9 & -    & -      \\
+MAE~\citepnum{he2022mae}                   & 82.5 & 53.8 & 58.7   \\
+DinoV2~\citepnum{oquab2023dinov2}          & 82.3 & 52.1 & 57.1 \\
+D-\texttt{[L]}-$r64$                       & \textbf{82.7} & \textbf{54.5} & \textbf{59.2}     \\
+\bottomrule
+\end{tabular}}
+\caption{Object detection results on the validation set of GlobalWheat. AP and AR stand for average precision and average recall, respectively.}
+\label{tab:globalwheat_wilds}
+\end{minipage}
+\label{tab:wilds}
+\end{table}
+
+\paragraph{Camelyon17}
+\label{sec:camelyon17}
+The WILDS Camelyon17 dataset consists of images of cancerous and non-cancerous cell tissue organized in labeled and unlabeled splits. We use the ``train-unlabeled" split for pre-training \model{}, and either use LoRA fine-tuning or linear probing on the training set of the labeled split. 
+We report accuracy on the binary classification problem and compare with entries on the WILDS leaderboard which use unlabeled data. Our results in \cref{tab:camelyon_wilds} demonstrate improved performance over domain-specific methods as well as DinoV2, once again successfully bridging the domain gap.
+
+\paragraph{iWildcam}
+\label{sec:iwildcam}
+iWildcam classification requires identifying one of 182 animal species given an image. 
+We pre-train on the training set, finding that this outperforms pre-training on the extra-unlabeled set. In \cref{tab:iwildcam_wilds}, we find an improvement over DinoV2 using LoRA-$r8$ PEFT. 
+Surprisingly, the linear probing performance of the \model{} suffers in comparison with DinoV2, suggesting possible loss in knowledge-transfer due to a small domain gap. Likely because natural image datasets $W_{D_S}$ such as ImageNet~\citep{deng2009imagenet} used for DinoV2 already contain many images of animals.
+
+\paragraph{GlobalWheat}
+\label{sec:globalwheat}
+The GlobalWheat dataset consists of a wheat head object detection task, where each image of a wheat field is associated with bounding boxes on the visible wheat heads~\cite{globalwheat,globalwheat2021}.
+\model{} extends pre-training on the training set, and then we run fine-tuning using Detectron2 code for object-detection with ViTs~\citep{wu2019detectron2}.
+\model{} outperforms both fully pre-trained baselines from the WILDS leaderboard and strong VFMs DinoV2 and MAE on top 1 accuracy, average precision, and average recall.
+\subsection{Analyzing \model{}}
+\label{sec:explora_analysis}
+\begin{table}[h!]
+\small
+\centering
+\begin{minipage}[c]{.325\linewidth}
+\centering
+    \includegraphics[width=\linewidth]{figures/blockwise_eigenvalues.pdf}
+    \captionof{figure}{The mean of the principal components of the feature map outputted by each ViT block.}
+    \label{fig:blockwise_spectral_mean}
+\end{minipage}%
+\hfill
+\begin{minipage}[c]{.325\linewidth}
+\centering
+    \includegraphics[width=\linewidth]{figures/blockwise_pos_accuracy.pdf}
+    \captionof{figure}{Linear probing each patch for position (local information), across all ViT blocks.%
+    }
+    \label{fig:blockwise_position_accuracy}
+\end{minipage}%
+\hfill
+\begin{minipage}[c]{.325\linewidth}
+\centering
+    \includegraphics[width=\linewidth]{figures/blockwise_cls_accuracy.pdf}
+    \captionof{figure}{Linear probing each patch for classification (global information), across all ViT blocks. %
+    }
+    \label{fig:blockwise_cls_accuracy}
+\end{minipage}%
+\end{table}
+
+The key design choice of \model{} is to fully train a small subset $\gU \subset \gL$ of the ViT, while applying low-rank updates to the remaining frozen layers $\gL \setminus \gU$.
+For parameter-efficiency, we aim to keep $|\gU| \ll |\gL|$ and make and informed choice of which layers to unfreeze based on their potential to improve learning during extended pre-training.
+
+We conduct an investigation on 5 models using a sample of $\gX_{D_T}$.
+These models are DinoV2, D-\model{}-$\texttt{[L]}$-$r64$, SatMAE, MAE, and M-\model{}-$\texttt{[L]}$-$r64$.
+We do the following analyses: 
+\begin{enumerate*}[label=(\roman*)]
+    \item PCA to measure the mean and variance of eigenvalues of patch feature vectors for each ViT block, in \cref{fig:blockwise_spectral_mean}
+    \item linear probing for local or global information~\citep{vit_registers} by training logistic regression classifiers on each block's patch feature vectors, to predict either patch position (\cref{fig:blockwise_position_accuracy}) or image class (\cref{fig:blockwise_cls_accuracy}).
+\end{enumerate*}
+
+\paragraph{Findings and Unfreezing Strategy for DinoV2}
+\label{par:understanding_explora_dino}
+Our analysis reveals that the spectral properties of a block's feature map (\cref{fig:blockwise_spectral_mean}) and the ability to retrieve local information from its output patch tokens (\cref{fig:blockwise_position_accuracy}) are correlated. 
+The classification accuracy for position and the mean of the principal eigenvalues peak in the middle-layers of the model, suggesting that the middle blocks capture local properties of patches (e.g., texture, relative position).
+Meanwhile, deeper blocks focus on global semantic understanding, as shown by increased classification accuracy for image class prediction in \cref{fig:blockwise_cls_accuracy}.
+Combined, these results suggest that unfreezing deeper layers, such as $\gU = \{\texttt{L}\}$, allows the model to better capture global features without overfitting to local details of images of $D_T$.
+This is empirically confirmed in \cref{tab:fmow_ablation}, where linear probing accuracy correlates inversely with the mean eigenvalue of each block (i.e., block 23 > block 22 > block 0 > block 9).
+The attention maps in \cref{fig:attention_viz} further support this, showing that the deeper layers focus more clearly on central objects, while earlier layers (e.g., blocks 9, 10) exhibit more diffuse attention patterns spread around the border.
+
+\paragraph{Findings and Unfreezing Strategy for MAE}
+\label{par:understanding_explora_mae}
+For MAE, we see a similar, but less pronounced trend.
+However, MAE is only trained for reconstruction, and so retains more local information across the ViT's layers. This is reflected by its lower patch-wise eigenvalues, higher localization accuracy, and lower global accuracies than Dino.
+
+\paragraph{\model{}'s Impact}
+\label{par:understanding_post_explora}
+D-\model{} preserves local information in the middle layers but also improves localization accuracy in the last few layers. 
+Importantly, it also enhances the global information contained in the patches for deeper model layers. 
+This indicates a better understanding of the target domain, as seen in \ref{sec:attention_map}, where \model{}'s attention highlights the central object more clearly.
+
+
+\section{Conclusion and Discussion}
+
+\label{sec:conclusion}
+In this paper, we introduce \model{}, a novel pre-training strategy to adapt pre-trained ViT foundation models for natural images to additional visual domains such as satellite imagery or medical data. 
+We challenge the common paradigm of expensive pre-training from scratch for each new visual domain by offering a solution to transfer knowledge from foundation models that is both parameter-efficient and effective (even outperforming domain-specific foundation models). 
+Our hope is that \model{} enables further use of foundation models on domains other than natural images without requiring vast computational resources for pre-training. 
+
+While effective, there are many aspects of \model{} that deserve further study. 
+The strategy of fully training a small amount (or budget) of weights combines extremely well with PEFT techniques such as LoRA-- we hope that future work investigates the reason behind this in further detail. 
+Unresolved questions also include whether other parameter-efficient techniques might work better with \model{} during pre-training. 
+Further work to evaluate \model{} for natural language would be valuable, as would an investigation into whether we can do away entirely with unfreezing a transformer block.
+
+
+

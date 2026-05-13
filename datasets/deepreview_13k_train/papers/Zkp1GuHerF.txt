@@ -1,0 +1,382 @@
+\title{LDAdam: Adaptive Optimization from Low-Dimensional Gradient Statistics}
+
+\begin{abstract}
+ This strategy keeps the optimizer's memory footprint to a fraction of the model size. LDAdam relies on a new projection-aware update rule for the optimizer states that allows for transitioning between subspaces, i.e., estimation of the statistics of the projected gradients. 
+To mitigate the errors due to low-rank projection, LDAdam integrates a new generalized error feedback mechanism, which explicitly accounts for both gradient and optimizer state compression. 
+We prove the convergence of LDAdam under standard assumptions, and show that LDAdam allows for accurate and efficient fine-tuning and pre-training of language models.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Scaling up deep neural networks leads to ever-improving models~\citep{kaplan2020scalinglawsneurallanguage}, but also to ever-increasing memory and compute requirements. In this work, we focus on the memory cost of \emph{optimizer states}, i.e., the additional first- and second-order gradient statistics required during the adaptive optimization process, which in the case of the baseline algorithm Adam \citep{kingma2017adammethodstochasticoptimization, loshchilov2019decoupledweightdecayregularization} reaches up to twice the size of the model. Our goal is to replicate Adam's performance and theoretical guarantees while significantly reducing its memory footprint.
+
+We start from the observation that the optimization landscape of deep networks exhibits low intrinsic dimensionality~\citep{li2018measuringintrinsicdimensionobjective}. Low-rank learning has been successfully leveraged for model \emph{fine-tuning}, with the LoRA technique~\citep{hu2021loralowrankadaptationlarge} and its many extensions~\citep{dettmers2023qloraefficientfinetuningquantized, liu2024doraweightdecomposedlowrankadaptation, nikdan2024rosaaccurateparameterefficientfinetuning} becoming standard. However,  such adapter-based methods do not extend to end-to-end accurate training~\citep{lialin2023relorahighranktraininglowrank, zhao2024galorememoryefficientllmtraining}, nor even to fine-tuning on more demanding tasks~\citep{zhang2023adaloraadaptivebudgetallocation, nikdan2024rosaaccurateparameterefficientfinetuning, liu2024doraweightdecomposedlowrankadaptation}. Despite promising results such as GaLore~\citep{zhao2024galorememoryefficientllmtraining}, designing memory-efficient full-parameter optimizers which leverage low-dimensional gradient statistics 
+with provable convergence and good practical performance remains an open challenge.
+
+\paragraph{Contributions.}
+We propose \emph{Low-Dimensional Adam (LDAdam)}, a memory-efficient adaptive optimizer which, for the first time, incorporates low-rank compression of \emph{both gradients and optimizer states}, with convergence guarantees under standard assumptions. The goal of the algorithm is to perform optimization steps within subspaces of lower dimension, while introducing mechanisms to 1) maintain relevant information from the last seen subspaces and 2) recover information lost due to low-rank compression. To reach this goal, our work is based on three main techniques. First, we formulate projection-aware update rules that allow us to perform adaptive optimization on dynamically changing coordinate systems and subspaces. Second, we leverage \emph{block power iteration}~\citep{Bentbib2015} at each step to efficiently and accurately project the gradient and optimizer states. Third, we use a generalized error feedback mechanism for both gradients and optimizer states. Moreover, we {prove the convergence of LDAdam under standard assumptions} and provide empirical evidence supporting its training efficiency.
+
+When performing adaptive optimization \emph{within low-dimensional subspaces}, a key challenge is to adapt the optimizer states to changes in the projection map. Adapting gradient statistics to new subspaces is not obvious and comes with two challenges. First, standard adaptive optimization algorithms are anisotropic: that is, the parameter-wise learning rate tuning implies that the choice of coordinate system used to express the gradient matrix impacts the optimization process. Second, the second-order statistics are nonlinear, which complicates estimation of the gradient statistics and error compensation. We address the first challenge by carefully selecting the coordinate system used for low-rank compression, i.e. the basis given by the most significant singular vectors. The second challenge is addressed by approximating the gradient statistics in the current subspace given the raw moments estimates in the previous subspace. Thus, in LDAdam, optimizer step is performed from the projection-aware intermediate optimizer states and the projected gradient, rather than from the optimizer states at the previous iteration and the full-rank gradient~\citep{kingma2017adammethodstochasticoptimization}. In turn, this leads to stronger convergence guarantees, and better practical performance.
+
+The choice of projection map at each step is key to low-rank compression. Performing singular value decomposition (SVD) at each step would add prohibitive time overhead; instead, we make use of \emph{block power iteration with warm initialization}~\citep{Bentbib2015, vogels2020powersgdpracticallowrankgradient}, which can achieve a tight approximation of the  most significant singular vectors of successive gradients, at low computational cost. To preserve the information from the last iterations kept within the optimizer states, we show that one can perform the block power iteration on a barycenter of the newly computed gradient and an average of the previous gradients. Finally, to mitigate the errors due to low-rank projection, we introduce a new variant of the error feedback mechanism~\citep{seide20141, karimireddy2019errorfeedbackfixessignsgd, alistarh2018convergencesparsifiedgradientmethods} that supports compression of \emph{both gradient and optimizer states}. Moreover, we propose a memory efficient implementation of it by reusing the space allocated to gradient accumulation.
+
+The resulting LDAdam method  is memory-efficient: for a weight layer of shape $n \times m$, the space cost of optimizer states is $nr+2rm$, where $r$ is the projection rank, while the cost of Adam's state is $2nm$. This matches the efficiency of the popular GaLore algorithm~\citep{zhao2024galorememoryefficientllmtraining}, the closest prior work in this area; and can bring major gains in practice, as usually $r\ll\min(m, n)$. Relative to GaLore, LDAdam has the advantages of tracking gradient evolution in the adapted subspace at each step, and correcting for the projection error. This leads to better practical performance, but also to theoretical guarantees of convergence under standard assumptions. Specifically, for smooth non-convex objectives, LDAdam can preserve the asymptotic convergence rate of AMSGrad \citep{reddi2019AMSGrad}, the provably-convergent version of Adam (see Theorem \ref{TheoremNonconvex}). Moreover, we show even faster rates for objectives that obey the Polyak-Łojasiewicz condition (see Theorem \ref{TheoremPLShort}).
+
+We validate the practical performance of LDAdam via an efficient PyTorch implementation. We apply LDAdam for \emph{fine-tuning} RoBERTa~\citep{liu2019robertarobustlyoptimizedbert} and Llama-family~\citep{touvron2023llama2openfoundation} models on the GLUE \citep{wang-etal-2018-glue} and Grade-School Math (GSM) \citep{cobbe2021trainingverifierssolvemath} benchmarks, respectively. In addition, we provide \emph{pre-training} results for Llama-type models with 130M and 350M parameters. Across all tasks and models, LDAdam shows competitive accuracy relative to Adam, but with much smaller optimizer states relative to the baseline, and comparable runtime. Relative to GaLore, LDAdam shows consistently higher accuracy, for matching memory costs and similar runtime. Ablations show that this is a consequence of both our projection-aware intermediate updates and error correction.
+
+In summary, we show that it is possible to achieve both theoretical guarantees and strong practical performance when performing adaptive optimization from low-dimensional gradient statistics. Our techniques may also be relevant to areas such as distributed optimization, while our implementation is relevant in reducing the practical memory overheads of training large language models (LLMs).
+
+
+\section{Related work}
+
+
+\paragraph{Memory-Efficient First-Order Methods in Optimization.}
+Gradient statistics are used to determine the descent direction \citep{rumelhart1986learning} and to adapt the learning rate per parameter \citep{JMLR:v12:duchi11a, Hinton2012RMSProp}. Adam \citep{kingma2017adammethodstochasticoptimization} combines both ideas in a bias-corrected design, and AdamW \citep{loshchilov2019decoupledweightdecayregularization} adds weight decay. Although it is the de facto optimizer for deep neural networks, Adam/AdamW has been the subject of several extensions aimed at reducing its memory footprint. For example, Adafactor \citep{shazeer2018adafactoradaptivelearningrates}, CAME \citep{luo2023cameconfidenceguidedadaptivememory} and Adam-mini \citep{zhang2024adamminiusefewerlearning} rely on a factorized representation of the second-order statistic to reduce memory. Quantization has also been proposed to reduce the  footprint of optimizer states \citep{dettmers20228bitoptimizersblockwisequantization}, and fusing computation of the backward pass and the optimizer step \citep{lv2024parameterfinetuninglargelanguage,lv2024adalomolowmemoryoptimizationadaptive} has also proven effective. 
+
+\paragraph{Error Feedback in Distributed Optimization.}
+Several methods have been proposed to reduce the communication overhead in distributed optimization: quantization \citep{alistarh2017qsgdcommunicationefficientsgdgradient}, sparsification \citep{alistarh2018convergencesparsifiedgradientmethods, lin2020deepgradientcompressionreducing} and low-rank approximation \citep{vogels2020powersgdpracticallowrankgradient}. Error feedback \citep{seide20141} has been shown to be effective in improving the empirical performance of biased gradient compression methods \citep{karimireddy2019errorfeedbackfixessignsgd, vogels2020powersgdpracticallowrankgradient} methods and key to ensuring their convergence~\citep{stich2018sparsifiedsgdmemory, alistarh2018convergencesparsifiedgradientmethods}. 
+MicroAdam \citep{modoranu2024microadam} only stores sparse gradients from each optimization step, and uses error feedback for correction, but reconstructs the full optimizer state at each step, instead of compressing it. 
+\paragraph{Parameter-Efficient Fine-Tuning (PEFT).}
+A natural approach for reducing memory overheads is to train less parameters~\citep{han2024parameterefficientfinetuninglargemodels}. This idea led to additive PEFT, where new trainable modules are added to the model architecture \citep{houlsby2019parameterefficienttransferlearningnlp, li2021prefixtuningoptimizingcontinuousprompts}; selective PEFT, where only certain parameters of the original model are retrained \citep{guo2021parameterefficienttransferlearningdiff}; and reparametrized PEFT, where new modules are trained and merged with the original parameters \citep{hu2021loralowrankadaptationlarge, nikdan2024rosaaccurateparameterefficientfinetuning, liu2024doraweightdecomposedlowrankadaptation}. 
+However, methods that train significantly less parameters tend to underperform for pre-training and fine-tuning on challenging tasks.
+
+\paragraph{Optimization via Low-Rank Gradient Projection.}
+GaLore~\citep{zhao2024galorememoryefficientllmtraining}, which partly motivated our work, performs adaptive optimization in a low-dimensional subspace that is  updated periodically. The adaptive optimizer is fed with a low-rank representation of the gradients obtained via SVD, thus saving memory, and produces a low-rank representation of the descent direction, which is then up-projected to update the model parameters. The idea is similar to PEFT in that low-rank gradient projection yields selective training in the coordinate system induced by SVD. The addition of low-rank components to achieve full-rank training is also proposed in ReLoRA \citep{lialin2023relorahighranktraininglowrank} or COLA \citep{xia2024chainloraefficientfinetuning}. However, unlike PEFT methods, GaLore computes and exploits the full gradient of the original model. The final algorithm allows pre-training of 7B parameter language models on consumer GPUs. However, it can only do so with a very small batch size and without the ability to accumulate gradients over multiple mini-batches. 
+\paragraph{GaLore Comparison.} Relative to GaLore, we propose the following new techniques: (1) we introduce a new projection-aware update rule (see Sections~
+\ref{sec:update_rule} and~\ref{sec:our_update}), which avoids accumulating low-rank gradients from \emph{different} subspaces into the optimizer states, and performs frequent updates; (2) to correct for projection errors in \emph{both} gradients and optimizer states, we introduce a new generalized error feedback mechanism (see Section~\ref{subsec:gen_EF}). 
+The convergence of GaLore is only guaranteed under a very strong ``stable-rank'' assumption, whereas we show convergence under standard conditions.  
+Experimentally, we show that these improvements lead to consistently improved accuracy, and that they can be implemented efficiently in terms of both memory and runtime.  
+Several orthogonal improvements such as quantization \citep{dettmers20228bitoptimizersblockwisequantization, zhang2024qgalorequantizedgaloreint4}, per-layer weight update \citep{lv2024parameterfinetuninglargelanguage}, and weight factorization \citep{jaiswal2024galorewelorelowrankweights} have been proposed to further improve projection-based methods. Many of these improvements  are compatible with LDAdam, and we plan to investigate them in future work. 
+
+
+\section{The Low-Dimensional Adam (LDAdam) Algorithm}
+
+\subsection{The Need for a Projection-Aware Update Rule}
+\label{sec:update_rule}
+
+\paragraph{Standard Adaptive Optimization.} We denote $f$ the loss function to minimize, $\theta_t$ the model parameters at step $t$, $G_t=\nabla_{\theta}f(\theta_t) \in \mathbb{R}^{n \times m}$ the gradient at $\theta_t$, $\grad_t$ its mini-batch stochastic counterpart, $\eta_t$ the learning rate, and $\eps$ a positive scalar used for numerical stability. The standard adaptive optimization relies on the gradient statistics estimates $\mlow_t$ and $\vlow_t$, which are obtained from the exponential moving average of the gradients at rate $\beta_1$ and the squared gradients at rate $\beta_2$, respectively. With $\hat{m}_t = \tfrac{\mlow_t}{1 - \beta_1^t}$ and $\hat{\vlow}_t = \tfrac{\vlow_t}{1 - \beta_2^t}$ their unbiased counterpart, Adam's update is: $ \theta_{t+1} = \theta_t - \eta_t \tfrac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon}.$
+
+\paragraph{The Challenges Behind Low-Rank Updates.}
+When adapting the learning subspaces to capture the low-rank gradient structure, one expects the optimizer states to retain information from previous iterations. However, frequent updates of the low-rank projection causes significant challenges: first, projections are lossy and gradient information is lost; second, since the projections may be different between steps, subspace adaptation may alter the representation of the low-dimensional optimizer states. To illustrate this second point, we briefly discuss the GaLore solution ~\citep{zhao2024galorememoryefficientllmtraining}. 
+
+Let $r$ be the compression rank, and $\orthpartT_t$ and $\orthpart_t$ be the projection and back-projection matrices we use at step $t$. $\orthpartT_t \in \mathbb{R}^{r \times n} $ yields a truncation to its first $r$ rows of the gradient matrix written in an adapted coordinate system, leading to a low-dimensional representation of the gradient with shape $r \times m$. Multiplication with the matrix $\orthpart_t$ is then used to express the compressed gradient in the canonical high-dimensional coordinate system. From now on, let $\mlow_t$ and $\vlow_t$ (resp. $\hat{\mlow}_t$ and $\hat{\vlow}_t$) be the first and second moment estimates (resp. unbiased estimates) in the \emph{low-dimensional space} induced at step $t$ by $\orthpartT_t$, and let $M_t = \orthpart_t\cdot \mlow_t$ denote the back-projected low-rank counterpart of $\mlow_t$.
+
+In this context, Equation \ref{eq:galore_wrong_update} describes the GaLore dynamics~\citep[Algorithm \ref{alg:GaLore}]{zhao2024galorememoryefficientllmtraining}: 
+\begin{equation}
+\squeeze
+    \theta_{t+1} = \theta_t - \eta_t \bm{\textcolor{blue}{\orthpart_t}}\cdot \frac{\hat{\mlow}_t}{\sqrt{\hat{\vlow}_t} + \eps} 
+    = \theta_t - \frac{\eta_t}{\sqrt{\bm{\hat{\vlow}_t}} + \eps} \frac{1-\beta_1}{1-\beta_1^t} \sum_{\tau=1}^{t} \beta_1^{t-\tau} \bm{\textcolor{blue}{\orthpart_t}} \cdot \bm{\orthpart_{\tau}^{\top}} \cdot \grad_{\tau}
+    \label{eq:galore_wrong_update}
+\end{equation}
+Notice that, in the above equation, the change in the low-dimensional projection basis between steps is ignored: as can be seen in the right-hand sum, gradients are projected and back-projected using \emph{different maps}, i.e. $\bm{{\orthpart_t}} \textnormal{ and } \bm{\orthpart_{\tau}^{\top}}$, respectively. Moreover, the statistics of gradients projected into different subspaces are accumulated on \emph{the same momentum buffers}. The issue we raise here (highlighted in bold in Equation \ref{eq:galore_wrong_update}) is partially mitigated in practice by heuristics: occasional updates of the projection map and exponential decay rates lead to only a fraction of the steps being effectively resulting from accumulation of compressed gradients in different subspaces. However, we will see experimentally that this leads to a drop in accuracy relative to the ``correct'' projections.
+
+\subsection{The LDAdam Update Rule} 
+\label{sec:our_update}
+
+\paragraph{Overview.} In LDAdam, we address two key challenges in low-rank updates: we introduce a projection-aware update rule that accounts for the change in the low-dimensional representation of the optimizer states, and we provide a generalized error feedback mechanism that accounts for the loss of gradient accuracy due to low-rank compression. Compared to standard adaptive optimization step, optimizer states are replaced by low-dimensional intermediate optimizer states, denoted by $\mlowpre{t}$, $\vlowpre{t}$; and the gradient is replaced by the accumulator $\acumlow_t = \orthpartT_t \cdot \acum_t$ obtained by low-rank projection of the high-dimensional accumulator $\acum_t = \grad_t + \error_t$, where $\error_t$ is the (generalized) error feedback buffer, storing projection errors. In the following, we  build the LDAdam algorithm step-by-step. The end-to-end construction is provided in Algorithm~\ref{alg:LDAdam_both}.
+
+Our first objective is to find a mechanism to transfer gradient information from one lower dimensional vector space to another. For this, we take inspiration from orthogonal projections, which provide the best approximation in terms of $\ell_2$ error. The projection-aware update rule for the first moment estimate (Algorithm \ref{alg:LDAdam_both} Line \ref{line:first_update}) follows from the multiplication with the matrix $\orthpartT_t \cdot \orthpart_{t-1}$, which stands for both the projection matrix and the change of basis matrix. The matrix $\orthpartT_t \cdot \orthpart_{t-1}\in \mathbb{R}^{r \times r}$ is low-dimensional and thus allows efficient transition between subspaces, as no intermediate high-dimensional vector is created. We obtain the following update:  
+
+\begin{equation}\label{eq:mt_intermediate_update}
+\squeeze
+    \mlow_t
+    = \beta_1 \textsc{Proj}_{\orthpart_t}(M_{t-1})  + (1-\beta_1) \acumlow_t 
+    = \beta_1 \underbrace{\orthpartT_t \cdot \orthpart_{t-1} \cdot \mlow_{t-1}}_{\mlowpre{t}}  + (1-\beta_1) \acumlow_t.
+\end{equation}
+\textbf{Optimizer States Compression.}
+Note already that projection yields compression. Yet, the discrepancy between successive subspaces leads to a loss of  information contained in the optimizer states. We  address this by enforcing slight shifts between subspaces, and by generalizing error feedback to account for the updating of optimizer states. The information lost on gradient momentum due to compression, and that needs to be reintroduced via the error feedback mechanism, is given by: 
+\begin{equation}\label{eq:xi_update}
+\squeeze
+    \mhigh_{t-1} - \orthpart_t \orthpartT_t \cdot \mhigh_{t-1}= \orthpart_{t-1} \cdot \mlow_{t-1} - \orthpart_t\cdot \mlowpre{t}.
+\end{equation}
+
+\paragraph{Estimating the Statistics of Projected Gradients.}
+Although reliable, the orthogonal projection of the optimizer state does not apply to the estimation of the second-order statistic. To overcome these challenges, we interpret Adam's optimizer states as statistical estimates of the first two moments of each gradient coordinate. Indeed, Adam's optimization step $t$ holds for an approximation of $(\mathbb{E}_{t, \beta_1}[G^{e_i}]/\sqrt{\mathbb{E}_{t, \beta_2}[(G^{e_i})^2]})_{i\leq n}$, where $\mathcal{E}_t=(e_1, \ldots, e_n)$ is the basis provided by the canonical parameterization of the model,  $G^{e_i}=\langle G, e_i\rangle$ a column of the gradient matrix, and $\mathbb{E}_{t, \beta}[\cdot]$ is the exponential time-weighted expectation from time $t$ with decay-rate $\beta$.
+
+We rely on this observation to rewrite Adam's update in any given coordinate system $\tilde{\mathcal{E}}_{t+1}$: we build $\hat{m}_{t+1/2}$ and $\hat{v}_{t+1/2}$ as statistical estimates of $(\mathbb{E}_{t, \beta_1}[G^{\tilde{e_i}}])_{i\leq n}$ and $(\mathbb{E}_{t, \beta_2}[(G^{\tilde{e_i}})^2])_{i\leq n}$. It follows from $G^{\tilde{e_i}} = \sum_{j \leq n} \langle \tilde{e_i}, e_j \rangle G^{e_j}$ that the matrix of change of basis $(\langle \tilde{e_i}, e_j \rangle)_{i,j \leq n}$ provides transition between coordinate systems. Its truncation to $i,j \leq r$ induces a rank-$r$ orthogonal projection of the gradients, and thus holds for the transition between subspaces:
+\begin{equation}\label{eq:mean_statistic_change_of_basis}
+\squeeze
+    \mathbb{E}_{t, \beta_1}[G^{\tilde{e_i}}]
+    = \sum_{j=1}^{n} \langle \tilde{e_i}, e_j \rangle \mathbb{E}_{t, \beta_1}[G^{e_j}]
+    \approx \sum_{j=1}^{r} \langle \tilde{e_i}, e_j \rangle (\hat{\mlow}_t)_j
+    = (\orthpartT_{t+1} \cdot \orthpart_t\cdot \hat{\mlow}_t)_i.
+\end{equation}
+Linearity of expectation leads to an autoregressive update rule for the first moment estimate (see Equation \ref{eq:mean_statistic_change_of_basis}). With $(\langle \tilde{e_i}, e_j \rangle)_{i,j} = (\orthpartT_{t+1} \cdot \orthpart_t)_{i,j}$ the estimation of the first-order statistic in the coordinate system $\tilde{\mathcal{E}}_{t+1}$ resolves to an orthogonal projection when considering only the first $r$ components (i.e., after truncation to $i,j \leq r$), and the above discussion on compression of optimizer states remains valid.
+Following our statistical approach, we obtain the projection-aware update rule for the second moment estimates (Algorithm \ref{alg:LDAdam_both} Line \ref{line:second_update}) from the approximation below:
+\begin{align} 
+\squeeze
+    \mathbb{E}_{t, \beta_2}[(G^{\tilde{e_i}})^2]
+    &= \squeeze\sum_{j=1}^{n} \langle \tilde{e_i}, e_j \rangle ^2 \mathbb{E}_{t, \beta_2}[(G^{e_j})^2] + \sum_{k \neq l}^{n} \langle \tilde{e_i}, e_k \rangle \langle \tilde{e_i}, e_l \rangle \mathbb{E}_{t, \beta_2}[G^{\tilde{e_k}} G^{\tilde{e_l}}] \nonumber  \\
+    &\approx \squeeze\sum_{j=1}^{r} \langle \tilde{e_i}, e_j \rangle ^2 (\hat{\vlow}_t)_j + \sum_{k \neq l}^{r} \langle \tilde{e_i}, e_k \rangle \langle \tilde{e_i}, e_l \rangle (\hat{\mlow}_t)_k (\hat{\mlow}_t)_l. \label{eq:variance_statistic_change_of_basis}
+\end{align}
+The approximation of the second-order statistics in a new coordinate system requires the estimation of the covariance between the gradient coordinates (see Equation \ref{eq:variance_statistic_change_of_basis}). Although too large to store, the covariance can be approximated by the product of first-order moment estimates, assuming independence between gradient coordinates. The latter assumption is enforced on average over the gradient matrix columns by the nature of the coordinate system inherited from SVD. In practice, we guarantee a positive estimate of the second-order statistics by clipping value to zero if necessary.
+
+\subsection{Learning Subspace Adaptation}
+
+LDAdam's memory savings stem from the low-dimensional structure of the moments estimate. The compression strategy, defined by a choice of truncated coordinate systems, sets the exploration of the parameter space, and its design meets two criteria: (i) the learning subspace must be adapted at each step to integrate error feedback; (ii) the compression operator must be set to approximate the current gradient and to preserve the information stored in the optimizer states.
+
+\textbf{Projection Map Computation.}
+Although singular value decomposition (SVD) provides an optimal low-rank approximation, its computational cost makes it prohibitive in our case. We follow PowerSGD~\citep{vogels2020powersgdpracticallowrankgradient} to efficiently approximate the most significant singular vectors: we perform a single block power iteration \citep{Bentbib2015} initialized with the approximation from the previous optimization step; and apply the Gram-Schmidt process to derive the projection map (Algorithm \ref{alg:LDAdam_both} Line \ref{line:power_iteration}). In addition, we propose to start the whole process by computing SVD of the first gradient.
+
+\textbf{Learning A Smooth Subspace  Transition.}
+LDAdam relies at each step on compression of the gradient and the optimizer states via a unique low-rank projection map. Instead of fitting two projection maps and interpolate between them, we propose to fit a single projection map to the interpolation of the gradient and an average of the previous gradients (Algorithm \ref{alg:LDAdam_both} Line \ref{line:interpolation}). We introduce an interpolation factor $\rho$ and perform a block power iteration to approximate SVD of the matrix: $B_t = \rho\;\orthpart_{t-1} \cdot \hat{\mlow}_{t-1} + (1-\rho) \acum_{t}$. The interpolation factor helps to balance the accuracy of the gradient compression with the preservation of the optimizer states. We suggest setting $\rho = \beta_1$, i.e. computing the optimal subspace for gradient momentum compression.
+
+\subsection{The Generalized Error Feedback Mechanism}
+\label{subsec:gen_EF}
+
+Error Feedback was introduced for distributed optimization \citep{seide20141} to account for gradient compression errors by reintroducing them into the  next iteration gradient. We extend this mechanism to account for loss of information on both the gradient and the optimizer states. We keep the same structure of the error feedback mechanism: the optimizer is fed by a unique accumulator that is a sum of the gradient and the error buffer.
+
+\textbf{Unbiased Error Buffer Loading.}
+With gradient and optimizer states decayed at different rates within the optimizer step, we must adjust the error buffer loading strategy of the optimizer states projection error by the factor $\beta_1 / (1-\beta_1)$ to recover the first moment estimate. Furthermore, the condition under which the error buffer loading strategy is consistent with the second moment estimate is given by: $\beta_2 = (1-\beta_2) (\tfrac{\beta_1}{1-\beta_1})^2$. We suggest setting $\beta_2 = 0.99$ and $\beta_1 \approx 0.908$, as the slight decrease in the decay rate of the second moment estimate helps to adapt faster to a new learning subspace. Equation \ref{eq:error_reserve_loading} describes the loading strategy of the generalized error feedback mechanism (Algorithm \ref{alg:LDAdam_both} Line \ref{line:error_feedback}).
+\begin{equation} \label{eq:error_reserve_loading}
+\squeeze
+    \error_{t+1} = [A_t - \orthpart_t\cdot\acumlow_t] + \frac{\beta_1(\beta_2)}{1-\beta_1(\beta_2)}  [\orthpart_{t-1} \cdot \mlow_{t-1} - \orthpart_t\cdot \mlowpre{t}]. 
+\end{equation}
+\paragraph{Implementing Error Feedback.}
+A naive implementation of the error feedback mechanism would add memory overhead equal to the model size. Since the gradient and the error buffer are added together before the optimization step is performed, we store the error buffer in the variable used for gradient accumulation (Algorithm \ref{alg:LDAdam_both} Lines \ref{line:error_feedback} and \ref{line:accumulation})(e.g. in PyTorch, modify the \texttt{optimizer.zero\_grad} function to store the error buffer in the \texttt{p.grad} variable). This results in an error feedback mechanism that does not require any further memory for optimizer states.
+
+\begin{algorithm}[h]
+  \caption{\label{alg:LDAdam_both}LDAdam ($\diamond$ Practical View Only, $\grad_t \in \mathbb{R}^{n \times m}$ / \textcolor{blue}{$\diamond$ Analytical View Only, $\grad_t \in \mathbb{R}^d$} )}
+  \begin{algorithmic}[1]
+        \Statex \rm \textbf{Hyperparameters:} step size $\eta_t$; decay rates $\beta_1$, $\beta_2$
+        \Statex \rm \textbf{LDAdam Hyperparameters:} projection rank $r$; interpolation factor $\rho$
+        \Statex \rm \textbf{LDAdam Hyperparameters:} {\color{blue} $\diamond$ contraction factor $q_r\in[0,1)$; $\rho  = \beta_1$}
+        \State \textbf{Initialization:} $\mlow_0 = 0$; $\vlow_0 = 0$; $\acum_0 = 0$, $\diamond$ $\orthpart_0 = \textsc{SVD}(\grad_0)$;  {\color{blue} $\diamond$ $\vlowhat_0 = 0; \error_1 = 0$}
+    \For{$t=\{1, 2, \dots, T\}$}
+        \Statex{\rm \hspace{1em} \textbf{Gradient accumulation and error buffer unloading}}
+        \State \hspace{1em}  $\diamond$ $\acum_t = \acum_{t} + \grad_t$ \label{line:accumulation}
+    \State \hspace{1em} {\color{blue} $\diamond$  $\acum_t = \error_{t} + \grad_t $}
+    \Statex{\rm \hspace{1em} \textbf{Learning subspace adaptation}}
+    \State \hspace{1em} $\bcum_t = \rho\; \orthpart_{t-1}\hat{\mlow}_{t-1} + (1-\rho)\acum_t$ \label{line:interpolation}
+        \State \hspace{1em} $\diamond$ $ \orthpart_t = \textsc{Gram-Schmidt}(\bcum_t\bcum_t^{\top} \cdot \orthpart_{t-1} )$ \label{line:power_iteration}
+    \State \hspace{1em} {\color{blue} $\diamond$ $\orthpart_t$ is any $d\times r$ orthogonal matrix such that $\|(I - \orthpart_t\orthpartT_t)\bcum_t\| \le q_r\|\bcum_t\|$}
+    \Statex{\rm \hspace{1em} \textbf{Optimizer states projection-aware update}}
+    \State \hspace{1em} $\mlowpre{t} = \orthpartT_t \orthpart_{t-1} \mlow_{t-1}$ \label{line:first_update}
+    \State \hspace{1em} $\vlowpre{t} = (1-\beta_2^{t-1}) \left| (\orthpartT_t\orthpart_{t-1})^2 \cdot (\hat{\vlow}_{t-1} - (\hat{\mlow}_{t-1})^2)+ (\orthpartT_t\orthpart_{t-1} \cdot \hat{\mlow}_{t-1})^2 \right|$ \label{line:second_update}
+    \Statex{\rm \hspace{1em} \textbf{Optimizer states Adam-type update}}
+    \State \hspace{1em} $\acumlow_t = \orthpartT_t \acum_t$
+    \State \hspace{1em} $\mlow_t = \beta_1  \mlowpre{t} + (1-\beta_1) \acumlow_t$
+    \State \hspace{1em} $\vlow_t = \beta_2 \vlowpre{t} + (1-\beta_2) \acumlow_t^2$
+    \State \hspace{1em} {\color{blue} $\diamond$ $\vlowhat_t = \max(\vlow_t,\|\vlowhat_{t-1}\|_{\max})$ } \label{line:AMSGrad}
+    \Statex{\rm \hspace{1em} \textbf{Model update}}
+    \State \hspace{1em} $\diamond$ $\theta_{t+1} = \theta_{t} -  \eta_t \orthpart_t \cdot \frac{\hat{\mlow}_t}{\sqrt{\hat{\vlow}_t} + \epsilon}$
+    \State \hspace{1em} {\color{blue} $\diamond$ $\theta_{t+1} = \theta_{t} -  \eta_t \orthpart_t \cdot \frac{\mlow_t}{\sqrt{\vlowhat_t + \epsilon}}$}
+    \Statex{\rm \hspace{1em} \textbf{Error buffer loading}}
+    \State \hspace{1em} $\acum_{t+1} = (\acum_t - \orthpart_t \cdot \acumlow_t) + \frac{\beta_1}{1-\beta_1} (\orthpart_{t-1} \cdot \mlow_{t-1} - \orthpart_t \cdot \mlowpre{t})$ {\color{blue} $\diamond$ $= \error_{t+1}$} \label{line:error_feedback}
+    \EndFor
+  \end{algorithmic}
+\end{algorithm}
+
+
+
+\section{Convergence Guarantees for LDAdam}
+
+
+\paragraph{Analytical Overview.} We now present our theoretical convergence results for LDAdam. We first provide/discuss an ``analytical" perspective on our approach in Algorithm \ref{alg:LDAdam_both}. Then we introduce and discuss the analytical assumptions used in the theory, along with two theoretical convergence rates.
+
+The outlined steps closely resemble those in the practical view of the algorithm. One notable difference is the introduction of a new AMSGrad-type normalization, $\vlowhat_t = \max(\vlow_t, ||\vlowhat_{t-1}||_{\max})$ in line \ref{line:AMSGrad}. This represents uniform version of the original AMSGrad technique \citep{reddi2019AMSGrad}, $\vlowhat_t = \max(\vlow_t, \vlowhat_{t-1})$, which enforces coordinate-wise monotonicity for the diagonal preconditioning. In our setup, as we transition between different low-dimensional spaces, the preconditioning matrix is no longer diagonal, and scaling factors may change after such a transition. To ensure that adaptive preconditioning remains monotonic, we enforce a monotonic spectrum of the preconditioning.
+
+To avoid unnecessary complications in the notations and derivations,  in this section we assume that the stochastic gradients $\grad_t $ and other variables derived from the gradients, such as momentum, are \emph{vectors}. We remind the reader that, in practice and in our implementation, gradients are viewed/represented as 2D matrices. In our analysis, vector gradients should be treated as the columns of the gradient matrix. 
+Nevertheless, all steps in Algorithm \ref{alg:LDAdam_both} are still applicable when dealing with matrix gradients. Specifically, given a matrix gradient $\grad_t$, we obtain a matrix $\bcum_t$, for which we assume that, regardless of the low-rank compression method used (e.g., SVD or power iterations), the contractive inequality $\|(I - \orthpartT_t\orthpart_t)\bcum_t\|_{\rm F} \le q_r\|\bcum_t\|_{\rm F}$ holds with respect to the Frobenious norm. We also incorporate the debiasing factor $\sqrt{1 - \beta_2^t} / (1 - \beta_1^t)$ in $\eta_t$.
+\paragraph{Convergence Guarantees for General Smooth Non-convex Functions.}
+We first outline the analytical assumptions under which we establish LDAdam's convergence guarantees.
+
+\begin{assumption}[Lower bound  and smoothness]\label{ass:smooth}
+    The loss function $f\colon\R^d\to\R$ is $L$-smooth and lower bounded by some $f^* \in \mathbb{R}$:
+    $$\|\nabla f(\theta) - \nabla f (\theta')\| \leq L \|\theta-\theta'\|, \quad \text{for any } \theta,\theta'\in\R^d.$$ 
+\end{assumption}
+
+\begin{assumption}[Unbiased and bounded stochastic gradient]\label{ass:boundgrad}
+    For all iterates $t \ge 1$, the stochastic gradient $\grad_t$ at $\theta_t$ is unbiased and uniformly bounded by some constant $G\ge 0$:
+    $$\E[\grad_{t}] = \nabla f(\theta_t), \quad \|g_{t}\| \leq G.$$
+\end{assumption}
+
+\begin{assumption}[Bounded variance]\label{ass:var}
+    For all iterates $t\ge1$, the variance of the stochastic gradient $\grad_t$ at $\theta_t$ is uniformly bounded by some constant $\sigma^2\ge0$:
+    $$\E[\|g_{t} - \nabla f(\theta_t)\|^2] \le \sigma^2.$$
+\end{assumption}
+All three assumptions are commonly used in adaptive optimization literature \citep{chen2019AdapType,defossez2022a, li2022distributed, Xie2023Adan, zhou2024on}. It is worth noting that the bounded gradient condition in Assumption \ref{ass:boundgrad} directly implies a bounded variance condition with a constant $\sigma^2 = 2G^2$. Therefore, for the purpose of asymptotic analysis, one can omit Assumption \ref{ass:var}. However, we will show that in the non-convex convergence rate, the $\sigma^2$-term decays at a rate of $1/\sqrt{T}$, while all other $G$-terms decay at a faster rate of $1/T$. Theorem \ref{TheoremNonconvex} states our general non-convex convergence result.
+\begin{theorem}[\bf Non-convex convergence rate]\label{TheoremNonconvex}
+	Let Assumptions \ref{ass:smooth}, \ref{ass:boundgrad} and \ref{ass:var} hold. Then, choosing step-size $\eta = \min(\frac{\epsilon}{4LC_0\sqrt{1+C_2}}, \frac{1}{\sqrt{T}})$, LDAdam (Algorithm \ref{alg:LDAdam_both}) satisfies
+	\begin{equation*}
+    \squeeze
+		\frac{1}{T}\sum_{t=1}^T \E[\|\nabla f(\theta_t)\|^2]
+		\leq \frac{2C_0}{\sqrt{T}}\left( f(\theta_1)-f^* + \frac{L \sigma^2}{\epsilon}\right)
+		  + \mathcal{O}\left(\frac{G^3}{T}\right)
+	\end{equation*}
+    with constants $C_0\eqdef \sqrt{\frac{1+\beta_2}{1-\beta_2}\frac{(1 - \beta_1(1-q_r))^2}{(1-\beta_1)^2(1-q_r)^2}G^2 + \epsilon}$ and $C_2 = \frac{\beta_1 + (1-\beta_1)q_r^2}{(1-\beta_1)^2(1-q_r)^2}$.
+\end{theorem}
+
+{\bf Discussion.} Compared to the standard stochastic gradient descent \citep{Ghadimi2016AGD}, the leading term $1 / \sqrt{T}$ of the obtained rate recovers the optimal non-convex convergence speed. Additionally, the asymptotic rate $\mathcal{O}(\frac{1+\sigma^2}{\sqrt{T}} + \frac{1}{T})$ aligns with the rate of uncompressed AMSGrad in the stochastic non-convex setup \citep{zhou2024on}. Therefore, the introduced low-rank compression framework along with the error feedback mechanism does not hurt the asymptotic convergence with respect to $T$.
+The slowdown caused by compression in the leading term is only through the constant $C_0 = \mathcal{O}(\frac{1}{1-q_r})$, where the factor $1-q_r \in (0,1]$ measures the aggressiveness of the compression. Note that our theory applies to any low-rank compression with $r \geq 1$. More compression corresponds to a smaller rank $r$ for the projections and a smaller factor $1 - q_r$. For instance, when using low-rank compression via SVD decomposition, one can prove $1-q_r = \Theta(\frac{r}{d})$ for any rank $r \geq 1$. In this case, the leading term of the rate becomes $\mathcal{O}(\frac{d}{r}\frac{1}{\sqrt{T}})$, indicating that the convergence slows down in the worst case by a factor of $d/r$ due to compression.
+\paragraph{Convergence Rate for Non-Convex Functions under the PL Condition.}
+Next, we show faster convergence for LDAdam when the loss function satisfies the PL condition.
+
+\begin{assumption}[\textrm{PL}-condition]\label{ass:PL}
+For some constant $\mu>0$ the loss function $f$ satisfies the Polyak-Łojasiewicz (PL) inequality: 
+$$\|\nabla f(\theta)\|^2\geq 2\mu (f(\theta)-f^*), \quad \text{for any } \theta\in\R^d.$$ 
+\end{assumption}
+
+\begin{theorem}{\bf(PL convergence rate)}\label{TheoremPLShort}
+Let Assumptions \ref{ass:smooth}, \ref{ass:boundgrad}, \ref{ass:var} and \ref{ass:PL} hold. Then, choosing step-size $\eta = \min(\eta_0, \frac{2C_0\log T}{\mu T})$, LDAdam (Algorithm \ref{alg:LDAdam_both}) satisfies
+\begin{equation*}
+\squeeze
+\E[f(\theta_{T+1})] - f^*
+\le \frac{\log T}{T} \left(\frac{2L C_0^2 \sigma^2}{\mu^2\epsilon}
++ \frac{6C_0(1+C_1)G^2}{\mu\sqrt{\epsilon}} \right)
++ \widetilde{\mathcal{O}}\left(\frac{G^4}{T^2} \right)
+\end{equation*}
+with constants $C_1 \eqdef \frac{\beta_1 + (1-\beta_1)q_r}{(1-\beta_1)(1-q_r)}$ and $\eta_0 \eqdef \min(\frac{\epsilon}{16LC_0}, \frac{C_0(1-\beta_1)(1-q_r)}{2\mu}, \frac{\epsilon^{3/4}}{6L\sqrt{C_0C_2}})$.
+\end{theorem}
+
+{\bf Discussion.} Notably, the leading term of the convergence rate under the PL condition improves to $\mathcal{O}(\frac{\log T}{T})$, compared to $\mathcal{O}(\frac{1}{\sqrt{T}})$ in the general non-convex setting. Faster rates of $\widetilde{\mathcal{O}}(\frac{1}{T})$ for adaptive optimization algorithms under the PL condition have been established when $\beta_2 \to 1$ \citep{He2023Adam} or through the use of the AMSGrad trick \citep{modoranu2024microadam}. In LDAdam, we apply a uniform version of AMSGrad normalization with arbitrary $\beta_2<1$ and derive the rate for compression with any rank $r \geq 1$. Hence, similar to the general non-convex case, we show the best-known convergence rate in the leading term, up to a logarithmic factor. While the last term has higher-order constant dependencies, these are negligible due to the $T^2$ damping effect. Thus, the theory suggests that the algorithm’s convergence rate remains comparable to that of the uncompressed version, with only a constant factor affected by the compression rank.
+To quantify the slowdown caused by compression, we again consider low-rank compression via SVD decomposition, as discussed earlier. As noted before, $C_0 = \mathcal{O}(\frac{1}{1-q_r}) = \mathcal{O}(\frac{d}{r})$, and similarly, from the expression of $C_1$, we have $C_1 = \mathcal{O}(\frac{1}{1-q_r}) = \mathcal{O}(\frac{d}{r})$. Therefore, the leading term of the rate becomes $\mathcal{O}((\frac{d}{r})^2 \frac{\log T}{T})$, with a compression slowdown factor of $(\frac{d}{r})^2$.
+
+
+
+\section{LDAdam in Practice}
+
+
+\subsection{Training Memory Footprint and Runtime}
+
+LDAdam's memory savings over baseline Adam \citep{kingma2017adammethodstochasticoptimization} (see Table \ref{table:memory} for comparison) follow from the low dimensionality of the optimizer states: for gradients of shape $n \times m$ with $n \leq m$, the gradient statistics in a learning subspace of rank $r$ are stored as tensors of shape $r \times m$, and the additional projection matrix is of shape $n \times r$. As a result, the memory footprint of LDAdam's optimizer states is only a fraction of the size of the model. For an $n \times n$ layer, the compression ratio of LDAdam relative to Adam is of $\frac{3}{2} \frac{r}{n}$.
+
+With the error buffer stored in the gradient variable, the error feedback mechanism is memory neutral. However, this comes at the cost of not supporting gradient clipping and per-layer weight updates \citep{lv2024parameterfinetuninglargelanguage, zhao2024galorememoryefficientllmtraining}. The latter allows memory savings proportional to the model size, but at the expense of gradient accumulation. Therefore, although applicable to most optimizers, it is not widely adopted, due to the large batch size used for large language model training  \citep{touvron2023llama2openfoundation} and the memory-intensive nature of activations in attention layers.
+
+\begin{table}[h]
+\small
+    \setlength{\abovecaptionskip}{0pt} % Space abovecaption
+    \caption{Optimizer comparison: parameter count during training for a weight layer of shape $n \times m$ with $n \leq m$ (i.e., left projection), training capabilities, and estimates of optimizer states memory footprint in half precision (models architecture is described in the Table \ref{table:architecture}).}
+    \label{table:memory}
+    \begin{center}
+    \begin{tabular}{lccccc}
+    \toprule
+    & Adam & LDAdam & GaLore \\
+    \midrule
+    \textbf{Token count} \\
+    Weights & $n m$ & $n m$ & $n m$ \\
+    Gradients & $n m$ & $n m$ &   \\
+    Optimizer States & $ 2 n m$ & $n r + 2 r m$ & $n r + 2 r m$  \\
+    \midrule
+    Gradient Clipping & \cmark & \xmark & \xmark & \\
+    Gradient Accumulation & \cmark & \cmark & \xmark \\
+    \midrule
+    \textbf{Memory estimates} \\
+    RoBERTa-base (\texttt{r=8})& 0.46 GB & 0.15 GB & 0.15 GB\\
+    Llama 350M (\texttt{r=256}) & 1.37 GB & 0.95 GB & 0.95 GB \\
+    Llama-2 7B (\texttt{r=32}) & 25.1 GB & 1.22 GB & 1.22 GB \\
+    Llama-2 7B (\texttt{r=512}) & 25.1 GB & 4.87 GB & 4.87 GB \\
+    \bottomrule
+    \end{tabular}
+    \end{center}
+\end{table}
+
+\paragraph{Runtime.} Compared to Adam, GaLore adds gradient compression; and compared to GaLore, LDAdam adds optimizer states projection-aware update and the generalized error feedback mechanism. Yet, the practical runtime differences are not substantial: concretely, on Llama-350M pre-training, LDAdam has a 10\% longer runtime compared to GaLore, and is 15\% slower than Adam.
+\subsection{Experiments}
+
+    We empirically evaluate LDAdam for fine-tuning and pre-training large language models against baseline Adam \citep{kingma2017adammethodstochasticoptimization} and the memory-efficient GaLore \citep{zhao2024galorememoryefficientllmtraining} (Algorithm \ref{alg:GaLore}). Similar to most parameter-efficient fine-tuning (PEFT) methods and to GaLore, we apply low-rank compression only to the two-dimensional matrices of the self-attention layers, e.g. wide embedding and output layers are trained using standard Adam optimizer. For a fair comparison, in all experiments we do not apply additional layer-wise  learning rate scaling, and apply hyperparameters suggested in the papers introducing the algorithm.
+
+\paragraph{Fine-tuning on GLUE.} We evaluate LDAdam for fine-tuning RoBERTa-base model \citep{liu2019robertarobustlyoptimizedbert} on the General Language Understanding Evaluation (GLUE) benchmark \citep{wang-etal-2018-glue}. RoBERTa-base is a 125M parameters large language model, built upon the encoder only attention-based BERT architecture \citep{devlin2019bertpretrainingdeepbidirectional}, and pre-trained for natural language understanding (NLU). GLUE benchmark includes a wide variety of NLU tasks with training samples of various size. We mimic memory-constrained setups by training for only 3 epochs with a batch size of 16, and used rank $\texttt{r=8}$ compression for LDAdam and GaLore. For a fair comparison, we tune the learning rate over the set $\{$1e-5, 2e-5, $\ldots$, 5e-5$\}$.
+
+\begin{table}[h]
+    \small \setlength{\abovecaptionskip}{0pt} % Space abovecaption
+    \caption{Results of fine-tuning RoBERTa-base model on the GLUE benchmark.}
+    \label{table:glue}
+    \begin{center}
+    \begin{tabular}{lcccccccccc}
+    \toprule
+    & \textbf{MRPC} & \textbf{STS-B} & \textbf{CoLA} & \textbf{SST-2} & \textbf{QNLI} & \textbf{QQP} & \textbf{MNLI} & \textbf{Avg} \\
+    \small Training Samples & \small 3.7k & \small 7k & \small 8.5k & \small 67k & \small 105k & \small 364k & \small 393k \\
+    \midrule
+    \normalsize % Revert to normal size
+    Adam & 88.97 & 90.08 & 58.57 & 94.34 & 92.81 & 91.38 & 87.85 & 86.28 \\
+    \midrule
+    LDAdam & 88.40 & 90.11 & 59.91 & 95.00 & 92.87 & 91.28 & 87.81 & 86.48 \\
+    LDAdam no-EF & 88.00 & 89.88 & 56.86 & 95.00 & 92.32 & 89.75 & 86.99 & 85.54 \\
+    GaLore & 86.19 & 88.97 & 55.12 & 94.15 & 92.01 & 89.86 & 86.80 & 84.73 \\
+    \bottomrule
+    \end{tabular}
+    \end{center}
+\end{table}
+
+\paragraph{Fine-tuning on GSM8K.} We evaluate LDAdam for fine-tuning Llama-2 7B model \citep{touvron2023llama2openfoundation} on the GSM8K mathematical reasoning dataset \citep{cobbe2021trainingverifierssolvemath}. Llama models are attention-based decoder-only large language models pre-trained for a wide variety of natural language processing tasks, including text generation. The GSM8K dataset contains grade school math word problems and it is used to assess basic mathematical reasoning. We run experiments for ranks $\texttt{r=32}$ and $\texttt{r=512}$, on 3 epochs, with a batch size of 32, and tune the learning rate over the set $\{$5e-5, 6e-5, $\ldots$, 9e-5, 1e-4, 2e-4, \ldots, 5e-4$\}$. Table \ref{table:GSM8K} reports the best average accuracy. We also provide peak memory usage read from the GPU, it accounts for the optimizer states memory footprint, but also the fixed memory cost of storing model, gradient and activations.
+
+\begin{table}[!h]
+    \small \setlength{\abovecaptionskip}{0pt} % Space abovecaption
+    \caption{Results of fine-tuning Llama-2 7B on the GSM8K dataset.}
+    \label{table:GSM8K}
+    \begin{center}
+    \begin{tabular}{lccccccc}
+    \toprule
+    & Adam & \multicolumn{2}{c}{LDAdam} & \multicolumn{2}{c}{LDAdam no-EF} & \multicolumn{2}{c}{GaLore} \\
+    \cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8} 
+    & & \texttt{r=32} & \texttt{r=512} & \texttt{r=32} & \texttt{r=512} & \texttt{r=32} & \texttt{r=512} \\
+    \midrule
+    \textbf{Accuracy} & 34.72 & 32.53 & 35.86 & 30.70 & 35.78 & 27.07 & 35.18 \\
+    \midrule
+    \textbf{Peak Memory} & 55.34 GB & 32.08 GB & 35.58 GB & 32.08 GB & 35.58 GB & 32.52 GB & 35.58 GB \\
+    \bottomrule
+    \end{tabular}
+    \end{center}
+\end{table}
+
+Across all fine-tuning experiments, LDAdam significantly outperforms GaLore, and is either on par or better than Adam. When ablating the LDAdam techniques, we observe that LDAdam without error feedback also outperforms GaLore, supporting LDAdam's continuous subspace adaptation strategy over GaLore's sequential update approach. The fact that we can match Adam once error feedback is enabled suggests that this technique is key to matching the practical performance of full-parameter training.
+
+\paragraph{Pre-training on C4.} We evaluate LDAdam for pre-training Llama models \citep{touvron2023llama2openfoundation} on the C4 dataset \citep{raffel2023exploringlimitstransferlearning}. Due to limited compute resources, we pre-train smaller 130M, 350M and 1.3B parameter variants \citep{lialin2023relorahighranktraininglowrank, zhang2019rootmeansquarelayer, shazeer2020gluvariantsimprovetransformer} of the Llama-2 models. C4 is a clean version of Common Crawl's web crawl corpus. We adjust the number of training steps according to the Chinchilla scaling law \citep{hoffmann2022trainingcomputeoptimallargelanguage}, i.e. 20 training tokens per model parameter; and use batch size 512 and sequence length 256, accounting to 131 072 tokens per step, thus using the same settings as GaLore. For a fair comparison, we tune the learning rate over the set $\{$5e-4, 1e-3, 5e-3$\}$, and report the best results for ranks $\texttt{r=8}$ and $\texttt{r=256}$ in Table \ref{table:c4}. Figure \ref{fig:C4_dynamics} depicts the pre-training dynamics.
+
+\begin{table}[h] \setlength{\abovecaptionskip}{0pt} % Space abovecaption
+    \caption{Results (validation perplexity $\downarrow$) of pre-training Llama models on the C4 dataset.}
+    \label{table:c4}
+    \small
+    \begin{center}
+    \begin{tabular}{lccccccc}
+    \toprule
+    & Adam & \multicolumn{2}{c}{LDAdam} & \multicolumn{2}{c}{LDAdam no-EF} & \multicolumn{2}{c}{GaLore} \\
+    \cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8} 
+    & & \texttt{r=8} & \texttt{r=256} & \texttt{r=8} & \texttt{r=256} & \texttt{r=8} & \texttt{r=256} \\
+    \midrule
+    \textbf{Llama 130M} & 24.64 & 23.82 & 22.65 & 45.17 & 25.32 & 67.78 & 26.04 \\
+    \midrule
+    \textbf{Llama 350M} & 18.08 & 18.37 & 17.30 & - & 19.85 & - & 20.03 \\
+    \bottomrule
+    \end{tabular}
+    \end{center}
+\end{table}
+
+Furthermore, we scale the experiments up to the Llama 1.3B parameter model, using the same hyperparameters but fixing the learning rate at $5e-4$ due to limited computational resources. Adam achieves a validation perplexity of 14.86
+, while LDAdam with rank $\texttt{r=16}$ achieves 14.09 
+.
+
+\begin{figure}[H]
+    \small \setlength{\abovecaptionskip}{0pt} % Space abovecaption
+    \centering
+    \caption{\label{fig:C4_dynamics}  Pre-training dynamics for Llama 350M (left) and Llama 1.3B (right) on the C4 dataset.}
+    \begin{tabular}{cc}
+        \includegraphics[width=0.45\textwidth]{figure/llama350m.png} &
+        \includegraphics[width=0.45\textwidth]{figure/llama1b.png}
+    \end{tabular}
+\end{figure}
+
+Pre-training experiments also show that LDAdam has comparable performance to Adam, both in terms of convergence and validation accuracy, and confirm the improvements over GaLore. Further, for very high compression rates (i.e., \texttt{r=8}), LDAdam still converges, but its no-EF variant does not, nor does GaLore. This highlights the need for an error correction mechanism for pre-training tasks, which are known to require models updates of high rank. For  lower compression (i.e. \texttt{r=256}), LDAdam 
+ outperforms the no-EF version and GaLore, which is correlated to their consistent projection errors. 
+LDAdam even appears to slightly outperform Adam; we attribute this small improvement to the regularization effect of compression. 
+
+
+\section{Discussion}
+
+
+In this work, we proposed a new low-rank learning method with the memory-efficient LDAdam optimizer, {analyzed its convergence under standard assumptions}, and provided empirical evidence of its ability to match the performance of Adam optimizer at a fraction of its memory cost.
+
+\textbf{Limitations.}
+The LDAdam optimizer relies on Adam's heuristic to estimate gradient statistics, but its development required the design of a specific intermediate optimizer state update rule. Therefore, efficient implementations of Adam are not directly applicable to LDAdam, and extending our work to other optimizers requires further work. 
+On the experimental side, a natural next step would be to execute large-scale billion-parameter \emph{pre-training} experiments. Doing so is feasible, but requires additional computational infrastructure and technical changes to the algorithm to allow for distributed training.
+
+\textbf{Impact Statement.}
+This paper presents work that aims to advance the field of machine learning. We believe that memory-efficient optimization is a step toward democratizing large-scale model training, and thus provides opportunities to foster both the development of new applications and the research in the field. There are many societal concerns about the rapidly growing use of artificial intelligence, we feel that none of them is specifically related to our work.
+
+
+
+

@@ -1,0 +1,348 @@
+\title{Pixel-Space Post-Training of Latent-Diffusion Models}
+
+\begin{abstract}
+
+Latent diffusion models (LDMs) have made significant advancements in the field of image generation in recent years. One major advantage of LDMs is their ability to operate in a compressed latent space, allowing for more efficient training and deployment. However, despite these advantages, challenges with LDMs still remain. For example, it has been observed that LDMs often generate high-frequency details and complex compositions imperfectly.
+We hypothesize that one reason for these flaws is due to the fact that all pre- and post-training of LDMs are done in latent space, which is typically $8 \times 8$ lower spatial-resolution than the output images. To address this issue, we propose adding pixel-space supervision in the post-training process to better preserve high-frequency details. Experimentally, we show that adding a pixel-space objective significantly improves both supervised quality fine-tuning and preference-based post-training by a large margin on a state-of-the-art DiT transformer and U-Net diffusion models
+in both visual quality and visual flaw metrics, while maintaining the same text alignment quality. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Diffusion models learn to sequentially denoise from random Gaussian noise to sharp images and have revolutionized the field of media generation and editing in recent years. 
+Latent diffusion models represent the most popular type of diffusion model because of their efficiency and simplicity.
+State-of-the-art LDMs are typically pretrained on webscale data, resulting in ``foundation models''~\citep{sd, sdxl, sd3, imagen_google, imagen3_google, emu, dalle, dalle2, dalle3}. 
+
+These foundation models are then post-trained on a smaller, carefully curated dataset to improve quality through either supervised quality fine-tuning (SFT)~\citep{emu} or human-in-the-loop preference modeling~\citep{dpo, diffusion_dpo, simpo}. 
+Post-training of image foundation models is also utilized to create new models for a variety of applications, including controllable generation~\citep{controlnet}, editing~\citep{emuedit}, 3D generation~\citep{dreamfusion}, video generation~\citep{makeavideo, emuvideo}, and many others.
+
+To achieve efficiency and simplicity, LDMs use a pretrained variational autoencoder (VAE) to compress images into latent representations. For example, in the original LDM paper~\citep{sd}, the authors used a conv-based VAE to compress a $512 \times 512 \times 3$ image to $64 \times 64 \times 4$. This representation significantly speeds up training and reduces computational cost as the denoising diffusion model now operates in the $64 \times 64 \times 4$ space instead of the original $512 \times 512 \times 3$ space ($48\times$ compression). However, this comes at the cost of lossy compression, which can result in inaccuracies in or loss of high-frequency details. 
+
+The research community has invested considerable effort in improving fine details, including scaling up the model, carefully curating fine-tuning datasets, increasing the latent channel dimension~\citep{emu}, and designing more powerful decoders~\citep{dalle3}.
+
+In this paper, we take a step back and hypothesize that the artifacts in LDMs are partially caused by the fact that all pretraining, post-training, and inference steps are done on a lower-resolution latent space. With this assumption, we propose adding an additional supervision term in the original pixel space during post-training by decoding the latent representation back and combining it with the original latent loss term. This approach aims to improve the quality of generated images by providing additional guidance in the pixel space, which helps to mitigate the loss of high-frequency details and artifacts introduced by the compression of the latent space. Figure~\ref{fig:teaser} demonstrates that our method can generate more stunning details when post-trained on the same dataset.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\linewidth]{figures/teaser_jw.png}
+    \caption{\textbf{Enhancing LDMs with pixel-space objectives.} We hypothesize that losses of details and artifacts in high-frequency details are partially caused by training on the lower-resolution latent space. We propose adding a pixel-space objective during LDM post-training. Our experiments show significant improvements in both DiT-based and UNet-based LDMs for reward-based and supervised fine-tuning.
+    }
+    \label{fig:teaser}
+\end{figure}
+
+Through extensive experiments and independent human evaluation from annotators who have no knowledge of this project, we have found that the proposed method has the following advantages:
+\begin{enumerate}
+    \item \textbf{Simplicity}: The proposed method does not modify the architecture of the diffusion denoising model and can be seamlessly integrated into any LDM-based model without introducing new parameters, making it flexible and efficient.
+    \item \textbf{Effectiveness}: Despite its simplicity, we found that the proposed method is surprisingly effective, resulting in a $18.2\%$ and $23.5\%$ improvements on visual appeal and visual flaws with supervised fine-tuning, and $17.8\%$ and $11.3\%$ improvements on preference-based fine-tuning on a DiT model on head-to-head A/B comparisons with the  latent-space baseline.
+    \item \textbf{General applicability to models}: The proposed method performs remarkably well in both DiT and U-Net based LDMs~\citep{sd, emu}. 
+    \item \textbf{General applicability to post-training methods}: The proposed method works well on both supervised fine-tuning and reward-based fine-tuning, and can be easily added to the future post-training methods researchers develop.
+\end{enumerate}
+
+A secondary contribution of this paper is that we are the first paper that extends the recently proposed SimPO~\citep{simpo} preference optimization post-training technique to the image generation task and shows its effectiveness on the diffusion-based image generation domain.
+
+
+\section{Related Work}
+
+A comprehensive review of diffusion models is out of the scope of this section. Interested readers are referred to~\citet{fuest2024diffusion} and~\citet{chan2024tutorial}. Here we highlight a few works that are closest-related to us.
+
+\subsection{Text-to-image diffusion model}
+Researchers have explored a variety of representations to train text-to-image diffusion models, including pixel-diffusion models~\citep{dalle2, imagen_google, ediff}, latent diffusion models~\citep{sd, emu}, and token-based generative transformers~\citep{muse, llamagen, kaiming_mar}. Pixel-diffusion models directly generate images in the pixel space, but due to computational constraints, they typically first generate images at a lower resolution (e.g., $64 \times 64$) and then upsample them (sometimes multiple times) to achieve the target resolution in a cascade fashion~\citep{imagen_google}.
+
+Latent Diffusion Models (LDMs), on the other hand, employ a pretrained autoencoder~\citep{sd} to compress the spatial dimensions of the image to be generated, typically by a factor of $8 \times 8$, while moderately increasing the channel dimension from 3 (RGB) to 4. This approach significantly enhances training efficiency compared to pixel diffusion models, thereby facilitating various applications such as high-resolution~\citep{pixart} and real-time image generation~\citep{emuflash, wimbauer2024cache}. Early LDM models use convolutional U-Nets as the backbone diffusion model, such as LDM1.5~\citep{sd} and Emu~\citep{emu}. Recently, the field has been dominated by diffusion transformers (DiTs), such as SD3~\citep{sd3} and PixArt-$\alpha$~\citep{pixart}. PixArt-$\alpha$ incorporates cross-attention modules into DiT and trained the model on high-aesthetic data in its final training stage. However, all of these LDM methods are still trained in latent space, which might suffer from loss of details and artifacts due to low spatial resolution.
+
+In this paper, we propose a novel approach to refining image quality in diffusion models by deploying a pixel-space objective function in the post-training stage. Our method does not depend on a particular diffusion model type and works equally well for both U-Nets and DiTs. 
+
+\subsection{Supervised quality fine-tuning (SFT)}
+Supervised fine-tuning is crucial to the success of modern LLMs~\citep{lima, llama2, gpt4}. In image and vision,~\citet{emu} proposes using a small set of extremely high-quality images to fine-tune a pretrained LDM model, resulting in significant improvements to the visual quality of generated images without sacrificing text-image alignment. \citet{dalle3} and~\citet{segalis2023picture} propose using captions rewritten by vision language models to facilitate better learning, including during SFT. 
+However, none of these proposed methods explored the representation space in which the model was fine-tuned. In this paper, we propose supplementing the regular supervised fine-tuning loss with a pixel-space objective function. We experimented with two different models: a replacement-trained U-Net LDM-1.5~\citep{sd} and a DiT model. Our results show that when fine-tuning on a small high-quality dataset,  our proposed method can significantly improve generation quality and visual flaws.
+
+\subsection{Human Preference Based Post Training}
+Reinforcement learning represents another popular type of post-training technique. The seminal work of~\citet{ppo} makes the policy gradient method practical. ~\citet{dpo} proposes doing direct preference optimization (DPO) with a reference model to improve the model quality on language models.~\citet{diffusion_dpo} and~\citet{ddpo} extend DPO to diffusion models. DPO optimizes diffusion models on paired human preference data by implicitly estimating a reward model. 
+~\citet{liang2024step} proposes doing step-aware DPO.~\citet{simpo}, on the other hand, remove the reference model to make reinforcement learning more direct and effective. 
+In this paper, we show that our proposed pixel-space objective also works well for reward-based post-training.
+
+
+
+\section{Method}
+
+
+Given an image $x \in \mathbb{R}^{H \times W \times 3}$ in RGB space, LDMs use an autoencoder $\mathcal{E}$ that encodes $x$ into a latent representation $z = \mathcal{E}(x)$. The decoder $\mathcal{D}$ then reconstructs the image from the latent, giving $\tilde{x} = \mathcal{D}(z) = \mathcal{D}(\mathcal{E}(x))$, where $z \in \mathbb{R}^{h \times w \times c}$. 
+
+\subsection{Supervised Pixel-space Fine-tuning}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/training_diagram.png}
+    \caption{\textbf{Supervised fine-tuning with pixel-space loss.} During fine-tuning, we decode the latent representation back to the pixel space and add a supervision in the output image resolution.}
+    \label{fig:training}
+\end{figure}
+
+By denoising a normally distributed variable step-by-step, LDMs learn a data distribution $p_{\theta}(x)$. Therefore, they can be understood as a series of denoising autoencoders $\epsilon_{\theta}(z_t, t)$; $t = 1 \dots T$ that are trained to predict the denoised variant of their input $z_t$ where $z_t$ is the noisy version of latent input $z$ at time $t$, $\epsilon$ is the original noise added to get $z_t$, and $\epsilon_{\theta}(z_t, t)$ is the predicted noise. Furthermore, the noise added to $z_{t-1}$ to get $z_t$ is Gaussian with variance $\beta_t$. The standard objective function for LDMs is:
+\begin{equation}
+    L_{\textit{SFT}}^{\textit{latent}} := \mathbb{E}_{\mathcal{E}(x), \epsilon \sim \mathcal{N}(0,1), t} \left[\| \epsilon - \epsilon_{\theta}(z_t, t) \|_2^2 \right].
+    \label{eqn:sft_original}
+\end{equation}
+Instead of working only in the latent space $\mathbb{R}^{h \times w \times c}$, we propose a loss function that incorporates the pixel space $\mathbb{R}^{H \times W \times 3}$ in the objective function. This is achieved by adding the noise $\epsilon$ to the latent image $z$ through the forward diffusion process $x_t = \sqrt{\bar{\alpha}_t}x_0 + \sqrt{1-\bar{\alpha}_t}\epsilon$, where $\alpha_t = 1- \beta_t$ and $\bar{\alpha}_t = \prod_{i=1}^t \alpha_i$, and decoding it back to the pixel space. The objective function then becomes
+\begin{equation}
+    L_{\textit{SFT}}^{\textit{pixel}} := \mathbb{E}_{\mathcal{E}(x), \epsilon \sim \mathcal{N}(0,1), t} \left[\| \mathcal{D}(\sqrt{\bar{\alpha}_t}z + \sqrt{1-\bar{\alpha}_t}\epsilon) - \mathcal{D}(\sqrt{\bar{\alpha}_t}z + \sqrt{1-\bar{\alpha}_t}\epsilon_{\theta}(z_t, t)) \|_2^2 \right].
+    \label{eqn:sft_pixel}
+\end{equation}
+We combine the latent objective, Equation~\ref{eqn:sft_original}, with the pixel objective, Equation~\ref{eqn:sft_pixel}, to obtain an objective that uses both the latent and pixel space, weighted by hyper-parameter $\lambda$. 
+\begin{equation}
+    L_{\textit{SFT}} := L_{\textit{SFT}}^{\textit{latent}} + \lambda L_{\textit{SFT}}^{\textit{pixel}}.
+    \label{eqn:sft_combined}
+\end{equation} 
+
+\subsection{Pixel-space Fine-tuning using Reward Modeling}
+
+Define $x^w$ and $x^l$ to be the ``winning" and ``losing" samples from human annotations, then $z^w = \mathcal{E}(x^w)$ and $z^l = \mathcal{E}(x^l)$ represent the ``winning" and ``losing" samples in the latent space. Unlike regular supervised fine-tuning, fine-tuning with DPO utilizes a reference distribution $p_{\text{ref}}(x)$ and hyperparameter $\beta$ for regularization. Fine-tuning now aims to learn $p_{\theta}$, which is aligned to human preferences, while still remembering $p_{\text{ref}}$. The reward modeling objective for fine-tuning takes the form:
+\begin{equation}
+\begin{aligned}
+    L_{\textit{dpo}}^{\textit{latent}} := & -\mathbb{E}_{\mathcal{E}(x), \epsilon \sim \mathcal{N}(0,1),t} \log \sigma ( -\beta 
+    ( \| \epsilon^w - \epsilon_{\theta}(z_t^w, t)\|_2^2 - \\ & \| \epsilon^w - \epsilon_{\text{ref}}(z_t^w, t)\|_2^2 - (\| \epsilon^l - \epsilon_{\theta}(z_t^l, t)\|_2^2 - \| \epsilon^l - \epsilon_{\text{ref}}(z_t^l, t)\|_2^2))).
+\end{aligned}
+\label{eqn:dpo_latent}
+\end{equation}
+Inspired by~\citet{simpo}, we remove the reference model and simplify the objective to
+\begin{equation}
+\begin{aligned}
+    L_{\textit{simpo}}^{\textit{latent}} := -\mathbb{E}_{\mathcal{E}(x), \epsilon \sim \mathcal{N}(0,1),t} \log \sigma \left( -\beta 
+    ( \| \epsilon^w - \epsilon_{\theta}(z_t^w, t)\|_2^2 - (\| \epsilon^l - \epsilon_{\theta}(z_t^l, t)\|_2^2 ))\right).
+\end{aligned}
+\label{eqn:simpo_latent}
+\end{equation}
+Similar to supervised fine-tuning, we also incorporate calculations in the pixel space into our reward modeling.  and define the pixel-space objective as
+\begin{equation}
+\begin{aligned}
+    L_{\textit{simpo}}^{\textit{pixel}} := & -\mathbb{E}_{\mathcal{E}(x), \epsilon \sim \mathcal{N}(0,1),t} \log \sigma ( \\  -\beta 
+    (& ( \| \mathcal{D}(\sqrt{\bar{\alpha}_t}z^w + \sqrt{1-\bar{\alpha}_t}\epsilon^w) - \mathcal{D}(\sqrt{\bar{\alpha}_t}z^w + \sqrt{1-\bar{\alpha}_t}\epsilon_{\theta}(z_t^w, t))\|_2^2  \\ -   & (\|\mathcal{D}(\sqrt{\bar{\alpha}_t}z^l + \sqrt{1-\bar{\alpha}_t}\epsilon^l) - \mathcal{D} (\sqrt{\bar{\alpha}_t}z^l + \sqrt{1-\bar{\alpha}_t}\epsilon_{\theta}(z_t^l, t))\|_2^2 ))).
+\end{aligned}
+\label{eqn:dpo_pixel}
+\end{equation}
+Combining latent and pixel terms and weighted by a constant $\mu$, we get
+\begin{equation}
+    L_{\textit{reward}} = L_{\textit{simpo}}^{\textit{latent}} + \mu L_{\textit{simpo}}^{\textit{pixel}}.
+\end{equation}
+
+
+
+\section{Experiment}
+
+
+
+We conduct a comprehensive qualitative and quantitative analysis, as well as ablation studies to show that our proposed loss function outperforms the regular latent space loss in both supervised fine-tuning and preference-based post-training. 
+
+\subsection{Human evaluation}
+
+Like many recent studies, we found that a rigorous and independent human evaluation process is the most reliable way to evaluate different models. Commonly used metrics such as the FID score do not correlate well with human preference~\citep{emu,sdxl,kirstain2023pick}.
+
+We contracted a team of paid and independent annotators who do not have contexts of our project to evaluate the generated images. We conducted A/B comparisons on visual flaws and visual appeal, as well as standalone evaluations on text alignment. We use a 600-prompt list in the GenAI MAGIC challenge for the evaluation~\citep{magicchallenge}, where each example is annotated by at least 5 people and the majority decision is used. 
+
+\textbf{Visual flaws.} The annotators were presented with two images side-by-side, generated by two different models, without the prompt. The annotators were trained to identify major flaws (e.g., displaced body parts) and minor flaws (distorted eyes), and are asked to choose from ``left wins'', ``tie'' and ``right wins''. 
+
+\textbf{Visual appeal.} Similar to the visual flaws task, but the annotators are asked to compare which image is more aesthetically pleasing. Annotators were instructed to reject any examples where one image was photo-realistic and the other was stylized (e.g., a cartoon).
+
+\textbf{Text alignment.} We predefined a list of binary questions for each prompt and asked annotators to answer yes or no. We calculated the text alignment  rate by aggregating the results across all questions. For example, for the prompt ``a cat and a dog'', the annotators are asked ``is there one dog'', ``is there one cat'', and ``are there other animals present''.
+
+\subsection{experimental setup}
+\textbf{Baseline.} We tested our model on three models: 1) A 0.6B parameter DiT model with standard transformer and cross attention blocks and trained with high quality data in an ``annealing'' stage after pretraining to generate high quality images, 2) A 0.86B parameter U-Net with LDM1.5 architecture~\citep{sd}, replacement-trained on 300M Shutterstock data without quality tuning, which thus generates lower-quality images without prompt engineering and 3) A larger U-Net based Emu model~\citep{emu} that has been quality fine-tuned, and generates the highest quality images among the three.
+
+\textbf{Supervised fine-tuning.} We curated a small, high-quality dataset of 1816 images for fine-tuning, following the practice of~\citet{emu}. Since Emu is already quality fine-tuned, we focused on replacement-trained LDM1.5 and DiT. For supervised fine-tuning with a small dataset, style consistency is crucial. We found that using a hand-picked set of generated images from a high-quality model is sufficient.
+
+\textbf{Preference-based fine-tuning.} We conducted experiments on the higher-quality U-Net Emu and DiT models. For each model, we generate 5 images per prompt and ask annotators to select a positive and negative pair. In instances where visual flaws and visual quality conflicted, we prioritize the image with fewest visual flaws as the positive example.
+\textbf{Implementation details.} We run all experiments at $512 \times 512$ resolution for LDM1.5 and DiT, and $768 \times 768$ for Emu, using Adam optimizer with weight decay of $5e-6$. For preference-based fine-tuning, we set $\lambda=\mu=8.0$ for DiT and $2.0$ for Emu to balance the pixel loss magnitude and latent loss magnitude, running 100 epochs. For supervised fine-tuning, we empirically use 140 epochs.  We ablate the hyper-parameters such as learning rate and batch size for each model and choose the best ones. Each experiment took 1-8 hours on 8 H100 GPUs to fine-tune one model. During inference, we use the standard DDIM solver with 50 steps with classifier-free guidance.
+
+\subsection{Experimental Results}
+
+\textbf{Supervised Fine-tuning. }
+After supervised fine-tuning, our proposed loss improved visual flaws win rate from $17.7\%$ to $64.2\%$, and visual quality win rate from $47.9\%$ to $64.7\%$, compared to regular fine-tuning against the DiT baseline. When directly comparing the model fine-tuned with our loss to the model fine-tuned with the regular latent space loss, ours showed a $32.8\%$ vs $9.3\%$ win rate on visual flaws and $34.8\%$ vs $16.6\%$ win rate on visual appeal. We also found that supervised fine-tuning did not affect text alignment, with correct alignment rates of $74.0\%$, $74.3\%$ and $74.0\%$ for baseline, regular latent fine-tuning, and our fine-tuning respectively, (Table~\ref{tab:sft_dit}), all within the margin of error for the annotations. Qualitative examples in Figure~\ref{fig:sft_qualitative} demonstrate that our method generates fewer artifacts and much better fine details.
+\begin{figure}[t!]
+    \centering
+    \includegraphics[trim={0 36.5cm 0.7cm 2cm},clip,width=1.0\linewidth]{figures/sft_qualitative.pdf}
+    \caption{\textbf{SFT with pixel-space loss: DiT.} Fine-tuning with our method improves visual quality and reduces flaws. Zoom in to see details.}
+    \label{fig:sft_qualitative}
+\end{figure}
+\begin{table}[h!]
+    \small
+    \centering
+    \caption{Pixel space loss improves supervised fine-tuning: DiT.}
+    \tabcolsep=0.12cm
+    \begin{tabular}{cccccccccccc}
+    \toprule
+     &  & \multicolumn{3}{c}{Visual Flaws} & & \multicolumn{3}{c}{Visual Appeal} & & \multicolumn{2}{c}{Text alignment} \\
+    Model A & Model B & \multicolumn{1}{c}{A Wins} & \multicolumn{1}{c}{Tie} & \multicolumn{1}{c}{B Wins} & & \multicolumn{1}{c}{A Wins} & \multicolumn{1}{c}{Tie} & \multicolumn{1}{c}{B Wins} & & Model A & Model B \\
+    \midrule
+    Regular SFT & Baseline & $17.7\%$& $74.0\%$& $8.3\%$& & $47.9\%$& $19.3\%$& $32.8\%$& & $74.3\%$ & $74.0\%$\\
+    Ours & Baseline & $64.2\%$ & $26.5\%$ & $9.3\%$ & & $64.7\%$ & $20.6\%$ & $14.8\%$ & & $74.0\%$ & $74.0\%$ \\
+    \midrule
+    Ours & Regular SFT & $\mathbf{32.8\%}$ & $57.8\%$ & $9.3\%$ & & $\mathbf{34.8\%}$ & $48.6\%$ & $16.6\%$ & & $74.0\%$ & $74.3\%$ \\
+    \bottomrule
+    \end{tabular}
+\label{tab:sft_dit}
+\end{table}
+\begin{table}[h!]
+    \small
+    \centering
+    \caption{Pixel space loss improves fine-tuning: Replacement trained LDM1.5.}
+    \tabcolsep=0.12cm
+    \begin{tabular}{cccccccccccc}
+    \toprule
+     &  & \multicolumn{3}{c}{Visual Flaws} & & \multicolumn{3}{c}{Visual Appeal} & & \multicolumn{2}{c}{Text alignment} \\
+    
+    Model A & Model B & \multicolumn{1}{c}{A Wins} & \multicolumn{1}{c}{Tie} & \multicolumn{1}{c}{B Wins} & & \multicolumn{1}{c}{A Wins} & \multicolumn{1}{c}{Tie} & \multicolumn{1}{c}{B Wins} & & Model A & Model B \\
+    \midrule
+    Regular SFT & Baseline & $75.0\%$& $13.7\%$& $11.3\%$& & $79.6\%$& $6.9\%$& $13.5\%$& & $72.3\%$ & $61.4\%$\\
+    Our SFT & Baseline & $74.2\%$ & $16.7\%$ & $9.1\%$ & & $75.2\%$ & $10.8\%$ & $14.0\%$ & & $72.1\%$ & $61.4\%$ \\
+    \midrule
+    Our SFT & Regular SFT & $\mathbf{29.3\%}$ & $46.7\%$ & $24.0\%$ & & $\mathbf{41.5\%}$ & $24.0\%$ & $34.4\%$ & & $72.1\%$ & $72.3\%$ \\
+    \bottomrule
+    \end{tabular}
+\label{tab:sft_sd}
+\end{table}
+
+Table~\ref{tab:sft_sd} show the results for LDM1.5 (replacement trained). Our proposed SFT with pixel loss still improves over regular latent SFT in head-to-head comparisons (last row). 
+Comparing with the DiT experiments, the smaller difference between pixel and regular SFT when compared to the baseline is due to LDM1.5's lower image generation quality, as it was only replacement trained with Shutterstock data. Therefore, both regularly SFT-ed and pixel SFT-ed models significantly outperform the baseline in terms of visual quality and flawlessness, and supervised fine-tuning in this case, focuses on learning the overall style and aesthetics of the fine-tune images instead of fine details. 
+See Figures~\ref{fig:teaser} for qualitative examples. Notably, text alignment also improved with SFT, consistent with findings from~\citet{emu}.
+
+\begin{table}[t!]
+    \small
+    \centering
+    \caption{Our proposed pixel-space objective also significantly improves DPO on the DiT model.}
+    \tabcolsep=0.12cm
+    \begin{tabular}{cccccccccccc}
+    \toprule
+     &  & \multicolumn{3}{c}{Visual Flaws} & & \multicolumn{3}{c}{Visual Appeal} & & \multicolumn{2}{c}{Text alignment} \\
+    Model A & Model B & \multicolumn{1}{c}{A Wins} & \multicolumn{1}{c}{Tie} & \multicolumn{1}{c}{B Wins} & & \multicolumn{1}{c}{A Wins} & \multicolumn{1}{c}{Tie} & \multicolumn{1}{c}{B Wins} & & Model A & Model B \\
+    \midrule
+    Regular DPO & Baseline & $27.5\%$ & $63.7\%$ & $8.8\%$ & & $48.3\%$ & $39.7\%$ & $12.0\%$ & & $72.8\%$ & $74.0\%$\\
+    Ours & Baseline & $43.3\%$ & $43.7\%$ & $13.0\%$ & & $61.2\%$ & $24.8\%$ & $14.0\%$ & & $75.7\%$ & $74.0\%$ \\
+    \midrule
+    Ours & Regular DPO & $\mathbf{31.0\%}$ & $49.3\%$ & $19.7\%$ & & $\mathbf{43.7\%}$ & $30.4\%$ & $25.9\%$ & & $75.7\%$ & $72.8\%$ \\
+    \bottomrule
+    \end{tabular}
+\label{tab:dpo_dit}
+\end{table}
+\begin{figure}[h!]
+    \centering
+    \includegraphics[trim={0.2cm 5.7cm 0.7cm 2cm },clip,width=1.0\linewidth]{figures/dpo_dit_qualitative.pdf}
+    \caption{\textbf{Preference-based post-training with pixel-space loss: DiT.} The model trained with our proposed objective function generates more stunning fine details and fewer artifacts.}
+    \label{fig:dpo_qualitative}
+\end{figure}
+\textbf{Preference-based fine-tuning. }
+Our method also demonstrates exceptional performance in reward-based fine-tuning, generating significantly more impressive details than the baselines. The results are best demonstrated qualitatively in Figure~\ref{fig:dpo_qualitative} and~\ref{fig:dpo_emu_qualitative}. Quantitatively, as shown in Table~\ref{tab:dpo_dit}, compared to regular DPO, our proposed pixel objective function improves the win rate from $27.5\%$ to $43.3\%$ for visual flaws and $48.3\%$ to $61.2\%$ for visual appeal when evaluated against the baseline DiT. 
+When doing head-to-head comparison between our method and regular DPO, we achieve win rates of $31.0\%$ vs $19.7\%$ on visual flaws and $43.7\%$ vs $25.9\%$ on visual appeal.
+Although unintended, our method also improves text alignment by $2.9\%$. 
+
+With U-Net based Emu (Figure~\ref{fig:dpo_emu_qualitative}), the baseline model already generates higher-quality flawless images in most cases. Therefore, the flaw comparison will result in ties in majority of the cases. Despite this, our proposed method still manages to improve visual flaws win rate from $2.7\%$ to $16.0\%$ and visual appeal from $36.3\%$ to $42.2\%$ as shown in Table~\ref{tab:dpo_emu}.
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[trim={0cm 4.5cm 0cm 0cm },clip,width=1.0\linewidth]{figures/dpo_emu_qualitative.pdf}
+    \caption{\textbf{Preference-based post-training with pixel-space loss: Emu.} Similar to DiT, the Emu model fine-tuned using our loss generates even better details, despite how the baseline Emu already generates good quality images with rich details. Zoom in to see the improvements.}
+    \label{fig:dpo_emu_qualitative}
+\end{figure}
+
+\begin{table}[h!]
+    \small
+    \centering
+    \caption{Pixel-space objective also improves DPO on Emu.}
+    \tabcolsep=0.12cm
+    \begin{tabular}{cccccccccccc}
+    \toprule
+     &  & \multicolumn{3}{c}{Visual Flaws} & & \multicolumn{3}{c}{Visual Appeal} & & \multicolumn{2}{c}{Text alignment} \\
+    Model A & Model B & \multicolumn{1}{c}{A Wins} & \multicolumn{1}{c}{Tie} & \multicolumn{1}{c}{B Wins} & & \multicolumn{1}{c}{A Wins} & \multicolumn{1}{c}{Tie} & \multicolumn{1}{c}{B Wins} & & Model A & Model B \\
+    \midrule
+    Regular DPO & Baseline & $ 2.7\%$ & $95.3\%$ & $2.0\%$ & & $36.3\%$ & $34.9\%$ & $28.8\%$ & & $89.5\%$ & $89.2\%$ \\
+    Ours & Baseline & $16.0 \%$ & $75.5\%$ & $8.5\%$ & & $42.2\%$ & $31.4\%$ & $26.5\%$ & & $89.3\%$ & $89.2\%$ \\
+    \midrule
+    Ours & Regular DPO  & $\mathbf{18.3\%}$ & $70.2\%$ & $11.5\%$ &  & $\mathbf{13.7\%}$ & $80.0\%$ & $6.3\%$ & & $89.3\%$ & $89.5\%$ \\
+    \bottomrule
+    \end{tabular}
+\label{tab:dpo_emu}
+\end{table}
+
+\textbf{Additional qualitative examples.
+
+\subsection{Ablation studies}
+\label{sec:ablation}
+
+\textbf{Latent vs Pixel vs Pixel+Latent Loss. }
+When only using the pixel space loss during supervised fine-tuning, we noticed that the resulting images had very clear details in the main focus of the image, but the background tends to be overly blurred as if they are photographs taken with an extremely narrow depth of field. As shown in Table~\ref{tab:ab_space}, using pixel space alone also significantly improves visual flaws, helping the images look more realistic and crisp. However by combining it with latent loss, we are able to significantly improve the visual appeal as well, resulting in images with more stunning details, especially in the background. 
+
+\begin{table}[h!]
+\small
+\centering
+    \caption{Ablation study: Supervised fine-tuning method: Latent, Pixel, vs Latent + Pixel (Ours).}
+    \begin{tabular}{cccccccc}
+    \toprule
+    \multicolumn{2}{c}{} & \multicolumn{3}{c}{Visual Flaws} & \multicolumn{3}{c}{Visual Appeal} \\
+    \multicolumn{1}{c}{Model A} & \multicolumn{1}{c}{Model B} & \multicolumn{1}{c}{A Wins} & \multicolumn{1}{c}{Tie} & \multicolumn{1}{c}{B Wins} & \multicolumn{1}{c}{A Wins} & \multicolumn{1}{c}{Tie} & \multicolumn{1}{c}{B Wins} \\
+    \midrule
+    Latent only & Baseline DiT & 17.7\% & 74.0\% & 8.3\% & 46.1\% & 20.7\% & 33.2\%  \\
+    Pixel only & Baseline DiT & 43.8\% & 42.7\% & 13.5\% & 44.8\% & 21.7\% & 33.5\%  \\
+    Ours (Latent and Pixel) & Baseline DiT & \textbf{64.2\%} & 26.5\% & 9.3\% & \textbf{63.8\%} & 21.5\% & 14.7\% \\
+    \midrule
+    Ours (Latent and Pixel) & Latent only & $\mathbf{32.8\%}$ & $57.8\%$ & $9.3\%$ & $\mathbf{34.8\%}$ & $48.6\%$ & $16.6\%$ \\
+    Ours (Latent and Pixel) & Pixel only & \textbf{22.7\%} & 60.5\% & 16.8\% & \textbf{47.5\%} & 38.5\% & 14.0\% \\
+    \bottomrule
+    \end{tabular}
+\label{tab:ab_space}
+\end{table}
+
+\textbf{Decoding Methodology. }
+Intuitively, to obtain as much image quality and details as possible, one may consider regressing to an objective function that compares the output to the original starting image in the pixel space. This involves two steps: first, transforming the predicted noise in the latent space back to $t=0$, then decoding into the pixel space using equation 
+\begin{equation}
+    x_0 = \mathcal{D}(z_0) = \mathcal{D}\biggl(\frac{1}{\sqrt{\bar{\alpha}_t}}(z_t - \sqrt{1-\bar{\alpha}_t}\epsilon_{\theta}(z_t, t))\biggr).
+    \label{eqn:eqn:decode_back_to_0}
+\end{equation}
+Although this method seems like it would be optimal in generating the detail and high quality desired in the final image, 
+ 
+
+Based on this finding, we propose comparing the output directly with the sample in the pixel space at the current timestep to eliminate the unwanted variations in the previous method, using Equation~\ref{eqn:sft_pixel}.
+Empirically, we have found that even though noisy images are out-of-distribution for the autoencoder, it still does surprisingly well in reconstructing them. 
+
+\textbf{Reference Model in Reward Modeling. } Traditionally, DPO~\citep{dpo, diffusion_dpo} utilizes a reference model, but recently~\citet{simpo} proposed removing the reference model (SimPO) in LLMs and showed strong performance. Here, we tested out different combinations of using latent-space loss and pixel-space loss with and without the reference model, as shown in Table \ref{dposimpo}. 
+We show that simply adding our proposed pixel loss term can already significantly improve the visual flaws metric using the standard DPO method ($53.0\%$ vs $27.5\%$ win rate compared to baseline DiT model). However, by incorporating SimPO, we achieve both significant improvement on visual flaws and visual appeal (improving from $27.5\%$ to $43.3\%$ in visual flaws and $47.2\%$ to $61.2\%$ in visual appeal). 
+To the best of our knowledge, this is also the first paper that demonstrates that the recent success of SimPO can also be extended to diffusion models.
+
+\begin{table}[h!]
+\small
+\centering
+\caption{Ablation Study: Reward modeling variations vs Baseline DiT}
+\begin{tabular}{ccccccc}
+\toprule
+\multicolumn{1}{c}{} & \multicolumn{3}{c}{Visual Flaws} & \multicolumn{3}{c}{Visual Appeal} \\
+\multicolumn{1}{c}{Model} & \multicolumn{1}{c}{Win} & \multicolumn{1}{c}{Tie} & \multicolumn{1}{c}{Lose} & \multicolumn{1}{c}{Win} & \multicolumn{1}{c}{Tie} & \multicolumn{1}{c}{Lose} \\
+\midrule
+DPO latent (baseline) & 27.5\% & 63.7\% & 8.8\% & 47.2\% & 40.7\% & 12.2\% \\
+DPO latent + DPO pixel & \textbf{53.0\%} & 31.5\% & 15.5\% & 49.0\% & 21.0\% & 30.0\% \\
+DPO latent + SimPO pixel & 50.7\% & 35.7\% & 13.7\% & 41.3\% & 22.8\% & 35.8\% \\
+SimPO latent + SimPO pixel (Proposed) & 43.3\% & 43.7\% & 13.0\% & $\mathbf{61.2\%}$ & $24.8\%$ & $14.0\%$ \\
+\bottomrule
+\end{tabular}
+\label{dposimpo}
+\end{table}
+
+
+
+\section{Limitations}
+
+\textbf{Limitations of Baseline Models.} Fine-tuning improvements are dependent on the quality of the original baseline model, and thus fine-tuning using pixel space loss may not always produce significant improvements. For example, if the original baseline model already has minimal flaws and high visual appeal, fine-tuning may not achieve many improvements. 
+In contrast, if the original baseline foundation model generates significant structural flaws that require the global understanding of the image composition, fine-tuning with our loss alone may not help eliminate them.
+
+\textbf{Limitations of Fine-tuning Dataset.} Fine-tuning is also dependent on the quality and composition of the dataset used. 
+Our dataset was hand-curated and consisted of images that followed our definition of high quality and style. Changing the composition of this dataset would lead to different results.
+
+\textbf{Limitations of Human Evaluation.} The images generated by the different models were evaluated by independent annotators. Although the annotators were trained on standards for visual flaws, visual appeal, and text alignment, these results may not fully reflect the real-world use of the models. Human evaluation is also inherently subjective and noisy in terms of aesthetics. 
+
+
+
+\section{Conclusions}
+
+In this paper, we proposed a novel post-training objective function for latent diffusion models by incorporating a pixel-space loss with the commonly used latent-space fine-tuning loss. The resulting model shows noticeable improvement in visual flaws and visual appeal metrics in both supervised fine-tuning and preference-based post-training through rigorous human evaluations. The proposed objective function is simple and can be easily plugged into existing models such as DiT and U-Net. 
+
+
+
+

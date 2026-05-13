@@ -1,0 +1,525 @@
+\title{Large Convolutional Model Tuning via Filter Subspace}
+
+\begin{abstract}
+Efficient fine-tuning methods are critical to address the high computational and parameter complexity while adapting large pre-trained models to downstream tasks.
+Our study is inspired by prior research that represents each convolution filter as a linear combination of a small set of filter subspace elements, referred to as \emph{filter atoms}. In this paper, we propose to fine-tune pre-trained models by adjusting only filter atoms, which are responsible for spatial-only convolution, while preserving spatially-invariant channel combination knowledge in atom coefficients.
+In this way, we bring a new filter subspace view for model tuning. 
+Furthermore, each filter atom can be recursively decomposed as a combination of another set of atoms, which naturally expands the number of tunable parameters in the filter subspace.
+By only adapting filter atoms constructed by a small number of parameters, while maintaining the rest of model parameters constant, the proposed approach is highly parameter-efficient. It effectively preserves the capabilities of pre-trained models and prevents overfitting to downstream tasks. 
+Extensive experiments show that such a simple scheme surpasses previous tuning baselines for both discriminate and generative tasks. 
+
+\keywords{Efficient Fine-tuning \and Filter Decomposition \and Filter Subspace}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+Large models have demonstrated exceptional performance across diverse domains and tasks~\cite{brown2020language, dosovitskiy2020image, he2016deep, kirillov2023segany, radford2019language, rombach2022high, silver2016mastering, touvron2023llama, vaswani2017attention}, attributing to their capability to effectively represent complex patterns and relationships~\cite{khan2020survey} by pre-training on massive datasets~\cite{ILSVRC15, raffel2020exploring, zhu2015aligning}.
+A common strategy to adapt these large models for specific downstream tasks is fine-tuning them with full parameters. But this method presents two main challenges: (1) Adjusting a vast number of parameters for particular target tasks is computationally intensive; (2) The limited availability of target data increases the risk of overfitting~\cite{lian2022scaling}.
+
+To address these challenges, researchers have developed parameter-efficient methods~\cite{chen2022adaptformer, hu2021lora, jia2022visual, shen2021partial, yeh2023navigating, zaken2021bitfit} by fine-tuning
+the pre-trained models with only a minimal number of parameters. 
+Among these methods, LoRA~\cite{hu2021lora} fine-tunes models without altering the model architecture, becoming notably popular for its simplicity and efficacy. 
+However, LoRA still risks overfitting when fine-tuned on limited data and compromising the generalization capability of large models. For instance, Figure~\ref{fig:compare_generated} illustrates that with only 5 training samples, LoRA tends to produce images that closely resemble the training data, compromising the ability for diverse image generation, compared with pre-trained models.
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{.84\textwidth}
+
+    \centering
+    \includegraphics[trim={0pt 160pt 0pt 10pt}, clip, width=\linewidth]{imgs/weakness_of_lora.pdf}
+    \end{subfigure}
+    \caption{
+    \small{Compared with LoRA~\cite{hu2021lora}, our method updates a small set of parameters and mitigates the risk of overfitting to the target concept. In this example task of learning the concept <castle> from 5 input images, we only require fine-tuning \textbf{0.75M} parameters, a stark reduction from the 22.67M parameters required by LoRA. Furthermore, the model fine-tuned by our method captures the target concept while ensuring a rich diversity and strong alignment with input text prompts. It demonstrates that our approach preserves the generalization capability of large models. The text prompts used to generate images from left to right are: ``The <castle> stands against a backdrop of snow-capped mountains'', ``A <castle> surrounded by a lush, vibrant forest'', ``The <castle> overlooks a serene lake'', and ``The <castle> in the autumn season with colorful foliage''. }
+    }
+    \label{fig:compare_generated}
+\end{figure}
+
+\subsubsection{Motivation.}
+To preserve the capabilities of pre-trained models when fine-tuning them on the downstream tasks, one prominent approach in continual learning~\cite{review, rusu2016progressive, apd} is to formulate convolution filters in ConvNets as a linear combination of filter atoms~\cite{li2019learning, papyan2017convolutional, dcf} and fine-tuning only filter atoms~\cite{miao2021continual, zhai2021hyper}. 
+Specifically, filters in each convolutional layer are decomposed over a small set of filter subspace elements, referred to as \emph{filter atoms}, responsible for \emph{spatial-only convolution}. Each convolutional layer is now constructed as linear combinations of filter atoms using decomposition coefficients, referred to as \emph{atom coefficients}, responsible for the \emph{spatially invariant channel combination}. 
+Hypothesizing variations across tasks can be reduced by bridging spatial discrepancies in the images, we propose to calibrate the pre-trained model by solely fine-tuning the spatial-only filter atoms while preserving the spatially-invariant channel weights, \textit{i.e.}, atom coefficients.
+
+In our work, we demonstrate that fine-tuning a large model via filter atoms is substantially effective and parameter-efficient, as filter atoms are responsible for spatial-only convolution and usually comprise only a few hundred parameters. 
+This strategy is in harmony with task subspace modeling principles, which suggest that task parameters occupy a low-dimensional subspace, allowing tasks to be represented as combinations of latent basis tasks~\cite{evgeniou2007multi, kumar2012learning, maurer2013sparse, romera2013multilinear, zhang2021survey}.
+We also discover that maintaining fixed atom coefficients, \textit{i.e.}, spatially-invariant channel mixing weights, plays a crucial role in preserving the generalization capability of pre-trained large models. 
+
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}[b]{.28\textwidth}
+         \centering
+         \includegraphics[trim={340pt 155pt 420pt 205pt}, clip, width=\linewidth]{imgs/compare_with_lora_3.pdf}
+         \caption{}
+     \end{subfigure}
+    \begin{subfigure}[b]{.46\textwidth}
+         \centering
+         \includegraphics[trim={200pt 100pt 190pt 90pt}, clip, width=\textwidth]{imgs/explain_decomposition_1.pdf}
+         \caption{}
+     \end{subfigure}
+    \caption{A filter subspace view of model tuning. 
+    (a) Each convolutional layer $\mathcal{F}$ is constructed as linear combinations of filter subspace elements, \textit{i.e.}, \emph{filter atoms} $\atom$, using decomposition coefficients, \textit{i.e.}, \emph{atom coefficients} $\coeff$. 
+    Hypothesizing variations across tasks can be reduced by bridging spatial discrepancies in the images, we propose to calibrate the pre-trained model by solely fine-tuning the spatial-only $\atom$ while keeping the spatially-invariant channel weights $\coeff$ fixed.
+    (b) The convolution operation is represented in two stages: At the \emph{spatial-only convolution} stage, each filter atom $\atom$ is adapting to the target task, and then at the \emph{cross-channel mixing} stage, $\feat'$ are combined into $\feat$ using fixed atom coefficients $\coeff$, which is obtained from the pre-trained model.
+    More details are provided in Section~\ref{sec:method}.
+    } 
+    \label{fig:compare_with_lora}
+\end{figure*}
+
+With a large number of parameters fixed, fine-tuning only a tiny set of parameters in filter atoms is potentially challenging to adapt to more complex tasks.
+We further demonstrate a simple yet effective way to expand the tunable parameters in filter subspace, without any modification on atom coefficients, by decomposing each filter atom over another set of filter atoms. This process provides an \emph{overcomplete} set of filter atoms and expands the tunable parameter space, all while still requiring fewer parameters than LoRA. 
+Additionally, we provide a simple technique to extend this method to linear layers, ensuring alignment with the characteristics in prior literature~\cite{li2019learning, miao2021continual, papyan2017convolutional, dcf}. 
+The illustration of our method is displayed in Figure~\ref{fig:compare_with_lora}. 
+
+
+We demonstrate the effectiveness of our approach on both discriminative and generative tasks with ResNet50~\cite{he2016deep}, ConvNeXt~\cite{liu2022convnet} and Stable Diffusion~\cite{rombach2022high}.
+We summarize our contributions as follows,
+\begin{itemize}
+    \item We propose a method by adapting only filter subspace elements (filter atoms), with a few hundred parameters, to achieve significantly parameter-efficient fine-tuning. 
+    \item We observe that maintaining fixed atom coefficients plays a crucial role in preserving the generalization capability of large models. 
+    \item We further demonstrate a simple way to expand the number of tunable parameters in filter subspace by recursively decomposing each filter atom over another set of filter atoms, which extends the parameter space for tuning. 
+    \item We conduct extensive experiments demonstrating the efficacy of our approach on discriminative and generative tasks for fine-tuning large models.
+\end{itemize}
+
+
+\section{Preliminary}
+
+\label{sec:preliminary}
+
+\subsection{Low-rank Adaptation for Fine-tuning} 
+LoRA~\cite{hu2021lora} introduces trainable low-rank matrices into layers to approximate weight updates. For a pre-trained weight matrix $\filter \in \mathbb{R}^{d' \times d}$, LoRA represents the weight update with a low-rank decomposition
+\begin{equation*}
+    \filter + \Delta \filter = \filter + \filter_{down} \filter_{up},
+\end{equation*}
+where $\filter_{down} \in \mathbb{R}^{d' \times r}$ and $\filter_{up} \in \mathbb{R}^{r \times d}$ are tunable parameters, $r$ is the intrinsic rank of weight updates, $d'$ and $d$ are the size of inputs and outputs. $r$ is usually much smaller than $d'$ and $d$. A learnable scalar hyperparameter $\alpha$ scales the weight updates, which leads to $\filter + \alpha \filter_{down} \filter_{up}$.
+
+\subsection{Sparse Coding and Matrix Factorization}
+\label{subsec:sparse_coding}
+Sparse coding attempts to find the representation of input $\mathbf{w}$ with respect to a dictionary of $m$ atoms $\{\mathbf{d}_l\}_{l=1}^{m}$ with the fewest number of coefficients $\alpha^l$, \textit{i.e.}, $\mathbf{w} = \sum_{l=1}^{m} \alpha^l \mathbf{d}_l$. The objective of a sparse coding problem can be written as
+\begin{equation*}
+    \min_{\alpha^{i, l}, \mathbf{d}_l} \sum_j \lVert \mathbf{w}^{i} - \sum_i \alpha^{i, l} \mathbf{d}_l \rVert^2_2 + \lambda \sum_i \lVert \alpha^{i, l} \rVert_1,
+\end{equation*}
+where $\lVert \cdot \rVert_1$ is the $L_1$ norm, and $\lambda$ is a Lagrange multiplier.
+
+It can be further expressed in a tensor form,
+\begin{equation}
+    \label{eq:sparse_code}
+    \min_{\coeff, \atom} \lVert \mathcal{F} - \coeff \times \atom \rVert^2_F + \lambda \lVert \coeff \rVert_{1,1},
+\end{equation}
+where $\mathcal{F} \in \mathbb{R}^{c' \times c \times k' \times k}$ is the input tensor, $\coeff \in \mathbb{R}^{c' \times c \times m}$ is the tensor of coefficients and $\atom \in \mathbb{R}^{m \times k' \times k}$ is a tensor of basis. 
+A number of algorithms have been developed to solve (\ref{eq:sparse_code}), such as fast iterative soft-thresholding algorithm (FISTA)~\cite{beck2009fast}, matching pursuit~\cite{mallat1993matching}, and least absolute shrinkage and selection operator (LASSO)~\cite{santosa1986linear}. 
+
+We can interpret the first term in (\ref{eq:sparse_code}) as finding a suitable tensor factorization for $\mathcal{F}$, while the second term serves as a penalty enforcing sparsity in the representation of $\mathcal{F}$.
+
+
+
+
+\section{Methods}
+
+\label{sec:method}
+In this section, we decompose convolution filters over a small set of filter subspace elements, referred to as \emph{fitler atoms}. This formulation enables a new model tuning method via filter subspace by solely adjusting filter atoms.
+
+\subsection{Formulation of Filter Decomposition}
+\label{subsec:decomposition}
+Our approach involves decomposing each convolutional layer $\mathcal{F}$ into two standard convolutional layers: a \textit{filter atom} layer $\atom$ that models filter subspace\footnote{The filter subspace is a span of $m$ filter atoms $\atom$.}, and an \textit{atom coefficient} layer $\coeff$ with $1 \times 1$ filters that represent combination rules of filter atoms, as displayed in Figure~\ref{fig:compare_with_lora} (a). 
+This formulation is written as
+\begin{equation}
+    \mathcal{F}=\coeff \times \atom,
+\end{equation}
+where $\times$ is the tensor product.
+
+$\mathcal{F} \in \mathbb{R}^{c' \times c \times k \times k}$ contains $c' \times c$ filters $\{\mathcal{F}^{i,j}\}_{i=1, j=1}^{i=c', j=c}$, where $c'$ and $c$ are the numbers of input and output channels, $k$ is the kernel size. $\atom \in \mathbb{R}^{m \times k\times k }$ is a set of $m$ filter atoms, \textit{i.e.}, $\atom = \{\mathbf{d}_l\}_{l=1}^{m}$, where $\mathbf{d}_l\in \mathbb{R}^{k \times k}$. Each filter $\mathcal{F}^{i,j}$ is a linear combination of $m$ filter atoms, calculated by $\mathcal{F}^{i,j}=\sum_{l=1}^{m} \alpha^{i, j, l} \mathbf{d}_l$, $\alpha^{i, j, l}$ represents each element in $\coeff \in \mathbb{R}^{c'\times c\times m}$.
+
+Considering input features $\inp \in \mathbb{R}^{c'\times h' \times w'}$ and output features  $\feat \in \mathbb{R}^{c\times h \times w}$, where $h' \times w'$ and $h \times w$ represent the dimension of input features and output features. The convolution process now can be comprehended as the following two steps:
+
+\subsubsection{$\bullet$ Spatial-only Convolution with $\atom$.} 
+Each channel of the input features $\inp$ convolves with each filter atom separately to produce intermediate features
+\begin{equation*}
+    \feat' = \atom * \inp,
+\end{equation*}
+where $\feat' \in \mathbb{R}^{(c'\times m) \times h \times w}$, $*$ is the convolution operation. 
+
+For each input feature channel $\inp^i$ and filter atom $\mathbf{d}_l\in \mathbb{R}^{k \times k}$, we have $\feat'^{i, l} = \inp^i * \mathbf{d}_l$, where $\feat'^{i, l}\in \mathbb{R}^{h \times w}, \inp^i \in \mathbb{R}^{h' \times w'}$ are one feature channel in $\feat', \inp$, and $\mathbf{d}_l$ is one filter atom in $\atom = \{\mathbf{d}_l\}_{l=1}^{m}$.
+
+This process leads to the generation of $m$ distinct intermediate output channels for each input channel, which is illustrated in Figure~\ref{fig:compare_with_lora}~(b). In this step, filter atoms focus only on handling the spatial information of input features, and cross-channel mixing is postponed to the next step.
+
+\subsubsection{$\bullet$ Cross-channel Mixing with $\coeff$.} 
+Subsequently, atom coefficients weigh and linearly combine the intermediate features to produce output features 
+\begin{equation*}
+    \feat = \coeff \times \feat'.
+\end{equation*}
+
+Each output feature channel $\feat^j \in \mathbb{R}^{h \times w}$ is linearly combined from $c'\times m$ intermediate feature channels $\feat'^{i,l} \in \mathbb{R}^{h \times w}$ with the coefficient $\{\alpha^{i, j, l}\}_{i=1,l=1}^{i=c',l=m}$,
+which is, $\feat^j = \sum_{i=1}^{c'}\sum_{l=1}^{m} \alpha^{i,j,l} \cdot \feat'^{i,l}$. Here, $\alpha^{i, j, l}$ represents each element in atom coefficients $\coeff \in \mathbb{R}^{c'\times c\times m}$.
+
+The spatially invariant channel weights, atom coefficients $\coeff$, serve as operators for channel mixing, functioning as distinct combination rules that construct the output features from the elemental feature maps generated by the filter atoms. During the model tuning, $\coeff$ is obtained from the pre-trained model and remains unchanged, while only filter atoms $\atom$ adapt to the target task.
+
+\subsubsection{Summary.} The two-step convolution operation explains different functionalities of filter atoms $\atom$ and atom coefficients $\coeff$, which is, $\atom$ only contribute to spatial convolution and $\coeff$ only perform cross-channel mixing. 
+In practice, the convolution operation is still performed as one layer, without generating intermediate features, to avoid memory cost. In the fine-tuning process, we solely adjust $\atom$, which contains a small set of number of parameters, $k \times k \ll c'\times c$, thereby facilitating parameter-efficient fine-tuning.
+
+\subsection{Overcomplete Filter Atoms}
+The parameters of filter atoms are extremely small compared with overall model parameters. For instance, the filter atoms constitute a mere $0.004\%$ of the total parameters in ResNet50~\cite{he2016deep}. To fully explore the potential of filter subspace fine-tuning, we show next a simple way to construct a set of overcomplete\footnote{
+As the size of filters is $k \times k$, $m=k^2$ independent filter atoms is \emph{complete} since every filter can be linearly combined by these filter atoms. As the number of filter atoms is larger than $k^2$, it becomes \emph{overcomplete}. Overcompleteness can potentially bring a more stable fine-tuning, and in our case, expand the number of parameters for adapting to downstream tasks.
+} filter atoms by recursively applying the above decomposition to each filter atom, to expand the parameter space for fine-tuning as needed.
+
+Specifically, each filter atom $\mathbf{d}_l$ can be further decomposed over $m_{1}$ number of filter atoms in $\atom_{1,l}=\{\mathbf{d}_{1,l}^{j}\}_{j=1}^{m_{1}}$ with its corresponding coefficients $\coeffs^{i} = \begin{bmatrix} \beta^{i,1}, \cdots, \beta^{i,m_{1}}\end{bmatrix} \in \mathbb{R}^{m_{1}}$,
+\textit{i.e.}, $\mathbf{d}_l = \sum_{j=1}^{m_{1}} \beta^{i,j} \mathbf{d}_{1,l}^{j}$. 
+Therefore, $\atom_1 \in \mathbb{R}^{(m\cdot m_1) \times k \times k}$ contains $m\cdot m_1$ filter atoms, leading to a overcomplete set. The recursive decomposition process is illustrated in Figure~\ref{fig:explain_decomposition}~(a).
+
+Considering input $\inp \in \mathbb{R}^{c'\times h' \times w'}$ and output $\feat \in \mathbb{R}^{c\times h \times w}$, convolution using the overcomplete filter atoms can be comprehended as three steps. While the spatial-only convolution with $\atom$ and cross-channel mixing with $\coeff$ steps are the same as before, it linearly combines the features channels corresponding to $m_1$ decomposed filter atoms in \emph{intra-channel mixing} step.
+
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}[b]{.36\textwidth}
+         \centering
+         \includegraphics[trim={60pt 240pt 560pt 60pt}, clip, width=\textwidth]{imgs/2nd_level_decomposition.pdf}
+         \caption{}
+     \end{subfigure}
+     \begin{subfigure}[b]{.57\textwidth}
+         \centering
+         \includegraphics[trim={10pt 100pt 150pt 100pt}, clip, width=\textwidth]{imgs/explain_decomposition_2.pdf}
+         \caption{}
+     \end{subfigure}
+    \caption[formulation of atom decomposition]{
+    (a) The process of constructing overcomplete filter atoms: One filter atom in $\atom$ is presented as a linear combination of $m_1$ filter atoms in $\atom_1$.
+    (b) The convolution operation is represented in three stages: At the spatial-only convolution stage, a set of overcomplete filter atoms $\atom_{1}$ is adapting to the target task and generates $m\cdot m_1$ feature channels by convolving with each input channel. 
+    At the \emph{intra-channel mixing} stage, every group of $m_1$ features is linearly combined by coefficients $\coeffs$ with \emph{no cross-channel mixing}.
+    At the cross-channel mixing stage, $\feat'$ are combined into $\feat$ using fixed atom coefficients $\coeff$, which is obtained from the pre-trained model. 
+    } 
+    \label{fig:explain_decomposition}
+\end{figure*}
+
+\subsubsection{$\bullet$ Intra-channel Mixing with $\coeffs$.} After convolving $\inp$ and $\atom_{1}$ to get $\feat'_{1} \in \mathbb{R}^{(c'\cdot m \times m_1)\times h \times w}$, the intermediate feature map $\feat' \in \mathbb{R}^{(c'\cdot m)\times h \times w}$ is obtained by linearly combining feature channels within the corresponding input channel via coefficients $\coeffs$,
+\begin{equation*}
+    \feat' = \coeffs \times \feat'_{1}.
+\end{equation*}
+
+Each feature channel $\feat^{'i}$ is calculated by $\feat^{'i} = \sum_{j=1}^{m_1} \beta^{i,j} \feat_{1}^{'i, j}$, where $\beta^{i,j}$ is one element in $\coeffs$, and $\feat_{1}^{'i, j} \in \mathbb{R}^{h \times w}$ is one feature channel in $\feat'_{1}$.
+This phase exclusively blends the feature channels within the same input channel, avoiding any mixing across different channels.
+The whole process is illustrated in Figure~\ref{fig:explain_decomposition}~(b). 
+To adapt the model to downstream tasks, we fine-tune both $\coeffs$ and $\atom_1$, which contain more tunable parameters than $\atom$.
+
+\subsection{Decomposition of Linear Layers} 
+\begin{wrapfigure}{r}{0.5\textwidth}
+     \centering
+     \includegraphics[trim={60pt 240pt 380pt 40pt}, clip, width=\linewidth]{imgs/explain_linear_decomposition.pdf}
+    \caption{
+    Formulate the linear layer $\mathbf{W}$ as a combination of atoms, $\mathbf{W} = \coeff_c \times \atom_c$.
+    }
+    \label{fig:recursive_decomposition}
+\end{wrapfigure}
+
+This method can be readily adapted to $1\times 1$ convolutional and linear layers as well.
+We start by applying Kronecker decomposition on a linear layer $\mathbf{W} = \mathbf{A} \otimes \mathbf{B}$, where $\mathbf{A} \in \mathbb{R}^{\frac{c'}{k'_c} \times \frac{c}{k_c}}$, $\mathbf{B} \in \mathbb{R}^{k'_c  \times k_c}$, $\mathbf{W} \in \mathbb{R}^{c'\times c}$, $\otimes$ is the Kronecker product. This approach has been explored by recent literature on fine-tuning~\cite{edalati2022krona, yeh2023navigating}. The idea is to represent a matrix as multiple blocks, where each block comes from the same basis $\mathbf{B}$ but varied by different constant $A_{ij}$.
+We then introduce $m_c$ pairs of $\mathbf{A}$ and $\mathbf{B}$ to reconstruct $\mathbf{W}$, $\mathbf{W} = \sum_{i=1}^{m_c} \mathbf{A}_i \otimes \mathbf{B}_i$, such that each block in $\mathbf{W}$ is represented as a linear combination of all $\mathbf{B}_i$.
+
+We re-write the above formulation as the notation with coefficients and atoms such that $\coeff_c = \{\mathbf{A}_i\}_{i=1}^{m_c}$ and $\atom_c = \{\mathbf{B}_i\}_{i=1}^{m_c}$. Therefore, $\mathbf{W}$ is constructed from $m_c$ atoms in $\atom_c \in \mathbb{R}^{m_c\times k'_c  \times k_c}$ by the combination using coefficients $\coeff_c \in \mathbb{R}^{\frac{c'}{k'_c} \times \frac{c}{k_c} \times m_c}$, which is, $\mathbf{W} = \coeff_c \times \atom_c$. This formulation is mathematically equal to the decomposition filters as filter atoms and atom coefficients. Similarly, the $1\times 1$ convolutional layer $\mathcal{F}_c \in \mathbb{R}^{c'\times c \times 1 \times 1}$ can be formulated as $\coeff_c$ and $\atom_c$ with the same process, 
+\begin{equation}
+    \label{eq:linear}
+    \mathcal{F}_c = \coeff_c \times \atom_c.
+\end{equation}
+The procedure of formulating linear layers as coefficients and atoms is illustrated in Figure~\ref{fig:recursive_decomposition}. 
+During the model tuning, $\coeff_c$ is obtained from the pre-trained model and remains unchanged, while only filter atoms $\atom_c$ adapt to the target task.
+
+
+\subsection{Parameter Efficient Fine-tuning} 
+\label{subsec:schemes}
+Building on our filter subspace formulation, we investigate various parameter-efficient fine-tuning strategies for tuning the pre-trained model. 
+For convolutional filters $\mathcal{F}$, we directly use sparse coding (\ref{eq:sparse_code}) to decompose them as atom coefficients and filter atoms $\coeff \times \atom$. For linear layers or $1\times 1$ convolution layers, we first formulate them as $\mathcal{F}_c$ (\ref{eq:linear}), and then decompose them as coefficients $\coeff_c$ and atoms $\atom_c$ using (\ref{eq:sparse_code}). For fine-tuning the models, we only adapt $\atom$ or $\atom_c$, while keeping $\coeff$ or $\coeff_c$ fixed. 
+
+When more parameters are needed, we represent $\atom$ as $\coeffs$ and $\atom_{1}$ to incorporate overcomplete filter atoms. We initialize $\atom_{1}$ by simply repeating each filter atom in $\atom$ for $m_1$ times and initialize every element in $\coeffs$ with the value $1/m_1$. This enables us to fine-tune both $\coeffs$ and $\atom_{1}$.
+
+In this study, we investigate three strategies that offer a range of tunable parameters from a small set to a slightly larger number: fine-tuning (1) only $\atom$, (2) $\atom$ and $\atom_c$, and (3) $\coeffs$, $\atom_{1}$ and $\atom_c$. Downstream tasks are modeled by their updates $\Delta \atom$, $\Delta \coeffs$, $\Delta \atom_{1}$ and $\Delta \atom_c$.
+
+
+
+\section{Experiments}
+
+In this section, we begin with studying the effectiveness of our method across various configurations to determine the most suitable application scenario for each configuration. 
+Subsequently, we demonstrate that fine-tuning only filter atoms requires far fewer parameters while preserving the capacity of pre-trained models, compared with baseline methods in the contexts of discriminative and generative tasks. 
+\subsection{Experimental Settings}
+\subsubsection{Datasets.} 
+Our experimental evaluations are mainly conducted on the Visual Task Adaptation Benchmark (VTAB)~\cite{zhai2019large}, which contains 19 distinct visual recognition tasks sourced from 16 datasets. As a subset of VTAB, VTAB-1k comprises a mere $1,000$ labeled training examples in each dataset.
+
+\subsubsection{Models.}
+For the validation experiment, we choose ResNet50~\cite{he2016deep} pre-trained on ImageNet-1K. For discriminative tasks, we choose the convolution-based model, ConvNeXt-B~\cite{liu2022convnet} pre-trained on ImageNet-21K as the initialization for fine-tuning. 
+For generative tasks, we choose Stable Diffusion~\cite{rombach2022high} which contains a downsampling-factor 8 autoencoder with an 860M UNet and CLIP ViT-L/14 as text encoder for the diffusion model. The model is pre-trained on the LAION dataset~\cite{schuhmann2022laion}, which contains over 5 billion image-text pairs.
+
+\subsection{Validation Experiments}
+In this section, we study the performance of our approach across various configurations.
+
+\subsubsection{Implementation details.} We employ ResNet50~\cite{he2016deep} pre-trained on ImageNet-1K~\cite{ILSVRC15} and fine-tune it on CIFAR-100~\cite{cifar10} for 50 epochs. We utilize the Adam optimizer~\cite{kingma2014adam} with a learning rate of 0.001 and a weight decay of $1\times 10^{-4}$ and a batch size of 256. 
+
+We compare different configures of our methods with the following experimental settings and $\coeff$, $\coeff_c$ are always fixed: (1) When fine-tuning $\atom$, we experiment with different numbers of filter atoms $m$ in the range of $[6, 9, 12]$. (2) When fine-tuning $\atom$ and $\atom_c$, we choose $(k'_c, k_c) \in \{(2, 2),(4, 4)\}$, and the number of filter atoms is $m=9$. (3) When fine-tuning $\atom_1$ and $\coeffs$, we choose $m=9$, and $m_{1}$ in the range of $[3, 4, 5]$. (4) When fine-tuning $\atom_c$, $\atom_1$ and $\coeffs$, we choose $m=9$, $m_{1}=3$ and $(k'_c, k_c)=(2, 2)$.
+\begin{table}[]
+\caption{Comparison among different configurations of our method.}
+\centering
+\scalebox{0.70}{
+
+    \begin{tabular}{c|ccc|ccc}
+    \toprule
+               &              &      &                 & \multicolumn{3}{c}{Fine-tune $\atom$} \\ \hline
+               & Linear Probe & LoRA & Full Finetuning & $m=6$ & $m=9$  & $m=12$      \\ \midrule
+    Accuracy $\uparrow$  & 55.4       &   78.6   & 83.3            & 66.25       &   66.86    & 68.68  \\ 
+    Param. (M) $\downarrow$ & 0.2        &   2   & 25.6            & \textbf{0.21}        &   \textbf{0.21}   & \textbf{0.21} \\ \bottomrule
+    \toprule
+               &  \multicolumn{3}{c|}{Fine-tune $\coeffs$ and $\atom_1$}  & \multicolumn{2}{c}{Fine-tune $\atom$ and $\atom_c$} & FT $\coeffs$, $\atom_1$ and $\atom_c$  \\ \hline
+               & $m_1=3$ & $m_1=4$  & $m_1=5$ & $k_c=2$ & $k_c=4$ & $m_1=4$, $k_c=4$      \\ \midrule
+    Accuracy $\uparrow$  & 78.69       &   78.7     & 78.9           & 75.03        &   79.83      & \textbf{81.8}  \\ 
+    Param. (M) $\downarrow$ & 0.82        &   1   & 1.2           & 0.23        &   0.62   & 2.1 \\ \bottomrule
+    \end{tabular}
+}
+\label{tab:toy}
+\end{table}
+
+\subsubsection{The effectiveness of filter subspace. 
+(1) While fine-tuning $\atom$ with fixed $\coeff$, our approach requires a negligible increase in the number of parameters, amounting to only $0.5\%$ additional parameters, but it achieves an almost $20\%$ improvement in accuracy when compared to linear probing. 
+(2) Fine-tuning $\coeffs$ and $\atom_{1}$ further improves accuracy from $66.8\%$ to $78.7\%$ compared to fine-tuning $\atom$ alone. It validates that overcomplete filter atoms provide more capacities for model tuning. 
+(3) Fine-tuning $\atom$ and $\atom_c$ results in significant improvements compared to fine-tuning $\atom$ alone. For example, with $k_c=2$, fine-tuning $0.02$M additional parameters improves accuracy from $66.86\%$ to $75.03\%$. 
+(4) Fine-tuning $\atom_c$, $\atom_{1}$, and $\coeffs$ achieves the highest accuracy but it also requires the greatest number of parameters among all of our configurations.
+
+
+\subsubsection{Discussion.}
+Fine-tuning the filter atoms $\atom$ or atoms $\atom_c$ enhances accuracy while keeping the parameter increase minimal, making it highly appropriate for scenarios where the number of parameters is a critical consideration. However, increasing the number of atoms does not easily yield further accuracy improvements. To achieve additional accuracy gains, incorporating the set of overcomplete filter atoms $\atom_1$ and their coefficients $\coeffs$ can be effective, but at the cost of an increase in parameters.
+
+\subsection{Generative Tasks}
+\label{sec:exp_gen}
+In this section, we apply our method to the generative task by evaluating the generative samples from VTAB dataset~\cite{zhai2019large}.
+\subsubsection{Baselines.}
+We compare our method to 6 baseline fine-tuning approaches: (i) Full fine-tuning, which entails updating all model parameters during the fine-tuning process; (ii) LoRA~\cite{hu2021lora}, involving the introduction of a low-rank structure of accumulated gradient update by decomposing it as up-projection and down-projection. (iii) LoHa~\cite{yeh2023navigating} utilizes the Hadamard product across two sets of low-rank decompositions to elevate the rank of the resultant matrix and reduce the approximation error. (iv) LoKr~\cite{yeh2023navigating} introduces the Kronecker product for matrix decomposition to reduce the tunable parameters. (v) BitFit~\cite{zaken2021bitfit} fine-tunes the bias term of each layer. (vi) DiffFit~\cite{xie2023difffit} fine-tunes the bias term, as well as the layer norm and the scale factor of each layer. 
+
+\subsubsection{Implementation details.}
+We fine-tune Stable Diffusion using the AdamW optimizer~\cite{loshchilov2018decoupled} with a learning rate of $5\times 10^{-6}$ for full parameter fine-tuning, and $1\times 10^{-3}$ for all other parameter-efficient fine-tuning methods.
+For few-shot learning, we fine-tune Stable Diffusion to learn the concept ``castle'' from the CustomConcept101 dataset~\cite{kumari2023multi} with the image shape of $512 \times 512$. We follow the method in Yeh \textit{et al.}~\cite{yeh2023navigating} and fine-tune the model for 1000 steps, and evaluate the fidelity, diversity, and text-to-image alignment of generated images. 
+
+We assess the fidelity as the average cosine similarity between DINOv2 embeddings~\cite{oquab2023dinov2} of the generated and dataset images. The diversity of generated images is measured by the Vendi score~\cite{friedman2022vendi} calculated with the DINOv2 embeddings. The alignment between generated images and corresponding prompts is measured via average cosine similarity in the CLIP feature space~\cite{radford2021learning}. 
+
+For the VTAB dataset, we fine-tune $\coeffs$, $\atom_1$, and $\atom_c$ of the model for 5000 steps with the image shape of $256 \times 256$ and utilize Frechet Inception Distance (FID)~\cite{heusel2017gans} as a quantitative metric for evaluation. To calculate FID, we generate 20,000 images from each checkpoint and compare them with images from the corresponding dataset. In cases where the dataset contains more than 20,000 images, we sample 20,000 images for comparison.
+\begin{figure*}[t]
+    \centering
+     \begin{subfigure}[b]{.23\textwidth}
+         \centering
+         \includegraphics[trim={0pt 0pt 0pt 0pt}, clip, width=\textwidth]{imgs/scene_castle6.jpg}
+         \caption{Input Images}
+     \end{subfigure}
+    \hfill
+     \begin{subfigure}[b]{.23\textwidth}
+         \centering
+         \includegraphics[trim={0pt 0pt 0pt 0pt}, clip, width=\textwidth]{imgs/origin6.jpg}
+         \caption{No Fine-tuning}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{.23\textwidth}
+         \centering
+         \includegraphics[trim={0pt 0pt 0pt 0pt}, clip, width=\textwidth]{imgs/bitfit6.jpg}
+         \caption{BitFit~\cite{zaken2021bitfit}}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{.23\textwidth}
+         \centering
+         \includegraphics[trim={0pt 0pt 0pt 0pt}, clip, width=\textwidth]{imgs/dcf6.jpg}
+         \caption{Ours, $\atom$ only}
+     \end{subfigure}
+     \begin{subfigure}[b]{.23\textwidth}
+         \centering
+         \includegraphics[trim={0pt 0pt 0pt 0pt}, clip, width=\textwidth]{imgs/lora6.jpg}
+         \caption{LoRA~\cite{hu2021lora}}
+     \end{subfigure}
+    \hfill
+     \begin{subfigure}[b]{.23\textwidth}
+         \centering
+         \includegraphics[trim={0pt 0pt 0pt 0pt}, clip, width=\textwidth]{imgs/loha6.jpg}
+         \caption{LoHa~\cite{yeh2023navigating}}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{.23\textwidth}
+         \centering
+         \includegraphics[trim={0pt 0pt 0pt 0pt}, clip, width=\textwidth]{imgs/ft6.jpg}
+         \caption{Full Fine-tuning}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{.23\textwidth}
+         \centering
+         \includegraphics[trim={0pt 0pt 0pt 0pt}, clip, width=\textwidth]{imgs/dcf0_b6.jpg}
+         \caption{Ours, $\atom$ and $\coeff$}
+     \end{subfigure}
+     
+    \caption{Fine-tune Stable Diffusion~\cite{rombach2022high} to learn the concept <castle> from (a) and generate images using text prompt: ``A peacock in front of the <castle>''. 
+    (b) Images generated by the pre-trained model, without any fine-tuning, align well with the text prompt but fail to match the target concept. (d) When only fine-tuning the filter atoms $\atom$, our approach achieves good alignment with the text prompt and the target concept. (h) However, fine-tuning the spatially-invariant channel weights, \textit{i.e.}, atom coefficients $\coeff$, results in generated images only align with the target concept, compromising the capability of the pre-trained model of producing diverse images that align with the text prompt.
+    This issue is also observed in (e-g).
+    } 
+    \label{fig:generated_imgs}
+\end{figure*}
+
+\begin{table}[]
+\caption{Evaluate different approaches in learning the concept <castle>.}
+\centering
+\scalebox{0.7}{
+    \begin{tabular}{c|c|cccccc|cccc}
+    \toprule
+                         & \textbf{Pre-trained} & \textbf{Full FT} & \textbf{LoRA}~\cite{hu2021lora}  & \textbf{LoHa}~\cite{yeh2023navigating} & \textbf{LoKr}~\cite{yeh2023navigating}     & \textbf{DiffFit}~\cite{xie2023difffit} & \textbf{BitFit}~\cite{zaken2021bitfit}            & $\mathbf{C}_1$  & $\mathbf{C}_2$ & $\mathbf{C}_3$ & $\mathbf{C}_4$\\ \midrule
+    Fidelity $\uparrow$  & 0.15        & \underline{0.74}    & 0.71  & 0.73 & 0.73 & 0.57    & 0.44              & 0.44 & 0.62 & 0.72 & \textbf{0.77}\\
+    Diversity $\uparrow$ & 32.56       & 4.29             & 4.85  & 3.51             & 4.27             & 10.38   & \underline{16.8}  & \textbf{16.82} & 8.97 & 8.53 & 2.56\\
+    T2I Alignment $\uparrow$& 0.32        &  0.24  & 0.23  & 0.21             & 0.23             & 0.26    & 0.25              & \textbf{0.31} & \underline{0.28} & 0.27 & 0.19\\ \midrule
+    Param. (M) $\downarrow$ & -           & 860           & 22.67 & 8.47             & 1.06             & 0.58    & \underline{0.34}  & \textbf{0.05} & 0.75 & 2.39 & 587\\ \bottomrule
+    \end{tabular}
+}
+\label{tab:few_shot_gene}
+\end{table}
+
+\subsubsection{Few-shot generative transfer learning.}
+We report the evaluation of all methods in Table~\ref{tab:few_shot_gene}. Our method with different configurations is denoted as $C_1 - C_4$. 
+(1) $C_1$ and $C_2$ represent fine-tuning $\atom$ and $\atom_c$ of the model with $(m, k_c) \in \{(6,4), (9, 16)\}$. 
+(2) $C_3$ fine-tunes $\coeffs$, $\atom_1$ and $\atom_c$, with $(m,k_c, m_1)=(9,16,3)$. 
+(3) $C_4$ is similar to $C_2$ but it fine-tunes $\coeff$ together with $\atom$ and $\atom_c$.
+
+Compared with other baseline methods, our method with configuration $C_{1}-C_3$ generate diverse images that are well-aligned with the text prompt. It means they preserve the capability of the pre-trained model while learning the new concept. 
+However, $C_4$ fine-tunes the atom coefficients $\coeff$, resulting in the model overfitting to the target concept, which is reflected in a notably high fidelity score, while compromising the model's ability to generate images aligned with the text prompt. This observation suggests that maintaining the spatially invariant channel weights $\coeff$ helps prevent overfitting when fine-tuning pre-trained models to downstream tasks. The visual examples can be found in Figure~\ref{fig:compare_generated} and~\ref{fig:generated_imgs}. 
+
+Methods like LoRA~\cite{hu2021lora} or full fine-tuning potentially update these $\coeff$, thus, they lead to lower diversity and text-to-image alignment in generated images. 
+In contrast, BitFit~\cite{zaken2021bitfit} and DiffFit~\cite{xie2023difffit} mostly fine-tune the bias, leaving $\coeff$ fixed, thus, they have a higher diversity and text-to-image alignment than LoRA. However, they also keep the spatial operation $\atom$ unchanged, resulting in a lower fidelity score compared with $C_2$. 
+
+
+\begin{table*}[]
+\caption{FIDs (lower the better) of image generation models on VTAB benchmark with Stable Diffusion pre-trained on LAION.}
+\centering
+\scalebox{0.7}{
+\begin{tabular}{c|ccccccc|cccc|ccccc|cc}
+\toprule
+                 & \multicolumn{7}{c|}{\textbf{Natural}}                                    & \multicolumn{4}{c|}{\textbf{Specialized}}                  & \multicolumn{5}{c|}{\textbf{Structured}}                                                                            &      &             \\ \midrule
+                 
+                 & \rotatebox{90}{Caltech101} & \rotatebox{90}{CIFAR100} & \rotatebox{90}{DTD} & \rotatebox{90}{Flowers102} & \rotatebox{90}{Pets} & \rotatebox{90}{SVHN} & \rotatebox{90}{Sun397} 
+                 & \rotatebox{90}{Patch Camelyon} & \rotatebox{90}{EuroSAT} & \rotatebox{90}{Resisc45} & \rotatebox{90}{Retinopathy} 
+                 & \rotatebox{90}{Clevr} & \rotatebox{90}{DMLab} & \rotatebox{90}{KITTI} & \rotatebox{90}{dSprites} & \rotatebox{90}{SmallNORB}
+                 & \rotatebox{90}{Mean} & \rotatebox{90}{Params. (M)} \\ \midrule
+No fine-tuning &      52.0       &  113.3 &   74.5   &     45.5       &    117.1   &  212.2    &    28.8     
+                 &   258.8    &     186.2     &      144.2     &      307.7        
+                 &      271.3           &   225.0     &     288.5   &      373.9         &    266.7          
+                 &    179.1  &    -          \\ \midrule
+Full fine-tuning   &39.0&   \underline{33.8}       &   46  &     42.9      &  32.6    &   \textbf{93.2}   &    \textbf{17.0}    
+                &        107.6        &    144.5     &     \textbf{54.3}     &     69.0       
+                &        \underline{25.8}     &       \textbf{30.3}         &   92.9    &   75.8    &      75.6        
+                &    61.3   &  860  \\ \midrule
+LoRA~\cite{hu2021lora}             &   \underline{36.8}    &    42.4       &   \textbf{40.6}   &   45.3  &    \underline{30.8}    &  120.9    &   17.7      
+                 &        \underline{101.2}         &     81.9     &     61.6      &    69.5          
+                 &   33.6     &    \underline{32.1}   &     \underline{64.4}   &        \textbf{69.4}       &     \underline{71.6}     
+                 &    57.5   &     22.67         \\ 
+LoHa~\cite{yeh2023navigating}             &   \textbf{33.8}    &    40.5       &   \underline{41.6}   &   \underline{41.5}  &    33    &  140.9    &   17.3      
+                 &        111.4         &     73.7     &     \underline{60.4}      &    \underline{66.5}          
+                 &   32.1     &    37.9   &     64.5   &        73.3       &     \textbf{65.7}     
+                 &    58.4   &     33.86         \\ 
+LoKr~\cite{yeh2023navigating}             &   37.7    &    43.5       &   43.2   &   50.6  &    41.1    &  144.2    &   21.4      
+                 &        \textbf{95.4}         &     \underline{70.5}     &     65.5      &    79.3          
+                 &   33.9     &    44.8   &     \textbf{64.1}   &        79.4       &     74.4     
+                 &    61.8   &     2.12         \\ \midrule
+Ours             &     38.6      &    \textbf{32.4}       &   43.9  &   \textbf{38.5}    &   \textbf{30.6}    &   \underline{96.8}   &   \underline{17.2}      
+                 &        109.7        &     \textbf{64.1}     &     62.4      &    \textbf{60.6}          
+                 &   \textbf{18.7}   &     41.9   &    69.5    &       \underline{73.2}       &   76.5      
+                 &  \textbf{54.7}    &    1.11         \\ 
+\bottomrule
+\end{tabular}
+}
+\label{tab:generative_vtab}
+\end{table*}
+
+\subsubsection{Performance comparisons on generative transfer learning.} We report FIDs of models trained and evaluated on VTAB tasks in Table~\ref{tab:generative_vtab}. In contrast to full parameter fine-tuning and LoRA, our approach attains the lowest FID scores ($54.7$ v.s. $57.5$) while employing the least number of fine-tuning parameters ($1.11$M v.s. $22.67$M). Despite fine-tuning only $0.13\%$ of the total model parameters, our method effectively tailors pre-trained Stable Diffusion to align it with the desired target distribution.
+
+
+\subsection{Discriminative Tasks}
+\label{sec:exp_dis}
+In this section, we apply our method to the discriminative task, namely the classification on VTAB-1k~\cite{zhai2019large}.
+We compare our method to 4 baseline fine-tuning approaches: (i) Full fine-tuning, (ii) Linear probing, (iii) BitFit~\cite{zaken2021bitfit}, and (iv) LoRA~\cite{hu2021lora}. 
+
+\subsubsection{Implementation details.}
+Images are resized to $224 \times 224$, following the default settings in VTAB~\cite{zhai2019large}. We employ the AdamW~\cite{loshchilov2018decoupled} optimizer to fine-tune models for 100 epochs. The cosine decay strategy is adopted for the learning rate schedule, and the linear warm-up is used in the first 10 epochs. 
+
+In this experiment, we fine-tune $\atom$ and $\atom_c$ while keeping $\coeff$ and $\coeff_c$ fixed, as this configuration delivers adequate accuracy without increasing parameters.
+
+\begin{table*}[]
+\caption{Performance comparisons on the VTAB-1k benchmark with ConvNeXt models pre-trained on ImageNet-21K.}
+\centering
+\scalebox{0.62}{
+\begin{tabular}{c|ccccccc|cccc|cccccccc|cc}
+\toprule
+                 & \multicolumn{7}{c|}{\textbf{Natural}}                                    & \multicolumn{4}{c|}{\textbf{Specialized}}                  & \multicolumn{8}{c|}{\textbf{Structured}}                                                                            &      &             \\ \midrule
+                 
+                 & \rotatebox{90}{Caltech101} & \rotatebox{90}{CIFAR100} & \rotatebox{90}{DTD} & \rotatebox{90}{Flowers102} & \rotatebox{90}{Pets} & \rotatebox{90}{SVHN} & \rotatebox{90}{Sun397} 
+                 & \rotatebox{90}{Patch Camelyon} & \rotatebox{90}{EuroSAT} & \rotatebox{90}{Resisc45} & \rotatebox{90}{Retinopathy} 
+                 & \rotatebox{90}{Clevr/count} & \rotatebox{90}{Clevr/distance} & \rotatebox{90}{DMLab} & \rotatebox{90}{KITTI} & \rotatebox{90}{dSprites/loc} & \rotatebox{90}{dSprites/ori} & \rotatebox{90}{SmallNORB/azi} & \rotatebox{90}{SmallNORB/ele} 
+                 & \rotatebox{90}{Mean} & \rotatebox{90}{Params. (M)} \\ \midrule
+Full fine-tuning & \textbf{94.9}& 64.2         &  73.6   &     \underline{99.5}       &   90.8   &   \underline{89.6}   &    37.7    
+                 &  \textbf{86.6}   &    85.1     &     \underline{85.9}     &     73.6        
+                 &     \textbf{73.3}        &       61.3         &    \textbf{52.1}   &   \textbf{83.1}    &      86.8        &      \textbf{61.1}        &      \underline{32.7}         &       \textbf{38.8}        
+                 &   \underline{72.14}   &      87.67       \\
+Linear Probing   &     92.3       &    65.8      &   \underline{76.8}  &      99.3      &   92.7   &  50.5    &    55.8   
+                &        84.0        &     92.7    &      82.5    &      \underline{74.7}       
+                &      46.1       &       38.5         &    41.1   &   66.3    &      24.2        &      35.4        &        18.4       &     26.0          
+                &   61.21   &   0.11          \\ \midrule
+BitFit~\cite{zaken2021bitfit} &    94.5      &     \underline{71.6}       &  76.7   &      99.4      &   \underline{93.0}   &   85.7   &   \underline{57.2}     &        \underline{86.4}         &    \underline{94.0}     &     \textbf{86.4}     &      74.3       &      67.8       &       57.2          &   49.8    &   80.5    &       77.7       &      59.1        &       30.4        &         22.0      &   71.77   &      0.24       \\
+LoRA~\cite{hu2021lora}             &      94.3      &     51.7     &  61.4   &     88.1       &   69.8   &   \textbf{91.2}   &    38.1    
+                 &      74.5          &    91.9     &    81.4      &     73.6        
+                 &       60.8      &         \underline{62}       &    \underline{50.3}   &   80.1    &      \textbf{96.3}        &        56.3      &      \textbf{39.3}         &      21.9         
+                 &   67.53   &    17.4         \\ \midrule
+Ours             &     \underline{94.8}       &    \textbf{71.7}      &   \textbf{76.9}  &    \textbf{99.6}        &   \textbf{93.1}   &   87.1   &    \textbf{57.5}    
+                 &    85.1           &    \textbf{94.6}     &    \textbf{86.4}      &     \textbf{74.8}        
+                 &     \underline{70.9}        &       \textbf{62.8}         &    \underline{50.3}   &   \underline{82.7}    &      \underline{89.4}        &        \underline{60.4}      &        31.2       &      \underline{29}         
+                 &    \textbf{73.59}  &     0.45        \\ 
+\bottomrule
+\toprule
+                & \multicolumn{19}{c|}{\textbf{Generalization Error} $\downarrow$} & & \\
+\midrule
+BitFit& 0.29& 1.04& 0.82& 0.062& 0.21& 0.47& 2.52& 0.39& 0.12& 0.38& 0.83& 0.46& 0.61& 1.29& 1.02& 0.34& 0.57& 4.08& 1.99& 0.98& 0.24\\
+LoRA  & 0.23& 1.22& 0.93& 0.028& 0.24& 0.4& 2.53& 0.72& 0.16& 0.41& 2.35& 0.94& 1.09& 1.56& 0.93& 0.25& 1.17& 2.56& 2.39& 1.06& 17.4\\
+Ours  & 0.24& 0.95& 0.96& 0.029& 0.22& 0.43& 2.52& 0.54& 0.14& 0.42& 1.64& 0.5& 1.08& 1.84& 1.01& 0.16& 0.99& 2.37& 2.01& \textbf{0.94}& 0.45\\
+\bottomrule
+    
+\end{tabular}
+}
+\label{tab:discriminative_vtab}
+\end{table*}
+
+\subsubsection{Performance comparisons on few-shot transfer learning.}
+We compare the performance of our approach and other baseline methods, and the results on VTAB-1k are shown in Table~\ref{tab:discriminative_vtab}. In these tables, the bold font shows the best accuracy of all methods and the underlined font shows the second best accuracy. Our method outperforms other parameter-efficient fine-tuning methods and even outperforms full fine-tuning. Specifically, our method obtains $6\%$ improvement in accuracy compared to LoRA on the VTAB-1k benchmark while utilizing significantly fewer trainable parameters ($0.45$M v.s. $17.4$M). 
+
+ 
+Our technique, which employs fixed atom coefficients, leads to a comparatively lower generalization error. It means our tuning method better preserves the generalization ability of the pre-trained model.
+
+
+
+\section{Related Works}
+
+\label{sec:related_works}
+
+\subsection{Pre-training and Fine-tuning}
+The standard practice of pre-training and fine-tuning~\cite{he2016deep, huang2017densely, tan2019efficientnet, xie2017aggregated} entails models initially undergoing pre-training on datasets such as ImageNet-21K, BookCorpus, and Common Crawl~\cite{ILSVRC15, raffel2020exploring, zhu2015aligning}. Subsequently, these models are fine-tuned to enhance their convergence and performance on specific tasks~\cite{he2019rethinking}. 
+
+In the realm of parameter-efficient fine-tuning~\cite{zhou2022learning}, various approaches have been proposed. LoRA~\cite{hu2021lora} fine-tunes lower-rank matrices at each layer to represent weight updates. 
+The adapter~\cite{houlsby2019parameter} approach inserts small modules between layers and reduces parameters by only tuning these adapters~\cite{chen2022adaptformer, karimi2021compacter, li2021prefix, zaken2021bitfit}. 
+Visual prompt tuning (VPT)~\cite{jia2022visual, sohn2023visual} has introduced a limited number of learnable parameters for optimization while keeping the backbone frozen. 
+SSF~\cite{lian2022scaling} proposes scaling and shifting deep features extracted by a pre-trained model.
+\subsection{Model Architectures}
+Compared with transformer-based models~\cite{dosovitskiy2020image, liu2021swin, touvron2021training, yu2022metaformer}, convolution has been used for a long time as the main module to extract the image features in computer vision tasks. With an inductive prior, convolution-based models require fewer training images and computation resources to achieve good generalization. Convolution-based architectures have been largely studied~\cite{he2016deep, liu2022convnet, simonyan2014very} and have found multiple applications, such as feature extracting~\cite{razavi2019generating}, image generation~\cite{karras2020analyzing, song2021maximum}, super-resoluton~\cite{wang2020deep}, and et cetera. Numerous studies explore the integration of convolutional techniques with vision transformers to enhance their performance~\cite{guo2022cmt, raghu2021vision}.
+Parameter-efficient fine-tuning in downstream tasks is crucial and requires further examinations when utilizing pre-trained large-scale convolution-based models.
+\subsection{Discriminative and Generative Tasks}
+Discriminative and generative tasks represent fundamental concepts in machine learning. Discriminative models~\cite{hao2020brief, he2016deep, padilla2020survey, zou2023object} are designed to distinguish between various data instances, while generative models~\cite{karras2020analyzing, razavi2019generating, song2021maximum, wang2020deep} are employed to create new data instances. Discriminative models have been applied to image classifications~\cite{he2016deep, liu2022convnet, simonyan2014very}, object detection~\cite{padilla2020survey, zou2023object}, and semantic segmentation~\cite{hao2020brief}. Generative models have been extensively studied for image synthesis, including variational autoencoder~\cite{kingma2021variational, razavi2019generating, vahdat2020nvae, van2017neural}, diffusion~\cite{dhariwal2021diffusion, rombach2022high, song2021maximum}, and autoregressive models~\cite{parmar2018image, van2016conditional, van2016pixel}. 
+
+In this study, our primary focus is on implementing parameter-efficient fine-tuning techniques for two tasks: image classification using ConvNeXt~\cite{liu2022convnet} and image synthesis employing Stable Diffusion~\cite{rombach2022high}.
+
+
+\section{Conclusion}
+
+
+In this work, we proposed the parameter-efficient fine-tuning method for large convolutional models by formulating the convolutional layers over the filter subspace. 
+Fine-tuning filter atoms composed of a small number of parameters and keeping the atom coefficients unchanged, is notably efficient in terms of parameters. It successfully maintains the capabilities of pre-trained models while avoiding overfitting to downstream tasks.
+We then formulate a simple yet effective way to achieve an overcomplete filter subspace by decomposing each filter atom over another set of filter atoms, thereby expanding the parameter space available for fine-tuning as needed. Our approach has demonstrated effectiveness in different configurations on both discriminate and generative tasks.
+
+\subsubsection{Limitations.} Our method, which concentrates on tuning models within the filter subspace, is particularly advantageous for ConvNets. While it can be naturally extended to linear layers through appropriate mathematical formulations, the full potential of our approach when applied to linear layers remains under-explored. 
+
+
+\clearpage  % TODO REVIEW/FINAL: This \clearpage needs to be removed from both review and camera-ready versions.
+
+
+
+
+
+

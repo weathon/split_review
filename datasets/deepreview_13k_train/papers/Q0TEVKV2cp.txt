@@ -1,0 +1,961 @@
+\title{Debiasing Mini-Batch Quadratics for Applications in Deep Learning}
+
+\begin{abstract}
+Quadratic approximations form a fundamental building block of machine learning
+  methods. E.g., second-order optimizers try to find the Newton step into the minimum of a
+  local quadratic proxy to the objective function; and the second-order approximation of
+  a network's loss function can be used to quantify the uncertainty of its outputs via
+  the Laplace approximation.
+When computations on the entire training set are intractable---typical for deep
+  learning---the relevant quantities are computed on mini-batches. This, however,
+  distorts and biases the shape of the associated \textit{stochastic} quadratic
+  approximations in an intricate way with detrimental effects on applications.
+In this paper, we (i) show that this bias introduces a systematic error, (ii) provide
+  a theoretical explanation for it, (iii) explain its relevance for second-order
+  optimization and uncertainty quantification via the Laplace approximation in deep
+  learning, and (iv) develop and evaluate debiasing strategies.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+
+Quadratic approximations of the loss landscape are increasingly used by algorithms in
+deep learning, from pruning methods \citep{Dong2017LearningPrune,Zeng2019MLPrune} and
+influence functions \citep{Koh2017Understanding} to second-order optimizers
+\citep{Amari1998NaturalGW,martens2010deep,martens2015optimizing,grosse2016kroneckerfactored,botev2017practical,zhang2017blockdiagonal,George2018Fast,martens2018kroneckerfactored,osawa2019large}
+and uncertainty quantification via the Laplace approximation
+\citep{Ritter2018ScalableLaplace,Ritter2018Online,kristiadi2020being,daxberger2021laplace,Immer2021Improving}.
+When the computations are intractable on the entire training set---typical for deep
+learning---the quantities of interest are computed on mini-batches subsampled from the
+training data.
+The goal of this work is to highlight that mini-batching systematically biases the
+shape of a quadratic approximation.
+
+
+\textbf{A systematic bias?} \Cref{fig:visual_abstract} illustrates the phenomenon. It
+shows five \textit{mini-batch} quadratics in their top-curvature 2D subspace for the
+fully trained \allcnnc model on \cifarhun data. For comparison, the full-batch
+quadratic, where all quantities are evaluated on the \textit{entire} training set, is
+projected into the \textit{same} 2D subspace. Within that subspace, the two quadratics
+are quite different: The mini-batch quadratic is much ``narrower'' (exhibits larger
+curvature) than the full-batch version. Given that the full-batch quadratic is the
+``right'' object to serve as the basis for, e.g., a Newton step or a Laplace
+approximation,\footnote{We are \textit{not} concerned with the approximation error
+arising from the quadratic approximation of the non-quadratic function
+$\Lossreg(\emptyarg; \traindata) \approx \quadratic(\emptyarg; \traindata)$ (see
+\cref{eq:fullbatch_quadratic}), but only with the consequences of replacing the
+full-batch quantities by their mini-batch counterparts $\quadratic(\emptyarg;
+\traindata) \approx \quadratic(\emptyarg; \minibatch)$.} the mini-batch version is
+\textit{not} a meaningful surrogate: Its Newton step is overly small and a Laplace
+approximation yields an overconfident uncertainty estimate.
+
+\begin{figure}
+  \centering
+  Top two eigenvectors computed on mini-batch\\[0.25ex]
+  \includegraphics[scale=0.99]{exp07/cifar100_allcnnc_wo_dropout_SGD_epoch_349_batch_0_curv_opt_ggn_damping_0.000e+00_contourf.pdf}
+  \caption{\textbf{A systematic bias?} We compute five mini-batch quadratics
+    $\quadratic(\emptyarg; \minibatch_m)$ with batch size $\vert\minibatch_m\vert = 512$
+    for the loss landscape of the fully trained \allcnnc model on \cifarhun data around
+    $\params_0 \gets \params_\star$ (shown as \colordot{black}).
+Each mini-batch quadratic defines a 2D subspace spanned by the top two eigenvectors
+    $\eigvec_1, \eigvec_2$ of $\hessian_{\minibatch_m}$, in which we evaluate (i) the
+    quadratic $\quadratic(\params_\star + \tau_1 \eigvec_1 + \tau_2 \eigvec_2;
+      \minibatch_m)$ itself (shown in \colorgradientbox{colorbiaseddark}) and (ii) the
+    full-batch quadratic $\quadratic(\params_\star + \tau_1 \eigvec_1 + \tau_2 \eigvec_2;
+      \traindata)$ (shown in \colorgradientbox{colorexactdark}).
+In that subspace, the mini-batch quadratic is much ``narrower'' than the full-batch
+    version which leads to overly small Newton steps and overconfident uncertainty
+    estimates via the Laplace approximation.}
+  \label{fig:visual_abstract}
+\end{figure}
+\textbf{Contributions.}
+To enable stable and efficient stochastic second-order optimizers, as well as reliable
+techniques for uncertainty quantification, we analyze this phenomenon and
+develop strategies to mitigate it.
+More specifically, our contributions are as follows: (i) We study mini-batch quadratics
+empirically and show that their geometry is systematically biased; (ii) we provide an
+explanation for this phenomenon, explaining the bias as an instance of the classic
+regression to the mean (directions of extreme steepness/curvature for one particular
+mini-batch are less extreme for other mini-batches), (iii) we explain the relevance of
+this bias for second-order optimization and uncertainty quantification via the Laplace
+approximation, and (iv) develop and evaluate debiasing strategies.
+ 
+
+
+\section{Notation \& background}
+
+
+\textbf{The regularized loss.}
+We consider a general supervised learning problem, where we try to find the optimal parameters
+$\params_\star = \argmin_{\params \in \R^\numparams} \mathcal{L}_{\text{reg}}(\params,
+  \traindata)$ for the parameterized function $\network_{\params} : \inputspace
+  \rightarrow \outputspace$ by minimizing the regularized loss $\Lossreg$ on $\numtraindata$ training examples $\trainset \defeq \{(\vx_n, \vy_n) \in
+  \inputspace \times \outputspace\}_{n \in \traindata}$,
+\begin{align}
+  \Lossreg(\params; \traindata)
+  \defeq
+  \Loss(\params; \traindata) + \regularizer(\params)
+  \quad \text{with} \quad
+  \Loss(\params; \traindata)
+  \defeq
+  \frac{1}{\vert \traindata \vert}
+  \sum_{n \in \traindata}
+  \loss(\network_{\params}(\vx_n), \vy_n), \quad \traindata = \{1, \ldots,
+  \numtraindata\}.
+  \label{eq:Loss_reg}
+  \raisetag{2ex}
+\end{align}
+The empirical risk $\mathcal{L}$ measures the dissimilarity between the model's
+predictions $\network_{\params}(\vx_n)$ and the true outputs $\vy_n$ via a loss function
+$\loss : \outputspace \times \outputspace \rightarrow \R$. The regularizer $\regularizer
+: \R^P \to \R$, $\regularizer(\params) \defeq \nicefrac{\beta}{2} \,
+\Vert\params\Vert_2^2$ with $\beta \in \R_{\geq 0}$, penalizes the ``complexity'' of the
+model.
+\subsection{Local full-batch \& mini-batch quadratic approximations}
+\label{sec:background_quadratic_approximations}
+\textbf{Full-batch quadratic.}
+A local quadratic approximation of the regularized loss around $\params_0 \in
+  \R^\numparams$ is given by the second-order Taylor expansion
+\begin{equation}
+  \Lossreg(\params; \traindata)
+  \; \approx \;
+  \quadratic(\params; \traindata)
+  \defeq
+  \frac{1}{2} (\params - \params_0)^\top \hessian_\traindata (\params - \params_0)
+  + (\params - \params_0)^\top \grad_\traindata
+  + \const_\traindata,
+  \label{eq:fullbatch_quadratic}
+\end{equation}
+where
+$
+  \const_\traindata
+  \defeq
+  \Lossreg(\params_0; \traindata)
+$,
+$
+  \grad_\traindata
+  \defeq
+  \nabla \Lossreg(\params_0; \traindata)
+$
+and
+$
+  \hessian_\traindata
+  \defeq
+  \nabla^2 \Lossreg(\params_0; \traindata)
+  =
+  \nabla^2 \Loss(\params_0; \traindata) + \beta \mI
+$
+is (some approximation of) the Hessian at $\params_0$ (all derivatives are with respect
+to the parameters $\params$ unless stated otherwise). As all quantities are evaluated on
+the \textit{entire} training set $\traindata$, we refer to this as the
+\textit{full-batch} quadratic. It holds that
+$
+  \nabla \quadratic(\params; \traindata)
+  =
+  \hessian_\traindata (\params - \params_0) + \grad_\traindata
+$
+and
+$
+  \nabla^2 \quadratic(\params; \traindata)
+  \equiv
+  \hessian_\traindata.
+$
+\textbf{Mini-batch quadratic.}
+When the computations are intractable on the entire training set, the quantities in
+\cref{eq:fullbatch_quadratic} are typically computed on a \textit{mini-batch}---a
+small randomly drawn subset---of the training data $\minibatch \subset \traindata,
+\vert\minibatch\vert \ll \numtraindata$, resulting in a \textit{stochastic} quadratic
+approximation $\quadratic(\emptyarg; \minibatch) \approx \quadratic(\emptyarg;
+\traindata)$. As $\const_\minibatch$, $\grad_\minibatch$ and $\hessian_\minibatch$ are
+unbiased estimates of $\const_\traindata$, $\grad_\traindata$ and $\hessian_\traindata$,
+this substitution may seem innocent, but, as we will see in
+\cref{sec:geometry_minibatch_quadratic}, it affects the geometry of the quadratic
+approximation \textit{substantially}.
+
+\textbf{Directional slope and curvature.} Consider a cut $r$ through the quadratic
+$\quadratic(\emptyarg; \minibatch)$ from $\params_\bullet \in \R^\numparams$ along the
+normalized direction $\vd$, $\Vert\vd\Vert = 1$. It holds that (derivation in
+\cref{sec:details_directional_derivatives})
+$
+  r(\tau)
+  \defeq
+  \quadratic(\params_\bullet + \tau \vd; \minibatch)
+  =
+  \nicefrac{1}{2} \tau^2
+  \vd^\top \nabla^2 \quadratic(\params_\bullet; \minibatch) \, \vd
+  + \tau
+  \vd^\top \nabla \quadratic(\params_\bullet; \minibatch)
+  + \text{const}.
+$
+So, as a function of $\tau$, $r : \R \to \R$ is a 1D parabola with derivatives
+$
+  r'(\tau)
+  = \tau \, \vd^\top \nabla^2 \quadratic(\params_\bullet; \minibatch) \, \vd
+  + \vd^\top \nabla \quadratic(\params_\bullet; \minibatch)
+$ and
+$
+  r''(\tau) \equiv \vd^\top \nabla^2 \quadratic(\params_\bullet; \minibatch) \, \vd.
+$
+We denote the \textit{directional} slope and curvature of the quadratic
+$\quadratic(\emptyarg, \minibatch)$ at $\params_\bullet$ in direction $\vd$ by
+\begin{equation*}
+  \dslope{\vd} \, \quadratic(\params_\bullet; \minibatch)
+  \defeq r'(0) = \vd^\top \nabla \quadratic(\params_\bullet; \minibatch)
+\quad \text{and} \quad
+\dcurv{\vd} \, \quadratic(\params_\bullet; \minibatch)
+  \defeq r''(0) = \vd^\top \nabla^2 \quadratic(\params_\bullet; \minibatch) \, \vd.
+\end{equation*}
+The directional slope and curvature at $\params_\bullet$ are thus simply the projections
+of the quadratic's gradient 
+and Hessian
+at that location onto the direction.
+\textbf{Eigenvalues as directional curvatures.} The directional curvature of
+the quadratic $\quadratic(\emptyarg; \minibatch)$ along one of $\hessian_\minibatch$'s
+normalized eigenvectors $\eigvec$ coincides with the corresponding eigenvalue $\eigval$ since
+$
+  \dcurv{\eigvec}\, \quadratic(\params_\bullet; \minibatch)
+  = \eigvec^\top \nabla^2 \quadratic(\params_\bullet; \minibatch) \, \eigvec
+  = \eigvec^\top \hessian_\minibatch \, \eigvec
+  = \eigval \Vert\eigvec\Vert^2
+  = \eigval.
+$
+Thus, in the context of a quadratic, an
+eigenvalue of the Hessian $\hessian_\minibatch$ has a geometric interpretation as the directional curvature
+along the respective eigenvector.
+
+\textbf{GGN \& FIM.} Next, we discuss second-order optimization methods and the Laplace
+approximation (LA) for neural networks. Both techniques rely on local quadratic
+approximations of the regularized loss function and require a \textit{positive definite}
+curvature matrix $\hessian_\minibatch$. The empirical risk's Hessian $\nabla^2
+\Loss(\params_0; \minibatch)$ can be \textit{indefinite} and is therefore typically
+replaced by (an approximation of) the positive semi-definite Generalized Gauss-Newton
+matrix (GGN) $\GGN_{\minibatch}$ or Fisher information matrix (FIM) $\mF_{\minibatch}$.
+In fact, GGN and FIM are often identical \citep[Sec.~9.2]{martens2020new}. The resulting
+$\hessian_\minibatch$ is positive definite if $\beta > 0$, or when a damping term
+$\delta \mI$, $\delta \in \R_{> 0}$ is added (\eg,~in trust-region methods).
+
+\subsection{Second-order methods \& conjugate gradients}
+\label{sec:background_second_order_methods}
+\textbf{The Newton step.} Due to the simple polynomial form of the quadratic
+$\quadratic(\emptyarg; \minibatch)$, its minimum can be derived in closed form and is
+given by the Newton step
+$
+  \argmin_{\params} \quadratic(\params; \minibatch)
+  =
+  \params_0 - \hessian_\minibatch^{-1} \grad_\minibatch.
+$ This serves as the basis for second-order optimizers like \lbfgs
+\citep{liu1989onthe,nocedal1980updating}, the Hessian-free approach
+\citep{martens2010deep} or \kfac (Kronecker-factored approximate curvature)
+\citep{martens2015optimizing,grosse2016kroneckerfactored,martens2018kroneckerfactored}.
+
+
+\textbf{Conjugate gradients.} We focus on the method of conjugate gradients (\cg)
+\citep{Hestenes1952}, as it is a powerful method specifically designed to minimize
+quadratics with positive definite Hessians effectively (details in
+\cref{sec:details_cg}). It is particularly useful in the context of large-scale
+optimization because it only requires access to matrix-vector products with the
+curvature matrix
+$
+  \vv
+  \mapsto
+  \hessian_\minibatch \, \vv
+$
+that can be computed in a matrix-free manner
+\citep{pearlmutter1994fast,schraudolph2002fast}, \ie without ever materializing the full
+matrix in memory---and it has been used successfully for training neural networks
+\citep{martens2010deep}.
+Starting at $\params_0$, \cg creates a sequence of iterates $(\params_0, \ldots,
+  \params_\numparams)$. In each iteration $p$, two main steps are performed: (i) Given the
+current position $\params_p$ and a normalized search direction $\vd_p$, the algorithm
+finds the minimum of the quadratic along $\params_p + \tau \vd_p$, \ie
+\begin{equation}
+  \params_{p+1} = \params_p + \tau_p \vd_p
+  \quad \text{with} \quad
+  \tau_p
+  \defeq
+  \argmin_{\tau \in \R} \quadratic(\params_p + \tau \vd_p; \minibatch)
+  =
+  -\frac{
+    \dslope{\vd_p} \quadratic(\params_p; \minibatch)
+  }{
+    \dcurv{\vd_p} \quadratic(\params_p; \minibatch)
+  }.
+  \label{eq:cg_update_with_magnitude}
+\end{equation}
+In the second step (ii), \cg constructs the next search direction $\vd_{p+1}$ such that
+it is \textit{conjugate} to all previous search directions, \ie $\vd_{p+1}^\top
+  \hessian_\minibatch \, \vd_i = 0$ for all $i \in \{1, \dots, p\}$.
+
+\subsection{Laplace approximation for neural networks}
+\label{sec:laplace_approximation}
+\textbf{Laplace approximation.} The Laplace approximation (LA) turns a trained standard
+neural network into a Bayesian neural network in a post-hoc manner
+\citep{MacKay1991BayesianModel,Ritter2018ScalableLaplace,kristiadi2020being,daxberger2021laplace}
+(details in \cref{sec:details_laplace_approximation}). The idea is to reinterpret the
+regularized loss $\Lossreg$ as the negative unnormalized log posterior $\log p(\params
+  \mid \trainset)$ of a specific Bayesian model.
+This interpretation identifies the optimal parameters
+$
+  \paramsmap
+  =
+  \argmin_{\params} \Lossreg(\params; \traindata)
+  =
+  \argmax_{\params} p(\params \mid \trainset)
+$
+as the mode of the posterior, \ie as the maximum a posteriori (MAP) estimate. A
+second-order approximation of the regularized loss around $\params_0 \gets \paramsmap$
+then translates into a Gaussian approximation of the posterior---the so-called Laplace
+approximation \citep{MacKay1992EvidenceFramework}, \ie
+\begin{equation}
+  \Lossreg(\params; \traindata)
+  \approx
+  \quadratic(\params; \traindata)
+  =
+  \frac{1}{2} (\params - \paramsmap)^\top \hessian_\traindata (\params - \paramsmap) +\text{const.}
+  \quad \leadsto \quad
+  p(\params \mid \trainset)
+  \approx
+  \gaussianpdf{\params}{\paramsmap}{\mSigma_\traindata},
+  \label{eq:full_batch_quadratic_to_gaussian}
+\end{equation}
+with $\mSigma_\traindata \defeq \numtraindata^{-1} \hessian_\traindata^{-1}$ (or an
+approximation thereof). 
+We obtain the predictive uncertainty $p(\vy_\testsymbol \mid \vx_\testsymbol,
+\trainset)$ for some test input $\vx_\testsymbol \in \inputspace$ by propagating the
+parameter uncertainty $\gaussian{\paramsmap}{\mSigma_\traindata}$ to the model's outputs
+via the linearized network \citep{Immer2021Improving,roy2024reparameterization}.
+\textbf{Full-batch vs. mini-batch LA.} It is common practice to compute the LA on the
+\textit{entire} training set. Depending on the curvature approximation, this comes at
+considerable computational costs. For example, a full-batch LA is prohibitive even for
+moderately sized models/\datasets when a low-rank approximation of the Hessian is
+computed via repeated Hessian-vector products (each of which requires a full pass over
+the training data); and it is essentially infeasible for model classes like LLMs, which
+are trained on massive datasets. However, what adds most to the costs is that it is
+standard to \textit{tune} the prior precision \citep{daxberger2021laplace}. This adds
+another outer loop that requires the same procedure to be performed multiple times.
+Being able to emulate the behavior of the full-batch quadratic on a mini-batch would
+thus be useful. We therefore study the mini-batch setting, \ie we replace
+$\quadratic(\emptyarg; \traindata)$ by $\quadratic(\emptyarg; \minibatch)$ in
+\cref{eq:full_batch_quadratic_to_gaussian}. We will see in \cref{sec:exp_LA} that, when
+mitigating the associated biases, a mini-batch LA can be a good proxy for the full-batch
+LA.
+ 
+
+
+\section{The shape of a mini-batch quadratic}
+
+\label{sec:geometry_minibatch_quadratic}
+This section studies the ``shape'' of a mini-batch quadratic $\quadratic(\emptyarg;
+\!\minibatch)$ and how it differs from $\quadratic(\emptyarg;\!\traindata)$.
+
+\subsection{Empirical study of the directional slopes and curvatures}
+\label{sec:empirical_study_dd}
+\textbf{The high-curvature subspace is relevant for all common use cases.} In our
+empirical study, we focus on the \textit{top}-curvature subspace. This subspace is
+particularly relevant for several reasons: 
+\begin{enumerate}
+  \item By the Eckart-Young-Mirsky Theorem, a truncated \svd is Frobenius norm-optimal,
+        \ie a low-rank approximation using the top eigenvectors is ideal from a
+        theoretical perspective. As the spectrum of the Hessian typically decays quickly
+        \citep{ghorbani2019investigation}, the bulk of the curvature information is
+        contained in the top-curvature subspace.
+  \item In the context of optimization, it has been observed that the gradient mainly
+        lives in the high-curvature space \citep{GurAri2018Gradient, dangel2022vivit}.
+        Thus, it makes sense for a second-order method to operate mainly in that space,
+        as steps outside of it can not be expected to reduce the objective function
+        significantly. 
+  \item In the context of the LA, directions of large curvature correspond to directions
+        in the weight space with \textit{low} variance, \ie these directions capture
+        what we \textit{know} about the model's parameters. Consequently,
+        \citet[p.~19]{daxberger2021laplace} describe a low-rank approximation of the
+        Hessian based on its top eigenvectors.
+\end{enumerate}
+
+\textbf{Experimental procedure.} We use the same setting as in
+\cref{fig:visual_abstract}: The fully trained \allcnnc model on the \cifarhun dataset.
+To isolate the effect of data subsampling, we eliminate \textit{all other} sources of
+noise. Thus, we remove the dropout layers from the model. We use the cross-entropy loss,
+an $\normltwo$-regularizer, and train the model with \sgd for $350$ epochs, see
+\cref{sec:exp_details_training} for details.
+
+We then pick a mini-batch $\minibatch_m$ of size $512$ and compute the $100$
+eigenvectors $\eigvec_1, \ldots, \eigvec_{100}$ to the $100$ \textit{largest}
+eigenvalues of $\Hessian_{\minibatch_m} \gets \GGN_{\minibatch_m} + \beta \mI$. That is
+the Hessian of the $\normltwo$-regularized mini-batch loss, where we replaced $\nabla^2
+\Loss(\params_\star; \minibatch_m)$ with the GGN approximation. Next, we compute the
+directional slopes and curvatures for \textit{all} mini-batch quadratics
+$\quadratic(\emptyarg; \minibatch_{m'})$, $m' \in \{1, \dots, \numminibatches\}$ along
+those $100$ eigenvectors. For a fixed eigenvector $\eigvec_p$, the \textit{average} of
+those directional slopes/curvatures over \textit{all} mini-batches coincides with the
+directional slope/curvature of the full-batch quadratic,
+\ie
+\begin{equation}
+  \frac{1}{\numminibatches} \sum_{m'=1}^\numminibatches
+  \underbracket[0.14ex]{
+    \dslope{\eigvec_p} \quadratic(\params_\star; \minibatch_{m'})
+  }_{\text{one~} \colordot{colorbiased} \text{~and many~} \colordot{colorunbiased}}
+  =
+  \underbracket[0.14ex]{
+    \dslope{\eigvec_p} \quadratic(\params_\star; \traindata)
+  }_{\text{\colorcross{colorexact}}}
+\quad \text{and} \quad
+\frac{1}{\numminibatches} \sum_{m'=1}^\numminibatches
+  \underbracket[0.14ex]{
+    \dcurv{\eigvec_p} \quadratic(\params_\star; \minibatch_{m'})
+  }_{\text{one~} \colordot{colorbiased} \text{~and many~} \colordot{colorunbiased}}
+  =
+  \underbracket[0.14ex]{
+    \dcurv{\eigvec_p} \quadratic(\params_\star; \traindata)
+  }_{\text{\colorcross{colorexact}}}\!,
+  \label{eq:average_directional_slopes_curvatures}
+\end{equation}
+derivation in in \cref{sec:details_directional_derivatives}. The colored markers in
+\cref{eq:average_directional_slopes_curvatures} refer to 
+\cref{fig:bias}. We repeat this procedure for three mini-batches $\minibatch_m$, $m \in
+  \{0, 1, 2\}$.
+\begin{figure}
+  \centering
+  Eigenvectors computed on mini-batch\\[0.25ex]
+  \includegraphics[width=0.99\textwidth]{exp09_dd1_and_dd2/cifar100_allcnnc_wo_dropout_SGD_curv_opt_ggn_batch_size_512_direction_opt_eigvecs_dtype_torch.float32_ylog.pdf}
+  \caption{\textbf{Directional slopes and curvatures are biased.}
+We use the \cifarhun dataset with the fully trained \allcnnc model and draw three
+    mini-batches $\minibatch_m$ of size $\vert\minibatch_m\vert = 512$ to compute the
+    top $100$ eigenvectors $\eigvec_1, \ldots, \eigvec_{100}$.
+For each mini-batch/column, we show the directional slopes \figtop and curvatures
+    \figbottom evaluated on (i) $\quadratic(\params_\star; \minibatch_{m})$ (\ie on the
+    \textit{same} mini-batch of data) as \colordot{colorbiased}, (ii)
+    $\quadratic(\params_\star; \minibatch_{m'})$ for $m' \neq m$ (\ie for all
+    \textit{other} mini-batches) as \colordot{colorunbiased} and (iii) the full-batch
+    quadratic (the average of the orange and all blue dots, see
+    \cref{eq:average_directional_slopes_curvatures}) as \colorcross{colorexact}.
+For the top panel, we switch the order and sign of the eigenvectors such that the
+    orange dots are all above zero and in descending order.
+There is a strong, systematic bias, particularly in the curvature: Computing the
+    eigenvectors and directional curvatures on the same data results in over-estimation
+    by roughly one order of magnitude. }
+  \label{fig:bias}
+\end{figure}
+\textbf{Directional slopes and curvatures are biased.} \cref{fig:bias} reveals a
+systematic bias in the directional slopes and, more pronounced, in the directional
+curvatures: When eigenvectors and directional derivatives are computed on the
+\textit{same} mini-batch, curvature is overestimated by roughly one order of magnitude
+compared to the curvature of the full-batch quadratic $\quadratic(\emptyarg;
+\traindata)$. Within the space that actually carries curvature information---the
+top-eigenspace of the quadratic's Hessian---the curvature magnitude is thus not at all
+representative of the true underlying loss landscape. For \textit{other} mini-batches,
+the directional slopes and curvatures are similar to the full-batch quadratic. This is
+because the averages in \cref{eq:average_directional_slopes_curvatures} are dominated by
+these unbiased samples.
+
+We present additional results for batch size $2048$ (instead of $512$), the Hessian
+$\nabla^2 \Loss(\params_\star; \minibatch_m)$ (instead of its GGN approximation) and \cg
+search directions (instead of eigenvectors) in \cref{sec:exp_details_biases}. The bias
+is present in \textit{all} settings, but less pronounced for larger batch sizes. For the
+\cg search directions, the bias in directional slope is much more distinct than for the
+eigenvectors: The biased slope is always negative, while the full-batch quadratic's
+slope is in fact positive for most \cg directions!
+
+\subsection{Where do the biases come from?}
+\label{sec:biases_theory}
+In the following, we provide an explanation for the biases in the directional slopes and
+curvatures (\ie the gap between the orange and a blue dot in \cref{fig:bias}) from a
+theoretical perspective.
+\subsubsection{Bias in the directional slope}
+Here, we focus on the \cg search directions since the bias in the directional slope is
+even more pronounced for those directions than for the eigenvectors. This is not
+accidental! The \cg directions are constructed from gradients---and gradients are
+directions that \textit{maximize} the steepness \colordot{colorbiased} for one
+particular mini-batch quadratic. For \textit{other} mini-batch quadratics, the steepness
+along those directions (\ie the directional slope \colordot{colorunbiased}) is therefore
+\textit{less} extreme. We formalize this intuition in \cref{sec:details_bias_slope}.
+\subsubsection{Bias in the directional curvature}
+Next, we consider the bias in the directional curvature along the eigenvectors of the
+curvature matrix. 
+
+\textbf{Directional curvature along $\hessian_\minibatch$'s eigenvectors.}
+Let $\eigvec_1, \ldots, \eigvec_{\numparams}$ and $\tilde{\eigvec}_1, \ldots,
+\tilde{\eigvec}_{\numparams}$ denote the eigenvectors of two mini-batch Hessians
+$\hessian_\minibatch$ and $\hessian_{\otherminibatch}$, respectively. Assume that the
+corresponding eigenvalues are in descending order, \ie $\eigval_1 \geq \ldots \geq
+\eigval_{\numparams}$ and $\tilde{\eigval}_1 \geq \ldots \geq
+\tilde{\eigval}_{\numparams}$. We can write the directional curvatures on $\minibatch$
+and $\otherminibatch$ along an eigenvector $\eigvec_i$ as (details in
+\cref{sec:details_bias_curvature})
+\begin{equation}
+  \underbracket[0.14ex]{
+    \dcurv{\eigvec_i} \quadratic(\params_\bullet; \otherminibatch)
+  }_{\colordot{colorunbiased}}
+  =
+  \eigvec_i^\top \hessian_{\otherminibatch} \eigvec_i
+  =
+  \sum_{p=1}^\numparams
+  \tilde{\eigval}_p \, \mOmega_{i, p},
+\quad \text{and} \quad
+\underbracket[0.14ex]{
+    \dcurv{\eigvec_i} \quadratic(\params_\bullet; \minibatch)
+  }_{\colordot{colorbiased}}
+  =
+  \eigvec_i^\top \hessian_{\minibatch} \eigvec_i
+  =
+  \eigval_i.
+  \label{eq:bias_curvature_eigvecs}
+\end{equation}
+The weights $\{\mOmega_{i, p} \defeq (\eigvec_i^\top
+  \tilde{\eigvec}_p)^2\}_{p=1}^\numparams$ are non-negative and sum to one, \ie
+  $\sum_{p=1}^\numparams \mOmega_{i, p} = 1$. The bias in the directional curvature thus
+  originates from misalignment of the eigenspaces of the two curvature
+  matrices---captured by the weights $\mOmega_{i, p}$---and/or a systematic difference
+  in their spectra.
+
+\textbf{Curvature bias is not due to differing spectra\dots} Assume that the eigenspaces
+are perfectly aligned, \ie $\mOmega_{i, i} = 1$ and $\mOmega_{i, p} = 0 \; \forall p
+\neq i$. In this case, we obtain $\dcurv{\eigvec_i} \quadratic(\params_\bullet;
+\otherminibatch) = \tilde{\eigval}_i$ from \cref{eq:bias_curvature_eigvecs}, so the bias
+originates \textit{exclusively} from the differences in the spectra. \Cref{fig:bias}
+shows the eigenvalues (as directional curvatures) for three different \cifarhun
+mini-batches. As they are very similar, this cannot serve as the main explanation for
+the curvature bias.
+\textbf{\dots but due to misaligned eigenspaces.} Now, assume that the spectra of
+$\hessian_\minibatch$ and $\hessian_{\otherminibatch}$ are identical, \ie $\eigval_p =
+\tilde{\eigval}_p \, \forall p \in \{1, \ldots, \numparams\}$ which simplifies the
+unbiased estimate in \cref{eq:bias_curvature_eigvecs} to
+$
+  \dcurv{\eigvec_i} \quadratic(\params_\bullet; \otherminibatch)
+  =
+  \sum_{p=1}^\numparams \eigval_p \, \mOmega_{i, p}
+$.
+Consider the curvature along $\eigvec_1$ as an example. If $\eigvec_1 =
+\tilde{\eigvec}_1$, there is only one non-zero weight $\mOmega_{1, 1} = 1$ and the two
+directional curvatures are identical. However, if there is significant overlap with any
+other eigenvectors (\ie some weight is distributed also on the \textit{lower}-curvature
+directions), the resulting curvature $\dcurv{\eigvec_1} \quadratic(\params_\bullet;
+\otherminibatch)$ is \textit{smaller} than $\dcurv{\eigvec_1}
+\quadratic(\params_\bullet; \minibatch)$.
+Analogously, for $\eigvec_\numparams$, the directional curvature on $\otherminibatch$ is
+\textit{larger} than on $\minibatch$ if there is significant overlap between
+$\eigvec_\numparams$ and some of $\hessian_{\otherminibatch}$'s
+\textit{higher}-curvature eigenvectors.
+This can be formalized by the following inequalities (derivation in \cref{sec:details_bias_curvature}):
+\begin{equation}
+  \underbracket[0.14ex]{
+    \dcurv{\eigvec_1} \quadratic(\params_\bullet; \otherminibatch)
+  }_{\colordot{colorunbiased}}
+  \leq
+  \underbracket[0.14ex]{
+    \dcurv{\eigvec_1} \quadratic(\params_\bullet; \minibatch)
+  }_{\colordot{colorbiased}}
+\quad \text{and} \quad
+\underbracket[0.14ex]{
+    \dcurv{\eigvec_\numparams} \quadratic(\params_\bullet; \otherminibatch)
+  }_{\colordot{colorunbiased}}
+  \geq
+  \underbracket[0.14ex]{
+    \dcurv{\eigvec_\numparams} \quadratic(\params_\bullet; \minibatch)
+  }_{\colordot{colorbiased}}\!.
+  \label{eq:bias_curvature_u1_uP}
+\end{equation}
+In general, if the eigenspaces are not perfectly aligned such that weight is distributed
+on several eigenvectors, this leads to \textit{less extreme} directional curvatures on
+mini-batch $\otherminibatch$ on \textit{both} ends of the spectrum.
+\Cref{fig:overlaps} shows the weights $\mOmega_{i, p}$ as pixels. The overlap between
+the eigenspaces is far from perfect, \ie one eigenvector from $\minibatch$ overlaps with
+several eigenvectors from $\otherminibatch$ to some extent.
+This explains the curvature overestimation in the top curvature subspace we observe in
+\cref{fig:bias} and identifies the misalignment of the eigenspaces as the dominating
+factor for the curvature bias.
+
+\subsubsection{Summary of the theoretical findings}
+The \cg search directions and the eigenvectors of the curvature matrix are both
+\textit{designed} to be ``extreme'' in some sense: The \cg directions are based on
+gradients that maximize steepness of the quadratic $\quadratic(\emptyarg; \minibatch)$,
+while the top/bottom eigenvectors subsume directions of largest/smallest curvature.
+However, these directions are extreme only for one particular mini-batch $\minibatch$.
+Another mini-batch $\otherminibatch$ has its own extreme directions that typically
+differ from those of $\minibatch$. Thus, \textbf{the extreme directions for
+  $\minibatch$ are less extreme for $\otherminibatch$}.
+Projecting both quadratics onto $\minibatch$'s directions consequently leads to extreme
+steepness and curvatures for $\minibatch$, but less extreme values for
+$\otherminibatch$.
+This result is an instance of the classic \textbf{regression to the mean}
+\citep{galton1886regression}: Using an algorithm to find the directions of most extreme
+steepness/curvature in one particular mini-batch, we must expect the steepness/curvature
+to be \textit{less} extreme on most \textit{other} batches (and thus also on the entire
+dataset). We can expect this phenomenon to occur for other \datasets, models, and curvature
+proxies as well, since the underlying mechanism is the stochasticity of the geometric
+information.
+
+\begin{figure}[tb!]
+  \begin{minipage}[t]{0.485\textwidth}
+    \centering
+    \caption{\textbf{In practice, eigenspaces are misaligned.}
+We reuse the setting of \cref{fig:bias} and compute the top $100$
+    eigenvectors $\eigvecs_m \! \in \R^{\numparams \times 100}$ for
+    $\{\minibatch_m\}_{m \in \{0, 1, 2\}}$.
+The weights $\mOmega_{i, j}$ are shown as a $100 \times 100$ greyscale image (color
+    ranges from black for $\mOmega_{i, j} \leq 10^{-8}$ to white for $\mOmega_{i, j} =
+      1$) for $m \in \{0, 1\}$, $m' \in \{0, 1, 2\}$.
+Clearly, the eigenspaces for different mini-batches are not perfectly aligned as
+    eigenvectors from $\minibatch_m$ overlap with several eigenvectors from
+    $\minibatch_{m'}$.}
+    \label{fig:overlaps}
+  \end{minipage}
+  \hfill
+  \begin{minipage}[t]{0.485\textwidth}
+    \centering
+    \caption{\textbf{\cg update magnitudes are biased.}
+Same setting as \cref{fig:bias_ggn_512} \figbottom. We run \cg on
+    $\{\minibatch_m\}_{m \in \{0, 1, 2\}}$ and show the directional update magnitudes
+    $\tau_1, \ldots, \tau_{10}$ for the first $10$ \cg steps using (i) the same
+    mini-batch $\minibatch_m$ (as \colordot{colorbiased}), (ii) all other mini-batches
+    (as \colordot{colorunbiased}) and (iii) the entire training set (as
+    \colorcross{colorexact}).
+The magnitudes are given by the negative ratio of the directional slope and
+    curvature (see \cref{eq:cg_update_with_magnitude}) and thus inherit the attached
+    biases.
+Note that most of the update magnitudes that are based on a single mini-batch of
+    data (\colordot{colorbiased}) have the wrong sign resulting in detrimental updates
+    in the wrong direction.}
+    \label{fig:cg_magnitudes}
+  \end{minipage}
+\end{figure}
+ 
+
+
+\section{Debiasing mini-batch quadratics for applications}
+
+
+
+We here argue that the biases affect second-order applications, and
+develop debiasing strategies.
+
+\subsection{Implications for second-order optimization and the Laplace approximation}
+\label{sec:implications_for_applications}
+\textbf{Detrimental updates in second-order optimizers.}
+In the context of second-order optimization, both the biases in the directional slopes
+and curvatures are relevant. From \cref{eq:cg_update_with_magnitude}, the \cg{} update
+magnitude $\tau_p$ to reach the minimum of $\quadratic(\params_p + \tau \vd_p;
+\minibatch_m)$ is given by the negative ratio of the directional slope and curvature at
+the current iterate $\params_p$ in the direction $\vd_p$---that is the 1D Newton step
+along that cut.\footnote{The exact same argument can also be made for the eigenvector
+directions as the Newton step can be decomposed into 1D Newton steps along the
+eigenvectors.} As both these quantities are biased, so is $\tau_p$ as shown in
+\cref{fig:cg_magnitudes}: While the update magnitudes for $\minibatch_m$ are
+\textit{always positive} (a property of \cg), minimizing the other---\textit{equally
+valid}---quadratics would require \textit{negative} update magnitudes for most of the
+\cg directions. In this sense, naive \cg on a single mini-batch of data makes updates in
+the wrong direction. This can be attributed to the bias in the directional slope since
+the slope determines the sign of $\tau_p$. Overestimation of the directional curvature
+is ``accidentally beneficial'' in this case as it leads to smaller steps.
+\textbf{Unreliable uncertainty quantification with the Laplace approximation.}
+For the LA, only the bias in the directional curvature is relevant. After
+\cref{sec:laplace_approximation}, the approximate posterior covariance over the
+network's parameters is given by $\mSigma_\minibatch = \numtraindata^{-1}
+\hessian_\minibatch^{-1}$. Via the eigendecomposition $\hessian_\minibatch =
+\sum_{p=1}^\numparams \eigval_p \eigvec_p \eigvec_p^\top$, we obtain $\mSigma_\minibatch
+= \numtraindata^{-1} \sum_{p=1}^\numparams \eigval_p^{-1} \eigvec_p \eigvec_p^\top$. Due
+to the biases we describe in \cref{sec:geometry_minibatch_quadratic}, the directional
+curvatures $\eigval_p$ are not representative of the true underlying curvature,
+resulting in a \textit{deformed} posterior covariance $\mSigma_\minibatch$.
+Specifically, the overestimation of the curvature in the top-curvature subspace
+translates into an \textit{underestimation} of the uncertainty in the posterior
+covariance (due to the inversion) with potentially severe consequences in
+safety-critical applications.
+\subsection{Debiasing strategies}
+\label{sec:debiasing_strategies}
+We now turn to strategies that mitigate the biases in second-order optimization and the
+LA. An empirical evaluation of these methods follows in \cref{sec:exp_cg,sec:exp_LA}.
+
+\textbf{Decoupling directions from magnitudes with a two-batch strategy.} The approaches
+we propose are simple yet effective. The idea is to commit to the imperfect directions
+from one mini-batch (as before) but use an \textit{additional} mini-batch to estimate
+the directional derivatives. With this, we \textit{decouple} the mechanism that
+determines the parameter subspace in which the method operates from the slope and
+curvature measurements within the space. Effectively, we use the blue dots from
+\cref{fig:bias,fig:cg_magnitudes} instead of the orange dots and thus obtain much more
+realistic estimates of the actual loss function's geometry (within the subspace defined
+by the first mini-batch). Next, we describe in more detail how this strategy can be
+applied to debias \cg and the LA.
+
+\subsubsection{Debiased conjugate gradients}
+\label{sec:debiased_cg}
+\textbf{Debiased approach.} For the debiased \cg method, we need to implement two
+processes: (i) The first process applies $\rankbound \leq \numparams$ \cg iterations to
+the mini-batch quadratic $\quadratic(\emptyarg; \minibatch)$ and collects the search
+directions $(\vd_1, \ldots, \vd_\rankbound)$. As before, this defines the subspace in
+which \cg operates. (ii) The second process recomputes the trajectory
+$(\tilde{\params}_1, \ldots, \tilde{\params}_\rankbound)$ within that subspace using
+debiased update magnitudes that are computed on a different mini-batch
+$\otherminibatch$, \ie we use $\tilde{\params}_0 \defeq \params_0$ and 
+\begin{equation}
+  \tilde{\params}_{p+1} \defeq \tilde{\params}_p + \tilde{\tau}_p \vd_p
+  \quad \text{with} \quad
+  \underbracket[0.14ex]{\tilde{\tau}_p}_{\colordot{colorunbiased}}
+  \defeq 
+  -\frac{
+    \dslope{\vd_p} \quadratic(\tilde{\params}_p; \otherminibatch)
+  }{
+    \dcurv{\vd_p} \quadratic(\tilde{\params}_p; \otherminibatch)
+  }
+  \quad \text{instead of} \quad
+  \underbracket[0.14ex]{\tau_p}_{\colordot{colorbiased}}
+  =
+  -\frac{
+    \dslope{\vd_p} \quadratic(\tilde{\params}_p; \minibatch)
+  }{
+    \dcurv{\vd_p} \quadratic(\tilde{\params}_p; \minibatch)
+  }.
+  \label{eq:debiased_cg}
+\end{equation}
+For $\otherminibatch = \minibatch$, $(\tilde{\params}_1, \ldots,
+\tilde{\params}_\rankbound)$ is congruent with the original trajectory $(\params_1,
+\ldots, \params_\rankbound)$ from the single-batch \cg approach. If the two mini-batches
+are different, the debiased trajectory will use updates into the directional minima of
+$\quadratic(\emptyarg; \otherminibatch)$ instead of $\quadratic(\emptyarg; \minibatch)$.
+Processes (i) and (ii) can either be run side by side in an alternating fashion
+(offering more flexibility regarding \eg the termination criterion at the cost of a
+small memory overhead, details in \cref{sec:details_cg}) or one after the other.
+\subsubsection{Debiased Laplace approximation}
+\label{sec:debiased_LA}
+\textbf{Laplace approximation with \kfac.} We briefly explore another
+popular curvature proxy: Kronecker-Factored Approximate Curvature (\kfac), which is
+commonly used both in optimization \citep{martens2015optimizing, martens2018kroneckerfactored,
+eschenhagen2023kfac} and uncertainty quantification \citep{Ritter2018ScalableLaplace}.
+It is a block-diagonal approximation to the FIM 
+$
+  \mF_{\minibatch} 
+  \approx 
+  \mK_{\minibatch} 
+  \defeq 
+  \blockdiag_{l=1,\ldots, L}(\mK_{\minibatch}^{(l)})
+$, 
+where each block 
+$
+  \mK_{\minibatch}^{(l)} 
+  \defeq
+  \mA^{(l)} \otimes \mB^{(l)}
+$ is approximated by the Kronecker product of two smaller
+matrices $\mA^{(l)}$ and $\mB^{(l)}$. Sampling from the respective LA with covariance
+$\mSigma_\minibatch = \numtraindata^{-1} (\mK_\minibatch + \beta \mI)^{-1}$ can be
+performed efficiently due to the specific structure of the \kfac approximation. For
+details, see \cref{sec:details_laplace_approximation_sampling}. 
+
+\textbf{Debiased approach.} For the debiased LA, we use two \kfac approximations
+$\mK_{\minibatch}$ and $\mK_{\otherminibatch}$ computed on different mini-batches. Via
+the eigendecomposition $\mK_{\minibatch} = \eigvecs \eigvals \eigvecs^\top$ with 
+$\eigvecs = (\eigvec_1, \ldots, \eigvec_\numparams)$ and $\eigvals = \diag(\eigval_1,
+\ldots, \eigval_\numparams)$, we can re-write the covariance matrix as 
+$
+  \mSigma_\minibatch
+  = \numtraindata^{-1} (\mK_{\minibatch} + \beta \mI)^{-1}
+  = \numtraindata^{-1} \eigvecs (\eigvals + \beta \mI)^{-1} \eigvecs.
+$
+For the debiased approach, we keep the eigenspace defined by $\mK_{\minibatch}$ but
+recompute the directional curvatures based on $\mK_{\otherminibatch}$, \ie we use
+\begin{align}
+  \tilde{\mSigma}_\minibatch
+  \!=\!
+  \frac{1}{\numtraindata} 
+  \eigvecs 
+  \big(\diag(\tilde{\eigval}_1, \dots, \tilde{\eigval}_\numparams) + \beta \mI\big)^{-1}
+  \eigvecs^\top
+\;\; \text{with} \;\;
+\underbracket[0.14ex]{\tilde{\eigval}_p}_{\colordot{colorunbiased}}
+  \!=\! \eigvec_p^\top \mK_{\otherminibatch} \eigvec_p
+\;\; \text{instead of} \;\;
+\underbracket[0.14ex]{\eigval_p}_{\colordot{colorbiased}}
+  \!=\! \eigvec_p^\top \mK_{\minibatch} \eigvec_p.
+  \label{eq:debiased_LA}
+  \raisetag{2.5ex}  \end{align} 
+
+
+\subsubsection{Computational cost of debiasing}
+Both debiasing techniques roughly double runtime compared to their single-batch
+counterparts: Debiased \cg performs one extra matrix-vector product with
+$\hessian_{\otherminibatch}$ per \cg iteration to compute the debiased update magnitude
+(details in \cref{sec:details_cg}). Debiased LA requires an additional \kfac
+approximation $\KFAC_{\otherminibatch}$; all subsequent operations to compute the
+debiased \kfac can be carried out efficiently at Kronecker factor level
+(details in \cref{sec:details_debiased_kfac}).
+In \cref{sec:experiments}, we thus use the debiased versions at \textit{half} the batch size,
+for a fair comparison. We will see that, at the resulting \textit{similar} computational cost, the debiased versions clearly outperform the
+single-batch alternatives.
+
+
+
+
+\section{Related work}
+
+
+
+We here briefly list other, related forms of bias correction that have been suggested
+elsewhere. 
+
+\textbf{A different two-batch approach.} Other works have proposed to use different (not
+necessarily disjoint) mini-batches for the gradient and the Hessian
+\citep{martens2010deep,byrd2011use}. 
+\citet[Sec. I.5]{benzing2022gradient} mentions the idea of using \textit{independent}
+mini-batches for the gradient and the Hessian to obtain an, in some sense, unbiased
+estimate
+$
+- \hessian_\minibatch^{-1} \grad_{\otherminibatch}
+$
+of the exact Newton step. This does, however, not resolve the biases described in this
+paper. Via the eigendecomposition of the Hessian $\hessian_\minibatch = \sum_{p=1}^P
+\eigval_p \eigvec_p \eigvec_p^\top$, we obtain 
+$
+  - \hessian_\minibatch^{-1} \grad_{\otherminibatch}
+\!=\!
+  - \sum_{p=1}^P 
+    \dslope{\eigvec_p} \quadratic(\params_\star; \otherminibatch)
+    (\dcurv{\eigvec_p} \quadratic(\params_\star; \minibatch))^{-1} \,
+    \eigvec_p.
+$
+While the numerator yields an unbiased estimate of the directional slope (similar to a
+\textit{blue} dot in the upper panel of \Cref{fig:bias}), the bias in the denominator
+remains since eigenvectors and directional curvatures are based on the same mini-batch
+(as for the \textit{orange} dots in the bottom panel of \Cref{fig:bias}).
+
+\textbf{Another debiasing approach.} \ekfac (Eigenvalue-corrected Kronecker
+Factorization) \citep{George2018Fast} corrects the eigenvalues of the \kfac
+approximation (similar to \cref{eq:debiased_LA}) which, provably, yields a more accurate
+approximation of the FIM than \kfac (in Frobenius norm). This correction, however, is
+designed to resolve a different kind of bias that is specific to the \kfac approximation
+and does not address the biases described in this work.
+
+\textbf{Running averages.} Other popular deep learning optimizers \textit{aggregate}
+curvature information over multiple steps via exponential moving averages (see \eg
+\citep{martens2015optimizing}). This emulates larger mini-batch sizes and thus reduces
+the curvature biases. However, when curvature evolves rapidly, obsolete curvature
+estimates from past steps might slow down training. Aggregating more robust
+\textit{debiased} curvature estimates instead might allow for shorter moving average
+windows and accelerate the optimization progress. We leave it to future work to explore
+these interactions.
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+In this section, we evaluate the effectiveness of the debiasing strategies from
+\cref{sec:debiasing_strategies}. In \cref{sec:experimental_details}, we provide the
+experimental details as well as additional empirical analyses. For instance, we show how
+the curvature biases with \kfac depend on the mini-batch size (see \cref{sec:exp_kfac}),
+how the biases evolve over the course of training (see \cref{sec:exp_biases_over_time}),
+and that the curvature biases become more pronounced for deeper/wider models (see
+\cref{sec:exp_numparams}).
+\subsection{Debiased conjugate gradients}
+\label{sec:exp_cg}
+We compare the standard single-batch \cg method to the debiased version (see
+\cref{sec:debiased_cg}) on the fully trained \allcnnc model without curvature damping.
+For a fair comparison, the single-batch approach uses one mini-batch of size $1024$
+while the debiased approach uses two mini-batches of size $512$, such that a similar
+amount of data and runtime budget is used. Details in \cref{sec:exp_details_cg}.
+
+\begin{figure}[tbh]
+  \centering
+  \includegraphics[width=0.99\textwidth]{exp03/cifar100_allcnnc_wo_dropout_SGD_epoch_349_batch_0_batch_size_1024_curv_opt_ggn_damping_0.000e+00.pdf}
+  \caption{\textbf{Debiased \cg is much more stable than the single-batch approach.} We
+  compare \cg runs without curvature damping ($\delta = 0$) with $\rankbound = 30$
+  iterations for the fully trained \allcnnc model on the \cifarhun \dataset in terms of
+  training/test loss/accuracy at similar computational cost: The single-batch approach
+  (shown as \colorline{colorbiased}) uses one mini-batch of size $1024$ while the
+  debiased approach (shown as \colorline{colorunbiased}) uses two mini-batches of size
+  $512$ each. Both approaches use the GGN curvature proxy and are run $5$ times on
+  different mini-batches. The markers \colordiamond{colorbiased} and
+  \colordiamond{colorunbiased} are placed at peak performance. 
+While the single-batch runs diverge quickly, the debiased \cg runs are stable.}
+  \label{fig:cg}
+  \end{figure}
+  
+
+  \textbf{Results \& discussion.} 
+All \cg runs in \cref{fig:cg} achieve a significant improvement in all four performance
+metrics. The most striking difference between the two approaches is their stability: The
+single-batch runs quickly reach peak performance and then diverge. In contrast, although
+the steps tend to be \textit{larger} (see \cref{fig:cg_magnitudes}), the debiased \cg
+runs are much more stable (without using any curvature damping). 
+This suggests that the reason for the divergence in the single-batch approach is
+\textit{not} the missing damping but the misinformed update magnitudes.
+The peak performance is slightly better for the single-batch runs which can be
+attributed to its more informative search directions (they were computed using
+\textit{double} the data). The peak performance of the debiased runs could likely be
+improved (at the same computational cost) by using a larger batch size for the
+directions and a smaller one for the update magnitudes (as the former seem harder to
+estimate, see \cref{sec:biases_theory}).
+\subsection{Debiased Laplace approximation}
+\label{sec:exp_LA}
+Here, we use a fully trained \allcnnc model on \cifarten data and compare (i) the
+vanilla model without LA, (ii) the single-batch \kfac LA approach, (iii) the debiased
+version (see \cref{sec:debiased_LA}), and (iv) the full-batch approach (where we compute
+\kfac on the entire training set) in terms of accuracy, NLL and ECE. Again, we apply the
+debiased approach at half the batch size of the single-batch approach for a fair
+comparison. We use prior precisions between $10^{-4}$ and $10$.
+\Cref{sec:exp_details_la} contains the experimental details and additional results on
+the training and OOD data. 
+
+\begin{figure}[tbh]
+  \centering
+  \includegraphics[width=0.99\textwidth]{exp16/LA_test.pdf}
+  \caption{\textbf{Debiased LA mimics the full-batch LA very well.} We compare LAs for
+  the fully trained \allcnnc model on \cifarten in terms of accuracy, negative log
+  likelihood loss (NLL) and expected calibration error (ECE) on the \cifarten test set.
+  For each mini-batch size (lighter color indicating smaller batch size), we draw $5$
+  mini-batches and report the mean performance as dot and min/max as vertical line. We
+  also report the performance of the vanilla model without LA (shown as
+  \colorline{black}) and the full-batch approach based on $\mK_{\traindata}$ (shown as
+  \colorcross{colorexact}). 
+In contrast to the single-batch approach, the debiased version mimics the behavior of
+  the full-batch approach very well over the entire range of prior precisions. }
+  \label{fig:la}
+\end{figure}
+
+\textbf{Results \& discussion.} \Cref{fig:la} shows the results. If the prior precision
+is low (\ie the LA relies mainly on the curvature information without the regularizing
+diagonal term), the single-batch version acts erratically due to the deformed curvature
+model---its performance drops drastically. The single-batch approach is also more
+sensitive to the choice of prior precision (in fact, it suggests a much larger prior
+precision than the full-batch approach). In contrast, the debiased approach achieves
+good performance over a wider range of prior precisions and mimics the full-batch
+approach ($\numtraindata\!=\!\num{40000}$) very well despite using only a tiny fraction
+of the data. 
+\textbf{Summary of the experimental results.} The use of mini-batch quadratics is a
+simple way to keep the costs of second-order optimization and uncertainty quantification
+manageable. The resulting biases, however, severely degrade their value, requiring large 
+mini-batches or algorithmic add-ons. Our experiments suggest that
+even simple debiasing strategies can largely mitigate this issue.
+ 
+
+
+\section{Conclusion}
+
+
+
+Our main takeaway is a general principle: \textbf{Quadratic approximations to the
+training loss computed on \textit{mini-batches} of the training data provide a
+\textit{distorted} representation of the true underlying loss landscape.} In particular,
+along the directions of large curvature, the mini-batch quadratics tend to strongly
+overestimate the curvature of the true loss.
+Our theoretical analysis shows that these biases can be traced back to the misalignment
+of the curvature matrices' eigenspaces.
+These insights are highly relevant for applications: As we demonstrated empirically, the
+biases in the directional slope and curvature lead to severely misinformed updates in
+stochastic second-order optimizers, and cause unreliable uncertainty estimates with
+Laplace approximations.
+We also proposed simple two-batch strategies to mitigate these biases. Our experiments
+demonstrate their superiority over the single-batch approaches in terms of stability and
+quality at similar computational costs.
+Our findings reveal a design prerequisite for building better stochastic curvature-based
+methods, which should be generally considered, and further developed, for all methods
+using such curvature evaluations. 
+ 
+
+
+
+\clearpage
+
+
+
+

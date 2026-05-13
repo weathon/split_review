@@ -1,0 +1,359 @@
+\title{Detecting Training Data of Large Language Models via Expectation Maximization}
+
+\begin{abstract}
+The widespread deployment of large language models (LLMs) has led to impressive advancements, yet information about their training data, a critical factor in their performance, remains undisclosed.
+Membership inference attacks (MIAs) aim to determine whether a specific instance was part of a target model's training data.
+MIAs can offer insights into LLM outputs and help detect and address concerns such as data contamination and compliance with privacy and copyright standards.
+However, applying MIAs to LLMs presents unique challenges due to the massive scale of pre-training data and the ambiguous nature of membership.
+Additionally, creating appropriate benchmarks to evaluate MIA methods is not straightforward, as training and test data distributions are often unknown.
+In this paper, we introduce \ours, a novel MIA method for LLMs that iteratively refines membership scores and prefix scores via an expectation-maximization algorithm, leveraging the duality that the estimates of these scores can be improved by each other.
+Membership scores and prefix scores assess how each instance is likely to be a member and discriminative as a prefix, respectively.
+Our method achieves state-of-the-art results on the WikiMIA dataset.
+To further evaluate \ours, we present \ourbenchmark, a benchmark built from OLMo resources, which allows us to control the difficulty of MIA tasks with varying degrees of overlap between training and test data distributions.
+We believe that \ours~serves as a robust MIA method for LLMs and that \ourbenchmark~provides a valuable resource for comprehensively evaluating MIA approaches, thereby driving future research in this critical area.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large language models (LLMs)~\citep{brown2020language, touvron2023llama2} have recently emerged as a groundbreaking development and have had a transformative impact in many fields.
+The vast and diverse training data are central to their success, which enables LLMs to understand and generate languages to perform complex tasks.
+Given that training data directly shape LLMs' behaviors, knowing the composition of training data allows researchers and practitioners to assess the strengths and limitations of LLMs~\citep{gebru2021datasheets}, address ethical concerns, and mitigate potential biases~\citep{bender2021dangers, feng2023pretraining} and other risks~\citep{bommasani2021opportunities}. 
+However, the exact composition of training data is often a secret ingredient of LLMs.
+
+Since LLMs are trained on large-scale corpora from diverse sources, including web content, the inclusion of undesirable data into training data such as test datasets~\citep{sainz2023nlp, oren2023proving, sainz2024data}, proprietary contents~\citep{chang2023speak, meeus2024copyright}, or personally identifiable information~\citep{mozes2023use} might prevalently happen unconsciously, raising serious concerns when deploying LLMs. 
+Membership inference attack (MIA) determines whether a particular data point has been seen during training a target model~\citep{shokri2017membership}.
+Using MIA to uncover those potential instances can serve as an effective mechanism in detecting data contamination~\citep{magar2022data} for the reliable evaluation of LLMs' ability~\citep{zhou2023don} and auditing copyright infringement~\citep{duarte2024cop} and privacy leakage~\citep{staab2023beyond, kim2024propile} to ensure compliance with regulations such as GDPR~\citep{voigt2017eu} and CCPA~\citep{legislature2018ccpa}.  % mitchell2019model 
+Therefore, MIA has gained huge interest in the LLM community.
+
+Despite increasing demands, MIA for LLMs is challenging~\citep{duan2024membership} largely due to the large scale of training data and intrinsic ambiguity of membership from the nature of languages. 
+Furthermore, designing a proper evaluation benchmark on MIAs for LLMs that emulates a realistic test case scenario is complicated. While training data distribution is a mixture of diverse sources and unknown, target test data at inference time could be from any distribution.
+This circumstance motivates us to develop a robust MIA method that can work well across different conditions on the distribution of members and non-members with minimal benchmark information.
+
+In this paper, we propose a novel MIA framework, \ours, which iteratively refines membership scores and prefix scores using an expectation-maximization algorithm.
+A membership score indicates how likely each data point is to be a member. 
+A prefix score indicates how discriminative each data point is in distinguishing members and non-members when used as a prefix.
+We empirically observe a duality between these scores, where better estimates of one can improve estimates of another.
+By starting from a reasonable initialization, our iterative approach progressively enhances score prediction until convergence, leading to more accurate membership scores for MIA.  
+
+To comprehensively evaluate our method and different MIA approaches, we introduce a new benchmark called \ourbenchmark~by utilizing OLMo~\citep{groeneveld2024olmo} resources.
+We vary degrees of distribution overlaps and control difficulty levels based on clustering.
+Throughout the extensive experiments, we have shown that \ours~is a versatile MIA method and significantly outperforms previous strong baselines, though all methods including ours still struggle to surpass random guessing in the most challenging random split setting. 
+
+Our novelty and main contributions are summarized as follows: 
+\begin{itemize}[nolistsep, noitemsep, leftmargin=2em] 
+    \item To the best of our knowledge, \ours~is the first approach that progressively enhances membership scores (and prefix scores) with an iterative refinement for improved MIA for LLMs. 
+    \item We demonstrate that ReCaLL~\citep{xie2024recall} has an over-reliance on prefix selection. In contrast, we design \ours~without requiring any labeled data or prior information on benchmarks.
+    \item \ours~remarkably outperforms all existing strong MIA baselines for LLMs, and achieves state-of-the-art results on WikiMIA~\citep{shi2023detecting}, the most popular benchmark for detecting pre-training data of LLMs.  
+    \item Experiments on our \ourbenchmark~benchmark with varying degrees of overlap between member and non-member distributions shows the robustness of \ours~and the utility of evaluating on diverse conditions when developing a new MIA method.
+\end{itemize}
+
+
+
+\section{Background}
+
+\label{sec:background}
+
+\subsection{Membership Inference Attack for LLMs}
+\label{sec:background-mia4llms}
+Membership inference attack (MIA)~\citep{shokri2017membership, carlini2022membership} is a binary classification task that identifies whether or not a given data point has been seen during model training: member vs non-member. 
+Given a target language model $\lm$ trained on an unknown $\mathcal{D_{\mathrm{train}}}$, MIA predicts a membership label of each instance $x$ in a test dataset $\test$ whether $x$ in $\mathcal{D_{\mathrm{train}}}$ or not, by computing a membership score $f(x; \lm)$ and thresholding this score. 
+By adjusting a threshold, MIA can control the trade-off between the true positive rate and the false positive rate. 
+The MIA performance is typically evaluated with two metrics: AUC-ROC and TPR@low FPR~\citep{carlini2022membership, mireshghallah2022quantifying}. 
+
+Most existing MIA methods are based on the assumption that the target model memorizes (or overfits) training data.
+In general, members will have a lower loss~\citep{yeom2018privacy}, which is the average log-likelihood (or perplexity) of target text with respect to a target LLM, compared to non-members. 
+Likelihood Ratio Attacks (LiRAs)~\citep{ye2022enhanced} perform difficulty calibration using a reference model~\citep{carlini2022membership}, a compression method~\citep{carlini2021extracting}, or the average loss from neighbors~\citep{mattern2023membership}.
+Min-K\%~\citep{shi2023detecting} calculates the average log-likelihood for tokens with the lowest likelihoods.
+Min-K\%++~\citep{zhang2024min} improves Min-K\% by normalizing each token's log probability.
+ReCaLL~\citep{xie2024recall} uses the ratio of the conditional log-likelihood to the unconditional log-likelihood as the membership score.
+ReCaLL is described in detail in~\S\ref{sec:background-recall}.
+\subsection{Why MIA for LLMs is Challenging}
+\label{sec:background-difficulty}
+Although MIA has been studied in machine learning for several years, it remains especially challenging for LLMs~\citep{duan2024membership, meeus2024inherent}.
+Due to the massive training dataset size, each instance is used in training only a few times, often just once~\citep{lee2021deduplicating}, making it difficult to leave a footprint on the model. 
+Moreover, there is inherent ambiguity in the definition of membership because texts are often repeated and partially overlap each other in the original form or with a minor difference even after the rigorous preprocessing of decontamination and deduplication~\citep{kandpal2022deduplicating, tirumala2024d4}. 
+The membership boundary becomes even fuzzier~\citep{shilov2024mosaic} if semantically similar paraphrases~\citep{mattern2023membership, mozaffari2024semantic} beyond lexical matching based on n-gram are considered.
+Traditional MIA approaches in machine learning literature~\citep{shokri2017membership, ye2022enhanced, carlini2022membership} based on training shadow models on non-overlapping data from the same data distribution, model architecture, and training algorithm as the target model are infeasible for LLMs considering high computational costs and unknown training specifications.
+\subsection{Evaluation of MIAs for LLMs}
+\label{sec:background-evaluation}
+
+Common MIA benchmarks such as WikiMIA~\citep{shi2023detecting} use a time cutoff based on model release dates and time information of documents~\citep{shi2023detecting, meeus2024did} to ensure somewhat membership labels.
+Besides, recent studies~\citep{duan2024membership, das2024blind, meeus2024inherent} question whether several MIAs that perform well on these benchmarks are truly conducting membership inference, as detecting distributional (often temporal) shifts alone may be sufficient to achieve high benchmark performance.  %  based on time information
+Thus, they advocate for the use of datasets with a random train-test split such as MIMIR~\citep{duan2024membership}, which is derived from the PILE dataset~\citep{gao2020pile}, for MIA evaluation.
+However, none of the existing methods significantly outperforms random guessing in this setting.
+Although this setting seems theoretically appropriate for evaluating MIA, there is no truly held-out in-distribution dataset in reality because LLMs are usually trained with all available data sources.
+In other words, it is difficult to find in-distribution non-member examples, and it is nearly impossible to completely eliminate the distribution shift between training and test data at inference time.
+
+Once an MIA benchmark, a pair of models and datasets, is released, it becomes difficult to prevent MIAs from exploiting information about the benchmark settings, such as how the dataset has been constructed.
+MIAs may exploit existing biases on datasets regardless of their intended purpose.
+To evaluate the true generalizability of MIAs in real-world scenarios, we should consider situations where we have minimal knowledge about the target language model, training data, and test data.
+Several ongoing attempts~\citep{meeus2024inherent, eichler2024nob} aim to reproduce setups that closely resemble practical MIA scenarios, but none are sufficiently effective to gain widespread adoption in the community.
+Our work is an additional effort in this direction. We propose a robust MIA method and evaluate it on our benchmark, which simulates various combinations of training and test data distribution.
+\subsection{ReCaLL: Assumptions and Limitations} 
+\label{sec:background-recall}
+ReCaLL~\citep{xie2024recall} uses the ratio between the conditional log-likelihood of a target data point $x$ given a non-member prefix $p$ as a context and the unconditional log-likelihood of $x$ by an LLM $\lm$ as a membership score, based on the observation that the distribution of ReCaLL scores for members and non-members diverges when $p$ is a non-member prefix: formally, $\recall_{p}(x; \lm) = \frac{\mathrm{LL}(x | p; \lm)}{\mathrm{LL}(x; \lm)}$ (we may omit $\lm$ later, for brevity), where $\mathrm{LL}$ is the average log-likelihood over tokens and the prefix $p$\footnote{As an extension from using a single prefix $p$, averaging the ReCaLL scores on a set of multiple prefixes is possible for an ensemble.} is a concatenation of non-member data points $p_i$: $p = p_1 \oplus p_2 \oplus \cdots \oplus p_n$.
+
+ReCaLL significantly outperforms other MIA approaches by a large margin.
+For instance, ReCaLL exceeds 90\% AUC-ROC on WikiMIA~\citep{shi2023detecting} beating previous state-of-the-art AUC-ROC of about 75\% from Min-K\%++~\citep{zhang2024min}. 
+However, there is no theoretical analysis of why and when ReCaLL works well.
+
+In \citet{xie2024recall}, non-members $p_i$ are randomly selected among non-members in a test dataset and excluded from the test dataset without validation, based on strong assumptions that (1) the ground truth non-members are available and (2) all of them are equally effective as a prefix.
+However, the held-out ground truth non-members, especially from the same distribution of the test set, may not always be available at inference time. 
+This aligns with the discussion in the previous section \S\ref{sec:background-evaluation}.
+Indeed, finding non-members could be difficult~\citep{villalobos2022will, muennighoff2024scaling} since training data of LLMs are ever-growing by gathering all crawlable data. 
+The solution to secure non-members in \citet{xie2024recall} is generating a synthetic prefix using GPT-4o. 
+However, according to their implementation, this method still relies on non-member test data as seed data.
+
+Selecting non-members from the test dataset makes ReCaLL preferable and unfair compared to other MIAs that do not utilize any non-member test data. 
+It partially explains why simple random selection reasonably works well.
+The ablation study from~\citet{xie2024recall} to demonstrate the robustness of the random prefix selection ironically reveals that ReCaLL's performance can be damaged when we do not have known non-member data points from the test dataset distribution. 
+Using non-members from a different domain (e.g. Wikipedia) significantly degrades ReCaLL's performance, sometimes even worse than Min-K\%++. 
+In other words, ReCaLL would not generalize well to test data from a distribution different from that of the prefix. 
+The similarity between the prefix and test data also matters.
+Another ablation study shows a variance between different random selections, implying that random prefix selection is not consistent and that all data points are not equally effective for the prefix.
+
+
+
+\section{Observation: Finding a Better Prefix}
+
+\label{sec:observation}
+
+In this section, we rigorously investigate how much ReCaLL's performance is sensitive to the choice of a prefix and particularly how much it can be compromised without given non-member data.
+We define a \textbf{prefix score} $r(p)$ as the effectiveness of $p$ as a prefix in discriminating memberships, particularly when using this prefix for ReCaLL.
+In the Oracle setting where ground truth labels of all examples in a test dataset $\test$ are available, we can calculate a prefix score by measuring the performance of ReCaLL with a prefix $p$ on a test dataset $\test$ using ground truth labels and a MIA evaluation metric such as AUC-ROC.
+While a prefix could be any text, we calculate prefix scores for all examples in a test dataset $\test$ by using each data point as a standalone prefix.
+
+As an initial analysis, we conduct experiments using the WikiMIA~\citep{shi2023detecting} dataset with a length of 128 as a target dataset and Pythia-6.9B~\citep{biderman2023pythia} as a target LM.
+Figure~\ref{fig:prefix_scores_hist} displays the distribution of prefix scores measured by AUC-ROC for members and non-members. 
+Consistent with the results from \cite{xie2024recall}, ReCaLL works well if a prefix is a non-member and does not work well if a prefix is a member. 
+Prefix scores of members are smaller than 0.7, and most of them are close to 0.5, which is the score of random guessing. 
+Prefix scores of non-members are larger than 0.5, and most of them are larger than 0.7. 
+This clear distinguishability suggests using a negative prefix score as a membership score. 
+
+Figure~\ref{fig:prefix_scores_metrics} displays ROC curves of MIA when negative prefix scores measured by different metrics are used as membership scores. 
+We use AUC-ROC, Accuracy, and TRP@$k$\%FPR with $k \in \{ 0.1, 1, 5, 10, 20\}$ as metrics.
+Using AUC-ROC-based prefix scores as membership scores achieves 98.6\% AUC-ROC, which is almost perfect and the highest among other metrics.
+
+\input{figs/prefix_scores}
+
+Without access to non-members (or data points with high prefix scores), ReCaLL's performance could be significantly lower.
+Given the wide spectrum of prefix scores for even non-members, the effectiveness of each data point varies, and the choice of data points for a prefix can be crucial, although using a concatenation of multiple data points as a prefix reduces variance. 
+In other words, we can expect better MIA performance by carefully selecting the prefix.
+Ultimately, it is desirable to find an optimal prefix $p$ without any information or access to given ground truth non-member data points on the test set.
+
+Contrary to the Oracle setting, labels which are what should be predicted are unknown at inference time, meaning that we cannot directly use labels to calculate prefix scores.
+In the next section \S\ref{sec:method}, we describe how our method addresses this problem by iteratively updating membership scores and prefix scores based on one another.
+We propose a new MIA framework that is designed to work robustly on any test dataset with minimal information.
+
+
+
+\section{Proposed Method: \ours}
+
+\label{sec:method}
+
+We target the realistic MIA scenario where test data labels are unavailable.
+We measure a prefix score by how $\recall_p$ on a test dataset $D_{test}$ aligns well with the current estimates of membership scores $f$ on $D_{test}$ denoted as $S(\recall_p, f, D_{test})$.
+More accurate membership scores can help compute more accurate prefix scores. 
+Conversely, more accurate prefix scores can help compute more accurate membership scores. 
+Based on this duality, we propose an iterative algorithm to refine membership scores and prefix scores via an Expectation-Maximization algorithm, called \ours, to perform MIA with minimal assumptions on test data (\S\ref{sec:background-recall}).
+
+Algorithm~\ref{alg:recallpp} summarizes the overall procedure of \ours.
+We begin with an initial assignment of membership scores using any existing off-the-shelf MIA method such as Loss~\citep{yeom2018privacy} or Min-K\%++~\citep{zhang2024min} (Line 1). 
+We calculate prefix scores $r(p)$ using membership scores and then update membership scores $f(x)$ using prefix scores.
+The update rule of prefix scores (Line 3) and membership scores (Line 4) is a design choice.
+We repeat this process iteratively until convergence (Line 5).
+Since \ours~is a general framework, all components, including initialization, score update rules, and stopping criteria, are subject to modification for further improvement.
+
+\input{figs/em-mia}
+
+\paragraph{Update Rule for Prefix Scores}
+Our observation in \S\ref{sec:observation} shows that AUC-ROC is an effective function $S$ to calculate prefix scores given ground truth labels. 
+Because we do not have labels, we can assign membership labels using the current membership scores $f$ and a threshold $\tau$ to use them as approximate labels to calculate prefix scores: $\text{AUC-ROC}(\{(\recall_p(x), \delta(f(x) > \tau) | x \in D_{test}) \})$.
+The value of $\tau$ could be chosen as a specific percentile in the score distributions to decide the portion of members and non-members.
+Using a median (50\% percentile) is a simple and practical choice because a test dataset is usually balanced.
+Instead of approximating hard labels, we can compare the ranks of $\recall_p(x)$ and the ranks of $f(x)$ on $D_{test}$ because the relative order among other data matters rather than the absolute values. 
+We can use the average difference in ranks as $\sum_{x \in \test} \| \text{rank}(\recall_p(x)) - \text{rank}(f(x)) \|$ or rank correlation coefficients such as Kendall's tau~\citep{kendall1938new} and Spearman's rho~\citep{spearman1961proof}.
+
+\paragraph{Update Rule for Membership Scores}
+Our observation in \S\ref{sec:observation} shows that a negative prefix score can be used as a good membership score.
+Alternatively, we can choose candidates with top-$k$ prefix scores to construct a prefix and calculate membership scores using ReCaLL with this prefix: $f(x) = \recall_{p}(x)$ where $p = p_1 \oplus p_2 \oplus \cdots \oplus p_n$ and $p_i \in \mathrm{argtopk}_{x \in \test} r(x)$.
+How to order $p_i$ in $p$ is also a design choice.
+Intuitively, we can place them in reverse order of the prefix score since a data point closer to the target text will have a larger impact on the likelihood.
+
+\paragraph{External data}
+We may extend the test dataset $\test$ by utilizing external data to provide additional signals. 
+Suppose we have a dataset of known members ($\mathcal{D_{\mathrm{m}}}$), a dataset of known non-members ($\mathcal{D_{\mathrm{nm}}}$), and a dataset of instances without any membership information ($\mathcal{D_{\mathrm{unk}}}$). 
+For example, $\mathcal{D_{\mathrm{m}}}$ could be old Wikipedia documents, sharing the common assumption that LLMs are usually trained with Wikipedia. 
+As discussed above, we target the case of $\mathcal{D_{\mathrm{nm}}} = \phi$, or at least $\mathcal{D_{\mathrm{nm}}} \cap \test = \phi$. 
+However, we can construct it with completely unnatural texts (e.g., ``*b9qx84;5zln"). 
+$\mathcal{D_{\mathrm{unk}}}$ is desirably drawn from the same distribution of $\test$ but could be from any corpus when we do not know the test dataset distribution.
+Finally, we can incorporate all available data for better prediction of membership scores and prefix scores: $\test \leftarrow \test \cup \mathcal{D}_{m} \cup \mathcal{D_{\mathrm{nm}}} \cup \mathcal{D_{\mathrm{unk}}}$.
+We have not explored the effect of exploiting additional data in our experiments but have left it to future work.
+
+
+
+\section{New Benchmark: \ourbenchmark}
+
+\label{sec:olmomia}
+\ours~works well and even performs almost perfectly on some benchmarks such as WikiMIA~\citep{shi2023detecting} (\S\ref{sec:results-wikimia}), while it does not work well on other datasets such as MIMIR~\citep{duan2024membership} similar to other methods. 
+We want to know why this is the case and what are the conditions for success.
+To answer these questions, we develop a new benchmark using OLMo~\citep{groeneveld2024olmo}, which is a series of fully open language models pre-trained with Dolma~\citep{soldaini2024dolma} dataset.
+OLMo provides intermediate model checkpoints and an index to get which data has been used for each training step, which are valuable resources to construct an MIA benchmark.
+We will share our implementation and resulting benchmark datasets. 
+Like us, anyone can create their own benchmark on their purpose by modifying our implementation.
+
+Figure~\ref{fig:olmomia} illustrates the basic setup of the \ourbenchmark~benchmark.
+Specifically, we use checkpoints of OLMo-7B trained with 100k, 200k, 300k, and 400k steps as target models (c.f., one epoch is slightly larger than 450k steps).
+Then, we consider any training data before 100k steps as members and any training data between 400k and 450k steps as non-members.
+However, we should keep in mind that there could still be some ambiguity in membership despite the effort of deduplication, as discussed in \S\ref{sec:background-difficulty}.
+Based on this setup, we have multiple settings with different samplings.
+
+\input{figs/olmomia}
+
+The most straightforward setting is \textit{Random}, where we randomly select members and non-members from each interval.
+This setting is similar to MIMIR~\citep{duan2024membership}, where members and non-members are from the training split and test split of the Pile dataset~\citep{gao2020pile}, respectively. 
+MIMIR is much more challenging than WikiMIA since the training set and test set are randomly split and thus have minimal distribution shifts.
+
+Based on clustering, we control the degree of overlap between the distribution of members and non-members, resulting in different difficulties.
+First, we sample enough numbers of members and non-members (in our case, 50k each).
+Next, we map sampled data into embedding vectors. 
+We use NV-Embed-v2 model~\citep{lee2024nv}, which was the first rank on the MTEB leaderboard~\citep{muennighoff2022mteb} as of Aug 30, 2024, for the embedding model.
+Then, we perform K-means clustering~\citep{lloyd1982least} for members and non-members separately (in our case, we use $K = 50$).
+
+To prevent datasets from degeneration that have duplicates with a very minor difference, we remove data points closer than a certain distance threshold with other points within a cluster in a greedy manner to guarantee all data points in the same cluster are not too close to each other. 
+Empirically, we observed that most pair distances measured by cosine distance range from 0.8 to 1.2, so we set 0.6 as the minimum inter-distance for deduplication.
+
+For the \textit{Easy} setting, we pick the farthest pair of a member cluster and a non-member cluster and pick instances farthest from the opposite cluster.
+For the \textit{Hard} setting, we pick the closest pair of a member cluster and a non-member cluster and pick instances closest to the opposite cluster.
+For the \textit{Medium} setting, we pick the pair of a member cluster and a non-member cluster with a median distance and randomly sampled instances within each cluster.
+
+Additionally, we have two additional settings derived from \textit{Random} and \textit{Hard}: we merge members from \textit{Random} and non-members from \textit{Hard} to create the \textit{Mix-1} setting, and we merge members from \textit{Hard} and non-members from \textit{Random} to create the \textit{Mix-2} setting.
+\textit{Mix-1} aims to simulate the case where test data come from a single cluster.
+Thus, any cluster might be fine, but we choose \textit{Hard} with no specific reason.
+These settings cover almost all possible inclusion relationships between members and non-members.
+
+For each difficulty level, we have two splits based on the maximum sequence length of 64 and 128.  %  that will be explained later
+For each dataset, we balance the number of members and non-members to 500 each to make the total size 1000.
+
+
+
+\section{Experimental Setup}
+
+
+\subsection{Datasets and Models}
+We evaluate \ours~and compare it with baselines (\S\ref{sec:experiments-baselines}) on the WikiMIA benchmark~\citep{shi2023detecting} (\S\ref{sec:results-wikimia}) and the \ourbenchmark~benchmark (\S\ref{sec:results-olmomia}) using AUC-ROC as an MIA evaluation metric.
+For WikiMIA, we use the original setting with length splits of 32, 64, and 128 as test datasets and use Mamba 1.4B~\citep{gu2023mamba}, Pythia 6.9B~\citep{biderman2023pythia}, GPT-NeoX 20B~\citep{black2022gpt}, LLaMA 13B/30B~\citep{touvron2023llama}, and OPT 66B~\citep{zhang2022opt} as target models, following \citet{xie2024recall} and \cite{zhang2024min}.  %  (a state space model)
+For \ourbenchmark~(\S\ref{sec:olmomia}), we use six settings of \textit{Easy}, \textit{Medium}, \textit{Hard}, \textit{Random}, \textit{Mix-1}, and \textit{Mix-2} as test datasets and use checkpoints after 100k, 200k, 300k, and 400k training steps as target models.
+Although \ours~requires a baseline sufficiently better than random guessing as an initialization, there is currently no such method for MIMIR~\citep{duan2024membership}.
+Therefore, we skip experiments on MIMIR, though this is one of the widely used benchmarks on MIA for LLMs.
+\subsection{Baselines}
+\label{sec:experiments-baselines}
+We compare our method against the following baselines explained in \S\ref{sec:background-mia4llms}: Loss~\citep{yeom2018privacy}, Ref~\citep{carlini2022membership}, Zlib~\citep{carlini2021extracting}, Min-K\%~\citep{shi2023detecting}, and Min-K\%++~\citep{zhang2024min}.
+We use Pythia-70m for WikiMIA and StableLM-Base-Alpha-3B-v2 model~\citep{StableLMAlphaV2Models} for \ourbenchmark~as the reference model of the Ref method, following~\citet{shi2023detecting} and \citet{duan2024membership}.
+For Min-K\% and Min-K\%++, we set $K = 20$.
+Among the commonly used baselines, we omit Neighbor~\citep{mattern2023membership} because it is not the best in most cases though it requires LLM inference multiple times for neighborhood texts, so it is much more expensive.
+\subsubsection{ReCaLL-based Baselines} 
+As explained in \S\ref{sec:background-recall}, the original ReCaLL~\citep{xie2024recall} uses labeled data from the test dataset, which is unfair to compare with the above baselines and ours.
+More precisely, $p_i$ in the prefix $p = p_1 \oplus p_2 \oplus \cdots \oplus p_n$ are known non-members from the test set $\test$, and they are excluded from the test dataset for evaluation, i.e., $\test' = \test \setminus \{ p_1, p_2, \cdots, p_n \}$.
+However, we measure the performance of ReCaLL with different prefix selection methods to understand how ReCaLL is sensitive to the prefix choice and use it as a reference instead of a direct fair comparison.
+
+Since changing the test dataset every time for different prefixes does not make sense and makes the comparison even more complicated, we keep them in the test dataset. 
+A language model tends to repeat, so $\mathrm{LL}(p_i | p; \lm) \simeq 0$.
+Because $\mathrm{LL}(p_i | p; \lm) \ll 0$, $\recall_{p}(p_i; \lm) \simeq 0$.
+It is likely to $\recall_{p}(p_i; \lm) \ll \recall_{p}(x; \lm)$ for $x \in \test \setminus \{ p_1, p_2, \cdots, p_n \}$, meaning that ReCaLL will classify $p_i$ as a non-member.
+The effect would be marginal if $|\test| \gg n$.
+Otherwise, we should consider this when we read numbers in the result table.
+
+We have four options for choosing $p_i$: \rand, \randm, \randnm, and \toppref.
+\rand~randomly selects any data from $\test$.
+\randm~randomly selects member data from $\test$.
+\randnm~randomly selects non-member data from $\test$.
+\toppref~selects data from $\test$ with the highest prefix scores calculated with ground truth labels the same as \S\ref{sec:observation}.
+All options except \rand~partially or entirely use labels in the test dataset.
+For all methods using a random selection (\rand, \randm, and, \randnm), we execute five times with different random seeds and report the average.
+
+The original ReCaLL~\citep{xie2024recall} is similar to \randnm, except they report the best score after trying all different $n$ values, which is again unfair.
+The number of shots $n$ is an important hyper-parameter determining performance. 
+A larger $n$ generally leads to a better MIA performance but increases computational cost with a longer $p$.
+We fix $n = 12$ since it provides a reasonable performance while not too expensive.
+
+Other simple baselines without using any labels are \textit{Avg} and \textit{AvgP}, which average ReCaLL scores over all data points in $\test$: $\textit{Avg}(x) = \frac{1}{|\test|} \sum_{p \in \test} \recall_p(x)$ and $\textit{AvgP}(p) = \frac{1}{|\test|} \sum_{x \in \test} \recall_p(x)$.
+The intuition is that averaging will smooth out ReCaLL scores with a non-discriminative prefix while keeping ReCaLL scores with a discriminative prefix without exactly knowing discriminative prefixes.
+\subsection{\ours}
+As explained in \S\ref{sec:method}, \ours~is a general framework where each component can be tuned for improvement, but we use the following options as defaults based on results from preliminary experiments. 
+Overall, Min-K\%++ performs best among baselines without ReCaLL-based approaches, so we use it as a default choice for initialization.
+Alternatively, we may use ReCaLL-based methods that do not rely on any labels like \avg, \avgp, or \rand.
+For the update rule for prefix scores, we use AUC-ROC as a default scoring function $S$.
+For the update rule for membership scores, we use negative prefix scores as new membership scores.
+For the stopping criterion, we repeat ten iterations and stop without thresholding by the score difference since we observed that membership scores and prefix scores converge quickly after a few iterations.
+We also observed that \ours~is not sensitive to the choice of the initialization method and the scoring function $S$ and converges to similar results.
+
+
+
+\section{Results and Discussion}
+
+
+\subsection{WikiMIA}
+\label{sec:results-wikimia}
+
+Table~\ref{tab:wikimia} shows the experimental results on the WikiMIA dataset.
+\ours~achieves state-of-the-art performance on WikiMIA for all different models and length splits, significantly outperforming all baselines, including ReCaLL, even without any given non-member test data. 
+\ours~exceeds 96\% AUC-ROC in all cases.
+For the largest model OPT-66B, \ours~gets 99\% AUC-ROC for length splits 32 and 64, while ReCaLL's performance is lower than 86\% AUC-ROC.
+
+\input{tabs/wikimia}
+
+All baselines without ReCaLL-based approaches achieve lower than 76\% AUC-ROC on average across different models.
+The relative order between ReCaLL-based baselines is consistent over different settings: $\randm < \avg, \avgp < \rand < \randnm < \toppref$.
+This trend clearly shows that ReCaLL is sensitive to the choice of the prefix.
+Particularly, the large gap between \randm and \rand~versus \randnm~shows that ReCaLL is highly dependent on the availability of given non-members.
+\randnm~is similar to the original ReCaLL~\citep{xie2024recall} in most cases except for the OPT-66B model and LLaMA models with sequence length 128, probably because $n = 12$ is not optimal for these cases.
+Among these, \rand~does not use any labels, so it is fair to compare with other baselines, and it performs worse than Min-K\%++ on average.
+This result again shows that ReCaLL is not strong enough without given non-members.
+
+\toppref~consistently outperforms \randnm, indicating that random prefix selection is definitely not sufficiently good and there is room for better MIA performance by prefix optimization~\citep{shin2020autoprompt, deng2022rlprompt, guo2023connecting}.
+Although the search space of the prefix is exponentially large and the calculation of prefix scores without labels is nontrivial, a prefix score could be a good measure to choose data points to construct the prefix. 
+\ours~approximates prefix scores and uses them to refine membership scores.
+\subsection{\ourbenchmark}
+\label{sec:results-olmomia}
+
+Table~\ref{tab:olmomia} shows the experimental results on the \ourbenchmark~benchmark.\footnote{We expect earlier training data will be harder to detect. However, we could not find a significant difference in the MIA performance for checkpoints at different numbers of training steps. Therefore, we report average scores over four intermediate OLMo checkpoints.}
+\ours~achieves almost perfect scores on \textit{Easy} and \textit{Medium} similar to WikiMIA, gets performance comparable to random guessing performance on \textit{Hard} and \textit{Random} similar to MIMIR, and gets reasonably good scores on \textit{Mix-1} and \textit{Mix-2}, though not perfect as on \textit{Easy} and \textit{Medium}.
+\ours~significantly outperforms all baselines in all settings except \textit{Hard} and \textit{Random}, where distributions of members and non-members heavily overlap to each other and all methods are not sufficiently better than random guessing.
+
+\input{tabs/olmomia}
+
+None of the baselines without ReCaLL-based approaches are successful in all settings, which implies that \ourbenchmark~is a challenging benchmark.
+The relative order between ReCaLL-based baselines is again consistent over different settings: $\randm < \avg, \avgp, \rand < \randnm < \toppref$, though all methods that do not use any labels fail to be successful.
+Interestingly, \randnm~works reasonably well on \textit{Mix-1} but does not work well on \textit{Mix-2}.
+This is because non-members from \textit{Mix-1} are from the same cluster while non-members from \textit{Mix-1} are randomly sampled from the entire distribution.
+On the other hand, \toppref~notably outperforms \randnm, implying that the effectiveness of non-member prefixes for MIA differs.
+
+As discussed in \S\ref{sec:background-evaluation}, we reemphasize that benchmarking MIAs for LLMs is tricky because predicting where real-world test data for MIA at inference time will come from is difficult.
+Therefore, at least, simulating different scenarios is beneficial and necessary, like what we did using \ourbenchmark~instead of a fixed existing benchmark.
+In this regard, we encourage MIA developers or practitioners to evaluate their methods on diverse conditions like \ourbenchmark.
+We do not claim that \ourbenchmark~is closer to real scenarios than other benchmarks.
+However, \ourbenchmark~could be similar to some possible real-world scenarios even if it still does not cover all possible scenarios.
+The results on \ourbenchmark~demonstrate that \ours~is a robust MIA method on the varying overlap between distributions of members and non-members in a test dataset.
+
+
+
+\section{Conclusion}
+
+We introduce a novel MIA method for LLMs called \ours~that iteratively updates membership scores and prefix scores via an Expectation-Maximization algorithm for better membership inference based on the observation of their duality.
+\ours~significantly outperforms ReCaLL even without strong assumptions that ReCaLL relies on and achieves state-of-the-art performance on WikiMIA.
+\ours~is easily tunable with several design choices, including initialization, score update rules, and stopping criteria, allowing the application to MIA in different conditions and providing room for further improvement. 
+We create a new benchmark for detecting pre-training data of LLMs named \ourbenchmark~to better understand the conditions under which \ours~works with a comprehensive evaluation.
+It turns out that \ours~robustly performs well for all settings except when the distributions of members and non-members are almost identical, resulting in none of the existing methods being better than random guessing.
+
+While our paper focuses on detecting pre-training data with the gray-box access of LLMs where computing the probability of a text from output logits is possible, many proprietary LLMs are usually further fine-tuned~\citep{ouyang2022training}, and they only provide generation outputs, which is the black-box setting.
+We left the extension of our approach to MIAs for fine-tuned LLMs~\citep{song2019auditing, jagannatha2021membership, mahloujifar2021membership, shejwalkar2021membership, mireshghallah2022quantifying, tu2024dice} or for LLMs with black-box access~\citep{dong2024generalization, zhou2024dpdllm, kaneko2024sampling} as future work.
+
+
+
+
+

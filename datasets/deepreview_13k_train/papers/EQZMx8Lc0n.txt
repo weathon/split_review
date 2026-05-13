@@ -1,0 +1,598 @@
+\title{RoCoFT: Efficient Finetuning of Large Language Models with Row-Column Updates}
+
+\begin{abstract}
+We propose RoCoFT, a parameter-efficient fine-tuning method for large-scale language models (LMs) based on updating only a few rows and columns of the weight matrices in transformers.
+Through extensive experiments with medium size LMs like BERT and RoBERTa, and larger LMs like Bloom-7B, Llama2-7B and Llama2-13B, we show that our method gives comparable or better accuracies than state-of-art PEFT methods while also being more memory and computation-efficient. We also study the reason behind the effectiveness of our method with tools from neural tangent kernel theory. We empirically demonstrate that our kernel, constructed using a restricted set of row and column parameters, are numerically close to the full-parameter kernel and gives comparable classification performance. Ablation studies are conducted to investigate the impact of different algorithmic choices, including the selection strategy for rows and columns as well as the optimal rank for effective implementation of our method.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Adapting Large Language Models~(LLMs) to different downstream applications is the current prevailing paradiagm for solving many Natural Language Processing~(NLP) tasks, such as sentiment analysis, machine translation, question answering, named entity recognition, and text summarization. 
+Large language models like GPT-4~\citep{achiam2023gpt} and Llama~\citep{touvron2023llama} are trained on massive amount of text data and contain billions of parameters. 
+They give state-of-art performance on many NLP, mathematical reasoning \citep{hendrycksmath2021, cobbe2021training}, and programming benchmarks\citep{jiang2024survey}. 
+Early works on transfer learning with pretrained LLMs, such as BERT~\citep{devlin2018bert} and RoBERTa~\citep{liu2019roberta}, use full fine-tuning, which updates all the parameters of the LLMs when adapting to downstream tasks. This approach becomes impractical as language models continue to scale up~\citep{hoffmann2022training}, since a separate copy of the model parameters needs to be stored for each downstream application. Updating all the parameters is also prone to overfitting and the loss of LLM capabilities due to catastrophic forgetting~\citep{kirkpatrick2017overcoming}, where the model loses previously learned knowledge while adapting to new tasks. 
+Adaptor methods~\citep{houlsby2019parameter, kowsher2024propulsion} resolve this problem of finetuning LLMs by introducing extra modules called adaptors with a small set of independent parameters. 
+Only the parameters in the adaptors need to be optimized during finetuning, and their small size makes it efficient to adapt an LLM to many different tasks.  
+Parameter-Efficient Finetuning~(PEFT) is the study of adapting LLMs to downstream applications by finetuning only a very small set of parameters. 
+Many PEFT methods have been proposed, including the popular LoRA~\citep{hu2021lora} and its variants \citep{zhang2023adalora, edalati2022krona, hyeon2021fedpara}, prefix and prompt tuning~\citep{li2021prefix, lester2021power}, and many other more advanced and complex adaptor methods \citep{he2021towards, zeng2023one}. 
+These PEFT methods are effective in reducing the number of parameters required to adapt to downstream tasks, while maintaining performance close to full finetuning. 
+
+
+Despite the numerous PEFT methods available, we pose a critical question: can we design \emph{even simpler} PEFT methods capable of adapting LLMs to diverse downstream tasks in a more efficient way? A simpler method could not only enhance computational and storage efficiency but also offer deeper insights into why PEFT methods succeed as simpler methods are easier to analyze. 
+We answer this question by presenting a new method called RoCoFT, where the LLMs can be efficiently adapted by updating only a small subset of rows or columns in the transformer block weight matrices. 
+We evaluate the effectiveness of our approach across several benchmarks on different language models. Our experimental results demonstrate that RoCoFT outperforms current PEFT techniques in accuracies, requires fewer trainable parameters and has faster training times. 
+We further analyze our method using Neural Tangent Kernel (NTK) theory \citep{jacot2018neural, malladi2023kernel}, demonstrating that, for a pretrained LLM, the NTKs derived from a restricted set of rows and columns closely resemble those computed from the full parameter set.
+This substantiates the effectiveness of our proposed method and further suggests that most of the critical features for fine-tuning are already acquired during the pretraining phase.
+This insight helps explain why many PEFT methods are effective with only so few parameters, as minimal additional learning is required when a strong set of foundational features is already established. 
+The contributions of this paper are: 
+
+$\bullet$ We introduce a new PEFT method called RoCoFT which gives comparable or better accuracies than state-of-art PEFT methods, while being more efficient in terms of memory and time complexity. 
+These claims are validated through extensive experiments on language models of different sizes and many benchmark datasets. 
+$\bullet$ We analyze our method with empirical neural tangent kernels and show that these kernels are close to NTKs defined on the full parameter set, and they give comparable accuracies on many tasks when trained with kernel logistic regression. 
+This explains why our method has performance close to full finetuning from the view of kernel methods. 
+
+$\bullet$ We perform extensive ablation studies on the design choices such as which and how many rows and columns to select to facilitate the implementation of our method
+
+
+
+\section{Related Works}
+
+
+{\bf PEFT Methods: }
+Parameter-Efficient Finetuning~(PEFT) methods aim to finetune only a small number of existing or extra parameters of the LLM to achieve results comparable to finetuning all the parameters. Recently, numerous PEFT approaches have been proposed to advance this strategy. 
+LoRA~\citep{hu2021lora} and related methods~\citep{zhang2023adalora, kopiczko2023vera, dettmers2024qlora} modify existing weight matrices of the model by introducing trainable low-rank decomposition matrices, as adapters, into each layer of the Transformer~\citep{vaswani2017attention} architecture. With ranks as low as 4 or 8 for many tasks, they significantly reduce both memory usage and computational time.
+IA$^3$~\citep{liu2022few} is another adaptor method that only trains scaling vectors for the key, value, and feed-forward weight matrices in the attention mechanism for task adaptation.  
+Prefix-Tuning~\citep{li2021prefix} and Prompt-Tuning~\citep{lester2021power,kowsher2023tuning} work by adding task-specific continuous vectors as contexts for inputs and only updates those parameters while keeping the original LLM parameters frozen. 
+MAM adaptors~\citep{he2021towards} generalize from both LoRA and prefix-tuning under a unified framework. 
+Our method is closer to LoRA and IA$^3$ in that we modify the weight matrices in the transformer architecture.  However, unlike these approaches, we introduce no extra parameters and modify the existing parameters in place. 
+BitFit~\citep{zaken2021bitfit} and LayerNorm Tuning~\citep{zhao2023tuning} finetune only the bias parameters and layernorm parameters respectively and are extremely parameter-efficient. 
+However, unlike LoRA and our method they cannot increase the capacity of the finetuning model by increasing the rank, since the number of bias and layernorm parameters are fixed in a model. 
+{\bf Neural Tangent Kernels: }
+~\cite{jacot2018neural} and related studies~\citep{lee2019wide} show that the training dynamics of an infinite-width multi-layer neural network with suitable Gaussian initialization can be completely described by a fixed kernel called the Neural Tangent Kernel~(NTK). 
+This result is further expanded in~\cite{yang2020tensor} to any architecture for which forward and backpropagation can be expressed via nonlinearities and matrix multiplications. In particular, it it shown that in the infinite-width limit for any modern architecture including models with attention layers, the NTK converges almost surely to a deterministic limit.
+Although these results are asymptotic, this interesting connection between deep neural networks and kernel methods allows many questions about neural networks to be studied via kernels. 
+For example, \cite{wei2022more} studied the generalization error of representations learned by deep neural networks through kernel regression with NTKs. 
+Recently \cite{malladi2023kernel} proposed to study the effect of finetuning LLMs through their NTKs, and provided theoretical support to their approach. 
+In this paper, we continue along this line of work to use NTKs to analyze PEFT methods. 
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}[t]{0.22\textwidth}
+        \centering
+\includegraphics[width=0.9\textwidth]{plots_clipped2/LoRA.png}
+        \caption{LoRA}
+    \end{subfigure}%
+    \begin{subfigure}[t]{0.22\textwidth}
+        \centering
+\includegraphics[width=0.9\textwidth]{plots_clipped2/AdaLoRA.png}
+        \caption{AdaLoRA}
+    \end{subfigure}% 
+ \begin{subfigure}[t]{0.22\textwidth}
+        \centering
+   \includegraphics[width=0.99\textwidth]{plots_clipped2/Prompt.png}
+        \caption{Prefix \& Prompt}
+    \end{subfigure}%
+    \begin{subfigure}[t]{0.35\textwidth}
+        \centering
+    \includegraphics[width=0.75\textwidth]{plots_clipped2/RoCoFT4.png}
+        \caption{RoCoFT}
+    \end{subfigure}
+    \caption{A simplified overview of various PEFT methods and RoCoFT~(snowflake icon indicates frozen parameters while fire icon indicates trainable parameters)}    \label{fig:RoCoFT_cmp}
+\end{figure}
+
+
+\section{RoCoFT}
+
+PEFT is a collection of methods for transferring pretrained LLMs to downstream tasks by optimizing only a very small set of (additional) parameters. 
+Since most modern LLMs are based on the transformer architecture~\citep{vaswani2017attention}, there is a line of work in PEFT focusing on modifying the transformer block by freezing most of its parameters and training only a few additional parameters. 
+The method proposed in~\cite{houlsby2019parameter} adds adaptive layers to the transformer blocks, and only parameters in those adaptive layers need to be trained for effective transfer learning. 
+LoRA~\citep{hu2021lora} removes the need for adding adaptive layers by directly modifying the weight matrices used in the transformer blocks. 
+There are multiple linear weight matrices in the transformer block taking up most of the parameters, including $\mbW_q$, $\mbW_k$, $\mbW_v$ for the query, key and value matrices in the attention mechanism, and also the weights $\mbW_{ff}$ for the MLP projection layers. LoRA makes use of a low-rank modification of these weight matrices:
+\[
+  \mbW = \mbW_0 + \mbB\mbA, 
+\]
+where $\mbW_0$ is the pretrained weight matrix, $\mbB$ and $\mbA$ are low rank matrices of rank $r$, and $\mbW$ is the weight matrix after finetuning. 
+In this formulation only $\mbB$ and $\mbA$ are updated. 
+If $\mbW$ is of dimensions $d \times k$, $\mbB$ and $\mbA$ will be of dimensions $d\times r$ and $r\times k$ respectively. 
+If $r \ll d,k$, this can lead to signficant savings in terms of mermory and runtime. 
+IA$^3$ in \citep{liu2022few} also modifies the weight matrices in the tranformer block, but instead of a low-rank modification they rescale the key and value matrices, and also the MLP layers using vectors $l_k$, $l_v$ and $l_{ff}$.
+
+The success of these PEFT methods leads us to ask if there are \emph{even simpler} methods for modifying the transformer block for effective finetuning. 
+Here we propose modifying only a few rows or columns in the weight matrices of the transformer block, for query, key, value weight matrices $\mbW_q$, $\mbW_k$, $\mbW_v$ and also the weight matrices in the feedforward layer $\mbW_{ff}$. 
+These can be expressed as: 
+\[
+  \mbW = \mbW_0 + \mbR  \qquad \mbox{and} \qquad
+  \mbW = \mbW_0 + \mbC  
+\]
+where $\mbR$ and $\mbC$ are restricted weight matrices such that only at most $r$ of the rows or columns are non-zero. 
+In practice we don't need to form these extra parameters $\mbR$ and $\mbC$ and can directly update the parameters in place. 
+Our method is the same as LoRA in its flexibility with increasing the capacity of the finetuning model by increasing the rank $r$, but it is simpler since there is no multiplication of low-rank matrices and all the parameters can be updated in place. 
+There is also no need to worry about the initializations of $\mbA$ and $\mbB$, as studied in~\citep{hayou2024impact}. 
+We call our method RoCoFT for {\bf Ro}w and {\bf Co}lumn-based {\bf F}ine-{\bf T}uning. 
+See Figure~\ref{fig:RoCoFT_cmp} for an illustrative diagram. 
+
+{\bf Intuition on why the method works:} One might wonder why such a simple update scheme can be effective for finetuning LLMs for different tasks, and our experiments in the following sections show even updating 1 row or 1 column per weight matrix can be extremely effective. 
+We believe this is related to the phenomenon that most of the knowledge of the LLMs are learned during the pretraining stage, and only very limited learning or adaptation is required during finetuning, as observed in the work~\cite{zhou2024lima} on the limited number of examples required for finetuning/alignment. 
+ 
+So there is perhaps nothing special about using low-rank or row and column-based matrices.
+As long as there are sufficient number of parameters spread throughout the LLM for updates, finetuning can be successful.   
+We also give support to this argument of most knowledge already acquired during pretraining by making use of the recent theory of NTK for finetuning LLMs~\citep{malladi2023kernel, jacot2018neural}. 
+We show that the kernels~(and thus features) defined by the full parameter set and our restricted parameter set based on a few rows or columns are very similar in their numerical values and classification performance.
+
+
+
+
+\section{Experiments}
+
+
+We evaluate the effectiveness of the proposed RoCoFT method across various NLP tasks, including the General Language Understanding Evaluation (GLUE) benchmark, question answering, text summarization, common sense reasoning, and mathematical reasoning. 
+
+\textbf{Baselines:} For our baseline comparisons, we utilize prominent PEFT methods such as Adapter \citep{houlsby2019parameter}, Prompt Tuning \citep{lester2021power}, Prefix-Tuning \citep{li2021prefix}, (IA)\textsuperscript{3} \citep{liu2022few}, Bitfit \citep{zaken2021bitfit}, LoRA \citep{hu2021lora}, AdaLoRA \citep{zhang2023adaptive}, MAM Adapter \citep{he2021towards}, PROPETL \citep{zeng2023one}, LoKr \citep{edalati2022krona}, \citep{wu2024mixture} and LoHa \citep{hyeon2021fedpara}. The experimental setup for the GLUE benchmark follows \citet{xu2023parameter}, while question answering and text summarization tasks are conducted according to \citet{zhang2023adaptive}.
+
+\textbf{Datasets and Model Selection:} 
+For the GLUE benchmark, we evaluate our RoCoFT method on a diverse set of tasks, including CoLA, SST-2, MRPC, STS-B, QQP, MNLI, QNLI, and RTE from \citet{wang2018glue}, using both RoBERTa Base and Large models \citep{liu2019roberta}. For question answering, we utilize the SQuAD v1.1 \citep{rajpurkar2016squad} and SQuAD v2.0 \citep{rajpurkar2018know} datasets with DeBERTa Base v3 \citep{he2020deberta}. Text summarization is evaluated using the XSum \citep{narayan2018don} and CNN/DailyMail \citep{hermann2015teaching} datasets with the BART Large model \citep{lewis2019bart}. 
+
+For LLM performance using RoCoFT, we conduct an extensive evaluation across thirteen benchmark datasets, covering both common sense reasoning and mathematical reasoning tasks, utilizing four LLMs: Bloom 7B \citep{le2023bloom}, GPT-J 6B \citep{mesh-transformer-jax}, LLaMa2-7B and LLaMA2-13B from \citet{touvron2023llama}. For common sense reasoning, we employ a wide range of datasets, including BoolQ \citep{clark2019boolq}, PIQA \citep{bisk2020piqa}, SIQA \citep{sap2019socialiqa}, HellaSwag \citep{zellers2019hellaswag}, WinoGrande \citep{sakaguchi2021winogrande}, ARC-easy and ARC-challenge \citep{clark2018think}, and OBQA \citep{OpenBookQA2018}, ensuring comprehensive coverage of the model's ability to handle diverse aspects of common sense reasoning. For mathematical reasoning, we use several specialized datasets, including MultiArith \citep{roy2016solving}, GSM8K \citep{cobbe2021training}, AddSub \citep{hosseini2014learning}, SingleEq \citep{koncel2015parsing}, and SVAMP \citep{patel2021nlp}, to assess the model’s performance on arithmetic reasoning tasks.
+
+\begin{table*}[ht]
+\centering
+\scalebox{.70}{
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{l|c|cccccccccc} 
+\hline
+\textbf{LM} & \textbf{PEFT Method} & \textbf{\# TTPs} & \textbf{CoLA} & \textbf{SST2} & \textbf{MRPC} & \textbf{STS-B} & \textbf{QQP} & \textbf{MNLI} & \textbf{QNLI} & \textbf{RTE} & \textbf{Avg.} \\
+\hline
+
+\multirow{14}{*}{\rotatebox{270}{\textbf{Roberta\textsubscript{Base}}}} & FT & 124.6M & 59.84 & 92.89 & 85.24/88.18 & 90.48/90.16 & 90.18/87.02 & 86.27 & 91.17 & 72.43 & 83.56/88.43  \\ \cline{2-12}
+& Adapter\textsuperscript{S} & 7.41M & 61.53 & 94.11 & \textcolor{black}{\textbf{89.81/90.85}} & 90.25/90.09 & 89.81/\textcolor{black}{\textbf{86.90}} & 86.27 & \underline{992.06} & 73.56 & 84.67/90.33 \\
+& Prompt tuning & 0.61M & 49.37 & 92.09 & 70.83/81.72 & 82.44/83.11 & 82.99/78.35 & 80.57 & 80.03 & 58.12 & 74.55/81.06 \\
+& Prefix-tuning & 0.96M & 59.31 & 93.81 & 84.25/85.03 & 88.48/88.32 & 87.75/84.09 & 85.21 & 90.77 & 54.51 & 80.51/85.31 \\
+& (IA)\textsuperscript{3} & 0.66M & 58.58 & 93.92 & 83.00/85.52 & 90.30/90.32 & 87.99/84.10 & 83.95 & 90.88 & 71.12 & 82.46/86.64 \\
+& BitFit & 0.083M & 61.32 & 93.12 & 87.22/88.41 & 90.34/90.27 & 88.12/84.11 & 84.64 & 91.09 & 77.98 & 84.22/87.59 \\
+& LoRA & 0.89M & 60.09 & 93.31 & 86.50/88.68 & 90.66/90.47 & 88.83/85.21 & 86.54 & 92.02 & 74.92 & 84.32/87.28 \\
+& AdaLoRA & 1.03M & 59.82 & 93.92 & 86.49/88.03 & 90.83/\textcolor{black}{\underline{90.73}} & 88.58/84.98 & 86.26 & 91.43 & 70.04 & 84.06/87.21 \\
+& MAM Adapter & 1.78M & 58.34 & 94.24 & 87.31/88.21 & 90.74/90.42 & 88.31/83.20 & 86.63 & 90.19 & 72.62 & 83.54/87.27 \\
+& PROPETL \textsubscript{Adapter} & 1.87M & \textcolor{black}{\textbf{64.24}} & 93.85 & 87.15/87.82 & 90.33/\textcolor{black}{\textbf{90.64}} & 89.22/85.79 & 86.49 & 91.56 & 75.54 & 84.79/88.08 \\
+& PROPETL \textsubscript{Prefix} & 10.49M & 60.11 & 93.63 & 86.73/87.98 & 90.30/90.19 & 88.54/85.05 & 86.22 & 91.51 & 63.31 & 82.54/87.74 \\
+& PROPETL \textsubscript{LoRA} & 1.77M & 57.94 & 94.11 & 87.42/88.87 & 90.66/90.35 & 88.90/85.55 & \textcolor{black}{\underline{86.83}} & 92.04 & 67.39 & 83.16/88.25 \\ 
+& MoSLoRA & 1.67M  & 60.57 & 93.95 & 86.74/87.98 & 90.05/89.43 & 88.76/85.62 & \textcolor{black}{\textbf{87.84}} & 90.60 & 75.10 & 84.20/88.70 \\
+\cline{2-12} 
+&RoCoFT\textsubscript{1-Row} & 0.083M & 60.18 & 94.06  & 87.74/88.48&90.70/90.47 & 88.49/85.35& 85.23 & 90.70 & 76.61 & 84.21/89.97\\
+&RoCoFT\textsubscript{3-Row} & 0.418M & \textcolor{black}{\underline{63.53}} & \textcolor{black}{\textbf{94.92}} & \textcolor{black}{\underline{89.71}}/90.74& \textcolor{black}{\textbf{90.89}}/90.49& \textcolor{black}{\textbf{89.97}}/\textcolor{black}{\underline{86.80}} & 86.73 & \textcolor{black}{\textbf{92.12}} & \underline{78.31} & \textcolor{black}{\textbf{85.65}}/\underline{90.61} \\
+&RoCoFT\textsubscript{1-Column} & 0.083M & 60.32 & 93.88 & 88.38/89.78 & 90.23/90.14& 88.46/85.84& 85.35& 90.58& 76.74 & 84.11/89.96\\
+&RoCoFT\textsubscript{3-Column} & 0.418M & 62.95 & \textcolor{black}{\underline{94.69}}& 89.18/\textcolor{black}{\underline{90.94}} & \textcolor{black}{\underline{90.85}}/90.45& \textcolor{black}{\underline{89.86}}/86.38 & 86.76& 91.89 & \textcolor{black}{\textbf{79.21}} & \underline{85.55}/\textcolor{black}{\textbf{90.69}}\\
+
+\hline
+
+\multirow{14}{*}{\rotatebox{270}{\textbf{Roberta\textsubscript{Large}}}} & FT & 355.3M & 65.78 & 95.50 & 92.22/94.28 & 91.74/91.96 & 90.83/88.68 & 89.21 & 93.19 & 81.40 & 87.48/91.64 \\ \cline{2-12}
+
+& Adapter\textsuperscript{S} & 19.77M & 65.33 & 96.37 & 89.88/90.23 & \textcolor{black}{\textbf{92.58}}/92.42 & \textcolor{black}{\underline{91.19/87.11}} & 91.00 & 94.31 & 85.25 & 88.24/90.05 \\ 
+& Prompt-tuning & 1.07M & 61.13 & 94.61 & 73.04/76.29 & 78.51/78.99 & 80.74/75.16 & 68.15 & 89.13 & 60.29 & 75.70/76.81 \\
+& Prefix-tuning & 2.03M & 59.01 & 95.76 & 88.24/89.37 & 90.92/91.07 & 88.88/85.45 & 89.30 & 93.32 & 74.01 & 84.93/88.63 \\
+& (IA)\textsuperscript{3} & 1.22M & 61.15 & 94.61 & 86.45/87.53 & 92.22/86.25 & 89.45/86.25 & 88.63 & 94.25 & 81.23 &85.99/86.67 \\
+& Bitfit& 0.222M & 67.01 & 96.10 & 90.93/92.13 & 91.93/\textcolor{black}{\textbf{93.38}} & 89.48/86.43 & 89.98 & 94.47 & 87.73 & 88.45/\underline{90.14} \\
+& LoRA & 1.84M & 64.47 & \textcolor{black}{\underline{96.67}} & 87.50/88.19 & 91.66/91.44 & 90.15/86.91 & 90.76 & \textcolor{black}{\underline{95.00}} & 79.78 & 86.99/88.85 \\
+& AdaLoRA & 2.23M & 65.85 & 94.95 & 89.46/90.34 & 92.05/91.80 & 89.60/86.30 & 90.36 & 94.62 & 77.98 & 86.86/89.48 \\
+& MAM Adapter & 4.20M & \textcolor{black}{\textbf{67.39}} & 95.81 & 90.12/92.07 & 92.44/92.18 & 90.87/86.65 & 90.62 & 94.31 & 86.62 & 88.52/\textbf{90.30} \\
+& PROPETL \textsubscript{Adapter} & 5.40M & 65.55 & 96.27 & 89.71/91.15 & 91.92/91.67 & 90.67/87.74 & \textcolor{black}{\textbf{91.37}} & 94.80 & 87.69 & 88.69/90.18 \\
+& PROPETL \textsubscript{Prefix} & 26.85M & 62.24 & 96.17 & 90.04/91.92 & 90.70/90.49 & 89.30/86.30 & 90.33 & 94.73 & 79.71 & 86.65/89.57 \\
+& PROPETL \textsubscript{LoRA} & 4.19M & 61.90 & 95.93 & 87.31/89.87 & 91.66/91.38 & 90.93/88.05 & 90.53 & 94.93 & 83.57 & 87.31/90.54 \\
+& MoSLoRA & 3.23M  & \textcolor{black}{\underline{67.27}} & 96.17 & 89.96/92.67 & 90.97/91.72 & 90.12/87.68 & 90.29 & 94.73 & 82.41 &  87.43/90.69\\
+\cline{2-12} 
+&RoCoFT\textsubscript{1-Row} & 0.222M & 65.70 & 96.63  & 89.97/90.79&91.81/92.07 & 90.17/86.15& 90.73 & 94.20 & 85.31 & 88.07/89.67\\
+&RoCoFT\textsubscript{3-Row} & 0.666M & \textcolor{black}{\textbf{67.39}} & \textcolor{black}{\textbf{96.69}} & \textcolor{black}{\textbf{91.05/92.19}}& 92.10/92.10& 90.82/86.11 & 90.98 & 94.85 & \textcolor{black}{\underline{87.83}} & \textcolor{black}{\textbf{88.96}}/90.13\\
+&RoCoFT\textsubscript{1-Column} & 0.222M & 64.89 & 96.60 & 89.12/90.24 & 91.96/92.10& 90.17/85.83& 90.81& 94.17& 85.71 & 87.92/89.39\\
+&RoCoFT\textsubscript{3-Column} & 0.666M & 67.18 & \textcolor{black}{\underline{96.67}}& 89.88/91.47 & \textcolor{black}{\underline{92.52/92.31}}& \textcolor{black}{\textbf{91.38/87.12}} & \textcolor{black}{\underline{91.13}} & 94.85 & 87.82 & \textcolor{black}{\underline{88.93}}/\textcolor{black}{\textbf{90.30}}\\
+
+\hline
+
+\end{tabular}
+}
+\caption{RoBERTa models performance on GLUE tasks: Metrics used are MCC for CoLA, Accuracy for SST-2, Accuracy and F1 score for MRPC and QQP, Pearson and Spearman correlations for STS-B, and Accuracy for MNLI, QNLI, and RTE.}\label{tab:roberta_glue}
+\end{table*}
+\begin{table*}[ht]
+\centering
+\scalebox{.78}{
+\begin{tabular}{l|ccc|ccc}
+\hline
+\textbf{PEFT Method} & \textbf{\#TTPs} & \textbf{SQuADv1.1} & \textbf{SQuADv2.0}  & \textbf{\#TTPs}  & \textbf{XSum} & \textbf{CNN/DailyMail}  \\
+\hline
+FT & 184M & 82.83 / 88.14 & 82.92 / 83.75 & 460M &  40.73 / 16.19 / 30.13 & 39.16 / 18.92 / 37.04  \\ \hline
+
+Prompt tuning & 0.650M & 74.52 / 78.42 & 73.59 / 76.72 & 0.755M & 38.24 / 14.46 / 27.89 &  37.42 / 17.43 / 34.92 \\
+Prefix-tuning & 1.733M & 78.38 / 82.94 & 74.94 / 79.04  & 2.983M& 38.24 / 15.16 / 28.84 &  38.32 / 17.72 / 35.76 \\
+LoKr & 0.815M & 80.64 / 86.45 & 80.14 / 81.96  & 1.089M
+& 39.03 / 16.14 / 30.42 &   \textcolor{black}{\textbf{40.83}} /  \textcolor{black}{\underline{19.10}} / 38.75 \\
+Bitfit & 0.172M & 80.53 / 86.25 & 79.06 / 83.75  & 0.672M & 39.10 / 16.87 / 30.43 & 39.93 / 18.12 / 38.85 \\
+LoHa & 0.765M & 81.43 / 88.02 & 81.67 / 85.01 & 1.285M &40.12 / 18.08 /  \textcolor{black}{\textbf{32.39}} &  39.98 / 18.84 / 38.01\\
+LoRA & 0.740M &  \textcolor{black}{\underline{81.64 / 87.16}} & {82.56} /  \textcolor{black}{\underline{85.75}}& 1.242M &  \textcolor{black}{\textbf{40.63}} / {18.44} / {32.15} & {40.74} / {19.10} / {39.24}\\
+AdaLoRA &0.810M &  81.16 / {87.75} &  \textcolor{black}{\underline{82.63}} /  \textcolor{black}{\textbf{85.82}}  & 1.663M & {40.95} / {18.28} / {31.84} & 40.53 / 18.24 /  \textcolor{black}{\textbf{39.63}} \\ \hline
+RoCoFT\textsubscript{Row} & 0.161M &  \textcolor{black}{\textbf{81.70 / 88.15}} &  \textcolor{black}{\textbf{82.76}} / 85.14  & 0.597M & 40.12 /  \textcolor{black}{\underline{18.48}} / 31.93 &  \textcolor{black}{\textbf{40.83}} /  \textcolor{black}{\textbf{19.12}} /  \textcolor{black}{\underline{39.55}} \\
+RoCoFT\textsubscript{Column} & 0.161M & 81.63 / 88.11 & 82.60 / 85.05 & 0.597M &  \textcolor{black}{\underline{40.62}} /  \textcolor{black}{\textbf{18.54}} /  \textcolor{black}{\underline{32.17}} &  40.18 /  \textcolor{black}{\underline{19.10}} / 39.21\\
+\hline
+\end{tabular}
+}
+\caption{Results of DeBERTaV3-bas  on SQuAD v1.1, v2.0 benchmarks, reported using EM/F1 scores and BART-large on XSum and CNN/Daily Mail, reported using ROUGE metrics (ROUGE-1, ROUGE-2, ROUGE-L).}\label{tab:deberta_bart_squad}
+
+\end{table*}
+
+
+\begin{table*}[htbp]
+\centering
+\scalebox{.70}{
+\setlength{\tabcolsep}{3.4pt}
+\begin{tabular}{l|c|ccccccccc|ccccc}
+\hline
+\textbf{LLM} & \textbf{Method} &  \textbf{\# TTPs} &\textbf{BoolQ} & \textbf{PIQA} & \textbf{SIQA} & \textbf{H.Sw.} & \textbf{W.Gra.} & \textbf{ARCe} & \textbf{ARCc} & \textbf{OBQA} & \textbf{M.Ar.} & \textbf{G.8K} & \textbf{A.S.} & \textbf{S.eEq} & \textbf{S.MP}\\
+\hline
+\multirow{4}{*}{\rotatebox{270}{\textbf{BLOOMz$_{7B}$}}} & Prefix & 33.37M & 58.53 & 62.24 & 65.41 & 48.32 & 66.63 & 68.13 & 49.32 & 63.51 & 78.41 & 66.45 & 67.52 & 66.94 & 49.10\\
+& AdaLoRA & 24.88M & 64.94 & \textcolor{black}{\textbf{74.68}} & 72.49 & 55.89 & 68.30 & {73.21} & 56.59 & {72.85} & {79.43} & 70.25 & 68.93  & \textcolor{black}{\textbf{70.93}} & {53.89} \\
+& (IA)\textsuperscript{3}& 19.34M &63.30 & \underline{73.33} & 71.01 & 52.50 & 71.60 & 69.45 & 54.14 & 68.60 & 78.90 & \textcolor{black}{\textbf{71.17}} & 70.33 & 70.84 & 53.95 \\
+& LoRA  & 24.22M & {65.89} & {73.92} & {73.33} & \textcolor{black}{\textbf{56.65}} & {71.39} & \textcolor{black}{\textbf{73.46}} & {57.15} & 72.31 & {79.50} & {70.93} & \textcolor{black}{\underline{70.90}} & 70.59 & 53.85 \\
+& RoCoFT\textsubscript{Row} & 13.37M & \underline{66.33} & 74.53 & \textcolor{black}{\textbf{73.56}} & \textcolor{black}{\underline{56.60}} & {72.14} & \textcolor{black}{\underline{73.29}} & \textcolor{black}{\textbf{57.48}} & \textcolor{black}{\textbf{72.92}} & \textcolor{black}{\textbf{79.76}} & {70.94} & \textcolor{black}{\textbf{70.95}} &  \underline{70.90} & \textcolor{black}{\textbf{54.42}}\\
+& RoCoFT\textsubscript{Column} & 13.37M & \textbf{66.34} & \textcolor{black}{\underline{74.64}} & {73.12} & {55.93} & \textcolor{black}{\textbf{72.50}} & 73.11 & \textcolor{black}{\underline{57.19}} & \textcolor{black}{\underline{72.90}} & \underline{79.72} & \underline{71.05} & {70.88} &  {70.76} & \textcolor{black}{\underline{54.38}}\\
+
+\hline
+
+\multirow{4}{*}{\rotatebox{270}{\textbf{GPT-J$_{6B}$}}} & Prefix & 27.83M & 62.28 & 65.04 & 67.72 & 44.15 & 63.71 & 63.59 & 46.47 & 58.31 & 83.12 & 67.44 & 75.25 & 78.46 & 49.12\\
+& AdaLoRA & 20.77M & 65.19 & 67.58 & \textcolor{black}{\textbf{71.22}} & 45.16 & 66.03 & 64.10 & \textcolor{black}{\textbf{47.75}} & 63.92 & 88.51 & 72.45 & 80.21 & \textcolor{black}{\underline{82.03}} & 56.14 \\
+& (IA)\textsuperscript{3}& 16.61M &63.17 & \textcolor{black}{\underline{68.51}} & 68.97 & 45.79 & 66.06 & 62.42 & 45.32 & \textbf{65.42} & \textcolor{black}{\underline{89.51}} & 72.04 & \underline{80.50}  & 81.50 & 55.43 \\
+& LoRA & 20.02M & \textcolor{black}{\underline{65.50}} & 67.63 & 69.46 & 45.60 & \textcolor{black}{\underline{66.80}} & 63.56 & 46.81 & 63.82 & 88.30 & \textcolor{black}{\textbf{72.82}} & \textcolor{black}{\textbf{80.60}} & 81.24 & \textcolor{black}{\underline{56.73}} \\
+& RoCoFT\textsubscript{Row} & 11.62M & \textcolor{black}{\textbf{65.92}} & \textbf{68.53} & 69.90 & \textcolor{black}{\underline{45.97}} & \textcolor{black}{\textbf{66.87}} & \textbf{64.91} & 45.12 & \textcolor{black}{\underline{65.07}} & 89.45 & \textcolor{black}{\underline{72.80}} & 80.45 & 82.12 & \textcolor{black}{\textbf{56.79}}\\
+& RoCoFT\textsubscript{Column} & 11.62M & 65.12 & 68.22 & \textcolor{black}{\underline{69.96}} & \textcolor{black}{\textbf{45.98}} & 66.78 & \textcolor{black}{\underline{64.89}} & \underline{45.70} & 64.81 & \textcolor{black}{\textbf{89.74}} & 72.24 & 80.23 & \textcolor{black}{\textbf{82.61}} & 56.70\\
+
+\hline
+
+\multirow{4}{*}{\rotatebox{270}{\textbf{LLaMA-2$_{7B}$}}} & Prefix & 33.53M & 67.33 & 79.46 & 75.80 & 76.04 & 72.11 & 71.67 & 57.33 & 69.98  & 84.18 & 68.47 & 81.04 & 80.00 & 52.17\\
+& AdaLoRA & 24.90M & 67.03 & 78.69 & 76.06 & 88.85 & 76.47 & \underline{76.50} & 60.36 & 74.22 & 89.81 & 77.07 & \textcolor{black}{\textbf{86.70}} & \textcolor{black}{\underline{83.01}} & 60.25 \\
+& (IA)\textsuperscript{3}& 19.42M & 65.02 & 78.10 & \textcolor{black}{\underline{78.00}} & 87.57 & \textcolor{black}{\underline{76.78}} & 75.48 & 60.54 & 74.02 & 90.20 & 76.13 & \textcolor{black}{\underline{86.55}} & \textcolor{black}{\textbf{83.70}} & 59.16\\
+& LoRA & 24.30M & 67.09 & 79.37 & 76.15 & 88.86 & \textcolor{black}{\textbf{77.54}} & \textcolor{black}{\textbf{76.54}} & \underline{60.55} & 74.63 & 90.13 & 75.68 & 84.67  & 82.14 & 59.94\\
+&RoCoFT\textsubscript{Row} & 13.47M & \textcolor{black}{\textbf{69.36}} & \textcolor{black}{\underline{80.01}} & \textcolor{black}{\textbf{78.09}} & \underline{89.28} & 76.73 & 76.46 & \underline{60.55} & \textcolor{black}{\textbf{76.96}} & \textcolor{black}{\textbf{90.55}} & \textcolor{black}{\textbf{77.37}} & 86.12 & 82.66 & \textcolor{black}{\textbf{60.75}} \\
+& RoCoFT\textsubscript{Column}& 13.47M & \textcolor{black}{\underline{69.32}} & \textbf{80.08} & 77.99 & \textcolor{black}{\textbf{89.46}} & 76.41 & 76.46 & \textcolor{black}{\textbf{60.59}} & \textcolor{black}{\underline{76.90}} & \underline{90.42} & \textcolor{black}{\underline{77.35}} & 86.16 & 82.48 & \underline{60.35} \\
+
+\hline
+
+\multirow{4}{*}{\rotatebox{270}{\textbf{LLaMA-2$_{13B}$}}} & Prefix & 61.97M & 68.38 & 80.99 & 77.80 & 80.00 & 76.35 & 77.62 & 61.32 & 72.94 & 87.22 & 71.09 & 84.09  & 81.28 & 58.25 \\
+& AdaLoRA & 45.04M &\textcolor{black}{\textbf{71.71}} & 82.55 & 78.88 & 91.60 & 83.01 & 83.04 & \textcolor{black}{\textbf{67.33}} & \textcolor{black}{\textbf{81.76}} & 90.55 & \textcolor{black}{\textbf{80.19}} & 87.00 & 87.10 & 66.03 \\
+& (IA)\textsuperscript{3}& 36.02M & 71.39 & 83.33 & 78.32 & \textcolor{black}{\textbf{92.40}} & \textcolor{black}{\textbf{83.24}} & 83.34 & 66.43 & 80.99 & \textcolor{black}{\textbf{91.88}} & 79.24  & \textcolor{black}{\underline{88.16}} & 87.08 & 65.63 \\
+& LoRA & 44.94M & 71.19 & \textcolor{black}{\textbf{83.99}} & 79.15 & \underline{91.86} & \textcolor{black}{\textbf{83.24}} & 83.35 & 67.05 & 81.37  & 91.27 & 78.90  & 86.89 & 86.07 & 65.85 \\
+& RoCoFT\textsubscript{Row} & 24.88M & \textcolor{black}{\underline{71.46}} & 83.32 & \textcolor{black}{\textbf{79.54}} & \underline{91.86} & 83.22 & \textcolor{black}{\textbf{83.65}} & \textcolor{black}{\underline{67.12}} & 81.54 & 90.69 & \underline{79.70} & \textcolor{black}{\textbf{88.24}} & \textcolor{black}{\underline{87.28}} & \underline{66.60} \\
+& RoCoFT\textsubscript{Column} & 24.88M & 71.44 & \textcolor{black}{\underline{83.52}} & \textcolor{black}{\underline{79.50}} & 91.84 & \underline{83.20} & \underline{83.39} & 67.06 & \textcolor{black}{\underline{81.73}} & \underline{91.46} & 79.63 & 88.11 & \textbf{87.58} & \textcolor{black}{\textbf{66.63}} \\
+
+\hline
+\end{tabular}
+}
+\caption{Accuracy comparison of commonsense and mathematical reasoning performance across different PEFT methods using LLMs.}
+\label{table:LLM_results}
+\end{table*}
+
+\textbf{Performance Analysis: } Table~\ref{tab:roberta_glue} presents the validation performance of RoCoFT compared with baselines on the GLUE benchmark tasks~\citep{wang2018glue}. RoCoFT achieves competitive or superior results while updating significantly fewer parameters. For instance, RoCoFT\textsubscript{3-Row}, with only 0.418 million trainable parameters, attains an average score of 85.65/90.61 on RoBERTa-base~\citep{liu2019roberta}, outperforming methods like LoRA~\citep{hu2021lora} and MAM Adapter~\citep{he2021towards}, which utilize more parameters. Moreover, RoCoFT variants consistently rank among the top performers across multiple tasks such as the MRPC, QNLI, and RTE, demonstrating robustness and versatility. On RoBERTa-large, RoCoFT\textsubscript{3-Row} matches the highest MCC score of 67.39 on the CoLA, achieves an accuracy of 96.69\% on the SST-2, and attains better performance on MRPC, Quora Question Pairs (QQP), QNLI, and RTE.
+
+As shown in Table~\ref{tab:deberta_bart_squad}, our proposed methods demonstrate superior performance on both question answering and summarization tasks while utilizing significantly fewer trainable parameters. Specifically, on the SQuAD v1.1 dataset~\citep{rajpurkar2016squad}, the RoCoFT\textsubscript{3-Row} method achieves the highest Exact Match (EM) and F1 scores of 81.70/88.15, outperforming other PEFT methods such as LoRA and AdaLoRA~\citep{zhang2023adalora}, which require more parameters. Similarly, on SQuAD v2.0~\citep{rajpurkar2018know}, the RoCoFT\textsubscript{3-Column} attains the top ROUGE-2 score of 8.54 on XSum, showcasing its effectiveness in handling text summarization.
+
+Table~\ref{table:LLM_results} showcases the performance of our proposed RoCoFT across various LLMs and tasks. Notably, these methods consistently achieve superior or competitive results compared to existing PEFT techniques. For the BLOOMZ$_{7\mathrm{B}}$ model~\citep{muennighoff2022crosslingual}, the RoCoFT\textsubscript{3-Row} method attains the highest accuracy on Social IQa (SIQA, 73.56\%), AI2 Reasoning Challenge (ARC-C, 57.48\%), OpenBookQA (OBQA, 72.92\%), MultiArith (M.Ar., 79.76\%), Arithmetic Sequence (A.S., 70.95\%), and Single-Math Problems (S.MP, 54.42\%). The RoCoFT\textsubscript{3-Column} variant also performs exceptionally well, achieving top scores on WinoGrande (W.Gra., 72.50\%) and Grade School Math 8K (GSM8K, 71.05\%). Similarly, with the GPT-J$_{6\mathrm{B}}$ model~\citep{mesh-transformer-jax}, our methods maintain strong performance. The RoCoFT\textsubscript{3-Row} method achieves the best results on Boolean Questions (BoolQ, 65.92\%), MultiArith (89.45\%), and S.MP (56.79\%), while the RoCoFT\textsubscript{3-Column} method excels on SIQA (69.96\%) and SingleEq (S.eEq, 82.61\%).
+
+When scaled to larger models like LLaMA2$_{7\mathrm{B}}$ and  LLaMA2$_{13\mathrm{B}}$~\citep{touvron2023llama}, our methods continue to demonstrate their effectiveness. On  LLaMA2$_{7\mathrm{B}}$, the RoCoFT\textsubscript{3-Row} method secures the highest accuracy on BoolQ (69.36\%), SIQA (78.09\%), OBQA (76.96\%), M.Ar. (90.55\%), and GSM8K (77.37\%). The RoCoFT\textsubscript{3-Column} variant achieves top performance on HellaSwag (H.Sw., 89.46\%) and S.eEq (82.48\%). For  LLaMA2$_{13\mathrm{B}}$, both RoCoFT\textsubscript{3-Row} and RoCoFT\textsubscript{3-Column} methods attain leading results on multiple tasks, with the RoCoFT\textsubscript{3-Row} method achieving the highest accuracy on SIQA (79.54\%), ARC-Easy (ARCe, 83.65\%), A.S. (88.24\%), and S.MP (66.60\%).
+
+These results underscore RoCoFT's ability to deliver state-of-the-art performance while maintaining parameter efficiency, making it highly suitable for deployment in resource-constrained environments.
+\begin{figure}[htbp]
+    \centering
+    \begin{minipage}{0.57\textwidth}
+        \centering
+        \setlength{\tabcolsep}{2.5pt}
+        \scalebox{0.72}{
+    \begin{tabular}{l|llll}
+    \hline
+        \textbf{Methods} & \textbf{Space}  & \textbf{Time} & \textbf{TTPs} & \textbf{APs}  \\
+        \hline
+
+        FT & $O(d \times d)$ & $O(d \times d)$ &  $d^2$ & $0$\\
+        $(IA)^3$ & $O(l_{k}+l_{v}+l_{ff})$ & $O(d_{k}+d_{v}+d_{ff})$ & $3d$ & $3d$\\
+        Prompt  & \(O(d \times l_{p})\) & \(O(d \times l_{p})\) & $l_p.d$& $l_p.d$\\
+        Prefix & \(O(L \times d \times l_{p})\) & \(O(L \times d \times l_{p})\) & $L.l_p.d$  & $L.l_p.d$\\ %\hline
+    
+        LoRA & $O((d+d) \times r)$ & $O((d+d) \times r)$ & $2dr$ & $2dr$\\
+        LoRA-FA & $O((d+d) \times r)$ & $O((d+d) \times r)$ & $dr$ & $2dr$\\
+
+        AdaLoRA & $O((d+d+r) \times r)$ & $O((d+d+r) \times r)$ & $2dr+r^2$ & $2dr+r^2$\\
+        LoHA & $O(2r  \times (d+d))$ & $O(2r  \times (d+d))$ & $4dr$ & $4dr$\\
+        \hline
+        \emph{RoCoFT\textsubscript{Row}} & \(O(d \times r)\)  & \(O(d \times r)\) & $rd$ & $0$ \\
+        \emph{RoCoFT\textsubscript{Column}} & \(O(d \times r)\)  & \(O(d \times r)\) & $rd$  & $0$\\
+        \hline       
+\end{tabular}}
+\captionof{table}{Space/Time Complexity; Total Trainable Parameters (TTPs) and Additional Parameters in model (Aps) for \emph{RoCoFT} method and baseline methods for single layer $\mbW\in \mathbb{R}^{d \times d}$. Within this table, we define \(l_{k}, l_{v},\) and \(l_{ff}\) as the dimensions of three learned vectors in  IA$^{3}$; and \(l_{p}\) as the length of the prompt added to the input/layers in prompt tuning and prefix-tuning.  For LoRA-type methods, we use \(r\) to represent the rank dimension.}\label{table:complexity}
+    \end{minipage}%
+    \setlength{\abovecaptionskip}{-3pt}
+    \hfill
+    \begin{minipage}{0.42\textwidth}
+        \centering
+        \includegraphics[width=5.2cm, height=5.0cm]{memory.png}
+        \caption{Comparison of memory costs for PEFT Methods. Blue bars show the memory cost of the original model weights, while green bars show the memory cost for optimization in each method.}
+        \label{fig:memory}
+    \end{minipage}
+\end{figure}
+\begin{figure*}[!t]
+\setlength{\abovecaptionskip}{-1pt}
+    \centering
+    \includegraphics[width=12.0cm, height=5.0cm]{time.png}
+  
+\caption{Training time (minutes) comparison across different PEFT methods.}
+\label{fig:training_time}
+\end{figure*}
+\textbf{Efficiency Comparison:} Our proposed method, RoCoFT, demonstrates significant parameter efficiency compared to existing PEFT techniques. Specifically, RoCoFT variants require substantially fewer trainable parameters while achieving competitive or superior performance.
+
+For instance, as shown in Table~\ref{tab:roberta_glue}, RoCoFT\textsubscript{Row} uses only 0.083 million trainable parameters for rank one and 0.418 million for rank three on the GLUE benchmark~\citep{wang2018glue}, outperforming methods like LoRA~\citep{hu2021lora} and MAM Adapter~\citep{he2021towards}, which use 0.89 million and 1.78 million parameters, respectively. Similarly, in question answering and summarization tasks (Table~\ref{tab:deberta_bart_squad}), our Row and Column methods utilize just 0.161 million trainable parameters, significantly less than LoRA and AdaLoRA~\citep{zhang2023adalora}, yet achieve higher or comparable performance.
+
+In terms of computational efficiency (Table~\ref{table:complexity}), our method exhibits lower space and time complexity. Specifically, RoCoFT has a time/space complexity of $O(r \times d)$, compared to LoRA's $O(2d \times r)$ and Prefix-Tuning's $O(L \times d \times l_p)$, where $r$ is the rank, $d$ is the model dimension, $L$ is the number of layers, and $l_p$ is the length of the prefix. Moreover, our method does not introduce any additional parameters into the model architecture, which also reduces the total number of parameters and requires less GPU memory and training time, as illustrated in Figure~\ref{fig:memory}. RoCoFT variants have lower memory occupancy during training (approximately $2.85\mathrm{GB}$) compared to other methods like LoRA and AdaLoRA, and consistently require less training time across various datasets, as shown in Figure~\ref{fig:training_time}. These results underscore the efficiency of our approach in terms of both parameter count and computational resources, highlighting its suitability for deployment in resource-constrained environments.
+
+
+\section{Finetuning through Neural Tangent Kernel Regression}
+
+Kernel methods are classic machine learning algorithms that make use of kernel functions for learning nonlinear mapping of inputs, with SVMs~\citep{cortes1995support} and Gaussian Processes~\citep{williams2006gaussian} being the prime examples. 
+A kernel function $\mbK: \calX \times \calX \rightarrow \mathbb{R}$ is a similarity function on the input space $\calX$ that satisfies certain symmetry and positive semi-definiteness conditions.  
+If these conditions~(Mercer's conditions) are satisfied the kernel behaves like an inner product over a possibly infinite dimensional space called the Reproducing Kernel Hilbert Space~(RKHS) $\calH$. 
+The RKHS $\calH$ contains functions $f: \calX \rightarrow \mathbb{R}$ that maps inputs to real numbers. 
+Although the functions $f \in \calH$ are infinite dimensional, when minimizing a loss function $\calL$ over a finite training sample $\{\mbx_i, \mby_i\}_{i=1}^n$, the Representer Theorem~\citep{scholkopf2001generalized} tells us that the optimal solution takes the form
+\[
+  f^*(\cdot) = \sum_{i=1}^n \alpha_i \mbK(\mbx_i, \cdot), 
+\]
+where $\alpha_i$ are coefficients that can depend on labels $\mby_i$. 
+When the loss function $\calL$ is convex the minimization problem is also convex. 
+The ability to learn nonlinear mappings of inputs through solving convex optimization problems makes kernel methods a powerful tool in machine learning. 
+
+Kernel methods differ from deep learning with neural networks in that the kernels~(and hence the feature representations) are fixed during learning, while deep neural networks continuously update their feature representations during backpropagation. 
+\cite{jacot2018neural} made the important discovery that under certain conditions, in the infinite width limit, the training of deep neural networks can be described by a fixed kernel called the Neural Tangent Kernel~(NTK).  
+For a neural network function $f_{\btheta}: \calX \rightarrow \mathbb{R}^k$ parameterized by $\btheta$, its Neural Tangent Kernel is defined by
+\[
+  \mbK_{{\btheta}}(\mbx, \mbx') = \langle \nabla f_{{\btheta}}(\mbx), \nabla f_{{\btheta}}(\mbx') \rangle, 
+\]
+where $\nabla f_{{\btheta}}(\mbx)$ is the corresponding Jacobian.($\nabla f_{{\btheta}}(\mbx)$ is $p\times k$ if $\btheta$ has $p$ parameters, and $\mbK_{{\btheta}}(\mbx, \mbx')$ is $k\times k$) %\te{for $k$ outputs.}\te{it is already mentioned above that  $f \in  \mathbb{R}^{k}$}
+This connection allows us to study the behaviour of neural networks with kernel methods. 
+\cite{malladi2023kernel} extends the NTK theory to model the finetuning of LLMs.  
+As an alternative to finetuning by SGD, given training data $(\mbx_i, \mby_i)_{i=1}^n$ for a downstream classification task, we can instead solve the following kernel logistic regression problem
+\[
+  \min_{f\in \calH} \sum_{i=1}^n \calL(f(\mbx_i), \mby_i) + \frac{\lambda}{2} \|f\|_{\calH}^2, 
+\]
+where $\calH$ is the RKHS defined by the NTK $\mbK_{\btheta}$, and $\calL(\cdot,\cdot)$ is the logistic loss. 
+For a two-class problem with $\mby_i \in \{0,1\}$, this is equivalent to 
+\[
+  \min_{\balpha} -\sum_{i=1}^n\sum_{j=1}^n \mby_i \alpha_j \mbK_{\btheta}(\mbx_i,\mbx_j) + \sum_{i=1}^n \log (1+\exp(\sum_{j=1}^n\alpha_j \mbK_{\btheta}(\mbx_i,\mbx_j))) +\frac{\lambda}{2} \sum_{i=1}^n\sum_{j=1}^n \alpha_i \alpha_j \mbK_{\btheta}(\mbx_i, \mbx_j). 
+\] 
+This problem is convex in $\balpha$ so the solution is easy to describe without local minima. 
+It is also clear that the solution is completely determined by the value of the NTK $\mbK_{\btheta}$ between all training samples $\mbx_i$. 
+Notice that $\btheta$ is fixed here~(usually set to pretrained model weights), so the kernel $\mbK_{\btheta}$ is also fixed.  
+\cite{malladi2023kernel} provides theoretical analysis on conditions when finetuning with SGD will converge to this particular kernel logistic regression setup at the infinite width limit.   
+
+Under this framework it becomes feasible to compare full finetuning with finetuning over a subset of parameters by comparing their respective NTKs. 
+Below, we compare the kernels of the 1-row and 1-column version of our RoCoFT method, and we denote the associated parameters as $\btheta_{_{R}}, \btheta_{_{C}} \subseteq \btheta$. The corresponding kernels are defined as 
+\[
+  \mbK_{{\btheta_{_R}}}\!(\mbx, \mbx') = \langle \nabla f_{{\btheta_{_R}}}\!(\mbx), \nabla f_{{\btheta_{_R}}}\!(\mbx') \rangle \quad \mbox{and} \quad 
+  \mbK_{{\btheta_C}}\!(\mbx, \mbx') = \langle \nabla f_{{\btheta_{C}}}\!(\mbx), \nabla f_{{\btheta_{C}}}\!(\mbx') \rangle  
+\]
+Note that while the Jacobians $\nabla f_{\btheta_{_R}}\!(\mbx)$ and $\nabla f_{\btheta_{C}}\!(\mbx)$ can have different dimensions due to different number of parameters, the kernels $\mbK_{\btheta_R}$ and $\mbK_{\btheta_C}$ reside in the same function space $\calH$~(so does the full finetuning kernel $\mbK_{\btheta}$) and can be compared on a data sample.   
+We first compare few-shot learning performance of these kernels using kernel logistic regression with prompt-based finetuning, as done in \citet{malladi2023kernel}.  The kernels are computed with the pretrained RoBERTa-base model. 
+From Table~\ref{tab:ntk_single_task} we can see the performance of kernel logistic regression using $\mbK_{\btheta_R}$ and $\mbK_{\btheta_C}$ are surprisingly close to using the kernel for full parameters $\mbK_{\btheta}$, usually within the standard error of 5 runs using different random seeds. 
+The performance of kernel logistic regression using $\mbK_{\btheta}$ is in turn close to full finetuning except for a few tasks including TREC, MNLI, SNLI, QNLI and MPQA, which are related to the prompt templates used.  Next we directly compare the kernel matrices $\mbK_{\btheta}$, $\mbK_{\btheta_R}$ and $\mbK_{\btheta_C}$ for these few-shot learning problems directly. 
+Figure~\ref{fig:ntk_sst2_qnli} shows the empirical Neural Tangent Kernel values for the the task SST-2.
+\iffalse
+\begin{wrapfigure}{r}{0.5\textwidth}  % 'r' for right, 'l' for left
+    \centering
+    \includegraphics[width=0.49\textwidth]{plots_clipped2/eigvalue_spectrum.eps}
+    \caption{Eigenvalue spectrum of $\mbK_{_{\btheta}}$, $\mbK_{\btheta_{_R}}$, and $\mbK_{_{\btheta_{_C}}}$. The eigenvalues with respect to each task are scaled with $\beta_{_{task}}$ for representation.}
+    \label{fig::spectrum}
+\end{wrapfigure}
+\fi
+ 
+This task is a two-class problem and hence their kernel matrices have 2x2 block structure. 
+The values of the kernel entries are capped at 95-percentile for better visualization under heatmap. 
+We can see that except for the magnitude of the entries in the kernel matrices, the patterns in the kernel matrices for the full parameter set $\mbK_{\btheta}$, 1-row set $\mbK_{\btheta_R}$ and 1-column set $\mbK_{\btheta_C}$ are extremely similar. 
+More quantitatively, Table~\ref{tab:kernel_diff_single} shows the relative difference between the 1-row kernel $\mbK_{\btheta_R}$ and 1-column kernel $\mbK_{\btheta_C}$ with the full parameter kernel $\mbK_\theta$ after normalization in $\ell_1$ and $\ell_2$ norms by flattening the kernel matrices. 
+For example, the relative difference for $\mbK_{\theta_R}$ is computed as 
+\[
+  \| ({\mbK_{\btheta_R}}/{\|\mbK_{\btheta_R}\|_p}) - ({\mbK_{\btheta}}/{\|\mbK_{\btheta}\|_p}) \|_p, \quad p=1,2. 
+\]
+We can see that except for few tasks like MNLI, SNLI and TREC, the relative differences between kernels are between 5 to 15\%, which are fairly small. 
+These results across many tasks from NTK provide strong support for our proposal that finetuning only a few rows or columns can give performance comparable to full finetuning. 
+
+\begin{table}
+\centering
+\scalebox{.75}{
+\setlength{\tabcolsep}{5pt}
+
+\begin{tabular}{l|l|llllllll}
+\hline
+\textbf{k-shot (single)} &\textbf{Method} &\textbf{SST-2} &\textbf{SST-5} &\textbf{MR} &\textbf{CR} &\textbf{MPQA} &\textbf{Subj} &\textbf{TREC} \\ \hline
+\multirow{4}{*}{~~~~~~~~~\textbf{16}} &Full FT &89.0(1.5) &44.6(1.4) &83.2(2.4) &93.3(0.2) &83.3(1.3) &88.5(2.6) &80.3(7.2) \\
+   &$\mbK_{\btheta}$ &88.3(0.3) &43.6(2.2) &84.7(1.5) &93.2(0.9) &76.4(2.7) &88.6(1.3) &56.0(9.2) \\
+   &$\mbK_{\btheta_R}$ &88.5(0.4) &42.9(1.9) &83.9(1.2) &93.2(0.5) &77.3(2.1) &85.8(1.2) &51.6(3.9) \\
+   &$\mbK_{\btheta_C}$ &88.6(2.4) &42.4(1.9) &84.6(1.0) &93.2(0.5) &77.6(2.0) &85.9(1.2) &51.2(6.7) \\ \hline
+\multirow{4}{*}{~~~~~~~~~\textbf{64}} &Full FT &89.7(0.4) &45.8(2.1) &85.6(1.1) &94.3(0.5) &84.8(0.8) &92.9(0.5) &93.2(1.0) \\
+   &$\mbK_{\btheta}$ &89.2(1.0) &46.0(1.3) &86.4(0.6) &93.7(0.4) &81.2(0.9) &91.4(0.7) &77.8(2.3) \\
+   &$\mbK_{\btheta_R}$ &89.5(0.5) &46.0(1.5) &86.4(0.6) &93.9(0.6) &81.6(0.7) &90.4(0.4) &70.4(1.6) \\
+   &$\mbK_{\btheta_C}$ &89.5(0.6) &45.9(1.5) &86.4(0.4) &93.9(0.6) &81.5(0.5) &90.5(0.6) &70.7(2.5) \\ \hline
+
+   \textbf{k-shot (pair)} &\textbf{Method} &\textbf{MNLI} &\textbf{SNLI} &\textbf{QNLI} &\textbf{RTE} &\textbf{MRPC} &\textbf{QQP} &\\ \hline
+\multirow{4}{*}{~~~~~~~~~\textbf{16}} &Full FT &59.2(2.7) &65.7(2.7) &62.1(3.1) &60.0(5.5) &73.9(2.7) &62.1(2.3) & \\
+   &$\mbK_{\btheta}$ &53.0(3.0) &57.8(2.3) &60.1(3.3) &60.0(4.7) &73.4(5.6) &58.2(0.9) &\\ 
+   &$\mbK_{\btheta_R}$ &51.1(2.8) &56.0(1.8) &59.6(2.3) &58.6(6.0) &69.3(5.9) &57.1(3.3)& \\
+   &$\mbK_{\btheta_C}$ &51.9(2.7) &56.4(1.8) &59.2(2.6) &58.1(5.6) &69.2(4.7) &58.4(1.7) &\\ \hline
+\multirow{4}{*}{~~~~~~~~~\textbf{64}} &Full FT &68.7(1.7) &77.3(0.9) &72.8(2.2) &68.9(2.5) &82.8(1.2) &69.2(1.3) & \\
+   &$\mbK_{\btheta}$ &60.4(1.8) &65.5(1.6) &67.3(1.6) &66.5(2.5) &79.2(2.5) &66.4(1.7) &\\ 
+   &$\mbK_{\btheta_R}$ &58.0(2.0) &64.7(1.0) &66.2(1.7) &61.1(0.8) &72.2(4.5) &64.2(3.0)& \\
+   &$\mbK_{\btheta_C}$ &58.4(2.5) &64.4(1.4) &66.7(1.8) &62.7(0.9) &73.5(4.6) &64.6(2.4) &\\ \hline
+\end{tabular}}
+\caption{Single-sentence and sentence-pair tasks comparing kernels for RoCoFT (1 row and 1 column), kernels for all parameters, and full finetuning.}\label{tab:ntk_single_task}
+\end{table}
+
+\iffalse
+
+\begin{table}
+\small
+\begin{tabular}{llllllll}
+k-shot &Method &MNLI &SNLI &QNLI &RTE &MRPC &QQP \\ \hline
+16 &Full FT &59.2(2.7) &65.7(2.7) &62.1(3.1) &60.0(5.5) &73.9(2.7) &62.1(2.3) \\
+   &$\mbK_{\btheta}$ &53.0(3.0) &57.8(2.3) &60.1(3.3) &60.0(4.7) &73.4(5.6) &58.2(0.9) \\ 
+   &$\mbK_{\btheta_R}$ &51.1(2.8) &56.0(1.8) &59.6(2.3) &58.6(6.0) &69.3(5.9) &57.1(3.3) \\
+   &$\mbK_{\btheta_C}$ &51.9(2.7) &56.4(1.8) &59.2(2.6) &58.1(5.6) &69.2(4.7) &58.4(1.7) \\
+\end{tabular}
+\caption{Sentence-pair tasks for kernels for RoCoFT (1 row and 1 column), kernels for all parameters, and full finetuning}\label{tab:ntk_pair_task}
+
+\end{table}
+\fi
+\begin{figure*}[t!]
+    \centering
+    \makebox[\linewidth][c]{   
+    \begin{subfigure}[t]{0.35\textwidth}
+        \centering
+        \includegraphics[width=2in]{plots_clipped3/result_original/NTK_SST-2_original_16_42.png}
+        \caption{Full Parameter $\mathbf{K}_{\btheta}$ }
+    \end{subfigure}%
+    ~ 
+    \begin{subfigure}[t]{0.35\textwidth}
+        \centering
+        \includegraphics[width=2in]{plots_clipped3/result_row/NTK_SST-2_row_16_42.png}
+        \caption{1-Row $\mbK_{\btheta_{R}}$ }
+    \end{subfigure}
+    ~ 
+    \begin{subfigure}[t]{0.35\textwidth}
+        \centering
+        \includegraphics[width=2in]{plots_clipped3/result_col/NTK_SST-2_col_16_42.png}
+        \caption{1-Column $\mbK_{\btheta_{C}}$ }
+    \end{subfigure}
+    }
+   
+\iffalse    
+    \begin{subfigure}[t]{0.32\textwidth}
+        \centering
+        \includegraphics[width=2in]{plots_clipped3/result_original/NTK_QNLI_original_16_42.png}
+        \caption{Full Parameter $\mbK_{\btheta}$ }
+    \end{subfigure}%
+    ~ 
+    \begin{subfigure}[t]{0.32\textwidth}
+        \centering
+        \includegraphics[width=2in]{plots_clipped3/result_row/NTK_QNLI_row_16_42.png}
+        \caption{1-Row $\mbK_{\btheta_{R}}$ }
+    \end{subfigure}
+    ~ 
+    \begin{subfigure}[t]{0.32\textwidth}
+        \centering
+        \includegraphics[width=2in]{plots_clipped3/result_col/NTK_QNLI_col_16_42.png}
+        \caption{1-Column $\mbK_{\btheta_{C}}$ }
+    \end{subfigure}
+\fi
+    \caption{Neural Tangent Kernels for SST-2 on 16-shot training data.}\label{fig:ntk_sst2_qnli}
+\end{figure*}
+\begin{table}
+\centering
+\scalebox{.75}{
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{l|llllllll}
+\hline
+\textbf{16-shot (single)} &\textbf{SST-2} &\textbf{SST-5} &\textbf{MR} &\textbf{CR} &\textbf{MPQA} &\textbf{Subj} &\textbf{TREC} \\ \hline
+$\mbK_{\theta_R},p\!=\!1$ &0.093(0.008) &0.083(0.005) &0.064(0.006) &0.087(0.007) &0.123(0.012) &0.061(0.005) &0.181(0.007) \\
+$\mbK_{\theta_R},p\!=\!2$ &0.130(0.014) &0.113(0.012) &0.092(0.011) &0.126(0.021) &0.182(0.017) &0.073(0.008) &0.197(0.008) \\
+$\mbK_{\theta_C},p\!=\!1$ &0.091(0.008) &0.077(0.004) &0.061(0.006) &0.084(0.006) &0.123(0.014) &0.055(0.005) &0.166(0.007) \\
+$\mbK_{\theta_C},p\!=\!2$ &0.127(0.016) &0.108(0.012) &0.089(0.011) &0.122(0.018) &0.184(0.018) &0.069(0.009) &0.185(0.008) \\ \hline
+\textbf{16-shot (pair)} &\textbf{MNLI} &\textbf{SNLI} &\textbf{QNLI} &\textbf{RTE} &\textbf{MRPC} &\textbf{QQP} & \\ \hline
+$\mbK_{\theta_R},p\!=\!1$ &0.177(0.011) &0.198(0.039) &0.076(0.028) &0.140(0.019) &0.073(0.009) &0.046(0.008) &\\
+$\mbK_{\theta_R},p\!=\!2$ &0.260(0.043) &0.255(0.069) &0.149(0.071) &0.203(0.039) &0.096(0.016) &0.063(0.013) &\\
+$\mbK_{\theta_C},p\!=\!1$ &0.176(0.013) &0.194(0.040) &0.073(0.028) &0.142(0.023) &0.073(0.010) &0.044(0.006)& \\
+$\mbK_{\theta_C},p\!=\!2$ &0.262(0.050) &0.253(0.072) &0.146(0.071) &0.212(0.047) &0.096(0.016) &0.061(0.011) &\\ \hline
+\end{tabular}}
+\addtolength{\tabcolsep}{3pt}
+\caption{Relative difference in kernels~(compared to full parameter $\mbK_\theta$) on single-sentence and sentence-pair tasks.}\label{tab:kernel_diff_single}
+\end{table}
+
+\iffalse
+\begin{table}
+\small
+\begin{tabular}{llllllll}
+\textbf{16-shot} &\textbf{MNLI} &\textbf{SNLI} &\textbf{QNLI} &\textbf{RTE} &\textbf{MRPC} &\textbf{QQP} \\ \hline
+$\mbK_{\theta_R},p\!=\!1$ &0.177(0.011) &0.198(0.039) &0.076(0.028) &0.140(0.019) &0.073(0.009) &0.046(0.008) \\
+$\mbK_{\theta_R},p\!=\!2$ &0.260(0.043) &0.255(0.069) &0.149(0.071) &0.203(0.039) &0.096(0.016) &0.063(0.013) \\
+$\mbK_{\theta_C},p\!=\!1$ &0.176(0.013) &0.194(0.040) &0.073(0.028) &0.142(0.023) &0.073(0.010) &0.044(0.006) \\
+$\mbK_{\theta_C},p\!=\!2$ &0.262(0.050) &0.253(0.072) &0.146(0.071) &0.212(0.047) &0.096(0.016) &0.061(0.011) \\
+\end{tabular}
+\caption{Relative difference in kernels~(compared to full parameter $\mbK_\theta$) on sentence-pair tasks}\label{tab:kernel_diff_pair}
+\end{table}
+\fi
+
+
+
+
+\section{Ablation Studies}
+
+
+\begin{figure*}[htp!]
+    \centering
+    \includegraphics[width=0.93\linewidth]{robust.jpg}
+    \caption{Accuracy comparison of Max, Min, Mixed, and Random row and column selection methods across different datasets. The results show that the proposed selection techniques are robust across various tasks.}
+    \label{fig:robustness}
+\end{figure*}
+\textbf{Robustness of Row-Column Selection:} In this study, we demonstrate the robustness of our row and column selection method through a detailed comparison of four selection strategies: Max, Min, Mixed, and Random. These strategies are applied to both rows and columns of the weight matrices.
+For the Min, Max, and Mixed selection strategies, we employ a scoring criterion used in the Wanda method~\citep{sunsimple}, a simple yet effective pruning technique that requires only the forward pass.
+Pruning a neural network involves scoring the weights by importance~(e.g., by the absolute values of weights), and then remove the least important ones.
+We can adopt these strategies to rank rows and columns by importance and evaluate the effect of finetuning on them.
+Given a weight matrix $\mbW \in \mathbb{R}^{d_{out} \times d_{in}}$ and input feature activations $\mbX \in \mathbb{R}^{s \times d_{in}}$ from a length $s$ sequence, Wanda calculates the importance score $\mbS_{ij}$ of the weight $\mbW_{ij}$ as
+\begin{equation}
+\mbS_{ij} = |\mbW_{ij}| \cdot \|\mbX_{\cdot j}\|_2,
+\end{equation}
+where $\|\mbX_{\cdot j}\|_2$ is the 2-norm across the $j$th feature aggregated across all examples in batch.
+To determine the most important rows, we sum $\mbS_{ij}$ across the columns, yielding a row score vector $\mbS_{\text{row}}\in \mathbb{R}^{d_{in}}$. The rows are then sorted by this score, and we select the top $r$ rows according to either the Max or Min scores. The same procedure is applied to columns by summing across the rows, producing a column score $\mbS_{\text{column}}\in \mathbb{R}^{d_{out}}$. The Mixed strategy takes half of the rows/columns from Min and half from Max, while the Random strategy selects rows and columns uniformly at random. 
+
+Figure \ref{fig:robustness} presents the comparative results of these four strategies on the SST-2, RTE, QNLI, CoLA, and MNLI datasets for rank $r=4$. Across all datasets, the results show consistent robustness, indicating that our method performs well regardless of the selection criteria—whether based on Max, Min, MinMax, or Random selection of rows or columns.
+
+\begin{wraptable}{r}{0.5\textwidth}
+\centering
+\scalebox{0.7}{
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{c|c|ccccc}
+\hline
+\textbf{Rank} &\textbf{Algorithm} & \textbf{Time} & \textbf{Accuracy} & \textbf{Parameters} & \textbf{Memory} &\\\hline
+\multirow{3}{*}{1}    & LoRA                       & 3:12                  & 0.910                     & 0.055                         & 2762 \\
+                      & RoCoFT$_{\text{row}}$                        & 3:00                  & 0.913                     & 0.022                     & 2372 \\
+                      & RoCoFT$_{\text{column}}$                     & 2:59                  & 0.912                     & 0.022                      & 2373 \\
+\hline
+\multirow{3}{*}{2}    & LoRA                       & 3:25                  & 0.922                     & 0.110                          & 2768 \\
+                      & RoCoFT$_{\text{row}}$                        & 3:00                  & 0.920                     & 0.055                         & 2410 \\
+                      & RoCoFT$_{\text{column}}$                    & 3:00                  & 0.922                     & 0.055                      & 2414 \\
+\hline
+\multirow{3}{*}{4}    & LoRA                       & 3:27                  & 0.925                     & 0.221                           & 2771 \\
+                      & RoCoFT$_{\text{row}}$                        & 3:01                  & 0.923                     & 0.110                          & 2450 \\
+                      & RoCoFT$_{\text{column}}$                     & 3:01                  & 0.922                     & 0.110                    & 2451 \\
+\hline
+\multirow{3}{*}{8}    & LoRA                       & 3:29                  & 0.929                     & 0.442                           & 2783 \\
+                      & RoCoFT$_{\text{row}}$                        & 3:03                  & 0.930                     & 0.221                          & 2336 \\
+                      & RoCoFT$_{\text{column}}$                     & 3:02                  & 0.928                     & 0.221                         & 2335 \\
+\hline
+\multirow{3}{*}{64}   & LoRA                       & 3:33                  & 0.928                     & 3.538                           & 2993 \\
+                      & RoCoFT$_{\text{row}}$                        & 3:06                  & 0.934                     & 1.769                          & 2656 \\
+                      & RoCoFT$_{\text{column}}$                    & 3:05                  & 0.933                     & 1.769                         & 2653 \\
+\hline
+\end{tabular}}
+
+\setlength{\belowcaptionskip}{-12pt}
+\caption{Comparison with LoRA in terms of rank, training time (minutes), accuracy, number of parameters, and memory usage (MB).} \label{tab:rank}
+
+\end{wraptable}
+
+\textbf{ Optimal Rank $r$ for RoCoFT :} We investigate the impact of varying the rank $r$ on the performance of RoCoFT (Row and Column Fine-Tuning) and compare it with the widely used LoRA method within the RoBERTa-base attention block. We assess key metrics such as training time, accuracy, number of parameters, and memory consumption for each rank $r \in \{1, 2, 4, 8, 64\}$ using the SST2 dataset. The results are summarized in Table \ref{tab:rank}.
+
+From the table, we observe that as the rank $r$ increases, both RoCoFT and LoRA exhibit improved accuracy. For lower ranks, such as $r=1$ and $r=2$, RoCoFT$_{\text{row}}$ and RoCoFT$_{\text{column}}$ consistently outperform LoRA in terms of both training time and parameter efficiency, while maintaining competitive accuracy. Specifically, for rank $r=1$, RoCoFT$_{\text{row}}$ achieves an accuracy of 0.913 while using only 0.022 million parameters, which is significantly fewer than LoRA’s 0.055 million parameters for the same rank, with a slight increase in accuracy. This demonstrates the parameter efficiency of RoCoFT at lower ranks.
+
+As the rank increases to $r=8$, both RoCoFT variants continue to show slight improvements in accuracy while maintaining a faster training time compared to LoRA. Notably, at higher ranks like $r=64$, RoCoFT$_{\text{row}}$ achieves the highest accuracy of 0.934 with a significantly lower memory footprint compared to LoRA (2.656 GB vs. 2.993 GB).
+
+
+\section{Conclusions}
+
+We present a novel PEFT method, termed RoCoFT, which finetunes selected rows and columns of model weights. Through an extensive series of experiments, we demonstrate that our method achieves competitive performance relative to other PEFT techniques, while significantly improving both memory efficiency and training time. Furthermore, by employing kernel methods, we show that the restricted kernels generated by our approach achieve comparable accuracy to full fine-tuning kernels in kernel logistic regression tasks. This indicates that RoCoFT effectively captures the most salient features from the full parameter kernel space. 
+Future works include combining our RoCoFT method with quantization to achieve more compressed models during finetuning. 
+We would also like to extend the kernel approach to the study and comparison of more PEFT methods. 
+
+
+
+
+

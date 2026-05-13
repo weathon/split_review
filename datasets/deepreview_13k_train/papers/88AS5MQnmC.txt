@@ -1,0 +1,319 @@
+\title{RRM:  Robust Reward Model Training Mitigates Reward Hacking}
+
+\begin{abstract}
+Reward models (RMs) play a pivotal role in aligning large language models (LLMs) with human preferences. However, traditional RM training, which relies on response pairs tied to specific prompts, struggles to disentangle prompt-driven preferences from prompt-independent artifacts, such as response length and format. In this work, we expose a fundamental limitation of current RM training methods, where RMs fail to effectively distinguish between contextual signals and irrelevant artifacts when determining preferences. To address this, we introduce a causal framework that learns preferences independent of these artifacts and propose a novel data augmentation technique designed to eliminate them. Extensive experiments show that our approach successfully filters out undesirable artifacts, yielding a more robust reward model (RRM). Our RRM improves the performance of a pairwise reward model trained on Gemma-2-9b-it, on RewardBench, increasing accuracy from 80.61\% to 84.15\%. Additionally, we train two DPO policies using both the RM and RRM, demonstrating that the RRM significantly enhances DPO-aligned policies, improving MT-Bench scores from 7.27 to 8.31 and length-controlled win-rates in AlpacaEval-2 from 33.46\% to 52.49\%.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Reinforcement Learning from Human Feedback (RLHF) has become a cornerstone in aligning large language models (LLMs) with human preferences to produce responses that are more helpful, honest, and harmless~\citep{ouyang2022training,bai2022training}. This approach involves training a reward model (RM) on human feedback, which then guides the LLM to generate high-quality responses through reinforcement learning. The success of RLHF is evident in various AI systems, such as Gemini~\citep{team2023gemini} and GPT-4~\citep{achiam2023gpt}. Despite its effectiveness, RLHF faces the fundamental issue of reward hacking~\citep{gao2023scaling}, where the model maximizes the reward function without truly aligning with the intended human preferences. This hacking issue occurs because the RM, while a powerful tool, is an imperfect proxy for human judgment and often struggles with out-of-distribution generalization~\citep{eisenstein2023helping}.
+
+The reward hacking problem manifests in several ways, with verbosity being a common issue: LLMs tend to generate longer responses to appear more detailed or explanatory, exploiting human raters' bias towards lengthier content~\citep{shen2023loose,singhal2023long}. In recognition of this challenge, extensive efforts have been made in the literature. ODIN~\citep{chen2024odin} designs a two-head approach to learn the quality reward that is orthogonal to length. Similarly, length-controlled Alpaca~\citep{dubois2024length} estimates the controlled direct effect~\citep{vanderweele2011controlled} through logistic regression by adjusting the length. To mitigate the length bias, an improved version~\citep{park2024disentangling} of DPO~\citep{rafailov2024direct} introduces length as penalty to the reward score. In practice, there are more reward hacking patterns beyond length, such as format (markdowns, bold-faces) and patterns (certain $n$-grams or emojis). This is largely due to the large output space of language with limited preference data, as well as the diverse and subjective nature of human preferences.
+
+It is challenging to identify and mitigate all potential exploitation patterns. We may consider the causal perspective to explain this phenomena. Given a prompt $x$ and a pair of responses $(y_1, y_2)$, the human preference can be caused by the real quality $s(x,y_1,y_2)$ that is associated with the prompt, or by the context-free artifacts $a(y_1, y_2)$ in the responses that do not depend on prompt. Traditional reward model training cannot differentiate the above two factors. There are two reasons for this. First, the pair of responses are always contextual and on-topic to the prompt, thus no counterfactual prompt (prompt from another examples) is used. The reward model may learn the artifacts existing in the responses by ignoring the prompt. If we use the counterfactual prompt, it can help estimate the level of artifact bias ($\mathbb{P}(y_1\succ y_2 | x')$ with $x'\neq x$) existing in the preference dataset~\citep{zhao2021calibrate}. Second, even if we adjust a few common artifacts, not all artifacts are observable and thus there is no easy way to control all the artifacts explicitly to answer the question ``what will the preference be if both responses share the same artifacts?''.  
+
+In response to these challenges, we propose a simple and effective method to improve reward modeling. We first formulate the reward model training in a causal framework, then we augment the reward model training data based on the causal rules. By doing so, we can effectively adjust the artifacts and only learn the real quality. Our pipeline is illustrated in Figure~\ref{fig:pipeline}, where we augment the reward model training data by using responses from other examples to effectively balance the artifacts in chosen and rejected responses. To summarize, the contributions of this paper are three-fold:
+\begin{itemize}
+    \item We identify a key issue with traditional reward model training: it often fails to distinguish between genuine contextual preference signals and spurious context-free artifacts. 
+    \item To address this, we propose a causal graph for human preference modeling and introduce data augmentation to mitigate artifacts learned by the reward model.
+    \item We further demonstrate that policies trained on these robust reward models consistently outperform those based on baseline reward models.
+\end{itemize}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=1.0\textwidth]{figures/RRM_Pipeline.pdf}
+\caption{The pipeline of our proposed robust reward model (RRM), which aim to decouple contextual preference quality signal and context-free artifacts. Suppose a proportion of chosen responses have certain artifact (bold-face wrapped with ``$**$'' in this figure), the reward model can hack the pattern and choose the response with the artifact instead of carefully reading the prompt. With our data augmentations, we can effectively balance the context-free artifacts in chosen and rejected responses, thus ensuring a more robust reward model during inference.}
+\label{fig:pipeline}
+\end{figure}
+
+
+
+
+\section{Preliminaries}
+
+In preference learning, we assume that there exists a preference oracle that determines the probability $\mathbb{P}(y_1 \succ y_2|x)$ that response $y_1$ is preferred over $y_2$ given the prompt $x$. Our goal is to optimize the preference by querying the preference oracle within certain budget constraint. In what follows, we first review the major ways to approximate and estimate the oracle based on a human preference dataset $\mathcal{D}_\text{hf}=\{x^{(i)}, y_w^{(i)}, y_l^{(i)}\}_{i=1}^N$. where $x^{(i)}$ represents prompt for example $i$, and $(y_w^{(i)}, y_l^{(i)})$ represents the chosen and rejected response, respectively.
+\paragraph{Reward models} Bradley-Terry pointwise reward model~\citep{bradley1952rank, ouyang2022training} is a widely adopted method, which additionally assumes that there exists a reward function $r(x, y) \in \mathbb{R}$ and the preference oracle satisfies
+$$
+\mathbb{P}(y_1 \succ y_2 | x) = \frac{\exp(r(x,y_1))}{\exp(r(x,y_1)) + \exp(r(x,y_2))}= \sigma\big(r(x,y_1)-r(x,y_2)\big).
+$$
+Then, we can fit the Bradley-Terry model by maximizing the log-likelihood on the training set:
+\begin{equation}\label{eq:dpo_loss}
+    \mathcal{L}(r_\phi,\mathcal{D}_\text{hf}) = -\mathbb{E}_{(x,y_w,y_l)\sim\mathcal{D}_\text{hf}}\left[\log\sigma \left(r_\phi(x,y_w)-r_\phi(x,y_l)\right)\right].
+\end{equation}
+
+The second predominant approach is the pairwise ranking model \citep{zhao2023slic,jiang2023llm}, which takes a prompt and a pair of responses as the input, and directly predicts the probability $\mathbb{P}(y_1 \succ y_2|x)$, which subsumes the BT model as a subclass. In the literature, the pairwise preference model has shown to outperform pointwise BT reward both empirically \citep{zhao2023slic,jiang2023llm,dong2024rlhf} and theoretically \citep{ye2024theoretical} due to its flexibility and larger function class capacity. Specifically, we denote the pairwise ranking model as $\rho_\psi(x,y_1,y_2)$ and leverage the next token prediction ability of the language model to format the sample as:
+\begin{center}
+``[CONTEXT] \{$x$\} [RESPONSE A] \{$y_1$\} [RESPONSE B] \{$y_2$\}''    
+\end{center}
+ Then, the $\rho_\psi(x,y_1,y_2)$ outputs either ``A'' or ``B'' as preferred one. We use the probability of decoding ``A'' as estimation of the preference probability $\hat{\sP}(y_1\succ y_2|x)$\footnote{We randomly flip response pairs and associated labels to remove positional bias.}. In this work, we use the pairwise ranking model for its superior performance and flexibility.
+
+\paragraph{Alignment Algorithms}
+Start with a reward function $r(x,y)$, a reference policy $\pi_\text{ref}$, and input prompt distribution $\mathcal{P}$, a policy $\pi$ is trained to optimize for the following objective:
+\begin{equation}\label{eq:rlhf_objective}
+    \max_{\pi}\mathbb{E}_{x\sim\mathcal{P}}\left[\mathbb{E}_{y\sim\pi(\cdot|x)}r(x,y)-\beta \mathbb{D}_\text{KL}\left[\pi(\cdot|x)\|\pi_\text{ref}(\cdot|x)\right]\right],
+\end{equation}
+where $\beta>0$ is the KL penalty coefficient. Several algorithms have been proposed to solve the above optimization, including PPO~\citep{schulman2017proximal,ziegler2019fine}, SLiC~\citep{zhao2023slic}, DPO~\citep{rafailov2024direct}, RSO~\citep{liu2023statistical}, and IPO~\citep{azar2024general}. For a stable evaluation process, we use DPO in this work for preference alignment. For a given preference dataset $\mathcal{D}_\text{p}$, DPO use the following loss function:
+\begin{equation}
+    \mathcal{L}_\text{DPO}(\pi_\theta|\pi_\text{ref},\mathcal{D}_\text{p}) = -\mathbb{E}_{(x,y_w,y_l)\sim\mathcal{D}_\text{p}}\left[\log\sigma\left(\beta\log\frac{\pi_\theta(y_w|x)}{\pi_\text{ref}(y_w|x)} - \beta\log\frac{\pi_\theta(y_l|x)}{\pi_\text{ref}(y_l|x)}\right)\right]
+\end{equation}
+
+\paragraph{Reward Hacking}
+Reward model is not perfect due to its limited model size, limited training data, and distribution shift between training data and alignment prompts and responses~\citep{eisenstein2023helping,gao2023scaling,guo2024direct,xiong2024iterative}. Several works have been proposed to mitigate reward hacking. They mainly focus on observable artifacts such as length~\citep{chen2024odin,dubois2024length,shen2023loose}. \citet{shen2023trickle} propose to enforce the consistency in reward model via data augmentation. Reward hacking can also be mitigated during policy training with post-adjusted reward~\citep{park2024disentangling} or with post-training model merge~\citep{lin2023speciality}. We focus on improving the reward model by addressing reward hacking from a causal perspective.
+
+\paragraph{Causal Inference}
+Causal inference can be embedded in graphical model frameworks as a directed acyclic graph (DAG) with causal relationship represented as a directed edge~\citep{pearl2009causality,lee2020learning}. We say a random vector $X$ to be \emph{faithful} with respect to a DAG $\mathcal{G}=(\mathcal{V},\mathcal{E})$ if for any $i,j\in \mathcal{V}$, and any subset $S\subseteq V\backslash\{i,j\}$,
+\begin{equation}
+    X^i\perp X^j \mid X^S \Leftrightarrow \text{$i$ and $j$ are d-separated by $S$ under $\mathcal{G}$},
+\end{equation}
+where $X^i\perp X^j \mid X^S$ denotes $X^i$ and $X^j$ are independent conditional on $X^S$. The definition of d-separation is as follows: suppose we are given a DAG $\mathcal{G}$; then, for two nodes $i,j\in\mathcal{V}$, a subset $S$ of $V\backslash\{i,j\}$ d-connects $i$ and $j$ if there exists a path $L$ between $i$ and $j$ such that every collider in $L$ either belongs to $S$ or has a descendent in $S$, and no other node in $L$ belongs to $S$. If $S$ does not d-connect $i$ and $j$, then it d-separates $i$ and $j$.
+
+
+
+\section{Robust Reward Model Training}
+
+\subsection{Causal framework}
+\begin{figure}[h]
+\centering
+\includegraphics[width=.29\textwidth]{figures/dag.pdf}
+\caption{Causal graph of reward model. $X$ is the prompt, $Y_1,Y_2$ are two responses, $S$ is the contextual signal that depends on input prompt and two responses. $A$ is the context-free artifact that only depends on two responses. $C$ is the preference label. Traditional reward model cannot differentiate the two DAGs on whether there is a causal edge from $A$ to $C$. Our work uses the augmented dataset to eliminate the edge from $A$ to $C$.
+}
+\label{fig:causal_graph}
+\end{figure}
+We formulate a DAG $\mathcal{G}$ to model the causal relationships among different quantities (Figure \ref{fig:causal_graph}). We assume the distribution of $(X,Y_1,Y_2,S,A,C)$ to be faithful to the DAG. $S$ is the \emph{sufficient statistic}~\citep{lehmann2006theory} that captures the contextual effect that one response fulfills the need of the prompt better than the other. $A$ is the \emph{sufficient statistic} that captures the context-free artifacts that only depend on two responses. Such artifacts can include length, format (bold faces, bullet points, markdown, etc), and certain patterns ($n$-grams such as ``Sure, here is the response:''). In traditional reward model training, the model may hack the patterns in $(Y_1,Y_2)$. Suppose 80\% of winning responses to be longer, then the reward model can get 80\% accuracy by just counting the number of tokens. Formally, we construct two hypothesis:
+\begin{itemize}
+    \item $\mathcal{H}_0$: there is no causal edge from $A$ to $C$.
+    \item $\mathcal{H}_1$: there is a causal edge from $A$ to $C$.
+\end{itemize}
+
+\begin{prop}\label{prop:identifiability}
+In traditional reward model training, $\mathcal{H}_0$ and $\mathcal{H}_1$ are not always distinguishable.
+\end{prop}
+
+The desired behavior of reward model is to ignore the artifact $A$ in determining the preference label $C$, which corresponds to $\mathcal{H}_0$. To achieve that, we can utilize two d-separation relationships of the DAG $\mathcal{G}$. 
+\begin{itemize}
+    \item \textbf{R1}: Under $\mathcal{H}_0$, $A$ and $C$ are d-separated by $(Y_1,Y_2)$, thus $A\perp C\mid (Y_1,Y_2)$.
+    \item \textbf{R2}: Under $\mathcal{H}_0$, $A$ and $C$ are d-separated by $S$, thus $A\perp C\mid S$.
+\end{itemize}
+
+In addition, we can set the preference rule based on the DAG $\mathcal{G}$. We say response $y$ is \emph{contextual} to $x$ if they are from the same triplet in $\mathcal{D}_\text{hf}=\{x^{(i)}, y_w^{(i)}, y_l^{(i)}\}_{i=1}^N$. For example, $y_w^{(i)}$ and $y_l^{(i)}$ are contextual to $x^{(i)}$, but $y_w^{(j)}$ and $y_l^{(j)}$ are not contextual to $x^{(i)}$ for $j\neq i$. Then for $(x, y_1, y_2)$, we have the following rules:
+\begin{itemize}
+    \item if both $y_1$ and $y_2$ are contextual to $x$, we set the winning one in $\mathcal{D}_\text{hf}$ as winner.
+    \item if only one of $y_1$ and $y_2$ is contextual to $x$, we set the contextual one as winner.
+    \item if neither $y_1$ nor $y_2$ is contextual to $x$, we set the preference label as ``Tie''.
+\end{itemize}
+
+\subsection{Data augmentation}
+To fix the issue mentioned in  Proposition~\ref{prop:identifiability}, we can effectively utilize \textbf{R1}\&\textbf{R2}. Given $\mathcal{D}_\text{hf}=\{x^{(i)}, y_w^{(i)}, y_l^{(i)}\}_{i=1}^N$, we can first expand the dataset as $\tilde{\mathcal{D}}_\text{hf}=\{x^{(i)}, y_w^{(i)}, y_l^{(i)},x^{(\sigma_1(i))}, y_w^{(\sigma_1(i))}, y_l^{(\sigma_1(i))},x^{(\sigma_2(i))}, y_w^{(\sigma_2(i))}, y_l^{(\sigma_2(i))}\}_{i=1}^N$, where $\sigma_1:[N]\rightarrow [N]$ and $\sigma_2:[N]\rightarrow [N]$ are two different invertible permutation functions randomly sampled from permutation group $S_N$. There are in total $3\times {6 \choose 2} = 45$ possible $(x,y_1,y_2)$ unordered triplets from each element in $\tilde{\mathcal{D}}_\text{hf}$. This is because there are 3 possible prompts with 2 choices among 6 responses and we treat $(x,y_1,y_2)$ and $(x,y_2,y_1)$ as the same one. 
+
+From \textbf{R1}, we can fix $(Y_1,Y_2)$ and vary $X$ to perturb $C$. From \textbf{R2}, we can fix $C$ by picking a contextual (prompt, response) pair $(X,Y_1)$ and another non-contextual response $Y_2$. Then we set $Y_1$ as winning response and vary losing response $Y_2$ to perturb $A$. We can see the augmented datasets derived from the above two rules cover all possible $(x,y_1,y_2)$ unordered triplets generated from $\tilde{\mathcal{D}}_\text{hf}$.}:
+
+\begin{align}\label{eq:augmented_triplets}
+\begin{split}
+    \left.
+    \begin{aligned}
+        (x^{(i)},y_w^{(i)},y_w^{(\sigma_1(i))})\rightarrow & \text{chosen}=y_w^{(i)} \\
+        (x^{(i)},y_w^{(i)},y_w^{(\sigma_2(i))})\rightarrow & \text{chosen}=y_w^{(i)} \\
+        (x^{(i)},y_w^{(i)},y_l^{(\sigma_1(i))})\rightarrow & \text{chosen}=y_w^{(i)} \\
+        (x^{(i)},y_w^{(i)},y_l^{(\sigma_2(i))})\rightarrow & \text{chosen}=y_w^{(i)} \\
+        (x^{(i)},y_l^{(i)},y_w^{(\sigma_1(i))})\rightarrow & \text{chosen}=y_l^{(i)} \\
+        (x^{(i)},y_l^{(i)},y_w^{(\sigma_2(i))})\rightarrow & \text{chosen}=y_l^{(i)} \\
+        (x^{(i)},y_l^{(i)},y_l^{(\sigma_1(i))})\rightarrow & \text{chosen}=y_l^{(i)} \\
+        (x^{(i)},y_l^{(i)},y_l^{(\sigma_2(i))})\rightarrow & \text{chosen}=y_l^{(i)}
+    \end{aligned}
+    \right\} \text{Non-contextuals} 
+    \left.
+    \begin{aligned}
+        (x^{(i)},y^{(\sigma_1(i))}_w,y^{(\sigma_1(i))}_l)\rightarrow \text{Tie} \\
+        (x^{(i)},y^{(\sigma_2(i))}_w,y^{(\sigma_2(i))}_l)\rightarrow \text{Tie} \\
+        (x^{(i)},y^{(\sigma_1(i))}_w,y^{(\sigma_2(i))}_w)\rightarrow \text{Tie} \\
+        (x^{(i)},y^{(\sigma_1(i))}_w,y^{(\sigma_2(i))}_l)\rightarrow \text{Tie} \\
+        (x^{(i)},y^{(\sigma_2(i))}_w,y^{(\sigma_1(i))}_l)\rightarrow \text{Tie} \\
+        (x^{(i)},y^{(\sigma_1(i))}_l,y^{(\sigma_2(i))}_l)\rightarrow \text{Tie}
+    \end{aligned}
+    \right\} \text{Neutrals} 
+\end{split}
+\end{align}
+
+``Non-contextuals'' set the contextual response as chosen and non-contextual one as rejected. ``Neutrals'' set both non-contextual responses as tie. With these, we have the following claim:
+\begin{prop}\label{prop:no_artifact}
+If the reward model is trained with $\mathcal{D}_\text{hf}$ and augmented triplets in Equation~\ref{eq:augmented_triplets}, there is no causal edge from $A$ to $C$ in DAG $\mathcal{G}$.
+\end{prop}
+
+\subsection{Connection to existing works}
+\paragraph{ODIN~\citep{chen2024odin}}
+ODIN decomposes reward into additive format of a quality one and a length one. During learning, it enforces the disentanglement between the quality reward and the response length and encourages the correlation between the length reward and the response length. We claim that this is a special case of our causal modelling with single observed artifact $A$ as length, because the disentangle learning is a necessary condition of the conditional independence between $C$ and $A$ given the data. Our framework is more general and can go beyond single and observed artifact.
+
+\paragraph{Length-controlled AlpacaEval-2~\citep{dubois2024length}}
+This work improves the original version of AlpacaEval-2 by conditioning on the length through Controlled Direct Effect~\citep{vanderweele2011controlled}. It adds length as a variable in the logistic regression to predict the preference. Effectively, it learns the residual part that cannot be explained by the length. In our framework, we directly learn the residual part that is orthogonal to the artifacts, which is the length in length-controlled AlpacaEval-2. Thus the two methods are equivalent, and our approach can go beyond single artifact and be extended to unobserved artifacts.
+
+\paragraph{Length-controlled DPO~\citep{park2024disentangling}}
+This work adds a length penalty in the RLHF objective (Equation~\ref{eq:rlhf_objective}). It serves as a post-hoc reward adjustment to mitigate the length bias during policy optimization. The idea for removing the lengthy bias using a length reward is the same as ODIN, but they don't have the correlation penalty and the additional hyperparameter introduced can add more complexity into policy optimization. In comparison, our work directly learns a artifact-free reward model so we do not need an explicit length adjustment factor in the alignment algorithm designs. %Our work still include their work as a special case. In our framework, we don't need the length adjustment because our learned preference is already artifact-free one.
+\paragraph{Contrast Instructions \citep{shen2023trickle}}
+This work shows the issues of reward models on the instruction and response consistencies when switching instruction or response to another similar one. It proposes a data augmentation training approach and retrieval-augmented inference technique to improve the consistencies of reward models. On contrary, by considering all possible combinations of $(x,y_1,y_2)$ across difference examples, our approach uses the organic data from the dataset, which can effectively eliminate the artifacts existing in the dataset. 
+
+
+
+\section{Experiments}
+
+In this section, we conduct reward modeling and apply the trained reward to downstream alignment tasks to verify the effectiveness of the proposed method. For deeper understanding, we also conduct analysis on reward model training data,  aligned policies, and perturbed reward model training data.
+
+\subsection{Settings}
+\paragraph{Training Set} We study RRM using the preference dataset curated by RLHFlow\footnote{\url{https://huggingface.co/datasets/RLHFlow/pair_preference_model_dataset}}~\citep{dong2024rlhf}, which has been used to train a series of strong open-source preference models as evaluated by the Rewardbench \citep{lambert2024rewardbench}. The dataset consists of 700K preference pairs, which is a mixture of HH-RLHF \citep{bai2022training}, SHP \citep{ethayarajh2022understanding}, HelpSteer \citep{wang2023helpsteer}, PKU-SafeRLHF \citep{ji2024beavertails}, UltraFeedback \citep{cui2023ultrafeedback}, UltraInteract \citep{yuan2024advancing}, Distilabel-Capybara \citep{Capybara}, and Distilabel-Orca \citep{OpenOrca}.
+
+\paragraph{Reward Model Training Details}
+We first train a pairwise ranking reward model (RM) from Gemma-2-9b-it. With the augmentation illustrated in Equation~\ref{eq:augmented_triplets}, we can get 14X additional examples, most of which can be too easy for RM to learn. To reduce the augmented data size, we first conduct inference on random 50\% of the augmented data using the trained RM, and leave the examples with $|\hat{\mathbb{P}}(A\succ B)-\mathbb{P}^*(A\succ B)|\geq 0.2$, where $\hat{\mathbb{P}}(A\succ B)$ is winning probability calculated by RM and $\mathbb{P}^*(A\succ B)$ is the ground truth probability\footnote{The ground truth probability is 1 if A is preferred over B, 0 if B is preferred over A, and 0.5 if they tie.}. We get 2.4M training examples by merging the filtered augmented data and original RM training data. Then we use the same training recipe to get the robust reward model (RRM). We train the reward models until convergence using AdamW~\citep{loshchilov2017decoupled} optimizer with learning rate 1e-6 and batch size 128\footnote{We pick the best hyperparameter by grid search.}. 
+\paragraph{Policy Model Training Details}
+We train DPO policies using the on-policy responses generated by Gemma-2-9b-it and labeled by RM and RRM, respectively. We use the prompt set from the UltraFeedback dataset to generate 5 responses per prompt. Then, we compare all ${5 \choose 2}$ pairs and pick the best-worst response pairs to align the DPO policy following \citep{pace2024west, dong2024rlhf}. We train the policies for 2 epochs at most using AdamW~\citep{loshchilov2017decoupled} optimizer with learning rate 2e-7 and a global batch size of 128, where the batch size follows \citet{dong2024rlhf} and the learning rate is decided by grid search. 
+\paragraph{Evaluation Metrics} We evaluate the quality of reward model from two perspectives: the accuracy on Reward-Bench~\citep{lambert2024rewardbench} and the quality of policies induced by the reward model. For policies induced by the reward model, we consider two variants: 1. Best-of-N (BoN) policy and 2. aligned DPO policy. Our main focus is for open-ended generation and we use MT-Bench~\citep{zheng2024judging} and AlpacaEval-2~\citep{dubois2024alpacafarm} to evaluate. 
+
+\subsection{Main Results}
+\paragraph{Reward Model Accuracy}
+The test accuracies on Reward-Bench are reported in Table~\ref{tab:reward-bench}. RRM improves ``Chat Hard'' and ``Safety'' by a clear margin but sacrifices the ``Reasoning''. Regarding ``Reasoning'', we hypothesize that math and coding are less affected by the non-contextual artifacts and we may use other rewards than an LLM because those are objectives like golden answers. On average, RRM improves RM by an absolute 3.54\% accuracy gain. 
+
+\begin{table}[h]\small
+\begin{center}
+\begin{tabular}{l|cccc|c}
+\hline
+\textbf{Model} & \textbf{Chat}  &  \textbf{Chat Hard} &  \textbf{Safety} & \textbf{Reasoning} & \textbf{Average}
+\\\hline\hline
+RM & \textbf{97.77} & 51.54 & 78.54 & \textbf{94.58} & 80.61 \\
+\hline
+RRM & 96.51 & \textbf{65.57} & \textbf{83.90} & 90.62 & \textbf{84.15} \\
+\hline
+\end{tabular}
+\caption{Comparison of test accuracy of Reward-Bench. RRM shows improvement upon RM on Chat Hard and Safety with an average 3.54\% improvement of accuracy.}
+\label{tab:reward-bench}
+\end{center}
+
+\end{table}
+\paragraph{Policies Induced by Reward Models}
+We investigate the quality of reward models by evaluating the aligned policies. To study the effect of adding ``Neutrals'' in Equation~\ref{eq:augmented_triplets}, we also train a reward model without augmented neutrals (-Neutrals). The results are summarized in Table~\ref{tab:main_results}.} shows shorter responses than RM and RRM since it explicitly disentangles the length from quality. RRM shows the best performance on both benchmarks over ODIN and RM, with shorter responses generated than RM, suggesting it effectively controls the length as one of the artifact. The added ``Neutrals'' have slight improvements on first-turn MT-Bench and AlpacaEval-2.
+
+\begin{table}[h]\small
+\begin{center}
+\begin{tabular}{ll|cccccc}
+\hline
+Reward & Policy & \multicolumn{3}{c}{ MT-Bench\tablefootnote{we do not evaluate BoN policies on MT-Bench because it involves multi-turn.} } &  \multicolumn{3}{c}{ AlpacaEval-2 } \\
+  & & T1 ($\uparrow$) & T2 ($\uparrow$) & Overall ($\uparrow$) & LC (\%) ($\uparrow$) & WR (\%) ($\uparrow$) & Length ($\downarrow$)
+\\ 
+\hline\hline
+ RM  & BoN (N=8) &  - & - & - & 36.87 & 50.14 & 3072 \\
+ RRM & BoN (N=8) & - & - & - & \textbf{47.68} & \textbf{53.19} & \textbf{1770} \\\hline
+ RM  & BoN (N=64) & - & - & - & 40.52 & 57.62 & 2992 \\
+ RRM & BoN (N=64)  & - & - & - & \textbf{62.82} & \textbf{63.03} & \textbf{1770} \\\hline
+ RM  & DPO       & 8.02 & 6.33 & 7.27 & 33.46 & 41.07 & 2416 \\
+ ODIN & DPO      & 8.66 & 8.13 & 8.39 & 48.29 & 37.13 & \textbf{1559} \\
+ RRM & DPO       & \textbf{8.70} & 7.87 & 8.31 & \textbf{52.49} & \textbf{43.31} & 1723 \\
+ ~~-Neutrals & DPO & 8.65 & \textbf{8.21} & \textbf{8.44} & 51.73 & 43.24 & 1722 \\
+\hline
+\end{tabular}
+\caption{Comparison among different reward models on various aligned policies. T1 and T2 stand for the first and second turn of the conversation, respectively. WR stands for win-rate against GPT-4. LC stands for length-controlled win-rate. Length is the average number of characters in the generated responses. RRM shows quality improvements over ODIN and RM with shorter responses than RM. Dropping augmented neutral examples slightly hurt the quality.}
+\label{tab:main_results}
+\end{center}
+\end{table}
+
+\subsection{Length Analysis}
+To further understand the artifacts learned in reward model, we take length as an example to analyze the reward model training data and aligned policy.
+\paragraph{Length distribution of training data}
+We study the length (number of tokens) distribution of reward model training datasets. Length is one common artifact that shows bias on both policy training and evaluation. We hypothesize that the bias can possibly come from the reward model training data. The one used in training RM is not well calibrated and the chosen responses are longer on average (Figure~\ref{fig:rm_data_length_a} and~\ref{fig:rm_data_length_b}) and by frequency (Figure~\ref{fig:rm_data_length_c}). On contrary, the RRM training data is better calibrated with length more balanced between chosen and rejected responses in each length bin (Figure~\ref{fig:rm_data_length_a} and~\ref{fig:rm_data_length_b}).
+\begin{figure*}[t!]
+    \centering
+    \begin{subfigure}[t]{0.32\textwidth}
+        \centering
+        \includegraphics[height=1.3in]{figures/rm_length.png}
+        \caption{Histogram of response lengths in RM training data.}
+        \label{fig:rm_data_length_a}
+    \end{subfigure}%
+    ~ 
+    \begin{subfigure}[t]{0.32\textwidth}
+        \centering
+        \includegraphics[height=1.3in]{figures/rrm_length.png}
+        \caption{Histogram of response lengths in RRM training data.}
+        \label{fig:rm_data_length_b}
+    \end{subfigure}
+    ~ 
+    \begin{subfigure}[t]{0.32\textwidth}
+        \centering
+        \includegraphics[height=1.3in]{figures/length_bias.png}
+        \caption{Percentage of chosen responses being longer or shorter in RM and RRM traininng data.}
+        \label{fig:rm_data_length_c}
+    \end{subfigure}
+    \caption{Distribution of response lengths on reward model training datasets. (a) the RM training data has longer chosen responses on average and not well calibrated (large percent deviation in left two bins between chosen and rejected) (b) the RRM training data is well calibrated and the average length of the chosen responses is even shorter than rejected. Additional neutral triplets can further calibrated the model. (c) Around 60\% of chosen responses are longer in RM training data. On contrary, the lengths of chosen responses are more balanced in RRM training data.}
+    \label{fig:rm_data_length}
+\end{figure*}
+
+\paragraph{Length distribution of policies}
+To understand the lengthy bias learned in various policies, we also study the length distribution of generated responses on AlpacaEval-2's~\citep{dubois2024length} prompts (Figure~\ref{fig:policy_length}). We observe that the policies induced by RRM generate shorter responses than RM, which implies the correction of lengthy bias by RRM.
+
+\begin{figure*}[t!]
+    \centering
+    \begin{subfigure}[t]{0.32\textwidth}
+        \centering
+        \includegraphics[height=1.3in]{figures/bo8_length.png}
+        \caption{Best of 8 responses}
+    \end{subfigure}%
+    ~ 
+    \begin{subfigure}[t]{0.32\textwidth}
+        \centering
+        \includegraphics[height=1.3in]{figures/bo64_length.png}
+        \caption{Best of 64 responses}
+    \end{subfigure}
+    ~ 
+    \begin{subfigure}[t]{0.32\textwidth}
+        \centering
+        \includegraphics[height=1.3in]{figures/dpo_length.png}
+        \caption{DPO policy}
+    \end{subfigure}
+    \caption{Distribution of response lengths on AlpacaEval-2 prompts of various policies induced by RM and RRM, average length is marked by the dashed line. All policies show a lengthy bias towards longer responses for RM comparing with RRM.}
+    \label{fig:policy_length}
+\end{figure*}
+\subsection{Deliberately designed artifacts}
+\paragraph{Artifacts}
+To verify that our proposed method is able to eliminate  artifacts, we artificially added an artifact to the chosen responses in reward model training data. More specifically, we add prefix ``\textit{Sure, here is the response: }'' to the chosen responses with probability 0.1. We train an RM and RRM on the modified reward model training data, respectively.
+
+To test the effect of reward model on the policy model, we first sample $N$ responses from Gemma-2-9b-it model using the AlpacaEval-2 prompts. Then we add the same type of artifact to each response with probability $p_a=p$, where $p\in\{0.05, 0.1, 0.2, 0.5\}$. Under this setting, RM trained on the artifact-added data would prefer responses with the artifacts since the chosen responses come with artifacts, even if the responses may contain low-quality answer. RRM is expected to be more robust to the artifact. To verify this, we construct BoN policies using RM and RRM, respectively. 
+
+As expected, Figure~\ref{fig:artifact} shows that after adding the artifacts, the BoN policies induced by RRM are more robust than RM to artifacts injected in the responses. 
+
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}[h]{0.4\textwidth}
+        \centering
+        \includegraphics[height=1.6in]{figures/artifact_8.png}
+        \caption{Best of 8 responses}
+    \end{subfigure}
+    ~ 
+    \begin{subfigure}[h]{0.4\textwidth}
+        \centering
+        \includegraphics[height=1.6in]{figures/artifact_64.png}
+        \caption{Best of 64 responses}
+    \end{subfigure}
+    \caption{Proportion of BoN generated responses with artifact versus the rate of injected artifact. For each policy, we first sample $N$ ($N=8$ or $64$) responses on AlpacaEval-2 prompts, then prepend ``Sure, here is the response: '' before each response with probability (Rate) 5\%, 10\%, 20\%, 50\%, respectively. Then we compute the proportion of BoN responses that have the above artifact (Artifact). The BoN policies induced by RRM are more robust to artifacts injected in the responses, suggesting that the proposed approach enables the model to focus more on the contextual signals instead of context-free artifacts in the reward model training data.}
+    \label{fig:artifact}
+\end{figure}
+
+
+\section{Related Works}
+
+
+\paragraph{RLHF algorithms} The first RLHF framework is based on the proximal policy optimization (PPO) algorithm, which was first popularized by \citet{christiano2017deep} and further developed by \citet{bai2022training, ouyang2022training}. However, getting the deep RL method (PPO) work is challenging especially in the era of LLMs \citep{choshenweaknesses, engstrom2020implementation}. In recognition of this issue, another line of works proposes direct alignment algorithms, where notable examples include SLiC \citep{zhao2023slic}, DPO \citep{rafailov2024direct}, IPO~\citep{azar2024general}, KTO~\citep{ethayarajh2024kto}, ORPO~\citep{hong2024reference}, SimPO~\citep{meng2024simpo}, and DRO~\citep{richemond2024offline}. These algorithms directly optimize a supervised target to optimize the policy model without constructing a reward model first, hence the name direct alignment algorithms. However, these algorithms learning from a fixed dataset are offline and often off-policy without further exploration of the environment. RSO~\citep{liu2023statistical} emphasizes the importance of reward model and fixes the distribution shift problem to improve the DPO training, followed by list-wise alignment~\citep{liu2024lipo} and the online (iterative) training frameworks~\citep{xiong2024iterative, guo2024direct,calandriellohuman}. Alternatively, there is also a line of work based on the best-of-n sampling, such as RAFT \citep{dongraft}, BOND \citep{sessa2024bond}, BoNBoN alignment \citep{gui2024bonbon}. These algorithms leverage a reward model to rank the generated responses and distill knowledge from the best responses. Our approach can benefit RLHF algorithms relying on a reward model.
+\paragraph{Reward Models \& Reward Hackings}
+Building a superhuman/unbiased reward model is vital for training better chat assistants since it could affect the upper bound of the policies' capabilities in the online preference optimization~\citep{wang2024secretsrlhflargelanguage, bai2022constitutionalaiharmlessnessai}. 
+Multi-objective rewards~\citep{wang2024interpretablepreferencesmultiobjectivereward}, RLHF-workflow~\citep{dong2024rlhf}, and RMBoost~\citep{shen2024boosting} are proposed to train more capable reward models. 
+While revealed by \citet{anthropic2024hacking, zhang2024listsemojisformatbias}, reward models are easily hacked by different pattern in different scenario, e.g., length~\citep{singhal2023long} and sycophancy. Recent works employ the model merging (WARP~\citep{rame2024warp} and WARM~\citep{rame2024warm}), and hacking reward decomposition (ODIN~\citep{chen2024odin}) to mitigate the hackings in online RLHF. Generative reward models can provide more detailed preference analysis~\citep{yan-etal-2024-predicting}. For the most accurate reward signal, one can also use verifiable answers in certain domain like math~\citep{xiong2024building}.
+Most model-based methods failed to distinguish between preferences driven by the prompt and context-free artifacts.
+Our RRM is more advanced in removing the artifacts. 
+
+
+
+
+\section{Conclusion}
+
+In this paper, we identified a key problem in the current reward training methodology: its inability to differentiate between contextual signals and context-free artifacts. Using a causal framework, we explained this effect and improved reward model training by introducing a data augmentation approach derived from the framework. Our theoretical analysis and extensive empirical results demonstrated that the proposed techniques effectively enhance both the test accuracy of the reward model and the quality of the policies it induces. Future work will explore filtering augmented pairs and matching artifacts when constructing response pairs, further refining the training process.
+
+
+
+
+

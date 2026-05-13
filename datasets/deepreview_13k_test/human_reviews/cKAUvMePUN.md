@@ -1,0 +1,193 @@
+# Exploring Effective Stimulus Encoding via Vision System Modeling for Visual Prostheses
+
+- Decision: Accept
+- Scores: 5, 8, 6, 6
+
+## Abstract
+Visual prostheses are potential devices to restore vision for blind people, which highly depends on the quality of stimulation patterns of the implanted electrode array. However, existing processing frameworks prioritize the generation of stimulation while disregarding the potential impact of restoration effects and fail to assess the quality of the generated stimulation properly. In this paper, we propose for the first time an end-to-end visual prosthesis framework (StimuSEE) that generates stimulation patterns with proper quality verification using V1 neuron spike patterns as supervision. StimuSEE consists of a retinal network to predict the stimulation pattern, a phosphene model, and a primary vision system network (PVS-net) to simulate the signal processing from the retina to the visual cortex and predict the firing rate of V1 neurons. Experimental results show that the predicted stimulation shares similar patterns to the original scenes, whose different stimulus amplitudes contribute to a similar firing rate with normal cells. Numerically, the predicted firing rate and the recorded response of normal neurons achieve a Pearson correlation coefficient of 0.78.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The authors explored a better way of encoding the image stimuli, using spiking recurrent network, phosphene generation model, building in many details of early visual system and used a V1 encoding model. Then they optimize the electric stimuli generation parameters. constrained by V1 recording data. The model reached competitive results for modeling V1 data.
+
+### Strengths
+### 
+
+- The authors provided adequate background literature for evaluating this work.
+- The authors built in numerous biological relevant details to make this stimulation system works, which is laudable.
+- The primate V1 prediction results seems quite competitive.
+- The energy efficiency is one highlight for this method!
+
+### Weaknesses
+### Weakness
+
+- The method and experimental procedure is still a bit vague to me, i.e. I’m not sure how data and gradient flow through this system and how this system trains. Correct me if I’m wrong, during training you use the DVS → spiking RNN → stimulation model → phospene model → PVS-net V1 model and then fit all parameters with the primate V1 data? Some parameters of the phosphene model are constrained by human patient data, is that also transferred to fit primate V1 data?
+- Eq. 8 and Eq. 9, the notations are somewhat confusing, are capital `Index` and `index` the same thing? What does $\cdot$ and $[]$ mean in the Eq. 9?.  I’m also not sure about the dimension of any of the variables… are they scalar or vector integer or what? Please clarify these in the paragraph following it.
+- The biological data validation figure seems a bit weak.
+    - Usually you’d like to plot the scatter plot between predicted spikes and actual spikes for all images and summarize the correlation for each cell. Figure 5 a) looks nice but lack the population summary.
+    - If the data presented Figure 5 b is real biological spike data from times, it seems overly sparse. Can you clarify the image stimulation onset and offset time schedule of it? —— if the no spike period is just gray screen stimulation, then the temporal accuracy is just defined by the stimuli time course, which doesn’t mean much.
+    - Further the temporal precision between the data and the prediction in Figure 5b seems **overly high.** With 10 repetitions, i.e. it can predict all the cases where spikes are missing? Maybe I misunderstood what data means in this case, is it the firing rate data for 166 V1 neurons, with some Poisson spike generator attached? How could the model know the differences between these different runs?
+    - Is Figure 5 training set or test set?
+    - Also not sure about the bottom panel in Figure 5 b), the x axes `Times` means different images?
+- The work is technical solid, but the contribution and impact seems limited to the neuroengineering domain, not sure the technique will fit or benefit the neurips community.
+
+### Questions
+### Questions
+
+- Not quite clear to me what “*the front 20 times prediction of*” mean in Figure 5 (b) caption. What are the x-axes “Times” in this plot? is it seconds?
+- Given the four repeats in your V1 data, could you calculate the noise ceiling / self consistency of V1 response itself? then you can kind of compare your obtained pearson correlation to that “ceiling”.
+- How do you compute the energy efficiency of Spiking RNN? also by counting the multiplication and addition in the simulated neuron firing process? —— if that’s the case won’t that depend on how do you discretize time?
+- For more data to train the model, [1] seems to be quite relevant.
+    
+    [1] Chen, X., Wang, F., Fernandez, E., & Roelfsema, P. R. (2020). Shape perception via a high-channel-count neuroprosthesis in monkey visual cortex. *Science*, *370*(6521), 1191-1196.
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes an end-to-end framework called StimuSEE for visual prosthetics. The proposed frameworks makes use of v1 neuron responses as feedback signal to train a retinal network to generate stimulation pattern. Their results show that with this framework, they could general meaningful simulation patterns that could predict v1 neurons with substantial performance.
+
+### Strengths
+The approach proposed in the paper is novel to my knowledge. The training pipeline is simplistic and clever. 
+The paper itself is well written, and thorough about providing experimental details for future replication.
+
+### Weaknesses
+Though the framework demonstrate reliable results in predicting V1 neurons, because of the different performance metric (neuronal responses vs. reconstruction error), it is hard to directly compare this method against other existing methods. One potential solutions is adding a decoder layer on top of the trained StimuSEE framework and see whether it indeed also facilitate reconstruction as well.  
+
+Since the StimuSEE frameworks consists of multiple models, the paper perhaps should make it more clear which of the models are trained with the error signals from predicting V1 responses. For example, in Figure 2, it could be helpful to use a bounding box with a different color or the SRNN model or an arrow signifying the direction of training feedback.
+
+### Questions
+The paper only briefly mentions that V1 neuron response in blind animals are comparable to those in sighted animals, it is unclear how this approach directly transfers to blind animals. Does this framework end up with different learned model based on coverage of V1 neurons in recording? Could you use two sighted animal to estimate how transferrable the model is from one animal to the other? Also since the frameworks requires many pre-determined parameters for other non-trainable models, could the authors provide some insight on how sensitive is the SRNN network training with respect to different parameter setting among the other models? 
+
+Could you elaborate on the purpose of the parameter index in equations (8)?
+
+### Soundness
+4 excellent
+
+### Presentation
+3 good
+
+### Contribution
+4 excellent
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper introduces an end-to-end framework (StimuSEE) designed for visual prostheses through the integration of a retinal network, a phosphene model, and a primary visual system network (PVS-net). Specifically, this method generates stimulation patterns by using the corresponding V1 neuron spike patterns as supervision. The performance of this framework is impressive (Pearson correlation coefficient = 0.78 between the predicted and groundtruth firing rate).
+
+### Strengths
+Overall, I think this paper showcases a notable contribution to the field, especially with its V1 neural encoding approach for visual prostheses. The writing is clear and well-organized. The methods and results are solid. The work has novelty and can lead to potential clinical applications, such as restoring vision for the blind.
+
+### Weaknesses
+Some details in methods and results need to be further elaborated in the main text. 
+I am willing to raise the score if the authors could provide clarification to my questions listed below.
+
+### Questions
+**Questions**:
+- It's unclear to me what is the novelty of the proposed phosphene model compared to Granley et al. (2022).
+- "The training details" section requires further elaboration to enhance clarity for readers and to ensure the work is reproducible by other researchers, for example:
+    - How is PVS-net pre-trained? Was the same dataset utilized both for the PVS-net pretraining and the end-to-end training?
+    - What is the temporal resolution of the label (neural firing rate)? How many time points per image?
+- Since the key innovation of this paper is using the V1 neural prediction instead of image reconstruction as the objective, a more detailed discussion and presentation of results in Fig.5 would be beneficial to convey the claims:
+    - In Fig 5a, the authors only showcased 20 neurons. It would be informative if the authors could provide quantitive results on the model's fit across all 166 neurons. Is Fig. 5b showing the results from a single neuron? If so, is it the best-performing one?
+    - What would be the chance-level performance for both Fig. 5a and Fig. 5b?
+    - Is Fig. 5a showing spike counts from 20 neurons for a single time point or single image? If yes, why not show the overall statistics for all images in the test dataset?
+    - Fig. 5b shows the neural spike train over time. What is the temporal resolution here? Also, why comparing the spike train randomly generated 10 times from the firing rate, instead of directly comparing the time series of the predicted and groundtruth firing rate?
+- How did you get the PCC in Table 2? Is it the correlation between the predicted and groundtruth firing rate along time? then averaged across all 166 neurons?
+
+Minor point:
+- Some fonts in equations (8) and (9) are not standard. Typically, functions or operators such as min, max, and ReLU are not italicized.
+- It will be more reader-friendly to explain some abbreviations (e.g., DVS, LIF) in the caption of Fig. 2.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This research proposes a new end-to-end architecture that can be used to generate an appropriate electrical stimulation pattern of visual prostheses based on an input natural image through a network of SRNNs, which can then be passed through a network of CNNs to induce the desired V1 neuronal activity. If this information flow can be successfully implemented, the network can be used to generate a corresponding electrical stimulation pattern based on the image. This would have great applications in patients with retinal dysfunction.
+
+Overall, the idea is great and I see great potential for this approahc in developing useful visual prostheses.
+
+### Strengths
+1. End-to-end prediction of V1responses using visual prothesis is rare.
+2. Uses an SRNN model with low energy cost is used.
+3. The design of the overall framework is elegant.
+
+### Weaknesses
+The overall writing is good, but some technical details are not clear
+
+### Questions
+1. What is the adjusted ReLU function for surrogate gradient?
+2. What are the differences between LIF and MP_LIF ? 
+3. How are the parameters of the phosphene model selected? It says "fitting the experimetnal data recorded from patients with retinal protheses". I didn't see any fitting procedure or decription of the data.
+4. Table 2, The performance of this work is better than CNN approach (Cadena et al, 2009). But can you show the number of parameters of each approach?
+5. Table 3 shows the energy cost of SRNN and CNN with a similar achitechture. The advange of SRNN is not surprising given the intrisically low energy cost of SRNN. However, the energy cost of SRNN should be compared to that of a CNN with similar performance (such as, Cadena, 2009) rather than similar achitechture.
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+4 excellent

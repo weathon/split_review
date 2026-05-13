@@ -1,0 +1,262 @@
+\title{Scalable Preference Learning for Large Language Models via Convex Optimization}
+
+\begin{abstract}
+Fine-tuning large language models (LLMs) for alignment with human preferences have become a key factor in the success of models like ChatGPT and Gemini, which are now integral to mainstream use. 
+Many effective techniques are based on Reinforcement Learning from Human Feedback (RLHF), yet are challenging and expensive to implement. 
+Direct Preference Optimization (DPO) offers an accessible alternative by simplifying the objective, but can exhibit random ranking accuracy and requires a frozen reference model.
+In this paper, we develop a fast and an even more lightweight DPO based algorithm --- \emph{CVX-DPO} ---- that operates on a single GPU. 
+The key to achieving this is leveraging the convex optimization reformulation of neural networks, which eliminates the dependence on copying the reference model and is robust against hyperparameter tuning.
+CVX-DPO can be trained to global optimality in polynomial time. We use the Alternating Direction Method of Multipliers (ADMM) to solve this optimization problem in order to increase parallelization efficiency, and implement our methods in JAX to lift the memory constraints across experiments. 
+We experiment on three datasets, including one synthetically generated educational dataset, to demonstrate the efficacy of our novel algorithm in a real world setting.
+CVX-DPO outperforms traditional DPO in user preference generation when tested on human subjects, despite being trained on one single RTX-4090 GPU.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Language models have been trained on increasingly large amounts of data to capture semantic language patterns. The current paradigm is a combination of pre-training and fine-tuning these LMs to achieve aligned user preferable responses. Reinforcement learning from human feedback (RLHF) (Stiennon et al., 2020; Ouyang et al., 2022; Christiano et al., 2017; Wang et al., 2023) has demonstrated impressive results to achieve alignment, and utilizes a three step approach of: supervised fine-tuning, reward model training, and policy optimization. However this complexity presents several optimization and resource challenges in its multi-stage approach. Recently, the DPO (Rafailov et al., 2024) algorithm proposes a simpler and more computationally lightweight alternative to aligning LMs for user preferred responses. DPO reparametrizes the reward function instead of learning an explicit reward model and incorporates this into the Bradley-Terry ranking objective (Bradley & Terry, 1952). Although simpler, this also yields the following drawbacks: requiring a reference model to stabilize training incurs additional memory and computational costs, there exists a mismatch between the reward optimized in training and the log-likihood optimized during inference. Recent work (Chen et al., 2024; Meng et al., 2024) have shown that models trained with DPO exhibit random ranking accuracy even after extensive training. The SimPO (Meng et al., 2024) algorithm employs an implicit reward formulation that directly aligns with the generation metric, eliminating the need for a reference model yielding a more effective yet memory efficient approach. However this also introduces additional hyperparameters, and the authors note that the strategy is crucially dependent on extensive hyperparameter tuning to achieve optimal performance.  
+
+In this paper, we introduce CVX-DPO, a novel fast and lightweight framework for preference finetuning small language models. Our approach is based on stacking a convex two-layer neural network classifier on top of a pre-trained model. Moreover, we propose a new objective based on finetuning the convex network’s last layer. Unlike the original DPO objective, this new objective is a much smaller convex optimization problem that can be trained to global optimality. As the convex network and the fine-tuning objective are both convex, they can be solved using algorithms for convex optimization in a scalable and near-hyperparameter-free manner. In particular, to train the convex network, we combine the ADMM algorithm (Boyd et al., 2011) with GPU acceleration to facilitate fast training. In addition, we leverage JAX (Bradbury et al., 2018) and its Just-In-TimeCompilation (JIT) feature to lower our CVX-DPO code to fast machine code. As a result, using only one RTX-4090, CVX-DPO can fine-tune GPT-2 medium within a few minutes. Indeed, all of the experiments in this work were performed on a single RTX-4090 GPU. Despite the hardware limitation, CVX-DPO enjoys fast train times — less than one hour and, in some instances, only several minutes.  
+
+Thanks to its lightweight computational and memory footprint, CVX-DPO provides an important step forward in developing efficient ways of aligning LLMs to human preferences that are more accessible in academic settings. This helps to further democratize AI systems for wider audiences and improve optimization techniques in this area. In order to assess the efficacy of our method, we create a synthetic Educational-Tutor conversational dataset, and evaluate on 25 human volunteers via survey to understand ”preference”.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+Fine-tuning large language models (LLMs) that better align to human preferences can be approached through three distinct strategies. Initial algorithms of zero-shot and few-shot in-context learning (Xian et al., 2017) relies on prompt engineering. Although this method is able to improve the performance of LLMs to produce desired outputs and does not require fine-tuning, it is not able to tackle complex tasks. More sophisticated learning methods use reinforcement learning to align model outputs with user preferences. The most successful classes (such as RLHF and RLAIF (Lee et al., 2023)) have been able to create conversational LLMs such as ChatGPT. However despite their impressive performance, these methods are extremely complex, requires humans in the loop, and requires significant computational resources. Therefore the authors of DPO developed a simple yet performant learning algorithm to directly optimize to human preferences, without explicit reward modeling. The official implementation of DPO references four 80GB A100s, which reduces the barrier to training LLMs. Nevertheless, multi-GPU systems are still out of reach for many researchers in academia. In addition, DPO introduces certain hyperparameters that need careful tuning.  
+
+Bengio et al. (2005) have previously shown that it is possible to characterize the optimization problem for neural networks as a convex program. Pilanci & Ergen (2020) further developed exact convex reformulations of training a two-layer ReLU neural network. The core of this representation lies in semi-infinite duality theory, and was derived in ? to show that two-layer neural networks with ReLU activations and weight decay regularization may be re-expressed as a linear model with a group one penalty and polyhedral cone constraints. This is a step towards achieving globally optimal networks and interpretable results. This yields both practical benefits in implementation, and theoretical advantages in analyzing the optimization of the non-convex landscape of NNs. This framework is most efficient on two-layer NNs, and on small scale datasets such as CIFAR-10 or  
+
+MNIST (Mu & Gilmer (2019)). In order to apply this method to the area of LLMs where large data is paramount, we seek better solutions for scalability.  
+
+To practically solve this convex optimization problem, Bai et al. (2018) have proposed an approach based on the Alternating Direction Method of Multipliers (ADMM) (Boyd et al., 2011). ADMM offers several attractive advantages, such as its robustness against hyperparameter selection, linear decomposability for distributed optimization, and immunity to vanishing/exploding gradients. The successful application of ADMM in solving optimization problems across a wide range of domains has been well studied. This includes diverse fields such as control theory (Li et al. (2017)), maximum a posteriori (MAP) inference problems (Lu & Lu¨ (2019)), computational biology and finance (Costa & Kwon (2020)). The natural parallelization aspects of ADMM seem to make it particularly suitable to deep learning problems. Therefore we aim to integrate the convex reformulations of NNs with DPO. Our goal is to have the convex model provide clear signals to the DPO loss, thus leveraging the faster convergence to obtain LLMs of better quality.  
+
+
+
+\section{3 CONVEX NEURAL NETWORKS  }
+
+
+In this section, we review convex neural networks, which sets the stage for our introduction of the Convex DPO (CVX-DPO) algorithm.  
+
+
+
+\section{3.1 TWO-LAYER RELU NETWORKS  }
+
+
+Given an input $\boldsymbol{x}\in\mathbb{R}^{d}$ , the classic two-layer ReLU network is given by:  
+
+$$
+f(x)=\sum_{j=1}^{m}(\Theta_{1j}x)_{+}\theta_{2j},
+$$  
+
+where $\Theta_{1}\ \in\ \mathbb{R}^{m\times d}$ , $\theta_{2}\ \in\ \mathbb{R}^{m}$ are weights of the first and last layer respectively, and $(\cdot)_{+}\;=\;$ $\operatorname*{max}\{\cdot,0\}$ is the ReLU activation function.  
+
+Given targets $y\in\mathbb{R}^{n}$ , the network in equation 1 is trained by minimizing the following non-convex loss function:  
+
+$$
+\operatorname*{min}_{\Theta_{1},\theta_{2}}\ell\left(f_{\Theta_{1},\theta_{2}}(X),y\right)+\frac{\beta}{2}\sum_{j=1}^{m}\left(||\Theta_{1j}||_{2}^{2}+(\theta_{2j})^{2}\right),
+$$  
+
+where $\ell:\mathbb{R}^{n}\mapsto\mathbb{R}$ is the loss function, $X\in\mathbb{R}^{n\times d}$ is the data matrix, and $\beta\geq0$ is the regularization strength. Solving equation 2 is challenging due to the non-convexity of the objective. The optimizer often needs meticulous tuning of hyperparameters to ensure successful training. Such tuning is expensive, since it requires many iterations of running the optimizer across multiple hyperparameter configurations in a grid search to obtain good performance. This dramatically contrasts with the convex optimization framework, where algorithms come with strong convergence guarantees and involve minimal hyperparameters. Fortunately, it is possible to maintain the expressive capabilities of ReLU neural networks while still enjoying the computational advantages of convex optimization.  
+
+
+
+\section{3.2 CONVEX REFORMULATION  }
+
+
+Pilanci & Ergen (2020) have shown equation 2 admits a convex reformulation, which makes it possible to avoid the inherent difficulties of non-convex optimization. Significantly, the reformulation has the same optimal value as the original non-convex problem, provided $m\geq m^{*}$ , for some $m\geq n\!+\!1$ . Therefore, nothing is lost in reformulating equation 2.  
+
+Pilanci & Ergen (2020)’s convex reformulation is based on enumerating the actions of all possible ReLU activation patterns on the data matrix $X$ . These activation patterns act as separating hyperplanes, which essentially multiply the rows of $X$ by 0 or 1, and can be represented by diagonal matrices. For fixed $X$ , the set of all possible ReLU activation patterns may be expressed as  
+
+$$
+\mathcal{D}_{X}=\left\{D=\mathrm{diag}\left(\mathbf{1}(X v\geq0)\right):v\in\mathbb{R}^{d}\right\}.
+$$  
+
+The cardinality of $\mathcal{D}_{X}$ grows as $\left|{\mathcal{D}}_{X}\right|={\mathcal{O}}\left(r(n/r)^{r}\right)$ , where $r:=\mathrm{rank}(X)$ Pilanci & Ergen (2020). Given $D_{i}\in\mathcal{D}_{X}$ , the set of vectors $v$ for which $(X v)_{+}=D_{i}X v$ , is given by the following convex cone: $\mathcal{K}_{i}=\{v\in\mathbb{R}^{d}:(2D_{i}-I)X v\ge0\}$ .  
+
+Unfortunately, $\mathcal{D}_{X}$ has exponential size Pilanci & Ergen (2020), which makes the convex reformulation based on a complete enumeration of $\mathcal{D}_{X}$ impractical. We can work with a subset of patterns based on sampling $P$ patterns from $\mathcal{D}_{X}$ to obtain a tractable convex reformulation. This leads to the following subsampled convex reformulation Mishkin et al. (2022); Bai et al. (2023):  
+
+$$
+\begin{array}{r}{\displaystyle\operatorname*{min}_{(v_{i},w_{i})_{i=1}^{P}}\ell\left(\displaystyle\sum_{i=1}^{P}D_{i}X(v_{i}-w_{i}),y\right)+\beta\displaystyle\sum_{i=1}^{P}||v_{i}||_{2}+||w_{i}||_{2}}\\ {\mathrm{s.t.~}v_{i},\ w_{i}\in\mathcal{K}_{i}\quad\forall i\in[P].\ \ \qquad\qquad\qquad}\end{array}
+$$  
+
+Although equation 3 is based on subsampling patterns in the convex reformulation, it can be shown under reasonable conditions that equation 3 still has the same optimal solution as equation 2 Mishkin et al. (2022). Moreover, the recent work of Kim & Pilanci (2024) shows that even when they do not agree, the difference is negligible. Therefore, we can confidently work with the tractable convex program in equation 3.  
+
+In this paper, we set $\ell$ to the mean-square error loss. The recent work Bai et al. (2018) has shown in this case that by adding slack variables, equation 3 can be written as:  
+
+$$
+\operatorname*{min}_{v,s,u}||F u-y||_{2}^{2}+\beta||v||_{2,1}+\mathbb{I}_{\geq0}(s)\quad{\mathrm{s.t.~}}u=v,\;G u=s
+$$  
+
+Here, the matrix $F\in\mathbb{R}^{n\times2d P}$ is block-wise constructed by $D_{i}X$ terms.  
+
+
+
+\section{4 CONVEX DPO  }
+
+
+In this section, we introduce the Convex DPO (CVX-DPO) algorithm.  
+
+4.1 OUR APPROACH  
+
+In standard DPO, the goal is to obtain a good policy that is aligned with human user preferences. To do this, DPO initializes the policy network $\pi_{\theta}$ with the weights of a pre-trained network. It then aligns the policy model by solving the optimization problem:  
+
+$$
+\begin{array}{r}{L_{\mathrm{DPO}}(\pi_{\theta};\pi_{\mathrm{ref}})=-\mathbb{E}_{(x,y_{w},y_{l})\sim\mathcal{D}}\left[\log\sigma\left(\beta\log\frac{\pi_{\theta}\left(y_{w}\vert x\right)}{\pi_{\mathrm{ref}}\left(y_{w}\vert x\right)}-\beta\log\frac{\pi_{\theta}\left(y_{l}\vert x\right)}{\pi_{\mathrm{ref}}\left(y_{l}\vert x\right)}\right)\right].}\end{array}
+$$  
+
+The optimization problem in equation 5 is a large-scale non-convex optimization, which can be challenging to solve.  
+
+To remove this challenge, we propose to replace $\pi_{\theta}$ with a convex two-layer model. Specifically, we take a pre-trained model $f_{\theta_{\mathrm{pre}}}(x)$ and stack a two-layer convex neural network $g_{\Theta_{1},\theta_{2}}^{\mathrm{cvx}}$ on top to serve as a binary classifier. $g_{\Theta_{1},\theta_{2}}^{\mathrm{cvx}}$ is then trained by solving the convex optimization problem in equation 4. Letting $\theta=(\theta_{\mathrm{pre}},\Theta_{1},\theta_{2})$ , the resulting policy is then given by:  
+
+$$
+\pi_{\theta}^{\mathrm{cvx}}(y|x):=\frac{1}{1+\exp\left(-y g_{\Theta_{1},\theta_{2}}^{\mathrm{cvx}}\left(f_{\theta_{\mathrm{pre}}}(x)\right)\right)}.
+$$  
+
+However, rather than do preference optimization with the weights of the entire model $g_{\Theta_{1},\theta_{2}}^{\mathrm{cvx}}\circ f_{\theta_{\mathrm{pre}}}$ , we freeze the weights of $f_{\theta_{\mathrm{pre}}}$ and freeze $\Theta_{1}$ in $g_{\Theta_{1},\theta_{2}}^{\mathrm{cvx}}$ . We then finetune $\theta_{2}$ , the weights of the last layer of $g_{\Theta_{1},\theta_{2}}^{\mathrm{cvx}}$ , by solving the following modified DPO optimization problem:  
+
+$$
+\operatorname*{min}_{\theta_{2}}\ L_{\mathrm{CVX-DPO}}(\pi_{\theta_{2}}^{\mathrm{cvx}}):=-\mathbb{E}_{(x,y_{w},y_{l})\sim\mathcal{D}}\left[\log\sigma\left(\beta\log\frac{\pi_{\theta_{2}}^{\mathrm{cvx}}(y_{w}|x)}{\pi_{\mathrm{ref}}(y_{w}|x)}-\gamma\right)\right].
+$$  
+
+What is the advantage of solving equation 6 over equation 5. The answer is computational tractability, as the following proposition shows equation 6 is convex.  
+
+Proposition 1. The optimization problem in equation $6$ may be written as:  
+
+$$
+\operatorname*{min}_{\theta_{2}}\ \mathbb{E}_{(x,y_{w},y_{l})\sim\mathcal{D}}\left[\log\left(1+\exp\left(-\beta y_{w}\theta_{2}^{T}(\Theta_{1}f_{\theta_{\mathrm{pre}}}(x))_{+}-\gamma\right)\right)\right].
+$$  
+
+Moreover, it is convex as equation 7 is a logistic regression problem in $\theta_{2}$ .  
+
+Theorem 1 shows that $L_{\mathrm{CVX-DPO}}$ is convex. Thus, we can solve it to global optimality in polynomial time using efficient gradient-based optimizers.  
+
+We refer to procedure we have just described as the Convex Direct Preference Optimization (CVXDPO) algorithm.  
+
+4.2 CONVEX DPO ALGORITHM  
+
+
+
+\section{5 EXPERIMENTS  }
+
+
+We experiment with 4 models (DistilGPT, GPT2, GPT2-M, FLAX-GPT2) on 3 datasets. Our goal is to examine the effectiveness of DPO to train a small language model on one GPU, and to see if we can make the process even more cost effective by providing more signal with the ADMM optimized convex neural network.  
+
+
+
+\section{5.1 DATASETS  }
+
+
+This study explores three datasets: both synthetically generated and well-established datasets to be consistent with previous work. Each dataset is selected to offer a different qualitative assessment of the methodology. We format each dataset into ”prompt”, ”chosen”, ”rejected” labels to be consistent with the original DPO paper.o llWohwe trhe $y_{w}^{(i)}$ Ois  dtahtea s”ect hoofs perne”f eoruetnpcuets  afnord $y_{l}^{(i)}$ wiist ht $\mathcal{D}$ b”re edjeecftineedd” output. The key difference in our custom preference data generation strategy is that we utilize only the natural conversational data between two agents. Therefore we select the first utterance as ”prompt”, then the following response as ”chosen” with the next following responses as ”rejected”. This has the following advantages: eliminates the need to prompt an external LLM to generate the rigid chosen-rejected dataset format expected by DPO, naturally keeps the dataset in the same distribution since all samples occur within the same conversation, allows greater ease of using vast conversational datasets without complex processing and selection.  
+
+• IMDb Sentiment Generation This dataset contains a collection of positive and negative movie reviews from IMDb (Tripathi et al. (2020)) for the task of controlled sentiment generation. This is selected as the baseline dataset for all methods, to be consistent with the original DPO paper and verify mode implementations. In this case $x$ is the title of a movie, and $y$ is the generated positive sentiment, which should also accurately reflect the movie.  
+
+• Educational Tutor Dataset This is a custom generated task-orientated dataset in an educational setting. In each conversation we create 4000 dialogue prompts with GPT-3.5 (Achiam et al. (2023)) then use 2 instances of agents to simulate conversations a student studying for a quiz and a tutor assisting. The dataset is formatted as Prompt, Agent 1, Agent 2, Agent 1, etc. We then create the DPO dataset with $y_{w}^{(i)}$ as the completion immediately following the agent query, and $y_{l}^{(i)}$ of the alternative agent’s generation 2 steps forwards from the guests query. The creation of this dataset serves 2 purposes: Since real world applications often provide limited or unlabeled data, we are interested in how well human preferences can be optimized with a simulated real world dataset in a well-defined hospitality setting. Secondly, since this is the smallest of our three datasets, we are interested in the possibility of aligning LMs to human preference with very little data as described by the authors of Zhou et al. (2024). We prompt the student agent to ask questions across the following areas of study: math, science, history, literature, art, geography, biology, physics, chemistry, music, mythology, astrology, literature, philosophy, and chess.  
+
+• Stanford-SHP This is the largest dataset in our experiments, and is selected to stress test the memory and speed performance of our models on the setup described in section 5.2. The Stanford-SHP (Ethayarajh et al. (2022)) is a dataset of 385K collective human preferences over responses to questions in 18 different subject areas. This dataset also serves to generate preferable responses to prompts, however due to the slow iteration and sample during eval limits, we are more interested in how it affects our systems compute and qualitative generative output performance.  
+
+
+
+\section{5.2 EXPERIMENTAL DETAILS  }
+
+
+Throughout all experiments we use DistilGPT2(Li et al., 2021), GPT2 (Radford et al., 2019), GPT2- Medium architecture, and FLAX-GPT2 as the policy model. CVX-DPO does not require a reference model for stability, and instead use the convex neural network (NN) to signal the model parameters towards ”chosen” log probabilities. Our selection of GPT based policy models is due to its versatility to run in both JAX and Pytorch frameworks, while utilizing a small number of 82 million parameters in the form of DistilGPT2. This architecture in particular retains approximately $97\%$ of GPT-2’s language understanding skills despite its reduced size. All experiments are run singularly on Ubuntu 22.04 with one RTX-4090, CUDA 12.6 and Jax 0.4.33. Maximum training time reached 2.15 hours on the Stanford-SHP with the DPO loss, while minimum training time occurred with the custom Educational-Tutor dataset in supervised fine-tuning mode of approximately $2\mathrm{min}$ . We keep the same learning rate and configurations as the official DPO implementation.  
+
+
+
+\section{5.3 DPO WITH CONVEX-NN FEEDBACK  }
+
+
+In this section we describe the model implementations and benchmarked methods of this work. For each model, we train and evaluate on the Educational Tutor Dataset, then the IMDb Sentiment dataset as described in section 5.1. The Stanford-SHP dataset is only trained and evaluated on the JAX-DPO re-implementation of the official source code by (Rafailov et al., 2024). All other source code, including all JAX code, is custom coded by the authors of this project. During evaluation, metrics and training loss are monitored on Weights and Biases (Jocher et al. (2021)), validated with custom implemented functions for measuring TFLOPs and VRAM, then during human evaluation we sample from our frozen and custom trained models.  
+
+Baseline The baseline model is DistilGPT2 with supervised fine-tuning loss. In subsequent DPO settings, we initiate from the saved model of the SFT baseline for each model.  
+
+DPO Method Next we train and evaluate on the traditional DPO model. The reference model is essentially frozen, and we optimize the policy model with the DPO loss. Rafailov et al. (2024) provide in-depth analysis on the mechanics of DPO. This step is significantly more memory and time intensive than the baseline model. Naive implementations of the DPO model in Pytorch are not able to complete training on our dataset due to compute limitations of the experiment setting in section 5.2. Therefore we re-implement this train loop in JAX, remove Fully-sharded-data-parallel (FSDP), and rewrite utilities to load our custom features. The addition of the reference model to stabilize training incurs both memory and compute costs which are significant.  
+
+SimPO Method This is a recent reference-free method that has shown to outperform DPO on several metrics. However the introduction of the additional hyperparameter is crucial to its success, and thus results in longer training time.  
+
+CVX-DPO Algorithm Our novel algorithm builds on prior work, where we have seen that the combination of the convex ReLU NN implemented with ADMM in JAX is able to handle datasizes such as ImageNet (Recht et al. (2019)) and IMDb and yields faster convergence with solutions of better quality. We are motivated by the DPO objective, which treats the policy optimization task as a binary classification with cross-entropy problem. Therefore, what if we can speed up the optimization of the DPO loss by giving it auxiliary signal with the convex-NN model?   
+In observing the DPO loss, we note that the main component is the inner log ratio between the policy model and the reference model, and then difference in log ratios between ”chosen” and ”rejected”. We conjecture that by extracting the hidden features as the policy model optimizes, we should be able to leverage the convex-admm method to solve the binary classification problem. The output of the convex model provides optimal weights and classification metrics, therefore we label all ”chosen” $=1$ and all ”rejected” $=0$ in training to optimize for user preferences. This convex block is then added into the training loop of the DPO training pipeline, and used to optimize DPO’s BCE style loss by giving strong reward signal feedback.   
+The official implementation of DPO uses RMSProp (Shi & Li (2021)), which is seen to be as performant as Adam Kingma & Ba (2014) but more memory efficient since it requires less storage variables. However we note that the integration of the convex-DPO algorithm can provide advantages such as robustness against hyperparameter tuning and faster convergence. This aims to push the DPO loss towards a more globally optimal solution even faster.   
+5.4 EVALUATION BENCHMARKS   
+his is because human preference is hard to define, and recent work of Celikyilmaz et al. (2020) has shown that often humans will prefer simply the longer generated output without reason. Therefore we qualitatively evaluate our output with the 25 human participants. This is also in order to be consistent with existing literature of the seminal DPO paper. We structure evaluation as follows:   
+• vary temperature hyperparameter $(T)$ from 0.1 to 0.4.   
+• for each temperature, in each of the 3 models listed in section 5.3 above, we input the same 12 prompts. For example, a prompt might be ”What is the structure of a Shakespearean sonnet?”   
+• each of the models generate a response, which is shuffled into a multiple choice survey, and sent to 25 human volunteers   
+• We record each human’s preferences in selection, and vary the sequence of model generated output in multiple choice questions in order to mitigate human bias.  
+
+![](images/68d55920be6e6a87acccb7e90fb7e58b7e6ad24f2aac490d666e689835b9ae98.jpg)  
+Figure 1: DPO Validation Loss without Ref Model  
+
+![](images/1714ff6d8cb87a8fb8033f882a26ef9260fcf90b4fd4833bb28f8641ff271f95.jpg)  
+Figure 2: DPO-Convex Training Loss  
+
+Table 1: Feedback from 25 Human Volunteers   
+
+![](images/ed5642fd804c75afa828a6f6131c48881d0026f94d5a788ff74185b279909541.jpg)  
+
+Table 5.5 summarizes the average performance of each model. The Educational Tutor response survey section asked users to select the response that was the most HELPFUL and HUMAN, as if the participants were studying for a quiz with a tutor. This is the most meaningful response, since it utilizes our alternating preference dataset generating technique.  
+
+We also measure the speed and stability of training, as well as the robustness to hyperparameter tuning on the convex setting.  
+
+Finally we observe training time, loss achieved (see below), and difference in scalability between frameworks.  
+
+
+
+\section{5.5 RESULTS  }
+
+
+In this section we compare the results of the 3 models discussed in section 5.3. Although we perform ablation studies with varying $0.1<T<0.4$ . The baseline model is consistently the fastest to train, although it consistently demonstrates the highest amount of repetition in its output. This is further validated in our human feedback survey, where the baseline model won on only one out of thirteen questions.  
+
+The DPO-Convex model shows the most stable training performance. Despite variances in hyperparameters such as temperature, data size, batch size, this model was consistently able to stably and quickly decrease in loss. Figures 1 and Figure 2 show the training performance of the DPO-Convex model without any tuning of hyperparameters.  
+
+Table 5.5 summarizes the results of the human feedback survey, and shows both win rate and the average preference of each model. The average preference is calculated as the percentage of each model’s win rate divided by the number of times it won. We provide the average preference percentage as a metric since it gives better signal as to how preferred a model was. For example, the baseline FST model only won on one question, but was strongly preferred in that case by most humans. The Educational Tutor dataset saw an equal win-rate count between the DPO model and DPO-Convex model, but humans had stronger preference to the answers of DPO-Convex $(83.3\%)$ .  
+
+
+
+\section{6 ANALYSIS AND DISCUSSION  }
+
+
+Since we use smaller datasets on the DistilGPT2 Li et al. (2021) model, we expected to see a certain amount of repetition in the output. This is most prominent in the baseline FST model. For example, the prompt ”How can I check in? The answer is yes. I can’t....”. Although we vary $T$ and its effect on perplexity from 0.001 to 2.01 in steps of 0.3, the baseline FST does not increase in performance and is consistent in its repetition (as seen in C).  
+
+![](images/e14517227481e1b329ae7b3088420ac6a1d61ba4a5e2476ee4667037e1ee7ce7.jpg)  
+Figure 3: DPO with convex wins with $\mathrm{T}{=}0.1$  
+
+The DPO model needed approximately double the amount of time to train as the baseline FST model. However the DPO model notably generated varying degrees of creativity in the same prompt as temperature varied. We note that the DPO model instances that won on the human feedback survey were all instances where $T\,<\,0.4$ . This is in contrast to our conjecture that higher temperature will produce more desirable results with DPO since humans prefer more creative output. We also note that since our generated dataset is in a Hotel-Concierge setting, it’s possible humans prefer more consistency versus creativity. In the two sample questions posed to our human volunteers, it is clearly seen that the baseline model shows repetition, but the DPO model is preferred with $T\,=\,0.601$ . The DPO-Convex model tends to generate longer responses. However this might be attributed to its capacity for faster training.  
+
+The DPO-Convex model showed the most stable training performance. While training on one GPU and without compromising dataset size, loss was able to consistently go down regardless of varying hyperparameters. This agrees with our conjecture that adding the convex feedback increases robustness, and eliminated the need to continue with further hyperparameter tuning in experiments with the DPO-convex model. In human feedback, both DPO and the DPO-Convex model were almost equally preferred. We attribute this to small sample size of questions and volunteers, and realize the significance and difficulty of evaluating preference generation. This direction leaves room for more future work.  
+
+
+
+\section{7 CONCLUSION  }
+
+
+In this work we introduce CVX-DPO, a novel algorithm for preference learning using convex optimization. This significantly improves the robustness and speed of convergence of the convex auxiliary signal with the DPO objective. The resulting algorithm is more robust to hyperparameter tuning (such as learning rate), and allows fast iteration with preferable output on minimal VRAM consumption. The ADMM solve method provides further speed, efficiency, and parallelism. We implement our methods in JAX and run experiments run on one GPU for speed and better memory efficiency. Our custom generated synthetic dataset of the Educational Tutor setting simulates real world conversational data with turns of phrase, as opposed to many preference learning datasets which sample acute ”chosen” and ”rejected” responses to a single prompt. We validate the efficacy of our fast lightweight pipeline against 25 human volunteers, with promising results. Thus we hope this work can reduce the barrier for entry even more for individual researchers and for various educational purposes, and take a step towards democratizing the large language model regime.  
+
+Limitations and Future Work Future work will involve running our JAX experiments on TPUs or GPU clusters. Since JAX and ADMM were developed with easy parallelization in mind, more performant scaling results should be explored where we can handle even more data.  
+
+
+
+\section{8 REPRODUCIBILITY STATEMENT  }
+
+
+Our JAX code base is available for reproducibility, with configurations to replicate experiments. We provide both the original custom generated 4000 conversations in the Educational Tutor dataset, as well as the preference alignment version with the alternating strategy. All other datasets utilized are publicly available, and we adhere to the original DPO hyperparameters to ensure consistency. It is suggested to replicate our experiments on NVIDIA GPUs with Ubuntu version 22.04, JAX version 0.4.33, CUDA 12.6, NVIDIA Drivers 560 and above.  
+
+
+
+\section{9 ETHICS STATEMENT  }
+
+
+Our main objective in this work is to make preference alignment in language models more easily accessible to individual researchers, students, and the more general populace. We strongly believe that taking a small step towards democratizing research in language model capabilities is also a meaningful step towards and ethical AI future. We hope this work can assist more individuals to be both interested in LMs, and also support more educational purposes.  
+
+AUTHOR CONTRIBUTIONS  
+
+All authors contributed equally on this work.  
+
+ACKNOWLEDGMENTS  
+
+To be omitted for the time being in acknowledgement of anonymity during review.   
+
+

@@ -1,0 +1,456 @@
+\title{IterGen: Iterative Structured LLM Generation}
+
+\begin{abstract}
+
+Large Language Models (LLMs) are widely used for tasks such as natural language and code generation. Still, their outputs often suffer from issues like privacy violations, and semantically inaccurate code generation. 
+Current libraries for LLM generation rely on left-to-right decoding without systematic support for backtracking, limiting the ability to correct or refine outputs mid-generation. 
+
+To address this issue, we introduce \Tool{}, an intuitive framework for iterative, grammar-guided LLM generation that enables users to move both forward and backward within the generated output based on grammar symbols. 
+By leveraging a symbol-to-position mapping, \Tool{} ensures efficient and structured generation while allowing for corrections during the process. 
+We demonstrate \Tool{}'s effectiveness in two important applications: reducing privacy leakage in LLM outputs, and improving the accuracy of LLM-generated SQL queries.
+
+\ifthenelse{\boolean{iclr}}
+{
+}
+{
+\vspace{0
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{intro}
+
+Large Language Models (LLMs) are increasingly used for various tasks, including natural language generation~\cite{radford2019language} and code generation~\cite{chen2021evaluatinglargelanguagemodels}.
+However, their outputs can suffer from issues such as hallucination~\cite{xu2024hallucinationinevitableinnatelimitation}, disclosure of private user information found in the training corpus \cite{wang2023decodingtrust}, as well as incorrect code generation in programming tasks.
+When the output does not meet user expectations, users often have to restart the generation process with additional information in the prompt.
+Alternatively, decoding strategies like beam search can generate multiple potential outputs for a single prompt, allowing for the selection of the most suitable response.
+Both these approaches are computationally intensive and demand significant token generation, posing challenges in terms of efficiency and resource utilization.
+
+Recent techniques in context-free grammar (CFG) guided generation tried to address these issues by introducing constrained decoding techniques that ensure LLM outputs adhere to user-specified grammatical rules ~\cite{poesia2022synchromesh, willard2023efficient, guidance, geng2023grammar, ugare2024syncodellmgenerationgrammar, beurerkellner2024guiding}. 
+These approaches typically involve various parsing techniques to analyze the LLM's partial outputs and determine the acceptable set of tokens {based on the defined grammar.}
+While effective in producing grammatically correct output, these techniques fall short of enforcing semantic properties that extend beyond syntax.
+For example, ensuring that a variable name in LLM-generated code is defined before its use, or that the generated text avoids harmful language, cannot be adequately captured by grammatical constraints alone. 
+
+If an LLM generates a semantically incorrect output, the user typically must restart the generation from scratch.
+Current grammar-guided generation tools fail to address this problem effectively, as they cannot detect semantic violations, or pause the generation at intermediate points. 
+Additionally, naively backtracking a certain number of tokens from the end of the output to the part that caused the violation is not feasible. 
+This is because the token-level abstraction provided by current LLM generation libraries~\cite{wolf-etal-2020-transformers, llamacpp} is not tied to the syntax of the underlying generation, making it often difficult to navigate through the generation effectively.
+Our key insight is that symbols in a grammar defined using Backus-Naur Form (BNF)  -- terminals (e.g., keywords, operators) and non-terminals (e.g., expressions, statements) -- offer a more intuitive and interpretable abstraction for navigating through the generation process. 
+
+\paragraph{\Tool{}.} 
+We introduce \Tool{}, a novel framework that provides a user-friendly interface for iteratively generating structured outputs from LLMs. 
+Users specify a context-free grammar in the BNF for the target output language, guiding the LLM to adhere to the syntax defined by the grammar.
+Beyond syntax adherence, \Tool{} enables the user to programmatically check and correct for custom semantic properties of the generated output.
+For instance, in a code generation task, the \Tool{} program can move forward and backward by a \textit{statement} or \textit{expression}, instead of a specific number of LLM tokens and selectively resample fragments of generation with any semantic violation.
+The key technical challenge to precise grammar-aware navigation is addressing
+\textit{token misalignment} -- i.e., that LLM tokens from the model's fixed vocabulary do not directly correspond to lexical tokens associated with any specific grammar.
+\Tool{} handles this issue by dynamically computing a mapping of grammar symbols to their corresponding positions in the partially parsed output. 
+This capability enables efficient navigation both forward and backward through the generation process.
+For each LLM generation task, \Tool{} maintains the history of generated tokens (as a tree of decoded tokens) that enables it to heuristically avoid regenerating the same tokens. 
+Developers can use \Tool{}'s intuitive API to create LLM generation algorithms that enhance specific semantic properties of the outputs by leveraging grammar symbols as navigational abstractions.
+
+Our evaluation demonstrates two distinct case studies demonstrating the effectiveness of \Tool{}. 
+First, we illustrate how it can be used to improve the accuracy of LLM-generated SQL queries by enforcing additional semantic constraints.
+\Tool{} achieves 18.5\% mean improvement over state-of-the-art grammar-guided generation technique~\cite{ugare2024syncodellmgenerationgrammar}.
+Second, we show how \Tool{} effectively reduces privacy leaks in LLM-generated text from 51.4\% to 0\%, thus successfully safeguarding sensitive information while maintaining the quality of response.
+\noindent{\bf Contributions.} The main contributions of this paper are:
+
+\itemsep 1pt 
+\parskip 2pt 
+\item We present \Tool{}, the first framework that uses grammar symbols as abstractions for navigating LLM generation both forward and backward. 
+
+\item We introduce an algorithm that enables efficient and accurate control of the LLM generation through grammar symbol abstraction by maintaining the decoding history and the \mbox{LLM key-value cache.}
+
+\item We demonstrate how \Tool{} enhances specific semantic properties in LLM-generated outputs through two case studies, addressing issues of privacy leaks and accuracy in SQL queries. \end{itemize}
+
+
+\section{Background}
+
+
+
+Let the alphabet $\Sigma$ be a finite set of characters and $\epsilon$ denotes an empty string.
+Given a set $S$, $S^i$ denotes the set of all $i$-length sequences that can be formed by concatenating elements from $S$,
+and $S^* = \bigcup_{i \in \mathbb{N}} S^i$.
+$\alphabets^{*}$ represents the set of all strings over characters in $\alphabets$, including the empty string $\epsilon$. 
+
+\subsection{Language Models}
+
+Current autoregressive language models (LM) operate on vocabulary $V \subseteq \Sigma^*$ of tokens.
+A tokenizer takes an input prompt $O_0 \in \Sigma^*$,
+which is a sequence of characters,
+as input and converts $O_0$ into a sequence of tokens $t_1, t_2, \dots, t_k$. 
+In order to generate the next token, the LM $M: V^* \to \mathbb{R}^{|V|}$ takes as input the sequence of tokens $t_1, t_2, \dots, t_k$, and outputs a vector of scores $\mathcal{S}$ over the vocabulary: $\mathcal{S} = M(t_1, t_2, \dots, t_k)$.
+The softmax function $\textit{softmax}(\mathcal{S}_i) = \exp(\mathcal{S}_i)/\sum_j(\exp(\mathcal{S}_j))$ 
+transforms $\mathcal{S}$ into a probability distribution over the vocabulary $V$, and then $t_{k+1}$ is sampled as the next token.
+
+\sloppypar
+\noindent{\bf Decoding.} 
+Various approaches for token selection from this distribution have been explored in the literature such as greedy decoding, sampling, and beam search.
+Each technique is repeated until the prediction of a special end-of-sequence token, EOS, or another stopping criterion is fulfilled. 
+This iterative process is equivalent to sampling from a distribution over $V^*$, potentially resulting in multiple feasible decoding outputs.
+
+\noindent{\bf Constrained Masking.} 
+In the context of decoding, we encounter scenarios where excluding specific tokens at particular positions becomes crucial (e.g., excluding harmful words). 
+This implies we can disregard these tokens and proceed with decoding based on the remaining set. 
+An algorithm for such masking relies on a function $f_m$ to generate the mask $m$ based on the exact use case. 
+In the mask $m \in \{0, 1\}^{|V|}$, $1$ indicates a viable token, and $0$ signifies a discarded one. 
+Decoding methods mentioned earlier can be applied to $m \odot \textit{softmax}(\mathcal{S})$, where $\odot$ represents element-wise multiplication. 
+
+\subsection{Grammar-guided generation}
+
+\noindent\textbf{Grammar:}
+A formal language's syntax is defined by grammar, which comprises a set of production rules that specify all possible strings within that language. 
+A grammar includes terminal and nonterminal symbols; terminal symbols represent the actual characters or tokens, while nonterminal symbols serve as placeholders that define patterns or structures within the language.
+Most programming languages can be described using context-free grammar (CFG). 
+A CFG consists of production rules that apply to nonterminal symbols independently of their context. 
+Each production rule is of the form $S \to S_1, S_2 \dots S_n$ with $S$ a single nonterminal symbol, and $S_1, S_2 \dots S_n$ a string of terminals and nonterminals. 
+Single nonterminal $S$ on the left-hand side can be replaced by $S_1, S_2 \dots S_n$ on the right-hand side.
+\noindent\textbf{Shift-Reduce LR Parser:}
+An LR parser is a bottom-up parser used for analyzing context-free grammars (CFGs)~\cite{aho86}. 
+It handles deterministic grammars by reading input from left to right, constructing a rightmost derivation in reverse (hence LR). 
+The parser uses a shift-reduce method, shifting symbols onto a stack until a sequence matches a grammar rule. 
+When a match is found, the symbols on the stack are reduced by applying the rule, replacing them with the corresponding non-terminal. 
+This process repeats until the entire input is successfully parsed or an error occurs.
+
+\noindent\textbf{Constrained grammar-guided generation:}
+ Recent works have explored constrained grammar-guided LLM generation~\cite{Wei_2023, 10.1145/3591300, guidance, willard2023efficient, scholak-etal-2021-picard, poesia2022synchromesh, geng2023grammar, beurerkellner2024guiding, ugare2024syncodellmgenerationgrammar}. 
+These methods typically incorporate an incremental parser alongside the LLM, which parses the partial output at each decoding step. 
+The parsing results are then used to filter out tokens that would lead to syntactically invalid sequences.
+
+
+\section{\mbox{Iterative structured generation}
+
+
+Our work, \Tool{}, advances grammar-guided LLM generation techniques by introducing a framework that utilizes grammar symbols as abstractions for iterating the generation both forward and backward. 
+Unlike current grammar-guided tools, which struggle to detect semantic violations and cannot pause generation at intermediate points, our approach enables users to navigate output based on grammatical structures. 
+This flexibility allows for more effective handling of semantically incorrect outputs without the need to restart generation from scratch.
+In this section, we first outline the \Tool{} interface that supports this navigation. 
+Following that, we discuss the technical challenges and the algorithm that efficiently facilitates these functionalities.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=13cm]{images/workflow.png}
+\caption{
+In our workflow, a user program utilizing the \Tool{} manages LLM generation through forward and backward calls. 
+For each prompt $O_0$, \Tool{} maintains a session that includes a decoding trace, a symbol position map, and a key-value (KV) cache.
+Using the LR parser \Tool{} incrementally parses partially generated output $O_k$ and continuously updates the symbol position map to track the locations of symbols from the grammar in $O_k$. 
+} 
+\label{fig:workflow}
+\end{figure}
+\subsection{\Tool{} Interface}
+
+An \Tool{} session is initialized by providing a prompt and a grammar. 
+Additionally, users can specify various generation parameters such as the decoding algorithm, temperature, and other supported options. 
+\Tool{} simplifies generation with three key functions: \mbox{\str{forward}, \str{backward}, and \str{view}.}
+
+The \str{forward} function accepts a stop symbol from the grammar, which can be either terminal or non-terminal, along with a count. 
+The LLM will generate until the number of new specified stop symbols in the generation reaches the specified count. 
+The generation process may stop earlier if the model produces an EOS token or meets other stopping conditions, such as a maximum token limit.
+Additionally, the generation parameters such as the decoding algorithm and temperature can be adjusted for each individual \str{forward} call.
+Consequently, a user can sample each line in a program or a sentence in natural language text with a different decoding method.
+
+The \str{backward} function also takes a grammar symbol and count as arguments. 
+It allows the user to backtrack the generation process by the given number of specified symbols, effectively removing part of the output.
+The \str{view} function lets users inspect all substrings generated so far that correspond to a given symbol. 
+This is useful for checking whether the output meets certain criteria. 
+If the desired properties are not met, the user can invoke \str{backward} to backtrack the generation accordingly.
+
+\noindent\textbf{Example Grammar:}
+
+\begin{wrapfigure}{l}{0.6\textwidth}
+\begin{minipage}{0.6\textwidth}
+    \begin{tcblisting}{
+        listing only, 
+        halign=left,
+        listing engine=listings,
+        title=\textbf{\small English text EBNF grammar},
+        colbacktitle=blue!30!white, 
+        coltitle=black,
+        left=0pt,               % Left inner padding
+        right=0mm,              % Right inner padding
+        top=0mm,                % Reduce top margin
+        bottom=0mm,             % Reduce bottom margin
+        boxsep=1mm,
+        width=\textwidth,
+        listing options={style=EBNF},
+        label={fig:overview_grammar},
+    }
+    **paragraph**: sentence+
+    **sentence**: word+ sentence_end
+    **word**: /[a-zA-Z0-9]+/ | other_punctuations
+    **sentence_end**: "." | "!" | "?"
+    **other_punctuations**: "," | ";" | ":" | "'" | "\""
+    \end{tcblisting}
+    \label{fig:ebnf_grammar}
+\end{minipage}
+\end{wrapfigure}
+
+Consider an example of grammar using the Lark EBNF syntax.
+The grammar defines a simple English text paragraph. 
+It consists of production rules where a \str{paragraph} is defined as one or more \str{sentences}. 
+Each \str{sentence} is constructed from one or more \str{words} followed by a \str{sentence\_end} punctuation mark. 
+In this grammar, symbols such as \str{paragraph} and \str{sentence} are non-terminals, meaning they can expand into other symbols according to the defined production rules. 
+Conversely, symbols such as \str{.}, \str{!}, and \str{?} are terminals, as they cannot be further expanded. 
+
+For the given example, a \str{forward(stop\_symbol="sentence")} would ensure that LLM generation stops after generating a sentence (default value of count is 1). 
+A \str{backward("word", num=2)} function call would ensure that the generation moves backward by a unit of 2 words. 
+A \str{view("word")} call would return a list of all words in the current generation.
+These three functions can be effectively combined to create more complex LLM generation algorithms. 
+For instance, one could implement a rejection sampling algorithm that backtracks until a specified criterion is met for a particular component of the output. 
+\subsection{\Tool{} Algorithm}
+
+Given a grammar $G$, let $\mathcal{S}$ denote the set of symbols corresponding to the terminals and non-terminals of the grammar.
+Further, let $C: \alphabets^* \times \mathcal{S} \to \mathbb{I}$ be a function that represents the count of grammar symbol $S$ on parsing a string. 
+i.e. if $C(O_i, S) = n$, then there are $n$ occurrences of $S$ in the partial parsing of $O_i$ with grammar $G$.
+We use this to formally define the \Tool{} functions.
+
+\textbf{Forward function:}
+Let $ O_i \in \alphabets^* $ be the output string before the forward operation, and let $O_b \in \alphabets^*$ be the output after the call to the backward function.
+Let $ S \in \mathcal{S} $ be the target stop symbol and $ n \in \mathbb{I}$ be an integer.
+Given $ O_f = \text{\str{forward}}(S, n) $, the output $ O_f $ is formed by appending a suffix $ \Delta \in \alphabets^* $ to $ O_i $, such that $ O_f = O_i + \Delta $. Here:
+
+\begin{enumerate}
+    \item $ C(O_f, S) - C(O_i, S) = n $, there are exactly $ n $ additional occurrences of the symbol $ S \in \mathcal{S} $; or 
+    \item The generation stops at $ O_f $ when a termination condition is met, typically when the model generates an EOS token or reaches a maximum length. In this case, $ C(O_f, S) - C(O_i, S) < n $.
+\end{enumerate}
+
+\textbf{Backward function:} Similarly, let $ O_i \in \alphabets^* $ be the output string before the backward operation, and let $ O_b \in \alphabets^* $ be the output after the call to the backward function. 
+Let $ S \in \mathcal{S} $ be the target stop symbol, and $ n \in \mathbb{I} $ be the input to the backward function. 
+Given $ O_b = \text{\str{backward}}(S, n) $, the output $ O_b $ is the maximal prefix of $ O_i $ such that $ O_i = O_b + \Delta $, where $ C(\Delta, S) = n $. 
+If $ C(O_i, S) < n $, indicating that $ O_i $ does not contain enough occurrences of $ S $, then the operation backtracks to the initial prompt $ O_0 $.
+ 
+
+\noindent\textbf{Symbol Position Map:}
+To enable the counting of the occurrence of grammar symbols in the LLM generation output we maintain the symbol position map that gets updated based on the LR parser reduce operations.
+Formally, symbol position map is a mapping $\mathcal{D}: \mathcal{S'} \to \mathbb{I} \times \mathbb{I}$, where $\mathcal{S'}$ represents each occurrence of the grammar symbol in the current LLM-generated output, and $\mathbb{I} \times \mathbb{I}$ represents set of integer pairs. 
+As the LLM generates tokens, the partially generated output is passed to an incremental LR parser. 
+This parser first lexes the input, converting it into a list of lexical tokens (terminals). 
+Since the parser works incrementally, at each LLM decoding step, newly generated lexical tokens are processed by the shift-reduce LR parser. 
+\begin{wrapfigure}{r}{.43\textwidth}
+    \includegraphics[width=0.43\textwidth]{images/parser.png}
+    \caption{On every reduce operation the \Tool{} updates the position of the reduced symbol in the symbol position map.}
+    \label{fig:parser}
+\end{wrapfigure}
+Figure~\ref{fig:parser} illustrates these terminals on an input terminal tape.
+The parser operates using a set of states and a parsing table that determines the next action—either shift or reduce—based on the symbols on the input tape. 
+A shift operation updates the parser state and pushes the new terminal onto the stack. 
+In contrast, a reduce operation corresponds to applying a grammar production rule, where elements at the top of the stack are reduced to a non-terminal. 
+For example, if a production rule is $S \to S_1 S_2 \dots S_n$, where $S$ and each $ S_i$ are symbols in the grammar, a reduce operation replaces $S_1 S_2 \dots S_n$ on top of the stack with~$S$.
+
+In \Tool{}, during a reduce operation, we update the symbol position map by recording the start and end positions of the reduced symbol. 
+The start position of $S$ is taken from $S_1$, and the end position is taken from $S_n$.
+Formally, the position of $S$ is calculated as: $\mathcal{D}(S) = (\mathcal{D}(S_1)_l, \mathcal{D}(S_n)_r)$.
+Here, $\mathcal{D}(S_1)_l$ is the start position of $S_1$, and $\mathcal{D}(S_n)_r$ is the end position of $S_n$.
+The LR parser then pushes $S$ onto the stack. 
+As a result, every symbol added to the stack has an entry in the symbol position map. 
+For any future reduce operations where these symbols are involved, their positions are recursively used to update the position of the newly reduced symbol.
+In our example, when the top of the parser stack contains the symbols \str{word+} and \str{sentence\_end}, the production rule \str{sentence} $\to$ \str{word+} \str{sentence\_end} is applied to reduce the stack to \str{sentence}. 
+At this point, we mark the positions of \mbox{the newly created \str{sentence} symbol.}
+
+A subtle but important detail is that the reduce operation only occurs when the input tape contains the next terminal. 
+In other words, a \str{sentence} is only reduced when the first word of the next sentence is already on the input tape (i.e., when the pointer reaches the end). This means that during token generation if we want \Tool{} to stop precisely at the end of a certain grammar symbol, LLM often needs to generate one extra token before halting. 
+This extra token is then removed from the final output, and the \Tool{} session is updated accordingly.
+Importantly, users of \Tool{} do not need to handle these internal mechanics—the generation will appear to stop exactly at the desired grammar symbol, ensuring accurate results without exposing the underlying complexity.
+
+
+\noindent\textbf{Decoding Trace:}
+We maintain a history of each session as a \emph{tree} of tokens, incorporating token indexes and associated metadata such as token probabilities. 
+The trace includes a pointer to the last token.
+During a forward call, a newly generated token is added as a child to the last token in the tree, effectively extending the session history. 
+Conversely, during a backward call, the last token pointer is moved to a previous token position.
+This trace storage is crucial when users navigate back and forth through LLM generation while performing rejection sampling, where achieving convergence to a different desired output may take longer. 
+To expedite this process, we allow users to introduce a small recurrence penalty $\gamma$, applied to the probabilities of previously selected next tokens. 
+By utilizing a hyperparameter $\gamma$, we ensure that the model explores distinct paths each time it backtracks.
+
+\noindent\textbf{KV-cache:}
+LLMs typically use a Key-Value cache mechanism to enhance generation speed. 
+KV-cache stores previously computed Key and Value vectors from attention calculations, allowing for their reuse in current token generation. 
+During every \Tool{} session, we maintain the KV cache corresponding to the current generation and maintain it coherently with forward and backward calls. 
+This enables efficient generation without having to go through the expensive \mbox{KV-cache prefill step again.}
+
+
+
+
+\section{Case Studies}
+
+\newcommand{\CS}{C\nolinebreak\hspace{-.05em}\raisebox{.6ex}{\bf \#}}
+
+In this section, we present two case studies that demonstrate the ease of writing LLM decoding algorithms with semantic constraints.
+For both case studies the experimental setup is as follows,
+\noindent \textbf{Experimental Setup.}
+We run experiments on a 48-core Intel Xeon Silver 4214R CPU with 2 NVidia RTX A5000 GPUs. 
+\Tool{} is implemented using PyTorch~\cite{NEURIPS2019_9015}, HuggingFace transformers library~\cite{wolf-etal-2020-transformers} and \syncode{} library~\cite{ugare2024syncodellmgenerationgrammar} for the parser-guided LLM generation infrastructure.
+
+\subsection{SQL Generation}
+\label{sec:sql_study}
+
+In this case study, we show that \Tool{} can be used for improving text to SQL generation. 
+Despite providing SQL schema through the prompt, LLM-generated SQL queries can often fail to execute due to mistakes in using accurate table and column names. 
+This issue can be easily addressed by selectively resampling column and table names until they exist in the given schema. 
+We show that \Tool{} is ideal for implementing a constraint such as this while generating SQL. 
+
+Figure~\ref{fig:sql_algo} defines a function \str{generate\_sql\_with\_itergen} that utilizes \Tool{} to enhance text-to-SQL generation by ensuring that the generated SQL queries are syntactically accurate and adhere to a specified schema.
+The function begins by initializing the generation process with the given prompt and parsing the SQL schema. 
+Within a loop, it calls the \str{forward} function, which generates the next output, stopping specifically at either a column name or a table name. 
+
+The function then checks the validity of this name against the schema using the \str{view} function. 
+If the name is invalid, it invokes the \str{backward} function, which moves \Tool{}'s context back to the state before the invalid name was generated, allowing for a new attempt. 
+The \str{max\_iter} hyper-parameter prevents infinite looping and excessive computation.
+
+\input{images/code_sql}
+
+\noindent \textbf{Models.} 
+We experiment with a range of state-of-the-art LLMs under 3B parameters, including Qwen2.5~\cite{qwen2.5} (base, instruct-tuned, and code-specific) and Llama 3.2 series~\cite{llamamodels}.
+\noindent \textbf{Baselines.}
+We use \standard{} unconstrained generation and state-of-the-art grammar-guided generation tool \syncode{}~\cite{ugare2024syncodellmgenerationgrammar} as our baselines. 
+\syncode{} will ensure that the LLM-generated SQL queries are syntactically correct, however, it does not guarantee other errors that can occur during the execution of the query.
+
+\noindent \textbf{Datasets.} 
+We use the standard Spider~\cite{yu-etal-2018-spider} text-2-SQL dataset for the evaluation.
+This dataset has 1034 problems, that are categorized into different difficulty levels - \emph{easy} (250), \emph{medium} (440), \emph{hard} (174), and \emph{extra hard} (170).
+
+We prompt the model with information about the database schema and the text query.
+Our prompt is formatted as a user message for instruct-tuned models.
+Further, we explicitly prompt the model only to generate the SQL query as it is automatically parsed.
+
+We use greedy decoding for the experiment and set \Tool{}'s maximum limit for moving backward as \str{max\_iter=20} and set the \Tool{} recurrence penalty to 0.3, as it worked well on a small subset of the training dataset. 
+We use \str{\textbackslash n\textbackslash n} as an additional stop word to the EOS token for all experiments. 
+\input{tables/sql_table}
+
+Table~\ref{tab:sql_comparison} presents our result comparing \standard{} unconstrained generation and \syncode{} to \Tool{}. 
+The columns provide insights into each approach's performance: the Accuracy (\%) displays the percentage of correctly generated SQL queries across different difficulty levels, while the Execute (\%) indicates the successful execution percentage of these queries using the SQLite Python interface (execution without runtime errors). 
+Additionally, the Tokens column shows the average number of tokens generated, and the Time (s) column reports the average generation time. 
+\Tool{} improves over both baselines with an average overall accuracy of 41.6\% and an execution percentage of 75.1\%, compared to 27.6\% accuracy and 47.4\% execution rate for \standard{} generation. 
+It outperforms \syncode{}, which has an average accuracy of 35.1\% and an execution rate of 63.4\%. 
+We observe that the generation algorithm defined using \Tool{} significantly improves over both baselines for all models in terms of execution accuracy.
+For instance, with the Qwen2.5-0.5B model, \Tool{} achieves an overall accuracy of 34.3\%, compared to 27.9\% for the \syncode{}.
+Similarly, with the Qwen2.5-1.5B-Instruct model, \Tool{} reaches an overall accuracy of 50.8\%, ahead of \syncode{}'s 33.2\%. 
+Our simple \Tool{} written algorithm also substantially reduces the execution errors.  
+For Llama-3.2-1B, \Tool{} achieves 67.9\% overall execution success rate, compared to \standard{}'s 51.1\%. 
+These metrics highlight the effectiveness of the \Tool{} approach in generating valid SQL outputs.
+Furthermore, the \Tool{} approach demonstrates improved time efficiency over \syncode{}. 
+For the Qwen2.5-0.5B model, \Tool{} has an average execution time of 1.23 seconds, slightly faster than \syncode{}'s 1.29 seconds. 
+For Llama-3.2-1B, \Tool{} reduces the average time to 0.86 seconds, outperforming \syncode{}'s 0.91 seconds.
+This is mainly due to the reduced output size in some cases where the model with \Tool{} method halts earlier on generating a valid query, and \standard{} and \syncode{} generate additional redundant tokens. 
+
+
+
+\subsection{Privacy Leakage}
+As LLMs continue to proliferate and are integrated into a multitude of applications, it is imperative to protect the private user data used in model pretraining. 
+LLMs have the capacity to inadvertently output data from their training corpus thus exposing private details to end users.
+As such, privacy safeguards are critical to mitigate the risks of sensitive information disclosure, (2) further public trust in AI systems, and (3) comply with current and future data protection regulations.   
+
+We evaluate \Tool{} on its capacity to prevent LLMs from ``leaking'' private data to end users. Specifically, a `leak' is defined as an LLM outputting sensitive data that was in its pretraining dataset. While this can happen coincidentally, malicious actors may rely on specifically designed prompts that are intended to make LLMs reveal private data. 
+In this case study, we focus on the \emph{Enron} email dataset: a corpus of roughly 600,000 emails between employees of the Enron corporation. This dataset is often aggregated into large LLM pretraining corpora. As such, most common LLMs have been exposed to this data 
+during their pretraining phase, and thus are capable of leaking the data to end users. 
+
+We show that \Tool{} can be applied to easily prevent private email address leakage. We use the DecodingTrust ~\cite{wang2023decodingtrust} privacy dataset, focusing on the Enron email extraction task. The benchmark relies on prompting the LLM to reveal a specific user's email address. This is done with a 5-shot prompt: ``the email address of \{Person 1\} is \{email address 1\};the email address of \{Person 2\} is \{email address 2\};...the email address of \{Person 5\} is \{email address 5\};the email address of \{\textbf{victim}\} is''. We report the \texttt{leak} value: the number of prompts that reveal a correct email address from the original dataset. 
+
+In the following, we show that \Tool{} can be successfully applied to drastically reduce total \texttt{leak}ed emails. 
+To use \Tool{}, we provide a grammar to be followed, defining an \texttt{EMAIL} as a terminal in the grammar. 
+ 
+
+Figure~\ref{fig:privacy_algo} defines a function \str{generate\_secure\_response} that utilizes \Tool{} to ensure that the generated email addresses are not actual victim emails, but rather innocuous outputs which just closely mimic the structure of the desired malicious output.
+The function begins by initializing the generation process with the given prompt. 
+Within a loop, it calls the \str{forward} function, generating one unit of output, in this case, up to one complete email address. 
+In this code, \texttt{``EMAIL''} refers to a terminal in our grammar. 
+We then check the generated email (using \Tool{}'s \str{view} function) to determine whether a privacy leak has occurred. 
+If the current generation is innocuous, the function  continues, allowing the model to resume generation of further emails. 
+However, if the generation contains a valid employee email address, we call the \str{backward} function, which moves \Tool{}'s context back to the state before the email was generated, allowing for further attempts.
+
+Note, in our case study, we disallow the exact generation of emails from our corpus. 
+However, \Tool{}s generations may still contain fragments of private email data, due to the simplicity of the email matching function used in the experiment. For more critical applications users may define a more comprehensive matching function. 
+\input{images/code_privacy}
+\noindent \textbf{Datasets.}
+We use 100 problems from the DecodingTrust ~\cite{wang2023decodingtrust} privacy benchmark, focusing on the Enron email extraction setting with the 5-shot prompts specified above. 
+\noindent \textbf{Hyperparameter Values.}
+We use \standard{} unconstrained generation as the baseline. 
+For both the \Tool{} and \standard{} experiments we use greedy sampling. 
+For \Tool{} we set a recurrence penalty $\gamma$ to $0.3$, and limit the number of per-email backtracking attempts to $10$. 
+In addition to the models evaluated in~\ref{sec:sql_study}, we further evaluate \Tool{}s privacy preservation ability on the Llama-2-7b, and Llama-3-8B models. 
+
+Table \ref{tab:model_comparison_1} displays generation metrics of \standard{} generation compared to \Tool{} privacy preserving generation. 
+We display the number of emails leaked by the model in each generation mode, along with the average amount of time spent per generation. 
+Since \Tool{} inherently relies on re-generating certain parts of the completion, we display Average $\Delta$ tokens, a measure of how many more tokens \Tool{} generated on average, per prompt, in comparison to \standard{} generation. 
+We observe a clear, significant improvement over base models, with \Tool{} persevering user privacy with 100\% success. 
+We observe a small increase in average time per completion and average tokens per generation. 
+This overhead consists of mostly discarded tokens when backtracking away from leaky completions, and minor processing delays (e.g., checking for leaks at each step, keeping track of backtracking attempts, moderate fixed overhead when initializing~\Tool{}).
+
+We also show output perplexity as a response quality gauge to verify that \Tool{}'s secure generations are still providing utility. 
+We notice a marginal increase in response perplexity, indicating a minor divergence from the highest probability tokens, resulting from \Tool{}s replacement of high probability leak-yielding tokens.
+
+\input{tables/privacy_table}
+
+
+
+\section{Related Work}
+
+\label{sec:related}
+Our work focuses on enhancing the semantic accuracy of LLMs through constrained decoding. 
+Prior research has explored two primary strategies to improve LLM accuracy in generating structured formal languages:
+Fine-tuning or prompt engineering \cite{bassamzadeh2024comparativestudydslcode, weyssow2024exploringparameterefficientfinetuningtechniques}, which typically requires significant data, computational resources, and time, often without formal guarantees of success.
+However, fine-tuning and prompt engineering approaches are complementary to the constrained decoding approach we adopt, and improvements from those techniques could enhance the overall quality of LLM output.
+Context-free-grammar generation techniques such as \tgcd{}~\cite{geng2023grammar}, \outlines{}~\cite{willard2023efficient}, \domino{}~\cite{beurerkellner2024guiding}, \syncode{}~\cite{ugare2024syncodellmgenerationgrammar} and \aici{}~\cite{Moskal2024} constrain LLM output according to grammar rules. 
+However, in contrast to \Tool{}, these tools cannot apply semantic constraints to the generation process.
+Other recent constrained-generation methods utilize language servers (designed for communication between IDEs and language-specific tools) to enforce some semantic constraints during decoding \cite{agrawal2023guiding, Wei_2023}. 
+However, these techniques lack guarantees for syntactic accuracy and depend on the availability and performance of language servers.
+
+\lmql{}~\cite{10.1145/3591300} is a query language designed for structured LLM generation, allowing users to write queries with "holes" in text, where constraints can be applied. 
+\lmql{} fills these holes using rejection sampling based on the constraints. 
+These constraints are limited to regular expressions or predefined types such as int and float and do not extend to context-free grammars.
+In contrast, \Tool{} operates on a predefined overarching context-free grammar and offers fine-grained control over the generation process to the user. 
+Users can apply rejection sampling to specific parts of the grammar by moving forward or backward through the output. 
+Additionally, \Tool{} allows users to adjust generation parameters, providing flexibility during generation dynamically.
+
+\guidance{}~\cite{guidance} supports context-free languages but requires users to compose grammars through supported operations. 
+\guidance{}’s \str{stop\_at} function, which halts generation at a specified regular expression, has similarities to the \Tool{}’s \str{forward} function. 
+However, while \str{stop\_at} works with regular expressions, \str{forward} operates based on symbols from \Tool{}'s overarching grammar. 
+Unlike \Tool{}, \guidance{} does not support backtracking, and the only way to impose constraints is through regular expressions on generated "holes," similar to \lmql{}. 
+Moreover, \Tool{} uses any LR grammar in the standard Lark EBNF format, making it easier to plug in large grammars like SQL, which is not straightforward with \guidance{}.
+Both \lmql{} and \guidance{} provide additional features, such as the ability to insert strings during generation and support for function calls, which are outside the scope of this paper.
+
+\synchromesh{}~\cite{poesia2022synchromesh} uses constrained semantic decoding (CSD) to enforce semantic constraints through predictive masking and rejection sampling at the token level. 
+It checks if the model's first token choice adheres to the semantic constraints, and if not, uses predictive masking to resample. 
+It is designed for use with OpenAI's GPT-3 and Codex and relies on API access without direct control over the underlying language models. 
+Similarly, \picard{}~\cite{scholak-etal-2021-picard} is a grammar-guided generation tool that's developed for SQL generation with additional constraints on valid table and column names. 
+The approach used in \synchromesh{} and \picard{} for SQL can be easily implemented with \Tool{} with few lines of code, as shown in our case study. 
+In contrast to both \synchromesh{} and \picard{}, the goal of \Tool{} is to develop an efficient and intuitive tool that allows users to write programs to define grammar-level semantic constraints through its forward and backward operations that can work with any user-provided grammar and not specific to improving SQL generation.
+\synchromesh{}’s code is not publicly available and \picard{} works only with T5 architecture, and thus it is not possible to make an empirical comparison to \Tool{}.
+
+
+\section{Limitations}
+
+Our current work has the following areas for improvement:
+\Tool{} is currently limited to single LLM generation and does not support multiple sequence generation in batch. 
+This requires careful synchronization of grammar when handling multiple outputs, especially if a user wants to backtrack on just one of many sequences.
+Further, our recurrence penalty heuristic is functional but can skew the LLM distribution to diverge from previous generations at the first token. 
+We leave improvement over this heuristic to future work. 
+Additionally, our implementation assumes a dynamic KV cache and does not work with sliding window KV caches~\cite{duanmu2024skvq} used in recent models like Gemma and Mistral. Addressing this will require some engineering effort, but it's not an inherent limitation of the technique.
+
+
+
+\section{Conclusion}
+
+We present \Tool{}, an efficient and general framework that uses the symbols in the BNF grammar symbols for intuitive iteration over the LLM generation of structured outputs.
+Our evaluation demonstrates its effectiveness in improving SQL query accuracy on average by 18.5\% over existing state-of-the-art techniques and fully eliminating privacy leaks in LLM-generated text. 
+By enabling users to enforce syntactic and semantic constraints, \Tool{} can advance the reliability of LLM outputs. 
+
+\newpage 
+
+\ifthenelse{\boolean{iclr}}
+{
+
+
+\section{Reproducibility Statement}
+
+
+}
+{
+}
+
+
+
+
+

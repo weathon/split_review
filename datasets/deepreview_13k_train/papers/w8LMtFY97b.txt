@@ -1,0 +1,516 @@
+\title{Hierarchical Uncertainty Estimation for Learning-based Registration in Neuroimaging}
+
+\begin{abstract}
+
+Over recent years, deep learning based image registration has achieved impressive accuracy in many domains, including medical imaging and, specifically, human neuroimaging with magnetic resonance imaging (MRI). However, the uncertainty estimation associated with these methods has been largely limited to the application of generic techniques (e.g., Monte Carlo dropout) that do not exploit the peculiarities of the problem domain, particularly spatial modeling. Here, we propose a principled way to propagate uncertainties (epistemic or aleatoric) estimated at the level of spatial location by these methods, to the level of global transformation models, and further to downstream tasks. 
+Specifically, we justify the choice of a Gaussian distribution for the local uncertainty modeling, and then propose a framework where uncertainties spread across hierarchical levels, depending on the choice of transformation model.
+Experiments on publicly available data sets show that Monte Carlo dropout correlates very poorly with the reference registration error, whereas our uncertainty estimates correlate much better. % with the reference registration error.
+Crucially, the results also show that uncertainty-aware fitting of transformations improves the registration accuracy of brain MRI scans. Finally, we illustrate how sampling from the posterior distribution of the transformations can be used to propagate uncertainties to downstream neuroimaging tasks.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+Aligning two or more images to a common coordinate frame, referred to as image registration, is one of the fundamental tasks in medical image analysis, especially in human neuroimaging with MRI. Since many human brain structures are fairly consistent across subjects, registration methods have been very successful in this domain. Registration plays a vital role in many important applications. One example is measuring temporal change in longitudinal studies by registering scans of the same subject at different time points \citep{holland2011nonlinear}: by using each subject as its own control, confounding effects introduced by inter-subject morphological variability are considerably reduced.
+Another important application has been image segmentation: prior to deep learning, the state of the art was established by multi-atlas approaches \citep{iglesias2015multi}, based on registering a set of labeled cases to the target scan and merging the deformed segmentations. 
+Yet another key application has been spatial normalization to a digital atlas (e.g., the ubiquitous MNI template, \citealt{fonov2009unbiased}), which is at the core of many neuroimaging studies, and which enables analyses (e.g., regression, group comparison) as a precise function of spatial location \citep{sowell2003mapping}.
+
+Classically, image registration is cast as an optimization task, where the aim is to maximize a measure of similarity between a pair of images with respect to a (non)-linear transformation -- often combined with a regularization term that prevents excessively convoluted deformations \citep{zitova2003image}. This problem is typically solved with standard numerical optimization methods \citep{nocedal1999numerical}. In medical imaging, the different components of optimization-based registration have been exhaustively studied, including transformation models \citep{rueckert1999nonrigid, christensen2001consistent}, similarity metrics \citep{pluim2003mutual,avants2008symmetric}, and optimization approaches \citep{klein2007evaluation,glocker2011deformable}. The reader is referred to \citep{sotiras2013deformable} for a comprehensive survey.
+
+During the last decade, the focus on image registration has shifted from optimization-based approaches to (deep) learning-based approaches. By sidestepping the numerical optimization task, these algorithms can predict a mapping between two images almost instantaneously. Earlier deep learning (DL) methods, best represented by QuickSilver \citep{yang2017quicksilver}, were trained in a supervised manner using ground-truth deformation fields obtained with classical optimization-based registration. These supervised approaches were superseded by unsupervised frameworks that learn to directly minimize the dissimilarity between two input images, using losses similar to those of classical methods  -- possibly combined with segmentation losses for improved alignment of anatomical regions \citep{balakrishnan2019voxelmorph,de2019deep}. By now, many features of classical registration, including diffeomorphisms \citep{krebs2019learning}, symmetry \citep{iglesias2023ready}, progressive warping \citep{lv2022joint}, or inter-modality support \citep{hoffmann2021synthmorph} have been incorporated into DL registration. 
+
+A crucial, but less explored, aspect of image registration is uncertainty estimation. Measures of uncertainty find application in surgery (to register pre-operative and intra-operative images, \citealt{simpson2011uncertainty}), radiation therapy (to better estimate margins around organs at risk, \citealt{risholm2011estimation}), or neuroimaging (for improved spatially normalized statistics,  \citealt{simpson2011longitudinal}), among other applications.
+In the classical registration literature, uncertainty models often rely on formulating the task as a probabilistic model, where the transform is a random variable \citep{simpson2013bayesian, le2017sparse, risholm2013bayesian, le2016quantifying, kybic2009bootstrap, agn2019fast}, and where the uncertainty is described by the posterior probability distribution of the transform. However, uncertainty estimation remains largely unexplored in the modern DL registration literature. 
+While there are well-established approaches in the DL literature (particularly ensembling and Monte Carlo dropout, \citealt{gal2015bayesian,lakshminarayanan2017simple}), they operate at the voxel level -- rather than on the whole transform. For this reason, uncertainty estimates in registration are scarce and typically a by-product of model predictions \citep{dalca2019unsupervised, gong2022uncertainty, krebs2018unsupervised}.
+
+Here, we propose to integrate uncertainty estimation into DL registration in a principled manner. Specifically, we propose a method for uncertainty-aware fitting of transformation models to predictions made \emph{independently} at different locations (typically at each voxel), which can directly capitalize on existing DL uncertainty estimation approaches. In this framework, DL solves a simpler location-by-location regression task, where a network is trained to predict a deformation vector per location (or, alternatively, a triplet of target coordinates \citealt{gopinath2024registration}), along with uncertainty estimates (aleatoric and/or epistemic). We can then fit multiple transformation models to the set of predictions; our methods are general and support, e.g., affine transforms, B-splines \citep{rueckert1999nonrigid}, or non-parametric \citep{avants2008symmetric} transforms. The uncertainty estimates can then be propagated to the model parameters in closed form, enabling: \textit{(i)}~a weighted fit, where uncertain locations contribute less to the fitting; and \textit{(ii)}~uncertainty estimation of the model parameters, e.g., B-spline coefficients. The uncertainty on the model parameters effectively considers dependencies across spatial locations and can be further propagated to downstream tasks, e.g., registration-based segmentation.
+
+In sum, our method models uncertainty as it propagates through a hierarchy of levels (network output, transform models parameters, downstream tasks), in a principled way that enables sampling, investigating modes of variation, and computing of error bars. Specifically, the main contributions of this work are:
+\begin{enumerate}
+  \item We propose a framework for propagating network estimated uncertainties (epistemic and/or aleatoric) to transformation models and further to downstream tasks. Furthermore, our framework allows fitting of multiple different transformation models, which can be flexibly chosen based on the application without retraining the network. %We quantitatively and qualitatively measure how the uncertainty estimation is correlated with the registration errors, and show that incorporating the uncertainty leverage the predicted uncertainty to benefit medical image registration.
+  \item Using an experimental setup based on a recently proposed coordinate-regression DL method for atlas registration, we show that \emph{aleatoric} uncertainty estimates correlate well with registration error but the epistemic uncertainty (estimated with Monte Carlo dropout) does not. Crucially, we also show that incorporating the aleatoric uncertainty into the fitting of the transformation model \emph{increases} registration accuracy. 
+\end{enumerate}
+
+
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+\myparagraph{Deep learning based medical image registration.} During the last decade, deep learning methods have dominated medical image registration \citep{cao2017deformable, krebs2017robust, rohe2017svf, uzunova2017training, sokooti2017nonrigid, tian2022liftreg, balakrishnan2019voxelmorph, dalca2019unsupervised, dalca2019learning, dalca2019unsupervised}. These methods directly predict a deformation field given two images, and can be generally categorized as supervised and unsupervised. Supervised methods train deep neural networks with ground truth deformation fields. For example, the pioneering QuickSilver method \citep{yang2017quicksilver} uses fields estimated with an accurate, computationally expensive Large Deformation Diffeomorphic Metric Mapping (LDDMM) model. \cite{cao2017deformable} learns the complex mapping from the input patch pairs to their respective deformation field in a patch-based manner. In the context of prostate imaging, \cite{krebs2017robust} investigates how deep learning could help organ-specific deformable registration, in applications such as motion compensation or atlas-based segmentation. \cite{uzunova2017training} seeks to learn highly expressive appearance models from a limited number of training samples. 
+
+Requiring ground truth deformation fields has 
+the disadvantage that
+trying to learn the distribution of such fields in isointense image regions may lead to wasted model capacity and misguiding gradients due to overfitting. In contrast, unsupervised registration usually uses spatial transformer networks (STN) \citep{jaderberg2015spatial} to warp moving images to match fixed images, and the model parameters are trained using the similarity between warped and fixed images. Similarly to classical methods, regularization terms are often used to encourage the smoothness of the predicted displacement fields. Representative unsupervised methods include VoxelMorph \citep{balakrishnan2019voxelmorph}, its variational extensions  \citep{dalca2019unsupervised}, and \citep{de2019deep}.   These unsupervised methods achieve accuracy levels comparable with classical techniques, albeit with much higher efficiency.
+
+\myparagraph{Uncertainty estimation.} Uncertainty estimation seeks to assess how confident a model is in its predictions -- which is of great importance in the deployment of models in the real world, particularly in critical applications such as medical imaging. 
+DL models deal with two types of uncertainty: aleatoric and epistemic. The former is input-dependent, e.g., noise in the data, and can be learned during training \citep{malinin2018predictive}. Epistemic uncertainty is on the model weights, e.g., due to insufficient training data. Principled formalisms such as Bayesian neural networks are possible, but are only practical for smaller models \citep{kendall2017uncertainties}. Recently, Monte Carlo (MC) dropout \citep{gal2015bayesian} and model ensembles \citep{lakshminarayanan2017simple, rupprecht2017learning} have been proposed as more practical approaches, especially in the context of classification tasks \citep{abdar2021review,gawlikowski2021survey}. Unfortunately, these approaches also have shortcomings: MC dropout, which randomly turns off a fraction of the neurons, is fast and easy to implement but is known to underestimate uncertainty \citep{blei2017variational}, whereas ensembles that estimate uncertainty as variance across multiple networks, or multiple output layers, are more accurate but computationally expensive in training \citep{lakshminarayanan2017simple}. 
+\myparagraph{Uncertainty estimation for image registration.} Uncertainty estimation for medical image registration provides a layer of reliability and interpretability, and has long been a research objective. In the classical literature, methods based on probabilistic modeling have enabled uncertainty estimation via Bayesian inference \citep{simpson2013bayesian, kybic2009bootstrap, le2017sparse, risholm2013bayesian, le2016quantifying, agn2019fast}. This is achieved by computing (exactly or approximately) the posterior probability distributions of the deformation model parameters. Instead of Bayesian inference, other methods have used bootstrap sampling as an empirical ensemble method to estimate registration uncertainty \citep{kybic2009bootstrap}.
+
+In the DL era, registration uncertainty is often underutilized, and most existing approaches either rely on direct application of the general uncertainty estimation techniques described above (see for instance \citealt{gong2022uncertainty,smolders2022deformable,chen2024registration}), or obtain simplistic uncertainty estimates as a by-product (e.g., the variational inference strategy in \citealt{dalca2019unsupervised,sedghi2019probabilistic}, which is known to underestimate uncertainty). Therefore, these approaches fail to consider the spatial distribution of deformation fields. 
+Finally, we note that the correlation between uncertainty estimates and registration errors has not been thoroughly investigated \citep{luo2019applicability,luo2020registration} -- possibly due to the scarcity of datasets with labeled pairs of landmarks that would ideally be used to measure these errors \citep{luo2020registration}.
+
+
+
+\section{Methods}
+
+Since our framework is applicable to different registration tasks, we first present it in general terms. Specific instantiations of the model, losses, and training approach are presented in~\Cref{sec:model_instantiation}. 
+
+\myparagraph{Preliminaries.}
+Given an input image, or input images, $\mathbf{I}$, our goal is to train a network that predicts $\mathbf{d}=[\mathbf{d}_1, \mathbf{d}_2, \mathbf{d}_3]$ where $\mathbf{d}_{j} = [d_{j,1}, ..., d_{j,N}]^T$ is a column vector storing $N$ values for the coordinate direction $j$. Depending on the application, the values may correspond to target $(x,y,z)$ coordinates, displacements from reference voxels in a target image that are needed to reach voxels in an input image, or even key points that can be used for landmark-based registration \citep{wang2023robust}. %We note that $\mathbf{I}$ can represent a pair of images (for pairwise registration) or a single image (e.g., for registration to a common coordinate frame, such as the MNI template, \citealt{fonov2009unbiased}). 
+We are thus seeking to train a neural network $\mathbf{F}_{\mathbf{\theta}}$ with parameters $\mathbf{\theta}$, such that: $\mathbf{d} = \mathbf{F}_{\mathbf{\theta}}(\mathbf{I})$. 
+\subsection{First level of uncertainty: target regression}
+\label{sec:first_level}
+The strength of our method lies in its ability to capitalize on well-established uncertainty estimation methods that operate at the level of the individual outputs $d_{j,n}$. In this context, one can use the techniques discussed in~\Cref{sec:intro} and~\Cref{sec:related_work} above to obtain an accurate estimate of the distribution of the field at each point individually. Without loss of generality, we assume this distribution to be Gaussian: Monte Carlo dropout and ensembles both yield samples that are typically summarized into a mean and (co-)variance; whereas aleatoric uncertainty estimation for continuous variables often relies on prediction of Gaussian means and (co-)variances as well \citep{tanno2017bayesian}. 
+
+Therefore, and irrespective of the chosen uncertainty modeling approach, we assume throughout the rest of this manuscript the availability of 
+$\bm{\mu} = [\bm{\mu}_1, \bm{\mu}_2, \bm{\mu}_3]$ and $\bm{\sigma} = [\bm{\sigma}_1, \bm{\sigma}_2, \bm{\sigma}_3]$, where $\bm{\mu}$ stores the predicted mean values for every position and direction and $\bm{\sigma}$ denotes the corresponding predicted standard deviations. Henceforth, we refer to these as the \textit{first level of uncertainty}.
+
+We further note that, since uncertainty is considered, overfitting in flat image regions is not an issue and one can safely train the network with supervised losses -- which greatly facilitates learning of aleatoric uncertainty. In this case, ground truth coordinates or displacements can be obtained by registering images to other images (pairwise registration) or MNI (atlas registration) using a slow, accurate, classical method \citep{yang2017quicksilver}.
+\subsection{Second level of uncertainty: weighted fitting}
+\label{sec:second_level}
+Given a set of predicted values $\bm{\mu}$ and their standard deviations $\bm{\sigma}$, 
+we can fit a large family of (non-)linear transformations, including models based on basis functions (e.g., B-splines, \citealt{rueckert1999nonrigid}) and non-parametric approaches \citep{thirion1998image}.
+
+\myparagraph{Uncertainty-Aware Parametric Transformations.} % Transformation models using basis functions can be fitted with weighted least squares. 
+Let $\boldsymbol{\phi} = [\boldsymbol{\phi}_1, ..., \boldsymbol{\phi}_B]$ be a matrix of $B$ basis functions where $\boldsymbol{\phi}_b = [\phi_{b,1},...,\phi_{b,N}]^T$ and $\phi_{b,n}$ represents the value of basis function $b$ evaluated at location %\footnote{For simplicity, we assume in the rest of this section that the spatial locations correspond to voxels, but the framework is equallly valid for, e.g., keypoints.} 
+$n$. Finally, let $\mathbf{c}$ be a $B\times 1$ vector with the coefficients of the basis functions. To fit the model, we minimize the coordinate error weighted by the corresponding precisions, given by the inverse variances. This can be solved in one coordinate direction $j$ at the time using standard weighted least squares. Given a weight matrix $\mathbf{W}_j = \mathrm{diag}(\boldsymbol{\sigma}^{-2}_j)$, the goal is to minimize the weighted squared error $E_j$ for each of the three dimensions $j=1,2,3$:
+$$
+E_j = [ \bm{\mu}_j - \bm{\phi} \bm{c}_j]^T \bm{W}_j [\bm{\mu}_j - \bm{\phi} \bm{c}_j],
+$$
+which has the well-known solution:
+$$
+    \bm{c}^\mu_j = [\bm{\phi}^T \bm{W}_j \bm{\phi}]^{-1} \bm{\phi}^T \bm{W}_j \bm{\mu}_j =  A \bm{\mu}_j,
+$$
+where $\bm{c}^\mu_j$ is the mean of the fitted coefficients for coordinate direction $j$, and $A_j = [\bm{\phi}^T \bm{W}_j \bm{\phi}]^{-1} \bm{\phi}^T \bm{W}_j$ is the weighted pseudoinverse.
+Further, since this is a linear estimate, we can compute the $B \times B$ covariance matrix of the fitted coefficients:
+\begin{equation}
+\label{eq:c_mu_c_sigma}
+\bm{c}^\Sigma_j = A_j * \bm{W}^{-1}_j * A_j^T.
+\end{equation}
+
+We note that the basis function formulation covers both linear and non-linear transformations, as the former can be seen as a special case of the latter with $\boldsymbol{\phi} = [\mathbf{x}, \mathbf{y}, \mathbf{z}, \mathbf{1}]$, where the first three columns are the coordinates at the corresponding $N$ locations in the input image space and the last one is a column of ones. These linear basis functions can be fitted in isolation (linear registration), prior to nonlinear fitting (sequential linear / nonlinear registration), or together with nonlinear basis functions in a single $\boldsymbol{\phi}$ (joint linear/nonlinear registration).
+
+Given $\bm{c}^\mu$ and $\bm{c}^\Sigma$ for every direction, we can: 
+\begin{itemize}
+\item Compute the most likely transform as $\bm{\phi}\bm{c}^\mu$.
+\item Visualize the variance map of the coefficients $\mathrm{diag}(\bm{c}^\Sigma)$, e.g., as a heat map.
+\item Obtain samples of the field as $\bm{\phi} A (\bm{\mu} + \bm{W}^{-1} \bm{g})$, where $\bm{g}$ is a random vector with zero-mean, unit-variance Gaussians at every entry.
+\item Extract the leading eigenvalues $\{\lambda_i\}$ and eigenvectors $\{\bm{e}_i\}$ (e.g., with randomized PCA, \citealt{rokhlin2010randomized}) to visualize the main modes of variation, e.g., $\bm{\phi} (\bm{c}^\mu \pm k \lambda_i \bm{e}_i)$ with $k\in[-3,3]$ and $i=1,2,3$.
+\end{itemize}
+\myparagraph{Uncertainty-Aware Non-Parametric Transformations.} 
+Best represented by the demons algorithm \citep{thirion1998image}, most non-parametric registration methods consist of alternating vector field estimation and field regularization (field smoothing). In our case, the field estimation is given by the network prediction, which is fixed, so iterating is not necessary. Instead, we simply convolve the network output with a smoothing kernel $K$ (typically Gaussian) to obtain the transformation. Since this is a linear operation (independently of the choice of $K$), the distribution of the smoothed field remains Gaussian, so we can:
+\begin{itemize}
+\item Compute the most likely transform, which can be efficiently obtained with convolutions: $K \star (\bm{\sigma}^{-2} \odot \bm{\mu}) / (K \star \bm{\sigma}^{-2})$, where $\odot$ is the element-wise (Hadamard) product. 
+\item Compute the voxel variance map as: $(K\odot K) \star \bm{\sigma}^{2}$.  
+\item Obtain samples of the field as $K \star (\bm{\mu} + \bm{W}^{-1} \bm{g})$, where $\bm{g}$ is, once again, a random vector with zero-mean, unit-variance Gaussians at every entry.
+\end{itemize}
+We note that extracting the leading eigenvalues and eigenvectors in this scenario is also possible, but cannot be effectively done with convolutions and requires using the full expression (\Cref{eq:c_mu_c_sigma}).
+
+
+Throughout the rest of this paper, we refer to the distribution of the fitted transformation (whether it is coefficients $\bm{c}$ of the smoothed non-parametric field) as the \textit{second level of uncertainty}.
+\subsection{Third level of uncertainty: error bars on downstream tasks}
+\label{sec:third_level}
+We can further propagate the uncertainty of the transformation to downstream tasks. As an example, we used registration-based segmentation. Given that we can draw samples of the spatial transformation, we can propagate multiple versions of an atlas segmentation (see~\Cref{fig:overview}). Each sample from the transformation leads to one possible segmentation map, resulting in different versions of segmentation maps, which can be used to estimate a distribution of labels at every spatial location -- and derive its uncertainty using, e.g., the entropy of this distribution. We call this the third level of uncertainty.
+
+
+\subsection{Model instantiation}
+\label{sec:model_instantiation}
+We demonstrate our framework using a simple coordinate-regression DL method, called ``Registration by Regression'' (RbR), for atlas registration that has been recently proposed \citep{gopinath2024registration}; extension to pairwise registration is straightforward, by regressing displacements from image pairs, rather than atlas coordinates from single images. RbR aims to non-linearly align a given input scan with a target atlas (specifically the MNI template). In this case, $\bm{d}$ specifies the target coordinates in the MNI space for every voxel in the input scan. Here we describe the losses used to train the baseline RbR model and the additional losses we have used in the training of the extended model.
+
+\myparagraph{Coordinate loss.}
+For the coordinate loss we use a simple $\ell_2$ loss between the predicted and ground-truth coordinates at every voxel location:
+\begin{equation*}
+L_{coord} = \frac{1}{\sum_n m_n}\sum_{n=1}^N m_n\ell_2[\mathbf{d}_n - F_{\theta}(\mathbf{I})_n],
+\label{eq:reg_loss}
+\end{equation*}
+where $\mathbf{m} = [m_1,...,m_N]^T$ is a flattened binary foreground mask excluding all non-brain regions and $\mathbf{d}_n$ and $F_{\theta}(\mathbf{I})_n$ denote the ground-truth and prediction at location $n$ respectively. An $\ell_1$ loss could also be used, but we show in the experiments that this yields worse performance. 
+
+\myparagraph{Mask loss.}
+In addition to regressing the atlas coordinates, the CNN is also trained to predict the brain mask $\mathbf{m}$ as the MNI template we use does not include non-brain structures. For the mask loss we use a combination of a standard cross-entropy and Dice losses with empirically chosen relative weights of 0.25 and 0.75.
+\begin{equation*}
+L_{mask} = \frac{1}{\sum_n m_n}\sum_{n=1}^N [0.25 * L_{ce}(m_n,\hat{m}_n) + 0.75 * L_{dice}(m_n,\hat{m}_n)],
+\label{eq:smask_loss}
+\end{equation*}
+in which $\mathbf{\hat{m}}$ is the predicted mask and $\mathbf{m}$ is a ground-truth mask, which is also used in the coordinate loss. In this case the cross-entropy and Dice losses are computed over two classes (foreground and background), where the ground-truth and predicted masks are one-hot encoded.
+
+\myparagraph{Atlas segmentation loss (optional).}
+Given we have a prediction $\mathbf{\hat{d}} = F_{\theta}(\mathbf{I})$, we can fit a transformation model, as outlined in \Cref{sec:second_level}, to map a segmentation from the target MNI space to the input. This allows us to supervise the network training using a more fine-grained Dice loss at the level of neuroanatomical structures. To this end, we can use the transformation models in \Cref{sec:second_level} as a differentiable step in the network and train end-to-end using a segmentation loss. Here, the transformation model contains both the linear and non-linear parts. We use a standard Dice loss for the segmentation:
+\begin{equation*}
+L_{seg} = \frac{1}{\sum_n m_n}\sum_{n=1}^N L_{dice}(\mathbf{s}_n, \mathbf{\hat{s}}_n),
+\label{eq:seg_loss}
+\end{equation*}
+where $\mathbf{s}$ and $\mathbf{\hat{s}}$ are the ground-truth and transformed segmentations respectively, and the Dice loss is now computed over multiple neuroanatomical structures (see~\Cref{fig:overview} for an example segmentation).
+\myparagraph{Aleatoric uncertainty loss (optional).}
+To model the aleatoric uncertainty, we learn to directly predict the means $\boldsymbol{\hat{\mu}}$ and standard deviations $\boldsymbol{\hat{\sigma}}$ of the coordinates. We use the hat to emphasize that these are predictions from the network. When modeling the uncertainty with a Gaussian distribution we aim to minimize the log-likelihood loss w.r.t. $\boldsymbol{\hat{\mu}}$ and $\boldsymbol{\hat{\sigma}}$ given the targets $\bm{d}$:
+\begin{equation*}
+L_{uncer} = \frac{1}{\sum_n m_n}\sum_{n=1}^N\sum_{j=1}^3\frac{m_n}{2} \left(\frac{\|d_{n,j} - \hat{\mu}_{n,j}|^2}{\hat{\sigma}_{n,j}^2} + \log(\hat{\sigma}_{n,j}^2) \right).
+\label{eq:uncer_loss_gaussian_single}
+\end{equation*}
+Here $d_{n,j}$ denotes the ground-truth coordinate for direction $j$ and voxel $n$. In practice, we learn to predict $\log(\hat{\sigma}^{2}_{n,j})$ rather than $\hat{\sigma}^{2}_{n,j}$ directly to map the values to real numbers (not only positive real numbers). Another distribution, such as the Laplace distribution could also be used, and in practice gives similar performance as shown in the experiments.
+
+\myparagraph{Epistemic uncertainty (optional).} To model the epistemic uncertainty, we train the network using Monte Carlo dropout. This amounts to randomly switching off a part of the activation functions in one or more layers. The samples can be generated similarly at test time by making repeated predictions while randomly dropping some of the activation functions. These samples are then summarized as $\boldsymbol{\hat{\mu}}$ and $\boldsymbol{\hat{\sigma}}$ and used in fitting the transformations. 
+
+\myparagraph{Full loss for different network configurations.} The full loss for the proposed approach is:
+\begin{equation*}
+L_{total} = L_{coord} + \lambda_{mask} L_{mask} + \lambda_{seg} L_{seg} + \lambda_{uncer} L_{uncer}.
+\label{eq:total_loss}
+\end{equation*}
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\textwidth]{figures/Framework_revised.pdf}
+    \caption{Overview of the training strategy of the proposed method.}
+    \label{fig:overview}
+\end{figure}
+
+When training without uncertainty, we simply drop the last term, which models the aleatoric uncertainty. This term is also not included when modeling the epistemic uncertainty, i.e., when training with Monte Carlo dropout.
+
+
+ 
+The overall training framework of the network is illustrated in~\Cref{fig:overview}. Given an input scan, the network regresses both the coordinate means $\boldsymbol{\mu}$ and the standard deviations $\boldsymbol{\sigma}$, as well as a foreground mask $\mathbf{\hat{m}}$. The optional atlas segmentation loss is denoted by the dashed box.
+
+
+
+
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+\myparagraph{Training and test data.}
+We use the same training and test data sets as \cite{gopinath2024registration}. The training data consists of high-resolution, isotropic, T1-weighted scans of 897 subjects from the HCP dataset \citep{van2013wu} and 1148 subjects from the ADNI \citep{jack2008alzheimer}, while the test data set includes the ABIDE \citep{di2014autism} and OASIS3 \citep{lamontagne2019oasis} data sets. More details can be found in~\Cref{sec:data}.
+
+\myparagraph{Implementation details.}
+We use the standard U-net \citep{ronneberger2015u} as our backbone. More details can be found in~\Cref{sec:implementation}.
+
+\subsection{Results}
+We first present results at every level of uncertainty and qualitatively demonstrate the utility of our approach in a downstream task. We then move on to presenting quantitative results on the registration accuracy using Dice scores as a quality metric. Finally, we show how the different components of the training affect registration accuracy using ablations. Bolded numbers denote significant differences (t-test, $p=0.05$). 
+\subsection{Uncertainty throughout the hierarchy}
+
+\myparagraph{First-level of uncertainty: epistemic and aleatoric uncertainty.} To ensure that the first-level uncertainties are useful and benefit the registration, they should correlate with the voxel-level coordinate prediction error. The proposed aleatoric uncertainty is simply the regressed $\boldsymbol{\sigma}^2$, whereas for the epistemic uncertainty we train a separate network using dropout layers but without the aleatoric uncertainty loss $L_{uncer}$.
+
+\begin{wrapfigure}{r}{0.76\textwidth}
+\centering
+\subfigure[Coordinate error (epistemic)]{
+\includegraphics[width=0.15\textwidth]{figures/mc_diff_mean.png}}
+\subfigure[Variance (epistemic)]{
+\includegraphics[width=0.15\textwidth]{figures/mc_sigma.png}}
+\subfigure[Coordinate error (aleatoric)]{
+\includegraphics[width=0.15\textwidth]{figures/our_diff.png}}
+\subfigure[Variance (aleatoric)]{
+\includegraphics[width=0.15\textwidth]{figures/our_sigma.png}}
+\includegraphics[width=0.047\textwidth]{figures/color_bar_10_positive_revise.png}
+\caption{Coordinate prediction error and estimated variance for the epistemic uncertainty (a,b) and for the aleatoric uncertainty (c,d).}
+\label{fig:voxel_uncer}
+\end{wrapfigure}
+In~\Cref{fig:voxel_uncer}, we show, for a single subject, the error between the predicted and ground-truth coordinates along with the voxel-wise variance estimated with epistemic and aleatoric uncertainties. The aleatoric uncertainty highlights the cortex, which is difficult to register, as a region of high variance, whereas the epistemic uncertainty is much more noisy with less structure. We also quantify both the Spearman, which is more robust against outliers, and Pearson correlations between the coordinate error and the variance for both uncertainty approaches over all subjects in the validation set. The correlations for the aleatoric uncertainty are (\textbf{0.601 $\pm$ 0.019}) (Spearman) and (\textbf{0.476 $\pm$ 0.021}) (Pearson), which are significantly higher than the correlations for the epistemic uncertainty (0.181 $\pm$ 0.017) (Spearman) and (0.108 $\pm$ 0.012) (Pearson). Importantly, the aleatoric uncertainty shows a strong correlation with the coordinate prediction error in absolute terms, which allows effective downweighting of mispredicted coordinates when fitting the transformation, as shown in the next section. Given its superiority, we only consider the aleatoric uncertainty in the subsequent experiments.
+
+
+\begin{wrapfigure}{r}{0.48\textwidth}
+\centering 
+\subfigure[Input]{
+\includegraphics[width=0.15\textwidth]{uncer_second/im.png}}
+\hspace{-0.15in}
+\subfigure[B-spline]{
+\includegraphics[width=0.15\textwidth]{uncer_second/bspline_uncer_re.png}}
+\hspace{-0.15in}
+\subfigure[Demons]{
+\includegraphics[width=0.15\textwidth]{uncer_second/Demoms_uncer.png}}
+\caption{The heat map of uncertainty from B-spline and Demons. Note the B-spline coefficients are upsampled to the image size for visualization.}
+\label{fig:uncer_second}
+\end{wrapfigure}
+\myparagraph{Second-level of uncertainty: uncertainty of transforms.} As outlined in \Cref{sec:second_level}, we can visualize the uncertainty of the parametric and non-parametric transforms by plotting the diagonal of their respective covariance matrices. The heat maps generated in such a way are shown in \Cref{fig:uncer_second} for the B-spline basis function (10 mm spacing)  coefficients and the Demons transformation (3 mm kernel). As for the first level, the largest variances for both transforms coincide with the cortex, which is difficult to register as it is highly folded. We note that the B-spline coefficients have very large variances in the background, because it is masked out in the fitting, i.e., there are no target coordinate predictions to match. The Spearman and Pearson correlations between variance and the coordinate prediction error are (0.619 $\pm$ 0.022) and (0.438 $\pm$ 0.020), respectively, for the Demons transformation. Thus, while the correlations are almost the same as for the network predicted aleatoric uncertainty, the estimate becomes more spatially coherent as shown in \Cref{fig:uncer_second}c. We do not compute the correlation for the variance of the B-spline coefficients as they are defined on a lower resolution grid (10 mm spacing).  
+
+
+
+\myparagraph{Third-level uncertainty: uncertainty at downstream tasks.}
+To illustrate how the uncertainty could be used in a downstream task we show samples of atlas deformations and associated propagated segmentations in \Cref{fig:fit_uncer,fig:seg_uncer}. Both figures highlight the variability of the samples, which would have a direct effect on any downstream analysis using quantities extracted from the segmentations, e.g., regional volume \citep{desikan2009brainvols}. The sample-to-sample differences, along with the variance, are again concentrated on the cortex. This registration-based uncertainty, when not accounted for, can decrease the power of downstream statistical analyses, or be mistaken for aging effects if the registration errors correlate with age.
+\begin{figure}[t]
+    \centering
+     \setlength{\tabcolsep}{0.5pt}
+    \begin{tabular}{ccccccc}
+    &  (a) Sample 1 & (b) Sample 2 & (c) Sample 3 & (d) Sample 4 & (e) Sample 5 \\
+         & \hspace{-.03in}
+    \includegraphics[width=.18\textwidth]{bspline/bspline_1.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.18\textwidth]{bspline/bspline_2.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.18\textwidth]{bspline/bspline_3.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.18\textwidth]{bspline/bspline_4.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.18\textwidth]{bspline/bspline_5.png} \\
+
+            \includegraphics[width=.048\textwidth]{figures/color_bar_004_positive.png} &
+            \hspace{-.03in}
+    \includegraphics[width=.18\textwidth]{bspline/bspline_variance_004.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.18\textwidth]{bspline/bspline_diff12.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.18\textwidth]{bspline/bspline_diff23.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.18\textwidth]{bspline/bspline_diff34.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.18\textwidth]{bspline/bspline_diff45.png} &
+   \includegraphics[width=.04\textwidth]{figures/color_bar_3.png} \\
+
+            &\hspace{-.03in}
+    \includegraphics[width=.18\textwidth]{demons/demons_1.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.18\textwidth]{demons/demons_2.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.18\textwidth]{demons/demons_3.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.18\textwidth]{demons/demons_4.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.18\textwidth]{demons/demons_5.png} \\
+
+\includegraphics[width=.048\textwidth]{figures/color_bar_04_positive.png} &
+\hspace{-.03in}
+    \includegraphics[width=.18\textwidth]{demons/demons_variance_04.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.18\textwidth]{demons/demons_diff12.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.18\textwidth]{demons/demons_diff23.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.18\textwidth]{demons/demons_diff34.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.18\textwidth]{demons/demons_diff45.png} &
+   \includegraphics[width=.04\textwidth]{figures/color_bar_10.png}\\
+   &  (f) Variance & (g) Diff: 2$\rightarrow$1 & (h) Diff: 3$\rightarrow$2 & (i) Diff: 4$\rightarrow$3 & (j) Diff: 5$\rightarrow$4
+    \end{tabular}
+    \caption{The top row shows samples from the B-spline transformation with their variance and sample-to-sample differences displayed on the second row (from left to right). Similarly, the third row shows samples from the Demons transformation with their variance and sample-to-sample differences shown on the last row (from left to right). Samples and their differences. Diff: 2$\rightarrow$1 means the difference between sample 2 and sample 1, and the same applies to others.}
+     \label{fig:fit_uncer}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+     \setlength{\tabcolsep}{0.5pt}
+    \begin{tabular}{ccccccc}
+     (a) Input & (b) Sample 1 & (c) Sample 2 & (d) Sample 3 & (e) Sample 4 & (f) Seg entropy \\
+    \includegraphics[width=.16\textwidth]{bspline/input.png} &
+    \hspace{-.09in}
+    \includegraphics[width=.16\textwidth]{bspline/bspline_seg_1.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.16\textwidth]{bspline/bspline_seg_2.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.16\textwidth]{bspline/bspline_seg_3.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.16\textwidth]{bspline/bspline_seg_4.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.16\textwidth]{bspline/bspline_seg_entropy.png} &
+    \includegraphics[width=.042\textwidth]{figures/color_bar_1_positive.png}\\
+
+    \includegraphics[width=.16\textwidth]{bspline/mask.png} &
+    \hspace{-.09in}
+    \includegraphics[width=.16\textwidth]{demons/demons_seg_1.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.16\textwidth]{demons/demons_seg_2.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.16\textwidth]{demons/demons_seg_3.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.16\textwidth]{demons/demons_seg_4.png} &
+    \hspace{-.05in}
+    \includegraphics[width=.16\textwidth]{demons/demons_seg_entropy.png} &
+    \includegraphics[width=.042\textwidth]{figures/color_bar_1_positive.png}\\
+    (g) Segmentation & (h) Sample 1 & (i) Sample 2 & (j) Sample 3 & (k) Sample 4 & (l) Seg entropy
+    \end{tabular}
+    \caption{Example samples from the B-spline transformation (top row, (b-e)) and the Demons transformation (bottom row (h-k)), along with the input scan (a) and the ground-truth segmentation (g). The last column (f, l) show the entropy of the sampled segmentation.}
+    \label{fig:seg_uncer}
+\end{figure}
+
+\subsection{Registration accuracy}
+We quantitatively evaluate the effect of the weighted fitting (second-level of uncertainty) using Dice scores computed between the ground-truth segmentation and the transformed atlas segmentation. 
+\begin{wraptable}{r}{0.55\textwidth}
+\centering
+\scriptsize
+\caption{Registration performance for transformations with and without uncertainties.}
+\begin{tabular}{ccc}
+\hline
+Fitting Strategy  & ABIDE & OASIS3\\
+\hline
+Affine & 0.718 $\pm$ 0.038 & 0.673 $\pm$ 0.056 \\
+Affine with uncertainty & \textbf{0.730 $\pm$ 0.033} & \textbf{0.682 $\pm$ 0.055}\\
+\hline
+B-Spline 10 mm & 0.782 $\pm$ 0.020 & 0.750 $\pm$ 0.034 \\
+B-Spline 10 mm with uncertainty & \textbf{0.790 $\pm$ 0.019} & \textbf{0.772 $\pm$ 0.030}\\
+ \hline
+Demons 3 & 0.799 $\pm$ 0.020 & 0.783 $\pm$ 0.029 \\
+Demons 3 with uncertainty & 0.799 $\pm$ 0.019 & 0.783 $\pm$ 0.028 \\
+\hline
+\end{tabular}
+\label{table:uncer_fitting}
+\end{wraptable}
+\Cref{table:uncer_fitting} shows the Dice scores for the affine, B-spline (10 mm), and Demons (3 mm kernel) transformation models fitted with and without uncertainty. The fits without uncertainty are done using only the predicted mean, i.e., effectively setting $\mathbf{W}_j$ to identity matrix. The registration accuracy, measured by Dice, improves for both the affine and B-spline transformations when uncertainty is used, and stays the same for Demons. We further show qualitative examples of segmentations transformed with and without uncertainty for a single subject in~\Cref{fig:qualitative}. The likely reason for the Demons transformation not benefiting from the uncertainty weighting is that we used the Demons transformation in the atlas segmentation loss $L_{seg}$. Thus, the network predicted average coordinates might already be close to optimal and no further weighting is needed. Nevertheless, the qualitative examples show differences for all transformation models, including Demons, when uncertainty weighting is used.
+
+
+\begin{figure}[t]
+    \centering
+     \setlength{\tabcolsep}{0.5pt}
+    \begin{tabular}{cccc}
+     (a) Input & (b) Segmentation & (c) Affine & (d) Affine (uncer.) \\
+    \includegraphics[width=.2\textwidth]{qualitative/im.png} &
+    \hspace{-.06in}
+    \includegraphics[width=.2\textwidth]{qualitative/gt.png} &
+    \hspace{-.06in}
+    \includegraphics[width=.2\textwidth]{qualitative/affine.png} &
+    \hspace{-.1in}
+    \includegraphics[width=.2\textwidth]{qualitative/affine_uncer.png} \\
+
+    \includegraphics[width=.2\textwidth]{qualitative/demons.png} &
+    \hspace{-.06in}
+    \includegraphics[width=.2\textwidth]{qualitative/demons_uncer.png} &
+    \hspace{-.06in}
+    \includegraphics[width=.2\textwidth]{qualitative/bspline.png} &
+    \hspace{-.1in}
+    \includegraphics[width=.2\textwidth]{qualitative/bspline_uncer.png} \\
+    (e) Demons & (f) Demons (uncer.) & (g) B-spline & (h) B-spline (uncer.)
+    \end{tabular}
+    \caption{Example transformations fitted with and without uncertainty. (a) and (b) show the input scan and segmentation. (c)-(h) show the transformed segmentations.}
+    \label{fig:qualitative}
+\end{figure}
+
+
+
+
+
+\subsubsection{Ablation studies}
+
+\begin{table*}[ht]
+\begin{center}
+\scriptsize
+\caption{Comparison between RbR and proposed approach with segmentation loss (average Dice).}
+\label{table:quantitative}
+\begin{tabular}{ccccc}
+\hline
+Method & \multicolumn{2}{c}{ABIDE} & \multicolumn{2}{c}{OASIS3} \\
+\hline
+& RbR \citep{gopinath2024registration} & Proposed & RbR \citep{gopinath2024registration} & Proposed \\
+\hline
+Affine & 0.712 $\pm$ 0.045 &  0.715 $\pm$ 0.040 & 0.667 $\pm$ 0.057 & 0.669 $\pm$ 0.058 \\
+Demons 1 & 0.734 $\pm$ 0.038 & \textbf{0.764 $\pm$ 0.025} & 0.730 $\pm$ 0.026 & \textbf{0.758 $\pm$ 0.025} \\
+Demons 3 & 0.739 $\pm$ 0.038 & \textbf{0.767 $\pm$ 0.024} & 0.728 $\pm$ 0.028 & \textbf{0.759 $\pm$ 0.030} \\
+Demons 5 & 0.743 $\pm$ 0.039 & \textbf{0.761 $\pm$ 0.026} & 0.722 $\pm$ 0.031 & \textbf{0.755 $\pm$ 0.026} \\
+B-Spline 2.5 & 0.733 $\pm$ 0.038 & \textbf{0.766 $\pm$ 0.024} & 0.728 $\pm$ 0.026 & \textbf{0.760 $\pm$ 0.032} \\
+B-Spline 5 & 0.735 $\pm$ 0.038 & \textbf{0.764 $\pm$ 0.027} & 0.725 $\pm$ 0.027 & \textbf{0.757 $\pm$ 0.034} \\
+B-Spline 10 & 0.738 $\pm$ 0.039 & \textbf{0.758 $\pm$ 0.023} & 0.713 $\pm$ 0.032 & \textbf{0.738 $\pm$ 0.029} \\
+\hline
+\end{tabular}
+\end{center}
+\end{table*}
+
+\begin{wraptable}{r}{0.4\textwidth}
+\centering
+\scriptsize
+\caption{Ablation study for $\lambda_{seg}$ (average Dice).}
+\begin{tabular}{ccc}
+\hline
+$\lambda_{seg}$  & ABIDE & OASIS3\\
+\hline
+0.5 & 0.734 $\pm$ 0.053 & 0.706 $\pm$ 0.043\\
+\hline
+1 & 0.732 $\pm$ 0.064 & 0.706 $\pm$ 0.053 \\
+\hline
+2 & 0.759 $\pm$ 0.035 & 0.734 $\pm$ 0.036\\
+\hline
+5 & \textbf{0.790 $\pm$ 0.019} & \textbf{0.772 $\pm$ 0.030} \\
+\hline
+10 & 0.771 $\pm$ 0.021 & 0.769 $\pm$ 0.019\\
+\hline
+\end{tabular}
+\label{table:seg_loss}
+\end{wraptable}
+\myparagraph{Seg. loss and its weight.} In~\Cref{table:quantitative}, we compare the performance of RbR to the proposed approach \emph{without} uncertainty but using the atlas segmentation loss, which was not used in the original RbR model. As expected, the Dice scores of the proposed approach are higher as the model is trained to minimize the Dice loss. We note, however, that incorporating the uncertainty-informed fitting further improves the results as shown above. We further show the effect of changing the loss weight in~\Cref{table:seg_loss}.
+
+\myparagraph{Modeling aleatoric uncertainty.}
+We model the variance in the uncertainty loss separately for each coordinate direction. Alternatively one can use the same variance for each direction, i.e., same uncertainty for $x,y,z$-coordinates. This is equivalent to an isotropic Gaussian distribution and would simplify the modeling as the uncertainty would be the same for all directions at each location. ~\Cref{table:channel} shows the effect of each modeling strategy on the Dice score. The results demonstrate that it is important to model the uncertainty in each direction separately. We also ablate the effect of the distribution in~\Cref{table:distribution} by comparing the scores when using a Gaussian or a Laplacian. The results are very similar, and in light of this, we chose to use the Gaussian distribution as it has nice theoretical properties as mentioned in~\Cref{sec:second_level}.
+
+\begin{table}[h]
+\parbox{.48\linewidth}{
+\centering
+\scriptsize
+\caption{Ablation study for the number of channels to model uncertainty (average Dice).}
+\begin{tabular}{ccc}
+\hline
+\# of channels  & ABIDE & OASIS3\\
+\hline
+Single channel & 0.714 $\pm$ 0.054 & 0.687 $\pm$ 0.048 \\
+\hline
+Three channels & \textbf{0.790 $\pm$ 0.019} & \textbf{0.772 $\pm$ 0.030} \\
+\hline
+\end{tabular}
+\label{table:channel}}
+\hfill
+\parbox{.48\linewidth}{
+\centering
+\scriptsize
+\caption{Ablation study for distribution used to model uncertainty (average Dice).}
+\begin{tabular}{ccc}
+\hline
+Distribution  & ABIDE & OASIS3\\
+\hline
+Gaussian & 0.785 $\pm$ 0.025 & 0.774 $\pm$ 0.026 \\
+\hline
+Laplacian & 0.790 $\pm$ 0.019 & 0.772 $\pm$ 0.030\\
+\hline
+\end{tabular}
+\label{table:distribution}}
+\end{table}
+
+
+\myparagraph{Choice of coordinate loss.}
+For the coordinate regression, we can either adopt a $L1$ or a $L2$ loss as a distance measure. $L1$ is often used because of its higher robustness, but $L2$ is usually faster to converge when training. The Dice score difference between the losses is shown in~\Cref{table:regre_loss}. The $L2$ loss performs slightly better than the $L1$ loss.
+
+\begin{table}[h]
+\parbox{.48\linewidth}{
+\centering
+\scriptsize
+\caption{Ablation study for regression loss (average Dice).}
+\begin{tabular}{ccc}
+\hline
+Regression loss  & ABIDE & OASIS3\\
+\hline
+$L1$ &  0.783 $\pm$ 0.024 & 0.763 $\pm$ 0.016\\
+\hline
+$L2$ & \textbf{0.790 $\pm$ 0.019} & \textbf{0.772 $\pm$ 0.030} \\
+\hline
+\end{tabular}
+\label{table:regre_loss}}
+\hfill
+\parbox{.48\linewidth}{
+\centering
+\scriptsize
+\caption{Ablation study for fitting strategy (average Dice).}
+\begin{tabular}{ccc}
+\hline
+Deformation strategy  & ABIDE & OASIS3\\
+\hline
+B-spline & 0.710 $\pm$ 0.022 & 0.700 $\pm$ 0.024 \\
+\hline
+Demons & \textbf{0.790 $\pm$ 0.019} & \textbf{0.772 $\pm$ 0.030}\\
+\hline
+\end{tabular}
+\label{table:nonlinear}}
+\end{table}
+\myparagraph{Choice of transformation during training.} For the atlas segmentation loss, we need to transform the atlas segmentation to input space. We compare B-splines (10 mm spacing) to Demons (3 mm kernel) in~\Cref{table:nonlinear}. The non-parametric transformation performs better, however we did not test all possible control point spacings for B-splines or smoothing kernels for Demons. It is possible that another parameter combination would yield even better performance.
+
+
+
+\section{Conclusion}
+
+Uncertainty estimates in DL-based registration approaches are often under-utilized although they provide valuable information about registration accuracy. Here we have proposed a principled approach for propagating the location-level uncertainties (first-level), to fitted transformations (second-level), and finally to downstream analyses (third-level). The results: show that network-estimated \emph{aleatoric} uncertainty correlates well with the coordinate prediction while epistemic uncertainty does not; show that incorporating the aleatoric uncertainty in the transformation fitting improves registration accuracy; and illustrate how the generated samples could benefit downstream analyses. In the future, we aim to extend the framework to pairwise registration of any two input images, and further validate the utility of the uncertainty estimates in aging studies and group comparisons (e.g., between healthy controls and dementia patients). 
+
+
+\myparagraph{Ethics Statement.} As the neuroimaging data used in this study is freely available and accessible to anyone after filling out the data usage agreement no ethical approval was needed. 
+
+\myparagraph{Reproducibility Statement.} We provide the necessary experimental details in~\Cref{sec:experiments} as well as~\Cref{sec:data},~\Cref{sec:implementation}, including data preparation,  training and test data sets, network architecture, and other implementation details. The code to reproduce the results will be made publicly available. Although we cannot redistribute the data, all data sets are freely available for download after filling out the data usage agreement.
+
+
+
+
+
+

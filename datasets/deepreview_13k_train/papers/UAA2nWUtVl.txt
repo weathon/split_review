@@ -1,0 +1,300 @@
+\title{Cascade Reward Sampling for Efficient Decoding-Time Alignment}
+
+\begin{abstract}
+Aligning large language models (LLMs) with human preferences is critical for their deployment. Recently, decoding-time alignment has emerged as an effective plug-and-play technique that requires no fine-tuning of model parameters. However, generating text that achieves both high reward and high likelihood remains a significant challenge. Existing methods often fail to generate high-reward text or incur substantial computational costs. In this paper, we propose \emph{CAscade RewarD Sampling} (CARDS) to address both issues, guaranteeing the generation of high-reward and high-likelihood text with significantly low costs. Based on our analysis of reward models (RMs) on incomplete text and our observation that high-reward prefixes induce high-reward complete text, we use rejection sampling to iteratively generate small semantic segments to form such prefixes. The segment length is dynamically determined by the predictive uncertainty of LLMs. This strategy guarantees desirable prefixes for subsequent generations and significantly reduces wasteful token re-generations and the number of reward model scoring. Our experiments demonstrate substantial gains in both generation efficiency and alignment ratings compared to the baselines, achieving five times faster text generation and 99\% win-ties in GPT-4/Claude-3 helpfulness evaluation.
+
+\end{abstract}
+
+\section{Introduction\label{sec:intro}
+
+
+
+Large language models (LLMs) have achieved remarkable performance across a wide variety of tasks \citep{wei2022emergent, bubeck2023sparks, touvron2023llama, kaddour2023challenges}. Despite their impressive capabilities, there are growing concerns regarding their safety and reliability~\citep{bai2022training, deshpande2023toxicity, weidinger2022taxonomy, gehman2020realtoxicityprompts}. The field of LLM alignment aims to address these issues by ensuring that LLMs adhere to human preferences and ethical standards. However, one critical challenge is that the generated text must satisfy constraints, including helpfulness and ethical considerations, while simultaneously maintaining fluency.
+
+Various alignment strategies have been developed, such as reinforcement learning with human feedback (RLHF)~\citep{christiano2017deep, bai2022constitutional, ouyang2022training} and supervised fine-tuning methods~\citep{liu2023chain, rafailov2024direct, ethayarajh2024kto}. Recently, decoding-time alignment, which only modifies the decoding procedure to generate aligned text, has gained increasing attention due to its simplicity and flexibility~\citep{deng2023reward, khanov2024args}. This approach does not require fine-tuning of LLM parameters, allowing for the plug-and-play adaptation for any unaligned LLM. Decoding-time alignment naturally supports frequently changing LLMs and reward models (RMs), potentially enabling some complicated tasks like multi-objective alignment~\citep{vamplew2018human, zhou2023beyond, yang2024rewards}. However, while some of the existing decoding-time alignment methods still struggle with the trade-off between alignment and fluency, they all encounter significant efficiency challenges due to auxiliary steps added to their generation process. For example, the reward-guided search paradigm~\citep{deng2023reward, khanov2024args} introduces considerable overhead of RM scoring, significantly slowing down the generation.
+
+In this paper, we propose \emph{CAscade RewarD Sampling} (CARDS), a novel decoding-time alignment method that guarantees high-reward and high-likelihood responses while substantially reducing the decoding cost. We formulate alignment as a sampling problem, where the target distribution is defined by the solution to the KL-constrained reward maximization problem~\citep{peters2007reinforcement,peng2019advantage,rafailov2024direct}. To reduce the search space, our method only samples a single semantic segment per step, instead of the full response. The start and end points of the segments are dynamically determined by the predictive uncertainty of LLMs, leveraging the fact that LLMs are less certain about the first token of a semantically complete sequence~\citep{wang2024my}. Each semantic segment is obtained through rejection sampling and is guaranteed to be well-aligned. Furthermore, we rigorously analyze the ability of RMs on incomplete responses, validating the core assumptions of our method. Our experiments on diverse LLM alignment benchmarks demonstrate the superiority of our method in terms of efficiency, alignment rating, and fluency. The main contributions of this paper are summarized as follows:
+\begin{itemize}
+    \item We approach alignment as a sampling problem and propose Cascade Reward Sampling (CARDS), an efficient decoding-time alignment method (demonstrated in Fig.~\ref{algo}). CARDS achieves high alignment ratings and fluency in generated text while significantly reducing decoding costs compared to baselines.
+    \item We provide a rigorous analysis of reward models (RMs) on incomplete text, validating the relationship between intermediate rewards and final rewards. This assumption has been implicitly adopted by many prior investigations; however, we are the first to rigorously verify it.
+    \item We demonstrate that RMs can serve as approximations for value functions/prefix scorers on semantically complete segments, eliminating the need for training separate models. Furthermore, we show that semantically complete segments can be easily identified using the predictive uncertainty of LLMs.
+    \item Comprehensive experiments demonstrate the superiority of CARDS in terms of efficiency, alignment rating, and fluency against baselines. CARDS can generate well-aligned responses with much lower computational costs.
+\end{itemize}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{fig/reward_sampling.pdf}
+    \caption{Illustration of CARDS sampling steps: Iteratively sampling new candidate segments until the acceptance criterion is met (high prefix-reward, Eq.~\eqref{eq:r_condition_soft}). The lengths of candidate segments are dynamically determined by the predictive uncertainty of LLMs (Section~\ref{sec:u}), which perseveres the semantic completeness of any partial response. The cascade generation strategy significantly reduces the computational cost (Section~\ref{sec:efficiency}) while persevering alignment rating (Section~\ref{sec:helpfulness}) and fluency (Section~\ref{sec:fluency}).}
+    \label{fig:reward_sampling}
+\end{figure}
+
+
+\section{Related Works\label{sec:related_work}
+
+\paragraph{Fine-tuning-based alignment.} The goal of fine-tuning-based alignment methods is to minimize the inference cost after deployment~\citep{frantar2023gptq}. They typically assume that LLMs and human preferences are fixed. Reinforcement learning from human feedback (RLHF) is a direct approach~\citep{christiano2017deep, lee2021pebble, ouyang2022training}, which uses RMs as a proxy of human preferences and refines the LLMs through the RL framework. Supervised fine-tuning (SFT) approach~\citep{liu2023chain, rafailov2024direct, ethayarajh2024kto} addresses the instability of RL training and further improve the efficiency of alignment training.
+
+\paragraph{Decoding-time alignment.} Aligning language models during decoding can adaptively fit any preference via different RMs~\citep{huang2024deal}, which introduce auxiliary steps into the generation process but no longer need parameter fine-tuning. Reward-guided search~\citep{deng2023reward, khanov2024args} uses the reward scores to rank the next token. They are token-level best-of-$N$ searching algorithms~\citep{nakano2021webgpt, touvron2023llama}, where $N$ candidates are drawn and the one with the highest reward is selected. In-context learning~\citep{lin2023unlocking, li2024rain} is also an efficient decoding-time alignment method, which prompts the base LLMs to align themselves. \citet{chakraborty2024transfer} can transfer the preference from a fine-tuned baseline LLM to a new LLM without further fine-tuning. \citet{mudgal2023controlled} trains a value-function module to conduct token-level scoring, and \citet{chen2024improving} trains a generative token-level RM. They both address the low accuracy of instance-level RMs in reward-guided search, but introduce significant computational overhead in obtaining such token-level scorers. In contrast, our method adopts segment-level reward evaluation, which makes the existing instance-level RMs accurate in scoring the semantically complete prefixes.
+
+\paragraph{Rejection sampling for language model alignment.} Rejection sampling enables sampling from intractable target distributions. \citet{khaki2024rs, liu2024statistical, xiong2023iterative} use rejection sampling to generate preference data for tuning language models. \citet{eikema2021sampling} directly samples responses using rejection sampling, but it does not apply to LLMs due to efficiency issue. The cascade sampling strategy in our method addresses the efficiency issue by sampling small semantic segments iteratively to reduce the search space.
+
+\paragraph{Segment-based text generation.} Splitting text into segments is a well-studied technique~\citep{pak2018text}. In LLM alignment, ToT~\citep{yao2023tree} first introduced similar ideas, in which the starting and ending points of segment candidates are task-related, but they have fixed lengths. In RAIN~\citep{li2024rain}, the length of each segment candidate is still a fixed hyper-parameter. In contrast, we adopt a flexible approach where semantic segments can vary in length. We allow the LLM to determine the number of tokens within a semantic segment based on its dynamic and adaptive predictive uncertainty, which can vary for different texts. Similar ideas of dynamic segment length can be found in speculative decoding~\citep{xia2024unlocking}, where the candidate sequence length is determined by LLMs' self-verification.
+
+
+\section{Preliminaries\label{sec:pre}
+
+\paragraph{RLHF policy as the target distribution.} Following previous works on KL-constrained reward maximization~\citep{peters2007reinforcement, korbak2022reinforcement, go2023aligning,rafailov2024direct} (pursuing high reward with fluency constraint), we can show that the optimal policy can be written as a reward-shifted conditional distribution:
+\begin{equation}
+    \pi_r(y|x) = \frac{1}{Z(x)}\pi_{\text{LM}}(y|x)\exp\left\{\frac{1}{\beta}r(x,y)\right\},
+    \label{eq:r_shift_dist}
+\end{equation}
+where $x$ is the input text, $y$ is the response, $Z(x)=\sum_y \pi_{LM}(y|x)\exp\{r(x,y)/\beta\}$ is the partition function, $\pi_{\text{LM}}(y|x)$ is the unaligned conditional distribution for the base LLM, $r(x,y)$ is the reward function, and $\beta$ controls the extent that $\pi_{\text{LM}}(y|x)$ is shifted for higher reward. Precisely characterizing the reward-shifted conditional distribution $\pi_r(y|x)$ (despite its intractability in practice) is guaranteed to produce the well-aligned text \citep{christiano2017deep,rafailov2024direct}.
+
+\paragraph{Rejection sampling.} Rejection sampling can effectively characterize an intractable target distribution (e.g., the unnormalized target distribution $f(y)=\pi_{LM}(y|x)\exp\{r(x,y)/\beta\}$) by sampling from a tractable proposal distribution (e.g., $g(y)=\pi_{\text{LM}}(y|x)$) with rejections. Specifically, to sample from the target conditional distribution $\pi_r(y|x)$, a proposal is drawn from the unaligned conditional distribution $y\sim\pi_{\text{LM}}(y|x)$, and then we accept the proposal only if
+\begin{equation}
+    u<\frac{\exp\left\{\frac{1}{\beta}r(x,y)\right\}}{\max_y\exp\left\{\frac{1}{\beta}r(x,y)\right\}},~~~~u\sim\text{Uniform}[0,1].
+    \label{eq:naive_rs}
+\end{equation}
+Doing so guarantees obtaining samples from the target distribution $\pi_r(y|x)$. Furthermore, we know that the expected number of re-sampling before one acceptance is $\max_y\exp\left\{r(x,y)/\beta\right\}$~\citep{hastings1970monte}, which guarantees the efficiency of rejection sampling when the denominator is small. In practical implementation, Eq.~\eqref{eq:naive_rs} can be simplified by approximating the denominator with an arbitrary constant $M$, allowing for a controlled trade-off between accuracy and efficiency. This approach is known as quasi-rejection sampling \citep{eikema2022approximate} and maintains accurate sampling from the target distribution.
+
+Naively, we can apply rejection sampling to decoding-time alignment by sampling from the reward-shifted conditional distribution (Eq.~\eqref{eq:r_shift_dist}). However, directly sampling from Eq.~\eqref{eq:r_shift_dist} will induce excessive computational cost, since the search space for the entire token sequence is extremely large.
+
+
+\section{Methodology: Cascade Reward Sampling\label{sec:label}
+
+Generating high-reward responses efficiently is the primary challenge in decoding-time alignment. The efficiency issue involves a trade-off between token re-generations and reward model (RM) scoring. Naive rejection sampling introduced in Section~\ref{sec:pre} will induce excessive token re-generation due to the large search space; on the other hand, reward-guided search~\citep{deng2023reward, khanov2024args} deterministically evaluates the Top-$k$ candidate tokens in every decoding step, leading to too many RM calls. Our method (CARDS) addresses this efficiency challenge by iteratively generating full responses in smaller segments to compress the search space at each step, and applying rejection sampling rather than deterministic search to limit the number of RM calls.
+
+In this section, we first discuss the correctness of our cascade sampling strategy for efficiently generating high-reward text (Section~\ref{sec:rm_prefix}), followed by a detailed explanation of our method (Section~\ref{sec:algo}).
+
+\subsection{Reward Models on Incomplete Text\label{sec:rm_prefix}}
+Generating high-reward complete responses in smaller segments (in a "cascade" fashion) requires: \romannumeral1) RMs are aligned with human judgments on incomplete responses; \romannumeral2) conditioned on high-reward prefixes, the complete responses are more likely to get high rewards. The first requirement ensures that the reward scores for prefixes serve as informative alignment metrics. The second requirement ensures that generating smaller segments is an efficient search method for high rewards. We discuss and validate each requirement in the following sections.
+
+\subsubsection{Reward Scores of Semantically Complete Prefixes\label{sec:value_func}}
+Reward models are trained to evaluate how responses are aligned with human preference. One of the dominant RM training objectives is pairwise comparison~\citep{stiennon2020learning, dong2023raft, xiong2023iterative} (also known as the Bradley–Terry models~\citep{bradley1952rank}):
+\begin{equation}
+    \mathcal{L}(x,y^+,y^-;\rm)=\log\sigma\left(r_{\rm}(x,y^-)-r_{\rm}(x,y^+)\right),
+\end{equation}
+where $\sigma(\cdot)$ is the sigmoid function, $x$ is the input text, and $y^+$/$y^-$ is the chosen/rejected response. We hypothesize that reward scores for prefixes (incomplete responses) are more accurate if the prefixes are semantically complete, as RMs are typically trained on complete responses. Semantically complete prefixes are closer to the data that RMs have seen during training. We verify this hypothesis in Fig.~\ref{fig:token_check}, where we compute the averaged reward of all prefixes obtained by segmentation. Fig.~\ref{fig:token_check} shows that the semantically-segmented prefixes (see Section \ref{sec:u} for details) are more aligned with the full-length responses than static segmentation (not semantically complete), as semantically-segmented prefixes have much lower reward scores on rejected responses.
+
+The ability of RMs to evaluate both complete responses and their prefixes also implies that RMs are similar to the value function in reinforcement learning~\citep{bellman1966dynamic, ouyang2022training}. The value function can evaluate any partial sequence of the full responses in the form of an expected score:
+\begin{equation}
+    V(s_{<t})=\mathbb{E}_{s_{\geq t}}V([s_{<t};s_{\geq t}]),
+\end{equation}
+where $s$ is a full response. Therefore, the above observation also suggests that \emph{RMs can be used as value functions on semantically complete prefixes}. This significantly simplifies the algorithm and reduces the decoding cost, as it eliminates the need to train a separate value function for scoring prefixes required in prior work \citep{mudgal2023controlled}.
+
+Prior efforts use RMs at the token level to evaluate arbitrary prefixes~\citep{deng2023reward, khanov2024args, li2024rain}, which requires RMs to give accurate scores (i.e., to be accurate value functions) for any prefix. In contrast, we make a weaker assumption, requiring RMs to be accurate only on semantically complete prefixes. This aligns with the actual capability of RMs as shown in Fig.~\ref{fig:token_check}.
+
+\subsubsection{Full-response reward is approximately monotonic to prefix reward}
+Generating responses in smaller segments can reduce the search space. However, it is important to ensure that the full-response reward will be high given a high-reward prefix. Mathematically, we can represent this relationship as follows. We assume that given response prefix $y_{<t}$, the full-response reward $r(x,y)$ follows a distribution (for simplicity, we use a Gaussian distribution), with the mean controlled by the prefix reward $r(x,y_{<t})$:
+\begin{equation}
+    r(x,y) \sim \mathcal{N}(r(x,y_{<t})+\epsilon_t,\sigma_t^2),
+    \label{eq:rm_prefix}
+\end{equation}
+where $\epsilon_t>0$ is a positive mean shift, indicating that full responses tend to have higher rewards than their prefixes. We visualize this assumption in Fig.~\ref{fig:rm_prefix_a}, where higher prefix rewards make it more likely to get high full-response rewards.
+
+To verify the above assumption, we test HH-RLHF\footnote{\url{https://huggingface.co/datasets/Anthropic/hh-rlhf}.} in Fig.~\ref{fig:rm_prefix}, which shows that prefix's rewards have the monotonic relationship with full-response rewards. Additionally, we show that the variance term $\sigma_t^2$ in Eq. Therefore, as we concatenate semantic segments into a longer and higher-reward prefix, generating a high-reward full response will be easier.
+
+\begin{figure}[t]
+    \centering
+    \subfloat[Visualization of the relation between full-response/prefix rewards \label{fig:rm_prefix_a}]{\includegraphics[width=.327\columnwidth]{fig/rm_prefix/rm_prefix_demo.pdf}}\hspace{0pt}
+    \subfloat[Prefixes excluding the last semantic segment\label{fig:rm_prefix_b}]{\includegraphics[width=.3285\columnwidth]{fig/rm_prefix/rm_prefix_s123.pdf}}\hspace{0pt}
+    \subfloat[Segment rewards on rejected responses\label{fig:token_check}]{\includegraphics[width=.3315\columnwidth]{fig/token_check/rejected_reward_fixed_num_seg.pdf}}
+    \caption{Reward relationship between full responses and their prefixes, evaluated on HH-RLHF test set. The prefix rewards are approximately monotonic to the full-response rewards. (a) visualizes the assumption, where the mean of the reward distribution is monotonic to the prefix reward (Eq.~\eqref{eq:rm_prefix}). (b) demonstrates that the monotonicity holds for real text, and that the majority of cases are above the reference line, described as the positive mean shift $\epsilon_t$ in Eq.~\eqref{eq:rm_prefix}. (c) shows the importance of semantic completeness, where semantically segmented prefixes (dynamic), obtained by uncertainty segmentation, are more aligned with full-length responses regarding averaged reward. The reference static segmentation in each bar has an identical number of segments as the dynamic one.}
+    \label{fig:rm_prefix}
+\end{figure}
+
+In summary, we validate the cascade generation strategy in CARDS, and show that it is an efficient approach to obtain high-reward responses. At each step of segment generation, the new prefix (formed by adding the new semantic segment to the current prefix) will, on average, have a higher reward than the prefix from the previous step.
+
+\subsection{Algorithm Details: Uncertainty-based Segmentation and Cascade Sampling\label{sec:algo}}
+With our understanding of RMs and the cascade generation strategy in Section~\ref{sec:rm_prefix}, the details about how to segment full responses and how to sample high-reward semantic segments are not completely resolved. The following paragraphs discuss the algorithmic schemes used in CARDS, and compare them to other alternatives.
+
+\subsubsection{Segmentation with Predictive Uncertainty\label{sec:u}}
+The predictive uncertainty of neural networks, typically the entropy of the softmax distribution~\citep{malinin2018predictive}, measures how certain the model is about its predictions. For autoregressive LLMs, predictive uncertainty directly measures the model's confidence in predicting the next token. Previous work has indicated that \emph{a well-trained LLM is usually certain about the tokens within a semantically complete segment, and is uncertain about the first token of such a semantic segment}~\citep{wang2024my}. This is because initiating a new segment is more unpredictable than continuing an existing one.
+
+We directly use the values of predictive uncertainty as a segmentation signal. We denote the entropy of the predictive distribution of $t$-token as $\mathcal{H}(v_t|x,y_{<t};\lm)$. If the uncertainty for the next token $v_t$ is above a threshold $\tau_u$:
+\begin{equation}
+    \mathcal{H}(v_t|x,y_{<t};\lm) \geq \tau_u,
+    \label{eq:u_condition}
+\end{equation}
+then the last token $v_{t-1}$ is marked as the ending of one semantic segment. The uncertainty-based segmentation examples are shown in Fig. Practically, when one segment exceeds the length limits (e.g., $32$ tokens), token generation is interrupted. This can avoid the excessive LLM calls for a few over-long segments.
+
+Previous works with similar segmentation-based generation typically fixed the length of segments~\citep{yao2023tree, li2024rain}, which ignores the importance of semantic completeness. Others used separate classifier models for segmentation~\citep{kim2000reducing,magimai2007entropy} and did not consider the knowledge from the pre-trained LLMs. Our method leverages the comprehension ability of pre-trained LLMs for segmentation, which preserves the semantic completeness of segments and introduces minimal computational overhead.
+
+\subsubsection{Cascade Sampling}
+Directly sampling from the reward-shifted distribution $\pi_r(y|x)$ in Eq.~\eqref{eq:r_shift_dist} is computationally costly due to the large search space. We instead only sample a small segment at each step to reduce the searching cost, and iteratively merge new segments to the response prefix. Consider a vocabulary set $\mathbb{V}$ and a full-length response $y\in\mathbb{V}^{t_K}$. We divide the generation of the entire $y$ into multiple steps:
+\begin{equation}
+    \pi_r(y|x)=\pi_r(y_{<t_1}|x)\prod_{k=1}^{K-1}\pi_r(y_{t_k:t_{k+1}}|y_{<t_k},x),
+\end{equation}
+where $[0,t_1,t_2,...,t_{K-1}]$ are the starting positions of semantic segments. Importantly, at each step, the target distribution of the new segment follows a similar form to that of the full response in Eq.~\eqref{eq:r_shift_dist}. This is formally stated in Lemma~\ref{lemma:cascade}.
+
+\begin{lemma}\label{lemma:cascade}
+     Assuming the reward models are equivalent to value functions when evaluating semantically complete prefixes (i.e., $r(x,y_{<t})=\beta V(x,y_{<t})$), the target distribution for sampling a new semantic segment is
+     \[
+        \pi_r(y_{t_k:t_{k+1}}|y_{<t_k},x) \propto \pi_{\text{LM}}(y_{t_k:t_{k+1}}|y_{<t_k},x)\cdot\exp\left\{\frac{1}{\beta}r(x,y_{t_{k+1}})\right\},
+     \]
+    which is an isomorphic form as the target distribution of the full response in Eq.~\eqref{eq:r_shift_dist}.  
+\end{lemma}
+ This lemma indicates that sampling a semantic segment \( y_{t_k:t_{k+1}} \) can be done in the same manner as sampling a full response \( y \). The cascade sampling strategy introduces only minor modifications to the naive rejection sampling described in Section \ref{sec:pre}. Specifically, we sample from \( \pi_r(y_{t_k:t_{k+1}}|y_{<t_k},x) \) using similar quasi-rejection sampling steps~\citep{eikema2022approximate}. First, a candidate \( y_{t_k:t_{k+1}} \) is drawn from the proposal distribution \( \pi_{\text{LM}}(y_{t_k:t_{k+1}}|y_{<t_k},x) \); second, we accept the candidate only if
+\begin{equation}
+    u < \exp\left\{\frac{r(x,y_{<t_{k+1}})-\tau_r(t_{k+1})}{\beta}\right\},~~~~u\sim \text{Uniform}[0,1].
+    \label{eq:r_condition_soft}
+\end{equation}
+Here, the reward threshold term $\tau_r(t_{k+1})$ corresponds to the constant in the denominator of Eq.~\eqref{eq:naive_rs}, which can take arbitrary values~\citep{eikema2022approximate}. Practically, we can set the reward threshold to a particular reward score, and our method is guaranteed to generate responses with higher rewards than that score
+\begin{equation}
+    \tau_r(t)=r_0+t\cdot\frac{r^\star-r_0}{n},
+\end{equation}
+where $r^\star$ is the final reward score we aim to achieve. The initial threshold $r_0$ should be slightly higher than the reward score for the input text $x$: $r_0 = (1-\alpha)\cdot r_x+\alpha\cdot r^\star$, since the first few semantic segments are more important to the overall alignment rating~\citep{zou2023universal}. Additionally, the reward goal $r^\star$ controls the expected re-sampling steps. Setting $r^\star$ large will lead to more re-sampling steps.
+
+The temperature term $\beta$ in Eq.~\eqref{eq:r_condition_soft} controls the tolerance for low-reward segments. A smaller $\beta$ makes low-reward segments (i.e., $r(x,y_{<t_{k+1}})<\tau_r(t_{k+1})$) less likely to be accepted. Furthermore, setting $\beta\rightarrow 0$ will induce a deterministic acceptance scheme, equivalent to comparing with a fixed threshold.
+
+The details of our method (CARDS) are summarized in Algorithm~\ref{algo}. At each step, a candidate segment $y^{\text{candidate}}$ is sampled, evaluated, and accepted/rejected. The cascade generation strategy proposed in this paper simultaneously enhances both efficiency and alignment rating.
+
+\begin{algorithm}[t]
+\caption{Cascade Reward Sampling (CARDS)}
+\label{algo}
+\textbf{Inputs:} Input token sequence $x$, language model $\lm$, and reward model $\rm$.
+
+\textbf{Outputs:} Generated token sequence $y$.
+
+$y \gets \emptyset$\;
+\While{$y$ within length limits} {
+    $y^{\text{candidate}} \gets \emptyset$\;
+    \While{Eq.~\eqref{eq:u_condition} not satisfied} {
+        $v \sim p(v|x,y,y^{\text{candidate}};\lm)$ \Comment*[r]{Sample a new candidate}
+        $y^{\text{candidate}} \gets [y^{\text{candidate}};v]$\;
+    }
+    $r(x,y,y^{\text{candidate}}) \gets -\log p(x,y,y^{\text{candidate}}|\rm)$ \Comment*[r]{Evaluate the candidate}
+    ~\\
+    \If{Eq.~\eqref{eq:r_condition_soft} satisfied} {
+        $y \gets [y;y^{\text{candidate}}]$ \Comment*[r]{Accept/Reject the candidate }
+    }
+}
+\end{algorithm}
+
+
+\section{Experiments\label{sec:exp}
+
+To comprehensively demonstrate the superiority of our method, CARDS, we evaluate the efficiency, helpfulness/ harmfulness, and fluency of the generated responses. We also conduct ablation studies to verify the choices of algorithm design and hyperparameters.
+
+\subsection{Efficiency Evaluation\label{sec:efficiency}}
+The computational cost in an LLM-RM architecture mainly arises from the number of LLM/RM calls. RMs are typically fine-tuned from the unaligned LLMs~\citep{deng2023reward,khanov2024args}, and thus the cost for one forward pass of RMs is the same as LLMs. We show the efficiency evaluation results in Table~\ref{tab:efficiency}. The number of tokens RMs evaluated at a time is an important metric for understanding the efficiency of decoding-time alignment. If evaluating one token each time (e.g.,  in RAD/ARGS), the LLM token re-generations can be saved but RM calls will be too expensive. Conversely, if evaluating the entire response at once (e.g. naive rejection sampling), only a few RM calls are needed but the LLM token re-generations will be too expensive. Our method strikes a balance between LLM and RM calls by using the RM to evaluate a partial response at a time.
+Our approach results in the lowest number of total calls (LLM + RM calls) and the smallest inference time. Compared to existing decoding-time alignment methods RAD/ARGS, our method reduces the number of total calls by 9x and decreases inference time by 5x.
+
+\begin{table}[t]\small\setlength\tabcolsep{5pt}
+\caption{Efficiency evaluations on HH-RLHF test set. Our method significantly accelerates the inference, with fewer number of model calls (\# of forward passes per response) and shorter inference time (per 100 responses) compared with RAD~\citep{deng2023reward}/ARGS~\citep{khanov2024args} and the naive rejection sampling (Naive RS) introduced in Section~\ref{sec:pre}.}
+\label{tab:efficiency}
+\centering
+\begin{tabular}{cccccc}
+\toprule
+\textbf{Model}                                                                                 & \textbf{Method} & \textbf{\# LLM Calls} & \textbf{\# RM Calls} & \textbf{\# Total Calls} & \textbf{Inference Time (min)} \\ \midrule
+\multirow{3}{*}{\begin{tabular}[c]{@{}c@{}}Llama 7B\\ \citep{touvron2023llama}\end{tabular}}   & RAD/ARGS        & \textbf{128}       & 5120              & 5248                 & 238.7                         \\
+                                                                                               & Naive RS        & 2553.64            & \textbf{19.95}    & 2573.59              & 224.3                         \\
+                                                                                               & \textbf{CARDS}  & 833.42             & 39.49             & \textbf{872.91}      & \textbf{75.8}                 \\ \hline
+\multirow{3}{*}{\begin{tabular}[c]{@{}c@{}}Mistral 7B\\ \citep{jiang2023mistral}\end{tabular}} & RAD/ARGS        & \textbf{128}       & 5120              & 5248                 & 244.3                         \\
+                                                                                               & Naive RS        & 1678.45            & \textbf{15.38}    & 1693.83              & 176.4                         \\
+                                                                                               & \textbf{CARDS}  & 548.48             & 27.16             & \textbf{575.64}      & \textbf{48.4}                 \\ \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Helpfulness/Harmfulness Evaluation\label{sec:helpfulness}}
+We conduct the standard alignment rating evaluations. The win-tie and scoring evaluations are shown in Table~\ref{tab:helpfulness_win_tie} and Table~\ref{tab:helpfulness_score} respectively. For the RM scores, we use the same RM as in inference to see if the generated responses can be aligned with the RM preference.
+
+\begin{table}[t]\small
+\caption{GPT-4/Claude-3 win-tie evaluation on the helpfulness/harmfulness of responses, tested on a 100-sample subset of HH-RLHF test set. Our method wins all compared baselines significantly, demonstrating its superior capability to align responses with human preference.}
+\label{tab:helpfulness_win_tie}
+\centering
+\begin{tabular}{ccclccc}
+\toprule
+\multirow{2}{*}{\textbf{Model}}                                                                & \multirow{2}{*}{\textbf{Ours}} & \multirow{2}{*}{v.s.} & \multirow{2}{*}{\textbf{Compared Method}} & \multicolumn{3}{c}{\textbf{Win-Tie (\%) $\uparrow$}} \\ \cline{5-7} 
+                                                                                               &                                &                       &                                           & GPT-4          & Claude-3          & Average         \\ \midrule
+\multirow{5}{*}{\begin{tabular}[c]{@{}c@{}}Llama 7B\\ \citep{touvron2023llama}\end{tabular}}   & CARDS                          &                       & Vanilla LLM                               & 99             & 96                & 97.5            \\
+                                                                                               & CARDS                          &                       & PPO~\citep{schulman2017proximal}          & 64             & 60                & 62.0            \\
+                                                                                               & CARDS                          &                       & DPO~\citep{rafailov2024direct}            & 79             & 83                & 81.0            \\
+                                                                                               & CARDS                          &                       & ARGS~\citep{khanov2024args}               & 73             & 72                & 71.5            \\
+                                                                                               & CARDS                          &                       & RAIN~\citep{li2024rain}                   & 96             & 85                & 90.5            \\ \hline
+\multirow{5}{*}{\begin{tabular}[c]{@{}c@{}}Mistral 7B\\ \citep{jiang2023mistral}\end{tabular}} & CARDS                          &                       & Vanilla LLM                               & 86             & 79                & 82.5            \\
+                                                                                               & CARDS                          &                       & PPO~\citep{schulman2017proximal}          & 79             & 72                & 75.5            \\
+                                                                                               & CARDS                          &                       & DPO~\citep{rafailov2024direct}            & 83             & 78                & 80.5            \\
+                                                                                               & CARDS                          &                       & ARGS~\citep{khanov2024args}               & 98             & 99                & 98.5            \\
+                                                                                               & CARDS                          &                       & RAIN~\citep{li2024rain}                   & 90             & 96                & 93.0            \\ \bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]\small
+\caption{Scoring evaluation on the helpfulness/harmfulness of responses in HH-RLHF test set. Under scores from the reward model, GPT-4, and Claude-3, our method outperforms all compared baselines. (The results for GPT-4/Claude-3 scores are based on a 100-sample subset)}
+\label{tab:helpfulness_score}
+\centering
+\begin{tabular}{clccc}
+\toprule
+\textbf{Model}                                                                                 & \textbf{Method}                  & \textbf{RM Score $\uparrow$} & \textbf{GPT-4 Score $\uparrow$} & \textbf{Claude-3 Score $\uparrow$} \\ \midrule
+\multirow{6}{*}{\begin{tabular}[c]{@{}c@{}}Llama 7B\\ \citep{touvron2023llama}\end{tabular}}   & Vanilla LLM                      & 5.80              & 5.26                 & 6.49                    \\
+                                                                                               & PPO~\citep{schulman2017proximal} & 6.10              & 5.76                 & 6.81                    \\
+                                                                                               & DPO~\citep{rafailov2024direct}   & 6.01              & 5.52                 & 6.59                    \\
+                                                                                               & ARGS~\citep{khanov2024args}      & 7.85              & 5.82                 & 6.68                    \\
+                                                                                               & RAIN~\citep{li2024rain}          & 7.56              & 5.84                 & 6.77                    \\
+                                                                                               & \textbf{CARDS} (Our method)      & \textbf{8.30}     & \textbf{6.28}        & \textbf{7.14}           \\ \hline
+\multirow{6}{*}{\begin{tabular}[c]{@{}c@{}}Mistral 7B\\ \citep{jiang2023mistral}\end{tabular}} & Vanilla LLM                      & 5.05              & 7.05                 & 7.89                    \\
+                                                                                               & PPO~\citep{schulman2017proximal} & 6.59              & 7.38                 & 7.83                    \\
+                                                                                               & DPO~\citep{rafailov2024direct}   & 5.23              & 7.25                 & 7.59                    \\
+                                                                                               & ARGS~\citep{khanov2024args}      & 8.85              & 7.57                 & 7.92                    \\
+                                                                                               & RAIN~\citep{li2024rain}          & 7.64              & 7.30                 & 7.91                    \\
+                                                                                               & \textbf{CARDS} (Our method)      & \textbf{12.49}    & \textbf{7.65}        & \textbf{8.05}           \\ \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Fluency Evaluation\label{sec:fluency}}
+Following the settings of \citet{khanov2024args}, we evaluate the diversity and coherence of generated responses as measurements of fluency. The results are shown in Table~\ref{tab:fluecy}. We observe that fine-tuning-based methods (PPO~\citep{schulman2017proximal} and DPO~\citep{rafailov2024direct}) typically have suboptimal fluency compared with the unaligned models (Vanilla LLM), and decoding-time alignment methods (ARGS~\citep{khanov2024args} and RAIN~\citep{li2024rain}) usually have comparable fluency. Our method further improves the response fluency via the uncertainty-based segmentation, which preserves the semantic completeness of segments.
+
+\begin{table}[t]\small
+\caption{Fluency evaluation on HH-RLHF test set, following \citet{khanov2024args}. Our method achieves outstanding fluency scores compared with the baselines, even better than the unaligned models (Vanilla LLM).}
+\label{tab:fluecy}
+\centering
+\begin{tabular}{clccc}
+\toprule
+\textbf{Model}                                                                                 & \textbf{Methods}                 & \textbf{Diversity $\uparrow$} & \textbf{Coherence $\uparrow$} & \textbf{Average $\uparrow$} \\ \midrule
+\multirow{6}{*}{\begin{tabular}[c]{@{}c@{}}Llama 7B\\ \citep{touvron2023llama}\end{tabular}}   & Vanilla LLM                      & 0.704                         & 0.872                         & 0.788                       \\
+                                                                                               & PPO~\citep{schulman2017proximal} & 0.608                         & 0.871                         & 0.740                       \\
+                                                                                               & DPO~\citep{rafailov2024direct}   & 0.499                         & \textbf{0.873}                & 0.686                       \\
+                                                                                               & ARGS~\citep{khanov2024args}      & 0.706                         & 0.831                         & 0.769                       \\
+                                                                                               & RAIN~\citep{li2024rain}          & 0.706                         & 0.872                         & 0.789                       \\
+                                                                                               & \textbf{CARDS} (Our method)      & \textbf{0.742}                & 0.856                         & \textbf{0.799}              \\ \hline
+\multirow{6}{*}{\begin{tabular}[c]{@{}c@{}}Mistral 7B\\ \citep{jiang2023mistral}\end{tabular}} & Vanilla LLM                      & 0.834                         & 0.853                         & 0.844                       \\
+                                                                                               & PPO~\citep{schulman2017proximal} & 0.817                         & 0.851                         & 0.834                       \\
+                                                                                               & DPO~\citep{rafailov2024direct}   & 0.724                         & 0.867                         & 0.796                       \\
+                                                                                               & ARGS~\citep{khanov2024args}      & 0.719                         & \textbf{0.875}                & 0.797                       \\
+                                                                                               & RAIN~\citep{li2024rain}          & \textbf{0.853}                & 0.865                         & \textbf{0.859}              \\
+                                                                                               & \textbf{CARDS} (Our method)      & 0.846                         & 0.854                         & \textbf{0.850}              \\ \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ablation Studies}
+We list a few interesting ablation studies below to understand the details of our method.
+
+\paragraph{Acceptance criterion in Eq.~\eqref{eq:r_condition_soft}.} Eq.~\eqref{eq:r_condition_soft} is a probability-based criterion. Another scheme is setting $\beta\rightarrow 0$ to get a threshold-based criterion: $r(x,y_{<t_{k+1}})\geq\tau_r(t_{k+1})$. We compare these two schemes in Table~\ref{tab:hard_soft}. We found that the probability-based criterion sacrifices a small amount of reward score for much more efficient response generation. Therefore, we recommend choosing the probability-based criterion by default.
+
+\paragraph{Dynamic or static segmentation?} Previous works did not consider dynamic segmentation for segment-based generation~\citep{yao2023tree, li2024rain}. We have compared these two strategies in Fig.~\ref{fig:token_check}, where dynamic segmentation is better aligned with the full-sentence rewards. Besides, the uncertainty-based segmentation proposed in this paper outperforms the static segmentation (RAIN) in the helpfulness/harmfulness evaluation.
+
+\begin{table}[t]\small
+\caption{Comparison between threshold-based acceptance and probability-based acceptance, evaluated by LLama 7B~\citep{touvron2023llama} on HH-RLHF test set. Although the reward for probability-based acceptance is lower, it is more efficient due to the reduced number of LLM/RM calls.}
+\label{tab:hard_soft}
+\centering
+\begin{tabular}{cccccc}
+\toprule
+\textbf{Criterion} & \textbf{RM Score} & \textbf{\# LLM Calls} & \textbf{\# RM Calls} & \textbf{\# Total Calls} & \textbf{Inference Time (min)} \\ \midrule
+Threshold          & \textbf{9.01}     & 1089.97            & 47.47             & 1137.44              & 105.9                         \\
+Probability        & 8.71              & \textbf{744.14}    & \textbf{34.48}    & \textbf{778.62}      & \textbf{66.1}                 \\ \bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Uncertainty metrics and threshold $\tau_u$.} There are uncertainty metrics besides entropy. Additionally, the uncertainty threshold is an important hyperparameter for controlling the number of segments.
+
+\paragraph{Shift factor $\beta$ and target reward score $r^\star$.} These two hyper-parameters control the cascade sampling process. There exists a relatively large interval for the appropriate value of $\beta$ ($0.5\sim 0.8$), where the averaged reward and the number of LLM/RM calls are optimal. For the value of $r^\star$, a higher reward threshold will induce a higher averaged reward, but the number of LLM/RM calls will also increase accordingly. In the experiments, $r^\star$ is set to be just higher than the RM score of ARGS~\citep{khanov2024args}, to guarantee outperforming compared baselines in terms of rewards.
+
+
+\section{Conclusion and Limitations\label{sec:conclusion}
+
+In this paper, we proposed the \emph{CAscade RewarD Sampling} (CARDS) for efficient decoding-time alignment. We first rigorously analyze the properties of reward models (RMs) and show the relationship between full-response reward and prefix reward. Then we leverage the rejection sampling to iteratively generate small semantic segments of high reward, where the predictive uncertainty of LLMs dynamically determines the segment length. Our method significantly reduces the computational cost of decoding-time alignment methods. In the experiments, we evaluate the efficiency, alignment rating, and fluency of the generated responses. Our method achieves promising results under all evaluations.
+
+Despite the superiority of our method, some technical limitations still exist and prevent our method from being more efficient. For example, the dynamic segmentation is hard to parallelize to batched inference, since the prefix length of each response is independently changing and never aligned.
+
+
+

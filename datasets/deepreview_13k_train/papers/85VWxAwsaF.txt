@@ -1,0 +1,374 @@
+\title{Amortized Posterior Sampling with Diffusion Prior Distillation}
+
+\begin{abstract}
+    We propose a variational inference approach to sample from the posterior distribution for solving inverse problems. From a pre-trained diffusion model, our approach trains a conditional flow model to minimize the divergence between the proposal variational distribution and the posterior distribution implicitly defined through the diffusion model. Once trained, the flow model is capable of sampling from the posterior distribution with a single NFE, amortized with respect to the measurement. The proposed method paves a new path for distilling a diffusion prior for efficient posterior sampling. We show that our method is applicable to standard signals in Euclidean space, as well as signals on manifold.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+We consider the following inverse problem
+\begin{align}
+\label{eq:ip}
+    \y = \Ac(\x) + \n ,\quad \y \in \Rd^m,\,\x\in\Rd^n,\,\Ab:\Rd^n \mapsto \Rd^m,\,\nb \sim \Nc(0,\sigma_y^2\Ib),
+\end{align}
+where the goal is to infer an unknown signal $\x$  from the degraded measurement $\y$ obtained through some forward operator $\Ac$, leveraging the information contained in the measurement and the prior $p(\x)$. A powerful modern way to define the prior is through diffusion models~\cite{ho2020denoising,song2020score}, where we train a parametrized model $\s_\theta$ to estimate the gradient of the log prior $\nabla_\x \log p(\x)$. 
+
+Solving inverse problems with the diffusion model can be achieved through posterior sampling with Bayesian inference. Arguably the standard way to achieve this is through modifying the reverse diffusion process of diffusion models. This adjustment shifts the focus from sampling from the trained prior distribution $p_\theta(\x_0)$   to sampling from the posterior distribution  $p_\theta(\x_0|\y)$.  This transition is facilitated by employing iterative projections to the measurement subspace~\cite{kadkhodaie2020solving,song2020score,chung2022come,wang2023zeroshot}, guiding the samples through gradients pointing towards measurement consistency~\cite{chung2023diffusion,song2023pseudoinverseguided}. 
+
+It should be noted that diffusion models learn the gradient of the prior and diffusion samplers~\cite{song2020denoising,lu2022dpm,song2020score} are methods that numerically solve the probability-flow ODE (PF-ODE) that defines the reverse diffusion sampling trajectory. Consequently, regardless of the specifics of the methods, standard diffusion model-based inverse problem solvers (DIS), even those that are considered {\em fast}, take at least a few tens of neural function evaluation (NFE), making them less effective for time-critical applications such as medical imaging and computational photography.
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=\linewidth]{./figs/main.png}
+\caption{Diverse inverse problem solving can be done with a \textbf{single} NFE, with the \textbf{same} network for all the different measurements. (row 1) Denoising on celebA, (row 2) inpainting MNIST on the bunny manifold, (row 3) imputation of ERA5 on the spherical manifold.}
+\label{fig:main}
+\end{figure}
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=\linewidth]{./figs/concept.png}
+\caption{Concept of the proposed method. (a) Training can be performed in an unsupervised fashion with a dataset consisting of degraded measurements $\y$ to train a conditional normalizing flow $G_\phi$ with the diffusion prior $\s_\theta$. (b) Once trained, one can achieve multiple posterior samples by inputting different noise vectors $\z \sim \Nc(0, \Ib)$ concatenated with the condition $\y$ with a single NFE, generalizable across any measurement $\y$.}
+\label{fig:concept}
+\end{figure}
+
+Another class of methods~\cite{feng2023score,feng2023efficient} introduces the use of variational inference (VI) to {\em train} a new proposal distribution $q_\phi^\y(\x)$ to {\em distill} the prior learned through the pre-trained diffusion model. The problem is defined as the following optimization problem
+\begin{align}
+\label{eq:vi}
+    \min_\phi D_{KL}(q_\phi^\y(\x_0) || p_\theta(\x_0|\y)),
+\end{align}
+where the superscript $\y$ emphasizes that the proposal distribution is specific for a single measurement $\y$. For tractable optimization, $q$ is often taken to be a normalizing flow~\cite{rezende2015variational,dinh2016density} (NF) so that the computation of likelihood can be done instantly, and one can sample multiple reconstructions from the posterior samples by plugging in different noise values from the reference distribution. Posing the problem this way yields a method that can achieve posterior samples with just a single NFE. Nevertheless, it is still impractical as training a measurement-specific variational distribution takes hours of training. It is often unrealistic to train a whole new model from scratch every time when a new measurement is taken.
+
+In this work, we take a step towards a {\em practical} VI-based posterior sampler by distilling a diffusion model prior. To this end, we propose a {\em conditional} normalizing flow $q_\phi(\x_0|\y)$ as our variational distribution and amortize the optimization problem in \eqref{eq:vi} over the conditions $\y$. By using a network that additionally takes in the condition $\y$ as the input, we can train a {\em single} model that generalizes across the whole dataset without the need for cumbersome re-training for specific measurements. (See Fig.~\ref{fig:concept} for the conceptual illustration of the proposed method, as well as representative results presented in Fig.~\ref{fig:main}.) Interestingly, we find that the speed of optimization is not hampered with such amortization, and the proposed method achieves comparable performance against the measurement-specific flow model~\cite{feng2023efficient,feng2023score}. Furthermore, we extend the theory to consider inverse problems on the Riemannian manifold, showing that the proposed idea is generalizable even when the signal is not one the Euclidean manifold. In summary, our contributions and key takeaways are as follows
+
+\begin{enumerate}
+  \item We propose an amortized variational inference framework to enable 1-step posterior sampling constructed implicitly from the pre-trained diffusion prior $p_\theta(\x)$ for {\em any} measurement $\y$. 
+  \item To the best of our knowledge, our method is the first diffusion prior distillation approach for solving inverse problems that are unsupervised (i.e. does not require any ground-truth data $\x$), as opposed to standard conditional NFs~\cite{lugmayr2020srflow} that required supervised paired data.
+  \item Experimentally, we show that the proposed method easily scales to signals that lie on the standard Euclidean manifold (e.g. images) as well as signals that lie on the Riemannian manifold, achieving strong performance regardless of the representation.
+\end{enumerate}
+
+
+
+\section{Preliminaries}
+
+\label{sec:prelinimaries}
+
+\subsection{Score-based diffusion models}
+\label{subsec:diffusion}
+
+We adopt the standard framework for constructing a continuous diffusion process $\x(t)$, where $t \in [0, T]$ and $\x(t) \in \mathbb{R}^d$, as outlined by Song \etal~\cite{song2020score}. Specifically, our goal is to initialize $\x(0)$ from a distribution $p_0(\x) = p_{\text{data}}$, and evolve $\x(t)$ towards a reference distribution $p_T$ at time $T$, which is easily samplable.
+
+The evolution of $\x(t)$ is governed by the Itô stochastic differential equation (SDE):
+\begin{align}
+\label{eq:forward-sde}
+    d\x = \f(\x, t)dt + g(t)d\w,
+\end{align}
+where $\f: \mathbb{R}^d \times \mathbb{R} \rightarrow \mathbb{R}^d$ represents the drift function, and $g: \mathbb{R} \rightarrow \mathbb{R}^d$ denotes the diffusion coefficient. These coefficients are designed to drive $\x(t)$ towards a spherical Gaussian distribution as $t$ approaches $T$.
+When the drift function $\f(\x, t)$ is affine, the perturbation kernel $p_{0t}(\x(t) | \x(0))$ is Gaussian, allowing for the parameters to be determined analytically. This facilitates data perturbation via $p_{0t}(\x(t) | \x(0))$ efficiently, without necessitating computations through a neural network.
+
+Furthermore, corresponding to the forward SDE, there exists a reverse-time SDE:
+\begin{align}
+\label{eq:reverse-sde}
+    d\xb &= [\fb(\xb, t) - g(t)^2 \nabla_\xb \log p_t(\xb)]dt + g(t) d\bar{\wb},
+\end{align}
+where $dt$ represents an infinitesimal negative time step, and $\bar{\wb}$ denotes the backward standard Brownian motion. While the trajectory of \eqref{eq:reverse-sde} is stochastic, there also exists a corresponding probability-flow ODE (PF-ODE) that recovers the same law $p_t(\x)$ as the time progresses~\cite{song2020score,song2020denoising}
+\begin{align}
+\label{eq:pf-ode}
+    d\xb &= [\fb(\xb, t) - \frac{g(t)^2}{2} \nabla_\xb \log p_t(\xb)]dt.
+\end{align}
+This allows a deterministic mapping between the reference and the target distribution, and hence diffusion models can also be seen as a neural ODE~\cite{chen2018neural}.
+
+A neural network can be trained to approximate the true score function $\nabla_\x \log p_t(\x)$ through score matching techniques, as demonstrated in previous works~\cite{song2019generative,song2020score}. This approximation, denoted $\s_{\theta}(\x, t) \approx \nabla_\x \log p_t(\x)$, is then utilized to numerically integrate the reverse-time SDE. To effectively train the score function, denoising score matching (DSM) is often employed~\cite{hyvarinen2005estimation}
+\begin{align}
+\label{eq:dsm}
+    \theta^* = \argmin_\theta \Ed_{t \sim U(\varepsilon, 1), \x(t), \x(0)}\left[\|\s_\theta(\x(t), t) - \nabla_{\x_t}\log p(\x(t)|\x(0))\|_2^2\right],
+\end{align}
+Interestingly, the posterior mean, or the so-called denoised estimate can be computed via Tweedie's formula~\cite{efron2011tweedie}. Specifically, for $p(\x_t|\x_0) = \Nc(\x_t; \alpha_t \x_0, \beta_t^2 \Ib)$, 
+\begin{align}
+\label{eq:tweedie}
+    \hat\x_{0|t}^\theta := \Ed_{p(\x_0|\x_t)}[\x_0|\x_t] 
+    = \frac{1}{\alpha_t}(\x_t + \beta_t^2 \nabla_{\x_t} \log p(\x_t)).
+\end{align}
+
+\subsection{Diffusion models for inverse problems (DIS)}
+\label{subsec:dis}
+
+Solving the reverse SDE in \eqref{eq:reverse-sde} or the PF-ODE in \eqref{eq:pf-ode} results in sampling from the prior distribution $p_\theta(\x_0)$, with the subscript emphasizing the time variable in the diffusion model context $\x_0 \equiv \x$. When solving an inverse problem as posed in \eqref{eq:ip}, our goal is to sample from the posterior $p_\theta(\x_0|\y) \propto p_\theta(\x)p(\y|\x_0)$. Using Bayes rule for a general timestep $t$ yields
+\begin{align}
+\label{eq:bayes}
+    \nabla_{\x_t} \log p_\theta(\x_t|\y) = \nabla_{\x_t} \log p_\theta(\x_t) + \nabla_{\x_t} \log p(\y|\x_t).
+\end{align}
+While the former term can be replaced with a pre-trained diffusion model, the latter term is intractable and needs some form of approximation. Existing DIS~\cite{kawar2022denoising,chung2023diffusion,wang2023zeroshot} propose different approximations for $\nabla_{\x_t} \log p(\y|\x_t)$, which yields sampling from slightly different posteriors $\nabla_{\x_t} \log p_\theta(\x_t|\y)$.
+
+Algorithmically, the posterior samplers are often implemented so that the original numerical solver for sampling from the prior distribution remains intact, while modifying the Tweedie denoised estimate at each time $\hat\x_{0|t}^\theta$ to satisfy the measurement condition given as \eqref{eq:ip}. From Tweedie's formula, we can see that this corresponds to approximating the conditional posterior mean $\Ed[\x_0|\x_t,\y]$ in the place of the unconditional counterpart $\Ed[\x_0|\x_t]$. The algorithms are inherently iterative, and the modern solvers~\cite{chung2023diffusion,wang2023zeroshot,zhu2023denoising} require at least 50 NFE to yield a high-quality sample. Moreover, as existing methods can be interpreted as approximating the reverse distribution $p(\x_0|\x_t)$ with a simplistic Gaussian distribution $q(\x_0|\x_t) = \Nc(\x_0; \hat\x_{0|t}^\theta, s_t^2\Ib)$~\cite{peng2024improving}, it typically yields a large approximation error, especially in the earlier steps of the reverse diffusion.
+\begin{table}[t]
+\centering
+\setlength{\tabcolsep}{0.2em}
+\resizebox{.8\textwidth}{!}{% <------ Don't forget this %
+\begin{tabular}{lcc@{\hskip 15pt}ccc}
+\toprule
+{\textbf{Class}} & \multicolumn{2}{c}{\textbf{Score-based}} & \multicolumn{3}{c}{\textbf{Variational Inference}} \\
+\cmidrule(lr){2-3}
+\cmidrule(lr){4-6}
+Methods & DIS & Noise2Score~\cite{kim2021noise2score} & RED-Diff  & Feng \etal~\cite{feng2023score,feng2023efficient} & \textbf{Ours} \\
+\midrule
+\thead{One-step inference} & \xmark & \xmark & \cmark & \cmark & \cmark \\
+\thead{Tackles general\\inverse problems} & \cmark & \cmark & \xmark & \cmark & \cmark \\
+\thead{Exact likelihood\\computation} & \xmark & \xmark & \xmark & \cmark & \cmark \\
+\thead{Amortized across $\y$} & \xmark & \xmark & \xmark & \xmark & \cmark \\
+\thead{Generalizable \\ across dataset} & \xmark & \xmark & \xmark & \xmark & \cmark \\
+\bottomrule
+\end{tabular}
+}
+\caption{
+Methods that leverage diffusion priors for solving inverse problems according to their class, and their characteristics.
+}
+\label{tab:taxonomy}
+\end{table}
+
+
+\section{Related works}
+
+\label{sec:related_works}
+
+\subsection{Variational inference in DIS}
+\label{subsec:vi}
+
+Standard DIS discussed in Sec.~\ref{subsec:dis} sample from the posterior distribution by following the reverse diffusion trajectory. Another less studied approach uses VI to use a new proposal distribution, where the problem is cast as an optimization problem in \eqref{eq:vi}.
+RED-diff~\cite{mardani2023variational} places a unimodal Gaussian distribution as the proposal distribution $q_\phi^\y(\x)$, and the KL minimization is done in a coarse-to-fine manner, similar to standard DIS, starting from high noise level to low noise level. While motivated differently, RED-diff and standard DIS have similar downsides of requiring at least a few tens of NFEs, as well as placing a simplistic proposal distribution. Furthermore, one can achieve only a single sample per optimization.
+
+Recently, Feng \etal~\cite{feng2023score,feng2023efficient} uses an NF model for the proposal distribution while solving the same VI problem. The optimization problem involves computing the diffusion prior log likelihood $\log p_\theta(\x)$. It was shown that it can be exactly computed by solving the PF-ODE~\cite{feng2023score,song2020score}, but numerically solving the PF-ODE per every optimization step is extremely computationally heavy, and hence does not scale well. To circumvent this issue, it was proposed to use a lower bound~\cite{feng2023efficient,song2021maximum}. Once trained, the NF model can be given different noise inputs $\z \sim \Nc(0, \Ib)$ to generate diverse posterior samples with a single forward pass through the network. However, the training should be performed with respect to all the different measurements, not being able to generalize across the dataset. Our work follows along this path to overcome the current drawback
+as shown in Table~\ref{tab:taxonomy}.
+
+\subsection{Distillation of the diffusion prior}
+\label{subsec:distillation}
+Our method involves distillation of the diffusion prior into a student deep neural network, in our case an NF model. Particularly, it involves evaluating the output of the model by checking the denoising loss gradients from the pre-trained diffusion model. This idea is closely related to variants of score distillation sampling (SDS)~\cite{poole2023dreamfusion,wang2024prolificdreamer}, where the gradient from the denoising loss is used to distill the diffusion prior by discarding the score Jacobian. Possibly a closely related work is Diff-instruct~\cite{luo2024diff}, where the authors propose to train a one-step generative model similar to GANs~\cite{goodfellow2014generative} by distillation of the diffusion prior with VI. By proposing an integral KL divergence (IKL) by considering KL minimization across multiple noise levels across the diffusion, it was shown that SDS-like gradients can be used to effectively train a new generative model. While having similarities, our method directly minimizes the KL divergence and does not require dropping the score Jacobian.
+
+Orthogonal to the score distillation approaches, there have been recent efforts to train a student network to emulate the PF-ODE trajectory itself~\cite{song2023consistency,gu2023boot} with a single NFE, one of the most prominent directions being consistency distillation (CD)~\cite{song2023consistency}. While promising, the performance of CM is upper-bounded by the {\em teacher} PF-ODE. Thus, in order to leverage CD-type approaches for diffusion posterior sampling, one has to choose one of the approximations of DIS as its teacher model. In this regard, applying CD for diffusion inverse problem solving is inherently limited.
+
+
+
+\section{Proposed Method}
+
+\label{sec:main}
+
+\subsection{Conditional NF for amortized score prior}
+The goal is to use a variational distribution that is conditioned on $\y$, such that the resulting distilled conditional NF model $G_\phi$ generalizes to any condition $\y$. To this end, inspired from the choices of~\cite{sun2021deep,feng2023score} we modify the objective in \eqref{eq:vi} to
+\begin{align}
+    &\min_{\phi} D_{KL}(q_\phi(\x_0|\y) || p_\theta(\x_0|\y)) \\
+    =&\min_\phi \int q_\phi(\x_0|\y)[-\log p(\y|\x_0) - \log p_\theta(\x_0) + \log q_\phi(\x_0|\y)]\\
+    =&\min_\phi \Ed_{\z} \left[-\underbrace{\log p(\y|G_\phi(\z,\y))}_{\rm fidelity} - \underbrace{\log p_\theta(G_\phi(\z,\y))}_{\rm prior} + \underbrace{\log \pi(\z) - \log \left|\det \frac{dG_\phi(\z,\y)}{d\z}\right|}_{\rm induced\:entropy} \right],
+\label{eq:conditional_score_prior}
+\end{align}
+where the second equality is the result of choosing a conditional NF as our proposal distribution, and now the expectation is over random noise $\z \sim \Nc(0, \Ib)$. Notice that our network takes in both a random noise $\z$ and the condition $\y$ as an input to the network.
+
+Under the Gaussian measurement model in \eqref{eq:ip}, the fidelity loss reads
+\begin{align}
+\label{eq:fidelity}
+    -\Ed_\z[\log p(\y|G_\phi(\z,\y))]
+    &= -\Ed_\z\left[\frac{\|\y - \Ac(G_\phi(\z,\y))\|_2^2}{2\sigma_y^2}\right].
+\end{align}
+Moreover, the induced entropy can be easily computed as it is an NF
+\begin{align}
+\label{eq:entropy_flow}
+    \Ed_{q_\phi(\x)}[\log q_\phi(\x)] = \Ed_{\z}\left[\log \pi(\z) - \log \left|\det \frac{dG_\phi(\z,\y)}{d\z}\right|\right]
+\end{align}
+where $\pi(z)$, in our case, is the reference Gaussian distribution $\Nc$. For simplicity, let us denote $\hat\x_0 := G_\phi(\z,\y)$.
+
+ Computation of $\log p_\theta(\hat\x_0)$ is more involved: to exactly compute the value, we would have to solve the PF-ODE, which is compute-heavy~\cite{song2020score,feng2023score}. To circumvent this burden, we leverage the evidence lower bound (ELBO)~\cite{song2021maximum,feng2023efficient} $b_\theta(\hat\x_0) \leq \log p_\theta(\hat\x_0)$:
+\begin{align}
+    b_\theta(\hat\x_0) = \Ed_{p(\hat\x_T|\hat\x_0)}\left[ \log \pi(\hat\x_T) \right] - \frac{1}{2} \int_0^T g(t)^2 h(t)\,dt
+\end{align}
+where
+\begin{align}
+    h(t) := \Ed_{p(\hat\x_t|\hat\x_0)}&\Bigg[
+    \underbrace{\|\s_\theta(\hat\x_t) - \nabla_{\hat\x_t} \log p(\hat\x_t|\hat\x_0)\|_2^2}_{\rm DSM (\eqref{eq:dsm})} \notag
+    \\ &- \| \nabla_{\hat\x_t} \log p(\hat\x_t|\hat\x_0) \|_2^2 - \frac{2}{g(t)^2} \nabla_{\hat\x_t} \cdot \fb(\hat\xb_t, t).
+    \Bigg]
+\end{align}
+When we have $p(\x_t|\x_0) = \Nc(\x_t; \alpha_t \x_0, \beta_t^2\Ib)$ and a standard diffusion model with a linear SDE $\fb(\x_t,t) = f(t)\x_t$,
+\begin{align}
+    \| \nabla_{\x_t} \log p(\x_t|\x_0) \|_2^2 = \frac{1}{\beta(t)^2} \|\epsilonb\|_2^2,\quad
+    \frac{2}{g(t)^2} \nabla_{\x_t} \cdot \fb(\xb_t, t) = \frac{2d\beta(t)}{g(t)^2},
+\end{align}
+where $d$ is the dimensionality of $\x_t$, and both terms are independent of $\phi$ and $\theta$. Intuitively, the DSM term evaluates the probability of $\x_0$ by measuring how easy it is to denoise the given $\x_0$. When the network easily denoises the given image, then it will assign a high probability. When not, a low probability is assigned.
+We can now define an equivalent ELBO $b'_\theta(\x_0)$ in terms of optimization, which reads
+\begin{align}
+\label{eq:dsm_score_prior}
+    b'_\theta(\x_0) = \Ed_{p_{0T}}[\log \pi(\x_T)] - \frac{1}{2}\int_0^T g(t)^2 \|\s_\theta(\x_t) - \nabla_{\x_t} \log p(\x_t|\x_0)\|_2^2\,dt
+\end{align}
+Plugging $b'_\theta(G_\phi(\z,\y))$ of \eqref{eq:dsm_score_prior} in the place of $\log p_\theta(G_\phi(\z,\y))$ in \eqref{eq:conditional_score_prior}, we can efficiently update $\phi$ by distilling the prior information contained in the diffusion model.
+
+\subsection{Architecture}
+It has been demonstrated in \cite{lugmayr2020srflow} that Conditional NFs are capable of learning distributions on the ambient space that are constrained on measurement. To achieve an architecture with invertible transformations, we extend RealNVP~\cite{dinh2016density} architecture to the conditional settings by borrowing insight from~\cite{sun2021deep}. In its plain form, RealNVP architecture mainly consists of Flow steps, each containing two Affine Coupling layers. In each affine coupling layer, input signal $\xb$ is split into two parts: $\xb_a$ which stays unchanged, and $\xb_b$ which is fed into the neural network. In order to invoke the condition, we simply concatenate the conditioning input $\y$ to the $\xb_b$ as these layers serve as the main and basic building blocks of entire invertible architecture. This seemingly simple integration led to very promising results in both Euclidean and non-Euclidean geometries as will be depicted in Section \ref{sec:exps}.
+
+\subsection{Manifold}
+Manifolds exhibit more complex or curved structures compared to flat Euclidean spaces. In many real-world scenarios such as in environmental science, data naturally resides on these non-Euclidean geometries, and removing artifacts or denoising over these shapes becomes both necessary and hard. Traditional DIS methods usually rely on spatial domain and requires for off-the-shelf projection methods to get plausible results. To mitigate this, our work extends the application of conditional NFs to distributions lying on non-Euclidean manifolds and solve intricate inverse problems right on the surface without the need for additional renderings. By leveraging the expressive power of conditional NFs, we aim to capture the intrinsic geometry and structure of manifold data while enabling efficient inference and sampling. We treat data as a point cloud of size $V \times C$, in which $V$ and $C$ denotes the number of vertices on the discretization of mesh and dimension of signal features (e.g. $3$ in case of rgb), respectively. Several complex geometries and practical data have been considered and CNF is optimized to perform noisy inpainting and imputation tasks. Findings suggest that our framework can capture the distribution even in severe masking levels across different geometries (see Section \ref{sec:exps}).
+
+
+
+\section{Experiments}
+
+\label{sec:exps}
+We validate our approach through various experiments, including (i) Denoising, Super Resolution, and Deblurring with CelebA face image data \cite{liu2015faceattributes}; (ii) Inpainting on Stanford Bunny Manifold with MNIST data; and (iii) Imputation on Sphere with ERA5~\cite{hersbach2020era5} temperature data. (i) Denoising is performed on the Euclidean in the image domain. In contrast, noisy (ii) inpainting and (iii) imputation are solved directly on the bunny and sphere manifolds. Throughout all the experiments, we use $24$ flow steps and we set the batch size to the $64$. We conduct all the training and optimization experiments on a single RTX3090 GPU instance.
+
+\subsection{Experimental Settings}
+\noindent\textbf{Inverse Problems on CelebA.} We follow the usual formulation and adapt $32\times 32$ resolution of facial images. $G_\phi$ is optimized over the $19,962$ \textbf{test} images by using the forward operator and prior from diffusion models. We optimize CNF for $1$M iterations (convergency was observed earlier but continued for potential refinement).
+
+\noindent\textbf{Inpainting on Bunny MNIST.} In order to demonstrate the geometric awareness of our model, we conduct experiment on Stanford Bunny Manifold. We choose the mesh resolution of $1889$ vertices and then project the [0, 1] normalized MNIST digits onto the bunny manifold \cite{turk1994zippered}. In order to ensure the dimensionality compatibility for the models, we use $1888$ vertices and zero mask the last vertex throughout the experiments. We obtain the measurement by occluding $30\%$ of vertices randomly and adding some Gaussian noise, i.e. $\Ac$ is the random masking operator and $\sigma_y=0.1$ in (\ref{eq:ip}). Our proposed CNF is trained on the test chunk of $10,000$ digit examples for $1$M iterations. 
+\noindent\textbf{Imputation on ERA5.} To show the essence and practical importance of our pipeline, we further conduct experiments on ERA5 temperature dataset. Even though data is available in a rectangular format, due to the spherical shape of Earth, it inherits some geometric information. We use $4^\circ$ resolution dataset with $4140$ vertices borrowed from \cite{dupontetal5gasp} with only temperature channel as it is quite popular to analyze in the domain of generative AI. Again, due to the dimensionality, we add $20$ more vertices with a signal value of zero, and the data is [0, 1] normalized. In contrast to Bunny MNIST, we use more severe occlusion of $60\%$ random masking with additional Gaussian noise of $\sigma_y=0.05$. We perform the optimization of our CNF model on the test part of the dataset with $2420$ examples for $315$k iterations. 
+\noindent\textbf{Score Networks.} For all the diffusion priors VPSDE formulation has been adapted. In the case of image domain CelebA, we borrow the same score checkpoint used in the \cite{feng2023score, feng2023efficient}, which uses NCSN++ \cite{song2021maximum} architecture and has been trained for $1$M iterations. For Bunny MNIST, we adapt the $1$D formulation of DDPM \cite{ho2020denoising} and train the score network for $500$k, at which the convergence was clearly observed through the generated samples. In the case of spherical weather data, we followed the same strategy as Bunny MNIST but achieved convergence of score network earlier at $360$k iterations.
+
+\begin{table}[t]
+\centering
+\setlength{\tabcolsep}{0.2em}
+\resizebox{1.0\textwidth}{!}{% <------ Don't forget this %
+\begin{tabular}{lccc@{\hskip 15pt}ccc@{\hskip 15pt}ccc}
+\toprule
+{\textbf{Geometry}} & \multicolumn{3}{c}{\textbf{Euclidean}} & \multicolumn{6}{c}{\textbf{Riemannian}} \\
+\cmidrule(lr){2-4}
+\cmidrule(lr){5-10}
+Dataset \& Task & \multicolumn{3}{c}{celebA (denoising)} & \multicolumn{3}{c}{Bunny-MNIST (inpainting)} & \multicolumn{3}{c}{ERA5 (imputation)} \\
+\cmidrule(lr){2-4}
+\cmidrule(lr){5-7}
+\cmidrule(lr){8-10}
+Metric & Time[s]$\downarrow$ & PSNR$\uparrow$ & SSIM$\uparrow$ & Time[s]$\downarrow$ & PSNR$\uparrow$ & MSE$\downarrow$ & Time[s]$\downarrow$ & PSNR$\uparrow$ & SSIM$\uparrow$ \\
+\midrule
+MCG~\cite{chung2022improving} & - & - & - & 19.85 & \underline{26.69} & \underline{0.0024} & 16.16 & 27.52 & 0.871 \\
+Noise2Score~\cite{kim2021noise2score} & 0.0172 & 24.36 & 0.871 & - & - & - & - & - & - \\
+DPS~\cite{chung2023diffusion} & 16.95 & \textbf{27.93} & \textbf{0.932} & 19.39 & \textbf{28.03} & \textbf{0.0017} & 15.36 & 28.95 & \underline{0.953} \\
+Proposed ($N = 1$) & \textbf{0.0021} & 23.37 & 0.836 & \textbf{0.0021} & 24.04 & 0.0041 & \textbf{0.0012} & \underline{33.17} & 0.883 \\
+Proposed ($N = 128$) & \underline{0.0035} & \underline{25.82} & \underline{0.901} & \underline{0.0035} & 24.88 & 0.0034 & \underline{0.0018} & \textbf{34.61} & \textbf{0.959} \\
+\bottomrule
+\end{tabular}
+}
+\caption{
+\add{Quantitative results on our 3 main experiments. \textbf{Best}, \underline{second best}}
+}
+\label{tab:main_results}
+\end{table}
+
+\subsection{Results}
+In this section, we provide the general results of each different task described above. We compare our model with the various baselines including, DPS~\cite{chung2023diffusion}, MCG~\cite{chung2022improving}, and Noise2Score~\cite{kim2021noise2score}. 
+\add{It should be noted that MCG and DPS are identical for denoising, and Noise2Score is only applicable to denoising. In such cases, we do not report the metrics.}
+We also demonstrate the comparisons and results against Feng \etal~\cite{feng2023efficient}. Finally, we experimentally confirm the robustness of our model across different unseen data or datasets. For evaluation purposes, we use peak signal-to-noise ratio (PSNR) and structural-similarity-index-measure (SSIM) which are widely used to assess the performance of inverse solvers with the ground truth and reconstructed signals. We further evaluate Fréchet Inception Distance (FID) to showcase the perceptual quality of generated samples. \add{As the proposed method can sample multiple different posterior samples with a single forward pass, and this process is easily parallelizable, we report two different types for the proposed method. One by taking a single posterior sample ($N = 1$), and another by taking 128 posterior samples and taking the mean ($N = 128$).}
+
+\subsubsection{General Results.}
+In general, our approach achieves competitive quantitative and qualitative results across different datasets on Euclidean and non-Euclidean geometries. We observe significant time improvements due to the single-step generation ability of our framework. Tab.~\ref{tab:main_results} and Fig.~\ref{fig:main} depict competitive quantitative and qualitative results confirming discussions along with instant time generations. \add{It should be noted that the boosted version ($N = 128$) of the proposed method only marginally increases the compute time, as we can sample multiple reconstructions in parallel. To demonstrate that our method can be applied to more general inverse problems, similar to~\cite{chung2023diffusion}, we conducted 2$\times$ Super Resolution and Gaussian Deblurring experiments on the celebA data as shown in Tab.~\ref{tab:deblur_SRx2_tab} \& Fig.~\ref{fig:deblur_SRx2_fig}, where we see that the perceptual quality of the proposed method is {\em better} while being $\sim \times 1000$ faster, and the difference in the distortion metrics are small. Interestingly, while Noise2Score approximates the posterior mean, and the boosted version of the proposed method also approximates the posterior mean by taking the average of the posterior samples, our method outperforms Noise2Score by more than 1 db, showcasing the superiority of the proposed method.}
+
+\subsubsection{Comparing with DIS and Noise2Score.}
+Both DPS~\cite{chung2023diffusion} and MCG~\cite{chung2022improving} leverage the pre-trained diffusion model to sample from the posterior distribution. However, these methods require thousands of NFEs to achieve stable performance. The required time for DPS and MCG is reported in Tab.~\ref{tab:main_results}, \ref{tab:deblur_SRx2_tab}. When decreasing the NFE as shown in Fig.~\ref{fig:comparison_dps_stability} (a), PSNR heavily degrades and eventually diverges when we take an NFE value of less than 30. Our method achieves competitive performance even with a single NFE.
+Moreover, it is shown in Fig.~\ref{fig:comparison_dps_stability} (b) that even slightly incorrectly choosing the step size parameter leads to a large degradation in performance, whereas our method is free from such cumbersome hyperparameter tuning. Finally, it is shown in Fig.~\ref{fig:comparison_dps_stability} (c) that DPS collapses to the mean of the prior distribution, altering the content of the measurement heavily when we take a smaller number of NFEs.
+
+\begin{figure}[!thb]
+\centering
+\includegraphics[width=\linewidth]{./figs/comparison_dps_stability.png}
+\caption{Comparison of our method against DPS~\cite{chung2023diffusion} on celebA denoising. (a) NFE vs. PSNR plot, (b) step size (used in DPS only) vs. PSNR plot, (c) representative results by varying the NFE.}
+\label{fig:comparison_dps_stability}
+\end{figure}
+
+It is worth mentioning that Noise2Score~\cite{kim2021noise2score} is applicable for one-step denoising of the measurements by leveraging the Tweedie's formula. However, as discussed in Sec.~\ref{sec:discussion}, our method is generally applicable to a wide class of inverse problems, whereas the applicability of Noise2Score is limited.
+
+\begin{figure}[]
+\centering
+\begin{minipage}[m]{0.5\textwidth}
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tabular}{l@{\hskip 15pt}lll@{\hskip 15pt}lll@{\hskip 15pt}l}
+\toprule
+{} & \multicolumn{3}{c}{\textbf{Gaussian Deblurring}} & \multicolumn{3}{c}{\textbf{Super Resolution x2}} & \\
+\cmidrule(lr){2-4}
+\cmidrule(lr){5-7}
+\cmidrule(lr){8-8}
+{\textbf{Method}} & {PSNR $\uparrow$} & {SSIM $\uparrow$}  & {FID $\downarrow$} & {PSNR $\uparrow$} & {SSIM $\uparrow$} & {FID $\downarrow$} & {Time[s] $\downarrow$}\\
+Proposed & 26.34 & 0.923 & \textbf{56.11} & 23.81 & 0.860 & \textbf{86.23} & \textbf{0.0035} \\
+\cmidrule(l){1-8}
+MCG~\cite{chung2022improving} & 27.38 & 0.928 & 75.63 & 22.64 & 0.859 & 100.3 & 17.27 \\
+DPS~\cite{chung2023diffusion} & \textbf{27.40} & \textbf{0.928} & 74.84 & \textbf{24.44} & \textbf{0.865} & 89.92 & 16.95 \\
+\bottomrule
+\end{tabular}
+}
+\captionof{table}{
+Quantitative results
+}
+\label{tab:deblur_SRx2_tab}
+\end{minipage}%
+\hfill
+\begin{minipage}[m]{0.5\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figs/deblur_SRx2.pdf}
+\caption{Qualitative results}
+\label{fig:deblur_SRx2_fig}
+\end{minipage}
+\end{figure}
+
+\subsubsection{Comparing with score prior method.}
+Compared to the exact score prior~\cite{feng2023score}, surrogate counterpart~\cite{feng2023efficient} presents $100$ times faster approach along with competitive or slightly better results in terms of quality. Despite being fast in terms of optimization of NF, \cite{feng2023efficient} still requires training the network for a considerable amount of time for every single measurement. We observed that under same conditions, conditional NF does not increase the complexity and training stage takes 0.15 seconds which is 0.14 seconds in case of unconditional version. We further sample a random point from test data of celebA and optimize unconditional NF with the same configurations as ours on this single measurement. NF trained solely on this data reaches 23.75dB in PSNR score, which is almost same as our result of 23.43dB on this measurement. All these confirms that under same conditions, our approach of introducing conditions can simply achieve best results being also amortized for plenty of measurements.
+
+\subsubsection{Generalizability across datasets and Blind Inverse Problems.}
+We further observe that our optimized framework can be used on unseen data as well. Table \ref{tab:robust_data} and Figure \ref{fig:robust} depicts that we achieve similar quantitative and qualitative reconstruction results when we sample from unseen celebA or ERA5 validation datasets. Note that score network is trained on train signals and CNF optimization has been conducted on test signals, i.e. validation is totally hidden to both teacher and student models. More strongly, our approach can also be leveraged on various datasets as pre-optimized inverse solver. To this end, we use our celebA optimized CNF model to perform Denoising task on the FFHQ \cite{karras2019style} dataset. Same Table and Figure show that our model can remove the noise artifacts with a similar performance as it does on original data, confirming the generalizibility feature.
+
+We further observed that our amortized inference approach can work in the absence of forward operator. In other words, we can perform blind inverse problems through our amortized posterior sampling. We used various imputation levels between 30\% to 60\% for ERA5 dataset, and conducted experiments with random choice of imputation in a blind manner. As a result, Fig.~\ref{fig:varying_masks_blind}shows that results as good as the original inverse solver with the known forward operation (all levels with more than 33 PSNR value).
+
+\begin{figure}[t]
+  \centering
+  \centerline{{\includegraphics[width=0.6\linewidth]{figs/varying_masks_blind.pdf}}}
+  \caption{Blind inverse problem solving with varying imputation levels.}
+  \label{fig:varying_masks_blind}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\setlength{\tabcolsep}{0.2em}
+\resizebox{1.0\textwidth}{!}{% <------ Don't forget this %
+\begin{tabular}{lccc@{\hskip 15pt}ccc@{\hskip 15pt}ccc}
+\toprule
+Dataset \& Task & {celebA val (denoising)} & {ERA5 val (imputation)} & {FFHQ (denoising)} \\
+\cmidrule(lr){2-2}
+\cmidrule(lr){3-3}
+\cmidrule(lr){4-4}
+\midrule
+PSNR$\uparrow$ & 23.26 & 33.12 & 21.92 \\
+SSIM$\uparrow$ & 0.831 & 0.882 & 0.822 \\
+\bottomrule
+\end{tabular}
+}
+\caption{
+Our approach is robust against unseen data samples and even generalizable accross different datasets once it is optimized. For the first $2$ columns, we use validation part of datasets and feed-forward our CNF on this totally unseen data. For the third column, we even show that our pre-optimized CNF can be leveraged to restore back the noised data samples from across various datasets. All the quantitative results align with their counterparts in Table \ref{tab:main_results} that confirms robustness and generalization ability of our pipeline which was not possible before.}
+\label{tab:robust_data}
+\end{table}
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=\linewidth]{./figs/ood.png}
+\caption{Figure demonstrating the visual results of robustness and generalization ability of our approach. First and second rows show the results on unseen validation data, and third row depicts generalization to another dataset. Corresponding quantitative analysis can be found in Table \ref{tab:robust_data}.}
+\label{fig:robust}
+\end{figure}
+
+
+
+
+\section{Discussion}
+
+\label{sec:discussion}
+
+We show a first proof of concept that we can construct a one-step posterior sampler that generalizes across any measurements in an unsupervised fashion (only having access to the measurements $\y$). Notably, our method extends to wide use cases with minimal constraints: 1) the operator $\Ac$ can be arbitrarily complex and non-linear, as in DPS~\cite{chung2023diffusion}, unlike many recent DIS that requires linearity of the operator~\cite{wang2023zeroshot,chung2024decomposed,zhu2023denoising}; 2) Training of the sampler can be done without any strict conditions on the measurement, unlike recent unsupervised score training methods that require i.i.d. measurement conditions with the same randomized forward operator~\cite{daras2023ambient,kawar2023gsure}. We opted for simplicity in the architecture design of $G_\phi$, and avoided introducing inductive bias of spatial information by taking a vectorized input, potentially explaining the slight background noise in the reconstructions. Further optimization in the choice of network architecture is left as a future direction of study.
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+
+In this work, we propose to use a conditional NF for a VI-based optimization strategy to train a one-step posterior sampler, which implicitly samples from the posterior distribution defined from the pre-trained diffusion prior. We show that our method is highly generalizable, being able to reconstruct samples that are not seen during training, applicable to diverse forward measurements, and types of data, encompassing standard Euclidean geometry as well as data on general Riemannian manifolds. We believe that our work can act as a cornerstone for developing a fast, practical posterior sampler that distills the diffusion prior.
+
+\clearpage  % TODO REVIEW/FINAL: This \clearpage needs to be removed from both review and camera-ready versions.
+
+
+
+
+
+

@@ -1,0 +1,463 @@
+\title{Joint Graph Rewiring and Feature Denoising via Spectral Resonance}
+
+\begin{abstract}
+    In graph learning the graph and the node features both contain noisy information about the node labels. In this paper we propose \textit{joint denoising and rewiring} (JDR)---an algorithm to jointly rewire the graph and denoise the features, which improves the performance of downstream node classification graph neural nets (GNNs). JDR improves the alignment between the leading eigenspaces of graph and feature matrices. To approximately solve the associated non-convex optimization problem, we propose a heuristic that efficiently handles real-world graph datasets with multiple classes and different levels of homophily or heterophily. We theoretically justify JDR in a stylized setting and verify the effectiveness of our approach through extensive experiments on synthetic and real-world graph datasets. The results show that JDR consistently outperforms existing rewiring methods on node classification using GNNs as downstream models.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\Glspl{gnn} are a powerful deep learning tool for graph-structured data, with applications in physics \citep{mandal2022robust, linkerhaegner2023grounding}, chemistry \citep{gilmer2017neural}, biology \citep{gligorijevic2019structure} and beyond \citep{zhou2021graph}. 
+Typical tasks across disciplines include graph classification \citep{duvenaud2015convolutional, xu2018how}, node classification \citep{kipf2017semisupervised, li2019optimizing} and link prediction \citep{pan2022neural}.
+
+Graph datasets contains two distinct types of information: the graph structure and the node features. 
+The graph encodes interactions between entities and thus the classes or communities they belong to, similarly to the features. 
+Since many real graphs inherently contain missing and spurious links and the features are noisy, we ask a natural question:
+\textit{Is there a simple way to jointly rewire the graph and denoise the features which improves performance of a downstream GNN?}
+
+Indeed, recent work demonstrates that \textit{rewiring} the graph by judiciously adding and removing edges may improve \gls{gnn} performance by facilitating information flow.
+In a \gls{gnn}, the graph serves not only to encode interactions but also to organize computations \citep{battaglia2018relational}. 
+So even when it correctly encodes interactions it may not be an effective computational graph and rewiring it may help.
+Preprocessing methods rewire the graph using its geometric and spectral properties \citep{topping2022understanding, nguyen2023revisiting, karhadkar2023fosr}. 
+End-to-end methods \citep{giraldo2023on, gutteridge2023drew, qian2024probabilistically} dynamically rewire the graph during training leveraging both the graph and the node features.
+However, unlike preprocessing methods, they do not output an improved graph which restricts their interpretability and reusability. Our focus is on the preprocessing methods.
+\begin{figure}
+  \centering
+  \includegraphics[width=0.99\textwidth]{figures/fig1.pdf}
+  \caption{Schematic overview of \acrfull{jdr}. In this example, we consider a noisy graph as it occurs in many different real-world scenarios, in the sense that it contains edges between and within classes and its node features are not fully aligned with the labels.
+  The graph's adjacency matrix $\bm{A}$ and binary node features $\bm{X}$ can be decomposed via spectral decomposition and \gls{svd}. The rewiring of $\bm{A}$ is performed by combining the information of its own eigenvectors $\bm{V}$ and the singular vectors $\bm{U}$ from $\bm{X}$. The same applies vice versa for denoising, and both are performed iteratively $K$ times. We synthesise the rewired graph $\tilde{\bm{A}}$ and the denoised features $\tilde{\bm{X}}$ by multiplying back with the final $\bm{V}_{(K)}$ and $\bm{U}_{(K)}$. To get specific properties like sparsity or binarity we can perform an \textsc{Update} step, e.g. by thresholding (as done here). The resulting denoised and rewired graph is displayed on the right. Its structure now better represents the communities and the first entry of the features indicates the class assignment.}
+  \label{fig:fig1}
+\end{figure}
+
+In this work, we propose a new  rewiring scheme that also uses node features (which contain information about node labels) to produce an enhanced graph.
+That both the graph and the features are correlated with labels is implicit in high-quality stylized models of graphs with features, including community models such as the \csbm \citep{deshpande2018contextual} and neighborhood graphs on points from low-dimensional manifolds. 
+This motivates various spectral clustering and non-linear dimensionality reduction methods \citep{shi2000normalized, ng2001on}. 
+In the \gls{csbm}, seminal theoretical work shows that jointly leveraging the graph (\gls{sbm}) and the features (a \gls{gmm}) improves over unsupervised clustering using either piece of information alone. However, the associated efficient inference algorithms based on belief propagation \citep{deshpande2018contextual, duranthon2023optimal} rely on perfect knowledge of the distribution of the \gls{csbm} and cannot be applied to arbitrary real-world data.
+
+Our contributions are as follows:
+\begin{enumerate}
+    \item We take inspiration from work on the \csbm to design a practical algorithm for joint graph rewiring and feature denoising, which can improve the node classification performance of any downstream \gls{gnn} on real-world data. We achieve this by adapting the graph and the features so as to maximize alignment between their leading eigenspaces. 
+    If these spaces are well-aligned we say that the graph and the features are \textit{in resonance}.
+    \item We design an alternating optimization algorithm, \gls{jdr}, which approximates alignment maximization on spectrally-complex real-world graph data with multiple classes, possibly homophilic or heterophilic. We prove that JDR improves alignment between the graph and the features, but also with the labels, on a stylized generative model with noise from the Gaussian orthogonal ensemble (GOE); a recent conjecture in the literature suggests that this generalizes to cSBM. 
+    \item We run extensive experiments to show that \jdr outperforms existing preprocessing rewiring strategies while being guided solely by denoising.
+\end{enumerate}
+This last point suggests that although there exist graphs with topological and geometrical characteristics which make existing rewiring schemes beneficial, a greater issue in real-world graphs is noise in the sense of missing and spurious links.
+This is true even when the graphs correctly reflect the ground truth information. 
+In a citation network, for example, citations that \textit{should} exist may be missing because of incomplete scholarship. 
+Conversely, citations that \textit{should not} exist may be present because the authors engaged in bibliographic ornamentation.
+
+
+\section{Joint Denoising and Rewiring}
+
+\label{sec: jdr}
+
+\subsection{Preliminaries}
+
+We let $\mathcal{G}=(\mathcal{V}, \mathcal{E})$ be an undirected graph with $|\mathcal{V}|=N$ nodes and an adjacency matrix $\bm{A}$. To each node we associate an $F$-dimensional feature vector and collect these vectors in the rows of matrix $\bm{X} \in \mathbb{R}^{N \times F}$. We make extensive use of the graph and feature spectra, namely the eigendecomposition $\bm{A}=\bm{V}\bm{\Lambda}\bm{V}^{T}$ and the \gls{svd} $\bm{X}=\bm{U}\bm{\Sigma}\bm{W}^{T}$, with eigen- and singular values ordered from largest to smallest. (As discussed below, in heterophilic graphs we order the eigenvalues of $\bm{A}$ according to their absolute value.)
+The graph Laplacian is $\bm{L}=\bm{D}-\bm{A}$, where $\bm{D}$ is the diagonal node degree matrix.
+For $k > 2$ node classes, we use one-hot labels $\bm{y} \in \{0, 1\}^{N\times k}$. We write $[L]$ for the set $\{1, 2, \ldots, L\}$.
+In the balanced two-class case, we consider nodes to be ordered so that the first half has label $\bm{y}_i=-1$ and the second half $\bm{y}_i=1$. 
+In semi-supervised node classification, the task is to label the nodes based on the graph ($\bm{A}$ and $\bm{X}$) and a subset of the labels $\bm{y}$. 
+\textit{Homophilic} graphs are those where nodes are more likely to connect with nodes with similar features or labels (e.g., friendship networks \citep{miller2001birds}); \textit{heterophilic} graphs are those where nodes more likely to connect with dissimilar nodes (e.g., protein interaction networks \citep{zhu2020beyond}).
+
+\subsection{Motivation via the contextual stochastic block model}
+
+For simplicity, we first explain our method for $k = 2$ classes and graphs generated from the \gls{csbm}. We then extend it to real-world graphs with multiple classes and describe the full practical algorithm.
+
+\textbf{Contextual Stochastic Block Model.} 
+\Glspl{csbm} \citep{deshpande2018contextual} extend \glspl{sbm} \citep{abbe2018community}, a community graph model, by high-dimensional node features. 
+
+We use \glspl{csbm} to build intuition about the graph rewiring and denoising problem. 
+In a balanced 2-class SBM, the nodes are divided into two equal-sized communities with node labels $\bm{y}_{i}\in\left\{ \pm 1\right\}$\footnote{This can be naturally extended to several classes of different size \citep{duranthon2023optimal}.}. 
+Pairs of nodes connect independently at random, with probability $c_{\text{in}}/N$ inside communities and   $c_{\text{out}}/N$ across communities.
+
+In the sparse regime \citep{abbe2018community}, with average node degree $d = \mathcal{O}(1)$, it is common to parameterize probabilities as $c_{\text{in}}=d+\lambda\sqrt{d}$ and $c_{\text{out}}=d-\lambda\sqrt{d}$, where $|\lambda|$ can be seen as the \gls{snr} of the graph.
+The signal $\bm{X}_{i} \in \mathbb{R}^F$ at node $i$ comes from a \gls{gmm},
+\begin{equation}
+    \bm{X}_{i}=\sqrt{\frac{\mu}{N}}\bm{y}_{i}\bm{u}+\frac{\bm{z}_{i}}{\sqrt{F}},
+\end{equation}
+where $\bm{u}\sim\mathcal{N}\left(0,\bm{I}_{F}/F\right)$ is the randomly drawn mean and  $\bm{z}_{i}\sim\mathcal{N}\left(0,\bm{I}_{F}\right)$ is i.i.d. Gaussian standard noise. 
+We set $\gamma = \frac{N}{F}$ and, following \citet{chien2021adaptive}, parameterize the graphs generated from the \csbm using $\phi = \frac{2}{\pi}\arctan(\lambda \sqrt{\gamma}/\mu)$. 
+For $\phi \to 1$ we get homophilic behavior; for $\phi \to -1$ we get heterophilic behavior.
+Close to either extreme the node features contain little information. 
+For $\phi \to 0$ the graph is Erd\H{o}s--R\'enyi and only the features contain information. 
+
+\textbf{Denoising and Rewiring the cSBM.} In the \gls{csbm}, $\bm{A}$ and $\bm{X}$ offer different noisy views on the labels. 
+One can show that up to a scaling and a shift, the adjacency matrix is approximately $\pm \bm{y}\bm{y}^T + \bm{Z}_{ER},$ which means that it is approximately a rank-one matrix with labels in the range, corrupted with ``Erd\H{o}s--R\'enyi-like noise'' $\bm{Z}_{ER}$ \citep{erdos1959on}.
+It similarly follows directly from the definition that the feature matrix $\bm{X}$ is approximately (again up to a scaling and a shift) $\bm{y}\bm{u}^T + \bm{Z}_{G}$ where $\bm{Z}_{G}$ is white Gaussian noise.
+It thus makes sense to use the information from $\bm{X}$ to enhance $\bm{A}$ and vice versa. 
+\citet{deshpande2018contextual} show that solving 
+\begin{equation}
+\begin{aligned}
+    &\operatorname*{maximize}_{\bm{v} \in \mathbb{R}^N,\bm{u} \in \mathbb{R}^F} ~ \langle \bm{v}, \bm{Av} \rangle + b \langle \bm{v}, \bm{Xu} \rangle\\
+    &\mathrm{subject~to} ~ \| \bm{v}\|_2 = \| \bm{u} \|_2 = 1, \langle \bm{v}, \textbf{1} \rangle \leq \delta
+\end{aligned}
+\label{eq:align-deshpande}
+\end{equation}
+for some carefully chosen value of $b$ allows one to analyze detection bounds in unsupervised community detection with $k=2$. 
+It is easy to see that in the high-SNR case ($\lambda$ and $\mu$ far away from the detection threshold), when the second leading eigenvector of $\bm{A}$ and the leading left singular vectors $\bm{X}$ approximately coincide with the labels, the optimal $\bm{v}^*$ is related to those vectors and aligned with the labels. 
+This suggests the following rationale for denoising: \textbf{(1)} We can interpret the value of \eqref{eq:align-deshpande} as a measure of alignment. Since $\bm{v}^*$ corresponds to the labels, we can relate this measure to the quality of the label estimation.
+\textbf{(2)} We may leverage this alignment to rewire the graph and denoise the features. Namely, we could perturb $\bm{A}$ and $\bm{X}$ in a way that improves the alignment.
+
+In real datasets, however, the optimal value of $b$ is unknown, the scaling of $\bm{X}$ is arbitrary, and things are further complicated by having (many) more than 2 classes. 
+Moreover, \eqref{eq:align-deshpande} is computationally hard.
+We thus define a simple related measure of alignment which alleviates these issues.
+
+\begin{figure}  
+    \centering 
+    \begin{subfigure}{0.58\textwidth} 
+        \centering          
+        \includegraphics[width=0.97\textwidth]{figures/fig2a.pdf}
+        \caption{}
+        \label{fig:graph_graph}
+    \end{subfigure}%
+    \begin{subfigure}{.42\textwidth} 
+        \centering 
+        \includegraphics[width=0.99\textwidth]{figures/fig2b.pdf}
+        \caption{}
+        \label{fig:graph_4x4}
+    \end{subfigure}%
+    \caption{An illustration of spectral alignment and resonance. In (\subref{fig:graph_graph}) we plot $\bm{\hat{x}}=\bm{x}^T\bm{A}\bm{x}$ for different noise levels in $\bm{A}$ and $\bm{x} \in \{-1, 1\}^N$, illustrated in the rows below. Without noise, $\bm{x}$ is exactly the label vector and $\bm{A}$ is block-diagonal.
+    We apply multiplicative noise; namely, for each noise level, we flip the sign of a proportion of values, resulting in a random signal for $\pm 0.5$. 
+    We see that the norm of $\bm{\hat{x}}$ depends on the noise level. The maximum is achieved for zero noise when the second leading eigenvector of $\bm{A}$ and the signal $\bm{x}$ are perfectly aligned.
+    In (\subref{fig:graph_4x4}), we consider a signal $\bm{\hat{x}}=\bm{A}\bm{x}$ for different noise levels in $\bm{A}$ and $\bm{x}$ on a graph with $20$ nodes; 
+    only a quarter of edges are shown to reduce clutter; 
+    the intra-class edges are grey; the inter-class edges are black. 
+    The largest norm is obtained for noise-free $\bm{A}$ and $\bm{x}$ (upper-left corner).
+    The norm of $\hat{\bm{x}}$ and the separation of communities decrease along both noise axes.
+    The inherent denoising capabilities of propagating $\bm{x}$ on a high-\gls{snr} graph \citep{ma2021unified} are also visible, particularly in the first two rows to the right.}
+    \label{fig:graph_resonance}
+\end{figure}
+
+\begin{definition}
+    Recall the decompositions $\bm{A} = \bm{V \Lambda V}^T$, $\bm{X} = \bm{U \Sigma W}^T$, and let $\bm{V}_L$, $\bm{U}_L$ denote the first $L$ columns of $\bm{V}$ and $\bm{U}$ and $\|.\|_{\mathrm{sp}}$ the spectral norm. We define graph--feature alignment as
+    \begin{align}
+        \mathrm{Alignment}_L(\bm{A}, \bm{X}) = \| \bm{V}_L^T \bm{U}_L \|_{\mathrm{sp}}.
+    \label{eq: alignment}
+    \end{align}
+    
+\end{definition}
+\textit{Remark:} The logic of this definition is that for a \gls{csbm} with high \gls{snr} and $k$ classes, the information about labels is indeed contained in the leading $L = k$ vectors of $\bm{V}$ and $\bm{U}$. 
+The quantity $\mathrm{Alignment}_L(\bm{A}, \bm{X})$ is the cosine of the angle between the subspaces spanned by the columns of $\bm{V}_L$ and $\bm{U}_L$. 
+To denoise the features and rewire the graph, we seek to improve the alignment.
+
+Given $\mathrm{Alignment}_L(\bm{A},\bm{X})$ and a graph with $\bm{A}_0$ and $\bm{X}_0$, the jointly denoised graph and features are the solution to
+\begin{equation}
+\begin{aligned}
+    &\operatorname*{maximize}_{\bm{A},\bm{X}} \mathrm{Alignment}_L(\bm{A},\bm{X})\\
+    & \mathrm{subject~to} ~ \|\bm{A}-\bm{A}_0\| \leq \delta_A, \|\bm{X}-\bm{X}_0\| \leq \delta_X.
+    \end{aligned}
+    \label{eq: denoising}
+\end{equation}
+The parameters $\delta_A, \delta_X > 0$ modulate the strength of alignment. 
+We will show empirically that a stronger alignment indicates a better representation of the labels by $\bm{A}$ and $\bm{X}$ and thus a better graph.
+Figure~\ref{fig:graph_resonance} visualizes this connection. It shows that the response of the graph to features is maximized when the spectra of the graph and the features are aligned.
+
+\subsection{Joint Denoising and Rewiring Algorithm}
+\label{ch:joint_graph_denoising}
+Maximizing the alignment \eqref{eq: denoising} directly, e.g., using gradient descent, is computationally challenging.
+Here we propose a heuristic which alternates between spectral interpolation and graph synthesis. We later prove that the resulting algorithm indeed improves alignment, both with the labels and between the graph and the features, under a stylized noise model.
+The algorithm, illustrated in Figure~\ref{fig:fig1}, comprises three steps. In Step 1, we compute the spectral decompositions of $\bm{A}$ and $\bm{X}$. 
+To improve the alignment, we interpolate between the $L$ largest eigenvectors in Step 2.
+Based on the new eigenvectors, we synthesize a new graph in Step 3.
+The three steps are iterated until a stopping criterion is met.
+As is standard in the rewiring literature, the hyperparameters of the algorithm are tuned on a validation set.
+Formalizing this results in the \jdr algorithm: 
+
+\begin{itemize}
+
+\item[\textbf{Step 1:}] Decomposition 
+\begin{align*}
+    \bm{A}=\bm{V}\boldsymbol{\Lambda}\bm{V}^{T} \text{ with } \bm{V} = (\bm{v}_1, \bm{v}_2,\dots,\bm{v}_N) \text{ and }
+    \bm{X}=\bm{U}\boldsymbol{\Sigma}\bm{W}^{T} \text{ with } \bm{U} = (\bm{u}_1, \bm{u}_2,\dots,\bm{u}_N)
+\end{align*}
+
+\item[\textbf{Step 2:}] Interpolation:
+For every $i \in [L]$,
+\begin{align*}
+    \tilde{\bm{v}}_i &= (1-\eta_A)\bm{v}_i + \eta_A ~\mathrm{sign}(\langle \bm{v}_i, \bm{u}_j \rangle) \bm{u}_j \\
+    \tilde{\bm{u}}_i &= (1-\eta_X)\bm{u}_i + \eta_X ~\mathrm{sign}(\langle \bm{u}_i, \bm{v}_j \rangle) \bm{v}_j
+\end{align*} 
+where $j$ is chosen as $\operatorname*{argmax}_{j \in [L]} |\langle \bm{v}_i, \bm{u}_j \rangle|$ when updating $\bm{v}_i$ and as $\operatorname*{argmax}_{j \in [L]} |\langle \bm{u}_i, \bm{v}_j \rangle|$ when updating $\bm{u}_i$. $\eta_A$ and $\eta_X$ are hyperparameters that are tuned with a downstream algorithm on a validation set. We use $\mathrm{sign}()$ to handle sign ambiguities in decompositions.
+
+\item[\textbf{Step 3:}] Graph Synthesis
+\begin{align*}
+    \tilde{\bm{A}} = \tilde{\bm{V}}\bm{\Lambda} \tilde{\bm{V}}^T \text{ and } \tilde{\bm{X}} = \tilde{\bm{U}}\bm{\Sigma} \bm{W}^T
+\end{align*}
+
+\item[\textbf{Step 4:}] Iterate steps $K$ times with
+\begin{align*}
+    \bm{A} \leftarrow \tilde{\bm{A}} \text{ and } \bm{X} \leftarrow \tilde{\bm{X}}. 
+\end{align*}
+\end{itemize}
+
+Following \eqref{eq: alignment}, we consider the $L$ leading eigenvectors of $\bm{A}$ and $\bm{X}$ for interpolation. 
+We show empirically that this heuristic yields strong results, but also prove that it improves alignment with labels with a stylized noise model.
+We emphasize that the interpolation rates $\eta_A$ and $\eta_X$ are the same across different eigenvectors and iterations $K$.
+After $K$ steps, we synthesize the final weighted dense graph $\tilde{\bm{A}} = \bm{V}_{(K)}\bm{\Lambda} \bm{V}_{(K)}^T$.
+To efficiently apply \glspl{gnn}, we can enforce sparsity, e.g., via thresholding or selecting the top-$k$ entries per node.
+\textbf{An illustration.} A simple edge case to illustrate how the algorithm works is when either only $\bm{A}$ or $\bm{X}$ contains information.
+In a \csbm with $\phi = 0$, $\bm{X}$ contains all the information, so the best hyperparameter choice is $\eta_X = 0$ and \eqref{eq: denoising} simplifies to a maximization over $\bm{A}$.
+Since there are only two classes, it is sufficient to consider $L=1$.
+From \eqref{eq:align-deshpande} we know that the leading left singular vector $\bm{u}_1$ of $\bm{X}$ is well-aligned with the labels. 
+We thus replace the second leading eigenvector $\bm{v}_2$ in $\bm{A}$ by $\bm{u}_1$ by choosing $\eta_A = 1.0$.
+After graph synthesis, the new $\bm{v}_2$ of $\tilde{\bm{A}}$ is not yet equal to $\bm{u}_1$, since $\bm{u}_1$ was not orthogonal to the other $\bm{v}_i$. We thus repeat the three steps $K$ times.
+For $\phi = \pm 1$ all information is contained in the graph; a similar argument can then be constructed \textit{mutatis mutandis}.
+
+\textbf{JDR improves alignment.} 
+We can prove that \gls{jdr} improves alignment under a stylized \gls{csbm}-like model.
+In fact, we can show something even stronger: the algorithm improves alignment with true labels.
+However, since we do not know the labels in practice, we focus on improving the alignment as defined in \eqref{eq: denoising}.
+To do this, we model the graph and features as rank-1 ``label'' matrices $\bm{A} =\lambda \bm{yy}^{T}+\bm{O}_{A}$ and $\bm{B}  =\lambda \bm{yy}^{T}+\bm{O}_{B}$, which are corrupted by independent GOE noise $\bm{O}_{A}$ and $\bm{O}_{B}$ and $\left\Vert \bm{y}\right\Vert =1$.
+This is a common model in the analysis of \gls{csbm} \citep{deshpande2018contextual}. The Gaussian adjacency equivalence conjecture \citep{shi2024homophiliy} suggests a generalization of the findings to the true binary adjacency case. 
+One iteration of \gls{jdr} with $L = 1$ first interpolates between the leading eigenvectors $\bm{v}_{1}\left(\bm{A}\right)=\bm{v}_{A}$ and $\bm{v}_{1}\left(\bm{B}\right)=\bm{v}_{B}$; graph synthesis then yields $\bm{A}_\eta=\bm{A}+\lambda_{1}\left(\bm{A}\right)\left(-\bm{v}_{A}\bm{v}_{A}^{T}+\tilde{\bm{v}}_{A}\tilde{\bm{v}}_{A}^{T}\right)$ with $\tilde{\bm{v}}_{A} = (1-\eta) \bm{\bm{v}}_{A} + \mathrm{sign}(\langle \bm{\bm{v}}_{A}, \bm{v}_{B}\rangle)\eta \bm{v}_B$. 
+
+\begin{prop}
+Let $\lambda>\sqrt{2}$. There exists an $ \eta^{0} \in (0, 1)$ such that 
+for all $\eta \in (0, \eta^0)$, we have 
+\begin{align*}
+\mathbb{P}\big[\left\langle \bm{v}_{1}\left(\bm{A}\right),\bm{y}\right\rangle ^{2}  < \langle \bm{v}_{1}(\bm{A}_{\eta}),\bm{y}\rangle ^{2}\big] \to 1 \text{ as } N \to \infty.
+\end{align*}
+\label{prop1}
+\end{prop}
+In words, interpolation improves alignment of the largest eigenvector with the labels $\bm{y}$ for sufficiently large graphs. By applying the same argument to $\bm{B}$, we obtain that our method indeed improves alignment and multiple iterations approximate solutions to \eqref{eq: denoising}.
+
+
+
+\section{Experiments}
+
+
+\begin{table}
+\centering
+\caption{Comparison of state-of-the-art preprocessing rewiring approaches. Note that we refer to the complexity per iteration. $N$ denotes the number of nodes, $m$ the number of edges and $d_{\text{max}}$ is the maximum node degree. }
+\label{tab:sota_rewiring}
+\scalebox{.9}{
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Method} & Add edge & Remove edge & Use Features & Heterophilic? & Complexity   \\ \midrule
+DIGL \citep{gasteiger2019diffusion}& \cmark & \xmark & \xmark &\xmark & $\mathcal{O}(N)$\\
+FoSR \citep{karhadkar2023fosr}& \cmark & \xmark & \xmark &\cmark & $\mathcal{O}(N^2)$\\
+BORF \citep{nguyen2023revisiting}& \cmark & \cmark & \xmark &\cmark & $\mathcal{O}(md_{\text{max}}^3)$\\
+\textbf{JDR (Ours)}& \cmark & \cmark & \cmark &\cmark & $\mathcal{O}(N)$ \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\label{sec: experiments}
+We extensively evaluate \jdr on both synthetic data generated from the \csbm and real-world benchmark datasets. 
+We follow experimental setting from \citet{chien2021adaptive} and evaluate \jdr for semi-supervised node classification with different downstream \glspl{gnn}.
+We also adopt their data splits, namely the sparse splitting $2.5\%/2.5\%/95\%$ for training, validation and testing, respectively, or the dense splitting $60\%/20\%/20\%$. 
+For the general experiments, we perform $100$ runs with different random splits.
+For the scalability experiments, we use the experimental settings of the respective works \citep{lim2021large, platonov2023a}.
+We report the average accuracy and the $95\%$-confidence interval calculated via bootstrapping with 1000 samples. 
+All experiments are reproducible using the code provided. 
+\textbf{Baselines.}
+Following recent works on rewiring, we use \gls{gcn} \citep{kipf2017semisupervised} as our downstream \gls{gnn}. 
+To obtain a more comprehensive picture, we additionally evaluate the performance on the more recent \gls{gprgnn} \citep{chien2021adaptive}. 
+We compare our algorithm with the state-of-the-art rewiring methods \gls{fosr} \citep{karhadkar2023fosr}, \gls{borf} \citep{nguyen2023revisiting} and \gls{digl} \citep{gasteiger2019diffusion}.
+\gls{fosr} approximates which edges should be added to maximize the spectral gap to reduce oversquashing.
+\gls{borf} adds edges in regions of negative curvature in the graph, which indicate bottlenecks that can lead to an oversquashing of the messages passed along these edges.
+A positive curvature indicates that there are so many edges in this area that messages could be oversmoothed, which is why edges are removed here.
+We compare computational and implementation aspects of \gls{jdr} and baselines in Table~\ref{tab:sota_rewiring}.
+On the \gls{csbm}, we compare to an \textit{optimal} baseline, namely the \gls{amp-bp} algorithm \citep{duranthon2023optimal}. 
+\gls{amp-bp} is asymptotically optimal (in the large dimension limit) for unsupervised or semi-supervised community detection in the \gls{csbm}.
+It relies on knowing the distribution of the \gls{csbm} and is thus not applicable to real-world graphs with unknown characteristics and complex features.
+
+\textbf{Hyperparameters.}
+Unless stated otherwise, we use the hyperparameters from \citet{chien2021adaptive} for the \glspl{gnn} and optimize the hyperparameters of \jdr using a mixture of grid and random search on the validation set. 
+We use the top-$64$ values of $\tilde{\bm{A}}$ to enforce sparsity and interpolation to update the features.
+For \gls{digl}, \gls{fosr} and \gls{borf}, we tune their hyperparameters using a grid search, closely following the given parameter range from the original papers. 
+For all hyperparameter searches we use \gls{gcn} and \gprgnn as the downstream models on $10$ runs with different random splits.
+\subsection{Results on Synthetic Data}
+We first test \jdr on data generated from the \gls{csbm}, as we can easily vary the \gls{snr} of the graph and the features to verify its denoising and rewiring capabilities.
+We focus on the sparse splitting, since for the dense splitting \gprgnn already matches the performance of \gls{amp-bp}.
+
+\begin{wrapfigure}{r}{0.4\textwidth}
+  \centering
+  \includegraphics[width=1.0\linewidth]{figures/csbm_align_wrap.pdf}
+  \caption{Alignment of the leading eigenspaces according to \eqref{eq: alignment} for graphs from the \gls{csbm} with different $\phi$.}
+  \label{fig:csbm_align}
+\end{wrapfigure}
+
+\textbf{Does JDR maximize Alignment?}
+Before discussing Figure~\ref{fig:csbm_results}, which shows the results of baselines and \jdr for different values of $\phi$, we verify empirically that our alternating optimization algorithm indeed approximates solutions to \eqref{eq: denoising}.
+As shown in Figure~\ref{fig:csbm_align}, the quantity $\mathrm{Alignment}_L(\bm{A},\bm{X})$ improves significantly after running JDR, across all $\phi$. As we show next, this happens simultaneously with improvements in downstream performance, which lends credence to the intuitive reasoning that motivates our algorithm. 
+\textbf{Heterophilic Regime.}
+For $\phi < -0.25$, the predictions of \gls{gcn} are only slightly better than random.
+\gls{gprgnn} performs much better, since it can learn higher order polynomial filters to deal with heterophily. 
+\gls{gcn}+\jdr outperforms the baseline by a very large margin; it handles heterophilic data well.
+Using \jdr for \gls{gprgnn} further improves its already strong performance in this regime.
+Both \glspl{gnn} benefit less from the denoising in the weakly heterophilic setting where they exhibit the worst performance across all $\phi$. 
+The difference between $\phi=0$ and the weakly heterophilic regime is that ``optimal denoising'' for $\phi = 0$ is straightforward, since all the information is contained in $\bm{X}$.
+
+\begin{wrapfigure}{l}{0.54\textwidth}
+  \centering
+  \includegraphics[width=1.0\linewidth]{figures/results_csbm_sparse_wrap.pdf}
+  \caption{Test accuracy on graphs from the \csbm across different $\phi$. The error bars indicate the $95\%$ confidence interval. \jdr improves the performance for both \glspl{gnn} across all $\phi$. }
+  \label{fig:csbm_results}
+\end{wrapfigure}
+
+\textbf{Weak Graph Regime.}
+For $|\phi| \leq 0.25$, where the \gls{snr} of the graph is very low, both \glspl{gnn} perform poorly. 
+Intuitively, when the graph is very noisy, a \gnn is a suboptimal model, since it leverages the graph structure.
+A simple MLP baseline, using only the node features, outperforms \glspl{gnn} in this setting, with all three approaches lagging far behind \gls{amp-bp}.
+Using \gls{jdr}, we see significant improvements for both \glspl{gnn}, which almost catch up with \gls{amp-bp} for $\phi=0$.
+Although all information was available in the node features, the \gls{gnn} with \jdr now clearly outperform the MLP by a very large margin.
+We argue that this is because in the semi-supervised setting with few labels available, the \gls{gnn} generalizes much better. 
+
+\textbf{Homophilic Regime.}
+For $\phi > 0.25$, \gls{gcn} and \gls{gprgnn} perform similarly well, with \gprgnn achieving better results for $\phi \to 1.0$.
+With \gls{jdr}, they become much more comparable to each other and closer to \gls{amp-bp}.
+Even though the hyperparameters of \jdr were tuned using only \gcn as a downstream model, it also improves the performance of \gprgnn for all $\phi$. 
+\subsection{Results on Real-World Data}
+We evaluate \jdr on five common homophilic benchmarks datasets, namely the citation graphs Cora, CiteSeer, PubMed \citep{sen2008collective}
+and the Amazon co-purchase graphs Computers and Photo \citep{mcauley2015image}. 
+For heterophilic datasets, we rely on the Wikipedia graphs Chameleon and Squirrel \citep{rozemberczki2021multi}, the WebKB datasets Texas and Cornell used in \citet{pei2020geom} and the actor co-occurence network Actor \citep{tang2009social}.
+To show the scalability of \jdr on larger heterophilic datasets, we further report the results for the Yandex Q user network Questions \citep{platonov2023a} and the social networks Penn94 and Twitch-Gamers \citep{lim2021large}.
+
+Following \citet{chien2021adaptive}, we evaluate the homophilic datasets in the sparse splitting, staying close to the original setting of \citet{kipf2017semisupervised} and the heterophilic datasets in dense splitting \citep{pei2020geom}. 
+The remaining larger graphs are evaluated using their original splits. 
+\begin{table}[t]
+    \centering
+    \caption{Results on real-world homophilic datasets in the sparse splitting (2.5\%/2.5\%/95\%): Mean accuracy across runs (\%) $ \pm \ 95\%$ confidence interval. Best average accuracy in \textbf{bold}.}  
+    \centering
+    \scalebox{0.97}{
+    \begin{tabular}{l*{5}{c}}\toprule Method&Cora&CiteSeer&PubMed&Computers&Photo\\\midrule
+    GCN &$77.26$\footnotesize{$\pm0.35$}&$67.16$\footnotesize{$\pm0.37$}&$84.22$\footnotesize{$\pm0.09$}&$84.42$\footnotesize{$\pm0.31$}&$91.33$\footnotesize{$\pm0.29$}\\
+    GCN+DIGL &$79.27$\footnotesize{$\pm0.26$}&$68.03$\footnotesize{$\pm0.33$}&$84.60$\footnotesize{$\pm0.09$}&$\bm{86.00}$\footnotesize{$\pm\bm{0.24}$}&$92.00$\footnotesize{$\pm0.23$}\\
+    GCN+FoSR &$77.23$\footnotesize{$\pm0.34$}&$67.03$\footnotesize{$\pm0.34$}&$84.21$\footnotesize{$\pm0.09$}&$84.34$\footnotesize{$\pm0.27$}&$91.36$\footnotesize{$\pm0.28$}\\
+    GCN+BORF &$77.23$\footnotesize{$\pm0.35$}&$66.96$\footnotesize{$\pm0.38$}&$84.22$\footnotesize{$\pm0.09$}&$84.46$\footnotesize{$\pm0.30$}&$91.26$\footnotesize{$\pm0.30$}\\
+    GCN+JDR &$\bm{79.96}$\footnotesize{$\pm\bm{0.26}$}&$\bm{69.35}$\footnotesize{$\pm\bm{0.28}$}&$\bm{84.79}$\footnotesize{$\pm\bm{0.08}$}&$85.66$\footnotesize{$\pm0.36$}&$\bm{92.52}$\footnotesize{$\pm\bm{0.23}$}\\\midrule
+    GPRGNN &$79.65$\footnotesize{$\pm0.33$}&$67.50$\footnotesize{$\pm0.35$}&$84.33$\footnotesize{$\pm0.10$}&$84.06$\footnotesize{$\pm0.48$}&$92.01$\footnotesize{$\pm0.41$}\\
+    GPRGNN+DIGL &$79.77$\footnotesize{$\pm0.30$}&$67.50$\footnotesize{$\pm0.35$}&$84.72$\footnotesize{$\pm0.10$}&$\bm{86.25}$\footnotesize{$\pm\bm{0.28}$}&$92.31$\footnotesize{$\pm0.25$}\\
+    GPRGNN+FoSR &$79.22$\footnotesize{$\pm0.31$}&$67.30$\footnotesize{$\pm0.38$}&$84.32$\footnotesize{$\pm0.09$}&$84.21$\footnotesize{$\pm0.46$}&$92.07$\footnotesize{$\pm0.37$}\\
+    GPRGNN+BORF &$79.43$\footnotesize{$\pm0.30$}&$67.48$\footnotesize{$\pm0.36$}&$84.36$\footnotesize{$\pm0.10$}&$84.08$\footnotesize{$\pm0.43$}&$92.11$\footnotesize{$\pm0.38$}\\
+    GPRGNN+JDR &$\bm{80.77}$\footnotesize{$\pm\bm{0.29}$}&$\bm{69.17}$\footnotesize{$\pm\bm{0.30}$}&$\bm{85.05}$\footnotesize{$\pm\bm{0.08}$}&$84.77$\footnotesize{$\pm0.35$}&$\bm{92.68}$\footnotesize{$\pm\bm{0.25}$}\\\bottomrule
+    \end{tabular}
+    }
+    \label{tab: real_homo}
+\end{table}
+\begin{table}[t]
+    \centering
+    \caption{Results on real-world heterophilic dataset in the dense splitting (60\%/20\%/20\%): Mean accuracy across runs (\%) $\pm \ 95\%$ confidence interval. Best average accuracy in \textbf{bold}.}
+    \centering
+    \scalebox{0.97}{
+    \begin{tabular}{l*{9}{c}}\toprule Method&Chameleon&Squirrel&Actor&Texas&Cornell\\\midrule
+    GCN &$67.65$\footnotesize{$\pm0.42$}&$57.94$\footnotesize{$\pm0.31$}&$34.00$\footnotesize{$\pm0.31$}&$75.62$\footnotesize{$\pm1.12$}&$64.68$\footnotesize{$\pm1.25$}\\
+    GCN+DIGL &$58.04$\footnotesize{$\pm0.48$}&$39.64$\footnotesize{$\pm0.34$}&$39.57$\footnotesize{$\pm0.29$}&$\bm{91.05}$\footnotesize{$\pm\bm{0.73}$}&$\bm{88.49}$\footnotesize{$\pm\bm{0.74}$}\\
+    GCN+FoSR &$67.67$\footnotesize{$\pm0.39$}&$58.12$\footnotesize{$\pm0.35$}&$33.98$\footnotesize{$\pm0.30$}&$78.31$\footnotesize{$\pm1.07$}&$65.64$\footnotesize{$\pm1.06$}\\
+    GCN+BORF &$67.78$\footnotesize{$\pm0.43$}&OOM&$33.95$\footnotesize{$\pm0.31$}&$76.66$\footnotesize{$\pm1.10$}&$68.72$\footnotesize{$\pm1.11$}\\
+    GCN+JDR &$\bm{69.76}$\footnotesize{$\pm\bm{0.50}$}&$\bm{61.76}$\footnotesize{$\pm\bm{0.39}$}&$\bm{40.47}$\footnotesize{$\pm\bm{0.31}$}&$85.12$\footnotesize{$\pm0.74$}&$84.51$\footnotesize{$\pm1.06$}\\\midrule
+    GPRGNN &$69.15$\footnotesize{$\pm0.51$}&$53.44$\footnotesize{$\pm0.37$}&$39.52$\footnotesize{$\pm0.22$}&$92.82$\footnotesize{$\pm0.67$}&$87.79$\footnotesize{$\pm0.89$}\\
+    GPRGNN+DIGL &$66.57$\footnotesize{$\pm0.46$}&$42.98$\footnotesize{$\pm0.37$}&$39.61$\footnotesize{$\pm0.21$}&$91.11$\footnotesize{$\pm0.72$}&$88.06$\footnotesize{$\pm0.81$}\\
+    GPRGNN+FoSR &$68.96$\footnotesize{$\pm0.45$}&$52.34$\footnotesize{$\pm0.37$}&$39.47$\footnotesize{$\pm0.21$}&$93.16$\footnotesize{$\pm0.66$}&$87.51$\footnotesize{$\pm1.04$}\\
+    GPRGNN+BORF &$69.44$\footnotesize{$\pm0.56$}&OOM&$39.55$\footnotesize{$\pm0.20$}&$93.53$\footnotesize{$\pm0.68$}&$88.83$\footnotesize{$\pm1.06$}\\
+    GPRGNN+JDR &$\bm{71.00}$\footnotesize{$\pm\bm{0.50}$}&$\bm{60.62}$\footnotesize{$\pm\bm{0.38}$}&$\bm{41.89}$\footnotesize{$\pm\bm{0.24}$}&$\bm{93.85}$\footnotesize{$\pm\bm{0.54}$}&$\bm{89.45}$\footnotesize{$\pm\bm{0.84}$}\\
+    \bottomrule
+    \end{tabular}
+    }
+    \label{tab: real_hetero}
+\end{table}
+
+\textbf{Homophilic Datasets.} Table~\ref{tab: real_homo} shows the results of \jdr compared to the baselines. 
+For both \glspl{gnn}, \jdr achieves the best results on four out of five datasets. 
+\gcn and \gls{gprgnn} with \jdr achieve similar performance here, which is consistent with the findings for the homophilic \gls{csbm}.
+\gls{digl} also performs strongly on the datasets and ranks first on Computers.
+However, with \gls{gprgnn} as a downstream model, the improvements are quite small.
+\gls{fosr} and \gls{borf} only marginally improve the performance of the \glspl{gnn} in this setting.
+
+\textbf{Heterophilic Datasets.} The results in Table~\ref{tab: real_hetero} show that \gls{gcn}+\jdr can catch up significantly compared to \gls{gprgnn}, but \gls{gprgnn}+\jdr generally performs better.
+This is in line with the findings for the heterophilic \gls{csbm}.
+\gls{digl} performs well on Actor, Texas and Cornell despite its inherent homophily assumption. 
+The reason for this is the chosen smoothing kernel, which results in a graph that is evenly connected everywhere with small weights. 
+\gcn then largely ignores the graph and thus performs very similarly to an MLP, which performs already quite well on these datasets \citep{chien2021adaptive}.
+However, this fails for \gls{gprgnn}, which can make better use of the weak, complex graph structures.
+\gls{fosr} and \borf also improve performance here in most cases, but they are outperformed by \gls{jdr} in all cases, often by a large margin.
+The out-of-memory error on Squirrel for \gls{borf} results from its computational complexity of $\mathcal{O}(md_{\text{max}}^3)$, because the dataset has a large number of edges $m$ and a high maximum node degree $d_{\text{max}}$.
+
+\begin{wraptable}{R}{0.56\textwidth}
+\centering
+\caption{Results on large datasets. Mean accuracy (ROC AUC for imbalanced Questions) across runs (\%) $\pm \ 95\%$ confidence interval. Best results in \textbf{bold}.}
+\label{tab:add_hetero_results}
+\scalebox{0.8}{
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & Questions & Penn94 & Twitch-gamers    \\ \midrule
+\# nodes  &  $48, 921$ & $41, 554$ & $168, 114$ \\
+\# edges  & $0.15$M & $1.36$M  & $6.8$M \\ \midrule
+GCN        & $75.31 \pm 0.81$  & $80.40 \pm 0.18$  & $64.56 \pm 0.19$ \\
+GCN+DIGL   & $73.35 \pm 0.64$  & $74.70 \pm 0.32$  & $61.64 \pm 0.14$ \\ 
+GCN+FoSR   & $75.51 \pm 0.73$  & $80.54 \pm 0.31$  & $64.65 \pm 0.15$\\
+GCN+JDR    & $\bm{77.52} \pm \bm{0.63}$  & $\bm{82.30} \pm \bm{0.61}$  & $\bm{65.14} \pm \bm{0.19}$ \\ 
+\bottomrule
+\end{tabular}
+}
+\end{wraptable}
+
+\textbf{Larger Graphs.}
+Scalability is a problem for preprocessing rewiring methods because applying them to large graphs requires significant amounts of memory and compute (see complexity in Table~\ref{tab:sota_rewiring}).
+Since the decompositions needed for \jdr can be truncated to the largest $L$ vectors, it is still applicable to larger graphs. 
+The experimental results on larger heterophilic datasets in Table~\ref{tab:add_hetero_results} verify this. 
+They show that \jdr can significantly improve performance for these larger graphs, while \gls{fosr} only achieves marginal improvements.
+\gls{borf} ran out of memory on all of these datasets and \gls{digl} is unable to improve due to its inherent homophily assumption. 
+While scaling \jdr to even larger graphs with millions of nodes is possible in principle, it requires more optimized and efficient implementations and is therefore left for future work.
+
+
+
+\section{Relation to Prior Work}
+
+\label{sec: related_work}
+JDR is most related to preprocessing rewiring methods which we thus use as baselines. To provide a more thorough overview, we also place it within the extended literature.
+
+\textbf{Graph Rewiring.} 
+Recent work show that even when a graph correctly encodes interactions it may not be an effective \textit{computational} graph for a \gls{gnn} due to conditions such as \textit{oversquashing} \citep{alon2021on, giovanni2023on} and \textit{oversmoothing} \citep{chen2020measuring}.
+Recently many methods have been proposed to address this, notably \textit{graph rewiring methods}. They can be divided into preprocessing and end-to-end methods.
+Preprocessing methods rewire the graph using geometric and spectral properties, including curvature \citep{topping2022understanding, nguyen2023revisiting, fesser2024mitigating, bober2024rewiring}, expansion \citep{deac2022expander, banerjee2022oversquashing}, effective resistance \citep{black23understanding, shen2024graph}, and spectral gap \citep{karhadkar2023fosr}. 
+Conceptually related is diffusion-based rewiring \citep{gasteiger2019diffusion} that smooths the graph with a diffusion kernel. 
+This can be interpreted as graph denoising, but is only suitable for homophilic graphs.
+Our approach is related to rewiring but with several key differences (see Table~\ref{tab:sota_rewiring}). Our rewiring strategy aims to denoise the graph (rather than control some geometric property) with the goal to improve downstream performance, while the classical rewiring literature focuses on optimizing the graph for message passing computations.
+
+Early end-to-end methods randomly drop edges during training to reduce oversmoothing \citep{rong2020dropedge}. Subsequent work \citep{gutteridge2023drew, qian2024probabilistically} incorporates latent features to dynamically rewire the graph.
+\citet{ji2023leveraging} use the estimated labels of a \gls{gnn} to rewire the graph during training of the same \gls{gnn}. 
+\citet{giraldo2023on} use curvature information for dynamic rewiring.
+Graph Transformers \citep{dwivedi2021generalization, rampasek2022recipe} aim to overcome oversquashing in \glspl{gnn} via global attention. 
+In order to handle large graphs, these works still need to revert to sparse, non-global attention \citep{gabrielsson2023rewiring, shirzad2023exphormer}. Unlike preprocessing methods, end-to-end methods cannot output an improved graph which restricts their interpretability and reusability.
+
+\textbf{Graph Denoising.} There is extensive literature on denoising signals on graphs using graph filters \citep{chen2013signal, ma2021unified, liu2022powerful}. However, we are interested in modifying the structure of the graph itself (rewiring), in a way that can benefit any downstream algorithm. 
+
+\textbf{Graph Structure Learning.} The aim of graph structure learning (GSL) \citep{zhu2022survey} is to make \glspl{gnn} more robust against adversarial perturbations of the graph or to learn a graph for data where there is no graph to start with \citep{jin2020graph, chen2020iterative, wang2024dgnn, zhu2024robust}. 
+\citet{lv2023robust} build a neighborhood graph over features and interpolate between it and the input graph, which is a form of alignment. 
+Unlike our method, they do not use spectral information, are unable to deal with noisy features and are only suitable for homophilic graphs where similarity-based connection rules apply.
+Even though both our work and GSL consider noisy graph settings, they are conceptually very different.
+We do not add noise to graph datasets which corresponds to a perturbation rate of $0$ (``clean data'') in GSL nomenclature.
+Instead, we acknowledge that in every real world dataset, there is noise in the graph structure and the node features, and one manifestation of this noise is a misalignment of their leading eigenspaces.
+We then use this to rewire the graph (and denoise features) so as to improve the overall node classification performance of downstream \glspl{gnn}. 
+Naturally, GSL methods have difficulties to improve over baselines in this setting \citep{jin2020graph, dong2023towards}.
+Our method, on the other hand, is not designed to handle strong perturbations and therefore cannot compete with GSL methods developed for specifically this purpose. 
+
+\textbf{Graph Regularization.}
+Laplacian regularization \citep{ando2006learning}, originally stemming from semi-supervised representation learning, has been adapted by recent methods \citep{yang2021rethinking, ma2021lereg} to also improve the performance of \glspl{gnn}.
+An extra loss term is added during the \glspl{gnn} training, which contains additional information about the graph structure to reduce oversmoothing.
+Their main limiting factor is the underlying homophiliy assumption: It is assumed that connected nodes are more likely to share the same label. 
+
+
+
+\section{Conclusion and Limitations}
+
+\label{sec: conclusion}
+
+Our experimental results clearly show that spectral resonance is a powerful principle on which to build graph rewiring (and feature denoising) algorithms. \Gls{jdr} consistently outperforms existing rewiring methods \gls{digl}, \gls{fosr} and \gls{borf} on both synthetic and real-world graph datasets. The smaller performance gains of \gls{gprgnn} suggest that this more powerful \gls{gnn} is already able to leverage the complementary spectra of graphs and features to some extent.
+
+Still, we should emphasize that preprocessing rewiring methods only use the graph, not the features. A direct comparison is thus not fair, as \gls{jdr} cannot be used at all without features. Nonetheless, we have proposed the first generally applicable algorithm for cases where such information \textit{is} available.
+
+On a meta level, our results suggest that noise in real-world graphs is an important limiting factor for the performance of \glspl{gnn}. It would therefore also be interesting to see whether feature-agnostic rewiring from a denoising perspective, for example using link prediction, could be used to improve the downstream performance. A related idea that we tried, but could not get to work well, is combining existing geometric rewiring algorithms with \gls{jdr}. Intuitively, there should be a way to benefit from both removing noise and facilitating computation, but we have to leave that for future work.
+
+We also note that most current rewiring methods can be applied to graph level tasks, while \gls{jdr} is limited to node classification tasks, as it is derived via \gls{csbm}, which only considers community structures. It is therefore a fundamental research question how to extend the \csbm idea to graph-level problems. Given the already ubiquitous impact of \gls{csbm} on \gls{gnn} research, this could potentially have a major impact on the field.
+
+
+
+
+

@@ -1,0 +1,227 @@
+\title{Ensembles of Low-Rank Expert Adapters}
+
+\begin{abstract}
+The training and fine-tuning of large language models (LLMs) often involve diverse textual data from multiple sources, which poses challenges due to conflicting gradient directions, hindering optimization and specialization.  These challenges can undermine model generalization across tasks, resulting in reduced downstream performance.  Recent research suggests that fine-tuning LLMs on carefully selected, task-specific subsets of data can match or even surpass the performance of using the entire dataset.  Building on these insights, we propose the Ensembles of Low-Rank Expert Adapters (ELREA) framework to improve the model's capability to handle diverse tasks.  ELREA clusters the training instructions based on their gradient directions, representing different areas of expertise and thereby reducing conflicts during optimization.  Expert adapters are then trained on these clusters, utilizing the low-rank adaptation (LoRA) technique to ensure training efficiency and model scalability.  During inference, ELREA combines predictions from the most relevant expert adapters based on the input data's gradient similarity to the training clusters, ensuring optimal adapter selection for each task.  Experiments show that our method outperforms baseline LoRA adapters trained on the full dataset and other ensemble approaches with similar training and inference complexity across a range of domain-specific tasks.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+While general-domain large language models (LLMs) such as GPT-4 (OpenAI, 2022; 2023) and Llama (Touvron et al., 2023) have shown remarkable efficacy in diverse applications, adapting these models through supervised fine-tuning to specific domains or tasks remains indispensable for achieving optimal performance. For example, instruction following requires subtle model adjustments to specialized datasets that the general pre-training corpus alone cannot provide (Ouyang et al., 2022). Significant resources have been invested in constructing varied, high-quality datasets tailored for LLM fine-tuning such as Alpaca (Taori et al., 2023), the Pile (Gao et al., 2021), or Flan (Longpre et al., 2023). These efforts have fueled the development of specialized models that address complex tasks across fields such as medical diagnostics (Singhal et al., 2023), financial analytics (Yang et al., 2023), and scientific decision-making (Zhang et al., 2024b), or to provide reasoning to their results (Wei et al., 2022), which were tasks once deemed challenging for automated systems.  
+
+Nonetheless, fine-tuning LLMs on a comprehensive dataset frequently encounters the issue of conflicting gradient directions from varied training data points (Wang et al., 2021; Xia et al., 2024; Chen et al., 2024). This phenomenon complicates the update process of models, potentially leading to suboptimal performance. Wang et al. (2023d) demonstrate that mixing diverse instructional datasets can sometimes result in less than ideal outcomes compared to fine-tuning on a carefully selected subset of the data that directly addresses the task at hand. To enhance the relevance of training data to specific tasks, Xie et al. (2023) have proposed methods like importance resampling, which aligns the training dataset more closely with the target task distribution. Another innovative approach proposed by Xia et al. (2024), termed targeted instruction tuning, involves selecting a small percentage (about $5\%$ ) of training data that most significantly influences task performance based on the average gradients of tokens. This method has shown promise, achieving comparable or superior results to traditional full dataset fine-tuning across various tasks. In addition, Xia et al. (2024) also present better outcomes in selecting data points based on the gradient norm than sentence embeddings.  
+
+Despite these advancements, current data selection techniques for fine-tuning are predominantly target-driven, relying heavily on specific features of the target task (e.g., n-gram frequency, example answer embedding, gradient direction) to guide the selection process. This requirement for taskspecific data features imposes significant limitations when adapting LLMs to new or emerging tasks, especially when relevant training data or features are unavailable.  
+
+To address these challenges, we propose a novel framework, Ensembles of Low-Rank Expert Adapters (ELREA), which leverages Low-Rank Adaptation (LoRA; Hu et al., 2022; Dettmers et al., 2023) to create multiple expert adapters. These adapters are trained independently on data groups with similar gradient directions and their predictions are assembled during inference based on the gradient features of the input. Specifically, ELREA begins by fine-tuning a base adapter on the full dataset to capture a wide range of general knowledge. We then evaluate and cluster the gradients of individual data points relative to their influence on the base adapter, organizing them into similarly sized groups. On each cluster we continue training a specialized LoRA expert that is initialized from the base adapter, allowing the training process to maintain a comparable computational burden to that of a single adapter trained on the entire dataset. During inference, the expert adapters collaboratively determine the output by dynamically weighting the adapters according to their alignment with the clusters’ gradient profile. Compared with conventional Deep Ensembles, such calculation could be conducted only once at the beginning in the recurrent generation process and re-used in subsequent passes, causing minimal computational overhead while achieving stronger performance (Lakshminarayanan et al., 2017; Havasi et al., 2021; Wang et al., 2023a). Unlike previous methods, ELREA focuses on the task-agnostic setup, i.e., a one-time training effort without the need for additional task-specific validation data, making it more suitable for real-world deployment of LLMs.  
+
+In summary, our contributions are threefold:1  
+
+• We introduce Ensembles of Low-Rank Expert Adapters (ELREA), a framework that integrates efficient parameter adaptation techniques into an ensemble model to address conflicting gradient directions in LLM fine-tuning.   
+• By combining gradient features with clustering methods, we create expert adapters specialized for different gradient profiles, enabling the model to adapt to diverse tasks without relying on task-specific data features or validation data points.   
+• We demonstrate that ELREA outperforms baseline LoRA adapters trained on the full dataset across various domain-specific applications, as well as other Mixture of Experts (MoE) and self-consistency methods.  
+
+
+
+\section{2 PRELIMINARIES  }
+
+
+
+
+\section{2.1 LANGUAGE MODELS AND PARAMETER-EFFICIENT FINE-TUNING  }
+
+
+Decoder-only LMs, pioneered by GPT (Radford et al., 2018), are built upon the decoder component of the Transformer architecture (Vaswani et al., 2017) and are among the most prevalent and thoroughly examined language models today. A pre-trained LM, denoted as $\mathcal{M}$ , learns the natural language patterns on extensive text corpora $\mathcal{D}_{\mathrm{pre-train}}$ through an unsupervised next-token-prediction (NTP) objective, which minimized the negative log likelihood (NLL) of a subsequent token $x_{t}$ in a length- $\cdot\!T$ sequence $\mathbf{\Delta}x\in\mathcal{V}^{T}$ consisting tokens from the vocabulary $\nu$ based on the preceding context $\mathbf{\deltax}_{<t}$ :  
+
+$$
+\mathcal{L}_{\mathrm{NTP}}(\pmb{x})=-\sum_{t=1}^{T}\log P(x_{t}|\pmb{x}_{<t};\pmb{\theta}_{\mathcal{M}}),
+$$  
+
+where $\theta_{\mathcal{M}}$ are the network parameters of the LM. Originally designed for text completion, the pretrained LMs have been enhanced with instruction-following or task-specific capabilities through targeted fine-tuning (Ouyang et al., 2022; OpenAI, 2022; 2023), expanding their utility across diverse applications. The fine-tuning process frequently adopts the NTP objective, utilizing a smaller, specialized fine-tuning dataset $\mathcal{D}_{\mathrm{ft}}$ that consists of instruction-response pairs ${\pmb x}_{\mathrm{ft}}=({\pmb x}_{\mathrm{instr}},{\pmb x}_{\mathrm{resp}})$ .  
+
+Full-parameter fine-tuning of high-performing LMs, which involves calculating $\nabla_{\pmb{\theta}_{\mathcal{M}}}\mathcal{L}_{\mathrm{NTP}}(\pmb{x})$ and updating $\theta_{\mathcal{M}}$ accordingly, is often impractical due to computational constraints arising from their vast number of parameters. To address this issue, parameter-efficient fine-tuning (PEFT) techniques have been developed (Houlsby et al., 2019; Li & Liang, 2021; He et al., 2022), with LoRA being a prominent example. LoRA introduces adapter $\theta_{\mathcal{Q}}$ into the LM’s linear layers whose weight matrices are, for example, $W_{i}\,\in\,\mathbb{R}^{d_{\mathrm{model}}\times d_{\mathrm{model}}}$ , where $i$ is the layer index and $d_{\mathrm{model}}$ is the model dimensionality as defined in (Vaswani et al., 2017). LoRA approximates the weight adjustments during fine-tuning using a low-rank decomposition $\Delta W_{i}\;\approx\;\mathbf{\dot{A}}_{i}\mathbf{B}_{i}^{\top}$ . Here, $A_{i},\mathbf{\bar{{B}}}_{i}\in\mathbb{R}^{d_{\mathrm{model}}\times r}$ are rank- $^r$ adapter matrices with $r\ll d_{\mathrm{model}}$ . During fine-tuning, the original weight matrices $W_{i}$ remain frozen, and only the adapter parameters $\pmb{\theta}_{\mathcal{Q}}\triangleq\bigcup_{i}\{\pmb{A}_{i},\pmb{B}_{i}\}$ are updated to minimize the NLL loss: $\mathrm{min}_{\pmb{\theta}_{\mathcal{Q}}}\,\mathcal{L}_{\mathrm{NTP}}(\pmb{x};\pmb{\theta}_{\mathcal{M}}\,\mathcal{\bar{+}}\,\pmb{\theta}_{\mathcal{Q}})$ . PEFT significantly reduces the computational demands of fine-tuning by limiting gradient calculations to a smaller set of parameters.  
+
+
+
+\section{2.2 GRADIENT FEATURE CALCULATION AND DATA SELECTION  }
+
+
+Originally introduced by Pruthi et al. (2020) to estimate the impact of individual training examples on model performance, gradient-based data selection has been further applied to training data selection (Gou et al., 2023; Xia et al., 2024; Pan et al., 2024; Liu et al., 2024c; Yang et al., 2024). Unlike methods based on surface-form textual features—which utilize token statistics or sentence embeddings as selection criteria (Reimers & Gurevych, 2019; Xie et al., 2023), this approach employs parameter gradients $\nabla\theta$ instead. Specifically, when fine-tuning a LoRA adapter $\mathcal{Q}$ using stochastic gradient descent (SGD), the gradient feature $\ensuremath{\boldsymbol{g}}(\ensuremath{\boldsymbol{{x}}})$ for each sequence $\textbf{\em x}$ can be computed as  
+
+$$
+\begin{array}{r}{\pmb{g}(\pmb{x})\in\mathbb{R}^{|\pmb{\theta}_{Q}|}=\mathrm{flatten}\left(\nabla_{\pmb{\theta}_{Q}}\mathcal{L}_{\mathrm{NTP}}(\pmb{x})\right).}\end{array}
+$$  
+
+flatten $(\cdot)$ denotes the operation that reshapes matrices into vectors and concatenates them. Using this expression, we derive the trajectory influence of a training data point $x_{\mathrm{ft}}\in\mathcal{D}_{\mathrm{ft}}$ , quantified by the inner product between its gradient feature and that of a task-specific validation data point $\pmb{x}_{\mathrm{valid}}$ . This inner product is then accumulated across training epochs $e$ , each weighted by the average learning rate η(e) for that epoch:  eE=1 η(e)⟨g(xft), g(xvalid)⟩. By leveraging this formulation and adapting training data with the highest influence scores for task-specific fine-tuning, achieving performance comparable to that obtained using the complete training dataset.  
+
+
+
+\section{2.3 MIXTURE OF EXPERTS AND ENSEMBLES  }
+
+
+Mixture of Experts (MoE) is an architecture that combines multiple expert models or network modules with a gating network (Szymanski & Lemmon, 1993; Jordan & Jacobs, 1994). In the context of LLMs, MoE was first adopted by Shen et al. (2023) for instruction-tuning and by Jiang et al. (2024) for LLM pre-training to reduce inference costs while achieving performance comparable to dense networks. This idea has been further developed in subsequent works (Zhu et al., 2024; Dai et al., 2024; Xue et al., 2024).  
+
+Upon receiving an input, the MoE’s gating network routes it to the relevant experts, which could be an entire feed-forward Transformer block (Jiang et al., 2024) or a fine-tuned LoRA adapter (Dou et al., 2023; Wu et al., 2024) for LMs. Routing could be either dense or sparse, depending on the fraction of the total experts are activated. The selected experts process the input and provide their outputs, which are aggregated at the end of the layer or block, typically through weighted averaging, to produce the final result. This dynamic and selective activation of experts ensures efficient computation and resource utilization. Mathematically, the output of a mixture of $M$ experts can be expressed as:  
+
+$$
+{\mathcal F}({\pmb x})=\sum_{m=1}^{M}\lambda_{m}({\pmb x}){\mathcal E}_{m}({\pmb x});\quad\sum_{m=1}^{M}\lambda_{m}({\pmb x})=1,\;\left|\{m|\lambda_{m}({\pmb x})\neq0\}_{m=1}^{M}\right|\leq M,
+$$  
+
+where $\mathcal{E}_{m}$ is an expert model, and $0\leq\lambda_{m}\leq1$ is its weight predicted by the gating network. Here we extend the definition of $\textbf{\em x}$ to any kind of layer input.  
+
+On the other hand, Deep Ensembles utilize a collection of multiple models with identical architecture that are trained independently with different parameter initializations (Lakshminarayanan et al., 2017; Gleave & Irving, 2022) . During inference, the last-layer predictions of these models, which could be either pre-activation logits or post-activation probabilities, are averaged to improve the overall performance. Suppose we have $N$ models $\{\mathcal{M}_{n}\}_{n=1}^{N}$ in the ensemble, the output would be:  
+
+$$
+\mathscr{M}_{\mathrm{ens}}({\pmb x})=\frac{1}{N}\sum_{n=1}^{N}\mathscr{M}_{n}({\pmb x}).
+$$  
+
+![](images/107c908634b1052d2b657dc1a5ab2de6b8093fdd74e39f30f4e8374b1f73c0a8.jpg)  
+Figure 1: The pipeline of ELREA for fine-tuning and inference. The data points (solid and hollow circles) do not necessarily have a geometric correspondence to their gradient directions (arrows).  
+
+The major differences between MoE and Deep Ensembles are two-fold: 1) MoE uses trainable gating networks for model selection, while Deep Ensembles average uniform or pre-defined weights; 2) MoE conducts output aggregation within layers or blocks, while Deep Ensembles do so at the end of the model. Although MoE can achieve finer-grained routing and potentially superior performance with careful design, Deep Ensembles, as both theoretically and empirically shown, remain the top approach for robustly improving model performance in value prediction and uncertainty estimation, albeit at the cost of reduced efficiency (Lakshminarayanan et al., 2017; Garipov et al., 2018; Fort et al., 2019; Fang et al., 2023; Pitis et al., 2023; Li et al., 2024b).  
+
+
+
+\section{3 METHOD  }
+
+
+In this section, we introduce the pipeline of ELREA, designed to enhance the fine-tuning of LLMs for improved downstream tasks by leveraging a mixture of LoRA experts in a Deep Ensembles framework. The pipeline, shown in Figure 1, consists of three main steps: 1) full-data adapter tuning, 2) gradient calculation, and 3) clustering and per-cluster fine-tuning. During inference, we estimate the similarity between the gradient of test instructions and the cluster instances to determine the influence of each cluster on the final prediction. The details of each step are elaborated below.  
+
+
+
+\section{3.1 FULL-DATA ADAPTER TUNING  }
+
+
+The first step involves fine-tuning a base LoRA adapter $\mathcal{Q}_{\mathrm{base}}$ from the backbone language model $\mathcal{M}$ on the entire fine-tuning dataset $\mathcal{D}_{\mathrm{ft}}$ for $E$ epochs using the NTP objective (equation 1). This process captures a broader spectrum of general and task-specific knowledge and enhances the model’s basic instruction-following abilities. The adapted model check oints $\{\mathcal{M}+\mathcal{Q}_{\mathrm{base}}^{(e)}\}_{e=1}^{E}$ , where $\mathcal{Q}_{\mathrm{base}}^{(e)}$ de$e$ , along with the corresponding optimizer states, provide the necessary parameters to calculate the gradient features (Xia et al., 2024).2  
+
+3.2 GRADIENT CALCULATION  
+
+With Adam optimizer (Kingma & Ba, 2015), which is the most adopted for LM fine-tuning, the gradient feature $\ensuremath{\boldsymbol{g}}(\ensuremath{\boldsymbol{{x}}})$ for each sequence $\textbf{\em x}$ is extended from equation 2 to consider the 1st and 2nd order momentum terms with decay rates $\beta_{1}$ and $\beta_{2}$ , as derived by Xia et al. (2024):  
+
+$$
+\begin{array}{c}{g_{\mathrm{Adam}}^{(t)}(\boldsymbol{x})=\eta^{(t)}\cdot m^{(t)}/(\sqrt{v^{(t)}}+\epsilon);}\\ {m^{(t)}=(\beta_{1}m^{(t-1)}+(1-\beta_{1})\mathbf{g})/(1-\beta_{1}^{t});\:v^{(t)}=(\beta_{2}\mathbf{v}^{(t-1)}+(1-\beta_{2})\mathbf{g}^{2})/(1-\beta_{2}^{t}),}\end{array}
+$$  
+
+where $t$ is the current training step and $\epsilon$ is a small constant to prevent division by zero. Each training instance $\pmb{x}_{\mathrm{ft}}\in\mathcal{D}_{\mathrm{ft}}$ is then associated with $E$ gradients $\{g_{\mathrm{Adam}}^{(e)}(\bar{\mathbf{x}}_{\mathrm{ft}})\}_{e=1}^{E}$ , each with the dimensionality of the number of total parameters in the adapter $|\theta_{\mathcal{Q}}|$ .3  
+
+Although $|\pmb{\theta}_{\mathcal{Q}}|\ll|\pmb{\theta}_{\mathcal{M}}|$ , it is still at a million level scale, which is too large for efficient clustering or similarity computation. Therefore, we follow Xia et al. (2024) and apply random projection (Kanerva et al., 2000), which is derived from the Johnson-Lindenstrauss lemma (Johnson $\&$ Lindenstrauss, 1984) stating that sufficiently high-dimensional data points can be projected into lowerdimensional space while approximately preserves pairwise distances between the points, to reduce the dimensionality of the gradient features to $d_{\mathrm{proj}}\stackrel{-}{\ll}|\pmb{\theta}_{\mathcal{Q}}|$ .  
+
+$$
+g_{\mathrm{Adam}}^{\prime}=R g_{\mathrm{Adam}};\quad R\in\{-1,1\}^{d_{\mathrm{proj}}\times|\theta_{\mathcal{Q}}|};\ R_{i j}\sim\mathcal{U}(\{-1,1\}).
+$$  
+
+For gradient feature clustering, we first average the gradient features of each instance across all epochs to obtain a single representative feature vector, which is then normalized and projected into a $(d_{\mathrm{proj}}-1)$ -dimensional hyper-sphere:  
+
+$$
+\delta({\pmb x})=\frac{\delta^{\prime}({\pmb x})}{\|\delta^{\prime}({\pmb x})\|};\quad\delta^{\prime}({\pmb x})=\frac{1}{E}\sum_{e=1}^{E}{\pmb g}_{\mathrm{Adam}}^{\prime(e)}({\pmb x})
+$$  
+
+as we are only interested in the gradient directions rather than their magnitudes.  
+
+ELREA is developed under the assumption that the test distribution is entirely unknown during fine-tuning. Therefore, for both fine-tuning and test instances, we only consider the gradient of the instruction (i.e. user-input) tokens $x_{\mathrm{{instr}}}$ $(\S\ 2.1)$ , excluding the expected system responses even if they are provided in the training data, which is different from Xia et al. (2024) who construct the gradients based only on the expected model answers.  
+
+
+
+\section{3.3 CLUSTERING AND PER-CLUSTER FINE-TUNING  }
+
+
+We then cluster the training gradient features $\{\delta(x_{\mathrm{ft,\,instr}})|x_{\mathrm{ft,\,instr}}\ \in\ \mathcal{D}_{\mathrm{ft}}\}$ into $K$ clusters using the BIRCH algorithm (Zhang et al., 1996). The BIRCH algorithm is well-suited for large, highdimensional datasets and demonstrates robustness against outliers. To reduce computational demands, we randomly select 5,000 data points from $\mathcal{D}_{\mathrm{ft}}$ for model fitting. This sample size adequately represents the feature distribution, and we use the resulting model to cluster all gradient features. Preliminary experiments show that the clustering algorithm is robust, i.e., it consistently produces identical or similar clusters when different random seeds are used. As BIRCH does not ensure balanced clusters, we reapply it to clusters exceeding five times the size of the smallest cluster. We iterate this process up to three times, each iteration targeting fewer clusters. Initially targeting 5 clusters, this method typically yields between 8 (after two iterations) and 10 (after three iterations) training clusters $\{\mathcal{D}_{c}\}_{c=1}^{\bar{C}}$ , where $C$ denotes the final number of clusters.  
+
+Within each cluster $\mathcal{D}_{c}$ , we proceed with LoRA fine-tuning from the base checkpoint $\mathcal{Q}_{\mathrm{base}}^{(E)}$ Qbase, extending for several more epochs at a reduced learning rate utilizing the same NTP objective. This results in a collection of $C$ LoRA expert adapters $\{\mathcal{Q}_{c}\}_{c=1}^{C}$ . Theoretically, each cluster contains training instances with similar gradient directions, which likely exert analogous effects on the model’s behavior. Fine-tuning with clustered data aims to direct the model towards a more precise update path, thereby potentially enhancing the model’s (i.e., $\mathcal{M}+\mathcal{Q}_{c})$ performance on specific task types which are unidentified during fine-tuning.  
+
+3.4 ROUTING AND INFERENCE  
+
+To route an input instruction to appropriate expert adapters, we calculate the cosine similarity between the gradient of the instruction $\delta_{\mathrm{test}}\triangleq\delta(x_{\mathrm{test,\,instr}})$ and the centroid of the gradients within each cluster $\begin{array}{r}{\bar{\delta}_{c}^{\prime}\stackrel{}{=}\frac{1}{|\mathcal{D}_{c}|}\sum_{{\pmb x}_{i}\in\mathcal{D}_{c}}\delta({\pmb x}_{i,\mathrm{instr}})}\end{array}$ . The normalized form of $\bar{\pmb\delta}_{c}$ is given by:  
+
+$$
+\bar{\delta}_{c}=\frac{\bar{\delta}_{c}^{\prime}}{\|\bar{\delta}_{c}^{\prime}\|};\quad\bar{\delta}_{c}^{\prime}=\frac{1}{|\mathcal{D}_{c}|}\sum_{{\pmb x}_{i}\in\mathcal{D}_{c}}\delta({\pmb x}_{i,\mathrm{instr}}).
+$$  
+
+Here, the cosine similarity simply becomes the inner product of these two normalized vectors: $\mathrm{cos}(\delta_{\mathrm{test}},\bar{\delta}_{c})=\langle\delta_{\mathrm{t}},\bar{\delta}_{c}\rangle$ . When the projection dimensionality $d_{\mathrm{proj}}$ is high, the similarity may suffer from the curse of dimensionality, where the gaps between the similarities to different cluster centroids may become too small. To address this issue, we standardize the cosine similarities across clusters before employing a SoftMax function on the standardized similarities $\cos^{\prime}(\delta_{\mathrm{test}},\bar{\delta}_{c})$ across clusters to determine their respective weights:  
+
+$$
+w_{c}=\frac{\mathrm{exp}(\mathrm{cos}^{\prime}(\delta_{\mathrm{test}},\bar{\delta}_{c}))}{\sum_{c^{\prime}=1}^{C}\mathrm{exp}(\mathrm{cos}^{\prime}(\delta_{\mathrm{test}},\bar{\delta}_{c^{\prime}}))};\quad\mathrm{cos}^{\prime}(\delta_{\mathrm{test}},\bar{\delta}_{c})=\frac{\mathrm{cos}(\delta_{\mathrm{test}},\bar{\delta}_{c})-\mu_{\mathrm{test}}}{\sigma_{\mathrm{test}}},
+$$  
+
+where $\mu_{\mathrm{test}}$ and $\sigma_{\mathrm{test}}$ are the mean and standard deviation of the cosine similarities across clusters.  
+
+Besides the cluster-specific adapters $\{\mathcal{Q}_{c}\}_{c=1}^{C}$ , we also incorporate the base adapter $\mathcal{Q}_{\mathrm{base}}$ during inference to leverage the general knowledge captured from the entire dataset. This is particularly crucial when the test instruction diverges significantly from all training instances, indicated by $\mathrm{max}_{c}\{\mathrm{cos}(\delta_{\mathrm{test}},\bar{\delta}_{c})\}\,<\,\tau$ , where $\tau$ is some threshold. We quantify the influence of the base adapter as $w_{\mathrm{base}}=1-\mathrm{max}_{c}\{\cos(\delta_{\mathrm{test}},\bar{\delta}_{c})\}$ . Therefore, we assemble $C+1$ adapters during inference, with the final prediction for the next token being the ArgMax of the weighted sum of output logits from each adapter:  
+
+$$
+\hat{x}_{t}=\operatorname*{arg\,max}_{x_{t}}\left(w_{\mathrm{base}}(\mathcal{M}+\mathcal{Q}_{\mathrm{base}})(x_{t}|x_{<t})+\sum_{c=1}^{C}w_{c}(\mathcal{M}+\mathcal{Q}_{c})(x_{t}|x_{<t})\right),
+$$  
+
+which is a combination of equation 3 and equation 4. $x_{t}$ is categorical, while $\mathcal{M}(x_{t}|\pmb{x}_{<t})$ denotes the output pre-activation logit of categorical token $x_{t}$ given the context tokens $\mathbf{\Delta}x_{<t}$ from the language model $\mathcal{M}$ . In equation 10 we get $\hat{x}_{t}$ , we append it to the context tokens $\mathbf{\boldsymbol{x}}_{<t+1}=\left(\mathbf{\boldsymbol{x}}_{<t},\hat{\boldsymbol{x}}_{t}\right)$ for all adapters in the ensemble and repeat the process until the end of the sequence is reached. As we are not dealing with probabilities here, the weights do not need to sum to 1, i.e. $w_{\mathrm{base}}+\sum_{c=1}^{C}w_{c}\neq1$ .  
+
+Unlike the LoRA MoE approaches $\left(\S\ 2.3\right)$ , which utilizes a gating network for layer-wise routing with predictions aggregated post-layer, ELREA resembles Deep Ensembles in its routing and aggregation strategy but uses LoRA adapters as ensemble components, and hence the name.  
+
+
+
+\section{4 EXPERIMENTAL SETUP  }
+
+
+Datasets We conducted experiments across two distinct evaluation categories: 1) general language understanding and reasoning, and 2) mathematical reasoning. For the first category, following Xia et al. (2024), we employ Flan V2 (Longpre et al., 2023), CoT (Wei et al., 2022), Dolly-15k (Conover et al., 2023), and OpenAssistant Conversations (K¨opf et al., 2023) for fine-tuning, and MMLU (Hendrycks et al., 2021a) and BIG-bench Hard (BBH; bench authors, 2023; Suzgun et al., 2023) to test model performance. The training and test datasets have no distribution overlap, making this setup suitable for evaluating the model’s generalization capabilities. For the mathematical reasoning category, we develop the MATH-Combined dataset by integrating existing resources including GSM8k (Cobbe et al., 2021), MathQA (Amini et al., 2019), SVAMP (Patel et al., 2021), and MATH (Hendrycks et al., 2021b) into a uniform format analogous to MATH. MATH-Combined utilizes indomain test points, offering insights into selecting task-specific data for effective fine-tuning.  
+
+Model and Fine-Tuning Our primary experiments involve fine-tuning the Gemma-2b model (Gemma Team, 2024b), specifically gemma-1.1-2b-it4, by applying rank-8 LoRA adapters to all linear layers, modifying about $0.39\%$ of the total model parameters. For both dataset categories, we fine-tune the base adapter $\mathcal{Q}_{\mathrm{base}}$ for 2 epochs using the Adam optimizer, with an initial learning rate of $5\times10^{-5}$ that linearly decays to zero. Cluster-wise adapters $\mathcal{Q}_{c}$ are initialized from $\mathcal{Q}_{\mathrm{base}}$ and fine-tuned for the same duration with a slightly reduced learning rate of $2\times10^{-5}$ . These hyperparameters are fixed since we assume no access to additional task-specific validation data. The maximum token sequence length during training is 2,048, with a batch size equals to 16 sequences distributed across the GPUs. Following Xia et al. (2024), we set the gradient projection dimensionality for clustering $d_{\mathrm{proj}}$ to 8,192, which we show leads to the best model performance. Please refer to appendices C and D for additional details.  
+
+Inference and Evaluation Since the test set is out of the fine-tuning distribution for the general reasoning and understanding category, we use up to three in-context examples from the validation subset of BBH and five from MMLU. For the mathematical reasoning category, we employ a zeroshot setup. During inference, we limit the maximum instruction sequence length to 1,200 tokens and the response length to 848 tokens for MATH-Combined and BBH. For MMLU, the instruction length is increased to 1,800 tokens and the response length to 248 tokens. We reduce the number of in-context examples until the instruction length falls within the specified limits. We employ greedy decoding at zero temperature and maximize the batch size feasible under operational constraints. For MATH-Combined, we leverage existing code from Hendrycks et al. (2021b) for parsing results and assessing accuracy.5 For MMLU and BBH, we develop regular expressions to parse outputs and calculate exact-match accuracy metrics. It is worth noting that although we use Gemma-2b as the backbone model $\mathcal{M}$ , we do not adhere to the experimental setup or evaluation protocol described in (Gemma Team, 2024b). Consequently, our reported results may differ from theirs.  
+
+Baselines The baseline model, $\mathcal{M}+\mathcal{Q}_{\mathrm{base}}$ , is fine-tuned on the entire dataset, serving as a general reference point for comparison. $\mathcal{M}+\mathcal{Q}_{\mathrm{dataset}}$ represents adapters fine-tuned and applied separately to each subset of MATH-Combined. For the backbone-only category, we directly evaluate the performance of the backbone model $\mathcal{M}$ . To compare with the MoE setup, we include three baselines: MoE Routing, MoE Merging, and MoLE. MoE Routing implements layer-level routing using the same weights as ELREA. MoE Merging averages the expert network parameters based on the expert weights before processing the input. Mixture of LoRA Experts (MoLE, Wu et al., 2024) applies a layer-wise gating function to dynamically predict expert weights based on the layer inputs. From the ensembling family, we consider Self-Consistency and LoRA Ensembles. Self-Consistency (Wang et al., 2023b) uses $\mathcal{M}+\mathcal{Q}_{\mathrm{base}}$ as the base model, performing five inference passes per instance with a temperature of 1. The final prediction is determined through majority voting. LoRA Ensembles (Wang et al., 2023a) independently fine-tunes three additional adapters, aside from $\mathcal{Q}_{\mathrm{base}}$ , under the same setup and averages predictions across all four models. To investigate the efficacy of gradientbased features, we have the Instruction Embedding baseline, which substitutes instruction gradients with sentence embeddings from a pre-trained model for data clustering and instance routing.  
+
+Additionally, we include Random Cluster and Uniform Weights as ablation study baselines. Random Cluster maintains the same cluster numbers and sizes as ELREA but assigns cluster members randomly from the $\mathcal{D}_{\mathrm{ft}}$ , which preserves the distribution characteristics of $\mathcal{D}_{\mathrm{ft}}$ and positions it as an approximate Deep Ensembles baseline with equivalent training effort to ELREA. On the other hand, Uniform Weights assigns equal weights to all clusters to verify the effectiveness of the cluster-wise adapter routing mechanism.  
+
+
+
+\section{5 RESULTS AND DISCUSSION  }
+
+
+Main Results Table 1 presents the test set accuracy across various MATH-Combined subsets, along with the micro-averaged results. ELREA consistently outperforms baseline methods on most sub-datasets by an observable margin, with only occasional dips in performance. On average, ELREA achieves performance gains of $9.67\%$ and $3.56\%$ over $\mathcal{M}+\mathcal{Q}_{\mathrm{base}}$ at ranks $r=8$ and $r=64$ , respectively, without leveraging additional training data or external knowledge sources. Table 2 further highlights the robustness of ELREA in general language understanding and reasoning tasks, even under test conditions that diverge from those used during fine-tuning. This finding aligns with the results reported by Xia et al. (2024). A comparison between $\mathcal{M}+\mathcal{Q}_{\mathrm{dataset}}$ and $\mathcal{M}+\mathcal{Q}_{\mathrm{base}}$ reveals that the former does not consistently outperform the latter. This observation suggests that a generalized approach to knowledge extraction across similar tasks (as illustrated in Figure 4) can sometimes be more effective than relying solely on dataset-specific expertise.  
+
+The MoE Routing and Merging frameworks, despite relying on pre-computed routing weights, still exhibit improvements over the baseline, which can be attributed to the ensemble effect of the experts. In contrast, the MoLE baseline, which employs a trainable router, consistently underperforms compared to $\mathcal{M}+\mathcal{Q}_{\mathrm{base}}$ . Consequently, the system likely converges to a suboptimal  
+
+Table 1: Comparison of test set accuracies (in $\%$ ) across various MATH-Combined subsets, along with the micro-average. Gray rows indicate the primary baseline; blue rows highlight ELREA.  
+
+378 379 380 381 382 383 384 385 386 387 388 389 390 391 392 393 394 395 396 397 398 399 400 401 402 403 404 405 406 407 408 409 410 411 412 413 414 415 416 417 418 419 420 421 422 423 424 425 426 427 428 429 430 431   
+
+![](images/2cf5ae747c0a2929700125cb8489168a84b6c7d39ccf42bedad652dc2ebc71f0.jpg)  
+(a) The number in parentheses indicates the improvement over the corresponding baseline $\mathcal{M}+\mathcal{Q}_{\mathrm{base}}$  
+
+Table 2: Comparison of test set exact-match accuracy (in $\%$ ) on BBH and MMLU, and the macroaveraged result. We also include the backbone $\mathcal{M}$ for reference.   
+
+![](images/dfef66a3007ca2627a5a68b4a64d9f02c68e739156dfdaa15b8b6b1cffd7acb0.jpg)  
+(a) A large portion of responses are unparsable, leading to an accuracy lower than random guess.  
+
+solution, overfitting the training data while sacrificing model generalization. A more sophisticated network design or a refined training strategy may be necessary for MoLE to achieve better results.  
+
+Conversely, the classical LoRA Ensembles setup, despite its higher computational cost, demonstrates robustness by consistently outperforming $\mathcal{M}+\mathcal{Q}_{\mathrm{base}}$ . This . These findings align with our discussion in $\S~2.3$ and underscore the effectiveness of ELREA’ ensemble approach. The SelfConsistency method, however, delivers poorer results due to significant variance in outcomes across  
+
+Table 3: The performance of ELREA with different clustering methods. The results use Gemma-2b backbone, LoRA rank $r=64$ , and number of clusters $C=10$ .  
+
+![](images/a9c7e90276728429453629f2b00f53648ffffa5d12ad36e2077243c47bc55a8d.jpg)  
+
+![](images/558e4606ea0e68d3be9a0a1e63fc22a2407fff63956dc9073aa951b0643f84dd.jpg)  
+Figure 2: Average weight distribution across clusters for different datasets and LoRA ranks. Only relative values matter. “M-C” represents MATH-Combined.   
+(a) Both use 256-d PCA for dimensionality reduction. Otherwise the gradient outliers result in multiple clusters with few data points.  
+
+runs, especially at higher sampling temperatures. The Instruction Embedding baseline also falls short of ELREA, highlighting the critical role of a refined gradient profile in achieving optimal expertise extraction and routing.  
+
+When Gemma2-9b is used as the underlying architecture, ELREA still continues to outperform the base adapter, although with a narrower margin. The advanced capabilities of Gemma2-9b in capturing task-specific knowledge, even without explicit fine-tuning, appear to diminish the advantages of ELREA (Gemma Team, 2024a). It suggests that ELREA is more beneficial when the backbone model is less tailored to the task or when the fine-tuning dataset is more diverse and complex.  
+
+Ablation Studies An examination of Tables 1 and 2 shows that the gradient-based clustering method consistently outperforms the random approach. This underscores the effectiveness of gradient-based clustering in isolating in-domain, task-specific data for fine-tuning. However, the advantage of ELREA over the Random Cluster is not always prominent. This is understandable, considering that Random Cluster approximates Deep Ensembles, a very strong baseline that sufficiently exploits the training data. The inferior performance of the Uniform Weights baseline highlights the importance of a properly designed routing mechanism in ELREA. Figure 2 illustrates the average weight distribution across clusters. We observe that, for the in-domain MATH-Combined test set, the experts are more evenly activated across different data points. In contrast, the BBH and MMLU datasets exhibit a skewed distribution favoring one or two clusters with significantly higher average weights. In these latter cases, the test distribution accounts for only a small portion of the training data, likely dominated by a few clusters. This may also explain why the LESS method introduced by Xia et al. (2024) can outperform the baseline using fewer training data.  
+
+As noted by Xia et al. (2024), the dimensionality of the gradient projection $d_{\mathrm{proj}}$ significantly influences the performance of training-test similarity matching. Figure 3a demonstrates a similar pattern for ELREA. When $d_{\mathrm{proj}}$ is reduced from 8,192 to 512, there is a noticeable decline in ELREA’ exact-match accuracy. This reduction compromises the model’s ability to retain task-specific, finegrained information, as random projection is more likely to omit essential features, resulting in diminished performance. Furthermore, an interesting observation on the BBH dataset reveals that ELREA underperforms compared to the base adapter at a projection dimensionality of 512, and even more so in comparison to the Random Cluster. Additionally, Table 3 shows that using PCA for dimensionality reduction, instead of selecting a smaller $d_{\mathrm{proj}}$ , also hurts performance. Similarly, using $\mathrm{k}$ -means for clustering degrades performance. This further underscores the importance of preserving representative gradient features for effective data clustering and matching, highlighting that failure to do so significantly impairs model performance.  
+
+![](images/3ee6b0faf4eaf8513eeecf3bd9c97ea2ac4c5173ccdd30ee4b13cf8237b627fb.jpg)  
+Figure 3: Effects of gradient projection dimensionality and selection of top- $k$ experts during inference on model performance.  
+
+Additionally, Figure 3b demonstrates that ELREA’ performance improves with the number of top- $k$ experts selected during inference. This suggests that the model benefits from incorporating a diverse set of experts, even when the contribution of some experts is relatively minor. While selecting fewer experts can lead to more efficient inference, a trade-off must be carefully considered to balance performance with computational cost.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+We introduced Ensembles of Low-Rank Expert Adapters (ELREA), a framework designed to address the challenge of conflicting gradient directions during the fine-tuning of LLMs across diverse datasets. ELREA develops multiple LoRA expert adapters, each optimized for a specific data cluster with similar gradient profiles. These adapters collaboratively generate predictions by dynamically adjusting their contributions based on the input’s gradient characteristics, effectively resolving gradient conflicts without the need for task-specific data features or validation sets. Our approach, which requires only a single training session, enhances the adaptability of models to new or evolving tasks and outperforms traditional LoRA adapters and other ensemble techniques across a variety of applications. Ablation studies confirm that both the ensemble structure and the gradient-based clustering and routing mechanisms are integral to ELREA’s effectiveness. These findings underscore the framework’s potential for efficient and scalable application of LLMs in practical settings.  
+
+
+

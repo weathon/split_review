@@ -1,0 +1,397 @@
+\title{Learning to Clarify: Multi-turn Conversations with Action-Based Contrastive Self-Training}
+
+\begin{abstract}
+  Large language models (LLMs) aligned through reinforcement learning from human feedback (RLHF) have quickly become one of the dominant paradigms for building intelligent conversational assistant agents. However, despite their strong performance across many benchmarks, LLM-based agents still lack conversational skills such as disambiguation: when generalized assistants are faced with ambiguity, they often overhedge or implicitly guess users' ground-truth intents rather than asking clarification questions, and under task-specific settings, high-quality conversation samples are often limited, affecting models' ability to learn optimal dialogue action policies. We propose Action-Based Contrastive Self-Training (henceforth \methodnospace), a quasi-online preference optimization algorithm based on Direct Preference Optimization (DPO)  which allows for sample-efficient dialogue policy learning in multi-turn conversation. We demonstrate \methodnospace's efficacy under sample-efficient conditions in three difficult conversational tasks: tabular-grounded question-answering, machine reading comprehension, and AmbigSQL, a novel task for disambiguating information-seeking requests for text-to-SQL generation. Additionally, we propose evaluating LLMs' ability to function as conversational agents by examining whether they can implicitly recognize and reason about ambiguity in conversation. \method demonstrates substantial conversation modeling improvements over standard approaches to supervised fine-tuning and DPO.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Conversations offer a natural and effective way for humans and intelligent systems to collaborate~\cite{amershi2019guidelines, lemon2012conversational}.
+The impressive capabilities of large language models (LLMs) have powered the rapid development of many generalist conversational assistants such as ChatGPT\footnote{https://openai. However, the promises of a conversational interfaces also come with the complexities of language. Human conversation is riddled with ambiguity, whether it be due to humans' tendency to prefer underspecification~\cite{zipf1949human} or even due to syntactic errors~\cite{messer1980six}. Moreover, disambiguation becomes even more important in complex domains where it can be a difficult multi-turn process to achieve common ground~\cite{beers2006common}. As it stands, existing LLM-powered conversational agents continue to struggle with modeling ambiguity~\cite{liu2023we}, and tend to exhibit unwanted behavior such as overhedging~\cite{ouyang2022training} or generating responses which represent a ``guess'' of the user's intent~\cite{deng2023goal} (see Figure~\ref{fig:intro_figure}).
+
+One of the primary reasons that LLMs may exhibit unwanted conversational behaviors is that their language modeling objective during pre-training or supervised fine-tuning (SFT) is not directly aligned with this goal ~\citep{ouyang2022training}. While approaches like \citep{ouyang2022training} propose LLM ``alignment'' using reinforcement learning from human feedback \cite{christiano2017deep}, existing models still struggle with conversational tasks spanning multiple turns~\citep{wang2023mint}. This is partly due to the fact that existing RLHF approaches do not directly optimize for pragmatic skills (e.g. \cite{bai2022training}). Moreover, there is often high variance in the target distribution of a particular use case, so it is imperative that downstream adaptation approaches are able to teach an LLM generalizable policies. Given sufficient in-distribution training data, this may be feasible with standard tuning approaches. But, policy learning can be particularly challenging given limited data~\citep{chen2022weakly, dong2023abilities}, and high-quality conversation collection can be difficult for reasons 
+such as privacy concerns~\cite{chen2023places}. 
+
+This motivates the design of a conversational adaptation approach for LLMs which is more closely aligned with the goal of modeling actions in multi-turn conversation. We focus on improving LLMs' abilities to implicitly select conversational strategies in ambiguous contexts, and propose an approach called \underline{A}ction-Based \underline{C}ontrastive Self-\underline{T}raining (\methodnospace). \method is a sample-efficient, quasi-online Direct Preference Optimization algorithm ~\cite{rafailov2024direct} which focuses on learning by highlighting the differences between an agent's possible pragmatic conversational actions. We demonstrate \methodnospace's sample-efficient performance on a diverse range of mixed-initiative conversational tasks: (i) tabular-grounded question answering, (ii) machine reading comprehension, and (iii) text-to-SQL generation. Our work demonstrates the necessity of considering action-based preferences for conversational tasks, and we propose a workflow for evaluating LLMs' ability to recognize and reason about ambiguity in conversation.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{Figures/Fig1v2.pdf}
+    \caption{Simplified example of ambiguity present at tabular-grounded conversational question answering based on~\cite{deng2022pacific}. 
+    A conversational agent should recognize when there is ambiguity and ask a clarifying question towards a more accurate final answer.}
+    \label{fig:intro_figure}
+\end{figure}
+
+
+\section{Related Work}
+
+\subsection{Mixed-Initiative Conversational Agents}
+Neural approaches to building mixed-initiative conversational agents typically consist of two core components: an understanding and planning module (e.g., a binary prediction task to determine whether to ask a clarifying question or provide an answer), and a generation module which can be controlled at a pragmatic level using the output of the planning module \citep{chen2022seamlessly, chen2017deep, qian2022database, yu2017situated} (e.g., forming an utterance which follows the action prescribed by the aforementioned prediction task). \\
+\textbf{Generation:} Many existing works focus on novel training methodologies to improve conditional generation as a complement to planning, with approaches such as multi-objective SFT \cite{chen2022seamlessly, wen2016conditional} or introducing specialized embeddings for control codes~\cite{keskar2019ctrl}.
+In recent years, LLMs have vastly improved performance in pragmatically-controlled generation~\cite{chen2023controllable}, but all of these approaches still depend on conversational planning. Planning remains a difficult task -- natural interaction is not deterministic and often requires long-horizon planning. \\
+\textbf{Planning:}
+The planning task can be viewed as a stochastic Markov Decision Process~\cite{wang2020task, yang2021multi,yu2023prompt} in which some dialogue state is drawn from a potentially unknown distribution, given the previous dialogue state and an imposed action. However, the action itself is not literally presented to the interacting parties; rather, an action is a low-dimensional representation of the pragmatic intent behind a given dialogue utterance (i.e., a dialogue act~\cite{sadek1991dialogue, stolcke2000dialogue,wu2023diacttod,yu2021midas}). As such, training planning modules often requires complex long-horizon reasoning and simulation to estimate the responses and intents of each interacting party. Many such efforts have examined combining neural models with search algorithms~\cite{cheng-etal-2022-improving, vath2023conversational, yu2023prompt} and simulation~\cite{deng2023plug, wang-etal-2020-task, yu2023prompt}. However, not only do such modular approaches often incur high computational overhead~\cite{yu2023prompt}, but they result in error propagation while not directly optimizing for response quality itself. In hopes of mitigating these concerns, we propose directly optimizing dialogue action planning as an implicit subtask of response generation in mixed-initiative conversation contexts, as we discuss in Section~\ref{sec:method}. 
+\subsection{Reinforcement Learning for LLM Alignment}
+The current paradigm of LLM training for downstream use cases consists of three phases: pre-training, supervised fine-tuning (SFT) for instruction-following, and RL tuning for alignment with human preferences~\cite{tunstall2023zephyr, rafailov2024direct, lee2023rlaif, ouyang2022training}. In our work, we primarily focus on the RL tuning phase. These approaches typically start with an initial policy model obtained by conducting SFT on a target task ($\pi_{SFT}$), before performing RL tuning using contrastive preference examples (most commonly collected through human feedback \citep{ouyang2022training} or a similar proxy like LLM-generated feedback \citep{lee2023rlaif}).\\
+\textbf{Online versus Offline RL Algorithms:}
+In the case of online algorithms like PPO, a reward model is first fit over the preference examples so that it could be used for RL optimization~\citep{ouyang2022training}.
+Such algorithms have certain advantages which may benefit the Markov Decision Process-like nature of conversations --- namely, a diverse search space as opposed to a fixed dataset, flexible reward functions, and broader policy exploration.
+However, PPO is notoriously difficult to tune, and offline algorithms such as DPO~\cite{rafailov2024direct}, SLiC~\cite{zhao2023slic}, and IPO~\cite{azar2024general} have become widely adopted as an LLM adaptation approach because they bypasses explicit reward modeling and thus only require one set of hyperparameters to optimize \citep{huang2024n+, rafailov2024direct, zhao2023slic, zheng2023secrets} while still achieving similar empirical results \cite{rafailov2024direct} given a fixed preference dataset.  
+Despite these findings, many of our contemporaries also question the promises of fully offline preference learning and have examined ``online'' variants of these offline algorithms~\cite{guo2024direct, xu2023some, xu2024dpo, yuan2024self}. 
+
+
+\section{Methods}
+
+\label{sec:preliminaries}
+\subsection{Problem Setup}
+\label{sec:problem_setup}
+We consider the formulation of tuning an LLM to function as a \textit{mixed-initiative conversational agent} --- through a series of dialogue interactions with a user, the LLM is expected to assist the user by correctly providing an output to the given query. Unlike the common agent interaction setting in which users completely control the flow of interaction with the expectation that agents may autonomously complete tasks such as using tools or online shopping~\cite{liu2023agentbench}, mixed-initiative conversational agents should understand how to redirect the flow of the interaction~\cite{allen1999mixed} through the execution of various actions or conversational strategies~\cite{chen2023controllable, chu2000mimic, peng2018deep}, such as clarifying questions.
+
+\paragraph{Notation} Consider a conversational environment in which an LLM is RL-tuned for response optimization. Let $\pi_{\theta_i}$ be an LLM's policy parameterized by $\theta$ at timestep $i \geq 0$, with $\pi_{ref}$ being the reference policy model (i.e., $\pi_{ref} \leftarrow \pi_{\theta_0}$). Let $D$ be a dataset consisting of conversations. Let each conversation $c$ in $D$ contain $n$ dialogue turns, through which a user is requesting one or more pieces of information from an agent. The state of a conversation (the observed utterances and actions given by each interacting party) at timestep $i$ can be represented by $t_i$. Implicitly, each $t_i$ is part of a trajectory which ends when the user's question expressed at an earlier timestep $j \leq i$ is answered\footnote{The case where $t_i$ contains the answer to a question while $j = i$ represents single-turn trajectories (those where a question is answered immediately, without any clarification turns).}. Each state $t_i$ is represented by the following tuple: $(p_i, r_i, g_i, a_i)$. $p_i$ is the prompt at $i$, consisting of any task-specific information (e.g. a SQL database schema, tabular data or retrieved passages) combined with any existing dialogue context. $r_i$ is the ground truth system-side response at $i$. $g_i$ is the response at the end of $t_i$'s ground truth trajectory, i.e., the answer to the user's original question after any possible clarification turns. In the single-turn trajectory case, $g_i \leftarrow r_i$. $a_i$ is the action implicitly expressed by $r_i$, where $a_i$ exists in the Action Space $S$ of a particular task\footnote{In the context of a fixed dataset, $a_i$ may be a fixed annotation. However, in online contexts like training or inference, the implicit action must be inferred by other means such as classification.}. For the conversational datasets considered in our experiments, we set $S = [\text{CLARIFY}, \text{ANSWER}]$ (but we note that the method can be extended to a broader action space). We also assume access to a capable controllable generation model ($M$), Action Classifier ($A$) and model which can be controlled to function as a coherent User Simulator ($U$). As discussed in Section~\ref{sec:method}, $M$ is used for preference data creation whereas $A$ and $U$ are both used during tuning and evaluation. We illustrate this notation in Figure~\ref{fig:notation}.
+
+\newcommand{\algcomment}[1]{{\footnotesize \fontfamily{cmtt}\selectfont // #1}}
+\renewcommand{\algorithmiccomment}[1]{\hfill{\(\triangleright\)~#1}\par}
+\subsection{\textit{\methodnospace}: Action-Based Contrastive Self-training} %\rs{why self-training? because preference data is generated by itself?}}
+\label{sec:method}
+\begin{figure}
+    \centering
+    \includegraphics[width=0.99\linewidth]{Figures/Fig2v8.pdf}
+    \caption{\textbf{Overview of the tuning phase of \methodnospace}.
+    For each initial contrastive pairing from $D_{pref}$ (constructed as in Section~\ref{sec:preference_data_construction}), we sample an on-policy response from the model being tuned. After evaluating the sampled response's trajectory, we update the contrastive pairing by either replacing the existing winning or losing response. The model policy is updated using the objective in Eqn~\ref{eq:dpo_objective}.
+    }
+    \label{fig:alg_graphic}
+\end{figure}
+One of the north stars in developing intelligent conversational models is the ability to automatically produce responses which take actions which lead to the highest probability of conversational success~\cite{wu2023diacttod,zhao2019rethinking}. We propose \methodnospace, an approach that adapts generic LLMs for dialogue generation which considers dialogue planning as an implicit subtask. \method is a quasi-online extension of the DPO algorithm which maintains its ease of use while incorporating more of the flexible exploration found during online learning. \method relies on a few core intuitions. 
+1) Contrastive preferences are an intuitive medium for demonstrating the \textit{pragmatic differences} between the implicit actions of ``winning'' and ``losing'' dialogue responses. 
+2) Conversational improvements require multi-turn optimization, which are difficult to express using only single-turn contrast pairings. 
+3) The gradient of the objective of algorithms such as DPO (see Eq.~\ref{eq:gradient}) is weighted based on the log probabilities assigned to the winning and losing responses. 
+4) By construction, on-policy response sampling represents a high-probability token sequence for an iteration of a policy model. 
+5) Knowledge of whether a policy model will assign high token probabilities to a given sequence can be used to form high-quality contrast pairings which effectively reward or penalize a model's own responses due to DPO's contrastive learning objective.
+The overall \method framework is summarized in Fig.~\ref{fig:alg_graphic}. \method consists of two phases: action-based contrast dataset construction (Algorithm~\ref{alg:data_creation}) and contrastive self-training (Algorithm~\ref{alg:ABC}). \begin{wrapfigure}{R}{0.45\textwidth}\begin{minipage}{0.45\textwidth}
+\begin{algorithm}[H]
+\small
+\begin{algorithmic}[1]
+\INPUT{Dataset $D$, Conditional generation model $M$, Action Space $S$} \STATE Initialize empty dataset $D_{pref}$.
+\FOR{conversation turn $t_i \in D$}
+\STATE Let $a_i' = S \setminus a_i$ \algorithmiccomment{Get Rejected Action}
+\STATE Let $y_{wi} = r_i$.
+\STATE \text{Sample $y_{li} \sim P_{M}(\cdot|p_i, a_i')$}. 
+\STATE Let $t_i' = (p_i, r_i, g_i, a_i, a_i', y_{wi}, y_{li})$.
+\STATE Add $t_i'$ to $D_{pref}$
+\ENDFOR
+\OUTPUT $D_{pref}$
+\end{algorithmic}
+\caption{
+Action-Based Contrast Dataset Construction %\rs{Generation?} \mc{Construction?}
+}
+\label{alg:data_creation}
+\end{algorithm}
+\end{minipage}
+\end{wrapfigure}
+
+\subsubsection{Construction of Preference Data}
+\label{sec:preference_data_construction}
+The preference dataset primarily consists of contrastive {\it winning-losing} action pairs. That is, for each conversation turn $t_i$ in a dataset $D$, we can construct $D_{pref}$ consisting of augmented $t_i'$ tuples. We add rejected action $a_i'$ which is sampled from $S \setminus a_i$ (note that in settings with a binary action space, such as ambiguous question answering, this is deterministic), winning response $y_{w_i}$ which is equal to $r_i$, and $y_{l_i}$ which is a losing response sampled using $M$\footnote{The losing response is sampled as $y_{li} \sim P_M(\cdot|p_i, a_i')$ after converting actions into instructions as in \citep{chen2023controllable}.}. See Algorithm~\ref{alg:data_creation}.
+LLM-generated responses can be more likely to be faithful to some prescribed dialogue act than the supposed ground-truth dialogue act annotations of utterances in many crowd-sourced dialogue datasets \cite{chen2023controllable}. 
+
+\subsubsection{Self-Training Using On-policy Conversation Trajectory Simulation}
+\label{sec:selftraining_overview}
+
+As in DPO training, we continuously sample batches from $D_{pref}$. Although each conversation turn $t_j$ in each batch $i$ has a default winning ($y_{wi}$) and losing ($y_{li}$) response, we also sample an on-policy response $y_j$ from $\pi_{\theta_i}$. We use $A$ to determine whether the implicit action of $y_j$ 
+\footnote{Classifying $y_j$'s action optimizes the following: $\operatorname*{argmax}_{a_k \in S} P_A(a_k | p_j, y_j)$}
+matches the ground truth action $a_j$. If it does match $a_j$, then we simulate the outcome $g_j'$ of the trajectory resulting from $y_j$ using $U$
+\footnote{The next user turn (denoted $u_{j+1}$) is sampled according to $u_{j+1} \sim P_U(\cdot | p_j, y_j$)} 
+and $\pi_{\theta_i}$. If either the implicit action of $y_j$ is incorrect, or the trajectory outcome $g_j'$ fails to meet task-specific heuristics (e.g., low semantic similarity or an incorrect arithmetic expression), we set $y_{lj} = y_j$. We provide details on the usage of $A$ and $U$ in Appendices \ref{sec:action_classifier_details} and \ref{sec:user_simulator_details}, respectively.
+
+\subsubsection{Contrastive RL Tuning for Alignment}
+After constructing the up-to-date winning $y_{wi}$ and losing $y_{li}$ pairing at turn $i$ through simulation (Section~\ref{sec:selftraining_overview}), we update the policy model ($\pi_\theta$) using the DPO training objective\cite{rafailov2024direct}, which is as follows (we ignore the $i$ iterator for simplicity):
+\begin{equation}
+\label{eq:dpo_objective}
+    \mathcal{L}_\text{DPO}(\pi_{\theta}; \pi_{ref}) = -\mathbb{E}_{(p, y_w, y_l)\sim \mathcal{D}}\left[\log \sigma \left(\beta \log \frac{\pi_{\theta}(y_w\mid p)}{\pi_{ref}(y_w\mid p)} - \beta \log \frac{\pi_{\theta}(y_l\mid p)}{\pi_{ref}(y_l\mid p)}\right)\right],
+\end{equation}
+where $p$ is a prompt consisting of a concatenation between \text{task info} and  conversation history = \{$x_1, y_1, ..., x_{i-1}, y_{i-1}, x_i$\} with each $x_i$ and $y_i$ representing observed user-side and system-side utterances at turn $i$; $y_w$ and $y_l$ are the designated ``winning'' and ``losing'' responses or trajectories as set in Section~\ref{sec:selftraining_overview}; $\pi_{ref}$ is the initial reference policy model; and $\beta$ is a hyperparameter that regularizes the ratio between $\pi_{\theta}$ and $\pi_{ref}$. The gradient of this objective is given in \cite{rafailov2024direct} as follows:
+\begin{multline}
+\label{eq:gradient}
+    \nabla_\theta \mathcal{L}_\text{DPO}(\pi_\theta;\pi_{ref}) = \\ -\beta\mathbb{E}_{(p, y_w, y_l) \sim \mathcal{D}} \bigg[\sigma(\hat{R}_\theta(p, y_l) - \hat{R}_\theta (p, y_w))\bigg[\nabla_\theta\log \pi(y_w \mid p) - \nabla_\theta\log\pi(y_l \mid p)\bigg]\bigg],
+\end{multline}
+where $R(p,y) = \beta \log \frac{\pi(y|p)}{\pi_{ref}(y|p)}$ for a given policy model $\pi$ and reference model $\pi_{ref}$, as proven under the assumptions in \cite{rafailov2024direct}. The intuition behind the objective is that the gradient of the loss function would increase the likelihood of winning responses $y_w \in Y_w$ and would decrease the likelihood of losing responses $y_l \in Y_l$, with each example being weighed by the magnitude of how incorrectly the implicitly defined reward model ranks the paired responses.
+
+\begin{figure}[t]
+\begin{algorithm}[H]
+\small
+
+\begin{algorithmic}[1]
+\INPUT{
+Initial Policy Model $\pi_{\theta_0}$,
+Action Contrast Dataset $D_{pref}$,
+Action Classifier $A$,
+Number of Training Batches $B$,
+User Simulator $U$,
+Downstream Task Heuristic $H$,
+Heuristic Tolerance $\epsilon$
+}%
+\FOR{conversation turn $t_j$ in batch $b_i$ sampled from $D_{pref}$ where $0 \leq i \leq B$}
+\STATE Sample $y_j \sim P_{\theta_i}(\cdot | p_j)$ \algorithmiccomment{Sample a response from the current model policy}
+\IF{Action $A(y_j) \neq $ Action $a_j$} 
+    \STATE Set $y_{lj} = y_j$ \algorithmiccomment{Implicit pragmatic action does not match ground truth}
+\ELSE
+    \STATE Initialize $Trajectory$
+    \STATE Add $y_j$ to $Trajectory$
+    \WHILE{$A(y_j) \neq ANSWER$} 
+    \STATE Clarification Answer $= P_U(p; y_j)$ \algorithmiccomment{Simulate User Clarification}
+    \STATE Add Clarification Answer to $Trajectory$
+    \STATE $y_{j+1}' = P_{\pi_{\theta}}(P;y_j)$ \algorithmiccomment{Simulate next policy response}
+    \STATE Add $y_{j+1}'$ to $Trajectory$
+    \ENDWHILE
+    \IF{$H(Trajectory$ outcome, Ground Truth Outcome $g_j) >\epsilon$}
+        \STATE Let $y_{wj} = Trajectory$ \algorithmiccomment{Reward acceptable trajectory outcome}
+    \ELSE
+        \STATE Let $y_{lj} = Trajectory$ \algorithmiccomment{Penalize bad trajectory outcome}
+    \ENDIF
+\ENDIF
+\STATE $\theta \leftarrow Update(\theta)$ until convergence (eq~\ref{eq:gradient})
+\ENDFOR
+\OUTPUT $\pi_{\theta_B}$
+\end{algorithmic}
+\caption{\textit{\methodnospace}: Action-Based Contrastive Self-Training} 
+\label{alg:ABC}
+\end{algorithm}
+\end{figure}
+
+
+\section{Experimental Setup}
+
+\label{sec:experiments}
+\begin{table}[]
+\caption{\textbf{Experimental results on PACIFIC's public validation set}. \method achieves the strongest performance compared to all tuning approaches across every condition in every metric. \method with zero-shot inference also matches or outperforms 10-shot Gemini in most conditions.
+\label{tab:pacific_results}
+}
+\centering
+\begin{adjustbox}{width=1.0\columnwidth,center}
+\begin{tabular}{@{}lllcccccc@{}}
+\hline
+          & & & \multicolumn{3}{c}{\textbf{Action-level}}  & \multicolumn{3}{c}{\textbf{Content-level}}     \\
+\toprule
+Base Model & Adaptation Setting & Examples & Accuracy $\uparrow$ & Weighted F1 $\uparrow$ & Macro F1 $\uparrow$ & Turn F1 $\uparrow$ & Traj. F1 $\uparrow$ & Post-Clarify F1 $\uparrow$ \\ \midrule
+Gemini Ultra & ICL - Standard & 10 & 84.5 & 77.9 & 49.4 & 41.4 & 42.1 & --- \\
+Gemini Pro 1.5 & ICL - Standard &  10 & 91.9 & 90.8 & 81.4 & 59.7 & 58.7 & 49.7 \\
+Gemini Pro 1.5 & ICL - Chain-of-Thought &  10 & 92.1 & 92.0 & 85.1 & 55.7 & 52.8 & 32.8 \\
+Gemini Pro 1.5 & ICL - Proactive MIPrompt & 10 & 91.8 & 92.0 & 85.7 & 65.6 & 61.4 & 29.5 \\
+\midrule
+Zephyr 7B-$\beta$ & SFT & 50 & 86.7 & 84.9 & 69.0 & 57.8 & 61.3 & 43.5 \\
+Zephyr 7B-$\beta$ & Naive DPO & 50 & 84.3 & 80.5 & 59.4 & 41.6 & 45.2 & 35.6 \\
+Zephyr 7B-$\beta$ & \method (ours) & 50 & \textbf{91.8} & \textbf{91.1} & \textbf{82.2} & \textbf{62.8} & \textbf{61.9} & \textbf{57.2} \\
+\midrule
+Zephyr 7B-$\beta$ & SFT & 100 & 90.6 & 90.5 & 82.3 & 58.6 & 60.3 & 49.9\\
+Zephyr 7B-$\beta$ & Naive DPO & 100 & 85.6 & 82.0 & 61.3 & 35.4 & 31.5 & 39.7\\
+Zephyr 7B-$\beta$ & \method (ours) & 100 & \textbf{92.2} & \textbf{92.0} & \textbf{86.0} & \textbf{65.0} & \textbf{62.0} & \textbf{57.4} \\
+\midrule
+Zephyr 7B-$\beta$ & SFT & 250 & 93.1 & 93.0 & 86.9 & 65.1 & 63.3 & 56.7 \\
+Zephyr 7B-$\beta$ & Naive DPO & 250 & 93.5 & 93.4 & 87.7 & 64.5 & 62.5 & 57.4 \\
+Zephyr 7B-$\beta$ & \method (ours) & 250 & \textbf{94.8} & \textbf{94.6} & \textbf{89.6} & \textbf{68.1} & \textbf{65.7} & \textbf{62.0}\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+\method is a sample-efficient approach to adapt an LLM to a conversational action policy.
+We are primarily concerned with learning improved timing for agent-side clarification question asking, and we thus evaluate \method as a tuning approach for three complex conversational information-seeking tasks. As a base model for our tuning experiments, we use Zephyr $\beta$, a version of Mistral 7B~\cite{jiang2023mistral} which has been instruction tuned on UltraChat and aligned to human preferences on UltraFeedback~\cite{cui2023ultrafeedback, ding2023enhancing, tunstall2023zephyr}.
+\subsection{Datasets}
+\label{sec:datasets}
+We investigate three mixed-initiative conversation tasks in which a user interacts with an assistant to retrieve some information. In our setup of each task, a user asks a query which may or may not be underspecified. The assistant is tasked with providing a response which may either be a clarifying question or an attempt to directly answer the user's query. For each task, we synthesize the initial rejected responses by prompting Gemini Ultra 1.0\footnote{Gemini is accessed through the Vertex AI API: \url{https://cloud.google.
+
+\paragraph{PACIFIC} is a task for proactive conversational question answering grounded on a mixture of tabular and textual financial data \citep{deng2022pacific}.
+This may involve generating the correct words from a given span, from multiple spans, or providing a correct arithmetic expression.
+The official evaluation for PACIFIC uses a numeracy-focused token overlap metric called DROP F1. 
+\paragraph{Abg-CoQA} is a conversational question answering dataset for disambiguation in machine reading comprehension \citep{guo2021abg}. 
+As there are no arithmetic expressions, we use embedding-based semantic distance with SentenceBERT~\cite{reimers2019sentence} as an evaluation metric, which has been proposed as a more flexible and realistic measure of question-answering performance~\cite{risch2021semantic}.
+
+\paragraph{AmbigSQL} is our new task for SQL-grounded conversational disambiguation. 
+We systematically perturbed unambiguous queries from Spider, a popular text-to-SQL benchmark~\cite{yu2018spider},
+resulting in paired training examples which can be easily incorporated into contrastive RL tuning. Each trajectory is evaluated by whether the final proposed SQL query matches the ground truth query's execution result.
+
+Our motivation in constructing AmbigSQL stems from the idea that disambiguation can lead to improved task performance. We found that constructing a SQL query for an underspecified request with and without clarification turns can result in a gap in execution match of up to 45.8\% (see Table~\ref{tab:ambigsql_ambiguityanalysis}).
+
+\subsection{Evaluation} 
+\label{sec:evaluation}
+We conduct evaluations of \methodnospace's ability to improve reasoning about ambiguity in conversation along two dimensions: 1) Implicit Ambiguity Recognition, an action-level evaluation of whether an agent correctly chooses to ask a clarifying question or provide an answer, and 2) Agent Task Performance, a content-level of the downstream task in terms of metrics such as execution match.
+\paragraph{Implicit Ambiguity Recognition}
+follows the notion of ``dialogue act accuracy'' used to evaluate generation controllability in \cite{chen2023controllable}. We evaluate whether each model can implicitly select the correct conversational action. Given a contextually-ambiguous user request, a model should generate a clarifying question, otherwise, it should attempt to provide the requested information. 
+Since PACIFIC and Abg-CoQA have highly imbalanced classes, we perform evaluation in terms of Accuracy, Weighted F1, and Macro F1. AmbigSQL is balanced, so we only evaluate Accuracy. 
+
+\textbf{Agent Task Performance} 
+We also evaluate on downstream task performance to verify that 1) \method does not unlearn task knowledge when optimizing for implicit actions, and 2) \method improves multi-turn task capabilities. 
+
+\begin{table}[]
+\caption{\textbf{Abg-CoQA test set evaluation results.} \method outperforms SFT across all evaluations in all three data settings. However, Gemini Ultra achieves the strongest downstream task performance when prompted with in-distribution in-context conversation examples.}
+\label{tab:abgcoqa_results}
+\centering
+\begin{adjustbox}{width=1.0\columnwidth,center}
+\begin{tabular}{@{}lllccccc@{}}
+\hline
+          && & \multicolumn{3}{c}{ \textbf{Action-level}}  & \multicolumn{2}{c}{\textbf{Content-level}}     \\ \hline
+Base Model & Adaptation Setting & Examples & Accuracy $\uparrow$ & Weighted F1 $\uparrow$& Macro F1 $\uparrow$ & Turn Similarity $\uparrow$ & Traj. Similarity $\uparrow$ \\ \midrule
+Gemini Ultra & ICL - Standard & 10 & 87.5 & 84.2 & 54.3 & 77.2 & 77.5 \\ 
+Gemini Pro 1.5 & ICL - Standard & 10 & 51.8 & 59.5 & 46.5 & 64.5 & 65.7 \\ 
+Gemini Pro 1.5 & ICL - Chain-of-Thought &  10 & 84.4 & 84.4 & 62.4 & 65.2 & 62.0 \\
+Gemini Pro 1.5 & ICL - Proactive MIPrompt & 10 & 60.9 & 67.9 & 52.2 & 61.6 & 63.7 \\
+\midrule
+Zephyr 7B-$\beta$ & SFT & 50 & 55.3 & 63.2 & 44.6 & 53.3 & 64.2\\
+Zephyr 7B-$\beta$ & Naive DPO & 50 & \textbf{88.0} & 83.2 & 49.0 & 61.1 & 62.7 \\
+Zephyr 7B-$\beta$ & \method (ours) & 50 & 84.7 & \textbf{84.3} & \textbf{52.3} & \textbf{66.2} & \textbf{68.8} \\
+\midrule
+Zephyr 7B-$\beta$ & SFT & 100 & 70.7 & 75.1 & \textbf{52.6} & 63.1 & 69.4 \\
+Zephyr 7B-$\beta$ & Naive DPO & 100 & 84.9 & 82.0 & 49.9 & 63.4 & 64.5 \\
+Zephyr 7B-$\beta$ & \method (ours) & 100 & \textbf{88.0} & \textbf{83.7} & 51.1 & \textbf{69.5} & \textbf{71.4} \\
+\midrule
+Zephyr 7B-$\beta$ & SFT & 250 & 56.3 & 64.1 & 45.1 & 61.0 & 59.8 \\
+Zephyr 7B-$\beta$ & Naive DPO & 250 & \textbf{88.0} & 82.7 & 46.8 & 68.7 & 70.9 \\
+Zephyr 7B-$\beta$ & \method (ours) & 250 & 86.2 & \textbf{83.3} & \textbf{53.3} & \textbf{72.5} & \textbf{75.1} \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+PACIFIC and Abg-CoQA are both initially proposed only with static task performance evaluations. The official PACIFIC evaluation only consists of system-side DROP F1 score (i.e., the system does not have to provide the eventual correct answer after asking a clarifying question), and Abg-CoQA only requires the system to provide answers (i.e., the system is never asked to produce a clarifying question). To mirror the static evaluation settings originally designed for these two tasks, we first conduct turn-level evaluation by comparing the model's response to the ground truth utterance given in response to the user's query, using the task-specific heuristics given in Section~\ref{sec:datasets}. % and Table~\ref{tab:metrics}.
+
+However, because we are specifically concerned with improving LLMs' multi-turn capabilities, we additionally propose a multi-turn evaluation scheme for all three tasks considered. We consider each user query to be a different information-seeking goal. For a given goal, the initial user-side query can be considered the beginning of a ground truth trajectory, and any possible clarification turns that are in response to a query can be considered to be a part of the same ground-truth trajectory of that query's goal. We sample a response for each user-side query and simulate the trajectory outcome each time the sampled response is a clarifying question. We use $A$ and $U$ for simulation as described in Section~\ref{sec:selftraining_overview} for \methodnospace, and use the heuristics defined in Section~\ref{sec:datasets}. We also compute task performance on the simulated responses in which the model has previously asked any clarifying questions, in order to get a more fine-grained measure of the model's ability to reason about its own clarification questions. 
+% and Table~\ref{tab:metrics}.
+\subsection{Baselines}
+\label{sec:baselines}
+\paragraph{Prompting Baselines} We also compare downstream task performance against end-to-end prompt-based approaches paired with frontier LLMs: Gemini Ultra 1.0 and Gemini Pro 1.5. We use 10 conversations as in-context examples, with three different prompting frameworks: i.) ``Standard'' which uses the same instruction formatting used for tuning; ii.) chain-of-thought reasoning~\cite{wei2022chain}; and iii.) the mixed-initiative prompting style as used in \cite{chen2023controllable} combined with Proactive Prompting \citep{deng2023prompting}, which is the strongest prompting baseline in \cite{deng2023plug} (henceforth Proactive MIPrompt, following the convention in \cite{deng2023plug}).
+
+\paragraph{Tuning Baselines}  
+We compare \method with supervised fine-tuning (SFT) as well as a common approach to DPO-based alignment. For SFT, we use the ground truth responses for each dataset's training split. 
+As for DPO-based alignment, in the absence of human annotators, a widely accepted approaches has been naively sampling responses from two high capacity models, with $Y_w$ coming from whichever model is of higher capacity (e.g., GPT-4 versus GPT-3.5)~\citep{mitra2023orca,mukherjee2023orca, xu2024contrastive}, effectively performing distillation from the larger model. We thus construct a preference dataset by sampling responses from Gemini Ultra 1.0 and its smaller counterpart, Gemini Pro 1.0. We use ``Standard'' in-context learning with ten examples for domain adaptation. 
+
+
+\section{Experimental Results}
+
+\label{sec:experimental_results}
+To emulate real-world scenarios with limited data, we evaluate \method as a tuning approach in a few different conditions with limited conversation samples across a set of diverse tasks.
+\subsection{Conversational QA with Tabular Grounding}
+\label{sec:pacific_results_section}
+In Table~\ref{tab:pacific_results}, we see that across all three data settings considered, \method achieves the strongest performance across all metrics compared to the other tuning approaches. Additionally, tuning with \method in these limited data settings grants the model the ability to match our outperform frontier language models despite having zero in-context examples during inference.
+\subsection{Conversational QA for Machine Reading Comprehension}
+\label{sec:abgcoqa_results_section}
+
+Our results for Abg-CoQA are presented in Table~\ref{tab:abgcoqa_results}. In all three data settings, we observe that \method achieved the strongest performance in terms of task-specific metrics (notably, in terms of trajectory-level embedding similarity). However, in the 50 and 250 conversation condition, Naive DPO outperforms \method in terms of Action Accuracy, and in the 100 conversation condition, SFT outperforms \method in terms of Macro F1. Additionally, Gemini Ultra with Standard prompting outperforms all baselines in terms of Macro F1, Turn Similarity, and Trajectory-level similarity, although \method with 250 conversations achieves comparable performance in terms of Trajectory-level similarity. This is likely because existing frontier LLMs can already achieve strong QA performance.
+\subsection{Conversational Text-to-SQL Generation}
+\label{sec:ambigsql_results_section}
+We find that although the prompting baselines do not achieve very high Action Accuracy, it is possible to achieve rather high Accuracy with SFT in each data condition. However, it appears that SFT alone is not sufficient for maximizing conversational reasoning performance. In each of the limited data scenarios, we observe considerable improvements in terms of Execution Match and Post-Clarification Execution Match with \method compared to both SFT and Naive DPO. 
+We note that prompting Gemini achieves the highest downstream task performance. This is likely due to the stronger capabilities of these LLMs in complex tasks such as text-to-SQL generation. 
+\begin{table}[]
+\caption{\textbf{AmbigSQL test set evaluation}. Zephyr tuned with \method is able to achieve the strongest task performance within each data setting. There are especially large performance improvements in post-clarification SQL execution match when data resources are more scarce.}
+\label{tab:ambigsql_results}
+\centering
+\begin{adjustbox}{width=1.0\columnwidth,center}
+\begin{tabular}{@{}lllccc@{}} \\
+\toprule
+& & & \multicolumn{1}{c}{ \textbf{Action-level}}  & \multicolumn{2}{c}{\textbf{Content-level}} \\
+\hline
+Base Model & Adaptation Setting & Examples & Action Accuracy $\uparrow$ & Execution Match $\uparrow$ & PC Execution Match $\uparrow$ \\ \midrule
+Gemini Ultra & ICL - Standard & 10 & 60.7 & 54.7 & 71.0 \\
+Gemini Pro 1.0 & ICL - Standard & 10 & 81.8 & 51.4 & 55.3 \\
+Gemini Pro 1.5 & ICL - Standard & 10 & 72.1 & 63.5 & 75.2 \\
+Gemini Pro 1.5 & ICL - Chain-of-Thought & 10 & 79.4 & 70.3 & 72.2 \\
+\midrule
+Zephyr 7B-$\beta$ & SFT & 50 & 77.4 & 21.9 & 13.9 \\
+Zephyr 7B-$\beta$ & Naive DPO & 50 & 72.1 & 35.9 & 31.3 \\
+Zephyr 7B-$\beta$ & \method (ours) & 50 & \textbf{80.8} & \textbf{43.6} & \textbf{38.1} \\
+\midrule
+Zephyr 7B-$\beta$ & SFT & 100 & 97.2 & 43.3 & 34.3 \\
+Zephyr 7B-$\beta$ & Naive DPO & 100 & 97.0 & 45.3 & 37.7 \\
+Zephyr 7B-$\beta$ & \method (ours) & 100 & \textbf{99.2} & \textbf{48.0} & \textbf{49.6} \\
+\midrule
+Zephyr 7B-$\beta$ & SFT & 250 & 99.8 & 51.0 & 50.7 \\
+Zephyr 7B-$\beta$ & Naive DPO & 250 & 99.9 & 47.0 & 47.6 \\
+Zephyr 7B-$\beta$ & \method (ours) & 250 & \textbf{99.9} & \textbf{52.3} & \textbf{53.0} \\
+\midrule
+Zephyr 7B-$\beta$ & SFT & 14,000 (All Conversations) & 99.8 & 63.1 & 60.4\\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+\subsection{Qualitative Examples}
+\label{sec:qualitative_analysis}
+In Table~\ref{tab:positive_qualitative_example_pacific} we compare two trajectories produced by Zephyr 7B tuned on 50 conversations from PACIFIC using SFT and \methodnospace, respectively, given the same conversation context and tabular information. The SFT model provided an incorrect answer to the user request, matching the ``Incorrect Assumption'' case in Figure~\ref{fig:intro_figure}. In contrast, the model tuned using \method asked a clarifying question before eventually producing the correct answer.
+
+\begin{table}[]
+\caption{\textbf{Comparison of trajectories using different tuning approaches}. Left: snippet of tabular data from the PACIFIC test set. Middle: trajectory resulting from the SFT model in response to the user query. Right: trajectory resulting from the \method model. Red text: sampled from $U$.}
+\label{tab:positive_qualitative_example_pacific}
+\begin{adjustbox}{width=1.0\columnwidth,center}
+\renewcommand{\arraystretch}{1.1} % Increase line spacing slightly
+\begin{tabular}{@{}llll@{}}
+\toprule
+\multirow{5}{*}{\begin{tabular}[c]{@{}l@{}}
+\textbf{Relevant Table Data} \\ 
+Year: 2019 || 2018 \\
+Total current liabilities : 851 || 167 \\
+Other noncurrent liabilities : 5 || 74 \\
+Total Liabilities: \$909 || \$1,305\end{tabular}} 
+& \textbf{SFT} & \textbf{ACT} \\ \hline
+& User: What were the total liabilities of IMFT? & User: What were the total liabilities of IMFT? \\ 
+& Assistant: \textit{\$909} $\times$ & Assistant: Which year are you asking about? \\ 
+& & \textcolor{red}{User: 2018} \\ 
+& & Assistant: \textit{\$1,305} \checkmark \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+\subsection{Ablation Studies}
+\FloatBarrier
+\begin{table}[h]
+\small
+  \caption{\textbf{Ablation study of various conditions} using PACIFIC's 50 conversation setting.}
+  \label{tab:ablations}
+  \centering
+  \scalebox{0.8}{
+  \begin{tabular}{lcccccc}
+    \toprule
+    & Macro F1 $\uparrow$ & Turn F1 $\uparrow$ & Traj. F1 $\uparrow$ & Post-Clarify F1 $\uparrow$ \\
+    \midrule
+    \multicolumn{5}{l}{\textbf{Action Importance}} \\
+    \midrule
+    \method \\
+    ~w/ Random Actions & 63.2 & 55.3 & 58.7 & 32.8 \\
+    \midrule
+    \multicolumn{5}{l}{\textbf{Ablation of \method subcomponents}} \\
+    \midrule
+    \method \\
+    ~w/o on-policy sampling & 74.8 & 61.5 & 59.1 & 40.5 \\
+    \method \\
+    ~w/ sampling but w/o simulation & 81.4 & 60.8 & 60.2 & 50.1 \\
+    \method (full) & 82.2 & 62.8 & 61.9 & 57.2 \\
+    \midrule
+    \multicolumn{5}{l}{\textbf{\method with unaligned foundation models}} \\
+    \midrule
+    Gemma 2B SFT & 57.7 & 38.0 & 40.5 & 17.0 \\
+    Gemma 2B ACT & \textbf{62.7} & \textbf{42.6} & \textbf{44.0} & \textbf{24.8} \\
+    \midrule
+    Mistral 7B SFT & 57.7 & 53.8 & 51.4 & 27.7 \\
+    Mistral 7B ACT & \textbf{75.7} & \textbf{58.1} & \textbf{57.6} & \textbf{31.9} \\
+    \bottomrule
+  \end{tabular}
+  }
+\end{table}
+\FloatBarrier
+\paragraph{Are action-based preferences necessary?}
+One of the key factors of \method is that all of the contrastive pairs highlight differences between pragmatic actions (e.g. asking a question versus providing an answer). As indicated in the main results (Tables~\ref{tab:pacific_results},\ref{tab:abgcoqa_results},\ref{tab:ambigsql_results}), we see that Naive DPO (i.e., when we sample preference pairings from LLMs without action specification) underperforms \methodnospace. In Table~\ref{tab:ablations}, we additionally examine the importance of action selection by randomly sampling \textit{both the winning and losing action} when constructing the preference pair, and observe this underperforms normal \methodnospace.
+\paragraph{Do we need on-policy sampling?} In Table~\ref{tab:ablations}, we also consider whether it is sufficient to remove sampling altogether, i.e. using the normal DPO algorithm on the action-based preference dataset as constructed in Section~\ref{sec:preference_data_construction}. While we do observe some improvements over SFT (e.g., from 69.0 to 74.8 in terms of Macro F1 and from 57.8 to 61.5 in terms of turn-level DROP F1), the overall improvements are much larger when using on-policy sampling as with full \methodnospace. This may be due to the fact that the LLM-sampled negative responses are not guaranteed to lie within the language manifold of the tuned policy model, making the training example too ``easy.'' Similarly, distribution shift is the key motivating factor the proposed online variant of DPO in \cite{guo2024direct}.
+\paragraph{Is trajectory simulation necessary?} We propose \method as an approach which is better-aligned with multi-turn conversations due to its trajectory-level simulation from the policy model. In Table~\ref{tab:ablations}, we find that removing trajectory-level simulation (while including on-policy response sampling for the purpose of determining pragmatic-level actions) results in degraded performance in terms of post-clarification DROP F1. This indicates that the model is better able to reason about its own clarification questions when tuned with trajectory-level simulation. We do note that this condition does outperform both SFT and \method without any sampling (particularly in terms of Macro F1).
+\paragraph{How much does pre-aligning the initial policy model help?} In all of our experiments with \methodnospace, we used Zephyr 7B-$\beta$, a version of Mistral 7B which has already been aligned with DPO. In Table~\ref{tab:ablations} we also examine the impact of directly tuning two base foundation models, Mistral 7B and Gemma 2B. Directly comparing the baseline SFT performance with Mistral 7B against Zephyr 7B (see Table~\ref{tab:pacific_results}), we can see there is already a noticeable gap in all metrics. After applying \methodnospace, while Mistral 7B's performance does improve, it does not achieve the same performance as Zephyr.
+\subsection{Limitations}
+\label{sec:limitations}
+The biggest limitation of our work is that we assume: i) the labeled clarification need of each dataset is objective; ii) the clarification questions are appropriate; and iii) the eventual answers are the ground truth. However, depending on the dataset, this can be a faulty assumption. Crowdsourced conversation datasets are often noisy~\cite{chen2023controllable}, and relying on noisy annotations or token sequences can result in suboptimal learned policies (from the perspective of asking unnecessary clarifying questions, as well as generating disfluent language).
+
+
+\section{Conclusion}
+
+
+In this work, we proposed \methodnospace, a quasi-online contrastive RL-tuning approach for sample-efficient conversational task adaptation, along with a workflow for evaluation of conversational agents.
+How \method will generalize to large-scale data and multi-task environments warrants further study, but in this work we see encouraging evidence that it is highly effective for task adaptation in the limited data regime. Future work may also consider combining \method with existing sophisticated tuning approaches and task heuristics such as execution feedback for complex tasks like text-to-SQL generation.
+
+
+
+
+

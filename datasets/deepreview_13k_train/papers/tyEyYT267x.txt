@@ -1,0 +1,271 @@
+\title{Interpolating Autoregressive and Discrete Denoising Diffusion Language Models}
+
+\begin{abstract}
+Diffusion language models offer unique benefits over autoregressive (AR) models due to their potential for parallelized generation and controllability, yet they lag in likelihood modeling and are limited to fixed-length generation. In this work, we introduce a class of semi-autoregressive (SAR) diffusion models that interpolate between discrete denoising diffusion and autoregressive models. 
+We propose a recipe for building effective SAR models that includes an efficient training algorithm, estimators of gradient variance, and data-driven noise schedules to minimize the variance. SAR models overcome key limitations of diffusion language models, setting a new state-of-the-art performance on language modeling benchmarks and enabling generation of arbitrary-length sequences.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Diffusion models are widely used to generate images (Ho et al., 2020; Dhariwal & Nichol, 2021) and videos (Ho et al., 2022; Gupta et al., 2023), and are becoming increasingly effective at generating discrete data such as text (Lou et al., 2023; Sahoo et al., 2024) or biological sequences (Avdeyev et al., 2023). Compared to autoregressive models, diffusion models have the potential to improve the controllability of model outputs and to accelerate generation.  
+
+However, discrete diffusion models currently face at least two limitations. First, in applications such as chat systems, models must generate output sequences of arbitrary length (e.g., a response to a user’s question). However, most recent diffusion architectures only generate fixed-length vectors (Austin et al., 2021; Lou et al., 2023). Second, the quality of discrete diffusion models, as measured by standard metrics such as perplexity, lags behind autoregressive approaches and further limits their applicability (Gulrajani & Hashimoto, 2024; Sahoo et al., 2024). This paper makes progress towards addressing both limitations by introducing semi-autoregressive denoising discrete diffusion language models (SAD3-LMs), which interpolate between diffusion and autoregressive modeling. Specifically, SAD3-LMs define an autoregressive probability distribution over blocks of discrete random variables; the conditional probability of a block given previous blocks is specified by a denoising discrete diffusion model (Austin et al., 2021; Sahoo et al., 2024).  
+
+Developing effective SAD3-LMs involves two challenges. First, efficiently computing the training objective for a semi-autoregressive model is not possible using one standard forward pass of a neural network and requires developing specialized algorithms. Second, training is hampered by the high variance of the gradients of the diffusion objective, causing SAD3-LMs to under-perform autoregression even with a block size of one (when both models should be equivalent). We derive estimators of gradient variance, and demonstrate that it is a key contributor to the gap in perplexity between autoregression and diffusion. We then propose custom noise processes that minimize gradient variance and make progress towards closing the perplexity gap.  
+
+We evaluate SAD3-LMs on language modeling benchmarks, and demonstrate that they are able to generate sequences of arbitrary length, including lengths that exceed their training context. In addition, SAD3-LMs achieve new state-of-the-art perplexities among discrete diffusion models. Compared to alternative semi-autogressive formulations that perform Gaussian diffusion over embeddings (Han et al., 2022; 2023), our discrete approach features tractable likelihood estimates and yields samples with improved generative perplexity using an order magnitude fewer generation steps. In summary, our work makes the following contributions:  
+
+• We introduce semi-autoregressive denoising discrete diffusion models, which are autoregressive over blocks of tokens; conditionals over each block are based on discrete diffusion. • We introduce custom training algorithms for semi-autoregressive models that enable efficiently leveraging the entire batch of tokens provided to the model. • We identify gradient variance as a limiting factor of the performance of diffusion models, and we propose custom data-driven noise schedules that reduce gradient variance. • Our results set a new state-of-the-art in perplexity for discrete diffusion and make progress towards reducing the gap to autoregressive models.  
+
+2 BACKGROUND: LANGUAGE MODELING PARADIGMS  
+
+2.1 AUTOREGRESSIVE MODELS  
+
+Consider a sequence of $L$ tokens $\mathbf{x}=\left(x^{1},\ldots,x^{L}\right)$ drawn from the data distribution $q(\mathbf{x})$ . We aim to fit a model $p_{\theta}(\mathbf{x})$ of $q$ . Autoregressive (AR) models define a factorized distribution of the form  
+
+$$
+\log p_{\theta}(\mathbf{x})=\sum_{i=1}^{L}\log p_{\theta}(\mathbf{x}^{i}\mid\mathbf{x}^{<i}),
+$$  
+
+where each $p_{\theta}(\mathbf{x}^{i}\mid\mathbf{x}^{<i})$ is parameterized directly with a neural network. As a result, AR models may be trained efficiently via next token prediction. However, AR models take $L$ steps to generate $L$ tokens due to the sequential dependencies.  
+
+2.2 DISCRETE DENOISING DIFFUSION PROBABILISTIC MODELS  
+
+Diffusion models fit a model $p_{\theta}(\mathbf{x})$ to undo a forward corruption process $q$ (Sohl-Dickstein et al., 2015; Ho et al., 2020). This process starts with clean data $\mathbf{x}$ drawn from the data distribution $q(\mathbf{x})$ and defines latent variables $\mathbf{x}_{t}$ for $t\in[0,1]$ that represent progressively noisy versions of $\mathbf{x}$ . In the discrete-time setting, the D3PM framework (Austin et al., 2021) defines $q$ to be a Markov forward process $q(\mathbf{x}_{t}\mid\mathbf{x}_{t-1})=\operatorname{Cat}(\mathbf{x}_{t};Q_{t}\mathbf{x}_{t-1})$ defined by the multiplication of matrices $Q_{t}$ over $T$ discrete time steps. The $Q_{t}$ can encode masking, random token changes, related word substitutions, and more.  
+
+An ideal diffusion model $p_{\theta}$ is the reverse of the process $q$ . The D3PM framework defines $p_{\theta}$ as  
+
+$$
+p_{\theta}(\mathbf{x}_{s}\mid\mathbf{x}_{t})=\sum_{\mathbf{x}}q(\mathbf{x}_{s}\mid\mathbf{x}_{t},\mathbf{x})p_{\theta}(\mathbf{x}\mid\mathbf{x}_{t}),
+$$  
+
+where the denoising base model $p_{\theta}(\mathbf{x}\mid\mathbf{x}_{t})$ predicts clean tokens $\mathbf{x}$ given noised tokens $\mathbf{x}_{t}$ . The marginalization is tractable due to the independent noising process over tokens in $q$ , as well as the independence assumptions commonly made in the base model: the clean tokens are modeled independently as $\prod_{i}p(\mathbf{x}^{\bar{i}}\mid\mathbf{x}_{t})$ .  
+
+The diffusion model $p_{\theta}$ is trained using variational inference. Given a number of discretization steps $T$ , defining $s(j)=(j-1)/T$ and $t(\overline{{j}})=j/T$ , and using $D_{\mathrm{KL}}[\cdot]$ to denote the Kullback–Leibler divergence, the Negative ELBO (NELBO) equals (Sohl-Dickstein et al., 2015):  
+
+$$
+\Sigma(\mathbf{x})=\mathbb{E}_{q}\Bigg[-\log p_{\theta}(\mathbf{x}|\mathbf{x}_{t(0)})+\sum_{j=1}^{T}D_{\mathrm{KL}}[q(\mathbf{x}_{s(j)}|\mathbf{x}_{t(j)},\mathbf{x})\|p_{\theta}(\mathbf{x}_{s(j)}|\mathbf{x}_{t(j)})]+D_{\mathrm{KL}}[q(\mathbf{x}_{t(T)}|\mathbf{x})\|p_{\theta}(\mathbf{x}_{t(T)})]\Bigg]
+$$  
+
+For brevity, we drop $j$ from $t(j)$ and $s(j)$ below; in general, $s$ will denote the time step before $t$ . This formalism extends to continuous time via Markov chain (CTMC) theory, and admits score-based generalizations (Song & Ermon, 2019; Lou et al., 2023; Sun et al., 2022) and simplifications (Sahoo et al., 2024) that tighten the ELBO and improve performance.  
+
+
+
+\section{3 SEMI-AUTOREGRESSIVE DENOISING DISCRETE DIFFUSION (SAD3-LM)  }
+
+
+We explore a class of semi-autoregressive denoising discrete diffusion language models, SAD3-LMs, that interpolate between autoregressive and diffusion models by defining an autoregressive distribution over blocks of tokens. We provide a semi-autoregressive objective for maximum likelihood estimation and efficient training and sampling algorithms. We show that for a block size of one, the diffusion objective suffers from high variance despite being equivalent to the autoregressive likelihood in expectation. We identify high training variance as a limitation of diffusion models and propose data-driven noise schedules that reduce the variance of the gradient updates during training.  
+
+Notation Consider a sequence of $L$ tokens $\mathbf{x}=\left[x^{1},\ldots,x^{L}\right]$ drawn from the data distribution $q(\mathbf{x})$ . We group tokens in $\mathbf{x}$ into $B$ blocks of length $L^{\prime}$ with $\bar{B^{\prime}}=L/L^{\prime}$ (we assume that $B$ is an integer). We denote each block $\mathbf{x}^{(b-1)L^{\prime}:b L^{\prime}}$ from token at positions $(b-1)L^{\prime}$ to $b L^{\prime}$ for blocks $b\in\bar{\{1,\ldots,B\}}$ as $\mathbf{x}^{b}$ for simplicity.  
+
+3.1 SEMI-AUTOREGRESSIVE DISTRIBUTIONS AND MODEL ARCHITECTURES  
+
+We propose to combine the language modeling paradigms in Sec. 2 by autoregressively modeling blocks of tokens and performing diffusion within each block. Our likelihood factorizes over blocks as  
+
+$$
+\log p_{\theta}(\mathbf{x})=\sum_{b=1}^{B}\log p_{\theta}(\mathbf{x}^{b}\mid\mathbf{x}^{<b}),
+$$  
+
+and each $p_{\theta}(\mathbf{x}^{b}\mid\mathbf{x}^{<b})$ is modeled using discrete diffusion over a block of $L^{\prime}$ tokens. Specifically, we define a reverse diffusion process  
+
+$$
+p_{\theta}(\mathbf{x}_{s}^{b}\mid\mathbf{x}_{t}^{b},\mathbf{x}^{<b})=\sum_{\mathbf{x}^{b}}q(\mathbf{x}_{s}^{b}\mid\mathbf{x}_{t}^{b},\mathbf{x}^{b})p_{\theta}(\mathbf{x}^{b}\mid\mathbf{x}_{t}^{b},\mathbf{x}^{<b})
+$$  
+
+as in (2), but restricted to block $b$ .  
+
+We obtain a principled learning objective by applying the NELBO in (3) to each term in (4) to obtain  
+
+$$
+-\log p_{\theta}(\mathbf{x})\leq\mathcal{L}_{\mathrm{SAR}}(\mathbf{x},\theta):=\sum_{b=1}^{B}\mathcal{L}(\mathbf{x}^{b},\mathbf{x}^{<b},\theta),
+$$  
+
+where each $\mathcal{L}(\mathbf{x}^{b},\mathbf{x}^{<b},\theta)$ is an instance of (3) applied to log $|p_{\theta}(\mathbf{x}^{b}\mid\mathbf{x}^{<b})$ . Since the model is defined by $\mathbf{x}_{\theta}$ conditioned on $\mathbf{x}^{\overset{\,,}{<}b}$ , we make the dependence on $\mathbf{x}^{<b},\boldsymbol{\theta}$ explicit in $\mathcal{L}$ . We denote the sum of these terms $\mathcal{L}_{\mathrm{SAR}}(\mathbf{x},\theta)$ (itself a valid NELBO).  
+
+Model Architecture Crucially, we parameterize the $B$ base denoiser models $p_{\theta}(\mathbf{x}^{b}\mid\mathbf{x}_{t}^{b},\mathbf{x}^{<b})$ using a single neural network $\mathbf{x}_{\theta}$ . The neural network $\mathbf{x}_{\theta}$ outputs not only the probabilities $\hat{p_{\theta}}(\bar{\mathbf{x}^{b}}\mid\mathbf{x}_{b}^{t},\mathbf{x}^{<b})$ , but also computational artifacts for efficient training. This will enable us to compute the loss $\mathcal{L}_{\mathrm{SAR}}(\mathbf{x},\theta)$ in parallel for all $B$ blocks in a memory-efficient manner. Specifically, we parameterize $\mathbf{x}_{\theta}$ using a transformer (Vaswani et al., 2017) with a block causal attention mask. The transformer $\mathbf{x}_{\theta}$ is applied to $L$ tokens, and tokens in block $b$ attend to tokens in blocks 1 to $b$ . When $\mathbf{x}_{\theta}$ is trained, $\mathbf{x}_{\theta}^{b}(\mathbf{x}_{t}^{b},\mathbf{x}^{<b})$ yields $L^{\prime}$ predictions for denoised tokens in block $b$ based on noised $\mathbf{x}_{t}^{b}$ and clean $\mathbf{x}^{<b}$ .  
+
+In autoregressive generation, it is normal to cache keys and values for previously generated tokens to avoid recomputing them at each step. Similarly, we use $\mathbf{K}^{b}$ , $\mathbf{V}^{b}$ to denote the keys and values at block $b$ , and we define $\mathbf{x}_{\theta}$ to support these as input and output. The full signature of $\mathbf{x}_{\theta}$ is  
+
+$$
+\mathbf{x}_{\mathrm{logits}}^{b},\mathbf{K}^{b},\mathbf{V}^{b}\gets\mathbf{x}_{\theta}^{b}(\mathbf{x}_{t}^{b},\mathbf{K}^{1:b-1},\mathbf{V}^{1:b-1}):=\mathbf{x}_{\theta}^{b}(\mathbf{x}_{t}^{b},\mathbf{x}^{<b}),
+$$  
+
+where $\mathbf{x}_{\mathrm{logits}}^{b}$ are the predictions for the clean $\mathbf{x}^{b}$ , and $\mathbf{K}^{b},\mathbf{V}^{b}$ is the key-value cache in the forward pass of $x_{\theta}$ , and $\mathbf{K}^{1:b-1},\mathbf{V}^{1:b-1}$ are keys and values cached on a forward pass of $\mathbf{x}_{\theta}$ over $\mathbf{x}^{<b}$ (hence the inputs $\mathbf{x}^{<b}$ and $\mathbf{K}^{1:b-1},\mathbf{V}^{1:b-1}$ are equivalent).  
+
+3.2 EFFICIENT TRAINING AND SAMPLING ALGORITHMS  
+
+Ideally, we wish to compute the loss $\mathcal{L}_{\mathrm{SAR}}(\mathbf{x},\theta)$ in one forward pass of $\mathbf{x}_{\theta}$ . However, observe that denoising $\mathbf{x}_{t}^{b}$ requires a forward pass on this noisy input, while denoising the next blocks requires running $\mathbf{x}_{\theta}$ on the clean version $\dot{\mathbf{x}}^{b}$ . Thus every block has to go through the model at least twice.  
+
+Training Based on this observation, we propose a training algorithm with these minimal computational requirements (Alg. 1). Specifically, we precompute keys and values $\mathbf{K}^{1:B},\mathbf{V}^{1:B}$ for the full sequence $\mathbf{x}$ in a first forward pass $(\emptyset,\mathbf{K}_{\cdot\cdot}^{1:B},\mathbf{V}^{1:B})\gets\mathbf{\dot{x}}_{\theta}(\mathbf{x})$ . We then compute denoised predictions for each block using $\mathbf{x}_{\theta}^{b}(\mathbf{x}_{t}^{b},\dot{\mathbf{K}}^{1:b-1},\mathbf{V}^{1:b-1})$ . Each token passes through $\mathbf{x}_{\theta}$ twice.  
+
+Vectorized Training Naively, Alg. 1 would apply $\mathbf{x}_{\theta}^{b}(\mathbf{x}_{t_{b}}^{b},\mathbf{K}^{1:b-1},\mathbf{V}^{1:b-1})$ in a loop $B$ times. We propose a vectorized implementation that computes ${\mathcal{L}}_{\mathrm{SAR}}(\mathbf{x})$ in one forward pass on the concatenation $\mathbf{x}_{\mathrm{noisy}}\oplus\mathbf{x}$ of clean data $\mathbf{x}$ with noisy data $\mathbf{x}_{\mathrm{noisy}}=\mathbf{x}_{t_{1}}^{1}\oplus\dot{\cdot}\cdot\oplus\mathbf{x}_{t_{B}}^{B}$ obtained by applying a noise level $t_{b}$ to each block $\mathbf{x}^{b}$ . We mask $\mathbf{x}_{\mathrm{noisy}}\oplus\mathbf{x}$ such that noisy tokens attend to other noisy tokens in their block and to all clean tokens in preceding blocks (see Suppl. D). Our method keeps the overhead of training SAD3-LMs tractable and combines with pretraining to further reduce costs.  
+
+![](images/015da299e9cfffcb181e45cf0b21a8aa63b8a3a4d7ff5822f67551a143ee8563.jpg)  
+
+Sampling. We sample one block at a time, conditioned on previously sampled blocks $(\mathrm{Alg~}2)$ . We may use any sampling procedure $\operatorname{SAMPLE}(\mathbf{x}_{\boldsymbol{\theta}}^{b},\mathbf{K}^{1:b-1},\mathbf{V}^{1:\hat{b}-1})$ to sample from the conditional distribution $p_{\theta}(\mathbf{x}_{s}^{b}|\mathbf{x}_{t}^{b},\mathbf{x}^{<b})$ , where the context conditioning is generated using cross-attention with pre-computed keys and values ${\bf K}^{<b}$ , ${\bf V}^{<b}$ . Similar to AR models, caching the keys and values saves computation instead of recalculating them when sampling a new block.  
+
+Notably, our SAR decoding algorithm enables us to sample sequences of arbitrary length, whereas diffusion models are restricted to fixed-length generation. Further, our sampler admits parallel generation within each block, whereas AR samplers are constrained to generate token-by-token.  
+
+4 UNDERSTANDING LIKELIHOOD GAPS BETWEEN DIFFUSION & AR MODELS  
+
+4.1 MASKED SAD3-LMS  
+
+The most effective diffusion models leverage a masking noise process (Austin et al., 2021; Lou et al., 2023; Sahoo et al., 2024), where tokens are gradually replaced with a special mask token. Here, we introduce masked SAD3-LMs, a special class of SAR models based on the masked diffusion language modeling framework (Sahoo et al., 2024).  
+
+More formally, we adopt a per-token noise process $q(x_{t}|x_{0})=\mathsf{C a t}(x_{t};\alpha_{t}x_{0}+(1-\alpha_{t})m)$ where $m$ is a one-hot encoding of the mask token, and $\alpha_{t}\in[0,1]$ is a strictly decreasing function in $t$ , with $\alpha_{0}\approx1$ and $\alpha_{1}\approx0$ . Intuitively, the probability of masking a token at time $t$ is $1-\alpha_{t}$ . We adopt the simplified objective from Sahoo et al. (2024) (the full derivation is provided in Suppl. A):  
+
+$$
+-\log p_{\theta}(\mathbf{x})\le\mathcal{L}_{\mathrm{MDLM}}(\mathbf{x},\theta):=\sum_{b=1}^{B}\mathbb{E}_{t_{b}\sim(0,1]}\mathbb{E}_{q}\frac{\alpha_{t}^{\prime}}{1-\alpha_{t}}\log p_{\theta}(\mathbf{x}^{b}|\mathbf{x}_{t_{b}}^{b},\mathbf{x}^{<b})
+$$  
+
+where $\alpha_{t}^{\prime}$ is the instantenous rate of change of $\alpha_{t}$ under the continuous-time extension of (3) that takes $T\rightarrow\infty$ . Under the linear schedule, $\alpha_{t}^{\prime}=-1$ .  
+
+The NELBO is tight for $L^{\prime}=1$ but becomes a looser approximation of the true negative log-likelihood for $L^{\prime}>1$ , $L^{\prime}\to L$ (see Suppl. C).  
+
+![](images/6fd7e2ebf72dd4e5c850b872db25877fb6985f238422b3374078d35ed45c375d.jpg)  
+Figure 1: Train NLLs for modeling the per-token likelihood on LM1B. Training under the discrete diffusion ELBO, where half of tokens are masked on average, has similar training variance to an AR model with a random batch size.  
+
+4.2 CASE STUDY: SINGLE TOKEN GENERATION  
+
+Our SAR parameterization (Eq. 7) is equivalent in expectation to the autoregressive NLL (Eq. 1) in the limiting case where $L^{\prime}=1$ . Surprisingly, we find a two point perplexity gap between our SAR model for $L^{\prime}=1$ and AR when training both models on the LM1B dataset.  
+
+Although the objectives are equivalent in expectation, we show that the remaining perplexity gap is a result of high training variance. Whereas an AR model is trained using the crossentropy of $L$ tokens, our SAR model for $L^{\prime}=1$ only computes the cross-entropy for masked tokens $\mathbf{x}_{t}\,=\,\mathbf{m}$ , so that $\mathbb{E}_{t\sim\mathcal{U}[0,1]}q(\mathbf{x}_{t}\,=\,\mathbf{m}|\mathbf{x})\,=\,0.5$ . As a result, training on the diffusion objective involves estimating loss gradients with $2\mathbf{x}$ fewer tokens and is responsible for higher variance during training compared to AR.  
+
+Table 1: Test perplexities for singletoken generation (PPL; ↓) across 16B tokens on LM1B. We also report the variance of the parameter gradient updates over $525\mathrm{M}$ tokens.   
+
+![](images/042af590f4954ad1f4bd8d1c388f135e55f79f3adaaddbf85e06bcf1f34d2ee3.jpg)  
+
+To close the likelihood gap, we train our SAR model for $L^{\prime}=1$ by designing the forward process to fully mask tokens, i.e. $\dot{q}(\mathbf{x}_{t}=\mathbf{\dot{m}}|\bar{\mathbf{x}})=1.$ . Under this schedule, training under the AR objective is equivalent to training under the SAR objective (Suppl. B). In Table 1, we show that training under the SAR objective yields the same perplexity as training under the AR objective. Empirically, we see that this reduces the variance of the training loss in Figure 1. We verify that tuning the noise schedule reduces the variance of the gradient updates by measuring it over $525\mathrm{M}$ tokens: while training on the ELBO results in a gradient variance $\mathrm{Var}_{\mathbf{x},t(i)}$ $\mathbf{\Phi}_{i)}\left[\nabla_{\theta}\mathcal{L}_{\mathrm{MDLM}}(\mathbf{x},\theta)\right]=0.92$ training under full masking reduces the gradient variance to 0.53.  
+
+
+
+\section{4.3 DIFFUSION GAP FROM HIGH VARIANCE TRAINING  }
+
+
+Next, we formally describe the issue of gradient variance in training diffusion models. Given our empirical observations for single-token generation, we propose an estimator for gradient variance that we use to minimize the variance of diffusion model training for $L^{\prime}\geq1$ .  
+
+While the ELBO is invariant to the choice of noise schedule (Suppl. A), this invariance does not hold for our Monte Carlo estimator of the loss used during training. As a result, the variance of the estimator and its gradients are dependent on the schedule. First, we express the estimator of the NELBO with a batch size $K$ . We denote a batch of sequences as $\mathbf{X}=\left[\bar{\mathbf{x}}^{(1)},\mathbf{x}^{(2)},\ldots,\mathbf{x}^{(K)}\right]$ , with each $\mathbf{x}^{(k)}$ ii∼d $q(\mathbf{x})$ . The batch NELBO estimator is given by  
+
+$$
+\mathcal{L}_{\mathrm{MDLM}}(\mathbf{X}):=l_{\theta}(\mathbf{X})=\frac{1}{K}\sum_{k=1}^{K}\sum_{b=1}^{B}\frac{\alpha_{t}^{\prime}}{1-\alpha_{t_{(k),b}}}\log p_{\theta}\left(\mathbf{x}^{(k),b}\mid\mathbf{x}_{t_{(k),b}}^{(k),b},\mathbf{x}^{(k),<b}\right),
+$$  
+
+where under the linear schedule, $\alpha_{t}^{\prime}$ is constant across $t\in[0,1]$  
+
+We derive the variance of the gradient estimator over $M$ batches $\mathbf{X}^{m}$ consisting of $K$ sequences each as:  
+
+$$
+\operatorname{Var}_{\mathbf{X},t}\left[\nabla_{\theta}l(\mathbf{X})\right]\approx\frac{1}{M-1}\sum_{m=1}^{M}\left\|\nabla_{\theta}l_{\theta}(\mathbf{X}^{m})-\frac{1}{M}\sum_{m=1}^{M}\nabla_{\theta}l_{\theta}(\mathbf{X}^{m})\right\|_{2}^{2},
+$$  
+
+where $t\sim\mathcal{U}[0,1]$ .  
+
+
+
+\section{5 LOW-VARIANCE NOISE SCHEDULES FOR MASKED SAD3-LMS  }
+
+
+5.1 INTUITION: AVOID EXTREME MASK RATES  
+
+We aim to identify schedules that minimize the variance of the gradient estimator and make training most efficient. In a masked setting, we want to mask random numbers of tokens, so that the model learns to undo varying levels of noise, which is important during sampling. However, if we mask very few tokens, reconstructing them is easy, and does not provide useful learning signal. If we mask everything, the optimal reconstruction are the marginals of each token in the data distribution, which is easy to learn, and again is not useful. These extreme masking rates lead to poor high-variance gradients: we want to learn how to clip them via a simple and effective new class of schedules.  
+
+5.2 CLIPPED SCHEDULES FOR LOW-VARIANCE GRADIENTS  
+
+We propose a class of "clipped" noise schedules that sample mask rates $1-\alpha_{t}\,\sim\mathcal{U}[\beta,\omega]$ for $0\leq\beta,\omega\leq1$ . We argue that from the perspective of deriving Monte Carlo gradient estimates, these schedules are equivalent to a continuous schedule where the mask probability is approximately 0 outside of the specified range such that $1-\alpha_{<\beta},1-\alpha_{>\omega}\approx\epsilon$ and $\alpha_{t}^{\prime}$ is linear within the range: $\alpha_{t}^{\prime}\approx\beta-\omega$ .  
+
+
+
+\section{5.3 DATA-DRIVEN CLIPPED SCHEDULES ACROSS BLOCK SIZES  }
+
+
+As the optimal mask rates may differ depending on the block size $L^{\prime}$ , we adaptively learn the schedule during training. While Kingma et al. (2021) perform variance minimization by isolating a variance term using their squared diffusion loss, this strategy is not directly applicable to our variance estimator in Equation 9 since we seek to reduce variance across random batches in addition to random $t_{b}$ .  
+
+Instead, we optimize parameters $\beta,\omega$ to directly minimize training variance. To limit the computational burden of the optimization, we use the variance of the estimator of the diffusion ELBO as a proxy for the gradient estimator to optimize $\begin{array}{r}{\beta,\omega;\operatorname*{min}_{\beta,\omega}\operatorname{Var}_{\mathbf{X},t}\left[\mathcal{L}(\theta,\beta,\omega;\mathbf{X})\right]}\end{array}$ .  
+
+In Table 2, we show that variance of the diffusion ELBO is correlated with test perplexity. Under a range of "clipped" noise rate distributions, we find that there exists a unique distribution for each block size $L^{\prime}\in\ \bar{\{4,}16,128\}$ that minimizes both the variance of the NLL and the test perplexity. We provide experimental details on the optimization procedure in Sec. 6.4.  
+
+Table 2: Perplexities (PPLs) and variances of the SAR ELBO $\operatorname{Var}_{\mathbf{X},t}\left[\mathcal{L}_{\mathrm{SAR}}(\mathbf{X},\theta)\right]$ from training on 60M tokens on LM1B across SAD3-LMs.  
+
+![](images/5619e513efc44ed88b123a5bfee883ee42771629ac7d29b0f573e246d3d612c8.jpg)  
+
+6 EXPERIMENTS  
+
+We evaluate SAD3-LMs across standard language modeling benchmarks and demonstrate their ability to generate arbitrary-length sequences on unconditional generation tasks. We train a base SAD3-LM using the maximum context length $L^{\prime}=L$ for 850K gradient steps and fine-tune under varying $L^{\prime}$ for 150K gradient steps on the One Billion Words dataset (LM1B) and OpenWebText (OWT). Further details are provided in Suppl F.  
+
+To reduce the variance of training on the diffusion ELBO, we adaptively learn the range of masking rates by optimizing parameters $\beta,\omega$ as described in Section 5.3. In practice, we do so using a grid search during every validation step (after ${\sim}5\mathrm{K}$ gradient updates) to identify $\beta,\omega$ : $\bar{\operatorname*{min}_{\beta,\omega}}\,\bar{\mathrm{Var}}_{{\bf X},t}\left[\mathcal{L}(\theta,\beta,\omega;\bar{\bf X})\right]$ .  
+
+During evaluation, we report likelihood under uniformly sampled mask rates (Eq. 7) as in Austin et al. (2021); Sahoo et al. (2024).  
+
+6.1 LIKELIHOOD EVALUATION  
+
+On LM1B, SAD3-LMs outperform all prior diffusion methods in Table 3. Compared to MDLM, SAD3-LM achieves up to a $13\%$ improvement in perplexity. We observe a similar trend on OpenWebText, as shown in Table 4.  
+
+We also evaluate the ability of SAD3-LMs to generalize to unseen datasets in a zero-shot setting, following the benchmark from (Radford et al., 2019). We evaluate the likelihood of SAD3-LMs trained with OWT on the following benchmark datasets (Radford et al., 2019): LM1B, Lambada (Paperno et al., 2016), AG News (Zhang et al., 2015), and Scientific Papers (Pubmed and Arxiv subsets; (Cohan et al., 2018)). In Table 5, SAD3-LM achieves the best zero-shot perplexity on Pubmed, surpassing AR, and the best perplexity among diffusion models on LM1B.  
+
+Table 3: Test perplexities (PPL; $\downarrow$ of models trained for 1M steps on LM1B. †Reported in He et al. (2022). Best diffusion value is bolded.   
+
+![](images/e4188a7da08f2d172a8da5c356e6c79a44c25c63e79b3e75da3d20f217537ee6.jpg)  
+
+6.2 QUALITATIVE ANALYSIS AND VARIABLE-LENGTH SEQUENCE GENERATION  
+
+We also examine qualitatively samples taken from the SAD3-LM model and baselines (AR, MDLM) trained on the OWT dataset; we report samples in E. We observed similar levels of coherence and diversity across samples from all models; we were not able to distinguish samples coming from different models in a blind test, despite the AR model achieving significantly lower perplexity values.  
+
+Table 4: Test perplexities (PPL; $\downarrow$ ) on OWT for models trained for 262B tokens.   
+
+![](images/c645a5bb63f87d63614439bd751d73a1af8e9d8d971251c95e400fc8022167de.jpg)  
+
+Table 5: Zero-shot validation perplexities (↓) of models trained for 524B tokens on OWT. All perplexities for diffusion models are upper bounds.   
+
+![](images/911d4de649a296bf879c0accae42858ae271b1f4b667127a252085869f2eeaf6.jpg)  
+
+One key drawback of many existing diffusion language models (e.g,. Austin et al. (2021); Lou et al. (2023)) is that they cannot generate full-length sequences that are longer than the length of the output context chosen at training time. The OWT dataset is useful for examining this limitation, as it contains many documents that are longer than 1,024 tokens in length. Accordingly, while our SEDD samples were clipped at 1,024 tokens, several of our AR and SAD3-LM samples exceed this threshold (Suppl E).  
+
+6.3 COMPARING TO CONTINUOUS-STATE SEMI-AUTOREGRESSIVE DISCRETE DIFFUSION (SSD-LM)  
+
+Han et al. (2022) introduced SSD-LM, an alternative semi-autoregressive formulation that performs Gaussian diffusion over word embeddings, as in Li et al. (2022). Our approach instead applies discrete noise and can be seen as the analogous extension of Austin et al. (2021).  
+
+Unlike SAD3-LMs, SSD-LM does not support likelihood estimation. Thus, to compare the models, we generated unconditionally sequences of length 1024 from both models as well as well as from the AR model, all trained on OWT. We measured generative PPL compared against SSD-LM and AR as well as the number of calls to the models during sampling. Compared to alternative semiautogressive formulations that perform Gaussian diffusion over embeddings (Han et al., 2022), our discrete approach yields samples with improved generative perplexity using an order magnitude fewer generation steps.  
+
+Table 6: Semi-AR generative perplexity (Gen. PPL; $\downarrow$ ) and sampling a sequences of $L=1024$ . All models are trained using a context length of 1024 tokens. For SEDD, MDLM, and SAR we set the number of diffusion steps $T=5000$ . SSD-LM uses a block size of 25 with $T=40K$ diffusion steps $T=1000$ per block). However, SAD3-LM $\mathcal{L}^{\prime}=16$ ) uses fewer NFEs by caching the predictions for $\mathbf{x}$ after sampling (see Sahoo et al. (2024)).  
+
+![](images/0c8d6a6dcbdf3e3b7b75f831e8e0f6a670346f04cfbb3ad1c6ae600a8aa2babf.jpg)  
+
+SAD3-LMs also enjoy efficiency improvements over AR models by using fewer functional evaluations (NFEs), whereas AR generation is fixed to $L$ NFEs. We evaluate our proposed SAR decoding algorithm (Alg. 2) in unconditional generation generate 10 sequences of lengths $L=1024$ using SAD3-LMs. We show that SAR approaches support generating sequences of arbitrary length, overcoming a key limitation of sampling with diffusion models. In generating 1024 tokens (Table 6), SAD3-LM achieves comparable results while using much fewer NFEs.  
+
+6.4 ABLATIONS  
+
+We assess the impact of the design choices in our proposed SAR recipes, namely 1) selection of the noise schedule and 2) the efficiency improvement of the proposed training and sampling algorithms relative to a naive implementation.  
+
+SELECTING NOISE SCHEDULES TO REDUCE TRAINING VARIANCE  
+
+Our class of "clipped" masking is the most effective in reducing the perplexity gap compared to linear, cosine, and logarithmic schedules. In Table 7, we train SAD3-LMs under a variety of different schedules for $L^{\prime}=4$ , 16 and show their impact on test perplexity on LM1B. We find that "clipping" the masking rates during training is the most effective for reducing the variance of the ELBO, which correlates with the perplexity. The ideal "clipped" masking rates, which are learned during training, are specific to the block size and further motivate our optimization.  
+
+Table 7: Effect of training under different noise schedules on perplexity on LM1B. All models are finetuned for 50K steps and are evaluated under the linear schedule where $t\sim\mathcal{U}[0,1]$ . For our clipped schedules, we compare the optimized clipping rates for $L^{\prime}=4,16$ .  
+
+![](images/74bbcaa0648dd402a5b966073ef88925e06835fbc8d4c4f10c3939be5804fb92.jpg)  
+
+
+
+\section{7 DISCUSSION, PRIOR WORK, AND CONCLUSION  }
+
+
+Comparison to D3PM Semi-autoregressive diffusion builds off D3PM (Austin et al., 2021) and applies it to each auto-regressive conditional. We improve over D3PM in three ways: (1) we provide a way of extending D3PM beyond fixed sequence lengths; (2) we study the perplexity gap of D3PM and AR models, identify gradient variance as a contributor, and design variance-minimizing schedules;  
+
+(3) we improve over the perplexity of D3PM models. While (1) involves modifying D3PM to make it semi-autoregressive, (2) is applicable to vanilla D3PM.  
+
+Comparison to MDLM Masked SAD3-LMs further make use of the perplexity-enhancing improvements in MDLM (Sahoo et al., 2024). We also build upon MDLM: (1) while Sahoo et al. (2024) points out that their ELBO is invariant to the noise schedule, we show that the noise schedule has a significant effect on gradient variance; (2) we push the state-of-the-art in perplexity beyond MDLM. Note that our perplexity improvements stem not only from semi-autoregression, but also from optimized schedules, and could enhance standard MDLM models.  
+
+Comparison to Autoregressive-Diffusion Models Han et al. (2022) introduced an alternative semi-autoregressive formulation that performs Gaussian diffusion over word embeddings, as in $\mathrm{Li}$ et al. (2022). Our approach instead applies discrete noise as in Austin et al. (2021), and features notable improvements: (1) tractable likelihood estimates enabling principled evaluation; (2) faster generation, as our number of model calls is bounded by the number of generated tokens, while SSD-LM performs orders of magnitude more calls; (3) significantly improved performance, measured by perplexity relative to existing models as well as generative perplexity relative to samples from both SSD-LM.  
+
+AR-Diffusion (Wu et al., 2023) is a variant of SSD-LM that uses a noise schedule which encourages sampling in a left-to-right manner. However, they sacrifice parallelism by assigning unique, per-token timesteps. Autoregressive Diffusion Models (Hoogeboom et al., 2021) generalize order-agnostic autoregressive models and discrete diffusion. In contrast, our approach is not order-agnostic as blocks are modeled autoregressively. TimeGrad (Rasul et al., 2021) performs time series forecasting under a diffusion objective conditioned on observations at the previous timestep. However, their framework is autoregressive so it is not amenable to parallel sampling or controllability.  
+
+Comparison to Jacobi Decoding Jacobi decoding (Santilli et al., 2023) is an AR inference technique that iteratively refines a random sequence and supports parallel generation of token blocks. However, Santilli et al. (2023) preserve causal masking from AR whereas SAD3-LMs may leverage more context by attending to tokens within a block and in previous blocks. Whereas Jacobi decoding uses uniform noise, SAD3-LMs use masking which has been shown to be superior in language modeling (Austin et al., 2021; Lou et al., 2023). Consistency LLMs (Kou et al., 2024) extend Jacobi decoding to include a fine-tuning objective. In contrast, SAD3-LMs may leverage clean conditional context $\mathbf{\check{x}}^{<b}$ to enhance predictions.  
+
+Limitations Training SAD3-LMs requires a custom procedure that is more expensive than regular diffusion training. We propose a vectorized implementation that keeps training speed within ${}^{-2\mathbf{X}}$ of diffusion training speed; in our experiments, we also pre-train with a standard diffusion loss to further reduce the speed gap. Additionally, SAD3-LMs generate blocks sequentially, hence may face the same speed and controllability constraints as AR, especially when blocks are small. The optimal block size for control is task specific, and optimal blocks for speed depend on the parallelization capabilities of inferencing hardware (e.g,. flops vs. memory throughput) and serving batch size.  
+
+Conclusion This work explores semi-autoregressive diffusion and is motivated by two problems with existing discrete diffusion: the need to generate arbitrary-length sequences and the perplexity gap to discrete models. We introduce SAD3-LMs, which represent a semi-autoregressive extension of the D3PM framework (Austin et al., 2021), and leverage a specialized training algorithm and custom noise schedules that further improve performance. We observe that in addition to being able to generate long-form documents, these models also improve perplexity, setting a new state-of-the-art among discrete diffusion models.  
+
+
+
+

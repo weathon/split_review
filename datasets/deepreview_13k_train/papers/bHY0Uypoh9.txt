@@ -1,0 +1,362 @@
+\title{Exploring Non-Convex Discrete Energy Landscapes: A Langevin-Like Sampler with Replica Exchange}
+
+\begin{abstract}
+Gradient-based Discrete Samplers (GDSs) are effective for sampling discrete energy landscapes. However, they often stagnate in complex, non-convex settings. To improve exploration, we introduce the Discrete Replica EXchangE Langevin (DREXEL) sampler and its variant with Adjusted Metropolis (DREAM). These samplers use two GDSs at different temperatures and step sizes: one focuses on local exploitation, while the other explores broader energy landscapes. When energy differences are significant, sample swaps occur, which are determined by a mechanism tailored for discrete sampling to ensure detailed balance. Theoretically, we prove both DREXEL and DREAM converge asymptotically to the target energy and exhibit faster mixing than a single GDS. Experiments further confirm their efficiency in exploring non-convex discrete energy landscapes.
+\end{abstract}
+
+\section{1 Introduction  }
+
+
+Sampling from high-dimensional discrete distributions has been an important task for decades across applications in texts (Mikolov et al., 2013; Devlin et al., 2019), images (Krizhevsky et al., 2012; Ronneberger et al., 2015), signal processing (Mallat, 1989; Donoho, 2006), genome sequences (Metzker, 2010; Macosko et al., 2015), etc. However, the exponential growth in the number of configurations makes sampling from $\pi(\pmb{\theta})\propto\exp\left[U(\pmb{\theta})\right]$ computationally prohibitive. The computational burden comes from evaluating the exact probabilities and normalizing constants, which makes exact sampling impossible in practice. Algorithms such as rejection sampling (Neumann, 1951), Swendsen-Wang (Swendsen & Wang, 1987), and Hamze-Freitas (Hamze & de Freitas, 2004) leverage special structures within the problem to make global updates. In more general settings, these methods may suffer from slow exploration, local dependencies, and poor convergence.  
+
+To make high-dimensional discrete sampling more efficient, Locally Balanced Proposals (LBPs) (Zanella, 2020; Sun et al., 2021) improved acceptance rates by adjusting proposal distributions based on the likelihood ratio. Early LBPs updated one coordinate at a time (Zanella, 2020; Grathwohl et al., 2021), and Grathwohl et al. (2021) developed gradient-based discrete sampler (GDS) to update coordinately. Later, Zhang et al. (2022b) further extended GDSs by updating all coordinates simultaneously, which enhances efficiency and scalability for large-scale, highdimensional computations on GPUs and TPUs.  
+
+Despite improvements in LBPs, how to balance the tradeoff between “global exploration” and “local exploitation” remains a challenge. High-dimensional discrete distributions are highly multi-modal, with deep and narrow wells caused by intrinsic discontinuities. Gradient-based LBPs, although effective, tend to get trapped in local modes due to their reliance on local gradients and small noise, which is insufficient for escaping these traps.  
+
+![](images/077ab8855a23f709f96a0c18434c7fa06ff156929c0b80170948780033784b2e.jpg)  
+
+Figure 1: DREXEL & DREAM sample trajectory in discrete domains. Blue denotes a low-temperature sampler, and red hightemperature sampler. They exchange samples following a swap mechanism.  
+
+To bridge this gap, we propose two samplers: Discrete Replica EXchangE Langevin (DREXEL) and Discrete Replica Exchange with Adjusted Metropolis (DREAM). These samplers combine  
+
+GDS with the replica exchange Markov Chain Monte Carlo (reMCMC) (Chen et al., 2019) for efficient exploration of non-convex discrete spaces. As illustrated in Figure 1, the samplers employ two GDSs at different temperatures and step sizes: the low-temperature sampler focuses on local exploitation, while the high-temperature sampler escapes local traps for broader exploration. Sample swaps occur when energy differences are significant, governed by a mechanism tailored for discrete sampling to ensure detailed balance. The combination of replica exchange and GDS makes them particularly effective for sampling from complex discrete structures in modern applications. The primary contributions in this work are summarized as follows:  
+
+• A novel integration of GDS with replica exchange to improve non-convex exploration;   
+• A swap mechanism tailored for detailed balance and sample efficiency in discrete sampling;   
+• Theoretical analysis of improved mixing rates over naïve discrete Langevin-like samplers;   
+• Superior performance in synthetic tasks, Ising models, restricted Boltzmann machines, and energy-based deep learning models for navigating non-convex discrete energy landscapes.  
+
+
+
+\section{2 Related Work  }
+
+
+Gradient-based Discrete Sampling becomes popular for complex discrete sampling tasks and its original idea comes from LBPs. The concept of LBPs, as introduced by Zanella (2020), utilized local information in the form of density ratios to improve the sample efficiency. Grathwohl et al. (2021) expanded LBPs by the use of first-order Taylor approximation, which further ensures computational feasibility. To improve sampling in high-dimensional discrete spaces, LBPs were extended to cover larger neighborhoods by performing a sequence of small moves (Sun et al., 2021). Zhang et al. (2022b) further developed GDSs, which adapt the continuous Langevin MCMC to discrete spaces and allow parallel updates of all coordinates based on gradient information. Subsequently, GDSs were improved through the introduction of an adaptive mechanism by which the step size can be automatically adjusted (Sun et al., 2023a). Most recently, Pynadath et al. (2024) introduced an automatic cyclical scheduling approach in step sizes to better handle multi-modal distributions by alternating between exploration and exploitation phases. While these methods have shown promise, sampling from highly non-convex discrete distributions remains challenging, particularly when dealing with strongly correlated variables or energy-based deep learning models.  
+
+Replica Exchange MCMC is a powerful method that enhances exploration in complex, multi-modal distributions, and a variety of related algorithms build on this. For instance, unadjusted Langevin MCMC (Durmus & Moulines, 2017) leverages gradient information to guide proposals but lacks the exchange mechanism. Importance sampling (Wang & Landau, 2001) adjusts for the discrepancy between target and proposal distributions, which offers flexibility in sampling but without temperaturebased exchanges. Simulated tempering (Lee et al., 2018) further refined the temperature-scaling strategy by dynamically adjusting the temperature of a single chain. Recently, Zhang et al. (2020) proposed a cyclical step-size scheduler to maintain a balance between exploration and exploitation. To enhance the exploration, reMCMC runs multiple chains at different temperatures and allows for chain swaps between them. Dong & Tong (2022) analyzed its mixing by quantifying the spectral gap, and Deng et al. (2020; 2022) validated its efficiency in large-scale deep learning tasks. Despite its success in continuous sampling and high-dimensional settings, to the best of our knowledge, its potential has not been studied in sampling from discrete distributions.  
+
+3 Preliminaries  
+
+The Target Distribution $\pi:=\Theta\rightarrow[0,1]$ denotes the probabilistic model we are sampling from:  
+
+$$
+\pi(\pmb{\theta})=\frac{1}{Z}\exp\left[\frac{U(\pmb{\theta})}{\tau}\right],\quad\forall\pmb{\theta}\in\Theta,\;\;\Theta\subset\mathbb{R}^{\mathbf{d}}.
+$$  
+
+Here $\pmb{\theta}$ is $\mathbf{d}$ -dimensional variable, $\tau=1.0$ denotes the respective temperature, $\Theta$ is a finite domain, $U$ represents the energy function, and $Z$ normalizes the distribution. Following the traditional settings in discrete sampling, we assume:  
+
+1. The sampling domain is coordinate-wisely factorized where $\begin{array}{r}{\Theta=\prod_{d=1}^{\mathbf{d}}\Theta_{d}}\end{array}$ , and we primarily consider the binary cases $\Theta=\{0,1\}^{\mathbf{d}}$ or categorical $\{0,1,\ldots,N-1\}^{\mathbfit{d}}$ ;   
+2. The energy function is differentiable across $\mathbb{R}^{\mathbf{d}}$ .   
+The primary goal is to design an efficient sampler to approximate $\pi$ within a finite sample size. The empirical distribution derived from these samples converges to $\pi$ , with the approximation error bounded by a constant $\epsilon>0$ under specific metrics.  
+
+Replica Exchange MCMC is a popular sampling method for non-convex exploration in continuous spaces. It updates according to the following dynamics:  
+
+$$
+\theta_{i+1}^{(k)}=\theta_{i}^{(k)}+\frac{\alpha_{k}}{2}\nabla U(\theta_{i}^{(k)})+\,\sqrt{\alpha_{k}\tau_{k}}\xi_{k},\;\;k=1,2;\;\;i=1,2,\cdots,I.
+$$  
+
+Here $\alpha_{1},\alpha_{2}\,\in\,\mathbb{R}^{+}$ represent step sizes, $\tau_{1},\tau_{2}\,\in\,\mathbb{R}^{+}$ are temperatures, and $\xi_{1},\xi_{2}$ are independent Gaussian noises drawn from $N\left(\mathbf{0},\mathbf{I}_{\mathbf{d}\times\mathbf{d}}\right)$ . The typical setup assumes $\alpha_{1}<\alpha_{2}$ and $\tau_{1}<\tau_{2}$ , with the first chain in (2) labeled as the low-temperature chain and the second as the high-temperature chain. The gradient $\nabla U(\cdot)$ directs the algorithm toward high-probability regions. To further improve the mixing rate over Langevin MCMC, reMCMC facilitates interaction via a chain swap mechanism. Specifically, the probability to swap the $i\cdot$ -th samples between $\pmb{\theta}_{i}^{(1)}$ and $\pmb{\theta}_{i}^{(2)}$ is determined by $\rho\operatorname*{min}\left\{1,\;\bar{S}\,(\pmb{\theta}_{i}^{(1)},\pmb{\theta}_{i}^{(2)})\right\}$ . The swap intensity is regulated by $\rho>0$ , and the swap function $S:=\Theta\times\Theta\rightarrow\mathbb{R}^{+}$ is given as follows:  
+
+$$
+S(\pmb{\theta}^{(1)},\pmb{\theta}^{(2)})=e^{\left(\frac{1}{\tau_{2}}-\frac{1}{\tau_{1}}\right)\left[U(\pmb{\theta}^{(1)})-U(\pmb{\theta}^{(2)})\right]}.
+$$  
+
+Intuitively, the swap probability in reMCMC depends on the energy estimated at $\pmb{\theta}^{(1)}$ and $\pmb{\theta}^{(2)}$ . When the low-temperature chain gets stuck in a local minimum and the high-temperature chain escapes to find modes with significantly lower energy, the chain will swap their samples with high probability. This enables the low-temperature chain to better characterize the newly discovered modes, while the high-temperature chain continues to search across the energy landscape. As mentioned in Chen et al. (2019), reMCMC behaves as a reversible Markov jump process due to its swap mechanism, which converges to a similar invariant distribution in (1) while the parameters can explore over $\mathbb{R}^{\mathbf{d}}$ .  
+
+While reMCMC is a powerful tool for non-convex exploration, its update may fail to preserve the target distribution due to discretization errors introduced by the finite step size (Welling & Teh, 2011). According to Roberts & Tweedie (1996), selecting an inappropriate step size can lead to a transient Markov chain without a stationary distribution. To mitigate such bias, two main approaches are commonly used: decaying step sizes (Vollmer et al., 2016; Teh et al., 2016) and Metropolis-Hastings (MH) corrections (Dwivedi et al., 2019; Chewi et al., 2021). While implementing decaying step sizes is straightforward and does not require additional computational burden, the second approach is more favorable due to its specific advantages in discrete sampling, which will be elaborated on later.  
+
+Metropolis-Hastings Correction is considered to correct discretization errors and ensure convergence to the target distribution. Specifically, at each iteration, a new candidate $\omega\leftarrow\pmb{\theta}_{i+1}{}^{1}$ is first generated with (2). To ensure that the resulting samples come from the target distribution, the MH step determines whether to accept or reject the candidate with ${\mathcal{A}}:=\Theta\times\Theta\rightarrow[0,1]$ :  
+
+$$
+\mathcal{A}(\omega,\pmb{\theta}_{i})=\operatorname*{min}\left\{1,\frac{\pi(\omega)q\left(\pmb{\theta}_{i}\mid\omega\right)}{\pi(\pmb{\theta}_{i})q\left(\omega\mid\pmb{\theta}_{i}\right)}\right\},
+$$  
+
+where $q:=\Theta\times\Theta\rightarrow[0,1]$ is the transition probability mapping from the current sample $\pmb\theta_{i}$ to the next sample $\pmb{\theta}_{i+1}$ . With probability $\mathcal{A}(\omega,\pmb{\theta}_{i})$ , the candidate $\omega$ is accepted in the current step; otherwise, it retains the current $\pmb{\theta}_{i}$ . This adjustment preserves the correct stationary distribution. Furthermore, because Langevin MCMC allows each sample to access any point in $\mathbb{R}^{\mathbf{d}}$ , it further ensures the Markov chain is both irreducible and ergodic (Diaconis & Freedman, 1997; Meyn & Tweedie, 2012).  
+
+Discrete Langevin Sampler (DLS) is a gradient-based approach for sampling from high-dimensional discrete distributions. Inspired by Langevin MCMC, DLS updates all coordinates in parallel from a single gradient computation to function effectively in discrete settings. Specifically, for a target distribution $\pi\propto$ exp $[U(\cdot)]$ , DLS generates a new sample $\pmb{\theta}_{i+1}$ inspired by the Taylor expansion:  
+
+$$
+q\left(\theta_{i+1}\mid\theta_{i}\right)=\frac{\exp\left(-\frac{1}{2\alpha}\left\|\theta_{i+1}-\theta_{i}-\frac{\alpha}{2\tau}\nabla U(\theta_{i})\right\|_{2}^{2}\right)}{Z_{\Theta}(\theta_{i})},\;\;\theta_{i},\theta_{i+1}\in\Theta.
+$$  
+
+Here $\nabla U(\pmb\theta)$ is the gradient of the energy function evaluated at $\pmb{\theta}$ , and $Z_{\Theta}(\pmb\theta)$ normalizes the distribution:  
+
+$$
+Z_{\Theta}(\theta_{i})=\sum_{\theta_{i+1}\in\Theta}\exp\left(-\frac{1}{2\alpha}\left\|\theta_{i+1}-\theta_{i}-\frac{\alpha}{2\tau}\nabla U(\theta_{i})\right\|_{2}^{2}\right).
+$$  
+
+This proposal distribution allows DLS to make larger, parallel updates while maintaining computational efficiency. As the dimension $\mathbf{d}$ in parameter space grows, the cost of computing (6) becomes prohibitively expensive. A key insight is that the update rule can be factorized by coordinate:  
+
+$$
+\theta_{i+1,d}\sim\mathrm{Categorical}\left[\mathrm{Softmax}\left(\frac{1}{2\tau}\nabla U(\theta_{i})_{d}(\theta_{i+1,d}-\theta_{i,d})-\frac{(\theta_{i+1,d}-\theta_{i,d})^{2}}{2\alpha}\right)\right],
+$$  
+
+where $d=1,2,\dots,\mathbf{d}$ is the dimension index, and $\theta_{i,d}$ represents the $i\cdot$ -th sample in the $d$ -th dimension. This algebraic expansion, following the binomial theorem, works because $(\nabla U(\pmb\theta_{i})_{d})^{2}$ is independent of $\theta_{i+1,d}$ . It makes DLS scalable and computationally efficient for complex distributions (Zhang et al., 2022b). Furthermore, the first term in (7) biases the proposal towards low-energy regions, where the gradient points towards increasing probability; the second term acts as a regularizing factor, which penalizes large jumps unless they are strongly favored by the gradient.  
+
+DLS can operate with or without MH corrections. Without corrections, it is simplified to the Discrete Unadjusted Langevin Algorithm (DULA), which is computationally efficient but may introduce bias. With corrections in (4), it becomes the Discrete Metropolis-adjusted Langevin algorithm (DMALA), which corrects bias at an increased computational cost. Both DULA and DMALA employ non-local proposals specifically for the heat kernel to enable more efficient sampling (Sun et al., 2023a).  
+
+
+
+\section{4 Discrete Langevin Sampler with Replica Exchange  }
+
+
+The proposed DLS variants are present here, which incorporate replica exchange and a customized sampler swap mechanism to ensure detailed balance. The complete algorithm is provided at the end.  
+
+
+
+\section{4.1 Discrete Samplers with Different Temperatures  }
+
+
+A key challenge with the naïve DLS is the tendency to become trapped in local modes, particularly in non-convex landscapes. To mitigate this, we introduce DREXEL, which incorporates replica exchange to enable efficient exploration across different local modes. Specifically, we employ two samplers separately with distinct step sizes and temperatures to approximate the target distribution:  
+
+$$
+\operatorname{Categorical}\left[\operatorname{Softmax}\left(\frac{1}{2\tau_{k}}\nabla U(\theta_{i}^{(k)})_{d}\left(\theta_{i+1,d}^{(k)}-\theta_{i,d}^{(k)}\right)-\frac{\left(\theta_{i+1,d}^{(k)}-\theta_{i,d}^{(k)}\right)^{2}}{2\alpha_{k}}\right)\right],\quad k=1,2.
+$$  
+
+Here $\tau_{1}<\tau_{2}$ and $\alpha_{1}<\alpha_{2}$ , with $k=1$ being the low-temperature and $k=2$ the high-temperature sampler. Intuitively, larger step sizes and higher temperatures encourage more exploratory moves, which allows the sampler to escape local modes through non-local jumps and explore different regions of the energy landscapes. This, on the downside, raises the rejection rate, as large jumps often land in low-probability regions, and introduce additional bias when approximating the target distribution.  
+
+To mitigate the bias, we further propose DREAM, which incorporates MH steps post-generation of new samples. Once the new samples are produced through (8), the acceptance rates $\bar{\mathcal{A}}(\bar{\pmb{\theta}}_{i+1}^{(1)},\pmb{\theta}_{i}^{(1)})$ and $\mathcal{A}(\pmb{\theta}_{i+1}^{(2)},\pmb{\theta}_{i}^{(2)})$ are estimated with (4). The new samples are accepted with probability $\mathcal{A}$ or rejected with $1-\mathcal{A}$ . The acceptance rates of two samplers are independent of one another. While the high-temperature sampler typically exhibits a lower acceptance rate than the low-temperature one, the rejection mechanism ensures that both samplers in DREAM converge to the target asymptotically. It should be noted that while decaying step sizes are commonly advantageous in Langevin MCMC for handling big data (Teh et al., 2016), they present potential challenges in discrete sampling. In discrete spaces, small steps do not equate to gradual movements as they do in continuous spaces. Instead, they tend to repeatedly propose nearly identical samples, which causes the sampler to become trapped in local regions. This problem becomes severe when dealing with non-convex energy landscapes, where a decaying step size worsens the issue of local traps. For this reason, the MH step is often favored as a solution in discrete sampling. With the MH step and fixed step sizes, the sampler can make large jumps to facilitate global exploration. This feature is essential for navigating highly structured state spaces, where the sampler needs flexibility to move between distant states.  
+
+In practice, high-temperature samplers may have difficulty exploiting certain regions due to abrupt exploration, which requires excessive time to fully characterize local modes and achieve mixing.  
+
+
+
+\section{4.2 Sample Swaps between Discrete Samplers  }
+
+
+A typical solution is to implement a swap function that enables sample exchanges between samplers at different temperatures. This helps cross energy barriers by combining the exploration of hightemperature samplers with the exploitation of low-temperature ones, which improves mixing rates.  
+
+The naïve swap function (3) of reMCMC relies on energy calculations at the current samples and corresponding temperatures. However, it is not practical to handle large-scale data in mini-batch settings. Intuitively, while $\tilde{U}(\pmb{\theta}_{i+1}^{(1)})$ and $\tilde{U}(\pmb{\theta}_{i+1}^{(2)})$ are both unbiased in mini-batches, a non-linear transformation of these estimators fail to provide an unbiased estimator for $S(\pmb{\theta}_{i+1}^{(1)},\pmb{\theta}_{i+1}^{(2)})$ (Deng et al., 2020). Under normality assumption for the energy estimate, we consider a bias correction term:  
+
+$$
+\begin{array}{r}{\widetilde{S}(\pmb{\theta}_{i+1}^{(1)},\pmb{\theta}_{i+1}^{(2)})=e^{\left(\frac{1}{\tau_{2}}-\frac{1}{\tau_{1}}\right)\left[U(\pmb{\theta}_{i+1}^{(1)})-U(\pmb{\theta}_{i+1}^{(2)})+\left(\frac{1}{\tau_{1}}-\frac{1}{\tau_{2}}\right)\sigma^{2}\right]},}\end{array}
+$$  
+
+where $\sigma^{2}$ compensates for noise in the stochastic gradient and removes swap bias. This adjustment ensures that the swap function behaves as a Martingale and matches the expected value obtained from exact gradients. Although this correction is not strictly necessary in discrete sampling, we retain this design in practice and examine the potential need for bias correction in the experiments. The bias-corrected versions of DREXEL and DREAM are referred to as bDREXEL and bDREAM.  
+
+When reMCMC is applied to discrete spaces, a notable challenge arises: the decaying step sizes commonly employed in continuous settings are not applicable. To ensure asymptotic convergence to the target distribution with fixed step sizes, we must maintain detailed balance not only between the low-temperature and high-temperature samplers but also between the current and next output samples. The swap designs in (3) and (9), however, overlook energy and temperature differences. This potentially violates detailed balance and slows down mixing in discrete sampling tasks. To mitigate the imbalance, we propose a swap function tailored for discrete sampling:  
+
+$$
+\tilde{S}(\theta_{i+1}^{(1)},\theta_{i+1}^{(2)}\mid\theta_{i}^{(1)},\theta_{i}^{(2)})=e^{\left(\frac{1}{\tau_{2}}-\frac{1}{\tau_{1}}\right)\left[U(\theta_{i+1}^{(1)})+U(\theta_{i}^{(1)})-U(\theta_{i+1}^{(2)})-U(\theta_{i}^{(2)})\right]}.
+$$  
+
+This swap function incorporates energy estimates at the last samples, which respects the energy landscape and preserves detailed balance. Importantly, since the previous samples are treated as constants during the swap, the detailed balance between replicas remains unaffected. We will demonstrate how this correction guarantees asymptotic convergence to the target distribution in the next section.  
+
+4.3 The Proposed Algorithms  
+
+As outlined in Algorithm 1, we present DREXEL and DREAM for discrete sampling. The approaches employ two DLSs with distinct temperatures and step sizes, which allows for sample swaps between them. At each iteration, the current samples are updated, followed by MH steps in DREAM. The swap mechanism exchanges samples when the high-temperature sampler locates a lower-energy mode. After $I$ iterations, the low-temperature sampler outputs samples to characterize the energy landscape. This approach, discussed further in 5.1, improves the mixing rate over DLSs by balancing exploration and exploitation.  
+
+270   
+271   
+272   
+273   
+274   
+275   
+276   
+277   
+278   
+279   
+280   
+281   
+282   
+283   
+284   
+285   
+286   
+287   
+288   
+289   
+290   
+291   
+292   
+293   
+294   
+295   
+296   
+297   
+298   
+299   
+300   
+301   
+302   
+303   
+304   
+305   
+306   
+307   
+308   
+309   
+310   
+311   
+312   
+313   
+314   
+315   
+316   
+317   
+318   
+319   
+320   
+321   
+322   
+323  
+
+
+
+\section{5 Theoretical Analysis  }
+
+
+In the previous section, we introduced DREXEL and DREAM, which use factorization to allow parallel updates and employ swap mechanisms to improve non-convex exploration. While these features are beneficial, the overall performance heavily relies on their convergence properties and theoretical guarantees. In this section, we provide asymptotic convergence guarantees for DREXEL (i.e. the version without the MH correction).  
+
+5.1 Asymptotic Convergence on Log-Quadratic Distributions  
+
+Our focus is first on the asymptotic behaviors of DREXEL. The analysis aims to show that as step sizes approach zero, the algorithm exhibits zero asymptotic bias, which ensures accurate sampling from the target distribution. Specifically, we focus on log-quadratic energy $\pi(\theta)$ ∝exp $(\theta^{\top}J\theta+b^{\top}\theta)$ , where $J\in\bar{\mathbb{R}}^{\bar{\mathbf{d}}\times\mathbf{d}}$ is a symmetric matrix, and $\pmb{b}\in\mathbb{R}^{\mathbf{d}}$ is a vector. If $J$ is asymmetric, we apply spectral decomposition to obtain a symmetric matrix, which enables an analytically tractable solution.  
+
+Zhang et al. (2022b) showed that DLS with temperature 1 is reversible for log-quadratic energy distributions when the step size is sufficiently small. However, this result does not directly extend to the proposed algorithm, as the swap mechanism (3) introduces potential imbalances. This imbalance is due to discontinuous transitions between neighboring states in discrete space, which makes the swap acceptance rule insufficient to maintain a detailed balance. This further introduces bias during the sampling process and leads to inaccurate modeling. To address this, we carefully control the swap probability in (10) to regulate transitions between high- and low-temperature samplers.  
+
+Theorem 1. Let $\alpha_{1}$ and $\alpha_{2}$ be the step sizes for the low- and high-temperature samplers, and let $q(\cdot|\theta)$ be the Markov chain transition kernel. Suppose the target $\pi(\theta)$ is log-quadratic, then:  
+
+• The Markov chain induced by DREXEL is reversible with respect to an intermediate distribution $\tilde{\pi}$ , i.e., for all $\theta,\theta^{\prime}\in\Theta_{:}$ , $\tilde{\pi}(\pmb{\theta})q(\pmb{\theta}^{\prime}|\pmb{\theta})=\tilde{\pi}(\pmb{\theta}^{\prime})q(\pmb{\theta}|\pmb{\theta}^{\prime})$ . • $A s\;\alpha_{1},\alpha_{2}\rightarrow0,$ , the stationary distribution $\pi^{\prime}$ converges weakly to the target distribution π.  
+
+This analysis focuses on the state transition of the low-temperature sampler, as the high-temperature sampler only facilitates exploration and does not produce final samples. Intuitively, with probability $\rho\tilde{S}$ , the next low-temperature sample is drawn from the high-temperature sampler, and with probability $\dot{\rho}(1-\tilde{S})$ , it selects from the low-temperature sampler. The transition simplifies to DLS without swaps and directly maintains the detailed balance, but the swap probability becomes essential for preserving this balance once swaps are considered in discrete sampling.1.  
+
+
+
+\section{6 Experiments  }
+
+
+To illustrate the effectiveness of our approach, we evaluate the proposed samplers across distinct discrete sampling and generative tasks. Our approach is compared against baselines including DLS (DULA and DMALA from Zhang et al. (2022b)), Any-scale Balanced sampling (AB) (Sun et al., 2023a), and the Automatic Cyclical Sampler (ACS) (Pynadath et al., 2024).  
+
+
+
+\section{6.1 Sampling from 2D Synthetic Problems  }
+
+
+We explore the challenges of sampling from 2D discrete multi-modal distributions defined over the domain $\Theta=\{1,2,\bar{\dots},N\}^{\mathbf{d}}$ , where $N=256$ and $\mathbf{d}=101\times101$ . Each coordinate takes one of the discrete values. Figure 2 (top) highlights the challenges of approximating non-convex energy landscapes, where samplers often struggle to explore the landscapes effectively with limited samples.  
+
+![](images/9018835158a042c075f58edf154cdcb2c0697d31467a56d253e4f1d2ff234650.jpg)  
+
+Figure 2: Top: Visualization of the true energy landscapes. Middle: Empirical energy distributions from DMALA. Bottom: Empirical energy distributions from DREAM.  
+
+Table 1: Experiment results with exploring 2D synthetic distributions, recorded with KL and MMD.   
+
+![](images/579be76331034b7f7cb77837862457ca97f052173e45391fa932b166d5e7ed47.jpg)  
+
+DREAM is compared with DMALA, AB, and ACS in these tasks. With automatic differentiation for gradient computation, we generate 640,000 samples to form the empirical distributions. Figure 2 (bottom) provides a qualitative analysis, showing that DREAM can effectively capture the underlying complex distributions. In the wave, 8gaussians, and 16gaussians, DMALA (mid) captures only $50\%$ modes due to its tendency to get stuck in local minima. DREAM, by contrast, recovers all modes, which reflects its robust exploration across different tasks. For quantitative evaluation, we report Kullback–Leibler (KL) divergence and maximum mean discrepancy (MMD) as performance metrics (Blessing et al., 2024). As shown in Table 1, DREAM consistently outperforms the baselines across all distributions.  
+
+
+
+\section{6.2 Sampling from Ising Models  }
+
+
+The Ising model (Newman & Barkema, 1999) is a mathematical structure used to describe systems of interacting binary variables, which are commonly represented as spins in physical systems (MacKay, 2003). Each spin can assume binary states and interact with adjacent spins within a lattice. The interactions between these neighboring spins are governed by the energy function $U(\pmb\theta)=\boldsymbol{\nu}\pmb\theta^{\intercal}\pmb{J}\pmb\theta+$ ${\pmb b}^{\intercal}{\pmb\theta}$ , where $\pmb{\theta}\in\{-1,1\}^{\mathbf{d}}$ is binary random variable, $\mathbf{\boldsymbol{J}}\in\{0,1\}^{\mathbf{d}\times\mathbf{d}}$ is a binary adjacency matrix, $w\in\mathbb{R}^{+}$ denote the connectivity strength, and $\pmb{b}\in\{0,1\}^{\mathbf{d}}$ is the bias vector.  
+
+![](images/a2fc2e22929a940870e9470b5e6f010992800704acaf33cdb8da85c5f0f38d65.jpg)  
+Figure 3: Ising model sampling results, evaluated by log RMSE. DREAM yields the best scores.  
+
+From Figure 3, for samplers without MH corrections, DREXEL shows a fast and consistent reduction in log RMSE, while DULA and ACS converge more slowly. Note that ACS exhibits periodic fluctuations due to its cyclical step size, where error initially decreases but then increases as the step size decays. For discrete sampling, it implies small step sizes do not effectively exploit local modes, and decaying step sizes may not be as effective as MH corrections in discrete settings. Among samplers with MH corrections, DREAM delivers the most efficient error reduction, which benefits from a strong exploration-exploitation balance. DMALA follows a more gradual path, while mh-ACS mirrors the periodic behavior of ACS due to its similar step-size schedule. These findings indicate that the proposed samplers generally offer better and more reliable mixing rates.  
+
+
+
+\section{6.3 Sampling from Restricted Boltzmann Machines  }
+
+
+Restricted Boltzmann Machines (RBMs) are generative stochastic neural networks designed to model complex distributions over discrete data (Fischer & Igel, 2012). RBMs typically consist of binaryvalued hidden and visible units, where the visible units represent observed data and the hidden units capture latent dependencies in the data. The energy function $U(\pmb\theta)=\log\left[1+\exp\left(J\pmb\theta+c\right)\right]+b^{\top}\pmb\theta,$ , where $\pmb{\theta}\in\lbrace0,1\rbrace^{\bar{\mathbf{d}}}$ represents the binary state vector for the visible layer , $\pmb{J}\in\mathbb{R}^{\mathbf{m}\times\mathbf{d}}$ is the weight matrix, $c\in\mathbb{R}^{\mathbf{m}}$ and $\pmb{\dot{b}}\in\mathbb{R}^{\mathbf{d}}$ denote biases for hidden units and visible units correspondingly.  
+
+![](images/5e2b8e708c2d5794c98803879e7883e1daa5ceccfa113d9f266bfb661684b823.jpg)  
+Figure 4: RBM sampling results, quantified by MMD. DREAM outperforms across various datasets.  
+
+We trained RBMs with 500 hidden units on the MNIST dataset using contrastive divergence (Hinton, 2002). To benchmark the effectiveness of various samplers, we reported MMDs between outputs generated by each sampler and the one by the structured Block-Gibbs sampler specific to RBMs.  
+
+Figure 4 highlights DREAM as the most effective sampler, which consistently achieves the best log MMD across all datasets and suggests superior convergence in sampling from RBMs. AB and ACS perform nearly as well but with slightly higher MMD values. Overall, DREAM provides the most robust sampling, followed by AB and ACS, while DMALA trails behind.  
+
+Deep Energy-Based Models (EBMs) (Ngiam et al., 2011; Bond-Taylor et al., 2021) are a class of probabilistic models where the energy function is parameterized by a ResNet (He et al., 2016). Specifically, the probability of a data point $\pmb{x}$ is given by $P_{\theta}(\pmb{x})=\exp\left[E_{\theta}(\pmb{x})\right]/Z_{\theta}$ , where $E_{\theta}(x)$ is the energy function parameterized by $\pmb{\theta}$ , and $Z_{\theta}=\mathbb{E}_{\theta\sim\Theta}\exp\left[E_{\theta}(\pmb{x})\right]$ normalizes the distribution. With DULA and DMALA as baselines, we evaluate DREXEL and DREAM2 by learning Deep EBMs. During training, the intractable likelihood gradient of the model is approximated through Persistent Contrastive Divergence (Tieleman & Hinton, 2009), while a replay buffer (Du & Mordatch, 2019) containing 1,000 past samples is implemented to improve both the efficiency and stability of the training process. Each sampler runs for 40 steps per iteration. Upon completing training, Annealed Importance Sampling (Neal, 2001) is conducted with DULA to estimate the test log-likelihoods.  
+
+Table 2: Test log-likelihoods of Deep EBMs evaluated on image datasets.   
+
+![](images/94aacf296c197b4a862680ab0f1d2f46d91275666c1850879e033dac7b361d8b.jpg)  
+
+We trained Deep EBMs for 20,000 iterations on binary images from Static MNIST, Dynamic MNIST, Omniglot, and Caltech Silhouettes datasets. The test log-likelihoods for trained models across different samplers are recorded in Table 2. Among the samplers, DREAM consistently achieved the highest log-likelihoods across all datasets, with notable improvements on Omniglot and Caltech Silhouettes. For MNIST datasets, DREXEL and DREAM also showed competitive performance, particularly on Static MNIST. In contrast, bDREXEL and bDREAM generally performed worse, with DREXEL and DREAM showing clear superiority across most datasets. These findings confirm that MH steps are essential for improving performance in discrete sampling tasks. Also, the proposed swap mechanism in (10) is effective at correcting imbalance and yielding better log-likelihood estimates across diverse image datasets.  
+
+
+
+\section{7 Conclusion and Discussion  }
+
+
+In this work, we addressed the challenge of balancing global exploration and local exploitation in non-convex discrete energy landscapes by proposing DREXEL and DREAM. These samplers integrate DLS with replica exchange to overcome the limitations of traditional samplers, which tend to get trapped in local modes due to reliance on local gradients and small disturbances.  
+
+We theoretically prove that the proposed samplers are reversible, which guarantees the accurate preservation of the target distribution. Moreover, these samplers achieve faster mixing than the naïve DLS. The empirical evidence suggests that the proposed samplers and swap mechanism significantly improve exploration and mixing in non-convex discrete spaces. Furthermore, while DREXEL maintains detailed balance throughout the process, MH corrections are critical for optimizing performance in certain tasks.  
+
+Our current work focuses on designing a single low-temperature and a single high-temperature sampler. Future research could extend this framework by introducing multiple parallel samplers to enhance exploration. We will also study theoretical guarantees to quantify the acceleration effect of the swap mechanism in the future.  
+
+We adhere to the ICLR Code of Ethics and confirm that our experiments use only public datasets.   
+While our results are primarily based on standard benchmarks, we recognize the potential for misuse   
+and encourage responsible application of our methods on real-world data.   
+Reproducibility Statement   
+To facilitate the reproducibility of our proposed method, the implementation of the synthetic task   
+related to this work is made available at the following anonymous link: https://anonymous.   
+4open.science/r/dream-F7E6.   
+References   
+Sungjin Ahn, Anoop Korattikara, and Max Welling. Bayesian Posterior Sampling via Stochastic Gradient Fisher Scoring. In International Conference on Machine Learning, pp. 1771–1778, 2012.   
+Patrick Billingsley. Probability and Measure. John Wiley & Sons, 2017.   
+Denis Blessing, Xiaogang Jia, Johannes Esslinger, Francisco Vargas, and Gerhard Neumann. Beyond elbos: A large-scale evaluation of variational methods for sampling. In International Conference on Machine Learning, 2024.   
+Sam Bond-Taylor, Adam Leach, Yang Long, and Chris G Willcocks. Deep Generative Modelling: A Comparative Review of VAEs, GANs, Normalizing Flows, Energy-Based and Autoregressive Models. IEEE Transactions on Pattern Analysis and Machine Intelligence, 44(11):7327–7347, 2021.   
+Andrew Campbell, Wenlong Chen, Vincent Stimper, Jose Miguel Hernandez-Lobato, and Yichuan Zhang. A Gradient Based Strategy for Hamiltonian Monte Carlo Hyperparameter Optimization. In International Conference on Machine Learning, pp. 1238–1248. PMLR, 2021.   
+Changyou Chen, Nan Ding, and Lawrence Carin. On the Convergence of Stochastic Gradient MCMC Algorithms with High-Order Integrators. Advances in Neural Information Processing Systems, 28, 2015.   
+Yi Chen, Jinglin Chen, Jing Dong, Jian Peng, and Zhaoran Wang. Accelerating Nonconvex Learning via Replica Exchange Langevin Diffusion. In International Conference on Learning Representation, 2019.   
+Sinho Chewi, Chen Lu, Kwangjun Ahn, Xiang Cheng, Thibaut Le Gouic, and Philippe Rigollet. Optimal Dimension Dependence of the Metropolis-Adjusted Langevin Algorithm. In Conference on Learning Theory, pp. 1260–1300. PMLR, 2021.   
+Hanjun Dai, Rishabh Singh, Bo Dai, Charles Sutton, and Dale Schuurmans. Learning Discrete Energy-Based Models via Auxiliary-Variable Local Exploration. Advances in Neural Information Processing Systems, 33:10443–10455, 2020.   
+Wei Deng, Qi Feng, Liyao Gao, Faming Liang, and Guang Lin. Non-convex Learning via Replica Exchange Stochastic Gradient MCMC. In International Conference on Machine Learning, pp. 2474–2483. PMLR, 2020.   
+Wei Deng, Qi Feng, Georgios Karagiannis, Guang Lin, and Faming Liang. Accelerating Convergence of Replica Exchange Stochastic Gradient MCMC via Variance Reduction. In International Conference on Learning Representation, 2022.   
+Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. BERT: Pre-Training of Deep Bidirectional Transformers for Language Understanding. In North American Chapter of the Association for Computational Linguistics, 2019.   
+Persi Diaconis and David Freedman. On Markov Chains with Continuous State Space. Annals of Probability, 1997.   
+Jing Dong and Xin T Tong. Spectral Gap of Replica Exchange Langevin Diffusion on Mixture Distributions. Stochastic Processes and Their Applications, 151:451–489, 2022.   
+David L Donoho. Compressed Sensing. IEEE Transactions on information theory, 52(4):1289–1306, 2006.   
+Yilun Du and Igor Mordatch. Implicit Generation and Modeling with Energy Based Models. Advances in Neural Information Processing Systems, 32, 2019.   
+Alain Durmus and Éric Moulines. Non-asymptotic Convergence Analysis for the Unadjusted Langevin Algorithm. The Annals of Applied Probability, pp. 1551–1587, 2017.   
+Raaz Dwivedi, Yuansi Chen, Martin J Wainwright, and Bin Yu. Log-Concave Sampling: MetropolisHastings Algorithms Are Fast. Journal of Machine Learning Research, 20(183):1–42, 2019.   
+Asja Fischer and Christian Igel. An Introduction to Restricted Boltzmann Machines. In Progress in Pattern Recognition, Image Analysis, Computer Vision, and Applications, pp. 14–36. Springer, 2012.   
+Gerald B Folland. Real Analysis: Modern Techniques and Their Applications, volume 40. John Wiley & Sons, 1999.   
+Will Grathwohl, Kevin Swersky, Milad Hashemi, David Duvenaud, and Chris Maddison. Oops I Took a Gradient: Scalable Sampling for Discrete Distributions. In International Conference on Machine Learning, pp. 3831–3841. PMLR, 2021.   
+Firas Hamze and Nando de Freitas. From Fields to Trees. In Conference on Uncertainty in Artificial Intelligence, pp. 243–250, 2004.   
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep Residual Learning for Image Recognition. In Conference on Computer Vision and Pattern Recognition, pp. 770–778, 2016.   
+Geoffrey E Hinton. Training Products of Experts by Minimizing Contrastive Divergence. Neural Computation, 14(8):1771–1800, 2002.   
+Alex Krizhevsky, Ilya Sutskever, and Geoffrey E Hinton. Imagenet Classification with Deep Convolutional Neural Networks. Advances in Neural Information Processing Systems, 25, 2012.   
+Holden Lee, Andrej Risteski, and Rong Ge. Beyond Log-Concavity: Provable Guarantees for Sampling Multi-modal Distributions Using Simulated Tempering Langevin Monte Carlo. Advances in Neural Information Processing Systems, 31, 2018.   
+Xuechen Li, Yi Wu, Lester Mackey, and Murat A Erdogdu. Stochastic Runge-Kutta Accelerates Langevin Monte Carlo and Beyond. Advances in Neural Information Processing Systems, 32, 2019.   
+Aaron Lou, Chenlin Meng, and Stefano Ermon. Discrete Diffusion Modeling by Estimating the Ratios of the Data Distribution. In International Conference on Machine Learning, 2024.   
+David JC MacKay. Information Theory, Inference and Learning Algorithms. Cambridge university press, 2003.   
+Evan Z Macosko, Anindita Basu, Rahul Satija, James Nemesh, Karthik Shekhar, Melissa Goldman, Itay Tirosh, Allison R Bialas, Nolan Kamitaki, Emily M Martersteck, et al. Highly Parallel Genome-Wide Expression Profiling of Individual Cells Using Nanoliter Droplets. Cell, 161(5): 1202–1214, 2015.   
+Stephane G Mallat. A Theory for Multiresolution Signal Decomposition: The Wavelet Representation. IEEE Transactions on Pattern Analysis and Machine Intelligence, 11(7):674–693, 1989.   
+Enzo Marinari and Giorgio Parisi. Simulated Tempering: A New Monte Carlo Scheme. Europhysics Letters, 19(6):451, 1992.   
+Michael L Metzker. Sequencing Technologies—the Next Generation. Nature Reviews Genetics, 11 (1):31–46, 2010.   
+Sean P Meyn and Richard L Tweedie. Markov Chains and Stochastic Stability. Springer Science & Business Media, 2012.   
+Tomas Mikolov, Kai Chen, Greg Corrado, and Jeffrey Dean. Efficient Estimation of Word Representations in Vector Space. In International Conference on Learning Representation, 2013.   
+Radford M Neal. Annealed Importance Sampling. Statistics and Computing, 11:125–139, 2001.   
+Radford M. Neal. MCMC Using Hamiltonian Dynamics. In Handbook of Markov Chain Monte Carlo, volume 54, pp. 113–162. Chapman and Hall/CRC, 2012.   
+Von Neumann. Various Techniques Used in Connection with Random Digits. Notes by GE Forsythe, pp. 36–38, 1951.   
+Mark EJ Newman and Gerard T Barkema. Monte Carlo Methods in Statistical Physics. Clarendon Press, 1999.   
+Jiquan Ngiam, Zhenghao Chen, Pang W Koh, and Andrew Y Ng. Learning Deep Energy Models. In International Conference on Machine Learning, pp. 1105–1112, 2011.   
+Patrick Pynadath, Riddhiman Bhattacharya, Arun Hariharan, and Ruqi Zhang. Gradient-Based Discrete Sampling with Automatic Cyclical Scheduling. arXiv preprint arXiv:2402.17699, 2024.   
+Ali Rahimi and Benjamin Recht. Random Features for Large-Scale Kernel Machines. Advances in Neural Information Processing Systems, 20, 2007.   
+Gareth O Roberts and Richard L Tweedie. Exponential Convergence of Langevin Distributions and Their Discrete Approximations. Bernoulli, 2(4):341–363, 1996.   
+Olaf Ronneberger, Philipp Fischer, and Thomas Brox. U-Net: Convolutional Networks for Biomedical Image Segmentation. In International Conference on Medical Image Computing and ComputerAssisted Intervention, pp. 234–241. Springer, 2015.   
+Umut Simsekli, Roland Badeau, Taylan Cemgil, and Gaël Richard. Stochastic Quasi-Newton Langevin Monte Carlo. In International Conference on Machine Learning, pp. 642–651. PMLR, 2016.   
+Haoran Sun, Hanjun Dai, Wei Xia, and Arun Ramamurthy. Path Auxiliary Proposal for MCMC in Discrete Space. In International Conference on Learning Representation, 2021.   
+Haoran Sun, Bo Dai, Charles Sutton, Dale Schuurmans, and Hanjun Dai. Any-Scale Balanced Samplers for Discrete Space. In International Conference on Learning Representation, 2023a.   
+Haoran Sun, Lijun Yu, Bo Dai, Dale Schuurmans, and Hanjun Dai. Score-Based Continuous-Time Discrete Diffusion Models. In International Conference on Learning Representation, 2023b.   
+Robert H Swendsen and Jian-Sheng Wang. Nonuniversal Critical Dynamics in Monte Carlo Simulations. Physical Review Letters, 58(2):86, 1987.   
+Yee Whye Teh, Alexandre Thiéry, and Sebastian J Vollmer. Consistency and Fluctuations for Stochastic Gradient Langevin Dynamics. Journal of Machine Learning Research, 17(7), 2016.   
+Tijmen Tieleman and Geoffrey Hinton. Using Fast Weights to Improve Persistent Contrastive Divergence. In International Conference on Machine Learning, pp. 1033–1040, 2009.   
+Sebastian J Vollmer, Konstantinos C Zygalakis, and Yee Whye Teh. Exploration of the (non-) asymptotic bias and variance of stochastic gradient Langevin dynamics. Journal of Machine Learning Research, 17(159):1–48, 2016.   
+Fugao Wang and David P Landau. Efficient, Multiple-Range Random Walk Algorithm to Calculate the Density of States. Physical Review Letters, 86(10):2050, 2001.   
+Max Welling and Yee W Teh. Bayesian Learning via Stochastic Gradient Langevin Dynamics. In International Conference on Machine Learning, pp. 681–688. Citeseer, 2011.   
+Yuxin Wen, Neel Jain, John Kirchenbauer, Micah Goldblum, Jonas Geiping, and Tom Goldstein. Hard Prompts Made Easy: Gradient-Based Discrete Optimization for Prompt Tuning and Discovery. Advances in Neural Information Processing Systems, 36, 2024.   
+Ulli Wolff. Collective Monte Carlo Updating for Spin Systems. Physical Review Letters, 62(4):361, 1989.   
+Giacomo Zanella. Informed Proposals for Local MCMC in Discrete Spaces. Journal of the American Statistical Association, 115(530):852–865, 2020.   
+Dinghuai Zhang, Nikolay Malkin, Zhen Liu, Alexandra Volokhova, Aaron Courville, and Yoshua Bengio. Generative Flow Networks for Discrete Probabilistic Modeling. In International Conference on Machine Learning, pp. 26412–26428. PMLR, 2022a.   
+Ruqi Zhang, Chunyuan Li, Jianyi Zhang, Changyou Chen, and Andrew Gordon Wilson. Cyclical Stochastic Gradient MCMC for Bayesian Deep Learning. In International Conference on Learning Representation, 2020.   
+Ruqi Zhang, Xingchao Liu, and Qiang Liu. A Langevin-Like Sampler for Discrete Distributions. In International Conference on Machine Learning, pp. 26375–26396. PMLR, 2022b.  
+
+
+

@@ -1,0 +1,443 @@
+\title{Targeted synthetic data generation for tabular data via hardness characterization}
+
+\begin{abstract}
+Synthetic data generation has been proven successful in improving model performance and robustness in the context of scarce or low-quality data. 
+Using the data valuation framework to statistically identify beneficial and detrimental observations, we introduce a novel augmentation pipeline that generates only high-value training points based on hardness characterization.
+We first demonstrate via benchmarks on real data that Shapley-based data valuation methods perform comparably with learning-based methods in hardness characterisation tasks, while offering significant theoretical and computational advantages. Then, we show that synthetic data generators trained on the hardest points outperform non-targeted data augmentation on simulated data and on a large scale credit default prediction task. In particular, our approach improves the quality of out-of-sample predictions and it is  computationally more efficient compared to non-targeted methods.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Training complex machine learning models requires large amounts of data, but in real-world applications data may be of poor quality, insufficient in amount, or subject to privacy, safety, and regulatory limitations. Such challenges have sparked an interest in \textit{synthetic data generation} (SDG), representing the practice of using available data to generate realistic synthetic samples \citep{review}.
+In this work, we argue that, when the objective is to use synthetic data to make an existing machine learning model better generalize to unseen data, augmenting only the hardest training points is more effective than augmenting the entire training dataset. In other words, we propose a \textit{scalable targeted synthetic data generation} framework, focusing on binary classification tasks. The underlying intuition is that, within a dataset, some of the observations are obvious to classify, whereas others play a more significant role in determining the decision boundary of the trained model. Focusing only on these harder examples when generating additional data may allow the model to efficiently learn a more robust decision boundary. 
+
+In particular, the method proposed in this work is specifically targeted towards binary classifiers on tabular data, which often require adaptations such as oversampling, undersampling, or synthetic data generation to improve model performance \citep{smote, He08} under class imbalance. While deep neural networks have proven successful across domains such as images, audio or text, they are still regularly outperformed on tabular data by simpler and more interpretable tree-based architectures \citep{shwartz-ziv_tabular_2021}. Therefore, we choose trees as the reference model for binary classification on tabular data, while deep learning models are used for synthetic data generation. In general, we will use $D = \{(\bm{x}_i, y_i)\}_{i=1}^n$ to denote the training data, where $\bm{x}_i \in \mathbb{R}^d$ is a $d$-dimensional feature vector and $y_i \in \{0, 1\}$ is a binary label.
+
+Our targeted synthetic data generation approach is divided into two main steps: \textit{(i)} hardness characterization of training data points, followed by \textit{(ii)} training of a synthetic data generator only on the hardest data points of the initial training dataset. In order to identify ``hard'' data points, we propose a novel hardness characterizer specific to tabular data, based on KNN data Shapleys \citep{knn_shapley}, capable of achieving performances comparable to state-of-the-art methods in hardness detection benchmarks, while offering key advantages such as being deterministic, model agnostic and computationally efficient. Hardness characterization has already been applied in the literature with rationales similar to this work, but mainly with the objective of pruning the easier examples \citep{scalability, grand}, rather than augmenting the harder ones. 
+
+Once the hardest points have been identified, synthetic data generation models are trained only on the most difficult points identified by our hardness characterizer. In this work, we focus on two widely used deep learning architectures for synthetic data generation for tabular data, namely Tabular Variational Autoencoders (TVAE) and Conditional Tabular Generative Adversarial Networks (CTGAN) \citep[both introduced in][]{ctgan}. To mitigate instabilities encountered during training, we devise a custom early stopping condition which allows to interrupt training when the quality of the synthetically generated samples is maximised. The best synthesizers are then found using a highly efficient routine which combines model selection and hyperparameter tuning. From a comparison of the best models we find that, given a fixed number of points to generate, augmenting only hard data results in a larger performance improvement on unseen data with respect to non-targeted data augmentation, while being computationally cheaper.
+
+The rest of the work is structured as follows: after a recap on the related literature in Section \ref{sec:background}, the proposed approach is discussed and empirically verified in Section~\ref{sec:methods}. 
+Next we explore the use of KNN Shapleys as hardness characterizers via a benchmark study in Section~\ref{sec:benchmark}, followed by a discussion on how to utilize them for synthetic data generation on real (Section~\ref{sec:amex_res}) and simulated data (Section~\ref{sec:sim_ex}). The results are extensively discussed in Section~\ref{sec:discussion}. 
+
+
+
+
+\section{Background and related literature}
+
+
+In this work, we aim to bridge the gap between existing methods for hardness characterization and game theoretic approaches to data valuation, with the objective of improving the performance of synthetic data generators. Therefore, our work closely aligns with existing techniques in hardness characterization, data valuation, and synthetic data generation, briefly reviewed in this section.
+
+\subsection{Hardness characterization} \label{sec:hard_cat}
+
+As remarked in the introduction, the first aim of this work is the identification of a subset of points that are hard for the model to learn. Existing literature on the topic of hardness characterization is often qualitative and based on different definitions of ``hardness". Following the taxonomy presented in \cite{hard_cat}, three main categories of hardness can be identified: \textit{(i) Mislabeling}: the true label is replaced with an incorrect one. The label perturbation probability can be uniform across classes %(equal probability of mislabeling across classes) 
+    or label-dependent;
+\textit{(ii) Out-of-distribution}: features are transformed or shifted, leading to observations distributed differently from the main data generating process;
+\textit{(iii) Atypical}: observations that are compatible with the main data generating process, but located in tails or rare regions of the feature distributions.
+These distinctions normally dictate different courses of actions: datapoints that are mislabeled or out of distribution are symptomatic of errors in the data collection process and should be removed from training data, while atypical datapoints are valid points and may in fact need to be augmented to train a robust model \citep{Yuksekgonul23}.
+
+While many different hardness characterizers have been proposed, most of them are based around keeping track of some statistic of interest for each datapoint during the training process, meaning they can be adapted to any model that is trained iteratively (such as XGBoost or a neural network). Examples include \textit{GraNd} \citep{grand}, which uses large gradients as an indicator of hardness, and \textit{Forget} \citep{forget}, which counts how many times each point is learnt and then forgotten during training, with the simple intuition that hard points are forgotten more often. Based on the quantitative benchmarks reported in \cite{hard_cat}, \textit{Data-IQ} \citep{dataiq} emerges as one of the best performers on tabular data, and it is chosen as benchmark hardness characterizer in this work because of its interpretability and compatibility with XGBoost.
+\paragraph{Data-IQ}
+Data-IQ \citep{dataiq} partitions the training data into ``easy'' and ``hard'' points via the concepts of \textit{epistemic} and \textit{aleatoric} uncertainty, combined with a model confidence score calculated from $\mathcal P(\bm{x},\bm{\theta})$, %=\mathbb{P}(Y=y \mid \bm{x},\ \bm{\theta})$, 
+representing the probability of assigning a correct label to an observation, given input features $\bm{x}$ and model parameters $\bm{\theta}$. %, 
+The epistemic uncertainty is caused by the variability in the estimated model parameters, whereas the aleatoric uncertainty captures the inherent data uncertainty. Given parameter estimates $\{\bm{\theta}_e\}_{e=1}^E$ obtained during training, a Data-IQ \textit{confidence score} is obtained as $\bar{\mathcal{P}}(\bm{x}) = E^{-1}\sum_{e=1}^E \mathcal{P}(\bm{x}, \bm{\theta}_e)$, whereas the aleatoric uncertainty is given by $v_{\mathrm{al}}(\bm{x}) = E^{-1}\sum_{e=1}^E \mathcal{P}(\bm{x}, \bm{\theta}_e)[1 - \mathcal{P}(\bm{x}, \bm{\theta}_e)]$. Training data can then be partitioned into \textit{(i) easy} points,
+corresponding to high $\bar{\mathcal{P}}(\bm{x})$ and low $v_{\mathrm{al}}(\bm{x})$, \textit{(ii) hard} points,
+corresponding to low $\bar{\mathcal{P}}(\bm{x})$ and low $v_{\mathrm{al}}(\bm{x})$, and \textit{(iii)} \textit{ambiguous}
+points, with high $v_{\mathrm{al}}(\bm{x})$.
+
+\subsection{Data valuation}
+
+Data valuation \citep[see][]{data_shapley} is the task of equitably quantifying the contribution of each data point to a model, via a data value $\phi_i(D, \mathcal{A}, V)$, where $D$ is the training dataset, $\mathcal{A}$ is a model and $V$ is a performance score, where $V(S)$ is the performance score of $\mathcal{A}$ when trained on $S \subseteq D$. 
+\cite{data_shapley} identifies that a suitable data valuator is the \textit{data Shapley} of the $i$-th training point, % \citep{data_shapley}, 
+which takes the following form: %$\phi_i(D, \mathcal{A}, V)$
+\begin{equation}
+    \phi_i = C \sum_{S \subseteq D\setminus\{i\}} {\binom{n-1}{|S|}}^{-1} \left[V(S \cup \{i\}) -V(S)\right],
+\label{eq:datashap}
+\end{equation}
+where $C$ is an arbitrary constant. The valuator $\phi_i$ %in Equation~\eqref{eq:datashap} is called the , and it 
+can be interpreted as weighted sum of all the possible ``marginal contributions'' of the datapoint. Exact evaluation of the data Shapleys is prohibitively expensive because of the need to retrain the model $2^{n-1}$ times (once per subset) for each observation in the training data. %Setting $C = (n!)^{-1}$ in Equation \ref{eq:datashap} gives $\phi_i = \mathbb{E}_{\pi \sim \Pi}[V(S_{\pi}^i \cup \{i\}) -V(S_{\pi}^i)]$, where $\pi$ is a random permutation of $D$, $\Pi$ is the uniform distributions over the $n!$ permutations of training data in $D$, and $S^i_\pi\subseteq D\setminus\{i\}$ is the set of observations in the permutation $\pi$ observed before the data point $i$. Based on this formulation, data Shapleys can be approximated 
+It is possible to approximate the data Shapleys by considering only a small number of subsets $S\subseteq D\setminus\{i\}$ in \eqref{eq:datashap}, obtained via Monte-Carlo sampling of random permutations. % until convergence.  
+Unfortunately, even state-of-the-art approximations based on this idea, such as \textit{TMC-Shapley} \citep{data_shapley} or \textit{Beta-Shapley} \citep{beta_shapley} are computationally prohibitive for datasets with $n \gg 1000$, making them difficult to use in practice. %for large-scale tabular datasets.
+More generally, extensive work has been developed in the literature to make the computation of data Shapleys more efficient, such as \cite{Jia19}, \cite{Wang23} and \cite{Wang24}.
+
+In particular, \cite{knn_shapley} %presented 
+derived a recursive algorithm to compute the exact data Shapleys for KNN classifiers in $\mathcal{O}\{n \log(n) \, n_{\mathrm{test}}\}$ complexity. 
+For training data $\{(\bm{x}_i, y_i)\}_{i=1}^n$ and test data $\{(\bm{x}_{\mathrm{test},i}, y_{\mathrm{test},i})\}_{i=1}^{n_{\mathrm{test}}}$, let 
+$(\alpha_{j,1}, \ldots, \alpha_{j,n})$ be the indices of training data points, sorted in increasing order according to their Euclidean distance from the $j$-th test data point, for $j=1,\dots,n_{\mathrm{test}}$. The KNN Shapley for the $i$-th training data point is then obtained as the average $s_i=n_{\mathrm{test}}^{-1}\sum_{j=1}^{n_{\mathrm{test}}} s_{j,i}$, where $s_{j,i}$ is calculated recursively as follows:
+\begin{align}
+    s_{j, \alpha_{j,n}} = \frac{1}{n}\mathds{1}_{y_{\mathrm{test},j}}\{y_{\alpha_{j,n}}\}, & & 
+    s_{j, \alpha_{j,i}} = s_{j, \alpha_{j,i+1}} + \frac{\mathds{1}_{y_{\mathrm{test},j}}\{y_{\alpha_{j,i}}\} - \mathds{1}_{y_{\mathrm{test},j}}\{y_{\alpha_{j,i+1}}\}}{iK \cdot \min\{K, i\}^{-1}},
+\end{align}
+where $j=1,\dots,n_{\mathrm{test}}$, $i=1,\dots,n-1$, and $\mathds{1}_\cdot\{\cdot\}$ is the indicator function. 
+\cite{scalability} found KNN Shapleys to be a valid alternative to data Shapleys in tasks such as data summarization or noisy labels detection, only when based on deep features extracted from image data by pre-trained architectures. A similar approach is unfortunately not possible on tabular data.
+In this work we argue that KNN Shapleys computed using a test dataset large enough to cover the entire data distribution, can be used for hardness characterization on tabular data. Specifically, we argue that the \textit{lowest} KNN Shapleys identify the \textit{hardest} training points. %We present below some intuition of why this works, while quantitative benchmarks on real data can be found in Section \ref{sec:benchmark}.
+
+\subsection{Synthetic data generation}\label{sec:sdg}
+Synthetic data generators (SGDs) for tabular data have been actively researched in recent years \citep[see for example][]{Fonseca23}. Here, we discuss three of the most popular SDGs used in practice: SMOTE, CTGAN, and TVAE. 
+
+\paragraph{SMOTE} %\label{sec:smote}
+In \textit{Synthetic Minority Over-sampling Technique} \citep[SMOTE;][]{smote}, %was originally developed as an alternative to over-sampling with replacement to balance datasets with a minority class. For each datapoint, 
+observations are picked at random among the $K$ nearest neighbours of the same class for each datapoint, and new data is generated by random sampling along the segment connecting the point to the chosen neighbour. The number of neighbours is determined based on the over-sampling ratio. %: for $200\%$ over-sampling, $2$ of the $K$ neighbours are randomly chosen. 
+
+\paragraph{CTGAN} 
+\textit{Tabular GAN} \citep[TGAN;][]{tgan} was the first attempt at using \textit{Generative Adversarial Networks} \citep[GAN;][]{gan} to generate tabular data, which was then extended to \textit{Conditional TGANs} \citep[CTGANs;][]{ctgan}. A GAN consists of two models: a generator that takes as input random noise and tries to output a point following the data distribution, and a discriminator that given observations (either from the original dataset or synthesized by the generator) outputs the probability of them being fake. Both the generator and discriminator are typically neural networks. In CTGANs, the possible non-Gaussianity and multimodality in the data is handled by fitting a variational Gaussian mixture model to each normalized numeric feature, whereas categorical features are represented as one-hot encoded vectors. Both the generator and the discriminator networks within the underlying GAN are multilayer perceptrons (MLPs). The name of the CTGAN architecture derives from the form of its conditional generator, which allows to generate %synthetic
+data conditional on specific values of the discrete features, for better handling imbalanced datasets.
+
+\paragraph{TVAE} %\label{sec:tvae}
+A \textit{Tabular VAE} \citep[TVAE;][]{ctgan} is an adaptation for tabular data of a Variational Auto-Encoder \citep[VAE;][]{vae}, using similar preprocessing to CTGAN. 
+A VAE consists in an encoder that learns to represent high-dimensional data into a low-dimensional latent space, and a decoder that reconstructs the compressed representation into the original domain. 
+Both the encoder and decoder networks are normally chosen to be MLPs \citep{vae}.
+
+
+\section{KNN Shapleys as hardness characterizers for SDGs}
+
+
+In this work, we propose to utilize KNN Shapleys as hardness characterizers, and subsequently generate synthetic data by only augmenting the hardest points. Our proposed pipeline is the following:
+\begin{enumerate}
+\item \textbf{KNN Shapley calculation} -- For a model $\mathcal A$ fitted on training data $D=\{(\bm{x}_i, y_i)\}_{i=1}^n$, calculate the KNN Shapleys $s_i,\ i=1,\dots,n$, based on a %sufficiently large 
+test set $\{(\bm{x}_{\mathrm{test},i}, y_{\mathrm{test},i})\}_{i=1}^{n_{\mathrm{test}}}$.
+\item \textbf{Ranking by hardness} -- Sort the KNN Shapleys in \textit{increasing order}, with points with lower values representing harder examples. 
+\item \textbf{Targeted augmentation} -- Given a synthetic data generator $\mathcal G$, perform data augmentation only on the hardest points, based on the ranking of the KNN Shapleys. 
+\end{enumerate}
+
+By generating synthetic data for difficult examples only, we aim to improve the performance of the model $\mathcal A$ specifically on the most challenging parts of the data distribution. The proposed procedure is summarized visually in Figure~\ref{fig:visual}. In the next section, we provide a mathematical intuition on the interpretation of KNN Shapley as hardness charaterizers. 
+
+\begin{figure}[b]
+\centering
+\includegraphics[width=0.9\textwidth]{images/visual.pdf}
+\caption{Visual representation of the proposed targeted synthetic data generation pipeline.}
+\label{fig:visual}
+\end{figure}
+\subsection{KNN Shapleys for hardness characterization: a toy example} \label{sec:toy_example}
+
+ Consider a mixture of two univariate normals with unit variance, centred at $-1$ and $1$, such that $ p(x\mid y=0) = \mathcal N(x; -1,1)$ and $p(x\mid y=1) = \mathcal N(x; 1,1)$. Datapoints are drawn from each distribution with probability $1/2$.
+Additionally, consider two points $(x_1,y_1)=(-1, 0)$ and $(x_2,y_2)=(1, 1)$, representative of each component of the mixture distribution. Consider a third point $(x_{\mathrm{train}}, y_{\mathrm{train}})$, with $y_{\mathrm{train}} = 0$ without loss of generality. Hence, the training set takes the form $D=\{(-1,0), (1,1), (x_{\mathrm{train}},0)\}$. As $x_{\mathrm{train}}$ increases, it becomes \textit{harder} to classify correctly under the true underlying data distribution, since the ratio $p(x_{\mathrm{train}} \mid y=0)\ /\ p(x_{\mathrm{train}} \mid y=1)$ decreases, %  (converging to zero in the limit), 
+consequently increasing the probability of misclassification. Note that any value of $x_{\mathrm{train}}\in\mathbb R$, combined with $x_1$ and $x_2$, partitions the real line into four different regions. %% Without loss of generality, assume $x_{\mathrm{train}} = 0$. 
+
+Any test data point $(x_{\mathrm{test}}, y_{\mathrm{test}})\in\mathbb R\times\{0,1\}$ induces a ranking of the training data based on the distances $\vert x_{\mathrm{test}}-x \vert,\ x\in\{x_1,x_2,x_{\mathrm{train}}\}$.
+For $x_{\mathrm{train}} = 0$, the four possible regions with different rankings of the three training points are plotted in Figure~\ref{fig:ranks}. The $1$NN Shapley %algorithm can then be applied to obtain the 
+value $s_{\mathrm{train}}$ for the point $(x_{\mathrm{train}}, y_{\mathrm{train}})=(0,0)$ can be calculated explicitly for all the possible values of $(x_{\mathrm{test}}, y_{\mathrm{test}})$. The results are reported in Table~\ref{tab:theor}.
+Since the data distribution is known, the expected value $\mathbb{E}(s_{\mathrm{train}})$ of the $1$NN Shapley for $(x_{\mathrm{train}}, y_{\mathrm{train}})=(0,0)$ can be explicitly calculated: %. Notice that for convenience of notation we use $s_{\mathrm{train}}$ for $s_{\mathrm{train}}(x_{\mathrm{test}},y_{\mathrm{test}})$ and $(x, y)$ for $(x_{\mathrm{test}},y_{\mathrm{test}})$.
+\begin{align}
+    \mathbb{E}(s_{\mathrm{train}}) &= \int_{-\infty}^{+\infty} s_{\mathrm{train}}\, p(x_{\mathrm{test}})\ \mathrm{d}x_{\mathrm{test}} 
+    = \frac{1}{2}\sum_{y\in\{0,1\}} \int_{-\infty}^{+\infty} s_{\mathrm{train}}\, p(x_{\mathrm{test}}\,|\,y)\ \mathrm{d}x_{\mathrm{test}}
+    \approx 0.209.
+    \label{eq:integral}
+\end{align}
+It must be remarked that the value of $s_{\mathrm{train}}$ depends on $(x_{\mathrm{test}}, y_{\mathrm{test}})$, as detailed in Table~\ref{tab:theor} and \eqref{eq:datashap}.
+The same procedure as \eqref{eq:integral} can be repeated for any $x_{\mathrm{train}}\in\mathbb R$, with results displayed in Figure \ref{fig:theor}. As expected, the $1$NN Shapley decreases in the direction of increasing hardness, suggesting an association between low KNN Shapleys and hard regions of feature space.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{0.375\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{images/ranks.png}
+    \caption{Four regions for $x_{\mathrm{test}}$ and ranking of  $\{x_1,x_{\mathrm{train}},x_2\}$, for $x_{\mathrm{train}}=0$.}
+    \label{fig:ranks}
+    \vspace*{1em}
+    \centering
+    \scalebox{0.725}{
+    \begin{tabular}{ccccc}
+        \toprule
+        $x_{\mathrm{test}}$ & $y_{\mathrm{test}}$ & $s_{-1}$ & $s_{\mathrm{train}}$ & $s_{1}$ \\ 
+        \midrule
+        $(-\infty, -1.2)$ & $0$ & $1/2$ & $1/2$ & $0$ \\ 
+        $(-\infty, -1/2)$ & $1$ & $-1/6$ & $-1/6$ & $1/3$ \\ 
+        $(-1/2, 0)$ & $0$ & $1/2$ & $1/2$ & $0$ \\ 
+        $(-1/2, 0)$ & $1$ & $-1/6$ & $-1/6$ & $1/3$ \\  
+        $(0, 1/2)$ & $0$ & $1/3$ & $5/6$ & $-1/6$ \\ 
+        $(0, 1/2)$ & $1$ & $0$ & $-1/2$ & $1/2$ \\ 
+        $(1/2, +\infty)$ & $0$ & $1/3$ & $1/3$ & $-2/3$ \\ 
+        $(1/2, +\infty)$ & $1$ & $0$ & $0$ & $1$ \\ 
+        \bottomrule
+        \end{tabular}
+    }
+    \caption{$1$NN Shapleys on the training data for $(x_{\mathrm{test}}, y_{\mathrm{test}})\in\mathbb R\times\{0,1\},\ x_{\mathrm{train}}=0$.}
+    \label{tab:theor}
+    \end{subfigure}
+    \hspace*{0.025\textwidth}
+    \begin{subfigure}{0.575\textwidth}
+    \includegraphics[width=\textwidth]{images/theor.pdf}
+    \caption{Expected value $\mathbb E(s_{\mathrm{train}})$ of the $1$NN Shapley for the data point $(x_{\mathrm{train}},0)$, for different values of $x_{\mathrm{train}}$.}
+    \label{fig:theor}
+    \end{subfigure}
+    \centering
+    \caption{Results for the toy experiment in Section~\ref{sec:toy_example}, based on a 50-50 mixture of two univariate normals with unit variance and means $-1$ and $1$, and training data $\{(-1,0),(1,1),(x_{\mathrm{train}},0)\}$.}
+    \label{fig:gaussians}
+\end{figure}
+
+
+
+\section{Results}
+
+In this section, the proposed hardness characterizer based on KNN Shapleys is first compared to the most common methods in the literature via comprehensive benchmarks on tabular data. Then, KNN Shapleys are calculated on a large credit default prediction dataset to identify the hardest points, which are later used to train and compare synthetic data generators. Lastly, the same pipeline is applied to a simulated dataset to verify consistency in the results.
+
+\subsection{Benchmark study}\label{sec:benchmark}
+In \cite{hard_cat}, the problem of hardness characterization is approached quantitatively by comparing existing methods on how confidently they can identify different kinds of hard datapoints on a variety of OpenML datasets \citep{OpenML}. Their toolkit supports two tabular datasets (\textit{diabetes} and \textit{cover}) and it allows to perturb a chosen proportion $p$ of datapoints according to one of three hardness types (\textit{mislabeling}, \textit{out-of-distribution}, or \textit{atypical}; \textit{cf.}~Section~\ref{sec:hard_cat}). For this study, we use $p \in \{0.05, 0.1, 0.15, 0.2\}$ and the performance metric %for hardness detection 
+is the \textit{Area Under the Precision Recall Curve} (AUPRC) of an MLP. Results are averaged across three independent runs per hardness type and then across the different hardness types. The results are plotted in Figure~\ref{fig:benchmarks}.
+
+On the diabetes dataset, our characterizer outperforms existing methods for all choices of $p$, although based on the critical difference diagram in Figure \ref{fig:diabetes}, it can be noticed that performance is not significantly different from Data-IQ, the other method to offer native XGBoost support. On the cover dataset (see Figure \ref{fig:cover}), our characterizer ranks 7th overall, although once again performance is statistically compatible with Data-IQ.
+Based on the mathematical intuition discussed in Section \ref{sec:toy_example}, KNN Shapleys are expected to be lower when a datapoint lies in a region of feature space where its target is \textit{atypical} (\textit{cf.} Section~\ref{sec:hard_cat}). When $p$ is too large relative to the dataset's difficulty, this atypicality is compromised, causing a deterioration in the performance of our characterizer. %This is most likely the reason behind the worse performance observed on the much simpler cover dataset.
+
+\begin{figure}[t]
+\begin{subfigure}{\textwidth}
+    \centering
+    \caption{\textit{Diabetes} dataset}
+    \label{fig:diabetes}
+    \begin{minipage}{0.55\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/heatmaps_diabetes.pdf} 
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.44\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/ranks_diabetes.pdf} % 
+    \end{minipage}
+\end{subfigure}
+\begin{subfigure}{\textwidth}
+    \centering
+    \caption{\textit{Cover} dataset}
+    \label{fig:cover}
+    \begin{minipage}{0.55\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/heatmaps_cover.pdf} 
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.44\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/ranks_cover.pdf} % 
+    \end{minipage}
+\end{subfigure}
+\caption{AUPRC heatmap and critical difference diagram for 13 different hardness characterizers (including KNN Shapleys, labelled \texttt{knn}) on the \textit{diabetes} and \textit{cover} datasets \citep{hard_cat}.}
+\label{fig:benchmarks}
+\end{figure}
+
+Based on these results, low KNN Shapleys prove to be solid indentifiers of hardness. Most hardness characterization techniques in the literature were devised for neural networks, and do not natively support XGBoost. On the other hand, KNN Shapleys have the clear advantage over existing methods of not requiring model training and thus being deterministic and model agnostic. However, they require an external test set and can become %prohibitively 
+expensive to calculate on very large datasets ($n > 10^6$).
+
+\subsection{American Express dataset}\label{sec:amex_res}
+
+The main real-world benchmark for the methodologies discussed in this work is the American Express credit default prediction dataset \citep{amex}, referred to as the \textit{Amex dataset}. The dataset consists of observations for $n = 458\,913$ customers. For each of them, we consider 188 features available at the latest credit card statement date, in addition to a binary label $y_i \in \{0, 1\}$ which specifies whether or not the customer was able to repay their credit card debt within 120 days of the statement.
+The $n = 458\,913$ available observations are split into $n_{\mathrm{valid}} = 50\,000$ datapoints used to validate model performance on unseen data, $n_{\mathrm{test}} = 50\,000$ observations used to calculate KNN Shapleys, and the remaining datapoints are used for training. The splits are performed randomly stratifying on the target, so that the same ratio of defaulters and non-defaulters is maintained across datasets. Performance is measured via the normalized Gini coefficient, which is $2 \cdot \mathrm{AUCROC} - 1$ with $\mathrm{AUCROC}$ denoting the \textit{Area Under the Receiver Operating Characteristic} curve. 
+
+The Amex dataset has been first released as part of a Kaggle\footnote{See \url{https://www.kaggle.} competition, with winning submissions typically consisting in ensembles of different models. XGBoost was found to have the best performance \textit{on its own} %(as it often happens on tabular data) 
+and is thus chosen as baseline for this study. In order to benefit from GPU acceleration, training was carried out on a cluster equipped with 4 GeForce RTX 3090 Ti GPUs and 256GB of memory. The number of gradient boosting rounds was set to an arbitrarily high number, % ($9999$), 
+using early stopping on validation Gini with a patience of 100 iterations of gradient boosting. Because of subsampling %of both 
+the datapoints and the features, the training process is non-deterministic and thus retraining a large number of times with different random seeds is required to mitigate randomness. This forces to choose a set of hyperparameters that offers low training times as well as solid validation performance. Through experimenting it was found, that setting the maximum tree depth to 4, the learning rate to 0.05, the subsampling ratio of datapoints to 0.8 and of features to 0.6, gives a validation Gini of $0.91986$ in under 2 minutes of training time.
+
+\subsubsection{Hardness characterization}\label{sec:hc}
+Data-IQ's confidence scores and aleatoric uncertainties are estimated for each training observation as per Section \ref{sec:hard_cat}. Figure \ref{fig:hist2d} displays the relationship between the two: in the top left a large amount of ``easy" points, with high confidence and low aleatoric uncertainty; in the bottom left a few ``hard" points, with low confidence and low aleatoric uncertainty; lastly, the ``ambiguous" points are located around the elbow, with high aleatoric uncertainty. Looking at the marginal distributions in Figure \ref{fig:dataiq_hist}, it is noticed that XGBoost is generally very confident in its predictions, causing the number of hard points to be low. Setting a low confidence threshold of $0.25$, a high confidence threshold of $0.75$ and a low aleatoric uncertainty threshold of $0.2$ allows to assign to each point a tag in $\{\textit{Easy}, \textit{Hard}, \textit{Ambiguous}\}$. Hard points are less than $3\%$ of training data and both hard and ambiguous points have a much higher proportion of defaulters than the full data (\textit{cf.} Table \ref{tab:dataiq}).
+
+\begin{figure}[t]
+\centering
+\begin{minipage}{0.425\textwidth}
+\begin{subfigure}{\textwidth}
+\caption{Hardness characterization results}
+\label{tab:dataiq}
+\centering
+\scalebox{0.8}{
+\begin{tabular}{cccc}
+        \toprule
+        Data-IQ tag & Easy & Hard & Ambiguous \\
+        \midrule
+        $N$ & $284\,902$ & $10\,499$ & $63\,512$ \\
+        \% defaulters & $19.07$ & $58.73$ & $51.09$ \\
+        \bottomrule
+    \end{tabular}
+}
+\vspace*{.5em}
+\end{subfigure}
+\begin{subfigure}{\textwidth}
+    \centering
+    \caption{Joint distribution of $v_{\mathrm{al}}(\bm{x})$ and $\bar{\mathcal{P}}(\bm{x})$}
+    \label{fig:hist2d}
+    \includegraphics[width=\textwidth]{images/unc_vs_conf.pdf}
+\end{subfigure}
+\end{minipage}
+\hspace*{0.025\textwidth}
+\begin{minipage}{0.525\textwidth}
+\begin{subfigure}{\textwidth}
+    \centering
+    \caption{Marginal distributions for $v_{\mathrm{al}}(\bm{x})$ and $\bar{\mathcal{P}}(\bm{x})$}
+    \label{fig:dataiq_hist}
+    \includegraphics[width=\textwidth]{images/dataiq_hist.pdf}
+\end{subfigure}
+\begin{subfigure}{\textwidth}
+    \centering
+    \caption{Feature 0 distribution for defaulters and non-defaulters}
+    \label{fig:feat0_dataiq}
+    \includegraphics[width=\textwidth]{images/best_features_hist.pdf}
+\end{subfigure}
+\end{minipage}
+\caption{Data-IQ hardness characterization scores on the Amex credit default prediction dataset.}
+\label{fig:dataiq_amex}
+\end{figure}
+
+Beyond these initial statistics, it is interesting to know where these points lie in feature space. By looking at the total reduction in loss due to a feature in the nodes where said feature is used to split the data, we can calculate the feature importances of a trained XGBoost classifier. In the case of the Amex dataset, the first feature dominates these scores, with an importance comparable to the bottom 100 features combined. Figure \ref{fig:feat0_dataiq} displays the distribution of this feature separated by Data-IQ tag for both defaulters and non-defaulters: hard defaulters somewhat overlap with easy non-defaulters and vice-versa, while ambiguous defaulters are almost indistinguishable from ambiguous non-defaulters. This is a common issue with tabular data, referred to as \textit{outcome heterogeneity} and is known to be captured by Data-IQ \citep{dataiq}.
+
+KNN Shapleys are then computed for $K \in \{1, 5, 100\}$ under the assumption that the $n_{\mathrm{test}}$ available out-of-sample data points are representative of the entire data distribution.
+Figure \ref{fig:knn_by_dataiq} displays the distribution of 100NN Shapleys separated by Data-IQ's tag: hard points as per Data-IQ exhibit low 100NN Shapleys, with very good adherence for the hardest points. In addition, the left tail of the ambiguous points lies in the region of low 100NN Shapleys and would thus be recognized as hard by our novel characterizer.
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[b]{0.535\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{images/knn_vs_dataiq_hist.pdf}
+    \caption{Distribution of the 100NN data Shapley scores for different Data-IQ tags.}
+    \label{fig:knn_by_dataiq}
+    \end{minipage}
+    \hspace{0.025\textwidth}
+    \begin{minipage}[b]{0.425\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{images/compare_hardness.pdf}
+    \caption{Validation Gini after removing hardest points, % first, %: Data-IQ and KNN Shapleys for $\mathrm{K} \in \{1, 5, 100\}$. 
+    with $95\%$ CIs.}% estimated by retraining 10 times with different random seeds.}
+    \label{fig:comp_hard}
+    \end{minipage}
+\end{figure}
+
+To choose the best $K$, validation Gini is monitored as we re-train XGBoost after gradually removing the hardest datapoints. These points are expected to be the most valuable for XGBoost and thus the best hardness characterizer should be the one displaying the fastest drop in validation performance. 100NN Shapleys outperform both other choices of $K$ and Data-IQ (\textit{cf.} Figure \ref{fig:comp_hard}). This comparison highlights an issue with Data-IQ: after a sharp drop when the hard points are removed, performance decreases at a rate comparable to random as the most ambiguous points are removed. \cite{dataiq} argue that the removal of ambiguous points should actually make the model more robust, as aleatoric uncertainty is data-dependent and cannot be reduced unless additional features are collected. This is however not the case for the Amex dataset, and beyond the small amount of hard points identified, Data-IQ does not provide guidance on the next most valuable points. %In addition, while Figure \ref{fig:comp_hard} may suggest to try even larger values of K, it is worth remembering that KNN Shapleys, like all methods based on nearest neighbours, rely on a proximity assumption which may be falsified for K too large. Based on these discoveries, the hardest points needed to train synthetic data generators in Section \ref{sec:sdg} are identified using 100NN Shapleys.
+
+\subsubsection{Synthetic data generation}\label{sec:sdg_res}
+The $10\%$ hardest datapoints are chosen as training set for synthetic data generators, with the purpose of establishing whether augmenting only the hardest datapoints makes XGBoost more robust than non-targeted data augmentation. The choice of a hard threshold is imposed by the expensive computational cost of fine-tuning neural networks, and $10\%$ is justified as it is just before the elbow region where the decrease in validation performance when removing hard data slows down (\textit{cf.} Figure \ref{fig:comp_hard}).
+The quality of the synthetic samples can be examined directly for the first feature: Figure \ref{fig:ctgan_hard_hist} (CTGAN) displays a good but not perfect overlap with real data, whereas from Figure \ref{fig:tvae_hard_hist} (TVAE) we can see better overlap of synthetic and real data with respect to CTGAN for the first feature. 
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{0.475\textwidth}
+        \centering
+        \caption{CTGAN}
+        \label{fig:ctgan_hard_hist}
+        \includegraphics[width=\textwidth]{images/ctgan_hard_hist.pdf}
+    \end{subfigure}
+    \hspace{.025\textwidth}
+    \begin{subfigure}{0.475\textwidth}
+        \centering
+        \caption{TVAE}
+        \label{fig:tvae_hard_hist}
+        \includegraphics[width=\textwidth]{images/tvae_hard_hist.pdf}
+    \end{subfigure}
+    \caption{Histogram of feature 0 in the Amex dataset for true and synthetic data generated via CTGAN and TVAE, restricted to the 10\% harest data points according to the 100NN Shapley scores.}
+    \label{fig:hard_hist}
+\end{figure}
+
+For models trained on the $10\%$ hardest points we augment by $100\%$, while for models trained using the entire dataset we augment by $10\%$, thus guaranteeing the same amount of synthetic samples across all experiments. Notice that for each attempt synthetic data has to be generated multiple times with different seeds to mitigate randomness and quantify uncertainty on the performance metric. The proposed routine, implemented in Python with the \texttt{baytune} package \citep{baytune}, requires very few attempts to find good proposals, and is thus more efficient than a grid search over a hyperparameter space, reducing the computational complexity of the problem. %. This efficiency is required by the significant computational complexity of the problem: for models trained on the entire dataset, 20 iterations of the routine take around one week to complete on the GPU cluster.
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.425\textwidth}
+        \begin{subfigure}{\textwidth}
+            \centering
+            \caption{Scores in fine-tuning routine: hard points}
+            \label{fig:tuning_hard}
+            \includegraphics[width=\linewidth]{images/tuning.pdf} 
+        \end{subfigure}
+        \begin{subfigure}{\textwidth}
+            \centering
+            \caption{Scores in fine-tuning routine: entire dataset}
+            \label{fig:tuning_entire}
+            \includegraphics[width=\linewidth]{images/tuning_tot.pdf} 
+        \end{subfigure}
+    \end{minipage}
+    \hspace*{0.025\textwidth}
+    \begin{minipage}{0.525\textwidth}
+        \centering
+        \begin{subfigure}{\textwidth}
+        \centering
+            \caption{Variation in Gini after augmentation with $95\%$ CIs.}
+            \label{tab:res}
+            \scalebox{0.75}{
+                \begin{tabular}{ccc}
+                    \toprule
+                    & hardest $10\%$ by $100\%$ & full data by $10\%$ \\
+                    \midrule
+                    SMOTE & $[-0.00122, -0.00109]$ & $[0.000116, 0.000192]$ \\
+                    Best TVAE & $[0.000366, 0.000431]$ & $[0.000232, 0.000278]$ \\
+                    Best CTGAN & $[0.000193, 0.000312]$ & $[0.000135, 0.000237]$ \\
+                    \bottomrule
+                \end{tabular}
+            }
+        \vspace*{.5em}
+        \end{subfigure}
+        \begin{subfigure}{\textwidth}
+        \centering
+        \caption{Scores for TVAE and TVAE on hard data points after $5\%, 10\%, 15\%, 20\%$ augmentation, with $95\%$ confidence intervals estimated by generating synthetic data 10 times.}
+        \label{fig:tvae_repeat}
+        \includegraphics[width=\textwidth]{images/tvae_vs_tvae_hard.pdf}
+        \end{subfigure}
+    \end{minipage}
+    \caption{Gini scores under different synthetic data augmentation regimes on the Amex dataset.}
+    \label{fig:tuning}
+\end{figure}
+
+Figures~\ref{fig:tuning_hard} and~\ref{fig:tuning_entire} display the scores after 20 attempts: the best scores are in both cases achieved by TVAE, and augmenting only the hardest points generally leads to a more significant improvement in validation performance, both for the best attempts and on average across different sets of hyperparameters.
+Table \ref{tab:res} reports the performance variations for the best TVAE, CTGAN and SMOTE: the latter does not work for the hardest points and is outperformed by TVAE for general augmentation. The robustness of these results for the best attempts can be verified by augmenting by different amounts ($5\%, 10\%, 15\%, 20\%$), with results displayed in Figure~\ref{fig:tvae_repeat}: generating more hard points further increases performance with diminishing returns after $15\%$, while for non-targeted augmentation, the performance actually worsens as more data is added due to the extra noise. Finally, to quantify the magnitude of this improvement, adding back the $n_{\mathrm{test}} = 50\,000$ observations used to compute KNN Shapleys into training data improves validation performance by $\approx 0.000326$, which is less than the improvement obtained from augmentation of the hard points via TVAE.  %so augmentation of the hard points via TVAE seems to also outperform increasing the training set size by same amount.
+
+It could be argued that the improvement in validation performance achieved via data augmentation, although larger for models trained on only the hardest datapoints, is very small in absolute value. 
+It must be remarked that similar improvements have only been achieved in the original Kaggle competition by generating thousands of features and building large ensemble models. Additionally, XGBoost already classifies over $90\%$ of validation data correctly, and any further improvement on this already highly performing model may have business value in practice.
+
+\subsection{Simulation study} \label{sec:sim_ex}
+
+To verify the robustness of the results, we run the same hardness characterization and data augmentation pipeline on simulated data. Specifically, we consider four bivariate normal distributions, assigning to two of them label $y = 0$, and $y = 1$ to the remaining ones. % so that the classes are balanced.
+We draw $n_{\mathrm{train}} = 5\,000$ training datapoints, $n_{\mathrm{valid}} = 2\,500$ observations for model validation and lastly $n_{\mathrm{test}} = 2\,500$ datapoints to calculate $5$NN Shapleys. The training dataset can be visualized in Figure \ref{fig:scatter} on the left, while the $5\%$ hardest points according to $5$NN Shapleys are shown on the right: notice that they are concentrated around the decision boundary, with most of them falling on the ``wrong'' side, confirming the issue of \textit{outcome heterogeneity} for hard data points discussed in Section \ref{sec:hc}.
+
+ %Notice how CTGAN was not considered because of excessive training instability on a dataset with just two features. 
+Figures~\ref{fig:simulation_tuning_hard} and~\ref{fig:simulation_tuning_tot} display the scores after 10 attempts: the targeted approach results in a larger performance improvement, both for the best attempt and on average across different sets of hyperparameters.
+Finally, we augment by different amounts %($2\%, 4\%, 6\%, 8\%, 10\%$) 
+using the best attempts, with results displayed in Figure~\ref{fig:comp}: hard points augmentation consistently outperforms the non-targeted approach and improves as more data is added.
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.515\textwidth}
+        \centering
+        \begin{subfigure}{\textwidth}
+        \centering
+            \caption{Scatter of training data (left) and hardest $5\%$ (right).}
+            \label{fig:scatter}
+            \includegraphics[width=.475\textwidth]{images/simulation_scatter.pdf}
+            \includegraphics[width=.475\textwidth]{images/simulation_scatter_hard.pdf}
+        \end{subfigure}
+        \begin{subfigure}{\textwidth}
+        \centering
+        \caption{Scores for TVAE after augmentation with $95\%$ CIs estimated by generating synthetic data 30 times.}
+        \label{fig:comp}
+        \includegraphics[width=\textwidth]{images/simulation_tvae_vs_tvae_hard.pdf}
+        \end{subfigure}
+    \end{minipage}
+    \hspace*{0.025\textwidth}
+    \begin{minipage}{0.435\textwidth}
+        \begin{subfigure}{\textwidth}
+            \centering
+            \caption{Scores in fine-tuning routine: hard points}
+            \label{fig:simulation_tuning_hard}
+            \includegraphics[width=\linewidth]{images/simulation_hard.pdf}
+        \end{subfigure}
+        \begin{subfigure}{\textwidth}
+            \centering
+            \caption{Scores in fine-tuning routine: entire dataset}
+            \label{fig:simulation_tuning_tot}
+            \includegraphics[width=\linewidth]{images/simulation_tot.pdf}  
+        \end{subfigure}
+    \end{minipage}
+    \caption{Gini scores under different synthetic data augmentation regimes on the bivariate Gaussian simulated data, with scatterplots of observations and 5\% hardest data points.}
+    \label{fig:tuning_sim}
+\end{figure}
+
+
+
+\section{Conclusion and discussion}
+
+
+In this work, we verified empirically %on a large-scale credit default dataset provided by American Express and on simulated data, 
+that, when it comes to data augmentation, focusing only on the most challenging points for the model can be beneficial, both in terms of performance improvement and computational efficiency. To achieve this result, we first devised a novel hardness characterizer based on KNN Shapleys, capable of achieving performances comparable to state-of-the-art methods in hardness detection benchmarks on tabular data. Then, we performed a complex fine-tuning routine on synthesizers trained either on the entire dataset or on the hardest points only, allowing to rigorously establish which approach leads to the largest performance improvement.
+
+Methodologically, this work aims at bridging the gap between learning-based hardness characterization and game theoretic data valuation. The benchmarks reported in Section \ref{sec:benchmark} represent the first quantitative comparison between a Shapley-based evaluator and existing hardness characterizers. While research on the two topics has often dealt with similar problems, such as mislabeling or data summarization \citep{grand, scalability}, the two paths have never crossed.
+
+Practically, this work attempts to change the perspective on data summarization: while existing literature has mostly focused on pruning the least valuable points from training data \citep{dataiq, dataoob}, here we propose augmenting the most valuable ones. We demonstrate that not all datapoints are created equal, and some play a more significant role in determining the predictive power of the final model: high-value data dictates which points we should either collect in larger amounts or, when this is not possible, synthetically generate.
+
+
+
+
+

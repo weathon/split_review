@@ -1,0 +1,387 @@
+\title{Training Neural Networks as Recognizers of Formal Languages}
+
+\begin{abstract}
+Characterizing the computational power of neural network architectures in terms of formal language theory remains a crucial line of research, as it describes lower and upper bounds on the reasoning capabilities of modern AI. However, when empirically testing these bounds, existing work often leaves a discrepancy between experiments and the formal claims they are meant to support. The problem is that formal language theory pertains specifically to recognizers: machines that receive a string as input and classify whether it belongs to a language. On the other hand, it is common to instead use proxy tasks that are similar in only an informal sense, such as language modeling or sequence-to-sequence transduction. We correct this mismatch by training and evaluating neural networks directly as binary classifiers of strings, using a general method that can be applied to a wide variety of languages. As part of this, we extend an algorithm recently proposed by \ifanonymoussubmissionmode{}\citet{anonymous-2024-causal}\else{}\citet{snaebjarnarson-etal-2024-causal}\fi{} to do length-controlled sampling of strings from regular languages, with much better asymptotic time complexity than previous methods. We provide results on a variety of languages across the Chomsky hierarchy for three neural architectures: a simple RNN, an LSTM, and a causally-masked transformer. We find that the RNN and LSTM often outperform the transformer, and that auxiliary training objectives such as language modeling can help, although no single objective uniformly improves performance across languages and architectures. Our contributions will facilitate theoretically sound empirical testing of language recognition claims in future work. We have released our datasets as a benchmark called FLaRe\footnote{\ifanonymoussubmissionmode{}Included in the supplementary material.\footnote{\ifanonymoussubmissionmode{}Included in the supplementary material
+\end{abstract}
+
+\section{Introduction}
+
+
+Neural network-based AI systems, including large language models (LLMs), have been hailed for their emergent reasoning abilities. What exactly are these abilities? The precise scope of what has emerged is hard to pin down. Fortunately, formal language theory gives us a vocabulary for ascribing hard limits to the kinds of computations neural networks can perform, enabling a much-needed formal characterization. For example, results from formal language theory allow us to know with certainty that a transformer LM (with no extra chain-of-thought timesteps) cannot determine whether two regular expressions with repetition operators are equivalent; a transformer LM runs in quadratic time, but the aforementioned problem provably requires exponential time \citep{sipser-2013-introduction}.
+
+A long line of research has attempted to precisely describe the class of problems neural architectures can solve in terms of formal languages. It consists of two parts: formal results that mathematically prove language class bounds, often under simplifying assumptions; and empirical results that, in complementary fashion, provide evidence of these bounds under real settings. Simplifying assumptions for the transformer architecture have included the absence of layer normalization, the use of hard attention, or the use of special positional encodings (see \citet{strobl-etal-2024-what} for a survey). Formal expressivity results also typically do not comment on whether solutions are practically reachable through training, even though the bias imposed by the training algorithm may render the set of solvable problems much smaller than suggested by formal expressivity results. Empirical results are therefore important for validating formal results under unsimplified conditions.
+
+The purpose of this paper is to reconcile a subtle but important disconnect between empirical results and claims about computational power. Formal language theory deals in recognizers: machines that receive a string as input and classify whether it is a member of a language. The Chomsky hierarchy and the classes P and NP are defined in terms of this paradigm. Consider, for example, the recent study by \citet{deletang-etal-2023-neural}: its core claims are about the Chomsky hierarchy, but the supporting experiments train language models and evaluate them as string-to-string functions. While the experiments do validate the authors' claims about a memory-based hierarchy in an informal sense, formally, the experiments do not demonstrate claims about the Chomsky hierarchy of \emph{languages}, but an analogous hierarchy of \emph{functions}. There are multiple ways to fix this mismatch: one could change the theoretical claims to those of a hierarchy of language models \citep{icard-2020-calibrating,borenstein-etal-2024-what} or string-to-string functions \citep{strobl-etal-2024-transformers}; or one could change the experiments to recognition to match the Chomsky hierarchy. In this paper, we explore the latter approach.
+
+We propose an experimental setup for training neural networks as recognizers of formal languages that only requires language-specific algorithms for positive sampling and membership testing. In contrast to most prior work, we generate adversarial negative examples without requiring language-specific rules \citep[cf.][]{weiss-etal-2018-practical,someya-etal-2024-targeted,bhattamishra-etal-2024-separations}. Like \citet{deletang-etal-2023-neural}, we focus on length generalization, and we include two sets of experiments that carefully distinguish between tests of inductive bias and expressivity. We extend recent work by \ifanonymoussubmissionmode{}\citet{anonymous-2024-causal}\else{}\citet{snaebjarnarson-etal-2024-causal}\fi{} to implement a scalable algorithm for length-controlled sampling from finite automata, with a preprocessing step that is asymptotically faster than a standard approach by a factor of $\bigo{\themaxlength^2}$, where $\themaxlength$ is the maximum string length. In order to explore the effectiveness of other training objectives used in past work while remaining within the recognition paradigm, we experiment with auxiliary loss terms in a multi-task learning setup. Although they do aid certain architectures on specific tasks, they do not have a consistent effect across architectures and languages, and a simple binary cross-entropy objective is often very effective. We compare three architectures: a simple RNN, an LSTM, and a causally-masked transformer. We experiment on a variety of formal languages across the Chomsky hierarchy and show that the transformer often underperforms the RNN and LSTM. We also see evidence of recent claims that transformers prefer low-sensitivity Boolean functions \citep{hahn-rofin-2024-why}. We have publicly released our datasets as a benchmark called \newterm{FLaRe} (\textbf{F}ormal \textbf{La}nguage \textbf{Re}cognition), along with our code.
+
+
+
+\section{Method}
+
+\label{sec:method}
+
+We start with some basic definitions. An \newterm{alphabet}, often denoted with the variable $\thealphabet$, is a non-empty finite set of elements called \newterm{symbols}. A \newterm{string} over $\thealphabet$ is a finite sequence of symbols in $\thealphabet$. We use $\emptystring$ to denote the empty string. A \newterm{language} (or \newterm{formal language}) over $\thealphabet$ is a (possibly infinite) set of strings over $\thealphabet$. Let $\kleene{\thealphabet}$ denote the language of all strings over $\thealphabet$. If a machine works by receiving a string as input and producing a decision to \newterm{accept} or \newterm{reject} it as output, then we call it a \newterm{recognizer}, and we say that it \newterm{recognizes} the language of strings that it accepts. A \newterm{language class} is a (possibly infinite) set of languages. Throughout the rest of this section, let us assume we are dealing with a specific language $\thelanguage$ over alphabet $\thealphabet$. For any string $\thestring \in \kleene{\thealphabet}$, we call the proposition $\thestring \in \thelanguage$ the \newterm{label} of $\thestring$.
+
+We now describe a general, effective method for sampling datasets from formal languages and training neural networks as recognizers. We address a number of challenges cited in past work, namely negative sampling, length-constrained sampling, and the paucity of the training signal when training on binary labels. We provide particularly efficient solutions for regular languages.
+
+\subsection{Dataset generation}
+\label{sec:dataset-sampling}
+
+Suppose we want to sample a set of $\thenumexamples$ string-label pairs, where the length of every string is in the range $\thelengthrange$. Assume that we have available to us
+\begin{enumerate*}[label=(\alph*)]
+    \item an algorithm for sampling a string $\thestring$ from $\thelanguage$ such that $\stringlength{\thestring} \in \thelengthrange$, and\label{item:positive-sampling-algorithm}
+    \item an algorithm for determining whether a string $\thestring \in \kleene{\thealphabet}$ is a member of $\thelanguage$.\label{item:membership-algorithm}
+\end{enumerate*}\footnote{This is directly comparable to the classical learning theory of \citet{gold-1967-language}, which assumes the availability of a ``text'' of positive examples and an ``informant'' that provides labels.} We do the following $\thenumexamples$ times. We uniformly sample a label from $\{0, 1\}$, ensuring a balanced dataset. If the label is $1$, we sample a string from $\thelanguage$ using the algorithm assumed by \cref{item:positive-sampling-algorithm}. If the label is $0$, we propose a random string $\thestring$ as a negative example. Since it is possible that $\thestring$ is inadvertently a member of $\thelanguage$, we test whether it is in $\thelanguage$ using the algorithm assumed by \cref{item:membership-algorithm}. If $\thestring \in \thelanguage$, we propose a new string until we get a confirmed negative example.
+
+We propose negative strings in one of two ways, with uniform probability. Half the time, we propose a \newterm{uniform negative example} by uniformly sampling a length $\thelength$ from $\thelengthrange$, then uniformly sampling a string from $\thealphabet^{\thelength}$. For many languages, this is very likely to produce a negative example, but one that is so superficially dissimilar to positive examples that the classification problem becomes too easy and fails to demonstrate the underlying algorithm. Prior work, therefore, typically uses language-specific rules to generate adversarial negative samples \citep{weiss-etal-2018-practical,bhattamishra-etal-2024-separations,someya-etal-2024-targeted}. To keep our methodology more general, the other half of the time, we propose a \newterm{perturbed negative example} by sampling a positive example and perturbing it with random edits \citep[cf.][]{weiss-etal-2017-extracting}. More precisely, we (1) sample the number of edits $\thenumedits$ from a geometric distribution that heavily favors small $\thenumedits$, and (2) iteratively apply $\thenumedits$ uniformly-sampled edits (single-symbol insertion, replacement, or deletion). We describe this procedure in more detail in \cref{sec:perturbation-sampling}. Typically, this is much more likely to produce negative examples that are difficult to distinguish from positive ones (see also our analysis in \cref{fig:edit-distance}).
+
+\subsection{Efficient length-constrained sampling for regular languages}
+\label{sec:dfa-sampling}
+
+We now turn to efficient length-constrained sampling for regular languages. Any regular language can be expressed as a simple state machine called a \newterm{deterministic finite automaton (DFA)}.
+\begin{definition}
+    \label{def:partial-dfa}
+    A \defn{partial deterministic finite automaton (partial DFA)} is a tuple $\theautomaton = (\thestateset, \thealphabet, \thetransitionfunc, \thestartstate, \theacceptstateset)$ where
+    \begin{enumerate*}[label=(\roman*)]
+        \item $\thestateset$ is a finite set of states;
+        \item $\thealphabet$ is an alphabet;
+        \item $\thetransitionfunc \colon \thestateset \times \thealphabet \rightarrow \thestateset \cup \{\nulltransition\}$ is the transition function, where $\nulltransition$ indicates the absence of a transition;
+        \item $\thestartstate \in \thestateset$ is the start state; and
+        \item $\theacceptstateset \subseteq \thestateset$ is the set of accept states.
+    \end{enumerate*}
+    If $\thetransitionfunc(\thestatefrom, \thesymbol) = \thestateto$, we say that $\theautomaton$ has a transition from $\thestatefrom$ to $\thestateto$ that scans $\thesymbol$, and we write $\fsatransition{\thestatefrom}{\thesymbol}{\thestateto} \in \thetransitionfunc$.
+\end{definition}
+Our definition of DFA is \emph{partial} in the sense that we do not require an outgoing transition to be defined for all $(\thestatefrom, \thesymbol) \in \thestateset \times \thealphabet$. For simplicity, from now on, we will simply refer to partial DFAs as DFAs. We call a sequence $\thepath$ of connecting states and transitions a \newterm{path}. If $\thepath$'s transitions scan $\thesymbol_1, \ldots, \thesymbol_{\thelength}$, we say that $\thepath$ \newterm{scans} the string $\thesymbol_1 \cdots \thesymbol_{\thelength}$. For any string $\thestring \in \kleene{\thealphabet}$, if there is a path that starts in $\thestartstate$, scans $\thestring$, and ends in an accept state, we say that $\theautomaton$ \newterm{accepts} $\thestring$ and \newterm{rejects} it otherwise. This leads to a straightforward $\bigo{\thelength}$-time membership testing algorithm: start in the initial state, follow the unique $\thestring$-scanning path (if it exists), and accept if it ends in an accept state. We say that $\theautomaton$ \newterm{recognizes} the language $\{ \thestring \in \kleene{\thealphabet} \mid \theautomaton \text{ accepts } \thestring \}$. If all states in a DFA are reachable from the start state and can lead to an accept state, we call it \newterm{trimmed}.
+
+We present an algorithm for length-constrained sampling from a DFA's language that is asymptotically much more efficient than a standard approach. To facilitate the exposition of this algorithm (and other algorithms in this paper), we first introduce semirings and weighted DFAs.
+\begin{definition}
+    \label{def:monoid}
+    A \defn{monoid} is a tuple $(\thesemiringset, \monoidop, \monoididentity)$, where $\thesemiringset$ is a set, $\monoidop$ is an associative binary operation, and $\monoididentity \in \thesemiringset$, called the \newterm{identity} element, satisfies $\monoididentity \monoidop a = a \monoidop \monoididentity = a$ for all $a \in \thesemiringset$. If $a \monoidop b = b \monoidop a$ for all $a, b \in \thesemiringset$, we say that the monoid is \defn{commutative}.
+\end{definition}
+\begin{definition}
+    \label{def:semiring}
+    A \defn{semiring} is a tuple $(\thesemiringset, \oplus, \otimes, \semiringzero, \semiringone)$ where $(\thesemiringset, \oplus, \semiringzero)$ is a commutative monoid and $(\thesemiringset, \otimes, \semiringone)$ is a monoid. Additionally, $\otimes$ distributes over $\oplus$: $a \otimes (b \oplus c) = (a \otimes b) \oplus (a \otimes c)$ and $(a \oplus b) \otimes c = (a \otimes c) \oplus (b \otimes c)$; and $\semiringzero$ is absorbing with respect to $\otimes$: $\semiringzero \otimes a = a \otimes \semiringzero = \semiringzero$. Furthermore, let $\semiringexp{a}{i} = \bigotimes_{j=1}^{i} a$, and $\kleene{a} = \bigoplus_{i = 0}^{\infty} \semiringexp{a}{i}$. If $\kleene{a}$ is defined and in $\thesemiringset$ for all $a \in \thesemiringset$, we say the semiring is \defn{closed}.
+\end{definition}
+A \newterm{weighted DFA} is a DFA with semiring-weighted transitions. The weights can, for example, be probabilities. Some of our algorithms are variants of existing algorithms over a different semiring.
+\begin{definition}
+    \label{def:semiring-partial-dfa}
+    A \defn{weighted deterministic finite automaton (WDFA)} over a semiring $(\thesemiringset, \oplus, \otimes, \semiringzero, \semiringone)$ is a tuple $\theautomaton = (\thestateset, \thealphabet, \thetransitionfunc, \thestartstate, \theacceptweightfunc)$ such that
+    \begin{enumerate*}[label=(\roman*)]
+        \item $\thestateset$, $\thealphabet$, and $\thestartstate$ are defined as in \cref{def:partial-dfa};
+        \item $\thetransitionfunc \colon \thestateset \times \thealphabet \rightarrow (\thestateset \times \thesemiringset) \cup \{\nulltransition\}$ is the transition function; and
+        \item $\theacceptweightfunc \colon \thestateset \rightarrow \thesemiringset$ is the accept weight function.
+    \end{enumerate*}
+    If $\thetransitionfunc(\thestatefrom, \thesymbol) = (\thestateto, \theweight)$, we say that $\theautomaton$ has a transition from $\thestatefrom$ to $\thestateto$ that scans $\thesymbol$ with weight $\theweight$, and we write $\wfatransition{\thestatefrom}{\thesymbol}{\theweight}{\thestateto} \in \thetransitionfunc$. We call $\{ \thestate \in \thestateset \mid \theacceptweightfunc(\thestate) \neq \semiringzero \}$ the set of accept states.
+\end{definition}
+
+Rather than simply accepting or rejecting a string, a WDFA assigns it a weight. The weight of a path is the product of the weights of its transitions and accept state, and the weight of a string is the weight of the path that scans it, or $\semiringzero$ if one does not exist. We can assign probabilities to strings with the \newterm{probability semiring} $([0, 1], +, \times, 0, 1)$ or, for numerical stability, the \newterm{log semiring} $(\realset \cup \{-\infty\}, \log(\exp(\cdot) + \exp(\cdot)), +, -\infty, 0)$. For random sampling, a probability semiring-weighted DFA must have transition and accept weights that are locally normalized per state.
+\begin{definition}
+    \label{def:pdfa}
+    A WDFA $\theautomaton = (\thestateset, \thealphabet, \thetransitionfunc, \thestartstate, \theacceptweightfunc)$ over the probability semiring is called a \defn{probabilistic DFA (PDFA)} if for all $\thestatefrom \in \thestateset$, $\left(\sum_{\wfatransition{\thestatefrom}{\thesymbol}{\theprobability}{\thestateto} \in \thetransitionfunc} \theprobability\right) + \theacceptweightfunc(\thestatefrom) = 1$.
+\end{definition}
+
+Now that we have set up the necessary definitions, we describe our procedure for length-constrained sampling from a regular language $\thelanguage$. Let $\thedfa$ be a trimmed DFA that recognizes $\thelanguage$. We convert $\thedfa$ to a PDFA $\thepdfa$ by assigning uniform probabilities to its transitions and accept states. More precisely, for each state $\thestatefrom \in \thestateset$, let $\numstateactions{\thestatefrom} \defeq |\{ \thesymbol \in \thealphabet \mid \exists \thestateto \in \thestateset, ~ \fsatransition{\thestatefrom}{\thesymbol}{\thestateto} \in \thetransitionfunc \}| + \indicator{\thestate \in \theacceptstateset}$. We set the probability of each outgoing transition to $\frac{1}{\numstateactions{\thestate}}$, and the accept probability to $\frac{1}{\numstateactions{\thestate}} \indicator{\thestate \in \theacceptstateset}$.
+Let $\thepdfadist$ denote the probability distribution defined by $\thepdfa$, and $\thestringrandomvar$ a $\thepdfadist$-distributed string-valued random variable. Mathematically (without getting into algorithmic details yet), our length-constrained sampling algorithm will do the following. Let $\thevalidlengthset \defeq \{ \thelength \in \thelengthrange \mid \exists \thestring \in \thealphabet^{\thelength}, ~ \thepdfadist(\thestring) > 0 \}$. We sample a length $\thelength$ uniformly from $\thevalidlengthset$. Then, we sample a string from the posterior distribution $\thepdfadist(\thestringrandomvar \mid \stringlength{\thestringrandomvar} = \thelength)$. This amounts to sampling from the distribution
+\begin{equation}
+    p(\thestring) = \frac{1}{|\thevalidlengthset|} \thepdfadist(\thestringrandomvar = \thestring \mid \stringlength{\thestringrandomvar} = \stringlength{\thestring}).
+\end{equation}
+
+How do we compute $\thevalidlengthset$ and sample from the posterior distribution efficiently? One approach would be to construct a WDFA for the distribution $\thepdfadist(\thestringrandomvar = \thestring \mid \stringlength{\thestringrandomvar} = \stringlength{\thestring})$. We could do this by intersecting $\thepdfa$ with a DFA that recognizes $\thealphabet^{\thelength}$, a procedure that would take $\bigo{\thenumstates \thelength}$ time \citep[cf.][]{van-der-poel-2024-mlregtest}. This would result in a WDFA that is not necessarily probabilistic, so as a prerequisite for sampling, we would need to renormalize its weights to locally sum to 1 (\cref{def:pdfa}), using a procedure known as weight pushing \citep{mohri-2009-algorithms} that runs in $\bigo{(\thenumstates \thelength)^3}$ time. Supposing $\theminlength = 0$, it would take $\bigo{\thenumstates^3 \themaxlength^4}$ time to do this for all lengths. This would not be scalable for our experiments, in which we sample strings up to length $\themaxlength = 500$. Fortunately, we can improve this by a factor of $\bigo{\themaxlength^2}$ using a tool proposed by \ifanonymoussubmissionmode\citet{anonymous-2024-causal}\else\citet{snaebjarnarson-etal-2024-causal}\fi{} called the \newterm{counting semiring}. The key idea is to \emph{share} computation among the different lengths by running a version of the weight pushing algorithm---only once---that computes the normalized weights for all lengths. Instead of weighting the DFA with probabilities, we use \emph{vectors} that bin probabilities by each length in $[0, \themaxlength]$.
+\begin{definition}
+    \label{def:counting-semiring}
+    Let $\thebasesemiring = (\thesemiringset, \basesemiringadd, \basesemiringmul, \basesemiringzero, \basesemiringone)$ be a semiring, and let $\thecountingsize \in \naturalnumberset$. For $\thecountingvector \in \thecountingsemiringset$, we write $\thecountingvector = (\thecountingvector_0, \thecountingvector_1, \ldots, \thecountingvector_{\thecountingsize})$. The \defn{$\thecountingsize$\textsuperscript{th}-order counting semiring} with respect to the \defn{base semiring} $\thebasesemiring$ is the semiring $\thecountingsemiring = (\thecountingsemiringset, \countingadd, \countingmul, \countingzero, \countingone)$, where:
+    \begin{subequations}
+    \begin{align}
+        (\thecountingvectorleft \countingadd \thecountingvectorright)_{\thecountingindex} &\defeq \thecountingvectorleft_{\thecountingindex} \basesemiringadd \thecountingvectorright_{\thecountingindex} && (\thecountingvectorleft, \thecountingvectorright \in \thecountingsemiringset; 0 \leq \thecountingindex \leq \thecountingsize) \label{eq:counting-add} \\
+        (\thecountingvectorleft \countingmul \thecountingvectorright)_{\thecountingindex} &\defeq \basesemiringsum_{\theothercountingindex = 0}^{\thecountingindex} \thecountingvectorleft_{\theothercountingindex} \basesemiringmul \thecountingvectorright_{\thecountingindex - \theothercountingindex} && (\thecountingvectorleft, \thecountingvectorright \in \thecountingsemiringset; 0 \leq \thecountingindex \leq \thecountingsize) \label{eq:counting-multiply} \\
+        \countingzero &\defeq (\basesemiringzero, \ldots, \basesemiringzero) &&
+        \countingone \defeq (\basesemiringone, \basesemiringzero, \ldots, \basesemiringzero)
+    \end{align}
+    \end{subequations}
+\end{definition}
+If $\thebasesemiring$ is closed, so is $\thecountingsemiring$. We write $\countingstar{\thecountingvector} \defeq \countingsum_{\theothercountingindex = 0}^\infty \countingexp{\thecountingvector}{\theothercountingindex}$; see \cref{eq:counting-semiring-star-formula} for a closed-form solution. The indexes of the vectors in the $\thecountingsize$\textsuperscript{th}-order counting semiring represent the values of an integer counter from $0$ to $\thecountingsize$; the meaning of the counter depends on how the semiring is used. We will use the counter to keep track of the number of symbols scanned by a DFA, i.e., the length of a sampled string. Say the base semiring is the probability semiring. In this case, $\thecountingvector_{\thecountingindex}$ is the probability of scanning a length-$\thecountingindex$ string. This interpretation applies to anything with a weight, including transitions, accept states, paths, and strings. Notice that if $\thecountingvectorleft$ is a vector whose only non-zero element is $\thecountingvectorleft_{\thecountingindex}$, and $\thecountingvectorright$ is a vector whose only non-zero element is $\thecountingvectorright_{\theothercountingindex}$, then $\thecountingvectorleft \countingmul \thecountingvectorright$ is a vector with the value $\thecountingvectorleft_{\thecountingindex} \basesemiringmul \thecountingvectorright_{\theothercountingindex}$ at index $\thecountingindex + \theothercountingindex$ and $\basesemiringzero$ elsewhere. More generally, \cref{eq:counting-multiply} convolves the two vectors, in effect marginalizing over all ways of reaching a count of $\thecountingindex$ for each $0 \leq \thecountingindex \leq \thecountingsize$.
+
+To use the counting semiring for length-constrained sampling from a PDFA $\thepdfa$, we \newterm{lift} $\thepdfa$ to a $\themaxlength$\textsuperscript{th}-order counting semiring-weighted DFA $\thecountingdfa$ as follows. For every transition $\wfatransition{\thestatefrom}{\thesymbol}{\thetransitionprobability}{\thestateto}$ in $\thepdfa$, we set the weight of $\fsatransition{\thestatefrom}{\thesymbol}{\thestateto}$ in $\thecountingdfa$ to $(\basesemiringzero, \thetransitionprobability, \basesemiringzero, \ldots, \basesemiringzero)$, indicating that the transition scans exactly one symbol with probability $\thetransitionprobability$. For every state with accept weight $\thetransitionprobability$, we set its accept weight in $\thecountingdfa$ to $(\thetransitionprobability, \basesemiringzero, \ldots, \basesemiringzero)$, indicating that it accepts (and scans no symbols) with probability $\thetransitionprobability$. The weight of any path in $\thecountingdfa$ is then a vector with at most one non-zero element, whose index is equal to the number of symbols the path scans, and whose value is the product of the original transition probabilities. We combine the weights of multiple paths by adding them elementwise (\cref{eq:counting-add}). To avoid underflow, we use the log semiring as the base semiring instead of the probability semiring (see \cref{sec:dfa-sampling-algorithm-details}).
+
+Running a semiring generalization of weight pushing on $\thecountingdfa$ allows us to compute exactly the quantities we need for efficient sampling from $\thepdfadist(\thestringrandomvar \mid \stringlength{\thestringrandomvar} = \thelength)$. At every state, and for every $0 \leq \thecountingindex \leq \thecountingsize$, it computes a probability distribution over (1) outgoing transitions and (2) whether to accept, conditioned on scanning exactly $\thecountingindex$ symbols in the future, according to the probabilities of $\thepdfa$. It does this by computing (1) for every transition, the sum of the weights of all paths in $\thecountingdfa$ that start with that transition, and (2) for every state, the sum of the weights of all paths in $\thecountingdfa$ that start and end at that state. Once we have these weights, which are vectors, if we locally normalize them elementwise at each state, we get the aforementioned probability distributions. Now, a $\bigo{\thelength}$-time sampling algorithm for sampling a string of exactly length $\thelength$ becomes straightforward. We start in $\thestartstate$ and initialize a counter $\thecountingindex$ to $\thelength$. Repeatedly, we sample transitions from the normalized distributions for index $\thecountingindex$ from the current state and decrement $\thecountingindex$ for every symbol scanned. We stop when we sample an accept action. The set of valid string lengths $\thevalidlengthset$ is the set of all $\thelength$ for which we can take any transition or accept at $\thestartstate$, conditioned on scanning $\thelength$ symbols in the future, with nonzero probability. See \cref{sec:dfa-sampling-algorithm-details} for more details and pseudocode.
+
+\paragraph{Time complexity.} With the log semiring as the base semiring, the $\countingmul$ and $\countingstar{{}}$ operations (\cref{eq:counting-multiply,eq:counting-semiring-star-formula}) can be computed in $\bigo{\thecountingsize^2}$ time. Weight pushing requires $\bigo{\thenumstates^3}$ multiplications and $\bigo{\thenumstates}$ star operations, making the overall time complexity of this approach $\bigo{\thenumstates^3 \thecountingsize^2} = \bigo{\thenumstates^3 \themaxlength^2}$. Moreover, the operations in \cref{def:counting-semiring} and weight pushing are all amenable to vectorization, and we take advantage of this by accelerating it with PyTorch \citep{paszke-etal-2019-pytorch}.
+
+\subsection{Neural network architectures}
+\label{sec:neural-network-architectures}
+
+We compare three neural network architectures: 
+\begin{enumerate*}[label=(\alph*)]
+    \item a multi-layer \newterm{simple RNN} \citep{elman-1990-finding} with a $\tanh$ activation function and learned initial hidden states,
+    \item a multi-layer \newterm{LSTM} \citep{gers-schmidhuber-2001-lstm} with decoupled input and forget gates and learned initial hidden states, and
+    \item a causally-masked \newterm{transformer} encoder \citep{vaswani-etal-2017-attention} with pre-norm \citep{wang-etal-2019-learning,nguyen-salazar-2019-transformers} and sinusoidal positional encodings.
+\end{enumerate*}
+In all cases, the model receives a string of symbols $\thestring = \thesymboli{1} \cdots \thesymboli{\thelength} \in \thealphabet^\thelength$ as input, converts it to a sequence of \newterm{input embedding vectors} $\theinputembeddingi{1}, \ldots, \theinputembeddingi{\thelength} \in \realset^\thehiddensize$ using an \newterm{embedding matrix} $\theembeddingmatrix$, and produces a sequence of \newterm{hidden vectors} $\thehiddeni{0}, \thehiddeni{1}, \ldots, \thehiddeni{\thelength} \in \realset^\thehiddensize$, which are used to compute logits for loss terms. For the simple RNN and LSTM, the hidden vectors are the hidden states of the last layer. For the transformer, the hidden vectors are the outputs of the last layer, and we always prepend a reserved $\bos$ symbol to the input, whose corresponding output is $\thehiddeni{0}$. For more details, see \cref{sec:neural-network-architecture-details}.
+
+We apply a learned affine transformation, called the \newterm{recognition head}, to the last hidden vector to classify whether the string is a member of the language. Let $\theacceptprob$ denote the probability that $\thestring$ is a member of $\thelanguage$ according to the neural network model $\themodel$, and let $\logistic{\cdot}$ be the logistic function.
+\begin{equation}
+    \theacceptprob \defeq \logistic{\affine{\recognitionabbrev}{\thehiddeni{\thelength}}}
+\end{equation}
+We say that the model \newterm{accepts} $\thestring$ if $\theacceptprob \geq \frac{1}{2}$ and \newterm{rejects} it otherwise.
+
+\subsection{Training objectives}
+\label{sec:loss-function}
+
+In all experiments, we train a neural network to classify whether an input string is in $\thelanguage$ by minimizing the binary cross-entropy of the recognition head \citep[cf.][]{weiss-etal-2018-practical,bhattamishra-etal-2023-simplicity,van-der-poel-2024-mlregtest,hahn-rofin-2024-why,bhattamishra-etal-2024-separations}. For any probability $\theprobability$ and proposition $\thebooleanproposition$, we define the binary cross-entropy $\binarycrossentropy{\theprobability}{\thebooleanproposition}$ as follows.
+\begin{equation}
+    \binarycrossentropy{\theprobability}{\thebooleanproposition} \defeq \begin{cases}
+        -\log(\theprobability) & \text{if }\thebooleanproposition \\
+        -\log(1-\theprobability) & \text{otherwise}
+    \end{cases}
+\end{equation}
+We minimize the following loss function.
+\begin{equation}
+    \therecognitionloss \defeq \binarycrossentropy{\theacceptprob}{\thestring \in \thelanguage}
+\end{equation}
+Using $\therecognitionloss$ as the only training objective may lead to some problems. For one, it might be difficult to learn to orchestrate a large number of internal computational steps given only a single bit of information per example. Moreover, gradient originates only from the last timestep, which is problematic for the RNN and LSTM, which are susceptible to the exploding and vanishing gradient problems. It is presumably for these reasons, in addition to the need for negative sampling, that most prior work has shied away from a pure language recognition training objective. One way to alleviate these issues is to provide the model with hints about the expected intermediate computational steps at all timesteps. Indeed, a common setup in past work is to have the model predict, for each timestep $\thetimestep$, the set of symbols that may appear at position $\thetimestep$ given the prefix $\thesymboli{1} \cdots \thesymboli{\thetimestep-1}$ \citep{cleermans-etal-1989-finite,gers-etal-2002-learning,schmidhuber-etal-2002-learning,rodriguez-wiles-1997-recurrent,suzgun-etal-2019-lstm,suzgun-etal-2019-evaluating,suzgun-etal-2019-memory,bhattamishra-etal-2020-ability,bhattamishra-etal-2020-computational,ebrahimi-etal-2020-how}.
+
+To this end, we include experiments that add one or both of the following auxiliary loss terms to the training objective for positive examples:
+\begin{enumerate*}[label=(\alph*)]
+    \item a \newterm{language modeling} loss term \citep[cf.][]{hewitt-etal-2020-rnns,dusell-chiang-2020-learning,dusell-chiang-2022-learning,dusell-chiang-2023-surprising,dusell-chiang-2024-stack,liu-etal-2023-transformers,akyurek-etal-2024-in-context,someya-etal-2024-targeted,borenstein-etal-2024-what}, which requires the model to learn a distribution over next symbols at each position; and
+    \item a \newterm{next symbol prediction}\footnote{This is often called next character prediction in prior work.} loss term, which requires the model to predict \emph{whether} each symbol may appear next at each position, given the prefix of $\thestring$ seen so far.
+\end{enumerate*}
+
+When we include the language modeling loss term, we add a \newterm{language modeling head} to the model that computes logits from the hidden vectors. The weights of the language modeling head are tied to the embedding matrix $\theembeddingmatrix$. We always require the head to predict $\eos$ as the last symbol, and we add an embedding for $\eos$ to $\theembeddingmatrix$. We average cross-entropy over timesteps to get the loss term. Let $\thealphabeteos \defeq \thealphabet \cup \{\eos\}$, and let $\theembeddingmatrix_{\thealphabeteos}$ denote the sub-slice of $\theembeddingmatrix$ that only contains embeddings for symbols in $\thealphabeteos$ (i.e., it does not contain the reserved $\bos$ embedding used by the transformer).
+\begin{subequations}
+\begin{align}
+    \thelmprobi{\thetimestep} &\defeq \softmax(\transpose{(\theembeddingmatrix_{\thealphabeteos})} \thehiddeni{\thetimestep - 1})_{\thesymboli{\thetimestep}} && (1 \leq \thetimestep \leq \thelength+1) \\
+    \thelmloss &\defeq \frac{1}{\thelength+1} \sum_{\thetimestep = 1}^{\thelength+1} -\log \thelmprobi{\thetimestep} &&
+    \thesymboli{\thelength+1} \defeq \eos
+\end{align}
+\end{subequations}
+Likewise, when we include the next symbol prediction loss term, we add a \newterm{next symbol prediction head}. For any string $\theotherstring \in \kleene{\thealphabet}$, we define the set of valid next symbols as follows.
+\begin{equation}
+    \thenextsymbolsetu{\theotherstring} \defeq \{ \thesymbol \in \thealphabeteos \mid \exists \theotherotherstring \in \kleene{(\thealphabeteos)} ~ \theotherstring \thesymbol \theotherotherstring \in \thelanguage \concatop \{\eos\} \}
+\end{equation}
+We use binary cross-entropy to train the model to discern whether each symbol in $\thealphabeteos$ is in $\thenextsymbolset$. We average cross-entropy over symbol types and timesteps to get the loss term.
+\begin{align}
+    \thenextsymbolprob &\defeq \logistic{\affine{NS}{\thehiddeni{\thetimestep-1}}}_{\thesymbol} && (1 \leq \thetimestep \leq \thelength+1; \thesymbol \in \thealphabeteos)
+\end{align}
+\begin{equation}
+    \thenextsymbolloss \defeq \frac{1}{\thelength+1} \sum_{\thetimestep = 1}^{\thelength+1} \frac{1}{|\thealphabeteos|} \sum_{\thesymbol \in \thealphabeteos} \binarycrossentropy{\thenextsymbolprob}{\thenextsymbolisvalid}
+\end{equation}
+We say that at each timestep $\thetimestep$, the model predicts the set $\{\thesymbol \in \thealphabeteos \mid \thenextsymbolprob \geq \frac{1}{2}\}$. Unlike language modeling, next symbol prediction adds additional information to the training data, as $\thenextsymbolset$ can include information about unobserved strings. Because of the presence of $\eos$, it also requires the model to predict whether every \emph{prefix} of $\thestring$ is in $\thelanguage$. For trimmed partial DFAs, we can easily precompute the set of valid next symbols for each state based on the outgoing transitions (\cref{alg:precompute-dfa-next-symbol-sets}). We use language-specific rules for non-regular languages (\cref{sec:language-details}). The full loss function with all auxiliary loss terms is
+\begin{equation}
+    \theloss \defeq \therecognitionloss + \thelmcoefficient \thelmloss + \thenextsymbolcoefficient \thenextsymbolloss
+\end{equation}
+where $\thelmcoefficient, \thenextsymbolcoefficient \in \nonnegativeset$ are coefficients that determine the importance of each auxiliary loss term. Whenever an auxiliary loss term is not included, this is equivalent to setting $\thelmcoefficient$ or $\thenextsymbolcoefficient$ to 0. Note that we never include them for negative examples. When computing the loss for a whole minibatch of examples, we average the loss $\theloss$ of the individual examples.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+We test the performance of the three architectures in \cref{sec:neural-network-architectures} on a variety of formal languages (\cref{tab:languages}) that have proven to be of particular interest in prior work, and that come from various levels of the Chomsky hierarchy. These include analogs of the transduction tasks used by \citet{deletang-etal-2023-neural}. For each regular language, we generate datasets using a hand-crafted DFA and the algorithms described in \cref{sec:dfa-sampling}. For the other languages, we use language-specific algorithms for length-constrained sampling and membership testing. We describe all languages in more detail in \cref{sec:language-details}. We call this collection of datasets \textbf{FLaRe} (\textbf{F}ormal \textbf{La}nguage \textbf{Re}cognition).
+
+\begin{table}[t]
+    \caption{Formal languages tested in this paper and included in FLaRe. For each language, we show the language class that it belongs to: regular (\textbf{R}), deterministic context-free (\textbf{DCF}), context-free (\textbf{CF}), or context-sensitive (\textbf{CS}). Each language does not belong to the previous language classes. Let $\substringcount{\thestring}{\theotherstring}$ be the number of times substring $\theotherstring$ occurs in $\thestring$, let $\thestring_{i \rightarrow \thesymbol}$ be $\thestring$ with its $i$\textsuperscript{th} symbol replaced with $\thesymbol$, and let $\binaryencoding{x}$ be the little-endian binary encoding of $x \in \naturalnumberset$. See \cref{sec:language-details} for details.}
+    \label{tab:languages}
+    \begin{center}
+        \small
+\begin{tabularx}{\textwidth}{@{}p{0.6cm}lp{7cm}l@{}}
+\toprule
+\textbf{Class} & \textbf{Language} & \textbf{Description} & \textbf{Example String} \\
+\midrule
+\textbf{R} & \languageevenpairs{} & $\{ \thestring \in \kleene{\{\sym{0}, \sym{1}\}} \mid \substringcount{\thestring}{\sym{01}} + \substringcount{\thestring}{\sym{10}}\text{ is even} \}$ & $\sym{010110}$ \\
+&& $= \{ \thesymbol \theotherstring \thesymbol \mid \thesymbol \in \{\sym{0}, \sym{1}\}, \theotherstring \in \kleene{\{\sym{0}, \sym{1}\}} \} \cup \{\emptystring, \sym{0}, \sym{1}\}$ & \\
+& \languagerepeatzeroone{} & $\{ (\sym{01})^n \mid n \geq 0 \}$ & $\sym{010101}$ \\
+& \languageparity{} & $\{ \thestring \in \kleene{\{\sym{0}, \sym{1}\}} \mid \substringcount{\thestring}{\sym{1}}\text{ is odd} \}$ & $\sym{11011001}$ \\ 
+& \languagecyclenavigation{} & A sequence of left ($\sym{<}$), right ($\sym{>}$), stay ($\sym{=}$) moves on a 5-position cycle, then the final position (0-indexed). & $\sym{>>=<>2}$ \\
+& \languagemodulararithmeticsimple{} & Expression involving $\{+, -, \times\}$ and $\{0, \ldots, 4\}$, then the result mod 5. No operator precedence. & $\sym{1-3×2=1}$ \\
+& \languagedycktwothree{} & Strings of balanced brackets with 2 bracket types and a maximum depth of 3. & $\sym{[()([])]()}$  \\
+& \languagefirst{} & $\{ \sym{1}\thestring \mid \thestring \in \kleene{\{\sym{0}, \sym{1}\}} \}$ & $\sym{100010}$ \\
+\midrule
+\textbf{DCF} & \languagemajority{} & $\{ \thestring \in \kleene{\{\sym{0}, \sym{1}\}} \mid \substringcount{\thestring}{\sym{1}} > \substringcount{\thestring}{\sym{0}} \}$ & $\sym{101101}$ \\
+& \languagestackmanipulation{} & A stack from bottom to top, a sequence of push and pop operations, and the resulting stack from top to bottom. & $\sym{011}\,\symbolpop\,\sym{=10}$ \\
+& \languagemarkedreversal{} & $\{ \thestring \sym{\#} \reverse{\thestring} \mid \thestring \in \kleene{\{\sym{0}, \sym{1}\}} \}$ & $\sym{001\#100}$ \\
+\midrule
+\textbf{CF} & \languageunmarkedreversal{} & $\{ \thestring \reverse{\thestring} \mid \thestring \in \kleene{\{\sym{0}, \sym{1}\}} \}$ & $\sym{001100}$ \\
+\midrule
+\textbf{CS} & \languagemarkedcopy{} & $\{ \thestring \sym{\#} \thestring \mid \thestring \in \kleene{\{\sym{0}, \sym{1}\}} \}$ & $\sym{001\#001}$ \\
+& \languagemissingduplicatestring{} & $\{ (\thestring \thestring)_{i \rightarrow \symbolunderscore} \mid \thestring \in \kleene{\{\sym{0}, \sym{1}\}}, 1 \leq i \leq 2 \stringlength{\thestring}, (\thestring \thestring)_i = \sym{1} \}$ & $\sym{1}\symbolunderscore\sym{011101}$ \\
+& \languageoddsfirst{} & $\{ a_1 b_1 \cdots a_n b_n a \sym{\#} a_1 \cdots a_n a b_1 \cdots b_n \mid$ & $\sym{01010=00011}$ \\
+&& $\qquad n \geq 0; a_i, b_i \in \{\sym{0}, \sym{1}\}; a \in \{\sym{0}, \sym{1}, \emptystring\} \}$ & \\
+& \languagebinaryaddition{} & $\{ \binaryencoding{x}\sym{0}^i\sym{+}\binaryencoding{y}\sym{0}^j\sym{=}\binaryencoding{x+y}\sym{0}^k \mid x, y, i, j, k \in \naturalnumberset \}$ & $\sym{110+01=10100}$ \\
+& \languagebinarymultiplication{} & $\{ \binaryencoding{x}\sym{0}^i\sym{×}\binaryencoding{y}\sym{0}^j\sym{=}\binaryencoding{xy}\sym{0}^k \mid x, y, i, j, k \in \naturalnumberset \}$ & $\sym{110×0100=011}$ \\
+& \languagecomputesqrt{} & $\{ \binaryencoding{x}\sym{0}^i\sym{=}\binaryencoding{\floor{\sqrt{x}}}\sym{0}^j \mid x, i, j \in \naturalnumberset \}$ & $\sym{01010=1100}$ \\
+& \languagebucketsort{} & Sequence of integers in $\{1, \ldots, 5\}$, then $\sym{\#}$ and the sorted sequence. & $\sym{45134\#13445}$ \\
+\bottomrule
+\end{tabularx}
+    \end{center}
+\end{table}
+
+For each language, we sample a single, fixed training set of 10k examples with lengths in $[0, 40]$. We run separate experiments with two different validation sets that are designed to address different scientific questions, each with 1k examples: a \newterm{short validation set} with string lengths in $[0, 40]$, and a \newterm{long validation set} with string lengths in $[0, 80]$. For any finite training set of strings, there are infinitely many valid ways of extrapolating to longer strings; we refer to the way that a neural network architecture disambiguates these possible solutions as its \newterm{inductive bias}. The short validation set reveals an architecture's inductive bias in the absence of any disambiguating information about how it should generalize to longer lengths, as in the experiments of \citet{deletang-etal-2023-neural}. The long validation set, on the other hand, does include longer strings, and so the model's performance on strings that are longer than those in the training set modulates the learning rate schedule, early stopping schedule, and model selection. In this way, it is more in line with expressivity work that seeks to understand whether an architecture admits a certain solution at all, regardless of its inductive bias.
+
+Each architecture consists of multiple layers; in all experiments, we use 5 layers. We automatically adjust the hidden vector size $\thehiddensize$ so that the number of parameters in each model is as close as possible to 64k, excluding extra parameters for language modeling and next symbol prediction heads. This ensures that all models are of comparable size across architectures and languages. For the simple RNN and LSTM, $\thehiddensize$ is the size of the hidden state vectors. For the transformer, $\thehiddensize$ is the model size $d_{\mathrm{model}}$. In the transformer, we use 8 attention heads in each layer, and we set the number of hidden units in each feedforward layer to $4 \thehiddensize$. Every time we train a model, we randomly sample certain hyperparameters \citep{bergstra-bengio-2012-random}, namely initial learning rate, minibatch size, and (when required) $\thelmcoefficient$ and $\thenextsymbolcoefficient$. For every combination of architecture, loss function variant, and type of validation set, we train \numruns{} models. We use four loss function variants: recognition with(out) language modeling and with(out) next symbol prediction. Therefore, for every architecture and validation set, we train \numrunstimeslossfunctions{} models. For more details, see \cref{sec:experiments-details}.
+
+
+
+\section{Results}
+
+\label{sec:results}
+
+To test whether a model has learned the underlying recognition algorithm, our evaluation focuses on the ability to generalize to inputs that are longer than those seen in training \citep[cf.][]{deletang-etal-2023-neural}. In \cref{tab:main-results}, we show recognition accuracy on a test set with string lengths in $[0, 500]$. It has 5,010 examples, or an average of 10 examples per length. Under ``Inductive Bias,'' we select the loss function with the highest mean accuracy on the test set from among the models trained on the short validation set, and we report this mean accuracy. Although we could select a single model based on performance on the validation set, this would result in noise due to the vagaries of model selection; we find that the mean accuracy that each architecture converges to when aggregated across multiple runs is more informative. Under ``Expressivity,'' we show the maximum test accuracy across all \numrunstimeslossfunctions{} models trained on the long validation set. See unabridged results and additional metrics in \cref{sec:full-results}.
+
+\begin{table}[t]
+    \caption{Accuracy on a test set with strings in the length range $[0, 500]$. The training data is in the length range $[0, 40]$. ``Inductive Bias'' uses validation data in the length range $[0, 40]$. We show mean accuracy across \numruns{} runs for the loss function with the highest mean accuracy on the test set. ``Expressivity'' uses validation data in the length range $[0, 80]$. We show maximum accuracy across all \numruns{} runs of all 4 loss functions. ``\transformerabbrev{}'' = transformer, ``\rnnabbrev{}'' = simple RNN, ``\lstmabbrev{}'' = LSTM.}
+    \label{tab:main-results}
+    \begin{center}
+        \small
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+& \multicolumn{3}{c}{Inductive Bias} & \multicolumn{3}{c}{Expressivity} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+Language & \transformerabbrev{} & \rnnabbrev{} & \lstmabbrev{} & \transformerabbrev{} & \rnnabbrev{} & \lstmabbrev{} \\
+\midrule
+\languageevenpairs{} & 0.99 & 0.60 & 0.83 & 1.00 & 1.00 & 1.00 \\
+\languagerepeatzeroone{} & 0.72 & 0.97 & 0.97 & 0.86 & 1.00 & 1.00 \\
+\languageparity{} & 0.56 & 0.71 & 0.90 & 0.60 & 1.00 & 1.00 \\
+\languagecyclenavigation{} & 0.84 & 0.93 & 0.90 & 0.93 & 0.93 & 0.93 \\
+\languagemodulararithmeticsimple{} & 0.69 & 1.00 & 0.98 & 0.88 & 1.00 & 1.00 \\
+\languagedycktwothree{} & 0.70 & 0.95 & 0.91 & 0.82 & 1.00 & 0.98 \\
+\languagefirst{} & 0.98 & 0.80 & 0.94 & 1.00 & 1.00 & 1.00 \\
+\languagemajority{} & 0.97 & 0.90 & 0.95 & 1.00 & 0.95 & 1.00 \\
+\languagestackmanipulation{} & 0.66 & 0.84 & 0.75 & 0.87 & 0.93 & 0.91 \\
+\languagemarkedreversal{} & 0.64 & 0.70 & 0.74 & 0.87 & 0.95 & 0.95 \\
+\languageunmarkedreversal{} & 0.58 & 0.72 & 0.76 & 0.63 & 0.81 & 0.88 \\
+\languagemarkedcopy{} & 0.63 & 0.76 & 0.69 & 0.86 & 0.95 & 0.95 \\
+\languagemissingduplicatestring{} & 0.66 & 0.82 & 0.85 & 0.86 & 0.95 & 0.94 \\
+\languageoddsfirst{} & 0.59 & 0.79 & 0.67 & 0.86 & 0.95 & 0.96 \\
+\languagebinaryaddition{} & 0.64 & 0.74 & 0.74 & 0.88 & 0.92 & 0.92 \\
+\languagebinarymultiplication{} & 0.70 & 0.74 & 0.78 & 0.92 & 0.92 & 0.92 \\
+\languagecomputesqrt{} & 0.67 & 0.78 & 0.84 & 0.86 & 0.89 & 0.89 \\
+\languagebucketsort{} & 0.63 & 0.84 & 0.69 & 0.88 & 0.96 & 0.83 \\
+\bottomrule
+\end{tabular}
+
+    \end{center}
+\end{table}
+
+We find that the RNN and LSTM outperform the transformer in most cases. In the inductive bias experiments, the transformer outperforms the RNN and LSTM only on \languageevenpairs{}, \languagefirst{}, and \languagemajority{}; in the expressivity experiments, it is never the best, and it only outperforms the RNN on \languagebucketsort{}. We do see differences based on a language's sensitivity, i.e., the tendency that changing a bit in a string changes its label. Transformers struggle on high-sensitivity languages (\languagerepeatzeroone{}, \languageparity{}) and do well on low-sensitivity languages (\languageevenpairs{}, \languagefirst{}), in accordance with prior work \citep{hahn-2020-theoretical,bhattamishra-etal-2023-simplicity,hahn-rofin-2024-why}. The LSTM outperforms the RNN on some languages that involve long-range dependencies (\languageevenpairs{}, \languagefirst{}), likely thanks to its memory cell. The LSTM can use its memory cell as a set of counters, which is useful for certain languages \citep{weiss-etal-2018-practical}; accordingly, we see that it outperforms the RNN on \languagemajority{}, but surprisingly not on \languagebucketsort{}. Although \citet{yao-etal-2021-self} gave a construction showing that the transformer can recognize bounded Dyck languages, we see that it struggles on \languagedycktwothree{}.
+
+Although it is possible, in principle, for a model's inductive bias to differ substantially from its expressivity, we see a remarkable consistency between inductive bias and expressivity. As expected, all expressivity scores are higher than the corresponding inductive bias score. However, the ranking of the architectures remains the same between inductive bias and expressivity for almost all languages; it only changes slightly for \languagemissingduplicatestring{} and \languageoddsfirst{}, and more noticeably for \languagebucketsort{}.
+
+Certain auxiliary loss terms do help in isolated cases: for example, next symbol prediction is crucial for the RNN to learn \languageevenpairs{} (\cref{tab:full-even-pairs}). However, we see that no term has a consistently positive or negative impact across languages and architectures (\cref{tab:best-loss-functions}). In fact, recognition alone is the most frequent best loss function, followed by next symbol prediction; loss functions that include a language modeling term help the least often. Remarkably, the RNN gets a mean accuracy of 100\% in the inductive bias experiments for \languagemodulararithmeticsimple{}, using only a recognition training objective.
+
+\begin{table}[t]
+    \caption{The best loss functions, corresponding to the accuracy scores reported in \cref{tab:main-results}. ``R'' = recognition; ``\languagemodelingabbrev{}'' = language modeling; ``\nextsymbolsabbrev{}'' = next symbol prediction. No single loss function consistently results in the best performance; the most frequent winner is just R.}
+    \label{tab:best-loss-functions}
+    \begin{center}
+        \small
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+& \multicolumn{3}{c}{Inductive Bias} & \multicolumn{3}{c}{Expressivity} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+Language & \transformerabbrev{} & \rnnabbrev{} & \lstmabbrev{} & \transformerabbrev{} & \rnnabbrev{} & \lstmabbrev{} \\
+\midrule
+\languageevenpairs{} & \recognitionabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{} & \recognitionabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{} \\
+\languagerepeatzeroone{} & \recognitionabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{} & \recognitionabbrev{} & \recognitionabbrev{} & \recognitionabbrev{} \\
+\languageparity{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{} & \recognitionabbrev{} \\
+\languagecyclenavigation{} & \recognitionabbrev{}+\languagemodelingabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{} & \recognitionabbrev{} & \recognitionabbrev{} & \recognitionabbrev{} & \recognitionabbrev{} \\
+\languagemodulararithmeticsimple{} & \recognitionabbrev{} & \recognitionabbrev{} & \recognitionabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{} & \recognitionabbrev{} \\
+\languagedycktwothree{} & \recognitionabbrev{}+\languagemodelingabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} \\
+\languagefirst{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{} & \recognitionabbrev{} & \recognitionabbrev{} & \recognitionabbrev{} \\
+\languagemajority{} & \recognitionabbrev{}+\languagemodelingabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{}+\nextsymbolsabbrev{} \\
+\languagestackmanipulation{} & \recognitionabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{} \\
+\languagemarkedreversal{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{} \\
+\languageunmarkedreversal{} & \recognitionabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} \\
+\languagemarkedcopy{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{} & \recognitionabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{} & \recognitionabbrev{} \\
+\languagemissingduplicatestring{} & \recognitionabbrev{}+\languagemodelingabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{} & \recognitionabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{} \\
+\languageoddsfirst{} & \recognitionabbrev{} & \recognitionabbrev{} & \recognitionabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{}+\nextsymbolsabbrev{} \\
+\languagebinaryaddition{} & \recognitionabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} \\
+\languagebinarymultiplication{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} \\
+\languagecomputesqrt{} & \recognitionabbrev{} & \recognitionabbrev{} & \recognitionabbrev{} & \recognitionabbrev{} & \recognitionabbrev{} & \recognitionabbrev{} \\
+\languagebucketsort{} & \recognitionabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\nextsymbolsabbrev{} & \recognitionabbrev{}+\languagemodelingabbrev{}+\nextsymbolsabbrev{} \\
+\bottomrule
+\end{tabular}
+
+    \end{center}
+\end{table}
+
+We see accuracy ceilings in the expressivity results for \languagecyclenavigation{}, \languagebinaryaddition{}, \languagebinarymultiplication{}, and \languagecomputesqrt{}. To investigate this, we looked at the examples with the highest cross-entropy. For \languagecyclenavigation{}, all architectures struggle on negative examples that have the right format but the wrong digit at the end; in contrast, the RNN and LSTM were able to get perfect accuracy on a related task in \citet{deletang-etal-2023-neural}. For \languagebinaryaddition{}, the transformer and RNN/LSTM fail for different reasons. The RNN/LSTM only misclassify negative examples that have the right format but incorrect arithmetic, but the transformer also misclassifies positive examples and negative examples that have extra $\sym{+}$, $\sym{×}$, or $\sym{=}$ symbols. The RNN and LSTM fail on \languagecomputesqrt{} for dissimilar reasons; the RNN sometimes accepts invalid formats.
+
+How does treating neural networks as recognizers instead of string-to-string functions affect performance? The most comparable sets of experiments are those of \citet[][Tables B.1 and B.5]{deletang-etal-2023-neural} and our inductive bias experiments. Whereas they found that transformers struggle on \languageevenpairs{} and the RNN/LSTM excel, we see the opposite. Both our results show that transformers struggle on \languageparity{}. Whereas they showed that the RNN/LSTM can perfectly solve \languagecyclenavigation{}, our results show they cannot, perhaps because in our version, the model must additionally validate the format of the string rather than emit a single digit. We see the same model ranking on \languagestackmanipulation{}, but we see differences on \languagemarkedreversal{}, \languageoddsfirst{}, \languagebinaryaddition{}, \languagebinarymultiplication{}, \languagecomputesqrt{}, and \languagebucketsort{}. Notably, we see that the RNN overperforms in our experiments, possibly due to our use of dropout, multiple layers, and a different activation function.
+
+In order to examine how the similarity of negative examples to positive examples affects classification difficulty, for \languagerepeatzeroone{} and \languagedycktwothree{}, we plot the transformer's recognition cross-entropy vs.\ the minimum \newterm{edit distance} between a string and any string in the language in \cref{fig:edit-distance} (we do not plot the RNN and LSTM because they get almost 100\% accuracy). Note that the number of edits $\thenumedits$ performed in \cref{sec:dataset-sampling} is an upper bound for, but necessarily equal to, the true edit distance. We give formal definitions and algorithms for computing edit distance in \cref{sec:edit-distance}. We do see that for both languages, the lower the edit distance is, the more the transformer struggles, particularly near 1 and 2 edits. This confirms that strings with few perturbations are indeed adversarial \citep[cf.][]{van-der-poel-2024-mlregtest}, even when the training distribution is highly skewed toward few edits.
+
+\begin{figure}[t]
+    \small
+    \tikzset{-}
+    \pgfplotsset{
+        height=1.5in,
+        width=\textwidth,
+    }
+    \centering
+    \begin{subfigure}[t]{0.48\textwidth}
+        \centering
+\begin{tikzpicture}
+    \def\threshold{0.6931471805599453}
+    \begin{axis}[
+        axis lines=left,
+        xlabel={Edit Distance},
+        xmin=0,
+        enlarge x limits=0.1,
+        ylabel={Cross-Entropy $\leftarrow$},
+        ymin=0,
+        enlarge y limits=0.1,
+    ]
+        \addplot[
+            mark=*,
+            mark options={scale=0.5},
+            only marks
+        ] table {figures/edit-distance/repeat-01.dat};
+        \draw[dashed] (axis cs:\pgfkeysvalueof{/pgfplots/xmin}, \threshold) -- (axis cs:\pgfkeysvalueof{/pgfplots/xmax}, \threshold);
+        \node[above left] at (axis cs:\pgfkeysvalueof{/pgfplots/xmax}, \threshold) {$\uparrow$ Incorrect};
+    \end{axis}
+\end{tikzpicture}
+
+        \subcaption{\languagerepeatzeroone{}}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.48\textwidth}
+        \centering
+\begin{tikzpicture}
+    \def\threshold{0.6931471805599453}
+    \begin{axis}[
+        axis lines=left,
+        xlabel={Edit Distance},
+        xmin=0,
+        enlarge x limits=0.1,
+        ymin=0,
+        enlarge y limits=0.1,
+    ]
+        \addplot[
+            mark=*,
+            mark options={scale=0.5},
+            only marks
+        ] table {figures/edit-distance/dyck-2-3.dat};
+        \draw[dashed] (axis cs:\pgfkeysvalueof{/pgfplots/xmin}, \threshold) -- (axis cs:\pgfkeysvalueof{/pgfplots/xmax}, \threshold);
+        \node[above left] at (axis cs:\pgfkeysvalueof{/pgfplots/xmax}, \threshold) {$\uparrow$ Incorrect};
+    \end{axis}
+\end{tikzpicture}
+
+        \subcaption{\languagedycktwothree{}}
+    \end{subfigure}
+    \caption{Recognition cross-entropy (lower is better) as a function of edit distance for the transformer model shown under ``Expressivity'' in \cref{tab:main-results}, on a separate dataset of 50 negative examples in the length range $[0, 500]$. The dashed lines show $\log 2$, the threshold for incorrect predictions. Despite being trained on a large proportion of negative examples with low edit distance, the transformer still struggles on examples that resemble positive examples.}
+    \label{fig:edit-distance}
+\end{figure}
+
+
+
+\section{Conclusion}
+
+
+We have proposed a general method for training neural networks as recognizers of formal languages, filling a crucial gap between formal results and experiments designed to support them. Moreover, we have developed a new algorithm for length-constrained sampling of strings from regular languages that is much more efficient than standard methods. We provided results for RNNs, LSTMs, and transformers on a wide range of formal languages commonly used in prior work, showing that RNNs and LSTMs often outperform transformers. An interesting question to address in future work is why transformers perform so much better on natural language than on formal languages. Finally, we trained all our models using additional loss terms that have been previously used as a proxy for recognition and found that these do not improve model performance reliably. We have publicly released our datasets as a benchmark called FLaRe (Formal Language Recognition).
+
+\ifanonymoussubmissionmode
+\else
+
+
+
+

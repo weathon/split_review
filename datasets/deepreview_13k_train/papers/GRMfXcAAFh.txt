@@ -1,0 +1,450 @@
+\title{Oscillatory State-Space Models}
+
+\begin{abstract}
+We propose Linear Oscillatory State-Space models (LinOSS) for efficiently learning on long sequences. Inspired by cortical dynamics of biological neural networks, we base our proposed LinOSS model on a system of forced harmonic oscillators. A stable discretization, integrated over time using fast associative parallel scans, yields the proposed state-space model. We prove that LinOSS produces stable dynamics only requiring nonnegative diagonal state matrix. This is in stark contrast to many previous state-space models relying heavily on restrictive parameterizations. Moreover, we rigorously show that LinOSS is universal, i.e., it can approximate any continuous and causal operator mapping between time-varying functions, to desired accuracy. In addition, we show that an implicit-explicit discretization of LinOSS perfectly conserves the symmetry of time reversibility of the underlying dynamics. Together, these properties enable efficient modeling of long-range interactions, while ensuring stable and accurate long-horizon forecasting. Finally, our empirical results, spanning a wide range of time-series tasks from mid-range to very long-range classification and regression, as well as long-horizon forecasting, demonstrate that our proposed LinOSS model consistently outperforms state-of-the-art sequence models. Notably, LinOSS outperforms Mamba by nearly 2x and LRU by 2.5x on a sequence modeling task with sequences of length 50k.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+State-space models \citep{s4,hasani2022liquid,s5,lru} have recently emerged as a powerful tool for learning on long sequences. These models posses the statefullness and fast inference capabilities of Recurrent Neural Networks (RNNs) together with many of the benefits of Transformers \citep{vaswani,bert}, such as efficient training and competitive performance on large-scale language and image modeling tasks. For these reasons, state-space models have been successfully implemented as foundation models, surpassing Transformer-based counterparts in several key modalities, including language, audio, and genomics \citep{mamba}.
+
+Originally, state-space models have been introduced to modern sequence modelling by leveraging specific structures of the state matrix, i.e., normal plus low-rank HiPPO matrices \citep{hippo,s4}, allowing to solve linear recurrences via a Fast Fourier Transform (FFT). This has since been simplified to only requiring diagonal state matrices \citep{gu2022parameterization,s5,lru} while still obtaining similar or even better performance. However, due to the linear nature of state-space models, the corresponding state matrices need to fulfill specific structural properties in order to learn long-range interactions and produce stable predictions. Consequently, these structural requirements heavily constrain the underlying latent feature space, potentially impairing the model's expressive power.
+
+In this article, we adopt a radically different approach by observing that forced harmonic oscillators, the basis of many systems in physics, biology, and engineering, can produce stable dynamics while at the same time seem to ensure expressive representations. Motivated by this, we propose to construct state-space models based on stable discretizations of forced linear second-order ordinary differential equations (ODEs) modelling oscillators. Our additional contributions are:
+\begin{itemize}
+    \item we introduce implicit and implicit-explicit associative parallel scans ensuring fast training and inference.
+    \item we show that our proposed state-space model yields stable dynamics and is able to learn long-range interactions only requiring nonnegative diagonal state matrix.
+    \item we demonstrate that a symplectic discretization of our underlying oscillatory system conserves its symmetry of time reversibility.
+    \item we rigorously prove that our proposed state-space model is a universal approximator of continuous and causal operators between time-series.
+    \item we provide an extensive empirical evaluation of our model on a wide variety of sequential data sets with sequence lengths reaching up to 50k. Our results demonstrate that our model consistently outperforms or matches the performance of state-of-the-art state-space models, including Mamba, S4, S5, and LRU.
+\end{itemize}
+
+
+
+\section{The proposed State-Space Model}
+
+Our proposed state-space model is based on the following system of forced linear second-order ODEs together with a linear readout,
+\begin{equation}
+\label{eq:de_loss}
+\begin{aligned}
+\by^{\prime\prime}(t) &= -\bA\by(t) + \bB\bu(t) + \bb, \\
+\bx(t) &= \bC\by(t) + \bD\bu(t),
+\end{aligned}
+\end{equation}
+with hidden state $\by(t) \in \mathbb{R}^m$, output state $\bx(t) \in \R^q$, time-dependent input signal $\bu(t)\in \mathbb{R}^p$, weights $\bA\in \mathbb{R}^{m\times m}$, $\bB \in \mathbb{R}^{m\times p}$, $\bC \in \R^{q \times m}$, $\bD \in \R^{q\times p}$, and bias $\bb \in \R^m$. Note that $\bA$ is a diagonal matrix, i.e., with non-zero entries only on its diagonal. We further introduce an auxiliary state $\bz(t) \in \mathbb{R}^m$, with $\bz = \by^\prime$. We can thus write \eqref{eq:de_loss} (omitting the bias $\bb$ and linear readout $\bx$) equivalently as,
+\begin{equation}
+\label{eq:aux_de_loss}
+\begin{aligned}
+\bz^{\prime}(t) &= -\bA\by(t) + \bB\bu(t),\\
+\by^\prime(t) &= \bz(t).
+\end{aligned}
+\end{equation}
+
+\begin{figure}[ht]
+\begin{center}
+\begin{minipage}{\textwidth}
+\begin{tikzpicture}
+    \node[anchor=south west,inner sep=0] (image) at (0,0) {\includegraphics[width=.95\textwidth]{figures/LinOSS_model.pdf}};
+    \begin{scope}[x={(image.south east)},y={(image.north west)}]
+        \draw (-0.005, .5) node {\rotatebox{90}{\textbf{time}}};
+        \draw (0.065, .5) node {\rotatebox{90}{\textbf{Input Sequence}}};
+        \draw (0.98, .5) node {\rotatebox{90}{\textbf{Output Sequence}}};
+        \draw (0.215,-0.05) node {LinOSS layer};
+        \draw (0.39,-0.05) node {nonlinear layer};
+        \draw (0.685,-0.05) node {LinOSS layer};
+        \draw (0.86,-0.05) node {nonlinear layer};
+
+        \draw[decorate,decoration={brace,amplitude=10pt}, thick]  (0.48,-0.1) -- (0.15,-0.1) node[midway,yshift=-0.6cm] {LinOSS block};
+
+        \draw[decorate,decoration={brace,amplitude=10pt}, thick]  (0.94,-0.1) -- (0.62,-0.1) node[midway,yshift=-0.6cm] {LinOSS block};
+
+        
+    \end{scope}
+\end{tikzpicture}
+\caption{Schematic drawing of the proposed Linear Oscillatory State-Space model (LinOSS). The input sequences are processed through multiple LinOSS blocks. Each block is composed of a LinOSS layer followed by a nonlinear transformation, specifically a Gated Linear Units \citep{glu} (GLU) layer in our case. After passing through several LinOSS blocks, the latent sequences are decoded to produce the final output sequence.}
+\label{fig:linoss}
+\end{minipage}
+\end{center}
+\end{figure}
+
+\subsection{Motivation and background}
+To demonstrate that the underlying ODE in \eqref{eq:de_loss} models a network of forced harmonic oscillators, we begin with the scalar case by setting $p = m = 1$ in \eqref{eq:de_loss}. Choosing $\bB = \bb = 0$, we obtain the classic ODE, $\by^{\prime \prime} + \bA \by = 0$, which describes simple harmonic motion with frequency $\bA>0$, such as that of a simple pendulum \citep{GHbook}. Now, allowing $\bB\neq 0$ introduces external forcing proportional to the input signal $\bu(t)$, where $\bB$ modulates the effect of the forcing. Finally, setting $p,m>1$ yields an uncoupled system of forced harmonic oscillators.
+
+\paragraph{Neuroscience inspiration.}
+Our approach is inspired by neurobiology, where the periodic spiking and firing of action potentials in individual neurons can be observed and analyzed as oscillatory phenomena. Furthermore, entire networks of cortical neurons exhibit behavior-dependent oscillations, reviewed in \cite{buzsaki2004neuronal}. Remarkably, despite their complexity, these neural oscillations share characteristics with harmonic oscillators, as described in \cite{winfree1980geometry}. Building on this insight, we distill the core essence of cortical dynamics and aim to construct a machine learning model following the motion of harmonic oscillations. Finally, we note that our focus is on the theoretical and empirical aspects of the proposed oscillatory state-space model in this manuscript. However, our model can be further used in the context of computational neuroscience emulating characteristic phenomena of brain oscillations, such as frequency-varying oscillations, transient synchronization or desynchronization of discharges, entrainment, phase shifts, and resonance, while at the same time being able to learn non-trivial input-output relations. 
+
+\subsection{Comparison with related work}
+State-space models have seen continuous advancements since their introduction to modern sequence modeling in \cite{s4}. The original S4 model \citep{s4}, along with its adaptations \citep{gu2022parameterization,nguyen2022s4nd,sashimi}, utilized FFT to solve linear recurrences. More recently, a simplified variant, S5 \citep{s5}, was introduced, which instead employs associative parallel scans to achieve similar computational speed. Another advancement to S4 have been Liquid Structural State-Space models \citep{hasani2022liquid} which exchanged the static state matrix with an input-dependent state transition module. While all aforementioned models rely on the HiPPO parameterization \citep{hippo}, Linear Recurrent Units (LURs) \citep{lru} demonstrated that even simpler parameterization yield state-of-the-art performance. 
+Finally, selective state spaces have been introduced in \cite{mamba} in order to further close the performance gap between state-space models and Transformers utilized in foundation models. 
+
+Oscillatory dynamics as a neural computational paradigm has been originally introduced via Coupled Oscillatory RNNs (CoRNNs) \citep{cornn}. In this work, it has been shown that recurrent models based on nonlinear oscillatory dynamics are able to learn long-range interactions by mitigating the exploding and vanishing gradients problem \citep{pascanu2013difficulty}. This approach was later refined for handling very long sequences in \cite{unicornn}, which utilized uncoupled nonlinear oscillators for fast sequence modeling by adopting a diagonal hidden-to-hidden weight matrix. Interestingly, this method resembles modern state-space models but distinguishes itself by employing nonlinear dynamics. Since then, this concept, generally termed as neural oscillators \citep{neural_oscil}, has been extended to other areas of machine learning, e.g., Graph-Coupled Oscillator Networks (GraphCON) \citep{rusch2022graph} for learning on graph-structured data, and RNNs with oscillatory dynamics combined with convolutions leading to locally coupled oscillatory RNNs \citep{keller2023neural}. Our proposed LinOSS model differs from all these methods by its explicit use of harmonic oscillators via a state-space model approach.
+
+\subsection{Discretization}
+Our aim is to approximately solve the linear ODE system \eqref{eq:aux_de_loss} as fast as possible, while at the same time being able to guarantee stability over long time-scales. To this end, we suggest to leverage the following two time integration schemes.
+
+\paragraph{Implicit time integration.} 
+We fix a timestep $0<\Dt\leq1$ and define our proposed state-space model hidden states at time $t_n = n\Dt$ as the following implicit discretization of the first order system \eqref{eq:aux_de_loss}:
+\begin{equation*}
+\begin{aligned}
+\bz_{n} &= \bz_{n-1} + \Dt(-\bA\by_n + \bB\bu_n),\\
+\by_{n} &= \by_{n-1}+ \Dt\bz_n.
+\end{aligned}
+\end{equation*}
+This can be written in matrix form by introducing $\bx_n = [\bz_n,\by_n]^\top$,
+\begin{equation*}
+\bH\bx_n = \bx_{n-1}+\bF_n,
+\end{equation*}
+with 
+\begin{equation*}
+    \bH = \begin{bmatrix}
+  \ident & \Dt\bA \\
+  -\Dt\ident & \ident
+\end{bmatrix}, \qquad 
+\bF_n = 
+\begin{bmatrix}
+\Dt\bB\bu_n \\
+\bf 0
+\end{bmatrix}.
+\end{equation*}
+We can now solve our discretized oscillatory system by simply inverting matrix $\bH$ and computing the induced recurrence. Note that inverting matrices typically requires $\mathcal{O}(m^3)$ operations (where $m$ is the number of rows or columns of the matrix) using methods like Gauss-Jordan elimination, making it computationally expensive. However, by leveraging the Schur complement, we can obtain an explicit form of $\bH^{-1}$ that can be computed in $\mathcal{O}(m)$, thanks to the diagonal structure of $\bA$. More concretely,
+\begin{equation}
+\label{eq:LOSS_IM_matrix}
+\bH^{-1} = 
+\begin{bmatrix}
+\ident - \Dt^2\bA\bS & -\Dt\bA\bS \\
+\Dt\bS & \bS
+\end{bmatrix} = 
+\begin{bmatrix}
+\bS & -\Dt\bA\bS \\
+\Dt\bS & \bS
+\end{bmatrix},
+\end{equation}
+with the inverse of the Schur complement $\bS = (\ident + \Dt^2\bA)^{-1}$ which itself is a diagonal matrix and can thus be trivially inverted. 
+We point out that among other choices, a straightforward condition that ensures $\bS$ is well-defined is $\bA_k\geq0$ for all $k=1,\dots,m$.
+The recurrence of the proposed model is then given as,
+\begin{equation}
+\label{eq:im_model}
+\bx_n = \bH^{\text{IM}}\bx_{n-1}+\bF_n^{\text{IM}},
+\end{equation}
+with $\bH^{\text{IM}}=\bH^{-1}$, and $\bF^{\text{IM}}_n = \bH^{-1}\bF_n$.
+As we will show in the subsequent section, this discretization leads to a globally asymptotically stable discrete dynamical system.
+
+\paragraph{Implicit-explicit time integration (IMEX).}
+Another discretization yielding stable dynamics that, however, do not converge exponentially fast to a steady-state can be obtained by leveraging symplectic integrators. To this end, we fix again a timestep $0<\Dt\leq1$ and define our proposed state-space model hidden states at time $t_n = n\Dt$ as the following implicit-explicit (IMEX) discretization of the first order system \eqref{eq:aux_de_loss}:
+\begin{equation}
+\label{eq:imex_disc}
+\begin{aligned}
+\bz_{n} &= \bz_{n-1} + \Dt(-\bA\by_{n-1} + \bB\bu_n),\\
+\by_{n} &= \by_{n-1}+ \Dt\bz_n.
+\end{aligned}
+\end{equation}
+The only difference compared to the previous fully implicit discretization is the explicit treatment of the hidden state $\by$ (i.e., using $\by_{n-1}$ instead of $\by_n$) in the first equation of \eqref{eq:imex_disc}. As before, we can simplify this system in matrix form,
+\begin{equation}
+\label{eq:imex_model}
+\bx_n = \bH^{\text{IMEX}}\bx_{n-1}+\bF_n^{\text{IMEX}},
+\end{equation}
+with 
+\[\bH^{\text{IMEX}} = \begin{bmatrix}
+  \ident & -\Dt\bA \\
+  \Dt\ident & \ident - \Dt^2\bA
+\end{bmatrix}, \qquad \bF_n^{\text{IMEX}} = \begin{bmatrix}
+\Dt\bB\bu_n \\
+\Dt^2\bB\bu_n
+\end{bmatrix}. \]
+
+Interestingly, ODE system \eqref{eq:aux_de_loss} represents a Hamiltonian system \citep{arn1}, with Hamiltonian,
+\begin{equation}
+\label{eq:hamil}
+    \bHAM(\by,\bz,t) = \frac{1}{2}\sum_{k=1}^m \bA_k\by_k^2 + \bz_k^2 - 2\left(\sum_{l=1}^p\bB_{kl}\bu(t)_l\right)\by_k.
+\end{equation}
+The numerical approximation of this system using the previously described IMEX discretization is symplectic, i.e., it preserves a Hamiltonian close to the Hamiltonian of the continuous system. Thus, by the well-known Liouville's theorem \citep{ss1}, we know that the phase space volume of \eqref{eq:aux_de_loss} as well as of its symplectic approximation \eqref{eq:imex_model} is preserved. This gives rise to invertible model architectures leading to memory efficient implementations of the backpropagation through time algorithm, similar as in \citep{unicornn}. This denotes the most significant difference between the two different discretization schemes, i.e., the IMEX integration-based model is volume preserving, while IM integration-based model introduces dissipative terms. We will see in subsequent sections that both models have their own individual advantages depending on the underlying data. 
+
+\subsection{Fast recurrence via associative parallel scans}
+Parallel (or associative) scans, first introduced in \citet{kogge1973parallel} and reviewed in \citet{asso_scan}, offer a powerful method for drastically reducing the computational time of recurrent operations. These scans have previously been employed to enhance the training and inference speed of RNNs \citep{martin2017parallelizing,kaul2020linear}. This technique was later adapted for state-space models in \citet{s5}, becoming a crucial component in the development of many state-of-the-art sequence models, including Linear Recurrent Units (LRUs) \citep{lru} and Mamba models \citep{mamba}. 
+
+A parallel scan operates on a sequence $[x_1,\dots,x_N]$ with a binary associative operation $\bullet$, i.e., an operation satisfying $(x\bullet y)\bullet z = x \bullet (y\bullet z)$ for instances $x,y$, and $z$, to return the sequence $[x_1, x_1 \bullet x_2, \dots, x_1 \bullet x_2 \bullet \dots \bullet x_N]$. Under certain assumptions, this operation can be performed in computational time proportional to $\lceil\log_2(N)\rceil$. This is in stark contrast to the computational time of serial recurrence that is proportional to $N$. It is straightforward to check that the following operation is associative:
+\[
+(\ba_1,\ba_2) \bullet (\bb_1,\bb_2) = (\bb_1\circbullet\ba_1,\bb_1\bulletcirc\ba_2+\bb_2),
+\]
+where $\circbullet,\bulletcirc$ are the matrix-matrix and matrix-vector products. Note that both products can be computed in $\mathcal{O}(m)$ time leveraging $2\times2$ block matrices with only diagonal entries in each block, e.g., matrices $\bH^{\text{IM}}$ and $\bH^{\text{IMEX}}$ in \eqref{eq:im_model},\eqref{eq:imex_model}. Clearly, applying a parallel scan based on this associative operation on the input sequence $[(\bH,\bF_1),(\bH,\bF_2),\dots]$ yields an output sequence $[(\bH,\bF_1),(\bH^2,\bH\bF_1+\bF_2),\dots]$ where the solution of the recurrent system $\bx_n = \bH\bx_{n-1}+\bF_n$ (with initial value $\bx_0=\bf 0$) is stored in the second argument of the elements of this sequence. Thus, we can successfully apply parallel scans to both discretizations \eqref{eq:im_model}\eqref{eq:imex_model} of our 
+proposed system in order to significantly speed up computations. We refer to the application of this parallel scan to implicit formulations as implicit parallel scans. When applied to implicit-explicit formulations, we describe it as implicit-explicit parallel scans.
+
+We term our proposed sequence model, which efficiently solves the underlying linear system of harmonic oscillators \eqref{eq:aux_de_loss} using fast parallel scans, as \textbf{Lin}ear \textbf{O}scillatory \textbf{S}tate-\textbf{S}pace (\textbf{LinOSS}) model. To differentiate between the two discretization methods, we refer to the model derived from implicit discretization as \textbf{LinOSS-IM}, and the model based on the implicit-explicit discretization as \textbf{LinOSS-IMEX}. A schematic drawing of our proposed state-space model can be seen in \fref{fig:linoss}.
+
+
+
+\section{Theoretical insights}
+
+
+\subsection{Stability and learning long-range interactions}
+Hidden states of classical nonlinear RNNs are updated based on its previous hidden states pushed through a parametric function followed by a (usually) bounded nonlinear activation function such as tanh or sigmoid. This way, the hidden states are guaranteed to not blow up. However, this is not true for linear recurrences, where specific structures of the hidden-to-hidden weight matrix can lead to unstable dynamics. The following simple argument demonstrates that computing the eigenspectrum (i.e., set of eigenvalues) of the hidden-to-hidden weight matrix of a linear recurrent system suffices in order to analyse its stability properties. To this end, let us consider a general linear discrete dynamical system with external forcing given via the recurrence $\bx_n = \bH\bx_{n-1}+\bB\bu_n$, and initial value $\bx_0=\bf 0$. Assuming $\bH$ is diagonalizable (if not, one can make a similar argument leveraging the Jordan normal form), i.e., there exists matrix $\bS$ such that $\bH=\bS {\bf \Lambda} \bS^{-1}$, where $\bf \Lambda$ is a diagonal matrix with the eigenvalues of $\bH$ on its diagonal. The dynamics of the transformed hidden state $\bar{\bx}_n=\bS^{-1}\bx_n$ evolve according to $\bar{\bx}_n = \bS^{-1}\bx_n = \bS^{-1}\bH\bx_{n-1}+\bS^{-1}\bB\bu_n = {\bf \Lambda}\bar{\bx}_{n-1}+\bar{\bB}\bu_n$ with initial value $\bar{\bx}_0 = \bS^{-1}\bx_0$, where $\bar{\bB} = \bS^{-1}\bB$. Unrolling the dynamics (assuming $\bx_0=\bf 0$) yields,
+\begin{equation*}
+    \bar{\bx}_1 = \bar{\bB}\bu_1, \quad \bar{\bx}_2 = {\bf \Lambda}\bar{\bB}\bu_1 + \bar{\bB}\bu_2, \quad ... \quad \Rightarrow \bx_n = \sum_{k=0}^{n-1} {\bf \Lambda}^k\bar{\bB}\bu_{n-k}. 
+\end{equation*}
+Clearly, if all eigenvalues $\bf \Lambda$ have magnitude less or equal than 1 the hidden states will not blow up. In addition to stability guarantees, eigenspectra with unit norm allow the model to learn long-range interactions \citep{urnn,gu2022train,lru} by avoiding vanishing and exploding gradients \citep{pascanu2013difficulty}. Therefore, it is sufficient to analyse the eigenspectra of our proposed LinOSS models in order to understand their ability to generate stable dynamics and learn long-range interactions. To this end, we have the following propositions.
+\begin{proposition}
+\label{prop:ev_im}
+Let $\bH^{\text{IM}} \in \R^{m\times m}$ be the hidden-to-hidden weight matrix of the implicit model LinOSS-IM \eqref{eq:im_model}. We assume that $\bA_{kk} \geq 0$ for all diagonal elements $k=1,\dots,m$ of $\bA$, and further that $\Dt>0$. Then, the complex eigenvalues of $\bH^{\text{IM}}$ are given as, 
+\begin{equation*}
+    \lambda_j = \frac{1}{1+\Dt^2\bA_{kk}} + i (-1)^{\lceil\frac{j}{m}\rceil} \Dt \frac{\sqrt{\bA_{kk}}}{1+\Dt^2\bA_{kk}}, \quad\text{for all } j=1,\dots,2m,
+\end{equation*}
+with $k = j \text{ mod } m$.
+Moreover, the spectral radius $\rho(\bH^{\text{IM}})$ is bounded by $1$, i.e., $|\lambda_j| 
+\leq 1$ for all $j=1,\dots,2m$.
+\end{proposition}
+\begin{proof}
+\begin{align*}
+\det(\bH^{\text{IM}}-\lambda\ident) &= 
+\begin{vmatrix}
+\bS -\lambda\ident & -\Dt\bA\bS \\
+\Dt\bS & \bS -\lambda\ident
+\end{vmatrix} = 
+\begin{vmatrix}
+\bS -\lambda\ident & -\Dt\bA\bS \\
+ {\bf 0}& \bS -\lambda\ident + \Dt^2\bA\bS^2(\bS-\lambda\ident)^{-1}
+\end{vmatrix} \\
+&= \prod_{k=1}^m (\bS_{kk}-\lambda)\left(\bS_{kk}-\lambda+\frac{\Dt^2\bA_{kk}\bS_{kk}^2}{\bS_{kk}-\lambda}\right) = \prod_{k=1}^m [(\bS_{kk}-\lambda)^2+\Dt^2\bA_{kk}\bS_{kk}^2].
+\end{align*}
+Setting $k=j \text{ mod }m$, the eigenvalues of $\bH^{\text{IM}}$ are thus given as,
+\begin{equation*}
+    \lambda_j = \bS_{kk} + i (-1)^{\lceil\frac{j}{m}\rceil}\Dt \bS_{kk}\sqrt{\bA_{kk}}, \quad\text{for all } j=1,\dots,2m.
+\end{equation*}
+In particular, assuming $\bA_{kk}\geq 0$ for all $k=1,\dots,m$, the magnitude of the eigenvalues $\lambda_j$ are given as,
+\[
+|\lambda_j|^2 = \bS_{kk}^2 + \Dt^2\bS_{kk}^2\bA_{kk} = \bS_{kk}^2(1+\Dt^2\bA_{kk}) = \bS_{kk} \leq 1,
+\]
+for all $j=1,\dots,2m$, with $k=j \text{ mod }m$.
+\end{proof}
+
+This proof reveals important insights into our proposed LinOSS-IM model. First, the magnitude of the eigenvalues at initialization can be controlled by either specific initialization of $\bA$, or alternatively through a specific choice of the time-step parameter $\Dt$. Moreover, LinOSS-IM yields asymptotically stable dynamics for any choices of positive parameters $\bA$. This denotes a significant difference compared to previous first-order system, where the values of $\bA$ (and thus its eigenvalues) have to be heavily constraint for the system to be stable. We argue that this flexibility in the parameterization of our model benefits the optimizer potentially leading to better performance in practice.
+
+\begin{remark}
+\label{remark:ev}
+A straightforward adaptation of Proposition \ref{prop:ev_im} can also be derived for the implicit-explicit version of the model, LinOSS-IMEX \eqref{eq:imex_model}. In particular, a similar analysis shows that the eigenvalues $\lambda_j$ of $\bH^{\text{IMEX}}$ in \eqref{eq:imex_model} all satisfy $|\lambda_j| = 1$. This result underscores the key distinction between the two models: LinOSS-IM incorporates dissipative terms, introducing a forgetting mechanism into the state-space model, whereas LinOSS-IMEX allows for learning interactions over arbitrarily long sequences. As previously argued in the literature, forgetting is a crucial feature for many applications. Therefore, LinOSS-IM can be seen as a model that integrates forgetting, while LinOSS-IMEX is capable of learning sequential interactions over arbitrary time-scales.
+\end{remark}
+
+\paragraph{Initialization and parameterization of weights.}
+Proposition \ref{prop:ev_im} and Remark \ref{remark:ev} reveal that both LinOSS models exhibit stable dynamics as long as the diagonal weights $\bA$ in \eqref{eq:de_loss} are non-negative. This condition can easily be fulfilled via many different parameterizations of the diagonal matrix $\bA$. An obvious choice is to square the diagonal values, i.e., a parameterization $\bA = \hat{\bA}\hat{\bA}$, with diagonal matrix $\hat{\bA} \in \R^{m \times m}$. Another straightforward approach is to apply the element-wise ReLU nonlinear activation function to $\bA$, i.e., $\bA = \relu(\hat{\bA})$, with $\relu(x) = \max(0,x)$ and $\hat{\bA}$ as before. The latter results in a LinOSS model where specific dimensions can be switched off completely by setting the corresponding weight in $\hat{\bA}$ to a negative value. Due to this flexibility, we decide to focus on the ReLU-parameterization of the diagonal weights $\bA$ in this manuscript.
+
+After discussing the parameterization of $\bA$, the next step is to determine an appropriate method for initializing its weights prior to training. Since we already know from Remark \ref{remark:ev} that all absolute eigenvalues of the hidden matrix $\bM^{\text{IMEX}}$ of LinOSS-IMEX are exactly one, the specific values of $\bA$ are irrelevant for the model to learn long-range interactions. However, according to Proposition \ref{prop:ev_im}, $\bA$ highly influences the eigenvalues of the hidden matrix $\bM^{\text{IM}}$ of LinOSS-IM \eqref{eq:im_model}. As discussed in the previous section, high powers of the absolute eigenvalues of the hidden matrix are of particular interest when learning long-range interactions. To this end, we have the following Proposition concerning the expected powers of absolute eigenvalues for LinOSS-IM.
+\begin{proposition}
+\label{prop:expected_ev}
+Let $\{\lambda_j\}_{j=1}^{2m}$ be the eigenspectrum of the hidden-to-hidden matrix $\bH^{\text{IM}}$ of the LinOSS-IM model \eqref{eq:im_model}. We further initialize $\bA_{kk} \sim \mathcal{U}([0,A_{\text{max}}])$ with $A_{\text{max}}>0$ for all diagonal elements $k=1,\dots,m$ of $\bA$ in \eqref{eq:aux_de_loss}. Then, the $N$-th moment of the magnitude of the eigenvalues are given as,
+\begin{equation}
+    \mathbb{E}(|\lambda_j|^N) = \frac{(\Dt^2A_{\text{max}}+1)^{1-\frac{N}{2}} - 1}{\Dt^2 A_{\text{max}}(1-\frac{N}{2})},
+\end{equation}
+for all $j=1,\dots,2m$, with $k=j \text{ mod }m$.
+\end{proposition}
+ Proposition \ref{prop:expected_ev} demonstrates that while the expectation of $|\lambda_i|^N$ might be much smaller than $1$, it is still sufficiently large for practical use-cases. For instance, even considering $\Dt=A_{\text{max}}=1$ and an extreme sequence length of $N=100$k still yields $\mathbb{E}(|\lambda_j|^N)=1/49999\approx 2\times10^{-5}$. Based on this and the fact that the values of $\bA$ do not affect the eigenvalues for LinOSS-IMEX, we decide to initialize $\bA$ according to $\bA_{kk}\sim \mathcal{U}([0,1])$ for both LinOSS models, while setting $\Dt=1$. 
+
+\subsection{Universality of LinOSS within continuous and causal operators}
+While trainability is an important aspect of learning long-range interactions, it does not demonstrate why LinOSS is able to express complex mappings between general (i.e., not necessarily oscillatory) input and output sequences. Therefore, in this section we analyze the approximation power of our proposed LinOSS model. Following the recent work of \citet{neural_oscil} we show that LinOSS is universal within the class of continuous and causal operators between time-series. 
+To this end, we consider a full LinOSS block, 
+\begin{equation}
+\label{eq:simple_loss}
+    \bz(t) = \bW\sigma(\Tilde{\bW}\by(t)+\Tilde{\bb}),
+\end{equation}
+with weights $\bW \in \R^{q \times \Tilde{m}}$, $\Tilde\bW \in \R^{\Tilde{m} \times m}$, bias $\Tilde{\bb}\in \R^{\Tilde{m}}$, element-wise nonlinear activation function $\sigma$ (e.g., $\tanh$ or ReLU), and solution $\by(t)$ of the LinOSS differential equations \eqref{eq:aux_de_loss}.
+
+Based on this, we are now interested in approximating operators $\Phi:C_0([0,T];\R^p) \rightarrow C_0([0,T];\R^q)$ with the full LinOSS model \eqref{eq:simple_loss}, where
+\[
+C_0([0,T];\R^p) := \set{\bu: [0,T] \to \R^p}{t\mapsto \bu(t) \text{ is continuous and } \bu(0) = \bf 0}.
+\]
+As pointed out in \citet{neural_oscil}, the condition $\bu(0)=\bf 0$ is not restrictive and can directly be generalized to the case of any initial condition $\bu(0)=\bu_0 \in \R^p$ simply by introducing an arbitrarily small warm-up phase $[-t_0,0]$ with $t_0>0$ of the oscillators to synchronize with the input signal $\bu$. In addition to these function spaces, we pose the following conditions on the underlying operator $\Phi$,
+\begin{enumerate}
+  \item $\Phi$ is \emph{causal}, i.e., for any $t\in [0,T]$, if $\bu, \bB \in C_0([0,T];\R^p)$ are two input signals, such that $\bu|_{[0,t]} \equiv \bB|_{[0,t]}$, then $\Phi(\bu)(t) = \Phi(\bB)(t)$.
+  \item $\Phi$ is \emph{continuous} as an operator \[
+  \Phi: (C_0([0,T];\R^p), \Vert \slot \Vert_{L^\infty}) \to (C_0([0,T];\R^q), \Vert \slot \Vert_{L^\infty}),
+  \]
+  with respect to the $L^\infty$-norm on the input-/output-signals.
+\end{enumerate}
+
+\begin{theorem}%[Universality of LOSS]
+\label{thm:unvsl}
+Let $\Phi: C_0([0,T];\R^p) \to C_0([0,T];\R^q)$ be a causal and continuous operator. Let $K \subset C_0([0,T];\R^p)$ be compact. Then for any $\epsilon > 0$, there exist hyperparameters $m$, $\Tilde{m}$, diagonal weight matrix $\bA \in \R^{m\times m}$, weights $\bB \in \R^{m\times d}$, $\Tilde{\bW}\in \R^{\Tilde{m}\times m}$, $\bW\in \R^{q\times \Tilde{m}}$ and bias vectors $\bb\in \R^{m}$, $\Tilde{\bb} \in \R^{\Tilde{m}}$, such that the output $\bz: [0,T]\to \R^q$ of the LinOSS block \eqref{eq:simple_loss} satisfies,
+\[
+\sup_{t\in [0,T]} | \Phi(\bu)(t) - \bz(t) | \le \epsilon, \quad \forall \, \bu\in K.
+\]
+\end{theorem}
+ The main idea of the proof is to encode the infinite-dimensional operator $\Phi$ with a finite-dimensional operator that makes use of the structure of the LinOSS ODE system \eqref{eq:de_loss}, and that can further be expressed by a (finite-dimensional) function. 
+
+
+
+\section{Empirical Results}
+
+In this section, we empirically test the performance of our proposed LinOSS models on a variety of challenging real-world sequential datasets, ranging from scientific datasets in genomics to practical applications in medicine. We ensure thereby a fair comparison to other state-of-the-art sequence models such as Mamba, LRU, and S5.
+
+\subsection{Learning Long-Range Interactions}
+In the first part of the experiments, we focus on a recently proposed long-range sequential benchmark introduced in \cite{walker2024log}. This benchmark focuses on six datasets from the UEA Multivariate Time Series Classification Archive (UEA-MTSCA), selecting those with the longest sequences for increased difficulty. The sequence lengths range thereby from $400$ to almost $18$k. We compare our proposed LinOSS models to recent state-of-the-art sequence models, including state-space models such as Mamba and LRU. \Tref{tab:uea} shows the test accuracies averaged over 5 random model initialization and dataset splits of all six datasets for LinOSS as well as competing methods. We note that all other results are taken from \cite{walker2024log}. Moreover, we highlight that we exactly follow the training procedure described in \cite{walker2024log} in order to ensure a fair comparison against competing models. More concretely, we use the same pre-selected random seeds for splitting the datasets into training, validation, and testing parts (using $70/15/15$ splits), as well as tune our model hyperparameters only on the same pre-described grid. In fact, since LinOSS does not possess any model specific hyperparameters -- unlike competing state-space models such as LRU or S5 -- our search grid is lower-dimensional compared to the other models considered. As a result, the hyperparameter tuning process involves significantly fewer model instances.
+\begin{table}[h!]
+\caption{Test accuracies averaged over $5$ training runs on UAE time-series classification datasets. All models are trained based on the same hyper-parameter tuning protocol in order to ensure fair comparability. The dataset names are abbreviations of the following UEA time-series datasets: EigenWorms (Worms), SelfRegulationSCP1 (SCP1), SelfRegulationSCP2 (SCP2), EthanolConcentration (Ethanol), Heartbeat, MotorImagery (Motor). The three best performing methods are highlighted in {\bf \textcolor{red}{red}} (First), {\bf \textcolor{blue}{blue}} (Second), and {\bf \textcolor{violet}{violet}} (Third).}
+\label{tab:uea}
+\centering
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lcccccc|c}
+\toprule
+&  \textbf{Worms} & \textbf{SCP1} & \textbf{SCP2} & \textbf{Ethanol} & \textbf{Heartbeat} & \textbf{Motor} & \textbf{Avg} \\
+Seq. length &
+17,984 &
+896 & 
+1,152 &
+1,751 & 
+405 &
+3,000 & \\
+\#Classes  &
+5 &
+2 & 
+2 &
+4 & 
+2 &
+2 & \\
+\midrule
+NRDE & 
+$77.2 \pm 7.1$ & 
+$76.7 \pm 5.6$ &
+$48.1 \pm 11.4$ &
+$\bf \color{blue}{31.4 \pm 4.5}$ &
+$73.9 \pm 2.6$ &
+$54.0 \pm 7.8$ &
+$60.2$  \\
+
+NCDE & 
+$62.2 \pm 2.2$ & 
+$80.0 \pm 2.0$ &
+$49.1 \pm 6.2$ &
+$22.0 \pm 1.0$ &
+$68.1 \pm 5.8$ &
+$51.6 \pm 6.2$ &
+$55.5$\\
+
+Log-NCDE & 
+$82.8 \pm 2.7$ & 
+$82.1 \pm 1.4$ &
+$54.0 \pm 2.6$ &
+$\bf \color{red}{35.9 \pm 6.1}$ &
+$74.2 \pm 2.0$ &
+$\bf \color{violet}{57.2 \pm 5.6}$ &
+$\bf \color{violet}{64.4}$\\
+
+LRU & 
+$\bf \color{blue}{85.0 \pm 6.2}$ & 
+$84.5 \pm 4.6$ &
+$47.4 \pm 4.0$ &
+$23.8 \pm 2.8$ &
+$\bf \color{red}{78.1 \pm 7.6}$ & 
+$51.9 \pm 8.6$ &
+$61.8$ \\
+
+S5 & 
+$\bf \color{violet}{83.9 \pm 4.1}$  & 
+$\bf \color{violet}{87.1 \pm 2.1}$ &
+$\bf \color{violet}{55.1 \pm 3.3}$ &
+$25.6 \pm 3.5$ &
+$73.9 \pm 3.1$ & 
+$53.0 \pm 3.9$ &
+$63.1$ \\
+
+Mamba & 
+$70.9 \pm 15.8$ & 
+$80.7 \pm 1.4$ &
+$48.2 \pm 3.9$ &
+$27.9 \pm 4.5$ &
+$\bf \color{violet}{76.2 \pm 3.8}$ &
+$47.7 \pm 4.5$ &
+$58.6$\\
+
+S6 & 
+$\bf \color{blue}{85.0\pm 16.1}$ & 
+$82.8 \pm 2.7$ &
+$49.9 \pm 9.4$ &
+$26.4 \pm 6.4$  &
+$\bf \color{blue}{76.5 \pm 8.3}$ &
+$51.3 \pm 4.7$ &
+$62.0$\\
+
+\midrule
+
+\textbf{LinOSS-IMEX} & 
+$80.0 \pm 2.7$ &
+$\bf \color{blue}{87.5 \pm 4.0}$ &
+$\bf \color{red}{58.9 \pm 8.1}$ &
+$\bf \color{violet}{29.9 \pm 1.0}$ &
+$75.5 \pm 4.3$ &
+$\bf \color{blue}{57.9 \pm 5.3}$ & %% check later again
+$\bf \color{blue}{65.0}$\\
+
+\textbf{LinOSS-IM} & 
+$\bf \color{red}{95.0 \pm 4.4}$ & 
+$\bf \color{red}{87.8\pm 2.6}$ &
+$\bf \color{blue}{58.2 \pm 6.9}$&
+$\bf \color{violet}{29.9 \pm 0.6}$&
+$75.8 \pm 3.7$ & 
+$\bf \color{red}{60.0 \pm 7.5}$ &
+$\bf \color{red}{67.8}$\\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+We can see in \Tref{tab:uea} that on average both LinOSS models outperform any other model we consider here by reaching an average (over all six datasets) accuracy of $65.0\%$ for LinOSS-IMEX and $67.8\%$ for LinOSS-IM. In particular, the average accuracy of LinOSS-IM is significantly higher than the two next best models, i.e., Log-NCDE reaching an average accuracy of $64.4\%$, and S5 reaching an accuracy of $63.1\%$ on average. It is particularly noteworthy that LinOSS-IM yields state-of-the-art results on the two datasets with the longest sequences, namely EigenWorms and MotorImagery. Specifically, on the challenging EigenWorms dataset, LinOSS-IM improves the test accuracy from the previous state-of-the-art of $85\%$ to an impressive $95\%$. 
+
+\subsection{Taking long ranges to the extreme}
+In this experiment, we test the performance of LinOSS in the case of taking long range interactions to the extreme. To this end, we consider the PPG-DaLiA dataset, a multivariate time series regression dataset designed for heart rate prediction using data collected from a wrist-worn device \citep{reiss2019deep}. It includes recordings from fifteen individuals, each with approximately 150 minutes of data sampled at a maximum rate of 128 Hz. The dataset consists of six channels: blood volume pulse, electrodermal activity, body temperature, and three-axis acceleration. We follow \citet{walker2024log} and divide the data into training, validation, and test sets with a 70:15:15 split for each individual. After splitting the data, a sliding window of length 49920 and step size 4992 is applied. As in previous experiments, we apply the exact same hyperparameter tuning protocol to each model we consider here to ensure fair comparison. The test mean-squared error (MSE) of both LinOSS models as well as other competing models are shown in \Tref{tab:ppg}. We can see that both LinOSS models significantly outperform all other models. In particular, LinOSS-IM outperforms Mamba by nearly a factor of $2$, as well as LRU by a factor of around $2.5$. This highlights the effectiveness of our proposed LinOSS models on sequential data with extreme length.
+\begin{table}[ht]
+\caption{Average test mean-squared error over $5$ training runs on the PPG-DaLiA dataset. All models are trained following the same hyper-parameter tuning protocol in order to ensure fair comparability. The three best performing methods are highlighted in {\bf \textcolor{red}{red}} (First), {\bf \textcolor{blue}{blue}} (Second), and {\bf \textcolor{violet}{violet}} (Third).
+}
+\label{tab:ppg}
+\centering
+\begin{tabular}{lc}
+\toprule
+\cmidrule(r){1-2}
+ Model &  MSE $\times 10^{-2}$ \\
+\midrule
+NRDE \citep{nrde} & $18.79 \pm 2.69$ \\
+Log-NCDE \citep{walker2024log}& $\bf \color{violet}{9.20 \pm 0.55}$ \\
+LRU \citep{lru}& $15.64 \pm 1.67$\\
+S5 \citep{s5}& $12.79 \pm 0.72$  \\
+S6 \citep{mamba}& $12.88 \pm 2.05$ \\
+Mamba \citep{mamba} & $10.65 \pm 2.20$ \\
+\textbf{LinOSS-IMEX} & $\bf \color{blue}{7.5 \pm 0.46}$ \\
+\textbf{LinOSS-IM} & $\bf \color{red}{6.4 \pm 0.23}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Long-horizon forecasting}
+Inspired by \cite{s4}, we test our proposed LinOSS on its ability to serve as a general sequence-to-sequence model, even with weak inductive bias. To this end, we focus on time-series forecasting which typically requires specialized domain-specific preprocessing and architectures. We do, however, not alter our LinOSS model nor incorporate any inductive biases. Thus, we simply follow \cite{s4} by setting up LinOSS as a general sequence-to-sequence model that treats forecasting as a masked sequence-to-sequence transformation. We consider a weather prediction task introduced in \cite{informer}. In this task, several climate variables are predicted into the future based on local climatological data. Here, we focus on the hardest task in \cite{informer} of predicting the future 720 timesteps (hours) based on the past 720 timesteps. \Tref{tab:wth} shows the mean absolute error for both LinOSS models as well as other competing models. We can see that both LinOSS models outperform Transformers-based baselines as well as the other state-space models.
+\begin{table}[h]
+    \centering
+    \caption{Mean absolute error on the weather dataset predicting the future 720 time steps based on the past 720 time steps. The three best performing methods are highlighted in {\bf \textcolor{red}{red}} (First), {\bf \textcolor{blue}{blue}} (Second), and {\bf \textcolor{violet}{violet}} (Third).}
+\label{tab:wth}
+\centering
+\begin{tabular}{lc}
+\toprule
+ Model & Mean Absolute Error \\
+\midrule
+Informer \citep{informer}  &$0.731$ \\
+Informer$^\dagger$ \citep{informer}&$0.741$\\
+LogTrans \citep{logtrans} & $0.773$\\
+Reformer \citep{reformer} &  $1.575$ \\
+LSTMa \citep{LSTMa} &  $1.109$ \\
+LSTnet \citep{LSTnet} &  $ 0.757$ \\
+
+S4 \citep{s4}  & $\bf \color{violet}{0.578}$ \\
+\textbf{LinOSS-IMEX} &  $\bf \color{red}{0.508}$ \\
+\textbf{LinOSS-IM} &  $\bf \color{blue}{0.528}$ \\
+\bottomrule
+\end{tabular}
+\end{table} 
+
+
+
+\section{Conclusion}
+
+In this paper, we introduce LinOSS, a state-space model based on harmonic oscillators. We rigorously show that LinOSS produces stable dynamics and is able to learn long-range interactions only requiring a nonnegative diagonal state matrix. In addition, we connect the underlying ODE system of the LinOSS model to Hamiltonian dynamics, which, discretized using symplectic integrators, perfectly preserves its symmetry of time reversibility. Moreover, we show that LinOSS is a universal approximator of continuous and causal operators between time-series. Together, these properties enable efficient modeling of long-range interactions, while ensuring stable and accurate long-horizon forecasting. Finally, we demonstrate that LinOSS outperforms state-of-the-art state-space models, such as Mamba, LRU, and S5.
+
+
+

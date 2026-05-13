@@ -1,0 +1,242 @@
+# NarrativeBridge: Enhancing Video Captioning with Causal-Temporal Narrative
+
+- Decision: Accept
+- Scores: 5, 5, 8, 6
+
+## Abstract
+Existing video captioning benchmarks and models lack coherent representations of \methodNameBenchmarksmall{}, which is sequences of events linked through cause and effect, unfolding over time and driven by characters or agents. This lack of narrative restricts models' ability to generate text descriptions that capture the causal and temporal dynamics inherent in video content. To address this gap, we propose \papername{}, an approach comprising of: (1) a novel \methodNameBenchmark{} (\methodNameBenchmarkshort{}) captions benchmark generated using a large language model and few-shot prompting, explicitly encoding cause-effect temporal relationships in video descriptions,  evaluated automatically to ensure caption quality and relevance and validated through human evaluation; and (2) a dedicated \methodNameNetwrok{} (\methodNameNetwrokshort{}) architecture with separate encoders for capturing cause and effect dynamics independently, enabling effective learning and generation of captions with \methodNameBenchmarksmall{}. Extensive experiments demonstrate that \methodNameNetwrokshort{} significantly outperforms state-of-the-art models, including fine-tuned vision-language models, and is more accurate in articulating the causal and temporal aspects of video content than the second best model (GIT): 17.88 and 17.44 CIDEr on the MSVD and MSR-VTT datasets, respectively. Cross-dataset evaluations further showcase CEN's strong generalization capabilities. The proposed framework understands and generates nuanced text descriptions with intricate \methodNameBenchmarksmall{} structures present in videos, addressing a critical limitation in video captioning. For project details, visit \href{https://narrativebridge.io/}{https://narrativebridge.io/}.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4
+
+### Summary
+In this paper, a video captioning dataset named Causal-Temporal Narrative (CTN) is proposed. Compared to previous video captioning datasets which lack in causal-temporal  information which connects a cause and an effect, CTN, built with LLMs, includes caption that directly connects cause and effect events. Also, a new architecture named Cause-Effect Network (CEN) is proposed, which consists of two independent encoders which capture cause and effect events, respectively.
+
+### Strengths
+1. The motivation of the work is clear, while the problem of improving the causal-and-effect understanding capability of a vision-language model is an important research direction.
+2. Experimental results show that both the proposed methods, CTN and CEN contribute to better performance on MSVD and MSRVTT benchmarks.
+
+### Weaknesses
+1. Including detailed statistics about the constructed CTN dataset (e.g., # of samples, average caption length, # of captions per sample, or more..) may enable readers to easily understand the dataset.
+2. Questions about Table 2.
+    1. Results show that Fine-tune v.v. shows better performance than CEN on the MSVD benchmark under the cross-dataset evaluation setting, compared to CEN trained with both datasets. The result of cross-dataset evaluation performing better than whole dataset training is somewhat counter-intuitive. Can you provide an explanation for these results?
+    2. What does the abbreviation of v.v. stands for? It would be better to mention the full name.
+3. Is there additional experimental results or analyses that could show CTN and CEN contributes to better cause-and-effect modeling besides results on MSVD and MSRVTT? Since the quantitative results of Tables 1 and 2 are not directly aimed at measuring cause-and-effect capability, some additional experiments may be required.
+4. These are some **minor** issues about the presentation of the work. These are **not** critical weaknesses, and somewhat personal opinions.
+    1. Personally, I think the example in Figure 1 is not very intuitive to explain the importance of causal-temporal narrative. Cause: “a car drove recklessly” and Effect: “the car was severely damaged” seems to be a valid cause-and-effect event, but the following event of “a group of guys started playing beer pong” seems like it’s not a direct effect of ‘cause'. This is a personal opinion, but you could consider finding a better example to demonstrate the idea.
+    2. I think ‘dataset’ instead of ‘benchmark’ might be a better word for CTN, as it is only used for training but not for evaluation.
+
+### Questions
+Please refer to weaknesses part.
+
+### Soundness
+3
+
+### Presentation
+3
+
+### Contribution
+3
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3
+
+### Summary
+The paper highlights that current video captioning benchmarks lack causal-temporal narratives and proposes a new benchmark to address this gap. This benchmark is generated by prompting a large language model (LLM) with a series of captions extracted from a video. To ensure relevance, EMScore is adapted to estimate the similarity between the generated captions and the video, discarding samples with low scores. The paper further introduces a two-stage framework to generate causal-temporal narrative (CTN) captions. In the first stage, two contrastive losses are applied to train Causal and Effect Video Encoders with their respective captions. In the second stage, the encoded causal and effect features are concatenated to decode a cohesive caption.
+
+### Strengths
+The paper proposes a benchmark focused on causal-temporal narratives, adapting an evaluation score for automated assessment.
+
+It introduces a novel captioning model that encodes causal and effect information separately, then fuses them to decode the final caption.
+
+Experiments demonstrate that the proposed CEN framework outperforms comparative methods in performance.
+
+### Weaknesses
+The paper includes a human evaluation of the generated CTN captions; however, the assessment is less convincing due to the limited sample size. Despite the large dataset size—approximately 300,000 samples in MSRVTT and MSVD—only 100 samples were selected for human evaluation, reducing the reliability of the results.
+
+For supervision during caption decoding, the paper simply concatenates the causal and effect text, which disrupts the original sentence grammar and lowers the quality of the synthetic supervision. The rationale behind this approach is unclear. An alternative method could involve inputting the causal and effect text into an LLM to fuse them into a more natural and coherent sentence. With ground truth captions generated by simple concatenation, evaluation metrics such as SPICE and CIDEr may not accurately reflect the quality of the generated captions. This approach could lead to discrepancies between metric scores and the true readability and coherence of the captions.
+
+The structure of the feature encoder in stage 2 is not clearly depicted. Typically, encoded features from transformer encoders consist of a series of representations. It is unclear whether h_cause and h_effect are lists of representations or single representations. If h_cause and h_effect are single representations, it is not specified how they are generated—whether by selecting a specific token, or by applying mean pooling or max pooling. Furthermore, the specific dimension along which these features are concatenated is not detailed.
+
+### Questions
+See above.
+
+### Soundness
+3
+
+### Presentation
+2
+
+### Contribution
+2
+
+---
+
+## Human Reviewer 3
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4
+
+### Summary
+This paper tackles the problem of captioning videos taking into account causal-temporal narratives. It does so by presenting two main contributions: a dataset and benchmark (CTN) with causes and effects per video, and a network architecture (CEN) for extracting such narratives directly from videos.
+
+When applying the CTN benchmark to CEN, the network gets better metrics when compared to similar methods, potentially establishing it as SOTA in the domain.
+
+### Strengths
+Significance:
+
+* The problem discussed is important and relevant to much of the field of video captioning and video generation. It's true that typical captioning methods don't typically expose causal information, which makes generated captions much less useful than they could be.
+
+Originality:
+
+* The work appears original though the novel aspects of it are a bit of straightforward applications of existing methods.
+
+Quality:
+
+* The work produces good results. While the paper discusses both results on existing benchmarks, and in CTN, the former being more interesting because they've been established independently.
+* I appreciate that both automatic benchmarks and human evaluations were used to evaluate this work.
+* The proposed CEN network architecture is interesting and original.
+
+Clarity:
+
+* The work is mostly clear, except for some aspects that are discussed in the weaknesses section.
+
+### Weaknesses
+ * The automatic evaluation process is found to filter out most bad cause and effect generations. More complete analysis on the distribution of the qualities of the generated captions is missing. I can imagine a histogram that displays the distribution of qualities with a vertical line showing the threshold that's been picked. Also the paper would benefit from analysis on whether the automatic evaluation filtering improves on the method, or is a patch for more fundamental issues in the prior step.
+
+* The contribution of CTN depends strongly on the prompt used to zero shot cause and effect generation. Given that this prompt is so central to the paper, the paper would benefit from more complete ablations regarding different aspects of the prompt. Especially important, the list of requirements that are presented in the prompt are justified in the paper but no corresponding ablation per requirement is done to validate the explanation. (the ablation donefor 4 prompts of varying degrees of quality appears insufficient for this purpose)
+
+* When building CTN, the captions are 1) generated from frames, and then 2) a model combines multiple captions into cause and effect captions without looking at frame information again until 3) the automatic evaluation step. Has the team considered using a model that can read text + image in step 2 as well?
+
+  Concluding cause and effect just from the individual frame captions is a lot more error prone than it could be if image information was also used. I think this possibility could be mentioned / analyzed as a potential alternative.
+
+* Why are causes and effects only separated by a space in CTN? Have other choices been ablated? In particular, I can imagine using a "comma" or an "and" between both to work slightly better.
+
+    * Has the team considered using an LLM to combine both captions together, instead of using concatenation?
+
+* For A5.1: more discussion on the human evaluation process would be very beneficial. How were the experts chosen? How is information presented to them? How were the 100 videos chosen?
+
+  For example it would be ideal to have an independent expert set; and it would be ideal if they were presented with the captions without labels that identify the models, and in such a way that each the models are independently ordered for each video (so annotators cannot be biased to always vote for the first model, for example)
+
+* Clarity: The paper, especially in the first few pages, is a bit too repetitive or verbose. It may benefit from some proofreading for succinctness. For example, the following two paragraphs are very close to each other, and both express a similar idea:
+
+```
+It means that our CTN benchmark differs significantly by focusing on generating comprehensive causal-temporal narratives, capturing broader temporal relationships within a single caption, and providing a more holistic view of video content
+```
+
+  and
+
+```
+We introduce a new benchmark CTN specifically designed to capture and evaluate causal-temporal narrative in video captioning. Our approach goes beyond existing benchmarks by explicitly modeling causal-temporal narrative in a single, coherent caption, enabling a more comprehensive understanding of video content.
+```
+
+  In other cases ideas are repeated in the same paragraph:
+
+```
+However, as our experiments show (see Section 4.4), even these advanced models struggle with generating accurate causal-temporal narratives. To address this limitation, there is a need to develop new video captioning models that can overcome the shortcomings of current frameworks. This also underscores the need for specialized architectures like our proposed CEN that are explicitly designed to capture and generate causal-temporal narratives in videos
+```
+
+  one could summarize this text as:
+
+```
+However, as our experiments show (see Section 4.4), even these advanced models struggle with generating accurate causal-temporal narratives. This also underscores the need for specialized architectures like our proposed CEN that are explicitly designed to capture and generate such narratives in videos
+```
+
+  Such verbosity makes the paper hard to read, despite the main ideas being explained very clearly.
+
+* The paper would benefit from a more complete discussion on possible downsides of this approach. For example for CTN how it compares to using frame data in step 2 as discussed above, or what downsides could arise from the concrete proposed architecture.
+
+* The paper mentions surveillance; maybe analyze this in the context of ethic concerns?
+
+* `We acknowledge potential ethical concerns (e.g., privacy in surveillance, risk of misleading content) but are committed to responsible development`, could this be made more concrete?
+
+* The paper mentions `lays the foundation for a paradigm shift`, which appears potentially grandiose in my opinion. Better to let the community arrive to this conclusion, than write it in the text.
+
+### Questions
+* The fatality video may be too graphic for some readers. I suggest switching it to a video on another topic.
+
+* In figure 5, CTN captions appear too similar to CEN. Is this a symptom of overfitting?
+
+* What does the system do when a video with no apparent cause and effect is used as input? For example, a person is singing but there's no audience reaction. Or a person is just sitting in a chair. The paper mentions "our method assumes a certain level of causal and temporal coherence within the video content"; maybe it would benefit from providing a probability value on the confidence for the existence of cause and effect in the input video?
+
+* `As expected, the resulting captions (Figure 6) are of low quality`, how is this measured?
+
+* Has the team considered the encoder of effect to also receive the encoded cause as input? How would that compare with the current approach?
+
+### Soundness
+3
+
+### Presentation
+3
+
+### Contribution
+3
+
+---
+
+## Human Reviewer 4
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4
+
+### Summary
+This paper focuses on incorporating causal-temporal narrative into video captioning.  The authors create a new dataset called Causal-Temporal Narrative (CTN) captions, using a LLM to generate captions that explicitly describe cause-effect relationships and maintain temporal consistency within videos based on multiple annotated ground-truths for the same video. The quality of these CTN captions is assessed both automatically (using EMScore) and through human evaluation.
+
+Furthermore, the authors propose a novel model architecture called the Cause-Effect Network (CEN), specifically designed to learn from the CTN captions. CEN decouples the cause and effect captions by finetuning one visual encoder for each of them. The representations of both encoders are then used during the LLM finetuning stage.
+
+Experiments on MSVD and MSR-VTT datasets demonstrate that CEN significantly outperforms state-of-the-art video captioning methods for generating CTN captions. Ablation studies further validate the design choices of CEN.
+
+### Strengths
+- While most of the causal video understanding focuses on video question answering, this paper proposes to bring causal understanding into video captioning. 
+- The data generation pipeline looks sound.
+- The proposed approach achieves strong results on the proposed benchmark.
+
+### Weaknesses
+ - The weakest ablated baseline already performs well above state-of-the-art approaches. It would be great to understand what the differences are. For instance, how does a baseline with the CLIP ViT features used directly perform?
+- The presentation can be improved, for instance it is not clear that the evaluation is on the CTN captions in Table 1, and the ablation study includes method names which are hard to interpret when having a first look at the table.
+- The data generation approach largely relies on the multiple GT captions present for each video in MSR-VTT and MSVD. 
+- Captioning metrics which do not move much like Rouge-L are hard to interpret.
+
+### Questions
+See above.
+
+### Soundness
+3
+
+### Presentation
+2
+
+### Contribution
+3

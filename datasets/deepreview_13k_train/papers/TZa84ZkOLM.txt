@@ -1,0 +1,227 @@
+\title{Out of Many, One: Designing and Scaffolding Proteins at the Scale of the Structural Universe with Genie 2}
+
+\begin{abstract}
+  Protein diffusion models have emerged as a promising approach for protein design. One such pioneering model is Genie, a method that asymmetrically represents protein structures during the forward and backward processes, using simple Gaussian noising for the former and expressive SE(3)-equivariant attention for the latter. In this work we introduce Genie 2, extending Genie to capture a larger and more diverse protein structure space through architectural innovations and massive data augmentation. Genie 2 adds motif scaffolding capabilities via a novel multi-motif framework that designs co-occurring motifs with unspecified inter-motif positions and orientations. This makes possible complex protein designs that engage multiple interaction partners and perform multiple functions. On both unconditional and conditional generation, Genie 2 achieves state-of-the-art performance, outperforming all known methods on key design metrics including designability, diversity, and novelty. Genie 2 also solves more motif scaffolding problems than other methods and does so with more unique and varied solutions. Taken together, these advances set a new standard for structure-based protein design.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+The design of proteins with novel structures and functions has emerged as a potent technology in therapeutic \cite{silva2019novo,cao2020novo,shanehsazzadeh2023unlocking} and industrial applications \cite{quijano2021novo,huddy2024blueprinting}. Generative AI has driven recent advances in protein design, most notably diffusion \cite{ho2020denoising,song2020score} and flow matching \cite{lipman2022flow} models, as has the revolution in protein structure prediction sparked by AlphaFold 2 \cite{jumper2021highly}. Proteins are one-dimensional polymers of amino acids ("sequences") that fold into three-dimensional shapes ("structures"). Generative protein models mirror this delineation, with most operating either in the sequence or structural domain. One rationale for sequence-based methods is that sequences are what ultimately get synthesized as functioning biomolecules, while structures require an additional structure-to-sequence map (inverse folding). Sequence-based models include EvoDiff \cite{alamdari2023protein}, a discrete diffusion model that uses order-agnostic autoregressive diffusion with a ByteNet-style \cite{kalchbrenner2016neural} architecture for denoising. EvoDiff is a promising and complementary approach to structure-based design, currently the prevalent paradigm.
+
+Structure-based methods \cite{trippe2022diffusion,wu2024protein,lin2023generating,ingraham2023illuminating,yim2023se,yim2023fast,anand2022protein,fu2024latent,wang2024proteus} focus on modeling structure space and typically employ separate inverse folding models such as ProteinMPNN \cite{dauparas2022robust} to propose plausible sequences given a generated structure. Their key rationale is that structure more closely associates with protein function than sequence. Among them, Genie performs diffusion on backbone atom coordinates and uses an SE(3)-equivariant denoiser to reason over a cloud of reference frames constructed from backbone coordinates. FrameDiff \cite{yim2023se} uses a diffusion process in SE(3) on backbone frames with an AlphaFold-inspired architecture for denoising. FrameFlow \cite{yim2023fast} adopts the general architecture of FrameDiff but uses flow matching instead. Chroma \cite{ingraham2023illuminating} combines a correlated diffusion process that respects statistical properties of natural proteins with an efficient graph neural network. It also includes a separate design network that predicts sequences and side-chain atoms given a generated backbone. More recently, Proteus \cite{wang2024proteus} uses a similar diffusion process and architecture as FrameDiff but introduces graph triangle blocks that combine the expressiveness of triangle attention from AlphaFold 2 with faster runtimes by limiting attention to nearby residues.
+
+The inter-connectedness of sequence and structure suggests that integrating their representations would advance protein design, particularly for conditional tasks that require pre-specified sequence or structural elements. Recent methods reflect this. One approach integrates sequence information as a condition of a structure-based diffusion process, as RFDiffusion \cite{watson2023novo} does when designing proteins with known sequence fragments. Another approach performs diffusion or flow matching in a joint sequence-structure space, as done by MultiFlow \cite{campbell2024generative} when it combines an SE(3) structural flow with a discrete sequence flow. There have also been attempts \cite{costa2023ophiuchus} at jointly encoding sequence and structure in a latent space and diffusing in this space; however, the approach remains nascent.
+
+Whether encoded by sequence or structure, function is what is sought in protein design. Many functions, including interactions with small molecules and other proteins, are governed by few residues, or a \textit{motif}. Achieving prescribed functions can thus often be distilled into designing a protein with a specific motif (\textit{e.g.,} an enzyme active site \cite{wang2022scaffolding} or antigen-binding site \cite{yang2021bottom}), known as \textit{motif scaffolding}. Diffusion models have shown success in this realm: \citet{wu2024practical} developed a sequential Monte Carlo sampler called Twisted Diffusion Sampler and applied it to FrameDiff to scaffold motifs while RFDiffusion and an updated FrameFlow \cite{yim2024improved} were explicitly trained on motif-conditioned tasks. Yet, current models cannot design proteins with multiple independent motifs, as they require inter-motif positions and orientations to be known \textit{a priori}. Proteins often comprise independent functional sites, either as separate domains connected by a flexible linker or as one globular domain, such as an enzyme with multiple substrate binding sites or a scaffolding protein that engages multiple signaling ligands. The ability to design such proteins, which we term \textit{multi-motif scaffolding}, would enable the development of new enzymes \cite{ebrahimi2023engineering}, biosensors \cite{yang2021bottom}, and therapeutics that disrupt or enhance protein-protein interactions \cite{marchand2022computational}. Concurrent with our work, \citet{castro2024accurate} employed an established non-diffusion model, $\text{RF}_\text{joint2}$, to inpaint an immunogen containing three distinct epitopes. This approach appears promising but has yet to be systematically benchmarked.
+
+In this work, we extend Genie to support single- and multi-motif scaffolding. We also improve the core Genie model through architectural modifications and enhancements to its training data and process. The resulting Genie 2 better captures protein structure space. When compared to existing models, Genie 2 sets state-of-the-art results in designability, diversity, and novelty. In addition, Genie 2 surpasses RFDiffusion on motif scaffolding tasks, both in the number of solved problems and the diversity of designs. We also curate a benchmark set comprising 6 multi-motif scaffolding problems from the literature and show that Genie 2 can propose complex designs incorporating multiple functional motifs, a challenge unaddressed by existing protein diffusion models.
+
+
+
+\section{Previous Genie Model}
+
+
+\paragraph{Diffusion with asymmetric protein representations} In contrast to all other SE(3)-equivariant diffusion models for protein generation, which use unified representations for the forward and backward diffusion processes, Genie represents proteins as point clouds of $C_{\alpha}$ atoms in the forward process and as clouds of reference frames in the reverse process. Let $\mathbf{x} = [\mathbf{x}^1, \mathbf{x}^2, \cdots, \mathbf{x}^N]$ be a sequence of $C_\alpha$ coordinates of length $N$. Given a sample $\mathbf{x}_0$ from the unknown protein structure distribution, Genie's forward process gradually adds isotropic Gaussian noise through a cosine variance schedule $\beta = [\beta_1, \beta_2, \cdots, \beta_T]$, where $T$ is the total number of diffusion steps (set to 1,000).
+\begin{equation}
+    q(\mathbf{x}_t | \mathbf{x}_{t-1}) = \mathcal{N}(\mathbf{x}_t \vert \sqrt{1 - \beta_t} \mathbf{x}_{t-1}, \beta_t \mathbf{I})
+\end{equation}
+By reparameterization, we have
+\begin{equation}
+    q(\mathbf{x}_t | \mathbf{x}_{0}) = \mathcal{N}(\mathbf{x}_t \vert \sqrt{\bar{\alpha}_t} \mathbf{x}_0, (1 - \bar{\alpha}_t) \mathbf{I}) \quad \text{where} \quad \bar{\alpha}_t = \prod_{s=1}^t \alpha_s \quad \text{and} \quad \alpha_t = 1 - \beta_t
+\end{equation}
+Since the isotropic Gaussian noise added at each diffusion step is small, the corresponding reverse process could be approximated with a Gaussian distribution:
+\begin{equation}
+    p(\mathbf{x}_{t-1} | \mathbf{x}_t) = \mathcal{N}(\mathbf{x}_{t-1} \vert \mathbf{\mu}_\theta(\mathbf{x}_t, t), \mathbf{\Sigma}_\theta(\mathbf{x}_t, t) \mathbf{I})
+\end{equation}
+where
+\begin{equation*}
+    \mathbf{\mu}_\theta(\mathbf{x}_t, t) = \frac{1}{\sqrt{\alpha_t}} \left( \mathbf{x}_t - \frac{\beta_t}{\sqrt{1 - \bar{\alpha}_t}} \mathbf{\epsilon}_\theta(F(\mathbf{x}_t), t) \right) \quad \quad \mathbf{\Sigma}_\theta(\mathbf{x}_t, t) = \gamma^2 \cdot \beta_t
+\end{equation*}
+$F(\cdot)$ is the Frenet-Serret frame construction process based on a sequence of coordinates, and $\gamma \in [0, 1]$ controls the scale of injected noise in the reverse process (analogous to sampling temperature).
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figure_1.png}
+  \caption{Genie 2 architecture (top), which extends Genie to enable scaffolding on (multiple) motifs. It consists of an SE(3)-invariant encoder that transforms input features into single residue and pair residue-residue representations, and an SE(3)-equivariant decoder that updates frames based on single representations, pair representations, and input reference frames. Example inputs to the model for single- and multi-motif scaffolding problems are shown (bottom-left green box), along with the corresponding generated designs (bottom-right box). In single motif scaffolding (top row), the motif may be contiguous or non-contiguous but all inter-residue positions and orientations are defined. In multi-motif scaffolding (bottom row), inter-motif geometry is left unspecified. For input sequences, white boxes denote masked out regions corresponding to the scaffold.}
+  \label{fig:architecture}
+\end{figure}
+
+\paragraph{SE(3)-equivariant denoiser} The core of Genie is its SE(3)-equivariant denoiser $\epsilon_\theta(F(\mathbf{x}_t), t)$, which reasons over reference frames to predict the noise injected during the forward process. Figure \ref{fig:architecture} summarizes Genie's architecture. The denoiser consists of an SE(3)-invariant encoder, which transforms individual residue and residue-residue pair features into single and pair representations, and an SE(3)-equivariant decoder, which uses Invariant Point Attention \cite{jumper2021highly} to update single representations that are in turn used to update input reference frames. Final noise vectors are computed as the displacement between the translation component of the updated frames and that of the input frames. For more details refer to \cite{lin2023generating}.
+
+
+
+\section{Methods}
+
+\label{sec:method}
+
+In this work we extend Genie's architecture and training procedure to enable motif scaffolding. We also substantially improve the core unconditional model through data augmentation and scaling.
+
+\paragraph{Motif representation for conditional generation} Genie's architecture naturally permits integration of conditional sequence and structure information into the diffusion process. We do so by encoding the residues of each motif as one-hot vectors and concatenating these encodings to the single residue features. We encode the structure of each motif using the pairwise distance matrix of its $C_\alpha$ atoms. This representation is SE(3)-invariant as it does not encode the absolute position and orientation of the motif(s), and is unlike the motif conditioning procedures of other methods (\textit{e.g.,} RFDiffusion and FrameFlow), which fix motif coordinates and are thus sensitive to initial placement(s).
+
+Our approach sidesteps a challenge in multi-motif scaffolding, where the design objective leaves the relative positions and orientations of motifs unspecified. By representing motif structures using pairwise distance matrices that specify intra-motif but not inter-motif distances, Genie 2 learns to satisfy the constraints of each motif while generating self-consistent configurations of inter-motif geometries. Figure \ref{fig:architecture} illustrates the types of (multi-)motif templates that can be specified. Note that even in single motif scaffolding, a motif may be non-contiguous by comprising multiple segments. What differentiates single and multi-motif scaffolding is that inter-segment geometric relationships are specified while inter-motif relationships are not. Genie 2's formulation does require specifying sequence length separations between motifs, either by fixing them or sampling from a distribution.
+
+\paragraph{Training} Genie 2 is trained in a purely conditional manner with every training example constituting a (single) motif scaffolding task. Tasks are constructed by first sampling structures from our training dataset to serve as ground truths. A target motif is then constructed for each structure by sampling $N_s$ segments totaling $N_r$ residues, where $N_s \sim \mathcal{U}(1, 4)$, $N_r \sim \mathcal{U}(\lfloor 0.05N \rfloor, \lceil 0.5N \rceil)$, and $N$ is again the length of the protein. The starting positions and lengths of motif segments are randomly chosen subject to the number of motif residues totalling $N_r$. Algorithm 1 describes the task sampling procedure in more detail. We initially experimented with training on varying ratios of conditional and unconditional tasks but found that higher proportions of conditional tasks generally yielded better performance on both types of tasks, and thus switched to purely conditional training. Due to computational constraints, we limit sequence length to 256 during training; however, Genie 2 is capable of generating proteins longer than 256 residues. In addition, we do not train on multi-motif scaffolding as our input representation permits under-specification of geometric relationships as an inference-time choice. Genie 2's performance on multi-motif scaffolding thus represents out-of-distribution generative generalization.
+
+\begin{algorithm}
+\caption{Motif construction for conditional training task}\label{alg:cap}
+\begin{algorithmic} \onehalfspacing
+\Require Sampled structure $\mathbf{x}$, a sequence of $C_\alpha$ coordinates of length $N$
+\State $N_s \sim \mathcal{U}(1, 4)$ \Comment{Number of segments in the motif}
+\State $N_r \sim \mathcal{U}(\lfloor 0.05N \rfloor, \lceil 0.5N \rceil)$ \Comment{Number of residues in the motif}
+\State $B \leftarrow [0, b_1, b_2, \cdots, b_{N_s - 1}, N_r]$ \quad where $b_1, b_2, \cdots, b_{N_s - 1}$ 
+\State \quad \quad are randomly sampled from $\{1, 2, \cdots, N_r - 1\}$
+\State \quad \quad without replacement and sorted in ascending order.
+\State $L \leftarrow [l_1, l_2, \cdots, l_{N_s}]$ \quad where $L_i = B_i - B_{i-1}$ \Comment{Split motif residues into segments}
+\State $\mathbf{M} = \text{Flatten}(\text{Permute}([S_1, S_2, \cdots, S_{N - N_r}, M_1, M_2, \cdots, M_{N_s}]))$ \quad where
+\State \quad \quad $S_i = [0]$ for $i \in [1, N - N_r]$ \Comment{Represents a scaffold residue}
+\State \quad \quad $M_j = [1, 1, \cdots, 1]$ where $|M_j| = l_j$ for $j \in [1, N_s]$ \quad \quad \Comment{Represents a motif segment}
+\Return $\mathbf{M}$ \quad where for $i \in [1, N]$ \Comment{Represents a motif sequence mask}
+\State \quad \quad $\mathbf{M}[i] = 1$ indicates that residue $i$ is a motif residue
+\State \quad \quad $\mathbf{M}[i] = 0$ indicates that residue $i$ is a scaffold residue
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Data augmentation} Diffusion models require large datasets to robustly capture complex distributions. Generative protein models have thus far relied on training on experimentally determined protein structures from the Protein Data Bank (PDB) \cite{berman2002protein,burley2023rcsb}. Despite the enormous experimental efforts that have gone into assembling the PDB, its size remains limited to \~{}20,000 proteins of relevant lengths. With the development of highly accurate protein structure prediction, we hypothesized that augmenting Genie training with confidently predicted protein structures could boost its performance by expanding the space of observed folds beyond those present in the PDB. Consequently, we train Genie 2 using the AlphaFold database (AFDB) \cite{varadi2022alphafold}, which consists of approximately 214M AlphaFold 2 predictions spanning nearly the entirety of UniProt  \cite{uniprot2023uniprot}. As AFDB is highly structurally redundant, we use a subsampled version \cite{barrio2023clustering} that applies FoldSeek \cite{van2024fast} to cluster entries based on structural similarity. We start with all cluster representatives from the FoldSeek-clustered database and then filter them using a pLDDT threshold of >80, to enrich for highly confident predictions, and a maximum sequence length of 256. This results in 588,570 structures. To our knowledge, Genie 2 is the first protein diffusion model to train on AFDB.
+
+\paragraph{Loss function} We minimize the loss function below, which computes the mean squared error between predicted and ground truth noise:
+\begin{align}
+    L(\theta) &= \mathbb{E}_{t, x_0, \epsilon} \left[ \frac{1}{N} \sum_{i=1}^{N} \left\Vert  \epsilon_t^i  - \epsilon_\theta^i(F(x_t), t) \right\Vert^2 \right] \\
+    &= \mathbb{E}_{t, x_0, \epsilon} \left[ \frac{1}{\vert \mathcal{M} \vert + \vert \mathcal{S} \vert} \left(\sum_{i \in \mathcal{M}} \left\Vert  \epsilon_t^i  - \epsilon_\theta^i(F(x_t), t) \right\Vert^2 + \sum_{i \in \mathcal{S}} \left\Vert \epsilon_t^i  - \epsilon_\theta^i(F(x_t), t) \right\Vert^2 \right) \right]
+\end{align}
+where $\mathcal{M}$ and $\mathcal{S}$ are the set of motif and scaffold residue indices, respectively. Under this construction, motifs are enforced as a soft constraint, ensuring that the model is responsive to motif specifications while also designing the protein as a whole.
+
+
+
+\section{Unconditional Protein Generation}
+
+
+To systematically assess Genie 2 and competing methods on unconditional protein generation, we conduct two sets of analyses. First, we assess methods without accounting for length while restricting the longest designed protein to 256 residues (Section \ref{uncond_indist}). This reflects Genie 2's in-distribution generative power since it is trained on proteins up to 256 residues long. Second, we assess methods in a length-specific manner up to 500 residues (Section \ref{uncond_length}) to quantify Genie 2's out-of-distribution generative capabilities. In both analyses, we rely on the evaluation metrics described in Section \ref{uncond_eval_metric}.
+
+We compare Genie 2 to Chroma, FrameFlow and RFDiffusion. The latter is widely perceived as the current state-of-the-art protein design model and has been extensively validated. A more recent model, Proteus, asserts some gains on designability over RFDiffusion at the cost of lower diversity. Unfortunately, the code for Proteus is not publicly available, precluding direct comparison. Nonetheless, based on Proteus' reported metrics, we believe that the comparison with RFDiffusion is sufficient to establish Genie 2 as the new state-of-the-art model. We note that while Chroma contains a built-in sequence design network, we find it to underperform ProteinMPNN and so exclude it; instead we adopt the same evaluation pipeline across all methods.
+
+\subsection{Evaluation metrics}
+\label{uncond_eval_metric}
+
+\paragraph{Designability} A structure that can be plausibly realized by some protein sequence is one that is designable. To determine if a structure is designable we employ a commonly used pipeline \cite{trippe2022diffusion} that computes \textit{in silico} self-consistency between generated and predicted structures. First, a generated structure is fed into an inverse folding model (ProteinMPNN \cite{dauparas2022robust}) to produce 8 plausible sequences for the design. Next, structures of proposed sequences are predicted (using ESMFold \cite{lin2022language}) and the consistency of predicted structures with respect to the original generated structure is assessed using a structure similarity metric (TM-score \cite{zhang2004scoring,xu2010significant}). Using this pipeline, we consider a generated structure to be designable if it is within 2Å RMSD of the most similar predicted structure ($\text{scRMSD} \leq 2$) and the structure is confidently predicted (mean $\text{pLDDT} \geq 70$). Over a set, "designability" quantifies the fraction of designable structures within it. We note that designability alone can be misleading because it does not account for structural diversity--for example, a model that has mode-collapsed into a single designable structure achieves perfect designability.
+
+\paragraph{Diversity} Complementary to designability is the (structural) diversity of a generated protein set. To quantify diversity we start by hierarchically clustering (with single linkage) the set of \textit{designable} generated structures. We exclude non-designable structures as we do not expect them to be realizable and including them would thus inflate diversity. As sequence lengths vary within a set of designable structures, we utilize TMAlign \cite{zhang2005tm} to compute the pairwise similarities of all structures and use a TM-score threshold of 0.6 as cutoff. This implies that any pair of structures across clusters would have a TM score of at most 0.6. We then compute "diversity" as the fraction of distinct designable clusters within a set of generated structures. As the diversity metric already enforces designability of generated clusters, we find that it better reflects the generative capabilities of a model than designability. Note that diversity depends on the number of samples generated, and tends to 0 as sample size increases. In all our experiments we use a fixed sample size to enable even comparisons.
+
+\paragraph{F1 score} Following \citet{lin2023generating}, we compute the harmonic mean between designability ($p_{\text{structures}}$) and diversity ($p_{\text{clusters}}$) as follows:
+\begin{equation}
+    F_\beta = (1 + \beta^2) \cdot \frac{p_{\text{structures}} \cdot p_{\text{clusters}}}{\beta^2 \cdot p_{\text{structures}} + p_{\text{clusters}}}
+\end{equation}
+where $\beta \in \mathbb{R}^+$ controls the relative weighting of designability and diversity. We set $\beta = 1$ and report the metric as F1 score.
+
+\paragraph{Novelty} Beyond designability and diversity, we also quantify the novelty of generated structures with respect to reference  datasets and, by extension, the known structural universe. To compute the novelty of a generated structure we again employ TM-score as our structure similarity metric and use TMAlign to compute the TM scores between a generated structure and all structures in a reference dataset. We consider a generated structure to be novel if it is designable and its TM-score to any reference structure is at most 0.5. Similar to our diversity calculations, we apply hierarchical clustering (with single linkage and a TM-score threshold of 0.6) to the set of novel structures and define "novelty" to be the fraction of distinct novel clusters within a set of generated structures. We measure novelty with respect to both the PDB and Foldseek-clustered AFDB datasets (the latter being our training dataset) and term these measures "PDB novelty" and "AFDB novelty", respectively.
+
+\subsection{In-distribution performance analysis}
+\label{uncond_indist}
+
+\begin{table*}
+\caption{Unconditional generative performance of structure-based diffusion models.}
+\label{tbl:unconditional}
+\vskip -0.15in
+\begin{center}
+\begin{sc}
+\begin{small}
+\begin{tabular}{lcccccccr}
+\toprule
+Method & Designability & Diversity & $F_1$ & PDB Novelty & AFDB Novelty \\
+\midrule
+Chroma & 0.70 & 0.51 & 0.59 & 0.13 & 0.04 \\
+RFDiffusion & \textbf{0.96} & 0.63 & 0.76 & 0.26 & 0.14 \\
+Genie 2 & \textbf{0.96} & \textbf{0.91} & \textbf{0.93} & \textbf{0.41} & \textbf{0.21} \\
+\bottomrule
+\end{tabular}
+\end{small}
+\end{sc}
+\end{center}
+\vskip -0.2in
+\end{table*}
+
+\begin{figure}[h!]
+  \centering
+  \includegraphics[width=\textwidth]{app_uncond_result_secondary.png}
+  \caption{Visualizations of in-distribution performance on unconditional generation. (A) Secondary structure distributions of proteins generated by Chroma, RFDiffusion and Genie 2. For reference, we also include the secondary structure distribution of 1,000 structures randomly drawn from AFDB (far right). (B) Secondary structure distributions of proteins generated by Genie 2 when sampling noise scale ($\gamma$ in equation (3)) is set to 0 (left) and 1 (right). (C) Self-consistency results on 1,000 randomly chosen structures from the PDB and clustered AFDB datasets.}
+  \label{fig:uncond_result_secondary}
+  \vskip -0.1in
+\end{figure}
+
+We assess Genie 2, Chroma, and RFDiffusion by generating 5 structures of every length ranging from 50 to 256 residues (1,035 structures in total). We omit FrameFlow here since it is trained using a maximum sequence length of 128, but include direct comparisons with FrameFlow in Section \ref{uncond_length}. Table \ref{tbl:unconditional} summarizes the performance of all methods on our key metrics. Relative to RFDiffusion and Chroma, Genie 2 achieves comparable designability and much higher diversity and novelty. This suggests that as a core unconditional model, Genie 2 best captures foldable protein structure space, and may thus serve as a superior engine for downstream sampling-based protein design tasks \cite{wu2024practical,didi2023framework}.
+
+In Figure \ref{fig:uncond_result_secondary}A, we visualize the secondary structure distribution of generated proteins. While all methods yield a wide range of secondary structure elements, the resulting distributions are biased (relative to AFDB), with beta strand-containing structures (top left of distribution) and loop elements (bottom left) being generally underrepresented. There are multiple possible reasons for this bias. First, the high frequency of helices in the training dataset leads to models that favor generating helical structures. Second, alpha helices are likely easier to generate than beta sheets as they involve largely local interactions while sheets may involve long-range interactions. Third, we assess Genie 2 using low temperature sampling as it yields better results, but this may shift the model from its learned distribution. We test this hypothesis by visualizing the distribution of secondary structures generated by Genie 2 under a normal temperature ($\gamma = 1$) in Figure \ref{fig:uncond_result_secondary}B. We observe that the resulting distribution is in fact consistent with that of the clustered AFDB dataset.
+
+This raises the question of whether low temperature sampling is necessary or, alternatively, why it helps improve Genie 2's performance. To investigate this we ran our self-consistency pipeline on 1,000 randomly chosen structures from the clustered AFDB dataset. We found that only 42.4\% of these structures are designable. When our designability criteria is relaxed to $\text{scTM} \geq 0.5$ and $\text{pLDDT} \geq 70$, the percentage of designable structures increases to 80.2\% (Figure \ref{fig:uncond_result_secondary}C). For comparison, among PDB structures 87.2\% are considered designable by our original criteria. This suggests that while AF-predicted structures are globally reliable (with $\text{scTM} \geq 0.5$), local atomic details remain much less accurate. Since we use AFDB for training, this might explain why designability is low at normal temperature sampling, as lower temperatures appear to bias Genie 2 towards higher fidelity. We note that ProteinMPNN was exclusively trained on the PDB and thus we cannot rule out the possibility that the apparent discrepancy in designability between the PDB and AFDB is due to a bias in ProteinMPNN towards the PDB.
+
+\subsection{Length-based performance analysis}
+\label{uncond_length}
+
+\begin{figure}
+  \centering
+  \includegraphics[width=\textwidth]{figure_2.png}
+  \caption{Assessment of methods by sequence length. For each method/sequence length combination, we generate 100 structures. (A) Box-and-whisker plots of scRMSDs between generated structures and their most similar ESMFold-predicted structures. Asterisks (*) indicate that sequence lengths exceed the maximum seen during training. (B-C) Plots of designability (B) and diversity (C) as a function of sequence length. (D) Example structures generated by Genie 2.}
+  \label{fig:uncondresults_length}
+  \vskip -0.1in
+\end{figure}
+
+We next assess generative performance in a length-dependent manner. For a subset of sequence lengths ranging from 50 to 500 residues, we generate 100 structures and assess them using our design metrics. Figure \ref{fig:uncondresults_length}A shows the scRMSD distribution across sequence lengths while Figures \ref{fig:uncondresults_length}B and \ref{fig:uncondresults_length}C plot designability and diversity as a function of sequence length, respectively. At nearly all assessed lengths, Genie 2 has comparable designability to RFDiffusion but higher diversity. For short proteins (<200 residues), Genie 2 exhibits considerably higher diversity (doubling that of RFDiffusion at 100 residues), which is noteworthy as shorter lengths constitute smaller design spaces.
+
+Generative models generally struggle with creating larger proteins due to their increased complexity. As sequence length increases, designability decreases and in turn so does diversity, likely because diversity depends on the number of designable proteins. Larger protein lengths should in principle permit greater diversity but they are harder to generate. Nonetheless, despite having been trained on monomers of at most 256 residues, Genie 2 can generate 500-residue structures with comparable or better performance than competing methods. For reference, RFDiffusion uses a crop size of 384 during training while Chroma trains on even larger proteins (>500 residues) owing to its efficient graph neural network. Figure \ref{fig:uncondresults_length}D shows examples of Genie 2 designed structures of varying lengths.
+
+
+
+\section{Motif Scaffolding}
+
+
+In this section we assess Genie 2 on single motif scaffolding and compare it to RFDiffusion on the same set of design tasks. A more recent method, FrameFlow, does assert superiority over RFDiffusion on single motif scaffolding, but its scaffolding-capable code is unfortunately unavailable, precluding direct comparison. We additionally assess Genie 2 on multi-motif scaffolding using a suite of 6 multi-motif tasks that we curated for this assessment.
+
+\begin{figure}
+  \centering
+  \includegraphics[width=\textwidth]{figure_3.png}
+  \caption{Comparison of Genie 2 and RFDiffusion on single-motif scaffolding. (A) Performance of Genie 2 and RFDiffusion across 24 single-motif scaffolding tasks. Inset (top right) shows a scatter plot of the (unique) success rate of Genie 2 vs. RFDiffusion; each point represents a scaffolding task. Summary statistics are shown in table (left). Example designs are shown (bottom) for successful task 3IXT (green) as well as failed task 4JHW (red). Scaffolds (white), motifs (blue), and unsatisfied sought motifs (red) are overlaid. (B) Plot of number of unique successes as a function of sample size.}
+  \label{fig:scaffoldresults}
+   \vskip -.1in
+\end{figure}
+
+\subsection{Evaluation metrics}
+
+Motif scaffolding problems consist of sequence and structure constraints on motif(s) plus length (min/max) constraints on scaffolds and the overall protein. To solve a motif scaffolding problem, we first sample a constraint-satisfying length for each scaffold segment while ensuring that total protein length is also within specifications. This information, together with the sequence and structure of motif(s), is passed as conditions to Genie 2. We quantify success using the criteria of RFDiffusion, which requires that generated structures achieve $\text{scRMSD} \leq 2$Å, $\text{pLDDT} \geq 70$, and $\text{pAE} \leq 5$ to be considered designable, and for designed motif(s) to have backbone $\text{RMSD} \leq 1$Å with respect to each motif to be considered constraint satisfying.
+
+While most previous studies, including RFDiffusion, use success rate as the evaluation metric, we find that this tends to inflate performance, as it is possible to achieve high success rates by repeatedly generating only one or a few successful designs, \textit{i.e.,} while suffering from mode collapse. Instead, and similar to \cite{yim2024improved}, we cluster successful designs based on structure similarity and report the number of unique successes. This approach better balances designability with diversity when assessing motif scaffolding performance. We use hierarchical clustering with single linkage and a TM-score threshold of 0.6. For each motif scaffolding problem, we sample 1,000 structures.
+
+\begin{figure}
+  \centering
+  \includegraphics[width=\textwidth]{figure_4.png}
+  \caption{Performance of Genie 2 on multi-motif scaffolding tasks. (A) Successful designs for task 1PRW\_four (scaffolding with four $\text{Ca}^{2+}$ ion binding sites) and 4JHW+5WN9 (scaffolding with RSV-F site II epitope and RSV-G 2D10 epitope). Scaffolds are in grey and distinct motifs are colored differently. (B) (Top) Successful design for multi-epitope immunogen. (Bottom) Individual epitope designs superposed over target structures (red). }
+  \label{fig:multiscaffoldresults}
+\end{figure}
+
+\subsection{Single-motif scaffolding} 
+\label{sec:single_motif}
+
+For evaluation, we use a previously published motif scaffolding benchmark \cite{watson2023novo} comprising 25 tasks curated from six recent publications. We exclude one task, 6VW1, as its motif consists of segments from multiple protein chains, a requirement not supported by Genie 2. Figure \ref{fig:scaffoldresults}A summarizes the performance of Genie 2 and RFDiffusion across the remaining 24 tasks. For 22 tasks, Genie 2 yields a similar or larger number of unique designs than RFDiffusion. Genie 2 also solves task 5WN9 that involves scaffolding the RSV G-protein 2D10 site \cite{chene2003inhibiting}, while RFDiffusion does not. We speculate that Genie 2 solves this task because it is capable of generating more diverse designs. In addition, we observe that the performance gap (in terms of number of unique successes) between Genie 2 and RFDiffusion widens as sample size increases (Figure \ref{fig:scaffoldresults}B), suggesting that Genie 2 is capturing a larger and more diverse structure space than RFDiffusion. Genie 2 does fail on one problem, 4JHW, that RFDiffusion also fails on, which involves scaffolding the RSV F-protein site-0. To better understand this failure case, we visualize the two closest designs (red box in Figure \ref{fig:scaffoldresults}) and observe that while Genie 2 yields designable structures it does not satisfy the motif constraints.
+
+\subsection{Multi-motif scaffolding}
+\label{sec:multimotif}
+
+To assess the multi-motif scaffolding capabilities of Genie 2, we curate from the literature a set of 6 scaffolding tasks that each require multiple motifs: designing an immunogen with two epitopes \cite{yang2021bottom}, scaffolding two $\text{Ca}^{2+}$ binding sites (four EF hand motifs) \cite{wang2022scaffolding,fallon2003closed}, scaffolding two binding motifs to PD-1 protein \cite{bryan2021computational}, scaffolding $\text{Cl}^{-}$ and $\text{Ni}^{2+}$ binding sites \cite{agnew2011correlation,chalkley2022novo}, and designing a binder of two different proteins, IL-2 receptor $\beta\gamma_c$ heterodimer (IL-2R$\beta\gamma_c$) and IL-2R$\alpha$ \cite{ren2022interleukin,silva2019novo}. The set is meant to reflect the breadth of potential protein design tasks, including immunogen, binder, and enyzme design.
+
+Genie 2 solves 4 of the 6 tasks. Figure \ref{fig:multiscaffoldresults}A shows successful designs of task 1PRW\_four (scaffolding with four $\text{Ca}^{2+}$ ion binding sites) and 4JHW+5WN9 (scaffolding with RSV-F site II epitope and RSV-G 2D10 epitope). In addition to our benchmark set, we apply Genie 2 to a multi-motif task proposed in a concurrent preprint \cite{castro2024accurate}. This task scaffolds an immunogen containing three unique epitopes from the respiratory syncytial virus (RSV) fusion protein. Genie 2 solves the task with only 1,000 samples. Figure \ref{fig:multiscaffoldresults}B shows an example design.
+
+
+
+\section{Limitations and Future Work}
+
+
+\label{sec:limitations}
+Genie 2 achieves state-of-the-art performance on both unconditional generation and motif scaffolding. Yet, its sampling time is longer than that of other methods, requiring 1,000 denoising iterations vs. 100 (FrameFlow), 500 (Chroma), and 50 (RFDiffusion). One future direction for Genie 2 is to improve its sampling efficiency in both unconditional protein generation and motif scaffolding. Genie 2 also employs triangular multiplicative update layers, introduced in AlphaFold 2. These layers are computationally expensive with $O(N^3)$ scaling, thus disproportionately affecting larger design tasks. A second future direction is thus to reduce the time and space complexity of the Genie 2 architecture, to enable generation of and training on larger proteins.
+
+\clearpage
+
+
+
+
+
+

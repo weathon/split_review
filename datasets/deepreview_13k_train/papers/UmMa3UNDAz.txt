@@ -1,0 +1,412 @@
+\title{EfficientDM: Efficient Quantization-Aware Fine-Tuning of Low-Bit Diffusion Models}
+
+\begin{abstract}
+Diffusion models have demonstrated remarkable capabilities in image synthesis and related generative tasks.
+Nevertheless, their practicality for low-latency real-world applications is constrained by substantial computational costs and latency issues.
+Quantization is a dominant way to compress and accelerate diffusion models, where post-training quantization (PTQ) and quantization-aware training (QAT) are two main approaches, each bearing its own properties.
+While PTQ exhibits efficiency in terms of both time and data usage, it may lead to diminished performance in low bit-width settings. On the other hand, QAT can help alleviate performance degradation but comes with substantial demands on computational and data resources.
+To 
+capitalize on 
+the advantages while avoiding their respective drawbacks,
+we introduce a data-free, quantization-aware and parameter-efficient fine-tuning framework for low-bit diffusion models, dubbed EfficientDM, to achieve QAT-level performance with PTQ-like efficiency.
+Specifically, we propose a quantization-aware variant of the low-rank adapter (QALoRA) that can be merged with model weights and jointly quantized to low bit-width.
+The fine-tuning process distills the denoising capabilities of the full-precision model into its quantized counterpart, eliminating the requirement for training data.
+To further enhance performance, we introduce scale-aware LoRA optimization to address ineffective learning of QALoRA due to variations in weight quantization scales across different layers.
+We also employ temporal learned step-size quantization to handle notable variations in activation distributions across denoising steps.
+Extensive experimental results demonstrate that our method significantly outperforms previous 
+PTQ-based
+diffusion models while maintaining similar 
+time and data efficiency.
+Specifically, there is only a marginal $0.05$ sFID increase when quantizing both weights and activations of LDM-4 to 4-bit on ImageNet $256\times256$.
+Compared to QAT-based methods, our EfficientDM also boasts a $16.2\times$ faster 
+quantization
+speed with comparable generation quality, rendering it a compelling choice for practical applications.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Diffusion models (DM)~\citep{ho2022videodiffusion,dhariwal2021diffusion,rombach2021highresolutionLDM,ho2022imagen} have demonstrated remarkable capabilities in image generation and related tasks.
+Nonetheless, the iterative denoising process and the substantial computational overhead of the denoising model limit the efficiency of DM-based image generation.
+To expedite the image generation process, numerous methods~\citep{bao2022analytic, songddim, liu2022pseudo, lu2022dpmsolver} have been explored to reduce the number of denoising iterations, effectively reducing the previously required thousands of iterations to mere dozens.
+However, the significant volume of parameters within the denoising model still demands a substantial computational burden for each denoising step, resulting in considerable latency,
+hindering
+the practical application of DM in real-world settings with latency and computational resource constraints.
+
+Model quantization, which compresses weights and activations from 32-bit floating-point values into lower-bit fixed-point formats, alleviating both memory and computational burdens.
+This effect can be increasingly pronounced as the bit-width decreases. 
+For instance, leveraging Nvidia's CUTLASS~\citep{kerr2017cutlass} implementation, an 8-bit model's inference speed can be $2.03\times$ faster than that of a full-precision (FP) model, and the acceleration ratio %
+reaches
+$3.34\times$ for a 4-bit model. 
+Therefore, it possesses substantial potential for significantly compressing and accelerating diffusion models, making them highly suitable for deployment on resource-constrained devices such as mobile phones.
+
+Nevertheless, the challenges associated with low-bit quantization for diffusion models have not received adequate attention.
+Typically, model quantization can be executed through two predominant approaches: post-training quantization (PTQ) and training-aware quantization (QAT). 
+PTQ calibrates the quantization parameters with a small calibration dataset, which is time- and data-efficient.
+However, they introduce substantial quantization errors at low bit-width.
+As illustrated in Figure~\ref{fig:eff_and_perf} , when quantizing both weights and activations to 4-bit with the PTQ method~\citep{he2023ptqd}, diffusion models fail to maintain their denoising capabilities.
+In contrast, QAT methods~\citep{krishnamoorthi2018quantizing, esser2019learned} can recover performance losses at lower bit-width by fine-tuning the whole model.
+However, this approach requires significantly more time and computing resources compared to PTQ method~\citep{he2023ptqd}, as evidenced by a $2.6\times$ increase in GPU memory consumption (31.4GB vs. 11.7GB) and a $18.9\times$ longer execution time (54.5 GPU hours vs. 2.88 GPU hours) when fine-tuning LDM-4~\citep{rombach2021highresolutionLDM} on ImageNet $256\times256$.
+Moreover, in some cases, it may be challenging or even impossible to obtain the original training dataset due to privacy or copyright concerns.
+
+\begin{wrapfigure}{r}{5.5cm}
+\centering
+         \includegraphics[scale=0.40]{figures/efficient_and_performance_crop.pdf}
+        \caption{An overview of the efficiency-vs-quality tradeoff across various quantization approachs. Data is collected on LDM-8~\citep{rombach2021highresolutionLDM} with 4-bit weights and activations on LSUN-Churches. The GPU memory consumption is visualized by circle size. %
+        } 
+        \label{fig:eff_and_perf}
+\end{wrapfigure}
+
+In this paper, we introduce a data-free and parameter-efficient fine-tuning framework for low-bit diffusion models, denoted as EfficientDM, which demonstrates the capability to achieve \emph{QAT-level performance} while upholding \emph{PTQ-level efficiency}
+during fine-tuning in terms of data and time.
+The foundation of our approach lies in a quantization-aware form of the low-rank adapter, as depicted in Figure~\ref{fig:mainfigure}b. 
+This variant enables the joint quantization of LoRA weights with model weights, thereby obviating additional storage and calculations.
+Compared to previous QAT method~\citep{so2023temporal}, our fine-tuning process is executed in a data-free manner, accomplished by minimizing the mean squared error (MSE) between the estimated noise of full-precision denoising model and its quantized counterpart, as illustrated in Figure~\ref{fig:mainfigure}c, thus eliminating the need for the original training dataset. 
+Due to quantization, the relationship between full-precision LoRA weights and quantized updated model weights becomes step-like with step size, \ie, the quantization scale parameter. 
+Effective updates are mostly observed in layers with small scales, while other layers with larger scales do not benefit. To address this, we introduce scale-aware LoRA optimization that adaptively adjusts the gradient scales of LoRA weights in different layers to ensure an effective optimization.
+Furthermore, we extend the learned step size quantization (LSQ) method~\citep{esser2019learned} into the denoising temporal domain for activations, effectively mitigating quantization errors due to varying activation distributions across time steps.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.90\columnwidth]{figures/main_figure_v7_crop.pdf}
+    \caption{An overview of the proposed EfficientDM fine-tuning framework. Here, $\mathbf{s}_w$ and $s_x$ represent the learnable quantization scales for weights and activations, respectively. Compared to QLoRA layer, both updated weights and activations in our QALoRA are quantized to enable efficient bitwise operations during inference.
+    Fine-tuning is performed by minimizing the mean squared error between the estimated noises of FP and quantized models.  
+    }
+    \label{fig:mainfigure}
+\end{figure}
+
+In summary, our contributions are as follows:
+\begin{itemize}[leftmargin=*]
+\setlength{\itemsep}{1pt}
+\item We introduce EfficientDM, an efficient fine-tuning framework for low-bit diffusion models which can achieve QAT performance with the efficiency of PTQ. The framework is rooted in the quantization-aware form of low-rank adapters (QALoRA) and distills the denoising capabilities of full-precision models into their quantized counterparts.
+\item We propose scale-aware LoRA optimization to alleviate the ineffective learning of QALoRA resulting from substantial variations in weight quantization scales across different layers. We also introduce TALSQ, an extension of activation learned step size quantization within the temporal domain to tackle the variation in activation distributions across denoising steps.
+\item Extensive experiments on CIFAR-10, LSUN and ImageNet demonstrate that our 
+EfficientDM
+reaches a new state-of-the-art performance for low-bit quantization of diffusion models.
+\end{itemize}
+
+
+\section{Related Work}
+
+\noindent\textbf{Model quantization.}
+Quantization is a widely employed technique for compressing and accelerating neural networks. Depending on whether fine-tuning of the model is necessitated, this method can be categorized into two approaches: post-training quantization (PTQ)~\citep{nagel2020adaround, li2021brecq, wei2022qdrop, lin2022fqvit} and quantization-aware training (QAT)~\citep{esser2019learned, gong2019dsq, nagel2022overcoming, louizos2018relaxed, jacob2018quantization, zhuang2018towards, he2022bivit}. PTQ does not involve fine-tuning the model's weights and only requires a small dataset to calibrate the quantization parameters. This approach is %
+fast and data-efficient
+but may result in suboptimal performance especially when employing low bit-widths. Recent advancements in reconstruction-based PTQ methods~\citep{li2021brecq, wei2022qdrop} utilize second-order error analysis and gradient descent algorithms to optimize quantization parameters. Such methods demonstrate robust performance, which can perform well even at 4-bit on image classification tasks. On the other hand, QAT entails fine-tuning the model weights to achieve low-bit quantization while minimizing performance degradation. Nevertheless, the substantial data prerequisites and high computational overhead render QAT much slower than PTQ. For instance, when applied to ResNet-18 model for the ImageNet classification task, it is reported to be $240\times$ slower than the PTQ method~\citep{li2021brecq}.
+This hindrance poses challenges to its widespread adoption, particularly for models with massive parameters.
+
+Given the demand to compress diffusion models and accelerate their sampling, quantization is considered an effective approach. Currently, most quantization work on diffusion models has focused on PTQ~\citep{shang2022ptq4dm, li2023q, he2023ptqd}. Since diffusion models can generate samples from random Gaussian noise, these methods are conducted in a data-free manner, with the calibration sets collected from the denoising process. For example, PTQ4DM~\citep{shang2022ptq4dm} and Q-Diffusion~\citep{li2023q} apply reconstruction-based PTQ methods to diffusion models. PTQD~\citep{he2023ptqd} further decomposes quantization noise and fuses it with diffusion noise. Nevertheless, these methods experience significant performance degradation at 4-bit or lower bit-widths. 
+Recent work TDQ~\citep{so2023temporal} fine-tunes diffusion models in a QAT manner and employs additional MLP modules to estimate quantization scales for each step.
+However, it requires the original dataset and training the entire quantized model with these extra MLP modules, incurring significant costs. In contrast, our approach introduces only a few trainable quantization scales per layer and can attain QAT-level performance with PTQ-level efficiency.
+
+\noindent\textbf{Parameter-efficient fine-tuning.}
+Parameter-Efficient Fine-Tuning (PEFT) has 
+emerged as a potent alternative to full fine-tuning, which tunes a small subset of parameters while keeping the vast majority frozen, to ease storage burden of large pretrained models.
+Noteworthy approaches within this realm include Prefix Tuning~\citep{li2021prefix, liu2021ptuning2}, Prompt Tuning~\citep{lester2021prompt, wang2022multitask}, and Low-rank adapters (LoRA)~\citep{hu2021lora, zhang2022adalora}, which have found extensive utility within large language models (LLMs). 
+
+Among these PEFT methods, LoRA~\citep{hu2021lora} keeps the pre-trained weights fixed and learns a set of low-rank decomposition matrices as updates to the weights. This method substantially reduces the number of trainable parameters, and 
+does not impose additional computational overhead due to re-parameterization.
+QLoRA~\citep{dettmers2023qlora} combines this technique with quantized LLMs, further curtailing memory requirements while mitigating performance degradation brought by quantization. However, its full-precision LoRA weights cannot be integrated with quantized model weights, leading to extra storage and computational costs for deployment. In contrast, we propose to merge LoRA weights with full-precision model weights and jointly quantize them to the target bit-width, enabling their seamless integration without incurring any additional overhead for deployment.
+Additionally, we identify and address the issue of ineffective learning of LoRA weights stemming from the variations in weight quantization scales, further enhancing the performance of low-bit diffusion models.
+
+
+\section{Background}
+
+\subsection{Diffusion Models}
+Diffusion models~\citep{songddim, ho2020ddpm} are a class of generative models that iteratively introduce noise to real data $\bx_0$ through a forward process and generate high-quality samples via a reverse denoising process. 
+Generally, the forward process is a Markov chain, which can be formulated as:
+ \begin{align}
+q(\bx_t|\bx_{t-1}) = \mathcal{N}(\bx_t;\sqrt{1-\beta_t}\bx_{t-1}, \beta_t \bI), \label{eq:forwardprocess}
+\end{align}
+where $\beta_t$ governs the magnitude of the introduced noise.
+The reverse process adheres to a similar form, where diffusion models 
+approximate the distribution of $q(\bx_{t-1} | \bx_{t})$ via variational inference by learning a Gaussian distribution:
+ \begin{align} \label{eq:reverseprocess}
+p_\theta(\bx_{t-1}|\bx_t)=\mathcal{N}(\bx_{t-1}; \bmu_\theta(\bx_t, t), \bSigma_\theta(\bx_t, t)),
+ \end{align}
+where $\bmu_\theta$ and $\bSigma_\theta$ are two neural networks. 
+When these neural networks are subjected to quantization, the resulting estimated statistics of the Gaussian distribution %
+can be inaccurate, thereby compromising the efficacy of the denoising process and the overall quality of the generated samples. 
+Our study is focused on introducing an efficient and powerful fine-tuning framework to narrow or even eliminate the performance gap between low-bit diffusion models and their full-precision counterparts.
+
+\subsection{Model Quantization}
+Model quantization represents model parameters and activations with low-precision integer values to reduce memory footprint and accelerate the inference. 
+Given a floating-point vector $\mathbf{x}$, it can be uniformly quantized as follows: 
+\begin{gather} \label{eq:quant-dequant}
+\hat{\mathbf{x}}=\mathcal{Q}_U(\mathbf{x}, s)=\mathrm{clip}(\lfloor \frac{\mathbf{x}}{s} \rceil, l, u) \cdot s.
+\end{gather}
+Here, $\lfloor \cdot \rceil$ is the $\mathrm{round}$ operation, $s$ is the trainable quantization scale, and $l$ and $u$ are the lower and upper bound of quantization thresholds, which are determined by the target bit-width. 
+To overcome the non-differentiability of the $\mathrm{round}$ operation during QAT, straight-through estimator (STE) is widely adopted to estimate the gradient:
+\begin{gather}
+    \frac{\partial \mathcal{L}}{\partial \mathbf{x}} \approx \frac{\partial \mathcal{L}}{\partial \hat{\mathbf{x}}} \cdot \mathbf{1}_{l \leq \frac{\mathbf{x}}{s} \leq u},
+\end{gather}
+where $\mathbf{1}_{A}$ represents an indicator function that takes on the value 1 if the element is in the set $A$, and the value 0 vice versa.
+
+
+\section{Efficient Quantization-aware Fine-tuning of Diffusion Models}
+
+
+In this section, we propose an efficient fine-tuning framework for diffusion models with both weights and activations quantized, possessing the efficiency of PTQ and the accuracy of QAT. 
+The proposed framework, dubbed EfficientDM, is depicted in Figure~\ref{fig:mainfigure}.
+It consists of a quantization-aware low-rank adapter and a noise distillation strategy, delivering parameter-efficient and data-free fine-tuning. Moreover, it is also equipped with scale-aware LoRA optimization and a temporal-aware quantizer for improved performance. 
+We elaborate each design as follows.
+
+\noindent\textbf{Quantization-aware low-rank adapter.}
+Low-rank adapter (LoRA) fine-tuning constrains the update of the model parameters to possess a low intrinsic rank,  denoted as $r$. Given a pretrained linear module $\mathbf{Y} = \mathbf{X}\mathbf{W}_{0}$, where $\mathbf{X} \in \mathbb R^{b\times c_{in}}$ and $\mathbf{W}_{0} \in \mathbb R^{c_{in}\times c_{out}}$, with $b$ representing the batch size, $c_{in}$ and $c_{out}$ representing the number of input and output channels, respectively, LoRA fixes the original weights $\mathbf{W}_{0}$ and introduces updates as follows:
+\begin{gather} \label{eq:lora}
+    \mathbf{Y}  = \mathbf{X}\mathbf{W}_{0} +\mathbf{X}\mathbf{B}\mathbf{A},
+\end{gather}
+where $\mathbf {B} \in\mathbb R^{c_{in}\times r}$ and $\mathbf {A} \in\mathbb R^{r \times c_{out}}$ are the learnable two low-rank matrices with $r \ll \mathrm{min}(c_{in}, c_{out})$.
+
+Nevertheless, this approach incurs limitations when both weights and activations are quantized, denoted by $\hat{\mathbf{W}_0}$ and $\hat{\mathbf{X}}$, respectively.
+In this case,
+the inner product between $\hat{\mathbf{W}_{0}}$ and $\hat{\mathbf{X}}$ can be efficiently implemented with bit-wise operations, whereas the operations involving $\mathbf{BA}$ and $\hat{\mathbf{X}}$ are computationally expensive during inference as $\mathbf{BA}$ is full-precision and has the same size as $\mathbf{W}_{0}$.
+To address this, we propose Quantization-aware Low-rank Adapter (QALoRA), where the LoRA weights are first merged with FP model weights and then jointly quantized to the target bit-width, as depicted in Figure~\ref{fig:mainfigure}b.
+Formally, the QALoRA is defined as follows:
+\begin{gather} \label{eq:qalora}
+    \mathbf{Y} = \mathcal{Q}_U (\mathbf{X}, s_x) \mathcal{Q}_U (\mathbf{W}_{0} + \mathbf{BA}, \mathbf{s}_w) =\hat{\mathbf{X}} \hat{\mathbf{W}},
+\end{gather}
+
+where $\mathbf{s}_w$ denotes the channel-wise quantization scale for weights and $s_x$ is the layer-wise quantization scale for activations. 
+After the fine-tuning process, only quantized updated model weights $\hat{\mathbf{W}}$ need to be saved. Notably, our approach can be readily integrated with QLoRA~\citep{dettmers2023qlora} by substituting $\mathbf{W}_0$ with $\hat{\mathbf{W}_0}$ to further reduce memory footprint.
+
+
+\noindent \textbf{Data-free fine-tuning for diffusion models.}
+Diffusion models require access to large and diverse datasets for effective training. 
+Obtaining such datasets can be challenging due to their sheer size, privacy concerns, or copyright restrictions. 
+To alleviate the dependency on the original dataset, 
+we propose a data-free fine-tuning approach that distills the denoising capabilities of a full-precision model into its quantized counterpart.
+Specifically, we input the same noise $\bx_t$ to both FP and quantized denoising models at denoising step $t$ and minimize the mean squared error (MSE) between their denoising results:
+\begin{align}
+    \mathcal{L}_t= \left \| \bmu_\theta(\bx_t, t) - \hat{\bmu}_\theta(\bx_t, t) \right \| ^{2},
+\end{align}
+where $\bmu_\theta(\bx_t, t)$ and $\hat{\bmu}_\theta(\bx_t, t)$ denote the denoising results of the FP and quantized models for the denoising step $t$, respectively. The input data $\bx_t$ is obtained by denoising random Gaussian noise $\bx_T \sim \mathcal{N}(0,1)$ with FP model iteratively for $T-t$ steps, as illustrated in Figure~\ref{fig:mainfigure}c.
+
+To facilitate the training of QALoRA, we further address the following technical challenges:
+
+\noindent \textbf{Variation of weight quantization scales across layers.}
+As demonstrated in Eq.~(\ref{eq:qalora}), due to the quantization process, the relationship between full-precision LoRA weights $\mathbf{BA}$ and 
+quantized updated weights $\hat{\mathbf{W}}$ follows a step function, where the step size is exactly equal to the quantization scale $\mathbf{s}_w$,
+and
+$\mathbf{W}_0$ serves as a fixed offset.
+This relationship is visually presented in Figure~\ref{fig:ba_delta}. 
+Consequently, while the full-precision LoRA weights are continuously optimized during the fine-tuning process, they need to be large enough to update the quantized model weights, otherwise they will be diminished by the $\mathrm{round}$ operation within the quantization process, as referred to Eq.~(\ref{eq:quant-dequant}) and (\ref{eq:qalora}).
+As shown in Figure~\ref{fig:layer_delta} and ``Scale-agnostic training" in Figure~\ref{fig:scale_aware}, fine-tuning the LoRA weights with limited iterations only yields effective updates for a few layers with relatively small scales. For other layers, their quantization scales are too substantial for LoRA weights to take effect due to the $\mathrm{round}$ operation.
+Alternative approaches, such as directly amplifying the learning rate, may impede the convergence process.
+
+
+To facilitate the optimization of LoRA weights, we consider the ratio of
+\begin{gather}
+    R = \frac{\nabla_\textbf{BA} \mathcal{L}} {\overline{\mathbf{s}_w}}
+\end{gather}
+should be roughly consistent in each layer, where $\overline{\mathbf{s}_w}$ represents the averaged weight quantization scale 
+across
+channels. 
+This can be achieved by simply multiplying the gradient of LoRA weights by this average weight quantization scale during the back-propagation phase.
+As shown in Figure~\ref{fig:scale_aware}, optimizing LoRA in the scale-aware approach enables effective training across the majority of layers.
+
+\begin{figure}
+    \centering
+    \begin{subfigure}{0.325\textwidth} %
+        \centering
+        \includegraphics[width=\textwidth]{figures/BA_What_crop.pdf}
+        \caption{}
+        \label{fig:ba_delta}
+    \end{subfigure}
+    \begin{subfigure}{0.318\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/layer_scale_crop.pdf}
+        \caption{}
+        \label{fig:layer_delta}
+    \end{subfigure}
+    \begin{subfigure}{0.32\textwidth}
+        \centering
+        \includegraphics[width=0.98\textwidth]{figures/scale_aware_training_crop.pdf}
+        \caption{}
+        \label{fig:scale_aware}
+    \end{subfigure}
+    \caption{The motivation and effect of scale-aware LoRA optimization. Data is collected from the 4-bit LDM-4 model. 
+    \textbf{(a):} Due to step-like relationship between $\mathbf{BA}$ and $\hat{\mathbf{W}}$, $\mathbf{BA}$ needs to be large enough to update model weights. Data is collected from the first channel in the $12^{th}$ layer.
+    \textbf{(b):} Significant disparity in weight quantization scales across layers. \textbf{(c):} Mean absolute value of quantized weight updates ($\hat{\mathbf{W}}$-$\hat{\mathbf{W}_0}$) for each layer. Most of them are zero under scale-agnostic training, indicating full-precision LoRA weights are too small to update quantized model weights. The proposed scale-aware LoRA optimization facilitates a more equitable distribution of quantized weight updates across layers. 
+    }
+    \label{fig:overall}
+\end{figure}
+
+\noindent \textbf{Variation of activation distribution across steps.
+This variability poses substantial challenges to the quantization of diffusion models. 
+Notably, existing methods proposed to address this issue aim to either find a set of quantization parameters applicable to all time steps~\citep{shang2022ptq4dm} or employ additional MLP module to estimate quantization parameters for each individual time step and layer~\citep{so2023temporal},
+which can be either suboptimal or cumbersome. 
+
+Inspired by LSQ~\citep{esser2019learned}, a technique where quantization scales are optimized alongside other trainable parameters through the gradient descent algorithm, we allocate temporal-aware quantization scales for activations and optimize them individually for each step, which we refer to as Temporal Activation LSQ (TALSQ):
+\begin{gather}
+    S_x = \left\{ s_x^0, s_x^1,\ldots, s_x^{T-1}\right\},
+\end{gather}
+where $T$ is the number of denoising steps for the fine-tuning.
+It is noteworthy that recent advancements in efficient samplers have significantly reduced the number of sampling steps.
+Therefore, TALSQ introduces only a few trainable parameters for a single layer, which is negligible even compared to LoRA weights (which generally have thousands of parameters per layer).
+After fine-tuning, we interpolate the learned temporal quantization scales to deal with the gap of sampling steps between fine-tuning and inference.
+
+
+\section{Experiments}
+
+
+
+\subsection{Implementation details}
+\noindent \textbf{Models and metrics.} To verify the effectiveness of the proposed method, we evaluate it with two widely adopted network structures: DDIM~\citep{songddim} and LDM~\citep{rombach2022ldm}. For experiments with DDIM, we evaluate it on CIFAR-10 dataset~\citep{krizhevsky2009learning}. Experiments with LDM are conducted on two standard benchmarks: ImageNet~\citep{deng2009imagenet} and LSUN~\citep{yu2015lsun}. The performance of diffusion models is evaluated with Inception Score (IS), Fréchet Inception Distance (FID)~\citep{heusel2017gans}. For experiments on ImageNet datasets, we also report  sFID~\citep{salimans2016improved} and Precision for reference. Results are obtained by sampling $50,000$ images and evaluating them with ADM’s TensorFlow evaluation suite~\citep{dhariwal2021diffusion}. The rank of the adapter is set to $32$ in our experiments. For the proposed EfficientDM framework, we fine-tune LoRA weights and quantization parameters for $16\mathrm{K}$ iterations with a batchsize of $4$ on LDM models and $64$ on DDIM models, respectively. The number of denoising steps for the fine-tuning is set to $100$. We employ Adam~\citep{kingma2014adam} optimizers with a learning rate of $5e^{-4}$.
+
+\noindent \textbf{Quantization settings.} The notion `W$x$A$y$' is employed to represent the bit-widths of weights `W' and activations `A'. We use channel-wise quantization for weights and layer-wise quantization for activations, as is a common practice. The input embedding and output layers in the model employ a fixed W8A8 quantization, whereas other convolutional and fully-connected layers are quantized to the target bit-width with a QALoRA module. 
+\subsection{Main Results}
+\subsubsection{Evaluation of Unconditional Generation}
+We begin our evaluation by performing unconditional generation on CIFAR-10 dataset and compare our results against well-established quantization methods, including both PTQ-based~\citep{shang2022ptq4dm, li2023q} and QAT-based~\citep{esser2019learned, so2023temporal} contenders. The results are presented in Table~\ref{tab:cifar}. Recent PTQ-based method~\citep{li2023q} performs well under W8A8 precision but exhibits performance degradation under W4A8 precision. Recent QAT-based method~\citep{so2023temporal} surpasses all PTQ-based approaches under W4A8 precision but necessitates access to the original training dataset and incurs a substantial $17.8\times$ increase in training time. In contrast, our proposed EfficientDM demonstrates superior performance even compared to previous QAT methods under both W8A8 and W4A8 precisions, while incurring significantly lower time costs. Notably, under W4A8 precision, we achieve an FID of $3.80$, outperforming QAT-based method TDQ~\citep{so2023temporal} by $0.33$.
+\begin{table}[h]
+\caption{Performance comparisons of quantized diffusion models on CIFAR-10 $32\times32$. Results are obtained by DDIM sampler with 100 steps.}
+\label{tab:cifar}
+\centering
+\scalebox{0.80}{
+\begin{tabular}{ccccccc}
+\hline
+Method      & \begin{tabular}[c]{@{}c@{}}Bit-width\\ (W/A)\end{tabular} & Training data & \begin{tabular}[c]{@{}c@{}}GPU Time\\ (hours)\end{tabular} & \begin{tabular}[c]{@{}c@{}}Model Size\\ (MB)\end{tabular} & IS$\uparrow$ & FID$\downarrow$ \\ \hline
+FP          & 32/32                                                     & 50K           & -         & 136.4                                                     & 9.12         & 4.14            \\ \hline
+PTQ4DM      & 8/8                                                       & 0             & 0.95      & 34.26                                                     & 9.31         & 14.18           \\
+Q-Diffusion & 8/8                                                       & 0             & 0.95      & 34.26                                                     & 9.48         & 3.75            \\
+LSQ         & 8/8                                                       & 50K           & 13.89     & 34.26                                                     & \textbf{9.62}         & 3.87            \\
+TDQ         & 8/8                                                       & 50K           & 16.99     & 34.30                                                     & 9.58         & 3.77            \\
+Ours        & 8/8                                                       & 0             & 0.97      & 34.30                                                     & 9.38         & \textbf{3.75}   \\ \hline
+PTQ4DM      & 4/8                                                       & 0             & 0.95      & 17.22                                                     & 9.31         & 10.12           \\
+Q-Diffusion & 4/8                                                       & 0             & 0.95      & 17.22                                                     & 9.12         & 4.93            \\
+LSQ         & 4/8                                                       & 50K           & 13.89     & 17.22                                                     & 9.38         & 4.53            \\
+TDQ         & 4/8                                                       & 50K           & 16.99     & 17.26                                                     & \textbf{9.59}         & 4.13            \\
+Ours        & 4/8                                                       & 0             & 0.97      & 17.26                                                     & 9.41         & \textbf{3.80}   \\ \hline
+\end{tabular}
+}
+\end{table}
+
+\subsubsection{Evaluation of Conditional Generation on ImageNet $256\times256$}
+We also evaluate the performance of our method over LDM-4 on large-scale ImageNet $256\times256$ dataset for class-conditional image generation, as presented in Table~\ref{tab:imgnetresult}. Experiments are conducted with three distinct samplers, including DDIM~\citep{songddim}, PLMS~\citep{liu2022pseudo} and DPM-Solver~\citep{lu2022dpmsolver}. Importantly, we offer a comprehensive evaluation based on four metrics (IS, FID, sFID, and Precision), %
+which should be collectively considered to ensure a robust assessment of image quality. In W8A8 quantization, recent PTQ-based methods~\citep{li2023q, he2023ptqd} exhibit performance levels with negligible degradation. However, when the bit-width drops to W4A8, performance degradation becomes evident for them. For instance, when employing the DDIM sampler, Q-Diffusion experiences a decline of $27.8$ in IS and a decrease of $2.6\%$ in precision. The introduction of EfficientDM yields a significant recovery in performance, with a merely $2.4$ IS decrease compared with FP method. As the bit-width decreased, the performance enhancements of EfficientDM became more pronounced. In the case of W4A4 quantization, none of the diffusion models quantized with PTQ-based methods is able to denoise images, regardless of the sampler used. In contrast, models quantized by our approach manage to maintain an exceptionally low FID of $6.17$ and a sFID of $7.75$ for the DDIM sampler, respectively. Leveraging the capabilities of EfficientDM, we push the quantization of diffusion model weights to 2-bit for the first time, resulting in a marginal increase of less than $1$ in the sFID metric when using the DDIM sampler.
+\begin{table}[h]
+\caption{Performance comparisons of fully-quantized LDM-4 models on ImageNet $256\times256$. `N/A' denotes failed image generation.}
+\label{tab:imgnetresult}
+\centering
+\scalebox{0.75}{
+\begin{tabular}{ccccccc}
+\hline
+Model-Sampler                                        & Method      & \begin{tabular}[c]{@{}c@{}}Bit-width\\ (W/A)\end{tabular} & IS$\uparrow$     & FID$\downarrow$   & sFID$\downarrow$ & \begin{tabular}[c]{@{}c@{}}Precision$\uparrow$\\ (\%)\end{tabular} \\ \hline
+\multirow{13}{*}{LDM-4 | DDIM (20 steps)}       & FP          & 32/32     & 364.73 & 11.28 & 7.70 & 93.66     \\ \cline{2-7} 
+                                             & Q-Diffusion & 8/8       & 350.93      & 10.60     & 9.29    & 92.46         \\
+                                             & PTQD         & 8/8       & 359.78      & \textbf{10.05}     & 9.01    & 93.00         \\
+                                             & Ours        & 8/8       & \textbf{362.34}      & 11.38     & \textbf{8.04}    & \textbf{93.77}         \\ \cline{2-7} 
+                                             & Q-Diffusion & 4/8       & 336.80      & 9.29     & 9.29    & 91.06         \\
+                                             & PTQD         & 4/8       & 344.72      & \textbf{8.74}     & 7.98    & 91.69         \\
+                                             & Ours        & 4/8       & \textbf{353.83}  & 9.93 & \textbf{7.34}    & \textbf{93.10}         \\ \cline{2-7} 
+                                             & Q-Diffusion & 4/4       & N/A      & N/A     & N/A    & N/A         \\
+                                             & PTQD         & 4/4       & N/A      & N/A     & N/A    & N/A         \\
+                                             & Ours        & 4/4       & \textbf{250.90}      & \textbf{6.17}     & \textbf{7.75}    & \textbf{86.02}         \\ \cline{2-7} 
+                                             & Q-Diffusion & 2/8       & 49.08      & 43.36     & 17.15    & 43.18         \\
+                                             & PTQD         & 2/8       & 53.36      & 39.37     & 15.14    & 45.89         \\
+                                             & Ours        & 2/8       & \textbf{175.03}      & \textbf{7.60}     & \textbf{8.12}    & \textbf{78.90}         \\ \hline
+\multirow{13}{*}{LDM-4 | PLMS (20 steps)}       & FP          & 32/32     & 379.19      & 11.71     & 6.08    & 94.22         \\ \cline{2-7} 
+                                             & Q-Diffusion & 8/8       & 373.49      & 11.25     & 5.75    & 93.84         \\
+                                             & PTQD         & 8/8       & 374.50      & \textbf{11.05}     & \textbf{5.45}    & 94.00         \\
+                                             & Ours        & 8/8       & \textbf{376.06}      & 11.78     & 6.21    & \textbf{94.27}         \\ \cline{2-7} 
+                                             & Q-Diffusion & 4/8       & 358.13      & 9.67     & 5.74    & 92.71         \\
+                                             & PTQD         & 4/8       & 357.66      & \textbf{9.24}     & 5.42    & 92.46         \\
+                                             & Ours        & 4/8       & \textbf{367.22}      & 10.26     & \textbf{5.11}    & \textbf{93.44}         \\ \cline{2-7} 
+                                             & Q-Diffusion & 4/4       & N/A      & N/A     & N/A    & N/A         \\
+                                             & PTQD         & 4/4       & N/A      & N/A     & N/A    & N/A         \\
+                                             & Ours        & 4/4       & \textbf{185.18}      & \textbf{10.95}     & \textbf{11.65}    & \textbf{75.61}         \\ \cline{2-7} 
+                                             & Q-Diffusion & 2/8       & 56.73      & 34.71     & 12.00    & 49.10         \\
+                                             & PTQD         & 2/8       & 58.08      & 31.87     & 10.32    & 50.73         \\
+                                             & Ours        & 2/8       & \textbf{182.63}  & \textbf{6.51} & \textbf{6.99} & \textbf{79.43}         \\ \hline
+\multirow{13}{*}{LDM-4 | DPM-Solver (20 steps)} & FP          & 32/32     & 373.12 & 11.44 & 6.85 & 93.67     \\ \cline{2-7} 
+                                             & Q-Diffusion & 8/8       & 365.64      & 10.78     & \textbf{6.15}    & 92.89         \\
+                                             & PTQD         & 8/8       & 368.04      & \textbf{10.55}     & 6.19    & 92.99    \\
+                                             & Ours        & 8/8       & \textbf{370.22}      & 11.21     & 6.83    & \textbf{93.50}         \\ \cline{2-7} 
+                                             & Q-Diffusion & 4/8       & 351.00      & 9.36     & \textbf{6.36}    & 91.50         \\
+                                             & PTQD         & 4/8       & 354.94      & \textbf{8.88}     & 6.73    & 92.03         \\
+                                             & Ours        & 4/8       & \textbf{359.16}      & 9.82     & 6.92    & \textbf{92.67}         \\ \cline{2-7} 
+                                             & Q-Diffusion & 4/4       & N/A      & N/A     & N/A    & N/A         \\
+                                             & PTQD         & 4/4       & N/A      & N/A     & N/A    & N/A         \\
+                                             & Ours        & 4/4       & \textbf{223.40}   & \textbf{7.54}     & \textbf{9.47}    & \textbf{80.06}         \\ \cline{2-7} 
+                                             & Q-Diffusion & 2/8       & 50.12      & 39.08     & 13.75    & 44.67         \\
+                                             & PTQD         & 2/8       & 51.51      & 38.32     & 12.90    & 46.48         \\
+                                             & Ours        & 2/8       & \textbf{165.76}      & \textbf{8.55}     & \textbf{9.71}    & \textbf{76.76}         \\ \hline
+\end{tabular}
+}
+\end{table}
+\subsection{Ablation Study}
+To assess the efficacy of each proposed component, we conduct a comprehensive ablation study on the ImageNet $256\times256$ dataset, employing the LDM-4 model with a DDIM sampler, as presented in Table~\ref{tab:ablation}. We initiate the evaluation with a baseline PTQD~\citep{he2023ptqd}, which is rooted in the reconstruction-based PTQ method~\citep{li2021brecq}. 
+However, 
+it failed to denoise images when operating under a W4A4 bit-width, yielding an exceedingly high FID score of $259.73$. This result underscores the inadequacy of the PTQ method in this particular low bit-width. In sharp contrast, our proposed efficient fine-tuning method QALoRA showcases significant performance improvement with a FID of $11.42$, %
+without imposing additional time costs. By incorporating scale-aware LoRA optimization, we achieve an FID reduction of $1.87$ and a sFID reduction of $10.95$, demonstrating that the LoRA weights are effectively trained to update the quantized weights. By further introducing TALSQ that learns quantization parameters for each denoising step, our method achieves a remarkable sFID of $7.75$, putting it in contention with even full-precision models.
+
+\begin{table}[htb]
+\small
+\caption{The effect of different components proposed in the paper. The experiment is conducted over LDM-4 model on ImageNet $256 \times 256$.}
+\label{tab:ablation}
+\centering
+\scalebox{0.80}
+{
+\begin{tabular}{ccccccc}
+\hline
+Method                    & \begin{tabular}[c]{@{}c@{}}Bit-width\\ (W/A)\end{tabular} & \begin{tabular}[c]{@{}c@{}}Time Costs\\ (GPU hours)\end{tabular} & IS$\uparrow$     & FID$\downarrow$   & sFID$\downarrow$ & \begin{tabular}[c]{@{}c@{}}Precision$\uparrow$\\ (\%)\end{tabular}     \\ \hline
+FP                        & 32/32                                                     & -                                                                & 364.73          & 11.28         & 7.71          & 93.66          \\ \hline
+PTQD               & 4/4                                                       & 2.88                                                             & 2.16            & 259.73        & 329.01        & 0.00           \\
+QALoRA                   & 4/4                                                       & 2.60                                                             & 156.15          & 11.42         & 24.18         & 78.36          \\
++scale-aware LoRA optimization & 4/4                                                       & 2.60                                                             & 172.96          & 9.55          & 13.23         & 81.87          \\
++TALSQ                     & 4/4                                                       & 3.05                                                    & \textbf{250.90} & \textbf{6.17} & \textbf{7.75} & \textbf{86.02} \\ \hline
+\end{tabular}}
+\end{table}
+
+Moreover, we conduct a comparative efficiency analysis of PTQ, QAT and our approach across data, GPU memory, and time consumption, as demonstrated in Table~\ref{tab:efficiency}. The PTQ method~\citep{he2023ptqd} emerges as the most efficient in terms of data, time and memory consumption. However, it cannot maintain denoising capabilities at W4A4 precision. 
+On the other hand, QAT method~\citep{park2022nipq}, despite achieving lower FID, necessitates the original training data and incurs a $2.2\times$ increase in memory resources (16950 MB vs. 7538 MB), and a $16.8\times$ increase in time consumption (18.5 GPU hours vs. 1.1 GPU hours) during the quantization of the LDM-8 model on the LSUN-Churches dataset.
+Comparatively, our proposed approach offers a compelling alternative. It operates without the need for training data and incurs less memory and time consumption compared to the QAT method. Specifically, when quantizing DDIM models on CIFAR-10 dataset, our method attains a FID \emph{that is comparable to that of the QAT method (10.48 vs. 7.30), while enjoying similar time efficiency to the PTQ method (0.97 GPU hours vs. 0.95 GPU hours)}, rendering it a practical choice for real-world applications.
+\begin{table}[htb]
+\small
+\caption{Efficiency comparisons of various quantization methods across training data, GPU memory and time. `OOM' denotes out-of-memory on RTX3090 GPU. We employ DDIM models for CIFAR-10 dataset and LDM models for other datasets. Both weights and activations of models are quantized to 4-bit.}
+\label{tab:efficiency}
+\centering
+\scalebox{0.80}
+{
+\begin{tabular}{cccccc}
+\hline
+Method                & Dataset                & Training data & \begin{tabular}[c]{@{}c@{}}GPU Memory\\ (MB)\end{tabular} & \begin{tabular}[c]{@{}c@{}}GPU Time\\ (hours)\end{tabular} & FID    \\ \hline
+\multirow{3}{*}{PTQ~\citep{he2023ptqd}}  & CIFAR-10               & 0             & 4334                                                      & 0.95                                                       & 181.05 \\
+                      & LSUN-Churches          & 0             & 7538                                                      & 1.10                                                       & 321.90 \\
+                      & ImageNet $256\times256$ & 0             & 11942                                                      & 2.88                                                       & 259.73 \\ \hline
+\multirow{3}{*}{QAT~\citep{esser2019learned}}  & CIFAR-10               & 50$\mathrm{K}$           & 9974                                                      & 13.89                                                      & 7.30  \\
+                      & LSUN-Churches          & 126$\mathrm{K}$          & 16950                                                     & 18.50                                                      & 9.08  \\
+                      & ImageNet $256\times256$ & 1.2$\mathrm{M}$          & OOM                                                       & -                                                          & -      \\ \hline
+\multirow{3}{*}{Ours} & CIFAR-10               & 0             & 9554                                                      & 0.97                                                       & 10.48  \\
+                      & LSUN-Churches          & 0             & 10980                                                     & 1.14                                                       & 14.34  \\
+                      & ImageNet $256\times256$ & 0             & 19842                                                     & 3.05                                                       & 6.17   \\ \hline
+\end{tabular}}
+\end{table}
+
+
+\section{Conclusion}
+
+In this paper, we have proposed EfficientDM, an efficient data-free fine-tuning framework for low-bit diffusion models. To commence, we have introduced a quantization-aware variant of low-rank adapters, which can be jointly quantized with model weights, enabling both efficient fine-tuning and low-bit inference. 
+To mitigate the reliance on original datasets, we have employed a distilling framework that transfers the noise estimation capabilities of a full-precision model to its quantized counterpart. To address ineffective learning arising from variations in weight quantization parameters across layers, we have introduced scale-aware LoRA optimization, which adaptively adjusts %
+the gradient scales of LoRA weights in different layers.
+Moreover, we have introduced TALSQ to address the activation distribution variations 
+across
+steps. Our extensive experiments have demonstrated the superiority of EfficientDM over previous post-training quantized diffusion models. Notably, even when quantizing both weights and activations of LDM-4 to 4-bit on ImageNet $256\times256$, where previous methods failed to denoise, EfficientDM exhibited only a marginal $0.05$ increase in sFID.
+Moreover, our method has demonstrated superior efficiency compared to QAT-based approaches with 
+minor
+performance gap, 
+making it a practical choice for real-world applications.
+
+
+\noindent \textbf{Limitations and future work.} While EfficientDM can attain QAT-level performance using PTQ-level data and time efficiency, it employs a gradient descent algorithm for optimizing QALoRA parameters. Compared to PTQ-based methods, this places higher demands on GPU memory, particularly with diffusion models featuring massive parameters. To address this, memory-efficient optimization methods can be integrated. Moreover, efficient diffusion models for tasks such as video or 3D generation are still under explored.
+
+\noindent \textbf{Acknowledgement}
+This work was supported by National Key Research and Development Program of China (2022YFC3602601).
+
+
+
+
+
+

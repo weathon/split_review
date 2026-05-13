@@ -1,0 +1,347 @@
+\title{Two Sparse Matrices are Better than One: Sparsifying Neural Networks with Double Sparse Factorization}
+
+\begin{abstract}
+Neural networks are often challenging to work with due to their large size and complexity. To address this, various methods aim to reduce model size by sparsifying or decomposing weight matrices, such as magnitude pruning and low-rank or block-diagonal factorization. In this work, we present {\bf Double Sparse Factorization (DSF)}, where we factorize each weight matrix into two sparse matrices. Although solving this problem exactly is computationally infeasible, we propose an efficient heuristic based on alternating minimization via ADMM that achieves state-of-the-art results, enabling unprecedented sparsification of neural networks. For instance, in a one-shot pruning setting, our method can reduce the size of the LLaMA2-13B model by 50\% while maintaining better performance than the dense LLaMA2-7B model. We also compare favorably with Optimal Brain Compression, the state-of-the-art layer-wise pruning approach for convolutional neural networks. Furthermore, accuracy improvements of our method persist even after further model fine-tuning.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Sparse neural networks have gained attention due to their potential to reduce computational costs and memory usage, making them more efficient for deployment on resource-constrained devices  \citep{prune1,prune2,hoefler2021sparsity}. By reducing the number of non-zero parameters, sparse networks can achieve accuracy similar to dense networks while requiring fewer operations. Reducing network size decreases the number of weights that must be loaded into the processing unit from memory, which is crucial since memory bandwidth often becomes a bottleneck in neural network deployments, particularly during single-sample LLM inference \citep{flashllm}. 
+
+In this work, we propose an improvement over a typical neural network sparsification. Instead of replacing each dense weight matrix with a sparse matrix, we replace each dense matrix with a product of two sparse matrices. This was proposed before \citep{giffon2021psm} but without practical success. We provide a much better heuristic for calculating sparse matrix factorization and achieve significant improvements over a wide range of models, including large language models and convolutional neural networks. 
+
+\begin{figure}[h]
+\begin{center}
+\includegraphics[width=0.8\linewidth]{llama.pdf}
+\end{center}
+\caption{\label{fig:llamap} Comparison of LLaMA2 models pruned either using our Double Sparse Factorization (DSF) or using previously state-of-the-art ADMM pruning. We prune models using 0, 50, and 60\% sparsities.}
+\end{figure}
+
+{\bf Contributions.} We propose a practical algorithm for factorizing a matrix into two sparse matrices called {\bf Double sparse factorization (DSF)}. We extend it for the layer-wise pruning scenario where one wants to preserve layer behavior for a given set of calibration inputs. Our sparse factorization algorithm is a heuristic based on alternating minimization where each subproblem is solved using the ADMM algorithm for solving a sparse regression problem \citep{boza2024fast}.
+
+Our algorithm obtains superior results in the layer-wise pruning scenarios, where we fix the number of non-zero entries in each layer. We compare favorably to Optimal Brain Compression \citep{OBC} for pruning convolutional image models.
+We also produce state-of-the-art layer-wise pruning results for large language models. Moreover, our method is the first layer-wise pruning method in which the larger pruned model is better than the dense smaller model.
+
+One could argue that our method requires storing one more pruning mask. We thus evaluate a scenario where one of the sparse factors mask (weights can be tuned, but nonzeros location is fixed) is randomly generated and fixed over the whole neural network. Our approach is better even in this scenario, which has almost the exact storage requirements as regular pruning.
+We also note that when one stores nonzero positions as explicit indices (not sparsity masks), the actual memory requirements only depend on a total number of non-zeros, so there is no increase in memory consumption for double sparsity.
+
+Finally, we also show that our factorized pruning brings benefits even when sparsified models are further fine-tuned after pruning and achieve competitive results for pruning convolutional networks on CIFAR and ImageNet datasets.
+
+
+
+\section{Related work}
+
+
+{\bf Neural network weight pruning and layer-wise one-shot pruning.} Post-training network pruning compresses the already training network by removing redundant weights \citep{prune1,prune2,prunef1,prunef2,hoefler2021sparsity,cyclical}. 
+
+Some approaches focus on splitting the network into individual layer-wise problems, where one wants to preserve layer behavior over a small set of calibration inputs. Optimal Brain Compression (OBC) \citep{OBC} removes one weight at a time and optimally updates the remaining weights in the layer. However, this approach is not feasible for large language models due to high computational cost. SparseGPT \citep{sparsegpt} uses various approximations and turns OBC into a more practical algorithm at the expense of higher approximation error. Wanda \citep{wanda} proposes to skip the weight update and prune weights based on the product of absolute magnitude and input norm. Finally, \citet{boza2024fast} obtains state-of-the-art layer-wise pruning results using an ADMM-based algorithm, which uses gradual pruning combined with Wanda mask selection and ADMM \citep{admm} weight update. 
+
+{\bf Compression based on matrix factorization.} Instead of turning weight matrices into sparse matrices, one can replace them with a product of multiple smaller matrices. A typical example is a low-rank factorization \citep{svd1,svd2} where one turns an $n \times m$ matrix into a product of $n \times k$ and $k \times m$ matrices, where $k << \min(n,m)$. More complicated examples include butterfly matrices \citep{butterfly} and Monarch matrices \citep{dao2022monarch}, where individual factors have some specific structure. Monarch matrices are the product of block-diagonal, permutation, and another block-diagonal matrix. The projection of a matrix into a set of monarch matrices is done by splitting the original matrix into blocks and then running a low-rank decomposition of each block. Another option is to decompose the matrix as a sum of low-rank and sparse matrix \citep{rosa,lrps1,ke2005robust,wright2009robust}.
+
+{\bf Separable convolutions.} Convolutional layer can be naturally factorized into depthwise (applying filter per input channels) and pointwise convolution (mixing multiple channels). The idea was found initially in MobileNets \citep{howard2017mobilenets,sandler2018mobilenetv2}, but they placed nonlinearity between the depthwise and pointwise convolutions. However, some works successfully use separable convolutions without nonlinearity between them \citep{edgenano,quartz}. 
+
+{\bf Sparse matrix factorization.} Factorization of the matrix into (sometimes more than two) sparse factors has already been studied. 
+It was shown that this problem is NP-hard even when the sparsity pattern for factors is given \citep{le2021spurious}.
+\citet{le2016flexible} provides a heuristic based on the proximal gradient step called palm4msa, which is then used by \citet{giffon2021psm} for compression of neural networks, but with very limited practical success. In the experiments section, we compare the quality of our factorization algorithm with palm4msa.
+
+
+
+\section{Preliminaries}
+
+
+In this work, we work with the post-training neural network sparsification scenario.
+We are given an already-trained network, and we will replace each weight matrix with a matrix that can be represented more efficiently, such as a sparse \citep{hoefler2021sparsity} or Monarch matrix \citep{dao2022monarch}. Usually, the replacement is done by solving the {\bf projection} problem, where we are looking for a matrix closest (typically using the Frobenius norm) to the original one. For example, when the target matrix is sparse, solving the projection problem is just the magnitude pruning \citep{prune2}. 
+
+In many cases, the sparsified network is often fine-tuned further. This can be prohibitive in some applications, especially involving large language models. We often resort to {\bf one-shot} pruning in such cases. We capture relevant statistics for each layer and prune them during one forward pass. This is usually done by solving {\bf layer-wise pruning} problem \citep{OBC,sparsegpt,boza2024fast}, where given calibration input $X$, original matrix $W$, one looks for sparse matrix $W_p$, such that the layer-wise error $||XW - XW_p||_2^2$ is minimized. 
+
+\subsection{Layer-wise pruning via ADMM}
+
+\citet{boza2024fast} solves the layer-wise pruning problem by application of the alternating direction method of multipliers \citep{admm} (ADMM). It provides a method for finding pruned weights given a pruning mask and also a heuristic for finding the pruning mask. First, given $X$, $W$, and pruning mask $M$, we are looking for $W_p$ such that $(1 - M) \odot W_p = 0$ and layer-wise error is minimized. This is done via $m$ ADMM iterations ($\rho$ is penalty factor, $U$ represents scaled dual variables):
+
+\begin{equation}
+\begin{aligned}   
+\widehat{W}^{(k+1)} &= (X^TX + \rho I )^{-1} (X^TXW + \rho(Z^{(k)}-U^{(k)}) \\
+Z^{(k+1)} &= M \odot (\widehat{W}^{(k+1)} + U^{(k)}) \\
+U^{(k+1)} &= U^k + \widehat{W}^{(k+1)} - Z^{(k+1)} \\
+\end{aligned}
+\label{eq:admmmask}
+\end{equation}
+
+We will take final $W_p = Z^{(m)}$ as the output. 
+Pruning mask $M$ is found during the optimization process. First, the problem is preconditioned, so the diagonal of $X^TX$ contains ones. Then, the sparsity matrix $M$ is found using gradual pruning with the cubic schedule. 
+ 
+
+
+\section{Double Sparse Factorization}
+
+
+In typical neural network pruning, we replace weight matrix $W$ with matrix $W_p$ which has at most $z$ nonzeros, i.e. 
+$|| W_p ||_0 \leq z$. 
+Here, we propose to replace weight matrix $W$ with shape $n \times m$ with a product of two sparse matrices $AB$ such that they have at most $z$ nonzeros in total, i.e. $|| A ||_0 + || B ||_0 \leq z$.
+We call this a {\bf double sparse factorization}.
+Usually, we assume that $A$ is a matrix with shape $n \times n$, $B$ is a matrix with shape $n \times m$, and $n \leq m$; if not, we transpose the matrix $W$.
+\subsection{Expressiveness and efficiency of double sparse factorization}
+
+\begin{figure}[h]
+\begin{center}
+\includegraphics[width=0.8\linewidth]{nnpic.pdf}
+\end{center}
+\caption{\label{fig:spxsp} Graphical illustration of double sparse factorization. A dense layer is turned into two sparse layers. With enough weights in sparse matrices, most connections will be covered by a path through sparse matrices.}
+\end{figure}
+Many matrix factorizations mentioned previously in the literature can be (often trivially) rewritten to double sparse representation with the same number of non-zeros.
+For example, low-rank factorization commonly done via SVD \citep{svd1, svd3} is already in the double sparse form.
+Monarch factorization \citep{dao2022monarch}, which is a product of block-diagonal, permutation, and block-diagonal matrices, can represented in double sparse form by fusing a permutation matrix with one of the block-diagonal matrices. 
+Also, double sparse factorization can efficiently represent a matrix that consists of multiple disjoint low-rank submatrices.
+
+The tricky case is an ordinary sparse matrix $W_p$. It can be represented in double sparse form as a product of identity and the original matrix: $IW_p$. However, this comes with the cost of additional non-zero entries for the identity matrix. 
+However, in the experiments, we will show that the double sparse representation represents the original dense matrix much better than an ordinary sparse matrix with the same number of non-zeros. 
+
+\subsection{Heuristic algorithm for obtaining double sparse factorization}
+
+First, we look into the {\bf projection} problem. Given matrix $W$, we want to replace it with some compressed matrix $W_c$, where their difference $||W_c - W||_F$ is minimized. 
+
+In our case, $W_c$ is a product of two sparse matrices $A, B$.
+Thus, we are given matrix $W$ and are looking for matrices $A, B$ such that:
+
+\begin{equation}
+\nonumber
+\begin{aligned}   
+\text{minimize~~} & ||AB - W||_F \\
+\text{subject to~~} & ||A||_0 + ||B||_0 \leq z
+\end{aligned}
+\end{equation}
+
+This problem is NP-hard even when the sparsity pattern for matrices $A$ and $B$ is given \citep{le2021spurious} thus we solve our problem heuristically.
+
+First, we decide how many nonzeros we allocate for each matrix, so our condition changes to $||A||_0 \leq z_a, ||B||_0 \leq z_b$.
+These allocations were determined manually in our experiments. In general, we found that it is beneficial to give one of the matrices approximately 1/3 of the nonzeros and 2/3 to the other one.
+Then, we continue with an alternating minimization algorithm. We fix the value of $A$ and find the best possible $B$, then fix the value of $B$ and try to find the best possible value of $A$. We repeat this process multiple times.
+
+One inner step of our algorithm can formalized as: Given $W, B$, find $A$ such that:
+\begin{equation}
+\nonumber
+\begin{aligned}   
+\text{minimize~~} & ||AB - W||_F \\
+\text{subject to~~} & ||A||_0 \leq z_a
+\end{aligned}
+\end{equation}
+
+This problem is just an $L_0$ constrained linear regression. We solve it using an iterative ADMM solver \citet{boza2024fast} mentioned in preliminaries, which heuristically finds matrix mask and corresponding values. We also apply the following heuristic\footnote{some people call this a dark magic} improvements.
+
+\begin{algorithm}[th!]
+   \caption{Heuristical sparse matrix factorization for solving projection problem. Given matrix $W$, number of outer iterations $n$, number of inner iterations $m$ and number of nonzero elements $z_a, z_b$ we find $A, B$ such that $||A||_0 \leq z_a$, $||B||_0 \leq z_b$ and $AB$ is as close as possible to $W$.}
+   \label{alg:spxsp}
+
+\begin{algorithmic}
+
+\STATE Initialize $A^{(0)}, B^{(0)}$
+\STATE $U_a^{(0)} = 0 \cdot A, U_b^{(0)} = 0 \cdot B$
+\FOR {$k = 1..n$}
+  \STATE $\rho_0 = \min(1.0, k / (n-3))^3$
+  \STATE $B^{(k)}, U_b^{(k)} \leftarrow $ solve $\argmin ||AB - W||_F$, st. $||B||_0 \leq z_b$ via $m$ iterations of ADMM \\
+  ~~~~~~~~~~~~~~~~~~~~~~~with starting point $B^{k-1}, U_b^{(k-1)}$ and starting $\rho_0$
+  \STATE $A^{(k)}, U_a^{(k)} \leftarrow $ solve $\argmin ||AB - W||_F$, st. $||A||_0 \leq z_a$ via $m$ iterations of ADMM \\
+  ~~~~~~~~~~~~~~~~~~~~~~~with starting point $A^{k-1}, U_a^{(k-1)}$ and starting $\rho_0$
+\ENDFOR
+\end{algorithmic}
+
+\end{algorithm}
+
+{\bf Warm starting the inner iterations.} To improve the convergence of ADMM iteration, we can warm-start it using the result from the previous step. To do that, we use not only the resulting sparse matrix but also all the dual variables $U$ from the ADMM algorithm. This allows us to decrease the number of inner iterations and speed up our algorithm.  
+
+{\bf Annealing.} We found that our algorithm is often quickly stuck in some local optima. To prevent that, we propose a simple annealing scheme. 
+The first step of ADMM for finding B is $\widehat{W}_b = (A^TA + \rho I)^{-1} (A^TW + \rho(B^{(k-1)}-U_b^{(k-1)}))$. Instead of using $\rho$ in the first iteration, we use smaller $\rho_0$ (we use default $\rho = 1$ in the remaining steps of ADMM). 
+This gives lower weight to the previous solution and allows us to escape from local minima at the first steps of the optimization.
+We gradually increase $\rho_0$ from 0 to 1 throughout the optimization; we found that a simple cubic schedule works best. 
+We also found that using more outer iterations ($n$) and fewer inner iterations ($m$) leads to better results. 
+
+{\bf Initialization.} To run our algorithm, we must assign an appropriate value to matrices $A$ and $B$. We tested several choices, including random initialization and singular value decomposition, but we settled on initializing $A$ as an identity matrix and $B$ with magnitude pruning of the original input matrix. 
+
+\subsection{Application of sparse factorization to layer-wise pruning}
+
+Next, we look into {\bf layer-wise pruning problem}. 
+In our case of the sparse factorization, we are given calibration input $X$, original weight matrix $W$ and are looking for sparse $A,B$ such that the reconstruction error $|| XW - XAB ||_2^2$ is minimized.
+
+We solve this problem by first running the weight projection algorithm from the previous section. 
+However, for the pruning of LLMs, we found that it is better to project the weight matrix multiplied by input feature norms. This was previously done in Wanda pruning algorithm \citep{wanda}. We then scale one of the factors back. We do not do this rescaling for vision models.
+
+We then process with the {\bf finalization} step. We then fix all sparsity masks and apply the ADMM algorithm for finding $B$ so that $||XW - XAB||_2^2$ is minimized. This is a straightforward modification of the ADMM algorithm.
+
+However, finding $A$ is tricky and sometimes numerically unstable.
+In the inner iteration of ADMM, we need to find $A$ such that ($Z, U$ are other variables from ADMM optimization):
+$||XW - XAB||_2^2 + \rho/2||A - Z + U||_2^2$ is minimized. After taking gradients, we solve the equation: $X^TXABB^T + \rho A = X^TXWB^T + \rho(Z - U)$. This is a special type of Sylvester equation \cite{roth1952equations,jiang2003solutions}, which can be solved using the eigendecomposition of $X^TX$ and $BB^T$.
+ We found that optimizing $A$ is only helpful for compressing vision models; we do not use it when compressing large language models.
+
+
+\section{Experiments}
+
+
+We evaluate our proposed Double Sparse Factorization in multiple settings.
+First, we test it on layer-wise pruning of large language models. We compare our algorithms to ADMM pruning \citep{boza2024fast}, which produces high-quality solutions in a reasonable time, even for large-scale models.
+Then we test it also on layer-wise pruning of vision models and compare it with Optimal Brain Compression \citep{OBC}, state of the art layer-wise pruning algorithm.
+
+We then proceed with the evaluation of the quality of our algorithm on the matrix projection problem. We compare with various matrix compression algorithms, including palm4msa \citep{le2016flexible}, Monarch decomposition \citep{dao2022monarch}, and SVD.
+Finally, we also test whether models compressed with DSF can be successfully fine-tuned. 
+\subsection{Layer-wise pruning of large language models}
+
+\begin{table}
+\caption{Perplexity on Wikitext-2 for layer-wise pruning of large language models. Density refers to the total \% of nonzero weights compared to the dense model.}
+\label{tab:llm}
+\begin{center}
+\begin{tabular}{clcccc}
+
+Density & Method & 1-7B & 2-7B & 2-13B & 2-70B \\\hline
+100\% & Dense  & 5.68& 5.12 & 4.57 & 3.12 \\\hline
+& Wanda  & 7.26 & 6.42 & 5.56 & 3.98 \\
+& ADMM   & 7.06 & 6.33 & 5.52 & 3.95 \\
+\rowcolor[HTML]{eeeeee}\cellcolor{white} 50\% &DSF  & {\bf 6.12} & {\bf 5.58} & {\bf 4.87} & {\bf 3.44}\\
+\rowcolor[HTML]{f5f5f5}\cellcolor{white} &DSF no fin. & 6.17 & 5.61 & 4.89 & 3.45\\
+\rowcolor[HTML]{f5f5f5}\cellcolor{white} &DSF one mask fix & 6.57 & 6.05 & 5.31 & 3.67 \\\hline
+
+& Wanda  & 10.66 & 9.71 & 7.75 & 4.98 \\
+& ADMM   & 9.22 & 8.70 & 7.09 & 4.81 \\
+\rowcolor[HTML]{eeeeee}\cellcolor{white} 40\% &DSF & {\bf 6.66} & {\bf 6.12} & {\bf 5.22} & {\bf 3.79}\\
+\rowcolor[HTML]{f5f5f5}\cellcolor{white} &DSF no fin. & 6.76 & 6.29 & 5.32 & 3.81\\
+\rowcolor[HTML]{f5f5f5}\cellcolor{white} &DSF one mask fix & 7.82 & 7.47 & 6.21 & 4.27 \\\hline
+
+\multirow{4}{*}{30\%} & ADMM   &  18.66 & 17.51 & 13.82 & 7.80 \\
+&\cellcolor[HTML]{eeeeee}DSF & \cellcolor[HTML]{eeeeee}{\bf 8.33} & \cellcolor[HTML]{eeeeee}{\bf 8.01} & \cellcolor[HTML]{eeeeee}{\bf 6.43} & \cellcolor[HTML]{eeeeee}{\bf 4.56}\\
+&\cellcolor[HTML]{f5f5f5}DSF no fin. & \cellcolor[HTML]{f5f5f5}9.13 & \cellcolor[HTML]{f5f5f5}10.82 & \cellcolor[HTML]{f5f5f5}7.5 & \cellcolor[HTML]{f5f5f5}4.59\\
+\rowcolor[HTML]{f5f5f5}\cellcolor{white} & DSF one mask fix & 15.07 & 16.49 & 10.87 & 5.99 \\
+
+\end{tabular}
+\end{center}
+\end{table}
+
+{\bf Setup.} We follow same setup as in Wanda \citep{wanda} and ADMM pruning \citep{boza2024fast}.
+We use 128 calibration samples from the C4 training dataset \citep{c4} and prune layers sequentially in order.
+We prune LLaMA \citep{llama} and LLaMA-2 \citep{llama2} models. Similarly to previous works, we measure perplexity on held-out Wikitext \citep{wikitext}. When factorizing square matrices (mainly in self-attention), we set the sparsity of one sparse factor to $16\%$. When factorizing rectangular matrices, the smaller factor will have $25\%$ sparsity. The number of nonzeros in the other factor is just the target number of nonzeros minus the number of nonzeros in the first factor.
+
+{\bf Compared methods.} We compare our Double Sparse Factorization (DFS) in three settings. The first one is the default one, solving the layer-wise pruning problem. Then, we disable the finalization step; thus, we only approximate the original dense matrix scaled by the input feature norms and solve the matrix projection problem. Finally, we fix one of the sparse masks to a random mask shared across all layers (but we run the finalization step). 
+We compare our method with two layer-wise pruning algorithms: Wanda \citep{wanda}, which prunes weights with the smallest product of value and activation norm, and ADMM pruning \citep{boza2024fast}, which also updates weights during the pruning using alternating direction method of multipliers.
+
+{\bf Results}. Results are summarized in Tab. \ref{tab:llm} and Fig. \ref{fig:llamap}. 
+Our Double Sparse Factorization is superior to previous layer-wise pruning methods. To our knowledge, this is the first time when a layer-wise pruned network has better perplexity than its dense counterpart (compare 50\% pruned LLaMA2-13B with perplexity 4.87 to dense LLaMA2-7B with perplexity 5.12). 
+Even when we fix one mask (and thus make the total size of the network the same as in regular pruning), our factorization produces favorable results. We also notice that in the lower sparsities, the finalization step is not that important but becomes noticeably important at higher sparsities. 
+
+{\bf Pruning speed.} We can prune the 7B models in apx. 30 minutes on one Nvidia 4090 GPU (this includes both forward pass and sparse factorization times). Note that reported total running times for ADMM pruning and SparseGPT are around 10-15 minutes \citep{boza2024fast}.
+
+\subsection{Comparison with Optimal Brain Compression}
+
+Optimal Brain Compression \citep{OBC} is a post-training layer-wise pruning algorithm, which prunes each network layer by removing one connection at a time and optimally updating the remaining weights. Compared to the ADMM update algorithm mentioned in the previous section, it is much more accurate, but at the expense of much longer running time, unsuitable for large language models. However, OBC is still usable for moderately sized vision neural networks like ResNet50 \citep{resnet}. 
+
+In this experiment, we evaluate the effectiveness of our Double Sparse Factorization of ResNet50 on Imagenet \citep{imagenet} dataset.
+We first run the OBC pipeline to determine layer-wise pruning ratios. Using the same calibration dataset as OBC,
+we then factorize every convolutional layer into two sparse matrices with the same number of nonzero weights as the OBC solution. We treat convolutions as linear layers, where input is processed via the im2col procedure. 
+The sparsity of the smaller factor is set to $max(0.16, s/2)$ where $s$ is sparsity from OBC. The bigger factor will get the remaining nonzeros (so the total nonzeros of sparse factors match the number of nonzeros used by OBC).
+Results are summarized in Tab. \ref{tab:obc}. We see that our solution is superior to the solution found by OBC for every sparsity setting, and the gap grows wider with larger sparsities. 
+
+\begin{table}
+\caption{Comparision of our Double Sparse pruning vs. Optimal Brain Compression on Resnet50 using Imagenet dataset.}
+\label{tab:obc}
+\begin{center}
+\begin{tabular}{cccc}
+Number of nonzeros & FLOP reduction & Method & Test accuracy [\%] \\\hline
+25.5M         & - & Dense & 76.13 \\\hline
+\multirow{2}{*}{16.8M}           & \multirow{2}{*}{2x} & OBC & 75.65 \\
+& & DSF & {\bf 75.78} \\\hline
+\multirow{2}{*}{12.3M}           & \multirow{2}{*}{3x} & OBC & 75.01 \\
+& & DSF & {\bf 75.56}  \\\hline
+\multirow{2}{*}{10.2M}  & \multirow{2}{*}{4x} & OBC & 74.05 \\
+& & DSF & {\bf 74.95} \\
+
+\end{tabular}
+\end{center}
+\end{table}
+
+\subsection{Comparison with other matrix approximation methods}
+
+\begin{figure}
+\begin{center}
+\includegraphics[width=0.8\linewidth]{recon.pdf}
+\end{center}
+\caption{\label{fig:recon} Reconstruction error of various compression methods on various matrix sizes for weight projection problem. We compress each matrix to 25\% of the original size. We normalize error by error of magnitude pruning. The mean is denoted by a large dot and individual results with smaller dots.}
+\end{figure}
+
+Now, we evaluate multiple methods for the weight projection problem. We use weight matrices from Llama-7B and Resnet-50. We truncate them to square matrices with sizes 64, 256, 1024, or 4096 (to accommodate Monarch factorization without problems). 
+We evaluate our Double Sparse Factorization (DSF), palm4msa from Faust library \citep{le2016flexible}, which also factories matrix into two sparse matrices, magnitude pruning, which keeps values with the largest magnitude, singular value decomposition, which factorizes matrix into two low-rank matrices, and Monarch decomposition \citep{dao2022monarch}, which factorizes matrix into block-diagonal, permutation and block-diagonal matrix.
+In all cases, we aim for 4x compression, i.e., each method can produce matrices that contain at most 25\% of non-zeros in total compared to the original matrix. 
+
+Results are summarized in Fig. \ref{fig:recon}. We see that our DSF consistently outperforms other methods. Interestingly, palm4mse is not better for small matrix sizes than magnitude pruning. Also, Monarch decomposition seems to be worse than ordinary SVD. 
+
+\subsection{Fine-tuning models pruned with double sparse factorization}
+
+\begin{table}
+\caption{Test accuracy on CIFAR-10 using Resnet-20 with varying width. Density refers to the total \% of nonzero weights compared to the dense model. FT refers to fine-tuning.}
+\label{tab:cifar-10}
+\begin{center}
+\begin{tabular}{cccc}
+
+Density & Method & Resnet-20-16 & Resnet-20-32 \\\hline
+100\% & Dense  & $92.2 \pm 0.2$ & $94.0 \pm 0.1$ \\\hline
+
+\multirow{4}{*}{20\%} & Magnitude w/o FT & $70.6 \pm 0.5$ & $86.2 \pm 0.3$  \\
+&Double sparse w/o FT& $80.0 \pm 0.9$ & $91.6 \pm 0.1$  \\
+&Magnitude w/ FT & $90.7 \pm 0.3$ & $93.2 \pm 0.1$  \\
+&Double sparse w/ FT & ${\bf 91.1 \pm 0.1}$ & ${\bf 93.5 \pm 0.1}$  \\\hline
+
+\multirow{4}{*}{10\%} & Magnitude w/o FT & $29.0 \pm 2.9$ & $51.1 \pm 5.2$  \\
+&Double sparse w/o FT & $48.9 \pm 2.9$ & $84.1 \pm 0.5$  \\
+&Magnitude w/ FT & $88.4 \pm 0.3$ & $92.1 \pm 0.2$  \\
+&Double sparse w/ FT & ${\bf 89.3 \pm 0.3}$ & ${\bf 92.5 \pm 0.1}$  \\
+
+\end{tabular}
+\end{center}
+\end{table}
+
+\begin{table}
+\caption{Test accuracy on Imagenet using Resnet-50. Density refers to the total \% of nonzero weights compared to the dense model. FT refers to fine-tuning.}
+\label{tab:imagenetft}
+\begin{center}
+\begin{tabular}{ccc}
+Density & Method & Test accuracy [\%]\\\hline
+100\% & Dense  & $76.13$ \\\hline
+
+\multirow{4}{*}{20\%} & Magnitude w/o FT &  $54.43$  \\
+&Double sparse w/o FT & $71.85$  \\
+&Magnitude w/ FT & $75.43$  \\
+& Cyclical pruning & $75.3$ \\
+& Double sparse w/ FT & ${\bf 75.78}$  \\\hline
+
+\multirow{4}{*}{10\%} & FT &  $9.87$  \\
+& Double sparse w/o FT & $55.76$  \\
+& Magnitude w/ FT & $73.32$  \\
+& Cyclical pruning & $73.3$ \\
+& Double sparse w/ FT & ${\bf 74.50}$  \\\hline
+
+\end{tabular}
+\end{center}
+\end{table}
+
+Finally, we test whether the double sparse advantage remains after fine-tuning a whole model. 
+In this experiment, we only focus on the original matrix projection and do not perform any input-dependent finalization.
+We test the pruning of Resnet-20 \citep{resnet} with varying starting widths (16 and 32) on the CIFAR-10 \citep{cifar} dataset. We also test using Resnet-50 using Imagenet dataset \citep{imagenet}. In all experiments, we use the same sparsity in all layers. 
+For CIFAR-10 experiments, we first train the dense network using the procedure from \citet{randomsparse}. We train for 160 epochs using SGD with a starting learning rate of 0.1 and 0.9 momentum. We decay the learning rate by 10 on epochs 80 and 120.
+We then prune each layer (except the first and last one) to 10 or 20\% of nonzeros using either magnitude pruning or our double sparse factorization method (on the weight projection problem). Then, we fine-tune the model for 50 epochs, starting with a learning rate of 0.01, which decays to 0.001 after 20 epochs. We run each setting 5 times using different seed. Results are shown in Tab \ref{tab:cifar-10}.
+
+For the Imagenet experiment, we start with the pre-trained Resnet-50 from Torchvision \citep{torchvision2016}.
+We then uniformly sparsify every layer except the first and last one and fine-tune using SGD, with a linear learning rate decay from 0.01 to zero and momentum of 0.9. 
+We also compare with results reported by \citet{cyclical}, which prunes the neural network in multiple cycles with resets (Cyclical pruning). Results are shown in Tab \ref{tab:imagenetft}.
+
+In all cases, starting test accuracy is higher for double sparse pruning and stays better when finetuned. This is especially evident at higher sparsities.
+
+
+
+\section{Conclusion}
+
+
+In this work, we introduced Double Sparse Factorization (DSF), an approach to decompose weight matrices into two sparse matrices, enabling more efficient neural networks. By applying DSF, we significantly improved layer-wise pruning for both large language models (LLMs) and convolutional neural networks (CNNs). The method effectively reduced the number of parameters without sacrificing model accuracy, achieving state-of-the-art results compared to traditional pruning techniques. Furthermore, our approach kept its performance gains even after further fine-tuning. 
+Our work is also one of the first to show that a sparse neural network can achieve more gains by employing a more complicated technique than just removing weights.
+
+
+
+
+

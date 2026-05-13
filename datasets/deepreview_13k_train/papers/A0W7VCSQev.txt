@@ -1,0 +1,333 @@
+\title{Listening to the Wise Few: Select-and-Copy Attention Heads for Multiple-Choice QA}
+
+\begin{abstract}
+
+A standard way to evaluate the abilities of LLM involves presenting a multiple-choice question and selecting the option with the highest logit as the model's predicted answer.  However, such a format for evaluating LLMs has limitations, since even if the model knows the correct answer, it may struggle to select the corresponding letter simply due to difficulties in following this rigid format. To address this, we introduce new scores that better capture and reveal model's underlying knowledge: the Query-Key Score (QK-score), derived from the interaction between query and key representations in attention heads, and the Attention Score, based on attention weights. These scores are extracted from specific \textit{select-and-copy} heads, which show consistent performance across popular Multi-Choice Question Answering (MCQA) datasets. Based on these scores, our method improves knowledge extraction, yielding up to 16\% gain for LLaMA2-7B and up to 10\% for larger models on popular MCQA benchmarks. At the same time, the accuracy on a simple synthetic dataset, where the model explicitly knows the right answer,  increases by almost 60\%, achieving nearly perfect accuracy,  therefore demonstrating the method's efficiency in mitigating MCQA format limitations. To support our claims, we conduct experiments on models ranging from 7 billion to 70 billion parameters in both zero- and few-shot setups.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Questions with multiple answer options are a common form
+of benchmarks evaluating question answering~\citep{HendrycksBBZMSS21}, common sense~\citep{zellers-etal-2019-hellaswag}, reading comprehension~\citep{huang-etal-2019-cosmos}, and other abilities of large language models. In multiple choice question answering tasks (MCQA), the model is provided with the question and multiple answer options, e.g. \textit{"Question: How many natural satellites does the Earth have? Options: A. 0. B. 1. C. 2. D. 3. E. None of the above. F. I don't know."} Sometimes the context that might be helpful to give the answer is added before the question, such as a paragraph or a dialogue for reading comprehension or some common sense reasoning. The model is asked to output the letter denoting the correct answer option. This format is similar to certain real-life students’ exams and shares some benefits with them: it is straightforward to evaluate, using automated tools. 
+
+On the other hand, for LLMs, especially smaller ones, understanding and adhering to a multiple-option format is not always trivial.  The model's performance  on a given multiple-option dataset depends not only on the ability to solve the task itself but also on its in-context learning or instruction-following capabilities.  The model may produce correct answers with formatting issues, which hinders the automatic evaluation of the MCQA task. Consequently, some works delegate answer evaluation to another LLM instead of relying on exact string comparison~\citep{wang-etal-2024-answer-c}.
+ When assessing the logits of the model for options, LLMs can follow shallow patterns such as options distribution. Some LLMs are inclined to prefer the answer option ``A'', while others tend to choose ``D''~\citep{zheng2024large}. All of these issues demonstrate pitfalls in the current MCQA evaluation process, especially for smaller LLMs. 
+
+However, the model's inability to follow the task format does not imply a lack of actual 'knowledge' regarding the correct answer.
+In this work, we show that while small LLMs generally perform poorly on MCQA benchmarks, their intermediate attention states can often provide better insights. Specifically, we introduce the method that uses the queries and keys within individual attention heads to select an answer.  We identify certain \textit{select-and-copy} heads that can choose the option with semantically relevant information   and transfer further its representation. Our findings suggest that LLMs process MCQA tasks more effectively in the middle layers but tend to revise this information in the later layers, leading to reduced performance. %Similar tendency was found  in factual information processing~\citep{azaria-mitchell-2023-internal} and hallucinations~\citep{ch-wang-etal-2024-androids}, though these studies focused primarily on examining hidden representations.  
+Our method belongs to the class of "white-box" techniques, meaning that we use the internal representations of LLMs to extract solutions for given tasks.
+
+\begin{figure*}[t]\centering
+\includegraphics[width=0.8\linewidth]{images/QK_new_version_small_shadow.png}
+\caption{Our method calculates the Query-Key score between the end-of-line token of an answer option and the last token of the prompt for the designated head, from which we derive the answer.}
+\label{fig:our_method}
+\end{figure*}
+
+  
+
+We identify the principal elementary algorithmic operation performed by pretrained Transformer models when answering multiple-choice questions. This task is complex, requiring the model to 
+first compute a representation of semantic information contained in both the question and the options inside such specific heads.
+After completing this task, the model selects the most appropriate option using the query-key alignment mechanism, see section \ref{sec:attention-as}, and then copy and outputs the option.
+Based on this intuition, we propose to identify the heads in the model that perform this \textit{select-and-copy} operation on the aggregated embeddings of the possible answers. Our results reveal the presence of such heads in all models we examined, ranging from 7 billion to 70 billion parameters. Remarkably, the best few performing heads are the same for different datasets. Moreover, the answers produced by these heads are significantly more accurate than the final output of the model, particularly in zero-shot scenarios.
+
+Our contributions are as follows:
+(1) We demonstrate the presence of \textit{select-and-copy} heads in LLMs of the wide range of 7-70B parameters, performing option selection operation for MCQA task; %multiple choice questions answering task
+(2) We introduce QK-score, along with attention score, the option scoring methods based on key and query representations derived from such heads. This scoring leads to 9-16\% improvement of the accuracy with task-specific heads;
+(3) We demonstrate that our method is more stable than the baselines to option permutations,  renaming and also when supplementary  options, like ``I don't know'', are added;
+(4) Our results provide further support for the hypothesis observed in other papers, e.g. \citet{li2023inferencetime, stolfo-etal-2023-mechanistic}, that the representations of the semantic meaning of a phrase are encoded in certain heads in the query, key, and value vectors of the phrase's last tokens—namely, the end-of-sentence punctuation token or the end-of-line token;
+(5) We study the attention patterns of \textit{select-and-copy} heads and their behavior under various conditions. This is a step towards better understanding how the LLMs work in general.
+
+
+
+\section{Related work}
+
+
+Question answering datasets are the standard way to measure capabilities of the Large Language Models to retain the knowledge, understand given texts, and perform reasoning. One can see the results of such testing in a number of technical reports on new LLMs, such as LLaMA2, LLaMA3, gpt-4-o, or Claude 3 Opus~\citep{touvron2023llama2openfoundation, dubey2024llama3herdmodels, openai2024gpt4technicalreport, claudereport}.  Many commonly used benchmarks incorporate MCQA tasks, as they are easy to evaluate ~\citep{ye2024llm_uq, pmlr-v174-pal22a}.
+
+Multiple choice prompting (MCP), when we present the question and multiple answer options to model, has many advantages over cloze prompting (CP), when a model is asked to complete partial inputs with a single probable word or phrase~\citep{robinson2023leveraging}. While in CP one uses the normalized answer probabilities 
+for evaluation, in MCP we can use the probabilities of the options' single tokens as a proxy. However, recent works highlight some issues 
+in evaluating models on MCQA tasks. \citet{gupta2024changinganswerorderdecrease} and \citet{pezeshkpour-hruschka-2024-large} show that permutation of the contents for options can significantly affect the accuracy using MCP. Similarly, \citet{zheng2024large} describe selection bias for different LLMs and propose a debiasing method PriDe to boost the accuracy. 
+In our work, we investigate the inner mechanisms of LLMs, especially the role of attention heads in MCQA tasks. Functional roles of attention heads were analysed for transformer-based models from the very beginning of encoder-only models~\citep{jo-myaeng-2020-roles, Pande_Budhraja_Nema_Kumar_Khapra_2021}, and nowadays even more detailed approaches were developed for decoder-only models in the common track of mechanistic interpretability~\citep{elhage2021mathematical, olsson2022context, bricken2023monosemanticity}. For example, \textit{induction heads} identified by \citet{elhage2021mathematical} play an important role in in-context learning~\citep{olsson2022context, pmlr-v202-von-oswald23a}, indirect object identification~\citep{wang2023interpretability} and overthinking~\citep{halawi2024overthinking}. Additionally, there is a number of research connecting theoretically constructed networks with real pretrained language models, revealing elements such as constant heads~\citep{lieberum2023does}, negative heads~\citep{yu2024correcting}, and content gatherer heads~\citep{merullo2024circuit}, among others. For more information on mechanistic interpretability and attention heads, we refer to \citet{rai2024practical} and \citet{zheng2024attention}.
+
+In our work, we focus on \textit{select-and-copy heads} that are used to select the right option for the MCQA task. The special case of such heads looking on option labels was mentioned in~\citep{lieberum2023does}. However, we show that not only are other tokens more representative for MCQA, but they can be used to significantly increase accuracy compared to baseline.
+
+Moreover, our experiments conclude that those heads that outperform the baseline on MCQA are located on the middle layers of LLM. It correlates with previous findings that many information is present in earlier layers, but is somehow lost or revised in later layers~\citep{kadavath2022language, azaria-mitchell-2023-internal, liu-etal-2023-cognitive, zou2023representationengineeringtopdownapproach, ch-wang-etal-2024-androids}. These studies mainly focus on linear probes of hidden representations~\citep{ettinger-etal-2016-probing, conneau-etal-2018-cram, burns2023discovering}, but we show that the disagreement between model output and inner structures can be captured in the level of query-key interactions and attention maps.
+
+
+\section{Attention as select-and-copy algorithm}
+
+
+In this section, we describe how attention mechanism can work as \textit{select-and-copy} operation.
+Suppose we have a sequence of $N$ token embeddings $\{\mathbf{x}_i\}_{i=1}^N$, which serve as an input to the corresponding attention head of transformer, each $\mathbf{x}_i \in \mathbb{R}^{d \times 1}$. In classical transformer architecture \cite{10.5555/3295222.3295349}, each attention head performs the transform of input embeddings:
+\begin{equation}
+\label{eq:attn_weights}
+    \vo_m = \sum_{n = 1}^N a_{m,n} \vv_n, \quad a_{m,n}= \frac{\exp \left( \frac{\vq_m^{\top} \vk_n}{\sqrt{d}} \right) }{  \sum_{j=1}^N\exp \left( \frac{\vq_m^{\top} \vk_j}{\sqrt{d}} \right) },
+\end{equation}
+where $\vq_i = \mW_q \vx_i$, $\vk_i = \mW_k \vx_i$, $\vv_i = \mW_v \vx_i$ and $\mW_q, \mW_k, \mW_v \in \R^{d_{model}\times d}$ are learned weight matrices. The resulting matrix $\mA = \{a_{n,m}\}_{n,m = 1}^N$ is stochastic, meaning that all its rows sum up to one.
+For decoder transformers, causal mask is applied to $\mA$ before softmax: $a_{i,j}=0, j>i$. 
+Thus, from equation \ref{eq:attn_weights}, for each token position $k$ in decoder transformers we can write
+\begin{equation}
+\label{eq:attn_for_one_token}
+\vo_m = \sum_{n \le m} a_{m,n} \vv_n
+\end{equation}
+meaning that the $m$-th token of output embedding is the linear combination of values of the preceding tokens weighted by $m$-th row of the attention matrix $\mA$. If all but one component here are close to zero, this transform can be considered as a conditional copy mechanism. Indeed, if $a_{m,j}$ is the only non-zero weight in the $m$-th row, then $a_{m,j}\approx 1$, and  $\vo_m \approx \vv_j$ (by \ref{eq:attn_for_one_token}). 
+Each token position from $0$ to $m$ can be considered as a cell storing the corresponding value vector; and attention weights $a_{m,0}, \dots, a_{m,m}$ are responsible for the \textit{choice} which cell to copy to the $m$-th output.
+
+Based on this, we came up with the idea
+of \textit{select-and-copy} heads, which implement such copying mechanism. Namely, in this work, we are interested in finding heads in the model, which select the proper option and copy the information from it to the answer. In such heads, the attention of $m$-th row should be concentrated on a few selected tokens, where $m$ is the output answer position.
+
+In modern models, positional encoding information can be represented as the additional transform of queries and keys
+in Eq. \ref{eq:attn_weights}. For example, 
+in Rotary Position Embedding (RoPE)~\citep{su2024roformer}  the rotation function $R_f(\cdot)$ is applied to them before taking dot product. Pre-softmax logit of the standard attention becomes $R_f(\vq_m)^{T} R_f(\vk_n) = R_g(\vq_m, \vk_n, m - n)$, introducing the dependency on the position shift $m - n$.
+
+In this paper, we evaluate the efficiency of the answer options scoring derived from \textit{select-and-copy} heads. We aim to choose heads which rely on options semantics rather than the position; to mitigate the effect of the relative position shift, we consider the QK-score, which does not use  the positional shift when comparing the queries and keys (see details in the next section).  
+
+
+
+\section{Approach}
+
+
+Consider some MCQA task
+with the corresponding dataset $\mathcal{D} = \mathcal{D}_{val}\cup\mathcal{D}_{test}$, where each instance represents the request to the model, consisting of prompt, question, and labelled answer options (Fig.~\ref{fig:our_method}). Given the request, the model should generate the label of the best option from the request.
+
+To find the heads in the model that implement the described above option selection mechanism, we pick best-performing heads using $\mathcal{D}_{val}$ based on the accuracy there, and then evaluate their performance on much larger $\mathcal{D}_{test}$. If such heads are in fact fully responsible for option selection, the performance just on them should be at least comparable to the performance of the whole model. We prove this claim by experiments in Section~\ref{sec:results}. Another way to select such heads is proposed in Section  \ref{sec:analysis};
+we demonstrate by attention maps analysis, that the best-performing heads indeed implement the option selection algorithm described above.  
+\textbf{QK-score and Attention-Score.}
+Given a data sample of MCQA task, we denote by $q$ the question supported with context if applicable, by $o = \{o_1, o_2, ..., o_n\}$ the semantic content of the provided answer options, and the corresponding labels by $d = \{d_1, d_2, ..., d_n\}$ (e.g A/B/C/D); we believe that the labels are default-ordered. All these parts are concatenated to a string 
+$q \ast d_1\ast o_1\ast \dots\ast d_n\ast o_n\ast$,
+where $\ast$ stands for any kind of delimiters, usually punctuation marks or newline characters (Fig.~\ref{fig:our_method}). The model should estimate $P(d_i \mid q, d, o)$ – the probability of option $d_i$ given the question $q$ and contents  of the answer $o$, concatenated with the answer options $d$.
+
+Let $t_i, i \in \{1, 2,...,n\}$ be the indices of tokens that incorporate knowledge about the corresponding answer options. We call them \textit{option-representative tokens}. Choosing such tokens properly is important for the success of our algorithm. In most experiments, we use the end-of-line token after the $i$-th option content as $t_i$; other possible variants are presented in Fig.~\ref{fig:token_intro}. We study them in Sec.~\ref{sec:analysis}.
+
+Let $N$ be the length of the whole text sequence, and consider the head with index $h$ from the layer $l$. Then, given $(q, d, o)$, we can compute \textit{QK-score} $S^{(l, h)}_{QK} (d_i)$ for option $d_i$ (from query and key vectors), and \textit{Attention-score} $S^{(l, h)}_{Att} (d_i)$ (from attention weights): 
+\begin{equation}
+    S^{(l, h)}_{QK} (d_i) =  \vq_{N}^{(l, h) \top} \vk^{(l, h)}_{t_i},
+    \quad 
+    S^{(l, h)}_{Att} (d_i) =  a_{N, t_i}^{(l, h)},
+    \quad 
+    i \in \{1, 2,...,n\}
+\end{equation}
+
+Our \textit{QK-score} of $i$-th option is calculated as a dot product of the $t_i$-th key and the last query vector $q_N$ (see Fig.~\ref{fig:our_method}).
+In \textit{QK-score} we do not apply positional transformation, therefore it is not equal to the attention scores before softmax. The best token by \textit{QK-score} does not necessarily correspond to the token with maximum attention, see Figure~\ref{fig:attention_14_24} for an example.
+For each method, the prediction is straightforward: we take the option, for which the score gives maximum. By applying softmax function to scores we could also estimate the head and score specific probabilities for options. 
+
+\textbf{Choosing the predicting heads.} We do not aggregate heads predictions. Instead, we use the scores from the single best head, which is selected by the accuracy on the validation set $\mathcal{D}_{val}$. In  Section~\ref{sec:results}, we report the results obtained from the best heads chosen separately for each dataset and each number of shots (i.e. number of examples provided in the prompt). In Section~\ref{sec:analysis}, we show that for each model, there exist universal heads working well on the most tasks and number of shots. Furthermore, we demonstrate that such universal heads can be found without access to labelled validation data.
+
+
+\begin{figure}[!t]
+    \centering
+    \begin{subfigure}{0.38\linewidth}
+   \includegraphics[width=1\linewidth]{images/token_scheme_new.png}
+   \caption{}
+   \label{fig:token_intro} 
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.59\linewidth}
+   \includegraphics[width=1\linewidth]{images/token_comparison_new.png}
+   \caption{}
+   \label{fig:token_comparison}
+    \end{subfigure}
+\caption{(a) Scheme for option-representative token types. (b) Performance of \textit{QK-score} and \textit{Attention-score} for different option-representative tokens on Llama2-7B base.}
+\end{figure}
+
+
+
+
+
+
+
+\section{Experiments}
+
+\subsection{Datasets}
+
+ We experiment on four challenging real-world MCQA datasets from LLM benchmarks: \textbf{MMLU}~\citep{HendrycksBBZMSS21}, \textbf{CosmosQA}~\citep{huang-etal-2019-cosmos}, \textbf{HellaSwag}~\citep{zellers-etal-2019-hellaswag} and \textbf{HaluDialogue}, which is a "dialogue" part of HaluEval~\citep{li-etal-2023-halueval}. All of them consist of questions with four possible answer options and some additionally have a context to be used to give the answer. Additionally, we introduce \textbf{Simple Synthetic Dataset} (SSD) created as a synthetic task in MCQA setting that will allow to estimate the ability of the model deal with the bare task format. Tasks from SSD do not require any factual knowledge from the model. The main version of this dataset contains questions of the form ``Which of the following options corresponds to ``\texttt{$<$word$>$}'' ?'' and contains 2.500 examples. Options include a word from the question and 3 random words, all mixed in a random order and marked by letters `A'-`D'. Other variations of this dataset have another number of options, sampled and named by the same principle.
+
+ Finally, following \citet{ye2024llm_uq} in all five datasets we specially modified questions by adding two extra options ``\texttt{E. None of the above.}'' and ``\texttt{F. I don't know.}'' that are intended to aggregate the uncertainty of LLM. Despite adding these two options, there are \textit{NO} questions for which `E' or `F' are correct answers.
+Following the previous approach by \citet{zheng2024large}, with fixed $N$-shot setup, we select $\mathcal{D}_{val}$ as $5\%$ of $\mathcal{D}$ for each dataset that is dedicated to assessing each head's performance. Based on this evaluation, the best head is chosen and applied to other questions in the dataset.
+
+\subsection{Baselines}
+
+The standard approach for MCQA is to use output probabilities from LLM for all options $d_i$ to choose the predicted option $\hat{d}$:
+\begin{equation}
+    \hat{d} = \argmax_{d_i} P(d_i \mid q, d, o),
+\end{equation}
+where  $q$ is the question, $o = \{o_1, o_2, ..., o_n\}$ are option contents, and $d = \{d_1, d_2, ..., d_n\}$ are the options labels (e.g A/B/C/D).
+In our experiments we refer to this method as \texttt{Baseline}. 
+
+In recent work~\citep{zheng2024large},it was proposed to mitigate the option selection bias, averaging the results over options permutation. The idea is to use the set of all cyclic permutations $\mathcal{I} = \{(i, i+1, ..., n, 1, ..., i-1)\}_{i=1}^n$ to calculate the debiased probability:
+\begin{equation}
+\tilde{P}(d_i \mid q, d, o) = \frac{1}{|\mathcal{I}|} \sum_{I\in \mathcal{I}}\log P( \pi_I(d_i) \mid q, d, \pi_I(o))
+\end{equation}
+Since computing probabilities for all permutations for each question is expensive, authors propose to estimate the prior distribution for option IDs on test set which is $5\%$ of all samples, and use it to debias new samples. In our experiments we refer to this method as \texttt{PriDe}. The test set is the same as we use for the best heads selection. %\textit{QK-score}.
+
+\subsection{Experimental setup}
+
+Our main experiments were carried out according to the following pipeline: first, we took a frozen pre-tranied Transformer LLM (its weights were not modified in any of the experiments); then, we passed through it questions from the validation subset and for each head of the model and each question obtained best in terms of \textit{QK-score} answer. After that, we chose a single head on which the highest accuracy was achieved (if several heads appeared to have equal accuracy scores we chose  one from the lower level of the model; although, in our experiments this happened extremely rare).
+Then we obtained answer predictions via baseline method and via \textit{QK-score} on the chosen head. Finally, we perform random shuffle of options in all questions and repeat the abovementioned procedure: it is done to correctly compute the Permutation Accuracy metric. 
+Note that it may be two different heads that achieve best \textit{QK-scores} on validation set before and after option permutation.
+
+We report two quality metrics on the test subset: accuracy of predicted answers (from the first run) and \textit{Permutation Accuracy} (PA) metric. The latter was introduced in \cite{gupta2024changinganswerorderdecrease} and is, in a sense, accuracy stable for choice permutation. PA metric is computed as the percentage of questions for which model choose correct choices before and after random permutation of options. 
+$
+\text{PA}~=~\frac{1}{N}\sum_{i = 1}^N \mathrm{I}_i \mathrm{I}^p_i,
+$
+where $N$ is the dataset size, $\mathrm{I}_i$ is the indicator value equals to 1 iff model's answer on question $i$ is correct, while $\mathrm{I}^p_i$ equals to 1 iff model gives correct answer on question $i$ after its options (their texts not letters) were permuted.
+Answer options ``\texttt{E.~None of the above.}'' and ``\texttt{F.~I don't know.}'' are special and therefore are exempt from shuffling. 
+
+  
+In few-shot regimes before asking the  question we provide model with  demonstrations in the same format except that the true answers (single capital letter for the correct option) are given after each example separated by single whitespace. Examples are separated from each other and from the actual question by single line breaks.
+The demonstrations are the same for every question in the given dataset. The set of examples for ($k+1$)-shot prompts contains the set of examples for $k$-shot prompts and one new example. The demonstrations were chosen from the first fifteen entries of the validation set, and their choice was mostly arbitrary, but we tried to filter out questions that we considered suboptimal from the perspective of an English-speaking human expert.
+
+\subsection{Results}
+\label{sec:results}
+Figure \ref{fig:main_results_pic} demonstrates the results of our method for LLaMA2-7B model. We observe an impressive improvement by 7-16\% on all the datasets in zero-shot regime. Although \textit{QK-scores} is not completely robust to option permutations, it is more stable than the baseline: the relative performance drop by PA metric is less than the baseline on all the datasets. In the few-shot regime, our approach is on par or outperforms other methods, with the most visible improvement on Halu Dialogue dataset by 5-9\% depending on the number of shots.
+
+PriDe results are added on Figure \ref{fig:main_results_pic} for the comparison. PriDe in the most cases performs better than the baseline,  but sometimes  fails in zero-shot regime. Our analysis reveals that this method is not robust for additional uncertain options "E" and "F". But overall, in all cases and for any options set, QK score outperforms PriDe.
+
+We also applied our method to larger models of LLaMA family: LLaMA2 (-13B, -70B) and LLaMA3 (-8B, -70B) as well as to their chat/instruction-tuned versions. Overall, the results are in line with those obtained for LLaMA2. 
+For all the smaller models of 8B and 13B size in zero-shot settings, our approach outperforms the baseline on all the datasets, both on accuracy and permutation accuracy, with the improvement up to huge 27\%, achieved on HellaSwag dataset with LLaMA3-8B model. With larger models, MMLU is the most difficult benchmark for our method, likely because questions from it are oriented on general knowledge while our method by design focuses more on the semantic relations between the question and the possible answers.
+
+
+
+Regarding performance of models on synthetic dataset SSD, in Figure \ref{fig:llama_2_and_3_synthetic} we can see that in baseline zero-shot setting LLaMA2-7B struggles to point onto the correct option, meanwhile, our method allows to extract the needed information from the model and gain much better quality. The figure shows accuracy for \textit{QK-score} from five best heads (we denote them by their \textit{(Layer, Head)} indices). Three of these heads can also be seen in the Table \ref{tab:best_heads_datasets}; the other two ((8, 8) and (12, 15)) are unique for this particular dataset.
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{images/shot_prompting.png}
+    \caption{Comparison of different methods for LLaMA2-7B (base) on various Q\&A datasets. Reported metrics are Accuracy (Acc) and Permutation Accuracy {(PA)}.}
+    \label{fig:main_results_pic}
+\end{figure}
+
+\addtolength{\tabcolsep}{-1pt}
+\begin{table}[t]
+    \centering
+    \begin{tabular}{rr|cccccc|cccc}
+        ~ & ~ & \multicolumn{6}{c|}{\textbf{LLaMA...}} & \multicolumn{4}{c}{\textbf{LLaMA... (chat, instruct)}} \\
+        Method & ~ & {\textbf{-30B}} & {\textbf{-65B}} & {\textbf{2-13B}} & {\textbf{2-70B}} & {\textbf{3-8B}} & {\textbf{3-70B}}  & {\textbf{2-13B}} &  {\textbf{2-70B}} &  {\textbf{3-8B}} &  {\textbf{3-70B}} \\
+        \hline
+        ~ & ~ & \multicolumn{10}{c}{\textbf{MMLU}}  \\
+        \multirow{2}{*}{Baseline} & {\scriptsize Acc} & \textbf{50.4} & \textbf{48.3} & 34.6 & \textbf{59.7} & 60.3 & \textbf{75.3} & 47.4 & 57.7 & 60.5 & \textbf{78.2}\\
+        ~ & {\scriptsize PA} & \textbf{37.9} & \textbf{35.7} & 22.4                          & \textbf{48.5} & 50.4 & \textbf{68.8} & 34.6 & 45.9 & 47.7 & \textbf{70.1}\\
+        \multirow{2}{*}{QK-score} & {\scriptsize Acc} & 45.2 & 46.2 & \textbf{42.2}          & 56.7 & \textbf{61.0} & 74.5 & \textbf{49.7} & \textbf{58.9} & \textbf{63.0} & 77.9\\
+        ~ & {\scriptsize PA} & 30.7 & 32.1 & \textbf{25.9}                                   & 39.2 & \textbf{51.5} & 66.0 & \textbf{38.3} & \textbf{47.1} & \textbf{49.3} & 67.9 \\
+        \hline
+        ~ & ~ & \multicolumn{10}{c}{\textbf{Cosmos QA}}  \\
+        \multirow{2}{*}{Baseline} & {\scriptsize Acc} & 59.9 & \textbf{65.7} & 29.6          & 65.5 & 54.9 & 82.0 & 48.1 & 68.5 & 85.4 & 91.6 \\
+        ~ & {\scriptsize PA} & \textbf{47.5} & \textbf{53.1} & 19.4                          & \textbf{56.3} & 39.3 & 75.7 & 36.8 & 58.3 & 71.0 & 82.5  \\
+        \multirow{2}{*}{QK-score} & {\scriptsize Acc} & \textbf{60.1} & 63.5 & \textbf{58.2} & \textbf{69.5} & \textbf{70.6} & \textbf{87.6} & \textbf{67.7} & \textbf{84.8} & \textbf{88.6} & \textbf{94.1} \\
+        ~ & {\scriptsize PA} & 44.4 & 50.8 & \textbf{44.3}                                   & 56.2 & \textbf{60.9} & \textbf{81.7} & \textbf{51.6} & \textbf{75.9} & \textbf{75.1} & \textbf{88.1} \\
+        \hline
+        ~ & ~ & \multicolumn{10}{c}{\textbf{Hellaswag QA}}  \\
+        \multirow{2}{*}{Baseline} & {\scriptsize Acc} & 35.2 & 33.4 & 36.8                   & 71.6 & 33.5 & \textbf{82.5} & 41.6 & 61.4 & 67.4 & \textbf{86.8} \\
+        ~ & {\scriptsize PA} & 16.5 & 13.7 & 17.1                                            & 62.9 & 15.8 & \textbf{76.1} & 25.8 & 49.0 & 27.8 & 71.2 \\
+        \multirow{2}{*}{QK-score} &{\scriptsize Acc} & \textbf{43.9} & \textbf{53.8} & \textbf{52.9} & \textbf{74.9} & \textbf{60.9} & 82.1 & \textbf{50.8} & \textbf{73.0} & \textbf{72.5} & 86.3 \\
+        ~ & {\scriptsize PA} & \textbf{21.5} & \textbf{35.0} & \textbf{38.8}                         & \textbf{63.3} & \textbf{50.8} & 75.2 & \textbf{37.3} & \textbf{64.9} & \textbf{36.3} & \textbf{72.8}\\
+        \hline
+        ~ & ~ & \multicolumn{10}{c}{\textbf{Halu Dialogue}} \\
+        \multirow{2}{*}{Baseline} & {\scriptsize Acc} & 36.3 & \textbf{46.7} & 41.0          & 39.4 & 46.6 & 44.3 & 49.4 & 39.4 & 62.1 &  68.8  \\
+        ~ & {\scriptsize PA} & 21.1 & \textbf{29.8} & 22.2                                   & 25.4 & 29.1 & 33.5 & 32.6 & 26.6 & 42.6 & 63.8   \\
+        \multirow{2}{*}{QK-score} & {\scriptsize Acc} & \textbf{44.8} & 42.4 & \textbf{47.2} & \textbf{58.4} & \textbf{52.3} & \textbf{67.8} & \textbf{56.2} & \textbf{58.1} & \textbf{64.7} & \textbf{76.7} \\
+        ~ & {\scriptsize PA} & \textbf{27.6} & 22.5 & \textbf{30.2}                          & \textbf{42.6} & \textbf{36.7} & \textbf{57.9} & \textbf{42.5} & \textbf{42.8} & \textbf{46.6} & \textbf{65.6} \\
+        \hline
+    \end{tabular}
+    \caption{Comparison of different base models in zero-shot setup on various Q\&A datasets. Reported metrics are Accuracy (Acc) and Permutation Accuracy ({PA)}. Best results are highlighted in \textbf{bold}.}
+    \label{tab:zero_shot_results_large_models}
+\end{table}
+\addtolength{\tabcolsep}{1pt}
+
+
+
+\section{Analysis}
+
+\label{sec:analysis}
+
+\textbf{Choosing option-representative tokens.}
+To compare our scores, we need to select option-representative tokens $\{t_i\}$, where the semantic information about each option semantics is concentrated. Due to the causal nature of the attention in LLMs, the logical choice is the last token after the content of the option, which is the end-of-line token. We use it in most of our experiments, although there are other tokens worth analysing: label itself, period after label and period after option content (see Fig.~\ref{fig:token_intro}). We also experimented with the mean aggregated score through all tokens in the content of the option, but it gave poor results. The detailed analysis of such variations for attention scores is presented in Fig.~\ref{fig:token_comparison}. We observe that the period after content and the end-of-line tokens are the most representative of our scores. There is an interesting finding concerning label token: despite it being almost useless in 0-shot setup as was shown in~\citep{lieberum2023does} also, we can see the better performance for 5-shot setup, in different heads. We hypothesise that there exist several types of "select-and-copy" heads, which influence the logits differently.
+
+\textbf{Select-and-copy heads ablation.}
+To investigate \textit{select-and-copy} heads and their relation to the performance of the model, 
+we use zero-ablation of heads~\citep{olsson2022context} to analyze the causal relationship between \textit{select-and-copy} heads and model output. In this method, we replace the output of a selected set of heads with  a zero vector, effectively removing their contribution to the residual stream. We experiment with a set of the 10 best heads based on the \textit{Attention-score} with EOL and label option-representative tokens and report the results in Fig.~\ref{fig:ablation}. Additionally, we perform random ablations by selecting 10 random heads and aggregating the results from 5 runs. To ensure a fair comparison, we select random heads only from the middle layers (12 to 20), where the top heads are also located. We observe a significant drop in accuracy, sometimes below random performance, for the most of dataset, when ablating heads by EOL token, indicating a causal relationship with the model's output.
+
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=\linewidth]{images/heads_ablation.png}
+    \caption{Zero-ablation of heads for LLaMA2-7B (upper) and LLaMA3-8B (lower)}
+    \label{fig:ablation}
+\end{figure}
+\textbf{Best heads.}
+\begin{figure}[!t]\centering
+    \begin{subfigure}[c]{0.69\linewidth}
+    \centering
+   \includegraphics[width=1\linewidth]{images/heatmaps/Heatmap_Top_1_Heads_On_Whole_Set_small.png}
+   \caption{}
+   \label{fig:best_heads} 
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[c]{0.3\linewidth}
+    \centering
+   \includegraphics[width=1\linewidth]{images/LLAMA-2-options-num-green-and-yellow.png}
+   \caption{}
+   \label{fig:llama_2_and_3_synthetic}
+    \end{subfigure}
+\caption{(a) Heatmap for (layer, head) indices for the best performing heads in LLaMA2-7B. The top 5\% heads were selected for each N-shot setup, with all 4 datasets combined. The intensity of color indicates the maximal N where this pair appears. The framed cells indicate best-performing pairs that are uniform for 3 or 4 datasets. The first 8 layers are omitted because no interesting heads are found there. 
+(b) Synthetic Dataset QK-score accuracy for various numbers of options (number of options is plotted on x axis, varies from 0 to 24) in zero-shot for LLaMA2-7B. Different colors of the lines correspond to different heads. ``Square'' markers correspond to the heads, performing well across real datasets (they are ``framed'' on Figure~\ref{fig:best_heads}), and ``round'' markers correspond to the heads that work well on the synthetic dataset specifically. The ``triangle''-marked dotted line reflects the baseline model's performance. 
+}
+\end{figure}
+As choosing the best head on validation set requires a sufficient amount of training data, we would like to determine whether there are universal heads that will be applicable to MCQA across multiple datasets and perform on par with the heads that are chosen for each task separately. Moreover, finding such heads would help mitigate the effects of a poorly chosen validation set, when discrepancies exist between the questions in the validation and test sets. %As stated in ~\cite{zheng2024attention}, there are some heads responsible for choosing the correct option letter in MCQA, however, these heads are determined for standard approach with attention, meanwhile we are interested in distinguishing such heads for \textit{QK-score} as well. 
+
+To illustrate how best-performing heads change in different setups, we select the best heads on the mixes across datasets and across shots, and select the 5\% ot the best heads for each mix. %took the mean accuracies for all heads on all setups, which are 4 datasets and 5 options of $N$-shot setting, with $N \in \{0, \dots, 4\}$. We cut out top 5\% heads for every setup and combined these heads for each dataset, thus obtaining 5 lists of top 5\% heads for every N-shot setup.  
+The result is shown on Figure~\ref{fig:best_heads}. This heatmap highlights the most stable heads, which appears among the best in several mixed tasks: when ``shots'' are mixed (``framed'' cells), or when datasets are mixed (dark cells).
+Most notably, the majority of robust heads in this sense lay within 12 and 21 layers. Then, we repeated the processing, but in this case we combined best-performing heads w.r.t. to the datasets. The most robust heads are (14,24) and (14,20). They appeared in the top 5\% pairs in mixed-``shot'' setup for all the datasets. They also demonstrate high performance on the synthetic data when the number of options is increased up to 24, as shown on Figure~\ref{fig:llama_2_and_3_synthetic}, while the performance of the baseline method drops below random. These results provide an additional evidence that the selected heads indeed able to perform the option selection task based on  option content. 
+
+\textbf{Attention patterns analysis.}
+ We can see that the attention weights are concentrated on option-representative tokens, namely $\backslash n$ symbols after options, with the highest weight on the correct option, and exactly that is expected from \textit{select-and-copy} heads. Interestingly, that QK score gives the clearer picture. 
+
+\textbf{Finding best heads without validation labels.} Based on this observation, we can propose an algorithm to find such stable heads without a labeled validation set. Namely, such heads should have heavy attention weights on option-representative tokens and high variability in the options they attend to.
+ 
+If some head doesn't attend on the options, then the first value is close to zero, meanwhile when the head is ``looking'' on options, but ``chooses'' the same option most of the time, the second value is close to zero. Multiplying these two values yields low scores for heads that consistently ``look'' at the same option or ignore options entirely. Conversely, heads that ``look'' at diverse options receive high scores. 
+Sorting all the heads of LLaMA2-7B model by this score, we see that the named four heads have very high score. Namely, they get into top-20 heads if scored across real datasets we use, and they get into top-10 heads if scored on our synthetic dataset, see Figure~\ref{fig:heads_scores}.
+\begin{figure}[!t]
+    \includegraphics[width=0.99\linewidth]{images/attention_maps/attentions_14_24_with_softmax_qk}
+    \caption{QK-scores after softmax (upper part of the diagram) and attentions (lower part of the diagram) for the last token on the 0-shot MMLU example on (14, 24) head. The task is ``\texttt{Question: What singer appeared in the 1992 baseball film 'A League of Their Own'$\backslash$nOptions:$\backslash$nA. Brandy.$\backslash$nB. Madonna.$\backslash$nC. Garth Brooks.$\backslash$nD. Whitney Houston.$\backslash$nE. I don't know.$\backslash$nF. None of the above.$\backslash$nAnswer:}''. 
+    Full version is on Figure~\ref{fig:attention_14_24}.}
+    \label{fig:small_attention_map_figure}
+\end{figure}
+
+\textbf{Selection bias.}
+Following previous studies on selection bias \cite{pezeshkpour-hruschka-2024-large, zheng2024large}, we investigate our methods towards the tendency to choose specific option rather then choosing a correct answer. We observe that among best heads we also have uneven distribution in predictions, which are corrected as well when increasing the number of shots. However, there is an interesting pattern that two best heads distributions are complementing each other, i.e $S^{(14, 20)}_{QK}$ is biased to options "A" and "D" an $S^{(14, 24)}_{QK}$ - to options "B" and "C". More detailed information can be found in  Fig.
+
+\begin{figure*}[!p]\centering
+\includegraphics[width=0.8\linewidth]{images/accuracy_with_best_heads_V3.png}
+\caption{Accuracy of the best performing heads and of the most robust heads - (14, 24), (14, 20)}
+\label{fig:accuracy_on_best_heads}
+\end{figure*}
+
+
+
+
+\section{Conclusion}
+
+
+In this work, we introduced two novel scoring mechanisms: \textit{QK-score} and \textit{Attention-score}, derived from internal mechanism of LLM that can help to improve the performance on multiple-choice question answering tasks. Our experiments demonstrated significant improvements (up to 16\%) across popular benchmarks, and even more striking results (up to 60\%) on a synthetic dataset designed to test the model's understanding of task format.
+
+We identified a subset of attention heads, which we termed \textit{select-and-copy} heads that play a critical role in these performance gains. These heads are relatively stable across different datasets and exist universally across model scales, and we explored their causal effect on task performance. Our findings suggest that these specialized heads have the potential to deepen our understanding of LLMs' capabilities not only for MCQA but for other reasoning tasks as well.
+
+This work opens up new avenues for further research into the internal dynamics of LLMs, including a deeper exploration of attention mechanisms and their role in complex task-solving that requires selection and copying information from the text.
+
+
+
+\section{Limitations}
+
+Also, our method is not applicable on scarce-resource tasks, even though one can utilize the heads we marked as robust enough.
+Besides, 
+MCQA task itself was
+criticized for oversimplification~\citep{balepur-etal-2024-artifacts}.
+
+
+

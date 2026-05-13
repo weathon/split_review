@@ -1,0 +1,304 @@
+\title{LocDiffusion: Identifying Locations on Earth by Diffusing in the Hilbert Space}
+
+\begin{abstract}
+Image geolocalization is a fundamental yet challenging task, aiming at inferring the geolocation on Earth where an image is taken. Existing methods approach it either via grid-based classification or via image retrieval. The geolocalization accuracy of these methods is constrained by the choice of geographic grid cell sizes or the spatial distributions of the retrieval image/geolocation gallery, and
+their performance significantly suffers when the spatial distribution of test images does not align with such choices. To address these limitations, we propose to leverage diffusion models to achieve image geolocalization with arbitrary resolutions. To avoid the problematic manifold reprojection step in diffusion, we developed a novel spherical positional encoding-decoding framework, which encodes points on a spherical surface (e.g., geolocations on Earth) into a Hilbert space of Spherical Harmonics coefficients and decodes points (geolocations) by mode-seeking. We call this type of position encoding Spherical Harmonics Dirac Delta (SHDD) Representation. We also propose a novel SirenNet-based architecture called CS-UNet to learn the conditional backward process in the latent SHDD space by minimizing a latent KL-divergence loss. We train a conditional latent diffusion model called LocDiffusion that generates geolocations under the guidance of images – to the best of our knowledge, the first generative model to address the image geolocalization problem. We evaluate our LocDiffusion model against SOTA image geolocalization baselines. LocDiffusion achieves competitive geolocalization performance and demonstrates significantly stronger generalizability to unseen geolocations.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Predicting locations on Earth based on a given condition (e.g., input image or text) is a fundamental yet challenging task. Image geolocalization, being a prominent example of this task, aims at predicting the geolocations only based on images, such as wildlife photos, street views, and remote sensing images. However, unlike image classification, solutions to image geolocalization are less mature because its ground-truths are locations represented by real-valued coordinates on the spherical surface. While regression models are commonly used to predict real-valued labels, they are proved to be tricky to train and perform especially poorly on image geolocalization due to the highly complex and non-linear mapping between the image space and the geospatial space (Vo et al., 2017; Izbicki et al., 2020). As an alternative solution, researchers employ pre-defined geographical classes (e.g. divide Earth into disjoint or hierarchical grid cells) or geo-tagged image galleries (e.g. a set of reference geotagged images) to map the real-valued ground-truth coordinates to discrete labels (e.g. the ID of the grid cell the ground-truth falls into or the ID of the reference image in the gallery that has the closest geotag as the label of a ground-truth location), subsequently transforming image geolocalization problem into a special case of image classification or image-image/image-location retrieval task. For example, both Vo et al. (2017) and CPlaNet (Seo et al., 2018) partition the Earth’s surface into non-overlapping grid cells and convert the image geolocalization problem into an image classification problem. GeoCLIP (Vivanco et al., 2023) uses a contrastive learning framework to align pretrained image embeddings with geographical location embeddings in the gallery and achieves SOTA performance. However, the spatial resolution of these approaches is constrained by the size of the grid cells or the spatial distribution of gallery images/locations.  
+
+![](images/b8d23ed4d4e61d54af6c9f83b23d0c59b68f341c5e7a4ff7e775d7d435756efc.jpg)  
+Figure 1: The diffculties of latent diffusion for image geolocalization. Black solid/dotted arrows denote the encoding/decoding steps. Orange modules are learnable, while blue modules are deterministic with no learning parameters. (1) It is difficult to diffuse in the position encoding space because valid positional encodings are also sparse. The diffusion model cannot function directly in the position encoding space, and learning a generalizable decoder on sparse data is also difficult. (2) The locational embedding space is dense and can perform diffusion processes, but the non-linear mapping between the position encoding and location embedding space makes decoding back to a correct coordinates extremely difficult. Minimizing distances in the location embedding space may not minimize geographic distance, and vice versa. (3) The SHDD encoding space is dense. Every point $\mathbf{e}$ in this encoding space corresponds to a spherical function $F_{\mathbf{e}}$ , whose difference from the spherical Dirac delta function $\delta_{(\theta_{0},\phi_{0})}$ of the ground truth location $(\theta_{0},\phi_{0})$ is measured by the reverse KL-divergence $\mathcal{E}$ . The latent diffusion in the SHDD encoding space equals gradually adding noise to $\delta_{(\theta_{0},\phi_{0})}$ (forward process) and find a sequence of $F_{\mathbf{e}}$ that gradually reduce $\mathcal{E}$ (backward process). (4) The SHDD decoding addresses the non-linearity problem. The heatmaps visualize the mappings from the Sphere2Vec (Mai et al., 2023b) location embedding space $\mathbf{(4a)}$ and from our SHDD encoding space (4b) back to the spherical coordinate space. Each pixel represents a Sphere2Vec embedding/SHDD encoding. The color of a pixel represents the distance from the spherical point represented by the embedding/encoding to the yellow star point in the middle. The mapping from the SHDD encoding space is significantly smoother.  
+
+Diffusion models have demonstrated great potential in directly and stably generating continuous outputs such as images and modeling complex distributions. They are commonly applied to points in Euclidean spaces (Song et al., 2020; Ho et al., 2020b; Song et al., 2021) or the geometric structures defined in Euclidean spaces (Xu et al., 2023). This motivates us to develop diffusion-based image geolocalization methods that output location predictions on the spherical surface with arbitrary spatial resolution and without dependence on predefined grid cells or galleries. However, naively performing diffusion in the coordinate space faces two major drawbacks. First, geographical locations do not form a Euclidean space. They reside on an embedded Riemannian manifold1. Diffusion in the geographical coordinate space is ineffective because of projection distortion and sparsity, i.e., performing diffusion on the XYZ coordinates will likely lead to a point that is not on the spherical surface. It is possible to perform diffusion on the manifolds, but it is very computationally expensive (Huang et al., 2022). Second, more importantly, raw coordinates cannot represent rich multi-scale geographical information or modeling complex spatial distributions (Mai et al., 2023b; Rußwurm et al., 2024). In order to achieve good modeling power for complex distributions over space, location representation methods (Mac Aodha et al., 2019; Mai et al., 2020b; 2022; 2023b; Rußwurm et al., 2024; Wu et al., 2024) commonly adopt multi-scale position encoding with deterministic transformations followed by learnable location embedding layers. 2Diffusion in the coordinate space would require non-standard diffusion model with multi-scale representations internally.  
+
+Despite their wide applicability, neither the position encoding space nor the location embedding space is suitable for developing a location diffusion model due to sparsity problem during diffusion and non-linearity problem during decoding as illustrated in Figure 1(1)(2). On the one hand, the position encoding space has a “sparsity problem”. The position encoding layer commonly increase the dimensionality of the representation significantly from the coordinate space. Therefore, all valid positional encodings form a very low-dimensional manifold embedded in a high-dimensional Euclidean space. If we diffuse in the embedded high-dimensional space and train a decoder to map Euclidean points back to geographic coordinates, the sparsity of position encodings (from the available training data) makes it very difficult to learn smooth local interpolations that generalizes to unseen data. On the other hand, while the location embedding space is dense and suitable for forward and backward diffusion processes, it leads to the difficulty to learn an inverse mapping which decodes the location embedding directly back to the coordinate space, skipping the position encoding space, because of the non-linear mapping between position encodings and location embeddings. We hypothesize that the ideal space to develop latent diffusion models for spherical location generation should be both dense and easy to find projections back to the coordinate space. Motivated by this observation, we propose a novel spherical position encoding method called Spherical Harmonics Dirac Delta (SHDD) Representation. Figure 1(3)(4) illustrates how our method addresses the sparsity problem by encoding a spherical point $(\theta_{0},\phi_{0})$ as a spherical Dirac delta function $\delta_{(\theta_{0},\phi_{0})}$ . In the SHDD encoding space, every point uniquely corresponds to a spherical function and can be seen as a noised spherical Dirac delta function. The level of noise $\mathcal{E}$ can be continuously measured by the reverse KL-divergence between $F_{\mathbf{e}}$ and $\delta_{(\theta_{0},\phi_{0})}$ . Then the latent diffusion in the SHDD encoding space equals gradually adding noise to the ground-truth $\delta_{(\theta_{0},\phi_{0})}$ (forward process) and find a sequence of $F_{\mathbf{e}}$ that gradually reduce (backward process). During decoding, the learning-free SHDD Decoder evaluates the corresponding spherical function $F_{\mathbf{e}}$ and decodes it as the spherical point whose corresponding spherical Dirac delta function minimizes $\mathcal{E}$ . Figure 1 4(b) demonstrates that our SHDD encoding space shows less decoding non-linearity than existing location representation learning methods such as Sphere2Vec (Mai et al., 2023b) and Rußwurm et al. (2024). Therefore, diffusion in the SHDD encoding space will be more stable and easier to converge. Equipped with the Hilbert (i.e. infinite dimensional Euclidean) SHDD encoding space and the SHDD decoder, we can now perform conventional latent diffusion for location generation. We propose a novel SirenNet-based architecture called Conditional Siren-UNet (CS-UNet) to learn the conditional backward diffusion process, i.e, to generate spherical points from random Gaussian noise given conditions such as images and texts. We call the integrated framework, including SHDD encoding, CS-UNet latent diffusion, and SHDD decoding, which enables efficient conditional generation of spherical points, the LocDiffusion model. On global image geolocalization tasks, the performance of LocDiffusion competes with state-of-the-art models, and is proven to be more spatially generalizable than existing retrieval based geolocalization models by ablation experiments. 2 RELATED WORK Geolocalization by classification and retrieval. Traditional geolocalization methods typically employ either a classification approach or an image retrieval approach. The former divides the Earth’s surface into non-overlapping or hierarchical grid cells and classifies images accordingly (Pramanick et al., $2022\mathbf{a}$ ; Vo et al., 2017; Muller-Budack et al., 2018) while the later approach identifies the location of a given image by matching it with a database of image-location pairs (Shi et al., 2020; Zhu et al., 2023; Zhou et al., 2024). Using fewer cells results in lower location prediction accuracy, while using smaller grids reduces the number of training examples per class and risks overfitting (Seo et al., 2018). On the other hand, retrieval-based systems usually suffer from poor search quality and inadequate coverage of the global geographic landscape. Diffusion in the coordinate space. Conventional diffusion models cannot function well in the spherical coordinate space (e.g., 3D coordinates representing points on a sphere) because valid points for diffusion are too sparse, i.e., adding or removing noise to a point on the manifold almost always results in a point outside the manifold. While certain coordinates such as latitude and longitude can remain in the valid manifold with noises, these spaces are non-Euclidean and not suitable for existing denoising diffusion implicit model (DDIM) models (Song et al., 2021). They can also cause significant distortions in localization (e.g., in regions with high latitudes).  
+
+Riemannian diffusion models. There are two common strategies in the past to address the above problem. The first strategy is to project a point on the sphere to its tangent space (which is Euclidean), add/remove noise in the tangent space, and re-project the noised/denoised point in the tangent space back to the surface (Rozen et al., 2021). The second strategy is to derive formulas for direct Riemannian diffusion (Huang et al., 2022). The main drawback of both strategies is their computational complexity. In the first case, each projection operation takes time, making acceleration based on DDIM (Song et al., 2021) impossible, because the projections are accurate only when the diffusion steps are adequately small. In the second case, the Riemannian diffusion formulation is much more complicated than the Euclidean version. The model architectures, training tricks, and other useful techniques developed for conventional diffusion models can not be easily transferred.  
+
+Location Embedding. The distinction between positional encoding and location embedding lies in semantics: the positional encoding is only a task-agnostic transformation of the coordinates of $\mathbf{x}$ , but the location embedding carries task-specific information. For example, it can contain information about spatial distributions of species if trained on geo-aware species fine-grained recognition tasks (Mac Aodha et al., 2019; Mai et al., 2023b;a; Cole et al., 2023). Some prior work on location encoding, such as NeRF (Mildenhall et al., 2020), utilized positional encoding to represent location information. This task-agnostic method focuses on capturing the position or order of elements within a sequence. In contrast, many location encoders are specifically designed to capture context-aware or spatially-aware location information. These encoders can be categorized into two groups: 2D location encoders (Berg et al., 2014; Tang et al., 2015; Mac Aodha et al., 2019; Mai et al., 2020b), which operate in projected 2D space, and the other is 3D location encoders (Mai et al., 2023b; Rußwurm et al., 2024) which interpret geolocation as 3D coordinates on earth surface. Please refer to A.  
+
+
+
+\section{3 PRELIMINARIES  }
+
+
+
+
+\section{3.1 REAL BASIS OF SPHERICAL HARMONICS  }
+
+
+Let $\mathbf{p}=(\theta,\phi)$ be a location on the spherical surface using conventional angular coordinates where $\theta\in[0,\pi)$ and $\phi\in[0,2\pi)$ . For any function $F(\theta,\phi)$ on the sphere, there exists a unique infinitedimensional real-valued vector of coefficients $\{C_{l m}\}$ (we may call it coefficient vector) such that  
+
+$$
+\forall(\theta,\phi),F(\theta,\phi)=\sum_{l=0}^{\infty}\sum_{m=-l}^{l}C_{l m}Y_{l m}(\theta,\phi)
+$$  
+
+where $l$ is called degree and $m$ is called order and $Y_{l m}(\theta,\phi)$ is the real basis of spherical harmonics at degree $l$ and order $m$ .2. In this way, any function on the sphere can be uniquely represented by its coefficient vector.  
+
+
+
+\section{3.2 SPHERICAL DIRAC DELTA FUNCTION  }
+
+
+Conventionally, a Dirac delta function $\delta$ is defined as a distribution on the real line where all probability mass concentrates on one single value, i.e., a single-point distribution. Analogously, a spherical Dirac delta function is a probability density function over the spherical surface whose mass all concentrates on one point:  
+
+$$
+\delta_{(\theta_{0},\phi_{0})}(\theta,\phi)=\left\{\infty\quad\theta=\theta_{0},\phi=\phi_{0}\right.
+$$  
+
+Therefore, we can use a spherical Dirac delta function to uniquely represent any point $(\theta_{i},\phi_{i})$ on the sphere by mapping it to $\delta_{(\theta_{i},\phi_{i})}$ . Representing a point as a function allows us to use spherical harmonics to represent points on the spherical surface.  
+
+
+
+\section{4 LOCDIFFUSION FRAMEWORK  }
+
+
+In this section, we will introduce the theory and techniques we employ in our LocDiffusion model that enable spherical location generation via latent diffusion. Our aim is to find a position encoding space that does not suffer from the sparsity problem and the non-linearity problem so we can efficiently perform latent diffusion. We first analyze what properties we need to achieve this and propose the Spherical Harmonics Dirac Delta (SHDD) Encoding-Decoding framework accordingly. Then we prove that SHDD satisfies all the desired properties. Following that, we propose the Conditional Siren-UNet (CS-UNet) architecture to learn the conditional backward process for latent diffusion. We also develop computational techniques based on the properties of SHDD representation so that the training and inference of LocDiffusion are efficient.  
+
+4.1 PROBLEM SETUP AND INTUITIONS  
+
+As we have outlined in the introduction, our goal is to find a position encoding method that encodes the spherical surface into a dense subset of $\bar{\mathbb{R}}^{d}$ (ideally the entire $\mathbb{R}^{d}$ ) and accurately decode points back to spherical coordinates. There are several mathematical properties such position encoding and decoding method should have. For rigorous discussions, we give definitions of the aforementioned properties and demonstrate how they guide the finding of our SHDD encoding-decoding framework.  
+
+Definition 4.1 (Coordinate Space) A Coordinate Space $\mathcal{C}$ can be any space with a parametrization, such as Euclidean space with the Descartes coordinate system. In this paper, $\mathcal{C}$ always refers to the unit sphere surface embedded in $\mathbb{R}^{3}$ with the conventional angular coordinate system $(\theta,\phi)$ .  
+
+Definition 4.2 (Position Encoding and Position Decoding) A Position Encoder $\mathbb{P}\mathbb{E}:\mathcal{C}\to\mathbb{R}^{d}$ is an injective function, usually $d\gg3$ . $S_{\mathbb{P E}}:=\mathbb{P E}(\mathcal{C})\subset\mathbb{R}^{d}$ is called the Position Encoding Space. A Position Decoder $\mathbb{P}\mathbb{D}:\mathbb{R}^{d}\rightarrow{\mathcal{C}}$ is a surjective function.  
+
+The sparsity problem: Since we are projecting a set of 2-dimensional points in $\mathcal{C}$ into a highdimensional Euclidean space $S_{\mathbb{P}\mathbb{E}}$ , dense filling is impossible. However, if we define a difference measure $\mathcal{E}:\mathbb{R}^{d}\times\mathbb{R}^{d}\rightarrow\bar{\mathbb{R}}$ , then $S_{\mathbb{P E}}$ can be partitioned by the following equivalence relation:  
+
+$$
+\mathbf{e}\sim\mathbf{e}^{\prime}\leftarrow\arg\operatorname*{min}_{\mathbf{s}\in S_{\mathbb{P}\mathbb{E}}}\mathcal{E}(\mathbf{e},\mathbf{s})=\arg\operatorname*{min}_{\mathbf{s}\in S_{\mathbb{P}\mathbb{E}}}\mathcal{E}(\mathbf{e}^{'},\mathbf{s})
+$$  
+
+that is, we can assign every point $\textbf{s}\in\ S_{\mathbb{P}\mathbb{E}}$ to the nearest positional encoding (consequently, a spherical point) in terms of $\mathcal{E}$ . We say the $\mathcal{E}$ -equivalence classes densely fill $\mathbb{R}^{d}$ . Further, a learningfree decoder exists as  
+
+$$
+\mathbb{P}\mathbb{D}_{\mathcal{E}}(\mathbf{e}):=\{\mathbf{p}\in\mathcal{C}|\mathbf{e}\stackrel{\mathcal{E}}{\sim}\mathbb{P}\mathbb{E}(\mathbf{p})\}=\underset{\mathbf{p}\in\mathcal{C}}{\arg\operatorname*{min}}\,\mathcal{E}(\mathbf{e},\mathbb{P}\mathbb{E}(\mathbf{p}))
+$$  
+
+If $\mathcal{E}$ is continuous, i.e.  
+
+$$
+\forall\mathbf{s}\in S_{\mathbb{P E}},(\mathbf{e}\to\mathbf{s})\Rightarrow(\mathcal{E}(\mathbf{e},\mathbf{s})\to0)
+$$  
+
+then the sparsity problem is resolved, since now diffusion in $S_{\mathbb{P E}}$ equals a random walk among spherical points and small perturbation will not result in an abrupt jump on the spherical surface.  
+
+The non-linearity problem: Since the diffusion model has intrinsic randomness, it is possible that the generated e corresponds to a wrong s. If the mapping between s and its corresponding spherical point $\mathbf{p}=\mathbb{P}\mathbb{D}_{\mathcal{E}}(\mathbf{s})$ is highly non-linear (e.g., in the location embedding space), the decoder $\mathbb{P}\mathbb{D}_{\mathcal{E}}$ will then be very unstable (see Figure 1). Thus, we hope that for a large tolerance $\eta>0$ and a small shift $\Delta>0$ , the following property holds for our decoder $\mathbb{P}\mathbb{D}_{\mathcal{E}}$ :  
+
+$$
+\forall\mathbf{s}\in S_{\mathbb{P}\mathbb{E}},\mathcal{E}(\mathbf{e},\mathbf{s})<\eta\Rightarrow d_{\mathcal{C}}(\mathbb{P}\mathbb{D}_{\mathcal{E}}(\mathbf{e}),\mathbb{P}\mathbb{D}_{\mathcal{E}}(\mathbf{s}))<\Delta
+$$  
+
+where $d_{C}$ is the distance in the spherical coordinate space (e.g., the great circle distance). If this property is satisfied, the non-linearity problem is resolved.  
+
+It is not an easy task to find such $\mathcal{E}$ , especially considering computational constraints (e.g., it is impossible to exactly evaluate the arg min function in Equation 3). Fortunately, we find that by treating spherical points as special spherical functions and represent them using Spherical Harmonics coefficients, we can define $\mathcal{E}$ as spherical KL-divergence which satisfies all the desirable properties mentioned above, thus addressing the sparsity and the non-linearity problems as a whole. Moreover, the choice of Spherical Harmonics coefficients also enables efficient computation.  
+
+4.2 SPHERICAL HARMONICS DIRAC DELTA (SHDD) ENCODING  
+
+As discussed in Section 3.2, we can represent spherical points as spherical Dirac delta functions. Consider Section 3.1, a spherical Dirac delta function can be encoded as an infinite-dimensional real-valued coefficient vector, i.e. a point in a Hilbert space. Here, $\cup$ denotes vector concatenation.  
+
+$$
+\mathbb{P}\mathbb{E}_{\mathrm{SHDD}}(\theta_{0},\phi_{0}):=\bigcup_{l=0}^{\infty}\bigcup_{m=-l}^{l}[C_{l m}]
+$$  
+
+Thus, the spherical harmonics coefficient vector can be used to uniquely represent a point $(\theta_{0},\phi_{0})$ on the sphere. In practice, it is impossible to deal with infinite-dimensional coefficient vectors. It is also impossible to deal with the infinite probability density of spherical Dirac delta functions. These two practical constraints, fortunately, can be settled as a whole: we truncate the coefficient vector up to its leading $(L+1)^{2}$ dimensions, where $L$ is the maximum degree of associate Legendre polynomials. Therefore, the $L$ -degree representation of point $(\theta_{0},\phi_{0})$ is defined as  
+
+$$
+\mathbb{P}\mathbb{E}_{\mathrm{SHDD}}^{L}(\theta_{0},\phi_{0}):=\bigcup_{l=0}^{L}\bigcup_{m=-l}^{l}[C_{l m}]
+$$  
+
+We call this $(L\!+\!1)^{2}$ -dimensional real-valued vector the $L$ -degree Spherical Harmonics Dirac Delta (SHDD) Representation of $(\theta_{0},\phi_{0})$ and $\mathbb{P}\mathbb{E}_{\mathrm{SHDD}}$ the SHDD encoder. Each SHDD representation corresponds to an approximation of the true spherical Dirac delta function $\delta_{(\theta_{0},\phi_{0})}$ , whose probability density concentrates in a region surrounding $(\theta_{0},\phi_{0})$ rather than a single point, solving the infinite density problem. The Legendre polynomials have finer granularity as their degree $L$ increases, which makes SHDD representations, like other frequency-based location encoding methods such as Sphere2Vec (Mai et al., 2023b), capable of capturing multi-scale spatial information.  
+
+Problems remain on how to find the values of $C_{l m}$ . For arbitrary spherical functions, $C_{l m}$ needs to be iteratively computed. However, for spherical Dirac delta functions, we can efficiently obtain $C_{l m}$ thanks to the fact that the coefficients of the Legendre polynomials are the values of the Legendre polynomials at $(\theta_{0},\phi_{0})$ (Arfken et al., 2011), i.e.,  
+
+$$
+F\equiv\delta_{(\theta_{0},\phi_{0})}\Leftrightarrow\forall(\theta,\phi),F(\theta,\phi)=\sum_{l=0}^{\infty}\sum_{m=-l}^{l}Y_{l m}(\theta_{0},\phi_{0})Y_{l m}(\theta,\phi)
+$$  
+
+That is, for spherical Dirac delta functions, $C_{l m}\,\equiv\,Y_{l m}(\theta_{0},\phi_{0})$ for any $l$ and $m$ . So instead of iteratively computing $\{C_{l m}\}$ in the general case, the encoding procedure can be reduced to a simple look-up of $Y_{l m}$ values.  
+
+It is worth noting that while the SHDD representation in Equation 8 has the same expression as the SH positional encoding used in a recent work (Rußwurm et al., 2024), they refer to distinct mathematical objects. The SH positional encoding of a point $(\theta_{0},\phi_{0})$ in their work is the sequence of evaluated $Y_{l m}\bar{(\theta_{0},\phi_{0})}$ values, which forms a sparse feature space. The SHDD representation of a point $(\theta_{0},\phi_{0})$ in our work is the $C_{l m}$ values of the corresponding spherical Dirac delta function $\delta_{(\theta_{0},\phi_{0})}$ , whose $\mathcal{E}$ -equivalence classes form a Hilbert coefficient space. The reason that the two types of positional encodings coincidentally have identical expressions is only because spherical Dirac functions satisfy Equation 9, i.e., $C_{l m}\equiv Y_{l m}(\theta_{0},\phi_{0})$ .  
+
+4.3 THE SHDD DISTANCE MEASURE  
+
+SHDD KL-Divergence An $L$ -degree SHDD representation corresponds to a spherical Dirac delta function $\delta$ , and an arbitrary $\mathbb{R}^{(L+1)^{2}}$ vector corresponds to certain spherical function $F$ . Thus, we can use the reverse KL-divergence between (the normalized) $F$ and $\delta$ as the difference measure $\mathcal{E}$ . Let $p_{(\theta,\phi)}$ and $q_{\mathrm{e}}$ be the normalized probability distributions corresponding to the SHDD representation of $(\theta,\phi)$ and an arbitrary $\mathbb{R}^{(L+1)^{2}}$ vector $\begin{array}{r}{\mathbf{e}=\bigcup_{l=0}^{L}\bigcup_{m=-l}^{l}\left[e_{l m}\right]}\end{array}$ . Specifically,  
+
+$$
+p_{(\theta,\phi)}(u,v):=\exp\left(\sum_{l=0}^{L}\sum_{m=-l}^{l}Y_{l m}(\theta,\phi)Y_{l m}(u,v)\right)/Z(\mathbb{P}\mathbb{E}_{\mathrm{SHDD}}(\theta,\phi))
+$$  
+
+$$
+q_{\mathbf{e}}(u,v):=\exp\left(\sum_{l=0}^{L}\sum_{m=-l}^{l}e_{l m}Y_{l m}(u,v)\right)/Z(\mathbf{e})
+$$  
+
+Here $\begin{array}{r}{Z(\mathbf{e})\;=\;\int_{u^{\prime}=0}^{u^{\prime}=\pi}\int_{v^{\prime}=0}^{v^{\prime}=2\pi}\exp\left(\sum_{l=0}^{L}\sum_{m=-l}^{l}e_{l m}Y_{l m}(u^{'},v^{'})\right)\mathbf{d}u^{'}\mathbf{d}v^{'}}\end{array}$ is a normalization constant and the exponential ensures that probabilities are non-negative. The SHDD KL-divergence  
+
+$$
+{\mathcal{L}}_{\mathrm{SHDD-KL}}(\mathbf{e},{\mathbb{P}}{\mathbb{E}}_{\mathrm{SHDD}}((\theta,\phi))):=\int_{u=0}^{u=\pi}\int_{v=0}^{v=2\pi}q_{\mathbf{e}}(u,v)\log{\frac{q_{\mathbf{e}}(u,v)}{p_{(\theta,\phi)}(u,v)}}\mathbf{d}u\mathbf{d}v
+$$  
+
+It is easy to verify that the SHDD KL-divergence is a continuous difference measure. As for the property described in Equation 6, notice that by Gibbs & Su (2002), the Wasserstein-2 distance $W_{2}$ between $p_{(\theta,\phi)}$ and $q_{\mathbf{e}}$ is bounded by the KL-divergence in the following inequality:  
+
+$$
+W_{2}^{2}(p_{(\theta,\phi)},q_{\mathrm{e}})\leq C\mathcal{L}_{\mathrm{SHDD-KL}}(\mathbf{e},\mathbb{P}\mathbb{E}_{\mathrm{SHDD}}((\theta,\phi)))
+$$  
+
+$C$ being a finite constant. $W_{2}$ , being the Earth Mover’s Distance, quantifies the amount of probability mass transport between two distributions. Thus, when $\mathcal{L}_{\mathrm{SHDD-KL}}(\mathbf{e},\mathbb{P}\mathbb{E}_{\mathrm{SHDD}}((\theta,\phi))$ is small, the difference in probability mass distribution is also small, and consequently the largest-mass-region found by the mode-seeking SHDD decoder will also remain mostly unchanged. Figure 1 visualizes this with concrete examples (pretrained Sphere2Vec location encoder and learned neural decoder v.s. our SHDD encoder and decoder) using heatmaps.  
+
+4.4 SHDD DECODING  
+
+KL-Divergence SHDD Decoder Following Equation 4, the KL-Divergence SHDD Decoder is:  
+
+$$
+\mathbb{P D}_{\mathrm{KL}}(\mathbf{e}):=\underset{(\boldsymbol{\theta},\boldsymbol{\phi})}{\arg\operatorname*{min}}\,\mathcal{L}_{\mathrm{SHDD-KL}}\big(\mathbf{e},\mathbb{P}\mathbb{E}_{\mathrm{SHDD}}\big((\boldsymbol{\theta},\boldsymbol{\phi})\big)\big)
+$$  
+
+It is impractical to compute $\mathbb{P}\mathbb{D}_{\mathrm{KL}}$ exactly. Luckily, Equation 9 makes a natural simplification possible. Notice that minimizing reverse KL-divergence leads to mode-seeking behavior (Minka et al., 2005), i.e. the $(\theta,\phi)$ that satisfies Equation 14 should fall within the region with the largest probability mass. Thus, we can decode e by finding the center of its probability mass concentration.  
+
+Mode-Seeking SHDD Decoder Let $\begin{array}{r}{\mathbf{e}\,=\,\bigcup_{l=0}^{L}\bigcup_{m=-l}^{l}\left[e_{l m}\right]}\end{array}$ be an arbitrary vector in $\mathbb{R}^{(L+1)^{2}}$ , then the position decoder $\mathbb{P}\mathbb{D}_{\mathrm{mode}}$ is defined as  
+
+$$
+\mathbb{P}\mathbb{D}_{\mathrm{mode}}(\mathbf{e};\rho):=\underset{(\theta,\phi)}{\mathrm{arg}\,\mathrm{max}}\{\int_{u=\theta-\rho}^{u=\theta+\rho}\int_{v=\phi-\rho}^{v=\phi+\rho}\exp\left(\sum_{l=0}^{L}\sum_{m=-l}^{l}e_{l m}Y_{l m}(u,v)\right)\mathbf{d}u\mathbf{d}v\}
+$$  
+
+where $\rho$ is a hyperparameter that controls the granularity of the evaluation. There is trade-off between decoding spatial resolution and decoding stability: when $\rho$ is large, we only know the rough range of $(\theta,\phi)$ but the result is less sensitive to local spikes, and vice versa.  
+
+One advantage of adopting the SHDD decoder is its learning-free property. Unlike learned neural decoders, there is no loss introduced during the decoding stage. Besides, the mapping from diffusion outputs to spherical coordinates is shown to be continuous and relatively smooth. Therefore, it is safe to train latent diffusion models only using the SHDD KL-divergence loss $\mathcal{L}_{\mathrm{SHDD-KL}}$ .  
+
+Another critical advantage is that the spatial resolution of our SHDD decoder is arbitrary (i.e., real-valued), and not dependent on partitions of the spherical surface or the spatial distributions of image/location galleries. This is because the SHDD representation is in effect a continuous spherical function and in theory one can evaluate it in arbitrary resolution. The only two constraints are the maximum degree of Legendre polynomials $L$ which limits the spatial resolution of the spherical function itself and the computational resources (e.g., float32 or float64, evaluation granularity $\rho)$ , both being independent from other factors.  
+
+
+
+\section{4.5 CONDITIONAL SIRENNET-BASED UNET (CS-UNET) ARCHITECTURE  }
+
+
+Inspired by the findings of Rußwurm et al. (2024), we explored different options eventually used SirenNet (Sitzmann et al., 2020) as the backbone of our diffusion model.2). Using sine as the activation function helps preserve gradients because the derivatives of sinusoidal/cosinusoidal functions are still sinusoidal and cosinusoidal functions.  
+
+![](images/6e70679590d4bedfe89ec0d3667ae504f76094e32583180b8780e259bb618e61.jpg)  
+Figure 2: (a): The architecture of Condition SirenNet Module (C-Siren). $x$ is the input latent vector, $\nsim^{\prime}$ $_x$ is the output latent vector, $t$ is the scalar timestep, and $e_{I}$ is the embedding of the input image. $d_{i}$ is the input dimension, $d_{o}$ is the output dimension, $d_{T}$ is the time embedding dimension, $d_{I}$ is the conditional embedding dimension. ${\bf(b)}$ : The architecture of Conditional SirenNet-Based UNet (CS-UNet) and the workflow of LocDiffusion. $d$ is the latent dimension. The numbered circles denote the order of training steps.  
+
+Figure 2(a) depicts the network architecture of the Conditional SirenNet (C-Siren) module. The design is straightforward: inputs are the latent vector $x$ , the image condition embedding $e_{I}$ , and the diffusion step $t$ . First, we use feed-forward layers to project $x$ and $e_{I}$ into hidden vectors $h_{x},\,h_{I}$ . Then we use the sinusoidal embedding layer (Song et al., 2021) and feed-forward layers to project the discrete diffusion timestep $t$ into a scale vector $\alpha_{t}$ and a shift vector $\epsilon_{t}$ . Then, we transform $h_{x}$ into $h_{x}=(1+\alpha_{t})\odot h_{x}+\overbar{\epsilon}_{t}$ , which is an unconditional denoising step. Following that, we sum the transformed $h_{x}$ and the condition $h_{I}$ and pass the sum to a feed-forward layer, which adjusts the denoising step under the guidance of the condition. Finally, output the sine-activated hidden vector to the next C-Siren module. Figure 2(b) completely describes the architecture of the Conditional SirenNet-Based Unet (CS-UNet).  
+
+
+
+\section{4.6 LOCDIFFUSION  }
+
+
+Next, we introduce the training cycle of our LocDiffusion model as illustrated in Figure 2(b). A training data sample includes an input image I and its associated geolocation $\mathbf{p}\,=\,(\theta,\phi)$ serving as the prediction target. First, we use a frozen CLIP-based image encoder (Radford et al., 2021) to encode the image I into an image embedding $e_{I}$ . Then, we encode the geolocation $\mathbf{p}=(\theta,\phi)$ into its SHDD representation $\mathbb{P}\mathbb{E}_{\mathrm{SHDD}}(\theta,\phi)$ and store them in a look-up table. Following that, we perform a standard DDPM training (Ho et al., 2020a) based on the proposed CS-UNet architecture as shown in Figure 2(b). In a forward pass in the latent diffusion process, the spherical Dirac delta function $\delta_{(\theta_{0},\phi_{0})}$ defined by $\mathbb{P}\mathbb{E}_{\mathrm{SHDD}}(\theta,\phi)$ will be gradually added noise until being reduced to a vector whose values in each dimension are purely generated from Gaussian noise. In a backward pass of the latent diffusion model, the CS-UNet will start with a noise vector and gradually recover the $\delta_{(\theta_{0},\phi_{0})}$ spherical function. We implement the DDPM algorithm based on the open-source PyTorch implementation3. We use the SHDD KL-divergence $\mathcal{L}_{\mathrm{SHDD-KL}}$ between the ground-truth SHDD representation $\mathbb{P}\mathbb{E}_{\mathrm{SHDD}}(\theta,\phi)$ and the diffusion output as the training objective, because it is more computationally stable and preserves the spatial multi-scalability than the spherical MSE (e.g. great circle distance) loss. During inferencing, we sample coefficient vectors from Gaussian noise conditioned on CLIP-based image embeddings and use $\mathbb{P}\mathbb{D}_{\mathrm{mode}}$ to predict locations.  
+
+There are two important implementation details worth mentioning. In practice, the integrals in Equation 12 and Equation 15 are approximated by summation. More specifically, we select a set of $N$ anchor points $\bar{\mathcal{A}_{N}}=\{(\theta_{i},\phi_{i})\in\bar{\mathcal{C}}\}_{i=1}^{N}$ on the sphere, and  
+
+$$
+\mathcal{L}_{\mathrm{SHDD-KL}}(\mathbf{e},\mathbb{P}\mathbb{E}_{\mathrm{SHDD}}(\theta,\phi))=\sum_{i=1}^{N}q_{\mathbf{e}}(\theta_{i},\phi_{i})\log\frac{q_{\mathbf{e}}(\theta_{i},\phi_{i})}{p_{(\theta,\phi)}(\theta_{i},\phi_{i})}
+$$  
+
+432   
+433   
+434   
+435   
+436   
+437   
+438   
+439   
+440   
+441   
+442   
+443   
+444   
+445   
+446   
+447   
+448   
+449   
+450   
+451   
+452   
+453   
+454   
+455   
+456   
+457   
+458   
+459   
+460   
+461   
+462   
+463   
+464   
+465   
+466   
+467   
+468   
+469   
+470   
+471   
+472   
+473   
+474   
+475   
+476   
+477   
+478   
+479   
+480   
+481   
+482   
+483   
+484   
+485  
+
+$\mathbb{P}\mathbb{D}_{\mathrm{mode}}(\mathbf{e};\rho)=\underset{(\theta,\phi)}{\operatorname{arg\,max}}\sum_{i=1}^{N}\mathbb{I}\{d_{C}((\theta,\phi),(\theta_{i},\phi_{i}))<\rho\}\exp\left(\sum_{l=0}^{L}\sum_{m=-l}^{l}e_{l m}Y_{l m}(\theta_{i},\phi_{i}))\right)$ (17) $\mathcal{L}_{\mathrm{SHDD-KL}}$ is used for training, thus we random sample $N=2048$ anchor points over the globe for each mini-batch to avoid overfitting. As for $\mathbb{P}\mathbb{D}_{\mathrm{mode}}$ , the choice of $\mathcal{A}_{N}$ introduces inductive bias – the regions with more anchor points have heavier impact on the decoding results and higher spatial resolutions. However, Table 2 shows that LocDiffusion performs stably well on different $\boldsymbol{A}_{N}$ .  
+
+
+
+\section{5 EXPERIMENTS  }
+
+
+Table 1: Main experimental results. Evaluation setup is identical to Vivanco et al. (2023). The GeoCLIP model retrieves locations from the $100\mathbf{k}$ gallery provided in its code-base which aligns well with the spatial distribution of test images. $L$ is the degree of SHDD representations used in our model. Bold numbers denote the best performance on the corresponding dataset.  
+
+![](images/227f8e245565d9d16329a657791c3b3f9eee9b5eec2cb79b5d247bcda02d1622.jpg)  
+
+Table 2: Generalizability experiment results on $\mathrm{Im}2\mathrm{GPS}3\mathrm{k}$ Dataset. Bold numbers denote the best results obtained in the given model and gallery/anchor setting. Numbers in the brackets denote the percentage performance degrdation relative to the prior knowledge gallery/anchor.  
+
+![](images/9f80dfe03e4033d1bbeb8c0779aec131ec1c4124040ce6c9cb9787e27c1f41c9.jpg)  
+
+Table 3: Training Set-up   
+
+![](images/f358cde4674b117b757772dec6f61885d1256ec760d077a1755022be5af48cf1.jpg)  
+
+
+
+\section{5.1 EXPERIMENTAL SETUP  }
+
+
+We in general follow the experimental setup of GeoCLIP Vivanco et al. (2023), the SOTA model for image geolocalization, for a fair comparison. The training dataset is MP16 (MediaEval Placing Tasks 2016, Larson et al. (2017)) containing 4.72 million geotagged images. The test datasets are Im2GPS3k (Hays & Efros, 2008) and YFCC26k (Thomee et al., 2016). The GWS15k (Clark et al.,  
+
+2023) reported in GeoCLIP is unfortunately not publicly available. For each test image, our model conditionally generate 16 locations and use their geographical center as the prediction. Then we count how many predictions fall into the neighborhoods of the ground-truth locations at different scales ( $\mathrm{~1~km~}$ , $25~\mathrm{km}$ , $200~\mathrm{km}$ , $750~\mathrm{km}$ and $2500~\mathrm{km}$ ) respectively. Table 3 lists the details of our training setup. We use an Adam optimizer.  
+
+
+
+\section{5.2 MAIN RESULTS  }
+
+
+Table 1 summarizes the geolocalization performance of our LocDiffusion model against baselines. On Continent $(2500\,\mathrm{km})$ , Country $(750\,\mathrm{km})$ , and Region $(200\,\mathrm{km})$ levels, our model can outperform the SOTA GeoCLIP model. On the finer scales ( $1\;\mathrm{km}$ and $25\;\mathrm{km},$ ), however, we show inferior performance due to the restricted spatial resolution of SHDD representation. With $L=47$ , the intrinsic variance of the SHDD decoder is around $200\,\mathrm{km}$ , making predictions on the $1\,\,\mathrm{km}$ and $25\,\mathrm{km}$ scales less reliable.3. Instead of unlimitedly increase $L$ for higher spatial resolution, we find that combining the advantages of LocDiffusion and retrieval-based models such as GeoCLIP is more efficient: we use LocDiffusion to generate candidate locations, and restrict the retrieval of GeoCLIP to the 200 km radius region around the candidate locations. The performance improves on all scales compared to using solely LocDiffusion or GeoCLIP.   
+Beyond performance numbers, the biggest advantage of generative geolocalization over traditional classification/retrieval-based geolocalization methods is that it completely gets rid of predefined spatial classes and location galleries. As is admitted in Vivanco et al. (2023), the performance of retrieval-based geolocalization methods depends heavily on the quality of the gallery – i.e., how well the candidate locations in the gallery cover the test locations. For example, GeoCLIP uses a $100\mathrm{k}$ gallery with locations drawn from MP16 training data. When using this gallery for the $\mathrm{GWS15k}$ dataset, the performance drops because there are unseen locations. It was also noticed that GeoCLIP’s performance drops when an evenly sampled grid on Earth is used. At small scales this is explainable because the grids are too coarse to predict $1\;\mathrm{km}$ to $25\;\mathrm{km}$ objects. However, at large scales, the performance of GeoCLIP should not be significantly affected, but it is not the case. See the results in Table 2. With 1 million grid points, the average distance between two candidates is less than $30\,\mathrm{km}$ . However, the performance of GeoCLIP at the $200\,\mathrm{km}$ , $750\,\mathrm{km}$ and $2500\,\mathrm{km}$ scales (way larger than $30\;\mathrm{km})$ is still much lower than the performance when using 100K MP16 gallery locations. It indicates that the decline in performance is due to GeoCLIP’s weak generalization to new, unseen locations. We can see that the gallery has a strong inductive bias that narrows the spatial scope, and makes the retrieval model easier to overfit, but hurts its spatial generalizability. Our LocDiffusion model, though also uses anchor points for decoding (training is random), is almost unaffected by the choice of anchor points. To align with GeoCLIP, we use the same MP16 gallery and evenly sample grid points as decoding anchor points. We can see, at the smaller scales, just like GeoCLIP, introducing the MP16 gallery helps improve the accuracy because its spatial inductive bias helps offset the vagueness of decoding. However, at larger scales, the performance of LocDiffusion is almost independent of the choice of anchors – both the way how we pick the anchor points (MP16 or even grid) and the total number of anchor points (from 21k to 1M). It is a strong indicator of better spatial generalizability for LocDiffusion.  
+
+
+
+\section{6 CONCLUSION, LIMITATIONS AND FUTURE WORK  }
+
+
+In this paper, we propose a novel SHDD encoding-decoding framework that enables latent diffusion for spherical location generation. We also propose a CS-UNet architecture to learn conditional diffusion and train a LocDiffusion model that addresses the image geolocalization task via generation. LocDiffusion achieves competitive geolocalization performance and demonstrates significantly better spatial generalizability. The major limitation of this work is that to accurately generate locations at finer scales, we need to quadratically increase the SHDD encoding dimension, which is computationally demanding. We aim to explore solutions such as hierarchical generation and random SHDD representations that reduce the space complexity from $L^{2}$ to linear.  
+
+Ethics Statement All datasets we use in this work including the MP16, Im2GPS3k, and YFCC  
+26k datasets are publicly available datasets. No human subject study is conducted in this work. We   
+do not find specific negative societal impacts of this work.   
+Reproducibility Statement Our source code has been uploaded as a supplementary file to repro  
+duce our experimental results. The implementation details of the spectral encoder are described in   
+Section 4.5 and 4.6. The hyperparameters used for LocDiffusion are shown in Table 3.   
+
+

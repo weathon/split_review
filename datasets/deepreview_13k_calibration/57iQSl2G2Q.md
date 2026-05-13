@@ -1,8 +1,8 @@
 # Safe Bayesian Optimization for Complex Control Systems via Additive Gaussian Processes
 
 - Decision: Reject
-- Avg Score: 2.20
-- Scores: 6, 3, 1, 1, 0
+- Avg Score: 5.00
+- Scores: 6, 3, 1, 10
 
 ## Abstract
 Controller tuning and optimization have been among the most fundamental problems in robotics and mechatronic systems. The traditional methodology is usually model-based, but its performance heavily relies on an accurate mathematical system model. In control applications with complex dynamics, obtaining a precise model is often challenging, leading us towards a data-driven approach. While various researchers have explored the optimization of a single controller, it remains a challenge to obtain the optimal controller parameters safely and efficiently when multiple controllers are involved. In this paper, we propose \textsc{SafeCtrlBO} to optimize multiple controllers simultaneously and safely. We simplify the exploration process in safe Bayesian optimization, reducing computational effort without sacrificing expansion capability. Additionally, we use additive kernels to enhance the efficiency of Gaussian process updates for unknown functions. Hardware experimental results on a permanent magnet synchronous motor (PMSM) demonstrate that compared to existing safe Bayesian optimization algorithms, \textsc{SafeCtrlBO} can obtain optimal parameters more efficiently while ensuring safety.

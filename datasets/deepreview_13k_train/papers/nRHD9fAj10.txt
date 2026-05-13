@@ -1,0 +1,662 @@
+\title{Bidirectional Consistency Models}
+
+\begin{abstract}
+Diffusion models (DMs) are capable of generating remarkably high-quality samples by iteratively denoising a random vector, a process that corresponds to moving along the probability flow ordinary differential equation (PF ODE).
+Interestingly, DMs can also invert an input image to noise by moving backward along the PF ODE, a key operation for downstream tasks such as interpolation and image editing. 
+However, the iterative nature of this process restricts its speed, hindering its broader application.
+Recently, Consistency Models (CMs) have emerged to address this challenge by approximating the integral of the PF ODE, largely reducing the number of iterations.
+Yet, the absence of an explicit ODE solver complicates the inversion process. 
+ To resolve this, we introduce Bidirectional Consistency Model (BCM), which learns a \emph{single} neural network that enables both \emph{forward and backward} traversal along the PF ODE, efficiently unifying generation and inversion tasks within one framework.
+We can train BCM from scratch or tune it using a pretrained consistency model, wh  ich reduces the training cost and increases scalability.
+ We demonstrate that BCM enables one-step generation and inversion while also allowing the use of additional steps to enhance generation quality or reduce reconstruction error.
+We further showcase BCM's capability in downstream tasks, such as interpolation, inpainting, and blind restoration of compressed images.
+Notably, when the number of function evaluations (NFE) is constrained, BCM surpasses domain-specific restoration methods, such as I$^2$SB and Palette, in a fully zero-shot manner, offering an efficient alternative for inversion problems.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\setcounter{footnote}{0} 
+Two key components in image generation and manipulation are \emph{generation} and its \emph{inversion}.
+Specifically, \emph{generation} aims to learn a mapping from simple noise distributions, such as Gaussian, to complex ones, like the distribution encompassing all real-world images. 
+In contrast, \emph{inversion} seeks to find the reverse mapping, transforming real data back into the corresponding noise \footnote{The inversion problem also refers to restoring a high-quality image from its degraded version. However, in this paper, we define it more narrowly as the task of finding the corresponding noise for an input image.}.
+Recent breakthroughs in deep generative models \citep{goodfellow2014generative, kingma2013auto, dinh2014nice, song2019generative, ho2020denoising, song2020denoising, song2020score}  have revolutionized this field. 
+These models have not only achieved remarkable success in synthesizing high-fidelity samples across various modalities \citep{karras2021alias, rombach2022high(stablediffusion), kong2020diffwave, sora}, but have proven effective in downstream applications, such as image editing,  by leveraging the inversion process \citep{mokady2023null, hubermanspiegelglas2023edit, hertz2022prompttoprompt}.
+\par
+Particularly, score-based diffusion models (DMs) \citep{song2019generative, ho2020denoising, song2020denoising, song2020score, karras2022elucidating} have stood out for generation \citep{NEURIPS2021_49ad23d1}.
+Starting from random initial noise, DMs progressively remove noise through a process akin to a numerical ODE solver operating over the probability flow ordinary differential equation (PF ODE), as outlined by \citet{song2020score}.
+However, it typically takes hundreds of iterations to produce high-quality generation results. 
+This slow generation process limits broader applications.
+\par
+This issue has been recently addressed by consistency models (CMs) \citep{song2023consistency, song2023improved}, which directly compute the integral of PF ODE trajectory from any time step to zero.
+Similar to CMs, \citet{kim2023consistency} introduced the Consistency Trajectory Model (CTM), which estimates the integral between any two time steps along the trajectory towards the denoising direction.
+Through these approaches, the consistency model family enables image generation with only a single Number of Function Evaluation (NFE, i.e., number of network forward passes) while offering a trade-off between speed and quality.
+\par
+On the other hand, unfortunately, the inversion tasks remain challenging for DMs.
+First, the generation process in many DMs \citep{ho2020denoising, karras2022elucidating} is stochastic and hence is non-invertible; 
+second, even for methods that employ a deterministic sampling process \citep{song2020denoising}, inverting the ODE solver necessitates at least hundreds of iterations for a small reconstruction error; 
+third, although CMs and CTM accelerate generation by learning the integral directly, this integration is strongly non-linear, making the inversion process even harder.
+Therefore, in this work, we aim to bridge this gap through natural yet non-trivial extensions to CMs and CTM. 
+Specifically, they possess a key feature of self-consistency: points along the same trajectory map back to the same initial point. 
+Inspired by this property, we pose the questions: 
+\begin{adjustwidth}{2em}{1.5em}
+\emph{Is there a form of stronger consistency where points on the same trajectory can map to each other, regardless of their time steps' order? 
+Can we train a network to learn this mapping?}
+\end{adjustwidth}
+In the following sections of this paper, we affirmatively answer these questions with our proposed \emph{Bidirectional Consistency Model} (BCM). 
+Specifically:
+\begin{enumerate}[leftmargin=*]
+    \item We train a single neural network that enables both forward and backward traversal (i.e., integration) along the PF ODE, unifying the generation and inversion tasks into one framework.
+    We can either train the model from scratch or fine-tune it from a pretrained consistency model to reduce training cost and increase scalability.
+    \item We demonstrate BCM can generate images or invert a given image with a single NFE, and can achieve improved sample quality or lower reconstruction error by chaining multiple time steps.
+    \item Leveraging BCM's capability to navigate both forward and backward along the PF ODE trajectory,  we introduce 
+    two sampling schemes and a combined approach that has empirically demonstrated superior performance.
+\item We apply BCM for image interpolation, inpainting, and blind restoration of compressed images, showcasing its potential versatile downstream tasks. 
+\end{enumerate}
+
+
+
+
+
+\section{Background and Preliminary}
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}{0.24\textwidth}
+    \centering
+\includegraphics[height=60pt,  trim={0cm 1.5cm 0cm 0cm}]{Figures/dm.pdf}
+    \caption{DM}
+\end{subfigure}
+\begin{subfigure}{0.24\textwidth}
+    \centering
+\includegraphics[height=60pt,  trim={0cm 1.5cm 0cm 0cm}]{Figures/cm.pdf}
+    \caption{CM}
+\end{subfigure}
+\begin{subfigure}{0.24\textwidth}
+    \centering
+\includegraphics[height=60pt,  trim={0cm 1.5cm 0cm 0cm}]{Figures/ctm.pdf}
+    \caption{CTM}
+\end{subfigure}
+\begin{subfigure}{0.24\textwidth}
+    \centering
+\includegraphics[height=60pt, trim={0cm 1.5cm 0cm 0cm}]{Figures/bcm.pdf}
+    \caption{BCM}
+\end{subfigure}
+    \caption{An illustrative comparison of score-based diffusion models, consistency models, consistency trajectory models, and our proposed bidirectional consistency models.
+    (a) DM estimates the score function at a given time step; 
+    (b) CM enforces self-consistency that different points on the same trajectory map to the same initial points;
+    (c) CTM strengthens this principle of consistency, which maps a point at time $t$ back to another point at time $u \leq t$ along the same trajectory.
+    (d) BCM is designed to map any two points on the same trajectory to each other, removing any restrictions on the mapping direction. 
+    When the mapping direction aligns with the diffusion direction, the model adds noise to an input image. 
+    Conversely, if the mapping direction is opposite, the model performs denoising. 
+    This approach unifies generation and inversion tasks into a single, cohesive framework.
+    }
+\end{figure}
+Before launching into the details of the Bidirectional Consistency Model (BCM), we first describe some preliminaries, including a brief introduction to Score-based Diffusion Models (DMs), Consistency Models (CMs), and Consistency Trajectory Model (CTM) in the following.
+We also illustrate these models, along with our proposed method, in \Cref{fig:illustration_ct_ctm_btm}.
+
+\textbf{Score-based Diffusion Models.} Score-based Diffusion Models \citep[DMs,][]{song2020score} sample from the target data distribution by progressively removing noise from a random $\rvx_T \sim N(0, T^2 \mI)$.
+To achieve this, DMs first diffuse the data distribution  $p_{\text{data}}(\rvx)$  through a stochastic differential equation (SDE):
+$
+    d \rvx_t = \bm{\mu}(\rvx_t, t) dt + \sigma(t) d\rvw_t,
+$
+which has a reverse-time SDE, as described by
+\citet{ANDERSON1982313}:
+$
+     d \rvx_t = \left[\bm{\mu}(\rvx_t, t) - \frac{1}{2} \sigma^2(t)\nabla \log p_t(\rvx_t)\right] dt + \sigma( t) d\bar{\rvw}_t,
+$
+where $t \in [0, T]$\footnote{To avoid numerical issues, we always set $t$ in $[0.002, T]$ in practice. However, to keep the notation simple, we will ignore this small initial value $0.002$ when describing our methods in this paper. 
+}, $p_t$ is the marginal density of $\rvx_t$, and $\rvw_t$ and $ \bar{\rvw}_t$ represents the standard Wiener process in forward and reverse time respectively.  
+Note, that $p_0$ is our desired data distribution $p_{\text{data}}$. 
+Remarkably, \citet{song2020score} showed that there exists an ordinary differential equation, dubbed the Probability Flow (PF) ODE, whose solution trajectories have the same marginal density $p_t$ at time $t$:
+\begin{align}
+  {d \rvx_t} / {dt} = \bm{\mu}(\rvx_t, t) - 1/2 \sigma^2(t)\nabla \log p_t(\rvx_t).
+\end{align}
+During training, DMs learn to estimate $\nabla \log p_t(\rvx_t)$ with a score model $\bm{s}(\rvx_t, t)$ with score matching \citep{hyvarinen2005estimation, song2020score, karras2022elucidating}. 
+And during sampling, DMs solve the empirical PF ODE from time $T$ to $0$ with a numerical ODE solver.
+Following \citet{karras2022elucidating}, we set $\mu=0, \sigma = \sqrt{2t}, T=80$.
+\par
+\textbf{Consistency Models, Consistency Training, and improved Consistency Training. }
+However, while the above procedure has proven effective in generating high-quality samples, the numerical ODE solver typically requires iterative evaluations of the network $\bm{s}(\rvx_t, t)$ and hence bottlenecks the generation speed.
+To this end, \citet{song2023consistency} proposed Consistency Models (CMs) that train a network to estimate the solution to PF ODE directly, i.e., 
+\begin{align}
+    \bm{f}_{\bm{\theta}}(\rvx_t, t) \approx \rvx_0  = \rvx_t + {\textstyle \int_{t}^{0}  }\left(\sfrac{d \rvx_s}{ds}\right) ds
+\end{align}
+The network $\bm{f}_{\bm{\theta}}(\cdot, \cdot)$ can be either trained by distillation or from scratch with Consistency Training (CT).
+Here, we describe the consistency training in more detail since it lays the foundation of our proposed method:
+to begin, consistency training first discretizes the time horizon $[0, T]$ into $N-1$ sub-intervals, with boundaries $0=t_1 < t_2 < \dots < t_N=T$.
+The training objective is defined as
+\begin{align}\label{eq:ct_loss}
+   \mathcal{L}_{CT}^N(\bm{\theta}, \bm{\theta}^-) =  \E_{\rvz, \rvx, n}[\lambda(t_n)d(\bm{f}_{\bm{\theta}}(\rvx + {t_{n+1}}\rvz, t_{n+1}), \bm{f}_{\bm{\theta}^-}(\rvx+{t_{n}}\rvz, t_{n}))].
+\end{align}
+$\bm{\theta}$ and $\bm{\theta}^-$ represents the parameters of the online network and a target network, respectively.
+The target network is obtained by $\bm{\theta}^- \leftarrow  \texttt{stopgrad}\left( \mu\bm{\theta}^- +  (1-\mu)\bm{\theta}\right)$ at each iteration.
+$\lambda(\cdot)$ is a reweighting function, $\rvx$ represents the training data sample, and 
+$\rvz \sim \mathcal{N}(0, \mI)$ is a random Gaussian noise. 
+During training, $N$ is gradually increased, allowing the model to learn self-consistency in an incremental manner.
+Additionally, \citet{song2023consistency} proposed to keep track of an exponential moving average (EMA) of the online parameter $\bm{\theta}$.
+Specifically, after optimizing $\bm{\theta}$ in each iteration, CMs update the EMA by
+$
+    \bm{\theta}_{\text{EMA}}  \leftarrow  \mu_{\text{EMA}}\bm{\theta}_{\text{EMA}}  +  (1-\mu_{\text{EMA}})\bm{\theta}.
+$
+After training, CMs discard the online parameters and generate samples with $\bm{\theta}_{\text{EMA}}$.
+\par
+Besides, in a follow-up work, \citet{song2023improved} suggested to use the Pseudo-Huber loss for $d$, along with other techniques that include setting  $\mu=0$ (i.e., $\bm{\theta}^- \leftarrow  \texttt{stopgrad}\left(\bm{\theta}\right)$), proposing a better scheduler function for $N$, adapting a better reweighting function $\lambda(t_n) = \sfrac{1}{|t_n-t_{n+1}|}$. 
+Dubbed improved Consistency Training (iCT), these modifications significantly improve the performance.
+Therefore, unless otherwise stated, we inherit these improving techniques in our work.
+\textbf{Consistency Trajectory Model.}
+While CMs learn the integral from an arbitrary starting time to $0$, Consistency Trajectory Model (CTM) \citep{kim2023consistency} learns the integral between any two time steps along the PF ODE trajectory towards the denoising direction.
+More specifically, CTM learns 
+\begin{align}
+\label{eq:ctm_target}
+   \bm{f}_{\bm{\theta}}(\rvx_t, t, u) \approx  \rvx_u = 
+ \rvx_t + {\textstyle \int_{t}^{u}}  \left(\sfrac{d \rvx_s}{ds}\right) ds, \quad \text{where } u \leq t.
+\end{align}
+CTM demonstrates that it is possible to learn a stronger consistency:
+two points $\rvx_t$ and $\rvx_u$ along the same trajectory not only can map back to the same initial point $\rvx_0$, but also can map from $\rvx_t$ to $\rvx_u$, provided $u\leq t$.
+This inspires us for a stronger consistency with a bijection between $\rvx_t$ and $\rvx_u$.
+\par
+However, it is worth noting that, while sharing some motivation, our methodology is foundationally different from that in CTM. 
+Our network adopts a different parameterization, which is a natural extension of that by EDM \citep{karras2022elucidating}. 
+Moreover, CTM largely relies on adversarial loss \citep{goodfellow2014generative}, while our proposed method, following \citet{song2023improved}, is free from LPIPS \citep{zhang2018unreasonable} and adversarial training.
+
+
+
+
+
+\section{Methods}
+
+In this section, we describe details of Bidirectional Consistency Model (BCM).
+From a high-level perspective, we train a network $\bm{f}_{\bm{\theta}}(\rvx_t, t, u)$ that traverses along the probability flow (PF) ODE from time $t$ to time $u$, i.e., 
+$ \bm{f}_{\bm{\theta}}(\rvx_t, t, u) \approx  \rvx_u = 
+ \rvx_t + \int_{t}^{u}  \frac{d \rvx_s}{ds} ds$. 
+This is similar to \Cref{eq:ctm_target},  but since we aim to learn both generation and inversion, we do not set constraints on $t$ and $u$, except for $ t\neq u$.
+To this end, we adjust the network parameterization and the training objective of consistency training \citep{song2023consistency,song2023improved}.
+ These modifications are detailed in \Cref{sec:parameterization,sec:bct}. 
+ Besides, we introduce new sampling schemes leveraging our model's invertibility, which are described in \Cref{sec:sampling}. 
+Finally, we discuss BCM's inversion in \Cref{sec:inversion}.
+\begin{algorithm}[t]
+\caption{Bidirectional Consistency Training (Red indicates differences from CT/iCT \citep{song2023consistency,song2023improved}}\label{alg:bct}
+\begin{algorithmic}
+\algblockdefx[repeat]{Repeat}{EndRepeat}{\textbf{repeat until convergence}}{\textbf{end repeat}}
+\Require Training set $\mathcal{D}$,
+initial model parameter $\bm{\theta}$, learning rate $\eta$, step schedule $N(\cdot)$, noise schedule $p(\cdot)$, EMA rate $\mu_{\text{EMA}}$, distance metric $d(\cdot, \cdot)$, reweighting function $\lambda(\cdot)$ and  $\lambda'(\cdot, \cdot)$.
+\Ensure Model parameter $\bm{\theta}_{\text{EMA}}$.\\
+\textbf{Initialize:} $\bm{\theta}_{\text{EMA}}\leftarrow \bm{\theta}, k\leftarrow 0$. \\
+\Repeat
+\State {\color{lightgray} \# Sample training example, time steps, and random noise:}
+\State  Sample $\rvx \in \mathcal{D}$, $n \sim p(n|N(k))$.
+\State {\color{BrickRed} Sample 
+ $n' \sim \tilde{p}(n'|N(k))$, where $\tilde{p}(n'|N(k)) \propto \text{\small$\begin{cases}
+ 0, & \text{if } n'=n,\\ 
+      p(n'|N(k)), & \text{otherwise.} 
+    \end{cases}$
+    }
+    $}
+\State  Sample $\rvz \sim \mathcal{N}(0, \mI)$.
+\State {\color{lightgray} \# Calculate and optimize BCT loss:}
+\State 
+$\mathcal{L}_{\text{CT}}(\bm{\theta}) \leftarrow
+ \lambda(t_n)d(\bm{f}_{\bm{\theta}}(\rvx + {t_{n+1}}\rvz, t_{n+1}, 0), \bm{f}_{\bar{\bm{\theta}}}(\rvx+{t_{n}}\rvz, t_{n}, 0)) $;
+ \State  {\color{BrickRed}$ \mathcal{L}_{\text{ST}}(\bm{\theta}) \leftarrow\lambda'(t_{n}, t_{n'})d\left(\bm{f}_{\bar{\bm{\theta}}}(\bm{f}_{\bm{\theta}}(\rvx+t_n \rvz, t_n, t_{n'}), t_{n'}, 0)), \bm{f}_{\bar{\bm{\theta}}}(\rvx+t_n \rvz, t_n, 0)\right)
+$;}
+\State {\color{BrickRed} $ \mathcal{L}_{\text{BCT}}(\bm{\theta}) \leftarrow \mathcal{L}_{\text{CT}}(\bm{\theta}) +\mathcal{L}_{\text{ST}}(\bm{\theta}) 
+$;}
+\State $\bm{\theta} \leftarrow \bm{\theta} - \eta \nabla_{\bm{\theta}}\mathcal{L}_{\text{BCT}}(\bm{\theta}) $;
+\State {\color{lightgray} \# Update the EMA parameter and the iteration number:}
+\State  $\bm{\theta}_{\text{EMA}} \leftarrow \mu_{\text{EMA}}\bm{\theta}_{\text{EMA}} + (1-\mu_{\text{EMA}})\bm{\theta}, k\leftarrow k+1$;
+\EndRepeat
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Network Parameterization}\label{sec:parameterization}
+We first describe the network parameterization.
+Our network takes in three arguments: 1) the sample $\rvx_t$ at time $t$, 2) the current time step $t$, and 3) the target time step $u$, and outputs the sample at time $u$, i.e., $\rvx_u$.
+To achieve this, we directly expand the models used in Consistency Models (CMs) \citep{song2023consistency, song2023improved} with an extra argument $u$.
+In CMs, the networks first calculate Fourier embeddings \citep{tancik2020fourier} or positional embeddings \citep{NIPS2017_3f5ee243} for the time step $t$, followed by two dense layers.
+Here, we simply concatenate the embeddings of $t$ and $u$, and double the dimensionality of the dense layers correspondingly.
+\par
+Similar to CMs \citep{song2023consistency} and EDM \citep{karras2022elucidating}, instead of directly learning $\bm{f}_{\bm{\theta}}$, we train $\bm{F}_{\bm{\theta}}$ and let $\bm{f}_{\bm{\theta}}(\rvx_t, t, u)  =  c_{\text{skip}}(t,u)\rvx_t + c_{\text{out}}(t,u) F_{\bm{\theta}}(c_{\text{in}}(t, u)\rvx_t, t, u)$, where
+\begin{align}\label{eq:network_param}
+ c_{\text{in}}(t, u) = \frac{1}{\sqrt{\sigma_{\text{data}}^2 + t^2}}, \quad c_{\text{out}}(t, u) = \frac{ \sigma_{\text{data}}(t - u)}{\sqrt{\sigma_{\text{data}}^2 + t^2}}, \quad c_{\text{skip}}(t,u)=\frac{\sigma_{\text{data}}^2 + tu}{\sigma_{\text{data}}^2 + t^2}.
+\end{align}
+Note that $c_{\text{skip}}(t, t) = 1$ and $c_{\text{out}}(t, t) = 0$, which explicitly enforce the boundary condition $\bm{f}_{\bm{\theta}}(\rvx_t, t, t) = \rvx_t$.
+ 
+
+\subsection{Bidirectional Consistency Training}
+\label{sec:bct}
+We now discuss the training of BCM, which we dub as Bidirectional Consistency Training (BCT).
+Following \citet{song2023consistency, song2023improved}, we discretize the time horizon $[0, T]$ into $N-1$ intervals with boundaries $0=t_1 < t_2 < \dots < t_N=T$.
+
+Our training objective has two terms.
+The first term takes the same form as \Cref{eq:ct_loss}, enforcing the consistency between any points on the trajectory and the starting point.
+We restate it with our new parameterization for easier reference:
+\begin{align}\label{eq:ct_loss_restate}
+   \mathcal{L}_{CT}^N(\bm{\theta}) =  \E_{\rvz, \rvx, t_n}[\lambda(t_n)d(\bm{f}_{\bm{\theta}}(\rvx + {t_{n+1}}\rvz, t_{n+1}, 0), \bm{f}_{\bar{\bm{\theta}}}(\rvx+{t_{n}}\rvz, t_{n}, 0))],
+\end{align}
+where $\rvx$ is one training sample, $\rvz\sim \mathcal{N}(0, \mI)$, and $\bar{\bm{\theta}}$ is the stop gradient operation on $\bm{\theta}$, and $\lambda(t_n) = \sfrac{1}{|t_{n}-t_{n+1}|}$.
+We replace $\bm{\theta}^-$ in \Cref{eq:ct_loss} with $\bar{\bm{\theta}}$ according to \citet{song2023improved}.
+\par
+The second term explicitly sets constraints between any two points on the trajectory.
+Specifically, given a training example $\rvx$, we randomly sample two time steps $t$ and $u$, and want to construct a mapping from $\rvx_t$ to $\rvx_u$, where $\rvx_t$ and  $\rvx_u$ represent the results at time $t$ and $u$ along the  Probability Flow (PF) ODE trajectory, respectively.
+Note, that the model learns to denoise (i.e., generate) when $u < t$, and to add noise (i.e., inverse) when $u > t$. 
+Therefore, this single term unifies the generative and inverse tasks within one framework, 
+and with more $t$ and $u$ sampled during training, we achieve consistency over the entire trajectory.
+To construct such a mapping, we minimize the distance 
+\begin{align}\label{eq:hard_loss}
+    d\left(\bm{f}_{\bm{\theta}}(\rvx_{t}, t, u), \rvx_{u}\right).
+\end{align}
+However,  \Cref{eq:hard_loss} will have different scales for different $u$ values, leading to a high variance during training. 
+Therefore, inspired by \citet{kim2023consistency}, we map both $\bm{f}_{\bm{\theta}}(\rvx_{t}, t, u)$ and $\rvx_{u}$ to time $0$, and minimize the distances between these two back-mapped images, i.e.,
+\begin{align}\label{eq:soft_loss_old}
+    d\left(\bm{f}_{\bar{\bm{\theta}}}(\bm{f}_{\bm{\theta}}(\rvx_{t}, t, u), u, 0)), \bm{f}_{\bar{\bm{\theta}}}(\rvx_{u}, u, 0)\right),
+\end{align}
+where $\bar{\bm{\theta}}$ is the same $\bm{\theta}$ with stop gradient operation. 
+We denote this as a ``soft" trajectory constraint.
+Unfortunately, directly minimizing \Cref{eq:soft_loss_old} without a pretrained DM is still problematic.
+This is because, without a pretrained DM,  we can only generate $\rvx_t$ and $\rvx_u$ from the diffusion SDE, i.e., 
+by adding Gaussian noise to $\rvx$.
+However, $\rvx_t$ and $\rvx_u$ generated by the diffusion SDE do not necessarily lie on the same PF ODE trajectory, and hence \Cref{eq:soft_loss_old} still fails to build the desired bidirectional consistency.
+Instead, we notice that when the CT loss defined in \Cref{eq:ct_loss_restate} converges, we have $\bm{f}_{\bar{\bm{\theta}}}(\rvx_{u}, u, 0) \approx  \bm{f}_{\bar{\bm{\theta}}}(\rvx_{t}, t, 0)\approx \rvx$. 
+We therefore optimize:
+\begin{align}\label{eq:soft_loss}
+    d\left(\bm{f}_{\bar{\bm{\theta}}}(\bm{f}_{\bm{\theta}}(\rvx_{t}, t, u), u, 0)), \bm{f}_{\bar{\bm{\theta}}}(\rvx_{t}, t, 0)\right).
+\end{align}
+Empirically, we found \Cref{eq:soft_loss} plays a crucial role in ensuring accurate inversion performance. 
+
+\par
+Finally, we recognize that the term $\bm{f}_{\bar{\bm{\theta}}}(\rvx+{t_{n}}\rvz, t_{n}, 0)$ in \Cref{eq:ct_loss_restate} and the term $\bm{f}_{\bar{\bm{\theta}}}(\rvx_t, t, 0)$  in \Cref{eq:soft_loss} have exactly the same form.
+Therefore, we set $t=t_n$ to reduce one forward pass.
+Putting together, we define our objective as 
+\begin{align}\label{eq:final_loss}
+ \begin{split}
+\mathcal{L}_{BCT}^N(\bm{\theta}) =
+ \E_{\rvz, \rvx, t_n, t_{n'}}\Big[
+          \lambda(t_n)&d(\bm{f}_{\bm{\theta}}(\rvx + {t_{n+1}}\rvz, t_{n+1}, 0), \bm{f}_{\bar{\bm{\theta}}}(\rvx+{t_{n}}\rvz, t_{n}, 0)) \\
+         + \lambda'(t_{n}, t_{n'})&d\left(\bm{f}_{\bar{\bm{\theta}}}(\bm{f}_{\bm{\theta}}(\rvx+t_n \rvz, t_n, t_{n'}), t_{n'}, 0)), \bm{f}_{\bar{\bm{\theta}}}(\rvx+t_n \rvz, t_n, 0)\right)
+\Big]
+ \end{split}
+\end{align}
+where we set reweighting as $\lambda'(t_n, t_{n'}) = \sfrac{1}{|t_{n}-t_{n'}|}$ to keep the loss scale consistent.
+\par
+\textbf{Training from scratch.} We can train BCM from scratch using \Cref{eq:final_loss}.
+We empirically found that all the training settings used for iCT \citep{song2023improved}, including the scheduler function for $N$, the sampling probability for $t_n$ (aka the noise schedule $p(n)$ in \citep{song2023consistency, song2023improved}), the EMA rate, and more, also works well for BCM.
+\par
+\textbf{Bidirectional Consistency Fine-tuning. } To reduce the training cost and increase scalability, we can also initialize BCM with a pretrained consistency model and fine-tune it using \Cref{eq:final_loss} to incorporate bidirectional consistency.
+Recall that BCM takes in three arguments: 
+1) the sample $\rvx_t$ at time $t$, 2) the current time step $t$, and 3) the target time step $u$, and outputs the sample at time $u$, i.e., $\rvx_u$.
+In contrast, the standard consistency model only takes the first two inputs and can be viewed as a special case of BCM when the target time step $u$ is set to $0$. 
+Therefore, we aim to initialize BCM such that it preserves the performance of the pretrained CM when $u=0$.
+To achieve this, we concatenate the embeddings of $t$ and $u$, then pass the result through a linear layer (without bias vector) to reduce the dimensionality by half. 
+The weight matrix is initialized as $[\rmI, \bm{0}]$.
+The embedding layers for $t$ and $u$ are initialized using the pretrained CM's embedding layer, but they are not tied together during fine-tuning.
+Other layers are initialized identically to those of the CM.
+It is easy to check that this initialization effectively ignores $u$, preserving the CM’s generation performance without fine-tuning.
+\par
+
+
+
+
+\subsection{Sampling}
+\label{sec:sampling}
+In this section, we describe the sampling schemes of BCM. 
+Similar to CMs and CTM, BCM supports 1-step sampling naturally.
+However,
+BCM's capability to navigate both forward and backward along the PF ODE trajectory allows us to design more complicated multi-step sampling strategies to improve the sample quality.
+We present two schemes and a combined approach that has empirically demonstrated superior performance in the following.
+\par
+\textbf{Ancestral Sampling.} 
+The most straightforward way for multi-step sampling is to remove noise sequentially.
+Specifically, we first divide the time horizon $[0, T]$ into $N$ sub-intervals with boundaries $0=t_0 < t_1 < \dots < t_N=T$. 
+Then, we sample a noise image $\rvx_T\sim \mathcal{N}(0, T^2\mI)$, and sequentially remove noise with the network:
+$
+    \rvx_{t_{n-1}} \leftarrow  \bm{f}_{\bm{\theta}}( \rvx_{t_{n}}, t_n, t_{n-1}), \quad n=N, N-1, ..., 1
+$.
+We note that the discretization strategy may differ from the one used during the training of BCM.
+Since this sampling procedure can be viewed as drawing samples from the conditional density 
+$p_{\rvx_{t_{n-1}}| \rvx_{t_{n}}}( \rvx_{t_{n-1}}| \rvx_{t_{n}})$, we dub it as ancestral sampling, and summarize it in \Cref{alg:as}.
+We can also view 1-step sampling as ancestral sampling, where we only divide the time horizon into a single interval. 
+\par
+\textbf{Zigzag Sampling.} 
+Another effective sampling method (Algorithm 1 in \citet{song2023consistency}) is to iteratively re-add noise after denoising.
+Similar to ancestral sampling, we also define a sequence of time steps $t_1 < \dots < t_N=T$.
+However, different from ancestral sampling where we gradually remove noise, we directly map $\rvx_T$ to $\rvx_0$ by $ \bm{f}_{\bm{\theta}}( \rvx_{T}, T, 0)$.
+We then add a fresh Gaussian noise to $\rvx_0$, mapping it from time $0$ to time $t_{n-1}$, i.e., 
+$\rvx_{t_{n-1}}=\rvx_0 + t_{n-1}\bm{\sigma}$, where $\bm{\sigma} \sim \mathcal{N}(0, \mI)$. 
+This process repeats in this zigzag manner until all the designated time steps are covered.
+The two-step zigzag sampler effectively reduces FID in CMs \citep{song2023consistency} and is theoretically supported \citep{lyu2023convergence}. 
+However, the fresh noise can alter the content of the image after each iteration, which is undesirable, especially considering that our tasks will both include generation and inversion.
+One may immediately think that setting the injected noise to be the same as the initial random noise can fix this issue.
+However, we reveal that this significantly damages the quality of the generated images.
+\par
+Fortunately, our proposed BCM provides a direct solution, leveraging its capability to traverse both forward and backward along the PF ODE. 
+Specifically, rather than manually reintroducing a large amount of fresh noise, we initially apply a small amount and let the network amplify it. 
+\begin{align}
+    \rvx_{0} \leftarrow  \bm{f}_{\bm{\theta}}( \rvx_{t_{n}}, t_n, 0), \quad \rvx_{\varepsilon_{n-1}} \leftarrow  \rvx_{0} + \varepsilon_{n-1}\bm{\sigma}, \quad \rvx_{t_{n-1}} \leftarrow \bm{f}_{\bm{\theta}}( \rvx_{\varepsilon_{n-1}}, \varepsilon_{n-1}, t_{n-1}).
+\end{align}
+where $\varepsilon_{n-1}$ is the scale of the small noises we add in $n$-th iteration, and $\bm{\sigma}\sim \mathcal{N}(0, \mI)$ is a fresh Gaussian noise.
+We detail this scheme in \Cref{alg:zs}.
+To verify its effectiveness, in \Cref{fig:zigzag}, we illustrate some examples to compare the generated images by 1) manually adding fresh noise, 2) manually adding fixed noise, and 3) our proposed sampling process, i.e., adding a small noise and amplifying it with the network.
+We can clearly see our method maintains the generated content.
+\par
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{0.235\textwidth}
+    \centering
+\includegraphics[width=\textwidth]{Figures/3.3-5example/one_step.pdf}
+    \end{subfigure}
+    \begin{subfigure}{0.235\textwidth}
+    \centering
+\includegraphics[width=\textwidth]{Figures/3.3-5example/manual_noise.pdf}
+    \end{subfigure}
+    \begin{subfigure}{0.235\textwidth}
+    \centering
+\includegraphics[width=\textwidth]{Figures/3.3-5example/same_noise.pdf}
+    \end{subfigure}
+    \begin{subfigure}{0.235\textwidth}
+    \centering
+\includegraphics[width=\textwidth]{Figures/3.3-5example/net_noise.pdf}
+    \end{subfigure}
+\end{figure}
+\textbf{Combination of Both.} 
+Long jumps along the PF ODE in zigzag sampling can lead to accumulative errors, especially at high noise levels, which potentially hampers further improvements in sample quality.
+Therefore, we propose a combination of ancestral sampling and zigzag sampling.
+Specifically, we first perform ancestral sampling to rapidly reduce the large initial noise to a more manageable noise scale and then apply zigzag sampling within this small noise level. 
+We describe this combined process in \Cref{alg:azs}.
+We empirically found this combination results in superior sample quality compared to employing either ancestral sampling or zigzag sampling in isolation.
+We provide ablation to evidence the effectiveness of this combination in \Cref{sec:sampling_abs}.
+\subsection{Inversion}\label{sec:inversion}
+BCM inverts an image following the same principle of sampling.
+Specifically, we also set an increasing sequence of noise scales $\varepsilon = t_1 < t_2 < \cdots < t_{N} \leq T$.
+Note that, in contrast to the generation process, it is not always necessary for $t_{N}$ to equal $T$. Instead, we can adjust it as a hyperparameter based on the specific tasks for which we employ inversion.
+Then, given an image $\rvx_0$, 
+we first inject a small Gaussian noise by $\rvx_{t_1}=\rvx_0 +\varepsilon\bm{\sigma}$, and then sequentially add noise with the network, i.e., 
+$
+    \rvx_{t_{n+1}} = f(\rvx_{t_{n}}, t_{n}, t_{n+1}), \quad n=1, 2, \cdots, N-1.
+$
+ 
+Empirically, we find this minor noise does not change the image's content and leads to lower reconstruction errors when $\varepsilon\approx 0.07$.
+One may also include denoising steps interleaved with noise magnifying steps, like zigzag sampling, but we find it helps little in improving inversion quality. 
+We summarize the inversion procedure in \Cref{alg:inv}. 
+
+
+
+\section{Experiments and Results}
+
+
+In this section, we first present the results of the two basic functions of BCM, i.e., generation and inversion. 
+Then in \Cref{sec:applications}, we show some potential applications enabled by these two functions.
+
+\subsection{Image Generation}
+\begin{figure}[t]
+  \centering
+    \begin{minipage}[b]{\textwidth}
+    \centering
+     \captionof{table}{Sample quality on CIFAR-10 (left) and ImageNet-64 (right). 
+    We train BCM from scratch on CIFAR-10 and fine-tune it using our reproduced iCT model on ImageNet-64. 
+}\label{tab:generation-result}
+\begin{minipage}[b]{0.47\textwidth}
+    \scalebox{0.60}{
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\multicolumn{4}{@{}l@{}}{\textbf{Diffusion with Fast Sampler /  Distillation / Fine-tuning}}            \\ \toprule
+DDIM \citep{song2020denoising}                                          & 10     & 8.23     &           -  \\
+DPM-solver-fast \citep{lu2022dpm}                                     & 10     &   4.70    &     -          \\
+AMED-plugin \citep{zhou2023fast}                                   & 5       & 6.61     & - \\
+Progressive Distillation \citep{salimans2021progressive}                              & 1     &   8.34    &         8.69       \\
+Diff-Instruct \citep{luo2024diff}  &   1  &   4.53  &     -     \\
+\multirow{2}{*}{CD \citep[LPIPS, ][]{song2023consistency}}                          & 1     &   3.55    & 9.48              \\
+                                                     & 2     &    2.93   & 9.75 \\
+
+\multirow{2}{*}{CTM \citep[LPIPS, GAN loss, ][]{kim2023consistency}    }                                 & 1     &  1.98     &  -            \\
+                                                     & 2     &  1.87     &  -   
+                                                       \\
+CTM  \citep[LPIPS, w/o GAN loss, ][]{kim2023consistency}                                     & 1     &  $>5.00^*$     &  -            \\     
+ECT   \citep{geng2024consistencymodelseasy}                                    & 2     &  2.11     &  -          \\   
+\textbf{Direct Generation}                           &       &       &               \\ \toprule
+EDM \citep{karras2022elucidating}                                                & 35     &  2.04     &  9.84              \\
+\multirow{2}{*}{CT \citep[LPIPS, ][]{song2023consistency}    }                                 & 1     &  8.70     &  8.49            \\
+                                                     & 2     &  5.83     &  8.85             \\
+CTM  \citep[LPIPS, GAN loss, ][]{kim2023consistency}                                     & 1     &  2.39     &  -            \\
+\multirow{2}{*}{iCT \citep{song2023improved}}                                 & 1     &  2.83     &  9.54             \\
+                                                     & 2     &  2.46     &  9.80             \\
+\multirow{2}{*}{iCT-deep \citep{song2023improved}}                          & 1     &  2.51     &  9.76             \\
+                                                     & 2     &  2.24     &  9.89             \\ \midrule
+\multirow{4}{*}{\textbf{BCM (ours)}$^\dag$   }                             & 1     & 3.10      &  9.45             \\
+                                                     & 2     & 2.39      &  9.88             \\
+                                                     & 3     & 2.50      &  9.82             \\
+                                                     & 4     & 2.29      &  9.92             \\
+\multirow{4}{*}{\textbf{BCM-deep (ours)}$^\dag$}           & 1     &  2.64     &  9.67             \\
+                                                     & 2     &  2.36     &  9.86             \\
+                                                     & 3     &  2.19     &  9.94             \\
+                                                     & 4     &  2.07     &  10.02             \\ \bottomrule
+\end{tabular}
+\end{minipage}\quad\quad
+\begin{minipage}[b]{0.47\textwidth}
+    \scalebox{0.60}{
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\multicolumn{3}{@{}l@{}}{\textbf{Diffusion with Fast Sampler /  Distillation / Fine-tuning}}            \\ \toprule
+DDIM \citep{song2020denoising}                                          & 10     &    18.3    \\
+DPM-solver-fast \citep{lu2022dpm}                                     & 10     &     7.93     \\
+AMED-solver \citep{zhou2023fast}                                   & 5       &  10.74    \\
+Progressive Distillation \citep{salimans2021progressive}                              & 1     &    7.88      \\
+Diff-Instruct \citep{luo2024diff}  &   1  &   5.57    \\
+EM Distillation     \citep{xie2024distillation}               & 1      &    2.20   \\
+\multirow{2}{*}{CD \citep[LPIPS, ][]{song2023consistency}}                          & 1     &            6.20       \\
+                                                     & 2     &  4.70      \\
+
+\multirow{2}{*}{CTM  \citep[LPIPS, GAN loss, ][]{kim2023consistency}    }            & 1     &     1.92          \\
+        & 2     &    1.73 
+                                                       \\
+ECT-XL \citep{geng2024consistencymodelseasy}                              & 2     &  1.67              \\ 
+\textbf{Direct Generation}                           &       &                   \\ \toprule
+EDM2-L/XL \citep{karras2024analyzing}                                              & 63     &    1.33              \\
+\multirow{2}{*}{CT \citep[LPIPS, ][]{song2023consistency}    }                                 & 1     &   13.0               \\
+          & 2     &  11.1               \\
+\multirow{2}{*}{iCT \citep{song2023improved}}                                 & 1     &        4.02 (4.60$^{**}$)           \\
+                                                     & 2     &       3.20   (3.40$^{**}$)      \\
+\multirow{2}{*}{iCT-deep \citep{song2023improved}}                          & 1     &    3.25       (3.94$^{**}$)     \\
+                                                     & 2     &   2.77  (3.14$^{**}$)     \\ 
+                                                     \midrule
+\multirow{4}{*}{\textbf{BCM (ours)}$^\dag$   }       & 1     &       4.18        \\
+                                                     & 2     &       2.88        \\
+                                                     & 3     &       2.78     \\
+                                                     & 4     &       2.68        \\
+\multirow{4}{*}{\textbf{BCM-deep (ours)}$^\dag$}     & 1     &       3.14        \\
+                                                     & 2     &       2.45         \\
+                                                     & 3     &       2.61         \\
+                                                     & 4     &       2.35       \\ \bottomrule
+\end{tabular}
+\end{minipage}
+    \end{minipage}
+    \hspace{5pt}
+     \begin{minipage}[b]{0.21\textwidth}
+     \centering
+    \begin{minipage}[b]{\textwidth}
+    \includegraphics[width=\textwidth]{Figures/generation/onestep-deep-main.png}
+     \text{\ \small (a) 1-step (FID 2.64)}
+   \end{minipage}\\
+   \begin{minipage}[b]{\textwidth}
+    \includegraphics[width=\textwidth]{Figures/generation/fourstep-deep-main.png}   \text{\ \small (d) 4-step (FID 2.07)}
+   \end{minipage}
+    \captionof{figure}{Samples by BCM-deep on CIFAR-10. }\label{fig:samples_main_text_cifar}
+     \end{minipage} 
+      \begin{minipage}[b]{0.77\textwidth}
+     \centering
+    \begin{minipage}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{Figures/generation/imagenet1step.png}
+     \text{\ \ \ \ \ \ \ \ \ \ \ \ \small (a) 1-step (FID 3.14)}
+   \end{minipage}
+   \begin{minipage}[b]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{Figures/generation/imagenet4step.png}   \text{\ \ \ \ \ \ \ \ \ \ \ \ \small (d) 4-step (FID 2.35)}
+   \end{minipage}
+    \captionof{figure}{Samples by BCM-deep on ImageNet-64. }\label{fig:samples_main_text_imagenet}
+     \end{minipage}
+\end{figure}
+
+We first evaluate the image generation performance of BCM.
+On CIFAR-10, we train our BCM from scratch, while on ImageNet-64, we first train an iCT model, and fine-tune BCM from it, as we discussed in \Cref{sec:bct}.
+When reproducing iCT on ImageNet-64, we encountered instability during training, and found it difficult to reproduce the reported FID by \citet{song2023improved}.
+To mitigate the performance gap, we removed the attention layer at the 32x32 resolution and added normalization to the QKV attention, following \citep{karras2024analyzing}.
+We empirically find these simple modifications bring positive influences on performance.
+
+We report image quality and NFE for CIFAR-10 and ImageNet-64 in \Cref{tab:generation-result}, and we visualize some generated samples
+
+As we can see, 
+\begin{itemize}[leftmargin=*]
+    \item  both ancestral sampling and zigzag sampling can improve the sample quality, while the combination of both further yields the best performance;
+    \item our proposed BCM achieves comparable or even better results within at least one order of magnitude fewer NFEs compared with diffusion models; 
+BCM presents better results with even fewer NFEs then the methods boosting sampling speed through fast samplers; 
+it is also comparable to modern distillation approaches like EM distillation by \citet{xie2024distillation};
+\item comparing with CMs,  iCT \citep{song2023improved} surpasses BCM for 1-step sampling.
+This is not surprising, given that BCMs tackle a significantly more complex task compared to CMs.
+ However, as the number of function evaluations (NFEs) increases, following the sampling strategies detailed in Section \ref{sec:sampling}, BCM starts to outperform. 
+ This indicates that \emph{our approach allows the model to learn bidirectional consistency without hurting the generation performance};
+ \item  our model's performance still falls short of CTM's \citep{kim2023consistency}.
+However, CTM relies heavily on adversarial loss and uses LPIPS \citep{zhang2018unreasonable} as the distance measure, which can have feature leakage \citep{song2023improved,kynkaanniemi2023role}. 
+ECT \citep{geng2024consistencymodelseasy} also outperforms BCM on ImageNet-64 with 2 NFEs. 
+However, we note that their approach—fine-tuning from a pretrained diffusion and using the advanced EDM2 architecture \citep{karras2024analyzing}—is orthogonal to ours. 
+Our method could be combined with theirs for potential improvements in both performance and training speed.
+\end{itemize}
+\par
+Another interesting phenomenon we observed on ImageNet-64 is that our fine-tuned BCM actually outperforms its initialization (i.e., our pretrained iCT) on generation. 
+In contrast, we empirically find fine-tuning iCT with the same training budget did not yield any improvement. 
+We suspect this is due to the ``soft" trajectory constraint in the bidirectional training objective, which may act as a form of regularization, aiding optimization. 
+We leave further investigation of this for future work.
+
+ 
+
+\subsection{Inversion and Reconstruction}
+We evaluate BCM's capability for inversion on CIFAR-10 and ImageNet-64, and report the per-dimension mean squared error (scaled to [0,1]) in \Cref{fig:inverse_mse}.
+We also present ODE-based baselines, including DDIM \citep{song2020denoising} and EDM \citep{karras2022elucidating} for comparison.
+
+We can see BCM achieves a lower reconstruction error than ODE-based diffusion models, with significantly fewer NFEs, on both data sets.
+\par
+We observe that using only 1 NFE for inversion sometimes introduces slight mosaic artifacts, possibly because both endpoints of the time horizon are less effectively covered and learned during training.
+Fortunately, the artifact is well suppressed when using more than 1 NFEs.
+Also, we find that the inversion process can occasionally alter the image context. 
+However, it is important to note that this is not unique to BCM but also occurs in ODE-based diffusion models, such as EDM (see  \Cref{fig:reconstructions-edm-9,fig:reconstructions-edm-19} for examples), even though they employ more NFEs.
+ 
+
+
+
+
+\subsection{Applications with Bidirectional Consistency}
+\label{sec:applications}
+
+\begin{figure}[t]
+    \centering
+\begin{minipage}{\textwidth}
+ \begin{minipage}{0.33\textwidth}
+ \centering
+    \begin{minipage}{\textwidth}
+    \centering
+     {\includegraphics[width=\textwidth,trim={0 10pt 0 0}]{Figures/inversion/inverse_mse_imagenet.pdf}}
+\end{minipage}
+\caption{Reconstruction MSE on CIFAR-10 \& ImageNet. 
+}
+    \label{fig:inverse_mse}
+\end{minipage}
+\begin{minipage}{0.66\textwidth}
+ \centering
+    \label{fig:res_interpolation}
+       \centering
+       \subcaptionbox{Original image with missing pixels.}
+       \subcaptionbox{BCM's inpainting (NFE=4, FID 12.32). More examples in \cref{fig:inpaint}.}
+       \subcaptionbox{CM's Inpainting (NFE=18, FID 13.16). More examples in \cref{fig:inpaint_cm}.}
+\end{minipage}
+\end{minipage}
+\end{figure}
+
+\begin{wrapfigure}{r}{0.35\textwidth}
+  \begin{center}
+\includegraphics[width=0.35\textwidth, trim={0 20pt 0 40pt}]{Figures/restoration/jpeg_restore.pdf} 
+  \end{center}
+  \caption{JPEG (QF20) restoration with I$^2$SB, Palette and BCM on ImageNet-64.
+}\label{fig:jpeg_restoration}
+\end{wrapfigure} 
+Since BCM inherits the consistency of CMs, it
+can handle the applications introduced by \citet{song2023consistency} in the same way, 
+including colorization, super-resolution, stroke-guided image generation, denoising, and interpolation between two \emph{generated} images.
+However, BCM's unique bidirectional consistency can enhance or enable more applications.
+In this section, we showcase that BCM can interpolate two \emph{real} images and achieve superior inpainting quality with fewer NFEs.
+We also demonstrate its downstream applications for blind restoration of compressed images. 
+\textbf{Interpolation.}  
+While CMs can perform interpolations between two \emph{generated} images \citep{song2023consistency}, our BCM can interpolate between two given \emph{real} images, which is a more meaningful application.
+Specifically, we can first invert the given images into noises, smoothly interpolate between them, and then map the noises back to images. 
+We illustrate some examples in \Cref{fig:res_interpolation}.
+Here, we note a caveat in the implementation of BCM's interpolation: 
+recall that when inverting an image, we first inject a small initial noise, as described in \Cref{sec:inversion}.
+ In the context of interpolation,  we find it crucial to inject \emph{different} initial noises for each of the two given images to avoid sub-optimal results, as illustrated in Figure \ref{fig:same_noise_interpolate}. 
+\textbf{Inpainting.}  
+BCM's bidirectional consistency can also help with inpainting:
+having an image with some pixels missing, 
+we first add a small noise to the missing pixels and then invert the image by multi-step inversion.
+Different from our standard inversion algorithm in \Cref{alg:inv}, at each iteration, we manually replace the region of missing pixels with a new Gaussian noise, whose scale corresponds to the current time step. 
+In this way, we gradually fill in the missing region to in-distribution noise. 
+In the end, we map the entire noisy image back to time $0$, finishing the inpainting.
+
+We illustrate our BCM inpainting results on CIFAR-10 in \Cref{fig:main_text_inpaint}, with the CM's inpainting results using the algorithms proposed by \citet{song2023consistency} (Algorithm 4 in \citep{song2023consistency}) for comparison.
+Our method produces better inpainting results within much fewer NFEs.
+
+\textbf{Blind restoration of
+compressed image.}  BCM's bidirectional consistency can offer broader applications.
+For example,  we can invert an image with OOD artifacts to the noise space and re-generate the image from the noise.
+During inversion, the model maps OOD regions to in-distribution noise, effectively eliminating these artifacts. 
+One potential application leveraging this property is blind restoration of compressed image, where OOD artifacts originate from compression.
+We prove this concept by applying BCM to restore images compressed by JPEG.
+We present the results in \Cref{fig:jpeg_restoration}, and also include two established restoration approaches, I$^2$SB \citep{liu2023i2sb} and Palette \citep{saharia2022palette}, for comparison.
+
+Surprisingly, BCM achieves better performance compared to both I$^2$SB and Palette when NFE is limited.
+Note that I$^2$SB and Palette require paired data under known degradation for training, while BCM is fully zero-shot and blind. 
+This result strongly evidences the potential of BCM in downstream inversion tasks.
+
+
+
+\section{Related Works}
+
+
+\textbf{Accelerating Diffusion's Generation. }
+In addition to CM and CTM we discussed in \Cref{sec:background}, many attempts have also been made to accelerate the generation of DMs.
+Existing methods include faster ODE solvers \citep{song2020denoising,zhang2022fast,lu2022dpmsolver,zhou2023fast} and distillation \citep{salimans2021progressive,luhman2021knowledge,zheng2023fast,luo2024diff,xie2024distillation}.
+However, these ODE solvers generally require 5-10 steps for satisfactory samples, and the distillation approach may cap the performance at the level of the pretrained diffusion model, as highlighted by \citet{song2023improved}.
+On the other hand, while distillation approaches have achieved impressive generation quality, an intrinsic property of CMs is their ability to enable fast traversal along ODEs.
+This allows for the design of broader applications; for example, \citet{zhang2024efficient} leverage this property to develop an efficient importance sampler. 
+Our proposed BCM further enriches this by enabling both forward and backward traversal.
+\textbf{Inversion. }
+Inversion of an input image is a key step in downstream tasks like image editing~\citep{mokady2023null, wallace2023edict, hertz2022prompttoprompt, hubermanspiegelglas2023edit}. 
+Current methods typically include encoders \citep{richardson2021encoding,tov2021designing}, optimization \citep{mokady2023null,abdal2019image2stylegan}, and model fine-tuning or modulation \citep{roich2021pivotal,alaluf2022hyperstyle}.
+For diffusion-based models, the most common inversion method is based on solving PF ODE backward, as first proposed by \citet{song2020denoising}.
+However, since the ODE solver relies on local linearization, this ODE-based inversion typically provides an insufficient reconstruction, especially when using fewer diffusion steps.
+One way to address this issue is to perform gradient optimization using the ODE-based inversion as an initialization, as introduced by \citet{mokady2023null}.
+Our proposed BCM can provide better inversion with fewer NFEs and is compatible with \citet{mokady2023null}'s approach for a better reconstruction quality.
+
+
+\section{Conclusions and Limitations}
+
+\label{sec:conclusions}
+In this work, we introduce the Bidirectional Consistency Model (BCM), enhancing upon existing consistency models \citep{song2023consistency,song2023improved,kim2023consistency} by establishing a stronger consistency. 
+This consistency ensures that points along the same trajectory of the probability flow (PF) ODE map to each other, thereby unifying generation and inversion tasks within one framework.
+By exploiting its bidirectional consistency, we devise new sampling schemes and showcase applications in a variety of downstream tasks.
+Unlike other distillation approaches, a notable property of CMs is their ability to enable fast traversal along the entire PF ODE.
+Our proposed BCM further enriches this, and we believe that it will open a new avenue for further exploration.
+
+One limitation of our method is that while employing more steps in generation or inversion can initially enhance results, the performance improvements tend to plateau quickly. 
+Increasing the Number of Function Evaluations (NFEs) beyond a certain point does not yield further performance gains. 
+This is similar to CMs, where there is no performance gain with more than 2 NFEs.
+A potential solution involves employing the parameterization and tricks proposed by \citet{kim2023consistency}.
+Additionally, our method delivers imperfect inversion, which sometimes alters the image content.
+However, we should note that this also happens in ODE-based DMs.
+Future work can involve developing more accurate inversion techniques, like the approach by \citet{wallace2023edict}.
+
+
+
+
+
+\newpage
+
+
+

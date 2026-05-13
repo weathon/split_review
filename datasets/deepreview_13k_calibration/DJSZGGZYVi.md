@@ -1,8 +1,8 @@
 # Representation Alignment for Generation: Training Diffusion Transformers Is Easier Than You Think
 
 - Decision: Accept
-- Avg Score: 3.00
-- Scores: 1, 0, 8, 1, 0, 8, 8, 1, 0
+- Avg Score: 9.00
+- Scores: 10, 8, 10, 8, 8, 10
 
 ## Abstract
 Recent studies have shown that the denoising process in (generative) diffusion models can induce meaningful (discriminative) representations inside the model, though the quality of these representations still lags behind those learned through recent self-supervised learning methods. We argue that one main bottleneck in training large-scale diffusion models \emph{for generation} lies in effectively learning these representations. Moreover, training can be made easier by incorporating high-quality external visual representations, rather than relying solely on the diffusion models to learn them independently. We study this by introducing a straightforward regularization called \emph{REPresentation Alignment (\sname)}, which aligns the projections of noisy input hidden states in denoising networks with clean image representations obtained from external, pretrained visual encoders. The results are striking: our simple strategy yields significant improvements in both training efficiency and generation quality when applied to popular diffusion and flow-based transformers, such as DiTs and SiTs.

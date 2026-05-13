@@ -1,0 +1,196 @@
+\title{Provence: efficient and robust context pruning for retrieval-augmented generation}
+
+\begin{abstract}
+Retrieval-Augmented Generation improves various aspects of large language models (LLMs) generation,  but suffers from computational overhead caused by long contexts, and the propagation of irrelevant retrieved information into generated responses. Context pruning deals with both aspects, by removing irrelevant parts of retrieved contexts before LLM generation. Existing context pruning approaches are limited, and do not present a universal model that would be both _efficient_ and _robust_ in a wide range of scenarios, e.g., when contexts contain a variable amount of relevant information or vary in length, or when evaluated on various domains. In this work, we close this gap and introduce Provence (Pruning and Reranking Of retrieVEd relevaNt ContExts), an efficient and robust context pruner for Question Answering, which dynamically detects the needed amount of pruning for a given context and can be used out-of-the-box for various domains. The three key ingredients of  Provence are formulating the context pruning task as sequence labeling, unifying context pruning capabilities with context reranking, and training on diverse data. Our experimental results show that Provence enables context pruning with negligible to no drop in performance, in various domains and settings, at almost no cost in a standard RAG pipeline. We also conduct a deeper analysis alongside various ablations to provide insights into training context pruners for future work.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Retrieval-Augmented Generation (RAG) has become a widely-used paradigm for improving factuality, attribution, and adaptability of Large Language Models (LLMs) (Das et al., 2019; Asai et al., 2024; Seo et al., 2019; Lewis et al., 2020; Mallen et al., 2023a; Min et al., 2023). Augmenting a given user’s query with retrieved relevant contexts helps to avoid the generation of untruthful information and enables the provision of references used to generate the answer. Furthermore, using a domain-specific datastore may enable access and reasoning over a previously unknown knowledge – without fine-tuning the LLM. One additional advantage of the RAG approach is the easy plug-andplay architecture (LangChain): practitioners may choose components (retrievers, generator LLMs, context granularity etc.) which best suit their particular cases to maximize the final performance.  
+
+At the same time, the use of RAG adds computational overhead due to both retrieval latency and the increased input length for the LLMs. It may also propagate irrelevant information present in retrieved contexts into generated responses. These issues can be solved by developing more efficient and robust LLMs – either by making architectural changes to process long contexts more efficiently (Nawrot et al., 2024; Dao, 2024; Chevalier et al., 2023) or increasing the diversity of the tuning data to improve processing of irrelevant contexts (Lin et al., 2024). However, tuning the LLM can be highly resource-consuming, or even impossible to apply for proprietary (closed) LLMs. An alternative solution consists in pruning retrieved contexts by removing context parts irrelevant to the user’s query – which reduces context lengths and therefore speeds up generation. Such context pruning module can be used in a plug-and-play manner with any generator LLM, featuring both easy use and better transparency in the RAG pipeline.  
+
+Despite initial efforts on developing context pruners for RAG, none of the existing solutions provide a model ready to be used out-of-the-box in practice. First, many approaches are designed for a simplified setting, e.g., with the assumption that only one sentence per context is relevant to the input query (Wang et al., 2023; Xu et al., 2024), or that the compression ratio is fixed (Jiang et al., 2023; Pan et al., 2024). However, in practice contexts may contain various portions of relevant information, from empty to full relevant context, and pruners should detect it in an adaptable fashion. Second, many works introduce context pruners that are not efficient enough to be used in practice. This includes using billion-sized LLMs as base models for pruners (Jiang et al., 2024; Pan et al., 2024; Wang et al., 2023), or designing abstractive context compressors which require sequential autoregressive generation of the final context (Wang et al., 2023; Xu et al., 2024). We argue that a more practical and efficient setting consists in fine-tuning a small-size model such as DeBERTa (He et al., 2021b;a), as an extractive pruner, i.e., with a lightweight prediction head for selecting relevant context parts. Third, most of the existing works train context pruners for each dataset individually and do not target nor test pruners robustness to various data domains.  
+
+![](images/fad3b3e2bf12c339158df0a2b3d3408b46591287248180d20e2a27e63dd78e46.jpg)  
+Figure 1: Illustration of inference (left) and training (right) of Provence.  
+
+Table 1: Analysis of existing approaches for context pruning. Violet / Orange highlight practical / less-practical solutions.   
+
+![](images/f37c0623443132cb3e938fa3def982577394da0b0e8dc4e331d700b27e540a12.jpg)  
+
+Table 1 summarizes the properties of various existing methods along specified dimensions and shows that none of them satisfy all listed criteria. The table also includes a dimension of pruning granularity, i.e., token-level vs sentence-level pruning. In this work, we focus on query-dependent sentencelevel pruning, which prunes out semantic units (sentences) that are deemed not relevant to generate the answer. An alternative approach is token-level pruning which prunes out low-level grammatical units such as articles or interjections, usually in a query-independent fashion. The two approaches are orthogonal and could potentially be combined.  
+
+To address listed limitations, we introduce Provence (Pruning and Reranking Of retrieVEd relevaNt ContExt), an adaptable, efficient and robust sentence-level context pruner for Question Answering, which can be used out-of-the-box across various domains and settings. To achieve this, we formulate context pruning as binary sequence labeling so that the binary mask predicted by the pruner determines sentences (from zero to all) which are relevant to the query, and train our pruner from a lightweight DeBERTa model on diverse data. Furthermore, we notice that context pruning and reranking (i.e., the second step in effective retrieval pipelines) bear a strong resemblance. We therefore propose to unify these two models into a single one, completely eliminating the cost of context pruning in the RAG pipeline.  
+
+More specifically, our contributions are as follows:  
+
+• We propose an approach for training an adaptable, robust, and efficient context pruner for QA – and will release our trained models. Three key ingredients of our approach are formulating context pruning as sequence labeling, unifying context pruning and reranking in a single model, and training on diverse data. • We test Provence on various QA domains and show its out-of-the-box applicability to prune contexts with negligible to no drop in performance and at almost no cost, substantially outperforming baseline approaches. We also demonstrate Provence capabilities in detecting the number of relevant sentences at any positions in the context and robustness to various context lengths. • We conduct multiple ablations to demonstrate which techniques are essential for training robust context pruners, to provide insights for future context pruners development.   
+Definitions. A typical RAG pipeline consists of $(O)$ a user’s question, or query; $(I)$ a datastore,   
+i.e., a collection of documents (pieces of text) to be retrieved from, (2) an efficient retriever which   
+enables fast retrieval from a large datastore (typically a dual-encoder model, where queries and   
+passages are encoded independently), (3) a more expensive cross-encoder reranker which further   
+reduces and reorders a set of retrieved passages (cross-encoding means encoding a passage together   
+with a query); and (4) a generator LLM which outputs the final response based on the user’s query   
+and the relevant passages. Such a pipeline can be represented as retrieve $>>$ rerank $>>$   
+generate. Context pruning can be incorporated before generation, i.e., retrieve $>>$ rerank   
+$>>$ prune $>>$ generate. In our work, we also propose to incorporate context pruning into   
+reranking, an essential and already present component in RAG (Rau et al., 2024a): retrieve >>   
+rerank+prune $>>$ generate. This enables context pruning at almost zero cost.   
+2 RELATED WORK   
+Context pruning. RECOMP (Xu et al., 2024) focuses on context pruning for RAG and proposes   
+both extractive and abstractive context pruners. The extractive RECOMP approach independently   
+encodes sentences in the context and then selects top sentences with embeddings closest to the query   
+embedding. Such an approach limits context understanding, due to independent processing of both   
+sentences and queries. The method also requires specifying the amount of sentences to keep as   
+a hyperparameter – which is usually unknown in practice and should depend on each particular   
+passage. The abstractive RECOMP summarizes key information from the passage relevant to the   
+query (including zero relevant information) by training on silver summaries generated by GPT-3.5.   
+However, it requires inefficient autoregressive generation of the final context, and can eventually   
+hallucinate facts not present in the input context. FilCo (Wang et al., 2023) similarly proposes to   
+generate contexts autoregressively but is trained on extractive targets, i.e., one sentence from the   
+context selected by one of three criteria. The drawbacks are again inefficiency and the simplified   
+assumption of one relevant sentence per context. A recent approach, COMPACT (Yoon et al., 2024),   
+also proposes to generate filtered contexts autoregressively – hence inefficiently – and introduces an   
+iterative approach for gradually updating the relevant context after processing a new portion of   
+retrieved passages. In contrast to all listed efforts, Provence dynamically detects the amount of   
+relevant information in the context – from zero to all sentences – in an extractive and efficient way.   
+Furthermore, we propose a novel approach of integrating context pruning into a reranker.   
+Concurrently to our work, DSLR (Hwang et al., 2024) performs extractive sentence-level pruning,   
+by encoding sentences one-by-one, together with the query, using existing rerankers. Similarly to   
+Provence, DSLR keeps sentences with scores higher than a threshold and preserves the original   
+order of sentences. However, in contrast to Provence, DSLR is not capable of keeping groups of   
+semantically connected sentences, due to independent sentence processing.   
+An orthogonal line of work proposes extractive token-level pruners. LLMLingua (Jiang et al., 2023)   
+and Selective Context (Li et al., 2023) use LLMs to remove tokens with high generation probabil  
+ities, independently of the query. LLMLingua2 (Pan et al., 2024) is a small BERT-based model   
+finetuned to eliminate redundant tokens, also independently of the query. LongLLMLingua (Jiang   
+et al., 2024) proposes query-dependent LLM-based token pruning based on contrastive perplexity.   
+Listed approaches remove tokens in a way that it does not break context understanding for the LLM   
+– hence they are not capable of removing semantic parts of the context. LLMLingua models also  
+
+have many hyperparameters in the interface which are hard to tune in practice. These approaches can however also be combined with sentence-level pruning.   
+Retrieval granularity. Alternatively to context pruning, one can reformulate datastore content into atomic units, e.g., propositions as in Dense-X retrieval Chen et al. (2024c) or decontextualized sentences (Choi et al., 2021). Such preprocessing is expensive and can lead to some information loss. Passage filtering. Another related – and orthogonal – line of works focuses on filtering entire passages if they are deemed irrelevant for a given question; such an approach can be straightforwardly combined with Provence. A simple method consists in introducing a threshold on the (re)ranking score. LongLLMLingua reranks passages based on the probability of a question given the passage. (Yoran et al., 2024) use natural language inference models to filter out passages that do not entail question-answer pairs, but report that this approach sometimes filters out relevant passages too. Improving context processing in LLMs. While context pruners aim to remove context parts irrelevant to the user’s query, another line of work aims to process contexts more efficiently and effectively in LLMs. Efficient context processing could be achieved through efficient attention implementations (Dao, 2024; Anagnostidis et al., 2023), KV cache compression (Nawrot et al., 2024), encoding retrieved passages in parallel (Zhu et al., 2024), or compressing contexts into one or more context embeddings (Chevalier et al., 2023; Ge et al., 2024; Rau et al., 2024b). Other works aim to make LLMs more robust, by exposing them to noisy contexts during training or finetuning (Izacard et al., 2022; Lin et al., 2024). All such approaches usually require LLM adaptation which may complicate application to an arbitrary picked LLM.   
+3 PROVENCE   
+The high-level overview of our proposed approach is illustrated in Figure 1. Our first contribution is to pose the context pruning problem as a sequence labeling task. We fine-tune a DeBERTa model to encode the query–context pair and output binary masks which are used to filter out irrelevant context parts. The labels for training are generated by LLama-3-8B-Instruct (AI@Meta, 2024); we call them silver labels since they are generated automatically. Such an approach solves several limitations of existing context pruners: $(I)$ by construction, the model is able to deal with varying noise in contexts and select an appropriate pruning ratio; (2) queries are encoded together with context sentences (cross-encoding), providing richer representations – compared for instance to extractive RECOMP which encodes query and context sentences independently; (3) using a lightweight encoder makes our approach more efficient than LLM-based or abstractive methods.   
+Our second contribution consists in unifying reranking and context pruning – instead of considering these steps as distinct in the RAG pipeline. In Provence, reranking and pruning can be done in $a$ single forward step, thus eliminating the computational overhead due to context pruning – making Provence almost “free”.   
+Training data. Our approach requires a set of training questions and a retrieval datastore. Speficially, we rely on the train set of the MS MARCO document ranking collection which includes $370k$ queries (Nguyen et al., 2016). The MS MARCO collection is a domain-diverse datastore of $3.2M$ documents crawled from the Web – which is required for the final model’s robustness to various domains – and is often used to train retrievers and rerankers. We also consider the train set of Natural Questions which contains $87k$ queries Kwiatkowski et al., 2019).   
+Data processing. We create a retrieval datastore by splitting MS MARCO documents into passages consisting of $N$ consecutive sentences – $N$ being a random integer $\in1..10$ . This is to enable the pruner’s robustness to variable retrieved context lengths. We also prepend page titles to each passage. For each question, we retrieve top-5 relevant passages using a strong retrieval pipeline (Rau et al., 2024a) consisting of a SPLADE-v3 retriever (Lassance et al., 2024) and a DeBERTa-v3 reranker (Lassance & Clinchant, 2023). The resulting set of retrieved passages is naturally diverse w.r.t. relevance or irrelevance to the question, due to imperfections in retrieval.   
+Silver labels generation. Given a question and a retrieved passage (context), we split the passage into sentences1 and prompt Llama-3-8B-Instruct to select sentences relevant to the given question.  
+
+One approach would be to use a straightforward prompt such as “Output indexes of sentences relevant to the given question”. However, we decided to utilize the strong LLMs’ capabilities of actually answering questions while citing relevant context sentences. We therefore instruct the LLM to answer the given question using only information provided in the given context, and output “No answer” in case no relevant information is provided. We also specify the easy-to-parse citation format [i] and number sentences with the same marker in the context. We also compare different prompting strategies in the ablation study.  
+
+We found that Llama-3-8B is well capable of answering only based on a given context in most cases and of outputting a citation $\sim90\%$ of the time. We filter out cases when no citations are produced and ”No answer” is not present in the LLM’s output, as these are the cases when the context actually contains relevant information but the LLM “forgot” to cite it.  
+
+Training of Provence. Our context pruner receives as input the concatenation of a question and a retrieved context, and outputs per-token binary labels denoting whether each token (defined by the pretrained model’s tokenizer) should be included in the selected context. In Section 4.4 (Ablations), we also consider an approach where a special token is inserted at the beginning of each sentence, and labels are predicted per-sentence based on the representations of those tokens. We train Provence as a binary per-token classifier with ground truth labels coming from the silver data labeling, and the model can be used as a standalone pruner, i.e., retrieve $>>$ rerank $>>$ Provence (standalone) $>>$ generate.  
+
+Unifying compression and reranking. We note that cross-encoder rerankers (Nogueira & Cho, 2020) share both the same architecture and inputs (pairs of question–passages) as Provence. Additionally, the task of context pruning (selecting parts of contexts that are useful for generating the answer to the question) intrinsically bears similarity with re-ranking (estimating the relevance of a context w.r.t. the question) – and we hypothesize the possibility of knowledge transfer between these two related tasks. We therefore propose to unify both approaches in a single model, with two different task heads. More specifically, the reranking head outputs a scalar prediction for the BOS token while the pruning head outputs per-token predictions for the passage tokens, as illustrated in Figure 1. To ease training, we propose to further fine-tune a pretrained reranker on our labeling objective, while adding a ranking “regularizer” to preserve initial reranking capabilities. The regularizer is a Mean Squared Error loss on the reranking scores from the initial reranker. This can be viewed as a straightforward pointwise score distillation process, where the initial model serves as the teacher – a method that has demonstrated great effectiveness in Information Retrieval Hofsta¨tter et al. (2021). The final loss function is as follows:  
+
+$$
+{\mathcal{L}}=\sum_{n=1}^{N}\left\{\sum_{k=1}^{L_{n}}\log P(y_{n,k}|z_{n,k})+\lambda{\big(}s_{n}-z_{n,0}{\big)}^{2}\right\}\qquad\quad z_{n}=\mathrm{Provence}(x_{n})
+$$  
+
+where $N$ is the number of datapoints (query–passage pairs), $x_{n}$ is a sequence of $L_{n}+1$ input tokens (concatenated query, passage and BOS at the $_{0-t h}$ position), $z_{n}$ is a sequence of $L_{n}+1$ predictions output by the model, $y_{n}$ is a sequence of $L_{n}$ target binary labels for context pruning, $s_{n}$ is the teacher score (initial reranker), $z_{n,0}$ is the ranking score predicted from the BOS representation.  
+
+In the case of the unified model, re-ranking and context pruning need a single forward step from the encoder, i.e., retrieve $>>$ Provence (w/ re-ranking) $>>$ generate – making context pruning almost free in terms of execution time.  
+
+Inference with Provence. At inference, we feed a concatenation of a question and a retrieved passage through Provence, which outputs probabilities of including each token in the final context, as well as the passage score in the case of the unified model. We simply use a threshold $T$ to binarize the token probabilites (keep or not) – which has a direct effect on the compression rate. As shown in the experiments Section, the choice of a threshold is generally transferable across various datasets, making the model flexible to be used out-of-the box in various QA applications2.  
+
+We note that our model outputs token-level predictions despite the sentence-level labeling task. However, in rare cases we could still have partial sentences being selected. To avoid this phenomenon, we apply a “sentence rounding” procedure: for each sentence, we check the ratio of kept tokens (predicted label $\c=1$ ), and select the entire sentence only if it is higher than 0.5.  
+
+![](images/7c9c63e20aeb9ec810677dcce6d2a1c86883a33fd4c6628bf2cad4ff199775d7.jpg)  
+Figure 2: Main results for various QA domains, comparing Provence and baseline models. Generator: LLama-2-7B, retriever: SPLADE-v3, reranker: DeBERTa-v3 (or Provence in the unified setting). Plot titles denote “Dataset name (datastore type)”. $x$ -axis denotes QA performance evaluated with LLM-as-a-judge; $y$ -axis denotes the context compression ratio. For both metrics, the higher the better: the best model would be closest to the top right corner. Numerical scores are presented in App. Tables 8–9. Main conclusion: Provence consistently lies on the Pareto front.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+4.1 EXPERIMENTAL SETUP  
+
+Provence training details. We train Provence on the data described in Section 3, using PyTorch (Paszke et al., 2019) and HuggingFace transformers (Wolf et al., 2020). We use DeBERTav3 (He et al., 2021a) as our pretrained model for training the standalone Provence. For the unified approach, we start training from an already trained cross-encoder, also based on DeBERTa-v3 (Lassance & Clinchant, 2023). Note that in the latter, we initialize the ranking head from its fine-tuned version, and train the separate pruning head from scratch.  
+
+After preliminary experiments, we set the learning rate to $3\times10^{-6}$ , the batch size to 48 and train models for one epoch. For joint training, there is a slight trade-off between pruning and reranking. We set the reranking regularization coefficient $\lambda$ to 0.05, chosen as the minimal value that does not substantially degrade reranking performance on the MS MARCO development set.  
+
+Evaluation datasets. We test Provence on a diverse set of QA datasets. First, we consider commonly used datasets relying on Wikipedia datastore: Natural Questions (Kwiatkowski et al., 2019), TyDi QA (Clark et al., 2020), PopQA (Mallen et al., 2023b) (all single-hop questions), and HotpotQA (Yang et al., 2018) (multi-hop questions). Second, we consider datasets with datastores from various domains: BioASQ (Nentidis et al., 2023) (biomedical questions with Pubmed as a datastore), SyllabusQA (Fernandez et al., 2024) (questions about educational course logistics, with courses syllabus as a datastore); and RGB Chen et al. (2024b) (questions about news with Googlesearched news as contexts).  
+
+Table 2: Time/MFLOPS required for context pruning. Top-5 retrieved documents, NQ dev set $3k$ samples).   
+
+![](images/1c50c8dee883089b96f2d62ccdcdd0ea80b3a821f4516846de57b30c932b4a41.jpg)  
+
+Table 3: Speed up in generation due to compression (Provence, $49\%$ compression). Batch sizes 1 or 256.   
+
+![](images/2b6018442407702be98b8e5459d0262073181ed45c47aa35e8a6b3d90940d3b0.jpg)  
+
+Evaluation settings. We conduct experiments using BERGEN (Rau et al., 2024a), a benchmarking library for RAG, using the recommended experimental setting. For each query, we retrieve top5 relevant passages using a strong and robust retrieval pipeline: SPLADE- $\cdot\mathbf{v}3>>$ DeBERTa-v3 reranker (except for RGB, for which Google-searched passages are already provided). We then pass queries prepended with relevant document (full length or pruned) into LLama-2-7B-chat (Touvron et al. Each evaluation dataset comes with short keyword answers, which we use to evaluate responses using LLM-based evaluation (LLMeval in Rau et al. We additionally measure compression as a portion of the context which was pruned out.  
+
+We compare Provence to publicly available context pruning models listed in Table 1, except LLMLingua and Selective Context which were shown to underperform LLMLingua2 (Pan et al., 2024). For all context pruners (except abstractive RECOMP for which it is not available), we enforce the selection of the first (title) passage sentence, to avoid ambiguity in understanding the context by the generator. For extractive RECOMP, we use the model trained on NQ, consider using top-1/2/3 sentences, and prepend the passage title to each sentence. For the LLMLingua family, we vary the compression rate in $\{0.25,0.5,0.75\}$ and use code provided on the official repository4. We use the XLM-RoBERTa model for LLMLingua2. For Provence, we use $T=0.1$ and $T=0.5$ . We also compare our method to DSLR based on the same reranker as ours, i.e, DeBERTa-v3.  
+
+
+
+\section{4.2 MAIN RESULTS  }
+
+
+Context pruners are often only tested on limited domain data, e.g., with Wikipedia datastore, and an important aspect of our work is evaluating context pruning on a series of QA domains. Figure 2 reports the trade-off between compression (efficiency) and LLM-evaluated performance (quality), for various QA datasets and context pruning methods. We choose to report a figure per dataset to better assess the Pareto front of existing solutions, rather than comparing methods with different compression rates in the same table.  
+
+First, we observe that Provence achieves the highest performance across pruning methods, for similar compression ratios. Second, it is noteworthy that Provence outperforms methods requiring more computations such as LLMLingua models, showing that efficiency is not traded for effectiveness. Furthermore, Provence is the only method capable of achieving high compression levels without (or with negligible) performance drops, on all datasets. Moreover, for some datasets, e.g., PopQA, pruning with Provence leads to performance improvements due to noise filtering.  
+
+The effect of threshold. An important aspect in the out-of-the-box applicability of context pruners is how much effort is needed to select the suitable values of hyperparameters. For Provence, it only consists in setting the pruning threshold $T$ . In Figure 2 (for which $T\,=\,0.1$ and $T\,=\,0.5)$ ), we observe that Provence pruning ratio automatically varies from $50\%$ to $80\%$ , depending on the dataset, which demonstrates that the same values for $T$ work well for all considered domains – making Provence robust to the choice of hyperparameters. If necessary, users can still tune it further for their datasets and/or needs. We note that some models specify the desired compression ratio as a hyperparameter, e.g., LLMLingua models or extractive RECOMP (through top- $N$ sentences).  
+
+![](images/52b3c6ac6e30941828cd14d59575056475bd0b68eebebfb41c3e5cc8024e9a09.jpg)  
+
+Figure 3: Analyses. (Left) Needle-in-the-haystack test allowing the control of the position of the ground truth sentence(s) in the context. (Middle) Comparison of the number of selected sentences by the silver predictor (LLaMA-3-8B-Instruct) and Provence. Heatmaps are normalized by rows: a cell in position $(i,j)$ indicates which percentage of contexts that were pruned into $i$ sentences by the silver predictor, were pruned into $j$ sentences by Provence. (Right) Testing Provence in settings with different context lengths. All experiments are done with unified Provence, $T=0.1$ .  
+
+While it may seem convenient to estimate inference cost, the “optimal” compression ratio (without losing performance) is specific to each particular question-context pair. Thus, using a threshold as a hyperparameter is more appropriate for this task. We also experimented with specifying a threshold in extractive RECOMP (shown on the same plot) and found that it often leads to lower performance (compared to top- $N$ ). The reason is that different queries have different ranges of similarity scores.  
+
+Efficiency. We compare Provence with other pruning methods in terms of efficiency. Table 2 reports compression time and MFLOPS5 required by different pruning methods. As expected, LongLLMLingua (based on LLama-2-7B-chat) is the slowest context pruner. RECOMP abstr. requires less MFLOPS compared to Provence, but its autoregressive nature makes it slower in practice6. Note that in the case of the unified model, pruning is almost free – as it’s part of the re-ranking step. Table 3 reports speed-up gains due to compression with Provence model $\sim50\%$ compression rate). All runs were performed on single Tesla V100-SXM2-32GB GPU with vllm Kwon et al. (2023). With large batch sizes, we systematically observe $2\times$ speed-ups at inference, while smaller batch sizes lead to lower gains (especially for smaller models). We assume this is mostly due to the CPU/GPU communication bottleneck, which masks inference gains due to compression.  
+
+4.3 ANALYSIS  
+
+In this Section, we conduct a more fine-grained evaluation to better understand the properties of Provence.  
+
+Robustness to the position of relevant information in the context. We design a needle-in-thehaystack experiment which allows us to check the performance of Provence on a simple toy example and to evaluate its robustness w.r.t. the position of the relevant information in the input context. We write 5 questions and answers, and insert answers (“needles”) at random positions between sentences, in a subset of 100 passages sampled from the Wikipedia datastore. Ideally, Provence should only select the “needle” sentences and filter out all other sentences in contexts. We plot the number of selected sentences and percentage of cases when the pruned context contains the “needle” (Figure 3, (Left)). We consider two settings: with 1- and 2-sentence “needles”. We observe that Provence correctly selects “needle” sentence(s) in most cases, except at leftmost and  
+
+Table 4: Effectiveness of reranking top-50 documents retrieved by SPLADE-v3. DeBERTa-v3 is the “baseline” (initialization point for Provence, which we aim to preserve performance). We report the $\mathbf{R}\!\stackrel{\rightharpoonup}{\omega}\!5$ on two RAG datasets (NQ and HotpotQA), MRR $@10$ on MS MARCO passages (dev set), $\mathtt{n D C G}@10$ on TREC DL’19 (Craswell et al., 2020), and mean $\operatorname{nDCG}@10$ on the 13 open datasets from the BEIR benchmark (Thakur et al.  
+
+![](images/42a82d9ce87eb35fbe5b032f35ecbaf355349031244b74c90d2342b2f94b3235.jpg)  
+
+rightmost positions.8 In most cases Provence does not select any irrelevant sentences. The results are similar for both simpler (1-sentence) and harder (2-sentence) “needles” showing Provence’s flexibility in detecting the number of relevant sentences, discussed below in more details.  
+
+Adaptability to the variable number of relevant sentences. To evaluate the capability of Provence to dynamically detect the number of relevant sentences in the context, we compare the number of sentences $L$ selected by Provence and by a silver oracle, for question-context examples from various datasets. A silver oracle is easy to construct for $L=0$ , by pairing questions with randomly sampled contexts. For $L\geqslant1$ , we use the labeling produced by Llama-3-8B-Instruct. Figure 3 (Middle) shows that the number of relevant sentences detected by Provence is close to the silver oracle value in most cases, for all considered datasets. In contrast, extractive RECOMP would always select a prespecified number of sentences.  
+
+Robustness w.r.t. context granularity. Figure 3 (Right) shows Provence performance for two datasets, with Wikipedia datastores made of contexts of various granularity. Here, each considered datastore is produced by splitting Wikipedia pages into chunks of $N$ sentences, $N\in\{2,6,10\}$ , or 100 words, and prepending the page title to each chunk. Provence shows high performance in all cases – the performance with pruned contexts being close to the performance obtained using original contexts. As could be expected, the compression ratio is higher for longer contexts.  
+
+Reranking effectiveness. Table 4 compares reranking performance between our reranking baseline and unified Provence – whose training starts from the former. We can see that our joint training procedure (on both pruning and ranking tasks) makes it possible to learn a context pruner that preserves initial reranking capabilities. We further include as a comparison point results from a model trained in similar conditions on NQ. Overall, results are similar – further highlighting the robustness of Provence w.r.t. training data. We further discuss such aspects in Section 4.4 (Ablations).  
+
+Applicability in different settings. Figure 8 (App.) demonstrates the applicability of Provence in variable retrieval-generator settings – achieving similar results as the ones reported in Figure 2.  
+
+4.4 ABLATIONS  
+
+In this Section we analyze various design choices made in Provence development, to provide insights into training context pruners for future works (results shown in Figure 4). All models in this section are standalone context pruners, trained with the same amount of parameter updates.  
+
+Model size. We first observe that DeBERTa-large slighly increases the compression rate – when comprared to DeBERTa-base. All other ablations are tuned from a DeBERTa-base model, for efficiency reasons. Note that the final Provence is trained from a DeBERTa-large model (or its equivalent reranker).  
+
+Data mixtures. We compare training on NQ ( $87k$ queries), MS MARCO downsampled to the same size, and full MS MARCO $370k$ queries). Despite the observation that using the MS MARCO type of data leads to lower results than NQ – with equal number of queries – we also find that using larger data (i.e., full MS MARCO) improves results. Our final models are trained on the full MS MARCO – further ablations are conducted on the NQ data, for efficiency reasons.  
+
+![](images/891a9f46087df5c0645fa1976b8cc4de22849fda9e0737562ffe6582f97b7c49.jpg)  
+Figure 4: Ablation results. All models are single-component modifications of the anchor model, which is a base-size model, trained on NQ data, with the answer oracle and token-level labeling.  
+
+Labeling strategies. As described in Section 3, we can train the pruner either to perform tokenlevel labeling (with sentence rounding at inference) or to perform sentence-level labeling. In the former case sentence representations are richer but the model also needs to learn to output similar predictions for tokens inside one sentence. In the latter case sentence content must be represented in a single embedding which may limit representation expressivity. In practice we observe close performance, with the token-level strategy slightly outperforming the sentence-level one some datasets. In all other experiments we use the token-level strategy.  
+
+Oracle prompts. We compare three options for prompting an oracle LLM to generate silver labeling: (1) answer oracle: asking to answer the given question from the given context, citing corresponding sentences; (2) relevance oracle: asking to list any relevant information in the context to the question, citing corresponding sentences; (3) straightforward oracle: asking to output indexes of sentences which answer the given question. We found that the behavior of the straightforward oracle varies on different prompts, while the use of the answer oracle makes answers more consistent. The motivation for the relevance oracle is that often contexts contain distantly relevant information to the query and it could be reasonable to select the corresponding sentences. Comparing the listed prompts, we observe that the relevance oracle underperforms the answer oracle, and the straightforward oracle performs similarly or slightly lower than the answer oracle.  
+
+Unification with reranker. In Figure 2 we compare Provence trained as a standalone model and as a model unified with reranker, and find that both strategies lead to similar results – although the former relies on two separate inference steps (re-ranking and pruning) in a RAG pipeline.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+In this work, we present Provence, a robust, adaptable, and efficient context pruner for Question Answering – either unified in a single model with reranking capabilities or available as a lightweight standalone model. In contrast to previous extractive approaches, Provence dynamically detects the needed pruning ratio for a given context and can be used out-of-the-box for various QA domains. In extensive experiments, we demonstrate that Provence prunes contexts with negligible to no drops in performance and in some cases even brings performance improvement due to removing context noise. We also show Provence capabilities in correctly detecting the number of relevant sentences in contexts, located at any position, and with contexts of various lengths. Finally, the ablation study highlights the importance of using a large training data and the appropriate prompt in the silver oracle.  
+
+Limitations. Despite Provence being ready to use in various settings, demonstrated in the paper, it is focusing only on QA applications, with a single passage processed at a time, and is trained on English-only data. Future work could consider extending it to other tasks, multi-passage contexts, and languages beyond English.  
+
+
+

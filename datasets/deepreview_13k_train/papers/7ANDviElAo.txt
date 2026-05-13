@@ -1,0 +1,443 @@
+\title{Graph Sparsification via Mixture of Graphs}
+
+\begin{abstract}
+\vspace{-0.5em}
+Graph Neural Networks (GNNs) have demonstrated superior performance across various graph learning tasks but face significant computational challenges when applied to large-scale graphs. One effective approach to mitigate these challenges is graph sparsification, which involves removing non-essential edges to reduce computational overhead. However, previous graph sparsification methods often rely on a single global sparsity setting and uniform pruning criteria, failing to provide customized sparsification schemes for each node's complex local context.
+In this paper, we introduce Mixture-of-Graphs (MoG), leveraging the concept of Mixture-of-Experts (MoE), to dynamically select tailored pruning solutions for each node. Specifically, MoG incorporates multiple sparsifier experts, each characterized by unique sparsity levels and pruning criteria, and selects the appropriate experts for each node. Subsequently, MoG performs a mixture of the sparse graphs produced by different experts on the Grassmann manifold to derive an optimal sparse graph. One notable property of MoG is its entirely local nature, as it depends on the specific circumstances of each individual node. Extensive experiments on four large-scale OGB datasets and two superpixel datasets, equipped with five GNN backbones, demonstrate that MoG (I) identifies subgraphs at higher sparsity levels ($8.67\%\sim 50.85\%$), with performance equal to or better than the dense graph, (II) achieves $1.47-2.62\times$ speedup in GNN inference with negligible performance drop, and (III) boosts ``top-student'' GNN performance ($1.02\%\uparrow$ on RevGNN+\textsc{ogbn-proteins} and $1.74\%\uparrow$ on DeeperGCN+\textsc{ogbg-ppa}).
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Graph Neural Networks (GNNs) \citep{sun2023all,zhou2020graph} have become prominent for confronting graph-related learning tasks, including social recommendation~\citep{wu2021self,yu2022graph}, fraud detection~\citep{sun2022structure, wang2019semi,cheng2020graph}, drug design~\citep{zhang2023learning}, and many others~\citep{wu2023graph, sun2023self}. The superiority of GNNs stems from iterative \emph{aggregation} and \emph{update} processes. The former accumulates embeddings from neighboring nodes via sparse matrix-based operations (\textit{e.g.}, sparse-dense matrix multiplication ({\fontfamily{lmtt}\selectfont \textbf{SpMM}}) and sampled dense-dense matrix multiplication ({\fontfamily{lmtt}\selectfont \textbf{SDDMM}})~\citep{fey2019fast,wang2019deep}), and the latter updates the central nodes' embeddings using dense matrix-based operations (\textit{e.g.}, {\fontfamily{lmtt}\selectfont \textbf{MatMul}}) \citep{fey2019fast,wang2019deep}. {\fontfamily{lmtt}\selectfont \textbf{SpMM}} typically contributes the most substantial part ($\sim$70\%) to the computational demands \citep{liu2023dspar,zhang2024two}, influenced largely by the graph's scale. Nevertheless, large-scale graphs are widespread in real-world scenarios \citep{wang2022searching,jin2021graph,zhang2024graph}, leading to substantial computational burdens, which hinder the efficient processing of features during the training and inference, posing headache barriers to deploying GNNs in the limited resources environments.
+
+\begin{figure*}
+\centering
+\includegraphics[width=\linewidth]{figs/intro_new.pdf}
+\caption{(\textbf{\textit{Left}}) We illustrated the $k$-hop neighborhood expansion rates for nodes 6 and 14, which is proportional to the amount of message they receive as the GNN layers deepen; (\textbf{\textit{Middle}}) The local patterns of different nodes vary, hence the attributions of edge pruning may also differ. For instance, pruning $(v_1,v_2)$ might be due to its non-bridge identity, while pruning $(v_5,v_6)$ could be attributed to it non-homophilic nature; (\textbf{\textit{Right}}) The overview of our proposed MoG.}
+\label{fig:intro}
+\end{figure*}
+
+To conquer the above challenge, graph sparsification~\citep{chen2023demystifying,hashemi2024comprehensive} has recently seen a revival as it directly reduces the \textit{aggregation} process associated with {\fontfamily{lmtt}\selectfont \textbf{SpMM}}~\citep{liu2023dspar,zhang2024two} in GNNs. Specifically, graph sparsification is a technique that approximates a given graph by creating a sparse subgraph with a subset of vertices and/or edges. Since the execution time of {\fontfamily{lmtt}\selectfont \textbf{SpMM}} is directly related to the number of edges in the graph, this method can significantly accelerate GNN training or inference. Existing efforts such as UGS~\citep{chen2021unified}, DSpar~\citep{liu2023dspar}, and AdaGLT~\citep{zhang2023graph} have achieved notable successes, with some maintaining GNN performance even with up to 40\% edge sparsity.
+
+Beyond serving as a \textbf{computational accelerator}, the purpose of graph sparsification extends further. Another research line leverages graph sparsification as a \textbf{performance booster} to remove task-irrelevant edges and pursue highly performant and robust GNNs~\citep{zheng2020robust}. Specifically, it is argued that due to uncertainty and complexity in data collection, graph structures are inevitably redundant, biased, and noisy~\citep{li2024gslb}. Therefore, employing graph sparsification can effectively facilitate the evolution of graph structures towards cleaner conditions~\citep{zheng2020robust,luo2021learning}, and finally boost GNN performance.
+
+However, existing sparsification methods, namely \textit{sparsifiers}, whether aimed at achieving higher sparsity or seeking enhanced performance, often adopt a rigid, global approach to conduct graph sparsification, thus suffering from the inflexibility in two aspects:
+
+\begin{itemize}[leftmargin=*]
+    \item[\ding{182}] \textbf{\textit{Inflexibility of sparsity level.}} Previous sparsifiers globally score all edges uniformly and prune them based on a preset sparsity level~\citep{chen2023demystifying}. However, as shown in \Cref{fig:intro} (\textit{Left}), the degrees of different nodes vary, which leads to varying rates of $k$-hop neighborhood expansion. This phenomenon, along with prior work on node-wise aggregation~\citep{lai2020policy,wang2023snowflake}, suggests that \textit{different nodes require customized sparsity levels tailored to their specific connectivity and local patterns}.
+
+    \item[\ding{183}] \textbf{\textit{Inflexibility of sparsity criteria.}} Previous sparsifiers often operate under a unified guiding principle, such as pruning non-bridge edges \citep{wang2022pruning}, non-homophilic edges \citep{gong2023beyond}, or edges with low effective resistance \citep{spielman2008graph,liu2023dspar}, among others. However, as illustrated in \Cref{fig:intro} (\textit{Middle}), the context of different nodes varies significantly, leading to varied rationales for edge pruning. Therefore, it is essential to  \textit{select appropriate pruning criteria tailored to the specific circumstances of each node to customize the pruning process effectively.}
+\end{itemize}
+
+Based on these observations and reflections, we propose the following challenge: \textit{Can we customize the sparsity level and pruning criteria for each node, in the meanwhile ensuring the efficiency of graph sparsification?} Towards this end, we propose a novel graph sparsifier dubbed \underline{M}ixture \underline{o}f \underline{G}raphs (\textbf{MoG}). It comprises multiple \textit{sparsifier experts}, each equipped with distinct pruning criteria and sparsity settings, as in \Cref{fig:intro} (\textit{Right}). Throughout the training process, \ourmethod dynamically selects the most suitable sparsifier expert for each node based on its neighborhood properties. This fosters specialization within each MoG expert, focusing on specific subsets of nodes with similar neighborhood contexts.
+After each selected expert prunes the 1-hop subgraph of the central nodes and outputs its sparse version, MoG seamlessly integrates these sparse subgraphs on the Grassmann manifold in an expert-weighted manner, thereby forming an optimized sparse graph.
+
+We validate the effectiveness of MoG through a comprehensive series of large-scale tasks. Experiments conducted across six datasets and three GNN backbones showcase that MoG can \ding{182} effectively locate well-performing sparse graphs, maintaining GNN performance losslessly at satisfactory graph sparsity levels ($8.67\%\sim50.85\%$), and even only experiencing a $1.65\%$ accuracy drop at $69.13\%$ sparsity on \textsc{ogbn-proteins}; \ding{183} achieve a tangible $1.47\sim 2.62\times$ inference speedup with negligible performance drop; and \ding{184} boost ROC-AUC by $1.81\%$ on \textsc{ogbg-molhiv}, $1.02\%$ on ogbn-proteins and enhances accuracy by $0.95\%$ on \textsc{ogbn-arxiv} compared to the vanilla backbones.
+
+
+\section{Technical Backgound}
+
+\paragraph{Notations \& Problem Formulation}\label{para:notation} We consider an undirected graph $\mathcal{G}=\{\mathcal{V},\mathcal{E}\}$, with $\mathcal{V}$ as the node set and $\mathcal{E}$ the edge set. The node features of $\mathcal{G}$ is represented as $\mathbf{X} \in \mathbb{R}^{N \times F}$, where $N = |\mathcal{V}|$ signifies the total number of nodes in the graph. The feature vector for each node $v_i \in \mathcal{V}$, with $F$ dimensions, is denoted by $x_i = \mathbf{X}[i,\cdot]$.  An adjacency matrix $\mathbf{A} \in \{0,1\}^{N \times N}$ is utilized to depict the inter-node connectivity, where $\mathbf{A}[i,j] = 1$ indicates an edge $e_{ij} \in \mathcal{E}$, and $0$ otherwise. For our task of graph sparsification, the core objective is to identify a subgraph $\mathcal{G}_{\text{sub}}$ given a sparsity ratio $s\%$:
+\begin{equation}
+\mathcal{G}^{\text{sub}} = \{\mathcal{V}, \mathcal{E} \setminus \mathcal{E}'\},\; s\% = \frac{|\mathcal{E}'|}{ |\mathcal{E}|},
+\end{equation}
+where $\mathcal{G}^{\text{sub}}$ only modifies the edge set $\mathcal{E}$ without altering the node set $\mathcal{V}$, and $\mathcal{E}'$ denotes the removed edges, and $s\%$ represents the ratio of removed edges.
+\paragraph{Graph Neural Networks} Graph neural networks (GNNs)~\citep{wu2020comprehensive} have become pivotal for learning graph representations, achieving benchmark performances in various graph tasks at {node-level}~\citep{xiao2022graph}, {edge-level}~\citep{sun2021multi}, and {graph-level}~\citep{liu2022graph}. At the {node-level}, two of the most famous frameworks are GCN~\citep{kipf2016semi} and GraphSAGE~\citep{hamilton2017inductive}, which leverages the message-passing neural network (MPNN) framework~\citep{gilmer2017neural} to aggregate and update node information iteratively. For {edge-level} and {graph-level} tasks, GCN and GraphSAGE can be adapted by simply incorporating a predictor head or pooling layers. Nevertheless, there are still specialized frameworks like SEAL~\citep{zhang2018link} and Neo-GNN~\citep{yun2021neo} for link prediction, and DiffPool~\citep{ying2018hierarchical} and PNA~\citep{corso2020principal} for graph classification. Regardless of the task, MPNN-style GNNs generally adhere to the following paradigm:
+\begin{equation}\label{eq:gnn}
+\mathbf{h}_i^{(l)} = \text{\fontfamily{lmtt}\selectfont \textbf{COMB}}\left( \mathbf{h}_i^{(l-1)}, \text{\fontfamily{lmtt}\selectfont \textbf{AGGR}}\{  \mathbf{h}_j^{(k-1)}: v_j \in \mathcal{N}(v_i) \} \right),\;0\leq l \leq L
+\end{equation}
+where $L$ is the number of GNN layers, $\mathbf{h}_i^{(0)} = \mathbf{x}_i$, and $\mathbf{h}_i^{(l)} (1\leq l\leq L)$ denotes $v_i$'s node embedding at the $l$-th layer. {\fontfamily{lmtt}\selectfont \textbf{AGGR}}($\cdot$) and {\fontfamily{lmtt}\selectfont \textbf{COMB}}($\cdot$) represent functions used for aggregating neighborhood information and combining ego- and neighbor-representations, respectively. 
+\paragraph{Graph Sparsification} 
+ Graph sparsification methods can be categorized by their utility into two main types: {computational accelerators} and {performance boosters}. Regarding {computational accelerators}, early works aimed at speeding up traditional tasks like graph partitioning/clustering often provide theoretical assurances for specific graph properties, such as pairwise distances~\citep{althofer1990generating}, cuts~\citep{abboud2022friendly}, eigenvalue distribution~\citep{batson2013spectral}, and effective resistance~\citep{spielman2008graph}. More contemporary efforts focus on the GNN training and/or inference acceleration, including methods like SGCN~\citep{li2020sgcn}, GEBT~\citep{you2022early}, UGS~\citep{chen2021unified}, DSpar~\citep{liu2023dspar}, and AdaGLT~\citep{zhang2024graph}. Regarding {performance boosters}, methods like NeuralSparse~\citep{zheng2020robust} and PTDNet~\citep{luo2021learning} utilize parameterized denoising networks to eliminate task-irrelevant edges. SUBLIME~\citep{liu2022towards} and Nodeformer~\citep{wu2022nodeformer} also involve refining or inferring a cleaner graph structure followed by $k$-nearest neighbors ($k$NN) sparsification.
+\paragraph{Mixture of Experts} The Mixture of Experts (MoE) concept~\citep{jacobs1991adaptive} traces its origins to several seminal works~\citep{chen1999improved,jordan1994hierarchical}. Recently, the sparse MoE architecture~\citep{shazeer2017outrageously,lepikhin2020gshard,fedus2021switch,clark2022unified} has regained attention due to its capacity to support the creation of vast (language) models with trillions of parameters~\citep{clark2022unified,hoffmann2022training}. Given its stability and generalizability, sparse MoE is now broadly implemented in modern frameworks across various domains, including vision~\citep{riquelme2021scaling}, multi-modal~\citep{mustafa2022multimodal}, and multi-task learning~\citep{ma2018modeling,zhu2022uni}. As for graph learning, MoE has been explored for applications in graph classification~\citep{hu2022graphdive}, scene graph generation~\citep{zhou2022came}, molecular representation~\citep{kim2023learning}, graph fairness~\citep{liu2023fair}, and graph diversity modeling~\citep{wang2024graph}.
+
+
+
+\section{Methodology}
+
+\subsection{Overview}
+\Cref{fig:framework} illustrates the workflow of our proposed \ourmethod. Specifically, for an input graph, MoG first decomposes it into 1-hop ego graphs for each node. For each node and its corresponding ego graph, a routing network calculates the expert scores. Based on the router's decisions, sparsifier experts with different sparsity levels and pruning criteria are allocated to different nodes. Ultimately, a mixture of graphs is obtained based on the weighted consensus of the sparsifier experts. In the following sections, we will first detail how to route different sparsifiers in \Cref{sec:routing}, then describe how to explicitly model various sparsifier experts in \Cref{sec:sparsifier} and how to ensemble the sparse graphs output by sparsifiers on the Grassmann manifold in \Cref{subsec:gmgm}. Finally, the overall optimization process and complexity analysis of \ourmethod is placed in \Cref{sec:optim}.
+
+\begin{figure}[!t]
+\setlength{\abovecaptionskip}{6pt}
+\centering
+\includegraphics[width=\textwidth]{figs/framework.pdf}
+\caption{The overview of our proposed method. \ourmethod primarily comprises ego-graph decomposition, expert routing, sparsifier customization, and the final graph mixture. For simplicity, we only showcase three pruning criteria including Jaccard similarity, gradient magnitude, and effective resistance.} \label{fig:framework}
+\end{figure}
+
+\subsection{Routing to Diverse Experts}\label{sec:routing}
+Following the classic concept of a (sparsely-gated) mixture-of-experts~\citep{zhao2024sparse}, which assigns the most suitable expert(s) to each input sample, \ourmethod aims to allocate the most appropriate sparsity level and pruning criteria to each input node. To achieve this, we first decompose the input graph $\mathcal{G}=\{\mathcal{V},\mathcal{E}\}$ into 1-hop ego graphs centered on different nodes, denoted as $\{\mathcal{G}^{(1)}, \mathcal{G}^{(2)}, \cdots, \mathcal{G}^{(N)}\}$, where $\mathcal{G}^{(i)}=\{\mathcal{V}^{(i)},\mathcal{E}^{(i)}\}$, $\mathcal{V}^{(i)}=\{v_j|v_j\in\mathcal{N}(v_i)\}$, $\mathcal{E}^{(i)}=\{e_{ij}|(v_i,v_j)\in\mathcal{E}\}$. Assuming we have $K$ sparsifier experts, for each node $v_i$ and its corresponding ego graph $\mathcal{G}^{(i)}$, we aim to select $k$ most suitable sparsifiers. We employ the noisy top-$k$ gating mechanism following~\citet{shazeer2017outrageously}:
+\begin{align}\label{eq:routing}
+    \Psi(\mathcal{G}^{(i)}) = \operatorname{Softmax}(\operatorname{TopK}(\psi(x_i),k)),\\
+    \psi(x_i) = x_iW_g + \epsilon\cdot\operatorname{Softplus}(x_iW_n),
+\end{align}
+where $\psi(x_i) \in \mathbb{R}^K$ is the calculated scores of $v_i$ for total $K$ experts, $\operatorname{TopK}(\cdot)$ is a selection function that outputs the largest $k$
+values, and $\Psi(\mathcal{G}^{(i)}) \in \mathbb{R}^k = [E^{(i)}_1, E^{(i)}_2, \cdots,E^{(i)}_k]$ represents those for selected $k$ experts. In $\Psi(\mathcal{G}^{(i)})$, $\epsilon\in\mathcal{N}(0,1)$ denotes the standard Gaussian noise, $W_g\in\mathbb{R}^{K\times F}$ and $W_n\in\mathbb{R}^{K\times F}$ are trainable parameters that learn clean and noisy scores, respectively. 
+
+After determining the appropriate experts, we proceed to generate different sparse graphs with diverse sparsifiers. We denote each sparsifier by $\kappa(\cdot)$, which takes in a dense graph $\mathcal{G}$ and outputs a sparse one $\Tilde{\mathcal{G}}=\kappa(\mathcal{G})$. Based on this, for each node $v_i$ and its ego graph $\mathcal{G}^{(i)}$, the routing network selects $k$ experts that produce $k$ sparse ego graphs. Notably, sparsifiers differ in their pruning rates (\textit{i.e.} the proportion of the edges to be removed) and the pruning criteria, which will be detailed in \Cref{sec:sparsifier}. \ourmethod's dynamic selection of different sparsifiers for each node aids in identifying pruning strategies truly adapted to the node's local context. Formally, the mixture of $k$ sparse graphs can be written as:
+\begin{equation}\label{eq:esmb_1}
+\widehat{\mathcal{G}^{(i)}} = \text{\fontfamily{lmtt}\selectfont \textbf{ESMB}}(\{\widetilde{\mathcal{G}}^{(i)}_{m}\}_{m=1}^{k}),\;\; \widetilde{\mathcal{G}}^{(i)}_{m} = \kappa^m(\mathcal{G}^{(i)}),
+\end{equation}
+where $\text{\fontfamily{lmtt}\selectfont \textbf{ESMB}}(\cdot)$ is a combination function that receives $k$ sparse graphs and ideally outputs an emsemble version $\widehat{\mathcal{G}^{(i)}}=\{\widehat{\mathcal{V}^{(i)}},\widehat{\mathcal{E}^{(i)}}\}$ that preserves their desirable properties. 
+It is noteworthy that, \ourmethod can \textit{seamlessly} integrate with any GNN backbone after obtaining each node's sparse ego graph. Specifically, we modify the aggregation method in \Cref{eq:gnn} as follows:
+\begin{equation}\label{eq:gnn2}
+\mathbf{h}_i^{(l)} = \text{\fontfamily{lmtt}\selectfont \textbf{COMB}}\left( \mathbf{h}_i^{(l-1)}, \text{\fontfamily{lmtt}\selectfont \textbf{AGGR}}\{  \mathbf{h}_j^{(k-1)}: v_j \in \widehat{\mathcal{V}^{(i)}} \} \right).
+\end{equation}
+\ourmethod acts as a plug-and-play module that can be pre-attached to any GNN architecture, leveraging multi-expert sparsification to enhance GNNs with (1) performance improvements from removing task-irrelevant edges (validated in \Cref{sec:exp_boost}); (2) resistance to high graph sparsity through precise and customized sparsification (validated in \Cref{sec:exp_spar}). The remaining questions now are: \textit{how can we design explicitly different sparsifiers?} and further, \textit{how can we develop an effective combination function that integrates the sparse graphs from different experts?}
+
+\subsection{Customized Sparsifier Modeling}\label{sec:sparsifier}
+With the workflow of \ourmethod in mind, in this section, we will delve into how to design sparsifiers driven by various pruning criteria and different levels of sparsity. Revisiting graph-related learning tasks, their objective can generally be considered as learning \( P(\mathbf{Y}|\mathcal{G}) \), which means learning the distribution of the target \( \mathbf{Y} \) given an input graph. Based on this, a sparsifier \( \kappa(\cdot) \) can be formally expressed as follows:
+\begin{equation}\label{eq:aim}
+\begin{aligned}
+P(\mathbf{Y}|\mathcal{G})
+& \approx \sum_{g\in\mathbb{S}_{\mathcal{G}}}P(\mathbf{Y}\;|\;\Tilde{\mathcal{G}})P(\Tilde{\mathcal{G}}\;|\;\mathcal{G})
+& \approx  \sum_{g\in\mathbb{S}_{\mathcal{G}}} Q_\Theta(\mathbf{Y}\;|\;\Tilde{\mathcal{G}})Q_\kappa(\Tilde{\mathcal{G}}\;|\;\mathcal{G})
+\end{aligned}
+\end{equation}
+where $\mathbb{S}_\mathcal{G}$ is a class of sparsified subgraphs of $\mathcal{G}$. The second term in \Cref{eq:aim} aims to approximate the distribution of \( \mathbf{Y} \) using the sparsified graph \( \Tilde{\mathcal{G}} \) as a bottleneck, while the third term uses two approximation functions \( Q_\Theta \) and \( Q_\kappa \) for \( P(\mathbf{Y} \;|\; \Tilde{\mathcal{G}}) \) and \( P(\Tilde{\mathcal{G}} \;|\; \mathcal{G}) \) parameterized by $\Theta$ and $\kappa$ respectively. The parameter \( \Theta \) typically refers to the parameters of the GNN, while the sparsifier \( \kappa(\cdot) \), on the other hand, is crafted to take an ego graph \( \mathcal{G}^{(i)} \) and output its sparsified version \( \Tilde{\mathcal{G}^{(i)}} \), guided by a specific pruning paradigm $C$ and sparsity $s^m\%$:
+\begin{equation}\label{eq:remove}
+\kappa^m(\mathcal{G}^{(i)}) = \{\mathcal{V}^{(i)},\mathcal{E}^{(i)}\setminus\mathcal{E}_p^{(i)} \},\; \mathcal{E}_p^{(i)} = \operatorname{TopK}\left(-C^m(\mathcal{E}), \lceil|\mathcal{E}^{(i)}|\times s^m\%\rceil \right),
+\end{equation}
+where \( C^m(\cdot) \) acts as the $m$-th expert's scoring function that evaluates edge importance. We leverage long-tail gradient estimation~\citep{liu2020dynamic} to ensure the $\operatorname{TopK}(\cdot)$ operator is differentiable. Furthermore, to ensure different sparsity criteria drive the sparsifier, we implement \( C^m(\cdot) \) as follows:
+\begin{equation}\label{eq:4_criteria}
+\begin{aligned}
+C^m(e_{ij}) = \operatorname{FFN}\left( x_i, x_j,  c(e_{ij}) \right),\; c^m(e_{ij}) \in \left\{\begin{array}{c}
+\text{Degree: } \left(|\mathcal{N}(v_i) + \mathcal{N}(v_j)|\right)/2\\
+\text{Jaccard Similarity: }\frac{|\mathcal{N}(v_i) \cap \mathcal{N}(v_j) |}{|\mathcal{N}(v_i) \cup \mathcal{N}(v_j)|}\\
+\text{ER: }(e_i - e_j)^T\mathbf{L}^{-1}(e_i - e_j)\\
+\text{Gradient Magnitude: } |\partial\mathcal{L}/\partial e_{ij}|
+\end{array}\right\},
+\end{aligned}
+\end{equation}
+where $\operatorname{FFN}(\cdot)$ is a feed-forward network, $c^m(e_{ij})$ represents the prior guidance on edge significance. By equipping different sparsifiers with various priors and sparsity levels, we can customize the most appropriate pruning strategy for each node's local scenario. In practice, we select four widely-used pruning criteria including edge degree~\citep{seo2024teddy}, Jaccard similarity~\citep{murphy1996,venu2011}, effective resistance~\citep{spielman2008graph,liu2023dspar} and gradient magnitude~\citep{wan2021edge,zhang2024graph}. Details regarding these criteria and their implementations are in \Cref{app:detail_criteria}.
+\subsection{Graph Mixture on Grassmann Manifold}\label{subsec:gmgm}
+After employing $k$ sparsifiers driven by different criteria and sparsity levels, we are in need of an effective mechanism to ensemble these $k$ sparse subgraphs and maximize the aggregation of their advantages. A straightforward approach is voting or averaging~\citep{sagi2018ensemble}; however, such simple merging may fail to capture the intricate relationships among multi-view graphs~\citep{kang2020multi}, potentially resulting in the loss of advantageous properties from all experts. 
+Inspired by recent advances in manifold representations~\citep{dong2013clustering,bendokat2024grassmann}, we develop a subspace-based sparse graph ensembling mechanism. We first provide the definition of the Grassmann manifold~\citep{bendokat2024grassmann} as follows:
+
+\begin{definition}[Grassmann manifold]
+Grassmann manifold $Gr(n, p)$ is the space of $n$-by-$p$ matrices (e.g., $\mathbf{M}$) with
+orthonormal columns, where $0\leq p \leq n$, i.e.,
+\begin{equation}
+\label{def:grass}
+Gr(n,p) = \left\{\mathbf{M}|\mathbf{M}\in\mathbb{R}^{n\times p}, \mathbf{M}^\top\mathbf{M} = \mathbf{I}\right\}.
+\end{equation}
+\end{definition}
+According to Grassmann manifold theory, each orthonormal matrix represents a unique subspace and thus corresponds to a distinct point on the Grassmann manifold~\citep{lin2020structure}. This applies to the eigenvector matrix of the normalized Laplacian matrix ($\mathbf{U} = \mathbf{L}[:,:p] \in \mathbb{R}^{n \times p}$), which comprises the first $p$ eigenvectors and is orthonormal~\citep{merris1995survey}, and thereby can be mapped onto the Grassmann manifold.
+
+Consider the $k$ sparse subgraphs $\{\widetilde{\mathcal{G}}^{(i)}_{m}\}_{m=1}^{k}$, their subspace representations are $\{\mathbf{U}^{(i)}_m \in \mathbb{R}^{|\mathcal{N}(v_i)|\times p}\}_{m=1}^{k}$. We aim to identify an oracle subspace $\mathbf{U}^{(i)}$ on the Grassmann manifold, which essentially represents a graph, that serves as an informative combination of $k$ base graphs. Formally, we present the following objective function:
+\begin{equation}\label{eq:grass_1}
+\begin{aligned}
+\min_{\mathbf{U^{(i)}}\in\mathbb{R}^{|\mathcal{N}(v_i)|\times p}} \sum_{m=1}^k \left( 
+\underbrace{ \operatorname{tr}(\mathbf{U^{(i)}}^\top \mathbf{L}_m\mathbf{U}^{(i)})}_{\textrm{(1) node connectivity}} +  \underbrace{\overbrace{E^{(i)}_m}^{\text{expert score}}\cdot d^2(\mathbf{U}^{(i)},\mathbf{U}^{(i)}_m)}_{\textrm{(2) subspace distance}}\right), \operatorname{s.t. } \mathbf{U^{(i)}}^\top \mathbf{U^{(i)}} = \mathbf{I}
+\end{aligned}
+\end{equation}
+where $\operatorname{tr}(\cdot)$ calculates the trace of matrices, $\mathbf{L}_m$ is the graph Laplacian of $\mathcal{G}^{(i)}_m$, $d^2(\mathbf{U}_1,\mathbf{U}_2)$ denotes the project distance between two subspaces~\citep{dong2013clustering}, and $E^{(i)}_m$ is the expert score for the $m$-th expert, calculated by the routing network $\Psi$, which determines which expert's subspace the combined subspace should more closely align with. In~\Cref{eq:grass_1}, the first term is designed to preserve the original node connectivity based on spectral embedding, and the second term controls that individual subspaces are
+close to the final representative subspace $\mathbf{U}^{(i)}$. Using the Rayleigh-Ritz Theorem~\citep{jia2001analysis}, we provide a closed-form solution for \Cref{eq:grass_1} and obtain the graph Laplacian of the ensemble sparse graph $\widehat{\mathcal{G}^{(i)}}$ as follows:
+\begin{equation}\label{eq:new_L}
+\widehat{\mathbf{L}^{(i)}} = \sum_{m=1}^k\left(\mathbf{L}_m - E_m^{(i)}\cdot\mathbf{U^{(i)}}^\top \mathbf{U^{(i)}}\right).
+\end{equation}
+We provide detailed derivations and explanations for \Cref{eq:grass_1,eq:new_L} in \Cref{app:ensemble}. Consequently, we can reformulate the function $\text{\fontfamily{lmtt}\selectfont \textbf{ESMB}}(\cdot)$ in \Cref{eq:esmb_1} as follows:
+\begin{equation}\label{eq:esmb_imple}
+\text{\fontfamily{lmtt}\selectfont \textbf{ESMB}}(\{\widetilde{\mathcal{G}}^{(i)}_{m}\}_{m=1}^{k}) = \{\mathbf{D} - \widehat{\mathbf{L}^{(i)}}, \mathbf{X}^{(i)}\} = \left\{\mathbf{D} - \sum_{m=1}^k\left(\mathbf{L}_m - E_m^{(i)}\cdot\mathbf{U^{(i)}}^\top \mathbf{U^{(i)}}\right), \mathbf{X}^{(i)}\right\}.
+\end{equation}
+On the Grassmann manifold, the subspace ensemble effectively captures the beneficial properties of each expert's sparse graph. After obtaining the final version of each node's ego-graph, $\widehat{\mathcal{G}^{(i)}} = \{\widehat{\mathbf{A}^{(i)}},\mathbf{X}^{(i)}\}$, we conduct a post-sparsification step as the graph ensembled on the Grassmann manifold can become dense again. Specifically, we obtain the final sparsity $s^{(i)}\%$ for $v_i$ by weighting the sparsity of each expert and sparsifying $\widehat{\mathcal{G}^{(i)}}$.
+\begin{equation}\label{eq:post}
+\widehat{\mathcal{G}^{(i)}} \leftarrow \{\operatorname{TopK}(\widehat{\mathbf{A}^{(i)}}, |\mathcal{E}^{(i)}|\times s^{(i)}\%),\mathbf{X}^{(i)} \},\; s^{(i)}\%=\frac{1}{k}\sum_{m=1}^k s^m\%.
+\end{equation}
+
+These post-sparsified $\widehat{\mathcal{G}^{(i)}}$ are then reassembled together into $\widehat{\mathcal{G}} \leftarrow \{\widehat{\mathcal{G}^{(1)}},\widehat{\mathcal{G}^{(2)}},\cdots,\widehat{\mathcal{G}^{(|\mathcal{V}|)}}\}$. Ultimately, the sparsified graph $\widehat{\mathcal{G}}$ produced by \ourmethod can be input into any MPNN~\citep{gilmer2017neural} or graph transformer~\citep{min2022transformer} architectures for end-to-end training.
+\subsection{Training and Optimization}\label{sec:optim}
+
+\paragraph{Additional Loss Functions} Following classic MoE works~\citep{shazeer2017outrageously,wang2024graph}, we introduce an expert importance loss to prevent \ourmethod from converging to a trivial solution where only a single group of experts is consistently selected:
+\begin{equation}
+\operatorname{Importance}(\mathcal{V}) =\sum_{i=1}^{|\mathcal{V}|}\sum_{j=1}^{k}E^{(i)}_m,\;\;\mathcal{L}_{\text{importance}}(\mathcal{V}) = \operatorname{CV}(\operatorname{Importance}(\mathcal{V}))^2,
+\end{equation}
+where $\operatorname{Importance}(\mathcal{V})$ represents the sum of each node's expert scores across the node-set, $\operatorname{CV}(\cdot)$ calculates the coefficient of variation, and $\mathcal{L}_{\text{importance}}$ ensures the variation of experts. Therefore, the final loss function combines both task-specific and MoG-related losses, formulated as follows:
+\begin{equation}\label{eq:final_loss}
+\mathcal{L} = \mathcal{L}_{\text{task}} + \lambda\cdot\mathcal{L}_{\text{importance}},
+\end{equation}
+where $\lambda$ is a hand-tuned scaling factor, with its sensitivity analysis placed in \Cref{sec:sensitivity}.
+
+\paragraph{Complexity Analysis} To better illustrate the effectiveness and clarity of \ourmethod, we provide a comprehensive {algorithmic table} in \Cref{app:algo} and detailed {complexity analysis} in \Cref{app:complexity}. To address concerns regarding the runtime efficiency of \ourmethod, we have included an empirical analysis of efficiency in \Cref{sec:exp_eff}.
+
+
+\section{Experiments}
+
+In this section, we conduct extensive experiments to answer the following research questions: 
+(\textbf{RQ1}) Can \ourmethod effectively help GNNs combat graph sparsity?
+(\textbf{RQ2})  Does \ourmethod genuinely accelerate the GNN inference?
+(\textbf{RQ3}) Can \ourmethod help boost GNN performance?
+(\textbf{RQ4}) How sensitive is \ourmethod to its key components and parameters?
+
+\subsection{Experiment Setup}
+\paragraph{Datasets and Backbones} We opt for four large-scale OGB benchmarks~\citep{hu2020open}, including \textsc{ogbn-arxiv}, \textsc{ogbn-proteins} and \textsc{ogbn-products} for {node classification}, and \textsc{ogbg-ppa} for {graph classification}. The dataset splits are given by \citep{hu2020open}. Additionally, we choose two superpixel datasets, MNIST and CIFAR-10~\citep{knyazev2019understanding}. We select GraphSAGE~\citep{hamilton2017inductive}, DeeperGCN~\citep{li2020deepergcn}, and PNA~\citep{corso2020principal} as the GNN backbones. More details are provided in \Cref{app:exp_details}.
+\paragraph{Parameter Configurations}\label{para:param}  For {\ourmethod}, we adopt the $m=4$ sparsity criteria outlined in \Cref{sec:sparsifier}, assigning $n=3$ different sparsity levels $\{s_1, s_2, s_3\}$ to each criterion, resulting in a total of $K=m \times n=12$ experts. We select $k=2$ sparsifier experts for each node, and set the loss scaling factor $\lambda=1e-2$ across all datasets and backbones. By adjusting the sparsity combination, we can control the global sparsity of the entire graph. We present more details on parameter settings in \Cref{app:exp_param}, and a recipe for adjusting the graph sparsity in \Cref{app:adjust}.
+
+\subsection{\ourmethod as Graph Sparsifier (RQ1 \& RQ2)}\label{sec:exp_spar}
+To answer \textbf{RQ1} and \textbf{RQ2}, we comprehensively compare \ourmethod with eleven widely-used topology-guided sparsifiers and five semantic-guided sparsifiers, as outlined in \Cref{tab:rq1_arxiv}, with more detailed explanations in \Cref{app:exp_sparsifier}. The quantitative results on five datasets are shown in \Cref{tab:rq1_arxiv,tab:rq1_arxiv_2,tab:rq1_products,tab:rq1_cifar,tab:rq1_proteins} and the efficiency comparison is in \Cref{fig:inference_speed}. We give the following observations (\textbf{Obs.}):
+\newcommand{\blue}[1]{$_{\color{BlueGreen}\downarrow #1}$}
+\newcommand{\red}[1]{$_{\color{RedOrange}\uparrow #1}$}
+\begin{table*}[!tbp]
+    \caption{Node classification performance comparison to state-of-the-art sparsification methods. All methods are trained using \textbf{GraphSAGE}, and the reported metrics represent the average of \textbf{five runs}. We denote methods with $\dag$ that do not have precise control over sparsity; their performance is reported around the target sparsity $\pm 2\%$. ``Sparsity \%'' refers to the ratio of removed edges as defined in \Cref{para:notation}. ``OOM'' and ``OOT'' denotes out-of-memory and out-of-time, respectively.
+    }
+\label{tab:rq1_arxiv}
+    \centering
+    \footnotesize
+    \setlength{\tabcolsep}{1pt}
+    \resizebox{\textwidth}{!}{
+    \begin{tabular}{cc|cccc|cccc}
+    \toprule
+    \multirow{3}{*}{} & Dataset  & \multicolumn{4}{c|}{\textsc{ogbn-arxiv} (Accuracy$\uparrow$)} & \multicolumn{4}{c}{\textsc{ogbn-proteins} (ROC-AUC$\uparrow$)}  \\
+    \midrule
+    & Sparsity \% & 10  & 30 & 50 & 70 & 10  & 30 & 50 & 70 \\ \midrule
+    \parbox[t]{4mm}{\multirow{9}{*}{\rotatebox[origin=c]{90}{Topology-guided}}}
+    & Random
+    & 70.03\blue{1.46} & 68.40\blue{3.09} & 64.32\blue{7.17} & 61.18\blue{10.3}& 76.72\blue{0.68} & 75.03\blue{2.37} & 73.58\blue{3.82} & 72.30\blue{5.10}\\
+    
+    & Rank Degree$^{\dag}$~\citep{voudigari2016rank}  & 68.13\blue{3.36} & 67.01\blue{4.48} & 65.58\blue{5.91} & 62.17\blue{9.32} & 77.47\red{0.07} & 76.15\blue{1.25} & 75.59\blue{1.81} & 74.23\blue{3.17}  \\
+    
+    & Local Degree$^{\dag}$~\citep{hamann2016structure}   & 68.94\blue{2.55} & 67.20\blue{4.29} & 65.45\blue{6.04} & 65.59\blue{5.90} & 76.20\blue{1.20} & 76.05\blue{1.35} & 76.09\blue{1.31} & 72.88\blue{4.52}\\
+    
+    & Forest Fire$^{\dag}$~\citep{Leskovec2006}   & 68.39\blue{3.10} & 68.10\blue{3.39} & 67.36\blue{4.13} & 65.22\blue{6.27} & 76.50\blue{0.90} & 75.37\blue{2.03} & 74.29\blue{3.11} & 72.11\blue{5.29}\\
+
+    
+    & G-Spar~\citep{murphy1996finley} 
+   & 71.30\blue{0.19} & 69.29\blue{2.20} & 65.56\blue{5.93} & 65.49\blue{6.00} & 77.38\blue{0.02} & 77.36\blue{0.04} & 76.02\blue{1.38} & 75.89\blue{1.51}\\
+    
+    
+    & LSim$^{\dag}$~\citep{satuluri2011local}
+    & 69.22\blue{2.27} & 66.15\blue{5.34} & 61.07\blue{10.4} & 60.32\blue{11.2} & 76.83\blue{0.57} & 76.01\blue{1.39} & 74.83\blue{2.57} & 73.65\blue{3.75}\\
+    
+    & SCAN~\citep{xu2007scan} & 71.55\red{0.06} & 69.27\blue{2.22} & 65.14\blue{6.35} & 64.72\blue{6.77}   & 77.60\red{0.20} & 76.88\blue{0.52} & 76.19\blue{1.21} & 74.32\blue{3.08}\\
+    
+    & ER~\citep{spielman2008graph}& 71.63\red{0.14} & 69.48\blue{2.01} & 69.00\blue{2.49} & 67.15\blue{4.34} & \multicolumn{4}{c}{OOT} \\
+    
+    & DSpar~\citep{liu2023dspar}
+    & 71.23\blue{0.26} & 68.50\blue{2.99} & 64.79\blue{6.70} & 63.11\blue{8.38}
+    & 77.34\blue{0.06} & 77.06\blue{0.34} & 76.38\blue{1.02} & 75.49\blue{1.91}
+    \\
+    \midrule
+    \parbox[t]{4mm}{\multirow{7}{*}{\rotatebox[origin=c]{90}{Semantic-guided}}}
+   
+    & UGS$^{\dag}$~\citep{chen2021unified}
+    & 68.77\blue{2.72} & 66.30\blue{5.19} & 65.72\blue{5.77} & 63.10\blue{8.39} 
+    & 76.80\blue{0.60} & 75.46\blue{1.94} & 73.28\blue{4.12} & 73.31\blue{4.09}\\
+
+    & GEBT~\citep{you2022early}
+       & 69.04\blue{2.45} & 65.29\blue{6.20} & 65.88\blue{5.61} & 65.62\blue{5.87} 
+       & 76.30\blue{1.10} & 76.17\blue{1.23} & 74.43\blue{2.97} & 74.12\blue{3.28} \\
+
+    & MGSpar~\citep{wan2021edge}
+    & 70.22\blue{1.27} & 69.13\blue{2.36} & 68.27\blue{3.22} & 66.55\blue{4.94} 
+    & \multicolumn{4}{c}{OOM} \\
+
+    & ACE-GLT$^{\dag}$~\citep{wang2023adversarial}
+    & 71.88\red{0.39} & 70.14\blue{1.35} & 68.08\blue{3.41} & 67.04\blue{4.45} 
+    & 77.59\red{0.19} & 76.14\blue{1.26} & 75.43\blue{1.97} & 73.28\blue{4.12} \\
+    
+    & WD-GLT$^{\dag}$~\citep{hui2022rethinking}
+    & 71.92\red{0.43} & 70.21\blue{1.28} & 68.30\blue{3.19} & 66.57\blue{4.92} 
+    & \multicolumn{4}{c}{OOM}\\
+    
+    & AdaGLT~\citep{zhang2024graph}
+    & 71.22\blue{0.27} & 70.18\blue{1.31} &\colorbox[HTML]{DAE8FC}{\textbf{69.13\blue{2.36}}} & 67.02\blue{4.47}  
+    & 77.49\red{0.09} & 76.76\blue{1.64} & 76.00\blue{2.40} & 75.44\blue{2.96}  \\
+    
+    & \textbf{\ourmethod (Ours)}$^{\dag}$ & \colorbox[HTML]{DAE8FC}{\textbf{71.93\red{\textbf{0.44}}}} 
+    & \colorbox[HTML]{DAE8FC}{\textbf{70.53}\blue{\textbf{0.96}}} 
+    & {{69.06\blue{{2.43}}}} & \colorbox[HTML]{DAE8FC}{\textbf{67.31\blue{\textbf{4.18}}}}
+    & \colorbox[HTML]{DAE8FC}{\textbf{77.78\red{\textbf{0.38}}}} 
+    & \colorbox[HTML]{DAE8FC}{\textbf{77.49}\red{\textbf{0.09}}} 
+    &  \colorbox[HTML]{DAE8FC}{\textbf{76.46\blue{\textbf{0.94}}}} & \colorbox[HTML]{DAE8FC}{\textbf{76.12\blue{\textbf{1.28}}}}
+      \\
+
+    \midrule
+    \multicolumn{2}{c|}{Whole Dataset} & \multicolumn{4}{c|}{71.49$_{\pm0.01}$} & \multicolumn{4}{c}{77.40$_{\pm0.1}$} \\
+    \bottomrule
+    \end{tabular}
+}
+\end{table*}
+\paragraph{Obs. \ding{182} \ourmethod demonstrates superior performance in both transductive and inductive settings.} As shown in \Cref{tab:rq1_arxiv,tab:rq1_graph,tab:rq1_products,tab:rq1_arxiv_2,tab:rq1_proteins}, \ourmethod outperforms other sparsifiers in both transductive and inductive settings. Specifically, for node classification tasks, \ourmethod achieves a $0.09\%$ performance improvement while sparsifying $30\%$ of the edges on \textsc{ogbn-proteins}+GraphSAGE. Even when sparsifying $50\%$ of the edges on \textsc{ogbn-proteins}+DeeperGCN, the ROC-AUC only drops by $0.81\%$. For graph classification tasks, \ourmethod can remove up to $50\%$ of the edges on \textsc{MNIST} with a $0.14\%$ performance improvement, surpassing other sparsifiers by $0.99\%\sim12.97\%$ in accuracy.
+\paragraph{Obs. \ding{183} Different datasets and backbones exhibit varying sensitivities to sparsification.} As shown in \Cref{tab:rq1_arxiv,tab:rq1_arxiv_2}, despite \textsc{ogbn-proteins} being relatively insensitive to sparsification, sparsification at extremely high levels (e.g., $70\%$) causes more performance loss for GraphSAGE compared to DeeperGCN, with the former experiencing a $2.28\%$ drop and the latter only $1.07\%$, which demonstrates the varying sensitivity of different GNN backbones to sparsification. Similarly, we observe in \Cref{tab:rq1_graph} that the \textsc{MNIST} dataset shows a slight accuracy increase even with $50\%$ sparsification, whereas the \textsc{ogbg-ppa} dataset suffers a $1.86\%$ performance decline, illustrating the different sensitivities to sparsification across graph datasets.
+\paragraph{Obs. \ding{184} \ourmethod can effectively accelerate GNN inference with negligible performance loss.} \Cref{fig:inference_speed} illustrates the actual acceleration effects of \ourmethod compared to other baseline sparsifiers. It is evident that \ourmethod achieves $1.6\times$ \textit{lossless acceleration} on \textsc{ogbn-proteins}+DeeperGCN and \textsc{ogbn-products}+GraphSAGE, meaning the performance is equal to or better than the vanilla backbone. Notably, on \textsc{ogbn-products}+DeeperGCN, \ourmethod achieves $3.3\times$ acceleration with less than a $1.0\%$ performance drop. Overall, \ourmethod provides significantly superior inference acceleration compared to its competitors.
+\begin{table*}[!tbp]
+    \caption{Graph classification performance comparison to state-of-the-art sparsification methods. The reported metrics represent the average of \textbf{five runs}. 
+    }
+\label{tab:rq1_graph}
+     \centering
+    \footnotesize
+    \setlength{\tabcolsep}{1pt}
+    \resizebox{\textwidth}{!}{
+    \begin{tabular}{cc|cccc|cccc}
+    \toprule
+    \multirow{3}{*}{} & Dataset  & \multicolumn{4}{c|}{\textsc{MNIST} + PNA (Accuracy $\uparrow$)} & \multicolumn{4}{c}{\textsc{ogbn-ppa} + DeeperGCN (Accuracy $\uparrow$)}  \\
+    \midrule
+    & Sparsity \% & 10  & 30 & 50 & 70 & 10  & 30 & 50 & 70 \\ \midrule
+    \parbox[t]{4mm}{\multirow{9}{*}{\rotatebox[origin=c]{90}{Topology-guided}}}
+    & Random
+    & 94.61\blue{2.74} & 87.23\blue{10.1} & 84.82\blue{12.5} & 80.07\blue{17.3}
+    & 75.44\blue{1.65} & 73.81\blue{4.09} & 71.97\blue{5.12} & 69.62\blue{7.47}
+    \\
+    
+    & Rank Degree$^{\dag}$~\citep{voudigari2016rank}  
+    & 96.42\blue{0.93} & 94.23\blue{3.12} & 92.36\blue{4.99} & 89.20\blue{8.15} 
+    & 75.81\blue{1.28} & 74.99\blue{2.10} & 74.12\blue{2.97} & 70.68\blue{6.41}\\
+    
+    & Local Degree$^{\dag}$~\citep{hamann2016structure}   
+    & 95.95\blue{1.40} & 93.37\blue{3.98} & 90.11\blue{7.24} & 86.24\blue{11.1} 
+    & 76.43\blue{0.66} & 75.87\blue{1.22} & 72.11\blue{4.98} & 69.93\blue{7.16}\\
+    
+    & Forest Fire$^{\dag}$~\citep{Leskovec2006}   
+    & 96.75\blue{0.60} & 95.42\blue{1.93} & 95.03\blue{2.32} & 93.10\blue{4.25} 
+    & 76.38\blue{0.71} & 75.33\blue{1.76} & 73.18\blue{3.91} & 71.49\blue{5.60}\\
+    
+    & G-Spar~\citep{murphy1996finley} 
+    & 97.10\blue{0.25} & 96.59\blue{0.76} & 94.36\blue{2.99} & 92.48\blue{4.87} 
+    & 77.68\red{0.59} & 73.90\blue{3.19} & 69.52\blue{7.57} & 68.10\blue{8.99}\\
+    
+    
+    & LSim$^{\dag}$~\citep{satuluri2011local}
+    & 95.79\blue{1.56} & 92.14\blue{5.21} & 92.29\blue{5.06} & 91.95\blue{5.40}  
+    & 76.04\blue{1.05} & 74.40\blue{2.69} & 72.78\blue{4.31} & 68.21\blue{8.88}\\
+    
+    & SCAN~\citep{xu2007scan} 
+    & 95.81\blue{1.54} & 93.48\blue{3.87} & 90.18\blue{7.17} & 86.48\blue{10.9} 
+    & 75.23\blue{1.86} & 75.18\blue{1.91} & 72.48\blue{4.61} & 71.11\blue{5.98}\\
+    
+    & ER~\citep{spielman2008graph}
+    & 94.77\blue{2.58} & 93.91\blue{3.44} & 93.45\blue{3.90} & 91.07\blue{6.28} 
+    & 77.94\red{0.85} & 75.15\blue{1.94} & 73.23\blue{3.86} & 72.74\blue{4.35} \\
+    
+    & DSpar~\citep{liu2023dspar}
+    & 94.97\blue{2.38} & 93.80\blue{3.55} & 92.23\blue{5.12} & 90.48\blue{6.87} 
+    & 76.33\blue{0.76} & 73.37\blue{3.72} & 72.98\blue{4.11} & 70.77\blue{6.32}\\
+    \midrule
+    
+    \parbox[t]{4mm}{\multirow{2}{*}{\rotatebox[origin=c]{90}{Semantic}}}
+    & ICPG~\citep{sui2021inductive}
+    & 97.69\red{0.34} & 97.39\red{0.04} & 96.80\blue{0.55} & 93.77\blue{3.58} 
+    & 77.36\red{0.27} & 75.24\blue{1.85} & 73.18\blue{3.91} & 71.09\blue{6.00}\\
+
+    & AdaGLT~\citep{zhang2024graph}
+    & 97.31\blue{0.04} & 96.58\blue{0.77} & 94.14\blue{3.21} & 92.08\blue{5.27}  
+    & 76.22\blue{0.87} & 73.54\blue{3.55} & 70.10\blue{6.99} & 69.28\blue{7.81}  \\
+    
+    & \textbf{\ourmethod (Ours)}$^{\dag}$ & \colorbox[HTML]{DAE8FC}{\textbf{97.80\red{\textbf{0.45}}}} 
+    & \colorbox[HTML]{DAE8FC}{\textbf{97.74}\red{\textbf{0.39}}} 
+    & \colorbox[HTML]{DAE8FC}{\textbf{97.79}\red{\textbf{0.44}}}  & \colorbox[HTML]{DAE8FC}{\textbf{95.30\blue{\textbf{2.05}}}}
+    & \colorbox[HTML]{DAE8FC}{\textbf{78.43\red{\textbf{1.34}}}} 
+    & \colorbox[HTML]{DAE8FC}{\textbf{77.90}\red{\textbf{0.81}}} 
+    & \colorbox[HTML]{DAE8FC}{\textbf{75.23}\blue{\textbf{1.86}}}  & \colorbox[HTML]{DAE8FC}{\textbf{73.09\blue{\textbf{4.00}}}}
+      \\
+
+    \midrule
+    \multicolumn{2}{c|}{Whole Dataset} & \multicolumn{4}{c|}{97.35$_{\pm0.07}$} & \multicolumn{4}{c}{77.09$_{\pm0.04}$} \\
+    \bottomrule
+    \end{tabular}
+}
+\end{table*}
+
+\begin{figure}[!tpb]
+\setlength{\abovecaptionskip}{6pt}
+\centering
+\includegraphics[width=\textwidth]{figs/inference.pdf}
+\caption{The trade-off between inference speedup and model performance for MoG and other sparsifiers. The first and second rows represent results on GraphSAGE and DeeperGCN, respectively. The gray pentagon represents the performance of the original GNN without sparsification.} \label{fig:inference_speed}
+\end{figure}
+\subsection{\ourmethod as Performance Booster (RQ3)}\label{sec:exp_boost}
+
+In the context of \textbf{RQ3}, \ourmethod is developed to augment GNN performance by selectively removing a limited amount of noisy and detrimental edges, while simultaneously preventing excessive sparsification that could degrade GNN performance. Consequently, we uniformly set the sparsity combination to $\{90\%, 85\%, 80\%\}$. We combine \ourmethod with state-of-the-art GNNs on both node-level and graph-level tasks. The former include RevGNN~\citep{li2021training} and GAT+BoT~\citep{wang2021bag}, which rank fourth and seventh, respectively, on the \textsc{ogbn-proteins} benchmark, and the latter include PAS~\citep{wei2021pooling} and DeeperGCN~\citep{li2020deepergcn}, ranking fourth and sixth on the \textsc{ogbn-ppa} benchmark. We observe from \Cref{tab:rq3}:
+\paragraph{Obs. \ding{185} \ourmethod can assist the ``top-student'' backbones to learn better.} Despite RevGNN and PAS being high-ranking backbones for \textsc{ogbn-proteins} and \textsc{ogbg-ppa}, \ourmethod still achieves non-marginal performance improvements through moderate graph sparsification: $1.02\%\uparrow$ on RevGNN+\textsc{ogbn-proteins} and $1.74\%\uparrow$ on DeeperGCN+\textsc{ogbg-ppa}. This demonstrates that \ourmethod can effectively serve as a plugin to boost GNN performance by setting a relatively low sparsification rate.
+
+\begin{table}[!tpb]
+\caption{Node classification results on \textsc{ogbn-proteins} with RevGNN and GAT+BoT and graph classification results on \textsc{ogbg-ppa} with PAS and DeeperGCN.  Mean and standard deviation values from \textbf{five} random runs are presented.}\label{tab:rq3}
+\begin{center}
+\begin{tabular}{l|cc|cc}
+\toprule
+&\multicolumn{2}{c|}{\textsc{ogbn-proteins} (ROC-AUC$\uparrow$)} & \multicolumn{2}{c}{\textsc{ogbg-ppa} (Accuracy$\uparrow$)}\\
+\midrule
+{Model} & \makecell{RevGNN} & \makecell{GAT+BoT}  & \makecell{PAS} & \makecell{DeeperGCN}  \\
+\midrule
+w/o \ourmethod      & 88.14$\pm$ 0.24 & 88.09	$\pm$ 0.16 & 78.28 $\pm$ 0.24 & 77.09	$\pm$ 0.04
+   \\
+\midrule
+\multirow{2}{*}{w/ \ourmethod} & \textbf{89.04} $\pm$ 0.72 &  \textbf{88.72} $\pm$ 0.50 & \textbf{78.66} $\pm$ 0.47 & \textbf{78.43} $\pm$ 0.19\\
+& (Sparsity: 9.2\%)  & (Sparsity: 12.7\%) & (Sparsity: 6.6\%)  & (Sparsity: 10.8\%) \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+\subsection{Sensitivity Analysis (RQ4)}\label{sec:sensitivity}
+To answer \textbf{RQ4}, we perform a sensitivity analysis on the two most important parameters in \ourmethod: the number of selected experts \( k \) and the expert importance loss coefficient \(\lambda\). We compared the performance of \ourmethod when choosing different numbers of experts per node, as outlined in \Cref{fig:abla_k}. The effect of different scaling factors \(\lambda\) on \textsc{ogbn-proteins}+DeeperGCN is shown in \Cref{tab:abla_lambda}. Based on the results of the above sensitivity analysis, we observe that:
+
+\paragraph{Obs. \ding{186} Sparse expert selection helps customized sparsification.}
+It can be observed FROM \Cref{fig:abla_k} that the optimal \( k \) varies with the level of graph sparsity. At lower sparsity (10\%), \( k=1 \) yields relatively good performance. However, as sparsity increases to 50\%, model performance peaks at \( k=4 \), suggesting that in high sparsity environments, more expert opinions contribute to better sparsification. Notably, when \( k \) increases to 6, \ourmethod's performance declines, indicating that a more selective approach in sparse expert selection aids in better model generalization. For a balanced consideration of performance and computational efficiency, we set \( k=2 \) in all experiments. We further provide sensitivity analysis results of paramter $k$ on more datasets, as shown in \Cref{app:sen_proteins_rev}.
+\paragraph{Obs. \ding{187} Sparsifier load balancing is essential.} We conduct a sensitivity analysis of the expert importance loss coefficient \(\lambda\). A larger \(\lambda\) indicates greater variation in the selected experts. As shown in \Cref{tab:abla_lambda}, \(\lambda=0\) consistently resulted in the lowest performance, as failing to explicitly enforce variation among experts leads to the model converging to a trivial solution with the same set of experts~\citep{wang2024graph,shazeer2017outrageously}. Conversely, \(\lambda=1e-1\) performed slightly better than \(\lambda=1e-2\) at higher sparsity levels, supporting the findings in Obs. 5 that higher sparsity requires more diverse sparsifier experts.
+
+\begin{minipage}[!t]{\linewidth}
+    \begin{minipage}[!t]{0.58\linewidth}
+    \centering
+    \includegraphics[width=.95\linewidth]{figs/ablation_k.pdf}
+    \end{minipage}
+    \hspace{0.1em}
+    \begin{minipage}[!t]{0.40\linewidth}
+    \centering
+		\renewcommand{\arraystretch}{1.1}%  row spacing
+    \scriptsize
+    \tabcolsep=0.85mm
+    \begin{tabular}{c|cccc}
+    \toprule
+    $\lambda$ & 0 & 1e-2 & 1e-1\\
+    \midrule
+    $10\%$ & $81.19_{\pm 0.08}$  & $\mathbf{83.32}_{\pm 0.19}$ & $83.04_{\pm 0.23}$  \\
+    $30\%$  & $79.77_{\pm 0.08}$  & $\mathbf{82.14}_{\pm 0.23}$ & $82.08_{\pm 0.25}$ \\
+    $50\%$ & $79.40_{\pm 0.06}$  & $81.79_{\pm 0.21}$ & $\mathbf{82.04}_{\pm 0.20}$ \\
+    $70\%$ & $78.22_{\pm 0.13}$  & ${80.90}_{\pm 0.24}$ & $\mathbf{80.97}_{\pm 0.28}$\\
+    \bottomrule
+    \end{tabular}%
+    \makeatletter\def\@captype{table}\makeatother\caption{Sensitivity study on scaling factor $\lambda$. The results are reported on \textsc{ogbn-proteins}+DeeperGCN.}\label{tab:abla_lambda}%%
+    \end{minipage}
+\end{minipage}
+
+\begin{table}[!htpb]
+\caption{Running time efficiency comparison on \textsc{ogbn-products}+GraphSAGE. We consistently set $n=4, k=2$, corresponding to utilizing 4 pruning criteria and selecting 2 experts for each node, and vary $m \in \{1,2,3\}$ to check how the training cost grows with $m$ increasing. }\label{tab:running_efficiency}
+\centering
+{\small
+\begin{tabular}{c|cc|cc}
+\toprule
+\makecell{Sparsity} &\multicolumn{2}{c|}{30\%} & \multicolumn{2}{c}{50\%}\\
+\midrule
+\makecell{Metric}  &  Per-epoch Time (s) & Accuracy (\%)  &  Per-epoch Time (s)  & Accuracy (\%) \\
+\midrule
+\makecell{Random}    & 18.71$\pm$ 0.14 & 74.21$\pm$ 0.28 & 15.42 $\pm$ 0.24 & 71.08$\pm$ 0.34
+   \\
+\makecell{AdaGLT} & 23.55$\pm$ 0.20 & 77.30 $\pm$ 0.54 & 21.68 $\pm$ 0.26 & 74.38 $\pm$ 0.79\\
+\midrule
+
+\makecell{\ourmethod {\scriptsize($m=1,K=3$)}} & 20.18$\pm$ 0.14 &  {77.75} $\pm$ 0.22 & 18.19 $\pm$ 0.30 & 76.10 $\pm$ 0.49\\
+
+\makecell{\ourmethod {\scriptsize($m=2,K=6$)}} & 21.25$\pm$ 0.22 &  {78.23} $\pm$ 0.29 & 19.70 $\pm$ 0.30 & {76.43} $\pm$ 0.49\\
+
+\makecell{\ourmethod {\scriptsize($m=3,K=12$)}} & 23.19$\pm$ 0.18 &  {78.15} $\pm$ 0.32 & 20.83 $\pm$ 0.29 & {76.98} $\pm$ 0.49\\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\subsection{Efficiency Analysis and Ablation Study (RQ4)}\label{sec:exp_eff}
+\paragraph{Efficiency Analysis} To verify that \ourmethod can achieve better results with less additional training cost than the previous SOTA methods, we compare the accuracy and the time efficiency of \ourmethod with AdaGLT on \textsc{ogbn-product}+GraphSAGE, as outlined in \Cref{tab:running_efficiency}. We have:
+\paragraph{Obs. \ding{188} \ourmethod can achieve better accuracy with less additional training cost.} It is evident in \Cref{tab:running_efficiency} that \ourmethod incurs less additional training cost compared to AdaGLT while achieving significant improvements in sparsification performance. More importantly, we demonstrate that with $k=2$, \ourmethod does not incur significantly heavier training burdens as the number of sparsifiers increases. Specifically, at $s\%=50\%$, the difference in per epoch time between \ourmethod ($K=3$) and \ourmethod ($K=12$) is only $2.63$ seconds, consistent with the findings of mainstream sparse MoE approaches~\citep{wang2024graph}.
+\paragraph{Ablation Study} We test three different settings of $\epsilon$ (in \Cref{eq:routing}) on \textsc{Ogbn-Arxiv}+GraphSAGE: (1) $\epsilon\sim\mathcal{N}(0,\mathbf{I})$, (2) $\epsilon=0$, and (3) $\epsilon=0.2$, presented in \Cref{tab:ablation}. Our key finding is that randomness in gating networks consistently benefits our model. More results and detailed analysis can be found in \Cref{app:ablation}.
+
+
+
+\section{Conclusion \& Limitation}
+
+In this paper, we introduce a new graph sparsification paradigm termed \ourmethod, which leverages multiple graph sparsifiers, each equipped with distinct sparsity levels and pruning criteria. \ourmethod selects the most suitable sparsifier expert based on each node's local context, providing a customized graph sparsification solution, followed by an effective mixture mechanism on the Grassmann manifold to ensemble the sparse graphs produced by various experts.  Extensive experiments on four large-scale OGB datasets and two superpixel datasets have rigorously demonstrated the effectiveness of \ourmethod. A potential limitation of \ourmethod is its current reliance on 1-hop decomposition to represent each node's local context. The performance of extending this approach to $k$-hop contexts remains unexplored, suggesting a possible direction for future research.
+
+
+
+
+

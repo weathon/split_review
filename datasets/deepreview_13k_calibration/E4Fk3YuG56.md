@@ -1,8 +1,8 @@
 # Cut Your Losses in Large-Vocabulary Language Models
 
 - Decision: Accept
-- Avg Score: 2.67
-- Scores: 1, 0, 6, 8, 1, 0
+- Avg Score: 8.50
+- Scores: 10, 6, 8, 10
 
 ## Abstract
 As language models grow ever larger, so do their vocabularies.

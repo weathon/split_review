@@ -1,0 +1,508 @@
+\title{Federated Time Series Generation on Feature and Temporally Misaligned Data}
+
+\begin{abstract}
+
+Distributed time series data presents a challenge for federated learning, as clients often possess different feature sets and have misaligned time steps. Existing federated time series models are limited by the assumption of perfect temporal or feature alignment across clients. In this paper, we propose \sys, a novel federated time series diffusion model that jointly learns a synthesizer across clients. At the core of \sys is a novel data distillation and aggregation framework that reconciles the differences between clients by imputing the misaligned timesteps and features. In contrast to traditional federated learning, \sys learns the correlation across clients' time series through the exchange of local synthetic outputs instead of model parameters. A coordinator iteratively improves a global distiller network by leveraging shared knowledge from clients through the exchange of synthetic data. As the distiller becomes more refined over time, it subsequently enhances the quality of the clients' local feature estimates, allowing each client to then improve its local imputations for missing data using the latest, more accurate distiller.  Experimental results on five datasets demonstrate \sys 's effectiveness compared to centralized training, and the effectiveness of sharing synthetic outputs to transfer knowledge of local time series. Notably, \sys achieves 79.4\% and 62.8\% improvement over local training in Context-FID and Correlational scores.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=.95\linewidth]{src/figures/crop_problem.pdf}
+    \caption{Feature and temporally misaligned time series. The gray masking indicates missing data.}
+    \label{fig:problem}
+\end{figure}
+
+Multivariate time series data are pivotal in many domains, such as healthcare, finance, manufacturing, and sales~\citep{lim2021time}. Consider a collaboration between multiple clients, shown in Figure \ref{fig:problem}. In a healthcare setting, these clients could be hospitals, each collecting patient data locally for a downstream task, such as predicting patient outcomes. The data gathered, such as vital signs like heart rate and blood pressure, is inherently \textit{temporal}, i.e., time series data. Aggregating data from all the sources could improve model performance due to increased sampled diversity when training downstream predictive models. However, privacy regulations such as the General Data Protection Regulation (GDPR)~\citep{gdpr} and confidentiality agreements between hospitals prevent sharing of raw data~\citep{alaa2021generative}.
+\textit{Federated learning} (FL)~\citep{mcmahan2017communication} takes a step towards tackling this privacy challenge by enabling clients to train a global model by sharing locally trained model parameters rather than raw data. However, this environment faces the challenge of \textit{feature and temporal misalignment}~\citep{luu2021time}, as hospitals may possess different feature sets with varying time intervals for data collection.
+
+In \textit{horizontal} FL~\citep{li2020federated}, different clients have data for the same features but for different samples or timesteps. Hence, it can tackle situations involving temporal misalignment but not feature misalignment. On the other hand, in \textit{vertical} FL~\citep{liu2024vertical}, different clients possess different feature sets for the same samples or timesteps. While this can handle feature misalignment, it cannot tackle temporal misalignment. Hence, neither horizontal nor vertical FL can fully tackle scenarios with both feature and temporal misalignment. On top of this, data may be missing or incomplete due to unavailability or inconsistent collection frequencies, further hindering a model's ability to learn patterns~\citep{pratama2016review}.
+
+To overcome these limitations, we propose \textbf{FedTDD} (\underline{Fed}erated Learning in Multivariate \underline{T}ime Series via \underline{D}ata \underline{D}istillation), a first-of-its-kind federated time series diffusion model capable of learning a time series synthesizer from clients' distinct features with temporal misalignment. \sys introduces a novel data distillation~\citep{sachdeva2023data} and aggregation framework for the common feature set, whose values differ across clients and can be obtained from the public domain. In this framework, a coordinator maintains a global model called the \emph{distiller}, trained iteratively using a combination of public data and clients' intermediate synthetic data outputs. Each client keeps a local time series diffusion model for imputing local features which leverages the latest distiller to improve the quality of local estimates. Unlike traditional federated learning, \sys learns the correlations among clients' time series through the exchange of synthetic outputs instead of aggregating models~\citep{mcmahan2017communication}, effectively handling feature and temporal misalignment without sharing raw data. 
+
+Given the recent advancements of diffusion models over mainstream generative models like \textit{Generative Adversarial Networks} (GANs)~\citep{goodfellow2020generative}, we utilize a time series \textit{Denoising Diffusion Probabilistic Model} (DDPM)~\citep{ho2020denoising}, adapted to handle temporal dependencies through temporal embeddings and sequential conditioning. Specifically, we select \textbf{Diffusion-TS}~\citep{yuan2024diffusion} since it leverages both time and frequency domain information, effectively capturing trends and seasonality, which leads to a more accurate imputation of missing data. By imputing data from unaligned time steps, clients can obtain temporally aligned data without needing alignment on the features or sharing raw data.
+
+In summary, our major contributions are as follows: 
+(i) We propose a novel federated generative learning framework that effectively handles temporal and feature-level misalignment and data missing problems in time series data.
+(ii) We develop a data distillation and aggregation framework that learns correlations among clients' time series by exchanging synthetic data instead of model parameters, enabling clients to improve their local models without direct data sharing and effectively handling data discrepancies.
+(iii) We conduct extensive experiments on five benchmark datasets, showing up to 79.4\% and 62.8\% improvement over local training in Context-FID and Correlational scores under extreme feature and temporal misalignment cases and achieving performance comparable to centralized training.
+
+
+\section{Related Work}
+
+
+\input{src/tables/related_work}
+
+\paragraph{Time series generation} Generative models for time series data aim to capture temporal dependencies and sequential patterns inherent in such datasets. TimeGAN~\citep{yoon2019time} combines \textit{generative adversarial networks} (GANs)~\cite{goodfellow2020generative} with recurrent neural networks~\citep{mogren2016c} to produce realistic multivariate time series. TimeVAE~\citep{desai2021timevae} utilizes variational autoencoders (VAEs)~\citep{kingma2013auto} tailored for time series to capture trends and seasonality. Recently, diffusion-based models like TimeGrad~\citep{rasul2021autoregressive}, CSDI~\citep{tashiro2021csdi}, SSSD~\citep{alcaraz2022diffusion}, TSDiff~\citep{kollovieh2024predict}, and Diffusion-TS~\citep{yuan2024diffusion} have further advanced time series generation by producing high-fidelity sequences, outperforming the mainstream GANs and VAE-based techniques. Despite their effectiveness, these models operate in centralized settings and assume fully aligned data with consistent features and timestamps. They are not equipped to handle feature and temporal misalignments common in real-world distributed scenarios, making them unsuitable for federated environments with heterogeneous data distributions~\citep{mendieta2022local, qu2022rethinking, ye2023heterogeneous}.
+
+\paragraph{Federated learning with generative models} Federated learning~\citep{zhang2021survey} has primarily been applied to image generation, such as FedCycleGAN~\citep{song2021federated} leverages CycleGAN~\citep{zhu2017unpaired} in federated settings to generate synthetic images while preserving data privacy. For tabular data, methods like GTV~\citep{zhao2023gtv}, DPGDAN~\citep{wang2023differentially}, and SiloFuse~\citep{shankar2024silofuse} employ GANs and diffusion models within vertical federated learning frameworks to synthesize tabular datasets. However, these approaches focus on vertically partitioned data, where all clients have features corresponding to the same sample ID, and do not address data redundancy or misalignment issues. Federated learning with generative models for time series data remains under-explored. Existing works such as FedGAN~\citep{rasouli2020fedgan}, VFLGAN-TS~\citep{yuan2024vflgan}, and T2TGAN~\citep{brophy2021estimation} extend GANs to federated time series generation. VFLGAN-TS operates in a vertical federated learning context, tackling feature misalignment, but does not handle temporal misalignment. In contrast, T2TGAN tackles horizontal federated learning settings but introduces data redundancy due to overlapping data among clients and cannot handle feature mismatches between clients. As summarized in Table~\ref{tab:related_work}, these methods encounter issues as shown in Figure~\ref{fig:problem}, making them less effective for federated time series generation where both feature and temporal misalignments are prevalent.
+
+\paragraph{Preliminary on generative modeling with DDPMs}
+
+For the generative backbone, we adopt the Diffusion-TS architecture~\citep{yuan2024diffusion}, which extends DDPMs~\cite{ho2020denoising} to capture temporal patterns using a generative modeling process. DDPMs are models trained using a \textit{forward noising} and \textit{backward denoising} process. The forward phase progressively adds random Gaussian noise to the data $\mathbf{s}_0$ at diffusion step $t$, where the transition is parameterized by $q(\mathbf{s}_t \mid \mathbf{s}_{t-1}) = \mathcal{N}(\mathbf{s}_t; \sqrt{1 - \beta_t} \, \mathbf{s}_{t-1}, \beta_t \, \mathbf{I})$ with $\beta_t \in (0, 1)$, eventually transforming it into pure noise $\mathbf{s}_T \sim \mathcal{N}(0, \mathbf{I})$.
+The backward phase is where the model learns to reverse this noising process. Starting from random noise $\mathbf{s}_T \sim \mathcal{N}(0, \mathbf{I})$, it iteratively removes the added noise step by step via $p_\theta(\mathbf{s}_{t-1} \mid \mathbf{s}_t) = \mathcal{N}(\mathbf{s}_{t-1}; \boldsymbol{\mu}_\theta(\mathbf{s}_t, t), \Sigma_\theta(\mathbf{s}_t, t))$, to reconstruct a new data sample resembling the original input distribution. The functions $\boldsymbol{\mu}_\theta$ and $\Sigma_\theta$ are generally estimated using a model.
+
+Diffusion-TS extends standard DDPMs by incorporating mechanisms specifically designed for time series characteristics such as trends and seasonality~\citep{kitagawa1984smoothness}. Instead of treating data points independently, it utilizes an encoder-decoder transformer architecture~\citep{vaswani2017attention} that processes entire sequences, effectively modeling temporal relationships. To handle trends, Diffusion-TS decomposes the time series into components that represent slow-varying behaviors over time. For capturing seasonality and periodic patterns, it employs frequency domain analysis using the Fast Fourier Transform (FFT)~\citep{cooley1969fast, heckbert1995fourier}. By integrating FFT, the model can analyze and reconstruct cyclical patterns~\citep{ceneda2018guided} within the data, allowing it to learn both time and frequency domain representations~\citep{fons2022hypertime}. This combination enables Diffusion-TS to generate more accurate and realistic time series data by effectively modeling complex temporal dynamics. Besides, Diffusion-TS supports both \textit{unconditional} and \textit{conditional} generation. In the unconditional generation, the model produces new samples solely based on the learned data distribution, starting from random noise and applying the learned denoising process. In the conditional generation, Diffusion-TS utilizes gradient-based guidance during sampling to incorporate the observed data \( \mathbf{y} \). At each diffusion step, the model refines its estimated time series \( \hat{\mathbf{s}}_0 \) by adjusting it with a gradient term that enforces consistency with the observed data. The refinement can be computed via $\tilde{\mathbf{s}}_0(\mathbf{s}_t, t; \theta) = \hat{\mathbf{s}}_0(\mathbf{s}_t, t; \theta) + \eta \nabla_{\mathbf{s}_t} ( \left\| \mathbf{y} - \hat{\mathbf{s}}_0(\mathbf{s}_t, t; \theta) \right\|^2 + \gamma \log p(\mathbf{s}_{t-1} \mid \mathbf{s}_t) )$, where \( \eta \) is a hyperparameter that controls the strength of the gradient guidance, and \( \gamma \) balances the trade-off between fitting the observed data and maintaining the generative model's prior distribution \( p(\mathbf{s}_{t-1} \mid \mathbf{s}_t) \). This iterative refinement ensures that the generated time series aligns with the provided observations and preserves the temporal patterns learned during training.
+
+
+\section{Background}
+
+\label{appx:background}
+
+In this section, we provide a comprehensive overview of Denoising Diffusion Probabilistic Models (DDPMs)~\citep{ho2020denoising} and introduce \textbf{Diffusion-TS}~\citep{yuan2024diffusion}, an extension of DDPMs specifically designed for time series data. We aim to highlight how Diffusion-TS builds upon the foundational principles of DDPMs, particularly focusing on the unique challenges of modeling temporal information inherent in time series data.
+
+\subsection{Denoising Diffusion Probabilistic Models}
+
+Denoising Diffusion Probabilistic Models (DDPMs) are a class of generative models that have demonstrated remarkable success in modeling complex data distributions, especially in the domain of image generation. The core idea behind DDPMs is to generate new data samples by reversing a predefined noising process. This involves two main stages: a forward diffusion process that progressively adds noise to the data, and a reverse diffusion process that learns to remove the noise to recover the original data distribution.
+
+\subsubsection{Forward Diffusion Process}
+
+The forward diffusion process incrementally corrupts the original data \( \mathbf{s}_0 \in \mathbb{R}^d \) through a Markov chain \( \mathbf{s}_0, \mathbf{s}_1, \dots, \mathbf{s}_T \). At each time step \( t \), Gaussian noise is added to the data as follows:
+\begin{equation}
+    q(\mathbf{s}_t \mid \mathbf{s}_{t-1}) = \mathcal{N}(\mathbf{s}_t; \sqrt{1 - \beta_t} \, \mathbf{s}_{t-1}, \beta_t \, \mathbf{I}),
+\end{equation}
+where \( \beta_t \in (0, 1) \) is a predefined variance schedule that controls the amount of noise added at each step, and \( \mathbf{I} \) is the identity matrix. The sequence \( \{ \beta_t \} \) is typically designed so that \( \beta_t \) increases over time, ensuring that the data becomes more corrupted as \( t \) increases.
+
+The overall forward process can be expressed as:
+\begin{equation}
+    q(\mathbf{s}_{1:T} \mid \mathbf{s}_0) = \prod_{t=1}^T q(\mathbf{s}_t \mid \mathbf{s}_{t-1}).
+\end{equation}
+As \( t \) approaches \( T \), the data \( \mathbf{s}_t \) becomes increasingly noisy, and in the limit \( \mathbf{s}_T \) approaches an isotropic Gaussian distribution \( \mathcal{N}(0, \mathbf{I}) \). This property is crucial because it allows the reverse process to start from a known simple distribution.
+
+An important feature of the forward process is that we can directly sample \( \mathbf{s}_t \) at any time step \( t \) from \( \mathbf{s}_0 \) without simulating all previous steps. By defining \( \gamma_t = 1 - \beta_t \) and \( \bar{\gamma}_t = \prod_{v=1}^t \gamma_v \), we can derive:
+\begin{equation}
+    q(\mathbf{s}_t \mid \mathbf{s}_0) = \mathcal{N}(\mathbf{s}_t; \sqrt{\bar{\gamma}_t} \, \mathbf{s}_0, (1 - \bar{\gamma}_t) \, \mathbf{I}).
+\end{equation}
+This expression shows that \( \mathbf{s}_t \) is a linear combination of the original data \( \mathbf{s}_0 \) and Gaussian noise, scaled by the terms \( \sqrt{\bar{\gamma}_t} \) and \( \sqrt{1 - \bar{\gamma}_t} \), respectively.
+
+Using the reparameterization trick~\citep{kingma2013auto}, which is widely used in variational autoencoders, we can write:
+\begin{equation}
+    \mathbf{s}_t = \sqrt{\bar{\gamma}_t} \, \mathbf{s}_0 + \sqrt{1 - \bar{\gamma}_t} \, \boldsymbol{\epsilon}\label{con:epsilon}
+\end{equation}
+where \( \boldsymbol{\epsilon} \sim \mathcal{N}(0, \mathbf{I}) \) is a standard Gaussian noise term. This formulation allows us to efficiently compute \( \mathbf{s}_t \) and backpropagate gradients during training.
+
+\subsubsection{Reverse Diffusion Process}
+
+The goal of the reverse diffusion process is to recover the original data \( \mathbf{s}_0 \) from the noisy data \( \mathbf{s}_T \). This involves learning a reverse Markov chain parameterized by \( p_\theta(\mathbf{s}_{t-1} \mid \mathbf{s}_t) \), where \( \theta \) represents the model parameters:
+\begin{equation}
+    p_\theta(\mathbf{s}_{t-1} \mid \mathbf{s}_t) = \mathcal{N}(\mathbf{s}_{t-1}; \boldsymbol{\mu}_\theta(\mathbf{s}_t, t), \Sigma_\theta(\mathbf{s}_t, t)).
+\end{equation}
+Starting from \( \mathbf{s}_T \sim \mathcal{N}(0, \mathbf{I}) \), we iteratively sample \( \mathbf{s}_{t-1} \) from \( p_\theta(\mathbf{s}_{t-1} \mid \mathbf{s}_t) \) until we reach \( \mathbf{s}_0 \). The functions \( \boldsymbol{\mu}_\theta \) and \( \Sigma_\theta \) are typically modeled using deep neural networks.
+
+\subsubsection{Training Objective and Variational Lower Bound}
+
+Directly maximizing the data likelihood \( \mathbb{E}_{\mathbf{s}_0}[\log p_\theta(\mathbf{s}_0)] \) is intractable due to the high-dimensional integrals involved. Instead, we optimize a variational lower bound (VLB) on the negative log-likelihood:
+\begin{equation}
+    \mathcal{J}_{\text{vlb}} = -\log p_\theta(\mathbf{s}_0 \mid \mathbf{s}_1) + \sum_{t=2}^T D_{\text{KL}}\left( q(\mathbf{s}_{t-1} \mid \mathbf{s}_t, \mathbf{s}_0) \, \bigg\| \, p_\theta(\mathbf{s}_{t-1} \mid \mathbf{s}_t) \right) + D_{\text{KL}}\left( q(\mathbf{s}_T \mid \mathbf{s}_0) \, \bigg\| \, p(\mathbf{s}_T) \right).
+\end{equation}
+In this expression, \( D_{\text{KL}} \) denotes the Kullback-Leibler divergence between two probability distributions. The first term measures the discrepancy between the true posterior and the model's approximation at the final step, the middle term sums over the discrepancies at each intermediate step, and the last term ensures that the model's prior at \( t = T \) matches the known distribution \( p(\mathbf{s}_T) \).
+
+\subsubsection{Simplified Training Objective}
+
+\citet{ho2020denoising} proposed a simplified training objective that focuses on predicting the noise \( \boldsymbol{\epsilon} \) added to \( \mathbf{s}_0 \) at each time step. By reparameterizing the reverse process, they showed that the variational lower bound can be simplified to the following loss function:
+\begin{equation}
+    \mathcal{J}_{\text{simple}} = \mathbb{E}_{t, \mathbf{s}_0, \boldsymbol{\epsilon}} \left[ \left\| \boldsymbol{\epsilon} - \boldsymbol{\epsilon}_\theta(\mathbf{s}_t, t) \right\|^2 \right],
+\end{equation}
+where \( \boldsymbol{\epsilon}_\theta(\mathbf{s}_t, t) \) is the model's estimate of the noise at time step \( t \). This loss function is computationally efficient and has been empirically shown to produce high-quality generative models.
+
+\subsubsection{Relation to Score Matching}
+
+Estimating \( \boldsymbol{\epsilon} \) is closely related to estimating the score function, which is the gradient of the log probability density function with respect to the data. Specifically, the score function \( \nabla_{\mathbf{s}_t} \log q(\mathbf{s}_t \mid \mathbf{s}_0) \) can be expressed as:
+\begin{equation}
+    \nabla_{\mathbf{s}_t} \log q(\mathbf{s}_t \mid \mathbf{s}_0) = -\frac{1}{1 - \bar{\gamma}_t} \left( \mathbf{s}_t - \sqrt{\bar{\gamma}_t} \, \mathbf{s}_0 \right) = -\frac{1}{\sqrt{1 - \bar{\gamma}_t}} \, \boldsymbol{\epsilon}.
+\end{equation}
+This shows that predicting \( \boldsymbol{\epsilon} \) is equivalent to learning the scaled score function of the noisy data distribution.
+
+\subsubsection{Sampling Procedure}
+
+After training, new data samples can be generated by starting from \( \mathbf{s}_T \sim \mathcal{N}(0, \mathbf{I}) \) and iteratively applying the learned reverse transitions. The sampling process at each step \( t \) is given by:
+\begin{equation}
+    \mathbf{s}_{t-1} = \frac{1}{\sqrt{\gamma_t}} \left( \mathbf{s}_t - \frac{1 - \gamma_t}{\sqrt{1 - \bar{\gamma}_t}} \, \boldsymbol{\epsilon}_\theta(\mathbf{s}_t, t) \right) + \sigma_t \, \mathbf{z},
+\end{equation}
+where \( \sigma_t \) is a hyperparameter controlling the randomness in the sampling process, and \( \mathbf{z} \sim \mathcal{N}(0, \mathbf{I}) \). This equation updates \( \mathbf{s}_{t} \) towards the estimated mean while adding some noise to maintain stochasticity.
+
+\subsection{Diffusion-TS: Interpretable Diffusion for Time Series}
+\label{appx:Diffusion-TS}
+
+While DDPMs have been successful in modeling high-dimensional data such as images, they do not explicitly account for the unique characteristics of time series data, which often include temporal dependencies, trends, and seasonal patterns. \textbf{Diffusion-TS}~\citep{yuan2024diffusion} extends the DDPM framework to address these challenges by incorporating an interpretable decomposition architecture specifically designed for time series analysis.
+
+\subsubsection{Adapted Diffusion Framework for Time Series}
+
+In Diffusion-TS, both the forward and reverse diffusion processes are adapted to capture the temporal structures inherent in time series data.
+
+\paragraph{Forward process} The forward process remains similar to that of standard DDPMs but is tailored to handle sequential data. The time series data \( \mathbf{s}_0 \in \mathbb{R}^d \), where \( d \) represents the sequence length, is gradually corrupted using a variance schedule \( \delta_t \):
+\begin{equation}
+    q(\mathbf{s}_t \mid \mathbf{s}_{t-1}) = \mathcal{N}\left( \mathbf{s}_t; \sqrt{1 - \delta_t} \, \mathbf{s}_{t-1}, \delta_t \, \mathbf{I} \right),
+    \label{eq:dts_forward}
+\end{equation}
+where \( \delta_t \in (0, 1) \) controls the noise level at each diffusion step. The cumulative product \( \bar{\gamma}_t = \prod_{v=1}^t \gamma_v \), with \( \gamma_t = 1 - \delta_t \), allows for direct computation of \( \mathbf{s}_t \) from \( \mathbf{s}_0 \).
+
+\paragraph{Reverse process} In the reverse process, Diffusion-TS modifies the parameterization by directly predicting an estimate of the original time series \( \hat{\mathbf{s}}_0(\mathbf{s}_t, t; \theta) \). The reverse transition is formulated as:
+\begin{equation}
+    \mathbf{s}_{t-1} = \frac{\sqrt{\bar{\gamma}_{t-1}} \delta_t}{1 - \bar{\gamma}_t} \, \hat{\mathbf{s}}_0(\mathbf{s}_t, t; \theta) + \frac{\sqrt{\gamma_t} (1 - \bar{\gamma}_{t-1})}{1 - \bar{\gamma}_t} \, \mathbf{s}_t + \sigma_t \, \mathbf{z}_t,
+\end{equation}
+where \( \sigma_t = \sqrt{\delta_t} \) and \( \mathbf{z}_t \sim \mathcal{N}(0, \mathbf{I}) \). By predicting \( \hat{\mathbf{s}}_0 \) directly, the model focuses on reconstructing the original time series, which is crucial for capturing temporal dependencies.
+
+\subsubsection{Decomposition-Based Model Architecture}
+
+To effectively model time series data, Diffusion-TS employs a decomposition-based architecture that explicitly models trend and seasonality components, inspired by classical time series decomposition methods.
+
+\paragraph{Trend synthesis} The trend component \( \mathbf{v}_{\text{tr}} \) captures the long-term progression in the data. It is synthesized using polynomial regression~\citep{oreshkin2019n, desai2021timevae}:
+\begin{equation}
+    \mathbf{v}_{\text{tr}} = \sum_{i=1}^{D} \left( \mathbf{C} \cdot \text{Linear}\left( \mathbf{w}_{\text{tr}}^{(i)} \right) + \mathbf{x}_{\text{tr}}^{(i)} \right),
+\end{equation}
+where \( D \) is the number of decoder layers in the transformer architecture, \( \mathbf{C} = [\mathbf{1}, \mathbf{c}, \mathbf{c}^2, \dots, \mathbf{c}^p] \) is a matrix of polynomial basis vectors, with \( \mathbf{c} = [0, 1, \dots, d - 1]^T / d \) representing normalized time indices and \( p \) being the polynomial degree, \( \mathbf{w}_{\text{tr}}^{(i)} \) are learnable weights for the \( i \)-th layer's trend component, and \( \mathbf{x}_{\text{tr}}^{(i)} \) is the mean output from the \( i \)-th decoder block, capturing the average behavior. This approach allows the model to capture smooth and continuous changes over time.
+
+\paragraph{Seasonality and residual synthesis} The seasonality component \( \mathbf{s}_{\text{seas}}^{(i)} \) captures repeating patterns or cycles in the data using Fourier series~\citep{de2011forecasting, woo2022etsformer}. The amplitude \( A_{i}^{(k)} \) and phase \( \Phi_{i}^{(k)} \) of the \( k \)-th frequency component are computed as follows:
+\begin{align}
+    A_{i}^{(k)} &= \left| \mathcal{F}\left( \mathbf{w}_{\text{seas}}^{(i)} \right)_k \right|, \quad \Phi_{i}^{(k)} = \arg\left( \mathcal{F}\left( \mathbf{w}_{\text{seas}}^{(i)} \right)_k \right), \\
+    \mathbf{s}_{\text{seas}}^{(i)} &= \sum_{k=1}^{K} A_{i}^{(k)} \cos\left( 2\pi f_k \, \mathbf{c} + \Phi_{i}^{(k)} \right),
+\end{align}
+where \( \mathcal{F} \) denotes the Fourier Transform applied to the weights \( \mathbf{w}_{\text{seas}}^{(i)} \), \( A_{i}^{(k)} \) and \( \Phi_{i}^{(k)} \) are the amplitude and phase of the \( k \)-th frequency component, \( K \) is the number of significant frequencies selected based on their amplitudes, and \( f_k \) is the \( k \)-th frequency component. The residual component \( \mathbf{r} \) accounts for any remaining patterns or noise not captured by the trend and seasonality components. The final reconstructed time series is obtained by combining these components:
+\begin{equation}
+    \hat{\mathbf{s}}_0(\mathbf{s}_t, t; \theta) = \mathbf{v}_{\text{tr}} + \sum_{i=1}^{D} \mathbf{s}_{\text{seas}}^{(i)} + \mathbf{r}.
+\end{equation}
+
+\subsubsection{Fourier-Based Training Objective}
+
+To ensure the model effectively learns and disentangles the time series components, Diffusion-TS introduces a loss function that operates in both the time and frequency domains:
+\begin{equation}
+    \mathcal{J}_\theta = \mathbb{E}_{t, \mathbf{s}_0} \left[ w_t \left( \lambda_1 \left\| \mathbf{s}_0 - \hat{\mathbf{s}}_0(\mathbf{s}_t, t; \theta) \right\|^2 + \lambda_2 \left\| \text{FFT}(\mathbf{s}_0) - \text{FFT}\left( \hat{\mathbf{s}}_0(\mathbf{s}_t, t; \theta) \right) \right\|^2 \right) \right],
+\end{equation}
+where \( w_t = \frac{\lambda \gamma_t (1 - \bar{\gamma}_t)}{\delta_t^2} \) is a weighting term that emphasizes learning at larger diffusion steps, with \( \lambda \) being a small constant. \( \lambda_1 \) and \( \lambda_2 \) are hyperparameters that balance the contributions of the time-domain loss and the frequency-domain loss, and \(\text{FFT}\) denotes the Fast Fourier Transform, which transforms the time series into the frequency domain. By incorporating the frequency-domain loss, the model is encouraged to accurately capture periodic components, improving its ability to model seasonality. Using mean squared error loss to train this denoising model is refer to~\citep{ho2020denoising}
+
+\subsubsection{Handling Temporal Information Differently}
+
+Diffusion-TS differs from standard DDPMs in several key aspects tailored for time series data. First, the model explicitly separates the time series into trend, seasonality, and residual components, enhancing interpretability and modeling capabilities. Second, by incorporating a loss in the frequency domain, the model emphasizes the learning of periodic patterns, which are prevalent in time series data. Lastly, the use of an encoder-decoder transformer architecture allows the model to capture long-range temporal dependencies and complex sequential patterns. These adaptations enable Diffusion-TS to effectively model the intricate temporal dynamics present in time series data, addressing the limitations of standard DDPMs that do not explicitly account for temporal structures.
+
+\subsubsection{Conditional Generation for Time Series Applications}
+\label{appx:conditional_generation}
+
+For practical applications like imputation (filling missing values) and forecasting (predicting future values), Diffusion-TS extends its framework to conditional generation. Given observed data \( \mathbf{y} \), the model aims to generate samples consistent with this data. To achieve this, Diffusion-TS employs gradient-based guidance during the sampling process. The estimated time series \( \hat{\mathbf{s}}_0 \) is adjusted at each diffusion step using:
+\begin{equation}
+    \tilde{\mathbf{s}}_0(\mathbf{s}_t, t; \theta) = \hat{\mathbf{s}}_0(\mathbf{s}_t, t; \theta) + \eta \nabla_{\mathbf{s}_t} \left( \left\| \mathbf{y} - \hat{\mathbf{s}}_0(\mathbf{s}_t, t; \theta) \right\|^2 + \gamma \log p(\mathbf{s}_{t-1} \mid \mathbf{s}_t) \right),
+    \label{eq:conditional_sampling}
+\end{equation}
+where \( \eta \) is a hyperparameter controlling the strength of the gradient guidance, \( \gamma \) balances the trade-off between fitting the observed data and adhering to the learned data distribution, and \( \log p(\mathbf{s}_{t-1} \mid \mathbf{s}_t) \) represents the model's prior, ensuring that the generated data remains realistic. By iteratively refining \( \tilde{\mathbf{s}}_0 \) using gradient information, the model generates samples that not only match the observed data but also maintain the overall temporal coherence and patterns learned during training.
+
+
+
+\section{\sys}
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\linewidth]{src/figures/crop_structure.pdf}
+    \caption{\sys Structure. First, the Distiller is pre-trained on a public dataset. Then, each client uses the distiller and imputer to impute common and exclusive features, respectively. Finally, synthetic data is sent back to the coordinator to expand the public dataset for the next round. The order of execution(1-7) is labeled in the figure. Here the common features are A and B, and the exclusive features are C and D.
+    }
+    \label{fig:Structure}
+\end{figure}
+
+In this work, we address the problem of collaborative time series imputation in the presence of temporal and feature misalignments, without requiring the sharing of raw data. In a federated learning setting, clients may possess different subsets of features. We categorize features into two types: \textit{common features} and \textit{exclusive features}. Common features are those present in all clients and also available in a public dataset, while exclusive features are unique to each client and not shared. For example, market indices might be common features in financial data, while individual portfolio holdings are exclusive. Our proposed framework, \sys, as shown in \autoref{fig:Structure}, tackles this problem using two models. A global distiller first imputes missing common features across clients. Local imputer models then use the imputed common features to predict the missing exclusive features for each client, addressing both temporal and feature misalignments. Furthermore, clients protect their privacy by sharing only synthetic versions of the common features while collaboratively improving the global distiller. This cycle of iterative imputation and model refinement ultimately converges to yield good quality imputations, while ensuring that no raw data is shared.
+
+\subsection{Problem Definition}
+
+We consider a federated learning setup involving $N$ clients and a coordinator. Each client $i$ possesses a time series dataset, denoted as $\mathbf{X}^i = \left[ { X^i_{j,k} } \right]_{\{j = 1 \dots T^i, k = 1 \dots C^i\}}$, where $T^i$ is the number of time steps, and $C^i$ is the number of channels. These datasets can be split into two components, one for the common features and one for the exclusive features, i.e., $\mathbf{X}^i = \mathbf{X}^i_{\text{comm}} \cup \mathbf{X}^i_{\text{ex}}$. The coordinator holds a public dataset $\mathbf{X}^{\text{pub}} = \left[{ {X}^{\text{pub}}_{j,k} } \right]_{\forall j; k \in \mathcal{F}_{\text{comm}}}$, which contains data for the common features $\mathcal{F}_{\text{comm}}$ but without any missing values. This public dataset is time-indexed differently from the clients' data and provides a reliable reference for the common features. Each client's time series data comes from a distinct time interval, meaning that each client's time indices $j$ are unique. The feature set for each client $i$, $\mathcal{F}^i$, consists of common features $\mathcal{F}_{\text{comm}}$, which are shared across all clients, and exclusive features $\mathcal{F}^i_{\text{ex}}$, which are specific to each client. Thus, the overall feature set for client $i$ is represented as $\mathcal{F}^i = \mathcal{F}_{\text{comm}} \cup \mathcal{F}^i_{\text{ex}}$. Conversely, clients may have missing values in both the common and exclusive features. These missing values are indicated by a binary mask matrix $\mathbf{M}^i = \left[{ M^i_{j,k} }\right]_{\forall j,k}$, where $M^i_{j,k} = 1$ if the value $X^i_{j,k}$ is observed while $0$ indicates it is missing. The mask can be split into two parts: $\mathbf{M}^i_{\text{comm}}$, which corresponds to missing data in the common features, and $\mathbf{M}^i_{\text{ex}}$, which corresponds to missing data in the exclusive features. The goal is to design a collaborative method that enables clients to leverage shared knowledge and the public dataset to input the missing data locally without sharing raw data. Table~\ref{tab:appx_notation} summarises the mathematical notations used.
+
+\subsection{Hybrid Federated Learning for imputation under misalignment}
+Algorithm~\ref{alg:FedTDD} presents the overview of \sys. The framework consists of two key components: the global distiller model $\mathcal{D}$ and the local imputer models $\mathcal{U}^i$. The global distiller $\mathcal{D}$ imputes missing common features shared across all clients, while each client trains a local imputer $\mathcal{U}^i$ to infer missing exclusive features specific to their data. These components work together to address temporal and feature misalignment by iteratively improving the imputation process over several rounds $r$ ranging from 1 to $R$.
+
+\input{src/pseudocode/FedTDD_simple}
+
+The process begins with the coordinator training a global distiller model $\mathcal{D}$ using the public dataset $\mathbf{X}^{\text{pub}}$. $\mathcal{D}$ leverages a temporal DDPM backbone to apply a forward diffusion process by gradually adding noise to the data and learns to reverse this process. During training, $\mathcal{D}$ conducts \emph{unconditional generation} by starting from Gaussian noise \( \boldsymbol{\epsilon} \) and learning to approximate the data distribution through the time and frequency domain components~\citep{yuan2024diffusion}. Formally, we have
+\begin{equation}
+    \mathcal{L}_{\text{time}} = \mathbb{E}_{(j,k,t) \, | \, \mathbf{M}^{\text{pub}}_{j,k} = 1} \left[ \left\| \mathbf{X}^{\text{pub}}_{j,k} - \Tilde{\mathbf{X}}^{\text{pub}}_{j,k}(\mathbf{X}_{j,k,t}^{\text{pub}}, t, \boldsymbol{\epsilon}; \theta) \right\|^2 \right] \quad \text{and}
+\end{equation}
+\begin{equation}
+    \mathcal{L}_{\text{freq}} = \mathbb{E}_{(j,k,t) \, | \, \mathbf{M}^{\text{pub}}_{j,k} = 1} \left[ \left\| \text{FFT}(\mathbf{X}^{\text{pub}}_{j,k}) - \text{FFT}\left( \Tilde{\mathbf{X}}^{\text{pub}}_{j,k}(\mathbf{X}_{j,k,t}^{\text{pub}}, t, \boldsymbol{\epsilon}; \theta) \right) \right\|^2 \right],
+\end{equation}
+where \( \boldsymbol{\epsilon} \sim \mathcal{N}(0, \mathbf{I}) \), $\mathbf{X}^{\text{pub}}_{j,k}$ is the $(j,k)$-th entry of $\mathbf{X}^{\text{pub}}$, $\Tilde{\mathbf{X}}^{\text{pub}}_{j,k}$ is the denoised estimate from $\mathcal{D}$, and \(\text{FFT}\) denotes the Fast Fourier Transform~\citep{heckbert1995fourier}, which is a mathematical operation that converts a finite-length time domain signal to its frequency domain representation. We take the following objective
+\begin{equation}
+    \mathcal{L}_{\text{distiller}(\mathcal{D}^i)} = \mathbb{E}_{(j,k,t) \, | \, \mathbf{M}^{\text{pub}}_{j,k} = 1} \left[ w_t \left( \lambda_1 \mathcal{L}_{\text{time}} + \lambda_2 \mathcal{L}_{\text{freq}} \right) \right], \quad
+    w_t = \frac{\lambda \gamma_t (1 - \bar{\gamma}_t)}{\delta_t^2},
+\end{equation}
+where $\lambda_1$ and $\lambda_2$ control the balance between time and frequency losses while $w_t$ emphasizes learning at larger diffusion steps, with $\lambda$ being a small constant. The parameter $\delta_t \in (0, 1)$ determines the amount of noise added at each forward diffusion step, where $t$ is a diffusion time step uniformly sampled from $1$ to $T$ during training.  The cumulative product \( \bar{\gamma}_t = \prod_{v=1}^t \gamma_v \), with \( \gamma_t = 1 - \delta_t \), track how the original signal diminishes over time due to the added noise. By weighting the loss at different steps, $w_t$ helps the model focus on reconstructing the signal under high-noise conditions. 
+
+After this initial training, the coordinator distributes the trained global distiller model $\mathcal{D}$ to all participating clients. Each client $i$ then utilizes $\mathcal{D}$ to impute their missing common features. Since clients may have missing values in $\mathbf{X}_{\text{comm}}^i$, they input their data along with the corresponding mask $\mathbf{M}_{\text{comm}}^i$ to the distiller model, which will perform \emph{conditional generation} to iteratively refine the imputed data by sampling from the conditional distribution guided by the observed data, shown in Equation~\ref{eq:conditional_sampling}. The imputation process follows $\hat{\mathbf{X}}_{\text{comm}}^i = \mathcal{D}(\mathbf{X}_{\text{comm}}^i, \mathbf{M}_{\text{comm}}^i)$, where $\mathcal{D}$ reconstructs only the missing values, indicated by $\mathbf{M}_{\text{comm}}^i=0$. Similarly, the local imputer imputes missing values in $\mathbf{X}_{\text{ex}}^i$ by inputting their data along with the corresponding mask $\mathbf{M}_{\text{ex}}^i$ to the imputer model via $\hat{\mathbf{X}}_{\text{ex}}^i = \mathcal{U}(\mathbf{X}_{\text{ex}}^i, \mathbf{M}_{\text{ex}}^i)$. The imputed common features $\hat{\mathbf{X}}_{\text{comm}}^i$ are then combined with the available exclusive features $\hat{\mathbf{X}}_{\text{ex}}^i$ to form the training data $\mathbf{X}^i_{\text{train}} = \hat{\mathbf{X}}_{\text{comm}}^i \cup \hat{\mathbf{X}}_{\text{ex}}^i$ for the local imputer. Meanwhile, each client trains their local imputer model $\mathcal{U}^i$ using $\mathbf{X}^i_{\text{train}}$ as the ground truth. Since the imputed common features $\hat{\mathbf{X}}_{\text{comm}}^i$ are fully known (as they are outputs from the pre-trained and fine-tuned $\mathcal{D}$), they are entirely used as ground truth for training $\mathcal{U}^i$, regardless of the original mask $\mathbf{M}_{\text{comm}}^i$. For the exclusive features, only the observed entries indicated by the mask $\mathbf{M}_{\text{ex}}^i$ are used as ground truth since the quality of the imputer's generated data during training is not sufficient to be used as ground truth. We define the loss mask as $\mathbf{M}^i_{\text{loss}} = \mathbf{1}_{\text{comm}}^i \cup \mathbf{M}_{\text{ex}}^i$, where $\mathbf{1}_{\text{comm}}^i$ is a matrix of ones corresponding to the common features of client $i$. This loss mask ensures that the reconstruction loss is computed over all entries of the imputed common features and the observed entries of the exclusive features. The training loss for the imputer $\mathcal{U}^i$ can be defined as follows:
+\begin{equation}
+    \mathcal{L}_{\text{imputer}(\mathcal{U}^i)} = \mathbb{E}_{(j,k,t) \, | \, \mathbf{M}^i_{\text{loss}_{j,k}} = 1} \left[ w_t \left( \lambda_1 \mathcal{L}_{\text{time}}^i + \lambda_2 \mathcal{L}_{\text{freq}}^i \right) \right],
+\end{equation}
+\begin{equation}
+     \text{where} \quad \mathcal{L}_{\text{time}}^i = \mathbb{E}_{(j,k,t) \, | \, \mathbf{M}^i_{\text{loss}_{j,k}} = 1} \left[ \left\| \mathbf{X}^i_{\text{train}_{j,k}} - \Tilde{\mathbf{X}}^i_{\text{train}_{j,k}}(\mathbf{X}^i_{\text{train}_{j,k,t}}, t; \theta) \right\|^2 \right]
+\end{equation}
+\begin{equation}
+     \text{and} \quad \mathcal{L}_{\text{freq}}^i = \mathbb{E}_{(j,k,t) \, | \, \mathbf{M}^i_{\text{loss}_{j,k}} = 1} \left[ \left\| \text{FFT}(\mathbf{X}^i_{\text{train}_{j,k}}) - \text{FFT}\left( \Tilde{\mathbf{X}}^i_{\text{train}_{j,k}}(\mathbf{X}^i_{\text{train}_{j,k,t}}, t; \theta) \right) \right\|^2 \right],
+\end{equation}
+where $ \mathbf{X}^i_{\text{train}_{j,k}}$ is the $(j,k)$-th entry of $\mathbf{X}^i_{\text{train}}$, $\Tilde{\mathbf{X}}^i_{\text{train}_{j,k}}$ is the denoised estimate from $\mathcal{U}$. After training, each client uses the trained imputer $\mathcal{U}^i$ to generate a synthetic dataset through \emph{unconditional synthesis}, which includes both the common features $\hat{\mathbf{X}}_{\text{comm}}^i$ and the exclusive features $\hat{\mathbf{X}}_{\text{ex}}^i$. Starting from Gaussian noise, the imputer generates samples $\hat{\mathbf{X}}^i = \mathcal{U}^i(\mathbf{z}), \mathbf{z} \sim \mathcal{N}(0, \mathbf{I})$, that capture the distribution of both common and exclusive features.
+
+To protect privacy, only the common features from the synthetic dataset, $\hat{\mathbf{X}}^i_{\text{comm}}$, are shared with the coordinator. This ensures that no raw or exclusive client data is exposed during the collaborative learning. The coordinator uses the synthetic common feature data from the clients to expand its public dataset. Rather than simply absorbing all the synthetic data, the coordinator carefully controls the growth of the dataset by accepting a fraction of the sequences from each client. Specifically, the coordinator adds $\frac{r}{R} \alpha * L$, where $L$ represents the length of the synthetic datasets $\hat{\mathbf{X}}^i_{\text{comm}}; \forall i \in \{1,2, \dots, N\}$, $\alpha$ is a hyperparameter between 0 and 1, and the ratio of $r$ and $R$ yields a number that linearly increases up to 1, allowing for a gradual expansion as the rounds increase. The coordinator retrains the global distiller $\mathcal{D}$ using this expanded dataset. The addition of synthetic data enhances the distiller's ability to learn the patterns necessary for imputing missing common features.
+
+The overall process creates an iterative cycle of improvement. As clients' generative models, specifically their local imputers, become more accurate with each round, the quality of the synthetic data they generate also improves. This higher-quality synthetic data, in turn, improves the distiller model at the coordinator, which benefits all clients when it is redistributed. Over several training rounds, this mutual reinforcement drives both the global distiller and the local imputers to improve continuously. Ultimately, the process converges, yielding robust imputation models without requiring clients to share their raw data.
+
+
+\section{Experiments}
+
+
+We assess \sys 's performance by showing its advantages and disadvantages when applied to multiple benchmark datasets.
+
+\paragraph{Datasets} To assess the quality of synthetic data, we consider four real-world datasets and one simulated dataset with different properties, such as the number of features, correlation, periodicity, and noise levels. Each dataset is preprocessed using a sliding window technique~\citep{yoon2019time} to segment the data into sequences of length 24 to capture meaningful temporal dependencies while keeping the computational cost manageable. \textbf{Stocks}~\citep{yoon2019time} is the daily historical Google stock data from 2004 to 2019 with highly correlated features. \textbf{ETTh}~\citep{zhou2021informer} recorded the electricity transformers hourly between July 2016 and July 2018, including load and oil temperature data that consists of 7 features. \textbf{Energy}~\citep{appliances_energy_prediction_374} from UCI appliances energy prediction dataset with 10-minute intervals for about 4.5 months. \textbf{fMRI}~\citep{smith2011network} is a realistic simulation of brain activity time series with 50 features. \textbf{MuJoCo}~\citep{tunyasuvunakool2020dm_control} is a physics-based simulation time series containing 14 features.
+
+\paragraph{Baselines} We compare \sys against approaches show in \autoref{fig:baselines_centralized_star}, \ref{fig:baselines_centralized}, \ref{fig:baselines_local} and \ref{fig:baselines_pretrained}. For the \textbf{Centralized*} training, we aggregate all data from individual clients, including public data, into a single location, where a global model is trained using the combined dataset, and this will be trained with all available features in the dataset and without missing values. While \textbf{Centralized} uses the same training procedure as Centralized*, it is, however, trained on a combined dataset with missing values and corresponding features available from each client plus the public data. To deal with differing features across clients, we create the combined dataset consisting of the total number of features in the particular benchmark dataset and zero-fill any remaining features to ensure uniformity. On the other hand, \textbf{Local} training involves training a separate model for each client using only their local data, without any communication or data aggregation. This approach has to be done to verify that \sys can perform relatively better than train locally. Finally, the \textbf{Pre-trained} approach leverages a model trained on a public dataset and uses it to impute the common features in local data from each client. Again, there is no data aggregation for this approach.
+In comparison, \sys integrates the Pre-trained approach and applies data aggregation to it. We utilized a SOTA diffusion-based multivariate time series generative model, Diffusion-TS~\citep{yuan2024diffusion}, as the backbone for these baselines and \sys. Alternatively, any other time series generative model can be adopted in these approaches in a plug-and-play manner.
+
+\begin{figure}
+    \centering
+    \begin{subfigure}[t]{0.195\textwidth}
+        \centering
+        \frame{\includegraphics[width=1\textwidth]{src/figures/baselines_centralized_star.pdf}}
+        \caption{Centralized*}
+        \label{fig:baselines_centralized_star}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.195\textwidth}
+        \centering
+        \frame{\includegraphics[width=1\textwidth]{src/figures/baselines_centralized.pdf}}
+        \caption{Centralized}
+        \label{fig:baselines_centralized}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.195\textwidth}
+        \centering
+        \frame{\includegraphics[width=1\textwidth]{src/figures/baselines_local.pdf}}
+        \caption{Local}
+        \label{fig:baselines_local}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.195\textwidth}
+        \centering
+        \frame{\includegraphics[width=1\textwidth]{src/figures/baselines_pretrained.pdf}}
+        \caption{Pre-trained}
+        \label{fig:baselines_pretrained}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.195\textwidth}
+        \centering
+        \frame{\includegraphics[width=1\textwidth]{src/figures/baselines_fedtdd.pdf}}
+        \caption{\sys}
+        \label{fig:baselines_fedtdd}
+    \end{subfigure}
+    \caption{Illustrations of different baselines compared to \sys. The data in the coordinator, also called public data, in \autoref{fig:baselines_centralized}, \ref{fig:baselines_pretrained} and \ref{fig:baselines_fedtdd} consists only common features time series. Dashes indicate temporal missing values.}
+    \label{fig:baselines}
+\end{figure}
+
+ \textbf{Context-Fréchet Inception Distance (Context-FID) score}~\citep{jeha2022psa} evaluates the similarity between the distribution of real and synthetic time series data by computing the Fréchet distance. \textbf{Correlational score}~\citep{liao2020conditional} measures the correlation between the features of multivariate time series in the synthetic data compared to its real data. \textbf{Discriminative score}~\citep{yoon2019time} measures the realism of the synthetic data by training a binary classifier to distinguish between real and synthetic data. \textbf{Predictive score}~\citep{yoon2019time} evaluates the utility of the synthetic data by training a sequence-to-sequence model on the synthetic data and measuring its performance on real data. All evaluation metrics are computed based on the respective features of the individual clients and then averaged over five trials, followed by calculating the overall average across the number of clients. The quality of synthetic data is considered the ``best" when all metrics approach 0, meaning lower values indicate better quality.
+
+\paragraph{Training configurations} We run \sys and the baselines mentioned above with ten clients, five global rounds, 7500 local epochs for the first round, and 5000 for the rest. Besides, the coordinator trains on the public data consisting of common features, and each client contributes a set of features, which is the combination of common and exclusive features. The number of common features is around 50\% of the total number of features in the original dataset. On the other hand, we use \ac{pr} to manipulate the proportion of the public data that has to be reserved from the entire dataset before partitioning the dataset to all clients. \Ac{sr} divides all sequences into two groups. In the first group, a mask is applied to just the common features, while in the second group, the mask is applied to all features.
+ In the main experiments, we set \ac{pr}, \ac{sr}, and \ac{mr} to 0.5.
+\label{sec:training_config}
+\subsection{Time Series Generation}
+
+In \autoref{tab:main_exp}, we quantitatively analyze the quality of unconditionally generated 24-length time series for diverse time series datasets. \sys shows a strong performance comparable to the Centralized* approach. The proposed aggregation mechanism during fine-tuning proved essential to prevent the degradation of the coordinator model's performance and, in turn, the client models. By doing this, we achieved strong results across most datasets. We also present the generated synthetic samples of one representative client for ETTh and fMRI datasets in \autoref{fig:main_ts}.
+
+\input{src/tables/main_exp}
+
+\paragraph{Challenges on fMRI dataset} We observe that the fMRI dataset's imputation quality was lower than other datasets, as the mean square error between the imputed and real data is greater. Consequently, client models degraded due to training on low-quality imputed data. This suggests that the imputation strategy may need further refinement for such datasets, where the data distribution and complexity present greater challenges for accurate synthetic data generation and imputation. Besides, the Local approach achieves the best Correlational and Discriminative scores for the fMRI dataset. However, we cannot conclude that training locally is the best overall approach for fMRI. As we mentioned, the low performance of \sys and Pre-trained is primarily due to the poor quality of the imputed data, which affects training. This shows the advantage of Local training not relying on imputed data, making it seem better suited for the fMRI dataset compared to \sys and Pre-trained.
+\label{sec:challenges_fmri}
+
+\paragraph{Comparison between Centralized and Local training} 
+Both Centralized and Local approaches are trained on datasets with missing values, but their performance differs significantly. This could be due to the different model architectures used in each approach. As aforementioned, the Centralized model is trained on a combined dataset where the additional features are filled with zeros, which results in the worst performance. This shows the advantage of having an individual model trained locally for each client.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\textwidth]{src/figures/main_ts.pdf}
+    \caption{Real samples and synthetic samples generated unconditionally from \sys and Local. The first and second rows of samples are from ETTh and fMRI datasets, respectively.}
+    \label{fig:main_ts}
+\end{figure}
+\subsection{Ablation Study}
+
+In \autoref{tab:main_ablation}, we show the result of reducing the number of common features in \sys. We set the number of common features to around 25\% of the total number of features in the corresponding dataset. As a result, we can observe the robustness of \sys when dealing with a relatively small number of common features across most datasets. However, \sys does not perform as expected on the fMRI dataset because of the poor quality of imputed data, as mentioned in Section~\ref{sec:challenges_fmri}. On the other hand, the performance of Centralized training slightly decreased due to more zeros filling out the combined dataset, especially in the public data.
+
+\input{src/tables/main_ablation}
+
+
+\section{Conclusion}
+
+
+While federated learning is increasingly applied for different regression tasks for time series (TS), it is still limited in handling generative tasks, especially when time series features are vertically partitioned and temporarily misaligned. We propose a novel federated TS generation framework, \sys, which trains TS diffusion model by leveraging the self-imputing capability of the diffusion model and globally aggregating from clients' knowledge through data distillation and clients' synthetic data. The central component of \sys is a distiller at the coordinator that first is pre-trained on the public datasets and then periodically fine-tuned by the aggregated intermediate synthetic data from the clients. Clients keep their personalized TS diffusion models and train them with local data and synthetic data of the latest distiller periodically. Our extensive evaluation across five datasets shows that \sys effectively overcomes the hurdle of feature partition and temporal misalignment, achieving improvements of up to 79.4\% and 62.8\% over local training on Context-FID and Correlational scores, while delivering performance comparable to centralized baselines.
+
+
+
+\section{Reproducibility and Ethics Statement}
+
+
+\paragraph{Reproducibility} To ensure the reproducibility of our research, we have open-sourced the code for the various federated learning techniques and the time series diffusion models, as shown in \url{https://anonymous.4open.science/r/FedTDD/}. This code is available in a publicly accessible repository under an anonymous account. Furthermore, all experiments conducted as part of this study utilized publicly available datasets.
+
+\paragraph{Ethics statement} In this research on federated learning over temporally and feature-misaligned datasets, we carefully considered both the positive and potential negative effects. By leveraging federated learning, we enhance data privacy, as no raw data is centralized, reducing risks of sensitive information exposure. However, misaligned datasets may introduce biases that impact model fairness, which we actively worked to mitigate. While our work aims to advance privacy-preserving AI, we acknowledge potential trade-offs in performance and fairness, which are transparently reported to inform future research and applications.
+\bibliography{src/refs}
+\bibliographystyle{iclr2025_conference}
+\clearpage
+
+
+\section{Notations}
+
+\label{appx:notations}
+
+\autoref{tab:appx_notation} shows the notations used in \sys.
+
+\input{src/tables/appx_notation}
+
+\input{src/background}
+
+
+
+\section{Additional Experimental Results}
+
+\label{appx:addexp}
+\subsection{Limited Public Data Availability}
+
+We analyze the performance of \sys against other baselines when the public data is limited by reducing the \acf{pr} from 0.5 to 0.25. As shown in \autoref{tab:appx_limited_pub}, \sys maintains its performance (ETTh and MuJoCo declined slightly) even with limited public data, and the results are notably better compared to those with a \ac{pr} of 0.5 in~\autoref{tab:main_exp}. This improvement is due to the increased amount of client data as \ac{pr} decreases, which allows for better time series generation as clients train on more data. Nevertheless, \sys continues to struggle with the fMRI dataset, as discussed in Section~\ref{sec:challenges_fmri}.
+
+\input{src/tables/appx_limited_pub}
+\subsection{Abundance of Sequences with Incomplete Data}
+
+We assess the robustness of \sys in handling a large number of sequences with missing values across individual clients by decreasing the \acf{sr} from 0.5 to 0.25. As explained in Section~\ref{sec:training_config}, decreasing the \ac{sr} increases the missingness across both common and exclusive features in client data. In \autoref{tab:appx_seq_missing}, we observe a slight decline in some metrics, but overall \sys performs well and even outperforms Local and Pre-trained baselines in terms of Context-FID, Correlational and Discriminative scores across most datasets. Again, \sys continues to underperform on the fMRI dataset, as mentioned in Section~\ref{sec:challenges_fmri}.
+
+\input{src/tables/appx_seq_missing}
+\subsection{Imbalanced Data Distributions}
+We now evaluate the performance of \sys against other baselines presented in \autoref{tab:appx_non_iid} using imbalanced partitioned datasets, where each partition may contain distinct data distributions. \sys generally performs better in terms of Context-FID score across most datasets except for MuJoCo and fMRI. This highlights the strength of \sys in maintaining synthetic data distribution with real data in most imbalanced dataset scenarios.
+
+\input{src/tables/appx_non_iid}
+
+\paragraph{Performance of Local training} The results show that training locally without communication with the coordinator is comparable to all other methods, particularly outperforming Centralized* and Centralized in most metrics. Notably, it achieves the best Discriminative score across datasets, especially in MuJoCo, Energy and fMRI, indicating that locally trained models generate more realistic synthetic data. In contrast, \sys and other baselines (excluding Local) perform below expectations, especially \sys and Pre-trained. This is primarily due to the evaluation of synthetic data using test data with different distributions corresponding to each client, while other approaches can generate more generalized synthetic data. For instance, the clients in \sys and Pre-trained learn different data distributions during the coordinator's imputation process. \sys performs even worse than Pre-trained due to the additional data aggregation and fine-tuning process. Moreover, Centralized* and Centralized approaches train all the data including public data at once, which leads to the worst performance. As a result, local models might be more suited for generating synthetic data that is distributed closer to the respective test data.
+\subsection{Aggregation Strategy}
+
+We evaluate the effectiveness of \sys on the Stocks and fMRI datasets by comparing our proposed aggregation strategy with three other aggregation settings: \textbf{(1) $ \mathbf{1 : 0} $}, e.g. fine-tune with 100 public samples and 0 synthetic samples, \textbf{(2) $ \mathbf{1 : 1} $}, e.g. fine-tune with 100 public samples and 100 synthetic samples, \textbf{(3) $ \mathbf{1 : [0, 1]} $}, e.g. fine-tune with 100 public samples and increase the synthetic samples linearly from 0 to 100, \textbf{(4) $ \mathbf{1 : \alpha [0, 1]} $ (ours)}, e.g. fine-tune with 100 public samples and increase the synthetic samples linearly from 0 to 100 by a factor $\alpha$. We explore $\alpha$ values of $[0.1, 0.5, 1.0]$, where $\alpha = 1.0$ is equivalent to setting (3). As shown in \autoref{tab:appx_agg_strategy}, our proposed strategy (4) achieves the best results across most metrics on Stocks dataset, particularly with $\alpha = 1.0$. Although our approach does not perform as well on the fMRI dataset, it effectively prevents further deterioration of results.
+
+\input{src/tables/appx_agg_strategy}
+
+
+\section{Experiment Details}
+
+
+\subsection{Hardware and Software}
+
+We run experiments on an Intel(R) Core(TM) i7-14700KF processor and an NVIDIA GeForce RTX 4090 GPU with CUDA version 12.5. The operating system for the setup is Ubuntu 22.04.4 LTS. Flower framework and PyTorch are used to simulate the distributed experiments by creating multiple models corresponding to individual clients.
+\subsection{Datasets}
+\label{appx:datasets}
+
+\autoref{tab:appx_dataset} shows the statistics of all benchmark datasets. We provide the number of rows and features.
+
+\input{src/tables/appx_datasets}
+\subsection{Evaluation Metrics}
+\label{appx:eval_metrics}
+
+\paragraph{Context-FID score} \citet{jeha2022psa} introduced the Context-FID score, which is an adaptation of existing Fréchet inception distance (FID) used for evaluating the similarity between real and synthetic time series distributions. Instead of the Inception model used for the image feature extractor, Context-FID leverages a time series embedding model called TS2Vec~\citep{yue2022ts2vec}. The authors demonstrated that models with lower Context-FID generally perform better in downstream tasks, such as achieving a strong correlation between Context-FID and the forecasting performance of generative model. In conclusion, a lower Context-FID score indicates greater similarity between the real and synthetic distributions.
+
+\paragraph{Correlational score} \citet{liao2020conditional} estimates the covariance of the $i^{th}$ and $j^{th}$ feature of time series using the following formula:
+\begin{equation}
+    {{\mathrm{cov}}_{i,j}} = \frac{1}{\mathcal{T}}\sum\limits_{t = 1}^\mathcal{T} {\mathrm{Y}_i^t\mathrm{Y}_i^t}  - \left( {\frac{1}{\mathcal{T}}\sum\limits_{t = 1}^\mathcal{T} {\mathrm{Y}_i^t} } \right)\left( {\frac{1}{\mathcal{T}}\sum\limits_{t = 1}^\mathcal{T} {\mathrm{Y}_{j}^t}} \right).
+\end{equation}
+
+To quantify the correlation between real and synthetic data, we compute the following metric:
+\begin{equation}
+    \frac{1}{{10}}\sum\limits_{i,j}^d {\left| {\frac{{{\mathrm{cov}} _{i,j}^{real}}}{{\sqrt {{\mathrm{cov}} _{i,i}^{real}} {\mathrm{cov}} _{j,j}^{real}}} - \frac{{{\mathrm{cov}} _{i,j}^{synth}}}{{\sqrt {{\mathrm{cov}} _{i,i}^{synth}} {\mathrm{cov}} _{j,j}^{synth}}}} \right|},
+\end{equation}
+
+\paragraph{Discriminative score} The discriminative score is determined by the formula $\mid$accuracy $-$ 0.5$\mid$, which measures the ability of the model to differentiate between real and synthetic data. A lower score indicates better performance as the model struggles to distinguish between the two, implying higher similarity. For consistency, we adapt the experimental setup of TimeGAN~\citep{yoon2019time} with a 2-layer GRU-based neural network as the classifier.
+
+\paragraph{Predictive score} The predictive score is computed as the MAE between the predicted and actual values on the test data. Again, we use the experimental configuration of TimeGAN~\citep{yoon2019time} with a 2-layer GRU-based neural network for sequence prediction.
+\subsection{Missing Scenario}
+\label{appx:missing_scenario}
+
+\autoref{fig:missing_scenario} shows the missing scenario we used in all experiments.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.5\textwidth]{src/figures/missing_scenario.pdf}
+    \caption{We consider random missing strategy on multivariate time series. The white background represents the conditional ground truth, while the grey background represents the time steps of the particular channel that must be imputed.}
+    \label{fig:missing_scenario}
+\end{figure}
+\subsection{Hyperparameters}
+\label{appx:hyperparams}
+
+In \autoref{tab:appx_hyperparameter}, we list the hyperparameter settings for all datasets. To evaluate the effectiveness of \sys, 80\% of each client's data is used for training, with the remaining 20\% reserved for testing.
+
+\input{src/tables/appx_hyperparams}
+
+
+\section{Visualizations}
+
+
+\autoref{fig:visual_pca} to \ref{fig:visual_kernel} present the performance of time series synthesis in three different visualization techniques. \textbf{Principal component analysis (PCA)}, \textbf{t-distributed Stochastic Neighbor Embedding (t-SNE)} and \textbf{kernel density estimation (KDE)} are used to visualize how well the generated synthetic data distributions align the real data distributions (PCA and t-SNE project the data in 2-dimensional space). The figures show that \sys achieves significantly better performance with greater overlap and closer similarity between the real and synthetic samples.
+
+
+\section{Synthetic Samples}
+
+
+\autoref{fig:samples_stocks} to \ref{fig:samples_fmri} demonstrate synthetic time series generated unconditionally by \sys and Local approach against real time series data. The generated synthetic samples from \sys closely resemble the real samples across most datasets. In each figure, the first row corresponds to the first client, the second row to the second client, and so forth. A maximum of 4 features are selected randomly for each client.
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\textwidth]{src/figures/visual_pca.pdf}
+    \caption{PCA plots of real and synthetic time series generated by one representative client from \sys, Pre-trained and Local on all datasets.}
+    \label{fig:visual_pca}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\textwidth]{src/figures/visual_tsne.pdf}
+    \caption{t-SNE plots of real and synthetic time series generated by one representative client from \sys, Pre-trained and Local on all datasets.}
+    \label{fig:visual_tsne}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\textwidth]{src/figures/visual_kernel.pdf}
+    \caption{KDE plots of real and synthetic time series generated by one representative client from \sys, Pre-trained and Local on all datasets. The y-axis of the plots represents the data density estimation.}
+    \label{fig:visual_kernel}
+\end{figure}
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\textwidth]{src/figures/samples_stocks.pdf}
+    \caption{Real samples and synthetic samples generated by \sys and Local for the Stocks dataset.}
+    \label{fig:samples_stocks}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\textwidth]{src/figures/samples_etth.pdf}
+    \caption{Real samples and synthetic samples generated by \sys and Local for the ETTh dataset.}
+    \label{fig:samples_etth}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\textwidth]{src/figures/samples_mujoco.pdf}
+    \caption{Real samples and synthetic samples generated by \sys and Local for the MuJoCo dataset.}
+    \label{fig:samples_mujoco}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\textwidth]{src/figures/samples_energy.pdf}
+    \caption{Real samples and synthetic samples generated by \sys and Local for the Energy dataset.}
+    \label{fig:samples_energy}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\textwidth]{src/figures/samples_fmri.pdf}
+    \caption{Real samples and synthetic samples generated by \sys and Local for the fMRI dataset.}
+    \label{fig:samples_fmri}
+\end{figure}
+
+
+
+
+\end{document}
+
+
+
+

@@ -1,0 +1,133 @@
+# Certified Deductive Reasoning with Language Models
+
+- Decision: Reject
+- Scores: 5, 5, 8
+
+## Abstract
+Language models often achieve higher accuracy when reasoning step-by-step in complex tasks. However, even when arriving at a correct final answer, their rationales are often logically unsound or inconsistent. This is a major issue when reliable reasoning traces are needed, such when fine-tuning on model-generated reasoning for self-improvement. To tackle these issues, we introduce a class of tools for language models called \emph{guides}, that use state and incremental constraints to guide generation. A guide can be invoked by the model to constrain its own generation to a set of valid statements given by the tool. In turn, the model's choices can change the guide's state. We show how a general system for logical reasoning can be used as a guide, which we call \textsc{LogicGuide}. Given a reasoning problem in natural language, a model can formalize its assumptions for \textsc{LogicGuide} and guarantee that its step-by-step reasoning is sound. In experiments on PrOntoQA, ProofWriter and Syllogism Validity datasets, \textsc{LogicGuide} significantly improves the performance of GPT-3, GPT-3.5 Turbo and LLaMA (accuracy gains up to 35\%), while drastically reducing \emph{content effects} --- the interference between unwanted prior assumptions and reasoning, which humans and language models suffer from. We then explore bootstrapping GPT-3.5 Turbo and LLaMA using their own reasoning traces. We find that LogicGuide is critical: by training only on certified self-generated reasoning, models can self-improve, avoiding learning from their own hallucinations. Moreover, bootstrapped models enjoy significant boosts on ReClor, a challenging real-world reasoning dataset, even when not relying on formalization at inference time.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper introduces a novel tool, termed "guide," designed to ensure that language models engage in sound step-by-step reasoning. As a primary illustration, LogicGuide utilizes general logical reasoning systems to guide models towards producing logically consistent explanations. Experimental results indicate that LogicGuide enhances the performance of language models, in terms of reasoning accuracy, reducing content effects, self-learning and generalization.
+
+### Strengths
+1. The paper introduces a novel logical guidance framework designed to aid LLMs in performing logical inference. The method employs the most general form of deductive reasoning, making it versatile across a range of reasoning scenarios.
+2. Experiments across multiple datasets validate that LogicGuide enhances the performance of language models. The paper also provides specific examples demonstrating its efficacy in mitigating the impact of unwarranted prior assumptions and performing self-learning.
+
+### Weaknesses
+1. The proposed method necessitates a reliance on a complex formalization process during training and inference.
+
+2. The scenarios considered in the paper seem a bit limited. Despite experimenting on diverse datasets, the nature of problems within them appear quite similar. In more generalized contexts, it might be challenging to formalize and identify corresponding actions, such as `objects`, `relations`, etc.
+
+3. The paper's primary contribution, namely, how to harness logic to ensure output consistency, seems to overlap with prior work on the Peano theorem and the constrained Semantic Decoding algorithm, which weakens the novelty of the current research.
+
+4. It seems the proposed idea is similar to the idea in Logic-LM. The authors did not discuss their differences.
+
+   Logic-LM: Empowering Large Language Models with Symbolic Solvers for Faithful Logical Reasoning https://arxiv.org/abs/2305.12295
+
+### Questions
+1. How likely that encountering a formalization failure may happen, and are there strategies in place to minimize formalization errors?
+2. To what extent does using constrained generation reduce the reasoning space, so as to mitigate the issue of "logical inferences made next can have a potentially large set of answers"? Is it possible that still there may be a considerably large set of answers, if so, how does your method decide on the the most appropriate content to generate next?
+3. Discussions on generalization involve models bootstrapped from other formalizable tasks. In scenarios challenging to formalize, what amount of preparatory work, such as the number of samples of formalizable tasks, is essential to ensure the model with strengthened generalization inference capabilities? If in the absence of abundant corresponding simpler tasks, how to generalize "guide" in broader scenarios?
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper studies logical reasoning in natural language with LLMs. Whereas a number of existing approaches may arrive at the correct answer with a wrong reasoning chain, this work proposes an approach to guide the LLM generations using a logic solver that constrains the space of possible generations to those that are logically valid. With this approach, while there can still be errors in the translation stage (i.e. the stage where the LLM translates from natural language to logical form), the logical conclusions made on those translations are valid. Experimental results are shown on multiple datasets including ProofWriter, PrOntoQA, Syllogism Validity, LegalBench, and ReClor.
+
+### Strengths
+- Logical reasoning (or more generally multi-hop reaosning) in natural language with LLMs is an important area of research.
+- Showing results both for prompting and finetuning.
+- The writing was mostly clear and easy to follow.
+- The reported improvements for ReClor could be quite encouraging.
+
+### Weaknesses
+ - Most of the experiments are done on the ProofWriter and the PrOntoQA datasets. Both these datasets have been constructed by turning logical theories into natural language using very simple templates. This is especially true for the PrOntoQA dataset where each sentence is of the format "X is Y" which is simply equivalent to (X, is, Y) in the triple notation. For this reason, while these datasets are appropriate benchmarks for measuring the general reasoning capacity of off-the-shelve LLMs, I do not think they are good benchmarks for the model proposed in this paper (translating these datasets back into their logical form is just too easy for nowadays LLMs). For this reason, while those results could be good sanity checks, I don't think they truly represent the merit of the proposed approach. They highly overestimate the performance we can expect on real tasks but highly underestimating how difficult it is to translate an actual natural language passage into logical form. 
+- The failure example highlighted in Page 6 (translating to (sees A B) in one place and (see A B) in another) makes me worry about the applicability of the proposed approach to reasoning problems beyond synthetic tasks such as ProofWriter and PrOntoQA. It also makes me  think that BoardgameQA might have been a slightly better dataset to use. While it has also been generated synthetically by converting logical theories into textual format, the missing knowledge piece of it makes it better resemble real-world problems, and makes for a good test to see the extent of the "see" vs" sees" problem in the proposed approach. 
+- While the results on the ReClor dataset are quite encouraging, I find them quite surprising as well for multiple reasons. 1- Given that the model is finetuned only on 120 samples, and considering the size of the models used, I would expect that the models should just overfit to those examples without any task transfer. 2- If I understand correctly, the finetuning is not on a mixture of the original data and the 120 data points, so I would expect that the model's general task solving ability should go down. 3- The ProofWriter and PrOntoQA datasets only require deductively applying the modus ponens rule, whereas the ReClor dataset requires more complicated rules and reasoning. For these reasons, I found the improvements a bit surprising and the provided explanation does not give much insights.
+
+### Questions
+- On which categories from Table 2 of the BoardgameQA paper do you expect your approach to fail/succeed? And why?
+- Given that the results in Table 6 are tested in a zero-shot setting, how do you extract the final answer? Is it possible that after finetuning on the 120 examples, the model mainly just learns to produce outputs in the specified format making it easier to extract the final answer (and hence higher predictive accuracy)?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper proposed a way to utilize a theorem prover with a large language model to produce answers.
+
+### Strengths
+The high level idea seems good (but the details I'm no so clear about). The results are very good.
+
+### Weaknesses
+The main problem with this that the details of the architecture isn't clear. Here is what I understand: The LLM gets language (The "Context" in the figures). The LLM generates a "formalized context" that can be used as the input to Peano. Peano implements a guide function, and outputs a set of valid one-step conclusions. This is input back into the LLM by biasing the logits (whatever that means), then presumably the LLM does sometime else to generate the next formalized contexts to do the next steps and so on. At some stage this halts and one of them produces an answer. (Does the LLM also outputs natural language?)
+[Alternatively: Using figure 2 as an example, The LLM takes the contact and produces the formalized context and the formalized goal. Peano takes these and outputs a proof (Is this the "reasoning" in that figure?). That would seem to make the most sense. But that can't be correct as the external tool only answers "what inferences can be made next?"]
+
+### Questions
+What is the interface between the LLM and Peano? (What is the input of each and what is the output? Does Peano have any knowledge built-in (e.g., axioms for deontic logic)?
+
+What is an example application beyond artificial logic puzzles? (The legal reasoning is a good example, but it only used the theorem prover for bootstrapping.)
+
+What does "bias the logits" mean? How is it done? How does the theorem prover determine how to bias them?
+
+(My rating assumes there is a satisfactory answer to these questions. I will downgrade my rating if I still cannot understand the interface after the rebuttal period.)
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+4 excellent

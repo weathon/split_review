@@ -1,0 +1,204 @@
+\title{Coeditor: Leveraging Repo-level Diffs for Code Auto-editing}
+
+\begin{abstract}
+Developers often dedicate significant time to maintaining and refactoring existing code. However, most prior work on generative models for code focuses solely on creating new code, overlooking the distinctive needs of editing existing code. In this work, we explore a multi-round code auto-editing setting, aiming to predict edits to a code region based on recent changes within the same codebase. Our model, Coeditor, is a fine-tuned language model specifically designed for code editing tasks. We represent code changes using a line diff format and employ static analysis to form large customized model contexts, ensuring the availability of appropriate information for prediction. We collect a code editing dataset from the commit histories of 1650 open-source Python projects for training and evaluation. In a simplified single-round, single-edit task, Coeditor significantly outperforms GPT-3.5 and SOTA open-source code completion models (bringing exact-match accuracy from 34.7 up to 60.4), demonstrating the benefits of incorporating editing history for code completion. In a multi-round, multi-edit setting, we observe substantial gains by iteratively conditioning on additional user edits. We have open-sourced our code, data, and model weights to encourage future research and have released a VSCode extension powered by our model for interactive IDE usage.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+In recent years, there has been enormous interest in applying transformer models for code generation (Feng et al., 2020; Ahmad et al., 2021; Wang et al., 2021; Chen et al., 2021; Fried et al., 2022; Allal et al., 2023), which has led to impressive performance on tasks such as program synthesis (Li et al., 2022; Nijkamp et al., 2022), program translation (Lachaux et al., 2020; Szafraniec et al., 2022), type inference (Jesse et al., 2022; Wei et al., 2023), and code auto-completion (Guo et al., 2021; Svyatkovskiy et al., 2021; Nguyen & Nadi, 2022; Zhang et al., 2023).  
+
+While these approaches effectively help programmers creating new code, they are not as adept at assisting with revising existing code. However, during a software project’s development cycle, developers often spend significant time editing code— changes made to one part of the codebase typically affect many others, and manually propagating these changes can be tedious and time-consuming.  
+
+In this paper, we introduce a task that we call (multi-round) auto-editing where the goal is to predict edits to code conditioned on the user’s previous edits. In particular, given an original codebase $U$ and a set of code changes $\Delta_{1},\ldots,\Delta_{k}$ that are semantically related (like those forming part of a commit), the auto-editing problem is to predict how to modify a specified region of code $u\in U$ by learning the following distribution:  
+
+$$
+P(\Delta u\mid\Delta_{k}\ldots\Delta_{1},U)\;.
+$$  
+
+Importantly, we allow the target region $u$ to overlap with any previous modifications $\Delta_{1},\ldots,\Delta_{k}$ to support repeated editing of the same region. This formulation enables the workflow illustrated in Figure 1, where a user can work alongside the model in multiple editing rounds, accepting suggestions matching the user’s intent and making additional edits manually if necessary.  
+
+![](images/1ec8d34dc13b7d229e80dc2f2f72e6b237b3f1ae06590f5c3162d3bf66be0548.jpg)  
+Figure 1: The multi-round auto-editing task. The user inspects the model output in each editing round and can optionally perform manual editing.  
+
+To solve this problem, we propose a new model called Coeditor that builds on top of the established CodeT5 model architecture and pre-trained checkpoint (Wang et al., 2021). Coeditor is based on two key ideas. First, it encodes all prior code edits $\Delta_{1},\ldots,\Delta_{k}$ using a line-based diffing scheme and decodes $\Delta u$ using masked span infilling; and, second, it uses lightweight static analysis to pull in relevant parts of the codebase $U$ . To effectively handle large contexts with numerous code changes, we also replace CodeT5’s dense attention with a block-sparse attention pattern, allowing us to reduce the computational cost while maintaining the ability to attend to all relevant code changes.  
+
+Another challenge in developing Coeditor is the lack of suitable training data for multi-round autoediting. We compute tree-differences between adjacent codebase versions to identify modifications to the same Python function and randomly split some changes into the model input for training in repeated editing scenarios. During testing, we use ground truth code changes to simulate user decisions regarding when to accept partial changes suggested by the model and when to manually perform edits missed by the model.  
+
+We compare our approach against existing code infilling models and show that, even in a simplified setting that requires predicting a single edited line in isolation, they severely lag behind our changeaware model: our method achieves $60.4\%$ exact match accuracy using a 220M parameter model, whereas text-davinci-003—the best performing code infilling model we have compared, which has 175 billion parameters—achieves only $30.5\%$ . In the full multi-round setting, we found that Coeditor automates editing $46.7\%$ of the changed lines, saving the user $28.6\%$ of keystrokes measured by an edit distance metric that accounts for cursor movement.  
+
+In summary, this paper presents the following main contributions:  
+
+• We introduce the repo-level multi-round code editing task, along with the corresponding PYCOMMITS dataset and evaluation framework.   
+• We introduce a new code editing model derived from CodeT5, using a line diff-based encoding scheme and enhancements that enable the model to condition on long contexts and appropriate other parts of the codebase, addressing key challenges in this setting.   
+• We release our source code, dataset, model checkpoint, as well as a VSCode extension that supports interactive usage to foster future research.1  
+
+
+
+\section{2 MOTIVATING EXAMPLE  }
+
+
+In this section, we illustrate our technique using the example in Figure 2, showcasing a two-round interaction between the user and our Coeditor model. Subfigures (a) and (b) display two initial user changes, while subfigures (c) and (d) illustrate two sequential Coeditor invocations with inlined model suggestions. We further analyze this example in detail below.  
+
+First, the user modifies the pack_batch function in subfigure (a) to read a new dictionary key, “cost”, from each row in the input. The extracted values are used to compute the total cost of the batch and added to the output. Next, the user removes three lines at the top of the group_to_batches function in subfigure (b). By removing these three lines, the user wants to avoid creating these lists beforehand and instead plans to call the process_edit function inside the for loop below.  
+
+![](images/f3d359609b531a6b30bb3da12b8c5c0476fa692fff453d502d2e214eda82eac2.jpg)  
+Figure 2: An example usage of Coeditor. (a) The user first edits the pack_batch function to read an additional dictionary key, “cost”, from each row in the input. (b) The user then removes 3 lines at the top of the group_to_batches function. (c) The user now invokes Coeditor at the bottom half of the same function. Coeditor correctly suggests adding a “cost” key to the dictionary variable row, but it fails to address the now undefined variables underlined in red. (d) However, if the user accepts the suggested change and manually introduces two new variables at line 209, Coeditor can then suggest the correct changes accordingly.  
+
+The user then scrolls down and invokes Coeditor at the bottom half of the same function (subfigure c). Here, the modified pack_batch function is called at lines 225 and 228 in subfigure (c), and its argument current_batch is iteratively constructed from row, which is a dictionary defined at line 215. Hence, the model correctly infers that row should be updated to include a “cost” key. Examining the surrounding context, the model also identifies that the ex_cost variable (defined at line 209) should be used as the inserted dictionary value.2  
+
+While Coeditor makes some useful editing suggestions so far, it does not address the now-undefined variables underlined in red by the IDE in subfigure (c). In particular, as there are no obvious alternatives nearby to replace these variables, Coeditor is unable to automatically fix these errors. Such a situation is common when the surrounding changes alone do not provide sufficient information to derive a complete solution. Therefore, the user can accept the partial changes suggested by the model and then manually introduce two new variables at line 209, as shown in subfigure (d). Coeditor can then leverage these new variables to suggest the correct changes needed to fix the errors.  
+
+This iterative approach allows Coeditor to adapt and refine its suggestions based on additional user edits, providing a more effective code editing experience than existing code completion techniques. By incorporating the editing history into the prediction context, Coeditor can better assist developers in a wide range of code editing tasks, from simple modifications and refactoring to more complex codebase-wide updates. For a more comprehensive understanding, we have included a screen recording of the Coeditor VSCode Extension, which can be found in the supplementary material.  
+
+
+
+\section{3 METHODS  }
+
+
+Recall from the introduction that we wish to model the distribution $P(\Delta u\mid\Delta_{k}\ldots\Delta_{1},U)$ . To this end, we first describe how to encode the target change $\Delta u$ and contextual changes $\Delta_{1}\ldots\Delta_{k}$ (subsection 3.1). We then describe how to form the context from the codebase $U$ using function signatures (subsection 3.2). These choices naturally lead to a model compatible with fine-tuning CodeT5, which was pre-trained on the masked span infilling task (subsection 3.3). Finally, we describe our new dataset that is used to fine-tune this model (subsection 3.4).  
+
+
+
+\section{3.1 ENCODING CODE CHANGES  }
+
+
+A suitable format is required to map code changes into token sequences that can be processed by a seq2seq transformer language model. In our setting, we want to select a format that encodes and decodes code changes in a uniform manner while minimizing the number of tokens the model needs to produce. Hence, we adopt a line-diff-based format, enabling us to convert auto-editing into a masked span infilling problem (Wang et al., 2021).3  
+
+Consider a block of code $u$ to be made up of lines $l_{1},\ldots,l_{m}$ and a user-specified edit region that spans between line $a$ and $a+n$ , where $1\leq a\leq a+n\leq m$ . Moreover, each line is associated with a status variable $s_{i}$ indicating what type of change (if any) has already been made; $s_{i}~\in$ $\left\{\,(\mathrm{empty})\,,<\!a\mathrm{dd}>,<\!d\!\in\!1\!>\right\}$ .4 We encode the input code by a function EncInput that (optionally) prepends status tokens $s_{1}\ldots s_{m}$ and placeholder tokens $<\!\!1\!>...<\!\!n\!>$ at the start of each line:  
+
+$$
+\mathrm{EncInput}(u)=s_{1}l_{1}s_{2}l_{2}\ldots<1>s_{a}l_{a}<2>s_{a+1}l_{a+1}\ldots<\cap>s_{a+n}l_{a+n}\ldots s_{m}l_{m}\;.
+$$  
+
+For contextual changes $\Delta_{1}\ldots\Delta_{k}$ , we can encode them using the same format but with an empty edit region. When the target change $\Delta u$ contains line additions, denoting the $j$ th line to be inserted before line $i$ as $l_{i j}^{\prime}$ , we can encode $\Delta u$ using the following expression,  
+
+$$
+\mathrm{EncOutput}(\Delta u)=<\!1\!>\!I_{a}D_{a}\!<\!2\!>\!I_{a+1}D_{a+1}\;\ldots\;<\!\mathrm{n}{>}I_{a+n}D_{a+n}\;,
+$$  
+
+Note that we add a further restriction that forbids $D_{i}$ from being $<\tt d e\perp>$ if $s_{i}$ is <add> in order to prevent the model from modifying a line that has just been added; we discuss this in more detail in section 6. Figure 3 illustrates this line-diff-based encoding scheme using the example from Figure 2. This format ensures that if we replace the placeholder tokens in the input with the corresponding changes specified in the output sequence, we obtain the total change that combines $u$ and $\Delta u$ .  
+
+
+
+\section{3.2 ANALYZING RELEVANT SIGNATURES  }
+
+
+Having described how we encode code changes, we must also establish a method for feeding $U$ , the remaining codebase, to the model. Simply inputting the entire codebase as is would result in an excessive number of tokens, overwhelming the context. Instead, inspired by the ideas proposed in previous type inference work (Pradel et al., 2020; Wei et al., 2020; 2023), we employ lightweight static analysis to extract the most relevant information into the context, as outlined below.  
+
+For each target code region $u$ , we analyze its pre-edit code and generate a list of its usages.5 In the case of a function usage, we retrieve its function signature; for a variable or class member usage, we retrieve the first statement in which it was assigned. We then concatenate all these usages into a single  
+
+![](images/162a23961b91885db1378f0ffe180508dea80f689f3cf45768c428fb693dfa72.jpg)  
+
+Figure 3: Coeditor encoding format. (Left) the input sequence adds placeholder tokens to indicate code region to edit. (Top right) the output sequence specifies further changes at each placeholder token. (Bottom right) relevant signatures are retrieved from the codebase and added to the context. (In this example, the Python module is called motivating).  
+
+![](images/3abe8795e78ce61a788954bbf2482b23ffffe99f4ad9ed9ba431388e1155b106.jpg)  
+Figure 4: Coeditor encoder sparse attention pattern. All attention between the reference blocks are skipped to avoid the quadratic cost of dense attention.  
+
+“document”, as shown at the bottom right of Figure 3, which serves as additional input context. This approach allows the model to access the most pertinent information about the current code region and significantly improves model performance (Table 5), while generating only a small number of extra tokens in the context (Table 2).  
+
+
+
+\section{3.3 ADAPTING CODET5  }
+
+
+Our model is based on the architecture and pre-trained weights of CodeT5 (Wang et al., 2021). CodeT5 was pre-trained on a large corpus of code data using the masked span infilling objective, making it a suitable choice for our problem. We employ the CodeT5-base model, containing 220M parameters, and fine-tune it for our code auto-editing setting. Although the original CodeT5 model was pre-trained with a small sequence length of 512, its relative positional encoding scheme allows us to fine-tune it on much longer sequences for our problem.  
+
+Considering that a single commit may encompass numerous code changes, concatenating all changes into a single input can lead to long token sequences that are difficult for the CodeT5 model to process with dense attention. To mitigate this issue, we replace the full attention in its encoder with a block-sparse attention pattern, illustrated in Figure 4. This pattern divides the input sequences into multiple reference blocks and a query block. The query block contains the code to be edited, whereas each reference block encodes a contextual unit change $\Delta u_{j}$ or a chunk of the signature document. We limit the sequence length of each block to 512 tokens for references and 1024 for the query, dividing longer blocks into multiple ones if necessary. The self-attention within each block is performed as usual, but the attention between different reference blocks is skipped to save computation, similar to other retrieval-augmented models (Izacard & Grave, 2021). However, we still allow the query block to attend to and be attended by all reference blocks (a global attention block (Beltagy et al., 2020; Zaheer et al., 2020)). We also set the relative distance between each reference and the query to be infinite when computing the relative positional encoding, making the model is insensitive to the ordering of the references. We are able to use a total of 16.4K reference tokens at test time, which is sufficient to cover $88.8\%$ of problem instances in our test set without truncating the context (Table 2). See subsection A.2 for more discussion of long-document attention mechanisms.  
+
+Table 1: General statistics of the PYCOMMITS dataset.   
+
+![](images/155884caac708a7593ba99926b6c191f79fea3cda55143c9ab3b6dea59cff6fb.jpg)  
+
+Table 2: Additional statistics specific to our technique, computed over the test set.   
+
+![](images/15dccbfdc8f36656decf50d86c6e7abc500014f091a5104675c84b3b5aae85ae.jpg)  
+
+
+
+\section{3.4 THE PYCOMMITS DATASET  }
+
+
+To train our model, we gather real-world code changes from the commit histories of open-source Python projects, a dataset we call PYCOMMITS. For each commit, we first identify which changes are made to the same code unit (a unit can be either a function, a region of a class, or a region of a module) and subsequently separate the commit into a list of unit additions, unit deletions, or unit modifications. As our work primarily focuses on code editing, only unit modifications are used as training labels, while the other two types of changes remain visible to the model as context.  
+
+For each unit modification, we create a training problem instance that instructs the model to predict the code change based on all prior (but not future) changes from the same commit. Git does not record the editing order of changes within the same commit, so we employ a simple heuristic that sorts unit changes according to their source code locations and the import order between modules. Specifically, we assume that units within the same file are modified from top to bottom, and if a module imports another module, changes in the imported module occur before those in the importing module.6 To train our model for the proposed multi-round editing setting, we generate synthetic data demonstrating repeated editing to the same code unit as follows: for those code change involving least two changed lines, we randomly sample a subset of the changes as the prediction target and line the remaining changes into the input. For example, the problem instance shown in Figure 3 can be generated by inlining 2 of the 6 changed lines in the input.  
+
+ We use 50 of the projects for testing and 50 for validation and use the remaining 1,550 projects for training. We use at most 1000 commits per project per project to ensure that the model is trained on a diverse set of code changes. We show the general statistics in Table 1 and the statictics that are specific to our technique in Table 2. Tokenization is performed using the CodeT5 tokenizer.  
+
+Table 3: Performance on 5000 code completion instances extracted from edits (PYCOMMITSONELINE). Add EM and Replace EM are the (enhanced) exact-match accuracies on addition and replacement change, respectively.   
+
+![](images/8a6f191ca4c0b0202789d2b4e225d3003afcf26e3d9326efbd35ca7ccaf15f6d.jpg)  
+
+
+
+\section{4 EVALUATION  }
+
+
+In this section, we first compare Coeditor with prior code completion approaches on a simplified version of the editing task. We then report Coeditor’s performance on the proposed multi-round editing task and conduct ablation studies.  
+
+Training Setup We initialize Coeditor with the CodeT5-base checkpoint (220M parameters) and train the model on our training set for 1.75 epoch, gradually increasing the model reference context size from 2048 tokens to 4096 tokens (at epoch 1) and then to 8192 tokens (at epoch 1.5). We use Huggingface’s Trainer implementation and the AdamW optimizer, with a linear learning rate schedule with a starting learning rate of 2e-5 and 0.01 weight decay. We train the model with a fixed batch size of 1 and a total of 1.34 million training steps. Training took about 5 days on a single NVIDIA Quadro RTX 8000 GPU with 48 GB memory.  
+
+
+
+\section{4.1 COMPARISON WITH CODE COMPLETION APPROACHES  }
+
+
+Baselines We compare Coeditor with four open-source code generation models: InCoder-1B, InCoder-6B (Fried et al., 2022), SantaCoder (Allal et al., 2023), and StarCoder7B (Li et al., 2023). All four code generation models have been trained with the Fill-in-the-middle pre-training objective (Aghajanyan et al., 2022). We also compare Coeditor with OpenAI’s text-davinci-003 model, which is the most recent GPT model supporting an infilling interface.7  
+
+Creating test instances We generate code completion problem instances from real commits as follows. For each code change in PYCOMMITS, we take the last changed line as the completion target. If the last change is a modification, we delete the modified line and let the model flil in the new version of the line. If the last change is a deletion, we simply discard the change. We then inline all changes before the target into the prediction context. This inlining process is implemented differently for each model: for our Coeditor model, the inlined changes are visible to our model following the encoding scheme described in subsection 3.1; for the code completion models, we simply apply the inlined changes to the original code and use the resulting state as the model input. Also note that while our model constructs its prediction context using relevant changes and static analysis (as described in subsection 3.2), the code completion models (which are unaware of code changes) only use the code surrounding the completion target as the prediction context. We call this test dataset, derived from our PYCOMMITS test set, PYCOMMITS-ONELINE.  
+
+Results We report the performance (without fine-tuning on this task) of all approaches in Table 3. We use an enhanced exact-match (EM) accuracy metric that performs semantic-preserving code normalization before checking for string equivalence.8All results, except for text-davinci-003, were obtained by measuring 5000 randomly sampled code completion problems from our test set. text-davinci-003 was evaluated using only 1000 problems to reduce cost. We see that Coeditor  
+
+Table 4: Multi-round evaluation results measured on 5000 problems from the PYCOMMITS test set. Lines, Levenshtein, and Keystrokes are the average total gains in the corresponding metrics. Rounds is the average number of rounds needed to complete all desired changes.  
+
+![](images/5a0694e3f4249948dc1f9b9885220fc0dd4300c17fe1f015d81037e1a49f4027.jpg)  
+
+significantly outperforms the other code generation models for both addition and replacement changes. Despite only using a 220M parameter model, Coeditor achieves an overall EM of $60.4\%$ , which is approximately 1.5 times higher than the best performing code completion model $(39.5\%)$ , demonstrating the significant beneftis of incorporating editing history for code completion.3).  
+
+
+
+\section{4.2 MULTI-ROUND EDITING  }
+
+
+This evaluation focuses on the editing assistant use case where we assume the user has some desired code changes in mind, and we aim to evaluate how much the model can save the user’s effort by automating as much changes as possible, potentially under the guidance of the user. The user can accept partial changes suggested by the model and make additional changes manually if needed.  
+
+Evaluation workflow To evaluate the above use case automatically, we use the ground-truth code changes to simulate the user’s actions. In particular, when the model predicts a list of changes, we compare the predicted changes against the ground truth changes line-by-line and accept any line change that exactly matches the ground truth. If none of the suggested changes match the ground truth, we assume the user will manually perform the first remaining change. In both cases, after the additional changes, we rerun the model to obtain new suggestions and repeat until all desired changes have been performed or the round limit $=6$ has been reached. In the end, we compute the total gain using the difference between the editing cost of the ground truth and the accumulative editing cost of all manually performed edits.  
+
+Measuring editing cost There are multiple ways to measure the cost of performing a code change. Since there is no consensus on the best metric, we report 3 metrics in our results. Prior work (Lavazza et al., 2023) suggests that for code understanding tasks, simple line counts-based metrics are almost as good as more complex metrics, hence our first metric, Lines, simply measures the number of changed lines before and after the edit. We also report Levenshtein, the classic Levenshtein editing distance metric that measures the minimal number of character addition, deletion, and substitution needed to transform one string into another. Although simple, the Levenshtein distance doesn’t model many important aspects of code editing, such as the cost associated with cursor movement, and it also under-count the cost of substitution and over-count the cost of large deletions. Hence, we propose an additional metric, Keystrokes, that aims to better approximate the number of needed user keystrokes than Levenshtein by allowing for batch deletion and accounting for the cost of cursor movements. We describe this metric in detail in the subsection A.1.  
+
+Results We report the evaluation results on 5000 problems sampled from our test set in Table 4, and we also report the single-round performance for reference. We see that Coeditor achieves much larger total gains under the multi-round setting, especially when measured with the Lines and Keystrokes metric (which we believe more accurately captures the user editing effort than Levenshtein).4).  
+
+
+
+\section{4.3 ABLATION STUDIES  }
+
+
+We retrain the model with various components disabled to study their impact on the overall model performance. We report the (single-round) exact match performance of each variation on the entire PYCOMMITS validation set in Table 5. The results show that removing any of the components leads to a decrease in performance, highlighting the importance of each component in the overall model. Specifically, when we remove the explicit feeding of code changes (No Diffs), the EM drops the most, from $42.1\%$ to $26.1\%$ . When we disable the static analysis component (No Signatures), the EM decreases to $33.3\%$ . Using a smaller limit of reference tokens impacts the model performance the least, reducing EM to $39.8\%$ . All results reported in Table 5 were obtained by training the model for half amount of training steps to save compute.  
+
+Table 5: Ablation results on the entire validation set (PYCOMMITS). All pairwise differences are statistically significant with $p<0.05$ using a paired bootstrap test.   
+
+![](images/6399adfe40bed66ea6d0c7e3b0fa15368d4aa2869b2b9a4f16e74e9334cecdec.jpg)  
+
+
+
+\section{5 RELATED WORK  }
+
+
+The past work most similar to our setting is that of Brody et al. (2020), which also targets a contextual code editing setting. However, it can only predict a restrictive set of code changes expressable as moving, deleting, or copying existing AST nodes and cannot generate novel expressions that are not present in the input. It also doesn’t make use of modern transformer architecture or pre-training techniques. In contrast, Ni et al. (2021) takes a rule-based approach, using program synthesis methods to distill similar change patterns in the context and make editing suggestions accordingly.  
+
+There is also prior work on non-contextual code change prediction settings. In Chakraborty et al. (2020), the authors use past code patches to train the model to perform similar edits and evaluate it on future edits in the same codebase. However, since the model does not condition on relevant changes, their technique requires retraining the model for new types of edit patterns. Panthaplackel et al. (2020a) proposes augmenting the decoder with a direct copying mechanism to help a encoder-decoder model perform editing tasks. Zhang et al. (2022) proposes a de-noising pre-training scheme, in which they randomly corrupt actual code snippets and train the model to predict the uncorrupted version from the corrupted version. Tufano et al. (2021) focuses on predicting code review changes using developer discussions. Reid & Neubig (2022) focuses on modeling the iterative editing process of texts and code and proposes a different change encoding scheme that represents edits at the word-level based on the Levenshtein algorithm.  
+
+Lastly, there is prior work that focuses on on learning to update code comments (Panthaplackel et al., 2020b) or generating natural language descriptions (Panthaplackel et al., 2022) from code changes. This work, we focus on measuring our model’s ability to make correct code changes and remove comments and doc-strings before measuring the exact accuracy.  
+
+
+
+\section{6 CONCLUSION AND LIMITATIONS  }
+
+
+In this paper, we presented Coeditor, a novel approach for repository-level code auto-editing. Building on the CodeT5 architecture, our model incorporates line diff format and static analysis to create large customized model contexts. We demonstrated that Coeditor significantly outperforms existing code completion methods in a simplified single-round, single-edit task. Furthermore, our model shows substantial performance improvements in a more complex multi-round, multi-edit setting.  
+
+One limitation of our current work is assuming that the user would manually identify the region of code requiring changes and then invoke the model to predict where and how to make these changes within that region. A promising direction for future work would be to extend the model to help users identify the regions of code that need to be changed within the entire codebase, enabling new types of usage such as auto-refactoring. Furthermore, as mentioned in subsection 3.1, our model is designed to not modify any lines in the input that have already been modified. While this simplifies the evaluation and prevents undesirable model behaviors such as disregarding changes already made by the user or getting stuck in an infinite editing loop, it can also limit the practical usage of our tool. Therefore, it would be valuable to explore methods that allow the model to collaborate with users in finer-grained editing units in future research.  
+
+
+

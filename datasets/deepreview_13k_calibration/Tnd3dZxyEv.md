@@ -1,8 +1,8 @@
 # Enhancing Performance of Multilayer Perceptrons by Knot-Gathering Initialization
 
 - Decision: Reject
-- Avg Score: 2.83
-- Scores: 5, 5, 3, 1, 0, 3
+- Avg Score: 5.20
+- Scores: 5, 5, 3, 10, 3
 
 ## Abstract
 Multilayer perceptrons (MLPs) with ReLU-like activation functions form a high-dimensional, piecewise linear function space, characterized by "knots"—points of non-differentiability. The density of such knots within a given input domain measures the MLP's capacity for function approximation. Despite the simplicity of this concept, knots remain underexploited to enhance the practical performance of MLPs. This paper introduces Knot Gathering Initialization (KGI), a novel method that amplifies the local expressiveness of MLPs by increasing the knot density within the input domain prior to training. As an initialization technique, KGI is lightweight, data-independent, and hyperparameter-insensitive. The concept of knots, and hence KGI, can be directly generalized to smooth activation functions from different angles, including geometry, information transmission, and spectral analysis. We demonstrate the effectiveness of KGI across diverse tasks, including curve and surface fitting, image classification, time series regression, physics-informed operator learning, representation disentanglement, and large language model pretraining. These experiments unexceptionally show that KGI improves both accuracy and convergence speed of MLPs, whether used standalone or as components of larger architectures. Promising future directions include: 1) the natural extension of KGI to convolutional and graph convolutional layers, as well as Low-Rank Adaptation (LoRA) for finetuning; and 2) applying knot gathering throughout training, rather than just at initialization.

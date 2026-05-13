@@ -1,0 +1,215 @@
+\title{Sparse MeZO: Less Parameters for Better Performance in Zeroth-Order LLM Fine-Tuning}
+
+\begin{abstract}
+While fine-tuning large language models (LLMs) for specific tasks often yields impressive results, it comes at the cost of memory inefficiency due to back-propagation in gradient-based training. Memory-efficient Zeroth-order (MeZO) optimizers, recently proposed to address this issue, only require forward passes during training, making them more memory-friendly. However, compared with exact gradients, ZO-based gradients usually exhibit an estimation error, which can significantly hurt the optimization process, leading to slower convergence and suboptimal solutions. In addition, we find that the estimation error will hurt more when adding to large weights instead of small weights. Based on this observation, this paper introduces Sparse MeZO, a novel memory-efficient zeroth-order optimization approach that applies ZO only to a carefully chosen subset of parameters. We propose a simple yet effective parameter selection scheme that yields significant performance gains with Sparse-MeZO. Additionally, we develop a memory-optimized implementation for sparse masking, ensuring the algorithm requires only inference-level memory consumption, allowing Sparse-MeZO to fine-tune LLaMA-30b on a single A100 GPU. Experimental results illustrate that Sparse-MeZO consistently improves both performance and convergence speed over MeZO without any overhead. For example, it achieves a 9% absolute accuracy improvement and 3.5x speedup over MeZO.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Fine-tuning large language models for specific tasks or datasets has become a prevalent practice in machine learning. However, a major obstacle in fine-tuning is the substantial memory requirements, which escalate as models increase in size and complexity, thereby limiting the scalability and accessibility for those with limited computational resources.  
+
+To mitigate the memory constraints, Parameter Efficient Fine-Tuning (PEFT) has been developed, allowing for the modification of only a subset of parameters and achieving comparable results to full model tuning (Hu et al., 2021; Lester et al., 2021; Li & Liang, 2021; Zaken et al., 2021; Zhang et al., 2023). However, PEFT methods still necessitate the calculation of gradients for backpropagation and caching of numerous activations during training, which introduces additional memory overhead. For instance, Malladi et al. demonstrates that, even with PEFT, training still requires approximately 6 times more memory than the memory cost for inference. This discrepancy raises a critical question: Can large language models be fine-tuned solely with the cost of inference?  
+
+In response to these challenges, zeroth-order (ZO) optimization presents a promising solution (Spall, 1992). ZO optimization is a gradient-free method that estimates gradients using only the forward pass of the model, eliminating the need for backpropagation and, consequently, reducing memory usage. MeZO (Malladi et al., 2023) is a recently proposed zeroth-order method for fine-tuning LLMs that has demonstrated impressive performance. However, compared to exact gradients, ZO-based gradients usually exhibit an estimation error, which can be defined as noise. This noise can significantly hurt the optimization process, leading to slower convergence and suboptimal solutions. Moreover, we find that the estimated ZO gradient is difficult to generalize across batches. Specifically, while it can successfully reduce the training loss on the sampled batch with a high probability, it is more likely to increase the loss on other batches.  
+
+To address this challenge, we investigate the impact of gradient noise in zeroth-order optimization for LLM fine-tuning. We measure how the noise affects optimization by evaluating its effect on generalization performance across different data batches. Interestingly, our experiments reveal that the noise has a more significant impact when added to large weights compared to small weights. Based on this finding, we propose a novel sparse memory efficient zeroth-order method (Sparse-MeZO) to selectively optimize small weights, which are more resilient to noise perturbation. By focusing on these noise-resistant weights, we demonstrate that our method enables the use of larger learning rates, leading to improved performance and faster convergence. Our contributions can be summarized as follows:  
+
+• In this paper, we investigate the impact of gradient noise in zeroth-order optimization for LLM fine-tuning. Our evaluations show that the gradient noise can make the estimated ZO gradient difficult to generalize across batches and the noise will hurt more when adding to large weights instead of small weights.  
+
+• Based on the above finding, we propose a sparse Memory-Efficient Zeroth-Order optimization method Sparse-MeZO (S-MeZO) for large language model fine-tuning. We also provide theoretical analysis to show the convergence of Sparse-MeZO.   
+• Different from the efficient implementation with random seed in MeZO, we propose a novel memory-efficient implementation of Sparse-MeZO, which can compute the sparse mask and perturb parameters in the forward pass. The technique enables fine-tuning LLaMA-30b with Sparse-MeZO on a single A100 GPU.   
+• We conduct empirical studies on LLaMA, OPT, and Mistral. The experimental results demonstrate that Sparse-MeZO can improve the fine-tuning performance and yield a faster convergence rate compared with vanilla MeZO across a wide range of natural language processing tasks. For example, it achieves a $9\%$ absolute accuracy improvement and $3.5\mathrm{x}$ speedup over MeZO on the RTE task, as shown in Figure 1.  
+
+
+
+\section{2 PRELIMINARIES  }
+
+
+
+
+\section{2.1 PARAMETER-EFFICIENT FINE-TUNING  }
+
+
+Parameter-Efficient Fine-Tuning (PEFT) is designed to facilitate efficient adaptation by updating only a subset of the model’s parameters, rather than fine-tuning the entire model (Hu et al., 2021; Zaken et al., 2021). These PEFT approaches can be categorized in various ways. We mainly focus on the selective methods and additive methods.  
+
+Selective Methods. Selective Methods try to selectively fine-tune a portion of a model and these methods have been explored in various studies. For example, Zaken et al.; Cai et al. focused on the model’s bias terms, finding that fine-tuning these terms alone could rival the results of fine-tuning the entire model. However, the effectiveness of this approach diminishes with larger datasets, as shown in further analysis by Zaken et al.. Beyond static parameter adjustments, there has been an exploration into dynamically modifying parts of the model (Brock et al., 2017). This concept was later applied to language models, with AutoFreeze (Liu et al., 2021b) confirming its viability. Nevertheless, these techniques still demand considerable computational resources and sometimes yield less optimal final outcomes.  
+
+Additive Methods. Additive methods, as an alternative to updating existing parameters, involve incorporating new layers into models, with the fine-tuning process focusing solely on these added layers (Houlsby et al., 2019; Hu et al., 2021; Lin et al., 2020; Rebuffi et al., 2017). Traditional techniques in this category, such as adapters (Houlsby et al., 2019), implemented layer additions in a sequential manner, which unfortunately led to increased inference latency. LoRA (Hu et al., 2021) has been proposed to mitigate this issue, which freezes the weights of the pre-trained model and introduces trainable matrices based on rank decomposition into each layer. Then, it can directly integrate the newly learned weights into the main model. Following this, IA3 (Liu et al., 2022) introduced innovative methods for adding parameters, balancing parameter count with accuracy, while LST (Sung et al., 2022) introduced a highway structure that learns only small, auxiliary channels, aiming to decrease memory demands. Despite these advancements, additive methods generally require meticulous design, and many fail to reduce the computational load during the backward pass.  
+
+2.2 ZEROTH-ORDER OPTIMIZATION  
+
+Unlike traditional gradient-based optimization methods that rely on derivatives to guide the search for optimal solutions, Zeroth-Order (ZO) optimization techniques do not require derivatives for optimization Spall (1992); Liu et al. (2018; 2019). These methods utilize only the value of the objective function, denoted as $f({\pmb x})$ , at any chosen point $\textbf{\em x}$ . To estimate the gradient in the direction of vector $_{\textit{z}}$ , the objective function is assessed at two points in close proximity, $f(x+\epsilon z)$ and $f(x-\epsilon z)$ , with $\epsilon$ being a minimal value. Following this, conventional optimization algorithms, such as gradient descent or coordinate descent, are implemented using these approximated gradient values. Currently, ZO methods have been widely used in various applications, such as adversarial attack and defense (Chen et al., 2017; Ilyas et al., 2018; Tu et al., 2019; Ye et al., 2018), Auto-ML (Ruan et al., 2019; Wang et al., 2022), natural language processing (Sun et al., 2022a;b), reinforcement learning (Vemula et al., 2019), Signal Processing (Liu et al., 2020), and on-chip training (Gu et al., 2021).  
+
+
+
+\section{2.2.1 MEZO  }
+
+
+ZO-SGD employs SPSA (Spall, 1992) to estimate the gradient. In general, conventional ZO-SGD algorithms utilizing SPSA consume twice the inference memory. MeZO (Malladi et al., 2023) is a memory-efficient variant of ZO-SGD. It circumvents the storage of gradients by saving the random seed and resampling the same random noise $_{\textit{z}}$ with the seed during forward process. More specifically, to calculate $\mathcal{L}(\pmb{\theta}+\epsilon\pmb{\dot{z}})-\mathcal{L}(\pmb{\theta}-\epsilon\pmb{z})$ , MeZO will sample a noise $_{\textit{z}}$ to perturb $\pmb{\theta}$ to $\theta\!+\!\epsilon z$ and then calculate $\displaystyle{\mathcal{L}}(\pmb{\theta}+\epsilon\pmb{z})$ . Then it resamples the same noise $_{\textit{z}}$ with the same seed and move the parameter back $\pmb{\theta}-\epsilon\boldsymbol{z}$ and calculates the loss. As a result, the zeroth order gradient estimator can be computed without any memory overhead.  
+
+
+
+\section{2.2.2 SPARSITY FOR ZEROTH-ORDER OPTIMIZATION  }
+
+
+![](images/08b136d88acceb1b3a72e32083c3edc13e0008355d13434f3f55fe8a89745e8f.jpg)  
+Figure 1: Performance of MeZO and SparseMeZO (S-MeZO) on RTE task. S-MeZO can achieve $3.5\mathrm{x}$ speedup compared with MeZO.  
+
+The hypothesis proposed by Frankle & Carbin,   
+known as the lottery ticket hypothesis, showed that within a densely connected neural network that is randomly initialized, there exists a subnetwork of sparse yet high-quality connections. Based on the hypothesis, model pruning aims to identify and preserve the crucial ’winning tickets’ - sparse subnetworks within the larger neural network that can achieve comparable or even superior performance (Sun et al., 2023; Frantar & Alistarh, 2023). In addition, Dynamic Sparse Training (DST) has been proposed to reduce the training and inference cost in first-order optimization (Liu et al., 2021a; Evci et al., 2020). Recently, several related works have tried to apply the sparsity to zeroth-order optimization (Balasubramanian & Ghadimi, 2018; Cai et al., 2021; 2022; Chen et al., 2023; Gu et al., 2021; Ohta et al., 2020; Wang et al., 2018). For example, DeepZero (Chen et al., 2023) proposes a novel ZO training protocol with model pruning guided sparsity. However, these methods mainly focus on the neural network training from scratch with random initialization, while the application of sparse zeroth-order optimization in fine-tuning tasks remains an area of ongoing exploration.  
+
+
+
+\section{3 PROPOSED METHOD  }
+
+
+
+
+\section{3.1 EMPIRICAL OBSERVATION ON MEZO  }
+
+
+For large language models, zeroth-order optimization algorithms like MeZO are often necessary when exact gradients are unavailable or prohibitively expensive to compute. However, compared with exact gradients, these methods inherently introduce noise in the gradient estimates used for optimization.  
+
+![](images/7c5f0f139bec5dedb355dfb6a7aeffd12cf73c2226faa1bda25e859503b7ca99.jpg)  
+
+Figure 2: (a) Test Accuracy with Different Learning Rates on RTE Task. We find MeZO is very sensitive to the selection of learning rate. Even a small increase from $1\times10^{-6}$ to $2\times10^{-6}$ causes divergence and instability. (b) Probability of Loss Increase on Different Batch. We find the estimated ZO gradient can successfully reduce the loss on the same batch but may be difficult to decrease the loss on the new held-out batch. (c) Continuing training from the drop point with small and large weights. We find that optimizing only the small weights can recover and further improve test accuracy.  
+
+p iesc tihfiec allolsy,s  tfhuen zcteiroont.h -Aors dsehr ogwrand iien nFt $g_{z}(\theta)$ (ias )a, pMpreoZxiOm eaxtehid baits $\begin{array}{r}{g_{z}(\theta)=\frac{\mathcal{L}(\theta+\epsilon z)-\mathcal{L}(\theta-\epsilon z)}{2\epsilon}z}\end{array}$ , oiwchee roef $\mathcal{L}$   
+learning rate. Even a small increase from $1\times10^{-6}$ to $2\times10^{-6}$ causes divergence and instability, while this larger learning rate is totally fine when fintuning with first-order methods. This suggests that the gradient noise introduced by the zeroth-order approximation, defined as $\pmb{\delta}=g(\theta)-\overline{{g_{z}}}(\theta)$ where $g(\theta)$ is the exact gradient, significantly hinders the optimization process when large step sizes are used. This motivates us to analyze the effects of this gradient noise $\delta$ and understand how it impacts optimization performance.  
+
+To quantify how the gradient noise $\delta$ hurts the optimization process, we evaluate its effect on the generalization performance of the estimated gradients. Specifically, we measure whether the zerothorder gradient estimate computed on one batch can effectively reduce the loss on other held-out batches. For a batch $B_{t}=\{\dot{B}_{t}^{1},B_{t}^{2}\}$ with 32 data points, we use 16 samples to estimate the zerothorder gradient $\mathbf{\mathit{g}}_{z}(\mathbf{\mathit{\theta}};B_{t}^{1})$ on batch $B_{t}^{1}$ , and evaluate it on the remaining 16 held-out samples $B_{t}^{2}$ . The results are shown in Figure 2. Interestingly, we find a stark contrast in performance - while the estimated gradient $g_{z}(\bar{\theta};\mathcal{B}_{t}^{1})$ can reliably reduce the loss on the same batch $B_{t}^{1}$ it was computed on $90\%$ success rate), it only manages to decrease the loss on the new held-out batch $B_{t}^{2}$ around $50\%$ of the time. This suggests that the zeroth-order gradient estimates suffer from overfitting or noise that makes them less generalizable to unseen data samples. The gradient noise $\delta$ , while allowing descent on the current batch, appears to introduce errors that prevent reliable descent directions for unseen batches. Therefore, the noise $\delta$ can be seen as hurting the optimization process by degrading the generalization performance of the parameter updates.  
+
+Next, we aim to understand if this effect is uniform across all model parameters or if certain parameter groups are more vulnerable to noise corruption. We notice the nature of vanilla MeZO, where $\frac{\bar{\mathcal{L}}(\theta\bar{+}\epsilon z)\bar{-}\bar{\mathcal{L}}(\theta\!-\!\epsilon z)}{2\epsilon}$ is used to estimate the gradient, and all parameters share the same value of  
+
+L(θ+ϵz)2−ϵL(θ−ϵz). This means not all parameters are optimized in the true gradient direction, which could be a limitation. To analyze this, we divide the parameters into different groups based on their magnitude - the top $20\%$ largest weights are considered "large", while the bottom $20\%$ are "small". Interestingly, our experiments reveal that the gradient noise $\delta$ hurts optimization more when added to large weights compared to small weights. As shown in Figure 2(c), when continuing training from the point where test accuracy drops (due to noise), we find that optimizing only the small weights can recover and further improve test accuracy. This suggests that small weights are less impacted by noise corruption and can generalize better. Therefore, the noise $\delta$ does not impact all parameters equally - it disproportionately disrupts the optimization of larger weights. Selectively optimizing smaller, noise-resilient weights may be a promising direction to mitigate the effects of gradient noise in zeroth-order optimization. In the next section, we will introduce the proposed Spare-MeZO algorithm, which can only select small weights to perturb and update weights.  
+
+Sparse-MeZO (S-MeZO) Require: $\pmb{\theta}$ represents pre-trained LLM weight, $N$ is the number of layers in model, learning rate $\eta_{t}$ , $s$ represents sparsification interval. Initialize random seed $s$ Determine threshold $\boldsymbol{h}=h_{1},\dots,h_{N}$ , of each layer with the sparsification interval for $t\gets1$ to $T$ do Sample Minibatch $\boldsymbol{\mathrm{\Delta}}\boldsymbol{\mathrm{\Omega}}^{\beta}$ from $X$ and random seed $s$ . $\begin{array}{r l}&{m\leftarrow\mathrm{GetMask}(\theta_{t},h)}\\ &{\theta_{t}\leftarrow\mathrm{PerturbParameters}(\theta_{t},\epsilon,s,m)}\\ &{l^{+}=\mathcal{L}(\theta_{t};B)}\\ &{\theta_{t}\leftarrow\mathrm{PerturbParameters}(\theta_{t},-2\epsilon,s,m)}\\ &{l^{-}=\mathcal{L}(\theta_{t};B)}\\ &{\theta_{t}\leftarrow\mathrm{PerturbParameters}(\theta,\epsilon,s,m)}\\ &{\mathrm{proj}\_\mathrm{grad}\leftarrow(l^{+}-l^{-})/(2\epsilon)}\end{array}$ $s$ for $\theta_{i}\in\pmb\theta$ do zi ∼N(0, 1) θi ←θi −ηt ∗proj_grad ∗mi ∗z end for end for 3.2 SPARSE-MEZO Consider a labelled dataset $\mathcal{D}\;=\;\{(\pmb{x}_{i},\pmb{y}_{i})\}_{i\in[|\mathcal{D}|]}$ and let $\mathcal{L}(\pmb{\theta};\pmb{\mathcal{B}})$ denotes the loss on a minibatch $\boldsymbol{\mathrm{\Delta}}\boldsymbol{\mathrm{\Omega}}^{\beta}$ . We can define a sparse mask with o b-n $m\:\in\:\{0,1\}^{d}$ dt om soedleelc.t ivAe lsyp asrasimfpielde  vtehres iroann doof mra nndooisme $z\,\in\,\mathbb{R}^{d}$ $z\sim\mathcal{N}(\mathbf{0},I_{d})$ n the su et of pre-traine perturbation can be defined as $\hat{z}\in\mathbb{R}^{d}$ $\hat{z}=m\odot z.$ (1) Based on this sparse perturbation $\hat{z}$ , we can redefine MeZO algorithm on Section 2.2.1 as SparseMeZO. The main difference is from the estimated gradient $g_{\hat{z}}(\bar{\theta})$ , which can be defined as :  
+
+$$
+\begin{array}{r l}&{g_{\hat{z}}(\pmb{\theta})=\frac{\mathcal{L}\left(\pmb{\theta}+\epsilon\hat{z};\mathcal{B}\right)-\mathcal{L}\left(\pmb{\theta}-\epsilon\hat{z};\mathcal{B}\right)}{2\epsilon}\hat{z}}\\ &{\quad\quad\quad=\frac{\mathcal{L}\left(\pmb{\theta}+\epsilon\pmb{m}\odot\pmb{z};\mathcal{B}\right)-\mathcal{L}\left(\pmb{\theta}-\epsilon\pmb{m}\odot\pmb{z};\mathcal{B}\right)}{2\epsilon}\hat{z},}\end{array}
+$$  
+
+where $\epsilon$ represents the perturbation scale.  
+
+Based on the observations from our motivation, we can create a sparse mask, $\mathbf{\nabla}m$ , determined by parameter magnitudes. Specifically, we only update parameters of smaller magnitude. These targeted parameters are defined as $\widehat{\pmb{\theta}}=\pmb{m}\,\overset{\cdot}{\odot}\pmb{\theta}$ . It’s important to note that we still preserve the complete set of parameters, but we apply sparse perturbations and gradient estimations only to the selected ones. This approach allows us to integrate the sparse mask into the standard MeZO method as a straightforward, adaptable tool. Then, we will introduce when and how to calculate the mask.  
+
+• Constant Mask: Setting the Mask Before Training. We compare the parameter values to a threshold for each layer to set the mask before training begins. However, a significant downside of this approach is the extra memory required to store a sparse mask, which is as large as the pre-trained model itself. Our goal is for our method to enhance performance without using more GPU memory or causing extra overhead.  
+
+• Dynamic Mask: Determining Mask at Each Iteration. We can establish a threshold for each layer before training and then generate the mask by comparing parameter values to this threshold during each iteration. This method avoids the necessity of storing a large mask, $\mathbf{\nabla}m$ .  
+
+In this paper, we’ll employ a dynamic mask to choose which parameters to perturb and update, addressing the issue of memory constraints. In addition, we determine thresholds using a principled sparsity-based approach. Specifically, we use a percentile-based method where the threshold is set based on a target sparsity level.  
+
+The pseudo-code is provided in Algorithm 1. This algorithm outlines that we first establish the threshold $h_{i}$ for each layer before beginning training. We then use GetMask (Algorithm 3) to compare each parameter against its threshold $h_{i}$ and create the mask $\mathbf{\nabla}m$ . Following this, we introduce the function PerturbParameters (Algorithm 2) to generate a Gaussian noise sample $z\sim\mathcal{N}(\mathbf{0},I_{d})$ and apply the mask $\mathbf{\nabla}m$ to produce a sparse perturbation $\hat{z}=m\odot z$ . With $\hat{z}$ , we perturb the current parameters $\theta_{t}$ to get new parameters $\theta_{t}+\epsilon\hat{z}$ and $\theta_{t}-\epsilon\hat{z}$ . This allows us to compute two distinct loss values: $l^{+}=\bar{\mathcal{L}}(\pmb{\theta}_{t}+\bar{\epsilon}\hat{z})$ and $l^{-}=\mathcal{L}(\pmb{\theta}_{t}-\epsilon\hat{\pmb{z}})$ . From these losses, we calculate the estimated sparse gradient $g_{m}(\theta_{t})=\mathrm{proj\_grad}*\hat{z}$ , where proj_grad $=\frac{l^{+}{-}l^{-}}{2\epsilon}$ . Finally, this gradient can be used with a learning rate $\eta_{t}$ to update $\theta_{t}$ .  
+
+
+
+\section{3.3 MEMORY-EFFICIENT IMPLEMENTATION OF SPARSE-MEZO  }
+
+
+In this paper, our primary aim is to introduce an efficient method for fine-tuning language models using zeroth-order optimization, enhancing performance on downstream tasks. As outlined in Algorithm 1, our approach involves perturbing the parameters $\theta_{t}$ twice to generate two distinct sets of parameters, $\pmb{\theta}_{t}^{\prime}=\pmb{\theta}_{t}+\epsilon\pmb{z}$ and $\theta_{t}^{\prime\prime}=\theta_{t}-\epsilon z$ . We then use the estimated gradient to update the original parameters $\theta_{t}$ . This step typically requires storing two separate sets of parameters, leading to increased memory usage during fine-tuning.  
+
+Recently proposed MeZO, conserves memory by saving random seeds $s$ and using it to resample $z$ for calculating $\mathbf{\boldsymbol{\theta}}_{t}^{\prime}$ , $\textstyle\theta_{t}^{\prime\prime}$ , and reconstructing $\theta_{t}$ without needing extra memory. However, applying a sparse mask $\mathbf{\nabla}m$ for calculating sparse perturbation $\hat{z}$ in MeZO poses a memory issue. We cannot simply reconstruct $\hat{z}$ by saving the random seed because the sparse mask, determined by parameter magnitudes, changes when parameters are altered by the perturbation. To address this, we propose potential solutions for the memory issue.  
+
+1-bit Quantization: We can apply 1-bit quantization to store the mask $\mathbf{\nabla}m$ , as it consists solely of 0s and 1s. However, this method still increases memory usage, which isn’t our goal. As a solution, we introduce a novel, memory-saving approach for zeroth-order optimization that calculates the mask $\mathbf{\nabla}m$ on the fly during the forward pass.  
+
+Calculating the Mask During the Forward Pass: By computing the mask and perturb parameters in the forward pass, we eliminate the need to store perturbed parameters $\mathbf{\boldsymbol{\theta}}_{t}^{\prime}$ and $\theta_{t}^{\prime\prime}$ . This means we only have to keep the original parameters $\theta_{t}$ throughout training. For vanilla implementation, we first need to calculate the perturbed parameters with mask $\mathbf{\nabla}m$ : $\pmb{\theta}_{t}^{\prime}=\pmb{\theta}_{t}+\epsilon\pmb{m}\odot z$ . After that, we can use perturbed parameters $\mathbf{\boldsymbol{\theta}}_{t}^{\prime}$ to calculate the loss value $l^{+}$ with the forward process. For example, the output of layer $i$ can be defined as $\pmb{y}^{(i)}=\pmb{\theta}_{t}^{\prime(i)}\pmb{x}^{(i)}+\pmb{b}^{(i)}$ . Noted that we need to save the vanilla parameters $\theta_{t}$ and mask $\mathbf{\nabla}m$ for vanilla implementation. However, for our proposed efficient implementation, we only need to save vanilla parameters $\theta_{t}$ . More specially, we can calculate the mask $m^{(i)}$ of layer $i$ during the forward process and then obtain the output of this layer: $\pmb{y}^{(i)}=(\pmb{\theta}_{t}^{(i)}+\epsilon m(\pmb{\theta}_{t})\pmb{z}^{(i)})\dot{\pmb{x}}^{(i)}+\pmb{b}^{(i)}$ , where $m(\cdot)$ represents the function GetMask to calculate mask $m^{(i)}$ . Then, we can release the memory of mask $\pmb{m}^{(i)}$ and calculate the output and mask of the next layer.  
+
+4 EXPERIMENTS  
+
+Following a similar setting to MeZO, we evaluate the performance of our proposed method on SuperGLUE Wang et al. (2019). The experimental results show that our proposed method can achieve better performance while also attaining faster convergence.  
+
+4.1 EXPERIMENTAL SETTING  
+
+Datasets. To verify the performance gain of our proposed method, we conduct experiments on various fine-tuning tasks include SST-2 (Socher et al., 2013), RTE (Bentivogli et al., 2009; Dagan et al., 2005; Giampiccolo et al., 2007; Haim et al., 2006), BoolQ (Clark et al., 2019), WIC (Pilehvar &  
+
+Camacho-Collados, 2018), MultiRC (Khashabi et al., 2018)) and multi-class task COPA (Roemmele et al., 2011).  
+
+Models. We primarily use pre-trained LLaMA-7b Touvron et al. (2023) to evaluate the performance of our proposed method on downstream tasks. To further demonstrate our method’s versatility, we also test it with Mistral-7B-v0.1 Jiang et al. (2023) and OPT-13b Zhang et al. (2022). Additionally, to examine our method’s scalability, we evaluate it on larger models, such as LLaMA-30b.  
+
+Baselines. First, we compare our method to the vanilla MeZO to demonstrate how sparsification enhances MeZO’s convergence speed and overall performance. Additionally, to show that our proposed S-MeZO effectively identifies and modifies crucial parameters, we contrast it with RMeZO (a version of MeZO applying a random mask to select parameters for optimization). In addition, we also explore the impact of zero-shot optimization on improving a pre-trained language model’s capabilities through experiments with zeroth-shot learning and in-context learning techniques (Brown et al., 2020). Lastly, to understand the performance gap between zeroth-order and first-order optimization in fine-tuning large language models, we present results from conventional full-parameter fine-tuning (FT) using the Adam optimizer, the most widely used method for such tasks. In addition, we also compare MeZO and its variants against LoRA, the most widely adopted PEFT method.  
+
+Training Procedure. We adopt most of the training hyperparameters from the standard MeZO, including dataset configuration, batch size, training epochs, epsilon value, and task prompts, with the key difference being a higher learning rate for S-MeZO due to updating only a subset of the parameters. The primary goal of our training is the next token prediction. For the dataset, we use MeZO’s approach, randomly selecting 1,000 examples for training and testing the model on another set of 1,000 examples (Zhou et al., 2023). We perform the experiments using three different seeds and report the average of the outcomes. In addition, the total training steps for LLaMA, Mistral and OPT is 20,000 and we evaluate its performance on the test dataset every 100 steps.  
+
+![](images/52b8635653e3dfa85592b8106c899de4ef8b8995fb7216e5269f7def14cb2ffc.jpg)  
+
+Table 1: Accuracy of Fine-Tuning LLaMA-7b on SuperGLUE (1,000 examples). ICL: In-Context Learning, FT: full-parameter fine-tuning with Adam, R-MeZO: MeZO with Random Mask.   
+
+![](images/e3ad219c52079caf1efc7303eaf7bd80863f54cc864beecab2dc77d972a2b860.jpg)  
+
+Table 2: Accuracy of Fine-Tuning Mistral-7b on SuperGLUE (1,000 examples). ICL: In-Context Learning, FT: full-parameter fine-tuning with Adam, R-MeZO: MeZO with Random Mask.  
+
+![](images/e9200e93861fe87563fb274a3eda42e2dbd72b6916d7bf7051f060eeeb929958.jpg)  
+Figure 3: Convergence Curves of Fine-Tuning LLaMA-7b with MeZO and Sparse-MeZO (S-MeZO) on (a) RTE, (b) BoolQ, (c) WIC tasks.  
+
+
+
+\section{4.2 PERFORMANCE  }
+
+
+To evaluate the performance of our proposed method S-MeZO, we initially tested it on the SuperGLUE benchmark using the LLaMA-7b model. The fine-tuning results, presented in Table 10, reveal that our S-MeZO method outperforms other zero-order (ZO) techniques like MeZO and R-MeZO. For instance, S-MeZO boosts MeZO’s accuracy from $71.7\%$ to $80.7\%$ on RTE (↑ $9\%$ ) and from $75.9\%$ to $80.9\%$ on BoolQ $(\uparrow5\%)$ . Furthermore, all zeroth-order-based methods surpassed the performance of Zero-shot learning and in-context learning, demonstrating that zeroth-order optimization significantly enhances the pre-trained model’s effectiveness on downstream tasks. Finally, we can find that SMeZO significantly bridges the performance gap between zero-order and first-order optimization methods.  
+
+To further verify the generality of our proposed S-MeZO, we also evaluate it on Mistral-7B-v0.1. The performance is shown in Table 2. We can find that S-MeZO can consistently improve the performance of vanilla MeZO and narrow down the performance gap between zeroth-order optimization and first-order optimization. For example, S-MeZO can improve the accuracy of vanilla MeZO from 81.6 to 85.3 on BoolQ and then achieve a comparable performance with full fine-tuning.  
+
+
+
+\section{4.3 CONVERGENCE RATE  }
+
+
+To verify that S-MeZO converges faster than MeZO, we carried out multiple experiments for comparison. The accuracy over steps is plotted in Figure 3, which shows that S-MeZO can use fewer steps to achieve a better performance than vanilla MeZO. For example, S-MeZO only needs about 5,000 steps to achieve $70\%$ accuracy but vanilla MeZO needs 17,500 steps. Finally, S-MeZO can achieve about $3.5\mathrm{x}$ speedup on RTE and $3\mathbf{x}$ speedup on BoolQ.  
+
+![](images/e3ca6446d543d1eae0f2262c4ce71833802dc4e0e3b35c17a411bb0406c7d48c.jpg)  
+
+Table 3: Memory Usage (batch size $=1$ ) of Fine-Tuning LLaMA-7b on SuperGLUE (1,000 examples).   
+EI represents the Efficient Implementation in section 3.3.  
+
+
+
+\section{4.4 MEMORY USAGE  }
+
+
+Table 3 shows the memory consumption for MeZO, S-MeZO, and traditional full-parameter finetuning of LLaMA-7b. The data reveal that S-MeZO does not require more memory than MeZO and offers a substantial saving of roughly 12 times less GPU memory compared to full-parameter finetuning. For instance, S-MeZO with Efficient Implementation (S-MeZO-EI) cuts down the memory needed from 158.6 GB for full tuning to just 14.6 GB on MultiRC task. In addition, S-MeZO with efficient implementation can reduce the memory cost from $28.3\,\mathrm{GB}$ of vanilla S-MeZO to $14.6\,\mathrm{GB}$ across all five tasks, which also illustrates the efficiency of our proposed implementation method: Calculating the Mask During the Forward Pass. As a result, we can use only inference memory cost to fine-tune large language models.  
+
+
+
+\section{4.5 SPARSE RATE  }
+
+
+For S-MeZO, we need to define the sparsity of the pre-trained model before starting to fine-tune it. To analyze the effects of sparsity value on the performance, we conduct experiments with various sparsity values (from 0.0 to 0.85). Figure 4 summarizes these experimental results with different sparsity values. We can find that a significant performance gain can be obtained when we use the sparsity value from 0.5 to 0.8. In addition, for most tasks, a sparsity value of 0.8 or 0.75 usually means a better performance. For example, S-MeZO can improve the accuracy from $71.7\%$ (when $r=0.0)$ ) to $82.3\%$ (when $r=0.8)$ ). It can also obtain a performance gain of $6.6\%$ for WIC (from $75.9\%$ to $82.5\%$ ).  
+
+![](images/a1dd2bdb83da8a6ada834edcf5620c6771db4406dd98cd51bcf9ffa6b39e89c1.jpg)  
+
+Table 4: Accuracy of Fine-Tuning LLaMA-7b and LLaMA-30b on SuperGLUE (1,000 examples).  
+
+
+
+\section{4.6 SCALABILITY  }
+
+
+In Table 10, we mainly introduce the performance of our methods on LLaMA-7b. A direct question is whether our proposed method can scale to larger language models. Therefore, in this section, we further explore our proposed method S-MeZO on LLaMA-30b. As shown in Table 4, we can see that the a larger model usually can obtain a better fine-tuned performance. For example, the accuracy on RTE with MeZO can be improved from $71.1\%$ on LLaMA-7b to $76.9\%$ on LLaMA-30b. Our method S-MeZO can further improve the performance on RTE to $82.1\%$ on LLaMA-30b. In addition, S-MeZO can further improve the accuracy on BoolQ to $85.7\%$ on LLaMA-30b.  
+
+![](images/7b6ddf4fa1c8fcbfe16bbefeb52d601d57be3861eb654835014038bd4b3722e1.jpg)  
+Figure 4: The effects of Sparsity for Fine-tuning LLaMA-7b with S-MeZO.  
+
+
+
+\section{4.7 THE ANALYSIS ABOUT EFFICIENT IMPLEMENTATION  }
+
+
+In section 3.3, we present the efficient implementation of S-MeZO, which enables our proposed method to require only the inference memory cost for fine-tuning large language models. To analyze the actual GPU memory usage during the training process, we provide these results in Table 3. We can find that S-MeZO needs the same GPU memory for all five tasks, which can also save about $50\%$ memory compared to sparse-mezo. That also illustrates the efficiency of our proposed efficient implementation.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+In this paper, we propose a novel memory-efficient zeroth-order fine-tuning method Sparse-MeZO,   
+which can use a similar memory cost to the inference process. We evaluate the performance of   
+fine-tuning LLaMA and OPT with Sparse-MeZO on SuperGULE benchmark and the experimental   
+results illustrate that Sparse-MeZO can achieve a higher accuracy and faster convergence. Finally, we   
+can fine-tune LLaMA-30b on a single A100 GPU.   
+Limitation: There is still a performance gap between our proposed method Sparse-MeZO and   
+first-order fine-tuning methods. We plan to address these limitations and enhance Sparse-MeZO’s   
+capabilities in our future research.   
+
+

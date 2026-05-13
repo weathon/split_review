@@ -1,0 +1,378 @@
+\title{FlowDec: A flow-based full-band general audio codec with high perceptual quality}
+
+\begin{abstract}
+We propose FlowDec, a neural full-band audio codec for general audio sampled at 48 kHz that combines non-adversarial codec training with a stochastic postfilter based on a novel conditional flow matching method. Compared to the prior work ScoreDec which is based on score matching, we generalize from speech to general audio and move from 24 kbit/s to as low as 4 kbit/s, while improving output quality and reducing the required postfilter DNN evaluations from 60 to 6 without any fine-tuning or distillation techniques. We provide theoretical insights and geometric intuitions for our approach in comparison to ScoreDec as well as another recent work that uses flow matching, and conduct ablation studies on our proposed components. We show that FlowDec is a competitive alternative to the recent GAN-dominated stream of neural codecs, achieving FAD scores better than those of the established GAN-based codec DAC and listening test scores that are on par, and producing qualitatively more natural reconstructions for speech and harmonic structures in music.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+An audio codec is a technique aiming to compress an audio waveform into compact and quantized representations and to reconstruct the audio waveform based on those encoded representations faithfully. The compact and quantized representations are suitable for efficient transmission and storage, which is essential for mobile communications and live video streaming applications (Kroon et al., 1986; Salami et al., 1994; Rao & Hwang, 1996). Different from legacy codecs (Atal & Schroeder, 1970; Schroeder & Atal, 1985; O’Shaughnessy, 1988) which exhibit considerable quality sacrifice in low-bitrate scenarios, modern codecs achieve lossless (Liebchen & Reznik, 2004; Coalson, 2000) or acceptable lossy (Valin et al., 2013; Bessette et al., 2002; Dietz et al., 2015) codings with $2\times$ or $10\times$ compression ratios. However, these codecs usually involve ad hoc designs and extensive manual efforts (Kim & Skoglund, 2024), which hinders the codecs from end-to-end optimizations to achieve high-fidelity audio coding in even lower bitrates (e.g. $<\!12$ kbit/s).  
+
+End-to-end (E2E) Neural codecs (Zeghidour et al., 2021; D´efossez et al., 2023; Wu et al., 2023; Kumar et al., 2024) have seen a surge in interest in recent years, particularly due to their usefulness in generative audio tasks such as generating music or speech conditioned on a textual description or transcript. These codecs nowadays achieve very good audio quality at bitrates as low as 8 kbit/s, where most classical non-neural codecs fail to produce acceptable results. To achieve high-quality results at low bitrates, most E2E neural codecs employ adversarial training inspired by generative adversarial networks (GANs) (Goodfellow et al., 2020) to recover natural-sounding signals and to avoid artificial artifacts that arise when training only with waveform or spectral losses.  
+
+Score-based (diffusion) and flow-based generative models (Ho et al., 2020; Song et al., 2021; Lipman et al., 2023) have in recent years taken over many generative application domains from GANs. In this spirit, a recently proposed score-based codec is ScoreDec (Wu et al., 2024), a widely applicable generative postfilter for E2E neural codecs. ScoreDec aims to recover natural-sounding signals by enhancing codec outputs, removing adversarial losses when training the E2E model and instead training a score-based generative model (Song et al., 2021) as a postfliter. While ScoreDec shows a clear advantage in output quality compared to the original codec variants that use adversarial training, it only considers speech signals, was tested only for a relatively high bitrate of 24 kbit/s, and – most importantly – has prohibitively expensive inference at a real-time factor (RTF) of 1.7 caused by the need of around 60 DNN evaluations.  
+
+In this work, we propose FlowDec, a generative neural codec based on a novel adaptation of conditional flow matching (CFM) (Lipman et al., 2023; Pooladian et al., 2023; Tong et al., 2024), and show that it is a competitive alternative to the current GAN-focused stream of neural codecs for general full-band audio. We address the shortcomings of ScoreDec (Wu et al., 2024) by designing and training for general audio beyond only speech, reducing bitrates from 24 kbit/s to below 8 kbit/s, and reducing the needed number of DNN calls from 60 to 6. We design for full-band audio covering the whole range of human hearing $(\leq20\,\mathrm{kHz})$ with a $48\,\mathrm{kHz}$ sampling rate, to avoid a significant loss of fidelity due to the total removal of high but audible frequencies as in De´fossez et al. (2023) or Zeghidour et al. (2021). The key advantage of $48\,\mathrm{kHz}$ over $44.1\,\mathrm{kHz}$ models such as DAC (Kumar et al., 2024) are that it is easier to achieve whole-number feature rates ( $75\,\mathrm{Hz}$ vs. $86.13\,\mathrm{Hz})$ ) and bitrates (7500 vs. 7751.95 bit/s) since 48,000 has simpler divisors.  
+
+Our main contributions in this work are: (1) the extension and simplification of prior score-based generative audio enhancement methods (Welker et al., 2022; Richter et al., 2023; Wu et al., 2024) with a novel adapted CFM method, with theoretical connections and comparisons to recent works on CFM (Pooladian et al., 2023; Tong et al., 2024); (2) the application to audio coding and extension of the speech-only ScoreDec (Wu et al., 2024) to general full-band audio at very low bitrates, while reducing the number of DNN evaluations by a factor of 10 without fine-tuning or distillation techniques; (3) high-fidelity perceptual quality competitive with a GAN-based state-of-the-art codec (Kumar et al., 2024), which we confirm with objective metrics and listening tests.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+
+
+\section{2.1 NEURAL CODECS  }
+
+
+Based on the training objectives, neural audio codecs can be divided into three main categories: auto-encoder (AE), neural vocoder, and postfilter. In the early days, legacy AE-based codecs (Krishnamurthy et al., 1990; Wu et al., 1994; Deng et al., 2010) usually train an AE to reconstruct handcrafted acoustic features and retrieve discrete codes with an independent quantization module on the hidden units which is not globally optimized, and require extensive ad hoc assumptions on audio signals and an additional audio synthesizer. Morishima et al. (1990) propose the first AE speech codec in the waveform domain but do not train the quantizer jointly. The pioneering fully E2E waveformdomain audio codecs incorporate a straight-through gradient estimation (Van Den Oord et al., 2017) or softmax quantization (Kankanahalli, 2018) for joint AE and quantizer training. However, they suffer from either slow inference from autoregressive decoding or limited quality from the lack of effective waveform losses for non-autoregressive (NAR) decoding. Recently, given the significant improvement in NAR audio waveform generation (Yamamoto et al., 2020; Kumar et al., 2019; Kong et al., 2020) adopting GANs (Goodfellow et al., 2020), GAN-based NAR audio codecs (Zeghidour et al., 2021; De´fossez et al., 2023; Wu et al., 2023; Kumar et al., 2024) achieve fast coding, impressive audio quality, and low bitrates.  
+
+By using the high-fidelity audio generations achieved by neural vocoders (van den Oord et al., 2016; Kalchbrenner et al., 2018; Valin & Skoglund, 2019a; Kong et al., 2020), methods which reconstruct the audio waveform based on quantized handcrafted acoustic features (Klejsa et al., 2019; Valin & Skoglund, 2019b; Mustafa et al., 2021), codes of conventional codecs (Kleijn et al., 2018), or neural AEs (Wu et al., 2023; San Roman et al., 2024), also achieve impressive coding performance. Postflitering (Zhao et al., 2018; Deng et al., 2020; Biswas & Jia, 2020; Korse et al., 2022) is a similar approach, easing the training burden of abstract code-to-waveform mapping by utilizing the decoder of a pre-trained codec to generate a distorted waveform, which is then enhanced by a postfilter.  
+
+
+
+\section{2.2 SCORE-BASED GENERATIVE SIGNAL ENHANCEMENT  }
+
+
+Welker et al. (2022) propose SGMSE, a score-based generative model (SGM) for speech enhancement (SE), by formulating the speech enhancement task as a diffusion process in the complex spectral domain. To avoid the ad hoc assumption that the additive noise in noisy speech follows a white Gaussian distribution, SGMSE directly incorporates the SE task into the diffusion process by interpolating between clean and noisy spectra, leading to a data-dependent prior similar to PriorGrad (gil Lee et al.,  
+
+![](images/eca1accff0753ffae1536573314785d5ba96658b24b3975c96c60a8c74a18be4.jpg)  
+Figure 1: Method overview: Codecs such as DAC (Kumar et al., 2024) employ adversarial training, using multiple specialized discriminator networks trained jointly with the decoder. Our method FlowDec is trained in a non-adversarial two-stage fashion, removing these discriminators and instead adding a stochastic postfliter that can produce multiple enhanced estimates of the pretrained decoder.  
+
+2022). Richter et al. (2023) propose $\mathrm{SGMSE+}$ , extending SGMSE to speech dereverberation and significantly improving its quality by using the more powerful backbone $\mathrm{NCSN++}$ (Song et al., 2021) for the score model. Due to the complex spectral modeling, both magnitude and phase spectra are utilized and enhanced, resulting in high-quality speech restoration.  
+
+Coding artifacts can also be viewed as a special type of noise that should be removed. To take advantage of both E2E and postfliter approaches, ScoreDec (Wu et al., 2024) adopts $\mathrm{SGMSE+}$ as the postfliter for both conventional and neural codecs and achieves human-level speech quality. However, the inference of ScoreDec is slow due to the high number of diffusion steps, and the effectiveness of ScoreDec for general audio is unclear. To tackle these issues, we propose FlowDec for general audio coding, with significantly reduced runtime cost at a real-time factor below 1, and a simplified formulation that requires only one hyperparameter instead of four.  
+
+
+
+\section{3 METHODS  }
+
+
+We cast the problem of recovering an estimate $\hat{x}\in\mathbb{R}^{L}$ of the clean audio $x^{*}\in\mathbb{R}^{L}$ given the code $c:=E(x^{*})$ from an encoder $E$ as a stochastic inference problem, with the goal of having a model that can provide clean audio estimates $\hat{x}$ as samples from the distribution  
+
+$$
+\hat{x}\sim p_{\mathrm{data}}(\hat{x}|c)\,,\quad c=E(x^{*})\in\mathbb{Z}^{\ell},\ell\ll L\,,
+$$  
+
+where $p_{\mathrm{data}}(\cdot|c)$ is the conditional distribution of clean audio given the code $c$ . We argue that this treatment is natural, as any encoder $E$ that maps $x^{*}\in\mathbb{R}^{\tilde{L}}$ to a lower-dimensional discrete representation $c$ is a many-to-one mapping: multiple $x^{*}$ will have the same code $c$ . Hence, fulfliling the ideal property $D(E(x^{*}))=x^{*}$ is formally impossible if $D$ is a one-to-one mapping. One could instead construct $D$ as an optimal estimator in the mean sense by minimizing  
+
+$$
+\operatorname*{min}_{D}\mathbb{E}_{x^{*}}\left[\mathrm{dist}(D(E(x^{*})),x^{*})\right]
+$$  
+
+with a pairwise distance dist such as the $L^{2}$ or $L^{1}$ distance. However, it is known that a method trained this way typically does not produce perceptually pleasing signals (Blau & Michaeli, 2018; 2019) even with domain-specific losses. A popular way around this for neural codecs is to employ adversarial training losses (Zeghidour et al., 2021; De´fossez et al., 2023; Kumar et al., 2024) to shift the distribution of decoded signals closer to that of natural signals. While relatively effective, this approach lacks clear interpretability, is limited by the quality of the discriminator, and may fail to properly minimize the distance between $p(\hat{x})$ and $p(x^{*})$ .  
+
+An alternative, which we follow here, is to directly construct $D$ as a one-to-many mapping, as done in recent literature on other audio inverse problems such as speech enhancement, dereverberation, and bandwidth extension (Richter et al., 2023; Lemercier et al., 2023a;b) and most recently for speech coding by $\mathrm{Wu}$ et al. (2024). We show a conceptual overview of this idea in Fig. 1. We realize this mapping in the form of a stochastic decoder $D_{s}(c)=\Omega(D_{0}(c))$ , combining a deterministic pre-trained initial decoder $D_{0}$ with a stochastic postfilter $\Omega$ . Defining $y\::=\:D_{0}(c)$ , $\Omega$ produces conditional samples $\hat{x}\;\sim\;p_{\Omega}(\hat{x}|y)$ from a learned distribution $p_{\Omega}(\cdot|y)$ , which approximates the intractable distribution $p_{\mathrm{data}}(\cdot|y)$ via minimization of a statistical divergence $\mathcal{D}$ :  
+
+We can assume that $p_{\Omega}(\hat{x}|y)=p_{\Omega}(\hat{x}|c)$ since $D_{0}$ is known, deterministic and non-compressive. The role of $D_{0}$ is now to provide a decent initial estimate, which may well still suffer from artifacts and is enhanced by $\Omega$ to deliver perceptually pleasing results. We choose $\mathcal{D}$ as the Wasserstein-2 distance, and practically minimize equation 3 by training a flow model, a neural network $v_{\theta}$ trained with an adapted CFM objective (Lipman et al., 2023).  
+
+
+
+\section{3.1 FLOW MATCHING  }
+
+
+Lipman et al. (2023) introduce the idea of Flow Matching, where the goal is to learn a model that can transport samples from a tractable distribution $q_{0}(x_{0})$ to an intractable data distribution $q_{1}(x_{1})=p_{\mathrm{data}}$ by solving the neural ordinary differential equation (ODE)  
+
+$$
+p_{\Omega}=\underset{q_{\Omega}}{\arg\operatorname*{min}}\,\mathcal{D}\big(q_{\Omega}(\cdot|y),p_{\mathrm{data}}(\cdot|y)\big)
+$$  
+
+$$
+\frac{d}{d t}\phi_{t}(x)=u_{t}(\phi_{t}(x))\,,\quad\phi_{0}(x)=x_{0}
+$$  
+
+starting from a sample $x_{0}\,\sim\,q_{0}$ . We call $\phi_{t}\,:\,[0,1]\,\times\,\mathbb{R}^{N}\,\to\,\mathbb{R}^{N}$ the flow with the associated time-dependent vector field $u_{t}\,:\,[0,1]\,\times\,\mathbb{R}^{N}\,\rightarrow\,\mathbb{R}^{N}$ , which generates a probability density path $p_{t}:\mathbb{R}^{N^{\star}}\!\to\mathbb{R}_{>0}$ with $p_{t=0}=q_{0}$ and $p_{t=1}=q_{1}$ . They propose to learn $v_{\theta}$ with the CFM target:  
+
+162   
+163   
+164   
+165   
+166   
+167   
+168   
+169   
+170   
+171   
+172   
+173   
+174   
+175   
+176   
+177   
+178   
+179   
+180   
+181   
+182   
+183   
+184   
+185   
+186   
+187   
+188   
+189   
+190   
+191   
+192   
+193   
+194   
+195   
+196   
+197   
+198   
+199   
+200   
+201   
+202   
+203   
+204   
+205   
+206   
+207   
+208   
+209   
+210   
+211   
+212   
+213   
+214   
+215  
+
+$$
+\mathcal{L}_{\mathrm{CFM}}:=\mathbb{E}_{x,t,p_{t}(x|x_{1})}\left[\left|\left|v_{\theta}(x,t)-u_{t}(x|x_{1})\right|\right|_{2}^{2}\right]
+$$  
+
+where $x_{1}\sim q_{1}$ and $\mathcal{L}$ denotes a training loss function. A key insight is that the conditional Eq. (5) has the same gradients as an intractable unconditional flow matching objective (Lipman et al., 2023, Eq. 5), and marginalizes to the correct unconditional probability path $p_{t}(\boldsymbol{x})$ and flow field $u_{t}(x)$ .  
+
+
+
+\section{3.2 JOINT FLOW MATCHING FOR SIGNAL ENHANCEMENT  }
+
+
+Unconditional $q_{0}$ Shifted $q_{0}(\cdot|x_{1})$  
+
+In the original flow matching (Lipman et al., 2023) and score matching (Song et al., 2021) formulations, ${x_{0}}^{1}$ is sampled independently of $x_{1}$ , typically from a zero-mean Gaussian $q_{0}=\dot{\mathcal{N}}(0,\sigma^{\tilde{2}}I)$ . Pooladian et al. (2023) and Tong et al. (2024) show that, while the conditional paths $p_{t}(x|x_{1})$ fulflil optimal transport (OT) from $q_{0}$ to $q_{1}$ when $q_{0}$ is a standard Gaussian, the modeled marginal probability path $p_{t}(\boldsymbol{x})$ generally does not fulflil OT. This can lead to high-variance training and low straightness in the learned marginal flow field $v_{\theta}$ , and thus to inefficient inference and suboptimal sample quality. To rectify this, both works propose a per-batch approximation to OT between the full distributions, by reordering the pairings in each training batch $\{(x_{b,0},x_{b,1})\}_{b=1}^{\overline{{B}}}$ with optimal couplings determined by an OT algorithm on each batch. Effectively, this samples $(\overline{{x_{0},x_{1}}})\sim q(x_{0},x_{1})$ jointly rather than independently.  
+
+![](images/cf9368f4c844030ea8b79a4de3fd6c6b8ef901947aecaa9e1e03122174ba1a42.jpg)  
+
+Here, we also propose sampling $(x_{0},x_{1})$ jointly, but in a way that is adapted to enhancement tasks and does not require any OT solvers or extra computations. Concretely, since we have access to the initial estimate $y=D_{0}(c)=D_{0}(E(x^{*}))$ , we choose the probability path  
+
+$$
+p_{t}(x_{t}|x_{1},y)=\mathcal{N}(x_{t};\mu_{t},\sigma_{t}):=\mathcal{N}(x_{t};y+t(x_{1}-y),(1-t)^{2}\Sigma_{y})
+$$  
+
+where $\Sigma_{y}=\mathrm{diag}(\sigma_{y}^{2})$ is a diagonal covariance matrix. This probability path is a linear interpolation between $y$ and $x_{1}$ , with noise linearly decreasing from $\sigma_{y}$ to zero. This leads to a coupling between $x_{0}$ and $x_{1}$ through $y$ . Namely, $q_{0}(x_{0}|x_{1},y)\,=\mathcal{N}(x;y,\Sigma_{y})$ , i.e., the mean of $x_{0}$ is shifted from 0 to $y$ , similar to score-based signal enhancement works (Richter et al., 2023; Wu et al., 2024). Intuitively, while we do not use it for inference or training, the marginalized $q_{0}(x_{0})$ is now a mixture of Gaussians, each of variance $\sigma_{y}^{2}$ and centered at the respective $y$ from the training data, see Fig. 2. When $\sigma_{y}$ is well-chosen so these Gaussians have negligible overlap, no minibatch OT is needed as the per-batch couplings can be assumed optimal by construction.1 for more details. The conditional $u_{t}$ can be found via (Lipman et al., 2023, Eq.2:  
+
+$$
+u_{t}(x|x_{1},y)=\frac{x_{1}-x_{t}}{1-t}
+$$  
+
+To simplify, since $x_{t}$ can be written in terms of $x_{0}$ , we note that  
+
+$$
+\begin{array}{r l r l}&{x_{t}=t x_{1}+(1-t)x_{0},}&{\qquad}&{x_{0}\sim\mathcal{N}(x_{0};y,\Sigma_{y}))}\\ &{\qquad=t x_{1}+(1-t)y+(1-t)\sigma_{t}\varepsilon,}&{\qquad}&{\varepsilon\sim\mathcal{N}(0,I)}\\ &{x_{0}=y+\sigma_{y}\varepsilon,}&{\qquad}&{\varepsilon\sim\mathcal{N}(0,I)}\end{array}
+$$  
+
+which, using that $x_{1}=x^{*}$ from Eq. (6), leads to the simple joint flow matching loss  
+
+$$
+\mathcal{L}_{\mathrm{JFM}}:=\mathbb{E}_{t\sim\mathcal{U}(0,1),(x^{*},y)\sim\mathfrak{D},\varepsilon\sim\mathcal{N}(0,I),x_{t}\sim p_{t}(x_{t}|x_{0})}\left[\bigg|\lvert v_{\theta}(x_{t},t,y)-\big(\underbrace{x^{*}}_{=x_{1}}-\underbrace{(y+\sigma_{y}\varepsilon)}_{=x_{0}}\bigg)\bigg\rvert\right|_{2}^{2}\right]
+$$  
+
+where $\mathfrak{D}$ is the training dataset. Note also that this loss removes the numerical instability around $t\approx1$ of Eq. (7) by reparameterizing in terms of $x_{0}$ and $x_{1}$ . By choosing $\sigma_{y}>0$ , we enforce the flow field to be a contractive mapping. This ensures the ODE for inference is numerically stable and converges locally. Our choice of $p_{t}$ improves upon SGMSE (Welker et al., 2022; Richter et al., 2023; Wu et al., 2024), in that trajectories in our formulation can reach $x^{*}$ exactly, which SGMSE fails to do since it does not model the correct $q_{0}$ (Lay et al., 2023). We also avoid designing and tuning special stochastic differential equations (SDEs) with multiple hyperparameters and use only one hyperparameter, $\sigma_{y}$ , for which we propose a data-based heuristic  
+
+![](images/eb8626b063225294e32532e9c08571333693ce4617c82d5bbc6c0442c13af81e.jpg)  
+Figure 3: Flow field comparison at $t=0.7$ for our linear $\sigma_{t}$ (left) versus score-based SGMSE (center) and FlowAVSE with constant $\sigma_{t}$ (right) for a toy problem. The white dot is $y$ , yellow stars are possible $x^{*}$ , blue lines are sample trajectories, and the background color indicates the density $p_{t}$ . SGMSE has highly curved trajectories and does not contract to $x^{*}$ ; FlowAVSE is non-contractive.  
+
+1). Another recent work for audiovisual speech enhancement by Jung et al. (2024) also makes use of CFM, but uses an independent CFM formulation (Tong et al., 2024) resulting in a constant $\sigma_{t}=\sigma$ and the target flow field $u_{t}$ being independent of the sampled noise. This leads to a non-contractive flow field and the potential for residual noise being left in the estimates since $\sigma_{1}=\sigma>0$ , whereas $\sigma_{1}=0$ in our case. We illustrate this qualitatively in Fig. 3 and also show empirically in our results section that, for our postflitering task, our formulation leads to better quality than both alternatives, at both a low and high number of function evaluations (NFE).  
+
+In practice, we replace $x^{*},y$ with the feature representations $\mathbf{X}^{*},\mathbf{Y}$ from an invertible feature extractor $\Phi$ and learn the flow in this feature domain. Namely, $\Phi$ is an amplitude-compressed complex short-time Fourier transform (STFT) (Welker et al., 2022) with compression exponent $\alpha=0.4 for details. We provide $\mathbf{Y}$ to $v_{\theta}$ as conditioning via channel-wise concatenation at the input (Richter et al., 2023).  
+
+After training, the flow model $v_{\theta}$ together with the ODE (4) models the conditional distribution $p_{\Omega}(\mathbf{X}^{*}|\mathbf{Y})$ . To produce clean feature estimates $\hat{\mathbf{X}}\sim p_{\Omega}$ , we first sample an initial state (latent) $\mathbf{X}_{0}\sim q_{0}(\mathbf{X}_{0}|\mathbf{Y})$ and then solve the flow ODE (4) using $v_{\theta}$ from $t=0$ to $t=1$ with a numerical ODE solver to get $\hat{\mathbf{X}}_{1}$ .7.6. Finally, we apply the inverse of the feature extractor $\Phi$ to produce the waveform estimate $\hat{x}=\Phi^{-1}(\hat{\mathbf{X}}_{1})$ .  
+
+3.3 NON-ADVERSARIAL CODEC TRAINING  
+
+Due to a lack of effective phase losses, NAR audio generative models trained with only spectral losses usually exhibit buzzy noise caused by unsynchronized phases. Many works employ adversarial training to circumvent this and restore more natural-sounding audio. This however requires complex handcrafted multi-discriminator losses and weightings to avoid unstable training, mode collapse, and divergence, and lacks interpretability (Wu et al., 2024; Lee et al., 2024). In recent years, generative diffusion models have largely superseded GANs for image and audio generation due to easier training and better detail modeling (Dhariwal & Nichol, 2021), but have yet to make such a strong impact for audio codecs.  
+
+To overcome these issues, we remove adversarial training and instead use a generative postfliter. We train a deterministic neural codec as the initial decoder $D_{0}$ without any adversarial losses and leave the task of matching the distributions of output audio and clean audio to the stochastic postfilter $\Omega$ The simplest way forward, which we follow, is to take an existing state-of-the-art neural codec such as DAC (Kumar et al., 2024) as $D_{0}$ and to remove all components related to adversarial loss terms.  
+
+
+
+\section{3.4 UNDERLYING CODEC: IMPROVED NON-ADVERSARIAL DAC  }
+
+
+In principle, stochastic postfliters such as ours can be trained for any underlying codec to enhance its waveform estimates, as shown in $\mathrm{Wu}$ et al. (2024). We use DAC (Kumar et al., 2024) as the basis for our underlying codecs due to its status as a state-of-the-art neural codec, as also recently established for speech by Muller et al. (2024), and its adaptibility for other sampling rates and bitrates. We remove the adversarial losses and modify some configuration settings listed in Section 4.2.  
+
+When we first trained this non-adversarial codec, we found that it produced unnatural results and bad scale-invariant signal-to-distortion ratio (SI-SDR) values around $-30\,\mathrm{dB}$ , particularly for music. After finding that low frequencies $(\leq2\,\mathrm{kHz})$ were badly modeled we add a multiscale constant-Q transform (CQT) loss, inspired by the high low-frequency resolution of the CQT, frequent use of the CQT in music processing (Moliner et al., 2023), and the multiscale Mel losses used by DAC. As in DAC’s multiscale Mel loss, we use both the differences of amplitudes and of log-amplitudes. We further add a $L^{1}$ waveform-domain loss to improve SI-SDR values and phase errors that magnitudeonly losses are blind to.7.2.  
+
+
+
+\section{3.5 FREQUENCY-DEPENDENT NOISE LEVELS  }
+
+
+As noted in Section 3.1, the choice of $\sigma_{y}$ is important for output quality. It is well known that the power spectrum of most natural signals follows an inverse power law, so high frequencies have much lower power than low frequencies. To rectify this, we calculate frequency-dependent curves $\bar{\sigma_{y}(f)}$ by performing the heuristic quantile calculation in Eq. (12) independently for each STFT frequency band. Similarly, MBD (San Roman et al., 2023) proposes a band-dependent noise scale but uses only 4 broad Mel bands for this purpose.7.4.  
+
+
+
+\section{4 EXPERIMENTAL SETUP  }
+
+
+
+
+\section{4.1 DATASETS  }
+
+
+For underlying codec training, we prepare a varied combination of datasets containing music, speech, and sounds, which are listed in Table 1. As proposed in Kumar et al. (2024), we sample audios in a type-balanced way during training, i.e., each training batch contains – in expectation – the same number of speech files as music files and sound files.  
+
+For postfliter training, we use the same overall dataset as a basis but perform the following additional steps: (1) To avoid slow postfliter training from calling $D_{0}$ in every step, we randomly sample 100,000 clean files $x^{*}$ per audio type and crop out segments with a maximum 30-second duration, calculate $y\;=\;D_{0}(E(\bar{x^{\ast}}))$ , and store it on disk. (2) For the postfilter to learn complex audio scenarios, we increase data variety with 100,000 clean 10-second mixtures of all three audio types from the  
+
+Table 1: Datasets used for codec training. Datasets in [brackets] are internal. $f_{s}^{\mathrm{max}}$ denotes the maximum sampling frequency and “h” is short for hours. For WavCaps-FreeSound\*, we filter the part of FreeSound contained in WavCaps to keep only the files with commercial-friendly licenses. For CommonVoice $13.0^{*}$ we use a custom subset.  
+
+![](images/5bd09229659291b32e96236d68516c4929e0dfc35ee8587fbc870f48cb9dea96.jpg)  
+
+subsets described above. We mix each randomly paired three audios in random proportions with mixing coefficients $(w_{\mathrm{speech},k},w_{\mathrm{music},k},w_{\mathrm{sound},k})$ sampled from a Dirichlet distribution $\mathrm{Dir}(\alpha_{\mathrm{speech}}=$ 4, $\alpha_{\mathrm{music}}=2$ , $\alpha_{\mathrm{audio}}=1$ ). We repeat all constituent segments shorter than 10 seconds and center-crop all that are longer. This leaves us with 400,000 pairs (2778 hours) of data.  
+
+As our test set, we use 3,000 random audio samples with 1,000 of each audio type: 500 files from the VCTK test set (Valentini-Botinhao, 2017) and 500 from the EARS test set (Richter et al., 2024b) for speech, 500 files from MUSDB18-HQ (Rafii et al., 2019) and 500 from MusicCaps (Agostinelli et al., 2023) for music, and 1000 flies from AudioSet (Gemmeke et al., 2017) for sound. To avoid overlap with MusicCaps, we remove all files from AudioSet with music-related tags, but keep tags related to instruments. We crop audios to a 10-second duration. As MUSDB, MusicCaps, and AudioSet are not used for training, we sample from them without regard to train/test splits.  
+
+
+
+\section{4.2 MODEL TRAINING AND VARIANTS  }
+
+
+For our underlying codecs, we use the official code and training settings from DAC (Kumar et al., 2024) but remove adversarial losses (Section 3.3), add a CQT and waveform loss (Section 3.4), and modify the configuration as listed in Table 2. We call these underlying codecs $N D A C$ to avoid confusion with the adversarially trained DAC. NDAC-75 is targeted at $48\,\mathrm{kHz}$ audio with a whole-number feature rate $(75\,\mathrm{Hz})$ and whole-number bitrates. NDAC-25 is a variant tailored for downstream generative audio tasks, with  
+
+Table 2: Our underlying codec variants, compared to official $44.1\,\mathrm{kHz}$ DAC by Kumar et al. (2024). $f_{s}$ is the sampling rate in $\mathrm{kHz}$ , $H$ is the hop length in samples, $f_{\mathrm{feat}}$ is the feature rate in $\mathrm{Hz}$ , $n_{c}$ is the number of codebooks, and $d_{\mathrm{emb}}$ is the latent code embedding dimension. Bitrates are in kbit/s.  
+
+![](images/4b5450b3fae6575fca371dca43747c4c021d38c888324b429fef48b8f07ee6e5.jpg)  
+
+a lower feature rate $(25\,\mathrm{Hz})$ and feature dimension which are advantageous for audio generation due to more efficient memory usage and decreased modeling difficulties. For the CQT loss (Section 3.4), we use the $\mathtt{C Q T2010v2}$ implementation of the CQT from the nnAudio Python package with 9 octaves, hop length 256, minimum frequency $27.5\,\mathrm{Hz}$ , $\{16,32,48,64,80\}$ bins per octave, with a loss weight of 1 for music samples and 0 for audio and speech samples. For the $\bar{L}^{1}$ waveform loss, we use a weight of 50. We train for 800,000 iterations with 0.4 second snippets and a batch size of 72. As baselines, we train $D A C{-}75$ and $D A C{-}25$ , equivalent versions of NDAC-75 and NDAC-25 with the original adversarial losses. To show that the differences between FlowDec and DAC are not just caused by the extra parameters from the postfliter, we also train baselines $2x D A C–75$ and $2x D A C{-}25$ for which we double the channels of all decoder convolution layers, increasing the parameters by $+100\,\mathrm{M}$ vs. $+26\,\mathrm{M}$ from the postfilter.  
+
+As postfilters, we train the following variants based on NDAC-75 and NDAC-25:  
+
+1. FlowDec-75m: $75\,\mathrm{Hz}$ , multi-bitrate. Trained based on NDAC-75 with bitrates $\{7.5,6.0,4.5,$ , $3.0\}$ kbit/s, by setting the number of codebooks at inference to $\{10,\,8,\,6,\,4\}$ . We include only this set of bitrates for ease and speed of training, and because we found that the codec does not provide good results below $3.0\,\mathrm{kbit}/\mathrm{s}$ . 2. FlowDec- $.75s$ : $75\,\mathrm{Hz}$ , single-bitrate. Trained based on NDAC-75 using only the highest bitrate of 7.5 kbit/s. The goal of this variant is to serve as a baseline for ablations and to investigate the quality gap between a single- and multi-bitrate postfilter. 3. FlowDec-25s: $25\,\mathrm{Hz}$ , single-bitrate. Trained based on NDAC-25 with a bitrate of $4.0\,\mathrm{kbit/s}$ . We do not train for multiple bitrates here as the bitrate and feature rate is already very low.  
+
+We train all postfilters based on a slightly modified $\mathrm{NCSN++}$ architecture (Song et al.3). We use Adam (Kingma, 2014) at a learning rate of $10^{-4}$ for 800,000 iterations, a 2-second snippet duration, and a batch size of 64. We track an exponential moving average (EMA) of the weights with decay 0.999 for inference. For every variant, we train one version with global $\sigma_{y}$ and one with a frequency-dependent $\sigma_{y}(f)$ , see Section 3.5. We use the frequency-dependent variants for all results unless stated otherwise. For the global variants, we set $\sigma_{y}=0.66$ . For the frequency-dependent variants, we estimate 768-point frequency curves $\sigma_{y}(f)$ and smooth them with a Gaussian kernel of bandwidth 3.7) based on FlowDec-75s.  
+
+4.3 OBJECTIVE METRIC EVALUATION  
+
+For evaluation with objective metrics we use SI-SDR (Roux et al., 2019), Frech´et Audio Distance (FAD) with clap-laion-audio embeddings as proposed in Gui et al. (2024), frequency-weighted segmental signal-to-noise-ratio (fwSSNR) (Loizou, 2013), the neural ITU-T P.804 estimation method SIGMOS (Ristea et al., 2024), and logSpecMSE, i.e., the mean squared error (MSE) of decibel log-magnitude spectrograms with a $32\,\mathrm{ms}$ Hann window and $75\%$ overlap. Note that SIGMOS is only valid for speech signals, so we only evaluate it on the speech test audios.  
+
+
+
+\section{4.4 SUBJECTIVE LISTENING TESTS  }
+
+
+Since objective metrics generally do not tell the full story of how a method is perceived by human listeners (Torcoli et al., 2021), it is important to also test this perceived quality directly. We conduct two MUSHRA-like tests (ITU, 2015) detailed in Table 3, comparing FlowDec variants against their DAC equivalents. “Test A” is designed to test our main models, and “Test B” to test low feature rate $(25\,\mathrm{Hz})$ models. We use Opus (Valin et al., 2013)  
+
+Table 3: Listening test parameters. Bold numbers in parentheses denote the bitrates in kbit/s.   
+
+![](images/80125b9cd8290337476ed8cd2f5e403b18aabebbe8274454e6cb6841a656d99e.jpg)  
+
+at the highest used bitrate as the low anchor and include the original audio as the hidden reference. In Test A, we also include the official $48\,\mathrm{kHz}$ checkpoint of EnCodec (De´fossez et al., 2023) at $6.0\,\mathrm{kbit/s}$ for comparison. We conduct both tests with 21 random 10-second audios from our test set: 7 from the EARS test set, 7 from MUSDB, and 7 from AudioSet. We ask 15 expert listeners to rate each audio on a scale from 0 to 100. We exclude listeners that rated the reference $<90$ or the low anchor $>90$ for more than $15\%$ of trials, resulting in 11 listeners for Test A and 10 for Test B.  
+
+
+
+\section{5 RESULTS  }
+
+
+
+
+\section{5.1 OBJECTIVE METRICS  }
+
+
+In Fig. 4, we show the objective metric results of FlowDec-75m and FlowDec-75s compared to EnCodec $(48\,\mathrm{kHz})$ , DAC-75, 2xDAC-75 and the official DAC $44.1\,\mathrm{kHz}$ checkpoint, and also include  
+
+![](images/b160888704b60c2d2cf37df3985bb95d1296dab0abea8628f4ce315853b2e958.jpg)  
+
+432   
+433   
+434   
+435   
+436   
+437   
+438   
+439   
+440   
+441   
+442   
+443   
+444   
+445   
+446   
+447   
+448   
+449   
+450   
+451   
+452   
+453   
+454   
+455   
+456   
+457   
+458   
+459   
+460   
+461   
+462   
+463   
+464   
+465   
+466   
+467   
+468   
+469   
+470   
+471   
+472   
+473   
+474   
+475   
+476   
+477   
+478   
+479   
+480   
+481   
+482   
+483   
+484   
+485  
+
+the $25\,\mathrm{Hz}$ feature rate models FlowDec-25s and DAC-25 for comparison. Our main model FlowDec$75\mathrm{m}$ produces the best FAD values by a large margin and also performs best on the SIGMOS OVRL metric. For the intrusive spectral metrics SI-SDR, fwSSNR, and logSpecMSE, retrained DAC generally outperforms FlowDec, though the gap in the perceptually weighted fwSSNR is small. This is to be expected under the perception-distortion tradeoff discussed in (Blau & Michaeli, 2018; 2019): FlowDec favors better perception (FAD) along this tradeoff at the cost of increased distortion (SISDR), see also Fig. 5, similar to observations made about score-based models for speech enhancement (Richter et al., 2023) and JPEG artifact removal (Welker et al., 2024). Furthermore, we see that the single-bitrate FlowDec-75s slightly outperforms FlowDec- $.75\mathrm{m}$ at 7.5 kbit/s as expected, and that $2\mathrm{xDAC}$ is slightly better than DAC but does not fundamentally change the qualitative behavior of DAC. For the $25\,\mathrm{Hz}$ models, we can see that the general behavior of FlowDec and DAC is unchanged, with FlowDec again exhibiting better FAD and SIGMOS.  
+
+In Table 4, we compare FAD, SI-SDR and fwSSNR of FlowDec-75s at $\mathrm{NFE}\,\in\,\{6,50\}$ against ScoreDec (Wu et al., 2024) and the alternative flow-based formulation with constant $\sigma_{t}$ (Jung et al., 2024). We can see that for $\mathrm{NFE}=6$ , FlowDec is a clear improvement over ScoreDec which produces unusable results at this NFE and also performs significantly better than Jung et al. (2024) here. At $\mathrm{{NFE}=50}$ , ScoreDec and FlowDec achieve similar SI-SDR, but FlowDec performs significantly better in FAD.7.1. Finally, in Fig. 7, we show a qualitative spectrogram comparison of FlowDec compared DAC for a guitar recording, which illustrates better reconstruction of harmonic structures by FlowDec.8.  
+
+
+
+\section{5.2 SUBJECTIVE LISTENING TESTS  }
+
+
+In Fig. 6, we show the results from both subjective listening Tests, A and B, as boxplots of MUSHRA scores per method and bitrate. For Test A, we can see that the 4.5 kbit/s variants are rated somewhat lower than the 7.5 kbit/s variants but still achieve good scores compared to EnCodec at 6.0 kbit/s, and the low anchor Opus. We can further see that, at any given bitrate, the score distributions of DAC-75 and FlowDec- $.75\mathrm{m}$ show no significant differences. For Test B with the $25\,\mathrm{Hz}$ models, we can again see that DAC and FlowDec generally perform on par, and also that the $25\,\mathrm{Hz}$ models are rated very similarly as their higher feature rate $(75\,\mathrm{Hz})$ equivalents at a similar bitrate.6, we also show results split by audio type, which seem to suggest that FlowDec performs better than DAC for speech samples, slightly worse for sound samples, and on par for music.  
+
+![](images/50ca4d613043c37b66a605a940fc54757d340b8d6cf23446b6710a9a9d48abe8.jpg)  
+Figure 6: Subjective listening results from Test A (left) and Test B (right). Numbers in (parentheses) denote the used bitrate in kbit/s. FlowDec is rated on par with DAC (Kumar et al., 2024), with no significant differences between their score distributions at any given bitrate and feature rate.  
+
+
+
+\section{5.3 REAL-TIME FACTOR  }
+
+
+An important property of a codec is its runtime. We determine the real-time factor (RTF) of the two NDAC variants and the FlowDec postfilter at $\mathrm{NFE}\in\{4,6,8\}$ with the midpoint solver on an NVIDIA A100-SXM4-80GB GPU. We find an RTF of 0.0134 for NDAC-75 and 0.0084 for NDAC-25. For the postfilter, we find that $\mathrm{RTF}\approx0.0358\times\mathrm{NFE}$ . At our default setting $\mathrm{NFE}=6$ , this results in a total RTF of 0.2285 for FlowDec- $75(\mathrm{m}/\mathrm{s})$ and 0.2235 for FlowDec25s, a significant improvement over the RTF of 1.707 for ScoreDec (Wu et al., 2024).  
+
+![](images/1ceae5974a84388ea5fc7ac604c18af999b566cb2510b5f8c2aaa3b58c113596.jpg)  
+Figure 7: Spectrogram comparison (pre-emphasis of 0.95) of DAC and FlowDec at 7.5 kbit/s for a guitar test audio. FlowDec better preserves harmonics where DAC creates noise-like structures.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+We presented FlowDec, a novel postfliter-based neural codec for general audio with high perceptual quality. FlowDec uses a novel modification of the flow matching formalism for signal enhancement, which is inspired by previous score- and flow-based generative works for signal enhancement (Richter et al., 2023; Wu et al., 2024; Jung et al., 2024) but improves upon them both in terms of theoretical properties and output quality. We showed that FlowDec achieves state-of-the-art FAD scores for the coding task and, in a listening test, performs on par with the current state-of-the-art GAN-based codec DAC (Kumar et al., 2024) at bitrates between 4.5 and 7.5 kbit/s. Furthermore, FlowDec also shows promising quality at the very low feature rate of $25\,\mathrm{Hz}$ and bitrate of $4.0\,\mathrm{kbit/s}$ , which we hope can contribute to more efficient long-range generative audio modeling.  
+
+While FlowDec, like DAC, is currently not streaming-capable due to the noncausal architecture of the used DNNs, our postfilter approach can be modified for a causal DNN as in (Richter et al., 2024a), which would pave the way for real-time communication and audio streaming applications. We leave this for future work, particularly since there are currently no streaming codecs available that achieve the quality of DAC to our knowledge. Another interesting future direction is the joint training of the initial decoder and the postfilter similar to Lemercier et al. (2023b), which could improve quality but may lead to unstable training. Finally, as the $\mathrm{NCSN++}$ architecture we use was originally built for images, we expect that future work using DNN architectures better adapted to audio signals can further improve the quality of FlowDec.  
+
+
+

@@ -1,0 +1,279 @@
+\title{DenseAttention: No-Compromise Exact All $N \times N$  Interactions Algorithm with $O(N)$ Space and Time Complexity}
+
+\begin{abstract}
+The ubiquitous Transformer architecture suffers from two main bottlenecks: 1) low computational and memory efficiency, leading to suboptimal hardware utilization, and 2) quadratic time complexity with respect to sequence length $N$, making it slow and costly for large data contexts. We propose a novel DenseAttention Network architecture, a straightforward simplification of the standard Transformer block that addresses these issues and serves as a drop-in replacement for language modeling tasks. We eliminate memory-bound components in DenseAttention, including Softmax, masking, one skip connection, and both LayerNorms, as well as key, value, and output projection matrices, as they become redundant. Despite these removals, it maintains exact $N \times N$ pairwise interactions between tokens. By exploiting the associativity of matrix multiplications, DenseAttention can be computed with $O(N^2d)$ or $O(Nd^2)$ time and space complexity, depending on the context. To handle the absence of Softmax and prevent numerical instability, we introduce MaxNormActivation at both ends of the Transformer block. We also devise Cosine Relative Positional Embeddings as a computationally efficient replacement for RoPE, and simple LocalAttention variations of the block to help the model focus on details in extremely long contexts. 
+
+DenseAttention competes with FlashAttention in speed on small sequences and outperforms it by orders of magnitude on large contexts. We pre-train encoder language models on sequences up to 16K in length, which perform similarly or better than baseline BERT-large, while significantly improving speed and efficiency.  Finally, we achieve state-of-the-art on the LRA benchmark among the Transformer-based architectures.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Transformer architecture (Vaswani et al., 2017) has become ubiquitous in neural networks across many domains and modalities, such as NLP (Devlin et al., 2019), images (Dosovitskiy et al., 2021), video (Arnab et al., 2021), speech recognition (Radford et al., 2022), and even tabular data (Arik & Pfister, 2019)). But most notably, it’s the core component of Large Language (Touvron et al., 2023a; Brown et al., 2020) and Multi-modal (Bai et al., 2023) Models, which demonstrate surprisingly good abilities in natural language understanding, comprehension and reasoning tasks.  
+
+The most prominent feature which distinguishes a Transformer layer from other architectures is the attention mechanism which allows for all of the inputs to simultaneously interact with each other. However, it’s also the source of its limitations: $O(N^{2})$ time and space complexity w.r.t context length $N$ , and computational inefficiency of the constituents which make the architecture work seamlessly. As reported by Ivanov et al. (2021), matrix multiplications account for $99.8\%$ of total FLOPs during BERT pretraining and only $61\%$ of runtime, the discrepancy being caused by low arithmetic intensity of memory bound operations, namely, LayerNorms, Softmaxs and other activations as well as elementwise operations.  
+
+Numerous extensions and modifications to the standard Transformer (Katharopoulos et al., 2020; Choromanski et al., 2022; Beltagy et al., 2020; Zhai et al., 2021; Hua et al., 2022) have been proposed in the recent years to alleviate the restrictive $O(N^{2})$ complexity. However, as these architectures in general rely on non-linear, memory-intensive and sparse operations to a much greater degree than traditional attention mechanism, their throughput in terms of tokens per second and hardware utilization are subpar in comparison with the latter on all but large sequence lengths (Tay et al., 2022; Dao et al., 2022). Besides, some report (Xiong et al., 2022; Sun et al., 2024; Tay et al., 2023), that their modeling capabilities may be limited in comparison with full-rank exact attention while their conceptual complexity and incompatibility with standard architectures prevents their widespread adoption.  
+
+![](images/e221dc40f59261a4bc50d7ca9e1efb2b3e0f8f0d15b2dac38c9ed4fd3d96cb62.jpg)  
+Figure 1: DenseAttention architecture. Left: DenseAttention mechanism; center: multi-head interpretation; right: the entire DenseAttention Network  
+
+Thus, we aim to achieve 3 main goals:  
+
+1. To create hardware efficient yet hardware-agnostic architecture with the arithmetic intensity ratio as high as possible. An ideal algorithm should contain merely matrix multiplications with no activations, normalizations and residual connections. However, while possible in principle, it remains a challenging task due to numerical instabilities occurring both in forward and backward pass and lagging performance of such architectures (Balduzzi et al., 2017; Santurkar et al., 2018; Pascanu et al., 2013)   
+2. To create an algorithm which would efficiently process long sequences, preferrably with $O(N)$ time and space complexity.   
+3. To make the resulting architecture as simple as possible, and closely resembling original Transformer architecture as well so it can serve as a drop-in replacement for the former and be easily adopted by both research and practitioners communities.  
+
+We accomplished all of these goals with DenseAttention and DenseAttention Network (DANet) blocks (Fig. 1). This architecture is a straight-forward simplification of the traditional Transformer architecture which does not introduce any additional elements and complexities to the module and can be freely swapped with it. On the contrary, we develop DenseAttention by removing all computationally inefficient elements of the original architecture: biases in all linear layers, masks, dropout, residual connection between attention and FFN. Most importantly, we remove Softmax inside selfattention. It results in the whole scaled dot-product attention mechanism becoming just a composition of matrix multiplications, which can be done in any order by associative property of matrix multiplication. This duality allows to calculate DenseAttention using either $O\bar{(}N^{\bar{2}}d)$ or $O(N d^{2})$ FLOPs, and the second option has linear time and space complexity w.r.t sequence length.  
+
+We remove LayerNorms and instead use a new MaxNormActivation, which scales token representations by their $l_{\infty}$ norm. We place it at both ends of the DANet block. We also remove all projection matrices except $W_{Q}$ in the self-attention module as they become redundant in the absence of non-linearities between attention and FFN. To empirically validate the architecture, we test on the challenging Long Range Arena (LRA) benchmark (Tay et al., 2021) and achieve a new SOTA result across all of the transformer-based models, even competing with State-Space-Models (Gu et al., 2022a). We also replace Transformer modules in BERT-large model (Devlin et al., 2019) with DenseAttention Network modules and pre-train it from scratch on sequences up to 16k tokens.  
+
+![](images/a3baa1bfba39482bdb0376469203545348b8ec51eff1af6e71029bec64841e09.jpg)  
+Figure 2: Comparison of speed between DenseAttention and FlashAttention2 (Dao (2024)) models across sequence lengths on a NVIDIA A100 40GB. Both models are used with the torch.compile() module.  
+
+The model achieves better quality metrics than the original BERT while enjoying faster training and inference both in $O(N^{2})$ and $O(N)$ regimes (Fig. 2).  
+
+To the best of our knowledge, we are the first to successfully train an NLP language model with no Softmax or any replacement/approximation for it in the attention layer. However, for vision tasks, such as object detection and instance segmentation, Zhuoran et al. (2021) propose two variations of attention, one without Softmax and the other with two softmaxes applied individually to Key and Query projections. However, they conduct experiments and report results only with second architecture. Recently, Koohpayegani & Pirsiavash (2024) instead scale Queries and Keys separately by their $l_{1}$ norm which allows them to successfully train a vision Transformer on ImageNet1K (Deng et al., 2009) and MS-COCO (Lin et al., 2014) datasets for different tasks with linear time complexity.  
+
+We opensource our code.  
+
+
+
+\section{2 BACKGROUND  }
+
+
+Here we give a brief exposition of essential elements of Transformer architecture and their variations.  
+
+Standard Transformer block consists of self-attention and feed-forward-network (FFN) sub-blocks (Vaswani et al., 2017). Let $\mathbf{X}\,\in\,\mathbb{R}^{N\times d}$ , where $N$ is the sequence length and $d$ is an embedding dimension of one token. Define $\mathbf{Q}\,=\,\mathbf{X}\mathbf{W}_{Q}$ as queries, $\mathbf{K}\,=\,\mathbf{X}\mathbf{W}_{K}$ as keys, and $\mathbf{V}\,=\,\mathbf{X}\mathbf{W}_{V}$ as values, where $\mathbf{W}_{Q},\mathbf{W}_{K},\mathbf{W}_{V}\in\mathbb{R}^{d\times d_{h}}$ are learnable parameters. Then the Scaled Dot-Product Attention is formulated as:  
+
+$$
+\operatorname{Attention}\left(\mathbf{X}\right)=\operatorname{Attention}(\mathbf{Q},\mathbf{K},\mathbf{V})=\operatorname{Softmax}\left({\frac{\mathbf{Q}\mathbf{K}^{\top}}{\sqrt{d_{h}}}}+\mathbf{M}\right)\mathbf{V},
+$$  
+
+with Softmax applied row-wise and mask $\mathbf{M}\,\in\,\mathbb{R}^{N\times N}$ with values 0 or $-\infty$ which effectively disables some positions from calculation to account for causal sequence processing or to conceal ’PAD’ token used for batch processing of sequences with different lengths.  
+
+Default implementation in some Transformer-based models (e.g. Devlin et al. (2019)) use biases in $\mathbf{Q},\mathbf{K}$ , and $\mathbf{V}$ projection layers.  
+
+Essentially, all transformer-based models use some form of Multi-Head Attention which has $H$ heads. Attention 1 is calculated for each head independently and the results are concatenated along the embedding dimension and projected back to full block’s output dimension by a matrix $\mathbf{W}_{O}\in$ $\mathbb{R}^{d\times d_{o u t}}$ :  
+
+$$
+\mathbf{MultiHeadAttn(Q,K,V)}=\mathbf{Concat}(\mathbf{head}_{1},\ldots,\mathbf{head}_{H})\mathbf{W}_{O}
+$$  
+
+Feed-Forward Network which follows self-attention is composed of two linear layers and an activation (usually ReLU or GeLU) in between. Intermediate inner dimension between the two layers is usually chosen to be ${4\bf{x}}$ larger than input/ output dimension. Finally, a LayerNorm layer and a residual connection are applied around both blocks, their relative positions dictated by PreNorm or PostNorm architectural choice (Xiong et al., 2020). The formulation of the whole Transformer layer $l$ with PreNorm is:  
+
+$$
+\begin{array}{r l}&{\mathbf{X}_{l}^{\prime}=\mathbf{X}_{l}+\mathrm{Attention}(\mathrm{LayerNorm}(\mathbf{X}_{l}))}\\ &{\mathbf{X}_{l+1}=\mathbf{X}_{l}^{\prime}+\mathrm{FFN}(\mathrm{LayerNorm}(\mathbf{X}_{l}^{\prime}))}\end{array}
+$$  
+
+Thus, each full Transformer block has two LayerNorms and two residual connections.  
+
+Depending on the implementation, dropout (Srivastava et al., 2014) might also be used in various parts of the block, specifically after FFN and attention sub-blocks as in original Transformer, and in attention matrix before softmax as in BERT.  
+
+
+
+\section{3 DESIGNING DENSEATTENTION  }
+
+
+In this section, we describe the DenseAttention architecture and motivations that led to specific changes as compared to the Transformer. Then we outline two extensions aimed at adapting components widely and successfully used in contemporary models to the architecture: Cosine RelPE, and LocalAttention layers.  
+
+
+
+\section{3.1 DENSEATTENTION  }
+
+
+Since we aim to achieve as much computationally efficient and simple module as possible, we proceed with eliminating inefficient components of original self-attention and Transformer architectures.  
+
+The most straightforward idea which we exploit first is to abstain from using Dropout module anywhere in the model. Even though the module can be removed altogether at inference time, we also do it for the training as we believe it won’t slow down the convergence with a large corpora dataset typical for LLM pre-training. Besides, as noted by Clark et al. (2019), dropout in attention probabilities might be the reason of redundancies among attention heads. Next, we remove the attention mask before Softmax. Note that if there are no biases in FFN, Query and Output linear layers and FFN activation is ReLU, then for a row vector $\mathbf{0}_{d}^{\top}=[0,0,\dots,0]_{1\times d}^{\top}$  
+
+$$
+\mathrm{FFN}(\mathbf{0}_{d}^{\top})=\mathbf{0}_{d}^{\top},
+$$  
+
+and  
+
+$$
+\mathrm{LayerNorm}(\mathbf{0}_{d}^{\top})=\mathbf{0}_{d}^{\top},
+$$  
+
+i.e. zero vector stays intact when acted upon by all components of the Transformer module. So we refrain from using biases throughout the new block, fix representation of the ”PAD” token at the output of embedding layer to $\bar{\mathbf{0}_{d}^{\top}}$ , and remove masking from the self-attention layer.  
+
+Subsequently, probably the most important modification that we impose on the old architecture is removal of row-wise Softmax activation from attention. We argue that the primary source of unparalleled modeling power of the original Transformer architecture which made it dominant architecture across multiple domains is the ability for all inputs to directly interact with each other in multiplicative way. This is the feature that all previous popular architectures like MLPs, CNNs and RNNs lack. We hypothesize that the role of softmax activation is ancillary to multiplicative interactions as it acts as a feature selection tool for the outputs of raw interactions matrix and normalizes them to be in [0, 1] range and to add up to 1. We suggest these restrictions may be lifted without detrimental effect on performance.  
+
+However, removing Softmax proves to be a very challenging task exactly for this reason: without it attention outputs become unbounded which can lead for them to either diverge to $\infty$ or shrink to  
+
+0. We formalize this statement with the following proposition considering simplified version of the new mechanism where $\mathbf{W}=\mathbf{W}_{Q}\mathbf{W}_{K}^{\top}$ and ${\mathbf W}_{V}={\mathbf I}$ :  
+
+Proposition 1. Let $\mathbf{X}\in\mathbb{R}^{N\times d}$ and $\mathbf{W}\in\mathbb{R}^{N\times d}$ be matrices composed of i.i.d. random variables, respectively $X_{i j}$ with $\mathbb{E}[X_{i j}]\,=\,0$ , $\operatorname{Var}(X_{i j})\,=\,\sigma_{X}^{2}$ , and $W_{k m}$ with $\mathbb{E}[W_{k m}]\,=\,0,$ , $V a r(W_{k m})\,=$ $\sigma_{W}^{2}$ . Let $X_{i j}$ and $W_{k m}$ also be independent for all $i,j,k,m$ . Then each element of the matrix Y = XWX⊤X ∈RN×d has zero expectation and variance σY2 ≥Nd2σ6Xσ2W .  
+
+Essentially, it means that variance of an output grows at least as a cube of an input variance in the new architecture layer. And since $\sigma_{Y}^{2}$ along with tail probability $\mathbb{P}(|Y_{i j}|\geq t)$ are not bounded from above and depend on the form of an unknown distribution, we can’t just fix $\sigma_{X}^{2}$ e.g. with the help of LayerNorm to ensure numerical stability.  
+
+Instead, we enforce $\operatorname*{max}(|X_{i j}|)\,\leq\,a$ for some positive $a$ which is equivalent to setting fixed $L_{\infty}$ norm for the inputs. Consequently, even in worst case scenario where  
+
+$$
+X_{i j}=a\;\mathrm{for}\;\forall\;i,j
+$$  
+
+it holds for $\mathbf{Z}=\mathbf{X}\mathbf{X}^{\top}\mathbf{X}\in\mathbb{R}^{N\times d}$ :  
+
+$$
+\begin{array}{r}{\operatorname*{max}(|Z_{i j}|)\leq N d a^{3},}\end{array}
+$$  
+
+i.e. $L_{\infty}$ norm of output values is bounded above. Furthermore, we make the following observation:  
+
+Proposition 2. If elements $W_{k m}$ of W are i.i.d normal variables with mean $\boldsymbol{O}$ and variance $\sigma_{W}^{2}$ , independent with $\forall\,X_{i j}$ , $\mathrm{Var}[(\mathbf{XW})_{p q}]\leq\sigma_{W}^{2}a^{2}d$  
+
+It follows from Prop. 2. that $\sigma_{W}$ and $a$ can be chosen such that $\mathbb{P}[|(X W)_{p q}|\;\geq\;\epsilon]\;\leq\;\delta$ for some $\epsilon\,>\,0,\delta\,>\,0$ depending on $\sigma_{W}$ and $a$ . Thus, we can assume that the matrix product ${\bf Y_{\Sigma}}=$ $\mathbf{X}\mathbf{W}\mathbf{X}^{\top}\mathbf{X}\in\mathbb{R}^{N\times d}$ will not explode with right selection of priors.  
+
+Specifically, we set $\begin{array}{r}{a\,=\,\frac{1}{N^{\frac{1}{3}}}}\end{array}$ N131 , so th√at 4 becomes max(|Zij|) ≤ d. We choose not to downscale inputs by further degree, e.g. by $d{\sqrt{n}}$ because resulting small values may hurt modeling quality during training in low-precision formats (fp16 and bf16).  
+
+We fix each embedding vector $\mathbf{X}_{i}$ to have constant $l_{\infty}$ norm of 1 by applying our novel MaxNormActivation function:  
+
+$$
+\mathrm{MaxNormActivation}(\mathbf{X}_{i})=\frac{\mathbf{X}_{i}}{\operatorname*{max}_{j}(|\mathbf{X}|_{i j})+\epsilon}
+$$  
+
+where $\epsilon$ is a very small number put to prevent division by 0. Note that similarly to RMSNorm (Zhang & Sennrich, 2019), MaxNormActivation doesn’t center its inputs. However, it uses $l_{\infty}$ norm instead of $l_{2}$ and doesn’t have scale and bias parameters as in Zhang & Sennrich (2019); Ba et al. (2016).  
+
+After MaxNormActivation we scale output by $\frac{1}{N^{\frac{1}{3}}}$ . We acknowledge that both these calculations are memory bound but together they incur at most the same memory movement and compute cost as LayerNorm. In our ablation experiments any other activation or normalization function or absence thereof would lead to a prompt and unrecoverable numerical instability early on during training.  
+
+Consequently, it allows the removal of Softmax, which doesn’t only lift a major computational and memory bottleneck which otherwise could be alleviated mainly with clever low-level algorithms as in Dao et al. (2022); Rabe & Staats (2021). Without Softmax and masking attention mechanism becomes a raw product of three matrices $\mathbf{Q}\mathbf{K}^{\top}\mathbf{V}$ . Exploiting associative property of matrix multiplication, we can compute the product as  
+
+
+
+\section{1. either $(\mathbf{Q}\mathbf{K}^{\top})\mathbf{V}$ which yields $2N^{2}d$ FMA operations,  }
+
+
+2. or $\mathbf{Q}(\mathbf{K}^{\top}\mathbf{V})$ which yields $2N d^{2}$ FMA operations and is linear w.r.t $N$ both in time and memory complexity.  
+
+We can utilize both methods interchangeably depending on what’s more favorable given particular values of $N$ and $d$ . $O(N)$ complexity gives way to processing very large sequences in linear time with the same result as if done in traditional $O\big(N^{2}\big)$ paradigm as it calculates exactly the same all $N\times N$ pairwise interactions but just in another order.  
+
+Next, we consider reducing the number of heads in the multi-head attention as they are computationally inefficient. As extensive research efforts have shown (Bhojanapalli et al., 2020; Voita et al., 2019; Kovaleva et al., 2019; Michel et al., 2019), significant portion of heads in multi-head attention are redundant, output low-rank representations and can be pruned without decrease in quality in downstream tasks, at least in BERT-sized models. Specifically, Bhojanapalli et al. (2020) find that increasing number of heads past a certain threshold degrades performance in BERT. Motivated by this, we propose increasing $d_{h}$ from conventional value $128~\mathrm{up}$ to 1024. In case of BERT example from C it leads to a single-head attention with arithm. int. 204.8 FLOPs/B which makes it computationally efficient even on NVIDIA A100. For LLMs with larger model dimension $d_{h}=1024$ would still leave room for multiple heads. We also use $d_{h}=256$ in experiments. And asymptotic arithm. int. in $O(N)$ -regime is $\frac{d}{2}$ just like in an ordinary $d\times d$ dense layer.  
+
+We note that the matrix $\mathbf{W}=\mathbf{W}_{Q}\mathbf{W}_{K}^{\top}$ in the expression $\mathbf{Q}\mathbf{K}^{\top}=\mathbf{X}\mathbf{W}_{Q}\mathbf{W}_{K}^{\top}\mathbf{X}^{\top}$ is essentially low-rank as in standard attention $d_{h}\ll d$ . But in our implementation this rank is much higher, in the extreme case being equal to $d$ . It results in multiplication of two high or full rank matrices. That is a redundant operation from DL perspective because composition of linear maps is just another linear map which could be learned using half of the parameters. Thus, we decide to keep the $\mathbf{W}_{Q}$ and discard $\mathbf{W}_{K}$ .  
+
+We also decide to remove LayerNorm and residual connection between attention and FFN subblocks as it improves computational efficiency of the architecture and appears not to hinder model performance. This leads to yet another simplification in the model design: $\mathbf{W}_{V}$ and $\mathbf{W}_{O}$ also become redundant by similar reasoning as in case of $\mathbf{W}_{Q}$ because there are no more non-linearities between attention outputs and FFN block.  
+
+Finally, the new attention mechanism in the case of a single head is formulated as:  
+
+$$
+\mathbf{DenseAttention}\left(\mathbf{X}\right)=\mathbf{XW}_{Q}\mathbf{X}^{\top}\mathbf{X}\in~\mathbb{R}^{N\times d}
+$$  
+
+And in the case of multiple heads $H$ it slightly changes:  
+
+$$
+\begin{array}{r l}&{\mathrm{DenseAttention}_{h}\left(\mathbf{X}\right)=\mathbf{X}\mathbf{W}_{Q_{h}}\mathbf{X}_{h}^{\top}\mathbf{X}_{h}\in\mathbb{R}^{N\times d_{h}}}\\ &{\mathrm{DenseAttention}\left(\mathbf{X}\right)=\mathrm{Concat}_{h}[\mathrm{DenseAttention}_{h}\left(\mathbf{X}\right)]}\end{array}
+$$  
+
+We call our attention algorithm ”DenseAttention” and the entire block as ”DenseAttention Network” or DANet (spelled ”dah-net”) because it basically consists of dense matrix multiplications with little else. We notice that DenseAttention in multi-head setting resembles popular multi-query attention design from Shazeer (2019) as it also calculates different representations only for Queries.  
+
+To complete the DenseAttention Network, we apply MaxNormActivation and residual connection to outputs of FFN. Final architecture to the layer $l$ can be summarized as follows:  
+
+$$
+\begin{array}{r l}&{\mathbf{X}_{l}^{\prime}=\mathrm{DenseAttention}(\mathrm{MaxNormActivation}(\mathbf{X}_{l})\cdot N^{-\frac{1}{3}})}\\ &{\mathbf{X}_{l+1}=\mathbf{X}_{l}+\mathrm{MaxNormActivation}(\mathrm{FFN}(\mathbf{X}_{l}^{\prime}))}\end{array}
+$$  
+
+3.2 COSINE RELPE  
+
+Many modern Language Models use (Minaee et al., 2024) Rotary Positional Embeddings (RoPE) (Su et al., 2024) which evidently perform better than learned or sinusoidal positional embeddings and don’t increase parameters count. The former two types of embeddings are applied once before the first layer and rely on skip-connections for propagating positional information to other layers in the stack. While it may be suitable for shallow networks, in deeper ones the signal gets decayed as more layers add their outputs to the residual branch. On the contrary, RoPE inject positional information into each of the Transformer layers by directly applying a transformation to the matrices $\mathbf{Q}$ and $\mathbf{K}$ which can be summarized as follows:  
+
+$$
+\mathbf{f}(\mathbf{x}_{i},m)=\left[\cos m\theta_{i}\right.\left.\right.-\sin m\theta_{i}\right]\left[x_{i1}\right],
+$$  
+
+where $\mathbf{x}_{i}=[x_{i1}\;x_{i2}]^{T}$ is a chunk $i$ , $i\in\{0,\ldots,\frac{d}{2}\}$ , of a vector $\mathbf{x}$ with $d$ dimensions which can be either a query $\mathbf{q}_{m}$ or key $\mathbf{k}_{m}$ with position $m$ out of $N$ in the sequence. Essentially, the transformation rotates the 2 two-dimensional vectors ${\bf q}^{\prime}$ and $\mathbf{k}^{\prime}$ with the intention to maximize their dot product  
+
+when they share the same position in sequence, and decay it to zero when the positions largely differ. However, direct calculation shows that it’s not always true, as the result for some fixed $i$ :  
+
+$$
+\mathbf{f}^{\top}(\mathbf{q}^{\prime},m)\mathbf{f}(\mathbf{k}^{\prime},n)=(q_{1}k_{1}+q_{2}k_{2})\cos(m-n)\theta+(q_{2}k_{1}-q_{1}k_{2})\sin(m-n)\theta
+$$  
+
+is only guaranteed to follow the pattern in case ${\bf q}^{\prime}$ and $\mathbf{k}^{\prime}$ are collinear. The total dot product of $\mathbf{q}$ and $\mathbf{k}$ is even less benign, for in each position $i$ of the model dimension, corresponding twodimensional vector chunk has a possibly distinctive prior angle from the origin, and $\theta_{i}$ is also unique by construction:  
+
+$$
+\theta_{i}=10000^{-2i/d},
+$$  
+
+But Su et al. (2024) show that this parameterization leads to long-term decay in norm of attention scores with the increase of relative distance $m-n$ .  
+
+Besides, RoPE are computationally inefficient as their calculation induces memory-expensive changes of tensor layout and several element-wise operations with low arithmetic intensity, separately for $\mathbf{Q}$ and $\mathbf{K}$ . We notice that there exist two other transformations with more favorable efficiency properties which can be applied to scalars at individual positions $i\in\{0,\ldots,d\}$ of vectors $\mathbf{q}$ and $\mathbf{k}$ rather than paired numbers: $g_{1}(x_{i},m)=x_{i}\cos m\theta_{i}$ and $g_{2}(x_{i},m)=x_{i}(\cos m\theta_{i}-\sin m\theta_{i})$ . These produce similar expansions to 5:  
+
+$$
+\begin{array}{r l}&{g_{1}(q_{i},m)g_{1}(k_{i},n)=q_{i}k_{i}\cos m\theta_{i}\cos n\theta_{i}=q_{i}k_{i}[\cos(m-n)\theta_{i}-\sin m\theta_{i}\sin n\theta_{i}]}\\ &{g_{2}(q_{i},m)g_{1}(k_{i},n)=q_{i}k_{i}[\cos(m-n)\theta_{i}-\sin(m+n)\theta_{i}]}\end{array}
+$$  
+
+We tested all three functions f, $g_{1}$ and $g_{2}$ on LRA tasks with DenseAttention and found out that all of them impact the performance very similarly. However, when we set a constant $\theta$ for all positions in an embedding dimension, the quality dropped, adding evidence to the leading role of parameterization 6 in the RoPE potential.  
+
+We choose the simpler function $g_{1}$ as the new computationally efficient alternative to RoPE and name it Cosine RelPE. We use it extensively in conjunction with DenseAttention, however it can be readily applied to standard Transformer in place of RoPE.  
+
+We find that application of Cosine RelPE to $\mathbf{X}$ before DenseAttention layer, while affecting even matrix $\mathbf{X}=\mathbf{V}$ inside it, doesn’t degrade the performance. Thus, we proceed with this architectural choice, which allows for one instead of two element-wise multiplications and can be further optimized by fusing with scaling factor $N^{-1/3}$ .  
+
+3.3 LOCALATTENTION FOR DENSEATTENTION  
+
+In the years following invention of Transformer, many variations of local attention, also known as sliding window attention, patterns and implementations have been proposed (Zaheer et al., 2020; Beltagy et al., 2020; Child et al., 2019; Roy et al., 2021; Dao et al., 2022). Recently, some of the open-weights Large Language Models (Jiang et al., 2023; Team et al., 2024) started partially or fully adopting some forms of local attention with the primary goal of alleviating quadratic cost of full attention for large contexts with the trade-off of not being able to fully process the entire sequence at once.  
+
+We also develop a form of local attention pattern for discretionary use with DenseAttention on very long contexts, however, with the goal of improving modeling quality as opposed to increasing speed. The reason of this extension is outlined by Qin et al. (2022a): in linear Transformer family of models, attention scores of a query are distributed along the sequence length more uniformly as compared to Softmax attention, so the model is not fully able to focus at details in the vicinity of a query’s token.  
+
+We adopt the approach to partition the whole sequence into equal non-overlapping chunks of window size $w$ , similar to Dao et al. (2022); Qin et al. (2022a). We choose this design because of its simplicity and straight-forward implementation with minimal invocations of memory-intensive data layouts. However, this form of chunked attention leads to all of the tokens not being able to interact with up to a half of the tokens constituting their neighbourhood. To mitigate this issue, we extend our local attention framework beyond one layer and propose a 3-layer structure 3. It consists of LocalAttention, ShiftedLocalAttention, and global DenseAttention layers. The second,  
+
+![](images/e965f79ac52a94d837d944d9ba646f82c38d793afa13df94554e565afdc9efd2.jpg)  
+Figure 3: Local attention for DenseAttention scheme. Left: Chunked attention pattern of an individual local attention layer. Right: 3 layer structure of Local – LocalShifted – global attentions.  
+
+Table 1: Long Range Arena performance. Accuracy is the metrics for all benchmarks. Best results are in bold.   
+
+![](images/53c06d3e9ea3fa2bffdcc2799d4a45eb2cad65bf20d6c21dbede1734c120d589.jpg)  
+
+ShiftedLocalAttention layer is shifted by $w/2$ relative to the first, which allows for all tokens to have symmetric neighbourhood after two consecutive layers. The full global attention of the last layer in the scheme combines fine-grained local results to capture all context of a sequence. The triples of layers then may be stacked together like ordinary Transformer layers to form a deep network.  
+
+We find local attention to be very effective in our experiments.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+To prove the viability of DenseAttention architecture, we conduct two sets of experiments: 1) long range sequence modeling on Long Range Arena benchmark; 2) pretraining of BERT-like encoder architecture on sequences of different lengths. We train all of the models with fp16 precision, unless stated otherwise.  
+
+4.1 LONG RANGE ARENA  
+
+Long Range Arena is a challenging suite of 6 classification benchmarks dedicated to examining the abilities of efficient and long-context models on large sequence lengths spanning from 1k to $16\mathrm{k}$ tokens. The tasks are diverse in nature and modalities: from synthetic and purely algorithmic, such as long version of ListOps benchmark (Nangia & Bowman, 2018), to character-level text classification on IMDB reviews (Maas et al., 2011). At the time of publication, the best model tested by Tay et al. (2021) achieved average of $55.01\%$ , and all of the models failed to learn above the level of change on the most difficult task, Pathfinder-X (seq. len 16K) adopted from Linsley et al. (2018); $\mathrm{Kim^{*}}$ et al. (2020).  
+
+Later, novel State-Space-Models-inspired architectures (Gu et al., 2022a;b; Ma et al., 2023; 2024) demonstrated by far superior performance considered to be out of reach for any Transformer-based model due specific inductive biases of the SSMs. But recently, Amos et al. (2024) showed that by using MLM-style pre-training the Transformer with RoPE is competitive with the SSMs. Interestingly, even without pre-training, but with RoPE, they reached a SOTA score on the benchmark among all Transformer-based architectures with a large margin.  
+
+Table 2: Ablations on the Retrieval task of LRA   
+
+![](images/8fc9244c97292bbe5da5523e26e8f0046483a3c54fac27930a29b843609a80c1.jpg)  
+
+We take their scores as well as results from original S4 paper (Gu et al., 2022a) as two strong baselines and conduct extensive experiments on LRA dataset with DANet model to see if our architecture is capable of matching or surpassing them. We mostly follow specifications outlined in the original LRA paper including number of heads and model dimensions, adjusting sometimes number of parameters to the one used by Amos et al. (2024). We report the results in Table 1. DenseAttention Network establishes new SOTA score among the Transformer-based models and even outperforms the SSM in 4 out of 6 benchmarks.  
+
+Thus, we prove that DenseAttention architecture is competitive with standard attention even despite the simplifications, the absence of Softmax and the presence of non-smooth functions in the DANet architecture (MaxNorm and ReLU). We also show that Transformers can match the performance of SSMs in principle.  
+
+We use Cosine RelPE and Local-ShiftedLocal-Global attention scheme in all of LRA models. These extensions are useful for improving results which is exemplified in table 2. Local attention proves to be instrumental and, often, its window size is the most important hyperparameter to tune.  
+
+We pre-train an encoder model with the approximately same number of parameters as in BERT-large (Devlin et al., 2019). We keep model dimension $d=1024$ as in original work but increase number of layers from 24 to 32 to keep parity in number of parameters. We use the same MLM (Masked Language Modelling) $+\ \mathrm{NSP}$ (Next Sentence Prediction) combination of training objectives and pre-train on the same datasets, namely Wikipedia and BookCorpus (Zhu et al., 2015).  
+
+Table 3: Evaluations of MLM loss and accuracy for DenseAttention models w.r.t to BERT on C4 dataset. N is the maximum sequence length with which a model was trained or/and evaluated.   
+
+![](images/a51d48854bb028f90cd7fd2ed901161956bb7c9c7512ad284ed6f21c87a91387.jpg)  
+
+We pre-train two models: one with single head of size $d=1024$ and the other with 4 heads of size $d=256$ . There are 4 training stages, each one resuming from the last checkpoint of the previous: first with approximately 850 million samples of sequence length 128, second with $150\;\mathrm{mil}$ . samples of seq. len 512, third with $80\;\mathrm{mil}$ . samples of seq. len 1024, and the last stage with $27\ \mathrm{mil}$ . samples of sequence length 16384 conducted exclusively with single head model. The single head model was trained in $\bar{O}(N^{2})$ regime with context sizes 128, 512 and, partially, 1024, and in $O(N)$ for the rest of the run with 1k and $16\mathrm{k}$ contexts. The 4 heads model utilized the $O(N)$ regime for all sequence lengths.  
+
+Then we validate and compare the results with BERT-large, using Google’s original pretrained checkpoint available from Hugging Face’s Transformers library (Wolf et al., 2020). We evaluate the models on out of domain texts of C4 dataset’s subset ”RealNewsLike” (Raffel et al., 2019) for all contexts lengths besides 16k because train/test splits for wiki $^+$ books dataset are almost surely different for our model and BERT training procedures. We use MLM loss which can be interpreted as logarithmic perplexity, and MLM accuracy as evaluation metrics. The results are presented in Table 3.  
+
+Key highlights. DenseAttention models uniformly outperform baseline in terms of MLM loss by a large margin. Nevertheless, single-headed DenseAttention models also uniformly outperform standard BERT in terms of accuracy, although the difference is not so pronounced, as with log-perplexity.  
+
+The models with 4 heads are inferior in both metrics to single head ones which supports our hypothesis that larger head sizes lead to better quality. The only exception is the performance of the models trained with context length 1024 on sequences of the same size, where 4 heads DenseAttention model variant produces significantly better metrics. This might hint that it’s easier for several heads to comprehend long sequences than for one. Note that the original BERT wasn’t trained with sequence length 1024, so we couldn’t compare it with our models in this setup.  
+
+Table 4: Throughput, sequences per second, of single head DenseAttention model in $O(N)$ and $O(N^{2})$ regimes in comparison with BERT, and BERT with FlashAttention 2 across various sequence lengths. FLOPs ratio is total MatMul FLOPs of forward pass of DenseAttention BERT implementation in $O(N^{2})$ regime divided by total MatMul FLOPs of forward pass of standard BERT. All experiments were conducted on a single NVIDIA A100 40Gb GPU.  
+
+![](images/bad2e92ef4eb6674b3a2d984e26bd6626e7eb75ed48ccadf8bd0bf9a59eac92a.jpg)  
+
+We also evaluate (Table 4) DenseAttention single head model speed, as measured by throughput, in comparison with standard BERT model and with highly-optimized, low-level FlashAttention-2 implementation which is the fastest conventional kernel for attention computation as of mid 2024 (Dao, 2024). All evaluations are performed using torch.compile() directive. As expected, DenseAttention model vastly outperforms even FlashAttention-2 algorithm with either quadratic or linear regime, depending on the sequence length. But, surprisingly, we also observed that with the increase of the sequence length the performance of the DenseAttetntion in the $O(N^{2})$ regime is slightly worse or even similar to FlashAttention-2 despite being written in high-level language and having more FLOPs per iteration than a standard model with comparable size. It leads to conclusion that the DenseAttention indeed achieves very high computational intensity and FLOPs utilization in comparison with the alternatives.  
+
+Moreover, we observe that quality evaluation metrics stay the same for a fixed lengths validation context if the regime gets switched from $O(N)$ to $O(N^{2})$ or vice versa regardless of the mode and sequence length with which a DenseAttention model has been trained. This invariance property holds even for the model trained on 16k context and applied to sequence length 128. Thus, we can train the models with DenseAttention on very large contexts in $O(N)$ time and then use it both short and long sequences with optimal speed and equal quality.  
+
+
+

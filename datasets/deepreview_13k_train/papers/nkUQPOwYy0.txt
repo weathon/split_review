@@ -1,0 +1,773 @@
+\title{Fast Multipole Attention: A Divide-and-Conquer Attention Mechanism for Long Sequences}
+
+\begin{abstract}
+Transformer-based machine learning models have achieved state-of-the-art performance in many areas. However, the quadratic complexity of the self-attention mechanism in Transformer models with respect to the input length hinders the applicability of Transformer-based models to long sequences.
+To address this, we present Fast Multipole Attention (FMA), a new attention mechanism that uses a divide-and-conquer strategy to reduce the time and memory complexity of attention for sequences of length $n$ from $\mathcal{O}(n^2)$ to 
+$\mathcal{O}(n \log n)$ or $\mathcal{O}(n)$, while retaining a global receptive field. The hierarchical approach groups queries, keys, and values into $\mathcal{O}( \log n)$ levels of resolution, where groups at greater distances are increasingly larger in size and the weights to compute group quantities are learned. As such, the interaction between tokens far from each other is considered in lower resolution in an efficient hierarchical manner. 
+A key aspect of our approach is that we \emph{learn} the basis functions that compute group quantities.
+The overall complexity of FMA is $\mathcal{O}(n)$ or $\mathcal{O}(n \log n)$, depending on whether the queries are down-sampled or not. This multi-level divide-and-conquer strategy is inspired by fast summation methods from $n$-body physics and the Fast Multipole Method. 
+We perform evaluation on autoregressive and bidirectional language modeling tasks and compare our FMA model with other efficient attention variants on medium-size datasets.
+We find empirically that the Fast Multipole Transformer performs much better than other efficient transformers in terms of memory size and accuracy. The FMA mechanism has the potential to empower large language models with much greater sequence lengths, taking the full context into account in an efficient, naturally hierarchical manner during training and when generating long sequences.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+The Transformer deep learning architecture \citep{attention}  was originally introduced in the context of neural machine translation \citep{Bahdanau} and has been widely adopted in various research areas including {image recognition} \citep{vit}, music generation \citep{musictransformer}, speech recognition \citep{conformer}, and protein structure prediction \citep{alphafold}. In natural language processing, pre-trained Transformer-based language models have shown remarkable performance when combined with transfer
+learning \citep{bert, gpt3}. At the heart of Transformer models is the self-attention mechanism, which essentially computes weighted averages of inputs based on similarity scores obtained with inner products.
+
+\subsection{Self-attention Mechanism}
+
+The self-attention mechanism can be described as follows.
+Consider an input sequence of tokens with length $n$, for example, a sentence with $n$ words. Assume the sequence is represented by a matrix $X\in \mathbb{R}^{n\times {d}}$, where row $i$ of $X$ represents token $i$ embedded in a vector space with dimension $d$.
+The self-attention mechanism learns, for each token $i$, a query vector, a key vector and a value vector, each embedded in a vector space with dimension $\widehat{d}$. In the neural network, the matrices of queries $Q\in\mathbb{R}^{n\times \widehat{d}}$, keys $K\in\mathbb{R}^{n\times \widehat{d}}$ and values $V\in\mathbb{R}^{n\times \widehat{d}}$ are obtained from the input sequence embedding $X$ using learned linear projection matrices $W_Q,W_K,W_V\in \mathbb{R}^{d\times \widehat{d}}: Q=XW_Q$, $K=XW_K$, and $V=XW_V$.
+
+The \textit{(unnormalized) attention matrix} computes similarity scores between queries and keys:
+\begin{align}
+            C  = QK^\top, \label{C}
+\end{align}
+where matrix element $c_{ij}$ computes the similarity between the query vector of token $i$ and the key vector of token $j$. The \textit{scaled dot-product attention} is defined by
+    \begin{align}
+        \widetilde{X}=\mathtt{ATTN}(Q,K,V)={\mathtt{softmax}}{\left(\frac{C}{\sqrt{\widehat{d} \,}}\right)}V.  \label{attn}
+    \end{align}
+Here {$\mathtt{softmax}$} is the standard normalized exponential functional that is applied to each matrix row.
+Essentially, for each token $i$ the attention mechanism
+calculates a convex combination of the value vectors in the rows of $V$ with coefficients obtained
+from inner products between query and key vectors.
+In this way, self-attention converts the input sequence $X\in \mathbb{R}^{n\times {d}}$ into a transformed sequence $\widetilde{X}\in \mathbb{R}^{n\times \widehat{d}}$, where each new token is a weighted linear combination of the value vectors of all input tokens. This provides the Transformer architecture with a global receptive field. The weight matrices $W_Q,W_K,W_V$ are trained to minimize the loss function of the Transformer.
+Calculating the attention matrix according to Eq.\ (\ref{C}) requires $\mathcal{O}(n^2 \widehat{d})$
+time and $\mathcal{O}(n^2)$ space and becomes a major computational bottleneck for large $n$.
+
+Unlike recurrent neural network layers and convolutional layers, self-attention layers thus have a global receptive field, allowing each
+attention layer to capture long-range dependencies in the sequence.
+However, this advantage comes with time and space complexity of
+$\mathcal{O}(n^2)$ for inputs of length $n$, since self-attention computes $n$ similarity scores for each token. This quadratic cost limits the maximum context size feasible in practice. To address this problem, many methods focusing on improving the efficiency of self-attention have been proposed.
+One line of work is sparsification of the attention matrix with either fixed patterns \citep{sparse, longformer} or clustering methods \citep{reformer, Routing}.
+However, the ability of attention to capture information from the entire sequence is impaired by these modifications. 
+Another direction is to linearize attention
+either by kernelizing \citep{performer, linear}
+or replacing $\mathtt{softmax}$ with a linear operation \citep{zhen2022cosformer}, and avoiding to form the
+attention matrix explicitly.
+Although these approaches have complexity
+linear in $n$, their main disadvantage is that
+in autoregressive models they require recurrent rather than parallel training along the sequence length dimension \citep{tay2022efficient}.
+Since generating or translating long texts poses document-level challenges of \emph{discourse} such as lexical cohesion, coherence, anaphora, and deixis \citep{maruf2021survey}, the ability to include more context in language models is important.
+
+In this work, we propose an efficient  variant of attention called \textit{Fast Multipole Attention (FMA)}, which
+uses different resolutions according to the distance
+between the input and output tokens. 
+This multi-level strategy is inspired by fast summation methods from $n$-body physics and the Fast Multipole Method \citep{Barnes1986-ah,greengard1987fast, beatson1997short,Martinsson2015}.
+Specifically,
+ in the neighborhood of the query, attention is
+ calculated with keys and values in full resolution.
+ Moving away from the query, keys and values are 
+ grouped and downsampled (or \emph{summarized}) in increasingly larger groups using learned downsampling weights,
+ and attention is calculated
+ in lower resolution. The resulting 
+ attention matrix has a hierarchical structure.
+ FMA preserves the global receptive field of full attention
+ and has an overall complexity of $\mathcal{O}(n\log n)$ or $\mathcal{O}(n)$, depending on whether the queries are
+downsampled or not. It
+ can be used in both autoregressive and bidirectional settings, as used, for example, in the GPT family and BERT family of language models, respectively.
+{Our work is most similar to two other recently proposed hierarchical attention mechanisms including the H-transformer \citep{zhu_h-transformer-1d_2021} and Multi-Resolution Analysis (MRA) attention \citep{zeng2022multi}. However, there are key differences that will be discussed later in this paper, and our method substantially outperforms H-transformer and MRA in realistic language modeling tasks.}
+
+ The motivation behind the divide-and-conquer strategy of FMA is not just an efficient computational technique to make the memory and computation cost of large context sizes manageable; the multilevel strategy is also a natural hierarchical way to handle large context sizes that intuitively makes sense for many applications. For example, when humans read books they don't remember the context provided by each individual word on previous pages or in previous chapters. Rather, they \emph{summarize} in their mind the context of what they have read, with more detail for recent pages than for earlier chapters. Similarly, when human authors write books, they don't keep the detailed context of every previous word in mind, but they work with a summarized context with a level of detail that, at least to some extent, can be assumed hierarchical-in-distance. 
+ FMA provides a natural hierarchical model for this summarization process that makes large context sizes manageable, both for humans and for language models. As such, FMA can be used to build a class of divide-and-conquer language models that enable large context sizes using a hierarchical context summarization mechanism.
+
+To evaluate the effectiveness of our method, we experiment on autoregressive and masked (bidirectional) language modeling tasks. We show that FMA can handle much longer sequences as it uses less memory and 
+floating point operations (FLOPs). In addition, we show that our FMA outperforms other efficient attention variants in terms of efficiency and efficacy.
+
+\subsection{Related Work}\label{sec:relatedwork}
+
+Reducing the asymptotic complexity of attention is crucial to scaling Transformer-based models for long inputs.
+ In this section, we summarize relevant works
+on improving the efficiency of attention and broadly divide them into the following categories.
+
+\textbf{Sparse patterns } 
+Local attention calculates entries on
+the diagonals or block diagonals of the attention matrix and has a linear cost. It is simple and widely used \citep{peterliu, sparse, etc, longformer,  bigbird}.
+Another pattern is strided attention, which computes entries of the attention matrix on dilated diagonals, as in \citep{sparse, longformer}. Strided attention can
+achieve a larger receptive span than
+local attention.
+Global tokens are another commonly used pattern. These tokens summarize information
+from the whole sequence and can be read by all output positions. They can be
+tokens within the input sequence \citep{sparse,longformer,  bigbird}  or auxiliary tokens \citep{etc, bigbird}. 
+
+\textbf{Clustering } 
+These approaches group inputs into clusters and compute attention within each cluster, in order to reduce the amount of computation. They are often based on the observation that the output of $\mathtt{softmax}$ is dominated by the largest inputs. In these works, k-means clustering \citep{Routing, clustering-based} and locality sensitive hashing \citep{reformer, clustered} are commonly used. ClusterFormer \citep{clusterformer} makes use of soft clustering by updating the word embeddings and the centroids simultaneously. 
+
+\textbf{Linearization }  Linearization aims to replace or approximate $\mathtt{softmax}$ with a linear operator to
+avoid forming the quadratic attention matrix explicitly. Linear Transformer \citep{linear} replaces the exponentiated dot-product $\exp{(q^\top k)}$ by $\phi(q)^\top\phi(k)$ with $\phi(\cdot)={\mathtt{elu}}(\cdot)+1$,
+where ${\mathtt{elu}(\cdot)}$ denotes the exponential linear unit activation function.
+Performer \citep{performer} and Random Feature Attention \citep{rfa} both use random
+features to define the kernel function $\phi$. cosFormer \citep{zhen2022cosformer} replaces
+{$\mathtt{softmax}$} with the {$\mathtt{ReLU}$} function followed by a cosine re-weighting mechanism that encourages locality. A drawback of linearization methods is that during autoregressive training, they need to be run
+recurrently, instead of via the more efficient teacher forcing approach 
+\citep{tay2022efficient}.
+FMMformer \citep{nguyen2021fmmformer} presents a 2-level method where the coarse low-rank approximation uses linearization.
+
+\textbf{Downsampling } Memory-compressed attention \citep{peterliu}
+downsamples keys and values using convolution kernels of size 3 with stride 3. Although the memory
+cost is reduced by a factor of 3, it scales quadratically in $n$. Linformer \citep{linformer} projects keys and values from $\mathbb{R}^{n\times \widehat{d}}$ to $\mathbb{R}^{k\times \widehat{d}}$ 
+with linear projections, resulting in an attention matrix, {$QK^\top$,} of size $n\times k$.
+However, causal masking in such downsampling methods that mix past and future is difficult.
+
+\textbf{Hierarchical transformer}
+Our work is most closely related to the recently proposed Hierarchical matrix transformer (H-transformer) \citep{zhu_h-transformer-1d_2021}, which approximates self-attention with a local+global (near-field+far-field) decomposition, and uses $\mathcal{O}( \log n)$ levels of resolution recursively to obtain $\mathcal{O}(n)$ efficiency in memory and time, while retaining high approximation accuracy. It uses fixed averaging between levels,
+whereas in FMA the downsampling operator is learned. 
+We compare FMA and H-transformer empirically in Sec.\ \ref{exp}, and our method substantially outperforms H-transformer.
+Also, the similarities and differences between our Fast Multipole approach and H-transformer will be explained in more detail in Sec.\ \ref{sec:htransformer}.
+
+\textbf{Multi-resolution attention} The Multi-Resolution Analysis (MRA) attention of \citep{zeng2022multi} is another related approach. MRA attention \citep{zeng2022multi} {\em adaptively} chooses higher recursive resolution where the attention scores are the largest in the attention matrix (with higher resolution not necessarily occurring closer to the diagonal). The downsamping weights are kept fixed. Multi-resolution analysis can be seen as an {\em adaptive} generalization of the fast multipole method \citep{beylkin1996wavelets}. 
+However, adaptive multi-resolution methods as in \citep{zeng2022multi} tend to be much more complicated and ad-hoc, and it is hard to make them effective. On the other hand, our FMA is a much simpler, more principled and parsimonious algorithm. In addition, MRA of \citep{zeng2022multi} is only evaluated on bidirectional tasks, while our FMA is applied effectively to both bidirectional (see Sec.\ \ref{exp2}) and autoregressive tasks (see Sec.\ \ref{exp1}).
+We find that our FMA results for language modelling have substantially better accuracy than the MRA attention from \citep{zeng2022multi}. 
+
+\ \\
+The rest of this paper is organized as follow.
+In Section \ref{sec:FMA} we describe our new Fast Multipole Attention (FMA) mechanism in detail and discuss its implementation and computational complexity. Section \ref{exp} describes medium-size computational experiments for autoregressive and bidirectional language models, showing that our FMA method enables long sequence lengths with complexity $\mathcal{O}(n \log n)$ or $\mathcal{O}(n)$ while retaining high accuracy, substantially outperforming other efficient transformers in realistic language modeling tasks. Section \ref{sec:conc} 
+concludes and discusses further research directions.
+
+
+
+\section{Fast Multipole Attention}
+
+
+\subsection{The Fast Multipole Attention Mechanism}
+
+Fast Multipole Attention considers the input sequence at different resolutions. In the neighborhood of the query, the dot-product attention is evaluated directly. For each query, distant keys and values are divided into groups and a \emph{summarization} is computed for each group via downsampling. The downsampled key vector is used for calculating the attention score, which later is multiplied with the downsampled value vector to obtain the attention output.
+By splitting the entire sequence into a tree of intervals, FMA achieves $\mathcal{O}(n\log n)$ space and time complexity with respect to the sequence length and hierarchical summarization. {When the queries are also downsampled, we obtain an $\mathcal{O}(n)$ version of FMA, named FMA-linear.} 
+
+Fig. \ref{row} demonstrates the intuition behind FMA. 
+The influence of the context sequence on token $i$ is computed in a multi-level way. First, the tokens in the sequence are divided between the immediate neighborhood of $i$ and the rest of the sequence. The influence of the tokens near $i$ (level 0) is computed using full attention. Next, the remaining tokens are divided between the level-1 tokens and the further-away tokens, and the influence of the level-1 tokens is computed using level-1 summarization. This divide-and-conquer strategy is repeated for all subsequent increasingly coarser levels, resulting in an efficient algorithm with complexity $\mathcal{O}(n \log n)$. 
+The rest of this section will describe FMA in detail.
+
+\begin{figure}[htbp]
+  \centering
+    \includegraphics[width=0.8\textwidth]{figures/fma1.png}
+    \caption{Top: full attention. All pairwise interactions are computed. Bottom:
+FMA with 3 levels and group size $m=2$. In the neighborhood of a token $i$, attention is computed in full. Tokens far away from $i$ are grouped and downsampled/summarized. The red, green, and purple blocks correspond to the fine level, the first coarse level, and the second coarse level, respectively. }
+\label{row}
+\end{figure}
+\begin{figure}[htbp]
+  \centering
+\includegraphics[width=0.6\textwidth]{figures/fma2.png}
+\caption{The structure of the FMA attention matrix $\widetilde{C}\approx Q K^\top$ with 3 levels for group size $m=2$ and approximation rank $p=1$. The highlighted row corresponds to Fig. \ref{row}. Dots represent downsampled query-key products.}
+\label{attnmat}
+\end{figure}
+
+\textbf{Tree Structure }
+To describe our FMA algorithm, we introduce a hierarchical tree structure for dividing
+the input sequence.
+We denote the fine-level group size by $m$, which is chosen small compared to $n$. 
+For simplicity, we assume $n$ is divisible by $m$ and $n/m$ is a power of 2. 
+On the fine level, level $0$, tokens are considered individually. Level $1$  contains intervals of size $m_1\coloneqq m$.
+The interval size on the $\ell$-th
+level is $m_\ell\coloneqq 2^{\ell-1}m$ for $\ell=1,\dots,L$, where $L\coloneqq\log_{2}(n/m)-1$. The coarsest level, level $L$, contains intervals of size $n/4$.
+
+\textbf{Downsampling Keys and Values }
+On level $\ell=1,\dots,L$, FMA downsamples each interval of size $m_\ell\times d$ in $X$ to $p\times d$, 
+where $p$ is the approximation rank of the off-diagonal blocks and $m$ is divisible by $p$. When $p=1$, each group is summarized by one vector. In our numerical results, we use $p=4$ summary vectors for each block to increase the accuracy of approximation (similar to using multiple heads in attention, or retaining multiple terms in the truncated multipole expansion for the original fast multipole method \citep{greengard1987fast,beatson1997short}).
+We use the downsampled $X$ to compute the downsampled $K$ and $V$: $K=X W_K$ and $V=X W_V$.
+We apply 1D convolution with kernel size $m_\ell$ and stride $m_\ell$ separately for every component of the $d$-dimensional vectors in the rows of $X$. 
+At level $\ell$, the 1D convolution learns $pd$ convolution kernels of size ${m_\ell}$. This produces $p$ summarized vectors of size ${m_\ell}$ in each group.
+Therefore, the downsampled key/value matrices, $K^{(\ell)}$ and
+$V^{(\ell)}$, have size $np/m_\ell\times \widehat{d}$.
+
+\textbf{Notation}
+Throughout the remainder of this paper, indices start from 0. We use subscript indices to indicate rows of matrices.
+
+\textbf{Hierarchical Matrix Structure} We introduce a hierarchical structure for an $n\times n$ matrix with the following non-overlapping index sets:
+\begin{align}
+    &I_0 &=\quad\quad   &\bigg\{(i,j) \in \left\{0,\dots,n-1\right\}^2:\left\lfloor\frac{i}{m}\right\rfloor - \left\lfloor\frac{j}{m}\right\rfloor \in [-1,1] \bigg\},\label{I0}\\
+     &I_\ell &=\quad \quad &\bigg\{(i,j)\in \left\{0,\dots,n-1\right\}^2: \left\lfloor\frac{i}{m_\ell}\right\rfloor - \left\lfloor\frac{j}{m_\ell}\right\rfloor \in \{\pm 2, \pm 3\} \bigg\}, \label{Il}
+\end{align}
+for $\ell=1,...,L.$ Here the indices start from 0. The index set $I_0$ corresponds to the block tri-diagonals with blocks of size $m$ and the sets $ I_\ell$ with $\ell\geq 1$ correspond to block super-diagonals and sub-diagonals.
+Fig. \ref{attnmat} illustrates the structure of $I_0$ (red), $I_1$ (green), and  $I_2$ (purple) for $L=2$ {and $m=2$.}
+
+\textbf{Fast Multipole Attention } With the hierarchical matrix structure and downsampled keys and values, FMA computes the attention scores at different levels. 
+For a pair $(i,j)\in I_0$, the attention score is calculated with the original $Q$ and $K$. For a pair $(i,j)\in I_\ell$ with $1\leq \ell\leq L$ , the attention score is calculated on level $\ell$ using $Q$ and $K^{(\ell)}$. Specifically, the attention scores are computed via
+\begin{align}
+    \widetilde{C}_{i,j} =
+    \begin{cases}
+         Q_i K_j^\top  &\quad \left(i,j\right)\in I_0,\\
+         Q_i \left(K^{(1)}_{\left\lfloor jp/m_1 \right\rfloor}\right)^\top &\quad \left(i,j\right)\in I_1,\\
+        \dots  \\
+         Q_i \left(K^{(L)}_{\left\lfloor jp/m_L \right\rfloor}\right)^\top &\quad \left(i,j\right)\in I_L.
+      \end{cases}\label{cij}
+\end{align}
+Here, $Q_i, K_j^{(\ell)}$ denote the $i$th row in $Q$ and the $j$th row in $K^{(\ell)}$, respectively.
+ According to Eq.\ (\ref{cij}), a coarse-level block of size $m_\ell\times m_\ell$ consists of $p$ unique columns, each repeated for $m_\ell/p$ times. Therefore, it can be seen as
+ a rank-$p$ approximation of the corresponding block in the dense attention matrix. The matrix 
+  $\widetilde{C}$ has a hierarchical structure as shown in Fig. \ref{attnmat}.
+  In causal attention,
+  the upper triangular part of $\widetilde{C}$ is set to $-\infty$.
+ In practice, the full $n\times n$ matrix $\widetilde{C}$ is not formed. Instead, each unique column in the coarse-level blocks is only calculated and stored once. 
+
+To normalize attention scores, {$\mathtt{softmax}$} is applied to each row of $\widetilde{C}$,
+\begin{align}
+    \widetilde{A}_{i} = \mathtt{softmax}\left(\widetilde{C}_{i}/\sqrt{\widehat{d \,}}\right), \quad { i=0,\ldots, n-1.}
+    \label{softmax}
+\end{align}
+{Next,} the attention output on each level is computed by multiplying the normalized attention scores with the values at corresponding locations, and each row of the bidrectional FMA is the sum of contributions from each level:
+\begin{align}
+    \widetilde{X}_i= \underbrace{\sum_{j:(i,j)\in I_0}\widetilde{A}_{i,j}V_j}_{\text{fine level}}  +
+    \underbrace{
+    \sum_{\ell=1}^{L}\sum_{j:(i,j)\in I_\ell}\widetilde{A}_{i,j}V^{(\ell)}_{\left\lfloor jp/m_\ell \right\rfloor}
+    }_{\text{coarse levels}},\quad { i=0,\ldots,n-1.} \label{output}
+\end{align}
+Note that the inner sum in Eq.\ (\ref{output}) with $m_\ell$ terms contains only $p$ different terms (that are each repeated $m_\ell/p$ times), and hence this sum is implemented efficiently as a sum of $p$ terms. 
+
+\subsection{Implementation and Complexity}\label{implementation}
+Fig. \ref{overview} gives an overview of FMA with three levels.
+\begin{figure}[hbtp!]
+    \centering
+    \resizebox{\textwidth}{!}
+    {
+
+\begin{tikzpicture}[
+xmat/.style = {rectangle, draw=black, fill=purple!5,
+minimum width=13mm, minimum height=18mm,rounded corners=2.5pt},
+q/.style = {rectangle, draw=black, fill=purple!5,
+minimum width=10mm, minimum height=18mm,rounded corners=2.5pt},
+q1/.style = {rectangle, draw=black, fill=cyan!5,
+minimum width=10mm, minimum height=14mm,rounded corners=2.5pt},
+q2/.style = {rectangle, draw=black, fill=blue!5,
+minimum width=10mm, minimum height=12mm,rounded corners=2.5pt},
+c/.style = {rectangle, draw=black,%purple!60,
+minimum width=18mm, minimum height=18mm},
+c1/.style = {rectangle, draw=black,%cyan!60,
+minimum width=18mm, minimum height=18mm},
+c2/.style = {rectangle, draw=black,%blue!60,
+minimum width=18mm, minimum height=18mm},
+y1/.style = {rectangle, draw=black, fill=cyan!5,
+minimum width=10mm, minimum height=18mm,rounded corners=2.5pt},
+y2/.style = {rectangle, draw=black, fill=blue!5,
+minimum width=10mm, minimum height=18mm,rounded corners=2.5pt},
+diag_c/.pic={ \draw[draw=black,fill=purple!5] (0,0) rectangle ++(0.225, 0.225);},
+diag_c1/.pic={ \draw[draw=black,fill=cyan!5] (0,0) rectangle ++(0.225, 0.225);},
+diag_c2/.pic={ \draw[draw=black,fill=blue!5] (0,0) rectangle ++(0.45, 0.45);},
+intersection/.style = {circle,fill=black,inner sep=0pt,minimum size=0.07cm},
+]
+\node[q,](K){$K$};
+\node[q1,below right=-0.5cm and 0.5cm of K ] (K1){$K^{(1)}$};
+\node[q2,below=0.05cm of K1] (K2){$K^{(2)}$};
+
+\node[q, above= 0.25cm of K] (Q){$Q$};
+
+\node[q, below =1.6cm of K] (V){$V$};
+\node[q1,below right= -0.5cm and 0.5cm of V ] (V1){$V^{(1)}$};
+\node[q2,below=0.05cm of V1] (V2){$V^{(2)}$};
+
+\coordinate[above right= -0.235cm and 2.51cm of Q]  (CC12);
+\coordinate[above right= -0.235cm and 2.735cm of Q]  (CC13);
+\coordinate[above right= -0.46cm and 2.51cm of Q]  (CC21);
+\coordinate[above right= -0.46cm and 2.735cm of Q]  (CC22);
+\coordinate[above right= -0.46cm and 2.96cm of Q]  (CC23);
+\coordinate[above right= -0.685cm and 2.735cm of Q]  (CC31);
+\coordinate[above right= -0.685cm and 2.96cm of Q]  (CC32);
+\coordinate[above right= -0.685cm and 3.185cm of Q]  (CC33);
+\coordinate[above right= -0.91cm and 2.96cm of Q]  (CC41);
+\coordinate[above right= -0.91cm and 3.185cm of Q]  (CC42);
+\coordinate[above right= -0.91cm and 3.41cm of Q]  (CC43);
+\coordinate[above right= -1.135cm and 3.185cm of Q]  (CC51);
+\coordinate[above right= -1.135cm and 3.41cm of Q]  (CC52);
+\coordinate[above right= -1.135cm and 3.635cm of Q]  (CC53);
+\coordinate[above right= -1.36cm and 3.41cm of Q]  (CC61);
+\coordinate[above right= -1.36cm and 3.635cm of Q]  (CC62);
+\coordinate[above right= -1.36cm and 3.86cm of Q]  (CC63);
+\coordinate[above right= -1.585cm and 3.635cm of Q]  (CC71);
+\coordinate[above right= -1.585cm and 3.86cm of Q]  (CC72);
+\coordinate[above right= -1.585cm and 4.085cm of Q]  (CC73);
+\coordinate[above right= -1.81cm and 3.86cm of Q]  (CC81);
+\coordinate[above right= -1.81cm and 4.085cm of Q]  (CC82);
+\node[c, right= 2.5cm of Q](C) {};
+\draw (CC12) pic {diag_c};
+\draw (CC13) pic {diag_c};
+\draw (CC21) pic {diag_c};
+\draw (CC22) pic {diag_c};
+\draw (CC23) pic {diag_c};
+\draw (CC31) pic {diag_c};
+\draw (CC32) pic {diag_c};
+\draw (CC33) pic {diag_c};
+\draw (CC41) pic {diag_c};
+\draw (CC42) pic {diag_c};
+\draw (CC43) pic {diag_c};
+\draw (CC51) pic {diag_c};
+\draw (CC52) pic {diag_c};
+\draw (CC53) pic {diag_c};
+\draw (CC61) pic {diag_c};
+\draw (CC62) pic {diag_c};
+\draw (CC63) pic {diag_c};
+\draw (CC71) pic {diag_c};
+\draw (CC72) pic {diag_c};
+\draw (CC73) pic {diag_c};
+\draw (CC81) pic {diag_c};
+\draw (CC82) pic {diag_c};
+\node[below right= 0 and 2.9cm of Q, anchor=south](Cname) {$\widetilde{C}^{(0)}$};
+
+\coordinate[above right= -0.235cm and 2.96cm of K]  (CC112);
+\coordinate[above right= -0.235cm and 3.185cm of K]  (CC113);
+\coordinate[above right= -0.46cm and 3.185cm of K]  (CC123);
+\coordinate[above right= -0.685cm and 2.51cm of K]  (CC131);
+\coordinate[above right= -0.685cm and 3.41cm of K]  (CC132);
+\coordinate[above right= -0.685cm and 3.635cm of K]  (CC133);
+\coordinate[above right= -0.91cm and 2.51cm of K]  (CC141);
+\coordinate[above right= -0.91cm and 2.735cm of K]  (CC142);
+\coordinate[above right= -0.91cm and 3.635cm of K]  (CC143);
+\coordinate[above right= -1.135cm and 2.96cm of K]  (CC151);
+\coordinate[above right= -1.135cm and 3.86cm of K]  (CC152);
+\coordinate[above right= -1.135cm and 4.085cm of K]  (CC153);
+\coordinate[above right= -1.36cm and 2.96cm of K]  (CC161);
+\coordinate[above right= -1.36cm and 3.185cm of K]  (CC162);
+\coordinate[above right= -1.36cm and 4.085cm of K]  (CC163);
+\coordinate[above right= -1.585cm and 3.41cm of K]  (CC171);
+\coordinate[above right= -1.81cm and 3.41cm of K]  (CC181);
+\coordinate[above right= -1.81cm and 3.635cm of K]  (CC182);
+\node[c1, below= 0.25cm of C](C1) {};
+\draw (CC112) pic {diag_c1};
+\draw (CC113) pic {diag_c1};
+\draw (CC123) pic {diag_c1};
+\draw (CC131) pic {diag_c1};
+\draw (CC132) pic {diag_c1};
+\draw (CC133) pic {diag_c1};
+\draw (CC141) pic {diag_c1};
+\draw (CC142) pic {diag_c1};
+\draw (CC143) pic {diag_c1};
+\draw (CC151) pic {diag_c1};
+\draw (CC152) pic {diag_c1};
+\draw (CC153) pic {diag_c1};
+\draw (CC161) pic {diag_c1};
+\draw (CC162) pic {diag_c1};
+\draw (CC163) pic {diag_c1};
+\draw (CC171) pic {diag_c1};
+\draw (CC181) pic {diag_c1};
+\draw (CC182) pic {diag_c1};
+\node[below right= 0 and 2.9cm of K, anchor=south](C1name) {$\widetilde{C}^{(1)}$};
+
+\node[c2, below= 0.25cm of C1](C2) {};
+\coordinate[above right= -0.46cm and -0.91cm of C2]  (CC212);
+\coordinate[above right= -0.46cm and -0.46cm of C2]  (CC213);
+\coordinate[above right= -0.91cm and -0.46cm of C2]  (CC223);
+\coordinate[above right= -1.36cm and -1.81cm of C2]  (CC231);
+\coordinate[above right= -1.81cm and -1.81cm of C2]  (CC241);
+\coordinate[above right= -1.81cm and -1.36cm of C2]  (CC242);
+\draw (CC212) pic {diag_c2};
+\draw (CC213) pic {diag_c2};
+\draw (CC223) pic {diag_c2};
+\draw (CC231) pic {diag_c2};
+\draw (CC241) pic {diag_c2};
+\draw (CC242) pic {diag_c2};
+\node[below right= 0 and -0.4cm of C2, anchor=south](C2name) {$\widetilde{C}^{(2)}$};
+
+\coordinate[above right= -0.235cm and 1.01cm of C]  (AA12);
+\coordinate[above right= -0.235cm and 1.235cm of C]  (AA13);
+\coordinate[above right= -0.46cm and 1.01cm of C]  (AA21);
+\coordinate[above right= -0.46cm and 1.235cm of C]  (AA22);
+\coordinate[above right= -0.46cm and 1.46cm of C]  (AA23);
+\coordinate[above right= -0.685cm and 1.235cm of C]  (AA31);
+\coordinate[above right= -0.685cm and 1.46cm of C]  (AA32);
+\coordinate[above right= -0.685cm and 1.685cm of C]  (AA33);
+\coordinate[above right= -0.91cm and 1.46cm of C]  (AA41);
+\coordinate[above right= -0.91cm and 1.685cm of C]  (AA42);
+\coordinate[above right= -0.91cm and 1.91cm of C]  (AA43);
+\coordinate[above right= -1.135cm and 1.685cm of C]  (AA51);
+\coordinate[above right= -1.135cm and 1.91cm of C]  (AA52);
+\coordinate[above right= -1.135cm and 2.135cm of C]  (AA53);
+\coordinate[above right= -1.36cm and 1.91cm of C]  (AA61);
+\coordinate[above right= -1.36cm and 2.135cm of C]  (AA62);
+\coordinate[above right= -1.36cm and 2.36cm of C]  (AA63);
+\coordinate[above right= -1.585cm and 2.135cm of C]  (AA71);
+\coordinate[above right= -1.585cm and 2.36cm of C]  (AA72);
+\coordinate[above right= -1.585cm and 2.585cm of C]  (AA73);
+\coordinate[above right= -1.81cm and 2.36cm of C]  (AA81);
+\coordinate[above right= -1.81cm and 2.585cm of C]  (AA82);
+\node[c, right= 1cm of C](A) {};
+\draw (AA12) pic {diag_c};
+\draw (AA13) pic {diag_c};
+\draw (AA21) pic {diag_c};
+\draw (AA22) pic {diag_c};
+\draw (AA23) pic {diag_c};
+\draw (AA31) pic {diag_c};
+\draw (AA32) pic {diag_c};
+\draw (AA33) pic {diag_c};
+\draw (AA41) pic {diag_c};
+\draw (AA42) pic {diag_c};
+\draw (AA43) pic {diag_c};
+\draw (AA51) pic {diag_c};
+\draw (AA52) pic {diag_c};
+\draw (AA53) pic {diag_c};
+\draw (AA61) pic {diag_c};
+\draw (AA62) pic {diag_c};
+\draw (AA63) pic {diag_c};
+\draw (AA71) pic {diag_c};
+\draw (AA72) pic {diag_c};
+\draw (AA73) pic {diag_c};
+\draw (AA81) pic {diag_c};
+\draw (AA82) pic {diag_c};
+\node[below right= 0 and -1.4cm of A, anchor=south](Aname) {$\widetilde{A}^{(0)}$};
+
+\coordinate[above right= -0.235cm and 1.46cm of C1]  (AA112);
+\coordinate[above right= -0.235cm and 1.685cm of C1]  (AA113);
+\coordinate[above right= -0.46cm and 1.685cm of C1]  (AA123);
+\coordinate[above right= -0.685cm and 1.01cm of C1]  (AA131);
+\coordinate[above right= -0.685cm and 1.91cm of C1]  (AA132);
+\coordinate[above right= -0.685cm and 2.135cm of C1]  (AA133);
+\coordinate[above right= -0.91cm and 1.01cm of C1]  (AA141);
+\coordinate[above right= -0.91cm and 1.235cm of C1]  (AA142);
+\coordinate[above right= -0.91cm and 2.135cm of C1]  (AA143);
+\coordinate[above right= -1.135cm and 1.46cm of C1]  (AA151);
+\coordinate[above right= -1.135cm and 2.36cm of C1]  (AA152);
+\coordinate[above right= -1.135cm and 2.585cm of C1]  (AA153);
+\coordinate[above right= -1.36cm and 1.46cm of C1]  (AA161);
+\coordinate[above right= -1.36cm and 1.685cm of C1]  (AA162);
+\coordinate[above right= -1.36cm and 2.585cm of C1]  (AA163);
+\coordinate[above right= -1.585cm and 1.91cm of C1]  (AA171);
+\coordinate[above right= -1.81cm and 1.91cm of C1]  (AA181);
+\coordinate[above right= -1.81cm and 2.135cm of C1]  (AA182);
+\node[c1, right= 1cm of C1](A1) {};
+\draw (AA112) pic {diag_c1};
+\draw (AA113) pic {diag_c1};
+\draw (AA123) pic {diag_c1};
+\draw (AA131) pic {diag_c1};
+\draw (AA132) pic {diag_c1};
+\draw (AA133) pic {diag_c1};
+\draw (AA141) pic {diag_c1};
+\draw (AA142) pic {diag_c1};
+\draw (AA143) pic {diag_c1};
+\draw (AA151) pic {diag_c1};
+\draw (AA152) pic {diag_c1};
+\draw (AA153) pic {diag_c1};
+\draw (AA161) pic {diag_c1};
+\draw (AA162) pic {diag_c1};
+\draw (AA163) pic {diag_c1};
+\draw (AA171) pic {diag_c1};
+\draw (AA181) pic {diag_c1};
+\draw (AA182) pic {diag_c1};
+\node[below right= 0 and -1.4cm of A1, anchor=south](A1name) {$\widetilde{A}^{(1)}$};
+\node[c2, right= 1cm of C2](A2) {};
+\coordinate[above right= -0.46cm and -0.91cm of A2]  (AA212);
+\coordinate[above right= -0.46cm and -0.46cm of A2]  (AA213);
+\coordinate[above right= -0.91cm and -0.46cm of A2]  (AA223);
+\coordinate[above right= -1.36cm and -1.81cm of A2]  (AA231);
+\coordinate[above right= -1.81cm and -1.81cm of A2]  (AA241);
+\coordinate[above right= -1.81cm and -1.36cm of A2]  (AA242);
+\draw (AA212) pic {diag_c2};
+\draw (AA213) pic {diag_c2};
+\draw (AA223) pic {diag_c2};
+\draw (AA231) pic {diag_c2};
+\draw (AA241) pic {diag_c2};
+\draw (AA242) pic {diag_c2};
+\node[below right= 0 and -0.4cm of A2, anchor=south](A2name) {$\widetilde{A}^{(2)}$};
+
+\node[intersection, right=0.25cm of C1](softmax1){};
+\node[intersection, left=0.25cm of A1](softmax2){};
+
+\node[q, below right=-1cm and 1cm of A](Y) {$\widetilde{X}^{(0)}$};
+\node[y1, below right=-1cm and 1cm of A1](Y1) {$\widetilde{X}^{(1)}$};
+\node[y2, below right=-1cm and 1cm of A2](Y2) {$\widetilde{X}^{(2)}$};
+
+\node[intersection, left=0.75cm of Y](out){};
+\node[intersection, left=0.5cm of Y1](out1){};
+\node[intersection, left=0.25cm of Y2](out2){};
+
+\node[q, right=0.8cm of Y1](Xp) {$\widetilde{X}$};
+\node[intersection, left=0.4cm of Xp](sumout){};
+\draw[->](K) |- (K1);
+\draw[rounded corners=5pt,->](K) --(K|-K2) node [pos=0.15,left] {downsample}-> (K2);
+\draw[->](V) |- (V1);
+\draw[rounded corners=5pt,->](V) --(V|-V2) node [pos=0.15,left] {downsample}-> (V2);
+
+\draw[->](Q) -- (C);
+\node[intersection, left=of C](kc){};
+\draw[rounded corners=5pt,-](K) -| (kc);
+
+\node[intersection, left=0.75cm of C1](kc1){};
+\draw[rounded corners=5pt,->]([yshift=-1cm]Q) -| (kc1) -> (C1);
+\draw[rounded corners=5pt,-](K1) -| (kc1.north);
+
+\node[intersection, left=0.5cm of C2](kc2){};
+\draw[rounded corners=5pt,->]([yshift=-2cm]Q) -| (kc2) -> (C2);
+\draw[rounded corners=5pt,-](K2) -| (kc2.north);
+
+\draw[rounded corners=5pt,-] (C) -| (softmax1.north);
+\draw[-] (C1) -- (softmax1);
+\draw[rounded corners=5pt,-] (C2) -| (softmax1.north);
+\draw[-] (softmax1)--(softmax2) node[above,pos=0.5]{softmax};
+\draw[rounded corners=5pt,->] (softmax2.north)|-(A);
+\draw[->] (softmax2)--(A1);
+\draw[rounded corners=5pt,->] (softmax2.north)|-(A2);
+
+\draw[rounded corners=5pt,-] (A) -| (out.north);
+\draw[rounded corners=5pt,-] (A1) -| (out1.north);
+\draw[rounded corners=5pt,-] (A2) -| (out2.north);
+\draw[rounded corners=5pt,-] (V) -| (out.north);
+\draw[rounded corners=5pt,-] (V1) -| (out1.north);
+\draw[rounded corners=5pt,-] (V2) -| (out2.north);
+\draw[->] (out.east)--(Y);
+\draw[->] (out1)--(Y1);
+\draw[->] (out2.east)--(Y2);
+
+\draw[rounded corners=5pt,-] (Y) -| (sumout);
+\draw[-] (Y1) -- (sumout.west);
+\draw[rounded corners=5pt,-] (Y2) -| (sumout);
+\draw[->] (sumout)--(Xp);
+
+\end{tikzpicture}
+
+    }
+    \caption{Overview of bidirectional FMA with three levels.}
+    \label{overview}
+\end{figure}
+Implementing Eq.\ (\ref{I0}) - Eq.\ (\ref{output}) efficiently requires efficient block sparse matrix multiplication and storage in order to avoid computing and storing the $\mathcal{O}(n
+^2)$ attention matrix.
+To the best of our knowledge,
+there is no native block sparse matrix multiplication routine with back propagation
+available in PyTorch.
+Therefore, we have implemented custom CUDA kernels to perform the sparse matrix multiplication routine for diagonal/block diagonal sparse matrices and to compute the derivatives with respect to those sparse matrices.
+The code of FMA is fully in PyTorch, and CUDA code for the sparse matrix
+multiplication is compiled by the Apache Tensor Virtual Machine (TVM) deep learning compiler
+\ref{tvm} from PyTorch expressions, which are easy to
+understand and modify.
+
+\ref{tvm}.
+
+The cost of each step in our FMA implementation is as follows:
+\begin{enumerate}
+    \item Calculate $K^{(\ell)}$ and $V^{(\ell)}$ on each level by 1D convolution. This requires $\mathcal{O}(npd\log (n/m))$ time and $\mathcal{O}(npd/m)$ space. (Note that $d=\widehat{d} \ \times$ the number of heads.)
+    \item Calculate dot-products between queries and keys on level $\ell$ at locations in
+    $I_\ell$ as in (\ref{cij}). Then apply $\mathtt{softmax}$ across all levels. In each coarse-level block, each unique column is only computed and stored once. This step requires
+        $\mathcal{O}(mnd + npd\log (n/m))$ time and
+        $\mathcal{O}(mn + np\log (n/m)) $ space.
+    \item Calculate attention output on each level and sum up the attention results on each level as in (\ref{output}).  This requires $\mathcal{O}(mnd + npd\log (n/m))$ time and
+        $\mathcal{O}(nd) $ space.
+\end{enumerate}
+The overall time and space complexity are $\mathcal{O}(mnd + npd\log (n/m))$ and $\mathcal{O}(mn + np\log (n/m)) $, where step 2 is dominant.
+
+
+
+\section{Experiments}
+
+In this section, we experimentally analyze the performance of the proposed method. First, 
+we evaluate FMA through autoregressive language modeling on the \texttt{enwik-8} dataset (Sec.\ \ref{exp1}). Then we evaluate FMA in the bidirectional setting
+through masked language modeling on \texttt{Wikitext-103} (Sec.\ \ref{exp2}).
+These are benchmark datasets for evaluating language models. For example, they are used in \citep{reformer, longformer, zhen2022cosformer}.
+In both tasks, we compare FMA with efficient attention variants used in other works focusing
+on improving the efficiency of attention for long sequences, including Memory-compressed attention  \citep{peterliu}, Reformer \citep{reformer}, linear attention \citep{linear}, BigBird \citep{bigbird}, H-transformer \citep{zhu_h-transformer-1d_2021}, and MRA \citep{zeng2022multi}.
+The context size varies from 512 to 4K.
+{For fair comparison}, we use the same transformer architecture for all attention variants. 
+Finally, in Sec.\ \ref{exp3}, we show a comparative analysis of memory and time cost to further illustrate the ability of FMA to scale efficiently.
+The hyperparameters are tuned for the full attention to achieve the best accuracy, and the same parameters are used for all efficient transformers as well. Following common practice, the learning rate increases linearly from 0 to 0.0006 over 200 warmup iterations. Then a cosine learning rate schedule \citep{SGDR} reduces the learning rate from 0.0006 to 0.00006 over a total of 60,000 iterations. The batch size is 64, the weight decay coefficient is 0.4 and the dropout probability is 0.3.
+There are two hyperparameters in FMA: the fine level group size $m$ and the
+approximation rank $p$. The number of levels is $\log_2
+(n/m)$, determined by $m$ and $n$.
+We use $p=4$ in our experiments for Fast Multipole Attention with $m = 64$ for $n = 512, 1024$ and $m = 128$ for longer sequences. 
+In general, increasing
+$m$ and $p$ leads to better accuracy at the cost of larger computational resources (see Sec.\ \ref{ablation}).
+For Reformer, we use two rounds of hashing and the number of buckets is set to the nearest power of two that is greater than or equal to the square root of the input size.
+We set the numerical rank to be 16 in H-transformer.
+We conduct the experiments on one NVIDIA Tesla A100 with 80GB of memory and use the $\mathtt{fairseq}$ toolkit \citep{fairseq}. 
+
+\subsection{Autoregressive Language Modeling} \label{exp1}
+
+\begin{table}[h!]
+\footnotesize
+\centering
+
+\begin{tabular}{lcccc } 
+ \toprule
+ model  & \makecell{context\\size $n$} & bpc(test)$\downarrow$ & \makecell{memory\\footprint} \\
+\midrule
+\rowcolor[gray]{0.9} Full  & 512 & 1.346 & 16.5 GB  \\
+\rowcolor[gray]{0.9} Compressed  & 512 & 1.439 & 13.5 GB \\
+  Reformer   & 512 & 1.372 & 15.5 GB  \\
+  Linear   & 512 & 1.424 & 38.2 GB  \\
+  BigBird  & 512 & 1.465 & 16.4 GB \\
+ H-transformer  & 512 & 1.853 & 12.3 GB  \\
+ FMA-m64-3lev & 512 & \textbf{1.353} & 11.6 GB  \\
+ FMA-linear-m64-3lev & 512 & 1.391 & \textbf{9.8 GB }  \\
+\midrule
+\rowcolor[gray]{0.9} Full  & 1024 & 1.236& 46.5 GB  \\
+\rowcolor[gray]{0.9} Compressed & 1024 & 1.351 & 27.4 GB   \\
+ Reformer  & 1024 & 1.271 & 31.8 GB \\
+  Linear  & 1024 &  1.343 & 74.9 GB  \\
+  BigBird  & 1024 & 1.345 & 23.1 GB  \\ 
+ H-transformer  & 1024 & 1.789 & 23.7 GB \\ 
+ FMA-m64-4lev  & 1024 & \textbf{1.256} & {21.6 GB} \\
+ FMA-linear-m64-4lev  & 1024 & {1.298} & \textbf{17.6 GB}   \\
+\midrule
+\rowcolor[gray]{0.9} Full & 2048 & 1.128 & 2$\times$71.5 GB \\
+\rowcolor[gray]{0.9} Compressed & 2048 & 1.276& 73.4 GB \\
+ H-transformer & 2048 & 1.684 & 38.4 GB \\
+ FMA-m128-4lev & 2048 & \textbf{1.220} & 48.2 GB  \\
+ FMA-linear-m128-4lev & 2048 & 1.244 & \textbf{34.1 GB}  \\
+\midrule
+\rowcolor[gray]{0.9} Full & 4096 & 1.091 & 8$\times$61.7 GB  \\
+ H-transformer  & 4096 & 1.535 & \textbf{66.0 GB}  \\
+ FMA-linear-m128-5lev & 4096 & \textbf{1.154} & 69.4 GB  \\
+ \bottomrule\\
+\end{tabular}
+\caption {\label{enwikresult}Autoregressive language modeling results on \texttt{enwik-8}. 
+With the same context size, FMA obtains lower bpc using less memory than other variants of {efficient} attention. For full attention we have to reduce the batch size and accumulate the gradient over batches to avoid GPU memory overflow, as listed in the accumulated memory use. Models with quadratic complexity are highlighted in gray. Bold numbers are best among the efficient transformers (not counting the $\mathcal{O}(n^2)$ transformers).}
+\end{table}
+We consider the
+\texttt{enwik-8} dataset \citep{enwik8}, which contains the first $10^8$ bytes of the English Wikipedia dump from 2006.  We train a character-level autoregressive language model that estimates the distribution of the next token given previous tokens. We use a transformer
+decoder as described in \citep{attention} with pre-normalization and learned positional embeddings,
+and replace the full attention
+with other attention variants to compare their performance. The model has 6 layers with embedding dimension $d$=768 and 12 attention heads, so that $\widehat{d}=d/12=64$.
+
+Table \ref{enwikresult} shows that with the same context size, FMA obtains a lower bits-per-character (bpc) measure using similar or less memory than other variants of efficient attention. Not surprisingly, full attention is more accurate than the efficient variants but requires quadratic memory which is unfeasible for long sequences. Also, FMA-linear uses less memory than FMA while achieving comparable bpc. 
+Models with quadratic complexity are highlighted in gray.
+Compared to H-transformer, FMA obtains dramatically better accuracy with smaller memory size. 
+
+It is also interesting to consider examples of FMA attention matrices generated in this language modeling task, as shown in Fig. \ref{fig:attn}. It can be seen that, in general, larger attention scores are concentrated along the diagonal, which is where FMA puts more resolution. At the same time, some strong long-distance connections also exist, which are captured at the group level by the FMA procedure.
+
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/step58400_batch8_layer2_head8.png}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/step58400_batch8_layer3_head8.png}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/step58400_batch17_layer4_head3.png}
+    \end{subfigure}
+    \caption{Some sample FMA attention matrices from various layers and heads for the autoregressive task of Table 1 with $n=1024$. The left, middle, and right panels represent a head from layer 2, 3 and 4, respectively.}
+    \label{fig:attn}
+\end{figure}
+
+\subsection{Bidirectional Language Model} \label{exp2}
+
+\begin{table}[htbp]
+\footnotesize
+\centering
+\begin{tabular}{l c c c } 
+ \toprule
+ model  &\makecell{context\\size $n$}& ppl(test)$\downarrow$ & \makecell{memory\\footprint}\\ 
+ \midrule
+\rowcolor[gray]{0.9} Full  & 512 & 9.21 & 15.4 GB\\
+  Reformer  & 512 & 11.03 & 14.6 GB\\
+   Linear  & 512 & 14.95 & 11.8 GB\\
+  MRA  & 512 & 11.82  & 11.1 GB\\
+  H-transformer  & 512 &  10.60 & 10.7 GB\\ 
+  FMA-m64-3lev  & 512 & \textbf{9.45} & 10.9 GB\\
+  FMA-linear-m64-3lev  & 512 & 10.78 & \textbf{8.2 GB}\\
+ \cmidrule(r){1-4}
+\rowcolor[gray]{0.9} Full & 1024 & 8.89 & 36.8 GB\\
+  Reformer  & 1024 & 10.56  & 27.4 GB\\
+   Linear  & 1024 & 14.24 & 22.0 GB\\
+  MRA  & 1024 &  10.20 & 17.5 GB\\
+  H-transformer  & 1024 &  9.81 & 16.9 GB\\
+  FMA-m64-4lev & 1024 &  \textbf{9.06} & 18.6 GB\\
+  FMA-linear-m64-4lev & 1024 &  10.13 & \textbf{15.6 GB}\\ 
+ \cmidrule(r){1-4}
+\rowcolor[gray]{0.9} Full & 2048 & 8.70 & 2$\times$56.5 GB\\
+  Reformer & 2048 &  9.90 & 49.2 GB\\
+  Linear & 2048 & 14.06 & 48.1 GB\\
+    MRA & 2048 &  9.66 & 35.3 GB\\
+  H-transformer & 2048 &  9.45 & 33.1 GB\\
+  FMA-m64-5lev & 2048 &  \textbf{8.95} & 37.0 GB\\
+  FMA-linear-m64-5lev & 2048 &  9.64 & \textbf{29.5 GB}\\
+    \bottomrule\\
+\end{tabular}
+\caption {\label {ppl}Bidirectional (masked) language modeling results on \texttt{Wikitext-103}. Models with quadratic complexity are highlighted in gray. Bold numbers are best among the efficient transformers (not counting the $\mathcal{O}(n^2)$ transformers). With the same context size, our FMA obtains the best accuracy and uses less memory compared to other efficient attention variants.}
+\end{table}
+
+We conduct bidirectional language modeling on \texttt{Wikitext-103} \citep{wiki103}, a dataset commonly used for testing long term dependencies in language models, see Table \ref{ppl}. We process \texttt{Wikitext-103} with Byte Part Encoding tokenization and train a  bidirectional language model by randomly masking 15\% of the input tokens. We use the Transformer encoder with 6 layers, embedding dimension $d=768$ and 12 attention heads, and we compare
+the performance and memory cost of different efficient attention variants, including our new FMA, by replacing the full attention module in the Transformer.
+The results in Table \ref{ppl} show that our new FMA obtains the best accuracy in the perplexity (ppl) measure next to the full attention with low memory footprint compared to other efficient transformers from the literature.
+
+
+\subsection{Ablation Study}\label{ablation}
+To explore the effect of changing the fine level group size $m$ and and the rank $p$ in FMA, we conduct experiments on \texttt{enwik-8} and measure the bpc and the memory cost under different settings. 
+Similar to Sec.\ \ref{exp1}, the model has 6 layers with embedding dimension {$d=768$} and 12 attention heads.
+Table \ref{mp} shows that increasing $m$ and $p$ gives lower bpc at the cost of an increased memory footprint.  Recall that the memory cost for storing the attention matrix with hierarchical structure is $\mathcal{O}(mn + np\log (n/m))$, which is the dominant part of the total memory footprint for large sequence lengths. In the main paper we consistently use $p=4$, which gives a good balance between accuracy and memory use.
+
+\begin{table}[htbp]
+\footnotesize
+\centering
+\begin{tabular}{lccc} 
+ \toprule
+    & m=16 (6 levels)& m=32 (5 levels)& m=64 (4 levels)\\
+ \midrule
+ p=1 & 1.321 (18.1 GB) & 1.279 (19.1 GB) & 1.270 (20.5 GB) \\
+ p=2 & 1.320 (18.4 GB)& 1.272 (19.3 GB) & 1.258 (20.9 GB) \\
+ p=4 & 1.307 (19.1 GB)& 1.266 (19.7 GB) & 1.256 (21.6 GB) \\
+ p=8 & 1.276 (20.2 GB)& 1.262 (21.1 GB) & 1.251 (23.2 GB) \\
+ \bottomrule
+\end{tabular}
+\caption{Autoregressive language modeling results with different $m$ and $p$ on enwik-8 with context size $n=1024$.}
+\label{mp}
+\end{table}
+
+\subsection{Efficiency Comparison} \label{exp3}
+
+\begin{figure*}[!ht]
+    \centering
+\includegraphics[trim={0 0 16.5cm 0},clip,width=1\linewidth]{figures/plot.pdf}
+\includegraphics[trim={16.5cm 0 0 0},clip,width=1\linewidth]{figures/plot.pdf}
+  \caption{Efficiency comparison of attention variants on different input sizes. (top) Memory footprint. (bottom) Inferencing time.}
+      \label{efficiency}
+\end{figure*}
+
+In order to demonstrate the scalability of FMA on long sequences, we compare its inference time and GPU memory footprint to those of full attention, memory compressed attention, MRA attention, LSH attention, linear attention, and H-attention.
+The input size varies from 256 to 8K and the batch size, embedding dimension $d$, and number of attention heads are 64, 768, and 12, respectively.
+
+As shown in Fig. \ref{efficiency}, the memory cost of FMA scales much better than full attention and is lower than or similar to that of other efficient variants. Similarly, its latency scales much better than full attention and is similar to that of other efficient variants. However, we should note that our current CUDA kernels are not yet fully optimized and that more efficient implementation of the kernels could further improve the time and memory efficiency.
+\subsection{Fast Multipole Methods} 
+For further context, in this section we draw connections between the attention mechanism and $n$-body problems and {recall}
+the Fast Multipole Method  (Greengard \& Rokhlin, 1987; Beatson \& Greengard, 1997; Martinsson,
+2015), which forms the inspiration for Fast Multipole Attention. An $n$-body
+problem in physics requires evaluating all pairwise influences in a system of $n$ objects, for example, the problem of finding
+potentials $u_i=\sum_{j=1}^{n}g(\bm{x}_i,\bm{x}_j)q_j$ for $ i=1,2,\dots,n$ due to charges $\{q_i\}_{i=1}^{n}$
+at locations $\{\bm{x}_i\}_{i=1}^{n}$, 
+where $g(\cdot,\cdot)$ is the interaction potential of electrostatics.
+ Attention resembles an $n$-body problem if we compare
+ token locations to target/source locations,
+ values to source strengths, and the attention kernel to the 
+ interaction kernel.
+ 
+ A popular class of methods to reduce the $ \mathcal{O}(n^2)$ complexity of direct
+ computation in $n$-body problems, the Fast Multipole Method (FMM), 
+ partitions the simulation domain into a hierarchy of cells, with each cell containing a small number of particles. It starts from the finest level and computes interactions between points in neighboring cells directly, and moves to coarser levels to compute interactions between distant source-target pairs using compact representations of points in source cells and multipole expansions. 
+In this way, the classic tree code  (Barnes \& Hut, 1986)  reduces the 
+computational complexity of the $n$-body problem from $\mathcal{O}(n^2)$ to $\mathcal{O}(n\log n)$ with a hierarchical tree structure. The attention matrix of FMA has the same
+structure as the 1D FMM. 
+
+\subsection{H-matrices and H-transformer} \label{sec:htransformer}
+In this section, we give some more details on the relation between
+our Fast Multipole Attention and the H-transformer of  \citep{zhu_h-transformer-1d_2021},
+which is based on the hierarchical matrices (H-matrices) proposed in
+\citep{Hackbusch1999, HACKBUSCH2000479}.
+In an H-matrix, off-diagonal blocks are replaced by their low-rank approximation.
+Similar to FMA, the sparsity pattern of the attention matrix in H-transformer is hierarchical and results in linear time and memory complexity, but there are key differences.
+First, in FMA we use a learned downsampling method instead of the fixed averaging process used in H-transformer to compute coarse-level average quantities.
+Second, H-transformer's fixed averaging requires the approximation rank $p$ to equal the group size $m$, which our experiments show is substantially sub-optimal.
+Third, unlike the H-matrix structure, in FMA tokens in the immediate left and right neighborhoods are not downsampled and are considered in full resolution, which results in better accuracy.
+Fourth, our approach has the flexibility to not downsample the queries, which leads to a better balance between accuracy and memory use in practice.
+Finally, these differences result in FMA being substantially more accurate than H-transformer, as demonstrated in our language modeling tests.
+
+
+
+\section{Conclusion}
+
+We have presented Fast Multipole Attention, an efficient variant of dot-product attention.
+With hierarchical grouping and downsampling of queries and keys, FMA
+achieves $\mathcal{O}(n\log n)$ or $\mathcal{O}(n)$ complexity while retaining a global receptive field.
+Compared to other multilevel attention mechanisms, FMA \emph{learns} the basis functions that compute group quantities, as opposed to the fixed averaging basis functions of H-transformer \citep{zhu_h-transformer-1d_2021} and the fixed wavelet family used in MRA attention \citep{zeng2022multi}.
+In both autoregressive and bidirectional tasks, our FMA outperforms other efficient attention variants overall, and is substantially more accurate than existing multilevel methods such as H-transformer and MRA attention.
+FMA is versatile and robust as it can be used as a drop-in replacement of causal or bidirectional attention without changing the model architecture or the training schedule.
+The high efficiency of FMA has the potential to empower large language models with much greater sequence lengths, taking the full context into account in a naturally hierarchical manner during training and when generating long sequences. 
+As for the Fast Multipole Method, the algorithmic principle of Fast Multipole Attention can naturally be extended to arrays in multiple dimensions including images and videos, so our new Fast Multipole Attention approach promises to have wide applications beyond language modeling.
+
+
+
+
+

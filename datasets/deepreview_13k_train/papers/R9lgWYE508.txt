@@ -1,0 +1,209 @@
+\title{Relaxing Accurate Initialization Constraint for 3D Gaussian Splatting}
+
+\begin{abstract}
+\vspace{-5pt}
+3D Gaussian splatting (3DGS) has recently demonstrated impressive capabilities in real-time novel view synthesis and 3D reconstruction. However, 3DGS heavily depends on the accurate initialization derived from Structure-from-Motion (SfM) methods. When the quality of the initial point cloud deteriorates, such as in the presence of noise or when using randomly initialized point cloud, 3DGS often undergoes large performance drops. To address this limitation, we propose a novel optimization strategy dubbed \textbf{RAIN-GS} (\textbf{R}elaxing \textbf{A}ccurate \textbf{IN}itialization Constraint for 3D \textbf{G}aussian \textbf{S}platting). Our approach is based on an in-depth analysis of the original 3DGS optimization scheme and the analysis of the SfM initialization in the frequency domain. Leveraging simple modifications based on our analyses, \textbf{RAIN-GS} successfully trains 3D Gaussians from sub-optimal point cloud~(e.g., randomly initialized point cloud), effectively relaxing the need for accurate initialization. We demonstrate the efficacy of our strategy through quantitative and qualitative comparisons on multiple datasets, where \textbf{RAIN-GS} trained with random point cloud achieves performance on-par with or even better than 3DGS trained with accurate SfM point cloud.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+Novel view synthesis is one of the essential tasks in computer vision and computer graphics, aiming to render novel views of a 3D scene given a set of images. It has a wide range of applications in various fields, including augmented reality and virtual reality~\cite{xu2023vr}, robotics~\cite{adamkiewicz2022vision}, and data generation~\cite{ge2022neural}. Neural radiance fields (NeRFs)~\cite{mildenhall2021nerf} have demonstrated remarkable success in this task, learning implicit representations that capture intricate 3D geometry and specular effects solely from images. However, NeRFs' reliance on multi-layer perceptrons (MLPs)~\cite{fridovich2023k, liu2020neural, reiser2021kilonerf,tancik2022blocknerf,zhang2020nerf} results in slow and computationally intensive volume rendering, hindering real-time applications.
+
+Recently, 3D Gaussian splatting (3DGS)~\cite{kerbl20233d} has emerged as a compelling alternative for both high-quality results and real-time rendering. Unlike NeRFs training an MLP to model the scene with an implicit representation, 3DGS models the scene using explicit 3D Gaussians. The learned 3D Gaussians are then projected to the image space using an efficient CUDA-based differentiable tile rasterization~\cite{kopanas2021point, kerbl20233d} technique which enables the rendering of the Gaussians in real-time. 
+
+Despite its remarkable results, 3DGS requires an additional input of initial point cloud compared to NeRFs. The quality of the initial point cloud is one of the essential requirements of 3DGS, showing large performance drops when trained with randomly initialized point cloud~\cite{kerbl20233d}. A similar type of performance degradation can occur in real-world scenarios, specifically in scenes where SfM techniques struggle to converge, such as scenes with symmetry, and textureless regions~\cite{bian2023nope,zhang2022relpose}. Also, accurate initial point cloud become a strict requirement even for situations where camera poses can be obtained through external sensors~\cite{geiger2013vision,sturm2012benchmark} or pre-defined such as in text-to-3D generation~\cite{tang2023dreamgaussian,yi2023gaussiandreamer}. In these cases, where the initial point cloud from SfM may contain noise or even unavailable, 3DGS requires an additional module to obtain the point cloud, adding extra computation cost~\cite{nichol2022point,wang2023dust3r}. 
+
+In this work, we start with a natural question: \textit{``Why is accurate initial point cloud so important in 3D Gaussian splatting?''} and conduct an in-depth analysis of the original 3DGS optimization scheme and SfM initialization. Our analyses reveal that the original 3DGS optimization scheme struggles to \textit{transport} Gaussians further from their initialized locations, leading to performance degradation when starting from random or noisy SfM initialization. In addition, the analysis of the SfM initialization in the frequency domain reveals that SfM initialization provides the low-frequency components of the true distribution. From the provided low-frequency components, 3DGS clones and splits existing Gaussians, which is then used to learn the remaining high-frequency details of the scene~\cite{kerbl20233d}. In this process, the low-frequency components guide the Gaussians to successfully learn the target distribution in a \textit{coarse-to-fine} manner utilizing the clone/split process, without the need to transport the Gaussians to correct locations. Based on this observation, we propose that to train 3DGS with noisy or random point cloud, we need an effective strategy that can transport the Gaussians further from their initial positions and encourage the Gaussians to prioritize the learning of the coarse structure information, which will then guide the overall optimization process to learn in a similar coarse-to-fine manner.
+
+Based on our analysis of accurate initial point cloud, we propose a novel optimization strategy called \textbf{RAIN-GS} (\textbf{R}elaxing \textbf{A}ccurate \textbf{IN}itialization Constraint for 3D \textbf{G}aussian \textbf{S}platting), which is composed of three key components: \textbf{1)} a novel initialization method starting with sparse Gaussians with large variance, \textbf{2)} progressive Gaussian low-pass filtering utilized in the rendering process, and \textbf{3)} a novel adaptive bound-expanding split (\oursplit) algorithm utilized in the adaptive density control. We demonstrate that RAIN-GS effectively relaxes the requirement of accurate initialization for 3DGS, as applying RAIN-GS to random point cloud successfully priorities the learning of low-frequency components and guides the Gaussians to learn in a \textit{coarse-to-fine} manner, and enables the Gaussians to traverse further from their initialized locations. After optimization, RAIN-GS applied to random point cloud achieves on-par or even better results compared to 3DGS trained with SfM. By effectively relaxing the requirement of initial point cloud, RAIN-GS opens up new possibilities for applying 3DGS to settings where obtaining accurate initial point cloud is challenging.
+
+
+
+\section{Related work}
+
+\label{sec:relwork}
+\subsection{Novel view synthesis}
+Neural radiance fields (NeRF)~\cite{mildenhall2021nerf} have succeeded in significantly boosting the performance of novel view synthesis by optimizing an MLP that can estimate the density and radiance of any continuous 3D coordinate. With the camera poses of the given images, NeRF learns the MLP by querying dense points along randomly selected rays, that outputs the density and color of each of the queried coordinates. Various follow-ups~\cite{barron2021mip,barron2022mip,du2023learning,hong2023unifying,li2023dynibar,muller2022instant,song2024darf,yang2023freenerf} adopted NeRF as their baseline model and further extend the ability of NeRF to model unbounded or dynamic scenes~\cite{barron2021mip,barron2022mip,li2023dynibar}, lower the required number of images for successful training~\cite{song2024darf,yang2023freenerf}, learn a generalizable prior to resolve the need of per-scene optimization~\cite{du2023learning,hong2023unifying}, or utilize an external hash-grid to fasten the overall optimization process~\cite{muller2022instant}. Although all of these works show compelling results, the volume rendering from dense points along multiple rays makes NeRF hard to apply in real-time settings achieving lower rendering rates of < 1 fps.
+
+Recently, 3D Gaussian splatting (3DGS)~\cite{kerbl20233d} has been recognized as a new solution for the task of novel view synthesis, succeeding in high-quality real-time novel-view synthesis at 1080p resolution with frame rates exceeding  90 fps. 3DGS achieves this by modeling the 3D scene with explicit 3D Gaussians, followed by an efficient and differentiable tile rasterization implemented in CUDA to accelerate the rendering process. Due to the efficient and fast architecture of 3DGS, it gained massive attention from various fields~\cite{luiten2023dynamic, yi2023gaussiandreamer,yang2023deformable3dgs,tang2023dreamgaussian}, extended to model dynamic scenes~\cite{yang2023deformable3dgs,luiten2023dynamic}, or used as an alternative for text-to-3D tasks~\cite{tang2023dreamgaussian,yi2023gaussiandreamer} for fast generation. Nevertheless, the essential requirement of both accurate pose and initial point cloud limits the application of 3DGS to only scenes where SfM can provide accurate point cloud. In this work, we analyze the optimization strategy of 3DGS and present a simple yet effective change in the optimization strategy to expand the versatility of 3DGS to successfully learn the scene without accurate initialization.
+
+\subsection{Structure-from-Motion (SfM)}
+SfM techniques~\cite{agarwal2011building,frahm2010building,schonberger2016structure} have been one of the most widely used algorithms to reconstruct a 3D scene. Typical SfM methods output the pose of each input image and a sparse point cloud that includes rough color and position information for each point. These methods employ feature extraction, matching steps, and bundle adjustment. For the task of novel view synthesis, NeRF~\cite{mildenhall2021nerf} utilizes the estimated pose from the SfM and trains an implicit representation to model the scene. The recently proposed 3DGS~\cite{kerbl20233d} utilizes both the accurate pose and initial point cloud as an initialization for the position and color of 3D Gaussians, showing large performance drops when the initial point cloud becomes noisy or not accessible.
+
+Despite the effectiveness of SfM in generating accurately aligned point cloud and precise camera poses, its incremental nature and the computational intensity of the bundle adjustment process significantly increase its time complexity, often to $O(n^4)$ with respect to $n$ cameras involved~\cite{wu2013towards}. Due to the high computational demand, SfM being a hard prerequisite limits the feasibility of NeRF or 3DGS for scenarios that require real-time processing. In addition, SfM often struggles to converge, such as in scenes with symmetry, specular properties, and textureless regions, and when the available views are limited. In these cases, an additional module is required to provide accurate initial point cloud to 3DGS, which can take longer times than SfM~\cite{wang2023dust3r}.
+ 
+
+
+\section{Preliminary: 3D Gaussian splatting (3DGS)}
+
+\label{sec:preliminary}
+Recently, 3DGS~\cite{kerbl20233d} has emerged as a promising alternative for the novel view synthesis task, modeling the scene with multiple 3D Gaussians~\cite{zwicker2002ewa}. 
+Each $i$-th Gaussian $G_i$ represents the scene with the following attributes: a position vector $\mu_i\in\mathbb{R}^3$, an anisotropic covariance matrix $\Sigma_i\in\mathbb{R}^{3\times3}$, spherical harmonic (SH) coefficients~\cite{yu2021plenoxels, muller2022instant}, and an opacity logit value $\alpha_i \in [0,1)$. With these attributes, each Gaussian $G_i$ is defined in the world space~\cite{zwicker2002ewa} as follows:
+\begin{equation}
+    G_i(x) = e^{-\frac{1}{2}(x-\mu_i)^T\Sigma_i^{-1}(x-\mu_i)}.
+\end{equation}
+To render an image from a pose represented by the viewing transformation $W$, the projected covariance $\Sigma_i'$ is defined as follows:
+\begin{equation}
+    \Sigma_i' = JW\Sigma_i W^TJ^T,
+\end{equation}
+where $J$ is the Jacobian of the local affine approximation of the projective transformation. The 2D covariance matrix is simply obtained by skipping the third row and column of $\Sigma_i'$~\cite{zwicker2002ewa}. Finally, to render the color $C(p)$ of the pixel $p$, 3DGS utilizes alpha blending according to the Gaussians depth. For example, when $N$ Gaussians are sorted by depth, the color $C(p)$ is calculated as follows:
+\begin{equation}
+    C(p) = \sum_{i=1}^{N} c_i \alpha_i G'_i(p)\prod_{j=1}^{i-1} (1 - \alpha_j G'_j(p)),
+\end{equation}
+where $c_i$ is the view-dependent color value of each Gaussian calculated with the SH coefficients, and $G'_i$ is the 3D Gaussian projected to the 2D screen space.
+
+Since 3DGS starts learning from sparse point cloud, they utilize an adaptive density control to obtain a more accurate and denser representation. By considering if the scene is under-/over-constructed, each of the Gaussians undergoes a clone/split operation. Gaussians that have small covariance are cloned and Gaussians considered to be too large are splitted into two new smaller Gaussians, where the means of new Gaussians are sampled from the probability density function (PDF) of the original Gaussian. When the Gaussian is considered to be too small, the Gaussian is cloned and simply located in the mean of the original Gaussian.
+
+
+\section{Motivation}
+
+\label{sec:motivation}
+Although point cloud can be noisy or unavailable in real-world scenarios~\cite{bian2023nope,zhang2022relpose}, 3DGS shows large performance drops depending on the accuracy of the initial point cloud~\cite{kerbl20233d}. To understand the large performance gap of 3DGS, we conduct an in-depth analysis of the original 3DGS optimization scheme and the analysis of SfM initialization in the frequency domain. Our analyses reveal two important characteristics of the optimization scheme of 3DGS: \textbf{1)} the optimization scheme of 3DGS struggles to transport Gaussians from their initialized locations and \textbf{2)} the coarse structure information~(low-frequency components) provided by the accurate initialization enables the adaptive density control method of 3DGS to robustly model the remaining fine details of the scene in a coarse-to-fine manner.
+
+\paragraph{3DGS lacks the ability to transport Gaussians.}
+\label{subsec:motivation_3DGS}
+To represent and learn the scene with explicit 3D Gaussians, 3DGS first initializes the Gaussians $G_i$ in the world space, whose means $\mu_i$ are defined by the initial point cloud. The point cloud can be either achieved from SfM or initialized randomly.
+
+As mentioned in \cite{charatan23pixelsplat}, the process of fitting a 3DGS model is similar to fitting a Gaussian Mixture Model (GMM), which is well-known for being non-convex and generally solved with the Expectation-Maximization (EM) algorithm \cite{dempster1977maximum}. They further note that, similar to the EM algorithm, training 3DGS from randomly initialized point cloud becomes prone to falling into local minima due to two main reasons. \textbf{1)} The Gaussians can only receive gradients close to their means, mostly from the range not exceeding the distance of a few standard deviations, and \textbf{2)} there is no existing path for the Gaussians that will decrease the loss monotonically. 
+
+Although \cite{charatan23pixelsplat} only analyzes the case of starting from random initialization, we verify that Gaussians can also easily fall into local minima when SfM-initialized point cloud become noisy. As shown in Table~\ref{tab:noise_sfm}, we find that adding a small constant noise or adding a small noise $\epsilon$ sampled from a normal distribution ($\epsilon \sim \mathcal{N}(0,1))$ to the SfM-initialized point cloud, leads to large performance drops. Based on these observations, we hypothesize that the optimization scheme of 3DGS lacks the ability to correct or move the positions of the Gaussians. We empirically verify our hypothesis by calculating the average distance each Gaussian traversed after optimization, as shown in Table~\ref{tab:movement}. It can be seen that the average distance each Gaussian moved is close to zero, indicating that the optimization scheme of 3DGS lacks the ability to move Gaussians, which can lead to the failure of capturing objects located far from the initial positions of the Gaussians. This emphasizes the need for a strategy that can enable the Gaussians to transport further from their initialized locations, in order to successfully train 3DGS from sub-optimal initializations.
+
+\input{assets/table/noise_sfm}
+\paragraph{Accurate initialization guides 3DGS to learn in a coarse-to-fine manner.}
+\label{subsec:motivation_SfM}
+\begin{figure*}[t]
+\begin{center}
+
+\resizebox{1.0\linewidth}{!}
+{
+    \includegraphics[width=1\linewidth]{assets/figures/fourier_analysis2.pdf}
+}
+\end{center}
+    \caption{\textbf{Analysis of SfM initialization in 3DGS.} (a) The top shows the GT image, and the bottom is the rendered image by 3DGS after only 10 steps with SfM initialization. We can observe that the rendered image is already coarsely-close to GT image. We randomly sample a horizontal line from the image marked in \textcolor{myred}{red}. (b) The pixel intensity along this line are shown, with the GT indicated in \textcolor{myblue}{blue} and the rendered image in \textcolor{myorange2}{orange}. (c) This graph visualizes the magnitude of the frequency components of (b). Since frequencies further from the middle of the x-axis represent high-frequency components, we observe that SfM provides \textit{coarse} approximation of the true distribution.}
+    \label{fig:sfm}
+\end{figure*}
+
+To further investigate the benefits of SfM initialization, we analyze the rendered images in the frequency domain using Fourier transform~\cite{nussbaumer1982fast}. As shown in Figure~\ref{fig:sfm}, the analysis in the frequency domain demonstrates that SfM initialization provides a coarse approximation of the target distribution. 
+
+As the goal of novel view synthesis is to understand the 3D distribution of the scene, it is necessary to model both low- and high-frequency components of the true distribution. However, prior NeRF frameworks~\cite{lin2021barf, park2021nerfies,yang2023freenerf} argue that NeRF is prone to overfitting and na\"ive optimization leads to over-fast convergence of high-frequency components, expressed with high-frequency artifacts in the rendered image. To circumvent this problem, they adopt a coarse-to-fine learning strategy, which regularizes NeRF to learn the low-frequency components first. Similarly, prior works~\cite{eckart2016accelerated,hertz2020pointgmm} utilizing GMMs for the task of point cloud registration or generation also mention that na\"ive fitting of GMMs can result in converging to local minima. In order to robustly train GMMs, they also adopt a coarse-to-fine strategy, implemented by starting with a small number of Gaussians and recursively increasing the number of total Gaussians. In both NeRFs and GMMs, coarse-to-fine strategy guides the network to learn more robustly, leading to better performance. 
+
+In this perspective, starting the optimization of 3DGS from SfM-initialized point cloud can be understood as benefitting from a similar coarse-to-fine process, where SfM provides the low-frequency components (Figure~\ref{fig:sfm}), and the adaptive density control method of 3DGS adds the Gaussians to learn the remaining high-frequency details. Based on our observations, the success of 3DGS from accurate initialization can be attributed to the low-frequency components guiding the overall training process, preventing the Gaussians from falling into local minima.
+This highlights the need for a strategy that can prioritize the learning of the low-frequency components even from sub-optimal initializations, which will then be used to guide the remaining optimization process of 3DGS.
+
+
+\section{Methodology}
+
+\label{sec:method}
+
+Following our motivation (Section~\ref{sec:motivation}), we propose a novel optimization strategy, dubbed \textbf{RAIN-GS} (\textbf{R}elaxing \textbf{A}ccurate \textbf{IN}itialization Constraint for 3D \textbf{G}aussian \textbf{S}platting), which enables the Gaussians to prioritize the learning of low-frequency components, and enables the Gaussians to transport further from their initialized locations. Our strategy consists of three key components: \textbf{1)} sparse-large-variance (SLV) initialization (Section~\ref{subsec:sparseinit}), \textbf{2)} progressive Gaussian low-pass filtering (Section~\ref{subsec:lowpass}), and  \textbf{3)} a novel adaptive bound-expanding split (\oursplit) algorithm (Section~\ref{subsec:novel_split}). 
+
+\subsection{Sparse-large-variance (SLV) initialization}
+\label{subsec:sparseinit}
+
+\begin{figure*}[t]
+\begin{center}
+\resizebox{1.0\linewidth}{!}
+{
+    \includegraphics[width=1\linewidth]{assets/figures/toy_1d.pdf}
+}
+\end{center}
+    \caption{\textbf{Toy experiment to analyze different initialization methods.} This figure 
+    visualizes the result of our toy experiment predicting the \textcolor{myblue}{target distribution} using a collection of \textcolor{myorange2}{1D Gaussians}, starting from different initialization methods.}
+    \label{fig:toy}
+\end{figure*}
+
+Drawing inspiration from GMMs~\cite{eckart2016accelerated, nichol2022point}, which gradually increase the number of Gaussians to accurately model target point cloud, we observe that the adaptive density control of 3DGS can be viewed as a similar process. Through cloning and splitting operations, 3DGS generally increases the number of Gaussians to find the adequate number of Gaussians required to represent the scene. Based on our findings, we hypothesize that initializing 3DGS with a sparse set of Gaussians will prioritize the learning of low-frequency components, akin to the progressive refinement approach employed by GMMs. This sparse initialization strategy is expected to capture the overall structure of the target point cloud in the early stages of the optimization process, with finer details being added as the number of Gaussians increases.
+
+To verify our hypothesis, we conduct a toy experiment in a simplified 1D regression task. Following the original 3DGS which can be interpreted as the learning process of a 3D target distribution with multiple Gaussians, we use $N$ Gaussians each with learnable means, variances, and weights, which are then blended to model a 1D target signal. Specifically, we follow the initialization methods of 3DGS~\cite{kerbl20233d}, where the means are initialized randomly and the variances are initialized based on the distances of the three nearest neighbors. As a result, sparse initialization of Gaussians leads to a larger initial covariance (SLV) and dense initialization leads to a smaller covariance (DSV). To verify our hypothesis that learning with sparse Gaussians will prioritize the learning of low-frequency components, we conduct our toy experiment using $N=15$ and $N=1000$ for the SLV and DSV initialization respectively. Note that our 1D toy experiment without the adaptive density control method of 3DGS provides a controlled environment isolating the effects of initialization. A detailed explanation of our toy experiment can be found in Section~\ref{supple:C} of the supplementary materials.
+
+As shown in Figure~\ref{fig:toy}, SLV initialization prioritizes the learning of low-frequency components compared to DSV initialization verifying our hypothesis. After 1,000 steps, SLV also shows a better prediction of the target distribution. Similar results can be observed when SLV is applied to 3DGS, as lowering the number of initial Gaussians $N$ in randomly initialized settings significantly improves performance. Following the random initialization method of \cite{kerbl20233d}, which randomly samples point cloud from a scene extent defined as three times the bounding box of the camera poses, SLV prioritizes the learning of low-frequency components, producing fewer high-frequency artifacts. Surprisingly, SLV becomes more effective even until extremely sparse settings~(e.g., as low as $N=10$), verifying the effectiveness of our novel SLV initialization method.
+
+\subsection{Progressive Gaussian low-pass filter control}
+\label{subsec:lowpass}
+Although our SLV initialization method is effective, we find that after multiple densification steps, the number of 3D Gaussians increases exponentially due to the adaptive density control, which can collapse into similar problems with the DSV initialization. In order to guide the 3D Gaussians to learn in a coarse-to-fine manner and let the 3D Gaussians sufficiently explore the low-frequency components during the early stage of training, we propose a novel progressive control of the Gaussian low-pass filter which is utilized in the rendering stage. 
+\paragraph{Gaussian low-pass filter for 3DGS.} \label{subsubsec:lowpass} In the rendering stage of 3DGS, the 2D Gaussian $G_{i}'$ projected from a 3D Gaussian $G_i$ is defined as follows:
+\begin{equation}
+   G_{i}'(x) = e^{-\frac{1}{2}(x-\mu_{i}')^T{\Sigma_{i}'}^{-1}(x-\mu_{i}')}.
+\end{equation}
+However, directly using projected 2D Gaussians can lead to visual artifacts when they become smaller than the size of a single pixel~\cite{kerbl20233d,yu2023mip}. To ensure coverage of at least one pixel, \cite{kerbl20233d} enlarge the 2D Gaussian's scale by adding a small value to the covariance's diagonal elements as follows:
+\begin{equation}
+   G_{i}'(x) = e^{-\frac{1}{2}(x-\mu_{i}')^T(\Sigma_{i}'+sI)^{-1}(x-\mu_{i}')},
+\end{equation}
+where $s$ is a pre-defined value of $s=0.3$ and $I$ is an identity matrix. This process can also be interpreted as the convolution between the projected 2D Gaussian $G_{i}'$ and a Gaussian low-pass filter $h$ (mean $\mu=0$ and variance $\sigma^2 = 0.3$) of $G_{i}' \otimes h$, which is shown to be an essential step to prevent aliasing~\cite{zwicker2002ewa}. After applying convolution with the low-pass filter, the area of the projected Gaussian $G_{i}'$ is approximated by a circle. The radius of this circle is defined by three times the larger eigenvalue from the 2D covariance matrix $(\Sigma_{i}'+sI)$\footnote{We provide a detailed proof in Section B.1 in the supplementary materials.}. 
+
+\paragraph{Progressive low-pass filter control.} 
+Instead of using a fixed value of $s$ through the entire optimization process, we notice that this value $s$ can \textbf{ensure} the minimum area each Gaussians have to cover in the screen space. As Gaussians only receive gradients inside the range of a few standard deviations~\cite{charatan23pixelsplat}, learning from wider areas is essential for the Gaussians to learn the coarse structure information of the scene. Therefore, we \textbf{control} $s$ to regularize the Gaussians to cover wider areas during the early stage of training and progressively learn from a more local region. Specifically, as the value $s$ ensures the projected Gaussians area to be larger than $9{\pi}s$\footnote{We provide a detailed proof in Section B.2 in the supplementary materials.}, we define the value $s$ such that $s = HW/9\pi N$, where $N$ indicates the number of Gaussians and $H,W$ indicates the height and width of the image respectively. 
+
+\subsection{Adaptive bound-expanding split (\oursplit) algorithm}
+\label{subsec:novel_split}
+As discussed in Section~\ref{subsec:motivation_3DGS}, in 3DGS, Gaussians struggle to model scenes far from their initialized locations. Through visualizations of the positions of the Gaussians after training, we empirically find that Gaussians particularly struggle to model scenes \textit{outside} the initial bound defined by the starting point cloud positions (see Section~\ref{subsec:gaussian_distance} of the supplementary materials for visualizations).
+
+This type of behavior is largely attributed to the characteristics of the adaptive density control method of 3DGS~\cite{kerbl20233d}, which applies a clone/split algorithm to the Gaussians. As the new Gaussian is sampled from the PDF of the original Gaussian, it is likely to be located near the original Gaussians, which leads to an increased density of Gaussians near initial locations. Consequently, 3DGS more easily models scenes \textit{inside} the initial bound compared to those \textit{outside} of it, highlighting the need for a strategy that can encourage the Gaussians to move outside the initial bound.
+
+Based on these observations, we propose the adaptive bound-expanding split algorithm, a novel splitting algorithm that can encourage the Gaussians to move outside the initial bound during early steps. Specifically, \oursplit \ algorithm splits each of the Gaussians into three, where two of the Gaussians undergo the same split process as the original split algorithm. However, for the additional third Gaussian, rather than sampling from the PDF of the original Gaussian, we initialize the new location by multiplying a constant value (proportional to the size of the scene extent). Also, we retain the same scale as the original Gaussian without dividing it. This is to encourage the transported Gaussians to receive gradients from larger regions in their new positions. We provide a more detailed explanation of \oursplit \ in Section~\ref{supple:A} in the supplementary materials. 
+
+\subsection{Analysis of RAIN-GS}
+All three key components of our strategy can be interpreted as a component that acts as the ``warm-up'' step for the Gaussians, which guides the Gaussians to first learn the coarse structure of the scene. SLV initialization and progressive Gaussian low-pass filtering facilitate coarse-to-fine optimization whereas \oursplit \ enables the Gaussians to transport to further locations. We demonstrate that our strategy successfully guides 3DGS to learn the coarse structure without any given information (e.g., accurate initial point cloud) which can widen the application of 3DGS to real-world scenarios where the initial point cloud can be noisy or absent. Specifically, as RAIN-GS does not have any restrictions or conditions for the initial point cloud other than being sparse (SLV initialization), we can apply our strategy to both point cloud achieved from SfM~\cite{schonberger2016structure} or random. The effectiveness and versatility of our strategy are further evaluated in Section~\ref{sec:exp}.
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+\subsection{Experimental Settings}
+\paragraph{Datasets.} 
+To assess the effectiveness of our strategy, we conduct qualitative and quantitative comparisons on the Mip-NeRF360 dataset~\cite{barron2022mip}, Tanks\&Temples dataset~\cite{knapitsch2017tanks}, and Deep Blending dataset~\cite{hedman2018deep} previously utilized in the evaluation of the 3DGS method~\cite{kerbl20233d}. We evaluate the PSNR, LPIPS, and SSIM metrics by constructing a train/test split using every 8th image for testing, as suggested in Mip-NeRF360~\cite{barron2022mip}. We use the same image resolution as 3DGS.
+
+\paragraph{Tasks.} As mentioned in Section~\ref{sec:motivation}, SfM can fail in real-world scenarios where the point cloud become noisy or sometimes inaccessible. To assess the robustness of 3DGS~\cite{kerbl20233d} in these scenarios, we first compare our strategy with 3DGS each trained with SfM-initialized point cloud, SfM-initialized point cloud with added noise $\epsilon$ ($\epsilon \sim N(0,1)$), and random point cloud, where our strategy only utilizes random point cloud (Table~\ref{tab:main_mip360}). In addition, to assess the performance of our strategy, we compare our strategy with Plenoxels~\cite{yu2021plenoxels}, InstantNGP-Base, InstantNGP-Big~\cite{muller2022instant}, and 3DGS~\cite{kerbl20233d} (Table~\ref{tab:mip360}). In the latter experiment, we evaluate 3DGS trained with SfM-initialized point cloud, and random point cloud. For our strategy, we train RAIN-GS with SfM-initialized point cloud and random point cloud.
+
+\subsection{Implementation details}
+\label{subsec:implementation_details}
+We implement our model based on 3DGS~\cite{kerbl20233d}. We follow the same training process of the existing implementation in all datasets. We apply our strategy to both randomly initialized point cloud and SfM-initialized point cloud. When applying RAIN-GS to randomly initialized point cloud (Table~\ref{tab:main_mip360}, Table~\ref{tab:mip360}), we set the initial number of Gaussians to $N=10$. When applying RAIN-GS to SfM-initialized point cloud (Table~\ref{tab:mip360}), we select a sparse set from the entire point cloud. We either use the top 10\% with the least reprojection error (denoted as <10\%) or use cluster centers (denoted as cluster) obtained through HDBSCAN~\cite{mcinnes2017accelerated}. As RAIN-GS guides the Gaussians to learn the coarse structure of the scene in the early stages of training, we set the first 10,000 steps as the warm-up phase and extend the densification steps by 10,000 steps. During the warm-up phase, the learning rate of the mean $\mu$ is unchanged, and \oursplit\ replaces the original split algorithm. Additional details are included in supplementary materials~\ref{supple:A}.
+
+\input{assets/table/main_table_mip360}
+\input{assets/table/main_table_tntbl}
+\input{assets/table/quan_mip360_nocolor}
+\input{assets/table/tnt_bl_nocolor}
+\begin{figure}[!t]
+\begin{center}
+{
+    \includegraphics[width=1\linewidth]{assets/figures/mainqual.pdf}
+}
+\end{center}
+    \caption{\textbf{Qualitative results on Mip-NeRF360, Tanks\&Temples, and Deep Blending dataset.}}
+    \label{fig:main_qual}
+
+\end{figure}
+\subsection{Quantitative comparison with 3DGS in real-word scenarios}
+As mentioned above, SfM might fail or produce noisy point cloud in real-world scenarios. To assess the robustness of 3DGS~\cite{kerbl20233d} in these cases, we evaluate 3DGS trained with SfM points, noisy SfM points, and random points. The results are compared with ours trained with random points.
+
+As shown in Table~\ref{tab:main_mip360}, 3DGS is highly dependent on the accuracy of initial point cloud, showing large performance drops when trained with noisy SfM point cloud (denoted as Noisy SfM) and random point cloud (denoted as Random). In contrast, our strategy trained from random point cloud shows on-par or even better results compared to 3DGS trained with accurate SfM point cloud.
+
+\subsection{Qualitative and quantitative comparison}
+In Table~\ref{tab:mip360}, we compare our model with Plenoxels~\cite{yu2021plenoxels}, InstantNGP-Base, InstantNGP-Big~\cite{muller2022instant}, and 3DGS~\cite{kerbl20233d} on the Mip-NeRF360 dataset~\cite{barron2022mip}, Tanks\&Temples dataset~\cite{knapitsch2017tanks}, and Deep Blending dataset~\cite{hedman2018deep}. All NeRF methods~\cite{yu2021plenoxels,muller2022instant,barron2021mip} are trained without SfM points. We evaluate 3DGS~\cite{kerbl20233d} and ours trained with SfM-initialized and randomly initialized point cloud. For ours trained with SfM-initialized point cloud, we evaluate utilizing different clustering methods of selecting the top 10\% with the least reprojection error (denoted as <10\%) or using cluster centers (denoted as cluster) obtained through HDBSCAN~\cite{mcinnes2017accelerated}.
+
+In Figure~\ref{fig:main_qual}, we provide qualitative results on novel test views. We compare with InstantNGP-Base ((a)), 3DGS trained with random point cloud ((b)) and SfM initialized point cloud ((c)), and ours trained with random point cloud ((d)). By comparing (b) and (d), we demonstrate the effectiveness of our strategy, which removes any unwanted high-frequency artifacts or floaters and also successfully captures scene objects located far away from the viewpoint. By comparing (c) and (d), ours trained with random point cloud show better results than 3DGS trained with SfM initialized point cloud, capturing fine details more effectively and rendering the background more accurately. More qualitative images are included in Section~\ref{supple:E} in the supplementary materials.
+
+\subsection{Ablation studies}
+\label{subsec:ablation_details}
+\input{assets/table/ablation}
+In Table~\ref{tab:c2f_ablation}, we validate the effectiveness of each component in our method trained in the Mip-NeRF360 dataset~\cite{barron2022mip} with randomly initialized point cloud. The comparison of Sparse-large-variance (SLV) and dense-small-variance (DSV) initialization is done by using $N=10$ and $N=1,000,000$ respectively. We compare our progressive Gaussian low-pass filter control method with using a constant low-pass filter value ($s=0.3$) as done in the original 3DGS~\cite{kerbl20233d}. We also compare utilizing our novel \oursplit \ method and the original split algorithm utilized in 3DGS. All three ablations show that using our components achieves significantly better results and using all three key components achieves the best results. More detailed and various ablation studies can be found in Section~\ref{supple:ablation} in the supplementary materials.
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+In this work, we introduce \textbf{RAIN-GS} (\textbf{R}elaxing \textbf{A}ccurate \textbf{IN}itialization Constraint for 3D \textbf{G}aussian \textbf{S}platting), a novel optimization strategy that effectively removes the constraint for accurate initialization. By combining sparse-large-variance (SLV) initialization, progressive Gaussian low-pass filter control, and the adaptive bound-expanding split (\oursplit) algorithm, our strategy successfully guides 3D Gaussians to prioritize the learning of low-frequency components and encourages the Gaussians to transport to further locations from the initialized locations. RAIN-GS effectively removes the strict reliance on accurate point cloud achieved from Structure-from-Motion (SfM), opening up new possibilities for 3DGS in scenarios where achieving accurate point cloud is challenging. 
+
+
+
+\clearpage
+
+
+
+

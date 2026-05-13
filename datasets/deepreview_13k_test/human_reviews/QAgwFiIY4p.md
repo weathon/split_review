@@ -1,0 +1,223 @@
+# Graph as Point Set
+
+- Decision: Reject
+- Scores: 5, 5, 8, 6
+
+## Abstract
+Graph is a fundamental data structure to model interconnections between entities. Set, on the contrary, stores independent elements. To learn graph representations, current Graph Neural Networks (GNNs) primarily use message passing to encode the interconnections. In contrast, this paper introduces a novel graph-to-set conversion method that bijectively transforms interconnected nodes into a set of independent points and then uses a set encoder to learn the graph representation. This conversion method holds dual significance. Firstly, it enables using set encoders to learn from graphs, thereby significantly expanding the design space of GNNs. Secondly, for Transformer, a specific set encoder, we provide a novel and principled approach to inject graph information losslessly, different from all the heuristic structural/positional encoding methods adopted in previous graph transformers. To demonstrate the effectiveness of our approach, we introduce Point Set Transformer (PST), a transformer architecture that accepts a point set converted from a graph as input. Theoretically, PST exhibits superior expressivity for both short-range substructure counting and long-range shortest path distance tasks compared to existing GNNs. Extensive experiments further validate PST's outstanding real-world performance. Besides Transformer, we also devise a Deepset-based set encoder, which achieves performance comparable to representative GNNs, affirming the versatility of our graph-to-set method.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper proposes a new architecture for graph representation learning. Specifically, the proposed model uses symmetric rank decomposition to obtain coordinates for each node in the graph. Then a transformer model treats the graph as a set of nodes (augmented with coordinates) and encodes the set. Since the coordinates are up to transformations by orthogonal matrices, the transformer model is designed to be invariant to orthogonal transformations. This paper analyses the expressive power of the model, and the model shows good empirical performance compared with existing graph transformers.
+
+### Strengths
+- A clear presentation of the methodology; easy to follow
+- The design of the architecture is well motivated by the analysis of symmetric rank decomposition, and this paper further provides theoretical analysis of expressiveness
+- The proposed model shows good empirical performance
+
+### Weaknesses
+- This paper exaggerates its contributions: this paper claims that the proposed model is a "paradigm shift", but the use of symmetric rank decomposition is actually not much different from existing positional encodings based on eigendecomposition. Also, the invariance to orthogonal transformations of positional encoding is discussed and addressed by several related papers (e.g., [1]). I don't think the proposed model is significantly different.
+- Given the above point, the experiment part should also include the performance of [1] and do a comparison, but it's missing.
+- Another recent graph transformer is missing [2] which seems to have better performance.
+
+[1] Sign and Basis Invariant Networks for Spectral Graph Representation Learning. Lim et al. ICLR 2023
+
+[2] Graph Inductive Biases in Transformers without Message Passing. ICML 2023
+
+### Questions
+Please see Weakness
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper introduces a graph representation learning approach by converting interconnected graphs into sets of independent points and encoding them using an orthogonal-transformation-equivariant Transformer. This graph-to-set conversion method, based on Symmetric Rank Decomposition (SRD), eliminates the need for intricate positional encodings used in traditional graph Transformers. The authors theoretically demonstrate that two graphs are isomorphic if and only if their converted point sets are equal up to an orthogonal transformation. They also propose a parameterization of SRD using permutation-equivariant functions for practical implementation. The paper introduces a Point Set Transformer (PST) for encoding the transformed point set.
+
+### Strengths
+1. The authors provide theoretical foundations for their approach, demonstrating that isomorphic graphs can be perfectly represented using their method. The use of Symmetric Rank Decomposition is well-explained and supported by theorems. They also provide expressivity results regarding the short-range and the long-range abilities of the models.
+
+2. The proposed method seems to outperform recent graph transformer architectures in the datasets used in this study.
+
+### Weaknesses
+1. One notable weakness in the paper is the tendency to overstate the novelty of certain ideas without providing adequate justification. Specifically, the paper emphasizes the concept of transforming a graph into a set of independent nodes as a novel approach. While the paper introduces a unique method of achieving this transformation through Symmetric Rank Decomposition (SRD), it does not sufficiently acknowledge that the idea of treating graphs as sets of nodes is not entirely novel in the context of graph neural networks. Many existing graph neural network models, including graph transformers, do employ the idea of viewing graphs as sets of nodes for processing. They use various techniques, including positional encodings, to capture and leverage the graph's structural information. While the paper rightfully introduces SRD as a different method for this transformation, it should clarify why this particular approach is advantageous or provides a significant improvement over existing methods. This would help readers understand the specific contributions and benefits of the proposed approach more clearly. Furthermore, the paper mentions the elimination of positional encodings in the proposed method, implying that this is beneficial. However, it does not provide a comprehensive explanation or empirical evidence to support this claim. The paper should clarify why removing positional encodings is advantageous and how this contributes to the overall effectiveness of the proposed approach. Without a clear rationale or evidence, it leaves readers questioning the choice to eliminate positional encodings and the potential impact on performance. In summary, the paper should provide a more balanced perspective on the novelty of its ideas and offer a robust justification for choices such as removing positional encodings to enhance the clarity and credibility of its contributions.
+
+2. The paper does not present empirical results from a wide range of graph benchmarks, which could have provided a more comprehensive assessment of the method's performance and generalizability. TUDatasets, like many other benchmark datasets, cover diverse graph structures and characteristics, and their inclusion in the evaluation process would have added valuable insights into the method's effectiveness across different graph types.
+
+### Questions
+1. It would be beneficial to see experimental results on a variety of benchmark datasets, including TUDatasets, to assess the method's performance and how it compares to existing approaches. Can the authors provide results on more graph benchmarks to substantiate their claims?
+
+2. The paper suggests that removing positional encodings is beneficial, but the rationale behind this choice is not clearly explained. Can the authors elaborate on why the elimination of positional encodings is advantageous and how it contributes to the overall performance of the method?
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper introduces a novel graph-to-set conversion that transforms interconnected nodes into a set of independent points, which allows seamless application of set encoder architectures such as the Transformer towards graph representation learning. The key is to perform symmetric rank decomposition on the adjacency or related matrices and process the coordinates through an orthogonal-transformation-equivariant set encoder, for which the paper proposes a new architecture, Point Set Transformer (PST). This approach has the benefit of not requiring any positional encodings used in previous graph Transformer literature, and is also theoretically shown to have stronger short-range and long-range expressivity compared to existing baselines. Experiments on substructure counting, molecular property prediction, and the Long Range Graph Benchmark validate the effectiveness of PST on various domains.
+
+### Strengths
+- [S1] The perspective of viewing graphs as point sets and performing graph representation learning via a set encoder is very interesting and original, and has great potential across the graph learning community.
+- [S2] The idea is fairly simple and easy-to-follow, yet empirically effective as shown in the presented experimental results.
+
+### Weaknesses
+- [W1] There are a few details missing in the methodology/experiments that may help to clarify towards better reproducibility.
+  - For each experiment, how is the rank $r$ chosen? Is it chosen via hyperparameter tuning? For larger graphs, it seems choosing a small $r$ will result in loss of information on the connectivity of the input graph. How is it that PST still performs well on Long Range Graph Benchmark despite this potential loss of information?
+  - For the experiments, which matrix was used to generate the generalized coordinates? The adjacency matrix, or normalized adjacency, or some other matrix? The beginning of Section 4 briefly seems to mention that the method mainly uses the adjacency matrix, but this is not clear from the experimental section. Furthermore, an ablation study on which adjacency matrix works well with PST could be another interesting direction that provides further guidance.
+  - After the graph-to-set conversion, how are edge features such as bond types in molecular graphs incorporated into PST? 
+- [W2] Another small concern is the computational cost due to use of symmetric rank decomposition. The paper mentions that each layer in PST runs in $\mathcal{O}(n^2 r)$-time and $\mathcal{O}(n^2 + nr)$-space, which can be costly if $n$ is large and $r$ must increase proportionally to $n$ in order to cover sufficient connectivity information. Table 10 in the Appendix shows runtime/memory consumption on ZINC, but since ZINC is consisted of fairly small graphs (~23.2 nodes per graph), it is unclear whether PST is scalable to large graphs (e.g. Long Range Graph Benchmark) as well. Could the authors elaborate on this?
+
+### Questions
+- Does the proposed graph-to-set conversion have any implications on graph generation [A, B, C] as well? Considering that the mapping is a bijection, being able to generate graphs via set generation would be another interesting direction, and any comments could further support the significance of the paper.
+- Typo in end of Subsection 7.1: "(Theorem 6 and Theorem 6)" -> "(Theorem 6 and Theorem 7)"
+
+[A] Kong et al., Autoregressive Diffusion Model for Graph Generation. (ICML 2023)\
+[B] Vignac et al., Digress: Discrete Denoising Diffusion for Graph Generation. (ICLR 2023)\
+[C] Jo et al., Score-based Generative Modeling of Graphs via the System of Stochastic Differential Equations. (ICML 2022)
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+This paper presents a method for representing graph data as a set of
+points. The representation is obtained based on symmetric rank
+decomposition, followed by the application of a permutation-equivariant
+function. Subsequently, the resulting features are treated as
+a 'coordinate representation' of the graph, and a Transformer model is
+used to address downstream tasks.
+
+### Strengths
+- Finding novel ways to represent graphs, in particular methods that do
+  not make use of message passing, are advantageous since they often
+  pinpoint novel research directions and permit escaping the WL
+  hierarchy for graph expressivity.
+
+- The method is elegant and grounded in strong theory (SRD).
+
+### Weaknesses
+The current write-up is suffering from substantial flaws, which cannot
+be easily rectified during the conference cycle:
+
+1. Lack of clarity: there are some (minor) issues with notation (for
+   instance, $Z$ is used both as a matrix and as
+   a permutation-equivariant function), but the overall description of
+   the method should be clarified. I needed multiple reads to understand
+   just *how* a graph is transformed and, moreover, understand the
+   algorithmic details of this transformation.
+
+   An overview figure or a brief summary would be immensely helpful
+   here.
+
+2. Lack of experimental depth: given the strong claims made in the paper
+   concerning a new state of the art, a much more detailed experimental
+   setup is required. In particular, a comparison of the different
+   models in terms of the number of parameters (of the model itself) and
+   the number of hyperparameters is required. Given recent work on
+   [improvements in the LRGB data
+   set](https://arxiv.org/pdf/2309.00367.pdf), which are only contingent
+   on hyperparameter tuning, a more detailed explanation of the setup
+   and the comparison is required.
+
+There are also some minor weaknesses:
+
+- Table 1 is hard to read and understand at first glance. Please either
+  highlight the best/second-best method or refrain from highlighting
+  altogether. Also, why are there no standard deviations for the other
+  methods?
+
+- There are some language issues, which would require an additional pass
+  over the paper (this is a minor point but it nevertheless slightly
+  impacts accessibility).
+
+### Questions
+1. How does the proposed approach compare to the work by [Kim et
+   al.](https://arxiv.org/abs/2110.14416), which also employs
+   Transformers for graph learning tasks?
+
+2. What are the contributions of the Transformer architecture to
+   predictive performance? Would a simple set function, realised by an
+   MLP with an appropriate pooling function, work as well? I believe
+   that disentangling and ablating the results would strengthen the
+   paper immensely.
+
+3. What is $X$ in Theorem 1 (and the subsequent text)? I assume that
+   this pertains to the features of the graph?
+
+4. To what extent is the method contingent on the SRD? Would it be
+   possible to use another type of decomposition?
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+3 good

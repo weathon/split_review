@@ -1,0 +1,360 @@
+\title{SeaDAG: Semi-autoregressive Diffusion for Conditional Directed Acyclic Graph Generation}
+
+\begin{abstract}
+We introduce SeaDAG, a semi-autoregressive diffusion model for conditional generation of Directed Acyclic Graphs~(DAGs). Considering their inherent layer-wise structure, we simulate layer-wise autoregressive generation by designing different denoising speed for different layers. Unlike conventional autoregressive generation that lacks a global graph structure view, our method maintains a complete graph structure at each diffusion step, enabling operations such as property control that require the full graph structure.
+Leveraging this capability, we evaluate the DAG properties during training by employing a graph property decoder. We explicitly train the model to learn graph conditioning with a condition loss, which enhances the diffusion model's capacity to generate graphs that are both realistic and aligned with specified properties. 
+We evaluate our method on two representative conditional DAG generation tasks: (1) circuit generation from truth tables, where precise DAG structures are crucial for realizing circuit functionality, and (2) molecule generation based on quantum properties.
+Our approach demonstrates promising results, generating high-quality and realistic DAGs that closely align with given conditions.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+The success of diffusion models in various domains~\citep{NEURIPS2021_49ad23d1, DBLP:conf/iclr/KongPHZC21}
+has led to significant interest in their application to graph generation~\citep{DBLP:conf/iclr/VignacKSWCF23, DBLP:conf/icml/KongCSZPZ23}. 
+In this work, we focus on conditional Directed Acyclic Graph~(DAG) generation.
+DAGs are essential and widely used data structures in various domains, including logic synthesis~\citep{li2022deepgate, DBLP:conf/dac/LiuY23a,wang2023easymap, pei2024betterv} 
+and bioinformatics~\citep{10.1093/bioinformatics/btz529}.
+Compared to general graphs, DAGs possess an \textbf{inherent layer-wise structure with intricate node inter-dependencies} that can significantly influence the overall graph properties. 
+In logic synthesis, for example, minor structural alterations in lower layers can propagate errors to higher layers, resulting in substantial functional differences. 
+Modeling these layer-wise structural features of DAGs requires specially designed model architectures and generation mechanisms~\citep{DBLP:conf/iclr/AnLJLH24}.
+Recognizing these challenges, many established DAG synthesis and optimization tools~\citep{DBLP:conf/dac/MishchenkoCB06, DBLP:journals/tcad/FlachRPJR14, li2024logic, wang2024hierarchical} employ a sequential synthesis approach, allowing for effective propagation and modeling of localized changes at each step on the global DAG structure. 
+
+Recent studies have explored DAG generation using Autoregressive~(AR) diffusion models~\citep{li2024layerdag}, owing to their improved efficiency and enhanced ability to model node-edge dependencies~\citep{DBLP:conf/icml/KongCSZPZ23}. However, existing approaches generally face the following challenges:
+(1) Their \textit{strict part-by-part generation} impedes information flow from later components to earlier ones, whereas in DAG structures with complex inter-layer interactions, subsequent layer structure can often influence the message passing in preceding layers~\citep{DBLP:conf/dac/WuQ16}.
+(2) They \textit{lack a global graph structure view} until the final generation step. This limitation is particularly problematic in conditional generation scenarios, where graph properties or functions generally cannot be evaluated without a complete structure~\citep{DBLP:journals/natmi/FangLLHZZWWW22}. 
+This incomplete view of conventional AR methods hinders effective property guidance during both training and sampling~\citep{DBLP:conf/iclr/VignacKSWCF23}.
+(3) Many existing works \textit{do not employ explicit condition learning} during training, with conditional guidance applied only during sampling~\citep{DBLP:conf/iclr/AnLJLH24, DBLP:conf/iclr/VignacKSWCF23}. However, our 
+experiments suggest that incorporating explicit graph condition learning during training enables the model to more effectively balance condition satisfaction and graph realism.
+
+\begin{figure}[!tbp]
+\centering
+\includegraphics[width=\textwidth]{figs/ar_overview.pdf}
+\caption{The overview of proposed layer-wise semi-autoregressive diffusion of SeaDAG. Layers are denoised at different speeds depending on their levels in DAG. A complete graph structure is maintained at very step.}
+\label{fig:ar_overview}
+\end{figure}
+
+To address above issues while preserving the benefits of AR models, we propose \textbf{SeaDAG}, a \textit{SEmi-Autoregressive} diffusion-based DAG generation model that enables graph property control, as illustrated in \figname~\ref{fig:ar_overview}. 
+Our approach simulates layer-wise autoregressive generation while being able to output a complete graph at every diffusion step. We achieve this by applying different denoising speeds to nodes and edges within different layers, inspired by recent advances in natural language generation~\citep{wu2023ar}. Therefore, layers with higher-noise can be generated conditioned on other less-noisy layers.
+
+In summary, SeaDAG offers several key advantages over existing methods:
+
+(1) \textbf{SeaDAG fully exploits the hierarchical and layer-wise nature of DAGs}. We design a denoising process that mimics sequential AR generation, enabling the model to effectively capture inter-layer dependencies. 
+
+(2) \textbf{SeaDAG evolves all layers simultaneously}, albeit at different rates, Unlike the strict part-by-part generation, this simultaneous evolution enables 
+more flexible generation and message passing among layers.
+
+(3) \textbf{SeaDAG maintains a complete graph structure at each timestep}, akin to one-shot methods.
+Leveraging this, we \textbf{incorporate explicit condition learning} by employing a property decoder during training to evaluate graph properties. By using a condition loss, we explicitly teach the model to learn the relationship between DAG structures and properties, which helps the model simultaneously satisfy the conditions while producing realistic graph structures.
+
+To demonstrate the broad applicability of our method, we evaluate it on two significant conditional graph generation tasks from distinct domains. First, we address an important challenge in electronic design automation \citep{liu2023chipnemo}: circuit generation from truth tables. This task was selected due to the pervasive use of DAGs in circuit design, representing a classic application of DAGs in real-world engineering. Second, to showcase our model's versatility, we tackle molecule generation based on quantum properties, a more general graph generation task. For this application, we convert molecular structures into DAGs using the junction tree representation~\citep{jin2018junction}. Notably, our model surpasses many specialized molecule generation models. These results collectively show the robustness of our method to produce realistic DAGs that adhere to specified conditions across diverse domains.
+
+
+
+\section{Methods}
+
+\subsection{Preliminary}
+\label{sec:preliminary}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\textwidth]{figs/exp_dag_2.pdf}
+\caption{(a) Example AIG and its truth table. (b) Example molecule and its junction tree, where each node represents a chemical substructure. The tree will be further transformed into a DAG.}
+\label{fig:exp_dag}
+\end{figure} 
+
+\paragraph{Directed acyclic graph} A directed acyclic graph with $n$ nodes $\mathcal{V} = \{n_1, n_2\dots n_n\}$ can be represented as $G = (\mathbf{X}, \mathbf{E})$. $\mathbf{X} \in \mathbb{R}^{n \times k_x}$ is the node type matrix. Each row $x_i\in \mathbb{R}^{k_x}$ is a one-hot vector encoding the type of node $n_i$ among $k_x$ possible types. $\mathbf{E}\in \mathbb{R}^{n \times n \times k_e}$ is the edge type matrix. Each entry $e_{ij} \in \mathbb{R}^{k_e}$ is a one-hot vector encoding the type of the directed edge from $n_i$ to $n_j$ among $k_e$ possible types. In this work, for a directed edge $e_{ij}$, we refer to $n_i$ as the child node and $n_j$ as the parent node.
+The $i$th row of $\mathbf{E}$ encodes all parents of $n_i$, denoted as $\mathrm{Pa}(n_i)$. The $j$th column encodes all children of $n_j$, denoted as $\mathrm{Ch}(n_j)$.
+We define leaf nodes as nodes without children, while root nodes are those without parents. The level of node $n_i$ is defined as the length of the longest directed path from any leaf node to $n_i$~\citep{DBLP:journals/corr/Bezek16}:
+\begin{align}
+    \mathrm{level}(n_i) &= \max_{n_j\in\mathrm{Ch}(n_i)} \mathrm{level}(n_j) + 1, \text{if } n_i \text{ is not a leaf node,}\\
+    \mathrm{level}(n_i) &= 0, \text{if }n_i \text{ is a leaf node.}
+\end{align}
+
+\paragraph{DAG representation of circuits} The And-Inverter Graph~(AIG) is a powerful representation of logic circuits.
+In an AIG, leaf nodes carry input signals to the circuit, while root nodes produce the circuit's output signals.
+Intermediate nodes are computing units that perform logical conjunction (AND operation) on two binary inputs $a, b \in \{0, 1\}$, outputting $a \land b$.
+Edge $e_{ij}$ from node $n_i$ to $n_j$ indicates that the output of $n_i$ serves as an input to $n_j$. Edges can optionally perform logical negation (NOT operation) on the signal they carry.
+This representation naturally forms a DAG structure. 
+The structure of an AIG uniquely defines its functionality, which can be represented as a canonical truth table mapping all possible combinations of input signals to their corresponding output signals. \figname~\ref{fig:exp_dag}(a) illustrates a simple AIG and its truth table.
+
+This representation is particularly useful because any combinational logic circuits can be expressed using only AND and NOT operations, making AIG a universal and efficient model for circuit analysis and synthesis.
+In this work, we generate AIGs that can realize a given truth table functionality. For node types, we have three category ($k_x = 3$): input gates, AND gates and output gates. For edges, we define three types ($k_e = 3$): non-existing edges representing the absence of a connection, normal edges for direct connections, and negation edges that perform a logical NOT operation. 
+
+\paragraph{DAG representation of molecules} We adopt the approach of~\cite{jin2018junction} to convert molecules into junction trees. This method first extracts valid chemical substructures, e.g. rings, bonds and individual atoms, from the training set. The vocabulary size is the number of node types $k_x$. Each molecule is then converted into a tree structure representing the scaffold of substructures. We transform this tree into a DAG by designating the tree root as the DAG root and converting tree edges to directed edges from children to parents. Edges have two types ($k_e = 2$): absent connections and existing connections. In this work, we generate junction trees of molecules from their properties. Junction trees are subsequently assembled into complete molecules for evaluation. \figname~\ref{fig:exp_dag}(b) shows a molecule and its junction tree. For more details on the construction of junction trees and their conversion to molecules, we refer the reader to~\cite{jin2018junction}.
+
+\subsection{Semi-Autoregressive Diffusion for DAG}
+
+\begin{figure}[!tbp]
+\centering
+\includegraphics[width=\textwidth]{figs/train.pdf}
+\caption{Training pipeline. SeaDAG predicts the node and edge type distribution in the clean graph. Apart from the cross-entropy loss, we employ a condition loss to incorporate explicit condition learning during training.}
+\label{fig:train}
+\end{figure}
+
+In this section, we introduce the proposed semi-autoregressive diffusion generation for DAG. This approach considers the hierarchical nature of DAGs while maintaining a complete graph structure at every step of the sampling process.
+The training pipeline of SeaDAG is illustrated in \figname~\ref{fig:train}. 
+
+\paragraph{Discrete graph denoising diffusion} The forward diffusion process independently adds noise to each node $x_i$ and each edge $e_{ij}$ from timestep 0 to $T$, where $T$ is the maximum diffusion step. The forward process is defined using transition matrices: $[Q^t_X]_{ij} = q(x^t = \mathbf{e}_j \vert x^{t - 1} = \mathbf{e}_i)$ and $[Q^t_E]_{ij} = q(e^t = \mathbf{e}_j \vert e^{t - 1} = \mathbf{e}_i)$. Here, $\mathbf{e}_i$ denotes a one-hot vector with 1 in its $i$th position. Consequently, the node and edge types at time $t$ can be sampled from the following distributions:
+\begin{align}
+    q(x_i^t\vert x_i^{t - 1}) &= {Q_X^t}^{\prime} x_i^{t-1}, \ q(e_{ij}^t\vert e_{ij}^{t-1}) = {Q^t_E}^{\prime} e_{ij}^{t-1} \label{eq:x_t_x_t-1}, \\
+    q(x_i^t\vert x_i) &= {\bar Q_X^t}^{\prime} x_i,\ q(e_{ij}^t\vert e_{ij}) = {\bar Q_E^t}^{\prime} e_{ij} \label{eq:x_t_x_0},
+\end{align}
+where $\bar Q_X^t = Q_X^1\dots Q_X^t$ and $\bar Q_E^t = Q_E^1\dots Q_E^t$. Following~\cite{DBLP:conf/iclr/VignacKSWCF23}, we use marginal distribution to define transition matrices: $Q_X^t = \alpha_t \mathbf{I} + (1 - \alpha_t)\mathbf{1}\mathbf{m_X}, Q_E^t = \alpha_t \mathbf{I} + (1 - \alpha_t)\mathbf{1}\mathbf{m_E}$, where $\mathbf{m_X}, \mathbf{m_E}$ are marginal distributions of node and edge types. We use cosine noise schedule following~\cite{pmlr-v139-nichol21a}.
+
+\paragraph{Semi-Autoregressive diffusion} To leverage the inherent layer-wise structure of DAGs and the dependency-modeling advantages of sequential generation, we introduce different diffusion speed for different layers. We define the timestep $t \in [0, T]$ as the global timestep. We denote the normalized node level as $l_i = \mathrm{level}(n_i) / \max_{n_j\in \mathcal{V}} \mathrm{level}(n_j)$. We then design a function $\mathcal{T}: [0, T] \times [0, 1] \rightarrow [0, T]$ that maps the global timestep $t$ and normalized level $l_i$ to a node-specific local timestep $\tau_i^t = \mathcal{T}(t, l_i)$ for node $n_i$, or an edge-specific local timestep $\tau_{ij}^t = \mathcal{T}(t, l_j)$ for edge $e_{ij}$. By designing $\mathcal{T}$ such that $\mathcal{T}(t, l_i) >= \mathcal{T}(t, l_j)$ when $l_i > l_j$, we assign larger timesteps to nodes at higher levels and edges pointing to higher levels. This configuration results in a bottom-up generation process, where layers at the bottom of the DAG are denoised at a higher speed. Conversely, we can achieve top-down generation by reversing this relationship. In our experiments, we implement $\mathcal{T}$ as:
+\begin{align}
+    \text{Bottom up generation: } \mathcal{T}(t, l) &= \text{clip}(\frac{T}{T - \beta(1 - l)}(t - \beta(1 - l)), 0, T) \\
+    \text{Top down generation: } \mathcal{T}(t, l) &= \text{clip}(\frac{T}{T - \beta l}(t - \beta l), 0, T),
+\end{align}
+where $\beta$ is a hyperparameter and function $\text{clip}(x, a, b)$ clips input $x$ to $[a, b]$. Empirically, we adopt a bottom-up generation approach for AIGs and a top-down generation approach for molecules.
+
+During training, we sample a random global timestep $t$ from $[0, T]$ and sample $G^t = (\mathbf{X}^t, \mathbf{E}^t)$ from the distribution:
+\begin{align}
+    q(G^t\vert G) &= \prod_{1\leq i \leq n}q(x_i^{\tau_i^t}\vert G)\prod_{1\leq i,j \leq n}q(e_{ij}^{\tau_{ij}^t}\vert G) \\
+    q(x_i^{\tau_i^t}\vert G) &= {\bar Q_X^{\tau_i^t}}^{\prime} x_i, \ q(e_{ij}^{\tau_{ij}^t}\vert G) = {\bar Q_E^{\tau_{ij}^t}}^{\prime} e_{ij}.
+\end{align}
+We train a network $f_{\theta}$ to predict the distribution of real graph $G$ from the noisy graph $G^t$: $f_{\theta}(G^t) = (p_{\theta}(\mathbf{X}), p_{\theta}(\mathbf{E}))$. Specifically, we extend the graph transformer architecture from~\cite{dwivedi2020generalization}. We employ cross-entropy loss between the predicted distribution and ground truth $G$ to compute the graph reconstruction loss $\mathcal{L}_{graph}$: 
+\begin{align}
+    \mathcal{L}_{graph}(\theta) = \sum_{1\leq i \leq n} \text{Cross-Entropy}(x_i, p_{\theta}(x_i)) + \sum_{1\leq i,j \leq n}\text{Cross-Entropy}(e_{ij}, p_{\theta}(e_{ij})).
+\end{align}
+
+During inference, we can use the predicted distribution to sample $G^{t - 1}$ from $G^t$:
+\begin{align}
+    p_{\theta}(G^{t - 1}\vert G^t) &= \prod_{1\leq i \leq n}p_{\theta}(x_i^{\tau_i^{t - 1}}\vert G^t)\prod_{1\leq i,j \leq n}p_{\theta}(e_{ij}^{\tau_{ij}^{t - 1}}\vert G^t) \label{eq:sample},
+\end{align}
+where 
+\begin{align}
+    p_{\theta}(x_i^{\tau_i^{t - 1}}\vert G^t) &= \sum_{k \in \{1\dots k_x\}} p_{\theta}(x_i^{\tau_i^{t - 1}}\vert x_i = \mathbf{e}_k, G^t)p_{\theta}(x_i = \mathbf{e}_k\vert G^t)\\
+    p_{\theta}(x_i^{\tau_i^{t - 1}}\vert x_i, G^t) &= p_{\theta}(x_i^{\tau_i^{t - 1}}\vert x_i, x_i^{\tau_i^t}) = \frac{p(x_i^{\tau_i^t}\vert x_i^{\tau_i^{t - 1}}, x_i)q(x_i^{\tau_i^{t - 1}}\vert x_i)}{q(x_i^{\tau_i^t}\vert x_i)}\\
+    p(x_i^{\tau_i^t}\vert x_i^{\tau_i^{t - 1}}, x_i) &= \sum_{x_i^{\tau_i^{t - 1} + 1}}\dots \sum_{x_i^{\tau_i^t - 2}}\sum_{x_i^{\tau_i^t - 1}}\prod_{\tau = \tau_i^{t - 1} + 1}^{\tau_i^t}q(x_i^\tau \vert x_i^{\tau - 1}),
+\end{align}
+and $p_{\theta}(e_{ij}^{\tau_{ij}^{t - 1}}\vert G^t)$ can be similarly computed. Detailed computation is provided in \appname~\ref{sec:sample_proof}.
+
+\paragraph{Sampling from SeaDAG} Computing node and edge-specific timesteps requires the node levels in the clean DAG. During training, we have access to the ground truth clean graph $G$ and could directly compute node levels. During sampling, where we start from a random graph, we determine its hierarchical structure by sampling the number of levels and their sizes from distributions observed in the training data. We can then apply Equation~\ref{eq:sample} to perform backward denoising and generate the final DAG. Detailed sampling algorithm is provided in \appname~\ref{sec:sample_algo}.
+
+\paragraph{Model equivariance} We can prove that our method is permutation equivariant since the utilized graph generation model is equivariant and the loss is invariant to node permutations. Detailed proofs are provided in \appname~\ref{sec:sample_proof}.
+
+\subsection{Conditional Generation}
+Our approach incorporates explicit condition learning by employing a property decoder to compute a condition loss during training. This section details the implementation of these key components.
+
+\subsubsection{Condition loss}
+To incorporate graph properties as generation conditions, we extend our network to accept an additional condition input $cond$: $f_{\theta}(G^t, cond) = (p_{\theta}(\mathbf{X}), p_{\theta}(\mathbf{E}))$. For AIG generation from truth tables, we concatenate truth table vectors with other node features. Each column of binary values in the truth table serves as an additional feature for the corresponding node. Since the condition truth table only provides signals for the input and output gates, we use all zero signals for the AND gates. In molecule generation from quantum property, we concatenate the desired molecule property with the graph level features.
+
+To enhance the network's ability to generate graphs that meet given conditions, we introduce a differentiable graph property decoding module $\phi$. This module decodes the graph property from a clean graph. 
+The implementation of $\phi$ varies based on the application: (1) For AIG generation, we simulate continuous circuit output using softmax-choice wiring, where each gate's input is a soft distribution over candidate inputs rather than a hard selection. (2) For applications where the graph property is not directly computable, such as molecule generation, we employ a pre-trained prediction model as the decoding module.
+Detailed implementations of $\phi$ can be found in \appname~\ref{sec:phi}.
+During training, we sample a predicted clean graph $\hat{G}$ from the predicted distribution $(p_{\theta}(\mathbf{X}), p_{\theta}(\mathbf{E}))$ using Gumbel-Softmax and decode its property using $\phi$. Then we compute the condition loss $\mathcal{L}_{cond}$ between ground truth property condition $cond$ and the decoded property:
+\begin{align}
+    \mathcal{L}_{cond}(\theta) &= \text{LossFunction}(cond, \phi(\hat{G})),
+\end{align}
+where LossFunction is Binary Cross Entropy for comparing two binary truth tables and Mean Squared Error for molecule property.
+The final loss is the combination of $\mathcal{L}_{graph}$ and $\mathcal{L}_{cond}$:
+\begin{align}
+    \mathcal{L}(\theta) &= \mathcal{L}_{graph}(\theta) + \lambda\mathcal{L}_{cond}(\theta),
+\end{align}
+where $\lambda$ is a hyperparameter.
+Since the $\mathcal{L}_{cond}$ is also invariant, the total loss is still invariant to permutation. 
+The training algorithm of SeaDAG is presented in Algorithm~\ref{alg:train}.
+
+\begin{algorithm}
+\setstretch{1.1}
+\caption{SeaDAG training algorithm}
+\label{alg:train}
+\begin{algorithmic}
+\Require DAG dataset $\{(G = (\mathbf{X}, \mathbf{E}), cond)\}$, maximum timestep T, function $\mathcal{T}$ to map global timestep $t$ and node level $l_i$ to local timestep, property decoder $\phi$
+\Ensure Optimized model parameter $\theta$ 
+\While{not converged}
+    \State Sample $(G, cond)$ and global timestep $t \in [1, T]$
+    \State Compute \textbf{node and edge specific local timestep}
+    \begin{align}
+        \tau_i^t \gets \mathcal{T}(t, l_i), \tau_{ij}^t \gets \mathcal{T}(t, l_j) \notag
+    \end{align}
+    \State Sample $G^t\sim q(G^t\vert G)$ using $\tau_i^t, \tau_{ij}^t$ based on Equation~\ref{eq:x_t_x_0}
+    \State $p_{\theta}(\mathbf{X}), p_{\theta}(\mathbf{E)} \gets f_{\theta}(G^t, cond)$
+    \State $\mathcal{L}_{graph} \gets \text{Cross-Entropy}(\mathbf{X}, p_{\theta}(\mathbf{X})) + \text{Cross-Entropy}(\mathbf{E}, p_{\theta}(\mathbf{E}))$
+    \State Sample $\hat{G} \sim (p_{\theta}(\mathbf{X}), p_{\theta}(\mathbf{E)})$ for \textbf{condition loss} calculation
+    \begin{align}
+        \mathcal{L}_{cond} \gets \text{LossFunction}(cond, \phi(\hat{G})) \notag
+    \end{align}
+    \State Optimize $\theta$ to minimize $\mathcal{L}_{graph} + \lambda\mathcal{L}_{cond}$
+\EndWhile
+\end{algorithmic}
+\end{algorithm}
+
+\subsubsection{Integrating conditon learning into training}
+Many AR or one-shot approaches to conditional graph generation train an unconditional model and incorporate conditional guidance only during sampling~\citep{DBLP:conf/iclr/VignacKSWCF23, DBLP:conf/icml/KongCSZPZ23}. However, we argue that this separation of condition learning from training hinders the model's ability to balance condition satisfaction with graph realism. Our experiment results suggest that while these methods can generate realistic graphs in unconditional mode, they struggle to maintain graph quality after applying conditional guidance during sampling.
+In contrast, 
+by integrating conditional learning into the training process, our method SeaDAG achieves a more effective balance between adhering to conditions and producing plausible graph structures.
+
+
+
+\section{Related Works}
+
+
+Different diffusion mechanisms have been proposed for graph generation. One-shot generation models apply noise addition and denoising processes across the entire graph structure simultaneously, predicting all nodes and edges at each timestep~\citep{DBLP:journals/tmlr/YanLSLW24, DBLP:conf/iclr/VignacKSWCF23}. 
+In contrast, AR diffusion models generate the graph sequentially, either producing one part of the graph at each diffusion step~\citep{DBLP:conf/icml/KongCSZPZ23} or having a separate denoising process for each part~\citep{DBLP:journals/corr/abs-2402-03687}. These AR approaches offer advantages in generation efficiency and are better at modeling dependencies between nodes and edges by allowing each step to condition on previously generated parts.~\citep{DBLP:conf/icml/KongCSZPZ23}. However, they face challenges such as sensitivity to node ordering~\citep{you2018graphrnn} and the production of only partial, incomplete graph structures during the sampling process. This limitation precludes operations that require the entire graph structure, such as validity checks and property guidance~\citep{DBLP:conf/iclr/VignacKSWCF23, DBLP:conf/iccv/YuWZGZ23}.
+Latent diffusion models have also been explored for graph generation~\citep{DBLP:journals/corr/abs-2402-02518}, with studies indicating their potential to enhance performance in 3D graph generation tasks~\citep{you2023latent}.
+
+
+\section{Experiments}
+
+In our experiments, we focus on evaluating two key aspects of the methods:
+(1) \textbf{Conditional generation}: We assess whether the methods can generate graphs that satisfy the given condition.
+(2) \textbf{Graph quality}: We evaluate whether the generated graphs are realistic and resemble real graphs in their distribution.
+
+\begin{figure}[thbp]
+\centering
+\includegraphics[width=0.9\textwidth]{figs/case_study.pdf}
+\caption{Sampled AIG and molecules by SeaDAG and the one-shot diffusion baseline DiGress.}
+\label{fig:case_study}
+\end{figure} 
+
+\subsection{Data and Baselines}
+\paragraph{AIG dataset} We generate a dataset of random AIGs with 8 inputs, 2 outputs and a maximum of 32 gates. For each AIG, we compute its corresponding truth table. The dataset comprises 12950 AIGs in the training set, 1850 in the validation set, and 256 in the test set. The generalization experiments on AIGs with more than 8 input and 2 outputs are available in \appname~\ref{sec:aig_generalization}.
+
+\paragraph{Molecule dataset} For molecule generation, we evaluate SeaDAG on the standard QM9 benchmark \citep{DBLP:journals/corr/WuRFGGPLP17}, which contains molecules with up to 9 heavy atoms. We adopt the standard dataset split, utilizing 100k graphs for training and 20k for validation. We generate 10k molecules for evaluation. We further conduct a molecule optimization experiment using the ZINC dataset~\citep{DBLP:journals/jcisd/IrwinSMBC12}, which has 219k molecules in training set and 24k molecules for validation. More dataset statistics are provided in \appname~\ref{sec:dataset}.
+
+\paragraph{Baselines} We evaluate SeaDAG against several recent graph generation diffusion models as well as state-of-the-art molecule generation models. 
+For one-shot graph diffusion baselines, we compare SeaDAG with SwinGNN~\citep{DBLP:journals/tmlr/YanLSLW24}, EDP-GNN~\citep{DBLP:conf/aistats/NiuSSZGE20}, GDSS~\citep{DBLP:conf/icml/JoLH22} and DiGress~\citep{DBLP:conf/iclr/VignacKSWCF23}.
+For AR graph diffusion baselines, we compare SeaDAG with Pard~\citep{DBLP:journals/corr/abs-2402-03687} and GRAPHARM~\citep{DBLP:conf/icml/KongCSZPZ23}. 
+For graph diffusion baselines that operate in latent space, we compare SeaDAG with LDM-3DG~\citep{you2023latent} and EDM~\citep{DBLP:conf/icml/HoogeboomSVW22}.
+For molecule generation baselines, we compare SeaDAG with GraphAF~\citep{DBLP:conf/iclr/ShiXZZZT20}, GraphDF~\citep{DBLP:conf/icml/LuoYJ21}, MoFlow~\citep{DBLP:conf/kdd/ZangW20}, GraphEBM~\citep{DBLP:journals/corr/abs-2102-00546} and SPECTRE~\citep{DBLP:conf/icml/MartinkusLPW22}. 
+Detailed implementations for baselines are provided in \appname~\ref{sec:baseline}.
+
+\subsection{Conditional generation}
+
+\begin{wraptable}{r}{8.5cm}
+\caption{AIG generation. 
+The best results are highlighted in bold and the second-best results are underlined.}
+\label{tab:cc_accu}
+\renewcommand*{\arraystretch}{1.1}
+\begin{tabular}{llcc}
+\hline
+\textbf{Model} & \textbf{Class} & \textbf{Validity$\uparrow$} & \textbf{Accuracy$\uparrow$} \\ \hline
+SwinGNN        & One-shot       & {\ul 88.29}                 & 57.40                       \\
+Pard           & Autoreg.       & 78.86                       & 75.78                       \\
+DiGress        & One-shot       & 43.21                       & {\ul 82.07}                 \\
+SeaDAG         & Semi-Autoreg.  & \textbf{92.38}              & \textbf{89.25}              \\ \hline
+\end{tabular}
+\end{wraptable} 
+
+\paragraph{Conditional AIG generation} \tabname~\ref{tab:cc_accu} presents the evaluation results for AIG generation. To achieve conditional generation, we extend baseline models to accept truth tables as additional input. We report two metrics: \textit{Validity}, which means the percentage of generated AIGs that are structurally valid, and function \textit{Accuracy}, which means the bit-wise accuracy between the condition truth table and the truth table of the generated AIGs. SeaDAG significantly outperforms baseline models on both metrics.
+\begin{table}[!thbp]
+\caption{Conditional generation evaluation on QM9. 
+We report the absolute error between the target and oracle-predicted properties~\citep{you2023latent}. The best results are highlighted in bold and the second-best results are underlined.}
+\label{tab:mol_cond}
+\begin{center}
+\renewcommand*{\arraystretch}{1.1}
+\begin{tabular}{lccccc}
+\hline
+\textbf{Model} & \textbf{$\alpha$} & \textbf{HOMO}  & \textbf{LUMO}  & \textbf{Gap}   & \textbf{$\mu$} \\ \hline
+Random         & 41.00             & 103.30         & 121.83         & 193.36         & 8.40           \\
+EDM            & 20.15             & 158.70         & 166.20         & 287.00         & 7.01           \\
+LDM-3DG        & 15.56             & 54.62          & \textbf{63.08} & 107.14         & 6.33           \\
+LDM-3DG-GSSL   & 16.43             & 55.03          & {\ul 66.53}    & 113.15         & 9.22           \\
+DiGress        & {\ul 9.23}        & {\ul 31.98}    & 105.06         & {\ul 90.57}    & {\ul 1.49}     \\
+SeaDAG         & \textbf{8.85}     & \textbf{30.91} & 103.03         & \textbf{89.70} & \textbf{1.33}  \\ \hline
+\end{tabular}
+\end{center}
+\end{table}
+
+\paragraph{Conditional molecule generation} We evaluate conditional molecule generation across five molecule properties: polarizability $\alpha$ ($\text{Bohr}^3$), Highest Occupied Molecular Orbital (HOMO) energy (meV), Lowest Unoccupied Molecular Orbital (LUMO) energy (meV), Gap between HOMO and LUMO (meV), and dipole moment $\mu$ (D). \tabname~\ref{tab:mol_cond} presents the Mean Absolute Error (MAE) between the target molecular properties and properties of the generated molecules. The random baseline represents the MAE of randomly sampled molecules. SeaDAG achieves the lowest MAE in four out of five property conditions, which underscores SeaDAG's ability in generating molecules with desired properties.
+
+\subsection{Graph Quality Evaluation}
+\label{sec:graph_quality}
+In addition to evaluating the methods' ability to meet the conditions, we also assess the realism of the generated graphs and how closely they resemble the real graph distribution. 
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=1.0\textwidth]{figs/level_dist.pdf}
+\caption{Distribution of maximum levels in generated AIGs. SeaDAG with semi-autoregressive diffusion generates AIGs with maximum levels similar to ground truth AIGs, while other two one-shot methods produce significantly shallower AIGs.}
+\label{fig:level_dist}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\textwidth]{figs/sample_process_bg.pdf}
+\caption{Comparison of a sampled AIG and the function accuracy during the sampling process by DiGress and SeaDAG from the same truth table. SeaDAG is capable of generating AIGs with greater level and complexity, achieving higher function accuracy.}
+\label{fig:sample_process}
+\end{figure} 
+
+\paragraph{Semi-autoregressive diffusion enhances AIG realism.} 
+We analyze the quality of generated AIGs from two aspects: (1) the AIG Validity, which is reported in \tabname~\ref{tab:cc_accu}, and (2) the distribution of maximum levels in the generated AIGs.
+\figname~\ref{fig:level_dist} illustrates a comparison between our proposed SeaDAG model, its one-shot variant (trained without layer-wise semi-autoregressive generation), and the one-shot diffusion model DiGress. While DiGress and the one-shot SeaDAG tend to produce shallow AIGs with significantly fewer levels than the ground truth, SeaDAG with semi-autoregressive diffusion achieves a maximum level distribution closely resembling that of the ground truth AIGs.
+\figname~\ref{fig:sample_process} presents a case study where DiGress and SeaDAG generate an AIG conditioned on the same truth table. SeaDAG is able to generate more complex AIGs with a greater number of levels and obtains higher function accuracy.
+These observations indicate that semi-autoregressive generation can help the model to construct more complex AIGs that are more similar to ground truth ones and therefore more capable of realizing the given truth tables.
+
+\begin{table}[H]
+\caption{Molecule quality evaluation on QM9. 
+Other conditional models, such as LDM-3DG and DiGress, exhibit a decline in quality compared to their unconditional counterparts. In contrast, SeaDAG maintains quality comparable to the best models in the unconditional group.
+Note that higher novelty on QM9 datasets indicates deviation from the training distribution rather than better performance~\citep{DBLP:conf/iclr/VignacF22}.}
+\label{tab:mol_quality}
+\begin{center}
+\resizebox{0.9\textwidth}{!}{
+\renewcommand*{\arraystretch}{1.1}
+\begin{tabular}{llccccc}
+\hline
+\textbf{\begin{tabular}[c]{@{}l@{}}Generation\\ Mode\end{tabular}} & \textbf{Model} & \textbf{Validity$\uparrow$} & \textbf{NSPDK$\downarrow$} & \textbf{FCD$\downarrow$} & \textbf{Unique$\uparrow$} & \textbf{Novelty} \\ \hline
+\multirow{10}{*}{Unconditional}                                    & GraphAF        & 74.43                       & 0.020                      & 5.27                     & 88.64                     & 86.59                      \\
+                                                                   & GraphDF        & 93.88                       & 0.064                      & 10.93                    & 98.58                     & 98.54                      \\
+                                                                   & MoFlow         & 91.36                       & 0.017                      & 4.47                     & {\ul 98.65}                     & 94.72                      \\
+                                                                   & EDP-GNN        & 47.52                       & 0.005                      & 2.68                     & \textbf{99.25}                     & 86.58                      \\
+                                                                   & GraphEBM       & 8.22                        & 0.030                      & 6.14                     & 97.90                     & 97.01                      \\
+                                                                   & SPECTRE        & 87.3                        & 0.163                      & 47.96                    & 35.70                     & 97.28                      \\
+                                                                   & GDSS           & 95.72                       & 0.003                      & 2.90                     & 98.46                     & 86.27                      \\
+                                                                   & GRAPHARM       & 90.25                       & {\ul 0.002}                & {\ul 1.22}               & 95.62                     & 70.39                      \\
+                                                                   & LDM-3DG        & \textbf{100.0}              & 0.009                      & 2.44                     & 97.57                     & 89.89                      \\
+                                                                   & DiGress        & {\ul 99.00}                 & \textbf{0.0005}            & \textbf{0.36}            & 96.66                     & 33.40                      \\ \hline
+\multirow{3}{*}{Conditional}                                       & LDM-3DG        & \textbf{100.0}              & 0.018                      & 4.72                     & 81.09                     & 92.03                      \\
+                                                                   & DiGress        & {\ul 99.28}                 & \textbf{0.0004}            & {\ul 0.72}               & \textbf{96.34}                     & 47.21                      \\
+                                                                   & SeaDAG   & \textbf{100.0}              & {\ul 0.002}                & \textbf{0.36}            & {\ul 93.01}                     & 55.15                      \\ \hline
+\end{tabular}
+}
+\end{center}
+\end{table}
+
+\paragraph{SeaDAG can balance molecule quality and condition satisfaction.} \tabname~\ref{tab:mol_quality} presents the evaluation of the quality of generated molecules.
+We employ several metrics to assess the plausibility of molecules: \textbf{Validity} is the fraction of valid molecules. Neighborhood subgraph pairwise distance kernel (\textbf{NSPDK}) MMD~\citep{DBLP:conf/icml/CostaG10} computes the MMD between the generated molecules and the test set, which takes into account both the node and edge features for evaluation. Fréchet ChemNet Distance (\textbf{FCD}) is the difference between training set and generated molecules in distributions of last layer activations of ChemNet. 
+
+Additionally, we also report Uniqueness, which is the fraction of the unique and valid molecules, and Novelty, which is the fraction of unique and valid molecules not present in the training set. Note that for QM9 dataset, a higher Novelty score does not indicate better performance, but rather suggests a deviation from the dataset's distribution, as QM9 comprehensively enumerates molecules within specific constraints~\citep{DBLP:conf/iclr/VignacF22}.
+We evaluate models in two categories: \textbf{Unconditional group}, where molecules are generated without constraints, and \textbf{Conditional group}, where generation is guided by one of the five aforementioned properties and the results represent the average of five separate evaluations. 
+
+For the baselines in the Conditional group, LDM-3DG~\citep{you2023latent} achieves conditional generation by giving models additional property inputs and DiGress~\citep{DBLP:conf/iclr/VignacKSWCF23} applys conditional guidance only during sampling stage.
+Notably, the conditional variants of LDM-3DG and DiGress exhibit up to 100\% deterioration in NSPDK and FCD metrics compared to their unconditional counterparts. 
+In contrast, SeaDAG achieves the best FCD scores across both conditional and unconditional groups, while its NSPDK performance is comparable to the best results in both groups.
+
+\subsection{Molecule Optimization via Conditional Generation}
+\begin{table}[!thbp]
+\caption{Molecule Optimization on ZINC. We report the best property scores achieved by each method. While other methods use optimization algorithms, SeaDAG is solely trained for conditional generation, yet it produces molecules with properties comparable to those of other methods.}
+\label{tab:mol_optim}
+\begin{center}
+\resizebox{0.9\textwidth}{!}{
+\renewcommand*{\arraystretch}{1.1}
+\begin{tabular}{llccccccc}
+\hline
+\multirow{2}{*}{\textbf{Model}} & \multirow{2}{*}{\textbf{Optimization Algo.}} & \multicolumn{3}{c}{\textbf{Penalized logP}}      &  & \multicolumn{3}{c}{\textbf{QED}}                 \\ \cline{3-5} \cline{7-9} 
+                                &                                              & \textbf{1st}   & \textbf{2nd}   & \textbf{3rd}   &  & \textbf{1st}   & \textbf{2nd}   & \textbf{3rd}   \\ \hline
+Train set                       & N.A.                                         & 4.52           & 4.30           & 4.23           &  & 0.948          & 0.948          & 0.948          \\
+ORGAN                           & Reinforcement Learning                       & 3.63           & 3.49           & 3.44           &  & 0.896          & 0.824          & 0.820          \\
+JT-VAE                          & Bayesian Optimization                        & 5.30           & 4.93           & 4.49           &  & 0.925          & 0.911          & 0.910          \\
+GCPN                            & Policy Gradient                              & 7.98           & 7.85           & 7.80           &  & 0.948          & 0.947          & 0.946          \\
+MolecularRNN                    & Policy Gradient                              & \textbf{10.34} & \textbf{10.19} & \textbf{10.14} &  & {\ul 0.948}    & \textbf{0.948} & \textbf{0.947} \\
+SeaDAG                          & N.A.                                         & {\ul 8.52}     & {\ul 8.35}     & {\ul 8.33}     &  & \textbf{0.948} & {\ul 0.947}    & {\ul 0.946}    \\ \hline
+\end{tabular}
+}
+\end{center}
+\end{table}
+We demonstrate a practical application of our conditional DAG generation in the domain of molecule optimization. On the ZINC dataset, we train SeaDAG to conditionally generate molecules based on two properties: penalized logP and Quantitative Estimate of Druglikeness~(QED), which are two common target properties for molecule optimization~\citep{DBLP:journals/corr/abs-1905-13372}. We then sample from SeaDAG with target property scores. Detailed implementations could be found in \appname~\ref{sec:mol_optim}.
+Without using explicit optimization techniques, SeaDAG achieves top property scores comparable to several optimization-based baselines~\citep{DBLP:journals/corr/GuimaraesSFA17, jin2018junction, DBLP:conf/nips/YouLYPL18} as shown in \tabname~\ref{tab:mol_optim}. 
+Notably, for the penalized logP property, SeaDAG attains scores surpassing the highest values observed in the training set. This suggests SeaDAG's capacity to extrapolate beyond the training distribution by effectively learning the intrinsic relationships between molecular structure and associated properties.
+
+
+\section{Conclusion}
+
+In this paper, we introduced SeaDAG, a semi-autoregressive diffusion model for conditional DAG generation. Our approach demonstrates significant improvements in generating graphs that are realistic and realize given conditions. Future research could focus on enhancing the method's efficiency to match that of fully autoregressive models.
+
+
+
+

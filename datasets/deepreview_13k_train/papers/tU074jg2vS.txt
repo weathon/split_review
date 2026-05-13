@@ -1,0 +1,234 @@
+\title{Hierarchical Autoregressive Transformers for Tokenizer-Free Language Modelling}
+
+\begin{abstract}
+Tokenization is a fundamental step in natural language processing, breaking text into units that computational models can process. While learned subword tokenizers have become the de-facto standard, they present challenges such as large vocabularies, limited adaptability to new domains or languages, and sensitivity to spelling errors and variations. To overcome these limitations, we investigate a hierarchical architecture for autoregressive language modelling that combines character-level and word-level processing. It employs a lightweight character-level encoder to convert character sequences into word embeddings, which are then processed by a word-level backbone model and decoded back into characters via a compact character-level decoder. This method retains the sequence compression benefits of word-level tokenization without relying on a rigid, predefined vocabulary. We demonstrate, at scales up to 7 billion parameters, that hierarchical transformers match the downstream task performance of subword-tokenizer-based models while exhibiting significantly greater robustness to input perturbations. Additionally, during continued pretraining on an out-of-domain language, our model trains almost twice as fast, achieves superior performance on the target language, and retains more of its previously learned knowledge. Hierarchical transformers pave the way for NLP systems that are more robust, flexible, and generalizable across languages and domains.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Tokenization plays a fundamental role in natural language processing (NLP) as it breaks down text into units that computational models can process. Two fundamental approaches are character-level and word-level tokenization. While character-level tokenization uses the “atomic” units of text and enjoys a small vocabulary size, it leads to long sequences with a high computational and memory cost. Conversely, word-level tokenization leads to short sequences but suffers from extremely large vocabulary sizes and the inability to process out-of-vocabulary words.  
+
+Subword tokenization has emerged as a compromise between these two extremes and has become the standard. Common subword tokenizers are trained—separately from the model—on a reference corpus of text. For example, Byte Pair Encoding (BPE; Gage, 1994; Sennrich et al., 2016) builds a vocabulary starting from individual bytes and iteratively merging adjacent pairs of tokens that occur most frequently in the corpus until the desired vocabulary size is reached. The resulting subword vocabulary leads to good sequence length compression on the reference corpus, while maintaining the ability to handle out-of-vocabulary words using a byte fallback.  
+
+However, subword tokenizers come with several downsides. First, contemporary models routinely use vocabulary sizes in the hundreds of thousands, making the corresponding embedding matrices and output heads extremely large. For instance, for the 8B model of the Llama-3 family (Dubey et al., 2024), with a vocabulary size of $128\mathbf{k}$ , embedding and head account for roughly $13\%$ of the model’s parameter footprint. Secondly, the tokenizer is fitted in a separate step and not included in the end-to-end learning process of the model. This becomes problematic when a pretrained model is applied to, or finetuned on text from different domains or languages to which the tokenizer is not attuned (see, e.g., Ali et al., 2024; Petrov et al., 2023; Deiseroth et al., 2024). Finally, spelling mistakes or variations can lead to drastically different token sequences for semantically close inputs and thereby degrade model performance.  
+
+![](images/062d2e8d70e17e859742cce19e50a230bdbf080ed6b474689850f011fce5dce1.jpg)  
+Figure 1: Schematic of the proposed hierarchical architecture. The input text is first split into words, with each word prepended by a special token [W]. These words are passed through the encoder and the activation at the position of the [W] token is selected as the word embedding $\mathbf{e}^{i}$ . The sequence of word embeddings $\mathbf{e}^{i}$ is then processed by the backbone to produce abstract predictive word embeddings $\mathbf{p}^{i}$ . The decoder then maps $\mathbf{p}^{i}$ to probabilites for the characters of the next word. During inference, given a text with a partial word, complete words are processed by the encoder and backbone. The decoder then recursively completes the remaining characters of the incomplete word and the completed word enters the encoder in a word recursion.  
+
+To address these shortcomings, we investigate a hierarchical architecture as shown in Figure 1, which combines character-level and word-level processing. We first split the text into words. The characters of each word are processed by a small character-level encoder module, which maps them to a word embedding. The resulting sequence of word embeddings is then processed by a larger backbone model. The outputs of the backbone are treated as abstract “predictive” word embeddings and are decoded back to characters by another small character-level decoder module. As we will demonstrate, the character-level modules can be kept very small, having fewer parameters than the token-level embedding and head they replace. Encoder, backbone and decoder are transformer models and the entire system can be trained end-to-end, without the need for a fixed, trained tokenizer.  
+
+Our core contributions are:  
+
+• We revisit, refine and thoroughly investigate a hierarchical architecture for autoregressive language modelling that combines character- and word-level processing. Its design eliminates the need for a fixed word or subword-level vocabulary, and does not require separate tokenizer training. Through a careful computational cost analysis and comprehensive architecture sweeps, we identify optimal hierarchical model configurations across various compute budgets.  
+
+• We conduct extensive experiments, comparing our proposed model against state-of-the-art subword tokenizer-based models and a competing hierarchical approach in compute-matched experiments on identical data. We demonstrate that our approach scales effectively to the 7B scale, consistently matching the performance of the baseline models.  
+
+• We demonstrate that our proposed model is significantly more robust to perturbations of its input.  
+
+• Finally, we show that our model enjoys superior finetunability on out-of-distribution data, such as new languages or domains, outperforming tokenizer-based architectures which struggle with adaption to new vocabularies. In particular, during continued pretraining on an unseen language, our model achieves superior performance on the target language, retains more of its previously acquired knowledge, while training almost twice as fast.  
+
+The remainder of this paper is organised as follows. Section 2 introduces our hierarchical architecture, including a detailed computational cost analysis. Related work is discussed in Section 3. In Section 4, we present our experimental setup and results. Section 5 concludes the paper with final remarks and potential directions for future research.  
+
+
+
+\section{2 HIERARCHICAL AUTOREGRESSIVE TRANSFORMERS  }
+
+
+We now introduce our hierarchical architecture, which is a refinement and simplification of similar architectures proposed in prior works, see Section 3. Our approach relies on a splitting rule that partitions text into sequences of words. Specifically, we use UTF-8 bytes1 as our base alphabet, consisting of $V_{\mathrm{B}}=256$ distinct values2, and split the text at Unicode whitespace characters, which are appended to the previous word. A text can then be represented as $(w^{1},\cdot\cdot\cdot,w^{L})$ with $w^{i}\in[V_{\mathrm{B}}]^{\ell_{i}}$ being a word of length $\ell_{i}$ . Importantly, the splitting rule is the only non-trainable processing step in our method. We argue that, for natural text in (alphabetic) languages, whitespace splitting is adequate. However, our hierarchical architecture is agnostic to the type of splitting rule, allowing for alternatives that may be more appropriate for different languages or domains.  
+
+2.1 HIERARCHICAL ARCHITECTURE  
+
+Our architecture consists of three main components:  
+
+• An encoder $E\colon\mathbb{R}^{\mathbb{N}\times d}\ \rightarrow\ \mathbb{R}^{\mathbb{N}\times d}$ , a bidirectional transformer operating on the character embeddings within each word. • A backbone ${\boldsymbol{B}\colon\mathbb{R}^{\mathbb{N}\times D}\rightarrow\mathbb{R}^{\mathbb{N}\times D}}$ , a causal transformer operating on word embeddings. • A decoder $D\colon\mathbb{R}^{\mathbb{N}\times d}\ \to\ \mathbb{R}^{\mathbb{N}\times V_{\mathrm{B}}}$ , a causal transformer with a language modelling head, operating on character level and outputting next-character prediction logits.  
+
+In addition, we have a character embedding $C\colon[V_{\mathrm{B}}]\,\rightarrow\,\mathbb{R}^{d}$ and two projection matrices $\mathbf{W}_{E}\,\in$ $\mathbb{R}^{D\times d}$ and $\mathbf{W}_{D}\in\mathbb{R}^{d\times D}$ mapping between the (smaller) character-level dimension $d$ and the (larger) word-level dimension $D$ .  
+
+A document $(w^{1},\ldots,w^{L})$ is processed by the model as explained in the following and depicted in Figure 1. Following Devlin et al. (2019), each word is prepended with a special token [W] and its characters are embedded via $C$ ,  
+
+$$
+\begin{array}{r}{\mathbf{x}_{j}^{i}=C(w_{j}^{(i)})\in\mathbb{R}^{d},\quad\mathbf{x}_{\mathrm{[w]}}=C([W])\in\mathbb{R}^{d}.}\end{array}
+$$  
+
+Then, it is passed through the encoder. The output corresponding to the [W] token, i.e., the first entry in the sequence dimension, is selected as a word embedding:  
+
+$$
+\begin{array}{r}{\mathbf{e}^{i}=\left[E(\mathbf{x}_{[\mathrm{W}]},\mathbf{x}_{1}^{i},\ldots,\mathbf{x}_{\ell_{i}}^{i})\right]_{1}\in\mathbb{R}^{d}.}\end{array}
+$$  
+
+The resulting sequence of word embeddings is projected to the backbone dimension, passed through the backbone and projected back to the decoder dimension:  
+
+$$
+\widetilde{\mathbf{e}}^{i}=\mathbf{W}_{\mathbf{E}}\mathbf{e}^{i}\in\mathbb{R}^{D},\quad\widetilde{\mathbf{p}}^{i}=\left[B(\widetilde{\mathbf{e}}^{1},\dots,\widetilde{\mathbf{e}}^{L})\right]_{i}\in\mathbb{R}^{D},\quad\mathbf{p}^{i}=\mathbf{W}_{\mathbf{D}}\widetilde{\mathbf{p}}^{i}\in\mathbb{R}^{d}.
+$$  
+
+The output for the $i$ -th word, $\mathbf{p}^{i}$ , is treated as a predictive word embedding, to be decoded into a sequence of characters matchting the next word. To that end, during training, we concatenate $\mathbf{p}^{i}$ with the character embeddings of the next word and map them through the decoder, resulting in a sequence of next-character prediction logits:  
+
+$$
+\begin{array}{r}{\mathbf{l}_{j}^{i}=\left[D(\mathbf{p}^{i},\mathbf{x}_{1}^{i+1},\ldots,\mathbf{x}_{\ell_{i+1}}^{i+1})\right]_{j}\in\mathbb{R}^{V_{\mathrm{B}}}.}\end{array}
+$$  
+
+We train on the loss  
+
+$$
+\sum_{i=1}^{L}\sum_{j=1}^{\ell_{i+1}+1}\mathcal{L}\left(\mathbf{l}_{j}^{i},w_{j}^{i+1}\right),
+$$  
+
+where $\mathcal{L}$ denotes character-level cross-entropy loss and we set the final prediction target of each word to $\boldsymbol{w}_{\ell_{i+1}+1}^{i+1}=[\mathsf{W}]$ , indicating the end of the word.  
+
+
+
+\section{2.2 INFERENCE  }
+
+
+Inference in our hierarchical architecture proceeds in a nested loop, as shown on the left side of Figure 1. To generate a new word, we pass the context sequence through encoder and backbone to produce a predictive next-word embedding. To materialize the next word in characters, we run an autoregressive loop of the decoder module. When a word is completed, as indicated by the prediction of a [W] token, it is appended to the input and the process is repeated.  
+
+
+
+\section{2.3 COMPUTATIONAL AND MEMORY COST  }
+
+
+We now discuss the computational cost and memory footprint of our proposed architecture, contrasting it with a baseline model using a subword tokenizer and a corresponding embedding matrix and language modelling head. We assume the baseline model uses P bbaasceklibnoenep arameters in its backbone and P head in its embedding and head. For the hierarchical model, we assume P hierarchical parameters in the backbone and P hcihearrarchical in each of the character-level modules.  
+
+Computational Cost. We present a simplified computational cost analysis under the assumption that the cost of a forward-backward pass through a transformer is proportional to $S P$ , where $S$ is the sequence length and $P$ is the number of non-embedding parameters. This is a standard simplification based on the observation that feed-forward FLOPs dominate attention FLOPs for typical settings.2.  
+
+Consider a document of $S$ characters. The computational cost of the two models depends heavily on the length of the sequence passed through the backbone, i.e., the number of words $S_{\mathrm{W}}$ and tokens $S_{\mathrm{T}}$ contained in the document, respectively. The baseline model processes a sequence of length $S_{\mathrm{T}}$ , passing it through the backbone and the output head, incurring a total cost of  
+
+$$
+\begin{array}{r}{C_{\mathrm{baseline}}=S_{\mathrm{T}}P_{\mathrm{baseline}}^{\mathrm{backbone}}+S_{\mathrm{T}}P_{\mathrm{baseline}}^{\mathrm{head}}.}\end{array}
+$$  
+
+In the hierarchical architecture, the backbone processes a sequence of length $S_{\mathrm{W}}$ . Additionally, the two character-level models each process the sequence of length $S$ plus an additional $S_{\mathrm{W}}$ word separator tokens for a total cost of  
+
+$$
+\begin{array}{r}{C_{\mathrm{hierarchical}}=S_{\mathrm{w}}P_{\mathrm{hierarchical}}^{\mathrm{backbone}}+2(S+S_{\mathrm{w}})P_{\mathrm{hierarchical}}^{\mathrm{char}}.}\end{array}
+$$  
+
+Our experiments will show that small en-/decoder modules are viable. For instance, in our 3Bscale experiment, the computational cost of our two character-level modules roughly equals that of the language modelling head of the baseline. Additionally, words represent a coarser unit than subwords; our pretraining dataset exhibits a ratio of $S_{\mathrm{W}}\approx0.69S_{\mathrm{T}}$ , see Figure 2 (left). Consequently, for a given cost budget, our hierarchical model will be able to operate with a larger backbone. We will revisit this for our compute-matched experiments in Section 4.  
+
+Memory. For compute-matched models, a hierarchical architecture will have a larger parameter footprint, see Table 2. In terms of activation memory, we have to distinguish between training and inference. During training, all activations have to be stored. Our hierarchical model shrinks the number of activations in the backbone by a factor of $S_{\mathrm{W}}/S_{\mathrm{T}}$ and avoids large logit tensors, but operates with a slightly larger backbone and needs to store additional activations in the characterlevel modules. Since the exact size of the activation memory depends on the caching strategy of the auto-differentiation framework, we forego a detailed comparison.  
+
+Inference. Using KV caching (Pope et al., 2023), it is possible to achieve near parity of FLOPs during training and inference.4. Additionally we propose a scheme to further optimise inference performance using cached word embeddings. The relevant quantity for memory consumption at inference time is the size of the KV cache, which can be a bottleneck in high-throughput inference systems.5.  
+
+![](images/c832827d5c602c37e98b1f28b353098ebb83ccae12ab83f5ac4017fe3407db0c.jpg)  
+Figure 2: Bytes per word (BPW) and bytes per token (BPT) statistics, showing that words are a coarser unit than subword tokens. The tokenizer has been fitted to the DCLM-baseline dataset (left). On a dataset to which the tokenizer is not attuned, such as the German Occiglot dataset (right), the tokenizer “fragments” and BPT drops significantly.  
+
+
+
+\section{3 RELATED WORK  }
+
+
+The granularity of computational models for natural language has been a prominent question in NLP research since its inception (see, e.g., a review by Mielke et al., 2021). For many years, the question of character- vs word-level modelling has dominated the discussion, until subword tokenization methods, such as Byte-Pair Encoding (BPE, Sennrich et al., 2016), have emerged as a middle ground, balancing the flexibility of characters with the semantic coherence of words. Over time, subword tokenizers have become the dominant approach, gaining widespread adoption. The current landscape of NLP largely treats subword tokens as fundamental, indivisible units that are determined through a preprocessing step prior to model training.  
+
+Some prior works have augmented word or subword token embeddings with character-level information (e.g., Ma et al., 2020; El Boukkouri et al., 2020; Aguilar et al., 2021). More recently, the T-FREE method (Deiseroth et al., 2024) operates at the word level while incorporating character information through specialized embedding and output layers. These approaches have either not tackled generative modelling or still require a fixed vocabulary for generation.  
+
+Another line of prior work aims to enable character- or byte-level language modelling at contemporary scales. While some attempts have been made to train purely character-level transformers (Al-Rfou et al., 2019; Choe et al., 2019; Xue et al., 2022) these have ultimately not kept pace with subword-level models. Moving closer to the present work, some authors have presented “hybrid” approaches, e.g., using downsampling mechanisms (Charformer; Tay et al., 2022), or cross-attention with a latent “bottleneck” sequence (Perceiver AR; Hawthorne et al., 2022) to internally condense the large sequence lengths generated by character-level models. In the following, we describe in detail the most closely-related works.  
+
+Sun et al. (2023) use a hierarchical character-word architecture for BERT-style masked language modelling. As input to the decoder, the authors concatenate the backbone output for the $i^{\th}$ -th word with the per-character encoder outputs for the same word. We devise a generative variant of this architecture. We introduce a shift by one, concatenating with embeddings of the next word and use the raw character embeddings rather than the encoder outputs, since the bidirectional encoder would otherwise “leak” information about future characters. Our work also substantially scales up this modelling paradigm, experimenting with models up to the 7B parameter scale, compared to Sun et al. (2023) who use models around the 100M scale.  
+
+The MegaByte architecture (Yu et al., 2023) uses a backbone-decoder architecture for generative modelling. Instead of splitting byte sequences into words, MegaByte chunks it into fixed-size patches of subsequent bytes. Their architecture does not use an encoder module; the input to the backbone is simply the concatenation of the embeddings of the bytes within a patch. Note that this restricts the architecture to the use of fixed-size patches. At the decoder, the backbone output is added to the byte sequences, which is prepended with a padding token. Yu et al. (2023) experiment with language models up to 320M parameters for the baseline model. We compare our approach experimentally to MegaByte below.  
+
+Thawani et al. (2023) propose the hierarchical architecture most closely related to the present work. A notable difference is that they prepend not one but four [W] tokens to each word in order to increase model capacity when going from encoder to backbone. This incurs drastically higher cost in en- and decoder compared to our approach of incrasing the hidden dimension. Thawani et al. (2023) experiment with models up to 77M parameters on datasets with fewer than 10M characters and a context window of only 192 characters (or the token equivalent thereof). Unfortunately, their experiments are not compute-matched and, by our calculation, assign $4\mathtt{x}$ more compute to the hierarchical architecture compared to the baseline.  
+
+Finally, in work that appeared concurrently with the preparation of the present paper, Slagle (2024) propose a byte-level model that applies additional Transformer layers to a subset of the input bytes. They investigate both a fixed-size spacing as well as a split rule that marks only certain bytes as “split bytes”, including whitespaces and punctuation.4). Experiments are compute-matched and scaled up to the 1B models trained on 80B bytes and do not include downstream evaluations. None of the above papers investigate robustness or finetunability.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+We proceed with an experimental investigation of the proposed method.  
+
+Models. All models are based on the Llama architecture (Touvron et al., 2023) with a fixed attention head size of 128. For the baseline model and the backbone of our hierarchical architecture, we use Llama’s default 1:1 “aspect ratio”, i.e., the number of heads equals the number of layers. The design of the character-level encoder and decoder modules is discussed in Section 4.1. The baseline model uses a BPE tokenizer with a vocabulary size of $64\mathrm{k}$ , fitted on our pretraining data.  
+
+Data. We perform our main experiments using the DCLM-Baseline dataset (Li et al., 2024), which is a curated English-only pretraining dataset. Hyperparameter sweeps and ablations conducted early on in the project used the well-established Fineweb dataset (Penedo et al., 2024). For our continued pretraining experiment, we use the German portion of the Occiglot Fineweb v0.5 dataset (Brack et al., 2024). Dataloading is handled on a byte basis to guarantee that both models get to see the exact same data during training. We enforce a maximum document length of 16, 384 bytes, corresponding to roughly 4k tokens or $2.7\mathrm{k}$ words. We load batches of $1024\cdot16\,384$ bytes, packing together documents of varying lengths with appropriate attention mask reset. In our pretraining experiments, we train for $72\mathrm{k}$ steps, which comes down to a total training set size of roughly 1.2 trillion bytes.  
+
+Hyperparameters. We use the AdamW optimiser (Loshchilov & Hutter, 2019) using $\beta_{1}=0.9$ , $\beta_{2}~=~0.95$ , $\varepsilon\:=\:10^{-8}$ and weight decay coefficient $\lambda\:=\:0.1$ . The learning rate is warmed up over 500 steps followed by a cosine decay to $10\%$ of its peak value.1.  
+
+Eval Metrics.4 for a description of our eval suite. In addition, we report a more immediate metric for pretraining performance. Since we compare models making byte-level and subword-level predictions, this requires some extra care.2.  
+
+4.1 HIERARCHICAL ARCHITECTURE SWEEP  
+
+Our hierarchical model consists of encoder, backbone, and decoder. Given a total compute budget, we now conduct a series of experiments to determine optimal sizes (number of heads and layers) of these three modules. These experiments used the Fineweb dataset at a budget of $14.4\mathbf{k}$ steps.  
+
+![](images/fa7077d9c2c22a67513e08a4be4f411be8525b99eefb5ef045ab2a7872443e3d.jpg)  
+
+Figure 3: Word and byte accuracy for hierarchical models with different encoder/decoder sizes. Each candidate encoder/decoder size has been trained with backbone sizes ranging from $L_{\mathrm{b}}=H_{\mathrm{b}}=16$ to $L_{\mathrm{b}}=H_{\mathrm{b}}=30$ . The horizontal axis shows training compute (Eq. 7) normalized by the highest value. The vertical gray lines indicate the compute required by the baseline models. Small characterlevel modules tend to yield better word accuracy at the tested compute budgets.  
+
+Given a backbone size (with $L_{\mathrm{b}}=H_{\mathrm{b}}$ as mentioned above), we have four degrees of freedom—the number of layers $(L_{\mathrm{e}},L_{\mathrm{d}})$ and heads $(H_{\mathrm{e}},H_{\mathrm{d}})$ in encoder and decoder—which is too many for an exhaustive sweep.3, to constrain the search space. Specifically, we concluded to use the same architecture for encoder and decoder $\mathit{\Pi}\mathit{\tilde{L}}_{\mathrm{e}}=\mathit{L}_{\mathrm{d}}$ , $H_{\mathrm{e}}=H_{\mathrm{d}})$ ) and to fix their aspect ratio at $H_{\mathrm{e}}=2L_{\mathrm{e}}$ .  
+
+The crucial remaining question is how to size en- and decoder relative to the backbone. From preliminary experiments, we isolated three candidate sizes: $(H_{\mathrm{e}},L_{\mathrm{e}})\in\{(6,3),(8,4),(10,5)\}$ . We then trained each candidate with multiple backbone sizes, ranging from $L_{\mathrm{b}}\,=\,H_{\mathrm{b}}\,=\,16$ to $L_{\mathrm{b}}\,=$ $H_{\mathrm{b}}=30$ . The result are depicted in Fig. 3, where we report both byte-level and word-level accuracy. Strikingly, these two metrics paint sharply different pictures, with the former favoring larger bytelevel modules and the latter favoring a larger backbone. However, the relative differences in byte accuracy are very small. Moreover, byte accuracy can be improved by merely making the decoder better at completing words given the first few characters, which does not improve word accuracy.  
+
+We adopted word accuracy, which we hypothesized to be a better predictor of model quality, as our guiding metric. This lead us to choose the (6, 3) configuration for the smaller two model sizes (1B and 3B-scale). We opted to use the slightly larger (8, 4) configuration for our 7B-scale model, based on the the observed trend that larger encoder/decoder sizes catch up for larger backbones. The backbone sizes for these models are set by compute-matching the baseline, which we discuss next.  
+
+
+
+\section{4.2 COMPUTE-MATCHED MODELS  }
+
+
+For the following architecture comparison, we decided to compare compute-matched models, meaning models that require (on average) the same amount of compute to process a document from the pretraining dataset. Since compute is the primary driver of training and inference cost, we believe this approach ensures a fair comparison between architectures. We first set the sizes for the encoder and decoder modules of our hierarchical architecture based on the considerations in the previous section. For each scale, we then size the backbone of the hierarchical model to match the compute required by the baseline. For the compute matching, we used the exact computa  
+
+Table 2: Compute-matched model configurations, showing number of attention Heads, Layers, and Parameter count.   
+
+![](images/4cfa55501ebf94be26a4bf4a91203971b6ef61f849e5944a5b07603ef2ed5ec6.jpg)  
+
+2, and the statistics of our pretraining dataset, depicted in Fig. 2. Details on the compute matching methodology may be  
+
+Table 1: Results of our pretraining experiments, showing accuracy on the pretraining dataset as well as scores on established eval tasks in the zero-shot setting. Generally, our hierarchical model performs on par with the tokenizer baseline within each compute-matched scale. There are some notable wins for the hierarchical model on the Lambada (LBD) eval task, where it outperforms the baseline by a relative margin of up to $68\%$ (at the 7B scale).  
+
+![](images/d51b435f6f399188d965a65cec5430a589cac9e5e785beef0ecbadc097342740.jpg)  
+
+3. The resulting models are listed in Table 2. Thanks to an efficient batched implementation of the character-level models using flash attention (Dao et al.3).  
+
+
+
+\section{4.3 PRETRAINING RESULTS  }
+
+
+In this section, we compare our hierarchical architecture with a subword tokenizer baseline for pretraining on the DCLM-Baseline dataset. All models are trained from scratch. We compare computematched models at three scales, corresponding to 1B, 3B, and 7B baselines. Table 1 presents byteand word-level accuracy, as well as zero-shot performance across 17 standard downstream tasks. Across scales and evaluation tasks, both architectures perform similarly, with a few notable differences. At the 1B scale, the tokenizer-based model holds a modest advantage on TriviaQA, though this gap disappears at larger scales. On the other hand, the hierarchical model consistently outperforms the baseline on the Lambada evaluation, with a relative margin of up to $68\%$ .  
+
+Comparison to MegaByte At the 1B scale, we also conducted a comparison with MegaByte (Yu et al., 2023), another hierarchical byte-level generative architecture, as detailed in Section 3. We use a model configuration from the original paper, which is compute-matched with our 1B-scale (14 layers in the backbone with hidden dimension $D=2048$ , 18 layers in the decoder with hidden size $d=1024$ and learning rate $2\cdot10^{-4}$ ). The results in Table 1 show that MegaByte underperforms across all but one evaluation tasks. To further investigate, we conducted an ablation combining our hierarchical architecture with MegaByte’s fixed 8-byte splitting, labeled as Hierarchical (8-byte split) in the table. This variant significantly improves over MegaByte (e.g., a 2.6 ppt increase in byte accuracy), showing that our hierarchical architecture is more performant even when using the same splitting rule. However, the hierarchical architecture with whitespace splitting still comes out on top, suggesting that a semantically meaningful splitting is a valuable inductive bias for the model.  
+
+4.4 ROBUSTNESS AGAINST INPUT PERTURBATIONS  
+
+Next, we evaluate the robustness of hierarchical and baseline models against perturbations of the inputs. We conduct this experiment on a subset of five eval tasks, for which the two architectures showed similar performance. We apply perturbations to the prompt of each item of the dataset and measure the change in average accuracy compared to each model’s performance on the original (unperturbed) golden answer. The perturbations include permuting, randomizing, or deleting $10\%$ of the characters per word, as well as changing the prompt to all caps. The results are depicted in Figure 4. We see that the hierarchical model is significantly more robust than the tokenizer-based model across perturbation types and scales. In particular for the all-caps perturbation, the baseline model suffers a 3 times larger drop in accuracy.5. Table 3 shows some illustrative examples, comparing the two models’ completions to perturbed prompts.  
+
+![](images/1311df49ff8023a965c1bea897afcefc98fdbc11768a3c8ed62958c660f175b1.jpg)  
+Figure 4: Average change in accuracy across the MMLU, OpenBookQA, Arc Challenge and HellaSwag eval tasks for perturbations to the prompt.  
+
+Table 3: Example completions of perturbed prompts.   
+
+![](images/9cab1caaccf0213958da19a54bda317b66d4bcbab0df82b38b5ff37826ebae7c.jpg)  
+
+
+
+\section{4.5 ADAPTATION ON CROSS-LINGUAL CONTINUED PRETRAINING  }
+
+
+After pretraining on the English-only DCLMBaseline dataset, we continue training the 3B-scale models on the German Occiglot dataset (Brack et al., 2024) to test adaption to a shift in data distribution. We re-warm the learning rate to half of its initial value and train for $20\mathbf{k}$ steps with otherwise identical settings as the pretraining runs.6. The results are shown in Figure 5. The hierarchical model consistently achieves higher average accuracy on the German evaluations while also retaining better scores on the English tasks. Since the tokenizer operates on a rigid vocabulary, it is unable to adapt to the new domain and must resort to byte fallback or combine tokens in statistically unfounded ways. We attribute the performance difference to the resulting larger distribution shift in the input of the tokenizer based model.  
+
+![](images/666a23dd5961e4f82f3abfc9cc15b7ff932a602194ef4169aeeaab55c364252d.jpg)  
+
+Figure 5: Continued pretraining on Occiglot German. We show average eval scores on English and German. The hierarchical architecture adapts better to the new language, while also retaining higher scores on English evals. At an equal FLOP budget we are only able to train the baseline for half as many steps due to it requiring almost two times the compute per document on the german dataset. Nevertheless, we continued training the baseline for more steps, depicted as dotted lines.  
+
+It is important to note that the models compared   
+here have been compute-matched based on the   
+statistics of the English DCLM dataset. As shown in Figure 2 (right), the word and token statistics shift drastically when switching to the German dataset, with bytes-per-token decreasing substantially due to tokenizer fragmentation. Consequently, the token sequence length grows much larger than  
+
+the word sequence length, making the continued pretraining of the hierarchical model 1.9 times faster than the baseline model, or equivalently being able to train on almost twice the data for the hierarchical model.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+We presented a hierarchical autoregressive transformer architecture that integrates character-level and word-level processing. Our approach retains the sequence length compression of word-level tokenization, while removing the need for a rigid, predefined vocabulary. Through extensive experiments, including models scaled up to 7 billion parameters, we demonstrated that the hierarchical architecture matches the downstream task performance of computed-matched tokenizer-based models, while significantly improving robustness to input perturbations and continued pretraining on out-of-distribution data, such as previously undersampled languages. These findings highlight the potential of hierarchical transformers to enhance flexibility, robustness, and generalization across diverse NLP tasks and domains.  
+
+Limitations. The whitespace splitting we used above is tailored to alphabetic languages rather than logographic languages like Chinese, where characters represent entire words or morphemes. These languages may benefit from a custom splitting rule to group bytes into semantically meaningful units. A similar concern holds for domains like mathematical writing or code, where whitespace splitting might not yield an optimal chunking. Secondly, as discussed above, for a compute-matched model, the hierarchical architecture will have a higher parameter footprint. During inference, this may be offset by a reduced size of the KV cache.  
+
+Outlook. Our work can be extended in various ways. First, one could experiment with different models for encoder and decoder. For example, the small character vocabulary, may facilitate multitoken prediction (Gloeckle et al., 2024) with multiple output heads. Further, with few characters per word, a text diffusion model (e.g., Li et al., 2022) could be used as a decoder. Finally, one could investigate additional levels of hierarchy, such as sentences or paragraphs, which may improve long context generation abilities.  
+
+
+
+

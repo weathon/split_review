@@ -1,8 +1,8 @@
 # CityBench: Evaluating the Capabilities of Large Language Models for Urban Tasks
 
 - Decision: Reject
-- Avg Score: 4.33
-- Scores: 8, 6, 6, 5, 1, 0
+- Avg Score: 7.00
+- Scores: 8, 6, 6, 5, 10
 
 ## Abstract
 Large language models (LLMs) with powerful generalization ability has been widely used in many domains. A systematic and reliable evaluation of LLMs is a crucial step in their development and applications, especially for specific professional fields. In the urban domain, there have been some early explorations about the usability of LLMs, but a systematic and scalable evaluation benchmark is still lacking. The challenge in constructing a systematic evaluation benchmark for the urban domain lies in the diversity of data and scenarios, as well as the complex and dynamic nature of cities. In this paper, we propose \textit{CityBench}, an interactive simulator based evaluation platform, as the first systematic evaluation benchmark for the capability of LLMs for urban domain. First, we build \textit{CitySim} to integrate the multi-source data and simulate fine-grained urban dynamics. Based on \textit{CitySim}, we design 7 tasks in 2 categories of perception-understanding and decision-making group to evaluate the capability of LLMs as city-scale world model for urban domain. Due to the flexibility and ease-of-use of \textit{CitySim}, our evaluation platform~\textit{CityBench} can be easily extended to any city in the world. We evaluate 13 well-known LLMs including open source LLMs and commercial LLMs in 13 cities around the world. Extensive experiments demonstrate the scalability and effectiveness of proposed \textit{CityBench} and shed lights for the future development of LLMs in urban domain.

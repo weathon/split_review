@@ -1,0 +1,226 @@
+\title{LongCite: Enabling LLMs to Generate Fine-grained Citations in Long-context QA}
+
+\begin{abstract}
+Though current long-context large language models (LLMs) have demonstrated impressive capacities in answering user questions based on extensive text, the lack of citations in their responses makes user verification difficult, leading to concerns about their trustworthiness due to their potential hallucinations. In this work, we aim to enable long-context LLMs to generate responses with fine-grained sentence-level citations, improving their faithfulness and verifiability. We first introduce LongBench-Cite, an automated benchmark for assessing current LLMs' performance in Long-Context Question Answering with Citations (LQAC), revealing considerable room for improvement. To this end, we propose CoF (Coarse to Fine), a novel pipeline that utilizes off-the-shelf LLMs to automatically generate long-context QA instances with precise sentence-level citations, and leverage this pipeline to construct LongCite-45k, a large-scale SFT dataset for LQAC. Finally, we train LongCite-8B and LongCite-9B using the LongCite-45k dataset, successfully enabling their generation of accurate responses and fine-grained sentence-level citations in a single output. The evaluation results on LongBench-Cite show that our trained models achieve state-of-the-art citation quality, surpassing advanced proprietary models including GPT-4o. 
+We also discover that SFT with citation information effectively reduces hallucinations and enables a more uniform utilization of context.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+Recent years have witnessed significant advancement in long-context large language models (LLMs), enabling them to address various user questions, such as information extraction and summarization, based on lengthy texts that surpass 100,000 tokens~\citep{claude-3-5, glm4, reid2024gemini}. Despite their remarkable capacities, current long-context LLMs typically do not provide citations to specific context snippets to support the statements they generated, making it challenging for users to verify model outputs given the substantial context lengths. This significantly impacts the reliability and trustworthiness of long-context LLMs, especially considering that they still struggle with hallucinations \citep{ji23, huang23} and are prone to generate unfaithful content.
+
+On the other hand, recent works in web browsing and open-domain QA have allowed LLMs to generate responses with in-line citations through retrieval-based generation (RAG) or post-hoc methods~\citep{webgpt, gao23b, gao23, menick23}. Nevertheless, these approaches still expose notable limitations in long-context scenarios: RAG often leads to compromised answer quality due to incomplete context information, while post-hoc methods prolong the user waiting time due to the more complicated pipeline. In addition, their generated citations typically refer to entire web pages~\cite{webgpt, bohnet22} or coarsely chunked snippets~\cite{gao23}, thereby requiring users to further pinpoint the specific support evidence for the final verification.
+
+To overcome the above limitations, this work explores directly employing long-context LLMs to generate accurate responses with fine-grained sentence-level in-line citations. We first propose \textbf{LongBench-Cite}, an automatic benchmark, to evaluate LLMs' performance on the task of \textbf{long-context question answering with citations (LQAC)}, and find that current LLMs obtain unsatisfactory results
+(Sec.~\ref{sec:benchmark}). Specifically, we find that many citations produced by current LLMs are either irrelevant, cannot fully support the response, or have a coarse granularity. Meanwhile, we observe that generating citations on the fly via in-context learning generally results in responses with lower correctness compared to vanilla long-context QA. 
+
+To further enhance the inherent capacity of LLMs for generating fine-grained citations from lengthy contexts, it is essential to construct a high-quality SFT dataset. To this end, we introduce \textbf{CoF} (abbr. for ``\textbf{Co}arse to \textbf{F}ine''), a novel pipeline that utilizes off-the-shelf LLMs to automatically construct long-context QA instances with precise sentence-level citations (Sec.~\ref{sec:pipeline}). CoF comprises four stages: (1) Starting with a long text material, CoF first invokes the LLM to produce a query and its associated answer through Self-Instruct~\citep{self-instruct}. (2) Next, CoF uses the answer to retrieve several chunks (each has a fixed length of 128 tokens~\footnote{In this work, we uniformly use GLM4-9B's tokenizer to count tokens.}) from the context, which are then fed into the LLM to incorporate coarse-grained chunk-level citations within the answer. (3) The LLM subsequently identifies relevant sentences from each cited chunk to produce fine-grained citations. (4) As a final step, instances with an insufficient number of citations are discarded. Our experiments validate the superiority of CoF over other LQAC strategies in terms of answer correctness and citation quality. With CoF, we construct \textbf{LongCite-45k}, a large-scale SFT dataset that consists of 44,600 high-quality LQAC instances with contexts up to 128,000 tokens.
+
+Finally, we utilize LongCite-45k to fine-tune GLM-4-9B~\citep{glm4} and Llama3.1-8B~\citep{llama-3-1}, two latest open-source long-context models (Sec.~\ref{sec:longcite}). The enhanced models, namely \textbf{LongCite-9B} and \textbf{LongCite-8B}, support a max context window of 128,000 tokens and are capable of generating accurate responses along with precise, fine-grained citations in one pass. Evaluation on LongBench-Cite indicates that our trained models achieve significantly better citation quality compared to even much larger proprietary models. Specifically, our 8B/9B size model outperforms GPT-4o by 6.4\%/3.6\% in term of citation F1 score and also achieves twice finer granularity. Meanwhile, we observe that SFT on LQAC data can alleviate hallucinations of LLMs and enable them to utilize context information more uniformly and comprehensively, instead of only focusing on a specific part of the context. This results in a further improvement in response correctness over vanilla long-context SFT. We also conduct extensive analyses and human evaluation to further verify the effectiveness of our approach.
+
+To summarize, our work makes the following contributions:
+
+1. We introduce LongBench-Chat, an automatic benchmark for the task of LQAC, and reveal the limited performance of current long-context LLMs.
+
+2. We propose CoF, which utilizes off-the-shelf LLMs to automatically construct high-quality long-context QA instances with fine-grained sentence-level citations. Using this method, we construct LongCite-45k, a large-scale SFT dataset for LQAC.
+
+3. We successfully train LongCite-8B and LongCite-9B using LongCite-45k dataset, allowing the generation of accurate responses and fine-grained citations in one pass. Our experiments show that SFT on LQAC data not only enhances the capacity for generating citations from lengthy contexts but also further improves response correctness.
+
+
+\section{Longbench-Cite: Benchmark Long-context QA with Citations}
+
+\label{sec:benchmark}
+
+\subsection{Problem Definition}
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figs/task.pdf}
+    \caption{Comparison between chunk-level and sentence-level citations.}
+    \label{fig:task}
+\end{figure}
+We formalize the task of \textbf{long-context question answering with citations (LQAC)} as follows: given a long context $\mathcal{D}$ and a query $q$, the LLM is required to return a response $\mathcal{A}$, which consists of $n$ statements $s_1, \dots, s_n$, and each statement $s_i$ cites a list of snippets $\mathcal{C}_i=\{c_{i,1}, c_{i,2}, \dots\}$ from $\mathcal{D}$. In this work, LLMs need to segment their responses into statements based on semantic integrity by enclosing each statement with two special tokens \textless statement\textgreater and \textless/statement\textgreater. As illustrated in Figure~\ref{fig:task}, we consider two types of citations:
+
+\begin{itemize}[itemsep=0pt, leftmargin=*]
+    \item\textbf{Chunk-level citations},  where the context $\mathcal{D}$ is divided into indexed chunks with a fix length of 128 tokens, and each citation $c_{i,j}$ is in the form of [$k$], referring to the $k$-th chunk;
+    \item\textbf{Sentence-level citations}, where $\mathcal{D}$ is divided into indexed sentences using NLTK~\citep{nltk}, and each $c_{i,j}$ takes the form of [$k$] or [$a$-$b$], referring to the $k$-th sentence or the snippet that includes the $a$-th to $b$-th sentences in $\mathcal{D}$, respectively.
+\end{itemize}
+
+Previous works~\citep{gao23} for open-domain QA and citation only explore the chunk-level citations. However, the crude segmentation applied for chunk-level citations often results in incomplete cited sentences that affect user experience. In this work, we mainly focus on sentence-level citations because they ensure semantic integrity better, allow for finer-grained citation, and are thus more user-friendly.
+\subsection{Data Collection}
+To evaluate LLMs' performance on LQAC task, we curate a new benchmark \textbf{LongBench-Cite} by collecting data from existing bilingual long-context benchmarks LongBench~\citep{longbench} and LongBench-Chat~\citep{longalign}, covering multiple key user-intensive tasks in both English and Chinese. Specifically, LongBench is a comprehensive benchmark with an average length of 7k words (English) and 13k characters (Chinese), and we select two single-doc QA datasets \textit{MultiFieldQA-en/zh}~\citep{longbench}, two multi-doc QA datasets \textit{HotpotQA}~\citep{hotpotqa} and \textit{DuReader}~\citep{dureader}, and one summarization dataset \textit{GovReport}~\citep{govreport} from it. LongBench-Chat comprises 50 real-world queries with long contexts ranging from 10k to 100k in length, covering various scenarios such as document QA, summarization, and coding, and we adopt all the queries. The detailed data statistics are listed in Table~\ref{tab:data_statistics}. 
+For all datasets, we require LLMs to generate long-form responses with citations.
+\input{tables/data_statistics}
+
+\subsection{Automatic Evaluation}
+LongBench-Cite evaluates models' responses based on the two dimensions:
+\begin{itemize}[itemsep=0pt, leftmargin=*]
+    \item \textbf{Correctness:} Whether the response is accurate and comprehensive for the query.
+    \item \textbf{Citation quality:} Whether the response is entirely supported by the cited snippets, no irrelevant snippets are cited, and the cited snippets are fine-grained.
+\end{itemize}
+In the following, we introduce automatic metrics for each dimension.
+
+\subsubsection{Evaluation of Correctness}
+For the correctness dimension, we adopt the evaluation method in~\cite{longalign}, which is specially designed for long-form responses. Specifically, we first remove citation-relevant tokens from LLM response, then ask GPT-4o to rate the response based on the query and groundtruth answers via few-shot (for LongBench-Chat) or zero-shot prompting (for other datasets). The detailed prompts can be found in Figure~\ref{prompt:correct_longbench_chat},~\ref{prompt:correct_qa}, and~\ref{prompt:correct_summary}. In addition, to investigate whether adding citations will hurt or improve models' long-context QA performance, we propose a new metric \textbf{correctness ratio}: 
+\begin{equation}
+\text{CR} = \text{C} / \text{C}_\text{LQA} \times 100\%
+\end{equation}
+Here, $\text{C}$ and $\text{C}_\text{LQA}$ respectively denote the correctness in LQAC setting and vanilla long-context QA setting, where we simply feed the concatenated context and query into the LLM to get a response. 
+
+\subsubsection{Evaluation of Citation Quality}
+To evaluate the citation quality, we select \textbf{citation F1} calculated using \textbf{citation recall} and \textbf{citation precision}~\citep{gao23} as the main metric, where the former examines if the model response is fully supported by cited snippets and the later detects irrelevant citations. Compared with~\cite{gao23}, which uses NLI model TRUE~\citep{true} for automatic examination, we further improve the measurement method with GPT-4o to better adapt to long-context QA scenarios. Human evaluation (Sec.~\ref{sec:human_eval}) demonstrates our improved method has a stronger agreement with human. Besides, we use \textbf{citation length} to measure the granularity of citations and avoid trivial results.
+
+\textbf{Citation Recall.}  We score citation recall (0/0.5/1) for each statement and average over all statements in the model response. Specifically, for each statement $s_i$ that cites at least one snippet ($\mathcal{C}_i\neq\emptyset$), we concatenate all snippets in $\mathcal{C}_i$ and ask GPT-4o to judge whether the concatenated text fully supports (1 point), partially supports (0.5 point), or does not support (0 point) $s_i$. On the other hand, most LLM responses contain several ``functional sentences'' such as \textit{``The proposed method has the following advantages:''} and \textit{``In summary, ...''} that do not require citation. Therefore, for each statement $s_i$ that has no citation ($\mathcal{C}_i=\emptyset$), we feed $s_i$ along with the query and the whole response into GPT-4o and prompt it to determine if $s_i$ is a starting sentence, transition sentence, or a summary or reasoning based on the previous response content. If so, $s_i$ needs no citation and directly receives a citation recall of 1; otherwise, the recall is 0. The prompts are shown in Figure~\ref{prompt:support_score} and~\ref{prompt:need_citation}.
+
+\textbf{Citation Precision.} We calculate citation precision for each citation (0/1 for irrelevant/relevant citations) and average over all citations in the response. Here, a cited snippet $c_{i,j}$ is relevant if and only if it entails some key points of the statement $s_i$, i.e., at least partially supports $s_i$. We also employ GPT-4o as the judge using the prompt in Figure~\ref{prompt:relevant_score}. In contrast, \cite{gao23} may overlook partially supporting cases due to the limited capacity of the NLI model it uses. 
+
+\textbf{Citation F1.} Citation F1 is a comprehensive metric to evaluate the citation quality of a response: 
+\begin{equation}
+    \text{F1} = (2\cdot \text{P} \cdot \text{R}) / (\text{P} + \text{R})
+\end{equation}
+where $\text{P}$ and $\text{R}$ denote the citation precision and recall of the response, respectively.
+
+\textbf{Citation Length.} Since the sentence-level citation allows citing snippets with different lengths, we use citation length, which is the average token number of cited snippets in the response, to quantify the granularity of citations. A lower average citation length indicates the response has finer-grained and more concise citations and is thus easier for users to validate. In addition, measuring average citation length can avoid trivial hacks for citation F1 such as citing the whole context for each statement.
+
+\subsection{Benchmarking Results of Current Long-context LLMs} 
+\label{sec:benchmark_results}
+We first evaluate 7 popular long-context LLMs (3 proprietary and 4 open-source models, details listed in Table~\ref{tab:model_card}) on LongBench-Cite using LAC-S (\textbf{l}ong-context \textbf{a}nswering with \textbf{c}itations in \textbf{s}enetence level) strategy, where the model needs to read the lengthy context entirely and generate the answer along with sentence-level citations in one pass. We select LAC-S strategy as the default setting due to its efficiency, losslessness of context information, and no reliance on additional retrieval systems. A further discussion about the pros and cons of different LQAC strategies can be found in Sec.~\ref{sec:pipeline_valid}. As illustrated in Figure~\ref{prompt:lac_s}, we number each sentence $sent_i$ in the context by adding a prefix ``\textless$\text{C}i$\textgreater''  and prompt the LLM with one demonstration. The evaluation results of citation quality and correctness are presented in Table~\ref{tab:main_cite} and Table~\ref{tab:main_correct}, respectively. Our findings are as follows: 
+
+\input{tables/main_cite}
+\input{tables/main_correct}
+
+1. \textbf{Open-source LLMs, especially models with smaller sizes, have poor citation quality and lag far behind proprietary LLMs.} Though achieving correctness close to proprietary LLMs, open-source LLMs have obvious difficulty in citing supporting evidence for their generated statements. We attribute this to (1) poor instruction-following and in-context learning ability: open-source models often generate citations that do not conform to the prescribed format; (2) relatively weak evidence-searching ability: they often fail to find evidence for some statements (i.e., $\mathcal{C}_i=\emptyset$), or only find partially supporting or irrelevant evidence.
+
+2. \textbf{The citation quality of proprietary LLMs is still unsatisfactory.} The citation F1 of proprietary LLMs on LongBench-chat and HotpotQA is only around 0.5, which means less than half statements in their responses are fully supported by the citations. Furthermore, their average citation length is even larger than chunk-level citation (whose citation length is 128), reflecting a coarse citation granularity. For example, the citation length of GPT-4o reaches 220 and each cited snippet contains about 6 sentences on average.
+
+3. \textbf{Generating responses and citations in one pass via in-context learning hurts the long-context QA performance.} On most datasets, current LLMs have correctness ratios less than 100\%, indicating that compared to standard long-context question answering, generating responses and citations at once through in-context learning always leads to correctness degradation due to the distribution shift from the post-training data.
+
+Overall, the performance of current LLMs on LQAC remains to be improved. To this end, we will explore automatic construction of SFT data in the following section to further enhance LLMs' capabilities for generating fine-grained sentence-level citations from lengthy contexts.
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figs/cof.pdf}
+    \caption{Overview of our CoF pipeline.  The pipeline consists of four steps: (1) Generating long-context QA instance via Self-Instruct; (2) Using the answer to retrieve $k$ context chunks and generating chunk-level citations; (3) Extracting sentence-level citations for each statement from the cited chunks. (4) Filter out LQAC instances with few citations. }
+    \label{fig:cof}
+\end{figure}
+
+
+\section{CoF: Automatic SFT Data Construction For LQAC}
+
+\label{sec:pipeline}
+To utilize off-the-shelf LLMs for automatically constructing high-quality SFT data for LQAC, we propose \textbf{CoF}, a post-hoc retrieval- and extraction-based pipeline that obtains precise sentence-level citations from \textbf{Co}arse to \textbf{F}ine. As illustrated in Figure~\ref{fig:cof}, CoF consists of four steps: (1) Given a long context material, CoF first employs the LLM to generate a query and corresponding answer through Self-Instruct~\cite{self-instruct}. (2) CoF then uses sentences in the answer to retrieve roughly $k$ chunks from the context, which are subsequently input into the LLM to add coarse-grained chunk-level citations into the answer.  (3) Next, the LLM generates fine-grained sentence-level citations for each statement by extracting supporting sentences from the corresponding chunk-level citations. (4) Finally, instances with too few citations are filtered out. In the following, we will introduce each step of CoF in detail and validate its effectiveness on LongBench-Cite.
+
+\subsection{Pipeline Details}
+\textbf{QA Instance Generation. }
+Considering that generating the answer and citations in one pass might affect answer correctness, we decide to first construct long-context QA pairs and then add citations into the answers in subsequent steps. The post-hoc characteristic also allows our pipeline to augment any long-context QA datasets with citations. For QA instance generation, we adopt the method of~\cite{longalign}, which first employs the LLM to propose a query according to the given lengthy context and then requests it again to obtain the answer via vanilla long-context QA. They also incorporate different task type descriptions into the prompts (Figure~\ref{prompt:qa_gen}), such as summarization, information extraction, and multi-hop reasoning, to guarantee the diversity of generated queries. 
+
+\textbf{Chunk-level Citation Generation. }
+After constructing the query and answer, we split the context into 128-token chunks and use each sentence in the answer to retrieve $l_\text{max}$ chunks. We retain top-$l$ chunks for each sentence, where $l=\min(l_\text{max}, (k+n_\text{sent}-1)/n_\text{sent})$ and $n_\text{sent}$ denotes the number of sentences, so that about $k$ chunks are retained in total. Then we feed all these chunks, which are sorted according to their position in the context, along with the query and answer into the LLM, and ask the LLM to segment the answer into statements and generate chunk-level citations for each statement using one-shot learning. Figure~\ref{prompt:cof_coarse} shows the prompt we use. Compared with generating citations for each statement individually, aggregating all retrieved chunks and generating citations at once can not only reduce the calls of LLM but also improve the citation recall due to the high relevance between the statements.
+
+\textbf{Sentence-level Citation Extraction. }
+Besides the coarse granularity, another drawback of chunk-level citation generated in step 2 is that the precise supporting evidence may be located at the beginning or end of the chunk where the sentences are incomplete. Therefore, to achieve fine-grained citations, we first expand each cited chunk by concatenating it with its preceding and succeeding chunks. Next, we retain and number complete sentences in the expanded chunk, and instruct the LLM to extract fine-grained supporting snippets from the chunk by outputting number spans such as [6-8], which refers to the 6th to 8th sentences, or outputting "No relevant information" if no supporting snippet is found in the chunk. The prompt includes 3 examples and is shown in Figure~\ref{prompt:cof_fine}. At last, we remove irregular spans and re-number the others according to the sentence position in the original context to obtain the final sentence-level citations. 
+
+\textbf{Data Filtering. }
+In the final filtering stage, we discard the instance if less than 20\% of the statements in the answer have citations. If an answer has too few citations, we assume it is not factual-grounded enough in the context and may leverage the internal knowledge of LLMs, which often results in hallucinations.
+
+\input{tables/compare_pipeline}
+\subsection{Pipeline Validation}
+\label{sec:pipeline_valid}
+Before large-scale data construction, we first test CoF (without query generation and final filtering) on LongBench-Cite to validate its effectiveness. We compare CoF with the following LQAC strategies:
+
+\begin{itemize}[itemsep=0pt, leftmargin=*]
+    \item\textbf{LAC-C/LAC-S}: the LLM reads the entire context and generates response and chunk-level/sentence-level citation in one pass.
+    \item\textbf{RAC-C/RAC-S}: the LLM reads top-$k$ chunks/sentences retrieved using the query and generates response and chunk-level/sentence-level citation in one pass. 
+    \item\textbf{post-LC-C/post-LC-S}: the LLM first generates a response via vanilla long-context QA, then adds chunk-level/sentence-level citations into the response by finding supporting evidence from the whole context.
+    \item\textbf{post-RC-C/post-RC-S}: the LLM first generates a response via vanilla long-context QA, then uses the response to retrieve about $k$ chunks/sentences from the context, and adds chunk-level/sentence-level citations by finding supporting evidence from the retrieved text (similar to step 2 of CoF).
+\end{itemize}
+We use GLM-4 as the backbone LLM and Zhipu Embedding-2 as the retriever for all strategies and set retrieval hyper-parameters $l_\text{max}=10$ and $k=40$. The results in Table~\ref{tab:pipeline-compare} show that:
+
+\textbf{1. Similar to other post-hoc strategies, CoF is able to preserve the high-quality answers produced through vanilla long-context QA, well preventing correctness degradation.} Specifically, GLM-4 perfectly maintains the answers' original contents unchanged when adding citations, thereby achieving 100\% correctness ratios. In contrast, though attaining higher citation F1, one-pass methods typically generate answers with lower correctness, failing to fully leverage LLMs' long-context QA capacities.
+
+\textbf{2. CoF achieves the highest citation F1 and relatively small citation length among post-hoc methods, highlighting its ability to generate precise, fine-grained citations.} Compared to post-LC-C and post-LC-S, post-hoc retrieval-based methods (i.e., post-RC-C, post-RC-S and CoF) benefit from a more focused evidence search space, typically yielding better performance. Furthermore, CoF's superiority over post-RC-C indicates that the step of sentence-level citation extraction effectively pinpoints supporting sentences and also filters out irrelevant chunks. Though post-RC-S achieves an even shorter citation length than CoF (49 v.s. 89), we empirically found that direct retrieval-based generation results in too many discontinuous citation numbers, making subsequent training difficult (details in Sec.~\ref{sec:ablation}). 
+
+\subsection{LongCite-45k: a Large-scale SFT Dataset for LQAC}
+After validating the efficacy of CoF, we utilize this framework to construct \textbf{LongCite-45k}, a large-scale SFT dataset for LQAC. Specifically, we first collect 50k documents from the pre-training corpus of GLM-4, covering 9 varied domains including books, encyclopedias, academic papers, codes, etc. These documents are mainly in English and Chinese and their lengths range from 256 to 128k tokens. We then apply CoF, using GLM-4 as the backbone LLM and Zhipu Embedding-v2 as the retriever, to generate a QA pair with sentence-level citations for each document, resulting in 44,600 high-quality LQAC instances after the filtering stage. As illustrated in Figure~\ref{fig:cof}(d), the input part of each instance consists of a task instruction, a long document, and a query, and the output part is an answer with sentence-level citations.
+
+
+\section{LongCite: Teach Long-context LLMs to Generate Citations}
+
+\label{sec:longcite}
+In this section, we conduct model training experiments to determine whether SFT on LongCite-45k can enhance LLMs' ability for the LQAC task, enabling them to generate both accurate responses and precise citations within a single output. We discuss the training details and experimental results as follows.
+
+\subsection{Training Details}
+We select two latest open-source base models, namely GLM-4-9B~\citep{glm4} and Llama-3.1-8B~\citep{llama-3-1}, for the training experiments. Both of the two models have been continually pre-trained on lengthy texts and support a context window of 128k tokens, thereby being suitable for SFT on LQAC data. Following~\cite{longalign}, we combine LongCite-45k with 76k general SFT instances from ShareGPT~\citep{vicuna2023} to ensure the model's general capacities. We name the models after SFT as LongCite-9B (abbr. for GLM-4-9B-LongCite) and LongCite-8B (abbr. for Llama-3.1-8B-LongCite).
+
+Meanwhile, to investigate whether SFT on LQAC data will influence models' long-context QA correctness compared to standard long-context SFT (i.e., SFT on vanilla long-context QA data), we additionally train the two base models using the pure long-context QA pairs (without the task instruction and citations) in LongCite-45k, and we name the trained models as LongSFT-9B (abbr. for GLM-4-9B-LongSFT) and LongSFT-8B (abbr. for Llama-3.1-8B-LongSFT). When calculating correctness ratios for LongCite-9B/8B, we use LongSFT-9B/8B to obtain the correctness in vanilla long-context QA setting (i.e., $\text{C}_\text{LQA}$).
+
+All models are trained using 4 nodes with 8$\times$H800 80G GPUs. We adopt Megatron-LM~\citep{megatron-lm} with context parallelism to support a maximum training sequence length of 128k tokens, and use packing training with loss weighting~\citep{longalign} to improve training efficiency. We set the batch size to 8 and the learning rate to 1e-5. We train each model for 4,000 steps, which is about 2 epochs and takes 18 hours.
+
+\subsection{Experimental Results}
+
+\subsubsection{Main Results}
+\label{sec:main_results}
+We show the citation quality and correctness of our trained models on LongBench-Cite in Table~\ref{tab:main_cite} and~\ref{tab:main_correct}, respectively. Here are our main findings:
+
+\textbf{1. LongCite-8B and LongCite-9B achieve the best citation qualities among all models.} Compared to three powerful proprietary models, i.e., GPT-4o, Claude-3-Sonnet, and GLM-4, LongCite-8B/9B improves the overall citation F1 by 6.4/3.6, 4.8/2.0, and 6.6/3.8, respectively. Besides, the average citation length of LongCite-8B and LongCite-9B is also significantly shorter than that of proprietary models and chunk-level citations, indicating finer citation granularity. Surprisingly, LongCite-8B and LongCite-9B even attain higher citation F1 than the data construction pipeline CoF (72.0 and 69.2 v.s. 65.8), implying a potential for continuous self-improvement. In addition, the similar citation length between the trained models and CoF demonstrates that not only the evidence-locating skill but also the citation granularity can be learned through SFT.
+
+Specially, we observe a performance gap between LongCite models and proprietary models on GovReport. We attribute this to the coarser citation granularity of proprietary models (e.g., the citation lengths of GLM-4 and LongCite-9B on GovReport are 188 and 86, respectively), which gives them unfair advantages in the evaluation of citation recall and precision. 
+
+\textbf{2. SFT with citation information further boosts the long-context QA correctness.} Different from in-context LQAC where the LLMs typically generate responses with lower correctness than vanilla long-context QA (Sec. ~\ref{sec:benchmark_results}), SFT on LQAC data consistently improves the response correctness on all the datasets compared to vanilla long-context SFT (i.e., $\text{CR} > 100\%$). In particular, the correctness of LongCite-8B/9B increased by 16\%/28\% over LongSFT-8B/9B. Besides, the overall correctness of our trained model is also comparable with the officially post-trained models (i.e., GLM-4-9B-chat and Llama-3.1-8B-Instruct), validating the rationality of generating long-context QA pairs using self-instruct in our CoF pipeline.
+
+To further explore the reasons for the correctness improvement, we manually compared the responses generated by LongCite-9B and LongSFT-9B and found that the improvement mainly comes from two aspects (we present 3 cases in Table~\ref{tab:case_1},~\ref{tab:case_2}, and~\ref{tab:case_3} to illustrate our interpretation): (1) SFT with citation information enhances the evidence locating ability of the model and helps to prevent from hallucination; (2) LongCite models can utilize context information more uniformaly. Specifically, when faced with a query that requires a global view, the generated citation numbers allow LongCite models to be aware of that current response content has covered which parts of the context, so that they can utilize different parts of context more uniformly, resulting in a more comprehensive response. In contrast, LongSFT models tend to use more information from the head part of the context and only roughly utilize or even ignore the rest of the context.
+
+\begin{figure}[t]
+\centering
+\begin{minipage}{0.52\textwidth}
+    \input{tables/ablation}
+\end{minipage}%
+\hfill
+\begin{minipage}{0.46\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figs/correct_f1_corr.pdf}
+    \caption{Citation F1 mean and std. w.r.t correctness of LongCite-9B's responses. }
+    \label{fig:correct_f1_corr}
+\end{minipage}
+\end{figure}
+
+\subsubsection{Further Analysis}
+\label{sec:ablation}
+\textbf{Ablation on LongCite-45k dataset.} To verify that the enhanced LQAC ability is obtained from the LongCite-45k dataset instead of standard long-context SFT, we test LQAC performance of LongSFT-9B on LongBench-Chat using the one-shot prompt in Sec.~\ref{sec:benchmark_results}. The results in Table~\ref{tab:ablation} indicate that LongSFT-9B performs poorly on LQAC task. Similar to the open-sourced LLMs, LongSFT-9B always generates nonconforming citations or no citations. 
+
+\textbf{Ablation on data filtering.} To demonstrate the effect of data filtering in CoF pipeline, we train LongCite-9B with the unfiltered data. Table~\ref{tab:ablation} shows that data filtering effectively improves citation quality.
+
+\textbf{Comparison with data constructed through post-RAC-S strategy.} We attempt constructing LQAC data by applying post-RAC-S strategy, whose performance is comparable with CoF (Sec.~\ref{sec:pipeline_valid}), to add citations for the QA pairs in LongCite-45k. However, as shown in Table~\ref{tab:ablation}, the model trained with post-RAC-S data achieves much worse citation F1 than LongCite-9B. We believe the main reason is that post-RAC-S directly recalls sentences that are not necessarily adjacent from the context, resulting in many discontinuous citation numbers (such as [3][7][15]...), which makes subsequent training difficult. In contrast, CoF extracts sentence-level citations from bigger chunk-level snippets and uses number spans to represent citations. These methods contribute to maintaining the semantic coherence of the cited information, which is advantageous for training purposes.
+
+\textbf{Correlation between correctness and citation quality.} To explore the correlation between correctness and citation quality, we divide LongCite-9B's responses on LongBench-Cite into three groups according to their correctness and compute the mean and standard deviation of citation F1 for each group. As illustrated in Figure~\ref{fig:correct_f1_corr}, responses with higher correctness typically have higher citation qualities, demonstrating a mutually promoting relationship between these two attributes.
+
+\input{tables/human_eval}
+\subsection{Human Evaluation}
+\label{sec:human_eval}
+To verify that our automatic evaluation of citation quality using GPT-4o correlates with human judgment, we conduct a human evaluation on three models: GLM-4, LongCite-8B, and LongCite-9B. Specifically, we anonymized their responses on LongBench-Chat, including 150 responses, 1,064 statements, and 909 citations in total, and manually annotated the citation recall and precision following the same standard as GPT-4o evaluation. We also compare GPT-4o evaluation with ALCE~\citep{gao23}, which utilizes NLI model TRUE~\citep{true} to measure citation recall and precision. As shown in Table~\ref{tab:human_eval}, the relative rankings produced by human and GPT-4o are consistent, indicating that improvements in GPT-4o scores also reflect improvements in human preferences. In addition, the absolute scores from GPT-4o typically aligned more closely with human scores compared to ALCE. On the other hand, we observed that GPT-4o scores are generally lower than human scores because the cited snippets often contain unclear pronouns like ``he/she'' and ``our method''. We believe that incorporating an anaphora resolution step may alleviate this problem but will also increase the evaluation costs. Furthermore, the Cohen’s kappa coefficients between GPT-4o and human are significantly higher compared to ALCE (Table~\ref{tab:corr}), demonstrating a substantial agreement for citation recall (0.593 when treating “partially support” as “not support” following ALCE) and citation precision (0.655). When taking human annotations as gold labels, GPT-4o also achieves high accuracy (75.0\% for citation recall and 88.8\% for precision).
+
+
+
+\section{Related Works}
+
+\textbf{Long-context LLMs.} 
+A mature approach for extending the context window of LLMs involves continued pre-training of base LLMs on extensive long texts followed by alignment using diverse long-context QA pairs~\citep{internlm2, glm4, llama-3-1}. However, because of the difficulty of annotations, most long-context QA data is automatically synthesized by LLMs themselves~\citep{longalign, longllama}, which cannot strictly guarantee the faithfulness of the answers. This leads to potential hallucinations of the aligned LLMs, i.e., fabricating content not present in or consistent with the context. Therefore, users often require a way to verify the accuracy and reliability of the information provided by LLMs, especially in highly sensitive domains such as law and finance. Our work explores how to enable long-text models to produce responses with fine-grained citations, thereby enhancing the verifiability and trustworthiness of the long-context LLMs.
+
+\textbf{Question Answering with Citations.} 
+Recently, question answering with citations has been extensively studied in the fields of open-domain QA~\citep{webgpt, bohnet22, gao23b, gao23, schimanski24}. Most of these methods rely on retrieval-augmented generation or post-hoc processing, which are not well-suited for long-context QA scenarios due to information loss or excessive latency. Furthermore, the coarse granularity of their citations negatively impacts user experience~\citep{huang24}. Our work, however, leverages long-context LLMs to generate responses and precise sentence-level citations in a single pass, providing advantages in terms of response correctness, efficiency, and user friendliness. Moreover, current methods for citation evaluation largely depend on NLI models that have limited capacities~\citep{true, liu23, gao23, Fierro24}. In contrast, we utilize GPT-4o as a judge and consider more complex scenarios, thereby achieving a higher agreement with human assessments.
+
+
+\section{Conclusion}
+
+In this work, we explore enhancing LLMs' capacity to generate fine-grained citations from lengthy contexts. We first propose LongBench-Cite, an automatic benchmark to reveal current LLMs' limited performance on long-context question answering with citations (LQAC). We then introduce CoF, a novel pipeline that uses off-the-shelf LLMs to automatically generate long-context QA instances with precise sentence-level citations, to construct LongCite-45k, a large-scale SFT dataset for LQAC. Finally, we successfully train LongCite-8B and LongCite-9B with LongCite-45k, allowing the generation of accurate responses and fine-grained citations in one pass. Extensive analyses and human evaluation further verify the effectiveness of our approach. We believe that this work lays a solid foundation for further research on LQAC and contributes to the development of more reliable and trustworthy LLMs.
+
+
+
+
+
+
+

@@ -1,0 +1,326 @@
+\title{DyDiff: Long-Horizon Rollout via Dynamics Diffusion for Offline Reinforcement Learning}
+
+\begin{abstract}
+
+With the great success of diffusion models (DMs) in generating realistic synthetic vision data, many researchers have investigated their potential in decision-making and control.
+Most of these works utilized DMs to sample directly from the trajectory space, where DMs can be viewed as a combination of dynamics models and policies.
+In this work, we explore how to decouple DMs' ability as dynamics models in fully offline settings, allowing the learning policy to roll out trajectories.
+As DMs learn the data distribution from the dataset, their intrinsic policy is actually the behavior policy induced from the dataset, which results in a mismatch between the behavior policy and the learning policy.
+We propose Dynamics Diffusion, short as \method, which can inject information from the learning policy to DMs iteratively.
+\method ensures long-horizon rollout accuracy while maintaining policy consistency and can be easily deployed on model-free algorithms.
+We provide theoretical analysis to show the advantage of DMs on long-horizon rollout over models and demonstrate the effectiveness of \method in the context of offline reinforcement learning, where the rollout dataset is provided but no online environment for interaction.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+Diffusion models (DMs) have shown a remarkable ability to capture high-dimensional, multi-modal distributions and generate high-quality samples, such as images~\cite{ho_denoising_2020,rombach2022high}, drug discovery~\cite{xu2023geometric}, and motion generation~\cite{tevet2022human}.
+Researchers find that such an ability also serves well in solving decision-making problems~\cite{zhu2023diffusion}. 
+For instance, using DMs as policy functions to generate single-step actions~\cite{chi2023diffusion}, as planners to generate trajectories guided by rewards or Q-functions~\cite{janner2022planning,zhu2023madiff}, or as data synthesizers to learn the data distribution of the dataset and augment the dataset with more behavior data~\cite{he2024diffusion,lu2024synthetic}.
+Both diffusion planners and data synthesizers use DMs to generate long-horizon trajectories. However, they choose to directly sample from the trajectory space, resulting DMs a combination of dynamics models and policies, i.e., a policy (the dataset average policy or a high-rewarded policy) is embedded in the generated sequences. Thus, none of those DMs can serve as a dynamics model and generate trajectories for arbitrary policies.
+
+We found that the ability to generate long-horizon rollouts is quite helpful in improving offline RL solutions. We build a motivating example where a TD3BC~\cite{fujimoto2021minimalist} agent is trained on an offline dataset with gradually augmenting on-policy data or dataset behavior data during learning, compared with no augmentation. Results in \fig{fig:data-type} reveal that \textit{augmenting on-policy data is better than behavior data}. We further compare augmenting on-policy rollouts with different lengths, and the results plotted in \fig{fig:rollout-len} indicate that \textit{augmenting long-horizon on-policy rollouts is better than shorter-horizon on-policy rollouts}.
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\linewidth]{fig/data_type.pdf}
+    \caption{Different data types.}
+    \label{fig:data-type}
+  \end{subfigure}
+  \begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\linewidth]{fig/rollout_len.pdf}
+    \caption{Different rollout length.}
+    \label{fig:rollout-len}
+  \end{subfigure}
+  \begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\linewidth]{fig/model_type.pdf}
+    \caption{Different model types.}
+    \label{fig:model-type}
+  \end{subfigure}
+  \caption{Training the policy on a part of \texttt{hopper-medium-replay} dataset under different settings. \textbf{(a)} During training, we train a diffusion model to generate and gradually augment on-policy data and dataset behavior data, compared with no extra data augmented. \textbf{(b)} Augment model generated on-policy rollouts with different lengths. \textbf{(c)} Use single-step dynamics models and our \method to generate rollouts. The detailed setting is described in \ap{app:motivation}.}
+  \label{fig:motivation}
+\end{figure}
+Given the above findings, we hope to design a model that can approximate long-horizon on-policy rollouts for offline policy training. 
+In this paper, we propose a novel method named Dynamics Diffusion (\method) to decouple existing trajectory DMs' ability as dynamics models and use their superior generative ability to accomplish this goal.
+Although some previous works have developed model-based methods for augmenting on-policy data via pre-trained single-step dynamics models~\cite{yu2020mopo,yu2021combo}, they are hard to generate long-horizon rollouts due to compounding errors.
+Different from them,
+\method can model the whole sequence and generate long-horizon rollouts for the learning policy and that benefits the training much more than shorter ones, which we showcase in \fig{fig:rollout-len}, along with a glimpse of the learning performance against single-step dynamics models in \fig{fig:model-type}. 
+
+To be more specific, \method works by first running a pre-trained single-step dynamics model with the current policy for many steps to get the initial on-policy sequences; then, the trajectory served as the initial conditions for a diffusion model to generate new samples, which is further be used for policy optimization. 
+In this way, \method combines the advantage of both the rollout consistency of single-step dynamics models with arbitrary policies, and the long-horizon generation of DMs with less compounding error. 
+Theoretical analysis for \method provides proofs of why DMs are better for long-horizon rollout than single-step dynamics model, and how the iterative process in \method reduces the accumulated error of the synthetic trajectories.
+
+We implemented \method as a plugin on a set of existing model-free algorithms, and conducted comprehensive experiments across various tasks on D4RL benchmarks, showing that \method significantly improves the performance of these algorithms without any additional hyperparameter tuning.
+
+In summary, our main contributions are listed as follows.
+\begin{itemize}[leftmargin=15pt]
+    \item \textbf{Investigating the policy mismatch problem}: We identify the policy mismatch problem in DMs for offline RL and investigate it in detail. To the best of our knowledge, this is the first work providing both experimental and theoretical analysis for this problem.
+    \item \textbf{Developing the ability of DMs as dynamics models}: We propose a novel method named \method, that combines DMs and single-step dynamics models, leveraging the advantages of both sides to perform long-horizon rollout with less compounding error.
+    \item \textbf{Providing theoretical analysis for non-autoregressive generation}: We prove the advantage of \method's non-autoregressive generation scheme against the autoregressive generation one, where the former reduces the return gap by a factor of $\frac{\gamma}{1-\gamma}\frac{\epsilon_d}{\epsilon_m}$, which is far greater than $1$ empirically.
+    
+\end{itemize}
+
+
+\section{Related Work}
+
+\paragraph{Diffusion Models in offline RL.}
+Diffusion models~\cite{ho_denoising_2020}, a powerful class of generative models, have recently been applied in offline RL~\cite{zhu2023diffusion} to play the role of planners ~\cite{janner2022planning, liang2023adaptdiffuser,he2024diffusion,hu2023instructed, ajay2022conditional,zhu2023madiff} and policies~\cite{wang2022diffusion,chen2022offline,lu2023contrastive,hansen2023idql,kang2024efficient}.
+For instance, Diffusion QL~\cite{wang2022diffusion} utilizes a conditional diffusion model to represent the policy and aims to maximize action-values during the training procedure of the diffusion model.
+Diffuser~\cite{janner2022planning} proposes a novel approach for data-driven decision-making based on trajectory-level diffusion probabilistic models.
+Recently, SynthER~\cite{lu2024synthetic} employed a diffusion model as a synthesizer for data augmentation in offline RL. The powerful expressiveness of diffusion models allows for non-autoregressive trajectory synthesis, resulting in lower compounding errors compared to multilayer perceptrons (MLPs).
+However, neglecting the learning policy leads to a significant distribution gap between the generated data and the data sampled by the learning policy in the real environment, which is not conducive to policy learning.
+In contrast, the proposed \method leverages both the ability of non-autoregressive trajectory synthesis and information of the learning policy.
+A concurrent work, PGD~\cite{jackson2024policy}, identifies the same policy mismatch problem of DMs, but addresses it differently. It computes the log-likelihood of generated trajectories based on the learning policy, injecting it as guidance for DMs. However, they only illustrate the influence of policy mismatch in toy environments. In this work, we investigate the policy mismatch problem from different perspectives, and also test the algorithm in complicated locomotion tasks while providing a more detailed theoretical analysis.
+
+\paragraph{Offline model-based RL.}
+As an intersection of model-based RL and offline RL \cite{levine2020offline,liu2021curriculum, levine2020offline}, offline model-based RL methods ~\cite{yu2021combo,yu2020mopo,argenson2020model,kidambi2020morel,matsushima2020deployment,swazinna2021overcoming} utilize supervised learning and generative modeling techniques to enhance policy's performance. Nevertheless, the distributional shift problem remains the fundamental challenge in offline model-based RL.
+On the one hand, a lot of methods~\cite{yu2020mopo,yu2021combo,kidambi2020morel,rigter2022rambo,li2024settling, matsushima2020deployment} utilize the dynamics model in a conservative way to reduce estimation errors and achieve better performance. 
+MOPO~\cite{yu2020mopo} incorporates the degree of uncertainty as a penalty term on the reward, 
+and MOReL~\cite{kidambi2020morel} assesses uncertainty through the maximum discrepancy between ensemble models. 
+On the other hand, methods such as SynthER~\cite{lu2024synthetic} leverage the dynamics model for data augmentation and also achieve high performance. 
+Our approach not only takes into account information about the learning policy but also avoids using conservative methods, thus allowing the dynamics model's full potential to be unleashed without hindrance.
+
+
+\section{Preliminaries}
+
+
+\paragraph{Diﬀusion model.}
+Diffusion models (DMs) are a class of generative models that generate data $x_0$ by removing noise from a pure Gaussian incrementally. In this work, we follow the architecture of EDM~\cite{karras2022elucidating}, which implements the forward process and the reverse process of the DM as the increase and decrease of the noise level of a probability flow ordinary differential equation (ODE)~\cite{song2020score}: 
+\begin{equation}
+\mathrm{d} \vx=-\dot{\sigma}(t) \sigma(t) \nabla_{\vx} \log p(\vx ; \sigma(t)) \mathrm{d} t~,
+\end{equation}
+where the dot denotes the derivative over time. 
+$\sigma (t)$ is the noise schedule with noise levels $\sigma^{\max} = \sigma^{0} > \sigma^{1} > \dots > \sigma^{N} = 0$ .
+$\nabla_{\vx} \log p(\vx ; \sigma(t))$ is the score function.
+We denote the data distribution at noise level $\sigma^i$ as $p(\vx ; \sigma^i)$ and the data distribution as $\sigma^\text{data}$. In the forward process, noises are gradually added to the data $\vx^N \sim p(\vx; \sigma^N)$ and turn it into pure Gaussian noises. While in the reverse process, a pure Gaussian noise is drawn from $\vx^0 \sim p(\vx; \sigma^0)$, and the sample is obtained by removing noise from $\vx$.
+
+\paragraph{Offline RL.}
+Offline RL solves a Markov decision process (MDP) similar to online RL, but optimizes the policy only with an offline dataset without environment interaction. Denote MDP $\caM = \{\mathcal{S}, \mathcal{A}, T, r, \gamma, d_0\}$, where
+$\mathcal{S}, \mathcal{A}$ are the state space and the action space,
+$T(s^\prime | s, a)$ is the dynamics function,
+$r(s, a)$ is the reward function, $\gamma \in (0, 1)$ is the discount factor, and $d_0$ is the initial state distribution.
+The formal objective of offline RL is to learn a policy $\pi$ that maximizes the discounted cumulative rewards as $\max_\pi J(\caM, \pi) := \mathbb{E}_{s_0 \sim d_0, a_t \sim \pi(\cdot|s_t), s_{t+1}\sim T(\cdot|s_t, a_t)}[\sum_{t=0}^\infty \gamma^t r(s_t, a_t)]$~.
+
+
+\section{Dynamics Diffusion (\method)}
+
+\label{sec:method}
+
+In this section, we will show our design for generating synthetic data with DMs while keeping consistent with the learning policy. We first detail the generation target of the DM and the sampling process. Then, we introduce the core of our method: how to use composite single-step dynamics models and DMs to generate data following the learning policy. Finally, we provide theoretical analysis for our method, explaining why \method is better than only using single-step models. 
+
+The sketch process of \method is illustrated in \fig{fig:main}. Generally, \method first samples states from the real dataset $\caD$ as initial states for rollout. Then, a DM conditioned on the initial state and the action sequence is used to synthesize the corresponding state sequence, where the action sequence is provided by a single-step dynamics model. This state sequence is then iteratively corrected via the learning policy and the DM. Finally, a reward-based filter is applied to select high-reward data, which are added to the synthetic dataset $\caD_\mathrm{syn}$ for further policy training.
+
+\subsection{Diffusion Models as Rollout Synthesizer}
+
+DMs prove to have excellent ability to model complex distributions and have been used for synthesizing sequential data in offline RL in many previous works~\cite{ajay2022conditional,zhu2023madiff,lu2024synthetic}. As offline RL possesses a pre-collected dataset $\caD$ containing trajectory-level sequential data, we can easily pre-train DMs over $\caD$ via supervised learning. We first construct the training set for the DM from $\caD$. Suppose the length of the generation sequence of the DM is $L$. For a trajectory $\tau = (s_0,a_0,s_1,\ldots,a_{H-1},s_H) \in \caD$, the corresponding training trajectories are derived by slicing or padding $\tau$ to length $L$, i.e. containing $L+1$ states and $L$ actions:
+\begin{equation}\label{eq:slice}
+    \caS(\tau) = \begin{cases}
+        \{\tilde\tau_i = (s_i, a_i, s_{i+1}, a_{i+1}, \ldots, a_{i+L-1}, s_{i+L}) \mid 0 \le i \le H-L \} & (H \ge L) \\
+        \{\tilde\tau = (s_0, a_0, s_1, \ldots, a_{H-1}, s_H, 0, 0, \ldots, 0) \mid |\tilde\tau|=L\} & (H < L)
+    \end{cases}~.
+\end{equation}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{fig/new-edmrl-2.pdf}
+    \caption{The sketch process of \method. It mainly consists of three parts: (1) Sampling start states from $\caD$ to generate initial trajectories as conditions. (2) Synthesizing rollout trajectories by iteratively sampling from the DM and the learning policy. (3) Filtering synthesized data and adding high-reward trajectories to $\caD_\mathrm{syn}$.}
+    \label{fig:main}
+\end{figure}
+
+Then, the training set for the DM is the union of $\caS(\tau)$ over all trajectories in $\caD$, as $\caS = \bigcup_{\tau \in \caD} \caS(\tau)$.
+Without causing ambiguity, we will also denote the trajectory in $\caS$ as $\tau$ for simplicity.
+
+There are several possible choices on which part of the trajectories the DM will generate. DecisionDiffuser~\cite{ajay2022conditional} generates state sequences, MTDiff~\cite{he2024diffusion} for state-action sequences, whereas SynthER~\cite{lu2024synthetic} for state-action-reward sequences. To leave space for the learning policy, we only generate the state sequence $\tau_s = (s_0, s_1, \ldots, s_L)$ of a trajectory $\tau = (\tau_s, \tau_a)$, conditioning on the action part $\tau_a = (a_0, a_1, \ldots, a_{L-1})$ and the first state $s_0$. Empirically, we still generate both states and actions simultaneously, but replace the generated actions and the first state with the given conditions after each diffusion step. This scheme injects the conditions into the diffusion process effectively, while preserving the relative positions between states and actions, which allows the DM to learn their causal relation.
+Formally, suppose the DM gives $\tau^i$ after the $i$-th denoising step. The conditions are applied by the hard replacement as
+\begin{equation}\label{eq:hard-rep}
+    \tau^i = (s_0^i, a_0^i, s_1^i, a_1^i, s_2^i, \ldots, a_{L-1}^i, s_L^i) \xRightarrow{\text{Apply Conditions}} \tau^i = (s_0, a_0, s_1^i, a_1, s_2^i, \ldots, a_{L-1}, s_L^i)~.
+\end{equation}
+
+We follow EDM~\cite{karras2022elucidating} to train and sample from the DM, which utilizes a neural network $D_\theta$ to directly predict the denoised sample from the noised one, instead of predicting the noise. Let $\hat\tau^N = D_\theta(\tau^i)$ be the predicted denoised trajectory from $\tau^i$. Denote $\hat\tau^N_{s>0}=(\hat s_1^N, \hat s_2^N, \ldots, \hat s_L^N)$ and $\hat\tau_a^N = (\hat a_0^N, \hat a_1^N, \ldots, \hat a_{L-1}^N)$, respectively. With hard replaced conditions, $\hat\tau_a^N$ always equals to the condition $\tau_a$ and $\hat s^N_0$ equals $s_0$, so we only need to compute the loss between $\hat\tau^N_{s>0}$ and $\tau_{s>0}$. The overall training loss for $D_\theta$ is
+\begin{equation}\label{eq:loss-diff}
+    L_\textrm{diff}(\theta) = \E_{\tau \sim \caS, \sigma\sim p_\sigma, \vn\sim\caN(0,\sigma^2\mI)}[\lambda(\sigma) \| \tau^N_{s>0} - \tau_{s>0} \|_2^2], \ \text{where } (s_0^N, \tau^N_{s>0}, \tau_a^N) = D_\theta(\tau + \vn; \sigma)~.
+\end{equation}
+Here, $\sigma$ is the noise scale, $p_\sigma$ is the distribution of $\sigma$, and $\lambda(\sigma)$ gives the weights for different noise scales. We keep the same choice as EDM, and their detailed values are listed in \ap{app:sample}. Under \eq{eq:loss-diff}, we expect the DM to learn the environment dynamics from the dataset.
+
+With a trained DM $D_\theta$, we can now sample state sequence $\tau_s^N$ beginning at $s_0$ and corresponding to a given action sequence $\tau_a$, started from pure noise $\tau^0 \sim \caN(0, t_0^2\mI)$. We directly use the EDM sampler for higher sampling accuracy and speed, but slightly modify the denoising part to apply the conditions. Most parts of the sampling process are the same as EDM, so we list it in \alg{alg:diff-sampling} in \ap{app:sample}. For brevity, we denote this sample process as sampling from a distribution $p_\theta(\tau | s_0, \tau_a)$.
+
+Though we now have DMs to generate state trajectories, the initial action trajectory for the condition is still left blank. Random action trajectories will only give low-quality samples, as it equals to execute a random policy from $s_0$. Besides, if we directly pick the action sequence from a real trajectory in the dataset, it still corresponds to the underlying behavior policy instead of the learning policy, which does not fulfill our expectation of keeping policy consistency. Therefore, we need to obtain the initial action trajectory with the assistance of other components.
+
+\subsection{Correct Rollouts with Diffusion Models}
+\label{subsec:opt}
+
+To obtain a good initial action sequence, we make the learning policy interacting with a pre-trained single-step dynamics model $T_\phi(s,a)$ parameterized by $\phi$. This model is directly trained via supervised learning over the dataset $\caD$, and the loss objective is
+\begin{equation}\label{eq:loss-dyn}
+    L_\mathrm{dyn}(\phi) = \E_{(s,a,s') \sim \caD, \hat s' \sim T_\phi(s,a)}[\| \hat s' - s' \|_2^2]~.
+\end{equation}
+
+For interaction, the most straightforward idea is to start from an initial state $s_0$ sampled from $\caD$, and sample $\hat a_0$ from the learning policy $\pi(\cdot|s_0)$. Then, the dynamics model predicts the next state $\hat s_1 \sim T_\phi(\cdot|s_0, \hat a_1)$. By iteratively sampling from the policy and the dynamics model, we can form a rollout trajectory autoregressively as
+\begin{equation}\label{eq:model-rollout}
+\hat \tau_\mathrm{dyn} = (s_0, \hat a_0, \hat s_1, \ldots, \hat a_{L-1}, \hat s_L), \quad \hat a_i \sim \pi(\cdot|\hat s_i), \hat s_{i+1} \sim T_\phi(\cdot|\hat s_i, \hat a_i), 0\le i\le L-1~,
+\end{equation}
+where $L$ is the rollout length and $\hat s_0 \coloneqq s_0$. However, rollout by interacting with a single-step dynamics model leads to severe compounding error as $L$ increases, thus not benefiting policy training as shown in \fig{fig:model-type}. 
+Therefore, $\hat \tau_\mathrm{dyn}$ is not directly used fro policy improvement but only as an initial condition for the DM, which can generate high accuracy trajectories.
+As all actions of $\hat \tau_\mathrm{dyn}$ are sampled from the learning policy $\pi$, $\hat \tau_\mathrm{dyn}$ naturally guarantees the policy consistency, making it a good initial condition for $p_\theta$. Formally, we select the action sequence $\hat \tau_{a,\mathrm{dyn}}$ and the first state $s_0$ as conditions, sampling a new trajectory from $p_\theta(\tau|s_0, \tau_a)$:
+\begin{equation}\label{eq:opt1}
+   (s_0, \hat\tau_{s,\mathrm{DM}}^{(1)}, \hat \tau_{a,\mathrm{dyn}}) \sim  p_\theta(\cdot|s_0, \hat \tau_{a,\mathrm{dyn}})~.
+\end{equation}
+
+However, the diffusion sampling process only modifies the state sequence while preserving $s_0$ and $\hat\tau_{a,\mathrm{dyn}}$ unchanged, violating the policy consistency. For further correction, we resample the action sequence from the learning policy given $s_0$ and $\hat\tau_{s,\mathrm{DM}}^{(1)}$:
+\begin{equation}\label{eq:opt1-policy}
+    \hat a_{0,\mathrm{DM}}^{(1)} \sim \pi(\cdot | s_0),\quad  \hat a_{i,\mathrm{DM}}^{(1)} \sim \pi(\cdot | \hat s_{i,\mathrm{DM}}^{(1)}), \quad \text{where } 1 \le i \le L-1~.
+\end{equation}
+
+Now, $\hat\tau_{\mathrm{DM}}^{(1)} = (s_0, \hat\tau_{s,\mathrm{DM}}^{(1)}, \hat\tau_{a,\mathrm{DM}}^{(1)})$ is consistent with the learning policy but violating the dynamics. We address this in the same way as $\hat \tau_\mathrm{dyn}$, that sampling a new trajectory from DM $p_\theta$ given $s_0$ and $\hat\tau_{a,\mathrm{DM}}^{(1)}$ as conditions:
+\begin{equation}\label{eq:opt2}
+    (s_0, \hat\tau_{s,\mathrm{DM}}^{(2)}, \hat\tau_{a,\mathrm{DM}}^{(1)}) \sim  p_\theta(\cdot|s_0, \hat\tau_{a,\mathrm{DM}}^{(1)})~.
+\end{equation}
+Then, the learning policy $\pi$ is used to correct the action sequence to keep policy consistency. By iteratively applying the DM and the learning policy, we can gradually inject information about the learning policy into the generated trajectory while preserving the dynamics accuracy with the DM.
+
+Finally, denote the final trajectory after $M$ iterations as $(s_0, \hat\tau_{a,\mathrm{DM}}, \hat\tau_{s,\mathrm{DM}}) = \hat\tau_{\mathrm{DM}} \coloneqq \hat\tau_{\mathrm{DM}}^{(M)}$ . Following the scheme of MBPO, we create another replay buffer $\caD_\mathrm{syn}$ to store synthetic data. 
+In practice, a batch of states are uniformly sampled from the real dataset $\caD$ as initial states, denoted as $\caB_s = \{s_0^k\}_{k=1}^{B_r}$, where $B_r$ is the batch size of the rollout. Each initial state $s_0^k$ will induce a rollout trajectory $\hat\tau_{\mathrm{DM}}^k$, so $\caB_s$ derives a trajectory set $\caB_\tau = \{\hat\tau_\mathrm{DM}^k\}_{k=1}^{B_r}$. 
+To prevent data with low rewards from harming the policy training, we filter $\caB_\tau$ using a reward-based filter before adding rollout trajectories into $\caD_\mathrm{syn}$. As we do not have direct access to the actual reward function, we pre-train a reward model $r_\psi(s,a)$ that predicts the rewards of synthetic transitions. Similar to the dynamics model, $r_\psi$ is simply trained via supervised learning:
+\begin{equation}\label{eq:loss-rew}
+    L_\mathrm{rew}(\psi) = \E_{(s,a,r) \sim \caD, \hat r \sim r_\psi(s,a)}[(\hat r - r)^2]~.
+\end{equation}
+
+For filtering, we predict the reward for each transition in $\hat\tau_{\mathrm{DM}}$, and sum them up for the whole trajectory:
+\begin{equation}\label{eq:pred-rew}
+    r_\psi(\hat \tau_\mathrm{DM}) \coloneqq r_\psi(s_0, \hat a_\mathrm{0, DM}) + \sum_{i=1}^{L-1} r_\psi(\hat s_{i, \mathrm{ DM}}, \hat a_{i, \mathrm{DM}})~.
+\end{equation}
+ Only a proportion of $\eta$ of trajectories in $\caB_\tau$ is added to $\caD_\mathrm{syn}$. We introduce two filter schemes to select high-reward data as:
+\begin{itemize}[leftmargin=15pt]
+    \item \textbf{Hardmax}: Sort the trajectories by their accumulative rewards, and directly select $\lfloor \eta B_r \rfloor$ of them with the highest rewards.
+    \item \textbf{Softmax}: Calculate a probability distribution $p_r(\hat\tau_{\mathrm{DM}}^k) = \frac{\exp(r_\psi(\hat\tau_{\mathrm{DM}}^k))}{\sum_{j=1}^{B_r} \exp(r_\psi(\hat\tau_{\mathrm{DM}}^j))}$ by softmax of their accumulative rewards, and sample $\lfloor \eta B_r \rfloor$ of them following $p_r$.
+\end{itemize}
+
+\begin{wrapfigure}{R}{0.4\textwidth} % 'L' for left, '0.5\textwidth' for half the width of the text
+    \centering
+    \includegraphics[width=\linewidth]{fig/snapshot-49-mse.pdf} % Replace 'example-image' with your image file
+    \caption{The mean-squared error of DMs and single-step models for rollout. As the rollout length increases, the MSE of single-step models surpasses DMs.}
+    \label{fig:mse}
+\end{wrapfigure}
+
+Intuitively, the hardmax filter strictly selects trajectories with high rewards, while the softmax filter includes those with low rewards. However, considering that offline RL policies are able to outperform the behavior policy by stitching trajectories in the dataset, the softmax filter provides more diversity and probability for the policy to discover better patterns. 
+
+As \method is an add-on scheme for synthesizing data, we do not design extra policy training algorithms but directly incorporate other model-free offline policy training methods that explicitly require policies. Our overall algorithm is listed in \alg{alg:overall}.
+
+\subsection{Theoretical Analysis}
+\label{sec:theory}
+
+We provide a brief theoretical analysis to show why models supporting non-autoregressive generation such as DMs are better than single-step models. Let $T(s'|s,a)$ be the real dynamics function. We begin with a lemma in MBPO~\cite{janner2019trust} that bounds the return gap between the real dynamics and the learned single-step dynamics. Denote the accumulative discounted return in dynamics $T$ with policy $\pi$ as $J(T, \pi)$, and the maximal reward as $R$.
+
+\begin{lemma}\label{lemma2}
+    (Lemma B.3 of MBPO). Suppose the error of a single-step dynamics model $T_m(s'|s,a)$ can be bounded as $\max_t \E_{a\sim \pi} [\KL(T_m(s'|s,a) \| T(s'|s,a))] \le \epsilon_m$. Then after executing the same policy $\pi$ from the same initial state $s_0$ in $T_m$ and the real dynamics $T$, the expected returns are bounded as
+    \begin{equation}
+        |J(T, \pi) - J(T_m, \pi)| \le \frac{2R \gamma\epsilon_m}{(1-\gamma)^2}~.
+    \end{equation}
+\end{lemma}
+
+Note that this formulation differs slightly from its original version in MBPO, that there is no policy error term as the policies executed in the trained dynamics model and the real dynamics are the same in offline RL. Then, the return gap of DMs can also be bounded. Denote the state distribution after executing an action sequence $\tau_a$ from $s_0$ in the real dynamics as $T(s_t|s_0, \tau_a)$, and that induced by the DM conditioned on $s_0$ and $\tau_a$ as $T_d(s_t|s_0, \tau_a)$.
+
+\begin{theorem}\label{thm1}
+    Suppose the error of a non-autoregressive model $T_d(s_t|s_0, \tau_a)$ can be bounded as $\max_t \TV(T_d(s_t|s_0, \tau_a)) \| T(s_t|s_0, \tau_a) \le \epsilon_d$. Then after executing the same policy $\pi$ from the same initial state $s_0$ in $T_d$ and the real dynamics $T$, the expected returns are bounded as
+    \begin{equation}
+        |J(T, \pi) - J(T_d, \pi)| \le \frac{2R\epsilon_d}{1-\gamma}~.
+    \end{equation}
+\end{theorem}
+
+The proof is listed in the \ap{app:proof}. We notice that these two bounds differ by a multiplier $\gamma/(1-\gamma)$, which is greater than $1$ as if $0.5 < \gamma<1$. In practice, $\gamma$ is usually set to be greater than $0.9$, and $\epsilon_d \ll \epsilon_m$ for the excellent modeling ability of DMs. As a result, $\epsilon_d < \gamma\epsilon_m/(1-\gamma)$ holds, implying that the non-autoregressive models enjoy a better error bound than single-step models. The difference in the multiplier is the consequence that the non-autoregressive model is merely affected by the compounding error. We conduct a simple experiment that computes the mean-squared error when doing rollout by DMs and single-step models, and the result is illustrated in \fig{fig:mse}. It shows that the MSE of single-step models increases quickly over the long horizon, surpassing DMs, which validates our assumption on the error of single-step models and DMs.
+Then, we analyze the effect of the iteration times $M$. In \method, we start from the state trajectory generated by the autoregressive model, and iterate between the DM and the learning policy for $M$ times. Though non-autoregressive models prove to be more accurate than single-step models at the transition level, their ability at the trajectory level is under check. Denote the trajectory from $s_0$ induced by $\pi$ in the real dynamics as $\tau = (s_0, a_0, s_1, \ldots) = (\tau_s, \tau_a)$, that generated autoregressively as $\tau_m = (s_0, a_{0,m}, s_{1,m}, \ldots) = (\tau_{s,m},\tau_{a,m})$, and that generated non-autoregressively after the $k$-th iteration as $\tau_{d}^{(k)} = (s_0, a_{0,d}^{(k)}, s_{1,d}^{(k)}, a_{1,d}^{(k)}, s_{2,d}^{(k)}, \ldots) = (\tau_{s,d}^{(k)}, \tau_{a,d}^{(k)})$. We begin with assumptions on the state distribution distance between $\tau_s$ and $\tau_{s,d}$ under different action sequences.
+
+\begin{assumption}\label{assum3}
+     The error between $T(s_t|s_0, \tau_{a})$ and $T_d(s_t|s_0, \tau_{a,d})$ can be bounded as $\max_t \TV(T_d(s_t|s_0, \tau_{a,d})) \| T(s_t|s_0, \tau_a) \le \epsilon_{s,d} + C_{a,d} \max_t \|\tau_{a,d} - \tau_a\|$, where $C_{a,d}$ is a constant.
+\end{assumption}
+
+\begin{assumption}\label{assum4}
+    Given two state sequences $\tau_{s,1}$ and $\tau_{s,2}$, the distance between corresponding action sequences induced by $\pi$ is bounded as $\max_t \TV(\pi(\tau_{a}|\tau_{s,1}) \| \pi(\tau_{a}|\tau_{s,2})) \le C_\pi \max_t \|\tau_{s,1} - \tau_{s,2}\|$, where $C_\pi$ is a constant.
+\end{assumption}
+
+\assum{assum3} is very similar to the condition of \theo{thm1}, but the difference in the action sequence is considered. Intuitively, the error of the non-autoregressive model is spread among the whole trajectory, thus the change in the action sequence will not lead to a significant difference in the state sequence. \assum{assum4} reflects the smoothness of the policy. Now, we derive how the distance between $\tau_{s,d}^{(k)}$ and $\tau_s$ changes over iterations. The error of the initial state sequence $\tau_{s,m}$ is given by \lm{lemma1} in \ap{app:proof}, i.e., $L\epsilon_m$. Then, the error of the initial action sequence is
+\begin{equation}\label{eq:err-am}
+    d(\tau_{a,m}, \tau_a) = \max_t \TV(\pi(\tau_{a}|\tau_{s,m}) \| \pi(\tau_{a}|\tau_{s})) \le C_\pi L \epsilon_m~.
+\end{equation}
+We then sample a new state trajectory $\tau_{s,d}^{(1)}$ from $p_\theta(\tau|s_0, \tau_{a,m})$. Under \assum{assum3}, the error of $\tau_{s,d}^{(1)}$ is bounded as
+\begin{equation}\label{eq:err-sd1}
+    d(\tau_{s,d}^{(1)}, \tau_s) = \max_t \TV(T_d(s_t|\tau_{a,m}, s_0) \| T(s_t|\tau_a, s_0)) \le \epsilon_{s,d} + C_{a,d} C_\pi L \epsilon_m~.
+\end{equation}
+This state sequence is then input to the policy $\pi$ to compute the corresponding action sequence $\tau_{a,d}^{(1)}$, whose error is then bounded as
+\begin{equation}\label{eq:err-ad1}
+    d(\tau_{a,d}^{(1)}, \tau_a) = \max_t \TV(\pi(\tau_{a}|\tau_{s,d}^{(1)}) \| \pi(\tau_{a}|\tau_{s})) \le C_\pi( \epsilon_{s,d} + C_{a,d} C_\pi L \epsilon_m)~.
+\end{equation}
+By \eq{eq:err-sd1} and \eq{eq:err-ad1}, each iteration will add and multiply two constant coefficients to the error bound. Continuing the iteration, we can derive the error of the state sequence after the $k$-th iteration as
+\begin{equation}\label{eq:err-sdk}
+\resizebox{0.92\textwidth}{!}{$
+    d(\tau_{s,d}^{(k)}, \tau_s) = \max_t \TV(T_d(s_t|\tau_{a,d}^{(k-1)}, s_0) \| T(s_t|\tau_a, s_0)) \le \frac{1 - C^k}{1-C}\epsilon_{s,d} + C^kL\epsilon_m, \quad k = 1,2,\ldots~,
+$}
+\end{equation}
+where $C=C_{a,d}C_\pi$. 
+As $k$ increases, the error bound goes from $L\epsilon_m$ to $\epsilon_{s,d}/(1-C)$. In practice, the accuracy of DMs is usually significantly better than the auto-regressive model, which implies $\epsilon_{s,d} \ll L\epsilon_m$, proving that the iteration will optimize the error bound of the synthetic trajectory.
+
+Finally, we must point out that the larger iteration times $M$ will not necessarily lead to better performance, as the intermediate result may go out of the data coverage, reducing the accuracy of the DM. Moreover, large $M$ will also greatly increase the time for rollout, as each rollout requires $M$ times of time-consuming sampling from the DM. Therefore, the choice of $M$ should also be determined according to the complexity of the dataset. Further discussion is in \se{sec:abl}.
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+To validate the effectiveness and generalization ability, we conduct intensive experiments on various benchmark tasks and over different offline model-free policy training algorithms. We aim to answer the following research problems through our experiments:
+\begin{itemize}[leftmargin=15pt]
+    \item Can \method effectively improve the performance of underlying policies, without tuning policy hyperparameters?
+    \item Can \method be adapted to different types of tasks, including dense- and sparse-reward tasks?
+    \item How different critical hyperparameters affect the performance of \method?
+\end{itemize}
+
+\subsection{Experiment settings}
+
+We conduct the experiments on the D4RL~\cite{fu2020d4rl} offline benchmark, following the common standard as previous offline RL works. Specifically, we test our performance on MuJoCo locomotion tasks and Maze2d, where the former is dense-reward while the latter is sparse-reward. For each MuJoCo locomotion task, three datasets are included: (a) \texttt{medium-replay}, shorted as \texttt{mr}, containing data collected by a policy during its online training process, from stochastic to medium-level. (b) \texttt{medium}, shorted as \texttt{md}, containing data collected by a single medium-level policy. (c) \texttt{medium-expert}, shorted as \texttt{me}, containing a 50/50 mixture of data collected by a medium policy and an expert policy, respectively. In short, medium-replay and medium-expert are mixed dataset, whereas medium is a single-policy datasets. For Maze2d, we test all three difficulties: umaze, medium, and large, from easy to hard. The harder the task, the larger and the more complicated the maze is. 
+
+For the underlying policy, we select three popular state-of-the-art offline RL algorithms: CQL~\cite{kumar2020conservative}, TD3BC~\cite{fujimoto2021minimalist}, and DiffQL~\cite{wang2022diffusion}. CQL is a Q-constraint method and employs stochastic Gaussian policy, while TD3BC is a simple modification of TD3~\cite{fujimoto2018addressing} using deterministic policy. DiffQL is a recent Q-learning method that includes DMs as policies. Our choices for baseline cover various types of the learning policy. Note that we omit IQL~\cite{kostrikov2021offline} as our underlying policy, as it only trains the value and Q-functions without explicit policy, thus not satisfying our motivation of shrinking the gap to the learning policy. All of the underlying policies are reimplemented over our codebase for fair comparison. We test both hardmax and softmax filters on base policies, and report the results of the softmax filter here. The full results are listed in \ap{app:ablation}.
+
+Besides the underlying policies as baselines, we also compare \method to SynthER~\cite{lu2024synthetic}, an add-on data augmentation method that utilizes DMs to synthesize trajectories. SynthER is also reimplemented and added on the same base policies.
+
+\subsection{Results}
+
+\input{content/main_table}
+
+The main results on D4RL MuJoCo locomotion tasks are listed in \tb{tab:d4rl}, which shows that \method improves base policies in most datasets, and reaches comparable performance in the rest of them. Our reimplemented baselines achieve similar performance compared to their original paper except SynthER, as it enlarges the size of the base policy networks while we do not in our reimplementation. Moreover, we do not change the hyperparameters of all base algorithms. The detailed settings and hyperparameters are described in \ap{app:exp}.
+
+Among different types of datasets (\texttt{md}, \texttt{me}, and \texttt{mr}), \method performs well in \texttt{mr} and \texttt{me} datasets but cannot improve baselines in \texttt{md}. A possible reason is that the data coverage of \texttt{md} is so narrow that the intermediate result of the sampling iteration becomes out-of-distribution, leading to degeneration of data accuracy. On the contrary, \method is able to generate high-quality diversified data when the data coverage is wide, thus improving the base policies. Moreover, as the synthetic data follows the distribution of the learning policy, they promote more than SynthER, which uniformly upsamples the whole dataset. From the perspective of different base policies, \method is relatively not compatible with CQL. Computing the conservative term in CQL requires Q-values on out-of-distribution data, making CQL more sensitive to data accuracy.
+
+\subsection{Ablation Studies}
+
+\label{sec:abl}
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{fig/combined_plot.pdf}
+  \caption{Ablation studies on various hyperparameters. Experiments on iteration times and rollout length validate our theory analysis, whereas those on filter proportion and real ratio prove the robustness of \method.}
+  \label{fig:ablation}
+\end{figure}
+
+To verify our theoretical analysis and investigate the sensitivity of \method to critical hyperparameters, we conduct experiments on varying iteration times $M$, rollout length $L$, filter proportion $\eta$, and real ratio $\alpha$. All ablation experiments are conducted on \texttt{hopper-mr} dataset over TD3BC base policy.
+\paragraph{Iteration time.} As stated in \se{sec:theory}, large iteration times will shrink the error bound but increase the probability of going out of the data distribution, which will degrade the data accuracy. \fig{fig:ablation}a proves our analysis that a medium $M$ will perform the best. Note that \method degenerates to only using single-step models for rollout when $M=0$. It also demonstrates the ability of DMs on long-horizon generation against single-step models.
+
+\paragraph{Rollout length.} As illustrated in \fig{fig:rollout-len}, large rollout length benefits the exploration of policy. However, increasing $L$ will also increase $\epsilon_d$, loosing the error bound. We test \method over different rollout lengths, and the results are in \fig{fig:ablation}b. These results support our analysis on $L$, proving the potential of DMs is larger than single-step models as the former can generate long-horizon trajectories accurately.
+
+\paragraph{Filter proportion.} This parameter determines the amount of data added to $\caD_\mathrm{syn}$ for each rollout. Intuitively, large $\eta$ will increase the data diversity but allow more low-reward data to be added, and vice versa. The results in \fig{fig:ablation}c show that \method is quite robust on $\eta$, implying the high quality of generated data.
+
+\paragraph{Real ratio.} The real ratio controls the proportion of the real data when sampling from $\caD$ and $\caD_\mathrm{syn}$. Note that \method only does rollout from real initial states, we cannot fully replace the real dataset with the synthetic one as SynthER. We begin with a common setting in MBRL that $\alpha=0.6$ and test various $\alpha$. \fig{fig:ablation}d depicts the performance against different $\alpha$. It shows that $\alpha$ around 0.6 leads to good performance, as large $\alpha$ will decrease the benefit of synthetic data from \method.
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+In this paper, we explored the use of Diffusion Models (DMs) in sequence generation for decision-making problems, specifically focusing on their application as dynamics models in fully offline reinforcement learning settings. We identified a critical issue where data synthesized directly by DMs can lead to a mismatch with the state-action distribution of the learning policy, negatively impacting policy learning. To address this, we introduced Dynamics Diffusion (\method), which can effectively generate trajectories following the learning policy distribution, ensuring both policy consistency and dynamics accuracy of the synthetic trajectories. The key components of \method that bring better performance are (1) the intrinsic modeling ability of DMs, and (2) the iterative correction process between the DM and the learning policy. Both theoretical analysis and experiment results prove the effectiveness of these two parts. As an add-on scheme, \method can be easily deployed on any offline model-free algorithms that train explicit policies. Generally, \method provides a promising direction for improving offline policy training algorithms with DMs. Moreover, \method has the potential to be applied to online RL algorithms under DMs with smaller structures, as well as techniques to enhance its scalability for large-scale tasks, which we leave for future works.
+
+
+
+
+
+
+

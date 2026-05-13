@@ -1,0 +1,299 @@
+\title{Better Instruction-Following Through Minimum Bayes Risk}
+
+\begin{abstract}
+General-purpose LLM judges capable of human-level evaluation provide not only a scalable and accurate way of evaluating instruction-following LLMs but also new avenues for supervising and improving their performance. One promising way of leveraging LLM judges for supervision is through \textit{Minimum Bayes Risk} (MBR) decoding, which uses a reference-based evaluator to select a high-quality output from amongst a set of candidate outputs. In the first part of this work, we explore using MBR decoding as a method for improving the test-time performance of instruction-following LLMs. We find that MBR decoding with reference-based LLM judges substantially improves over greedy decoding, best-of-N decoding with reference-free judges and MBR decoding with lexical and embedding-based metrics on AlpacaEval and MT-Bench. These gains are consistent across LLMs with up to 70B parameters, demonstrating that smaller LLM judges can be used to supervise much larger LLMs. Then, seeking to retain the improvements from MBR decoding while mitigating additional test-time costs, we explore iterative self-training on MBR-decoded outputs. We find that self-training using Direct Preference Optimisation leads to significant performance gains, such that the self-trained models with greedy decoding generally match and sometimes exceed the performance of their base models with MBR decoding.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Instruction-following large language models (LLMs) \citep{chung2022scalinginstructionfinetunedlanguagemodels, wei2022finetunedlanguagemodelszeroshot} have shown remarkable potential as generalist problem-solvers, prompting extensive efforts to improve their performance. One task that has seen tremendous progress due to LLMs is the evaluation of text generation itself. Recent works find that ``LLM-as-a-Judge'' frameworks  \citep{zheng2023judging, alpaca_eval, dubois2024length} demonstrate strong correlation with human evaluations and significantly outperform lexical \citep{lin2004rouge,papineni2002bleu} and embedding-based methods \citep{zhangbertscore, yuan2021bartscore, qin2023t5score} across a wide range of instruction-following tasks. 
+
+While the use of LLM judges has largely focused on the evaluation of outputs, LLM judges can also provide a way to supervise the generations of other LLMs.
+This generally involves using the judge as a \emph{reference-free} evaluator to score candidate outputs produced by the LLM and then selecting the highest-scoring candidate as the final output in what is known as best-of-N (BoN) decoding \citep{song2024goodbadgreedyevaluation}.
+However, prior works find that LLM judges, including powerful proprietary LLMs such as GPT-4, significantly underperform when no human-curated reference answer is available \citep{ye2024flaskfinegrainedlanguagemodel, zheng2023judging}.
+In contrast, \emph{reference-based} evaluation, where a human-curated reference answer is available, shows significantly higher correlation with human evaluations of outputs.
+This poses a chicken-and-egg problem: how can we leverage reference-based LLM judges for test time generation if no human references are available?
+
+\textit{Minimum Bayes Risk (MBR) decoding} \citep{bickel1977mathematical} provides a way of overcoming this problem. In place of the inaccessible human references, MBR decoding leverages other candidate outputs as \textit{pseudo-references}, and uses the evaluator, also known as the \textit{utility metric}, to conduct reference-based evaluation of all candidate outputs against all pseudo-references. The final output is then chosen as the candidate output with the highest average score: see Figure \ref{fig:mbr_diagram}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.87\textwidth]{images/mbr_diagram.pdf}
+    \caption{\textbf{Illustration of MBR decoding}. Multiple candidates are first sampled from an LLM. Then, each candidate is evaluated against all other candidates (pseudo-references) using a reference-based evaluator. The pseudo-references are marginalised to produce final scores, and the candidate with the highest score is selected.}
+    \label{fig:mbr_diagram}
+\end{figure}
+In this work, we explore whether MBR decoding using LLM judges as utility metrics can be used to enhance instruction-following LLMs. We divide our work into two main parts. First, inspired by the effectiveness of scaling inference time compute \citep{welleck2024decodingmetagenerationinferencetimealgorithms, snell2024scaling}, we investigate whether MBR decoding with LLM judges can improve the performance of instruction-following LLMs during test time (denoted as ``MBR inference'') (Section \ref{sec:experiment_i}). Second, following recent works demonstrating that iterative self-training can improve LLM performance \citep{xu2023some, chen2024selfplayfinetuningconvertsweak, yuan2024selfrewarding, wu2024meta}, we examine whether MBR decoding with LLM judges can be used to select high-quality model outputs for use in subsequent iterations of self-training (denoted as ``MBR distillation'') (Section \ref{sec:experiment_ii}). This both provides a way of training models without access to external labels and also allows us to mitigate the inference-time costs associated with MBR inference.
+
+From our MBR inference experiments, we find that MBR decoding with LLM judge Prometheus-2-7B \citep{kim2024prometheus} improves performance by +3.6\% on AlpacaEval and +0.28 on MT-Bench on average across five LLMs relative to greedy decoding. Notably, Llama2-7b with Prometheus MBR decoding outperforms Llama2-13b with greedy decoding on MT-Bench, while Prometheus MBR decoding with Llama2-13b outperforms Llama2-70b with greedy decoding on AlpacaEval 2.0. Gains persist even for large 70B models, demonstrating that small LLM judges can supervise larger LLMs through MBR decoding. We also compare MBR decoding against other methods that use LLM judges for supervision. We show that Prometheus MBR decoding is far more effective than MBR decoding with word match-based metrics (e.g. ROUGE) or semantic similarity-based metrics (e.g. BERTScore). Comparing MBR to BoN decoding, we find that MBR decoding consistently outperforms BoN decoding across multiple LLMs and LLM judges, and that the gains from MBR decoding increase as the supervising LLM judge increases in size and ability. 
+
+From our MBR distillation experiments, we find that self-training with Direct Preference Optimisation (DPO) \citep{rafailov2024directpreferenceoptimizationlanguage} on preference pairs selected using MBR decoding \citep{yang2024directpreferenceoptimizationneural} with Prometheus-2-7B substantially improves greedy decoding performance. For instance, MBR self-trained Llama2-13b improves by +7.1\% on AlpacaEval 2.0 and +0.90 on MT-Bench relative to its baseline SFT counterpart when evaluated using only greedy decoding, far surpassing the corresponding gains from BoN self-training. We also find that MBR self-trained models evaluated with greedy decoding generally match and sometimes exceed the performance of their base models evaluated with MBR decoding, thereby demonstrating that MBR distillation is an effective way of mitigating the inference-time costs of MBR decoding while retaining improved performance.
+
+
+\section{Background}
+
+
+Language models are \textit{autoregressive} probabilistic models; i.e., the probability of a token $y_i$ depends on prompt $x$ and all previous tokens in the sequence:
+\begin{equation}
+    p(y|x) = \prod_{i=1}^{T} p(y_i|y_{i-1}, \dots, y_1, x).
+\end{equation}
+During inference, outputs are typically obtained either using \textit{maximum a-posteriori}-based decoding methods that attempt to maximise probability, such as greedy decoding ($y_i = \argmax_{y_i} p(y_i|y_{<i}, x)$) and beam search \citep{graves2012sequencetransductionrecurrentneural}, or by tokenwise sampling from the distribution ($y_i \sim p(y_i|y_{<i}, x)$). Both approaches rely on the model's distribution as indicative of output quality. 
+
+Alternatively, we can first obtain a \textit{hypothesis set} $\mathcal{H}_\mathrm{hyp}$ comprising $N_{\mathrm{cand}}$ candidate outputs from the model (for example, by sampling multiple times), and then select the final output from $\mathcal{H}_\mathrm{hyp}$ based on some external criteria. For example, given some reference-free evaluator $u$ (e.g. an LLM judge), best-of-N (BoN) decoding selects the output $\hat{y} \in \mathcal{H}_\mathrm{hyp}$ such that
+\begin{equation}
+    \hat{y} = \argmax_{y \in \mathcal{H}_\mathrm{hyp}} u(y).
+\end{equation}
+
+As reference-free estimation of output quality can be a difficult problem, MBR decoding replaces the reference-free evaluator with a reference-based evaluator $u(y, y^\star)$ (e.g. a reference-based LLM judge) that evaluates candidate $y$ relative to a reference $y^\star$.\footnote{Certain evaluators (e.g. LLM judges) are ``task-aware'', and take prompt $x$ as an input when performing evaluation. Such utility metrics can then be written as $u(y; x)$ and $u(y, y^\star; x)$.} In the MBR literature, this evaluator is known as a \textit{utility metric} \citep{freitag-etal-2022-high, fernandes-etal-2022-quality, finkelstein2024mbrqefinetuningtrainingtime}. MBR decoding selects the final output $\hat{y}$ that maximises \textit{expected utility} under the model distribution:
+\begin{equation}
+  \hat{y} = \argmax_{y\in\mathcal{H}_\mathrm{hyp}} ~\underbrace{\mathbb{E}_{ y^* \sim p(y \mid x)}[ u(y, y^*)]}_{\textstyle \approx ~\frac{1}{N_{\mathrm{cand}}}\sum_{j=1}^{N_{\mathrm{cand}}}u(y, y^{(j)})}, 
+\end{equation}
+where the expectation is approximated as a Monte Carlo sum using model samples $y^{(1)}, \ldots, y^{(N_{\mathrm{cand}})} \sim p(y|x)$. In practice, this amounts to computing the utility of each candidate in $\mathcal{H}_\mathrm{hyp}$ using all other candidates as (pseudo-)references, and then selecting the candidate with the highest average utility as the final output.\footnote{The expectation can also be computed over a separate set of model outputs known as the \textit{evidence set} \citep{eikema2020map, bertsch2023its}. We do not explore this setting in our work.} The MBR-decoded output can therefore be interpreted as being the candidate with the highest \textit{``consensus''} utility as measured by the utility metric, as it achieves the highest average utility when evaluated against all other candidate outputs. It is therefore crucial to choose a reference-based metric that is a good proxy for human preferences as our utility function, as this ensures that a ``high-consensus'' output corresponds to a ``high-quality'' output.
+
+
+
+\section{MBR Inference}
+
+In this experiment, we investigate using MBR decoding with LLM judge utility metrics to improve instruction-following LLMs at test time. 
+
+\subsection{Experimental Setup}
+
+\subsubsection{Models and Generation Parameters}
+We use the chat and instruct variants of the Llama2 \citep{touvron2023llama2openfoundation} and Llama3 \citep{dubey2024llama3herdmodels} models in this experiment. All models have undergone prior SFT and demonstrate strong instruction-following and conversation abilities. We generate $N_{\mathrm{cand}} = 30$ candidates using temperature sampling with $t = 0.3$ for all MBR decoding experiments unless otherwise specified. 
+
+\subsubsection{MBR Utility Metrics}
+
+\textbf{LLM judge}\quad We choose \textbf{Prometheus-2-7B} \citep{kim2024prometheus} as our representative reference-based LLM judge. Prometheus is a specialist judge model finetuned from Mistral-7b \citep{jiang2023mistral7b} that correlates strongly with human judges and GPT-4. Crucially, Prometheus can also act as a reference-free judge by simply omitting the reference from its input. This allows us to directly compare MBR with BoN decoding using the same LLM judge utility metric. 
+
+We compare using LLM judges for MBR decoding with three other classes of utility metrics:
+
+\textbf{ROUGE}\quad ROUGE \citep{lin-2004-rouge} is a word-level F-measure designed for measuring summarisation and machine translation performance \citep{lin-2004-rouge}.
+
+\textbf{BERTScore}\quad BERTScore is a neural evaluation metric that computes the token-level contextual similarity between a candidate and a reference. Like ROUGE, BERTScore is not task-aware. As our model outputs may be longer than 512 tokens, we use \textbf{Longformer-large} \citep{beltagy2020longformerlongdocumenttransformer} as our BERTScore model, which supports inputs up to 4094 tokens long.
+
+\textbf{Dense embedders}\quad Dense embedders generate contextual embeddings of text passages for use in downstream tasks. One such task is measuring the level of semantic similarity between two text passages \citep{agirre-etal-2012-semeval}. This task is directly relevant to MBR decoding, as we can treat pairs of candidates as text passages and their similarity score as the utility. To the best of our knowledge, using dense embedders as a utility metric for MBR decoding has never been explored before. In our work, we use the instruction-following embedder \textbf{SFR-Embedder-2\_R} \citep{SFRAIResearch2024} as our representative dense embedder.
+
+\subsubsection{Baselines}
+
+In addition to \textbf{greedy decoding} and \textbf{beam search} (BS) with $k=10$ beams, we also experiment with \textbf{\textsc{longest} decoding}, where we select the longest candidate from the hypothesis set (as measured in characters) as the final output, and \textbf{best-of-N (BoN) decoding}. We generate $N_{\mathrm{cand}} = 30$ candidates using temperature sampling with $t = 0.3$ for both longest and BoN decoding. %further baseline experiments that are not discussed in the main text. 
+
+\subsubsection{Evaluation}
+
+\textbf{AlpacaEval 2.0}\quad AlpacaEval \citep{alpaca_eval} is an LLM-based evaluation metric. It consists of an 805-sample, highly diverse single-turn instruction-following conversational dataset and an associated evaluation framework. In AlpacaEval 2.0 \citep{dubois2024lengthcontrolledalpacaevalsimpleway}, evaluation is conducted by performing head-to-head comparison of candidate answers against GPT-4-generated answers facilitated by a judge LLM. The judge model is prompted to output a single token representing its choice of winner, with the log-probabilities of the token used to compute a weighted win rate. In addition to standard win rates, AlpacaEval 2.0 also provides length-controlled (LC) win rates, which are debiased versions of the standard win rates that control for the length of the outputs. Both the AlpacaEval standard and LC evaluation demonstrate strong correlation with human judgements.
+
+\textbf{MT-Bench}\quad MT-Bench \citep{zheng2023judging} is an 80-sample, two-turn instruction-following conversational dataset. It can be evaluated using either head-to-head comparison or direct assessment with an LLM judge. In the direct assessment setting, the judge LLM is prompted to generate an explanation followed by a score between 1 and 10, with no reference answer used. MT-Bench with GPT-4-judge matches crowdsourced human preferences well, achieving over 80\% agreement, which is the same level of agreement between human evaluators \citep{zheng2023judging}.
+
+We use GPT-4o \citep{openai2024gpt4technicalreport} as the LLM judge for both AlpacaEval 2.0 and MT-Bench. For AlpacaEval, we report LC win rates unless otherwise stated. For MT-Bench, we use direct assessment for all experiments. 
+\subsection{Experimental Results}\label{sec:main_results}
+\begin{table}[h]
+    \footnotesize
+    \centering
+    \begin{tabular}{c | c | c | c | c | c | c}
+    \hline
+    & \textbf{2-7B} & \textbf{2-13B} & \textbf{2-70B} & \textbf{3-8B} & \textbf{3-70B} & \textbf{Avg. $\Delta$}\\ \hline
+     Greedy & 14.4 & 19.0 & 22.8 & 34.4 & 42.7 & 0 \\
+     BS & 14.8 & 18.2 & 21.5 & 33.9 & 42.4 & -0.50 \\
+     Longest & 10.5 & 15.2 & 19.8 & 29.8 & 40.4 & -3.51 \\ 
+     Prometheus BoN & \underline{16.4} & \underline{20.8} & \underline{25.0} & 35.5 & \underline{44.3} & \underline{1.74}\\ \hline
+     ROUGE MBR & 16.2 & 20.0 & 24.7 & 35.4 & 43.7 & 1.33 \\ 
+     BERTScore MBR & 16.2 & 20.5 & 24.4 & \underline{35.7} & 44.0 & 1.50 \\
+     SFR-Embedder MBR & 12.1 & 16.6 & 22.2 & 32.5 & 42.8 & -1.42\\
+     Prometheus MBR & \textbf{17.7} & \textbf{23.4} & \textbf{26.2} & \textbf{37.9} & \textbf{46.0} & \textbf{3.62} \\  \hline
+    \end{tabular}
+    \caption{AlpacaEval 2.0 win rates (\%) for various models and decoding strategies, along with the average win rate differences compared to greedy decoding across all models (denoted as \textbf{Avg. $\Delta$}). MBR decoding with Prometheus consistently outperforms all baseline methods and other MBR decoding methods.}
+    \label{tab:main_alpacaeval_results}
+\end{table}
+
+\begin{table}[h]
+    \small
+    \centering
+    \begin{tabular}{c | c | c | c | c | c | c}
+    \hline
+     & \textbf{2-7B} & \textbf{2-13B} & \textbf{2-70B} & \textbf{3-8B} & \textbf{3-70B} & \textbf{Avg. $\Delta$} \\ \hline
+     Greedy & 5.72 & 5.90 & 6.50 & 7.54 & 8.29 & 0 \\
+     BS & 5.58 & 5.95 & 6.49 & 7.30 & 8.20 & -0.09 \\
+     Longest & 5.67 & 6.03 & 6.59 & 7.22 & 8.22 & -0.04 \\ 
+     Prometheus BoN & 5.77 & 6.08 & 6.65 & \underline{7.66} & \underline{8.42} & \underline{0.13} \\ \hline
+     ROUGE MBR & \underline{5.78} & \underline{6.11} & 6.68 & 7.63 & 8.31 & 0.11 \\ 
+     BERTScore MBR & 5.68 & 6.02 & \underline{6.72} & 7.52 & \underline{8.42} & 0.08 \\
+     SFR-Embedder MBR & 5.73 & 6.04 & 6.54 & 7.45 & 8.33 & 0.03 \\
+     Prometheus MBR & \textbf{6.10} & \textbf{6.26} & \textbf{6.79} & \textbf{7.69} & \textbf{8.50} & \textbf{0.28} \\  \hline
+    \end{tabular}
+    \caption{MT-Bench scores for various models and decoding strategies,  along with the average score differences compared to greedy decoding across all models (denoted as \textbf{Avg. $\Delta$}). MBR decoding with Prometheus consistently outperforms all baseline methods and other MBR decoding methods.}
+    \label{tab:main_mt_bench_results}
+\end{table}
+
+Our main experimental results are documented in Tables \ref{tab:main_alpacaeval_results} and \ref{tab:main_mt_bench_results}.
+
+\textbf{Prometheus MBR decoding provides significant and consistent gains}\quad The gains associated with Prometheus MBR decoding are significantly larger than those associated with other utility metrics, yielding an average improvement of +3.6\% on AlpacaEval 2.0 and +0.28 on MT-Bench. For comparison, the performance gap between Llama2-7b and Llama2-13b with greedy decoding is +4.6\% on AlpacaEval 2.0 and +0.18 on MT-Bench, while the corresponding gap between Llama2-13b and Llama2-70b is +3.8\% and +0.60. Notably, Llama2-7b with Prometheus MBR decoding outperforms Llama2-13b with greedy decoding on MT-Bench, while Prometheus MBR decoding with Llama2-13b outperforms Llama2-70b - a model over five times bigger - with greedy decoding on AlpacaEval 2.0. We also find that Prometheus MBR decoding yields larger gains than Prometheus BoN decoding; we explore this further in Section \ref{sec:compare_with_BoN}.
+
+We also highlight that the performance gains associated with Prometheus MBR decoding are significant across models of all sizes, even for much larger models such as Llama3-70b. This scaling property suggests that small judge models can still be used to supervise much larger models.
+
+\textbf{ROUGE and BERTScore MBR decoding provide small but consistent gains} \quad ROUGE and BERTScore MBR decoding improve average performance relative to greedy decoding by +1.3\% and +1.5\% on AlpacaEval 2.0 and by +0.11 and +0.08 on MT-Bench respectively. This benefit is present for all models. This improvement suggests that selecting outputs without awareness of the task and using only word- or token-level measures of consistency can still yield meaningful improvements even in the instruction-following setting.
+
+\textbf{SFR-Embedder MBR decoding fails to yield consistent gains} \quad SFR-Embedder MBR decoding reduces performance relative to greedy decoding by -1.4\% on AlpacaEval 2.0 while improving performance by +0.03 on MT-Bench on average. We hypothesise that embedder models, which are trained to distinguish at a high level between text passages, cannot to detect nuanced differences between semantically-similar outputs. We also note that embedder MBR decoding generally selects for longer outputs, which may explain the discrepancy between its performance on AlpacaEval 2.0 (which is length-controlled) and MT-Bench.
+
+\textbf{Beam search and \textsc{longest} decoding degrade performance} \quad Beam search and \textsc{longest} decoding reduce performance relative to greedy decoding by -0.5\% and -3.5\% on AlpacaEval 2.0 and -0.09 and -0.04 on MT-Bench respectively. The poor performance of beam search further underscores the idea that optimising for output probability alone is not enough to improve output quality.
+
+\subsection{Analysis of Prometheus MBR decoding}\label{sec:mbr_analysis}
+Given the promise shown by Prometheus MBR decoding, we conduct additional experiments to better understand its properties.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=1.0\textwidth]{images/plot_N_and_t.pdf}
+    \caption{AlpacaEval 2.0 win rates (\%) for Llama2-70b with varying hypothesis set size $N_{\mathrm{cand}}$ \textbf{(left)} and generation temperature $t$ \textbf{(right)} values for Prometheus MBR and BoN decoding. Performance for both methods initially increases with $N_{\mathrm{cand}}$ and plateaus at around $N_{\mathrm{cand}} = 20$. Performance also initially increases with $t$, but drops rapidly after $t=1.0$.
+}
+    \label{fig:N_and_t_plots}
+\end{figure}
+
+\textbf{Prometheus MBR decoding performance vs. $t$ and $N_{\mathrm{cand}}$} \quad We plot AlpacaEval 2.0 win rates as a function of $N_{\mathrm{cand}}$ and $t$ in Figure \ref{fig:N_and_t_plots} for Llama2-70b with Prometheus MBR and BoN decoding. We find that performance
+initially increases with $N_{\mathrm{cand}}$ but plateaus at around $N_{\mathrm{cand}} = 20$, suggesting that expanding the size of the hypothesis set beyond this yields little benefit. Performance also initially increases with $t$, highlighting the benefits of increased candidate diversity, although it rapidly degrades at high temperatures as the individual candidate outputs decline in quality.
+
+\begin{figure*}[h]
+    \centering
+    \includegraphics[width=1.0\textwidth]{images/mbr_by_category.pdf}
+    \caption{Difference in AlpacaEval 2.0 win rates (\%) between Prometheus MBR decoding and greedy decoding averaged over all five LLMs and broken down by question category. A positive value indicates that MBR decoding outperforms greedy decoding on the given category. Orange bars represent the standard error. We find that Prometheus MBR decoding improves performance across a wide range of question categories.}
+    \label{fig:mbr_by_category}
+\end{figure*}
+
+ We find that MBR decoding improves output quality across most question categories. These include reasoning-based categories such as coding and mathematical reasoning, although the largest improvements are seen across writing-based categories such as technical, recommendations and creative writing. We hypothesise that this discrepancy arises due to (1) the higher bar for correctness associated with reasoning tasks which limits the number of good answers that can be found amongst candidate outputs; and (2) limitations of existing utility functions, which may struggle to handle difficult reasoning tasks.
+
+\subsubsection{Further Comparisons with Best-of-N Decoding}\label{sec:compare_with_BoN}
+
+\begin{table}[h]
+    \small
+    \centering
+    \begin{tabular}{c | c | c | c | c | c | c}
+    \hline
+      & \textbf{2-7B} & \textbf{2-13B} & \textbf{2-70B} & \textbf{3-8B} & \textbf{3-70B} & \textbf{Avg. $\Delta$} \\ \hline
+    Greedy & 5.72 & 5.90 & 6.50 & 7.54 & 8.29 & 0 \\ \hline
+    Prometheus-2-7B-BoN & 5.77 & 6.08 & 6.65 & 7.66 & 8.42 & 0.13 \\
+    Prometheus-2-7B-MBR & 6.10 & 6.26 & 6.79 & 7.69 & 8.50 & 0.28 \\ \hline
+    Prometheus-2-8x7B-BoN & 6.01 & 6.17 & 6.80 & 7.75 & 8.41 & 0.24 \\
+    Prometheus-2-8x7B-MBR & \textbf{6.26} & \underline{6.32} & 6.87 & 7.79 & \textbf{8.64} & \underline{0.39} \\ \hline
+    JudgeLM-7b-BoN & 5.63 & 5.95 & 6.69 & 7.37 & 8.26 & -0.01 \\
+    JudgeLM-7b-MBR & 6.00 & 6.11 & 6.79 & 7.69 & 8.44 & 0.22 \\ \hline
+    JudgeLM-33b-BoN & 5.68 & 6.03 & 6.58 & 7.37 & 8.35 & 0.01 \\
+    JudgeLM-33b-MBR & 5.94 & 6.27 & \underline{6.88} & \textbf{7.92} & 8.50 & 0.31 \\ \hline
+    Llama3-70b-Instruct-BoN & 5.77 & 6.16 & 6.57 & 7.39 & 8.35 & 0.06 \\
+    Llama3-70b-Instruct-MBR & \underline{6.22} & \textbf{6.43} & \textbf{6.94} & \underline{7.87} & \underline{8.52} & \textbf{0.41} \\ \hline
+    \end{tabular}
+    \caption{MT-Bench scores for BoN and MBR decoding with various judge LLMs as utility metrics, along with the average score differences compared to greedy decoding across all models (denoted \textbf{Avg. $\Delta$}). MBR decoding consistently outperforms BoN decoding across all comparable utility metrics.}
+    \label{tab:mbr_vs_bon}
+\end{table}
+
+As BoN decoding can also leverage LLM judges as a utility metric, we conduct additional experiments to compare its performance against MBR decoding. We compare BoN and MBR decoding for five different LLM judges on MT-Bench and report the results in Table \ref{tab:mbr_vs_bon}. In addition to Prometheus-2-7B, we also evaluate its larger sibling \textbf{Prometheus-2-8x7B}, as well as \textbf{JudgeLM-7b} and \textbf{JudgeLM-33b} \citep{zhu2023judgelmfinetunedlargelanguage}, which are two judge models finetuned from LLaMA models \citep{touvron2023llamaopenefficientfoundation}. All of our chosen judges can act as both reference-free and reference-based judges, allowing us to compare MBR and BoN decoding on a level playing field.\footnote{Because sequence-classifier reward models \citep{stiennon2022learningsummarizehumanfeedback}  do not support reference-based evaluation, it is not possible to fairly compare BoN decoding with these methods to MBR.}
+
+We find that MBR decoding consistently outperforms BoN decoding across all selected judge models. This difference is especially large for the JudgeLM models and for Llama3-70b-Instruct, where BoN fails to significantly improve on greedy decoding. One explanation for this discrepancy is that our LLM judges are insufficiently good at reference-free evaluation for BoN decoding to be effective. This idea is supported by prior studies comparing reference-free and reference-based evaluation, which consistently show that reference-free methods tend to underperform, even when using strong judge models like GPT-4 \citep{ye2024flaskfinegrainedlanguagemodel, kim2024prometheus, zheng2023judging}. Another explanation is that MBR decoding provides a smoothing effect that arises from our use of expected utility in place of utility point estimates for output selection, tying back to our hypothesis that selecting ``high-consensus'' outputs yields significant benefit. This averaging process reduces the impact of individual mistakes made by the imperfect LLM judge, thereby providing for a more stable and reliable measure of quality. We leave further exploration of these ideas to future work.
+
+Notably, in Table \ref{tab:mbr_vs_bon}, MBR performance improves by scaling the size of the LLM judge, with Prometheus-2-8x7B outperforming Prometheus-2-7B and JudgeLM-33b outperforming JudgeLM-7b. This suggests that improving the LLM judge utility metric directly improves MBR decoding performance and that MBR decoding will benefit as newer and better LLM judges are developed.
+
+
+\section{MBR Distillation}
+
+
+Our results so far demonstrate the potential of MBR decoding to significantly improve the test-time performance of instruction-following models, but this comes at the cost of substantial inference-time compute costs due to the linear cost for generating $N_{\mathrm{cand}}$ candidate outputs, and the quadratic cost for computing utility across these candidates. To mitigate this, we explore distilling MBR-decoded outputs back into the model itself and aim to obtain MBR decoding-level (or better) performance without needing to perform MBR decoding at test time.
+
+\subsection{Experimental Setup}
+
+\subsubsection{Training an SFT Model}
+
+We start by performing SFT on the base Llama2-7b and Llama2-13b models. This is necessary to instil instruction-following behaviour in the models so that they can be used to generate instruction-following self-training data. We choose not to use the official chat variants of these models as we wish to retain full control over the training procedure and avoid inheriting any biases introduced through prior finetuning and alignment.
+
+We use 3000 randomly-drawn samples from UltraChat-200k \citep{ding2023enhancingchatlanguagemodels} for SFT. UltraChat is a highly diverse conversational instruction-following dataset created using GPT-3.5-Turbo. Each sample consists of multi-turn prompts and responses, although we only take the first turn of each sample in order to simplify experimentation. We designate our SFT models as \textit{sft}. 
+
+\subsubsection{Iterative DPO on MBR-Decoded Outputs}
+
+Having obtained SFT models, we now conduct DPO to improve the models on their own MBR-decoded outputs, an approach first proposed by \cite{yang2024directpreferenceoptimizationneural} for improving machine translation. We start by randomly drawing a further 3000 prompts from UltraChat (excluding the samples that have already been selected for SFT). Next, we generate $N_{\mathrm{cand}} = 12$ candidate outputs from our \textit{sft} models using these prompts. Following \cite{yang2024directpreferenceoptimizationneural}, we then score the candidate outputs using a utility metric and form preference pairs from the highest-scoring and lowest-scoring outputs. This preference pair dataset is then used for DPO on the \textit{sft} models, yielding \textit{dpo}-MBR-1. We extend upon \cite{yang2024directpreferenceoptimizationneural} by iteratively repeating this process twice more, each time using the latest \textit{dpo} models as the base model paired with a fresh set of 3000 prompts, yielding the models \textit{dpo}-MBR-2 and \textit{dpo}-MBR-3.
+
+\subsubsection{Utility Metrics and Evaluation}
+
+ We compare our \textit{dpo} models with greedy decoding against the \textit{sft} models with greedy decoding, beam search and MBR decoding. For MBR decoding, we use $N_{\mathrm{cand}} = 30$ and $t = 0.3$ with Prometheus-2-7B as the utility metric. We also baseline against models trained with SFT on 12000 UltraChat samples that we call \textit{sft}-full. Finally, we experiment with BoN self-training, again using Prometheus-2-7B as the utility metric and following the same procedure as for MBR self-training, which yields the models \textit{dpo}-BoN-1, \textit{dpo}-BoN-2 and \textit{dpo}-BoN-3. 
+
+We evaluate our trained models using greedy decoding on AlpacaEval 2.0, once again reporting length-controlled win rates vs. GPT-4, and MT-Bench. As we only train our models to engage in single-turn conversations we evaluate only on the first turn of MT-Bench.
+
+\subsection{Results}\label{sec:self_train_results}
+
+\begin{table}[h]
+    \centering
+    \begin{minipage}{0.48\textwidth}
+        \small
+        \centering
+        \begin{tabular}{c | c | c | c | c}
+        \hline
+          & \multicolumn{2}{c|}{AlpacaEval 2.0} & \multicolumn{2}{c}{MT-Bench} \\ \cline{2-5}
+          & \textbf{7B} & \textbf{13B} & \textbf{7B} & \textbf{13B} \\ \hline 
+         \textit{sft} w. Greedy & 5.18 & 8.24 & 5.43 & 5.85 \\ 
+         \textit{sft} w. MBR & \textbf{9.99} & 13.6 & 5.78 & 6.31 \\
+         \textit{sft}-full & 6.35 & 9.40 & 5.55 & 6.26 \\ \hline
+         \textit{dpo}-1-BoN & 5.78 & 10.3 & 5.78 & 6.08 \\  
+         \textit{dpo}-2-BoN & 6.22 & 11.2 & 5.91 & 6.41 \\  
+         \textit{dpo}-3-BoN & 6.40 & 12.8 & 5.88 & 6.56 \\ \hline
+         \textit{dpo}-1-MBR & 5.68 & 10.8 & 5.78 & 6.48 \\  
+         \textit{dpo}-2-MBR & 7.22 & 13.9 & 6.11 & 6.73 \\  
+         \textit{dpo}-3-MBR & 8.86 & \textbf{15.3} & \textbf{6.14} & \textbf{6.75} \\ \hline
+        \end{tabular}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.48\textwidth}
+        \small
+        \centering
+        \begin{tabular}{c | c | c}
+            \hline
+            & AlpacaEval 2.0 & MT-Bench \\ \hline
+            \textit{sft}-1-MBR & 5.52 & 5.48 \\ 
+            \textit{sft}-2-MBR & 6.75 & 5.43 \\ 
+            \textit{sft}-3-MBR & 6.48 & 5.51 \\ \hline
+        \end{tabular}
+        \caption{\textbf{(Left)} AlpacaEval 2.0 win rates (\%) and MT-Bench scores for models self-trained using DPO. After three rounds of training, the self-trained models consistently outperform their BoN counterparts and SFT baselines. \textbf{(Top)} AlpacaEval 2.0 win rates (\%) and MT-Bench scores for models self-trained using SFT. Self-training with SFT yields substantially worse results than self-training with DPO.}
+        \label{tab:self_train_results}
+    \end{minipage}
+\end{table}
+
+\begin{figure*}[h]
+    \centering
+    \includegraphics[width=1.0\textwidth]{images/self_train_by_category.pdf}
+    \caption{Differences in AlpacaEval 2.0 win rates (\%) between \textit{dpo}-3-MBR models and their respective \textit{sft} with greedy decoding baselines on different question categories. The largest improvements are seen in open-ended writing tasks, with less improvement on reasoning-focussed tasks (e.g. mathematical reasoning and coding).}
+    \label{fig:dpo_win_rates_by_category}
+\end{figure*}
+
+\begin{figure*}[h]
+    \centering
+    \includegraphics[width=1.0\textwidth]{images/decode_times.pdf}
+    \caption{\textbf{(Left)} AlpacaEval 2.0 win rate (\%) vs. \textit{sft} with greedy decoding against generation throughput. \textit{dpo}-3-MBR with greedy decoding matches the performance of \textit{sft} with MBR decoding, but with significantly higher throughput. \textbf{(Right)} Average generation and decoding times on the AlpacaEval dataset. The decoding step in MBR decoding takes disproportionately long. This problem can mitigated through MBR self-training.}
+    \label{fig:decode_times}
+\end{figure*}
+
+\textbf{DPO self-training significantly improves model performance}\quad We report the results of our self-training experiment in the left subtable of Table \ref{tab:self_train_results}. We find that three rounds of MBR self-training with DPO significantly improves model performance, with the 7B \textit{dpo}-3-MBR model outperforming the 13B \textit{sft} model with greedy decoding on both AlpacaEval 2.0 and MT-Bench. The improvements saturate by the third round of self-training as measured on MT-Bench (6.11 vs. 6.14 (7B) and 6.73 vs. 6.75 (13B) in Table~\ref{tab:self_train_results}), although there appears to be room for further improvement on AlpacaEval 2.0 (7.22 vs. 8.86 (7B) and 13.9 vs. 15.3 (13B) in Table~\ref{tab:self_train_results}). Both \textit{dpo}-3-MBR models outperform their \textit{sft}-full counterparts, which suggests that training on MBR-decoded outputs is more beneficial than SFT on a larger split of UltraChat. The \textit{dpo}-3-MBR models also generally outperform \textit{sft} with MBR decoding, and this is especially prominent for MT-Bench, which suggests that DPO on MBR-decoded outputs enables models to recover and then exceed their MBR-decoding performances. We find that DPO on BoN-decoded outputs also improves model performance, although less so than DPO with MBR-decoded outputs. We attribute this to the relative strength of MBR decoding.
+
+\textbf{SFT self-training yields smaller gains than DPO self-training}\quad We experiment with iterative SFT self-training, using the 7B \textit{sft} model. We document our results in the right subtable of Table \ref{tab:self_train_results}. We use the same sets of prompts as for DPO and select as our SFT labels the highest-scoring sample as determined by MBR, following \cite{finkelstein2024mbrqefinetuningtrainingtime}. As before, we conduct three rounds of iterative training, yielding \textit{sft}-1-MBR, \textit{sft}-2-MBR and \textit{sft}-3-MBR. We find that SFT training yields significantly less improvement than DPO. This indicates that MBR self-training benefits most from preference learning, where the model learns to contrast its highest- and lowest-quality outputs.
+
+\textbf{DPO self-trained model performance by question category}\quad We repeat the analysis on performance by question category for \textit{dpo}-3-MBR in Figure \ref{fig:dpo_win_rates_by_category}. Self-training improves performance on almost all question categories, with generally larger improvement on writing-based categories and smaller improvement on reasoning-based categories. % for details. 
+
+\textbf{Analysis of compute costs}\quad We illustrate the savings on compute introduced by self-training in Figure \ref{fig:decode_times}. We perform inference with various 7B models and decoding strategies on AlpacaEval 2.0, using 2xA100 GPUs and vLLM \citep{kwon2023efficient} as our inference engine. We use a generation batch size of 1, a LLM judge utility calculation batch size of 32, and $N_{\mathrm{cand}} = 12$. We find that MBR decoding imposes significant overhead, largely due to the quadratic $\mathcal{O}({N_{\mathrm{cand}}^2})$ cost incurred during the utility calculation step. This overhead is removed through MBR self-training, which nonetheless retains performance gains. Note that \textit{dpo}-3-MBR generates longer outputs than \textit{sft}, which explains why its average generation time as seen in the right-hand plot of Figure \ref{fig:decode_times} is higher.
+
+
+\section{Related Work}
+
+
+\textbf{MBR decoding}\quad MBR decoding has been explored in the context of machine translation using a variety of translation metrics such as COMET \citep{rei2020cometneuralframeworkmt} and BLEURT \citep{sellam2020bleurtlearningrobustmetrics}, with promising results \citep{freitag-etal-2022-high, freitag2023epsilon, farinhas-etal-2023-empirical, stanojevic-simaan-2014-fitting}. Prior works \citep{bertsch2023its, jinnai2023modelbased} also study MBR decoding for summarisation, using ROUGE and BERTScore as metrics. \cite{suzgun2022follow} apply MBR decoding to several tasks, including summarisation, machine translation and three different BIG-Bench tasks \citep{srivastava2023imitationgamequantifyingextrapolating}. None of these works explore the use of MBR decoding in the more open-ended instruction-following domain, nor do they consider using LLM judges as utility metrics.
+
+\textbf{LLM judges}\quad Based on the strong instruction-following capabilities of LLMs, recent works explore prompting LLMs to judge responses from other LLMs \citep{alpaca_eval,zheng2023judging}. Follow-up works suggest that training on the evaluation traces of strong models may equip smaller models with strong evaluation capabilities \citep{kim2023prometheus,kim2024prometheus,zhu2023judgelm,vu2024foundational,wang2024direct}. These works focus on training LLMs to produce scoring decisions matching those of humans. In our work, instead of viewing evaluation as an end goal, we explore utilising the evaluation capabilities of LLM judges as supervision to improve instruction-following LLMs.
+
+\textbf{Inference-time algorithms}\quad Many inference-time algorithms generate multiple candidate outputs and select a final output based on external criteria. In addition to MBR and BoN decoding, examples of such algorithms include Self-Consistency \citep{wang2023selfconsistency}, which selects the most self-consistent answers through marginalisation of chain-of-thought reasoning paths and Universal Self-Consistency (USC) \citep{chen2023universal}, where the LLM is used to self-select the most consistent chain-of-thought reasoning path from amongst many reasoning paths. \cite{kuhn2023semantic} propose an MBR-esque algorithm that uses dense embedders and clustering to measure semantic uncertainty. Other inference-time algorithms prompt the LLM to perform additional inference steps in a structured manner. Examples include Tree-of-Thoughts \citep{yao2023treethoughtsdeliberateproblem} and Graph-of-Thoughts \citep{Besta_2024}, as well as recursive improvement strategies such as Self-Refine \citep{madaan2023selfrefineiterativerefinementselffeedback} and Reflexion \citep{shinn2023reflexionlanguageagentsverbal}. 
+
+\textbf{Self-training} 
+Self-training is a promising avenue for model improvement as it enables training without external labelled data. \cite{gulcehre2023reinforcedselftrainingrestlanguage} introduce an algorithm that iteratively generates samples from a policy and then updates the policy using offline RL. \cite{yuan2024selfrewardinglanguagemodels} train models to score their own outputs, and then use these scores to create preference datasets which they distil back into the model using DPO. \cite{huang2022largelanguagemodelsselfimprove} train models on their own highest-confidence outputs as determined by majority voting. Self-training on MBR-decoded outputs has also been explored for machine translation. \cite{finkelstein2024mbrqefinetuningtrainingtime} train models with SFT on their own MBR and quality estimation outputs for machine translation and demonstrate that this yields improvements over baseline models. \cite{wang2024dontthrowawaydata} use MBR to generate targets for sequence-level distillation, again for machine translation. \cite{yang2024directpreferenceoptimizationneural} are the first to use DPO to upweight the model's own MBR generations, allowing them to recover much of their original MBR performances on machine translation using only greedy decoding. 
+
+
+
+\section{Conclusion}
+
+In this work, we investigate using LLM judges to supervise other LLMs on instruction-following tasks through MBR decoding, and find that this yields significant and consistent improvements to model performance relative to greedy decoding, beam search and BoN decoding. These benefits persist across a wide range of question categories and are also consistent across models of various sizes, demonstrating that small LLM judges can be used to improve much larger LLMs at inference time. To mitigate the significant inference-time costs associated with MBR decoding, we also explore iterative self-training on MBR-decoded outputs. We find that MBR self-training using DPO, but not SFT, enables models to recover and even exceed their base MBR decoding performance using only greedy decoding. We hope our work further highlights the potential of using LLM judges for supervision and inspires future research into MBR decoding beyond its traditional domains and applications, particularly through the development of new utility metrics.
+
+\clearpage
+
+
+

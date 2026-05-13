@@ -1,0 +1,432 @@
+\title{Towards Meta-Pruning via Optimal Transport}
+
+\begin{abstract}
+Structural pruning of neural networks conventionally relies on identifying and discarding less important neurons, a practice often resulting in significant accuracy loss that necessitates subsequent fine-tuning efforts. This paper introduces a novel approach named Intra-Fusion, challenging this prevailing pruning paradigm.
+Unlike existing methods that focus on designing meaningful neuron importance metrics, Intra-Fusion redefines the overlying pruning procedure.
+Through utilizing the concepts of model fusion and Optimal Transport, we leverage an agnostically given importance metric to arrive at a more effective sparse model representation.
+Notably, our approach achieves substantial accuracy recovery without the need for resource-intensive fine-tuning, making it an efficient and promising tool for neural network compression.
+Additionally, we explore how fusion can be added to the pruning process to significantly decrease the training time while maintaining competitive performance. We benchmark our results for various networks on commonly used datasets such as CIFAR-10, CIFAR-100, and ImageNet. More broadly, we hope that the proposed Intra-Fusion approach invigorates exploration into a fresh alternative to the predominant compression approaches.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Alongside the massive progress in the past few years, modern over-parameterized neural networks have also brought another thing onto the table. That is, of course, their massive size. Consequently, as part of the community keeps training bigger networks, another community has been working, often in the background, to ensure that these bulky networks can be made compact to actually be deployed~\citep{Hassibi1993OptimalBS}. Techniques to reduce the size of these networks and speed-up inference come in various forms, such as pruning --- which can itself be unstructured~\citep{han2015learning}, semi-structured~\citep{zhou2021learning}, or structured~\citep{wang2019eigendamage,frantar2023sparsegpt}; quantization~\citep{dettmers2022llm,yao2022zeroquant,xiao2022smoothquant}; knowledge distillation~\citep{hinton,gou2021knowledge}; low-rank decomposition~\citep{yu2017compressing}; hardware co-design~\citep{zhu2019sparse}, to list a few. 
+
+However, despite the apparent conceptual simplicity of these techniques, compressing neural networks, in practice, is not as straightforward as simply doing one or two traditional post-processing steps~\citep{blalock2020state}. The process involves a crucial element—fine-tuning or retraining, on the original dataset or a subset—extending over several additional epochs.
+
+While such additional fine-tuning may not seem too much of an issue for some networks, for others like large language models even a single epoch might be excessively expensive. Hence, this makes the question of investigating the direction of `fine-tuning-free' compression methods or even `data-free' compression methods all the more pertinent. 
+
+Besides, since it is almost a given that the training pipeline for taking any interesting network from scratch to deployment will include some form of compression, an overlooked aspect is whether any improvements can be introduced in this joint space of training and pruning in the conventional strategy. For instance, a fine example is the Lottery Ticket Hypothesis~\citep{frankle2018lottery}, which suggests the presence of sparse sub-networks that can be trained from the outset while obviating the need for subsequent pruning. Presently, however, this is more of an existence result, since the sub-networks are obtained retrospectively, i.e., having trained dense networks from scratch. Another prominent example is that of Federated learning~\citep{mcmahan2017communication,zhang2021survey}, which has made the community rethink the process of training large models in a distributed manner by carrying local model updates and then aggregating these model parameters directly. 
+In fact, stemming from the practical interest in federated learning, but also theoretical questions of mode connectivity~\citep{garipov2018loss},  another novel line of work has lately explored the possibility of fusing (the parameters of) independently trained networks (potentially of different sizes). A notable work in this direction, from which we are heavily inspired, is that of OTFusion~\citep{singh2020model}. More specifically, amongst other things, the authors also demonstrate the idea of fusing a network with a lesser version of itself, say a pruned version, in a bid to help recover the performance drop in the past. However, as their demonstration was merely a proof-of-concept and inherently limited in scope, this exciting idea of self-recovery has remained in a nascent stage. 
+
+Our focus in this paper is, therefore, to unite these two lines of work, namely pruning and fusion, in a more cohesive manner. By unifying these two concepts, we sim to expand the horizon of the conventional pruning paradigm --- across the trifold axes of:
+
+\textbf{(i) Intra-Fusion:} While most research on pruning has focused on devising more meaningful neuron importance metrics, the overlying procedure has remained largely the same: \emph{Keep the most important neurons, discard the rest}. In contrast, Intra-Fusion leverages Optimal Transport to additionally inform the process of model compression with the neurons that otherwise would have been discarded (see Section \ref{sec:methodology}).
+    
+\textbf{(ii) Data-Free pruning:} Pruning neural networks generally leads to immediate drops in accuracy, hence requiring an extensive fine-tuning step to be usable in a practical setting. Accuracy drops between simpler and more sophisticated neuron importance metrics do not differ substantially. We argue that this is largely an artifact of the underlying pruning procedure and show that, by using \textit{Intra-Fusion, a significant amount of accuracy can be recovered without the need for any datapoints.}
+
+\textbf{(iii) Split-Data Training:} Models that are to be pruned after training are most often fine-tuned for many epochs to regain sufficient performance. Via the presented `PaF' and `FaP' approaches, we factorize this process through the combination of model pruning and model fusion. By splitting the training dataset into multiple parts, over which models are trained concurrently, we achieve significant training time speedups.
+    
+
+
+\section{Background}
+
+\subsection{Pruning}
+\label{sec:background_pruning}
+Pruning techniques~\citep{lecun1989optimal} can broadly be classified into \emph{structured}~\citep{wang2019eigendamage,fang2023depgraph}, and \emph{unstructured} pruning~\citep{han2015learning,singh2020woodfisher}. Unstructured pruning involves zeroing out individual weights and leaves the network structure unaltered. Our work exclusively deals with \emph{structured pruning}, which aims to remove entire sets of parameters or neurons and thereby directly alters the network structure. The reason being that (a) the structured pruning procedure directly translates into a speedup in the inference time --- unlike in unstructured pruning, which requires the aid of specialized hardware accelerators to extract some (typically reduced) levels of speedup; (b) structured pruning eases the storage and memory footprint of the network; while unstructured pruning methods yield no such gains (but, in fact, also necessitate the maintenance of binary masks during the course of training).
+
+\paragraph{Structured pruning.}
+A very common and successful approach to prune networks structurally is to capture a neuron's importance by its $\ell_p$-norm, where $p$ is the order of the norm. Despite its simplicity, $\ell_p$-norm pruning can achieve state-of-the-art performance by cleverly incorporating the dependencies within the network \citep{fang2023depgraph}. However, other works such as \citep{yang2018geometric} have shown that the ``smaller-norm-less-important assumption" does not always hold. Instead of removing neurons with a small norm, redundant filters can be found by exploiting relationships between neurons of the same layer. Namely, they consider neurons close to the geometric mean to be redundant as they represent information abundant in the layer. Instead of evaluating importance based on the weight itself, other methods focus on the activations of the neurons. The importance of a neuron is thus measured by evaluating the reconstruction error of the current layer \citep{yihui2017channel} or of the final response layer \citep{yu2018nisp}.
+
+Evidently, research on structured pruning has largely focused on devising more meaningful importance measures, while the overlying procedure has remained the same, repeating the mantra: \textit{Keep the most important neurons, discard the rest}.
+This work \textit{challenges} the above mantra by recycling or restoring information from all neurons to create more accurate compressed networks.
+
+\subsection{Optimal Transport \& Model Fusion}
+\textbf{Optimal Transport (OT).} OT~\citep{villani2009optimal} is a mathematical framework that provides a rigorous and geometrically interpretable way to compare probability distributions. The OT problem aims to find the most economical way to ``transport" mass from one distribution defined over a space $\mathcal{X}$ to another supported over the space $\mathcal{Y}$, where the cost is determined by a function $c$. It achieves this by lifting the metric in the ground space (i.e., $\mathcal{X}$,$\mathcal{Y}$) to obtain a metric in the space of distributions. In the case of discrete probability measures, OT reduces to the well-known transportation problem in linear programming, which has the following form:
+\begin{equation*}
+\mathrm{OT}(\mu, \nu ; C) := \min \, \, \langle T, C \rangle_F \quad \text{s.t., } \quad T \mathbf{1}_m=\alpha, \, T^{\top} \mathbf{1}_n=\beta\, \quad\text{and}\quad T \in \mathbb{R}_{+}^{(n \times m)}\,.
+\end{equation*}
+Here, $\mu:=\sum_{i=1}^n \alpha_i \cdot \delta(x_i) $ and $\nu:= \sum_{j=1}^m b_j \cdot \delta(y_j)$, with $\sum_{i=1}^n \alpha_i = \sum_{j=1}^m \beta_j = 1$ describe two probability measures, where $\delta(\cdot)$ denotes the dirac delta function. Further, $T$ denotes the transport map whose row and columns should sum to the marginals $\alpha$ and $\beta$. Besides, $C$ denotes the ground cost, of moving a unit mass from point $x_i$ to $y_j$, and for instance,
+ in the Euclidean case, it can be $C(x_i, y_j) = \|x_i-y_j\|^2$. Optimal Transport has found applications in many fields, especially in machine learning~\citep{kusner2015word,frogner2015learning,arjovsky2017wasserstein,ot_class_incremental} and we will consider this in regards to fusion.
+\textbf{Model Fusion.} The key idea behind model fusion is to combine the capabilities of two parent networks into a single-child network. 
+~\citet{singh2020model} introduces Optimal Transport (OT) for model fusion, which is the fusion technique we are using throughout this paper. We will refer to this method as \emph{OTFusion}. The main idea behind this work is to combine multiple independently trained neural networks, after accounting for the permutation symmetries that exist within the layers. Finding the permutation symmetries is then framed as an Optimal Transport problem between the neurons of the given networks. 
+An important thing to note is that~\cite{singh2020model} primarily use uniform distributions in place of $\alpha$ and $\beta$; however as we will see later, we further exploit this in our proposed method. 
+
+Besides \emph{OTFusion}, other works are also inherently based on a similar formulation~\citep{li2015convergent, yurochkin2019bayesian, wang2020federated}, though not always geared towards the same end. Our focus will nevertheless be on \emph{OTFusion}, as we directly build atop their exploration of pruning and fusion. 
+
+
+
+\section{Methodology}
+
+\label{sec:methodology}
+Intra-Fusion, as a ``meta-pruning" approach, is an attempt to take a step back from the search for meaningful importance metrics, and reconsider the way these found importance metrics are leveraged to come up with a sparse model representation. Instead of simply discarding the least important neurons (as done in the ``conventional pruning" approach, see Algorithm \ref{alg:conventional_pruning}), Intra-Fusion leverages a modified version of OTFusion to incorporate the discarded neurons into the ``surviving" ones (see Algorithm \ref{alg:intra_fusion}). We refer to our algorithm as a new "meta" approach to pruning, since it challenges the overlying framework that defines how an agnostic importance metric is integrated. It does not compete with any importance metrics. Instead it provides an alternative methodology on how these metrics are used to compress a network.
+
+This section is dedicated to the inner workings of Intra-Fusion. Since Intra-Fusion is an alternative to the conventional pruning procedure, we show both meta-pruning approaches side by side (see Algorithm \ref{alg:conventional_pruning} and \ref{alg:intra_fusion}) to highlight the differences between the two. Section \ref{sec:methodology_overview} serves as a high-level overview of the two algorithms, whereas the subsequent sections are more detailed explanations of the individual parts that make up Intra-Fusion, which are also referenced in Algorithm \ref{alg:intra_fusion}.
+\subsection{Meta Pruning: An Overview}
+\label{sec:methodology_overview}
+\begin{algorithm}
+\caption{Parent Algorithm}
+\label{alg:parent}
+\KwData{\textsc{Importance} $\vi_{1 \times n}$, group $\sG$ with group cardinality $n$, and target group cardinality $m$.}
+\KwResult{group $\sG_{new}$ with group cardinality $m$}
+\begin{minipage}[t]{0.5\textwidth}
+\begin{algorithm}[H]
+\caption{Conventional Pruning}
+\label{alg:conventional_pruning}
+$t \leftarrow m^{\text{th}}$ highest scalar in $\vi$ ;
+
+$\sG_{new} \leftarrow \emptyset$ ;
+
+{\For{$layer \in \sG$}{
+$layer_{new}\leftarrow$ $layer$ without neurons $j$
+
+\hspace*{6em}where $\vi[j]< t$ ;
+
+$\sG_{new} = \sG_{new} \cup \{ layer_{new} \}$ ;}
+
+}
+\BlankLine
+\BlankLine
+\BlankLine
+\BlankLine
+\BlankLine
+\BlankLine
+\BlankLine
+\BlankLine
+\BlankLine
+\BlankLine
+\BlankLine
+
+\end{algorithm}
+\end{minipage}%
+\begin{minipage}[t]{0.5\textwidth}
+
+\begin{algorithm}[H]
+\caption{Intra-Fusion}
+\label{alg:intra_fusion}
+
+$\sY \leftarrow \textsc{getTarget}(\sG)$ \Comment*[r]{3.2.1}
+
+$\sX \leftarrow \sG$ \Comment*[r]{3.2.1}
+
+$\mC_{n \times m} \leftarrow \textsc{computeCost}(\sX, \sY)$ \Comment*[r]{3.2.2}
+
+$\bm{\nu}_{1 \times m} \leftarrow 
+\textsc{getTargetDistr}(m, \vi)$ \Comment*[r]{3.2.3}
+
+$\bm{\mu}_{1 \times n} \leftarrow \textsc{getSourceDistr}(n, \vi)$ \Comment*[r]{3.2.3}
+
+$\mT_{n \times m} \leftarrow \textsc{OT}(\bm{\mu}, \bm{\nu}, \mC)$ \Comment*[r]{3.2.4}
+
+$\mT_{m \times n} \leftarrow \textrm{diag}(\frac{1}{\bm{\mu}}) \times \mT^\top$ \Comment*[r]{3.2.4}
+
+$\sG_{\text{new}} \leftarrow \emptyset$ \;
+
+\For{$layer \in \sG$}{
+
+$\sG_{new} = \sG_{new} \cup \{ \mT \times layer \}$ \Comment*[r]{3.2.4}
+}
+
+\end{algorithm}
+\end{minipage}
+\end{algorithm}
+
+\textbf{Structured Pruning: Group-by-Group.} 
+As described in Section \ref{sec:background_pruning}, the increasing complexity of neural networks pose a challenge for structured pruning. Removing neurons from layers individually can lead to broken networks, as neurons in a layer might not only be dependent on the previous layer, but also on those that lie even further back.
+\begin{figure}[htp]
+    \centering
+    \begin{subfigure}{0.23\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{groups_visuals/complete_network_small.png}
+        \caption{The beginning of an example network}
+        \label{fig:groups_example_net}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.23\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{groups_visuals/broken_network_small.png} 
+        \caption{Broken network: individually pruned layers}
+        \label{fig:groups_broken_net}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.23\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{groups_visuals/complete_network_byGroups_small.png} 
+        \caption{The network as a set of neuron pairings}
+        \label{fig:groups_pairings}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.23\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{groups_visuals/pruned_network_byGroups_small.png}
+        \caption{Structurally pruning complete group}
+        \label{fig:groups_pairings_pruned}
+    \end{subfigure}
+    \caption{Structural pruning by considering groups}
+    \label{fig:groups}
+\end{figure}
+In Figure \ref{fig:groups}, we show an example of this: Assume we are given the beginning of a network in Figure \ref{fig:groups_example_net}, where layer three represents the arrival of a residual connection. When iterating through the network layer-by-layer, while pruning, the network can easily be broken (see Figure \ref{fig:groups_broken_net}). As multiple layers can be arranged in such a dependency, pruning of multiple layers has to be done jointly (in our example layers one to three). We call a set of layers that have to be pruned in unison a group $\sG$. In a group, not all neurons are dependent on one another. We can identify ``pairings of neurons" that have to be handled jointly (see the different colored pairings in Figure \ref{fig:groups_pairings}). The number of neuron pairings in a group we term ``group cardinality" (in our example this would be three). 
+
+Structurally pruning the network in Figure~\ref{fig:groups_example_net} whilst considering the dependencies could result in the network shown in Figure~\ref{fig:groups_pairings_pruned}. 
+
+\textbf{Meta-Pruning Comparison.} The starting point for conventional pruning and for our Intra-Fusion methodology is the same. We are given a group $\sG$ with initial group cardinality $n$, that we wish to prune to a target group cardinality $m \leq n$. Moreover, we are given an importance vector $\vi_{1 \times n}$ that assigns an agnostic importance score (e.g. $\ell_1$-norm) to each independent pairing in the group. In conventional pruning (see Algorithm \ref{alg:conventional_pruning}), we keep the $m$ most important neuron pairings according to $\vi$, and remove the rest to arrive at our new group $\sG_{new}$ with group cardinality $m$. 
+
+Most research on structured pruning has focused on devising more meaningful importance measures, i.e. $\vi$, whereas the overlying procedure detailed in Algorithm \ref{alg:conventional_pruning} has remained practically unaltered. 
+Inspired by \emph{OTFusion}, 
+we attempt to develop an alternative to the way pruning is conventionally done.
+Instead of simply discarding the less important pairings in a group (in Figure \ref{fig:groups_pairings} this would be the blue pairing), we leverage the computed importance metrics to inform the process of fusing these pairings to end up at a lower group cardinality. 
+
+To end up at a lower group cardinality, we fuse the exisiting $n$-many pairings to end up at $m$-many pairings. 
+The matching of the pairings to be fused is found via Optimal Transport (OT), which requires the careful setting of multiple non-trivial hyper-parameter choices. In particular, the discrete ``source distribution" of our OT problem is representative of the original network's group $\sG$ (group cardinality $n$), i.e., it is supported on the space of neuron pairings.
+
+To complete the OT problem formulation we additionally need to determine a target of group cardinality $m$, and a neural similarity measure to quantify the transportation cost. Lastly, we need to ascertain the probabilistic measures encapsulating the mass distribution of both the source and target entities. Solving the just formulated OT problem gives a transportation map $\mT$.
+
+\subsection{Components of Intra-Fusion}
+\label{sec:components_intrafusion}
+\textsc{3.2.1 Target and Source Selection.}
+Our experiments reveal that a simple, but fruitful option is to use $\sG_{new}$ derived by Algorithm \ref{alg:conventional_pruning}, i.e. the neurons with the highest importance according to some agnostically defined metric. Another promising approach is to cluster the neurons with K-means \citep{Lloyd1982LeastSQ}, or Gaussian Mixture Models, with $m$ clusters, and use the respective cluster centroids as the target. 
+
+\textsc{3.2.2 Transportation Cost.}
+Once we have determined the source and the target, the next step is to quantify the cost of moving a unit mass from a source neuron to a target neuron. For this we will take a metric that measures how similar or dissimilar neurons are. In case a group contains multiple layers (as shown in Figure \ref{fig:groups}), we have to find a joint similarity measure for pairings of neurons.
+
+Given two vectors $\va$ and $\vb$, each representative of the weights of a different neural pairing, we determine similarity by their normalized $\ell_1$-distance. The weights for neural pairings can be derived via concatenating the weights of the respective neurons and bias terms. 
+
+However, architectural components such as Batch Normalization (BN) \citep{ioffe2015batch} evidently presents themselves as a challenge due to their unique connection with their prior layer. We overcome this challenge by taking advantage of the properties of batch normalization, and simply merge the batchnorm layer into the prior layer whose outputs it acts upon \citep{benoitFolding2018}, 
+
+\begin{equation}
+\vw_{new} = \frac{\vw \times \gamma}{\sqrt{\sigma}}, \quad b_{new} = \frac{(b - \mu) \times \gamma}{\sqrt{\sigma}} + \beta\,.
+\label{eq:bn_merge_weight}
+\end{equation}
+
+In this context, $\vw$ denotes the weight vector corresponding to the preceding layer. Furthermore, we denote $b$ as its associated bias term. The symbols $\mu$ and $\sigma$ represent the running mean and variance, respectively, of the batch normalization layer, while $\gamma$ and $\beta$ symbolize the learnable parameters.
+
+\textsc{3.2.3 Probability Distribution.}
+We propose two different ways of quantifying probability mass: uniform or importance-informed. A uniform distribution prescribes equal mass to each neuron pairing. In the importance-informed option, the mass is relative to the importance of the neuron pairing. In order to transform the importance of a neuron pairing to a probability, one can either divide the importance by the sum of all importances, or use softmax.
+
+\begin{figure}[ht]
+    \centering
+    
+    \begin{subfigure}{0.325\linewidth}
+        \includegraphics[width=\linewidth]{probability_distributions/uTuS_bigger.pdf}
+        \caption{Uniform target and source distribution.}
+        \label{fig:utus}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.325\linewidth}
+        \includegraphics[width=\linewidth]{probability_distributions/uTiS_bigger.pdf}
+        \caption{Uniform target and importance-informed source distribution.}
+        \label{fig:utis}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.325\linewidth}
+        \includegraphics[width=\linewidth]{probability_distributions/iTiS_bigger.pdf}
+        \caption{Importance-informed target and source distribution.}
+        \label{fig:itis}
+    \end{subfigure}
+    
+    \caption{Options for target/source probability mass distribution with $\ell_1$-norm as importance.}
+    \label{fig:probability_distributions}
+\end{figure}
+
+\textsc{3.2.4 Deriving fused Neurons.}
+Given the cost matrix $\mC$, and our probability distributions $\bm{\mu}$, and $\bm{\nu}$, we can finally derive the optimal transport map $\mT$. Since the columns of this transport map act as the coefficients for the weighted aggregation of corresponding neuron pairings, it is imperative to ensure that these coefficients collectively sum to unity.
+
+Moreover, as a final preparatory step before amalgamating matching neuron pairings, it is necessary to conjoin the batch normalization layer with the layer upon which it operates. This process is elucidated in Equation \ref{eq:bn_merge_weight}. Subsequently, we establish the values of $\mu$ and $\beta$ as zero, and $\sigma$ and $\gamma$ as one, thereby preserving the unaltered state of the batch normalization layer's activation.
+
+Consequently, we proceed to traverse each layer within the group denoted as $\sG$, and rather than removing neurons of diminished significance, we opt to generate fused neurons through a process of matrix multiplication with the transport map $\mT$. This methodology culminates in pruned layers that emerge as a product of a nuanced aggregation, where the shared features of these neurons are subject to a weighted summation.
+
+
+
+\section{Empirical Results}
+
+
+Here, we seek to illustrate the accuracy gains Intra-Fusion can achieve. Most pruning literature ignores pre-finetuning accuracy, largely due to the significant accuracy drops imposed. In Section \ref{sec:methodology:datafree}, we show that this drop is mainly an artefact of the overlying pruning methodology. Namely, by utilizing importance metrics in a more involved way as done in Intra-Fusion, a significant amount of accuracy can be maintained. Lastly, for the sake of completeness, we show how Intra-Fusion stands up in face of fine-tuning.
+
+\textbf{Terminology.}
+Since we cut whole neurons and not just individual edges we will distinguish between ``neuron sparsity" and ``weight sparsity". We refer to ``neuron sparsity" as the number of 
+neuron pairings that are cut out of a group. Accordingly, we will refer to the number of edges removed from the neural network as ``weight sparsity". Where unspecified, we are referring to neuron sparsity when talking about ``sparsity".
+
+Lastly, in this Section we use the term ``Group". This refers to $\sG$ as described in Section~\ref{sec:methodology}. Moreover, the group indices are ordered such that small indices are closer to the output of the model, e.g. Group 4 is closer to the end of the model than Group 5.
+
+\subsection{Data-Free: Pruning without Fine-Tuning}
+
+\label{sec:methodology:datafree}
+ In order to compare the data-free performance of the conventional meta-pruning paradigm (see Algorithm \ref{alg:conventional_pruning}), and Intra-Fusion (see Algorithm \ref{alg:intra_fusion}), we compare the test accuracy of a VGG11-BN, ResNet18, ResNet50, on CIFAR-10, CIFAR-100, and ImageNet. Furthermore, the pruning is done on the basis of a group, for importance metrics $\ell_1$, and more sophisticated ones such as Taylor~
+\citep{molchanov2019taylor}, LAMP \citep{lee2021layeradaptive} and CHIP~\citep{NEURIPS2021_ce6babd0}.
+Given the nature of Taylor importance, additional information about parameter gradients is needed when deploying it as a metric. 
+A snapshot of the results can be seen in Figure~\ref{fig:data_free_resnet50_imagenet} and~\ref{fig:data_free_cifar}. While diverse importance metrics do not seem to affect pre-finetuning accuracy meaningfully, Intra-Fusion can leverage an importance metric to substantially increase accuracy (by up to +60\% in certain cases) without any additional use of data.
+
+Across different network architectures, there appear to be, in general, two different kinds of groups: volatile and resilient. Volatile groups exhibit strong accuracy losses as the sparsity increases (e.g., see "Group 6" in Figure~\ref{fig:data_free_cifar}), whereas resilient groups only experience small ones (e.g., see "Group 16" in Figure~\ref{fig:data_free_resnet50_imagenet}). This pattern seems to be agnostic with respect to the importance metric. Nevertheless, Intra-Fusion manages to increase accuracy substantially for both types.
+
+Take for instance Group 6 from Figure \ref{fig:data_free_cifar}, a volatile group. For a neuron sparsity of 40\%, the conventionally pruned model has dropped to an accuracy of only 80.2\%, whereas the Intra-Fused model is still at a competitive 92.1\%. However, even for resilient groups, where the margin of improvement is low, we make improvements (see Group 16 in Fig.~\ref{fig:data_free_resnet50_imagenet}).
+ \textit{Overall, this shows the benefit of our proposed approach, which can alleviate the performance drop without relying on fine-tuning, or for that matter on any datapoints at all.} 
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{data_free/resnet50_imagenet/resnet50_imagenet_l1_new.pdf}
+    \end{subfigure}
+    \begin{subfigure}{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{data_free/resnet50_imagenet/resnet50_imagenet_taylor_new.pdf}
+    \end{subfigure}
+    \label{fig:data_free_resnet50_imagenet}
+\end{figure}
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{data_free/resnet18_cifar10/resnet18_cifar10_l1_new.pdf}
+    \end{subfigure}
+    \begin{subfigure}{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{data_free/vgg11_bn_cifar100/vgg11_bn_cifar100_l1_new.pdf}
+    \end{subfigure}
+    \label{fig:data_free_cifar}
+\end{figure}
+
+\subsection{Data-Driven: Pruning with Fine-Tuning}
+\label{sec:methodology:datadriven}Although fine-tuning may not always be the most convenient in all scenarios, it might be possible in others. In any case, it would be interesting to see whether the performance gains delivered by Intra-Fusion standup in the face of fine-tuning or not. Hence, we carry out a similar experiment as before for both VGG11-BN and ResNet18 trained on CIFAR-10; however, this time, fine-tuning after model compression is available.
+
+\renewcommand*{\arraystretch}{0.9}
+\begin{table}[ht]
+\centering
+\begin{small}
+
+  \caption{Intra-Fusion vs. default pruning with fine-tuning for $\ell_1$ importance on CIFAR-10.}
+  \label{table:finetuning}
+  \begin{tabular}{llllll}
+    \toprule
+    Model & Base (\%) & Sparsity (\%) & Default (\%)     & Intra-Fusion (\%)  & Gain. (\%) \\
+    \midrule
+    \multirow{4}{*}{VGG11-BN} & \multirow{4}{*}{89.56\%} & 64 & 88.95 & \textbf{89.19} & +0.24 \\[1mm]
+    & & 84 & 88.14 & \textbf{88.51} & +0.36 \\[1mm]
+    & & 91 & 87.43 &\textbf{88.15} & +0.72 \\[1mm]
+    & & 96 & 85.21 & \textbf{85.89} & +0.68 \\
+    \midrule 
+    \multirow{4}{*}{ResNet18} & \multirow{4}{*}{92.17\%} & 64 & 91.53 & \textbf{91.98} & +0.45 \\[1mm]
+    & & 84 & 91.22 & \textbf{91.62} & +0.40 \\[1mm]
+    & & 91 & 90.41 &\textbf{91.37} & +0.96 \\[1mm]
+    & & 96 & 88.82 & \textbf{89.60} & +0.79 \\
+    \bottomrule
+  \end{tabular}
+\end{small}
+\end{table}
+Table~\ref{table:finetuning} contains our results (averaged over multiple runs) for this setting. We observe that  Intra-Fusion obtains a consistent gain of up to 1\% test accuracy (with standard deviation of 0.13\% for all sparsities), across all the considered sparsity levels. While the gains might not seem as stark, we must remark that here we allowed for a significantly long fine-tuning schedule, and that Intra-Fusion converges faster due to the large initial accuracy gains. It is also important to note that the focus of this paper is on data-free pruning.
+
+To conclude, our consistent gains show that the boost afforded by Intra-Fusion is complementary to that provided via just fine-tuning the pruned model --- thereby demonstrating the efficacy of our approach.
+
+
+
+\section{Understanding Intra-Fusion}
+
+So far, we have elucidated and juxtaposed Intra-Fusion with the conventional pruning methodology, demonstrating that Intra-Fusion possesses the distinctive capability to enhance accuracy significantly without relying on any data. In this section, we would like to obtain a better understanding of the inner workings of Intra-Fusion.
+
+\subsection{Output Preservation}
+
+A very intuitive explanation for the superior performance of Intra-Fusion is its ability to better preserve the output of the original non-pruned model. Hence, we quantify output divergence by the $\ell_2$-distance to the output of the original model for various groups in the data-free scenario at different sparsities. Thus, it seems that merging akin neurons as we do with Intra-Fusion leads to better output preservation, and subsequent superior performance.
+
+\label{sec:output_preservation}
+\begin{figure}[htp]
+    \centering
+    \begin{subfigure}{0.28\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{output_preservation/distance_histogram_resnet18_Num15_PruneTypel1_GroupIdx0_Sparsity0.1_dscifar10.pdf}
+        \caption{Sparsity: 10\%}
+        \label{fig:out_preservation_01}
+    \end{subfigure}
+    \begin{subfigure}{0.28\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{output_preservation/distance_histogram_resnet18_Num15_PruneTypel1_GroupIdx0_Sparsity0.2_dscifar10.pdf}
+        \caption{Sparsity: 20\%}
+        \label{fig:out_preservation_02}
+    \end{subfigure}
+    \begin{subfigure}{0.28\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{output_preservation/distance_histogram_resnet18_Num15_PruneTypel1_GroupIdx0_Sparsity0.3_dscifar10.pdf}
+        \caption{Sparsity: 30\%}
+        \label{fig:out_preservation_03}
+    \end{subfigure}
+    \caption{Output preservation comparison of the original model. Model: ResNet18. Dataset: CIFAR-10. Group: 0. Importance metric: $\ell_1$.}
+    \label{fig:out_preservation}
+\end{figure}
+
+\subsection{Neural Landscape}
+
+To gather further insights as to how Intra-Fusion differs from the conventional pruning methodology when navigating the weight space, we show an example of a pruned network and the corresponding accuracy landscape that surrounds the models.
+We vectorize all the parameters before carrying out their linear interpolation for this figure and 
+ following the procedure in~\citep{garipov2018loss}. We specify three models in that space (in our case: original model, default pruned model, and the Intra-Fusion model), one of which serves as the origin, and thus a 2D slice is built. In this slice, we sample a grid of possible networks and evaluate their performance on the test set. It is important to note that not all models in the given 2D slice of the parameter space are pruned (e.g. original model). 
+
+\label{sec:ablation_neural_landscape}
+\begin{figure}[htp]
+    \centering
+    \begin{subfigure}{0.35\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{neural_landscape_plots/results_of_loss_landscape_Cifar10_resnet18_grid40_sp40_l1_aligned_group6reverse.pdf}
+        \caption{Sparsity: 40\%}
+        \label{fig:landscape_sparsity40}
+    \end{subfigure}
+    \begin{subfigure}{0.35\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{neural_landscape_plots/results_of_loss_landscape_Cifar10_resnet18_grid40_sp60_l1_aligned_group6rev.pdf}
+        \caption{Sparsity: 60\%}
+        \label{fig:landscape_sparsity60}
+    \end{subfigure}
+    \caption{Resnet18. CIFAR-10, when group 6 is pruned. IF: Intra-Fusion.}
+    \label{fig:Landscape_SingelGroup}
+\end{figure}
+
+In Figure \ref{fig:Landscape_SingelGroup} we depict how the accuracy varies for different models in the identified 2D slice of the parameter space. 
+Evidently, the Intra-Fusion model ends up at a more convenient part of the accuracy landscape when compared to the regularly pruned model ("Default") resulting in a superior performance. It appears that using the less important neurons to inform the process of model pruning is more effective at identifying a favorable spot in the parameter space than simply discarding them.
+\subsection{Ablation Study on Varying Target and Source Distribution}
+As mentioned in Section \ref{sec:components_intrafusion}, we present two choices for the source and target distribution: uniform and importance-informed. In order to discern which option is advantageous, we prune six ResNet18 models using different combinations of source and target distributions with the $\ell_1$-norm criterion. We employ the Kruskal-Wallis H-test \citep{Kruskal1952UseOR} to assess statistically significant differences between the distribution choices. The test reveals that the p-values for nearly all cases indicate statistical insignificance. In cases where significance is observed ($p \leq 0.05$), the differences in accuracy are marginal. However, it is plausible that a more informative importance metric than the $\ell_1$-norm could give the importance-informed version an advantage.
+
+
+
+\section{Application Beyond Pruning: Factorizing Model Training}
+
+\label{sec:split_data}
+In an attempt to find further valuable integrations of pruning and fusion, we also explore how fusion can be used to ``factorize" and possibly speed up the training process of models that are supposed to be pruned after training. In an increasingly digitalized world the amount of available data points is consistently increasing. We are looking for an approach that manages to leverage the fact that also on subsets of the whole dataset, a competitive performance can be achieved. 
+This factorization provides another angle on enhancing the performance and training time of models. It could for example be especially interesting as an alternative or enhancement to data parallelism during distributed model training. 
+
+The model that is created with the standard pruning approach (trained on the whole dataset, then pruned and finally fine-tuned) we call the ``whole-data model". Like in a real-world setting, the result of the pruning is fine-tuned since this most of the time recovers a lot of performance.
+\subsection{The Split-Data Approach}
+In the approach we want to propose, we split the model training into smaller phases by utilizing pruning and fusion. 
+For this we first split the data set into two subsets $a$ and $b$ on which we then train two individual models $model_a$, $model_b$ in parallel. This leads to a theoretical 2x speedup in the model training time since the convergence on half of the dataset does not take more epochs than on the whole dataset (see Figure~\ref{fig:train_convergence_speed}). 
+These two models are then fused using OT and fine-tuned on the whole data set. To reach the target sparsity we prune the resulting network and fine-tune again. We call this approach FaP (Fuse and Prune, see Figure~\ref{fig:FaP_approach}). For completeness we also include the performance of individually pruning and fine-tuning the networks before fusing --- this we call PaF (Prune and Fuse, see Figure~\ref{fig:PaF_approach}). For the pruning part of doing FaP and PaF, we use the introduced Intra-Fusion.
+\begin{figure}[h!]
+  \centering
+  \includegraphics[trim=0 0 0 5, clip,width=.8\linewidth]
+  {PaF_Figures/FaP_approach_visual_new_cut.png}
+  \caption{The FaP approach.}
+  \label{fig:FaP_approach}
+\end{figure}
+To give a concrete insight into the relative runtimes of the different approaches, we give a side-by-side comparison of their timelines in Figure~\ref{fig:SplitData_overTime}.
+Relative to the model training time of a VGG11-BN (CIFAR-10), we achieve a speedup of 1.81. The overall speedups of the split-data approaches are 1.42 (PaF) and 1.31 (FaP). Importantly, in applications, the time for training $T_1$ of a model on large datasets will typically be much greater than the time for fine-tuning $T_2$ ($T_1\gg T_2$), and speedups are expected to be much more significant.
+
+\subsection{k-Fold Split-Data}
+\label{sec:PaF_kfold}
+As an alternative, to simply splitting the dataset into two and using each subset to train a model (that's what we have done so far), we can generalize to a k-fold style approach.
+\textbf{Generating Additional Trainingsets.} Here we split the dataset into $k$ equally sized and distinct subsets $s_p$. We now create training datasets $d_i$ that consist of $k/2$-many of these subsets $s_p$. By choosing $k \bmod 2 = 0$ we ensure that each $d_i$ will end up containing 50\% of the original dataset. We then take all possible $k \choose k/2$-many $d_i$ and individually train models on them. 
+\textbf{Extending PaF and FaP.} Since the fusion algorithm naturally extends to fusing more than two models (as also presented by \citep{singh2020model}), we can now generalize PaF and FaP to combine pruning and fusion of more than two models - leading to a more effective use of the OT-based fusion approach.
+
+\textbf{Consequences for Model Training Speedup.} This approach comes with additional requirements for computational resources to enable the parallel training and pruning of the multiple individually trained models. However, besides fusion taking insignificantly longer, it does not require more time than the previously explored split-data approaches and thus yields the same speedup.
+\subsection{Split-Data Performance}
+
+
+\subsection{Split-Data As Alternative To Data Parallelism}
+Splitting the dataset into different parts that models are trained on individually is not a new idea. Specifically, during distributed model training in cloud infrastructures, this is a common approach called \textbf{Data-Parallelism}. However, the gradients are exchanged among the models after the individual backpropagation steps so all models are effectively updated with gradients computed from the whole dataset. This leads to high network utilization, sensitivity to network latency and wait times between the training steps.
+
+In our \textbf{Split-Data} approaches (like PaF and FaP), we completely separate the model training. Each model has its designated part of the training data it is trained on. Only after the models have individually converged are the edge weights communicated and fused. This yields far less communication overhead and is not sensitive to network latency.
+
+
+\section{Conclusion}
+
+In sum, we perform a detailed investigation of unifying and bridging the paradigms of pruning and fusion through our conceptions of Pruning-and-Fusion as well as Fusion-and-Pruning. Specifically, we showed how our proposed technique of Intra-Fusion provides a consistent gain --- with and without fine-tuning, the latter being also privacy-preserving and highly cost-efficient. We also investigated how fusion can be used to factorize the training process, given that it is subsequently accompanied by pruning, to result in non-trivial speedup in training times. The sparsity obtained via our algorithm is also amenable to actual speedup in inference times, without needing special accelerators. 
+Overall, our work shows the compatibility of bringing together pruning and fusion in the form of meta-pruning, and the potential inherent therein.
+All in all, this raises the question of rethinking the pre-dominant paradigm and perhaps redefining our approach to obtaining compact models via fusion.
+
+

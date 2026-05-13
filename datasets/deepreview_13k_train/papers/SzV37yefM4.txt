@@ -1,0 +1,480 @@
+\title{Contrastive Decoding Improves Reasoning in Large Language Models}
+
+\begin{abstract}
+We demonstrate that Contrastive Decoding -- a simple, computationally light, and training-free text generation method proposed by Li et al 2022 -- achieves large out-of-the-box improvements over greedy decoding on a variety of reasoning tasks. Originally shown to improve the perceived quality of long-form text generation, Contrastive Decoding searches for strings that maximize a weighted difference in likelihood between strong and weak models. We show that Contrastive Decoding leads LLaMA-65B to outperform LLaMA 2, GPT-3.5 and PaLM 2-L on the HellaSwag commonsense reasoning benchmark, and to outperform LLaMA 2, GPT-3.5 and PaLM-540B on the GSM8K math word reasoning benchmark, in addition to improvements on a collection of other tasks. Analysis suggests that Contrastive Decoding improves over existing methods by preventing some abstract reasoning errors, as well as by avoiding simpler modes such as copying sections of the input during chain-of-thought. Overall, Contrastive Decoding outperforms nucleus sampling for long-form generation and greedy decoding for reasoning tasks, making it a powerful general purpose method for generating text from language models.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\customfootnotetext{*}{ Work done as an AI resident at Meta.}
+\begin{figure}[h!]
+\begin{floatrow}
+\ffigbox{%
+   \includegraphics[width=0.48\textwidth]{plots/splashy-heatmap-rev1.png}
+}{%
+ \caption{Contrastive decoding improves reasoning across model scales and reasoning tasks.}\label{fig:splashy-heatmap}
+}
+
+\ffigbox{%
+   \includegraphics[width=0.48\textwidth]{plots/splashy-hellaswag.png}
+}{%
+\caption{Contrastive scoring significantly improves performance on HellaSwag, a standard commonsense reasoning benchmark.}\label{fig:splashy-hellaswag}
+}
+\end{floatrow}
+\end{figure}
+ 
+
+Text is generated from large language models (LLMs) in different ways for different tasks.
+For open-ended text generation tasks, truncated sampling is normally used, as the most likely strings under a model tend to be short and uninteresting \citep{holtzman2020nucleus}.
+For reasoning problems, greedy decoding is normally preferred, to avoid risking sampling errors.
+This bifurcation is undesirable; for example it increases the likelihood of reasoning errors during open-ended generation.
+
+We explore the use of Contrastive Decoding \citep{li2022contrastive} for solving reasoning problems with LLMs.
+Contrastive Decoding (CD) searches for strings that maximize a weighted difference in likelihood between a stronger \emph{expert} and a weaker \emph{amateur} model, and was shown to outperform existing methods for open-ended text generation. 
+It achieves this by avoiding undesirable modes of the expert model’s distribution, such as short or generic strings, which tend to be the most likely under any model, including the amateur.
+
+We show that Contrastive Decoding outperforms greedy decoding on reasoning problems.
+On GSM8K, a widely used benchmark consisting of grade-school word math problems, contrastive decoding improves the performance of various LLaMA models by up to 8 absolute percentage points.
+This result outperforms LLaMA 2, which has 5 billion more parameters and is trained on 40\% more data.
+On HellaSwag, using the CD objective to rank answers leads LLaMA to outperform all existing models except GPT-4. We find general improvement on arithmetic reasoning and multiple-choice ranking tasks, including on models as large as LLaMA-65B, suggesting that Contrastive Decoding could bring such widespread improvements to much larger models.
+
+We also analyze the cause of the improvement from Constrastive Decoding. Empirically, we find that Contrastive Decoding performs less surface-level copying from the prompt than greedy decoding and misses fewer reasoning steps. This result suggests that, similarly to findings in \cite{li2022contrastive}, Contrastive Decoding works by reducing repetitive or other undesirable modes of the model distribution.
+Our current method yields mixed results for commonsense reasoning tasks and slightly degrades factual retrieval, both trends that encourage further refinement of the method.
+
+Overall, we show that Contrastive Decoding not only substantially improves LLM accuracies on a range of benchmarks, but is also the first generation algorithm to achieve state-of-the-art results in both reasoning and text generation problems. 
+These results allow a more unified method for improving generation from language models across tasks.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.9\textwidth]{plots/cd_front_diagram.png}
+\caption{CD accentuates what the expert model has learned that the amateur model has not. Results are taken from greedy decoding with a 65B parameter expert, using $\alpha = 0.1$, $\beta = 0.5$ for CD.}
+\end{figure}
+
+
+
+\section{Contrastive Decoding}
+
+
+\subsection{Simplified Formulation}
+The original Contrastive Decoding formulation from \citet{li2022contrastive} explicitly chooses two parameters: $\alpha$ and the intermediate temperature of the amateur distribution $\tau_a$, with the intermediate temperature of the expert fixed at $\tau_e = 1$.
+We slightly refactor the hyperparameter choice to be more interpretable and simplify the algorithm by working directly in logit space.
+
+Let $s_{a}^{(i)}$ and $s_{e}^{(i)}$ be the unnormalized scores (logits) assigned to token $i$ by the amateur and expert models, respectively. $\alpha$ is the same hyperparameter in the original paper: a proportion of the maximum probability assigned by the expert model, with any tokens assigned a lower probability masked out. $\beta$ is a hyperparameter corresponding to the strength of the amateur penalty. We include a leading $(1 + \beta)$ coefficient to the expert logits to decouple the strength of the contrastive penalty from the expected scale of the output logits, cleanly delineating between the contrastive tradeoff and the final sampling temperature. This matches the formulation of DExperts \citep{liu2021dexperts}, with the expert model serving both as the base prior and steering expert.
+
+\begin{figure}[h!]
+\noindent\makebox[\textwidth][c]{%
+\begin{boxedminipage}[][116pt]{.55\textwidth}
+    \centering
+    \textbf{1.} Determine $\alpha$-mask. \\
+    $V_{valid} = \{j \in V, s_e^{(j)} \geq \log \alpha + \max_{k \in V} s_e^{(k)} \}$
+    \noindent\rule{\textwidth}{0.5pt}
+    \textbf{2.} Subtract amateur logits. \\
+    $s_{CD}^{(i)} = \begin{cases}
+        (1 + \beta)s_e^{(i)} - \beta s_a^{(i)} & i \in V_{valid} \\
+        -\infty & i \not\in V_{valid}
+    \end{cases}$
+\end{boxedminipage}%
+}
+\end{figure}
+ Our implementation takes three lines of readable code.
+
+\subsection{Probabilistic Interpretation}
+Our implementation of $\alpha$-masking has the same interpretation as in \citet{li2022contrastive}, given that the expert temperature is fixed to $\tau_e = 1$.  
+
+Further, we can consider the post-softmax probabilities produced by CD as a perturbation of the probabilities predicted by the expert model. Not including $\alpha$-masking, the probability assigned to token $i$ by CD is a normalized adjustment of the probability assigned by the expert model:
+
+\begin{equation}
+p_{CD}^{(i)} \propto p_{e}^{(i)} \left(\frac{p_{e}^{(i)}}{p_{a}^{(i)}}\right)^{\beta}
+\end{equation}
+
+It is therefore clear that as $\beta \to 0$ the contrastive penalty disappears, and as $\beta \to \infty$ the distribution collapses to the argmax of $p_e^{(i)} / p_a^{(i)}$, which is the original formulation from \citet{li2022contrastive}.
+
+
+
+\section{Experiments}
+
+
+\subsection{Experimental Setup}
+
+\textbf{Models.}\paragraphspace We use untuned models from the LLaMA 1 family \citep{touvron2023llama} at all scales.
+Unless otherwise stated, we use an untuned LLaMA-65B as the expert and an untuned, LLaMA-architecture model with 1.5B parameters trained on the same data as the other LLaMA 1 models as an amateur.
+For one ablation study, we use models from the FLAN-T5 family \citep{chung2022flan}.
+
+\textbf{Decoding Parameters.}\paragraphspace We set $\beta = 0.5$ and $\alpha = 0.1$ for all experiments unless otherwise stated.
+We use greedy decoding, except for self-consistency experiments for which we sample at $\tau = 0.7$ following \citet{touvron2023llama}.
+
+\textbf{Prompting.}\paragraphspace For generation tasks, we use 8-shot chain-of-thought prompting, in line with \citet{touvron2023llama}. The examples are the same as in LLaMA for tasks contained in that paper, and taken from \citet{wei2023chainofthought} for other mathematical tasks.
+
+\textbf{Datasets.}\paragraphspace Following prior works, we evaluate on a number of datasets.
+The following tasks measure performance on algebraic word problems:
+\textbf{AQuA} \citep{ling-etal-2017-aqua},
+\textbf{ASDiv} \citep{miao2021diverse},
+\textbf{GSM8K} \citep{cobbe2021gsm8k}, and
+\textbf{SVAMP} \citep{patel2021svamp}.
+We also evaluate on \textbf{MATH} \citep{hendrycks2021math}, a larger and more challenging benchmark.
+
+For commonsense reasoning, we measure open-ended performance on \textbf{CommonsenseQA} \citep{talmor2019csqa} and \textbf{StrategyQA} \citep{geva2021strategyqa}. We also evaluate on a battery of multiple-choice reasoning benchmarks: both the easy and challenge splits of the \textbf{AI2 Reasoning Challenge} dataset \citep{clark2018arc}, \textbf{BoolQ} \citep{clark2019boolq}, \textbf{HellaSwag} \citep{zellers2019hellaswag}, \textbf{MMLU} \citep{hendrycks2021mmlu}, \textbf{PIQA} \citep{bisk2019piqa}, \textbf{SIQA} \citep{sap2019socialiqa}, and \textbf{WinoGrande} \citep{sakaguchi2019winogrande}.
+
+\subsection{Hyperparameter Selection}
+
+Contrastive decoding has three major hyperparameters: the masking ratio $\alpha$, the contrastive strength $\beta$ and the size of the amateur model. We find that results are fairly insensitive to $\alpha$ as long as $\beta$ is reasonably small (below 1); unless otherwise stated we use $\alpha=0.1$ across experiments.
+
+Next we consider the size of the amateur model. In agreement with \citet{li2022contrastive}, we find that performance benefits from smaller amateur models (~\autoref{fig:amateur-study}); while a 1B-parameter amateur helps reasoning performance, a 7B-parameter amateur harms it. We also examine different types of amateurs; ablation studies show that a partially-trained amateur performs better than a fully-trained one, and that a poorly-prompted expert can be successfully used as an amateur as well (see ~\autoref{sec:ablation-studies}).
+
+Finally, we examine the effect of $\beta$. The optimal value depends on the task, but for both generation tasks like GSM8K and multiple-choice ranking tasks like PIQA we find that $\beta=0.5$ performs well. Setting $\beta$ too high can place too much weight in the contrastive penalty and harm performance, especially with a larger gap between amateur and expert models. $\beta=0$ corresponds to standard greedy decoding with no contrastive penalty.
+
+The best result on GSM8K, with LLaMA-65B and $\beta = 0.25$, is 57.7 (Table ~\ref{table:beta-sweep}), outperforming PaLM-540B (56.5), LLaMA-2 (56.8) and GPT-3.5 (57.1).\footnote{\citet{openai2023gpt4} evaluates GPT-3.5 5-shot; all others are 8-shot.}
+\citep{anil2023palm2,openai2023gpt4}
+
+\begin{figure}[h!]
+\begin{floatrow}
+\ffigbox[0.45\textwidth]{%
+   \includegraphics[width=0.45\textwidth]{plots/amateur-7b-ablation.png}
+}{%
+ \caption{%
+    Results on GSM8K with LLaMA-65B as the expert. While a 7B amateur harms performance, a 1.5B amateur helps.
+ }\label{fig:amateur-study}
+}
+\capbtabbox{%
+    \begin{tabular}{| c | c c c c |}
+    \hline
+    Expert & $\beta=0$ & $\beta=0.25$ & $\beta=0.5$ & $\beta=1$ \\
+    \hline
+    7B & 10.7 & 11.5 & \textbf{13.6} & 11.0 \\
+    \hline
+    13B & 17.0 & 21.0 & \textbf{22.9} & 20.4 \\
+    \hline
+    30B & 35.2 & 40.0 & \textbf{43.4} & 42.0 \\
+    \hline
+    65B & 51.0 & \textbf{57.7} & 56.8 & 44.6 \\
+    \hline
+    \end{tabular}
+}{%
+\caption{Results on GSM8K. $\beta=0.5$ tends to give good results across expert sizes.}\label{table:beta-sweep}
+}
+\end{floatrow}
+\end{figure}
+\begin{figure}[h!]%
+    \centering
+    \subfloat[]{\label{fig:hellaswag-negative}{\includegraphics[width=0.45\textwidth]{plots/hellaswag_negative.png} }}%
+    \qquad
+    \subfloat[]{\label{fig:piqa-negative}{\includegraphics[width=0.45\textwidth]{plots/piqa_negative.png} }}%
+    \caption{Two examples of sweeping through $\beta$ values on multiple-choice reasoning tasks across model scales. Dashed horizontal lines mark performance without contrastive decoding.}
+    \label{fig:negative-betas-main}%
+\end{figure}
+
+\subsection{Arithmetic Reasoning}
+We find that contrastive decoding tends to help on arithmetic reasoning tasks with chain-of-thought prompting; see ~\autoref{table:math-gen} for all results. One exception to this is the MATH dataset, which proves to be challenging for both standard and contrastive decoding. We conjecture that because contrastive decoding amplifies skills that the expert has learned better than the amateur, it cannot help on tasks that are well beyond the expert's ability.
+
+We also experiment with normalizing the $\alpha$-masked CD scores via softmax, then temperature sampling from the resulting distribution. This permits CD to generate multiple candidate reasoning chains to be used for self-consistency (taking the majority answer) \citep{wang2023selfconsistency}. We show across both mathematical and commonsense reasoning, CD improves self-consistency performance.
+
+\begin{table}[h!]
+\begin{floatrow}
+\ttabbox{
+\begin{tabular}{l l | l l l l l | l} 
+ \hline
+ Model & CD & AQuA & ASDiv & GSM8K & MATH & SVAMP & Average \\ [0.5ex]
+ \hline
+  7B & \xmark & 21.0$^*$ & 40.2 & 10.7 & 3.0 & 27.3 & 20.4 \\ 
+  13B & \xmark & 18.1$^*$ & 49.0 & 17.4 & 4.2 & 39.4 & 25.6 \\ 
+  30B & \xmark & 23.8 & 60.1 & 35.3 & 6.9 & 55.9 & 36.4 \\ 
+  65B & \xmark & 33.3 & 67.2 & 51.0 & 10.6 & 69.1 & 46.2 \\ 
+  65B \texttt{maj@20} & \xmark & 38.2 & 73.6 & 68.0 & --$^\dagger$ & 77.3 & 64.3 \\ 
+  \hline
+  7B & \cmark & 19.0$^*$ \scriptsize{(-2.0)} & 39.7 \scriptsize{(-0.5)} & 14.3 \scriptsize{(+3.6)} & 2.9 \scriptsize{(-0.1)} & 31.5 \scriptsize{(+4.2)} & 21.5 \scriptsize{(+1.1)} \\
+  13B & \cmark & 16.0$^*$ \scriptsize{(-2.1)} & 52.0 \scriptsize{(+3.0)} & 22.7 \scriptsize{(+5.5)} & 3.8 \scriptsize{(-0.4)} & 43.1 \scriptsize{(+3.7)} & 27.5 \scriptsize{(+1.9)} \\
+  30B & \cmark & 29.8 \scriptsize{(+6.0)} & 62.5 \scriptsize{(+2.4)} & 43.1 \scriptsize{(+8.1)} & 8.1 \scriptsize{(+1.2)} & 59.3 \scriptsize{(+3.4)} & 40.6 \scriptsize{(+4.2)} \\
+  65B & \cmark & 36.9 \scriptsize{(+3.6)} & 71.9 \scriptsize{(+4.7)} & 56.8 \scriptsize{(+5.8)} & 10.3 \scriptsize{(-0.3)} & 67.8 \scriptsize{(-1.3)} & 48.7 \scriptsize{(+2.5)} \\
+  65B \texttt{maj@20} & \cmark & \textbf{39.4} \scriptsize{(+1.2)} & \textbf{77.4} \scriptsize{(+3.8)} & \textbf{74.0} \scriptsize{(+6.0)} & --$^\dagger$ & \textbf{79.0} \scriptsize{(+1.7)} & \textbf{67.5} \scriptsize{(+3.2)} \\
+ \hline
+\end{tabular}
+}{\caption{Results on math generation tasks. Contrastive decoding generally improves performance.}
+\label{table:math-gen}}
+\end{floatrow}
+\end{table}
+\subsection{Commonsense Reasoning}
+
+Results are more mixed for CommonsenseQA and StrategyQA. For both of these tasks, we 8-shot prompt our model and compute the exact match score against the ground-truth answers. We find that contrastive decoding harms performance for smaller models, but that this harm equalizes somewhat for the 65B model and evens out when using self-consistency. See ~\autoref{table:commonsense-gen} for full results.
+
+\begin{table}[h!]
+\begin{floatrow}
+\ttabbox{
+\begin{tabular}{c l | l l | l l l l l l | l} 
+ \hline
+ Model & CD & CSQA & StrategyQA & Average \\ [0.5ex] 
+ \hline
+  7B & \xmark & 40.0 & 59.2 & 49.6 \\
+  13B & \xmark & 60.4 & 64.5 & 62.5 \\
+  30B & \xmark & 66.4 & 68.7 & 67.6 \\
+  65B & \xmark & 77.5 & 69.5 & 73.5 \\
+  65B \texttt{maj@20} & \xmark & 77.0 & \textbf{79.3} & 78.2 \\
+ \hline
+  7B & \cmark & 37.3 \scriptsize{(-2.7)} & 58.3 \scriptsize{(-0.9)} & 47.8 \scriptsize{(-1.8)} \\
+  13B & \cmark & 58.5 \scriptsize{(-1.9)} & 65.5 \scriptsize{(+1.0)} & 62.0 \scriptsize{(-0.5)} \\
+  30B & \cmark & 62.8 \scriptsize{(-3.6)} & 67.6 \scriptsize{(-1.1)} & 65.2 \scriptsize{(-2.4)} \\
+  65B & \cmark & 77.1 \scriptsize{(-0.4)} & 71.5 \scriptsize{(+2.0)} & 74.3 \scriptsize{(+0.8)} \\
+  65B \texttt{maj@20} & \cmark & \textbf{77.9} \scriptsize{(+0.9)} & \textbf{79.3} \scriptsize{(+0.0)} & \textbf{78.6} \scriptsize{(+0.4)} \\
+ \hline
+\end{tabular}
+}{\caption{CD harms commonsense reasoning with a smaller expert, but performance evens out with a larger expert-amateur gap.}
+\label{table:commonsense-gen}
+}
+\end{floatrow}
+\end{table}
+
+\footnotetext[1]{In the AQuA task, the model selects one out of five given options. Thus the random baseline is $20\%$, and results below that threshold are not meaningful.}
+\footnotetext[2]{Given the size of the dataset and length of generations, we do not evaluate maj @ 20 on MATH.}
+
+\subsection{Contrastive Ranking}
+
+We further evaluate a contrastive objective as a scoring function to rank answers to multiple-choice questions. These tasks are zero-shot, multiple-choice cloze tasks; instead of open-ended generation the model scores each potential completion, length-normalizing following \citet{touvron2023llama}. We find comparable performance across most tasks, with more substantive gains on HellaSwag and ARC-Challenge. Notably, on HellaSwag CD leads LLaMA-65B to score 88.0, which outperforms LLaMA-2 (85.3), GPT-3.5 (85.5) \citep{openai2023gpt4} and PALM 2-Large (86.8) \citep{anil2023palm2}.
+
+\begin{table}[h!]
+\centering
+\begin{floatrow}
+\ttabbox{
+\begin{tabular}{c | c c c c c c c c | l}
+ \hline 
+    $\beta$ & ARC-E & ARC-C & BoolQ & HSwag & PIQA & SIQA & WGrande & MMLU & Avg \\
+ \hline
+ 0.0 & \textbf{79.1}  & 56.1  & 84.2  & 84.2   & 82.6 & 52.3 & 77.3 & \textbf{63.5}  &  72.4    \\
+ \hline
+0.5 & 79.0  & 59.5 & \textbf{84.3}  & 87.4 & \textbf{83.1} & \textbf{53.3} & \textbf{77.8}  & 63.4 & \textbf{74.9}   \\
+1.0 & 76.9  & \textbf{59.7} & 84.1 & \textbf{88.0} & 82.9 & \textbf{53.3} & 76.5 & 63.2 & 74.5   \\
+\hline
+\end{tabular}
+}{
+\caption{Results on multiple-choice reasoning tasks. CD generally provides a modest boost.}
+}
+\end{floatrow}
+\end{table}
+
+
+\section{Additional Studies}
+
+
+\subsection{Effects of Contrastive Decoding}
+
+\textbf{CD is worse at arithmetic but better at logical reasoning.}\paragraphspace We conduct a manual error analysis of 100 randomly selected examples from the GSM8K set between continuations from greedy decoding and CD ($\beta = 0.5, \alpha = 0.1$). We follow \citet{wang2023understandingcot} and categorize wrong answers as primarily being due to an arithmetic error, a missing step or a semantic misunderstanding. We add one category of ``degeneration," chosen when the model lapses into excessive repetition. Our small-scale analysis finds that CD makes more arithmetic errors, but that this is offset by better semantic reasoning and fewer missing steps (see Table ~\ref{table:error-analysis}).
+
+\begin{table}[h!]
+\centering
+\begin{floatrow}
+\ttabbox{
+    \begin{tabular}{c | c c c c | c}
+        CD & Arithmetic & Missing Step & Semantic & Degeneration & Total Errors \\
+        \hline
+        \xmark & \textbf{4\%} & 22\% & 24\% & 4\% & 54\% \\
+        \hline
+        \cmark & 8\% & \textbf{20\%} & \textbf{21\%} & \textbf{3\%} & \textbf{52\%}
+    \end{tabular}
+}{
+    \caption{Proportion of errors in of a set of 100 GSM8K questions. CD makes more arithmetic errors, but omits fewer steps and avoids semantic misunderstandings.}
+    \label{table:error-analysis}
+}
+\end{floatrow}
+\end{table}
+
+To further explore the claim that the benefit of CD does not stem from arithmetic evaluation, we generate a toy dataset of 1,0000 multiplication and subtraction equations with operands up to four digits and then 8-shot prompt models to complete the expression, measuring exact match accuracy. We find that CD does not improve performance on this task, and in fact may degrade it slightly. Results are shown in Table ~\ref{table:synth-arith}.
+
+\begin{figure}[h!]
+\begin{floatrow}
+\capbtabbox{%
+    \begin{tabular}{| c | l l |} 
+    \hline
+    & Standard & CD \\
+    \hline
+    Correct \% & 44.6 & \textbf{51.1} \\
+    Parseable \% & 95.2 & \textbf{95.6} \\
+    Average \# chars & 215.2 & 217.2 \\
+    \hline
+    \end{tabular}
+}{%
+    \caption{High-level generation statistics from sampled generations on GSM8K. Responses are similar lengths, despite the performance improvement from CD.}\label{table:high-level-stats}
+}
+\ffigbox{%
+   \includegraphics[width=0.45\textwidth]{plots/f1-study.png}
+}{%
+ \caption{%Token-level F1 scores, with the generation ``retrieving" from the prompt.
+ CD reduces copying from the question in the generated Chain of Thought, as measured by n-gram overlap on GSM8K generations.
+ }\label{fig:f1-study}
+}
+\end{floatrow}
+\end{figure}
+
+\textbf{CD reduces copying from the prompt.}\hspace{15pt}We analyze 26,000 sampled generations from CD-sampling on GSM8K against the corresponding set from temperature sampling; both of these sets of generations are used in our self-consistency study. We find that responses are roughly the same length and follow the few-shot template roughly the same proportion of the time. This rules out the hypothesis that contrastive decoding simply leads the model to follow the template better, prevents degeneration or induces longer answers with more reasoning steps. Further, we run an automatic evaluation of greedy generations using ROSCOE \citep{golovneva2022roscoe} but do not find significant differences in any of these metrics. However, we measure the precision and recall of the tokens in the prompt by the sampled generations and find that CD systematically reduces token-level copying from the prompt.
+This may be related to increased reasoning ability, as surface-level copying from the prompt does not provide new information to the problem.
+
+\textbf{CD can harm factual recall.}\paragraphspace Our primary claim is that contrastive decoding improves chain-of-thought reasoning. However, we also test CD on two pure factual-recall tests that do not utilize chain-of-thought: OpenBookQA \citep{mihaylov2018obqa} and TriviaQA \citep{joshi2017triviaqa}. OpenBookQA (``OBQA"), is a multiple-choice completion task, while TriviaQA is a 5-shot generation task. Reusing the same setup from reasoning leads to a slight degradation of performance, as seen in Table ~\ref{table:factual-recall}.
+
+\begin{figure}[h!]
+\begin{floatrow}
+\ttabbox{\begin{tabular}{| c | l l |}
+\hline
+CD & OBQA & TriviaQA$^*$  \\
+\hline
+\xmark & \textbf{60.0} & \textbf{72.2} \\
+\cmark & 57.8 \scriptsize{(-2.4)} & 69.9 \scriptsize{(-2.1)} \\
+\hline
+\end{tabular}
+}{\caption{CD can harm performance on factual recall tasks.}\label{table:factual-recall}}
+
+\ttabbox{
+\begin{tabular}{| c | l l l l |} 
+ \hline
+ CD & 7B & 13B & 30B & 65B \\
+ \hline
+ \xmark & \textbf{31.0} & \textbf{36.3} & \textbf{52.3} & \textbf{58.4} \\
+ \cmark & 30.9 & 35.6 & 52.2 & 57.6 \\
+ \hline
+\end{tabular}
+}{%
+ \caption{CD slightly harms performance on a synthetic task of evaluating arithmetic expressions.}
+ \label{table:synth-arith}
+}
+\end{floatrow}
+\end{figure}
+\textbf{CD outperforms other reasoning enhancements in FLOP efficiency.}\paragraphspace We note that contrastive decoding introduces relatively little overhead in comparison to other reasoning-enhancing methods. We estimate that with a 1.5B amateur and 65.2B expert, contrastive decoding increases the total number of FLOPs by $3. This compares favorably to self-consistency, which requires several extra full generation loops.
+We show in Figure ~\ref{fig:flops-figure} that CD is significantly more efficient than self-consistency.
+
+\footnotetext[1]{On manual examination, we find the set of correct answers provided by TriviaQA to be insufficient. Randomly sampling 100 supposedly incorrect answers generated by CD and standard decoding, we find roughly half are in fact correct (46/100 with CD and 49/100 without). A rough linear extrapolation gives us estimates for non-CD and CD scores of 85.8 and 83.7, respectively.}
+
+
+\subsection{Ablation Studies}
+\label{sec:ablation-studies}
+
+\textbf{$\alpha$-masking alone is not enough.}\paragraphspace 
+When sampling and performing self-consistency, $\alpha$-masking prevents the sampling of tokens the expert finds to be unlikely.
+It is natural to ask what portion of the benefit comes purely from $\alpha$-masking and not the contrastive objective itself.
+
+To answer this, we set $\beta = 0$ but $\alpha = 0.1$; that is, we mask out candidates based on the expert but do not apply the contrastive objective. When sampling one path, we expect $\alpha$-masking to improve over temperature sampling alone as it eliminates unlikely results and thus provides a closer approximation to greedy sampling. This holds, but as we increase the number of paths we find no benefit from $\alpha$-masking alone. This suggests that the contrastive objective, and not $\alpha$-masking, is the primary source of improved self-consistency results. See Figure ~\ref{fig:gsm8k-maskingonly} for results of this ablation.
+\begin{figure}[h!]
+\begin{floatrow}
+\ffigbox{%
+   \includegraphics[width=0.48\textwidth]{plots/gsm8k-maskingonly-ablation.png}
+}{%
+ \caption{GSM8K scores via temperature sampling and maj @ $k$ with various values of $k$. $\alpha$-masking alone does not yield significant improvement, while full CD does.}\label{fig:gsm8k-maskingonly}
+}
+
+\ffigbox{%
+   \includegraphics[width=0.48\textwidth]{plots/gsm8k-no-cot-ablation.png}
+}{%
+ \caption{Comparison of GSM8K scores with LLaMA-65B, both with and without chain-of-thought prompts. CD only helps when using CoT.}\label{fig:no-cot-ablation}
+}
+\end{floatrow}
+\end{figure}
+
+\textbf{CD requires chain-of-thought prompting to improve results.}\paragraphspace We next study whether contrastive decoding provides an advantage in the absence of chain-of-thought prompting.
+We remove the chains of thought from the GSM8K fewshot prompt, and find that as expected performance drops for both standard and contrastive decoding (Figure ~\ref{fig:no-cot-ablation}); further, without chains of thought contrastive decoding provides no consistent improvement. As with the MATH dataset, solving problems without explicit reasoning steps may be too challenging of a task for the expert model, and thus leave too small a gap between the expert and amateur to contrastively exploit.
+
+\textbf{CD can benefit non-LLaMA models.}\paragraphspace We conduct a short study to show that CD can benefit models outside of the LLaMA family. For this study, we choose the FLAN-T5 family as it is open-source, has a wide range of model sizes that share a single tokenizer, and obtains good performance on chain-of-thought reasoning tasks. We use FLAN-T5-XXL (11B) as the expert model and FLAN-T5-Small (80M) as amateur. We evaluate on GSM8K using the 8-shot random prompts from \citet{fu2023chainofthoughthub}; note that GSM8K is within the set of tasks that FLAN-T5 is finetuned on. CD provides a slight boost in performance, as seen in Table ~\ref{table:flan-t5-study}. We leave more extensive experiments on other families of models to future work.
+
+\begin{table}[h!]
+\begin{floatrow}
+\ffigbox{
+\includegraphics[width=0.4\textwidth]{plots/perf-vs-flops.png}
+}{
+\caption{FLOP increases, with increasing compute from using more samples for self-consistency. CD achieves similar or better performance with a smaller increase in FLOPs.}\label{fig:flops-figure}
+}
+\capbtabbox{
+\begin{tabular}{l l | c c} 
+ \hline
+ CD & $\beta$ & GSM8K \\
+ \hline
+ \xmark & 0 & 16.4 \\
+ \cmark & 0.5 & 17.1 \\
+ \cmark & 1.0 & \textbf{17.4} \\
+ \hline
+ 
+\end{tabular}
+}{%
+\caption{FLAN-T5 performance on GSM8K. CD provides a boost to performance.}\label{table:flan-t5-study}
+}
+\end{floatrow}
+\end{table}
+
+\textbf{Small-scale amateurs beat ``negative prompting."}\paragraphspace We experiment to determine if there is a more effective weak amateur model to use for contrastive decoding. We define a set of ``negative prompts" by sampling 7B model outputs on the fewshot prompts and collecting the incorrect responses. We use these responses as fewshot prompts to mimic the failure modes of the family of models. These negative prompts should harm the performance of models they are prompted with, and specifically bias results towards the error distribution of the 65B model.
+
+We find that contrasting with a negative prompt does not harm performance, but does not improve it as much as contrasting with a small amateur (see Table ~\ref{table:negative-prompting}).
+In an ablation study, we find that negative prompting does not harm performance that much; prompting a 65B model with incorrect fewshot examples on GSM8K gives a score of 41.3, which underperforms prompting with correct examples (51.2) but significantly beats non-chain-of-thought prompting (13.5). This supports \citet{wang2023understandingcot}, who find that even incorrect chain-of-thought rationales improve reasoning. A prompting strategy which better incapacitates the expert model might yield better results.
+
+\textbf{Mid-training checkpoints make for good amateurs.}\paragraphspace We experiment with checkpoints of a mid-training 7B-parameter LLaMA model taken 10\% and 23\% of the way through the full training run. Even while a fully-trained 7B amateur harms performance on GSM8K, we find that a partially-trained amateur improves performance. We do not perform extensive hyperparameter sweeps here, instead reusing $\alpha=0.1$, $\beta=0.5$ as before. We do not pursue partially-trained amateurs for our main results as results may vary based on the order of training data, but this result allows us to interpret contrastive decoding as a first-order optimization step over the output of a model, highlighting the high-level behaviors that it learns later on in the course of training. See Table ~\ref{table:partially-trained} for full results. 
+
+\begin{table}[h!]
+\begin{floatrow}
+
+\ttabbox{
+\begin{tabular}{c | c c c c}
+Expert & Greedy & NP & CD & CD + NP \\
+\hline
+7B & 10.7 & 11.4 & \textbf{14.3} & 12.7 \\
+\hline
+13B & 17.4 & 17.5 & \textbf{22.7} & 20.7 \\
+\hline
+30B & 35.3 & 36.9 & \textbf{43.1} & 42.9 \\
+\hline
+65B & 51.0 & 52.0 & \textbf{56.8} & 54.7 \\
+\end{tabular}}
+{
+\caption{On GSM8K, negative prompting outperforms greedy decoding but weakens CD.}\label{table:negative-prompting}
+}
+\ttabbox{\begin{tabular}{c | c | c}
+Amateur & Amateur Tokens & GSM8K \\
+\hline
+7B & 130B & \textbf{57.0} \\
+\hline
+7B & 300B & 56.8 \\
+\hline
+7B & 1.3T & 49.9
+\end{tabular}}{
+\caption{Early-training checkpoints can be good amateurs, even when late-stage checkpoints harm performance.}\label{table:partially-trained}
+}
+\end{floatrow}
+\end{table}
+
+
+\section{Related Work}
+
+
+\textbf{Steering methods for reasoning.}\paragraphspace Other works more explicitly model the error distribution of reasoning steps and use this to steer decoding. For example GRACE \citep{khalifa2023discriminatorguided} uses a contrastive loss to train an external step-level discriminator, which it then uses to select between candidate steps sampled from a base model. Using the interpretation of contrastive decoding as mutual distinguishability between amateur and expert, we see that our method is close to FUDGE \citep{yang2021fudge} where the binary predictor is an estimate of the probability that the generated token has come from the expert rather than the amateur.
+
+\textbf{Prompting Methods for Reasoning.}\paragraphspace There are many recent prompting methods to improve language model reasoning; see \citet{qiao2023promptingsurvey} for a survey.
+We perform our experiments with chain-of-thought prompting \citep{wei2023chainofthought}.
+
+\textbf{Sampling methods}\paragraphspace
+Several decoding methods exist to improve the quality of generations from large language models. For open-ended generation, truncated sampling schemes like top-$k$ sampling \citep{fan2018hierarchical}, nucleus sampling \citep{holtzman2020nucleus} and typical sampling \citep{meister2023typical} have been shown to reduce repetition in comparison to greedy decoding and beam search while producing more coherent generations than standard temperature sampling.
+However, sampling can still introduce errors into logical chains, and so greedy decoding is used to more effectively solve reasoning tasks. \citep{wei2023chainofthought,anil2023palm2}
+
+\textbf{Contrastive Generation Methods.}\paragraphspace
+Our formulation's objective can be interpreted as a special case of DExperts \citep{liu2021dexperts}, using the larger model as both an expert and base LM prior. 
+\citet{yona2023cid} identify model biases with Contrastive Input Decoding, a contrastive-decoding-style technique similar to negative prompting that operates on perturbed text inputs. 
+
+Concurrently to our work, \citet{chuang2023dola} propose DoLA, which improves factuality and reasoning through contrastive decoding between the predictions of later layers and earlier layers in a language model. We study a wider array of reasoning tasks and demonstrate that a 7B amateur is too large, finding greater gains in reasoning just by scaling down the amateur to 1.5B parameters.
+
+Our paper differentiates itself from \citet{li2022contrastive}, which initially proposed Contrastive Decoding, in several ways: by testing on standard reasoning benchmarks, by our exploration of $\beta$ as a hyperparameter, by ablations with various types of amateurs, and by a careful analysis of the combination of Contrastive Decoding with chain-of-thought prompting and self-consistency.
+
+
+
+\section{Limitations}
+
+
+Our investigation is also limited mainly to the LLaMA family of models. While the method continues to provide benefit to larger LLaMA models, further work is required to definitively establish the effect of contrastive decoding on larger, tuned models.
+
+
+
+\section{Conclusion}
+
+
+Our study shows that contrastive decoding can improve chain-of-thought reasoning in large language models. While challenges like factual recall remain, this strengthens the case for contrastive decoding as a simple, general-purpose method to elicit more desirable behavior from large language models.
+
+\subsection*{Reproducibility Statement}
+
+The training process and model architecture for the 1.5B-parameter LLaMA model used as the amateur in several results is publicly available, but the weights are not, which limits public reproducibility of results relying on that model. The results on FLAN-T5, as well as the negative-prompting study and examination of 7B-LLaMA as an amateur, are all built on entirely open-source models and data.
+
+
+
+
+

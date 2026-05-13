@@ -1,0 +1,506 @@
+\title{Improved Localized Machine Unlearning Through the Lens of Memorization}
+
+\begin{abstract}
+Machine unlearning refers to removing the influence of a specified subset of training data from a machine learning model, efficiently, after it has already been trained.
+This is important for key applications, including making the model more accurate by removing outdated, mislabeled, or poisoned data.
+In this work, we study localized unlearning, where the unlearning algorithm operates on a (small) identified subset of parameters.
+Drawing inspiration from the memorization literature, we propose an improved localization strategy that yields strong results when paired with existing unlearning algorithms. We also propose a new unlearning algorithm, Deletion by Example Localization (DEL), that resets the parameters deemed-to-be most critical according to our localization strategy, and then finetunes them. Our extensive experiments on different datasets, forget sets and metrics reveal that DEL sets a new state-of-the-art for unlearning metrics, against both localized and full-parameter methods, while modifying a small subset of parameters, and outperforms the state-of-the-art localized unlearning in terms of test accuracy too.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Machine unlearning, coined by \citet{cao2015towards}, is the problem of removing from a trained model (the influence of) a subset of its original training dataset. While unlearning is a young area of research, it has recently attracted a lot of attention \citep{triantafillou2024we}. 
+Example applications of unlearning include keeping models up-to-date or improving their quality by deleting training data that is identified post-training as being outdated, mislabeled or poisoned.
+
+Unlearning is a challenging problem in deep neural networks since they are highly non-convex, preventing us from easily quantifying the influence of different training examples on the trained weights. As a straightforward solution to unlearning a given ``forget set'', one can simply retrain the model from scratch on an adjusted training dataset that excludes that set. This approach implements \textit{exact unlearning}, guaranteeing that the resulting model has no influence from the forget set. However, this approach can be prohibitively computationally expensive. Instead, a burgeoning area of research has emerged that designs methods to post-process the trained model to attempt to \textit{approximately} erase the influence of the forget set, \textit{efficiently}. This post-processing introduces a challenging balancing act, as imperfect attempts at removing some training examples after-the-fact may accidentally damage the model and overly reduce its utility (e.g. accuracy on the remainder of the training data or generalization ability). Therefore, designing successful approximate unlearning methods involves navigating trade-offs between i) forgetting as well as possible, ii) utility, and iii) efficiency. 
+
+We hypothesize that \textit{localized unlearning}, where the unlearning algorithm operates on only a (small) subset of the parameters, is a promising avenue for striking a good balance in the above trade-offs. Specifically, modifying a (appropriately chosen) small fraction of the weights may be intuitively less likely to overly damage the network's utility (e.g.\@ generalization capabilities) and more likely to be efficient, since fewer parameters are subject to modification. However, the success of such a localized approach hinges on the ability to identify the right subset of parameters to perform unlearning on. In this work, we take a deep dive into different localization strategies, drawing inspiration specifically from hypotheses formulated about \textit{where} in the network training data is ``memorized'' \footnote{We intend here a very restricted definition of “memorization” in the context of classification models, which do not provide generative outputs. In this context, memorization relates to a data element contributing to the model's ability to accurately label input data.  Such models do not "contain" bit-wise or code-wise copies of their training data.}.
+
+Indeed, a closely-related research community has been studying \textit{memorization} in neural networks. Informally, a training example is memorized by a model if that model's predictions on that example would have been different had the example not been included in the training set \citep{feldman2020does,pruthi2020estimating}. As we discuss later, this notion is closely tied to unlearning. 
+In this work, we investigate whether hypotheses for where memorization happens give rise to improved localized unlearning, through informing which parts of the network we should act on in order to unlearn a given set of examples.
+Our contributions can be summarized as follows:
+\begin{itemize}
+    \item We leverage hypotheses for where memorization occurs to derive strategies that pinpoint a minimal set of parameters that the unlearning algorithm should act on; and we investigate their strengths and weaknesses. We find that data-agnostic strategies are a poor choice: they either achieve good unlearning performance at the expense of utility, or the other way around, but not both. We aim to improve on this via data-dependent approaches that target a small fraction of the parameters chosen based on the particular forget set.
+    \item Our insights from a thorough investigation led us to propose a practical localization strategy inspired by the memorization localization algorithm of \citet{maini2023can} that is more efficient than that algorithm and, when paired with various unlearning algorithms from the literature, outperforms prior work in terms of unlearning and utility metrics. 
+    \item We propose a new localized unlearning algorithm, Deletion by Example Localization (DEL), by pairing our localization strategy with the simple approach of resetting the deemed-to-be critical parameters and then finetuning the newly reinitialized parameters.
+
+    
+
+    \item \ourmethod achieves state-of-the-art results on three datasets / architectures (CIFAR-10 with ResNet-18, SVHN with ViT, and ImageNet-100 with ResNet-50), different types of forget sets (IID and non-IID variations), for two different unlearning metrics, against both localized and full-parameter unlearning methods. At the same time, DEL outperforms all previous localized unlearning methods in terms of utility metrics too. In addition, DEL is more robust to the parameter budget, outperforming the previous SOTA method SalUn across different budgets, and when paired with different unlearning algorithms.
+\end{itemize}
+
+
+\section{Background}
+
+
+We begin by introducing the notation we will use in this paper and defining key concepts.
+
+Let $\trainingset$ denote a training dataset and $\alg$ a (possibly randomized) training algorithm. Then, we denote by $\theta^o = \alg(\trainingset)$ the parameters obtained by training on $\trainingset$ using $\alg$. We will refer to $\theta^o$ as the ``original model'', i.e. the model before any unlearning takes place. We will study algorithms for ``unlearning'' a subset $\mathcal{S} \subset \trainingset$, referred to as the forget set. We refer to $\trainingset \setminus \mathcal{S}$, the remainder of the training data, as the retain set. While different variations are possible, we assume for simplicity that the unlearning algorithm $\unlearn$ has access to both the forget set and the retain set.
+
+\subsection{Unlearning}
+In this section, we define unlearning intuitively in a way that faithfully reflects the standard metrics used in the community that we also adopt for evaluation; see Section \ref{sec:unlearn_defn} for an alternative definition.
+
+\begin{definition}
+\label{defn:unlearning}
+\textbf{Unlearning.} For a given algorithm $\alg$ and dataset $\trainingset$, an algorithm $\unlearn$ is said to unlearn a forget set $\mathcal{S}$ if the unlearned model $\unlearn(\theta^o, \mathcal{S}, \trainingset \setminus \mathcal{S})$ and the ``retrained model'' $\alg(\trainingset \setminus \mathcal{S})$ have the same distribution of outputs on $\mathcal{S}$.
+\end{definition}
+
+The above compares the (distribution of) outputs of the models obtained by two different recipes. The first is $\alg(\trainingset \setminus \mathcal{S})$, retraining ``from scratch'' on only the retain set, which is prohibitively expensive but ideal from the standpoint of eliminating the influence of $\mathcal{S}$ on the model. The second is $\unlearn(\theta^o, \mathcal{S}, \trainingset \setminus \mathcal{S})$, applying $\unlearn$ to post-process the original model $\theta^o$ in order to unlearn $\mathcal{S}$.
+
+In the above, we refer to ``distributions'' of outputs since re-running either of the two recipes with a different random seed, that controls the initialization or the order of mini-batches, for example, would yield slightly different model weights, thus possibly slightly different outputs too.
+In our experiments considering classification tasks, the ``outputs'' are the vector of softmax probabilities, and different metrics consider different elements of that vector, e.g. the accuracy metric requires the ``argmax'' of that vector, whereas more sophisticated metrics consider the correct class probability (``confidence''). 
+
+We desire unlearning algorithms $\unlearn$ that cause these two recipes to yield similar outputs, with the second recipe being substantially more computationally-efficient compared to the first, in order to justify paying the cost of approximate unlearning rather than simply using the first recipe directly.
+\textbf{Unlearning evaluation.} Evaluating unlearning rigorously is an ongoing area of research; current state-of-the-art evaluation methods \citep{hayes2024inexact,triantafillou2024we} require training a large number of models, which is very expensive. 
+In this work, we leverage standard metrics in the research community, building on top of the evaluation procedure of \citep{fan2023salun} that considers two metrics for unlearning quality. 
+The first is the accuracy of the unlearned model on the forget set, with the goal of matching the accuracy of the retrained model on the forget set, in line with Definition \ref{defn:unlearning}. 
+The second is a Membership Inference Attack (MIA), that, given access to outputs (``predictions'') of the unlearned model, aims to detect whether an example was used in training. Moreover, in Section \ref{sec:mia_confidence_correctness}, we present evaluations using a stronger MIA that is based on the ``confidence'' of the unlearned model. 
+We adopt the $MIA_{\text{score}}$ of \citet{fan2023salun}\footnote{Unlike previous work \citet{fan2023salun}, we refer to this metric as the MIA score instead of MIA efficacy to avoid potential misunderstandings. This distinction clarifies that the metric measures the effectiveness of defending against an attack rather than the effectiveness of the attacker. } that measures the efficacy of defending such an attack as the portion of forget set examples that the attacker thinks were unseen. An ideal unlearning algorithm would have an $MIA_{\text{score}}$ matching that of the retrained-from-scratch model; see Section \ref{sec:metrics} for details.
+In addition, a comprehensive evaluation of unlearning also requires measuring utility, which we measure via test accuracy (and retain accuracy, in Section \ref{sec:retain-acc}), and efficiency.
+
+\textbf{Localized unlearning.} In this work, we focus on ``localized unlearning'' algorithms $\mathcal{U}$ that modify only a (preferably small) subset of the parameters of $\theta^o$, leaving the rest unchanged (see Figure \ref{fig:loc_unlearning}). We view localized unlearning as a promising direction as we hypothesize that it can yield better trade-offs between unlearning efficacy, utility and efficiency, 
+due to modifying fewer parameters.
+
+A localized unlearning algorithm has two components. The first is a \textit{localization strategy} $\mathcal{L}$ that produces a mask $m$ determining which subset of the parameters should be modified to carry out the unlearning request: $m = \mathcal{L}(\theta^o, \mathcal{S})$ where $m$ is a binary vector specifying whether each parameter will be updated. The second component is a \textit{unlearning strategy}. This, in principle, can be any unlearning algorithm that, in this case, will operate on only the subset of the parameters indexed by $m$. Overall, a localized unlearning algorithm is instantiated by selecting a particular $(\mathcal{L}, \mathcal{U})$ pair.
+
+\begin{figure}[t]
+\begin{center}
+\includegraphics[width=0.95\textwidth]{localized_unlearning.pdf}
+\end{center}
+\caption{\textbf{Localized unlearning} consists of two parts:  a \textit{localization strategy} that identifies a set of ``critical parameters'' (dashed line circles) and an \textit{unlearning algorithm} that aims to remove the influence of the forget set by modifying only the critical parameters (highlighted circles), keeping the rest unchanged. Ideally, the unlearned model should ``behave'' like the model retrained from scratch, i.e. the two should produce the same (distribution of) outputs; see Definition \ref{defn:unlearning}}
+\label{fig:loc_unlearning}
+\end{figure}
+
+\subsection{Memorization} \label{sec:mem}
+An intriguing phenomenon is that, despite models exhibiting strong generalization properties, they still tend to ``memorize'' some of their training data \citep{arpit2017closer,zhang2021understanding}. In fact, recent theories argue that some forms of memorization are in fact necessary for optimal generalization \citep{feldman2020does, brown2021memorization, attias2024information}. In the below, we first present a definition of memorization borrowed from \citep{feldman2020does}, and then discuss the connections with unlearning.
+
+\begin{definition}
+\label{defn:mem}
+\textbf{Label memorization.} Assume a dataset $\trainingset = \{ (x_i, y_i) \}_{i=1}^N$, where $x_i$ and $y_i$ denote the input and label for the $i$'th training example, and assume a training algorithm $\alg$ and a model $f(x; \theta)$ parameterized by $\theta$ mapping inputs to labels. Then, the \defn{memorization score} for an example $(x_i, y_i) \in \trainingset$ (with respect to $\trainingset$, $\alg$ and $f$) is
+\begin{equation}
+    \Pr_{\theta \sim \alg(\trainingset)}[f(x_i; \theta) = y_i]  \ - \Pr_{\theta \sim \alg(\trainingset \setminus (x_i, y_i))}[f(x_i; \theta) = y_i].
+\end{equation}
+\end{definition}
+Intuitively, an example is highly memorized by a model if the model can only predict its label correctly when that example is in the training set. This will be primarily the case for atypical, ambiguous or mislabeled examples that would not be otherwise correctly predicted \citep{feldman2020neural}.
+
+\textbf{Connections with unlearning.} Some forms of memorization and unlearning are intimately connected: at the extreme where an example isn't memorized at all, it can be thought of as being trivially ``unlearned'' according to some unlearning metrics of interest, because the model's predictions on that example aren't different from what they would have been had that example not been included in the training set (``retrain from scratch''). Empirically, considering varying degrees of memorization, \citet{zhao2024makes} showed that most approximate unlearning methods are more successful on forget sets which include examples that have lower memorization scores compared to those with higher memorization scores. Relatedly, \citet{jagielski2022measuring} study catastrophic forgetting during training; a phenomenon that can be characterized as reduced memorization of an example in later stages of training, that can be interpreted as a passive form of unlearning. They find that, when training on large datasets, examples that were only seen early in training may be less memorized, which they quantify via the failure rates of privacy attacks aiming to extract examples or infer whether they were used for training. \citet{toneva2018empirical} find that examples with noisy labels witness a larger number of ``forgetting events'' during training, defined as an event where an example that was previously correctly predicted becomes incorrectly predicted later in training. Based on these insights on the strong connection of memorization and unlearning, we ask: does knowledge (or assumptions) of \textit{where} in the network a forget set is memorized give rise to improved unlearning for that forget set?
+
+\textbf{Localizing memorization.} Investigating the above question is a challenging undertaking, as pinpointing where memorization occurs is in and of itself a research problem. \citet{baldock2021deep} define the ``prediction depth'' for an example to be the earliest layer in the network after which the example is correctly predicted. They find that mislabeled examples are only predicted correctly in the final few layers of the model, and conclude that ``early layers generalize while later layers memorize''. \citet{stephenson2021geometry} draw the same conclusion through a study of manifold complexity and shattering capability. However, \citet{maini2023can} found that the parameters that memorize specific examples are actually scattered throughout the network and not concentrated in any individual layer.
+
+
+
+\section{Related Work}
+
+
+\textbf{Unlearning.} \citet{cao2015towards} coined the term unlearning and proposed exact algorithms for statistical query learning. \citet{bourtoule2021machine,yan2022arcane} propose frameworks that support exact unlearning in deep networks more efficiently by considering architectures with many components, where one only needs to retrain the affected parts of the model for each unlearning request. However, in the worst case, efficiency can be as poor as in naive retraining and, furthermore, these specialized architectures may have lower accuracy compared to state-of-the-art ones. Instead, a plethora of approximate unlearning methods \citep{ginart2019making,guo2019certified,golatkar2020eternal,golatkar2020forgetting,thudi2022unrolling} were developed that operate on an already-trained model to remove the influence of the forget set. Simple commonly-used baselines include finetuning the model on only the retain set (``\textbf{Finetune}''), or on only the forget set using the negated gradient (``\textbf{NegGrad}''), or combining these two in a joint optimization ``\textbf{NegGrad+}'' \citep{kurmanji2024towards}, performing gradient descent on the retain set and ascent on the forget set, simultaneously. One could also apply a joint optimization using gradient descent on both the retain and forget sets, after having first randomly relabelled the examples in the forget set (``\textbf{Random Label}'') \citep{graves2021amnesiac,fan2023salun}. \textbf{SCRUB} \citep{kurmanji2024towards} builds on NegGrad+ by casting unlearning as a teacher-student problem and using distillation. \citet{liu2024model} show that sparsity aids unlearning and that adding an L1-penalty to the Finetune baseline improves its performance (``\textbf{L1-sparse}''). 
+One could also utilize influence function analysis \citep{koh2017understanding} to mitigate the impact of the forget data by estimating the importance of the model weights (``\textbf{IU}'') \citep{izzo2021approximate}.
+
+\textbf{Localized unlearning.} \citet{goel2022towards} propose baselines that perform unlearning on only the $k$ deepest (closest to the output) layers and either simply finetune them (``\textbf{CF-k}'') or reinitialize them and then finetune them (``\textbf{EU-k}''). 
+The contemporaneous work of \citet{foster2024fast} (``\textbf{SSD}'') uses the Fisher information matrix to identify parameters that are disproportionately important to the forget set and apply unlearning on those. \citet{fan2023salun} proposes Saliency Unlearning (``\textbf{SalUn}''), which selects a subset of critical parameters by considering the gradients of the forget set and applies unlearning (by default using Random Label) on the identified parameters. We will later compare this state-of-the-art method to other strategies inspired by the memorization literature, and propose a novel strategy that outperforms previous work. Related ideas have been proposed in the context of unlearning in LLMs \citep{hase2024does,guo2024robust}, though we note that the problem formulation of LLM unlearning as well as the architectures and algorithms used there are substantially different and out of the scope of this paper. We will later
+discuss how our findings relate to and differ from theirs
+(See Section \ref{sec:discussion}).
+
+
+
+\section{Deriving and investigating localized unlearning based on memorization hypotheses}
+
+In this section, we derive localization strategies from hypotheses in the memorization literature and investigate their performance in the context of localized unlearning compared to existing approaches. Based on the discussion in Section \ref{sec:mem}, we consider two hypotheses for where memorization occurs, and we then turn each one of them into a localization strategy $\mathcal{L}(\theta^o, \mathcal{S})$. The two hypotheses are: i) memorization happens in the ``deepest layers'', i.e. closest to the output, consistent with \citep{baldock2021deep,stephenson2021geometry}, and ii) memorization of an example is confined to a small set of channels, scattered across the network, whose location depends on the example \citep{maini2023can}.
+We compare the unlearning performance of four localization strategies:  i) \textbf{Deepest} and ii) \textbf{CritMem}, derived based on the above two hypotheses, iii) selecting the shallowest rather than deepest layers (``\textbf{Shallowest}''), as a control experiment, and iv) the localization strategy of SalUn \citep{fan2023salun} (``\textbf{SalLoc}'') that is not motivated through the lens of memorization but is regarded as state-of-the-art in the unlearning literature. Note that we reserve the name ``SalUn'' for the pairing of SalLoc with the Random Label unlearning algorithm, which is the choice that \citet{fan2023salun} found worked best (we mix-and-match localization strategies with unlearning algorithms in Section \ref{sec:our-unlearning}). 
+
+\textbf{Deepest} returns a mask that allows only the $k$ deepest (closest to output) layers to be updated during unlearning, based on the first hypothesis. If paired with an unlearning algorithm that resets the chosen parameters and then finetunes them, this corresponds to the EU-k method of \citep{goel2022towards}. 
+
+\textbf{CritMem} is based on the second hypothesis and implemented via the algorithm of \citet{maini2023can}. Given an example, it iteratively finds the deemed-to-be most critical channel, resets all its associated parameters and repeats, until the prediction on that example flips to an incorrect one. The criterion used to identify the next most critical channel at each iteration is obtained by multiplying the weights by their respective gradients on that example, and choosing the channel for which the (sum, over the channel parameters) of the magnitude of this quantity is the highest. We run this algorithm for each example in $\mathcal{S}$ independently, record the critical channels identified for each and then consider the union of those as the critical channels for $\mathcal{S}$. The mask is then set to allow to only modify the parameters involved in those critical channels. 
+
+\textbf{Shallowest} returns a mask that allows only the $k$ shallowest (closest to the input) layers to be updated during unlearning, as a control experiment for Deepest.
+
+\textbf{SalLoc} sorts all parameters based on the magnitude of gradients over $\mathcal{S}$, in descending order and then, given a threshold $\alpha$ for the percentage of the parameters that might be updated during unlearning, it returns a mask that turns on only the first $\alpha$ percent of elements of that sorted list \citep{fan2023salun}.
+
+The above strategies differ along several axes. Firstly, Deepest and Shallowest are data-agnostic in that they do not use $\mathcal{S}$ to inform which parameters to choose, whereas CritMem and SalLoc are data-dependent and tailor the mask to $\mathcal{S}$. Secondly, there are differences in granularity: Deepest and Shallowest consider a layer as the unit (i.e. each layer is either included or excluded as a whole). CritMem's unit is a channel while SalLoc has the finest granularity, considering each individual parameter as a unit. Finally, out of the data-dependent ones, CritMem is substantially more computationally expensive than SalLoc. This is because \textit{for each} example in $\mathcal{S}$, it applies an \textit{iterative} approach that resets the next most critical channel, one at a time, until the termination criterion. On the other hand, SalLoc chooses the critical parameters in ``one-shot'' rather than iteratively and, additionally, operates on \textit{batches} of $\mathcal{S}$. Both of these aspects make it significantly more efficient.
+
+\textbf{Experimental setup} We conduct this investigation on CIFAR-10 using ResNet-18, and a forget set comprised of $10\%$ of the training samples, randomly selected from two classes (2 and 5). We use a simple unlearning algorithm that resets the identified critical parameters (obtained based on each localization strategy), and then finetunes only the identified critical parameters and the classifier layer using only the retain set (``\textbf{Reset + Finetune}''). Since each of the above localization strategies chooses a different set and number of parameters, to ensure fairness, we compare them to one another for different ``budgets'' of how many parameters are updated. For example, for Deepest, we select the $k$ deepest layers (for several different values of $k$), and we compute the number of parameters that are selected each time to obtain the ``budget''. 
+We measure unlearning performance in terms of three metrics: Forget accuracy and MIA score for unlearning quality, and test accuracy for utility.
+For all three metrics, the ideal behaviour is to match the performance of the retrain-from-scratch ``oracle'' on that metric. We include all details in Sections \ref{sec:experiment_setup} including hyperparameters but we note that, throughout the paper, we tune hyperparameters separately for each budget and localization strategy.
+
+\begin{figure}[h]
+    \centering
+    \begin{minipage}{0.7\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{scatter_legend.pdf} 
+    \end{minipage}
+    \begin{minipage}{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{scatter_forget.pdf} 
+        \label{fig:forget-alpha}
+    \end{minipage}
+    \begin{minipage}{0.328\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{scatter_mia.pdf}
+        \label{fig:mia-alpha}
+    \end{minipage}
+    \begin{minipage}{0.328\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{scatter_test.pdf} 
+        \label{fig:test-alpha}
+    \end{minipage}
+    \caption{Comparison of localization strategies  combined with the Reset + Finetune (RFT) unlearning algorithm. 
+    An ideal unlearning algorithm would match the ``oracle'' (``retrain-from-scratch'') on each metric, with the smallest possible parameter budget, for increased efficiency.
+    The strategy we will propose later (``ours'') yields the best trade-off, with near-perfect unlearning for several budgets.
+    }
+    \label{fig:loc-vs-alpha}
+\end{figure}
+
+\textbf{Findings} From Figure \ref{fig:loc-vs-alpha} we observe the following. First, when updating (almost) all parameters, \textbf{Deepest} achieves strong results on all metrics, which is expected since, at that end of the spectrum, Deepest paired with Reset + Finetune amounts to retraining (almost) the entire model. However, for smaller budgets, it performs very poorly in unlearning metrics as resetting only deeper layers does not cause a sufficient accuracy drop on the forget set (though it at least preserves test accuracy). On the other hand, \textbf{Shallowest} is much more effective at unlearning compared to Deepest, and in fact a strong baseline, suggesting that research should consider this baseline alongside EU-k of \citet{goel2022towards}. This is perhaps due to resetting earlier layers causing larger ``disruption'' to the information flow in the network. Indeed, contrary to Deepest, this strategy leads to poor test accuracy for several budgets, which is the main downside of this approach. \textbf{CritMem} is unable to reach good unlearning quality in this setup. Note that we can only evaluate CritMem for small budgets, as the algorithm of \citet{maini2023can} terminates once enough parameters are reset such that the prediction is flipped to an incorrect one (so the max value of $\alpha$ we can consider is capped). We find that resetting only those parameters is insufficient for achieving good unlearning results when paired with this unlearning algorithm. \textbf{SalLoc} has a similar trend to Shallowest in terms of unlearning metrics but leads to higher test accuracy. It performs similarly to CritMem in the range where we can compare them.
+Overall, we observe that data-agnostic localization strategies yield poor performance: each of Deepest and Shallowest can either achieve good forget accuracy / MIA score at the expense of utility, or the other way around, but not both. We hypothesize that a data-dependent approach with a finer-grained control of \textit{which} earlier and deeper parameters to update in a way that is informed by the forget set, would yield better trade-offs, due to causing minimal and targeted ``disruption'' that preserves utility. We have considered two such data-dependent strategies so far, CritMem and SalLoc. CritMem, directly adapted from the memorization literature, results in updating only a small number of parameters (based on its termination criterion) and is unable to achieve good forgetting quality within that budget in the context of localized unlearning, while it is also computationally expensive, as discussed above, due to its iterative nature. SalLoc, on the other hand, is more efficient and improves a little over Shallowest in terms of causing less of a test accuracy drop.
+
+
+
+\section{Improved localized unlearning}
+
+\label{sec:our-unlearning}
+In this section, building on our previous observations, we take a deeper dive into key design choices of CritMem and SalLoc, formulate hypotheses about their appropriateness and empirically investigate the axes in which they differ, leading to an improved localized unlearning approach.
+
+\subsection{Examining key building blocks of localization algorithms}
+As discussed in Section \ref{sec:loc_unlearn_mem}, SalLoc has the finest granularity, making a decision for whether or not to select individual parameters, whereas CritMem operates on the level of output channels, thus deciding whether the mask should include or exclude all parameters associated with a channel, as a unit. We hypothesize that, because attempts to locate where memorization occurs are based on heuristics and are imperfect, the easier task of making coarser-grained decisions, as in CritMem, is a more appropriate choice compared to the harder, and thus more error-prone, task of making parameter-level assessments of criticality. Specifically, marking all parameters of a channel as critical, if a subset of them are deemed to be critical, can be seen as useful ``smoothing'', at the potential expense of leading to resetting some more parameters than may have been strictly necessary.
+
+Further, we also hypothesize that CritMem's criticality criterion that uses weighted gradients rather than simply considering the magnitude of gradients themselves (SalLoc) is also more appropriate: it can be seen as a more conservative choice, which is more suitable in light of the heuristic nature of determining criticality. Intuitively, a weight with a small value can be seen as less critical ``overall'' (for the training set) which is an important signal to consider in addition the gradients on specific forget set examples, as it may also serve as a useful ``regularizer'' when making heuristic assessments.
+\begin{wraptable}{r}{5.5cm}
+    \caption{Combining different granularity and criticality criteria in a non-iterative localization algorithm. 
+    The top-left cell corresponds to the SalLoc, while the bottom-right cell (shaded) represent our proposed approach.}
+    \label{vtab:mix_match_abl_small}
+    \resizebox{0.4\textwidth}{!}{
+    \begin{tabular}{cccc}
+    \\\toprule  
+     & & Grads & Weighted grads \\\midrule
+    \multirow{ 3}{*}{Parameter} & $\Delta_{forget}$ & $-7.58_{\pm8e-3}$ & $15.07_{\pm0.01}$ \\
+                                & $\Delta_{test}$ & $3.63_{\pm4e-3}$ & $11.55_{\pm6e-3}$ \\
+                                & $\Delta_{MIA}$ & $8.74_{\pm1.10}$ & $-16.32_{\pm1.39}$ \\\midrule
+    \multirow{ 3}{*}{Channel}   & $\Delta_{forget}$ & $-12.33_{\pm8e-3}$ & \cellcolor{lightgray}$1.58_{\pm0.01}$ \\
+                                & $\Delta_{test}$ & 1.55 $_{\pm2e-3}$ & \cellcolor{lightgray}$4.41_{\pm2e-3}$ \\
+                        & $\Delta_{MIA}$ & $15.53_{\pm1.10}$ & \cellcolor{lightgray}$3.33_{\pm1.28}$ \\
+    \end{tabular}
+
+\end{wraptable}
+
+        
+Based on the above, we hypothesize that CritMem's granularity level and its criticality criterion are more suitable than SalLoc's for localized unlearning. However, CritMem's iterative nature makes it computationally expensive. Recall that, for each given example, it determines the next most critical channel \textit{one at a time}, resets it and repeats to find the next most critical one, until the label of the example flips. To instead obtain a more efficient localization strategy, we investigate incorporating CritMem's granularity and its criticality criterion into an algorithm that, akin to SalLoc, estimates the critical parameters for each batch in $\mathcal{S}$ in ``one-shot'', leading to increased efficiency both due to batching over examples in $\mathcal{S}$ as well as due to determining criticality non-iteratively for each batch. 
+
+In Table \ref{vtab:mix_match_abl_small}, we investigate the effect of the granularity and criticality criteria mentioned above, in the context of batched and non-iterative localization algorithms, on the same experimental setup (dataset, forget set, etc) as in Section \ref{sec:loc_unlearn_mem}. We find that indeed the best choice is given by using the channel-wise granularity and weighted gradients. We therefore build on these decisions to devise our localization strategy in the next section. 
+
+\subsection{Introducing our localization strategy} Given a forget set $\mathcal{S}$ and an original model $\theta^o$ with $p$ parameters, for $j\in\{1, \dots, p\}$, let ${\theta^o_j}$ and $g_{j}(\theta^o, \mathcal{S})$ represent the weight and gradient values on the forget set, respectively. We define the \textit{criticality score} $s_j$ of the $j^{th}$ parameter as the magnitude of the weighted gradient over the forget set: $s_{j}= |\theta^o_j \cdot g_{j}(\theta^o, \mathcal{S})|$; this is the same criticality criterion used in CritMem, whereas SalLoc simply considers the magnitude of the gradient for each parameter $|g_{j}(\theta^o, \mathcal{S})|$ for assessing its criticality.
+
+As discussed above, we choose to determine criticality in a coarser-grained way compared to individual parameters. To that end, for an output ``channel'' $o_i$ (or ``neuron'' more broadly, encompassing non-convolutional architectures), we describe how to obtain its criticality score $c_{o_i}$ based on the criticality score of its constituent parameters. Let $\tilde{s}_i$ be a list of the criticality scores for the parameters belonging to neuron $o_i$, sorted in descending order. We set the neuron criticality $c_{o_i}$ to be the average of the top $h$ scores of its associated parameters: 
+$c_{o_i}= \frac{1}{h} \Sigma_{j=1}^{h} \tilde{s}_i[j]$. 
+
+Finally, having obtained the neuron criticality scores, we put together the mask $m_{\alpha}$ for parameter budget $\alpha$, represented as a binary vector of size $p$, where a $1$ indicates the corresponding parameter will be updated by the unlearning algorithm, whereas an entry of $0$ indicates it will be kept unchanged. To this end, we form another sorted list $\tilde{c}$, that sorts the neurons in descending order of their criticality scores. We then pick the largest number of neurons from the start of the sorted list, such that the total selected parameters are within the budget. Then, we assign a $1$ to all entries of $m_{\alpha}$ for parameters belonging to the chosen critical neurons and $0$ to the rest. We provide pseudocode in Section \ref{sec:pseudocode}.
+
+Our localization strategy can, in principle, be paired with any unlearning algorithm, but we find we obtain strongest results by pairing it with the simple Reset + Finetune (RFT) algorithm. We refer to the combination of our localization strategy with RFT as \textbf{Deletion by Example Localization (DEL)}. 
+
+
+
+\section{Comparison to state-of-the-art and analyses}
+
+
+In this section, we carry out comprehensive experiments on three datasets and architectures (CIFAR-10 with ResNet-18,  SVHN with ViT and ImageNet-100 with ResNet-50; see Section \ref{sec:experiment_setup} for details), to examine the performance of our localization strategy paired with various unlearning algorithms, on different types of forget sets, as well as various analyses to understand the factors behind the success of localized unlearning methods.
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.7\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{barplot_legend.pdf} 
+    \end{minipage}
+    \par
+    \begin{minipage}{0.33\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{forget_bar.pdf} 
+        \label{fig:forget-bar}
+    \end{minipage}
+    \begin{minipage}{0.33\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{mia_bar.pdf}
+        \label{fig:mia-bar}
+    \end{minipage}
+    \begin{minipage}{0.328\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{test_bar.pdf} 
+        \label{fig:test-bar}
+    \end{minipage}
+    \par
+    \caption{Pairing localization strategies / budgets (e.g. Ours-30\% denotes applying our localization strategy to select 30\% of parameters) with three unlearning algorithms, on CIFAR-10 / ResNet (the ideal behaviour is to match the ``Oracle''). 
+    \textbf{Our method has the best unlearning efficacy, paired with \textit{any} unlearning algorithm, and its performance degrades much less than SalLoc's when the budget reduces from 30\% to 20\%; meanwhile, it has no worse (or better) test accuracy}.
+    \label{fig:local-unlearn-barplot}
+}
+\end{figure}
+
+\textbf{Pairing with different unlearning algorithms.}  In Figure \ref{fig:local-unlearn-barplot}, we compare different localization strategies, for different values of the parameter budget, paired with three different unlearning algorithms. We observe that i) our method pairs well with different unlearning algorithms, ii) in terms of forget accuracy and MIA score, our method yields the best results, coming very close to the ideal ``oracle'' reference point by updating only 30\% of the network's parameters, iii) at the same time, test accuracy is no worse (and sometimes better) using our method. 
+\textbf{\ourmethod is robust to the parameter budget.} Figure \ref{fig:loc-vs-alpha} shows that \ourmethod is more robust to the budget compared to all other strategies considered, yielding strong results across several budgets. Figure \ref{fig:local-unlearn-barplot} corroborates this finding in the context of different unlearning algorithms too, showing that our localization method experiences much lower performance degradation compared to SalLoc, when the budget is reduced: we significantly outperform SalLoc when the budget is 20\%.
+
+\begin{wrapfigure}{r}{0.41\textwidth} 
+    \centering
+        \includegraphics[width=0.45\textwidth]{radar_plot.pdf} 
+    \caption{\textbf{On SVHN with ViT}, \textbf{\ourmethod outperforms state-of-the-art full-parameter and localized unlearning in terms of unlearning quality}. L1-sparse has better test accuracy than \ourmethod but has poor unlearning performance. These results are for the non-IID forget set, and $\alpha = 30 \%$ for localized methods; see Table \ref{tab:sota_comparisons_svhn_vit} for full results.
+    \label{fig:radar_plot}
+}
+\end{wrapfigure}
+
+\begin{table}[h]
+    \caption{\ourmethod outperforms the state-of-the-art localized and full-parameter unlearning, on CIFAR-10/ResNet-18 on two forget sets: the \textbf{Non-IID} forget set consists of $10\%$ of the training samples, randomly selected from two classes, whereas the \textbf{IID} one consists of $10\%$ of the training samples, randomly selected from all classes. We use three metrics, each represented as $\Delta$, obtained by subtracting the unlearning algorithm's value for a given metric from the Oracle's value for that metric): forget accuracy ($\Delta_{\text{forget}}$ ), MIA score ($\Delta_{\text{MIA}}$) and test accuracy ($\Delta_{\text{test}}$). 
+    Note that SalLoc-RL corresponds to ``SalUn'' which employs Random Label, regarded as state-of-the-art.
+    }
+    \label{tab:sota_comparisons}
+     \resizebox{0.78\textwidth}{!}{
+    \begin{tabularx}{\textwidth}{@{}W|Z|ccc|ccc@{}}
+        \multicolumn{2}{c|}{} & \multicolumn{3}{c}{\textbf{Non-IID Forget Set}} & \multicolumn{3}{c}{\textbf{IID Forget Set}} \\ 
+        
+        \cmidrule(lr){1-8}
+        \multicolumn{2}{c|}{ } & \textbf{$\Delta_{\text{forget}}$} & \textbf{$\Delta_{\text{MIA}}$} & \textbf{$\Delta_{\text{test}}$} & \textbf{$\Delta_{\text{forget}}$} & \textbf{$\Delta_{\text{MIA}}$} & \textbf{$\Delta_{\text{test}}$} \\ 
+        \cmidrule(lr){1-8}
+
+        \multirow{5}{*}{\begin{sideways}\textbf{Full-parameter }\end{sideways}
+        \begin{sideways}\textbf{Unlearning}\end{sideways}
+        }
+        & Retraining(Oracle) & $0.00_{\pm0.00}$ & $0.00_{\pm0.00}$ & $0.00_{\pm0.00}$
+        & $0.00_{\pm0.00}$ & $0.00_{\pm0.00}$ & $0.00_{\pm0.00}$\\ 
+        \cmidrule(lr){2-8}
+        
+        & Fine-tuning & $-5.60_{\pm0.89}$ & $6.07_{\pm1.10}$ & $-1.61_{\pm0.34}$  
+        &  $-1.98_{\pm1.10}$ & $1.96_{\pm1.11}$ & $-2.00_{\pm0.72}$\\
+        
+        & NegGrad+  & $-4.44_{\pm0.95}$ & $4.92_{\pm1.14}$ & $4.61_{\pm0.22}$
+        & $1.87_{\pm1.31}$ & $1.89_{\pm1.30}$ & $4.21_{\pm0.67}$ \\ 
+
+        & NegGrad & $-3.30_{\pm0.72}$ & $3.76_{\pm0.94}$ & $4.60_{\pm0.18}$ 
+        & $-15.04_{\pm0.40}$ & $15.39_{\pm0.39}$ & $-1.11_{\pm0.51}$\\ 
+        & Random Label & $-1.64_{\pm0.98}$ & $2.07_{\pm1.15}$ & $4.33_{\pm0.19}$
+        & $1.69_{\pm0.46}$ & $1.69_{\pm0.47}$ & $4.93_{\pm0.47}$ \\ 
+
+        & L1-sparse & $-1.50_{\pm0.82}$ & $-1.01_{\pm1.03}$ & $2.07_{\pm0.51}$ 
+        & $1.80_{\pm1.20}$ & $-1.80_{\pm1.08}$ & $0.62_{\pm0.67}$ \\ 
+        
+        & IU\footnotemark &
+        $-5.00_{\pm0.88}$ &  $5.04_{\pm0.91}$ &  $4.18_{\pm0.19}$ & $-2.20_{\pm0.39}$ & $2.19_{\pm0.38}$ &  $10.94_{\pm0.43}$\\ [-1pt]
+
+        \cmidrule(lr){1-8}
+
+        \multirow{6}{*}{\begin{sideways}\textbf{Localized}\end{sideways}
+        \begin{sideways}\textbf{Unlearning}\end{sideways}} 
+        
+        & SSD & $-11.16_{\pm6.28}$ & $11.18_{\pm6.29}$ & $2.68_{\pm1.18}$ &  $1.60_{\pm1.99}$ & $1.59_{\pm1.98}$ & $11.58_{\pm1.03}$\\[-5pt]
+        
+        & CritMem-RL ($\alpha=16\%$) & $-1.82_{\pm1.19}$ & $1.87_{\pm1.21}$ & $4.86_{\pm0.19}$
+        &  $-2.03_{\pm0.45}$ & $2.05_{\pm0.45}$ & $4.36_{\pm0.37}$\\
+
+        & Shallowest-RL ($\alpha=25\%$) & $1.29_{\pm1.62}$ & $-0.80_{\pm1.74}$ & $5.88_{\pm0.18}$ 
+        & $3.41_{\pm0.77}$ & $-3.43_{\pm0.78}$ & $6.43_{\pm0.52}$\\
+
+        & SalLoc-RL ($\alpha=30\%$) & $-2.8_{\pm1.45}$ & $3.30_{\pm1.54}$ & $4.63_{\pm0.27}$
+        &  $-3.81_{\pm0.40}$ & $3.80_{\pm0.39}$ & $4.29_{\pm0.45}$ \\
+
+        \cmidrule{2-8}
+        & \cellcolor{lightgray}\textbf{DEL ($\alpha=30\%$)} & \cellcolor{lightgray}$0.43_{\pm1.06}$ & \cellcolor{lightgray}$0.64_{\pm1.23}$ & \cellcolor{lightgray}$2.23_{\pm0.25}$ 
+        & \cellcolor{lightgray}$0.97_{\pm0.42}$ & \cellcolor{lightgray}$-0.97_{\pm0.40}$ & \cellcolor{lightgray}$1.87_{\pm0.49}$\\
+        
+        \cmidrule(lr){1-8}
+    \end{tabularx}
+    }
+\end{table}
+
+\textbf{\ourmethod outperforms the state-of-the-art for all datasets and forget set types.} We compare \ourmethod to state-of-the-art methods for unlearning, including ones that update all parameters on two different datasets. On CIFAR-10, we also consider two forget sets: an \textbf{IID forget set} comprised of 10\% of randomly-chosen training samples, and a \textbf{non-IID forget set} of the same size but choosing samples belonging to a subset of the classes (see details in Section \ref{sec:experiment_setup}).
+We present the results in Table \ref{tab:sota_comparisons} and Figure \ref{fig:radar_plot}, Table \ref{tab:sota_comparisons_svhn_vit} and Table \ref{tab:sota_comparisons_imagenet100_resnet50}. For each localized unlearning strategy and on each dataset, we report results using its best identified parameter budget and its best-paired unlearning algorithm for that setting. We observe that, generally, localized unlearning methods outperform their full-parameter counterparts in terms of unlearning metrics ($\Delta_{forget}$ and $\Delta_{MIA}$); on the former ($\Delta_{forget}$) because full-parameter methods end up causing the forget set accuracy of unlearning to become significantly lower than the ideal reference point, yielding a negative $\Delta$ (associated with poor MIA score, too). We hypothesize that localized unlearning, due to making a more targeted update, can be more easily tuned to reach the desired reference point for the forget accuracy rather than ``overshooting'' it, amending the above issue. On the other hand, full-parameter methods lead to (marginally) better test accuracy in some cases, especially for the IID forget set. Out of the considered localized methods, that \ourmethod outperforms the state-of-the-art on all metrics and across forget sets.
+
+\begin{table}[h]
+    \caption{Comparison to state-of-the-art, including algorithms that update all parameters (``\textbf{Full-Parameter}'') on  \textbf{Non-IID} and \textbf{IID} forget set when training a \textbf{ViT} model on \textbf{SVHN} dataset.
+    }
+    \label{tab:sota_comparisons_svhn_vit}
+     \resizebox{0.78\textwidth}{!}{
+    \begin{tabularx}{\textwidth}{@{}W|Z|ccc|ccc@{}}
+        \multicolumn{2}{c|}{} & \multicolumn{3}{c}{\textbf{Non-IID Forget Set}} & \multicolumn{3}{c}{\textbf{IID Forget Set}} \\ 
+
+        \cmidrule(lr){1-8}
+        \multicolumn{2}{c|}{ } & \textbf{$\Delta_{forget}$} & \textbf{$\Delta_{MIA}$} & \textbf{$\Delta_{test}$} & \textbf{$\Delta_{forget}$} & \textbf{$\Delta_{MIA}$} & \textbf{$\Delta_{test}$} \\ 
+        \cmidrule(lr){1-8}
+
+        \multirow{5}{*}{\begin{sideways}\textbf{Full-parameter }\end{sideways}
+        \begin{sideways}\textbf{Unlearning}\end{sideways}
+        }
+        & Retraining(Oracle) & $0.00_{\pm0.00}$ & $0.00_{\pm0.00}$ & $0.00_{\pm0.00}$
+        & $0.00_{\pm0.00}$ & $0.00_{\pm0.00}$ & $0.00_{\pm0.00}$\\ 
+        \cmidrule(lr){2-8}
+        
+        & Fine-tuning  & $-11.27_{\pm0.66}$ & $11.22_{\pm0.65}$ & $-0.76_{\pm0.20}$
+        & $-2.73_{\pm0.49}$ & $-1.05_{\pm0.42}$ & $-0.91_{\pm0.22}$\\ 
+        
+        & NegGrad+   & $-3.45_{\pm1.65}$ & $3.38_{\pm1.67}$ & $2.32_{\pm0.27}$
+        & $3.22_{\pm3.58}$ & $-6.99_{\pm3.53}$ & $3.75_{\pm3.53}$\\ 
+
+        & NegGrad  & $-19.75_{\pm0.74}$ & $19.70_{\pm0.53}$ & $0.10_{\pm0.21}$
+        & $-11.78_{\pm0.36}$ & $8.00_{\pm0.22}$ & $0.58_{\pm0.21}$\\ 
+        & Random Label  & $-5.20_{\pm1.78}$ & $5.13_{\pm1.81}$ & $3.22_{\pm0.67}$
+        & $-0.96_{\pm0.54}$ & $-2.82_{\pm0.46}$ & $3.69_{\pm0.47}$\\ 
+
+        & L1-sparse  & $-8.72_{\pm0.34}$ & $8.66_{\pm0.31}$ & $0.24_{\pm0.19}$
+        & $1.36_{\pm0.46}$ & $-2.43_{\pm0.39}$ & $1.52_{\pm0.29}$\\ 
+        
+        & IU &
+        $1.57_{\pm0.28}$ &  $5.04_{\pm0.91}$ &  $3.11_{\pm0.18}$
+        &   $1.45_{\pm0.36}$ & $-5.25_{\pm0.22}$ & $12.41_{\pm0.21}$\\ [-1pt]
+
+        \cmidrule(lr){1-8}
+
+        \multirow{6}{*}{\begin{sideways}\textbf{Localized}\end{sideways}
+        \begin{sideways}\textbf{Unlearning}\end{sideways}} 
+                
+        & SSD & $2.83_{\pm1.57}$ & $-2.95_{\pm1.56}$ & 
+        $3.30_{\pm0.24}$ &
+        $7.26_{\pm0.88}$ &
+        $-11.09_{\pm0.85}$ &
+        $13.26_{\pm0.74}$\\ [2pt]
+        
+        & CritMem-RL ($\alpha=1\%$)  & $-20.77_{\pm0.27}$ & $20.71_{\pm0.26}$ & $-0.45_{\pm0.18}$
+        & $-11.94_{\pm0.35}$ & $8.16_{\pm0.22}$ & $0.08_{\pm0.21}$\\  [2pt]
+
+        & Shallowest-RFT ($\alpha=30\%$)  & $5.20_{\pm2.34}$ & $-5.24_{\pm2.32}$ & $3.78_{\pm1.28}$
+        & $3.09_{\pm0.90}$ & $-6.89_{\pm0.86}$ & $3.56_{\pm0.59}$\\  [2pt]
+
+        & SalLoc-RFT ($\alpha=30\%$)   & $1.71_{\pm0.32}$  & $-1.71_{\pm0.31}$ & $2.55_{\pm0.20}$
+        & $0.78_{\pm0.41}$ & $4.55_{\pm0.32}$ & $3.68_{\pm0.23}$\\  [2pt]
+
+        \cmidrule{2-8}
+        & \cellcolor{lightgray}\textbf{DEL ($\alpha=30\%$)} & \cellcolor{lightgray}$0.75_{\pm0.91}$ & \cellcolor{lightgray}$-0.78_{\pm0.92}$ & \cellcolor{lightgray}$0.78_{\pm0.52}$ 
+        & \cellcolor{lightgray}$0.46_{\pm0.043}$ & \cellcolor{lightgray}$-4.26_{\pm0.32}$ & \cellcolor{lightgray}$0.89_{\pm0.29}$\\
+
+        \cmidrule(lr){1-8}
+    \end{tabularx}
+    }
+\end{table}
+
+\begin{table}[ht]
+    \centering
+    \caption{Comparison to state-of-the-art, including algorithms that update all parameters (``\textbf{Full-Parameter}'') as well as (``\textbf{Localized}'' unlearning algorithms on \textbf{IID} forget set when training a \textbf{ResNet-50} model on \textbf{ImageNet-100} dataset. Consistent with our previous results, our proposed method outperforms all compared approaches across all studied unlearning metrics. For test accuracy, our method achieves state-of-the-art performance among localized approaches; however, full-parameter methods outperform localized unlearning approaches.
+    }
+    \label{tab:sota_comparisons_imagenet100_resnet50}
+     \resizebox{0.8\textwidth}{!}{
+     \centering
+    \begin{tabularx}{\textwidth}{@{}W|Z|ccc@{}}
+        \multicolumn{2}{c|}{ } & \textbf{$\Delta_{forget}$} & \textbf{$\Delta_{MIA}$} & \textbf{$\Delta_{test}$} \\ 
+        \cmidrule(lr){1-5}
+
+        \multirow{5}{*}{\begin{sideways}\textbf{Full-parameter }\end{sideways}
+        \begin{sideways}\textbf{Unlearning}\end{sideways}
+        }
+        & Retraining(Oracle) & $0.00_{\pm0.00}$ & $0.00_{\pm0.00}$ & $0.00_{\pm0.00}$  \\ 
+        \cmidrule(lr){2-5}
+        
+        & Fine-tuning   & $-6.96_{\pm1.33}$ & $6.34_{\pm1.18}$ & $0.54_{\pm0.95}$\\ 
+    
+        & NegGrad+   & $-3.18_{\pm1.95}$ & $2.54_{\pm1.52}$ & $5.09_{\pm1.64}$ \\ 
+
+        & NegGrad   & $5.13_{\pm8.05}$ & $-5.65_{\pm8.14}$ & $19.68_{\pm6.60}$ \\ 
+
+        & Random Label   & $5.18_{\pm1.59}$ & $-5.49_{\pm1.03}$ & $5.96_{\pm1.10}$ \\ 
+
+        & L1-sparse   & $-5.58_{\pm1.32}$ & $4.76_{\pm0.94}$ & $1.06_{\pm0.98}$ \\ 
+
+        \cmidrule(lr){1-5}
+
+        \multirow{6}{*}{\begin{sideways}\textbf{Localized}\end{sideways}
+        \begin{sideways}\textbf{Unlearning}\end{sideways}} 
+         & SSD   & $-14.11_{\pm1.96}$ & $13.71_{\pm1.80}$ & $5.44_{\pm1.37}$ \\  [2pt]
+
+        & Shallowest-RFT ($\alpha=30\%$)   & $-1.69_{\pm2.41}$ & $2.36_{\pm2.26}$ & $11.72_{\pm1.50}$ \\  [2pt]
+
+        & SalLoc-RFT ($\alpha=30\%$)   & $1.36_{\pm2.01}$ & $-2.19_{\pm1.73}$ & $6.09_{\pm0.98}$ \\  [2pt]
+
+        \cmidrule{2-5}
+        & \cellcolor{lightgray}\textbf{DEL ($\alpha=30\%$)} & \cellcolor{lightgray}$0.78_{\pm1.55}$ & \cellcolor{lightgray}$-1.74_{\pm1.35}$ & \cellcolor{lightgray}$5.20_{\pm1.08}$ \\
+        \cmidrule(lr){1-5}
+    \end{tabularx}
+    }
+\end{table}
+
+\textbf{Localized unlearning succeeds due to selecting critical parameters.} 
+We design a control experiment to investigate to what extent the success of localized unlearning is dependent on \textit{which} parameters are chosen (rather than simply \textit{how many}). To this end, we compare the mask produced by each localization strategy to a ``random mask'' that is constructed to follow the same structure and distribution of the number of chosen parameters per layer as the corresponding non-random mask. For example, to create the random mask that CritMem will be compared with, we randomly select a number of channels for each layer equal (but randomly selected this time) to the number of channels that CritMem selects for that layer. The results in Table \ref{vtab:random_mask} indicate that, beyond doubt, localized unlearning algorithms succeed due to pinpointing critical parameters.  
+
+\begin{table}[h]
+    \centering
+    \caption{\textbf{Random-vs-standard masking} using RFT unlearning, $\alpha$=$16\%$, on CIFAR-10 / ResNet-18.}
+    \label{vtab:random_mask}
+    \resizebox{0.72\textwidth}{!}{
+    \begin{tabularx}{\textwidth}{@{}c|ccc|ccc@{}}
+        \cmidrule(lr){1-7}
+        \multicolumn{1}{c|}{} & \multicolumn{3}{c|}{\textbf{Standard Masking}} & \multicolumn{3}{c}{\textbf{Random Masking}} \\ \cmidrule(lr){2-7}
+
+         & \textbf{CritMem} & \textbf{SalLoc} & \textbf{Ours} & \textbf{CritMem} & \textbf{SalLoc} & \textbf{Ours} \\ 
+        \cmidrule(lr){1-7}
+
+        $\Delta_{\text{forget}}$ & $-13.25_{\pm1.53}$ & $-8.26_{\pm0.92}$ & $-2.86_{\pm1.09}$
+        & $-18.60_{\pm1.03}$ & $-13.26_{\pm0.80}$ & $-8.58_{\pm0.98}$ \\
+
+        $\Delta_{\text{MIA}}$ & $13.73_{\pm1.62}$ & $8.75_{\pm1.09}$ & $3.36_{\pm1.27}$  
+        & $19.09_{\pm1.21}$ & $13.78_{\pm1.02}$ & $9.07_{\pm1.17}$ \\
+
+        $\Delta_{\text{test}}$ & $2.85_{\pm0.31}$ & $3.50_{\pm0.53}$ & $2.62_{\pm0.22}$  
+        & $1.99_{\pm0.19}$ & $1.91_{\pm0.57}$ & $1.89_{\pm0.21}$ \\
+    \end{tabularx}
+    }
+\end{table}
+
+\textbf{Is localized unlearning better due to tailoring to $\mathcal{S}$?} We design a set of experiments to investigate this by changing the criticality criterion. Specifically, we choose two criteria that are not specific to the forget set $\mathcal{S}$: the first uses only the magnitude of the weights (``weights''), and the second uses weighted gradients, but where the gradients this time are over all of $\trainingset$ rather than just $\mathcal{S}$ (``Weighted gradients (train set)''). Our rationale is that, if either of these forget-set-agnostic criteria work equally well as our method's criterion (``Weighted gradients (forget set)''), this would suggest that the success of our method is not due to specialization to $\mathcal{S}$ but rather finding parameters that are ``generally critical'' for the training data. We observe from Table \ref{vtab:mem_abl_iid_noniid} that, for the IID forget set, the above two criteria that depend on $\trainingset$ rather than $\mathcal{S}$ specifically, yield more similar results to our criterion. This is reasonable since the forget and train follow the same distribution in the IID forget set case. On the other hand, for the non-IID forget set, we do observe that tailoring the criticality criterion used in the localization strategy to $\mathcal{S}$ yields better results in terms of the unlearning metrics. These findings suggest that i) the success of different localization strategies is dependent on the distribution of the forget set, ii) our method (shaded gray area in the table) is a top performer in all cases.
+
+\begin{table}[h]
+    \caption{Investigation of different granularity and criticality criteria in a non-iterative localization algorithm ($\alpha$=$15\%$) on \textbf{IID} and \textbf{Non-IID forget set}. The shaded region corresponds to our method.}
+    \label{vtab:mem_abl_iid_noniid}
+    \resizebox{0.69\textwidth}{!}{
+    \begin{tabularx}{\textwidth}{@{}c|ccccc|cccc@{}}
+        \cmidrule(lr){1-10}
+        \multicolumn{1}{c|}{} & \multicolumn{5}{c}{\textbf{Non-IID forget set}} &
+        \multicolumn{4}{c}{\textbf{IID forget set}}\\
+     \cmidrule(lr){2-10}
+
+         \textbf{Granularity} & & {\makecell{\textbf{Gradients} \\ \textbf{(forget set)} }} & {\makecell{ \textbf{Weights} \\}}  & {\makecell{\textbf{Weighted}\\\textbf{ gradients} \\ \textbf{(train set)}}} & {\makecell{\textbf{Weighted}\\\textbf{ gradients} \\ \textbf{(forget set)} }}
+         & {\makecell{\textbf{Gradients} \\ \textbf{(forget set)} }} & {\makecell{ \textbf{Weights} \\}}  & {\makecell{\textbf{Weighted}\\\textbf{ gradients} \\ \textbf{(train set)} }} & {\makecell{\textbf{Weighted}\\\textbf{ gradients} \\ \textbf{(forget set)} }}  \\ 
+        \cmidrule(lr){1-10}
+
+        \makecell{Individual \\ parameter} & {\makecell{$\Delta_{\text{forget}}$ \\ $\Delta_{\text{test}}$ \\ $\Delta_{\text{MIA}}$}}
+        & {\makecell{$-7.58_{\pm8e-3}$ \\$3.63_{\pm4e-3}$  \\ $8.74_{\pm1.10}$ }} 
+        & {\makecell{$15.50_{\pm6e-3}$ \\ $10.80_{\pm5e-3}$ \\ $-14.73_{\pm0.97}$}}
+        & {\makecell{$14.03_{\pm0.01}$ \\ $10.60_{\pm6e-3}$ \\ $-13.89_{\pm1.29}$}}
+        & {\makecell{$15.07_{\pm0.01}$ \\ $11.55_{\pm6e-3}$ \\ $-16.32_{\pm1.39}$}}
+        
+       & {\makecell{$-6.72_{\pm0.41}$ \\$1.98_{\pm0.45}$  \\ $6.81_{\pm0.41}$ }} 
+        & {\makecell{$11.67_{\pm0.51}$ \\$11.11_{\pm0.60}$  \\ $11.68_{\pm0.50}$ }} 
+        & {\makecell{$11.19_{\pm0.15}$ \\ $10.90_{\pm0.51}$ \\ $-11.21_{\pm0.52}$}} 
+        & {\makecell{$11.15_{\pm0.48}$ \\$11.05_{\pm0.54}$  \\ $-11.13_{\pm0.46}$ }} \\
+        \cmidrule(lr){1-10}
+        
+        \makecell{Output \\ channel} &  {\makecell{$\Delta_{\text{forget}}$ \\ $\Delta_{\text{test}}$ \\ $\Delta_{\text{MIA}}$}}
+        & {\makecell{$-12.33_{\pm8e-3}$ \\ {$1.55_{\pm2e-3}$}  \\ $15.53_{\pm1.10}$}} 
+        & {\makecell{$6.02_{\pm5e-3}$ \\ $5.64_{\pm2e-3}$ \\ {$-1.02_{\pm0.93}$}}}  
+        & {\makecell{{$-2.52_{\pm0.01}$} \\ $3.52_{\pm4e-3}$ \\ $6.73_{\pm1.12}$}} 
+        & \cellcolor{lightgray} {\makecell{$1.58_{\pm0.01}$ \\ $4.41_{\pm2e-3}$ \\ $3.33_{\pm1.28}$}}
+        
+        & {\makecell{$-5.18_{\pm0.40}$ \\ {$1.26_{\pm0.54}$}  \\ $5.16_{\pm0.39}$}} 
+        & {\makecell{$1.33_{\pm0.41}$ \\ $2.86_{\pm0.45}$ \\ {$-1.40_{\pm0.39}$}}} 
+        &  {\makecell{$1.69_{\pm0.68}$ \\ $2.27_{\pm0.44}$ \\ $1.67_{\pm0.68}$}}
+        & \cellcolor{lightgray}{\makecell{$0.65_{\pm0.60}$ \\ $3.05_{\pm0.43}$ \\ $0.69_{\pm0.59}$}}\\
+        
+        \cmidrule(lr){1-10}
+            \end{tabularx}
+    }
+\end{table}
+
+
+
+\section{Discussion and Conclusion}
+
+\label{sec:discussion}
+
+\textbf{To summarize}, we have performed an investigation on whether hypotheses for where memorization happens in the network give rise to improved localized unlearning. Our investigation led us to propose a new localization strategy that is more practical and efficient compared to the algorithm from the memorization literature that it builds upon, while outperforming the state-of-the-art unlearning methods on several metrics, when paired with different unlearning algorithms. Our proposed \ourmethod method, obtained by pairing our strategy with the simple RFT unlearning algorithm, sets a new state-of-the-art on forget sets of different distributions, different datasets and architectures, and across parameter budgets.
+We find that for non-IID forget sets, tailoring the parameter selection to the specific forget set (rather than the training set more broadly) is more important than it is for IID forget sets. Our method outperforms others in both cases but to different degrees, pointing to important questions for future work regarding what other characteristics of forget sets affect the behaviours and success rates of localized unlearning.
+
+\textbf{So, does memorization inform unlearning?} \citet{hase2024does} find that, for model editing in LLMs, the ``causal tracing'' method \citep{meng2022locating} for knowledge localization, surprisingly, does not indicate which layer to modify in order to most successfully rewrite a stored fact with a new one. That is, they find that success in editing tasks is generally unrelated to localization results based on causal tracing. \citet{guo2024robust} study whether mechanistic interpretability insights improve unlearning of ``factual associations'' in LLMs. They also find that localization techniques based on preserving outputs (such as causal tracing) yield performance that is no better, or even worse, than non-localized unlearning. However, they come up with a mechanistic unlearning method that does outperform both output-based localization and non-localized unlearning, showing that some form of localization is useful. Our results, in the very different context of unlearning a subset of data in vision classifiers, offer an important data point in this ongoing discussion. In line with \citet{hase2024does}, we find that directly translating memorization hypotheses into localization strategies does not help unlearning: Deepest led to very poor unlearning results (demonstrating either its weakness as a memorization locator, or the disconnect between memorization localization and unlearning performance), and CritMem, while showing more promise, did not perform better than simple baselines, while being significantly more expensive than them. However, insights from \citep{maini2023can}, in particular regarding the granularity and criticality criterion used during localization led us to improve upon the state-of-the-art localized and full-parameter unlearning methods, renewing hopes that, while memorization localization and unlearning may be separate research questions, progress in the former may guide progress in the latter.
+
+
+
+

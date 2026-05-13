@@ -1,0 +1,277 @@
+\title{SparseVLM: Visual Token Sparsification for Efficient Vision Language Models Inference}
+
+\begin{abstract}
+In vision-language models (VLMs), visual tokens usually consume a significant amount of computational overhead, despite their sparser information density compared to text tokens. To address this, most existing methods learn a network to prune redundant visual tokens and require additional training data. Differently, we propose an efficient training-free token optimization mechanism dubbed SparseVLM without extra parameters or fine-tuning costs. Concretely, given that visual tokens complement text tokens in VLMs for linguistic reasoning, we select visual-relevant text tokens to rate the significance of vision tokens within the self-attention matrix extracted from the VLMs. Then we progressively prune irrelevant tokens. To maximize sparsity while retaining essential information, we introduce a rank-based strategy to adaptively determine the sparsification ratio for each layer, alongside a token recycling method that compresses pruned tokens into more compact representations. Experimental results show that our SparseVLM improves the efficiency of various VLMs across a range of image and video understanding tasks. In particular, LLaVA equipped with SparseVLM reduces 61\% $\sim$ 67\% FLOPs with a compression ratio of 78\% while maintaining 93\% of the accuracy.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Benefiting from tremendous advancements in large language models (LLMs) \citep{radford2019language, brown2020language, achiam2023gpt, touvron2023llama, peng2023instruction, bi2024deepseek}, the realm of vision-language models (VLMs) has undergone a revolutionary progress. To combine visual signals with textual semantics, the mainstream practice in VLMs \citep{team2023gemini, Qwen-VL, chen2023internvl, li2024mini, li2023blip} employs sequential visual representation, where images are extracted into vision tokens and sent into an LLM decoder. With modal alignment and instruction fine-tuning \citep{du2021glm, liu2023improvedllava, zhu2023minigpt}, recent VLMs successfully adapt LLMs to the vision domain and inherit their perception and reasoning abilities.
+
+Despite the promising performance, further incorporation of visual tokens inevitably introduces a huge memory and computation overhead when compared to LLMs, particularly for high-resolution images \citep{li2024mini} and multi-frame videos \citep{lin2023video}. For instance, a $672 \times 672$ image in LLaVA \citep{liu2024visual} yields $2304$ vision tokens that span over half of the context length. However, the information in images is typically more sparse than in natural languages \citep{marr2010vision}, resulting in inefficiency in directly processing both modalities.
+To address this, existing methods extract more compact image representations by modifying the image encoder or projector \citep{alayrac2022flamingo, li2023llama, instructblip, cha2024honeybee}. While some recent works further sparsify vision tokens during the decoding \citep{ye2024voco, chen2024image, cai2024matryoshka}, they still ignore the guidance from the language tokens, which contradicts the multimodality paradigm. We argue that \textbf{\textit{visual tokens should be sparsified adaptively based on the question prompt}}, as the model might focus on different parts (e.g., foreground or background) when dealing with various questions, as shown in Figure \ref{fig:pic1}. Furthermore, current approaches generally train a network to prune redundant visual tokens and require additional training data \citep{li2023llama, ye2024voco}.
+
+In this paper, we introduce a \textbf{text-guided training-free} framework dubbed \textbf{SparseVLM} for efficient vision language model inference. 
+We reuse the self-attention matrix of visual-text tokens directly from the decoder layers without extra training parameters for sparsification. 
+We ascertain that \textbf{\textit{not all prompt tokens should be considered}} as some could be less relevant, which leads to inaccurate correlation results and downgrades the performance of sparse inference. 
+Specifically, our SparseVLM first identifies text tokens strongly correlated with visual signals via cross-attention.
+Then, we measure the contribution of visual tokens to the selected visual-relevant text tokens (raters) and adaptively prune the insignificant vision tokens. 
+Instead of directly discarding the pruned tokens, we further recycle and cluster them to reconstruct more compact tokens to minimize information loss.
+Due to the information density varying for different image inputs, we employ the rank of the attention matrix to indicate the redundancy level and set an adaptive sparsification ratio accordingly.
+
+The proposed method is simple yet practical. It can act as a plug-and-play module to improve the efficiency of VLMs without additional fine-tuning.
+Extensive experiments demonstrate that our SparseVLM effectively reduces the computation of various VLMs without sacrificing their performance in a wide range of image and video understanding tasks. 
+For example, LLaVA \citep{liu2024visual} equipped with SparseVLM achieves a $4.5\times$ compression rate while maintaining $93\%$ of its original performance. Alternatively, the latency (CUDA time) can decrease by $53.9\%$ with only a $13\%$ drop in accuracy.
+To investigate the effectiveness of our method in the video tasks, we further apply SparseVLM to VideoLLaVA \citep{lin2023video} to additionally compress temporal frames.
+Without complex design changes, SparseVLM can sparsify video frames into an adaptive number of vision tokens and outperforms existing vision compression methods in video question-answering benchmarks. For instance, our method average exceeds FastV \citep{chen2024image} by $34.4\%$.
+
+In summary, the contributions of this paper are threefold:
+\begin{enumerate} 
+\item We introduce a novel sparsification framework dubbed SparseVLM for vision-language models. To the best of our knowledge, it is the first attempt to explore the potential of text-aware guidance for efficient inference of VLMs, where additional training is unnecessary.
+\item In the framework, we first assign visual-relevant text tokens as raters, to judge the importance of vision tokens. Additionally, the rank of the attention logits is employed to reflect the redundancy and adaptively prune VLMs. Finally, we recycle partial tokens from the pruned pools and reconstruct them to accommodate more information within fewer slots.
+\item We apply our SparseVLM framework to both image and video VLMs and conduct extensive experiments across various benchmarks. Our approach consistently outperforms the existing state-of-the-art method FastV by $7.7\% \sim 14.8\%$ on LLaVA, $10.2\% \sim 21.6\%$ on MiniGemini, and $34.4\%$ on VideoLLaVA.
+\end{enumerate} 
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.98 \textwidth]{pic/moti.pdf}
+    \caption{\textbf{Visualization of different visual token sparsification methods.} Unlike previous methods with text-agnostic visual sparsification (c) e.g., recent FastV~\citep{chen2024image}, our SparseVLM (b) is guided by question prompts to select relevant visual patches. Best viewed in color.}
+    \label{fig:pic1}
+\end{figure}
+
+
+
+\section{Related Work}
+
+
+\textbf{Vision-Language Models.} With the impressive success of large language models (LLMs) \citep{achiam2023gpt, touvron2023llama, bai2023qwen}, recent works on generative vision-language models (VLMs) \citep{liu2023improvedllava, chen2023internvl, li2024mini} improve multimodal comprehension and generation by receiving a long visual token sequence. Moreover, processing higher-resolution images inevitably entails an exponential growth in the length of the visual sequence. For example, LLaVA encodes $336 \times 336$ images into $576$ tokens \citep{liu2024visual} and processes images with a greater resolution of $672 \times 672$ into $2304$ tokens \citep{liu2023improvedllava}. Along the same lines, mini-Gemini-HD \citep{li2024mini} converts images into $2880$ vision tokens based on the standard of high resolution $1536 \times 1536$ and low resolution $672 \times 672$. Comprehending videos or multiple images inherently necessitates increased token slots for visual signals. The VideoLLaVA \citep{lin2023video} and VideoPoet \citep{kondratyuk2023videopoet} models allocate thousands of tokens to afford the representation of multiple frames. However, the large number of vision tokens leads to a huge bottleneck for computational infrastructure. Further research and development in sparsification technologies are urged to overcome these hurdles and fully unleash the potential of VLMs.
+
+\textbf{Visual Compression for VLMs.} Compression of vision tokens is necessary because, on the one hand, their quantity is usually tens to hundreds of times that of language tokens. On the other hand, visual signals are inherently redundant compared to dense human-designed texts \citep{marr2010vision}. Past efforts to address the above problem can be categorized into two directions. The first one centers on the vision tower or projection of visual modality and cuts vision tokens with external modules. For instance, LLaMA-VID \citep{li2023llama} exploits the use of Q-Former with context token while DeCo \citep{yao2024deco} employs an adaptive pooling to downsample the visual tokens at the patch level. The other type methods \citep{ye2024voco, chen2024image, cai2024matryoshka} go deeper into the text modality and sparsify vision tokens during LLM decoding, but they still neglect the guidance from the text tokens. In our paper, SparseVLM takes note of this and improves performance upon it.
+
+\textbf{Token Merging for VLMs.} 
+Token merging has recently received much attention in the field of VLMs where its algorithms mainly fall into two directions. One focuses on the matching algorithm using the Bipartite Soft Matching (BSM) \citep{bolya2022token}. For example, ToMe \citep{bolya2022token} prunes according to the relevance between visual tokens and text and merges both modalities through the BSM algorithm. Other methods rely on clustering methods for token merging. For instance, LLaVolta \citep{chen2024llavolta}
+proposes the visual context compressor (an average pooling) to merge the output tokens from the vision tower and progressively enhance the VLMs' efficiency by training. Inspired by TCFormer \citep{zeng2024tcformer}, we apply $k$-nearest neighbor density peak aggregation algorithm \citep{rodriguez2014clustering} to the field of vision-language models. Unlike TCFormer, our method focuses on merging the dropped tokens and makes full use of their detailed information.
+
+
+
+\section{Proposed Approach: SparseVLM}
+
+
+In this section, we present our SparseVLM framework for efficient VLM inference.
+We first review the attention mechanism in VLMs and then introduce the detailed strategies for our visual sparsification, including visual significance estimation, relevant text token selection, and sparsification level adaptation.
+We further propose the token recycling method to reduce information loss and provide a theoretical analysis of computation savings.
+The overall architecture is shown in Figure \ref{fig:pic2}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.\textwidth]{pic/archi.pdf}
+    \caption{\textbf{The architecture of SparseVLM.} In stage (a), text raters are pre-selected before entering the sparsification LLM. In stage (b), adaptive sparsification is performed on LLM layers, involving computing redundancy and the recycling of reconstructed tokens. Best viewed in color.}
+    \label{fig:pic2}
+\end{figure}
+
+\subsection{Preliminary: Attention in VLM Decoders}
+The VLM decoders typically use the causal \textit{self-attention} in the original transformer model \citep{vaswani2017attention} for token interactions.
+Without loss of generality, we discuss the condition of single-head attention. 
+Formally, the self-attention matrix with logits $\mA \in \mathbb{R}^{L\times L}$, where $L$ denotes the length of total tokens (e.g., system, image, and question prompt tokens), is computed by
+\begin{equation} \label{eq:1}
+    \mA = \text{Attention}(\mQ, \mK) = \text{Softmax} \left( \frac{\mQ \mK^T}{\sqrt{D}} \right),
+\end{equation}
+where the scalar $D$ represents the matrix dimension, and the $\mQ \in \mathbb{R}^{L\times D}$ and $\mK \in \mathbb{R}^{L\times D}$ are the query and key matrices, respectively. The keys and queries in a self-attention layer are computed in parallel by using multi-layer perceptrons (MLPs) to transform the input hidden states $\mH$ into a common space, where aligned interactions between different modalities occur.
+
+\subsection{Sparsification Guidance from Text to Visual Modality}
+
+\textbf{Estimation of Visual Token Significance.} For a multimodal vision-language model, we should consider its impact on other modalities when deleting a single modal information. In our case, we need to understand how relevant a visual token is to the textual tokens in order to determine whether it should be removed. Therefore, we naturally come up with reusing the self-attention logits in VLMs transformer layers as a reference, since they already contain \textit{language-to-vision} query results. 
+
+In particular, we take the interaction between the \textit{query}-dimensional part of logits of the textual modality and the \textit{key}-dimensional part of the visual modality as the basis for sparsification priority matrix $\mP \in \mathbb{R}^{L_t\times L_v}$, where $L_t$ and $L_v$ are the lengths of text and vision tokens, that is defined by
+\begin{equation} \label{eq:2}
+    \mP = \mA[i_t, i_v],
+\end{equation}
+with
+\begin{equation} \label{eq:3}
+    i_t \in \{x | \mA[x, :] = \sL\}, \ \ \  i_v \in \{y | \mA[:, y] = \sI\}, 
+\end{equation}
+where $\sL$ and $\sI$ denote the language instruction and image tokens set, respectively.
+
+Next, we average scores of all instruction tokens to obtain the estimate $\bar{\mP}_j$ for $j$th vision token as 
+\begin{equation} \label{eq:4}
+    \bar{\mP}_j = \frac{1}{L_t} \sum\nolimits_{i=1}^{L_t} \mP[i,j], \ \ j \in \{1, 2, \ldots, L_v\},
+\end{equation}
+where we use $\bar{\mP}_j$ as the significance indicator for sparsification and a larger value in $\bar{\mP}_j$ means higher significance for the corresponding token.
+Calculation of \eqref{eq:4} costs $L_t \times L_v$ FLOPs, while the correlation matrix $\mA$ and the indexing process is \textit{free}, which benefits the inference efficiency.
+
+\textbf{Relevant Text Token Selection.} It is not appropriate to use all text tokens as a reference for visual sparsification. Figure \ref{fig:pic3} shows four representative cases where we compute the correlation between the prompt and the image. Case $3$ highlights \verb+Tylenol, Advil, ibuprofen+, while \verb+top, sticker, fridge+ in case $4$ are significant, where a large proportion of question tokens in light red include little visual relevance. Therefore, it is unreasonable to make insignificant text tokens to rate vision tokens, and we need to select relevant text tokens (i.e., ``\textit{raters}'') for guidance.
+
+Specifically, for an input image $\vx_v$, the vision embedding tokens $\mH_v$ can be computed as
+\begin{equation} \label{eq:5}
+    \mH_v = \mW \mZ_v,
+\end{equation}
+where $\mZ_v$ is the visual feature provided by visual encoder $\mZ_v = g(\vx_v)$, and $\mW$ is the projection matrix to convert $\mZ_v$ into vision embedding tokens $\mH_v$. 
+For the language instruction $\vx_q$, it is transformed into text embedding tokens $\mH_q$ through the tokenizer. The above tokens both have the same dimensionality as the word embedding space. Then, we start to recognize which characters in the prompt are visually relevant and assign them the role of raters, which can be formulated as
+\begin{equation} \label{eq:6}
+    \mS = \{\ i \ | \ \mR[i] \geq m,  \ \ i \in \{1, 2, \ldots, L_t\}\}.
+\end{equation}
+\begin{equation} \label{eq:7}
+    \mR = \frac{1}{L_v} \sum_{j=1}^{L_v} \text{Softmax} (\mH_v {\mH_q}^T),
+\end{equation}
+where $m = \text{Mean}(\mR)$ and only candidates who exceed the $m$ will become raters. The strategy $\mS$ defines the index of selected raters from the candidate list containing $L_t$ tokens with priority. The \eqref{eq:7} costs $L_t \times L_v \times 2D$ FLOPs, only computed once before entering the decoder.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.\textwidth]{pic/pic1.pdf}
+    \caption{\textbf{Sample prompts from four representative multimodal benchmarks.} The darker the word, the greater its relationship to the image and the more valuable it is for reference. 
+    We see that some words are irrelevant to the vision domain (e.g., prepositions and pronouns) and should not be considered for visual sparsification. Best viewed in color.}
+    \label{fig:pic3}
+\end{figure}
+
+\textbf{Sparsification Level Adaptation.} 
+Having obtained the token significance, we further propose a rank-based strategy to adaptively determine the level of vision sparsification at each decoder layer.
+Considering that \textit{a full-rank matrix implies that all its rows or columns are linearly independent}, we use the rank of $\mP$ to demonstrate the redundancy of the visual tokens. 
+We argue that the difference between the dimension and rank of $\mP$ reflects its redundancy and utilize a scaling factor $\lambda$ to determine the number of deletions as
+\begin{equation} \label{eq:8}
+    N = \lambda \times (L_v - \text{Rank}(\mP)).
+\end{equation}
+We then remove $N$ visual tokens with the smallest values in $\mP$. 
+Notably, if the result of $N$ in a decoder layer is $0$, we skip the layer and abandon sparsification. 
+This stage requires $L_t \times L_v \times \text{min}(L_t, L_v)$ FLOPs for rank computation per layer.
+
+\subsection{Visual Token Recycling} 
+We progressively sparsify visual tokens in each layer in the decoder, which results in more discarded tokens at later stages. 
+Despite less significant, the pruned vision tokens with relatively large values in $\mP$ still contain certain information. 
+To efficiently preserve more visual details with fewer tokens, we propose a token recycling strategy to aggregate and reconstruct tokens to be sparsified. 
+
+\textbf{Token Aggregation.} 
+We first recycle the pruned visual tokens $\bar{h}_v$ with the top-$\tau$ (\%) highest values in $\mP$ from the deleted pool. 
+Then, we group $\bar{h}_v$ tokens with $k$-nearest neighbor density peak aggregation algorithm \citep{rodriguez2014clustering} for adaptive token aggregation. 
+
+In particular, we first compute the local density $\rho_i$ of the $i$th token of total $\tau \times N$ recycled tokens according to its $k$-nearest neighbors $\gK (\bar{h}_{v}^{i})$ as
+\begin{equation}
+\rho_{i}=\exp \left(-\frac{1}{k} \sum\nolimits_{\bar{h}_{v}^{j} \in \gK (\bar{h}_{v}^{i})}^{i, j} \left\|\bar{h}_{v}^{i}-\bar{h}_{v}^{j}\right\|_{2}^{2} \right).
+\label{eq:9}
+\end{equation}
+Then, we compute the minimum distance between the recycled token $\bar{h}_{v}^{i}$ and any other token with higher density (denoted as the distance indicator $\delta_{i}$) that is defined by
+\begin{equation}
+\delta_{i} = \left\{
+\begin{array}{ll}
+  \min & \left\|\bar{h}_{v}^{i}-\bar{h}_{v}^{j} \right\|_{2}, \text { if } \exists j \text { s.t. } \rho_{j}>\rho_{i}, \\
+  \max & \left\|\bar{h}_{v}^{i}-\bar{h}_{v}^{j}\right\|_{2}, \text { otherwise }.
+\end{array}
+\right.
+\label{eq:10}
+\end{equation}
+We use $\rho_i \times \delta_i$ to indicate the score of each token, where the tokens with higher scores are likely to be cluster centers.
+Other tokens are then assigned to the nearest cluster center via cosine similarity. 
+The FLOPs cost in this stage is $L_r\times(3L_r - 1) \times 2D + L_{r}$, where $L_{r} = \tau \times N$ is the length of recycled tokens, $C = \theta \times L_{r} $ is the number of cluster centers, and $\tau$ and $\theta$ are hyperparameters.
+
+\textbf{Token Reconstruction.} 
+Having performed token aggregation, the recycled tokens with similar semantics are classified into the same group. 
+Then, the tokens $\sT \in \mathbb{R}^{N_k \times D}$ in the $k$th group are reconstructed into a new compressed token $\mT_{k} \in \mathbb{R}^{1 \times D}$ via the element-wise sum operation as
+\begin{equation}
+\mT_{k} = \sum\nolimits_{i=1}^{N_k} \sT[i], \ \ k \in \{1, 2, \ldots, C\},
+\label{eq:11}
+\end{equation}
+where $N_k$ is the token number of the $k$th group and the operation costs $D \times (L_{r} - C)$ FLOPs.
+\subsection{Theoretical Analysis of Computational Complexity}
+We consider the computation of multi-head attention and feed-forward network (FFN) modules in the FLOPs estimation. 
+Assuming $N$ is the number of  pruned tokens, $D$ is the hidden state size, which is the same as the intermediate size in FFN, the FLOPs for one transformer layer can be reduced by $6 (N - C) D^{2} + 2(N - C)^{2} D$. 
+
+Thus, we estimate the FLOP savings as the reduction part minus the additional sparsification overhead computed as
+\begin{equation}
+\renewcommand{\arraystretch}{1.5}
+\begin{array}{ll}
+ \underbrace{\scriptstyle { \textstyle \sum_{i}} 6 (N_{i} - C_{i}) D^{2} + 2 (N_{i} - C_{i})^{2} D}_{\text{reduction part}}
+ - \underbrace{\scriptstyle 2 L_{t} L_{v} D - {\textstyle \sum_{i}} L_{t}^{i} L_{v}^{i} (1 + \min (L_{t}^{i}, L_{v}^{i})) -(6{L^{i}_{r}}^{2} + 2L_{r}^{i}) D - L_{r}^{i}}_{\text{overhead part}} \\
+ \approx -2 L_{t} L_{v} D + \sum_{i} D(6DN_{i}(1-x) + N_{i}^{2}(2+2x^2-4x-6(\tau)^{2})) - {L^{i}_{t}}^{2} L_{v}^{i} \\
+ \approx -2 L_{t} L_{v} D + \sum_{i} DN_{i}(6D + 2N_{i}) - {L^{i}_{t}}^{2} L_{v}^{i}, \ \ i \in \{1, 2, \ldots, \Omega\},
+\label{eq:12}
+\end{array}
+\end{equation}
+where $\Omega$ is the number of total layers, and $x = \tau \times \theta$ is a very small decimal that can be ignored. 
+
+
+
+\section{Experiments}
+
+\input{table/main}
+In this section, we validate our method within various VLM architectures on comprehensive multimodal benchmarks to assess its effectiveness including image and video understanding tasks.
+
+\subsection{Image Understanding Tasks}
+\textbf{Datasets.} For image-based multimodal evaluation, we conduct experiments on eight widely adopted benchmarks including GQA \citep{hudson2019gqa}, MMBench (MMB) \citep{liu2023mmbench}, MME \citep{fu2023mme}, POPE \citep{li2023evaluating}, SQA \citep{lu2022learn}, VQA$^{\text{V2}}$ (VQA V2) \citep{goyal2017making}, and VQA$^{\text{Text}}$ (TextVQA) \citep{singh2019towards}. Furthermore, we check the consistency of SparseVLM on ConBench \citep{zhang2024unveiling}.
+
+\textbf{Implementation Details.} We verify the proposed SparseVLM on two popular VLM frameworks: LLaVA \citep{liu2024visual} and Mini-Gemini \citep{li2024mini}. LLaVA-1.5 employs CLIP-pretrained ViT-L as the visual tower, while Mini-Gemini (MGM) further introduces a LAION-pretrained ConvNeXt-L \citep{liu2022convnet} for high-resolution refinement. For LLaVA-1.}.
+
+\textbf{Main Results.} In Table \ref{tab:main}, we present the performance of SparseLLaVA (LLaVA equipped with SparseVLM) on image understanding benchmarks. To intuitively assess the performance, we provide the results by percentage format for comparative analysis, and the accuracy of the vanilla model with the 100\% upper limit. We set $3$ vision token count configurations ($192$, $128$, and $64$) to check the advantages of SparseVLM. When pruning from $576$ to $192$ tokens, the SparseLLaVA only decreases the average accuracy by $4.2\%$ without additional training and exceeds ToMe \citep{bolya2022token} $7.4\%$. Furthermore, when only $64$ tokens are left, our method outperforms FastV \citep{chen2024image} by a significant margin of \textbf{14.8}\%, while ToMe performs worst due to its direct merging.
+
+Figure \ref{fig:mgm} shows the performance of SparseMGM, and we visualize the results on POPE, TextVQA, and GQA. We find that our framework has an obvious advantage over FastV and ToMe. With the reduction of tokens, the gap between FastV and SparseVLM is increasing sharply. The reason is that, compared to FastV and ToMe, the text-aware strategy enables us to accurately locate visual tokens with more details, while the recycling of pruned tokens further reduces information loss.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=.97\textwidth]{pic/MGM.pdf}
+    \caption{\textbf{Performance of MGM armed with SparseVLM on three multimodal benchmarks.} The horizontal axis represents the remaining number of vision tokens, while the vertical axis means the accuracy after percentage normalization. FastV is included for comparison.}
+    \label{fig:mgm}
+\end{figure}
+
+\subsection{Video Understanding Tasks}
+\input{table/videollava}
+\textbf{Datasets.} We test our method on four common video question answering benchmarks, TGIF-QA \citep{jang2017tgif}, MSVD-QA \citep{xu2017video}, MSRVTT-QA \citep{xu2017video} and ActivityNet-QA \citep{yu2019activityqa}, where video-question pairs are massively disproportional in length.
+
+\textbf{Implementation Details.}
+We directly apply our SparseVLM for Video-LLaVA \citep{lin2023video}, which is a commonly used VLM framework for video question answering. Video-LLaVA is composed of several key components, including language bind encoder $f^{v}_{M} $\citep{zhu2023languagebind} for extracting features from raw visual inputs (e.g., images or videos), a language decoder model $f_L$ such as Vicuna \citep{touvron2023llama}, a visual projection layer $f_P$, and a word embedding layer $f_T$.}, as it is publicly available.
+
+\textbf{Main Results.}
+In Table \ref{tab:videollava}, we set the Video-LLaVA with $2048$ video tokens as our upper bound for an overall average accuracy of $100.0\%$ and a score of $+0.00$. To make a fair comparison, we both preserve $135$ vision tokens ($93.4\%$ pruning ratio) for FastV \citep{chen2024image} and SparseVLM. 
+It is clear that our approach consistently outperforms FastV across all benchmarks, both in accuracy (Acc.) and GPT evaluation score. SparseVideoLLaVA achieves a total average accuracy of $86.5\%$, a significant $\textbf{34.4\%}$ higher than $52.1\%$ of FastV. From the GPT score perspective, SparseVLM only loses $0.17$ points compared to $1.02$ points of FastV. 
+These improvements suggest that when handling video modality containing temporal features, SparseVLM continues to deliver strong performance, generating accurate responses to diverse questions while utilizing significantly fewer tokens. This achieves an effective trade-off between inference efficiency and model performance.
+
+
+
+\section{Analysis}
+
+\subsection{Effects of Relevant Text Token Selection}
+
+\begin{wrapfigure}{r}{0.45\textwidth}
+    \begin{center}
+        \includegraphics[width=\linewidth]{pic/ablation.pdf}
+    \end{center}
+    \caption{\textbf{The ablation study of text raters.}}
+    \label{fig:ab_1}
+\end{wrapfigure}
+
+We propose a selection mechanism to localize visually irrelevant text tokens to limit their negative effects in rating the significance of vision tokens. Here we conduct experiments to analyze the effects of the mechanism in Figure \ref{fig:ab_1}. Under the same number of vision tokens ($142$), we have 3 settings (using all tokens, only text tokens, and only text raters we select) with LLaVA \citep{liu2023improvedllava} to judge vision token candidates. In TextVQA \citep{singh2019towards}, our mechanism improves the vanilla text-aware method (only text tokens) by $0.79\%$, which validates that our extra selection is effective. Besides, by building upon the text-aware manner, we further outperform the baseline (all tokens) by $\textbf{4.3}\%$ on POPE \citep{li2023evaluating}. The huge margin means POPE sparsification is quite sensitive to question prompts, and text guidance is necessary. In summary, text rater selection is general and improves the performance across various scenarios.
+
+\subsection{Effects of Pruned Tokens Recycling}
+\input{table/merge_ablation}
+To validate the effectiveness of our token recycling strategy, we perform ablation experiments on the LLaVA model \citep{liu2023improvedllava}. The results are presented in Table \ref{tab:merge_ablation}. Across multiple sparsity ratios ($64$, $96$, $128$, $192$), our algorithm achieves a significant average performance improvement of $\textbf{1.2}\%$ and $\textbf{7.2}\%$ on TextVQA \citep{singh2019towards} and POPE \citep{li2023evaluating}, respectively. Notably, as the number of pruned vision tokens increases, the benefit brought by our recycling method increases. For instance, when pruning from $192$ to $64$ tokens, the pruned token recycling significantly boosts the accuracy from $\textbf{1.5\%}$ to $\textbf{17.7\%}$ on POPE. We argue that when the size of the deleted pool grows, the amount of lost information increases. Our method effectively recycles the lost information and compresses it into few slots using the proposed reconstruction mechanism. 
+
+\subsection{Efficiency Analysis}
+\input{table/efficiency}
+SparseVLM affords significant efficiency and storage gains for the inference process. We conduct a comparative analysis of storage memory, CUDA time, and FLOPs on LLaVA-7B, and compare our method with the baseline method and FastV \citep{chen2024image}. 
+As displayed in Table \ref{tab:efficiency}, we conduct an inference efficiency analysis on a single NVIDIA A100-80GB with identical lengths of text prompts and single-image inputs. 
+Compared to the baseline model, SparseVLM achieves a significant reduction of $53.9\%$ in CUDA time and $84.4\%$ in FLOPs while keeping $88\%$ accuracy. Despite SparseVLM has an additional overhead to calculate text raters and cluster-pruned vision tokens, it leads to fewer than FastV tokens with comparable accuracy. Additionally, SparseVLM demonstrates lower metrics in terms of CUDA latency time and FLOPs by $23.2\%$ and $8.4\%$, respectively.
+
+\subsection{Visualization}
+As shown in Figure \ref{fig:visualization}, we visualize SparseVLM on various VQA questions. From left to right, we visualize the results after we apply token pruning to different layers. On the very right, the dialogue box contains the prompt with the highlighted in red the most relevant text, and below is the generated answer in green produced by the remaining pruned image tokens. As the number of layers increases, more tokens are pruned and the Region of Interest (ROI) is gradually refined. The model systematically reduces less relevant image information while retaining key tokens that are closely tied to the question. The visualization reveals that SparseVLM, although discarding some overall image details, effectively retains essential visual tokens. These preserved tokens encapsulate the features necessary for answering the question, focusing on more relevant visual regions through their interaction with the question.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=.96\textwidth]{pic/visualization.pdf}
+    \caption{\textbf{Visualization of SparseVLM on different VQA prompts.} From left to right, the visual representation becomes increasingly sparse, leaving fewer vision tokens. Best viewed in color.}
+    \label{fig:visualization}
+\end{figure}
+
+
+
+\section{Conclusion}
+
+This paper introduced an efficient text-aware training-free token optimization mechanism called SparseVLM which significantly enhanced the efficiency of various VLMs in image and video understanding tasks. Unlike existing methods, SparseVLM was able to optimize VLMs without introducing extra parameters and fine-tuning costs.
+We achieved a more compact visual representation by progressively pruning the less relevant vision tokens. In addition, we employed the matrix rank to adaptively determine sparsification ratios and recycled the pruned tokens via reconstruction to reduce the information loss.
+Experiments demonstrated that SparseVLM increased the efficiency of various VLMs. Particularly, LLaVA equipped with SparseVLM achieved a reduction of 53.9\% latency with a compression ratio of 88.9\% while maintaining 87\% accuracy. %Alternatively, the latency can be decreased by $53.9\%$ with only a $13\%$ drop in accuracy. 
+Moreover, our method exceeded FastV accuracy by 34.4\% in video understanding tasks. Our SparseVLM can provide practical benefits for deploying off-the-shelf VLMs on edge devices and in the cloud.
+
+\newpage
+
+
+
+
+

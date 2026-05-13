@@ -1,0 +1,378 @@
+\title{Learning a Diffusion Model Policy from Rewards via Q-Score Matching}
+
+\begin{abstract}
+Diffusion models have become a popular choice for representing actor policies in behavior cloning and offline reinforcement learning. This is due to their natural ability to optimize an expressive class of distributions over a continuous space. However, previous works fail to exploit the score-based structure of diffusion models, and instead utilize a simple behavior cloning term to train the actor, limiting their ability in the actor-critic setting. In this paper, we present a theoretical framework linking the structure of diffusion model policies to a learned Q-function, by linking the structure between the score of the policy to the action gradient of the Q-function. We focus on off-policy reinforcement learning and propose a new policy update method from this theory, which we denote \emph{Q-score matching}. Notably, this algorithm only needs to differentiate through the denoising model rather than the entire diffusion model evaluation, and converged policies through Q-score matching are implicitly multi-modal and explorative in continuous domains. We conduct experiments in simulated environments to demonstrate the viability of our proposed method and compare to popular baselines. Source code is available from the project website: \url{https://michaelpsenka.io/qsm}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Reinforcement Learning (RL) has firmly established its importance across a range of complex domains, from discrete game environments like Go, Chess, and Poker \citep{silver2016mastering, silver2017mastering, brown2019superhuman} to continuous environments like goal-oriented robotics \citep{kober2013reinforcement, sunderhauf2018limits, ibarz2021train, Wu22CoRL_DayDreamer}. Robotics RL applications typically need to work in a continuous vector space for both states and actions. This not only makes traditional RL algorithms designed for discrete state and action spaces infeasible, but makes parameterizing the policy (distribution of actions) a difficult challenge, where one must typically choose between ease of sampling (e.g. Gaussians \citep{agostini2010reinforcement}) and expressiveness.
+Recently, diffusion models \citep{hyvarinen2005estimation, ho2020denoising} have emerged as a promising avenue for parameterizing distributions. These models, rooted in the idea of iterative increments of noising and denoising from a distribution, have shown great potential in generative tasks \citep{rombach2022high, watson2022novel}. In the context of RL, diffusion models offer both expressiveness and easy sampling, since normalization constants do not need to be computed for sampling. However, their adoption in RL is relatively nascent, and the nuances of their implementation and performance are still subjects of investigation.
+
+One unexplored approach is through the alignment of the learned policy's score, denoted by $\nabla_a \log(\pi(a|s))$, with the score of an optimal policy, denoted by $\nabla_a \log(\pi^*(a|s))$. However, traditional score matching is ill-posed in this setting, because we not only lack samples from $\nabla_a \log(\pi^*(a|s))$, but also from $\pi^*(a|s)$ itself. Our primary result emphasizes that in the context of RL, one can match the score of $\pi$ to that of $\pi^*$ by iteratively matching the score of $\pi$ to the gradient of the state-action value function with respect to action, $\nabla_a Q^\pi(s, a)$. This offers a new, geometric perspective on policy optimization, where the focus for policy optimization becomes iteratively pushing the vector field $\nabla_a \log(\pi(a|s))$ towards the vector field $\nabla_a Q^\pi(s, a)$. We call this approach \emph{Q-score matching} (QSM).
+
+We then use this novel method on off-policy reinforcement learning scenarios, an important but yet unexplored area for diffusion model policies. Without a fixed distribution to sample from (akin to what is given for behavior cloning or offline RL applications), it is unclear how exactly to train a diffusion model represented policy. We postulate and empirically demonstrate that QSM is a viable algorithm for learning diffusion model policies.
+
+The paper is structured as follows: we begin by establishing a continuous-time formulation of RL via stochastic differential equations to allow score-based analysis while keeping the stochastic flexibility of the RL setting. We then introduce the standard policy gradient for diffusion models in this setting, and afterwards give a theoretical introduction to QSM. Finally, we lay out our empirical framework, results, and the broader implications of our method for learning diffusion model policies in reinforcement learning problems.
+
+\subsection{Related work}
+
+We now introduce the relevant related work for this paper. The most direct relation is the line of work related to diffusion models in the RL setting, which is relatively new but actively explored. We discuss some particular works related to various parts of this paper's setting, including the action gradient of the Q-function and the score of the policy distribution.
+
+\subsubsection{Diffusion models in reinforcement learning}
+
+Diffusion models, characterized by their incremental noise-driven evolution of data, have found various applications in RL, ranging from imitating expert behavior to optimizing policies using complex action-value functions. The following are some notable examples:
+
+\textbf{Behavior cloning:}
+``Behavior cloning'' is a type of imitation learning where an agent tries to mimic the behavior of an expert without explicit reward feedback. Much of the earlier work in diffusion models for policy learning has been for behavior cloning \citep{janner2022planning, reuss2023goal}, as the specifics of the behavior cloning setting (matching a distribution to a given dataset) fit more closely to the original design principle of diffusion models, namely through score matching \citep{hyvarinen2005estimation}. In a similar vein, work has been done on learning a stochastic state dynamics model using a diffusion model \citep{li2022exponential}.
+
+\textbf{Offline Q-learning:}
+Offline RL techniques leverage existing datasets to learn optimal policies without further interaction with the environment. Similar to the behavior cloning setting, optimizing the policy using a large fixed dataset fits more closely with the common usage of diffusion models for learning distributions, and in combination with the above policy gradient formula for diffusion models has enabled many recent works in this area \citep{wang2022diffusion, suh2023fighting, kang2023efficient, hansen2023idql, lu2023contrastive}.
+
+\textbf{Policy gradient:}
+Policy gradient methods seek to directly optimize the policy by computing gradients of the expected reward with respect to the policy parameters \citep{sutton1999policy}. Previous work has derived a formula for the policy gradient with respect to a diffusion model's parameters \citep{black2023training}, but such formulas are much more general and do not fully exploit the structure of a diffusion model. For example, the new expectation for the policy gradient becomes dependent on internal action samples, making the estimates less sample efficient (see Section \ref{sec:policygrad_intro}).
+
+There are additional works that use the action gradient of the Q-function for learning \citep{silver2014deterministic, berseth2018model, d2020learn, li2022prag, sarafian2021recomposing}, where the standard policy gradient is expanded to include the action gradient of the Q-function through the chain rule, but such methods require an explicit representation for the full policy distribution $\pi(a | s)$, which is not readily available for diffusion models.
+
+\textbf{Diffusion-QL:}
+Although Wang et al. \citep{wang2022diffusion} perform experiments in the offline-RL setting with a behavior cloning term, they propose a method for pure Q-learning: training on $Q$ itself as the objective, and backpropagating through the diffusion model evaluation. However, such training still does not utilize the unique structure of diffusion models and presents computational challenges (e.g. exploding/vanishing gradients from differentiating through model applied on itself). In this paper, we explore a method that does not require backpropagating through the entire diffusion evaluation, but rather just the internal denoising model, much like standard diffusion model training.
+
+\subsubsection{Stochastic optimal control}
+At a conceptual level, our work is rooted in the principles of stochastic optimal control \citep{fleming2012deterministic, kirk2004optimal, bellman1954dynamic}, which deals with optimizing systems subjected to random disturbances over time. Especially relevant to our context is the continuous-time formulation, where the control strategies are adjusted dynamically in response to evolving system states. However, much of stochastic optimal control literature typically assumes access to some model of the state dynamics. Instead of assuming a state dynamics model, we assume a model for the expected discounted rewards over time (the Q-function), leading to new motivations for the theoretical development of our method. Nonetheless, exploring the link between this paper and stochastic optimal control is an interesting direction for future work, in particular given the surface similarities between Theorems \ref{thm:main_nonstoch} and \ref{thm:main_stoch_max} and the Hamilton-Jacobi-Bellman equation \citep{bellman1954dynamic}.
+
+
+
+\section{Problem formulation}
+
+We now define and introduce core mathematical notation and objects used. Of notable difference from a standard reinforcement learning formulation is the use of a continuous time formulation, which is helpful to simplify the theoretical statements of this paper.
+
+\subsection{Notation}
+\begin{enumerate}
+    \item Different notations for the time derivative of a path $x(t)$ are used, depending on the setting. In the non-stochastic/deterministic setting, we use dot notation $\dot{x}(t) \coloneqq \dt x(t)$. In the stochastic setting, we use the standard SDE notation, using $dx(t)$ instead of $\dt x(t)$.
+    \item In the main body and proofs, we often refer to the ``score'' of the action distribution, which is always denoted $\score$ and always used as the vector field defining the flow of actions over time. Not all settings have $\score$ line up with the classical score of a distribution, but we use the terminology ``score'' throughout to highlight the analogy to a distribution's true score $\nabla_a \log \pi(a | s)$, as seen most clearly through the Langevin dynamics with respect to a distribution's score \citep{langevin1908brownian, papanicolaou1977martingale, welling2011bayesian}.
+\end{enumerate}
+
+\subsection{Definitions}
+We denote the \emph{state space} as a Euclidean space $\mc S = \R^s$, and the \emph{action space} as another Euclidean space $\mc A = \R^a$. For the theoretical portion of this paper, we consider the following stochastic, continuous-time setting for state and action dynamics:
+\begin{align}
+\begin{split}\label{eq:stochastic_cont_model}
+    ds &= F(s, a)dt + \Sigma_s(s, a) dB_t^s,\\
+    da &= \score(s, a)dt + \Sigma_a(s, a) dB_t^a,\\
+    s(0) &= s_0,\\
+    a(0) &= a_0.
+\end{split}
+\end{align}
+$\score : \mc S \times \mc A \to \mc A$ corresponds to the ``score'' of our policy and is the main parameter for policy optimization in this setting. $F : \mc S \times \mc A \to \mc S$ corresponds to the continuous state dynamics, and $\Sigma_s(s, a), \Sigma_a(s, a)$ are functions from $\mc S \times \mc A$ to positive semidefinite matrices in $\R^{s\times s}$ and $\R^{a\times a}$ respectively, corresponding to the covariance structure for the uncertainty in the dynamics of $s(t)$ and $a(t)$. The covariances are with respect to the separate Brownian motions $B^s, B^a$, each embedded in $\mc S$ and $\mc A$ respectively.
+
+While many works formulate RL in a continuous state/action/time setting \citep{bradtke1994reinforcement, doya2000reinforcement, jia2022policy, jia2023q, zhao2024policy}, it is less common to formulate the action as a joint dynamical system. This proves important when linking this theoretical structure to a diffusion model, as highlighted in Section \ref{sec:time_discretization}.
+
+Our main objective in this paper is to maximize path integral loss functions of the following form:
+\begin{equation}\label{eq:q_def_continuous}
+    Q^\score(s_0, a_0) = \E \int_0^\infty \gamma^t r(s(t, s_0, a_0))dt,
+\end{equation}
+where $r : \mc S \to [0,1]$ is the \emph{reward function}, the expectation is taken over the stochastic dynamics given in \eqref{eq:stochastic_cont_model}, $s(t, s_0, a_0)$ is a sample of the path $s(\cdot)$ at time $t$ from initial conditions $(s_0, a_0)$, and $\gamma \in (0, 1)$ is a fixed constant corresponding to a ``discount factor''. Discretizing by time gives a more familiar formula for the Q-function:
+\begin{equation}
+    Q^\score(s_0, a_0) = \E \sum_{t=0}^\infty \gamma^t r(s(t, s_0, a_0)),
+\end{equation}
+and furthermore if we cut off at some horizon where $\sum_{T+1}^\infty\gamma^i \approx 0$:
+\begin{equation}
+    Q^\score(s_0, a_0) = \E \sum_{t=0}^T \gamma^t r(s(t, s_0, a_0)).
+\end{equation}
+We write superscript $\score$ because we want to consider $Q$ as a function not of the initial conditions, but of the score $\score$, and try to find a score $\score^*$ that maximizes $Q^{\score}(s_0, a_0)$ for a fixed initial condition (or an expectation over a distribution of initial conditions).
+
+There is of course motivation for optimizing the noise covariance structure for the actions $\Sigma_a$, but we save this optimization for a future work and here purely focus on the score $\score$.
+
+\textbf{Our objective} in this paper is then to maximize the following function with respect to the vector field $\score: \S \times \A \to \A$ for some distribution over initial state/action pairs $\bb P \times \pi$:
+
+\begin{equation}
+    J(\score) = \E_{\bb P \times \pi}Q^\score(s,a).
+\end{equation}
+
+\subsection{Time discretization}\label{sec:time_discretization}
+One may observe that the action model in \eqref{eq:stochastic_cont_model} is not standard, since actions $a(t)$ are modeled as a smooth flow over time, rather than an explicit function of the state $s(t)$. The motivation for this model comes when we discretize in time via the Euler-Maruyama method, and further when we discretize at different time scales with respect to the state and action dynamics in the following way:
+\begin{align}
+\begin{split}\label{eq:discretize_stoch_dynamics}
+    s_{t+1} &= s_t + F(s_t, a_t) + z, z \sim \mc N(\mb 0, \Sigma_s(s_t, a_t)),\\
+    a_{t}^i &= a_t^{i-1} + \frac{1}{K}\score(s_t, a_t^{i-1}) + z_t^i, \\
+    z_t^i &\sim \mc N(\mb 0, \frac{1}{K}\Sigma_a(s_t, a_t^{i-1})),\\
+    a_{t+1} &= a_t^K,
+\end{split}
+\end{align}
+where $a_t^i \coloneqq a_{t+i/K}$. By discretizing the action dynamics at $K$ times the fidelity of the state dynamics discretization, we recover a time-invariant diffusion model of depth $K$, with denoising mean represented by $\score$ and variance represented by $\Sigma_a$. As a result, we expect the theory on the model in \eqref{eq:stochastic_cont_model} to also approximately hold for systems of the form given in \eqref{eq:discretize_stoch_dynamics} where actions are represented by a diffusion model, up to the error incurred by time discretization. This time scaling also allows actions to depend on the state $s_t$ more than the previous action $a_{t-1}$; as the number of sampling steps $K$ increases, the initial condition $a_{t-1}$ becomes less influential.
+
+
+\section{Policy gradient for diffusion policies}
+
+
+Recall that the policy gradient, the gradient of the global objective $J(\theta) = \E_{s, a} Q^{\pi}(s, a)$ is given by the following \citep{sutton1999policy}:
+\begin{equation} \label{eq:policy_grad_formula}
+\nabla_\theta J(\theta) = \E_{(s_0, a_0, s_1, a_1, \ldots)}\sum_{t=1}^\infty Q(s_t, a_t)\nabla_\theta \log \pi_\theta(a_t | s_t),
+\end{equation}
+where the distribution of the expectation is with respect to the policy $\pi$ and the environment dynamics. For a time-discretization of a diffusion model policy, we do not have access to global probability $\pi(a|s)$, but rather just the incremental steps $\pi(a^\tau | a^{\tau - 1}, s)$ (superscript here indicates internal diffusion model steps), and would need to integrate over all possible paths to get the following:
+\begin{align}
+&\pi(a^K|s) = \label{eq:action_expanded}\\
+&\quad \int_{a^{K-1}} \cdots \int_{a^1} \pi(a^1 | s)\prod_{\tau = 2}^K\pi(a^\tau | a^{\tau - 1}, s)da^1 \cdots da^{K-1},\nonumber
+\end{align}
+which is quickly infeasible to compute with respect to $K$. However, after substituting \eqref{eq:action_expanded} into \eqref{eq:policy_grad_formula}, we can simplify and obtain the following form:
+\begin{equation}\label{eq:policy_gradient_main}
+    \nabla_\theta J(\theta) = \E\sum_{t=1}^\infty Q(s_t, a_t^K) \left( \sum_{\tau=1}^K\nabla_\theta\log \pi_\theta(a_t^\tau | a_t^{\tau - 1}, s_t)\right),
+\end{equation}
+where the expectation is taken over the all states $\{s_t\}_{t=1}^\infty$ and all internal actions $\{\{a_t^\tau\}_{\tau=1}^K\}_{t=1}^\infty$. 
+ Importantly, the expectation now explicitly depends on the internal action states $\{a_t^\tau\}_{\tau=1}^K$ rather than just the executed action $a_t$, and uses no explicit structure of diffusion models; this formula likewise holds for any model with internal actions $\{a_t^\tau\}_{\tau=1}^K$. It is thus reasonable to expect that applying this formula directly will lead to sample inefficiency; we present comparative results in Section \ref{sec:experiments}. We are then motivated to pursue alternative methods for updating the diffusion model policy, that use some of the score-based structure of the diffusion model.
+
+
+\section{Policy optimization via matching the score to the Q-function}
+
+
+We now introduce the main theoretical contribution of this work: an alternative method for updating the policy given an estimate of the $Q$-function that avoids the aforementioned problems from policy gradients.
+
+The theory of this section is relevant for continuous-time dynamical systems. Thus, we consider the continuous-time $Q$-function given in eq. \eqref{eq:q_def_continuous} and the corresponding total energy function $J(\score)$:
+\begin{equation}\label{eq:main_loss_continuous}
+    J(\score) = \E_{(s, a)} Q^{\score}(s, a),
+\end{equation}
+where the expectation for $Q^\score$ is taken over sampled paths of $(s(t), a(t))$ with respect to the stochastic dynamics from \eqref{eq:stochastic_cont_model} starting from $(s_0, a_0)$. In computation, we can also consider a finite-dimensional parameterization $\score_\theta$ for parameters $\theta \in \R^d$ and the parameterized loss:
+\begin{equation}\label{eq:main_loss_continuous}
+    J(\theta) = \E_{(s, a)} Q^{\score_\theta}(s, a),
+\end{equation}
+where the parameters $\theta$ parameterize the vector field $\score$ for the actions given in \eqref{eq:stochastic_cont_model}.
+
+Our goal is to match the score $\score$ with that of an optimal distribution with respect to $J$, denoted $\score^*$. However, unlike the standard score matching literature, we not only do not have access to any samples of $\score^*$, but not even from the action distribution $\pi^*$ it generates. Thus, our matching approach will require access to a surrogate $\score^*$ approximator.
+
+One hypothesis from dimensional analysis is to compare $\score$ to $\nabla_a Q^\score$, which is also a vector field from $\mc S \times \mc A$ to $\mc A$. Intuitively, $\nabla_a Q^\score$ provides which ways actions should be modified locally to maximize expected reward. As such, we define $\score^* \approx \nabla_a Q$ and define our actor update as an iterative optimization of the score $\score$ against the $\nabla_a Q$ target.
+One can optimize $\score$ by iteratively matching it to the action gradient of its $Q$-function, $\nabla_a Q^\score(s, a)$. Gradients with respect to this optimization would only depend on the denoising model $\score$ itself, rather than the full diffusion model evaluation.
+\begin{figure}\label{fig:continuous_diagram}
+    \centering
+    
+    \begin{subfigure}
+    \centering
+        \includegraphics[width=0.48\linewidth]{fig/cont_fig_1.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}
+    \centering
+        \includegraphics[width=0.48\linewidth]{fig/cont_fig_2.pdf}
+    \end{subfigure}
+    
+    \caption{A visual description of Theorem \ref{thm:main_nonstoch} and Theorem \ref{thm:main_stoch_max}, and the implied update rule for a policy $\pi$ parameterized by a diffusion model. The left image depicts a randomly initialized score $\score^0$, and the right the result after one step of QSM $\score^1$. If there is any discrepancy between the score $\nabla_a \log(\pi(a|s))$ (orange vector, denoted $\score$ in the paper and optimized directly) and the action gradient $\nabla_a Q(s, a)$ (blue vector), we can forcefully align the score to the $Q$ action gradient to strictly increase the $Q$ value at $(s, a)$.}
+\end{figure}
+
+\subsection{Non-stochastic setting}
+
+We begin by proving the above result in the non-stochastic setting. That is, the state and action both evolve as paired ordinary differential equations. To further simplify, we will begin by trying to optimize just the $Q$-function at a fixed point $Q(s_0, a_0)$, or without loss of generality of the theory, the $Q$-function at the origin $Q(\mb 0, \mb 0)$. This is still quite a rich setting, since even for a fixed point $Q(s, a)$ is still a path integral equation. The following theorem formalizes the setting, and gives a concrete statement relating the optimal policy's score to the action gradient of the $Q$-function.
+
+\begin{theorem}[Optimality condition, deterministic setting]\label{thm:main_nonstoch}
+    Consider the following joint deterministic dynamics governing the state $s(t) \in \R^s$ and action $a(t) \in \R^a$:
+    \begin{align}
+    \begin{split}\label{eq:sys_nonstoch}
+        &\begin{aligned}
+            \dot{s}(t) &= F(s(t), a(t)), & \dot{a}(t) &= \score(s(t), a(t)), 
+        \end{aligned} \\
+        &\begin{aligned}
+            s(0) &= \mb 0, & a(0) &= \mb 0.
+        \end{aligned}
+    \end{split}
+    \end{align}
+    where $s(t) \in \R^s, a(t) \in \R^a$, $\|\score(s, a)\|_2 \le C$ for all $(s, a)$, and $\score$ is Lipschitz with respect to $\|\cdot \|_2$. Denote $s(t, s_0, a_0)$ the resulting state $s(t)$ from initial conditions $s_0, a_0$. Let $r: \R^s \to [0, 1]$ be a smooth function. Finally, let $\score^*: \R^s \times \R^a \to \R^a$ be a vector field that maximizes the following path norm for fixed $\gamma \in (0,1)$ over smooth flows $\score$ with norm bound $C$ and bounded Lipschitz constant:
+    \begin{align}
+        J(\score) &= Q^\score(\mb 0,\mb 0),\\
+        Q^\score(s_0, a_0) &= \int_0^\infty \gamma^t r(s(t, s_0, a_0))dt,
+    \end{align}
+    it follows that $\score^*(s, a) = \alpha_{s, a}\nabla_a Q^{\score^*}(s, a)$ for some $\alpha_{s, a} > 0$ for all $(s, a)$ along the trajectory $(s(t), a(t))$ where $\nabla_a Q^{\score^*}(s, a) \ne \mb 0$.
+\end{theorem}
+
+Proof can be found in Section \ref{sec:proof_nonstochopt}. \emph{At their core, Theorems \ref{thm:main_nonstoch} and \ref{thm:main_stoch_max} state the following}: if there is anywhere that $\score(s, a)$ and $\nabla_a Q^\score(s, a)$ are not aligned, then a new vector field $\score'$ resulting from aligning $\score(s, a)$ with $\nabla_a Q^\score(s, a)$ will strictly increase $Q^{\score'}(\mb 0, \mb 0)$ towards $Q^*(\mb 0, \mb 0)$. As one can imagine, once we extend the above to losses of integrals over $Q$, the collinear condition extends to the entire integrated space.
+
+\begin{corollary}\label{corr:nonstoch_dist}
+    Consider the setting of Theorem \ref{thm:main_nonstoch}, but with the following modified loss:
+    \begin{equation}
+        J(\score) = \E_{\bb P \times \pi}Q^\score(s,a),
+    \end{equation}
+    where $\bb P \times \pi$ is a probability measure over $\R^s \times \R^a$ absolutely continuous with respect to the Lebesgue measure. For any maximizer $\score^*$, it follows that $\score^*(s, a) = \alpha_{s, a} \nabla_a Q^{\score^*}(s, a)$ for all $(s, a) \in \R^s \times \R^a$ where $\nabla_a Q^{\score^*}(s, a) \ne \mb 0$.
+\end{corollary}
+
+\subsection{Stochastic setting}
+
+We now extend to stochastic differential equations over the actions, as modeled by \eqref{eq:stochastic_cont_model}. Fortunately, the theory for the deterministic case in Theorem \ref{thm:main_nonstoch} extends rather identically to the fully stochastic case.
+
+\begin{theorem}[Optimality condition, stochastic setting]\label{thm:main_stoch_max}
+    Consider the following joint stochastic dynamics governing the state $s(t) \in \R^s$ and action $a(t) \in \R^a$:
+    \begin{align}
+    \begin{split}\label{eq:proof_a_stoch}
+        ds(t) &= F(s(t), a(t))dt + \Sigma_s(s(t), a(t)) dB_t^s,\\
+        da(t) &= \score(s(t), a(t))dt + \Sigma_a(s(t), a(t)) dB_t^a,\\
+        s(0) &= s_0,\\
+        a(0) &= a_0,
+    \end{split}
+    \end{align}
+    where $\score, F$ are globally Lipschitz functions defined from $\R^s \times \R^a$ to $\R^a$, $\Sigma_s(s, a)$ is a globally Lipschitz function from $\R^s \times \R^a$ to positive semidefinite matrices in $\R^{s\times s}$ (and similarly for $\Sigma_a(s, a)$), and $B_t^s, B_t^a$ are separate standard Brownian motions in $\R^s$ and $\R^a$. Further consider the following loss function with respect to the vector field $\score$:
+    \begin{align}
+        J(\score) &= \E_{\bb P \times \pi}Q^\score(s,a),\\
+        Q^\score(s_0, a_0) &= \E \int_0^\infty \gamma^t r(s(t, s_0, a_0))dt,
+    \end{align}
+    where $\bb P \times \pi$ is a probability measure over $\R^s \times \R^a$, and the expectation for $Q^\score$ is taken over sampled paths of $(s(t), a(t))$ starting from $(s_0, a_0)$. For any optimal vector field $\score^*$ with respect to $J$, it follows that $\score^*(s, a) = \alpha_{s, a}\nabla_a Q^{\score^*}(s, a)$ for some $\alpha_{s, a} > 0$ for all $(s, a) \in \R^s \times \R^a$ where $\nabla_a Q^{\score^*}(s, a) \ne \mb 0$ in the support of the distribution generated by $\bb P, \pi$, and the stochastic dynamics of $(s(t), a(t))$.
+\end{theorem}
+
+ While this theorem does not imply a specific algorithm, it does provide theoretical justification for a class of policy update methods: iteratively matching $\score(s, a)$ to $\nabla_a Q(s, a)$ will provide strict increases to the resulting Q-function globally.
+
+
+\begin{figure*}[t]
+    \centering
+    
+    \hspace{0.8cm}
+    \begin{subfigure}{}
+        \includegraphics[width=0.22\textwidth]{fig/gridworld_Q_1.pdf}
+    \end{subfigure}
+    \begin{subfigure}{}
+        \includegraphics[width=0.22\textwidth]{fig/gridworld_Q_2.pdf}
+    \end{subfigure}
+    \begin{subfigure}{}
+        \includegraphics[width=0.22\textwidth]{fig/gridworld_Q_3.pdf}
+    \end{subfigure}
+    
+    
+    \hspace{-0.1cm}
+    \begin{subfigure}{}
+        \raisebox{0.22cm}{\includegraphics[width=0.23\textwidth]{fig/pi_T1.pdf}}
+    \end{subfigure}
+    \begin{subfigure}{}
+        \raisebox{0.44cm}{\includegraphics[width=0.23\textwidth]{fig/ent_scaling.pdf}}
+    \end{subfigure}
+    \begin{subfigure}{}
+        \includegraphics[width=0.23\textwidth]{fig/pi_T10em1.pdf}
+    \end{subfigure}
+
+    \caption{Pedagogical simulation of our algorithm's reduction to a simple single-goal gridworld setting. \textbf{The top row} is a visualization of two iterates of $\pi(a|s) \leftarrow e^{\alpha Q^\pi(s, a)} / \sum_{a'}e^{\alpha aQ^\pi(s, a')}$, for $\alpha = 2$. The color of each square is the expected reward starting from that square, and we use the local maximizing direction to define discrete gradients: $\nabla_a Q(s, a) \coloneqq a^*Q(s,a^*)$, where $a^* \coloneqq \argmax_{a'} Q(s,a')$, and similarly for $\nabla_a \log(\pi(a|s))$. \textbf{The bottom row} shows the effect of the parameter $\alpha$ on the entropy of the converged distribution $\pi*(s|a)$. To the left is the learned policy with $\alpha = 1$, and to the right the learned policy with $\alpha = 10$.}
+    \label{fig:example_gridworld}
+\end{figure*}
+
+\subsection{Pedagogical reduction in gridworld}\label{sec:pedagogical}
+
+To provide intuition for Theorem \ref{thm:main_stoch_max}, we illustrate a reduction of the theorem in gridworld, where the state space $\S = \{1, \ldots, M\} \times \{1, \ldots, N\}$ for some fixed $M, N \in \bb N$, and $\A = \{\mathrm{LEFT}, \mathrm{RIGHT}, \mathrm{UP}, \mathrm{DOWN}\}$. While diffusion models are not well-defined in discrete space, there is a sensible reduction to gridworld through the Langevin dynamics link.
+
+Suppose (for Euclidean $\S$ and $\A$) we have completed the matching described in Theorem \ref{thm:main_stoch_max} and found a score $\score^*$ such that $\score^*(s, a) = \alpha \nabla_a Q(s, a)$ for some fixed $\alpha > 0$. Consider the dynamics of \eqref{eq:stochastic_cont_model} for a fixed state ($F(s, a) = 0, \Sigma_s(s, a) = 0$), and setting $\Sigma_a (s, a) = \sqrt{2} I_a$; given certain conditions \citep{bakry2014analysis}, we have the following result for the stationary distribution of actions $a(t)$ as $t\to\infty$ for any fixed $s\in \mc S$, denoted $\pi(a|s)$:
+\begin{equation}
+    \pi(a|s) \sim e^{\alpha Q(s, a)}.
+\end{equation}
+Thus, we can view QSM as matching the full action distribution $\pi(a|s)$ the Boltzmann distribution of the Q-function, $\frac{1}{Z}e^{\alpha Q(s, a)}$, where $Z = \int_{\A} e^{\alpha Q(s, a)}$. While directly setting $ \pi(a|s) \sim e^{\alpha Q(s, a)}$ is infeasible in continuous state/action spaces, we can represent the probabilities $\pi(a|s)$ directly as a matrix of shape $|\S| \times |\A|$ in the finite case and use the following update rule:
+\begin{equation}\label{eq:soft_policy_iter}
+    \pi'(s|a) = \frac{e^{\alpha Q^\pi(s, a)}}{\sum_{\A} e^{\alpha Q^\pi(s, a)}}.
+\end{equation}
+This update rule is the same as \emph{soft policy iteration} \citep{haarnoja2018soft}, but using the standard Q-function rather than the soft Q-function. Nonetheless, we still see in simulated gridworld environments that $\alpha$ acts as an inverse entropy regularization parameter: the lower $\alpha$ is, the higher the entropy of the converged distribution $\pi^*(a|s)$. We visualize this update rule in a simple gridworld environment, depicted in \cref{fig:example_gridworld}.
+
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}
+        \centering
+        \includegraphics[height=0.35\textwidth]{fig/results_agg_score.pdf}
+        \label{fig:first_image}
+    \end{subfigure}
+    \hspace{-3mm}
+    \begin{subfigure}
+        \centering
+        \raisebox{-4.6mm}[0pt][0pt]{% Adjust the -5mm value as needed to lower the image
+\includegraphics[height=0.385\textwidth]{fig/new_results.pdf}} % Adjust this line with your second image file name
+        \label{fig:second_image}
+    \end{subfigure}
+    \caption{Experimental results across a suite of eight continuous control tasks. QSM matches and sometimes outperforms TD3 and SAC performance on the tasks evaluated, particularly in samples needed to reach high rewards. Even though QSM trains on expressive diffusion models, it matches the sample efficiency of explicit Gaussian and tanh-parameterized models.}
+    \label{fig:dmc_subsets}
+\end{figure*}
+\begingroup
+\removelatexerror
+\begin{algorithm}[H]
+    
+    Initialize critic networks $Q_{\theta_1}$, $Q_{\theta_2}$, and score network $\score_\phi$ with random parameters $\theta_1$, $\theta_2$, $\phi$
+
+    Initialize target networks $\theta^{'}_1 \leftarrow \theta_1$, $\theta^{'}_2 \leftarrow \theta_2$
+
+    Initialize replay buffer $\mathcal{B}$
+
+    \While{not converged}{
+
+      Choose action by iteratively denoising \\
+      $a^T \sim \mathcal{N}(0, I) \rightarrow a^0$ using $\score_\phi$:\, $a_t \sim \pi_\phi(x_t)$; \\
+      Step environment:\, $x_{t+1}, r_{t+1} \leftarrow \operatorname{env}(a_t)$; \\
+      Store $(x_t, a_t, r_{t+1}, x_{t+1})$ in $\mathcal{B}$; \\
+      Sample minibatch of $N$ transitions $(x_t, a_t, r_{t+1}, x_{t+1})$ from $\mathcal{B}$; \\
+      Sample actions via iterative denoising using $\score_\phi$:\, $\tilde{a}_{t+1} \sim \pi_\phi(x_{t+1})$; \\
+      Compute critic target:\\ $y_t = r_{t+1} + \gamma \min_{i = 1, 2} Q_{\theta^{'}_i} (x_{t+1}, \tilde{a}_{t+1})$; \\
+      Update critics:\\ $\theta_i = \argmin_{\theta_i} N^{-1} \sum (y_t - Q_{\theta_i} (s_{t}, a_t))^2 $; \\
+      Update score model:\\ $\phi = \argmin_\phi N^{-1} \sum (\score_\phi(x_t, a_t) - \nabla_a Q(x_t, a_t))^2$;\\
+      Update target networks:\, $\theta^{'}_i \leftarrow \tau \theta_i + (1 - \tau) \theta^{'}_i$;
+    }
+    \caption{Q-Score Matching (QSM)}
+    \label{alg:qsm}
+\end{algorithm} 
+\endgroup
+
+
+
+\section{Experiments}
+
+
+In this section, we describe a practical implementation of QSM and evaluate our algorithm on various environments from the Deepmind control suite \citep{tunyasuvunakool2020dmcontrol}. We seek to answer the following questions:
+\begin{enumerate}
+    \item Can QSM learn meaningful policies provided limited interaction with the environment?
+    \item Does QSM learn complex, multi-modal policies?
+    \item How does QSM compare to popular baselines?
+\end{enumerate}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.22\textwidth]{fig/policy.pdf}
+    \caption{QSM can learn multi-modal policies. Samples from policy shown for the first state of a toy cartpole swingup task, where -1 and 1 represent the initial action for each of two optimal trajectories.}
+    \label{fig:policy}
+\end{figure}
+In particular, the first point allows us to verify that using the score-based structure of diffusion models allows us to train diffusion model policies in a sample-efficient manner. We implement QSM using N-step returns \citep{Sutton1998} and the Q-function optimization routine outlined in DDPG \citep{lillicrap2019continuous}. For each update step, actions from the replay buffer are noised according to a variance-preserving Markov chain, similar to \cite{hansen2023idql}. We then evaluate $\nabla_a Q$ and provide this as the target to our score model $\score$. This update is computed for every environment step with batches of size 256 sampled from the replay buffer. Both the critic and score model are parameterized as 2-layer MLPs with 256 units per layer. Pseudocode for the algorithm is provided in algorithm \ref{alg:qsm}. In this work, we add a small amount of Gaussian noise to the final sampled actions. We note that other, interesting exploration strategies exist, such as limiting the amount of denoising steps applied to the action. However, in this work we focus mainly on QSM, and leave additional study of exploration to future work. 
+
+\subsection{Continuous Control Evaluation}
+
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure} % Adjust the width as necessary
+        \centering
+        \raisebox{13.2mm}[0pt][0pt]{\includegraphics[height=0.235\textwidth]{fig/init_cond.jpg}}
+        \label{fig:new_image}
+    \end{subfigure}
+    \hspace{0.5cm}
+    \begin{subfigure} % Adjust the width as necessary
+        \centering
+        \includegraphics[height=0.385\textwidth]{fig/quad_multimodal.pdf}
+        \label{fig:quad_multimodal}
+    \end{subfigure}
+    \caption{Demonstration of multimodal action distributions due to QSM. Displayed are sampled actions from a successfully QSM-trained model and a successfully Diffusion-QL-trained model. Each figure displays 1,000 sampled actions at the given time step from the displayed initial condition of quadruped\_walk, projected down to $\R^2$ using UMAP \citep{mcinnes2018umap}. Both compared models are exactly the same (including sampling procedure), except for the method the denoising submodel was trained. This demonstrates that the diversity in sampling from QSM comes not from the diffusion model architecture, but the training methodology itself.}
+    \label{fig:multimodal_comparison}
+\end{figure*}
+
+In \cref{fig:dmc_subsets}, we evaluate QSM on six tasks from the Deepmind control suite of tasks. These tasks range from easy to medium difficulty. We also compare QSM to SAC \citep{haarnoja2018soft} and TD3 \citep{fujimoto2018addressing}, and find that QSM manages to achieve similar or better performance than the SAC and TD3 baselines. Conventional actor-critic methods parameterize the actor as a Gaussian distribution or a transformed Gaussian distribution, which can lead to sub-optimal exploration strategies, as certain action modes may get dropped or low Q-value actions may get sampled frequently. QSM  instead learns policies which are not constrained to a fixed distribution class and are able to cover many different action modes. As such, QSM learn policies which are multi-modal and complex, thereby enabling policies to better approximate the true optimal policy. In \cref{fig:policy}, we visualize actions sampled from a QSM policy for the initial state of a toy cartpole swingup task. Note the high mass around the extreme actions, both of which represent the initial action for the two unique optimal trajectories. 
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.41\textwidth]{fig/new_results_policygrad.pdf}
+    \caption{Performance when updating a diffusion model policy via policy gradients on select continuous control tasks, which is notably worse than QSM (ours), matching discussion in Section \ref{sec:policygrad_intro}.}
+    \label{fig:policygrad_comparison}
+\end{figure}
+
+
+
+
+\section{Conclusion}
+
+Diffusion models offer a promising class of models to represent policy distributions, not only because of their expressibility and ease of sampling, but the ability to model the distribution of a policy through its score. To train such diffusion model policies in the reinforcement learning setting, we introduce the Q-score matching (QSM) algorithm, which iteratively matches the parameterized score of the policy to the action gradient of its Q-function. This gives a more geometric viewpoint on how to optimize such policies, namely through iteratively matching vector fields to each other. We additionally provide a practical implementation of this algorithm, and find favorable results when compared to popular RL algorithms.
+
+
+
+There are still plenty of avenues for future work. This work focused purely on the score $\score$, or the ``drift'' term of the diffusion model, and assumed a fixed noise model $\Sigma_a$. However, optimization of $\Sigma_a$ is an especially interesting direction for future work; delving deeper into this optimization might reveal intriguing connections to maximum entropy reinforcement learning, providing a richer understanding of the balance between exploration and exploitation. Additionally the theory for this paper builds a baseline for QSM and related algorithms, but there still remain many important theoretical questions to answer. In particular, convergence rate analysis could highlight further improvements to the QSM algorithm.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.89\textwidth]{fig/qsm_diffQ_compare.pdf}
+    \caption{Comparison between QSM and Diffusion-QL \citep{wang2022diffusion} over the same hyperparameters -- QSM performance here differs from Figure \ref{fig:dmc_subsets} due to the enforcement of consistent hyperparameters, in order to emphasize distinctions between QSM and Diffusion-QL. While performance is mostly comparable, note that QSM takes up significantly less computation time for the policy gradient, as it only differentiates through the denoising model rather than the full diffusion evaluation, and generally yields more consistent results, while Diffusion-QL can sometimes get ``stuck'' at suboptimal solutions. This idea is further supported through Figure \ref{fig:multimodal_comparison}, which demonstrates QSM's distinct promotion of exploration.}
+    \label{fig:qsm_diffQ}
+\end{figure*}
+
+
+

@@ -1,0 +1,667 @@
+\title{Transformer-VQ: Linear-Time Transformers via Vector Quantization}
+
+\begin{abstract}
+We introduce Transformer-VQ, a decoder-only transformer computing softmax-based dense self-attention in linear time.  Transformer-VQ's efficient attention is enabled by vector-quantized keys and a novel caching mechanism. 
+In our large-scale experiments, Transformer-VQ is shown highly competitive in quality, obtaining 0.99 bpb on Enwik8, 26.6 ppl on PG-19, and 3.16 bpb on ImageNet64. In addition, the optimized implementation of Transformer-VQ is over 3x faster than a comparable quadratic-time transformer at sequence length 8k, is over 12x faster at 32k, and can scale to 131k with similar throughput
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[h]
+\vskip -0.1in
+\begin{center}
+\begin{tikzpicture}[node distance=0.75cm]
+  \node (key1_name) {$k_1$};
+  \node[right=of key1_name] (key2_name) {$k_2$};
+  \node[right=of key2_name] (key3_name) {$k_3$};
+  \node[right=of key3_name] (key4_name) {$k_4$};
+  \node[right=of key4_name] (key5_name) {$k_5$};
+  
+  \node[above=0.25cm of key1_name, draw, fill=blue!40, rectangle, minimum width=0.1cm, minimum height=1cm] (key1) {};
+  \node[above=0.25cm of key2_name, draw, fill=green!45, rectangle, minimum width=0.1cm, minimum height=1cm] (key2) {};
+  \node[above=0.25cm of key3_name, draw, fill=red!40, rectangle, minimum width=0.1cm, minimum height=1cm] (key3) {};
+  \node[above=0.25cm of key4_name, draw, fill=yellow!90, rectangle, minimum width=0.1cm, minimum height=1cm] (key4) {};
+  \node[above=0.25cm of key5_name, draw, fill=green!75, rectangle, minimum width=0.1cm, minimum height=1cm] (key5) {};
+  
+  \node[above=0.25cm of key1, draw, fill=white!20, rectangle, minimum width=0.1cm, minimum height=0.2cm] (weight1) {};
+  \node[above=0.25cm of key2, draw, fill=white!20, rectangle, minimum width=0.1cm, minimum height=0.4cm] (weight2) {};
+  \node[above=0.25cm of key3, draw, fill=white!20, rectangle, minimum width=0.1cm, minimum height=0.1cm] (weight3) {};
+  \node[above=0.25cm of key4, draw, fill=white!20, rectangle, minimum width=0.1cm, minimum height=0.2cm] (weight4) {};
+  \node[above=0.25cm of key5, draw, fill=white!20, rectangle, minimum width=0.1cm, minimum height=0.6cm] (weight5) {};
+
+    \node[right=0.5cm of key5_name] (mapsto) {$\mapsto$};
+    \node[right=0.5cm of key5] (vq) {$\,\text{VQ}$};
+    \node[right=0.5cm of weight5] (approx) {$\,\,\,\approx$};
+  
+  \node[right=0.5cm of mapsto] (key1hat_name) {$\hat{k}_1$};
+  \node[right=of key1hat_name] (key2hat_name) {$\hat{k}_2$};
+  \node[right=of key2hat_name] (key3hat_name) {$\hat{k}_3$};
+  \node[right=of key3hat_name] (key4hat_name) {$\hat{k}_4$};
+  \node[right=of key4hat_name] (key5hat_name) {$\hat{k}_5$};
+
+  \node[above=0.25cm of key1hat_name, draw, fill=blue!40, rectangle, minimum width=0.1cm, minimum height=1cm] (key1hat) {};
+  \node[above=0.25cm of key2hat_name, draw, fill=green!60, rectangle, minimum width=0.1cm, minimum height=1cm] (key2hat) {};
+  \node[above=0.25cm of key3hat_name, draw, fill=red!60, rectangle, minimum width=0.1cm, minimum height=1cm] (key3hat) {};
+  \node[above=0.25cm of key4hat_name, draw, fill=yellow!40, rectangle, minimum width=0.1cm, minimum height=1cm] (key4hat) {};
+  \node[above=0.25cm of key5hat_name, draw, fill=green!60, rectangle, minimum width=0.1cm, minimum height=1cm] (key5hat) {};
+  
+  \node[above=0.25cm of key1hat, draw, fill=white!20, rectangle, minimum width=0.1cm, minimum height=0.1cm] (weight1hat) {};
+  \node[above=0.25cm of key2hat, draw, fill=white!20, rectangle, minimum width=0.1cm, minimum height=0.5cm] (weight2hat) {};
+  \node[above=0.25cm of key3hat, draw, fill=white!20, rectangle, minimum width=0.1cm, minimum height=0.05cm] (weight3hat) {};
+  \node[above=0.25cm of key4hat, draw, fill=white!20, rectangle, minimum width=0.1cm, minimum height=0.1cm] (weight4hat) {};
+  \node[above=0.25cm of key5hat, draw, fill=white!20, rectangle, minimum width=0.1cm, minimum height=0.5cm] (weight5hat) {};
+\end{tikzpicture}
+\end{center}
+\vskip -0.15in
+\caption{Schematic of the VQ-Attention approximation. The colorful and blank boxes depict the keys and attention weights, respectively. The keys on the right have been vector-quantized. Since the green keys ${k}_{2}, {k}_{5}$ map to the same code, they have the same attention weights in this attention head.}
+\vskip -0.15in
+\label{fig:vq_attn_approximation}
+\end{figure}
+
+Transformer \citep{Vaswani2017} language models would ideally scale to long sequences, since their predictive abilities often improve as context length increases \citep{ZDai2019, Kaplan2020}. Unfortunately, the standard transformer uses a self-attention mechanism with a quadratic time complexity with respect to sequence length. This limits the practicality of applying transformers to very long sequences, since increasing the sequence length by a factor of $10^{n}$ increases the attention computations by a factor of $100^{n}$. Transformer variants that overcome this efficiency bottleneck have the potential to facilitate new long-context applications and enable new breakthroughs. 
+
+Up to this point, a variety of \emph{efficient transformers} \citep{YTay2020} have been proposed to scale to long sequences. Techniques include sparsity \citep{Child2019, Ye2019, Beltagy2020, Kitaev2020, Qiu2020, Roy2021, Tay2020, Sukhbaatar2021, Wu2022, Liu2023, ZZhang2023}, compression \citep{Liu2018, Rae2020, Ainslie2020, CZhu2021, Ren2021, Nawrot2021, Nawrot2023}, low-rank approximations \citep{SWang2020, Vyas2020, Katharopoulos2020, Xiong2021, Tay2021, Choromanski2021}, and cross-attention operations \citep{ZDai2019, XMa2021, Hutchins2022, Hawthorne2022}. Other efficient sequence models have also been proposed \citep{AGu2022, LeeThorp2022, Mehta2022, JSmith2022, Hasani2022, Poli2023, Peng2023}. 
+
+In this paper, we present Transformer-VQ, a transformer decoder with \emph{dense self-attention computible in linear time} with respect to sequence length. This is made possible through a combination of vector-quantized keys, localized positional biases, and compressive cache that can be attended to efficiently, while yielding the same results as an uncompressed variable-length cache. Transformer-VQ is also simple to implement sampling for. 
+
+
+
+\section{Preliminaries}
+
+
+\subsection{Notation}
+
+The real numbers are denoted by $\mathbb{R}$ and the extended real numbers $\mathbb{R} \cup \{-\infty, \infty\}$ by $\bar{\mathbb{R}}$. Zero-based indices are used for all tensors. When indexing a matrix $\mathbf{M}$ along the first axis, we use $\mathbf{M}_{i}$ to denote a column vector and $\mathbf{M}_{i, :}$ to denote a row vector. The functions $\text{LN}(\cdot)$, $\text{Softmax}(\cdot)$, $\text{Concat}(\cdot)$ denote LayerNorm \citep{Ba2016}, softmax, and concatenation, each applied row-wise. The symbols $\triangleq, \propto, \odot, \exp(\cdot), \delta_{a, b}, \text{SG}(\cdot)$ denote equality by definition, proportionality, element-wise product, element-wise exponentiation, Kronecker delta function, and the stop-gradient operator. We slightly abuse notation to write inner products of vectors $\mathbf{u}, \mathbf{v}$ as $\mathbf{u}^{\top}\mathbf{v}$, and outer products as $\mathbf{u}\mathbf{v}^{\top}$. 
+
+We assume familiarity with transformers \citep{Vaswani2017}, and use the notation $D_{m}$ to denote the model width, $D_{k}$ to denote the query/key vector width, and $D_{v}$ to denote the value vector width. 
+
+\subsection{Vector Quantization}
+
+Vector quantization (VQ) is a technique used extensively throughout this work. In this subsection we briefly review vector quantization, motivate its use in self-attention, and discuss the backpropagation-compatible VQ scheme introduced by \citet{vanDenOord2017}. 
+
+\subsection{Vector Quantizers and Codebooks}
+
+\begin{definition}
+A \emph{vector quantizer} is a function $\text{VQ}(\cdot; \mathbf{C})$ with domain $\mathbb{R}^{D}$ and codomain $\mathbb{R}^{D}$. For an input $\mathbf{x}$, its output $\hat{\mathbf{x}}$ is given by 
+\begin{align}
+z &\triangleq \argmin_{s} || \mathbf{x} - \mathbf{C}_{s} ||^{2} \\
+\hat{\mathbf{x}} &\triangleq \mathbf{C}_{z}
+\end{align}
+where $\mathbf{C} \in \mathbb{R}^{S \times D}$ is known as the \emph{codebook}. The row indices $\{0, \ldots, S-1\}$ of $\mathbf{C}$ are called \emph{shortcodes}, and the rows themselves are called \emph{codewords}. 
+\end{definition}
+
+\begin{theorem}[Based on \citet{RGuo2019}]\label{thm_dotmin}
+Let $\mathbf{q} \in \mathbb{R}^{D}$ be a random variable with $\mathbb{E}_{\mathbf{q}}[\mathbf{q}\mathbf{q}^{\top}] = \sigma^{2} \mathbf{I}_{D}$ for some $\sigma > 0$, and let $\mathbf{k} \in \mathbb{R}^{D}$ be a random variable independent of $\mathbf{q}$. Let $\varphi : \mathbb{R}^{D} \to \mathbb{R}^{D}$ be a deterministic function. Then
+\begin{align}
+\mathbb{E}_{\mathbf{q}, \mathbf{k}} || \mathbf{q}^{\top}\mathbf{k} - \mathbf{q}^{\top}\varphi(\mathbf{k})||^{2} &\propto \mathbb{E}_{\mathbf{k}} || \mathbf{k} - \varphi(\mathbf{k})||^{2}.
+\end{align}
+\end{theorem}
+
+\begin{corollary}\label{coro_vq_is_minimizer}
+Let the conditions of Theorem \ref{thm_dotmin} hold. Given the constraint that $\varphi(\mathbb{R}^{D}) = \{ \mathbf{C}_{s} \}_{s=0}^{S-1}$, the choice $\varphi(\cdot) = \text{VQ}(\cdot; \mathbf{C})$ minimizes $\mathbb{E}_{\mathbf{q}, \mathbf{k}} || \mathbf{q}^{\top}\mathbf{k} - \mathbf{q}^{\top}\varphi(\mathbf{k})||^{2}$. 
+\end{corollary}
+
+\begin{corollary}
+Let the conditions of Theorem \ref{thm_dotmin} hold. With $\hat{\mathbf{k}} = \text{VQ}(\mathbf{k}; \mathbf{C})$ we have 
+\begin{align}
+\argmin_{\mathbf{C}} \mathbb{E}_{\mathbf{q}, \mathbf{k}} || \mathbf{q}^{\top}\mathbf{k} - \mathbf{q}^{\top}\hat{\mathbf{k}}||^{2}
+&= \argmin_{\mathbf{C}} \mathbb{E}_{\mathbf{k}} ||\mathbf{k} - \hat{\mathbf{k}}||^{2}.
+\end{align}
+\end{corollary}
+
+\begin{remark}
+Fnding the global minimizer $\mathbf{C}^{*} = \argmin_{\mathbf{C}} \mathbb{E}_{\mathbf{k}} ||\mathbf{k} - \hat{\mathbf{k}}||^{2}$ is expensive, so in practice we approximate it using the method from \citet{vanDenOord2017, Razavi2019}. 
+\end{remark}
+
+\subsection{Vector-Quantized Representation Learning}
+
+\begin{definition}[Based on \citet{vanDenOord2017}]
+A \emph{vector-quantizer with straight-through estimator} is a function $\text{STVQ}(\cdot; \mathbf{C})$ with domain $\mathbb{R}^{D}$ and codomain $\mathbb{R}^{D}$. For an input $\mathbf{x}$, its output $\hat{\mathbf{x}}$ is given by 
+\begin{align}
+z &\triangleq \argmin_{s} || \mathbf{x} - \mathbf{C}_{s} ||^{2} \\
+\hat{\mathbf{x}} &\triangleq \mathbf{x} + \text{SG}(\mathbf{C}_{z} - \mathbf{x}).
+\end{align}
+\end{definition}
+
+\begin{remark}
+For any $\mathbf{x} \in \mathbb{R}^{D}$, $\text{STVQ}(\mathbf{x}; \mathbf{C})$ evaluates to $\text{VQ}(\mathbf{x}; \mathbf{C})$. However, for purposes of backpropagation, the Jacobian of the quantizer w.r.t. its input will now be an identity matrix everywhere, instead of a zero matrix almost everywhere. Intuitively, when using $\text{STVQ}$, gradients w.r.t. the quantizer outputs are copied `straight through' to the inputs. 
+\end{remark}
+
+\begin{remark}
+We overload the notation $\text{STVQ}(\cdot; \mathbf{C})$ to operate row-wise on matrix-valued inputs. 
+\end{remark}
+
+
+
+\section{Transformer-VQ}
+
+
+We now propose Transformer-VQ, a decoder-only transformer that can compute dense self-attention in linear time.
+
+\subsection{Quadratic-Time Formulation}
+
+\begin{definition}\label{def_vqattn}
+\emph{Vector-Quantized Self-Attention} is a function $\text{VQAttn}(\cdot; \mathbf{C}, \mathbf{W}_{\{Q, K, V, G, O\}})$ with domain $\mathbb{R}^{T \times D_{m}}$ and codomain $\mathbb{R}^{T \times D_{m}}$. For an input $\mathbf{X},$ its output $\mathbf{Y}$ is defined via
+\begin{align}
+\tilde{\mathbf{X}} &\triangleq \text{LN}(\mathbf{X}) \in \mathbb{R}^{T \times D_{m}} \\
+\mathbf{Q} &\triangleq \tau^{-0.5}\text{LN}(\tilde{\mathbf{X}}\mathbf{W}_{Q}) \in \mathbb{R}^{T \times D_{k}} \\
+\mathbf{K} &\triangleq \tau^{-0.5}\text{LN}(\tilde{\mathbf{X}}\mathbf{W}_{K}) \in \mathbb{R}^{T \times D_{k}} \\
+\mathbf{V} &\triangleq \phi_{v}(\tilde{\mathbf{X}}\mathbf{W}_{V}) \in \mathbb{R}^{T \times D_{v}} \\
+\mathbf{G} &\triangleq \phi_{g}(\tilde{\mathbf{X}}\mathbf{W}_{G}) \in \mathbb{R}^{T \times D_{v}} \\
+\hat{\mathbf{K}} &\triangleq \text{STVQ}(\mathbf{K}; \mathbf{C})  \in \mathbb{R}^{T \times D_{k}} \\
+\mathbf{W} &\triangleq \phi_{w}(\mathbf{Q}\hat{\mathbf{K}}^{\top} + \mathbf{B}) \in \mathbb{R}^{T \times T} \\
+\mathbf{O} &\triangleq (\mathbf{W}\mathbf{V}) \odot \mathbf{G} \in \mathbb{R}^{T \times D_{v}} \\
+\mathbf{Y} & \triangleq \mathbf{X} + \mathbf{O}\mathbf{W}_{O} \in \mathbb{R}^{T \times D_{m}} 
+\end{align}
+where each $\mathbf{W}_{\bullet}$ denotes a trainable projection, $\mathbf{B}$ denotes positional biases and/or mask, $\tau$ is a fixed constant, and the $\phi_{v}, \phi_{g}, \phi_{w}$ are element-wise or row-wise nonlinearities. The query/key LayerNorms use unit gain and zero bias, and $\text{STVQ}(\cdot; \mathbf{C})$ denotes row-wise application of vector-quantization with a straight-through gradient estimator \citep{vanDenOord2017}. 
+\end{definition}
+
+\begin{remark}
+Our attention mechanism is applied to a gated attention unit (GAU) design inspired by \citet{WHua2022}. GAU is a single-headed gated attention mechanism and generally uses a small key width $D_{k} = 128$, and a large value width $D_{v} = 2D_{m}$, with two GAUs replacing a single transformer layer. This yields a similar parameter count and compute requirement as the usual transformer layer. 
+\end{remark}
+
+\begin{remark}
+Prior work has also applied LayerNorm or similar to the queries and keys in attention \citep{Henry2020, Roy2021, CZhu2021, Wu2022, Hutchins2022, Dehghani2023, Elsen2023}, generally finding it to improve numerical stability and convergence. 
+\end{remark}
+
+\subsection{Warmup: Linear-Time Encoder Attention}
+
+To simplify the theorems for decoder-only attention and build intuition, we first discuss a setting where there is no causal mask. 
+
+\begin{theorem}\label{thm_noncausal_elementwisephi_factorizable}
+Suppose $\mathbf{B}_{i, j} = 0$ for all $i, j$, and $\phi_{w}$ is an element-wise nonlinearity. Then the attention weights in Definition \ref{def_vqattn} can be factored:
+\begin{align}
+\mathbf{W} &\triangleq \phi_{w}(\mathbf{Q}\hat{\mathbf{K}}^{\top} + \mathbf{B}) \\
+&= \phi_{w}(\mathbf{Q}\hat{\mathbf{K}}^{\top}) \\
+&= \phi_{w}(\mathbf{Q}\mathbf{C}^{\top}) \mathbf{\Delta} 
+\end{align}
+where $\phi_{w}(\mathbf{Q}\mathbf{C}^{\top}) \in \mathbb{R}^{T \times S}$, $\mathbf{\Delta} \in \mathbb{R}^{S \times T}$ and $\mathbf{\Delta}_{s, t} \triangleq \delta_{s, z_{t}}$. Here, $\delta_{\cdot, \cdot}$ denotes the Kronecker delta function and $z_{t}$ is the VQ shortcode for timestep $t$. 
+\end{theorem}
+
+\begin{figure}[h]
+\begin{center}
+\begin{tikzpicture}
+  \matrix (W) [matrix of math nodes, nodes in empty cells,
+               nodes={draw, minimum size=1mm, anchor=center, line width=0.2pt}, 
+               row 1 column 1/.style={nodes={fill=blue!10}},
+               row 2 column 1/.style={nodes={fill=blue!50}},
+               row 3 column 1/.style={nodes={fill=blue!30}},
+               row 4 column 1/.style={nodes={fill=blue!10}},
+               row 5 column 1/.style={nodes={fill=blue!30}},
+               row 6 column 1/.style={nodes={fill=blue!10}},
+               row 7 column 1/.style={nodes={fill=blue!50}},
+               row 1 column 4/.style={nodes={fill=blue!10}},
+               row 2 column 4/.style={nodes={fill=blue!50}},
+               row 3 column 4/.style={nodes={fill=blue!30}},
+               row 4 column 4/.style={nodes={fill=blue!10}},
+               row 5 column 4/.style={nodes={fill=blue!30}},
+               row 6 column 4/.style={nodes={fill=blue!10}},
+               row 7 column 4/.style={nodes={fill=blue!50}},
+               row 1 column 5/.style={nodes={fill=blue!10}},
+               row 2 column 5/.style={nodes={fill=blue!50}},
+               row 3 column 5/.style={nodes={fill=blue!30}},
+               row 4 column 5/.style={nodes={fill=blue!10}},
+               row 5 column 5/.style={nodes={fill=blue!30}},
+               row 6 column 5/.style={nodes={fill=blue!10}},
+               row 7 column 5/.style={nodes={fill=blue!50}},
+               row 1 column 2/.style={nodes={fill=blue!50}},
+               row 2 column 2/.style={nodes={fill=blue!30}},
+               row 3 column 2/.style={nodes={fill=blue!10}},
+               row 4 column 2/.style={nodes={fill=blue!50}},
+               row 5 column 2/.style={nodes={fill=blue!30}},
+               row 6 column 2/.style={nodes={fill=blue!10}},
+               row 7 column 2/.style={nodes={fill=blue!10}},
+               row 1 column 7/.style={nodes={fill=blue!50}},
+               row 2 column 7/.style={nodes={fill=blue!30}},
+               row 3 column 7/.style={nodes={fill=blue!10}},
+               row 4 column 7/.style={nodes={fill=blue!50}},
+               row 5 column 7/.style={nodes={fill=blue!30}},
+               row 6 column 7/.style={nodes={fill=blue!10}},
+               row 7 column 7/.style={nodes={fill=blue!10}},
+               row 1 column 3/.style={nodes={fill=blue!30}},
+               row 2 column 3/.style={nodes={fill=blue!10}},
+               row 3 column 3/.style={nodes={fill=blue!30}},
+               row 4 column 3/.style={nodes={fill=blue!10}},
+               row 5 column 3/.style={nodes={fill=blue!30}},
+               row 6 column 3/.style={nodes={fill=blue!50}},
+               row 7 column 3/.style={nodes={fill=blue!30}},
+               row 1 column 6/.style={nodes={fill=blue!30}},
+               row 2 column 6/.style={nodes={fill=blue!10}},
+               row 3 column 6/.style={nodes={fill=blue!30}},
+               row 4 column 6/.style={nodes={fill=blue!10}},
+               row 5 column 6/.style={nodes={fill=blue!30}},
+               row 6 column 6/.style={nodes={fill=blue!50}},
+               row 7 column 6/.style={nodes={fill=blue!30}},
+               ]
+  {
+     &   &   &   &   &   & \\
+     &   &   &   &   &   & \\
+     &   &   &   &   &   & \\
+     &   &   &   &   &   & \\
+     &   &   &   &   &   &  \\
+     &   &   &   &   &   & \\
+     &   &   &   &   &   &  \\
+  };
+    \node[below=0.2cm of W] {$\phi_{w}(\mathbf{Q}\hat{\mathbf{K}}^{\top}) \in \mathbb{R}^{T \times T}$};
+    
+  \node[right=0.75cm of W, font=\LARGE] {$\times$};
+
+  \matrix (V) [right=2.25cm of W, matrix of math nodes, nodes in empty cells,
+               nodes={draw, fill=green!50, minimum size=1mm, anchor=center, line width=0.2pt},
+               row 1 column 1/.style={nodes={fill=green!30}},
+               row 1 column 2/.style={nodes={fill=green!10}},
+               row 2 column 1/.style={nodes={fill=green!10}},
+               row 2 column 2/.style={nodes={fill=green!50}},
+               row 3 column 1/.style={nodes={fill=green!30}},
+               row 3 column 2/.style={nodes={fill=green!10}},
+               row 4 column 1/.style={nodes={fill=green!30}},
+               row 4 column 2/.style={nodes={fill=green!50}},
+               row 5 column 1/.style={nodes={fill=green!10}},
+               row 5 column 2/.style={nodes={fill=green!10}},
+               row 6 column 1/.style={nodes={fill=green!50}},
+               row 6 column 2/.style={nodes={fill=green!10}},
+               row 7 column 1/.style={nodes={fill=green!30}},
+               row 7 column 2/.style={nodes={fill=green!30}},
+               ]
+  {
+     &   \\
+     &   \\
+     &   \\
+     &   \\
+     &   \\
+     &   \\
+     &   \\
+  };
+  \node[below=0.2cm of V] {$\mathbf{V} \in \mathbb{R}^{T \times D_{v}}$};
+  
+  \node[right=0.75cm of V, font=\LARGE] {$=$};
+  
+  \matrix (P) [right=2.25cm of V, matrix of math nodes, nodes in empty cells,
+               nodes={draw, minimum size=1mm, anchor=center, line width=0.2pt},
+               row 1 column 1/.style={nodes={fill=blue!10}},
+               row 2 column 1/.style={nodes={fill=blue!50}},
+               row 3 column 1/.style={nodes={fill=blue!30}},
+               row 4 column 1/.style={nodes={fill=blue!10}},
+               row 5 column 1/.style={nodes={fill=blue!30}},
+               row 6 column 1/.style={nodes={fill=blue!10}},
+               row 7 column 1/.style={nodes={fill=blue!50}},
+               row 1 column 2/.style={nodes={fill=blue!50}},
+               row 2 column 2/.style={nodes={fill=blue!30}},
+               row 3 column 2/.style={nodes={fill=blue!10}},
+               row 4 column 2/.style={nodes={fill=blue!50}},
+               row 5 column 2/.style={nodes={fill=blue!30}},
+               row 6 column 2/.style={nodes={fill=blue!10}},
+               row 7 column 2/.style={nodes={fill=blue!10}},
+               row 1 column 3/.style={nodes={fill=blue!30}},
+               row 2 column 3/.style={nodes={fill=blue!10}},
+               row 3 column 3/.style={nodes={fill=blue!30}},
+               row 4 column 3/.style={nodes={fill=blue!10}},
+               row 5 column 3/.style={nodes={fill=blue!30}},
+               row 6 column 3/.style={nodes={fill=blue!50}},
+               row 7 column 3/.style={nodes={fill=blue!30}},
+  ]
+  {
+     &   &   \\
+     &   &   \\
+     &   &   \\
+     &   &   \\
+     &   &   \\
+     &   &   \\
+     &   &   \\
+  };
+  \node[below=0.3cm of P] {$\phi_{w}(\mathbf{Q}\mathbf{C}^{\top}) \in \mathbb{R}^{T \times S}$};
+
+  \node[right=0.75cm of P, font=\LARGE] {$\times$};
+
+  \matrix (U) [right=2.25cm of P, matrix of math nodes, nodes in empty cells,
+               nodes={draw, fill=green!50, minimum size=1mm, anchor=center, line width=0.2pt},
+               row 1 column 1/.style={nodes={fill=green!30}},
+               row 1 column 2/.style={nodes={fill=green!30}},
+               row 2 column 1/.style={nodes={fill=green!10}},
+               row 2 column 2/.style={nodes={fill=green!50}},
+               row 3 column 1/.style={nodes={fill=green!10}},
+               row 3 column 2/.style={nodes={fill=green!30}},
+               ]
+  {
+     &   \\
+     &   \\
+     &   \\
+  };
+  \node[below=0.8cm of U] {$\boldsymbol{\Delta}\mathbf{V} \in \mathbb{R}^{S \times D_{v}}$};
+ 
+ 
+\end{tikzpicture}
+\end{center}
+\vskip -0.1in
+\caption{Schematic of the VQ-Attention factorization with element-wise $\phi_{w}$. The column set of $\mathbf{W} = \phi_{w}(\mathbf{Q}\hat{\mathbf{K}}^{\top}) \in \mathbb{R}^{T \times T}$ has size $\leq S$ due to VQ, so the attention output $\mathbf{O} = \mathbf{W}\mathbf{V}$ can be obtained by computing the unique attention scores $\phi_{w}(\mathbf{Q}{\mathbf{C}}^{\top})$ and using them to further aggregate to the grouped-sum $\mathbf{\Delta}\mathbf{V}$. Transformer-VQ uses a softmax-based extension of this idea for its cache.}
+\vskip -0.1in
+\label{fig:vq_attn_cache}
+\end{figure}
+
+\begin{theorem}\label{thm_noncausal_softmaxphi_factorizable}
+Suppose $\mathbf{B}_{i, j} = 0$ for all $i, j$, and $\phi_{w}$ is the row-wise softmax nonlinearity. Then the attention weights in Definition \ref{def_vqattn} can be factored:
+\begin{align}
+\mathbf{W} &\triangleq \phi_{w}(\mathbf{Q}\hat{\mathbf{K}}^{\top} + \mathbf{B}) \\
+&= \phi_{w}(\mathbf{Q}\hat{\mathbf{K}}^{\top}) \\
+&= \Diag(\exp(\mathbf{Q}\mathbf{C}^{\top})\mathbf{\Delta}\mathbf{1})^{-1} \exp(\mathbf{Q}\mathbf{C}^{\top}) \mathbf{\Delta} 
+\end{align}
+where $\mathbf{1} \in \mathbb{R}^{T}$, $\Diag(\exp(\mathbf{Q}\mathbf{C}^{\top})\mathbf{\Delta}\mathbf{1})^{-1}\exp(\mathbf{Q}\mathbf{C}^{\top}) \in \mathbb{R}^{T \times S}$, $\mathbf{\Delta} \in \mathbb{R}^{S \times T}$ and $\mathbf{\Delta}_{s, t} \triangleq \delta_{s, z_{t}}$. Here, $\delta_{\cdot, \cdot}$ denotes the Kronecker delta function and $z_{t}$ is the VQ shortcode for timestep $t$. 
+\end{theorem}
+
+\subsection{Linear-Time Decoder Attention}
+
+\begin{theorem}\label{thm_causal_elementwisephi_recurse}
+Let $L$ be a divisor of $T$. Suppose $\mathbf{B}_{i, j} = -\infty$ for $j > i$ (causal masking), and $\mathbf{B}_{i, j} = 0$ for $j < i - L$ (no bias outside a sliding window). Define $\mathbf{\Delta} \in \mathbb{R}^{S \times T}$ with $\mathbf{\Delta}_{s, t} \triangleq \delta_{s, z_{t}}$. Let $\phi_{w}$ be an element-wise nonlinearity with $\phi_{w}(-\infty) = 0$. For a tensor $\mathbf{M}$, let $\mathbf{M}_{(\ldots, n, \ldots)}$ denote the slice $\mathbf{M}_{\ldots, nL:(n+1)L, \ldots}$, where unsliced dimensions will be denoted by `$:$'. Then the product $\mathbf{WV}$ in Definition \ref{def_vqattn} can be computed using the following block-level recurrence:
+\begin{align}
+\mathbf{U}(n) &\triangleq 
+\begin{cases} \mathbf{U}(n-1) + \mathbf{\Delta}_{(:, n)}\mathbf{V}_{(n, :)} & \text{ if } n \geq 0 \\
+\boldsymbol{0} & \text{ otherwise } \\
+\end{cases} \\
+(\mathbf{W}\mathbf{V})_{(n, :)} &= \phi_{w}(\mathbf{Q}_{(n, :)}\mathbf{C}^{\top})\mathbf{U}(n-2) \\
+&\quad\quad + \phi_{w}(\mathbf{Q}^{(n, :)}\hat{\mathbf{K}}_{(n-1, :)}^{\top} + \mathbf{B}_{(n, n-1)})\mathbf{V}_{(n-1, :)} \\
+&\quad\quad + \phi_{w}(\mathbf{Q}^{(n, :)}\hat{\mathbf{K}}_{(n, :)}^{\top} + \mathbf{B}_{(n, n)})\mathbf{V}_{(n, :)}
+\end{align}
+where any tensor slice $\mathbf{M}_{(\ldots, n, \ldots)}$ is defined as a zero tensor of width $L$ in the sliced dimension if any block slice index $n$ is less than zero (zero-padding). 
+\end{theorem}
+
+\begin{theorem}\label{thm_causal_softmax_recurse}
+Let the assumptions of Theorem \ref{thm_causal_elementwisephi_recurse} hold, but suppose $\phi_{w}$ is now the row-wise softmax nonlinearity. Let $\mathbf{1} \in \mathbb{R}^{T}$. Let $\mathbf{A} \triangleq \exp(\mathbf{Q}\hat{\mathbf{K}}^{\top} + \mathbf{B})$. Then the product $\mathbf{WV}$ in Definition \ref{def_vqattn} can be computed using the following block-level recurrence:
+\begin{align}
+\mathbf{U}(n) &\triangleq 
+\begin{cases} \mathbf{U}(n-1) + \mathbf{\Delta}_{(:, n)}\mathbf{V}_{(n, :)} & \text{ if } n \geq 0 \\
+\boldsymbol{0} & \text{ otherwise } \\
+\end{cases} \\
+\mathbf{L}(n) &\triangleq 
+\begin{cases} \mathbf{L}(n-1) + \mathbf{\Delta}_{(:, n)}\mathbf{1}_{(n)} & \text{ if } n \geq 0 \\
+\boldsymbol{0} & \text{ otherwise } \\
+\end{cases} \\
+(\mathbf{A}\mathbf{V})_{(n, :)} &= \exp(\mathbf{Q}_{(n, :)}\mathbf{C}^{\top})\mathbf{U}(n-2) \\
+&\quad\quad + \exp(\mathbf{Q}_{(n, :)}\hat{\mathbf{K}}_{(n-1, :)}^{\top} + \mathbf{B}_{(n, n-1)})\mathbf{V}_{(n-1, :)} \\
+&\quad\quad + \exp(\mathbf{Q}_{(n, :)}\hat{\mathbf{K}}_{(n, :)}^{\top} + \mathbf{B}_{(n, n)})\mathbf{V}_{(n, :)} \\
+(\mathbf{A}\mathbf{1})_{(n)} &= \exp(\mathbf{Q}_{(n, :)}\mathbf{C}^{\top})\mathbf{L}(n-2) \\
+&\quad\quad + \exp(\mathbf{Q}_{(n, :)}\hat{\mathbf{K}}_{(n-1, :)}^{\top} + \mathbf{B}_{(n, n-1)})\mathbf{1}_{(n-1)} \\
+&\quad\quad + \exp(\mathbf{Q}_{(n, :)}\hat{\mathbf{K}}_{(n, :)}^{\top} + \mathbf{B}_{(n, n)})\mathbf{1}_{(n)} \\
+(\mathbf{W}\mathbf{V})_{(n, :)} &= \Diag((\mathbf{A}\mathbf{1})_{(n)})^{-1}(\mathbf{A}\mathbf{V})_{(n, :)}.
+\end{align}
+\end{theorem}
+
+\begin{remark}
+Theorem \ref{thm_causal_softmax_recurse} provides an algorithm to compute VQ-Attention from the queries, keys, values, gates, and codebook in $\mathcal{O}(L(S + 2L)(D_{k} + D_{v}))$ time per query block, and therefore $\mathcal{O}(T(S + 2L)(D_{k} + D_{v}))$ time per sequence. 
+\end{remark}
+
+\begin{remark}\label{remark:stability}
+For numerical stability, we use an equivalent implementation of Theorem \ref{thm_causal_softmax_recurse} that stores the running mean of the value vectors assigned to a given shortcode, instead of the sum as done by $\mathbf{U}(n-2)$. The result is made equivalent by moving the logarithm of the counts $\mathbf{L}(n-2)$ inside the exponentials $\exp(\mathbf{Q}_{(n, :)}\mathbf{C}^{\top})$ appearing in $(\mathbf{A}\mathbf{V})_{(n, :)}$ and $(\mathbf{A}\mathbf{1})_{(n)}$. 
+\end{remark}
+
+\begin{remark}
+The general strategy of computing un-normalized softmax and its denominator is also used by many prior methods, including Memory-Efficient Attention \citep{RabeStaats2021}, FlashAttention \citep{Dao2022}, and RWKV \citep{Peng2023}; however, the first two techniques do not run in linear time, and the last one couples a recurrent state size to the model width, which is contrary to the principle of transformers. 
+\end{remark}
+
+\subsection{Learning Algorithm}
+
+\subsubsection{Training Loss}
+Let $\boldsymbol{\theta}$ denote the set of non-codebook parameters of a transformer with $N$ VQ-Attention layers, and let $\mathcal{C} = \{ \mathbf{C}^{(\ell)} \}_{\ell=0}^{N-1}$ denote the set of the layers' codebooks. For autoregressive modeling of a sequence $\mathbf{X} = \{ \mathbf{x}_{t} \}_{t=0}^{T}$, we define the Transformer-VQ training loss as 
+\begin{align}
+\mathcal{L}(\mathbf{X}; \boldsymbol{\theta}, \mathcal{C}) &= \mathcal{L}_{\text{CE}}(\mathbf{X}; \boldsymbol{\theta}, \mathcal{C}) + \beta \mathcal{L}_{\text{VQ}}(\mathbf{X}; \boldsymbol{\theta}, \mathcal{C})
+\end{align}
+where $\beta > 0$ is a hyperparameter known as the commit loss coefficient, and
+\begin{align}
+\mathcal{L}_{\text{CE}}(\mathbf{X}; \boldsymbol{\theta}, \mathcal{C}) &\triangleq \frac{1}{T}\sum_{t=0}^{T-1} -\ln p(\mathbf{x}_{t+1} | \mathbf{x}_{\leq t}, \boldsymbol{\theta}, \mathcal{C}) \\
+\mathcal{L}_{\text{VQ}}(\mathbf{X}; \boldsymbol{\theta}, \mathcal{C}) &\triangleq \frac{1}{T}\sum_{t=0}^{T-1} \sum_{\ell=0}^{N-1} || \mathbf{K}_{t}^{(\ell)} - \text{SG}(\mathbf{C}_{z_{t}}^{(\ell)}) ||_{2}^{2}.
+\end{align}
+Thus, the training loss is the average next-token cross-entropy loss, plus the average token's commitment losses \citep{vanDenOord2017}, summed over layer codebooks. 
+The non-codebook parameters $\boldsymbol{\theta}$ receive a gradient from both loss terms. Following \citet{vanDenOord2017, Razavi2019}, codebooks are parameterized using EMA-smoothed k-means.
+
+\subsubsection{Training Updates}\label{training_updates}
+
+Instead of updating on the full sequence loss given above, we generally update every $W/L$ query blocks, where $W \ll T$, which resembles a strategy used in prior works \citep{ZDai2019, Wu2022, Hutchins2022}. 
+
+Each update is obtained by backpropagating through a window of $W$ timesteps, with gradients computed on the corresponding terms in the per-token average losses above. Codebooks are also updated every $W/L$ query blocks. 
+
+When $W/L = 1$, using Theorem \ref{thm_causal_softmax_recurse} is an efficient equivalent to a variable-length key-value cache. When $W/L > 1$, a learning signal is sent through any value vectors added to the compressed cache within the backpropagation window. 
+
+
+
+\section{Related Work}
+
+
+\subsection{Hierarchical Attention}
+
+Combiner \citep{Ren2021} proposes an approximation of softmax using a simple graphical model, and parameterizes its internal probabilities using max-pooling over query/key features, enabling decoder-only self-attention in subquadratic time. H-Transformer-1D \citep{ZZhu2021} uses average-pooling operations over queries/keys to reduce the complexity of encoder-only self-attention. Transformer-LS \citep{CZhu2021} uses dynamic projections to downsample long-range features in transformers by a user-specified factor. Hourglass Transformer \citep{Nawrot2021} and MegaByte \citep{Yu2023} eschew pooling in favor of convolutions or reshaping for temporal downsampling, and apply these techniques to reduce computation in the interior layers of decoder-only transformers. 
+
+Transformer-VQ differs from these works in that it uses vector quantization (VQ), a well-understood method for compression, instead of newly-designed heuristic methods. In addition, it does not rely on token contiguity to guide the compression process. Instead, it utilizes an equivalence to dense attention. Notably, Transformer-VQ is easier to sample from compared to previous hierarchical attention models; since the cache update logic can be equivalently applied every token instead of every $L$ tokens, there are no sporadic `feature consolidation' operations required during sampling. 
+
+\subsection{Kernelizable Attention}
+
+Kernelizable attention \citep{Katharopoulos2020, Choromanski2021, Peng2021, ZQin2022Cosformer} computes query and key features and applies the same nonlinearity to both of them separately, omitting additional nonlinearities when computing attention weights. By using the associativity of matrix multiplication, kernelized attention reduces attention to linear complexity. Transformer-VQ is distinguished from kernelizable attention through an asymmetric treatment of queries and keys, a deterministic equivalence to softmax-based attention, training stability, and strong quantitative results on long-context autoregressive modeling benchmarks. 
+
+Clustering attention \citep{Vyas2020} uses vector-quantized queries and is also kernelizable. However, it requires learning per-layer codebooks for each sequence and uses a modified form of Lloyd's iterations based on Hamming distance and locality-sensitive hashing. This yields a complex non-causal algorithm which is only suitable for non-causal attention and is slow on TPUs. Transformer-VQ is strongly differentiated from clustering attention by its simplicity, applicability to decoder-only tasks, efficiency on TPUs, and large-scale experimental validation. 
+
+\subsection{Compressive Attention}
+
+Compressive Transformers \citep{Rae2020} directly learn a compression function for long-range features. LUNA \citep{XMa2021} and Recurrent Transformers \citep{Bulatov2022, Hutchins2022} use cross-attention to compress long-range features into a recurrent state. Notably, our model implements a kind of block-recurrent mechanism for its cache, but is significantly more parameter-efficient than the mechanisms proposed by \citet{XMa2021, Hutchins2022}. More generally, Transformer-VQ differs from compressive/recurrent transformers in that it has an equivalence to quadratic-time attention over vector-quantized keys. In other words, if the keys are already vector-quantized, the Transformer-VQ cache losslessly reduces the cost to linear time. 
+
+Perceivers \citep{Jaegle2021, Hawthorne2022} use cross-attention to attend to long sequences, and compute self-attention over only a narrow stack of `latents'. Transformer-VQ differs from Perceivers in that it computes dense self-attention in linear time, instead of just cross-attention. Thus, while Perceivers' long-range layers incur a quadratic time complexity during sampling, Transformer-VQ generates sequences in linear time. 
+
+\subsection{Gated Sequence Models}
+
+Gated attention was introduced in FLASH \citep{WHua2022} as a fusion of attention sublayers \citep{Vaswani2017} and GLU-based MLP sublayers \citep{Shazeer2020}. 
+Various gating mechanisms have previously been used to stabilize training of transformers \citep{Parisotto2019} and other sequence models including S4 \citep{AGu2022}, GSS \citep{Mehta2022}, MEGA \citep{XMa2023} and RWKV \citep{Peng2023}. Transformer-VQ uses the original gating formulation from \citet{WHua2022}, and develops a new attention mechanism.
+
+\subsection{VQ, K-Means, and Beyond}
+
+Ideas relating to $k$-means, vector quantization, and/or codebooks have also been applied in transformers for sparse attention \citep{Roy2021, ShWang2021, NWang2022}, feature learning \citep{CMao2022, Roy2022}, sparsely-activated MLPs \citep{Lample2019}, and expert selection \citep{Roller2021}. These works generally feature codebooks or similar \emph{within} a transformer architecture. Several works also have proposed models that feature a codebook somewhere \emph{outside} a transformer, e.g., when transformers are priors for VQ-VAEs \citep{Kaiser2018, Dhariwal2020, Ramesh2021, DLee2022, SZhou2022}. Transformer-VQ uses one codebook within each layer and, in contrast to all of the aforementioned works, computes dense self-attention in linear time. 
+
+Transformer-VQ is not directly related to methods which quantize the weights of a transformer e.g., \citet{Dettmers2022, Dettmers2023, Frantar2023}. Such methods are typically applied after training to reduce the memory overhead of the model weights, while still computing in higher precision. As such, they do not affect the bitwidth of the queries, keys, or values, nor the complexity of self-attention. However, if applying our method to large models, these approaches may be complementary during inference. 
+
+
+
+\section{Experiments}
+
+\label{section:experiments}
+
+Transformer-VQ is implemented in Jax \citep{Bradbury2018} and Flax \citep{Heek2023}. For training, we use TPU v3 pod slices \citep{Jouppi2017}. 
+
+\subsection{Preliminary Studies}
+
+\subsubsection{Codebook Size Ablations}
+Larger codebook sizes may allow more flexible attention patterns and could improve the fidelity of the gradients, both of which are likely to benefit model quality at the expense of additional wall time. To investigate, we ablate the codebook size $S$ using the Enwik8 dataset (described in $\S$ \ref{quant:enwik8}), and report the lowest validation bits-per-byte (BPB, lower is better) obtained by each model in Table \ref{table:codebook_ablation}.
+\begin{table}[h]
+\begin{minipage}{.5\linewidth}
+\centering
+\caption{Codebook size ablations.}
+\label{table:codebook_ablation}
+\medskip
+\begin{small}
+\begin{tabular}{l l l}
+\toprule
+\bf Setting & \bf Val. BPB & \bf Latency (Rel.) \\
+\midrule
+$S = 256$ & 1.010 & \bf 0.927 \\
+$S = 512$ & 1.005 & 1.0 \\
+$S = 1024$ & \bf 1.000 & 1.109 \\
+\bottomrule
+\end{tabular}
+\end{small}
+\end{minipage}
+\hfill
+\begin{minipage}{.5\linewidth}
+\centering
+\caption{Compressive cache ablation.}
+\label{table:cache_ablation}
+\medskip
+\begin{small}
+\begin{tabular}{l l l}
+\toprule
+\bf Compressive cache & \bf Val. BPB & \bf Latency (Rel.) \\
+\midrule
+No & 1.026 & \bf 0.836 \\
+Yes & \bf 1.010 & 0.927 \\
+\bottomrule
+\end{tabular}
+\end{small}
+\end{minipage}
+\end{table}
+
+Table \ref{table:codebook_ablation} confirms the intuition that larger codebooks improve the prediction quality (lower BPB) in return for additional wall time per training step. In particular, for this dataset and model size, increasing the codebook size by a factor of two appears to decrease the validation BPB by about a factor of $0.995$. This result may suggest that the validation loss follows a power-law scaling \citep{Kaplan2020} w.r.t. codebook size, though more experiments are needed to verify this phenomenon, and it is subject to the caveat that the validation loss must eventually level off \citep{Henighan2020, JHoffmann2022}, as the model cannot be expected to obtain zero loss at infinite codebook size. 
+
+\subsubsection{Compressive Cache Ablation}
+Since our model has several architectural differences from most prior works, the benefit of the compressive cache must be shown directly. To investigate, we train a model with the compressive cache omitted, using codebook size $S = 256$. We report the validation BPB for Enwik8 in Table \ref{table:cache_ablation}. 
+
+As shown in Table \ref{table:cache_ablation}, removing the compressive cache reduces the wall time per step by a factor of about $1.1$ at the evaluated model size, but leads to a significant drop in quality (higher bits-per-byte). This confirms the importance of our compressive cache mechanism.  
+
+\subsubsection{Latency and Throughput}
+
+We now measure the training latency (seconds per step) and compute the training throughput (tokens per second). The latter is computed as tokens per batch divided by latency, and allows a direct efficiency comparison across different sequence lengths. We benchmark on a TPU v3 with 8 cores, using a global batch size of 8 sequences. For these experiments, we scale the sequence length $T$ by multiples of $4\times$, and backpropagate through the entire sequence length.
+
+We compare an unquantized quadratic-time full attention baseline (`Full') to our proposed linear-time VQ-Attention (`VQ') using Theorem \ref{thm_causal_softmax_recurse}. Since this theorem does not require access to the output gates, VQ-Attention can be extended to multi-head attention variants as well. For each attention type, we therefore benchmark three head types: multi-head attention (`MHA'; \citet{Vaswani2017}), multi-query attention (`MQA'; \citet{Shazeer2019}), and single-head gated attention (`SHGA' aka GAU; \citet{WHua2022}). 
+For VQ-attention, we use codebook size $S = 512$ and block length $L = 512$, which is the same as our later experiments. All models use roughly 190M parameters total. 
+
+As shown in Table \ref{table:throughput_190m_serial}, our model has a 3x lower latency/3x higher throughput than the quadratic attention baseline at $T=8192$ when using SHGA for both. Moreover, Transformer-VQ is over 6x faster than the quadratic-time baselines when using MQA/MHA for both models. As the sequence length increases to $T=32768$, Transformer-VQ is over 12x faster than the quadratic time baseline when both use SHGA. For MQA/MHA, the quadratic-time attention gives an out-of-memory error at $T=32768$, while Transformer-VQ maintains comparable or better throughput than with 4x shorter sequences. Table \ref{table:throughput_190m_matmul} even shows that Transformer-VQ can scale to sequences of length $T=131072$ without a substantial decrease in throughput and without running out of memory. 
+
+\subsection{Quantitative Results}\label{quant_results}
+To assess the ability of Transformer-VQ to learn long-range dependencies, we now conduct a series of large-scale experiments, benchmarking on several long-range autoregressive modeling tasks. For fair comparison, we only benchmark against models (a) trained without using any extra data or augmentation, and (b) evaluated with fixed parameters. In all cases, we use codebook size $S = 512$. 
+
+\subsubsection{Enwik8}\label{quant:enwik8}
+
+\begin{wraptable}{r}{6.0cm}
+\centering
+\vskip -0.25in
+\caption{Test bits-per-byte on Enwik8.}
+\vskip -0.1in
+\label{table:enwik8_bpb}
+\medskip
+\begin{small}
+\begin{tabular}{l l}
+\toprule
+\bf Model & \bf BPB \\
+\midrule
+\citet{ZDai2019} - XL & 0.99 \\
+\citet{Child2019} - Sparse & 0.99 \\
+\citet{Beltagy2020} - Longform. & 0.99 \\
+\citet{Roy2021} - Routing & 0.99 \\
+\citet{Sukhbaatar2019a} - Adapt. & 0.98 \\
+\citet{Nawrot2021} - Hourglass & 0.98 \\
+\citet{Rae2020} - Compress. & 0.97 \\
+\citet{CZhu2021} - Long-Short & 0.97 \\
+\citet{AFan2020b} - Feedback & 0.96 \\
+\citet{Lei2021} - SRU++ & 0.95 \\
+\citet{Sukhbaatar2021} - Expire. & 0.95 \\
+\citet{Lutati2023} - Focus Attn. & \bf 0.94 \\
+\midrule
+Transformer-VQ & 0.99 \\
+\bottomrule
+\end{tabular}
+\end{small}
+\vskip -0.4in
+\end{wraptable}
+
+Enwik8 is a byte-level language modeling dataset consisting of 100 million bytes of unprocessed English-language Wikipedia articles \citep{Mahoney2011}, with long-term dependencies that may span tens of thousands of bytes. Per convention, it is split into train, validation, and test sets of 90 million, 5 million, and 5 million bytes, respectively \citep{Child2019, Rae2020}. 
+
+For this dataset, we trained a Transformer-VQ with 190M parameters, smaller than the model by \citet{ZDai2019}. We report test bits-per-byte (BPB) in Table \ref{table:enwik8_bpb}. 
+
+Transformer-VQ obtains a BPB of 0.99, notably matching the result of the large Transformer-XL model from \citet{ZDai2019}, while using 33\% fewer parameters and a 75\% shorter cache that covers a longer context. 
+
+For this dataset, we found overfitting was a significant issue, and due to the compressive cache mechanism, using i.i.d. attention dropout was not possible. Sweeping over the residual dropout rate, weight decay coefficient, and layerdrop \citep{AFan2020a} rate, we found a setting yielding good generalization. Nonetheless Transformer-VQ does fall short of state-of-the-art here, with several works using complex recurrence or forgetting mechanisms and obtaining better Enwik8 results. 
+
+\subsubsection{PG-19}
+
+PG-19 is an open-vocabulary language modeling dataset consisting of 11 gigabytes of text from over 28,000 freely-available Project Gutenberg books published prior to 1919 \citep{Rae2020}. The average number of words per book is nearly 70,000, enabling learning long-term dependencies, especially in novels \citep{Sun2021, Hutchins2022}. 
+
+For this dataset, we trained a Transformer-VQ with 1.3B parameters, similar to the largest model by \citet{Hutchins2022}. Since PG-19 is an open-vocabulary dataset, we first learned a SentencePiece vocabulary \citep{Kudo2018} of size 32,000 using the BPE method. Following the calculations of \citet{Rae2020}, we report the test set word-level perplexity (WLP) in Table \ref{table:pg19_wlp}. 
+
+\begin{table}[h]
+\begin{minipage}{.5\linewidth}
+\centering
+\caption{Test word-level perplexity on PG-19.}
+\label{table:pg19_wlp}
+\medskip
+\begin{small}
+\begin{tabular}{l l}
+\toprule
+\bf Model & \bf WLP \\
+\midrule
+\citet{Yu2023} - MegaByte & 36.4 \\
+\citet{Rae2020} - XL & 36.3 \\
+\citet{Rae2020} - Compressive & 33.6 \\
+\citet{Roy2021} - Routing & 33.2 \\
+\citet{Hawthorne2022} - Perceiver AR & 28.9 \\
+\citet{Hutchins2022} - Block-Recur. & \bf 26.5 \\
+\midrule
+Transformer-VQ & $26.6$ \\
+\bottomrule
+\end{tabular}
+\end{small}
+\end{minipage}
+\hfill
+\begin{minipage}{.5\linewidth}
+\centering
+\caption{Validation bits-per-byte on ImageNet64.}
+\label{table:imagenet64_bpb}
+\medskip
+\begin{small}
+\begin{tabular}{l l}
+\toprule
+\bf Model & \bf BPB \\
+\midrule
+\citet{Kingma2021} - VDM & 3.40 \\
+\citet{Hawthorne2022} - Perceiver AR & 3.40 \\
+\citet{Yu2023} - MegaByte & 3.40 \\
+\citet{Grcic2021} - DenseFlow & 3.35 \\
+\citet{Lipman2023} - Flow Matching & 3.31 \\
+\citet{Hazami2022} - Efficient VDVAE & 3.30 \\
+\midrule
+Transformer-VQ (190M) & \bf 3.22 \\
+Transformer-VQ (1.2B) & \bf 3.16 \\
+\bottomrule
+\end{tabular}
+\end{small}
+\end{minipage}
+\end{table}
+
+Transformer-VQ obtains a WLP of 26.6, very close to the state-of-the-art by Block-Recurrent Transformers \citep{Hutchins2022}. Interestingly, since our Transformer-VQ design is equivalent to using dense self-attention with vector-quantized keys, our strong result shows that models using self-attention only (no recurrence) can also be highly competitive on PG-19. This affirms the efficacy of standalone self-attention as a method for sequence processing at scale. Lastly, we avoid the instabilities of FLASH \citep{ZQin2022Devil, XMa2023} thanks to softmax normalization and our cache normalization ($\S$ \ref{remark:stability}). 
+
+\subsubsection{ImageNet64}
+
+ImageNet64 is an image dataset consisting of over 1.2 million images downsampled to 64x64 resolution \citep{Chrabaszcz2017, Deng2009}. Flattening the images yields an autoregressive density estimation task on sequences of over 12,000 bytes each. Note since the official test set is not public for this dataset, we report results on the official validation set. For validation purposes we used a held-out set of about 80,000 examples from the training split. 
+
+For this dataset, we trained Transformer-VQ models with 190M and 1.2B parameters, similar to the Enwik8 and PG-19 models, respectively. We report the bits-per-byte on the official validation set in Table \ref{table:imagenet64_bpb}. Several of the earlier baselines used an earlier variant of downsampled ImageNet prepared by \citet{vanDenOord2016} with a different downsampling algorithm. Since that variant has been unavailable through official channels for about a year, we used the newer variant following \citet{Lipman2023}. We emphasize that our results using the newer variant cannot be directly compared with baselines using the earlier variant; however, due to several reporting ambiguities, Table \ref{table:imagenet64_bpb} does not symbolically distinguish variants used. 
+
+\begin{figure}[h]
+\begin{center}
+\includegraphics{imagenet64_nucleus_1dot0_seed42/samples_step500000_proc0_item6.png}
+\includegraphics{imagenet64_nucleus_1dot0_seed42/samples_step500000_proc1_item0.png}
+\includegraphics{imagenet64_nucleus_1dot0_seed42/samples_step500000_proc2_item5.png}
+\includegraphics{imagenet64_nucleus_1dot0_seed42/samples_step500000_proc3_item1.png}
+\includegraphics{imagenet64_nucleus_1dot0_seed42/samples_step500000_proc3_item6.png}
+\includegraphics{imagenet64_nucleus_1dot0_seed42/samples_step500000_proc4_item1.png}
+\includegraphics{imagenet64_nucleus_1dot0_seed42/samples_step500000_proc11_item0.png}
+\includegraphics{imagenet64_nucleus_1dot0_seed42/samples_step500000_proc13_item6.png}
+\includegraphics{imagenet64_nucleus_1dot0_seed42/samples_step500000_proc0_item7.png}
+\includegraphics{imagenet64_nucleus_1dot0_seed42/samples_step500000_proc4_item2.png}
+\includegraphics{imagenet64_nucleus_1dot0_seed42/samples_step500000_proc9_item5.png}
+\includegraphics{imagenet64_nucleus_1dot0_seed42/samples_step500000_proc13_item2.png}
+\end{center}
+\vskip -0.1in
+\caption{Generated samples from our large ImageNet64 model; nucleus 1.0.}
+\label{fig:imagenet64_samples_nucleus1dot0_seed42}
+\end{figure}
+
+Transformer-VQ with 190M parameters is roughly the same size as the Efficient VDVAE \citep{Hazami2022}, but obtains a better result of 3.22 BPB, setting a new state-of-the-art for small models. Transformer-VQ with 1.2B parameters obtains a 3.16 BPB, setting a new absolute state-of-the-art on this dataset, and generates high-fidelity samples on par with Perceiver AR while using 33\% fewer steps, omitting its image-specific architectural adjustments, and generating samples in linear time. 
+
+
+
+\section{Conclusion}
+
+
+Transformer-VQ is a transformer decoder computing softmax-based self-attention in linear time. Its efficient attention is enabled by vector-quantized keys, which allow our cache to be attended to in compressed form, while yielding the same result as uncompressed attention over the same keys. 
+Large-scale experiments show Transformer-VQ is an efficient and flexible autoregressive model, with state-of-the-art results or near on PG-19 and ImageNet64. Future work directions include formal scaling laws, larger models, and porting to lower-level frameworks like Pallas, Triton, or CUDA. 
+
+\subsection*{Reproducibility Statement}
+
+ 
+
+
+

@@ -1,0 +1,467 @@
+\title{Eureka-Moments in Transformers: Multi-Step Tasks Reveal Softmax Induced Optimization Problems}
+
+\begin{abstract}
+In this work, we study rapid improvements of the training loss in transformers when being confronted with multi-step decision tasks. 
+We found that transformers struggle to learn the intermediate task and both training and validation loss saturate for hundreds of epochs.
+When transformers finally learn the intermediate task, they do this rapidly and unexpectedly. We call these abrupt improvements \emph{\ahas}, since the transformer appears to suddenly learn a previously incomprehensible concept. 
+\neww{We designed synthetic tasks to study the problem in detail, but the leaps in performance can be observed also for language modeling and in-context learning (ICL). We suspect that these abrupt transitions are caused by the multi-step nature of these tasks. Indeed, we find connections and show that ways to improve on the synthetic multi-step tasks can be used to improve the training of language modeling and ICL}.
+Using the synthetic data we trace the problem back to the Softmax function in the self-attention block of transformers and show ways to alleviate the problem. These fixes reduce the required number of training steps, lead to higher likelihood to learn the intermediate task, to higher final accuracy and training becomes more robust to hyper-parameters.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure*}[t]
+    \begin{subfigure}[]{0.355\textwidth}
+        \includegraphics[width=1\linewidth]{Figures/task_flow_newest_indi_new2.pdf}
+    \end{subfigure}
+    \hspace{0.025\textwidth}
+    \begin{subfigure}[]{0.32\textwidth}
+        \includegraphics[width=1\linewidth,trim=6 6 6 0,clip]{Figures/val_acc_teaser3.jpg}
+        \includegraphics[width=1\linewidth,trim=6 6 6 6,clip]{Figures/train_loss_teaser3_fin2.jpg}
+    \end{subfigure}
+    \hspace{0.025\textwidth}
+    \begin{subfigure}[]{0.25\linewidth}
+        \includegraphics[width=0.8\linewidth,trim=6 6 6 7,clip]{Figures/teaser_80k_3w_ns2.pdf}
+        \includegraphics[width=0.8\linewidth,trim=6 6 6 6,clip]{Figures/train_loss_bert_new20_2rows_new.pdf}
+    \end{subfigure}
+    
+    \caption{\textbf{Transformers can get stuck during optimization for two-stage tasks.} 
+    \textbf{(a)} Describes our 2 step decision task used to study \ahas. \textbf{Task 1} is to compare the two \textbf{indicators} (here digits). If the digits are the same, \textbf{task 2} is to classify the top-right image and bottom left else. Top-right and bottom left are referred to as \textbf{targets}. The location of the correct target is referred to as \textbf{target location}. 
+    \textbf{(b)} \textbf{Validation accuracy} and \textbf{training loss} for the task in (a). 2 ViTs (blue and green) fail to converge, while one ViT (yellow) has a \aha. \ahas are characterised by a sudden increase of accuracy and drop of the loss (in contrast to Grokking \citep{grokking}). ResNets are not susceptible to this kind of optimization difficulty.
+    \textbf{(c)} \textbf{\ahas on real datasets.} Sharp improvements after initial plateauing can also be observed for GPT-2 ICL, here in the Omniglot ICL task \citep{chan2022data} and language modeling with RoBERTa on Wikipedia. We will show later that our analysis transfers to these tasks (see \cref{fig:real_life_examples_normsoft}).
+    }
+    \label{fig:teaser}
+    \phantomlabel{a}{fig:teaser_data}
+    \phantomlabel{b}{fig:teaser_acc}
+    \phantomlabel{c}{fig:real_life_examples}
+\end{figure*}
+
+A key quality of any intelligent system is its ability to deal with complex problems that may consist of multiple sub-problems. It should learn to solve these sub-problems even in the absence of direct feedback.
+Deep learning has enabled such capabilities to a certain degree. For example, deep classifiers learn the hierarchical feature representations necessary to build a good classifier. 
+Reinforcement learning learns object representations required to predict how to receive a sparse reward. 
+Language models group tokens to derive their contextual meaning and then predict a new token.
+In-context learning (ICL) tasks require to first learn similarities and then associate tokens based on positional information by learning induction heads \citep{olsson2022context}.
+While aforementioned examples show great promise, researchers spend a large effort on designing the training process to learn sub-tasks. For instance, reward shaping is common in reinforcement learning, many computer vision works use explicit or implicit intermediate supervision, while for language modelling and ICL a good data arrangement plays an important role \citep{chan2022data}.
+For some of these problems, a saturation of the learning process followed by a sudden improvements can be observed, as shown in Fig.~\ref{fig:real_life_examples}.
+However, the relation of implicit multi-step learning to saturation of the learning process followed by abrupt improvements in training loss has not been investigated.
+
+But how can we study multi-step learning?
+One may tend to study popular tasks in detail, for which many benchmarks and results already exist. 
+BERT pretraining \citep{kenton2019bert} and ICL \cite{chan2022data} are candidates that are likely to entail a multi-step task. For BERT the network might first learn word frequencies and might learn to use the context to predict masked tokens in a second step.
+Similarly ICL can be understood as multi-step task, where first similarities of tokens have to be learned, followed by learning where to look up the correct label, i.e., learning an induction head. 
+For both tasks we observe sudden improvements, similar to those that we study in this work (see Fig.~\ref{fig:real_life_examples}).
+Unfortunately, real data prohibits a clean study due to multiple factors:
+1) The exact sub-tasks are typically unknown and, hence, hard to study.
+2) There are many easy samples that do no require multi-step reasoning,
+overlaying the progress on the multi-step task. 
+3) The features necessary for the tasks are unknown, i.e.,~we cannot study what the network fails to learn, let alone the reason for it. 
+4) Even the number of steps is unknown, thus, we cannot determine if models learn only a subset of the tasks.
+
+As a remedy, we propose to analyze multi-step learning by controlling the data-generating process with synthetic data. This allows us to create clean two-step tasks in a controlled setting that facilitates a detailed study. Specifically, we remove confounding variables, know the number of tasks, and know for each task the relevant features, their location and the total number of steps. 
+Thus, it solves the issues above all at once. 
+This comes with the assumption that our findings on synthetic data transfer to related observations on real data. Indeed, our understanding how \ahas appear on synthetic tasks and the corresponding way to improve training leads to better training behavior on non synthetic tasks, i.e.,~higher ICL accuracy on Omniglot and earlier \ahas on masked language modeling on Wikipedia (see Fig.~\ref{fig:real_life_examples_normsoft}). 
+
+In each of our synthetic datasets, the answer to the first task $p(z|x)$, which is not explicitly modeled in the loss function, must be found by the model in order to correctly solve the final second task depending on it $p(y|x,z)$. For example, in Fig.~\ref{fig:teaser_data}, the model must first classify the two digits to find out if they are of the same class, which determines where to look for the subsequent FashionMNIST classification task. The loss only provides a training signal for the latter task. Thus, the model must figure this out by itself during training. Formally, such multi-step tasks can be described as $p(y|x,z) \cdot p(z|x)$, i.e.,~the probability of class $y$ given evidence $x$ and the latent variable $z$.
+
+Our study reveals that transformers have difficulties in learning such two-step tasks (Fig.~\ref{fig:teaser_acc}).
+After they learned to classify a randomly selected FashionMNIST image $p(y|x,z)$, they  saturate and only after a long time suddenly learn $p(z|x)$, i.e.,~the task to select the right fashion image by comparing the digits.
+We call this phenomenon a \aha. Intriguingly, we find that they never learn task 1 within 1000 epochs and stick with the prior $p(z)$ for some random seeds. We later find that the probability of \ahas depends on the difficulty of the task. In contrast to the transformer, a ResNet learns both tasks immediately.  
+
+Our goal is not to add to the old transformer vs. CNN discussion, but we want to investigate this particular problem. What is its cause? Is it due to a too small capacity? Is it the number of heads or the learning rate? Is it the spatial arrangement of task 1 and 2? We found that these factors play only a minor role and finally traced the problem back to the Softmax function in the transformer's attention blocks. We found parts of the gradient's components become very small depending on the Softmax output.
+This cannot be fixed by using a larger learning rate, since other components of the gradient are large, but it can be simply fixed by a normalization of the Softmax function.
+
+In summary, the contributions of this analysis paper are: 1) We study multi-step learning without intermediate supervision via a fully controlled data-generating process on synthetic tasks. 2) We discover a new failure mode of transformers.
+3) We analyse the mechanisms underlying this failure mode and find that the Softmax function leads to (local) small gradients for the key and value weight matrices, thereby hindering learning. 
+4) To validate the role of Softmax, we mitigate the failure mode through targeted interventions.
+We show that these interventions lead to significantly faster convergence, higher accuracy, higher robustness to suboptimal hyper-parameters, and higher probability of model convergence, affirming our analysis. 
+5) We find related learning behavior in ICL and language modeling and show that our solution transfers to these settings.
+
+
+
+\section{Related Works}
+
+\textbf{Emergence and phase transitions.}
+Following \citet{steinhardt_ml_systems_will_be_different} \& \citet{wei2022emergent},
+\emph{emergence} refers to a qualitative change in a learning system resulting from an increase of model size, training data or training steps, where \emph{phase transitions} are additionally characterized by a sharp change. \ahas are special types of phase transitions.
+While recent work showed that sharp emergence may just be an artifact of the choice of a discontinuous metric~\citep{emergancemirage,srivastava2022beyond}, we observe rapid changes also for continuous metrics in our setting.
+A connection between phase transitions or emergence and our work may exist, and both may be related to escaping bad energy landscapes as in our work.
+
+\textbf{Unexplained phase transitions.}
+Previous works reported observations that may be \ahas, without investigating their cause. 
+For instance, rapid improvements happen for in-context-learning (ICL) \citep{olsson2022context}, diffusion model training \cite{zhang2023adding} and BERT training \citep{gupta2020gmat,attentionGuiding,nagatsuka2021pre,anonymous2023,chen2024sudden}.
+\citet{attentionGuiding} proposed to bias the attention mechanism towards predefined attention patterns and observed speed-ups in BERT training, while \citet{chen2024sudden} connect the sharp drop to sudden learning of syntactic attention structures.
+We also identify the learning of the task-required attention pattern to be the cause of the problem.
+In concurrent work \citet{reddy2023mechanistic} studied phase transitions in ICL. Specifically, they show for a small toy-model that slow initial learning is due to a saddle-point, where one path leads to a sub-optimal minimum (i.e.,~random context label) and the other path to the ICL solution. They discover a ``cliff'' in the loss landscape and shallow gradients that lead to the ICL solution. While our setting shows substantial differences, our analysis reveals the same underlying mechanisms, i.e.,~ shallow gradients, which we investigate in more detail.
+
+\textbf{Grokking.}
+A similar phenomenon has been discovered on synthetic data \citep{grokking} and was further studied in \citep{omnigrok,mechanistic_grokking,thilak2022the,millidge2022grokking,barak2022hidden,liu2022towards}. Grokking describes the phenomenon of sudden generalization after overfitting, which can be induced by weight decay. 
+In contrast to \ahas, the training accuracy already saturates at close to 100\% (overfitting), a long time before the validation accuracy has a sudden leap from chance level to perfect generalization. 
+For \ahas, validation and training loss saturate (no overfitting) and the sudden leap occurs for \emph{both simultaneously}.
+\textbf{Unstable gradients in transformers.}
+The position of the layer-norm (LN) \citep{xiong2020layer} and instabilities in the Adam optimizer in combination with LN induced vanishing gradients \citep{huang2020improving}. Removing the LN \citep{baevski2018adaptive,child2019generating,wang2019learning} or Warmup \citep{baevski2018adaptive,child2019generating,wang2019learning,huang2020improving} resolves this problem, but in our case, Warmup alone does not help.
+Others identified the Softmax as one of the problems, showing that both extremes, attention entropy collapse, i.e.,~too centralized attention \citep{att_entropy_collapse,relu_softmax} and a large number of small attention scores, i.e.,~close to maximum entropy \citep{attentionisnotallyouneed,trivial_attention} can lead to small gradients \citep{noci2022signal}.
+As a remedy to vanishing gradients caused by entropy collapse \citet{wang2021escaping} proposed to replace the Softmax by periodic functions.
+However, before \ahas, the attention distribution is in neither extreme. Instead the attention is allocated to the wrong tokens. 
+
+\textbf{Temperature in Softmax.}
+A key operation in the transformer is the scaled dot-product attention.
+Large products can lead to attention entropy collapse \citep{att_entropy_collapse,relu_softmax}, which results in very small gradients. 
+In contrast, \citet{trivial_attention} observed close to uniform attention over tokens.
+They scaled down very low scores further while amplifying larger scores, but this only amplified the problem when important tokens are already ignored.
+Instead, \citet{normsoftmax} proposed to normalize the dot product.
+Their proposed \textit{\normsoftmax} avoids low variance attention weights and thus avoids the small gradient problem. We found it as the most effective intervention on the Softmax function.
+Others proposed to learn the temperature parameter \citep{learn_temp,ali2021xcit}, but this is difficult to optimize.
+For very large models the problem becomes more severe.
+Models with more than 8B parameters show attention entropy collapse \citep{vit22b}.
+They followed \cite{gilmer2023intriguing} and normalized the $QK^T$ with layer norm before the Softmax.
+
+
+
+\section{Background}
+
+\label{sec:background}
+\textbf{Preliminaries. }
+This work investigates the popular dot product attention \citep{transformer}, defined as
+\begin{equation}
+    \text{Attention}(Q,K,V) = \text{Softmax}\left(\frac{QK^T}{\tau}\right)V,
+\end{equation}
+where the weight matrices $W_Q$, $W_K$ and $W_V$ map the input $X$ to query $Q$, key $K$, value $V$, and the temperature parameter $\tau$ controls the entropy of the output. A low temperature leads to low entropy, i.e.,~a more ``peaky'' distribution. 
+Commonly, $\tau$ is set to $\sqrt{d_k}$, where $d_k$ is the dimensionality of $Q$ and $K$. Thus, $\sqrt{d_k}$ is the standard deviation of $QK^T$ under the independence assumption of rows of $Q$ and $K$ with 0 mean and variance of 1 \citep{transformer}.
+
+\textbf{Softmax attention can cause vanishing gradients.}
+Attention entropy collapse, i.e.,~too centralized attention, can cause vanishing gradients \citep{att_entropy_collapse,relu_softmax}, since all entries of the Jacobian of the Softmax will become almost 0 (see .~\ref{sec:vanishing_gradient}).
+Similarly, uniform attention can cause vanishing gradients for $W_K$ and $W_Q$ \citep{noci2022signal}.
+
+A remedy to both problems is to control the attention temperature $\tau$.
+A larger $\tau$ in the Softmax will dampen differences of $QK^T$ and by that prevent vanishing gradients by low attention entropy.
+In contrast, a smaller $\tau$ will amplify differences of $QK^T$ and prevents vanishing gradients caused by uniform attention. 
+Choosing the right temperature is difficult and can have a strong influence on what the model learns, how fast it converges etc. As a remedy, we propose to start training with a low temperature and follow a schedule to heat it up to the default value of $\sqrt{d_k}$.
+We refer to this approach as \textbf{Heat Treatment} (HT) and it is one of our interventions to test whether the Softmax is indeed the root cause of the optimization difficulties.
+This approach has multiple advantages. First, it removes the difficulty of choosing the exact temperature. Second, the network gets optimized for ``more peaky'' attention, but the temperature increases steadily. By that, the network starts with centralized attention but since the next epochs attention will be more uniform than the previous (due to increasing the temperature), it does not run into the issue of low attention entropy. 
+Last, the network can focus on most important features early in training and broaden the view over time, attending to other features.
+
+\textbf{\normsoftmax.}
+An alternative to tame the attention is \normsoftmax \citep{normsoftmax}, which replaces the expected standard deviation $\sqrt{d_k}$ gets by the empirical standard deviation $\sigma(QK^T)$, for each attention block individually. \normsoftmax can be computed by 
+\begin{equation}
+    \text{NormSoftmax}(Q,K)=\text{Softmax}\left( \frac{QK^T}{min(\sigma(QK^T), \tau)}\right).
+\end{equation}
+If $QK^T$ has low standard deviation differences will be amplified. If $\sigma(QK^T)>\tau$, $\tau$ will be used. 
+
+
+
+\section{Task Description \& Experimental Conditions}
+
+\label{sec:task_description}
+Recent works across diverse fields found sudden abrupt learning behaviors, e.g.,~sudden improvements of RoBERTa \citep{roberta}, rapid emergence of induction heads \citep{olsson2022context}, or the ``sudden convergence phenomenon'' of control net \citep{zhang2023adding}.
+We hypothesize that all of these constitute multi-step mechanisms $p(y|x,z) \cdot p(z|x)$, where $p(y|x,z)$ (task 2) is dependent on the result of $p(z|x)$ (task 1), where only the last task is supervised. 
+But why does it take so long for transformers to learn such mechanisms and why is the improvement so sudden?
+
+\textbf{Task description.}
+We suspect that these training problems are due to the multi-step nature of these tasks. To test this we study such multi-step mechanisms on a simple two-step tasks. Note that many-step tasks would also be possible but are a more complicated study object.
+Fig.~\ref{fig:teaser_data} provides a schematic overview for one of our vision tasks:
+Task 1 requires the model to indicate where to look at, i.e., top right or bottom left depending on whether the MNIST digits \citep{mnist} in the top left and bottom right match or do not match. Task 2 is a simple classification. Here it is FashionMNIST \citep{fashionmnist} classification.
+Note that only task 2 is evaluated and only task 2 gets supervision; akin to, ICL for example, for which supervision is only provided for a the missing token, but not directly for the induction head learning.
+By design of our datasets, $40-55\%$ accuracy can be obtained by only solving task 2 and picking the target at random. The range is due to varying difficulty of task 2. Higher accuracies can only be achieved by learning the multi-step structure.
+
+\textbf{Vision dataset creation.}
+The visual datasets are based on MNIST \citep{mnist} and Fashion-MNIST \citep{fashionmnist}. 
+An example and a schematic of the task is shown in Fig.~\ref{fig:teaser_data}.
+The samples are created by sampling 2 random Fashion-MNIST samples and 2 digit samples from the MNIST classes ``1'' and ``2''. We apply a random color to the MNIST samples (red or blue). Next, we compose a new image from the 4 images, putting the 2 MNIST samples on top left and bottom right and the Fashion-MNIST samples on the remaining free quadrants. If the 2 MNIST samples are from the same class, the class of the top-right image is the sample label and bottom-left else. 
+
+\textbf{Reasoning task.} 
+Complementary to above vision tasks, we further simplified the multi-step task to an algorithmic task of the form
+$    f(a,\;b,\;c,\;d)=\left\{\begin{array}{ll} c, & g(a,\;b) \\
+         d, & \textrm{otherwise}\end{array}\right.,
+         \label{eq:reason_eq}$
+where \begin{math}a,b,c,d\in\{0,\;1,\;...,\;n\}\end{math}, task 1 is \begin{math}g(a,\;b)=\mathbbm{1}[(\textrm{a is even}\land\textrm{b is odd}) \lor (\textrm{a is odd}\land\textrm{b is even})]\end{math} and task 2 is a simple copying task of either $c$ or $d$. More details are provided in \ref{sec:reasoning_task_suppmat}.
+
+\textbf{Metrics.}
+We define the \textbf{\aharatio} as the proportion of training runs with \aha across the different random seeds.
+To automatically detect \ahas, we set a conservative threshold at a validation accuracy of $70\%$, as this threshold can not be crossed without solving task 1. 
+\textbf{Accuracy after \aha}, in the following referred to as accuracy, is computed over all runs that had a \aha. Note that this metric must be jointly considered with the \aharatio, since high accuracy with low \aharatio indicates that optimization typically failed (no \aha) but possibly just one ``lucky'' training run learned to solve the multi-step mechanism.
+Finally, \textbf{average \ahaepoch} provides the average epoch at which the \aha happened. It is computed only for runs with \aha and again must be interpreted jointly with the \aharatio.
+
+\textbf{Models and hyper-parameters.}
+Following \citet{compactvit}, we use a ViT version specifically designed for small datasets. 
+Unless stated otherwise, we train a ViT with 7 layers, 4 heads each with embedding dimension of 64, patch size of 4 and MLP-ratio of 2. Consequently, the default temperature is $\sqrt{d_k}=8$. The ResNet has a comparable parameter count and consists of 9 layers. 
+For ViT, ViT+HT and \normsoftmax, we tested 5 different temperature parameters in initial experiments. More details on the training setup are provided in ~\ref{sec:experimental_setup_vision}.
+For the reasoning task, we train a transformer on 30\% of the entire set of possible inputs (i.e.,~\begin{math}11^4=14\,641\end{math} input combinations) for 10K epochs over five random seeds. More details on model and training are provided in \ref{sec:reasoning_task_suppmat} .
+
+
+
+\section{Understanding \ahas \& Optimization Problems of Transformers}
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[l]{1.0\linewidth}
+        \includegraphics[width=0.935\linewidth]{Figures/icml_no_eureka.pdf}
+        \caption{ViT (without \aha)}
+    \end{subfigure}
+    \begin{subfigure}[l]{1.0\linewidth}
+        \includegraphics[width=1\linewidth]{Figures/icml_eureka.pdf}
+        \caption{ViT $\tau=\frac{1}{3}$ (with \aha)}
+    \end{subfigure}
+    \caption{\textbf{What is represented in different parts of the attention block.} Bar plots show linear probe accuracy averaged over heads. Indicator 1 is the top MNIST digit. Both ViT and ViT $\tau=\frac{1}{3}$ extract the indicator class information from the images and it is available in each layer. Information is available before and after the residual connection, therefore it is not entirely ignored by the attention. Differences between ViT and ViT $\tau=\frac{1}{3}$ are visible for CLS token and target location task. Res.~denotes residual layer. Error bars show variance over heads. Results for layer 6 using $Z_i$. Black line indicates chance. Indicator 2 plots are similar. More layers and indicator 2 plots are shown in Fig.~\ref{fig:linprobe_z}. $Q$, $K$, $V$ linear probes in Figs.~\ref{fig:linprobe_q} to \ref{fig:linprobe_v}. A similar analysis using more sensitive information-theoretic probes \citep{voita2020information} can be found in \cref{sec:info_probes}}
+    \label{fig:linprobe_vit_failure}
+  \phantomlabel{a}{fig:linprobe_vit_failure_failure}
+  \phantomlabel{b}{fig:linprobe_vit_failure_success}
+\end{figure}
+\begin{figure}[h]
+    \begin{subfigure}[c]{1\linewidth}
+    \centering
+    \includegraphics[width=0.8\linewidth,trim=6 11 0 3,clip]{Figures/icml_attn_maps_no_eureka.pdf}
+    \end{subfigure}
+    \begin{subfigure}[c]{1\linewidth}
+    \centering
+    \includegraphics[width=0.8\linewidth,trim=6 11 0 3,clip]{Figures/icml_attn_map_with_eureka.pdf}
+    \end{subfigure}
+     \caption{\textbf{Attention maps after training for:}  \textbf{(a)} \textbf{ViT without \aha}. It fails to compare the 2 digits. First layers explicitly ignore indicators (digits) (highlighted with red). \textbf{(b)}\textbf{ ViT $\tau=\frac{1}{3}$ with \aha} attends indicators in first layers (red) and predominantly attends the correct target (ankle boot) in later layers. Black is no and white is high attention. Maps show the average attention of each query, i.e.,~we average over the key-dimension of the attention map.}
+      \phantomlabel{a}{fig:attn_maps_failure}
+     \phantomlabel{b}{fig:attn_maps_success}
+    \label{fig:attn_maps}
+\end{figure}
+
+Here, we analyze the problem on the dataset described in Fig.~\ref{fig:teaser_data}. In Sec.~\ref{sec:artifical_problem} we provide supporting experiments and finally show indications, that the results can be transferred to real datasets, i.e.,~Wikipedia text completion and ICL.
+
+\subsection{Why Do Transformers Fail to Learn Two-step Tasks?}
+To investigate why ViT's training fails, we analyze the learned representations using progress measures.
+Note that solving task 1 requires ViT to \textbf{1)} learn to distinguish the indicators, \textbf{2)} carry the information through the layers and \textbf{3)} compare the indicator information to obtain the target location.
+We use linear probes on the output of the attention heads, i.e.,~$Z_i =\text{Attention}(Q_i,K_i,V_i)$, for all heads $i$.
+However, note that linear separation becomes very likely as feature dimensionality increases. Thus, a high accuracy on the linear probe classification does not imply that the transformer is using that information. It only shows that the information is represented and linearly separable.
+
+\textbf{Does the transformer fail to distinguish the indicators?}
+The left bar plots in Fig.~\ref{fig:linprobe_vit_failure_failure} show that the indicators can be linearly separated well (orange, brown) across all layers (Fig.~\ref{fig:linprobe_z}). Nonetheless, ViT fails to learn task 1 (Fig.~\ref{fig:linprobe_vit_failure_failure} right plot). 
+Thus, the transformer represents the information to solve task 1 but does not utilize it.
+
+\textbf{Does the transformer filter out information required for task 1?}
+Since the loss provides a training signal only for task 2, the transformer may learn to just ignore the indicators.
+Task 1 information could be ignored in the attention blocks, i.e.,~the attention function does not attend to the indicators.
+To test this, we probe the representation after the attention operation at two locations, before and after the residual connection.
+Fig.~\ref{fig:linprobe_vit_failure_failure} reveals that the indicator information is available in all layers. Early in training, some indicator information is filtered out in the attention block (blue). 
+Indicator information is partially filtered out in deeper layers, but is always recovered by the residual connections (see Fig.~\ref{fig:linprobe_z}).
+Thus, features required for task 1 are not filtered out.
+\begin{figure}[t]
+    \centering
+        \includegraphics[width=1\linewidth,trim=0 0 0 0,clip]{Figures/gradMag_single_layer_two_column.pdf}
+    \caption{\textbf{L1 gradient norm during training} for $W_K$, $W_Q$ and $W_V$ for the first layer. For ViT, $W_K$ and $W_Q$ receive much smaller gradients than $W_V$. Before \aha (gray regions), the differences between gradient magnitudes are much smaller for smaller temperatures or \normsoftmax. The y-axis is log scaled. All layers shown in Fig.~\ref{fig:grad_mag_full}. }
+    \label{fig:grad_mag}
+\end{figure}
+
+\begin{figure}
+    \begin{subfigure}{0.24\linewidth}
+        \footnotesize{ViT}
+        \includegraphics[width=1.\textwidth,trim=160 80 230 80,clip]{Figures/vanilla.png}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.24\linewidth}
+        \footnotesize{$\text{ViT }\tau$=1/3}
+        \includegraphics[width=1.\textwidth,trim=160 80 230 80,clip]{Figures/constant3.png}
+    \end{subfigure}
+    \begin{subfigure}{0.24\linewidth}
+        \footnotesize{ViT+HT}
+        \includegraphics[width=1.\textwidth,trim=160 80 230 80,clip]{Figures/HT.png}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.24\linewidth}
+        \footnotesize{\normsoftmax}
+        \includegraphics[width=1.\textwidth,trim=160 80 230 80,clip]{Figures/normsoft.png}
+    \end{subfigure}
+    \caption{\textbf{Gradients on image for $W_k$} at Epoch 50. For ViT the gradient for $W_K$ comes mostly from target regions, while for the other approaches indicator regions provide substantial gradient. A detailed explanation of this plot and plots for $Q$ and $V$ can be found in Sec.~\ref{sec:split_grad_indi_target}}
+    \label{fig:grad_imgs}
+\end{figure}
+\begin{table}
+  \caption{\textbf{Quantitative results} on the \textbf{main dataset}, as described in Fig.~\ref{fig:teaser_data}. and the \textbf{No position task} (Fig.~\ref{fig:tas}). $\tau$ not optimized for \emph{No position task}. \textbf{ER}: \aharatio, \textbf{Acc.}: Accuracy, \textbf{Avg.~EE.}: average \ahaepoch. }
+  \label{tab:final_res_joint}
+  \centering
+  \resizebox{1\linewidth}{!}{
+  \begin{tabular}{lcccc}
+    \toprule
+    \multicolumn{5}{c}{Main Dataset}\\
+    \midrule
+    \multicolumn{2}{c}{} & \multicolumn{1}{c}{} & \multicolumn{2}{c}{Avg.~over EMs}\\
+    Model & $\tau$    & ER $\uparrow$    & Acc. $\uparrow$  & Avg.~EE. \\
+    \midrule
+   ViT &  $\frac{1}{0.025}$ & 3/10 & 89.40 & 174.67 \\
+   ViT &  $\frac{1}{0.075}$ & 6/10 & 90.13 &  181.34 \\
+   ViT + WD 0.5 &  $\sqrt{d_k}$ & 5/10 & 90.09 & 177.8\\
+   ViT &  $\sqrt{d_k}$ & 7/10 & 89.48 & 207.43  \\
+   ViT + Warmup 20 &  $\sqrt{d_k}$ & 8/10 & 87.65 & 205.87  \\
+   $W_{QKV}$ grad scaling & $\sqrt{d_k}$ & \textbf{10/10} & 87.96 & 119.4 \\ 
+    \normsoftmax & $\sqrt{d_k}$ & \textbf{10/10} & 89.56 & 28.2  \\
+    \normsoftmax & $\frac{1}{3}$ & \textbf{10/10} & 89.18 & 23.5  \\
+    ViT  & $\frac{1}{3}$ & \textbf{10/10} & 89.35 & 66.6  \\
+    ViT+HT & $\frac{1}{3} \rightarrow  \sqrt{d_k}$ & \textbf{10/10} & 89.81 & 74.0 \\
+    \normsoftmax + HT & $\frac{1}{3} \rightarrow  \sqrt{d_k}$ & \textbf{10/10} & \textbf{89.83} & 17.5 \\
+    \midrule
+    \multicolumn{5}{c}{No Position Task} \\
+    \midrule
+   ViT &  $\sqrt{d_k}$ &  0/4 & - & -\\
+   ViT + Warmup 20 &  $\sqrt{d_k}$ &  1/4 & 89.55 & 117 \\
+   $W_{QKV}$ grad scaling & $\sqrt{d_k}$  & 0/4 & - & - \\ 
+    \normsoftmax & $\sqrt{d_k}$ &  \textbf{3/4} & \textbf{88.98} &  228 \\
+    \normsoftmax & $\frac{1}{3}$ &  1/4 & 89.77 & 20  \\
+    ViT  & $\frac{1}{3}$ &  1/4 & 89.68 & 191 \\
+    ViT+HT & $\frac{1}{3} \rightarrow  \sqrt{d_k}$ &  1/4 & 88.36  & 242\\
+    \normsoftmax + HT & $\frac{1}{3} \rightarrow  \sqrt{d_k}$ & 1/4  & 90.63   & \textbf{19}  \\    
+    \bottomrule
+  \end{tabular}
+  }
+\end{table}
+
+\textbf{Does the transformer fail to combine the information?}
+We observe that the target location (solution of task 1) cannot be inferred by the linear probe (Fig.~\ref{fig:linprobe_vit_failure_failure}). Therefore, even though the (indicator) information is available, it is not able to utilize this information to predict the target location of task 2.
+Thus, the transformer has all the information but fails to combine it to solve the multi-step task.
+
+\textbf{Differences to a transformer that had a \aha.}
+Fig.~\ref{fig:linprobe_vit_failure_success} shows the linear probe results for a transformer that had a \aha. Interestingly, the target location can be inferred by linear probes from all layers and all tested representations with high accuracy. This is in stark contrast to transformers that had no \aha.
+The second striking difference is that indicator information is represented in the CLS token. This is even stronger for early layers (Fig.~\ref{fig:linprobe_z}). 
+We suspect, that the transformer uses the CLS token to match the classes of the indicators.
+
+\textbf{Why does the transformer fail to combine the information?}
+We visualize the attention maps of two fully trained ViTs in Fig.~\ref{fig:attn_maps}. We find that the transformer without \aha does not attend the indicator digits and attends only the targets of task 2, whereas a transformer with \aha attends the indicator digits in early layers.
+This suggest that a ViT without \aha does not pay enough attention to the indicators to match them and struggles to learn to attend different regions.
+
+\begin{table}[h!]
+  \caption{\textbf{Sensitivity to learning rate}. Lower temperatures and  \normsoftmax drastically increase robustness to imperfect learning rate schedules. \aharatio computed over seeds and schedules.}
+  \label{tab:lr_sensitivity}
+  \centering
+  \begin{tabular}{lc}
+    \toprule
+    Model &   \aharatio $\uparrow$  \\
+    \midrule
+    ViT & 04/36 \\
+    VIT + Warmup 20 & 14/36\\
+    $W_{QKV}$ grad scaling & 5/36\\
+    \normsoftmax & \textbf{36/36} \\
+    ViT $\tau=\frac{1}{3}$ & 20/36 \\ 
+    ViT+HT $\frac{1}{3} \rightarrow  \sqrt{d_k}$ & 25/36 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\textbf{Why does the transformer fail to learn to attend to the indicators?}
+Based on the discussion in Sec.~\ref{sec:background}, we hypothesize that ill-distributed attention scores lead to small gradients for $W_K$ and $W_Q$, which in turn inhibit learning and in particular learning to shift attention towards the indicators. 
+Note that high attention to some pairs with low attention to all others or uniformly distributed attention can result in vanishing gradients \citep{noci2022signal}.
+To test this, we visualize the L1-norm of the gradient of the first layer in Fig.~\ref{fig:grad_mag}. 
+For vanilla ViT the gradients for $W_K$ and $W_Q$ are 0.5-1 orders of magnitude smaller than those for $W_V$.
+Thus, only small gradients are backpropagated through the Softmax to $W_Q$ and $W_K$, and the attention map improves only slowly, which results in the observed slow learning. 
+Differences between the gradients are much smaller for ViT $\tau=\frac{1}{3}$, ViT+HT and \normsoftmax, in particular before the \aha. Fig.~\ref{fig:grad_imgs} shows the origin of gradients on the image plane for $W_k$. For ViT, the gradients mostly originate from the target regions, which further explains why many steps are needed to move attention to the indicators, as these gradients  only lead to improved target recognition.
+
+\textbf{Is too small or too large attention-entropy the problem?}
+We visualize the distribution of attention maps over training in Fig.~\ref{fig:attn_heatmap}: the vast majority of attention scores is very small. This indicates that a too uniform attention is causing small gradients.
+Larger attentions are rare, but not absent, as can be seen in Fig.~\ref{fig:attn_maps_failure}, but indicator regions have small and uniform attention.
+Thus, we conclude that \textbf{local uniform attention} causes the transformer's learning problems.
+
+\subsection{Can Enforcing Lower Entropy Attention Maps Resolve the Small Gradients?}
+
+The previous subsection indicates that a local uniform attention is causing the learning problems of the transformer.
+To test this hypothesis and show that this causes the observed problems we use targeted interventions.  
+Particularly, we modify Softmax's temperature $\tau$ in the attention block.
+Large temperatures increase entropy, while small temperatures decrease it.
+We apply following interventions: training with lower/higher temperature; HT, where the temperature increases from a low value to default temperature during the first half of training; and \normsoftmax, which adaptively changes the temperature for each sample, head and layer.
+\textbf{Does a lower temperature solve the small gradient issue and thereby mitigate the optimization issues?}
+Increasing the temperature from low to default or using \normsoftmax increases high attention scores (c.f.~Fig.~\ref{fig:attn_heatmap}).
+Importantly, the transformer learns to also attend to the indicators (Fig.~\ref{fig:attn_maps_success}).
+Furthermore, all approaches (lower temperature $\tau$, HT and \normsoftmax) solve the imbalanced gradient issue for $W_V$, $W_Q$ and $W_K$ (Fig.~\ref{fig:grad_mag}) and lead to higher gradients in indicator regions (Fig.~\ref{fig:grad_imgs}).
+\ahas happen much earlier or instantly (see Fig.~\ref{fig:final_acc_curve}).
+Thus, the interventions indeed mitigate the optimization issues.
+A comprehensive comparison between a vanilla ViT and other versions is provided in Tab.~\ref{tab:final_res_joint}.
+Decreasing the temperature or using \normsoftmax increases the \aharatio, accuracy and decreases the \ahaepoch (i.e.,~improving the energy landscape).
+In contrast, increasing the temperature has a negative effect on the \aharatio, showing that the local uniform attention is the main cause for the learning problem.
+
+\subsection{Is This an Artificial Problem Caused by Other Factors?}
+\label{sec:artifical_problem}
+\textbf{Does the transformer simply ignore specific indicator locations?}
+The task and dataset used in the previous subsections showed indicators and targets always at the same location, i.e.,~indicators on top-left and bottom right.
+Such a dataset design might result in two undesired effects: 1) The transformer might learn to ignore features based on the associated positional embeddings. 
+2) The task might be easier, since positional embeddings can be used as shortcut to find indicators without the need to rely on the actual features.
+To disprove both cases we create another dataset, explained in Fig.~\ref{fig:tas}.
+We observe that removing the fixed position for indicators and targets makes the task even more difficult (Tab.~\ref{tab:final_res_joint} bottom) and differences between methods are even more apparent. Thus, ViTs without \aha do not simply learn to ignore regions of the image.
+
+
+\textbf{Is this a mere artifact of a bad choice of hyper-parameters?}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.7\linewidth,trim=8 8 8 5,clip]{Figures/val_acc3_icml_noA.pdf}
+    \caption{\textbf{Validation accuracy curves on \emph{main dataset}.} Both interventions, ViT+HT and \normsoftmax drastically reduce the saturation period and can even lead to a complete disappearance of the saturation period.}
+    \label{fig:final_acc_curve}
+\end{figure}
+\begin{figure}
+    \centering
+    \includegraphics[width=0.6\linewidth]{Figures/flow_noPos_NoB.pdf}
+    \caption{\textbf{\emph{No position task} description.} This task is identical to the \emph{main task}, but removes more information by swapping indicator (digit) and target (fashion) in each row with a probability of 0.5, i.e.,~task 2 is to classify either the top or bottom fashion sample. Two samples are shown to highlight differences from the task described in Fig.~\ref{fig:teaser_data}.}
+    \label{fig:tas}
+\end{figure}
+We test various competing explanations that could lead to the observed phenomenon, like training instabilities due to inadequate Warmup, 
+bad choice of learning rate schedules and Weight Decay to force circuit formation as observed for grokking \citep{mechanistic_grokking}. 
+Weight Decay and Warmup do not improve the results. We find that \ahas are sensitive to the learning rate. \normsoftmax and HT reduce the sensitivity to sub-optimal learning rates drastically (see Tab.~\ref{tab:lr_sensitivity}). See \ref{sec:hyper_parameter_artifact} for a more detailed answer to the posed question.
+\begin{figure*}[h!]
+    \centering
+    \includegraphics[width=0.8\linewidth,trim=8 6 8 3,clip]{Figures/non_vision_74.pdf}
+    \caption{\textbf{\ahas for single-layer transformers on a simple reasoning task.} We show the train (blue) and test (orange) accuracies for attention with Softmax, Softmax+HT, or \normsoftmax, over 5 random seeds (transparencies). Chance probability is \begin{math}6/11\approx 54\%\end{math} (black).}
+    \label{fig:non_vision}
+\end{figure*}
+
+\begin{figure}[h!]
+    \centering
+    \begin{subfigure}[c]{1.0\linewidth}
+    \centering
+    \includegraphics[width=0.7\linewidth,trim=8 0 8 0,clip]{Figures/train_loss_bert_new21.pdf}
+    \subcaption{Language modeling}
+    \end{subfigure}
+    \begin{subfigure}[c]{1.0\linewidth}
+    \centering
+    \includegraphics[width=0.7\linewidth,trim=8 0 8 0,clip]{Figures/icl_150k_3w_s_bn.pdf}
+    \subcaption{In-Context learning}
+    \end{subfigure}
+    \caption{\textbf{\ahas on real datasets.} Sharp improvements after plateauing can be observed for RoBERTa pretraining and ICL. Using \normsoftmax leads to an earlier (RoBERTa) and higher (ICL) \aha. Averages for ICL over 4 seeds, 2 exemplary seeds shown per method.}
+    \label{fig:real_life_examples_normsoft}
+\end{figure}
+\textbf{Influence of model scale, dataset size and image resolution on \ahas}.
+We found no consistent influence of model scale on \aharatio. See \ref{sec:model_scale} for more details.
+Further, we can rule out that this observation is an artifact of image resolution or dataset size by showing the phenomenon on a ImageNet-100 based dataset in \ref{sec:imagenet}.
+
+\textbf{Can the problem be fixed by rescaling of the gradient magnitude for $W_V$, $W_Q$ and $W_K$?}
+The observation that lower gradient imbalance leads to higher \aharatio suggests, that simply rescaling of the gradients may solve the problem. 
+We find that this does work for the \emph{Main task} but not for the \emph{No position task}, (see Tab.~\ref{tab:final_res_joint}) and is very sensitive to the learning rate (see Tab.~\ref{tab:lr_sensitivity}).
+We attribute this to the differences in gradient magnitudes for indicators and targets and discuss it further in Sec.~\ref{sec:grad_mag_scale}.
+\textbf{Do gradients vanish completely and can transformers recover?}
+Fig.~\ref{fig:teaser_acc} already suggests, that one potential solution to reliably get \ahas is very long training. This observation is supported by Fig.~\ref{fig:grad_mag}, which indicates that gradients become small, but not 0. 
+Indeed we observe that training for 3000 epochs results in a \aharatio of 4/4 for all the learning rate schedules.
+In practice, this is of little help because the number of sub-tasks is unknown and \ahas are hard to predict.
+
+\textbf{Is this truly a transformer optimization problem?}
+
+To show that \ahas are general to all transformers and not just artifacts of vision data, we also show their occurrence in single-layer 4 head transformers on simplistic algorithmic tasks, referred to as the \textbf{reasoning task} (Sec.~\ref{sec:task_description}). Here, features (numbers) are directly provided as tokens and need not be extracted. 
+Fig.~\ref{fig:non_vision} reveals that \ahas appear even in this minimal setting.
+Both HT and \normsoftmax reduce the training steps required for \ahas to occur and increase the \aharatio from 3/5 to 4/5 or 5/5, respectively. 
+
+\textbf{Does the \normsoftmax intervention translate to real data?}
+\citet{normsoftmax} reported improved performance and faster convergence on ImageNet and machine translation tasks using \normsoftmax.
+Both tasks likely contain some innate multi-step tasks, e.g.,~identifying a common discriminative feature and then discriminating between the difficult classes for ImageNet. These improvements may be due to easier multi-step learning with \normsoftmax. 
+
+To further validate the results of our analysis in a real setting we train RoBERTa \citep{roberta} with \normsoftmax for language modeling on Wikipedia, where we suspect task 1 to be learning of general word probabilities and task 2 to be modulating these probabilities based on context, or modulating them based on syntactic relations \citep{chen2024sudden}.
+Additionally, we train GPT-2 on the Omniglot \citep{radford2019language} dataset and test its ICL abilities following \citet{chan2022data}. Experimental details for RoBERTa and ICL are provided in ~\ref{sec:roberta_details} and ~\ref{sec:gpt2_details}, respectively.
+Fig.~\ref{fig:real_life_examples_normsoft} shows that \normsoftmax indeed leads to earlier \ahas for RoBERTa. 
+Furthermore, \normsoftmax also improves ICL, i.e., GPT-2 with \normsoftmax trained on the Omniglot ICL task results in higher ICL accuracy and seems to prevent failure cases like no or a small \aha (Baseline s1 in Fig.~\ref{fig:real_life_examples_normsoft}).
+Thus, our analysis and results are indeed transferable to real datasets and also to transformers with causal attention,i.e., GPT-2. 
+
+
+
+\section{Limitations and Conclusion}
+
+
+\textbf{Limitations.}
+The ability to decompose tasks into sub-problems and learn to solve those sub-tasks is a common problem, but it is difficult to study on real datasets, due to many confounding factors. 
+As a result many works follow  a trial-and-error approach. In contrast, we try to gain deeper understanding by studying this problem in a controlled, synthetic setting. This comes with the assumption that our analysis transfers to real data. We find evidence for that, as the intervention (\normsoftmax) leads to improvements on real data and can prevent getting stuck (Fig.~\ref{fig:real_life_examples_normsoft}).
+
+\textbf{Conclusion.}
+In this work, we identified that transformers have difficulties to decompose a task into sub-problems and learn to solve the intermediate sub-tasks. We observed that transformers can learn these tasks suddenly and unexpectedly but usually take a long time to do so. We called these sudden leaps \ahas. We pined the problem down to the Softmax in the attention that leads to small gradients. 
+We proposed simple interventions that specifically target the Softmax and show that they improve the transformers' capabilities to learn sub-tasks and to learn them faster. We identify \normsoftmax as most robust and convenient method, leading to consistently better results. Last, we showed that our observations transfer to real datasets.
+
+
+

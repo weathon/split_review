@@ -1,0 +1,313 @@
+\title{Implicit Maximum a Posteriori Filtering via Adaptive Optimization}
+
+\begin{abstract}
+Bayesian filtering approximates the true underlying behavior of a time-varying system by inverting an explicit generative model to convert noisy measurements into state estimates. This process typically requires either storage, inversion, and multiplication of large matrices or Monte Carlo estimation, neither of which are practical in high-dimensional state spaces such as the weight spaces of artificial neural networks. Here, we frame the standard Bayesian filtering problem as optimization over a time-varying objective. Instead of maintaining matrices for the filtering equations or simulating particles, we specify an optimizer that defines the Bayesian filter \emph{implicitly}. In the linear-Gaussian setting, we show that every Kalman filter has an equivalent formulation using $K$ steps of gradient descent. In the nonlinear setting, our experiments demonstrate that our framework results in filters that are effective, robust, and scalable to high-dimensional systems, comparing well against the standard toolbox of Bayesian filtering solutions. We suggest that it is easier to fine-tune an optimizer than it is to specify the correct filtering equations, making our framework an attractive option for high-dimensional filtering problems.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Time-varying systems are ubiquitous in science, engineering, and machine learning. Consider a multielectrode array receiving raw voltage signals from thousands of neurons during a visual perception task. The goal is to infer some underlying neural state that is not directly observable, such that we can draw connections between neural activity and visual perception, but raw voltage signals are a sparse representation of neural activity that is shrouded in noise. To confound the problem further, the underlying neural state changes throughout time in both expected and unexpected ways. This problem, and most time-varying prediction problems, can be formalized as a probablistic state space model where latent variables evolve over time and emit observations \citep{simon2006optimal}. One solution to such a problem is to apply a Bayesian filter, a type of probabilistic model that can infer the values of latent variables from observations.
+Typically, Bayesian filters require matrix storage, inversion, and multiplication or the storage of \emph{particles}, which are samples from the filtering distribution at every time step. In large state and observation spaces, the computational costs associated with both of these approaches render them impractical \citep{raitoharju2019computational}. In addition, since most time-varying systems do not have ground-truth states available, accurately estimating the process noise -- the variability of the underlying latent variables -- is nearly impossible. This problem is exacerbated in continuous systems where we need to perform numerical integration, which introduces additional uncertainty. Existing Bayesian filters are sensitive to process noise and dynamics misspecification, making them hard to use in these settings \citep{mehra1972approaches}.  Most filters are highly structured, requiring explicit specification of distributional assumptions. To be usable in practical settings, we need a system that remains effective when scaled to large state spaces (being applicable to weather systems, neural recording, or even modeling the evolving weights of an artificial neural network) and is robust to misspecification of the process noise and dynamics (which is almost guaranteed). %
+
+The practical problems that arise when training deep neural networks (DNNs) are not dissimilar from those that make Bayesian filters difficult to work with: high-dimensional state spaces, nonlinearities, and nonconvexity. These pressures have made way for adaptive optimizers \citep{duchi2011adaptive, tieleman2012lecture, zeiler2012adadelta, kingma2014adam} that offer a largely prescriptive solution for training DNNs, succeeding many previous approaches to optimizing neural networks that include applying Bayesian filtering equations \citep{haykin2004kalman}. To efficiently and effectively overcome the difficulties of training DNNs  \citep{glorot2010understanding}, modern optimizers invariably make use of (i) the empirical Fisher information to crudely incorporate curvature  at very little computational cost \citep{martens2020new} and (ii) momentum to increase stability and the rate of convergence \citep{sutskever2013importance}. We show that these same methods can be applied to Bayesian filtering in an extremely practical and theoretically-motivated framework.
+
+In the following sections, we cast Bayesian filtering as optimization over a time-varying objective and show that much of the information that is explicitly defined by structured filters can be \emph{implicitly} internalized by optimizer hyperparameters. In doing so, we can solve many of the scalability challenges associated with Bayesian filters and make Bayesian filtering easier to implement, especially for the well-versed deep learning practitioner. We show that our proposed method, Implicit Maximum a Posteriori (IMAP) Filtering, is robust to misspecification and matches or outperforms classical filters on baseline tasks. We also show that it naturally scales up to high-dimensional problems such as adapting the weights of a convolutional neural network, and that it performs particularly well in this setting. We argue that it is easier to specify an optimizer than it is to correctly identify classical filtering equations, and our results illustrate the benefits of this implicit filtering approach.
+
+
+
+
+\section{Background}
+
+We begin with an introduction to the filtering problem. Assume a discrete-time state space model with a Markov process over the states $\rvx_{0:T} \triangleq \rvx_0, \rvx_1, \ldots, \rvx_T$ and a sequence of observations $\rvy_{1:T} \triangleq \rvy_1, \rvy_2, \ldots, \rvy_T$ which are conditionally independent given the corresponding state. The joint probability of the states and observations is
+\begin{align}
+    p(\rvx_{0:T}, \rvy_{1:T}) = p(\rvx_0) \prod_{t=1}^T p(\rvx_t | \rvx_{t-1}) p(\rvy_t | \rvx_t),
+\end{align}
+where $p(\rvx_0)$ is the \emph{initial distribution}, $p(\rvx_t | \rvx_{t-1})$ is the \emph{transition distribution}, and $p(\rvy_t | \rvx_t)$ is the \emph{likelihood}. The posterior over the joint state  $\rvx_{1:t}$ of the system given all of the observations up until the current time $\rvy_{1:t}$ is given by:
+\begin{align}
+    p(\rvx_{1:t} | \rvy_{1:t}) = \int p(\rvx_0) \prod_{s=1}^t \frac{p(\rvx_s | \rvx_{s-1}) p(\rvy_s | \rvx_s)}{p(\rvy_s | \rvy_{1:s-1})} \,d \rvx_0,
+\end{align}
+where $p(\rvy_1 | \rvy_{1:0}) \triangleq p(\rvy_1)$. In sequential estimation, we are often only interested in the marginal of the current state $p(\rvx_t | \rvy_{1:t})$, known as the \emph{filtering distribution}. We normally want to compute or approximate this distribution such that the requisite computational resources do not depend on the length of the sequence. This can be accomplished by first initializing $p(\rvx_0 | \rvy_{1:0}) \triangleq p(\rvx_0)$, and then forming a \emph{predictive distribution} via the Chapman-Kolmogorov equation,
+\begin{align}
+    p(\rvx_t|\rvy_{1:t-1}) = \int p(\rvx_t|\rvx_{t-1})p(\rvx_{t-1}|\rvy_{1:t-1}) d \rvx_{t-1}, \label{eq:chapman_kolmogorov}
+\end{align}
+and updating that predictive distribution, in light of measurements $\rvy_t$, by a simple application of Bayes' rule for every time step $t = 1, \ldots, T$,
+\begin{align}
+    p(\rvx_t|\rvy_{1:t}) = \frac{p(\rvy_t|\rvx_t)p(\rvx_t|\rvy_{1:t-1})}{p(\rvy_{t}|\rvy_{1:t-1})}.\label{eq:update_step}
+\end{align}
+
+\subsection{Kalman Filter for Linear-Gaussian Systems}
+When the transition distribution and likelihood are linear and Gaussian,  we can compute optimal estimates in closed-form via the Kalman filtering equations \citep{kalman1960new}.
+Assume the following state space model:
+\begin{align}
+    p(\rvx_0) &= \mathcal{N}(\rvx_0 \mid \bm{\mu}_0, \bm{\Sigma}_0), \\
+    p(\rvx_t \mid \rvx_{t-1}) &= \mathcal{N}(\rvx_t \mid \mF_{t-1} \rvx_{t-1}, \mQ_{t-1}), \\
+    p(\rvy_t \mid \rvx_t) &= \mathcal{N}(\rvy_t \mid \rmH_t \rvx_t, \rmR_t),
+\end{align}
+where $\mF_{t-1}$ and $\rmH_t$ are the transition and observation matrices, respectively, with process noise $\mQ_{t-1}$ and measurement noise $\rmR_t$.
+The Kalman filter propagates the filtering distribution from the previous timestep $p(\rvx_{t-1} \mid \rvy_{1:t-1}) = \mathcal{N}(\rvx_{t-1} \mid \bm{\mu}_{t-1}, \bm{\Sigma}_{t-1})$ with the predict step,
+\begin{align}
+    p(\rvx_t | \rvy_{1:t-1}) &= \mathcal{N}(\rvx_t | \bm{\mu}_t^-, \bm{\Sigma}_t^-)\text{, where } %
+    \bm{\mu}_t^{-} = \bm{F}_{t-1}\bm{\mu}_{t-1},  %
+    \bm{\Sigma}_t^{-} = \bm{F}_{t-1}\bm{\Sigma}_{t-1}\bm{F}_{t-1}^\top + \bm{Q}_{t-1}, %
+\end{align}
+and then updates that distribution as follows:
+\begin{align}
+    p(\rvx_t | \rvy_{1:t}) &= \mathcal{N}(\rvx_t \mid \bm{\mu}_t, \bm{\Sigma}_t)\text{, where }  %
+    \bm{\mu}_t = \bm{\mu}_t^{-} + \mK_t\rvv_t, %
+    \bm{\Sigma}_t = \left[(\bm{\Sigma}_t^{-})^{-1} + \mH_t^\top \mR_t^{-1} \mH_t\right]^{-1},\label{eq:kalman_update_step} %
+\end{align}
+$\rvv_t = \rvy_t - \mH_t \bm{\mu}_t^-$ is the prediction error, and $\mK_t = \bm{\Sigma}_t^{-}\mH^\top(\mH_{t}\bm{\Sigma}_t^{-}\mH_{t}^\top + \mR_{t})^{-1}$ is known as the Kalman gain.
+
+\subsection{Approximate Bayesian Filtering for Nonlinear Systems}
+In real-world systems, guarantees for optimality break down due to inherent nonlinearities and their (at best) approximate Gaussianity. The broader Bayesian filtering community has been motivated by developing methods that can operate in these more realistic settings \citep{sarkka2023bayesian}. Classical solutions include the extended Kalman filter (EKF) and iterated extended Kalman filter (IEKF) that make use of Jacobian matrices to linearize both the dynamics and observation models, and subsequently use the Kalman filtering equations \citep{gelb1974applied}. These are arguably the most popular filtering implementations but only work well in mildly nonlinear systems on short timescales \citep{julier2004unscented}. The unscented Kalman filter (UKF) \citep{julier1995new, julier2004unscented}, like the particle filter (PF) \citep{doucet2001sequential}, is better equipped to handle highly nonlinear systems but both of these methods suffer from the curse of dimensionality and sensitivity to misspecified dynamics. Nonetheless, EKFs, IEKFs, UKFs, and PFs are the most prominent filtering solutions found throughout industry and research, leveraging expensive linearization techniques or particle approximations to treat nonlinearities.
+
+
+
+
+\section{Bayesian Filtering as Optimization}
+
+\begin{figure}[t]
+\label{explantory}
+\begin{center}
+\includegraphics[width=\textwidth]{figures/explanatory.png}
+\end{center}
+\caption{\emph{Explicit Bayesian inference} \textbf{(left)} uses Bayes' rule to balance information from the likelihood and explicitly defined priors. $x^*_i$ are MAP estimates of three different posteriors, respective to the priors shown in blue, yellow, and purple. \emph{Implicit Bayesian inference} \textbf{(right)} defines an optimization procedure that reverses the directionality of Bayes' rule by defining a procedure to estimate the posterior mode, which corresponds to an implicitly defined prior. Three trajectories $(x_1^{(0)}, \ldots)$, $(x_2^{(0)}, \ldots)$, $(x_3^{(0)}, \ldots)$ of gradient descent are shown with a fixed learning rate over 3, 4, and 5 steps, respectively. Taking the solutions produced by gradient descent as MAP estimates, we can use the corresponding gradient steps to determine the prior distributions that they implied \citep{santos1996equivalence}.
+}
+\end{figure}
+The update step \cref{eq:update_step} in a Bayesian filter is a straightforward application of Bayes' rule with the predictive distribution $p(\rvx_t | \rvy_{1:t-1})$ playing the role of the prior. In linear-Gaussian systems, this posterior distribution is available in closed-form \cref{eq:kalman_update_step} but one could alternatively achieve an equivalent result via gradient descent due to its connection to regularized least-squares \citep{santos1996equivalence}. In this section, we describe this connection and how an optimization procedure can implicitly define a prior distribution, a kind of dual formulation of Bayes' theorem (see Figure 1). Such a formulation reduces Bayesian inference to point estimates, but this can be more practical for nonlinear systems whose filtering distributions $p(\rvx_t | \rvy_{1:t})$ are not analytically tractable in general. 
+\subsection{Finding the Posterior Mode via Truncated Gradient Descent}
+
+The mode of the filtering distribution can be expressed as the minimizer of the negative log posterior:
+\begin{align}
+\bm{\mu}_t = \argmin_{\rvx_t} \bar{\ell}_t(\rvx_t)\text{, where } \bar{\ell}_t(\rvx_t) = -\log p(\rvy_t | \rvx_t) - \log p(\rvx_{t} | \rvy_{1:t-1} ).
+\end{align}
+In the case of the linear-Gaussian system, the regularized loss function is (up to an additive constant):
+\begin{align}
+\bar{\ell}_t(\rvx_t) &=  \frac{1}{2} \| \rvy_t - \rmH_t \rvx_t \|^2_{\rmR_t} + \frac{1}{2} \| \rvx_t - \bm{\mu}_t^- \|_{\bm{\Sigma_t^-}}^2. \label{eq:regularized_least_squares},
+\end{align}
+where $\| \rvz \|^2_{\rmP} \triangleq \rvz^\top \rmP^{-1} \rvz$.
+\citet{santos1996equivalence} observed that the minimizer of a regularized least squares problem as in \cref{eq:regularized_least_squares} can be recovered by performing truncated gradient descent on the likelihood term alone. Specifically, let $\bm{\mu}_t^{(0)} = \bm{\mu}_t^-$ and define the recursion
+\begin{equation}
+    \bm{\mu}_t^{(k+1)} \leftarrow \bm{\mu}_t^{(k)} + \rmM_t  \rmH_t^\top \rmR_t^{-1} (\rvy_t - \rmH_t \bm{\mu}_t^{(k)}), \ \ \text{for} \ \ k = 1, \ldots, K - 1.\label{eq:santos_recurrence}
+\end{equation}
+Let $\rmB_t$ simultaneously diagonalize $(\bm{\Sigma}^-_t)^{-1}$ and $\rmH_t^\top \rmR_t^{-1} \rmH_t$ such that $\rmB_t^\top (\bm{\Sigma}_t^-)^{-1} \rmB_t = \rmI$ and $\rmB_t^\top \rmH_t^\top \rmR_t^{-1} \rmH_t \rmB_t = \text{diag}(r_1, \ldots, r_n)$. Such a matrix $\rmB_t$ is guaranteed to exist since both $(\bm{\Sigma}^-_t)^{-1}$ and $\rmH_t^\top \rmR_t^{-1} \rmH_t$ are symmetric and $(\bm{\Sigma}^-_t)^{-1}$ is positive definite \citep[Sec.~8.7]{golub2013matrix}. The columns of $\rmB_t$ are the generalized eigenvectors of $\rmH_t^\top \rmR_t^{-1} \rmH_t$ with respect to $(\bm{\Sigma}^-_t)^{-1}$ and $r_1, \ldots, r_n$ are the corresponding eigenvalues. By Theorem 3.1 of \citet{santos1996equivalence}  $\bm{\mu}_t^{(K)}$ defined in \cref{eq:santos_recurrence} is the minimizer of \cref{eq:regularized_least_squares} when $\rmM_t = \rmB_t \text{diag}( \lambda_1, \ldots, \lambda_n) \rmB_t^\top$, where $\lambda_i = (1 / r_i)(1 - (1 + r_i)^{-1/K})$ if $r_i \neq 0$ and $\lambda_i = 1$ otherwise. This suggests an optimization wherein $\bm{\mu}_t$ is computed via $K$ steps of gradient descent on the likelihood, where $\rmM_t$ is the learning rate matrix induced by $\bm{\Sigma}_t^-$.
+
+\subsection{Truncated Gradient Descent as Prior Specification}\label{sec:santos_equivalence}
+Instead of computing the learning rate matrix $\rmM_t$ for a given $\bm{\Sigma}_t^-$, consider specifying $\rmM_t$ directly. For example, $\rmM_t = \rho \rmI$ recovers gradient descent on the likelihood with learning rate $\rho$. Let $\rmC_t$ be chosen such that $\rmC_t^\top \rmM_t^{-1} \rmC_t = \rmI$ and $\rmC_t^\top \rmH_t^\top \rmR^{-1}_t \rmH_t \rmC_t = \text{diag}(s_1, \ldots, s_n)$. As for $\rmB_t$ above, such a $\rmC_t$ will exist since both $\rmM_t^{-1}$ and $\rmH_t^\top \rmR^{-1}_t \rmH_t$ are symmetric and $\rmM_t^{-1}$ is positive definite. Then, by Theorem 3.2 of   \citet{santos1996equivalence}, $\bm{\mu}_t^{(K)}$ as defined by \cref{eq:santos_recurrence} is the minimizer of \cref{eq:regularized_least_squares} where $\bm{\Sigma}_t^- = \rmC_t \text{diag}(\sigma_1, \ldots, \sigma_n) \rmC_t^\top$, where $\sigma_i = (1 / s_i) ((1 - s_i)^{-K} - 1)$ if $s_i \neq 0$ and $\sigma_i = 1$ otherwise. Thus, in a linear-Gaussian system, specifying the learning rate matrix $\rmM_t$ implicitly defines an equivalent predictive covariance $\bm{\Sigma}_t^-$ and truncated gradient descent on the likelihood recovers the mode of the filtering distribution.
+\subsection{Alternative Interpretation as Variational Inference}
+The procedure shown above can be alternatively motivated by positing a variational distribution $q_t(\rvx_t) = \mathcal{N}(\rvx_t \mid \rvm_t, \rmM_t)$ with fixed covariance $\rmM_t$. The choice of $\rmM_t$ then specifies the covariance of the variational approximate to the filtering distribution, the learning rate matrix of the optimization, and the effective prior covariance. More generally, \citet{khan2023bayesian} demonstrates that many popular adaptive optimization techniques such as RMSprop and Adam can be interpreted as performing variational inference with different choices of $q_t(\rvx_t)$. In this light, the choice of the optimization algorithm when combined with $k$ steps of optimization implicitly defines a corresponding prior distribution. In the next section, we propose a simple yet effective filtering algorithm based on this interpretation of the update step.
+
+
+
+
+
+\section{Implicit Maximum a Posteriori Filtering}
+
+
+In this section, we state the Bayesian filtering steps of our approach, which (partially) optimizes the likelihood $p(\rvy_t|\rvx_t)$ at every time step. The filtering distribution at each time $t$ is represented by its mean estimate $\bm{\hat{\mu}}_t$.  In addition to the likelihood, we also assume knowledge of a sequence of transition functions $f_t(\rvx_{t-1}) \triangleq \mathbb{E}[\rvx_t | \rvx_{t-1}]$. This is less restrictive than fully specifying the transition distribution, as done in standard Bayesian filtering. The overall algorithm for the Implicit MAP Filter is summarized in \cref{alg:implicit_map_filter}.
+
+\begin{minipage}{0.50\textwidth}
+\begin{algorithm}[H]
+  \caption{Implicit MAP Filter}
+  \label{alg:implicit_map_filter}
+  \begin{algorithmic}
+  \itemindent=-5pt
+    \STATE {\bfseries Input:} Timesteps $T$, initial state estimate $\hat{\bm{\mu}}_0$, sequence of loss functions $\ell_1, \ldots, \ell_T$ where $\exp(-\ell_t(\rvx)) \propto p(\rvy_t \mid \rvx_t = \rvx)$, sequence of transition functions $f_1, \ldots, f_T$ where $f_t(\rvx) = \mathbb{E}[\rvx_t | \rvx_{t-1} = \rvx]$, optimizer $\mathcal{M}$, number of optimization steps $K$. \\
+    \STATE {\bfseries Output:} Filtering state estimates $\bm{\hat{\mu}}_1, \ldots, \bm{\hat{\mu}}_T$.
+    \FOR{$t=1$ {\bfseries to} $T$}
+        \STATE $\bm{\mu}_t^- \leftarrow f_t(\hat{\bm{\mu}}_{t-1})$
+        \STATE $\bm{\hat{\mu}}_t \leftarrow \small{\textsc{IMAP-UPDATE}}(\bm{\mu}_t^-, \ell_t, \mathcal{M}, K)$ 
+    \ENDFOR
+  \end{algorithmic}
+\end{algorithm}
+\end{minipage}\hfill
+\begin{minipage}{0.46\textwidth}
+\begin{algorithm}[H]
+  \caption{Update step of Implicit MAP Filter: $\small{\textsc{IMAP-UPDATE}}(\bm{\mu}^-, \ell, \mathcal{M}, K)$}
+  \label{alg:implicit_map_update}
+  \begin{algorithmic}
+  \itemindent=-5pt
+    \STATE {\bfseries Input:} Initialization $\bm{\mu}^-$, loss function $\ell$, optimizer $\mathcal{M}$, number of optimization steps $K$. \\
+    \STATE {\bfseries Output:} State estimate $\bm{\hat{\mu}}$. 
+    \STATE $\rvm^{(0)} \leftarrow \bm{\mu}^-$
+    \FOR{$k=0$ {\bfseries to} $K-1$}
+        \STATE $\rvg^{(k)} \leftarrow \nabla_\rvx \ell(\rvx) \rvert_{\rvx = \rvm^{(k)}}$
+        \STATE $\rvm^{(k+1)} \leftarrow \rvm^{(k)} + \mathcal{M}(\rvg^{(k)} ; \rvg^{(0:k-1)})$ 
+    \ENDFOR
+    \STATE $\bm{\hat{\mu}} \leftarrow \rvm^{(K)}$
+  \end{algorithmic}
+\end{algorithm}
+
+\end{minipage}
+\subsection{Predict Step}\label{sec:predict}
+The predictive distribution for the Implicit MAP Filter is obtained by applying the first-order delta method ~\citep{dorfman1938note,verhoef2012who} to the Chapman-Kolmogorov equation \cref{eq:chapman_kolmogorov}:
+\begin{align}
+    p(\rvx_t \mid \rvy_{1:t-1}) &= \int p(\rvx_t \mid \rvx_{t-1})p(\rvx_{t-1} \mid \rvy_{1:t-1}) d \rvx_{t-1} \approx p(\rvx_t \mid \rvx_{t-1} = \bm{\mu}_{t-1}). 
+\end{align}
+The mean of the predictive distribution is thus obtained by applying the transition function to the previous state estimate: $\mathbb{E}[\rvx_t | \rvy_{1:t-1}] \approx f_t(\bm{\mu}_{t-1})$. This negates the need for matrix-matrix products as is commonly required for the predict step.
+
+\subsection{Update Step}\label{sec:update}
+The update step is simply the application of optimizer $\mathcal{M}$ for $K$ iterations, considering only an initialization $\bm{\mu}_t^-$, observation $\rvy_t$, and loss function $\ell_t$. Here, $\mathcal{M}$ takes as input the history of gradients and outputs a vector to be added to the current state. This formulation captures many popular optimizers, including SGD, RMSProp, and Adam. Our algorithm for the update step of the Implicit MAP Filter is provided in \cref{alg:implicit_map_update}.
+
+When choosing $\mathcal{M}$ and $K$, the goal is to specify an inductive bias that corresponds to the true filtering equations for the system. Choices such as increasing $K$ and the learning rate increase the Kalman gain \citep{freitas2000hierarchical}. The nature of each optimization step, as well as $K$, defines the shape and entropy of the filtering distribution assumed \citep{duvenaud2016early}. Changing the initialization $\bm{\mu}_t^-$ given by the predict step modifies the location of the \emph{implicitly} defined prior distribution within the latent space. This concert of initialization $\bm{\mu}_t^-$, optimizer $\mathcal{M}$, and number of iterations $K$ produces a state estimate $\bm{\hat{\mu}}_t$ that maximizes the posterior with respect to an \emph{implicitly} defined prior. The aim when specifying these quantities is to define the \emph{correct} posterior.
+
+
+
+
+
+
+\section{Experimental Evaluation}
+
+
+The goal of our experiments is to assess whether the most popular adaptive optimizers can be used to design effective, robust, and scalable Bayesian filters. We begin with a simple low-dimensional system with nonlinear dynamics to establish that our approach is competitive with standard filters. Then, we turn to a more challenging system that has been used as a benchmark for these algorithms, demonstrating our advantages. Finally, we show how Implicit MAP Filtering can be effective in high-dimensional settings, such as adapting the weight space of a convolutional neural network.
+
+\subsection{Toy nonlinear System}\label{sec:toy}
+
+The equivalence between Kalman filtering and $K$ steps of gradient descent elucidated in Section~\ref{sec:santos_equivalence} suggests that the proposed framework should produce reliable estimates in \emph{approximately} linear-Gaussian systems. To better understand filtering amidst nonlinearites, we first consider the one-dimensional example used in \citet{doucet2001sequential,gordon1993novel,kitagawa1996monte}, originally proposed by \citet{netto1978new}, which admits highly nonlinear periodic behavior (see Figure 2):
+\begin{align}
+    \rvx_{t} = \frac{1}{2}\rvx_{t-1} + 25\frac{\rvx_{t-1}}{1 + \rvx_{t-1}^2} + 8\cos{(1.2t\Delta t)} + \bm{q}_{t-1}, \quad \quad \rvy_{t} = \frac{\rvx_t^2}{20} + \bm{r}_{t},
+\end{align}
+where $\rvx_{0} \sim \mathcal{N}(0, 1)$, $\bm{q}_{t-1} \sim \mathcal{N}(0, \bm{Q}_{t-1})$, $\bm{r}_{t} \sim \mathcal{N}(0, \bm{R}_{t})$, and $\Delta t = 0.1$. We simulate ground truth trajectories and their measurements for 200 time steps and evaluate performance using the root mean square errors (RMSEs) with respect to the simulated true trajectories for every combination of $\bm{Q}_{t-1} \in \{1, 3, 5\}$ and $\bm{R}_{t} \in \{1, 2, 3\}$. The means and $95\%$ confidence intervals of the RMSEs are computed from 100 independent Monte Carlo (MC) simulations. 
+
+\begin{figure}[t]
+\label{system1figure}
+\begin{center}\includegraphics[width=\textwidth]{figures/system1.png}
+\end{center}
+\caption{Toy nonlinear system ($\bm{Q}_{t-1} = 3, \bm{R}_{t} = 2)$ for a single random trajectory \textbf{(left)} and the respective filter estimates \textbf{(right)}. Implicit MAP Filter (MAP) shown uses the Adam optimizer with 50 steps at learning rate $\eta = 0.1$ and exponential decay rates $\beta_1, \beta_2 = 0.1$.}
+\end{figure}
+Table \ref{experiment_1_table} shows the results for $\bm{R}_t = 2$ and $\bm{Q}_{t-1} = 1, 3, 5$. There exist RMSprop and Adam hyperparameters that are competitive with the unscented Kalman filter (UKF) under low-to-medium process noise and better under high process noise. Both the extended Kalman filter (EKF) and iterated extended Kalman filter (IEKF) have the tendency to diverge in this system. The particle filter (PF) performs the best universally, since 1000 particles can capture uni-modal and bi-modal filtering distributions in one dimension quite well.
+The Implicit MAP Filter does not explicitly use $\bm{Q}_{t-1}$ or $\bm{R}_t$ but internalizes both of these terms by the choice of optimizer. Compared to methods that similarly use gradient information (EKF, IEKF), our Implicit MAP Filters with Adam and RMSprop see a significant performance boost despite the challenge of a non-convex likelihood. In contrast to methods that use sigma points (UKF) or particles (PF), we see competitive performance while avoiding covariance calculations or maintaining many copies of the state.
+
+
+\begin{table}[t]
+\caption{RMSEs on the toy nonlinear system ($\bm{R}_t = 2$). Results show the average RMSE over 100 MC simulations with 95\% confidence intervals.}
+\label{experiment_1_table}
+\centering
+\renewcommand{\arraystretch}{1.0} %
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & \textbf{RMSE ($\bm{Q}_{t-1} = 1$)} & \textbf{RMSE ($\bm{Q}_{t-1} = 3$)} & \textbf{RMSE ($\bm{Q}_{t-1} = 5$)} \\
+\midrule
+EKF & $24.619 \pm 3.988$ & $34.909 \pm 2.732$ & $45.646 \pm 5.629$ \\
+IEKF ($K = 5$) & $9.277 \pm 0.652$ & $15.321 \pm 0.493$ & $17.898 \pm 0.559$ \\
+\midrule
+IMAP (Adadelta)* & $32.008 \pm 8.650$ & $23.152 \pm 3.973$ & $26.462 \pm 5.058$ \\
+IMAP (Gradient Descent)* & $5.589 \pm 0.219$ & $7.966 \pm 0.180$ & $10.130 \pm 0.196$ \\
+IMAP (Adagrad)* & $5.569 \pm 0.215$ & $6.549 \pm 0.223$ & $9.264 \pm 0.227$ \\
+IMAP (RMSprop)* & $5.304 \pm 0.256$ & $6.000 \pm 0.227$ & $8.527 \pm 0.441$ \\
+IMAP (Adam)* & $5.699 \pm 0.190$ & $5.842 \pm 0.231$ & $7.964 \pm 0.334$ \\
+\midrule
+UKF & $4.550 \pm 0.242$ & $5.762 \pm 0.270$ & $9.555 \pm 0.400$ \\
+\midrule
+PF ($n = 1000$) & $\bm{1.565 \pm 0.047}$ & $\bm{2.800 \pm 0.108}$ & $\bm{4.518 \pm 0.160}$ \\
+\bottomrule
+\end{tabular}
+
+\end{table}
+
+\subsection{Stochastic Lorenz Attractor}\label{sec:lorenz}
+In the previous section, we show that our approach is competitive with a particle filter (PF) and the unscented Kalman filter (UKF) in a system that is relatively easy for these methods. Now, we evaluate a mildly nonlinear chaotic system that is more complicated because the stochastic differential equation (SDE) is unreliable for accurately predicting the next state \citep{evensen2009data}.
+
+Consider a stochastic Lorenz '63 system \citep{lorenz1963deterministic, li2020scalable, zhao2021non},
+\begin{align}
+    \text{d} \begin{pmatrix} x_{1,t} \\ x_{2,t} \\ x_{3,t} \end{pmatrix} = \begin{pmatrix}
+\sigma (x_{2,t} - x_{1,t}) \\ x_{1,t} (\rho - x_{3,t}) - x_{2,t} \\ x_{1,t} \cdot x_{2,t} - \beta x_{3,t}
+\end{pmatrix} \text{d}t + \alpha \text{d}W_t, \quad \quad \rvy_t = \begin{pmatrix} x_{1,t} \\ x_{2,t} \\ x_{3,t} \end{pmatrix} + \bm{r}_t,
+\end{align}
+where $\rvx_{0} \sim \mathcal{N}(\bm{\mu}_0, \bm{I}_3)$ for $\bm{\mu}_0 = (10, 10, 10)$, $\bm{r}_{t} \sim \mathcal{N}(\bm{0}, 2 \cdot \bm{I}_3)$, $\sigma = 10$, $\rho = 28$, $\beta = \frac{8}{3}$, $\alpha = 10$, and $W_t$ is a three-dimensional Wiener process with unit spectral density. Similar to \citet{zhao2021non}, we simulate numerical ground truth trajectories and their measurements uniformly for 200 time steps with d$t = 0.02$ using 10000 Euler-Maruyama integration steps between each measurement.
+
+We report three experimental configurations where we only vary the method used for numerical integration: 4th order Runge-Kutta (RK4) method, Euler's method (Euler), and no integration, assuming a Gaussian random walk (GRW). These methods are presented in decreasing order of accuracy with respect to the aforementioned Euler-Maruyama integration steps. The objective is to assess robustness to dynamics misspecification, which is an unavoidable reality wherever numerical integration is required. Unlike the toy nonlinear system, where the true process noise covariance is known exactly, numerical integration introduces additional unmodeled noise to the process. This presents a realistic challenge that can significantly distort estimates \citep{huang2017novel, mehra1972approaches}.
+
+Table \ref{experiment_2_table} shows the results of these experiments and the number of values stored to describe the state ($N$). Performing such a search for the PF is impractical due to the cost of numerically integrating each particle. The Implicit MAP Filter with gradient descent and the EKF with optimized $\bm{Q}_{t-1}$ show the best performance. Both are relatively robust to worsening estimates of the SDE. The EKF with optimized $\bm{Q}_{t-1}$ is close to optimal due to the convexity of this system. 
+The performance of the Implicit MAP Filter and the optimized EKF are statistically equivalent but with several key differences. Our approach only computes a point estimate over a minimal state space representation, which decreases space complexity and avoids expensive matrix-matrix computations. Classical filters such as the EKF are difficult to tune \citep{chen2018weak} whereas simple adaptive optimizers, like Adam, are fixed to 3 or 4 hyperparameters regardless of the state space and are faster to evaluate, making search quick and effective. The EKF is not well suited for nonconvexities, as shown in Section~\ref{sec:toy}, whereas the Implicit MAP Filter overcomes this pitfall by its choice of optimizer.
+Accommodating worsening dynamics estimates is straightforward by either increasing the number of steps or learning rate, each of which corresponds to a weaker prior. In Table \ref{experiment_2_table}, our Implicit MAP Filter with gradient descent uses 3 gradient steps with learning rate $\eta = 0.05$ with RK4, 3 steps with $\eta = 0.1$ for the Euler case, and 10 steps with $\eta = 0.1$ for the GRW case.
+
+\begin{table}[t]
+\caption{RMSEs on the stochastic Lorenz attractor ($\alpha = 10$). Results show the average RMSE over 100 MC simulations with 95\% confidence intervals. RK4 indicates 4th order Runge-Kutta method. Euler indicates Euler's method. GRW indicates a Gaussian random walk. $N$ is the number of values stored to describe the state space ($D = 3$).}
+\label{experiment_2_table}
+\centering
+\renewcommand{\arraystretch}{1.0} %
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Method} & \textbf{RMSE (RK4)} & \textbf{RMSE (Euler)} & \textbf{RMSE (GRW)} & $\bm{N}$ \\
+\midrule
+EKF (original $\bm{Q}_{t-1}$) & $0.890 \pm 0.094$ & $2.308 \pm 0.155$ & $3.057 \pm 0.037$ & $D + D^2$ \\
+EKF (optimized $\bm{Q}_{t-1}$)* & $\bm{0.692 \pm 0.014}$ & $\bm{0.952 \pm 0.011}$ & $\bm{1.561 \pm 0.010}$ & $D + D^2$ \\
+IEKF ($K = 5$) & $0.890 \pm 0.094$ & $2.308 \pm 0.158$ & $3.057 \pm 0.038$ & $D + D^2$ \\
+\midrule
+IMAP (Adadelta)* & $6.034 \pm 0.634$ & $7.649 \pm 0.254$ & $10.754 \pm 0.279$ & $\bm{D}$ \\
+IMAP (Adam)* & $0.982 \pm 0.135$ & $1.153 \pm 0.014$ & $1.885 \pm 0.010$ & $\bm{D}$ \\
+IMAP (Adagrad)* & $0.907 \pm 0.144$ & $1.096 \pm 0.017$ & $1.765 \pm 0.013$ & $\bm{D}$ \\
+IMAP (RMSprop)* & $0.881 \pm 0.114$ & $1.081 \pm 0.015$ & $1.757 \pm 0.015$ & $\bm{D}$ \\
+IMAP (Gradient Descent)* & $\bm{0.701 \pm 0.018}$ & $\bm{0.960 \pm 0.012}$ & $\bm{1.561 \pm 0.010}$ & $\bm{D}$ \\
+\midrule
+UKF (original $\bm{Q}_{t-1}$) & $2.742 \pm 0.059$ & $2.856 \pm 0.066$ & $5.628 \pm 0.067$ & $D + D^2$ \\
+UKF (optimized $\bm{Q}_{t-1}$)* & $1.402 \pm 0.010$ & $1.417 \pm 0.011$ & $1.736 \pm 0.013$ & $D + D^2$ \\
+\midrule
+PF ($n = 1000$) & $1.568 \pm 0.027$ & $1.725 \pm 0.031$ & $14.346 \pm 0.365$ & $nD$ \\
+\bottomrule
+\end{tabular}
+
+\end{table}
+
+
+\subsection{Yearbook}\label{sec:yearbook}
+
+Suppose we have a pre-trained neural network that performs inference in a time-varying environment. This could be a recommender system that must evolve with changing seasons or a facial recognition system that must be robust to temporal shift. Let us assume that data curation is expensive, so we are only given a small number of examples at every time step for adaptation. We can formalize this as the following state space model \citep{haykin2004kalman}:
+\begin{align}
+    \rvw_{t} = f(\rvx_{t-1}) + \bm{q}_{t-1}, \quad \quad
+    \rvy_{t} = h(\rvw_{t}, \bm{X}_t) + \bm{r}_{t}
+\end{align}
+where $\rvw_{t}$ is the network's \emph{ideal} weight parameterization, $\bm{q}_{t-1}$ is some noise vector that corrupts estimates from the transition function $f$, $\rvy_{t}$ is the network's desired response vector after applying the transformation $h$ parameterized by $\rvw_{t}$ with feature matrix $\bm{X}_{t}$, and $\bm{r}_{t}$ is the measurement noise. 
+
+In this final experiment, we design a time-varying prediction task as described above using the Yearbook dataset~\citep{ginosar2015century}, which contains 37,921 frontal-facing American high school yearbook photos that capture changes in fashion and population demographics from 1905 - 2013. We use the data from 1905-1930 to pre-train a 4 layer convolutional neural network (CNN) to perform a binary gender classification task. From 1931-2010, we adapt this weight initialization at each year sequentially using five simple approaches: static weights, direct fit, variational Kalman filtering (VKF), particle filtering (PF), and our Implicit MAP filtering.
+
+This system is complicated by (1) a state space of 28,193 parameters, (2) unknown weight-space dynamics equations, and (3) unknown process noise and measurement noise covariances. We report classification accuracies for all five methods in Table \ref{yearbook_table}, grouped into two 40 year blocks. Static weights yields the worst performance due to the problem being fundamentally non-stationary. On the other extreme, attempting to exactly fit the data at each time step severely overfits, which proves to be better but still suboptimal. The VKF, PF, and Implicit MAP Filter attempt to internalize the system's true state space equations via a small grid search, but this is clearly difficult to do exactly in such a state space. Our implicit approach is less sensitive to this inevitable misspecification. The Implicit MAP Filter with 50 steps of Adam optimization not only showed the best performance, but also highly desirable space and time complexity. In cases where we do not start with a pre-trained network, we can simply fit the first timestep to convergence, which is equivalent to an uninformative prior on the initial state.
+
+\begin{table}[t]
+\caption{Classification accuracy with $95\%$ confidence intervals over two 40 year blocks in the yearbook dataset.}
+\label{yearbook_table}
+\centering
+\renewcommand{\arraystretch}{1.0} %
+\begin{tabular}{lcc}
+\toprule
+\textbf{Method} & \textbf{\% Correct (Validation Years)} & \textbf{\% Correct (Test Years)} \\
+\midrule
+Static Weights & $82.416 \pm 2.270$ & $60.897 \pm 1.615$\\
+Particle Filter & $86.430 \pm 1.790$ & $66.715 \pm 2.390$\\
+Variational Kalman Filter & $93.087 \pm 1.038$ & $79.967 \pm 2.204$\\
+Direct Fit & $94.416 \pm 0.924$ & $80.449 \pm 1.845$ \\
+Implicit MAP Filter & $\bm{94.973 \pm 0.837}$ & $\bm{84.747 \pm 2.030}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+
+\section{Related Work}
+
+Bayesian filtering, optimization, and neural networks share a long history that dates back to early attempts of using the extended Kalman filter (EKF) algorithm to train multilayer perceptrons \citep{singhal1988training}. Since then, Kalman filter theory for the training and use of neural networks saw rich development \citep{haykin2004kalman}, but fell out of fashion as gradient descent proved to be the more efficient and scalable option for the training of deep neural networks \citep{bengio2017deep}. %
+\citet{ruck1992comparative} realized a connection between optimization and Bayesian filtering, showing that the standard backpropagation algorithm can be seen as a degenerate form of the EKF. Several works have since connected the EKF and the Gauss-Newton method \citep{bertsekas1996incremental, bell1993iterated} and showed that the EKF can be seen as a single iteration of Newton’s method for a specific quadratic form \citep{humpherys2012fresh}. %
+\citet{ollivier2018online,ollivier2019extended} proved equivalence between online natural gradient descent and the EKF when the dynamics are stationary or the process noise is proportional to the posterior covariance over states. \citet{aitchison2020bayesian} used the Bayesian filtering formalism to derive adaptive optimizers like Adam and RMSprop. \citet{freitas2000hierarchical} showed that the process noise and measurement noise can be viewed as adaptive per-parameter learning rates. In the present work, we establish similar connections between optimization and Bayesian filtering but focus on optimization as a tool for Bayesian filtering rather than Bayesian filtering as a tool for optimization.
+
+Several works have similarly used popular optimization methods to address challenges with classical Bayesian filters. \citet{auvinen2010variational} and \citet{bardsley2013krylov} used limited memory Broyden–Fletcher–Goldfarb–Shanno (LBFGS) and conjugate gradients, respectively, to derive variational Kalman filters with low storage covariance, and inverse covariance, approximations. These methods scale up classical filters, like low-rank extended Kalman filters \cite{chang2023low}, rather than providing a general filtering approach that is painless to implement. \citet{chen2003bayesian}  describes particle filters that move every particle down their respective gradient prior to sampling from the proposal distribution. 
+This is reminiscent of our approach in that it uses gradients, but differs in that it maintains particles, performs sampling, and again falls within the class of explicit filters.
+
+
+\section{Conclusion}
+
+
+We have shown that Bayesian filtering can be considered as optimization over a time-varying objective and that such a perspective opens the door to effective, robust, and scalable filters built from adaptive optimizers. This framework, however, comes at the cost of interoperability and uncertainty estimates, which limits use in risk-sensitive environments or situations where the filtering equations themselves are used for analysis. Nonetheless, our proposed Implicit MAP Filtering approach is an attractive option for the performance-driven practitioner.
+
+
+
+
+
+
+\subsubsection*{Reproducibility Statement}
+
+
+
+

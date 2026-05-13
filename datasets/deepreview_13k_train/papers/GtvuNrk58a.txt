@@ -1,0 +1,283 @@
+\title{Round and Round We Go! What makes Rotary Positional Encodings useful?}
+
+\begin{abstract}
+Positional Encodings (PEs) are a critical component of Transformer-based Large Language Models (LLMs), providing the attention mechanism with important sequence-position information. One of the most popular types of encoding used today in LLMs are Rotary Positional Encodings (RoPE), that rotate the queries and keys based on their relative distance. A common belief is that RoPE is useful because it helps to decay token dependency as relative distance increases. In this work, we argue that this is unlikely to be the core reason. We study the internals of a trained Gemma 7B model to understand how RoPE is being used at a mechanical level. We find that Gemma learns to use RoPE to construct robust `positional' attention patterns by exploiting the highest frequencies. We also find that, in general, Gemma greatly prefers to use the lowest frequencies of RoPE, which we suspect are used to carry semantic information. We mathematically prove interesting behaviours of RoPE and conduct experiments to verify our findings, proposing a modification of RoPE that fixes some highlighted issues and improves performance. We believe that this work represents an interesting step in better understanding PEs in LLMs, which we believe holds crucial value for scaling LLMs to large sizes and context lengths.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+It is common to provide positional information to the attention mechanism in Transformers through the use of absolute positional encodings \citep{vaswani2017attention}, relative positional encodings \citep{su2024roformer}, or by introducing a bias directly to the activations \citep{press2021train}. One of the currently most widely adopted encodings, especially in Large Language Models (LLMs), are Rotary Positional Encodings (RoPE) \citep{su2024roformer}, being used in popular models such as  LLama 3 \citep{dubey2024llama} and Gemma \citep{team2024gemma}.  RoPE acts on the queries and keys by splitting them in $2$-dimensional chunks and rotating each chunk at a different frequency. The method can be implemented efficiently and provides an interesting geometric approach to positional encodings. 
+
+Despite the significant adoption of RoPE, the specific reasons why this method is useful to Transformer models remains poorly understood. One of the main arguments in favour of RoPE made by \cite{su2024roformer} is that the method helps to decay attention coefficients as the relative distance grows. Most such claims, however, rely on the queries and keys being \emph{constant} vectors -- which is uncommon in practice. In fact, in this work we find that there are many situations in which this decay does \emph{not} occur and that this is exploited at times by attention heads in Gemma 7B \citep{team2024gemma}. 
+
+Further, there are open intriguing questions relating to how exactly the different frequencies in RoPE are useful. In the standard parameterisation of RoPE, the fastest frequencies rotate at $1$ radian per token, whilst the slowest are several orders of magnitude slower at $\approx 1/10{\small,}000$ radians per token. As dot product attention directly depends on the angle between the queries and keys, the highest frequencies are extremely sensitive to small token rearrangements, making them poor carriers of information. Consequently, we find it interesting and important to understand how exactly the different rotation frequencies are used in LLMs.
+
+\paragraph{Contributions.} In this work, we study in-depth empirically and theoretically how Transformers and in particular LLMs benefit from RoPE. We rely on the pretrained and open-source Gemma 7B \citep{team2024gemma} model for our empirical analysis. We summarise our findings: 
+
+\begin{itemize}
+    \item In Section \ref{sec:rope-decay}, we argue against the common claim that RoPE is useful because it encourages the decay of attention coefficients with distance. We provide theoretical and empirical evidence to support our claim.
+    \item In Section \ref{sec:rope-frequencies}, we propose a new way to understand the usage of different frequencies in the queries and keys. We find that Gemma 7B  largely prefers to use the low frequencies of RoPE. The first and last layers instead show the most use of the high frequencies.
+    \item In Section \ref{sec:high-frequencies}, we show that the highest frequencies in RoPE are cleverly used by Gemma 7B to construct special `positional' attention heads (see Figure \ref{fig:rope_mech}). We mathematically prove the `robustness' of the construction. 
+    \item In Section \ref{sec:low-frequencies}, we study how the low frequencies are used. We observe distinct `bands' in the low frequencies of the queries and keys. We conjecture that Gemma 7B is using them as `information channels'. We prove that these channels cannot be robust over long context. 
+    \item In Section \ref{sec:low-frequencies-ablation}, we propose a new technique called $p$-RoPE that removes the lowest frequencies of RoPE to create robust semantic channels. We show not only that removing a percentage of the frequencies maintains the performance, but also \emph{improves it} on 2 billion parameter models. We believe that our work explains why increasing the maximum RoPE wavelength helps with long-context, e.g. as shown in Llama 3 \citep{dubey2024llama}. 
+\end{itemize}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/rope_tikz_offdg.pdf}
+    \caption{Depiction of our construction which allows Transformers to obtain positional attention heads using RoPE. On the \textbf{left} we depict key and query vectors for each position $i$, where keys are all identical, and queries are just a rotated version of the key, in a way that matches one of RoPE's highest frequencies. The \textbf{center} depicts how keys get rotated by RoPE, making the key at $i-1$ perfectly align with the query. Due to the high frequency of the rotation, all other keys will lead to a smaller attention weight. On the \textbf{right} we show the resulting attention weights, resulting in this case in an off-diagonal positional attention. See Section~\ref{sec:high-frequencies} for more details.}
+    \label{fig:rope_mech}
+\end{figure}
+
+
+
+\section{Background}
+
+We denote by $\xb_i \in \R^d$ the $d$-dimensional token embedding of the $i$-th token. Query and key vectors take the form $\qb_i = \Wb_Q \xb_i$ and $\kb_i = \Wb_K \xb_i$ respectively, given query and key matrices $\Wb_Q, \Wb_K \in \R^{d\times d}$. The attention mechanism\footnote{We ignore here the $1/\sqrt{d}$ scaling factor introduced by \citet{vaswani2017attention} for ease of notation.} performs the following computation:
+
+\begin{equation}
+    \label{eq:attention}
+    \alpha_{i, j} = \frac{\exp\left( \ab_{i,j} \right)}{\sum_{\ell \leq i} \exp\left(\ab_{i,\ell} \right)}, \text{with } \ab_{i, j} = k\left(\qb_i, \kb_j \right)
+\end{equation}
+
+where $k$ is a kernel function which in our work takes the form of either a simple dot product, i.e. No Positional Encoding (NoPE) \citep{haviv2022transformer,kazemnejad2024impact}, or RoPE. We focus on the case in which the attention mechanism is \emph{causal}, the most common type of attention used in LLMs today. In a causal mechanism, we have that $\alpha_{i, j} = 0$ when $j > i$ and  $\sum_{j: j \leq i} \alpha_{i, j} = 1$. We also note that we assume $\ab_{i, j}$ to be finite, as it is always the case in practice, such that $0 < \alpha_{i, j} < 1$, when $j < i$. We call $\ab_{i,j}$ the `activation' or `logit', while we call $\alpha_{i,j}$ the `attention coefficient' between $i$ and $j$. It is sometimes useful to view the attention coefficients in matrix-form, which in our specific case results in a lower triangular row-stochastic matrix. We highlight an important special case for $k$ which we call $k_{\text{NoPE}}$, i.e. no positional encoding:
+
+\begin{equation}
+ k_{\text{NoPE}}\left(\qb_i, \kb_j\right) = \qb_i^\top \kb_j,
+\end{equation}
+ 
+where $\qb_i^\top$ denotes the tranpose of $\qb_i$. In other words, in NoPE the kernel function computes simply the dot product, providing no positional information to the Transformer. It has been shown that Transformers can still perform well, especially out of distribution, with NoPE \citep{kazemnejad2024impact}. In particular, \cite{kazemnejad2024impact} prove that the Transformers could in principle recover absolute positional information through the causal mask; however, the proof relies on the universal approximation theorem, which we believe is a practical limitation.
+\subsection{Rotary Positional Encodings (RoPE)}
+For simplicity of notation in this work we assume that query are key vectors are $d$-dimensional, with $d \geq 2$ being an even number. We decompose queries and keys into $2$-dimensional chunks $\qb_i = \bigoplus_{k = 1\dots d/2} \qb_i^{[k, k+1]} = \bigoplus_{k = 1\dots d/2} \qb_i^{(k)}$, where $\bigoplus$ denotes direct sum (concatenation). In other words, we denote by $\qb_i^{(k)} \in \R^2$ the $k$-th $2$-dimensional chunk of the query vector of the $i$-th token, using analogous notation for the key vectors. 
+
+RoPE considers a sequence of angles $G = \left(g_k = \theta^{-2(k-1)/d}:  k = 1, \dots, d/2\right)$\footnote{We denote the angles $g_k$ instead of $\theta_k$ as we opt for more of a group theoretic perspective of RoPE.}, where $g_1 = 1$ is the fastest rotating component at $1$ radian per token and $g_{d/2} = \theta^{-(d - 2)/d} \approx \theta^{-1}$ the slowest rotating component at approximately $1/\theta$ rotations per token. The parameter $\theta$ is called the base wavelength, which by default is $10{\small,}000$ \citep{su2024roformer}, although works have explored increasing it to, for instance, $500{\small,}000$ \citep{xiong2023effective,roziere2023code,dubey2024llama}. We denote by $\rho(g_k)$ the matrix form of $g_k$:
+
+\begin{equation}
+    \rho(g_k) = \begin{bmatrix}
+\cos(g_k) & -\sin(g_k) \\
+\sin(g_k) & \cos(g_k)
+\end{bmatrix},
+\end{equation}
+
+highlighting that $\rho(g_k)$ is a $2$-dimensional orthogonal transformation (rotation). One can view $\rho(g_k)$ as a `unit rotation' by $g_k$ radians. The RoPE technique amounts to the construction of a block-diagonal matrix $\Rb^{i} = \bigoplus_{k = 1\dots d/2} \rho(g_k)^i \in \R^{d \times d}$, where each $2\times 2$ block on the diagonal is a rotation by a different frequency of RoPE. The $\Rb^{i}$ denotes in fact matrix exponentiation by an integer $i$ which is the position of $\xb_i$ \footnote{We emphasize that $i$ and $j$ have nothing to do with $\sqrt{-1}$, but instead denote the position $i$ and $j$ of the token in the sequence.}. We can exploit a nice property of rotation matrices, i.e. that $\rho(g_k)^i = \rho(i g_k)$ to avoid the computation of the matrix power. As this matrix is block diagonal, computing $\Rb_i \qb_i$ means that the rotations act only on $2$-dimensional chunks of the query (or key), i.e. $\Rb_i \qb_i = \bigoplus_{k = 1 \dots d/2} \rho(i g_k) \qb_i^{(k)}$. This leads to the final formulation of $k_{\text{RoPE}}$: 
+
+\begin{equation}
+    k_{\text{RoPE}}\left(\qb_i, \kb_j\right) = \left(\Rb^i \qb_i\right)^\top\left(\Rb^j \kb_j \right) = \qb_i^\top \Rb^{j - i}\kb_j = \sum_{k = 1 \dots d/2}\left(\qb_i^{(k)}\right)^\top\rho(g_k)^{j -i} \kb_j^{(k)},
+\end{equation}
+
+where we use the fact that $\left(\rho(g_k)^{i}\right)^\top \rho(g_k)^j = \rho(g_k)^{-i}\rho(g_k)^j = \rho(g_k)^{j - i}$. We highlight how the block diagonal structure of $\Rb$ allows one to decompose the dot product into the sum of dot products of $2$-dimensional chunks, with each key vector chunk rotated at a frequency dictated by $g_k$.
+\subsection{Related works}
+A number of works have investigated how different modifications of RoPE affect its generalisation. A well-known method involves increasing the parameter $\theta$ from the originally proposed $10{\small,}000$ to a larger value, such as $500{\small,}000$ \citep{xiong2023effective, roziere2023code}. Notably, this is also used in the recently released LLama 3 class of models \citep{dubey2024llama}. The justification provided for this modification is that a higher base wavelength means that the attention decay induced by RoPE will be slower, allowing for more robust learning over a larger context. In this work, we challenge this common assumption and investigate why RoPE and modifications such as these are helpful.
+
+In a different direction, works have pointed out that NoPE shows strong performance in \emph{out-of-distribution} (OOD) settings when compared to RoPE, arguing that the causal mechanism is sufficient to learn positional information \citep{haviv2022transformer, kazemnejad2024impact}. In this work, we instead argue that NoPE and RoPE have \emph{complementary} strengths and weaknesses and that for instance NoPE is unable to learn certain types of attention matrices present in Gemma 7B. \cite{ruoss2023randomized} propose to provide \emph{randomised} positional information, showing that this helps boost OOD performance, claiming that this helps the model to learn over a longer range of relative distances. 
+
+Overall, we believe this work provides a different and perhaps more nuanced perspective on different works that tackle positional encodings. In spirit, this work is similar to works that aim to understand LLMs from a mechanistic perspective \citep{elhage2021mathematical, olsson2022context, wang2022interpretability, hanna2024does} and from the representations they produce \citep{barbero2024transformers, velickovic2024softmax}.
+
+
+
+\section{Does RoPE decay activations with distance?}
+
+\label{sec:rope-decay}
+In this section, we argue against the common claim that RoPE is helpful because it helps to decay activations as the relative distance between tokens increases. Such claims often work under the assumption that queries and keys are for instance a vector with all entries equal to each other, which we believe is an unrealistic oversimplification\footnote{Intuitively, \citet{su2024roformer} ask the question of what happens, as we vary the relative distance, to the dot product between already aligned queries and keys. This indeed will lead to a `decay' with relative distance. However, this perspective ignores what happens to originally misaligned queries and keys, whose dot product can \emph{increase} with relative distance.}. Importantly, this claim was originally provided by the authors of RoPE \citep{su2024roformer} as a justification for the chosen structure of the encoding. Follow up works have used this claim to justify modifications, such as increasing the base wavelength $\theta$ to $500{\small,}000$. We therefore find it important to point out cases in which this decay does not in fact occur.
+
+\begin{figure}
+    \centering
+    \subfloat[\centering RoPE applied to constant queries and keys.]{{\includegraphics[width=0.45\textwidth]{figures/constant-qks.png} }}%
+    \qquad
+    \subfloat[\centering RoPE applied to Gaussian queries and keys.]{{\includegraphics[width=0.45\textwidth]{figures/gaussian-qks.png} }}%
+    \caption{RoPE applied to either (a) constant `all-ones' queries and keys or (b) queries and keys with entries sampled IID from a Gaussian. The decay of the activations is present when the queries and keys are constant all-ones vectors, but not when they are Gaussian random vectors.}%
+    \label{fig:rope-decay}%
+\end{figure}
+
+We start by showing, in Proposition \ref{prop:arbitrary-decay-distance} that given any key, we can find a query such that RoPE is maximal for any chosen relative distance. This highlights the fact that RoPE provides Transformers with \emph{robust} ways to attend to specific relative distances. In fact, we will show, in Section \ref{sec:rope-frequencies}, that this mechanism is what Gemma 7B uses to construct heads that attend to specific positions.
+
+\begin{proposition}[RoPE can be maximal at arbitrary distance]
+\label{prop:arbitrary-decay-distance}
+Given any query $\qb$ and any relative distance $r \in \mathbb{Z}$, we can find a key $\kb$ such that the softmax value is largest at distance $r$ with RoPE.
+\end{proposition}
+
+Next, in Proposition \ref{prop:guassian-rope-decay}, we show that given queries and keys sampled independently from a standard multivariate Gaussian, the expected value of the activations is $0$. Moreover, this is independent of the relative distance of the queries and keys -- implying that the expected value of the activations is independent of the relative distance when the queries and keys are sampled from a Gaussian.
+
+\begin{proposition}[Gaussian queries and keys do not decay.]
+\label{prop:guassian-rope-decay}
+Let $\qb, \kb \sim \mathcal{N}(\mathbf{0}, \Ib)$. Then, for any relative distance $r \in \mathbb{Z}$, we have that:
+\begin{equation*}
+   \expec_{\qb, \kb \sim \mathcal{N}(\mathbf{0}, \mathbf{I})}\left[\qb^\top \Rb^{r} \kb \right] = 0. 
+\end{equation*}
+\end{proposition}
+
+We showcase this by constructing a synthetic experiment in which we either set queries and keys as all-ones vectors, e.g. as done by \cite{su2024roformer, xiong2023effective}, or sample entries independently from a Gaussian, accounting for appropriate normalisations. Figure \ref{fig:rope-decay} shows the results. While there seems to be some form of decay of the activations as relative distance increases when the queries and keys are all-ones vectors (a) -- up to appropriate normalisation, this is clearly not the case when the queries and keys are instead random Gaussian vectors (b).
+\begin{tcolorbox}[boxsep=0mm,left=2.5mm,right=2.5mm]
+\textbf{Summary of the Section:} {\em While RoPE helps to decay activations with relative distance in very specific conditions, this does not have to happen. In fact, we will see in the next section that this is something that Gemma 7B exploits to create specific attention patterns.}   
+\end{tcolorbox}
+
+
+
+\section{How are different frequencies used?}
+
+\label{sec:rope-frequencies}
+In this section, we explore how different frequencies of RoPE are used. RoPE relies on a set of frequencies $G$ that take values $1, \dots, \theta^{-(d-2)/d}$, with the highest frequency varying by $1$ radian per token, while the lowest being much more stable, varying at $\approx 1/\theta$ per token. As the angle between vectors affects the dot product, the contribution from the highest frequencies should behave similarly to random noise, i.e. a small perturbation in the token sequence will give a largely different activation contribution. A natural question is whether these frequencies are being used and, if so, how exactly are they helpful?
+
+To measure the usage of frequencies, we start by noting that by Cauchy-Schwarz, the effect of the $k$-th frequency component on the activation $\ab_{i,j}$ is upper bounded by the $2$-norm of the query and key components, i.e. $\lvert \langle \qb_i^{(k)}, \kb_j^{(k)} \rangle \rvert \leq \lVert \qb_i^{(k)} \rVert \lVert \kb_j^{(k)} \rVert$. It is therefore natural to look at the mean $2$-norm for each $\kb^{k}$ in Gemma 7B over long sequences. For Gemma 7B, we note that $k = 1, \dots, 128$, i.e. the hidden dimension is $128 \times 2 = 256$.
+
+Figure \ref{fig:mean-norm-query-keys} shows the results. We plot the average  $2$-norm at each layer of each rope `chunk' over a number of sequences, ordering them by frequency, with the intuition that the norm will be an upper bound for how much that frequency will impact the activation dot product. We emphasize that the mean is taken over all of the $16$ heads at each layer. It is clear that learning has assigned much higher norm on average to the lowest frequencies, meaning that they will likely influence the dot product the most. This seems to be true at each layer. Interestingly, there seems to be some high frequency usage present especially at the very first and last layers. 
+
+We believe this to be remarkable evidence showcasing how Gemma adapts to RoPE by preferring to use the lowest frequencies when computing attention activations. This highlights that this behaviour is a consequence of RoPE, where learning discovers that these medium to high frequency `chunks' are not useful and hence pushes their norm to $0$ so that their impact on the dot product is minimal. Corresponding entries in value vectors, not being rotated, do not suffer from the same pressure to have their norm $0$. %-- supporting the fact that this is not a training artifact, but rather a consequence of RoPE as RoPE is not applied to the value vectors. 
+
+In Figure \ref{fig:first-layer-frequencies}, we show the frequency usage of the $16$ attention heads in the first layer. The heads that stand out as using the high frequencies, especially for the keys, are Heads 5 and 8. We will show in the next section that these heads correspond to \emph{positional attention heads}. We also highlight the sparse nature of the frequency usage, with the presence of `high norm' bands, especially at the lower frequencies. We highlight that this kind of pattern seems consistent with the observation that feed-forward layers act as sparse dictionary lookup tables \citep{mor2021transformer}. In this context, we believe that these bands are used to perform some kind of sparse query and key semantic matching.
+
+\begin{figure}%
+    \centering
+    \subfloat[\centering Mean query norm distribution at each layer.]{{\includegraphics[width=0.42\textwidth]{figures/query-chunk-distribution.png} }}%
+    \qquad
+    \subfloat[\centering Mean key norm distribution at each layer.]{{\includegraphics[width=0.42\textwidth]{figures/key-chunk-distribution.png} }}%
+    \caption{$2$-norm plotted over $2$-dimensional chunks of queries (a) and keys (b) for each layer in Gemma 7B, corresponding to different RoPE frequencies. A mean is taken over $10$ different Shakespeare quotes and the $16$ attention heads at each layer.}%
+    \label{fig:mean-norm-query-keys}%
+\end{figure}
+
+\begin{figure}%
+    \centering
+    \subfloat[\centering Mean query norms at each attention head.]{{\includegraphics[width=0.42\textwidth]{figures/first-layer-queries-frequency.png} }}%
+    \qquad
+    \subfloat[\centering Mean key norms at each attention head.]{{\includegraphics[width=0.42\textwidth]{figures/first-layer-keys-frequency.png} }}%
+    \caption{$2$-norm plotted over $2$-dimensional chunks of queries (a) and keys (b) for each attention head of the first layer in Gemma 7B, corresponding to different RoPE frequencies. A mean is taken over $10$ different Shakespeare quotes. We explain in Section \ref{sec:high-frequencies} the high frequency behaviour in Head 5 and Head 8.}%
+    \label{fig:first-layer-frequencies}%
+\end{figure}
+
+\begin{tcolorbox}[boxsep=0mm,left=2.5mm,right=2.5mm]
+\textbf{Summary of the Section:} {\em We empirically showed that most of the RoPE usage in Gemma 7B occurs at the low frequencies. We also identified `high frequency' heads and high norm bands.}   
+\end{tcolorbox}
+
+
+\section{High frequencies: Positional attention}
+
+\label{sec:high-frequencies}
+The highest frequencies in RoPE are interesting to study as their usefulness is not immediately obvious. In particular, in the previous section, we showed that Gemma 7B seems to largely avoid them. In this section, we will study the cases in which certain attention heads mostly use the very highest frequencies, showing that these heads tend to display purely positional attention patterns. We will prove by construction that RoPE allows for \emph{arbitrarily sharp} attention patterns of this type -- a construction that Gemma 7B seems to be closely learning in practice. We will also prove that such heads cannot be constructed with NoPE. \emph{We believe the ability to construct such heads is important when trying to optimise for auto-regressive generation.} These heads have also shown to be useful for structure generalisation (see, e.g., Figure 6 in \cite{ruoss2023randomized}).
+\begin{figure}%
+    \centering
+    \subfloat[\centering A diagonal head in Gemma 7B.]{{\includegraphics[width=0.42\textwidth]{figures/gemma-diagonal-lastlayer-attention.png} }}%
+    \qquad
+    \subfloat[\centering A previous-token head in Gemma 7B. ]{{\includegraphics[width=0.42\textwidth]{figures/gemma-previous-token-attention.png} }}%
+    \caption{Examples of purely positional heads occurring in Gemma 7B, showcasing a diagonal head at the last layer (a) and a previous-token head at the first layer (b).}%
+    \label{fig:positional-heads-in-gemma}%
+\end{figure}
+\begin{figure}%
+    \centering
+    \subfloat[\centering Query frequency usage for Layer 27 Head 8. head]{{\includegraphics[width=0.42\textwidth]{figures/gemma-q-layer27-head8.png} }}%
+    \qquad
+    \subfloat[\centering Key frequency usage for Layer 27 Head 8.  ]{{\includegraphics[width=0.42\textwidth]{figures/gemma-k-layer27-head8.png} }}%
+    \caption{Query and key frequency usage for a diagonal head present at the final layer, shown in Figure \ref{fig:positional-heads-in-gemma} (a). The head mostly relies on the high frequencies.}%
+    \label{fig:diagonal-head-pattern-qks}%
+\end{figure}
+
+In Figure \ref{fig:positional-heads-in-gemma}, we show certain heads in Gemma 7B that specialise into purely positional attention patterns -- with Figure \ref{fig:positional-heads-in-gemma} (a) showing a `diagonal' attention pattern and \ref{fig:positional-heads-in-gemma} (b) a `previous-token' attention pattern. These heads seem to attend based purely on relative position, with no regards for semantics. It is not immediately clear how purely diagonal attention patterns are helpful, as these in principle behave like a residual connection. The reason \emph{why} Gemma learns to construct such a pattern is outside the scope of this work, but constitutes interesting learnt behaviour which requires further analysis -- perhaps a training `bug'. 
+
+Figure \ref{fig:diagonal-head-pattern-qks}, shows that for the diagonal head, Gemma seems to rely mostly on the very highest frequencies. In fact, we found it remarkably consistent to identify positional heads, by looking at the usage of the highest frequencies. The heads 5 and 8 previously pointed in Figure \ref{fig:first-layer-frequencies} in fact correspond to positional heads with attention head 5 being purely diagonal and attention head 8 a previous-token head. 
+\paragraph{Constructing robust positional heads.}
+We now study theoretically the mechanism through which Gemma 7B learns to robustly construct positional attention patterns. We start by defining more formally diagonal and previous-token attention patterns. Importantly, our definition relies on being able to learn patterns to an arbitrary precision $\epsilon$, given a maximum size $N$.
+
+\begin{definition}
+An attention head can learn a diagonal attention pattern if given an $\epsilon > 0$ and a fixed size $N$, for all $i \leq N$, we have $\alpha_{i, i} > 1 - \epsilon$, implying that $\sum_{j: j < i} = \epsilon$. Similarly, for the previous-token head, we must have $\alpha_{i, i-1} > 1 - \epsilon$ for all $\epsilon > 0$, implying that $\sum_{j: j \neq i-1} \alpha_{i, j} = \epsilon$.
+\end{definition}
+
+We prove in Proposition \ref{prop:nope-no-pos-pattern} that no construction exists for NoPE that is able to learn such attention patterns.
+
+\begin{proposition} 
+\label{prop:nope-no-pos-pattern} 
+An attention head with NoPE \textbf{cannot} learn a diagonal or off-diagonal pattern.
+\end{proposition}
+
+Instead, in Theorem \ref{thm:rope-pos-pattern}, we show that an attention head with RoPE is able to learn such patterns. The construction relies on setting queries and keys equal to each-other and for the off-diagonal case, inverse-rotating them by a unit rotation for each RoPE chunk.
+
+\begin{theorem} 
+\label{thm:rope-pos-pattern}
+An attention head with RoPE \textbf{can} learn a diagonal or off-diagonal pattern.
+\end{theorem}
+
+ We also find why the highest frequency rotations are most similar, as they are the ones which will affect the dot-product most rapidly. For the diagonal case, setting queries and keys equal means that the dot product $\langle \qb_i, \Rb^{j-i} \kb_j \rangle$ will be maximal when $j = i$ and strictly smaller when $j \neq i$. The decrease in the dot product will depend on the angle between the rotated queries and keys. This angle will become dissimilar the fastest when using the highest frequency rotations. If $g_{d/2} \approx 1/10000$ for instance, then $g_{d/2}^{j-i}$ will misalign the queries and keys by a radian at a distance of $\approx 10{\small,}000$ tokens, while the highest frequency $g_{1}$ will only need a single token.
+
+\begin{tcolorbox}[boxsep=0mm,left=2.5mm,right=2.5mm]
+\textbf{Summary of the Section:} {\em High frequencies in RoPE provide a mechanism to construct `positional' attention patterns. NoPE is instead provably not able to construct such patterns.}   
+\end{tcolorbox}
+
+
+\section{Low frequencies: Semantic attention}
+
+\label{sec:low-frequencies}
+We now study how the low frequencies are being used. As observed in Section \ref{sec:rope-frequencies}, the majority of the allocated norm (within the key and query embeddings) in Gemma 7B seems to be towards the lower frequencies. Furthermore, there seems to be a presence of distinct `bands' in attention heads, especially in these low frequencies. In this section, we argue that the low frequencies are most useful to detect information related to token `semantics'
+as they are the most invariant to token relative distance. The rotations are however not perfectly invariant over long relative distance, 
+leading eventually to misalignment of the vectors also at the lowest frequencies. 
+
+In other words, the lowest frequencies are useful \emph{as they are precisely the frequencies for which dot product is the least affected by the relative distance}. In particular, we believe this is why works such as LLama 3 have found it useful to increase the base wavelength to $500{\small,}000$, meaning that the lowest frequencies rotate at roughly $1/500{\small,}000$ radians per token. With a context length of $128$k in LLama 3, the standard wavelength of $10{\small,}000$ will in fact complete $\approx 2.04$ rotations, which might lead in certain situations to poor generalisation due to tokens being erroneously misaligned simply due to the large context. We therefore suspect that with larger and larger contexts, the $\theta$ base wavelength of RoPE will have to also be increased accordingly. 
+
+In Figure \ref{fig:semantic-heads-in-gemma} (a), we identify an interesting semantic head that makes tokens appearing after an apostrophe token attend to the apostrophe\footnote{For instance, for the following $4$ tokens [\texttt{BOS}, I, ', m], the attention head at token m will attend to the apostrophe token '. For all other tokens it will attend to the \texttt{BOS} token.}. We point out the qualitative difference when compared to the frequency usage in the positional heads from Section \ref{sec:high-frequencies}. This head is interesting being it is semantic (detecting apostrophes), but also positional, only detecting an apostrophe at the \emph{previous token}. We see how Gemma 7B is using the highest frequencies, visibly active in Figure \ref{fig:semantic-heads-in-gemma} (b), to detect `previous token' apostrophes.
+\begin{figure}%
+    \centering
+    \subfloat[\centering Semantic `apostrophe' attention head.]{{\includegraphics[width=0.42\textwidth]{figures/gemma-apostrophe-attention.png} }}%
+    \qquad
+    \subfloat[\centering Key frequency usage for the apostrophe head.]{{
+    \includegraphics[width=0.42\textwidth]{figures/gemma-k-layer1-head10.png} }}
+    \caption{(a) Semantic attention head making tokens appearing after an apostrophe attend to it (b) Key frequency usage of same attention head, showing bands around low frequencies. The apostrophe tokens are at positions 3, 9, and 15.}%
+    \label{fig:semantic-heads-in-gemma}%
+\end{figure}
+
+We now however show that the `semantic bands' cannot be robust over large context. In particular, irrational rotations are `dense' meaning that given a long enough context, they can rotate to any arbitrary value. We use this to show that there exists a relative distance for which the attention activation will be erroneously large. We prove the $2$-dimensional case, i.e. a single RoPE frequency, for simplicity. We believe that this is still an informative case as we observe that these bands are often very distinct and focused on a single frequency.
+\begin{theorem}
+\label{thm:rope-loses-focus}
+Let the hidden dimension be $d=2$, i.e. there is only a single RoPE frequency $g_1$. Consider a sequence $\xb_{bos}, \xb_1, \dots, \xb_N$ with a target token at some position $\xb_{n}$. Then for large enough $N$, the attention head with RoPE is unable to attend to such a token such that $\alpha_{i, n} > 1 - \epsilon$ for any $\epsilon > 0$ and any $1 \leq n \leq N$.
+\end{theorem}
+
+\subsection{Truncating the lowest frequencies of RoPE}
+\label{sec:low-frequencies-ablation}
+In the previous section and more formally in Theorem \ref{thm:rope-loses-focus}, we claimed that \textbf{RoPE lacks robust semantic channels}. To adapt to this, as shown in Figure \ref{fig:mean-norm-query-keys}, Gemma 7B seems to prefer to use the lowest frequencies to construct high norm semantic bands. The key insight is that unfortunately these high norm bands are not robust when the context becomes very large. We believe that this is why works such as Llama 3 found it helpful to increase the base wavelength of RoPE due to the larger context. 
+
+In this section, to investigate this further, we carry out an ablation in which we truncate the very lowest frequencies of RoPE. The intuition is that if our newly found intuition is correct, truncating the lowest frequencies \emph{should not harm performance}. In fact, this allows RoPE to provide robust semantic channels that are distance agnostic. We call this modification $p$-RoPE, with $0\leq p \leq 1$ being the fraction of RoPE `kept'. We highlight two special edge cases: $p = 0$ coincides with NoPE, while the case $p=1$ with RoPE. As such, the quantity $p$ behaves like an interpolant between the two, with higher values of $p$ being closer to RoPE and lower to NoPE.
+
+\begin{table}
+\parbox{.45\linewidth}{
+\centering
+\caption{A summary of the discussed properties of RoPE, NoPE and $p$-RoPE.}
+\begin{tabular}{llll}
+        \toprule
+        Encoding & \textbf{NoPE} & \textbf{RoPE} & \textbf{$p$-RoPE} \\ \midrule
+        Positional  & \xmark & \cmark & \cmark \\
+        Semantic & \cmark & \xmark & \cmark \\ \bottomrule
+        \end{tabular}
+}
+\hfill
+\parbox{.45\linewidth}{
+\centering
+\caption{Validation perplexity comparison between NoPE, RoPE and $p$-RoPE.}
+\begin{tabular}{lll}
+        \toprule
+        Encoding &    \texttt{Wiki }& \texttt{FlanV2}\\ \midrule
+        NoPE      & 4.8594 & 6.6429 \\
+        RoPE       & 4.4627 & 6.4429 \\ \midrule
+        $0.25$-RoPE & 4.5302 & 6.5111 \\ 
+        $0.75$-RoPE & \textbf{4.4414} & \textbf{6.4422} \\ \bottomrule
+        \end{tabular}
+}
+\end{table}
+
+We would like to note that $p$-RoPE is in spirit similar to the idea of increasing the wavelength of RoPE from $10{\small,}000$ to $500{\small,}000$, first proposed by \cite{roziere2023code} and later employed by LLama 3 \citep{dubey2024llama}. The effect that increasing the wavelength has is that of increasing the amount of tokens required to destroy semantic information, leading to improved long-range performance. For a wavelength that is large enough compared to the context, the very lowest frequencies can act as a semantic channel, as the position will have very little impact on the dot product. A summary of the properties between NoPE, RoPE, and $p$-RoPE is shown in Table 1.
+
+We train Gemma 2B models from scratch on the \texttt{Wiki} and \texttt{FlanV2} training datasets (see Section \ref{app:supplementary-p-rope} for details). We benchmark the use of RoPE, NoPE, and $p$-RoPE. We set the base wavelength $\theta$ to $10{\small,}000$ and train and evaluate using the standard Gemma $8$k token context. In Table 2, we show the perplexity on the validation set. We can see how truncating the lowest frequencies \emph{not only maintains the same performance, but even seems to improve the validation perplexity}, supporting our claims regarding the low frequencies acting as non-robust semantic channels in standard RoPE. Truncating even more of the frequencies ($0.25$-RoPE) harms performance, but with results still significantly better than with NoPE. Of course an $8$k context is not very large and improvements due to wavelength increase typically were observed on a larger context of $32$k \citep{xiong2023effective}. We lack the resources to validate this on larger context lengths, but believe this to be a very interesting future direction. We in fact expect that truncating some small percentage of the lowest frequency tokens to help with long-context generalisation by providing robust semantic channels that are independent of relative distance and can therefore generalise automatically to any context length. 
+
+\begin{tcolorbox}[boxsep=0mm,left=2.5mm,right=2.5mm]
+\textbf{Summary of the Section:} {\em Low frequencies in RoPE tend to be used by semantic attention heads, as the rotation based on relative distance between tokens has minimal impact on the dot product. Removing the rotation for a certain percent of low frequencies improves performance on Gemma 2B models.}
+\end{tcolorbox}
+
+
+
+\section{Conclusion}
+
+In this work, we explored the behaviour of RoPE. We started by arguing that the use of RoPE does not ensure that attention weights will decay with relative distance. This is provably the case if we assume, for instance, that the keys and queries are Gaussian random vectors. Further, we provided a construction that ensure the attention weight is maximal at any provided relative distance, regardless of magnitude, with these observations going against the typical intuitions used to justify RoPE.
+
+We provided evidence that high-frequencies bands are used to build circuitry that leads to positional attention. We provided a construction that ensures this behaviour and identified a strikingly similar construction within the attention heads of Gemma 7B. Furthermore we showed that NoPE is unable to do similar positional attention.
+
+Finally we showed that low-frequencies are used for semantic attention, and argued that removing the RoPE rotation for these low-frequencies can potentially improve the ability to attend semantically and in particular to generalize such type of attention to longer contexts. We verified this through an ablation study with Gemma 2B. We overall see our work as providing a more nuanced understanding of RoPE and hope that it can lead to an improved understanding of how LLMs use positional encodings, ultimately leading to performance gains -- especially over long contexts.
+
+
+

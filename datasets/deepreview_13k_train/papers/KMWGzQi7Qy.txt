@@ -1,0 +1,535 @@
+\title{A Critical Look At Tokenwise Reward-Guided Text Generation}
+
+\begin{abstract}
+	Large language models (LLMs) can significantly be improved by aligning to human preferences---the so-called reinforcement learning from human feedback (RLHF).  However, the cost of fine-tuning an LLM is prohibitive for many users.
+	Due to their ability to bypass LLM finetuning, tokenwise reward-guided text generation (RGTG) methods have recently been proposed.
+	They use a reward model trained on full sequences to score partial sequences during a tokenwise decoding, in a bid to steer the generation towards sequences with high rewards.
+	However, these methods have so far been only heuristically motivated and poorly analyzed.
+	In this work, we show that reward models trained on full sequences are not compatible with scoring partial sequences.
+	To alleviate this issue, we propose to explicitly train a Bradley-Terry reward model on partial sequences, and autoregressively sample from the implied tokenwise policy during decoding time.
+	We study the property of this reward model and the implied policy.
+	In particular, we show that this policy is proportional to the ratio of two distinct RLHF policies.
+	We show that our simple approach outperforms previous RGTG methods and achieves similar performance as strong offline baselines but without large-scale LLM finetuning.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+Large language models (LLMs) provide a modern foundation for most if not all text generation tasks \citep{radford2019gpt2,brown2020gpt3,touvron2023llama,touvron2023llama2}.
+In practice, significant improvements in the quality of text generation are achieved by aligning LLMs to human preferences \citep{stiennon2020rlhf,ouyang2022training}.
+This is typically done by reinforcement learning from human feedback (RLHF), which involves two steps: i) learning a reward model from preference data and ii) fine-tuning an LLM to maximize expected rewards by reinforcement learning \citep{ziegler2019rlhf}.
+Usually, this is done via a reinforcement learning algorithm such as proximal policy optimization \citep[PPO,][]{schulman2017proximal}.
+Nevertheless, recently, \citet{rafailov2023direct} showed that the reward modeling step (i) can be bypassed by directly fine-tuning an LLM with preference data, resulting in a method called direct preference optimization (DPO).
+While this simplifies RLHF, the fine-tuning step (ii) remains prohibitively costly for most users since it requires high-performance computational resources with large GPUs.
+
+In order to alleviate the computational issue above, \citet{khanov2023alignment,deng2023reward} explored tokenwise reward-guided text generation (RGTG) techniques that avoid any fine-tuning of the LLM.
+More precisely, the LLM remains frozen (i.e., not finetuned) and the reward model is used at decoding time to directly adjust the softmax scores of the tokens.
+Unlike DPO, this line of work retains the reward modeling step, but training reward models are typically a much cheaper endeavor than finetuning text-generation LLMs since smaller models can be utilized for reward modeling.
+Furthermore, reward models are modular: they can easily be composed and reused without any cost to guide text generation in conjunction with any base LLM.
+In contrast, RLHF via DPO requires fine-tuning of every LLM that we wish to improve based on human preference data.
+
+While RGTG is an interesting alternative to the standard offline RLHF, it is often based on heuristics and still poorly analyzed.
+For instance, ARGS \citep{khanov2023alignment} proposed to simply use a reward model trained on full sequences to score each partial sequence during autoregressive decoding.
+Meanwhile, \citet{deng2023reward} used a custom tokenwise loss to distill a reward model trained on full sequences.
+It is thus unclear if these approaches can give rise to a sound tokenwise text generation policy.
+
+In this work, we analyze this common RGTG approach.
+First, we show that the usage of full-sequence reward models for scoring partial sequences in a tokenwise policy is pathological.
+To alleviate this, we propose to explicitly train a Bradley-Terry reward model on partial sequences and analyze their property.
+We prove that this text generation policy is a ratio of two different RLHF policies trained on sequences of different lengths.
+Ideally, the policy would be derived from a single RLHF policy, but as we shall also show in \cref{sec:method}, the exact computation of such a policy is intractable.
+By deriving the sampling policy from a ratio of distinct RLHF policies, we obtain a tractable sampling procedure.
+This is akin to the argument of \citet{zhao2024probabilistic} where they use a similar ratio but for deriving a sequential Monte Carlo method.
+
+We empirically validate our analysis on two different text generation datasets on two recent LLMs.
+Evidence shows that our RGTG approach achieves better performance compared to ARGS, matching the performance of the more expensive, offline PPO and DPO baselines.
+
+In summary, our contributions are:
+\begin{enumerate}[(i)]
+	\setlength\itemsep{0em}
+	\item We analyze the recent practice of using full-sequence reward models for guiding the LLM decoding process. In particular, we show a deficiency in this approach.
+	\item We propose to explicitly train a Bradley-Terry reward model on partial sequences and sample from the induced per-token policy induced by it during the decoding time.
+	\item We show that this reward model is a ratio of two distinct RLHF policies over sequences with different lengths. This is a tradeoff that one must make to make tokenwise RGTG free of the pathology and yet still tractable.
+	\item Experiments with recent LLMs such as Llama-2-7b \citep{touvron2023llama2} validate our theoretical insights.
+\end{enumerate}
+
+
+
+
+\section{Preliminaries}
+
+\label{sec:prelim}
+
+We denote a prompt by $\rvx$ and its response by $\rvy$ where the bolded letters indicate sequences of tokens.
+The $i$-th token in $\rvx$ is denoted by $x^i$, while the partial sequence starting at token $i$ and ending at token $j$ is denoted by $\rvx^{i:j}$.  The length of a sequence $\rvx$ is denoted by $\abs{\rvx}$.
+The same notation applies to \(\rvy\).
+
+\subsection{Reinforcement Learning from Human Feedback}
+
+LLMs generally consist of probabilistic models that can generate a response $\rvy$ given a prompt $\rvx$.
+More specifically, the generation of $\rvy$ is done token-by-token by sampling the next token from a conditional distribution $\pi(y^{i} | \rvx,\rvy^{1:i-1})$.
+
+Given a preference dataset \(\D = \{ (\rvx_k, \rvy_{wk}, \rvy_{lk}) \}_{k=1}^{K}\) containing \(K\) triples of token sequences \((\rvx, \rvy_w, \rvy_l)\), \citet{ziegler2019rlhf,ouyang2022training} proposed a technique based on reinforcement learning (RL) to align an LLM with the preference dataset.
+They train a parametric reward model $r_{\phi}(\rvy|\rvx)$ that assigns a higher score to the ``winning'' (i.e., preferred) utterance $\rvy_w$ and a lower score to the ``losing'' utterance $\rvy_l$.
+This is done via the Bradley-Terry model \citep{bradleyterry1952paired} which minimizes the loss:
+\begin{equation} \label{eq:bradley-terry}
+	\mathcal{L}_R = - \E_{\rvx, \rvy_w, \rvy_l \sim \D} \log \sigma ( r_{\phi} (\rvy_w|\rvx) - r_{\phi} (\rvy_l|\rvx)) ,
+\end{equation}
+where \(\sigma\) is the logistic function.
+Note that \(r_\phi\) is trained to score entire utterances \(\rvy\).
+Once $r_\phi$ is trained, it can be used to infer the probability of generating sequence \(\rvy\) in response to \(\rvx\), i.e., \(P_\phi(\rvy|\rvx)=\nicefrac{\exp(r_\phi(\rvy|\rvx))}{\sum_{\rvy'} \exp(r_\phi(\rvy'|\rvx)}\).
+Given a reference LLM, we denote by $\piref(\rvy|\rvx)$ the conditional probability that it will generate response $\rvy$ to prompt $\rvx$ (also referred to as policy).
+We refer to the LLM and its policy interchangeably.
+One can then copy the LLM and finetune it to maximize
+\begin{equation} \label{eq:rlhf}
+	\max_\theta \E_{\substack{\rvx \sim \D, \\ \rvy \sim \pi_\theta(\rvy | \rvx)}}[r_\phi(\rvy \vert \rvx)] - \beta \KL[\pi_\theta(\rvy | \rvx) \,\Vert\, \piref(\rvy | \rvx)] ,
+\end{equation}
+where the KL term forms a regularizer that ensures that the finetuned model will not differ too much from the reference model.
+The above optimization problem can be optimized by many RL techniques, including the popular proximal policy optimization (PPO) algorithm \citep{schulman2017proximal}.
+This RL optimization is quite costly in practice due to the size of the LLM.
+\subsection{Direct Preference Optimization}
+
+The above optimization \eqref{eq:rlhf} has a closed form solution of the form \citep{peters2007reinforcement}
+\begin{equation} \label{eq:policy}
+	\pi_\theta(\rvy | \rvx) = \frac{1}{Z(\rvx)} \piref(\rvy \vert \rvx) \exp(\beta r_\phi(\rvy \vert \rvx))
+\end{equation}
+where $Z(\rvx) = \sum_\rvy \piref(\rvy | \rvx) \exp(\beta r_\phi(\rvy \vert \rvx))$ is the intractable partition function.
+Notice that we can reorganize \eqref{eq:policy} to express the reward function in terms of the policies \(\pi_\theta\) and \(\piref\):
+\begin{equation*}
+	\label{eq:reward}
+	r(\rvy \vert \rvx) = \frac{1}{\beta} \log \frac{\pi_\theta(\rvy | \rvx)}{\piref(\rvy | \rvx)} + \log Z(\rvx) ,
+\end{equation*}
+which can be used to replace $r_\phi(\rvx|\rvy)$ in \eqref{eq:bradley-terry} to obtain the following optimization problem:
+\begin{equation*}
+	\max_\theta \E_{\rvx, \rvy_w, \rvy_l \sim \D} \log \sigma \left( \frac{1}{\beta} \left( \log \frac{\pi_\theta(\rvy_w | \rvx)}{\piref(\rvy_w | \rvx)} - \log \frac{\pi_\theta(\rvy_l| \rvx)}{\piref(\rvy_l| \rvx)}\right) \right) .
+\end{equation*}
+Maximizing the above objective with respect to $\theta$ directly finetunes the LLM without the need to learn a reward model.
+Furthermore, this maximization is done by supervised learning, which is generally simpler than RL.
+This approach, known as direct preference optimization \citep[DPO,][]{rafailov2023direct}, reduced the cost of RLHF while ensuring that the same finetuned LLM is obtained as RLHF based on PPO.
+Note, however, that both PPO and DPO-based RLHF are still very costly in practice since they require finetuning (a copy of) the target LLM \(\piref\).
+
+\subsection{Reward-Guided Text Generation}
+\label{subsec:rgtg}
+
+In a separate line of work, \citet{khanov2023alignment} proposed reward-guided text generation (RGTG) techniques that do not require any LLM fine-tuning, but can obtain sequences \(\rvy\) with high reward.
+This is done by freezing the reference LLM \(\piref\) and at decoding time, the next-token probability \(\piref(y^{i} \mid \rvx, \rvy^{1:i-1})\) is adjusted by a reward model \(r_\phi\).
+More specifically, possible values for \(y^{i}\) are scored by a weighted combination of logits of \(\piref\) and the rewards :
+\begin{equation*}
+	\label{eq:score}
+	\textstyle
+	\score(y^{i} | \rvx, \rvy^{1:i-1}) = \log \piref(y^{i} \vert \rvx, \rvy^{1:i-1}) + \beta r_\phi(\rvy^{1:i} \vert \rvx) .
+\end{equation*}
+The next value for \(y^{i}\) is then selected greedily by maximizing their score or by sampling from a softmax distribution of the scores that has a similar form to the RLHF policy in \eqref{eq:policy}:
+\begin{equation*}
+	\softmax(\score(y^{i} \vert \rvx, \rvy^{1:i-1})) = \frac{1}{Z(\rvx, \rvy^{1:i-1})} \piref(y^{i} \vert \rvx, \rvy^{1:i-1}) \exp(\beta r_\phi(\rvy^{1:i} \vert \rvx)) ,
+\end{equation*}
+where the partition function \(Z(\rvx, \rvy^{1:i-1})\) is now tractable since the summation is now over all possible values of just a \emph{single} variable \(y^{i}\)---it is a summation over possible tokens in the vocabulary.
+
+Note however that it is unclear whether the resulting distribution is equivalent/approximating the RLHF policy in \eqref{eq:policy}.
+\citet{khanov2023alignment} do train the reward model with the Bradley-Terry loss, but it is trained only with complete sequences, i.e.\ \(r_\phi(\rvy \vert \rvx)\), while it is used to score partial sequences, i.e.\ \(r_\phi(\rvy^{1:i} \vert \rvx)\).
+Hence, it is unclear whether the inferred scores for partial sequences are reasonable.
+Meanwhile, \citet{deng2023reward} learn the reward model by minimizing a cumulative squared loss to distill a full-sequence reward model instead of using the Bradley-Terry loss \eqref{eq:bradley-terry}, making the connection to RLHF policy looser.
+In \cref{sec:method} we show that reward models trained only with complete sequences can assign arbitrary scores to partial sequences and in \cref{sec:experiments} we show empirically that the resulting RGTG policy therefore underperforms that of PPO or DPO.
+
+Along the same lines, \citet{zhao2024probabilistic} proposed to match each of the marginal distribution of \(\pi_\theta(\rvy^{1:i} \vert \rvx)\) by learning a series of parametric functions \(\smash{\{ \psi_{\phi_i} \}_{i=1}^{\abs{\rvy}}}\).
+This in turn induces a policy:
+\begin{equation*}
+	\label{eq:twisted_smc}
+	\pi(y^{i} \vert \rvx, \rvy^{1:i-1}) = \frac{1}{Z(\rvx, \rvy^{1:i-1})} \piref(y^{i} \vert \rvx, \rvy^{1:i-1}) \exp(\psi_{\phi_{i}}(\rvy^{1:i} \vert \rvx)) .
+\end{equation*}
+The generated sequences \(\rvy\) are then approximately equal to the sequences generated by the RLHF policy \eqref{eq:policy}.
+However, their method is general and does not specifically target RGTG---indeed, \citet{zhao2024probabilistic} focused on using the implied approximation of the partition function \(Z(\rvx)\).
+
+Finally, \citet{rafailov2024qfunction} modifies DPO to obtain a partial-sequence reward model
+\begin{equation*}
+	r(\rvy^{1:i} \vert \rvx) = \frac{1}{\beta} \log \frac{\pi_\theta(y^{i} \vert \rvx, \rvy^{1:i-1})}{\piref(y^{i} \vert \rvx, \rvy^{1:i-1})} .
+\end{equation*}
+Similar to the sequence-based DPO, this reward model is then used to obtain a per-token loss function to finetune the LLM and thus, while defining a partial-sequence reward model, is not a RGTG method.
+
+
+
+
+\section{Pitfalls of RGTG and How to Fix Them}
+
+\label{sec:method}
+
+First, we start by analyzing the partial sequence rewards inferred from a reward model trained with full sequences only.
+
+\begin{theorem} \label{thm:full_for_partial}
+	A reward model $r$ trained to minimize the Bradley-Terry loss \eqref{eq:bradley-terry} on full sequences $\rvy^{1:\abs{\rvy}}$ may assign arbitrary rewards to partial sequences $\rvy^{1:i}$ (where $i< \abs{\rvy}$).
+	More precisely, $r(\rvy^{1:i} \vert \rvx) = v_{\rvx,\rvy^{1:i}}$ where $v_{\rvx,\rvy^{1:i}}\in \R$ can be any value.
+\end{theorem}
+\begin{proof}
+	Let $r(y^i|\rvx,\rvy^{1:i})$ be the reward associated with token $y^i$ in the context of $\rvx,\rvy^{1:i}$.
+	Then token-level and (partial) sequence-level rewards are related by the following identity:
+	\begin{equation} \label{eq:identity}
+        \textstyle
+		r(\rvy^{1:i}|\rvx) = \sum_{j=1}^i r(y^j|\rvx,\rvy^{1:j-1}) \qquad \text{for all}\enspace \rvx,\rvy,i
+	\end{equation}
+	Optimizing a reward model with full-sequence preference data yields specific values for $r(\rvy^{1:|\rvy|}|\rvx)$.
+	Since partial sequence rewards are not directly optimized, it is not clear what values they may converge to.
+	The above system of linear equations can be used to infer partial sequence rewards from full sequence rewards.
+	However the system is underdetermined since there are more variables than equations:  there is one equation for every combination of $\rvx$, $\rvy$, and $i$, while there is one variable per combination of $\rvx$, $\rvy$, and $i$ on the left-hand side of each equation and many more variables on the right-hand side.
+	Hence partial sequence rewards can take arbitrary values and yet satisfy (\ref{eq:identity}).
+\end{proof}
+\begin{figure}
+	\begin{center}
+		\scalebox{0.98}{
+			\includegraphics{figures/fig_one}
+		}
+	\end{center}
+
+	\caption{
+		A pathology of using a reward model trained on full-sequence to predict partial sequences in decoding-time RGTG.
+		We denote \(r^i = r(y^i \vert \rvx, \rvy^{1:i-1})\).
+		While the total reward over the full sequence \(\rvy = (y^1, \dots, y^n)\) might be nonzero \(c\), it could be in the extreme case that the values over previous partial sequences are all zero---this is a perfectly valid result for a sequence-level reward model \textbf{(top)}.
+		This means we can have an \emph{unguided} decoding, in a \emph{reward-guided} decoding.
+		By explicitly training \(r\) on partial sequences, we could avoid this issue \textbf{(bottom)}: While \(\rvy\) might achieve the same final reward \(c\), nonvanishing reward signals over partial sequences could be avoided.
+	}
+	\label{fig:one}
+\end{figure}
+This leads to an unidentifiability problem---see \cref{fig:one} for an example.
+If we learn a reward model based on preferences over full sequences only as proposed by \citet{khanov2023alignment,deng2023reward}, then we may not obtain adequate rewards for partial sequences.
+As a concrete example, suppose \(r\) is a reward model such that (\cref{fig:one})
+\begin{equation*}
+	r(y^i|\rvx,\rvy^{1:i-1})=
+	\begin{cases}
+		r(\rvy|\rvx) & i = |\rvy| \\
+		0            & i< |\rvy| .
+	\end{cases}
+\end{equation*}
+This reward model satisfies the identity in \eqref{eq:identity} and therefore could be the solution when minimizing the Bradley-Terry loss \eqref{eq:bradley-terry}.
+If we use this reward model to sample from the induced RLHF optimal policy in \eqref{eq:policy}, then the token level sampling distribution is the same as for the reference LLM \(\piref(y^{i} \mid \rvx, \rvy^{1:i-1})\) for all tokens except the last one.
+This is problematic since RLHF generally changes the token level distribution at each position, not just the last token.
+Hence the ARGS method \citep{khanov2023alignment} may utilize a reward model that does not score partial sequences properly, which in turn may negatively impact token-by-token generation.
+
+\begin{figure}
+	\begin{center}
+		\hspace{-0.25cm}
+		\includegraphics{figures/method}
+	\end{center}
+
+	\caption{
+		The proposed approach to alleviating the problem in \cref{thm:full_for_partial}.
+		First, we (i) train the reward model \(r\) on partial sequences explicitly (when \(\abs{\rvy_w} \neq \abs{\rvy_l}\), we pad to the longest sequence) and (ii) sample from the weighted sum of the logits and the rewards of the next token during decoding.
+		This is in contrast to previous RGTG methods where the reward model is trained on full sequences, but the decoding relies on partial sequence scoring \citep{khanov2023alignment,deng2023reward}.
+	}
+	\label{fig:method}
+\end{figure}
+
+To alleviate this issue, we propose to explicitly train the reward model with partial sequences---still using the Bradley-Terry model in contrast to \citet{deng2023reward}---as follows (\cref{fig:method}).
+We create a separate loss function for all prefix lengths $i$:
+\begin{equation}
+	\mathcal{L}_R^i = - \E_{\rvx, \rvy_w, \rvy_l \sim \D} \log \sigma ( r_{\phi} (\rvy_w^{1:i}|\rvx) - r_{\phi} (\rvy_l^{1:i}|\rvx)) . \label{eq:partial-seq-objectives}
+\end{equation}
+
+\begin{wrapfigure}[18]{r}{0.5\textwidth}
+
+	\begin{minipage}{0.5\textwidth}
+		\begin{algorithm}[H]
+			\small
+
+			\caption{Decoding with our approach.}
+			\label{alg:rgtg}
+
+			\begin{algorithmic}[1]
+				\Require Pretrained partial-sequence reward model \(r_\phi\), Prompt $\rvx$, number of candidates $k$, hyperparameter $\beta > 0$, any reference/SFT model $\piref$, generation length $l$
+				\Ensure A generated response to $\rvx$ of length $l$
+				\For{i = 1 to $l$}
+				\State $V^{(k)} = \mathtt{top\_k}(\piref(v \vert \rvx, \rvy^{1:i-1}))$
+				\For{$v \in V^{(k)}$}
+				\State Reward $r_\phi(\rvy^{1:i-1}, v \vert \rvx))$
+				\State Logit $\log \piref(v \vert \rvx, \rvy^{1:i-1})$
+				\State $\log \pi(y^i=v \vert \rvx, \rvy^{1:i-1}) =$
+				\Statex \qquad\qquad $\log \piref(v \vert \rvx, \rvy^{1:i-1}) + \beta r_\phi(\rvy^{1:i-1}, v \vert \rvx)$
+				\EndFor
+				\State $y^{i} \sim \mathrm{Cat}(\softmax(\log \pi(y^i \vert \rvx, \rvy^{1:i-1})))$
+				\EndFor
+				\State \Return  $\rvy^{1:l}$
+			\end{algorithmic}
+		\end{algorithm}
+	\end{minipage}
+\end{wrapfigure}
+
+Then, given that full sequence $\rvy_w$ is preferred to full sequence $\rvy_l$, we assume that the partial sequence $\rvy_w^{1:i}$ is also preferred to the partial sequence $\rvy_l^{1:i}$.
+Strictly speaking, it is hard for human annotators to compare partial sequences due to their incomplete nature and most preference datasets do not include preferences over partial sequences.
+Nevertheless, we can interpret $\rvy_w^{1:i}$ as the prefix of a winning sequence that is preferred over a losing sequence with prefix $\rvy_l^{1:i}$.
+Furthermore, optimizing the partial-sequence objective \eqref{eq:partial-seq-objectives} for all lengths $i$ determines a reward model for all response prefixes that is adequate in the sense that it induces a distribution over partial sequences that approximates the true underlying preference distribution $P^*(\rvy^{1:i} \vert \rvx)$ instead of assigning arbitrary rewards in the sense of \cref{thm:full_for_partial}.
+
+
+Once the partial-sequence reward model $r_\phi$ is trained, we can use it to sample the next token $y^i$ conditioned on the previous tokens $\rvx,\rvy^{1:i}$ according to the following conditional distribution:
+\begin{equation}
+	\pi(y^{i} \vert \rvx,\rvy^{1:i-1}) = \frac{1}{Z(\rvx,\rvy^{1:i-1})} \piref(y^{i} \vert \rvx,\rvy^{1:i-1}) \exp(\beta r_\phi(\rvy^{1:i} \vert \rvx)) .
+	\label{eq:token-conditional-distribution}
+\end{equation}
+This constitutes a tokenwise RGTG method.
+Algorithm~\ref{alg:rgtg} summarizes the decoding procedure.
+Contrary to the previous approach of \citet{khanov2023alignment}, it directly follows the policy induced by the explicitly trained reward model over partial sequences.
+Meanwhile, compared to \citet{deng2023reward} it leverages the standard Bradley-Terry model instead of a custom squared loss function that distills a full-sequence reward model.
+
+Let us analyze the tokenwise sampling distribution in \eqref{eq:token-conditional-distribution}.
+By the definition of conditional distributions, we can rewrite it as a ratio of two partial sequence distributions:
+\begin{equation*}
+	\pi(y^i \vert \rvx,\rvy^{1:i-1}) = \frac{\pi(\rvy^{1:i} \vert \rvx)}{\pi(\rvy^{1:i-1} \vert \rvx)}
+\end{equation*}
+It is still unclear, however, how does this distribution relates to RLHF policies---the main point of the tokenwise RGTG methods.
+The following theorem shows how the decoding process by following this distribution relates to RLHF-induced policies.
+
+\begin{theorem} \label{thm:ratio}
+	Given a reward model trained according to the partial-sequence Bradley-Terry objective in \eqref{eq:partial-seq-objectives}, the induced token generation distribution \(\pi\) \eqref{eq:token-conditional-distribution} is proportional to the ratio:
+	\begin{equation} \label{eq:multiple-rlhf}
+		\pi(y^i \vert \rvx,\rvy^{1:i-1}) \propto \frac{\pi_{\textnormal{RLHF},i}(\rvy^{1:i} \vert \rvx)}{\pi_{\textnormal{RLHF},i-1}(\rvy^{1:i-1} \vert \rvx)}
+	\end{equation}
+	where \(\pi_{\textnormal{RLHF},i}\) and \(\pi_{\textnormal{RLHF},i-1}\) are two distinct policies over prefix sequences of length $i$ and $i-1$, respectively, induced by RLHF optimization \eqref{eq:rlhf}.
+\end{theorem}
+\begin{proof}
+	We first note that for each prefix length $i$, performing RLHF \eqref{eq:rlhf} under a reward model $r$ induces a different policy $\pi_{\text{RLHF},i}(\rvy^{1:i} \vert \rvx)$ for different values of \(i\).
+	To see this, notice that by \eqref{eq:rlhf}:
+	\begin{equation*}
+		\textstyle \pi_{\text{RLHF},i}(\rvy^{1:i} \vert \rvx) = \nicefrac{1}{Z(\rvx)} \piref(\rvy^{1:i} \vert \rvx) \exp(\beta r(\rvy^{1:i} \vert \rvx))
+	\end{equation*}
+	Then, for \(i < j\), we have by marginalization:
+	\begin{align*}
+		\pi_{\text{RLHF},j}(\rvy^{1:i}|\rvx) & = \sum_{\rvy^{i+1:j}} \pi_{\text{RLHF},j}(\rvy^{1:j}|\rvx)                                                                                                                                                       \\
+		                                     & \propto \sum_{\rvy^{i+1:j}} \piref(\rvy^{1:j}|\rvx) \exp(\beta r(\rvy^{1:j} \vert \rvx))                                                                                                                         \\
+		                                     & = \piref(\rvy^{1:i} \vert \rvx) \exp(\beta r(\rvx, \rvy^{1:i})) \sum_{\rvy^{i+1:j}} \piref(\rvy^{i+1:j} \vert \rvx,\rvy^{1:i}) \frac{\exp(\beta r(\rvy^{1:j} \vert \rvx))}{\exp(\beta r(\rvy^{1:i} \vert \rvx))} \\
+		                                     & \propto \pi_{\text{RLHF},i}(\rvy^{1:i} \vert \rvx) \sum_{\rvy^{i+1:j}} \piref(\rvy^{i+1:j} \vert \rvx,\rvy^{1:i}) \frac{\exp(\beta r(\rvy^{1:j} \vert \rvx))}{\exp(\beta r(\rvy^{1:i} \vert \rvx))}              \\
+		                                     & \not\propto \pi_{\text{RLHF},i}(\rvy^{1:i}|\rvx) .
+	\end{align*}
+	Since $\sum_{\rvy^{i+1:j}} \piref(\rvy^{i+1:j} \vert \rvx,\rvy^{1:i}) \frac{\exp(\beta r(\rvy^{1:j} \vert \rvx))}{\exp(\beta r(\rvy^{1:i} \vert \rvx))}$ depends on $\rvy^{1:i}$, it cannot be treated as a normalization constant.
+	Therefore $\pi_{\text{RLHF},i}(\rvy^{1:i}|\rvx) \neq \pi_{\text{RLHF},j}(\rvy^{1:i}|\rvx)$.
+	Based on this fact, then:
+	\begin{align*}
+		\pi(y^i \vert \rvx,\rvy^{1:i-1}) & \propto \piref(y^i \vert \rvx,\rvy^{1:i-1}) \exp(\beta r(\rvy^{1:i} \vert \rvx))                                                          & \mbox{(by \eqref{eq:policy})}                 \\
+		                                 & \propto \piref(y^i|\rvx,\rvy^{1:i-1}) \frac{\exp(\beta r(\rvy^{1:i} \vert \rvx)}{\exp(\beta r(\rvy^{1:i-1} \vert \rvx))}                  & \mbox{(normalization constant)}               \\
+		                                 & = \frac{\piref(\rvx, \rvy^{1:i}) \exp(\beta r(\rvy^{1:i} \vert \rvx))}{\piref(\rvx, \rvy^{1:i-1}) \exp(\beta r(\rvy^{1:i-1} \vert \rvx))} & \mbox {(conditional distribution definition)} \\
+		                                 & \propto \frac{\pi_{\text{RLHF},i}(\rvy^{1:i} \vert \rvx)}{\pi_{\text{RLHF},i-1}(\rvy^{1:i-1} \vert \rvx)} .                               & \mbox{(by \eqref{eq:policy})}
+	\end{align*}
+	This completes the proof of the theorem.
+\end{proof}
+Ideally, we would like a decoding procedure that samples the next token from a distribution that is mathematically equivalent to the conditional distribution resulting from an RLHF over full sequences.
+However, as shown in \cref{thm:ratio}, a partial-sequence reward model $r_\phi$ leads to multiple RLHF decoding policies with different conditional distributions for each prefix length $i$.
+Hence it is not possible to have equivalence with a single RLHF policy, e.g.\ as obtained via PPO or DPO.
+
+One may then ask: Which RLHF policy is best?
+We argue that none of them is necessarily better than the others since they simply arise from considering different prefix lengths.
+Note that the reward model $r_\phi$ leads to a distribution that approximates the true underlying preference distribution partial sequences.
+The problem is inherent to RLHF which takes a reference LLM with a consistent distribution over response prefixes induced by a reward model and yields different decoding policies for different prefix lengths.
+
+Since all the resulting RLHF decoding policies have merit, one could argue that we can keep things simple by selecting only one policy, perhaps the RLHF policy induced by full sequence preferences (i.e., $\pi_{\text{RLHF}}(\rvy|\rvx)$).
+However, as discussed by \citet{rafailov2024qfunction,zhao2024probabilistic}, a conditional distribution over full sequences does not give us an immediate procedure to sample token-by-token.
+Mathematically, we can derive a token-level policy from a full-sequence policy as follows:
+\begin{align*}
+	\pi_{\text{RLHF}}(y^i \vert \rvx,\rvy^{1:i-1}) = \frac{\pi_{\text{RLHF}}(\rvy^{1:i} \vert \rvx)}{\pi_{\text{RLHF}}(\rvy^{1:i-1} \vert \rvx)} = \frac{\sum_{\rvy^{i+1:|\rvy|}} \pi_{\text{RLHF}}(\rvy|\rvx)}{\sum_{\rvy^{i:|\rvy|}} \pi_{\text{RLHF}}(\rvy|\rvx)} .
+\end{align*}
+However, the summations in the above equation are exponentially large in the length $|\rvy|$ of the sequences.
+This exponential complexity was also noted by \citet{zhao2024probabilistic} who proposed a twisted sequential Monte Carlo technique to approximate computation and mitigate the exponential complexity.
+In contrast, our approach embraces the multitude of RLHF policies and leverages them in a linear time decoding procedure without any approximation of the partial sequence RLHF policies.
+The ratio policy \eqref{eq:token-conditional-distribution} described here can thus be seen as a necessary tradeoff if one wants to perform tokenwise RGTG without the pathology in \cref{thm:full_for_partial}.
+
+
+
+\section{Related Work}
+
+\label{sec:related-work}
+
+\textbf{Language model alignment}\quad Simple fine-tuning and instruction tuning~\cite{wei2021finetuned} are ways to align LLMs to labeled data. Recently, RLHF methods~\cite{christiano2017deep,ziegler2019fine,lee2021pebble,lee2021pebble,nakano2021webgpt,snell2022offline} have provided a direct method to align LLMs to human preferences. 
+The PPO algorithm has specially been popular and has shown promising results for a range of tasks~\cite{askell2021general, bai2022training,ouyang2022training}. 
+However, training RL models is compute intensive and researchers have turned their attention to  supervised fine-tuning methods that can learn directly from preference data. 
+\citet{liu2023chain} turns the preference data into prompts with which they fine-tune the LLM. 
+\citet{dong2023raft} uses the reward model to filter the training set to better fine-tune the model. 
+DPO models \citep{rafailov2023direct,rafailov2024qfunction} the language model as a Bradley-Terry model and optimizes the RLHF objective without any need for RL. 
+These training based methods, however, still fine-tune the base LLM which can be expensive as we scale.  
+
+\textbf{Guided decoding}\quad There has been prior work in guided decoding using sequence-level~\cite{welleck2022naturalprover,uesato2022solving, lightman2023let, krishna2022rankgen,li2023making, khalifa2023grace, yao2023tree} and token-level~\cite{dathathri2019plug, krause2021gedi, krause2021gedi, yang2021fudge,chaffin2022ppl, liu2023attribute} value functions. 
+These token-level guided decoding algorithms are different from our work as they do not typically align language models using reward models or preference datasets. 
+\citet{deng2023reward} use a reward model in the decoding process however, they use a cumulative squared loss function that is different from the RLHF framework. 
+The closest work to our method is \citet{khanov2023alignment}, whose work is based on the Bradley-Terry model, but they use a reward model trained on full-sequences which we argue can lead to pitfalls (\cref{thm:full_for_partial}).
+Concurrent to our work, \citet{zhao2024probabilistic} present a reward guided decoding method based on sequential Monte Carlo and show that it can approximate RLHF.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+We evaluate our proposed approach, which we call \textbf{P}artial \textbf{A}lignment as \textbf{R}eward-\textbf{G}uided \textbf{S}ampling (PARGS)\footnote{This is in contrast to ARGS which considers full sequences and greedy decoding instead of sampling.} on two language generation tasks: summarization and dialogue generation.
+
+\subsection{Experimental Setup}
+\label{subsec:setup}
+\textbf{Summarization task}\quad We use the Reddit TL;DR dataset~\cite{volske2017tl}, where, the context $x$ is a post on the Reddit forum and $y$ is the summary of the post.
+We use the human preference dataset from \cite{stiennon2020learning} to train the reward model and the relevant baselines.
+Our base summarization model is a GPT$2$-large model fine-tuned on the TL;DR training set.
+We use a pretrained reward model based on the DeBerta-v3-large architecture\footnote{\href{https://huggingface.co/OpenAssistant/reward-model-deberta-v3-large-v2}{OpenAssistant/reward-model-deberta-v3-large-v2}} and train it with partial sequences for an additional epoch.
+Our baselines include top-\(k\) sampling~\cite{fan2018hierarchical}, Best-of-\(N\) generation, which involves sampling \(N\) sequences from  reference LLM and returning the best one according to the reward model, RLHF models based on PPO~\cite{schulman2017proximal} and DPO~\cite{rafailov2023direct}, and the reward-base decoding method ARGS~\cite{khanov2023alignment}.
+
+\textbf{Dialogue task}\quad Next we evaluate our model on single turn dialogue using the Anthropic Helpful and Harmless (HH) \cite{bai2022training} dataset.
+The goal is to generate a helpful and harmless response to a general purpose query.
+Each sample provides a prompt $\rvx$ and two responses $\rvy$ with a label indicating the preferred response.
+Here $\rvx$ is the human dialogue and $\rvy$ is the response from the assistant.
+We use Llama-2-7b (7 billion) as the base model and DeBerta-v3 as the reward model which is about $20\times$ smaller.
+\textbf{Evaluation}\quad Following \cite{khanov2023alignment} we compare the algorithms based on \emph{average reward} on the test samples as measured by the reward model.
+A higher reward indicates better alignment with the reward model.
+Note that we use a \emph{different} full-sequence reward model and not the partial-sequence reward model (that we trained for our algorithm) to evaluate the models.
+Moreover, evaluating language generation, especially unconditionally, is nuanced and human evaluation is generally preferred, but time consuming. An alternative is LLM based evaluation, which has been shown to align with human assessment~\cite{zheng2023judging,rafailov2023direct}. We adopt GPT-4 based evaluation as a proxy of human evaluation. Following \cite{chiang2023vicuna} we construct prompts for the two tasks and ask GPT-4 to score and rank response pairs. We randomly shuffle the order of the responses to mitigate position bias~\cite{zheng2023judging}. Finally we use the Rouge-L~\cite{lin2004rouge} score to measure the diversity of our generations for the dialogue task.
+
+\subsection{Results}
+
+\Cref{tab:reward} (left) shows the average reward for the summaries generated by the different algorithms as measured by the reward model. PARGS achieves the best average reward among the techniques that keep the LLM frozen and generate a single response $\rvy$.  For reference, we also note that PARGS is competitive with DPO and PPO based RLHF that incur a large cost to finetune the LLM and Best-of-N that incur significant overhead to generate multiple responses.  
+Note that we also evaluate our algorithm with greedy decoding (PARGS-G) for a direct comparison with ARGS. 
+Similarly, \cref{tab:reward} (right) presents average rewards for the responses of the different algorithms on the HH dialogue task. Note that in this setting the reward model is $20\times$ smaller than the base LLM.  Again, PARGS achieved the highest reward among the techniques that freeze the LLM and generate a single response.
+We observe that Best-of-\(N\) achieved the highest average reward followed by DPO, but incurred overhead to generate multiple responses and fine-tune the LLM  respectively.
+
+\begin{table*}[t]
+	\centering
+    \footnotesize
+	\begin{tabular}{cccc}
+		\toprule
+		\multicolumn{4}{c}{\textbf{TL;DR Summarization}}            \\
+		\midrule
+		\textbf{Method}    & \textbf{LLM}    & \textbf{Single \(\rvy\)?} & $r \pm \text{SE}$             \\
+		\midrule
+		Top-\(k\)    & frozen & yes           & -0.11$\pm$0.28         \\
+		ARGS      & frozen & yes           & 1.57$\pm$0.21          \\
+		\emph{PARGS-G}   & frozen & yes           & 2.06$\pm$0.20          \\
+		\emph{PARGS}     & frozen & yes           & \textbf{2.36$\pm$0.20} \\
+		\midrule
+		Best-of-\(N\) & frozen & no            & 2.2 $\pm$0.19          \\
+		DPO       & trained  & yes           & 0.81$\pm$0.26          \\
+		PPO       & trained  & yes           & 2.41$\pm$0.23          \\
+		\bottomrule
+	\end{tabular}
+	\hfill
+	\begin{tabular}{cccc}
+		\toprule
+		\multicolumn{4}{c}{\textbf{HH Dialogue}}                     \\
+		\midrule
+		\textbf{Method}    & \textbf{LLM}    & \textbf{Single \(\rvy\)?} & $r \pm \text{SE}$             \\
+		\midrule
+		Top-\(k\)     & frozen & yes           & -1.42$\pm$0.21          \\
+		ARGS      & frozen & yes           & -0.97$\pm$0.19          \\
+		\emph{PARGS-G}   & frozen & yes           & -0.97$\pm$0.18          \\
+		\emph{PARGS}     & frozen & yes           & \textbf{-0.88$\pm$0.19} \\
+		\midrule
+		Best-of-\(N\) & frozen & no            & 0.17 $\pm$0.18          \\
+		DPO       & trained  & yes           & -0.79$\pm$0.31          \\
+		\bottomrule
+	\end{tabular}
+
+	\caption{Average reward (over 100 samples) $\pm$ standard error for the TL;DR summarization and HH dialogue tasks.  The best technique that freezes the LLM and generates a single response $\rvy$ is bolded.}
+	\label{tab:reward}
+\end{table*}
+\begin{table*}[t]
+	\centering
+    \footnotesize
+	\begin{tabular}{cccc}
+		\toprule
+		\multicolumn{4}{c}{\textbf{TL;DR Summarization}}                              \\
+		\midrule
+		\textbf{Method A} & \textbf{vs} & \textbf{Method B} & \textbf{Win-Tie ($\%$)} \\
+		\midrule
+		PARGS             &             & ARGS              & 73 - 0                  \\
+		PARGS             &             & Best-of-\(N\)         & 55 - 0                  \\
+		PARGS             &             & DPO               & 59 - 1                  \\
+		PARGS             &             & PPO               & 56 - 0                  \\
+		\bottomrule
+	\end{tabular}
+	\hfill
+	\begin{tabular}{cccc}
+		\toprule
+		\multicolumn{4}{c}{\textbf{HH Dialogue}}                                      \\
+		\midrule
+		\textbf{Method A} & \textbf{vs} & \textbf{Method B} & \textbf{Win-Tie ($\%$)} \\
+		\midrule
+		PARGS             &             & ARGS              & 49 - 11
+		\\
+		PARGS             &             & Best-of-\(N\)         & 36 - 11                 \\
+		PARGS             &             & Top-\(k\)             & 56  - 15                \\
+		PARGS             &             & DPO               & 27  - 14                \\
+		\bottomrule
+	\end{tabular}
+
+	\caption{GPT-4 evaluation based on the win-tie rate of PARGS over different baselines on TL;DR summarization with GPT$2$-large, and on HH dialogue generation with Llama-2-7b.}
+	\label{tab:gpt4}
+\end{table*}
+
+Next we evaluate PARGS against Best-of-N, ARGS, DPO and PPO using GPT-4.
+\Cref{tab:gpt4} reports the win-tie rate (i.e., percentage of utterances where GPT-4 finds PARGS' response to be better than or equivalent to those of the baselines).  Table~\ref{tab:gpt4} (left) shows that PARGS has a higher win-tie rate compared to all the methods, especially ARGS, for RL;DR summarization.
+As noted by others~\cite{rafailov2023direct}, Best-of-\(N\) is a strong baseline, but it is computationally intensive (inference cost is $2\times$ that of PARGS as described in Section \ref{subsec:cost}).  On HH, we observe (\cref{tab:gpt4} right) that PARGS is better than top-\(k\) and ARGS, but worse than Best-of-\(N\) and DPO. As we scale training based alignment methods, e.g., DPO become prohibitive.  DPO and Best-of-$N$ also trade diversity for accuracy as discussed next.
+
+
+\begin{wraptable}[7]{r}{0.3\textwidth}
+	\centering
+	\footnotesize
+	\begin{tabular}{ccc}
+		\toprule
+		\textbf{Method} & \textbf{ROUGE-L \(\downarrow\)} \\
+		\midrule
+		Top-\(k\)           & 0.1946                          \\
+		DPO             & 0.2068                          \\
+		PARGS           & 0.1881                          \\
+		\bottomrule
+	\end{tabular}
+	\caption{Diversity based on ROUGE-L.}
+	\label{tab:diversity}
+\end{wraptable}
+
+We evaluate the diversity of generation on HH dialogue generation.
+We compare the sampling based techniques by generating \(10\) responses for each prompt, evaluating the Rouge-L score between each generated pair and averaging the score.
+A lower Rouge-L score indicates a higher diversity.
+We note in \cref{tab:diversity} that PARGS generates the most diverse responses compared to top-\(K\) and DPO.
+Note that Best-of-\(N\) generates $N\times$ the number of samples from top-\(K\).
+\subsection{Decoding costs}
+\label{subsec:cost}
+
+We present an estimate for the floating point operations (FLOPs) per token for inference with PARGS. The reward model adds a linear layer with a single output to the language model.
+The number of non-embedding parameters in a model, following the calculation of \citet{kaplan2020scaling}, is approximately \(N\approx 12n_\text{layers}d_\text{model}^2\), where $n_\text{layers}$ is the number of layers and $d_\text{model}$ is the hidden dimension size.
+Additionally the FLOPs required by a forward pass is \(C_\text{forward} \approx 2N +2n_\text{layers}n_\text{ctx}d_\text{model}\), where $n_\text{ctx}$ is the number of context tokens.
+The additional operations include $4d_\text{model}$ for the embedding and $2d$ for reward predicting. But since $6d_\text{model} \ll N$, $C_\text{RM} \approx C_\text{forward}$.
+Also if $d_\text{model} \gg  \nicefrac{n_\text{ctx}}{12}$ we can assume that $C_\text{RM}=C_\text{forward}=2N$~\cite{deng2023reward}.
+At decode time we analyse \(k\)-tokens using the reward model.
+In our experiments \(k=10\), so the total inference cost is $C_\text{forward}+10C_\text{RM}$ FLOPs per token.
+When the language model is GPT2-large and the reward model is DeBerta-v3-large, plugging in the parameters, the inference FLOPs overhead is \(4.3\times\) the base model.
+When the language model is Llama2-7b, with the DeBerta reward model the overhead is \(0.47\times\). Note that the Best-of-\(N\) decoding cost overhead would always be \(9\times\).
+
+\subsection{Limitations}
+\label{subsec:limitations}
+
+Ideally, human evaluators are used to judge the generated sequences.
+However, we did not do so due to the monetary costs of conducting such an experiment.
+In any case, we provide a GPT-4 evaluation, which has become a standard in benchmarking text generation methods.
+Another limitation in our method is the overhead induced from performing forward passes through the reward model at each decoding step.
+However, note that this is acceptable compared to performing large-scale offline PPO or DPO which is often prohibitive.
+Moreover, this limitation is shared with other RGTG methods.
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+
+We have discussed the pitfalls in tokenwise, decoding-time reward-guided text generation (RGTG) with reward models trained on full sequences. 
+These pitfalls can lead to inadequate reward during the autoregressive decoding process and may lead to subpar performance.
+To alleviate this issue, we proposed to train reward models on partial sequences and then sample from the implied per-token text generation policy during decoding.
+We proved that this policy is a ratio of \emph{two} distinct reinforcement learning from human feedback (RLHF) policies. 
+This means that this policy is not equivalent to the standard offline RLHF methods. 
+However, we have also shown that it is intractable to obtain a tokenwise policy that is equivalent to a \emph{single} RLHF policy. 
+Training a partial-sequence reward model can thus be seen as a tradeoff between avoiding the pitfall of using full-sequence reward model in RGTG and tractability.
+Our experiment results validated our approach: it performs better than a recent RGTG method, ARGS, that leverages full-sequence reward models. 
+
+
+
+\clearpage
+
+\ack{
+Resources used in this work were provided by the Province of Ontario, the Government of Canada through CIFAR, companies sponsoring the Vector Institute \url{https://vectorinstitute.ai/partners/} and the Natural Sciences and Engineering Council of Canada.
+AK thanks Rob Brekelmans for a fruitful discussion. AR thanks Apple for support through the Waterloo Apple PhD Fellowship, Natural Sciences and Engineering Council of Canada for its support through the PGS-D program, and the David R. Cheriton Graduate Scholarship. JG thanks Microsoft Research for support through its PhD Scholarship Programme and the International Max Planck Research School for Intelligent Systems (IMPRS-IS).
+} 
+
+
+
+
+

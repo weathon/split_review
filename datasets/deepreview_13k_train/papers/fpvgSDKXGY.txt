@@ -1,0 +1,598 @@
+\title{Simple ReFlow: Improved Techniques for Fast Flow Models}
+
+\begin{abstract}
+Diffusion and flow-matching models achieve remarkable generative performance but at the cost of many sampling steps, this slows inference and limits applicability to time-critical tasks. The ReFlow procedure can accelerate sampling by straightening generation trajectories. However, ReFlow is an iterative procedure, typically requiring training on simulated data, and results in reduced sample quality. To mitigate sample deterioration, we examine the design space of ReFlow and highlight potential pitfalls in prior heuristic practices. We then propose seven improvements for training dynamics, learning and inference, which are verified with thorough ablation studies on CIFAR10 $32 \times 32$, AFHQv2 $64 \times 64$, and FFHQ $64 \times 64$. Combining all our techniques, we achieve state-of-the-art FID scores (without / with guidance, resp.) for fast generation via neural ODEs: $2.23$ / $1.98$ on CIFAR10, $2.30$ / $1.91$ on AFHQv2, $2.84$ / $2.67$ on FFHQ, and $3.49$ / $1.74$ on ImageNet-64, all with merely $9$ neural function evaluations.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+The diffusion model (DMs) paradigm \citep{dickstein2015thermo,ho2020ddpm} has changed the landscape of generative modelling of perceptual data, benefitting from scalability, stability and remarkable performance in a diverse set of tasks ranging from unconditional generation \citep{dhariwal2021beat} to conditional generation such as image restoration \citep{chung2023dps}, editing \citep{meng2022sdedit}, translation \citep{su2023ddib}, and text-to-image generation \citep{rombach2022ldm}. However, to generate samples, DMs require numerically integrating a differential equation using tens to hundreds of neural function evaluations (NFEs) \citep{song2021sde,song2021ddim}. Naively reducing the NFE increases discretization error, causing sample quality to worsen. This has sparked wide interest in accelerating diffusion sampling \citep{song2021ddim,lu2022dpmsolver,zhang2023deis,kim2023dmcmc,salimans2022pd,song2023cm}.
+
+Flow matching models (FMs) \citep{lipman2023fm} are a closely related class of generative model sharing similar training and sampling procedures and enjoying similar performance to diffusion models. Indeed, FM and DMs coincide for a particular choice of forward process \citep{kingma2023elbo}. Whereas diffusion models relate to entropically regularized transport \citep{bortoli2021dsb, shi2023dsbm, peluchetti2023diffusion}, a key property of flow matching models is their connection to non-regularized optimal transport, and hence deterministic, straight trajectories \citep{liu2022rfmp}.
+
+While there exist a plethora of acceleration techniques, one promising, yet less explored avenue is ReFlow \citep{liu2022rf,liu2022rfmp}, also known as Iterative Markovian Fitting (IMF) \citep{shi2023dsbm}. ReFlow straightens ODE trajectories through flow-matching between marginal distributions coupled by a previously trained flow ODE, rather than using an independent coupling. Theoretically, with an infinite number of ReFlow updates, the resulting learned ODE should be straight, which enables perfect translation between the marginals with a single function evaluation \citep{liu2022rf}.
+
+In practice however, ReFlow results in a drop in sample quality \citep{liu2022rf,liu2024instaflow}. To address this problem, recent works on sampling acceleration via ReFlow opt to use heuristic tricks such as perceptual losses that only loosely adhere to the underlying theory \citep{lee2024rfpp,liu2024slimflow}. Consequently, it is unclear whether the marginals are still preserved after ReFlow. This is problematic, as exact inversion and tractable likelihood calculation require access to a valid probability flow ODE between the marginals. Moreover, these two functions are critical to downstream applications such as zero-shot classification \citep{li2023zeroshot}  etc.
+
+The goal of this work is to study and mitigate the performance drop after ReFlow without violating the theoretical setup. Although technical in nature, we call our method \textit{simple}, as, similar to \textit{simple diffusion} \citep{hoogeboom2023simple}, it does not rely on latent-encoders, perceptual losses, or premetrics, whose effect on the learned marginals is poorly understood. To this end, we first disentangle the components of ReFlow. Next, we examine the pitfalls of previous practices. Finally, we propose enhancements within the theoretical bounds, and verify them through rigorous ablation studies.
+
+Our contributions are summarized as follows.
+\begin{compactitem}
+    \item \textbf{We generalize and categorize the design choices of ReFlow (Section \ref{sec:design}).} We generalize the ReFlow training loss and categorize the design choices of ReFlow into three key groups: \textit{training dynamics}, \textit{learning}, and \textit{inference}. Within each group, we discuss previous practices, highlight their potential pitfalls, and propose improved techniques.
+    \item \textbf{We analyze each improvement via ablations (Sections \ref{sec:dynamics}, \ref{sec:learning}, and \ref{sec:inference}).} For each proposed improvement, we verify its effect on sample quality via extensive ablations on three datasets: CIFAR10 $32 \times 32$ \citep{cifar10}, FFHQ $64 \times 64$ \citep{ffhq}, and AFHQv2 $64 \times 64$ \citep{afhqv2}. We demonstrate that our techniques are robust, and they offer consistent gains in FID scores \citep{heusel2017fid} on all three datasets.
+    \item \textbf{We achieve state-of-the-art results (Section \ref{sec:applications}).} With all our improvements, we set state-of-the-art FIDs for fast generation via neural ODEs, without perceptual losses or premetrics. Our best models achieve $2.23$ FID on CIFAR10, $2.30$ FID on AFHQv2, $2.84$ FID on FFHQ, and $3.49$ FID on ImageNet-64, all with merely 9 NFEs. In particular, our models outperform the latest fast neural ODEs such as curvature minimization \citep{lee2023curvature} and minibatch OT flow matching \citep{pooladian2023mfm}. We are also able to further enhance the perceptual quality of samples via guidance, setting $1.98$ FID on CIFAR10, $1.91$ FID on AFHQv2, $2.67$ FID on FFHQ, and $1.74$ FID on ImageNet-64, also with 9 NFEs.
+\end{compactitem}
+
+
+
+\section{Background}
+
+
+Let $\PP_0$ and $\PP_1$ be two data distributions on $\RR^d$. Rectified Flow (RF) \citep{liu2022rf,liu2022rfmp} is an algorithm which learns straight ordinary differential equations (ODEs) between $\PP_0$ and $\PP_1$ by iterating a procedure called ReFlow. Below, we describe ReFlow, and explain how it can be applied to diffusion probability flow ODEs to learn fast generative flow models.
+
+\subsection{Flow Matching and ReFlow}
+
+Let us first define the flow matching (FM) loss and its equivalent formulation as a denoising problem
+\begin{align}
+    \LL_{\FM}(\theta;\QQ_{01}) &\coloneqq \EE_{(\xx_0,\xx_1) \sim \QQ_{01}} \EE_{t \sim \unif(0,1)} \left[ \ell_{\MSE}(\xx_1 - \xx_0, \vv_\theta(\xx_t,t)) \right] \label{eq:fm_loss} \\
+    &\coloneqq \EE_{(\xx_0,\xx_1) \sim \QQ_{01}} \EE_{t \sim \unif(0,1)} [ t^{-2} \cdot \ell_{\MSE}(\xx_0,\DD_\theta(\xx_t,t)) ] \label{eq:dfm_loss}
+\end{align}
+where $\vv_\theta : \RR^d \times (0,1) \rightarrow \RR^d$ is a velocity parameterized by $\theta$, $\ell_{\MSE}(\xx,\yy) \coloneqq \|\xx - \yy\|_2^2$, $\xx_t \coloneqq (1 - t) \xx_0 + t \xx_1$, and $\QQ_{01}$ is a coupling, \ie, a joint distribution, of $\PP_0$ and $\PP_1$, and $\DD_\theta(\xx_t,t) \coloneqq \xx_t - t \vv_\theta$ is a denoiser that is optimized to recover the original data $\xx_0$ given a corrupted observation $\xx_t$ and time $t$ as inputs. According to the FM theory, a velocity which minimizes \eqref{eq:fm_loss} or a denoiser which minimizes \eqref{eq:dfm_loss} can translate samples from $\PP_i$ to $\PP_{1-i}$, $i \in \{0,1\}$, by solving the ODE
+\begin{align}
+    d\xx_t = \vv_\theta(\xx_t,t) \, dt = t^{-1}(\xx_t - \DD_\theta(\xx_t,t))\, dt, \quad t \in (0,1) \label{eq:fm_ode}
+\end{align}
+from $t = i$ to $1-i$ \citep{lipman2023fm}.
+Let us call the denoiser which minimizes \eqref{eq:dfm_loss} w.r.t. the independent coupling $\QQ_{01} = \PP_0 \otimes \PP_1$ as $\DD_\theta^1$.
+
+For $n \geq 1$, ReFlow minimizes \eqref{eq:dfm_loss} with coupling induced by $\DD_\theta^n$ to obtain $\DD_\theta^{n+1}$ whose ODE has a lower transport cost. Specifically, observe that \eqref{eq:fm_ode} with $\DD_\theta^n$ induces a coupling
+\begin{align}
+    d\QQ_{01}^n(\xx_0,\xx_1) \coloneqq
+    \begin{cases}
+        d\PP_1(\xx_1) \delta(\xx_0 - \solve(\xx_1,\DD_\theta^n,1,0)) \\
+        d\PP_0(\xx_0) \delta(\xx_1 - \solve(\xx_0,\DD_\theta^n,0,1))
+    \end{cases} \label{eq:coupling}
+\end{align}
+where $\delta$ is the Dirac delta, and $\solve(\xx,\DD_\theta^n,t_0,t_1)$ solves \eqref{eq:fm_ode} from time $t = t_0$ to $t_1$ with initial point $\xx$. Concretely, given $\xx_i \sim \PP_i$ for $i \in \{0,1\}$, we sample $\xx_{1-i} \sim \QQ_{1-i|i}(\cdot|\xx_i)$ by integrating \eqref{eq:fm_ode} from $t = i$ to $1-i$ starting from $\xx_i$. The two expressions in \eqref{eq:coupling} are equivalent, since an ODE defines a bijective map between initial and terminal points.
+
+RF guarantees that if $\DD_\theta^{n+1}$ is a minimizer of $\LL_{\FM}(\theta;\QQ_{01}^n)$, the ODE with $\DD_\theta^{n+1}$ has transport cost less than or equal to that of the ODE with $\DD_\theta^n$. An ODE with minimal transport cost has perfectly straight trajectories, making it possible to translate between the marginals with a single Euler step, \eg, $\xx_0 = \DD_\theta(\xx_1,1)$ when translating from $t = 1$ to $0$ (see Section 3 of \citealp{liu2022rf}).
+
+\subsection{ReFlow with Diffusion Probability Flow ODEs}
+
+Given distribution $\PP_0$ on $\RR^d$ and Gaussian perturbation kernel $d\QQ_{\sigma|0}(\yy_\sigma | \yy_0) \coloneqq \NN(\yy_\sigma | \yy_0, \sigma^2 \bm{I})$, DMs solve the denoising score matching (DSM) \citep{vincent2011dsm} problems
+\begin{align}
+    \LL_{\DSM}(\theta) \coloneqq \EE_{\sigma \sim \mathbb{S}} \EE_{\yy_0 \sim \PP_0} \EE_{\yy_\sigma \sim \QQ_{\sigma | 0}(\cdot | \yy_0)} \left[ \ell_{\MSE}(\yy_0, \FF_\theta(\yy_\sigma,\sigma)) \right]
+\end{align}
+to learn a denoiser $\FF_\theta : \RR^d \times (0,\infty) \rightarrow \RR^d$. $\FF_\theta$ then defines a probability flow ODE between $\PP_0$ and $\PP_0 * \NN(\bm{0},\hat{\sigma}^2 \bm{I}) \approx \NN(\bm{0},\hat{\sigma}^2 \bm{I})$ for a large $\hat{\sigma}$:
+\begin{align}
+    d\yy_\sigma = \sigma^{-1} (\yy_\sigma - \FF_\theta(\yy_\sigma,\sigma)) \, d\sigma, \quad \sigma \in (0,\infty). \label{eq:diff_pfode}
+\end{align}
+When $\PP_1$ is standard normal, \eqref{eq:fm_ode} with $\DD^1_\theta$ and \eqref{eq:diff_pfode} are equivalent, as \eqref{eq:fm_ode} with the change of variables $(\yy_{\sigma},\sigma) \coloneqq (\frac{\xx_t}{1 - t},\frac{t}{1 - t})$ and \eqref{eq:diff_pfode} are identical \citep{lee2024rfpp}.
+It follows that we can straighten diffusion probability flow ODE trajectories via ReFlow. Specifically, with the coupling
+\begin{align}
+d\QQ_{01}^1(\xx_0,\xx_1) =
+\begin{cases}
+    d\PP_1(\xx_1) \delta(\xx_0 - \solve(\frac{\xx_1}{1 - t},\FF_\theta,\frac{t}{1-t},0)) \\
+    d\PP_0(\xx_0) \delta(\xx_1 - (1-t) \cdot \solve(\xx_0,\FF_\theta,0,\frac{t}{1-t}))
+\end{cases} \label{eq:diff_coupling}
+\end{align}
+where $t \approx 1$ and $\solve(\yy,\FF_\theta,\sigma_0,\sigma_1)$ solves \eqref{eq:diff_pfode} from $\sigma = \sigma_0$ to $\sigma_1$ with initial point $\yy$, we can minimize \eqref{eq:fm_loss} to learn $\DD^2_\theta$, and so on. Because optimizing \eqref{eq:fm_loss} is often expensive, a typical procedure is to perform one ReFlow step with \eqref{eq:diff_coupling} to get $\DD^2_\theta$, and distill \eqref{eq:fm_ode} trajectories into a student model for one-step generation \citep{liu2022rf,liu2024slimflow,liu2024instaflow}.
+
+
+\section{Improved Techniques for ReFlow}
+
+
+We now investigate the design space of ReFlow and propose improvements. Specifically, in Section \ref{sec:design}, we generalize the FM loss and identify the components that constitute ReFlow. The components are organized into three groups -- \textit{training dynamics}, \textit{learning}, and \textit{inference}. In Sections \ref{sec:dynamics}, \ref{sec:learning}, and \ref{sec:inference}, we investigate the pitfalls of previous practices and propose improved techniques in each group. To show that our improvements are robust, we provide rigorous ablation studies on CIFAR10 $32 \times 32$, AFHQv2 $64 \times 64$, and FFHQ $64 \times 64$. \textit{We find that ReFlow training and sampling are very different from those of DMs, and generally require distinct techniques for optimal performance.}
+
+\subsection{The Design Space of ReFlow} \label{sec:design}
+\textbf{Generalizing weight and time distribution.} Let the joint distribution of $(\xx_0,\xx_1,t,\xx_t)$ be given by $\xx_0,\xx_1 \sim d\QQ_{01}$, $t \sim \TT$, and $\xx_t = (1-t) \xx_0 + t\xx_1$.
+Then \eqref{eq:dfm_loss} can also be expressed as
+\begin{align}
+    &\LL_{\FM}(\theta;\QQ_{01}) = \EE_{t \sim \unif(0,1)} \EE_{\xx_t \sim \QQ_t} \left[ w(t) \cdot \LL_{\FM}(\theta;\QQ_{01},\xx_t,t) \right], \label{eq:reflow_loss} \\
+     \textit{where} ~~ &\LL_{\FM}(\theta;\QQ_{01},\xx_t,t) \coloneqq \EE_{\xx_0 \sim \QQ_{0|t}(\cdot | \xx_t)} \left[ \ell_{\MSE}(\xx_0,\DD_\theta(\xx_t,t)) \right], \label{eq:reflow_subloss}
+\end{align}
+and $w(t) = t^{-2}$. This shows that the FM loss is separable w.r.t. $(\xx_t,t)$, and the optimal denoising function is given by the posterior mean \citep{robbins1956tweedie}: $\DD^*(\xx_t,t) = \EE_{\xx_0 \sim \QQ_{0|t}(\cdot|\xx_t)}[\xx_0]$.
+Hence, we may replace $w(t)$ with a general weight $w(\xx_t,t)$ and use a general time distribution $\TT$
+\begin{align}
+    \LL_{\FM}(\theta;\QQ_{01}) = \EE_{t \sim \TT} \EE_{\xx_t \sim \QQ_t} \left[ w(\xx_t,t) \cdot \LL_{\FM}(\theta;\QQ_{01},\xx_t,t) \right].
+\end{align}
+This is minimized under the same condition,
+given that $w(\xx_t,t) > 0$ and $\TT$ is supported on $(0,1)$.
+
+\textbf{Generalizing the loss function.} We also consider using general loss functions in ReFlow, \ie,
+\begin{align}
+    \LL_{\FM}(\theta;\QQ_{01},\xx_t,t) = \EE_{\xx_0 \sim \QQ_{0|t}(\cdot | \xx_t)} \left[ \ell(\xx_0,\DD_\theta(\xx_t,t)) \right]
+\end{align}
+for general $\ell : \RR^d \times \RR^d \rightarrow \RR$. It is difficult to precisely characterize the class of $\ell$
+that preserves the minimizers of
+\eqref{eq:fm_loss}, and popular losses such as LPIPS \citep{zhang2018lpips} and pseudo-Huber (PH) \citep{song2024icm} lack this guarantee. However, $\ell_{\MSE}$ has been observed to be sub-optimal compared to, \eg, LPIPS and PH for training fast models \citep{lee2024rfpp}. To mitigate this trade-off between theoretical correctness and practicality, we consider a wider class of losses
+\begin{align}
+    \ell_{\phi}(\xx,\yy) \coloneqq \| \phi(\xx) - \phi(\yy) \|_2^2 \label{eq:l_phi}
+\end{align}
+for invertible linear maps $\phi : \RR^d \rightarrow \RR^d$. 
+This again ensures that the loss is minimized when $\DD_\theta$ outputs the posterior mean,
+and $\ell_{\MSE}$ is a special case of this loss with the identity map $\phi = \bm{I}$.
+
+\textbf{Generalized FM loss.} Combining the two generalizations, we have our generalized FM loss
+\begin{align}
+    &\LL_{\GFM}(\theta;\QQ_{01}) = \EE_{t \sim \TT} \EE_{\xx_t \sim \QQ_t} \left[ w(\xx_t,t) \cdot \LL_{\GFM}(\theta;\QQ_{01},\xx_t,t) \right], \label{eq:gen_reflow_loss} \\
+    \textit{where} ~~ &\LL_{\GFM}(\theta;\QQ_{01},\xx_t,t) \coloneqq \EE_{\xx_0 \sim \QQ_{0|t}(\cdot | \xx_t)} \left[ \ell_{\phi}(\xx_0,\DD_\theta(\xx_t,t)) \right]. \label{eq:gen_reflow_subloss}
+\end{align}
+The following proposition ensures its theoretical correctness.
+\begin{proposition} \label{prop:correctness}
+    Let $w(\xx_t,t)$, $d\TT(t)$ be positive, and $\phi$ be an invertible linear map. Then, $\theta$ minimizes \eqref{eq:gen_reflow_loss} if and only if it minimizes \eqref{eq:fm_loss}.
+\end{proposition}
+\begin{table}[t]
+\centering
+\resizebox{1\textwidth}{!}
+{
+\begin{tabular}{lllll}
+\toprule
+& \textbf{RF} & \textbf{RF++} & \textbf{Baseline} & \textbf{Simple ReFlow (Ours)} \\
+\cmidrule{1-5}
+\textbf{Train Dynamics (Sec. \ref{sec:dynamics})} & & \\
+Weight $w(\xx_t,t)$& $1/t^2$ & $1$, $1/t$ & $1$  & $1/\sg[\LL_{\FM}(\theta;\QQ_{01},\xx_t,t)]$ \\
+Time distribution $d\TT(t) \propto$ & $1$ & $\cosh(4(t-0.5))$ & $\cosh(4(t-0.5))$ & $10^t$ \\
+Loss function $\ell$ & $\ell_{\MSE}$, LPIPS & Pseudo-Huber, LPIPS & $\ell_{\MSE}$ & $\ell_{\bm{I} + \lambda \HPF}$ \\
+\cmidrule{1-5}
+\textbf{Learning (Sec. \ref{sec:learning})} & & \\
+$\DD_\theta$ initialization with DM& \xmark & \cmark & \cmark & \cmark \\
+$\DD_\theta$ dropout probability& $0.15$ & Equal to EDM & $0.15$  & $ \ll 0.15$ \\
+Sampling from $\QQ_{01}$ & Backward & Backward & Backward & Forward, Projection \\
+\cmidrule{1-5}
+\textbf{Inference (Sec. \ref{sec:inference})} & & \\
+ODE Solver& Euler & Euler, Heun & Heun  & DPM-Solver \\
+Discretization of $[0,1]$ & Uniform & Uniform & Uniform & Sigmoid $\kappa=20$ \\
+\cmidrule{1-5}
+\textbf{Reference}& \makecell{\citep{liu2022rf} \\ \citep{liu2024slimflow}} & \citep{lee2024rfpp} & --  & -- \\
+\bottomrule
+\end{tabular}}
+\caption{Comparison of practices for optimizing the ReFlow loss \eqref{eq:gen_reflow_loss} and solving the ODE \eqref{eq:fm_ode}. $\sg$ means stop gradient and $\mathrm{HPF}$ denotes high-pass filter. \textbf{Baseline} is the combination of most recent techniques which do not violate the flow matching theory.}
+\label{tab:choices}
+\end{table}
+
+\subsubsection{Training Dynamics, Learning, and Inference}
+
+We now observe that there are seven components that constitute ReFlow: time distribution $\TT$, training dataset (empirical realization of $\QQ_{01}$), weight $w(\xx_t,t)$, loss function $\ell_\phi$, denoiser $\DD_\theta$, and ODE solver and discretization schedule for solving \eqref{eq:fm_ode}. We categorize them into three groups below.
+
+\textit{Training dynamics} influence the path that the model takes towards the minimizers 
+of \eqref{eq:gen_reflow_loss} during training. Although the solution to which the model converges may change if dynamics changes, training dynamics do not impact the solution set itself. Weight function $w(\xx_t,t)$, time distribution $\TT$, and loss function $\ell_{\phi}$ belong here. \textit{Learning} influence the solution set of \eqref{eq:gen_reflow_loss} by constraining the hypothesis class or by changing the training dataset. Parameterization of $\DD_\theta$ and how we sample from $\QQ_{01}$ belong here. Finally, \textit{inference} influence generation or inversion of samples given a trained model. ODE solver and time discretization of the unit interval belong here.
+
+In Tab.~\ref{tab:choices}, we describe recent ReFlow practices within our framework. Baseline is the collection of most recent ReFlow techniques which do not violate FM theory \citep{lipman2023fm}. We will build up improvements on this baseline setting in the subsequent sections.
+\subsection{Improving Training Dynamics} \label{sec:dynamics}
+
+\begin{table}[t]
+\centering
+\begin{minipage}{0.35\textwidth}
+\hspace{-2mm}
+\includegraphics[width=1.0\linewidth]{figures/scale.pdf}
+\captionof{figure}{Min., avg., max. relative losses after training on CIFAR10.}
+\label{fig:scales}
+\end{minipage} \hspace{3mm}
+\begin{minipage}{0.54\textwidth}
+\centering
+\resizebox{1.0\textwidth}{!}{
+\begin{tabular}{cccc}
+\toprule
+$w(\xx_t,t)$ & \textbf{CIFAR10} & \textbf{AFHQv2} & \textbf{FFHQ} \\
+\cmidrule{1-4}
+$1$ & $2.83$ & $2.87$ & $4.28$ \\
+$1/t$ & $2.77$ & $\second{2.76}$ & $\second{4.01}$ \\
+$1/t^2$ & $2.76$ & $\first{2.74}$ & $4.04$ \\
+$(\sigma^2 + 0.5^2) / (0.5\sigma)^2$ & $2.78$ & $2.82$ & $4.04$ \\
+$1/\EE_{\xx_t} [ \sg[\LL_{\GFM}(\theta;\QQ_{01},\xx_t,t)] ]$ & $\second{2.74}$ & $2.79$ & $\first{3.83}$ \\
+\cmidrule(lr){1-4}
+$1/\sg[\LL_{\GFM}(\theta;\QQ_{01},\xx_t,t)]$ & $\first{2.61}$ & $\first{2.74}$ & $\first{3.83}$ \\
+\bottomrule
+\end{tabular}}
+\caption{Comparison of various $w(\xx_t,t)$, combined with baseline $\TT$, $\ell$, and learning choices. Best numbers are \textbf{bolded}, and second best are \underline{underlined}.}
+\label{tab:weights}
+\end{minipage}
+\end{table}
+
+\textbf{Evaluation protocol.} Unless written otherwise, to evaluate a training setting, we initialize ReFlow denoisers with pre-trained EDM \citep{karras2022edm} denoisers, and optimize \eqref{eq:gen_reflow_loss} with $\QQ_{01} = \QQ_{01}^1$ of \eqref{eq:diff_coupling} for $200k$ iterations. We sample $1M$ pairs from $\QQ_{01}^1$ by solving \eqref{eq:diff_pfode} from $t = 1$ to $0$ with EDM models and use them for training. We measure the performance of an optimized model by computing the FID \citep{heusel2017fid} between $50k$ generated images and all available dataset images.} We we report the minimum FID out of three random generation trials, as done by \cite{karras2022edm}.
+\subsubsection{Loss Normalization} \label{sec:normalization}
+
+\textbf{Previous practice.} There is little study on suitable loss weights for ReFlow training. For instance, \cite{lee2024rfpp} use $w(\xx_t,t) = 1$, and such choices can be detrimental to training, as the weighted loss $w(\xx_t,t) \cdot \LL_{\GFM}(\theta; \QQ_{01},\xx_t,t)$ without proper modulation by $w(\xx_t,t)$ can have vastly different scales w.r.t. $t$, leading to slow and unstable model convergence. Typically, the loss vanishes as $t \rightarrow 0$ since $\xx_t \rightarrow \xx_0$, and to counteract this, previous works have suggested
+\begin{align*}
+    w(\xx_t,t) =
+    \begin{cases}
+        1/t & \text{for ReFlow \citep{lee2024rfpp}}, \\
+        (\sigma^2 + 0.5^2) / (0.5\sigma)^2, \ \sigma \coloneqq \frac{t}{1-t} & \text{for DMs \citep{karras2022edm}}, \\
+        1/\EE_{\xx_t \sim \QQ_t} [ \sg[\LL_{\GFM}(\theta; \QQ_{01},\xx_t,t)] ] & \text{for DMs \citep{karras2023edm2}},
+    \end{cases}
+\end{align*}
+where $\sg[\cdot]$ is stop-gradient. The FM weight $1/t^{-2}$ in \eqref{eq:dfm_loss} naturally emphasizes $t \approx 0$ as well.
+
+However, we claim that such weights constant w.r.t. $\xx_t$ can be sub-optimal for ReFlow, as ReFlow loss scales can vary greatly w.r.t. $\xx_t$ even for fixed $t$. For instance, the following proposition shows that, at initialization, relative loss for DM at $t=1$ is constant whereas relative loss for ReFlow can be arbitrarily large.
+
+\begin{proposition} \label{prop:scale}
+Assume output layer zero initialization for the DM denoiser and DM initialization for the ReFlow denoiser. Then maximum relative losses for DM and ReFlow at $t=1$ are
+\begin{gather*}
+\textstyle \max_{\xx_1} \LL_{\GFM}(\theta;\PP_0 \otimes \PP_1,\xx_1,1) / \min_{\xx_1} \LL_{\GFM}(\theta;\PP_0 \otimes \PP_1,\xx_1,1) = 1\\
+\textstyle \max_{\xx_1} \LL_{\GFM}(\theta;\QQ_{01}^1,\xx_1,1) / \min_{\xx_1} \LL_{\GFM}(\theta;\QQ_{01}^1,\xx_1,1) = \max_{\xx_0,\xx_0'} \|\xx_0 - \bm{\mu}_0 \|_2^2 / \|\xx_0' - \bm{\mu}_0 \|_2^2
+\end{gather*}
+resp., where $\bm{\mu}_0 = \EE_{\xx_0 \sim \PP_0}[\xx_0]$, and $\min_{\xx_i}$, $\max_{\xx_i}$ is taken w.r.t. $\xx_i$ in the support of $\PP_i$.
+\end{proposition}
+ In fact, in Fig.~\ref{fig:scales}, we observe that ReFlow loss varies greatly w.r.t. $\xx_t$ after training as well. In contrast to DM training loss whose minimum and maximum values differ by a factor of at most $20$, minimum ReFlow loss is at least $\times 100$ smaller than the maximum loss for all $t > 0.2$.
+
+\textbf{Our improvement.} We propose a simple improvement by using
+\begin{align}
+    w(\xx_t,t) = 1/\sg[\LL_{\GFM}(\theta;\QQ_{01},\xx_t,t)].
+\end{align}
+Similar to \cite{karras2023edm2}, we keep track of the loss values during training with a small neural net that is optimized alongside $\DD_\theta$ using the parameterization $w(\xx_t,t) = \exp(-f_\phi(\xx_t,t))$.
+
+\textbf{Ablations.} In Tab.~\ref{tab:weights}, we compare our weight with all aforementioned weights. As expected, the uniform weight $w(\xx_t,t) = 1$ has the worst performance, as it is unable to account for vanishing loss as $t \rightarrow 0$. We get noticeable FID gain by using weights such as $1/t$ or which place a larger emphasis on $t = 0$. Our weight, which accounts for loss variance w.r.t. both $t$ and $\xx_t$, yields the best FID across all three datasets. The gap between baselines and our weight is especially large on CIFAR10.
+
+\subsubsection{Time Distribution}
+
+\begin{wraptable}{r}{0.4\linewidth}
+\centering
+\begin{minipage}{0.4\textwidth}
+\centering
+\hspace{-5mm}
+\includegraphics[width=0.9\linewidth]{figures/dists.pdf}
+\captionof{figure}{Time distribution densities.}
+\label{fig:t_dists}
+\end{minipage}
+\begin{minipage}{0.4\textwidth}
+\centering
+\resizebox{1.0\textwidth}{!}{
+\begin{tabular}{cccc}
+\toprule
+$d\TT(t) \propto $ & \textbf{CIFAR10} & \textbf{AFHQv2} & \textbf{FFHQ} \\
+\cmidrule{1-4}
+$\cosh(4(t-0.5))$ & $\first{2.61}$ & $2.74$ & $\second{3.83}$ \\
+$\lognormal$ & $3.28$ & $3.20$ & $4.48$ \\
+$\mathrm{uniform}~ (1^t)$ & $2.65$ & $\second{2.70}$ & $3.85$ \\
+\cmidrule(lr){1-4}
+$10^t$ & $\second{2.62}$ & $\first{2.69}$ & $\first{3.77}$ \\
+$100^t$ & $2.68$ & $\first{2.69}$ & $3.93$ \\
+\bottomrule
+\end{tabular}}
+\caption{Comparison of various $\TT$, combined with our $w(\xx_t,t)$ and baseline $\ell$ and learning choices.}
+\label{tab:times}
+\end{minipage}
+\end{wraptable}
+
+\textbf{Previous practice.} \cite{liu2022rf} and \cite{liu2024slimflow} use a uniform distribution on $(0,1)$. On the other hand, \cite{lee2024rfpp} notice better performance with a time distribution whose density is proportional to a shifted hyperbolic cosine function, \ie, $d\TT(t) \propto \cosh(4 (t - 0.5))$, which has peaks at $t = 0$ and $1$. The rationale behind using such a distribution is that, as \eqref{eq:fm_ode} converges to the OT ODE with ReFlows, the denoiser needs to directly predict data from noise at $t \approx 1$ and vice versa at $t \approx 0$, so it is beneficial to emphasize those regions via $\TT$.
+
+\textbf{Our improvement.} The peak at $t = 0$ of the baseline $\cosh$ time density compensates for vanishing loss as $t \rightarrow 0$, but as we normalize the loss with our weight, this peak is now no longer necessary. Thus, we use a distribution with density proportional to the increasing exponential, \ie, $d\TT(t) \propto a^t$ for $a \geq 1$.
+
+\textbf{Ablations.} We compare the performance of the exponential distribution with $a \in \{1,10,100\}$, where $a=1$ corresponds to the uniform distribution. We also compare with the lognormal distribution, which has been observed to be effective for training DMs and CMs \citep{karras2022edm,karras2023edm2,song2024icm}
+Fig.~\ref{fig:t_dists} displays time densities, and Tab.~\ref{tab:times} shows training results. We first note that an emphasis on $t = 1$ is necessary, as evidenced by severe FID degradation with the lognormal distribution. 
+We then observe that $10^t$, which closely resembles the $\cosh$ distribution, but without the peak at $t = 0$, has consistently good performance, while suffering from a slight loss on CIFAR10. Other choices such as $1^t$ or $100^t$ are either too flat or sharp, yielding worse FID. Hence, we propose to take $d\TT(t) \propto 10^t$.
+\begin{figure}[t]
+\centering
+\hspace{-1mm}
+\begin{subfigure}{0.1865\linewidth}
+\includegraphics[width=\linewidth]{figures/2d_vec.pdf}
+\caption{$\vv_{\theta}(\xx_t,t)$}
+\label{fig:2d_viz_vec}
+\end{subfigure} \hspace{1mm}
+\begin{subfigure}{0.38\linewidth}
+\includegraphics[width=\linewidth]{figures/2d_mse.pdf}
+\caption{FM with $\ell_{\MSE}$}
+\label{fig:2d_viz_mse}
+\end{subfigure} \hspace{1mm}
+\begin{subfigure}{0.38\linewidth}
+\includegraphics[width=\linewidth]{figures/2d_ph.pdf}
+\caption{FM with PH}
+\label{fig:2d_viz_ph}
+\end{subfigure}
+\caption{Comparison of flow matching (FM) with $\ell_{\MSE}$ and Pseudo Huber (PH) losses.}
+\label{fig:2d_viz}
+\end{figure}
+
+\subsubsection{Loss Function}
+
+\textbf{Previous practice.} To accelerate convergence and mitigate sample quality degradation during ReFlow, previous works have employed heuristic losses in \eqref{eq:dfm_loss} such as LPIPS and
+\begin{align*}
+\ell(\xx,\yy) =
+\begin{cases}
+(1/t) \cdot (\|\xx - \yy\|_2^2 + (ct)^2)^{1/2} - c & \text{Pseudo-Huber (PH) \citep{lee2024rfpp}}, \\
+\LPIPS(\xx,\yy) + (1-t) \cdot \PH(\xx,\yy) & \text{LPIPS+PH \citep{lee2024rfpp}}.
+\end{cases}
+\end{align*}
+While such losses perform better in practice than $\ell_{\MSE}$ in terms of FID, they do not ensure \eqref{eq:fm_loss} is minimized at optimality, and so lose the theoretical guarantees of FM. We demonstrate this below.
+
+Fig.~\ref{fig:2d_viz} compares FM with $\ell_{\MSE}$ and PH, where $\PP_1$ is unit Gaussian and $\PP_0$ is a mixture of Gaussians. As shown in Fig.~\ref{fig:2d_viz_vec}, the two models learn distinct vector fields, so PH indeed induces different ODE trajectories. While the model trained with $\ell_{\MSE}$ translates between $\PP_0$ and $\PP_1$ accurately, the model trained with PH generates incorrect distributions, \eg, the model density is not isotropic at $t = 1$, and modes are biased at $t = 0$. So, instead of relying on empirical arguments (\eg, Section 4 in \cite{lee2024rfpp}) to justify heuristic losses,
+we show that a proper choice of the invertible linear map $\phi$ in \eqref{eq:l_phi} can still offer non-trivial performance gains while adhering to FM theory.
+
+\begin{table}[t]
+\centering
+\begin{minipage}{0.37\textwidth}
+\centering
+\resizebox{1.0\textwidth}{!}{
+\begin{tabular}{lccc}
+\toprule
+\textbf{Loss} & \textbf{CIFAR10} & \textbf{AFHQv2} & \textbf{FFHQ} \\
+\cmidrule{1-4}
+$\ell_{\MSE}$ & $2.62$ & $2.69$ & $3.77$ \\
+PH & $\second{2.59}$ & $2.71$ & $\second{3.75}$ \\
+LPIPS & $2.81$ & $2.65$ & $4.02$ \\
+LPIPS+PH & $2.63$ & $2.72$ & $3.79$ \\
+\cmidrule(lr){1-4}
+$\ell_{\bm{I} + 0.1 \HPF}$ & $2.63$ & $\second{2.62}$ & $3.76$ \\
+$\ell_{\bm{I} + 10 \HPF}$ & $\first{2.58}$ & $\first{2.55}$ & $\first{3.69}$ \\
+$\ell_{\bm{I} + 1000 \HPF}$ & $3.20$ & $2.79$ & $4.43$ \\
+\bottomrule
+\end{tabular}}
+\caption{Comparison of various $\ell$ combined with our $w(\xx_t,t)$ and $\TT$.}
+\label{tab:losses}
+\end{minipage} \hfill
+\begin{minipage}{0.3\textwidth}
+\centering
+\includegraphics[width=1.0\linewidth]{figures/hpf_lmda.pdf}
+\captionof{figure}{$\lambda$ ablation.}
+\label{fig:hpf_lmda}
+\end{minipage}
+\begin{minipage}{0.3\textwidth}
+\centering
+\includegraphics[width=1.0\linewidth]{figures/loss_curves.pdf}
+\captionof{figure}{CIFAR10 training.}
+\label{fig:curves}
+\end{minipage}
+\end{table}
+
+\textbf{Our improvement.} Previous works have observed high-frequency features are crucial to diffusion-based modeling of image datasets \citep{kadkhodaie2024gahb,zhang2023hipa,yang2023slim}. Moreover, since we initialize $\DD_\theta$ with a pre-trained DM, we assert that the model already has a good representation of low-frequency visual features. Hence, to accelerate the learning of high-frequency features, we propose calculating the difference of denoiser output $\DD_\theta(\xx_t,t)$ and clean data $\xx_0$ after passing them through a high-pass filter (HPF) using the linear map, \ie, use $\ell_\phi$ in \eqref{eq:l_phi} with
+\begin{align}
+    \phi = \bm{I} + \lambda \cdot \HPF \label{eq:hpf}
+\end{align}
+where $\lambda > 0$ controls the emphasis on high-frequency features. The identity matrix in \eqref{eq:hpf} is necessary to ensure that $\phi$ is invertible, so \eqref{eq:fm_loss} is minimized at optimality per Prop.~\ref{prop:correctness}.
+
+We also remark that using $\ell_{\phi}$ can be interpreted as preconditioning the gradient. Specifically, since
+\begin{align}
+    \nabla_{\DD_\theta} \ell_\phi(\xx_0,\DD_{\theta}(\xx_t,t)) &= \phi^\top \phi \{ \nabla_{\DD_\theta} \ell_{\MSE}(\xx_0,\DD_\theta(\xx_t,t)) \},
+\end{align}
+using $\ell_{\phi}$ in place of $\ell_{\MSE}$ is equivalent to scaling the original FM loss gradient along the eigenvectors of $\phi^\top \phi$ by the corresponding eigenvalues. For instance, $\ell_{\phi}$ with \eqref{eq:hpf} amplifies gradient magnitudes along high-frequency features by $(\lambda + 1)$, and leaves gradient magnitudes along low-frequency features unchanged. This perspective provides another justification for using $\ell_{\phi}$, since using an appropriate preconditioning matrix can accelerate convergence \citep{kingma2015adam}.
+\textbf{Ablations.} Tab.~\ref{tab:losses} compares our loss $\ell_{\bm{I} + \lambda \HPF}$ for $\lambda \in \{0.1,10,1000\}$ with $\ell_{\MSE}$ and the heuristic losses. If $\lambda$ is too small, $\ell_{\bm{I} + \lambda \HPF}$ has little improvement compared to $\ell_{\MSE}$, whereas if $\lambda$ is too large, $\phi$ becomes nearly singular, leading to a severe drop in the FID. Our loss with $\lambda = 10$ provides consistent improvement over $\ell_{\MSE}$, doing even better than PH and LPIPS. Indeed, in Fig.~\ref{fig:hpf_lmda} which visualizes FID change w.r.t. $\ell_{\MSE}$ for various values of $\lambda$, we observe $\lambda = 10$ provides the optimal performance across all datasets. Morever, CIFAR10 learning curves in Fig.~\ref{fig:curves} verify that $\ell_{\bm{I} + 10 \HPF}$ enjoys fast convergence compared to all other losses.
+\subsection{Improving Learning} \label{sec:learning}
+\subsubsection{Model Dropout}
+
+\textbf{Previous practice.} Similar to \textit{simple diffusion} \citep{hoogeboom2023simple}, we find dropout to be highly impactful. There is little study on the impact of dropout in denoiser UNets for ReFlow. Dropout rates in ReFlow denoiser UNets are usually set to $0.15$ \citep{liu2022rf,liu2024slimflow}, or equal to the dropout rates of DMs that are used to initialize ReFlow denoisers \citep{lee2024rfpp}. For the EDM networks, dropout rates are $0.13$ on CIFAR10, $0.25$ on AFHQv2, and $0.05$ on FFHQ.
+
+\textbf{Our improvement.} We observe that learning the OT ODE is a harder task than learning the diffusion probability flow ODE. For instance, at $t = 1$, the optimal DM denoiser only needs to predict the data mean $\EE_{\xx_0 \sim \PP_0}[\xx_0]$ for any input $\xx_1 \sim \PP_1$, but an optimal ReFlow denoiser has to directly map noise to image along the bijective OT map. This means we need a larger Lipschitz constant for the ReFlow denoiser \citep{salmona2022pushforward}, so we use smaller dropout rates during ReFlow training in favor of larger effective UNet capacity over stronger regularization.
+
+\begin{table}[t]
+\centering
+\begin{minipage}{0.4\textwidth}
+\begin{minipage}{0.9\textwidth}
+\hspace{-2mm}
+\includegraphics[width=1.0\linewidth]{figures/dropout.pdf}
+\captionof{figure}{Dropout $p$ ablation.}
+\label{fig:dropout}
+\end{minipage} \\
+\begin{minipage}{0.9\textwidth}
+\centering
+\resizebox{0.9\textwidth}{!}{
+\begin{tabular}{rccc}
+\toprule
+& \textbf{CIFAR10} & \textbf{AFHQv2} & \textbf{FFHQ} \\
+\cmidrule{1-4}
+RF $\ p=$ & $0.15$ & $0.15$ & $0.15$ \\
+EDM $p=$ & $0.13$ & $0.25$ & $0.05$ \\
+Ours $p=$ & $0.09$ & $0.09$ & $0.03$ \\
+\bottomrule
+\end{tabular}}
+\caption{Dropout $p$ in each setting.}
+\label{tab:opt_p}
+\end{minipage}
+\end{minipage} 
+\begin{minipage}{0.55\textwidth}
+\centering
+\resizebox{1.0\textwidth}{!}{
+\begin{tabular}{lccc}
+\toprule
+ & \textbf{CIFAR10} & \textbf{AFHQv2} & \textbf{FFHQ} \\
+\cmidrule{1-4}
+\textbf{Baseline (BSL)} & $2.83$ & $2.87$ & $4.28$ \\
+\cmidrule{1-4}
+\textbf{Dynamics (DYN)} & & & \\
+BSL $+ \ w(\xx_t,t)$ & $2.61_{\triangledown 0.22}$ & $2.74_{\triangledown 0.13}$ & $3.83_{\triangledown 0.45}$ \\
+BSL $+ \ w(\xx_t,t) + \TT$ & $2.62_{\triangledown 0.21}$ & $2.69_{\triangledown 0.18}$ & $3.77_{\triangledown 0.51}$ \\
+BSL $+ \ w(\xx_t,t) + \TT + \ell_{\phi}$ & $2.58_{\triangledown 0.25}$ & $2.55_{\triangledown 0.32}$ & $3.69_{\triangledown 0.59}$ \\
+\cmidrule{1-4}
+\textbf{Learning (LRN)} & & & \\
+BSL $+$ Optimal $p$ (OP) & $2.63_{\triangledown 0.20}$ & $2.67_{\triangledown 0.20}$ & $3.60_{\triangledown 0.68}$ \\
+BSL $+$ OP $+$ Forward & $2.57_{\triangledown 0.26}$ & $2.63_{\triangledown 0.24}$ & $3.60_{\triangledown 0.68}$ \\
+BSL $+$ OP $+$ Projected & $2.57_{\triangledown 0.26}$ & $2.62_{\triangledown 0.25}$ & $3.58_{\triangledown 0.70}$ \\
+\cmidrule{1-4}
+\textbf{DYN \& LRN} & & & \\
+DYN $+$ OP & $\second{2.43}_{\triangledown 0.40}$ & $2.53_{\triangledown 0.34}$ & $3.17_{\triangledown 1.11}$ \\
+DYN $+$ OP $+$ Forward & $\first{2.38}_{\triangledown 0.45}$ & $\first{2.44}_{\triangledown 0.43}$ & $\second{3.14}_{\triangledown 1.14}$ \\
+DYN $+$ OP $+$ Projected & $\first{2.38}_{\triangledown 0.45}$ & $\second{2.47}_{\triangledown 0.40}$ & $\first{3.13}_{\triangledown 1.15}$ \\
+\bottomrule
+\end{tabular}}
+\caption{Summary of our training improvements. Subscripts denote FID improvement w.r.t. baseline. Evaluated with sigmoid discretization (see Append. \ref{append:power}).}
+\label{tab:summary}
+\end{minipage}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/rho.pdf}
+\caption{$\rho$ ablation. Solid and dotted lines show results w/o and with improved dynamics, resp.}
+\label{fig:rho}
+\end{figure}
+
+\textbf{Ablations.} To verify that smaller dropout rates are beneficial, we return to the baseline training setting (Tab.~\ref{tab:choices}), and run a grid search over dropout probability $p \in [0,0.15]$. In Fig.~\ref{fig:dropout}, which shows FID change w.r.t. baseline $p = 0.15$, we find that smaller $p$ is always beneficial. In fact, optimal $p$ are even smaller than those used to train EDM denoisers, despite using the same architecture (Tab.~\ref{tab:opt_p}). FIDs after applying optimal dropout to baseline are written in row BSL+OP of Tab.~\ref{tab:summary}. We also observe in row DYN+OP that optimal dropout rates can be combined with improved dynamics to further enhance performance without additional grid search over $p$.
+\subsubsection{Training Coupling}
+
+\textbf{Previous practice.} A common practice is to generate a large number of pairs from $\QQ_{01}^1$ by solving the diffusion probability flow ODE \eqref{eq:diff_pfode} backwards, \ie, from noise to data, and use the generated set as an empirical approximation of $\QQ_{01}^1$ throughout training \citep{liu2022rf,lee2024rfpp,liu2024slimflow,liu2024instaflow}. However, the set of generated $\xx_0$ is only an approximation of the true marginal $\PP_0$, so naively training with generated data will accumulate error on the marginal at $t = 0$.
+
+\textbf{Our improvement -- \textit{forward pairs}.} To mitigate error accumulation at $t = 0$, we incorporate pairs generated by solving the diffusion probability flow ODE forwards, starting from data, coined forward pairs. We assert forward pairs can be helpful, as $\xx_0$ are exactly data points.
+
+To use forward pairs, we first invert the training sets for each dataset, which yields additional $50k$ pairs for CIFAR10, $13.5k$ pairs for AFHQv2, and $70k$ pairs for FFHQ. Due to the small number of forward pairs, we use them in combination with backward pairs, and to prevent forward pairs from being ignored due to the large number of backward pairs, we sample forward pairs with probability $\rho$ and backward pairs with probability $1-\rho$ at each step of the optimization.
+
+\textbf{Our improvement -- \textit{projected pairs}.} We also propose projecting the coupling $\QQ_{01}^1$ to $\Pi(\PP_0,\PP_1)$, the set of joint distributions with marginals $\PP_0$ and $\PP_1$, by solving the optimization problem
+\begin{align}
+\textstyle \widehat{\QQ}_{01}^1 = \argmin_{\Gamma_{01}} W_p(\Gamma_{01} , \QQ_{01}^1) \quad s.t. \quad \Gamma_{01} \in \Pi(\PP_0,\PP_1) \label{eq:projection}
+\end{align}
+where $W_p$ is the $p$-Wasserstein distance \citep{villani2009ot}, and using the projected coupling $\widehat{\QQ}_{01}^1$ in place of the original during training. Intuitively, this procedure can be understood as fine-tuning the generated marginals to adhere to the true marginals without losing the coupling information in $\QQ_{01}^1$.
+
+\textbf{Ablations.} In Fig.~\ref{fig:rho}, we see that it is always beneficial to use forward pairs, as long is $\rho$ is not too high, \eg, $\rho \leq 0.5$. Otherwise, the model starts overfitting to the forward pairs. Interestingly, on FFHQ, using forward pairs without improved training dynamics has no improvement in the FID, implying that improved dynamics may be necessary to make the best out of the rich information contained in the forward pairs. In rows BSL+OP+Projected and DYN+OP+Projected of Tab.~\ref{tab:summary}, we observe that projected pairs also offer improvements in the FID score across all three datasets.
+\begin{table}[t]
+\centering
+\begin{minipage}{0.35\textwidth}
+\centering
+\hspace{-2mm}
+\resizebox{1.02\textwidth}{!}{
+\begin{tabular}{lccc}
+\toprule
+ & \textbf{CIFAR10} & \textbf{AFHQv2} & \textbf{FFHQ} \\
+\cmidrule{1-4}
+Unif. & $2.36_{\triangledown 0.47}$ & $2.34_{\triangledown 0.53}$ & $2.97_{\triangledown 1.31}$ \\
+EDM   & $2.80_{\triangledown 0.03}$ & $3.61_{\vartriangle 0.74}$ & $6.78_{\vartriangle 2.50}$ \\
+\cmidrule(lr){1-4}
+\textbf{Ours} \\
+$\kappa = 10$ & $\second{2.31}_{\triangledown 0.52}$ & $\second{2.31}_{\triangledown 0.56}$ & $\second{2.87}_{\triangledown 1.41}$ \\
+$\kappa = 20$ & $\first{2.23}_{\triangledown 0.60}$ & $\first{2.30}_{\triangledown 0.57}$ & $\first{2.84}_{\triangledown 1.44}$ \\
+$\kappa = 30$ & $2.45_{\triangledown 0.38}$ & $2.78_{\triangledown 0.09}$ & $3.32_{\triangledown 0.96}$ \\
+\bottomrule
+\end{tabular}}
+\caption{Various discretizations applied to our best models and DPM-Solver with $r = 0.4$.}
+\label{tab:disc_dpm}
+\end{minipage} \hspace{1mm}
+\begin{minipage}{0.31\textwidth}
+\centering
+\includegraphics[width=1.0\linewidth]{figures/error.pdf}
+\captionof{figure}{Avg. truncation \\ error.}
+\label{fig:truncation}
+\end{minipage}
+\hspace{-2mm}
+\begin{minipage}{0.31\textwidth}
+\centering
+\includegraphics[width=1.0\linewidth]{figures/kappa.pdf}
+\captionof{figure}{$\kappa$ ablation.}
+\label{fig:kappa}
+\end{minipage}
+\end{table}
+
+\subsection{Improving Inference} \label{sec:inference}
+
+\begin{wrapfigure}{r}{0.28\linewidth}
+\centering
+\includegraphics[width=1.0\linewidth]{figures/discs.pdf}
+\caption{Discretizations.}
+\label{fig:discs}
+\end{wrapfigure}
+
+\textbf{Previous practice.} To generate data after ReFlow, previous works often use an uniform discretization $\{t_i = i/N : i = 0, \ldots, N\}$ of $[0,1]$ along with the Euler or Heun to integrate \eqref{eq:fm_ode} from $t = 1$ to $0$ \citep{liu2022rf,liu2024instaflow,lee2024rfpp,liu2024slimflow}.
+
+\textbf{Our improvement.} As the ReFlow ODE converges to the OT ODE, we assert that high-curvature regions in ODE paths now occur near $t \in \{0,1\}$. While the previously proposed EDM schedule
+\begin{align*}
+\textstyle t_0 = 0, \quad t_i = \frac{\sigma_i}{\sigma_i + 1} \ \ \textit{where} \ \ \sigma_i = (\sigma_{\min}^{1/d} + \frac{i}{N} (\sigma_{\max}^{1/d} - \sigma_{\min}^{1/d}))^d
+\end{align*}
+for solving diffusion probability flow ODEs emphasizes $t \in \{0,1\}$, we note that it does not perform better than the uniform discretization, as shown in Tab.~\ref{tab:disc_dpm}. Similar to \cite{lin2024flawed}, we speculate that this is because $t_N < 1$. Specifically, 
+ $\vv_\theta(\xx_1,t_N) \neq \vv_\theta(\xx_1,1)$ since $t_N \neq 1$, but the integration of the ODE is done with $\vv_\theta(\xx_1,t_N)$ in place of $\vv_\theta(\xx_1,1)$, leading to erroneous ODE trajectories.
+
+Instead of tuning $\{\sigma_{\min},\sigma_{\max},d\}$ to address this problem, we propose a simple sigmoid schedule
+\begin{align}
+    \textstyle \{t_i = (\sig(\kappa(\frac{i}{N}-0.5)) - \sig(-\frac{\kappa}{2})) / (\sig(\frac{\kappa}{2}) - \sig(-\frac{\kappa}{2})) : i = 0, \ldots, N\} \label{eq:sigmoid_disc}
+\end{align}
+with one parameter $\kappa$ which controls the concentration of $t_i$ at $t \in \{0,1\}$. Here, $\sig$ is the sigmoid function. As $\kappa \rightarrow 0$, $\{t_i\}$ converges to the uniform discretization, and as $\kappa \rightarrow \infty$, all $t_i$ with $i < N/2$ will converge to $0$, and all $t_i$ with $i > N/2$ will converge to $1$.
+
+To solve the ODE \eqref{eq:fm_ode}, we consider DPM-Solver \citep{lu2022dpmsolver} with the update rule
+\begin{align}
+\textstyle \xx_{t_i} \leftarrow \xx_{t_{i+1}} + (t_i - t_{i+1}) (\frac{1}{2r} \vv_\theta(\xx_{s_{i+1}},s_{i+1}) + (1 - \frac{1}{2r}) \vv_\theta(\xx_{t_{i+1}},t_{i+1}))
+\end{align}
+where $s_{i+1} = t_i^r t_{i+1}^{1-r}$ and $r \in (0,1]$. We recover the second order Heun update (the baseline solver) with $r = 1$, but we assert that we can obtain better performance by tuning $r$.
+
+\textbf{Ablations.} In Tab.~\ref{tab:disc_dpm}, we display results for solving \eqref{eq:fm_ode} with various discretizations and DPM-Solver with $r = 0.4$. First, row $\kappa = 10$ shows that we can indeed mitigate the timestep mismatch problem in the EDM schedule. It also shows we can gain improvements by using $r < 1$ (in the baseline setting, we use the sigmoid schedule with $\kappa = 10$ and Heun). Second, rows $\kappa = 20$, $30$ tells us we can get even better results by increasing sharpness, but too large $\kappa$ hurts performance.
+
+To investigate the performance difference between discretizations, we visualize local truncation error $\|\bm{\tau}\|_2$ in Fig.~\ref{fig:truncation}, where $\bm{\tau}$ given time-step $t_i$ and $\xx_{t_{i+1}} \sim \QQ_{t_{i+1}}$ is defined as
+\begin{align*}
+\textstyle \bm{\tau} = (\xx_{t_{i+1}} + (t_i - t_{i+1}) \vv_\theta(\xx_{t_{i+1}},t_{i+1})) - \solve(\xx_{t_{i+1}},\DD_\theta,t_{i+1},t_i).
+\end{align*}
+We first note that the uniform distribution incurs large error near $t \in \{0,1\}$. This highlights that we indeed must place more points near those $t$ in order to control discretization error. While the EDM schedule has less error at those regions, because $t_N \neq 1$, the mismatch between the initial state $\xx_1$ and time $t_N$ does not ensure the ODE is solved properly. Finally, we see that our schedule is able to control the error at the extremes. While the error for our schedule increases near $t \approx 0.5$, Fig.~\ref{fig:kappa} tells us we can sacrifice accuracy at intermediate $t$ to prioritize perceptual quality by choosing a large $\kappa$.
+
+
+\section{Related Works}
+
+
+Efforts for accelerating diffusion-based generation can be divided roughly into three branches: learning faster ODEs, using faster ODE solvers, and distilling probability flow ODEs. Below, we give a brief discussion of recent progress in respective categories. 
+\textbf{Rectified flows.}
+
+\textbf{Faster ODEs via couplings.} Generally, ODEs with straight generative trajectories can be solved accurately with substantially fewer velocity evaluations than those with high-curvature trajectories \citep{numanalysis}. In fact, probability flow ODEs with perfectly straight trajectories can translate one distribution to another with a single Euler step. This has motivated works on learning optimal transport (OT) ODEs such as Rectified Flow (RF) \citep{liu2022rf,liu2022rfmp,lee2024rfpp} and OT Flow Matching \citep{tong2023cfm,pooladian2023mfm}, or learning ODEs which directly minimize trajectory curvature \citep{lee2023curvature}.
+
+\textbf{Fast sampling.} One can use higher-order solvers which utilize higher order differentials of the ODE velocity to take large integration steps or reduce truncation error \citep{karras2022edm,dockhorn2022genie,lu2022dpmsolver,zhang2023deis}. While this approach is generally training-free, recent works \citep{zhou2024amed,kim2024dode} have incorporated trainable components which minimize truncation error to further accelerate sampling.
+
+\textbf{Distillation and Consistency Models.} The goal of distillation is to compress multiple probability flow ODE steps of a teacher diffusion model into a single evaluation of a student model. Representative methods are progressive distillation \citep{salimans2022pd}, and consistency distillation \citep{song2023cm,song2024icm,kim2024ctm,geng2024ect}.
+
+We also remark that faster ODEs have several practical benefits over other approaches. Since translation along an ODE is a bijective map, we can achieve fast inversion and likelihood evaluation by integrating the ODE backwards starting from data. Furthermore, faster ODEs can be combined with distillation or fast samplers to achieve a greater effect. For instance, \cite{lee2023curvature,liu2024instaflow,liu2024slimflow} have observed it is substantially easier to distill ODE models with straight trajectories. \cite{lee2023curvature,lee2024rfpp} also report combining RF models with higher-order solvers improves the trade-off between generation speed and quality.
+
+
+\begin{table}[t]
+\centering
+\resizebox{1.0\textwidth}{!}{
+\addtolength{\tabcolsep}{-0.9mm}
+\begin{tabular}{lccccccccccccc}
+\toprule
+\multirow{2}{*}{\textbf{Method}} & \multicolumn{3}{c}{\textbf{CIFAR10}} & \multicolumn{3}{c}{\textbf{AFHQv2}} & \multicolumn{3}{c}{\textbf{FFHQ}} & \multicolumn{3}{c}{\textbf{ImageNet (cond.)}} & \multirow{2}{*}{\textbf{Reference}} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10} \cmidrule(lr){11-13}
+& NFE & FID & STN & NFE & FID & STN & NFE & FID & STN & NFE & FID & STN \\
+\cmidrule{1-14}
+\textbf{DM ODE} \\
+EDM & $35$ & $1.97$ & $14.19$ & $79$ & $1.96$ & $28.41$ & $79$ & $2.39$ & $27.15$ & $79$ & $2.30$ & $26.76$ & \citep{karras2022edm} \\
+ & $9$ & $37.91$ & -- & $9$ & $28.03$ & -- & $9$ & $56.84$ & -- & $9$ & $35.46$ & -- & \dittotikz \\
+DPM-Solver & 9 & $4.98$ & -- & -- & -- & -- & 9 & $9.26$ & -- & 9 & $6.64$ & -- & \citep{lu2022dpmsolver} \\
+AMED-Solver & 9 & $2.63$ & -- & -- & -- & -- & 9 & $4.24$ & -- & 9 & $5.60$ & -- & \citep{zhou2024amed} \\
+\cmidrule{1-14}
+\textbf{FM ODE} \\
+MinCurv & 9 & $8.76$ & $5.87$ & 9 & $13.63$ & $10.45$ & 9 & $10.44$ & $10.49$ & -- & -- & -- & \citep{lee2023curvature} \\
+FM-OT & 142 & $6.35$ & -- & -- & -- & -- & -- & -- & -- & 138 & $14.45$ & -- & \citep{lipman2023fm} \\
+OT-CFM & 100 & $4.44$ & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & \citep{tong2023cfm} \\
+MOT-50 & -- & -- & -- & -- & -- & -- & -- & -- & -- & 132 & $11.82$ & -- & \citep{pooladian2023mfm} \\
+FM*    & 100 & $2.96$ & $10.73$ & 100& $2.73$ & $16.20$ & 100& $3.30$ & $16.71$ & -- & -- & -- & Baseline \\
+MOT-512*  & 100 & $3.29$ & $8.77$ & 100& $5.53$ & $13.45$ & 100& $4.69$& $14.29$& -- & -- & -- & \dittotikz \\
+MOT-1024* & 100 & $3.18$ & $8.59$ & 100& $5.83$& $13.45$  & 100& $4.84$ & $14.07$& -- & -- & -- & \dittotikz \\
+MOT-4096* & 100 & $3.16$ & $8.34$ & 100& $6.18$& $12.68$  & 100&  $4.92$ & $13.47$ & -- & -- & -- & \dittotikz \\
+ReFlow & 110 & $3.36$ & -- & -- & -- & -- & -- & -- & -- & -- & -- & -- & \citep{liu2022rf} \\
+Simple ReFlow* & 9 & $2.23$ & $1.64$ & 9 & $2.30$ & $3.30$ & 9 & $2.84$ & $2.87$ & 9 & $3.49$ & $2.72$ & Ours \\
+\quad + Guidance* & 9 & $1.98$ & $2.49$ & 9 & $1.91$ & $5.60$ & 9 & $2.67$ & $3.24$ & 9 & $1.74$ & $3.92$ & \dittotikz \\
+\bottomrule
+\end{tabular}}
+\caption{Comparison of neural ODE methods. MOT-$b$ is minibatch OT with minibatch size $b$, and MinCurv is curvature minimizing flow. We report FID and straightness (STN): $\textstyle S(\vv_\theta) \coloneqq \int_0^1 \EE \left[ \| (\xx_1 - \xx_0) - \vv_\theta(\xx_t,t) \|_2 \right] \, \mathrm{d}t $. Star * next to a method denotes our training results.}
+\label{tab:flow_comparison}
+\end{table}
+
+
+
+\section{Applications}
+
+
+\textbf{Comparison to other fast flow methods.} Our approach significantly outperforms other ODE approaches, \eg, minibatch-OT FM \citep{pooladian2023mfm, tong2023cfm} and curvature minimization \citep{lee2023curvature}, see see Tab. \ref{tab:flow_comparison}. Where possible, we report straightness \citep{liu2022rf}, which quantifies how an ODE trajectory deviates from a straight line between its initial and terminal points (see Tab.
+
+\begin{wrapfigure}{r}{0.3\linewidth}
+\centering
+\includegraphics[width=1.0\linewidth]{figures/imagenet.pdf}
+\caption{ImageNet-64 FID at 9 NFEs without and with our improvements.}
+\label{fig:imagenet}
+\end{wrapfigure}
+
+\textbf{Improving perceptual quality via guidance.} DMs often use guidance such as classifier-free guidance (CFG) \citep{ho2022cfg} or autoguidance (AG) \citep{karras2024autog} to enhance the perceptual quality of samples. As observed by \cite{liu2024instaflow}, conditional ReFlow models can also easily be combined with CFG. While it is unclear what effect guidance has on the marginals of ReFlow models, we also try applying AG / CFG to our best unconditional / conditional models, since perceptual quality may be of interest for certain downstream tasks. We already achieve state-of-the-art results for fast ODE-based generation with our improved choices, but we obtain even lower FID scores with guidance, as shown in the last row of Tab.~\ref{tab:flow_comparison}.
+\textbf{ReFlow on class-conditional ImageNet-64.} To verify the scalability of our improvements, we apply our training dynamics (DYN), learning (LRN), and inference (INF) choices to ReFlow with the class-conditional ImageNet-64 EDM model. We use $8M$ backward pairs, $4M$ forward pairs, and $\rho=0.2$ for this experiment.
+Fig.~\ref{fig:imagenet} at CFG scale $w = 0$, \ie, no guidance, confirms that our techniques are effective. DYN+LRN improves BSL FID from $4.27$ to $3.91$, and INF further improves the FID to $3.49$, which is better than FIDs of state-of-the-art fast flow methods. Finally, with CFG $w = 0.4$, our DYN+LRN+INF model achieves an even better FID score of $1.74$. Our techniques also consistently improve CFG FIDs, implying that they offer orthogonal benefits.
+
+
+
+\section{Conclusion}
+
+
+In this paper, we decompose the design of ReFlow into three groups -- training dynamics, learning, and inference. Within each group, we examine previous practices and their potential pitfalls, which we overcome with seven improved choices for loss weight, time distribution, loss function, model dropout, training data, ODE discretization and solver. We verify the robustness of our techniques via extensive analysis on CIFAR10, AFHQv2, and FFHQ, and their scalability by ReFlow on ImageNet-64. Our techniques yield state-of-the-art results among fast neural ODE methods, without latent-encoders, perceptual losses, or premetrics.
+
+
+
+
+
+
+
+{
+\small
+
+
+
+

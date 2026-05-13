@@ -1,0 +1,549 @@
+\title{Towards Robust and Efficient Cloud-Edge Elastic Model Adaptation via Selective Entropy Distillation}
+
+\begin{abstract}
+The conventional deep learning paradigm often involves training a deep model on a server and then deploying the model or its distilled ones to resource-limited edge devices. Usually, the models shall remain fixed once deployed (at least for some period) due to the potential high cost of model adaptation for both the server and edge sides. However, in many real-world scenarios, the test environments may change dynamically (known as distribution shifts), which often results in degraded performance. Thus, one has to adapt the edge models promptly to attain promising performance. Moreover, with the increasing data collected at the edge, this paradigm also fails to further adapt the cloud model for better performance. To address these, we encounter two primary challenges: 1) the edge model has limited computation power and may only support forward propagation; 2) the data transmission budget between cloud and edge devices is limited in latency-sensitive scenarios. In this paper, we establish a Cloud-Edge Elastic Model Adaptation (\methodname) paradigm in which the edge models only need to perform forward propagation and the edge models can be adapted online. In our \methodname, to reduce the communication burden, we devise two criteria to exclude unnecessary samples from uploading to the cloud, \ie, dynamic unreliable and low-informative sample exclusion. Based on the uploaded samples, we update and distribute the affine parameters of normalization layers by distilling from the stronger foundation model to the edge model with a sample replay strategy. Extensive experimental results on ImageNet-C and ImageNet-R verify the effectiveness of our \methodname.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Deep neural networks (DNNs) have witnessed remarkable breakthroughs in a broad spectrum of applications from computer vision~\citep{resnet,alexey2021vit} to natural language processing~\citep{radford2018improving,brown2020language}.
+In real-world applications, the traditional deployment pipeline of DNNs is as follows: 1) training a large/foundation model on a cloud server and 2) distilling/compressing the large/foundation model into a smaller model to be deployed in edge devices for delay-sensitive applications.
+This pipeline has gained great success when test samples share the same distribution as the training ones.
+However, in real-world edge devices, the environment may dynamically change and the distributions of test samples are different from training ones.
+Such distribution shifts often result from natural variations or corruptions, such as changes in lighting and sensor degradation~\citep{hendrycks2019benchmarking,koh2021wilds}.
+In this case, models may exhibit significant performance drop~\citep{wang2021tent,zhang2021memo}.
+
+To handle the distribution shift, previous methods seek to update the edge model, which can be roughly categorized into two groups:
+i) \textit{Offline generalization} methods are executed on the cloud and then distribute updated models to the edge devices.
+Specifically, unsupervised domain adaptation methods~\citep{zhang2020collaborative,liang2020we,Qiu2021CPGA,lin2022prototype} perform model adaptation on collected test data in an offline manner.
+Domain generalization methods~\citep{li2018learning,dou2019domain} pre-anticipate the possible test shifts at the training time, in which the possible shifts can be simulated by a meta-learning scheme.
+However, they may yield inferior performance since it is hard to pre-anticipate all unknown shifts at training time.
+ii) \textit{Online generalization} methods directly learn the shifts by adapting the model with test data.
+Recently, test-time training~\citep{sun2020test,bartler2022mt3} and fully test-time adaptation (TTA) methods~\citep{wang2021tent,niu2022EATA,niu2023towards} are newly devised to adapt a model to the test domain in an online manner, which are more practical in real-world applications.
+However, they may be computationally heavy to perform back-propagation, which may be unaffordable in resource-limited edge devices.
+
+Besides, the foundation model in the cloud also should be continuously updated using the test samples in the edges.
+To address the above issues, one can leverage both the cloud and the edge by uploading all the test samples to the cloud for adaptation of both the foundation and edge models.
+However, it is still very challenging:
+1) The data communication burden between the cloud and edges may be heavy.
+Since the communication overhead is mainly affected by the number of uploaded samples.
+It not only decreases the adaptation efficiency in the cloud but also consumes the limited bandwidth in the cloud-edge system.
+2) How to exploit the foundation model to enhance the performance of the edge model on distribution-shift test data is an open question.
+Typically, the cloud has much richer computational resources and budgets than edges.
+In this case, the cloud is able to support heavier computation and leverage more complex and stronger models for adaptation.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/cloud-edge-tta.pdf}
+\caption{
+Comparisons between the conventional Test-time Adaptation (TTA) (left) and our Cloud-Edge Elastic Model Adaptation (right).
+The conventional one locally performs adaptation only in the edge with limited resources.
+In contrast, our \methodname conducts model adaptation more efficiently in the edge, which offloads the heavy adaptation workloads to the cloud with massive resources.
+}
+\label{fig:cloud_edge_tta_comparisons}
+\end{figure}
+
+In this paper, we propose a Cloud-Edge Elastic Model Adaptation (\methodname) paradigm that executes dynamic model adaptation in a cloud-edge collaborative way instead of inference with the fixed model.
+As shown in Figure~\ref{fig:cloud_edge_tta_comparisons}, we delegate all adaptation workloads to the cloud and thus only require vanilla inference in edges.
+To reduce communication overhead,
+we exclude two types of samples from uploading to the cloud: 1) unreliable samples with high entropy identified by a dynamic entropy thresholding scheme;
+2) low-informative samples with low entropy identified by an unchanged thresholding scheme.
+Based on this, our \methodname greatly reduces the communication burden.
+To leverage rich knowledge in the foundation model, we use it to guide the edge model via knowledge distillation for adaptation.
+To improve the data utilization efficiency of uploaded samples, we devise a replay buffer to store and reuse these samples.
+We distill the foundation model to the edge model based on both the newly uploaded samples and samples from the replay buffer.
+In this way, our \methodname achieves better performance than the vanilla adaptation.
+\textbf{Main novelty and contributions}:
+1) We establish a Cloud-Edge Elastic Model Adaptation (\methodname) paradigm designed for efficient collaborative model adaptation.
+Our \methodname is a general paradigm that is applicable to online adapt edge models to new dynamically changing environments.
+2) We improve the adaptation performance of the edge model by performing a replay-based entropy distillation, which minimizes prediction entropy and the KL divergence between the edge model and the foundation model using a sample replay strategy.
+3) We reduce communication costs by devising entropy-based criteria for excluding unreliable and low-informative samples from being uploaded. Experimental results show \methodname lowers 60\% communication cost
+than SOTAs on ImageNet-C.
+
+
+\section{Cloud-Edge Communication-Efficient Model Adaptation}
+
+
+\noindent
+\textbf{Problem statement}.
+In this paper, we focus on how to efficiently improve adaptation performance in the context of cloud-edge deployment under distribution-shifted scenarios.
+Let $g_{w}(\cdot)$ denote a model trained in a powerful cloud server on a set of training data.
+Instead of deploying the model $g_{w}(\cdot)$ in the cloud, we would infer $g_{w}(\cdot)$ locally on a resource-limited edge device (\eg, a surveillance camera in an industrial park) for delay-sensitive applications.
+In the inference, $g_{w}(\cdot)$ on edge devices may encounter out-of-distribution test samples.
+These test samples are distribution-shifted to the training ones due to natural variations or corruptions, such as lighting/weather changes and unexpected noises resulting from sensor degradation.
+In this case, the model $g_{w}(\cdot)$ may often be sensitive to these distribution shifts, potentially leading to significant performance degradation.
+
+To tackle the distribution-shift issue, many test-time adaptation (TTA) approaches~\citep{sun2020test,wang2021tent} have been proposed to improve the model adaptation performance through parameter updates.
+These methods become attractive since they do not require access to training data and adapt the model on the unlabeled test data via entropy minimization in a self-supervised manner.
+However, the applicability of these approaches to edge devices is limited due to computational resource constraints, such as memory limitations that hinder model updating.
+An alternative approach is to employ these methods to adapt the model $g_{w}(\cdot)$ in the cloud by centralizing the test data.
+Nevertheless, this suffers from two challenges.
+1) Uploading all test samples incurs significantly heavy communication overhead.
+2) Conventional TTA methods are typically designed for a single device and may be hard to fully exploit the resources of both the cloud and the edges.
+In this study, we seek to address the issues by developing an efficient and effective cloud-edge based adaptation method.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/pipeline.pdf}
+\caption{
+An overview of our proposed \methodname.
+In edge: after inference, each edge asynchronously uploads samples to the cloud by excluding unreliable ones (based on $S^{high}(\bx)$ in Eqn.~(\ref{eq:remove-high-ent})) and low-informative ones (based on $S^{low}(\bx)$ in Eqn.~(\ref{eq:remove-low-ent})).
+In cloud: 
+1) our \methodname improves the foundation model $f_{\theta}(\cdot)$ with the uploaded samples via entropy minimization (Eqn.~\ref{eq:entropy-minimize-teacher}) and meanwhile stores uploaded samples into a replay buffer.
+2) With both the uploaded samples and the samples randomly sampled from the replay buffer, \methodname adapts the edge model $g_w(\cdot)$ with the guidance from the foundation model $f_{\theta}(\cdot)$ via the knowledge distillation loss (Eqn.~\ref{eq:distillation}).
+}
+\label{fig:illustration_cectta}
+\end{figure*}
+
+\subsection{Efficient Adaptation for Robustness and Communication Enhancement}
+
+In this paper, we devise a Cloud-Edge Elastic Model Adaptation (\methodname) paradigm in which the adaptation task is decomposed to the cloud and edges based on their computational resources and budgets.
+The edge only requires performing a vanilla model inference, while the remaining adaptation workloads are offloaded to the cloud (see Figure~\ref{fig:illustration_cectta}).
+Then, our \methodname selectively uploads a subset of samples, determined by our proposed entropy-based criteria (refer to Section~\ref{sec:contributed-sample-identification}), to the cloud for adaptation.
+This selective sample uploading strategy significantly reduces the communication burden.
+Once the cloud adaptation process is complete, the edge model updates its parameters from the cloud and then infers the next incoming test samples. 
+Importantly, \methodname introduces no extra computational cost in edges and is applicable to resource-constrained edge devices.
+
+In the cloud, we seek to adapt the edge model with uploaded test samples.
+Specifically, we seek to leverage a foundation model $f_{\theta}(\cdot)$ with stronger capability and more parameters to guide the edge model for adaptation (refer to Section~\ref{sec:distilled-adaptation}).
+Notably, the foundation model does not require access to training data and updates through unsupervised entropy minimization.
+To maximize data utilization for adaptation, we devise a replay buffer to store the uploaded samples.
+When transferring knowledge from the foundation model to the edge model via knowledge distillation, we exploit both the newly uploaded samples and the samples from the replay buffer for higher data utilization efficiency.
+This results in better performance of the edge model compared to vanilla adaptation.
+The pseudo-code involved in the edge and cloud is presented in Algorithms~\ref{alg:edge} and~\ref{alg:cloud}, respectively.
+\begin{figure}[t]
+	\begin{minipage}[t]{0.56\linewidth}
+	\centering
+\begin{algorithm}[H]
+	\caption{Adaptation process in edge.}
+	\label{alg:edge}
+	\begin{algorithmic}[1]
+    \REQUIRE{Test samples $\mD_{test}\small{=}\{\bx_j\}_{j=1}^{M}$, the edge model $g_{w}(\cdot)$, parameters $B$, $E_{\text{max}}$ and $E_{\text{min}}$.}
+    \FOR{a batch $\mX\small{=}\{\bx_b\}_{b=1}^{B}$ in $\mD_{test}$}
+    \STATE Calculate predictions $\hat{y}$ for all $\bx \in \mX$ via $f_{\Theta}(\cdot)$.
+    \STATE Calculate $S(\bf x)$ via Eqn.~(\ref{eq:overall-remove}) with $E_{\text{max}}$ and $E_{\text{min}}$.
+    \STATE Update the threshold $E_{\text{max}}$ via Eqn.~(\ref{eq:dynamic-E-max}).
+    \STATE Upload samples $\{{\bf x} | S({\bf x})\small{=}1, {\bf x} \small{\in} \mX\}$ to  cloud.
+    \STATE Update the parameters $\tilde{w} \in w$ from the cloud.
+    \ENDFOR
+    \ENSURE The predictions $\{\hat{y}\}_{k=1}^M$ for all $\bx \in \mD_{test}$.
+	\end{algorithmic}
+\end{algorithm}
+	\end{minipage}\hfill
+	\begin{minipage}[t]{0.42\linewidth}
+	\centering
+\begin{algorithm}[H]
+	\caption{Adaptation process in cloud.}
+	\label{alg:cloud}
+	\begin{algorithmic}[1]
+    \REQUIRE{Test samples $\hat{\mX}\small{=}\{\bx_n\}_{n=1}^{N}$, the foundation model $f_{\theta}(\cdot)$ and edge model $g_w(\cdot)$.}
+    \STATE Update parameters $\tilde{\theta} \in \theta$ of the foundation model $f_{\theta}(\cdot)$ via entropy minimization (Eqn.~\ref{eq:entropy-minimize-teacher}) with $\hat{\mX}$.
+    \STATE Update parameters $\tilde{w} \in w$ of the edge model $g_{w}(\cdot)$ via knowledge distillation (Eqn.~\ref{eq:distillation}) with $\mX$.
+    \STATE Distribute the parameters $\tilde{w}$ to edge.
+	\end{algorithmic}
+\end{algorithm}
+	\end{minipage}
+\end{figure}
+
+\subsection{Sample Filtration for
+Communication Cost Reduction
+in Edge Side}\label{sec:contributed-sample-identification}
+
+To reduce the communication overhead between the cloud and edges, we propose a sample filtration strategy that removes high and low entropy test samples from being uploaded to the cloud.
+A recent study by \cite{wang2021tent} proposes a model adaptation method that adapts on a batch of test samples by conducting entropy minimization.
+Minimizing entropy penalizes decisions at high densities in the data distribution to improve accuracy for distinct classes~\citep{grandvalet2004semi}, which has proven to be a crucial constraint for domain adaptation~\citep{saito2019iccv,roy2019unsupervised}.
+Furthermore,~\cite{niu2022EATA} has demonstrated that high entropy samples adversely affect the adaptation performance when entropy minimization is employed.
+The reason may be that the model adapts using the test samples without labels via entropy minimization, introducing considerable uncertainty when dealing with high-entropy samples during the adaptation process.
+
+However, this method only filters test samples based on a static and pre-determined threshold.
+It suffers two limitations:
+1) The entropy of samples tends to decrease along with the adaptation.
+Therefore, only a part of the negatively impacting samples can be excluded.
+2) It overlooks the fact that adaptation with extremely low-entropy samples is unnecessary.
+To address the above issues, we propose to 
+1) dynamically exclude the \textbf{unreliable} (high entropy) samples by adaptively adjusting the threshold in accordance with the entropy of current samples.
+2) exclude the \textbf{low-informative} (low entropy) samples.
+We design the entropy-based filtration criteria as it is an information-theoretic measure that represents uncertainty and information and has proven to be a simple yet effective strategy~\citep{burr2010active,margatina2021active,ren2022active}.
+To this end, we devise a binary score $S(\bf x)$ to indicate whether a sample $\bx$ should be uploaded.
+We only upload the test samples with $S(\bf x)\small{=}1$ and discard those with $S(\bf x)\small{=}0$.
+
+\begin{wrapfigure}{r}{0.45\textwidth}
+\centering
+\includegraphics[width=1.0\linewidth]{figures/ents-proportion.pdf}
+\caption{Proportions of test samples with $E(\bx; w)\small{>}E_{\text{max}}$ (red) and $E(\bx; w)\small{\leq}E_{\text{max}}$ (blue) during adaptation via entropy minimization on ImageNet-C.
+}
+\label{fig:dynamic-entropy-threshold-motivation}
+\end{wrapfigure}
+
+\textbf{Dynamic identification on unreliable samples}.
+Let $\mathbbm{1}_{\{\cdot\}}(\cdot)$ denote an indicator function. 
+Following~\citep{niu2022EATA}, we exploit a entropy threshold $E_{\text{max}}$ to filter out the high entropy test samples as follows
+\begin{equation}\label{eq:remove-high-ent}
+    S^{high}(\bx) = \mathbbm{1}_{\{E(\bx; w)<E_{\text{max}}\}}(\bx),
+\end{equation}
+where $E(\bx;w)$ denotes the entropy of the prediction $g_w(\bx)$ for the sample $\bx$.
+As we perform adaptation through entropy minimization, the entropy of the test samples is likely to decrease.
+Consequently, a fixed threshold $E_{\text{max}}$ would progressively exclude fewer and fewer samples during the adaptation.
+To substantiate this, we perform an empirical study to reveal the proportions of the test samples whose entropy is larger than a fixed $E_{\text{max}}$ at different stages during the adaptation process.
+As shown in Figure~\ref{fig:dynamic-entropy-threshold-motivation}, in the final stage, we filter out fewer samples (indicated by the red bar) compared to the initial stage.
+This trend could be attributed to the predictions becoming more certain (\ie, predictions with lower entropy) as the adaptation progresses.
+
+In light of the aforementioned empirical study, it becomes feasible to filter out more high-entropy samples by dynamically decreasing the $E_{\text{max}}$.
+To this end, we seek to lower $E_{\text{max}}$ according to the average entropy of the test samples after every adaptation batch.
+To be specific, in the adaptation batch $t$, the entropy threshold $E_{\text{max}}^t$ can be calculated by 
+
+\begin{equation}\label{eq:dynamic-E-max}
+    E_{\text{max}}^t \leftarrow \lambda \times E_{\text{max}}^{t-1} \times \frac{E_{\text{avg}}^t}{E_{\text{avg}}^{t-1}},
+\end{equation}
+
+where $E_{\text{avg}}^t$ denotes the average entropy of all test samples in past $t$ batches, $\lambda$ is a hyper-parameters.
+Note that $E_{\text{avg}}^0$ can be obtained from the first batch of the test samples.
+Based on Eqn.~(\ref{eq:dynamic-E-max}), when the average entropy becomes smaller, $E_{\text{max}}$ would be descended accordingly.
+In this way, we exclude more unreliable samples from uploading to the cloud, thereby enhancing communication efficiency.
+\textbf{Identification on low-informative samples}.
+In addition to high entropy samples, test samples with extremely low entropy are unnecessary for adaptation.
+Since they only contribute negligible gradient while minimizing the entropy loss.
+Following the similar scheme above, we employ a threshold $E_{\text{min}}$ to discard samples with entropy lower than $E_{\text{min}}$.
+We do not adopt a dynamic variation strategy on $E_{\text{min}}$ since the threshold that determines whether a sample contributes negligible gradient does not depend on the average entropy of current test samples.
+Formally, $S^{low}(\bx)$ can be written as
+\begin{equation}\label{eq:remove-low-ent}
+    S^{low}(\bx) = \mathbbm{1}_{\{E(\bx;\theta)>E_{\text{min}}\}}(\bx).
+\end{equation}
+
+The overall binary score $S(\bf x)$ can be calculated by
+\begin{equation}\label{eq:overall-remove}
+    S(\bx)=S^{high}(\bx) \cdot S^{low}(\bx).
+\end{equation}
+Note that the edge model only requires one regular forward propagation without the need for backward propagation or gradient descent.
+Once the edge model $g_w(\cdot)$ makes predictions for test samples, it asynchronously uploads the samples with $S(\bx)\small{=}1$ to the cloud using a background thread.
+We emphasize that uploading samples does not block the edge from inferring on next incoming samples.
+In other words, the processes of inference and uploading can be executed simultaneously.
+\subsection{Replay-based Knowledge Distillation for Adaptation in Cloud Side}\label{sec:distilled-adaptation}
+
+Recent studies have demonstrated that larger models with a great number of parameters often achieve better performance than a small one on the out-of-distribution data~\citep{hendrycks2019benchmarking}.
+Compared with the vanilla adaptation, it is possible to further improve the edge model $g_{w}(\cdot)$ in the cloud by distillation from a high-performing foundation model $f_{\theta}(\cdot)$.
+Note that it is feasible and practical that the foundation model has knowledge that covers all the test samples inferred by the edge model (see results and analysis in Table~\ref{tab:imagenet-r-clip}).
+Since cloud server has much more sufficient computational resources and budgets to support the heavier models.
+In this case, our proposed \methodname would adopt a foundation model to enhance the adaptation performance, which takes advantage of the rich computational resources of the cloud.
+However, it is non-trivial to distill the foundation model $f_{\theta}(\cdot)$ to the edge model $g_{w}(\cdot)$.
+Note that vanilla distillation training requires a large number of samples~\citep{chen2019datafree,yu2023datafree}.
+The amount of accessible test samples is limited as we exclude unreliable and low-informative samples in the edge.
+To alleviate this issue, we devise a replay buffer $\mB$ to store the uploaded samples inspired by~\citep{mnih2013playing}.
+In each distillation step, we first update the foundation model $f_{\theta}(\cdot)$ via unsupervised entropy minimization in an unsupervised manner on the uploaded samples.
+Through this adaptation process, the foundation model acquires additional knowledge of the current test data.
+Then, we boost the edge model $g_{w}(\cdot)$ via the knowledge distillation guided by the foundation model on both the uploaded samples and the samples from the replay buffer.
+
+\textbf{Entropy minimization for foundation model adaptation}.
+Upon receiving the batch of uploaded test samples $\hat{\mX}\small{=}\{{\bf x}_i\}_{i=1}^N$, we first put them into the replay buffer $\mB\small{=}\mB \cup \hat{\mX}$.
+Note that the capacity of the buffer is limited (see analysis and ablations in Table~\ref{tab:effects-replay-buffer-size}).
+We update the buffer with the newly uploaded test samples in a first-in and first-out manner.
+Subsequently, we update the foundation model over the batch $\hat{\mX}$.
+Adaptation with a batch not only avoids a trivial solution (\ie, assigning all probability to the most probable class~\citep{wang2021tent}) but also improves the parallel efficiency in the cloud server.
+Formally, we adapt $f_{\theta}(\cdot)$ by minimizing the weighted entropy loss $\mL_{\mathrm{ENT}}(f_{\theta}({\bf{x}}))$
+\begin{equation}\label{eq:entropy-minimize-teacher}
+    \min_{\tilde{\theta}}  H(\bx) \sum_{y \in \mC} f_{\theta} (y | \bx) \log f_{\theta} (y | \bx),
+\end{equation}
+where $H(\bx)\small{=}1/\exp{(E(\bx; \theta)\small{-}E_{\text{max}}})$ and $\mC$ denotes the model output space.
+In Eqn.~(\ref{eq:entropy-minimize-teacher}), we optimize the loss weighted by $H(\bx)$ following~\citep{niu2022EATA} since we seek to encourage the model to focus on the low-entropy test samples during adaptation.
+In the back-propagation process, it is worth noting that the gradient is not propagated through $H(\bx)$.
+
+For efficient adaptation, we only update the affine parameters of normalization layers $\tilde{\theta} \small{\in} \theta$ while keeping the remaining layers fixed.
+The advantages are three folds: 1) This model updating strategy is efficient since it requires less memory footprint and computational resources.
+2) Compared with distributing all the parameters to the edge, our \methodname only needs to transfer BN parameters and lowers downloading overhead (\eg, reduce 99.91\% parameters distributing burden in ResNet-18).
+3) The model may preserve the previous knowledge since most parameters remain unchanged, leading to better adaptation stability and performance (see results in Table~\ref{tab:effect-updating-way}). 
+
+\textbf{Knowledge distillation with replay buffer for edge model adaptation}.
+With the updated foundation model, we seek to adapt the edge model $g_w(\cdot)$ on both $\hat{\mX}$ and a set of test samples randomly sampled from the replay buffer $\mB$.
+Specifically, we align the predictions between the logits $f_{\theta}(\cdot)$ and $g_w(\cdot)$ via Kullback–Leibler (KL) divergence $\mL_{\mathrm{KL}}$.
+In addition, we adapt $g_w(\cdot)$ via a cross-entropy loss $\mL_{\mathrm{CE}}$, in which the pseudo labels $\hat{y}$ are generated by the foundation model.
+Note that $\hat{y}$ can be calculated by $\hat{y}=\argmax_{y \in \mC}(f_{\theta}(y|x))$.
+Formally, we optimize $g_w(\cdot)$ by employing both entropy minimization and knowledge distillation as follows,
+\begin{equation}\label{eq:distillation}
+\begin{aligned}
+    \min_{\tilde{w}} H(\bx) [\alpha \mL_{\mathrm{KL}}(g_w({\bf{x}}), f_{\theta}({\bf{x}})) + \beta \mL_{\mathrm{CE}}(g_w({\bf{x}}), \hat{y}) + \mL_{\mathrm{ENT}}(g_w({\bf{x}})))],
+\end{aligned}
+\end{equation}
+where $\alpha$ and $\beta$ are factors for balancing the losses.
+we use the KL divergence to align the prediction distribution of the foundation and edge models, and the CE loss to align the decision boundaries.
+These two kinds of losses make the edge model learn the knowledge in complementary manners from the foundation model.
+The combination of both losses outperforms the adoption of either one in isolation (See results and analyses in Table~\ref{tab:effect-knowledge-distillation-components}).
+
+In edge model adaptation, we still only update the affine parameters of normalization layers $\tilde{w} \small{\in} w$.
+After distilled adaptation of the edge model $f_w(\cdot)$, we distribute the parameters $\tilde{w}$ to edge devices to update $f_w(\cdot)$.
+In particular, once the cloud has completed adaptation, we can perform the reception of parameters from the cloud in the background, typically via a separate thread to avoid blocking the inference process.
+Upon full reception of the parameters, we would update the parameters of the edge model at the beginning of the next inference iteration.
+
+
+
+\section{Experiments}
+
+
+In the following, we provide the details of the used datasets and implementation, more details are put in the supplementary materials.
+\textbf{Datasets and models}.
+We evaluate our method and considered methods on ImageNet-C~\citep{hendrycks2019benchmarking}.
+which is a distribution shift dataset by applying 4 main category corruption (\ie, noise, blur, weather, and digital), with a total of 15 diverse corruption types, to the ImageNet validation set.
+Each corruption has 5 different severity levels (\ie, from level 1 to 5), in which the higher severity level indicates the more severe distribution shift.
+We also verify our \methodname on ImageNet-R~\citep{hendrycks2021many}, which contains 30,000 images with various artistic renditions of 200 ImageNet classes collected from Flickr.
+We adopt ResNet101~\citep{resnet} as the foundation model and ResNet18 as the edge model in the main experiments.
+We explore more foundation models and edge models in the ablation studies (see results in Tables~\ref{tab:comparisons-foundation-models} and~\ref{tab:comparisons-edge-models}).
+\textbf{Implementation details}.
+We set the entropy thresholds $E_{\text{max}}\small{=}0.4\times\ln C$ as the initialized value following~\citep{niu2022EATA} and $E_{\text{min}}\small{=}0.02\times\ln C$, where $C$ denotes the number of classes.
+Then the threshold $E_{\text{max}}$ decreases based on Eqn.~(\ref{eq:dynamic-E-max}) with $\lambda\small{=}1.0$.
+For the adaptation of the foundation and edge model, we use both an SGD optimizer with a learning rate of $0.00025$ and a momentum of $0.9$.
+For the adaptation of the edge model, we set the batch size to $128$, in which $32$ samples are newly uploaded and the remaining $96$ samples are randomly sampled from the replay buffer.
+The hyper-parameter $\alpha$ and $\beta$ are both set to $3$.
+
+\textbf{Compared methods}.
+We compare our methods with the following state-of-the-art TTA methods, including BN Adaptation~\citep{schneider2020improving}, ONDA~\citep{mancini2018ONDA}, LAME~\citep{boudiaf2022parameter}, Pseudo Label (PL)~\citep{lee2013pseudo}, Tent~\citep{wang2021tent}, CoTTA~\citep{wang2022continual} and ETA~\citep{niu2022EATA}.
+In the experiments, we assume the edge devices only have limited resources and thus are unable to perform backpropagation.
+All workloads in the above TTA methods invoked in backpropagation would be executed in the cloud by uploading test samples.
+In this way, we can compare the amount of data transmission between our method and the counterparts.
+
+\begin{table*}[t]
+\caption{
+Comparisons with state-of-the-art methods on ImageNet-C (severity level 3 and 5) regarding \textbf{Accuracy (\%)}.
+We adopt Resnet101 as the foundation model and ResNet18 as the edge model.
+$^\dagger$ denotes the TTA method that does not require any backward propagation and can be locally executed in edge devices.
+Note that our \methodname requires uploading fewer samples on average with severity levels 3 (19.1k \vs~26.1k) and 5 (14.4k \vs~18.8k) than ETA.
+}
+\label{tab:imagenet-c-level35}
+\begin{center}
+\begin{threeparttable}
+\LARGE
+\resizebox{1.0\linewidth}{!}{
+\begin{tabular}{l|ccc|cccc|cccc|cccc|>{\columncolor{blue!8}}c}
+\multicolumn{1}{c}{} & \multicolumn{3}{c}{Noise} & \multicolumn{4}{c}{Blur} & \multicolumn{4}{c}{Weather} & \multicolumn{4}{c}{Digital}  \\
+\cmidrule{1-17}
+Severity Level=3 & Gauss. & Shot & Impul. & Defoc. & Glass & Motion & Zoom & Snow & Frost & Fog & Brit. & Contr. & Elastic & Pixel & JPEG & Avg.  \\
+\cmidrule{1-17}
+ResNet18 (baseline) & 21.6 & 19.9 & 18.7 & 29.9 & 15.8 & 28.7 & 27.6 & 27.6 & 23.8 & 35.5 & 62.7 & 38.1 & 51.8 & 41.6 & 53.0 & 33.1 \\
+~~$\bullet~$ BN Adaptation$^\dagger$ & 42.3 & 39.8 & 40.0 & 37.5 & 31.4 & 45.1 & 44.3 & 40.8 & 36.2 & 53.9 & 65.0 & 58.2 & 60.2 & 58.0 & 57.7 & 47.4 \\
+~~$\bullet~$ ONDA$^\dagger$ & 40.0 & 38.9 & 37.5 & 29.5 & 27.5 & 43.8 & 43.9 & 40.2 & 35.2 & 54.6 & 65.1 & 56.1 & 59.7 & 58.6 & 57.6 & 45.9 \\
+~~$\bullet~$ LAME$^\dagger$ & 20.6 & 18.9 & 17.2 & 29.5 & 14.7 & 28.3 & 26.9 & 26.8 & 23.2 & 34.9 & 62.4 & 37.5 & 51.3 & 41.1 & 52.5 & 32.4 \\
+~~$\bullet~$ PL & 48.1 & 48.0 & 46.1 & 41.1 & 39.7 & 51.3 & 49.9 & 47.3 & 39.8 & 58.6 & 64.9 & 59.2 & 62.5 & 60.8 & 59.4 & 51.8 \\
+~~$\bullet~$ Tent & 47.2 & 47.1 & 45.1 & 40.0 & 38.2 & 50.4 & 49.4 & 46.7 & 40.1 & 58.1 & 64.9 & 59.0 & 62.5 & 60.5 & 59.2 & 51.2 \\
+~~$\bullet~$ CoTTA & 42.0 & 40.7 & 39.8 & 30.3 & 30.1 & 46.3 & 46.1 & 41.9 & 36.5 & 56.2 & 64.9 & 58.0 & 60.2 & 59.3 & 58.1 & 47.4 \\
+~~$\bullet~$ ETA & 50.1 & 50.2 & 48.6 & 44.0 & 42.7 & 52.9 & 51.4 & 49.9 & 43.5 & 59.5 & \textbf{65.2} & 60.9 & \textbf{62.9} & \textbf{61.6} & \textbf{59.9} & 53.5 \\
+\rowcolor{pink!30}~~$\bullet~$ \methodname (Ours) & \textbf{51.1} & \textbf{51.2} & \textbf{49.8} & \textbf{45.2} & \textbf{44.1} & \textbf{53.7} & \textbf{52.0} & \textbf{50.8} & \textbf{44.2} & \textbf{60.1} & 65.0 & \textbf{61.1} & \textbf{62.9} & \textbf{61.6} & 59.8 & \textbf{54.2} \\
+\cmidrule{1-17}
+Severity Level=5 & Gauss. & Shot & Impul. & Defoc. & Glass & Motion & Zoom & Snow & Frost & Fog & Brit. & Contr. & Elastic & Pixel & JPEG & Avg.  \\
+\cmidrule{1-17}
+ResNet18 (baseline) & 1.5 & 2.3 & 1.5 & 11.4 & 8.7 & 11.1 & 17.6 & 10.6 & 16.2 & 14.0 & 51.5 & 3.4 & 16.5 & 23.3 & 30.7 & 14.7 \\
+~~$\bullet~$ BN Adaptation$^\dagger$ & 16.6 & 16.2 & 17.3 & 18.6 & 18.2 & 25.9 & 34.7 & 28.4 & 29.8 & 41.2 & 58.5 & 22.2 & 40.1 & 45.3 & 38.0 & 30.1 \\
+~~$\bullet~$ ONDA$^\dagger$ & 13.7 & 15.0 & 14.1 & 12.3 & 13.2 & 23.7 & 34.2 & 29.4 & 28.6 & 40.9 & 58.5 & 12.3 & 39.3 & 44.6 & 37.5 & 27.8 \\
+~~$\bullet~$ LAME$^\dagger$ & 0.9 & 1.1 & 0.6 & 11.2 & 8.2 & 10.8 & 17.0 & 8.7 & 15.6 & 12.4 & 51.1 & 3.3 & 14.9 & 22.5 & 30.1 & 13.9 \\
+~~$\bullet~$ PL & 24.8 & 26.8 & 24.6 & 20.3 & 21.3 & 33.6 & 41.8 & 39.0 & 32.4 & 49.9 & 59.5 & 11.4 & 47.9 & 51.5 & 47.0 & 35.4 \\
+~~$\bullet~$ Tent & 22.8 & 25.0 & 23.2 & 20.1 & 21.1 & 32.4 & 41.0 & 37.8 & 33.5 & 48.9 & 59.3 & 18.0 & 46.9 & 50.6 & 45.9 & 35.1 \\
+~~$\bullet~$ CoTTA & 15.2 & 16.2 & 15.7 & 11.8 & 14.9 & 26.9 & 36.9 & 31.2 & 29.9 & 43.6 & 59.2 & 17.0 & 40.9 & 47.2 & 39.3 & 29.7 \\
+~~$\bullet~$ ETA & 26.8 & 29.7 & 27.6 & 22.6 & 22.7 & 37.1 & 44.0 & 42.4 & 37.6 & 51.6 & 60.1 & 26.1 & 49.8 & 53.3 & 48.5 & 38.7 \\
+\rowcolor{pink!30}~~$\bullet~$ \methodname (Ours) & \textbf{29.8} & \textbf{32.2} & \textbf{30.3} & \textbf{25.3} & \textbf{26.8} & \textbf{39.3} & \textbf{45.3} & \textbf{43.7} & \textbf{38.7} & \textbf{52.8} & \textbf{60.1} & \textbf{32.9} & \textbf{50.8} & \textbf{54.0} & \textbf{49.3} & \textbf{40.8} \\
+\cmidrule{1-17}
+\end{tabular}
+}
+\end{threeparttable}
+\end{center}
+\end{table*}
+\subsection{Performance Comparisons on ImageNet-C}
+
+We compared our proposed \methodname with the considered methods in Table~\ref{tab:imagenet-c-level35} in ImageNet-C~\citep{hendrycks2019benchmarking} with the severity levels 3 and 5.
+We adopt a CNN-based model ResNet101 as the foundation model and ResNet18 as the edge model in this experiment.
+We put more experimental results with the severity levels 1, 2, and 4 as well as the results on transformer-based models in the supplementary due to the page limitation.
+From the results, our \methodname achieves the highest accuracy in most 15 different corruption types and the best average accuracy (\eg, 40.8\% with the severity level 5).
+To be specific, \methodname outperforms Tent (29.8\% \vs~22.8\%) and ETA (29.8\% \vs~26.8\%) on the corruption Gaussian noise with the severity level 5.
+The reasons are twofold: 1) the proposed filtration strategy removes more harmful test samples; 2) our replay-based distillation scheme transfers distribution knowledge to the edge model.
+The results verify the effectiveness of the proposed sample filtration strategy and distilled adaptation method.
+
+In Figure~\ref{fig:comparisons-imagenetC-num-uploaded-level35}, we compare the average number of uploaded samples over 15 corruption types of our \methodname and the considered methods with ResNet18 as the edge model.
+Note that the compared methods PL, Tent and CoTTA need to upload the whole test samples (50k samples, 100\%) to the cloud for adaptation.
+These methods introduce great 
+communication overhead
+between the cloud and edges, which is inefficient in the context of cloud edge model deployment.
+ETA excludes some test samples with high prediction entropy but still requires uploading 26.1k (52\%) and 19.1k (38\%) samples in severity levels 3 and 5, respectively.
+With the proposed dynamic sample filtration strategy, 
+our \methodname further reduces the number of uploaded samples to 18.8k (37\%) and 14.4k (29\%) in severity levels 3 and 5.
+Compared with ETA, we remove more high-entropy samples with a dynamic threshold and further exclude low-entropy samples.
+In this case, our proposed \methodname only needs to upload fewer samples to the cloud for adaptation, which demonstrates the superiority of our methods over existing methods in terms of the amount of data transmission.
+
+\subsection{Performance Comparisons on ImageNet-R}
+
+In Table~\ref{tab:imagenet-r}, we report the results of our \methodname and considered methods on a realistic out-of-distribution dataset ImageNet-R.
+This benchmark dataset is collected
+from Flickr instead of generated by some corruption algorithms  (\ie, as ImageNet-C done) and filtered by Amazon MTurk annotators according to the class names in the original ImageNet.
+From the results, our \methodname achieves 27.9\% accuracy on ImageNet-R (+4.1\% over Tent, +1.7\% over the best counterpart ETA).
+As for the number of uploaded test samples, our \methodname only requires 5944 (20\%) samples, which is lower than ETA (7457, 25\%) and much lower than Tent, PL and CoTTA (30,000, 100\%).
+These results are consistent with those on ImageNet-C that our proposed \methodname yields the highest robust accuracy with the fewest uploaded samples.
+The results further demonstrate the effectiveness and potential of our method while applied to realistic test samples in real-world applications.
+
+\begin{figure*}[t]
+	\begin{minipage}[t]{0.49\linewidth}
+\begin{table}[H]
+\caption{Comparisons with state-of-the-art methods on ImageNet-R benchmark. We adopt ResNet101 as the foundation model and ResNet18 as the edge model.
+$^\dagger$ denotes the TTA method that does not require any backward propagation and can be executed in edge devices, which does not require uploading test samples.
+}
+\label{tab:imagenet-r}
+ \begin{center}
+ \begin{threeparttable}
+    \resizebox{1.0\linewidth}{!}{
+ 	\begin{tabular}{l|cc}\toprule
+        \multirow{1}{*}{\tabincell{c}{Model}}&\multirow{1}{*}{\tabincell{c}{Acc. (\%)}}&\multirow{1}{*}{\tabincell{c}{\#Uploaded samples}} \\
+        \midrule
+        ResNet18 (baseline) & 20.4 & -- \\
+        ~~$\bullet~$ BN Adapt.$^\dagger$ & 22.8 & --  \\
+        ~~$\bullet~$ ONDA$^\dagger$ & 22.7 & --  \\
+        ~~$\bullet~$ LAME$^\dagger$ & 20.2 & --  \\
+        ~~$\bullet~$ PL & 23.8 & 30,000 (100\%) \\
+        ~~$\bullet~$ Tent & 23.6 & 30,000 (100\%)  \\
+        ~~$\bullet~$ ETA & 26.2 & 7,457 (25\%)  \\
+        ~~$\bullet~$ CoTTA & 23.2 & 30,000 (100\%) \\
+        \rowcolor{pink!30}~~$\bullet~$ \methodname (Ours) & \textbf{27.9} & \textbf{5,944 (20\%)} \\
+        \bottomrule
+	\end{tabular}}
+	 \end{threeparttable}
+	 \end{center}
+\end{table}
+	\end{minipage}\hfill
+	\begin{minipage}[t]{0.49\linewidth}
+\begin{table}[H]
+\caption{Comparisons with Tent and ETA with a mixture of 15 corruption types on ImageNet-C.}
+\label{tab:imagenet-c-mixed}
+ \begin{center}
+ \begin{threeparttable}
+    \resizebox{1.0\linewidth}{!}{
+ 	\begin{tabular}{l|cc}\toprule
+        \multirow{1}{*}{\tabincell{c}{Model}}&\multirow{1}{*}{\tabincell{c}{Accuracy (\%)}}&\multirow{1}{*}{\tabincell{c}{\#Uploaded samples}} \\
+        \midrule
+        ResNet18 (baseline) & 33.1 & -- \\
+        ~~$\bullet~$ Tent~~~~~~~ & 30.5 & 750k (100\%)  \\
+        ~~$\bullet~$ ETA & 44.5 & 384k (51\%)  \\
+        \rowcolor{pink!30}~~$\bullet~$ \methodname (Ours) & \textbf{45.6} & \textbf{286k (38\%)} \\
+        \bottomrule
+	\end{tabular}}
+	 \end{threeparttable}
+	 \end{center}
+\end{table}
+\begin{table}[H]
+\caption{Effect of sample filtration strategy.}
+\label{tab:effects-upload-sample-components}
+ \begin{center}
+ \begin{threeparttable}
+    \resizebox{1.0\linewidth}{!}{
+ 	\begin{tabular}{l|ccccc}\toprule
+        \multicolumn{1}{c|}{\multirow{2}[0]{*}{Method}} & \multicolumn{2}{c}{Level 3} & \multicolumn{2}{c}{Level 5} \\
+         & \multicolumn{1}{c}{Acc. (\%)} & \multicolumn{1}{c}{\#Upload} & \multicolumn{1}{c}{Acc. (\%)} & \multicolumn{1}{c}{\#Upload} \\
+        \midrule
+         $S^{high}{(\bx)}$ w/ Fixed $E_{\text{max}}$ & 51.2  & 25,325	& 30.0  & 15,473      \\
+         ~~$+$ Dynamic $E_{\text{max}}$ & 51.1 & 20,976	     & 29.9 & 10,081        \\
+         \rowcolor{pink!30}~~$+~S^{low}{(\bx)}$  & \textbf{51.1} & \textbf{17,479}   & \textbf{29.8} & \textbf{9,889}                 \\
+        \bottomrule
+	\end{tabular}}
+	 \end{threeparttable}
+	 \end{center}
+\end{table}
+\begin{table}[H]
+\caption{Effect of the replay buffer.}
+\label{tab:effects-replay-buffer}
+ \begin{center}
+ \begin{threeparttable}
+    \resizebox{1.0\linewidth}{!}{
+ 	\begin{tabular}{c|ccccc}
+        \toprule
+        \multicolumn{1}{c|}{\multirow{2}[0]{*}{Replay Buffer}} & \multicolumn{2}{c}{Level 3} & \multicolumn{2}{c}{Level 5} \\
+         & \multicolumn{1}{c}{Acc. (\%)} & \multicolumn{1}{c}{\#Upload} & \multicolumn{1}{c}{Acc. (\%)} & \multicolumn{1}{c}{\#Upload} \\
+        \midrule
+         $\times$  & 47.4 & 17,654 & 25.0 & 9,084        \\
+         \rowcolor{pink!30}~~$\checkmark$ & \textbf{51.1}  & 17,479	& \textbf{29.8}  & 9,889      \\
+        \bottomrule
+	\end{tabular}}
+	 \end{threeparttable}
+	 \end{center}
+\end{table}
+	\end{minipage}
+\end{figure*}
+
+\begin{figure*}[t]
+    \centering
+    \begin{minipage}{.32\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/comparisons_eata_level35.pdf}
+        \caption{Comparisons of the average number of uploaded test samples on ImageNet-C with the severity levels 3 and 5.}
+        \label{fig:comparisons-imagenetC-num-uploaded-level35}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{.32\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/ablation_lambda.pdf}
+        \caption{Effect of $\lambda$ in Eqn.~(\ref{eq:dynamic-E-max}) with ResNet18 as edge model on ImageNet-C (Gaussian noise,
+severity level 3).}
+        \label{fig:ablation-lambda}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.32\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/ablation_E_min.pdf}
+        \caption{Effect of $E_{\text{min}}$ in Eqn.~(\ref{eq:remove-low-ent}) with ResNet18 as edge model on ImageNet-C (Gaussian noise,
+severity level 3).}
+        \label{fig:ablation-E-min}
+    \end{minipage}
+\end{figure*}
+
+\subsection{Further Experiments}\label{sec:further-exp}
+
+In ablation studies, we consider two representative severity levels (\ie, 3 and 5). Severity levels 3 and 5 represent the medium-difficulty distribution shift and the most challenging distribution shift, respectively.
+By adopting these two levels, we effectively assess the performance of various adaptation algorithms.
+Moreover, the hyper-parameters derived from these levels demonstrate their adaptability and suitability for addressing other severity levels as well. For a similar consideration, the settings are widely adopted by Tent~\citep{wang2021tent} and ETA\citep{niu2022EATA}.
+
+Due to the page limitation, We put more ablations in the supplementary materials, including the effects of 1) hyperparameters $E_\text{max}$, $\alpha$ and $\beta$, 2) components in distillation loss (Eqn.~(\ref{eq:distillation})), 3) different foundation models, 4) different edge models, 5) different filtration strategies 6) replay buffer size, 7) different parameters updating schemes and 8) different parameters distribution intervals.
+
+\textbf{Comparisons under mixed-and-shifted distributions.}
+We evaluate our \methodname on mixed ImageNet-C in severity level 3 that consists of 15 different corruption types/distribution shifts (750k images in total).
+Note that it is common for the edge model to encounter test samples with mixed distribution shifts in practice.
+In Table~\ref{tab:imagenet-c-mixed}, compared with Tent and ETA, our \methodname outperforms them in both the accuracy (+15.1\% over Tent and +1.1\% over ETA) and the number of uploaded samples (-62\% than Tent, -13\% 
+than ETA).
+The results show the effectiveness of \methodname for applications in complex scenarios with out-of-distribution samples. 
+
+\textbf{Effect of $\lambda$ in Eqn.~(\ref{eq:dynamic-E-max}).}
+To investigate the effect of $\lambda$ in Eqn.~(\ref{eq:dynamic-E-max}), we perform more experiments with different $\lambda \in$ \{0.6, 0.7, 0.8, 0.9, 1.0, 1.1\}.
+From Figure~\ref{fig:ablation-lambda}, when $\lambda$ becomes larger, our \methodname would remove fewer test samples and upload more samples to the cloud, and the robust accuracy improves since we transfer the more contributed samples to the cloud for adaptation.
+The robust accuracy is highest (51.1\%) when $\lambda\small{=}1.0$ and keep unchanged while $\lambda\small{>}1.0$.
+Considering a larger $\lambda$ leads to more 
+communication burden, we select $\lambda\small{=}1.0$ for the efficiency-performance trade-off and fix $\lambda$ to 1.0 for all other experiments.
+Experimental results in Tables~\ref{tab:imagenet-c-level35}, and \ref{tab:imagenet-r} demonstrate that this fixed $\lambda$ works well, indicating that the $\lambda$ in our \methodname is not sensitive to different datasets.
+\textbf{Effect of $E_{\text{min}}$ in Eqn.~(\ref{eq:remove-low-ent}).}
+We evaluate our \methodname with different $E_{\text{min}}$, selected from \{0.01, 0.02, 0.03, 0.04, 0.05, 0.06\}.
+Note that the larger $E_{\text{min}}$ is, the more low-entropy samples are excluded.
+In this case, the out-of-distribution performance would decrease since we may remove some contributed samples during adaptation.
+From Figure~\ref{fig:ablation-E-min}, the accuracy drops when $E_{\text{min}}$ is larger than 0.02.
+Therefore, we set the entropy threshold $E_{\text{min}}$ to 0.02 across various datasets, including ImageNet-C (15 corruption types and 5 severity levels) and ImageNet-R.
+Extensive experiments show that our \methodname works well with the chosen hyperparameters on different datasets and various severity levels.
+\textbf{Effect of components in sample filtration strategy.}
+We perform an ablation experiment in Table~\ref{tab:effects-upload-sample-components} to verify the components in the proposed sample filtration strategy.
+Compared with the baseline that removes test samples based on $S^{high}(\bx)$ with fixed $E_{\text{max}}$ (the same as ETA), introducing dynamic $E_{\text{max}}$ in Eqn.~(\ref{eq:dynamic-E-max}) achieves comparable accuracy (51.1\% \vs~51.2\%) in severity level 3 with fewer uploaded samples (20,976 \vs~25,325).
+When further removing low-entropy samples based on $S^{low}(\bx)$ in Eqn.~(\ref{eq:remove-low-ent}), the number of uploaded samples further decreases (\eg, 25,325 $\rightarrow$ 17,479).
+The results demonstrate the effectiveness of our proposed sample filtration strategy.
+We further demonstrate the superiority of our filtration strategy over the random uploading strategy in Table~\ref{tab:effect-entropy-criteria}.
+
+\textbf{Effect of the replay buffer.}
+In Table~\ref{tab:effects-replay-buffer}, we report the performance of our \methodname on ImageNet-C (Gaussian noise, severity level 3) with/without the replay buffer.
+Note that the replay buffer is able to provide more samples for distillation and boost the data utilization efficiency in our cloud edge adaptation.
+With the replay buffer, our \methodname achieves much higher accuracy (51.1\% \vs~47.4\%) on ImageNet-C (Gaussian noise, severity level 3).
+The reason is that we reuse samples from the replay buffer for knowledge distillation.
+This leads to more sufficient model updates when the foundation model transfers the knowledge to the edge model.
+The experimental results demonstrate the effectiveness of the proposed replay buffer in knowledge distillation.
+
+
+
+\section{Conclusion}
+
+
+In this paper, we devise a Cloud-Edge Elastic Model Adaptation (\methodname) paradigm that improves the model adaptation performance by leveraging both the cloud server and edge devices.
+In the adaptation, we highlight that our \methodname does not introduce any extra computational cost in the edge devices.
+Specifically, we devise a sample filtration strategy to exclude unnecessary samples from the cloud for adaptation.
+It reduces the data transmission overhead between the cloud and edge and thus improves the adaptation efficiency.
+Besides, we adopt a powerful foundation model to guide the edge model for adaptation via the proposed replay-based knowledge distillation.
+Extensive experimental results on several benchmark datasets demonstrate the effectiveness of our \methodname.
+
+
+

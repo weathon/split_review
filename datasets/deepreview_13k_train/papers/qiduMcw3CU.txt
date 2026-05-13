@@ -1,0 +1,474 @@
+\title{Skill Machines: Temporal Logic Skill Composition in Reinforcement Learning}
+
+\begin{abstract}
+\looseness=-1
+It is desirable for an agent to be able to solve a rich variety of problems that can be specified through language in the same environment.
+A popular approach towards obtaining such agents is to reuse skills learned in prior tasks to generalise compositionally to new ones. 
+However, this is a challenging problem due to the curse of dimensionality induced by the combinatorially large number of ways high-level goals can be combined both logically and temporally in language.
+To address this problem, we propose a framework where an agent first learns a sufficient set of skill primitives to achieve all high-level goals in its environment. The agent can then flexibly compose them both logically and temporally to provably achieve temporal logic specifications in any regular language, such as regular fragments of linear temporal logic. 
+This provides the agent with the ability to map from complex temporal logic task specifications to near-optimal behaviours zero-shot.
+We demonstrate this experimentally in a tabular setting, as well as in a high-dimensional video game and continuous control environment. 
+Finally, we also demonstrate that the performance of skill machines can be improved with regular off-policy reinforcement learning algorithms when optimal behaviours are desired. 
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\looseness=-1
+
+While reinforcement learning (RL) has achieved recent success in several applications, ranging from video games \citep{badia20} to robotics \citep{levine16}, there are several shortcomings that hinder RL's real-world applicability.
+One issue is that of sample efficiency---while it is possible to collect millions of data points in a simulated environment, it is simply not feasible to do so in the real world. This inefficiency is exacerbated when a single agent is required to solve multiple tasks, as we would expect of a generally intelligent agent. 
+
+\looseness=-1
+One approach to overcoming this challenge is to reuse learned behaviours to solve new tasks \citep{taylor09}, preferably without further learning. 
+Such an approach is often \textit{compositional}---
+an agent first learns individual skills and then combines them to produce novel behaviours. 
+There are several notions of compositionality in the literature, such as \textit{spatial} composition \citep{todorov09,vanniekerk19}, where skills are combined to produce a new single behaviour to be executed to achieve sets of high-level goals ("pick up an object that is both blue and a box"), and \textit{temporal} composition \citep{sutton99,jothimurugan2021compositional}, where sub-skills are invoked one after the other to achieve sequences of high-level goals (for example, ``pickup a blue object and then a box"). 
+
+Spatial composition is commonly achieved through a weighted combination of learned successor features \citep{barreto2018transfer,barreto2019option,alver22}. Notably, work by \citet{tasse20,tasse22} has demonstrated spatial composition using Boolean operators, such as negation and conjunction, producing semantically meaningful behaviours without further learning. This ability can then be leveraged by agents to follow natural language instructions \citep{cohen21,cohen2022end}.
+
+One of the most common approaches to temporal composition is to learn options for achieving the sub-goals present in temporal logic tasks while learning a high-level policy over the options to actually solve the task, then reusing the learned options in new tasks \citep{araki2021logical,icarte2022reward}.
+However, other works like \cite{vaezipoor2021ltl2action} have proposed end-to-end neural network architectures for learning sub-skills from a training set that can generalise to similar new tasks.
+
+\cite{liu2022skill} observe that for all these prior works, some of the sub-skills (e.g., options) learned from previous tasks can not be transferred satisfactorily to new tasks and provide a method to determine when this is the case. 
+For example, if the agent has previously learned an option for ``getting blue objects'' and another for ``getting boxes'', it can reuse them to ``pickup a blue object and then a box'', but it cannot reuse them to ``pickup a blue object that is not a box, and then a box that is not blue''.
+We can observe that this problem is because all the compositions in prior works are \emph{either strictly temporal or strictly spatial}. 
+While the example shows that temporal composition alone is insufficient, notice that spatial composition is also not enough for solving long-horizon tasks.
+In these instances, it is often near impossible for the agent to learn, owing to the large sequence of actions that must be executed before a learning signal is received \citep{arjona19}.
+
+\looseness=-1
+Hence, this work aims to address the highlighted problem by combining the approaches above to develop an agent capable of both zero-shot spatial \emph{and} temporal composition. We particularly focus on temporal logic composition, such as linear temporal logic (LTL) \citep{pnueli77}, allowing agents to sequentially chain and order their skills while ensuring certain conditions are always or never met. We make the following main contributions: 
+\begin{enumerate}
+    \item \textbf{Skill machines:}
+We propose \textit{skill machines (SM)}, which are finite state machines (FSM) that encode the solution to any task specified using any given regular language (such as regular fragments of LTL) as a series of Boolean compositions of \textit{skill primitives}---composable sub-skills for achieving high-level goals in the environment. An SM is defined by translating the regular language task specification into an FSM, and defining the skill to use per FSM state as a Boolean composition of pretrained skill primitives.
+    \item \textbf{Zero-shot and few-shot learning using skill machines:}
+By leveraging reward machines (RM) \citep{icarte18}---finite state machines that encode the reward structure of a task---we show how an SM can be obtained directly from an LTL task specification, and prove that these SMs are \textit{satisficing}---given a task specification and regular reachability assumptions, an agent can successfully solve the task while adhering to any constraints.
+We further show how standard off-policy RL algorithms can be used to improve the resulting behaviours when optimality is desired.
+This is achieved with no new assumption in RL.
+    \item \textbf{Emperical and qualitative results:}
+We demonstrate our approach in several environments, including a high-dimensional video game and a continuous control environment. 
+Our results indicate that our method is capable of producing near-optimal to optimal behaviour for a variety of long-horizon tasks without further learning, including empirical results that far surpass all the representative state-of-the-art baselines.
+\end{enumerate}
+
+
+\section{Background}
+
+
+\looseness=-1
+We model the agent's interaction with the world as a Markov Decision Process (MDP), given by $(\mathcal{\state}, \action, \dynamics, \reward, \gamma)$, where 
+\begin{enumerate*}[label=(\roman*)]
+  \item $\state$ is the finite set of all states the agent can be in;
+  \item $\action$ is the finite set of actions the agent can take in each state;
+  \item $\dynamics(s' | s, a)$ is the dynamics of the world;
+  \item $\reward: \state\times\action\times\state \to \mathbb{R}$ is the reward function;
+  \item $\gamma \in [0, 1]$ is a discount factor.
+\end{enumerate*}
+The agent's aim is to compute a Markov policy $\pi$ from $\state$ to $\action$ that optimally solves a given task.
+Instead of directly learning a policy, an agent can instead learn a value function that represents the expected return of executing an action $a$ from a state $s$, and then following $\pi$: $\qpi(s,a) = \E^\pi \left[ \sum_{t=0}^{\infty} \gamma^t \reward(s_t, a_t,s_{t+1}) \right]$.
+The optimal action-value function is given by $\qstar(s, a) = \max_\pi \qpi(s, a)$ for all states $s$ and actions $a$, and the optimal policy follows by acting greedily with respect to $\qstar$ at each state: $\pi^*(s) \in \argmax_a \qstar(s,a)$. 
+\subsection{LTL and Reward Machines} \label{back:reward_machines}
+\looseness=-1
+One difficulty with the standard MDP formulation is that the agent is often required to solve a complex long-horizon task using only a scalar reward signal as feedback from which to learn.
+To overcome this, a common approach is to use reward machines (RM) \citep{icarte2018}, which provide structured feedback to the agent in the form of a finite state machine (FSM).
+\citet{camacho2019ltl} show that temporal logic tasks specified using regular languages, such as regular fragments of LTL (like safe, co-safe, and finite trace LTL), can be converted to RMs with rewards of $1$ for accepting transitions and $0$ otherwise (Figure \ref{fig:safety-vis} shows an example).\footnote{
+Accepting transitions are those at which the high-level task---described, for example, by LTL---is satisfied.
+}
+Hence, without loss of generality, we will focus our attention on tasks specified using regular fragments of LTL---such as co-safe LTL \citep{kupferman2001model}.
+These LTL specifications and RMs encode the task to be solved using a set of propositional symbols $\prop$ that represent high-level environment features as follows:
+
+\begin{definition}[LTL]
+\label{def:ltl}
+\looseness=-1
+An LTL expression is defined using the following recursive syntax:
+$
+\varphi \coloneqq p ~|~ \neg \varphi ~|~ \varphi_1 \vee \varphi_2 ~|~ \varphi_1 \wedge \varphi_2 ~|~ X \varphi ~|~ G \varphi ~|~ \varphi_1 U \varphi_2 ~|~ \varphi_1 F \varphi_2
+$,
+where $p\in \prop$; $\neg$ (\textit{not}), $\vee$ (\textit{or}), $\wedge$ (\textit{and}) are the usual Boolean operators; $X$ (\textit{neXt}), $G$ (\textit{Globally} or \textit{always}), $U$ (\textit{Until}), $F$ (\textit{Finally} or \textit{eventually}) are the LTL temporal operators; and $\varphi,\varphi_1,\varphi_2$ are any valid LTL expression.
+
+\end{definition}
+\begin{definition}[RM]
+\label{def:rm}
+\looseness=-1
+Given a set of environment states $\state$ and actions $\action$, a reward machine is a tuple $\reward_{\state \action} = \langle \fsmstate, u_0, \delta_u , \delta_r \rangle$ where (i) $\fsmstate$ is a finite set of states; (ii) $u_0 \in \fsmstate$ is the initial state; (iii) $\delta_u : \fsmstate \times 2^\prop \to \fsmstate$ is the state-transition function; and (iv) $\delta_r: \fsmstate \times 2^\prop \to \{0, 1\}$ is the state-reward function.\footnote{
+RMs are more general, but for clarity, we focus on the subset that is obtained from regular languages.
+}
+\end{definition}
+
+To incorporate RMs into the RL framework, the agent must be able to determine a correspondence between abstract RM propositions and states in the environment. To achieve this, the agent is equipped with a labelling function $L : \state \to 2^\prop$ that assigns truth values to each state the agent visits in its environment.
+The agent's aim now is to learn a policy $\pi: \state \times \fsmstate \to \action$ that maximises the rewards from an RM while acting in an environment $\langle \state, \action, \dynamics, \gamma, \prop, L\rangle$.
+However, the rewards from the reward machine are not necessarily Markov with respect to the environment. \citet{icarte2022reward} shows that a \textbf{product MDP} (Definition \ref{def:tasks} below) between the environment and a reward machine guarantees that the rewards are Markov such that the policy can be learned with standard algorithms such as $Q$-learning. This is because the product MDP uses the cross-product to consolidate how actions in the environment result in simultaneous transitions in the environment and state machine. Thus, product MDPs take the form of standard, learnable MDPs.
+In the rest of this work, we will refer to these product MDPs as \textit{tasks}.
+To ensure that the optimal policy is also the policy that maximises the probability of satisfying the temporal logic task specification, we will henceforth assume that the environment dynamics are deterministic. 
+
+\begin{definition}[Tasks]
+\label{def:tasks}
+Let $\langle \state, \action, \dynamics, \gamma, \prop, L\rangle$ represent the environment and $\langle \fsmstate, u_0, \delta_u , \delta_r \rangle$ be an RM representing the task rewards. Then a task is a product MDP $M_\mathcal{T} = \langle \mathcal{\state}_\mathcal{T}, \action, \dynamics_\mathcal{T}, \reward_\mathcal{T}, \gamma \rangle$ between the environment and the RM, where
+$\mathcal{\state}_\mathcal{T} \coloneqq \mathcal{\state} \times \fsmstate$,
+$
+\reward_\mathcal{T}(\langle s, u \rangle, a, \langle s', u' \rangle)  \coloneqq \delta_r(u,l')
+$, 
+$\dynamics_\mathcal{T}(\langle s, u \rangle, a) \coloneqq \langle s', u' \rangle
+$,
+$s' \sim \dynamics(\cdot | s, a)$, $u' = \delta_u(u, l')$, and $l' = L(s')$.
+\end{definition}
+
+\subsection{Logical Skill Composition}
+\label{sec:logicalcomposition}
+
+\looseness=-1
+Consider the multitask setting where for each task $M$, an agent is required to reach some terminal goal states in a goal space $\goals \subseteq \state$. 
+\citet{tasse20,tasse2022generalisation} develop a framework for this setting that allows agents to apply the Boolean operations $\wedge$, $\vee$ and $\neg$ over the space of tasks and value functions.
+This is achieved by first defining a goal-oriented reward function $\rbar_M(s, g, a)$ that extends the task rewards $\reward_M(s, a)$ to penalise an agent for achieving goals different from the one it wished to achieve: 
+$
+\rbar_M(s, g, a) \coloneqq R_{\text{MIN}} \textbf{ if } (g \neq s \text{ and } s \text{ is terminal}) \textbf{ else } \reward_M(s, a);
+$
+where $R_{\text{MIN}}$ is the lower bound of the reward function. Using $\rbar_M(s, g, a)$, the related goal-oriented value function can be defined as $\qbar_M^{\bar{\pi}_M}(s, g, a) = \E^{\bar{\pi}_M} \left[ \sum_{t=0}^{\infty} \gamma^t \rbar_M(s_t, g, a_t) \right]$.
+Despite the modification of the regular RL objective, an agent can always recover the regular optimal policy of the given task by maximising over goals and actions: $\pi_M^*(s) \in \argmax_a \max_g \qstarbar_M(s,g,a)$.
+
+If a new task can be represented as the logical expression of previously learned tasks, and all tasks differ only in their rewards at goal states (that is, all tasks share the same state and action space, transition dynamics, discount factor, and non-terminal rewards), \citet{tasse2022generalisation} prove that the optimal policy can immediately be obtained by composing the learned goal-oriented value functions using the same expression.
+For example, the $\vee$, $\wedge$, and $\neg$ of two goal-reaching tasks $A$ and $B$ can respectively be solved as follows (we omit the value functions' parameters for readability):
+\[
+\qstarbar_A \vee \qstarbar_B  = \max\{\qstarbar_{A}, \qstarbar_{B}\};
+~
+\qstarbar_A \wedge \qstarbar_B = \min\{\qstarbar_{A}, \qstarbar_{B}\};
+~
+\neg \qstarbar_A = \left(\qstarbarbig + \qstarbarsmall \right) - \qstarbar_{A}; 
+\]
+\looseness=-1
+where $\qstarbarbig$ and $\qstarbarsmall$ are the goal-oriented value functions for the maximum task ($\reward_\tau = \rmax$ for all $\goals$) and minimum task ($\reward_\tau = \rmin $ for all $\goals$), respectively.
+Following \citet{tasse22}, we will also refer to these goal-oriented value functions as \textit{world value functions} (WVFs). 
+
+
+\section{Skill Composition for Temporal Logic Tasks}
+
+\label{sec:sc}
+
+\begin{figure}[ht!]
+    \centering
+    \includegraphics[width=\linewidth]{images/framework_v2.pdf}
+    
+    \caption{Illustration of our framework: Consider a continuous environment containing a robot (\textit{red sphere}) with 3 LiDAR sensors that it uses to sense when it has reached a red cylinder ($\cylinder$), a green button ($\button$), or a blue region ($\region$). The agent first learns \textit{skill primitives} to reach these 3 objects (the red, green, and blue sample trajectories obtained from them respectively). Then given any task specification over these 3 objects, such as: ``Navigate to a button and then to a cylinder while never entering blue regions'' with LTL specification $(F ( \button \wedge X(F ~\cylinder))) \wedge (G ~\neg \region)$, the agent first translates the \textit{LTL task specification} into an RM, then plans which spatial skill to use at each temporal node using \textit{value iteration} and composes its skill primitives to obtain said spatial skills (culminating in a \textit{skill machine}), and finally uses them to solve the task without further learning.
+    The RM is obtained by converting the LTL expression into an FSM using Spot \citep{duret2016spot}, then giving a reward of $1$ for accepting transitions and $0$ otherwise. 
+    The nodes labeled $t$ in the RM and SM represent terminal states (sink/absorbing states where no transition leaves the state).
+    }
+    \label{fig:safety-vis}
+\end{figure}%
+
+\looseness=-1
+To describe our approach, we use the \textit{Safety Gym Domain}~\citep{ray2019benchmarking} shown in Figure \ref{fig:safety-vis} as a running example. 
+Here, the agent moves by choosing a direction and force ($\action = \mathbb{R}^2$) and observes a real vector containing various sensory information like joint velocities and distance to the objects in its surrounding ($\state = \mathbb{R}^{60}$).
+The LTL tasks in this environment are defined over 3 propositions: $\prop = \{\cylinder, \button, \region\}$, where each proposition is true when the agent is $\epsilon=1$ metre near its respective location.
+
+Now consider an agent that has learned how to ``Go to the cylinder'' ($F~ \cylinder$), ``Go to a button'' ($F~ \button$), and ``Go to a blue region'' ($F~ \region$). 
+Say the agent is now required to solve the task with LTL specification $(F ( \button \wedge X(F ~\cylinder))) \wedge (G ~\neg \region)$.
+Using prior LTL transfer works \citep{vaezipoor2021ltl2action,jothimurugan2021compositional,liu2022skill}, the agent would have learned options 
+for solving the first 3 tasks, but then would be unable to transfer those skills to immediately solve this new task. 
+This is because the new task requires the agent to first reach a button that is not in a blue region (\textit{eventually} satisfy $\button \wedge \neg \region$) while not entering a blue region along the way (\textit{always} satisfy $\neg\region$). 
+Similarly, it then must eventually satisfy $\cylinder \wedge \neg \region$ while never satisfying $\region$.
+However, all 3 options previously learned will enter a blue region if it is along the agent's path. Hence the agent will need to learn new options for achieving $\button \wedge \neg \region$ and $\cylinder \wedge \neg \region$ where the option policies never enter $\region$ along the way. 
+
+In general, we can see that there are $2^{2^\prop}$ possible Boolean expressions the agent may be required to \textit{eventually} satisfy (spatial curse), and $2^{2^\prop}$ possible Boolean expressions the agent may be required to \textit{always} satisfy (temporal curse). This highlights the curses of dimensionality we aim to simultaneously address.
+In this section, we will introduce skill primitives as the proposed solution for addressing the aforementioned curses of dimensionality.
+We will then introduce skill machines as a state machine that can encode the solution to any temporal logic task by leveraging skill primitives. 
+
+\subsection{From Environment to Primitives}
+\label{sec:ts}
+
+
+\looseness=-1
+We desire an agent capable of learning a sufficient set of skills that can be used to solve new tasks, specified through LTL, with little or no additional learning.
+To achieve this, we introduce the notion of \textit{primitives} which aims to address the spatial and temporal curses of dimensionality as follows:
+
+\looseness=-1
+\paragraph*{Spatial curse of dimensionality:} 
+To address this, we can learn WVFs (the composable value functions described in Section \ref{sec:logicalcomposition}) for \textit{eventually} achieving each proposition, then compose them to \textit{eventually} achieve the Boolean expression over the propositions. For example, we can learn WVFs for tasks $F~ \cylinder$, $F~ \button$, and $F~ \region$. However, the product MDP for LTL specified tasks have different states and dynamics (see Definition \ref{def:tasks}). Hence, they do not satisfy the assumptions for zero-shot logical composition (Section \ref{sec:logicalcomposition}). To address this problem, we define task primitives below. These are product MDPs for achieving each proposition when the agent decides to terminate, and share the same state space and dynamics. We then define skill primitives as their corresponding WVFs.
+
+\looseness=-1
+\paragraph*{Temporal curse of dimensionality:}     
+To address this, we introduce the concept of \textit{constraints} $\cons \subseteq \{ \widehat p ~|~ p \in \prop \}$ which we use to augment the state space of task primitives\footnote{ 
+\looseness=-1
+The notation $\widehat p$ represents when a \textit{literal} (a proposition $p\in\prop$ or its negation $\neg p$) is being used as a constraint. Similarly, we will use $\widehat \prop$ or $\widehat \sigma$ respectively when the literals in a set $\prop$ or Boolean expression $\sigma$ are constraints.
+}. 
+In a given environment, a constraint is a proposition that an agent may be required to \textit{always} keep True or \textit{always} keep False in some FSM state of a temporal logic task. Equivalently, it is a proposition which may never change across the trajectory of the agent in the FSM state.
+When contradicted it may transition the agent into a failure FSM state (an FSM sink state from which it can never solve the task). For example, some tasks like $(F ( \button \wedge X(F ~\cylinder))) \wedge (G ~\neg \region)$ require the agent to solve a task $F ( \button \wedge X(F ~\cylinder))$ while never setting $\region$ to True ($G ~\neg \region$).
+By setting the $\region$ proposition as a constraint when learning a primitive (e.g achieving $\button$), the agent keeps track (in its cross-product state) of whether or not it has reached a blue region in a trajectory that did not start in a blue region. That is, in an episode where the agent does not start in a blue region but later goes through a blue region and
+terminates at a button, the agent will achieve the goal $g=\{\button,\widehat\region\} \in 2^{\prop\cup\cons}$.
+We henceforth assume the general case $\cons = \{ \widehat p ~|~ p \in \prop \}$ for our theory, then later consider different choices for $\cons$ in our experiments. 
+
+We now formally define the notions of task primitives and skill primitives such as ``Go to a button'':
+\begin{definition}[Primitives] \label{def:primitives}
+Let $\langle \state, \action, \dynamics, \gamma, \prop, L\rangle$ represent the environment the agent is in, and $\cons$ be the set of constraints. We define a \textit{task primitive} here as an MDP $M_p = \langle \state_\goals, \action_\goals, \dynamics_\goals, \reward_p, \gamma \rangle$ with absorbing states $\goals = 2^{\prop\cup\cons}$ that corresponds to achieving a proposition $p \in \prop\cup\cons$, where
+$\state_\goals \coloneqq (\state \times 2^\cons) \cup \goals$;
+$\action_\goals \coloneqq \action \times \action_\tau, \textrm{ where } \action_\tau = \{0, 1\}\textrm{ is an action that terminates the task}$;
+\begin{align*}
+    &\dynamics_\goals(\langle s, c \rangle, \langle a, a_\tau \rangle) \coloneqq \begin{cases}
+    l' \cup c & \text{if } a_\tau = 1\\
+\langle s', c' \rangle &\text{otherwise}
+    \end{cases}; ~
+    \reward_p(\langle s, c \rangle, \langle a, a_\tau \rangle) \coloneqq \begin{cases}
+    1 & \text{if } a_\tau = 1 \text{ and } p \in l' \cup c  \\
+    0 & \text{otherwise}
+    \end{cases},
+\end{align*}
+where $s' \sim \dynamics(\cdot | s, a)$, $l = L(s)$, $l' = L(s')$, and $c' = c \cup ((\widehat l \oplus \widehat l') \cap \cons) $.
+
+A \textit{skill primitive} is defined as $\qstarbar_p(\langle s, c \rangle, g, \langle a, a_\tau \rangle)$, the WVF for the task primitive $M_p$.
+\end{definition}
+
+\looseness=-1
+The above defines the state space of primitives to be the product of the environment states and the set of constraints, incorporating the set of propositions that are currently true. 
+The action space is augmented with a terminating action following \citet{barreto2019option} and \citet{tasse20}, which indicates that the agent wishes to achieve the goal it is currently at, and is similar to an option's termination condition \citep{sutton99}. 
+The transition dynamics update the environment state $s$ and the set of violated constraints $c$ when any other action is taken. Here, the labeling function is used to return the set of propositions $l$ and $l'$ achieved in $s$ and $s'$ respectively. Any constraint present exclusively in $l$ or $l'$ is added to $c$, since it has not been kept always True or always False. Finally, the agent receives a reward of $1$ when it terminates in a state where the proposition $p$ is true, and $0$ otherwise. 
+Figure \ref{fig:task_primitive_process} shows examples of the resulting optimal policies when the set of constraints is empty and non-empty.
+
+\looseness=-1
+Since all task primitives $\mathcal{M}_\goals \coloneqq \{M_p~|~p\in\prop\cup\cons\}$ share the same state space, action space, dynamics, and rewards at non-terminal states, the corresponding skill primitives $\goalq_\goals \coloneqq \{\qstarbar_p~|~p\in\prop\cup\cons\}$ can be composed to achieve any Boolean expression over $\prop\cup\cons$ \citep{tasse2022generalisation}.
+We next introduce \textit{skill machines} which leverages skill primitives to encode the solution to temporal logic tasks. 
+\subsection{Skill Machines} \label{skill_machines}
+
+\looseness=-1
+We now have agents capable of solving any logical composition of task primitives $\mathcal{M}_\goals$ by learning only their corresponding skill primitives $\goalq_\goals$ and using the zero-shot composition operators (Section \ref{sec:logicalcomposition}). 
+Given this compositional ability over skills, and reward machines that expose the reward structure of tasks, agents can solve temporally extended tasks with little or no further learning. To achieve this, we define a skill machine (SM) as a representation of logical and temporal knowledge over skills.      
+
+\begin{definition}[Skill Machine]
+\label{def:SM}
+\looseness=-1
+Let $\langle \state, \action, \dynamics, \gamma, \prop, L\rangle$ represent the environment the agent is in, and $\goalq_\goals$ be the corresponding skill primitives with constraints $\cons$.
+Given a reward machine  $\reward_{\state \action} = \langle \fsmstate, u_0, \delta_u , \delta_r \rangle$, a skill machine is a tuple 
+$\pskill = \langle \fsmstate, u_0, \delta_u , \delta_Q \rangle$ where $\delta_Q : U \to [\state_\goals \times \action_\goals \to \mathbb{R}]$ is the state-skill function defined by:
+\[
+\delta_Q(u)(\langle s, c \rangle,\langle a, 0 \rangle) \coloneqq \max_{g\in\goals} \qstarbar_{\sigma_u} (\langle s, c \rangle,g,\langle a, 0 \rangle), 
+\]
+\looseness=-1
+and $\qstarbar_{\sigma_u}$ is the composition of skill primitives $\goalq_\goals$ according to a Boolean expression $\sigma_u \in 2^{2^{\prop\cup\cons}}$ .
+\end{definition}
+\looseness=-1
+For a given state $s\in\state$ in the environment, the set of constraints violated $c\subseteq\cons$, and state $u$ in the skill machine, the skill machine computes a skill $\delta_Q(u)(\langle s, c \rangle,\langle a, 0 \rangle)$ that an agent can use to take an action $a$. The environment then transitions to the next state $s'$ with true propositions $l'$---where $\langle s', c' \rangle \leftarrow P_\goals(\langle s, c \rangle,\langle a, 0 \rangle)$ and $l' \leftarrow L(s')$---and the skill machine transitions to $u' \leftarrow \delta_u(u,l')$.
+This process is illustrated in Figure \ref{fig:skill_machine_process} for the skill machine shown in Figure \ref{fig:safety-vis}.
+Remarkably, because the Boolean compositions of skill primitives are optimal, there always exists a choice of skill machine that is optimal with respect to the corresponding reward machine, as shown in Theorem~\ref{thm:optimalSM}, which demonstrates that SMs can be used to solve tasks without having to relearn action level policies: 
+
+
+\begin{theorem}
+Let $\pi^*(s, u)$ be the optimal policy for a task $M_\mathcal{T}$ specified by an RM  $\reward_{\state \action}$. Then there exists a corresponding skill machine $\pskill$ such that 
+$\pi^*(s, u) \in \argmax_{a\in\action}\delta_Q(u)(\langle s, c \rangle,\langle a, 0 \rangle).$
+\label{thm:optimalSM}
+\end{theorem}
+\subsection{From Reward Machines to Skill Machines}
+
+\looseness=-1
+In the previous section, we introduced skill machines and showed that they can be used to represent the logical and temporal composition of skills needed to solve tasks specified by reward machines. 
+However, we only proved their existence---for a given task, how can we acquire an SM that solves it?
+
+\looseness=-1
+\textbf{Zero-shot via planning over the RM:} 
+To obtain the SM that solves a given RM, we first plan over the reward machine (using value iteration, for example) to produce action-values for each transition. We then select skills for each SM state greedily by applying Boolean composition to skill primitives according to the Boolean expressions defining: (i) the transition with the highest value (propositions to eventually satisfy); and (ii) the transitions with zero value (constrains to always satisfy). 
+This process is illustrated by Figure~\ref{fig:rm_sm}. 
+Since the skills per SM state are selected greedily, the policy generated by this SM is \textit{recursively optimal} \citep{hutsebaut2022hierarchical}---that is, it is locally optimal (optimal for each sub-task) but may not be globally optimal (optimal for the overall task).
+Interestingly, we show in Theorem \ref{thm:rm_sm_main} that this policy is also \textit{satisficing} (reaches an accepting state) if we assume global reachability---all FSM transitions (that is all Boolean expressions $\sigma \in 2^{2^\prop}$) are achievable from any environment state.
+This is a more relaxed version of the assumption “any state is reachable from any other state” that is required to prove optimality in most RL algorithms,
+since an agent cannot learn an optimal policy if there are states it can never reach.
+
+
+\begin{theorem}
+Let $\reward_{\state \action} = \langle \fsmstate, u_0, \delta_u , \delta_r \rangle$ be a satisfiable RM where all the Boolean expressions $\sigma$ defining its transitions are in negation normal form (NNF) \citep{robinson2001handbook} and are achievable from any state $s\in\state$. Define the corresponding SM $\pskill = \langle \fsmstate, u_0, \delta_u , \delta_Q\rangle$ with 
+$
+\delta_Q(u)(\langle s, c \rangle,\langle a, 0 \rangle) \mapsto \max_{g\in\goals} \qstarbar_{(\sigma_\prop \wedge \neg \sigma_\cons)} (\langle s, c \rangle,g,\langle a, 0 \rangle)
+$
+where 
+$\sigma_\prop \coloneqq argmax_{\sigma} ~ \qstar(u,\sigma)$, 
+$\sigma_\cons \coloneqq \bigvee \{\widehat\sigma~|~\qstar(u,\sigma)=0\}$, 
+and $\qstar(u,\sigma)$ is the optimal Q-function for $\reward_{\state \action}$. 
+Then, $\pi(s, u) \in \argmax_{a\in\action}\delta_Q(u)(\langle s, c \rangle,\langle a, 0 \rangle)$ is satisficing.
+\label{thm:rm_sm_main}
+\end{theorem}
+
+\looseness=-1
+Theorem \ref{thm:rm_sm_main} is critical as it provides soundness guarantees, ensuring that the policy derived from the skill machine will always satisfy the task requirements.
+
+\textbf{Few-shot via RL in the environment:} 
+Finally, in cases where the composed skill $\delta_Q(u)(\langle s, c \rangle,\langle a, 0 \rangle)$ obtained from the approximate SM is not sufficiently optimal, we can use any off-policy RL algorithm to learn the task-specific skill $Q_{\mathcal{T}}(s,u,a)$ few-shot.
+This is achieved by using the maximising Q-values $\max\{\gamma Q_{\mathcal{T}},(1-\gamma)\delta_Q\}$ in the exploration policy during learning. Here, the discount factor $\gamma$ determines how much of the composed policy to use. 
+Consider Q-learning, for example: during the $\epsilon$-greedy exploration, we use $a \leftarrow \argmax_\action \max\{\gamma Q_{\mathcal{T}},(1-\gamma)\delta_Q\}$ to select greedy actions. This improves the initial performance of the agent where $\gamma Q_{\mathcal{T}} < (1-\gamma)\delta_Q$, and guarantees convergence in the limit of infinite exploration, as in vanilla Q-learning. 
+
+
+\section{Experiments}
+
+
+\looseness=-1
+We evaluate our approach in three domains, including a high-dimensional, continuous control task. 
+In particular, we consider the Office Gridworld (Figure~\ref{fig:office_world}), the Moving Targets domain (Figure~\ref{fig:boxman}) and the Safety Gym domain (Figure~\ref{fig:safety-vis}). 
+
+\textbf{Office Gridworld~\citep{icarte2022reward}:}
+Tasks are specified over 10 propositions $\prop = \{\officeA, \officeB, \officeC, \officeD, \decorprop, \coffeeprop, \mailprop, \officeprop, \mailpropstate, \officepropstate\}$ and 1 constraint $\cons = \{ \widehat\decorprop \}$.
+We learn the skill primitives $\goalq_\goals$ (visualised by Figure~\ref{fig:ow_values_base}) using goal-oriented Q-learning \citep{tasse20}, where the agent keeps track of reached goals and uses Q-learning~\citep{watkins89} to update the WVF with respect to all previously seen goals at every time step. 
+
+\looseness=-1
+\textbf{Moving Targets Domain~\citep{tasse20}:}
+This is a canonical object collection domain with high dimensional pixel observations ($84\times84\times3$ RGB images). The agent here needs to pick up objects of various shapes and colours; collected objects respawn at random empty positions similarly to previous object collection domains~\citep{barreto2020fast}. There are 3 object colours---\textit{beige} ($\beige$), \textit{blue} ($\blue$), \textit{purple} ($\purple$)---and 2 object shapes---\textit{squares} ($\crate$), \textit{circles} ($\ball$).
+The tasks here are defined over 5 propositions $\prop = \{\beige,\blue,\purple,\crate,\ball\}$ and 5 constraints $\cons = \widehat\prop$.
+We learn the corresponding skill primitives with goal-oriented Q-learning, but using deep Q-learning~\citep{mnih15} to update the WVFs.
+
+\looseness=-1
+\textbf{Safety Gym Domain~\citep{ray2019benchmarking}:}
+A continuous state and action space ($\state = \mathbb{R}^{60}, \action = \mathbb{R}^2$) domain where an agent, represented by a point mass, must navigate to various regions defined by 3 propositions ($\prop = \{\cylinder,\button,\region\}$) corresponding to its 3 LiDAR sensors for the \textit{red cylinder} $\cylinder$, the \textit{green buttons} $\button$, and the \textit{blue regions} $\region$.
+We learn the four skill primitives corresponding to each predicate (with constraints $\cons = \{ \widehat\region \}$), using goal-oriented Q-learning and TD3~\citep{fujimoto2018addressing}.
+\subsection{Zero-shot and Few-shot Temporal Logics}
+\label{sec:zeroshot}
+\begin{table*}[h!]
+    \centering
+    \begin{tabular}{ cp{0.89\textwidth}  }
+    \toprule
+    Task & Description | LTL \\
+    \midrule
+    
+    1 & Deliver coffee to the office without breaking decorations $|$ $\left(F \left(\coffeeprop \wedge X \left(F~ \officeprop \right)\right)\right) \wedge \left(G~ \neg \decorprop \right)$ \\
+    2 & Patrol rooms $\officeA$, $\officeB$, $\officeC$, and $\officeD$ without breaking any decoration \\
+    & | $\left(F \left(\officeA \wedge X \left(F \left(\officeB \wedge X \left(F \left(\officeC \wedge X \left(F \officeD\right) \right) \right) \right) \right) \right) \right) \wedge \left(G~ \neg \decorprop\right)$ \\
+    3 & Deliver coffee and mail to the office without breaking any decoration \\
+    & | $\left(\left(F \left(\coffeeprop \wedge X \left(F \left(\mailprop  \wedge X \left(F \officeprop\right)\right)\right)\right)\right) \vee \left(F \left(\mailprop \wedge X \left(F \left(\coffeeprop \wedge X \left(F \officeprop\right)\right)\right)\right)\right)\right) \wedge \left(G \neg \decorprop\right)$ \\
+    4 & Deliver mail to the office until there is no mail left, then deliver coffee to office while there are people in the office, then patrol rooms A-B-C-D-A, and never break a decoration \\
+    & | $\left(F \left(\mailprop \wedge X \left( F \left(\officeprop \wedge X \left(\neg\mailprop U \left(\neg\mailpropstate \wedge \mailprop \wedge X \left(F \left(\coffeeprop \wedge X \left(\neg\officeprop U \left(\neg\officepropstate \wedge \officeprop \wedge X \right.\right.\right.\right.\right.\right.\right.\right.\right.\right.$ \\
+    &$\left.\left.\left.\left.\left.\left.\left.\left.\left.\left.\left(F \officeA \wedge X \left( F \left(\officeB \wedge X \left( F \left(\officeC \wedge X \left( F \left(\officeD \wedge X \left( F \officeA\right)\right)\right)\right)\right)\right)\right)\right)\right)\right)\right)\right)\right)\right)\right)\right)\right)\right)  \wedge \left(G~ \neg\decorprop\right)$ \\
+    
+    \bottomrule
+    \end{tabular}
+    \caption{Tasks in the Office Gridworld. The RMs are generated from the LTL expressions.}
+    \label{tab:office_world_tasks}
+\end{table*}
+\looseness=-1
+We use the Office Gridworld as a multitask domain, and evaluate how long it takes an agent to learn a policy that can solve the four tasks described in Table \ref{tab:office_world_tasks}. The tasks are sampled uniformly at random for each episode.
+In all of our experiments, we compare the performance of SMs without further learning and SMs paired with Q-learning (QL-SM) with that of regular Q-learning (QL) and the following state-of-the-art RM-based baselines \citep{icarte2022reward}:
+\begin{enumerate*}[label=(\roman*)]
+\item \textbf{Counterfactual RMs (CRM)}: This augments Q-learning by updating the action-value function at each state ($Q(s,u,a)$) not just with respect to the current RM transition, but also with respect to all possible RM transitions from the current environment state. This is representative of approaches that leverage the compositional structure of RMs to learn optimal policies efficiently.
+\item \textbf{Hierarchical RMs (HRM)}: The agent here uses Q-learning to learn options to achieve each RM state-transition, and an option policy to select which options to use at each RM state that are grounded in the environment states. This is representative of option-based approaches that learn hierarchically-optimal policies.
+\item \textbf{Reward-shaped variants (QL-RS, CRM-RS, HRM-RS)}: The agent here uses the values obtained from value iteration over the RMs for reward shaping, on top of the regular QL, CRM, HRM algorithms. This is representative of approaches that leverage planning over the RM to speed up learning.
+\end{enumerate*}
+
+\looseness=-1
+In addition to learning all four tasks at once, we also experiment with Tasks $1$, $3$ and $4$ in isolation. In these single-task domains, the difference between the baselines and our approach should be more pronounced, since QL, CRM and HRM now cannot leverage the shared experience across multiple tasks. Thus, the comparison between multi-task and single-task learning in this setting will evaluate the benefit of the compositionality afforded by SMs, given that the $11$ skill primitives used by the SMs here are pretrained only once for $1\times10^5$ time steps and used for all four experiments. 
+For fairness towards the baselines, we run each of the four experiments for $4\times10^5$ time steps. 
+
+\looseness=-1
+The results of these four experiments are shown in Figure \ref{fig:ow_returns}. Regular Q-learning struggles to learn Task $3$ and completely fails to learn the hardest task (Task $4$). Additionally, notice that while QL and CRM can theoretically learn the tasks optimally given infinite time, only HRM, SM, and QL-SM are able to learn hard long horizon tasks in practice (like task $4$). This is because of the temporal composition of skills leveraged in HRM, SM, and QL-SM. In addition, the skill machines are being used to zero-shot generalise to the office tasks using skill primitives. Thus using the skill machines alone (SM in Figure \ref{fig:ow_returns}) may provide sub-optimal performance compared to the task-specific agents, since the SMs have not been trained to optimality and are not specialised to the domain. Even under these conditions, we observe that SMs perform near-optimally in terms of final performance, and due to the amortised nature of learning the WVF will achieve its final rewards from the first epoch. 
+\setlength{\belowcaptionskip}{-5pt}
+\begin{figure*}[t!]
+    \centering
+    \begin{subfigure}[t]{0.25\textwidth}
+    \centering
+    \includegraphics[width=1\linewidth]{images/rm1_.pdf}
+    \caption{Task 1}
+    \label{fig:ow_single_task}
+    \end{subfigure}%
+    \begin{subfigure}[t]{0.25\textwidth}
+    \centering
+    \includegraphics[width=1\linewidth]{images/rm3.pdf}
+    \caption{Task 3}
+    \label{fig:ow_single_task_a}
+    \end{subfigure}%
+    \begin{subfigure}[t]{0.25\textwidth}
+    \centering
+    \includegraphics[width=1\linewidth]{images/rm4.pdf}
+    \caption{Task 4}
+    \label{fig:ow_single_task_b}
+    \end{subfigure}%
+    \begin{subfigure}[t]{0.25\textwidth}
+    \centering
+    \includegraphics[width=1\linewidth]{images/mt.pdf}
+    \caption{Multiple tasks (1-4)}
+    \label{fig:ow_multi_task_c}
+    \end{subfigure}%
+    \caption{Average returns over 60 independent runs during training in the Office Gridworld. The shaded regions represent 1 standard deviation. For each training run, we evaluate the agent $\epsilon$-greedily ($\epsilon=0.1$) after every $1000$ step and report the average total rewards obtained over each $40$ consecutive evaluation. The black dotted line indicate the point at which the baselines have trained for the same number of time steps as the skill primitives pretraining.} 
+    \label{fig:ow_returns}
+\end{figure*}%
+\setlength{\belowcaptionskip}{0pt}
+
+\looseness=-1
+ Additionally, SMs with Q-learning always begin with a significantly higher reward and converge on their final performance faster than all baselines. The speed of learning is due to the compositionality of the skill primitives with SMs, and the high final performance is due to the generality of the learned primitives being paired with the domain-specific Q-learner. In sum, skill machines provide fast composition of skills and achieve optimal performance compared to all benchmarks when paired with a learning algorithm.
+
+\begin{figure}[h!]
+\begin{floatrow}
+\capbtabbox[0.52\textwidth]{%  
+\centering
+\renewcommand{\arraystretch}{0.85}
+\begin{tabular}{ cp{0.42\textwidth}  }
+\toprule
+Task & Description | LTL \\
+\midrule
+    
+1 & Pick up any object. Repeat this forever. | $F \left(\ball \vee \crate\right)$ \\
+2 & Pick up blue then purple objects, then objects that are neither blue nor purple. Repeat this forever.  | 
+ $F (\blue \wedge X (F (\purple \wedge X (F ((\ball \vee \crate) \wedge \neg (\blue \vee \purple))))))$ \\
+3 & Pick up blue objects or squares, but never blue squares. Repeat this forever. | \\
+& $(F (\blue \vee \crate)) \wedge (G~ \neg (\blue \wedge \crate))$ \\
+4 & Pick up non-square blue objects, then non-blue squares in that order. Repeat this forever. | 
+$F ((\neg\crate \wedge \blue) \wedge X (F (\crate \wedge \neg\blue)))$ \\
+
+\bottomrule
+\end{tabular}
+}{%
+\caption{Tasks in the Moving Targets domain. To repeat forever, the terminal states of the RMs generated from LTL are removed, and transitions to them are looped back to the start state.}
+\label{table:mt_tasks}
+}
+~
+\ffigbox[0.44\textwidth]{%
+\centering
+ \includegraphics[width=1\linewidth]{images/returns_cropped.pdf}
+}{%
+\caption{Average returns over 100 runs for tasks in Table~\ref{table:mt_tasks}. The agent and object positions are randomised and objects respawn in random positions when collected.}
+\label{fig:returns}
+}%
+\end{floatrow}
+\end{figure}
+\subsection{Zero-shot Transfer with Function Approximation}
+
+\looseness=-1
+We now demonstrate our temporal logic composition approach in the Moving Targets domain where function approximation is required. 
+Figure~\ref{fig:returns} shows the average returns of the optimal policies and SM policies for the four tasks described in Table~\ref{table:mt_tasks} with a maximum of $50$ steps per episode.
+Our results show that even when using function approximation with sub-optimal skill primitives, the zero-shot policies obtained from skill machines are very close to optimal on average. We also observe that for very challenging tasks like Tasks 3 and 4 (where the agent must satisfy difficult temporal constraints), the compounding effect of the sub-optimal policies sometimes leads to failures. Finally, we provide a qualitative demonstration of our method's applicability to continuous control tasks using Safety Gym, a benchmark domain used for developing safe RL methods \citep{ray2019benchmarking}.
+We define a set of increasingly complex tasks and visualise the resulting trajectories after composing the agent's learned primitive skills. 
+Figure~\ref{fig:safety-vis} illustrates the trajectory that satisfies the task requiring the agent to navigate to a blue region, then to a red cylinder, and finally to another red cylinder while avoiding blue regions.
+
+        
+    
+
+
+
+
+\section{Related Work}
+
+Regularisation has previously been used to achieve semantically meaningful disjunction \citep{todorov09,vanniekerk19} or conjunction \citep{haarnoja18,hunt19}. 
+Weighted composition has also been demonstrated; for example, \citet{peng19} learn weights to compose existing policies multiplicatively to solve new tasks.
+Approaches built on successor features (SF) are capable of solving tasks defined by linear preferences over features \citep{barreto2020fast}., while 
+\citet{alver22} show that an SF basis can be learned that is sufficient to span the space of tasks under consideration.
+By contrast, our framework allows for both spatial composition (including operators such as negation that others do not support) and temporal composition such as LTL.
+
+A popular way of achieving temporal composition is through the options framework \citep{sutton99}. Here, high-level skills are first discovered and then executed sequentially to solve a task \citep{konidaris2009skill}.
+\citet{barreto2019option} leverage the SF and options framework and learn how to linearly combine skills, chaining them sequentially to solve temporal tasks. 
+However, these approaches offer a relatively simple form of temporal composition.
+By contrast, we are able to solve tasks expressed through regular languages zero-shot, while providing soundness guarantees.
+
+\looseness=-1
+Approaches to defining tasks using human-readable logic operators also exist. \citet{li2017reinforcement} and \citet{littman2017environment} specify tasks using LTL, which is then used to generate a reward signal for an RL agent. \citet{camacho2019ltl} perform reward shaping given LTL specifications, while \citet{jothimurugan2019composable} develop a formal language that encodes tasks as sequences, conjunctions and disjunctions of subtasks. This is then used to obtain a shaped reward function that can be used for learning. These approaches focus on how to improve learning given such specifications, but we show how an explicitly compositional agent can immediately solve such tasks using WVFs without further learning. 
+
+
+
+\section{Conclusion}
+
+
+\looseness=-1
+We proposed skill machines---finite state machines that can be learned from reward machines---that allow agents to solve extremely complex tasks involving temporal and spatial composition. 
+We demonstrated how skills can be learned and encoded in a specific form of goal-oriented value function that, when combined with the learned skill machines, are sufficient for solving subsequent tasks without further learning. 
+Our approach guarantees that the resulting policy adheres to the logical task specification, which provides assurances of safety and verifiability to the agent's decision making, important characteristics that are necessary if we are to ever deploy RL agents in the real world. 
+While the resulting behaviour is provably satisficing, empirical results demonstrate that the agent's performance is near optimal;  further fine-tuning can be performed should optimality be required, which greatly improves the sample efficiency.
+We see this approach as a step towards truly generally intelligent agents, capable of immediately solving human-specifiable tasks in the real world with no further learning. 
+
+\newpage
+
+
+
+
+
+

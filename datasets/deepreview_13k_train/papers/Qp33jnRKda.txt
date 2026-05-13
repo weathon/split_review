@@ -1,0 +1,619 @@
+\title{Growing Tiny Networks: Spotting Expressivity Bottlenecks and Fixing Them Optimally}
+
+\begin{abstract}
+Machine learning tasks are generally formulated as optimization problems, where one searches for an optimal function within a certain functional space.
+In practice, parameterized functional spaces are considered, in order to be able to perform gradient descent. 
+Typically, a neural network architecture is chosen and fixed, and its parameters (connection weights) are optimized, yielding an architecture-dependent result. 
+This way of proceeding however forces the evolution of the function during training to lie within the realm of what is expressible with the chosen architecture, and prevents any optimization across %possible 
+architectures.
+Costly architectural hyper-parameter optimization is often performed to compensate for this. Instead, we propose to adapt the architecture on the fly during training. 
+
+We show that the information about desirable architectural changes, due to expressivity bottlenecks when attempting to follow the functional gradient, can be extracted from %the 
+backpropagation. 
+To do this, we propose 
+a mathematical definition of expressivity bottlenecks, which enables us to
+detect, 
+quantify and solve them while training,
+by adding suitable neurons when and where needed.
+Thus, while the standard approach requires large networks, in terms of number of neurons per layer, for expressivity and optimization reasons, we are able to start with  very small neural networks and let them grow appropriately. 
+As a proof of concept, we show 
+results~on the CIFAR dataset, matching large neural network accuracy, with competitive training time,
+while removing the need for standard architectural hyper-parameter 
+search.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\paragraph{Issues with the fixed-architecture paradigm.} Universal approximation theorems such as %\todo{cite} 
+\citep{HornikEtAl89,cybenko1989approximation} %, NEURIPS2020_786ab8c4} 
+are historically among the first theoretical results obtained on neural networks, stating the family of neural networks with arbitrary width as a good candidate for a parameterized space of functions to be used in machine learning.
+However the current common practice in neural network training consists in choosing a fixed architecture, and training it, without any possible architecture modification meanwhile. This inconveniently prevents the direct application of these universal approximation theorems, as expressivity bottlenecks that might arise in a given layer during training will not be able to be fixed. There are two approaches to circumvent this in daily practice. Either one chooses a (very) large width, to be sure to avoid expressivity and optimization issues
+\citep{DNN1,DNN2},
+to the cost of extra computational power consumption for training and applying such big models; to mitigate this cost, model reduction techniques are often used afterwards, using pruning, tensor factorization, quantization \citep{WellingCompression} or distillation \citep{hinton2015distilling}.
+Or one tries different architectures and keeps the most suitable one (in terms of performance-size compromise for instance), which multiplies the computational %power 
+burden
+by the number of trials. This latter approach relates to the Auto-DeepLearning field~\citep{liu2020towards}, where 
+different exploration strategies over the space of architecture hyper-parameters (among other ones) have been tested, including reinforcement learning \citep{baker2017designing, zoph2016neural},  Bayesian optimization techniques \citep{pmlr-v64-mendoza_towards_2016}, and evolutionary approaches \citep{Miller1989DesigningNN,stanley2009hypercube,DBLP:journals/corr/MiikkulainenLMR17,bennet2021nevergrad},   that all rely on random tries 
+and consequently take time for exploration. 
+Within that line, Net2Net~\citep{chen2015net2net}, AdaptNet~\citep{yang2018netadapt} and MorphNet~\citep{gordon2018morphnet} propose different strategies to explore possible variations of a given architecture, possibly guided by model size constraints.
+Instead, we aim at providing a way to locate precisely expressivity bottlenecks in a trained network, which might speed up neural architecture search significantly. Moreover, based on such observations, we aim at modifying the architecture \emph{on the fly} during training, in a single run (no re-training), using first-order derivatives only, while avoiding neuron redundancy.
+Related work on architecture adaptation while training includes probabilistic edges \citep{liu2018darts} or sparsifying priors \citep{WolinskiPruning}. %However
+
+\paragraph{Optimization properties.} An important reason for common practice to choose wide architectures is the associated optimization properties: sufficiently larger networks are proved theoretically and shown empirically to be better optimized than small ones \citep{Kernel1}. Typically, small networks exhibit issues with spurious local minima, while wide ones %usually 
+find good nearly-global minima. One of our goals %of our study 
+is %to be able 
+to train small networks without suffering from such optimization~difficulties.
+
+\paragraph{Neural architecture growth.} 
+A related line of work consists in growing networks neuron by neuron, by iteratively estimating the best possible neurons to add, according to a certain criterion. For instance, approaches such as \citep{Splitting} or Firefly~\citep{NEURIPS2020_fdbe012e} aim at escaping local minima by adding neurons that minimize the loss under neighborhood constraints.
+These neurons are found by gradient descent or by solving quadratic problems involving second-order derivatives.
+Other approaches \citep{Causse2019ParsimoniousNN,bashtova2022application}, including GradMax~\citep{evci2022gradmax}, seek to minimize the loss as fast as possible and involve another quadratic problem. 
+However the neurons added by these approaches are possibly redundant with existing neurons, especially if one does not wait for
+training convergence to a local minimum (which is time consuming) before adding neurons, therefore producing larger-than-needed architectures. 
+
+\paragraph{Redundancy.} To our knowledge, the only approach tackling redundancy in neural architecture growth 
+adds random neurons that are orthogonal in some sense to the ones already present~\citep{maile2022when}. More precisely, the new neurons are picked
+within the \emph{kernel} (preimage of $\{0\}$) of an application describing already existing neurons. 
+Two such applications are proposed, respectively the matrix of fan-in weights and the pre-activation matrix, yielding two different notions of orthogonality.
+The latter formulation is close to the one of GradMax, in that both study first-order loss variations and use the same pre-activation matrix, with an important difference though: GradMax optimally decreases the loss without caring about redundancy, while the other one avoids redundancy but picks random directions instead of optimal ones.
+In this paper we bridge the gap between these two approaches, picking optimal directions that avoid redundancy in the pre-activation space.
+
+\paragraph{Notions of expressivity.}
+Several concepts of expressivity or complexity exist in the Machine Learning literature, ranging from Vapnik-Chervonenkis dimension~\citep{VapnikVCdim} and Rademacher complexity~\citep{koltchinskii2001rademacher} to the number of pieces in a piecewise affine function (as networks with ReLU activations are)~\citep{CountLinReg1,CountLinReg2}.
+Bottlenecks have been also studied from the point of view of Information Theory, through mutual information between the activities of different layers \citep{tishby2015learning,dai2018compressing}; 
+this quantity is difficult to estimate though.
+Also relevant and from Information Theory, the Minimum Description Length paradigm and Kolmogorov complexity \citep{kolmogorov1965three,li2008introduction} enable to define trade-offs between performance and model complexity.
+
+In this article, we aim at measuring lacks of expressivity as the difference between what the backpropagation asks for and what can be done by a small parameter update (such as a gradient step), %gradient step, 
+that is, between the desired variation for each activation in each layer (for each sample) and the best one that can be realized by a parameter update. Intuitively, differences arise when a layer does not have sufficient expressive power to realize the desired variation.
+Our main contributions are that we:
+\begin{itemize}
+\item take a functional analysis viewpoint over gradient descent on neural networks, suggesting to attempt to follow the functional gradient. We optimize not only the weights of the current architecture, but also the architecture itself on the fly, in order to progressively move towards more suitable parameterized functional spaces. %This type of approach is completely new, to our knowledge.
+This removes the optimization issues (local minima) that %usually arise when considering
+are due to thin architectures;
+\item properly define and quantify the notion of expressivity bottlenecks, globally at the neural network output as well as at each layer, and this in an easily computable way. This allows to localize %the 
+expressivity bottlenecks in a neural network;
+\item mathematically define the best possible neurons to add to a given layer to decrease lacks of expressivity as a quadratic %optimization 
+problem; compute them
+and
+their associated
+expressivity gain;
+\item automatically adapt the architecture to the task at hand by making it grow where needed, and this in a single run, in competitive computational complexity with respect to classically training a large model just once. To remove any need for layer width hyper-optimization, one could define a target accuracy and stop adding neurons when it is reached.
+\end{itemize}
+
+
+
+\section{Main concepts}
+
+\subsection{Notations}
+
+Let $\mathcal{F}$ be a functional space, e.g.~$L_2(\mathbb{R}^p \rightarrow \mathbb{R}^d)$, and a loss function $\Loss: \mathcal{F} \rightarrow \R$ defined on it, of the form
+    $\mathcal{L}(f) = \E_{(\vx, \vy) \sim \mathcal{D}}\Big[ \ell(f(\vx), \vy) \Big]$, where $\ell$ is the per-sample loss, assumed to be differentiable,
+        and where $\mathcal{D}$ is the sample distribution, from which the dataset $\{(\displaystyle \vx_1,  \displaystyle \vy_1), ..., (\displaystyle \vx_N, \displaystyle \vy_N)\}$ is sampled, with  $\displaystyle \vx_i \in \mathbb{R}^p$ and $\displaystyle \vy_i \in \mathbb{R}^d$.%on $\mathbb{R}^d$.
+    
+    For the sake of simplicity we consider a feedforward neural network 
+    $f_{\theta} : \mathbb{R}^p \rightarrow \mathbb{R}^d$
+    with $L$ hidden layers, each of which consisting of an affine layer with weights $\mW_l$ followed by a differentiable activation function $\sigma_l$ which satisfies $\sigma_l(0) = 0$.
+    The network parameters are then
+    $\theta := (\displaystyle \mW_l)_{l=1\dots L}$. %, ..., \displaystyle \mW_L)$ 
+
+\begin{figure}[h!]
+    \begin{minipage}{.5\columnwidth}
+         $$\;\;\;\;\;\;\vb_0( \vx) \;=\; \begin{pmatrix}  \vx \\ 1\end{pmatrix} $$
+         $$\forall l \in [1, L], \;\; \begin{cases} \va_l( \vx) &= \; \mW_l  \,\vb_{l-1}( \vx) \\
+         \vb_{l}( \vx) &= \;\begin{pmatrix} \sigma_l( \va_l( \vx)) \\ 1 \end{pmatrix}
+         \end{cases}$$
+          $$\hspace{1.5cm} f_{\theta}( \vx) \;=\; \sigma_L( \va_L( \vx))$$
+    
+    \end{minipage}
+    \hfill
+    \begin{minipage}{.45\columnwidth}
+        \centering
+        \includegraphics[width=0.6\linewidth]{schema_NN.png}
+        \caption{Notations}
+\end{figure}
+
+To any vector-valued function noted $\displaystyle \vt(\vx)$ and any batch of inputs $\displaystyle \mX := [\vx_1, ..., \vx_n]$, we associate the concatenated matrix $\displaystyle \mT(\mX) := \begin{pmatrix} \displaystyle \vt(\vx_1) & ... & \displaystyle \vt(\vx_n) \end{pmatrix} \in \mathbb{R}^{|\vt(.)|\times n}$.
+The matrices of pre-activation and post-activation activities at layer $l$ over a minibatch $\mX$ are thus respectively:
+$\displaystyle \mA_l( \mX) = \begin{pmatrix} \displaystyle \va_l( \vx_1) & ... & \displaystyle \va_l( \vx_n)\end{pmatrix} $ and  $\displaystyle \mB_l( \mX) = \begin{pmatrix} \displaystyle \vb_l( \vx_1) & ... & \displaystyle \vb_l( \vx_n)\end{pmatrix}$.
+
+\textit{NB: 
+convolutions can also be considered, with appropriate representations (cf matrix $\vb_l^c(\vx)$ in \ref{eq :activity_convolution}).}
+
+\subsection{Approach}
+
+\paragraph{Functional gradient descent.} We take a functional perspective on the use of neural networks. % to solve machine learning tasks. 
+Ideally in a machine learning task, one would search for a function $f : \mathbb{R}^p \rightarrow \mathbb{R}^d$ that minimizes the loss $\mathcal{L}$ by gradient descent: $\frac{\partial f}{\partial t}  = -\nablaf \mathcal{L}(f)$ for some metric on the functional space $\F$ (typically, ${L}_2(\mathbb{R}^p \rightarrow \mathbb{R}^d)$), where $\nablaf$ denotes the functional gradient and $t$ denotes the evolution time of the gradient descent. 
+ This direction $\mathcolor{teal}{\vDV}$ is the best infinitesimal variation in $\mathcal{F}$ to add to $f$ to decrease the~loss $\Loss$.
+
+
+\paragraph{Parametric gradient descent reminder.} 
+However in practice, to represent functions and to compute gradients, the infinite-dimensioned functional space $\mathcal{F}$ has to be replaced with a finite-dimensioned parametric space of functions, which is usually done by choosing a particular neural network architecture $\A$ with weights $\theta \in \Theta_{\!\A}$. The associated parametric search space $\FA$ then consists of all possible functions~$f_{\theta}$ that can be represented with such a network for any parameter value~$\theta$.
+
+    the gradient descent is of the form: 
+    $$\frac{\partial \theta}{\partial t} = - \nablatheta \Loss(f_{\theta}) = -\!\!\!\! \E_{(\vx, \vy) \sim \mathcal{D}}\Big[ \nablatheta \ell(f_{\theta}(\vx), \vy) \Big] \, .$$
+    Using the chain rule, these parameter updates yield a functional evolution : 
+    $$\vvv_{\text{GD}} \;:=\; \frac{\partial f_{\theta}}{\partial t} \;=\; \frac{\partial f_{\theta}}{\partial \theta}\;\frac{\partial \theta}{\partial t} %\\
+    \;=\; \frac{\partial f_{\theta}}{\partial \theta} \; \E_{(\vx,\vy)\sim\mathcal{D}} \left[\frac{\partial f_{\theta}}{\partial \theta}^T\!\!(\vx)\; \textcolor{teal}{\vDV(\vx)}\right]$$
+which significantly differs from the original functional gradient descent.
+We will aim to augment the neural network architecture so that parametric gradient descents can get closer to the functional~one. %gradient descent.
+\begin{comment}
+Usually the gradient descent procedure is definied in a Hilbert space $\big(\Theta, \langle \;, \;\rangle\big)$ where $\Theta \subset \mathrm{R}^d$ is the parameter space and $\langle \;, \;\rangle$ the usual scalar product on $\mathrm{R}^d$. The direction used by this procedure , $\nablatheta\mathcal{L}$, is by definition the best infinetisimal direction for the parameter $\theta$ to decrease the loss \textbf{within this Hilbert space}. Indeed, for any parameter move $\delta \theta \in \Theta$  and gradient step $\eta$, following gradient descent at time $t$,  $\;\theta \xleftarrow[]{} \theta - \eta \delta \theta\;$, leads to the decrease of loss :
+\begin{align*}
+    \mathcal{L}^{t+1} \approx \mathcal{L}^t  - \eta\;\langle \nablatheta\mathcal{L}^t, \delta \theta \rangle 
+\end{align*}
+Where $\mathcal{L}(f) := \E_{(\vx, \vy) \sim \mathcal{D}}\Big[ \Loss(f(\vx), \vy) \Big]$.
+Although this Taylor developpement is widely knowed (on $\big(\Theta, \langle \;, \;\rangle\big)$), it is rarely considered on other Hilbert spaces $\big(\mathcal{F}, \langle\;, \; \rangle_{\mathcal{D}}\big)$ on which the $\Loss$ is $C^1$  on $\mathcal{F}$ \citep{DBLP:journals/corr/Martens14}. In this paper, we have chosen to study a Hilbert space of infinite dimension,  because it provides mathematical arguments to determine how to expand the finite dimensional space of parameters $\Theta$
+\TODO{lien avec accroissement d'architecture}
+. It is precisely in the comparison of spaces of different dimensions that lies the trick of our method.
+We define the Hilbert space $\big(\mathcal{F}, \langle\;, \; \rangle_{\mathcal{D}}\big)$ with $\mathcal{F}$ the set of $L_2$ functions and $\langle\;, \;\rangle_{\mathcal{D}}$ the scalar product definied by $\langle \vu, \vv\rangle_{\mathcal{D}} := \mathbb{E}_{\vx \sim \mathcal{D}}\big[\vu(\vx)^T \vv(\vx)\big]$. In this setting we defined a functional gradient, or desired update, the function  $\mathcolor{teal}{\vDV}:= -\nabla_{f} \mathcal{L}(f)$ which is defined at $\vx$ by $\mathcolor{teal}{\vDV(\vx)} = -\nabla_{\vu = f(\vx)} \mathcal{L}(\vu, \vy)$. Similarly to the usual gradient, $\mathcolor{teal}{\vDV}$ indicates the best infinitesimal variation to add to $f$ to decrease the loss within this new Hilbert space. Indeed, for any $\delta f \in \mathcal{F}$, performing a gradient by $f\xleftarrow[]{}f - \eta \delta f$, we have :
+\begin{align*}
+    &\mathcal{L}^{t+1} \approx \mathcal{L}^t - \eta\langle\mathcolor{teal}{\vDV(x)}, \delta f (x)\rangle_{ \mathcal{D}}
+\end{align*}
+
+\paragraph{From one Hilbert space to an other.}
+    if all functional updates $\delta f$ can not be represented by a parameter move, the reverse is always possible. Let's compute the functinal move associate to the usual gradient descent. Under standard weak assumptions (\ref{annexeth:mesure_theory}), 
+    the gradient descent is then of the form: 
+    $$\frac{\partial \theta}{\partial t} = - \nablatheta \Loss(f_{\theta}) = -\!\!\!\! \E_{(\vx, \vy) \sim \mathcal{D}}\Big[ \nablatheta \Loss(f_{\theta}(\vx), \vy) \Big] = \mathbb{E}_{(\vx, \vy) \sim \mathcal{D}}\big[\frac{\partial f_{\theta}(\vx)}{\partial \theta}^T \;\mathcolor{teal}{\vDV(\vx)}\big]$$
+    Using the chain rule, this yields a function change : 
+    $$\vvv_{\text{GD}} \;:=\; \frac{\partial f_{\theta}}{\partial t} \;=\; \frac{\partial f_{\theta}}{\partial \theta}\;\frac{\partial \theta}{\partial t} %\\
+    \;=\; \frac{\partial f_{\theta}}{\partial \theta} \;\mathbb{E}_{(\vx, \vy) \sim \mathcal{D}}\big[\frac{\partial f_\theta(\vx)}{\partial \theta}^T\;\mathcolor{teal}{\vDV(\vx)}\big]$$
+
+\end{comment}
+\begin{wrapfigure}{r}{0.45\textwidth}
+   \centering
+    \includegraphics[scale = 0.35]{one_manifold.png}
+   \label{fig:expres}
+
+\paragraph{Optimal move direction.} 
+    $$\TA^{f_\theta} := \left\{ \left. \frac{\partial f_{\theta}}{\partial \theta}\; \delta \theta \; \right| \; \text{s.t.} \; \delta \theta \in \Theta_{\!\A}\right\}$$ This linear space is a first-order approximation of the neighborhood of $f_\theta$ within $\FA$. 
+        The direction 
+    $\vvv_{\text{GD}}$ obtained above by gradient descent is actually not the best one to consider within $\TA$. Indeed, the best move $\vvv^*$ would be  the orthogonal projection of the desired direction $\textcolor{teal}{\vDV} :=-\nabla_{f_{\theta}} \Loss(f_{\theta})$ onto $\TA$.
+    This projection %depends on the chosen metric and 
+    is what a (generalization of the notion of) natural gradient would compute~\citep{NatGrad}.
+\medskip
+
+Indeed, the parameter variation $\delta\theta^*$ associated to the functional variation $\vvv^* = \frac{\partial f_\theta}{\partial \theta}\, \delta\theta^*$ is the gradient $-\nabla_\theta^{\TA} \Loss(f_\theta)$ of $\Loss \circ f_\theta$ w.r.t.~parameters $\theta$
+when considering the $L_2$ metric on \emph{functional} variations $\|\frac{\partial f_\theta}{\partial \theta}\, \delta\theta \|_{L_2(\TA)}$, not to be confused with 
+\begin{equation}\label{eq:vstar}
+\vvv^* \,=\, \argmin_{\vvv \in \TA} \|\vvv-\tvDV\|^2 \,=\, \argmin_{\vvv \in \TA} \left\{ D_f\Loss(f)(\vvv) + \frac{1}{2} \|\vvv\|^2 \right\}
+\end{equation}
+$$\delta\theta^*   \;=\; \argmin_{\delta\theta \in \Theta_{\!\A}} \left\|\frac{\partial f_\theta}{\partial \theta}\, \delta\theta-\tvDV\right\|^2  \;=\; \argmin_{\delta\theta \in \Theta_{\!\A}} \left\{ D_\theta\Loss(f_\theta)(\delta\theta) + \frac{1}{2} \left\| \frac{\partial f_\theta}{\partial \theta}\, \delta\theta\right\|^2 \right\} =: -\nabla_\theta^{\TA} \Loss(f_\theta)\, .$$
+
+\paragraph{Lack of expressivity.} When $\tvDV$ % :=\left.-\nabla_{f} \Loss(f)\right|_{f = f_\theta}$ 
+does not belong to the reachable subspace $\TA$, there is a lack of expressivity, that is, the parametric space $\A$ is not rich enough to follow the ideal functional gradient descent.  The expressivity bottleneck is then quantified as the distance $\|\vvv^* - \tvDV\|$ between 
+the functional gradient $\tvDV$ and
+the optimal functional move $\vvv^*$ given the architecture $\A$ (in the sense of Eq.~\ref{eq:vstar}). 
+
+\subsection{Generalizing to all layers}\label{sec:updating_layer_activity}
+
+\paragraph{Ideal updates.} The same reasoning can be %recursively 
+applied to the pre-activations $\va_l$ at each layer $l$, seen as functions 
+$\va_l: \vx \in \R^p \mapsto \va_l(\vx) \in \R^{d_l}$
+defined over the input space of the neural network. 
+The optimal parameter update for
+a given layer $l$ then follows the projection of the desired update %direction 
+$-\nabla_{\va_l}\Loss(f_{\theta})$ of the pre-activation functions $\va_l$
+onto the linear subspace $\TA^{\displaystyle \va_l}$ of pre-activation variations that are possible with
+the architecture, as we will detail now. %just like in the intuition part.
+
+Given an sample $(\vx, \vy)\in \mathcal{D}$, standard 
+backpropagation already iteratively computes $\textcolor{teal}{\vDVl(\vx)} := -\left(\nabla_{\va_l}\Loss(f_{\theta})\right)(\vx) = -\left.\nabla_{ \vu}\ell\left(\sigma_L(\displaystyle \mW_L \,\sigma_{L-1} ( \mW_{L-1} \,...\, \sigma_l( \vu))),\, \vy\right)\right|_{\vu=  \va_l( \vx)}$, which is the derivative of the loss $\ell(f_{\theta}(\vx), \vy)$ with respect to the pre-activations $\vu = \va_l(\vx)$ of each layer. This is usually performed in order to compute the gradients w.r.t.~model parameters $\mW_l$, $\,$as $\,\nabla_{\mW_l}\ell(f_{\theta}(\vx), \vy) \;=\; \frac{\partial  \va_l( \vx)}{\partial \emW_l}\; \nabla_{\va_l}\ell(f_{\theta}(\vx), \vy)$.
+$\textcolor{teal}{\vDVl(\vx)} := - \left(\nabla_{\va_l}\Loss(f_{\theta})\right)(\vx)$ indicates the direction in which one would like to change the layer pre-activations $\va_l(\vx)$ in order to decrease the loss at point $\vx$.
+
+\paragraph{Activity update resulting from a parameter change.}
+Given a subset of parameters $\tilde{\theta}$ (such as the ones specific to a layer: $\tilde{\theta} = \mW_l$), and an incremental direction $\delta \tilde{\theta}$ to update these parameters (e.g. the one resulting from a gradient descent: $\delta \tilde{\theta} = - \eta \sum_{(\vx,\vy) \in \text{minibatch}} \nabla_{\tilde{\theta}}\ell(f_{\theta}(\vx), \vy)$ for some learning rate $\eta$), the impact of  the parameter update $\delta \tilde{\theta}$ on the pre-activations
+$\va_l$ at layer $l$ at order 1 in $\delta \tilde{\theta}$ is $\displaystyle\textcolor{magenta}{ \vDE^l( \vx_i, \delta{\tilde{\theta}})} : = \frac{\partial  \va_l( \vx)}{\partial \tilde{\theta}} \;\delta \tilde{\theta}$.
+\emph{Note:} given a learning rate $\eta$, in the sequel we will rather consider $\textcolor{teal}{\vDVl(\vx)} := - \eta \nabla_{\va_l}\Loss(f_{\theta})(\vx)$.
+
+
+\section{Expressivity bottlenecks}
+
+We now quantify expressivity bottlenecks at any layer $l$ as the distance between the desired activity update $\textcolor{teal}{ \vDVl(.)}$ and the best realizable one $\textcolor{magenta}{ \vDE^l(.)}$ (cf Figure \ref{fig:expres}):
+\begin{defn}[Lack of expressivity]
+\end{defn}
+    \begin{equation}
+        \Psi^{l} :=\underset{ \vDE^l \in \TA^{ \va_l}}{\min}\; \frac{1}{n}\sum_{i=1}^n\left\|\textcolor{magenta}{ \vDE^l( \vx_i)} - \textcolor{teal}{ \vDVl( \vx_i)}\right\|^2         = {\min_{\delta\theta}} \;\frac{1}{n}\left\| \textcolor{magenta}{\mDE^l ( \mX, \delta \theta)} -  \textcolor{teal}{\mDVl( \mX)}\right\|^2_{\Tr}
+        \label{eq:mini_NG}
+    \end{equation}
+where $||.||$ stands for the ${L}_2$ norm, $||.||_{\Tr}$ for the Frobenius norm, and $ \textcolor{magenta}{\mDE^l ( \mX, \delta \theta)}$ is the activity update resulting from parameter change $\delta \theta$ as defined in previous section.
+In the two following parts 
+we fix the minibatch $\mX$ and simplify notations accordingly  by removing the~dependency~on~$\mX$. % , which is considered fixed.
+
+\subsection{Best move without modifying the architecture of the network}
+Let $\delta  \mW_l^*$ be the solution of \ref{eq:mini_NG} when the parameter variation $\delta \theta$ is restricted to involve only layer $l$ parameters, i.e.~${\mW}_l$.
+This move is sub-optimal in that it does not result from an update of all architecture parameters but only of the current layer ones: % parameters $\mW_l$ of the layer $l$: 
+\begin{align}\label{eq:dwl}
+    \delta  \mW_l^* &= \underset{ \mM  } %\in \mathcal{M}( \mW_l.\text{shape})}
+    {\argmin} 
+    \frac{1}{n} \left\| \textcolor{magenta}{\mDE^l( \mM)} -  \textcolor{teal}{\mDVl}\right\|_{\Tr}^2
+  \end{align}
+\begin{prop}\label{prop1}
+    The solution of Problem~(\ref{eq:dwl}) is:% and its associated activity variation are: 
+    \begin{align*}
+        &\delta  \mW_l^* = \frac{1}{n} \mDVl  \mB_{l-1}^T   (\frac{1}{n} \mB_{l-1} \mB_{l-1}^T)^{+} 
+    \end{align*}
+    where $P^+$ denotes the generalized inverse of matrix $P$.  
+\end{prop}
+This update $\delta \mW_l^*$ is not equivalent to the usual gradient descent update, whose form is $\delta  \mW_l^{\text{GD}} \propto  {\textcolor{teal}{\mDVl}} \mB_{l-1}^T$. In fact 
+the associated activity variation, $\delta \mW_l^*\mB_{l-1}$,
+is the projection of $ \textcolor{teal}{\mDVl}$ on
+the post-activation matrix of layer $l-1$, that is to say onto the span of all possible   post-activation directions, through the projector %$ \mP : = 
+$\frac{1}{n}\mB_{l-1}^T (\frac{1}{n}\mB_{l-1}\mB_{l-1}^T)^{+} \mB_{l-1}$. To increase expressivity if needed, we will aim at increasing this span with the most useful directions to close the gap between this best update and the desired one. 
+Note that the update
+$\delta  \mW_l^*$
+consists of a standard gradient ($\textcolor{teal}{\mDVl}\mB_{l-1}^T$)
+and of a (kind of) natural gradient only for the last part (projector), as we consider metrics in the pre-activation space.
+\begin{comment}
+We have the following equations:
+\begin{align*}
+    \sum_{i=1}^n\Loss(f_{\theta^{grad}}(X_i), Y_i) &= \sum_{i=1}^n\Loss(f_{\theta}(X_i), Y_i) - \gamma ||\textbf{V}_{l-1}^T\mathbf{\DV}^l||^2_{Tr}  + o(\gamma)\\
+    \sum_{i=1}^n\Loss(f_{\theta^{SN}}(X_i), Y_i) &= \sum_{i=1}^n\Loss(f_{\theta}(X_i), Y_i) - \gamma ||P_{l-1}\mathbf{\DV}^l||^2_{Tr}  + o(\gamma)
+\end{align*}
+With $\theta^{grad}$ parameters updated at layer $l$  according to usual gradient descent and $\theta^{SN}$ updated according to $\delta W_l^*$.
+\textbf{3.3}.
+\end{comment}
+
+\subsection{Reducing expressivity bottleneck by modifying the %neural network 
+architecture}
+To get as close as possible to $ \mDVl$ and to increase the expressive power of the current neural network, we modify each layer of its structure. At layer $l\!-\!1$, we add $K$ neurons $n_1, ..., n_K$ with input weights $ \valpha_1, ...,  \valpha_k$ and output weights $ \vomega_1, ...,  \vomega_K$ (cf Figure \ref{ajout_neurone}). We have the following expansions by concatenation : $ \mW_{l-1}^T \leftarrow \begin{pmatrix}  \mW_{l-1}^T &  \valpha_1 &...&  \valpha_K \end{pmatrix}$ and $ \mW_{l} \leftarrow \begin{pmatrix}  \mW_{l} &  \vomega_1 & ... &  \vomega_K\end{pmatrix}$.
+
+\begin{figure}[t]
+    \begin{minipage}{0.5\columnwidth}
+        \centering
+        \includegraphics[scale=0.4]{ajout_neuron_bleu.png}
+        \caption{Adding one neuron to layer $l$ in cyan $(K = 1)$, with connections in cyan. Here, $ \valpha \in \mathrm{R}^5$ and $ \vomega \in \mathrm{R}^3$.}
+        \label{ajout_neurone}
+    \end{minipage}
+    \begin{minipage}{0.5 \columnwidth}
+        \centering
+        \includegraphics[scale=0.5]{ajout_fonctionnel_bleu.png}
+        \caption{Sum of functional moves}
+        \label{fig:sum_functionel}
+    \end{minipage}
+\end{figure}
+
+We note this architecture modification $\theta \leftarrow \theta \oplus \theta_{ \leftrightarrow}^K$ where $\oplus$ is the concatenation sign and $\theta_{\leftrightarrow }^K : = ( \valpha_k, \vomega_k)_{k = 1}^K$ are the $K$ added neurons. 
+ 
+ The added neurons could be chosen randomly, as in usual neural network initialization, but this would not yield any guarantee regarding the impact on the system loss. Another possibility would be to set either input weights $( \valpha_k)_{k=1}^K$ or output weights $( \vomega_k)_{k=1}^K$ to 0, so that the function $f_\theta(.)$ would not be modified, while its gradient w.r.t.~$\theta$ would be enriched from the new parameters.
+Another option is to solve a optimization problem as in the previous section with the modified structure $\theta \leftarrow \theta \oplus \theta_{ \leftrightarrow}^K$ and jointly search for both the optimal new parameters 
+$\theta_{ \leftrightarrow }^K$
+ \begin{align}\label{eq:optimal_variation}
+     \underset{\theta_{ \leftrightarrow }^K,\;  \mM}{\argmin} \left\|\textcolor{magenta}{\mDE^{l}( \mM \oplus \theta_{ \leftrightarrow }^K)} - \textcolor{teal}{\mDVl}\right\|^2_{\Tr} 
+ \end{align}
+ 
+As shown in figure \ref{fig:sum_functionel},  the displacement $\mDE^{l}$ at layer $l$ is actually a sum of the moves induced by the neurons already present ($\mM$) and by the added neurons ($\theta_{ \leftrightarrow}^K$), our problem rewrites as :
+ \begin{align}\label{eq:eq_rajout}
+     \underset{\theta_{ \leftrightarrow}^K,\; \mM}{\argmin} \left\|  \textcolor{magenta}{\mDE^{l}(\theta_{\leftrightarrow }^K)} + \textcolor{magenta}{\mDE^{l}( \mM)} - \textcolor{teal}{\mDV^{l}} \right\|_{\Tr}^2
+ \end{align}
+with $\textcolor{magenta}{\vDE^{l}(\vx, \theta_{ \leftrightarrow }^K)} := \sum_{k=1}^K \vomega_k\;(b_{l-2}(\vx)^T\valpha_k)$ (See \ref{RQ:DE}). 
+We choose $\mM$ as the best move of already-existing parameters as defined in Proposition \ref{prop1} and we note 
+$  \textcolor{teal}{\mDVl_{proj}} 
+:=  \textcolor{teal}{\mDVl} -  \textcolor{magenta}{\mDE^{l}( \mM^*)}$. 
+We are looking for the solution $\big(K^*, {\theta}^{K*}_{ \leftrightarrow }\big)$ of the optimization problem :
+\begin{align}\label{eq:probform}
+   \underset{K, \;\theta^{K}_{ \leftrightarrow }}{\argmin}\left\|\textcolor{magenta}{\mDE^{l}(\theta_{ \leftrightarrow }^K)} - \textcolor{teal}{\mDVl_{proj}}\right\|_{\Tr}^2 \;.
+\end{align}
+This quadratic optimization problem can be solved
+thanks to the low-rank matrix approximation theorem \citep{ApproxMatrix}, 
+using matrices $ \mN : =\frac{1}{n}  \mB_{l-2}  \big(\textcolor{teal}{\mDVl_{proj}}\big)^T$ and $ \mS := \frac{1}{n}  \mB_{l-2} \mB_{l-2}^T$.
+As $ \mS$ is semi-positive definite, let its truncated SVD be $ \mS =  \mU\Sigma\mU^T$, and define $S^{-\frac{1}{2}} := \mU\sqrt{\Sigma}^{-1} \mU^T$, with the convention that the inverse of 0 eigenvalues is 0.
+Finally, consider the truncated SVD of matrix $ S^{-\frac{1}{2}} \mN = \sum_{k=1}^{R} \lambda_k  \vu_k  \vv_k^T$,
+where $R$ is the rank of the matrix $S^{-\frac{1}{2}} \mN $. Then:\bigskip
+    
+\begin{prop}\label{prop2}
+    \begin{itemize}
+    \item their optimal weights: $\theta_{\leftrightarrow }^{K^*} = ({ \valpha}_k^{*}, { \vomega}_k^{*})_k^{K^*} = \left(\mathrm{sign}(\lambda_k)\sqrt{|\lambda_k|} S^{-\frac{1}{2}}\vu_k,\;  \sqrt{|\lambda_k|}\vv_k\right)_k^{K^*}\;$ 
+    \end{itemize}
+    Moreover for any number of neurons $K \leqslant R$, and associated %scaled 
+    weights 
+    ${\theta}^{K,*}_{\leftrightarrow}$, the  expressivity gain and the first order in $\eta$ of the loss improvement due to the addition of these $K$ neurons are equal and can be quantified very simply as a function of the singular values $\lambda_k$:
+        $$\Psi^l_{\theta \oplus {\theta}^{K,*}_{\leftrightarrow }} = \Psi^l_{\theta} - \textcolor{red}{\sum_{k=1}^K \lambda_k^2}
+        \;\;\;\;\;\;\;\text{and}\;\;\;\;\;\;
+        \Loss(f_{\theta \oplus {\theta}^{K,*}_{\leftrightarrow}}) = \Loss(f_{\theta}) + \frac{\sigma_l'(0)}{\eta} \textcolor{red}{\sum_{k=1}^K \lambda_k^2} + o(||{\theta}^{K,*}_{\leftrightarrow}||^2)$$
+\end{prop}
+\begin{prop}\label{prop3}
+    \begin{align*}
+         \mN  \mN^T \valpha_k = \lambda  \mS  \valpha_k
+    \end{align*}
+\end{prop}
+
+\begin{corollaire*}{For all integers $m, m'$ such that $m + m' \leqslant R$, at order one in $\eta$, adding $m+m'$ neurons simultaneously according to the previous method is equivalent to adding $m$ neurons then $m'$ neurons by applying successively the previous method twice.}
+\end{corollaire*}\label{cor2}
+\emph{Note:}
+Problems (\ref{eq:eq_rajout}) and (\ref{eq:probform}) are generally not equivalent, though similar (cf \ref{append:equiv}).\\
+\emph{Note 2:} Minimizing the distance (\ref{eq:optimal_variation}), ie the distance between $\textcolor{teal}{\mDVl}$ and $\textcolor{magenta}{\mDE^{l}}$, is equivalent to minimizing the loss $\Loss$ at order one in $\textcolor{magenta}{\mDE^{l}}$: %, ie using the Taylor development at order $||\textcolor{magenta}{\mDE^{l}}|| $: 
+\begin{align} \label{eq:Loss_Taylor_order_1}
+    \Loss(f_{\theta \oplus \theta_{\leftrightarrow}^K})& \approx  \Loss(f_{\theta})- \frac{\sigma_{l-1}'(0)}{\eta \; n} \Big\langle  \textcolor{teal}{\mDVl},\;  \textcolor{magenta}{\mDE^{l}} \Big\rangle_{\Tr}
+\end{align}
+The family $ \{\mDE^{l+1}(( \valpha_k,  \vomega_k))\}_{k=1}^K$ of pre-activity variations induced by adding the neurons ${\theta}^{K,*}_{\leftrightarrow }$ is orthogonal for the trace scalar product. We could say that the added neurons are orthogonal to each other (and to the already-present ones) in that sense.
+Interestingly, the GradMax method~\citep{evci2022gradmax} 
+also aims at minimizing the loss~\ref{eq:Loss_Taylor_order_1}, 
+\paragraph{Addition of new neurons
+i.e.~we add $(\sqrt{\gamma}\alpha, \sqrt{\gamma}\omega$).
+The addition of each neuron $k$ has an impact on the loss of the order of $\gamma\lambda_k^2$  %inasmuch 
+provided $\gamma$ is small. 
+This performance gain could be used in a selection criterion realizing a trade-off with computational complexity. A selection based on statistical significance of singular values can also be performed.
+The full algorithm and its complexity are detailed in Appendices \ref{sec:fullalgo} and \ref{sec:complexity}.
+
+\begin{comment}
+\subsection{Choosing the amplitude factor $\gamma$ when adding neurons}
+
+\textcolor{red}{EN ANNEXE ? EN fait la methode a pas de temps fixe marche mieux et d'ailleur elle est aussi instable mais pour que tout se passe bien il faut seulement mettre le facteur d'amplitude egale au learning rate de la couche en question ca marche super bien} \\
+Let us consider the $l\!+\!1$-th layer of the network. Having the best update for linear layer $l\!+\!1$, $\delta \mW_{l+1}^*$, and the best neurons to add accordingly to layer $l$, $(\hat{\valpha}_k^*, \hat{\vomega}_k^*)_{k=1}^{K}$, we estimate the best factor $\gamma$ 
+to multiply the new neurons with, in order to
+speed up the learning. Defining $\hat{\theta}^{K,*}_{ \leftrightarrow}(\gamma) = (  \gamma \hat{\valpha}_k^*, \hat{\vomega}_k^*)_{k=1}^{K}$, we apply a line search algorithm  to find a local minimum of the loss function :
+\begin{align}
+    & \gamma^* : = \underset{\gamma \in \mathcal{V}(0)}{\argmin} \; \frac{1}{n} \sum_{i=1}^n \Loss(f_{\theta\oplus \hat{\theta}^{K,*}_{\leftrightarrow}(\gamma)}(X_i), Y_i)
+\end{align}
+where $\mathcal{V}(0)$ is a neighbourhood of zero.\\
+\textit{Remark : the amplitude factor can also be defined differently, for example by choosing a different amplitude factor for the input and output parameters, ie  $(\sqrt{\gamma_1}\alpha_k, \sqrt{\gamma_2}\omega_k)_{k=1}^K$.}
+    
+\end{comment}
+
+
+
+\section{About greedy growth sufficiency}
+
+
+$$\inf_f \sum_{x \in \mathcal{D}} \|f(x)-f^*(x)\|^2$$
+where $f(x)$ is the output of the neural network and $\mathcal{D}$ is the training set.
+\begin{prop}[Greedy completion of an existing network] If $f$ is not $f^*$ yet, 
+then there exists a set of neurons to add to the hidden layer such that the new function $f'$ will have a lower loss than $f$.
+\end{prop}
+One can even choose the added neurons such that the loss is arbitrarily well minimized. Furthermore:
+
+\begin{prop}[Greedy completion by one single neuron]
+ If $f$ is not $f^*$ yet, there exists a neuron to add to the hidden layer such that the new function $f'$ will have a lower loss than $f$.
+\end{prop}
+As a consequence, there exists no situation where one would need to add many neurons simultaneously to decrease the loss: it is always feasible with a single neuron.
+One can express a lower bound on how much the loss has improved (for the best such neuron), but it is not a very good bound without further assumptions on $f$. Furthermore, finding the optimal neuron to add is actually NP-hard~\citep{bach2017breaking}, so we will not necessarily search for the optimal one.
+
+\begin{prop}[Greedy completion by one infinitesimal neuron]\label{prop:infinit}
+The neuron in the previous proposition can be chosen to have arbitrarily small input weights.
+\end{prop}
+This detail is important in that our approach is based on the tangent space of the function $f$ and thus manipulates infinitesimal quantities. 
+Our optimization problem indeed relies on the linearization of the activation function by requiring the added neuron to have infinitely small input weights,
+to make the problem easier to solve.
+This proposition confirms that such neuron exists~indeed.
+
+\paragraph{Correlations and higher orders.}
+Note that, as a matter of fact, our approach exploits
+linear correlations between inputs of a layer and desired output variations. It might happen that the loss is not minimized yet but there is no such correlation to exploit anymore. In that case the optimization problem (\ref{eq:probform}) will not find neurons to add. Yet following Prop.~\ref{prop:infinit} there does exist a neuron with arbitrarily small input weights that can reduce the loss. This paradox can be explained by pushing further the Taylor expansion of that neuron output in terms of weight amplitude (single factor $\epsilon$ on all of its input weights), for instance
+$\sigma(\epsilon {\boldsymbol\alpha}\cdot \vx) \simeq \sigma(0) + \sigma'(0) \epsilon {\boldsymbol\alpha}\cdot \vx + \frac{1}{2} \sigma''(0) \epsilon^2 ({\boldsymbol\alpha}\cdot \vx)^2 + O(\epsilon^3)$.
+Though the linear term ${\boldsymbol\alpha}\cdot \vx$ might be uncorrelated over the dataset with desired output variation, i.e.~$\E_{\vx\sim\mathcal{D}}[{\boldsymbol\alpha}\cdot \vx] = 0$, the quadratic term $({\boldsymbol\alpha}\cdot \vx)^2$, or higher-order ones otherwise, might be correlated. Finding neurons with such higher-order correlations can be done by increasing accordingly the power of $({\boldsymbol\alpha}\cdot \vx)$ in the optimization problem (\ref{eq:eq_rajout}). Note that one could consider other function bases than the polynomials from Taylor expansion.
+In all cases, one does not need to solve such problems exactly but just to find an approximate solution, i.e.~a neuron improving the loss.
+
+\paragraph{Adding random neurons.}Another possibility to suggest additional neurons, when expressivity bottlenecks are detected but no correlation (up to order $p$) can be exploited anymore, is to add random neurons. The first $p$ order Taylor expansions will show 0 correlation with desired output variation, hence no loss improvement nor worsening, but the correlation of the $p+1$-th order will be non-0, with probability 1, in the spirit of random projections. 
+Furthermore, in the spirit of common neural network training practice, one could consider brute force combinatorics by adding many random neurons and hoping 
+some
+will be close enough to the desired direction~\citep{DBLP:journals/corr/abs-1803-03635}.
+The difference with usual training is that we would perform such computationally-costly searches only when and where relevant, exploiting all simple information first (linear correlations~in~each~layer). 
+
+
+
+\section{Results}
+
+ \subsection{Comparison with GradMax on CIFAR-100}
+
+The closest growing method to TINY is GradMax \cite{evci2022gradmax}, as 
+it solves a quadratic problem similar to \ref{eq:probform}. 
+By construction, the objective of GradMax is to decrease the loss as fast as possible 
+considering an infinitesimal increment of new neurons. In fact, this method is equivalent to ours, 
+with the main difference that GradMax does not take into account the expressivity of the current architecture as TINY does in \ref{eq:probform} by projecting $\DV$.
+In-depth details about the difference between the GradMax and TINY are provided in ~\ref{GradMaxcompare}.
+In this section, we show on the CIFAR-100 dataset that solving  (\ref{eq:probform}) instead of \ref{eq:GradMax}(defined by GradMax) to grow a network
+allows better final performance and almost full expressivity power. 
+To do so, we have re-implemented the GradMax method and mimicked its growing process which consists in 
+ increasing the architecture of a shallow $\text{ResNet18}_{s}$ %(\ref{archi:ResNet18}) 
+until it reaches the architecture of the usual $\text{ResNet18}$. This process is described in the pseudo code \ref{algo:Pareto_detail}, where two parameters can be chosen :
+the starting architecture of the model
+of the usual ResNet18 architecture \ref{archi:ResNet18} ($s = 1/4$ or $s = 1/64$)  and the time of training between each neurons addition 
+($\Delta t = 1$ or $\Delta t = 0.25$). 
+Then the number of parameters and the performance of the growing network %$:=(\text{nbr}_p, acc)$ 
+are evaluated at regular intervals to plot Figure~\ref{fig:Pareto_WT}.
+
+Once the models have reached the final architecture $\text{ResNet18}$, 
+they are trained for 250 epochs (or 500 epochs if they have not converged on the training set). 
+We have summarized the final performance
+in table \ref{tab:AccuracyInfiny}.
+We also added the column Reference, which gives the performance of
+a $\text{ResNet18}$ trained from scratch by usual gradient descent with all its neurons.  We do not expect TINY or GradMax to achieve the performance of the reference as its architecture and optimisation process have been optimised for years.
+
+The details of the protocol can be found in the annexes \ref{sec:cifar100}, as well as other technical details such as the dynamic of the learning batch size \ref{sec:batchsize_for_learning}, the number of examples used to solve the expressivity bottleneck \ref{eq:probform} and  the complexity of the algorithms \ref{sec:complexity}. For both methods, all the latter apply so that the main differences between GradMax and TINY is the mathematical definition of the new neurons. 
+
+
+\begin{figure}
+    \centering
+    \includegraphics[scale = 0.52]{ParetoFront_DELTA0_only_WithTraining.png}
+    \caption{Accuracy on test of as a function of the number of parameters during architecture growth from $\text{ResNet}_s$ to ResNet18. The left (resp. right) column is for the starting architecture $\text{ResNet}_{1/4}$(resp. $\text{ResNet}_{1/64}$). The upper (resp. lower) row is for $\Delta t$ equal to 0.25 (resp. 1) epoch.}
+    \label{fig:Pareto_WT}
+\end{figure}
+
+\begin{comment}
+\def\TSqz{$67.2 \pm 0.1\;$}
+\def\TFqz{$\mathcolor{blue}{69.5 \pm 0.2^{\;2*}\;}$}
+\def\TSqu{$70.5 \pm 0.1\;$}
+\def\TFqu{$\mathcolor{black}{\textbf{70.6 \pm 0.2}^{*}\;}$}
+
+\def\TSsz{$65.8 \pm 0.1\;$}
+\def\TFsz{$\mathcolor{blue}{68.9 \pm 0.1}^{\;2*}\;$}
+\def\TSsu{$68.2\pm 0.4\;$}
+\def\TFsu{$\mathcolor{blue}{68.5 \pm 0.4}^{\;*}\;$}
+
+\def\GSqz{$65.3 \pm 0.1$}
+\def\GFqz{$\mathcolor{blue}{65.86 \pm 0.19}^{\;*}$}
+\def\GSqu{$68.6 \pm  0.1$}
+\def\GFqu{$\mathcolor{blue}{68.75 \pm 0.13}^{\;*}$}
+
+\def\GSsz{$45.3 \pm 0.2$}
+\def\GFsz{$\mathcolor{blue}{57.12 \pm 0.27}^{\;10*}$}
+\def\GSsu{$56.7 \pm 0.2$}
+\def\GFsu{$\mathcolor{blue}{58.5 \pm 0.1}^{\; 10*}\;$}
+\end{comment}
+\def\TSqu{$ \mathcolor{black!50}{71.0 \pm 0.1} $}
+\def\TSqz{$ \mathcolor{black!50}{67.0 \pm 0.1} $}
+\def\TSsu{$ \mathcolor{black!50}{68.0 \pm 0.4 }$}
+\def\TSsz{$ \mathcolor{black!50}{66.0 \pm 0.1} $}
+\def\TFqu{$\mathcolor{black}{ \textbf{71.0} \pm \textbf{0.2} }^{\;5*}$}
+\def\TFqz{$\mathcolor{black}{ 70.0 \pm 0.2 }^{\;5*}$}
+\def\TFsu{$\mathcolor{black}{ \textbf{69.0} \pm \textbf{0.6} }^{\;5*}$}
+\def\TFsz{$\mathcolor{black}{ 69.0 \pm 0.1 }^{\;5*}$}
+
+\def\GSqu{$ \mathcolor{black!50}{69.0 \pm 0.1} $}
+\def\GSqz{$ \mathcolor{black!50}{65.0 \pm 0.1} $}
+\def\GSsu{$ \mathcolor{black!50}{57.0 \pm 0.2} $}
+\def\GSsz{$ \mathcolor{black!50}{45.0 \pm 0.2} $}
+
+\def\GFqu{$\mathcolor{black}{ 69.0 \pm 0.1 }^{\;5*}$}
+\def\GFqz{$\mathcolor{black}{ 67.0 \pm 0.2 }^{\;5*}$}
+\def\GFsu{$\mathcolor{black}{ 59.0 \pm 0.1 }^{\;10*}$}
+\def\GFsz{$\mathcolor{black}{ 57.0 \pm 0.3 }^{\;10*}$}
+\def\Bb{$72.9 $}
+\def\Bbvirg{$0.1^{\;5*}$}
+
+
+\renewcommand{\arraystretch}{1.1}
+\begin{table}[h!]
+    \centering
+    \begin{tabular}{|*{7}{c|}}
+        \hline
+         &\multicolumn{2}{c|}{TINY}&\multicolumn{2}{c|}{GradMax} & \multicolumn{2}{|c|}{\multirow{2}{*}{Refe-}}\\ \cline{1-5}
+    \diagbox{ $s$ }{$\Delta t$}&0.25 & 1 & 0.25 & 1 & \multicolumn{2}{|c|}{rence}\\ \hline
+    \textcolor{black!50}{1/4} &\TSqz & \TSqu & \GSqz & \GSqu & \multicolumn{2}{|c|}{\multirow{2}{*}{\Bb}}\\ \cline{1-5}
+    \textcolor{black}{1/4}&\TFqz &\TFqu& \GFqz & \GFqu & \multicolumn{2}{|c|}{\multirow{2}{*}{$\pm$}}\\ \cline{1-5}
+    \textcolor{black!50}{1/64} &\TSsz &\TSsu& \GSsz & \GSsu &\multicolumn{2}{|c|}{\multirow{2}{*}{\Bbvirg}}\\ \cline{1-5}
+    \textcolor{black}{1/64}  &\TFsz &\TFsu& \GFsz & \GFsu & \multicolumn{2}{|c|}{}\\ \hline
+    
+    \end{tabular}
+    \caption{Final accuracy on test of ResNet18 after the architecture growth (\textit{grey}) and after convergence (\textit{black}). The number of start indicated grossly the multiple of 50 epochs needed to achieve convergence.  With the starting architecture $\text{ResNet}_{1/64}$ and $\Delta t= 0.25$ the method TINY achieves \TSsz  on test after its growth and it reaches \TFsz after $5* := 5 \times 50$ epochs (examples of training curves for the extra training \ref{fig:extra_training_TINY}). Mean and standard deviation performed on 2 runs for each setting.}
+    \label{tab:AccuracyInfiny}
+\end{table}
+
+\begin{figure}
+    \centering
+    \includegraphics[scale = 0.7]{accuracy_TINYGradMaxGrowth.png}
+    \caption{Evolution of accuracy and number of parameters as a function of gradient step for the setting $\Delta t =1$, $s = 1/64$  for TINY and GradMax, mean and standard deviation over two runs. Other settings in the annexes \ref{fig:AccCurveTINYGradMax}}
+    \label{fig:TINYGradMaxgrowth}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[scale = 0.7]{extra_training_TINYGradMax.png}
+    \caption{Evolution of accuracy and number of parameters as a function of gradient step for the setting $\Delta t =1$, $s = 1/64$ during extra training for TINY and GradMax, mean and standard deviation over two runs. Other settings in the annexes \ref{fig:extra_training_GradMax} and \ref{fig:extra_training_TINY}.}
+    \label{fig:ExtraTrainingTG}
+\end{figure}
+
+
+ 
+For $s = 1/64$, we observe a significant difference in performance between TINY and GradMax methods. While TINY models almost achieve the reference's performance, they remain stuck 10 points below with GradMax. It suggests that starting with an architecture far from full expressvity, ie $\text{ResNet}_{1/64}$, the theory proposed by GradMax is not sufficient and TINY is more robust.
+As for the setting $s=1/4$,
+both methods seem equivalent in terms of final performance and achieve full expressivity. 
+
+ 
+The curves on \autoref{fig:TINYGradMaxgrowth}, which are extracted from \autoref{fig:AccCurveTINYGradMax} in the annexes,  show that TINY models have converged at the end of the growing process, while GradMax ones do not.
+This latter effects
+contrast with
+GradMax formulation which is to accelerate the gradient descent as fast as possible by adding neurons. 
+Furthermore GradMax need extra training to achieve full expressivity as
+for the particular setting $s=1/64, \Delta t =1$, the extra training time of GradMax is twice as high as TINY's, as shown in Figure \ref{fig:ExtraTrainingTG}.
+This need for extra training also appear in Table \ref{tab:AccuracyInfiny} where for all settings the difference in performance after and before extra training goes up to 20 \% ($s = 1/64, \Delta t = 0.25$, resp. 6\% for TINY).
+
+
+\subsection{Comparison with Random on CIFAR-100 : initialisation impact}
+In this section, we focus on the impact of the new neurons' initialization. To do so, we consider as a baseline the Random method, which initializes the new neurons according to a Gaussian distribution: $(\alpha_k^*, \omega_k^*)_{k=1}^K\sim \mathcal{N}(0, Id)$. Also, when adding new neurons,
+instead of normalizing them as previously, we search for the best scaling using a line-search on the loss. Thus, we perform the operation $\theta_{\leftrightarrow}^K \leftarrow \gamma^* \theta_{\leftrightarrow}^K$ \ref{algo:Pareto_detail}, with the amplitude factor $\gamma^* \in \mathbb{R}$ defined as :
+\begin{align}\label{eq:AmplFact}
+\gamma^* := \argmin_{\gamma \in [-L, L]}\sum_i\mathcal{L}(f_{\theta \oplus \gamma \theta_{\leftrightarrow}^K}(\vx_i), \vy_i) \hspace{1.5cm} \text{with}  \;\;\gamma \theta_{\leftrightarrow}^{K^*} = (\gamma\alpha^*_k, \gamma\omega^*_k)_k^K
+\end{align}
+with $L$ a positive constant. More details can be found in \ref{sec:AMplFactNormalization}. 
+With such an amplitude factor, one can measure the quality of the directions generated by TINY and Random by quantifying the decrease of loss.
+
+To better measure the impact of the initialisation method, and to distinguish it from the optimization process,
+we do not preform any gradient descent. This contrasts with the previous section where long training time after architecture growth was modifying the direction of the added neurons, dampening initialization impact with training time, especially as they were added with a small amplitude factor (cf Section \ref{sec:UsualNormalization}).
+
+\begin{figure}
+    \centering
+    \includegraphics[scale = 0.65]{ParetoFront_Random_TINY_noNG.png}
+    \caption{Accuracy on test as a function of the number of parameters during architecture growth from $\text{ResNet}_{1/64}$ to $\text{ResNet}_{18}$.}
+    \label{fig:Pareto_RT}
+\end{figure}
+With these two modifications to the protocol of previous section, we obtain Figure \ref{fig:Pareto_RT}.
+We see the crucial impact of TINY  initialization over the Random method.
+Indeed, the random method does not learn through the growing process and it can be quantified as follows.  In the random setting, we models $\vDE(X), \vDV(X)$ as independent Gaussian variable following $\mathcal{N}(0_d, I_d\frac{1}{\sqrt{d}})$ where $d$ approximate the dimension of $\vDV$ and $\vDE$. From equation \ref{eq:Loss_Taylor_order_1}, the scalar product $\langle \mDE(X), \mDV(X)\rangle:= \frac{1}{n}\sum_i \vDV(\vx_i)^T\vDE(\vx_i)$ is a proxy of the expected decrease of loss after each architecture growth.
+This quantity can be approximated by its standard deviation, ie $\frac{1}{\sqrt{d}}$ and therefore making  the expected gain of loss comparable to 
+to $\frac{1}{\sqrt{64}}$ for the first layer and $\frac{1}{\sqrt{512}}$ for the last layer.
+
+A first supplementary remarks is that 
+the search interval of \eqref{eq:AmplFact} for can be shrunk to $[0, L]$ as the first order development of the loss in \eqref{eq:Loss_Taylor_order_1} is positive. This property is the direct consequence of the definition of $\mDE^*$ as the minimizer of the expressivity bottleneck \eqref{eq:probform}.
+One can also note that 
+we do not include GradMax in Figure~\ref{fig:Pareto_RT}, 
+because its protocol initializes the on-going weight to zero ($\alpha_k \leftarrow 0$)
+and imposes a small norm on its out-going weights ($||\omega_k|| = \epsilon$). Those two aspects make the amplitude factor $\gamma^*$ meaningless and the impact of the new neurons initialization invisible without gradient descent.
+
+
+
+
+\begin{comment}
+\begin{algorithm}[h!]
+ \For{each method [TINY, MethodeToCompareWith]}{
+    Start from neural network $N$ with initial structure $s \in \{1/4, 1/64\}$ \;
+    \While{N architecture doesn't match $\text{ResNet18}$}{
+    \For{d in \{depths to grow\}}{
+    \uIf{method == TINY}{
+    Compute $n_d$ neurons according to \ref{prop3} $:= (\alpha_k, \omega_k)_{k=1}^{n_{l}}$ \;
+    Normalize the neurons \ref{sec:UsualNormalization}, \ref{sec:AMplFactNormalization}\;
+    Add the neurons to the architecture at depth $d$\;
+    }
+    \uElseIf{mathod == GradMax}{Add $n_d$ neurons  at layer $d$ according to GradMax method \ref{GradMaxcompare} \;}
+    \uElseIf{mathod == Random}{
+    Generate random new neurons\;
+    Normalize the new neurons \ref{sec:AMplFactNormalization}\;
+    Add the neurons to the architecture at depth d\;}
+    Train $N$ for $\Delta t$ epoch \;
+    Save $N$, its number of parameters and its performance \;
+    \If{method == TINY and Fig. \ref{Pareto_RT}}{
+    Compute best update $\mW_{d+1}$ at $d+1$ \;
+    Normalize $\mW_{d+1}$ \ref{sec:AMplFactNormalization}\;
+    Update the layer $d+1$ with $\mW_{d+1}$ \;
+    }
+    }
+    
+    
+    
+    
+ }
+    
+ }
+    
+\end{comment}
+
+The code and the DEMO-notebook are available at \url{https://gitlab.inria.fr/mverbock/tinypub}. 
+
+
+\section{Conclusion}
+
+
+We provided the theoretical principles of TINY, 
+a method to grow the architecture of a neural net while training it; %with only a single training phase
+starting from a very thin architecture, TINY adds the neurons  where needed and yields a fully trained architecture at the end.
+Our method relies on the functional gradient to find new directions that tackle the expressivity bottleneck, even for small networks, by expanding their space of parameters.
+This way, we combine in the same framework gradient descent and neural architecture search, that is optimizing the network parameters and its architectures at the same time.
+
+The method is generic for all architectures and is instantiated for linear and convolutional layers. Extension to self-attention mechanism (transformers) is part of future works. 
+Although the common architectures consist of a succession of layers, a new research direction is to develop tool handling  
+general computational graphs (U-net, Inception, Dense-Net).
+
+
+Another possible development would be to study the statistics reliability of the TINY method, for instance using tools borrowed from random matrix theory.
+Indeed statistical tests can be applied on intermediate computations to obtain the new neurons. An interesting byproduct of this approach would define a threshold to select neurons found by \ref{prop2}, based on statistical significance.
+
+
+
+
+
+

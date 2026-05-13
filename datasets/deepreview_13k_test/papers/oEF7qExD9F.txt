@@ -1,0 +1,408 @@
+\title{LMUFormer: Low Complexity Yet Powerful Spiking Model With Legendre Memory Units}
+
+\begin{abstract}
+Transformer models have demonstrated high accuracy in numerous applications but have high complexity and lack sequential processing capability making them ill-suited for many streaming applications at the edge where devices are heavily resource-constrained. Thus motivated, many researchers have proposed reformulating the transformer models as RNN modules which modify the self-attention computation with explicit states. However, these approaches often incur significant performance degradation.
+The ultimate goal is to develop a model that has the following properties: parallel training, streaming and low-cost inference, and state-of-the-art (SOTA) performance. In this paper, we propose a new direction to achieve this goal. We show how architectural modifications to a fully-sequential recurrent model can help push its performance toward Transformer models while retaining its sequential processing capability. Specifically, inspired by the recent success of Legendre Memory Units (LMU) in sequence learning tasks, we propose LMUFormer, which augments the LMU with convolutional patch embedding and convolutional channel mixer. 
+Moreover, we present a spiking version of this architecture, which introduces the benefit of states within the patch embedding and channel mixer modules while simultaneously reducing the computing complexity. 
+We evaluated our architectures on multiple sequence datasets. Of particular note is our performance on the Speech Commands V2 dataset (35 classes). In comparison to SOTA transformer-based models within the ANN domain, our LMUFormer demonstrates comparable performance while necessitating a remarkable \rev{$53\times$} reduction in parameters and a substantial \rev{$65\times$} decrement in FLOPs. Furthermore, when benchmarked against extant low-complexity SNN variants, our model establishes a new SOTA with an accuracy of 96.12\%. 
+Additionally, owing to our model's proficiency in real-time data processing, we are able to achieve a 32.03\% reduction in sequence length, all while incurring an inconsequential decline in performance.git}}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+In recent years, Transformers~\citep{vaswani2017attention} have become the most prevalent deep learning models for many applications. The global attention mechanism enables Transformers to capture long-distance dependencies in input data. Moreover, their state-less structure makes their training easily parallelizable, helping them perform well with large-scale datasets, leading to SOTA accuracy in a wide range of applications, including Natural Language Processing (NLP)~\citep{gpt32020language, touvron2023llama}, Computer Vision (CV)~\citep{vit2020image, liu2021swin}, and spoken term classification (STC)~\citep{gulati2020conformer, ast2021ast}. 
+However, their self-attention mechanism imposes compute and memory complexity that is quadratic in the sequence length $N$. Moreover, the nature of the self-attention computation prevents the underlying hardware from performing much of the computation until after the entire input sequence is available.
+
+In contrast, Recurrent Neural Network (RNN) models are designed to process data sequentially and their complexity is only $\mathcal{O}(N)$ making them an attractive low-complexity alternative to transformers. However, RNN models traditionally have higher training time as the training procedure must accommodate the long sequence of dependencies within the model, making parallelization more difficult. Moreover, unlike transformers, RNN models like LSTMs~\citep{lstm1997long} and GRUs~\citep{gru2014properties} can only leverage past and current information and traditionally suffer from forgetting due to having a limited memory horizon. Recently, however, Legendre Memory Units\citep{lmu2019legendre} have been proposed that have the ability to remember information over a theoretically infinite time horizon. Benefiting from this property, 
+LMU-based models outperform many RNN models while still underperforming compared to Transformer alternatives. 
+We hypothesize that the remaining performance gap between LMUs and Transformers is not only because Transformers benefit from future information, but also because they possess more complex network structures, such as the self-attention computation, and thus have higher representational capacity. 
+
+In an attempt to explore this hypothesis, we propose a novel sequential network architecture, dubbed LMUFormer, that %not only uses additional classifiers as previously proposed \citep{lmu2019legendre}, but also 
+augments the LMU module with convolutional patch embedding and convolutional channel mixers. Importantly, our convolutional patch embedding only interacts with neighboring input samples and our convolutional channel mixers and the final classifier only operate on the current state of the LMU. Therefore, our LMUFormer model can process data sequentially. 
+Moreover, we present a spiking version of this architecture which extends the benefits of state that is explicit in the LMU implicitly to the patch embedding and channel mixing structures to improve accuracy while simultaneously further enabling complexity reduction. 
+In summary, this paper makes the following contributions:
+\begin{itemize}
+\item We propose a novel architecture LMUFormer which outperforms most existing RNN models with similar complexity on a wide range of sequence learning tasks. 
+On evaluating the Speech Commands dataset, our LMUFormer model, when benchmarked against transformer-based models with competitive performance levels, manifests a significant reduction — accounting for \rev{$53\times$} fewer parameters and \rev{$65\times$} diminished FLOPs.
+
+\item  We further devised a spiking variant of the LMUFormer that not only achieves state-of-the-art (SOTA) performance within the realm of SNN models on the Speech Commands dataset but also presents comparable results on the Long Range Arena benchmark.
+
+\item Attributable to the real-time data processing capabilities inherent to our models, we evaluate the performance of the model when different proportions of sequences are received. We demonstrate that our model can achieve 99\% of the original performance while reducing 32.03\% sequence length.
+\end{itemize}
+ 
+
+
+\section{Preliminaries}
+
+
+\textbf{Legendre Memory Unit \& Parallel Training:}
+The Legendre Memory Unit (LMU) is a memory cell proposed by \cite{lmu2019legendre} designed to efficiently capture and represent temporal dependencies in sequential data rooted in the mathematical properties of Legendre polynomials. 
+Mathematically, the LMU is based on two state-space matrices $(\boldsymbol{A},\boldsymbol{B})$ that approximate a linear transfer function in continuous 
+time as follows
+\begin{equation}
+ \dot{\boldsymbol{m}}(t) = \boldsymbol{A} \boldsymbol{m}(t) + \boldsymbol{B} \boldsymbol{u}(t),
+\label{eq:lmu:lti}
+\end{equation}
+where $u(t)$ represents the input signal and $m(t)$ represents the memory state vector. This continuous-time system is mapped onto discrete 
+time with time step $t$ as follows
+\begin{equation}
+ \boldsymbol{m}[t] = \bar{\boldsymbol{A}} \boldsymbol{m}[t-1] + \bar{\boldsymbol{B}} \boldsymbol{u}[t],
+\label{eq:lmu:dlti}
+\end{equation}
+where $\bar{\boldsymbol{A}}$ and $\bar{\boldsymbol{B}}$ are the discretized version of $\bar{\boldsymbol{A}}$ and $\bar{\boldsymbol{B}}$.
+
+To better support parallel training, we adopt the same module design as \cite{plmu2021parallelizing} to get $u[t]$ from $x[t]$, which is the input signal of the LMU cell in $t$ time step, as follows
+\begin{equation}
+ \boldsymbol{u}[t] = Act_u(\boldsymbol{W}_u \boldsymbol{x}[t] + \boldsymbol{b}_u)
+\label{eq:plmu:u}
+\end{equation}
+and obtain the output of the LMU module as described as follows
+\begin{equation}
+ \boldsymbol{o}[t] = Act_o(\boldsymbol{W}_m \boldsymbol{m}[t] + \boldsymbol{W}_x \boldsymbol{x}[t] + \boldsymbol{b}_o),
+\label{eq:plmu:o}
+\end{equation}
+where $\boldsymbol{W}_u$, $\boldsymbol{W}_m$, and $\boldsymbol{W}_x$ are the learnable parameter matrices. Note that $Act_u$ and $Act_o$ represent the activation functions. Therefore, the module only has one recurrent connection and can be regarded as a linear time-invariant (LTI) system which can be solved in a non-iterative way which is the key for parallel training. We also adopt fast Fourier transform (FFT) as \cite{plmu2021parallelizing} to further reduce the training complexity to $\mathcal{O}(N\log_2 (N)\cdot d_c)$, where $N$ is the length of the sequence and $d_c$ is the feature dimension of the input $x$.
+
+
+\textbf{Spiking Neural Network:}
+As the third-generation neural network~\citep{snnlif1997networks}, SNNs have gained a lot of attention for their potential for higher energy efficiency than traditional ANNs. Mimicking the behavior of biological neurons which communicate using brief electrical pulses, SNNs use binary "spikes" to process and transmit information. However, to convert sequential multi-bit input data such as audio or text into spikes, a coding scheme is required. Rate coding~\citep{lee2016training} and direct coding~\citep{wu2019direct} are two of the most commonly used methods. Rate coding translates the input sequence into a spike train across $T$ time steps, with the spike count correlating to input magnitude and spikes following a Poisson distribution~\citep{lee2020enabling}. In direct coding, in contrast, the multi-bit inputs are fed to the first convolution layer in the models and spikes are used only in subsequent portions of the network. If the dataset does not contain temporal information, the outputs of the $1^{st}$ convolution layer need to be repeated $T$ time steps, and converted to binary or multi-bit spikes through spiking neurons. %, and the output is repeated $T$ time steps are converted to binary spikes through spiking neurons. 
+
+In this paper, we use direct coding as well as the Leaky Integrate-and-Fire (LIF) \citep{snnlif1997networks} neuron model. The behavior of the LIF neuron is described as follows:
+
+\begin{equation}\label{eq:lif_1}
+    \boldsymbol{u}_l^t = \lambda \boldsymbol{u}_l^{t-1} + \boldsymbol{w}_{l} \boldsymbol{o}_{l-1}^t -
+    v^{th}_l \boldsymbol{o}_{l-1}^{t-1}\; \; \; \; \ 
+   \boldsymbol{o}_l^{t-1} = \begin{cases} 1, & \text{if } \boldsymbol{u}_l^{t-1} \geq v^{th}_l; \\  0, & \text{otherwise} \end{cases}
+\end{equation}
+$\boldsymbol{u}_l^t$ represents the membrane potential tensor of the $l^{th}$ layer at the $t^{th}$ time step, $\lambda$ is a leak factor that varies between 0 and 1, $\boldsymbol w_{l}$ is the weight connecting layers $(l{-}1)$ and $l$, $\boldsymbol{o}_{l-1}^t$ is the spike output of the ${(l{-}1)}^{th}$  layer at the $t^{th}$ time step, $v^{th}_l$ is the threshold that is kept constant for layer $l$. 
+
+
+
+\section{Related Work}
+
+
+
+\textbf{SNN for sequential learning:}
+In the domain of computer vision, various SNN models have been proposed, serving purposes ranging from image recognition~\citep{fang2021deep, dsr2022training} to object detection~\citep{kim2020spiking, barchid2023spiking}, and these models have demonstrably achieved competitive performance relative to their ANN counterparts. Notwithstanding, the exploration of SNNs in sequential tasks, such as text classification and spoken term classification, remains notably limited, with scant literature~\citep{slstm2020long,slstm,text2022spiking} addressing these applications.
+
+\textbf{Recurrent Transformers:} Since the inception of the work \cite{linearvit2020transformers} that proposed linear transformers, many researchers focused on modifying the self-attention mechanism to make transformer-based model have lower costs during inference. Linformer~\citep{wang2020linformer} incorporates fixed-size linear projections, facilitating a streamlined approximation of attention across longer sequences. Similarly, Nystromformer~\citep{xiong2021nystromformer}leverages the Nyström method to realize an approximation of the standard self-attention mechanism, achieving linear complexity. In a distinct approach, \cite{peng2023rwkv} proposed a novel model architecture, Receptance Weighted Key Value (RWKV). Notably, the time-mixing block within RWKV can arguably be interpreted as computing the product of the matrices K and V, subsequently multiplied by R, suggesting its foundational roots in the Transformer paradigm. Building upon this foundation, \cite{zhu2023spikegpt} design the SpikeGPT based on RWKV which has demonstrated competitive performance across both Natural Language Generation (NLG) and Natural Language Understanding (NLU) tasks. 
+
+\textbf{MLP-Mixer:} 
+The MLP-Mixer \citep{mlpmixer2021mlp} has emerged as a novel paradigm in the field of computer vision, diverging from the conventional approaches of Convolutional Neural Networks (CNNs) and Vision Transformers (ViTs). 
+The MLP-Mixer leverages multilayer perceptrons (MLPs) for both spatial and channel-wise data processing. By sequentially employing independent MLPs, it avoids convolution and attention mechanisms, resulting in a streamlined architecture. 
+Inspired by this, we followed a similar framework to design our LMUFormer but further improved it to handle data with temporal information.
+
+
+
+\section{Proposed Spiking LMUFormer}
+
+We propose spiking LMUFormer as shown in Fig. \ref{fig:LMU:overall}, which can be trained in parallel and process data sequentially during inference. Our model is primarily based on LMU and augmented with several techniques from Transformers. Specifically, our model consists of a convolutional patch embedding, LMU block, convolutional channel mixers, and a final fully-connected layer as the classification head. This section first introduces the structure of the patch embedding and channel mixers and then elaborates on how to convert the model to an efficient spiking version.
+\begin{figure}
+\centerline{\includegraphics[scale=0.38]{Figs/overall_LMU.png}}
+\caption{The overall network architectures of LMUFormer.}
+\label{fig:LMU:overall}
+\end{figure}
+\subsection{Convolutional Patch Embedding}
+
+Embedding is the first component of Transformer models and is responsible for converting words/tokens into continuous vectors. 
+For NLP tasks, we simply use the built-in PyTorch embedding module to model the embedding functionality.
+For STC tasks, we design two types of Convolutional patch embedding. The first is inspired by \cite{ast2021ast} and \cite{convpe2021early} which used a series of 2D convolutional layers to split the spectrogram into a sequence of ${N \ 16{\times}16}$ patches. Specifically, we create a new dimension for the embedding features and regard the spectrogram as an image to perform convolution. This structure mixes temporal and frequency information to extract superior feature representations.
+However, it also yields significant algorithmic delays when processing sequential input data, hindering real-time processing. To mitigate this concern, we propose to use several 1D convolutional layers with a kernel size of 3 for patch embedding, as we illustrate in Fig. \ref{fig:convPE}(a). When the kernel size is 1, the patch embedding layer is ideal for processing sequential data with no algorithmic latency but also suffers from poor performance. We empirically observed that a convolution kernel of size 3 can dramatically improve the performance since it can capture information about nearby samples and, as analyzed in Fig. \ref{fig:convPE}(b), the added latency is negligible. As an example, the blue lines in Fig. \ref{fig:convPE}(b) represent that to obtain the first output in layer 5, i.e., the output of the patch embedding, we need to wait until the $9^{th}$ input sample arrives. After that, for each input sample fed into the model, the patch embedding can calculate an output, as shown by the red lines. Thus, our network can process the input sequence in real-time after a delay of only 9 samples, which is negligible compared to the total number of samples (typically at least a few hundreds) present in any sequence learning task.
+
+\begin{figure}
+    \centering
+    \begin{subfigure}{0.4\textwidth}
+        \includegraphics[width=0.8\linewidth]{Figs/convPE.png}
+        \caption{}
+    \end{subfigure}
+    \hfill 
+    \begin{subfigure}{0.5\textwidth}
+        \includegraphics[width=0.8\linewidth]{Figs/delay.png}
+        \caption{}
+    \end{subfigure}
+    \caption{(a) The structure of the convolutional patch embedding; (b) The delay analysis of the convolutional patch embedding.}
+    \label{fig:convPE}
+\end{figure}
+\subsection{Convolutional Channel Mixer}
+
+Inspired by \cite{mlpmixer2021mlp}, we expect the LMU module to be primarily responsible for mixing information across tokens due to the presence of the state variables. To effectively capture the information across the different feature channels, we augment the LMU module with a channel mixer module, that consists of BN and non-linear activation layers followed by $1{\times}1$ convolutional layers as described in Eq. \ref{eq:mixer:channel}. 
+The first activation layer employs Gaussian Error Linear Units (GELU) as introduced by \cite{gelu2016gaussian}, while the subsequent activation layer utilizes the Rectified Linear Units (ReLU)~\citep{relu2012imagenet}.
+Since the convolutional layer, BN layer, and non-linear activation layer do not interact with temporal information, we omit the time notation $T$ in Eq. \ref{eq:mixer:channel} for simplicity. 
+We also add a residual connection ~\citep{he2016deep} between the input $X_i$ and the output $X_o$ of the convolutional channel mixer and refer to this enhanced structure as the Conv Channel Mixer Block.
+
+\begin{equation}
+\begin{aligned}
+X &= Conv_1(GELU(BN_1(X_i))), & X_o = Conv_2(ReLU(BN_2(X)))
+\end{aligned}
+\label{eq:mixer:channel}
+\end{equation}
+
+\subsection{Spiking LMUFormer Network Structure}
+
+To further improve the energy efficiency, we propose a spiking version of the LMUFormer, named spiking LMUFormer. %In the following parts, we present the modifications we made to the LMUFormer in order to obtain an efficient SNN model based on its different components
+
+For NLP tasks, we use the batch normalization and the spiking LIF (SN) layer in the first LMU block to convert the floating point values to spikes, that results in sparsity and accumulate-only operations. For STC tasks, we use the first convolution layer together with its followed BN and SN layer in the patch embedding as the direct encoder. Inspired by \citep{yao2023spikedriven}, we also adjust the positions of residual shortcuts to make sure the output is the addition between two floating point numbers rather than the spikes.
+As depicted in Fig. \ref{fig:LMUblock}, the spiking LMU block encompasses several layers, structured sequentially as: a BN layer, followed by a SN layer, succeeded by the core spiking LMU cell, which is then coupled with a Conv layer, and concluded with another BN layer. Notably, the integration strategy we employed capitalizes on the inherent temporal dynamics of both the LMU and the SNN. 
+Considering the concurrent updates of both the memory and hidden states in the LMU at every discrete time step, in conjunction with the analogous updates of the membrane potentials and spikes within the SNN, we have devised a merged process to optimize the overall operational efficiency of their integration.
+In particular, we feed the input spikes $X_S[t]$ into a convolutional layer and a BN layer to get the input signal of the memory cell. 
+\begin{equation}
+    U[t] = BN(Conv1d(X_S[t]))
+    \label{eq:lmu:1}
+\end{equation}
+
+Meanwhile, they are also regarded as the input of spike neurons. 
+As we adopt the Leaky Integrate-and-Fire (LIF) neuron \citep{snnlif1997networks} model, the update of the membrane potential $U_H[t]$ at time step $t$ is described below \citep{lif2018spatio} 
+\begin{equation}
+    U_H[t] = U_V[t-1] + \frac{1}{\tau} (U[t] - (U_V[t-1] - U_V^{reset})),
+    \label{eq:lif:1}
+\end{equation}
+where $U_V[t-1]$ means the membrane potential after emitting spikes at time step $t-1$, 
+$\tau$ is the time constant, and $U_V^{reset}$ represents the reset potential.
+The firing of spikes is then described as follows
+\begin{equation}
+    U_S[t] = F(U_H[t] - U_V^{th})
+    \label{eq:lif:2}
+\end{equation}
+where $U_S[t]$ means the spikes of the input signal of the memory cell and $F$ denotes the firing function, which outputs 1 when the input is greater than 0, and 0 otherwise. 
+Finally, to reset the membrane potential $U_V$ at time step $t$ we use the following equation
+\begin{equation}
+    U_V[t] = U_H(t) \cdot (1-U_S[t]) + U_V^{reset} \cdot U_S[t].
+    \label{eq:lif:3}
+\end{equation}
+
+After obtaining $U_S[t]$ and the memory vector $M[t-1]$ in the last time step, we can formulate the update of $M[t]$ as shown below 
+\begin{equation}
+    M[t] = \bar{\boldsymbol{A}} \cdot M_S[t-1] + \bar{\boldsymbol{B}} \cdot U_S[t],
+    \label{eq:lmu:2}
+\end{equation}
+where $\bar{\boldsymbol{A}}$ and $\bar{\boldsymbol{B}}$ are the discretized space metric from \cite{lmu2019legendre}. 
+To simplify the notation, we use the function Spiking Neuron $SN(\cdot)$ as the abbreviation of \Cref{eq:lif:1,eq:lif:2,eq:lif:3}. 
+Therefore, as shown below
+\begin{equation}
+\begin{aligned}
+M_S[t] &= SN(M[t]), & O[t] &= SN(BN(Conv1d([M_S[t], X_S[t]])))
+\end{aligned}
+\label{eq:lmu:3}
+\end{equation}
+we first feed the $M[t]$ into the spiking neurons to get the spikes of the memory state at time step $t$. 
+Then we concatenate $M_S[t]$ and $X_S[t]$ along the feature dimension and feed them into the 1D Conv layer, BN layer, and SN to get the output spikes of the LMU block at time step $t$.
+
+\begin{figure}
+\centerline{\includegraphics[scale=0.32]{Figs/LMU_block.png}}
+\caption{
+The network architectures of spiking LMU block and the details within the spiking LMU cell.
+ }
+\label{fig:LMUblock}
+\end{figure}
+
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+\subsection{Permuted Sequential MNIST}%%%add an image classification task
+\begin{wraptable}{r}{8.5cm}
+\centering
+\begin{tabular}{|c|c|c|}
+\hline
+Model & SNN & Acc (\%) \\
+\hline
+LSTM \citep{lmu2019legendre} & N & 89.86 \\
+LMU \citep{lmu2019legendre} & N & 97.15 \\
+HiPPO-LegS  \citep{gu2020hippo} & N & 98.3 \\
+PLMU  \citep{plmu2021parallelizing}& N & 98.49 \\
+LMUFormer & N & \textbf{98.55} \\
+LMUFormer & Y & 97.92 \\
+\hline
+\end{tabular}
+\caption{Performance comparison of our LMUFormer models and previous works on psMNIST dataset.}
+\label{tab:cmp:psmnist}
+\end{wraptable}
+To evaluate the performance of our models on vision task, we use the permuted sequential MNIST (psMNIST) dataset~\citep{psMNIST2015ASW}. Unlike the original MNIST dataset~\citep{lecun-mnist} showing each $28 \times 28$ grayscale image as a whole, psMNIST presents the pixels of each image as a sequence, typically in a permuted order. It results in this task being much more challenging than the original task since the models need to remember and integrate information over time, i.e., have the ability to handle long-range dependencies. psMNIST contains 10 classes, involving handwritten digits from 0 to 9 and we split 50k images as training dataset, 10k images as validation dataset, and the rest 10k images as test images.
+
+As shown in Table .\ref{tab:cmp:psmnist}, our models not only outperform all the RNN models but also surpass the existing LMU-based models. Since the psMNIST dataset is relatively small, directly applying our LMUFormer model could easily lead to overfitting, so we used a simplified version. We only use one Conv layer as well as a BN layer as the patch embedding and remove the channel mixer. 
+
+\subsection{Speech recognition}
+
+We use the Speech Commands V2 dataset \citep{sc2018speech} contains 105,829 audio files of 35 different words. Each recording lasts up to 1 second and the sampling rate is 16KHz. We use the official dataset splits, where the training, validation, and test dataset contains 84,843, 9,981, and 11,005 samples, respectively. We chose the hardest classification task with 35 classes to test our models.
+
+\begin{table}[t]
+\caption{Performance comparison of our LMUFormer models and previous works on Speech Commands dataset. ($\text{Spikformer}^*$ and $\text{Spike-driven ViT}^*$ represent models in which we replace our LMU module with Spiking Self Attention \cite{zhou2022spikformer} and Spike-Driven Self-Attention \cite{yao2023spikedriven} modules, respectively.)}
+\label{tab:res:sc}
+\begin{center}
+\begin{tabular}{|c|c|c|c|c|}
+\hline
+\bf Model & \bf \makecell{Sequential\\Inference} & \bf \makecell{Parallel\\Training} & \bf SNN & \bf Accuracy (\%) \\
+\hline 
+RNN~\citep{baseline2022surrogate} & Yes    & No  & No & 92.09 \\
+Attention RNN~\citep{de2018neural} & No    & No  & No  & 93.9 \\
+liBRU~\citep{baseline2022surrogate} & Yes    & No  & No & 95.06 \\
+Res15~\citep{vygon2021learning} & Yes    & Yes & No  & 97.00 \\
+KWT2 ~\citep{berg2021keyword} & No    & Yes & No  & 97.74 \\
+AST~\citep{ast2021ast}        & No    & Yes & No  & 98.11 \\
+
+\hline
+LIF~\citep{baseline2022surrogate} & Yes    & Yes & Yes & 83.03 \\
+SFA~\citep{salaj2021spike} & Yes & No & Yes & 91.21 \\
+$\text{Spikformer}^*$~\citep{zhou2022spikformer} & No & Yes & Yes & 93.38 \\
+RadLIF~\citep{baseline2022surrogate} & Yes    & No & Yes & 94.51 \\ 
+$\text{Spike-driven ViT}^*$~\citep{yao2023spikedriven} & No & Yes & Yes & 94.85 \\
+\hline
+LMUFormer & Yes    & Yes & No & \textbf{96.53} \\
+LMUFormer (with states) & Yes    & Yes & No & \textbf{96.92} \\
+Spiking LMUFormer & Yes & Yes & Yes & \textbf{96.12} \\
+\hline
+\end{tabular}
+\end{center}
+\label{tab:cmp:sc}
+\end{table}
+
+As shown in Table \ref{tab:cmp:sc}, our LMUFormer model outperforms the existing RNN models. Although there is still about a 1.5\% drop in test accuracy between our model with the SOTA transformer-based model, our model has fewer parameters (1.622 Million vs. 86.933 Million, \rev{$86.933/1.622\approx53.66$}), fewer FLOPs ($1.89\times 10^8$ vs. $1.24\times10^{10}$, \rev{$124/1.89\approx65.61$}) and can handle data sequentially. 
+Additionally, our evaluations indicate that the LMUFormer (with states) achieves a noteworthy performance of 96.92\%. This empirical outcome substantiates our initial hypothesis that the integration of states within patch embedding and the channel mixer block can enhance model performance. In pursuit of unparalleled energy efficiency, we convert this model to the 1-bit SNN model, i.e., the spiking LMUFormer, which surpasses all the contemporary SNN models with mere $3.09\times10^{7}$  theoretical synaptic operations (SOPs)~\citep{merolla2014million}. \\
+\begin{wraptable}{r}{8cm}
+\centering
+\begin{tabular}{|c|c|c|}
+\hline
+Model & Params. (M) & OPs (G) \\
+\hline
+AST \citep{ast2021ast} & 86.93 & 12.4 \\
+LMUFormer & 1.62 & 0.189 \\
+Spiking LMUFormer & 1.69 & 0.0309 \\
+\hline
+\end{tabular}
+\caption{Comparison of the number of model parameters and operational counts between our LMUFormer models and AST model. (OPs refers to FLOPs in ANNs, and SOPs in SNNs)}
+\label{tab:cmp:psmnist}
+\end{wraptable}
+In addition, we also added the result of two experiments for two transformer-based SNN models, Spikeformer~\citep{zhou2022spikformer} and Spike-driven ViT ~\citep{yao2023spikedriven}, that achieve the SOTA performance in the vision tasks. Because they do not provide the official version of their models for the SC dataset, we tested new models in which we use their proposed structure of self-attention as a  substitute for the LMU module in our model. 
+It is important to note that the Spikformer~\citep{zhou2022spikformer} model has a dramatic drop compared with the non-spiking transformer-based AST~\citep{ast2021ast}. This suggests that if we restrict the patch embedding to only mix the information from neighboring samples, the power of the original global attention in transformer models will be degraded. 
+On the contrary, the Spike-driven ViT~\citep{yao2023spikedriven} can preserve a higher accuracy which indicates its linear attention is more robust to the degradation of the features extracted by the patch embedding.
+Moreover, our spiking LMUFormer achieves a further 1.27\% increase in accuracy, demonstrating that our model is superior to the traditional transformer-based spiking models when handling information with temporal information.
+
+\subsection{Long Range Arena Benchmark} %%% this is a must.
+To showcase the capability of our LMUFormer with longer tokens, we utilize the Long Range Arena (LRA) benchmark introduced by \cite{lra2020long}. The benchmark comprises:
+\begin{itemize}
+    \item \textbf{ListOps}: A synthetic task where models operate on nested lists, gauging their understanding of hierarchical structures.
+    \item \textbf{Text}: Byte-level classification of IMDb reviews, pushing the boundaries on sequence lengths.
+    \item \textbf{Retrieval}: Document retrieval tasks centered around byte-level tokens.
+    \item \textbf{Image}: Image classification, but uniquely handled as pixel sequences, sidestepping traditional 2D processing.
+    \item \textbf{Pathfinder}: An image-based task assessing if an unobstructed path connects two highlighted points, challenging models on long-range spatial dependencies.
+\end{itemize}
+
+Adhering to the evaluation protocol from \cite{lra2020long}, which establishes specific train/test splits, we report the classification accuracy for each task and present an aggregated performance measure across all tasks. \\
+
+We conducted a comparative study involving five transformer-based models: the vanilla transformer~\citep{vaswani2017attention}, 
+Linear Trans.~\citep{linearvit2020transformers}, Linformer~\citep{wang2020linformer}, 
+BigBird~\citep{bigbird} and Nystromformer~\citep{xiong2021nystromformer}. 
+And the results of the first four models are from \cite{lra2020long}. As detailed in Table \ref{tab:cmp:lra}, there is still a significant gap in the performance between our models with the recent S4-based models \rev{\citep{gu2021efficiently}}, but our LMUFormer excels against these transformer-based models in almost all tasks except Pathfinder.
+Furthermore, our spiking variant of LMUFormer surpasses them in the ListOps and Retrieval tasks. 
+Notably, our spiking LMUFormer is the inaugural SNN model to not only demonstrate comparable performance on the LRA dataset but also to outshine the majority of its transformer-based counterparts. 
+Intriguingly, the spiking LMUFormer outperforms the regular LMUFormer by an average margin of 0.53\%, suggesting the potential of SNN models to harness their inherent temporal dynamics for superior performance with long sequences. 
+\begin{table}
+\centering
+\caption{Performance comparison of our LMUFormer models and previous works on Long Range Arena (LRA) Dataset.}
+\begin{tabular}{|c|c|c|c|c|c|c|}
+\hline
+Model & \makecell{ListOps\\(2K)} & Text(4K) & \makecell{Retrieval\\(4K)} & Image(1K) & \makecell{Pathfinder\\(1K)} & Avg  \\
+\hline
+S4 & 58.35 & 76.02 & 87.09 & 87.26 & 86.05 & 80.48 \\
+\hline
+Linear Trans. & 16.13 & 65.90 & 53.09 & 42.34 & 75.30 & 50.55 \\
+Linformer & 35.70 & 53.94 & 52.27 & 38.56 & \textbf{76.34} & 51.36 \\
+Transformer & 36.37 & 64.27 & 57.46 & 42.44 & 71.40 & 54.39 \\
+BigBird & 36.05 & 64.02 & 59.29 & 40.83 & 74.87 & 55.01 \\
+Nystromformer & 37.15 & 65.52 & 79.56 & 41.58 & 70.94 & 58.95 \\
+\hline
+LMUFormer & 34.43 & \textbf{68.27} & 78.65 & \rev{54.16} & 69.9 & \rev{61.08} \\
+Spiking LMUFormer & \textbf{37.30} & 65.80 & \textbf{79.76} & \rev{\textbf{55.65}} & 72.68 & \rev{\textbf{62.24}} \\
+\hline
+\end{tabular}
+\label{tab:cmp:lra}
+\end{table}
+
+\subsection{Ablation Study}
+\begin{table}[t]
+\caption{Ablation study on different patch embeddings and channel mixers in the LMUFormer model in Speech Commands V2 dataset. ( ``Naive LMU'' means only using the LMU cell as the token mixer while ``LMU Block'' means adding a Conv layer and BN layer after the LMU cell. ``Conv PE'' means our convolutional patch embedding and ``Conv CM'' means our convolutional channel mixer.)}
+\label{tab:ab:1}
+\begin{center}
+\begin{tabular}{|c|c|c|c|c|c|}
+\hline
+\bf Model type & \bf Patch Embedding & \bf Token Mixer & \bf Channel Mixer & \bf Acc. (\%) & $\Delta$ (\%) \\ \hline 
+Non-spiking & Identity & Naive LMU & Identity & 76.17 & 0.0 \\
+\hline
+Non-spiking & One-layer Conv & Naive LMU & Identity & 89.28 & 13.11 \\ \hline
+Non-spiking & One-layer Conv & LMU Block & Identity & 89.8 & 0.52 \\ \hline
+Non-spiking & Conv PE & LMU Block & Identity & 95.57 & 5.77 \\ \hline
+Non-spiking & Conv PE & LMU Block & Conv CM & \textbf{96.53} & 0.96 \\ \hline
+Spiking & One-layer Conv & Naive LMU & Identity & 83.78 & 0.0 \\ \hline
+Spiking & One-layer Conv & LMU Block & Identity & 87.88 & 4.1 \\ \hline
+Spiking & Conv PE & LMU Block & Identity & 95.20 & \textbf{7.32} \\ \hline
+Spiking & Conv PE & LMU Block & Conv CM & \textbf{96.12} & 0.92 \\ \hline
+
+\end{tabular}
+\end{center}
+\end{table}
+
+We first conducted extensive ablation studies to show the impact of the different patch embeddings and channel mixers in our proposed LMUFormer model on the final performance. 
+All the models have one final linear layer that acts as the classification head and are trained and tested on the Speech Command V2 dataset with 35 classes. 
+As shown in Table \ref{tab:ab:1}, a naive LMU module with a classification head, \rev{same as a pLMU}, can only achieve 76.17\% accuracy while simply adding a convolution layer can boost the result to 89.28\%. 
+Although the performance of the non-spiking model with our LMU block is only slightly better than the model with a naive LMU, our LMU block significantly improves the performance of the spiking model by 4.1\% (an increase from 83.78\% to 87.88\%).
+Moreover, the results show our convolutional patch embedding can further improve the accuracy of the models compared to models with a simple convolution layer.
+Finally, using a convolutional channel mixer, our models achieve a final accuracy 
+of 96.53\% for the non-spiking model and 96.12\% for the spiking model.
+
+
+\subsection{Recurrent Processing}
+\begin{wrapfigure}{r}{0.5\textwidth}
+\centerline{\includegraphics[scale=0.2]{Figs/acc_seq.png}}
+\caption{Plot of test accuracy as the number of samples in the sequence increases.}
+\label{fig:seq:acc}
+\end{wrapfigure}
+To more clearly showcase our model's proficiency with sequential data, we evaluated the trained spiking LMUFormer on the Speech Command V2 test dataset, gradually increasing the sequence length from 0 to its full length of 128 samples. As shown in Fig. \ref{fig:seq:acc}, the increase in the model's accuracy with the number of samples first accelerates continuously and then levels off. This indicates that after a certain number of samples have been obtained, the model has been able to predict the results almost correctly. \rev{Specifically, our model achieves 99\% of its original performance while getting a 32.03\% (1 - 87/128) reduction in the sequence length}, yielding results of 95.17\% compared to 96.12\% which is even higher than the spikformer model (93.38\%) which utilizes all the information from the whole sequence.
+
+
+
+
+\section{Conclusions}
+
+
+The transformer model excels across various domains, particularly with large-scale datasets, owing to its exceptional performance and straightforward parallel training. However, its $\mathcal{O}(N^2)$ complexity during inference, coupled with the necessity to acquire the complete sequence before calculating the self-attention, limits its utility in resource-constrained environments demanding low latency. 
+Hence, we introduce the LMUFormer and Spiking LMUFormer models, uniquely designed to switch between parallel and recurrent forwarding when training and testing. Through extensive experiments, we demonstrate that our non-spiking model achieves close to the performance of state-of-the-art (SOTA) models while markedly reducing the model size by approximately 
+\rev{$53\times$} and computational complexity by roughly \rev{$65\times$}.
+Furthermore, our Spiking LMUFormer achieves SOTA performance, registering a notable accuracy of 96.12\% among prevailing SNN models evaluated on the Speech Commands V2 dataset, without compromising on efficiency. It is our aspiration that this contribution serves as a catalyst for further exploration and advancements in model design for SNNs, particularly in the domain of sequence learning tasks.
+
+
+
+\section{Acknowledgements}
+
+
+We would like to acknowledge a gift funding from Intel that supported this work. We would also like to thank Sumit Bam Shrestha and Timothy Shea for insightful discussions on LMUFormer.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

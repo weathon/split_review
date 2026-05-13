@@ -1,0 +1,352 @@
+\title{Dynamic Layer Tying for Parameter-Efficient Transformers}
+
+\begin{abstract}
+In the pursuit of reducing the number of trainable parameters in deep transformer networks, we employ Reinforcement Learning to dynamically select layers during training and tie them together. Every few iterations, the RL agent is asked whether to train each layer $i$ independently or to copy the weights of a previous layer $j<i$. This facilitates weight sharing, reduces the number of trainable parameters, and also serves as an effective regularization technique. Experimental evaluations validate that our model modestly outperforms the baseline transformer model with regard to perplexity and drastically reduces the number of trainable parameters. In particular, the memory consumption during training is up to one order of magnitude less than the conventional training method. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+The recent work on large language models is based mostly on the transformer architecture of~\cite{vaswani2017attention}. Such models have become increasingly larger and are trained for 100s of thousands of GPU hours using high-end GPUs~\citep{brown2020language,chowdhery2022palm,rae2021scaling,touvron2023llama}.
+
+However, it is clear that the Transformer architecture (like other deep architectures) is overparameterized. For example, pruning can be used to reduce the number of FLOPs of transformers during inference time at least by half, with little effect on accuracy~\citep{kurtic2022optimal,kwon2022fast}, attention heads can be removed post-training with little effect on performance~\citep{michel2019sixteen,voita2019analyzing}. The lottery ticket hypothesis holds for transformers~\citep{frankle2018lottery,chen2020lottery,chen2020earlybert,prasanna2020bert,movva2020dissecting}, and, perhaps most relevant to our work, layers can be dropped altogether during inference~\cite{fan2019reducing,sajjad2020effect}, and attention scores can be reused~\cite{bhojanapalli2021leveraging}.
+
+Motivated by the potential to reuse transformer layers, we conducted a preliminary experiment in which we started with a transformer of $L$ layers and trained only $\frac{L}{2}$ layers by sharing the weights between layers $i$ and layer $i+\frac{L}{2}$ for $i<\frac{L}{2}$. The transformer trained this way achieved the same, or somewhat better performance, as the conventional $L$ layer transformer. 
+
+This encouraging preliminary finding raises a few questions. First, is there something special about this pattern of repetition? Second, is a factor of two the best we can get? Taken to the extreme, it would be desirable that every layer in the architecture either replicates one of the previous layers or, if needed for the sake of accuracy, have a new set of weights.
+
+Our method opts to find such a general pattern. Trying to train only once, we view the repetition pattern $\va$ as a dynamic action that some driver network $\mathcal Q$ learns from reinforcement during the training of the primary network $\mathcal T$. Every few epochs, a new action vector $\va$ is obtained based on the Q-function estimation given by $\mathcal Q$. 
+
+The element $a_i \in [0,1,\dots,i]$ for $i=1,\dots,L$ indicates from which layer to copy the weights to layer $i$ of $\mathcal T$. If $a_i=i$ then the weights of this layer are being optimized independently of other layers. If $a_i<i$ then the weights of layer $a_i$ are used as the weights of layer $i$. This is transductive: if layer $a_i=j$ and $a_j = k$, then both layers $i$ and $j$ share the same weights of layer $k$. 
+After a few training iterations of the primary network $\mathcal T$, the reward for the driver network $\mathcal Q$ is computed by considering the loss obtained on a few training batches. $\mathcal Q$ is then updated, and a new action vector $\va$ is recovered. Depending on the dynamics of the driver network, the changes in the replication pattern can be rather rapid. Yet, as we show, the training process is stable. 
+
+Our results indicate that training this way leads to a replication of at least $75\%$ of the transformer layers while maintaining the same level of accuracy, or even slightly better, as the full $L$ layer transformer. This is achieved with a relatively small $\mathcal Q$ network, which is only applied during training.
+
+Our contributions are:
+(i) Presenting a novel method for dramatically reducing the number of parameters in a transformer architecture. (ii) Establishing the potential of Reinforcement Learning (RL) to serve as a pivotal mechanism for dynamically optimizing the architectural configurations of transformers during training. The impact of RL in this context is considerably more profound than its conventional applications, such as adaptive learning rate tuning~\cite{xu2019learning}. (iii) Demonstrating the use of RL in Neural Architecture Search (NAS) in a single training pass, unlike all previous work we are aware of, which follow \cite{baker2017rl,gao2019graphnas,zoph2016neural} and collect multiple training sessions. (iv) Showing that transformers can be trained effectively, despite rapid changes in architecture during the training process.
+
+
+\section{Related Work}
+
+\label{sec:related}
+Our method changes the architecture of the Transformer network and is, therefore, a Neural Architecture Search (NAS) method. The promise of the field is to discover architectures that would surpass human-designed ones in performance.  While most recent contributions rely on techniques such as Differentiable Architecture Search~\citep{liu2018darts}, some of the earlier approaches relied on RL. \cite{zoph2017nas}, employ a recurrent neural network (RNN) to generate architectural descriptions of neural networks and train it with RL. \cite{baker2017rl} employ Q-learning to search for optimal CNN architectures. \cite{cai2018enas} uses a controller, trained with the policy gradient method, to search for architectures in a more computationally efficient manner. As mentioned, RL NAS methods suggest a fixed architecture and train it from scratch, using the validation score as a reward. The trained network is not changed dynamically during training as we do.
+
+The use of RL for dynamically controlling the training of a deep neural network has focused on learning rate optimization. Controlling the learning rate is often done with a fixed schedule, such as a step decay or a cosine decay, which determines the step size for each iteration of the optimization process \citep{ruder2016overview}. %Attempts to employ an RL policy as adjusting the learning rate include (Bello et al., 2017; Metz et al., 2021; 2020). In
+\cite{xu2019learning} employ proximal policy optimization (PPO)~\citep{schulman2017proximal} trained across multiple sessions (not a single session as in our method). \citep{subramanian2023learned} also employ PPO, and use a state vector that includes the training loss of the last epoch, the epoch index, and the number of remaining epochs.
+
+{
+Considerable effort has been dedicated to making transformers more efficient by reducing the quadratic complexity of the self-attention mechanism, e.g.,~\citep{child2019generating,ma2021luna}. With respect to parameter efficiency, network pruning methods \citep{molchanov2016pruning,hassibi1993optimal,frankle2018lottery,liu2018rethinking} including the transformer pruning methods mentioned above~\citep{kurtic2022optimal,kwon2022fast} reduce the size of the network by removing or shrinking matrices from the network. Such methods often require further re-training, while our method is applied during training, maintaining the training time per epoch and reducing the peak memory consumption. The recent Wanda method~\citep{sun2023simple} performs straightforward magnitude-based pruning~\citep{han2015deep,gale2019state,zhu2017prune,liu2018rethinking} on the trained transformer. Despite its simplicity, it is shown to outperform other pruning alternatives. In comparison to our method, the sparsity demonstrated is up to 50\% of the weights, while our method is shown to reduce 75\% to 87\% of the parameters. Our approach, which focuses on reuse, and pruning, which attempts to ``reduce'', are not mutually exclusive and can be combined.}
+{ Other methods that reuse computations or parameters within transformers include the Reuse Transformer~\citep{bhojanapalli2021leveraging} which, unlike our method, uses a specific and fixed pattern of reusing elements and only reuses attention heads. Overall less than 10\% of the parameters are shared. Similarly to the Reuse Transformer, the Subformer~\citep{reid2021subformer} shares the parameters of the middle layers, however, much more extensively, reaching up to 50\% reduction in the number of parameters. This requires the addition of auxiliary network elements, which we do not do. \citet{takase2021lessons} explore three different fixed patterns of sharing parameters, reusing 50\% to 66\% of the layers. The differences in performance between the patterns are small, and our last ablation (ablation vii) is similar to the Cycle pattern. \citet{xiao2019sharing} share attention weights (and not the parameters for computing these), based on the attention similarity. The number of reduced parameters is not reported but the average speedup is 1.3 (23\% reduction).}
+{Parameter Efficient Fine-Tuning (PEFT) often target specific layers or modules, e.g., only the top layers \citep{gheini2021cross}, only the bias parameters \citep{zaken2021bitfit}, or selecting based on scores \citep{sung2021training,vucetic2022efficient}. Additive PEFT methods introduce additional trainable parameters %, such as adapters \citep{rebuffi2017learning} 
+that can be added to the attention and feed-forward layers of transformers \citep{houlsby2019parameter}. % or the prompt \citep{li2021prefix,lester2021power}. 
+LoRA \citep{hu2022lora} adds low-rank matrices to the weight matrices. %Hybrid approaches combine both selective and additive elements~\citep{chen2023parameter,he2022towards}. 
+PEFT methods substantially reduce the number of trainable parameters, but are applicable for finetuing (after the full model has been trained), while our method is for training from scratch. See Sec.~\ref{sec:discussion} for future work on finetuning.}
+
+
+
+\section{Method}
+
+\label{sec:method}
+\begin{figure}
+\begin{small}
+\begin{algorithm}[H]
+\caption{Q-learning driven dynamic layer tying}\label{alg:rl_training}
+\begin{algorithmic}[1]
+\Require $L$ the number of layers, $K$ the number of training steps of $\mathcal T$,  $k$ the number of training steps between the update and evaluation of $\mathcal Q$, \( \gamma \) the discount factor, and $\epsilon$ initial exploration probability
+\State Initialize the primary model $\mathcal T$ and the Q-network $\mathcal Q$
+\State Freeze layers \( 1 \) to $L-1$ in $\mathcal T$, such that only layer $0$ trains at initialization. % {WHY HERE? STARTING WILL ALL BEING FROZEN. ALSO NOTE THE INDICES I'VE USED} epsilon = max(epsilon * 0.95, 0.01)
+\State Initialize $\vs = \va = 0$ \Comment{An all zero vector}
+\For{\( \text{step} = 0 \) to \( K-1 \)}
+\State Sample a mini-batch $B$ from the dataset
+\State Perform a training step with $\mathcal T$ on $B$
+\If{mod(step,k) == 0} \Comment{Every $k$ steps}%the
+    
+    \State Obtain an action vector $\va=\pi(\vs)$ %based on $\mathcal Q(\vs)$, using $\epsilon$ -greedy-sampling
+    \State Compute $\vs'$ based on $\va$ \Comment{Eq.~\ref{eq:vs}}
+    \For{$i=0$ to \( L-1 \)}
+        \If {$\vs_i'\neq \vs_i$}
+        \If {$\vs_i'== i$}
+            \State Untie layer $i$ of $\mathcal T$ \Comment{Copy its weights and update it independently of layer $\vs_i$}
+        \Else
+            \State Replicate all weights of layer $\vs_i'$ of $\mathcal T$ to layer $i$ of $\mathcal T$ 
+            \State Tie the weights of layer $i$ to layer  $\vs_i'$ 
+            \EndIf
+        \EndIf
+    \EndFor
+    \State Sample a mini-batch $B$ from the data-set
+    \State $r_{step}$ = Compute negative PPL score based on $\mathcal T$ on $B$
+    \State $r_{predicated}$ = $\mathcal Q(\vs,\va)$ \Comment{Eq.~\ref{eq:qsa}}
+    \State $r  = r_{step} + \gamma*\max_{a}\mathcal Q(\vs')_{\va}$
+    \State $L = MSE(r_{predicted}, r)$
+    \State update $\mathcal Q$ using $L$
+    \State $\vs = \vs'$   
+    \State {$\epsilon=\max\{\epsilon*0.95, 0.1\}$}
+\EndIf
+
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+\end{small}
+\end{figure}
+
+We aim to train a transformer $\mathcal T$ with $L$ layers from scratch. All elements of a transformer layer, including the key, query, and value projections, and the linear layers are considered as a single set of training parameters. The set of parameters for layer $i$ can be either independent from all layers $j<i$, or tied to the set of parameters of some layer $j<i$. 
+
+The state vector $\vs\in \mathbb{N}^L$ indicates, at each location $i=0,1,\dots,L-1$, the layer with the lowest index that has the same tied weights. Therefore, $\forall i\in [0,\ldots, L-1]: 0\leq \vs_i \leq i$. If $\vs_i = i$ it indicates that layer $i$ does not have its parameters tied with any of the previous layers. By this definition, it always holds that $\vs_0 = 0$. 
+
+The action space is similar, except that the action vector $\va\in \mathbb{N}^L$ can point to any previous layer that has its weights tied with layer $i$, not necessarily the one with the lowest index $j\leq i$. 
+
+To obtain $\vs$ from $\va$, one can employ the following recursion 
+\begin{equation}
+\label{eq:vs}
+\vs_i = \begin{cases}
+i& \va_i == i\\
+\vs_{\va_i}& \text{Otherwise}
+\end{cases}
+\end{equation}
+
+The Q-function of a Markov Decision Process represents the expected cumulative future reward for taking a particular action $\va$
+a in a particular state $\vs$, while following a certain policy $\pi$~\citep{sutton2018reinforcement}. Similarly to previous work that employs deep Q-learning\citep{mnih2013playing}, we employ an $\epsilon-$greedy policy obtained interpolating between a random policy and one obtained by maximizing, at a given state, the Q-function over the available actions.
+\begin{equation}
+\label{eq:epsilongreedy}
+\pi(\vs) = \begin{cases}
+    \argmax_\va \mathcal Q(\vs,\va) & \text{at probability } 1-\epsilon\\
+    \text{a uniformly sampled $\va$} & \text{at probability } \epsilon
+\end{cases}\,,
+\end{equation}
+where $\mathcal Q$ is the network we learn in order to approximate the Q-function. Its implementation takes $\vs$ as input and returns a vector of Q-values for each index $i$, indicating the Q-value obtained for each action $j=0,1,\dots,i$.
+\begin{equation}
+\label{eq:qsa}
+\mathcal Q(\vs,\va) := \sum_i \mathcal Q(\vs)[i,\va_i]\,,
+\end{equation}
+where indexing occurs first for the vector of Q-values per each index $i$ and then for an element in this vector. Therefore, the input and output domains of the approximated Q-function are $\mathcal Q:\mathbb{R}^{L-1}\rightarrow \mathbb{R}^\frac{(L+2)(L-1)}{2}$. This reflects the fact that $\vs_0$ is fixed and that for every layer $i=1,2,\dots, L-1$ the network $\mathcal Q$ needs to assign values to $i+1$ different actions. %SO IT IS (2+L)/2*(L-1)
+The optimal action-value function $Q^*$ obeys an important identity known as the Bellman equation
+\begin{equation}
+    \label{eq:bellman}
+    Q^*(s,a) = \mathbb E_{s'} [r + \gamma \max_{a'}Q^*(s',a') | s,a]\,,
+\end{equation}
+
+We run the policy $\pi$ based on $\mathcal Q$ to obtain a new action $\va$ after every $k$ training steps of the primary network $\mathcal T$. $k$ is relatively small and such actions are taken frequently. At initialization, only layer $i=0$ is trained; all other layers are fixed at their initial values. Then, after $k$ training steps, and every $k$ training steps afterwards, we perform the following set of actions: (i) obtain a new action $\va=\mathcal \pi (\vs)$, (ii) extract the new state $\vs'$ based on $\va$, as in Eq.~\ref{eq:vs}, (iii) replicate the weights of each layer $i$ to be the same as $\vs_i$ and tie these weights, (iv) compute a reward for $\mathcal T$ based on the negative perplexity score as computed on a random training batch, (v) update $\mathcal Q$ based on the expected reward vs. the computed one, using the Bellman equation, (vi) reduce the exploration factor $\epsilon$ by a fixed factor of 0.95, but always keeping it above a constant of 0.1, and, finally, (vi) run $k$ more training steps for $\mathcal T$ and repeat.
+
+{The method is depicted in Alg. A few implementation details are worth noting. First, in line 2, the replication pattern of the first $k$ steps (where $k<<K$) is determined to be such that layer $0$ trains and the other layers are kept fixed at their initialization values. %The closest-matching action vector $\va$ and stage vector $\vs$ are set to be the all-zero vector, see line 3.
+Then, every $k$ steps  we obtain a new action $\va$, using the $\epsilon-$greedy policy in Eq.~\ref{eq:epsilongreedy}, see lines 7-8. % In line 9, we compute the state $\vs'$ based on the obtained action $\va$ according to Eq.~\ref{eq:vs}. This state is acted upon by replicating and tying the weights in lines 12,13. The condition in line 11 ensures that this happens only when this exact replication did not occur in the previous state $\vs$. 
+Second, we note that a layer that changes state can, based on the condition in line 12, either (i) shift from being untied or tied to one layer to being tied to a new layer, or (ii) shift to being trained independently. In the first type of shift, a new set of weights would be copied, which may change the transformer much more quickly than through gradient steps. In the second type of shift, the weights are not changed immediately. However, they begin to drift between layers that were previously tied. %Third, as depicted in lines 20-21, a random mini-batch is used to estimate the perplexity (PPL) score of $\mathcal T$. The reward $r$ is set in a similar fashion to the reward of DQN (\cite{mnih2013playing}) as the sum of the evaluation score and the discounted prediction of the next state $\mathcal Q(\vs')$ (lines 22, 23). %We do so by using Bellman (Eq.~\ref{eq:bellman}) as an iterative update: $\mathcal Q_{i+1}(s,a) = r+\gamma \max_{a'}Q_{i+1}(s', a')$.
+Third, the exact schedule for modifying the value of $\epsilon$ is given in line 27. 
+}
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+In our experiments, two architectures were used: (i) GPT-2 with 48 decoder blocks, each with 16 attention heads. The hidden dimension for each block was set to 1600, and (ii) BERT, which consists of 12 decoder blocks with a hidden size of 768 and 12 attention heads at each layer. In all of our experiments, $\mathcal{Q}$ is an MLP with one hidden layer with 128 units and the ReLU activation function.
+
+We ran all experiments for $K=300$ epochs, a batch size of 16, and $k=15$ with a separate validation set used to select the best model. 
+
+The hyper-parameters used were: the transformer learning rate is set to 0.0001 and $\mathcal Q$'s learning rate was set to 0.001, $\gamma =0.99$, the initial exploration probability is set to $\epsilon=1.0$ (explore), and as depicted in Alg.~\ref{alg:rl_training}, the $\epsilon$-decay factor: 0.95, and the minimal $\epsilon$ value is set to 0.1.
+
+Our experiments ran on 2-4 A100 GPUs for the GPT-2 based architecture and 1-4 A6000/A5000 GPUs for the BERT architecture.
+
+\begin{table}[t]
+    \caption{Metric scores for the GPT-2 architecture}
+    \smallskip
+    \smallskip
+    \label{tab:results2}
+    \centering
+    \begin{tabular}{@{}l@{~}l@{~}c@{~}c@{~}c@{~}c@{}}
+    \toprule
+  && \multicolumn{4}{c}{Training set}\\
+  \cmidrule{3-6}
+     Metric & {Method}     & {Wiki-2} &{Wiki-103} & {Lambada} & {1-billion}\\
+    \midrule
+ \multirow{2}{*}{Perplexity} &       Conventional training & 53.57 & \textbf{22.32} & 94.96 & 88.35 \\
+         & Our method & \textbf{49.37} & 22.35& \textbf{93.84} & \textbf{72.35}\\
+         \midrule
+          \multirow{2}{*}{Number of trainable parameters}   &     Conventional training & 1.6B& 1.6B & 1.6B & 1.6B \\
+         &Our method mean over training& 171M & 151M& 166M& 218M\\ 
+         &Our method at end of training& 264M & 142M& 326M& 203M\\
+        \midrule
+          \multirow{2}{*}{Number of independent layers}   &     Conventional training & 48 & 48 & 48 & 48 \\
+           &Our method mean over training& 4.395 & 2.309& 3.547& 4.486\\ 
+         &Our method at end of training& 7 & 6& 9& 10\\
+\midrule
+\multirow{2}{*}{Training time per epoch (seconds)} &       Conventional training & 148.5 & 3609.5 & 26376.5 & 15440 \\
+         & Our method & 165 &  4010.5 & 29307.2 & 17155.5\\
+         \bottomrule
+    \end{tabular}
+    \smallskip
+    \smallskip
+    \caption{Metric scores for the BERT architecture}
+    \smallskip
+    \smallskip
+    \label{tab:results}
+    \centering
+    \begin{tabular}{@{}l@{~}l@{~}c@{~}c@{~}c@{~}c@{}}
+    \toprule
+  && \multicolumn{4}{c}{Training set}\\
+  \cmidrule{3-6}
+     Metric & {Method}     & {Wiki-2} &{Wiki-103} & {Lambada} & {1-billion}\\
+    \midrule
+ \multirow{2}{*}{Perplexity} &       Conventional training & 70.15 &  154.2& 202.70 &   $>$1000\\
+         & Our method & \textbf{69.27} & \textbf{132.6}& \textbf{156.30} & \textbf{215.50}\\
+         \midrule
+          \multirow{2}{*}{Number of trainable parameters}   &     Conventional training & 376M & 376M & 376M & 376M \\
+         &Our method mean over training& 52M & 52M& 52M& 57M\\ 
+         &Our method at end of training& 46M & 46M& 67M& 60M\\
+        \midrule
+          \multirow{2}{*}{Number of independent layers}   &     Conventional training & 12 & 12 & 12 & 12 \\
+           &Our method mean over training& 2.36 & 2.83& 1.88 & 2.45\\ 
+         &Our method at end of training&  3&  5& 3& 3\\
+\midrule
+\multirow{2}{*}{Training time per epoch (seconds)} &       Conventional training & 51.2 & 1244.6 & 5324.1 & 9095.3 \\
+         & Our method &26.5&  644.5& 2757.1& 4704.4  \\
+         \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{figure}
+    \centering
+    \begin{tabular}{@{}c@{}c@{}}
+    \includegraphics[width=.4985\textwidth,keepaspectratio]{images/wiki2_take4.png}&         %\includegraphics[width=.4985\textwidth,height=\textheight,keepaspectratio]{images/wiki-103-final-state.jpeg}\\
+    \includegraphics[width=.4985\textwidth,height=\textheight,keepaspectratio]{images/wiki103_take4.png}\\
+    {(a)} & {(b)}\\
+    \end{tabular}
+    \caption{The replication map for the GPT-2 architecture post-training for (a) Wiki-2, (b) Wiki-103. The lowest-index layer in each group of layers that share weights is connected to itself.}
+    \label{fig:replicationgraph}
+\end{figure}
+
+\noindent{\bf Datasets\quad} In this study, we employ four widely used datasets to evaluate the performance of our method for language modeling tasks. All datasets were pre-processed by converting the text into tokens using GPT-2's tokenizer, which has a vocabulary of $50,257$ tokens. \textbf{WikiText-2 (Wiki2)}
+ is a large language modeling corpus that consists of over 2 million tokens. It is derived from a snapshot of verified Good and Featured articles on Wikipedia. The dataset is widely used for training language models and serves as a standard benchmark for evaluating various NLP algorithms. \textbf{WikiText-103 (Wiki103)}
+ is an extension of the WikiText-2 dataset, containing more than 100 million tokens. It is also sourced from Wikipedia articles and is considered to be one of the most comprehensive datasets for training large-scale language models. \textbf{LAMBADA}
+ is designed to test the capabilities of language models in predicting the final word of a sentence, given all the preceding words in that sentence. The dataset contains approximately 10,000 examples, each a sequence of sentences extracted from books. The task is challenging as it often requires understanding the broader context provided by the preceding sentences. The \textbf{1 Billion Words} dataset is a corpus of text containing approximately 1 billion tokens, sourced from news articles. It provides a diverse range of vocabulary and sentence structures, making it ideal for training robust language models.
+
+\noindent{\bf Results\quad} In Table~\ref{tab:results2}, we present a comprehensive evaluation of our proposed method against conventional training on the GPT-2 architecture across multiple datasets: Wiki-2, Wiki-103, Lambada, and 1-billion. Our method consistently outperforms the baseline in terms of perplexity, with the most significant gains observed in the 1-billion words dataset, where we reduce the perplexity from 88.35 to 72.35. Additionally, our method exhibits a significant reduction in the number of trainable parameters, with a mean over training as low as 151M for Wiki-103, and not much higher on the other datasets, compared to the baseline's 1.6B. Although the conventional method outperformed our method on Wiki-103, the gap is marginal. %Despite a slightly higher training time per epoch, the trade-off in terms of model efficiency is evident.
+
+Table~\ref{tab:results} showcases the results for the BERT architecture, presenting similar trends. Our method outperforms the conventional training across all datasets. Notably, in the 1-billion dataset, the perplexity is reduced drastically, from over 1000 in conventional training to 215.50 in our method. The number of trainable parameters also sees a substantial decrease, with a mean during training of 52M-57M, compared to the conventional 376M. %Remarkably, our method also results in a significantly lower training time per epoch, indicating our approach's efficiency.
+
+In both architectures, we can observe that the mean number of independent layers (or, equivalently, the number of groups of identical layers) is rather low during training and is somewhat higher in the final model. Especially in BERT, we can observe that even for large datasets the number of independent layers is small. In our ablation study below we check whether one can simply train much less layers.
+With respect to training time, the results are mixed. While in Tab.~\ref{tab:results} it is demonstrated that our method somewhat slows down the training time, Tab.~\ref{tab:results2} presents a reduction of almost 50\% in runtime. We believe, but have not yet verified, that this is due to the difference in hardware between the two experiments. While GPT-2 experiments run on A100, the BERT experiments run on A6000/A5000.
+The status at the end of the training is shown in Fig.~\ref{fig:replicationgraph}. A line is drawn between every layer index $i$ and the layer it replicates $\vs_i$. A layer $i$ for which the state vector satisfies $\vs_i = i$ is connected to itself. As shown, there are seven such layers for Wiki-2 and six for Wiki-103, matching the statistics report in Tab.~\ref{tab:results}. The dominance of layer zero is clear, see Sec.~\ref{sec:discussion} for a discussion of this property and its implications.
+\begin{figure}
+    \centering
+    \begin{tabular}{@{}c@{}c@{}}
+    \includegraphics[width=.78043\textwidth,keepaspectratio]{images/tied-untied-changes.jpeg}& 
+    \end{tabular}
+    \caption{The number of change state events per type for training GPT-2 on Wiki-2}
+    \label{fig:numchanges}
+\smallskip
+    \centering
+    \includegraphics[width=.78043\textwidth,keepaspectratio]{images/number_of_times_each_layer_was_trainable.jpeg}
+    \caption{The number of steps in which each decoder block was trainable}
+    \label{fig:self-mapping}
+\end{figure}
+
+\noindent{\bf Training dynamics\quad} The training process takes place under the guidance of a policy that is trained from scratch. This policy can change the layer topology drastically and it is, therefore, interesting to explore the training dynamics. First, it is not clear whether any changes are made at all to the topology throughout the training process. It could be the case that after a certain period of exploration, the policy is to keep the state fixed from one step to the next. As Fig.~\ref{fig:numchanges} demonstrates, this is not the case. We distinguish two types of state-change events, as detailed in Sec.~\ref{sec:method}. In the first, which we called ``tied events'', a layer $i$ replicates a layer it did not replicate previously. In the second type, termed ``untied events'', a layer $i$ obtains a new state of $\vs = i$ and is trained independently of previous layers, which had replicated another layer $j<i$. Evidently, both types of events continue to occur throughout the training process and their frequency does not diminish.
+
+{
+The memory consumption during training is a result of the training dynamics. Tab.~\ref{tab:memory} depicts the peak and average memory consumption during the training of GPT-2. Our memory consumption is lower by 65\% in peak consumption and 68\% on average. This difference is obtained without any attempt to optimize memory usage during training or to release unused memory, and does not reflect in full the drop in the size of the model.}
+
+
+\begin{table}[t]
+
+    \caption{Memory consumption during training of a GPT-2 architecture for a batch size of 16 and a sequence length of 256.}
+    \label{tab:memory}
+    \centering
+   \begin{tabular}{lcc}
+    \toprule
+     {Statistics}     & {Conventional training} & {Our method}\\
+     \midrule
+        Peak memory &12,566.66 MB & 4,514.31 MB
+\\
+        Average memory consumption &10,223.08 MB & 3,395.16 MB\\
+         \bottomrule
+    \end{tabular}
+\end{table}
+
+One may wonder if all layers have the same chance of being untied. We note that since the exploration factor $\epsilon$ is at least 0.1 throughout training, with the exception of layer 0, all layers are expected to be tied to other layers at one point or another. As can be seen in Fig.~\ref{fig:self-mapping}, this is indeed the case. 
+
+It can also be observed that the lower layers are more likely to have an untied status of $\vs_i==i$ (other layers with index $j>i$ may still have $\vs_j=i$ and train together in a tied way). This makes sense due to the increasing number of replication options that higher layers have. However, we note from Fig.~\ref{fig:replicationgraph}(b) that the layers with $\vs_i==i$ can be relatively evenly distributed at the end of training.
+
+
+\begin{table}[t]
+    \caption{Perplexity scores for the ablation study for the Wiki-2 and the Shakespeare datasets.}
+    \label{tab:ablation}
+    \centering
+   \begin{tabular}{lcc}
+    \toprule
+     {Architecture}     & {Wiki-2} & {Shakespeare}\\
+     \midrule
+         (i) Vanilla transformer $L=$ \#independent layers in ours & 54.64 & 167.3\\
+         (ii) Training all epochs with the final architecture & 59.35 & 185.3\\
+         (iii) Applying the recorded dynamic on permuted indices & 65.21 & 172.2\\
+         (iv) Applying the recorded dynamics on the indices without Q  & 50.05 & 161.3\\
+         (v) Fully dynamic without weight tying  & 235.8 & 202.9\\
+(vi) All layers are trainable at initialization & 50.18 & \textbf{159.3}\\
+
+         (vii) {``Cycle'':} Connecting layer $i$ to layer $\frac{L}{2} + i$& 51.93 & 176.6\\
+        { (viii) ``Cycle Rev'': Connecting layer $i$ to layer $L-i$} & {52.83} & {180.0}\\
+         {(ix) ``Sequence'': Connecting pairs of consecutive layers} & {54.01}& {173.9}\\
+         \midrule
+         Conventional training & 53.57 & 173.2\\
+                  Our full method & \textbf{49.37} & 161.1\\
+         \bottomrule
+    \end{tabular}
+\end{table}
+
+\noindent{\bf Ablation study\quad} Ablation experiments were conducted on the Wiki-2 dataset with the GPT-2 architecture. Since much of the ablations focus on validating that the success of the method does not arise from avoiding overfitting by reducing the network capacity, we also run ablations on the small Shakespeare dataset. This dataset has parts of Shakespeare's plays, sonnets, and other writings. %It contains a wide range of linguistic constructs, ranging from simple sentences to complex dialogues, poetic forms, and archaic language}. 
+It is small, with 250K tokens and the ablation uses a 12-layer GPT-2 like model.
+
+Since the model obtained with our method has about a sixth of the number of parameters in the original model, we need to explore whether the full model capacity is required at all. To validate this, we designed a few ablations: (i) a transformer in which the number of layers $L$ is the number of independent layers obtained by our method, and (ii) training from scratch a static transformer architecture that has the same weight-tying structure as our method's final architecture.
+
+As can be seen in Tab.~\ref{tab:ablation}, both these transformers are far behind our full method's results and also behind the conventional training results. {The second ablation implies that our method is not suitable for finding ``lottery tickets'', i.e., pruned architectures for training from scratch~\citep{frankle2018lottery,chen2020lottery,chen2020earlybert,prasanna2020bert,movva2020dissecting}.}
+
+Another related ablation (iii) checks whether the dynamic status changes can be made arbitrarily, by recording the state vector $\vs$ during the course of training, and applying a permuted version of it $\pi(\vs)$ when changing the status of a layer to copy another layer or to be tied, where $\pi$ is a fixed permutation operator that is applied element-wise. 
+
+The results of this ablation demonstrate that the layer identity is important and that a significant degradation occurs in the model's performance when the same dynamics are applied to a different set of layers. As a sanity check, we also (iv) run the recorded set of states on another training session (without performing Q-learning). As can be seen, this obtains results that are similar but slightly worse than those of the full unablated method.
+
+The necessity of weight tying is demonstrated by ablation (v), in which weight replication occurs as in the full method, but weight tying does not take place. This leads to very unstable training and a very high perplexity score.
+
+We also explore (vi) the effect of freezing all layers except for layer 0 at initialization by freeing all layers to train (removing line 2 of Alg.~\ref{alg:rl_training}. This somewhat outperforms the full method on the shakespeare dataset but is less successful on Wiki-2. We conclude that freezing at initialization may not be crucial (more experiments are needed). However, it has a sizable advantage in the peak GPU memory consumption.
+
+We also provide results for (vii) using half the layers and tying every layer $i=1,2,\dots,L/2$ to layer $L/2+i$. This cuts the number of trained layers by a much smaller fraction than our own method and is given as a reference since it was outlined as motivation in Sec.~\ref{sec:intro}. As mentioned, this improves perplexity over the conventional training, but not nearly as much as our full method. 
+
+{As mentioned in Sec.~\ref{sec:related}, ablation (vii) is the Cyclic pattern of~\citep{takase2021lessons}. The two other patterns there are provided for completeness as ablations (viii) and (ix). As can be seen, these patterns, which reuse only 50\% of the layers, are not as effective as our method.}
+
+
+
+\section{Discussion and Limitation}
+
+\label{sec:discussion}
+
+Replacing the weights of an entire layer with those of another is a drastic change to the network. Yet, as shown in Fig.~\ref{fig:numchanges} (blue graph), such changes occur throughout training. This ability to perform this change without causing a temporal setback to the training process is not trivial, since even functionally equivalent layers can be expressed in multiple ways, by permuting the attention heads or the outputs of the feed-forward network. However, permutation to the feed-forward network would drastically modify the token embedding the next layer observes, and would cause the network's performance to degrade unless the other layers co-adapt. 
+
+We attribute the fact that no such setbacks occur to the way the training process initializes. Layer 0 trains in a way that cannot be too specific, due to the random{ly initialized} filters downstream{, which require time to co-adapt}. Then, layer 0 is replicated and multiple copies of it are trained simultaneously. Other layers are also copied and their copies begin to train. However, given that layer zero is a valid replication source for all layers, and given that the exploration constant $\epsilon$ is initialized at a high value, layer zero is dominant. This domination, as can be seen in Fig.~\ref{fig:replicationgraph}, is maintained until the end of training. 
+
+We posit that all layers are exposed directly or through a replication chain to the information of layer 0, and that it spreads a specific order of attention heads and embeddings that are maintained across layers. Having this global alignment is crucial for smooth training despite large blocks of weights being copied during the process. Support for this hypothesis can be seen in Fig.~\ref{fig:our-similarity}(a), which depicts the Pearson correlations between the weights of the feed-forward networks of the independent transformer layers trained with our method. The minimal correlation is 0.93. For reference, the correlation between the same layers in the conventional training (some of the 48 untied layers) is shown in panel (b). The inter-layer correlations are close to zero, as expected by the arbitrary permutation argument.
+
+\begin{figure}[t]
+    \centering
+    \begin{tabular}{cc}
+    \includegraphics[width=.40289\textwidth,keepaspectratio]{images/our-similarity-matrix.jpeg}&
+    \includegraphics[width=.40289\textwidth,keepaspectratio]{images/reference-similarity-matrix.jpeg}\\
+    (a) & (b)\\
+    \end{tabular}
+    \caption{(a) Pearson correlations between the weights of the feed-forward networks of the untied layers (Wiki-2; GPT-2 architecture). The colorbar range is [0.93,1] (b) As a reference, the correlations between the same layers in the conventionally trained GPT-2 model. The value range is [0,1].}
+    \label{fig:our-similarity}
+\end{figure}
+
+Our research is focused on training transformer models from the ground up, contrasting with the extensive body of work that primarily concentrates on the fine-tuning of pre-trained transformers. ~\citep{devlin2018bert,liu2019roberta,dodge2020fine,raffel2020exploring,brown2020language,he2021deberta}. It is unclear whether a method that starts with one trainable layer and then gradually explores options to untie some layers can be applied in such a case, especially since, as shown in Sec.~\ref{sec:experiments}, the number of independent layers remains small throughout training. An alternative that makes sense, but which is left for future work, is to apply the dynamic weight tying to the low-rank updates (LoRA) of \cite{hu2021lora}. One can also try to apply RL methods that employ backtracking~\citep{dary2022dependency}, or use alternative search strategies, such as CAB~\citep{zhang1998complete} or MCTS~\citep{chaslot2008progressive}, changing one state index at a time.
+
+{The evaluation of our work is limited to transformers in the language domain. However, transformers are ubiquitous. Finally, transformers are often finetuned on downstream tasks.}
+
+
+\section{Conclusions}
+
+
+We present a method that is, as far as we can ascertain, the most dynamic form of Neural Architecture Search presented. During the training process itself, a deep Q-learning network drives a layer replication process, which ends up with over 90\% of the parameters being in layers that completely replicate an earlier layer. This order of magnitude reduction in the number of parameters is achieved without sacrificing the perplexity score and, in some cases, also leads to an improvement in this metric. These surprising findings are further explored by visualizing the dynamics of the training process and the crucial components of the method are demonstrated in an ablation study. 
+
+
+

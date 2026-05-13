@@ -1,0 +1,311 @@
+\title{Mitigating Reward Over-optimization in Direct Alignment Algorithms with Adaptive Importance Sampling}
+
+\begin{abstract}
+Recently, Direct Alignment Algorithms (DAAs) such as Direct Preference Optimization (DPO) have emerged as alternatives to the standard Reinforcement learning from human feedback (RLHF) for aligning large language models (LLMs) with human values. Surprisingly, while DAAs do not use a separate proxy reward model as in RLHF, their performance can still deteriorate due to over-optimization – a phenomenon found in RLHF where the policy can exploit failures of the reward model to achieve high rewards but the actual quality of the model begins to degrade. Recent studies find that DAAs tend to increase probability mass on out-of-distribution responses and the training objective in DAAs is heavily under-constrained on these out-of-distribution (OOD) responses due to a mismatch between offline distribution and the LM policy. In this paper, we propose a method to mitigate the distribution shift between the offline distribution and the LM policy by multiplying with an importance weight to reflect the policy distribution. The resulting method, called Adaptive Importance Sampling (AIS), relies on importance sampling techniques and resolves the high variance issue in importance sampling without extra hyper-parameters. Our experiment results showed Adaptive IS can improve win rates by 15% while maintaining a lower KL budget compared to DAAs.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Preference learning has emerged as an important part of the fine-tuning process to align large language models with human preference. There are two predominant flavors of preference learning for LLMs. The first approach includes online reinforcement learning from human feedback (RLHF) methods (Ouyang et al., 2022; Christiano et al., 2017). It typically involves a multi-stage procedure: fine-tuning a reward model to capture human preference and fine-tuning the LM policy to maximize the expected reward using online RL algorithms such as Proximal Policy Optimization (Schulman et al., 2017). While empirically performant, this multi-stage procedure is complex and computationally intensive: it requires repeated querying of the reward model as well as sampling from the current policy. A set of alternative methods called direct alignment algorithms (DAAs), avoid fitting separate reward models, instead opting to simply train the policy directly on the offline preference dataset via a ranking loss. The most known examples are Direct Preference Optimization (DPO) (Rafailov et al., 2023), and Identity Preference Optimization (IPO) (Tang et al., 2024c). Since DAAs typically do not sample new responses from the LLM’s policy during training, they are characterized as offline preference learning methods.  
+
+In RLHF, LMs are trained to optimize a surrogate, imperfect reward function instead of the actual ”ground-truth” human reward, resulting in situations where the policy learns to produce responses that achieve high reward scores, but their quality is poor. This phenomenon is often known as the reward over-optimization or reward hacking problem in RLHF (Stiennon et al., 2020b; Ouyang et al., 2022; Chen et al., 2024b; Gao et al., 2022). In the context of direct alignment algorithms (DAAs), reward-hacking-like behaviors still exist even when there is no explicit reward model (Rafailov et al., 2024; Guo et al., 2024). For instance, LLMs fine-tuned with DPO generate responses with increasing length but do not improve the ground-truth win rate (Park et al., 2024a). In another study, Rafailov et al. (2024) found that DAAs exhibit degradation patterns at various KL-divergence budgets, similar to those in RLHF.  
+
+There are several explanations for why the reward over-optimization phenomenon occurs in the classical RLHF pipeline: (1) the reward functions are evaluated on unseen responses and (2) learned reward functions prefer unintended behaviors. Morever, the LLMs can learn to generate OOD examples to exploit these failure modes of RMs (Hendrycks et al., 2021; Rame et al., 2024). Similarly, Rafailov et al. (2024) explains the over-optimization in DAAs by appealing to the under-constrained nature of the optimization problem used in DAAs when extrapolating to OOD samples. As a result, a large amount of extrapolation can potentially be detrimental to the performance of the learned policy.  
+
+In this work, we first identify one source of over-optimization in DAAs: the ineffective regularization of DAAs due to the shift between the distribution used for data collection and the trained policy, leading to ineffective use of the KL divergence budget. Our results show that reward over-optimization happens earlier and the performance gain from DAAs diminishes as the offline data shifts away from the LM policy. One approach to mitigate this problem is to add a KL divergence penalty to encourage the model to stay close to reference policy (Song et al., 2024; Fisch et al., 2024) (Song et al., 2024; Fisch et al., 2024; Ding et al., 2024). This additional regularization explicitly prevents the LM policy from pushing a large probability mass to OOD responses. However, these methods are costly since they require repeated sampling from the current policy and are sensitive to hyper-parameters. We propose a novel method based on importance sampling techniques, called Adaptive Importance Sampling (Adaptive IS). Adaptive IS reduces the effects of the distribution shift problem while also balancing the trade-off between bias and variance of the importance ratio to stabilize training. Furthermore, the implementation of Adaptive IS incurs minimal computational overhead, making it highly scalable.  
+
+Our main contributions are as follows:  
+
+• We study the effect of distribution shift and how it relates to reward over-optimization in DAAs.   
+• We propose Adaptive Importance Sampling (Adaptive IS), to minimize the distribution gap between offline distribution and the LM policy   
+• Our results indicate that Adaptive IS outperforms DAAs, with up to a $15\%$ win rate as measured by a golden reward model, while maintaining a lower KL budget.  
+
+
+
+\section{2 PRELIMINARIES  }
+
+
+We provide the formulation and background of RLHF and DAAs in sections 2.1 and 2.2, respectively. The over-optimization phenomenon and regularization in DAAs are presented in Section 2.3 and 2.4.  
+
+2.1 REINFORCEMENT LEARNING FROM HUMAN FEEDBACK (RLHF)  
+
+To align LMs with human preferences, the overall RLHF pipelines consist of three stages:  
+
+Supervised Fine-Tuning (SFT): Given a pre-trained model and a dataset of prompts $\mathbf{x}$ and response y. Language models are trained for instruction following via maximum-likelihood estimation over next-tokens. The resultant model is then called $\pi_{\mathrm{ref}}(\mathbf{y}|\mathbf{x})$ .  
+
+Reward Modeling: In the second phase, the reference model is prompted with prompts $\mathbf{x}$ to produce pairs of responses $(\mathbf{y_{1}},\mathbf{y_{2}})\sim\pi_{\mathrm{ref}}(\cdot|\mathbf{x})$ . The pair of responses then being labeled by the human to express preferences, which are denoted as $\mathbf{y}^{\bar{w}}\,\succ\,\mathbf{y}^{l}\vert\mathbf{x}$ . Typically, user rankings are assumed to follow the Bradley-Terry model:  
+
+$$
+p(\mathbf{y}_{1}\succ\mathbf{y}_{2}|x)=\frac{\exp(r(\mathbf{x},\mathbf{y}_{1}))}{\exp(r(\mathbf{x},\mathbf{y}_{1}))+\exp(r(\mathbf{x},\mathbf{y}_{2}))}=\sigma\big(r(\mathbf{x},\mathbf{y}_{1})-r(\mathbf{x},\mathbf{y}_{2})\big)
+$$  
+
+This results on preference dataset $\mathcal{D}\;=\;\{\mathbf{x}^{(i)},\mathbf{y}^{w(i)},\mathbf{y}^{l(i)}\}_{i=1}^{N}$ . We can then use this dataset to train a parametrized reward model $r_{\phi}(x,y)$ to maximize the differences between $\mathbf{y}^{w}$ and $\mathbf{y}^{l}$ using  
+
+maximum likelihood estimation with the following objective:  
+
+$$
+\mathcal{L}_{R}(r_{\phi})=-\mathbb{E}_{(\mathbf{x},\mathbf{y}^{w},\mathbf{y}^{l})\sim\mathcal{D}}[\log\sigma(r_{\phi}(\mathbf{x},\mathbf{y}^{w})-r_{\phi}(\mathbf{x},\mathbf{y}^{l}))]
+$$  
+
+RL Fine-tuning: After obtaining the learned reward function at the second stage, it can be used to provide feedback to the language model with an on-policy algorithm such as PPO with the following objective:  
+
+$$
+\operatorname*{max}_{\pi_{\theta}}\mathbb{E}_{\mathbf{x}\sim\mathcal{D},\mathbf{y}\sim\pi_{\theta}(\cdot|\mathbf{x})}\Big[r_{\phi}(\mathbf{x},\mathbf{y})-\beta\mathbb{K}\mathbb{L}(\pi_{\theta}||\pi_{\mathrm{ref}})\Big]
+$$  
+
+Where $\beta$ controlling the deviation from the reference policy $\pi_{\mathrm{ref}}$ . This constraint prevents the model from deviating too far away from the region that the reward model is well-trained on and prevents mode-collapse to single high-rewards responses.  
+
+2.2 DIRECT ALIGNMENT ALGORITHMS (DAAS).  
+
+While RLHF achieves superior performance in aligning LMs with human preferences, this process is complex and computationally expensive. DAAs address these problems by directly optimizing policy $\pi_{\theta}$ over preference data. Amongst these algorithms, Direct Preference Optimization is the most popular approach, DPO derived the closed-form solution of Eq 2,  
+
+$$
+\pi^{*}(\mathbf{y}|\mathbf{x})={\frac{1}{Z(\mathbf{x})}}\pi_{\mathrm{ref}}(\mathbf{y}|\mathbf{x})\exp\left({\frac{1}{\beta}}r(\mathbf{x},\mathbf{y})\right)
+$$  
+
+With $Z(\mathbf{x})$ as the normalization function, According to the above equation, we can parameterize the reward function by the log-likelihood ratio between $\pi_{\theta}$ and $\pi_{\mathrm{ref}}$ :  
+
+$$
+r_{\theta}(\mathbf{x},\mathbf{y})=\beta\log\frac{\pi_{\theta}(\mathbf{y}\vert\mathbf{x})}{\pi_{\mathrm{ref}(\mathbf{y}\vert\mathbf{x})}}+\beta\log Z(\mathbf{x})
+$$  
+
+This enables us to optimize the LM policy $\pi_{\theta}$ directly with human feedback data:  
+
+$$
+\mathcal{L}_{\mathrm{DAA}}(\pi_{\theta},\pi_{\mathrm{ref}})=\mathbb{E}_{\mathbf{x}\sim\mathcal{D},(\mathbf{y}^{w},\mathbf{y}^{l})}\sim\pi_{\mathrm{ref}}(\cdot|\mathbf{x})\left[f\left(\beta\log\frac{\pi_{\theta}(\mathbf{y}^{w}|\mathbf{x})}{\pi_{\mathrm{ref}}(\mathbf{y}^{w}|\mathbf{x})}-\beta\log\frac{\pi_{\theta}(\mathbf{y}^{l}|\mathbf{x})}{\pi_{\mathrm{ref}}(\mathbf{y}^{l}|\mathbf{x})}\right)\right]
+$$  
+
+Where $f$ is a convex loss function. When $f(x)=-\log\sigma(x)$ , we recover standard DPO objective (Rafailov et al., 2023), other popular objectives include: IPO (Azar et al., 2024) with $f(x)=(x-$ $\mathrm{i)^{2}}$ . Other objectives can be found in (Tang et al., 2024c). In this paper, we will focus on these 2 standard objectives due to limited computational resources.  
+
+
+
+\section{2.3 OVER-OPTIMIZATION IN DAAS  }
+
+
+Gao et al. (2022) refer to the over-optimization phenomenon as the situation where algorithms consume a large optimization budget without improving or even reducing performance. In this study, the KL divergence $\mathbb{K L}(\pi_{\theta},\pi_{\mathrm{ref}})$ is used as an optimization budget since it measures how far the optimized policy $\pi_{\theta}$ drifts away from the reference policy $\pi_{\mathrm{ref}}$ during training. Rafailov et al. (2024) study the trade-off between KL divergence and policy performance under three direct alignment objectives DPO, IPO, and SLiC. They observe clear over-optimization after a certain time during training when an additional increase in the KL budget leads to decreasing model performance. This pattern persists across model sizes, and smaller models often exhibit clearer signs of overoptimization. Moreover, regularization methods such as length regularization can not mitigate this problem. Tang et al. (2024a) observe that both online and offline variants of DAAs suffer from overoptimization, however, online achieve better budget and performance trade-offs than offline. It’s not clear why since both of them are bottlenecked by an offline pairwise preference dataset.  
+
+2.4 REGULARIZATION IN DAAS  
+
+In this section, we borrow analysis from GPO Tang et al. (2024d) to investigate the regularization effect of DAAs’ loss functions. We first denote the log ratio difference as ρθ := log ππrθef((yyww)) log $\frac{\pi_{\theta}(\mathbf{y}^{l})}{\pi_{\mathrm{ref}}(\mathbf{y}^{l})}$ , then the DAA loss can be written as the following:  
+
+$$
+\begin{array}{r}{\mathcal{L}_{\mathrm{DAA}}(\rho_{\theta})=\mathbb{E}_{\mathbf{x}}\mathbb{E}_{(\mathbf{y}^{w},\mathbf{y}^{l})\sim\pi_{\mathrm{ref}}}\left[f(\beta\rho_{\theta})\right].}\end{array}
+$$  
+
+We consider the Taylor expansion around $\rho_{\theta}=0$ ,  
+
+$$
+\frac{\mathfrak{l}_{\mathbf{x}}\mathbb{E}_{(\mathbf{y}^{w},\mathbf{y}^{l})\sim\pi_{\mathrm{ref}}}\left[f\left(\beta\rho_{\theta}\right)\right]\approx f(0)+\underset{\mathrm{preferwes}}{\underbrace{f^{\prime}(0)\beta\cdot\mathbb{E}_{\mathbf{x}}\mathbb{E}_{(\mathbf{y}^{w},\mathbf{y}^{l})\sim\pi_{\mathrm{ref}}}\left[\rho_{\theta}\right]}}+\underset{\substack{\mu\cdot\mathrm{weighted}\,\mathrm{squared}\,\mathrm{loss}}}{\underbrace{f^{\prime\prime}(0)\beta^{2}}}\mathrm{.~\mathbb{E}_{x}\mathbb{E}_{(\mathbf{y}^{w},\mathbf{y}^{l})\sim\pi_{\mathrm{ref}}}\left[\rho_{\theta}^{2}\right]},
+$$  
+
+Consider the expectation of gradient of the $\mu$ -weighted squared loss term,  
+
+$$
+\mathbb{E}_{\mathbf{x}}\mathbb{E}_{\mathbf{y}\sim\pi_{\mathrm{ref}}}\left[\nabla_{\theta}\frac{1}{2}\rho_{\theta}^{2}\right].
+$$  
+
+Tang et al. (2024d) show that if $\mu=\pi_{\theta}$ then this expectation will recover the update of reverse KL regularization, i.e.  
+
+$$
+\mathbb{E}_{\mathbf{x}}\mathbb{E}_{\mathbf{y}\sim\pi_{\theta}}\left[\nabla_{\theta}\frac{1}{2}\rho_{\theta}^{2}\right]=C\mathbb{E}_{\mathbf{x}}\nabla_{\theta}\mathbb{K}\mathbb{L}\left(\pi_{\theta},\pi_{\mathrm{ref}}\right)
+$$  
+
+where $C$ is constant depended on $\beta$ , $f^{\prime}(0)$ and $f^{\prime\prime}(0)$ . This equality suggests that DAAs enforce regularization via optimizing a $\mu$ -weigthed objective.  
+
+Note that the approximation in Eq. 1 is only valid when $\rho_{\theta}$ is small and Eq. 2 is only valid when the expected gradient under current policy $\pi_{\theta}$ can be estimated using training data. These conditions are generally not held when the training progresses. As a result, the algorithms can not guarantee bounded reverse KL if the training data does not cover the response space well (Song et al., 2024). In section 3.2, we provide an analysis of the regularization effect in DAAs using a didactic setting.  
+
+
+
+\section{3 METHODOLOGY  }
+
+
+
+
+\section{3.1 ADAPTIVE IMPORTANCE SAMPLING (ADAPTIVE-IS)  }
+
+
+In the DAAs algorithm, human preference data does not need to be collected from the starting policy $\pi_{\mathrm{ref}}$ . Moreover, even if $\mu=\pi_{\mathrm{ref}}$ , during training DAAs tend to assign a high probability mass on OOD responses that are not presented in offline data (Tajwar et al., 2024; Rafailov et al., 2024). Once the policy $\pi_{\theta}$ moves far away from $\pi_{\mathrm{ref}}$ , this can potentially be detrimental to performance and offline data may not have sufficient coverage to rectify.  
+
+To mitigate this problem, a simple approach is to apply online sampling training to collect responses from the current policy $\pi_{\theta}$ and use an external reward to correct these biases from the LM policy (Guo et al., 2024)(Calandriello et al., 2024; Guo et al., 2024).  
+
+$$
+\mathcal{L}_{\mathrm{Online-DPO}}(\pi_{\theta},\pi_{\mathrm{ref}})=-\mathbb{E}_{\mathbf{x}\sim\mathcal{D},(\mathbf{y}^{w},\mathbf{y}^{l})\sim\pi_{\theta}(\cdot|\mathbf{x})}\left[\log\sigma\left(\beta\log\frac{\pi_{\theta}(\mathbf{y}^{w}|\mathbf{x})}{\pi_{\mathrm{ref}}(\mathbf{y}^{w}|\mathbf{x})}-\beta\log\frac{\pi_{\theta}(\mathbf{y}^{l}|\mathbf{x})}{\pi_{\mathrm{ref}}(\mathbf{y}^{l}|\mathbf{x})}\right)\right]
+$$  
+
+However, online training is considerably more complex than off-policy methods, involving multistage training (requiring training an external reward) and sampling from the LM policy during training, incurring significant computational costs.  
+
+Our method aims to minimize the distribution gap between offline distribution and the policy distribution while does not need online sampling using importance sampling, a technique to estimate expectations under one distribution given samples from a reference distribution $\pi_{\mathrm{ref}}$ , which leads to an unbiased estimation of online-DPO objective :  
+
+$$
+\begin{array}{r l}&{\quad\mathcal{L}_{\mathrm{IS-DPo}}(\pi_{\theta},\pi_{\mathrm{ref}})}\\ &{=-\mathbb{E}_{\mathbf{x}\sim\mathcal{D},\mathbf{y}^{w},\mathbf{y}^{l}\sim\pi_{\mathrm{ref}}(\cdot|\mathbf{x})}\left[\left(w(\mathbf{x},\mathbf{y}^{w},\mathbf{y}^{l})\log\sigma\left(\beta\log\frac{\pi_{\theta}\left(\mathbf{y}^{w}|\mathbf{x}\right)}{\pi_{\mathrm{ref}}\left(\mathbf{y}^{w}|\mathbf{x}\right)}-\beta\log\frac{\pi_{\theta}\left(\mathbf{y}^{l}|\mathbf{x}\right)}{\pi_{\mathrm{ref}}\left(\mathbf{y}^{l}|\mathbf{x}\right)}\right)\right]}\end{array}
+$$  
+
+where the importance weights $\begin{array}{r}{w(\mathbf{x},\mathbf{y}^{w},\mathbf{y}^{l})\,=\,\frac{\pi_{\theta}(\mathbf{y}^{w}|\mathbf{x})}{\pi_{\mathrm{ref}}(\mathbf{y}^{w}|\mathbf{x})}\frac{\pi_{\theta}(\mathbf{y}^{l}|\mathbf{x})}{\pi_{\mathrm{ref}}(\mathbf{y}^{l}|\mathbf{x})}}\end{array}$ . Here, the importance weight is the ratio of sequence-level probability between $\pi_{\theta}$ and $\pi_{\mathrm{ref}}$ , e.g. $\begin{array}{r}{{\frac{\pi_{\boldsymbol\theta}\left(\mathbf{y}\left|\mathbf{x}\right)}{\pi_{\mathrm{ref}}\left(\mathbf{y}\left|\mathbf{x}\right)}}\,=\,\prod_{t=1}^{T}{\frac{\pi_{\boldsymbol\theta}\left(y_{t}\left|\mathbf{x},\mathbf{y}_{<t}\right)}{\pi_{\mathrm{ref}}\left(y_{t}\left|\mathbf{x},\mathbf{y}_{<t}\right)}}}\end{array}$ The update is multiplied by this importance weight to adjust the action probabilities so that the expectation is as if the actions were sampled according to the LM policy $\pi_{\theta}$ .  
+
+Adaptive Importance Sampling Direct computing the importance weights in training can suffer from extremely high variance when $\pi_{\theta}$ deviate far away from $\pi_{\mathrm{ref}}$ . To mitigate this problem, we consider another estimator, called Exponential Smoothing Importance Sampling (Aouali et al., 2023; Korba & Portier, 2022), which is defined as:  
+
+$$
+\begin{array}{r l}&{\mathcal{L}_{\mathrm{DPO}}(\pi_{\theta},\pi_{\mathrm{ref}})}\\ &{=\,-\,\mathbb{E}_{(\mathbf{x},\mathbf{y}^{w},\mathbf{y}^{l})\sim\mathcal{D}}\left[\left(\frac{\pi_{\theta}(\mathbf{y}^{w}|\mathbf{x})}{\pi_{\mathrm{ref}}(\mathbf{y}^{w}|\mathbf{x})}\frac{\pi_{\theta}(\mathbf{y}^{l}|\mathbf{x})}{\pi_{\mathrm{ref}}(\mathbf{y}^{l}|\mathbf{x})}\right)^{\alpha}\log\sigma\left(\beta\log\frac{\pi_{\theta}(\mathbf{y}^{l}|\mathbf{x})}{\pi_{\mathrm{ref}}(\mathbf{y}^{w}|\mathbf{x})}-\beta\log\frac{\pi_{\theta}(\mathbf{y}^{l}|\mathbf{x})}{\pi_{\mathrm{ref}}(\mathbf{y}^{l}|\mathbf{x})}\right)\right]}\end{array}
+$$  
+
+where $\alpha$ serve as a regularization to trade-offs between bias and variance of the Importance weight estimator. It is easy to see that when $\alpha=0$ , we recover DPO loss and when $\alpha=1$ , we obtain DPO with importance sampling
+
+How to choose $\alpha?$ Given the LMs $\pi_{\theta}$ is an auto-regressive model. Where for each prompt $\mathbf{x}$ , The $\mathrm{LM}\,\pi_{\theta}$ generate $\mathbf{y}$ in an auto-regressive manner:  
+
+$$
+\pi_{\boldsymbol{\theta}}(\mathbf{y}|\mathbf{x})=\prod_{t=1}^{T}\pi_{\boldsymbol{\theta}}(y_{t},(\mathbf{x},\mathbf{y}_{<t})
+$$  
+
+As the number of the tokens $T$ increases, the variance of the importance weight can grow exponentially with respect to the number of tokens. Thus, we should decrease $\alpha$ value when the number of tokens is large and vice versa. by setting $\begin{array}{r}{\alpha=\frac{1}{|y|}}\end{array}$ |y1|, we can adaptively trade-offs between bias and variance of importance weight. :A:d:e:t:a:il:e:d:a:n:a:l:y:si:s:o:f:t:h:e::va:r:i:a:nc:e: :a:n:d:t:h:e:e:f:fe:c:t:o:f: :α:a:r:e::gi:v:e:n:i:n :S:ec:t:i:o:n:E:,:A::p:p:e:n:di:x:.:  
+
+3.2 AN ANALYSIS OF REGULARIZATION EFFECT IN DAAS AND ADAPTIVE-IS DAAS  
+
+![](images/c00e3c369fa5d1448df245f327da512b49b95ad49c07afcbe476034c74d49e7d.jpg)  
+Figure 1: Correlation between KL divergence and $\mu$ -weighted loss and $\mu$ -IS weighted loss. We can see that $\mu$ -IS weighted loss achieve high correlation with the KL divergence.  
+
+As the section 2.4 has shown the square loss term in DAAs only serves as a local approximation of KL divergence when $\pi_{\theta}$ is near $\pi_{\mathrm{ref}}$ , as the LM policy $\pi_{\theta}$ deviates far away from the reference model, the correlation between 2 objectives becomes more difficult to grasp. To see how importance sampling can enforce a more effective regularization in DAAs, we experiment with a synthetic setup using a Mixture of Gaussian and measure the correlation between $\mu$ -weighted loss and $\mu$ -weighted loss with importance sampling ( $\mu$ -IS weighted loss).  
+
+$$
+\mathbb{E}_{\mathbf{x}\sim\mathcal{D},(\mathbf{y}^{w},\mathbf{y}^{l})\sim\mu(\cdot|\mathbf{x})}\left[\frac{w(\mathbf{x},\mathbf{y}^{w},\mathbf{y}^{l})}{2}\left(\log\frac{\pi_{\theta}(\mathbf{y}^{w}|\mathbf{x})}{\pi_{\mathrm{ref}}(\mathbf{y}^{w}|\mathbf{x})}-\log\frac{\pi_{\theta}(\mathbf{y}^{l}|\mathbf{x})}{\pi_{\mathrm{ref}}(\mathbf{y}^{l}|\mathbf{x})}\right)^{2}\right]
+$$  
+
+The offline distribution $\mu$ is parameterized as $\begin{array}{r l r}{\mu}&{=}&{\frac{3}{10}{\mathcal N}(-0.8,0.2^{2})\;+\;\frac{4}{10}{\mathcal N}(0,0.2^{2})\;+}\end{array}$ $\scriptstyle{\frac{3}{10}}\!\mathcal{N}(0.8,\,0.2^{2})$ . We assume $\pi_{\mathrm{ref}}=\mu$ and the policy distribution $\pi_{\theta}=\mathcal{N}(\theta,0.1^{2})$ , where $\theta$ is a parameter, we varying from $[-1,1]$ and estimate divergence, $\mu$ -weighted loss and $\mu$ -IS weighted loss, we generate 2000 samples to estimate these objectives.  
+
+In figure 1, we show the correlation between the $\mathrm{KL}$ divergence and $\mu$ -weighted loss and $\mu$ -IS weighted loss under log scale with $\theta$ varying from $[-1,1]$ . When $\pi_{\theta}$ is close to $\pi_{\mathrm{ref}}$ , both 2 losses exhibit a high correlation with KL divergence. But for $\mu$ -weigthed loss, the correlation starts to break down when $\pi_{\theta}$ moves far away from $\pi_{\mathrm{ref}}$ , while $\mu$ -IS still exhibits a high correlation with KL divergence.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+In this section, we will first examine how distribution shift affects the performance of DAAs. We find that under distribution shift, the performance gain from DAAs is margin and decreases when the offline data shifts away from the LM policy. Moreover, reward-overoptimization happen faster under distribution shift.  
+
+Then, we will evaluate our methods in standard RLHF datasets: TL;DR summarization.  
+
+4.1 EXPERIMENT SETTINGS  
+
+We adopt a synthetic setup from Gao et al. (2022) to study the trade-off between KL divergence and policy performance. We first train a golden reward model with a Pythia- $.6.9\mathfrak{b}$ from the initial human preference dataset and then use it to label preference data for training offline algorithms. The gold reward model will be much larger than the optimized policy to simulate the complexity of human preferences for the LM policy to be captured given a finite dataset.  
+
+Dataset: For all experiments, we will use Reddit TL;DR summarization dataset Stiennon et al. (2020a)(Stiennon et al., 2020a). It is a summarization dataset with SFT split, consisting of 116,722 human-written summaries and preference split, comprising 92,858 humanannotated preference pairs.  
+
+Pretrained Model: All of our experiments will be carried out using the Pythia family of Large Language Models Biderman et al. (2023) (:B:i:d:e:r:m:a:n: e:t: a:l:.,: 2:0:2:3:): with 1B model sizes due to limited computational resources. All models have gone through supervised fine-tuning on the SFT split of the TL;DR dataset, resulting $\pi_{\mathrm{ref}}$ policy. The model is then trained on preference learning data for 1 epoch using AdamW optimizer, with a cosine decay schedule and a learning rate of $1e-6$ .  
+
+Model Evaluation: We evaluate the performance of any policy by the win rate against 512 reference summaries available in the SFT split. The golden reward model determines the win rate. We evaluate with 2 standard objectives in DAAs: DPO and IPO. Following previous works, we use the KL divergence between the current policy $\pi_{\theta}$ and the reference policy $\pi_{\mathrm{ref}}$ as a measure of optimization budget (Rafailov et al., 2024; Tang et al., 2024a; Gao et al., 2022).  
+
+
+
+\section{4.2 MAIN RESULTS  }
+
+
+![](images/96e4f5e67219a82e89ec00a4a0200de6d7ec54c18ac34ea5cf47741fcab4eed5.jpg)  
+
+Figure 2: Trade-off between performance and KL divergence for DPO and Adaptive IS with varying regularization strength. We see that Adaptive IS achieves superior performance and KL efficiency.  
+
+In this section, we evaluate the over-optimization phenomenon when using Adaptive IS and compare it against two baselines: DPO and IPO. Our key findings are illustrated in Figure 2, which displays the model win rates using an evaluation set of prompts judged by the golden reward model. It’s important to note that over-optimization for DAAs occurs when the performance shows a hump-shaped pattern, where increasing the KL budget leads to a decrease in model performance (Rafailov et al., 2024). These patterns can be clearly observed from the DPO and IPO tradeoff curves. On the other hand, Adaptive IS-DPO (resp IPO) outperforms standard DPO (resp IPO) by a large margin given a smaller KL budget, increasing performance by over $10\%$ under the same KL budget. The results demonstrate that Adaptive IS can address the over-optimization issue and uses the KL divergence budget more efficiently than offline.  
+
+![](images/8743fc59d41277d59504ea3867ab008c580d88dfc13cd38702a40139278c5aa1.jpg)  
+Figure 3: Evolution of win-rates, and $\mathrm{KL}$ divergence. Adaptive IS model achieves higher final win rate over standard DPO model with less than $35\%$ of the KL budget Moreover, Adaptive IS maintains consistent performance throughout training, while standard DPO performance peaks early at $20\%$ of the first epoch and start to decreasing performance.  
+
+In previous studies, it has been shown that DAAs tend to show early convergence behavior during training. They achieve their highest performance after being trained on only a small portion of the data. Subsequently, their performance starts decreasing in conjunction with a rise in KL divergence metrics (Park et al., 2024a; Rafailov et al., 2023). In figure 3, we analyze the intra-epoch training dynamics patterns of standard DPO, IPO, and the AIS variants as configurations with $\beta\,=\,0.01$ . After $20\%$ of the epoch, DPO has reach it highest win-rate and start to descend while increasing KL steadily with further training. In contrast, Adaptive IS-DPO shows no degradation as the training progresses and achieves higher final win rates. This can be explained that at the initial steps, DAAs objective always initialized as the reference model, the offline data distribution is similar to the LM policy distribution and can make a solid improvement, as the LM policy deviates far away from the reference model. Offline algorithms become less effective as they no longer represent the distribution encountered during on-policy. This growing discrepancy between the training and test time may lead to sub-optimal performance. In contrast, AIS can leverage pre-collected data and select training instances that benefit the learning process.  
+
+4.3 HOW DOES DISTRIBUTION SHIFT AFFECT OFFLINE PREFERENCE OPTIMIZATION?  
+
+Previous works often attribute the sub-optimal performance of DAAs to a distribution gap between the current policy and the policy used to sample training data. In this experiment, we create a setting where we can control the gap between the training data and the training policy and try to observe the effect of these gaps on the final performance. Specifically, we first perform DPO fine-tuning on the  
+
+378   
+379   
+380   
+381   
+382   
+383   
+384   
+385   
+386   
+387   
+388   
+389   
+390   
+391   
+392   
+393   
+394   
+395   
+396   
+397   
+398   
+399   
+400   
+401   
+402   
+403   
+404   
+405   
+406   
+407   
+408   
+409   
+410   
+411   
+412   
+413   
+414   
+415   
+416   
+417   
+418   
+419   
+420   
+421   
+422   
+423   
+424   
+425   
+426   
+427   
+428   
+429   
+430   
+431  
+
+SFT model $\pi_{\mathrm{ref}}$ and collect two checkpoints $\pi_{\theta_{1}}$ and $\pi_{\theta_{2}}$ , ordered by number of training iterations. Then we generate pairs of responses using πref, $\pi_{\theta_{1}}$ and $\pi_{\theta_{2}}$ , resulting to three synthetic datasets $D_{1}$ , $D_{2}$ and $D_{3}$ , respectively. These datasets are labeled using the golden preference model. By following this procedure, $D_{1}$ , $D_{2}$ and $D_{3}$ are gradually shifted away form $\pi_{\mathrm{ref}}$ . We then finetune 3 LM policies initialized from $\pi_{\mathrm{ref}}$ on these 3 datasets using DPO objective with varying regularization strength.  
+
+![](images/4f4a88ecb53f923fc316bc756594604b9652bf6054aac35ee58682cab13113d0.jpg)  
+
+Figure 4: Win-rate and KL divergence against the fraction of epoch results for datasets $\mathcal{D}_{1},\mathcal{D}_{2},\mathcal{D}_{3}$ gradually shift away from $\pi_{\mathrm{ref}}$  
+
+In figure 4, we observed the same phenomenon as in (Tang et al., 2024a) where the SFT data achieves the best performance compared to the other 2 datasets. For the other 2 datasets, the performance gain is margin and cannot achieve the same level of performance of the data generated policy. Moreover, as the data gradually shifts away from the initial policy, the performance gain from offline preference learning becomes less significant. In figure 5 (left), we report the win-rate KL trade-off between the policy learned from SFT data and data $\mathcal{D}_{3}$ that generated from the policy with the highest win rate. We can see that reward-over-optimization happens earlier under distribution shift than the SFT data and cannot achieve satisfying performance even though the offline is generated from a higher winrate policy, showing the importance of how different the offline distribution is to the LM policycan have large effect to the performance of DAAs. In figure 5 (right), we show the peak win rate of various regularization strengths across different shifted datasets. As the offline shift aways from the initial LM policy $\pi_{\theta}$ , the performance gain from DAAs methods starts to decrease.  
+
+![](images/f5c38a057faef040fc1835609d2ab5f0a071a474e9c59b4a70017d36fc6c76d5.jpg)  
+Figure 5: Left: KL-win rate tradeoff results under distribution shift. Reward-over-optimization happens earlier under distribution shift and cannot achieve satisfying performance even though the online policy data performs much better than the SFT model. Right: Peak win rate across different datasets. As the data gradually shifts, the performance of DAAs starts to degrade.  
+
+
+
+\section{5 RELATED WORKS  }
+
+
+Preference fine-tuning. There are two main approaches for fine-tuning language models based on user preferences. The first approach involves online reinforcement learning methods such as RLHF (Ouyang et al., 2022). This method includes multiple steps: fine-tuning a reward model to capture preferences and optimizing language models to maximize the reward scores. The second approach, known as direct alignment algorithms (DAAs), aims to simplify the multi-step process of RLHF. DAAs directly update the language model’s policy using human feedback. Examples of DAAs include Direct Preference Optimization (DPO) (Rafailov et al., 2023), and Identity Preference Optimization (IPO) (Tang et al., 2024c). Since DAAs don’t typically generate new responses from the language model’s policy during training, they are considered offline preference learning methods.  
+
+Reward-Overoptimization in RLHF. Gao et al. (2022) refer to the over-optimization phenomenon as optimizing too much against a surrogate objective eventually hinders the true objective. They introduce a synthetic setup to study the trade-off between the KL divergence $\mathbb{K L}(\pi_{\theta},\pi_{\mathrm{ref}})$ and the policy performance. In the context of RLHF, prior works have observed that while the LLM’s expected reward increases the actual quality of the model’s output decreases. This phenomenon is termed reward exploitation or reward ”over-optimization” in RLHF and relates to problems such as verbosity bias. Many works try to address this problem by improve robustness of the reward model: (Shen et al., 2023) proposed to use a smaller reward model to capture length bias and use a larger reward model to learn true reward. (Coste et al., 2024) using an ensemble of rewards improves OOD robustness, (Rame et al., 2024) use weighted-averaged reward models. While these methods have been shown to effectively mitigate reward-overoptimization. Reward-overoptimization in DAAs does not train a reward model, so previous approaches cannot be directly applied to this setting.  
+
+Over-optimization in DAAs. Recent works have shown that DAAs also exhibit reward ”overoptimization” behavior such as length bias (Park et al., 2024a). Unlike standard RLHF, these offline algorithms do not train an explicit reward function but directly finetune the LMs. However, research addressing over-optimization in offline learning is still limited compared to standard RLHF. Rafailov et al. (2024) explains why over-optimization occurs by pointing to the under-constrained nature of the optimization problem used in DAAs. Park et al. (2024a) try to tackle this problem using reward shaping to eliminate verbosity bias.  
+
+Performance gap between online and offline alignment. In this work, we draw the relationship between reward-overoptimization problems in offline alignment algorithms and distribution issues of shift in offline reinforcement learning context (Levine et al., 2020; Kumar et al., 2020). That is, during training, LMs $\pi_{\theta}$ is trained on data that is generated from reference model $\pi_{\mathrm{ref}}$ . However, during deployment, it will be queried on its own distribution. which may lead to performance degradation if the LMs are very unlikely to visit states that are present in the offline data Chen et al. (2024a). The most closely related to our works is that of (Zhou et al., 2024), where they try to minimize the distribution gap between offline and the LM policy simulating on-policy learning with off-policy preference data where they approximate the importance weight by a constant instead of using reference probability. However, they do not provide an explanation for how using lengthnormalization helps in balancing the trade-offs between bias and variance in the importance weight.  
+
+
+
+\section{6 CONLUSION  }
+
+
+We study the problem of reward-overoptimization in Direct Alignment Algorithms (DAAs). We showed that one of the main sources in reward-overoptimization in DAAs is due to the mismatch between offline distribution and the LM policy. To reduce this distribution gap problem, we introduce Adaptive Importance Sampling (Adaptive IS), a technique to estimate samples under the LM policy distribution given samples from the offline distribution while resolving the high variance issue of the importance ratio estimation. Our results showed that Adaptive IS improves performance and is highly effective at combating reward over-optimization in DAAs.  
+
+Limitation. In this paper, we adopt the synthetic setup used by (Gao et al., 2022), where we   
+assume the golden reward model as the ground truth reward. However, this golden reward model   
+may not accurately represent real-world human preferences. Moreover, we did not experiment with   
+larger models and other datasets due to limited computational resources.   
+:A:n:o:t:he:r: l:i:m:i:ta:t:io:n::is::t:ha:t::w:e:a:s:s:u:m:e::t:ha:t:t:h:e::pr:e:f:e:re:n:c:e: :d:at:a:i:s:g:e:n:e:r:a:te:d: :b:y:t:h:e:r:e:f:er:e:n:c:e::m:o:d:e:l.   
+:W:h:i:c:h:i:s::n:ot: :a:l:w:a:y:s:h:o:l:d:i:n: :p:ra:c:t:ic:e:.::I:n::m:o:st: :c:a:se:s:,:t:h:e::pr:e:f:e:re:n:c:e: :d:at:a:s:e:t :is::s:a:m:p:l:e:d:f:r:o:m::a:n   
+:u:n:k:n:o:w:n::p:ol:i:cy::µ:,::w:e:c:a:n: :o:n:ly: :e:st:i:m:a:t:e:t:h:is: :p:ol:i:c:y:u:s:i:n:g:m::a:xi:m::u:m::li:k:e:li:h:o:o:d: :es:t:i:m:a:ti:o:n:,:w::hi:c:h   
+r:e:s:u:lt:s:i:n:t:h:e:r:e:fe:r:e:n:c:e:m::o:d:el: :π:re:f.:   
+
+

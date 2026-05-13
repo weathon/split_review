@@ -1,0 +1,364 @@
+\title{Language Model Inversion}
+
+\begin{abstract}
+
+
+Language models produce a distribution over the next token; can we use this to recover the prompt tokens? 
+We consider the problem of language model inversion and show that next-token probabilities contain a surprising amount of information about the preceding text. Often we can recover the text in cases where it is hidden from the user, motivating a method for recovering unknown prompts given only the model's current distribution output. We consider a variety of model access scenarios, and show how even without predictions for every token in the vocabulary we can recover the probability vector through search. On Llama-2 7b, our inversion method reconstructs prompts with a BLEU of $59$ and token-level F1 of $78$ and recovers $27\%$ of prompts exactly. Our dataset of prompts will be provided upon paper publication.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Language models are autoregressive, outputting the probability of each next token in a sequence conditioned on the preceeding text. This distribution is used to generate future tokens in the sequence. 
+Can this distribution also be used to reconstruct the prompt? 
+
+In most contexts, this question is pointless, since we have already conditioned on this information. However, increasingly language models are being offered ``as a service'' where the user may have access to the outputs, but not all of the true prompt. In this context, it may be of interest to users to know the prompt and, perhaps, for the service provider to protect it. This goal has been the focus of ``jailbreaking'' approaches that attempt to use the forward text generation of the model to reveal the prompt. 
+
+We formalize this problem of prompt reconstruction as \textit{language model inversion}, recovering the input prompt conditioned on the language model's next-token probabilities. 
+Interestingly, work in computer vision has shown that probability predictions of image classifiers retain a surprising amount of detail~\citep{dosovitskiy2016inverting}, so it is plausible that this also holds for language models. We propose an architecture that predicts prompts by``unrolling'' the distribution vector into a sequence that can be processed effectively by a pretrained encoder-decoder language model. This method shows for the first time that language model predictions are mostly invertible: in many cases, we are able to recover very similar inputs to the original, sometimes getting the input text back exactly.
+
+We additionally explore the feasibility of prompt recovery across a spectrum of real-world access patterns: full next-token probability outputs, top-K probabilities, probabilities per token upon request, and discrete sampling. We find that even in the case where we are only able to observe text output from the model (no probabilities), we can recover enough of the probability distribution to reconstruct the prompt. 
+Our results show that systems that offer text-only access to a language model reveal information about their prompts. With enough queries, we can extract next-token probabilities at a given position, which can be used to reconstruct the input.
+Unlike text-based jailbreaks, our dense distribution inversion is less inhibited by post-pretraining reinforcement learning techniques such as RLHF to align the model. We also show that our inversion techniques transfer between models of the same family, and are not affected by language model scaling.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\textwidth]{figs/00_overview.pdf}
+  \caption{Under the assumption that a language model is offered as a service with a hidden prefix prompt that produces next-word probabilities, the system is trained from samples to invert the language model, i.e. to recover the prompt given language model probabilities for the next token. 
+  }
+  \label{fig:overview}
+\end{figure}
+
+
+\section{Related work}
+
+
+\textbf{Inverting deep embeddings.} Several lines of work in computer vision have shown that inputs can be approximately reconstructed from the logits of an image classifier \citep{mahendran2014UnderstandingDI,dosovitskiy2016inverting,teterwak2021understanding} or from a self-supervised representation vector \citep{bordes2021highfissl}. Some recent work \citep{takahashi2023breaching} has shown that outputs of computer vision models may reveal private information when shared in a federated learning setup. There is also work on inverting representations in NLP: \citet{song2020informationfromembeddings,li2023sentence,morris2023vec2text} investigate the privacy leakage of text embeddings from encoder models. \citet{morris2023vec2text} succeeds in recovering full text sequences from their embeddings by conditioning the encoder of an encoder-decoder Transformer for inversion. Ours is the first work to  inversion directly from the probability outputs of language models.
+
+\textbf{Model inversion and membership inference.} Given an output of a model, \textit{model inversion} aims to construct an input that produces that output. This problem was investigated for simple regression classifiers in~\citep{fredrikson2014privacy, frederikson2015modelinversion} and extended to neural face-recognition classifiers in~\citep{zhang2020secret}. In some cases, model inversion can help recover training data.  For example, in face-recognition classifiers each class corresponds to a single person, thus any image recovered by model inversion is visually similar to the training images for the same class label.
+\citep{zhang2022textrevealer} used model inversion techniques to recover memorized training data from pretrained language models. 
+A related problem is \textit{membership inference}: given a data point, determine whether it was part of the model's training data or not~\citep{shokri2017membership}. \citet{duan2023privacy} demonstrated membership inference for in-context learning.
+
+Prompt inversion is a form of model inversion, but we work with significantly more complex language models, where dimensionality of inputs is much higher than in the classifiers studied in prior model-inversion work.  Instead of recovering information about the training data, we aim to recover the specific prompt given to the model and filter out information related to the training data. 
+
+\textbf{Model stealing.} As language models become more and more valuable, they are hidden behind increasingly stringent safeguards. Research into `model stealing' aims to explore how models themselves can be replicated via API queries \citep{tramèr2016stealing}. Stealing NLP models has been demonstrated in many domains: linear text-based classification \citep{lowd2005spam}, language classification \citep{pal2019aff, krishna2020thieves}, machine translation \citet{wallace2021imitation}, and even text retreival \citep{dziedzic2023sentence}. Recent work \citet{gudibande2023false} suggests that this form of imitation may create models that replicate surface-level syntax but do not learn more complex attributes like knowledge or factuality. Different than these works, we do not focus on reconstructing model weights from third-party model outputs, but finding a hidden prompt from outputs of a third-party model.
+
+
+
+\section{Prompt Reconstruction}
+
+
+Language models give the probability of the next token conditioned on the tokens that came before it, i.e. $\mathbf{v} = p(x_{T+1} \mid x_{1}, ..., x_{T}; \theta)$, where $\mathbf{v} \in \Delta^{|\mathcal{V}|-1}$ gives the probability of each of $|\mathcal{V}|$ possible next tokens. Generally these models have relatively large vocabulary sizes; the vocabulary $\mathcal{V}$ may contain tens or hundreds of thousands of elements. 
+
+\subsection{Logits contain residual information}
+\label{subsec:logits-residual-info}
+
+We construct a simple experiment to demonstrate the amount of information LM logits may convey about the input. Given 100 text inputs from Wikipedia, we substitute a single word in the first sentence with a synonym\footnote{We perform synonym swaps using GPT-4. More information on this experiment is given in \Cref{app:synonym_swap}}. Let $\hat{x}_{s}$ be the synonym of word $x_{s}$. To measure the change in language model output between the original sequence (containing $x_s$) and the new sequence (containing $\hat{x_{s}}$), we compute two quantities: the KL divergence between the probability output of $p$ for the original and synonym-swapped sequences, and the bit-level Hamming Distance between the two distributions when represented at 16-bit precision.
+
+\begin{wrapfigure}[]{r}{0.5\textwidth}    
+    \centering
+    \includegraphics[width=\linewidth]{figs/01_kl_bits.pdf}
+    \vspace*{-0.5cm}
+    \caption{Long-term information in $\log \mathbf{v}$.}
+    \label{fig:kl_bits}
+\end{wrapfigure}
+
+We plot KL and bitwise Hamming Distance relative to the position of the synonym swap in \Cref{fig:kl_bits}. If LMs did not contain residual information about previous words, we would expect bitwise distance to decay to zero as we move away from the position of the swap. However, we observe that bits remain: although the vector $\textbf{v}$ is only used to predict the next token, it clearly contains residual information about the prompt tokens $x_{1},..., x_{T}$. Since KL puts most of its weight on the highest-likelihood tokens, it can decay to zero, while much of the information remains in the low-probability tokens.
+
+\subsection{Prompt Reconstruction}
+
+We now consider the problem of inverting the process: given the probability vector, we attempt to produce the prompt that led to these next-token probabilities. Given some unseen model $f : \mathcal{V}^{T} \rightarrow \Delta^{|\mathcal{V}|-1}$ which gives next-token probabilities, we would like to learn to invert this function from samples: pairs of text prefixes and their associated next-token probability vectors $(x_{1:T}^1, \mathbf{v}^1) \ldots (x_{1:T}^J, \mathbf{v}^J)$.
+
+\paragraph{Inverting from outputs?} Besides inverting from the probability vector, natural procedure to consider is predicting the prompt directly from the output of the language model. For example, given the model output ``Bogota'', we may predict the input ``What is the capital of Columbia?''. We hypothesize that a single logit vector contains much more detailed information about the prompt then a single sequence sampled from the argmax of these vectors. However, we consider this scenario in our \textit{Sample inverter} baseline described in \Cref{sec:experimental_design}.
+
+\paragraph{Prompt datasets.} We construct Instructions-2M, a meta-dataset consisting of 2.33M instructions including user and system prompts for a wide variety of different problems. This includes prompts from Supernatural Instructions~\citep{wang-etal-2022-super}, Self Instruct~\citep{wang-etal-2023-self-instruct}, Alpaca~\citep{alpaca}, Dolly\footnote{https://huggingface.co/datasets/databricks/databricks-dolly-15k}, ShareGPT\footnote{https://huggingface.co/datasets/anon8231489123/ShareGPT\textunderscore Vicuna\textunderscore unfiltered}, Unnatural Instructions~\citep{honovich-etal-2023-unnatural}, ChatBot Arena~\footnote{https://huggingface.co/datasets/lmsys/chatbot\textunderscore arena\textunderscore conversations}, Stable Diffusion Dataset\footnote{https://huggingface. In addition we collect out-of-domain prompts to test the ability of the model to generalize in topical area. 
+
+\paragraph{Assumptions of our threat model.} We motivate this problem by the prevalence of language models as a service. In these use cases we assume that an unknown prefix sequence, known as the \textit{prompt}, is prepended to the user input. We consider varying levels of model access: full distributional access, partial distributional access (top-K or by request), text output with user-defined logit bias, and text output access only. We assume no access to the model weights or activations.
+
+
+
+\section{Method: Learning to Invert Probabilities}
+
+\label{sec:method}
+Our proposed approach is to learn a conditional language model that maps from next-token probabilities back to tokens: $p(x_{1:T} \mid  \mathbf{v})$.  We parameterize this distribution using a pretrained Transformer language model and train on samples from the unconditional model. Following work from \citet{dumoulin2018feature-wise} on feature-level conditioning, we use the cross-attention in an encoder-decoder Transformer to condition on the next-token vector. 
+
+Since our encoder model is pretrained on text (we utilize T5), we must reformat $\mathbf{v}$ to be fed to a language encoder. 
+The simplest method is to project $\mathbf{v}$ to $\mathbb{R}^{d}$ and feed it as an input hidden vector. 
+However, given the large size of the vocabulary $|\mathcal{V}|$ and the fact that it has been passed through a softmax, this would cause a large reduction in rank and a loss of information\footnote{We explore variants of this projection through ablation experiments in \Cref{sec:ablations}.}. We instead `unroll' the vector into a sequence of pseudo-embeddings $\mathbf{c}_i \in \mathbb{R}^{d}$, so that we can condition transformer outputs on the full probability vector $\mathbf{v}$, 
+\begin{eqnarray*}
+\mathbf{c}_{i} &=& \text{MLP}_i(\log ( \mathbf{v}_{d (i-1): d i} )) \ \ \forall \  i \in \{ 1 \ldots  \lceil |\mathcal{V}| / d\rceil \}\\
+x^*& = & \arg\max_{x} \text{Dec}(x, {\text{Enc}(\mathbf{c})}) 
+\end{eqnarray*}
+Where $x^*$ is the predicted inversion, $d$ is the embedding dimension, and $\mathbf{v}$ is padded with zeros at the final position. In practice we use $|\mathcal{V}|=32000$ and $d=768$ for all experiments which leads to a fixed-length input sequence of $42$ words.   
+
+
+\section{Extracting Logits via API}
+
+
+The previous sections assume we have access to the full language model output probability vector. However, many language model platforms limit the information returned from API calls. For example, a well-known service's API only exposes either samples or the top-5 log probabilities, but does not expose all output probabilities for a given input.
+
+We therefore propose a method for extracting next-token probabilities from APIs where the full probability distribution is not immediately available. We take advantage of the fact that even when API services do not return the full probabilities, they typically allow users to add a \textit{logit bias} to adjust the distribution. In addition to providing a logit bias per API call, they typically allow setting the temperature parameter to zero to provide argmax of the distribution.
+\begin{algorithm}[t]
+    \begin{algorithmic}
+        \Procedure{Api\_Argmax}{$i$, $b$}
+        \State{\Return{$\arg\max [\log \mathbf{v}_0, \ldots, \log \mathbf{v}_i + b, \ldots] $}}
+        \Comment{Argmax of hidden $\mathbf{v}$ with bias $b$ added to $i$}
+        \EndProcedure{}
+        \Procedure{FindLogit}{$i$}
+        \State{$U\gets \epsilon$}
+        \Comment{Initialize upper bound to $\epsilon>0$}
+        \While{\textsc{Api\_Argmax}($i, U$) $\neq i $} \Comment{Exponentiate to find upper bound}
+            \State{$U \gets 2 U$}
+        \EndWhile{}
+        \State{$L \gets 0$} \Comment{Lower bound}
+        \State{$M \gets (L+U)/2$}
+        \While{$U-L > \delta$}
+        \Comment{Perform binary search to precision $\delta$}
+        \If{$\textsc{Api\_Argmax}(i, M) = i$} \Comment{Call API with $i$ upweighted by $M$ to obtain argmax}
+            \State{$U \gets M$}
+        \Else
+            \State{$L \gets M$}
+        \EndIf{}
+        \State{$M \gets (L+U)/2$}
+        \EndWhile{}
+        \Return{$-M$}
+        \EndProcedure{}
+        \Procedure{ExtractLogits}{$ $}
+        \State{logits[$i$] $\gets$ \textsc{FindLogit}($i$) for each word $i$ in vocab}
+        \EndProcedure{}
+    \end{algorithmic}
+    \caption{Logit Extraction via Binary Search for each word $i$}
+    \label{alg:dista}
+
+\end{algorithm}
+
+        
+
+
+The probability of each token can therefore be recovered by finding its difference with the most likely word. We compute this difference by finding the smallest logit bias to make that word most likely. Algorithm~\ref{alg:dista} shows the approach, which relies on binary search to find the logit bias for each word.
+
+Note that binary search can be conducted independently for each word, enabling full parallelization and requiring only a single logit bias at a time. By running this procedure for each word in the vocabulary, we can then reconstruct the full distribution
+$\mathbf{v} = \text{softmax}(\text{logits})$.
+The necessary number of queries to determine the distribution is $|\mathcal{V}|$ times the number of bits required to represent the desired precision.}
+
+
+
+
+
+
+
+
+\section{Experimental setup}
+
+\label{sec:experimental_design}
+\paragraph{Models.} We train models to invert the distribution of Llama-2 (7B) and Llama-2 Chat (7B) \citep{touvron2023Llama}. We choose this model because, as of the time of publication, it is the best-performing open-source LLM at the 7B parameter scale. We assume full access to the model output probabilities except for during the distribution extraction experiments in \Cref{sec:results}, in which we set temperature to $0$ and provide a single logit bias argument.
+
+ We parameterize the inversion model using the method described in \Cref{sec:method} and select T5-base \citep{raffel2020exploring} as our encoder-decoder backbone, which has $222M$ parameters. We set the maximum sequence length to $64$ for all experiments. We train models for $100$ epochs with Adam optimizer with a learning rate of $2e-4$. We use a constant learning rate with linear warmup over the first $25,000$ training steps. We train in bfloat16 precision.
+
+\paragraph{Metrics.} We consider several metrics for prompt reconstruction: F1 score at the token level, BLEU score \citep{papineni2002bleu} as a measure of string overlap, and exact match. We also consider the cosine similarity between the text embeddings of the original and recovered text as a measure of semantic relatedness. For cosine similarity, we use embeddings from the model \texttt{text-embeddings-ada-002} available through the OpenAI API \citep{neelakantan2022text}. For each metric, we report error bounds as standard error of the mean (SEM).
+
+We randomly hold out $1\%$ of the training data for testing. We additionally evaluate on two datasets of human-written prompts: code prompts from Alpaca \citep{alpaca}, and prompts extracted from the helpfulness and harmlessness data collected in \citet{anthropic2022rlhf}. Both datasets are drawn from different, more narrow distributions than our all-encompassing training dataset.
+\paragraph{Baselines.} As we are the first work to consider inverting text directly from language model probabilities, there are no prior baselines to compare to. We therefore develop several baselines:
+\begin{itemize}[leftmargin=*]    
+    \item \textit{Jailbreak strings.} Human-written sequences that attempt to persuade the language model to divulge information from earlier in the sequence. We aggregate jailbreak strings from a variety of sources, including writing some manually. We source $20$ jailbreak strings and test them on all models. For pre-trained Llama models, jailbreak strings are simply appended to the prompt. For chat models, we input the hidden prompt as a system instruction, along with a basic system instruction that instructs the model not to divulge its hidden prompt. We then input the jailbreak string as a user prompt. When reporting results, we report the mean performance of all prompts as well as an oracle figure indicating the best-performing jailbreak string on the test dataset selected after evaluation.
+
+    \item \textit{GPT-4 Few-shot.} We prompt GPT-4 with examples of the top-K tokens by probability from Llama-2 input predictions. These example input-output pairs are prepended to the top probabilities for the hidden input.
+
+       \item  \textit{Sample inverter.} Instead of inverting from next-token probability, we consider whether we might predict prompts from samples of the text outputs from the LM. To train this model, we sample outputs from Llama-2 7b chat and train a T5-base encoder-decoder to predict the input prompt from a given language model output.
+\end{itemize}
+
+
+
+\section{Results}
+
+\label{sec:results}
+
+\begin{table*}[t]
+    \centering
+    \caption{Main results for prompt inversion on our Instructions-2M dataset of prompts. Models were trained to invert probabilities from Llama-2 7B and Llama-2 7B chat.}
+\begin{tabular}{llllll}
+    \toprule
+    & & \multicolumn{4}{c}{Instructions-2M} \\
+      &  & BLEU & CS & Exact & Token F1 \\
+    \midrule
+    \multirow[t]{6}{*}{\multirow{6}{*}{\rotatebox{90}{(Chat)}}}  & Sample inverter & $25.55_{\pm{0.89}}$ & $90.2_{\pm{0.4}}$ & $0.0_{\pm{0.0}}$ &  $65.1_{\pm{1.5}}$  \\
+    & Few-shot (GPT-3.5) & $4.00_{\pm{0.43}}$ & $77.9_{\pm{0.4}}$ & $0.0_{\pm{0.0}}$ & $19.4_{\pm{0.9}}$ \\
+ & Few-shot (GPT-4) & $6.07_{\pm{0.59}}$ & $79.3_{\pm{0.4}}$ & $0.0_{\pm{0.0}}$ & $25.4_{\pm{1.1}}$ \\
+ & Jailbreak (mean) & $10.23_{\pm{1.22}}$ & $80.1_{\pm{0.4}}$ & $0.0_{\pm{0.0}}$ & $25.0_{\pm{1.5}}$ \\
+  & Jailbreak (oracle) & $14.88_{\pm{1.42}}$ & $82.0_{\pm{0.4}}$ & $0.0_{\pm{0.0}}$ & $32.9_{\pm{1.7}}$ \\
+ & Ours & $\pmb{58.26_{\pm{1.76}}}$ & $\pmb{93.6_{\pm{0.4}}}$ & $\pmb{23.4_{\pm{2.7}}}$ & $\pmb{75.8_{\pm{1.3}}}$ \\
+ \midrule
+ \multirow{5}{*}{\rotatebox{90}{(LM)}} 
+    & Few-shot (GPT-3.5) & $2.73_{\pm{0.29}}$ & $75.3_{\pm{0.3}}$ & $0.0_{\pm{0.0}}$ & $18.6_{\pm{0.9}}$ \\
+ & Few-shot (GPT-4) & $3.01_{\pm{0.39}}$ & $74.9_{\pm{0.3}}$ & $0.0_{\pm{0.0}}$ & $18.5_{\pm{1.1}}$ \\
+ & Jailbreak (mean) & $13.97_{\pm{1.69}}$ & $83.5_{\pm{0.4}}$ & $5.4_{\pm{1.0}}$ & $21.3_{\pm{2.0}}$ \\
+ & Jailbreak (oracle) & $54.37_{\pm{2.96}}$ & $88.8_{\pm{0.3}}$ & $\pmb{36.5_{\pm{3.4}}}$ & $68.4_{\pm{2.5}}$ \\
+ & Ours & $\pmb{59.21_{\pm{2.11}}}$ & $\pmb{94.6_{\pm{0.4}}}$ & $26.6_{\pm{2.8}}$ & $\pmb{77.8_{\pm{1.3}}}$ \\
+    \bottomrule
+\end{tabular}
+
+    \label{tab:results_main}
+\end{table*}
+
+\begin{table*}[t]
+    \centering
+    \caption{Out-of-distribution results for prompt inversion. Models were trained to invert probabilities from Llama-2 7B and Llama-2 7B chat.}
+\small
+\hspace*{-0.5cm}\begin{tabular}{llllll|llll}
+\toprule
+ \multicolumn{2}{c}{}  & \multicolumn{4}{c}{Alpaca Code Generation} & \multicolumn{4}{c}{Anthropic HH} \\
+ &  & BLEU & CS & Exact & Tok F1 & BLEU & CS & Exact & Tok  F1 
+ \\ 
+\midrule
+    \multirow[t]{5}{*}{\multirow{5}{*}{\rotatebox{90}{(Chat)}}} 
+ & Few (3.5) & $6.57_{\pm{0.52}}$ & $79.7_{\pm{0.4}}$ & $0.0_{\pm{0.0}}$ & $28.7_{\pm{1.0}}$ & $2.70_{\pm{0.23}}$ & $75.1_{\pm{0.3}}$ & $0.0_{\pm{0.0}}$ & $14.7_{\pm{0.8}}$ \\
+ & Few (4) & $6.83_{\pm{0.44}}$ & $80.3_{\pm{0.4}}$ & $0.0_{\pm{0.0}}$ & $29.8_{\pm{0.9}}$ & $3.36_{\pm{0.29}}$ & $77.3_{\pm{0.4}}$ & $0.0_{\pm{0.0}}$ & $17.5_{\pm{0.9}}$ \\
+ & Jail (avg) & $6.07_{\pm{0.48}}$ & $74.7_{\pm{0.5}}$ & $0.0_{\pm{0.0}}$ & $23.8_{\pm{0.8}}$ & $2.43_{\pm{0.23}}$ & $81.1_{\pm{0.4}}$ & $0.0_{\pm{0.0}}$ & $16.4_{\pm{0.6}}$ \\
+ & Jail (oracle) & $14.19_{\pm{0.85}}$ & $83.5_{\pm{0.4}}$ & $0.0_{\pm{0.0}}$ & $36.8_{\pm{0.9}}$ & $3.01_{\pm{0.27}}$ & $82.3_{\pm{0.4}}$ & $0.0_{\pm{0.0}}$ & $17.7_{\pm{0.7}}$ \\
+ & Ours & $44.41_{\pm{1.76}}$ & $93.0_{\pm{0.3}}$ & $8.2_{\pm{1.7}}$ & $73.9_{\pm{1.1}}$ & $25.56_{\pm{1.65}}$ & $90.2_{\pm{0.3}}$ & $6.6_{\pm{160}}$ & $54.2_{\pm{1.5}}$ \\
+ \midrule
+    \multirow{5}{*}{\rotatebox{90}{(LM)}} & Few (3.5) & $3.53_{\pm{0.32}}$ & $72.1_{\pm{0.5}}$ & $0.0_{\pm{0.0}}$ & $18.6_{\pm{0.9}}$ & $4.39_{\pm{0.39}}$ & $74.3_{\pm{0.3}}$ & $0.0_{\pm{0.0}}$ & $20.0_{\pm{1.1}}$ \\
+ & Few (4) & $6.35_{\pm{0.56}}$ & $77.0_{\pm{0.5}}$ & $0.0_{\pm{0.0}}$ & $28.7_{\pm{1.3}}$ & $4.51_{\pm{0.46}}$ & $74.7_{\pm{0.2}}$ & $0.0_{\pm{0.0}}$ & $18.8_{\pm{1.0}}$ \\
+ & Jail (avg) & $29.32_{\pm{1.94}}$ & $55.7_{\pm{0.5}}$ & $12.7_{\pm{1.6}}$ & $45.9_{\pm{2.0}}$ & $25.71_{\pm{2.15}}$ & $52.1_{\pm{0.4}}$ & $14.2_{\pm{1.8}}$ & $40.8_{\pm{2.4}}$ \\
+ & Jail (oracle) & $72.98_{\pm{2.83}}$ & $89.7_{\pm{0.7}}$ & $61.5_{\pm{3.4}}$ & $80.2_{\pm{2.3}}$ & $77.70_{\pm{2.63}}$ & $92.2_{\pm{0.6}}$ & $64.5_{\pm{3.4}}$ & $83.0_{\pm{2.2}}$ \\
+ & Ours & $46.22{\pm{1.81}}$ & $93.3_{\pm{0.4}}$ & $10.5_{\pm{1.9}}$ & $74.9_{\pm{1.1}}$ & $25.06_{\pm{1.57}}$ & $90.1_{\pm{0.4}}$ & $6.3_{\pm{1.6}}$ & $55.8_{\pm{1.4}}$ \\
+    \bottomrule
+\end{tabular}
+    \label{tab:results_ood}
+\end{table*}
+
+Table~\ref{tab:results_main} shows the main results of the experiments on reversing prompts from the Instructions-2M test set on both a raw LLM and RLHF Chat variant. We find that our method is able to achieve high BLEU score with the true prompts and achieve reasonable high-exact match reproduction. This approach is significantly better than few-shot prompting approaches, even when using GPT-4. The other trained approach (Sample Inverter) has a reasonable BLEU but $0$ exact recoveries. The failure of sample inversion indicates that we are able to extract more usable information about the prompt from the logit vector than from the argmax outputs alone.
+
+Compared to manually written jailbreak strings, our approach is significantly better than the average value, comparable with the oracle jailbreak method. Notably, while the best jailbreak method works well on the raw LM, none of the jailbreak approaches work on the RLHF chat version. We do observe that our method works slightly better on the non-chat model ($59$ vs. $52$ mean BLEU), indicating that the RLHF procedure used to train the chat model may reduce the amount of information from what was initially available in the next-token probabilities. 
+\noindent \textbf{Out-of-domain.}
+Table~\ref{tab:results_ood} shows the results when using prompts that are significantly different than the training distribution both in length and in content. For these domains, the model is significantly better than few-shot and jailbreaking on the RLHF model.  With the chat model, we also observe that the jailbreak strings are especially ineffective on the Anthropic HH dataset, which contains a large amount of toxic content; this indicates that the chat model is less likely to obey the user's request when toxic content is present in the prompt. For the raw model, the inversion approach is a bit worse than jailbreaking on BLEU. 
+
+\begin{table*}[t]
+    \centering
+    \footnotesize
+    \caption{Results of model transfer: testing inverters trained to invert Llama-2 7B and Llama-2 7B chat on the respective 13B and 70B parameter versions. Results are measured in Token F1; scores on 7B are provided for comparison.}
+\begin{tabular}{ll|ccc}
+\toprule
+Train & Test & Alpaca Code Generation & Anthropic HH & Instructions-2M \\
+\midrule
+\multirow[t]{3}{*}{7b}  & 7b & $76.3_{\pm{1.9}}$ & $56.2_{\pm{2.3}}$ & $77.7_{\pm{2.3}}$ \\
+ & 13b & $48.4_{\pm{1.4}}$ & $44.3_{\pm{2.2}}$ & $54.9_{\pm{1.9}}$ \\
+ & 70b & $52.1_{\pm{1.5}}$ & $44.8_{\pm{2.2}}$ & $53.0_{\pm{2.0}}$ \\
+
+\midrule
+\multirow[t]{3}{*}{7b-chat} & 7b-chat & $76.6_{\pm{1.9}}$ & $55.6_{\pm{2.3}}$ & $75.8_{\pm{2.1}}$ \\
+ & 13b-chat & $37.3_{\pm{1.4}}$ & $32.5_{\pm{2.0}}$ & $43.6_{\pm{1.7}}$ \\
+ & 70b-chat & $36.5_{\pm{1.2}}$ & $32.2_{\pm{1.7}}$ & $43.1_{\pm{1.8}}$ \\
+\bottomrule
+\end{tabular}
+    \label{tab:transfer}
+\end{table*}
+
+\noindent \textbf{API-Based Logits Extraction.}
+Here we examine our ability to recover the next-token probability distribution. We simulate an API with a `logit bias' argument and argmax outputs using a local LLAMA-2 model. We visualize results of our technique (blue) vs. a naive Monte Carlo sample baseline (red) in \Cref{fig:redaction_by_k} (left). Our deterministic algorithm extracts useful logits in fewer queries than the Monte Carlo baseline. This result follows our hypothesis (\Cref{subsec:logits-residual-info}) that useful information is contained in the probabilities of very unlikely words, which almost never occur during random sampling.
+
+\noindent \textbf{Transferability.} We next investigate whether inversions transfer to models of different size by evaluating our inversion models trained on the 7B version of Llama-2 on the 13B version and 70B version. Results are shown in \Cref{tab:transfer}. We observe that inversions transfer reasonably well, performing best on code generation, and significantly better between non-RLHF'd models than between the chat models. We speculate that models may need to be further fine-tuned to adapt to different models. 
+
+\noindent \textbf{Inversion and  Language Model Scale.} To understand how dependent inversion results are to language model size, we consider   inverting different sizes of GPT-2 ~\citep{radford2019gpt2} and show results in \Cref{tab:model_ablations} (Left). Interestingly, the reconstructions perform very similarly (within 1 point of BLEU score) regardless of the size of the language model inverted. The fact that output probabilities contain similar amounts of information even after going through vastly different amounts of processing (dependent on the varying model size) differ from the findings of \citet{dosovitskiy2016inverting} who note that more layers of computation make inversion more difficult in CNNs.
+
+\subsection{Defending against prompt inversion}
+
+Language model providers may be interested in defending prompts from inversion. One simple defense is to add noise to the language model output distribution; instead of providing a deterministic (argmax) output, from which an attacker could trivially reconstruct the output probabilities, language model providers, could instead \textit{sample} from the output distribution. 
+
+We consider three different LM sampling mechanisms as defenses against prompt inversion: adjusting the softmax temperature during sampling, adjusting the top-p parameter of nucleus sampling~\citep{holtzman2020curious}, and adjusting the total number of tokens considered (top-K). We sample from Llama-2 7b (non-chat) and feed probabilities into our inverter model according to the desired  strategy. Results are visualized in \Cref{fig:defense}.
+
+In each case, we observe a trade-off between language model fidelity and inversion performance. Interestingly, inversion performs best at temperature value $\tau=1$, and suffers when temperature decreases, as the LM distribution anneals to argmax, as well as when temperature increases, as the distribution collapses to uniform. For both top-p and top-k we note that the model requires almost all of the distribution to perform well, indicating that there is significant information in the tails.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figs/05_defense.png}
+    \caption{Language model providers may sample differently in an effort to protect prompts from inversion. We explore inversion performance under various sampling strategies employed as defenses against inversion attacks: annealing temperature, setting top-K value, and nucleus (top-p) sampling. We consider applying temperature to the softmax both in log space (orange) and probability space (blue).}
+    \label{fig:defense}
+\end{figure}
+
+\subsection{Analysis}
+
+\begin{table*}[t]
+    \centering
+    \footnotesize
+    \caption{Examples of prompt inversions from our model, which conditions only on language model probabilities. Samples are randomly selected from the Instructions-2M validation set.}
+
+\definecolor{maroon}{RGB}{128,0,0}
+\newcommand{\mb}[1]{\textcolor{maroon}{\textbf{\underline{{\smash{#1}}}}}}
+
+\renewcommand{\arraystretch}{1.4} % increase vertical padding in table
+
+\footnotesize
+\centering
+\begin{tabularx}{\textwidth}{XcX}
+    \toprule
+    \textbf{Original} & & \textbf{Reconstruction} \\
+    \midrule
+What is the Charles `Chick' Evans Memorial Scholarship?	& $\Rightarrow$ & What is the Charles \mb{E. Chen} Scholarship \mb{Program}? \\   
+Is the following sentence grammatically correct? They was playing soccer in the park. OPTIONS: - unacceptable - acceptable & $\Rightarrow$&Is the following sentence grammatically correct? They was playing soccer in the park. OPTIONS: - unacceptable - acceptable \\    
+What are the benefits of practicing mindfulness meditation?	& $\Rightarrow$&What are the benefits of practicing mindfulness meditation? \\    
+Come up with an essay on the importance of emotions in decision-making. No input	& $\Rightarrow$ & \mb{Write an} essay \mb{about} the importance of \mb{empathy}. No input \\    
+What are the rules of a sit-and-go poker tournament? &	$\Rightarrow$& What are the rules of a \mb{standard Texas hold’em} poker tournament? \\    
+What impact do workplace policies have on reducing unconscious bias, and how can they be improved?	& $\Rightarrow$& What \mb{are the} impact \mb{of unconscious biases} on workplace policies \mb{and practices}, and how can they be \mb{addressed}?    \\   
+Given that John Steinbeck's ``Of Mice and Men" was published in 1937, can it be concluded that Steinbeck won the Nobel Prize in Literature that same year?	& $\Rightarrow$& Given that \mb{the novel} ``\mb{The Catcher in the Rye}" was \mb{written by} \mb{J.D. Salinger} and published in \mb{1951}, can it be concluded that it won the \mb{Pulitzer Prize for Fiction} in \mb{1951}? \\ 
+\bottomrule
+\end{tabularx}
+    \label{tab:qualitative_examples}
+\end{table*}
+
+\textbf{Qualitative examples.} We showcase some randomly-selected qualitative examples from Instructions-2M in \Cref{tab:qualitative_examples}. Our inverted prompts are generally on topic and syntactically similar to the originals. Two prompts are perfectly reconstructed. We notice that proper nouns seem difficult; in one example, our model correctly recovers the structure of a question, but mixes up Steinbeck's \textit{Of Mice and Men} with Salinger's \textit{The Catcher in the Rye}\footnote{Of course, T5 knows Wikipedia well, and correctly states the year the incorrectly predicted book was published.}. (One might assume that this information is represented in the probability distribution, but interestingly the raw probabilities do not favor either title.)  In all examples, the system correctly identifies whether or not the prompt ends in punctuation.
+
+\noindent \textbf{Which components of the distribution does the inverter need?} To investigate whether our model focuses most on the largest components of its input, we iteratively remove (set to the mean) $k$ components from the probability vector in both ascending and descending order. We also consider removing all but a random subset of $k$ components from the input. \Cref{fig:redaction_by_k} highlights the difference in reconstruction performance across levels of component removal. It appears that the model focuses more on the more likely words. In particular, the smallest $k$ probabilities are only slightly more useful than a random $k$. Reconstruction is poor in general until almost the entire distribution is re-included.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.45\textwidth]{figs/04_sampling.png}\hspace{1cm}\includegraphics[width=0.45\textwidth]{figs/02_topk_redaction.png}     
+\caption{(Left) Model performance under our API-based logit recovery technique vs the Monte Carlo baseline. The dotted blue line is given by reconstructing the prompt from the true probability vector. (Right) Model performance across levels of probability vector redaction. We test eliminating all except the top-K probabilities, all except the bottom-K, and all except random K, while varying K from 1 to 32,000 (full input dimensionality).}
+\label{fig:redaction_by_k}
+\end{figure}
+
+
+
+
+\section{Conclusion \& Future Work}
+
+
+We define the problem of inversion from language model outputs and analyze inversion approaches from an attack and defense perspective. We show that this attack vector can be used to elicit hidden prompts from LM systems, even when we do not have direct access to model output distributions.
+
+\noindent\textit{What are the limits of inversion?} Our experiments show that much information about the input can be recovered from language model probabilities, but do not estimate the upper bound. The scaling analysis in \Cref{sec:ablations} implies that larger backbone models recover more information, but we do not run any experiments with backbone models larger than hundred-million parameter scale.
+
+\noindent\textit{How can we keep our prompts safe?} Our experiments show that when sampling is enabled, we can reconstruct model probability distributions given enough queries to the model. The only foolproof way to protect prompts while providing users access to generate text from a language model is to disable top-logits access (output only text) and set temperature to 0.
+\noindent\textit{Smarter parameterizations for inversion.} Future work might consider exploiting the fact that inputting a single suffix into a LM outputs multiple next-token predictions, one at each position, not just at the end. Additional research may find that utilizing a parameterization that integrates token embeddings with probability values, so that the inversion model `knows' which value corresponds which word, could be useful.
+\pagebreak
+
+
+
+\section{Ethics}
+
+
+Our research on the inversion of language models underscores the ethical implications surrounding the deployment of such models as services, particularly when providers maintain prompts that are valuable or contain personal information. Users of language models may be affected as they rely on these services for various purposes, including content generation and information retrieval. Prompt secrecy can compromise users' trust in the systems they interact with, raising concerns about the transparency and integrity of the services themselves.
+
+Lack of access to the underlying prompts hinders efforts to scrutinize, evaluate, and regulate language models effectively, thereby impeding advancements in the responsible and ethical development of AI technologies. Our research advances the field towards wider access to prompts while highlighting important privacy concerns for language-models-as-a-service providers.
+
+
+\section{Reproducibility}
+
+
+Code for reproducing all experiments is available at \href{https://anonymous.4open.science/status/language-model-inversion}{anonymous.4open.science/status/language-model-inversion}. Our dataset of prompts will be provided upon paper publication.
+
+
+
+\section{Acknowledgements}
+
+JXM is supported by a NSF GRFP. JC is supported by NSF 2242302. AMR is supported by NSF 2242302, NSF CAREER 2037519, IARPA HIATUS, and a Sloan Fellowship. Thanks to the Allen Institute for AI for providing the compute required to train the LLAMA inversion models. 
+
+
+
+
+
+
+
+
+

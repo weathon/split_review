@@ -1,8 +1,8 @@
 # Safety Alignment Should be Made More Than Just a Few Tokens Deep
 
 - Decision: Accept
-- Avg Score: 1.57
-- Scores: 1, 0, 1, 0, 8, 1, 0
+- Avg Score: 9.50
+- Scores: 10, 10, 8, 10
 
 ## Abstract
 The safety alignment of current Large Language Models~(LLMs) is vulnerable. Relatively simple attacks, or even benign fine-tuning, can jailbreak aligned models. We argue that many of these vulnerabilities are related to a shared underlying issue: safety alignment can take shortcuts, wherein the alignment adapts a model's generative distribution primarily over only its very first few output tokens.

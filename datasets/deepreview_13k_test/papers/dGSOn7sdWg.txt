@@ -1,0 +1,443 @@
+\title{SyllableLM: Learning Coarse Semantic Units for Speech Language Models}
+
+\begin{abstract}
+
+Language models require tokenized inputs. However, tokenization strategies for continuous data like audio and vision are often based on simple heuristics such as fixed sized convolutions or discrete clustering, which do not necessarily align with the semantic structure of the data. For speech in particular, the high resolution of waveforms (16,000 samples/second or more) presents a significant challenge as speech-based language models have had to use several times more tokens per word than text-based language models. In this work, we introduce a controllable self-supervised technique to merge speech representations into coarser syllable-like units while still preserving semantic information. We do this by 1) extracting noisy boundaries through analyzing correlations in pretrained encoder losses and 2) iteratively improving model representations with a novel distillation technique. Our method produces controllable-rate semantic units at as low as 5Hz and 60bps and achieves SotA in syllabic segmentation and clustering. Using these coarse tokens, we successfully train SyllableLM, a Speech Language Model (SpeechLM) that matches or outperforms current SotA SpeechLMs on a range of spoken language modeling tasks. SyllableLM also achieves significant improvements in efficiency with a 30x reduction in training compute and a 4x wall-clock inference speedup.
+
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Learning to generate speech solely from listening to spoken language is a fundamental task in speech processing. It requires abstracting beyond the underlying acoustics of speech into phones, syllables, words, and sentences to process correlations across long ranges of time. But while current textual language models \citep{Touvron2023LLaMAOA,Zhang2022OPTOP,gpt3} can compose highly realistic text, language models on spoken language still struggle to output semantically meaningful speech. An increasing focus has coalesced around Generative Spoken Language Modeling (GSLM) \citep{gslm}, which sets out to achieve this goal.
+
+The most successful approaches to GSLM are Transformer Decoder Language Models \citep{vaswani} such as AudioLM \citep{borsos2023audiolm} and TWIST \citep{hassid2023textually}. These Speech Language Models (SpeechLMs) operate on discrete tokens output by self-supervised learning (SSL) based encoder models \citep{hsu-hubert, Chung2021w2vBERTCC}. However, existing SSL tokenizations predominantly capture phonetic information \citep{choi2024selfsupervisedspeechrepresentationsphonetic} at a high temporal resolution of 25-50 tokens per second, much greater than the typical human speaking rate of 2-5 words per second. This large number of tokens substantially impairs both training and inference speed \citep{hassid2023textually}, and it is unclear whether modeling speech with such a high granularity harms semantic understanding.
+
+
+
+Very recently, there has been significant progress in extracting coarser speech unit representations from raw audio. In particular, SD-HuBERT \citep{cho2023sd} finetunes HuBERT~\citep{hsu-hubert} with a DINO-like distillation objective, and VG-HuBERT \citep{peng2023word,peng2023syllable} uses a contrastive loss against cross-modal visual inputs. We continue and significantly improve upon this line of research, resulting in high quality speech tokens (units) suitable for SpeechLMs that exhibit a temporal resolution roughly corresponding to syllables. Specifically, we demonstrate significant improvements in textual reconstruction from low-bitrate units of SSL models, reducing the word-error-rate (WER) from 37\% using SD-HuBERT units to 7\%, and more than halving realized bitrate of previous SpeechLM units from 175bps to as low as 60bps. We additionally find that our units correlate strongly with syllables both in boundary detection and in cluster quality.
+
+Furthermore, we evaluate the effects of training SpeechLMs on these new units and obtain state-of-the-art results across a wide-variety of metrics, competitive with or outperforming AudioLM (350M parameters), all TWIST model sizes (125M-13B parameters), and the newly released Moshi-7B \citep{kyutai2024moshi} with significantly fewer parameters, lower training time, and faster inference speed. Our code and checkpoints are available at \href{https://www. Our contributions are as follows:
+\begin{enumerate}[noitemsep,topsep=0pt]
+    \item We propose an unsupervised algorithm named LossPred that reveals noisy syllable-like segmentation of unannotated speech signals by analyzing the loss of a pretrained self-supervised model (e.g. HuBERT) across different masking spans.
+    \item We propose a method named SylBoost that sharpens the feature space of self-supervised speech models by bootstrapping from LossPred syllable-like segmentations. SylBoost achieves SotA unsupervised syllabic segmentation, categorization, and low-bitrate unit-to-audio resynthesis. 
+    \item Using quantized SylBoost units as a basis for tokenization, we train SyllableLM, a SpeechLM that outperforms or matches prior approaches on a range of tasks while being 30x faster to train, 4x faster for inference, and having a 2.5x reduction in unit bitrate.
+\end{enumerate}
+
+
+
+\section{Related Work}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{FullAgglomeration6.pdf}
+    \caption{Left-Top: The loss prediction matrix $C$, where brighter is higher likelihood placed on the teacher label. A time-aligned transcript is on the bottom, and predicted cluster unit boundaries span vertically as dashed-lines. Left-Bottom: A Mel-Spectrogram of the input waveform with an example masked timespan in gray. The losses on tokens at timesteps covered by the solid blue and dotted red spans are mapped to their corresponding rows and columns in $C$ as described in Section \ref{sec:LossPred}. Right: Visual of SylBoost. We train a student to match intermediate teacher features pooled over regions generated by pseudo-syllable-boundaries. We use a min-cut algorithm on the feature self-similarity matrix to extract boundaries, and then apply K-Means and Agglomerative clustering to obtain discrete units.
+    }
+    \label{fig:fullagglomeration}
+\end{figure}
+\paragraph{Self-Supervised Encoder Models}
+There has been a great amount of work in learning high-level representations from data by reconstructing corrupted inputs across speech \citep{wav2vec2, hsu-hubert, d2v2}, audio \citep{Gong2021SSASTSA}, text \citep{devlin-etal-2019-bert, clark2020electra}, and vision \citep{caron2021emerging, MaskedAutoencoders2021}. To navigate the lack of simple discrete targets in speech, much work has been placed in finding high-quality targets, such as iterative clustering \citep{hsu-hubert} and by predicting the representations of a teacher network based on a running average of student model weights \citep{baevski2022data2vec, d2v2}. An alternate but similar line of work has been placed into learning low-bitrate units for the task of resynthesis \citep{fossez2023high, zeghidour2021soundstream,Yang2023HiFiCodecGV,Kumar2023HighFidelityAC,Zhang2023SpeechTokenizerUS,Du2023FunCodecAF}, which include losses focused on reconstruction and use an information bottleneck to enforce compression.
+
+\paragraph{Applications of Neural Codecs}
+The discrete units generated by these self-supervised encoders are versatile and fundamental to much of the recent progress in speech research such as Text-To-Speech \citep{wang2023neural, Ju2024NaturalSpeech3Z, song2024ellav,Peng2024VoiceCraftZS}, joint audio-text foundation models \citep{yang2023uniaudio,Chou2023TowardJL,Nguyen2024SpiRitLMIS}, unsupervised speech recognition \citep{baevski2021unsupervised}, discrete unit resynthesis \citep{polyak21_interspeech, fossez2023high, zeghidour2021soundstream}, text-to-audio \citep{Kreuk2022AudioGenTG,agostinelli2023musiclm,Copet2023SimpleAC}, and generative spoken language modeling \citep{borsos2023audiolm, hassid2023textually, gslm}. Each of these methods operates on audio units exclusively greater than or equal to 25Hz, which has been a frequently cited area for future work to improve on \citep{hassid2023textually}. Recent work \citep{10096788} has also explored training speech encoder models with coarser units as targets.
+\paragraph{Extracting Semantic Units from Raw Data}
+Additionally relevant to our work are several approaches, particularly in vision and audio, that generate emergent semantic clusterings from self-supervised transformer \citep{vaswani} models. In particular, the DINO approach in \citet{caron2021emerging} observes object representations in attention maps through student-teacher distillation. Similar techniques have been also applied to audio to discover emergent syllable boundaries \citep{cho2023sd, peng2023syllable}. These behaviors can vary heavily with small changes in pretraining strategy as explored in \citet{darcet2024vision}. Merging similar features has also been shown to produce significant vision model speedups such as in \citet{bolya2023token}. Most similar to our work, \citet{algayres2023generative} extracted coarse continuous representations for GSLM, however these results trail behind language modeling approaches.
+
+
+
+\section{Learning Self-Supervised, Syllable-Like Representations from Raw Speech}
+
+\label{sec:syllablesunits}
+
+
+In this section, we describe the bootstrapping process by which we extract low-bitrate speech units. We first describe LossPred, our algorithm to analyze outputs of self-supervised speech model loss functions to generate initial syllable-like unit boundaries. Following this, we define SylBoost, a procedure to iteratively refine these boundaries with student-teacher distillation. We also propose a new algorithm for the efficient extraction of boundaries from feature self-similarity matrices to fix the bottleneck slowing down VG-HuBERT and SD-HuBERT extraction.
+
+\subsection{LossPred: Extracting Syllable-like Segmentation from Relations in HuBERT's Loss}
+\label{sec:LossPred}
+HuBERT has previously been shown to learn phone-like units with its K-Means clusterings \citep{hsu-hubert} which have formed the basis of subsequent works on GSLM and unsupervised ASR \citep{baevski2021unsupervised, gslm, hassid2023textually}. However, other work \citep{pasadcomparative, pasad2024what} has shown that the representations learned by these models also correlate with higher level structure such as words, despite these structures not immediately appearing during clustering. Our goal in this section is to propose a method that can be applied to a pretrained HuBERT model in order to automatically extract unit boundaries at the level of syllables or words rather than phones. Although we apply our method to HuBERT, we expect that it could also be applied to other SSL speech models that utilize a similar loss function such as WavLM~\citep{Chen2021WavLMLS} or wav2vec2.0~\citep{wav2vec2}. The crucial commonality between these models is that they all utilize a masked language modeling (MLM) training objective, whereby input speech tokens are randomly masked and the model is trained to predict the masked inputs conditioned on the unmasked inputs. % However, HuBERT is only the work we know of that publicly provides both student and teacher model checkpoints, which is required for our analysis.
+
+We ground our intuition for LossPred with the following thought experiment: if the input tokens corresponding to an entire word were replaced with mask tokens, we would expect the HuBERT model loss at these timesteps to be relatively high, as HuBERT would have to jointly predict word identity and the underlying acoustics to predict the missing span. On the other hand, if only the latter portion of a word were masked out, infilling this masked region given the word prefix may be easier by comparison. With this, if we iteratively shift a contiguous mask over a span of tokens and look at the loss, we would suspect to see a strong decrease in the loss throughout the timesteps corresponding to a masked semantic unit (word, syllable, or otherwise) as the beginning or end of the unit was partially revealed to the model. 
+
+
+LossPred operates using two frozen off-the-shelf HuBERT models, a student model and a teacher model, where the student model has been optimized to predict the quantized representations of the teacher model at layer $L$, and the teacher model comes from the prior iteration of pretraining as described in \citet{hsu-hubert}.
+Formally, given an input waveform $W$, we extract the teacher labels by passing $W$ into the teacher model and then quantizing the representations at layer $L$ with K-Means. We denote these teacher labels as $Y_{\{1\ldots T\}}$, where $T$ is the number of timesteps. As done during HuBERT pretraining, we give the student model a corrupted version of $W$ where outputs from student CNN feature extraction at select timesteps are replaced with the HuBERT `mask' embedding. We denote these student CNN features as $X^M_{\{1\ldots T\}}$ where $M = \{t_1,\ldots t_m\}$ is a set of masked out timesteps. Following the pretext task, the student then predicts the teacher labels at masked timesteps $Y_t, t\in M$ conditioned on $X^M$ and is evaluated using a cross-entropy loss:
+
+\begin{equation}
+    \mathlarger{\mathcal{L}_\text{HuBERT}} \coloneq -\log p(Y_t \mid X^M)% = -\log p(Y_t \mid X^M_1, \ldots, X^M_T)
+\end{equation}
+
+We define a loss prediction matrix $C$, shown in Figure \ref{fig:fullagglomeration}, which looks at the losses of the student model as we move a contiguous sliding window of $s$ timesteps to mask. Specifically, $C$ models the raw probabilities of the losses where the column is the timestep being predicted and the row represents the closest unmasked token.
+\begin{equation}
+C_{r,c} \in \mathbb{R}^{T\times T}_+ = 
+\begin{cases} 
+    p(Y_c \mid X^M) \mid M = \{r+1, r+2, \ldots r+s\} \cap [1,T] & \text{if }  r < c, |r-c|\le \lfloor \frac{s}{2} \rfloor, \\
+    p(Y_c \mid X^M) \mid M = \{r-1, r-2, \ldots r-s\} \cap [1,T] & \text{if }  r > c, |r-c|\le \lfloor \frac{s}{2} \rfloor, \\
+    0 & \text{otherwise.}
+\end{cases}
+\end{equation}
+We separately calculate the upper and lower triangles of $C$, relating to the closest observed waveform being before the mask and after the mask respectively. For simplicity, we assume here that the losses in the first half of the mask span are uncorrelated with information after the mask and vice versa. 
+In the upper triangle, each entry $C_{\smash{r,c}}$ at row $r$ column $c$ is equal to $p(Y_{\smash{c}} \mid X^{\smash{M}})$ given that the mask span in $X^{\smash{M}}$ starts just after time $r$. Inversely, in the lower triangle, $C_{r,c}$ is equal to $p(Y_c \mid X^M)$ given that the mask span ends just before time $r$. We use a span size $s=50$ corresponding to 1 second as this duration is long enough to mask the majority of spoken words. We calculate the upper triangle using the first 25 timesteps of the mask span, and the lower triangle using the last 25. 
+
+To extract $k$ semantic regions with boundaries $B = \{b_1=1<b_2<\ldots<b_{k+1}=T+1\}$ from $C$, we use the min-cut algorithm from \citet{shi2000normalized} discussed further in \citet{peng2023syllable}, treating $C$ as the input feature-similarity matrix:
+\begin{equation}
+    B \coloneq \argmax_{\{b_1=1<b_2\ldots< b_{k+1}=T+1\}} \mathlarger{\mathlarger{\sum}}\limits_{t=1}^{k} 
+    \frac{\sum\limits_{i,j=b_t}^{b_{t+1}-1} {C_{i,j}}}
+    {\sum\limits_{i=b_t}^{b_{t+1}-1}\sum\limits_{j=1}^{T} (C_{i,j} + C_{j,i}) - \sum\limits_{i,j=b_t}^{b_{t+1}-1} {C_{i,j}}}
+\end{equation}
+By choosing $k$ to be proportional to the length of the utterance, we can control the sample rate of our boundaries. We explore modifying this parameter in-depth throughout our experiments. We find that semantic units extracted by LossPred tend to be syllable-like (both via inspection, and also confirmed experimentally in our segmentation and clustering experiments) and so we focus on syllable-resolution units for the rest of the paper.
+
+LossPred is expensive to run due to using one forward pass for each sliding window location. To make this efficient, we extract multiple masked spans simultaneously with a gap between spans of three seconds. This results in roughly 200 forward passes of the student model to calculate $C$ on an arbitrarily-sized audio. Fortunately, we only ever need to run LossPred once to initialize SylBoost training (described in \ref{sec:agglomeration}), so this does not affect later semantic unit extraction speed. % We specifically use HuBERT as opposed to other models as it is only the work we know of that publicly provides both student and teacher model checkpoints for contextualized targets (HuBERT-large and HuBERT-base respectively).
+\subsection{SylBoost: Bootstrapping Pesudo-Syllabic Units with Iterative Distillation}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=.98\textwidth,trim={0cm 5.85cm 0cm 0cm},clip]{Controllability3.pdf}
+    \caption{Qualitative results on SylBoost controllability for boundary detection. We plot the feature similarity matrix $A$, described in \ref{sec:agglomeration} for HuBERT, Data2Vec2, and SylBoost on Data2Vec2 when trained at different unit rates. The number of cuts $k$ is selected dynamically as described in \ref{sec:tokenizer_exp}.}
+    \label{fig:controllability}
+\end{figure}
+
+\label{sec:agglomeration}
+Given the initial boundaries predicted by LossPred, we follow the paradigm of noisy-student-teacher learning~\citep{xie2020noisy} to extract semantic representations. Our goal is to ``sharpen'' the syllabic organization in the feature space of an input student model, as seen in Figure~\ref{fig:controllability}. We choose a pretrained HuBERT~\citep{hsu-hubert} or Data2Vec2 \citep{d2v2} to initialize our SylBoost student and teacher models, with the teacher model parameters held constant.
+
+The SylBoost procedure is depicted in Figure \ref{fig:fullagglomeration}. For a set of hypothesized speech segment boundaries $B = \{b_1=1< b_2< \ldots< b_{k+1}=T+1\}$, we group together all temporal tokens between two boundaries into disjoint groups.  $G_i = \{t \mid b_i \le t < b_{i+1}\}$. For notation, we let $H_t$ be the index of the group that contains $t$: $t \in G_{H_t}$. We apply the SylBoost loss (Equation~\ref{eq:sylboostloss}) to model features at layer $L$, which we select based on syllabic correlation as explored in detail in \citet{pasad2024what}. This results in student features $X_{\{1\ldots T\}}^{\smash{(L)}}$ and teacher features $Y_{\{1\ldots T\}}^{\smash{(L)}}$. The loss is then the mean squared error between the student features $X_t^{\smash{(L)}}$ at each timestep and the mean of the teacher features in the timestep's corresponding group:
+\begin{equation}
+    \mathlarger{\mathcal{L}_\text{SylBoost}} \coloneq \frac{1}{T} \mathlarger{\mathlarger{\sum}}\limits_{t=1}^{T} \left(X_t^{(L)}-\frac{1}{|G_{H_i}|} \mathlarger{\sum}\limits_{s \in G_{H_i}} Y_s^{(L)}\right)^2
+    \label{eq:sylboostloss}
+\end{equation}
+After training, SylBoost results in a student model with sharpened latent features $X_t^{\smash{(L)}}$ from which we calculate a matrix $A$ of pairwise frame distances where element $A_{i,j}$ equals the $L_2$ distance between the features $X_i^{\smash{(L)}}$ and $X_j^{\smash{(L)}}$ as depicted in Figure~\ref{fig:controllability}. We then extract boundaries from $A$ using a cut algorithm described in the next section (Sec.~\ref{sec:efficient_extraction}). With this, we can generate new pseudolabel boundaries and run SylBoost again to extract even better boundaries, which we perform twice. Finally, we extract discrete clusters by mean pooling the features at layer $L$ over each SylBoost boundary group followed by K-Means and Agglomerative Clustering to a desired number of units.
+
+
+
+
+\subsection{Efficient Extraction of Unit Boundaries for SylBoost}
+\label{sec:efficient_extraction}
+To extract boundary indices from learned feature representations \citet{peng2023syllable} proposed adapting the mincut approach in \citet{malioutov-barzilay-2006-minimum}. However, for speech this approach is slow in practice and difficult to parallelize, bottlenecking our ability to extract boundaries in bulk across the large corpora necessary for downstream language modeling. Inspired by the SylBoost objective, we propose a more efficient approach for extraction: given $k+1$ potential boundaries, we seek to choose groups that minimize the sum of the distances from each unit to the mean of its assigned group:
+\begin{equation}
+    B \coloneq \argmin_{\{b_1=1<b_2\ldots< b_{k+1}=T+1\}} 
+    \mathlarger{\mathlarger{\sum\limits_{i=1}^{k}\sum\limits_{j=b_i}^{b_{i+1}-1}}}
+    \left(X_j^{(L)}-\frac{1}{b_{i+1}-b_i}  \sum\limits_{l=b_i}^{b_{i+1}-1} X_l^{(L)}\right)^2
+\end{equation}
+We further restrict the setting by choosing a maximum group length of $G$ tokens, where we choose $G=50$ to correspond to one second of tokens, as syllables or words longer than this are fairly rare. With this, we can then split our algorithm into 1) calculating a distance array $D \in \mathbb{R}^{T \times G}$, where $D_{t,g}$ is the cost of the group of length $g$ ending at token $t$ and then 2) solving the minimal interval cover from this distance array with dynamic programming. An efficient implementation using PyTorch \citep{pytorch} on CUDA \citep{cuda} runs in $O(k)$ data-aware sequential steps. 
+
+
+
+\section{SyllableLM: Speech Language Modeling on Coarse Units}
+
+GSLM \citep{gslm} defines a pipeline for modeling raw audio as three stages: 1) Audio-to-unit Tokenization, 2) Running a language model on these units, and 3) Decoding the tokens back into a waveform.
+For Audio-to-unit Tokenization, we use the second iteration of SylBoost as described in Section \ref{sec:syllablesunits}. In this section, we lay out our language modeling and resynthesis.
+
+\subsection{Language Model}
+Like AudioLM and TWIST, we use an autoregressive transformer decoder language model to approximate $p(x_t\mid x_{t-1},\ldots,x_1)$ given an input token sequence $x_1, \dots, x_T$. We refer to this language model trained on the discrete clusters output by SylBoost as the main SpeechLM. Like TWIST, we prepend a \texttt{<BOS>} token and make no other special changes.
+
+
+\subsection{Token to Speech Decoding}
+To convert SylBoost tokens back into audio, we adopt the interleaved decoding strategy from \citet{song2024ellav} to output the units from TWIST \citet{hassid2023textually}, obtaining a waveform by cascading this output into their provided vocoder. This interleaving strategy demonstrates superior performance in high-difficulty settings compared to other text-to-speech models like VALL-E \citep{wang2023neural}, and so we use it for all resynthesis experiments. To interleave our units, we sort on the start-timestep of every SylBoost unit and TWIST-unit in ascending order. 
+We subtract 0.08s (the length of two TWIST units) from each SylBoost unit start time before sorting to account for noisy SylBoost boundaries. 
+For the rest of the pipeline, we follow \citet{song2024ellav} without global advance using our syllables as a drop-in replacement for phones and use greedy decoding. We call this model the Interleaved-Vocoder-LM.
+
+Although incorporating this additional resynthesis model slows down generation compared to TWIST, most model scaling happens in the SpeechLM. For example, the TWIST paper still observes scaling improvements in semantic understanding with a SpeechLM of 13B parameters while current SotA speech synthesis models such as \citet{Ju2024NaturalSpeech3Z} operate with fewer than 1B parameters. Taking the same approach as TWIST, our work focuses purely on improving the semantics of generated audio and is entirely orthogonal to work on audio synthesis quality and voice cloning.
+
+We then generate continuations for a sample by 1) Extracting syllable-units and TWIST units from the sample, 2) Sampling syllable-unit continuations from the SpeechLM, 3) Continuing TWIST units with our interleaved model conditioned on sample TWIST units, sample syllable-units, and continued syllable-units, and 4) Resynthesizing these into speech using the vocoder. 
+
+
+
+\section{Experiments}
+
+\subsection{Training Datasets}
+We train our tokenizer using LibriSpeech \citep{librispeech}, which contains 960 hours of audio books. We noticed that SylBoost converges before all data is used, and so we randomly subsample LibriSpeech to a 100 hour train set and train for five epochs and two iterations for all experiments. We train our SpeechLMs using all of LibriLight \citep{librilight}, which provides roughly 55k hours of speech. As a note on fair comparison, although AudioLM uses exactly this split of LibriLight, TWIST collects an additional 100k hours of data, totaling to 155k hours.
+
+\subsection{SylBoost Unit Configurations}
+\label{sec:tokenizer_exp}
+
+By varying the number of boundaries input to our cut algorithm at each stage in the SylBoost pipeline, we can arbitrarily control our rate of temporal tokenization. We evaluate three main unit rates at 8.33Hz, 6.25Hz, and 5.00Hz, the latter which matches the empirical rate of SD-HuBERT units on LibriSpeech dev-clean. To account for differences between slow and fast speakers, we dynamically choose $k$ during SylBoost to best match the number of distinct feature groups in the embedding space (seen as blocks in the feature self-similarity matrix $A$, Figure \ref{fig:controllability}). We do this by setting a threshold $\delta$ and taking the fewest boundaries $k$ such that the loss per timestep is less than $\delta$ for 75\% of timesteps. We choose $\delta$ so that average unit rates over LibriSpeech dev-clean match a desired frequency. We also explore modifying the number of clusters generated by K-Means and Agglomerative Clustering, which combined with changing the unit rate results in fine-grained bitrate control. We note that although prior approaches like SD-HuBERT and VG-HuBERT apply a cut algorithm with $k$ cuts, there is no way to control the actual number of distinct feature groups in the self-similarity matrix during training. As a result, we cannot increase the frequency of SD-HuBERT units by changing $k$: Additional cuts result in close-to-identical representations that map to the same quantized clusters.
+
+\subsection{Results: Evaluating Unit Quality}
+\label{sec:res_unit_quality}
+
+\begin{table}
+  \caption{Unsupervised syllable boundary detection and clustering accuracy on LibriSpeech \citep{librispeech} test. For F1 scores, the superscript is tolerance threshold in ms. All other metrics use 50ms. Higher is better.}
+  
+  \label{tab:main_units}
+  \centering
+  \resizebox{0.99\textwidth}{!}{
+  \small
+    \begin{tabular}{lccccccccc}
+    
+    \toprule 
+    Approach  &Backbone &  Training                & F1$^{50}$          & F1$^{20}$          & Pr.         & Re.          & R             &  CPur & SPur \\ 
+    \midrule
+    Feat-Sim\citep{peng2023syllable} & HuBERT                & no & 47.3                    & 24.7                    & 46.6          & 48.0          & 54.5          & 28.0           & 30.0            \\
+    LossPred 5.0Hz (Ours) &HuBERT &  no       & 59.6                    & 31.4                    & 54.9          & 66.7          & 56.3          & -              & -              \\
+    \midrule
+    SD-HuBERT\citep{cho2023sd} & HuBERT &  yes             & 66.1                    & 32.2                    & 64.9          & 67.4          & 70.7          & \textbf{43.2}  & 45.0            \\
+    SylBoost 5.0Hz (Ours) & HuBERT &  yes      & 70.9                   & 40.1                    & 70.8          & 71.4          & 75.1          & 28.9           & 47.8            \\
+    SylBoost 5.0Hz (Ours) &Data2Vec2 &  yes        & \textbf{73.2} & \textbf{44.6} & \textbf{72.1} & \textbf{74.4} & \textbf{76.9} & 33.6           & \textbf{54.9}   \\
+    \bottomrule
+    \end{tabular}
+}
+\end{table}
+We evaluate the quality of our semantic units with two approaches 1) measuring correspondence with syllables and 2) running speech resynthesis followed by ASR. To measure correspondence with syllables, we use the development and test sets of LibriSpeech \citep{librispeech} and follow the approach from \citet{peng2023syllable}, extracting timesteps for phones using the Montreal Forced Aligner \citep{mcauliffe17_interspeech} and then converting these phones into syllables with a rule-based method \citep{syllabify}. We evaluate the quality of syllable boundary detection with a ground truth boundary marked as hit if a proposed boundary is present within a tolerance threshold. We report F1, Precision, Recall, and R score \citep{rasanen09b_interspeech}. We ablate F1 scores with tolerance windows of 20ms and 50ms. Given boundaries, we also evaluate the purity of our clusters at 4096 units. Syllable Purity measures the probability that a syllable is mapped to its most corresponding cluster unit, and Cluster Purity measures the probability that a cluster is mapped to its most corresponding syllable unit.
+
+Even if units do not correspond with syllables, they can still be useful to SpeechLMs if they can resynthesize back into speech that matches the original text. Additionally, training a resynthesis model provides a stronger description of the semantic information contained in units than purity metrics, which may be unreliable because SD-HuBERT does not provide a unit at every timestep while our methods do. To evaluate resynthesized speech, we follow AudioLM and measure Word Error Rate (WER) and Character Error Rate (CER) on the set of 4-10 second segments from LibriSpeech test-clean. For ASR, we follow VALL-E \citep{wang2023neural} and use the public HuBERT-base CTC ASR model provided by \citet{hsu-hubert}.
+
+\begin{table}
+\small
+    \parbox[t]{.29\linewidth}{
+        \captionsetup{font=small}
+        \caption{Boundary detaction with different initialization using HuBERT on LS dev-clean}
+        \centering
+        \label{tab:iters}
+        \resizebox{.29\textwidth}{!}{
+        \begin{tabular}{lccc}
+        \toprule
+        Model      & F1 & Pr. & Re. \\
+        \midrule
+        Feat-Sim     & 46.7  & 48    & 45   \\
+        \>\>-Iter 1    & 51.1  & 50    & 52  \\
+        \>\>-Iter 2    & 50.4  & 51    & 50   \\
+        \midrule
+        LossPred      & 60.1  & 53    & 68   \\
+        \>\>-Iter 1    & 67.1  & 67    & 68   \\
+        \>\>-Iter 2    & \textbf{70.2}  & \textbf{70}    & \textbf{70}  \\
+        \bottomrule
+        \end{tabular}
+        }
+    }
+    \hfill
+    \parbox[t]{.29\linewidth}{
+        \captionsetup{font=small}
+        \caption{Controllability of unit rate measured on LibriSpeech dev-clean boundary detection. D2V2, 50ms threshold. P:Phone, S:Syllable, W:word}
+        \centering
+        \label{tab:controllability}
+        \resizebox{.29\textwidth}{!}{
+        \begin{tabular}{lccc}
+        \toprule
+        Hz   & F1-P & F1-S & F1-W \\
+        \midrule
+        8.33 & \textbf{72.0}    & 63.5    & 56.8    \\
+        6.25 & 65.2    & 71.8    & 66.0    \\
+        5.0  & 58.7    & 73.0    & 71.8    \\
+        4.3  & 54.3    & \textbf{73.2}    & \textbf{74.0}    \\
+        \bottomrule \\
+        \end{tabular}
+        }
+    }
+    \hfill
+    \parbox[t]{.39\linewidth}{
+        \captionsetup{font=small}
+        \caption{Inference speed measured in Real-Time-Factor (RTF), the processed seconds per second. 32 batches with 25s of audio each, 1 GPU, 16 Cores. Hardware in \ref{sec:hparams}}
+        \label{tab:speed}
+        \centering
+        \resizebox{.39\textwidth}{!}{
+        \begin{tabular}{lc}
+        \toprule
+        Tokenizer Encoder    & RTF  $\uparrow$  \\
+        \midrule
+        SD-HuBERT \citep{cho2023sd}          & 368                  \\
+        HuBERT+\citep{peng2023syllable}      & 88                  \\
+        HuBERT+Our Extraction (\ref{sec:efficient_extraction})      & \textbf{488}                \\
+        \midrule
+        \multicolumn{2}{l}{SpeechLM, 90M, Cached Units}       \\
+        \midrule
+        TWIST                &  7.8k                     \\
+        Ours 6.25Hz 8k &        \textbf{34.7k}              \\
+        \bottomrule
+        \end{tabular}
+        }
+    }
+\end{table}
+Table \ref{tab:main_units} shows our syllabic correspondence results against the prior-state-of-the-art SD-HuBERT \citep{cho2023sd}
+and the HuBERT-based feature similarity strategy from \citet{peng2023syllable}. Applying SylBoost to either HuBERT or Data2Vec2 improves correspondence across-the-board except for in cluster purity. Although LossPred trails SD-HuBERT in performance, it pushes the boundary for syllable recognition using HuBERT without additional training. Improvement across iterations and with different loss initialization can be found in Table \ref{tab:iters}, which shows that using LossPred as a bootstrapping source instead of HuBERT similarity \citep{peng2023syllable} makes SylBoost converge to much higher segmentation accuracy. In Table \ref{tab:controllability}, we demonstrate the controllability of SylBoost to extract boundaries at different granularities: higher unit rates successfully correspond more with phones and lower unit rates correspond more with syllables and words. In Table \ref{tab:speed} we show the speedup of our efficient unit extraction.
+
+\begin{table}
+\caption{Unit Resynthesis. WER/CER results on 4-10 second examples on LibriSpeech \citep{librispeech} test-clean. Hz and Bitrate are measured post deduplication on LibriSpeech dev-clean.
+    }
+\centering
+ \resizebox{0.99\textwidth}{!}{
+    \label{tab:resynth}
+    \centering
+    \begin{tabular}{llccccc}
+    \toprule
+    Model                      & Changes                   & Hz & \#Units & BPS  & WER$\downarrow$  & CER$\downarrow$ \\
+    \midrule % \cmidrule{1-2}
+    SD-HuBERT~\citep{cho2023sd}                  &                                     & 5.0     & 4096      & 60   & 37.3 & 22.7 \\
+    SylBoost (HuBERT)                & +Our Clustering                     & 5.0     & 4096      & 60   & 18.5 & 10.2 \\
+    SylBoost (Data2Vec2)                  & +Use Data2Vec2                      & 5.0     & 4096      & 60   & 12.8 & 6.4  \\
+    SylBoost (Data2Vec2)                  & +Increase \#Units                     & 5.0     & 16384     & 70   & 9.1  & 4.3  \\
+    SylBoost (Data2Vec2)                  & +Tune unit-rate, \#Units & 8.33    & \textbf{2048}      & 91   & 8.0  & 3.7  \\
+    SylBoost (Data2Vec2)                  & +Tune unit-rate, \#Units                   & 6.25    & 8192      & 81   & \textbf{7.0}  & \textbf{3.2} \\
+    \midrule
+    \rowcolor{mygray}[\dimexpr\tabcolsep+0.2pt\relax] \multicolumn{2}{l}{TWIST Tokenizer (upper bound)~\citep{hassid2023textually}}                            & 19.5    &500      & 175  & 6.3  & 2.5  \\
+    \bottomrule
+    \end{tabular}
+}
+\end{table}
+We demonstrate the step-by-step changes used to improve unit cluster re-synthesis quality as compared to SD-HuBERT in Table \ref{tab:resynth}. We observe over a 50\% decrease in WER and CER by using SylBoost with the same clustering parameters as  SD-HuBERT. We further decrease WER by a third by using Data2Vec2, and from there by modifying the unit sample rate and number of clusters can reach as low as 2048 clusters and a WER of 7\%. These results demonstrate by far the lowest bitrate we are aware of for ``reasonable-quality'' self-supervised-unit resynthesis. Resynthesis for all models we train is done back into TWIST-Tokenizer units, bounding potential quality at a WER of 6.3\%.
+
+\subsection{Speech Lauguage Model Configuration}
+All of the SpeechLMs we implement, as well as our Interleaved-Vocoder-LM, follow the OPT \citep{Zhang2022OPTOP} architecture and default to using 12 Transformer layers, an embedding dimension of 768, and learned positional embeddings. This totals to 90M non-embedding parameters, and represents an identical model architecture to TWIST-125M. We also experiment with a larger 24 layer 1024 dimension model totaling to 300M non-embedding parameters, the same as AudioLM and TWIST-350M. For all language model pretraining experiments, we randomly crop files to 25 seconds, use a batch size of 80000 tokens, and train for 200k steps, which amounts to the same compute as in TWIST. To make our approach entirely textless, we do not use TWIST initialization. We tokenize using SylBoost on Data2Vec2 \citep{d2v2}, which provided the best results in low-bitrate WER resynthesis (Table \ref{tab:resynth}).
+
+\subsection{Speech Language Model Baselines}
+We compare against a range of SotA SpeechLMs: AudioLM \citep{borsos2023audiolm}, TWIST \citep{hassid2023textually}, GSLM \citep{gslm}, and the audio-only version of Moshi \citep{kyutai2024moshi}. As a tokenizer, AudioLM uses w2v-BERT tokens \citep{Chung2021w2vBERTCC}, TWIST operates on tokens from a HuBERT model that the TWIST authors pretrain for an additional iteration on multilingual data, \citet{gslm} uses HuBERT-base and K-Means, and Moshi operates on a residual codec with the first code distilled to match WavLM \citep{Chen2021WavLMLS}. AudioLM and TWIST are the most directly comparable models to SyllableLM with respect to dataset and transformer size and output units at 25Hz followed by consecutive deduplication.
+
+We reimplement a 90M parameter model using the TWIST tokenizer units without textually-pretrained initialization (Cold-Init in the TWIST paper) on our data split for an all-else-held equal comparison on unit type. We additionally reimplement Byte Pair Encoding (BPE) to train a SpeechLM as done in \citet{acousticbpe}, resulting in the lowest bitrate encoding of speech outside of our model. We run BPE on deduplicated TWIST units and we grid search to find that the minimum bitrate for BPE occurs at 4k units, which we use for all experiments (\citet{acousticbpe} originally operated on 50Hz units, meaning that the 118bps rate obtained here is also new). For textual toplines, we train on corresponding LibriLight text transcripts from \citet{kang2023libriheavy} and convert text to phones and syllables using the same methods as in Section \ref{sec:res_unit_quality}.
+
+\subsection{Results: Spoken Language Modeling}
+\label{res:generation}
+\begin{table}
+    \caption{Main SyllableLM results. We evaluate on sWUGGY (In-Vocab, All, Out-of-Vocab), sBLIMP from \citet{nguyen2020zero}, and tStoryCloze from \citet{hassid2023textually}. Higher is better for all metrics. Bold is best, underlined is second-best.}
+    \centering
+     \resizebox{0.99\textwidth}{!}{
+    \begin{tabular}{llllllllccccc}
+        \toprule
+                          &        &         &  &  & \#Data & \#Data    & GPU-     & \multicolumn{3}{c}{sWUGGY} & \multicolumn{2}{c}{Semantics} \\  \cmidrule(lr){9-11} \cmidrule(lr){12-13}
+        Model                     & Params & \#Units & Hz & BPS & Hours & Toks & Hours & All  & IV       & OOV    & sBLIMP           & tSC                   \\
+        \midrule
+        Phone Topline             & 90M   & 70      & 12.5 & 76 & 55K & 2.5B      &  70                 &  81.4 &  95.2     & 67.7       &   68.8               & 80.6                      \\
+        Syllable Topline          & 90M   & 28k     & 5.0  & 74 & 55K & 1B      &  70                 & 79.5 &  93.1      & 65.9       &   69.3               & 76.6                     \\
+        \midrule
+        \citet{gslm}         & 150M & 100 & 50 & 332 & 6K & 1.1B & - & 64.8 & - & - & 54.2 & 66.6\\
+        AudioLM  \citep{borsos2023audiolm}                 & 300M   & 1K    & 25 & 250 & 55K & 5B   & 2.9k*    &  71.5   & \textbf{83.7}     & 59.3   & \textbf{64.7}             & -                           \\
+        TWIST \citep{hassid2023textually}                    & 300M   & 500     & 19.5 & 175 & 155K & 9B   & 295            & 70.6 & 80.3  & 61.0   & 56.2             & 69.9                          \\
+        TWIST                     & 1.3B   & 500     & 19.5 & 175 & 155K & 9B   & 1.1k*         & 71.8  & 81.1 & \underline{62.3}   & 57.0             & 70.6                          \\
+        \rowcolor{mygray}[\dimexpr\tabcolsep+0.2pt\relax] TWIST                     & 7B     & 500     & 19.5 & 175 & 155K & 9B    & 5.9k*         & 72.7 & 83.6  & 61.8   & 59.0             & 74.1                     \\
+        \rowcolor{mygray}[\dimexpr\tabcolsep+0.2pt\relax] TWIST                     & 13B    & 500     & 19.5  & 175 & 155K & 9B    & 10k*        & 73.9 & 84.1  & 63.7   & 59.2             & 76.4                          \\
+        \rowcolor{mygray}[\dimexpr\tabcolsep+0.2pt\relax] Moshi \citep{kyutai2024moshi}                     & 7B    & 2K     & 12.5$\times$8  & 1.1K & 7M & 2.5T    & -        & 74.8 & -  & -   & 59.9             & 80.9                          \\
+        \midrule
+        TWIST-CI                  & 90M   & 500     & 19.5  & 175 & 55K & 3.9B   & \underline{84}            & 69.7 & 79.8   & 59.7   & 55.5             & 69.0                          \\
+        BPE   \citep{acousticbpe}              & 90M   & 4k  & 9.8 & 118 & 55K & 2B     & \underline{84}               & 61.8  & 66.7     & 56.8      & 54.5                & 56.2                             \\
+        \midrule
+        SyllableLM           & 90M   & 2k    & 8.3 & 91 & 55K &  1.6B     & \textbf{70}            & \textbf{72.2} & 81.7   & \textbf{62.6}   & 62.4             & \underline{71.4}                          \\
+        SyllableLM          & 90M   & 8k    & \underline{6.25} & \underline{81} & 55K & \underline{1.2B}    & \underline{75}           & \underline{72.1}  & \underline{82.2}   & 61.9   & 62.9             & 70.2                           \\
+        SyllableLM            & 90M   & 16k   & \textbf{5.0} & \textbf{70} & 55K & \textbf{1B}    & \underline{82}             & 67.6 & 76.9  & 58.3   & 63.2             & 69.0                             \\
+        SyllableLM      & 300M   & 8k        & \underline{6.25} & \underline{81} & 55K & \underline{1.2B}     & 290             & \textbf{72.2}   & \underline{82.2}       & 62.0      &  \underline{63.7}              &  \textbf{75.4}                            \\
+        \bottomrule
+    \end{tabular}
+    }
+    \label{tab:speechlm}
+\end{table}
+
+\label{res:gslm}
+
+The end-to-end GSLM pipeline is deep, and so it is essential to have metrics to independently evaluate different stages. To evaluate our SpeechLM stage, we follow \citet{gslm} and use the ZeroSpeech \citep{nguyen2020zero} sWUGGY and sBLIMP evaluation. The sWUGGY dataset tasks the model with outputting a higher perplexity on similar but fake spoken words (e.g. brick vs blick). Similarly, the sBLIMP dataset checks syntactic correctness (e.g. the dog sleeps vs the dogs sleeps). We also evaluate the SpeechLM on the tSC set from \citet{hassid2023textually}, which operates like the ZeroSpeech metrics on a spoken version of the StoryCloze dataset \citep{mostafazadeh-etal-2016-corpus} with the last sentence in negative samples randomly chosen. For all metrics we follow prior work and output the mean perplexity per token.
+
+
+The results for SpeechLM metrics are depicted in Table \ref{tab:speechlm}. We find that training with our syllable units improves performance across-the-board on speech understanding tasks. \textbf{With under 90 hours of training, SyllableLM outperforms the 13B parameter TWIST and 7B Moshi on sBLIMP}, which best evaluates semantic understanding \citep{gslm}. Measured on all of sWUGGY, we also beat AudioLM with 30x less GPU compute and TWIST model sizes up to 1.3B parameters in lexical understanding. On tSC, we observe that SyllableLM benefits from scaling with our large model approaching the performance of our textual topline. Because our units are much lower frequency, we see a 4.5x speedup at inference time with the same parameter count in Table \ref{tab:speed}. Due to compute requirements, we are unable to scale further.
+
+\begin{table}
+\small
+    \resizebox{.47\textwidth}{!}{
+    \parbox[t]{.47\linewidth}{
+        \captionsetup{font=small}
+        \caption{Holding number of SylBoost units and unit rate constant. ZeroSpeech development set.}
+        \label{tab:swuggy_sblimp_constant}
+        \centering
+        \begin{tabular}{llcc}
+        \toprule
+        Hz   & \#Units & sWUGGY & sBLIMP \\
+        \midrule
+        8.33 & 4k    & \textbf{72.9}   & 61.8  \\
+        6.25 & 4k    & 69.3   & \textbf{63.3}      \\
+        5.00 & 4k    & 65.7   & 62.8    \\
+        \midrule
+        8.33 & 2k    & 72.1   & \textbf{62.0}   \\
+        8.33 & 4k    & \textbf{72.9}   & 61.8    \\
+        8.33 & 8k    & \textbf{72.9}    & 61.2    \\
+        \bottomrule
+        \end{tabular}
+    }
+    }
+    \hfill
+    \resizebox{.52\textwidth}{!}{
+    \parbox[t]{.52\linewidth}{
+        \captionsetup{font=small}
+        \caption{Continuation Metrics. We measure PPX@Oracle-VERT and VERT@Oracle-PPX (Described in \ref{res:gslm})}
+        \centering
+        \begin{tabular}{lcc}
+        \toprule
+        Model               & PPX@O-V     & VERT@O-P        \\
+        \midrule
+        TWIST 300M          & 205 $\pm$ 24         & 24.0 $\pm$ 1.0          \\
+        TWIST 1.3B          & 175 $\pm$ 14         & 22.6 $\pm$ 1.2          \\
+        \midrule
+        8.33Hz 2k 90M  & 159 $\pm$ $\>\>$8          & \textbf{15.1} $\pm$ 0.9 \\
+        6.25Hz 8k 90M  & 139 $\pm$ 12         & 20.1 $\pm$ 0.7          \\
+        5.00Hz 16k 90M & \underline{131} $\pm$ 11   & \underline{15.2} $\pm$ 1.0    \\
+        6.25Hz 8k 300M & \textbf{116} $\pm$ $\>\>$7 & \underline{15.8} $\pm$ 0.9  \\
+        \bottomrule
+        \end{tabular}
+        \label{tab:continuations}
+    }
+    }
+\end{table}
+We notice a decrease in sWUGGY quality with our 5.0Hz units, which we suspect is in part caused by the short length of the dataset audios making input tokenization excessively short. We further ablate changing the unit rate and unit frequency in Table \ref{tab:swuggy_sblimp_constant}. We also find that BPE, despite having the lowest bitrate outside of our approach, does not approach the quality gains created by our syllable-like units.
+
+To measure the quality of end-to-end continuations, we use the VERT@O-PPX and PPX@O-VERT metrics proposed in \citet{gslm}, which are shown to be the automatic metrics correlating best with human meaningfulness judgements. 
+VERT@O-PPX measures the diversity of output at the sampling temperature where the perplexity of generated audio transcriptions matches that of the ground truth text, and PPX@O-VERT performs the inverse. 
+Like \citet{gslm}, we generate 10-second continuations from 1000 randomly sampled 3-second crops from LibriSpeech test-clean, and measure results using their provided environment and parameters. 
+To prevent errors from randomly cutting off audio in the middle of a syllable-like unit, we discard the last encoded unit for all models when generating continuations. %ALAN: Bonus detail 
+We report these in Table \ref{tab:continuations} with two sigma error bars and find that SyllableLM outperforms TWIST 300M and 1.3B.% We do not provide human meaningfulness judgement scores due to cost. 
+   
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Discussion and Limitations}
+
+\label{sec:limitations}
+Though speech is a very general medium, there are a number of challenges in adapting our methods to generate low-bitrate units angled towards other audio tasks or other domains such as vision. Our LossPred technique assumes that the semantic units to learn are separable across time, one-dimensional, and contiguous. In audio tasks or settings with multiple speakers, sounds or words can occur simultaneously. Images and video have partially occluded or overlapping objects.
+
+Despite this, LossPred is unique in that it finds boundaries using the values (losses) that the pretrained model is directly trained to optimize. Meanwhile, other approaches such as DINO \citep{caron2021emerging} and SD-HuBERT rely on difficult-to-control intermediate features for semantic discovery. SylBoost then demonstrates that we can use LossPred to extract emergent and interpretable features even when they are not clear in the original model. Because of this, we believe that LossPred and SylBoost provide a very promising direction for controllable and scalable semantic feature clustering and extraction in domains like speech, audio, music, and video.
+
+Low-frequency units such as ours also provide a significantly more computationally tractable path toward the scaling that has seen such success in textual language models. On the other hand, SylBoost units may be losing out on useful paralinguistic features like tone whose impact is only salient on non-audiobooks or at scale. We suspect that hybrid models operating on low-bitrate and high-bitrate units could be constructed to balance these considerations and demonstrate significant quality improvements in multimodal speech-text language modeling. 
+
+
+
+\section{Conclusion}
+
+We introduce a new method to tokenize speech for use in SpeechLMs. We do this by proposing a method to elicit syllabic organization in pretrained speech encoder models, bootstrapping a feature-space clustering algorithm from a static analysis of correlations in off-the-shelf SSL encoder model losses across time. We demonstrate the success of our technique both in having strong associations with syllables and as an extremlely low-bitrate codec of speech for textual resynthesis. Using this tokenization strategy, we successfully train SyllableLM, a SpeechLM that out-performs comparable state-of-the-art approaches across a diverse range of metrics with a significant training and inference speedup. We further ablate several design decisions such as quantization strategy, loss initialization, and the effects of controllability for downstream usecases. Compression is a crucial aspect of learning, and we hope that these significant improvements in the unsupervised learning of low-bitrate speech units can serve as a foundation for approaches towards understanding spoken language and general representation learning.
+
+
+
+\section{Reproducibility}
+
+We focused heavily on reproducibility throughout our work, and we commit to releasing all parameters and code used upon deanonymization. We provide the exact equations used to calculate LossPred, SylBoost, and our Efficient Extraction Pipeline, allowing for reimplementation solely from the main text. The SyllableLM architecture and Interleaved-Vocoder-LM are well-defined and follow publicly sourced prior work. All datasets used for training and evaluation are listed explicitly in the main text, and all evaluation procedures are described as would be needed to calculate them.
+
+
+
+\section{Ethics}
+
+It is important to note that large textual language models can have harmful effects, such as enabling the generation of misinformation in mass. Although generative spoken language models have not yet caught up to their textual counterparts, it is still necessary to be aware of potential misuses that could arise in the future.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

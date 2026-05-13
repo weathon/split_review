@@ -1,8 +1,8 @@
 # LEGO-Compiler: Enhancing Neural Compilation Through Composable Chain of Thought
 
 - Decision: Reject
-- Avg Score: 3.40
-- Scores: 1, 0, 5, 5, 6
+- Avg Score: 6.50
+- Scores: 10, 5, 5, 6
 
 ## Abstract
 Large language models (LLMs) have the potential to revolutionize how we design and implement compilers and code translation tools. However, existing LLMs struggle to handle long and complex programs.  We introduce LEGO-Compiler, a novel neural compilation system that leverages LLMs to translate high-level languages into assembly code. Our approach centers on three key innovations: LEGO translation, which decomposes the input program into manageable blocks; annotation-based Chain-of-Thoughts, guiding LLMs through the compilation process with LLM-annotated context; and a feedback mechanism for self-correction. Supported by formal proofs of code composability, LEGO-Compiler demonstrates high accuracy on multiple datasets, including over 99% on ExeBench and 100% on industrial-grade CoreMark, and successfully handles programs far exceeding the length limitations of native LLM translation. This work opens new avenues for applying LLMs to system-level tasks, complementing traditional compiler technologies.

@@ -1,0 +1,254 @@
+\title{PaCA: Partial Connection Adaptation for Efficient Fine-Tuning}
+
+\begin{abstract}
+Prior parameter-efficient fine-tuning (PEFT) algorithms reduce memory usage and computational costs of fine-tuning large neural network models by training only a few additional adapter parameters, rather than the entire model. However, the reduction in computational costs due to PEFT does not necessarily translate to a reduction in training time; although the computational costs of the adapter layers are much smaller than the pretrained layers, it is well known that those two types of layers are processed sequentially on GPUs, resulting in significant latency overhead. LoRA and its variants avoid this latency overhead by merging the low-rank adapter matrices with the pretrained weights during inference. However, those layers cannot be merged during training since the pretrained weights must remain frozen while the low-rank adapter matrices are updated continuously over the course of training. Furthermore, LoRA and its variants do not reduce activation memory, as the first low-rank adapter matrix still requires the input activations to the pretrained weights to compute weight gradients. To mitigate this issue, we propose **Pa**rtial **C**onnection **A**daptation (**PaCA**), which fine-tunes randomly selected partial connections within the pretrained weights instead of introducing adapter layers in the model. PaCA not only enhances training speed by eliminating the time overhead due to the sequential processing of the adapter and pretrained layers but also reduces activation memory since only partial activations, rather than full activations, need to be stored for gradient computation. Compared to LoRA, PaCA reduces training time by 22\% and total memory usage by 16\%, while maintaining comparable accuracy across various fine-tuning scenarios, such as fine-tuning on the MMLU dataset and instruction tuning on the Oasst1 dataset. PaCA can also be combined with quantization, enabling the fine-tuning of large models such as LLaMA3.1-70B. In addition, PaCA enables training on 23\% longer sequence data and improves throughput by 16\% on both NVIDIA A100 and INTEL Gaudi 2 GPUs compared to LoRA. The code is available at [https://anonymous.4open.science/r/paca-366F](https://anonymous.4open.science/r/paca-366F).
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Following the scaling laws (Kaplan et al., 2020; Hoffmann et al., 2022), the size of language models based on the transformer architecture (Vaswani et al., 2017) has grown significantly in recent years. Large Language Models (LLMs) such as GPT4 (OpenAI, 2023) and LLaMA 3 (Dubey et al., 2024) have achieved remarkable abilities across a wide range of general tasks. Furthermore, the capabilities of LLMs can be refined for specific purposes, either by creating models specialized for specific tasks through fine-tuning (Singhal et al., 2023) or by developing chatbots that better understand user queries through instruction tuning (Wei et al., 2022; Taori et al., 2023). However, fine-tuning LLMs consumes significant computational power and memory, making it impossible to perform without a large number of expensive GPUs.  
+
+Parameter-efficient fine-tuning (PEFT) (Li & Liang, 2021; Houlsby et al., 2019; He et al., 2022) is a set of methods to relieve the high costs of fine-tuning large models. Prior PEFT schemes introduce new adapter layers with significantly fewer parameters to a pretrained model and only train these newly introduced adapter layers, substantially reducing the memory needed to store gradients and optimizer states. Furthermore, PEFT can reduce the computational overhead of fine-tuning, as it needs to calculate the parameter gradients only for the adapter weights, rather than for all model parameters.  
+
+![](images/071ee86598a259fb8a5924edfc48d73a6f12a48c253f8199ab1665a1df2d2d85.jpg)  
+Figure 1: Overview of Partial Connections Adaptation (PaCA) algorithm.  
+
+However, we observed that the reduction in computational cost due to PEFT does not translate into a significant decrease in actual training time. This issue arises from the fact that the adapter layers are typically processed sequentially with the pretrained layers since GPUs are generally optimized for processing one kernel at a time. This sequential processing limits the full utilization of hardware resources and incurs significant latency overhead, even though the number of FLOPs of the adapter layers is significantly smaller than that of the pretrained layers. While some software tools such as CUDA streams could be used to process the adapter layers in parallel by executing multiple kernels simultaneously, it suffers from the overhead of managing and synchronizing the streams (Wang et al., 2016; Dai et al., 2018; Han et al., 2022).  
+
+LoRA (Hu et al., 2022) and its variants (Kopiczko et al., 2024; Liu et al., 2024; Wu et al., 2024) avoid this latency overhead by merging the low-rank adapter matrices and the pretrained weights to eliminate the need for sequential processing during inference. However, this approach cannot be applied to fine-tuning since the low-rank adapter matrices need to be trained separately from the frozen pretrained weights, making the overhead from sequential processing unavoidable. Furthermore, LoRA and its variants do not reduce activation memory compared to Full-FT, since the input activations of the pretrained weights still need to be stored in memory to calculate the gradients for the first low-rank adapter matrix.  
+
+In this paper, we propose PaCA (Partial Connection Adaptation), which fine-tunes randomly selected partial connections in the pretrained weights without relying on adapter layers, as depicted in Fig. 1. Unlike prior PEFT schemes, PaCA successfully reduces training time since the forward and backward operations for the pretrained weights also include those for the partial connections, eliminating the need for additional sequential processing. Furthermore, since calculating the gradients for the partial weights only requires the corresponding activations, PaCA significantly reduces activation memory usage as well. We first theoretically show that $\mathrm{PaCA}$ can effectively converge the loss in general neural networks. In experiments with various scenarios, PaCA demonstrates substantial reductions in both training time and memory compared to prior PEFT schemes while maintaining comparable accuracy on NVIDIA A100 (Choquette et al., 2021) and Intel Gaudi 2 GPUs (Intel Corporation, 2023). In summary, our contributions are as follows:  
+
+• We propose PaCA, a memory-efficient PEFT algorithm that fine-tunes randomly selected partial connections within pretrianed weights without using additional adapter layers.  
+
+• We theoretically prove that PaCA can converge the loss in general neural networks.  
+
+• We experimentally show that PaCA effectively reduces memory consumption and improves training speed compared to prior PEFT algorithms across various fine-tuning scenarios on different types of GPUs.  
+
+
+
+\section{2 BACKGROUND & MOTIVATION  }
+
+
+In general, training deep neural networks involves backpropagation (Rumelhart et al., 1986), which facilitates the adaptation of the model in the direction that minimizes the loss function. The equations below show the backpropagation algorithm for a linear layer:  
+
+$$
+\begin{array}{r l}{\mathrm{Forward}{\cdot}}&{\mathbf{X}_{o u t}=\mathbf{W}\mathbf{X}_{i n}}\\ {\mathrm{Backward}{:}}&{\nabla\mathbf{X}_{i n}=\mathbf{W}^{T}\nabla\mathbf{X}_{o u t}}\\ &{\nabla\mathbf{W}=\nabla\mathbf{X}_{o u t}\,\mathbf{X}_{i n}^{T}}\end{array}
+$$  
+
+where $\mathbf{W}\in\mathbb{R}^{d_{o u t}\times d_{i n}}$ , $\mathbf{X}_{i n}\in\mathbb{R}^{d_{i n}}$ , and $\mathbf{X}_{o u t}\in\mathbb{R}^{d_{o u t}}$ denote the weights, input activations, and output activations, respectively, with $d_{i n}$ and $d_{o u t}$ denoting the input and output dimensions of the layer. ∇W and $\nabla{\mathbf{X}}_{i n}$ represent the weight gradients and input gradients. The forward propagation computes the output activations following Eq. 1, while the backward propagation computes the input gradients (Eq. 2) and the weight gradients (Eq. 3).  
+
+Full-FT trains all layers using backpropagation, performing the operations described in Eqs. 1-3 for each layer. Consequently, Full-FT incurs significant memory overhead due to storing the gradients and optimizer states for all parameters. To lower this overhead, various PEFT schemes have been introduced. For instance, the training scheme of LoRA ( $\mathrm{Hu}$ et al., 2022), a representative PEFT algorithm, is represented as the equations below:  
+
+$$
+\begin{array}{r l}{\mathrm{Forward}\!:}&{\mathbf{X}_{o u t}=\mathbf{W}\mathbf{X}_{i n}+\mathbf{B}(\mathbf{A}\mathbf{X}_{i n})}\\ {\mathrm{Backward}\!:}&{\nabla\mathbf{X}_{i n}=\mathbf{W}^{T}\nabla\mathbf{X}_{o u t}+\mathbf{A}^{T}(\mathbf{B}^{T}\nabla\mathbf{X}_{o u t})}\\ &{\nabla\mathbf{B}=\nabla\mathbf{X}_{o u t}\,\mathbf{X}_{m i d}^{T}\,,\ \nabla\mathbf{A}=\nabla\mathbf{X}_{m i d}\,\mathbf{X}_{i n}^{T}}\end{array}
+$$  
+
+where $\textbf{B}\in\~\mathbb{R}^{d_{o u t}\times r}$ and $\mathbf{A}\,\in\,\mathbb{R}^{r\times d_{i n}}$ represent the low-rank adapter matrices in LoRA, with $r$ denoting the rank of the adapter. $\mathbf{X}_{m i d}\,\in\,\mathbb{R}^{r}$ represents the output activations after propagating through the LoRA A layer (i.e., $\mathbf{X}_{m i d}=\mathbf{A}\mathbf{X}_{i n}$ ). In Eqs. 4-6, we have highlighted the computations involving adapter weights in blue. Compared to Full-FT, prior PEFT schemes introduce two key changes: 1) computations for the adapters are added in forward and backward propagations (Eqs. 4-5), and 2) only the adapters are trained, excluding the pretrained weights (Eq. 6). Since the computational cost of the adapters in PEFT is typically negligible compared to that of the pretrained layers (Li & Liang, 2021; Houlsby et al., 2019; He et al., 2022; Hu et al., 2022), PEFT can reduce the overall computational cost of training by eliminating the need to compute parameter gradients for the pretrained weights.  
+
+For more detailed analysis, we calculate FLOPs and measure training time when fine-tuning the LLaMA3-8B model using Full-FT and LoRA. Experimental results show that the operation count of LoRA is approximately $33\%$ lower than Full-FT (Fig. 2a). However, the saving in actual training time is only $0.6\%$ , as displayed in Fig. 2b, which is far below the expected $33\%$ decrease. To investigate this discrepancy, we analyzed the computational cost for both forward and backward propagation, as well as the actual training time.  
+
+One interesting finding is that the time required for forward propagation in LoRA increased by $33\%$ compared to Full-FT, despite requiring a similar number of operations, as shown in Fig. 2b. This latency overhead is due to the inefficient sequential processing of the pretrained and adapter layers, as reported by Hu et al. (2022). More specifically, the operations associated with the adapter layers are conventionally executed in a sequential manner, rather than in parallel with the pretrained layers, as GPUs are typically designed to execute a single kernel at a time. Although parallel execution of the adapter layers may be feasible using CUDA streams, which allow multiple kernels to run concurrently, these methods introduce additional overhead of resource allocation and synchronization between streams (Wang et al., 2016; Dai et al., 2018; Han et al., 2022).  
+
+This sequential processing of the adapter and pretrained layers negatively impacts hardware utilization and incurs latency overhead, despite the fact that the computational cost of the adapter layers accounts for only approximately $1\%$ of that of the pretrained layers. This latency overhead could be mitigated by merging the low-rank adapter matrices into the pretrained weights during inference (Hu et al., 2022). However, during fine-tuning, where the pretrained weights must remain frozen and only the adapter weights are updated separately, such merging is not possible and the latency overhead from sequential processing remains.  
+
+![](images/ee30ca158598e03886286dee3efc30d039e1f131c94ebea71b420d919b96a7a6.jpg)  
+Figure 2: The number of operations (TFLOPs) and training time (ms) per iteration when training LLaMA3-8B with full-fine tuning (Full-FT) and LoRA.  
+
+Furthermore, LoRA and its variants are unable to reduce the activation memory. In Full-FT, all input activations $\left(\mathbf{X}_{i n}\right)$ must be stored in memory during forward propagation in order to calculate the gradients of the pretrained weights $(\nabla\mathbf{W})$ in backward propagation, as shown in Eq. 3. Although LoRA does not require the computation of gradients for the pretrained weights, the input activations $\left(\mathbf{X}_{i n}\right)$ must still be stored in memory to calculate the gradients for the LoRA A layer $(\nabla\mathbf{A})$ , as indicated in Eq. 6. Additionally, the output activations of the LoRA A layer $({\bf{X}}_{m i d})$ must be stored in memory to calculate the gradients for the LoRA B layer (∇B) following Eq. 6. This issue with activation memory becomes more critical when training on long sequence data or increasing batch size to improve training throughput (Chen et al., 2023; Korthikanti et al., 2023; Woo et al., 2024).  
+
+
+
+\section{3 METHODOLOGY  }
+
+
+3.1 PACA: PARTIAL CONNECTION ADAPTATION  
+
+Motivated by the observation that the newly introduced adapter layers lead to training inefficiencies, we propose Partial Connection Adaptation (PaCA). PaCA fine-tunes randomly selected partial connections within the pretrained weights rather than introducing new adapter layers, as depicted in Fig. 1. More specifically, PaCA employs the training algorithm below:  
+
+$$
+\begin{array}{r l}{\mathrm{Forward:}}&{\mathbf{X}_{o u t}=\mathbf{W}\mathbf{X}_{i n}}\\ {\mathrm{Backward:}}&{\nabla\mathbf{X}_{i n}=\mathbf{W}^{T}\nabla\mathbf{X}_{o u t}}\\ &{\nabla\mathbf{P}=\nabla\mathbf{X}_{o u t}\,^{p}\mathbf{X}_{i n}^{T}}\end{array}
+$$  
+
+where $\textbf{P}\in\,\mathbb{R}^{d_{o u t}\times r}$ and ${}^{p}\mathbf{X}_{i n}\;\in\;\mathbb{R}^{r}$ denote the partial connections randomly selected from the pretrained weights (i.e., $\textbf{P}\subset\textbf{W}$ and the corresponding partial activations selected from the input activations (i.e., ${}^{p}\mathbf{X}_{i n}\subset\mathbf{X}_{i n})$ , respectively. $r$ represents the number of the randomly selected columns within the pretrained weights, which we refer to rank when PaCA is applied. The operations involving partial connections are highlighted in red.  
+
+$\mathrm{PaCA}$ randomly selects the partial connections to fine-tune from the pretrained weights before training and then fine-tunes only the selected connections. Since these partial connections are part of the pretrained weights, no additional computations are required in forward and backward computations (Eqs. 7-8), completely avoiding inefficient sequential processing due to the adapter layers in  
+
+LoRA. In addition, while LoRA requires both the input activations $\left(\mathbf{X}_{i n}\right)$ and the output activations of the LoRA A layer $({\bf{X}}_{m i d})$ to calculate gradients for the low-rank adapter matrices (Eq. 6), PaCA only needs to store the partial activations $(^{p}\mathbf{X}_{i n})$ to calculate the gradients of the partial connections (∇P), significantly reducing the amount of activation to be temporarily stored in memory.  
+
+ 2. Experimental results indicate that PaCA provides a $19\%$ reduction in total training time compared to LoRA, by reducing forward propagation time by $18\%$ and backward propagation time by $20\%$ , achieved through avoiding additional sequential processing. One interesting observation is that while the FLOPs required for forward and backward propagation in $\mathrm{PaCA}$ are nearly identical, the actual runtime for backward propagation is $17\%$ longer than forward propagation. We hypothesize that, even though the computation of weight gradients for partial connections (Eq. 9) is significantly smaller than that for the pretrained weights, it occurs sequentially with the input gradient computation (Eq. 8) during backward propagation. This sequential processing introduces additional latency compared to forward propagation, which only involves the computation of output activations (Eq. 1). It should be noted that this latency overhead is not a specific overhead introduced by PaCA, but rather an inherent issue in all backpropagation-based training algorithms including Full-FT and prior PEFT algorithms, which must compute both input gradients and weight gradients.  
+
+Intuitively, training only a subset of connections can be interpreted as learning within a subspace composed of the selected connections. Prior studies revealed that overparameterized models can be efficiently trained even when weights are projected onto a small subspace (Li et al., 2018; Aghajanyan et al., 2021). Similarly, LoRA Hu et al. (2022) was suggested based on the assumption that weight updates can be projected onto a small low-rank subspace. Inspired by these observations, we hypothesized that weight updates could also be projected onto a small subspace composed of a subset of weight columns. In other words, we assumed that the critical factor is learning within a small subspace, not the method of selecting the subspace itself. Here we prove that training only a subset of connections is sufficient to ensure the convergence of loss in neural networks, as demonstrated in Section 3.2.  
+
+
+
+\section{3.2 CONVERGENCE ANALYSIS OF PACA  }
+
+
+In Section 3.1, we proposed $\mathrm{PaCA}$ and demonstrated its effectiveness. Now we theoretically prove that $\mathrm{PaCA}$ converges for general neural networks. We first define the input at the $k$ -th iteration as $\mathbf{X}^{k}$ and the full set of weights as $\mathbf{W}^{k}\,=\,[\mathbf{W}_{1}^{k},\mathbf{W}_{2}^{k},\ldots,\mathbf{W}_{n}^{k}]$ , where $n$ denotes the number of layers. The loss of the model is defined as $f(\mathbf{X}^{k},\mathbf{W}^{k})$ . The weight of the $l$ -th layer $\mathbf{W}_{l}^{k}$ can be represented as a collection of column vectors (i.e., $\mathbf{W}_{l}^{k}\;=\;\left[{}_{1}\mathbf{w}_{l}^{k},2\mathbf{w}_{l}^{k},\ldots,{}_{d_{l}}\mathbf{w}_{l}^{k}\right])$ . In $\mathrm{PaCA}$ , we only fine-tune randomly selected columns $\mathbf{P}_{l}^{k}=\left[\phantom{}_{i_{1}}\mathbf{w}_{l}^{k},\phantom{}_{i_{2}}\mathbf{w}_{l}^{k},\phantom{}...\,,\phantom{}_{i_{r}}\mathbf{W}_{l}^{k}\right]$ where $i_{1},\ldots,i_{r}$ denote the selected column indices for PaCA. The weights are then updated as follows:  
+
+$$
+\begin{array}{r l}{\mathrm{Full-FT}:}&{\mathbf{W}_{l}^{k+1}=\mathbf{W}_{l}^{k}-\eta\nabla\mathbf{W}_{l}^{k}=\mathbf{W}_{l}^{k}-\eta[\nabla_{1}\mathbf{w}_{l}^{k},\nabla_{2}\mathbf{w}_{l}^{k},\dots,\nabla_{d_{l}}\mathbf{w}_{l}^{k}]}\\ {\mathrm{PaCA}:}&{\mathbf{W}_{l}^{k+1}=\mathbf{W}_{l}^{k}-\eta\Delta\mathbf{W}_{l}^{k}=\mathbf{W}_{l}^{k}-\eta[\mathbf{0},\nabla_{i_{1}}\mathbf{w}_{l}^{k},\dots,\nabla_{i_{r}}\mathbf{w}_{l}^{k},\dots\mathbf{0}]}\end{array}
+$$  
+
+where $\eta$ denotes learning rate and $\Delta\mathbf{W}_{l}^{k}$ denotes weight updates. In this scenario, we define the full set of partial connections within the model as $\mathbf{P}^{k}=[\mathbf{P}_{1}^{k},\mathbf{P}_{2}^{k},\ldots,\mathbf{P}_{n}^{k}]$ . Then, $\mathrm{PaCA}$ satisfies the following theorem:  
+
+Theorem 1. If the gradient of the loss function $f(\boldsymbol{W},\boldsymbol{X})$ is Lipschitz continuous and the only partial connections are updated, then  
+
+$$
+f(\pmb{W}^{k+1},\pmb{X}^{k+1})\leq f(\pmb{W}^{k},\pmb{X}^{k})-\eta(1-\frac{\eta L}{2})||\nabla\pmb{P}^{k}||^{2}
+$$  
+
+We prove Theorem 1 by applying Eq. 11 to the quadratic upper bound using Lipschitz continuity condition (i.e., $f(\mathbf{W}^{k+1},\mathbf{X}^{\widehat{k}+\widehat{1}})\stackrel{=}\textstyle f(\mathbf{\bar{W}}^{k},\mathbf{X}^{k})+\bar{\nabla}_{\mathbf{W}^{k}}f(\mathbf{W}^{k},\mathbf{\bar{X}}^{k})(\mathbf{W}^{k+1}-\mathbf{\bar{W}}^{k})^{\bar{T}}+L/2||\mathbf{W}^{k+1}-\mathbf{\bar{W}}^{k}||^{2},$ $\mathbf{W}^{k}||^{2})$ where $L$ denotes the Lipschitz constant.  
+
+Theorem 1 implies that as long as the learning rate $\eta$ is chosen to satisfy the condition $0<\eta<2/L$ , the loss function $f(\mathbf{W},\mathbf{X})$ will decrease after each iteration, ensuring convergence of the neural network.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+To verify the effectiveness of PaCA, here we evaluate its performance in various fine-tuning scenarios. Section 4.1 first compares the accuracy and performance of PaCA with other PEFT algorithms, such as LoRA (Hu et al., 2022), DoRA (Liu et al., 2024), and MosLoRA (Wu et al., 2024), when finetuning the LLaMA2-7B/13B (Touvron et al., 2023) and LLaMA3-8B (Dubey et al., 2024) models on the MMLU dataset (Hendrycks et al., 2021). In Section 4.2, we observe the instruction-following ability on the MT-Bench dataset (Zheng et al., 2023) after fine-tuning the LLaMA3-8B model with PaCA and the LoRA family on the Oasst1 dataset (Ko¨pf et al., 2023). In Section 4.3, we compare the performance and score of our quantized PaCA (QPaCA) with QLoRA (Dettmers et al., 2023) on the MT-Bench (Zheng et al., 2023) dataset while fine-tuning the LLaMA3.1-70B (Dubey et al., 2024) model on the Oasst1 dataset. Section 4.4 analyzes the ability of PaCA and the LoRA family to handle long sequence data and the training throughput when increasing the batch size, using both a single NVIDIA A100 (Choquette et al., 2021) and Intel Gaudi 2 GPU (Intel Corporation, 2023). In addition, we tested PaCA on different model architectures such as the vision transformer (ViT (Dosovitskiy et al
+
+
+
+\section{4.1 FINE-TUNING FOR SPECIFIC TASKS  }
+
+
+We first compared PaCA against LoRA, DoRA, and MosLoRA using the MMLU dataset, which consists of 57 tasks designed to assess the ability of a model to understand and reason across a wide range of academic subjects (Hendrycks et al., 2021). The evaluation was conducted on the LLaMA2- 7B/13B and LLaMA3-8B models, with the rank of the prior PEFT methods set to 8. We employ PaCA with a rank of 8 and 16, each representing the case where the rank is equal to that of prior PEFT methods and where the number of trainable parameters is identical. All experiments were conducted on a single NVIDIA A100 GPU.  
+
+Table 1: Comparisons of memory usage (Mem), training time (Time), and 5-shot accuracy on MMLU dataset when fine-tuning LLaMA2-7B/13B and LLaMA3-8B models using various PEFT algorithms. Param indicates the number of trainable parameters.  
+
+![](images/5026aa143bd266587a3cf5a845fac27ab3747ff3fa25202e819183c0fdb2bed5.jpg)  
+
+The experimental results in Table 1 demonstrate that PaCA significantly reduces both memory usage and training time across all models, while maintaining accuracy comparable to the other PEFT algorithms. For the LLaMA2-7B model, PaCA achieves accuracy similar to LoRA when the rank is set to 8, despite using only half the number of trainable parameters, reducing memory usage by $13\%$ and training time by $26\%$ simultaneously. In this configuration, the accuracy of PaCA drops by up to $0.9\%$ compared to LoRA variants such as DoRA and MosLoRA. However, when the rank of $\mathrm{PaCA}$ is increased to 16, matching the number of trainable parameters with DoRA and MosLoRA, PaCA achieves almost identical accuracy to DoRA and MosLoRA while still offering considerable reductions in memory usage and training time. Specifically, PaCA reduces memory usage by $31\%$ and training time by $63\%$ compared to DoRA, while offering a $13\%$ reduction in memory usage and a $26\%$ reduction in training time compared to MosLoRA.  
+
+A similar trend is observed in both LLaMA2-13B and LLaMA3-8B, where PaCA continues to show substantial reductions in memory usage and training time. On LLaMA2-13B, $\mathrm{PaCA}$ achieves comparable accuracy to the LoRA variants while reducing memory usage by $13\%$ , $29\%$ , and $13\%$ , and training time by $17\%$ , $64\%$ , and $20\%$ , compared to LoRA, DoRA, and MosLoRA, respectively. In LLaMA3-8B, $\mathrm{PaCA}$ consumes the least memory and training time among LoRA and its variants, while achieving the highest accuracy. In summary, PaCA successfully improves training speed by eliminating unnecessary sequential processes and reduces memory usage by storing only partial activations, while maintaining comparable accuracy in fine-tuning scenarios on specific tasks.  
+
+
+
+\section{4.2 INSTRUCTION TUNING  }
+
+
+We next evaluate PaCA on the MT-Bench dataset, which consists of 80 queries designed to measure the instruction-following capabilities of a model across multiple tasks, providing a detailed assessment of its performance in real-world scenarios (Zheng et al., 2023). Specifically, we fine-tuned LLaMA3-8B using a single NVIDIA A100 GPU on the Oasst1 dataset, which is an instructionfollowing dataset, and then evaluated the score on the MT-Bench dataset using GPT4o-mini as the judge.  
+
+Table 2: Comparisons of memory usage (Mem), training time (Time), and score on MT-Bench dataset when fine-tuning LLaMA3-8B on Oasst1 dataset using various PEFT algorithms.   
+
+![](images/552857a75d9a1c3ef60d594f716702857c1fb9d346b53326372889913d0a204b.jpg)  
+
+Table 2 confirms that PaCA significantly reduces memory usage and training time compared to other PEFT methods while maintaining comparable scores, consistent with the results observed when fine-tuning it on the MMLU dataset. Specifically, our $\mathrm{PaCA}$ outperforms LoRA and MosLoRA with $16\%$ less memory usage and $19\%$ shorter training time. Furthermore, PaCA reduces memory usage by $28\%$ and training time by $58\%$ compared to DoRA, while achieving comparable scores. One interesting observation is that the memory usage of $\mathrm{PaCA}$ increases by approximately 4GB when the rank is raised from 64 to 128, whereas the memory usage remains almost unchanged when increasing the rank from 8 to 16 in Section 4.1. This is because a higher rank requires more optimizer state memory and activation memory for fine-tuning the partial connections.  
+
+
+
+\section{4.3 QPACA: ENHANCEMENTS TO QLORA  }
+
+
+While PEFT significantly reduces the memory required for gradients and optimizer states, the model weights must be loaded onto the GPU, which consumes a significant amount of memory, especially when training large models. For example, loading the weights of LLaMA3.1-70B requires 140GB of memory, making it impossible to fine-tune using a single NVIDIA A100 GPU. To address this issue, QLoRA (Dettmers et al., 2023) quantizes the pretrained weights to 4 bits to further reduce memory usage and trains only the 16-bit adapter layers, enabling the fine-tuning of LLaMA3.1-70B on a single NVIDIA A100 GPU. This approach can be extended to PaCA by quantizing the unselected  
+
+Table 3: Comparisons of memory usage (Mem), training time (Time), and score on MT-Bench dataset when fine-tuning LLaMA3-8B and LLaMA3.1-70B on Oasst1 dataset using QLoRA and QPaCA. No tuning and Quantized in the table refer to the models in 16-bit precision without quantization and with 4-bit NormalFloat Quantization (NF), respectively, without fine-tuning.  
+
+![](images/22f2ea5a8a1dd54251c275512ab4357663e01a60a1cbc344374fdbc7a42cca15.jpg)  
+
+connections within the pretrained weights to 4 bits, while fine-tuning only the 16-bit randomly selected partial connections. We named this algorithm Quantized Partial Connection Adaptation (QPaCA) and compared it with QLoRA when fine-tuning LLaMA3-8B and LLaMA3.1-70B on the Oasst1 dataset using a single NVIDIA A100 GPU. Following Section 4.2, we evaluated the score on the MT-Bench dataset, using GPT4o-mini as the judge.  
+
+Experimental results demonstrate that QPaCA reduces both memory usage and training time compared to QLoRA, as displayed in Table 3. Specifically, on the LLaMA3-8B model, QPaCA not only achieved higher scores than the model quantized in the NF4 format, but also outperformed the 16-bit baseline, similar to QLoRA. Furthermore, QLoRA achieved an $11\%$ reduction in memory usage and a $12\%$ reduction in training time compared to QPaCA.  
+
+In addition, even on a larger scale model, LLaMA3.1-70B, QPaCA successfully reduces memory usage by $14\%$ and training time by $8\%$ with almost no drop in score compared to QLoRA and higher scores than the NF4 quantized model without fine-tuning on the MT-Bench dataset. This training time reduction is relatively smaller than when comparing $\mathrm{PaCA}$ with LoRA in previous sections, and this is due to the time overheads of additional quantization and dequantization processes, which cannot be reduced by training only partial connections, unlike the forward and backward propagations.  
+
+Table 4: Max sequence length for fine-tuning LLaMA3-8B using vaious PEFT algorithms on a single NVIDIA A100 GPU.  
+
+![](images/d1c87deca916182647e06123cbfa98309c437ea0cf1ba387c5ec196f029d967a.jpg)  
+
+In this section, we evaluate the usability of $\mathrm{PaCA}$ by measuring its training performance in different scenarios. We first increase the sequence length of the data while fine-tuning the LLaMA3-8B model with each PEFT method until an out-of-memory (OOM) error occurs, and the maximum sequence length is displayed in Table 4. We found that PaCA increased the maximum sequence length by $23\%$ , $108\%$ , and $23\%$ compared to LoRA, DoRA, and MosLoRA, respectively, by storing only partial activations instead of all input activations.  
+
+Next, we evaluate the training throughput improvements achieved by $\mathrm{PaCA}$ compared to LoRA and its variants as the batch size increases when fine-tuning LLaMA3-8B using a single NVIDIA A100 GPU and Intel Gaudi 2 GPU. As shown in Fig. 3, PaCA demonstrated the ability to increase the batch size by $33\%$ on the NVIDIA A100 GPU and $21\%$ on the Intel Gaudi 2 GPU compared to LoRA and its variants, primarily due to its reduction of activation  
+
+432   
+433   
+434   
+435   
+436   
+437   
+438   
+439   
+440   
+441   
+442   
+443   
+444   
+445   
+446   
+447   
+448   
+449   
+450   
+451   
+452   
+453   
+454   
+455   
+456   
+457   
+458   
+459   
+460   
+461   
+462   
+463   
+464   
+465   
+466   
+467   
+468   
+469   
+470   
+471   
+472   
+473   
+474   
+475   
+476   
+477   
+478   
+479   
+480   
+481   
+482   
+483   
+484   
+485  
+
+![](images/0f7f40a7198adbdcd90c01821af271f3a3b1e49d781ed54d087e7c3298389fd7.jpg)  
+Figure 3: Training throughput (sentences/s) on a single NVIDIA A100 GPU and INTEL Gaudi 2 GPU when fine-tuning LLaMA3-8B with a sequence length of 512.  
+
+memory. This reduction allows $\mathrm{PaCA}$ to handle larger batch sizes, which directly leads to better resource utilization and improves scalability. In addition, at the same batch size, PaCA consistently achieved higher training throughput compared to LoRA and its variants, as PaCA eliminates inefficient sequential processing introduced by adapter layers, allowing for higher hardware utilization. Consequently, $\mathrm{PaCA}$ outperformed LoRA, achieving a throughput of 10.36 sentences/s on A100 and 15.5 sentences/s on Gaudi 2, representing a $16\%$ improvement for both GPUs.  
+
+In this section, we explore alternative strategies for selecting connections in PaCA and evaluate their effectiveness beyond the random selection approach. We tested two selection schemes that consider the importance of each column. A weight-based strategy selects the columns with the highest $L_{2}$ - Norm from the initial pretrained weights, whereas a gradient-based strategy accumulates gradients during the first 100 iterations without updating weights (i.e., $\begin{array}{r}{G_{i}=\sum_{t}\|g_{i}^{t}\|^{2}}\end{array}$ , where $i$ is the number of layers and $t$ is the accumulation step) and selects columns with the largest accumulated gradients. Experimental results are displayed in the table below.  
+
+
+
+\section{6 RELATED WORK  }
+
+
+Table 5: Test score on MT-Bench dataset when fine-tuning LLaMA3-8B with PaCA using various connection selecting strategy on Oasst1 dataset.   
+
+![](images/7b8feca3a8e7c57d94150d9dc21196e71a5640712a6dc60d7776825d68cbc3e3.jpg)  
+
+Table 5 demonstrates that random selection achieves similar performance to importance-based selection schemes. In other words, the choice of selection strategy does not noticeably affect fine-tuning accuracy. Therefore, we chose to select connections randomly in PaCA, as this strategy eliminates the need for complex processes to measure the importance of connections, thereby minimizing training time or memory overhead without performance degradation.  
+
+Parameter-efficient fine-tuning (PEFT) Fine-tuning LLMs requires significant memory resources to store parameter gradients and optimizer states. PEFT algorithms address this challenge by introducing adapter layers with far fewer parameters than the pretrained models, significantly reducing the memory required for parameter gradients and optimizer states by fine-tuning only the adapter layers. PEFT methods can generally be categorized into three groups: Adapter-based methods (Li & Liang, 2021; Houlsby et al., 2019; He et al., 2022), Prompt-based methods (Lester et al., 2021; Razdaibiedina et al., 2023; Wang et al., 2023; Zhang et al., 2024; Gao et al., 2023), and LoRA and its variants (Hu et al., 2022; Kopiczko et al., 2024; Liu et al., 2024; Wu et al., 2024). Adapterbased methods introduce new trainable adapter weights to the pretrained models. For example, Houlsby et al. (2019) adds adapter layers as linear modules in series with the existing model, while He et al. (2022) inserts adapter modules in parallel with the pretrained model. Secondly, Promptbased methods inject new trainable prompt vectors into the model. Specifically, LLaMA-Adapter (Zhang et al., 2024; Gao et al., 2023) introduces prompts into the upper layers of the transformer, enabling the model to incorporate diverse knowledge. Although these approaches enable efficient fine-tuning with smaller trainable parameters, they introduce latency overhead during inference due to the sequential processing of the adapter layers and the pretrained model.  
+
+The third category of PEFT methods is LoRA and its variants. LoRA (Hu et al., 2022) introduces low-rank matrices as adapters to approximate weight gradients during fine-tuning, then merges these low-rank matrices with the pretrained weights, effectively eliminating inference overhead. VeRA (Kopiczko et al., 2024) takes this approach further by freezing the low-rank matrices and sharing them across layers, while only learning the scaling vectors for each layer, which significantly reduces the number of trainable parameters. DoRA (Liu et al., 2024) improves upon LoRA by considering both the magnitude and direction of gradients through weight decomposition, leading to higher accuracy compared to LoRA. MosLoRA (Wu et al., 2024) enhances LoRA by introducing a learnable mixer between the two low-rank matrices, improving its capabilities. Even though LoRA and its variants can remove latency overhead by merging the adapter weights with the pretrained weights during inference, latency overhead persists during fine-tuning, as merging the weights is not feasible at this stage.  
+
+PEFT with Quantization Quantization (Dettmers et al., 2022; Frantar et al., 2022; Lin et al., 2024; Frantar et al., 2023) is a technique that reduces memory usage and computational complexity by representing weights or activations in low precision. This method can also be combined with PEFT to reduce memory usage during fine-tuning (Kwon et al., 2022; Dettmers et al., 2023; Xu et al., 2024). For instance, QLoRA (Dettmers et al., 2023) compresses pretrained weights to 4 bits and trains only the low-rank adapter matrices represented in 16 bits, significantly reducing the memory required to load the model. Additionally, QA-LoRA (Xu et al., 2024) integrates the lowrank adapter matrices with the zero point in quantization, enabling the direct generation of a 4-bit quantized model after fine-tuning. While those quantized-PEFT approaches reduce memory usage for fine-tuning, the sequential processes introduced by the adapter layers still cause training time overhead.  
+
+
+
+\section{7 CONCLUSION  }
+
+
+In this work, we propose PaCA, a memory-efficient PEFT algorithm that fine-tunes randomly selected partial connections within the pretrained weights without employing additional adapter layers. By removing the sequential processing overhead associated with the adapters in prior PEFT schemes, PaCA significantly improves hardware utilization and training speed. In addition, PaCA reduces activation memory by only storing partial activations instead of all input activations. We theoretically prove that PaCA can successfully converge in general deep neural networks. Moreover, in experiments, PaCA consistently outperforms LoRA and its variants in training performance while maintaining comparable accuracy across various fine-tuning scenarios. We also show that $\mathrm{PaCA}$ can be applied simultaneously with quantization. Finally, we demonstrate the effectiveness of PaCA in scenarios involving long sequence data or when maximizing throughput in resource-constrained environments. For future work, we aim to develop methods for identifying optimal partial connections in PaCA, rather than relying on random selection, to further enhance fine-tuning accuracy.  
+
+
+

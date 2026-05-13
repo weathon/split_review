@@ -1,0 +1,345 @@
+\title{Accelerating Sinkhorn algorithm with sparse Newton iterations}
+
+\begin{abstract}
+    Computing the optimal transport distance between statistical distributions is a fundamental task in machine learning. One remarkable recent advancement is entropic regularization and the Sinkhorn algorithm, which utilizes only matrix scaling and guarantees an approximated solution with near-linear runtime. Despite the success of the Sinkhorn algorithm, its runtime may still be slow due to the potentially large number of iterations needed for convergence. To achieve possibly super-exponential convergence, we present Sinkhorn-Newton-Sparse (SNS), an extension to the Sinkhorn algorithm, by introducing early stopping for the matrix scaling steps and a second stage featuring a Newton-type subroutine.
+    Adopting the variational viewpoint that the Sinkhorn algorithm maximizes a concave Lyapunov potential, we offer the insight that the Hessian matrix of the potential function is approximately sparse. Sparsification of the Hessian results in a fast \(O(n^2)\) per-iteration complexity, the same as the Sinkhorn algorithm. 
+    In terms of total iteration count, we observe that the SNS algorithm converges orders of magnitude faster across a wide range of practical cases, including optimal transportation between empirical distributions and calculating the Wasserstein \(W_1, W_2\) distance of discretized densities. The empirical performance is corroborated by a rigorous bound on the approximate sparsity of the Hessian matrix.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Optimal transport (OT) calculates the best transportation plan from an ensemble of sources to targets \citep{villani2009optimal, linial1998deterministic,peyre2017computational} and is becoming increasingly an important task in machine learning \citep{sandler2011nonnegative,jitkrittum2016interpretable,arjovsky2017wasserstein,salimans2018improving,genevay2018learning,chen2020graph,fatras2021unbalanced}. In this work, we focus on optimal transportation problem with entropic regularization:
+\begin{equation}\label{eqn: LP+entropy}
+\min_{P: P\1=r , P^{\top}\1 = c}  C\cdot P + \frac{1}{\eta} H(P),
+\end{equation}
+where \(\eta > 0\) is the entropy regularization parameter, \(C \in \mathbb{R}^{n \times n}\) is the cost matrix, \(c,r \in \mathbb{R}^{n}\) are respectively the source and target density, and \(H(P) := \sum_{ij}p_{ij}\log{p_{ij}}\) is the entropy of \(P\). The insight of using the Sinkhorn algorithm is that entropy-regularized optimal transport is equivalent to an instance of matrix scaling \citep{linial1998deterministic,cuturi2013sinkhorn,garg2020operator}:
+\[
+\text{Find diagonal matrix \(X, Y\) so that \(P = X\exp(-\eta C)Y\) satisfies \(P\1=r , P^{\top}\1 = c\).}\footnote{The symbol \(\exp(-\eta C)\) denotes entry-wise exponential.}
+\]
+
+The Sinkhorn algorithm \citep{yule1912methods} alternates between scaling the rows and columns of a matrix to a target vector, and its convergence property was first proved in \citet{sinkhorn1964relationship}. Theoretical results show that the Sinkhorn algorithm converges at a relatively slow rate. 
+While the Sinkhorn algorithm satisfies exponential convergence \citep{franklin1989scaling,carlier2022linear}, its best proven exponential convergence rate is often too close to one for practical use (see Section \ref{sec: related} for detailed discussions) and in practice it behaves more like a polynomially converging method \citep{altschuler2017near,ghosal2022convergence}. Therefore, to reach within a sub-optimality gap \(\epsilon\), the tightest bound of iteration complexity in practice tends to be \(O(\mathrm{poly}(\epsilon^{-1}))\) in early stages. 
+
+We introduce a new algorithm that greatly accelerates convergence by reducing the required iteration counts. Utilizing a well-established variational perspective for the Sinkhorn algorithm \citep{altschuler2017near}, we consider the Lyapunov potential \(f \colon \mathbb{R}^{n} \times \mathbb{R}^{n} \to \mathbb{R}\) associated with the entropic optimal transport problem in \eqref{eqn: LP+entropy}:
+\begin{equation}\label{eqn: dual form}
+f(x,y) :=  -\frac{1}{\eta}\sum_{ij}\exp(\eta(-c_{ij} + x_i + y_j) -1) + \sum_i r_ix_i + \sum_j c_j y_j.
+\end{equation}
+In particular, the discussion in Section \ref{sec: variational} shows that solving \eqref{eqn: LP+entropy} is equivalent to obtaining \((x^{\star}, y^{\star}) = \argmax_{x, y}f(x, y)\). We emphasize that \(f\) is \emph{concave}, allowing routine convex optimization techniques to be used. 
+Under this framework, the matrix scaling step in the Sinkhorn algorithm can be seen as an alternating maximization algorithm
+\begin{equation}\label{eqn: Sinkhorn}
+    \begin{cases}
+    x \gets \argmax_{x} f(x, y),\\
+    y \gets \argmax_{y} f(x, y).
+    \end{cases}
+\end{equation}
+The formula in \eqref{eqn: Sinkhorn} provides surprisingly clear guidance and justification for our approach to accelerate the Sinkhorn algorithm. First, one can only achieve a substantially reduced iteration count by jointly optimizing \((x,y)\). Second, no first-order method can be used, as they achieve polynomial convergence at best, reaching an iteration complexity of \(O(\epsilon^{-1})\) in the case of gradient descent for a sub-optimality of \(\epsilon\) \citep{boyd2004convex}, or \(O(\epsilon^{-1/2})\) in the case of accelerated gradient descent \citep{nesterov1983method}. In conclusion, one can only hope to achieve better convergence with second-order methods, which enjoy super-exponential convergence \citep{boyd2004convex}. The use of Newton's method for the Sinkhorn algorithm has been introduced in \citet{brauer2017sinkhorn}. However, even a single Newton step has an \(O(n^3)\) cost, which violates the goal of having a near-linear time algorithm with \(O(n^2)\) total complexity. This naturally leads to the question:
+\begin{questionbox}
+\begin{center}
+        Is there an algorithm that reaches the optimality gap \(\epsilon\) with an iteration complexity of Newton's algorithm and an \(O(n^2)\) per-iteration complexity of the Sinkhorn algorithm?
+\end{center}
+\end{questionbox}
+
+\paragraph{Practical Newton's algorithm via Hessian sparsification}
+We answer the question in the affirmative by introducing the Sinkhorn-Newton-Sparse (SNS) algorithm, which achieves fast convergence and an \(O(n^{2})\) per-iteration complexity. 
+The main technical novelty is to solve the Hessian system \((\nabla^2f)v = -\nabla f\) in Newton's algorithm efficiently with sparse approximation. In particular, we show that the Hessian matrix of the Lyapunov potential is approximately sparse in the following sense:
+\begin{defn}\label{defn: approximate sparsity}
+(Sparsity and approximate sparsity)
+    Let \(\lVert \cdot \rVert_{0}\) denote the \(l_0\) norm. The sparsity of a matrix \(M \in \mathbb{R}^{m\times n}\) is defined by \(\tau(M) := \frac{\lVert M\rVert_{0}}{mn}.\) Furthermore, a matrix \(M \in \mathbb{R}^{m \times n}\) is \((\lambda, \epsilon)\)-sparse if there exists a matrix \(\tilde{M}\) so that \(\tau(\tilde{M}) \leq \lambda\) and \(\lVert M - \tilde{M} \rVert_{1} \leq \epsilon\). 
+\end{defn}
+In Section \ref{sec: analysis}, we prove a rigorous bound on the approximate sparsity of the Hessian matrix. We highlight our result by providing an informal version of our sparsity analysis:
+\begin{thmbox}
+\begin{thm*}\label{thm: informal} (Informal version of Theorem \ref{thm: main})
+    Assume \(\min_{P: P\1=r , P^{\top}\1 = c}  C\cdot P\) admits a unique solution. Then, if \(t, \eta\) are sufficiently large, the Hessian matrix after \(t\) Sinkhorn matrix scaling step is \(( \frac{3}{2n}, 12n^2\exp{\left(-p\eta\right)} + \frac{q}{\sqrt{t}})\)-sparse for some parameter \(p, q\).
+\end{thm*}
+\end{thmbox}
+As \(\nabla^{2}f\) is approximately sparse, one can approximate \(\nabla^{2}f\) with a relaxed target sparsity \(\lambda = O(1/n) > \frac{3}{2n}\). The cost for solving the sparsified linear system thus reduces to \(O(\lambda n^3 ) = O(n^2)\). 
+
+
+\paragraph{Contributions}
+The contribution of this paper is threefold. First, we point out the sparsification technique, and the resultant SNS algorithm reduces the per-iteration cost of Newton step to \(O(n^2)\). While a related idea has been discussed with the name of the Sinkhorn-Newton algorithm in \citet{brauer2017sinkhorn}, the \(O(n^3)\) complexity of Sinkhorn-Newton makes the algorithm prohibitively expensive to work with. Second, we give a non-asymptotic analysis, showing that one can expect sparse Hessian generically. Third, we fully adapt our sparsity argument to the case of non-unique solutions. We introduce a novel argument that shows an \(O(\frac{1}{\sqrt{n}})\) sparsity. Moreover, the provided numerical analysis directly treats the case of non-unique solutions.
+
+\paragraph{Notation}
+For \(n \in \mathbb{N}\), we denote \([n] := \{1, \ldots, n\}\). We use shorthand for several matrix operations for the sake of notational compactness. The \(\cdot\) operation between matrices is defined by \(C \cdot P = \sum_{i,j=1}^{n}c_{ij}p_{ij}\). For a matrix \(M\), the notation \(\log{M}\) stands for entry-wise logarithm, and similarly \(\exp(M)\) denotes entry-wise exponential. The symbol \(\mathbf{1}\) stands for the all-one vector in \(\mathbb{R}^n\). Finally, we use the symbol \(\lVert M\rVert_{1}\) to denote the entry-wise \(l_1\) norm, i.e. \(\lVert M\rVert_{1} := \lVert \mathrm{vec}(M)\rVert = \sum_{ij} \lvert m_{ij} \rvert \).
+
+
+
+\section{Related literature}
+
+
+\paragraph{Convergence of Sinkhorn} We give an overview of the convergence of the Sinkhorn algorithm and discuss the iteration complexity to reach within an error tolerance \(\alpha\) on the marginal KL divergence, which is defined by \(\mathcal{L}(P):= \mathrm{KL}(r || P\1) + \mathrm{KL}(c || P^{\top}\1)\).
+The Sinkhorn algorithm has a sub-optimality gap of \(O\left(\left(1 - e^{-24\lVert C \rVert_{\infty}\eta}\right)^t\right)\) after \(t\) steps \citep{carlier2022linear}, which implies an iteration complexity of \(O(e^{24\lVert C \rVert_{\infty}\eta} \log(1/\alpha))\).
+The analysis by \citet{altschuler2017near} proves an iteration complexity of \(O(\alpha^{-1})\), and it has been refined to \(O(\alpha^{-1/2})\) in special cases \citep{ghosal2022convergence}. We refer the readers to \citet{peyre2017computational,carlier2022linear} for a more comprehensive review of the convergence of the Sinkhorn algorithm. The analysis in \citep{mallasto2020entropy,weed2018explicit} considers the convergence of the entropic optimal transport solution to the true transport plan, which further connects the Sinkhorn solution to the ground-truth optimal transport plan.
+
+\paragraph{Sparsification in Sinkhorn} Sparsification techniques have been extensively explored to improve the efficiency of the Sinkhorn algorithm. Sparsification has been considered during matrix scaling \citep{li2023importance}, and a 2-norm or group lasso penalty function has been considered to boost sparsity in the transport plan \citep{blondel2018smooth}. Unlike the methods discussed, which modify the optimization task, our work retains the original formulation while introducing enhancement via sparsification inside the optimization step. Our approach uses Newton's algorithm, and the sparsity is applied to the Hessian matrix for the Lyapunov function. The numerical analysis in our work lends further support to a sparse transportation plan in the entropic case.
+
+\paragraph{Acceleration for Sinkhorn} There is considerable research interest in speeding up the runtime of the Sinkhorn algorithm. There are a few strategies related to our work, including randomized or greedy row/column scaling \citep{genevay2016stochastic, altschuler2017near}, dynamic schedule of entropic regularization \citep{chen2023exponential}. These works complement our work, as both strategies can be naturally used in our Newton-type algorithm. Although both techniques can potentially boost the convergence speed of SNS, we focus on the case with fixed entropy strength and joint optimization over all variables to show that a sparse approximation to the Hessian can reach rapid convergence on its own. Another notable line of acceleration technique considers acceleration using an approximation of the kernel \(K = \exp(-C\eta)\) \citep{deriche1993recursively,solomon2015convolutional,bonneel2016wasserstein, altschuler2019massively,scetbon2020linear,huguet2023geodesic} or by exploring low-rankness of the transport plan\citep{scetbon2021low}.
+
+\paragraph{Variational methods in Entropic OT} Furthermore, a stream of research focuses on jointly optimizing the potential \(f\) using accelerated first-order method \citep{dvurechensky2018computational,thibault2021overrelaxed,kemertas2023efficient}. The SNS algorithm can be extended by replacing Sinkhorn matrix scaling steps with iteration schemes based on first-order methods. As a variational interpretation of the Sinkhorn algorithm, it can also be viewed as mirror descent \citep{mishchenko2019sinkhorn,leger2021gradient}.
+
+\paragraph{OT in Machine Learning} A rich body of literature exists on the applications of optimal transport in various machine-learning domains. Research such as \citet{kolouri2017optimal,vayer2018optimal,genevay2019sample,luise2018differential,oneto2020exploiting,huynh2020otlda} studies statistical learning with optimal transport. Studies like \citet{genevay2017gan,bousquet2017optimal,sanjabi2018convergence,deshpande2019max,lei2019geometric,patrini2020sinkhorn,onken2021ot} utilize optimal transport distance as a metric for improving the performance and robustness of unsupervised learning algorithms. The Sinkhorn algorithm, featured in works such as \citet{Fernando_2013_ICCV,redko2017theoretical,courty2017joint,alvarez2018structured,nguyen2022improving,nguyen2021most,xu2022unsupervised,turrisi2022multi}, is commonly used in robust domain adaptation, particularly in addressing distribution shift. Additionally, various approaches employ neural networks to learn the optimal transport map, as seen in \citep{seguy2017large,damodaran2018deepjdot,makkuva2020optimal,mokrov2021large,daniels2021score}.
+
+
+
+\section{Variational form of the Sinkhorn algorithm}
+
+This section summarizes the variational form of the Sinkhorn algorithm, a mathematical representation crucial for understanding our proposed algorithm's theoretical underpinnings. As pointed out, the Sinkhorn algorithm performs alternating maximization for the Lyapunov potential
+\[
+\max_{x,y} \min_P L(P, x, y) :=  \frac{1}{\eta} P \cdot \log P + C\cdot P - x\cdot(P\1-r) - y\cdot(P^{\top}\1-c).
+\]
+\[
+f(x,y) = \min_P L(P, x, y).
+\]
+Maximizing over \(f\) is equivalent to solving the problem defined in \eqref{eqn: LP+entropy}:
+As a consequence of the minimax theorem, \((x^{\star}, y^{\star}) = \argmax_{x, y}f(x, y)\) effectively solves \eqref{eqn: LP+entropy}, as the following equation shows: \[\argmin_{P: P\1=r , P^{\top}\1 = c}  C\cdot P + \frac{1}{\eta} H(P)=:P^{\star}  =  \exp{\left(\eta(-C + x^{\star}\1^{\top} + \1\left(y^{\star}\right)^{\top}) - 1\right)}.\]
+
+Let \(P\) be defined as  \(\exp{\left(\eta(-C + x\1^{\top} + \1y^{\top}) - 1\right)}\), where it serves the intermediate matrix corresponding to dual variables \(x,y\). As \(f\) is concave, the first-order condition is equivalent to optimality. Upon direct calculation, one has \[\partial_{x_i} f(x,y) = r_{i} - \sum_{k}P_{ik},\quad \partial_{y_j} f(x,y) = c_{j} - \sum_{k}P_{kj}.\]
+As a consequence, maximizing \(x\) with fixed \(y\) corresponds to scaling the rows of \(P\) so that \(P\mathbf{1} = r\). Likewise, maximizing \(y\) with fixed \(x\) corresponds to scaling the column of matrix \(P\) so that \(P^{\top}\mathbf{1} = c\). Thus, the Sinkhorn matrix scaling algorithm corresponds to an alternating coordinate ascent approach to the Lyapunov function, as illustrated in \eqref{eqn: Sinkhorn}. For the reader's convenience, we write down the first and second derivatives of the Lyapunov function \(f\):
+\begin{equation}\label{eqn: Hessian formula}
+\nabla_{x} f(x,y) = r - P \mathbf{1}, \quad \nabla_{y} f(x,y) = c - P^{\top} \mathbf{1}, \quad \nabla^2 f(x, y) = \eta
+\begin{bmatrix}
+\mathrm{diag}(P\1) & P \\
+P^{\top} & \mathrm{diag}(P^{\top}\1)
+\end{bmatrix}
+\end{equation}
+
+
+
+
+\section{Main algorithm}
+
+We introduce Algorithm \ref{alg:SNS}, herein referred to as Sinkhorn-Newton-Sparse (SNS). This algorithm extends the Sinkhorn algorithm with a second stage featuring a Newton-type subroutine. In short, Algorithm \ref{alg:SNS} starts with running the Sinkhorn algorithm for \(N_1\) steps, then switches to a sparsified Newton algorithm for fast convergence. 
+Algorithm \ref{alg:SNS} employs a straightforward thresholding rule for the sparsification step. Specifically, any entry in the Hessian matrix smaller than a constant \(\rho\) is truncated to zero, and the resulting sparsified matrix is stored in a sparse data structure.
+The truncation procedure preserves symmetry and diagonal dominance of the Hessian matrix (as a simple consequence of \eqref{eqn: Hessian formula}), which justifies the use of conjugate gradient for linear system solving \citep{golub2013matrix}. The obtained search direction \(\Delta z\) is an approximation to the exact Newton step search direction, i.e., the solution to the linear system \((\nabla^2 f)v = -\nabla f\).
+
+\begin{algorithm}
+\caption{Sinkhorn-Newton-Sparse (SNS)}\label{alg:SNS}
+\begin{algorithmic}[1]
+\Require $f, x_{\mathrm{init}} \in \mathbb{R}^{n}, y_{\mathrm{init}} \in \mathbb{R}^{n}, N_1, N_2, \rho, i = 0$
+
+\State \texttt{\# Sinkhorn stage}\\
+$(x,y) \gets (x_{\mathrm{init}}, y_{\mathrm{init}}) $ \Comment{Initialize dual variable}
+\While{$i < N_1$} %\Comment{Sinkhorn stage} 
+    \State \(P \gets \exp{\left(\eta(-C + x\1^{\top} + \1y^{\top}) - 1\right)}\)
+    \State \( x \gets x + \left(\log(r) - \log(P\mathbf{1} ) \right)/\eta\) 
+    \State \(P \gets \exp{\left(\eta(-C + x\1^{\top} + \1y^{\top}) - 1\right)}\)
+    \State \( y \gets y + \left(\log(c) - \log(P^{\top}\mathbf{1} ) \right)/\eta\)
+    \State $i \gets i + 1$
+\EndWhile
+
+\State \texttt{\# Newton stage} \\
+
+$z \gets (x,y) $ 
+
+\While{$i <N_1 + N_2$} 
+    \State \(M \gets \text{Sparsify}(\nabla^2 f(z), \rho)\)\Comment{Truncate with threshold \(\rho\)}
+    \State $\Delta z \gets \text{Conjugate\_Gradient}(M, -\nabla f(z))$ \Comment{Solve sparse linear system}
+    \State $\alpha \gets \text{Line\_search}(f, z, \Delta z) $ \Comment{Line search for step size}
+    \State $z \gets z + \alpha  \Delta z$
+    \State $i \gets i + 1$
+\EndWhile
+\State Output dual variables $(x,y) \gets z$.
+\end{algorithmic}
+\end{algorithm}
+\paragraph{Complexity analysis of Algorithm \ref{alg:SNS}}
+Inside the Newton stage, the conjugate gradient method involves \(O(n)\) left multiplications by \(M := \mathrm{Sparsify}(\nabla^2 f(z), \rho)\). Furthermore, left multiplication by \(M\) involves \(O(\tau(M) n^2)\) arithmetic operations, where \(\tau(\cdot)\) is the sparsity defined in Definition \ref{defn: approximate sparsity}. Thus, obtaining \(\Delta z\) is of complexity \(O(\tau(M)n^{3})\). To maintain an upper bound for per-iteration complexity, in practice, one sets a target sparsity \(\lambda\) and picks \(\rho\) dynamically to be the \(\ceil{\lambda n^2}\)-largest entry of \(\nabla^2 f(z)\), which ensures \(\tau(M) \leq \lambda\). For the forthcoming numerical experiments, whenever the transport problem has unique solutions, we have found setting \(\lambda = 2/n\) suffices for a convergence performance quite indistinguishable from a full Newton step, which is corroborated by the approximate sparsity results mentioned in Theorem \ref{thm: informal}.
+
+
+\paragraph{Necessity of Sinkhorn steps}
+We remark that the Sinkhorn stage in SNS has two purposes. The first purpose is warm initialization. Using the Sinkhorn steps, we bring the intermediate dual variable \((x,y)\) closer to the optimizer so that the subsequent Newton step has a good convergence speed. Secondly, this proximity ensures that the intermediate matrix \(P\) satisfies approximate sparsity. While the number of Sinkhorn steps is written as a fixed parameter in Algorithm \ref{alg:SNS}, one can alternatively switch to the Newton stage dynamically. In particular, we switch to a sparsified Newton step when the two following conditions hold: First, the intermediate matrix \(P\) should admit a good sparse approximation, and secondly, the Newton step should improve the Lyapunov potential more than the Sinkhorn algorithm. 
+Our analysis in Section \ref{sec: analysis} demonstrates that it requires at most \(O(1/\epsilon^2)\) Sinkhorn steps for the sparsification to be within an error of \(\epsilon\).
+
+
+
+
+\section{Sparsity analysis of SNS}
+
+This section gives a complete theoretical analysis of the approximate sparsity throughout the SNS algorithm: Theorem \ref{thm: main} analyzes the approximate sparsity of the Hessian after the \(N_1\) Sinkhorn step; Theorem \ref{thm: subsidiary} analyzes the approximate sparsity within the \(N_2\) Newton steps and proves monotonic improvement on the approximate sparsity guarantee. Three symbols are heavily referenced throughout this analysis, which we list out for the reader's convenience:
+\begin{itemize}
+    \item \(P_{t, \eta}:\) The result of Sinkhorn algorithm after \(t\) iterations.
+    \item \(\mathcal{F}:\) The set of optimal transport plan in the original problem
+    \item \(P^{\star}_{\eta}:\) The entropy-regularized optimal solution,
+\end{itemize}
+where \(\mathcal{F}, P^{\star}_{\eta}\) satisfy the following equation:
+\begin{equation}\label{eqn: LP + sinkhorn}
+\mathcal{F} := \argmin_{P: P\1=r , P^{\top}\1 = c}  C\cdot P, \quad P^{\star}_{\eta} := \argmin_{P: P\1=r , P^{\top}\1 = c}  C\cdot P + \frac{1}{\eta}H(P).
+\end{equation}
+
+\paragraph{Approximate sparsity in the Sinkhorn stage}
+We first prove the main theorem on the approximate sparsity of \(P_{t, \eta}\), which in particular gives an approximate sparsity bound for the Hessian matrix when one initiates the sparsified Newton step in Algorithm \ref{alg:SNS}. We generalize to allow for the setting where potentially multiple solutions exist to the optimal transport problem. Definition \ref{defn: vertex and face} lists the main concepts in the analysis. For concepts such as a polyhedron, face, and vertex solution, the readers can consult \citet{cook1998combinatorial} for detailed definitions.
+\begin{defn}\label{defn: vertex and face}
+    Define \(\mathcal{P}\) as the feasible set polyhedron, i.e. \(\mathcal{P} := \{P \mid P\1=r , P^{\top}\1 = c, P \geq 0\}\). The symbol \(\mathcal{V}\) denotes the set of vertices of \(\mathcal{P}\). The symbol  \(\mathcal{O}\) stands for the set of optimal vertex solution, i.e.
+    \begin{equation}\label{eqn: LP}
+        \mathcal{O} := \argmin_{P \in \mathcal{V}} C\cdot P.
+    \end{equation}
+    The symbol \(\Delta\) denotes the vertex optimality gap \[\Delta = \min_{Q \in \mathcal{V} - \mathcal{O}}Q \cdot C - \min_{P \in \mathcal{O}}P \cdot C.\]
+    We use \(\mathcal{F} = \mathrm{Conv}(\mathcal{O})\) to denote the optimal face to the optimal transport problem, and \(\tau(\mathcal{F}):=\max_{M \in \mathcal{F}}\tau(M)\) is defined to be the sparsity of \(\mathcal{F}\). We define a distance function to \(\mathcal{F}\) by \(\mathrm{dist}(\mathcal{F}, P) = \argmin_{M \in \mathcal{F}}\lVert M - P \rVert_{1}\).
+\end{defn}
+We move on to prove the theorem for approximate sparsity of \(P_{t, \eta}\):
+\begin{thm}\label{thm: main}
+    Assume \(\lVert r \rVert_{1} = \lVert c \rVert_{1} = 1\), and let \(\Delta\) be as in Definition \ref{defn: vertex and face}. There exists constant \(q, t_1\) such that, for \(\eta > \frac{1 + 2\log{n}}{\Delta},\) \(t > t_{1}\), one has
+    \[\mathrm{dist}(\mathcal{F}, P_{t, \eta}) \leq 6n^2 \exp\left(-\eta\Delta\right) + \frac{\sqrt{q}}{\sqrt{t}}.\]
+    Therefore, for \(\lambda^{\star} = \tau(\mathcal{F})\), it follows that \(P_{t, \eta}\) is \((\lambda^{\star}, \epsilon_{t, \eta})\)-sparse, whereby
+    \[
+    \epsilon_{t, \eta} := 6n^2 \exp\left(-\eta\Delta\right) + \frac{\sqrt{q}}{\sqrt{t}}.
+    \]
+    As a result, the Hessian matrix in Algorithm \ref{alg:SNS} after \(N_{1}\) Sinkhorn steps is \((\frac{\lambda^{\star}}{2} + \frac{1}{2n}, 2\epsilon_{N_1, \eta})\)-sparse.
+    
+    Define the subset \(\mathcal{S} \subset \mathbb{R}^{n \times n}\) so that \(C \in \mathcal{S} \) if \(C\) is a cost matrix for which \(\min_{P: P\1=r , P^{\top}\1 = c}  C\cdot P\) has non-unique solutions. Then, \(\mathcal{S}\) is of Lebesgue measure zero, and so the optimal transport \(\min_{P: P\1=r, P^{\top}\1 = c}  C\cdot P\) has unique solution generically. The generic condition \(C \not \in \mathcal{S}\) leads to \(\lambda^{\star} \leq 2/n.\) If one further assumes $r =  c = \frac{1}{n}\mathbf{1}$, then \(\lambda^{\star} = 1/n.\) 
+    
+\end{thm}
+
+\begin{proof}
+    It suffices to construct a sparse approximation to \(P_{t, \eta}\) that matches the requirement in Definition \ref{defn: approximate sparsity}. We choose the sparse approximation to be the matrix \(P^{\star} \in F\) which satisfies \(P^{\star} = \argmin_{M\in F} \lVert P_{\eta}^{\star} - M \rVert_1\). By triangle inequality, one has
+    \[
+    \lVert P_{t, \eta} - P^{\star} \rVert \leq \epsilon := \lVert P_{t, \eta} - P^{\star}_{\eta} \rVert_{1} + \mathrm{dist}(\mathcal{F}, P^{\star}_{\eta}).
+    \]
+    Thus \(P_{t, \eta}\) is \((\tau(\mathcal{F}), \epsilon)\)-sparse. Existence of a sparse approximation to the Hessian matrix \(\nabla^{2}f\) is shown by the following construction:
+    \[
+    \tilde{M} = \begin{bmatrix}
+    \mathrm{diag}(P_{t, \eta}\1) & P^{\star} \\
+\left(P^{\star}\right)^{\top} & \mathrm{diag}(P_{t, \eta}^{\top}\1)
+    \end{bmatrix}.
+    \]
+    One can directly count that the number of nonzero entries of \(\tilde{M}\) is upper bounded by \(2n + 2\lambda^{\star}n^2\). Moreover, direct computation shows \(\lVert\tilde{M} - \nabla^{2}f\rVert_1 = 2  \lVert P_{t, \eta} - P^{\star}\rVert_1 \leq 2\epsilon\). Thus, we show that the Hessian matrix is \((\frac{\lambda^{\star}}{2} + \frac{1}{2n}, 2\epsilon)\)-sparse. 
+    
+    
+    Thus, the proof reduces to proving \(\epsilon < \epsilon_{t, \eta}\).
+    By Corollary 9 in \citep{weed2018explicit}, if \(\eta > \frac{1 + 2\log{n}}{\Delta},\) it follows
+    \begin{equation}\label{eqn: weed result}
+        \mathrm{dist}(\mathcal{F}, P_{\eta}^{\star}) \leq 2n^2\exp\left(-\eta\Delta  + 1 \right) \leq 6n^2 \exp\left(-\eta\Delta\right).
+    \end{equation}
+    By Pinsker inequality \citep{pinsker1964information} and Theorem 4.4 in \citet{ghosal2022convergence}, there exists constants \(q, t_1\) such that, for any \(t > t_1\), one has
+    \begin{equation}\label{eqn: nutz result}
+        \lVert P_{t, \eta} - P^{\star}_{\eta} \rVert_{1}^2 \leq \mathrm{KL}(P_{\eta, t} || P_{\eta}^{\star}) + \mathrm{KL}( P_{\eta}^{\star} || P_{\eta, t}  ) \leq \frac{q}{t},
+    \end{equation}
+    and thus \(\lVert P_{t, \eta} - P^{\star}_{\eta} \rVert_{1} \leq \frac{\sqrt{q}}{\sqrt{t}}.\) Combining \eqref{eqn: weed result} and \eqref{eqn: nutz result}, one has \(\epsilon < \epsilon_{t, \eta}\), as desired.
+    
+    One has \(C \in \mathcal{S} \in \mathbb{R}^{n \times n}\) if and only if there exist two distinct permutation matrices \(P_1, P_2\) so that \(C \cdot P_1 = C \cdot P_2\). For each \(P_1, P_2\), the condition that \(C \cdot P_1 = C \cdot P_2\) is on a subset of measure zero on \(\mathbb{R}^{n \times n}\). As there are only a finite number of choices for \(P_1, P_2\), it follows that \(\mathcal{S}\) is a finite union of sets of measure zero, and thus in particular \(\mathcal{S}\) is of measure zero. Thus, one has \(C \not \in \mathcal{S}\) generically.
+    
+    When \(\min_{P: P\1=r , P^{\top}\1 = c}  C\cdot P\) has a unique solution \(\mathcal{P}^{\star}\), it must be an extremal point of the polyhedron \(\mathcal{P}\), which has \(2n-1\) non-zero entries \citep{peyre2017computational}, and therefore \(\tau(\mathcal{F}) = \tau(\mathcal{P}^{\star}) \leq \frac{2n-1}{n^2} \leq \frac{2}{n}\). In the case where $r =  c = \frac{1}{n}\mathbf{1}$, it follows from Birkhoff–von Neumann theorem that \(nP^{\star}\) is a permutation matrix, and therefore \(\tau(\mathcal{F}) = \tau(\mathcal{P}^{\star}) = \frac{1}{n}\).
+\end{proof}
+
+As Theorem \ref{thm: main} shows, taking a target sparsity \(\lambda = O(1/n) > 3n/2\) in Algorithm \ref{alg:SNS} leads to a good sparse approximation, which leads to a \(O(n^2)\) per-iteration cost. It is worth pointing out that the \(\exp{\left(-\Delta\eta\right)}\) term in \(\epsilon_{t, \eta}\) shows the appealing property that the matrix \(P_{t, \eta}\) has a better sparse approximation guarantee in the challenging case where \(\eta\) is very large. 
+
+\paragraph{Approximate sparsity in the Newton stage}
+We consider next the approximate sparsity inside the \(N_2\) Newton loops. We show that approximate sparsity is monotonically improving as the Newton step converges to the optimal solution:
+\begin{thm}\label{thm: subsidiary}
+    Let \(z_{k} = (x_{k}, y_{k})\) denote the dual variable at the $k$-th Newton step, and let \(\epsilon_k = \max_{z}f(z) -  f(z_k)\) be the sub-optimality gap for \(z_k\). For the sake of normalizing the transport plan formed by \(z_k\), take \(y_{k,\star} = \argmax_{y} f(x_{k}, y)\) and define \(P_{k}\) to be the transport plan formed after column normalization, i.e., \[P_{k} = \exp{\left(\eta(-C + x_{k}\1^{\top} + \1\left(y_{k,\star}\right)^{\top}) - 1\right)}.\]
+    Then, for the same constant \(q\) in Theorem \ref{thm: main}, for \(\epsilon_k < 1\) and \(\eta >  \frac{1 + 2\log{n}}{\Delta}\), the matrix \(P_{k}\) is \((\lambda^{\star}, \zeta_k)\)-sparse, where
+    \[
+    \zeta_{k} = 6n^2 \exp\left(-\eta\Delta\right) + \sqrt{q} \left(\epsilon_k\right)^{1/4}.
+    \]
+\end{thm}
+ We remark that the \(\epsilon_k^{1/4}\) term in Theorem \ref{thm: subsidiary} becomes insignificant if \(\epsilon_k\) decreases at a super-exponential rate. Moreover, the statement in Theorem \ref{thm: subsidiary} would have shown monotonically improving approximate sparsity if one were to add a column scaling step inside the Newton inner loop in Algorithm \ref{alg:SNS}. For clarity, we do not include any matrix scaling in the Newton stage of Algorithm \ref{alg:SNS}. However, combining different techniques in the second step might aid convergence and is worth investigating.
+
+
+
+
+
+\paragraph{Sparsity under non-uniqueness}
+We explore sparsity guarantees when the optimal transport problem lacks a unique solution. Although these cases are rare in practice, we point out the somewhat surprising result: There exist conditions for which one can derive sparsity properties of the optimal face using tools from extremal combinatorics on bipartite graphs \citep{erdHos1974probabilistic,jukna2011extremal}.
+On a high level, the optimality of \(P^{\star} \in \mathcal{F}\) forbids certain substructures from forming in an associated bipartite graph, which in turn gives an upper bound on the number of nonzero entries of \(P^{\star}\).
+\begin{thm}\label{thm: extremal combinatorics}
+For a cost matrix \(C = [c_{ij}]_{i,j = 1}^{n} \in \mathbb{R}^{n\times n}\), suppose that \(c_{ij} + c_{i'j'} = c_{i'j} + c_{ij'}\) if and only if \(i = i'\) or \(j = j'\). Then one has \(\tau(\mathcal{F}) \leq \frac{1 + o(1)}{\sqrt{n}} \).
+\end{thm}
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{\textwidth}
+        \centering
+        \includegraphics[width=.85\textwidth]{Figure/combined_plots_linear_assignment.pdf}
+        \caption{Entropic random linear assignment}
+        \label{fig:my_label}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{\textwidth}
+        \centering
+        \includegraphics[width=.85\textwidth, trim={0 0 0 2cm},clip]{Figure/combined_plots_L2.pdf}
+        \caption{Optimal transport on the MNIST dataset under transportation cost \(\lVert x-y \rVert _2^2\)}
+        \label{fig:my_label2}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{\textwidth}
+        \centering
+        \includegraphics[width=.85\textwidth, trim={0 0 0 2cm},clip]{Figure/combined_plots_L1.pdf}
+        \caption{Optimal transport on the MNIST dataset under transportation cost \(\lVert x-y \rVert _1\)}
+        \label{fig:my_label3}
+    \end{subfigure}
+    \caption{Performance comparison between Algorithm \ref{alg:SNS} and the Sinkhorn algorithm.}
+    \label{fig:main}
+\end{figure}
+
+\iffalse
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width = \textwidth]{Figure/combined_plots_linear_assignment.png}
+    \caption{Performance comparison between Algorithm \ref{alg:SNS} and the Sinkhorn algorithm for entropic random linear assignment. }
+    \label{fig:my_label}
+    \centering
+    \includegraphics[width = \textwidth]{Figure/combined_plots_L2.png}
+    \caption{Performance of Algorithm \ref{alg:SNS} versus the Sinkhorn algorithm for the MNIST dataset under transportation cost \(\lVert x-y \rVert _2^2\).}
+    \label{fig:my_label2}
+    \centering
+    \includegraphics[width = \textwidth]{Figure/combined_plots_L1.png}
+    \caption{Performance of Algorithm \ref{alg:SNS} versus the Sinkhorn algorithm for MNIST dataset under transportation cost \(\lVert x-y \rVert _1\).}
+    \label{fig:my_label3}
+\end{figure}
+\fi
+
+
+
+\section{Numerical result}
+
+\label{sec: expts}
+We conduct numerical experiments to compare the original Sinkhorn and SNS algorithms. We use the following settings: We obtained the runtime data on a 2021 Macbook Pro laptop with an Apple M1 Pro chip. The linear system solving is done through the conjugate gradient step as mentioned in Algorithm \ref{alg:SNS}. To set a challenging case, we use an entropic regularization with \(\eta = 1200\) throughout the experiments. Additionally, we perform experiments on the numerical performance of quasi-Newton methods \citep{nocedal1999numerical}.
+
+In the first numerical test, we consider the random assignment problem with entropic regularization \citep{mezard1987solution,steele1997probability,aldous2001zeta}, considered a hard instance of optimal transport. The cost matrix \(C = [c_{ij}]_{ij= 1}^{n} \in \mathbb{R}^{n \times n}\) with \(n = 500\) is generated by \(c_{ij} \sim \mathrm{Unif}([0,1])\). The source and target vectors are \(c = r = \frac{1}{n}\mathbf{1}\). We run Algorithm \ref{alg:SNS} with \(N_1 = 20\) and a target sparsity of \(\lambda = 2/n\). Figure \ref{fig:my_label} shows that SNS drastically outperforms Sinkhorn in iteration and runtime. 
+
+In the second numerical experiment, similar to the experiment setting in \citet{cuturi2013sinkhorn}, we consider the more practical case of optimal transport on the MNIST dataset. In particular, two images are respectively converted to a vector of intensities on the $28 \times 28$ pixel grid, which are then normalized to sum to 1. The entry corresponding to the \((i_1,i_2)\)-th pixel is conceptualized as the point \((i_1/28, i_2/28) \in \mathbb{R}^{2}\), and the transport cost is the Euclidean distance cost \(\lVert x-y\rVert^2\). Similarly, we pick \(N_1 = 20\) in Algorithm \ref{alg:SNS} with a target sparsity of \(\lambda = 2/n\). Figure \ref{fig:my_label2} shows a similar performance boost to the Sinkhorn algorithm.
+
+
+As the approximate sparsity analysis underlying Section \ref{sec: analysis} mainly focuses on the situation of unique solutions, it is of interest to test problems with many optimal transport solutions, as it is a case where the SNS algorithm might potentially break in practice. For this purpose, we consider the MNIST example under the \(l_1\) transport cost \(\lVert x-y \rVert_1\), which is known to have non-unique solutions due to the lack of convexity in the \(\lVert \cdot \rVert_1\) norm \citep{villani2009optimal}. As the Sinkhorn algorithm converges quite slowly, we pick \(N_1 = 700\) before switching to the Newton stage. Choosing a target sparsity of \(\lambda = 15/n\) is sufficient for convergence to the ground truth, which shows that SNS runs quite well even without a uniqueness guarantee. 
+
+In Table \ref{tab:runtime_iteration_comparison}, we benchmark the runtime for Sinkhorn versus SNS to reach machine accuracy, which shows that SNS has an overall runtime advantage for convergence. In particular, we list the performance of SNS in the Newton stage, which shows that early stopping of Sinkhorn matrix scaling steps and switching to the Newton stage results in an order of magnitude speedup in iteration counts. While we cannot prove the conjectured super-exponential convergence, the low iteration count in the Newton stage shows strong numerical support. 
+\begin{table}[t]
+\renewcommand{\arraystretch}{1.1}
+    \centering
+    \caption{Performance comparison between SNS and Sinkhorn. Both algorithms are run until they reach machine accuracy.}
+    \begin{tabular}{l|c|cS[table-format=3.2]S[table-format=4.0]}
+        \toprule
+        \textbf{Case} & \textbf{Method} & \textbf{Stage} & \textbf{Time (s)} & \textbf{Iterations}\\
+        \midrule
+        \multirow{4}{*}{Random} & \multirow{3}{*}{SNS} & Sinkhorn & {0.12} & {20} \\
+        &  & Newton & {0.22} & {9} \\
+        &  & Total & \textbf{0.34} & \textbf{29} \\\cline{2-5}
+        & Sinkhorn & Total & 233.36 & 56199 \\
+        \hline
+        \multirow{4}{*}{MNIST L2} & \multirow{3}{*}{SNS} & Sinkhorn & {0.17} & {20} \\
+        & & Newton & {2.16} & {33} \\
+        &  & Total & \textbf{2.33} & \textbf{53} \\\cline{2-5}
+        & Sinkhorn & Total & 18.84 & 2041 \\
+        \hline
+        \multirow{4}{*}{MNIST L1} & \multirow{3}{*}{SNS} & Sinkhorn & {6.28} & {700} \\
+        &  & Newton & {5.94} & {77} \\
+        &  & Total & \textbf{12.22} & \textbf{777} \\\cline{2-5}
+        & Sinkhorn & Total & 45.75 & 5748 \\
+        \bottomrule
+    \end{tabular}
+
+    \label{tab:runtime_iteration_comparison}
+\end{table}
+
+
+\section{Conclusion}
+
+We propose the Sinkhorn-Newton-Sparse algorithm, demonstrating its empirical super-exponential convergence at a \(O(n^2)\) per-iteration cost through numerical validation. We prove several novel bounds on approximate sparsity underlying the algorithm. For problems with non-unique solutions, we elucidate a novel relationship between approximate sparsity and extremal combinatorics. We contend that this new method significantly advances the field of high-precision computational optimal transport and complements the existing Sinkhorn algorithm. 
+
+For future work, it may be interesting to study how the approximation accuracy of the sparsification step affects the algorithm's convergence and how to devise more sophisticated sparse approximation techniques beyond simple thresholding. Moreover, it is an exciting direction to incorporate existing optimal transport techniques with the SNS algorithm, including greedy row/column optimization, dynamic regularization scheduling, and hardware-based parallel accelerations. Theoretically, analytic properties on the Lyapunov potential might provide more insight into the region where the sparsified Newton algorithm achieves the super-exponential convergence we empirically observe.
+
+
+
+
+
+
+

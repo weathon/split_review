@@ -1,0 +1,219 @@
+\title{Making PPO even better: Value-Guided Monte-Carlo Tree Search decoding}
+
+\begin{abstract}
+Inference-time search algorithms such as Monte-Carlo Tree Search (MCTS) may seem unnecessary when generating natural language text based on state-of-the-art reinforcement learning such as Proximal Policy Optimization (PPO). In this paper, we demonstrate that it is possible to get extra mileage out of PPO by integrating MCTS on top. The key idea is *not* to throw out the *value network*, a byproduct of PPO training for evaluating partial output sequences, when decoding text out of the *policy network*. More concretely, we present a novel *value-guided* decoding algorithm called **PPO-MCTS**, which can integrate the value network from PPO to work closely with the policy network during inference-time generation. Compared to prior approaches based on MCTS for controlled text generation, the key strength of our approach is to reduce the fundamental mismatch of the scoring mechanisms of the partial outputs between training and test. Evaluation on four text generation tasks demonstrate that **PPO-MCTS** greatly improves the preferability of generated text compared to the standard practice of using only the PPO policy. Our results demonstrate the promise of search algorithms even on top of the aligned language models from PPO, and the under-explored benefit of the value network.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Numerous text decoding algorithms have been introduced to improve the controllability and human alignment of text generation by language models (LMs). Guided decoding (Lu et al., 2020; Welleck et al., 2022, inter alia), where the generative LM is steered by an auxiliary evaluation function that captures goal satisfaction by partial outputs, has been of particular interest, since this framework can be combined with search algorithms to achieve more desirable outcomes. However, in most prior work, the choice of evaluation function can be suboptimal, relying on rule-based heuristics or borrowing classification models that are not trained to evaluate incomplete sequences.  
+
+Our key observation is that the value model produced from Proximal Policy Optimization (PPO) (Schulman et al., 2017) is a natural candidate for the evaluation function in guided decoding. PPO has become the de facto algorithm for aligning language models to human feedback using reinforcement learning (RLHF) (Ouyang et al., 2022; OpenAI, 2022; 2023; Bai et al., 2022; Touvron et al., 2023b). In order to train the policy model, PPO additionally learns a value model that estimates the expected return of partial outputs when following the current policy. Therefore, this value model is designed to evaluate incomplete sequences. However, AI researchers and practitioners usually discard the value model checkpoints when saving or releasing their PPO models, leaving the usefulness of such value models under-explored. Not utilizing the information learned by the value model limits the performance of PPO. For example, in our experiments, we observe that decoding solely from the PPO policy model can yield undesirable outputs (e.g., Figure 1).  
+
+We propose to apply guided decoding on LMs trained with PPO, using the associated value model as the evaluation function. The value model estimates the expected return for a partial sequence to be completed by following the associated policy, and as we will show later, it is suitable to guide decoding because: (1) it is trained to predict the value for partial sequences; (2) it is specifically tailored for the associated policy. In particular, we propose to use Monte-Carlo Tree Search (MCTS) (Kocsis & Szepesvari, 2006) to search for output sequences with higher rewards. MCTS is shown to be an indispensable inference-time component that helps the AlphaGo series reach superhuman performance on Go (Silver et al., 2016; 2017), and is recently employed to steer LMs (Zhao et al., 2023b; Hao et al., 2023; Chaffin et al., 2021). In this work, we apply guided decoding (MCTS, in particular) on policy/value model pairs trained with PPO. We refer to our decoding method as PPO $^+$ MCTS.  
+
+Figure 1 shows an example for applying $\scriptstyle\mathrm{PPO+MCTS}$ on a text generation task where decoding from the PPO policy alone fails the task. The objective is to generate a positive-sentiment continuation to a given negative-sentiment prompt, “You can’t fix one dangerous situation with one ...” The PPO policy indicates “bad” as the most likely next token, and following that policy yields a negative-sentiment continuation, failing the task. However, with $\scriptstyle\mathrm{PPO+MCTS}$ , a search tree is built and tokens are decoded based on the statistics obtained from evaluating sequences with a few steps of look-ahead, and thus “person” becomes the most likely next token. Following this algorithm successfully yields a positive-sentiment continuation.  
+
+To successfully combine PPO models and MCTS decoding, we introduce a novel and yet critical modification to the original MCTS algorithm: initializing the $Q$ of children actions from the $V$ of their parent node to encourage exploration. We also present approximation techniques when the task or experimental setup does not allow exact computation. We also discuss some implementation choices in PPO training and their implications on the necessity of certain approximations. More details can be found in $\S3$ .  
+
+Experiments on four text generation tasks show that $\scriptstyle\mathrm{PPO+MCTS}$ generates text with higher preferability than standard decoding (e.g., top- $p$ sampling (Holtzman et al., 2019)):  
+
+1. On sentiment steering (using the OpenWebText dataset (Gokaslan & Cohen, 2019)), $\scriptstyle\mathrm{PPO+MCTS}$ achieves a success rate that is $30\%$ (absolute) higher than direct sampling from the same PPO policy, while maintaining other desirable properties such as fluency, diversity, and topicality. Human evaluation favors $\scriptstyle\mathrm{PPO+MCTS}$ over the PPO policy by a $20\%$ (absolute) margin.  
+
+2. On toxicity reduction (using the RealToxicityPrompts dataset (Gehman et al., 2020)), $\scriptstyle\mathrm{PPO+MCTS}$ reduces the toxicity of generated text by $34\%$ (relative). Human evaluation favors $\scriptstyle\mathrm{PPO+MCTS}$ over the PPO policy by a $30\%$ (relative) margin.  
+
+3. On knowledge introspection (evaluated on several QA benchmarks), $\scriptstyle\mathrm{PPO+MCTS}$ produces commonsense knowledge that is $12\%$ (relative) more useful to downstream QA tasks.  
+
+4. On creating helpful and harmless chatbots (using the HH-RLHF dataset (Bai et al., 2022)), $\scriptstyle\mathrm{PPO+MCTS}$ produces dialog responses with $5\%$ (absolute) higher win rate in human evaluation.  
+
+Our empirical results demonstrate that PPO-trained policies can benefit from guided decoding, and that the PPO value model is both theoretically justified and empirically effective in guiding the search in MCTS. We additionally show that $\scriptstyle\mathrm{PPO+MCTS}$ outperforms a longer training of PPO or using best-of- ${\boldsymbol{n}}$ decoding, both of which directly optimize for the rewards. Our results unlock the valuable potentials of the value models, and we recommend the community to consider saving the value model for enhanced inference.  
+
+
+
+\section{2 PRELIMINARIES  }
+
+
+In this section, we introduce some preliminaries that support the discussion of our method, including common notations in text generation, guided decoding, and Proximal Policy Optimization.  
+
+
+
+\section{2.1 NOTATION  }
+
+
+In the most common formulation of text generation, an LM estimates the probability distribution of the next token $x_{t}$ given a prior context $x_{<t}$ , $p_{\theta}(x_{t}|x_{<t})$ , and decodes the next token by referencing this probability. Common decoding algorithms include greedy decoding, beam search, temperature sampling, and top- $\cdot p$ sampling (Holtzman et al., 2019). Text generation tasks usually provide a prompt $w$ and asks for a continuation $x_{1,..T}$ , in which case the LM models $p_{\theta}(x_{t}|w,x_{<t})$ .  
+
+When text generation is cast as a sequential decision making problem (Puterman, 1994), a state is the prompt plus the response generated so far, and an action is the next generated token. Formally, $\boldsymbol{s}_{t}=\left(\boldsymbol{w},\boldsymbol{x}_{<t}\right)$ and $a_{t}=x_{t}$ . The LM is referred to as a policy model $p_{\theta}\big(a_{t}|s_{t}\big)$ .  
+
+In controlled text generation, the goal is often characterized by a reward function $r(s_{T+1})$ , where $s_{T+1}=(w,x_{1\dots T})$ is the complete generated text. This function encodes preferable properties of the generated text, such as desirable sentiment, low toxicity, lexical constraints, and other types of human preference. The reward function may be either rule-based or modeled with a neural classifier or regressor. Certain methods, including the guided decoding methods that we describe below, can guide text decoding to increase the reward of outputs.  
+
+
+
+\section{2.2 GUIDED DECODING  }
+
+
+Guided decoding employs an evaluation function to evaluate states with partial output, $\mathbf{\mathcal{S}}_{t}=$ $(w,x_{<t})$ , against some goal. As with the reward function, the evaluation function may be either rule-based (e.g., Lu et al., 2020; Welleck et al., 2022) or modeled with a neural classifier or regressor (e.g., Chaffin et al., 2021; Yao et al., 2023). This evaluation function can be combined with the policy LM to guide the decoding, which is often complemented with some search algorithm to allow for some look-ahead and long-horizon planning (e.g., Lu et al., 2021; Chaffin et al., 2021). MonteCarlo Tree Search (MCTS) is among the most effective search algorithms (Silver et al., 2016).  
+
+
+
+\section{2.3 PROXIMAL POLICY OPTIMIZATION (PPO)  }
+
+
+PPO (Schulman et al., 2017) is an RL algorithm for optimizing a policy against a given reward   
+function. PPO assumes a reward function that computes a reward $r(s_{T+1})$ from the terminal state   
+$s_{T+1}$ (i.e., the complete sequence). This reward is assigned to the step-level reward of the last step,   
+$r_{T}$ wuaarldl yi st hpee innailtiizaelidz ewdi tpho lai cKy Lo fd iPvPerOg ternacien itnegr)m, ,a ,r awmheetreer hise rtehfeo rree,f tehree nsctee pp-loelivceyl $\begin{array}{r}{-\beta\log{\frac{p_{\theta}\left(a_{t}\left|s_{t}\right.\right)}{p_{\theta_{0}}\left(a_{t}\left|s_{t}\right.\right)}}}\end{array}$ $\theta_{0}$ $\beta$  
+
+![](images/e204dbeaa8c38ab2ded7e84e5a83988ae2b78db74ede085a643df3e69c8af7ba.jpg)  
+Figure 2: The four stages of one simulation in MCTS. Note: we displayed the node visit count $\bar{N(s)}$ on its parenting edge as the number of “paws” (e.g., in the bad token in the backup stage).  
+
+reward is  
+
+$$
+r_{t}={\left\{\begin{array}{l l}{-\beta\log{\frac{p_{\theta}(a_{t}|s_{t})}{p_{\theta_{0}}(a_{t}|s_{t})}}+r(s_{T+1})}&{{\mathrm{(where~}}t=T{\mathrm{)}}}\\ {-\beta\log{\frac{p_{\theta}(a_{t}|s_{t})}{p_{\theta_{0}}(a_{t}|s_{t})}}}&{{\mathrm{(where~}}1\leq t<T{\mathrm{)}}}\end{array}\right.}
+$$  
+
+PPO simultaneously trains two models: a policy model $p_{\theta}\big(a_{t}|s_{t}\big)$ , and a value model $V_{\phi}\big(s_{t}\big)$ , both parameterized with neural networks. The PPO learning objective consists of two parts: a policy objective and a value objective. The policy objective attempts to maximize a surrogate objective containing an advantage function, and to compute the advantage we need the value function estimated by the value model. The value objective attempts to minimize the value estimation error against the empirical return,  
+
+$$
+G_{t}=\sum_{t^{\prime}=t}^{T}\gamma^{t^{\prime}-t}r_{t^{\prime}},
+$$  
+
+where $\gamma$ is the discounting factor. For more details about the PPO learning objectives, see $\S\mathrm{A}.2$ .  
+
+Current practices of decoding from PPO models. After PPO training, most researchers and engineers deploy only the resulting policy model, and decode with simple methods such as greedy decoding or top- $\boldsymbol{p}$ sampling $(\S2.1)$ . The associated value model cannot be utilized, because its checkpoints are either unsaved or unreleased by model trainers. Our observation is that this value model is a very suitable candidate for the evaluation function in guided decoding.  
+
+
+
+\section{3 METHOD  }
+
+
+Applying MCTS decoding on top of PPO-trained models allows for systematic search and lookahead in the decoding space. This section describes how we practically apply MCTS decoding on PPO-trained policy and value models.4)$ and some detailed implementation choices in PPO that may render these approximations necessary $(\S\mathrm{A}.5)$ .  
+
+The goal of MCTS is to find high-reward output sequences, using the policy model and evaluation function as guidance. The policy provides initial proposals on promising actions, and the evaluation function scores partial sequences proposed by the policy. We want to evaluate more frequently partial sequences stemmed from more promising actions so as to obtain more accurate evaluations for these actions (i.e., exploitation), while we also want to make sure to evaluate some less promising actions so as to reduce the likelihood of missing out high-reward sequences (i.e., exploration). MCTS offers an effective exploration and evaluation heuristic based on tree search.  
+
+In $\scriptstyle\mathrm{PPO+MCTS}$ , the MCTS decoding works with the policy and value model trained by PPO. To decode each token, MCTS builds a search tree while running a number $S$ of simulations. In the search tree, each node represents a state $s$ and each edge represents an action $a$ . For each node $s$ , we maintain two variables: a visit count $N(s)$ (which is eventually used to decode the token) and a mean value ${\bar{V}}(s)$ ; for each edge $(s,a)$ , we keep track of the value of its $Q$ -function $Q(s,a)$ . Each simulation consists of four stages (illustrated in Figure 2):  
+
+1. Select: Select an unexplored node in the tree. Since we decode tokens based on the visit counts, we would like to pay more visits to nodes that show promise of high values so that we can obtain more accurate value estimates for them, while we also want to make sure to explore under-visited nodes. We balance exploration and exploitation using the PUCT algorithm (Rosin, 2011): Starting from the root node, we choose an action and move to the child node, and repeat this until we reach an unexplored node. Say currently we are at node $s$ . The action $a^{*}$ is chosen according to the following formula, which favors high $Q$ -function values while discounting high visit counts:  
+
+$$
+a^{*}=\underset{a}{\arg\operatorname*{max}}\left[Q(s,a)+c_{\mathrm{puct}}\cdot p_{\theta}(a|s)\frac{\sqrt{N(s)}}{1+N(s^{\prime})}\right],
+$$  
+
+where $s^{\prime}$ is the state after taking action $a$ from node $s$ , $p_{\theta}(a|s)$ is the PPO policy prior, $Q(s,a)$ is the $Q$ -function for edge $(s,a)$ and is derived from the outputs of the PPO value model (see formula in the backup stage below), $N(s)$ is the visit count of node $s$ , ${\bar{V}}(s)$ is the mean value produced from evaluating nodes in the subtree of node $s$ (inclusive) (see formula in the backup stage below), and $c_{\mathrm{puct}}$ is a hyperparameter.  
+
+Note that in PPO, intermediate steps are penalized with a $\mathrm{KL}$ term (Equation 1), and there is a discounting factor $\gamma$ when computing the return (Equation 2). To capture these, We use the $Q$ - function (instead of the ${\bar{V}}(s)$ as in Silver et al. (2017)) in Equation 3, which is in line with the original formulation of MCTS (Kocsis & Szepesvari, 2006).  
+
+2. Expand: The selected node $s^{*}$ is expanded and marked as explored. The prior policy distribution $p_{\theta}(\cdot|s^{\ast})$ is computed for this node, and actions with the top- $k$ priors are each linked to a new, unexplored child node. The $\bar{V}$ of child nodes are zero-initialized.  
+
+3. Evaluate: The value function of node $s^{*}$ is evaluated, using the PPO value model: $V(s^{*})\;=\;$ $V_{\phi}\big(s^{*}\big)$ . If $s^{*}$ is a terminal state, the final reward $r(s_{T+1})$ is used. We initialize the visit count of $s^{*}$ as one, and the mean value of $s^{*}$ with this value model’s output, i.e., $N(s^{*})\gets1,\bar{V}(s^{*})\gets V(s^{*})$ . Following Silver et al. (2017) and Chaffin et al. (2021), we do not do Monte-Carlo rollout due to efficiency considerations.  
+
+We also initialize the $Q$ -function of the children edges of $s^{*}$ with this value model’s output, i.e., $Q(s^{*},a)\gets V(s^{*}),\forall a$ . This contrasts with the standard MCTS algorithm where the V¯ (or in our case, the $Q$ ) of the children of newly explored nodes are zero-initialized. We refer to this change as initializing $Q$ with $V$ . We made this change because with PPO models, the $Q$ can have rather large scales (in the order of 10s), due to reasons that will be explained in $\S\mathrm{A}.5$ . During early experiments, we found that this can severely suppress exploration in the tree search, making it degenerate to greedy decoding.  
+
+4. Backup: Update the visit count $N(\cdot)$ and mean value $\bar{V}(\cdot)$ for all nodes, and the $Q$ -function $Q(\cdot,\cdot)$ for all edges, on the path from node $s^{*}$ back to the root node $s_{t}$ . The update is carried out bottom-up, with the update rules:  
+
+$$
+\begin{array}{l}{{\displaystyle{Q(s,\tilde{a})\gets r(s,\tilde{a})+\gamma\bar{V}(\tilde{s})},}}\\ {{\displaystyle{\bar{V}(s)\gets\sum_{a}N(s^{\prime})Q(s,a)/\sum_{a}N(s^{\prime})},}}\\ {{\displaystyle N(s)\gets N(s)+1,}}\end{array}
+$$  
+
+where $s$ is a node on the path and $\tilde{s}$ is its child (also on the path) after taking action $\tilde{a}$ ; $s^{\prime}$ is the child node of state $s$ after taking an action $a$ ; $r(s,a)$ is the step-level reward defined in Equation 1.  
+
+Before the simulations, the root node $s_{t}$ is initialized with the expand and evaluate stages. After the simulations, an action is decoded from the normalized visit counts of the children of the root node:  
+
+$$
+p(a_{t}|s_{t})\propto N(s_{t},a_{t})^{1/\tau_{d}},
+$$  
+
+where $\tau_{d}$ is a temperature hyperparameter. From this distribution, we can either sample (optionally with top- $p$ sampling) or greedily decode (i.e., $\tau_{d}\to0$ ).  
+
+Forbidding node expansion after terminal states. Text generation usually stops at a terminal token, [EOS]. When the action is [EOS], the child node is called a terminal node. Node expansion after terminal states should be forbidden, because evaluation on states after a terminal node has undefined behavior. To maintain proper visit counts up to the terminal node, when encountering a terminal node in the select stage, we should not stop the simulation early, but jump directly to the backup stage.  
+
+
+
+\section{4 EXPERIMENTAL SETUP  }
+
+
+We apply our $\scriptstyle\mathrm{PPO+MCTS}$ decoding method on four text generation tasks: sentiment steering, toxicity reduction, knowledge introspection, and creating helpful and harmless chatbots. Additional experiment details can be found in $\S B$ .  
+
+Task 1: sentiment steering. PPO has been previously employed to control LM toward generating text with a specified sentiment (positive or negative), and we apply MCTS decoding on top of these PPO-trained models to further improve the success rate of sentiment steering (i.e., satisfying the goal). We follow the experimental setup in Lu et al. (2022), where the task is to generate positivesentiment continuations for negative-sentiment prompts (and inversely, negative continuations for positive prompts) in the OpenWebText dataset (Gokaslan & Cohen, 2019).  
+
+Task 2: toxicity reduction. PPO has been previously employed to steer LMs toward generating less toxic text, and we apply MCTS decoding on top of these PPO-trained models to further reduce toxicity. We follow the experimental setup in Lu et al. (2022), where the task is to generate less toxic, yet fluent and diverse, continuations to prompts in the RealToxicityPrompts dataset (Gehman et al., 2020).  
+
+Task 3: knowledge introspection. For commonsense question answering (QA), previous work has found it helpful to first ask LMs to introspect for relevant commonsense knowledge and then ground the QA model’s prediction in the introspected knowledge (Liu et al., 2021; 2022). The knowledge introspection model takes the question as input and generates a knowledge statement, and this model can be trained with PPO to maximize the utility of the generated knowledge on the downstream QA model (Liu et al., 2022). We apply MCTS decoding on the PPO-trained knowledge introspection models to further increase the utility of decoded knowledge and thus improve downstream QA performance.  
+
+Task 4: helpful and harmless chatbots. In this task, we investigate how effective PPO $^+$ MCTS is on aligning LMs to human preferences. We use the helpfulness and harmlessness data from Anthropic’s HH-RLHF dataset (Bai et al., 2022).  
+
+
+
+\section{5 RESULTS  }
+
+
+Across all four tasks, $\scriptstyle\mathrm{PPO+MCTS}$ achieves superior performance compared to direct decoding from the PPO policy. In $\S5.1$ , we conduct more ablations and analyses with the sentiment steering task, and show that our method outperforms other reward-improving strategies such as best-of- $n$ decoding and longer PPO training.  
+
+Baselines. We compare with direct decoding from the same PPO policy model, using nucleus sampling $\textit{p}=\,0.5$ in knowledge introspection, and $p~=~0.9$ in other tasks). We also include best-of- ${\cdot n}$ decoding as a baseline, where each decoded continuation is selected from $n$ candidates produced by nucleus sampling, and the selection is done by the value model. For fair comparison with $\scriptstyle\mathrm{PPO+MCTS}$ , in best-of- ${\boldsymbol{n}}$ we use $\textit{n}=\,50$ in sentiment steering, and $n\:=\:20\$ in toxicity reduction.  
+
+Task 1: sentiment steering. We evaluate on the test set of OpenWebText. When steering for positive sentiment, we evaluate on the subset of negative-sentiment prompts; when steering for negative sentiment, we evaluate on the subset of positive-sentiment prompts. Following Lu et al. (2022), we conduct both automatic and human evaluation. For automatic evaluation, we report the ratio of generated text with desirable sentiment (i.e., rate of goal satisfaction) over 25 samples for each prompt, fluency as measured by the perplexity of generated text according to the off-the-shelf $\mathsf{G P T2\!-\!x1}$ (Radford et al., 2019), and diversity as the percentage of distinct $n$ -grams in the generated text. For human evaluation, we do pairwise comparison on outputs from $\scriptstyle\mathrm{PPO+MCTS}$ to the direct sampling baseline, based on the perceived level of sentiment desirability, fluency, and topicality.  
+
+As shown in Table 1, $\scriptstyle\mathrm{PPO+MCTS}$ greatly increases the sentiment steering success rate compared to the direct sampling baseline from the policy ( $+34\%$ absolute on positive sentiment and $+26\%$ absolute on negative sentiment), while maintaining comparable fluency and diversity. Meanwhile, best-of- ${\cdot n}$ only gives marginal or no improvement of success rate on either target sentiment. Human evaluation also shows that $\scriptstyle\mathrm{PPO+MCTS}$ generates more preferable text than the direct sampling baseline ( $+22\%$ on positive sentiment and $+18\%$ on negative sentiment).  
+
+Table 1: Results on sentiment steering. Upper: automatic evaluation. Lower: human evaluation. See Table 6 for more baselines and compared methods. †: we use our replica of the PPO model, which is trained under a slightly different setting than Lu et al. (2022) (details in $\S B.1$ ) and has similar performance.   
+
+![](images/cef864f015b883e5072f532ea98e848b989df8c43ee35082e7af7c7624159fbf.jpg)  
+
+Table 2: Results on toxicity reduction. Left: automatic evaluation. Right: human evaluation. †: we use our replica of the PPO model, which is trained under a slightly different setting than Lu et al. (2022) (details in $\S B.2)$ and has similar performance.   
+
+![](images/9940b66973828a46c5ec7afe276e623c7712160696334f4aea7ace9a9363ffe5.jpg)  
+
+Table 3: Results on knowledge introspection. QA accuracy on theTable 4: Results on helpful dev set of each dataset is reported. †: our results on the PPO baseline and harmless chatbots. are slightly different from Liu et al. (2022), possibly due to discrepancy in Reward PPL compute environments and random variation.   
+
+![](images/6ec11d7801c5526c43a09f6a038eeb227d3f9f6c183ff25abf008b69b3c6d4b6.jpg)  
+
+Task 2: toxicity reduction. We evaluate on the test set of RealToxicityPrompts. Following Lu et al. (2022), we conduct both automatic and human evaluation. For automatic evaluation, we report the maximum toxicity over 25 samples for each prompt, fluency as measured by the perplexity of generated text according to the off-the-shelf $\mathsf{G P T2\!-\!x1}$ (Radford et al., 2019), and diversity as the percentage of distinct $n$ -grams in the generated text. For human evaluation, we do pairwise comparison on outputs from $\scriptstyle\mathrm{PPO+MCTS}$ to the direct sampling baseline, based on the perceived level of toxicity, fluency, and topicality.  
+
+As shown in Table 2, $\scriptstyle\mathrm{PPO+MCTS}$ reduces max toxicity of the sampled text compared to the direct sampling baseline from the policy ( $-34\%$ relative), while maintaining comparable fluency and diversity. Meanwhile, best-of- ${\cdot n}$ only gives marginal reduction on toxicity ( $-5\%$ relative). Human evaluation also shows that $\scriptstyle\mathrm{PPO+MCTS}$ generates less toxic text than the direct sampling baseline (with a margin of $30\%$ relative), with comparable fluency and topicality.  
+
+Task 3: knowledge introspection. We report the QA accuracy on the validation set of the same five datasets as in Rainier: CommonsenseQA (Talmor et al., 2019), QASC (Khot et al., 2020), PIQA (Bisk et al., 2020), SIQA (Sap et al., 2019), and Winogrande (Sakaguchi et al., 2020). As shown in Table 3, using $\scriptstyle\mathrm{PPO+MCTS}$ to decode the commonsense knowledge from Rainier improves the downstream QA performance by $0.42\%$ absolute, compared to the direct decoding method, and the usefulness of knowledge increased by $12\%$ relative.  
+
+Task 4: helpful and harmless chatbots. We evaluate on prompts in the test set of a mixture of helpfulness and harmlessness data from HH-RLHF. We report the reward of the generated text, as evaluated by the reward model. We also conduct human evaluation and compare $\scriptstyle\mathrm{PPO+MCTS}$ with the baseline decoding method. As reported in Table 4, $\scriptstyle\mathrm{PPO+MCTS}$ increases the average reward of the output by 0.04 compared to the PPO policy baseline. In human evaluation, $\scriptstyle\mathrm{PPO+MCTS}$ also has $5\%$ (absolute) higher win rate than PPO.  
+
+
+
+\section{5.1 ANALYSES AND ABLATIONS  }
+
+
+In this section, we report additional ablation results and analyses of our PPO $^+$ MCTS method, using the sentiment steering task.  
+
+Do we need the value model? Ablation: using reward model in place of value model in MCTS. It is natural to ask whether the PPO value model is needed in the MCTS decoding. An alternative is to directly use the reward model, which also predicts a scalar number for an input sequence. The reward model predicts the reward of the full sequence $(r(s_{T+1}))$ , whereas the value model predicts the expected return under the current policy $\begin{array}{r}{(\mathbb{E}_{p_{\theta}}[\sum_{t^{\prime}=t}^{T}\gamma^{t-{'}t}r_{t^{\prime}}])}\end{array}$ . Theoretically, the value model has two advantages over the reward model: (1) the value model is trained to process partial sequences, while the reward model is usually not; (2) the value model is tailored for the policy model, whereas the reward model is off-the-shelf or trained prior to PPO. Empirically, we experiment with a version of $\scriptstyle\mathrm{PPO+MCTS}$ where the value model is replaced by the reward model, and report the result in Table 6 under PPO+MCTS[R]. This variation results in lower goal satisfaction rate and lower fluency than our value-guided version of $\scriptstyle\mathrm{PPO+MCTS}$ . Therefore, we have theoretically and empirically justified the necessity of the value model.  
+
+Do we need MCTS? Ablation: using stepwise-value in place of MCTS. We also study the necessity of the MCTS algorithm during decoding. To this end, we compare with a simple baseline, stepwise-value: to decode each token, we query the policy and keep the top- $k$ tokens, use the value model to evaluate each, and sample from the distribution derived from the value logits. To keep fluency relatively high, we change the hyperparameters to $S=k=10$ and $\tau_{d}=1.0$ with linear annealing down to zero. As shown in Table 6, stepwise-value results in much lower goal satisfaction and much lower fluency compared to $\scriptstyle\mathrm{PPO+MCTS}$ . Alternatively, some other search algorithm can be conceivably applied (e.g., beam search, $\mathbf{A}^{*}$ ). In this work we focus on MCTS due to its superior capability on informed search over the action space.  
+
+MCTS vs. more PPO? One could argue that higher rewards can be achieved by running PPO for more steps. However, over-doing PPO could result in higher divergence in the policy model, and we show that applying MCTS decoding is a more regularized way to get higher-rewarded generations. We continue training the PPO models of both sentiments up to $500\;\mathrm{PPO}$ steps, and apply the direct top- $\cdot p$ sampling on the resulting policy, which is denoted as “PPO ( $\operatorname{4x}$ more steps)” in Table 6. Experiments show that on the positive-sentiment model, this method results in inferior goal satisfaction with significantly worse PPL compared to $\scriptstyle\mathrm{PPO+MCTS}$ , while on the negative-sentiment model, it has comparable PPL and yet still lower goal satisfaction. These results suggest that MCTS decoding is a more desirable way to achieve higher rewards than training PPO for longer.  
+
+How to get diversity out of MCTS? MCTS is known to search for the best sequence of actions. There are two places in MCTS where we can promote diversity: (a) when decoding the action from visit counts (Equation 7), we can apply a non-zero temperature $\tau_{d}$ so that we get stochastic results, and (b) in the expand stage, we can apply a higher temperature $\tau_{e}$ to the priors $p_{\theta}(a|s)$ , so as to encourage more exploration in the search tree.}$ ). Increasing $\tau_{e}$ can substantially improve goal satisfaction and diversity, yet at the expense of hurting fluency. On the other hand, increasing $\tau_{d}$ can increase diversity, with relatively small penalty on fluency and goal satisfaction. To maintain comparable diversity while optimizing for goal satisfaction, we choose $\tau_{d}=\tau_{e}=2.0$ in our experiments.  
+
+Other hyperparameters. Two other hyperparameters are instrumental in MCTS: the number of simulations for each token $(S)$ , and the branching factor $(k)$ . We experiment with $S=[10,20,50]$ , and to prevent $k$ from being a limiting factor in the tree search, we keep it the same as $S$ . Based on these observations, we choose $S\,=\,k\,=\,50$ in our experiments.  
+
+Inference time overhead. $\scriptstyle\mathrm{PPO+MCTS}$ does introduce an inference time overhead compared to direct sampling from policy models. Estimated naively, $\scriptstyle\mathrm{PPO+MCTS}$ is $2S$ times slower due to the tree construction, where $S$ is the number of simulations run before decoding each token, if we assume that the policy and value model share the same architecture and size. KV caching may be used to speed up standard decoding methods (e.g., top- $\boldsymbol{p}$ sampling), and it is also applicable and equally effective on $\scriptstyle\mathrm{PPO+MCTS}$ , so it has no impact on the relative overhead. However, the subtree under the decoded token can be reused when constructing the search tree for the next token, and thus at least $\lceil S/k\rceil$ tree nodes do not need to be re-computed (and in practice, this number is usually much higher). This mitigates the large inference time overhead to some extent.  
+
+
+
+\section{6 RELATED WORK  }
+
+
+Guided decoding. Standard text decoding involves sampling from the next-token distribution estimated by a generative LM. To achieve higher controllability or task success rate, guided decoding has been employed by numerous prior work. Among these, some use token-level value functions to guide decoding (Dathathri et al., 2019; Krause et al., 2020; Lu et al., 2020; Chaffin et al., 2021), while others use step-level verifiers (Welleck et al., 2022; Uesato et al., 2022; Lightman et al., 2023; Krishna et al., 2022; Li et al., 2022; Khalifa et al., 2023; Xie et al., 2023; Yao et al., 2023), and they are usually complemented with some search algorithms. Our method, $\scriptstyle\mathrm{PPO+MCTS}$ , is a guided decoding method with token-level value functions, and our decoding is further empowered by MonteCarlo Tree Search. Furthermore, while the value functions in most prior work are based on either hand-crafted rules or separate discriminative models, the value model we use is specifically tailored for the generative LM, and more directly captures the desired target metric.  
+
+Monte-Carlo Tree Search for text generation. MCTS has been employed in various language tasks. LLM-MCTS (Zhao et al., 2023b) and RAP (Hao et al., 2023) applies MCTS to planning and logical reasoning tasks, where they use off-the-shelf LLMs as both policy and value models. PPLMCTS (Chaffin et al., 2021) applies MCTS in a plug-and-play manner to control certain aspects of generated text (e.g., polarity, emotion), where the value models are off-the-shelf sequence classifiers (which are not meant to operate on partial sequences). Leblond et al. (2021) applies MCTS to the machine translation task, where the value model is trained to fit an already-trained policy, similar to AlphaGo (Silver et al., 2016). To our best knowledge, we are the first to apply MCTS to policy and value models trained jointly with PPO.  
+
+Proximal Policy Optimization. PPO (Schulman et al., 2017) is an RL algorithm for optimizing a policy against a given reward function, and has found great success in language tasks (Ouyang et al., 2022; OpenAI, 2022; 2023; Bai et al., 2022; Touvron et al., 2023b; Liu et al., 2022; Wu et al., 2023). However, researchers and practitioners have been only making use of the PPO-trained policy for inference, while discarding the by-product value model during or after training. To our best knowledge, we are the first to make use of PPO’s value model and combine it with the policy to yield better text generation. After PPO, other RL algorithms for language has been proposed, including Quark (Lu et al., 2022), DPO (Rafailov et al., 2023), and SLiC (Zhao et al., 2023a). Yet these methods do not train an accompanying value model, and thus cannot directly benefit from value-guided MCTS.  
+
+
+
+\section{7 CONCLUSION AND FUTURE WORK  }
+
+
+In this paper, we proposed an effective method to apply Monte-Carlo Tree Search (MCTS) decoding on top of PPO-trained policy and value models, and demonstrated the usefulness of value models trained as byproducts when aligning LMs to human preference.  
+
+Future work may consider using MCTS as a policy optimization operator (Silver et al., 2017; Grill et al., 2020) for language model training, yet several challenges may need to be addressed: (1) constructing the Monte-Carlo search tree is less efficient than PPO policy rollout; (2) MCTS updates the policy distribution towards the visit counts, which may not have sufficient significance due to the large action space in language.  
+
+
+

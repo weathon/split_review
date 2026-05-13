@@ -1,0 +1,131 @@
+# Provable Repair of Vision Transformers: Last Layer is All You Need
+
+- Decision: Reject
+- Scores: 3, 5, 5
+
+## Abstract
+Vision Transformers have emerged as state-of-the-art image recognition tools, but may still exhibit incorrect behavior. Incorrect image recognition can have disastrous consequences in safety-critical real-world applications such as self-driving automobiles. In this paper, we present Provable Repair of Vision Transformers (PRoViT), a provable repair approach that guarantees the correct classification of
+images in a repair set for a given Vision Transformer without modifying its ar-
+chitecture. PRoViT avoids negatively affecting correctly classified images (draw-
+down) by minimizing the changes made to the Vision Transformer’s parameters
+and original output. We observe that for Vision Transformers, unlike for other
+architectures such as ResNet or VGG, editing just the parameters in the last layer
+achieves correctness guarantees and very low drawdown. We introduce a novel
+method for editing these last-layer parameters that enables PRoViT to efficiently
+repair state-of-the-art Vision Transformers for thousands of images, far exceeding
+the capabilities of prior provable repair approaches.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes a method for provable repair of neural networks by modifying only the weights of the last linear layers so as to maximise the classification accuracy on the repair set. This problem can be cast as a linear program (LP), as previously done in the literature. The novelty of this work that sparsity is taken into account when solving this LP.
+
+### Strengths
+The proposed method can exploit the sparsity in the LP (given that the number of labels in the repair set remains small). The results on ViT are quite good.
+
+### Weaknesses
+1. The authors claim that their method has "provable correctness guarantees" (all images in the repair set will be classified correctly post-repair), which is of course not true because the final accuracy deepens on the repair set and the capacity of the last layer. (Take the ImageNet training set as the repair set for example, can the method guarantee a 100% accuracy? Obviously not.) This incorrect claim seems to come from a misconception regarding the algorithm. The method's success is fundamentally limited by the expressiveness of the last linear layer and the nature of the repair set itself, which the authors do not adequately acknowledge. The claim of provable correctness is misleading, as it implies a guarantee that is not present in practice.
+
+2. There's a fundamental algorithmic issue. "Since FTall only terminates once all inputs are classified correctly, it is a provable repair approach." (at the end of section 2), and "If there is no solution to the LP, the loop continues. Otherwise, the repaired Vision Transformer is returned." (at the end of page 5): the authors claim that their algorithm terminates when all the images are correctly classified. The question is: Is it guaranteed to terminate? The algorithm's termination is not guaranteed, as the LP solver might not find a solution that satisfies the repair set constraints, leading to a potential infinite loop. The authors do not provide a clear stopping criterion or a method for handling cases where a solution cannot be found.
+
+3. Some other claims are also questionable. For example, "PRoViT scales to thousands of images": this depends on the number of classes present in the repair set. For example, if there's only a single class, then this claim becomes uninteresting. The scalability claim is overly broad and depends heavily on the diversity of the repair set's labels. If the repair set contains a large number of images but only a few classes, the LP's constraints are significantly reduced, making the problem much easier to solve. This nuance is not properly addressed.
+
+4. Are you sure that the optimization problems in Equations (2) and (3) are linear programs? In addition, please avoid using "Theorem" for everything. For example, Theorems 2 and 4 should be stated as remarks, in my opinion. (And perhaps the other ones should be labeled with Proposition instead of Theorem.) The formulation of Equations (2) and (3) as linear programs needs further clarification, and the use of "Theorem" for all results is not appropriate, as some are more accurately described as remarks or propositions. The authors should provide more rigorous justification for the linearity of the optimization problems.
+
+5. Most importantly, the proposed method has nothing to do with vision transformers. It is largely based on existing works, the optimization problem is the same, only the resolution has been improved by taking into account sparsity. And it also works for any models other than ViT (as long as they has a linear layer at the end, which is the case for all common architectures). It happens to work well for ViTs, but there was absolutely no explanation for this phenomenon, and ViTs were also not the motivation for the design of the method, so the title and the framing of this paper seem to use ViTs only to attract attention. The method's applicability to Vision Transformers seems coincidental rather than intrinsic, as it relies on the presence of a final linear layer, a common feature in many architectures. The paper lacks a compelling explanation for why the method performs particularly well on ViTs, making the title and framing seem opportunistic.
+
+### Questions
+See weaknesses.
+
+### Soundness
+1 poor
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper presents a method for provable repair the correction of classification outputs using Vision Transformers on a specified set of images with certain guarantees and with limited degradation of performance (drawdown) on the initial training set. The proposed provable repair method claims that suitable modification of the final fully-connected layer of a vision transformer is sufficient to achieve these goals. Specifically, the paper builds on provable repair methods proposed for DNNs, like MMDNN and APRNN, that, while they cannot be fully implemented in the case of vision transformers (ViTs) due to the presence of self-similarity modules, they can be applied to the last fully-connected layer of ViTs.
+
+### Strengths
+The paper is well written and easy to read. The main ideas behind the proposed method are clearly exposed and their relation to previous work is presented. Based on concepts introduced in the MMDNN and ARPNN works, a modification of the last layers weights is performed by defining a linear programming problem for satisfying the required constrains. To improve the efficiency of the method, the problem is limited only to the class labels contained in the given repair set. Additionally, fine-tuning of the final layer is also applied in an alternating way, to further improve generalization and limit drawdown.
+
+### Weaknesses
+The contribution is somewhat limited, as the main idea is based on similar approaches applied for DNNs, such as MMDNN (Goldberger et al., 2020) and APRNN (Tao et al., 2023). Nevertheless, these methods have been suitably modified for their application in the context of ViTs. 
+
+Some aspects of the evaluation could be improved. For example, it is mentioned that standard LP-based repair of the last layer could not be considered due to scalability issues. While this is a major limitation of this baseline, it would be interesting to provide some results on a dataset with a reduced number of categories that would make this comparison possible. Also, another aspect that would be interesting to consider in the ablative study is the performance of the proposed method for large values of K. Is there a maximum K value in practice and, if yes, how can this limit be estimated in practice?
+
+### Questions
+As stated above, is there a maximum K value inpractice? If yes, is it easy to estimate it?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper talks about on how to add robustness in VIT models, something which was guaranteed in VGG and ResNet. 
+They achieved this using a set patter of modifying last layers of VIT model.
+
+### Strengths
+* Great theoretical backing for their proof.
+* Mentions initial hypothesis what they are trying to achieve using this task. This is a great way to start any research problem.
+
+### Weaknesses
+ * I fail to see lot of practical sense from this paper.
+* Adding some pictorial references to the idea might be able to help readers to grasp the idea completely.
+
+### Questions
+NA
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+3 good

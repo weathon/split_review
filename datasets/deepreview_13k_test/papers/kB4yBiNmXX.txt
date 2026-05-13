@@ -1,0 +1,421 @@
+\title{FasterViT: Fast Vision Transformers with Hierarchical Attention}
+
+\begin{abstract}
+We design a new family of hybrid CNN-ViT neural networks, named FasterViT, with a focus on high image throughput for computer vision (CV) applications. FasterViT combines the benefits of fast local representation learning in CNNs and global modeling properties in ViT. Our newly introduced Hierarchical Attention (HAT) approach decomposes global self-attention with quadratic complexity into a multi-level attention with reduced computational costs. We benefit from efficient window-based self-attention. Each window has access to dedicated carrier tokens that participate in local and global representation learning. At a high level, global self-attentions enable the efficient cross-window communication at lower costs. FasterViT achieves a SOTA Pareto-front in terms of accuracy and image throughput. We have extensively validated its effectiveness on various CV tasks including classification, object detection and segmentation. We also show that HAT can be used as a plug-and-play module for existing networks and enhance them. We further demonstrate significantly faster and more accurate performance than competitive counterparts for images with high resolution.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+Vision Transformers (ViTs)~\citep{dosovitskiy2020image} have recently become popular in computer vision and achieved superior performance in various applications such as image 
+\begin{wrapfigure}{r}{0.5\textwidth}
+\small
+\centering
+    \begin{minipage}[c]{\linewidth}
+    \tiny
+    \begin{overpic}[width=\textwidth]{Images/latency/models_latency_torch.pdf}
+    \put(30,189){\textbf{FasterViT-5}}
+    \put(42,183){\textbf{FasterViT-4}}
+    \put(58,174){\textbf{FasterViT-3}}
+    \put(102,160){\textbf{FasterViT-2}}
+    \put(125,138){\textbf{FasterViT-1}}
+    \put(147,123){\textbf{FasterViT-0}}
+        \put(17.5,60.9)
+    {
+    \tiny
+    \resizebox{0.35\linewidth}{!}{
+    \setlength\tabcolsep{0.9mm}
+    \renewcommand{\arraystretch}{1}
+    \fcolorbox{black}{white}{%
+
+    \begin{tabular}{l|ccc} 
+      Model  & Throughput & Top-1  \\ \hline
+      Swin-S  & 1720  & 83.2\\
+      ConvNeXt-S  & 2008  & 83.1\\
+      \textbf{FasterViT-2}  & \textbf{3161}  & \textbf{84.2}\\ \hline
+      Swin-B  & 1232  & 83.5\\
+      ConvNeXt-B  & 1485  & 83.8\\
+      \textbf{FasterViT-3}  & \textbf{1780}  & \textbf{84.9}\\ \hline
+    ConvNeXt-L  & 508  & 84.3\\
+      \textbf{FasterViT-4 } & \textbf{849}  & \textbf{85.4}\\ 
+      
+    \end{tabular} 
+ }
+    }
+    }
+    \end{overpic}
+    \end{minipage}\hfill
+\caption{Comparison of image throughput and ImageNet-1K Top-1 accuracy. Throughput is measured on A100 GPU with batch size of 128.}
+\label{fig:fig1}
+\end{wrapfigure}
+classification~\citep{liu2021swin,dong2022cswin,lin2017focal}, object detection~\citep{zhang2021vit,fang2021you} and semantic segmentation~\citep{xie2021segformer,cheng2021per}. In addition to learning more uniform local and global representations across their architecture when compared to Convolutional Neural Networks (CNNs), ViTs scale properly to large-scale data and model sizes~\citep{raghu2021vision,paul2022vision}. Recently, several efforts~\citep{he2022masked,xie2022simmim} have also shown the exceptional capability of ViTs in self-supervised learning of surrogate tasks such as masked image modeling which may significantly enhance the performance of downstream applications. Despite these advantages, lack of inductive bias in pure ViT models may require more training data and impede performance~\citep{xu2021vitae}. Hybrid architectures, which consist of both CNN and ViT-based components, could address this problem and achieve competitive performance without needing large-scale training datasets~\citep{dosovitskiy2020image} or other techniques such as knowledge distillation~\citep{touvron2021training}. An integral component of ViTs is the self-attention mechanism~\citep{vaswani2017attention,dosovitskiy2020image} which enables modeling of both short and long-range spatial dependencies. However, the quadratic computational complexity of self-attention significantly impacts the efficiency and hinders its use for applications with high-resolution images. In addition, contrary to the isotropic architecture (\textit{i.e.}, same feature resolution with no downsampling) of the original ViT model, learning feature representations in a multi-scale manner typically yields better performance~\citep{fan2021multiscale,wang2022pvt}, specifically for downstream applications (\textit{e.g.}, detection, segmentation). 
+
+To address these issues, Swin Transformer~\citep{liu2021swin} proposed a multi-scale architecture in which self-attention is computed in local windows, and window-shifting allows for interaction of different regions. However, due to the limited receptive field of these local regions and small area of coverage in window 
+\begin{wrapfigure}{r}{0.5\textwidth}
+\caption{\small Visualization of the proposed Hierarchical Attention in the feature space. By performing local window attention and hierarchical attention we can achieve global information propagation at reduced costs.}\label{fig:hat}
+  \begin{center}
+\includegraphics[width=0.8\linewidth,]{Images/v1/ga_concept.pdf}
+  \end{center}
+\end{wrapfigure}shifting~\citep{liu2021swin,lin2017focal}, capturing cross-window interactions and modeling the long-range spatial dependencies become challenging for large-resolution input features. Furthermore, using self-attention blocks in early stages with larger resolution may impact the image throughput due to the increased number of local windows. Recently, the Swin Transformer V2 model~\citep{liu2022swin} was proposed to address training instabilities on high-resolution images by improving the self-attention mechanism. However, in addition to having a lower image throughput compared to the Swin Transformer~\citep{liu2021swin}, Swin Transformer V2 still relies on the original window-shifting mechanism for cross-interaction of different windows, which becomes less effective with large image sizes. 
+In this work, we attempt to address these issues and propose a novel hybrid architecture, denoted as FasterViT, which is tailored for high-resolution input images, while maintaining a fast image throughput. FasterViT consists of four different stages in which the input image resolution is reduced by using a strided convolutional layer, while doubling the number of feature maps. We propose to leverage residual convolutional blocks in the high-resolution stages of the architecture (\textit{i.e.}, stage 1,~2), while employing transformer-blocks in later stages (\textit{i.e.}, stage 3,~4). This strategy allows for fast generation of high-level tokens which can be further processed with the transformer-based blocks. For each transformer block, we use an interleaved pattern of local and, newly proposed, Hierarchical Attention blocks to capture both short and long-range spatial dependencies and efficiently model the cross-window interactions. Specifically, our proposed Hierarchical Attention (see Fig.~\ref{fig:hat}) learns carrier tokens as a summary of each local window and efficiently models the cross-interaction between these regions. The computational complexity of the Hierarchical Attention grows almost linearly with input image resolution, as the number of regions increases, due to the local windowed attention being the compute bottleneck. Hence, it is an efficient, yet effective way of capturing long-range information with large input features.
+
+We have extensively validated the effectiveness of the proposed FasterViT model on various image tasks and datasets such as ImageNet-1k for image classification, MS COCO for object detection and instance segmentation and ADE20K dataset for semantic segmentation. FasterViT achieves state-of-the-art performance considering the trade-off between performance (\textit{e.g.}, ImageNet-1K top-1 accuracy) and image throughput (see Fig.~\ref{fig:fig1}). To demonstrate the scalability of FasterViT for larger datasets, we have also pre-trained FasterViT on ImageNet-21K dataset and achieved state-of-the-art performance when fine-tuning and evaluating on larger-scale resolutions. 
+
+The summary of our contributions is as follows:
+\begin{itemize}[noitemsep,nosep]
+\item We introduce FasterViT, which is a novel hybrid vision transformer architecture designed for an optimal trade-off between performance and image throughput. FasterViT scales effectively to higher resolution input images for different dataset and model sizes.  
+
+\item We propose the Hierarchical Attention module which efficiently captures the cross-window interactions of local regions and models the long-range spatial dependencies.
+
+\item FasterViT achieves a new SOTA Pareto front in terms of image throughput and accuracy trade-off and is significantly faster than comparable ViT-based architectures yielding significant speed-up compared to recent SOTA models. It also achieves competitive performance on downstream tasks of detection and instance segmentation on MS COCO dataset and semantic segmentation on ADE20K dataset.   
+\end{itemize}
+
+
+\section{Related Work}
+
+\label{sec:related}
+
+\noindent
+\textbf{Vision Transformers.} 
+Oriented from the language processing domain, the first application of transformer architecture to vision task immediately offers an inspiring demonstration of the high efficacy of attention across image patches across varying scenarios~\citep{dosovitskiy2020image}. The appealing strength of vision transformer and its architecture and logic simplicity has therefore triggered a quickly evolving literature in the past two years, where ViT performance is quickly boosted by an erupting new set of innovations: network-wise leveraging knowledge distillation for data-efficient training as in DeiT~\citep{touvron2021training}, hybriding convolution and self-attention for enhanced inductive biases as in LeViT~\citep{graham2021levit}, imposing CNN-inspired pyramid rules on ViTs~\citep{wang2021pyramid, wang2022pvt}, along with component-wise improvements such as improved token utilization as in T2T-ViT~\citep{yuan2021tokens}, enhanced positional embedding~\citep{chu2021conditional}, local window attention as shown in the inspiring work of the Swin family~\citep{liu2021swin, liu2022swin} and CSwin~\citep{dong2022cswin}, global attention in GCViT~\citep{hatamizadeh2022global}, among many other architectural insights~\citep{chu2021twins, zhang2021multi,yuan2022volo}.
+Along with the increasing capacity comes the increasing computation burden. As similarly facing challenges in scaling up the models in language tasks (e.g., from BERT-Large 0.3B~\citep{devlin2019bert}, to Megatron-LM 8.3B~\citep{shoeybi2019megatron}, and Switch-Transformer1.6T~\citep{fedus2021switch}), scaling up vision transformers is also a highly challenging but highly important task~\citep{dai2021coatnet, liu2022swin} due to the attention-extensive nature of transformers, urging efficiency for pervasive usage.
+
+\noindent
+\textbf{Towards Enhanced Efficiency.} Boosting up ViT efficiency has therefore been a very vibrant area. One stream of approach roots in the efficient deep learning literature that cuts down on network complexity leveraging popular methods such as efficient attention~\citep{bolya2022hydra,lu2021soft, cai2022efficientvit}, network compression~\citep{chen2021autoformer,chen2021chasing,liang2022evit, yang2021nvit}, dynamic inference~\citep{yin2022avit,rao2021dynamicvit}, operator adaptation~\citep{molchanov2022lana}, token merging and manipulations~\citep{marin2021token,xu2022evo}, etc. These methods can yield off-the-shelf speedups on target ViT backbones, but are also limited to the original backbone's accuracy and capacity. 
+Another stream of work, on the other hand, focuses on designing new ViT architectures with enhanced efficiency as an original design objective. For example, 
+EfficientFormer~\citep{li2022efficientformer} entails mobile applications through dimension-consistent re-design of transformer block and removing redundant architectural components. 
+VisFormer~\citep{chen2021visformer} transits computation extensive transformer to a convolutional counterpart for enhanced vision efficiency.
+CrossViT~\citep{chen2021crossvit} learns multi-scale features and utilizes small/large-patch backed tokens that are channeled by efficient attention, offering linear time and memory complexity.
+Even with such a rapid progress in literature, enabling efficient ViTs remains a significant challenge, where we next further push the Pareto front of faster ViT on top of prior art by a large margin. Note that we focus on the second stream of architectural redesign for efficiency boost, and consider a joint exploration with the first acceleration stream of method like compression as orthogonal and fruitful future work.
+
+\noindent
+\textbf{Global Self-Attention.} A number of efforts have introduced global self-attention to capture more contextual information. In NLP (\textit{i.e., 1D}), BigBird~\citep{zaheer2020big} and LongFormer~\citep{beltagy2020longformer} proposed to select special tokens (\textit{i.e. non-learnable}) as global tokens to attend to other tokens via a sliding-window dense self-attention. In computer vision, EdgeViT~\citep{edgevit}, Twins~\citep{chu2021twins} and Focal Transformer~\citep{yang2021focal} proposed
+hierarchical-like attention mechanisms which rely on heuristic token aggregation in the forms of pooling~\citep{yang2021focal}
+or linear projection~\citep{edgevit,chu2021twins}. There are three key differences between these efforts and our proposed hierarchical attention: (1) as opposed to using a pre-defined mechanism to select the global tokens (\textit{e.g., random}), we propose to learn these tokens (\textit{i.e., carrier token}) via summarizing the role of each region in the input feature space (2) we propose learnable token aggregation and propagation mechanisms by computing self-attention among carrier tokens (3) as opposed to using dense/dilated self-attention, our proposed HAT uses local window-based self-attention and has a smaller computational complexity.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.99\linewidth]{Images/fastervit_arch_horizontal.pdf}
+    \caption{Overview of the FasterViT architecture. We use a multi-scale architecture with CNN and transformer-based blocks in stages 1, 2 and 3, 4, respectively. Best viewed in color.
+    }
+    \label{fig:architecture}
+\end{figure*}
+
+
+\section{FasterViT}
+
+\label{sec:method}
+
+\subsection{Design Principals}
+\label{sec:design}
+
+We next detail our FasterViT architecture, offering Pareto accuracy-latency trade-off. We focus on highest throughput for computer vision tasks on mainstream off-the-shelf hardware such as GPUs that excel in parallel computing. Computation in this case involves a set of streaming multiprocessors (SMs) with CUDA and Tensor cores as computation units. It requires frequent data transfer for calculation and can be impacted by data movement bandwidth. As such, operations bounded by computation are math-limited, while those bounded by memory transfer are memory-limited. It requires a careful balance between the two to maximize throughput.
+
+In hierarchical vision models, spatial dimension of intermediate representation shrinks as inference proceeds. Initial network layers mostly have larger spatial dimensions and fewer channel (\textit{e.g.}, 112$\times$112$\times$64), making them memory-bound. This makes a better fit for compute-intensive operations, such as dense convolution instead of depth-wise/sparse counterparts that impose extra transfer cost. Also operations not representable in matrix manipulation forms, \textit{e.g.}, non-linearity, pooling, batch normalization, are also memory-bound and shall be minimized for usage. On the contrary, later layers tend to be math-limited with computationally expensive operations. For example, hierarchical CNNs have feature maps of size 14$\times$14 with high dimensional kernels. This leaves room for more expressive operations such as Layer Normalization, squeeze-and-excitation, or attention, with fairly small effect on throughput. Guided by these insights we design a novel architecture that will benefit all stages from accelerated computing hardware. 
+
+
+\subsection{Architecture}
+Our overall design is shown in Fig.~\ref{fig:architecture}. It exploits convolutional layers in the earlier stages that operate on higher resolution. The second half of the model relies on novel hierarchical attention layers to reason spatially across the entire feature maps. In this design, we optimize the architecture for compute and throughput. As a result, the first half of the network and downsampling blocks make use of dense convolutional kernels. We also avoid squeeze-and-excitation operators and minimize Layer Normalization for higher resolution stages (\textit{i.e.}, 1, 2), as these layers tend to be math-limited. Later stages (\textit{i.e.}, 3, 4) in the architecture tend to be math-limited as GPU hardware spends more time on compute compared to the memory transfer cost. As a result, applying multi-head attention will not be a bottleneck. 
+
+\subsection{FasterViT Components}
+\paragraph{Stem} An input image $\ \mathbf{x}\in \mathbb{R}^{H\times W\times 3}$ is converted into overlapping patches by two consecutive $3 \times 3$ convolutional layers, each with a stride of $2$, which project them into a $D$-dimensional embedding. The embedded tokens are further batch-normalized~\citep{ioffe2015batch} and use the ReLU activation function after each convolution.
+
+\paragraph{Downsampler Blocks} FasterViT follows the  hierarchical structure: the spatial resolution is reduced by 2 between stages by a downsampling block. We apply 2D layer normalization on spatial features, followed by a convolutional layer with a kernel of $3 \times 3$ and a stride of two. 
+
+\paragraph{Conv Blocks} Stage 1 and 2 consist of residual convolutional blocks, which are defined as
+\begin{align}
+\begin{split}
+\mathbf{\hat{x}} & = \text{GELU}(\text{BN}(\text{Conv}_{3\times3}(\mathbf{x}))), \\
+\mathbf{x} & = \text{BN}(\text{Conv}_{3\times3}(\mathbf{\hat{x}})) + \mathbf{x},
+\label{eq:fused_convmb}
+\end{split}
+\end{align}
+where $\text{BN}$ denotes batch normalization~\citep{ioffe2015batch}. Following the design principles, these convolutions are dense. 
+
+\paragraph{Hierarchical Attention} In this work, we propose a novel formulation of windowed attention, summarized in Fig~\ref{fig:hat} and detailed presentation in Fig~\ref{fig:hat_details}. We start with local windows introduced in Swin Transformer~\citep{liu2021swin}. Then, we introduce a notion of \textit{carrier tokens} (CTs) that play the summarizing role of the entire local window. The first attention block is applied on CTs to summarize and pass global information. Then, local window tokens and CTs are concatenated, such that every local window has access only to its own set of CTs. By performing self attention on concatenated tokens we facilitate local and global information exchange at reduced cost. By alternating sub-global (CTs) and local (windowed) self-attention we formulate a concept of \textit{hierarchical attention}. Conceptually, CTs can be further grouped into windows and have a higher order of carrier tokens.
+
+Assume we are given an input feature map  $\ \mathbf{x}\in \mathbb{R}^{H\times W\times d}$ in which $H$, $W$ and $d$ denote the height, width and number of feature maps, let us set $H=W$ for simplicity. We first partition the input feature map into $n\times n$ local windows with $n=\frac{H^2}{k^2}$, where $k$ is the window size, as:
+\begin{align}
+\begin{split}
+\mathbf{\hat{x}_{l}} & = \text{Split}_{k\times k}(\mathbf{x}). 
+\label{eq:split}
+\end{split}
+\end{align}
+
+The key idea of our approach is the formulation of \textit{carrier tokens} (CTs) that help to have an attention footprint much larger than a local window at low cost. At first, we initialize CTs by pooling to $L=2^c$ tokens per window:
+\begin{align}
+\begin{split}
+\mathbf{\hat{x}_{c}} & = \text{Conv}_{3\times3}(\mathbf{x}), \\
+\mathbf{\hat{x}_{ct}} & = \text{AvgPool}_{H^2 \rightarrow n^2L}(\mathbf{\hat{x}_{c}}), 
+\label{eq:carr}
+\end{split}
+\end{align}
+where $\text{Conv}_{3\times 3}$ represents efficient positional encoding inspired by~\citep{peg} and used in Twins~\citep{chu2021twins}. $\mathbf{\hat{x}_{ct}}$ and $\text{AvgPool}$ denote the carrier tokens and feature pooling operation, respectively; $c$ is set to 1, but can be changed to control latency. The current approach with conv+pooling gives flexibility with the image size. These pooled tokens represent a summary of their respective local windows, we set $L << k$. The procedure of CT initialization is performed only once for every resolution stage. Note that every local window $\mathbf{\hat{x}_{l}}$ has unique set of carrier tokens, $\mathbf{\hat{x}_{ct,l}}$, such that $\mathbf{\hat{x}_{ct}}=\{\mathbf{\hat{x}_{ct,l}}\}_{\mathbf{l}=0}^n$.
+
+\begin{figure*}[!t]
+    \centering
+    \includegraphics[width=1\linewidth]{Images/v1/ga_details3.pdf}
+    \caption{Proposed Hierarchical Attention block. Carrier tokens (CT) learn a summary of each local window and facilitate global information exchange between local windows. Local window tokens only have access to a dedicated subset of CT for efficient attention. CT undergo full self-attention to enable cross-window attention. ``Attention" stands for MHSA~\citep{vaswani2017attention}, MLP for multi-layer perceptron.
+     Best viewed in color.}
+    \label{fig:hat_details}
+\end{figure*}
+
+\input{Images/attention_comparison}
+
+In every HAT block, CTs undergo the attention procedure:
+\begin{align}
+\begin{split}
+\mathbf{\hat{x}_{ct}} & = \mathbf{\hat{x}_{ct}} + \gamma_1 \cdot \text{MHSA} (\text{LN} (\mathbf{\hat{x}_{ct}})), \\
+\mathbf{\hat{x}_{ct}} & = \mathbf{\hat{x}_{ct}} + \gamma_2 \cdot \text{MLP}_{d \rightarrow 4d \rightarrow d} (\text{LN} (\mathbf{\hat{x}_{ct}})),
+\label{eq:self_hat}
+\end{split}
+\end{align}
+where $\text{LN}$ represents layer normalization~\citep{layernorm}, $\text{MHSA}$ represents multi-head self attention~\citep{vaswani2017attention}, $\gamma$ is a learnable per-channel scale multiplier~\citep{touvron2021going}, $\text{MLP}_{d \rightarrow 4d \rightarrow d}$ is a 2-layer MLP with GeLU~\citep{hendrycks2016gaussian} activation function. %, and $4d$ internal representation.%\footnote{We observed lower performance with $< 4d$ channels.}. 
+
+Next, in order to model short-long-range spatial information, we compute the interaction between the local and carrier tokens,
+$\mathbf{\hat{x}_{l}}$ and $\mathbf{\hat{x}_{ct,l}}$, respectively. At first, local features and CTs are concatenated. Each local window only has access to its corresponding CTs: 
+\begin{align}
+\begin{split}
+\mathbf{\hat{x}_w} & = \text{Concat}(\mathbf{\hat{x}_{l}},\mathbf{\hat{x}_{ct,l}}).
+\label{eq:carr_int1}
+\end{split}
+\end{align}
+These tokens undergo another set of attention procedure:
+\begin{align}
+\begin{split}
+\mathbf{\hat{x}_{w}} & = \mathbf{\hat{x}_{w}} + \gamma_1 \cdot \text{MHSA} (\text{LN} (\mathbf{\hat{x}_{w}})), \\
+\mathbf{\hat{x}_{w}} & = \mathbf{\hat{x}_{w}} + \gamma_2 \cdot \text{MLP}_{d \rightarrow 4d \rightarrow d} (\text{LN} (\mathbf{\hat{x}_{w}})).
+\label{eq:self}
+\end{split}
+\end{align}
+
+Finally, tokens are further split back and used in the subsequent hierarchical attention layers:
+\begin{align}
+\begin{split}
+\mathbf{\hat{x}_{l}},\mathbf{\hat{x}_{ct,l}} & = \text{Split}(\mathbf{\hat{x}_{w}}), 
+\label{eq:carr_int2}
+\end{split}
+\end{align}
+
+Procedures described in Equations~\ref{eq:self_hat}-\ref{eq:carr_int2} are iteratively applied for a number of layers in the stage. To further facilitate long-shot-range interaction, we perform \textit{global information propagation}, similar to the one in~\citep{edgevit} in the end of the stage. Finally, the output of the stage is computed as:
+\begin{align}
+\begin{split}
+\mathbf{x} & = \text{Upsample}_{n^2L \rightarrow H^2} \mathbf{(\hat{x}_{ct,l})} + \text{Merge}_{n^2k^2\rightarrow H^2}(\mathbf{\hat{x}_{l}})
+\label{eq:carr_int3}
+\end{split}
+\end{align}
+ 
+
+MHSAs performed in Eq.~\ref{eq:self_hat} and~\ref{eq:self} are token position invariant, however, the location of features in the spatial dimension are clearly informative. To address this, we first add absolute positional bias directly to CTs and local window tokens. We are inspired by SwinV2~\citep{liu2022swin} and employ a 2-layer MLP to embed absolute 2D token location into feature dimension. 
+Then, to facilitate image-like locality inductive bias we enhance the attention with log space relative positional bias from SwinV2~\citep{liu2022swin} ($2$-layer MLP). It ensures that the relative position of tokens contribute to shared attention patterns. 
+This approach yields flexibility regarding image size, as the positional encoding is interpolated by the MLP, and hence a trained model can be applied to any input resolution.
+
+An attention map comparison between efficient global-local self attention is shown in Fig.~\ref{fig:attention_comparison}. The proposed hierarchical attention splits full attention into local and sub-global, both compressible to 2 dense attentions. Carrier tokens participate in both attentions and facilitate information exchange. 
+
+\paragraph{Complexity Analysis of HAT} 
+The key features of the efficiency of our approach are (i) separation of attentions and (ii) local windows only have access to their CTs. The complexity of the most conventional and popular full attention is $O(H^4d)$.
+Partitioning the feature size into windows of size $k$, and running the attention, simplifies the attention to  $O(k^2H^2d)$ as proposed in~\citep{liu2021swin}. It is well known that such windowed attention is more efficient but lacks global feature  interaction. Our approach takes this one step further and is based on carrier tokens that summarize and interact over the entire feature map, to remedy for missing global communication. Given $L$ total carrier tokens per window, local window complexity is $O((k^2+L)H^2d)$. Local (windowed) attention is followed by attention on carrier tokens with complexity $O((\frac{H^2}{k^2} L)^2d)$. The total cost of both attentions is $O(k^2H^2d + LH^2d + \frac{H^4}{k^4}L^2d)$. 
+
+An orthogonal approach for multilevel attention is to provide access to subsampled global information inside local attention. For example, Twins~\citep{chu2021twins} subsamples global feature map and uses it as key and value for local window attention. It has a complexity of $O(k^2H^2d + \frac{H^4}{k^2}d)$ (from the paper). Under the same size of the local window ($k$), and $H$, we can get the difference of $O(L+\frac{H^2L^2}{k^4})$ for HAT and $O(\frac{H^2}{k^2})$ for Twins. HAT gets more efficient with higher resolution, for example, for $H=32$, $k=8$, with $L=4$ we get $O(8)$ for HAT, whereas $O(16)$ for Twins. %, cutting down attention complexity by half.
+
+
+
+
+
+
+
+
+\input{Tables/results_imagenet.tex}
+
+\input{Tables/results_detection.tex}
+
+
+
+\section{Results}
+
+\label{sec:results}
+
+\subsection{Image Classification}
+In Table~\ref{tab:imagenet}, we demonstrate a quantitative comparison between the performance of FasterViT models and a variety of different hybrid, conv and Transformer-based networks on ImageNet-1K dataset. 
+Comparing to Conv-based architectures, we achieve higher accuracy under the same throughput, for example, we outperform ConvNeXt-T by 2.2\%. Considering the accuracy and throughput trade-off, FasterViT models are significantly faster than Transformer-based models such as the family of Swin\begin{wraptable}{r}{9.6cm}
+\begin{minipage}{1.0\linewidth}
+\small
+\centering
+\resizebox{1.\linewidth}{!}{
+\setlength{\tabcolsep}{2.5pt}
+  \begin{tabular}{lccccc}
+    \toprule
+Model &  Image Size& \#Param & FLOPs & Throughput& Top-1 \\
+      &  (Px) & (M) & (G) & (Img/Sec) & (\%) \\
+    \midrule
+   ViT-L/16$^\ddag$~\cite{liu2021swin}  & 384 & 307.0& 190.7& 149 & 85.2 \\
+    Swin-L$^\ddag$~\cite{liu2021swin}  & 224 & 197.0& \ \ 34.5& 787 & 86.3 \\
+    Swin-L$^\ddag$~\cite{liu2021swin}  & 384 & 197.0& 103.9& 206 & 87.3 \\
+    ConvNeXt-L$^\ddag$~\cite{liu2022convnet} & 224 & 198.0 & \ \ 34.4 & 508 & 86.6\\
+    ConvNeXt-L$^\ddag$~\cite{liu2022convnet} & 384 & 198.0 & 101.0 & 172 & 87.5\\
+    \rowcolor{Gray}
+    \textbf{FasterViT-4}$^\ddag$  & 224 & 424.6& \ \ 36.6 &\textbf{849} & \textbf{86.6}\\
+    \rowcolor{Gray}
+    \textbf{FasterViT-4}$^\ddag$  & 384 & 424.6& 119.2 &\textbf{281} & \textbf{87.5}\\
+    \bottomrule
+
+  \end{tabular} 
+  }
+    \caption{\textbf{ImageNet-21K} pretrained classification benchmarks on \textbf{ImageNet-1K} dataset~\citep{deng2009imagenet}. Image throughput is measured on A100 GPUs with batch size of 128. $^\ddag$ denotes models that are pre-trained on ImageNet-21K dataset.}
+    \label{tab:imgnet_21k}
+\end{minipage}
+\end{wraptable}
+Transformers~\citep{liu2021swin,liu2022swin}. Furthermore, 
+compared to hybrid models, such as the recent EfficientFormer~\citep{li2022efficientformer} and MaxViT~\citep{tu2022maxvit} models, FasterViT on average has a higher throughput while achieving a better ImageNet top-1 performance. To validate the scalability
+of the proposed model, we pre-trained FasterViT-4 on ImageNet-21K dataset and fine-tuned it on various image resolutions on ImageNet-1K dataset. As shown in Table~\ref{tab:imgnet_21k}, FasterViT-4 has a better accuracy-throughput trade-off compared to other counterparts. 
+
+\begin{wraptable}{r}{7.6cm}
+\begin{minipage}{1.0\linewidth}
+\small
+\centering
+\resizebox{1.\linewidth}{!}{
+\setlength{\tabcolsep}{2.5pt}
+  \begin{tabular}{lcccc}
+    \toprule
+    Model  & Throughput & FLOPs (G) & IoU(ss/ms) \\
+    \midrule	 
+    Swin-T~\cite{liu2021swin}  & 350 & 945 & 44.5/45.8\\
+    ConvNeXt-T~\cite{liu2022convnet}  & 363 & 939  & \quad-\  /46.7\\
+         \rowcolor{Gray}
+    \textbf{FasterViT-2}  & \textbf{377} & 974  & \textbf{47.2/48.4}\\
+    \midrule
+    Twins-SVT-B~\cite{chu2021twins}  & 204 &  - & 47.7/48.9\\
+    Swin-S~\cite{liu2021swin}  & 219 & 1038  & 47.6/49.5\\
+    ConvNeXt-S~\cite{liu2022convnet}  & 234 & 1027  &\quad-\  /49.6\\
+        \rowcolor{Gray}
+    \textbf{FasterViT-3}  & \textbf{254} & 1076  & \textbf{48.7/49.7}\\
+    \midrule
+    Twins-SVT-L~\cite{chu2021twins}  & 164 & -  & 48.8/50.2\\
+    Swin-B~\cite{liu2021swin}  & 172 & 1188  & 48.1/49.7\\
+    ConvNeXt-B~\cite{liu2022convnet}  & 189 & 1170  &\quad-\  /49.9\\
+    \rowcolor{Gray}
+    \textbf{FasterViT-4}  & \textbf{202} & 1290  & \textbf{49.1/50.3}\\
+    \bottomrule
+
+  \end{tabular}  
+  }
+\caption{Semantic segmentation on \textbf{ADE20K}~\citep{zhou2017scene} with UPerNet~\citep{xiao2018unified}.}
+    \label{tab:ade_segmentation}
+\end{minipage}
+\end{wraptable}
+
+\subsection{Dense Prediction Tasks}
+In Table~\ref{tab:cascademaskrcnn}, we present object detection and instance segmentation benchmarks on MS COCO dataset~\citep{lin2014microsoft} with Cascade Mask R-CNN~\citep{he2017mask} network. We observe that FasterViT models have better accuracy-throughput trade-off when compared to other counterparts. Specifically, FasterViT-4 outperforms ConvNeXt-B and Swin-B by +0.2 and +1.0 in terms of box AP and +0.3 and +1.0 in terms of mask AP, while being 15$\%$ and 30$\%$ faster in terms of throughput, respectively. We also conduct additional object detection experiments with FasterViT-4 ImageNet-21K pre-trained backbone and the state-of-the-art DINO~\citep{zhang2022dino} model and achieve a high detection accuracy of 58.7 box AP. In Table~\ref{tab:ade_segmentation}, we present the semantic segmentation benchmarks with UPerNet~\citep{xiao2018unified} network for experiments conducted on ADE20K dataset~\citep{zhou2017scene}. Similar to previous tasks, FasterViT models benefit from a better performance-throughput trade-off. 
+
+\begin{wraptable}{R}{7.8cm}
+\begin{minipage}{1.0\linewidth}
+\small
+\centering
+\resizebox{1.\linewidth}{!}{
+\setlength{\tabcolsep}{2.5pt}
+  \begin{tabular}{llccc}
+    \toprule
+      Model& Attention &  FLOPs (G)&Thr(Img/Sec)& Top-1 (\%) \\
+    \midrule
+    FasterViT-0 &Twins~\citep{chu2021twins}&3.0&6896&80.8 \\
+    FasterViT-0 &EdgeViT~\citep{edgevit}&3.2&5928&81.0 \\
+        \rowcolor{Gray}
+    FasterViT-0 &\textbf{HAT}&3.3&5802&\textbf{82.1} \\ \midrule
+    FasterViT-1 &Twins~\citep{chu2021twins}&4.7&4949&82.1 \\
+    FasterViT-1 &EdgeViT~\citep{edgevit}&4.8&4188&82.5 \\
+        \rowcolor{Gray}
+    FasterViT-1 &\textbf{HAT}&5.3&4344&\textbf{83.2} \\ \midrule
+    FasterViT-2 &Twins~\citep{chu2021twins}&8.0&3668&82.9 \\
+    FasterViT-2 &EdgeViT~\citep{edgevit}&8.5&3127&83.4 \\
+    \rowcolor{Gray}
+    FasterViT-2 &\textbf{HAT}&8.7&3161&\textbf{84.2} \\
+    \bottomrule
+    
+  \end{tabular} 
+  }
+    \caption{Ablation study on the effectiveness of HAT compared to EdgeViT~\citep{edgevit} and Twins~\citep{chu2021twins} self-attention mechanisms. All attention blocks are replaced with the indicated attention type. }
+    \label{tab:abl-comp-edge}
+\end{minipage}
+\end{wraptable}
+
+
+\section{Ablation}
+
+\paragraph{EdgeViT and Twins} As shown in Table~\ref{tab:abl-comp-edge}, we performed a \begin{wraptable}{r}{8.2cm}
+\begin{minipage}{1.0\linewidth}
+\small
+\centering
+\resizebox{1.\linewidth}{!}{
+\setlength{\tabcolsep}{2.5pt}
+    \begin{tabular}{l|cc|cccccc}
+              & \multicolumn{2}{c|}{Pretrain}  & \multicolumn{6}{c}{Finetune}  \\
+              & \multicolumn{2}{c|}{W8, I256}      & \multicolumn{2}{c}{W12, I384} & \multicolumn{2}{c}{W16, I512} & \multicolumn{2}{c}{W24, I768}\\
+             Model & acc & im/s &  acc & im/s & acc & im/s & acc & im/s\\
+              \toprule
+        SwinV2-T~\cite{liu2022swin} & 81.8 & 1674      & 83.2 & 573  & 83.8 & 168 & 84.2 & 72 \\     
+        SwinV2-S~\cite{liu2022swin} & 83.7 & \ \  633       &  84.8    &  338 &85.4 & 153 & - & -\\ 
+
+            \rowcolor{Gray}
+     \textbf{FasterViT-2} & \textbf{84.3} & \textbf{2500}      & \textbf{85.3} & \textbf{984}  &\textbf{85.5} & \textbf{489}  & \textbf{85.6} & \textbf{155} \\
+\midrule
+        SwinV2-B~\cite{liu2022swin} & 84.2 &\ \   499      &    85.1     &    251    & 85.6 & 115 & - & - \\
+    \rowcolor{Gray}
+          \textbf{FasterViT-4 256} & \textbf{85.3} &\ \  \textbf{653}          &   \textbf{86.0 }   &   \textbf{254}   & \textbf{86.1} & \textbf{133} & \textbf{86.0} & \textbf{44}\\
+
+     \bottomrule
+    
+    \end{tabular} 
+  }
+    \caption{Quantitative comparison between higher resolution fine-tuning of FasterViT and SwinV2. FasterViT is more accurate on average by 0.9\%, and faster by 2x.}
+    \label{tab:swin-v2-com}
+\end{minipage}
+\end{wraptable}
+comprehensive ablation study to validate the effectiveness of HAT by replacing all attention layers with attention mechanisms in EdgeViT~\citep{edgevit} and Twins~\citep{chu2021twins} in the 3rd and 4th stages. For all model variants, FasterViT models with HAT achieve a better accuracy, sometimes by a significant margin. Twins achieves a higher throughput due to its small kernel size (\textit{i.e. $k=2$}), however, this significantly limits its accuracy. The better performance of HAT is attributed to its learnable information aggregation/propagation via CTs, and direct access to dedicated CTs in windowed attention. 
+\paragraph{Carrier Token Size} We investigated the effect of carrier token size and window size on the accuracy and image throughput of the model.
+\begin{wraptable}{r}{7.6cm}
+\begin{minipage}{1.0\linewidth}
+\small
+\centering
+\resizebox{1.\linewidth}{!}{
+\setlength{\tabcolsep}{2.5pt}
+  \begin{tabular}{l|cc|ccc|cc}
+\hline
+ & \multicolumn{2}{c|}{ImageNet} & \multicolumn{3}{c|}{COCO} & \multicolumn{2}{c}{ADE20k} \\
+ & top-1 & Thr & AP$^\text{box}$ & AP$^\text{mask}$& Thr & mIoU & Thr \\
+\hline
+Swin-T & 81.3 &2758& 50.4 & 43.7& 161 & 44.5 & 350\\
+\rowcolor{Gray}
+\textbf{Swin-T + HAT}  & \textbf{81.7} &2721& \textbf{50.9} & \textbf{44.3}& 150 & \textbf{45.4}&338 \\
+
+\hline
+\end{tabular}
+  }
+\caption{Ablation study on the effectiveness of HAT as a plug-and-play module with Swin-T model for various CV tasks.Thr stands for throughput and is measure in image/sec.}
+    \label{tab:abl_study_cmt}
+\end{minipage}
+\end{wraptable} We observed that increasing the carrier token size can improve the performance at the cost of decreased throughput, sometimes by a significant margin. In addition, increasing the window size slightly improves the Top-1 accuracy while also decreasing the throughput. In fact, increasing the window size does not scale properly to higher resolution images due to its significant impact on efficiency. As a result, HAT is a more effective and efficient mechanism that can be employed to model long-range spatial dependencies without sacrificing the throughput. Please refer to supplementary materials for more details.    
+
+\paragraph{Plug-and-Play HAT} We employed HAT as a plug-and-play module with Swin-T model Table \ref{tab:abl_study_cmt}. This change results in +0.9 and +0.4$\%$ improvement in terms of mIoU and Top-1 accuracy on ImageNet classification and ADE20K segmentation tasks. In addition, improvements on MS COCO by +0.5 box AP and +0.6 mask AP on object detection and instance segmentation 
+tasks, respectively. In addition, we also provide throughput comparisons and show that HAT can be efficiently used with existing architectures with minimal overhead. Hence, it validates the effectiveness of HAT as a standalone self-attention. 
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+In this work, we have presented a novel hybrid model, denoted as FasterViT, which achieves SOTA Pareto-front in terms of ImageNet Top-1 accuracy and throughput. We have extensively validated the effectiveness of FasterViT in downstream dense prediction tasks such as object detection, instance segmentation and semantic segmentation. Our benchmarks demonstrate better accuracy-throughput trade-off in comparison to counterpart models such as ConvNeXt and Swin Transformer.
+
+
+
+\section{Acknowledgement}
+
+We thank Amanda Moran, Christopher Lamb, Sivakumar Thottakara, Sudeep Sabnis, Ranjitha Prasanna and other members of NVIDIA
+NGC team for providing highly-optimized GPU cloud infrastructures which were used for training and evaluation of FasterViT models.
+
+
+
+
+
+

@@ -1,0 +1,212 @@
+\title{Optimizing Attention}
+
+\begin{abstract}
+The attention mechanism is an important part of transformer architectures. It en-
+ables the network to compare samples within a sequence. Before the comparison
+is performed, tokens are multiplied by trainable matrices. These matrices can
+constitute a significant part of the total number of parameters. Their size creates
+problems on systems with limited cache in the compute unit, especially if there
+is limited bandwidth between compute unit and memory. In particular, GPUs on
+mobile devices suffer from this double bottleneck.
+Prior works mitigate this problem for instance by storing low-rank approxima-
+tions, quantization or minimizing the amount of data that needs to be transferred.
+In this paper, an alternative to the traditional attention mechanism is proposed
+which does not require any trainable matrices to perform the attention. The idea
+rests upon solving optimization problems, whereby memory is substituted for
+compute. It will be shown however, that the computational demand can be re-
+duced such that auto-differentiation becomes possible. An experimental evalua-
+tion shows that the proposed algorithm performs favorable compared with several
+baselines.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Transformers Vaswani et al. (2017) have been widely used in various applications, such as natural language processing Devlin et al. (2019) or image recognition Dosovitskiy et al. (2021). More recently, very large transformer models have been successfully applied to auto-regressive language modeling, for instance GPT OpenAI et al. (2023), Llama Touvron et al. (2023), and Gemini Bao et al. (2023). These powerful transformers require a vast amount of memory to run due to their large model sizes. While the parameters can be loaded layer by layer during inference, it still poses a significant challenge when running them on mobile devices, which typically have very limited cache in the neural processing unit – often, a few megabytes only. In addition, the attention operation incurs quadratic complexity w.r.t. number of input tokens, both in terms of memory usage and computation.  
+
+Recently, researchers have proposed various techniques to reduce the computation and/or memory costs of attention. Efficient attention methods such as Letourneau et al. (2024) only require linear computation and memory costs while maintaining model accuracy. Other works optimize the implementation of attention. For instance, FlashAttention Dao et al. (2022) uses tiling to decompose the softmax computation and other techniques to reduce the number of memory accesses. However, in these approaches, large matrices mapping the input to query, key, and value tensors prior to attention are still necessary. The severely limited cache at the compute units necessitates that only tiny pieces of these matrices can be kept in cache at the same time, thus token data and matrix pieces need to be retrieved from memory multiple times for each attention operation. This increases the amount of data that needs to be transferred between slow main memory and fast cache via limited bandwidth, which incurs high latency especially on resource-constrained devices.  
+
+In this work, we propose a novel, optimization-based approach to perform both self- and crossattention, in order to eliminate both the heavy weight matrices and the computationally expensive soft-(arg)max operation during the attention computation. Instead of remixing the values based on the similarity/attention matrix between queries and keys, we directly solve for the mixing coefficients for the value tensor. Specifically, we impose that the remixed values need to be similar to the queries. We additionally impose a sparsity constraint, which leads to a sparse reconstruction problem.  
+
+To reduce the high cost for iteratively solving these problems during any forward pass and to reduce the memory demand to allow for backward passes, we propose to use several approximations to increase efficiency, thereby enabling auto-differentiation with the proposed algorithm. To mitigate the errors induced by the proposed techniques, we also propose to include random tokens in our algorithm, similar to the idea proposed by Darcet et al. (2024), yet we offer a geometric intuition regarding the effect these tokens have in the proposed algorithm. A scalar activation and a lightweight normalization further promote sparsity and reduce overfitting.   
+A well-known property of the standard attention is that the attention coefficients, namely the soft(arg)max normalized scalar products between queries and keys, are very sparse, and thus focus on a few key/value tokens. For images, it has been shown, e.g., by Dosovitskiy et al. (2021), that high attention weights are concentrated on a few spots in the image from which the keys stem. Our proposed approach achieves similar effects, but achieves this via sparse signal reconstruction. This offers a new interpretation of the mechanism behind attention, as well as a new way to compute attention by solving the sparse signal reconstruction problem. In other words, the proposed algorithm optimizes over the given data to determine where to focus attention, ie where to place high attention scores.   
+An experimental evaluation shows that the proposed algorithm compares favorable with suitable baselines. We provide qualitative example of semantically meaningful attention maps.   
+This paper is structured as follows: In Sec. 2, we briefly summarize related works. We give a detailed explanation of the standard attention mechanism in Sec. 3 and present our solution in Sec. 4. The experimental evaluation follows in Sec. 5. The paper concludes with a discussion in Sec. 6. 2 RELATED WORK   
+Reducing Model Sizes Jacob et al. (2018) proposed to reduce model sizes by quantization. It is a technique to reduce the memory requirements by converting the weights from some higher-precision representation, such as 32-bit floating point numbers, to some lower precision, often integers. This process not only reduces the model sizes but may also increase the efficiency if the compute unit can process integer data faster.   
+Model sizes can also be reduced by so-called low-rank approximation (Guo et al., 2023) that is to approximate matrices by low-rank approximations. Only the rank-reduced variants are being stored. As with quantization, LoRA-approximation can also increase the time data needs to travel through the network. Other techniques to reduce model sizes are pruning (Sun et al., 2024) or distillation (Oquab et al., 2023).   
+Computational Complexity of Attention Choromanski et al. (2020) used random orthogonal features to estimate the a low-rank approximation of the attention matrix. Child et al. (2019) proposed to use attention masks with pre-defined sparsity patterns to reduce the computational demand of attention. Locality-sensitive hashing is used by Kitaev et al. (2019) in the attention, so that only those key tokens that are closest to each query are being used.   
+A transformer with linear complexity for computing self-attention was proposed by Wang et al. (2020), albeit only for fixed sequence-lengths. Katharopoulos et al. (2020) proposed an attention mechanism with linear complexity for variable sequence lengths. You et al. (2023) improved this idea by using an approximation to angular similarities as activation.   
+State-Space-Models (Poli et al., 2023), (Gu & Dao, 2023), (Patro & Agneeswaran, 2024) model the interaction between tokens by first-order differential equations or approximations thereof. For images, Hou et al. (2024) use a convolutional architecture that employs self-attention. To reduce the computational complexity of this operation, the authors propose to approximate the attention matrix by 2D-convolutions. Letourneau et al. (2024) generalize this idea by approximating the selfattention with polynomials. They show that their algorithm generalizes several others, for instance Conv2Former (Hou et al., 2024) or (Gu & Dao, 2023).   
+FlashAttention by (Dao et al., 2022) was proposed to minimize the number of accesses to the main memory of the GPU since the bandwidth between the compute units to the memory is limited. Follow-up works Dao (2024); Shah et al. (2024) further optimize the idea. Since evaluating the  
+
+soft-(arg)argmax operator is compute-expensive, Koohpayegani & Pirsiavash (2024) proposed a transformer variant that replaces this operation.  
+
+
+
+\section{3 STANDARD ATTENTION MECHANISM  }
+
+
+Attention performs exhaustive pairwise comparisons between the set of query tokens, $\pmb q_{1},\dots,\pmb q_{N_{q}}$ , with the set of key tokens, $k_{1},\dots,k_{N_{k}}$ . The resulting similarity matrix, i.e., attention matrix, is used to linearly combine a set of value tokens, $\pmb{v}_{1},\dots,\pmb{v}_{N_{k}}$ .  
+
+In self-attention, the elements, ${\pmb q}_{i},\,{\pmb k}_{j},\,{\pmb v}_{j}$ , are created by multiplying the input by the weight matrices, $W_{q}$ , $W_{k}$ , and $W_{v}$ , which correspond to the queries, keys, and values, respectively. The weight matrices have sizes $D\times D_{q,k,v}$ . Here, the three numbers $D_{q,k,v}$ indicate the dimensions of the three token sequences ${\pmb q}_{i},{\pmb k}_{j}$ , and $\pmb{v}_{j}$ .  
+
+In cross-attention, two different input sequences are used. The queries $\pmb q_{i}$ are created from one sequence by multiplication with $W_{q}$ , whereas the keys $k_{j}$ and values $\pmb{v}_{j}$ are created from another sequence by multiplications with $\bar{W_{k}}$ and $W_{v}$ , respectively. Some models such as the one proposed by Carion et al. (2020) even use three different input sequences.  
+
+For multi-head attention, the vectors $q_{i},\,k_{j}$ and $\pmb{v}_{j}$ are split into parts of equal size, for instance, $\pmb q_{i}=\left[\pmb q_{i1}^{T}\quad\pmb q_{i2}^{T}\quad\cdot\cdot\cdot\quad\pmb q_{N_{H}}^{T}\right]$ , where $N_{H}$ indicates the number of heads. The dimensions of ${\pmb q}_{i},{\pmb k}_{j}$ and $\pmb{v}_{j}$ , $D_{q}$ and $D_{v}$ must be integer-divisible by $N_{H}$ .  
+
+Stacking the tokens into matrices $Q^{T}\;=\;[q_{1}\quad\cdots].$ , $K^{T}\;=\;\left[k_{1}\quad\cdots\right]$ and $V^{T}\,=\,\left[{\pmb v}_{1}\,\mathrm{~\boldmath~\beta~}\,\cdot\,\cdot\,\cdot\right]$ , the attention mechanism proposed by Vaswani et al. (2017) is defined by  
+
+$$
+\hat{Q}=\mathrm{soft-argmax}\left(\eta\,Q K^{T}\right)V,
+$$  
+
+where $\eta=D^{-1/2}$ . The linear combinations of the rows of $V$ yields the rows $\hat{\pmb q}^{T}$ of matrix $\hat{Q}^{T}$ .  
+
+
+
+\section{4 PROPOSED APPROACH: OPTIMIZING ATTENTION  }
+
+
+The original transformer Vaswani et al. (2017) can be formulated as a message-passing algorithm, as shown by Velicˇkovic´ et al. (2018); Yun et al. (2019). We draw on this formulation and use a simplified intuition in the following: At each attention, the nodes in the value set $\{v_{j}\}$ send update messages $\pmb{v}_{j}$ to the nodes of the query set $\{q_{i}\}$ . The incoming messages into each node of the query set are weighted by the normalized scalar products soft-argmax $(\eta\pmb{q}_{i}^{T}\pmb{K}^{T})$ . These messages are sum-aggregated before the nodes in the query set are updated by an MLP. Normalization by soft-argmax maintains the original numerical ranges for the sum-aggregated update messages.  
+
+First, we formulate attention as a reconstruction problem, where we solve for the linear transformation that linearly combines the values so as to approximate the queries  
+
+$$
+\operatorname*{min}_{\mathbf{x}_{i}}\|\mathbf{q}_{i}^{T}-\mathbf{x}_{i}^{T}\cdot V\|
+$$  
+
+for a suitable norm, where $\pmb{x}_{i}$ is an $N_{v}$ -dimensional variable to be optimized. The scalars $\pmb{x}_{i}$ control the linear combination and subsume the role of the attention coefficients soft-argmax $\bigl(\eta\mathop{Q K}^{T}\bigr)$ in Eq. equation 1.  
+
+In the case of cross-attention, the query and value tensors are the two inputs, respectively, without being transformed by the $W_{q}$ and $W_{v}$ weight matrices. By solving the optimization, we project the values to the subspace of the queries if the $l_{2}$ -norm is being used; this resembles what the original cross-attention does. In self-attention, both query and value tensors are from the same input, so we require the ith element of $\pmb{x}_{i}$ to be zero to avoid a trivial solution. In this way, the optimization reveals the correlation structure between every input element and the rest via this reconstruction.  
+
+Next, we impose the requirement that only few nodes in the value set should be allowed to send messages to a particular node $q_{i}$ , which helps mitigate overfitting. Using an $l_{1}$ regularization, we arrive at the sparse reconstruction problem  
+
+$$
+\operatorname*{min}_{\pmb{x}_{i}}\left\|\pmb{q}_{i}^{T}-\pmb{x}_{i}^{T}\cdot\pmb{V}\right\|_{2}^{2}+\lambda\left\|\pmb{x}_{i}\right\|_{1},
+$$  
+
+where the scalar $\lambda$ controls the sparsity. We can solve Eq. equation 3 by means of the alternating direction method of multipliers (ADMM). Defining auxiliary variables $z,\,\pmb{\mu}$ and a scalar $\rho$ , the ADMM can be optimized by iterating the following steps  
+
+$$
+\begin{array}{r l}&{\pmb{x}^{(k+1)}=\left(V V^{T}+\rho I\right)^{-1}\left(V\pmb{q}_{i}+\rho\left(\pmb{x}^{(k)}-\pmb{z}^{(k)}\right)\right)}\\ &{\pmb{z}^{(k+1)}=\tau_{\lambda/\rho}\left(\pmb{x}^{(k)}-\pmb{\mu}^{(k)}\right)}\\ &{\pmb{\mu}^{(k+1)}=\pmb{\mu}^{(k)}+\pmb{x}^{(k+1)}-\pmb{z}^{(k+1)}}\end{array}
+$$  
+
+where $\tau_{a}(\cdot)$ in Eq. equation 4b denotes the proximal operator, the superscript $(k)$ the iteration number and $\boldsymbol{\mathit{I}}$ the identity matrix. Since the token $\pmb q_{i}$ is contained in one of the rows of $V$ in case of self-attention, we zero-out the corresponding entry of $\pmb{x}_{i}$ at each iteration. While the original convergence guarantee is not longer applicable, we notice that clamping the entries of $\pmb{x}_{i}$ prevents divergence.  
+
+Efficient Updates. Na¨ıvely inverting $V V^{T}+\rho I$ in Eq. equation 4a is computationally expensive, since it is quadratic in the number of tokens in the value set and can be very large. Yet, we notice that $V$ is extremely narrow; in fact, we usually have $N_{v}\gg D_{v}/N_{H}$ . This implies that the eigenvalue decomposition $V^{T}V\,=\,X D X^{T}$ can be efficiently computed. Since the non-zero eigenvalues of $V V^{T}$ equal those of $V^{T}V$ , we only need the left singular vectors $Y\,\approx\,V X D^{-1/2}$ of $V\,=$ $\mathbf{\Delta}_{Y S X}{^T1}^{\mathbf{\Delta}}$ since they equal the eigenvectors of $V V^{T}$ corresponding to the non-zero eigenvalues. Thereby, we can efficiently compute the updates  
+
+$$
+\pmb{x}^{(k+1)}=\pmb{Y}\pmb{S}^{-1}\left(\pmb{Y}^{T}\left(\pmb{V}\pmb{q}_{i}+\rho\left(\pmb{x}^{(k)}-\pmb{z}^{(k)}\right)\right)\right)
+$$  
+
+without ever having to allocate memory for the large inverse. We augment matrix $\boldsymbol{S}$ by adding $\rho$ to the diagonal of $S\stackrel{=}{=}D^{1/2}$ . To avoid exploding gradients during backpropagation, we add $r\cdot I$ to the diagonal of $V^{T}V$ where the entries of $\pmb{r}$ are drawn from a uniform distribution $\mathcal{U}(0,\sigma)$ with $\sigma$ being small.  
+
+We notice that after some training, the matrix of values tokens $V$ degenerates, i.e., many of the eigenvalues of $V^{T}V$ become very small whereby the minimal eigenvalue gap shrinks. This necessitates more iterations, thus slowing down forward and backward passes through the network and increasing memory demand. This problem does not appear in the original formulation of the ADMM due to the term $+\rho I$ in Eq equation 4a which has the same effect as a Tikhonov-regularizer, i.e., it prevents rank-deficiency. Furthermore, the ADMM might not reach a reasonable solution if the query $\pmb q_{i}$ is far from the range space span $(V^{T}V)$ .  
+
+Random Token as Regularization. Instead of reverting to the slow and memory-intensive formulation in Eq. equation 4a, we propose to create a set of tokens whose entries are drawn from a normal distribution with mean zero and unit covariance. These random tokens are then appended to $V$ . This has two consequences. First, it increases the eigenvalues of $V^{T}V$ thereby acting similarly as a Tikhonov-regularizer. Secondly, it endows the left singular vectors $\mathbf{\deltaY}$ with components which span parts of the nullspace of span $\bar{(V^{T}V)}$ , hence the distance between between query and range space reduces. In other words, the ADMM can better regress components of $\pmb q_{i}$ in the kernel space of the non-augmented value matrix. We noticed that this reduces overfitting. The idea of using additional tokens is similar to the idea proposed by Darcet et al. (2024) except that the tokens used here are not trainable. Furthermore, they serve a specific purpose interpretable in terms of linear algebra.  
+
+Lastly, to further increase sparsity but avoid the computationally expensive soft-argmax operator, we map the estimated $\pmb{x}_{i}$ by  
+
+$$
+\pmb{x}_{i}^{\prime}=\nu(\alpha(\pmb{x}_{i})),
+$$  
+
+where $\alpha(\cdot)$ be the function that raises each entry of $\pmb{x}_{i}$ to its fifth power, and $\nu$ be a normalization function that, for instance, divides by the sum of the absolute values of $\pmb{x}_{i}$ . We observed that this reduces overfitting.  
+
+![](images/0e984df9b348a6b5d6332cbd96ba3cce241ed95cd1babb0783abebe6805120e3.jpg)  
+
+Table 1: Comparison between the three baseline models baseline enc SA without weights, baseline dec SA without weights and baseline dec CA without weights with the proposed algorithm (bottom three rows). The bottom row must be compared with baseline dec CA without weights, the second row from the bottom needs to be compared with baseline dec CA without weights, and the third row with baseline enc SA without weights. It can be seen that the proposed algorithm achieves superior results.  
+
+
+
+\section{5 EXPERIMENTS  }
+
+
+We evaluate the impact of the proposed optimization-based attention by comparing with transformer models that use both self- and cross-attention. The ADMM parameters are set to $\lambda=0.1$ , $\rho=10$ and the number of iterations is taken to be 5 for all experiments.  
+
+We compare with the model (DETR) proposed by Carion et al. (2020) which comprises six transformer layers with self-attention, followed by another six layers with both self- and cross-attention. Specifically, we compare against several baselines that omit weight matrices in their attention mechanism, since our proposed approach also does not require weight matrices. We follow the procedure in (Carion et al., 2020) and perform experiments on the COCO 2017 detection dataset (Lin et al., 2014). As backbone, we use a ResNet50. We perform all experiments using 4 GPUs and a batch size of 8. We use the original learning rate, weight decay and learning rate scheduling.  
+
+
+
+\section{5.1 COMPARISON WITH BASELINES  }
+
+
+Table 1 shows results of the proposed method with several baselines. On the top are the results provided in the original DETR paper. The row below shows results of baselines which we trained for 300 epochs on 4 GPUs. The following 3 rows correspond to standard DETR versions that do not use weight projections in the self-attention of the encoder (baseline enc SA wo weights), the self-attention of the decoder (baseline dec SA wo weights) and the cross-attention of the decoder (baseline dec CA wo weights). The proposed attention model was evaluated with replacing the selfattention of the encoder (prop encoder SA), the self-attention of the decoder (prop decoder SA) and the cross-attention of the decoder (prop decoder SA). As such, we compare the first, second, and third variants of our proposed models with the first, second, and third baselines, respectively.  
+
+We see that our proposed approach performs similarly or better when comparing to the corresponding baselines. This shows that it is indeed possible to replace the standard attention mechanism with our proposed optimization-based approach while maintaining model performance. At the same time, our proposed approach does not require softmax and is by design parallelizable. When comparing with the original $D E T R$ , our models have lower detection scores since they use significantly less parameters (no weight matrices); for each attention layer in the encoder and decoder, we require $25\%$ fewer parameters if one attention mechanism per layer is replaced or even $33\%$ if both are replaced in the decoder.  
+
+
+
+\section{5.2 ABLATIONS  }
+
+
+In the ablation, we first analyze how the different cross-attention variants perform. We study the evolution from a plain $l_{2}$ -regularized model ( $l_{2}$ -optim) in the first row of table 2 to the different variants of the efficient ADMM: the plain efficient ADMM indicated by (a) in the first column of table 2, the efficient ADMM endowed with 100 random tokens (b), with 500 random tokens and dropout augmentation (c), with 500 random tokens, dropout and sparsity inducing activation (SIA) in equation 6 (d), and like (d) but with soft path-dropout on the residual path (e). Here, we multiply the residual path around the attention with a random number $\tau\sim\mathcal{U}(0,1)$ with probability $p=0.5$ .  
+
+![](images/d7ea3c438e0a365f7f701c6e751fc53ccded6aba13bb528169c649fa14a8a7c5.jpg)  
+Table 2: Ablation study: Comparison between different version of the algorithm when the cross-attention (CA) of the decoder is replaced. The second column $(\Delta)$ indicates the average difference between test and training loss over the past 5 epochs. (a) the proposed efficient ADMM; (b) with 100 random tokens; (c) with 500 random tokens and dropout; (d) 500 random tokens, dropout and SIA; (e) 1000 random tokens, dropout and SIA; (f) like d with soft path dropout; (g) like d with hard path dropout.  
+
+![](images/8d86d8cc4499d70e9b0190593a8dc1b4870d7f809a4377f71b1823eaa4dabd15.jpg)  
+
+Table 3: Ablation study: Comparison between different version of the algorithm when the self-attention (SA) of the decoder is replaced. The second column $(\Delta)$ indicates the average difference between test and training loss over the past 5 epochs. (a) the proposed efficient ADMM; (b) with 500 random tokens, dropout and SIA.  
+
+Finally, the last row (f) is like (d) but with hard path-dropout. Versions (a), (b), (c) and (g) were trained for 300 epochs, the other were terminated earlier at around 250 epochs.  
+
+These improvements are motivated by our observation that the network easily overfits. The gap between training and test losses $(\Delta)$ , averaged over the last 5 epochs, is given in the second column of table 2. It can be seen that all the precision metrics improve while the gap decreases from $>$ 3 to about 1.7. Most important improvements were the introduction of random tokens, sparsity inducing activation as well as a soft dropout on the residual path around the attention mechanism. We generally observe that convergence speed decrease for the more constrained variants, so using more epochs might be reasonable.  
+
+Similarly, we compare several variants for self-attention in the decoder in table 3. The first row corresponds to a vanilla ADMM while the second and third rows correspond to the plain efficient ADMM and the efficient ADMM with 500 random tokens and sparsity inducing activation, all without path dropout. Here, the precision metrics improve less over the computationally more expensive vanilla ADMM, probably due to the smaller gap between training and test losses already present in the vanilla ADMM case.  
+
+
+
+\section{5.3 QUALITATIVE RESULTS  }
+
+
+Encoder, Self-Attention We first show qualitative examples of the proposed algorithm used to replace the self-attention in the encoder. Figure 1 shows two examples with marked query points (left ear on top, below left eye) on the left and the corresponding attention heads on the right. Since the employed algorithm permits negative mixing coefficients, color differences indicate concentrated attention. Interestingly, with taking the left ear as query point, the attention focuses on the outlines of that ear in several heads while other heads remain inactive. Similarly for the left eye as query point; several heads focus on the eyes and even the nose, while several heads do nothing. There are more examples in the supplementary.  
+
+Decoder, Cross-Attention We further provide qualitative examples of the results of the proposed algorithm when the cross-attention in the decoder is replaced. The image from the validation set of MSCOCO shows three teddy bears which are indeed classified. Conversely, the corresponding baseline algorithm does not succeed. We select the head with the strongest classification score and show the attention maps of each head of the last layer in Fig. 2. It can be seen that the attention is focused on few parts of the image.  
+
+![](images/c79d40626ba244941a2103416567cccff7f92c7aa0b5ae58dafa22729bd3527c.jpg)  
+324 325 326 327 328 329 330 331 332 333 334 335 336 337 338 339 340 341 342 343 344 345 346 347 348 349 350 351 352 353 354 355 356 357 358 359 360 361 362 363 364 365 366 367 368 369 370 371 372 373 374 375 376 377   
+Figure 1: Two different examples of semantically meaningful attention focusing to particular queries at the last layer of encoder. The two images on the left indicate the two query points (left ear on top, left eye below). The two $2\times8$ sets of images on the right side show the images with the attention maps overlayed. Each each corresponds to one particular head. Please see the text for more explanation. It can be seen that some heads remain inactive while others focus on reasonable parts of the image. The image is from the validation set of MSCOCO.  
+
+The attention maps to the token with the second highest score are shown in Fig. 3. It can be seen that attention scores with large magnitude of several heads probe the outline of the shape. Lastly, we show the eight attention maps of the token with third highest classification score in Fig. 4. It can be seen that the attention is focused on the shape in the middle which is reasonable since the other two tokens are already focused on the outer two shapes.  
+
+For a different image, the attention maps of the token with the highest classification score are shown in Fig. 6. On the left is the original image, the maps corresponding to the eight heads are on the right. All heads concentrate on the pot plant.  
+
+Further examples are shown in the supplementary.  
+
+6 DISCUSSION  
+
+This work addresses the attention mechanism in transformers. It allows the network to compare tokens with each other. Standard transformers require that tokens are multiplied by weight matrices before and after the comparison. In particular on mobile devices, these weights can be so large that they do not fit into the cache memory of the compute units. This requires that subsets of tokens are multiplied with pieces of the matrices which in turn causes the same data to be transferred multiple  
+
+![](images/c19fe113a19dc9d6f42b767d2fa314dd90c4c6c99ca4ad7467b9a5df87c7fd2e.jpg)  
+strongest score. The classification is correct. The image is from the validation set of MSCOCO.   
+times between memory and cache. In particular if there is limited bandwidth, this operation can slow down the entire network.  
+
+While other works compress the data or propose how to minimize data transfers between the memories, we propose to eliminate the matrices from the attention algorithms. We show that attention can be performed by solving optimization problems, thus the optimal attention coefficients are determined in a data-driven way. To increase the speed of those operations and allow for autodifferentiation, we propose several techniques to reduce the required memory. The experimental evaluation shows that our algorithms compare favorably with the baselines and that the attention maps can be semantically reasonably. We hope that this work provides a novel perspective on the mechanism of attention.  
+
+![](images/e16320fe5c96ead4271bec440df0bd421c93046d3cfc620abd42d7ded143aef5.jpg)  
+Figure 4: Attention maps of the token with third strongest (correct) classification score (cf. Figs. 2 and 3). It can be seen that the attention is focused on the shape in the middle. The image is from the validation set of MSCOCO.  
+
+![](images/346d19c7fc9f4c004b44ee7080cdf7f03bfe3f44ad53266506bd078d0cbad799.jpg)  
+Figure 6: Decoder cross-attention: Shown is where the token with the highest classification score attends to. Left: original image. Right: eight attention heads. The token correctly classifies a pot plant. The image is from the validation set of MSCOCO.  
+
+7 REPRODUCIBILITY   
+We integrated our algorithm in the excellent repository provided by the authors of DETR (Carion   
+et al., 2020). After reshaping the token tensors into the heads, Eq. 4 needs to be iterated. Afterwards,   
+the attention scores need to be multiplied with the mask tensor to account for padded images. Lastly,   
+the scores are multiplied with the value tensor. For our efficient variants, Eq. 5 can be used. If   
+random tokens are to be used, they need to be appended to the value tensor.   
+8 ETHICS STATEMENT   
+This research was undertaken with having best practices for scientific research in mind. No exper  
+iments with human were performed during this project. We used standard, publicly available data   
+to allow for comparison with others in the field. We made sure not include any image of persons   
+into this paper so as not to violate any privacy. We adhere to strict protocols for data collection and   
+storage. The paper was third-party inspected for possible violations of these policies. We complied   
+with all relevant legal and ethical standards throughout the research process.   
+We recognize that unforeseen biases can result from the limited MSCOCO dataset, or even inten  
+tional misuses. We thus understand this research project only as inspiration to others in the field.   
+Before deploying the developed algorithm to real-world applications, strict tests with much more   
+data have to be undertaken to ensure that unintentional biases are not present and misuses may not   
+occur.   
+
+

@@ -1,0 +1,450 @@
+\title{CFG++: Manifold-constrained Classifier Free Guidance for Diffusion Models}
+
+\begin{abstract}
+Classifier-free guidance (CFG) is a fundamental tool in modern diffusion models for text-guided generation. Although effective, CFG has notable drawbacks. For instance, DDIM with CFG lacks invertibility, complicating image editing; furthermore, high guidance scales, essential for high-quality outputs, frequently result in issues like mode collapse. Contrary to the widespread belief that these are inherent limitations of diffusion models,
+this paper reveals that the problems actually stem from the off-manifold phenomenon associated with CFG, rather than the diffusion models themselves.
+ More specifically, inspired by the recent advancements of diffusion model-based inverse problem solvers (DIS),  we reformulate text-guidance as an inverse problem with a text-conditioned score matching loss and
+develop CFG++, a novel approach that tackles the off-manifold challenges inherent in traditional CFG. CFG++ features a surprisingly simple fix to CFG, yet it offers significant improvements, including 
+better sample quality for text-to-image generation, invertibility, smaller guidance scales,  reduced mode collapse, etc. Furthermore, CFG++ enables seamless interpolation between unconditional and conditional sampling at lower guidance scales, consistently outperforming traditional CFG at all scales. 
+Moreover, CFG++ can be easily integrated into the high-order diffusion solvers  and naturally extends to distilled diffusion models.
+Experimental results confirm that our method significantly enhances performance in 
+text-to-image generation, DDIM inversion, editing, and solving inverse problems, suggesting a wide-ranging impact and potential applications in various fields that utilize text guidance. Project Page: \url{https://cfgpp-diffusion.io/}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+Classifier-free guidance (CFG)~\citep{ho2021classifierfree} forms the key basis of modern text-guided generation with diffusion models~\citep{dhariwal2021diffusion,rombach2022high}. Nowadays, it is common practice to train a diffusion model with large-scale paired text-image data~\citep{schuhmann2022laion}, so that sampling (i.e. generating) a signal (e.g. image, video) from a diffusion model can either be done unconditionally from $p_\theta(\x|\varnothing) \equiv p_\theta(\x)$, or conditionally from $p_\theta(\x|\cb)$, where $\cb$ is the text conditioning. Once trained, it seems natural that one would acquire samples from the conditional distribution by simply solving the probability-flow ODE or SDE sampling~\citep{song2020score,song2020denoising,karras2022elucidating} with the conditional score function. In practice, however, it is observed that  the conditioning signal is insufficient when used naively. To emphasize the guidance, one  uses the guidance scale $\omega > 1$, where the direction can be defined by the direction from the unconditional score to the conditional score~\citep{ho2021classifierfree}. 
+
+In modern text-to-image (T2I) diffusion models, the guidance scale $\omega$ is  typically set within the range of $[5.0, 30]$,
+referred to as the {\em moderately} high range of CFG guidance
+~\citep{chen2024pixartalpha,podell2023sdxl}. 
+The insufficiency in guidance also holds for classifier guidance~\citep{dhariwal2021diffusion,song2020score} so that a  scale of 10 was used.
+While using a high guidance scale yields higher-quality images with better alignment to the condition, it is also prone to mode collapse, reduces sample diversity, and yields an inevitable accumulation of errors during the sampling process. One example is DDIM inversion~\citep{dhariwal2021diffusion}, a pivotal technique for controllable synthesis and editing~\citep{mokady2023null}, where running the inversion process with $\omega > 1.0$ leads to significant compromise in the reconstruction performance~\citep{mokady2023null,wallace2023edict}.
+Another extreme example would be score distillation sampling (SDS)~\citep{poole2022dreamfusion}, where the guidance scale in the order of a few hundred is chosen. Using such a high guidance scale leads to better asset quality to some extent, but induces blurry and saturated results. Several research efforts have been made to mitigate this downside by exploring methods where using a smaller guidance scale suffices~\citep{wang2024prolificdreamer,liang2023luciddreamer}. Although recent progress in SDS-type methods has reduced the necessary guidance scale to a range that is similar to those of ancestral samplers, using a moderately large $\omega$ is considered an inevitable choice.
+
+In this work, we aim to give an answer to this conundrum by revisiting the geometric view of diffusion models. In particular, inspired by the recent advances in diffusion-based inverse problem solvers (DIS)~\citep{kadkhodaie2021stochastic,chung2023diffusion,song2023pseudoinverseguided,kim2024dreamsampler,chung2024decomposed},
+we reformulate the text guidance as an inverse problem with a text-conditioned score-matching loss and derive a reverse diffusion sampling strategy by utilizing decomposed diffusion sampling (DDS) \citep{chung2024decomposed}.
+This results in a surprisingly simple fix of CFG to the sampling process without any computational overhead. The resulting process, which we call CFG++, works with a small guidance scale, typically $\lambda \in [0.0, 1.0]$, that smoothly {\em interpolates} between unconditional and conditional sampling, with $\lambda = 1.0$ having a similar effect as using CFG sampling with $\omega \sim 12.5$ at 50 neural function evaluation (NFE). 
+Furthermore, DDIM inversion with CFG++ is invertible up to the discretization error, simplifying image editing.
+Comparing CFG++ against CFG shows that we achieve consistently better sample quality for text-to-image (T2I) generation, significantly better DDIM inversion capabilities that lead to enhanced reconstruction and editing, and enabling the incorporation of CFG guidance to diffusion inverse solvers (DIS)~\citep{chung2023diffusion}. While the applications of CFG++ that we show in this work are limited, we believe that our work will have a broad impact that can be applied to all applications that leverage text guidance through the traditional CFG.
+\begin{figure}[t]
+\begin{minipage}{.49\textwidth}
+    \setstretch{1.05}
+    \begin{algorithm}[H]
+    \small
+           \caption{Reverse Diffusion with CFG}
+           \label{alg:cfg}
+            \begin{algorithmic}[1]
+             \Require $\x_T \sim \Nc(0, \rmI_d), 0 \leq \textcolor{cfg}{\omega} \in \mathbb{R}$
+             \For{$i=T$ {\bfseries to} $1$}
+                 \State{$\epscfgnc(\x_t) = \epsnullnc(\x_t) + \textcolor{cfg}{\omega} [\epscond(\x_t) - \epsnullnc(\x_t)]$}
+                 \State{$\tweediecfgnc(\x_t) \gets (\x_t - \sqrt{1-\bar\alpha_t}\epscfgnc(\x_t))/\sqrt{\bar\alpha_t}$}
+                 \State{$\x_{t-1} = \sqrt{\bar\alpha_{t-1}} \tweediecfgnc(\x_t) + \sqrt{1-\bar\alpha_{t-1}}\epscfg(\x_t)$}
+              \EndFor
+              \State {\bfseries return} $\x_0$
+            \end{algorithmic}
+    \end{algorithm}
+\end{minipage}
+\begin{minipage}{.49\textwidth}
+    \begin{algorithm}[H]
+           \small
+           \caption{Reverse Diffusion with CFG++}
+           \label{alg:cfg++}
+            \begin{algorithmic}[1]
+             \Require $\x_T \sim \Nc(0, \rmI_d), \textcolor{cfgpp}{\lambda} \in [0, 1]$
+             \For{$i=T$ {\bfseries to} $1$}
+                 \State{$\epscfgppnc(\x_t) = \epsnullnc(\x_t) + \textcolor{cfgpp}{\lambda} [\epscond(\x_t) - \epsnullnc(\x_t)]$}
+                 \State{$\tweediecfgppnc(\x_t) \gets (\x_t - \sqrt{1-\bar\alpha_t}\epscfgppnc(\x_t))/\sqrt{\bar\alpha_t}$}
+                 \State{$\x_{t-1} = \sqrt{\bar\alpha_{t-1}} \tweediecfgppnc(\x_t) + \sqrt{1-\bar\alpha_{t-1}}\epsnull(\x_t)$}
+            \EndFor
+            \State {\bfseries return} $\x_0$
+            \end{algorithmic}
+    \end{algorithm}
+\end{minipage}
+    \caption{Comparison between reverse diffusion process by CFG and CFG++. CFG++ proposes a simple but surprisingly effective fix: using $\epsnull(\x_t)$ instead of $\epscfg(\x_t)$ in updating $\x_{t-1}$. }
+\end{figure}
+
+
+
+\section{Background}
+
+\label{sec:background}
+
+\noindent\textbf{Diffusion models.}
+\label{subsec:diffusion}
+Diffusion models~\citep{ho2020denoising,song2020score,karras2022elucidating} are generative models designed to learn the reversal of a forward noising process. This process starts with an initial distribution $p_0(\x)$ where $\x \in \Rd^n$, and progresses towards the standard Gaussian distribution $p_T(\x) \approx \mathcal{N}(\bm{0}, \Ib)$, utilizing forward Gaussian perturbation kernels. Sampling from the data distribution can be performed by solving either the reverse stochastic differential equation (SDE) or the equivalent probability-flow ordinary differential equation (PF-ODE)~\citep{song2020score}. 
+For example, under the choice $p(\x_t|\x_0) = \mathcal{N}(\x_0, \sigma_t^2\Ib)$, the generative PF-ODE reads
+\begin{align}
+\label{eq:pfode}
+    d\x_t = -\sigma_t\nabla_{\x_t} \log p(\x_t)\,dt = \frac{\x_t - \mathbb{E}[\x_0|\x_t]}{\sigma_t}\,dt
+    ,\,\, \quad
+    \x_T \sim p_T(\x_T),
+\end{align}
+where 
+Tweedie's formula~\citep{efron2011tweedie} $\Ed[\x_0|\x_t] = \x_t + \sigma_t^2\nabla_{\x_t} \log p(\x_t)$ is applied to achieve the second equality. When aiming for a text-conditional diffusion model that can condition on arbitrary $\cb$, one can extend epsilon matching to a conditional one where the condition is dropped with a certain probability~\citep{ho2021classifierfree} so that null conditioning with $\cb = \varnothing$ is possible. The neural network architecture of $\epsilonb_\theta$ is designed so that the condition $\cb$ can {\em modulate} the output through cross attention~\citep{rombach2022high}.
+For simplicity in notation throughout the paper, we define
+$\epscond := \epsilonb_\theta(\x_t, \cb)$ and $\epsnull := \epsilonb_\theta(\x_t, \varnothing)$ by dropping $\theta$ and $\x_t$.
+
+Extending the result of Tweedie's formula to the unconditional case under the variance preserving (VP) framework of DDPMs~\citep{ho2020denoising}, we have
+\begin{align}
+\label{eq:tweedie}
+    \Ed[\x_0|\x_t, \varnothing] = \hat\x_\varnothing(\x_t) := (\x_t - \sqrt{1 - \bar\alpha_t} \epsnull(\x_t)) / \sqrt{\bar\alpha_t}.
+\end{align}
+Leveraging \eqref{eq:tweedie}, it is common to use DDIM sampling~\citep{song2020score} to solve the conditional probability-flow ODE (PF-ODE) of the generative process. Specifically, a single iteration reads
+\begin{align}
+\label{eq:ddim_tweedie}
+    \tweedienull &= (\x_t - \sqrt{1-\bar\alpha_t} \epsnull)/\sqrt{\bar\alpha_t} \\
+    \x_{t-1} &= \sqrt{\bar\alpha_{t-1}}\tweedienull + \sqrt{1-\bar\alpha_{t-1}} \epsnull,
+\label{eq:ddim_update}
+\end{align}
+where  $\tweedienull:=  \hat\x_\varnothing(\x_t) =  \Ed[\x_0|\x_t, \varnothing]$ is the denoised signal by Tweedie's formula, and
+\eqref{eq:ddim_update} corresponds to the {\em renoising} step.
+ This is repeated for $t = T, T-1, \dots, 1$.
+
+For modern diffusion models, it is common to train a diffusion model in the latent space~\citep{rombach2022high} with
+the latent variable $\z$. While most of our experiments are performed with latent diffusion models (LDM), as our framework holds both for pixel- and latent-diffusion models, we will simply use the notation $\x$ regardless of the choice.
+\noindent\textbf{Classifier free guidance.}
+\label{subsec:cfg}
+For a conditional diffusion,
+\cite{ho2021classifierfree} considered the sharpened posterior distribution $p^\omega(\x|\cb) \propto p(\x)p(\cb|\x)^\omega$. Using Bayes rule for some timestep $t$,
+\begin{align}
+\label{eq:bayes_sharpen}
+    \nabla_\x \log p^\omega(\x_t|\cb) = \nabla_{\x_t} \log p(\x_t) + \omega (\nabla_{\x_t} \log p(\x_t|\cb) - \nabla_{\x_t} \log p(\x_t))
+\end{align}
+Parametrizing the score function with $\epsilonb_\theta$, as in DDPM~\citep{ho2020denoising}, we have
+\begin{align}
+    \epscfg(\x_t) := \epsnull(\x_t) + \omega [\epscond(\x_t) - \epsnull(\x_t)]
+\label{eq:cfg}
+\end{align}
+where we introduce a compact notation $\epscfg$ that guides the sampling from the sharpened posterior. When sampling with CFG guidance with DDIM sampling, one replaces $\epsnull$ with $\epscfg$ for both the Tweedie estimate~\eqref{eq:ddim_tweedie} and the subsequent update step~\eqref{eq:ddim_update},  leading to Algorithm~\ref{alg:cfg}.
+
+\noindent\textbf{Diffusion model-based inverse problem solvers.}
+\label{sec:dds}
+Diffusion model-based inverse problem solvers (DIS) aims to perform posterior sampling from an unconditional diffusion model~\citep{kadkhodaie2021stochastic,chung2023diffusion,song2023pseudoinverseguided,kim2024dreamsampler}.
+Specifically, for a given loss function $\ell(\x)$ which often stems from the likelihood, the goal of DIS is to address the optimization problem $\min_{\xb\in \Mc} \ell(\xb)$, where $\Mc$ represents the clean data manifold sampled from the unconditional distribution $p_0(\x)$. It is essential to navigate in a way that minimizes cost while also identifying the correct clean manifold.
+
+\cite{chung2023diffusion} proposed diffusion posterior sampling (DPS), where the updated estimate from the noisy sample $\x_t \in \Mc_t$ is constrained to stay on the same noisy manifold $\Mc_t$. This is achieved by computing the manifold constrained gradient (MCG)~\citep{chung2022improving} on a noisy sample $\x_t\in \Mc_t$ as
+$\nabla^{mcg}_{\x_t}\ell(\x_t) := \nabla_{\x_t}\ell (\hat \x_t)$,
+where $\hat \x_t$ is the denoised sample in \eqref{eq:tweedie} through Tweedie's formula~\citep{efron2011tweedie}.
+The resulting algorithm with DDIM~\citep{song2020score} can be stated as follows:
+\begin{equation}
+\begin{aligned}
+\label{eq:cvp_ddim}
+    \x_{t-1} &= \sqrt{\bar\alpha_{t-1}}\left(\tweedienull -  \gamma_t \nabla_{\x_t}\ell (\tweedienull)\right)+ \sqrt{1-\bar\alpha_{t-1}} \epsnull,
+\end{aligned}
+\end{equation}
+where $\gamma_t>0$ denotes the step size. Under the linear manifold assumption \citep{chung2022improving,chung2023diffusion}, this allows precise transition to $\Mc_{t-1}$. To mitigate the computational complexity and the instability of neural network backprop, \cite{chung2024decomposed} shows that \eqref{eq:cvp_ddim} can be equivalently represented as
+\begin{equation}
+\begin{aligned}
+\label{eq:dds_ddim}
+    \x_{t-1} &\simeq \sqrt{\bar\alpha_{t-1}}\left(\tweedienull -  \gamma_t \nabla_{\tweedienull}\ell (\tweedienull)\right)+ \sqrt{1-\bar\alpha_{t-1}} \epsnull
+\end{aligned}
+\end{equation}
+under further assumptions on $\Mc$. This method, often referred to 
+as the decomposed diffusion sampling (DDS), bypasses the computation of the score Jacobian, similar to~\citet{poole2022dreamfusion}, making it stable and suitable for large-scale medical imaging inverse problems \citep{chung2024decomposed}. In the following, we leverage the insight from DDS to propose an algorithm to improve upon the CFG algorithm.
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=0.8\linewidth]{figs/manifold_v2.jpg}
+    \caption{Off-manifold phenomenon of CFG arise from: (a) the typical CFG scale $\omega > 1.0$  which leads to extrapolation and deviation from the piecewise linear data manifold, and (b) CFG's renoising process, which introduces a nonzero offset $\Delta^\omega$ from the correct manifold. CFG++ effectively mitigates all these artifacts.
+    }
+    \label{fig:manifold}
+\end{figure}
+
+
+
+\section{CFG++ : Manifold-Constrained CFG}
+
+\label{sec:main}
+
+\subsection{Derivation of CFG++}
+Instead of uncritically adopting the sharpened posterior distribution 
+$p^\omega(\x|\cb) \propto p(\x)p(\cb|\x)^\omega$ as introduced by \cite{ho2021classifierfree}, we adopt a fundamentally different strategy by reformulating text-guidance as an optimization problem. Specifically, our focus is on identifying a loss function 
+$\ell(\x)$ in \eqref{eq:dds_ddim} such that, when minimized under the condition set by the text, enables the reverse diffusion process to generate samples that increasingly satisfy the text condition progressively.
+
+One of the most significant contributions of this paper is to reveal that the text-conditioned score matching loss or alternatively, score distillation sampling (SDS) loss~\citep{poole2022dreamfusion} is ideally suited for our purpose. Specifically, we are interested in solving the following inverse problem through diffusion models:
+\begin{align}
+\label{eq:cfgplus}
+    \min_{\xb\in \Mc}\ell_{sds}(x), \quad   \ell_{sds}(\x):= \|\epsilonb_\theta(\sqrt{\bar\alpha_{t}}\x + \sqrt{1-\bar\alpha_{t}} \epsilonb, \cb) - \epsilonb\|_2^2
+\end{align}
+This implies that our goal is to identify solutions on the clean manifold 
+$\Mc$ that optimally aligns with the text condition $\cb$. 
+
+To avoid the Jacobian computation, in this paper, we attempt to solve \eqref{eq:cfgplus} through DDS in \eqref{eq:dds_ddim}.
+The resulting sampling process from reverse diffusion is then given by
+\begin{eqnarray}
+    \x_{t-1} &=& \sqrt{\bar\alpha_{t-1}}\left(\tweedienull -  \gamma_t \nabla_{\tweedienull}\ell_{sds} (\tweedienull)\right)+ \sqrt{1-\bar\alpha_{t-1}} \epsnull.
+\end{eqnarray}
+By using $\x_t = \sqrt{\bar\alpha_t}\x + \sqrt{1-\bar\alpha_t}\epsilonb$ from the clean image $\x \in \Mc$, we can equivalently write the loss as
+$\ell_{sds}(\x) = \frac{\bar\alpha_t}{1-\bar\alpha_t}\| \x - \tweediecond \|^2$, which leads to
+\begin{eqnarray}
+\label{eq:cfgp1}
+    \x_{t-1}     = \sqrt{\bar\alpha_{t-1}}\left(\tweedienull + \lambda (\tweediecond-\tweedienull)\right)+ \sqrt{1-\bar\alpha_{t-1}} \epsnull
+\end{eqnarray}
+where  $\lambda := \frac{2{\bar\alpha_t}}{{1-\bar\alpha_t}}\gamma_t$.
+Using the CFG notation $\epscfgppnc(\x_t) := \epsnullnc(\x_t) + {\lambda} [\epscond(\x_t) - \epsnullnc(\x_t)]$ and $\tweedienull + \lambda (\tweediecond-\tweedienull) =  (\x_t - \sqrt{1-\bar\alpha_t}\epscfgppnc(\x_t))/\sqrt{\bar\alpha_t}$, \eqref{eq:cfgp1} can be equivalently represented as
+\begin{align}\label{eq:cfgp2tweedie}
+\tweediecfgppnc(\x_t)&= (\x_t - \sqrt{1-\bar\alpha_t}\epscfgppnc(\x_t))/\sqrt{\bar\alpha_t}\\
+    \x_{t-1}     &= \sqrt{\bar\alpha_{t-1}}\tweediecfgppnc(\x_t)+ \sqrt{1-\bar\alpha_{t-1}} \epsnull(\x_t) 
+    \label{eq:cfgp2ddim}
+\end{align}
+which is summarized in Algorithm~\ref{alg:cfg++}.
+By examining Algorithm~\ref{alg:cfg} and Algorithm~\ref{alg:cfg++}, we observe that CFG and CFG++ are mostly the same, with a crucial difference in the renoising process. This surprisingly simple fix of utilizing the unconditional noise $\epsnull(\x_t)$ instead of $\epscfg(\x_t)$ leads to a smoother trajectory of generation, (Fig.~\ref{fig:main} bottom) and generation with superior quality (Fig.~\ref{fig:main} top).
+
+Although we focus our construction of the solver on DDIM for simplicity, note that DDIM is just one way of reverse sampling. For most widely used solvers up to the second order, a single-step update of solving the unconditional PF-ODE can be represented as
+\begin{align}
+\label{eq:general_sampling_iteration_null}
+    \x_i = {\tweedienull(\x_{i-1})} + a_i \tweedienull(\x_{i-1}) + b_i \tweedienull(\x_{i-2}) + c_i\x_{i-1} + d_i\epsilonb,\,\epsilonb \sim \Nc(0, \Ib),
+\end{align}
+with $d_i \neq 0$ when one uses an ancestral sampler. Note that the first right-hand side term in \eqref{eq:general_sampling_iteration_null} corresponds to the denosing, whereas the rest terms describes the higher-order
+ corrected version of the {\em renoising} process.
+As the goal of CFG++ is to optimize the denoising process under the text-guidance while keeping the renoising components equivalent to unconditional sampling, applying CFG++ to the general iteration in \eqref{eq:general_sampling_iteration_null} simply leads to
+\begin{align}
+\label{eq:general_sampling_iteration_cfgpp}
+    \x_i = \tweediecfgpp(\x_{i-1}) + a_i \tweedienull(\x_{i-1}) + b_i \tweedienull(\x_{i-2}) + c_i\x_{i-1} + d_i\epsilonb,\,\epsilonb \sim \Nc(0, \Ib).
+\end{align}
+Moreover, CFG++ naturally extends to distilled diffusion models, such as SDXL-turbo~\citep{sauer2023adversarial} and SDXL-lightning~\citep{lin2024sdxl}, where akin to \eqref{eq:general_sampling_iteration_cfgpp}, we use the conditional denoised estimate, but for the rest of the noise components in the Euler solver, we use the unconditional estimate.
+\subsection{Geometry of CFG++}
+\label{subsec: geometry}
+
+\noindent\textbf{Mitigating off-manifold phenomenon.}
+In Fig.~\ref{fig:main} (bottom), 
+we illustrate the evolution of the posterior mean through Tweedie's formula during the reverse diffusion process. Notably, in the early phases of reverse diffusion sampling under CFG, there is a sudden shift in the image and intense color saturation.
+Conversely, CFG++ is free from the undesirable off-manifold phenomenon. In the following, we investigate why this is the case.
+
+Note that the denoised estimate of CFG and CFG++ at time $t$ can be equivalently represented as
+\begin{align}
+\tweediecfgpp(\x_t)=(1-\lambda) \tweedienull(\x_t) + \lambda \tweediecond(\x_t), \quad
+\tweediecfg(\x_t)=(1-\omega) \tweedienull(\x_t) + \omega \tweediecond(\x_t). 
+\end{align}
+$\lambda,\omega \in [0, 1]$ facilitates an {\em interpolation}. However, with $\omega > 1.0$, CFG {\em \textcolor{cfg}{extrapolates}} beyond the unconditional and conditional estimates. 
+Consequently, under the assumption that the clean manifold be piecewise linear~\citep{chung2024decomposed}, the conditional posterior mean estimates from CFG obtained with a guidance scale outside the range of 
+$[0, 1]$, can easily extend beyond the piecewise linear manifold. This may lead to the estimates potentially ``falling off'' the data manifold, as depicted by an \textcolor{cfg}{orange} arrow pointing downwards in Fig.~\ref{fig:manifold}(a). 
+Thus,  we select $\lambda \in [0, 1]$ as the guidance scale for CFG++ to ensure it remains an {\em \textcolor{cfgpp}{interpolation}} between the unconditional and conditional estimate, thus preventing it from `falling off' the clean data manifold.
+An additional source of the off-manifold phenomenon in CFG occurs during the transition from the clean manifold $\Mc$ to the subsequent noisy manifold $\Mc_{t-1}$, due to a similar off-manifold phenomenon from the large guidance scale (i.e. extrapolation), illustrated in Fig.~\ref{fig:manifold} (b).
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=0.75\linewidth]{figs/align_plot3.jpg}
+    \caption{Text-conditioned score matching loss throughout the reverse diffusion sampling for both CFG and CFG++  in SDXL. Avg. loss computed with 55 prompts from~\citep{chen2024pixartalpha}.}
+    \label{fig:align_plot}
+\end{figure}
+
+\noindent\textbf{Text-Image alignment.}
+In Fig.~\ref{fig:main} (top), and Fig.~\ref{fig:t2i_sdxl}, we observe enhanced text-to-image alignment achieved with CFG++. This enhanced alignment capability is a natural consequence of CFG++, which directly minimizes the text-conditioned score-matching loss as shown in \eqref{eq:cfgplus}. In contrast, CFG indirectly seeks text alignment through the sharpened posterior distribution   
+$p^\omega(\x|\cb) \propto p(\x)p(\cb|\x)^\omega$. Therefore, CFG++ inherently outperforms CFG in terms of text alignment due to its fundamental design principle. 
+For example, Fig.~\ref{fig:align_plot} displays the normalized text-conditioned score matching loss, represented as $(1-\bar\alpha_t)\|\epsilonb -\epsilonb_\theta(\x_t, \cb) \|^2/\bar\alpha_t = \| \x - \tweediecond \|^2$, throughout the reverse diffusion sampling process for both CFG and CFG++. The loss plot associated with CFG shows fluctuations and maintains a noticeable gap compared to CFG++ even after the completion of the reverse diffusion process.  In fact, the fluctuation associated
+with CFG is also related to the off-manifold issue, and from Fig.~\ref{fig:align_plot}  we can easily see that
+the off-manifold phenomenon is more dominant at early stage of reverse diffusion sampling.
+Conversely, the loss trajectory for CFG++ demonstrates a much smoother variation, particularly during the early stages of reverse diffusion.
+\noindent\textbf{DDIM inversion.}
+As discussed in \citep{song2020denoising}, the denoising process for unconditional DDIM is approximately invertible, meaning that 
+$\x_t$
+  can generally be recovered from 
+$\x_{t-1}$
+Specifically, from \eqref{eq:ddim_tweedie} and \eqref{eq:ddim_update}, we have the following approximate
+inversion formula for unconditional DDIM:
+\begin{align}
+    \tweedienull(\x_t) &= ({\x_{t-1} - \sqrt{1-\bar\alpha_{t-1}} \epsnull(\x_t)})/{\sqrt{\bar\alpha_{t-1}}} % \notag \\
+    \simeq
+    ({\x_{t-1} - \sqrt{1-\bar\alpha_{t-1}} \epsnull(\x_{t-1})})/{\sqrt{\bar\alpha_{t-1}}} \label{eq:ddim_tweedi_u} \\
+    \x_{t} & = \sqrt{\bar\alpha_{t}}\tweedienull(\x_t) + \sqrt{1-\bar\alpha_{t}} \epsnull(\x_t)% \notag \\
+     \simeq
+    \sqrt{\bar\alpha_{t}}\tweedienull(\x_t) + \sqrt{1-\bar\alpha_{t}} \epsnull(\x_{t-1})
+    \label{eq:ddim_update_u}
+\end{align}
+where the approximation arises from $ \epsnull(\x_{t}) \simeq \epsnull(\x_{t-1})$.
+A similar inversion procedure has been employed for conditional DDIM inversion under CFG By assuming $\epscfg(\x_t) \simeq \epscfg(\x_{t-1})$, and replacing $\epsnull$ by $\epscfg$ as detailed in
+Algorithm~\ref{alg:inversion_cfg}.
+
+On the other hand, by examining \eqref{eq:cfgp2tweedie} and \eqref{eq:cfgp2ddim},
+we can  obtain the following approximate DDIM inversion formula under CFG++:
+\begin{align}
+\label{eq:ddim_tweedie_ipp0}
+   \tweediecfgppnc(\x_t)     &\simeq
+    ({\x_{t-1} - \sqrt{1-\bar\alpha_{t-1}} \epsnull(\x_{t-1})})/{\sqrt{\bar\alpha_{t-1}}}  \\
+    \x_{t} & \simeq
+    \sqrt{\bar\alpha_{t}} \tweediecfgppnc(\x_t) + \sqrt{1-\bar\alpha_{t}} \epscfgppnc(\x_{t-1})
+\label{eq:ddim_update_ipp}
+\end{align}
+where we apply the approximation $  \epscfgppnc(\x_{t})\simeq \epscfgppnc(\x_{t-1})$ alongside the
+usual assumption $\epsnull(\x_{t}) \simeq \epsnull(\x_{t-1})$.
+This formulation underpins the CFG++ guided DDIM inversion algorithm, presented in Algorithm~\ref{alg:inversion_cfg++}.
+
+In practice, for small time step size the error $\epsnull(\x_{t}) \simeq \epsnull(\x_{t-1})$ is relatively small, so the unconditional DDIM inversion by \eqref{eq:ddim_tweedi_u} and \eqref{eq:ddim_update_u}   lead to relatively insignificant errors.
+Unfortunately, the corresponding inversion from conditional diffusion under CFG is quite distorted as noted in \citep{mokady2023null,wallace2023edict}.
+In fact, this distortion is originated from the inaccuracy of the approximation
+$\epscfg(\x_t) \simeq \epscfg(\x_{t-1})$. More specifically, 
+even when $\epsnull(\x_{t}) \simeq \epsnull(\x_{t-1})$,
+the approximation error from the CFG is given by
+\begin{align}
+    \boldsymbol{ \varepsilon}_{cfg} &:= \epscfg(\x_{t})-\epscfg(\x_{t-1}) = (\epsnull(\x_{t}) - \epsnull(\x_{t-1})) 
+    + \omega \big(\delta\epscond(\x_t) -  \delta\epscond(\x_{t-1})  \big) \notag\\
+    &\simeq \omega \big(\delta\epscond(\x_t) -  \delta\epscond(\x_{t-1})  \big),
+\end{align}
+where $\delta\epscond(\x_t) := \epscond(\x_t) - \epsnull(\x_t)$ denotes the directional component from 
+unconditional to the conditional diffusion.
+Since the directional component by the text guidance  is not negligible, 
+this error becomes significant for high guidance scale $\omega$.
+Accordingly, the guidance scale must
+be heavily downweighted in order for inversions on real world images to be stable, thus limiting the strength of edits.
+To mitigate this issue, the authors in  \citep{mokady2023null,wallace2023edict} developed
+null text optimization and coupled transform techniques, respectively.
+
+On the other hand,  under the usual DDIM assumption $ \epsnull(\x_{t}) \simeq \epsnull(\x_{t-1})$, the approximation error of CFG++ mainly arises from \eqref{eq:ddim_update_ipp}, which is smaller than that of CFG since we have
+\begin{align}
+\|\boldsymbol{ \varepsilon}_{cfg++} \|= \lambda \|\delta\epscond(\x_{t}) - \delta\epscond(\x_{t-1})\| < \|\boldsymbol{ \varepsilon}_{cfg} \|
+\end{align}
+thanks to $\lambda<\omega$. 
+Therefore, CFG++  significantly improves the DDIM inversion as shown Fig.~\ref{fig:main} (middle) for representative results and Sec.~\ref{subsec: inversion} for further discussions.
+\begin{table}[t]
+\centering
+\resizebox{1.0\textwidth}{!}{% <------ Don't forget this %
+\begin{tabular}{lcccccccccc}
+\toprule
+{} & \multicolumn{2}{c}{$\omega = 2.0, \lambda=0.2$} & \multicolumn{2}{c}{$\omega = 5.0, \lambda=0.4$} & \multicolumn{2}{c}{$\omega = 7.5, \lambda=0.6$} &
+\multicolumn{2}{c}{$\omega = 9.0, \lambda=0.8$} & \multicolumn{2}{c}{$\omega = 12.5, \lambda=1.0$}\\
+\cmidrule(lr){2-3}
+\cmidrule(lr){4-5}
+\cmidrule(lr){6-7}
+\cmidrule(lr){8-9}
+\cmidrule(lr){10-11}
+{\textbf{Method}} & {FID $\downarrow$} & {CLIP $\uparrow$} & {FID $\downarrow$} & {CLIP $\downarrow$} & {FID $\downarrow$} & {CLIP $\uparrow$} & {FID $\downarrow$} & {CLIP $\uparrow$} & {FID $\downarrow$} & {CLIP $\uparrow$}\\
+\midrule
+\thead{CFG~\citep{ho2021classifierfree}} & 13.84 & 0.298 & 15.08 & 0.310 & 17.71 & 0.312 & 20.01 & 0.312 & 21.23 & 0.313 \\
+\thead{CFG++ \textcolor{pinegreen}{(ours)}} & \textbf{12.75} & \textbf{0.303} & \textbf{14.95} & 0.310 & \textbf{17.47} & 0.312 & \textbf{19.34} & \textbf{0.313} & \textbf{20.88} & 0.313\\
+\bottomrule
+\end{tabular}
+}
+\caption{
+Quantitative evaluation of 50NFE DDIM T2I with SD v1.5 on COCO 10k
+}
+\label{tab:results_t2i}
+\end{table}
+
+
+\section{Experimental Results}
+
+In this section, we design experiments to show the limitations of CFG and how CFG++ can effectively mitigate these downsides. The main experiments were conducted with SD v1.5 or SDXL with 50 NFE DDIM sampling. In this regime, we searched for the matching guidance values of $\omega$ and $\lambda$ for a fair comparison. We fix $\lambda = 0.2, 0.4, 0.6, 0.8, 1.0$ and find the $\omega$ values that produce the images that are of closest proximity in terms of LPIPS distance given the same seed. We found that the corresponding values were $\omega = 2.0, 5.0, 7.5, 9.0, 12.5$, respectively.  Some of the experiments were also conduced with distilled model such as
+SDXL-{turbo, lightning}.
+
+\subsection{Text-to-Image Generation}
+Using the corresponding scales for $\omega$ and $\lambda$, we directly compare the performance of the T2I task using SD v1.5 and SDXL. In Tab.~\ref{tab:results_t2i}, we report quantitative metrics using 10k images generated from COCO captions~\citep{lin2014microsoft}. Here,
+we observe a constant improvement of the FID metric across all guidance scales (also see Fig.~\ref{fig:t2i_scale_interpolation} for an apples-to-apples comparison), with approximately the same level of CLIP similarity or better. 
+\begin{wraptable}[8]{r}{0.5\textwidth}
+\centering
+\setlength{\tabcolsep}{0.2em}
+\resizebox{0.48\textwidth}{!}{% <------ Don't forget this %
+\begin{tabular}{llcc}
+\toprule
+Model & Metric & CFG & CFG++ (\textcolor{cfgpp}{ours}) \\
+\midrule
+\multirow{3}{*}{SDXL-Lightning} & FID$\downarrow$ & 59.67 & \textbf{59.21} \\
+& CLIP$\uparrow$ & 0.320 & \textbf{0.325} \\
+& ImageReward$\uparrow$& 0.777 & \textbf{0.968} \\
+\midrule
+\multirow{2}{*}{SD v1.5 (DPM++ 2M)} & FID$\downarrow$ & 32.72 & \textbf{32.58} \\
+& CLIP$\uparrow$ & \textbf{0.313} & 0.312 \\
+\bottomrule
+\end{tabular}
+}
+\caption{
+Quant. eval. on accelerated T2I sampling
+}
+\label{tab:results_t2i_lightning_dpm}
+\end{wraptable}
+The improvements can also be clearly seen in Fig.~\ref{fig:t2i_sd1.5} (SD v1.5), where the unnatural components of the generated images are corrected. Specifically, we see that unnatural depictions of human hands, and incorrect renderings of the text are corrected in CFG++, a long-standing research question in and of its own~\citep{podell2023sdxl,pelykh2024giving,chen2023textdiffuser}.
+We find that the improvement gain from CFG++ is even more dramatic for distilled diffusion models such as SDXL-\{turbo, lightning\}. We quantify the results on the same 5k prompts with 6 NFE sampling. In Fig.~\ref{fig:t2i_sdxl_lightning} and Fig.~\ref{fig:t2i_sdxl_lightning_v2}, we see significant boosts in the quality of the generated images, which is also depicted in the improvements seen in Tab.~\ref{tab:results_t2i_lightning_dpm}.
+
+To show the compatibility of CFG++ with higher-order solvers, we experiment with DPM++2M~\citep{lu2022dpmpp} solver with 20 NFE. We note that in such low NFE regime, a CFG scale of 5.0 corresponds to the CFG++ scale of 1.0, and we have to slightly extrapolate the value of $\lambda \geq 1.0$ to achieve stronger guidance results. In Tab.~\ref{tab:results_t2i_lightning_dpm}, we again see that CFG++ yields results that are favorable to standard CFG.
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=0.9\textwidth]{./figs/t2i_sdxl_lightning.jpg}
+    \caption{T2I using SDXL-Lightning, 6 NFE, CFG vs CFG++.}
+    \label{fig:t2i_sdxl_lightning}
+\end{figure}
+
+\subsection{Diffusion image Inversion and Editing}
+\label{subsec: inversion}
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=\linewidth]{figs/inversion_edit.jpg}
+    \caption{%Inversion comparison for SDv1.5. 
+    Inversion and editing results.
+    (a) Reconstructed samples after inversion by CFG and CFG++. (b) Quantitative comparison between CFG and CFG++ for reconstruction. (c) Image editing comparison via SDXL.}
+    \label{fig:inversion_edit}
+\end{figure}
+
+We further explore the effect of CFG++ on DDIM inversion~\citep{dhariwal2021diffusion}, where the source image is reverted to a latent vector that can reproduce the original image through generative process. DDIM inversion is well-known to break down in the usual CFG setting as CFG magnifies the accumulated error of each inversion step \citep{mokady2023null}, violating local linearization assumptions \citep{wallace2023edict}. We show that CFG++ mitigates this issue by improving the inversion and image editing capabilities. We evaluate our method following the experimental setups in \citet{park2024energy} and \citet{kim2024dreamsampler}.
+
+\noindent
+\textbf{Diffusion Image Inversion.}
+Using the matched set of scales for $\omega$ and $\lambda$, we demonstrate the effect of CFG++ on the diffusion image inversion task. Specifically, we reconstruct the images after inversion and evaluate it through PSNR and RMSE, following the methodology of \citet{wallace2023edict}. In Fig.~\ref{fig:inversion_edit}, we illustrate the reconstructed examples (\ref{fig:inversion_edit}a) from a real image from COCO data set and computed metrics (\ref{fig:inversion_edit}b) for 5k COCO-2014~\citep{lin2014microsoft} validation set. Both qualitative and quantitative evaluations demonstrate a consistent improvement on reconstruction performance induced by CFG++.
+Notably, DDIM inversion with CFG++ leads to a consistent reconstruction of the source image across all guidance scales, while DDIM inversion with CFG fails to reconstruct it, as shown in Fig.~\ref{fig:inversion_scale} for another real image.
+
+\noindent
+\textbf{Image Editing.}
+Fig.~\ref{fig:inversion_edit}c compares the image editing result using CFG and CFG++ followed by image inversion with 5 NFEs. In the image editing stage, a word in the source text highlighted by green color is swapped with the target concept, and this modified text is used as the condition for sampling. CFG++ successfully edits the target concept while preserving other concepts, such as background. In particular, the water splashing in the background, which tends to disappear in the conventional CFG, is maintained through the inversion process by CFG++. This emphasizes CFG++'s superior ability to retain specific scene elements that are frequently lost in the standard CFG approach. Moreover, standard CFG's disrupted DDIM inversion leads to saturated and less faithful editing results, whereas CFG++ delivers precise and high-fidelity edits.
+\subsection{Text-Conditioned Inverse Problems}
+Inverse problem involves restoring the original data $\x$ from a noisy measurement $\y = \Ac(\x) + \n$, where $\Ac$ represents an imaging operator introduces distortions (e.g, Gaussian blur) and $\n$ denotes the measurement noise. Diffusion inverse solvers (DIS) address this challenge by leveraging pre-trained diffusion models as implicit priors and performing posterior sampling $\x \sim p(\x|\y)$. 
+Methods that leverage latent diffusion have gained recent interest~\citep{rout2024solving,song2024solving}, but leveraging texts for solving these problems remains relatively underexplored~\citep{chung2023prompt,kim2023regularization}. One of the main reasons for this is that naively using CFG on top of latent DIS leads to diverging samples~\citep{chung2023prompt}. Several heuristic modifications such as null prompt optimization~\citep{kim2023regularization} with modified sampling schemes were needed to mitigate this drawback. This naturally leads to the question: Is it possible to leverage CFG guidance as a plug-and-play component of existing solvers? Here, we answer this question with a positive by showing that CFG++ enables the incorporation of text prompts into a standard solver. Specifically, we focus on comparing the performance of PSLD \citep{rout2024solving}  combined with CFG and CFG++ in solving linear inverse problems. This evaluation utilizes the FFHQ \citep{karras2019style} 512x512 dataset and the text prompt "a high-quality photo of a face".
+
+As shown in Tab.~\ref{tab:results_ldis}, our method mostly outperforms both the vanilla PSLD and PSLD with CFG.
+The superiority is also evident from the Fig.~\ref{fig:ldis_main}, where CFG++ consistently delivers high-quality reconstructions across all tasks. PSLD with CFG often suffer from artifacts and blurriness. Conversely, CFG++ achieves better fidelity, clearly distinguishing between faces and faithfully reproducing fine details like eyelids and hair texture. 
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figs/ldis_main_v3.jpg}
+    \caption{Qualitative comparison on various inverse problems using PSLD \citep{rout2024solving} under CFG and CFG++.}
+    \label{fig:ldis_main}
+\end{figure}
+\begin{table}[!h]
+\centering
+\resizebox{1.0\textwidth}{!}{% <------ Don't forget this %
+\begin{tabular}{lcccccccccccc}
+\toprule
+{} & \multicolumn{3}{c}{SR (x8)} & \multicolumn{3}{c}{Deblur (motion)} & \multicolumn{3}{c}{Deblur (gauss)} &
+\multicolumn{3}{c}{Inpaint}\\
+\cmidrule(lr){2-4}
+\cmidrule(lr){5-7}
+\cmidrule(lr){8-10}
+\cmidrule(lr){11-13}
+{\textbf{Method}} & {FID $\downarrow$} & {LPIPS $\downarrow$} & {PSNR $\uparrow$} & {FID $\downarrow$} & {LPIPS $\downarrow$} & {PSNR $\uparrow$} & {FID $\downarrow$} & {LPIPS $\downarrow$} & {PSNR $\uparrow$} & {FID $\downarrow$} & {LPIPS $\downarrow$} & {PSNR $\uparrow$}\\
+\midrule
+\thead{PSLD} & 46.24 & 0.413 & 24.41 & 97.51 & 0.500 & 21.83 & 41.65 & \textbf{0.388} & 26.88 & 10.27 & 9.36 & 30.15 \\
+\thead{PSLD + CFG} & 41.24 & 0.394 & \textbf{24.91} & 91.90 & 0.493 & \textbf{22.29} & 41.52 & 0.390 & \textbf{26.94} & \textbf{9.36} & 0.055 & 30.27 \\
+\thead{PSLD + CFG++ \textcolor{pinegreen}{(ours)}} & \textbf{36.58} & \textbf{0.385} & 24.87 & \textbf{65.67} & \textbf{0.482} & 21.93 & \textbf{39.85} & 0.400 & 26.90 & 9.78 & \textbf{0.052} & \textbf{30.31} \\
+
+\bottomrule
+\end{tabular}
+}
+\caption{Quantitative comparison (FID, LPIPS, PSNR) of PSLD, PSLD with CFG, and PSLD with CFG++ on Latent Diffusion Inverse Solver.} %WIP
+\label{tab:results_ldis}
+\end{table}
+
+
+
+\section{Related Works and Discussions}
+
+\label{sec:discussion}
+
+\citet{kynkaanniemi2024applying} observed that applying CFG guidance at the earlier stages of sampling always led to detrimental effects and drastically reduced the diversity of the samples. The guidance at the later stages of sampling had minimal effects. Drawing upon these observations, it was empirically shown that applying CFG only in the limited time interval near the middle led to the best performance. Similar observations were made in the SD community~\citep{howard2022,birch2023} in adjusting the guidance scale across $t$. These findings are orthogonal to ours in that these methods keep the sampling trajectory the same and try to empirically adjust the strength of the guidance, while we aim to design a different trajectory.
+More recently, \citet{bradley2024classifier} observed that the CFG score is not a valid denoising direction, showing that in the asymptotic limit, CFG sampling can be considered as a specific type of predictor-corrector (PC) sampling, dubbed PCG. PCG shares a similar spirit with CFG++ in that for the mainstream of sampling, one defers from the use of mixed CFG score (we use unconditional score, PCG uses conditional score) to avoid invalid directions. While PCG derives an interesting connection of PC sampling with CFG, the proposed algorithm does not improve the sampling performance. In contrast, CFG++ improves the sample quality without additional computation overhead.
+Since CFG++ attempts to make adjustments of CFG using a linear combination of score functions, it is not surprising to see that CFG++ sampling can be achieved by setting a time varying schedule. 
+Specifically, by setting a time-varying schedule $\omega_t$ as $\omega_t = -\gamma_t / \xi_t$, where $\gamma_t = \frac{\sqrt{\bar\alpha_{t-1}}\sqrt{1 - \bar\alpha_t}}{\sqrt{\bar\alpha_t}}, \xi_t = \sqrt{1 - \bar\alpha_{t-1}} - \frac{\sqrt{\bar\alpha_{t-1}}\sqrt{1 - \bar\alpha_t}}{\sqrt{\bar\alpha_t}}$, one can achieve the same effect with CFG as CFG++. However, this specific choice of time-varying guidance scale has not been reported in the literature, as it is a schedule that is relatively complex to be drawn heuristically.
+
+
+\section{Conclusion}
+
+This paper revises the most widespread guidance method, classifier-free guidance (CFG), highlighting that a small and reasonable guidance scale, e.g. $\lambda \in [0.0, 1.0]$, might suffice successful guidance with a proper geometric correction. Observing that the original CFG suffers from off-manifold issues during sampling, we propose a simple but surprisingly effective fix. This change translates the conditional guidance from extrapolating to interpolating between unconditional and conditional sampling trajectories, leading to more interpretable guidance in contrast to the conventional CFG which relies on heuristic $\omega$ scaling. Given that CFG++ mitigates off-manifold issues, it may be beneficial for other downstream applications requiring accurate latent denoised estimate representations, e.g. DIS, as demonstrated in our experiments.
+\label{sec:conclusion}
+
+
+
+

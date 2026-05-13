@@ -1,8 +1,8 @@
 # Markovian Transformers for Informative Language Modeling
 
 - Decision: Reject
-- Avg Score: 3.60
-- Scores: 5, 6, 6, 1, 0
+- Avg Score: 6.75
+- Scores: 5, 6, 6, 10
 
 ## Abstract
 Chain-of-Thought (CoT) reasoning holds great promise for explaining the outputs of language models, but recent studies have highlighted significant challenges in its practical application for interpretability. We propose to address this issue via two key components: a technique to factor next-token prediction through intermediate CoT text, ensuring the CoT is causally load-bearing, and a reinforcement learning approach to train CoT to predict future tokens independently of other context. This results in ``Markovian'' language models, where CoT serves as a fixed-size state for future token prediction. Our approach optimizes for ``informativeness'' – the improvement in next-token predictions using a trained CoT compared to a baseline. We demonstrate our method's effectiveness using Proximal Policy Optimization (PPO) on arithmetic problems and achieve an 11\% performance boost on the GSM8K benchmark using Mistral 7B Inst V2. The increased sensitivity of model performance to CoT perturbations provides strong evidence of CoT reliance. This work advances the development of more transparent and interpretable language models, potentially enabling their extension to arbitrarily long contexts and enhancing AI reasoning capabilities across various domains.

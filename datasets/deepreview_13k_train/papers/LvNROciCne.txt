@@ -1,0 +1,352 @@
+\title{AdaRankGrad: Adaptive Gradient Rank and Moments for Memory-Efficient LLMs Training and Fine-Tuning}
+
+\begin{abstract}
+Training and fine-tuning large language models (LLMs) come with challenges related to memory and computational requirements due to the increasing size of the model weights and the optimizer states. Various techniques have been developed to tackle these challenges, such as low-rank adaptation (LoRA), which involves introducing a parallel trainable low-rank matrix to the fixed pre-trained weights at each layer. However, these methods often fall short compared to the full-rank weight training approach, as they restrict the parameter search to a low-rank subspace. This limitation can disrupt training dynamics and require a full-rank warm start to mitigate the impact. 
+In this paper, we introduce a new method inspired by a phenomenon we formally prove: as training progresses, the rank of the estimated layer gradients gradually decreases, and asymptotically approaches rank one. Leveraging this, our approach involves adaptively reducing the rank of the gradients during Adam optimization steps, using an efficient online-updating low-rank projections rule. We further present a randomized SVD scheme for efficiently finding the projection matrix. 
+Our technique enables full-parameter fine-tuning with adaptive low-rank gradient updates, significantly reducing overall memory requirements during training compared to state-of-the-art methods while improving model performance in both pretraining and fine-tuning. Finally, we provide a convergence analysis of our method and demonstrate its merits for training and fine-tuning language and biological foundation models.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large language models (LLMs) have gained significant attention due to their impressive ability to handle various tasks, such as dialogue-based systems and text completion. Both supervised fine-tuning and additional pre-training can further enhance their performance across tasks and domains. However, training these models presents significant computational and memory challenges. This is because performing the gradient updates requires storing billions of LLM's trainable parameters along with the optimizer state (e.g., gradients and moments). In Adam, for example, the gradients and the estimated first and second moments triple the size of the model itself \citep{xu2024understanding,brown2022efficient,kim2023memory}. 
+
+To tackle the challenges associated with LLM fine-tuning, researchers have developed various optimization techniques to reduce memory usage during model training. One key approach that has emerged is Parameter-efficient fine-tuning (PEFT) \citep{han2024parameterefficientfinetuninglargemodels}, which enables the adaptation of pre-trained language models (PLMs) to different tasks without the need to fine-tune all model parameters. A prominent method within PEFT is the Low-Rank Adaptation (LoRA) algorithm, introduced by \cite{hu2021lora}. LoRA reparameterizes a weight matrix $ \bbw \in \mathbb{R}^{m \times n} $ into $ \bbw = \bbw_0 + \bbb \bba $, where $ \bbw_0 $ is a frozen full-rank matrix, and $ \bbb \in \mathbb{R}^{m \times r} $ and $ \bba \in \mathbb{R}^{r \times n} $ are low-rank adaptors. Since $ r \ll \min(m, n) $, the low-rank adaptors $ \bba $ and $ \bbb $ require fewer trainable parameters, reducing memory usage. LoRA has been widely adopted for fine-tuning, with several variants emerging, including LoRA+, which uses different learning rates for the two matrices \citep{Chen2023}, Adaptive LoRA, which adapts the rank of the matrices during training \citep{Wang2023}, and Sparse LoRA, which introduces sparsity to the matrices to further reduce computational cost \citep{Xu2023}. These methods have been demonstrated to enhance the efficiency and performance of LLM fine-tuning for various tasks.
+
+Despite its advantages, recent research has identified some limitations of low-rank reparameterization. For example, LoRA may not achieve the same performance levels as full-rank fine-tuning \citep{meng2024periodiclorabreakinglowrankbottleneck} and might require initial full-rank model training as a warm-up before effectively utilizing the low-rank subspace \citep{lialin2024}. These issues may stem from the fact that optimal weight matrices are not inherently low-rank or from changes in gradient training dynamics introduced by the reparameterization. In addition, LoRA keeps the tuning layer shapes in the base model static without dynamic adjustments. Another approach by \cite{he2022sparseadapter} dynamically adjusts tuning parameters during training, and \citep{zhang2023adalora} gradually reduces tuning parameters. Still, neither of these methods improves the inference efficiency of the fine-tuned model.
+Until recently, the pre-training of large language models (LLMs) has been primarily limited to corporations and governments with substantial computational and memory resources. The significant challenges posed by the enormous memory and computational requirements made it impractical for the average home user. To illustrate this challenge, we take the following as an example. Training a Mistral $7$B model from scratch poses substantial memory challenges. Given its $7$ billion parameters, a single update step requires approximately $70$ GB of memory: $14$ GB for the model parameters, $42$ GB for Adam optimizer states and gradients, and $14$ GB for activations. Consequently, consumer-level GPUs like the NVIDIA RTX $3090$, which has $24$ GB of VRAM, are inadequate for handling such a large-scale training task. 
+
+To overcome this challenge, the study in \citep{zhao2024galore} introduced a training strategy called GaLore that enables full-parameter learning while being more memory-efficient than traditional low-rank adaptation methods such as LoRA. The core idea behind GaLore is to exploit the slowly changing low-rank structure of the gradient $ \bbg \in \mathbb{R}^{n \times m} $ of the weight matrix $ \bbw $, rather than approximating the weight matrix itself as low-rank. GaLore significantly improved memory efficiency, reducing optimizer state memory usage by up to 65.5\%. The following noticeable variant is Q-GaLore \citep{dettmers2023qlora}, which combines low-rank gradient projection with INT4 quantization to further reduce memory usage, and an additional parallel variant would be ReLoRA \citep{lialin2024} employed in pre-training-by periodically updating $ \bbw_0 $ using previously learned low-rank adaptors. We found that Galore to be suboptimal since it arbitrarily requires pre-defining a fixed low-rank size for the gradient projection/low-rank-approximation, while gradients rank gradually diminish during training down to rank one. Additionally, GaLore uses a fixed window size for the number of iterations between updates to the subspace onto which the gradients are projected, keeping this window size constant. Finally, Galore does not transform (adjust) the first and second moments at any update of projection subspace, which we empirically found degrading the potential performance. We suggest an inner transformation scheme of the moments at any projection updates. 
+
+\paragraph{Our approach and theoretical results.} In this paper, we introduce a new training method aimed at optimizing memory efficiency in the training or fine-tuning of large language models (LLMs), while also improving convergence rates and overall performance. Our method leverages two key properties of LLMs. First, we present a novel theoretical finding that shows how the approximate rank of the LLM gradient matrices decreases progressively throughout the training process (even under basic SGD settings), asymptotically approaching rank one. Note that previous studies have only demonstrated an implicit upper bound on the rank of the gradient, which is far from being tight. For example, \cite{zhao2024galore} showed that the rank of the gradient satisfies $\text{rank}\left( \bbg ^{n \times m} \right)<\min\{n,m\}/2$. Second, as highlighted in previous research \citep{gromov2024,refael2024,jaiswal2024}, the depth of a layer (how far from input/output) and its architectural design contribute differently to the model's performance. Specifically, when perturbations from the same distribution are applied across various layers, the impact on accuracy varies significantly. This indicates that the optimization steps have less influence on the model's performance for certain layers, depending on their depth and architecture type. Noise in these layers has a smaller impact on the overall task, meaning that the gradients in these layers carry less important information. This results in naturally lower-rank update steps (gradients).
+
+Building upon these two insights and to address the limitations of the LoRA variants, we propose a method that enables full-parameter learning while dramatically reducing memory requirements and computational complexity through adaptive low-rank gradient projections during the Adam update step.
+For each gradient tensor $\bbg_t^j \in \mathbb{R}^{r \times n}$ at layer $j \in [L]$ and iteration $t$, AdaRankGrad efficiently identifies a unique set of significant projection directions (subspace) $\bbp_t^j \in \mathbb{R}^{r_j \times n}$ along which the gradient $\bbg_t^j$ exhibits %
+\begin{figure}[t!]
+\centering
+\includegraphics[width=0.6\linewidth]{Screenshot_2024_09_25_224219.png} 
+\caption{The illustration shows how AdaRankGard \ref{alg::AdaRankGrad} is trained. First, the gradients $\bbg_t$ are projected into a 3D space (in this example), represented as $\Hat{\bbg}_t^{3\times m}=\bbp^{3\times n}_t\bbg_t^{n\times m}$. As convergence occurs, the gradient's dimension decreases to a 2D space and then to a 1D space. This dimensionality reduction indicates convergence while efficiently using memory.}
+\label{fig:wrapfig}
+\end{figure}
+the largest changes, where $r_t^j$ is the lowest possible rank to still maintain a predefined information fraction (given threshold) relative to the original, non-projected gradient. Practically, $\bbp_t^j\bbg_t^j$ is the low-projected-gradient and ${\bbp_t^j}^\top\bbp_t^j\bbg_t^j$ is the best low-rank approximation the of the gradients $\bbg_t^j$ that embodies the required fraction of its information. The projections $\bbp_t^j$ are being adaptively updated throughout training (based on the convergence criteria of the gradients on the projected subspace), where their rank $r^j_t$ is dictated by preserving the given information threshold. The method ensures: (1) The method determines the optimal projection dimension for each layer's gradient tensor independently, adjusting dynamically throughout training. This rank adjustment leverages property we prove that the effective dimensionality of the full gradients gradually decreases over time, allowing updates to be performed in a lower-dimensional projection space, thereby reducing memory usage. (2) The projection matrix for each layer's gradients is updated based on a convergence criterion within their respective subspace. This ensures updates occur precisely when needed, avoiding premature or delayed transitions between subspaces, resulting in faster overall convergence.
+\begin{table}[htb]
+\caption{Comparison between AdaRankGrad, GaLore, and LoRA. Assume $\bbw \in \mathbb{R}^{n \times m} (n \geq m)$, constant rank $r$, and adaptive-rank $r_\text{adap}$ (with initial-rank $r_\text{init} = r$).}
+\centering
+\footnotesize
+\begin{tabular}{lccc}
+\hline
+& AdaRankGrad & GaLore & LoRA \\
+\hline
+Weights & $n m$ & $n m$ & $n m + n r + m r$ \\
+\hline
+Optim States ($r_\text{adap} < r$) & $n r_\text{adap} + 2 m r_\text{adap}$ & $n r + 2 m r$ & $2 n r + 2 m r$ \\
+\hline
+Multi-Subspace & $\checkmark$ & $\checkmark$ & $\mathbf{x}$ \\
+Adaptive-Subspace-Dimension & $\checkmark$ & $\mathbf{x}$ & $\mathbf{x}$ \\
+Adaptive-Subspace-Updates & $\checkmark$ & $\mathbf{x}$ & $\mathbf{x}$ \\
+Pre-Training & $\checkmark$ & $\checkmark$ & $\mathbf{x}$ \\
+Fine-Tuning & $\checkmark$ & $\checkmark$ & $\checkmark$ \\
+\hline
+\end{tabular}
+\end{table}
+
+
+\section{Related Work and Background}
+
+\paragraph{Memory efficient optimizers.}
+Memory-efficient optimization has been a recent focus of research. Multiple studies have aimed to reduce the memory requirements of gradient statistics in adaptive optimization algorithms \citep{shazeerAdafactorAdaptiveLearning,anilMemoryEfficientAdaptive}. One common approach is quantization, which helps decrease the memory footprint of optimizer states \citep{liMemoryEfficientOptimizers2023}. Additionally, recent advancements have suggested reducing the memory used by weight gradients by integrating the backward operation with the optimizer update \citep{lvAdaLomoLowmemoryOptimization2023,lvFullParameterFinetuning2023}. This characteristic has been leveraged to reduce memory usage during training processes \citep{gooneratneLowrankGradientApproximation2020, huangLowRankGradientDescent2023, modoranuErrorFeedbackCan2024}.
+
+\paragraph{Low-rank gradient optimization.} The phenomenon of low-rank gradients naturally arises during the training of neural networks, a subject that has been extensively examined both theoretically and practically, e.g., \cite{zhaoZerOInitializationInitializing2022, cossonLowRankGradientDescent2023, yang2023spectral}. This characteristic low-rank structure gradients has been leveraged to reduce memory usage during training processes \cite{gooneratneLowrankGradientApproximation2020, huangLowRankGradientDescent2023, modoranuErrorFeedbackCan2024}, and results in a reduced computational complexity as compared to standard gradient descent methods.
+
+\paragraph{Adam optimization.} 
+
+Arguably, among the most popular optimization methods used for training large language models (LLMs) are the \emph{Adam optimizer} \citep{kingma2017adammethodstochasticoptimization} and its variant, \emph{AdamW} \citep{loshchilov2019decoupledweightdecayregularization}, which incorporates weight decay for regularization. However, it is well-established that Adam optimization has higher memory complexity compared to other optimization alternatives. To illustrate this, let us briefly review how the Adam optimization algorithm operates. First, we need to establish some notation. Consider a neural network denoted as $\Phi(\cdot;\boldsymbol\theta)$, which consists of $L$ layers and is parameterized by {\footnotesize{$\boldsymbol{\theta} \triangleq \left[\bbw_1^{d_1 \times d_0}, \ldots, \bbw_{L-1}^{d_{L-1} \times d_{L-2}}, \bbw_{L}^{d_{L} \times d_0^{L-1}}\right]$}}. Here, $\bbw_{i}$ represents the weights tensor parameters associated with the $i$-th layer, for $i \in [L]$. In the following, let $t \in \mathbb{N}$ represent the $t$-th step of the Adam optimization algorithm. Then, we recall that the single update step in Adam is given by,
+\begin{equation}
+\textbf{Adam}\left\{
+\begin{aligned}
+&\quad \bbg_t  = \nabla \Phi\left(\boldsymbol\theta_{t-1}\right), \nonumber\\
+&\quad \bbm_t  = \beta_1 \bbm_{t-1} + \left(1 - \beta_1\right) \bbg_t, \nonumber\\
+&\quad \bbv_t  = \beta_2 \bbv_{t-1} + \left(1 - \beta_2\right) \bbg_t^2, \nonumber\\
+&\quad \hat{\bbm}_t  = \bbm_t / \left(1 - \beta_1^t\right), \nonumber\\
+&\quad \hat{\bbv}_t = \bbv_t / \left(1 - \beta_2^t\right), \nonumber\\
+&\quad \boldsymbol\theta_t  = \boldsymbol\theta_{t-1} - \alpha \hat{\bbm}_t / \left(\sqrt{\hat{\bbv}_t} + \epsilon\right).
+\nonumber
+\end{aligned} \right.
+\end{equation}
+Specifically, at time step $t$, $\bbg_t$ denotes the backpropagated gradient matrix, i.e., $\nabla \Phi\left(\boldsymbol\theta_{t-1}\right)$. The exponentially weighted moving averages of the first and second moments are denoted by $\bbm_t$ and $\bbv_t$, respectively, with their bias-corrected counterparts given by $\hat{\bbm}_t$ and $\hat{\bbv}_t$. The AdamW optimizer updates the model parameters at step $t$ according to the rule, {\footnotesize{$\boldsymbol{\theta}_t = \boldsymbol{\theta}_{t-1} - \alpha \left( \frac{\hat{\bbm}_t}{\sqrt{\hat{\bbv}_t} + \epsilon} + \lambda \boldsymbol{\theta}_{t-1} \right)$}},
+where $\lambda\geq0$ is the weight decay rate (for Adam $\lambda=0$), and all operations are performed element-wise. In this equation, $\beta_1$ and $\beta_2$ control the decay rates for the moving averages of the moments, $\alpha$ is the learning rate, and $\epsilon$ is a small constant to avoid division by zero. Notably, since Adam/W requires storing both $\bbm_t$ and $\bbv_t$ at each time step, it incurs an additional memory footprint of $2mn$.
+ 
+While existing approaches \citep{zhao2024adapprox,vyas2024adamem,okewu2020parameter} focus on low-rank approximations of the first and second moments with the goal of reducing memory requirements, we propose to approximate the gradients by a low-rank factorization. Consequently, in our scheme the moments are integrally constrained onto this reduced dimension, and thus we gain both benefits.
+
+
+
+\section{Method and Main Results}
+
+
+\subsection{Theoretical Motivation: Gradually Gradient Rank Vanishing}\label{sec::Theoretical_Motivation}
+\begin{figure}[t!]
+\centering{\includegraphics[width=0.7\linewidth]{Colab_Screenshot_2024_09_21_010917_2.png}} 
+\vskip -0.1 in
+\caption{The figure illustrates the exponential decay of eigenvalues in the MLP layer's gradient, at the first iteration of fine-tuning RoBERTa-Base \citep{liu2019roberta} model, on the MRPC task, from GLUE \citep{wang2019superglue}. Notably, the red line indicates that 50\% of the gradient information (in terms of squared norm ratio) is captured by the first eigenvalue, while the green line shows that 90\% is contained within the first two eigenvalues.
+}
+\label{eigenvalues_deacy}
+\end{figure} As mentioned in the introduction, a few recent empirical results (e.g., \citep{jaiswal2024galore,zhao2024galore,lialin2023}), demonstrate that the gradients, when training or fine-tuning LLM's, are ``approximately low-rank". As an example, this phenomenon can be observed in Figure~\ref{eigenvalues_deacy}, where it is evident that the squared norm of the gradient's singular values decay to zero exponentially fast.
+
+As hinted above, this phenomenon is only true in the approximate sense; roughly speaking, only very few eigenvalues hold almost all the information captured by the gradient. Accordingly, a low-rank matrix approximates the underlying gradient up to a negligible approximation error. The practical implication is that while the weight matrices are not necessarily low-rank, training certain high-rank layers with low-rank based-gradient updates is possible. To make the above discussion precise, consider the following definition for approximate low-rank matrices.\sloppy
+\begin{definition}[Approximate low-rank matrix] \label{def::Approximate_rank_of_matrix} A matrix $\bba\in\mathbb{R}^{n\times m}$ is called $(\eta,\varepsilon)$-approximately rank-$r$, if there exist $\eta \in[0,1)$, $\varepsilon>0$, and a matrix $\bba_{\mathsf{app},r}\in\mathbb{R}^{n\times m}$ with $\mathsf{rank}(\bba_{\mathsf{app},r})=r$ and $r<\min\{n,m\}$, such that,
+\begin{equation}
+\left\|\bba-\bba_{\mathsf{app},r}\right\|_{F} \leq \eta\cdot\|\bba\|_{F} + \varepsilon.\label{eqn:applowrank}
+\end{equation}
+\end{definition}
+As it turns out, it can be shown (see, e.g., \citep{golub2013matrix}) that the optimal $\bba_{\mathsf{app},r}$ minimizing the approximation error in the left-hand-side of \eqref{eqn:applowrank}, can be obtained by applying an SVD on $\bba$ and then retaining only the top $r$ singular values and their corresponding singular vectors. Mathematically, we have $\bba_{\mathsf{app},r} = \sum_{i=1}^r \sigma_i \bu_i \bv_i^\top$,
+where $\{\sigma_i\}_i$ are the singular values of $\bba$, and $\{\bu_i\}_i$ and $\{\bv_i\}$ are the corresponding left and right singular vectors, respectively. The approximation error is in turn given by $\left\| \bba - \bba_{\mathsf{app},r} \right\|_{F}^2 = \sum_{i=r+1}^{\min \{m, n\}} \sigma_i^2$. This construction gives an $(\eta_\bba,0)$-approximately rank-$r$ matrix, with the minimal $\eta_\bba$ possible. 
+
+Recently in \citep{zhao2024galore}, the structure of the gradient for a wide family of nonlinear networks known as ``reversible networks" \citep{tian2021} was studied,\footnote{It can be shown that this family includes many different kinds of layers, such as, linear layers (MLP and Conv.), and (leaky) ReLU non-linearity.} defined as follows.
+\begin{definition}(Reversibility \citep{tian2021})
+Layer $\ell\in [L]$ is reversible if there is a $\bbg_\ell(\boldsymbol{x} ; \boldsymbol{\theta}) \in \mathbb{R}^{n_\ell \times n_{\ell-1}}$ such that
+the gradient after nonlinearity satisfies $\tilde{\boldsymbol{g}}_{\ell-1}=\bbg_\ell^{\top}(\boldsymbol{x} ; \boldsymbol{\theta}) \bbp_\ell^{\top}(\boldsymbol{x} ; \boldsymbol{\theta}) \tilde{\boldsymbol{g}}_\ell$, for some matrix $\bbp_\ell(\boldsymbol{x} ; \boldsymbol{\theta}) \in \mathbb{R}^{n_\ell \times n_\ell}$. A network is reversible if all of its layers are reversible.
+\end{definition}
+For simplicity of notation, we use $\bbg_t^\ell$ to denote $\left[\bbg_\ell(\boldsymbol{x} ; \boldsymbol{\theta})\right]_t$, where $t\in\mathbb{N}$ is the iteration index in the optimization process. Furthermore, when it is clear from the context, we omit the layer index $\ell$ from our notations. Assuming reversibility and SGD weight update (i.e., $\bbw_t=\bbw_{t-1}+\alpha \bbg_{t-1}$), it is shown in \cite{zhao2024galore} that for both $\ell_2$ and cross entropy losses, the gradient is of the structure form $\bbg=\frac{1}{N} \sum_{i=1}^N\left(\bba_i-\bbb_i W \bbc_i\right)$, where $N$ is the batch size, $\{\bba_i\}_{i=1}^N$ are input-dependent matrices, and $\{\bbb_i,\bbc_i\}_{i=1}^N$ are certain positive semi-definite (PSD) matrices. 
+Furthermore, it was proven that if the gradient $\bbg_t$, has the above structure for all $t\geq \mathsf{t}_0$, for some $\mathsf{t}_0\in\mathbb{N}$, then, 
+the stable rank $\operatorname{sr}\left(\bbg_t\right)\triangleq\frac{\|\bbg_t\|_F}{\|\bbg_t\|_2}$ satisfies,
+$$
+\operatorname{sr}\left(\bbg_t\right) \leq \operatorname{sr}\left(\bbg_{\mathsf{t}_0}^{\|}\right)+\left(\frac{1-\eta \lambda_2}{1-\eta \lambda_1}\right)^{2\left(t-\mathsf{t}_0\right)} \left.\left\|\bbg_{\mathsf{t}_0}-\bbg_{\mathsf{t}_0}^{\|}\right\|_F^2\middle/\left\|\bbg_{\mathsf{t}_0}^{\|}\right\|_2^2,\right.
+$$
+where $\bbs\triangleq\frac{1}{N} \sum_{i=1}^N \bbc_i \otimes \bbb_i$, $\lambda_1<\lambda_2$ denote its two smallest distinct eigenvalues, and $\bbg_{\mathsf{t}_0}^{\|}$ is the projection of $\bbg_{\mathsf{t}_0}$ onto the minimal eigenspace $\mathcal{V}_1$ of $\bbs$ that corresponds to $\lambda_1$. Accordingly, as $t\to\infty$, we get that the final stable rank is upper bounded by $\operatorname{sr}(\bbg_{\mathsf{t}_0}^{\|})$. Under the same gradient structure assumption and for the vanilla settings of the SGD weights update, we were able to prove the following stronger result. We prove that the approximated stable rank of the gradients approach one as the training process progresses. To state this result, we need to make a few notations. Let $\bbg_t=\bbu_t\Sigma_t\bbv_t^\top$ be the SVD decomposition of $\bbg_t$, and let $\bbp_t(\ell,r)=\bbu[:,\ell:r]_t\bbu[:,\ell:r]_t^\top$ be the corresponding projection matrix. When clear for the context, we omit the index $\ell$ and use $\bbp_t(r)\equiv\bbp_t(\ell=1,r)$. We have the following result.
+\begin{figure}[t!]
+    \centering
+\includegraphics[width=10cm,height=5cm]{rank_fig.png}
+    \caption{The figure presents the effective rank (see Section ~\ref{sec::experiments}) measured after every $100$ update steps on the RTE dataset, from GLUE \citep{wang2019superglue}.}
+    \label{fig:rankvsmemory}
+\end{figure}
+\begin{lem}[Asymptotically rank-one]
+\vskip -0.15 in
+Given a reversible neural network and using the vanilla setting of SGD for weight update. Then,
+$$\kappa(t)\triangleq\frac{\left\|\bbg_t-\bbp_t(1) \bbg_t\right\|_{F}^2}{\left\|\bbg_t\right\|_{F}^2}\leq O(C^{-t}),$$
+for some constant $C>1$.
+\label{Gradient's rank gradually diminish}
+\end{lem}
+The above result implies that $\bbg_t$ approaches its rank-one approximation $\bbp_t(1) \bbg_t,$ as the iteration number increases, namely, $\bbg_t$ becomes rank-one. 
+The proof of Lemma~\ref{Gradient's rank gradually diminish} is relegated to Section~\ref{sec:proofs}. 
+Finally, in Fig.~\ref{fig:rankvsmemory} and Fig.~\ref{fig:rankvsmemory2}, we demonstrate that for a large language model (RoBERTa-base \cite{liu2019roberta}), which contains also non reversible layers, the rank decay evolves as a function of the number of update steps, in a fine-tuning task.
+ \subsection{Adaptive-Low-Rank Subspace Selection}
+As aforesaid, our training strategy is self-adapting by updating the low-rank projection subspace for the gradient of each layer, leveraging the phenomena raised by Lemma~\ref{Gradient's rank gradually diminish}. The most natural but computationally expensive way to search for the subspace on which a gradient has the highest variance is by applying the truncated SVD \citep{eckart1936approximation}, with a truncated rank that preserves the predefined fraction of information. In this section, we first utilize an efficient method to approximate the gradient, which is more practical than the expansive truncated SVD approximation. We then use this method to propose an algorithm that identifies the most suitable projection subspace with the smallest possible span/rank that maintains the given information threshold.
+
+\subsubsection{Identifying projecting subspace by power iteration}
+Consider a matrix $\bba \in \mathbb{R}^{n \times m}$. Finding its ``best" low-rank approximation can be framed as the following optimization problem $\min _{\bbq, \bbu}\left\|\bba - \bbq \bbu^{\top}\right\|_F^2$, where $\bbq \in \mathbb{R}^{n \times r}$ and $\bbu \in \mathbb{R}^{m \times r}$. As discussed above, the matrix $\bba_{\mathsf{app},r} = \bbq \bbu^{\top}$ represents the $(\eta,\varepsilon)$ rank-$r$ approximation of $\bba$. Computing full SVD for large matrices is computationally intensive and memory-demanding. To address these challenges, we detail Algorithm \ref{alg::randomized_range_finder} \citep{halko2010findingstructurerandomnessprobabilistic}, an efficient technique for producing a ``good" proxy for the optimal low-rank approximation of $\bba$. Algorithm \ref{alg::randomized_range_finder} is designed to solve the optimization problem
+$\arg\min _{\mathbf{Q} \in \mathbb{R}^{n \times r}} \left\|\bba - \mathbf{Q Q}^\top \bba \right\|_F,$
+and approximates the matrix $\bba$ as $\bba_{\mathsf{app},r} \approx \mathbf{Q Q}^\top \bba.$
+The computational complexity of the SSRF algorithm is dominated by two main operations: the matrix multiplication $\bba \Omega$, whose computational complexity is $O(mnk)$, and the QR decomposition of the resulting matrix $\bby$, requiring $O(mk^2)$. Therefore, the total complexity is $O(mnk + mk^2)$. In scenarios where $k\ll m,n$, this complexity simplifies to $O(mnk)$, which is significantly more efficient than using SVD whose complexity is $O(\min(mn^2, m^2n))$. This low-complexity makes the SSRF preferable for extracting leading singular vectors in large-scale data settings.
+
+ \begin{algorithm}[t]
+        \caption{Subspace selection via randomized range finder (SSRF)}
+        \label{alg::randomized_range_finder}
+        \begin{algorithmic}
+            \STATE {\bfseries Inputs:} Matrix $\bba \in \mathbb{R}^{n \times m}$, target rank $r\leq \min \{n, m\}$. 
+            \STATE {\bfseries Initialization:} $\Omega \in \mathbb{R}^{r\times m} \sim \textbf{N}(0,1)$
+            \STATE $\bby \leftarrow \bba \Omega$
+            \STATE Construct $\bbq\in \mathbb{R}^{r\times m}$ using the $\mathrm{QR}$ decomposition of $\bby$
+            \STATE {\bfseries Return:} $\mathbf{Q}$
+        \end{algorithmic}
+    \end{algorithm}
+\subsubsection{Fast adaptive low-rank approximation}
+
+It is clear from Definition \ref{def::Approximate_rank_of_matrix} that a larger value of the rank $r$ increases the computational operations and induces a higher memory footprint, while a smaller value of $r$ will result in a non-negligible approximation error. To mitigate this, we suggest Algorithm~\ref{alg:adaptive_srsi}, an adaptive procedure for rank selection that adjusts the value of $r$ to preserve at least a certain fraction of the information in $\bba$. Specifically, at start we set $r_0 = r_{\text{min}}$, and then find the best $\bba_{\mathsf{app},r}\approx\mathbf{Q Q}^\top \bba$ using SSRF. At each time step $t$, given the current rank $r_t$, we compute the approximation error as,
+    \begin{algorithm}[hb]
+   \caption{Information-based adaptive subspace selection (IASS)}
+   \label{alg:adaptive_srsi}
+   \footnotesize
+ \begin{algorithmic}
+   \STATE {\bfseries Inputs:} Matrix $\bba \in \mathbb{R}^{n \times m}$, minimum rank $r_{\text{min}}\geq 1$, maximum threshold rank $r_{\text{max}}\ll m$, and information threshold $\eta_{\text{th}}\in(0,1).$
+   \STATE {\bfseries Initializations:} $t\gets0,r_0 \gets r_{\text{min}} , \eta_0\gets\eta_{\text{th}}+1.$
+   \WHILE{$r\geq1$ and $r_{\text{max}}-r_{t}\geq1$}%and $\eta_t> \eta_{\text{th}}$}
+       \STATE $\mathbf{Q}\leftarrow\operatorname{SSRF}(\bba, r_t)$\hfill\hfill{\color{gray}\COMMENT{Call Algorithm \ref{alg::randomized_range_finder}}}
+        \STATE $\bba_{\text{app,}r_t}\leftarrow\mathbf{Q Q}^\top\bba$.
+       \STATE $\eta_t \leftarrow \left\|\bba - \bba_{\text{app,}r_t}\right\|_F / \|\bba\|_F$ \hfill\hfill\COMMENT{{\color{gray}$\approx\frac{\sum_{i=r_t + 1}^{n} \sigma_{i}(\bbg_t)^2}{\sum_{i=1}^{n} \sigma_{i}(\bbg_t)^2}$}}
+        \IF{$\eta_t > \eta_{\text{th}}$}
+            \STATE $r_{\text{max}} \gets \lceil\frac{r_{\text{max}} - r_t}{2}\rceil$
+        \ELSIF{$\eta_t \leq \eta_{\text{th}}$}
+            \STATE $r_t \gets \lfloor\frac{r_{\text{max}} - r_t}{2}\rfloor$
+        \ENDIF
+   \ENDWHILE
+   \STATE {\bfseries Return:} $\bbq, r_t$.
+        \end{algorithmic}
+    \end{algorithm}
+\begin{align}\label{def::approximate_error}
+\eta_t = \frac{\left\|\bba - {\bba}_{\text{app,}{r_t}}\right\|_F^2}{\|\bba\|_F^2}=\frac{\sum_{i=r_t + 1}^{n} \sigma_{i} (\bba)^2}{\sum_{i=1}^{n} \sigma_{i}(\bba)^2}.    
+\end{align}
+We then apply binary search until we find the maximum $r$ for which the corresponding condition still holds: $\eta<\eta_{\text{th}}$. It is important to note that, from the outset, we know a priori that the rank of the approximated gradients is inherently low. Consequently, the initial value of $r_{\text{max}}\ll \min\{m,n\}$ is small, and the number of iterations required for the search is correspondingly minimal, specifically $O(\log(r_{\text{max}}-r_{\text{min}})),$ obviously $(r_{\text{max}}-r_{\text{min}})\ll \min\{m,n\}$.
+
+\subsection{Adaptive Low-Rank and Moments Gradient Optimization}
+We can now present our main algorithm for adaptive low-rank and moments gradient optimization in Algorithm~\ref{alg::AdaRankGrad}. 
+To describe AdaRankGrad update step rule, we need to establish a few important notations first. For $t\in\mathbb{N}$, let $\rho_t:\mathbb{R}^{m\times n}\to\mathbb{R}^{m\times n}$ be an entry-wise gradient update rule (e.g., Adam, AdamW, AdaFactor, etc.). For $t\in\mathbb{N}$ and layer $j\in[L]$, recall the SVD of the gradient $\bbg^j_{t}= \bbu^j_{t}\Sigma^j_{t}(\bbv^j_{t})^\top$, and further define the projection matrices $\bbp^j_{t}(r_t^j)=\text{SSRF}(\bbu^j_{t}[:,:r_{t}^j]^\top),\bbr^j_{t}(r_t^j)=\text{SSRF}\left(\bbv^j_{t}[:,:r_{t}^j]\right)$, where for a given threshold $0<\eta_{\text{th}}\leq 1$, we let $r_{t}^j\triangleq\sup\{r\in\mathbb{N}:\eta_\text{th}\cdot\|\bbg^j_t\|_F^2-||\bbg^j_t - \bbp^j_{t}(r) \bbg^j_t||_F^2\geq0\}$, computed using Algorithm~\ref{alg:adaptive_srsi}. Next, for $j\in[L]$, and some $\varsigma>0$, we let $\{\mathsf{T}^j_\ell\}_{\ell\geq0}$, with $\mathsf{T}^j_0=0$, denote the monotone sequence of integers, for which $\|(\bbp^j_{\mathsf{T}_i})^{\top}(r^j_{\mathsf{T}^j_i}) \bbg^j_{\mathsf{T}^j_i}\bbr_{\mathsf{T}^j_i}^j(r^j_{\mathsf{T}^j_i})\|_F\leq\varsigma$; under certain conditions that we list below, it is shown in \cite{cossonLowRankGradientDescent2023}[Thm. 3.4] (as well as in \cite{zhao2024galore}[Theorem 3.8], for reversible layers) that $\mathsf{T}_i$'s are finite. 
+Then, for $i\in\mathbb{N}$, and $t\in[\mathsf{T}_i+1,\mathsf{T}_{i+1}]$, the AdaRankGrad weight update is given by,%
+$$\bbw_{t}^j=\bbw_{\mathsf{T}_i}^j+\sum_{\ell=\mathsf{T}_i+1}^{t} \eta_t\bbp^j_{\mathsf{T}_i}(r^j_{\mathsf{T}_i}) \rho_\ell\left((\bbp^j_{\mathsf{T}_i}(r_{\mathsf{T}_i}))^{\top} \bbg^j_{\ell} \bbr^j_{\mathsf{T}^j_i}(r^j_{\mathsf{T}^j_i})\right) (\bbr^j_{\mathsf{T}_i}(r^j_{\mathsf{T}^j_i}))^{\top},$$%\nonumber
+for $j\in[L]$, where $\eta_t$ is the learning rate at time $t$ adapted by $\rho_t$, and $\bbw_{\mathsf{T}_0}=\bbw_0$ is a pre-trained model, in a case of fine-tuning task, or a given weights initialization, in case of pre-training task. In the sequel, we let $\eta\triangleq\eta_0$ denote the initial learning rate, and for simplicity of notation, when clear from the context, we drop the dependency of the various notations on the layer index $j$.
+Our algorithm comprises four main blocks, all contained within an outer loop that terminates once we reach convergence. The role of each block is as follows.
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Block 1}: We select the (approximated) subspace along the directions of the $r$ largest eigenvectors, using Algorithm \ref{alg:adaptive_srsi}. The number of orthogonal directions $r$ is determined by the information threshold required to preserve the gradient information, according to \eqref{def::approximate_error}.
+    \item \textbf{Block 2}: We transform the first and second gradient moments evaluated during the Adam update steps between the previous and the updated subspace. The main reason for this transformation is because, as will be seen below, in the fourth block, the first and second moments of the gradients are aligned with the previous projected subspace, and thus, a transformation is needed to convert them from the previous subspace to the current one.
+    \item \textbf{Block 3}: We tune the parameters during the low-rank update step. The stopping condition triggering the update of the orthogonal projection matrix is based on the convergence of the projected gradient onto the subspace.
+    \item \textbf{Block 4}: The actual pre-trained model parameters are updated, using the low-dimensional and memory-efficient projected gradients on the selected subspace.
+\end{itemize}
+\begin{algorithm}[t]
+\footnotesize
+\caption{Adaptive low-rank and moments gradient (AdaRankGrad)}
+\label{alg::AdaRankGrad}
+\begin{algorithmic}
+\STATE \textbf{Input:} A Layer $\bbw\in\mathbb{R}^{n \times m}$ from $\boldsymbol{\theta}$, dataset $\mathcal{D}$, loss function $\mathcal{L}$, scale factor $\alpha$, information thershold $0<\eta_{\text{th}}<1,$ initial rank $r_{\text{init}}$, maximal rank $r_{\text{max}},$ initial learning rate $\alpha$, and small numbers $\varsigma_1,\varsigma_2>0$.
+\STATE \textbf{Initialization:} $t=0.$
+    \STATE Sample batch $B \longleftarrow\{x_i, y_i\}_{i=1}^{|B|}{\color{gray}\sim\mathcal{D}}$
+    \STATE Compute batch gradient $\bbg_t \leftarrow \sum_{i=1}^{|B|}\frac{\partial}{\partial \bbw} \mathcal{L}\left(\Phi(x_i, \boldsymbol{\theta}),y_i\right)$\hfill{\color{gray}\COMMENT{For unsupervised $ \mathcal{L}\left(\Phi(x_i, \boldsymbol{\theta})\right)$}}
+\WHILE{$\|\bbg_t\|_F>\varsigma_1$} 
+    \STATE {\color{blue}\hrulefill}
+    \STATE \textbf{\color{blue}Block 1: Adaptive subspace selection}
+    \STATE $\bbq_t, r_t \leftarrow$ IASS$\left(\bbg_t,r_{\text{init}},r_{\text{max}},\eta_{\text{th}}\right)$ \hfill{\color{gray}\COMMENT{Approximated $r_t$-dimension subspace: $Q_t^{r_t\times n}$ projected matrix}}
+    {\color{blue}\\\hrulefill}
+    \STATE \textbf{\color{blue}Block 2: Moments subspaces transformation}
+    \STATE $\bbr_t^{r_t \times r_{t-1}} \leftarrow \bbq_t^\top\bbq_{t-1} \text{ if } t\geq 1, \text{ else } \mathbf{0}^{r_t \times r_{t-1}}$
+    \STATE $\bbm_t^{r_t \times m} \leftarrow \bbr_t \bbm_{t-1},\text{ if } t\geq 1, \text{ else } \mathbf{0}^{r_t \times m}$\hfill{\color{gray}\COMMENT{$1^{st}$-order moment}}
+    \STATE $\bbv_t^{r_t \times m} \leftarrow \bbr_t\bbv_{t-1},\text{
+ if } t\geq 1, \text{ else } \mathbf{0}^{r_t \times m}$\hfill {\color{gray}\COMMENT{$2^{st}$-order moment}}
+    {\color{blue}\\\hrulefill}  
+    \STATE\textbf{\color{blue}{Block 3: Low-rank optimization}}
+    \STATE $\hat{\bbg}_t\leftarrow\bbq_t^\top\bbg_t$ \hfill{\color{gray}\COMMENT{Projected gradient on the approximated $r_t$-dimension subspace}}\WHILE{$\|\hat{\bbg}_t\|_F>\varsigma_2$}
+        \STATE
+        {\color{blue}\hrulefill}
+        \STATE\textbf{\color{blue}Block 4: Adam update step} 
+        \STATE $\bbm_t  \longleftarrow \beta_1 \bbm_t + \left(1 - \beta_1\right) \hat{\bbg}_t$
+        \STATE $ \bbv_t  \longleftarrow \beta_2 \bbv_t + \left(1 - \beta_2\right) \hat{\bbg}_t^2$
+        \STATE $\hat{\bbm}_t  \longleftarrow \bbm_t / \left(1 - \beta_1^t\right)$
+        \STATE $\hat{\bbv}_t \longleftarrow \bbv_t / \left(1 - \beta_2^t\right)$
+        \STATE $\bbw_t  \longleftarrow \bbw_t - \alpha \bbq_t\hat{\bbm}_t / \left(\sqrt{\hat{\bbv}_t} + \epsilon\right)$
+        {\color{blue}\\\hrulefill}
+        \STATE $t\gets t+1$
+        \STATE Sample batch $B \longleftarrow\{x_i, y_i\}_{i=1}^{|B|}{\color{gray}\sim\mathcal{D}}$
+        \STATE Compute batch gradient $\bbg_t \leftarrow \sum_{i=1}^{|B|}\frac{\partial}{\partial \bbw} \mathcal{L}\left(\Phi(x_i, \boldsymbol{\theta}),y_i\right)$
+        \STATE $\hat{\bbg}_t\leftarrow\bbq_t^\top\bbg_t$
+    \ENDWHILE 
+    {\color{blue}\\\hrulefill}
+\ENDWHILE \hfill {\color{gray}\COMMENT{Exit by convergence criteria could alternatively be defined by the number of epochs}}
+\STATE \textbf{Return} $\bbw_t$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{theorem}[Convergence of Algorithm \ref{alg::AdaRankGrad}]\label{thm:2}
+For a loss function $\mathcal{L},$ and given architecture $\Phi$, suppose that the compositions of $f\equiv\mathcal{L}\left(\Phi(\cdot)\right)$ is $\beta$-smooth non-convex function that are bounded by some $M\in\mathbb{R}_+$. Let $\bbg_t^j$ denote the gradient matrix w.r.t. the $j$th reversible layer at time $t\in\mathbb{N}$. Assume that $\|\bbg_t^j\|_F\leq D$, for all $j\in[L]$ and $t\in\mathbb{N}$, where $D\in\mathbb{R}_+$. Then, for any $\varepsilon> 0$, there exists $\mathsf{C}\in\mathbb{R}_+$ such that for all $\mathsf{T}_N>\frac{\mathsf{C}}{\varepsilon^2}$, it holds that $\frac{1}{\mathsf{T}_NL}\sum_{j=1}^{L}\sum_{i=0}^{N-1}\sum_{t=\mathsf{T}_{i}}^{\mathsf{T}_{i+1}-1}\left\|\bbg_t^j\right\|_F^2 \leq \varepsilon
+$. In particular, Algorithm \ref{alg::AdaRankGrad}, with vanilla SGD weight update\footnote{We focus on SGD for the simplicity (as is standard practice in related literature, e.g., \citep{zhao2024galore}).}, $\varsigma_2\triangleq\varsigma_{2,i}=\sqrt{1-\eta_{\text{th}}}\cdot\left\|\bbg_{\mathsf{T}_{i-1}}\right\|_F^2$, where $i$ is the Block $3$ entry counter, and learning rate $\alpha<2/\lambda_{\max}$, achieves an $\varepsilon$-critical point,\footnote{Also known as $\varepsilon$-stationary, see, e.g., \citep{cossonLowRankGradientDescent2023}.} i.e., $\left\|\bbg_t^j\right\|_F^2\leq\varepsilon$, for some $t\in\mathbb{N}$, and any $j\in[L]$.
+\end{theorem}
+The proof of Theorem~\ref{thm:2} can be found in Section~\ref{sec:proofs}. A few important comments are in order. First, to reduce memory usage, we apply in Algorithm \ref{alg::AdaRankGrad} a per-layer weight update during backpropagation, as proposed by recent works, see, e.g., \cite{lv2024adalomolo}. This is in contrast to common optimizers which usually update all weights after backpropagation by storing the full gradients in memory, which could be highly inefficient. Second, note that the Adam update step block in Algorithm \ref{alg::AdaRankGrad} can be replaced by any quantized Adam variant, e.g., \cite{NIPS2017_1c303b0e,chen2021quantized,seok2021quantized}, and as so allows to obtain tasked fine-tuned quantized model or quantized adaptor; this is discussed in more detail below. Finally, we would like to mention here that one can easily apply 4-bit projected gradient updates, as introduced in Q-GaLore \citep{zhang2024qgalore}.
+
+If, after fine-tuning, one wishes to create an adapter (i.e., a parallel low-dimensional LoRA type model) alongside the original model, this can be done efficiently as follows. First, we calculate the training weights gap $\Delta\triangleq\bbw_\text{Fine-Tuned}-\bbw_\text{Pretrained}$, where $\bbw_\text{Fine-Tuned}$ is the model weight at the end of the process, and $\bbw_\text{Pretrained}$ is the original model weight. Then, we find the $r_\text{Adaptor} \triangleq \mathsf{rank}(\Delta)$, using some matrix ranking algorithm, and finally, we solve 
+$\min_{\bba\in\mathbb{R}^{n \times r_\text{Adaptor}}, \bbb\in\mathbb{R}^{r_{\text{Adaptor}} \times m}} \left\|\Delta - \bba \bbb \right\|_F^2$, using any optimization algorithm (e.g., gradient descent). We note that any solution to this matrix factorization optimization problem is well-known as a global optimum \citep{NIPS2016_f2fc9902}.
+
+
+\section{Experiments}
+
+In this section, we test the performance of our algorithm on real-world datasets. Before discussing the setup we rely on in our experiments, we define four measures for memory usage reduction in the rank-adaptive projection matrices. Specifically, %recall that $\bbw_j$ is the $j$th layer of a given LLM. 
+for the $j$th layer, we define \emph{the effective layer-gradient-rank}, by,
+$\mathcal{R}^j_\text{adap}\triangleq\frac{\sum_{t=0}^{\mathsf{T}-1}\mathsf{R}^j_t}{\mathsf{T}}$, where $\mathsf{R}_t^j$ is the rank of the $j$th layer projection matrix at time $0\leq t\leq \mathsf{T}-1$, for some $\mathsf{T}\in\mathbb{N}$, and accordingly the \emph{total weighted-average effective rank} is defined as $\mathcal{R}_\text{adap}\triangleq \frac{\sum_{j=1}^{L}\sum_{t=0}^{\mathsf{T}-1}\mathsf{R}^j_t(d_j+d_{j+1})}{\mathsf{T}\cdot\sum_{j=0}^{L}(d_j\cdot d_{j+1})}.$ Following that, we define the average per-layer reduction in memory footprint, when compared to the non-adaptive low-rank fine-tuning, by  $\mathcal{M}_{\text{red}}^j\triangleq(\bar{\mathsf{R}}^j - \mathcal{R}^j_\text{adap})\cdot(d_j+d_{j+1}),$ where $\bar{\mathsf{R}}^j$ is the time-independent non-adaptive rank (such as in Galore). Finally, we define the total memory reduction by $\mathcal{M}_{\text{red}}\triangleq\sum_{j=1}^{L}(\bar{\mathsf{R}}^j - \mathcal{R}^j_\text{adap})\cdot(d_j+d_{j+1}).$
+\subsection{Fine-tuning on GLUE benchmark}
+We evaluate our model on the GLUE benchmark \citep{wang2019superglue} by fine-tuning the pre-trained Roberta-base model \cite{liu2019roberta} on 8 tasks. We compare the results against full fine-tuning, LoRA, and GaLore methods and present them in Table \ref{tab:comparison}. We report the overall (matched and mismatched) accuracy for MNLI, Matthew’s correlation for CoLA, Pearson correlation for STS-B, F1-score for MRPC, and accuracy for other tasks.
+As can be seen, our method improves the accuracy of fine-tuning while consuming less training memory on average. In addition, in Figure \ref{fig:rankvsmemory2}, we present the average memory reduction measured at the end of each epoch (blue) and the corresponding effective rank (green). Finally, empirical analysis of the hyperparameters is provided in Figures~\ref{fig:rank_eta}.
+\begin{table}[hbt]
+\centering
+\caption{Evaluating AdaRankGrad comparing to state-of-the-art memory-efficient fine-tuning methods on GLUE benchmark using pre-trained RoBERTa-Base. For AdaRankGrad, we present accuracy results with average effective rank. }
+\resizebox{\linewidth}{!}{
+\begin{tabular}{lccccccccc}
+\hline
+\textbf{Model}  & \textbf{Memory} & \textbf{CoLA} & \textbf{STS-B} & \textbf{MRPC} & \textbf{RTE} & \textbf{SST2} & \textbf{MNLI} & \textbf{QNLI} & \textbf{QQP} \\
+\hline
+Full Fine-Tuning  & 747M & 62.24 & 90.92 & 91.30 & 79.42 & 94.57 & 87.18 & 92.33 & 92.28 \\ \hline
+LoRA (rank=4) & 257M & 61.38 & 90.57 & 91.07 & 78.70 & 92.89 & 86.82 & 92.18 & \textbf{91.29} \\
+GaLore (rank=4) & 253M & 60.35 & 90.73  & 92.25 & 79.42 & 94.0  & 87.0 & 92.24 & 91.06 \\ 
+AdaRankGrad (Initial rank=4) & \textbf{202M} & \textbf{61.4}(3.71) & \textbf{90.97}(3.79) & \textbf{92.6}(3.72) & \textbf{81.23}(3.65) & \textbf{94.8}(3.91)  & 86.6(3.69) & \textbf{92.5}(3.9) & 90.4(3.67) \\ \hline
+LoRA (rank=8) & 264M & 61.83 & 90.80 & 91.90 & 79.06 & 93.46 & 86.94 & 92.25 & \textbf{91.22} \\
+GaLore (rank=8) & 257M & 60.06 & 90.82 & 92.0 & 79.78 & 94.38 & 87.17 & 92.2   & 91.11  \\
+AdaRankGrad (Initial rank=8) & \textbf{237M} & \textbf{62.0}(6.41)  & \textbf{90.89}(7.77) & \textbf{92.5}(5.33) & \textbf{81.23}(6.64)  & \textbf{94.80}(5.69) & 86.5(6.00)  & \textbf{92.6}(6.54) & 89.7(6.00) \\ 
+\hline
+\end{tabular}}
+\label{tab:comparison}
+\end{table}
+
+\begin{figure}[htb]
+\centering
+\includegraphics[width=.4\linewidth]{MRPC_r8.png}
+\includegraphics[width=.4\linewidth]{RTE_r8.png}
+\caption{We present the effective rank measured for non-attention layers and corresponding memory reduction for AdaRankGrad trained on MRPC (left panel) and RTE (right panel) datasets from the GLUE benchmark.}
+\label{fig:rankvsmemory2}
+\end{figure}
+\begin{figure}[H]
+\centering
+\includegraphics[width=.45\linewidth]{effective_rank_xi.png}
+\includegraphics[width=.45\linewidth]{F1_eta.png}
+\caption{The left graph presents the effective rank measured for different values of $\eta_{th}$ while training AdaRankGrad on MRPC dataset. The right graph present the effective rank measured for different values of $\eta_{th}$ while training AdaRankGrad on MRPC dataset.}
+\label{fig:rank_eta}
+\end{figure}
+\subsection{Fine-tuning Geneformer on Biological Omics Tabular Data}
+High-throughput omics technologies, such as next-generation sequencing \cite{reis2009next}, allow for the simultaneous measurement of thousands to millions of biological molecules, capturing biological processes at the tissue or single-cell level. Recent studies have aimed to construct foundation models for omics data \cite{cui2024scgpt,theodoris2023transfer}. Unfortunately, the complexity of omics data makes the use of low-rank optimization methods such as LoRa sub-optimal for foundation omics models, and therefore, training is often based on relatively high ranks \citep{chen2024quantized}. In this experiment, we demonstrate that the proposed approach can alleviate this problem due to the adaptive low-rank projection of gradients.
+We conducted a fine-tuning experiment for cell classification, specifically focusing on the Classification of Cardiomyopathy Disease States. We used the \emph{Geneformer gf-12L-30M-i2048}
+\footnote{A transformer-based model trained on ~30 million single-cell transcriptomes for gene classification and in silico perturbation analysis. It has 12 layers with an input size of 2048 genes per cell, designed to understand gene network dynamics. Huggingface: \url{https://huggingface.co/ctheodoris/Geneformer}} 
+as our pre-trained base model, which is based on the BERT model and pre-trained on 30 million single-cell transcriptomes \citep{theodoris2023transfer, devlin2018bert}. Following the setup proposed in \citep{chen2024quantized}, we fine-tuned our method with a maximal rank of 16 on approximately 187,000 samples for three epochs, with a batch size of 16. We evaluated the model on a test set of size 17,228. Figure \ref{fig:geneformer} presents the Macro-F1 score and Accuracy measured for each epoch. As shown, our method converges faster with a stable improvement over LoRA.
+\begin{figure}[H]
+\vskip -0.1 in
+\centering
+\includegraphics[width=.38\linewidth]{cell_class_accuracy.png}
+\includegraphics[width=.38\linewidth]{cell_class_macrof1.png}\\
+\vskip -0.1 in
+\caption{We evaluate AdaRankGrad in the Geneformer fine-tuning task and present Accuracy (left panel) and Macro-1 (right panel) measurements. The adaptive low-rank projections improve the model converges compared to LoRA and Galore methods.}
+\vskip -0.1 in
+\label{fig:geneformer}
+\end{figure}
+
+\subsection{Pre-training LLAMA on C4 Dataset} Here, we repeated the comparison presented in \cite{zhao2024galore} [Table 2] to evaluate AdaRankGrad performance to the state-of-the-art method, in terms of perplexity and memory usage. We evaluate AdaRankGrad by training large LLaMA-based models on the C4 dataset, a cleaned and massive version of Common Crawl's web corpus \citep{raffel2020exploring}. This dataset is primarily used for pre-training language models and learning word representations. To closely mimic practical pre-training scenarios, we train on a large dataset without repeating data, scaling model sizes up to $350$ million. The results are presented in Table~\ref{ex::pretraining}.
+\begin{table}[H]
+\centering
+\caption{The LLaMA 7B model was pre-trained on the C4 dataset for 120K steps. Validation perplexity and memory usage estimates reported.}
+\begin{tabular}{l|c|c|c}
+\hline \textbf{Steps}/\textbf{Tokens} & \textbf{8-bit GaLore} & \textbf{8-bit Adam} & \textbf{8-bit AdaRankGrad} \\
+\hline 40\text{K }/ 5.2\text{B} & 17.94 & 18.09 & \bf{17.86}\\
+80\text{K }/10.5\text{B} & 15.39 & 15.47 & \bf{15.27} \\
+120\text{K }/15.7\text{B} & 14.95 & \bf{14.83} & 14.87 \\
+\hline
+\textbf{Mem} & 18\text{G} & 26\text{G} & \bf{16.4}\text{G} \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\caption{A comparison of low-rank state-of-the-art algorithms for pre-training LLaMA models of varying sizes on the C4 dataset. We use initial rank $r_{\text{init}}=r$ for AdaRankGrad, w.r.t the $r$ presented in the last table raw. The information threshold $\eta_{\text{th}}=0.48$ for the three model training. The validation perplexity is presented, along with an estimate of the memory required for the total number of parameters and optimizer states in BF16 format. We used NVIDIA A100 for the three experiments.}
+\centering\begin{tabular}{lccc}
+\hline & $\mathbf{6 0 M}$ & $\mathbf{1 3 0 M}$ & $\mathbf{3 5 0 M}$ \\
+\hline Full-Rank & $34.06(0.36 \mathrm{G})$ & $25.08(0.76 \mathrm{G})$ & $18.80(2.06 \mathrm{G})$ \\
+\hline GaLore & $3 4 . 8 8(0.24 \mathrm{G})$ & $2 5 . 3 6(0.52 \mathrm{G})$ & $1 8 . 9 5(1.22 \mathrm{G})$ \\
+Low-Rank & $78.18(0.26 \mathrm{G})$ & $45.51(0.54 \mathrm{G})$ & $37.41(1.08 \mathrm{G})$ \\
+LoRA & $34.99(0.36 \mathrm{G})$ & $33.92(0.80 \mathrm{G})$ & $25.58(1.76 \mathrm{G})$ \\
+ReLoRA & $37.04(0.36 \mathrm{G})$ & $29.37(0.80 \mathrm{G})$ & $29.08(1.76 \mathrm{G})$ \\
+\textbf{AdaRankGrad} & $\mathbf{34.24}(0.206 \mathrm{G})$ & $\mathbf{25.22}(0.497 \mathrm{G})$ & $\mathbf{18.91}(1.106 \mathrm{G})$ \\
+\hline
+Training Tokens & 1.1 B & 2.2 B & 6.4 B \\
+$r / d_{\text{model}}$ & $128 / 256$ & $256 / 768$ & $256 / 1024$ \\
+\hline
+\end{tabular}
+\label{ex::pretraining}
+\end{table}
+
+
+\section{Discussion}
+
+In this paper, we present AdaRankGrad, a full-parameters efficient optimization scheme that applies adaptive low-rank updates without relying on a parallel low-rank adapter (LoRA), thus preserving the natural training dynamics. Unlike methods such as LoRA, which rely on parallel adapters, AdaRankGrad enables full parameter fine-tuning while maintaining low memory costs through efficient low-rank optimization updates. Moreover, unlike GaLore, AdaRankGrad leverages the natural phenomenon where the dimensionality of the approximated gradient decreases as training progresses. This allows adaptive updates of the projection subspace only when the gradients have converged to a lower-dimensional space, ensuring that optimization resources are fully utilized—no unnecessary updates occur before or after convergence. As demonstrated in Section~\ref{sec::experiments}, this approach results in superior prediction performance.
+
+AdaRankGrad offers a unique trade-off between memory efficiency and model performance. While it may slightly increase training time due to the need to determine an optimal rank for projecting subspace updates, these updates are infrequent. The search for the best subspace rank is conducted within a very narrow range, reducing the overall computational cost. To further mitigate this, we proposed an efficient subspace-update technique that significantly reduces the SVD-based subspace calculations by an order of magnitude. In practice, this optimization compensates for the additional time spent in subspace search, making AdaRankGrad a competitive choice compared to methods like GaLore.
+
+For future research, we suggest exploring other update steps besides Adam, such as AdaFactor, and studying different efficient algorithms for computing the subspace over which gradients are projected. Another promising avenue would be to investigate algorithms that search for the optimal subspace rank, which preserves a similar fraction of information as the full gradient. These directions could further enhance the efficiency and performance of optimization schemes like AdaRankGrad. 
+
+
+
+
+
+
+
+

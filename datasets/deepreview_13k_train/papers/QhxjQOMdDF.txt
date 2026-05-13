@@ -1,0 +1,380 @@
+\title{Addax: Utilizing Zeroth-Order Gradients to Improve Memory Efficiency and Performance of SGD for Fine-Tuning Language Models}
+
+\begin{abstract}
+
+Fine-tuning language models (LMs) with the standard Adam optimizer often demands excessive memory, limiting accessibility. The ``in-place'' version of Stochastic Gradient Descent (IP-SGD) and Memory-Efficient Zeroth-order Optimizer (MeZO) have been proposed as solutions to improve memory efficiency. However, IP-SGD still requires a substantial amount of memory, and MeZO suffers from slow convergence and degraded final performance due to its zeroth-order nature. This paper introduces {\em Addax}, a novel method that improves both memory efficiency and algorithm performance of IP-SGD by integrating it with MeZO. Specifically, Addax computes the zeroth- or first-order gradient of the data points in the minibatch based on their memory consumption and combines zeroth- and first-order gradient estimates to obtain the updated direction in each step.
+By computing the zeroth-order gradient of data points that require more memory and the first-order gradient of the ones that require less memory, Addax overcomes the slow convergence of MeZO and the excessive memory requirement of IP-SGD. Additionally, the zeroth-order gradient acts as a regularizer for the first-order gradient, further enhancing the model's final performance.
+Theoretically, we establish the convergence of Addax under mild assumptions, demonstrating faster convergence and less restrictive hyper-parameter choices than MeZO. Our extensive experiments with diverse LMs and tasks show that Addax consistently outperforms MeZO in terms of accuracy and convergence speed while having a comparable memory footprint. 
+In particular, our experiments using one A100 GPU on the OPT-13B model reveal that, on average, Addax outperforms MeZO in terms of accuracy/F1 score by $14\%$ and runs $15\times$ faster while having a comparable memory footprint to MeZO. In our experiments on the larger OPT-30B model, on average, Addax outperforms MeZO in terms of accuracy/F1 score by $>16\%$ and runs $30\times$ faster on a single H100 GPU. Moreover, Addax surpasses the performance of standard fine-tuning approaches, such as IP-SGD and Adam, in most tasks in terms of accuracy/F1 score with significantly less memory requirement.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Fine-tuning pre-trained language models (LMs) is a crucial step in a wide range of natural language processing tasks, including text classification and sentiment analysis~\citep{devlin-etal-2019-bert}, as well as their use in different domains~\citep{gururangan-etal-2020-dont, schwartz2019inducing, lu2019vilbert}. However, standard fine-tuning approaches (with the Adam optimizer) demand excessive memory requirement due to gradient and/or the optimizer state storage, presenting a challenge as LMs grow in scale~\citep{Brown-etal-Lanauge-2020, openai2023gpt4}. For instance, fine-tuning a 13-billion-parameter model like OPT~\citep{zhang2022opt} in mixed precision requires over 316 GB of memory, hindering accessibility for researchers and practitioners with limited resources and specialized hardware. 
+
+Recently, various memory-efficient methods for fine-tuning LMs have been proposed. In-context learning (ICL) utilizes a single {\it inference pass}, incorporating label examples in its context for prediction~\citep{Brown-etal-Lanauge-2020}. Despite its limited success, ICL's performance is shown to be less effective than (Adam) fine-tuning for medium-sized LMs~\citep{Brown-etal-Lanauge-2020}. As an alternative approach, Parameter-Efficient Fine-Tuning (PEFT) tunes a fraction of the network while freezing the rest of the parameters and significantly reduces the {\it parameters} needed for fine-tuning~\citep{Hu2020-lora, li-liang-2021-prefix, lester-etal-2021-power}. Despite its efficiency, fine-tuning LMs with PEFT may still require more memory than model inference. For example, fine-tuning OPT-13B with Adam with a batch size of $8$ requires $4\times$H100 GPUs (316GB total), whereas utilizing PEFT decreases this to $2\times$H100 GPUs (158GB total) with a batch size of $16$~\citep{Brown-etal-Lanauge-2020}. Nonetheless, this requirement is still $6 \times$ greater than the 25GB  needed for model inference.   
+
+Another approach for memory-efficient fine-tuning is to lessen the memory footprint of the optimizer. Recently, the  Memory-Efficient Zeroth-order Optimizer (MeZO) is proposed by~\citet{malladi2023MeZO}. MeZO generates gradient estimators solely through forward passes with minimal memory overhead. Unlike the classical zeroth-order optimization method ZO-SGD \citep{spall-1992-zo_sgd}, MeZO allows in-place perturbation of model parameters to avoid storing the perturbation vector. One desirable property of MeZO (and in general approaches that reduce the memory overhead of the optimizers) is that it can be combined with other methods, such as PEFT. Moreover, \citet{malladi2023MeZO} showed that the memory footprint of MeZO can be $12\times$ lower than  Adam. While being memory efficient, \textit{MeZO suffers from 1) slow convergence rate compared to standard fine-tuning methods such as Adam; and 2) possible degradation of the performance  (e.g. accuracy) of the fine-tuned model compared to Adam} (see the experiments in \cite{malladi2023MeZO} and Table~\ref{tab:opt-13B-main_results}). Observing these drawbacks, it is natural to ask:
+
+\begin{center}
+\noindent\fbox{
+    \parbox{0.8\linewidth}{
+\textbf{Question:}   Can we develop an optimizer for fine-tuning language models (LMs)  
+that requires significantly less memory than the standard Adam but still enjoys fast convergence and produces high-quality fine-tuned models?
+}}  
+    \end{center}
+
+In an effort to answer this question, we propose Addax (\textit{\textbf{ADD}ition of gr\textbf{A}dient estimates through memory-efficient e\textbf{X}ecution}),  a method that: \textbf{i)} is memory efficient,  \textbf{ii)} has fast convergence speed, and \textbf{iii)} achieves the best performance across a wide range of fine-tuning methods and tasks. Our specific contributions are as follows:
+\begin{enumerate}[leftmargin=*]
+    \item {\bf Algorithm design.} We develop Addax, a novel approach that cleverly assigns different batches of data to either MeZO or in-place SGD (IP-SGD) and combines the computed gradients. This strategic assignment of data points, based on input length, allows Addax to maintain a memory footprint comparable to MeZO while significantly improving performance. Specifically, Addax accelerates MeZO's convergence rate and boosts the final model's performance, effectively overcoming the limitations of zeroth-order optimization.  Our design is driven by two novel observations: 1) computing gradients for different data points requires varying memory, and 2) integrating zeroth-order updates with first-order methods enhances the quality of the fine-tuned model. 
+
+    \item {\bf Theoretical analysis.} Theoretically, we analyze Addax's convergence under mild assumptions in two scenarios: with and without the data assignment procedure. Unlike MeZO, the convergence rate of Addax is independent of model size without requiring the assumption of low-rankness of the Hessian. Additionally, we show that the hyperparameters for Addax are less restrictive compared to those of MeZO. %
+
+        \item {\bf Numerical comparisons.} We perform comprehensive experiments on a broad range of model architectures (e.g., masked LM and autoregressive LM), model scales ranging from 350M to 70B parameters, and tasks including classification, multiple-choice questions, and content generation. Compared to SGD and IP-SGD, Addax has a lower memory footprint and is on par with MeZO. Using a single A100 (40GB) GPU, Addax successfully fine-tunes the OPT-13B model on all nine tasks, while SGD fails on all tasks and IP-SGD fails on three due to memory limitations (see Figure~\ref{fig:opt-13B-accuracy}). Addax surpasses MeZO by 14\% in accuracy/F1 and converges $15\times$ faster on average, with a similar memory footprint. Furthermore, Addax outperforms Adam in seven out of nine tasks while reducing memory usage by up to $89\%$. When fine-tuning larger model like OPT-30B with a single H100 (80GB) GPU, Addax achieves superior performance over IP-SGD and MeZO on various tasks, e.g. test accuracy $16\%$ higher than MeZO, $4.8\%$ higher than IP-SGD when IP-SGD applicable (see Figure~\ref{fig:opt-30B-combined} and Table~\ref{tab:opt-30B-summary}). Similar results are observed when fine-tuning Addax on OPT-66B and Llama-2-70B using three H100 (240GB total) GPUs (See Table~\ref{tab:opt-66B-summary} and ~\ref{tab:llama-70B-summary}).    
+ 
+\end{enumerate}
+\begin{figure}[]
+    \centering
+    \begin{minipage}{\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/OPT-13B/OPT-13B-combined.pdf}
+        \caption{\footnotesize
+        Accuracy/F-1 score, memory, and convergence time resulted from fine-tuning the OPT-13B model with various algorithms on one A100 (40GB) GPU, except for Adam, which runs on five GPUs. The label ``OOM'' means the run encounters an out-of-memory error during fine-tuning, even with the smallest batch size.  Addax consistently outperforms other methods in terms of Accuracy, with GPU memory consumption comparable to MeZO. 
+        Except for Adam, all other methods are running in 16-bit mode. We do not report the time for Adam as it requires five GPUs.}
+        \label{fig:opt-13B-accuracy}
+    \end{minipage}
+    \begin{minipage}{\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/OPT-30B-combined.pdf}
+    \caption{\footnotesize 
+    Accuracy/F-1 score, memory, and convergence time resulted from fine-tuning the OPT-30B model with various algorithms on one H100 (80GB) GPU. The label ``OOM'' means the run encounters out-of-memory errors during fine-tuning. \ul{Addax leads to the best final accuracy in all experiments and has a comparable memory footprint to MeZO while converging orders of magnitude faster. 
+    }
+    \label{fig:opt-30B-combined}
+    \end{minipage}
+\end{figure}
+
+
+
+\section{Notations and Preliminaries}
+
+\subsection{Notations}
+We are interested in optimizing the (smooth and possibly non-convex) loss function
+\begin{equation}\label{eq:problem}
+    \min_{\ttheta\in\R^d} \bigg(\cL(\ttheta) := \E_{x \sim \cD}\left[\ell(\ttheta; x) \right] \bigg),
+\end{equation}
+ parameterized by $\ttheta \in \R^d$, where $\cD$ denotes the (fine-tuning) data distribution and $x$ denotes the (fine-tuning) data point. 
+Throughout, we mark the values related to zeroth- and first-order gradient with $(\cdot)^0, (\cdot)^1$, respectively, and denote the iteration and coordinate indices as $(\cdot)_t, (\cdot)_i$, where $t\in\{0,\dots, T\}, i\in \{1,\dots, d\}$. In addition, we assume $\ttheta$ parameterized an $M$-layer network, i.e., $\ttheta=(\ttheta_1, \dots, \ttheta_M)$, where $\ttheta_m \in \R^{d_m}$ and $\sum^{M}_{m=1}d_m=d$. The maximum sequence length in the dataset $\mathcal{D}$ is denoted by $L_{max}$. We slightly abuse the notation and denote the loss evaluated on a minibatch $\cB$ as $\cL(\ttheta;\cB) \bydef \frac{1}{B}\sum_{x\in\cB}\ell(\ttheta; x)$.
+
+
+
+\subsection{Memory-Efficient Zeroth-order Optimizer}
+MeZO~\citep{malladi2023MeZO} is a memory-efficient fine-tuning approach based on the zeroth-order stochastic gradient descent method (ZO-SGD). The update step of MeZO follows SGD, i.e., $\ttheta_{t+1}=\ttheta_t-\eta \widehat{\nabla} \cL\left(\ttheta_t ; \cB^0_t\right)$, with the key difference of using zeroth-order gradient $\widehat{\nabla} \cL\left(\ttheta_t ; \cB^0_t\right)$ estimated on minibatch $\cB^0_t$, instead of first-order gradient $\nabla \cL\left(\ttheta_t ; \cB^1_t\right).$ The zeroth-order gradient is estimated using Simultaneous Perturbation Stochastic Approximation (SPSA, \citep{spall-1992-zo_sgd}):
+{\small \begin{equation}
+\label{eq:spsa}
+\widehat{\nabla} \mathcal{L}(\boldsymbol{\theta} ; \mathcal{B})=\frac{\mathcal{L}(\boldsymbol{\theta}+\epsilon \boldsymbol{z} ; \mathcal{B})-\mathcal{L}(\boldsymbol{\theta}-\epsilon \boldsymbol{z} ; \mathcal{B})}{2 \epsilon} \boldsymbol{z},
+\end{equation}}%
+where $\bz$ is a random search direction, e.g., $\bz\sim \mathcal{N}(\mathbf{0},\mathbf{I}).$
+In ZO-SGD, SPSA requires generating and storing $\bz \in \R^d$ multiple times during model perturbation, $\ttheta+\epsilon\bz, \ttheta-\epsilon\bz$, which is memory inefficient. MeZO reduces memory consumption in the implementation of SPSA by only storing the random seed that generates $\bz$, reducing memory consumption from $\cO(d)$ to $\cO(1)$.
+
+However, due to the inherent bias and higher noise level in the zeroth-order gradient estimate~\citep{nesterov2017random}, MeZO suffers from slower convergence and worse final model performance compared to first-order methods, c.f.~\citet[Table 1]{malladi2023MeZO}, and the experiments in section~\ref{sec: Experiments}.
+
+
+\subsection{Preliminaries and Major Observations}\label{sec:background:2}
+
+In this subsection, we provide the key observations behind the development of Addax:
+
+\noindent\textbf{SGD can match the performance of Adam in fine-tuning tasks.} 
+Although Adam and AdamW~\citep{kingma-2015-adam,loshchilov2018decoupled} have demonstrated better performance than SGD in training deep learning models from scratch, they require additional memory to store optimizer states, which is unfavorable in fine-tuning LMs. On the other hand, it has been observed that SGD achieves comparable performance to Adam in fine-tuning tasks
+(see, e.g., \citet{zhang2024transformers} and \cite{lv2023full}). This observation is also re-confirmed in our experiments showing that fine-tuning LMs using (16-bit) SGD can achieve comparable performance to fine-tuning with (32-bit) Adam. For example, in the right panel of Figure~\ref{fig:motivation}, in three fine-tuning tasks of RTE, CB, and COPA~\citep{wang2019superglue}, SGD leads to higher performance while requiring significantly less memory. The success of using SGD in fine-tuning LMs is attributed to the relative ``nice'' landscape of fine-tuning tasks of LMs~\citep{hao2019visualizing, zhang2024transformers}.
+\begin{figure}[!tb]
+\begin{subfigure}{.5\textwidth}
+    \centering
+      \includegraphics[width=0.9\linewidth]{figures/OPT-13B-profiling/mezo_and_sgd_IP_300_OPT-13B.pdf}
+  \end{subfigure}
+\begin{subfigure}{.5\textwidth}
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/Motivation-plots/scatter_motivation.pdf}\llap{\shortstack{%
+        \includegraphics[scale=0.42]{figures/Motivation-plots/legend_scatter_motivation.pdf}\\
+        \rule{0ex}{0.8in}%
+      } \rule{-0.8in}{0ex}}
+\end{subfigure} 
+\caption{\small \textbf{Left}: Memory profile of fine-tuning OPT-13B with IP-SGD and MeZO on a synthetic dataset with a fixed sequence length of $300$. \textbf{Right:} Fine-tuning OPT-13B using IP-SGD  and small batch sizes (BS) can outperform Adam while consuming significantly lower memory. }
+\label{fig:motivation}
+\end{figure}
+\noindent\textbf{Memory-efficient implementation of SGD via ``in-place'' updates.} 
+To reduce the memory footprint of SGD, several studies have explored the utilization of {\it in-place (IP)  updates} during backward propagation~\citep{zhao2024galore, lv2023full}. Instead of separating the backward propagation and weight update steps, which require storing the gradients for all layers, in-place SGD (IP-SGD) combines the two steps by updating the weights in each layer as soon as the gradients are computed and immediately discards the gradient after it has been used. In-place update avoids storing the gradients of the full model and, thus, significantly reduces the memory footprint of SGD. 
+
+Though improving over SGD, IP-SGD may still require more memory than MeZO. To compare the memory consumption of IP-SGD and MeZO, we record the memory consumption as a function of the batch size in the left panel of Figure~\ref{fig:motivation}. As illustrated in the figure, with a memory constraint of 30GB, we can use a batch size of 18 for running MeZO, while we can only use a batch size of 2 for running IP-SGD. 
+
+
+ \begin{wrapfigure}{r}{0.49\textwidth}
+  \begin{center}
+    \includegraphics[width=0.98\linewidth]{figures/OPT-13B-profiling/SGD_IP-SGD_memory.pdf}
+  \end{center}
+  \label{fig:sequence_memory_profiling}
+\end{wrapfigure}
+\noindent {\bf Memory required for computing gradient depends on the input sequence length.}
+
+We observe that \textit{in fine-tuning LM models, the memory required for first-order gradient estimation depends on the maximum input sequence length (in tokens).} In Figure~\ref{fig:sequence_memory_profiling}, we record the memory consumption of SGD, IP-SGD, and MeZO with fixed batch size and varying input sequence length. As illustrated in the figure, the memory consumption of all algorithms increases as the input sequence length increases, and the memory increase of IP-SGD is much faster than MeZO.
+
+ 
+
+With the above observations in hand, we discuss our algorithm, Addax, in the next section.
+
+
+\section{Addax}
+
+Building on the insights from Section~\ref{sec:background}, we propose Addax, a method that assigns data batches to either MeZO or IP-SGD based on memory needs and then combines their gradients. In memory-limited scenarios, Addax reduces memory usage by assigning shorter sequences to IP-SGD and longer ones to MeZO, leading to a similar convergence rate as IP-SGD, much faster than MeZO, while keeping a similar memory footprint, significantly less than IP-SGD. Furthermore, incorporating zeroth-order gradients with first-order gradients can enhance the final model performance. We first propose the Addax algorithm, provide its convergence properties, and finally discuss how incorporating the zeroth-order gradient benefits SGD in the final model performance.
+
+\subsection{Algorithm Overview}
+Addax starts by partitioning the dataset into data points with long/short sequence length, i.e.,  $\mathcal{D} = \mathcal{D}^0 \cup \mathcal{D}^1$  where $\mathcal{D}^0 = \{x \in \mathcal{D} \,| \, \textrm{length}(x) > L_T\}$ and $\mathcal{D}^1 = \{x \in \mathcal{D} \,| \, \textrm{length}(x) \leq  L_T\}$ for some given threshold hyper-parameter~$L_T$, where $\textrm{length}(\cdot)$ measures the sequence length of a data point. As discussed in Section~\ref{sec:background:2}, computing gradients on data points in $\mathcal{D}^1$ requires much less memory than computing the gradients in $\mathcal{D}$ because the maximum input sequence length of $\mathcal{D}^1$ is capped by $L_T$, which is smaller than $L_{max}$. With this data partition, Addax computes the zeroth-order gradient on the data points with long sequence length in $\mathcal{D}^0$ while computing the first-order gradients for the data points with short sequence length in $\mathcal{D}^1$, resulting in a considerable memory reduction compared with IP-SGD. In particular, at each iteration of the algorithm, Addax draws a random batch~$\mathcal{B}^0$ (with $|\mathcal{B}^0| = K^0$) of data points from $\mathcal{D}^0$ and a random search direction~$\mathbf{z}\in \mathbb{R}^d$ with $\mathbb{E}[\bz] = 0$ and $\mathbb{E}[\bz\bz^T] = \mathbf{I}$. Then, using the drawn samples, it utilizes SPSA to estimate the  directional derivative of the objective function in the direction~$\mathbf{z}$ at the point $\boldsymbol{\theta}$ with a small perturbation size $\epsilon$:
+\[g^0 = \frac{1}{K^0}\sum_{x \in \mathcal{B}^0} \frac{\ell(\boldsymbol{\theta}+\epsilon \boldsymbol{z} ;x)-\ell(\boldsymbol{\theta}-\epsilon \boldsymbol{z} ; x)}{2 \epsilon}.\]
+Then, Addax draws a random batch~$\mathcal{B}^1$ (with $|\mathcal{B}^1| = K^1$) of data from $\mathcal{B}^0$ and computes $\mathbf{g}^1 = \frac{1}{K^1} \sum_{x \in \mathcal{B}^1} \nabla \ell(\boldsymbol{\theta};x).$ Finally, it updates the model parameters by:
+\begin{equation}
+\label{eq:addaxUpdate}
+\boldsymbol{\theta} \gets \boldsymbol{\theta} - \eta \left( \alpha \mathbf{z} g^0 +  (1-\alpha)\mathbf{g}^1 \right),
+\end{equation}
+where $\eta$ is the learning rate and $\alpha \in [0,1]$ is a mixing constant for combining the two gradient estimates. If one na\"ively implements the update rule in~\eqref{eq:addaxUpdate}, it needs to store the gradient~$\mathbf{g}^1$ and the direction $\bz$. However, as discussed in Section~\ref{sec:background}, 
+one can perform the update rule in~\eqref{eq:addaxUpdate} in-place, without storing the values of $\mathbf{g}^1$ or $\bz$. Such a memory-efficient implementation of Addax is described in \algref{alg:addax}. %
+We leave further detailed discussions on this algorithm to \appref{app:subroutine}. 
+
+\noindent\textbf {Addax without data assignment (Addax-WA).} When sufficient memory is available to perform IP-SGD, one might argue that there is no need to use zeroth-order gradients. However, as  demonstrated in our extensive experiments (see Figure~\ref{fig:further_discusssion} and Fine-tuning results for datasets SST-2, RTE, WSC of Addax ($L_T=320$) in Table~\ref{tab:opt-30B-main_results}),
+incorporating zeroth-order gradients still results in better final accuracy for the fine-tuned model. Therefore, even when memory constraints are not a concern, we continue to utilize zeroth-order gradients by randomly selecting a data batch and combining its zeroth-order gradient with IP-SGD. This is achieved by setting $\mathcal{D}^0 \gets \mathcal{D}$ and $\mathcal{D}^1 \gets \mathcal{D}$ in step~\ref{addax: total_dataset} of Algorithm~\ref{alg:addax}. This version of the algorithm is referred to as \textit{Addax-WA}.
+
+Having introduced Addax, we would like to comment on a recent related work. Concurrently with our work, \citet{zhang2024revisiting} propose a ``hybrid ZO-FO'' fine-tuning scheme for LLMs, which also integrates zeroth- and first-order gradient estimates. 
+However, their method differs significantly from ours. They limit backpropagation to the deeper layers and use zeroth-order optimization in the shallower layers. This approach prevents them from taking advantage of the memory savings offered by in-place update rules and does not harness the benefits of zeroth-order methods for improving the final model accuracy. In contrast, our approach utilizes in-place update rules, ensuring that memory usage does not scale significantly with model size and removing the need to limit backpropagation to specific layers. Furthermore, we allocate data to optimizers differently, leading to additional major memory savings.
+ 
+
+
+\begin{algorithm}[tb!]%
+\begin{algorithmic}[1]
+\STATE {\bfseries Input:} $\vtheta$ with $M$ Layers, $T, \mathcal{L}, L_T, L_{max}, K^0, K^1$, perturbation scale $\epsilon$, mixing parameter $\alpha \in [0,1]$, and datasetl~$\mathcal{D}$. 
+ \IF{$L_T \geq L_{max}$}
+     \STATE $\mathcal{D}^0 \gets \mathcal{D}$, $\mathcal{D}^1 \gets \mathcal{D}$ \label{addax: total_dataset}
+ \ELSE
+   \STATE $\mathcal{D}^0 \gets \{x \in \mathcal{D} \,| \, \textrm{length}(x) > L_T\}$, $\mathcal{D}^1 \gets \{x \in \mathcal{D} \,| \, \textrm{length}(x) \leq  L_T\}$ \label{addax: dataset_partition} 
+ \ENDIF
+ \FOR{$t \in \{0, 1, \cdots, T-1\}$}
+    \STATE Randomly draw mini-batches $\mathcal{B}^{0}$, $\mathcal{B}^{1}$ uniformly from $\mathcal{D}^0, \mathcal{D}^1$ with $K^0$, $K^1$ samples.
+    \STATE $(g^0, s) \gets \CALL{ZerothGrad}(\vtheta, \mathcal{L}, \mathcal{B}^{0}, \epsilon)$ \; (\algref{alg:zeroth_grad}) \hfill {\it \# Estimate zeroth-order gradient}\label{addax:zerothgrad} 
+
+    \FOR{$m=M, \ldots, 1$} \label{addax:first_update_for_start}
+        \STATE $\boldsymbol{g}^1_m \leftarrow \frac{1}{K^1} \sum_{x \in \mathcal{B}^1} \nabla_{\btheta_m} \mathcal{L}(\boldsymbol{\theta}, x)$ \hfill {\it \# Estimate layer $l$ first-order gradient}\label{addax:backwardgrad}
+        \STATE $\boldsymbol{\theta}_{m} \leftarrow \boldsymbol{\theta}_{m}-\eta_t (1-\alpha) \boldsymbol{g}^1_m$ \hfill {\it \# Update model parameters} \label{addax:first_order_update}
+        \STATE $\boldsymbol{g}^1_m \leftarrow$ None \hfill {\it \# Clear gradients} \label{addax:clear_gradients}
+    \ENDFOR \label{addax:first_update_for_end}
+    \STATE Reset random number generator with seed $s$ \label{addax:resetseed} 
+    \FOR{$m=1, \ldots, M$} \label{addax:zeroth_update_for_start}
+        \STATE $\boldsymbol{z}_{m} \sim \mathcal{N}(0,\mathbf{I}_{d_m})$ \label{addax:gen_rand_direction}
+        \STATE $\boldsymbol{\theta}_{m} \leftarrow \boldsymbol{\theta}_{m} - \eta_t \alpha g^0 \boldsymbol{z}_{m} $ \hfill {\it \# Update model parameters}
+        \STATE $\boldsymbol{z}_{m} \gets$ None 
+    \ENDFOR \label{addax:zeroth_update_for_end}
+
+ \ENDFOR
+\STATE {\bfseries Output:} $\vtheta$ 
+\end{algorithmic}
+\caption{Addax: ADDition of grAdient estimates through memory-efficient eXecution 
+}\label{alg:addax}
+\end{algorithm}
+\subsection{Theoretical Analysis}
+\label{sec: theoretical_analysis}
+Depending on whether step~\ref{addax: total_dataset} or step~\ref{addax: dataset_partition} is executed in Algorithm~\ref{alg:addax}, the algorithm follows two distinct trajectories. We analyze each case separately. We begin by discussing the convergence result of Addax when step~\ref{addax: total_dataset} is applied, i.e., the Addax-WA algorithm. We start by presenting the convergence of Addax in the general nonconvex setting:
+\begin{theorem}[Informal]\label{thm:AddaxinformalNonconvex}
+    Assume that the loss $\ell$ is Lipschitz smooth, and the first-order stochastic gradient is unbiased and has bounded variance. Choosing $\eta_t = \eta = \cO(d^{-1/2}T^{-1/2})$ and $\epsilon = \cO(d^{-3/4}T^{-1/4}))$ in Addax leads to the convergence rate: 
+    \[\E\left[\norm{\nabla \cL(\ttheta_t)}^2\right] = \cO\left(\frac{1}{\sqrt{T}}\cdot\sqrt{\frac{(1-\alpha)^2}{K^1}+\frac{\alpha^2d}{K^0}}\right).\]
+    Further, by choosing the optimal  $\alpha = \frac{K^0}{K^0+dK^1}$, we obtain the 
+     convergence rate     $\cO\left(\sqrt{\frac{d}{T(K^0+dK^1)}}\right).$ 
+\end{theorem}
+ %
+\begin{remark}
+Compared with the convergence rate of zeroth-order methods~\cite{ghadimi2013stochastic, nesterov2017random}, the above convergence rate is nearly dimension-independent. In particular, the factor $\sqrt{\frac{d}{T(K^0+dK^1)}}$ is upper bounded by $\sqrt{\frac{1}{TK^1}}$.
+\end{remark}
+\begin{remark}
+The restrictions on the choice of parameters for Addax are more relaxed than the ones in zeroth-order methods. In particular, ZO-SGD (or MeZO) requires choosing smaller parameters $\epsilon = \cO(d^{-1}T^{-1/2})$ and $\eta = \cO(1/\sqrt{dT})$ for guaranteeing convergence. These choices are clearly more restrictive than the choice of parameters in Theorem~\ref{thm:AddaxinformalNonconvex}. Therefore, one can choose a larger learning rate in Addax compared to MeZO.
+\end{remark}
+
+\begin{remark}
+Prior works observed that pre-trained LMs have a low effective rank Hessian~\citep{aghajanyan2020intrinsic, li2018measuring, papyan2018full, papyan2020traces}. 
+\end{remark}
+
+\xwedit{Besides assuming the loss is nonconvex and smooth, we also provide the convergence of Addax for strongly convex and smooth loss functions:}
+\begin{theorem}[Informal]\label{thm:AddaxinformalConvex}
+    Assume that  $\cL$ is strongly convex, per-sample loss $\ell$ is Lipschitz smooth, and the first-order stochastic gradients are unbiased and have bounded variance. Choosing  $\eta_t = \eta = \cO(T^{-1} \ln(T))$ and $\epsilon = \cO(\alpha^{1/2}T^{-1/2}d^{-1/2})$ in Addax leads to the convergence rate: 
+    \[
+ \E[\norm{\ttheta_{T}-\ttheta_\star}^2]  = \cO\left(\frac{\ln(T)}{T}\left(\frac{(1-\alpha)^2}{K^1}+ \frac{\alpha^2d}{K^0}\right)\right)
+    \]
+    Further, by choosing the optimal  $\alpha = \frac{K^0}{K^0+dK^1}$, Addax converges with rate $\cO\left(\frac{\ln(T)d}{T(K^0+dK^1)}\right)$. 
+\end{theorem}
+
+The above results cover the case where step~\ref{addax: total_dataset} is executed in Algorithm~\ref{alg:addax}.
+
+\subsection{Further Discussions on the Benefits of Utilizing Zeroth-Order Gradients}
+\label{sec: addax insights}
+\xwedit{Beyond enhancing memory efficiency of IP-SGD by eliminating the need to compute gradients for input data with longer sequence lengths that are more memory-intensive, using zeroth-order updates alongside first-order updates improve the final performance and accuracy of the fine-tuned model compared with vanilla IP-SGD. We hypothesize the following reasons for this improvement in performance:}
+
+\noindent\textbf{Zeroth-order updates may help to escape spurious and sharp local minima. It has also been observed that injecting noise into the gradient can be beneficial in nonconvex optimization. For example, \citet{ge2015escaping} and \citet{jin2017escape} showed that adding noise to the gradient direction can help escape saddle points in nonconvex optimization. Moreover, \citet{zhou2019toward} showed (both experimentally and theoretically) that injecting noise into the gradient direction can help the algorithm in escaping bad/spurious local minima. One can also argue that noise would help the algorithm in finding \textit{flat minima} and avoid sharp local minima~\citet{liu2021noisy}. All these insights suggest that Addax can converge to better local minima. Our extensive experiments in Section~\ref{sec: Experiments} also show that Addax outperforms SGD in terms of the final performance of the fine-tuned model.
+\noindent\textbf{Zeroth-order updates act as a regularizer.}
+To simplify the presentation, consider the case where step~\ref{addax: total_dataset} is executed in Algorithm~\ref{alg:addax}. 
+Recall that the zeroth-order gradient is an unbiased estimator of the smoothed version of the actual loss. That is, $\E [g^0 \bz] = \nabla \widehat{\cL} (\btheta)$, where $\widehat{\cL} (\btheta) \triangleq \E_{\bz} \left[ \cL(\btheta + \epsilon\bz) \right]$ is the Gaussian smoothed version of the original loss function $\cL(\btheta)$ (see  \citet[Section 1]{nesterov2017random} and \citet[Section 9.3]{nemirovsky1983wiley}).  Thus, the Addax update rule in~\eqref{eq:addaxUpdate} aims to solve the optimization problem 
+\[
+\min_{\btheta} \; \; (1-\alpha) \cL (\btheta) + \alpha \widehat{\cL} (\btheta).
+\]
+Such a regularization, illustrated in Figure~\ref{fig:further_discusssion}, can help escape sharp local minima and find higher-quality solutions. When step~\ref{addax: dataset_partition} is executed, then this regularization is only done for some of the data points but still can be effective. This could be the reason that Addax finds higher-quality models in all our experiments.
+
+
+    
+
+\begin{figure}[!tb]
+\begin{subfigure}{.5\textwidth}
+    \centering
+      \includegraphics[width=0.9\linewidth]{figures/smoothing.pdf}
+  \end{subfigure}
+\begin{subfigure}{.5\textwidth}
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/addax_ablation.pdf}
+\end{subfigure} 
+  
+\caption{\small \textbf{Left}:   An illustration of loss function $\cL(\ttheta)$ alongside its Gaussian smoothed version $\widehat{\cL}(\ttheta)$. Minimizing $(1-\alpha) \mathcal{L}(\boldsymbol{\theta})+\alpha \widehat{\mathcal{L}}(\boldsymbol{\theta})$ can help escape sharp local minima and find higher quality solutions. \textbf{Right}: The regularization effect of zeroth-order gradient estimates on first-order gradient estimates. We fix $K^1 = 4$ in Addax across experiments while varying $K^0$ from 0 to 16. In the special case where $K^0 = 0$, Addax reduces to IP-SGD.} 
+\label{fig:further_discusssion}
+\end{figure}
+
+
+
+\section{Experiments}
+
+{\bf Experiment Settings.} 
+We conduct fine-tuning experiments on five different models: the masked LM RoBERTa-large of~\citep{liu2019roberta} (350M), the OPT-13B, OPT-30B, OPT-66B~\citep{zhang2022opt} and Llama-2-70B models~\citep{touvron2023llama}. 
+{\bf  Observations on OPT-13B experiments}\; Following~\citep{malladi2023MeZO},
+we fine-tune the OPT-13B model using a single A100 GPU with Addax, MeZO, IP-SGD, and SGD. The results are presented in Figure~\ref{fig:opt-13B-accuracy} and Table~\ref{tab:opt-13B-main_results}. In this configuration, we aim to select the largest possible batch sizes for MeZO, IP-SGD, and SGD and optimize $(K^0, K^1)$ and $L_T$ for Addax using one GPU. Averaging over nine tasks, Addax outperforms MeZO in this configuration by 14\% in accuracy/F1 score and converges $15 \times$ faster. To highlight the differences in convergence speed, we plot the convergence curves of Addax-WA and MeZO using the same batch size in Figure~\ref{fig: convergence_speed}.
+
+Remarkably, while Addax can successfully run on all datasets, SGD encounters out-of-memory errors on all nine tasks and IP-SGD  fails in three out of nine tasks. For the six datasets where IP-SGD is able to fine-tune, Addax achieves an average accuracy/F1 score of 81.7 compared to 80.3 for IP-SGD. Finally, Addax even outperforms Adam in seven out of nine tasks while it reduces up to $89\%$ the memory.
+{\bf  Observations on OPT-30B, OPT-66B, and Llama-2-70B experiments.}\; We also perform experiments on fine-tuning the larger-size models OPT-30B, OPT-66B, and Llama-2-70B. In particular, we fine-tune the OPT-30B model using one H100 GPU and report the results in Figure~\ref{fig:opt-30B-combined} and Table~\ref{tab:opt-30B-main_results}. To summarize
+the results, we report the averaged performance metrics (time, accuracy, and memory) in Table~\ref{tab:opt-30B-summary}. Our experiment on OPT-30B shows that while Addax has comparable memory consumption to MeZO, on average, Addax outperforms MeZO by more than $16\%$ in terms of final accuracy and converges~$30\times$ faster. 
+Moreover, SGD and IP-SGD failed in three out of seven tasks due to out-of-memory, while Addax can run on all tasks. In terms of the final accuracy of the fine-tuned model, Addax outperforms MeZO, SGD, and IP-SGD in all experiments in OPT-30B. 
+
+Similar observations are made in fine-tuning OPT-66B and Llama-2-70B models on three H100 GPUs: SGD and IP-SGD fail in some or all tasks due to out-of-memory, while Addax can efficiently fine-tune on all tasks. Addax outperforms other methods in six of seven tasks for the OPT-66B model and all six tasks for the Llama-2-70B model. Moreover, Addax outperforms MeZO in terms of final accuracy while being orders of magnitude faster. The results are summarized in Table~\ref{tab:opt-66B-summary} and Table~\ref{tab:llama-70B-summary}, repectively. 
+{\bf Observations on RoBERTa-large experiments.} Besides the large autoregressive language model, we also perform experiments on a smaller language model: RoBERTa-large with 350M parameters. The results can be found in Figure~\ref{fig:roberta-large-accuarcy}. As can be seen in this figure, 16/32-bit Addax outperforms zero-shot and MeZO across six different tasks and surpasses Adam in four out of six tasks. We also investigate the two important hyper-parameters, $\alpha$ and $\frac{K^1}{K^0 + K^1}$ on Addax's performance. The results can be found in Figure~\ref{fig: heatmap-hyperparameters-32-bit-addax} and Figure~\ref{fig: heatmap-hyperparameters-16-bit-addax}. As shown in the top row of the heatmaps of the two figures, it is observed that an increase in the ratio $\frac{K^1}{K^0+K^1}$ correlates with improved accuracy across tasks for both 16-bit and 32-bit Addax configurations. We did not identify a consistent trend for $\alpha$ across different tasks for both 16-bit and 32-bit Addax, suggesting that the optimal $\alpha$ requires tuning and could be task-specific.
+
+{\bf Zeroth-order gradient estimates improve model performance even when $K^1$ is small.} We report the detailed choice of the batch size for different algorithms in Table~\ref{tab:opt-13B-main_results}. Notably, fine-tuning OPT-13B using Addax with a smaller first-order batch size $K^1$ surpasses the performance of SGD with larger batch sizes. For example, Addax achieves an accuracy of $68.3$ on the WIC task with $K^1=4$, while IP-SGD achieves $66.0$ with a batch size of $12$. This suggests that the zeroth-order gradient estimate in Addax provides stability (and regularization of the gradient) even when $K^1$ is small and can effectively reduce memory usage.
+It is important to note that reported memory usage should be interpreted with caution, as it depends on the selected batch size. Reducing the batch size can lower memory usage, but it may come at the cost of accuracy and convergence speed. In our tables, when an entry is marked with $*$,  it means that even with the smallest batch size in our grid (i.e. BS = 2), the algorithm still results in out-of-memory.
+\noindent\textbf{Hyperparameter tuning.} For MeZO, IP-SGD, and SGD, we select the largest possible batch size from the hyperparameter search grid that maximizes GPU memory usage without causing out-of-memory. For Addax, we choose $K^0$, $K^1$, and $L_T$ values that optimize GPU usage during fine-tuning on the MultiRC dataset, as it is the task with the longest sequence length. Successful fine-tuning on MultiRC implies Addax can handle smaller tasks as well.
+
+\begin{table}[!tb]
+\centering
+\caption{\footnotesize Summary of OPT-30B fine-tuning results on one H100 GPU (80GB): The $\ols{\text{METRIC}}$, representing the average performance across short datasets (SST-2, RTE, WSC, WIC) and long datasets (BoolQ, MultiRC, SQuAD). $L_{max}$ is the maximum sequence length within a dataset. Detailed results are in Table~\ref{tab:opt-30B-main_results}.}
+\label{tab:opt-30B-summary}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{@{}l|ccc|ccc@{}}
+\toprule
+\multicolumn{1}{c|}{} &
+  \multicolumn{3}{c|}{Short Datasets ($L_{max} \leq 260)$)} &
+  \multicolumn{3}{c}{Long Datasets ($L_{max} > 260$)} \\
+ &
+  Physical &
+  $\ols{\text{Wall-clock time}}$ to &
+  $\ols{\text{Accuarcy/F1}} (\%)$ &
+  Physical &
+  $\ols{\text{Wall-clock time}}$ to &
+  $\ols{\text{Accuarcy/F1}} (\%)$ \\
+\multicolumn{1}{c|}{Method} &
+  $\ols{\text{Memory}}$ &
+  the best validation &
+  (Fine-Tuning) &
+  $\ols{\text{Memory}}$ &
+  the best validation &
+  (Fine-Tuning) \\ \midrule
+MeZO    & 66GB & 655.7min & 69.3 & 78GB & 776.0min & 68.7 \\
+SGD     & $*$    & $*$        & $*$    & $*$    & $*$        & $*$    \\
+IP-SGD  & 70GB & 3.0min   & 75.1 & $*$    & $*$        & $*$   \\
+Addax & 68GB & 14.5min  & 78.7 & 77GB & 28.5min  & 82.0 \\ \bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\begin{table}[!tb]
+\centering
+\caption{\footnotesize Summary of OPT-66B fine-tuning results on three H100 GPUs (240GB total): The $\ols{\text{METRIC}}$, representing the average performance across short datasets (SST-2, RTE, BoolQ, WSC, WIC, SQuAD) and long dataset (MultiRC). $L_{max}$ is the maximum sequence length within a dataset. Detailed results are in Table~\ref{tab:opt-66B-main_results}.}
+\label{tab:opt-66B-summary}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{@{}l|ccc|ccc@{}}
+\toprule
+\multicolumn{1}{c|}{} &
+  \multicolumn{3}{c|}{Short Datasets ($L_{max} \leq 420)$)} &
+  \multicolumn{3}{c}{Long Dataset ($L_{max} > 420$)} \\
+ &
+  Physical &
+  $\ols{\text{Wall-clock time}}$ to &
+  $\ols{\text{Accuarcy/F1}} (\%)$ &
+  Physical &
+  $\ols{\text{Wall-clock time}}$ to &
+  $\ols{\text{Accuarcy/F1}} (\%)$ \\
+\multicolumn{1}{c|}{Method} &
+  $\ols{\text{Memory}}$ &
+  the best validation &
+  (Fine-Tuning) &
+  $\ols{\text{Memory}}$ &
+  the best validation &
+  (Fine-Tuning) \\ \midrule
+MeZO    & 170GB & 511.5min & 72.4 & 197GB & 379.6min & 61.1 \\
+SGD     & $*$     & $*$        & $*$    & $*$     & $*$        & $*$    \\
+IP-SGD  & 170GB & 3.8min   & 77.1 & $*$     & $*$        & $*$    \\
+Addax & 173GB & 21.9min  & 80.6 & 215GB & 76.9min  & 80.6 \\ \bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\begin{table}[!tb]
+\centering
+\caption{\footnotesize Summary of Llama-2-70B fine-tuning results on three H100 GPUs (240GB total): The notation~$\ols{\text{METRIC}}$ represents the average performance across short datasets (RTE, WSC, WIC) and long datasets (BoolQ, MultiRC, SQuAD). $L_{max}$ is the maximum sequence length within a dataset. Detailed results are in Table~\ref{tab:llama-70B-main_results}.}
+\label{tab:llama-70B-summary}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{@{}l|ccc|ccc@{}}
+\toprule
+\multicolumn{1}{c|}{} &
+  \multicolumn{3}{c|}{Short Datasets ($L_{max} \leq 260)$)} &
+  \multicolumn{3}{c}{Long Dataset ($L_{max} > 260$)} \\
+ &
+  Physical &
+  $\ols{\text{Wall-clock time}}$ to &
+  $\ols{\text{Accuarcy/F1}} (\%)$ &
+  Physical &
+  $\ols{\text{Wall-clock time}}$ to &
+  $\ols{\text{Accuarcy/F1}} (\%)$ \\
+\multicolumn{1}{c|}{Method} &
+  $\ols{\text{Memory}}$ &
+  the best validation &
+  (Fine-Tuning) &
+  $\ols{\text{Memory}}$ &
+  the best validation &
+  (Fine-Tuning) \\ \midrule
+MeZO    & 149GB & 4609min & 61.1 & 186GB & 792.3min & 73.3 \\
+SGD     & $*$     & $*$        & $*$    & $*$     & $*$        & $*$    \\
+IP-SGD  & 189.5GB & 6.2min   & 78.2  & $*$     & $*$        & $*$    \\
+Addax & 190.1GB & 21.2min  & 80.1 & 218GB & 37.2min  & 88.9 \\ \bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+
+
+
+\section{Conclusion, Broader Impact, and Limitations}
+
+
+This paper introduces Addax, a memory-efficient fine-tuning method for  Language Models (LMs). By leveraging both first- and zeroth-order stochastic gradient estimates, Addax demonstrates improved memory efficiency without sacrificing convergence speed or model performance, as validated by our extensive experiments across various models, tasks, and datasets.  
+Addax has the potential to impact language model fine-tuning tasks for researchers and machine learning practitioners with limited resources. With a convergence time comparable to first-order methods and memory usage similar to zeroth-order methods, Addax provides a resource-efficient approach to optimizing higher-quality fine-tuned models. Furthermore, Addax has proven effective with large-scale models, and its memory-efficient nature can make large-scale fine-tuning more feasible by requiring fewer resources. 
+
+{\bf Limitation:} Addax introduces an additional hyper-parameter, $\alpha$, which requires tuning for best performance. While the search grid for $\alpha$ is small and includes only five different values across all OPT experiments, this is still an additional burden for institutions with limited resources. 
+
+{\bf Future works:} Addax may also have potential application in tasks other than fine-tuning. For example, Addax may be used for pre-training tasks or even combined with the Adam algorithm by passing the combined first- and zeroth-order gradients to Adam. From a theoretical perspective, conducting an in-depth theoretical analysis of how zeroth-order gradient estimates regularize the performance of first-order ones is of particular interest. We leave these aspects as future work for further exploration. Furthermore, we did not explore the effectiveness of Addax when combined with other memory-efficient methods, such as PEFT~\citep{Hu2020-lora, li-liang-2021-prefix, lester-etal-2021-power}, quantization~\cite{dettmers2022llm}, and memory-efficient attention mechanisms~\cite{dao2022flashattention, zandieh2023kdeformer, han2023hyperattention}, but we hope to investigate these combinations in future work. 
+
+\newpage
+
+
+
+
+
+

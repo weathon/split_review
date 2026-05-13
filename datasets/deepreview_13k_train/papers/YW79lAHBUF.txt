@@ -1,0 +1,561 @@
+\title{LLMs Are In-Context Reinforcement Learners}
+
+\begin{abstract}
+Large Language Models (LLMs) can learn new tasks through in-context supervised learning (i.e., ICL). This work studies if this ability extends to in-context reinforcement learning (ICRL), where models are not given gold labels in context, but only their past predictions and rewards. We show that a naive application of ICRL fails miserably, and identify the root cause as a fundamental deficiency at exploration, which leads to quick model degeneration. We propose an algorithm to address this deficiency by increasing test-time compute, as well as a compute-bound approximation. We use several challenging classification tasks to empirically show that our ICRL algorithms lead to effective learning from rewards alone, and analyze the characteristics of this ability and our methods. Overall, our results reveal remarkable ICRL abilities in LLMs. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+\newcommand{\usericon}{\faUser}
+\newcommand{\llamaicon}{\raisebox{-0.2em}{\includegraphics[height=1.2em]{figures/llama.pdf}}}
+
+\begin{figure}[!b]
+    \centering
+    \footnotesize
+    \begin{tcolorbox}[
+        width=0.9\textwidth
+    ]%
+\texttt{Query: It declined my transfer.\\ 
+\llamaicon~Intent: declined transfer\\
+'declined transfer' is the correct answer! Good job!\\[10pt]
+Query: If I'm getting my identity verified, what all do I need?\\
+\llamaicon~Intent: verify top up \\ 
+The answer 'verify top up' is wrong! You can do better!\\[10pt]
+Query: Am I allowed to change my PIN anywhere?\\
+\llamaicon~Intent: change pin \\
+'change pin' is the correct answer! Good job! \\[10pt]
+Query: How do I contact customer support about my declined transfer?\\
+\llamaicon~Intent: \textbf{\textcolor{red}{contactless not working}}
+}
+\end{tcolorbox}    
+\caption{\textbf{Illustration of in-context reinforcement learning}. The context is queries, with predicted model outputs (\llamaicon), and verbalized rewards. The prompt ends with a new query, and the model has to complete its prediction (\textcolor{red}{red}). The model learns in-context from the past interactions on the prompt.}
+\label{fig:intro}
+\end{figure}
+
+
+        
+        
+        
+        
+
+Large language models (LLMs) have been shown to exhibit in-context learning (ICL), a form of supervised learning that does not require parameter updates~\citep{brown2020language}. 
+ICL relies on including supervised input-output pairs in the LLM context (i.e., prompt),\footnote{We use the terms \emph{prompt} and \emph{context} interchangeably.} and has been shown as effective with few~\citep{brown2020language} or many~\citep{bertsch2024incontext, agarwal2024manyshotincontextlearning} examples.
+In this paper, we ask whether the ability to learn in-context extends to reinforcement learning (RL), i.e., whether language models can effectively perform in-context reinforcement learning (ICRL).
+
+ICRL is a natural combination of ICL and reinforcement learning (RL). Instead of constructing the LLM context from supervised input-output pairs, the LLM context is constructed using triplets consisting of input, model output prediction, and the corresponding rewards. As the number of input examples increases, the model observes more triplets, leading to an online learning scenario.
+hese triplets are followed by a new input, for which the model predicts an output.
+\autoref{fig:intro} illustrates ICRL prompting.
+A naive implementation of this formulation is similar to ICL, except that the context grows over time, and instead of relying on annotated labels and a static dataset, the model is exposed to a stream of inputs and rewards. 
+
+We study the ICRL capabilities of \llama{}~3.1~\citep{dubey2024llama} and \phillm{}-3.5-mini~\citep{abdin2024phi3technicalreporthighly}, using several standard classification benchmarks, focusing on single-step RL  (i.e., contextual bandits).
+Unfortunately, as we show, the naive formulation quickly leads LLMs to degenerate, often by always predicting the same output.  
+We identify two causes for this failure. First, LLMs, even when sampled from, exhibit an inability to explore. Second, they struggle to learn from complex in-context signals, such as when rewards are negative. 
+
+We address the exploration deficiency by taking advantage of how LLMs are sensitive to their prompt composition in unexpected ways~\citep{chen-etal-2023-relation,sclar2024quantifying}, and add stochasticity to the prompt construction. 
+Given the difficulty of LLMs to benefit from negative examples, we filter these out from the context, making the prompt more stylistically similar to ICL prompts, and easier to reason about. 
+The stochastic prompt effectively neutralizes degeneration in our experiments. Simplifying the prompt further increases performance, even though it removes informative negative learning signals
+Overall, these mechanisms expose effective ICRL in LLMs. 
+
+Our method shows a strong relationship between performance and test-time compute -- as compute costs increase, the model also performs better~\citep{snell2024scalingllmtesttimecompute}.
+Much of the computational cost arises from the stochastic construction of prompts, which occurs for each example and increases in cost as the model observes more examples. 
+To reduce these costs, we show that this process can be approximated, and that the level of approximation is in direct relation to how much compute is allocated to the model. 
+
+Overall, we show that our approach is able to overcome the exploration degeneration of both \llama and \phillm, leading to impressive and consistent gains through ICRL. 
+For example, in the \banking~\citep{Casanueva2020} classification task, \llama improves from 17.2\% zero-shot accuracy to 66.0\% through ICRL. 
+We also show that our approximation of ICRL is effective with both models, although the stronger \llama can absorb a much higher approximation level. 
+Our code, data, and experimental logs are available at \url{https://lil-lab.io/icrl/}. 
+
+
+
+
+
+\section{In-context Reinforcement Learning}
+
+
+
+ICL operates by providing a model with correct demonstrations of a task. 
+A demonstration includes an input (e.g., \textit{What is the best football club in Europe?}) and its corresponding correct output (e.g., \textit{AC Milan}).
+In its reliance on gold-standard labels, ICL follows the common supervised learning paradigm, although without any change in the model parameters.
+However, in-context learning could also be performed differently. Instead of providing models with correct demonstrations, the model could first try to guess answers, then observe the outcomes (i.e., rewards) of its predictions, and eventually learn from these signals, in an online learning setting, all within the context. 
+This alternative way of learning in context follows the reinforcement learning paradigm~\cite[RL;][]{sutton2018reinforcement}, where models learn by reinforcing good behaviors and suppressing bad choices. 
+
+Formally, we are concerned with an RL scenario where the model $\policy$ observes an input $\example^{(t)} \sim \datadist$ sampled from the data distribution $\datadist$ at time $t$, generates a prediction $\hat{\prediction}^{(t)}$, and then observes a reward $\reward^{(t)} \sim \rewardfunc(\example^{(t)}, \hat{\prediction}^{(t)})$. We denote the tuple $(\example^{(t)}, \hat{\prediction}^{(t)}, \reward^{(t)})$ as an episode. 
+
+In common RL terminology, the model $\policy$ is the policy, the input $\example^{(t)}$ is the state, and the prediction $\prediction^{(t)}$ is the action. 
+Throughout our formulation, the policy is also conditioned on previous episodes in the form of an LLM context, similar to how supervised examples are provided in ICL. 
+These past episodes are not part of the state. 
+Instead, the context is used to perform in-context policy improvement, similar to how past episodes are used to perform policy improvement in conventional RL (e.g., via parameter updates).
+
+We design several methods to elicit in-context reinforcement learning (ICRL) from LLMs. 
+The \naiveshort approach is a straightforward implementation of ICRL following the common ICL recipe (\autoref{sec:icrl:naive}). The \expshort approach (\autoref{sec:icrl:explorative}) is motivated by the empirical weaknesses we observe in the naive approach (\autoref{sec:results}). Finally, the \appshort method comes to reduce some of the computational demands of \explorative. 
+
+
+
+\subsection{\naive}\label{sec:icrl:naive}
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \centering
+    \begin{minipage}[r]{0.5\textwidth}
+        \centering
+        \begin{algorithm}[H]
+            \footnotesize
+            \caption{\naive}\label{alg:naive_icrl}
+            \begin{algorithmic}[1]
+                \Require
+                \Statex $\datadist$: Data distribution
+                \Statex $\policy$: Language model policy
+                \Statex $\rewardfunc$: Reward function
+                \Statex
+                \State Init buffer $\episodeset \gets \emptyset$
+                \For{$t = 1,2,3,\dots$}
+                    \State $\context \gets$ create context from $\episodeset$ \label{ln:naive:context-construct}
+                    \State Observe input $\example^{(t)} \sim \datadist$
+                    \State Sample prediction $\hat{\prediction}^{(t)} \sim \policy( \cdot \vert C, \example^{(t)})$\label{ln:naive:predict}
+                    \State Observe reward $\reward^{(t)} \sim \rewardfunc(\example^{(t)}, \hat{\prediction}^{(t)})$ %
+                    \State Add episode to buffer \par \hspace{0.5em} $\episodeset \gets  \episodeset \cup \{(\example^{(t)}, \hat{\prediction^{(t)}}, \reward^{(t)})\}$ %
+                \EndFor
+            \end{algorithmic}
+        \end{algorithm}
+    \end{minipage}
+\end{wrapfigure}
+
+\autorefalg{alg:naive_icrl} outlines the most straightforward way to implement ICRL. 
+The model repeatedly observes a new example, predicts its output, and observes its reward. Each such model interaction creates an episode, which is added to an episode buffer.  
+For each interaction, we construct a context $\context$ from existing episodes (line~\ref{ln:naive:context-construct}). 
+As long as the LLM context window allows it, at each time step, all past episodes $\episodeset$ are included in the context in the order they were observed. 
+This allows re-using past computations (i.e., through the KV cache), leading to relatively efficient computation.\footnote{We assume unbounded memory through our analysis. This makes it possible to compare the computational costs of the different algorithms, because it allows the assumption that it is possible to store the computation for all previous episodes stored in the context.}
+If the context window length is reached, we only consider recent episodes that fit into the context window, essentially running ICRL with a sliding window as big as the LLM context window allows. 
+
+Unfortunately, \naiveshort fails miserably in practice, as we empirically show in \autoref{sec:results} and \autoref{fig:main_results}. Its poor performance is due to its incapacity to explore the output space. 
+\autoref{fig:main_heatmaps} visualizes how \naiveshort degenerates to predicting just a few labels, far from the real distribution in the data. 
+
+
+
+\subsection{\explorative}\label{sec:icrl:explorative}
+
+\explorative addresses the exploration deficiency observed with \naive by leveraging the sensitivity of LLMs to their prompt.  
+It has been widely observed that changes in prompt composition lead to variance in LLM behavior, including changes in the set of ICL examples~\citep{zhang-etal-2022-active, liu-etal-2022-makes, chen-etal-2023-relation, levy2023diversedemonstrationsimproveincontext} or even seemingly meaningless stylistic changes~\citep{sclar2024quantifying, lu-etal-2022-fantastically}. 
+Generally, this property of LLMs is not viewed positively. 
+However, it provides an opportunity to introduce stochasticity into the ICRL process, and thereby introducing a level of exploration. 
+We achieve this by randomly choosing the subset of past episodes to include in the prompt each time the model observes a new input. 
+
+In addition, we empirically observe that LLMs have a harder time benefiting from negative learning signals (i.e., episodes with negative reward). 
+This has been observed in past feedback-driven continual learning work~\citep{kojima-etal-2021-continual, NEURIPS2023_666cccc6}.
+Negative episodes are also not very informative for learning -- indicating that one output is bad, essentially encourages an almost uniform distribution over outputs. 
+This leads to the second design decision in \expshort: only include examples with a positive reward in the constructed contexts. 
+
+\autorefalg{alg:explorative_icrl} describes \explorative. 
+For each input, we construct a new context (lines \ref{ln:eicrl:initc}--\ref{ln:eicrl:context_loop_end}). 
+We decide what past episodes to include in this context by sampling from a Bernoulli variable parameterized by $\keepprob$ (lines \ref{ln:eicrl:context_loop_start}--\ref{ln:eicrl:context_loop_end}. 
+We sample independently for each past episode. 
+This results in different reasoning for each input, because each is done with a different context. 
+When storing past episodes, we only include episodes with positive reward (lines \ref{ln:eicrl:reward_cond}--\ref{ln:eicrl:add_episode}).
+
+Depending on $\keepprob$, \expshort will encounter the issue of the LLM context window saturating much later than naive. 
+However, deploy ICRL for enough interactions, and the context window will saturate, even for models with the largest windows. 
+Similar to naive, we downsample the context if it overflows the LLM context window (line~\ref{ln:eicrl:downsample}). 
+We design three strategies to downsample the context if we reach the limit of the LLM context window: (a) \textit{unbiased}: randomly remove episodes from $\context^{(t)}$ until it fits the context window; (b) \textit{start-biased}: use the longest possible prefix of episodes from $\context^{(t)}$ such that it fits the LLM context size; and (c) \textit{end-biased}: use the longest possible suffix. 
+
+A downside of \expshort is the computational cost. 
+While \naiveshort benefits from caching, caching is not useful for \expshort, because each episode requires the construction of a fresh context $\context^{(t)}$. 
+The probability of encountering the same context twice, or even the same prefix, is exceptionally low even after a few episodes. 
+This means that the context has to be computed from scratch for each input. 
+If $\keepprob$ is relatively small, contexts are likely to be much shorter than in naive. Although this can reduce the cost, explorative remains much more computationally demanding than naive. 
+
+
+
+
+
+
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[t]{0.475\textwidth}
+        \centering
+        \begin{algorithm}[H]
+            \footnotesize
+            \caption{\explorative}\label{alg:explorative_icrl}
+            \begin{algorithmic}[1]
+                \Require
+                \Statex $\datadist$: Data distribution
+                \Statex $\policy$: Language model policy
+                \Statex $\rewardfunc$: Reward function
+                \Statex $\keepprob$: Prob. to keep examples in context
+                \Statex
+                \State Init episode buffer $\episodeset \gets \emptyset$
+                \For{$t=1,2,3,\dots$}                 
+                    \State Init empty context $\context^{(t)} \gets [\,]$ \label{ln:eicrl:initc}
+                    \For{$\episode \in \episodeset$}\label{ln:eicrl:context_loop_start}
+                        \State $b \sim \text{Bernoulli}(\keepprob)$
+                        \If{$b = 1$}
+                            \State Add episode to context $\context^{(t)} \mathrel{+}= \episode$
+                        \EndIf
+                    \EndFor\label{ln:eicrl:context_loop_end}
+                    \If{$|\context^{(t)}|>$ LLM context window}
+                        \State $\context^{(t)} \gets$ downsample $\context^{(t)}$ \label{ln:eicrl:downsample}
+                    \EndIf
+                    \State Observe input $\example^{(t)} \sim \datadist$
+                    \State Sample prediction $\hat{\prediction}^{(t)} \sim \policy( \cdot \vert \context^{(t)}, \example^{(t)})$ \label{ln:eicrl:prediction}
+                    \State Observe reward $\reward^{(t)} \sim \rewardfunc(\example^{(t)}, \hat{\prediction}^{(t)})$ %
+                    \If{$r^{(t)} > 0$} \label{ln:eicrl:reward_cond}
+                            \State Add episode to buffer \par \hspace{1em}  $\episodeset \gets \episodeset \cup \{(\example^{(t)}, \hat{\prediction^{(t)}}, \reward^{(t)})\}$
+                    \EndIf\label{ln:eicrl:add_episode}
+                    
+                \EndFor
+            \end{algorithmic}
+        \end{algorithm}
+    \end{minipage}
+    \hspace{0.02\textwidth}
+    \begin{minipage}[t]{0.475\textwidth}
+        \centering
+        \begin{algorithm}[H]
+            \footnotesize
+            \caption{\approximate}\label{alg:approximate_icrl}
+            \begin{algorithmic}[1]
+                \Require
+                \Statex Everything from \autorefalg{alg:explorative_icrl}
+                \Statex $\storagesize$: Number of contexts to maintain
+                \Statex
+                \State Init empty contexts $\mathcal{C} \gets \{[\,]^{(1)},\dots,[\,]^{(\storagesize)}\}$ \label{ln:aicrl:init_contexts}%
+                \For{$t=1,2,3,\dots$}
+                    \State Sample context uniformally $\context \sim \uniform \left( \mathcal{C} \right)$ \label{ln:aicrl:sample_context}
+                    \State Observe input $\example^{(t)} \sim \datadist$ \label{ln:aicrl:input}
+                    \State Sample prediction $\hat{\prediction}^{(t)} \sim \policy( \cdot \vert \context, \example^{(t)})$
+                    \State Observe reward $\reward^{(t)} \sim \rewardfunc(\example^{(t)}, \hat{\prediction}^{(t)})$  \label{ln:aicrl:reward} %
+                    \If{$r > 0$} \label{ln:aicrl:testreward}
+                        \For{$k = 1$ to $\storagesize$}\label{ln:aicrl:itercontexts}
+                            \State $b \sim \text{Bernoulli}(\keepprob)$
+                            \If{$b = 1$}
+                                \State Add episode to cached context \par \hspace{4em} $\contextstore[k] \mathrel{+}= (\example^{(t)}, \hat{\prediction}^{(t)}, \reward^{(t)})$ \label{ln:aicrl:updatecontext} %
+                            \EndIf
+                        \EndFor
+                    \EndIf
+                \EndFor
+            \end{algorithmic}
+        \end{algorithm}
+    \end{minipage}
+\end{figure}
+
+\subsection{\approximate}\label{sec:icrl:approximate}
+
+\explorative addresses the exploration deficiencies of \naive, but incurs high computational costs (\autoref{sec:icrl:explorative}). 
+We propose an approximation of \explorative that strikes a balance between computational cost and learning effectiveness. 
+Similar to \expshort, the approximate version also excludes episodes with negative reward and focuses on exploration by stochasticity in the context. 
+
+
+\autorefalg{alg:approximate_icrl} describes \approximate. 
+The core idea behind the approximation is to limit the number of contexts, so we can simply gradually expand them with new episodes, rather than always create and compute new contexts. 
+We maintain $\storagesize$ contexts $\contextstore$, which all start empty (line~\ref{ln:aicrl:init_contexts}). 
+At each time step $t$, we sample a context $\context$ from the $\storagesize$ contexts (line~\ref{ln:aicrl:sample_context}), and use it for episode $t$ (lines \ref{ln:aicrl:input}--\ref{ln:aicrl:reward}. 
+If the reward $\reward^{(t)}>0$, we use the episode to expand all contexts stochastically. 
+For each context in $\contextstore$, we expand it with the $t$-th episode with a probability of $\keepprob$ (lines \ref{ln:aicrl:itercontexts}--\ref{ln:aicrl:updatecontext}). 
+
+\appshort introduces stochasticity in two places: sampling the context to use for each episode and the expansion of the stored contexts. 
+In \autorefalg{alg:approximate_icrl}, we use \emph{uniform} sampling to choose the context (line~\ref{ln:aicrl:sample_context}). 
+This is a uniform approximation of the probability of a context, which can also be easily computed \emph{exactly} using the probabilities of the episodes it contains and $\keepprob$. 
+In practice, we find the exact computation to work poorly, because contexts that are assigned more episodes or have low probability episodes quickly receive very low probability, and are not used. 
+\autoref{tab:results_approximate_parameters:sampling_strategy} shows this experimental analysis.
+We use uniform sampling throughout our experiments. 
+The level of approximation the algorithm provides depends on the resources available. For example, one can allocate each context to a compute unit, so a machine with eight compute units (e.g., GPUs) will support $\storagesize=8$. 
+\appshort is a strict approximation of \expshort in the sense that coupling the exact context sampling strategy and $\storagesize \to \infty$ gives \expshort. 
+However, the approximation is limited in handling contexts that extend beyond the LLM window length. Overcoming this while maintaining the efficiency of the approximation is an important direction for future work. 
+
+
+
+
+
+\section{Experimental Setup}
+
+
+\paragraph{Models}
+
+We use the instruction-tuned versions of \llama{}~3.1 8B ~\citep{dubey2024llama} and \phillm{}-3.5-mini 3.8B~\citep{abdin2024phi3technicalreporthighly}. 
+We chose these models because, at the time of this work, they are the only popular open-source large language models that support more than 100k tokens in the context, while still having less than 10B parameters. 
+We use both in a multi-turn chat format. 
+We compute the maximum number of episodes the context window can take for each model and task combination.  
+Both models are used for the main experiments, but only \llama for a few secondary experiments, due to the computational costs. 
+We use constrained decoding when generating model predictions, similar to recent work on ICL~\citep{bertsch2024incontext}. 
+
+\paragraph{Tasks}
+
+We follow \citeauthor{bertsch2024incontext}'s (\citeyear{bertsch2024incontext}) study of many-shot ICL in focusing on five classification problems: \banking~\cite[77 labels;][]{Casanueva2020}, \clinic~\cite[150 labels;][]{larson-etal-2019-evaluation}, \nlu~\cite[68 labels;][]{Liu2021}, \trec~\cite[6 labels:][]{li-roth-2002-learning, hovy-etal-2001-toward}, and \trecfine~\cite[50 labels;][]{li-roth-2002-learning, hovy-etal-2001-toward}. Because of the large output spaces (up to 150 labels in \clinic), these tasks are challenging for large language models, as empirically shown by \citet{bertsch2024incontext} and replicated in our ICL experiments.
+
+The datasets are of different sizes. 
+The size of the datasets dictates the number of time steps in our experiments.
+We randomly sub-sample \banking, \clinic, and \nlu to 10k examples. 
+\trec and \trecfine are smaller, so we only use 5k training examples for each. 
+This allows the experiments to be of relatively standard length. 
+The training data corresponds to the data distribution $\datadist$ in our algorithms.  
+We also sub-sample all test sets to 500 examples each, to reduce the computational cost of experiments. 
+\nlu does not provide a standard test set, so we create our own train and test splits. 
+In all experiments, the datasets contain the same examples in the same order.
+\paragraph{Rewards and Prompt Design}
+We use a deterministic binary reward function. Rewards are computed from the gold-standard labels in the dataset. We automatically transform the numerical rewards into a natural language format indicating if the model prediction is correct or not, which is more suitable for LLM reasoning. 
+
+\paragraph{Evaluation} 
+
+We report running test accuracy. 
+For test accuracy, we use the held-out test set of each dataset. We compute it every 500 steps for each test example separately, using the context used to process that step's training example.
+In some cases, we also report train accuracy as the running mean accuracy over the most recent 256 episodes. 
+
+We also report regret, the forgone utility from an actual model prediction in comparison to the oracle choice. 
+Intuitively, regret measures how many interactions the model handled poorly throughout the experiment. 
+In our experiments, regret is the accumulated number of incorrect examples throughout learning. 
+Regret gives a single number that considers both the final performance and how fast the model reached it. 
+A good system would reach high performance as fast as possible, making fewer mistakes overall (i.e., would have a low regret).
+
+\paragraph{Comparisons}
+
+We compare our ICRL algorithms against the zero-shot setting, which corresponds to the performance on the test set at step zero (i.e., without any in-context examples). 
+We also report supervised ICL performance for all tasks to contextualize the results. We generally expect supervised ICL to outperform ICRL, because it has access to gold-standard labels. 
+In particular, at each time step where we report supervised ICL performance, we provide the model all examples observed so far by the ICRL methods, but with gold-standard labels. 
+We stop the supervised ICL experiments when the number of examples becomes bigger than the maximum number supported by the context window. 
+
+
+
+\section{Results and Analysis}
+
+
+
+ 
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=1.0\textwidth]{figures/main_results/main_results.pdf}
+    \caption{\textbf{Performance of ICRL}. \naiveshort, \expshort, and \appshort held-out test results and regret for both models and all tasks. We also report Supervised ICL performance. \expshort consistently outperforms zero-shot (i.e., first step) and \naiveshort, while also showing consistent trends of continual improvement as more data is observed.}
+    \label{fig:main_results}
+\end{figure}
+
+
+We show the test accuracies and training regrets \autoref{fig:main_results}.\footnote{Unless specified otherwise, we use: $p_{keep} = 0.1$; uniform context sampling and $\storagesize=8$ for \appshort; unbiased downsampling when the context fills for \expshort.}  We also show the performance of supervised ICL for comparison, although it relies on a much higher degree of supervision.
+\paragraph{LLMs Can Learn In-Context From Rewards Alone} 
+\expshort effectively learns in all tasks and for both models, showing significant improvements over zero-shot. 
+\expshort improves over the performance of zero-shot \llama by +48.8\% in \banking, +56.8\% in \clinic, +36.8\% in \nlu, +36.0\% in \trec, and +50.2\% in \trecfine; and the same with \phillm by +46.2\% in \banking, +55.2\% in \clinic, +33.4\% in \nlu, +9\% in \trec, and +22.4\% in \trecfine.  
+In general, its accuracy approaches the supervised ICL upper bound in some settings, and it always outperforms zero-shot. 
+For both models, \expshort also demonstrates a continual growth in performance over time, suggesting that with more data its performance would improve. This is especially evident for the most challenging datasets, i.e., the ones with the most labels (i.e., \banking, \clinic, \nlu), as they require a much stronger exploration effort. Thus, our empirical findings show that LLMs can learn in-context from rewards alone.
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=1.0\textwidth]{figures/naive_heatmaps/meta-llama_Meta-Llama-3.1-8B-Instruct_banking77_naive_vs_explorative_heatmaps.pdf}
+    \caption{\textbf{Confusion matrices for zero-shot, \naiveshort and \expshort}. Each position $(x, y)$ represents the number of times \llama predicts label $x$ while the true label is $y$ in \banking on the test data. For \naiveshort and \expshort, we report results at the final time step. On the right of each matrix, we report the distribution of true labels. On top of each matrix, we report the distribution of predicted labels. The distributions are not on the same scale for visibility. Only \expshort does not present a skewed distribution and is concentrated along the diagonal, meaning most times the predicted label is the correct label.}
+    \label{fig:main_heatmaps}
+\end{figure} 
+\paragraph{\naiveshort Fails to Explore}
+The \naiveshort does not learn and in most cases even deteriorates below zero-shot (\autoref{fig:main_results}). 
+One key issue is exploration. 
+\autoref{fig:main_heatmaps} shows prediction confusion matrices, output distributions, and data distributions for the \banking task with \llama, comparing zero-short, \naiveshort, and \expshort.
+A perfect classifier would have non-zero counts only on the diagonal, and the output distribution would be identical to the data distribution. 
+Both \naiveshort and \expshort start from zero-shot.
+After learning, \expshort shows a clear focus on the diagonal and higher similarity between the prediction and data distributions. 
+\naiveshort fails to learn to effectively classify. The output distribution explains why: its focus on just a few labels indicates it failed to explore.  
+
+
+
+\begin{figure}[!t]
+    \centering
+    \subfloat[\label{fig:results_ablations:reward}]{
+        \includegraphics[width=0.47\textwidth]{figures/ablations/ablations_results_no_regret.pdf}
+    }
+    \hfill
+    \subfloat[\label{fig:results_ablations:stochasticity}]{
+        \begin{minipage}{0.47\textwidth}
+            \footnotesize
+            \centering
+            \begin{tabular}{l*{2}{c}}
+            \toprule
+            & \multicolumn{2}{c}{\textbf{Accuracy} $\uparrow$} \\
+            \cmidrule(lr){2-3}
+            \textbf{Task} & Expl. & \naiveshort + Pos. only \\
+            \midrule
+            \textbf{\banking} & \textbf{0.66} & 0.43 \\
+            \textbf{\clinic} & 0.81 & \textbf{0.83} \\
+            \textbf{\nlu} & \textbf{0.71} & 0.57 \\
+            \textbf{\trec} & \textbf{0.84} & 0.65 \\
+            \textbf{\trecfine} & \textbf{0.74} & 0.48 \\
+            \bottomrule
+            \end{tabular}
+        \end{minipage}
+    }
+    \caption{\textbf{\explorative ablations}. (a) Test accuracy of \explorative with different reward signals. Positive reward only is the best choice. (b) Comparison of \expshort with \naiveshort when only positive rewards are used (ablating on the stochastic context from \expshort). Test accuracy is reported at the final step. \expshort consistently outperforms \naiveshort with positive rewards only by large margins, except for one case where they are tied.}
+    \label{fig:results_ablations}
+\end{figure}
+\paragraph{Both Modifications of \expshort are Important}
+
+\expshort modifies \naiveshort in two ways: stochasticity for exploration and episodes with positive rewards to simplify the context. 
+\expshort with both positive and negative rewards learns, but much less effectively than if we omit episodes with negative rewards (\autoref{fig:results_ablations:reward}). 
+On the other hand, \autoref{fig:results_ablations:stochasticity} shows that even though omitting negative examples from \naiveshort helps, there remains a large gap to \expshort. 
+\autoref{fig:results_ablations:reward}  also shows the impact of reward. 
+We see some level of learning without rewards or with inverted rewards. 
+This aligns with past observations of a domain effect in ICL~\citep{min2022rethinking, pan-etal-2023-context, lyu-etal-2023-z, kossen2024incontextlearninglearnslabel}.
+However, this learning is relatively minimal, and including both positive and negative episodes improves performance significantly, albeit it remains much lower than with positive episodes only. 
+Including only negative episodes, on the other hand, is catastrophic. 
+We also observe that when providing noisy rewards (i.e., with a probability of 10\% the reward is inverted) performance does not degrade significantly, suggesting that ICRL has some robustness to environments with noisy learning signals. 
+Of course, this is an initial experiment of robustness to noise, and we leave a more detailed analysis for future work. 
+\paragraph{Uniform Context Sampling in \appshort is Better} 
+
+We observe that exact context sampling in \appshort performs worse than uniform sampling. 
+This happens because exact computation often leads to always using the same context at later steps, as small changes in the probability of sampling can compound once the model is biased towards one context. 
+\autoreftab{tab:results_approximate_parameters:sampling_strategy} reports regret and final accuracy for exact and uniform strategies, on \llama and both \banking and \clinic tasks. 
+
+\begin{wrapfigure}{r}{0.5\textwidth}  %
+    \centering
+        \includegraphics[width=0.5\textwidth]{figures/approximate_beam_sizes/microsoft_Phi-3.5-mini-instruct_approximate_beam_sizes_results_without_regret.pdf}
+    }    
+    
+    \subfloat[\label{tab:results_approximate_parameters:sampling_strategy}]{
+        \footnotesize
+        \centering
+        \begin{tabular}{l*{8}{c}}
+        \toprule
+        & \multicolumn{4}{c}{\textbf{Accuracy} $\uparrow$} & \multicolumn{4}{c}{\textbf{Regret} $\downarrow$} \\
+        \cmidrule(lr){2-5} \cmidrule(lr){6-9}
+        \textbf{Task} & \multicolumn{2}{c}{Exact} & \multicolumn{2}{c}{Unif.} & \multicolumn{2}{c}{Exact} & \multicolumn{2}{c}{Unif.} \\
+        \midrule
+        \textbf{\banking} & \multicolumn{2}{c}{0.55} & \multicolumn{2}{c}{\textbf{0.62}} & \multicolumn{2}{c}{5108} & \multicolumn{2}{c}{\textbf{4597}} \\
+        \textbf{\clinic} & \multicolumn{2}{c}{0.73} & \multicolumn{2}{c}{\textbf{0.81}} & \multicolumn{2}{c}{3301} & \multicolumn{2}{c}{\textbf{2760}} \\
+        \bottomrule
+        \end{tabular}
+    }
+\end{wrapfigure}
+
+
+
+
+
+\paragraph{\appshort is an Effective Alternative to \expshort}
+
+In the \autoref{fig:main_results}, \appshort performs almost as well as \explorative when trained with \llama, across all tasks. 
+The results are very different with \phillm: despite early learning, \appshort deteriorates quickly. 
+This stems from one of the contexts being biased towards one label and therefore predicting only this label. Eventually, the bias towards the label spreads to other contexts, leading to the collapse in performance we observe. 
+It is empirically possible to recover, as we see in \banking later in the experiment, but the chance of it happening seems very low. 
+The success of \llama and failure of \phillm with $\storagesize = 8$ show that different LLMs have different sensitivity to the approximation. 
+\autoref{fig:results_approximate_parameters:beam_size_phi} shows that that with a higher number of contexts $\storagesize > 32$ \phillm is able to effectively learn, indicating \phillm needs a higher computational budget. 
+ 
+Overall, \llama is robust to the approximation, with most values performing similarly to \expshort, except with the lowest values of $\storagesize$. 
+
+
+
+
+
+
+\paragraph{\appshort Reduces Compute Needs}
+
+We measure the reduction of tokens processed in \appshort compared to \expshort throughout full ICRL runs. 
+We approximate this measure by computing at each step the number of tokens required for a forward call and subtracting the number of tokens of the sequence with the longest common prefix processed in a previous step, as it would be possible to use the KV cache for all the tokens in the common prefix (assuming infinite memory). We find that \expshort processes two orders of magnitude more tokens than \appshort.
+\paragraph{ICRL is Sensitive to Stochasticity Level}
+
+Stochasticity in context generation is one of the important components that contribute to both \expshort and \appshort performance. 
+It is modulated by setting $\keepprob$. 
+\autoref{fig:results_p_keep} shows the sensitivity of \expshort to the value of $\keepprob$. 
+Without stochasticity ($\keepprob = 1.0$), ICRL struggles on both models, but especially on \phillm. 
+However, if $\keepprob$ is too high, we retain too few examples on the context, and it can hurt performance. 
+
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/p_keep_search/p_keep_search_results.pdf}
+    \caption{\textbf{Sensitivity to $\keepprob$ in \explorative}. We compare performance with different values of $\keepprob$. Intermediate values learn better for both models.}
+    \label{fig:results_p_keep}
+\end{figure}
+
+\paragraph{Comparison of Context Subsampling Strategies}%
+
+In practice, we never saturate the LLM context window when using \llama or \phillm because our context window is more than 100k and $\keepprob=0.1$. 
+We conduct experiments to evaluate the strategies we presented in \autoref{sec:icrl:explorative} to handle the case of overflowing the context window by limiting the context window of \llama to 4k or 8k tokens. 
+Generally, we observe that \textit{start-biased} strategy outperforms \textit{unbiased}, which in turn performs better than \textit{end-biased}, in all cases, although by only small margins.
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.7\textwidth]{figures/context_length_strategy_comparison/context_length_and_strategy_comparison_banking77.pdf}
+    \caption{\textbf{Performance with limited context and effect of subsampling strategies}. We report test accuracy and regret of \llama with \banking. As expected, a longer context leads to better performance. The difference between the strategies is negligible, with start-biased slightly better.}
+    \label{fig:results_explor_context_strategies_banking}
+\end{figure}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Related Work}
+
+
+
+\paragraph{In-Context (Supervised) Learning} 
+ICL was first demonstrated by \citet{brown2020language}, and since then its causes~\citep{chan_data_2022, xie2022explanationincontextlearningimplicit, olsson2022incontextlearninginductionheads, garg2022transformers, pmlr-v202-von-oswald23a, hendel-etal-2023-context, wang2023labelwordsanchorsinformation} and the level of learning it displays~\citep{min2022rethinking, lyu-etal-2023-z} have been studied extensively.
+By now, it is well established that LLMs can learn new tasks in context~\citep{garg2022transformers, wei2023largerlanguagemodelsincontext, pan-etal-2023-context, kossen2024incontextlearninglearnslabel, li2024languagemodelslearncontext}. 
+Our work builds on this line of work, and provides the first evidence that LLMs can perform RL in context, and not only supervised learning (i.e., the standard way it is done). 
+
+Our study would not be possible without recent increases in the context window length of LLMs~\citep{dubey2024llama, abdin2024phi3technicalreporthighly, geminiteam2024geminifamilyhighlycapable}. 
+Recent work showed that model performance can continue to increase when including hundreds or thousands of demonstrations~\citep{bertsch2024incontext, agarwal2024manyshotincontextlearning}. We find similar results, as LLMs can continually improve when learning through ICRL until their context does not saturate. Interestingly, while some work \citep{zhang2024incontextprinciplelearningmistakes, mo2024ciclcontrastiveincontextlearning, shinn2024reflexion} find that models can learn from mistakes, our results do not support this. 
+It is possible that models can learn from mistakes only when explicitly reasoning~\citep{kojima2022large, wei2022chainofthought} about them~\citep{zhang2024incontextprinciplelearningmistakes, shinn2024reflexion} and cannot implicitly leverage negative signals.
+
+
+\paragraph{In-Context Reinforcement Learning}
+Likely the closest work to ours is \cite{krishnamurthy2024largelanguagemodelsexplore}. They investigate whether LLMs can solve multi-armed bandit problems, a state-less simpler RL setting than the one we are focused on.
+Our experimental setup revolves around contextual bandit problems, where the best action depends on the specific input.  
+We observe similar issues to their findings with the \naiveshort approach. 
+They present a set of negative results, and finally are able to elicit effective learning, but through a prompting strategy that cannot generalize beyond their very simple scenario. 
+They conclude LLMs cannot explore, similar to our conclusions from \naiveshort. 
+However, we address this problem by developing \expshort, which includes stochasticity and focuses on positive episodes. 
+\citet{wu2024smartplaybenchmarkllmsintelligent} propose a set of benchmarks that includes a simplified multi-armed bandit problem. They provide baseline performance with a method similar to \naiveshort, showing mixed results even given the extreme simplicity of their setting, compared to that of \cite{krishnamurthy2024largelanguagemodelsexplore}. 
+
+Another related line of research is that of Transformers trained to solve sequential decision-making problems~ \citep{janner2021sequence, chen2021decision, pmlr-v162-xu22g,laskin2022incontextreinforcementlearningalgorithm, pmlr-v162-zheng22c, NEURIPS2023_8644b61a, grigsby2023amago, raparthy2023generalizationnewsequentialdecision}. In all these cases, Transformers~\citep{vaswani2017attention} are trained from scratch. Our focus is different: we study ICRL that emerges from the process of training LLMs, without fine-tuning the LLM for this purpose. 
+
+
+
+\section{Discussion and Limitations}
+
+
+We study the potential of LLMs to demonstrate ICRL, and propose several algorithms to elicit this behavior: \naiveshort, \expshort, and \appshort. 
+\naiveshort fails miserably, but this allows us to identify exploration as the key missing ingredient. 
+\expshort introduces stochasticity to the prompt construction, and combined with focusing on positive examples, shows consistent ICRL. 
+However, this comes at a high computational cost. 
+\appshort comes to address this cost, by a strict approximation of \expshort. 
+We provide a detailed analysis of the various methods, and show the importance of each of our choices, and the sensitivity of the process to various settings. 
+
+Our work carries several limitations, all of which outline important directions for future work. 
+The first is due to our choice of problems to study. 
+We intentionally selected classification benchmarks to simplify the experiments and evaluation in this early stage of studying ICRL. 
+However, this leaves open the question of applicability to more complex problems, where rewards are more nuanced. 
+For example, summarization and question answering provide much more formidable challenges, albeit with complex evaluation challenges. 
+We believe our work enables future work to study these challenges, and that this is an important direction. 
+
+Another limitation is our use of a binary reward function. 
+This choice is directly derived from our focus on classification. It is an important aspect in making our benchmark environment straightforward to experiment with. 
+However, it leaves open an important question: can ICRL handle more nuanced reward signals? For example, a reward function that can give all possible real numbers in a specific range. 
+Such a reward function leads to an interesting challenge in decoding it into language. It is a particularly important question given our observations that LLMs do not learn well in-context from negative rewards. 
+The problem we identified with reasoning about episodes with negative rewards poses another limitation, and lays out an important research question for future work. 
+
+Our work also lays out open questions as far as the use of computational resources. Our methods are relatively compute-intensive, especially after the learner observes many episodes. 
+We propose \appshort to address this, and show how it allows to trade-off compute for robustness. 
+However, \appshort left open the problem of working with a limited context window, a critical problem for deploying these methods for extended periods with many interactions. 
+This, again, is a very important direction for future work. 
+
+Finally, not a limitation per se, but we kept prompt optimization to a minimum. This was an intentional choice, because our goal is to find robust behaviors, and not prompt engineer the problem. 
+However, this does leave significant room for development, likely improving on the results we observe. 
+
+We hope our work helps to shed light on the capabilities of contemporary LLMs, and that it lays out the ground for extensive future work, both research and practice. 
+
+
+
+
+
+
+
+
+
+

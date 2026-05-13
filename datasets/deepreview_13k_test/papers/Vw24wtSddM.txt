@@ -1,0 +1,414 @@
+\title{Tree Cross Attention}
+
+\begin{abstract}
+
+Cross Attention is a popular method for retrieving information from a set of context tokens for making predictions. At inference time, for each prediction, Cross Attention scans the full set of $\mathcal{O}(N)$ tokens. In practice, however, often only a small subset of tokens are required for good performance. 
+Methods such as Perceiver IO are cheap at inference as they distill the information to a smaller-sized set of latent tokens $L < N$ on which cross attention is then applied, resulting in only $\mathcal{O}(L)$ complexity. 
+However, in practice, as the number of input tokens and the amount of information to distill increases, the number of latent tokens needed also increases significantly. 
+In this work, we propose Tree Cross Attention (TCA) - a module based on Cross Attention that only retrieves information from a logarithmic $\mathcal{O}(\log(N))$ number of tokens for performing inference. 
+TCA organizes the data in a tree structure and performs a tree search at inference time to retrieve the relevant tokens for prediction. 
+Leveraging TCA, we introduce ReTreever, a flexible architecture for token-efficient inference. 
+We show empirically that Tree Cross Attention (TCA) performs comparable to Cross Attention across various classification and uncertainty regression tasks while being significantly more token-efficient. 
+Furthermore, we compare ReTreever against Perceiver IO, showing significant gains while using the same number of tokens for inference.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+With the rapid growth in applications of machine learning, an important objective is to make inference efficient both in terms of compute and memory. 
+NVIDIA~\citep{Leopold_2019} and Amazon~\citep{Barr_2019} estimate that 80–90\% of the ML workload is from performing inference. 
+Furthermore, with the rapid growth in low-memory/compute domains (e.g. IoT devices) and the popularity of attention mechanisms in recent years, there is a strong incentive to design more efficient attention mechanisms for performing inference. 
+
+Cross Attention (CA) is a popular method at inference time for retrieving relevant information from a set of context tokens. 
+CA scales linearly with the number of context tokens $\mathcal{O}(N)$. However, in reality many of the context tokens are not needed, making CA unnecessarily expensive in practice. 
+General-purpose architectures such as Perceiver IO~\citep{jaegle2021perceiverio} perform inference cheaply by first distilling the contextual information down into a smaller fixed-sized set of latent tokens $L < N$.
+When performing inference, information is instead retrieved from the fixed-size set of latent tokens $\mathcal{O}(L)$.
+Methods that achieve efficient inference via distillation are problematic since (1) problems with a high intrinsic dimensionality naturally require a large number of latents, and (2) the number of latents (capacity of the inference model) is a hyperparameter that requires specifying before training. However, in many practical problems, the required model's capacity may not be known beforehand. For example, in settings where the amount of data increases overtime (e.g., Bayesian Optimization, Contextual Bandits, Active Learning, etc...), the number of latents needed in the beginning and after many data acquisition steps can be vastly different. 
+In this work, we propose (1) Tree Cross Attention (TCA), a replacement for Cross Attention that performs retrieval, scaling logarithmically $\mathcal{O}(\log (N))$ with the number of tokens. 
+TCA organizes the tokens into a tree structure. From this, it then performs retrieval via a tree search, starting from the root. As a result, TCA selectively chooses the information to retrieve from the tree depending on a query feature vector. 
+TCA leverages Reinforcement Learning (RL) to learn good representations for the internal nodes of the tree.
+Building on TCA, we also propose (2) ReTreever, a flexible architecture that achieves token-efficient inference. 
+
+In our experiments, we show (1) TCA achieves results competitive to that of Cross Attention while only requiring a logarithmic number of tokens, (2) ReTreever outperforms Perceiver IO on various classification and uncertainty estimation tasks while using the same number of tokens, (3) ReTreever's optimization objective can leverage non-differentiable objectives such as classification accuracy, and (4) TCA's memory usage scales logarithmically with the number of tokens unlike Cross Attention which scales linearly.
+
+
+\section{Background}
+
+
+\subsection{Attention}
+
+Attention retrieves information from a context set $X_c$ as follows:
+$$
+    \mathrm{Attention}(Q, K, V) = \mathrm{softmax}(\frac{QK^T}{\sqrt{d}}) V
+$$
+where $Q$ is the query matrix, $K$ is the key matrix, $V$ is the value matrix, and $d$ is the dimension of the key and query vectors.
+In this work, we focus on Cross Attention where the objective is to retrieve information from the set of context tokens $X_c$ given query feature vectors, i.e., $K$ and $V$ are embeddings of the context tokens $X_c$ while $Q$ is the embeddings of a batch of query feature vectors. 
+In contrast, in Self Attention, $K$, $V$, and $Q$ are embeddings of the same set of token $X_c$ and the objective is to compute higher-order information for downstream calculations. 
+
+\subsubsection{Perceiver IO}
+
+Perceiver IO~\citep{jaegle2021perceiverio} is a general attention-based neural network architecture applicable to various tasks. 
+Perceiver IO is composed of a stacked iterative attention encoder ($\mathbb{R}^{N \times D} \rightarrow \mathbb{R}^{L \times D}$) and a Cross Attention module where $N$ is the number of context tokens and $L$ is a hyperparameter.
+Perceiver IO's encoder aims to compress the information of the context tokens to a smaller constant ($L$) number of latent tokens ($\mathrm{Latents}$) whose initialization is learned. More specifically, each of the encoder's stacked iterative attention blocks work as follows:
+$$
+    \mathrm{Latents} \leftarrow \mathrm{SelfAttention(CrossAttention(}\mathrm{Latents}, \mathcal{D}_C)) 
+$$
+When performing inference, Perceiver IO simply retrieves information from the set of latents to make predictions via cross attention. As a result, all the necessary information needed for performing inference must be compressed into its small fixed number of latents. However, this is not practical for problems with high intrinsic dimensionality. 
+\subsection{Reinforcement Learning}
+
+Markov Decision Processes (MDPs) are defined as a tuple $M = (\mathcal{S}, \mathcal{A}, T, R, \rho_0, \gamma, H)$, where $\mathcal{S}$ and $\mathcal{A}$ denote the state and action spaces respectively, $T(s_{t+1} |s_t, a)$ the transition dynamics, $R(r_{t+1} | s_t, a_t, s_{t+1})$ the reward function, $\rho_0$ the initial state distribution, $\gamma \in (0, 1]$ the discount factor, and $H$ the horizon. In the standard Reinforcement Learning setting, the objective is to optimize a policy $\pi(a|s)$ that maximizes the expected discounted return $E_{\pi,T,\rho_0}[\sum^{H-1}_{t=0} \gamma_t R(r_{t+1} | s_t, a_t, s_{t+1})]$.
+
+
+
+\section{Tree Cross Attention}
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.65\textwidth]{figures/ICLR_1-V1.png}
+    \caption{\textbf{Architecture Diagram of ReTreever.} Input Array comprises a set of $N$ context tokens which are fed through an encoder to compute a set of context encodings. Query Array denotes a batch of $M$ query feature vectors.
+    Tree Cross Attention organizes the encodings and constructs a tree $\mathcal{T}$. 
+    At inference time, given a query feature vector, a logarithmic-sized subset of nodes (encodings) is retrieved from the tree $\mathcal{T}$. The query feature vector retrieves information from the subset of encodings via Cross Attention and makes a prediction.
+    }
+    
+    \label{fig:ReTreever}
+\end{figure}
+
+We propose Tree Cross Attention (TCA), a token-efficient variant of Cross Attention. 
+Tree Cross Attention is composed of three phases: (1) Tree Construction, (2) Retrieval, and (3) Cross Attention.
+In the Tree Construction phase ($\mathbb{R}^{N \times D} \rightarrow \mathcal{T}$), TCA organizes the context tokens ($\mathbb{R}^{N \times D}$) into a tree structure $(\mathcal{T})$ such that the context tokens are the leaves in the tree. The internal (i.e., non-leaf) nodes of the tree summarise the information in its subtree. Notably, this phase only needs to be performed once for a set of context tokens.
+
+The Retrieval and Cross Attention is performed multiple times at inference time. During the Retrieval phase ($\mathcal{T} \times \mathbb{R}^{D} \rightarrow \mathbb{R}^{\mathcal{O}(\log(N)) \times D}$), the model retrieves a logarithmic-sized selected subset of nodes $(\mathbb{S})$ from the tree using a query feature vector $q \in \mathbb{R}^{D}$ (or a batch of query feature vectors $\mathbb{R}^{M \times D})$. 
+Afterwards, Cross Attention ($\mathbb{R}^{\mathcal{O}(\log(N)) \times D} \times \mathbb{R}^{D} \rightarrow \mathbb{R}^{D}$) is performed by retrieving the information from the subset of nodes with the query feature vector.
+The overall complexity of inference is $\mathcal{O}(\log(N))$ per query feature vector. 
+We detail these phases fully in the below subsections.
+
+After describing the phases of TCA, we introduce ReTreever, a general architecture for token-efficient inference. 
+Figure \ref{fig:ReTreever} illustrates the architecture of Tree Cross Attention and ReTreever. 
+
+
+\subsection{Tree Construction}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/ICLR_2-V1.png}
+    \caption{Diagram of the aggregation procedure performed during the Tree Construction phase. The aggregation procedure is performed bottom-up beginning from the parents of the leaves and ending at the root of the tree. The complexity of this procedure is $\mathcal{O}(N)$ but this only needs to be performed once for a set of context tokens. Compared to the cost of performing multiple predictions, the one-time cost of the aggregation process is minor.} 
+    \label{fig:aggregation_step}
+\end{figure}
+
+The tokens are organized in a tree $\mathcal{T}$ such that the leaves of the tree consist of all the tokens. The internal nodes (i.e., non-leaf nodes) summarise the information of the nodes in their subtree. The information stored in a node has two specific desideratas, summarising the information in its subtree needed for performing (1) predictions and (2) retrieval (i.e., finding the specific nodes in its subtree relevant for the query feature vector).
+The method of organizing the data in the tree is flexible and can be done either with prior knowledge of the structure of the data, with simple heuristics, or potentially learned.
+For example, heuristics used to organize the data in traditional tree algorithms can be used to organize the data, e.g., ball-tree~\citep{omohundro1989five} or k-d tree~\citep{cormen2006introduction}.
+
+After organizing the data in the tree, an aggregator function $\mathrm{Agg}: \mathcal{P}(\mathbb{R}^d) \rightarrow \mathbb{R}^d$ (where $\mathcal{P}$ denotes the power set) is used to aggregate the information of the tokens.
+Starting from the parent nodes of the leaves of the tree, the following aggregation procedure is performed bottom-up until the root of the tree: $h_v = \mathrm{Agg}(\{h_u | u \in  \mathbb{C}_v\})$ where $\mathbb{C}_v$ denotes the set of children nodes of a node $v$ and $h_v$ denotes the vector representing the node. Figure \ref{fig:aggregation_step} illustrates the aggregation process.
+
+In our experiments, we consider a balanced binary tree.
+To organize the data, we use a k-d tree. 
+During their construction, k-d trees select an axis and split the data evenly according to the median, grouping similar data together. For sequence data such as time series, the data is split according to the x-axis (e.g., time). For images, this means that the pixels are split according to the x or y-axis, i.e., vertically or horizontally. 
+To ensure the tree is perfectly balanced, padding tokens are added such that the values are masked during computation. Notably, these padding nodes are less than the number of tokens. As such, it does not affect the big-O complexity. 
+
+
+\subsection{Retrieval} 
+
+
+  
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.6\textwidth,height=2in]{figures/Retrieval-Stage-5.png}
+    \caption{Example result of a Retrieval phase. 
+    The policy creates a path from the tree’s root to its leaves, selecting a subset of nodes: the terminal leaves in the path and the highest-level unexplored ancestors of the other leaves.
+    The green arrows represent the path (actions) chosen by the policy $\pi$. The red arrows represent the actions rejected by the policy. The green nodes denote the subset of nodes selected, i.e., $\mathbb{S} = \{h_2, h_3, h_9, h_{10}\}$. The grey nodes denote nodes that were explored at some point but not selected. The red nodes denote the nodes that were not explored or selected. 
+    }
+    \label{fig:selected-nodes}
+\end{figure}
+
+\begin{wrapfigure}{R}{0.45\textwidth}
+\begin{minipage}{0.45\textwidth}
+    \begin{algorithm}[H]
+    \caption{Retrieval}\label{alg:training_retrieval}
+    \begin{algorithmic}
+    \Require Tree Structure ($\mathcal{T}$), policy ($\pi_\theta$), and query feature vector $q$
+    \Ensure Set of selected nodes ($\mathbb{S}$)
+    \State $v \gets \mathrm{Root}(\mathcal{T})$
+    \State $\mathbb{S} \gets \emptyset$
+    \While{$v$ is not leaf}
+        \State $v' \sim \pi_\theta(  a | \mathbb{C}_v, q)$ \Comment{where $a \in \mathbb{C}_v$ }
+        \State $\mathbb{S} \gets \mathbb{S} \cup (\mathbb{C}_v \backslash v')$ \Comment{$\mathbb{C}_v$ denotes children nodes of $v$}
+        \State $v \gets v'$
+    \EndWhile
+    \State $\mathbb{S} \gets \mathbb{S} \cup v$
+    \end{algorithmic}
+    \end{algorithm}
+\end{minipage}
+\end{wrapfigure}
+
+To learn informative internal node embeddings for retrieval, we leverage a policy $\pi$ learned via Reinforcement Learning for retrieving a subset of nodes from the tree.
+Algorithm \ref{alg:training_retrieval} describes the process of retrieving the set of selected nodes $\mathbb{S}$ from the tree $\mathcal{T}$. Figure \ref{fig:selected-nodes} illustrates an example of the result of this phase.
+
+$v$ denotes the node of the tree currently being explored. At the start of the search, it is initialized as $v \gets \mathrm{Root}(\mathcal{T})$.
+The policy's state is the set of children nodes of the current node being explored $\mathbb{C}_v$ and the query feature vector $q$, i.e., $s = (\mathbb{C}_{v}, q)$. 
+Starting from the root, the policy samples one of the children nodes, i.e., $v' \sim \pi_\theta(  a | \mathbb{C}_v, q)$ 
+ where $a \in \mathbb{C}_v$, to further explore for more detailed information retrieval. 
+The nodes that are not being further explored are added to the set of selected nodes $\mathbb{S} \gets \mathbb{S} \cup (\mathbb{C}_v \backslash v')$. 
+Afterwards, $v$ is updated ($v \gets v'$) with the new node and the process is repeated until $v$ is a leaf node (i.e., the search is complete). 
+
+Since the height of a balanced tree is $\mathcal{O}(\mathcal{\log(N)})$, as such, the number of nodes that are explored and retrieved is logarithmic: $||\mathbb{S} || = \mathcal{O}(\log(N))$. 
+
+
+
+\subsection{Cross Attention}
+
+The retrieved set of nodes ($\mathbb{S}$) is used as input for Cross Attention alongside the query feature vector $q$. 
+Since $||\mathbb{S} || = \mathcal{O}(\log(N))$, this results in a Cross Attention with overall logarithmic complexity $\mathcal{O}(\log(N))$ complexity per query feature vector. 
+In contrast, applying Cross Attention to the full set of tokens has a linear complexity $\mathcal{O}(N)$. 
+Notably, the set of nodes $\mathbb{S}$ has a full receptive field of the entire set of tokens, i.e., either a token is part of the selected set of nodes or is a descendant (in the tree) of one of the selected nodes. 
+ 
+
+
+\subsection{ReTreever: Retrieval via Tree Cross Attention}
+
+In this section, we propose ReTreever (Figure \ref{fig:ReTreever}), a general-purpose model that achieves token-efficient inference by leveraging Tree Cross Attention. 
+ 
+
+In the case of Perceiver IO, the model is composed of (1) an iterative attention encoder ($\mathbb{R}^{N \times D} \rightarrow \mathbb{R}^{L \times D}$) which compresses the information into a smaller fixed-sized $L$ set of latent tokens and (2) a Cross Attention module used during inference for performing information retrieval from the set of latent tokens. As a result, Perceiver IO's inference complexity is $\mathcal{O}(L)$. 
+
+In contrast, ReTreever is composed of (1) an encoder ($\mathbb{R}^{N \times D} \rightarrow \mathbb{R}^{N \times D}$) and (2) a Tree Cross Attention (TCA) module used during inference for performing information retrieval from a tree structure. Unlike Perceiver IO which compresses information via a specialized encoder to achieve efficient inference, ReTreever's inference is token-efficient irrespective of the encoder, scaling logarithmically $\mathcal{O}(\log(N))$ with the number of tokens.
+As such, the choice of encoder is flexible and can be, for example, a Transformer Encoder or efficient versions such as Linformer, ChordMixer, etc.   
+ 
+ 
+
+
+\subsection{Training Objective}
+The objective ReTreever optimises consists of three components with hyperparameters $\lambda_{RL}$ and $\lambda_{CA}$, denoting the weight of the terms:
+$$
+    \mathcal{L}_{ReTreever} = \mathcal{L}_{TCA} + \lambda_{RL} \mathcal{L}_{RL} + \lambda_{CA} \mathcal{L}_{CA} 
+$$
+$L_{TCA}$ aims to tackle the first desiderata, i.e., learning node representations in the tree that summarise the relevant information in its subtree for making good predictions.
+$$
+    \mathcal{L}_{TCA} = \mathrm{Loss}(\mathrm{CrossAttention}(x, \mathbb{S}), y)
+$$
+$\mathcal{L}_{RL}$ tackles the second desiderata, i.e., learning internal node representations for retrieval (the RL policy $\pi$) within the tree structure\footnote{The described objective is the standard REINFORCE loss (without discounting $\gamma = 1$) using an entropy bonus for a sparse reward environment.
+}.
+$$\mathcal{L}_{RL} = \sum_{t=0}^{\log(N) - 1} \left[ \mathcal{R} \log \pi_\theta (a_t | s_t) + \alpha \mathcal{H}[\pi_\theta(\cdot | s_t)] \right]$$ 
+The horizon is the height of the tree $\log(N)$, $\mathcal{H}$ denotes entropy, and $\mathcal{R}$ denotes the reward/objective we want ReTreever to maximise\footnote{The only reward $\mathcal{R}$ is given at the end of the episode. As such, the undiscounted return for each timestep is $\mathcal{R}$.}. 
+Typically this reward corresponds to the negative TCA loss $\mathcal{R} = -\mathcal{L}_{TCA}$, e.g., Negative MSE, Log-Likelihood, and Negative Cross Entropy for regression, uncertainty estimation, and classification tasks, respectively. However, crucially, the reward \textbf{does not need to be differentiable}. 
+As such, $\mathcal{R}$ can also be an objective we are typically not able to optimize directly via gradient descent, e.g., accuracy for classification tasks ($\mathcal{R} = 1$ for correct classification and $\mathcal{R} = 0$ for incorrect classification). 
+
+Furthermore, at inference time, the objective of the policy $\pi$ and the Cross Attention module are intertwined in that the policy aims to select relevant nodes for the Cross Attention. As such, to improve training, the weights are shared between the policy and the Cross Attention module. More specifically, the policy is parameterized as an attention module where the policy's action probabilities are the attention weights of the context (i.e., child nodes $\mathbb{C}_v$) given the query (i.e., $q$). 
+
+Lastly, to improve the early stages of training and encourage TCA to learn good node representations, $\mathcal{L}_{CA}$ is included:
+$$
+    \mathcal{L}_{CA} = \mathrm{Loss}(\mathrm{CrossAttention}(x, \mathrm{Leaves(\mathcal{T})}), y)
+$$ 
+
+
+
+
+\section{Experiments}
+
+
+Our objective in the experiments is: (1) Compare Tree Cross Attention (TCA) with Cross Attention in terms of the number of tokens used and the performance. We answer this in two ways: (i) by comparing Tree Cross Attention and Cross Attention directly on a memory retrieval task and (ii) by comparing our proposed model ReTreever which uses TCA with models which use Cross Attention. (2) Compare the performances of ReTreever and Perceiver while using the same number of tokens. In terms of analyses, we aim to: (3) Highlight how ReTreever and TCA can optimize for non-differentiable objectives using $\mathcal{L}_{RL}$, improving performance. (4) Show the importance of the different loss terms in the training objective. (5) Empirically show the rate at which Cross Attention and TCA memory grow with respect to the number of tokens.
+
+To tackle those objectives, we consider benchmarks for classification (Copy Task, Human Activity) and uncertainty estimation settings (GP Regression and Image Completion). 
+Our focus is on (1) comparing Tree Cross Attention with Cross Attention, and (2) comparing ReTreever with general-purpose models (i) Perceiver IO for the same number of latents and (ii) Transformer (Encoder) + Cross Attention. 
+
+The results show the baseline Transformer + Cross Attention achieves results competitive with prior state-of-the-art. 
+Specifically, we compared against the following baselines for GP Regression and Image Completion: LBANPs~\citep{feng2023latent}, TNPs~\citep{nguyen2022transformer}, NPs~\citep{garnelo2018neural}, BNPs~\citep{lee2020bootstrapping}, CNPs~\citep{garnelo2018conditional}, CANPs~\citep{kim2019attentive}, ANPs~\citep{kim2019attentive}, and BANPs~\citep{lee2020bootstrapping}.
+We compared against the following baselines for Human Activity: SeFT~\citep{horn2020set}, RNN-Decay~\citep{che2018recurrent}, IP-Nets~\citep{shukla2019interpolation}, L-ODE-RNN~\citep{chen2018neural}, L-ODE-ODE~\citep{rubanova2019latent}, and mTAND-Enc~\citep{shukla2021multi}.
+ 
+
+
+\subsection{Copy Task}
+
+We first verify the ability of Cross Attention and Tree Cross Attention (TCA) to perform retrieval. The models are provided with a sequence of length $N=2^k$, beginning with a [BOS] (Beginning of Sequence) token, followed by a randomly generated palindrome comprising of $2^{k}-2$ digits, ending with a [EOS] (End of Sequence) token. The objective of the task is to predict the second half ($2^{k-1}$) of the sequence given the first half ($2^{k-1}$ tokens) of the sequence as context. To make a correct prediction for index $2^{k} - i$ (where $0 < i \leq 2^{k-1}$), the model must retrieve information from its input/context sequence at index $i + 1$. The model is evaluated on its accuracy on $3200$ randomly generated test sequences. As a point of comparison, we include Random as a baseline, which makes random predictions sampled from the set of digits ($0-9$), [EOS], and [BOS] tokens. 
+
+\textbf{Results.} We found that both Cross Attention and Tree Cross Attention were able to solve this task perfectly (Table \ref{alg:training_retrieval}). In comparison, TCA requires $\sim 50 \times$ fewer tokens than Cross Attention.
+Furthermore, we found that Perceiver IO's performance for the same number of tokens was dismal ($15.2 \pm 0.0 \%$ accuracy at $N=256$), further dropping in performance as the length of the sequence increased. This result is expected as Perceiver IO aims to compress all the relevant information for any predictions into a small fixed-sized set of latents. However, all the tokens are relevant depending on the queried index. As such, methods which distill information to a lower dimensional space are insufficient. In contrast, TCA performs tree-based memory retrieval, selectively retrieving a small subset of tokens for predictions. As such, TCA is able to solve the task perfectly while using the same number of tokens as Perceiver. 
+
+\begin{table}[]
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{|c|cc|cc|cc|}
+\hline
+\multirow{2}{*}{Method} & \multicolumn{2}{c|}{$N=256$}                & \multicolumn{2}{c|}{$N=512$}               & \multicolumn{2}{c|}{$N=1024$}               \\
+                        & \multicolumn{1}{c|}{\% Tokens} & Accuracy & \multicolumn{1}{c|}{\% Tokens} & Accuracy & \multicolumn{1}{c|}{\% Tokens} & Accuracy \\ \hline
+Cross Attention                    & \multicolumn{1}{c|}{$100.0\%$}     & $\mathbf{100.0 \pm 0.0}$    & \multicolumn{1}{c|}{$100.0\%$}     & $\mathbf{100.0 \pm 0.0}$  & \multicolumn{1}{c|}{$100.0\%$}     & $\mathbf{99.9 \pm 0.2}$  \\ 
+Random              & \multicolumn{1}{c|}{---}    & $8.3 \pm 0.0$  & \multicolumn{1}{c|}{---}    & $8.3 \pm 0.0$  & \multicolumn{1}{c|}{---}    &   $8.3 \pm 0.0$       \\ 
+Perceiver IO               & \multicolumn{1}{c|}{$\mathbf{6.3\%}$}          &   $15.2 \pm 0.0$       & \multicolumn{1}{c|}{$\mathbf{3.5\%}$}          &     $13.4 \pm 0.2$     & \multicolumn{1}{c|}{$\mathbf{2.0\%}$}          &     $11.6 \pm 0.4$     \\ 
+TCA             & \multicolumn{1}{c|}{$\mathbf{6.3\%}$}    & $\mathbf{100.0 \pm 0.0}$  & \multicolumn{1}{c|}{$\mathbf{3.5\%}$}    & $\mathbf{100.0 \pm 0.0}$  & \multicolumn{1}{c|}{$\mathbf{2.0\%}$}    &    $\mathbf{99.6 \pm 0.6}$      \\ \hline
+\end{tabular}
+\end{adjustbox}
+\label{table:copy_task}
+\caption{Copy Task Results with accuracy (higher is better) and $\%$ tokens (lower is better) metrics. 
+}
+\end{table}
+
+
+\subsection{Uncertainty Estimation: GP Regression and Image Completion}
+
+\subsubsection{GP Regression}
+
+The goal of the GP Regression task is to model an unknown function $f$ given $N$ points.  During training, the functions are sampled from a GP prior with an RBF kernel $f_i \sim GP(m, k)$ where $m(x) = 0$ and $k(x, x') = \sigma_f^2 \exp(-\frac{(x - x')^2}{2l^2})$. The hyperparameters of the kernel are randomly sampled according to $l \sim \mathcal{U}[0.6, 1.0)$, $\sigma_f \sim \mathcal{U}[0.1, 1.0)$, $N \sim \mathcal{U}[3, 47)$, and $M \sim \mathcal{U}[3, 50-N)$. After training, the models are evaluated according to the log-likelihood of functions sampled from GPs with RBF and Matern 5/2 kernels. 
+\begin{table}
+\centering
+\begin{tabular}{|c|c|cc|}
+\hline
+Method                       & $\%$ Tokens & RBF          & Matern 5/2   \\ \hline
+Transformer + Cross Attention                        & $100\%$ &  $\mathbf{1.35 \pm 0.02}$  & $\mathbf{0.91 \pm 0.02}$  \\ 
+Perceiver IO                        & $\mathbf{14.9\%}$ &  $1.06 \pm 0.05$  & $0.58 \pm 0.05$  \\
+Perceiver IO ($L = 32$)                        & $68.0\%$ &  $1.25 \pm 0.04$  & $0.78 \pm 0.05$  \\ 
+ReTreever                & $\mathbf{14.9\%}$ & $\mathbf{1.25 \pm 0.02}$  & $\mathbf{0.81 \pm 0.02}$  \\  \hline
+\end{tabular}
+\caption{1-D Meta-Regression Experiments with log-likelihood (higher is better) and $\%$ tokens (lower is better) metrics. 
+}
+\label{table:1d_regression}
+\end{table}
+\textbf{Results.} In Table \ref{table:1d_regression}, we see that ReTreever ($1.25 \pm 0.02$) outperforms Perceiver IO ($1.06 \pm 0.05$) by a large margin while using the same number of tokens for inference. We found that Perceiver IO needed $\sim 4.6 \times$ the number of tokens to achieve comparable performance. 
+
+\subsubsection{Image Completion}
+
+The goal of the Image Completion task is to make predictions for the pixels of an image given a random subset of pixels of an image. The CelebA dataset comprises coloured images of celebrity faces. The images are downsized to size $32 \times 32$.
+The EMNIST dataset comprises black and white images of handwritten letters with a resolution of $32 \times 32$. We consider $10$ classes. Following prior works, the $x$ values of the images are rescaled to be between [-1, 1], the y values to be between [-0.5, 0.5], and the number of pixels is sampled according to $N \sim \mathcal{U}[3, 197)$ and $M \sim \mathcal{U}[3, 200-N)$.
+
+
+\begin{table}[]
+\centering
+\begin{tabular}{|c|cc|cc|}
+\hline
+\multirow{2}{*}{Method}       & \multicolumn{2}{c|}{CelebA}                                      & \multicolumn{2}{c|}{EMNIST}                                      \\ 
+                              & \multicolumn{1}{c|}{$\%$ Tokens}      & LogLikelihood            & \multicolumn{1}{c|}{$\%$ Tokens}      & LogLikelihood            \\ \hline
+Transformer + Cross Attention & \multicolumn{1}{c|}{$100\%$}          & $\mathbf{3.88 \pm 0.01}$ & \multicolumn{1}{c|}{$100\%$}          & $\mathbf{1.41 \pm 0.00}$ \\
+Perceiver IO                  & \multicolumn{1}{c|}{$\mathbf{4.6\%}$} & $3.20 \pm 0.01$          & \multicolumn{1}{c|}{$\mathbf{4.6\%}$} & $1.25 \pm 0.01$          \\
+ReTreever                     & \multicolumn{1}{c|}{$\mathbf{4.6\%}$} & $3.52 \pm 0.01$          & \multicolumn{1}{c|}{$\mathbf{4.6\%}$} & $1.30 \pm 0.01$          \\ \hline
+\end{tabular}
+\caption{Image Completion Experiments. The methods are evaluated according to the log-likelihood (higher is better) and $\%$ tokens (lower is better) metrics.}
+\label{table:image_completion}
+\end{table}
+
+\textbf{Results.} In Table \ref{table:image_completion}, we see that ReTreever outperforms Perceiver IO significantly on both CelebA and EMNIST while using the same number of tokens. Compared with Transformer + Cross Attention, ReTreever uses $\sim 21 \times$ fewer tokens, making it significantly more token-efficient. 
+
+
+
+
+
+
+
+
+\subsection{Time Series: Human Activity}
+
+The human activity dataset consists of 3D positions of the waist, chest, and ankles (12 features) collected from five individuals performing various activities such as walking, lying, and standing. We follow prior works preprocessing steps, constructing a dataset of $6,554$ sequences with $50$ time points. The objective of this task is to classify each time point into one of eleven types of activities. 
+
+\begin{table}[]
+\centering
+\begin{tabular}{|c|c|c|}
+\hline
+Model & $\%$ Tokens & Accuracy      \\ \hline
+Transformer + Cross Attention                          & $100\%$     &  $\mathbf{89.1 \pm 1.3}$             \\ 
+Perceiver IO                     &  $\mathbf{14\%}$        &  $87.6 \pm 0.3$ \\ 
+ReTreever                     &   $\mathbf{14\%}$        &   $\mathbf{88.9 \pm 0.4}$            \\ \hline
+\end{tabular}
+\caption{Human Activity Experiments with accuracy (higher is better) and $\%$ tokens (lower is better) metrics.}
+\label{table:human_activity}
+\end{table}
+
+\textbf{Results.} Table \ref{table:human_activity} show similar conclusions as our prior experiments. (1) ReTreever performs comparable to Transformer + Cross Attention, requiring far fewer tokens ($86\%$ less), and (2) ReTreever outperforms Perceiver IO significantly while using the same number of tokens. 
+
+
+\subsection{Analyses} 
+
+
+\begin{table}[]
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{|c|cc|cc|cc|}
+\hline
+\multirow{2}{*}{Method} & \multicolumn{2}{c|}{$N=256$}                & \multicolumn{2}{c|}{$N=512$}               & \multicolumn{2}{c|}{$N=1024$}               \\
+                        & \multicolumn{1}{c|}{\% Tokens} & Accuracy & \multicolumn{1}{c|}{\% Tokens} & Accuracy & \multicolumn{1}{c|}{\% Tokens} & Accuracy \\ \hline
+TCA (Acc)             & \multicolumn{1}{c|}{$\mathbf{6.3\%}$}    & $\mathbf{100.0 \pm 0.0}$  & \multicolumn{1}{c|}{$\mathbf{3.5\%}$}    & $\mathbf{100.0 \pm 0.0}$  & \multicolumn{1}{c|}{$\mathbf{2.0\%}$}    &    $\mathbf{99.6 \pm 0.6}$      \\ 
+TCA (Neg. CE)              & \multicolumn{1}{c|}{$\mathbf{6.3\%}$}    & $\mathbf{99.8 \pm 0.3}$  & \multicolumn{1}{c|}{$\mathbf{3.5\%}$}    & $95.5 \pm 3.8$  & \multicolumn{1}{c|}{$\mathbf{2.0\%}$}    &   $80.3 \pm 14.8$       \\ \hline
+\end{tabular}
+\end{adjustbox}
+\caption{Comparison of Accuracy and Negative Cross Entropy as the reward. }
+\label{table:acc_ce_analyses}
+\end{table}
+
+\textbf{Optimising non-differentiable objectives using $\mathcal{L}_{RL}$.} In classification, typically, accuracy is the metric we truly care about. However, accuracy is a non-differentiable objective, so instead in deep learning, we often use cross entropy so we can optimize the model's parameters via gradient descent. However, in the case of RL, the reward does not need to be differentiable. As such, we compare the performance of ReTreever when optimizing for the accuracy and the negative cross entropy. 
+Table \ref{table:acc_ce_analyses} shows that accuracy as the RL reward improves upon using negative cross entropy. This is expected since (1) the metric we evaluate our model on is accuracy and not cross entropy, and (2) accuracy as a reward is simpler compared to negative cross entropy as a reward, making it easier for a policy to optimize. More specifically, a reward using accuracy as the metric is either: $\mathcal{R} = 0$ for an incorrect prediction or $\mathcal{R} = 1$ for a correct prediction. However, a reward based on cross entropy can have vastly different values for incorrect predictions. 
+
+\textbf{Memory Usage.} Tree Cross Attention's memory usage (Figure \ref{fig:analyses} (left)) is significantly more efficient than Cross Attention, growing logarithmically in the number of tokens compared to linearly.
+\begin{figure}
+    \centering
+    \includegraphics[width=0.32\textwidth]{figures/mem_usage_num_tokens.png}
+    \includegraphics[width=0.32\textwidth]{figures/training_curve_CA.png}
+    \includegraphics[width=0.32\textwidth]{figures/training_curve_RL.png}
+    \caption{Analyses Plots. (left) Memory usage plot comparing the rate in which memory usage grows at inference time relative to the number of tokens. (middle) Training curve with varying weights ($\lambda_{CA}$) for the Cross Attention loss term. (right) Training curve with varying weights ($\lambda_{RL}$) for the RL retrieval loss term.
+    }
+    \label{fig:analyses}
+\end{figure}
+
+\textbf{Importance of the different loss terms $\lambda_{CA}$ and $\lambda_{RL}$.} Figure \ref{fig:analyses} (right) shows that the weight of the RL loss term is crucial to achieving good performance. $\lambda_{RL} = 1.0$ performed the best. If the weight of the term is too small $\lambda_{RL} \in \{0.0, 0.1\}$  or too large $\lambda_{RL} = 10.0$, the model is unable to solve the task. 
+Figure \ref{fig:analyses} (middle) shows that the weight of the Cross Attention loss term improves the stability of the training, particularly in the early stages. Setting $\lambda_{CA} = 1.0$ performed the best. Setting too small values for $\lambda_{CA} \in \{0.0, 0.1\}$ causes some erraticness in the early stages of training. Setting too large of a value $\lambda_{CA} = 10.0$ slows down training.  
+
+
+
+\section{Related Work}
+
+
+There have been a few works which have proposed to leverage a tree-based architecture~\citep{tai2015improved,Nguyen2020Tree-Structured,madaan2023treeformer,wang2019tree} for attention, the closest of which to our work is Treeformer~\citep{madaan2023treeformer}. Unlike prior works (including Treeformer) which focused on replacing self-attention in transformers with tree-based attention, in our work, we focus on replacing cross attention with a tree-based cross attention mechanism for efficient memory retrieval for inferences. 
+Furthermore, Treeformer (1) uses a decision tree to find the leaf that closest resembles the query feature vector, (2) TF-A has a partial receptive field comprising only the tokens in the selected leaf, and (3) TF-A has a worst-case linear complexity in the number of tokens per query. 
+In contrast, TCA (1) learns a policy to select a subset of nodes, (2) retrieves a subset of nodes with a full receptive field, and (3) has a guaranteed logarithmic complexity.
+
+As trees are a form of graphs, Tree Cross Attention bears a resemblance to Graph Neural Networks (GNNs). 
+The objectives, however, of GNNs and TCA are different. In GNNs, the objective is to perform edge, node, or graph predictions. However, the goal of TCA is to search the tree for a subset of nodes that is relevant for a query.
+Furthermore, unlike GNNs which typically consider the tokens to correspond one-to-one with nodes of the graph, TCA only considers the leaves of the tree to be tokens. 
+We refer the reader to surveys on GNNs~\citep{wu2020comprehensive,thomas2023graph}.
+
+
+
+
+\section{Conclusion}
+
+
+
+In this work, we proposed Tree Cross Attention (TCA), a variant of Cross Attention that only requires a logarithmic $\mathcal{O}(\log(N))$ number of tokens when performing inferences. 
+By leveraging RL, TCA can optimize non-differentiable objectives such as accuracy. 
+Building on TCA, we introduced ReTreever, a flexible architecture for token-efficient inference.
+We evaluate across various classification and uncertainty prediction tasks, showing (1) TCA achieves performance comparable to Cross Attention while being significantly more token efficient and (2) ReTreever outperforms Perceiver IO while using the same number of tokens for inference.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\newpage
+
+
+
+
+

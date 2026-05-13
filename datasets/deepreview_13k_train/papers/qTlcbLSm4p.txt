@@ -1,0 +1,393 @@
+\title{Relay Diffusion: Unifying diffusion process across resolutions for image synthesis}
+
+\begin{abstract}
+Diffusion models achieved great success in image synthesis, but still face challenges in high-resolution generation. Through the lens of discrete cosine transformation, we find the main reason is that \emph{the same noise level on a higher resolution results in a higher Signal-to-Noise Ratio in the frequency domain}. In this work, we present Relay Diffusion Model (RDM), which transfers a low-resolution image or noise into an equivalent high-resolution one for diffusion model via blurring diffusion and block noise. Therefore, the diffusion process can continue seamlessly in any new resolution or model without restarting from pure noise or low-resolution conditioning. RDM achieves state-of-the-art FID on CelebA-HQ and sFID on ImageNet 256$\times$256, surpassing previous works such as ADM, LDM and DiT by a large margin.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[H]
+    \begin{center}
+        {\includegraphics[width=1\linewidth]{figures/combined_main_results_final.png}}
+    \end{center}
+    \caption{(left): Generated Samples by RDM on ImageNet 256$\times$256 and CelebA-HQ 256$\times$256. (right): Benchmarking recent diffusion models on class-conditional ImageNet 256$\times$256 generation without any guidance. RDM can achieve a FID of 1.87 if with classifier-free guidance.}
+    \label{fig: main_results}
+\end{figure}
+Diffusion models~\citep{ho2020denoising,rombach2022high} succeeded GANs~\citep{goodfellow2020generative} and autoregressive models~\citep{ramesh2021zero,ding2021cogview} to become the most prevalent generative models in recent years. However, challenges still exist in the training of diffusion models for high-resolution images. More specifically, there are two main obstacles: 
+
+\textbf{Training Efficiency. } Although equipped with UNet to balance the memory and computation cost across different resolutions, diffusion models still require a large amount of resources to train on high-resolution images. One popular solution is to train the diffusion model on a latent (usually 4$\times$ compression rate in resolution) space and map the result back as pixels~\citep{rombach2022high}, which is fast but inevitably suffers from some low-level artifacts. The cascaded method~\citep{ho2022cascaded, saharia2022photorealistic} trains a series of varying-size super-resolution diffusion models, which is effective but needs a complete sampling for each stage separately.
+
+\textbf{Noise Schedule.} Diffusion models need a noise schedule to control the amount of the isotropic Gaussian noise at each step. The setting of the noise schedule shows great influence over the performance, and most current models follow the linear~\citep{ho2020denoising} or cosine~\citep{nichol2021improved} schedule. However, \emph{an ideal noise schedule should be resolution-dependent} (See Figure~\ref{fig: block} or ~\cite{chen2023importance}), resulting in suboptimal performance to train high-resolution models directly with common schedules designed for resolutions of 32$\times$32 or 64$\times$64 pixels.
+
+These obstacles hindered previous researchers to establish an effective end-to-end diffusion model for high-resolution image generation. \cite{dhariwal2021diffusion} attempted to directly train a 256$\times$256 ADM but found that it performs much worse than the cascaded pipeline. \cite{chen2023importance} and \cite{hoogeboom2023simple} carefully adjusted the hyperparameters of noise schedule and architecture for high-resolution cases, but the quality is still not comparable to the state-of-the-art cascaded methods~\citep{saharia2022photorealistic}. 
+
+In our opinion, the cascaded method contributes in both training efficiency and noise schedule: (1) It provides flexibility to adjust the model size and architecture for each stage to find the most efficient combination. (2) The existence of low-resolution condition makes the early sampling steps easy, so that the common noise schedules (optimized for low-resolution models) can be applied as a feasible baseline to the super-resolution models. Moreover, (3) high-resolution images are more difficult to obtain on the Internet than low-resolution images. The cascaded method can leverage the knowledge from low-resolution samples, meanwhile keep the capability to generate high-resolution images. Therefore, it might not be a promising direction to completely replace the cascaded method with an end-to-end one at the current stage. 
+
+The disadvantages of the cascaded method are also obvious: 
+(1) Although the low-resolution part is determined, a complete diffusion model starting from pure noise is still trained and sampled for super-resolution, which is time-consuming. (2) The distribution mismatch between ground-truth and generated low-resolution condition will hurt the performance, so that tricks like conditioning augmentation~\citep{ho2022cascaded} become vitally important to mitigate the gap. Besides, the noise schedule of high-resolution stages are still not well studied.
+
+\textbf{Present Work. } Here we present the \textbf{R}elay \textbf{D}iffusion \textbf{M}odel (RDM), a new cascaded framework to improve the shortcomings of the previous cascaded methods. In each stage, the model starts diffusion from the result of the last stage, instead of conditioning on it and starting from pure noise. Our method is named as the cascaded models work together like a ``relay race''.
+The contributions of this paper can be summarized as follows:
+\begin{itemize}
+    \item We analyze the reasons of the difficulty of noise scheduling in high-resolution diffusion models in frequency domain. Previous works like LDM~\citep{rombach2022high} assume all image signals from the same distribution when analyzing the SNR, neglecting the difference in frequency domain between low-resolution and high-resolution images.
+    Our analysis successfully account for phenomenon that the same noise level shows different perceptual effects on different resolutions, and introduce the \emph{block noise} to bridge the gap.
+    \item We propose RDM to disentangle the diffusion process and the underlying neural networks in the cascaded pipeline. RDM gets rid of the low-resolution conditioning and its distribution mismatch problem. Since RDM starts diffusion from the low-resolution result instead of pure noise, the training and sampling steps can also be reduced. 
+    \item We evaluate the effectiveness of RDM on unconditional CelebA-HQ 256$\times$256 and conditional ImageNet 256$\times$256 datasets. RDM achieves state-of-the-art FID on CelebA-HQ and sFID on ImageNet.  
+\end{itemize}
+
+
+
+\section{Preliminary}
+
+
+\subsection{Diffusion Models}
+To model the data distribution $p_{data}(\mathbf{x}_0)$, denoising diffusion probabilistic models (DDPMs,~\citet{ho2020denoising}) define the generation process as a Markov chain of learned Gaussian transitions. DDPMs first assume a forward diffusion process, corrupting real data $\mathbf{x}_0$ by progressively adding Gaussian noise from time steps $0$ to $T$, whose variance $\{\beta_t\}$ is called the noise schedule:
+\begin{equation}
+    q(\mathbf{x}_t|\mathbf{x}_{t-1})=\mathcal{N}(\mathbf{x}_t; \sqrt{1-\beta_t}\mathbf{x}_{t-1},\beta_t\mathbf{I}).
+\end{equation}
+The reverse diffusion process is learned by a time-dependent neural network to predict denoised results at each time step, by optimizing the variational lower bound (ELBO).
+
+Many other formulations for diffusion models include stochastic differential equations (SDE,~\citet{song2020score}), denoising diffusion implicit models (DDIM,~\citet{song2020denoising}), etc. \cite{karras2022elucidating} summaries these different formulations into the \textbf{EDM} framework.
+In this paper, we generally follow the EDM formulation and implementation.
+The training objective of EDM is defined as $L_2$ error terms:
+\begin{equation}
+    \mathbb{E}_{\mathbf{x}\sim p_{data},\sigma\sim p(\sigma)}\mathbb{E}_{\mathbf{\epsilon}\sim\mathcal{N}(\mathbf{0}, \mathbf{I})}\Vert D(\mathbf{x}+\sigma\mathbf{\epsilon},\sigma)-\mathbf{x}\Vert^2,
+\end{equation}
+where $p(\sigma)$ represents the distribution of a continuous noise schedule. $D(\mathbf{x}+\mathbf{\epsilon},\sigma)$ represents the denoiser function depending on the noise scale. We also follow the EDM precondition for $D(\mathbf{x}+\mathbf{\epsilon},\sigma)$ with $\sigma$-dependent skip connection~\citep{karras2022elucidating}.
+Cascaded diffusion model (CDM,~\citet{ho2022cascaded}) is proposed for high-resolution generation. CDM divides the generation into multiple stages, where the first stage generates low-resolution images and the following stages perform super-resolution conditioning on the outputs of the previous stage. Cascaded models are extensively adopted in recent works of text-to-image generation, e.g. Imagen~\citep{saharia2022photorealistic}, DALL-E-2~\citep{ramesh2022hierarchical} and eDiff-I~\citep{balaji2022ediffi}.
+
+
+
+
+\subsection{Blurring Diffusion} \label{sec:ihd}
+
+The Inverse Heat Dissipation Model (IHDM)~\citep{rissanen2022generative} generates images by reversing the heat dissipation process. The heat dissipation is a thermodynamic process describing how the temperature $u(x, y, t)$ at location $(x,y)$ changes in a (2D) space with respect to the time $t$. The dynamics can be denoted by a PDE $\frac{\partial u}{\partial t}= \frac{\partial^2 u}{\partial x^2}+\frac{\partial^2 u}{\partial y^2}$.
+
+Blurring diffusion~\citep{hoogeboom2022blurring} is further derived by augmenting the Gaussian noise with heat dissipation for image corruption. Since simulating the heat equation up to time $t$ is equivalent to a convolution with a Gaussian
+kernel with variance $\sigma^2=2t$ in an infinite plane~\citep{bredies2018mathematical}, the intermediate states $\vx_t$ become blurry, instead of noisy in the standard diffusion. If Neumann boundary conditions are assumed, blurring diffusion in discrete 2D pixel space can be transformed to the frequency space by Discrete Cosine Transformation (DCT) conveniently as:
+\begin{equation}
+    q(\vu_t | \vu_0) = \mathcal{N}(\vu_t | \mD_t \vu_{0}, \sigma_t^2\mI),
+    \label{eq:blur-diff}
+\end{equation}
+where $\vu_t = \text{DCT}(\vx_t)$
+, and $\mD_t=e^{\mathbf{\Lambda} t}$ is a diagonal matrix with $\mathbf{\Lambda}_{i\times W+j}=-\pi^2(\frac{i^2}{H^2}+\frac{j^2}{W^2})$ for coordinate $(i,j)$. Here Gaussian noise with variance $\sigma_t^2$ is mixed into the blurring diffusion process to transform the deterministic dissipation process to a stochastic one for diverse generation~\citep{rissanen2022generative}.
+
+
+
+
+
+
+\section{method}
+
+
+\begin{figure}[h]
+    \begin{center}
+    {\includegraphics[width=1\linewidth]{figures/block_noise.png}}
+    \end{center}
+    \caption{Illustration of spatial and frequency results after adding independent Gaussian and block noise. (a)(b) At the resolution of $64\times 64$ and $256\times 256$, the same noise level results in different perceptual effects, and in the frequency plot, the SNR curve shifts upward. (c) The independent Gaussian noise at the resolution $64\times 64$ and block noise (kernel size = 4)  at the resolution $256\times 256$ produces similar results in both spatial domain and frequency domain. The noise is $\mathcal{N}(0,0.3^2)$ for (a). These SNR curves are universally applicable to most natural images.
+    }
+    \label{fig: block}
+    \end{figure}
+    
+
+\subsection{Motivation}\label{sec:motivation}
+The noise schedule is vitally important to the diffusion models and resolution-dependent. A certain noise level appropriately corrupting the $64\times 64$ images, could fail to corrupt the $256\times 256$ (or a higher resolution) images, which is shown in the first row of Figure~\ref{fig: block}(a)(b). \cite{chen2023importance} and \cite{hoogeboom2023simple} attributed this to the lack of schedule-tuning, but we found an analysis from the perspective of frequency spectrum can help us better understand this phenomenon.
+
+\textbf{Frequency spectrum analysis of the diffusion process.} The natural images with different resolutions can be viewed as the result of visual signals sampled at varying frequencies. To compare the frequency features of a $64\times 64$ image and a $256\times 256$ image, we can upsample the $64\times 64$ one to $256\times 256$, perform DCT and compare them in the 256-point DCT spectrum.
+The second row of Figure~\ref{fig: block}(a) shows the signal noise ratio (SNR) at different frequencies and diffusion steps. In Figure~\ref{fig: block}(b), we clearly find that \emph{the same noise level on a higher resolution results in a higher SNR in the (low-frequency part of) the frequency domain}. 
+At a certain diffusion step, a higher SNR means that during training the neural network presumes the input image more accurate, but 
+the early steps may not be able to generate such accurate images after the increase in SNR. This training-inference mismatch will accumulate over step by step during sampling, leading to the degradation of performance. 
+
+\textbf{Block noise as the equivalence at high resolution.} After the upsampling from $64\times 64$ to $256\times 256$, the independent Gaussian noise on $64\times 64$ becomes noise on $4\times 4$ grids, thus greatly changes its frequency representation.
+To find a variant of the $s\times s$-grid noise without deterministic boundaries, we propose \textbf{Block noise}, where the Gaussian noise are correlated for nearby positions. More specifically, the covariance between noise $\epsilon_{x_0,y_0}$ and $\epsilon_{x_1, y_1}$ is defined as
+\begin{equation}
+    \text{Cov}(\epsilon_{x_0,y_0}, \epsilon_{x_1, y_1}) = \frac{\sigma^2}{s^2}\max\big(0, s-\text{dis}(x_0,x_1)\big)\max\big(0, s-\text{dis}(y_0,y_1)\big),
+\end{equation}
+where $\sigma^2$ is the noise variance, and $s$ is a hyperparameter \emph{kernel size}. The dis$(\cdot, \cdot)$ function here is the Manhattan distance. For simplicity, we ``connect'' the top and bottom edges and the left and right edges of the image, resulting in
+\begin{equation}
+    \text{dis}(x_0,x_1) = \min\left( |x_0 - x_1|, x_{max} - |x_0 - x_1| \right).
+\end{equation}
+The block noise with kernel size $s$ can be generated by averaging $s\times s$ independent Gaussian noise. Suppose we have an independent Gaussian noise matrix $\epsilon$, the block noise construction function Block$[s](\cdot)$ is defined as
+\begin{equation}
+	\text{Block}[s](\epsilon)_{x,y}= \frac{1}{s}\sum_{i=0}^{s-1} \sum_{j=0}^{s-1}\epsilon_{x-i,y-j},
+    \label{eq:block-noise}
+\end{equation}
+where $\text{Block}[s](\epsilon)_{x,y}$ is the block noise at the position $(x,y)$, and $\epsilon_{-x} = \epsilon_{x_{max}-x}$. Figure~\ref{fig: block}(c) shows that the block noise with kernel size $s=4$ on $256\times 256$ has a similar frequency spectrum as the independent Gaussian noise on $64\times 64$ images.
+
+The analysis above seems to indicate that we can design an end-to-end model for high-resolution images by introducing block noise in early diffusion steps, while cascaded models already achieves great success. Therefore, a revisit of the cascaded models is necessary.
+
+\textbf{Why does the cascaded models alleviate this issue?} Experiments in previous works~\citep{nichol2021improved,dhariwal2021diffusion} have already shown that cascaded models perform better than end-to-end models under a fair setting. These models usually use the same noise schedule in all stages, so why are the cascaded models not affected by the increase of SNR? The reason is that in the super-resolution stages, the low-resolution condition greatly ease the difficulty of the early steps, so that even the higher SNR requires a more accurate input, the accuracy is within the capability of the model.
+
+A natural idea is that since the low-frequency information in the high-resolution stage has already been determined by the low-resolution condition, we can continue generating directly from the upsampled result to reduce both the training and sampling steps. 
+However, the generation of low-resolution images is not perfect, and thus the solution of the distribution mismatch between ground-truth
+and generated low-resolution images is a priority to ``continue'' the diffusion process.  
+
+
+
+
+\subsection{Relay Diffusion}\label{sec:framework}
+
+\begin{figure}[h]
+\begin{center}
+{\includegraphics[width=1\linewidth]{figures/rdm.png}}
+\end{center}
+\caption{ Pipeline of Relay Diffusion Models (RDM). }
+\label{fig:pipeline}
+\end{figure}
+We propose relay diffusion model (RDM), a cascaded pipeline connecting the stages with block noise and (patch-level) blurring diffusion. Different from CDM, RDM considers the equivalence of the low-resolution generated images when upsampled to high resolution. Suppose that the generated $64\times 64$ low-resolution image $\mathbf{x}^L_0 = \mathbf{x}^L + \epsilon_L$ can be decomposed into a sample in real distribution $\mathbf{x}^L$ and a remaining noise $\epsilon_L \sim \mathcal{N}(\mathbf{0}, \beta_0^2\mathbf{I})$. As mentioned in section~\ref{sec:motivation}, the $256\times 256$ equivalence of $\epsilon_L$ is Block[$4$] noise with variance $\beta_0^2$, denoted by $\epsilon_H$. After (nearest) upsampling, $\mathbf{x}^L$ becomes $\mathbf{x}^H$, where each $4\times 4$ grid share the same pixel values. We can define it as the starting state of a \emph{patch-wise blurring diffusion}.
+Unlike blurring diffusion models~\citep{rissanen2022generative}~\citep{hoogeboom2022blurring} that perform the heat dissipation on the entire space of images, we propose to implement the heat dissipation on each $4\times 4$ patch independently, which is of the same size as the upsampling scale.
+ The forward process would have a similar representation with~\eqref{eq:blur-diff}:
+\begin{equation}
+    q(\vx_t | \vx_0) = \mathcal{N}(\vx_t | \mV\mD^p_t\mV^\mathrm{T}\vx_{0}, {\sigma_t}^2\mI), \quad t\in\{0,..,T\},\label{eq:patch-blur}
+\end{equation}
+where $\mV^\mathrm{T}$ is the projection matrix of DCT and $\sigma_t$ is the variance of noise. Here the $\mD^p_T$ is chosen to guarantee $\mV\mD^p_T\mV^\mathrm{T}\vx_{0}$ in the same distribution as $\vx^H$, meaning that the blurring process ultimately makes the pixel value in each $4\times 4$ patch the same.
+
+The training objective of the high-resolution stage of RDM generally follows EDM~\citep{karras2022elucidating} framework in our implementation. The loss function is defined on the prediction of denoiser function $D$ to fit with true data $\vx$, which is written as:
+\begin{align}
+    &\mathbb{E}_{\vx\sim p_{data},t\sim \mathcal{U}(0,1),\mathbf{\epsilon}\sim\mathcal{N}(\mathbf{0},\mathbf{I})}\Vert D(\vx_t,\sigma_t)-\vx\Vert^2, \nonumber\\
+    &\text{where}\quad \vx_t=\textcolor{blue}{\underbrace{\mV\mD^p_t\mV^\mathrm{T}}_{blurring}}\vx+\frac{\sigma}{\sqrt{1+\alpha^2}}\big(\mathbf{\epsilon}+\alpha\cdot\textcolor{red}{\underbrace{\text{Block}[s](\mathbf{\epsilon'})}_{block\ noise}}\big),\label{eq:relaydiff}
+\end{align}
+where $\epsilon$ and $\epsilon'$ are two independent Gaussian noise.
+The main difference in training between RDM and EDM is that the corrupted sample $\vx_t$ is not simply $\vx_t=\vx + \epsilon$, but a mixture of the blurred image, block noise and independent Gaussian noise. Ideally, the noise should gradually transfer from block noise to high-resolution independent Gaussian noise, but we find that a weighting average strategy perform well enough, because the low-frequency component of the block noise is much larger than the independent Gaussian noise, and vice versa for high-frequency component. $\alpha$ is a hyperparameter and the normalizer $\frac{1}{\sqrt{1+\alpha^2}}$ is used to keep the variance of the noise, $\sigma^2$ unchanged.
+
+The advantages of RDM compared to CDM includes:
+\begin{itemize}
+    \item RDM is more efficient, because RDM skips the re-generation of low-frequency information in the high-resolution stages, and reduce the number of training and sampling steps.
+    \item RDM is more simple, because it gets rid of the low-resolution conditioning and conditioning
+    augmentation tricks. The consumption from cross-attention with the low-resolution condition is also spared.
+    \item RDM is more potential in performance, because RDM is a Markovian denosing process (if with DDPM sampler). Any artifacts in the low-resolution images can be corrected in the high-resolution stage, while CDM is trained to correspond to the low-resolution condition.
+\end{itemize}
+Compared to end-to-end models~\citep{chen2023importance,hoogeboom2023simple},
+\begin{itemize}
+    \item RDM is more flexible to adjust the model size and leverage more low-resolution data.
+\end{itemize} 
+
+
+
+
+
+
+\subsection{Stochastic Sampler} \label{sec:sampler}
+Since RDM differs from traditional diffusion models in the forward process, we also need to adapt the sampling algorithms. In this section, we focus on the EDM sampler~\citep{karras2022elucidating} due to its flexibility to switch between the first and second order (Heun's) samplers.
+Heun's method introduces an additional step for the correction of the first-order sampling. The updating direction of a first-order sampling step is controlled by the gradient term $\vd_n=\frac{\vx_n-\vx_\theta(\vx_n,\sigma_{t_n})}{\sigma_{t_n}}$. The correction step updates current states with an averaged gradient term $\frac{\vd_n+\vd_{n-1}}{2}$. Heun's method takes account of the change of gradient term $\frac{\vd\vx}{\vd t}$ between $t_n$ and $t_{n-1}$. Therefore, it achieves higher quality while allowing for fewer steps of sampling.
+
+We adapt the EDM sampler to the blurring diffusion of RDM's super-resolution stage following the derivation of DDIM~\citep{song2020denoising}. We define the indices of sampling steps as $\{t_i\}_{i=0}^N$, in corresponding to the noisy states of images $\{\vx_i\}_{i=0}^N$. To apply blurring diffusion, images are transformed into frequency space by DCT as $\vu_i=\mV^\mathrm{T}\vx_i$. \cite{song2020denoising} uses a family of inference distributions to describe the diffusion process. We can write it for blurring diffusion as:
+\begin{equation} \label{eq:family_dist}
+    q_{\delta}(\vu_{1:N}|\vu_0)=q_{\delta}(\vu_N|\vu_0)\prod\limits_{n=2}^N q_{\delta}(\vu_{n-1}|\vu_n,\vu_0),
+\end{equation}
+where $\delta\in \mathbb{R}^\mathrm{N}_{\geq 0}$ denotes the index vector for the distribution. For all $n>1$, the backward process is:
+\begin{equation}\label{eq:sampler_dist}
+    q_{\delta}(\vu_{n-1}|\vu_n,\vu_0)=\mathcal{N} \big(\vu_{n-1}|\frac{1}{\sigma_{t_n}}(\sqrt{\sigma^2_{t_{n-1}}-\delta^2_n}\vu_n+(\sigma_{t_n}\mD^p_{t_{n-1}}-\sqrt{\sigma^2_{t_{n-1}}-\delta^2_n}\mD^p_{t_n})\vu_0),\delta^2_n\mI \big).
+\end{equation}
+The mean of the normal distribution ensures the forward process to be consistent with the formulation of blurring diffusion in Section~\ref{sec:framework}, which is $q(\vu_n | \vu_0) = \mathcal{N}(\vu_n | \mD^p_{t_n} \vu_{0},\sigma_{t_n}^2\mI)$. When the index vector $\delta$ is $0$, the sampler degenerates into an ODE sampler. We set $\delta_n=\eta\sigma_{t_{n-1}}$ for our sampler, where $\eta\in[0,1)$ is a fixed scalar controlling the scale of randomness injected during sampling. We substitute the definition into Eq.~\ref{eq:sampler_dist} to obtain our sampler function as:
+\begin{equation}\label{eq:sampler}
+    \vu_{n-1}=(\mD^p_{t_{n-1}} + \gamma_n(\mI - \mD^p_{t_n}))\vu_n + \sigma_{t_n}(\gamma_n\mD^p_{t_n} - \mD^p_{t_{n-1}})\frac{\vu_n-\Tilde{\vu}_0}{\sigma_{t_n}} + \eta\sigma_{t_{n-1}}\bm{\epsilon},
+\end{equation}
+where $\gamma_n\triangleq\sqrt{1-\eta^2}\frac{\sigma_{t_{n-1}}}{\sigma_{t_n}}$. As in the section~\ref{sec:motivation}, we also need to consider block noise besides blurring diffusion. The adaptation is just to replace isotropic Gaussian noise $\bm{\epsilon}$ with $\Tilde{\bm{\epsilon}}$, which is a weighted sum of the block noise and isotropic Gaussian noise. $\Tilde{\vu}_0=\vu_\theta(\vu_n,\sigma_{t_n})$ is predicted by the neural network.
+
+Finally, a stochastic sampler for the super-resolution stage of RDM is summaries in Algorithm~\ref{alg:sample}.
+
+\begin{algorithm}
+\caption{the RDM second-order stochastic sampler}
+\begin{algorithmic}
+\State {{\bf sample} $\vx_N \sim \mathcal{N} \big( \mathbf{0}, \sigma_N^2 \mathbf{I} \big)$}
+\State $\vu_N=\mV^\mathrm{T}\vx_N$
+    \textcolor{gray}{\Comment{transformed into the frequency domain}}
+\For{$n \in \{N, \dots, 1\}$}
+    \State $\gamma_n=\sqrt{1-\eta^2}\frac{\sigma_{t_{n-1}}}{\sigma_{t_n}},\quad \delta_n=\eta\sigma_{t_{n-1}}$
+        \textcolor{gray}{\Comment{coefficient of the random term}}
+    \State $\Tilde{\vu}_0=\vu_\theta(\vu_n, \sigma_{t_n})$
+        \textcolor{gray}{\Comment{model prediction at $t_n$}}
+    \State {$\vd_n=\frac{\vu_n - \Tilde{\vu}_0}{\sigma_{t_n}}$} 
+        \textcolor{gray}{\Comment{first-order gradient term at $t_n$}}
+    \State $\vu_{n-1}=(\mD^p_{t_{n-1}} + \gamma_n(\mI - \mD^p_{t_n}))\vu_n + \sigma_{t_n}(\gamma_n\mD^p_{t_n} - \mD^p_{t_{n-1}})\vd_n + \delta_n\bm{\epsilon}$
+    \State $ $
+        \textcolor{gray}{\Comment{from $t_n$ to $t_{n-1}$ using Euler's method}}
+
+    \begin{mdframed}[backgroundcolor=yellow!10,hidealllines=true,innerleftmargin=0pt,innerrightmargin=0pt]
+    \If{$n\ne 1$} \textcolor{gray}{\Comment{the second-order part}}
+        \State $\Tilde{\vu}'_0=\vu_\theta(\vu_{n-1},\sigma_{t_{n-1}})$
+            \textcolor{gray}{\Comment{model prediction at $t_{n-1}$}}
+        \State $\vd_{n-1}=\frac{\vu_{n-1}-\Tilde{\vu}'_0}{\sigma_{t_{n-1}}}$
+            \textcolor{gray}{\Comment{gradient term at $t_{n-1}$}}
+        \State $\vd'_n=\frac{\vd_n+\vd_{n-1}}{2}$
+            \textcolor{gray}{\Comment{second-order gradient term}}
+        \State $\vu'_{n-1}=(\mD^p_{t_{n-1}} + \gamma_n(\mI - \mD^p_{t_n}))\vu_n + \sigma_{t_n}(\gamma_n\mD^p_{t_n} - \mD^p_{t_{n-1}})\vd'_n + \delta_n\bm{\epsilon}$ \textcolor{gray}{\Comment{correction}}            
+    \EndIf
+    \end{mdframed}
+    \State $\vu_{n-1}=\vu'_{n-1}$
+\EndFor
+\State $\vx_0=\mV\vu_0$
+\end{algorithmic}
+\label{alg:sample}
+\end{algorithm}
+
+
+
+\section{Experiments}
+
+
+\subsection{Experimental Setting}
+
+\textbf{Dataset.} We use CelebA-HQ and ImageNet in our experiments. CelebA-HQ~\citep{karras2018progressive} is a high-quality subset of CelebA~\citep{liu2015deep} which consists of 30,000 images of faces from human celebrities. ImageNet~\citep{deng2009imagenet} contains 1,281,167 images spanning 1000 different classes and is a widely-used dataset for generation and vision tasks. We train RDM on these datasets to generate $256\times 256$ images.
+
+\textbf{Architecture and Training.} RDM adopts UNet~\citep{ronneberger2015u} as the backbone of diffusion models for both the first and the second stage. The detailed architectures largely follow ADM~\citep{dhariwal2021diffusion} for fair comparison. We train unconditional models on CelebA-HQ and class-conditional models on ImageNet respectively. Since we follow the EDM implementation, we directly use the released checkpoint from EDM in ImageNet in the $64\times 64$ stage. The FLOPs of the $64\times 64$ model are about $1/10$ that of the $256\times 256$ model.
+
+\textbf{Evaluation.} We use metrics including FID~\citep{heusel2017gans}, sFID~\citep{nash2021generating}, IS~\citep{salimans2016improved}, Precision and Recall~\citep{kynkaanniemi2019improved} for a comprehensive evaluation of the results. FID measures the difference between the features of model generations and real images, which is extracted by a pretrained Inception network. sFID differs from FID by using intermediate features, which better measures the similarity of spatial distribution. IS and Precision both measure the fidelity of the samples, while Recall indicates the diversity. We compute metrics with 50,000 and 30,000 generated samples for ImageNet and CelebA-HQ respectively.
+\begin{table}[t]
+    \caption{Benchmarking unconditional image generation on CelebA-HQ $256\times 256$. } %
+    \label{tbl:result_celeba}
+    \begin{center}
+    \begin{small}
+    \begin{tabular}{lccc}
+    \toprule
+    \multicolumn{4}{l}{\bf{Unconditional CelebA-HQ} $256\times 256$} \\
+    \toprule
+    Model                                 & FID$\downarrow$   & Precision$\uparrow$ & Recall$\uparrow$ \\
+    \midrule
+    LSGM~\citep{vahdat2021score}          & 7.22  & -     & - \\
+    WaveDiff~\citep{phung2023wavelet}     & 5.94  & -     & 0.37 \\
+    LDM-4~\citep{rombach2022high}         & 5.11  & 0.72  & 0.49 \\
+    StyleSwin~\citep{zhang2022styleswin}  & 3.25  & -     & - \\
+    \textbf{RDM}                          & \bf{3.15} & \bf{0.77} & \bf{0.55} \\
+    \bottomrule
+    \end{tabular}
+    \end{small}
+    \end{center}
+
+\end{table}
+
+\begin{table}[t]
+    \caption{Benchmarking class-conditional image generation on ImageNet $256\times 256$. } %
+    \label{tbl:result_ImageNet}
+    \begin{center}
+    \begin{small}
+    \begin{tabular}{lccccc}
+    \toprule
+    \multicolumn{6}{l}{\bf{Class-Conditional ImageNet} $256\times 256$} \\
+    \toprule
+    Model & FID$\downarrow$   & sFID$\downarrow$  & IS$\uparrow$     & Precision$\uparrow$ & Recall$\uparrow$ \\
+    \midrule
+    BigGAN-deep~\citep{brock2018large} & 6.95 & 7.36 & 171.4 & 0.87 & 0.28 \\
+    StyleGAN-XL~\citep{sauer2022stylegan} & 2.30 & 4.02 & 265.12 & 0.78 & 0.53 \\
+    \midrule
+    ADM~\citep{dhariwal2021diffusion}       & 10.94 & 6.02 & 100.98 & 0.69 & 0.63 \\
+    LDM-4~\citep{rombach2022high}           & 10.56 & - & 103.49 & 0.71 & 0.62 \\
+    DiT-XL/2~\citep{peebles2022scalable}    & 9.62 & 6.85 & 121.50 & 0.67 & 0.67 \\
+    MDT-XL/2~\citep{gao2023masked}          & 6.23 & 5.23 & 143.02 & 0.71 & 0.65 \\
+    \textbf{RDM}                            & \bf{5.27} & 4.39 & 153.43 & 0.75 & 0.62 \\
+    \cmidrule(lr){1-6}
+    CDM~\citep{ho2022cascaded}              & 4.88 & -      & 158.71 & -    & - \\
+    ADM-U,G                                 & 3.94 & 6.14   & 215.84 & 0.83 & 0.53 \\
+    LDM-4-G (CFG=1.50)                      & 3.60 & -      & 247.67 & 0.87 & 0.48 \\
+    \cmidrule(lr){1-6}
+    MDT-XL/2-G (dynamic\ CFG) & \textbf{1.79} & 4.57 & 283.01 & 0.81 & 0.61 \\
+    \cmidrule(lr){1-6}
+    DiT-XL/2-G (CFG=1.50)   & 2.27 & 4.60 & 278.24 & 0.83 & 0.57 \\
+    MDT-XL/2-G (CFG=1.325)  & 2.26 & 4.28 & 246.06 & 0.81 & 0.59 \\
+    \textbf{RDM} (CFG=3.50) & 1.99 & 3.99 & 260.45 & 0.81 & 0.58 \\
+    \quad + class-balance & \textbf{1.87} & \bf{3.97} & 278.75 & 0.81 & 0.59 \\
+    \bottomrule
+    \end{tabular}
+    \end{small}
+    \end{center}
+\end{table}
+
+\subsection{Results}
+\textbf{CelebA-HQ} We compare RDM with the existing methods on CelebA-HQ $256\times 256$ in Table~\ref{tbl:result_celeba}. RDM outperforms the state-of-the-art model StyleSwin~\citep{zhang2022styleswin} with a remarkably fewer training iterations (50M versus 820M trained images). We also achieve the best precision and recall among the existing works.
+
+\textbf{ImageNet} Table~\ref{tbl:result_ImageNet} shows the performance of class-conditional generative models on ImageNet $256\times 256$. We report the best results as possible of the existing methods with classifier-free guidance (CFG)~\citep{ho2022classifier}. RDM achieves the best sFID and outperforms all the other methods by FID except MDT-XL/2~\citep{gao2023masked} with a dynamic CFG scale. 
+If with a fixed but best-picked CFG scale\footnote{The best CFG scale is 1.325 with a hyperparameter sweep from 1.0 to 1.8. We observed the FID increases greatly if CFG scale $>$ 1.5 for MDT-XL/2.}, MDT-XL/2 can only achieve an FID of 2.26. 
+While achieving competitive results, RDM is trained with only 70\% of the iterations of MDT-XL/2 (1.2B versus 1.7B trained images), indicating that the longer training and a more granular CFG strategy are potential directions to further optimize the FID of RDM.
+\textbf{Training Efficiency} We also compare the performance of RDM with existing methods along with the training cost in Figure~\ref{fig: main_results}. When CFG is disabled, RDM achieves a better FID than previous state-of-the-art diffusion models including DiT~\citep{peebles2022scalable} and MDT~\citep{gao2023masked}. RDM outperforms them even with only about $1/3$ training iterations. 
+
+\subsection{Ablation Study}\label{sec:ablation}
+
+In this section, we conduct ablation experiments on the designs of RDM to verify their effectiveness. Unless otherwise stated, we report results of RDM on $256\times 256$ generation without CFG.
+
+\begin{figure}[h]
+\begin{center}
+{\includegraphics[width=1.0\linewidth]{figures/ablation_block.png}}
+\end{center}
+\caption{The effectiveness of block noise. We compare the performance of RDM along the training on (a) ImageNet $256\times 256$ and (b) CelebA-HQ $256\times 256$. To apply block noise in RDM, we set $\alpha=0.15$ and kernel size $s=4$.}
+\label{fig: ablation_block}
+\end{figure}
+
+\textbf{The Effectiveness of block noise.} \label{sec:ablation_blocknoise}
+We compare the performance of RDM with and without adding block noise in Figure~\ref{fig: ablation_block}. With a sufficient phase of training, RDM with block noise outperforms the model without block noise by a remarkable margin on both ImageNet and CelebA-HQ. This demonstrates the effectiveness of the block noise. The addition of block noise introduces higher modeling complexity of the noise pattern, which contributes to a slower convergence of training in the initial stage, as illustrated by Figure~\ref{fig: ablation_block}(a). We assume that training on a significantly smaller scale of samples leads to a fast convergence of the model, which obliterates such a feature, therefore a similar phenomenon cannot be observed in the training of CelebA-HQ.
+
+
+    
+    
+    
+
+\begin{table}[h]
+    \centering
+    \begin{tabular}{lcccccccccc}
+    \toprule
+    $\eta$              & 0    & 0.10 & 0.15 & 0.20      & 0.25 & 0.30 & 0.40 & 0.50 \\
+    \midrule
+    FID$\downarrow$     & 5.65 & 5.44 & 5.31 & \bf{5.27} & 5.48 & 5.91 & 6.91 & 9.17 \\
+    \bottomrule
+    \end{tabular}
+    
+    
+    \begin{tabular}{lcccccccccc}
+    \toprule
+    $\eta$              & 0    & 0.10 & 0.15 & 0.20      & 0.25 & 0.30 & 0.40 & 0.50 \\
+    \midrule
+    FID$\downarrow$     & 4.11 & 3.74 & 3.43 & \bf{3.15} & 3.23 & 3.52 & 4.79 & 6.41 \\
+    \bottomrule
+    \end{tabular}
+    \captionof{table}{ Effect of stochasticity in the sampler on ImageNet $256\times 256$ (top) and CelebA-HQ $256\times 256$ (bottom). We explored different values of the $\eta$ in Algorithm \ref{alg:sample}.} 
+    \label{tbl:ablation_sde}
+\end{table}
+
+\textbf{The scale of stochasticity.} 
+As previous works~\citep{song2020score} have shown, SDE samplers usually perform better than ODE samplers. 
+We want to quantitatively measure how the scale of the stochaticity affects the performance in the RDM sampler (Algorithm~\ref{alg:sample}). Table~\ref{tbl:ablation_sde} shows results with $\eta$ varying from $0$ to $0.50$. For both CelebA-HQ and ImageNet, the optimal FID is achieved by $\eta=0.2$. We hypothesis a small $\eta$ is insufficient for the noise addition to cover the bias formed in earlier sampling steps, while a large $\eta$ introduces excessive noise into the process of sampling, which makes a moderate $\eta$ to be the best choice. Within a reasonable scale of stochasticity, an SDE sampler always outperforms the ODE sampler by a significant margin.
+
+\begin{wrapfigure}[23]{r}{.55\textwidth}
+    \centering
+\includegraphics[width=0.55\textwidth]{figures/ablation_steps2.png}
+    \caption{Comparison of FID on ImageNet with different sampling steps. For allocation of NFE $=N$ in RDM, $10n+(\frac{N}{2}-n)$ means $10n$ for the first stage and $\frac{N}{2}-n$ for the second.}
+    \label{fig:ablation_steps}
+\end{wrapfigure}
+
+\textbf{Sampling steps.} To demonstrate the efficiency of our model, we compare the performance of RDM and other methods with fewer sampling steps. Number of Function Evaluations (NFE), i.e., the number that a neural network is called during sampling, is used as the index of the comparison for fairness. For RDM, the NFE consists of the NFE in the second stage and $1/10$ the NFE in the first stage, according to the proportion of the FLOPs. As shown in Figure~\ref{fig:ablation_steps}, the performance of DiT-XL/2~\citep{peebles2022scalable} and MDT-XL/2~\citep{gao2023masked} both drop significantly with a lower NFE, while RDM barely declines. Considering that the steps in different stages may contribute differently in FID, we demonstrates three FLOPs allocation strategies in Figure~\ref{fig:ablation_steps}.  
+With more NFE allocated in the first stage, RDM achieves a better FID. In all the settings, RDM performs better than MDT-XL/2 and DiT-XL/2 if NFE $<$ 200.
+
+
+
+\section{Conclusion and Discussion}
+
+
+
+In this paper, we propose relay diffusion to optimize the cascaded pipeline. The diffusion process can now continue when changing the resolution or model architectures. We anticipate that our method can reduce the cost of training and inference, and help create more advanced text-to-image model in the future.
+
+The frequency analysis in the paper reveals the relation between noise and image resolution, which might be helpful to design a better noise schedule. 
+However, our numerous attempts to directly derive the optimal noise schedule on the dataset did not yield good results. The reason might be that the optimal noise schedule is also be related to the size of the model, inductive bias, and the nuanced distribution characteristics of the data. Further investigation is left for future work.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

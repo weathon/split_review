@@ -1,0 +1,625 @@
+\title{Grounding Video Models to Actions through Goal Conditioned Exploration}
+
+\begin{abstract}
+Large video models, {pretrained on massive amounts of Internet video},  provide a rich source of physical knowledge about the dynamics and motions of objects and tasks.
+However, video models are not grounded in the embodiment of an agent, and do not describe how to actuate the world to reach the visual states depicted in a video.
+To tackle this problem, current methods use a separate vision-based inverse dynamic model trained on embodiment-specific data to map image states to actions. 
+Gathering data to train such a model is often expensive and challenging, and this model is limited to visual settings similar to the ones in which data are available.
+In this paper, we investigate how to directly  ground video models to continuous actions through self-exploration in the embodied environment -- using generated video states as visual goals for exploration.
+We propose a framework that uses trajectory level action generation in combination with video guidance to
+enable an agent to solve complex tasks without any external supervision, e.g., rewards, action labels, or segmentation masks.
+We validate the proposed approach on 8 tasks in Libero, 6 tasks in MetaWorld, 4 tasks in Calvin, and 12 tasks in iThor Visual Navigation. 
+We show how our approach is on par with or even surpasses multiple behavior cloning baselines trained on expert demonstrations while without requiring any action annotations. 
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Large video models~\citep{videoworldsimulators2024, girdhar2023emu, ho2022imagen} trained on a massive amount of Internet video data capture rich information about the visual dynamics and semantics of the world for physical decision-making. Such models are able to provide information on how to accomplish tasks, allowing them to parameterize policies for solving many tasks~\citep{du2024learning}. They are further able to serve as visual simulators of the world, allowing simulation of the visual state after a sequence of actions~\citep{videoworldsimulators2024, yang2024learning}, and enabling visual planning to solve long-horizon tasks~\citep{du2023video}.
+However, directly applying video models zero-shot for physical decision-making is challenging due to embodiment grounding. While generated videos provide a rich set of visual goals for solving new tasks, they do not explicitly provide actionable information on how to reach each visual goal. To ground video models to actions, existing work has relied on training an inverse dynamics model or goal-conditioned policy on a set of demonstrations from the environment~\citep{black2023zero, du2024learning,du2023video}. Such an approach first requires demonstrations to be gathered in the target environment and embodiment of interest, which demands human labor or specific engineering (e.g. teleoperation or scripted policy). In addition, the learned policies may not generalize well to areas in an environment that are out-of-distribution of the training data.
+Recently, ~\citet{ko2023learning} proposes an approach to directly regress actions from video models, without requiring any action annotations. In ~\citet{ko2023learning}, optical flow between synthesized video frames is computed and used, in combination with a depth map of the first image, to compute a rigid transform of objects in the environment. Robot actions are then inferred by solving for actions that can apply the specified rigid transform on an object. While such an approach is effective on a set of evaluated environments, it is limited in action resolution as the inferred object transforms can be imprecise due to both inaccurate optical flow and depth, leading to a relatively low success rate in evaluated environments~\citep{ko2023learning}. In addition, it is difficult to apply this approach to many robotic manipulation settings such as deformable object manipulation, where there are no explicit object transforms to compute.
+\begin{wrapfigure}{r}{0.55\textwidth} %
+    \centering
+    \includegraphics[width=0.55\textwidth]{images/1-teaser-v4.pdf} 
+    \caption{\textbf{Grounding Video Models to Actions.} Our approach learns to ground a large pretrained video model into continuous actions through goal-directed exploration in the environment. Given a synthesized video, a goal-conditioned policy attempts to reach each visual goal in the video, with data in the resulting real-world execution saved in a replay buffer to train the goal-conditioned policy.  }
+    \label{fig:1-teaser}
+\end{wrapfigure}
+We propose an alternative manner to directly ground a video model to actions \textit{without using annotated demonstrations}. In our approach,  we learn a goal-conditioned policy, which predicts the actions to reach each synthesized frame in a video. We learn the policy in an online manner, where given a specified task, we use each intermediate synthesized frame as a visual goal for a goal-conditioned policy from which we obtain a sequence of actions to execute in an environment. We then use the image observations obtained from execution in the environment as ground-truth data to train our goal-conditioned policy. We illustrate our approach in Figure~\ref{fig:1-teaser}.
+
+In practice, directly using synthesized images as goals for exploration often leads to insufficient exploration. Agents often get stuck \bluet{in} particular parts of an environment, preventing the construction of a robust goal-conditioned policy. To further improve exploration, we propose to generate chunks of actions to execute in an environment given a single visual state. By synthesizing and executing a chunk of actions we can explore the environment in a more directed manner, enabling us to achieve a more diverse set of states. We further intermix goal-conditioned exploration with random exploration to further improve exploration. 
+Overall, our approach has three contributions: \textbf{(1)} We propose goal-conditioned exploration as an approach to ground video models to continuous actions. \textbf{(2)} We propose a set of methods for effective exploration in the environment, using a combination of chunked action prediction for temporally coherent exploration along with periodic randomized actions for robust state coverage.
+\textbf{(3)} We illustrate the efficacy of our approach on a set of simulated manipulation and navigation environments.
+
+
+
+
+
+
+
+\section{Related Work}
+
+\paragraph{Video Model in Decision making} A large body of recent work has explored how video models can be used in decision making~\citep{yang2024video, mccarthy2024towards}. Prior work has explored how video models can act as reward functions~\citep{escontrela2024video, huang2023diffusion, chen2021learning}, representation learning~\citep{seo2022reinforcement, wu2023unleashing,wu2024pre,yang2024spatiotemporal}, policies~\citep{ajay2024compositional,du2024learning,liang2024dreamitate}, dynamics models~\citep{yang2024learning, du2024learning, zhou2024robodreamer,videoworldsimulators2024, rybkin2018learning, mendonca2023structured}, and environments~\citep{bruce2024genie}. 
+Our work explores that given video generations, how we can learn a policy and infer the actions to execute in an environment \textit{without any action labels}, while existing works \citep{baker2022video, bharadhwaj2024track2act, black2023zero, wen2023any, zhou2024minedreamer, wang2024language} requires domain specific action data. 
+Most similar to our work is AVDC \citep{ko2023learning}, which uses rigid object transformations 
+computed by optical flow between video frames as an approach to extract actions from generated videos. We propose an alternative unsupervised approach to ground video models to continuous action by leveraging video-guided goal-conditioned exploration to learn a goal-conditioned policy.
+
+\paragraph{Learning from Demonstration without Actions.}
+A flurry of work \bluet{has} studied the problem of robot learning from demonstrations without actions.
+One line of work studies the problem of extrapolating the control actions assuming that the expert state trajectories are provided~\citep{torabi2018behavioral, radosavovic2021state, li2024accelerating}, though collecting such ground-truth state-level data is expensive and hard to scale. 
+Some recent work explores learning from image/video robotic data without actions \citep{seo2022reinforcement, wu2024pre, mendonca2023structured, ma2022vip, wang2023manipulate, ma2023liv, schmeckpeper2021reinforcement}, either by constructing a world model, reward model, or representation model. However, these methods usually need additional finetuning on data or rewards from specific downstream environments. 
+By contrast, our method uses action-free demonstration videos to train a video generative model and leverages the generated frames as goals to learn a goal-conditioned policy to complete a task. 
+As a result, our policy learning requires neither action labels nor environment awards which can be challenging to obtain.
+
+\textbf{Robotic Skill Exploration.}
+\redta{
+Typical robot skill exploration is formulated as an RL problem~\citep{haarnoja2018soft, hafner2019dream} and assumes some form of environment rewards, but the design of reward functions is highly task dependent and demands human labor.
+To this end, some recent work explores robotic skill exploration without any rewards.
+One typical class of methods is developed upon computing intrinsic exploration rewards to promote rare state \bluet{visit}. These methods can be based on 
+prediction error maximization~\citep{pathak2017curiosity,henaff2019explicit,shyam2019model},
+disagreement of an ensemble of world models~\citep{hu2022planning, sekar2020planning, sancaktar2022curious}, 
+entropy maximization~\citep{pong2020skew, pitis2020maximum, jain2023maximum, eysenbach2018diversity},
+counting~\citep{bellemare2016unifying}, 
+or relabeling~\citep{ghosh2021learning}.
+However, discrepancy, counting, or relabeling based methods are limited to simple environments, short-horizon tasks, or low-dimensional state-space.
+We propose to use video models for direct exploration, as large pretrained video models are a rich source of task-specific information.
+With efficient guidance from the video model,
+we show that our method is able to collect high-quality data from the environment and accomplish challenging long-horizon tasks conditioned on language instruction at test time.
+}
+
+
+ 
+
+
+
+
+
+\section{Method}
+
+
+In this section, we describe our method to ground video models to actions by unsupervised exploration in the environments.
+First, in Section \ref{subsect:method-relabel}, we describe the pipeline of policy execution conditioned on video frame and hindsight relabeling via environment rollouts.
+Next, in Section \ref{subsect:method-boot}, we introduce a periodic random action bootstrapping technique to secure the quality of video-guided exploration.
+Finally, in Section \ref{subsect:method-chunk}, we propose a chunk-level action prediction technique to further enhance the coverage, stability, and accuracy of the goal-conditioned policy.
+The pseudocode of our method is provided in Algorithm \ref{algo:main}.
+
+\subsection{Learning Goal-Conditioned Policies through Video-Guidance and Hindsight Relabeling}\label{subsect:method-relabel}
+
+A key challenge in unsupervised skill exploration is that
+the possible underlying environment states are enormous, making it difficult for an agent to discover and be trained on every valid state, especially in the high-dimensional visual domain. 
+Many relevant states for downstream task completion, such as stacking blocks on top of each other or opening a cabinet, require a very precise sequence of actions to obtain, which is unlikely to happen from random exploration.
+Video models have emerged as a powerful source of prior knowledge about the world, providing rich information about how to complete various tasks from large-scale internet data. We leverage the knowledge contained in these models to help guide our exploration in an environment to solve new tasks.
+To this end, we propose a novel method that uses a pre-trained video model $f_{\theta}(x_{\text{start}}, c)$ 
+to guide the exploration and shrink the search space only to task-relevant states
+($x_{\text{start}}$ denote the initial observation and $c$ denote the corresponding task description).
+This concurrently benefits sides: the goal-conditioned policy obtains task-relevant goals so as can perform efficient exploration centered around the task-relevant state space; on the other hand, the underlying information from the video model is extracted to end effectors and enables effective decision-making and control in embodied agents.
+Specifically, during exploration, we first leverage the video model to generate a sequence of images based on the given image observation $x_\text{start}$ and language task description $c$,
+\begin{equation}
+    \mathtt{pred\_v} = f_\theta( x_{\text{start}}, c), \: \hfv \text{where} \hfv x_{\text{start}} \sim \mathcal{O} \hfv \text{and} \hfv c \sim \mathcal{T}
+\end{equation}
+where $\mathcal{O}$ is the observation space and $\mathcal{T}$ is the task space.
+We then execute the actions predicted by the goal-conditioned policy $a^{\text{pred}} = \pi(a | x_{\text{start}}, x_{\text{goal}})$ in the environment, where the goal $x_{\text{goal}}$ is set to each predicted video frame $\mathtt{pred\_v}_i$ sequentially.
+Hence, we can obtain an episode of image action pairs $(x_{1:t}^{\text{env}}, a_{1:t}^{\text{pred}})$ of length $t$ from the environment and these rollout data will be added to a replay buffer $R$ for policy training.
+
+At the beginning of training, these data might not necessarily reach the exact goals given by the video model, but are still effective to indicate the task-specific region, since the rollout results of $a_{1:t}^{\text{pred}}$ are relabeled and can reflect the ground-truth environment dynamics. Empirically, we observe the proposed video-guided exploration scheme is very effective, and we visualize the curve of number of success versus total number of video-guided rollouts in Figure \ref{fig:abl-explo-suc}. 
+Our overall training objective is
+\begin{equation}
+    \max_{\phi} \: \: \mathbb{E}_{( x_{i:i + h}, a_{i:i + h} ) \sim R} \big[ \log  \pi_{\phi}( a_{i:i + h}   | x_i, x_{i+h} )  \big]
+\end{equation}
+where $i$ is a randomly sampled temporal index inside a rollout episode, $h$ denotes the horizon of the policy, and $\phi$ represents the parameters of the goal-conditioned policy. Note that provided a video model $f_\theta$ trained on internet scale data, the video predictions can be easily generalized to a broad observation space $\mathcal{O}$ and task space $\mathcal{T}$, enabling the proposed guidance scheme directly applied to various unseen scenarios.
+\subsection{\redta{Periodic} Random Action Bootstrapping}\label{subsect:method-boot}
+
+When a goal-conditioned policy is initialized from scratch, it is unable to effectively process the frames provided by a video model and use them to guide exploration, as it is unable to process input frames.
+Empirically, we found that a randomly initialized policy would often instead preferentially output particular actions ({\i.e.} only move up) independent of goals given by the video model. 
+
+This significantly compromises the exploration because the policy will not explore the task-related states as we expect.
+More importantly, though we can obtain ground-truth environment dynamics via hindsight relabeling, the actions in the replay buffer $R$ are output from the scratch policy itself. This might result in an undesirable loop where only the previous outputs are used as the ground-truth and these actions are irrelevant to completing the task.
+
+\redta{
+To this end, inspired by random action sampling in RL setting~\citep{sutton2018reinforcement}, we propose a novel periodic random action bootstrapping method 
+for grounding video model to actions.
+}
+Specifically, we first conduct random action exploration and append the resulting data to the replay buffer $R$ before the training starts, 
+and \redta{periodically} conduct extra random exploration during training. The process can be denoted by
+\begin{equation}
+    R \: \: \leftarrow \: \:   a_{1:t^r}^{i_r} \sim \mathtt{Uniform}\big[ a_{\text{low}}, a_{\text{high}} \big] \quad   \text{for} \: \: i^r \: \: \text{in} \: \: [1, 2, ..., n_r]
+\end{equation}
+where $n_r$ denotes the number of random action episodes, $t^r$ denotes the length of a random action episode, $ a_{\text{low}}$ and $ a_{\text{high}}$ are the action limits.
+This proposed bootstrapping method can enhance the exploration in two ways: the initial random actions serve as the basic world dynamics information which enables the policy to reach the vicinity of goal states specified by video frames, ensuring effective video-guided exploration; the periodic extra random exploration can further expand the agent's discovered state space and stabilize policy training.
+Please see Section \ref{subsect:exp-abl} for ablation studies.
+
+
+
+\begin{figure}[t]
+\begin{minipage}{\linewidth}
+\begin{algorithm}[H]
+\caption{Grounding Video Models to Actions}\label{algo:main}
+\begin{algorithmic}[1] %
+
+\State \textbf{Require:} a frozen video diffusion model $f_{\theta}(x_{\text{start}}, c)$, a goal-conditioned policy to train $\pi(a | x_{\text{start}}, x_{\text{goal}})$, a replay buffer $R$
+\State \textbf{Hyperparameters:} horizon of policy $\pi$ $h$, training iteration $N$, number of initial random action episodes $n_r$, video-guided exploration frequency $q_v$
+    \State Sample $n_r$ episodes of random actions and add to replay buffer $R$
+    \For{$i = 1 \to N$}
+        \If{ $i \mod q_v$ == 0} 
+            \State Sample a task $c'$, obtain observation $x_0$, and generate video $\mathtt{pred\_v} = f_{\theta}(x_0, c')$
+            \State Execute policy $\pi(a | \cdot, \cdot)$ in the environment where the goals are frames from $\mathtt{pred\_v}$ 
+            \State Add the resulting image-action pairs from the video rollout to replay buffer $R$
+        \EndIf
+        \State $(x_{i:i+h}, a_{i:i+h})$ = sample a consecutive sequence of image-action pairs from replay buffer $R$
+        \State $a^{\text{pred}} = \pi(a | x_{i}, x_{i+h} )$
+        \State $\mathcal{L} = \text{MSE}( a^{\text{pred}}, a_{i:i+h}  )$
+    \EndFor
+    \State \Return goal-conditioned policy $\pi$
+\end{algorithmic}
+\end{algorithm}
+\end{minipage}
+\end{figure}
+
+
+
+
+\subsection{Chunk Level Action Prediction and Exploration}\label{subsect:method-chunk}
+In current robot exploration frameworks, the policy usually predicts a single action as output and explores the environment with the predicted action. However, single-action prediction can hinder diverse exploration, as the agent can easily stuck in a single state, outputting the same repeated action. 
+\bluet{In addition}, trajectories generated in such manner are often incoherent, as repeatedly sampled actions may reverse and undo actions generated previously in the trajectory.
+\bluet{Finally,  exploration with single action prediction} requires one model forward pass for each action, resulting in a larger computational burden and higher latency.
+
+
+To tackle these issues, we propose to predict a sequence of actions with horizon $h$ and explore the environments using the predicted chunks of actions. 
+On one hand, by modeling behavior over a longer horizon, chunk-level action prediction can encourage more coherent action sequences and 
+mitigate myopic actions and compounding errors, especially when the temporal distance to the goal is large.
+On the other hand, exploration with action chunks can in turn collect more coherent data from the environment, further facilitating the policy to capture the underlying environment dynamics. 
+In addition, we utilize chunk-level actions during random exploration. Specifically, we sample an action mean $a^m$ from a uniform distribution, and based on $a^m$, we sample a chunk of actions $a^c$ of length $l_c$ from Gaussian distribution, where the $i$-th action is represented as $a_i^c \sim \mathcal{N}(a^m, \sigma)$. 
+This ensures consistent exploration and avoids the zero-mean random action issue that confines the agent to a small vicinity near the start state.
+
+Recent works have also employed action chunking~\citep{bharadhwaj2024roboagent,zhao2023learning} in behavior cloning. 
+However, our application is different and we propose to use action chunking to enable more effective unsupervised exploration. We illustrate how, in combination with video-guided exploration, this action chunking allows for more coherent exploration, as well as enabling models to make consistent plans to achieve video goals.
+In Section \ref{subsect:exp-abl}, we provide a study comparing chunk-level prediction versus single action prediction in the Libero environment and empirically show that the chunk-level design can substantially improve the resulting goal-reaching policy.
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{images/10-env-show-v3.pdf}
+    \caption{\textbf{Environment Demonstrations.} We evaluate our method on three robotic manipulation environments: Libero, Meta-World, Calvin, and one visual navigation environment: iThor, with a total of 30 tasks. }
+    \label{fig:10-env-show}
+\end{figure}
+
+
+
+
+
+
+
+
+\section{Experiments}
+
+We present our experiment results across four simulated environments shown in Figure \ref{fig:10-env-show}.
+In Section \ref{subsect:exp-mani}, we describe our results on three robotic manipulation environments: 8 tasks on Libero~\citep{liu2024libero}, 6 tasks on MetaWorld~\citep{yu2020meta}, and 4 tasks on Calvin~\citep{mees2022calvin}.
+Following this, in Section \ref{subsect:exp-navi}, we show evaluation results on 4 different scenes and 12 targets on iTHOR~\citep{kolve2017ai2} visual navigation environment.
+Finally, in Section \ref{subsect:exp-abl}, we present ablation studies on the proposed chunk level action prediction and random action bootstrapping methods. 
+
+We use the same demonstration data to train the baseline methods and our video model, \textit{except that} training the video model only requires the image sequences of demonstrations, while most baseline methods need the corresponding action annotations (highlighted by an asterisk).
+In evaluation, for manipulation tasks, the initial robot state and object positions are randomized; for visual navigation tasks, we randomize the robot start position.
+
+
+
+\paragraph{Implementation.} For the video model, the inputs are the observation image and the task description. We follow the lightweight video model architecture introduced in \citep{ko2023learning} and train one video model from scratch for each environment. 
+We deem that finetuning large text-conditioned video models~\citep{yang2024cogvideox,chen2024videocrafter2,saharia2022photorealistic} or designing task-specific video model might be an interesting future research direction.
+For the goal-conditioned policy, we implement it with a CNN-based Diffusion Policy~\citep{chi2023diffusion}, which takes as input the observation image and the goal image and outputs a chunk of actions. 
+
+
+
+
+\begin{table}[t]
+\centering
+
+{
+\setlength{\tabcolsep}{3pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{l c c c c c}
+\toprule
+ &  put-red-mug-left & put-red-mug-right & put-white-mug-left & put-Y/W-mug-right &  Overall  \\
+\midrule
+BC* & \numerr{8.8}{5.3}  & \numerr{15.2}{7.8}  & \numerr{32.0}{12.9}  & \numerr{21.6}{12.3}  & \numerr{19.4}{9.6}  \\
+GCBC* & \numerr{2.4}{2.0}  & \numerr{0.8}{1.6}  & \numerr{16.0}{7.2}  & \numerr{7.2}{5.3}  & \numerr{6.6}{4.0}  \\
+DP BC* & \numerr{33.6}{3.2}  & \numerr{33.6}{8.2}  & \numerr{59.2}{7.8}  & \numerr{57.6}{5.4}  & {\numerr{46.0}{6.2}}  \\
+DP GCBC* & 
+\numerr{24.8}{4.7}  & \numerr{22.4}{7.4}  & \numerr{16.0}{8.8}  & \numerr{3.2}{3.0}  & \numerr{16.6}{6.0}  \\
+SuSIE* & \numerr{18.4}{2.0}  & \numerr{32.0}{8.4}  & \numerr{43.2}{4.7}  & \numerr{25.6}{11.5}  & \numerr{29.8}{6.6}  \\
+
+\midrule
+AVDC &  \numerr{0.0}{0.0}  & \numerr{0.0}{0.0}  & \numerr{0.0}{0.0}  & \numerr{0.0}{0.0}  & \numerr{0.0}{0.0}  \\
+\rowcolor{yellow!20}
+Ours w/ SuSIE & \numerr{23.2}{3.0}   & \textbf{ \numerr{60.0}{6.7} }  & \textbf{ \numerr{68.8}{4.7} }  & \textbf{ \numerr{67.2}{8.9} }  & \textbf{ \numerr{54.8}{5.8} }  \\
+\rowcolor{yellow!20}
+Ours & \textbf{ \numerr{38.4}{15.3} }  & { \numerr{40.8}{7.8} }  
+& { \numerr{51.2}{3.9} }  & { \numerr{38.4}{8.6} }  & { \numerr{42.2}{8.9} }  \\
+
+\bottomrule
+
+\end{tabular}
+}
+}
+
+\resizebox{\columnwidth}{!}{%
+{
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{l c c c c c} %
+
+&  put-choc-left & put-choc-right & put-red-mug-plate & put-white-mug-plate &  Overall  \\
+\midrule
+
+BC* & \numerr{19.2}{9.3}  & \numerr{12.8}{9.3}  & \numerr{7.2}{5.3}  & \numerr{20.0}{11.3}  & \numerr{14.8}{8.8}  \\
+GCBC* & \numerr{4.8}{1.6}  & \numerr{4.0}{4.4}  & \numerr{2.4}{3.2}  & \numerr{7.2}{6.4}  & \numerr{4.6}{3.9}  \\ 
+DP BC* & \numerr{42.4}{5.4}  & \numerr{50.4}{5.4}  & \numerr{32.8}{9.3}  & \numerr{71.2}{5.3}  & \numerr{49.2}{6.4}  \\
+DP GCBC* & \numerr{45.6}{6.0}  & \numerr{32.0}{8.8}  & \numerr{7.2}{4.7}  & \numerr{5.6}{4.1}  & \numerr{22.6}{5.9}  \\
+SuSIE* & \numerr{17.6}{9.3}  & \numerr{32.8}{9.9}  & \numerr{16.0}{2.5}  & \numerr{10.4}{4.1}  & \numerr{19.2}{6.5}  \\
+\midrule
+AVDC & \numerr{1.3}{1.9}  & \numerr{0.0}{0.0}  & \numerr{0.0}{0.0}  & \numerr{0.0}{0.0}  & \numerr{0.3}{0.5}  \\
+\rowcolor{yellow!20}
+Ours w/ SuSIE & { \numerr{44.0}{7.6} }  & { \numerr{54.4}{5.4} }  & { \numerr{66.4}{12.0} }  & \textbf{ \numerr{36.0}{7.6} }  & { \numerr{50.2}{8.2} }  \\
+\rowcolor{yellow!20}
+Ours & \textbf{ \numerr{70.4}{12.8} } & \textbf{ \numerr{79.2}{3.9} } 
+& \textbf{ \numerr{72.8}{6.4} } & { \numerr{25.6}{11.5} } & \textbf{ \numerr{62.0}{8.7} }  \\
+\bottomrule
+\end{tabular}
+}
+}
+\caption{
+\textbf{Quantitative results on 8 tasks of two different scenes in Libero.} Note that methods marked with an asterisk `*' require ground-truth action demonstrations to train, while other methods do not. \textit{Ours w/ SuSIE} uses an image-editing model to generate subgoals guidance while \textit{Ours} uses a video model.
+}
+\label{tab:libero-main}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{images/4-libero-qual-v4.pdf}
+    \caption{\textbf{Qualitative Results of task `put the yellow and white mug to the right plate' in Libero environment.} The start states of the robot and objects are randomized in test time. Only a subset of the predicted video frames are shown due to the space limit. Our goal-conditioned policy shown in the bottom right is able to follow the video prediction and finish the task. BC cannot accurately locate the target while AVDC can move to the mug but without the skill of grasping concave objects.}
+    \label{fig:4-libero-qual}
+    
+\end{figure}
+
+
+
+
+\subsection{Manipulation}\label{subsect:exp-mani}
+In this section, we aim to evaluate the goal-conditioned policy learned by the proposed unsupervised exploration in tabletop manipulation environments with continuous action space.
+To better understand the capability of the method, we investigate multi-task policy learning in Libero and Calvin, and single-task policy learning in Meta-world.
+\redta{Note that methods highlighted by an \textit{asterisk} require ground-truth action labels to train, while our method only requires image observations for training the video model with the potential of zero-shot generalization if trained on internet-scale data.}
+
+\textbf{Libero}~\citep{liu2024libero} is a tabletop simulation of a Franka  Robot, which features several dexterous manipulation tasks. For each task in Libero, the agent is required to achieve the final state described in a corresponding sentence, which identifies the target object and task completion state. 
+The action space consists of the delta position and orientation of the end effector and the applied force on the gripper, resulting in a total dimension of 7.
+\bluet{
+
+}
+We include 8 tasks from two scenes in Libero as the testbed. 
+In this environment, we aim to evaluate the multi-task learning capability of our method, hence we only train one policy model for all 8 tasks. The video model is trained on the visual image sequences of the demonstrations provided in Libero, where we use 20 episodes per task, thereby 160 demonstrations in total. 
+We train BC, GCBC, SuSIE~\citep{black2023zero} on the same visual image sequences but with expert actions corresponding to each image. 
+Following the setting in AVDC, we provide it with the segmentation masks of the target objects, while our method does not require such privileged information.
+We present the quantitative results in Table \ref{tab:libero-main} and qualitative results in Figure \ref{fig:4-libero-qual} and \ref{fig:11-our-and-gcbc}.
+Across 8 tasks, our method is able to outperform baselines by a margin, though without any access to expert action data.
+We observe that BC-based methods tend to memorize and overfit to the training data, where they fail to locate the target objects, while our method is more robust in test-time.
+In addition, though knowing the exact positions of target objects in test-time, AVDC is unable to achieve any meaningful results, probably because that AVDC uses hard-coded action primitives and planning procedural, making it difficult to generalize to more complex manipulation tasks, for example, grasping concave objects such as mugs. 
+Note that our method can also be integrated with various forms of generative models, as shown by \textit{Ours w/ SuSIE} where we use an image-editing model to predict the subgoals for exploration.
+
+
+
+\begin{table}[t]
+\setlength{\tabcolsep}{5pt}
+\centering
+\small %
+\begin{tabular}{lccccccc}
+\toprule
+ & door-open & door-close &  handle-press & hammer & assembly & faucet-open & Overall  \\
+\midrule
+
+BC* & \numerr{64.0}{4.4}  & \numerr{76.0}{0.0}  & \numerr{49.6}{3.2}  & \numerr{4.8}{3.9}  & \numerr{8.0}{2.5} 
+& \numerr{88.8}{3.0}  & \numerr{48.5}{2.8}  \\
+GCBC* & \numerr{64.8}{6.9}  & \numerr{93.6}{2.0}  & \numerr{50.4}{6.5}  & \numerr{4.8}{1.6}  & \numerr{8.0}{2.5} 
+& \textbf{\numerr{95.2}{1.6}} & \numerr{52.8}{3.5}  \\
+DP BC* & \numerr{73.6}{4.8}  & {\numerr{94.4}{2.0}}  & \numerr{52.0}{8.4}  & \numerr{7.2}{3.0}  & \numerr{0.8}{1.6} 
+& \numerr{82.4}{2.0}  & \numerr{51.7}{3.6}  \\
+DP GCBC* & \numerr{68.0}{0.0}  & {\numerr{96.0}{4.0}}  & \numerr{36.0}{0.0}  & \numerr{14.0}{2.0}  & \numerr{5.6}{2.0} 
+& \numerr{80.0}{0.0}  & \numerr{49.9}{1.3}  \\
+\midrule
+AVDC &  
+\numerr{52.0}{0.0}  & \textbf{\numerr{97.3}{1.9}}  & \numerr{76.0}{5.7}  & \numerr{4.0}{3.3}  & \numerr{8.0}{0.0} 
+& \numerr{66.7}{5.0}  & \numerr{50.7}{2.6}  \\
+\yelrow
+Ours & \textbf{\numerr{76.0}{4.9}}  & {\numerr{85.6}{2.0}}  & \textbf{\numerr{94.4}{2.0}}  & \textbf{\numerr{43.2}{6.4}}  & \textbf{ \numerr{16.8}{3.0} }
+& \textbf{\numerr{87.2}{3.0}}  & \textbf{\numerr{67.2}{3.6}}  \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Quantitative Results of 6 tasks in Meta-World.} Methods marked with an asterisk `*' require ground-truth action demonstrations to train. AVDC uses the segmentation mask of the target object to compute actions. Our method learns the policy by video-guided self-exploration in the environment without any external supervision.}
+\label{tab:mw-main}
+\end{table}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{images/6-mw-qual-v2.pdf}
+    \caption{\textbf{Qualitative Results of task Door-Open in Meta-World environment.} The position of the box and robot are randomized in test-time. Only a subset of the predicted video frames are shown due to space limit. Our goal-conditioned policy can follow the subgoals given by the video frames and successfully finish the task. BC misses the handle probably due to the out of training distribution box position and starts to predict random actions. AVDC can move to the handle thanks to the exact given handle location. However, it begins to close the door halfway, probably because of the incorrect flow prediction due to error accumulation or occlusion.}
+    \label{fig:6-mw-qual}
+\end{figure}
+
+
+\textbf{Meta-World}~\citep{yu2020meta} 
+is a simulated robotic benchmark of a Sawyer robot arm with a set of tabletop manipulation tasks that involve various object interactions and different tool use.
+The action space consists of the delta position of the end effector and the applied force on the gripper, resulting in a total dimension of 4.
+
+We consider 6 tasks: door-open, door-close, handle-press, hammer, assembly, faucet-open. 
+We directly utilize the video model checkpoint provided in AVDC.
+To further validate the proposed exploration approach, we conduct single-task exploration in this environment, where we train one policy model for each task. Each learning-based baseline model is trained on the same demonstrations used to train the video model, namely, 15 episodes per task.
+We present the quantitative results in Table \ref{tab:mw-main} and qualitative results in Figure \ref{fig:6-mw-qual}. 
+We observe that our policies can successfully learn various manipulation skills and outperform all the counterparts in the average success rate despite the absence of action labels for training.
+
+\looseness=-1
+\textbf{Calvin}~\citep{mees2022calvin} is a robotic simulation environment with multiple language-conditioned tasks. This environment contains a 7-DOF  Panda robot arm and various assets including a desk with a sliding door, a drawer, an LED, and a lightbulb. The agent is required to complete tasks in the environment given by a corresponding language description. The action space we use is same as Libero.
+We consider 4 tasks: turn on lightbulb, turn on led, move slider left, and open drawer. 
+These tasks involve different manipulation skills and different operation areas in the workspace, allowing us to validate skill learning and spatial coverage capability of our goal-conditioned policy.
+For example, to move the slider left, the agent has to drag the handle from the central area to the upper left corner. We present the quantitative results in Table \ref{tab:cal-main} and qualitative results in Figure \ref{fig:8-cal-qual}. We do not report AVDC in the above table, as we found it performed very poorly in the above environments. Even without any action data or rewards, our policy is able to cover the majority of the space and outperform all the baselines, especially for the challenging open drawer task, where the agent must move downwards below the table and pull toward the bottom right boundary of the environment.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{images/8-cal-qual-v2.pdf}
+    \caption{\textbf{Qualitative Results of task Open Drawer in Calvin environment.} Our goal conditioned policy successfully completes the task by following the subgoals in the video, while both BC and GCBC cannot put the end effector to the handle and thus fail to open the drawer. }
+    \label{fig:8-cal-qual}
+\end{figure}
+
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.71\textwidth}
+
+    \setlength{\tabcolsep}{1pt}
+    \centering
+    
+    \small %
+    \resizebox{\columnwidth}{!}{
+    \begin{tabular}{lccccc}
+    \toprule
+    & lightbulb & led & slider left  & open drawer & Overall  \\
+    \midrule
+    BC* & \numerr{47.2}{21.1}  & \numerr{48.8}{9.9}  & \numerr{67.2}{14.2}  & \numerr{36.0}{18.8}  & \numerr{49.8}{16.0}  \\
+    GCBC* & 
+    \numerr{1.6}{2.0}  & \numerr{38.4}{13.0}  & \numerr{32.0}{6.2} & \numerr{22.4}{7.8}  & \numerr{23.6}{7.3}  \\
+    DP BC* & 
+    \numerr{70.4}{2.0}  & \numerr{79.2}{3.9}  & \numerr{68.8}{4.7}  & \numerr{56.8}{1.6}  & \numerr{68.8}{3.0}  \\
+    DP GCBC* &  
+    \numerr{35.2}{3.0}  & \numerr{44.0}{5.7}  & \numerr{40.0}{3.6}  & \numerr{17.6}{7.4}  & \numerr{34.2}{4.9}  \\
+    \midrule
+    \yelrow
+    Ours & \textbf{\numerr{100.0}{0.0}}  & \textbf{\numerr{86.4}{5.4}}  & \textbf{\numerr{83.2}{3.0}}  & \textbf{\numerr{68.0}{3.6}}  & \textbf{\numerr{84.4}{3.0}}  \\
+    
+    
+    \bottomrule
+    \end{tabular}
+    }
+    \captionof{table}{\textbf{Quantitative Results of 4 Calvin tasks}. 
+    Each task requires the agent to manipulate objects located in different regions, especially in open drawer where the policy needs to cover the bottom right boundary of the environment.} 
+    \label{tab:cal-main}
+
+        
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.28\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/11-our-and-gcbc.pdf}
+        \caption{\textbf{Qualitative Comparison of our method and GCBC on Libero.}}
+        \label{fig:11-our-and-gcbc}
+    \end{minipage}
+\end{figure}
+
+
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{images/7-thor-qual-v3.pdf}
+    \caption{\textbf{Qualitative Results of Navigation to Bread in iTHOR environment.} The start position of the agent is randomized in \bluet{test time}. Only a subset of the predicted video frames are shown due to the space limit. 
+    In navigation tasks with a moving camera, the video model can still generate realistic frames that respect the the actual scene layout. Our goal-conditioned policy is able to follow the video frames and reach the bread shown in the middle of the frame. 
+    However, BC turns to the other way, and AVDC cannot correctly infer the required actions and miss the target.}
+    \label{fig:7-thor-qual}
+\end{figure}
+
+
+
+
+
+
+
+
+
+
+
+\begin{table}[t]
+\setlength{\tabcolsep}{4pt}
+
+\centering
+\small %
+
+{
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{ccccccccc}
+ & \multicolumn{4}{ c }{  Kitchen } & \multicolumn{4}{ c }{ Living Room } \\
+
+\cmidrule(lr){2-5} \cmidrule(lr){6-9}
+
+ Method &  Toaster & Spatula & Bread  &  Overall  &  Painting & Laptop & Television & Overall  \\
+
+\midrule
+
+BC* & \numerr{48.0}{2.4} & \bluet{\textbf{\numerr{56.0}{3.7}}} & \textbf{\numerr{36.0}{6.6}} & \numerr{46.7}{4.3}    & 
+\textbf{\numerr{36.0}{12.4}} & \numerr{45.0}{11.0} & \numerr{49.0}{4.9} & \numerr{43.3}{9.4} \\
+
+GCBC* &  
+\textbf{\numerr{52.0}{5.1}} & \numerr{49.0}{6.6} & \numerr{39.0}{5.8} & \numerr{46.7}{5.9}  & \numerr{27.0}{8.1} & \textbf{\numerr{49.0}{5.8}} & \textbf{\numerr{58.0}{8.7}} & \textbf{\numerr{44.7}{7.6}}  
+\\
+AVDC &  
+\numerr{10.0}{4.1} & \numerr{13.3}{4.7} & \numerr{13.3}{2.4} & \numerr{12.2}{3.7}  & \numerr{8.3}{2.4} & \numerr{13.3}{8.5} & \numerr{20.0}{4.1} & \numerr{13.9}{5.0}  
+\\
+\midrule
+\yelrow
+Ours & 
+\numerr{45.0}{3.2} & \textbf{\numerr{56.0}{4.9}} & \textbf{\numerr{44.0}{5.8}} & \textbf{\numerr{48.3}{4.6}}  & \numerr{29.0}{4.9} & \numerr{42.0}{6.0} & \textbf{\numerr{57.0}{5.1}} & \textbf{\numerr{42.7}{5.3}}  \\
+
+\bottomrule
+\end{tabular}
+}
+}
+
+{
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{ccccccccc}
+ & \multicolumn{4}{ c }{  Bedroom } & \multicolumn{4}{ c }{ Bathroom } \\
+
+\cmidrule(lr){2-5} \cmidrule(lr){6-9}
+
+ Method &  Blinds & DeskLamp & Pillow  &  Overall  &  Mirror & ToiletPaper & SoapBar  & Overall  \\
+
+\midrule
+
+BC* &  \textbf{\numerr{67.0}{2.4}} & \textbf{\numerr{40.0}{7.1}} & \textbf{\numerr{81.0}{5.8}} & \textbf{\numerr{62.7}{5.1}}
+& \textbf{\numerr{48.0}{6.8}} & \numerr{51.0}{13.2} & \numerr{45.0}{4.5} & \numerr{48.0}{8.1} \\
+
+GCBC* &  
+\numerr{52.0}{8.1} & \numerr{22.0}{2.4} & \numerr{72.0}{6.0} & \numerr{48.7}{5.5}  & \numerr{43.0}{16.0} & \numerr{64.0}{9.2} & \bluet{\textbf{\numerr{55.0}{11.8}}} & \bluet{\textbf{\numerr{54.0}{12.3}}}  \\
+
+AVDC &  
+\numerr{30.0}{4.1} & \numerr{13.3}{4.7} & \numerr{36.7}{2.4} & \numerr{26.7}{3.7}  & \numerr{10.0}{4.1} & \numerr{1.7}{2.4} & \numerr{6.7}{2.4} & \numerr{6.1}{2.9}  
+\\
+\midrule
+\yelrow
+Ours & \textbf{\numerr{57.0}{5.1}} & \numerr{24.0}{3.7} & \textbf{\numerr{72.0}{7.5}} & 
+\textbf{\numerr{51.0}{5.4}}  & \numerr{36.0}{9.2} & \textbf{\numerr{75.0}{4.5}} & \textbf{\numerr{47.0}{7.5}} & \textbf{\numerr{52.7}{7.0}}  \\
+
+\bottomrule
+\end{tabular}
+}
+}
+\caption{ \textbf{Quantitative Results on iThor Navigation.} We report the success rates across 4 different scenes and 12 targets. Though without access to action labels, our method is on par with the BC and GCBC trained on expert demonstrations and outperforms  AVDC which also does not require expert action labels.}
+\label{tab:thor-main}
+
+\end{table}
+
+
+
+
+
+
+
+
+\subsection{Visual Navigation}\label{subsect:exp-navi}
+In addition to tabletop-level robot arm manipulation tasks, we evaluate the proposed method in a room-level visual navigation setting with discrete actions.
+
+\textbf{iTHOR}~\citep{kolve2017ai2} is a room-level vision-based simulated environment, where agents can navigate in the scenes and interact with objects. We adopt the iTHOR visual object navigation benchmark, where agents are required to navigate to the specific type of objects given by a nature language input. The action space consists of four actions: Move Ahead, Turn Left, Turn Right, and Done. We incorporate 4 different scene types: Kitchen, Living Room, Bedroom, and Bathroom, with 3 targets in each scene. Following \citep{ko2023learning}, the video model is trained on 20 demonstration image sequences per task. BC and GCBC are also trained on the same demonstrations while with access to corresponding actions. 
+Since the navigation actions are discrete and episode lengths  (typically $< 20$) are much shorter than robot arm manipulation tasks, we find that predicting a single action suffices. Our method uses the same ResNet+MLP model architecture as BC-based baselines.
+
+We present the quantitative results in Table \ref{tab:thor-main}. 
+Our method outperforms the no expert data baseline AVDC by 36\% on average and surpasses all baselines in the Kitchen scene while performing on par with BC-based baselines in other scenes.
+Qualitative results are shown in Figure \ref{fig:7-thor-qual} and \ref{fig:app:24-ithor-qual-fp201}.
+Our goal-conditioned policy is able to reliably synthesize discrete actions that follow the generated video plan. 
+In contrast, the actions inferred by AVDC are incorrect: the agent keeps rotating right and misses the target, whereas the underlying actions in the video should be moving ahead and then rotating right, probably because that the drastic change in observation poses challenges for optical flow prediction.
+BC predicts a wrong action at the first step, where the agent directly rotates to the opposite side and navigates to the target Spatula, likely due to its limited generalizability -- directly mimicking the similar actions in the training demonstrations at this position. 
+
+
+\subsection{Ablation Studies}\label{subsect:exp-abl}
+In this section, we ablate the effectiveness of design choices described in Section \ref{sect:method}.
+\paragraph{Random Action Bootstrapping.} 
+We conduct ablation studies on the importance of the random action bootstrapping technique. 
+We first present the training-time exploration efficiency in Figure \ref{fig:abl-explo-suc}. 
+As shown by \textit{w/o rand}, the no random action method tends to collapse and can hardly achieve any task success during the exploration. Since the task completion data cannot be collected from the environment, \textit{w/o rand} cannot obtain any meaningful results in test time, which is reflected in Table \ref{tab:abl}.
+In contrast, as shown by the blue, red, and orange lines in Figure \ref{fig:abl-explo-suc}, the model is able to obtain significantly more task success after we apply random action bootstrapping.
+The performance of \textit{w/o extra rand} decreases through time in Scene 1, showing that extra random exploration is able to stabilize training, and its performance is similar to \textit{ours} in Scene 2, probably because the manipulation region for Scene 2 focuses on the center area of the table (see Figure \ref{fig:app:23-lb-qual-sc2}) and the initial random actions suffice.
+Besides, we observe that the slope of the curve gradually \bluet{becomes} stable after just 250 rollout attempts, which means that the success rate of exploration can easily converge, showing the efficiency of the proposed video-guided exploration scheme.
+\paragraph{Chunk-level Action Prediction.} 
+We compare the performance of the proposed chunk-level action prediction model v.s. single action prediction model. We use the same setup as BC (ResNet18+MLP) for the \textit{single action} prediction baseline. 
+We first present a line chart of the number of success during exploration v.s. total number of exploration rollouts in Figure \ref{fig:abl-explo-suc}. 
+Both the chunk-level method and the single action method achieve non-trivial numbers of success during exploration.
+However, we can see that the chunk-level model consistently obtains higher success rates (i.e., steeper slope) in the exploration phase, which facilitates the policy learning because the training data contains more trajectories that successfully complete the tasks.
+In Table \ref{tab:abl}, we present the test-time success rate of the two methods in Libero. Similar to the exploration phase, the chunk-level action prediction model achieves higher success rates by 25.8\% and 21.0\%, respectively.
+\paragraph{Video Guided Environment Exploration.} 
+We further compare the performance of purely random action exploration versus with video-guided exploration, as shown by \textit{w/o video} in Table \ref{tab:abl},
+ where we replace the video-guided exploration in Algorithm \ref{algo:main} by random exploration.
+Unsurprisingly, the purely random exploration baseline fails across all tasks. 
+We hypothesize that without guidance from the video model, the agent can hardly discover the necessary states to complete the tasks, probably due to the long temporal distance between the start and goal states and the fact that the relevant state space for task completion only accounts for a tiny subset of the infinite possible states.
+
+
+
+
+
+
+
+\begin{figure}[t]
+\begin{minipage}{0.6\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{images/5-lb-ablation-v2.pdf} %
+    \captionof{figure}{\textbf{Line Chart of Number of Success versus Number of Total Exploration Rollouts During Training.} Both \textit{ours}, \textit{w/o extra rand}, \textit{single action} \bluet{can effectively complete tasks during video-guided exploration and thus is able to collect high-quality data for further policy training.}}
+    \label{fig:abl-explo-suc}
+\end{minipage}
+\hfill
+\begin{minipage}{0.38\textwidth}
+    \centering
+    \small
+    \setlength{\tabcolsep}{3pt}
+    \begin{tabular}{ l c c }
+        \toprule
+        Method & Scene 1 & Scene 2 \\
+        \hline
+        w/o rand  & \numerr{0.0}{0.0}  & \numerr{0.0}{0.0}   \\        
+        w/o video & \numerr{0.0}{0.0}  & \numerr{0.0}{0.0}   \\
+        w/o extra rand & \numerr{28.0}{5.0}  & \numerr{61.6}{9.6} \\
+        single action & \numerr{16.4}{5.4}  & \numerr{41.0}{5.8}   \\
+        \yelrow
+        Ours   &  \textbf{\numerr{42.2}{8.9}}  & \textbf{\numerr{62.0}{8.7}}  \\
+        \bottomrule
+    \end{tabular}
+    \captionof{table}{\textbf{Ablation Studies on Exploration in Libero environment.} We report experiment results of w/o any random bootstrapping, w/o video-guided exploration, w/ initial but w/o extra random bootstrapping, using a single action prediction model along with our proposed approach.}
+    \label{tab:abl}
+    
+\end{minipage}
+\end{figure}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Discussion}
+
+
+\paragraph{Limitations.} Our approach has several limitations. First, since the approach relies on goal-conditioned random exploration and without access to action labels, for tasks that require very precise manipulation ({\it i.e.} stacking a block tower in millimeter precision), our random exploration procedure may not find the precise set of actions. In such settings, having a random exploration primitive (i.e. stacking a block on top of another) on which we do goal-conditioned policy learning may help us find such precise actions.  In addition, purely random exploration in the physical world might pose additional requirements for the workbench, 
+as sampled actions or the initial actions outputted by the learned goal-conditioned policy may cause undesired contacts between the robot and the external environment. This can be partially mitigated by integrating hard-coded safety constraints and is also a further direction of future work.
+Finally, our method usually requires dozens of video-guided rollouts to obtain a competent policy for a task. While resetting an environment is easy in simulation, this might demand additional work in real-world experiments.
+Combining our approach with a policy that can reset environment states would be an interesting direction for the future.
+
+
+\paragraph{Conclusion.} In this paper, we have presented a self-supervised approach to ground generated videos into actions. As generative video models become increasingly more powerful, we believe that they will be increasingly useful for decision-making, providing powerful priors on how various tasks should be accomplished. As a result, the question of how we can accurately convert generated video plans to actual physical execution will become increasingly more relevant, and our approach points towards one direction to solve this question, through online interaction with the agent's environment.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

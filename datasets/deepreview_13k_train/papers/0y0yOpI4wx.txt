@@ -1,0 +1,544 @@
+\title{General-Purpose In-Context Learning by Meta-Learning Transformers}
+
+\begin{abstract}
+Modern machine learning requires system designers to specify aspects of the learning pipeline, such as losses, architectures, and optimizers.
+Meta-learning, or learning-to-learn, instead aims to \emph{learn} those aspects, and promises to unlock greater capabilities with less manual effort.
+One particularly ambitious goal of meta-learning is to train general-purpose in-context learning algorithms from scratch, using only black-box models with \emph{minimal inductive bias}.
+Such a model takes in training data, and produces test-set predictions across a wide range of problems, without any explicit definition of an inference model, training loss, or optimization algorithm.
+In this paper we show that Transformers and other black-box models can be meta-trained to act as general-purpose in-context learners.
+We characterize transitions between algorithms that generalize, algorithms that memorize, and algorithms that fail to meta-train at all, induced by changes in model size, number of tasks, and meta-optimization.
+We further show that the capabilities of meta-trained algorithms are bottlenecked by the accessible state size (memory) determining the next prediction, unlike standard models which are thought to be bottlenecked by parameter count.
+Finally, we propose practical interventions such as biasing the training distribution that improve the meta-training and meta-generalization of general-purpose in-context learning algorithms.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Meta-learning is the process of automatically \emph{discovering new learning algorithms} instead of designing them manually~\citep{schmidhuber1987evolutionary}.
+An important quality of human-engineered learning algorithms, such as backpropagation and gradient descent, is their applicability to a wide range of tasks or environments.
+For learning-to-learn to exceed those capabilities, the meta-learned learning algorithms must be similarily \emph{general-purpose}.
+Recently, there has been significant progress toward this goal~\citep{kirsch2019improving,oh2020discovering}.
+The improved generality of the discovered learning algorithms has been achieved by introducing inductive bias, such as by bottlenecking the architecture or by hiding information, which encourage learning over memorization.
+Methods include restricting learning rules to use gradients~\citep{metz2019understanding,kirsch2019improving,oh2020discovering}, symbolic graphs~\citep{real2020automl,co-reyes2021evolving}, or parameter sharing~\citep{kirsch2020meta,kirsch2021introducing}.
+
+While enabling generalization, these inductive biases come at the cost of increasing the effort to design these systems and potentially restrict the space of discoverable learning algorithms.
+Instead, we seek to explore general-purpose meta-learning systems with \emph{minimal inductive bias}.
+Good candidates for this are black-box sequence-models as meta-learners such as LSTMs~\citep{hochreiter2001learning,wang2016learning,duan2016rl} or Transformers~\citep{vaswani2017attention}. 
+These memory-based or in-context learners take in training data and produce test-set predictions without any explicit definition of an inference model, training loss, or optimization algorithm.
+With recent advances of in-context learning in large language models~\citep{brown2020language}, neural networks can already learn many concepts from demonstrations.
+What are the necessary conditions such that those models can learn from a wide range of demonstrations?
+To what extent can we elicit in-context learning that generalizes to a wider range of problems, in a similar way how learning via backpropagation and gradient descent can generalize?
+In this work, we investigate how such in-context meta-learners can be trained to (meta-)generalize and learn on significantly different datasets than used during meta-training.
+For this we propose a Transformer-based \emph{General-Purpose In-Context Learner} (GPICL) which is described with an associated meta-training task distribution in \autoref{sec:model_data}.
+In \autoref{sec:investigate_data} we characterize algorithmic transitions---induced by scaling the number of tasks or the model size used for meta-training---between memorization, task identification, and general learning-to-learn.
+We further show in \autoref{sec:investigate_architecture} that the capabilities of meta-trained algorithms are bottlenecked by their accessible state (memory) size determining the next prediction (such as the hidden state size in a recurrent network), unlike standard models which are thought to be bottlenecked by parameter count.
+Finally, in \autoref{sec:investigate_optimization}, we propose practical interventions that improve the meta-training of general purpose learning algorithms.
+Additional related work can be found in \autoref{sec:related_work}.
+
+
+
+\section{Background}
+
+
+\paragraph{What is a (supervised) learning algorithm?}
+In this paper, we focus on the setting of meta-learning supervised in-context learning algorithms.
+Consider a mapping
+\begin{equation}\label{eq:supervised_learning_alg}
+    \left( \{x_i, y_i\}_{i=1}^{N_D}, x' \right) \mapsto y'
+\end{equation}
+from the training (support) set $D = \{x_i, y_i\}_{i=1}^{N_D}$ and a query input $x'$ to the query's prediction $y'$ where $x_i, x' \in \R^{N_x}$, $y_i, y' \in \R^{N_y}$ and $N_D, N_x, N_y \in \mathbb{N}^+$.
+The subset of these functions that qualify as learning algorithms are those that improve their predictions $y'$ given an increasingly larger training set $D$.
+Meta-learning then corresponds to finding these functions via meta-optimization.
+As in other black-box meta-learning models, we use a neural network to represent such functions.
+Such in-context learning is different from gradient-based meta-learning (such as MAML~\citep{finn2017model}) in that no explicit gradients are computed at meta-test time.
+All required mechanisms for learning are implicitly encoded in the black-box neural network.
+
+\begin{wraptable}{r}{0.5\textwidth}
+\setlength\rotheadsize{1em}
+\centering
+\scriptsize
+\begin{Overpic}[abs]{%
+\begin{tabular}{@{}ccccc@{}}
+\rot{Learning} & \rot{Generalizing} & Algorithm Description & \rot{Seen Tasks} & \rot{Unseen Tasks} \\ \midrule
+\xmark & \xmark & Task memorization & \raisebox{-.5\height}{\includegraphics[width=1cm]{figs/behv-good-flat.pdf}} & \raisebox{-.5\height}{\includegraphics[width=1cm]{figs/behv-bad-flat.pdf}} \\
+\cmark & \xmark & \makecell{Task identification} &  \raisebox{-.5\height}{\includegraphics[width=1cm]{figs/behv-good-learn.pdf}} & \raisebox{-.5\height}{\includegraphics[width=1cm]{figs/behv-bad-flat.pdf}} \\
+\xmark & \cmark & Zero-shot generalization &  \raisebox{-.5\height}{\includegraphics[width=1cm]{figs/behv-good-flat.pdf}} & \raisebox{-.5\height}{\includegraphics[width=1cm]{figs/behv-good-flat.pdf}} \\
+\cmark & \cmark & \makecell{General-purpose\\learning algorithm} &  \raisebox{-.5\height}{\includegraphics[width=1cm]{figs/behv-good-learn.pdf}} & \raisebox{-.5\height}{\includegraphics[width=1cm]{figs/behv-good-learn.pdf}} \\
+\end{tabular}
+}%
+\put (115.5, 2.5) {\rotatebox{90}{\textbf{\small Performance}}}
+\put (127, -7.8) {\textbf{\small Examples seen}}
+\end{Overpic}
+\caption{An algorithm encoded in a neural network can be classified along two different dimensions: To what extent it \emph{learns} and to what extent it \emph{generalizes}.}
+\label{fig:algorithm_categorization}
+\end{wraptable}
+\paragraph{What is a general-purpose learning algorithm?}
+A learning algorithm can be considered general-purpose if it learns on a wide range of possible tasks $D$ and their respective related queries $x', y'$.
+In this paper, we are interested in strong generalization across entirely different datasets such as MNIST, Fashion MNIST, and CIFAR10.
+Human-engineered learning algorithms such as gradient-descent on a suitable loss function can be considered general-purpose learning algorithms that can be applied to any of these datasets (where the gradient is obtained via backpropagation or other means).
+Meta-learners often don’t generalize that well at meta-test time when we have an entirely new dataset that we want to learn on.
+We set out to investigate under which conditions in-context learning generalizes well.
+In comparison to in-context learning, gradient-based methods like MAML hard-code the human-engineered learning algorithm of gradient descent and inherit its generalization properties.
+
+
+
+\section{General-Purpose In-Context Learning}
+
+Due to the small number of inductive biases in black-box models, we can only expect (meta-)generalization when meta-training with an appropriately broad data distribution.
+Thus, changes in the data distribution affect whether and how a model meta-learns and meta-generalizes.
+We classify algorithms along two different dimensions:
+To what extent it learns (improving predictions given increasingly larger training sets provided at inference time), and to what extent it generalizes (performs well on instances, tasks, or datasets not seen before).
+Algorithms can then be categorized as in \autoref{fig:algorithm_categorization}.
+In task memorization, the model immediately performs well on seen tasks but does not generalize.
+In task identification, the model identifies the task and gets better on it at inference time as it sees more examples but can only do so on tasks very similar to what it was trained on.
+In zero-shot generalization, the model immediately generalizes to unseen tasks, without observing examples.
+Finally, a general-purpose learning algorithm improves as it observes more examples both on seen and significantly different unseen tasks.
+We demonstrate algorithmic transitions occurring between these learning modalities, and empirically investigate these.
+
+\subsection{Generating Tasks for Learning-to-Learn}
+Neural networks are known to require datasets of significant size to effectively generalize.
+While in standard supervised learning large quantities of data are common, meta-learning algorithms may require a similar number of distinct \emph{tasks} in order to learn and generalize.
+Unfortunately, the number of commonly available tasks is orders of magnitudes smaller compared to the datapoints in each task.
+
+Previous work has side-stepped this issue by building-in architectural or algorithmic structure into the learning algorithm, in effect drastically reducing the number of tasks required.
+For example, in \citet{kirsch2020meta,kirsch2021introducing}, the authors included symmetries into the black-box model in the form of input and output permutation invariances.
+An alternative to this is the generation of new tasks~\citep{schmidhuber2013powerplay,clune2019ai,such2020generative,parker2022evolving}.
+Unfortunately, it is not easy to generate a wide range of tasks that are both diverse and contain structure as it can be found in the real world.
+
+\begin{wrapfigure}{r}{0.55\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figs/transformer-figure.pdf}
+    \caption{
+    Our \emph{General-Purpose In-Context Learner} (GPICL) is based on the vanilla Transformer which is trained to make predictions for queries $x'$ given any prefix of a dataset $D := \{x_i, y_i\}_{i=1}^{N_D}$ as in \autoref{eq:multi_task}.
+    }
+    \label{fig:transformer_architecture}
+\end{wrapfigure}
+In this work, we take an intermediate step by augmenting existing datasets, in effect increasing the breadth of the task distribution based on existing task regularities.
+We generate a large number of tasks by taking existing supervised learning datasets, randomly projecting their inputs and permuting their classification labels. 
+While the random projection removes spatial structure from the inputs, this structure is not believed to be central to the task (for instance, the performance of SGD-trained fully connected networks is invariant to projection by a random orthogonal matrix \citep{wadia2021whitening}). 
+Task augmentation allows us to investigate fundamental questions about learning-to-learn in the regime of many tasks without relying on huge amounts of existing tasks or elaborate schemes to generate those.
+
+A task or dataset $D$ is then defined by its corresponding base dataset $\bar D = \{ \bar{x}_i, \bar{y}_i \}$, (linear) projection $A \in \mathbb{R}^{N_x \times N_x}$, with $A_{ij} \sim \mathcal{N}\left(0, \frac{1}{N_x} \right)$, and output permutation $\rho$, $D = \{ A \bar{x}_i, \rho(\bar{y}_i) \}$.
+Unless noted otherwise, the distribution over output permutations $p(\rho)$ is uniform.
+
+\begin{figure*}[th]
+\centering
+\begin{overpic}[width=0.33\linewidth]{figs/mlp.pdf}
+\put (6,84) {\textbf{\small(a)}}
+\end{overpic}
+\hfill
+\begin{overpic}[width=0.6\linewidth]{figs/transformer-large-model-large-data.pdf}
+\put (6,46) {\textbf{\small(b)}}
+\put (50,46) {\textbf{\small(c)}}
+\end{overpic}
+\caption{
+\textbf{GPICL is able to generalize to unseen tasks.} 
+Each cell is a separate meta-training run.
+\textbf{(a)} An MLP classifier trained in a multi-task fashion across various numbers of tasks (generated based on MNIST) and network sizes is able to fit linearly more tasks, the larger its capacity.
+\textbf{(b)} A sequence model (here the GPICL Transformer) that observes a dataset $D$ of inputs and labels transitions into generalizing to an seemingly unbounded number of tasks with an increase in model size.
+This is achieved by switching from a memorization solution to a learning solution that \textbf{(c)} generalizes to unseen tasks.
+This generalization does not occur with the MLP.
+}
+\label{fig:mlp_vs_transformer}
+\end{figure*}
+
+\begin{algorithm}[t]
+  \centering	
+  \begin{algorithmic}	
+    \Require Dataset $\bar D = \{\bar x_i, \bar y_i\}$, Number of tasks $K \in \mathbb{N}^+$
+    \State \# Define $p(D)$ by augmenting $\bar D$, here by:
+    \State $\{A^{(k)}_{ij}\}_{k=1}^{K} \sim \mathcal{N}(0, \frac{1}{N_x})$ \Comment{Sample input projections}
+    \State $\{\rho^{(k)}\}_{k=1}^{K} \sim p(\rho)$ \Comment{Sample output permutations}
+    \State $D^{(k)} = \{A^{(k)}\bar x_i, \rho^{(k)}(\bar y_i)\}$
+    \State $p(D) := \mathrm{Uniform}[\{D^{(k)}\}_{k=1}^K]$
+    \\
+    \State \# Meta-Training on $p(D)$
+    \While{not converged}
+      \State $\theta \leftarrow \theta - \alpha \nabla_\theta J(\theta)$ \Comment{\autoref{eq:multi_task}}
+    \EndWhile
+  \end{algorithmic}	
+  \caption{Meta-Training for General-Purpose In-Context Learning (GPICL) via Augmentation}\label{alg:gpicl_meta_training}
+\end{algorithm}
+
+\subsection{Meta-learning and meta-testing}
+\paragraph{Meta-learning}
+Given those generated tasks, we then meta-train jointly on a mini-batch sampled from the whole distribution.
+First, we sample datasets $D$ from the augmented task distribution $p(D)$ and then take a random batch $D_{1:N_D}$ from the training set.
+Second, we minimize $J(\theta)$, the sum of losses on the query prediction after observing any prefix $D_{1:j-1}$
+\begin{equation}\label{eq:multi_task}
+J(\theta) = \expect{D \sim p(D)}{\sum_{j=1}^{N_D}l(f_\theta(D_{1:j-1}, x_j), y_j)},
+\end{equation}
+where in the classification setting, $l$ is the cross entropy loss between the label $y_j$ and prediction $y' = f_\theta(D_{1:j-1}, x_j)$,
+$f_\theta$ is a neural network mapping to predictions $y'$ as in \autoref{eq:supervised_learning_alg}.
+During meta-training, we take gradient steps in $J(\theta)$ by backpropagation and Adam~\citep{kingma2014adam}.
+To investigate the effect of the data distribution, we train on various numbers of tasks (\autoref{alg:gpicl_meta_training}).
+Finally, we need to choose a black-box model for the function $f_\theta$.
+We use a vanilla Transformer~\citep{vaswani2017attention} with learned positional embeddings, visualized in \autoref{fig:transformer_architecture}.
+We call it the \emph{General-Purpose In-Context Learner} (GPICL).
+Each token corresponds to the concatenation of a transformed input $x_i$ and one-hot encoded label $y_{i-1}$.
+The model predicts the corresponding logits $y' = y_i$ for the current input $x' = x_i$.
+When querying for the first $x_1$, no label for the previous input is available, so we feed a zero vector.
+
+\paragraph{Meta-testing}
+At meta-test time, no gradient-based learning is used.
+Instead, we simply obtain a prediction $y'$ by evaluating the neural network $f_\theta$ on a dataset $D$ and query point $x'$.
+The dataset $D$ is either derived from the same base dataset (eg MNIST after meta-training on MNIST) or it is derived from a different dataset (eg Fashion MNIST or CIFAR10).
+In both cases a seen or unseen random projection is used.
+Datapoints are taken only from the respective test split of the base dataset.
+
+
+
+\section{Experiments on the Emergence of General Learning-To-Learn}
+
+
+\paragraph{Multi-task training with standard classifiers}
+Given a task distribution of many different classification tasks, we first ask under what conditions we expect ``learning-to-learn'' to emerge.
+We train a single model across many tasks where each task corresponds to a random transformation of the MNIST dataset, but where the MLP only receives a single datapoint instead of a whole sequence as input.
+This corresponds to $N_D = 1$ in \autoref{eq:multi_task}.
+We would expect such a non-sequential classifier to be able to correctly predict for more tasks as its number of parameters increases.
+When plotting the network capacity against the number of tasks, we indeed observe a linear boundary 
+where an increasing number of tasks can be fit the larger the network (\autoref{fig:mlp_vs_transformer}a).
+This is consistent with results in \citet{collins2016capacity}, which found that a constant number of bits about the data distribution can be stored per model parameter, across a variety of model architectures and scales.
+\paragraph{Learning-to-learn with large sequential models and data}
+In contrast to the MLP classifier, a sequence model that observes multiple observations and their labels from the same task, could exceed that linear performance improvement by learning at inference time.
+Indeed, we observe that when switching to a Transformer that can observe a sequence of datapoints before making a prediction about the query, more tasks can be simultaneously fit (\autoref{fig:mlp_vs_transformer}b).
+At a certain model size and number of tasks, the model undergoes a transition, allowing to generalize to a seemingly unbounded number of tasks.
+We hypothesize that this is due to switching the prediction strategy from memorization to learning-to-learn.
+Further, when (meta-)testing the same trained models from the previous experiment on an unseen task (new random transformation of MNIST), they generalize only in the regime of large numbers of tasks and model size (\autoref{fig:mlp_vs_transformer}c).
+As an in-context learner, meta-testing does not involve any gradient updates but only running the model in forward mode.
+
+\paragraph{Insight 1: It is possible to learn-to-learn with black-box models}
+Effective learning algorithms can be realized in-context using black-box models with few inductive biases, given sufficient meta-training task diversity and large enough model sizes.
+To transition to the learning-to-learn regime, we needed at least $2^{13} = 8192$ tasks.
+
+In the following, we study learning-to-learn from the perspective of the \emph{data distribution}, the \emph{architecture}, and the \emph{optimization dynamics}.
+For the data distribution, we look at how the data diversity affects the emergence and transitions of learning-to-learn, generalization, and memorization.
+For architecture, we analyze the role of the model and state size in various architectures.
+Finally, we observe challenges in meta-optimization and demonstrate how memorization followed by generalization is an important mechanism that can be facilitated by biasing the data distribution.
+
+\subsection{Large Data: Generalization and Algorithmic Transitions}\label{sec:investigate_data}
+
+\begin{wrapfigure}{r}{0.66\textwidth}
+\centering
+\begin{overpic}[width=0.95\linewidth]{figs/meta-test.pdf}
+\put (10,31) {\textbf{\small(a)}}
+\put (56,31) {\textbf{\small(b)}}
+\end{overpic}
+\caption{
+\textbf{
+GPICL learns from examples at test time, and generalizes to unseen tasks and datasets.}
+We meta-trained the Transformer on a set of tasks defined by random transformations of either MNIST (blue) or FashionMNIST (orange). We then meta-test on unseen tasks, and seen (\textcolor{blue}{a}\textcolor{orange}{b}) or unseen (\textcolor{blue}{b}\textcolor{orange}{a}) datasets.
+The plot shows the accuracy averaged across multiple runs at each inner step, with shading indicating $95\%$ confidence intervals.
+The increase in performance at each step suggests we have learned a learning algorithm.
+}
+\label{fig:meta_test}
+\end{wrapfigure}
+\paragraph{Simple data augmentations lead to the emergence of learning-to-learn}
+To verify whether the observed generalizing solutions actually implement learning algorithms (as opposed to e.g.\ zero-shot generalization), we analyze the meta-test time behavior.
+We plot the accuracy for a given query point for varying numbers of examples in \autoref{fig:meta_test}.
+As is typical for learning algorithms, the performance improves when given more examples (inputs and labels).
+
+\paragraph{Generalization}
+Naturally, the question arises as to what extent these learning algorithms are general.
+While we have seen generalization to unseen tasks consisting of novel projections of the same dataset, do the learned algorithms also generalize to unseen datasets?
+In \autoref{fig:meta_test} we observe strong out-of-distribution performance on Fashion MNIST after having trained on MNIST (b, blue), and there is no generalization gap compared to directly training on Fashion MNIST (b, orange).
+Similarly, when meta training on Fashion MNIST and meta testing on MNIST (a, orange) we observe that the learning algorithm generalizes, albeit with a larger generalization gap.
+
+\paragraph{Comparison to other methods} 
+Other datasets and baselines are shown in \autoref{tab:meta-test-datasets}.
+We aim to validate whether methods with less inductive bias (such as our GPICL), can compete with methods that include more biases suitable to learning-to-learn.
+This includes stochastic gradient descent (SGD), updating the parameters online after observing each datapoint.
+MAML~\citep{finn2017model} proceeds like SGD, but uses a meta-learned neural network initialization.
+Both methods that rely on backpropagation and gradient descent learn more slowly than our Transformer.
+In the case of MAML, this may be due to the main mechanism being feature reuse~\citep{Raghu2020Rapid} which is less useful when training across our wider task distribution.
+For in-context learners (methods that do not hard-code gradient descent at meta-test time), we test VSML~\citep{kirsch2020meta} that discovered learning algorithms significantly generalizing between tasks.
+Our GPICL comes surprisingly close to VSML without requiring the associated inductive bias.
+GPICL generalizes to many datasets, even those that consist of random input-label pairs.
+We also observe that learning CIFAR10 and SVHN from only 99 examples with a general-purpose learning algorithm is difficult, which we address in \autoref{sec:domain_and_general_purpose}.
+\begin{wrapfigure}{r}{0.5\textwidth}
+\centering
+\includegraphics[width=0.95\linewidth]{figs/meta-test-improvement-mnist.pdf}
+\caption{
+\textbf{Transformers exhibit three different phases in terms of meta-learned behavior.}
+(1) When training on a small number of tasks, tasks are memorized.
+(2) Tasks from the training distribution are identified, which is evident as a within-sequence increase of performance.
+(3) When training across many tasks, we discover a learning algorithm that generalizes to unseen tasks and unseen datasets.
+}
+\label{fig:meta_test_improvement}
+\end{wrapfigure}
+
+Using LSTM-based in-context learners performs worse, which we further discuss in \autoref{sec:investigate_architecture} among other alternative architectures.
+
+\begin{table*}[]
+\centering
+\footnotesize
+\caption{
+\textbf{Meta-test generalization to various (unseen) datasets} after meta-training on augmented MNIST and seeing 99 examples, predicting the 100th.
+We report the mean across 3 meta-training seeds, 16 sequences from each task, 16 tasks sampled from each base dataset.
+GPICL is competitive to other approaches that require more inductive bias.
+}
+\label{tab:meta-test-datasets}
+\begin{tabular}{@{}llllllll@{}}
+\toprule
+Method & Inductive bias & MNIST & \begin{tabular}[c]{@{}l@{}}Fashion\\ MNIST\end{tabular} & KMNIST & Random & CIFAR10 & SVHN  \\ \midrule
+SGD                & Backprop, SGD & 70.31\% & 50.78\% & 37.89\% & 100.00\% & 14.84\% & 10.16\% \\
+MAML               & Backprop, SGD & 53.71\% & 48.44\% & 36.33\% & 99.80\% & 17.38\% & 11.33\% \\
+VSML               & \begin{tabular}[c]{@{}l@{}}In-context, param sharing\end{tabular} & 79.04\% & 68.49\% & 54.69\% & 100.00\% & 24.09\% & 17.45\% \\
+LSTM               & In-context, black-box & 25.39\% & 28.12\% & 18.10\% & 58.72\% & 12.11\% & 11.07\%      \\
+GPICL (ours) & In-context, black-box & 73.70\% & 62.24\% & 53.39\% & 100.00\% & 19.40\% & 14.58\% \\ \bottomrule
+\end{tabular}
+\end{table*}
+
+\paragraph{Insight 2: Simple data augmentations are effective for learning-to-learn}
+The generality of the discovered learning algorithm can be controlled via the data distribution.
+Even when large task distributions are not (yet) naturally available, simple augmentations are effective.
+
+\paragraph{Transitioning from memorization to task identification to general learning-to-learn}
+When do the learned models correspond to memorizing, learning, and generalizing solutions?
+In \autoref{fig:meta_test_improvement}, we meta-train across varying numbers of tasks, with each point on the x-axis corresponding to multiple separate meta-training runs.
+We plot the accuracy difference between the last and first prediction (how much is learned at meta-test time) for a seen task, an unseen task, and an unseen task with a different base dataset.
+We observe three phases:
+In the first phase, the model memorizes all tasks, resulting in no within-sequence performance improvement.
+In the second phase, 
+it memorizes and learns to identify tasks, resulting in a within-sequence improvement confined to seen task instances.
+In the final and third phase, we observe a more general learning-to-learn, a performance improvement for unseen tasks, even different base datasets (here FashionMNIST).
+This phenomenon applies to various other meta-training and meta-testing datasets.
+The corresponding experiments can be found in 
+
+\paragraph{Insight 3: The meta-learned behavior has algorithmic transitions}
+When increasing the number of tasks, the meta-learned behavior transitions from task memorization, to task identification, to general learning-to-learn.
+
+\subsection{Architecture: Large Memory (State) is Crucial for Learning}\label{sec:investigate_architecture}
+
+In the previous experiments we observed that given sufficient task diversity and model size, Transformers can learn general-purpose learning algorithms.
+This raises the question how essential the Transformer architecture is and whether other black-box models could be used.
+We hypothesize that for learning-to-learn the size of the memory at meta-test time (or state more generally) is particularly important in order to be able to store learning progress.
+Through self-attention, Transformers have a particularly large state.
+We test this by training several architectures with various state sizes in our meta-learning setting.
+In \autoref{fig:large_state_space}a, we observe that when we vary the hyper-parameters which most influence the state size, we observe that for a specific state size we obtain similar performance of the discovered learning algorithm across architectures.
+In contrast, these architectures have markedly different numbers of parameters (\autoref{fig:large_state_space}b).
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \centering
+    \begin{overpic}[width=0.50\linewidth]{figs/state-space-size-unseen.pdf}
+    \put (75,80) {\textbf{\small(a)}}
+    \end{overpic}
+    \hfill
+    \begin{overpic}[width=0.47\linewidth]{figs/param-count-unseen.pdf}
+    \put (20,85) {\textbf{\small(b)}}
+    \end{overpic}
+    \caption{
+    \textbf{
+    The state size (accessible memory) of an architecture most strongly predicts its performance as a general-purpose learning algorithm.
+    }
+    \textbf{(a)} A large state is crucial for learning-to-learn to emerge.
+    \textbf{(b)} The parameter count correlates less well with learning capabilities.
+    }
+    \label{fig:large_state_space}
+\end{wrapfigure}
+\paragraph{What corresponds to state (memory) in various architectures?}
+Memory $N_S$ in the context of recurrent neural networks corresponds to the hidden state or context vector of size $N_H$, thus $N_S \in \mathcal{O}(N_H)$.
+More generally, we can describe the state as the information bottleneck that the sequence has to pass through before making predictions.
+In the context of learning-to-learn, this state has to hold information about everything that has been learned so far.
+Standard learning algorithms such as neural networks trained via SGD would have a state that corresponds to the neural network parameters, iteratively updated via SGD.
+In transformers, self-attention allows for a particularly large state of $N_S \in \mathcal{O}(N_K N_L N_T)$ where $N_K$ is the size of key, value, and query, $N_L$ is the number of layers, and $N_T$ is the length of the sequence.
+In addition to \autoref{fig:large_state_space}, \autoref{fig:large_state_space_extended} show meta-test performance on more tasks and datasets.
+
+\paragraph{Insight 4: Large state is more crucial than parameter count}
+This suggests that the model size in terms of parameter count plays a smaller role in the setting of learning-to-learn and Transformers have benefited in particular from an increase in state size by self-attention. 
+Beyond learning-to-learn, this likely applies to other tasks that rely on storing large amounts of sequence-specific information.
+
+\subsection{Challenges in Meta-Optimization}\label{sec:investigate_optimization}
+
+Meta-optimization is known to be challenging.
+Meta gradients~\citep{finn2017model,xu2018meta,bechtle2021meta} and works with parameter sharing or weight updates in their architecture ~\citep{kirsch2020meta,pedersen2021evolving,risi2021selfassemblingAI} observed various difficulties:
+
+We show that some of these problems also occur with black-box models and propose effective interventions.
+
+\begin{figure*}[t]
+    \centering
+    \begin{overpic}[width=0.3\linewidth]{figs/loss-plateaus-100p.pdf}
+    \put (0,65) {\textbf{\small(a)}}
+    \end{overpic}
+    \begin{overpic}[width=0.69\linewidth]{figs/plateau-zoom.pdf}
+    \put (-3,28) {\textbf{\small(b)}}
+    \end{overpic}
+    \caption{
+    \textbf{Meta-training dynamics often involve an extended period where GPICL's performance is stuck on a plateau.}
+    \textbf{(a)} Meta-loss vs. meta-training step, for a uniform distribution over meta-training tasks. Training tasks are generated by random transformations of FashionMNIST. 
+    \textbf{(b)} A zoomed in view of the plateau. The loss only decreases slightly and the model memorize small biases in the training data (decreasing generalization) before the loss drops sharply. 
+    }
+    \label{fig:loss_plateaus}
+\end{figure*}
+
+\paragraph{Loss plateaus when meta-learning with black-box models}
+By training across a large number of randomly transformed tasks, memorizing any task-specific information is difficult.
+Instead, the model is forced to find solutions that are directly learning.
+We observe that this results in (meta-)loss plateaus during meta-training where the loss only decreases slightly for long periods of time (\autoref{fig:loss_plateaus}a).
+Only after a large number of steps (here around 35 thousand) does a drop in loss occur.
+In the loss plateau, the generalization loss increases on unseen tasks from both the same and a different base dataset (\autoref{fig:loss_plateaus}b).
+This suggests that being able to first memorize slightly enables the following learning-to-learn phase. %
+
+\begin{figure*}[t]
+\centering
+\begin{overpic}[width=0.26\linewidth]{figs/plateau-overfit-generalize.pdf}
+\put (-5,80) {\textbf{\small(a)}}
+\end{overpic}
+\begin{overpic}[width=0.33\linewidth]{figs/batch-size-plateau-length.pdf}
+\put (0,62) {\textbf{\small(b)}}
+\end{overpic}
+\begin{overpic}[width=0.33\linewidth]{figs/num-tasks-plateau-length.pdf}
+\put (0,62) {\textbf{\small(c)}}
+\end{overpic}
+\caption{
+\textbf{Whether GPICL memorizes, generalizes, or remains trapped on a meta-loss plateau depends on the number of meta-training tasks, and the meta-training batch size.} 
+\textbf{(a)} A phase diagram showing GPICL's behavior at the end of meta-training (50k steps). Solutions either memorize, generalize and learn, or remain in the loss plateau.
+With additional training steps, configurations in the plateau might eventually transition to memorization or generalization. 
+Generalization only occurs with large enough batch sizes and sufficient, but not too many, tasks.
+\textbf{(b)} This behavior is explained by the plateau length decreasing with the increasing batch sizes (reducing the noise contribution), and
+\textbf{(c)} increasing with larger numbers of tasks.
+}
+\label{fig:intervention_batch_size}
+\end{figure*}
+
+\paragraph{Intervention 1: Increasing the batch size}
+
+This suggests increasing the meta-batch size as a straightforward solution.
+When plotting various batch sizes against numbers of tasks we obtain three kinds of solutions at the end of meta-training (\autoref{fig:intervention_batch_size}a):
+(1) Solutions that generalize and learn,
+(2) Solutions that memorize, and
+(3) Solutions that are still in the loss plateau (due to maximum of 50 thousand optimization steps).
+The larger the batch size, the more tasks we can train on without getting stuck in a loss plateau.
+When plotting the length of the loss plateau against the task batch size (\autoref{fig:intervention_batch_size}b) we observe a power-law relationship with increasing batch sizes decreasing the plateau length.
+
+Thus, this intervention relies on parallelizability.
+An increase in the number of tasks also increases the plateau length (\autoref{fig:intervention_batch_size}c),
+possibly due to a larger number of tasks inhibiting the initial memorization phase.
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+\centering
+\begin{overpic}[width=\linewidth]{figs/loss-plateaus.pdf}
+\put (0,60) {\textbf{\small(a)}}
+\put (47,60) {\textbf{\small(b)}}
+\put (0,29) {\textbf{\small(c)}}
+\put (47,29) {\textbf{\small(d)}}
+\end{overpic}
+\caption{
+\textbf{Biasing the training distribution is an effective intervention which prevents a meta-loss plateau.}
+A uniform distribution over tasks leads to a long plateau \textbf{(d)}, while increasing the training fraction that corresponds to a single task reduces the plateau \textbf{(abc)}.
+}
+\label{fig:intervention_biases}
+\end{wrapfigure}
+
+\paragraph{Intervention 2: Changes in the meta-optimizer}
+Given that many gradients in the loss plateau have very small norm, Adam would rescale those element-wise, potentially alleviating the issue.
+In practice, we observe that the gradients are so small that the $\epsilon$ in Adam's gradient-rescaling denominator (for numerical stability) limits the up-scaling of small gradients.
+Using smaller $\epsilon$ results in more than halving the plateau length.
+\paragraph{Intervention 3: Biasing the data distribution / Curricula}
+GPICL mainly relies on the data distribution for learning-to-learn.
+This enables a different kind of intervention: Biasing the data distribution.
+The approach is inspired by the observation that before leaving the loss plateau the model memorizes biases in the data.
+Instead of sampling label permutations uniformly, we bias towards a specific permutation by using a fixed permutation for a fraction of each batch.
+This completely eliminates the loss plateau, enabling a smooth path from memorizing to learning (\autoref{fig:intervention_biases}).
+Surprisingly, even when heavily biasing the distribution, memorization is followed by generalization.
+This biased data distribution can be viewed as a curriculum, solving an easier problem first that enables the subsequent harder learning-to-learn.
+Further investigation is required to understand how this transition occurs.
+
+We hypothesize that many natural data distributions---including language---contain such sub-tasks that are easy to memorize followed by generalization.
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figs/pre-trained.pdf}
+\caption{
+\textbf{Using pre-trained networks allows leveraging domain-specific knowledge while still generalizing to other datasets}
+GPICL is meta-trained on MNIST either with the randomly transformed raw inputs or randomly transformed pre-trained features.
+Pre-training helps to accelerate meta-test-time in-context learning on datasets that have a matching domain, such as CIFAR10.
+With only 100 examples, the learning algorithm can achieve about $45\%$ accuracy on CIFAR10.
+The learning algorithms still generalize to a wide range of datasets.
+Error bars are $95\%$ confidence intervals of the mean across meta-training runs.
+}
+\label{fig:dom_gen}
+\end{wrapfigure}
+
+\subsection{Domain-specific and general-purpose learning}\label{sec:domain_and_general_purpose}
+
+We demonstrated the feasibility of meta-learning in-context learning algorithms that are general-purpose.
+An even more useful learning algorithm would be capable of both generalizing, as well as leveraging domain-specific information for learning when it is available.
+This would allow for considerably more efficient in-context learning, scaling to more difficult datasets without very long input sequences.
+Toward this goal, we investigate a simple scheme that leverages pre-trained neural networks as features to learn upon.
+This could be from an unsupervised learner or a frozen large language model~\citep{radford2021learning,tsimpoukelli2021multimodal}.
+Here, we first project the inputs $\bar x_i$ of a base-dataset $\bar D$ into some latent space using a pre-trained network, and then proceed with meta-training and meta-testing as before, randomly projecting these alternative features.
+For the pre-trained network, we use a ResNet trained on ImageNet and remove its final layer.
+In \autoref{fig:dom_gen} we have meta-trained GPICL on MNIST either with the randomly transformed raw inputs or randomly transformed embedded features.
+At meta-test-time the learning algorithm generalizes to a wide range of datasets, measured by the meta-test accuracy of the 100th example.
+At the same time, the pre-trained ImageNet helps to accelerate learning on datasets that have a matching domain, such as CIFAR10.
+We observe that with only 100 examples, the learning algorithm meta-trained on MNIST, can achieve about $45\%$ accuracy on CIFAR10.
+
+
+
+\section{Related work}
+
+
+\paragraph{Meta-learning: Inductive biases and general-purpose learning algorithms}
+Meta-learning approaches exist with a wide range of inductive biases, usually inspired by existing human-engineered learning algorithms.
+Some methods pre-wire the entire learning algorithm~\citep{finn2017model}, pre-wire backpropagation and the structure of a gradient-based optimizer~\citep{andrychowicz2016learning,metz2019understanding,metz2020tasks}, or learn the loss function~\citep{houthooft2018evolved,kirsch2019improving,bechtle2021meta}.
+Many methods search over hyper-parameters that alter existing learning algorithms~\citep{xu2018meta,metz2020using,chen2022towards}.
+Fast weight programmers or hyper-networks update the weights of the same or another neural network~\citep{schmidhuber1992learning,schmidhuber1993reducing,ha2017hypernetworks,irie2021going,sandler2021meta,kirsch2022self,zhmoginov2022hypertransformer}, frequently with various symmetries.
+
+There has been growing interest in meta-learning more general-purpose learning algorithms.
+Such learning algorithms aim to be general and reusable like other human-engineered algorithms (e.g.~gradient descent).
+The improved generality of the discovered learning algorithm has been achieved by introducing inductive bias, such as by bottlenecking the architecture or by hiding information, encouraging learning over memorization.
+Methods include enforcing learning rules to use gradients~\citep{metz2019understanding,kirsch2019improving,oh2020discovering}, symbolic graphs~\citep{real2020automl,co-reyes2021evolving}, parameter sharing and symmetries~\citep{kirsch2020meta,kirsch2021introducing}, or adopting evolutionary inductive biases~\citep{lange2023es,li2023optformer}.
+Parameter sharing and symmetries have additionally been discussed in the context of self-organization~\citep{tang2021sensory,risi2021selfassemblingAI,pedersen2022minimal}.
+
+\paragraph{In-context learning with black-box models}
+Black-box neural networks can learn-to-learn purely in their activations (in-context) with little architectural and algorithmic bias~\citep{hochreiter2001learning,wang2016learning,duan2016rl,santoro2016meta,mishra2018a,garnelo2018conditional}.
+This requires a feedback or demonstration signal in the inputs that allows for learning such as the reward in reinforcement learning or label in supervised learning~\citep{schmidhuber1993self}.
+While a frequently used architecture is the LSTM~\citep{hochreiter1997long,gers2000learning}, 
+this mechanism has also seen substantial recent attention in Transformer models~\citep{brown2020language,chan2022data} under the name of in-context learning.
+In large language models (LLMs) demonstrations of a task in the input help solving language-based tasks at inference (meta-test) time~\citep{brown2020language}.
+This few-shot learning ability has been attributed to the data-distributional properties of text corpora~\citep{chan2022data}.
+In-context learning has also been interpreted from a Bayesian inference perspective~\citep{ortega2019meta,mikulik2020meta,nguyen2022transformer,muller2022transformers}.
+Our method GPICL is in the class of these black-box in-context learners.
+The number of model parameters has been at the core of scaling up LLMs to unlock greater capabilities and have been formulated in scaling laws~\citep{kaplan2020scaling,hoffmann2022training}.
+Our empirical study suggests that for learning-to-learn, the amount of memory (model state) is even more predictive of in-context learning capabilities than parameter count.
+
+\paragraph{General-purpose in-context learning}
+While in-context learning has been demonstrated with black-box models, little investigation of general-purpose meta-learning with these models has been undertaken. 
+Generalization in LLMs has previously been studied with regards to reasoning and systematicity~\citep{csordas2021devil,deletang2022neural,wei2022chain,zhou2022least,anil2022exploring}.
+In this work we focus on meta-generalization instead, the extent to which in-context learning algorithms generalize.
+In contrast to previous methods, GPICL implements \emph{general-purpose} learning algorithms.
+Independently, \citet{garg2022can} recently studied generalization on synthetic functions compared to our augmented datasets.
+VSML~\citep{kirsch2020meta} also implements in-context learning with black-box LSTMs, but makes use of parameter-sharing to aid generalization.
+PFNs~\citep{muller2022transformers} demonstrated learning to learn on small tabular datasets when meta-training on synthetically generated problems.
+Experiments on more complex classification settings such as Omniglot relied on fine-tuning.
+In comparison, our method investigated meta-generalization of learning algorithms directly to datasets such as MNIST, Fashion MNIST, and CIFAR10 while studying fundamental questions about the conditions necessary for such generalization.
+TabPFNs~\citep{hollmann2022tabpfn} extend PFNs to larger tabular datasets.
+
+
+
+\section{Discussion and Conclusion}
+
+
+By generating tasks from existing datasets, we demonstrated that black-box models such as Transformers can meta-learn general-purpose in-context learning algorithms (GPICL).
+We observed that learning-to-learn arises in the regime of large models and large numbers of tasks with several transitions from task memorization, to task identification, to general learning.
+The size of the memory or model state significantly determines how well any architecture can learn how to learn across various neural network architectures.
+We identified difficulties in meta-optimization and proposed interventions in terms of optimizers, hyper-parameters, and a biased data distribution acting as a curriculum.
+We demonstrated that in-context learning algorithms can also be trained to combine domain-specific learning and general-purpose learning.
+We believe our findings open up new possibilities of data-driven general-purpose meta-learning with minimal inductive bias, including generalization improvements of in-context learning in large language models (LLMs).
+
+An important subject of future work is the exploration of task generation beyond random projections, such as augmentation techniques for LLM training corpora or generation of tasks from scratch.
+A current limitation is the applicability of the discovered learning algorithms to arbitrary input and output sizes beyond random projections.
+Appropriate tokenization to unified representations may solve this~\citep{chowdhery2022palm,zhang2023meta}.
+Furthermore, learning algorithms often process millions of inputs before outputting the final model.
+In the current black-box setting, this is still difficult to achieve and it requires new advances for in context length of sequence models.
+Recurrency-based models may suffer from accumulating errors, whereas Transformer's computational complexity grows quadratically in sequence length.
+
+
+
+
+
+
+
+

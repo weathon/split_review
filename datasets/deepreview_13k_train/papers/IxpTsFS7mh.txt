@@ -1,0 +1,248 @@
+\title{VQ-TR: Vector Quantized Attention for Time Series Forecasting}
+
+\begin{abstract}
+Probabilistic time series forecasting is a challenging problem due to the long sequences involved, the large number of samples needed for accurate probabilistic inference, and the need for real-time inference in many applications. These challenges necessitate methods that are not only accurate but computationally efficient. Unfortunately, most current state-of-the-art methods for time series forecasting are based on Transformers, which scale poorly due to quadratic complexity in sequence length, and are therefore needlessly computationally inefficient. Moreover, with a few exceptions, these methods have only been evaluated for non-probabilistic point estimation. In this work, we address these two shortcomings.
+For the first, we introduce VQ-TR, which maps large sequences to a discrete set of latent representations as part of the Attention module. This not only allows us to attend over larger context windows with linear complexity in sequence length but also allows for effective regularization to avoid overfitting.
+For the second, we provide what is to the best of our knowledge the first systematic comparison of modern Transformer-based time series forecasting methods for probabilistic forecasting. In this comparison, we find that VQ-TR performs better or comparably to all other methods while being computationally efficient.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Time series forecasting is a challenging machine learning task given the need to model complex, non-linear temporal patterns over potentially long time horizons. Recently, methods based on Transformers (Vaswani et al., 2017) have dominated the state-of-the-art, outperforming both classical autoregressive approaches, as well as deep learning approaches using Convolutional Neural Networks (CNNs) or Recurrent Neural Networks (RNNs). This is in large part due to the Transformer’s strong inductive bias (Zhou et al., 2021), which allows it to look back over the entire context history of a time series, without suffering from limited temporal field or issues of forgetting (Mahto et al., 2021).  
+
+Unfortunately, the recent line of work on using transformers for time series forecasting has two major limitations. First, the proposed methods generally use very computationally inefficient architectures, given the quadratic complexity in sequence length necessitated by the self-attention mechanism. This problem is most pronounced in problems where sequence lengths are long, although even with medium sequence lengths it results in unnecessarily inefficient computation. In particular, these problems are exacerbated in probabilistic time series forecasting settings, where many sample trajectories must be generated, and forecasting must often be performed in real time.  
+
+A second issue with the past work on transformer-based time series forecasting is that, with very few exceptions,1these methods have only been evaluated in terms of their performance for point forecasting (that is, predicting the mean values of future sequences), rather than their performance for probabilistic forecasting (that is, predicting the full probability distribution of future sequences). This is unfortunate, since for many applications areas probabilistic forecasting is paramount. Although arguably it is straightforward to use these methods to perform probabilistic forecasting by replacing the heads of the models with probabilistic emission heads, there are no existing standard benchmarks for comparing the performance of different transformer architectures for this task.  
+
+In this paper, we address these shortcomings via a two-pronged approach. For the first, we propose a novel Transformer architecture for time series forecasting, $\mathrm{V}\mathrm{Q}\mathrm{-}\mathrm{TR}$ , which eliminates the quadratic complexity in sequence length of attention via a Vector Quantization (van den Oord et al., 2017) module. For the second, we provide a systematic comparison of the performance of an extensive set of Transformer-based methods for probabilistic time series forecasting on a wide range of datasets, in terms of many different performance metrics for probabilistic inference. In this comparison, we find that $\mathrm{V}\mathrm{Q}\mathrm{-}\mathrm{TR}$ performs better or comparably to all other methods while being significantly more computationally efficient. In addition, we find that the Vector Quantization module not only improves computational and memory efficiency but also improves forecasting performance due to a natural regularizing effect.  
+
+
+
+\section{2 BACKGROUND  }
+
+
+
+
+\section{2.1 PROBABILISTIC TIME SERIES FORECASTING  }
+
+
+The task of probabilistic time series forecasting in the univariate setting consists of training on a dataset of $D\geq1$ time series $\begin{array}{r}{D_{\mathrm{train}}=\{x_{1:T^{i}}^{i}\}}\end{array}$ where $i\in\{1,\ldots,D\}$ and at each time point $t$ , we have $\boldsymbol{x}_{t}^{i}\in\mathbb{R}$ or $\mathbb{N}$ . We are tasked with predicting the potentially complex distribution of the next $P>1$ time steps into the future, and we are given a test set $\bar{D_{\mathrm{test}}}\stackrel{^{\cdot}}{=}\{x_{T^{i}+1:T^{i}+P}^{i^{\bar{}}}\}$ . Each time index $t$ is in practice a date-time value that increments regularly based on the frequency of the dataset in question, and the last training point $T^{i}$ for each time series may or may not be the same date-time. Autoregressive models like those in Graves (2013) or Salinas et al. (2019b) estimate the prediction density by decomposing the joint distribution of all $P$ points via the chain rule of probability as:  
+
+$$
+p_{\mathcal{X}}(x_{T^{i}+1:T^{i}+P}^{i})\approx\Pi_{t=1}^{P}p(x_{T^{i}+t}^{i}|x_{1:T^{i}-1+t}^{i},\mathbf{c}_{1:T^{i}+P}^{i};\theta),
+$$  
+
+parameterized by some model with trained weights $\theta$ . This requires the next time point being conditioned on all the past and covariates $\mathbf{c}_{t}^{i}$ (detailed in Section 3.3), which is computationally challenging to scale, especially if the time series has a considerably long history. Models like DeepAR (Salinas et al., 2019b) typically resort to the seq-to-seq paradigm (Sutskever et al., 2014) and consider some context window of fixed-size $C$ sampled randomly from the complete time series history to learn some historical representation and use this representation in the decoder to learn the distribution of the subsequent time points of the context. This does, however, mean that the model falls short of capturing seasonalities in its prediction, which can lead to a worse approximation of the future distribution.  
+
+Encoder-decoder Transformers (Vaswani et al., 2017) naturally fti the seq-to-seq paradigm, where $N$ encoding Transformer layers can be used to learn a size $C$ sequence of representations, denoted by:  
+
+$$
+\{\mathbf{h}_{t}\}_{t=1}^{C-1}=\mathrm{Enc}_{N}\circ\cdot\cdot\circ\mathrm{Enc}_{1}\big(\{\mathsf{c o n c a t}(x_{t}^{i},\mathbf{c}_{t+1}^{i})\}_{t=1}^{C-1};\theta\big).
+$$  
+
+Afterward, $M$ layers of a causal or masked decoding Transformer can be used to model the subsequent $P$ future time points conditioned on the encoding representations as:  
+
+$$
+\Pi_{t=C}^{C+P-1}p(x_{t+1}^{i}|x_{t:C}^{i},\mathbf{c}_{t+1:C+1}^{i},\mathbf{h}_{1},\dots,\mathbf{h}_{C-1};\theta).
+$$  
+
+For example, if we assume the data comes from a Student-T distribution then the outputs of the Transformer’s $M$ decoders can be passed to a layer that returns appropriately signed parameters of a  
+
+Student-T distribution. Then, we can maximize the log-likelihood of the resulting Student-T given the predicted parameters given by  
+
+$$
+\sum_{t=C}^{C+P-1}\log p_{\mathcal{T}}(x_{t+1}^{i}|x_{t:C}^{i},\mathbf{c}_{t+1:C+1}^{i},\mathbf{h}_{1},\dots,\mathbf{h}_{C-1};\theta),
+$$  
+
+for all $i,t$ from $\mathcal{D}_{\mathrm{train}}$ using stochastic gradient descent (SGD), as described in Section 3.1. Note that this approach can be used with any choice of distribution class, not just student-T, with the Transformer’s decoders returning the parameter values for the chosen distribution class.  
+
+Transformers offer a viable alternative to recurrent neural networks (RNN), such as LSTM (Hochreiter and Schmidhuber, 1997) or GRU (Chung et al., 2014), which, apart from being sequential, suffer from forgetting for large context windows, or Convolutional models like TCN (Bai et al., 2018), which have limited temporal receptive fields. However, transformers scale quadratically with sequence length in the compute and memory per layer. Reducing the computational requirements of Transformers is an active area of research, and several strategies have been proposed, for example, by compressing the sequence (Wang et al., 2020), exploiting locality (Beltagy et al., 2020), or mitigating computation for each of the input entities (Hawthorne et al., 2022). In contrast, our approach works by quantizing the representations without modifying the inputs, using Vector Quantization as described next.  
+
+
+
+\section{2.2 VECTOR QUANTIZATION (VQ)  }
+
+
+The VQ-VAE (van den Oord et al., 2017; Razavi et al., 2019) is an encoder-decoder Variational Autoencoder (VAE) (Kingma and Welling, 2019) that encodes inputs onto a set of $J\ge1$ discrete latent variables called the codebook $\{\mathbf{z}_{1},\ldots,\mathbf{z}_{J}\}$ . The decoder reconstructs the inputs from the resulting discrete vectors. The input vector is quantized with respect to its distance to its nearest codebook vector via the Vector Quantization (VQ) operator, which is defined by:  
+
+$$
+\begin{array}{r}{\mathrm{Quantize}(\mathbf{q}):=\mathbf{z}_{n},n\quad\mathrm{where}\quad n=\arg\underset{j}{\operatorname*{min}}\,\|\mathbf{q}-\mathbf{z}_{j}\|_{2}.}\end{array}
+$$  
+
+Due to the non-differentiable VQ operation, the codebook is learned by straight-through gradient estimation (Hinton et al., 2012; Bengio et al., 2013).2  
+
+Additionally, when using VQ one introduces two extra loss terms. First, we include a latent loss term, which encourages alignment of codebook vectors to the inputs of VQ, and therefore ensures that the straight-through gradient estimation is reasonable. Second, we include a commitment loss term, which encourages inputs to “commit” to particular code vectors, and heuristically helps with convergence behavior and preventing cycling. These are implemented via the “stop-gradient” (sg) or “detach” operators of deep learning frameworks, which block gradients from flowing into its argument. The additional VQ loss terms can be concretely written as:  
+
+$$
+\mathbf{commitment}\,\mathbf{loss}\colon\beta\Vert\mathbf{sg}(\mathbf{z})-\mathbf{q}\Vert_{2}^{2},
+$$  
+
+where $\beta$ is a hyperparameter weighting the commitment loss.  
+
+
+
+\section{3 VQ-TR MODEL  }
+
+
+We motivate our methodology for incorporating VQ within the transformer architecture with an observation about the effect of approximations of the query vector on self-attention. Recall that in self-attention, the incoming vector sequences are mapped to query, key, and value vectors, denoted by $\mathbf{q}_{t},\mathbf{k}_{t}$ , and $\mathbf{v}_{t}$ , respectively, for each time step $t$ . Let us denote the approximation of the query vector $\mathbf{q}_{t}$ by $\hat{\mathbf{q}}_{t}$ . The attention weight for sequence index $t$ attending on some other index $u$ is  
+
+$$
+w_{t u}=\frac{\exp({\bf q}_{t}^{T}{\bf k}_{u})}{\sum_{j}\exp({\bf q}_{t}^{T}{\bf k}_{j})},
+$$  
+
+and the output representation are correspondingly given by, $\begin{array}{r}{\mathbf{o}_{t}=\sum_{u}w_{t u}\mathbf{v}_{u}}\end{array}$ (Phuong and Hutter, 2022)
+
+Theorem 3.1. If $\begin{array}{r}{\left\langle\sum_{u}\left|\mathbf{q}_{t}^{T}\mathbf{k}_{u}-\hat{\mathbf{q}}_{t}^{T}\mathbf{k}_{u}\right|\right.\leq\delta_{t}}\end{array}$ for sufficiently small $\delta_{t}>0_{:}$ , then the attention weights with respect to the approximation $\hat{\mathbf{q}}_{t}$ , which we denote $\hat{w}_{t u}$ , satisfy the bounds  
+
+$$
+w_{t u}(1-2\delta_{t})\leq\hat{w}_{t u}\leq w_{t u}(1+2\delta_{t})\qquad\forall u\,.
+$$  
+
+Further, as a result $\lvert\mathbf{o}_{t}-\hat{\mathbf{o}}_{t}\rvert\leq2\delta_{t}\mathbf{o}_{t}$ holds element-wise for the output representation.  
+
+The above result bounds the error in the output representation from the self-attention module due to errors in the query vector. It is clear from this result that we can ensure that the outputs have a good approximation on average for all queries if we pick codebook vectors $\{\mathbf{z}_{1},\ldots,\mathbf{z}_{J}\}$ such that $\begin{array}{r}{{\mathbb{E}}_{{\bf q}\in\mathcal{Q},{\bf k}\in\mathcal{K}}[\operatorname*{min}_{j=1}^{J}\left|{\bf q}^{T}{\bf k}-{\bf z}_{j}^{T}{\bf k}\right|]}\end{array}$ is small, where the expectation operator $\mathbb{E}_{\mathbf{q}\in\mathcal{Q},\mathbf{k}\in\mathcal{K}}$ corresponds to averaging over all queries and keys. Now, by Jensen’s inequality, the squared of this average is bounded by $\bar{\mathbb{E}}_{{\bf q}\in\mathcal{Q},{\bf\bar{k}}\in\mathcal{K}}[\operatorname*{min}_{j=1}^{J}({\bf\dot{q}}_{\cdot}^{T}{\bf k}-{\bf\Phi}{\bf z}_{j}^{T}{\bf k})]^{2}\,=\,\mathbb{E}_{{\bf q}\in\mathcal{Q},{\bf k}\in\mathcal{K}}\operatorname*{min}_{j=1}^{J}({\bf q}^{\bar{T}}{\bf k}-{\bf\Phi}{\bf z}_{j}^{T}{\bf k})^{2}$ . We can minimize a looser upper bound for these output representation errors by minimizing this mean squared error. This has a nice interpretation, since  
+
+$$
+\begin{array}{r l r}{\lefteqn{\mathbb{E}_{{\bf q}\in\boldsymbol{Q},{\bf k}\in\mathcal{K}}\Big[\operatorname*{min}_{j=1}^{J}({\bf q}^{T}{\bf k}-{\bf z}_{j}^{T}{\bf k})^{2}\Big]=\mathbb{E}_{{\bf q}\in\boldsymbol{Q},{\bf k}\in\mathcal{K}}\Big[\operatorname*{min}_{j=1}^{J}({\bf q}-{\bf z}_{j})^{T}{\bf k}{\bf k}^{T}({\bf q}-{\bf z}_{j})\Big]}}\\ &{}&{=\mathbb{E}_{{\bf q}\in\mathcal{Q}}\Big[\operatorname*{min}_{j=1}^{J}({\bf q}-{\bf z}_{j})^{T}\Big(\Sigma_{k}+\mu_{k}\mu_{k}^{T}\Big)({\bf q}-{\bf z}_{j})\Big]\,,}\end{array}
+$$  
+
+which is a $K$ -means objective weighted by $\pmb{\Sigma}_{k}+\pmb{\mu}_{k}\pmb{\mu}_{k}^{T}$ , where $\pmb{\mu}_{k}$ and $\Sigma_{k}$ denote the mean and covariance of the key vectors respectively. Thus, given that the optimal codes of VQ are known to be the $K$ -means clusters of the input representations (van den Oord et al., 2017), this suggests VQ is a natural approach to ensure small output representation errors.  
+
+Given this motivation, in the $\mathrm{VQ-TR}$ model, we modify the Transformer’s encoder architecture by first mapping the $C$ incoming query vectors, denoted by $Q\in\mathbb{R}^{C\times F}$ , through a VQ module:  
+
+$$
+Z_{0},\mathrm{indices:}=\mathrm{VQ}(Q)\,.
+$$  
+
+where $Z_{0}\,\in\,\mathbb{R}^{J\times F}$ denotes the latent codebook vectors, and indices $\in\{1,\{\dots,J\}^{C}$ denotes the sequences of $C$ indices from these $J$ codebook vectors. Next, we apply cross-attention of the keys/values with the latent codebook vectors to obtain $Z_{1}\in\mathbb{R}^{J\times F}$ :  
+
+$$
+Z_{1}:=\mathrm{CrossAttn}(Z_{0},K,V)\,,
+$$  
+
+and then process them further via self-attention $L$ times: $Z_{l+1}:=\mathrm{SelfAttn}(Z_{l})$ . Finally, we return the original number of sequences by gathering the resulting latent vectors via the indices with respect to the quantization of the input vectors $Q$ :  
+
+$$
+\mathbb{R}^{C\times F}\ni Z:=\mathrm{Gather}(Z_{L+1},\mathrm{indices}).
+$$  
+
+This total construction can be repeated $N$ times, allowing for $N$ encoding layers. Since there are only $J$ latent vectors, and in practice $J\ll C$ , we obtain an architecture with memory and compute complexity of $O(C J)$ and $\bar{O}(L J^{2})$ from the cross-attention and latent self-attention respectively (Jaegle et al., 2021; Hawthorne et al., 2022) per number of encoding layers $N$ . This is in contrast to memory and compute complexity of $O(L C^{\bar{2}})$ for each attention layer with the vanilla Transformer.  
+
+One downside to this architecture is that we lose the ability to impose a causal structure. Fortunately, we can resolve this problem by first using the above non-causal encoder to learn discrete representations of large context windows, and then using a causal Transformer decoder to predict future time series values, which is a standard kind of approach for time series forecasting. Unfortunately, given $M$ decoding layers, the decoder will then scale as $O(M P^{2})$ . On the other hand, in practice (including in our experiments) we often have $P\ll C$ , which mitigates this downside, so we can still train and perform inference efficiently conditioned on long histories. We present a schematic of the $\mathrm{VQ-TR}$ model in Figure 1 for both the training (Section 3.1) and inference (Section 3.2) scenarios.  
+
+
+
+\section{3.1 TRAINING  }
+
+
+Given a set $\mathcal{D}_{\mathrm{train}}$ of $D\geq1$ time series, we construct batches of inputs by randomly sampling univariate time series $\{x_{1:T^{i}}^{i}\}$ , with $i\in\mathbb{Z}^{+}$ such that $i\leq D$ , then selecting random $t\in\mathbb{Z}^{+}$ with $t\leq T^{i}-C-P$ , which gives us context window $\{x_{t:t+C}^{i}\}$ and corresponding prediction window $\{x_{t+C+1:t+C+P}^{i}\}$ , for fixed context and prediction window lengths $C$ and $P$ respectively.  
+
+![](images/dbfe018a4b0d51551a310aac15ed575bc351adeb2d086923522b569507561759.jpg)  
+Figure 1: $\mathrm{V}\mathrm{Q}\mathrm{-TR}$ model with $N$ encoding vector-quantized cross-attention blocks and $M$ causal decoding transformer blocks. During training (left), the encoder takes a sequence of length $C-1$ and the decoder outputs the estimated distribution parameters (of some chosen distribution class) for the next $P$ time steps, which are learned via the negative log-likelihood together with the $N$ Vector Quantizer losses. During inference (right), we pass the last $C-1$ length context window to the encoder and the very last value in it to the decoder, which allows us to sample the next time step which we autoregressively pass back to the decoder to obtain predictions for the desired horizon.  
+
+For each batch step, we jointly minimize the negative log-likelihood of the predicted distribution with respect to the ground truth predictions, along with the $N$ latent and commitment losses from the VQ module placed on each encoder layer. This is in contrast to the practice of first learning the discrete latent representations in an unsupervised fashion and then using these latent representations for downstream tasks, as in, for example, the DALL $\cdot\,\mathrm{E}$ model (Ramesh et al., 2021).  
+
+Note, $\mathrm{VQ-TR}$ models each time series independently, using a shared model. For example, if we have a multivariate dataset with $K$ time series, the future values for each of those time series are assumed to depend only on past values of that specific time series, and not on any values of the other $K-1$ time series. However, we do use a common model for the relationship between past and future values, which is applied independently to each of the $K$ time series. Also, note that this approach is used for all models in our comparison, not just $\mathrm{V}\mathrm{Q}\mathrm{-}\mathrm{TR}$ .  
+
+
+
+\section{3.2 INFERENCE  }
+
+
+During inference, we feed the final $C$ -sized window (minus the last entry) for each time series $i\in\mathcal{D}_{\mathrm{train}}$ to the encoder, and the last entry to the decoder, to obtain estimated distribution parameters of the next entry. We then sample one or more values from this distribution, and feed these back to the decoder. Repeating this $P$ times gives us sample trajectories over the prediction window.  
+
+Note that we only need to run the encoder once to make predictions, and we can repeat tensors in the batch dimension to obtain multiple samples from the distribution in parallel. If a point forecast is required, we can evaluate the empirical mean or median at each time point of the prediction.  
+
+
+
+\section{3.3 COVARIATES  }
+
+
+Positional encoding allows the Transformer to encode positional information of sequences, which is necessary since Attention is a permutation equivariant layer. In the time series setting, we can naturally create positional encodings like Rotary Positional Embedding (RoPE) (Su et al., 2021) via date-time covariates. More specifically, for a particular time point $t$ , depending on the frequency of the time series $i$ , we can create hour-of-day, day-of-week, week-of-month, etc. features as a vector, which we denote by ${\bf c}_{t}^{i}$ . Due to their deterministic temporal nature, we can build these covariates for all future time points we wish to forecast. Additional covariates can be constructed by embedding the identity $i$ of each time series in a dataset via Embedding layers, as done in the DeepAR method. All the methods considered receive the same covariates as input.  
+
+
+
+\section{3.4 SCALING  }
+
+
+Time series data can be of an arbitrary numerical magnitude within a dataset. This is unlike vision, NLP, or even audio modalities. So to train a shared model over potentially very different time series, we calculate the mean value of the signal within its context window and divide the signal with it to normalize (Salinas et al., 2019b). The scale value of the context is kept as a covariate. More importantly, the model’s output distribution is transformed back to the original scale, using the scale value from training or inference, to respectively calculate log probabilities or sample next points. If the scaling cannot be done in the output distribution’s parameter space, one can do it in the data space after sampling. All deep learning-based methods in Section 4 incorporate this heuristic.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+
+
+\section{4.1 DATASETS  }
+
+
+We use the following open datasets: Exchange (Lai et al., 2018), Solar (Lai et al., 2018), Elecricity3, Traffi $\mathrm{{c}^{4}}$ , Taxi5, and Wikipedia6 preprocessed exactly as in Salinas et al. (2019a). These datasets cover a range of time series domains, including finance, weather, energy, logistics, and page views. We also note that we do not normalize scales for the traffic dataset, as its values are bounded.  
+
+
+
+\section{4.2 EVALUATION CRITERIA  }
+
+
+We evaluate all methods both in terms of their performance for point forecasting and also for probabilistic forecasting. As emphasized in Section 1, this is to the best of our knowledge the first extensive, systematic comparison of transformer-based methods for probabilistic forecasting.  
+
+Point forecasting metrics: We use the normalized root mean square error (NRMSE), the mean absolute scaled error (MASE) (Hyndman and Koehler, 2006), and the symmetric mean absolute percentage error (sMAPE) (Makridakis, 1993). For these metrics, we use the sample median except for NRMSE, where we report sample mean.  
+
+Probabilistic forecasting metrics: We follow the recommendations of the M4 competition (Makridakis et al., 2020) for evaluating probabilistic forecasting. Specifically, we report the mean scale interval score $(\mathrm{MSIS}^{7})$ ) (Gneiting and Raftery, 2007) for the $95\%$ prediction interval, the $50^{\mathrm{th}}$ and $90^{\mathrm{th}}$ quantile percentile loss (QL50 and QL90, respectively), as well as the continuous ranked probability score (CRPS) (Gneiting and Raftery, 2007; Matheson and Winkler, 1976). The CRPS is a proper scoring rule that measures the compatibility of a predicted cumulative distribution function (CDF) $F$  
+
+with the ground-truth samples $x$ as  
+
+$$
+\mathrm{CRPS}(F,x)=\int_{\mathbb{R}}(F(y)-\mathbb{I}\{x\leq y\})^{2}\,\mathrm{d}y,
+$$  
+
+where $\mathbb{I}\{x\leq y\}$ is 1 if $x\leq y$ and 0 otherwise. We approximate the CDF via empirical samples at each time point, and the final metric is averaged over all context windows of the time series, and time steps within the corresponding prediction window.  
+
+
+
+\section{4.3 BASELINES  }
+
+
+Transformer-based Baselines: TFT (Lim et al., 2021b), Informer (Zhou et al., 2021), Autoformer (Wu et al., 2021), ETSformer (Woo et al., 2022), Hopfield (Ramsauer et al., 2021), Longformer (Beltagy et al., 2020), Reformer (Kitaev et al., 2020), Linformer (Wang et al., 2020), Nystromformer (Xiong et al., 2021), Performer (Choromanski et al., 2021) and PatchTST (Nie et al., 2023).  
+
+Other Deep-learning Baselines: DeepAR (Salinas et al., 2019b), MQCNN (Wen et al., 2017), SQF-RNN (Gasthaus et al., 2019), IQN-RNN (Gouttes et al., 2021), VQ-AR (Rasul et al., 2022), and D-Linear (Zeng et al., 2023).  
+
+Classical Baseline: ETS (Hyndman and Khandakar, 2008).  
+
+4.4 RESULTS  
+
+We detail the results of our extensive experiments for $\mathrm{V}\mathrm{Q}\mathrm{-TR}$ and the transformer-based baselines in Table 1.8 As can be seen in Table 1, VQ-TR, performs competitively compared to all other transformer-based methods. In particular, it performs best on almost all metrics on 5 out of 6 datasets. Moreover, the performance is close to the best-performing method in cases where it does not outperform. We hypothesize that this competitive performance is in part due to the vector quantization module, which may function as a noisy channel similar to a VAE, regularizing the learning naturally and improving test performance. Indeed, we provide some positive evidence for this in our vector quantization ablation.  
+
+Next, we investigate the computational efficiency of the $\mathrm{VQ-TR}$ transformer architecture. In Figure 2 we compare the training time and corresponding memory usage for $\mathrm{V}\mathrm{Q}\mathrm{-TR}$ with the vanilla Transformer, as well as several Transformers that were specifically designed for computational efficiency, on the Traffic dataset. We find that, when using a fairly moderate codebook size $J=25$ ), $\mathrm{V}\mathrm{Q}\mathrm{-}\mathrm{TR}$ strongly outperforms all other methods in terms of memory efficiency, and is also competitive in terms of runtime. We also note that although the training time of $\mathrm{VQ-TR}$ was not the lowest in this comparison using a fixed batch size, in practice its substantially lower memory usage may allow for using larger batch sizes, and therefore faster training.  
+
+ There, we study the impact of the codebook size $(J)$ on forecasting quality. Our main findings are that: (1) forecasting quality in general is not very sensitive to $J$ ; and (2) using small $J$ can have a positive regularizing effect, which is especially evident for Traffic and Taxi where the underlying signal is very simple and low dimensional.  
+
+![](images/59c027d2d5b220b1b1e43ccc451cf8166ee5a317527c0e1723fdef1cd16f30fe.jpg)  
+
+Table 1: Forecasting metrics (lower is better) using Vanilla Transformer and other Transformer based models with Student-T $(-\t)$ , Negative Binomial $(-\mathrm{nb})$ or IQN (-iqn) emission heads, on the open datasets. The best (smallest) metrics are highlighted in bold. Note that the numbers for TFT are different than those in Lim et al. (2021a), since our Traffic dataset is different than theirs.  
+
+![](images/cb34f2a2d5da7b5cf8698cee452ffcb07feeb5e6a6c5a9ab618257a84ad06fe4.jpg)  
+Figure 2: Training time and memory usage of VQ-TR compared with other transformer-based models on Traffic dataset, using comparable hyperparameters for all methods. For each method, the left bar displays training time (in seconds), and the right bar displays the memory usage (in gigabytes). In the case of VQ-TR we show results with a moderate codebook size $J=25$ ) as well as a very large codebook size $J=245$ ).  
+
+
+
+\section{5 RELATED WORK  }
+
+
+Our method decouples the input sequence from the computation of the attention block by utilizing a discrete set of latent. This strategy of reducing the computational cost is similar to the Perceiver (Hawthorne et al., 2022), Set Transformer (Lee et al., 2019), Luna (Ma et al., 2021), and Compressive Transformer (Rae et al., 2020) models. Perceiver-AR is the closest related method. However, it is a decoder-only architecture. Thus, to produce multiple samples for the probabilistic forecasting use case at inference time, Perceiver-AR requires running cross-attention over a large context window for $P$ times, causing both memory and computation bottlenecks. The use of VQ in sequential generative modeling has been explored in Audio/Speech settings (Dhariwal et al., 2020; Zeghidour et al., 2021; Baevski et al., 2020) where typically a VQ-VAE is trained on the data, and then a generative model is trained on these learned latent representations separately.  
+
+An alternative approach to improving the scalability of Transformer architectures to longer context windows is to better optimize the underlying computation, for example, using flash attention (Dao et al., 2022). Our work is orthogonal to such approaches, as it focuses on the scalability of the transformer architecture itself, and can further benefit from more optimized computation.  
+
+Using VQ for time-series forecasting problems has been explored by the $\mathrm{VQ-AR}$ (Rasul et al., 2022) model. This model works by applying an RNN to the raw time series input, and then applying VQ. This means, if one were to simply replace the RNN in $\mathrm{VQ-AR}$ with Transformer blocks, the transformer would be applied to non-quantized vectors, and we would still have quadratic-in-sequencelength scaling. In contrast, our work incorporates VQ within the transformer architecture as part of the encoder attention blocks. In Rabanser et al. (2020) the authors investigate the performance of forecasting models when they discretize the input into discrete bins whereas here we explicitly learn discrete representations.  
+
+
+
+\section{6 SUMMARY AND DISCUSSION  }
+
+
+We have presented $\mathrm{V}\mathrm{Q}\mathrm{-TR}$ , a novel transformer architecture that scales linearly with the encoder sequence size, and demonstrated its empirical value for probabilistic time series forecasting in a systematic comparison with other transformer-based methods for this task. We find that VQ-TR performs very competitively in terms of both forecasting performance and computation / memory usage, due to the dual efficiency and regularization beneftis of vector quantization. Furthermore, our extensive comparison of the performance of state-of-the-art transformer methods for probabilistic time series forecasting can serve as a needed and previously missing benchmark within the literature. For future work, we would like to investigate the performance of VQ-TR for NLP, Audio, or Vision based problems.  
+
+
+
+

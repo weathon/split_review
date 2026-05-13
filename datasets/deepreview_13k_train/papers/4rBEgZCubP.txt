@@ -1,0 +1,383 @@
+\title{Learning 3D Particle-based Simulators from RGB-D Videos}
+
+\begin{abstract}
+Realistic simulation is critical for applications ranging from robotics to animation.
+Traditional analytic simulators sometimes struggle to capture sufficiently realistic simulation which can lead to problems including the well known ``sim-to-real'' gap in robotics.
+Learned simulators have emerged as an alternative for better capturing real-world physical dynamics, but require access to privileged ground truth physics information such as precise object geometry or particle tracks.
+Here we propose a method for learning simulators directly from observations. 
+Visual Particle Dynamics (VPD) jointly learns a latent particle-based representation of 3D scenes, a neural simulator of the latent particle dynamics, and a renderer that can produce images of the scene from arbitrary views.
+VPD learns end to end from posed RGB-D videos and does not require access to privileged information.
+Unlike existing 2D video prediction models, we show that VPD's 3D structure enables scene editing and long-term predictions.
+These results pave the way for downstream applications ranging from video editing to robotic planning.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Physical simulation underpins a diverse set of fields including robotics, mechanical engineering, game development, and animation.
+In each of these fields realistic simulation is critical and substantial effort goes into developing simulation engines that are specialized for the unique requirements and types of physical dynamics of that field \citep{todorov2012mujoco,openfoam,coumans2019}.
+Obtaining sufficiently realistic simulators for a particular scene requires additional work \citep{shao2021accurately}, including the tuning of simulation assets like object models and textures, as well as the physical properties that will lead to realistic dynamics \citep{qiao2022neuphysics}.
+Even with significant effort and tuning, it is often impossible to perfectly capture the physics of any particular real-world scene, as sub-scale variations in surfaces and textures can have significant impacts on how objects behave.
+
+Over the last few years, learned simulators have emerged as an alternative to carefully hand-crafted analytic simulators. They can be trained to correct the outputs of analytic solvers \citep{kloss2022combining, Ajay2018}, or trained to mimic analytic physics directly, but at significantly faster speeds \citep{pfaff2021learning,dima2021accelerated}. Learned simulators can capture many different dynamics, ranging from liquids and soft materials to articulated and rigid body dynamics \citep{Li2018,allen2023learning}. When researchers can provide state-based information for a real-world dynamic scene (the positions and poses of objects over time), learned simulators can mimic real-world physics better than careful tuning with analytic simulators \citep{allen2022graph}.
+
+However, learned simulators still require access to privileged ``ground truth" physics information to be trained. The vast majority require near-perfect state estimation -- the poses, exact 3D shapes, and positions -- of all objects, at all time points, in a scene. Recent attempts to relax these requirements still require access to other forms of supervised information such as object segmentation masks \citep{driess2022learning, riochet2020intphys, shi2022robocraft}. 
+
+While there exist many video prediction models that do not require such privileged information \citep{finn2016unsupervised,clark2019adversarial,ho2022imagen}, these models are not simulators. Unlike simulators, 2D video models do not operate in 3D, do not generally support rendering a dynamic scene from a new viewpoint, and do not allow 3D editing of scenes to produce new simulation outcomes. Recent works such as NeRF-dy \cite{li2021nerfdy} which represent scenes as single latent vectors can support rendering from new viewpoints, but cannot support 3D editing. Similarly, recent advances in 3D neural representations for dynamic scenes \citep{li2023dynibar, du2021neural}, can provide beautiful reconstructions of single videos without access to privileged physics information, but these models are not simulators either. Once trained, they represent a recording of a specific scene, and cannot be applied to a new scene without re-training.
+
+Here we ask whether we can learn \emph{simulators} from multi-view RGB-D observations alone. Our model, Visual Particle Dynamics (VPD), jointly learns a latent particle-based 3D scene representation, a predictive model represented as a hierarchical graph neural network on that representation, and a conditional renderer that can produce new images from arbitrary views. It is trained end to end on multi-view RGB-D data without object masks or 2D segmentation models, and has the following desirable properties which we demonstrate:
+\begin{itemize}
+    \item VPD supports 3D state editing. Its explicit 3D representation can be edited, simulated, and re-rendered from novel views.
+    \item VPD supports multi-material simulation. We demonstrate results for multi-body rigid dynamics and soft-body interactions.
+    \item VPD outperforms 2D video models in data efficiency. With as few as 16 trajectories, VPD can learn a simulator for a simple dynamic scene.
+\end{itemize}
+
+To our knowledge, Visual Particle Dynamics is the first fully learned simulator that supports these crucical properties, and which does not require access to any privileged supervised information for training or inference.
+\begin{figure}[t]
+\centering
+\includegraphics[width=1.0\textwidth]{figures/latent_physics_v1_3.pdf}
+\label{fig:overview}
+\end{figure}
+
+
+
+
+
+
+
+
+
+\section{Related work}
+
+Given the importance of realistic simulation across a wide variety of subject areas (robotics, graphics, engineering), there are a variety of techniques for learning predictive models with different capabilities, each with different assumptions about input data requirements. We outline the general classes of learned predictive models below, and summarize the capabilities of key related works in Table~\ref{tab:prior}. 
+
+\paragraph{Learned simulators} 
+Learned simulators aim at replacing analytic simulators with a learned function approximator. This means they are generally trained on \emph{state} information from a ground truth solver, and often cannot be used directly on visual input data. Depending on the application, state can be represented as point clouds \citep{Li2018,sanchez2020learning,mrowca2018flexible}, meshes \citep{pfaff2021learning,allen2023learning}, or as SDFs \citep{le2023differentiable}. Learned function approximators such as graph neural networks (GNNs) \citep{battaglia2018relational}, continuous convolutional kernels \citep{ummenhofer2019lagrangian}, or MLPs \citep{li2021nerfdy}, can then be used to model the evolution of the state through time. Our work goes beyond these approaches by never requiring access to the states directly, instead learning from RGB-D videos.
+
+\paragraph{Bridging perception and simulators} 
+Several approaches rely on these learned simulators as a dynamics backbone, but attempt to learn perceptual front-ends that can provide point clouds or mesh information from video. 
+Some attempts rely on \emph{pre-trained} dynamics models which were trained with ground truth state information \citep{guan2022neurofluid, wu2017learning}, and learn a mapping from perception to 3D state. 
+Learning this mapping for a general setting is a very hard task, and hence most methods only work for simple scenes, and/or require object segmentation masks to seperate the scene into components \citep{janner2019reasoning,driess2022learning,shi2022robocraft,xue20233dintphys}. 
+In contrast, VPD removes the requirement of either having a pre-trained simulator or object segmentation masks and trains end to end with pixel supervision.
+NeRF-dy \citep{li2021nerfdy} reverses this formula, first learning a vector representation of scenes, then learning a dynamics model on this representation.
+We describe NeRF-dy in \Cref{sec:baselines} and compare to its choices in \Cref{sec:results}.
+
+\paragraph{Analytic simulators and system identification}
+Another strategy for constructing a simulation of a real-world scene involves modeling the scene in an analytic simulator, then fitting the physics coefficients of this simulator to match the real data as well as possible.
+Differentiable simulators \citep{hu2019difftaichi,Freeman2021BraxA,Du2021DiffPDDP,Howell2022DojoAD,warp2022} enable the use of gradients in system identification; however, this typically requires ground-truth object positions.
+Recent work \citep{qiao2022neuphysics,le2023differentiable} combines implicit 3D object representations with a differentiable simulator to support capturing object models from the real world.
+Methods for inferring articulated models from video \citep{Heiden2022InferringAR} similarly depend on pre-trained instance segmentation models and have only been applied to simple settings.
+Overall these methods can give good results, but are limited by the types of physics representable in the analytic simulator and the complexities of state estimation.
+\paragraph{Unsupervised video models} Video models do not require object segmentation masks or pre-trained dynamics models. Some methods directly model dynamics in pixel-space \citep{finn2016unsupervised,clark2019adversarial,ho2022imagen}, but often fail to model dynamics reliably. Other models attempt to discover object representations \citep{du2020unsupervised}, or more recently, simultaneously learn object representations and dynamics \citep{watters2017visual,qi2020learning,wu2023slotformer}. Given the breadth of existing video data, large-scale learning with transformers and diffusion models has shown promise for enabling long-horizon planning in robotics \citep{hafner2023dreamerv3,du2302learning}. However, these learned models are not simulators. Those that learn dynamics do not generally operate in 3D and they do not support compositional editing. VPD possesses both of these qualities while still learning from fully unsupervised data.
+
+\paragraph{Video radiance fields} A class of methods extend NeRF \citep{mildenhall2020nerf} with a temporal axis, to encode individual videos in neural network weights \citep{li2020neural,du2021neural,li2023dynibar}. Unlike the methods above however, these approaches encode a single video trajectory and do not support predicting videos, or generalizing across different videos. In contrast, VPD supports both.
+\setlength{\tabcolsep}{3pt}
+\begin{table}[t]
+    \begin{small}
+    \begin{tabular}{l|cc|c|cccc}
+        \toprule Method & \multicolumn{2}{c|}{Supervision} & \multicolumn{1}{c}{Sensors} & \multicolumn{4}{|c}{Capabilities} \\ 
+        \midrule
+        & No states & No masks & Type & Editable & Rendering & 3D & Prediction \\
+        \midrule
+        NeRF-dy \citep{li2021nerfdy} & \cmark & \cmark & multi RGB & \xmark & \cmark & \xmark & \cmark  \\
+        3D-IntPhys \citep{xue20233dintphys} & \xmark & \xmark & multi RGB & \cmark & \cmark & \cmark & \cmark  \\
+        RoboCraft \citep{shi2022robocraft} & \cmark & \xmark & multi RGB-D & \cmark & \xmark & \cmark & \cmark \\
+        SlotFormer \citep{wu2023slotformer} & \cmark & \cmark & RGB & \xmark & \cmark & \xmark & \cmark \\
+        \cite{driess2022learning} & \cmark & \xmark & multi RGB & \cmark & \cmark & \cmark & \cmark \\
+        Dynibar \citep{li2023dynibar} & \cmark & \cmark & multi RGB & \xmark & \cmark & \cmark & \xmark \\
+        Ours & \cmark & \cmark & multi RGB-D & \cmark & \cmark & \cmark & \cmark\\
+        \bottomrule
+    \end{tabular}
+    \label{tab:prior}
+    \end{small}
+\end{table}
+
+
+\section{Visual Particle Dynamics}
+
+A Visual Particle Dynamics (VPD) model consists of three components: (1) an \emph{encoder} which maps a set of one or more RGB-D images into a 3D latent particle representation; (2) a \emph{dynamics model} which predicts the evolution of these particles through time; and (3) a \emph{renderer} which decodes the particles into an image. See Figure~\ref{fig:overview} for an overview of our method.
+All of these components are trained together and end to end via supervision on a multi-step pixel-wise loss.
+\subsection{Encoder}
+The encoder converts a set of RGB-D images, corresponding to a short video captured from one or more views, into a set of latent particles for each time-step. 
+First, we unproject each pixel into 3D space using each camera's transformation matrix and per-pixel depth value to obtain the 3D location $\mX_{ij}$. 
+Next, we process the input RGB image using a UNet \citep{ronneberger2015unet} to produce per-pixel latent features $\mZ_{ij}$. 
+Latent features and 3D locations for each pixel $(i, j)$ are combined to form a latent particle $(\mX_{ij}, \mZ_{ij})$ as shown in \Cref{fig:encoder}.
+
+This procedure produces a set of particles $\pall$ for each image.
+If more than one camera is present, we can simply merge all the particle sets from each time-step.
+The UNet shares its weights between all cameras and does not receive camera or depth inputs.
+In our experiments, we filter the set of particles to those that lie within a designated area containing the objects of interest, which we refer to as the workspace (see \autoref{tab:vpd_hypers}).
+We then subsample the particles uniformly at random to limit the memory footprint of the network.
+See \Cref{sec:points_scaling} for results with varying numbers of particles.
+
+\begin{figure}[t]
+\centering
+
+\begin{subfigure}[b]{0.35\textwidth}
+\centering
+\includegraphics[height=2cm,bb=0 0 389 204]{figures/encode.pdf}
+\caption{Encode}
+\end{subfigure}
+\begin{subfigure}[b]{0.2\textwidth}
+\centering
+\includegraphics[height=2cm,bb=0 0 231 204]{figures/process.pdf}
+\caption{Process}
+\end{subfigure}
+\begin{subfigure}[b]{0.35\textwidth}
+\centering
+\includegraphics[height=2cm,bb=0 0 389 204]{figures/decode.pdf}
+\caption{Decode}
+\end{subfigure}
+
+\end{figure}
+\subsection{Dynamics model}
+The dynamics model predicts the set of particles at time $t+1$ given the current and previous particles using a GNN, i.e. $\pnext = D(\pprev, \pcur)$, and is applied recursively to make multi-step particle rollouts.
+Prior work on GNN-based dynamics models generally assumes ground truth correspondences between points at different time-steps \citep{sanchez2020learning}, and use those to compute e.g. velocities. 
+However, correspondences are not available when working with video, and can be unreliable or unspecified (e.g. objects moving out of frame). 
+We therefore decide to entirely side-step finding correspondences. 
+Instead, we connect latent points of different time-steps in a graph based on spatial proximity and rely on the network to learn to correctly propagate information.
+
+\paragraph{Graph construction}
+The most straightforward approach to construct such a graph would be to connect each point in $\pcur$ to all points in $\pprev$ within a certain spatial distance.
+However, working with videos requires a large number of points ($\sim 2^{14}$) to accurately represent the textures and geometry of a complex scene. Directly connecting these point clouds would generate an excessive number of graph edges. 
+Instead, we employ a hierarchical 2-layer GNN \citep{Cangea2018TowardsSH,Ying2018HierarchicalGR,Lee2019SelfAttentionGP} to sparsify connections. 
+Inspired by \cite{hu2020randlanet,fortunato2022multiscale}, we construct a sparse layer of ``abstract nodes'' $\pabstract$, whose locations are chosen uniformly at random from $\pcur$, thereby roughly matching its point density. Each point in $\pprev, \pcur$ connects to up to two nearest abstract nodes within a small spatial radius $r_s$, enabling the abstract nodes to convey information over time. 
+The abstract nodes are connected with bidirectional edges to other abstract nodes within a larger radius $r^a_s$, as well as reciprocal edges to each connected node in $\pcur$ (\Cref{fig:abstract}). 
+Communicating through this sparse set of abstract nodes significantly reduces the number of necessary edges. Details on graph construction and parameters can be found in \Cref{sec:implementation_details}.
+
+\paragraph{Message passing}
+To compute the dynamics update, we use multigraph message passing with an Encode-Process-Decode architecture \citep{pfaff2021learning}. The multigraph $\mathcal{G}$ is defined by the particle nodes $\node{\pprev},\node{\pcur}$, abstract nodes $\node{\pabstract}$, and edges $\edge{\pprev}{\pabstract},\edge{\pcur}{\pabstract},\edge{\pabstract}{\pabstract},\edge{\pabstract}{\pcur}$ between these node sets. We encode latent features $\mZ$ from the image encoder into the nodes $\node{\pall}$, and the distance vector between node positions into the edges. Nodes $\node{\pabstract}$ do not receive any initial features.
+
+Next, we perform one round of message passing on all nodes $\node{\pall}$ to abstract nodes $\node{\pabstract}$, followed by $K=10$ message passing steps between abstract nodes, and one message passing step back from $\node{\pabstract}$ to $\node{\pcur}$. 
+Finally, the features in $\node{\pcur}$ are decoded to the difference vectors $(\Delta \hat{\vx}, \Delta \hat{\vz})$ in position, and latent state. 
+These vectors are added to the particle state $\pcur$ to form the estimate $\pnext$ used for rendering.
+Since the renderer operates on relative locations, the predicted $\Delta \hat{\vx}$ directly corresponds to objects moving in the predicted video, while changes in $\Delta \hat{\vz}$ allows for predicting appearance changes caused by motion, such as a shadow moving beneath a flying object.
+
+Algorithm \ref{pseudo} in \Cref{sec:implementation_details} details the entire message passing algorithm. Following \cite{pfaff2021learning}, we use MLPs for encoding, decoding and message passing, with separate sets of weights for different edge and node types. See \Cref{sec:implementation_details} for all architectural details.
+
+\subsection{Renderer}
+We use a neural renderer similar to \citep{xu2022pointnerf, guan2022neurofluid} to render a particle set into an image from a desired camera.
+Following the volumetric rendering formulation from \cite{mildenhall2020nerf}, rendering a given ray consists of querying a neural network at a set of locations along the ray to get an RGB color and a density, then compositing these values along the ray to get the color of a single pixel.
+The renderer $R$ predicts a color $\hat{\vc}$ given a particle set and the origin and direction $(\vo, \vd)$ of this ray: $\hat{\vc} = R(\mathcal{P}, (\vo, \vd))$.
+For VPD, and similar to \cite{xu2022pointnerf}, the input features at each query location are computed from a set of $k$ approximate nearest neighbor particles (see \Cref{sec:pointfeats}).
+
+Let $p_x$ be the location of a particle and $p_z$ be its latent features, with $\mathcal{N}(\vx)$ the set of particles close to a location $\vx$.
+We compute the features at a location $\vx$ using a kernel $k$ to be $f_k(\vx) = \sum_{p^i \in \mathcal{N}(\vx)} k(\vx, p^i_x) \cdot p^i_z$.
+For VPD, we use a set of concentric annular kernels defined by a radius $r$ and a bandwidth $b$:
+\begin{align}
+    k_{r, b}(\vx, \vx') &= \exp \left\{ - \frac{ \left( \norm{\vx' - \vx}_2 - r\right)^2}{b^2} \right\}
+    \label{eq:kernel}
+\end{align}
+This kernel weights points more highly when they are at a distance $r$ from the query location.
+We concatenate the computed features using a set of $m$ kernels $k_1 \ldots k_m$, giving the final feature vector 
+\begin{align}
+    f(\vx) = f_{k_1}(\vx) \oplus \ldots \oplus f_{k_m}(\vx)
+\end{align}
+where $\oplus$ denotes concatenation.
+The network then predicts the color $\hat{\vc}$ and density $\hat{\sigma}$ at a location $\vx$ and a viewing direction $\vu$ as $(\hat{\vc}, \hat{\sigma}) = \textrm{MLP}(f(\vx) \oplus \gamma(\vu))$, where $\gamma$ is NeRF positional encoding.
+\subsection{Training}
+
+Given a multi-view RGB-D video, we train VPD by encoding the first two timesteps into particle sets $(\mathcal{P}^{1}, \mathcal{P}^{2})$.
+We then recursively apply the dynamics model $\pnext = D(\pprev, \pcur)$ to generate particle sets $(\hat{\mathcal{P}}^{3}, \ldots, \hat{\mathcal{P}}^{2 + T})$ for some prediction length $T$.
+The complete loss is the expected squared pixel reconstruction error over timesteps $t = 3...2+T$ and ray indices $i$ across all cameras:
+\begin{align}\label{eq:render}
+    \mathcal{L}_\text{VPD} = \frac{1}{T} \sum_{t=3}^{2 + T} \Expect_{i} \Big[ R \left(\hat{\mathcal{P}}^t, (\vo_{i}^t, \vd_{i}^t) \right) - \vc_{i}^t \Big] ^2
+\end{align}
+In our training we use 256 sampled rays per timestep to evaluate this expectation.
+
+
+\section{Experimental setup}
+
+
+We test VPD on three datasets which stress different simulator capabilities.
+The MuJoCo block dataset \citep{todorov2012mujoco} is visually simple but tests a model's ability to accurately represent crisp rigid contact \citep{allen2022graph}.
+The Kubric datasets \citep{greff2022kubric} encompass a range of visual complexities, from Platonic solids to densely-textured scans of real objects and backgrounds, and tests a model's ability to represent multi-object interactions in varied visual environments.
+The deformable dataset evaluates a model's ability to represent the dynamics of non-rigid objects with a large number of degrees of freedom.
+In all cases, the models are provided with RGB-D views from multiple cameras.
+For evaluation, 16 trajectories are chosen at random and held out from each dataset, and we report each model's PSNR (with SSIM in \Cref{sec:ssim}) \citep{wang2004image}. The PSNR (Peak Signal to Noise Ratio) correlates with the mean squared error between the ground truth and predicted images, and therefore captures both deviations in the dynamics and effects of blurring.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.99\textwidth,trim={0 0 0 0},clip,bb=0 0 2227 1380]{figures/figure_3_rollout_new2.pdf}
+\label{fig:rollouts}
+\end{figure}
+
+\textbf{MuJoCo block} contains 256 trajectories, each with 64 time-steps, of a single block being tossed onto a plane with randomized initial height, velocity, and angular velocity. RGB-D images are generated from 16 $128\times128$ pixel resolution cameras arranged in a half sphere.
+
+\textbf{Kubric Movi-A/B/C} \citep{greff2022kubric} includes trajectories of 3 objects (from a set of 3, 10, and 1033 different possible shapes, respectively) being thrown onto a grey/coloured/textured floor with randomized initial velocities and sizes. 
+We re-generate the dataset to include camera information. RGB-D images are rendered from 9 cameras of $128\times128$ pixel resolution arranged in a half dome.
+350 trajectories are used for training, each with 96 time-steps.
+
+\textbf{Deformables} is a dataset of deformable objects, simulated and rendered using Blender \citep{blender} softbody physics. 
+In Deformable Block a cube is dropped onto the floor with randomized initial position and orientation.
+In Deformable Multi, one object out of a set of five (Cube, Cylinder, Donut, Icosahedron, Rubber duck) is dropped onto the floor with randomized initial position and orientation.
+In Deformable Collision two objects are dropped and collide onto the floor. 
+All datasets consist of 256 training trajectories with 80 time steps. 
+The scene is rendered using four cameras of $128\times128$ pixel resolution arranged in a half dome.
+
+\subsection{Baselines} \label{sec:baselines}
+We provide two major baseline comparisons to highlight the importance of VPD's compositional 3D architecture: SlotFormer and NeRF-dy. 
+SlotFormer is a compositional 2D object-based video model \citep{wu2023slotformer} and NeRF-dy is a non-compositional 3D prediction model \citep{li2021nerfdy}.
+
+\textbf{SlotFormer} is a 2D video prediction model that operates over a slot-based latent representation \citep{wu2023slotformer}. 
+It uses a slot-based image encoder, SAVI \citep{kipf2021conditional}, and models how these slots change over time with a transformer. 
+In contrast to VPD, SlotFormer operates on single-view RGB camera data.
+To provide SlotFormer with the same data that VPD has access to, we treat each view in the multi-view dataset as a separate trajectory for training.
+Matching prior work, we condition SlotFormer on 6 history time-steps rather than 2 used for our model.
+\textbf{NeRF-dy} \citep{li2021nerfdy} is the most similar work to ours, with its ability to use multi-view video data and perform novel view synthesis. 
+Since neither the code nor the datasets from that work are available, we perform ablations to VPD that roughly capture the key architectural differences between VPD and NeRF-dy as highlighted below:
+\begin{enumerate}
+\item \textbf{NeRF-dy uses a \emph{global} latent vector per scene}. Instead of a 3D latent representation, NeRF-dy uses a single latent vector $\vz$ to represent the scene. This affects both the dynamics model (implemented as an MLP on $\vz$ instead of a GNN) and the renderer (globally conditioned on $\vz$). We implement this as an ablation, ``Global'', which uses the image and camera orientation encoder from \cite{li2021nerfdy}, and models the dynamics using an MLP rather than a GNN. As in VPD, the encoder and the dynamics are trained jointly.
+\item \textbf{NeRF-dy uses \emph{sequential} training of the encoder/decoder followed by dynamics}. NeRF-dy pretrains the encoder and decoder then holds their weights fixed and trains the dynamics model with supervision in the latent space. We use this training scheme in conjunction with the VPD particle-based architecture to investigate the significance of end-to-end training. This ablation is referred to as ``Sequential''.
+\end{enumerate}
+More implementation details for these baselines are available in \Cref{sec:slotformer_details} and \Cref{sec:ablation_implementation}.
+
+
+
+\section{Results}
+
+
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\textwidth,bb=0 0 3254 1087]{figures/rollout_degradation_all.png}
+\label{fig:pred}
+\end{figure}
+
+Across the MuJoCo, Kubric, and Deformables datasets, we find that VPD produces detailed, physically consistent long-horizon rollouts (Section \ref{sec:prediction}), supports compositional 3D editing and re-rendering of novel scenes (Section \ref{sec:editability}), and can learn simple dynamics with as few as 16 trajectories and 1-2 RGB-D cameras (Section \ref{sec:efficiency}).
+All metrics and visuals are from the held-out set.
+Videos of rollouts for each model, as well as generalization experiments, can be found on the \href{https://sites.google.
+
+\subsection{Video prediction quality}
+\label{sec:prediction}
+
+\begin{table}[b]
+    \centering
+    \begin{small}
+    \begin{tabular}{l|c|ccc|ccc}
+        \toprule Method & \multicolumn{1}{c|}{MuJoCo} & \multicolumn{3}{|c}{Deformable} & \multicolumn{3}{|c}{Kubric}  \\ 
+        \midrule
+        & Block & Block & Multi & Collision & MOVi-A & MOVi-B & MOVi-C \\
+        \midrule
+        SlotFormer & 32.541 & 28.673 & 27.545 & 23.145 & \textbf{30.934} & \textbf{28.810} & 22.367 \\
+        Global & 29.601 & 26.969 & 26.636 & 22.394 & 27.604 & 26.201 & 20.068 \\
+        Sequential & 25.858 & 30.854 & 31.256 & 27.911 & 28.613 & 25.921 & 21.854\\
+        VPD (Ours) & 	\textbf{33.076} & \textbf{31.520} & \textbf{31.221} & \textbf{28.725} & 29.014 & 27.194 & \textbf{23.142} \\
+        \bottomrule
+    \end{tabular}
+    \end{small}
+    \caption{PSNR scores averaged over 32 rollouts steps (higher is better).}
+    \label{tab:psnr}
+\end{table}
+
+We first evaluate each learned simulator's ability to generate long horizon video predictions.
+After training, each model is rolled out to generate predicted videos for 32 timesteps into the future, which are compared to the ground truth future frames.
+VPD performs consistently well across all three datasets (\Cref{tab:psnr}) which is to be expected given the high quality qualitative rollouts (\Cref{fig:rollouts}).
+The Global representation struggles to capture multi-object scenes, which can be seen in its lower scores on the Kubric datasets and Deformable Collision. 
+SlotFormer performs well on the solid-colored rigid bodies it was designed for (MOVi-A/B), but struggles to represent detailed textures (MOVi-C) or deformable objects when they come into contact with the floor.
+VPD is able to successfully represent both multi-object collision dynamics and object shape changes.
+Kubric's scenes pose a challenge for VPD because they have a huge diameter (100 meters); we find VPD predictions can be improved slightly by bounding the input scene (\Cref{sec:kubric_highcams}).
+
+VPD's prediction quality also degrades gracefully as a function of rollout step (\Cref{fig:pred}).
+VPD is able to represent significantly more detail than SlotFormer, as evinced by its high PSNR scores in the first few rollout steps. 
+Meanwhile VPD's predictions at 32 steps are often better than the Global ablation at any step, and it remains much more accurate than the Sequential ablation at 32 steps.
+
+These results highlight the ability of VPD's latent 3D particle representation to precisely capture a scene, and the locality bias of the VPD dynamics to preserve scene coherence over time.
+
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=1.0\textwidth]{figures/edit_squishy.pdf}
+\label{fig:edit_squishy}
+\end{figure}
+
+\subsection{Editability and novel view generalization}
+\label{sec:editability}
+\paragraph{3D point cloud editing}
+When using a learned simulator with a 3D scene representation, it is possible to directly interrogate and even edit the scene before simulating.
+This capability could support many applications such as adding 3D assets to a 3D scene estimated from a set of sensors, tweaking object shapes, deleting objects, or moving them around.
+
+We demonstrate 3D editing and simulation with VPD on a held-out test trajectory from the deformables collision dataset.
+\Cref{fig:edit_squishy} visualizes the latent particles by applying the VPD renderer to each particle location to get a color, then plotting the colored points in 3D.
+In the original trajectory, a deformable pink ball and red cylinder fall onto a floor, squishing together into a pink and red lump. In order to edit the points corresponding to each object (ball, cylinder, floor) we roughly cluster the particles by position on the first frame.
+If we delete the pink ball from the inferred 3D scene, the cylinder still falls onto the ground. However, the top of the cylinder is no longer squished, since the pink ball did not come into contact with it.
+If we delete the cylinder, the pink ball falls all the way to the floor without deforming.
+If we delete the floor, the two objects both fall at a steady rate and neither one deforms since they both fall at the same acceleration.
+In all cases, this is roughly the behavior we would expect from the true underlying physics.
+
+\paragraph{Novel viewpoint generalization} 
+Operating on 3D latent point clouds also allows us to render high-quality images from novel viewpoints, even when training on very few camera poses. 
+In Figure \ref{fig:rollouts}, we show that VPD trained on the ``Deformable Collision'' dataset with only 4 fixed camera angles has no trouble generalizing to novel camera positions in a ring around the object. 
+This sparse setting is challenging for e.g. NeRF-based methods which have weaker spatial biases, and impossible for 2D predictive models like SlotFormer.
+
+
+\subsection{Data sparsity}
+\label{sec:efficiency}
+In many applications, it might not be possible to obtain large numbers of RGB-D images of a particular scene at each timestep.
+We therefore investigate how well VPD performs when it has access to a very small number of trajectories or input views, and when it must use depth information predicted by a monocular depth estimation network.
+
+\textbf{Different numbers of trajectories} \hspace{1.1em} We generate datasets for MuJoCo Block of sizes 16, 32, 64, 128 and 256 trajectories, and evaluate each model's video prediction quality on the same set of 16 held-out trajectories (\Cref{fig:efficiency}).
+Surprisingly, we find that even with as few as 16 distinct training trajectories, VPD achieves a PSNR of 31.22 which is only 1.85 points less than VPD trained with 256 distinct trajectories, and comparable in performance to baseline models trained with 4-8$\times$ as much data.
+This suggests that VPD could be suitable for applications in robotics where collecting many trajectories can be expensive.
+
+\textbf{Different numbers of views} \hspace{1.1em} We train models on MuJoCo Block with between 1 and 9 input views.
+With fewer views, VPD will have significant uncertainty about the object's shape (for example, it cannot see the back of the block). 
+Despite this challenge, even with a single RGB-D camera VPD performs comparably to when it has 9 RGB-D cameras. 
+While we are unsure of how VPD performs so well with a single RGB-D camera, one hypothesis is that since VPD's dynamics are trained end to end with the encoder, the dynamics could compensate for the particles that are missing due to self-occlusion.
+Future work will investigate whether these results apply to more complex datasets, and whether separately training the dynamics and the encoder erases this effect.
+
+\textbf{Predicted depth} \hspace{1.1em}
+While we use VPD with ground-truth depth information throughout our experiments, we provide a preliminary experiment using estimated depth instead.
+We extend the encoder's UNet with an additional output feature plane and interpret its value as pixel-wise metric depth.
+This depth prediction is supervised with an MSE loss on the training images and receives gradients via end to end training.
+On the MuJoCo Block dataset, VPD makes predictions of reasonable quality even with imprecise depth estimates (\Cref{fig:pred_depth}).
+
+
+\begin{figure}[t]
+\centering
+
+\begin{subfigure}[b]{0.25\textwidth}
+\centering
+\includegraphics[width=\textwidth,bb=0 0 510 512]{figures/psnr_vs_trajectories.png}
+\caption{Dataset sizes}
+\label{fig:efficiency}
+\end{subfigure}
+\hspace{0.5cm}
+\begin{subfigure}[b]{0.25\textwidth}
+\centering
+\includegraphics[width=\textwidth,bb=0 0 540 456]{figures/psnr_views_rollout.png}
+\caption{Input views}
+\label{fig:input_views}
+\end{subfigure}
+\hspace{0.5cm}
+\begin{subfigure}[b]{0.25\textwidth}
+\centering
+\includegraphics[width=\textwidth,bb=0 0 544 504]{figures/psnr_rollout_pred_vs_gt_depth.png}
+\caption{Estimated depth}
+\label{fig:pred_depth}
+\end{subfigure}
+\caption{Video prediction results with various changes to the MuJoCo dataset that ablate different aspects of the input data.
+\textbf{(a)} VPD works effectively across a range of dataset sizes, whereas baselines require more data to achieve good results. 
+\textbf{(b)} VPD can learn as well conditioned on one RGB-D camera as on 9 RGB-D cameras. 
+\textbf{(c)} VPD is able to sustain reasonably high prediction quality even with an imprecise learned depth model (blue line).
+\end{figure}
+
+
+
+
+\section{Discussion}
+
+Visual Particle Dynamics (VPD) represents a first step towards simulators that can be learned from videos alone. By jointly learning a 3D latent point cloud representation, dynamics model for evolving that point cloud through time, and renderer for mapping back to image space, VPD does not require state information in the form of object masks, object geometry, or object translations and rotations. Since VPD encodes particles in 3D, it also supports novel view generation and video editing through direct point cloud interactions. To our knowledge, this combination of 3D interpretability, editability, and simulation is unique among predictive models learned without physical supervision.
+
+However, VPD also has limitations. As evidenced in our videos and figures, VPD struggles with blurring over very long rollouts, a common challenge in video prediction. It also requires access to RGB-D videos, which are not always available. While we showed a proof-of-concept for VPD working with predicted depth instead of ground-truth depth, this still requires a depth signal for training which may not always be available. Future work will need to investigate the potential application of pre-trained depth models with fine-tuning to a particular scenario.
+
+We believe that VPD's ability to learn simulators directly from sensors has several important implications. For robotics, VPD could be used to learn a simulator directly from real data without requiring a separate state estimation step. This could then support much more effective sim-to-real transfer by learning a simulator that better reflects the robot's environment. For graphics, VPD could support new applications such as realistic video editing for systems where it is difficult to hand-code simulators. Overall, VPD opens new directions for how simulators can be learned and deployed when no analytic simulator is available. 
+
+
+
+
+
+

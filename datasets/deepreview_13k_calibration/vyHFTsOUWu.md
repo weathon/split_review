@@ -1,8 +1,8 @@
 # Instruction Following without Instruction Tuning
 
 - Decision: Reject
-- Avg Score: 3.00
-- Scores: 3, 5, 1, 0, 6
+- Avg Score: 6.00
+- Scores: 3, 5, 10, 6
 
 ## Abstract
 Instruction tuning commonly means finetuning a language model on instruction-response pairs.

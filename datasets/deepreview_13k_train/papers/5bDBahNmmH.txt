@@ -1,0 +1,259 @@
+\title{Cohesion: Coherence-Based Diffusion for Long-Range Dynamics Forecasting}
+
+\begin{abstract}
+We recast existing works on probabilistic dynamics forecasting through a unified framework connecting turbulence and diffusion principles: Cohesion. Specifically, we relate the coherent part of nonlinear dynamics as a conditioning prior in a denoising process, which can be efficiently estimated using reduced-order models. This fast generation of long prior sequences allows us to reframe forecasting as trajectory planning, a common task in RL. This reformulation is beneficial because we can perform a single conditional denoising pass for an entire sequence, rather than autoregressively over long lead time, gaining orders-of-magnitude speedups with little performance loss. Nonetheless, Cohesion supports flexibility through temporal composition that allows iterations to be performed over smaller subsequences, with autoregressive being a special case. To ensure temporal consistency within and between subsequences, we incorporate a model-free, small receptive window via temporal convolution that leverages large NFEs during denoising. Finally, we perform our guidance in a classifier-free manner to handle a broad range of conditioning scenarios for zero-shot forecasts. Our experiments demonstrate that Cohesion outperforms state-of-the-art probabilistic emulators for chaotic systems over long lead time, including in Kolmogorov Flow and Shallow Water Equation. Its low spectral divergence highlights Cohesion's ability to resolve multi-scale physical structures, even in partially-observed cases, and are thus essential for long-range, high-fidelity, physically-realistic emulation.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Solving Partial Differential Equations (PDEs) with probabilistic emulators has gained significant momentum relative to their deterministic counterpart Gao et al. (2024a); R¨uhling Cachay et al. (2024); Gilpin (2024) due to their ability to generate ensemble forecasts that facilitate uncertainty quantification useful for decision making processes Bhatnagar et al. (2019); Brandstetter et al. (2022a;b); Guo et al. (2016); Li et al. (2020); Lu et al. (2021). In particular, diffusion, a powerful class of probabilistic model, has been widely used as emulators in an autoregressive manner to produce sequential forecasts over a target lead time, $\Delta t$ Li et al. (2024); Price et al. (2023); Lippe et al. (2024). However, this probabilistic forecasting approach poses several challenges. First, the conditional denoising process to estimate $p(\mathbf{u}\mid\mathbf{c})$ , where $\mathbf{u}\in\mathbb{R}^{n_{\mathbf{u}}}$ and $\mathbf{c}\in\mathbb{R}^{n_{\mathbf{u}}}$ are the state and conditioning vector respectively, is generally tied to the condition-generating process. This is primarily due to the use of $(\mathbf{u},\mathbf{c})$ data pair during training, such that whenever the likelihood $p(\mathbf{c}\mid\mathbf{u})$ changes, one would require further fine-tuning and re-training Stock et al. (2024); Zhao et al. (2024); Gong et al. (2024); Gao et al. (2024a); Chen et al. (2023); Gao et al. (2024b); Hua et al. (2024); Li et al. (2024). Second, a diffusion-based autoregressive approach is extremely costly as one needs to perform multiple denoising passes such that the number of function evaluation (NFEs) grows proportionately with the number of discretization of $\Delta t$ Price et al. (2023); Lippe et al. (2024). This is a problem for many long-range forecasting applications, in weather and climate domains for example, where previous gains in inference speed achieved by deterministic data-driven emulators are quickly offset.  
+
+As such, we introduce Cohesion (Figure 1), a diffusion-based forecasting framework that incorporates turbulence and reinforcement learning (RL) principles to achieve accurate and stable long rollouts with orders-of-magnitude inference speedups. First, by leveraging the idea of low-dimensional, coherent flow in turbulence as a conditioning factor within diffusion, we can efficiently generate long sequences of prior c using a reduced-order model (ROM), such as deep Koopman operator Lusch et al. (2018); Wang et al. (2022). ROMs are especially useful in representing dynamics evolving on low-dimensional attractors dominated by persistent coherent structures Stachenfeld et al. (2021); Solera-Rico et al. (2024), and they demonstrate greater stability over long rollouts compared to high-dimensional models Nathaniel et al. (2024). As a result, we are able to reframe forecasting as trajectory planning – a common task in RL Janner et al. (2022) – which allows us to perform conditional denoising for the entire sequence in a single pass. Nonetheless, Cohesion supports flexibility through temporal composition that allows denoising passes to be performed iteratively over smaller subsequences, with autoregressive being a special case when the subsequence length $R$ is less than the discretization magnitude over $\Delta t$ : i.e., $R<T:=N_{\Delta t}$ . Furthermore, we implement a small receptive window to ensure local agreement at each denoising step, and multi-scale global consistency over the composition of many NFEs without any specialized temporal models Gao et al. (2024a); Ru¨hling Cachay et al. (2024). Finally, we perform our guidance in a classifier-free manner to handle a broad range of conditioning scenarios for zero-shot forecasts.  
+
+![](images/4fff233ff7bee783fe80b561fd3479eff7d4db239ffa7523e5b23eea2b7e9483.jpg)  
+Figure 1: Overview of our Cohesion framework, which reframes forecasting as a trajectory planning task, enabled by a lightweight reduced-order model (ROM) capable of generating conditioning priors efficiently. Key features include: (a) classifier-free guidance for handling broad range of conditioning for zero-shot forecasting; (b) temporal composition through iterative denoising passes which stitch subsequences together; and the use of (c) model-free, small receptive window to ensure local agreement and multi-scale global consistency by exploiting large NFEs during denoising.  
+
+In order to evaluate Cohesion, we study challenging chaotic spatiotempral dynamics including the Kolmogorov Flow and Shallow Water Equation. For instance, we show that Cohesion is more stable and accurate over state-of-the-art models, including the probabilistic formulation of Spherical Fourier Neural Operator (SFNO) Bonev et al. (2023). Cohesion also has minimal spectral divergences, highlighting its ability to resolve multi-scale structures even in partially-observed cases.  
+
+
+
+\section{2 UNIFIED TURBULENCE-DIFFUSION FRAMEWORK  }
+
+
+We begin by recasting existing works on diffusion-based dynamics forecasting through the lens of turbulence theory. Specifically, we consider time-dependent, discrete dynamics across one temporal dimension $t\in[0,T]\subset\mathbb{N}$ and multiple spatial coordinates $\mathbf{x}=[x_{1},x_{2},\ldots,x_{m}]\in{\mathcal{X}}$ (Equation 1).  
+
+$$
+\mathbf{u}(\mathbf{x},t+1)=\mathcal{F}[\mathbf{u}(\mathbf{x},t)]
+$$  
+
+where $\mathcal{F}:\mathbb{R}^{n_{\mathbf{u}}}\rightarrow\mathbb{R}^{n_{\mathbf{u}}}$ is a differentiable flow map. In general, turbulent dynamics are characterized by a state vector $\mathbf{u}(\mathbf{x},t)$ , and can be represented by a combination of coherent flow and fluctuating component through a mapping operator $\mathcal{H}\,:\,\mathbb{R}^{n_{\mathbf{u}}}\,\rightarrow\,\mathbb{R}^{n_{\mathbf{u}}}$ ; the linear composition represents the popular Reynolds technique:  
+
+$$
+\mathbf{u}(\mathbf{x},t)=\mathcal{H}[\underbrace{\bar{\mathbf{u}}(\mathbf{x},t)}_{\mathrm{coherent\:flow}},\underbrace{\mathbf{u}^{\prime}(\mathbf{x},t)}_{\mathrm{fluctuating\:flow}}]=\underbrace{\bar{\mathbf{u}}(\mathbf{x},t)+\mathbf{u}^{\prime}(\mathbf{x},t)}_{\mathrm{Reynolds\:decomposition}}
+$$  
+
+Several previous studies have implicitly leveraged the decomposition principle in diffusion-based dynamics forecasting. Here, we make the connection explicit, starting with the coherent flow. Many works, for instance, approximate a variation of $\bar{\mathbf{u}}(\mathbf{x},t)$ using a deterministic mapping and employ this as a conditioning factor to directly estimate the posteriors over (1) the full solution $p_{\phi}\big(\mathbf{u}_{K}^{\phantom{\dagger}}\mid\bar{\mathbf{u}}(\mathbf{x},t)\big)$ , or indirectly through (2) the residual $p_{\phi}(\mathbf{u}_{K}^{\bar{\prime}}\mid\bar{\mathbf{u}}(\mathbf{x},t))$ . Throughout, the subscripts $\{0,k,K\}\ \in\mathcal{K}$ refer to the perturbed state vector at the initial, intermediate, and final denoising step, respectively. We explain each of these strategies in turn.  
+
+Coherent flow as conditioning prior. In order to obtain a conditioning prior within a diffusion framework for forecasting purposes, one often estimates an initial guess for the current timestep using a parameterized model $D:\,\mathbb{R}^{n_{\mathbf{u}}}\,\rightarrow\,\mathbb{R}^{n_{\mathbf{u}}}$ , such as $\bar{\mathbf{u}}(\mathbf{x},t)\,\bar{=\,}\,\mathcal{D}[\mathbf{u}(\mathbf{x},t-1)]$ Stock et al. (2024); Zhao et al. (2024); Price et al. (2023); Gong et al. (2024); Gao et al. (2024a); Chen et al. (2023). Others, meanwhile, utilize either a filtered approximation or known system statistics as $\bar{\mathbf{u}}(\mathbf{x},t)$ Qu et al. (2024); Gao et al. (2024b); Hua et al. (2024); Li et al. (2024). In this work, we define deterministic prior to follow closely with the principle of coherent flow in turbulence theory (more in Section 3.2).  
+
+Full posterior estimation. Estimating the full posterior solution involves constructing the operator $\mathcal{H}$ based on prior approximation and posterior estimation through an iterative denoising process. This is followed by marginalization over intermediate states, as shown in Equation 3.  
+
+$$
+\begin{array}{r}{p_{\phi}(\mathbf{u}_{0:K}\mid\bar{\mathbf{u}}(\mathbf{x},t)):=p(\mathbf{u}_{0})\prod_{k=1}^{K}p_{\phi}(\mathbf{u}_{k}\mid\mathbf{u}_{k-1},\bar{\mathbf{u}}(\mathbf{x},t))}\\ {\mathbf{u}(\mathbf{x},t)\sim p_{\phi}(\mathbf{u}_{K}\mid\bar{\mathbf{u}}(\mathbf{x},t))=\displaystyle\int p_{\phi}(\mathbf{u}_{0:K}\mid\bar{\mathbf{u}}(\mathbf{x},t))d\mathbf{u}_{0:K-1}}\end{array}
+$$  
+
+Thereafter, probability evaluation is performed, for example by taking an expectation over the conditional posterior at diffusion step $K$ Stock et al. (2024); Zhao et al. (2024); Price et al. (2023); Gong et al. (2024); Gao et al. (2024a); Chen et al. (2023); Qu et al. (2024); Gao et al. (2024b); Hua et al. (2024); Li et al. (2024).  
+
+Residual posterior estimation. Several works seek to instead estimate the correction term $\mathbf{u}^{\prime}(\mathbf{x},t)$ , rather than the full solution $\mathbf{u}(\mathbf{x},t)$ Lippe et al. (2024); Srivastava et al. (2023); Yu et al. (2023); Mardani et al. (2024). Here, $\mathcal{H}$ is first composed of prior approximation. The posterior estimation step in Equation 3 is then followed, but replacing $\mathbf{u}(\mathbf{x},t)\;\leftarrow\;\mathbf{u}^{\prime}(\mathbf{x},t)$ . After marginalization of intermediate states and posterior evaluation, the residual (or stochastic refinement) is added to the prior, akin to Reynolds linear decomposition (Equation 2 RHS), and shown in Equation 4.  
+
+$$
+\mathbf{u}(\mathbf{x},t)\approx\underbrace{\bar{\mathbf{u}}(\mathbf{x},t)}_{\mathrm{deterministic~prior}}+\underbrace{\mathbf{u}^{\prime}(\mathbf{x},t)}_{\mathrm{stochastic~refinement}};\quad\mathbf{u}^{\prime}(\mathbf{x},t)\sim p_{\phi}(\mathbf{u}_{K}^{\prime}\mid\bar{\mathbf{u}}(\mathbf{x},t))
+$$  
+
+For both approaches, in addition to the different ways for prior approximation, variations exist in terms of how sampling is performed and how post-processing is implemented. After demonstrating the conceptual connection between diffusion and turbulence in the form of coherent-prior and stochastic-refinement pairings, we discuss each component of Cohesion next.  
+
+3 COHESION: COHERENCE-BASED DIFFUSION  
+3.1 CLASSIFIER-FREE DIFFUSION FOR ZERO-SHOT FORECASTING  
+
+Forward diffusion. At each time step in the forward diffusion process, a sample $\mathbf{u}\,\sim\,p(\mathbf{u})$ is progressively perturbed through a continuous diffusion timestepping. This process is described by a linear stochastic differential equation (SDE), as shown in Equation 5 Song et al. (2020).  
+
+$$
+d\mathbf{u}_{k}=\underbrace{f(k)\mathbf{u}_{k}\,d k}_{\mathrm{drift~term}}+\underbrace{g(k)\,d w(k)}_{\mathrm{diffusion\,term}}
+$$  
+
+where $f(k)$ and $g(k)\,\in\,\mathbb{R}$ are the drift and diffusion coefficients. Here, $w(k)\,\in\,\mathbb{R}^{n_{\mathbf{u}}}$ represents a Wiener process (standard Brownian motion), and $\mathbf{u}_{k}\,\in\,\mathbb{R}^{n_{\mathbf{u}}}$ denotes the perturbed sample at diffusion step $k\in[0,K=1]\subset\mathbb{R}$ . We use cosine noise scheduler in variance-preserving (VP) SDE Nichol & Dhariwal (2021); Chen (2023).  
+
+Reverse denoising. The reverse denoising process is represented by a reverse SDE as defined in Equation 6 Song et al. (2020), where the score function is approximated with a learnable score network, $s_{\theta}(\mathbf{u}_{k},k)$ . The objective function would be to minimize a continuous weighted combination of Fisher divergences between $s_{\theta}(\mathbf{u}_{k},k)$ and $\nabla_{\mathbf{u}_{k}}\log p(\mathbf{u}_{k})$ through score matching Vincent (2011); Song et al. (2020).  
+
+$$
+d\mathbf{u}_{k}=\underbrace{[f(k)\mathbf{u}_{k}}_{\mathrm{drift~term}}-g(k)^{2}\underbrace{\nabla_{\mathbf{u}_{k}}\log p(\mathbf{u}_{k})}_{\mathrm{score~function}}]d k+\underbrace{g(k)d w(k)}_{\mathrm{diffusion~term}}
+$$  
+
+However, the perturbed state distribution $p({\mathbf{u}}_{k})$ is data-dependent and unscalable. As such, we reformulate the objective function by replacing $\nabla_{\mathbf{u}_{k}}\log p(\mathbf{u}_{k})$ with $\nabla_{\mathbf{u}_{k}}\log p(\mathbf{u}_{k}\mid\mathbf{u})$ where the analytical form of the perturbation kernel is accessible Vincent (2011). In order to improve the stability of the objective, especially closer to the start of the denoising step $(k\ \to\ 0)$ ), we apply a reparameterization trick which replaces $s_{\theta}({\bf u}_{k},k)\;=\;-\epsilon_{\theta}({\bf u}_{k},k)/\sigma\bar{(k)}$ , where $\Sigma\ =\ \sigma^{2}$ as in Equation 7 Zhang & Chen (2022).  
+
+$$
+\operatorname*{min}_{\theta}\mathbb{E}_{p(\mathbf{u}),p(k),p(\epsilon)\sim\mathcal{N}(0,\mathbf{I})}\left[\left||\epsilon_{\theta}(\mu(k)\mathbf{u}+\sigma(k)\epsilon,k)-\epsilon)||_{2}^{2}\right]
+$$  
+
+Following standard convention, we denote $\epsilon_{\theta}(\mathbf{u}_{k},k)$ with $s_{\theta}(\mathbf{u}_{k},k)$ for cleaner notation.  
+
+Zero-shot conditional sampling. The case we have discussed so far is the unconditional sampling process as we try to sample $\mathbf{u}\sim\j_{P}(\mathbf{u}_{K})$ . In order to condition the generative process with $\mathbf{c}:=$ $\bar{\mathbf{u}}(\mathbf{x},t)$ , we seek to sample from $\mathbf{u}\sim p(\mathbf{u}_{K}\mid\mathbf{c})$ . This can be done by modifying the score as in Equation 6 with $\nabla_{\mathbf{u}_{k}}\log p(\mathbf{u}_{k}\mid\mathbf{c})$ and plugging it back to the reverse SDE process.  
+
+As noted earlier, however, one would need fine-tuning or re-training whenever the observation process $p(\mathbf{c}\mid\mathbf{u})$ changes. Nonetheless, several works have attempted to approximate the conditional score with just a single pre-trained network, bypassing the need for expensive re-training Song et al. (2020); Chung et al. (2022). First, using Bayes rule, we expand the conditional score as:  
+
+$$
+\begin{array}{r}{\nabla_{\mathbf{u}_{k}}\log p(\mathbf{u}_{k}\mid\mathbf{c})=\underbrace{\nabla_{\mathbf{u}_{k}}\log p(\mathbf{u}_{k})}_{\mathrm{unconditional~score}}+\underbrace{\nabla_{\mathbf{u}_{k}}\log p(\mathbf{c}\mid\mathbf{u}_{k})}_{\mathrm{log-likelihood~function}}}\end{array}
+$$  
+
+Since the first term on the right-hand side is already approximated by the unconditional score network, the remaining task is to identify the second log-likelihood function. Assuming a Gaussian observation process, the approximation goes as in Equation 9 Chung et al. (2022).  
+
+$$
+p(\mathbf{c}\mid\mathbf{u}_{k})=\int p(\mathbf{c}\mid\mathbf{u})p(\mathbf{u}\mid\mathbf{u}_{k})d\mathbf{u}\approx\mathcal{N}(\mathbf{c}\mid\hat{\mathbf{u}}(\mathbf{u}_{k}),\sigma_{\mathbf{c}}^{2})
+$$  
+
+The mean $\hat{\bf u}({\bf u}_{k})$ can be approximated by the Tweedie’s formula Efron (2011) as in Equation 10.  
+
+$$
+\hat{\mathbf{u}}(\mathbf{u}_{k})\approx\frac{\mathbf{u}_{k}+\sigma^{2}(k)s_{\theta}(\mathbf{u}_{k},k)}{\mu(k)}
+$$  
+
+Following works from Rozet & Louppe (2023); Qu et al. (2024), we improve the numerical stability by injecting information about the noise-signal ratio in the variance term, i.e., $\sigma_{\mathbf{c}}^{2}\!+\!\gamma[\sigma^{2}(k)/\mu^{2}(k)]\dot{\mathbf{I}}$ ,  
+
+![](images/368595e82af3b457781d3e46d8710bc8ceabc3865330e8bc740898f7e729f07d.jpg)  
+(a) Trajectory planning: $R=T$  
+
+![](images/28f52267c875de356c7b67c2d28ef307e54fe893f820b35c024c2850c5b18680.jpg)  
+(b) Autoregressive forecasting: $R=1$  
+
+Figure 2: By temporal composition, we allow for flexible refinement subsequence size $R$ . (a) Trajectory planning approach ( $R=T$ case) where only one pass of conditional denoising is performed. (b) Autoregressive forecasting approach ( $R=1$ case) requires multiple backward passes.  
+
+where $\gamma$ , I are scalar constant and the identity matrix respectively. We now have a classifier-free posterior diffusion sampling where $\nabla\mathbf{u}_{k}\log p(\mathbf{u}_{k}\mid\mathbf{c})$ can be approximated using a single unconditional score network $s_{\theta}(\mathbf{u}_{k},k)$ , allowing for zero-shot forecasts given different conditioning scenarios (see Algorithm 1).  
+
+Predictor-corrector. We implement a predictor-corrector procedure to enhance the quality of our conditional generative process Song et al. (2020). The reverse SDE prediction process is solved using the exponential integrator (EI) discretization scheme as in Equation 11 Zhang & Chen (2022). The correction phase employs several steps of Langevin Monte Carlo (LMC) to adjust for discretization errors, utilizing a sufficiently small Langevin amplitude $\tau\in\mathbb{R}_{+}$ as in Equation 12 Song et al. (2020) (see Algorithm 2).  
+
+$$
+\mathbf{u}_{k+\Delta k}\leftarrow\frac{\mu(k+\Delta k)}{\mu(k)}\mathbf{u}_{k}+\left(\frac{\mu(k+\Delta k)}{\mu(k)}+\frac{\sigma(k+\Delta k)}{\sigma(k)}\right)\Sigma(k)s_{\theta}(\mathbf{u}_{k},k\mid\mathbf{c})
+$$  
+
+$$
+\mathbf{u}_{k}\gets\mathbf{u}_{k}+\tau s_{\theta}(\mathbf{u}_{k},k)+\sqrt{2\tau}\epsilon.
+$$  
+
+3.2 LEARNING COHERENT STRUCTURES  
+
+Koopman theory Koopman & Neumann (1932) demonstrates that nonlinear dynamics can be modeled by an infinite-dimensional linear Koopman operator acting on the space of all possible measurement functions. Leveraging a deep encoder-decoder model, $\{\mathcal{G}_{E},\mathcal{G}_{D}\}\in\mathcal{G}$ Lusch et al. (2018), the Koopman operator $\mathcal{O}:\bar{\mathcal{G}}_{E}(\mathcal{X})\mapsto\bar{\mathcal{G}}_{E}(\mathcal{X})$ acts on a lower $\left(n_{\mathbf{d}}\right)$ -dimensional latent manifold that advances the state vector in time (see Equation 13).  
+
+$$
+\mathcal{O}[\mathcal{G}_{E}(\mathbf{u}(\mathbf{x},t))]:=\mathcal{G}_{E}\circ\mathcal{F}[\mathbf{u}(\mathbf{x},t)]=\mathcal{G}_{E}\circ\mathbf{u}(\mathbf{x},t+1)
+$$  
+
+A conditioning prior is then generated by the decoder as:  
+
+$$
+\bar{\mathbf{u}}(\mathbf{x},t+1):=\mathcal{G}_{D}\circ\mathcal{O}[\mathcal{G}_{E}(\mathbf{u}(\mathbf{x},t))]
+$$  
+
+Composing $\scriptscriptstyle\mathcal{O}$ for $m$ times within Equation 14 results in the generation of an autoregressive sequence of conditioning priors that extends over $m$ steps. We perform joint training by minimizing the 1- step lagged reconstruction loss as in Equation 15. We collectively refer to $\{\mathcal{G}_{E},\mathcal{O},\mathcal{G}_{D}\}\in f_{\psi}$ as the reduced-order model (ROM), where $f_{\psi}:\mathbb{R}^{n_{\mathbf{u}}}\rightarrow\mathbb{R}^{n_{\mathbf{u}}}$ .  
+
+$$
+\operatorname*{min}_{\{\mathcal{G}_{E},\mathcal{O},\mathcal{G}_{D}\}\in f_{\psi}}\mathbb{E}_{p(\mathbf{u})}\left[\|\bar{\mathbf{u}}(\mathbf{x},t+1)-\mathbf{u}(\mathbf{x},t+1)\|_{2}^{2}\right]
+$$  
+
+3.3 FORECASTING AS TRAJECTORY PLANNING  
+
+When a denoising pass is performed iteratively, as evidenced in many autoregressive tasks Price et al. (2023); Srivastava et al. (2023), the computational costs can become prohibitively expensive. By leveraging our proposed compute-efficient ROM $f_{\psi}$ , we can generate a sequence of conditioning priors $\mathcal{C}(\mathbf{x})\in\mathbb{R}^{R\times n_{\mathbf{u}}}$ of length $R$ as:  
+
+$$
+{\mathcal{C}}(\mathbf{x})=\{\mathbf{c}(t_{0}+1):=f_{\psi}^{1}(\mathbf{u}(\mathbf{x},t_{0})),\cdots,\mathbf{c}(t_{0}+R):=f_{\psi}^{R}(\mathbf{u}(\mathbf{x},t_{0}))\}_{1:R}
+$$  
+
+where ${\bf u}({\bf x},t_{0})$ is the initial condition. We then perform conditional denoising given $\mathcal C(\ensuremath{\mathbf{x}})$ to estimate $\mathcal{U}(\mathbf{x})\in\dot{\mathbb{R}}^{R\times\dot{n}_{\mathbf{u}}}$ as in Equation 17.  
+
+$$
+\mathcal{U}(\mathbf{x})=\{\mathbf{u}(\mathbf{x},t_{0}+1),\allowbreak\cdot\cdot\cdot,\mathbf{u}(\mathbf{x},t_{0}+R)\}_{1:R}\sim p_{\phi}(\mathcal{U}_{K}(\mathbf{x})\mid\mathcal{C}(\mathbf{x}))
+$$  
+
+![](images/05d2bf0973a240ddd956b502d695457b7a55bbb91630e15d2c541597d7b38871.jpg)  
+Figure 3: A single denoising step with local receptive window of size $W=3$ . Multiple composition through many NFEs ensures global consistency.  
+
+Figure 2a illustrates an example of trajectory planning $\left(R\ =\ T\right)$ , with a single denoising pass. We also provide flexibility and allow $\mathbf{\bar{\mu}}\mathbf{\bar{\mu}}\in\mathbf{\mu}[1,T]\mathbf{\Sigma}\subset\mathbf{\bar{\mathbb{N}}}$ . In the case where $R\,<$ $T$ , we can simply repeat the denoising passes $r\;=\;1\;:\;\lceil T/\bar{R}\rceil$ times, where $\lceil.\rceil$ is the ceiling operation, and $\mathcal C(\ensuremath{\mathbf{x}})$ is generated using the previous-step forecast as the initial condition whenever $r>1$ . Figure 2b illustrates this case for $R\,=\,1$ , a special case for the classic nextstep autoregressive approach. In order to effectively capture multi-scale temporal information, we also incorporate a model-free local receptive window of size $W\in[1,R]\subset\mathbb{N}.$ . This approach ensures local agreement during each conditional denoising step by training the score model on $W$ -length subsequences (see Algo  
+
+rithm 3). By composing many such steps during inference (see Algorithm 4), local agreement translates to global consistency. Figure 3 shows a single temporal convolution during a single denoising step illustrating a window size of $W\,=\,3$ captures local context. For this work, we use $W\,=\,5$ during the training of and sampling using the score network.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+Baselines. We use probabilistic Spherical Fourier Neural Operator (SFNO) Bonev et al. (2023) as a baseline, building on FNO Li et al. (2020), which leverages Fast Fourier and Spherical Harmonic Transforms (SHT) to model Earth’s fluid dynamics, including Kolmogorov Flow and the Shallow Water Equation used in this study. We use the off-the-shelf SFNO implementation1, widely employed in weather Kurth et al. (2023) and climate emulation Watt-Meyer et al. (2023). To ensure a fair comparison, we scale SFNO’s parameters to match or exceed those of Cohesion and introduce probabilistic modifications. Unless stated, all models are evaluated on five samples/members.  
+
+• Checkpoints: Ensembles through multiple model fitting initialized randomly.   
+• MC-Dropout: Ensembles by enabling inference-time dropouts.   
+• IC Perturbation: Ensembles through the perturbation of initial conditions.  
+
+Metrics. In addition to pixel-based (RMSE, MAE; Equations 19-20) and structure-based (MSSSIM; Equation 25) metrics, we also use physics-based metrics of spectral divergence evaluated at the final forecasting step, $\Delta t$ (Equation 31). The latter is especially crucial to measure how well multi-scale structures are preserved. A smooth model (i.e., low fidelity) can perform better on metrics like RMSE, but poorly on the spectral domain in e.g., capturing high-frequency signal. The notation $\scriptstyle(\mathrm{{R}}=1)$ ) and $({\bf R}{=}{\bf T})$ indicate Cohesion in either autoregressive or trajectory planning mode.  
+
+4.1 KOLMOGOROV FLOW  
+
+Incompressible fluid dynamics are governed by the Navier-Stokes equations:  
+
+$$
+\begin{array}{l}{{\displaystyle{\dot{\bf u}}=-({\bf u}\cdot\nabla){\bf u}+\frac{1}{\mathrm{Re}}{\nabla^{2}}{\bf u}-\frac{1}{\rho}\nabla p+{\bf f}},}\\ {~~0=\nabla\cdot{\bf u}}\end{array}
+$$  
+
+where u is the velocity field, $\ensuremath{\mathrm{Re}}{}=10^{3}$ is the Reynolds number, $\rho=1$ is the fluid density, $p$ is the pressure field, and $\mathbf{f}$ is the external forcing. Following Kochkov et al. (2021) and using $\sin=\cos\pm\mathrm{d}^{2}$ as solvers, we consider a two-dimensional domain $\bar{[0,2\pi]}^{2}$ with periodic boundary conditions and an external forcing f corresponding to Kolmogorov forcing with linear damping.  
+
+Experimental setup. The Navier-Stokes Equations 18 are solved on a $256\!\times\!256$ grid, downsampled to a $64\!\times\!64$ resolution, with an integration time step of $\Delta=0.2$ model time units between successive snapshots of the velocity field u. We generated 8196 independent trajectories – each of length 64 and discarding the first half of warm-ups – subsequently dividing them into $80\!-\!10\!-\!10$ train-valtest trajectory-level split.1.  
+
+Model architectures. The ROM consists of 5 symmetrical convolution layers in the $\mathcal{G}_{E}-\mathcal{O}-\mathcal{G}_{D}$ composition with hidden size of [4, 8, 16, 32, 64] and embedding dimension of $n_{\mathbf{d}}=64$ . The score network is parameterized by modern U-Net with [3, 3, 3] residual blocks He et al. (2016), each consisting of [16, 32, 64] hidden channels. The temporal component of the score network is parameterized by a two-layer dense network with 256 hidden channels and 64-dimensional embedding.  
+
+![](images/386f4ccdce091359db057e5504a5d9da0c7b202a5b4ca48fe5112d1f6c82a85e.jpg)  
+Figure 4: Qualitative result for Kolmogorov Flow where Cohesion is stable and able to capture fine details over long rollouts compared to its probabilistic baselines.  
+
+![](images/e4dc2cb0435b154044eee070ae42eb3de5e1bcb0e53bf78aff948c95cd015154.jpg)  
+Figure 5: Quantitative result for Kolmogorov Flow where Cohesion has the lowest RMSE $\left(\downarrow\right)$ , MAE (↓), and highest MS-SSIM $(\uparrow)$ over long rollouts compared to its probabilistic baselines.  
+
+Results. As illustrated in Figure 4, we demonstrate that Cohesion is able to capture fine details over long rollouts. This is also highlighted by Cohesion’s ability to outperform probabilistic baselines in the pixel-based, structure-based metrics (Figure 5), as well as physics-based scores (Figure 8a).  
+
+
+
+\section{4.2 SHALLOW WATER EQUATION (SWE)  }
+
+
+The SWE system can be described by a set of nonlinear hyperbolic PDEs that governs the dynamics of thin-layer ”shallow” fluid where its depth is negligible relative to the characteristic wavelength. Thus, SWE is ideal to model planetary fluid phenomena Bonev et al. (2018).  
+
+![](images/45e5f1bbc4741ce9420558e05c38116fe252f59b0b7334c76c7644bf461f2bb2.jpg)  
+Figure 6: Qualitative result for SWE where Cohesion is stable and able to capture fine details over long rollouts compared to its probabilistic baselines.  
+
+![](images/2a55eaa352e677fd7c8ec44e8c0fbb2f69e6e5a3e423612523826c3d560749ba.jpg)  
+
+Figure 7: Quantitative result for SWE where Cohesion has the lowest RMSE $\left(\downarrow\right)$ , MAE $\left(\downarrow\right)$ , and highest MS-SSIM $(\uparrow)$ over long rollouts compared to its probabilistic baselines.  
+
+Experimental setup. We generate 2048 trajectories of SWE on a rotating sphere Bonev et al. (2023), with a $80\!-\!10\!-\!10$ train-val-test trajectory-level split. Each trajectory is randomly initialized with an average geopotential height of $\varphi_{a v g}~=~10^{3}~\cdot~g$ and a standard deviation $\bar{\varphi_{a m p}}\,\sim\,{\mathcal{N}}(120,20)\,\cdot\,g$ , on a Galewsky setup to mimic barotropically unstable mid-latitude jet Galewsky et al. (2004). The spatial resolution is $120\times240$ , keeping the last $\Delta t\,=\,N_{\Delta t}\,=\,32$ of vorticity snapshots.2.  
+
+![](images/180311bb7158eecb47c5117cd1984daf4055e41a45d33916d948fc390abc8e84.jpg)  
+
+Model architectures. The ROM consists of 5 symmetrical convolution layers in the $g_{E}-$ $O-\mathcal{G}_{D}$ The score network is setup identically with that in Kolmogorov Flow.  
+
+Figure 8: Cohesion has the lowest spectral divergence (↓) across probabilistic baselines, indicating its ability to capture multi-scale physical structures.  
+
+composition with hidden size of [8, 16, 32, 64, 128] and embedding dimension of $n_{\mathbf{d}}=128$ .  
+
+Results. We first demonstrate that Cohesion is able to capture fine details over long rollouts (Figure 6). This is also highlighted by Cohesion’s ability to outperform probabilistic baselines in the pixelbased, structure-based metrics (Figure 7), as well as physics-based scores (Figure 8b).  
+
+4.3 COHESION AS A PHYSICALLY-CONSISTENT PROBABILISTIC EMULATOR  
+
+We further demonstrate Cohesion’s ability to generate physically-consistent forecasts over long rollouts, even in partially-observed cases. Evaluations are based on Cohesion as trajectory planner.  
+
+![](images/de627a05e6c9168281d83c1a1b71b0231fa933f6575c4c2f459b411ff618aa8a.jpg)  
+
+Figure 9: Cohesion as a refiner: Cohesion improves RMSE (↓), MAE $\left(\downarrow\right)$ , and MS-SSIM (↑) scores over its coherent-only prior forecasts generated sequentially with ROM.  
+
+Cohesion as a refiner. As shown in Figure 9, Cohesion acts as a refiner of prior forecasts generated by ROM. While ROM provide fast approximations of the system’s evolution, they often lack the resolution necessary to capture fine details of the system, particularly in complex chaotic flows. Cohesion enhances these coarse forecasts by applying a diffusion-based refinement process, improving their alignment with high-fidelity simulation.  
+
+![](images/8d0ea4354a3af78b94ac46672c6d34222d8c44c71c021761c8454f674e9f3f37.jpg)  
+Figure 10: Cohesion as a resolver: Cohesion resolves multi-scale physics ubiquitous in chaotic dynamics even after long rollouts $(\mathrm{T}\!=\!\Delta t)$ , by first getting accurate coherent flow i.e., low-frequency signal $\left(\downarrow\emph{k}\right)$ , before correcting for the fluctuating component i.e., high-frequency signal $(\uparrow k)$ . Topmiddle-bottom rows represent initial-middle-final denoising steps.   
+(a) Kolmogorov Flow   
+(b) Shallow Water Equation  
+
+Cohesion as a resolver. As shown in Figure 10 (evaluated at $\mathrm{T}=\Delta t$ ), Cohesion also resolves multiscale physics where it first captures low-frequency signals (low wavenumber, $k$ ), which correspond to the coherent features of the system (e.g., dominant wave pattern). Once the coherent flow is wellrepresented, Cohesion then resolves high-frequency signals (high wavenumber, $k$ ), which relate to the faster-evolving turbulent features (e.g., eddies) that arise from coupled nonlinearity.  
+
+Cohesion is physically grounded. As shown in Figure 11, Cohesion generates high-resolution, realistic physics even in the presence of partially observed conditioning priors. This property is essential for modeling real-world dynamics where priors may be incomplete (e.g., due to sparse representation) or inconsistent (e.g., due to system biases), enabling the framework to handle uncertainty over long unrolls in a physically-grounded manner.  
+
+![](images/62530809010b4e00940931f270243ba3f6e8035c77745b32f23f6b91676a463f.jpg)  
+Figure 11: Cohesion produces physically-consistent and realistic forecasts at long unrolls even in the presence of partially-observed conditioning prior. In this experiment, we apply equally-spaced masking to the coherent dynamics generated by ROM, which is then used as a conditioning prior during the denoising process.   
+(b) Shallow Water Equation  
+
+
+
+\section{5 CONCLUSION  }
+
+
+We introduce Cohesion, a diffusion-based forecasting framework developed with turbulence and RL principles that is both cheap and achieves stable, accurate, and realistic long simulation rollouts. By reframing autoregressive forecasting as trajectory planning, we gain significant speedups (Figure 12) while maintaining performance. This is enabled by reduced-order modeling, temporal composition, and temporal convolution to ensure multi-scale, local-global consistency. Our extensive examination of Cohesion on Kolmogorov Flow and Shallow Water Equation, in terms of improved performance over state-of-the-art probabilistic emulator across metrics presents an important step toward resolving multi-scale physics in an efficient manner, even in partially-observed cases. This approach can extend predictability and improve the fidelity and realism of data-driven emulators for chaotic systems, like weather and climate, leading to actionable insights.  
+
+![](images/76bcb6a06de4574ee177af39f1de866a3846e49ef5c161a7ce74e0cf3bc48116.jpg)  
+Figure 12: Relative inference runtime in $\scriptstyle\mathbf{R}=1$ and $\scriptstyle\mathbf{R}=\mathbf{T}$ settings with identical resource.  
+
+
+

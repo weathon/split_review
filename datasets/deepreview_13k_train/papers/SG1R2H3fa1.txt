@@ -1,0 +1,539 @@
+\title{Revisiting Random Walks for Learning on Graphs}
+
+\begin{abstract}
+    We revisit a simple idea for machine learning on graphs, where a random walk on a graph produces a machine-readable record, and this record is processed by a deep neural network to directly make vertex-level or graph-level predictions.
+    We refer to these stochastic machines as \textbf{random walk neural networks}, and show that we can design them to be isomorphism invariant while capable of universal approximation of graph functions in probability.
+    A useful finding is that almost any kind of record of random walk guarantees probabilistic invariance as long as the vertices are anonymized.
+    This enables us to record random walks in plain text and adopt a language model to read these text records to solve graph tasks.
+    We further establish a parallelism to message passing neural networks using tools from Markov chain theory, and show that over-smoothing in message passing is alleviated by construction in random walk neural networks, while over-squashing manifests as probabilistic under-reaching.
+    We show that random walk neural networks based on pre-trained language models can solve several hard problems on graphs, such as separating strongly regular graphs where the 3-WL test fails, counting substructures, and transductive classification on arXiv citation network without training.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\setcounter{footnote}{0} 
+
+The most widely used class of neural networks on graphs are message passing neural networks where each vertex keeps a feature vector and updates it by propagating and aggregating messages over neighbors~\cite{kipf2017semi, hamilton2017inductive, gilmer2017neural}.
+These networks benefit in efficiency by respecting the natural symmetries of graph functions, namely invariance to graph isomorphism~\cite{chen2019on}.
+On the other hand, message passing can be viewed as implementing color refinement iterations of the one-dimensional Weisfeiler-Lehman (1-WL) graph isomorphism test, and consequently their expressive power is not stronger~\cite{xu2019how, morris2019weisfeiler}.
+Also, the inner working of these networks is tied to the topology of the input graph, which is related to over-smoothing, over-squashing, and under-reaching of features under mixing~\cite{topping2022understanding, giraldo2023on, nguyen2023revisiting}.
+
+In this work, we (re)visit a simple alternative idea for learning on graphs, where a random walk on a graph produces a machine-readable record, and this record is processed by a deep neural network that directly makes vertex-level or graph-level predictions.
+We call these stochastic machines \textbf{random walk neural networks}.
+Using random walks for graph learning has received practical interest due to their scalability and compatibility with sequence learning methods.
+This has led to empirically successful algorithms such as DeepWalk~\cite{perozzi2014deepwalk} and node2vec~\cite{grover2016node2vec} which use skip-gram models on random walks and CRaWl~\cite{tonshoff2023walking} which uses convolutions on random walks.
+However, principled understanding and design of random walk neural networks have been studied relatively less.
+
+We study the fundamental properties of random walk neural networks, and show that they can be designed from principle to be isomorphism invariant while capable of universal approximation of graph functions in probability.
+Specifically, we find that \textbf{(1)} almost any kind of record of random walks guarantees invariance as long as the vertices are anonymized, and there is no constraint on the choice of the neural network that processes the records, and \textbf{(2)} universal approximation is achieved if the neural network that reads the records is powerful enough, and the random walk covers the whole graph of interest with a high probability.
+The findings motivate us to record random walks in plain text and adopt a pre-trained transformer language model to read these records to solve graph tasks.
+They also give us principled guidance on how to design the random walk algorithm to minimize or bound the cover times, such as using restarts when working on a large and possibly infinite graph.
+
+We further analyze random walk neural networks using tools from Markov chain theory and establish a parallelism to a simple model of message passing neural networks.
+From this, we show that over-smoothing phenomenon in message passing is inherently avoided in random walk neural networks, while over-squashing manifests as probabilistic under-reaching.
+This eliminates the typical trade-off between over-smoothing and over-squashing in message passing and allows our method to focus on overcoming under-reaching using rapidly mixing random walks such as non-backtracking walks.
+
+We test random walk neural networks based on pre-trained language models on several hard problems on graphs.
+Our model based on DeBERTa~\cite{he2021deberta} learns and performs separation of strongly regular graphs with perfect accuracy whereas the 3-WL test fails, and it also successfully learns challenging tasks of counting 8-cycles at graph-level and vertex-level.
+We further show that our approach can turn transductive classification problem on a large graph into an in-context learning problem by recording labeled vertices during random walks.
+To demonstrate this, we apply frozen Llama~3~\cite{meta2024llama3} directly on transductive classification on arXiv citation network with 170k vertices, and show that it outperforms message passing networks as well as zero- and few-shot baselines even without training.
+This verifies that our approach allows a pure language model to understand and leverage graph structures.
+
+
+
+\section{Random Walk Neural Networks}
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/overview.pdf}
+    \caption{
+    A random walk neural network that reads text record using a language model.
+    }
+    \label{fig:overview}
+\end{figure}
+We define a random walk neural network as a randomized function $X_\theta(\cdot)$ that takes a graph $G$ as input and outputs a random variable $X_\theta(G)$ on the output space $\mathbb{R}^d$.\footnote{While any output type such as text is possible (Figure~\ref{fig:overview}), we explain with vector output for simplicity.}
+It can be optionally queried with an input vertex $v$ which gives a random variable $X_\theta(G, v)$.
+It consists of the following:
+\begin{enumerate}
+    \item \textbf{Random walk algorithm} that produces $l$ steps of vertex transitions $v_0\to\cdots\to v_l$ on the input graph $G$. If an input vertex $v$ is given, we fix the starting vertex by $v_0=v$.
+    \item \textbf{Recording function} $q: (v_0\to\cdots\to v_l, G)\mapsto\mathbf{z}$ that produces a machine-readable record $\mathbf{z}$ of the random walk.
+    It may access the graph $G$ to record auxiliary information such as attributes.
+    \item \textbf{Reader neural network} $f_\theta:\mathbf{z}\mapsto\hat{\mathbf{y}}$ that processes record $\mathbf{z}$ and outputs a prediction $\hat{\mathbf{y}}$ in $\mathbb{R}^d$.
+    It is the only trainable component and is not restricted to specific architectures.
+\end{enumerate}
+To perform graph-level tasks, we sample a prediction $\hat{\mathbf{y}}\sim X_\theta(G)$ by running a random walk on $G$ and processing its record using the reader neural network.
+For vertex-level predictions $\hat{\mathbf{y}}\sim X_\theta(G, v)$, we query the input vertex $v$ by simply starting the random walk from it.
+
+In the sections below, we discuss the design of each component for graph-level tasks on finite graphs and then vertex-level tasks on possibly infinite graphs.
+The latter simulates learning problems on large graphs, such as transductive classification, and forces the model to operate independently of the size of the whole graph $G$~\cite{micali2016reconstructing}.
+\subsection{Graph-Level Tasks}\label{sec:graph_level}
+
+Let $\mathbb{G}$ be the class of undirected, connected, and simple graphs\footnote{We assume this for simplicity but extending to directed or attributed graphs is possible.}.
+Let $n\geq 1$ and $\mathbb{G}_n$ be the collection of graphs in $\mathbb{G}$ with at most $n$ vertices.
+We would like to model a graph-level function $\phi:\mathbb{G}_n\to\mathbb{R}^d$ using a random walk neural network $X_\theta(\cdot)$.
+
+Since $\phi$ is a function on graphs, it is reasonable to assume that it is isomorphism invariant:
+\begin{align}\label{eq:graph_level_invariance}
+    \phi(G) = \phi(H),\quad\forall G\simeq H.
+\end{align}
+Incorporating the invariance structure to our model class would offer generalization benefit~\cite{lyle2020on, bronstein2021geometric}.
+Since $X_\theta(\cdot)$ is a randomized function, we accept the probabilistic notion of invariance~\cite{kallenberg2005probabilistic, bloem-reddy2020probabilistic, cotta2023probabilistic, cornish2024stochastic}:
+\begin{align}\label{eq:graph_level_probabilistic_invariance}
+    X_\theta(G)\overset{d}{=}X_\theta(H),\quad\forall G\simeq H.
+\end{align}
+We now claim that we can achieve probabilistic invariance by properly choosing the random walk algorithm and recording function while not imposing any constraint on the reader neural network.
+\begin{theorem}\label{theorem:invariance}
+    $X_\theta(\cdot)$ is invariant if its random walk algorithm and recording function are invariant.
+\end{theorem}
+Below, we describe the choice of random walk algorithm, recording function, and neural networks that comprise random walk neural networks as in Theorem~\ref{theorem:invariance}.
+\paragraph{Random walk algorithm}
+A random walk algorithm is invariant if it satisfies the following:
+\begin{align}\label{eq:random_walk_invariance}
+    \pi(v_0)\to\cdots\to\pi(v_l)\overset{d}{=}u_0\to\cdots\to u_l,\quad\forall G\overset{\pi}{\simeq}H,
+\end{align}
+where $v_{[\cdot]}$ is a random walk on $G$, $u_{[\cdot]}$ is a random walk on $H$, and $\pi:V(G)\to V(H)$ specifies the isomorphism from $G$ to $H$.
+It turns out that many random walk algorithms in literature are already invariant.
+To see this, let us write the probability of walking from a vertex $u$ to its neighbor $x\in N(u)$:
+\begin{align}\label{eq:first_order_random_walk}
+    \mathrm{Prob}[v_t=x|v_{t-1}=u] \coloneq \frac{c_G(u, x)}{\sum_{y\in N(u)}c_G(u, y)},
+\end{align}
+where the function $c_{G}: E(G)\to\mathbb{R}_+$ assigns positive weights called conductance to edges.
+If we use constant conductance $c_G(\cdot)=1$, we have unbiased random walk used in DeepWalk~\cite{perozzi2014deepwalk}.
+We show:
+\begin{theorem}\label{theorem:first_order_random_walk_invariance}
+    The random walk in Equation~\eqref{eq:first_order_random_walk} is invariant if its conductance $c_{[\cdot]}(\cdot)$ is invariant:
+    \begin{align}
+        c_G(u, v) = c_H(\pi(u), \pi(v)),\quad\forall G\overset{\pi}{\simeq}H.
+    \end{align}
+    It includes constant conductance, and any choice that only uses degrees of endpoints $\mathrm{deg}(u)$, $\mathrm{deg}(v)$.
+\end{theorem}
+We favor using the degree information since it is cheap while potentially improving the behaviors of walks.
+Among many instantiations, we find that the following conductance function called the minimum degree local rule~\cite{abdullah2015speeding, david2018random} is particularly useful:
+\begin{align}\label{eq:minimum_degree_local_rule}
+    c_G(u, v) \coloneq \frac{1}{\min[\mathrm{deg}(u), \mathrm{deg}(v)]}.
+\end{align}
+This conductance is special because it achieves $O(n^2)$ cover time, i.e. the expected time of visiting all $n$ vertices of a graph, optimal among random walks in Equation~\eqref{eq:first_order_random_walk} that use degrees of endpoints~\cite{david2018random}.
+
+In practice, we find that adding non-backtracking property that enforces $v_{t+1}\neq v_{t-1}$ is helpful while not adding much cost.
+Formally, we can extend Equation~\eqref{eq:first_order_random_walk} and Theorem~\ref{theorem:first_order_random_walk_invariance} to second-order random walks that include non-backtracking and node2vec walks~\cite{grover2016node2vec}.
+\paragraph{Recording function}
+A recording function $q: (v_0\to\cdots\to v_l, G)\mapsto\mathbf{z}$ takes a random walk and produces a machine-readable record $\mathbf{z}$.
+We let $q(\cdot, G)$ have access to the graph $G$ the walk is taking place.
+This allows recording auxiliary information such as vertex or edge attributes.
+A recording function is invariant if it satisfies the following for any given random walk $v_{[\cdot]}$ on $G$:
+\begin{align}\label{eq:recording_invariance}
+    q(v_0\to\cdots\to v_l, G) = q(\pi(v_0)\to\cdots\to\pi(v_l), H),\quad\forall G\overset{\pi}{\simeq}H.
+\end{align}
+Invariance requires that $q(\cdot, G)$ produces the same record $\mathbf{z}$ regardless of re-indexing of vertices of $G$ into $H$.
+For this, we have to be careful in how we represent each vertex in a walk $v_0\to\cdots\to v_l$ as a machine-readable value, and which auxiliary information we record from $G$.
+We make two choices:
+\begin{itemize}
+    \item \textbf{Anonymization.}
+    We name each vertex in a walk with a unique integer, starting from $v_0\mapsto1$ and incrementing it based on their order of discovery.
+    For instance, a random walk $a\to b\to c\to a$ translates to a sequence $1\to2\to3\to1$.
+    \item \textbf{Anonymization + named neighborhoods.}
+    While applying anonymization for each vertex $v$ in a walk, we record its neighbors $u\in N(v)$ if they are already named but the edge $v\to u$ has not been recorded yet.
+    For instance, a walk $a\to b\to c\to d$ on a fully-connected graph translates to a sequence $1\to2\to3\langle1\rangle\to4\langle1, 2\rangle$, where $\langle\cdot\rangle$ represents the named neighborhoods.
+\end{itemize}
+We now show the following:
+\begin{theorem}\label{theorem:recording_function_invariance}
+    A recording function $q:(v_0\to\cdots\to v_l, G)\mapsto\mathbf{z}$ that uses anonymization, optionally with named neighborhoods, is invariant.
+\end{theorem}
+
+Our choice of anonymizing a walk is inspired by the observation model of Micali~and~Zhu~(2015)~\cite{micali2016reconstructing}.
+While initially motivated by privacy concerns~\cite{micali2016reconstructing, ivanov2018anonymous}, we find it useful for invariance.
+Recording named neighborhoods is inspired by sublinear algorithms that probe previously discovered neighbors during a walk~\cite{dasgupta2014estimating, chiericetti2016sampling, bera2020count}.
+In our context, it is useful because whenever a walk visits a set of vertices $S\subseteq V(G)$ it automatically records the entire induced subgraph $G[S]$.
+As a result, to record all edges of a graph, a walk only has to visit all vertices.
+It is then possible to choose a random walk algorithm that takes only $O(n^2)$ time to visit all $n$ vertices~\cite{abdullah2015speeding, david2018random}, while traversing all edges, i.e. edge cover time, is $O(n^3)$ in general~\cite{zuckerman1991on, panotopoulou2013bounds}.
+The degree-biasing in Equation~\eqref{eq:minimum_degree_local_rule} precisely achieves this.
+
+\paragraph{Reader neural network}
+A reader neural network $f_\theta:\mathbf{z}\mapsto\hat{\mathbf{y}}$ processes the record $\mathbf{z}$ of the random walk and outputs a prediction $\hat{\mathbf{y}}$ in $\mathbb{R}^d$.
+As in Theorem~\ref{theorem:invariance}, there is no invariance constraint imposed on $f_\theta$, and any neural network that accepts the recorded walks and has a sufficient expressive power can be used.
+This is in contrast to message passing where invariance is hard-coded in feature mixing operations.
+Furthermore, our record $\mathbf{z}$ can take any format, such as a matrix, byte sequence, or plain text, as long as $f_\theta$ accepts it.
+It is appealing in this regard to choose the record to be plain text, such as \texttt{"1-2-3-1"}, and choose $f_\theta$ to be a pre-trained transformer language model.
+This offers expressive power~\cite{yun2020are} as well as transferable representation from language domain~\cite{lu2022pretrained, rothermel2021dont}.
+In our experiments, we test both "encoder-only" DeBERTa~\cite{he2021deberta} and "decoder-only" Llama~\cite{touvron2023llama} language models as $f_\theta$.
+
+\subsection{Vertex-Level Tasks}\label{sec:vertex_level}
+We now consider vertex-level tasks.
+In case of finite graphs, we may simply frame a vertex-level task $(G, v)\mapsto\mathbf{y}$ as a graph-level task $G'\mapsto\mathbf{y}$ where $G'$ is $G$ with its vertex $v$ marked.
+Then, we can solve $G'\mapsto\mathbf{y}$ by querying a random walk neural network $X_\theta(G, v)$ to start its walk at $v_0=v$.
+
+A more interesting case is when $G$ is an infinite graph that is only locally finite, i.e., has finite degrees.
+This simulates learning problems on a large graph such as transductive classification.
+In this case, it is reasonable to assume that our target function depends on finite local structures~\cite{tahmasebi2023the, micali2016reconstructing}.
+
+Let $r\geq 1$, and $\mathbb{B}_r\coloneq\{B_r(v)\}$ be the collection of local balls in $G$ of radius $r$ centered at $v\in V(G)$.
+We would like to model a vertex-level function $\phi:\mathbb{B}_r\to\mathbb{R}^d$ on $G$ using a random walk neural network $X_\theta(\cdot)$ by querying the vertex of interest, $X_\theta(G, v)$.
+We assume $\phi$ is isomorphism invariant:
+\begin{align}
+    \phi(B_r(v))=\phi(B_r(u)),\quad\forall B_r(v)\simeq B_r(u).
+\end{align}
+The invariance of $X_\theta(\cdot)$ in probability is defined as following:
+\begin{align}
+    X_\theta(G, v)\overset{d}{=}X_\theta(G, u),\quad\forall B_r(v)\simeq B_r(u).
+\end{align}
+We may achieve invariance by choosing the random walk algorithm and recording function similar to the graph-level case\footnote{This is assuming that the random walks are localized in $B_r(v)$ and $B_r(u)$, e.g. with restarts.}.
+As a modification, we query $X_\theta(G, v)$ with the starting vertex $v_0=v$ of the random walk.
+Anonymization informs $v$ to the reader neural network by always naming it as $1$.
+
+Then, we make an important choice of localizing random walks with restarts.
+That is, we reset a walk to the starting vertex $v_0$ either with a probability $\alpha\in(0, 1)$ at each step or periodically every $k$ steps.
+A restarting random walk tends to stay more around its starting vertex $v_0$, and was used to implement locality bias in personalized PageRank algorithm for search~\cite{page1999pagerank, gasteiger2019predict}.
+This localizing effect is crucial in our context since a walk may drift away from $B_r(v_0)$ before recording all necessary information, which will then take an infinite time to return since $G$ is infinite~\cite{dumitriu2003on, janson2012hitting, carnage2012expected, mcnew2013random}.
+Restarts make the return to $v_0$ mandatory, ensuring that $B_r(v_0)$ can be recorded within a finite expected time.
+We show:
+\begin{theorem}\label{theorem:infinite_local_cover_time}
+    For a uniform random walk on an infinite graph $G$ starting at $v$, the cover time and edge cover time of the finite local ball $B_r(v)$ are not always finitely bounded.
+\end{theorem}
+\begin{theorem}\label{theorem:finite_local_cover_time}
+    In Theorem~\ref{theorem:infinite_local_cover_time}, if the random walk restarts at $v$ with any nonzero probability $\alpha$ or any period $k\geq r+1$, the cover time and edge cover time of $B_r(v)$ are always finite.
+\end{theorem}
+
+
+
+\section{Analysis}
+
+In Section~\ref{sec:algorithm}, we have described the design of random walk neural networks, primarily relying on the principle of invariance.
+In this section we provide in-depth analysis on their expressive power and relations to issues in message passing such as over-smoothing, over-squashing, and under-reaching.
+
+\subsection{Expressive Power}\label{sec:expressive_power}
+
+Intuitively, if the records of random walks contain enough information such that the structures of interest, e.g. graph $G$ or local ball $B_r(v)$, can be fully recovered, a powerful reader neural network such as a multi-layer perceptron~\cite{cybenko1989approximation, hornik1989multilayer} or a transformer~\cite{yun2020are} on these records would be able to approximate any function of interest.
+Our following analysis shows this.
+
+We first consider using random walk neural network $X_\theta(\cdot)$ to universally approximate graph-level functions $\phi(\cdot)$ in probability, as defined in Abboud~et~al.~(2021)~\cite{abboud2021the}.
+While we consider scalar-valued functions as often done in universality proofs, extension to vector-valued functions can be done easily.
+\begin{definition}\label{defn:graph_level_universality}
+    $X_\theta(\cdot)$ is a universal approximator of graph-level functions in probability if, for all invariant functions $\phi:\mathbb{G}_n\to\mathbb{R}$ for a given $n\geq 1$, and $\forall\epsilon,\delta>0$, there exist choices of length~$l$ of the random walk and network parameters $\theta$ such that the following holds:
+    \begin{align}\label{eq:graph_level_universality}
+        \mathrm{Prob}[|\phi(G) - X_\theta(G)|< \epsilon] > 1-\delta,\quad\forall G\in\mathbb{G}_n.
+    \end{align}
+\end{definition}
+
+We show that, if the random walk is long enough and the reader neural network $f_\theta$ is powerful enough, a random walk neural network $X_\theta(\cdot)$ is capable of graph-level universal approximation in probability.
+In particular, we show that the length of the random walk $l$ controls the confidence $1-\delta$ of the approximation, with cover time $C_V(G)$ or edge cover time $C_E(G)$ playing a central role.
+\begin{theorem}\label{theorem:graph_level_universality}
+    A random walk neural network $X_\theta(\cdot)$ with a sufficiently powerful $f_\theta$ is a universal approximator of graph-level functions in probability (Definition~\ref{defn:graph_level_universality}) if it satisfies either of the below:
+    \begin{itemize}
+        \item It uses anonymization to record random walks of lengths $l > C_E(G)/\delta$.
+        \item It uses anonymization and named neighborhoods to record walks of lengths $l > C_V(G)/\delta$.
+    \end{itemize}
+\end{theorem}
+We remark that, while the cover time and edge cover time are $O(n^3)$ for uniform random walks~\cite{aleliunas1979random, zuckerman1991on, coppersmith1996random, feige1997a, bussian1996bounding, abdullah2012cover, panotopoulou2013bounds, georgakopoulos2014new}, we make use of minimum degree local rule in Equation~\eqref{eq:minimum_degree_local_rule} to achieve a cover time of $O(n^2)$~\cite{abdullah2015speeding, david2018random}, in conjunction with named neighborhood recording.
+While universal approximation can be in principle achieved with simple uniform random walk, our design reduces the length $l$ required for the desired reliability $>1-\delta$, and hence improves learning and inference.
+
+We now show an analogous result for universal approximation of vertex-level functions.
+Since our target function $\phi$ is on a collection $\mathbb{B}_r$ of finite graphs, the proof is similar to the graph-level case.
+\begin{definition}\label{defn:vertex_level_universality}
+    $X_\theta(\cdot)$ is a universal approximator of vertex-level functions in probability if, for all invariant functions $\phi:\mathbb{B}_r\to\mathbb{R}$ for a given $r\geq 1$, and $\forall\epsilon,\delta>0$, there exist choices of length~$l$ and restart probability $\alpha$ or period $k$ of the random walk and network parameters $\theta$ such that:
+    \begin{align}\label{eq:vertex_level_universality}
+        \mathrm{Prob}[|\phi(B_r(v)) - X_\theta(G, v)|< \epsilon] > 1-\delta,\quad\forall B_r(v)\in\mathbb{B}_r.
+    \end{align}
+\end{definition}
+
+We show the following, which relates to local cover time $C_V(B_r(v))$ and edge cover time $C_E(B_r(v))$:
+\begin{theorem}\label{theorem:vertex_level_universality}
+    A random walk neural network $X_\theta(\cdot)$ with a sufficiently powerful $f_\theta$ and any nonzero restart probability $\alpha$ or restart period $k\geq r+1$ is a universal approximator of vertex-level functions in probability (Definition~\ref{defn:vertex_level_universality}) if it satisfies either of the below for all $B_r(v)\in\mathbb{B}_r$:
+    \begin{itemize}
+        \item It uses anonymization to record random walks of lengths $l > C_E(B_r(v))/\delta$.
+        \item It uses anonymization and named neighborhoods to record walks of lengths $l > C_V(B_r(v))/\delta$.
+    \end{itemize}
+\end{theorem}
+We remark that restarts are necessary to finitely bound the local cover times of a random walk on an infinite graph.
+From this fact and Theorem~\ref{theorem:vertex_level_universality} we can see that non-restarting walks of finite length cannot provide vertex-level universal approximation in probability, and our design is obligatory.
+
+\subsection{Over-smoothing, Over-squashing, and Under-reaching}\label{sec:feature_mixing}
+
+In message passing neural networks, the model operates by passing features over edges and mixing them, and thus their operation is tied to the topology of the input graph.
+It is now understood how this relates to the issues of over-smoothing, over-squashing, and under-reaching~\cite{barcelo2020the, topping2022understanding, giovanni2023how, giraldo2023on, nguyen2023revisiting, wu2023demystifying}.
+We connect these theories and random walk neural networks to verify if similar issues may take place.
+
+Let $G$ be a connected non-bipartite graph with row-normalized adjacency matrix $P$.
+We consider a simplified message passing model, where the vertex features $\mathbf{h}^{(0)}$ are initialized as some probability vector $\mathbf{x}$, and updated by $\mathbf{h}^{(t+1)}=\mathbf{h}^{(t)}P$.
+This simple model is often used as a proxy to study the aforementioned issues~\cite{giraldo2023on, zhao2019pairnorm}.
+For example, over-smoothing happens as the features exponentially converge to a stationary vector $\mathbf{h}^{(l)}\to\boldsymbol{\pi}$ as $l\to\infty$, smoothing out the input $\mathbf{x}$~\cite{giraldo2023on}.
+Over-squashing and under-reaching occur when a feature $\mathbf{h}_u^{(l)}$ becomes insensitive to distant input $\mathbf{x}_v$.
+While under-reaching refers to insufficient depth $l<\mathrm{diam}(G)$~\cite{barcelo2020the, topping2022understanding}, over-squashing refers to features getting overly compressed at bottlenecks of $G$, even with sufficient depth $l$.
+The latter is described by the Jacobian $|\partial \mathbf{h}_u^{(l)}/\partial \mathbf{x}_v|\leq [\sum_{t=0}^lP^t]_{uv}$,\footnote{This bound is obtained by applying Lemma 3.2 of Black~et~al.~(2023)~\cite{black2023understanding} to our simplified message passing.}, as the bound often decays exponentially with $l$~\cite{topping2022understanding, black2023understanding}.
+
+What do these results tell us about random walk neural networks?
+We can see that, while $P$ drives feature mixing in the message passing schema, it can be also interpreted as the transition probability matrix of uniform random walk where $P_{uv}$ is the probability of walking from $u$ to $v$.
+This parallelism motivates us to design an analogous, simplified random walk neural network and study its behavior.
+
+We consider a simple random walk neural network that runs a uniform random walk $v_0\to\cdots\to v_l$, reads the record $\mathbf{x}_{v_0}\to\cdots\to\mathbf{x}_{v_l}$ by averaging, and outputs it as $\mathbf{h}^{(l)}$.
+Like simple message passing, the model involves $l$ steps of time evolution through $P$.
+However, while message passing uses $P$ to process features, this model uses $P$ only to obtain a record of input, with feature processing decoupled.
+We show that in this model, over-smoothing does not occur as in simple message passing\footnote{While we show not forgetting $\mathbf{x}$ for brevity, we may extend to initial vertex $v_0$ using its anonymization as $1$.}:
+\begin{theorem}\label{theorem:oversmoothing}
+    The simple random walk neural network outputs $\mathbf{h}^{(l)}\to\mathbf{x}^\top\boldsymbol{\pi}$ as $l\to\infty$.
+\end{theorem}
+Even if the time evolution through $P$ happens fast (i.e. $P$ is rapidly mixing) or with many steps $l$, the model is resistant to over-smoothing as the input $\mathbf{x}$ always affects the output.
+In fact, if $P$ is rapidly mixing, we may expect improved behaviors based on Section~\ref{sec:expressive_power} as the cover times could reduce.
+
+On the other hand, we show that over-squashing manifests as probabilistic under-reaching:
+\begin{theorem}\label{theorem:oversquashing}
+    Let $\mathbf{h}_u^{(l)}$ be output of the simple random walk neural network queried with $u$.
+    Then:
+    \begin{align}\label{eq:oversquashing}
+        \mathbb{E}\left[\left|\frac{\partial \mathbf{h}_u^{(l)}}{\partial \mathbf{x}_v}\right|\right]=\frac{1}{l+1}\left[\sum_{t=0}^lP^t\right]_{uv}\to \boldsymbol{\pi}_v\quad\text{as}\quad l\to\infty.
+    \end{align}
+\end{theorem}
+The equation shows that the feature Jacobians are bounded by the sum of powers of $P$, same as in simple message passing.
+Both models are subject to over-squashing phenomenon that is similarly formalized, but manifests through different mechanisms.
+While in message passing the term is related to over-compression of features at bottlenecks~\cite{topping2022understanding}, in random walk neural networks it is related to exponentially decaying probability of reaching a distant vertex $v$, i.e., probabilistic under-reaching.
+
+In message passing, it is understood that the topology of the input graph inevitably induces a trade-off between over-smoothing and over-squashing~\cite{nguyen2023revisiting, giraldo2023on}.
+Our results suggest that random walk neural networks avoid the trade-off, and we can focus on overcoming under-reaching e.g. by accelerating the walk, while not worrying much about over-smoothing.
+Our design choices such as degree-biasing (Equation~\eqref{eq:minimum_degree_local_rule}) and non-backtracking~\cite{alon2007non} can be understood as achieving this.
+
+
+
+\section{Related Work}
+
+
+\paragraph{Random walks on graphs}
+Our work builds upon theory of random walks on graphs, i.e. Markov chains on discrete spaces.
+Their statistical properties such as hitting and mixing times have been well-studied~\cite{aleliunas1979random, lovasz1993random, coppersmith1996random, feige1997a, oliveira2012mixing, peres2015mixing}, and our method (Section~\ref{sec:algorithm}) is related to cover time~\cite{aleliunas1979random, kahn1989cover, ding2011cover, abdullah2012cover}, edge cover time~\cite{zuckerman1991on, bussian1996bounding, panotopoulou2013bounds, georgakopoulos2014new}, and improving them, using local degree information~\cite{ikeda2009the, abdullah2015speeding, david2018random}, non-backtracking~\cite{alon2007non, kempton2016non, arrigo2019non, fasino2021hitting}, or restarts in case of infinite graphs~\cite{dumitriu2003on, mcnew2013random, janson2012hitting}.
+Random walks and their statistical properties are closely related to structural properties of graphs, such as effective resistance~\cite{doyle1984random, chandra1997the}, Laplacian eigen-spectrum~\cite{lovasz1993random, spielman2019spectral}, and discrete Ricci curvatures~\cite{ollivier2009ricci, devriendt2022discrete}.
+This has motivated our analysis in Section~\ref{sec:feature_mixing}, where we transfer the prior results on over-smoothing and over-squashing of message passing based on these properties~\cite{barcelo2020the, topping2022understanding, giovanni2023how, giraldo2023on, black2023understanding, nguyen2023revisiting, park2023non} into the results on our approach.
+Our work is also inspired by graph algorithms based on random walks, such as anonymous observation~\cite{micali2016reconstructing}, sublinear algorithms~\cite{dasgupta2014estimating, chiericetti2016sampling, bera2020count}, and personalized PageRank for search~\cite{page1999pagerank}.
+While we adopt their techniques to make our walks and their records well-behaved, the difference is that we use a deep neural network to process the records and directly make predictions.
+
+\paragraph{Random walks and graph learning}
+In graph learning, random walks have received interest due to their scalability and compatibility to sequence learning methods.
+DeepWalk~\cite{perozzi2014deepwalk} and node2vec~\cite{grover2016node2vec} use shallow skip-gram models on random walks to learn vertex embeddings.
+While CRaWl~\cite{tonshoff2023walking} is the most relevant to our work, it uses convolutions on walks recorded in a different way from ours.
+Hence, its expressive power is controlled by the kernel size and does not always support universality.
+AgentNet~\cite{martinkus2023agent} learns agents that walk on a graph while recurrently updating their features.
+While optimizing the walk strategy, this method may trade off efficiency as training requires recurrent roll-out of the entire network.
+Our method allows pairing simple and fast walkers with parallelizable networks such as transformers, which suffices for universality.
+WalkLM~\cite{tan2023walklm} proposed a fine-tuning method for language models on random walks on text-attributed graphs.
+While in a similar spirit, our result provides more principles as well as extending to purely topological graphs and training-free setups.
+Our method is also related to label propagation algorithms~\cite{zhu2002learning, zhu2005semi, grady2006random} that perform transductive learning on graphs based on random walks, which we further discuss in Section~\ref{sec:arxiv}.
+
+\paragraph{Probabilistic invariant neural networks}
+Whenever a learning problem is compatible with symmetry, incorporating the associated invariance structure to the hypothesis class often leads to generalization benefit~\cite{bronstein2021geometric, elesedy2022group, elesedy2023symmetry}.
+This is also the case for probabilistic invariant neural networks~\cite{lyle2020on, bloem-reddy2020probabilistic}, which includes our approach.
+Probabilistic invariant networks have recently gained interest due to their potential of achieving higher expressive powers compared to deterministic counterparts~\cite{cotta2023probabilistic, sieradzki2022coin}.
+In graph learning, this is often achieved with stochastic symmetry breaking between vertices using randomized features~\cite{loukas2020what, puny2020global, abboud2021the, kim2022pure}, vertex orderings~\cite{murphy2019relational, kim2023learning}, or dropout~\cite{papp2021dropgnn}.
+Our approach can be understood as using random walk as a symmetry-breaking mechanism for probabilistic invariance, which provides an additional benefit of natural compatibility with sequence learning methods.
+
+\paragraph{Language models on graphs}
+While not based on random walks, there have been prior attempts on applying language models for problems on graphs~\cite{wang2023can, chen2023exploring, zhao2023graphtext, fatemi2023talk, ye2024language}, often focusing on prompting methods on problems involving simulations of graph algorithms.
+We take a more principle-oriented approach based on invariance and expressive power, and thus demonstrate our approach mainly on the related tasks, e.g. graph separation.
+We believe extending our work to simulating graph algorithms requires a careful treatment~\cite{weiss2021thinking, deletang2023neural, luca2024simulation, sanford2024understanding} and plan to investigate it as future work.
+
+
+
+\section{Experiments}
+
+
+We perform a series of experiments to demonstrate random walk neural networks.
+We implement random walk algorithms in C++ based on Chenebaux~(2020)~\cite{chenebaux2020graph}, which produces good throughput even without GPU acceleration~\cite{tonshoff2023walking}.
+Likewise, we implement recording functions in C++ which perform anonymization with named neighborhoods and produce plain text.
+
+We choose reader neural networks as pre-trained language models, with a prioritization on long inputs in accordance to Section~\ref{sec:expressive_power}.
+For fine-tuning experiments, we use DeBERTa-base~\cite{he2021deberta} that supports up to 12,276 tokens, and for training-free experiments, we use instruction-tuned Llama~3~\cite{meta2024llama3} that support up to 8,192 tokens.
+We implement our pipelines in PyTorch~\cite{adam2019pytorch} with libraries~\cite{fey2019fast, falcon2019lightning, wolf2019huggingface, kwon2023efficient} that support multi-GPU training and inference.
+
+\subsection{Graph Separation}\label{sec:graph_separation}
+\begin{table}[!t]
+\caption{
+Graph separation results.
+We report accuracy of classifying training data rounded to the first decimal point.
+*, $\dag$, $\ddag$, $\mathsection$, and $^\diamond$ are from \cite{papp2021dropgnn}, \cite{murphy2019relational}, \cite{zhao2022from}, \cite{martinkus2023agent}, and \cite{alvarez2024improving}, respectively.
+We trained AgentNet and CRaWl on SR25 with their reported best configurations on SR16 and CSL, respectively.
+}
+\centering
+\footnotesize
+\begin{tabular}{lccccc}\label{table:graph_separation}
+    \\\Xhline{2\arrayrulewidth}\\[-1em]
+     & CSL & SR16 & SR25 \\
+    Method & 1, 2-WL fails & 3-WL fails & 3-WL fails \\
+    \Xhline{2\arrayrulewidth}\\[-1em]
+    GIN~\cite{xu2019how} & 10.0\%$\dag$ & 50.0\%$\mathsection$ & 6.7\%$\ddag$ \\
+    PPGN~\cite{maron2019provably} & 100.0\%$\mathsection$ & 50.0\%$\mathsection$ & 6.7\%$\ddag$ \\
+    \Xhline{2\arrayrulewidth}\\[-1em]
+    GIN-AK+~\cite{zhao2022from} & - & - & 6.7\%$\ddag$ \\
+    PPGN-AK+~\cite{zhao2022from} & - & - & 100.0\%$\ddag$ \\
+    GIN+ELENE~\cite{alvarez2024improving} & - & - & 6.7\%$^\diamond$ \\
+    GIN+ELENE-L~(ED)~\cite{alvarez2024improving} & - & - & 100.0\%$^\diamond$ \\
+    \Xhline{2\arrayrulewidth}\\[-1em]
+    GIN-RNI~\cite{abboud2021the, sato2021random} & 16.0\%* & - & - \\
+    GIN-RP~\cite{murphy2019relational} & 37.6\%$\dag$ & - & - \\
+    GIN-Dropout~\cite{papp2021dropgnn} & 82.0\%* & - & - \\
+    \Xhline{2\arrayrulewidth}\\[-1em]
+    Random Walk AgentNet~\cite{martinkus2023agent} & 100.0\%$\mathsection$ & 50.5\%$\mathsection$ & - \\
+    AgentNet~\cite{martinkus2023agent} & 100.0\%$\mathsection$ & 100.0\%$\mathsection$ & 6.7\% \\
+    CRaWl~\cite{tonshoff2023walking} & 100.0\%$\mathsection$ & 100.0\%$\mathsection$ & 46.6\% \\
+    DeBERTa-walk (Ours) & 100.0\% & 100.0\% & 100.0\% \\
+    \Xhline{2\arrayrulewidth}
+\end{tabular}
+\end{table}
+
+We first verify the claims on expressive power in Section~\ref{sec:expressive_power} using three synthetic datasets where the task is recognizing the isomorphism type of an input graph.
+This is framed as fitting an $N$-way classification problem on $N$ non-isomorphic graphs.
+The graphs are chosen such that a certain WL graph isomorphism test fails, and so does their related family of message passing neural networks.
+
+The Circular Skip Links (CSL) graphs dataset~\cite{murphy2019relational} contains 10 non-isomorphic regular graphs with 41 vertices of degree 4.
+Distinguishing these graphs requires computing lengths of skip links~\cite{martinkus2023agent, chen2019on}, and 1-WL and 2-WL tests fail.
+The $4\times 4$ rook's and Shrikhande graphs~\cite{alvarez2024improving}, which we call SR16, are a pair of strongly regular graphs with 16 vertices of degree 6.
+Distinguishing the pair requires detecting 4-cliques~\cite{martinkus2023agent}, and 3-WL test fails~\cite{alvarez2024improving}.
+The SR25 dataset~\cite{balcilar2021breaking} contains 15 strongly regular graphs with 25 vertices of degree 12, on which 3-WL test fails~\cite{alvarez2024improving}.
+SR25 is challenging and has only been solved by a handful of carefully designed subgraph-based message passing algorithms~\cite{mitton2021subgraph, zhao2022from, alvarez2024improving}.
+Our random walk neural network uses the minimum degree local rule from Equation~\eqref{eq:minimum_degree_local_rule} with non-backtracking (Algorithm~\ref{alg:random_walk}), and recording function with anonymization and named neighborhoods that produces plain text (Algorithm~\ref{alg:recording_function_anonymization_neighborhoods}).
+We use pre-trained DeBERTa-base language model as the reader neural network, and fine-tune it with cross-entropy loss for at most 100k steps using AdamW optimizer~\cite{loshchilov2019decoupled} with 2e-5 learning rate and 0.01 weight decay on on 8$\times$ RTX 3090 GPUs.
+While the model supports 12,276 tokens in maximum, we use 512 tokens which is the maximum allowed by memory constraint.
+We use batch size 256, and accumulate gradients for 8 steps for SR25.
+At test time, we ensemble 4 stochastic predictions of the network by averaging classification logits.
+
+The results are in Table~\ref{table:graph_separation}.
+Message passing neural networks that align with certain WL test fail when asked to solve harder problems, e.g. GIN aligns with 1-WL and fails in CSL.
+Recent algorithms that use subgraphs and structural features show improved performance, with state-of-the-art such as ELENE-L~(ED) solving SR25.
+Alternative approaches based on stochastic symmetry-breaking e.g. random node identification, often fail on CSL although universal approximation is possible in theory~\cite{abboud2021the}, possibly due to learning difficulties.
+For algorithms based on walks, AgentNet and CRaWl solve CSL and SR16, while failing on SR25.
+This is because learning a policy to walk in AgentNet can be challenging in complex tasks especially at the early stage of training, and the expressiveness of CRaWl is limited by the receptive field of convolution layers.
+Our approach based on DeBERTa language model overcomes the problems, being the first walk-based algorithm that solves SR25.
+We find that the models often focus on sparse, connected substructures, which presumably provide discriminative information on the isomorphism types.
+
+\subsection{Substructure Counting}\label{sec:counting}
+
+\begin{table}[!t]
+\caption{
+Substructure (8-cycle) counting results.
+We report normalized mean absolute error (MAE) on test set at best validation.
+We trained MP, Subgraph GNN, Local 2-GNN, and Local 2-FGNN using configurations in \cite{zhang2024beyond}, and trained MP-RNI, MP-Dropout, AgentNet, and CRaWl as in Table~\ref{table:graph_separation}.
+}
+\centering
+\footnotesize
+\begin{tabular}{lcc}\label{table:counting}
+    \\\Xhline{2\arrayrulewidth}\\[-1em]
+    Method & Graph-level & Vertex-level \\
+    \Xhline{2\arrayrulewidth}\\[-1em]
+    MP~\cite{zhang2024beyond} & {.0917} & {.1156} \\
+    Subgraph GNN~\cite{zhang2024beyond} & {.0515} & {.0715} \\
+    Local 2-GNN~\cite{zhang2024beyond} & {.0433} & {.0478} \\
+    Local 2-FGNN~\cite{zhang2024beyond} & {.0422} & {.0438} \\
+    Local 2-FGNN (large) & {.0932} & {.1121} \\
+    \Xhline{2\arrayrulewidth}\\[-1em]
+    MP-RNI~\cite{abboud2021the, sato2021random} & {.3610} & {.3650} \\
+    MP-Dropout~\cite{papp2021dropgnn} & {.1359} & {.1393} \\
+    \Xhline{2\arrayrulewidth}\\[-1em]
+    AgentNet~\cite{martinkus2023agent} & {.1107} & N/A \\
+    CRaWl~\cite{tonshoff2023walking} & {.0526} & {.0725} \\
+    DeBERTa-walk (Ours) & {.0459} & {.0465} \\
+    \Xhline{2\arrayrulewidth}
+\end{tabular}
+\end{table}
+
+We test our model on more challenging tasks that require both expressive power and generalization to unseen graphs.
+We use a synthetic dataset of 5,000 random regular graphs from Chen~et~al.~(2020)~\cite{chen2020can}, and consider the task of counting substructures.
+We choose 8-cycles since they are known to require a particularly high expressive power~\cite{zhang2024beyond}.
+We experiment with both graph-level and vertex-level counting i.e. counting 8-cycles containing the queried vertex, following Zhang~et~al.~(2024)~\cite{zhang2024beyond}.
+We use the data splits from the previous works~\cite{chen2020can, zhao2022from, zhang2024beyond}, while excluding disconnected graphs following our modeling assumption in Section~\ref{sec:graph_level}.
+Our random walk neural network uses the same design to Section~\ref{sec:graph_separation}, and we train them with L1 loss for at most 250k steps using batch size of 128 graphs for graph-level counting and 8 graphs for vertex-level.
+At test-time, we ensemble 64 and 32 stochastic predictions by averaging for graph- and vertex-level tasks, respectively.
+
+The results are in Table~\ref{table:counting}, and overall in line with Section~\ref{sec:graph_separation}.
+While simple message passing shows a low performance, variants with higher expressive powers such as local 2-GNN and local 2-FGNN achieve high performances.
+This is consistent with the observation of \cite{zhang2024beyond}.
+On the other hand, message passing with stochastic symmetry-breaking often show learning difficulties and does not achieve good performance.
+AgentNet was not directly applicable for vertex-level counting since its vertex encoding depends on which vertices the agent visits, and a learning difficulty was observed for graph-level counting.
+Our approach based on DeBERTa demonstrates competitive performance, outperforming random walk baselines and approaching performances of local 2-GNN and 2-FGNN.
+
+\subsection{In-Context Transductive Classification}\label{sec:arxiv}
+
+\begin{table}[!t]
+\caption{
+Transductive classification test accuracy on ogbn-arxiv.
+$\dag$ denotes using validation labels for in-context learning or label propagation, as done in \cite{huang2020combining}.
+For Llama~3, we use instruction-tuned models, and ensemble 5 predictions by voting for both one-shot learning and our algorithm.
+}
+\centering
+\footnotesize
+\begin{tabular}{lcc}\label{table:arxiv}
+    \\\Xhline{2\arrayrulewidth}\\[-1em]
+    Method & Accuracy \\
+    \Xhline{2\arrayrulewidth}\\[-1em]
+    MLP~\cite{hu2020open} & 55.50\% \\
+    node2vec~\cite{hu2020open} & 70.07\% \\
+    GCN~\cite{hu2020open} & 71.74\% \\
+    GAT~\cite{li2021training} & 73.91\% \\
+    RevGAT~\cite{li2021training} & 74.26\% \\
+    \hline\\[-1em]
+    Label propagation~\cite{huang2020combining} & 68.50\% \\
+    C\&S~\cite{huang2020combining} & 72.62\% \\
+    C\&S$\dag$~\cite{huang2020combining} & 74.02\% \\
+    \hline\\[-1em]
+    Llama2-13b zero-shot~\cite{he2023harnessing} & 44.23\% \\
+    GPT-3.5 zero-shot~\cite{he2023harnessing} & 73.50\% \\
+    DeBERTa, fine-tuned~\cite{zhao2022learning} & 74.13\% \\
+    \hline\\[-1em]
+    Llama3-8b zero-shot & 50.20\% \\
+    Llama3-8b one-shot & 52.49\% \\
+    Llama3-8b one-shot$\dag$ & 52.54\% \\
+    Llama3-8b-walk (Ours) & 71.10\% \\
+    Llama3-8b-walk (Ours)$\dag$ & 73.11\% \\
+    \hline\\[-1em]
+    Llama3-70b zero-shot & 65.33\% \\
+    Llama3-70b one-shot$\dag$ & 67.57\% \\
+    Llama3-70b-walk (Ours)$\dag$ & \textbf{74.75\%} \\
+    \Xhline{2\arrayrulewidth}
+\end{tabular}
+\end{table}
+
+Previous results considered synthetic tasks on undirected, unattributed, and relatively small graphs.
+We now show that our approach based on frozen Llama 3~\cite{meta2024llama3} language models can solve real-world problem on a large graph with directed edges and textual attributes, without any training.
+We use ogbn-arxiv~\cite{hu2020open}, a citation network of 169,343 arXiv papers with title and abstract attributes.
+The task is transductive classification into 40 areas such as \texttt{"cs.AI"} using a subset of labeled vertices.
+
+We consider two representative types of baselines.
+The first reads title and abstract of each vertex using a language model and solves vertex-wise classification problem, ignoring graph structure.
+The second initializes vertex features as language model embeddings and trains a graph neural network, at the risk of over-compressing the text.
+Our algorithm allows taking the best of both worlds.
+
+The resulting record naturally includes a number of input-label pairs of the classification task at hand, implying that we can frame transductive classification problem as a simple in-context learning problem~\cite{brown2020language}.
+This allows us to use a frozen Llama 3~\cite{meta2024llama3} language model directly on transductive classification without any training.
+
+The results are in Table~\ref{table:arxiv}.
+Notably, our model based on frozen Llama 3 is able to outperform graph neural networks on text embeddings, as well as language models that perform vertex-wise predictions ignoring graph structures such as GPT-3.5 and fine-tuned DeBERTa.
+We especially note that our model largely outperforms one-shot baselines, which are given 40 randomly chosen labeled examples (one per class).
+This is surprising as our model observes fewer vertices, 29.17 in average, due to other recorded information.
+This is presumably since the record produced by our algorithm faithfully encodes graph structure, providing more useful input for the language model to quickly learn the task in-context compared to randomly chosen shots.
+Overall, the results show that our approach allows a pure language model to understand and leverage graph structures even without training.
+As a final note, our approach is related to label propagation algorithms~\cite{zhu2002learning, zhu2005semi, grady2006random} for transductive classification, which makes predictions by running random walks and probing the distribution of visited labeled vertices.
+The difference is that, in our approach, the reader neural network i.e. language model can appropriately use other information such as attributes, as well as do meaningful non-linear processing rather than simply probing the input.
+As shown in Table~\ref{table:arxiv}, our approach outperforms label propagation, verifying our intuition.
+This result also supports the proposal of Sato~(2024)~\cite{sato2024training} of using labels as features for training-free neural networks for transductive classification on graphs.
+
+
+
+\section{Conclusion}
+
+\cutparagraphup
+We presented random walk neural networks, stochastic machines that process a graph as a machine-readable record of random walk.
+By choosing a proper random walk algorithm and recording function, the proposed method can achieve isomorphism invariance and universal approximation of graph functions in probability using unconstrained neural networks.
+Equipped with a powerful language model, the proposed method demonstrated promising results on a number of hard graph learning problems and even in-context learning capability on large-scale transductive classification tasks.
+
+\paragraph{Limitations and future work}
+Our current main limitation is the cost of performing training and inference with language models, especially on long walks.
+We believe efficient fine-tuning with e.g. low-rank adaptation~\cite{hu2022lora, chen2023longlora} may help overcome the issue.
+A question for future work is whether we can train a language model on a large pseudocorpus of random walks~\cite{flubicka2019synthetic, flubicka2020english} to build a foundation model for graphs which is language-compatible.
+We plan to investigate this direction in the future.
+
+\paragraph{Acknowledgements}
+This work was supported in part by the National Research Foundation of Korea (RS-2024-00351212) and the IITP grant (2022-0-00926 and RS-2022-II220959) funded by the Korean government (MSIT).
+
+
+{\small
+
+
+
+

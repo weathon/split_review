@@ -1,0 +1,362 @@
+\title{Progressive Autoregressive Video Diffusion Models}
+
+\begin{abstract}
+
+Current frontier video diffusion models have demonstrated remarkable results at generating high-quality videos.
+However, they can only generate short video clips, normally around 10 seconds or 240 frames, due to computation limitations during training.
+In this work, we show that existing models can be naturally extended to \textit{autoregressive} video diffusion models without changing the architectures.
+Our key idea is to assign the latent frames with \textit{progressively} increasing noise levels rather than a single noise level, 
+which allows for fine-grained condition among the latents and large overlaps between the attention windows.
+Such progressive video denoising allows our models to autoregressively generate video frames without quality degradation or abrupt scene changes.
+We present state-of-the-art results on long video generation at 1 minute (1440 frames at 24 FPS).
+Videos from this paper are available at \url{https://desaixie.io/pa-vdm/}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Video diffusion models have recently demonstrated remarkable success in generating high-quality video content across a variety of applications~\citep{meta2024moviegen,blattmann2023stable,guo2023animatediff,bartal2024lumierespacetimediffusionmodel,ho2022imagen,girdhar2023emu}. These models are capable of synthesizing realistic video sequences that are increasingly indistinguishable from real-world footage. However, despite their impressive results, current video diffusion models are constrained by a significant limitation: they can only generate videos of relatively short duration, typically up to about 10 seconds or 240 frames. This temporal restriction leads to challenges for broader applications that require longer, more continuous video outputs, highlighting the need for further research and innovation to extend the capabilities of these models.\todos{citations of t2v base models and their durations}
+Several approaches~\citep{ho2022videodiffusionmodels,henschel2024streamingt2vconsistentdynamicextendable,blattmann2023stable,opensora,gao2024vidgptintroducinggptstyleautoregressive} have been proposed to address the challenge of generating longer videos with video diffusion models.
+They autoregressively apply video diffusion models to generate short video clips in a windowed fashion, where each subsequent clip conditions on the final frames of the previous one. 
+One solution~\citep{opensora,gao2024vidgptintroducinggptstyleautoregressive} directly puts the conditioning frames into the input frames, replacing the noisy frames.
+Another solution~\citep{ho2022videodiffusionmodels} additionally adds the same level of noise to the conditioning frames as the noisy frames. 
+Due to the large gap between the noise levels of the condition frames and the noisy frames, iteratively applying the first solution sometimes produces videos with numerous abrupt scene changes, which is similar to generating short video clips independently.
+The second solution is more effective at producing smooth pixel-level transitions between generated clips, since the condition frames and the noisy frames have the same noise levels during denoising.
+However, it struggles to preserve secondary attributes, e.g., velocity and acceleration, accurately, leading to generating unnatural and inconsistent movement in long videos. 
+In addition, repeatedly applying the second solution amplifies these issues, increasing inaccuracies in motion dynamics and accumulating errors that causes the video to eventually diverge.
+
+We propose \textit{autoregressive} video diffusion models that denoise video frames in a \textit{progressive} manner.
+It can generate long videos with smooth and continuous video frames and motions with no quality degradation. 
+The core innovation of our method lies in the denoising process: instead of applying a single noise level across all frames used in traditional video generation (or extension) diffusion models, we progressively increase the noise levels across frames during denoising. 
+Such progressive noise levels allows autoregressive video denoising with large overlaps between the attention window, as illustrated in~\cref{fig:main}.
+This approach improves the temporal transitions in extended frames,
+resulting in more natural motion and better consistency.
+Our method can be easily implemented by changing the noise scheduling and finetuning pre-trained video diffusion models, either UNet-based~\citep{ronneberger2015u,ho2022videodiffusionmodels} or Diffusion Transformer (DiT)-based~\citep{peebles2023dit,ma2024latte,openai2024sora} backbone, without changing the original model architecture. 
+Our progressive autoregressive inference procedure can work training-free, if the model has been trained on vary noise levels, e.g. the masked pre-training in~\citep{opensora}.
+Our method can generate videos up to one minute in length (1440 frames) without noticeable degradation in quality. 
+Moreover, the additional computational cost at inference time is minimal comparing to previous works~\citep{wang2023genlvideomultitextlongvideo,qiu2024freenoisetuningfreelongervideo,henschel2024streamingt2vconsistentdynamicextendable} that generates overlapped clips, making this approach more efficient for practical use in the long video generation.
+
+We compare our method to the baselines on long video generation at 60-second or 1440 frames.
+Our quantitative results demonstrate that our method has overall the best frame quality, the best motion dynamics, the best aesthetic and the least scene changes. It is able to maintain these metrics over the entire 60-second duration.
+Qualitatively, our method is also shown to be preserve the frame and motion quality over time, while the baselines performance drops.
+By applying our method to two base models and demonstrating significantly improved performance compared to their respective baselines, we confirm its universal applicability to existing video diffusion models.
+We provide more video results at our website \url{https://desaixie.io/pa-vdm/}. 
+In sum, our progressive autoregressive video diffusion models achieves state-of-the-art results on long video generation.
+
+\input{figs/fig_replacement_vs_pavd/fig}
+
+
+
+\section{Background}
+
+\subsection{Video Diffusion Models}
+Diffusion models~\citep{sohl2015diffusion,ho2020ddpm} are generative models that learn to generate samples from a data distribution 
+$\displaystyle q(\rvx^0)$ 
+through an iterative denoising process.
+During training, data samples are first corrupted using the forward diffusion process $\displaystyle q(\rvx^t|\rvx^0)$
+\begin{align}
+    \label{eq:forward_diffusion}
+    \displaystyle q\left(\rvx^t \middle| \rvx^0\right)&=\mathcal{N}(\rvx^t; \sqrt{\alpha^t}\rvx^0, (1-\alpha^t)\mI)\\ %
+    \label{eq:add_noise}
+    \displaystyle \rvx^t &= \sqrt{\alpha^t}\rvx^0 + \sqrt{1-\alpha^t}\epsilon %
+\end{align}
+where $\displaystyle t\in [0, T)$ is the noise level or diffusion timestep, $\displaystyle \bm{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mI)$ is the noise, and $\bm{\alpha}^{1:T}$ is the variance schedule. 
+With those noisy data samples $\displaystyle \rvx^t$, diffusion models are trained to fit to the data distribution $\displaystyle q(\rvx^0)$ by maximizing the variational lower bound~\citep{kingma2013vae} of the log likelihood of $\displaystyle \rvx^0$, which can be simplified into a mean squared error loss~\citep{ho2020ddpm}
+\begin{align}
+    \label{eq:ddpm_loss}
+    \displaystyle \mathcal{L}(\theta) = \left\| \epsilon - \epsilon_\theta(\rvx^t, t) \right\|^2 %
+\end{align}
+where $t$ is uniform between $0$ and $T$, $\displaystyle \bm{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mI)$ and $\bm{\epsilon}_\theta$ is the noise predicted by the model with parameters $\theta$.
+
+At sampling time, we consider the sampling noise level schedule $\displaystyle \bm{\tau} = \{\tau_1, \tau_2, ..., \tau_{S}\}$
+, which is an increasing subset of $t \in [0, T)$ of length $S$~\citep{song2021ddim}.
+Starting from $\displaystyle \rvx^{\tau_S} \sim \mathcal{N}( \mathbf{0}, \mI ), \tau_S=T$, the reverse denoising process is autoregressively applied as
+\begin{align}
+    \label{eq:ddim_reverse}
+    \displaystyle p_\theta\left(\rvx^{\tau_{i-1}} \middle| \rvx^{\tau_i}\right) = q_\sigma\left( \rvx^{\tau_{i-1}} \middle| \rvx^\tau, f_\theta(\rvx^t, t)\right)
+\end{align}
+where $\displaystyle \hat{\rvx}^0=\displaystyle f_\theta(\rvx^t, t)$ is the $\displaystyle \rvx^0$ predicted by the model and $\displaystyle f_\theta(\rvx^t, t)$ is the DDIM~\citep{song2021ddim} reverse process equation, which we omit for simplicity.
+This gives us a sequence of samples $\displaystyle \rvx^T, \rvx^{\tau_{S-1}}, \ldots, \rvx^{\tau_1}, \rvx^0$, and the last sample $\displaystyle \rvx^0$ is the clean output result.
+
+Video diffusion models~\citep{ho2022videodiffusionmodels,blattmann2023align} are diffusion models that consider latent representations of video data, consisting of $F$ latent frames $\displaystyle \rvx_{0:F-1}=\{\rx_0, \rx_1, \ldots, \rx_{F-1}\}$.
+The same forward diffusion process, the reverse denoising process, and loss (\cref{eq:forward_diffusion,eq:add_noise,eq:ddpm_loss,eq:ddim_reverse}) can be applied to model these video data by treating all the latents as one entity, ignoring the correlation among the latents. 
+Recent video diffusion models~\citep{meta2024moviegen,opensora} have employed various diffusion model variants~\citep{liu2022rectifiedflow,liu2023instaflow,lipman2023flowmatchinggenerativemodeling} to improve training and inference efficiency as well as output quality.
+Nevertheless, our method is compatible with any diffusion model variant as long as the model corrupts the data $\displaystyle \rvx^t$ at the same noise levels $t$.
+\subsection{Long Video Generation via Replacement}
+\label{sec:bg:long_replacement}
+Video diffusion models can only generate short video clips, because they are only trained on videos with a limited length $F$ due to GPU memory limit.
+When adapted to generating $L > F$ latent frames at sampling time, their generation quality substantially degrades~\citep{qiu2024freenoisetuningfreelongervideo}.
+The straightforward solution is to autoregressively apply video diffusion models, generating each video clip while conditioning on the previous clip.
+In this paper, we refer to the $F$ latents that the video diffusion model processes as the \textit{attention window}.
+Given $E<F$ clean latents $\displaystyle \rvx_{0:E}^0$ as condition, there are two methods for autoregressively applying video diffusion models.
+\citet{opensora,gao2024vidgptintroducinggptstyleautoregressive,blattmann2023stable} place the clean condition latents $\displaystyle \Bar{\rvx}_{0:E-1}^{0}$ directly at the front of the attention window, directly replacing the sampled latents $\displaystyle \rvx_{0:E-1}^{\tau_i}$ at each denoising step
+\todos{I2V/V2V citation for this method's origin.}
+\begin{align}
+    \displaystyle p_\theta\left(\Bar{\rvx}_{0:E-1}^0, \rvx_{E:F-1}^{\tau_{i-1}} | \Bar{\rvx}_{0:E-1}^0, \rvx_{E:F-1}^{\tau_i}\right)
+\end{align}
+We will refer to this method as the \textit{replacement-without-noise} method.
+
+\citet{song2020score,ho2022videodiffusionmodels} additionally add noise to the conditioning latents
+\begin{align}
+    \displaystyle p_\theta\left(\Bar{\rvx}_{0:E-1}^{\tau_{i-1}}, \rvx_{E:F-1}^{\tau_{i-1}} \middle| \Bar{\rvx}_{0:E-1}^{\tau_i}, \rvx_{E:F-1}^{\tau_i}\right)
+\end{align}
+where $\displaystyle \Bar{\rvx}_{0:E-1}^{\tau_i}$ are the condition latents $\displaystyle \Bar{\rvx}_{0:E-1}^{0}$ noised via the forward process (\cref{eq:forward_diffusion,eq:add_noise}).
+This maintains the same noise level distribution and training objective as regular video diffusion models.
+We will refer to this method as the \textit{replacement-with-noise} method.
+
+Both the \textit{replacement-with-noise} method and the \textit{replacement-without-noise} method allow a video diffusion model to autoregressively generate video frames by conditioning on previous frames.
+We consider them as baselines in our experiments in~\cref{sec:exp:long}.
+
+\input{figs/fig_noise_level_comparison/fig}
+
+
+\section{Progressive Autoregressive Video Diffusion Models}
+
+\label{sec:method}
+Existing video diffusion models~\citep{meta2024moviegen,blattmann2023stable,guo2023animatediff,bartal2024lumierespacetimediffusionmodel} can only generate short video clips up to a limited length (e.g. 10 seconds or 240 frames), due to GPU memory constraints during training.
+We show that, without changing the architectures, they can be naturally extended to \textit{progressive autoregressive} video diffusion models that can generate long videos without quality degradation.
+We achieve this by proposing a per-frame noise schedule, which is inspired by~\citet{chen2024diffusionforcingnexttokenprediction}.
+During training, we finetune pre-trained video diffusion models to adapt to such noise schedule;
+during sampling, our models adopt such noise schedule and can thus autoregressively generate video frames.
+
+\subsection{Progressive Video Denoising}
+\label{sec:method:progressive}
+Inspired by~\citep{chen2024diffusionforcingnexttokenprediction}, we assign progressively increasing noise levels $\displaystyle \bm{\tau}_{0:F-1}$ to the $F$ latent frames in the attention window.
+These noise levels can be obtained from the sampling noise level schedule $\displaystyle \bm{\tau} = \{\tau_0, \tau_1, ..., \tau_{S}\}$~\citep{song2021ddim}, where $\displaystyle 0 = \tau_0 < \ldots < \tau_{i-1} < \tau_i < \ldots < \tau_S = T$, depending on $F$ and $S$.
+In this work, we consider the linear sampling schedule
+\begin{align}
+    \label{eq:linear_schedule}
+    \displaystyle \bm{\tau}'_{0:S} = \left\{\tau'_0, \tau'_1, \tau'_2, \ldots, \tau'_{S-1}, \tau'_S \right\} = \left\{ 0, \frac{T}{S}, \frac{2T}{S}, \ldots, \frac{(S-1)T}{S}, T\right\}
+\end{align}
+
+For simplicity, we set $F=S$, so that our latents' noise levels $\displaystyle \bm{\tau}_{0:F-1}$ can take the values of either $\displaystyle \bm{\tau}'_{0:S-1}$ or $\displaystyle \bm{\tau}'_{1:S}$.
+We denoise the latent frames of a video with the progressively increasing noise levels
+\begin{align}
+    \label{eq:progressive}
+    \displaystyle p_\theta\left(\rx_{0}^{\tau'_0}, \rx_{1}^{\tau'_1}, ..., \rx_{F-2}^{\tau'_{S-2}}, \rx_{F-1}^{\tau'_{S-1}} \middle| \rx_{0}^{\tau'_1}, \rx_{1}^{\tau'_2}, ..., \rx_{F-2}^{\tau'_{S-1}}, \rx_{F-1}^{\tau'_S}\right)
+\end{align}
+where the input frames and output frames have noise levels $\bm{\tau}'_{1:S}$ and $\bm{\tau}'_{0:S-1}$ respectively.
+
+With our progressive noise levels, which is a subset of independent noise levels $\displaystyle \rvt_{0:F-1}$ for the frames $\displaystyle \rvx_{0:F-1}$, one concern is that whether this formulation is still compatible with existing video diffusion models.
+Conceptually, we are effectively using a single set of model parameters $\theta$ to jointly model $F$ latents $\displaystyle q(\rx^0_0), q(\rx^0_1), \ldots, q(\rx^0_{F-1})$, where each latent has a single noise level $t_f$ like regular diffusion models.
+Thus, we can directly apply the forward process, reverse process, and training loss (\cref{eq:forward_diffusion,eq:add_noise,eq:ddpm_loss,eq:ddim_reverse}) of existing video diffusion models~\citep{ho2020ddpm,song2021ddim,liu2022rectifiedflow,liu2023instaflow}. 
+This means that we can obtain our progressive autoregressive video diffusion models from pre-trained video diffusion models, which demands immense computation resources.
+
+Intuitively, the benefit of our progressive video denoising process is that it gradually establishes correlation among consecutive latent frames.
+Given some existing video latents as conditioning, it is challenging for video diffusion models to produce temporally consistent extensions latents from newly sampled noisy latents~\citep{qiu2024freenoisetuningfreelongervideo}.
+In contrast to the \textit{replacement-with-noise} method~\citep{blattmann2023stable,ho2022videodiffusionmodels} where the latents are denoised together at the same noise level, our progressive video denoising encourages the later latents with higher uncertainty to follow the patterns of the earlier and more certain latents, facilitating modeling a smoother temporal transition and better preserving motion velocity.
+Compared to the \textit{replacement-without-noise} method where there is a large noise level gap between the clean condition latents $\displaystyle \Bar{\rvx}_{0:E-1}^{0}$ and the noisy frames $\displaystyle \rvx_{E:F-1}^{\tau_i}$, our method provides more fine-grained condition, where difference of noise levels between neighboring latents is only $\frac{T}{S}$, as illustrated in~\cref{eq:linear_schedule,fig:noise_level_comparison}.
+Additionally, both \textit{replacement} methods~\citep{ho2022videodiffusionmodels,blattmann2023stable,opensora} need to balance between the benefit of having larger overlap between two subsequent attention windows and the extra computation cost when setting the number of condition frames $E<F$.
+In contrast, our method can have the maximum attention window overlap of $F-1$ latents while not requiring any extra computation (\cref{eq:progressive}).
+
+Another benefit of our method is the more efficient modeling of long videos of $L$ latent frames using video diffusion models with a limited attention window length $F < L$.
+During training, the model needs to fit any subset of $F$ latents out of the $L$ latents.
+When using the two \textit{replacement} methods~\citep{ho2022videodiffusionmodels,blattmann2023stable,opensora}, the model needs to train on the full range of noise levels $t\in[0,T)$ for each data sample of $F$ latents. 
+With our method, the neighboring training data are efficiently modeled as exactly one sampling step apart from each other, so that we only need to train on the noise levels between $\displaystyle \bm{\tau}'_{0:S-1}$ and $\displaystyle \bm{\tau}'_{1:S}$.
+\subsection{Autoregressive Generation}
+\label{sec:method:autoregressive}
+Notice that the noise levels of the input and output latents in~\cref{eq:linear_schedule,eq:progressive}, $\displaystyle \bm{\tau}'_{0:S-1}$ and $\displaystyle \bm{\tau}'_{1:S}$, only differ by $\displaystyle \tau'_0=0$ and $\displaystyle \tau'_S=T$.
+We can simply transition the output latents into the correct input noise levels by saving and removing the clean latent $\displaystyle \rx_0^0$ at the front, shifting the latent sequence forward once, and appending a new noisy latent $\displaystyle \rx_{F-1}^T \sim \mathcal{N}( \mathbf{0} , \mI )$ at back.
+\cref{alg:main,fig:main} details this autoregerssive sampling procedure.
+
+\input{algs/main_alg}
+
+\paragraph{Variable Length} The above design only allows for autoregressive video extension given an initial video of length $F$.
+In addition, the noisy latents remaining in the attention window $\displaystyle \rvx_{0:F-1}^{\bm{\tau}'_{1:S}}$  (line 8 of~\cref{alg:main}) are discarded after the end of the autoregressive inference, which can cause wasted computing resources and inaccurate handling of the ending of text prompt.
+To enable text-to-long-video generation without starting latents and proper generation of ending latents, we extend the base design in~\cref{eq:progressive,alg:main} to add an initialization stage and an termination stage, where the model operates on variable attention window lengths from $1$ to $F-1$.
+During initialization, we simply disable the ``removing $\displaystyle \rx_0^0$'' operation in line 8 of~\cref{alg:main}: starting from a noisy latent $\displaystyle \rx_0^T$, we denoise it for one step and append a new noisy latent to obtain $\displaystyle \{ \rx_0^{\tau'_{S-1}}, \rx_1^T \}$; we repeat this by $F-1$ times to obtain $\displaystyle \rvx^{\bm{\tau}'_{1:S}}_{0:F-1} = \left\{ \rx_1^{\tau'_1}, \ldots, \rx_{F-2}^{\tau'_{S-1}}, \rx_{F-1}^{T} \right\}$, i.e. the input to line 5 of~\cref{alg:main}.
+During termination, we disable the ``append $\displaystyle \rx_{F-1}^T$'' operation: 
+starting with $F$ latents $\displaystyle \rvx^{\bm{\tau}'_{1:S}}_{0:F-1} = \left\{ \rx_0^{\tau'_1}, \ldots, \rx_{F-2}^{\tau'_{S-1}}, \rx_{F-1}^{T} \right\}$, we denoise them for one step, save and remove the first latent $\displaystyle \rx_0^0$ and shift the latents by $-1$ to obtain $\displaystyle \rvx^{\bm{\tau}'_{1:S-1}}_{0:F-2} = \left\{ \rx_0^{\tau'_1}, \ldots, \rx_{F-2}^{\tau'_{S-1}} \right\}$; we repeat this by $F$ times to save and remove all the remaining latents in the attention window.
+We train the model accordingly on video latent frames with variable lengths ranging from $1$ to $F-1$, following the noise levels described above. 
+
+\subsection{Training}
+\label{sec:method:training}
+While regular video diffusion models always treat the latent frames as a single entity by assigning a single noise level $\displaystyle \rt$ to all of them, we extend this formulation by modeling each frame independently and assigning them with varying noise levels $\displaystyle \rvt_{0:F-1}$.
+This change in the noise level distribution typically requires finetuning the pre-trained video diffusion model to adapt to our progressive noise level distribution.
+We finetune pre-trained video diffusion models by modifying the noise levels during training. 
+Regular diffusion model training~\citep{ho2020ddpm,liu2022rectifiedflow,liu2023instaflow} involves uniformly sampling a noise level $\rt\in [0, T)$, adding noise to the samples $\displaystyle \rvx^0_{0:F-1}$ via the forward diffusion process (\cref{eq:forward_diffusion,eq:add_noise}), and computing the loss (\cref{eq:ddpm_loss}).
+To enable sampling with progressive noise levels in~\cref{eq:linear_schedule,eq:progressive}, we simply switch to per-frame training noise levels $\displaystyle \rvt_{0:F-1}$. 
+In our experiment, we observed that, similar to the sampling noise levels $\displaystyle \bm{\tau}'_{0:S}$ in~\cref{eq:linear_schedule}, training on a simple linear noise schedule yielded satisfactory results for all reported experiments. 
+During training, the noise levels $\displaystyle \vt$ is perturbated by a random shift $\displaystyle \delta$  to preserve the coverage of the full diffusion timestep range $[0, T)$~\citep{song2020denoising}. $\displaystyle \delta=0.4\epsilon(\rt_i-\rt_{i+1}), \bm{\epsilon} \sim \mathcal{N}( 0 , \mI )$ is randomly sampled for each training iteration and remains constant for all $\displaystyle \rvt_{0:F-1}$ within that iteration.
+
+
+
+
+
+\section{Experiments}
+
+
+In this section, we follow our terminology as discussed and defined in~\cref{sec:bg:long_replacement}, including the \textit{replacement-with-noise} method, the \textit{replacement-without-noise} method, and attention window.
+
+\subsection{Implementation}
+
+\paragraph{Our models and baseline models}
+
+We implement our progressive autoregressive video diffusion models by fine-tuning from pre-trained models. Specifically, we use two video diffusion models based on the diffusion transformer architecture~\citep{peebles2023dit,openai2024sora}: Open-Sora v1.2~\citep{opensora} (denoted as \opensora) and a modified variant of Open-Sora (denoted as \internalmodel in later experiments).
+Both models are latent video diffusion models~\citep{blattmann2023align}, each utilizing a corresponding 3D VAE that encodes 17 (\opensora) or 16 (\internalmodel) video frames into 5 latent representations.
+\opensora generates videos at 240$\times$424 resolution 24 FPS with 30 sampling steps.
+\internalmodel produces results at 176$\times$320 resolution 24 FPS with 50 sampling steps.
+Based on \opensora and \internalmodel, we also implement two baseline autoregressive video generation methods, \textit{replacement-with-noise} (denoted as RW) and \textit{replacement-without-noise} (denoted as RN) (\cref{sec:bg:long_replacement}), to compare with our proposed \textit{progressive autoregressive} (denoted as PA) video generation method (\cref{sec:method}).
+
+We train \internalmodel on our progressive noise levels, as discussed in~\cref{sec:method:training}.
+The resulting model can perform progressive autoregressive video generation, which we denote as PA-\internalmodel.
+We also train \internalmodel with the \textit{replacement-with-noise} method, which we will denote as RW-\internalmodel.
+Starting from the same pre-trained weight of the base model, RW-\internalmodel is trained for 3 times more training steps compared to PA-\internalmodel.
+
+\opensora undergoes masked pre-training~\citep{opensora}, where the masked latents $\displaystyle \rvx_{0:E-1}^0$ are clean without any added noise~\citep{opensora}. 
+This allows the \opensora base model to perform autoregressive video generation with the \textit{replacement-without-noise} method.
+We denote this model as RN-\opensora-base.
+Such training also allows \opensora to learn that the noise levels $\displaystyle \rvt_{0:F-1}$ can be independent with respect to the latent frames and thus enables our \textit{progressive autoregressive} video denoising sampling procedure (\cref{sec:method:autoregressive,alg:main}) to work training-free.
+We denoise this model as PA-\opensora-base.
+\paragraph{Training details}
+We train \internalmodel and \opensora on captioned image and video datasets, containing 1 million videos and 2.3 billion images.
+These data are licensed and have been filtered to remove low-quality content.
+We train PA-\internalmodel on video clips of $16, 32, ..., 176$ frames that correspond to $F=5, 10, ..., 55$ latents.
+The $F=55$ attention window length is derived by setting $F=S+5$, where $S=50$ is the number of sampling steps in M ($S=30$ in O) and $5$ is the length of an additional chunk of latent frames. The advantage of such design is described in the below ``Keeping clean frames available in temporal self-attention'' paragraph.
+The shorter latent frame lengths $F=5, 10, ..., 50$ are used for the variable length training, as discussed in~\cref{sec:method:autoregressive}.
+RW-\internalmodel is trained on videos of $64$ frames that corresponds to $F=20$ latents.
+
+\paragraph{Modification to the base model}
+To implement progressive autoregressive video diffusion models on top of their pre-trained foundation video diffusion models, we do not need to modify the base model architectures.
+Instead, we only need to modify the model's forward, training, and inference procedures.
+In the training and inference procedures, we replace the single noise level $\displaystyle \rt \in [0, T)$ from regular diffusion model training~\citep{ho2020ddpm,ho2022videodiffusionmodels} with our per-frame noise level $\displaystyle \rvt_{0:F-1}$ and $\displaystyle \bm{\tau}'_{0:S-1}$ (\cref{sec:method:training,sec:method:progressive}).
+To accommodate this change, we only need to make a single modification to the the noise level embedding computation in the model's forward procedure. 
+While the regular timestep only has the batch size dimension $B$, our progressive timesteps has two dimensions $B, F$.
+We first flatten them into the batch dimension of size $B \times F$, pass it to the timesteps embedding module, unflatten the two dimensions, and finally broadcast the timestep embedding to the same shape of the latents so they can be combined through either addition, concatenation, modulation, or cross-attention~\citep{perez2018film,NIPS2017_attention,peebles2023dit}.
+
+\label{sec:4.1}
+\paragraph{Chunk-by-chunk denoising}
+3D VAE~\citep{opensora} usually encode and decode video latent frames chunk-by-chunk.
+In our early experiments on PA-\internalmodel and PA-\opensora with $F=S$, we find that there is serious cumulative error when all latents are given different noise levels and the attention window is shifted by one latent at a time, causing the generated videos to diverge quickly after a few seconds, as shown in Ablation 2 in~\cref{fig:vs_ablation}.
+We resolve the problem by treating each chunk of latents as a single latent: they are assigned with the same noise level, and are added and removed from the attention window together.
+In other words, for the 3D VAE chunk size of $C=5$ latents in \internalmodel and \opensora, we shift the attention window by $C$ latents every $C$ sampling steps.
+Effectively, the $C$ latents that belong to the same chunk always have the same noise level $t$ and are added to or removed from the attention window together.
+Our ablation experiments on both \opensora and \internalmodel show that the chunked training and inference substantially improves the generation result.
+
+\paragraph{Keeping clean frames available in temporal self-attention}
+The default design of our progressive autoregressive video denoising process presented in~\cref{sec:method:autoregressive} results in temporal jittering.
+This is because the clean latents $\displaystyle \rvx_{0:C-1}^0$ are immediately removed from the attention window; 
+as the later latents cannot attend to the previous clean latents, it is hard for the model to denoise the later latents to be perfectly temporally consistent with the previous clean latents.
+In practice, we always keep a chunk of $C$ clean latents, e.g.,  $C=5$ mentioned ahead in our training details, in front of all the noisy latents, extending the attention window lengths $F$ from $50$ to $55$ and from $30$ to $35$ for \internalmodel and \opensora respectively.
+This helps resolving the frame-to-frame discontinuity issue.
+
+\subsection{Long video generation}
+\label{sec:exp:long}
+\paragraph{Baselines}
+As discussed in~\cref{sec:4.1}, using our base models, we implement two baseline autoregressive video generation methods on three models, which are denoted as RW-\internalmodel, RN-\opensora-base, and RN-\opensora.
+We also compare to Stable Video Diffusion (SVD)~\citep{blattmann2023stable} and StreamingT2V~\citep{henschel2024streamingt2vconsistentdynamicextendable} model families.
+Specifically, we consider the SVD-XT model from SVD, a image-to-video model that generates a short video clip of 25 frames at 576x1024 resolution given an conditioning image.
+We apply it autoregressively, using the last image of the previous clip as the condition for generating a new clip.
+This is equivalent to the \textit{replacement-without-noise} method except that it only conditions on a single frame rather than a chunk of 17 frames as RN-\opensora.
+We also consider the StreamingSVD model from StreamingT2V, a image-to-long-video generation model that uses SVD as the base model~\citep{henschel2024streamingt2vconsistentdynamicextendable}; its autoregressive video generation is enabled by training additional modules that connect to the base model via cross-attention.
+Similar to our progressive autoregressive video diffusion models, StreamingSVD can autoregressively generate long videos at 720x1280 resolution with arbitrary lengths, which we set to 1440 frames.
+\paragraph{Testing set}
+Our testing set consists of 40 text prompts and the corresponding real videos, sampled from Sora~\citep{opensora} demo videos, MiraData~\citep{ju2024miradatalargescalevideodataset}, 
+UCF-101~\citep{soomro2012ucf101}, and LOVEU~\citep{wu2023tune,wu2023cvpr}.
+For each text prompt, we generate two videos with 1440 frames, 60 seconds long at 24 FPS, resulting in a total of 80 videos.
+We use these 80 videos from each model for both quantitative and qualitative results, unless specified otherwise.
+Due to computation resource limitations of sampling 1-minute long videos, we only obtained partial results from \internalmodel-PA and StreamingSVD, including 48 videos from 24 text prompts and 40 videos from 40 text prompts respectively. 
+This testing set measures the zero-shot long video generation ability of the models, since none of them are specifically trained on any of the above datasets.
+
+Since our focus is on long video generation, we focus on the video extension capability of the models rather than the text-to-short-video generation capability.
+Thus, we use the initial frames of the videos as the condition for all models, similar to the setting in~\citep{henschel2024streamingt2vconsistentdynamicextendable}.
+\internalmodel, \opensora~\citep{opensora}, StreamingSVD~\citep{henschel2024streamingt2vconsistentdynamicextendable}, and SVD-XT~\citep{blattmann2023stable} use 16, 17, 1, and 1 frames from the real video as the initial condition.
+
+\paragraph{Metrics}
+We consider 6 metrics in VBench~\citep{huang2024vbench}: subject consistency, background consistency, motion smoothness, dynamic degree, aesthetic quality, and imaging quality. 
+We compute average metrics using VBench-long, where each metric is computed on 30 2-second clips for each 60-second video; for subject and background consistency, a clip-to-clip metric is considered in addition to the average metric over the clips.
+We also show how the metrics vary over time by plotting the metrics over the 30 2-second clips averaged over the 80 60-second videos.
+Similar to~\citet{henschel2024streamingt2vconsistentdynamicextendable}, we also use the Adaptive Detector algorithm from PySceneDetect~\citep{pyscenedetect} to count the number of detected scene changes, where Num Scenes $=1$ means that there is no scene change detected.
+\paragraph{Quantitative Results}
+We present the average metrics for each model in~\cref{tab:main}. 
+The metrics are averaged over all the videos that each model generates from our testing set described above.
+In~\cref{fig:vbench}, we also illustrate the trend of metrics over the 1-minute duration of videos for each model. 
+We find that subject consistency, background consistency, and motion smoothness metrics are not discriminative, as all models have obtained similar results on these metrics on average and can also maintain them over the 1-minute duration.
+We summarize the quantitative results on the remaining metrics of each model below.
+
+\input{tables/main_table}
+\input{figs/fig_score_over_time/fig}
+
+Our PA-\internalmodel obtains the best overall quality; on average, it has substantially better dynamic degree than all except SVD-XT, the best aesthetic and imaging quality, and only slightly worse number of scenes than RW-\internalmodel and StreamingSVD; it is able to best maintain the level of dynamic degree, aesthetic and imaging quality over the 1-minute duration.
+
+Although the baseline RW-\internalmodel has a nearly perfect number of scenes $\approx 1$, it has a poor dynamic degree that degrades substantially after a few seconds, where most of its generated videos are static; furthermore, its aesthetic and image qualities also degrades over the 1-minute duration.
+
+Our PA-\opensora-base achieves slightly better dynamic degree, aesthetic quality and imaging quality on average and better maintains them over time compared to RN-\opensora-base; it also substantially reduces the number of scenes and is effectively generating longer video shots; these results are impressive given that they are obtained training-free.
+
+The other baseline RN-\opensora-base have worse aesthetic and imaging quality than our PA-\opensora-base both on average and over time; it also has the worst number of scenes, making it fail at the core goal of long video generation.
+
+StreamingSVD achieves good overall quality; it achieves the best number of scenes, decent dynamic degree, aesthetic quality and imaging quality and can maintain them over time; however, they worse than our PA-\internalmodel on average.
+
+SVD-XT, although achieves the best dynamic degree, also has the worst aesthetic and imaging quality both on average and over time, making its results undesirable.
+
+
+\paragraph{Qualitative Results}
+\input{figs/fig_qualitative_new/fig}
+We also show strength of our method with qualitative comparison results in~\cref{fig:qualitative}. 
+Both of our models demonstrate strong performance in terms of frame fidelity and motion realism (e.g. camera motion, wave motion, and running gestures). 
+PA-\internalmodel outperforms PA-\opensora due to additional fine-tuning with our proposed progressive noise levels~\cref{sec:method:training}, whereas PA-\opensora simply inherits the pre-trained weights from Open-Sora v1.2 base model~\citep{opensora}. 
+In contrast, SVD-XT~\citep{blattmann2023stable} shows severe artifacts that decreases frame validity, and StreamingSVD from StreamingT2V~\citep{henschel2024streamingt2vconsistentdynamicextendable} suffers from cumulative errors, resulting in degraded video quality as the sequence length increases. 
+For more qualitative results, please refer to our website \url{https://desaixie.io/pa-vdm/}.
+
+\input{figs/fig_ablation/fig}
+
+
+\subsection{Ablation Study}
+
+We conduct ablation studies on the PA-\internalmodel model to evaluate the impact of ``chunk-by-chunk denoising'' and ``keeping clean frames available in temporal self-attention'', as described in~\cref{sec:4.1}. 
+Qualitative comparison has been shown in~\cref{fig:vs_ablation}. 
+In Ablation 1, we observe that the absence of clean frames in the input sequence prevents noisy frames from attending to previous clean frames, resulting in poor performance over a long duration. 
+This also causes frame-to-frame discontinuity, which is more noticeable in the supplementary anonymous webpage. In Ablation 2, not decoding the video chunk-by-chunk leads to severe cumulative errors, causing the video to diverge after only a few seconds.
+
+\todos{proper ending qualitative result}
+
+
+
+
+
+\section{Related Works}
+
+\label{sec:related}
+
+The field of long video generation has faced significant challenges due to the computational complexity and resource constraints associated with training models on longer videos. As a result, most existing text-to-video diffusion models \citep{guo2023animatediff,ho2022imagen,ho2022videodiffusionmodels,blattmann2023stable} have been limited to generating fixed-size video clips, which leads to noticeable degradation in quality when attempting to generate longer videos. Recent works are proposed to address these challenges through innovative approaches that either extend existing models or introduce novel architectures and fusion methods. 
+
+Freenoise~\citep{qiu2024freenoisetuningfreelongervideo} utilizes sliding window temporal attention to ensure smooth transitions between video clips but falls short in maintaining global consistency across long video sequences. Gen-L-video~\citep{wang2023genlvideomultitextlongvideo}, on the other hand, decomposes long videos into multiple short segments, decodes them in parallel using short video generation models, and later applies an optimization step to align the overlapping regions for continuity. FreeLong~\citep{lu2024freelong} introduces a sophisticated approach which balances the frequency distribution of long video features in different frequency during the denoising process. Vid-GPT~\citep{gao2024vidgptintroducinggptstyleautoregressive} introduces GPT-style autoregressive causal generation for long videos.
+
+More recently, Short-to-Long (S2L) approaches are proposed, where correlated short videos are firstly generated and then smoothly transit in-between to form coherent long videos. StreamingT2V~\citep{henschel2024streamingt2vconsistentdynamicextendable} adopts this strategy by introducing the conditional attention and appearance preservation modules to capture content information from previous frames, ensuring consistency with the starting frames. It further enhances the visual coherence by blending shared noisy frames in overlapping regions, similar to the approach used by SEINE~\citep{chen2023seine}. NUWA-XL~\citep{yin2023nuwa} leverages a hierarchical diffusion model to generate long videos using a coarse-to-fine approach, progressing from sparse key frames to denser intermediate frames. However, it has only been evaluated on a cartoon video dataset rather than natural videos. VideoTetris~\citep{tian2024videotetris} introduces decomposing prompts temporally and leveraging a spatio-temporal composing module for compositional video generation. 
+
+Another line of research focuses on controllable video generation~\citep{zhuang2024vlogger,tian2024emo,hu2024animate,zhu2024champ} and has proposed solutions for long video generation using overlapped window frames. These approaches condition diffusion models using both frames from previous windows and signals from the current window. While these methods demonstrate promising results in maintaining consistent appearances and motions, they are limited to their specific application domains which relies heavily on strong conditional inputs.
+
+
+
+\section{Discussion}
+
+In this work, we target long video generation, a fundamental challenge of current video diffusion models.
+We show that they can be naturally adapted to become progressive autoregressive video diffusion models without changing the architectures.
+With our progressive noise levels and the autoregressive video denoising process (\cref{sec:method:progressive,sec:method:autoregressive}), we obtain state-of-the-art results on long video generation at 1-minute long.
+Since our method does not require changing the model architectures, it can be seamlessly combined with many orthogonal works, paving the way for generating longer videos at higher quality, long-term dependency, and controllability.
+
+A limitation of our method is the demand of a well-trained base video diffusion model.
+Similar to the \textit{replacement} methods~\citep{ho2022videodiffusionmodels,opensora} and other approaches like StreamingT2V~\citep{henschel2024streamingt2vconsistentdynamicextendable}, our method autoregressively applies a video diffusion model to generate long videos. 
+Such autoregressive video generation poses huge challenge on the base video diffusion model. 
+Some slight errors remaining in the ``clean'' latents $\displaystyle \rvx^0$ may not be noticeable in a single video clip; 
+however, in the autoregressive scenario, these error can be carried onto later frames, resulting in quality degradation.
+Further more, as the video diffusion model is only trained on denoising latents of real video data, it may poorly handle such distribution shift towards the generated erroneous latents~\citep{xie2024carve3d,fan2024reinforcement}, resulting in more severe quality drop.
+This means that even after finetuning on our progressive noise levels, our method could still generate videos with some degree of quality degradation over time if the base video diffusion model is not well trained.
+
+There are many promising future directions to extend this work.
+We only train on progressively increasing noise levels to reduce the space of noise levels for easier convergence.
+If sufficient computing resources are available, training on fully random, per-frame independent noise levels would enable a single model for various tasks with arbitrary lengths, including video extension, connection, temporal super-resolution.
+Another promising future application of the long video generation ability of our models is to use them as world simulators, useful for tasks in robotics and 3D vision.
+Being able to generate long videos without quality degradation is an substantial step towards this direction.
+\todos{citations}
+
+
+
+
+
+
+
+

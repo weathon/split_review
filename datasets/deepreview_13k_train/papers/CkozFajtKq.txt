@@ -1,0 +1,556 @@
+\title{Flow Matching for Accelerated Simulation of Atomic Transport in Materials}
+
+\begin{abstract}
+We introduce \textsc{LiFlow}, a generative framework to accelerate molecular dynamics (MD) simulations for crystalline materials that formulates the task as conditional generation of atomic displacements.
+The model uses flow matching, with a \textit{Propagator} submodel to generate atomic displacements and a \textit{Corrector} to locally correct unphysical geometries, and incorporates an adaptive prior based on the Maxwell--Boltzmann distribution to account for chemical and thermal conditions.
+We benchmark \textsc{LiFlow} on a dataset comprising 25-ps trajectories of lithium diffusion across 4,186 solid-state electrolyte (SSE) candidates at four temperatures.
+The model obtains a consistent Spearman rank correlation of 0.7--0.8 for lithium mean squared displacement (MSD) predictions on unseen compositions.
+Furthermore, \textsc{LiFlow} generalizes from short training trajectories to larger supercells and longer simulations while maintaining high accuracy.
+With speed-ups of up to 600,000$\times$ compared to first-principles methods, \textsc{LiFlow} enables scalable simulations at significantly larger length and time scales.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Atomic transport is a fundamental process that governs the performance of materials in various technologies, including energy storage, catalysis, and electronic devices \citep{balluffi2005kinetics,yip2023molecular}.
+Solid-state electrolytes (SSEs) are a prime example, emerging as a safer and more stable alternative to liquid electrolytes commonly used in lithium-ion batteries \citep{bachman2016inorganic}.
+The study and design of SSEs rely on fast and accurate atomistic simulation techniques to model the intricate ionic diffusion behaviors that dictate the atomic transport in these materials.
+The standard method, \textit{ab initio} molecular dynamics (AIMD), involves costly density functional theory (DFT) calculations for each propagation step in the scale of femtoseconds.
+Hence, their application is limited to small spatiotemporal scales and a few simulations, often insufficient for characterizing diffusive dynamics or screening candidate materials.
+Recently, universal machine learning interatomic potentials (MLIPs), trained on large-scale DFT calculations, have emerged as a promising alternative \citep{friederich2021machine,ko2023recent}.
+However, even with MLIPs, dynamics must be discretized in sufficiently small time steps to ensure stable and accurate propagation \citep{fu2023forces} and are still too slow to enable scalable simulation to perform high-throughput screening from large material databases.
+
+To accelerate MD simulations for small bio/organic molecules, methods such as Timewarp \citep{klein2024timewarp}, Implicit Transfer Operator Learning (ITO, \citet{schreiner2024implicit}), Score Dynamics (SD, \citet{hsu2024score}), and Force-Guided Bridge Matching (FBM, \citet{yu2024force}) have been proposed.
+These methods leverage a generative model to propagate the conformational distribution from time $\tau$ to time $\tau + \Delta \tau$, where $\Delta \tau$ is much larger than the typical MD time steps.
+A similar approach has been applied to coarse-grained polymer electrolyte simulations in \citet{fu2023simulate}.
+
+In the context of all-atom simulations of crystalline materials across different temperatures, these methods do not account for symmetries or handle various atom types under various simulation conditions.
+This work aims to address this by developing a tailored, flow-matching-based, generative acceleration framework designed for scalable and cost-effective simulations of crystalline materials and diffusive dynamics in SSEs.
+The key objective is to construct a model capable of accurately reproducing relevant kinetic observables, such as mean squared displacement (MSD) and self-diffusivity of mobile ions, in comparison to long MD simulations using MLIPs or AIMD.
+
+Our contributions are as follows:
+\begin{itemize}[leftmargin=2em]
+    \item We introduce the task of generative acceleration of MD for crystalline materials, formulating it as the conditional generation of atomic displacements.
+    Our approach accounts for periodic boundary conditions and generalizes effectively across different supercell sizes.
+    \item We develop a flow matching approach with a physically motivated adaptive prior to account for chemical and thermal conditions, along with a corrector mechanism to ensure stability.
+    \item Additionally, we contribute a trajectory dataset based on MLIPs, designed to benchmark performance across diverse material systems and temperature conditions.
+\end{itemize}
+
+
+
+\section{Background}
+
+\subsection{Preliminaries}
+\label{sec:preliminaries}
+
+\paragraph{Crystalline materials and representation}
+The crystal structure, assuming perfect order with translational symmetry, can be idealized as an infinite repetition of atoms, each assigned an atom type from the periodic table $\mathcal{A}$, within a unit cell with periodic boundary conditions \citep{ashcroft1976solid}.
+In this work, the structure of a material with $n$ atoms in the unit cell is represented by the tuple $\mathcal{M} = (\bm{X}, \bm{L}, \bm{a})$, where $\bm{X} = (\bm{x}_1, \bm{x}_2, \cdots, \bm{x}_n)^\top \in \mathbb{R}^{n \times 3}$ denotes the Cartesian coordinates of the atoms, $\bm{L} = (\bm{l}_1, \bm{l}_2, \bm{l}_3)^\top \in \mathbb{R}^{3 \times 3}$ with rows defining the basis vectors of a 3-D repeating unit cell, and $\bm{a} \in \mathcal{A}^n$ is the atom types.
+We impose a graph structure on the material by connecting pairs of nearby atoms with edges \citep{schutt2017schnet}, possibly across unit cell boundaries.
+An edge $((i, j), \bm{k}) \in \llbracket 1, n\rrbracket^2 \times \mathbb{Z}^3$ is formed between atoms $i$ and $j$ if the distance between atom $i$ and atom $j$, displaced by $\bm{k}$ unit cells from $i$, is smaller than the cutoff, i.e., $\left\Vert \bm{x}_j + \bm{kL} - \bm{x}_i \right\Vert_2 < r_\text{cutoff}$.
+An $a \times b \times c$ supercell of $\mathcal{M}$ is defined as
+\begin{equation}
+    (\bm{X}', \bm{L}', \bm{a}') = (\oplus_{\kappa=1}^{abc} (\bm{X} + \bm{1}_n \otimes \bm{k}_\kappa), \bm{L} \operatorname{diag}(a, b, c), \oplus_{\kappa=1}^{abc} \bm{a}),
+    \label{eq:supercell}
+\end{equation}
+where $\oplus$ denotes concatenation, $\otimes$ is the outer product, and $\bm{k}_\kappa \in \mathbb{Z}_a \times \mathbb{Z}_b \times \mathbb{Z}_c$ represents the index of unit cell repetitions.
+Although the method is designed for general crystalline materials, the primary application of this work is on lithium SSEs, which are further discussed in \cref{sec:solid_state_electrolytes}.
+
+\paragraph{Molecular dynamics for materials}
+MD is a simulation methodology used to sample ensembles of configurations or trajectories of atomistic systems by solving the equation of motion, $\bm{M}\Ddot{\bm{X}}_\tau = - \nabla U(\bm{X}_\tau)$, over time $\tau$,\footnote{In this work, we denote physical time by $\tau$ and flow matching time by $t$. For clarity, we omit the physical time when it does not cause ambiguity, e.g., $\bm{D}_0$ and $\bm{D}_1$ correspond to $t = 0$ and $1$, respectively.} where $\bm{M} = \operatorname{diag}(\bm{m})$ is the diagonal matrix of atomic masses, $\bm{m} = \bm{m}(\bm{a})$, and $U(\bm{X})$ is the potential energy \citep{frenkel2023understanding}.
+Given the initial position $\bm{X}_0$ and the velocity $\dot{\bm{X}}_0$, typically sampled from the Maxwell--Boltzmann distribution, the equation of motion is usually discretized and propagated with a time step of 0.5--2 fs, depending on the fastest motion of the system.
+For organic and biomolecules with a limited number of atom types, classical force fields with specified functional forms are routinely used to approximate the system energy with reasonable accuracy.
+However, for inorganic solid systems containing various elements across the periodic table, the parametrization of classical force fields is challenging, and $U(\cdot)$ is often derived from quantum mechanical calculations (\textit{ab initio} MD), which are computationally much more expensive and scale poorly ($\mathcal{O}(n^3)$ in theory).
+\paragraph{Machine learning interatomic potentials}
+Due to the high computational cost of \textit{ab initio} calculations, machine learning interatomic potentials (MLIPs) based on graph neural networks have been developed to approximate the results of the quantum calculations \citep{friederich2021machine,ko2023recent}.
+Recent advances in universal MLIPs, such as MACE-MP-0 \citep{batatia2024foundation} and CHGNet \citep{deng2023chgnet}, enable faster simulations and linear scaling with respect to number of atoms, but pre-trained models often tend to overestimate the kinetic properties \citep{deng2024overcoming}.
+We employed MLIPs to generate our trajectory dataset of lithium-containing materials to demonstrate chemical transferability across different materials.
+
+\paragraph{Flow matching}
+Flow matching \citep{lipman2023flow} is a generative modeling framework in which samples from the prior distribution $x_0 \sim p_0(x)$ are transported to samples from the data distribution $x_1 \sim q(x)$ by a time-dependent vector field $u_t(x)$ ($t \in [0, 1])$.
+The vector field generates a flow $\psi_t$ defined with $\psi_0(x) = x$ and $(\mathrm{d}/\mathrm{d}t) \psi_t(x) = u_t(\psi_t(x))$ and a probability path $p_t(x) = [\psi_t]_\ast p_0(x)$.
+The data conditional vector field $u_t(x \vert x_1)$ is available in closed form for the commonly used Gaussian probability path, i.e., $p_t(x \vert x_1) = \mathcal{N}(x; \mu_t(x_1), \sigma_t(x_1)^2 \bm{I})$.
+The marginal vector field model $v_t(x; \theta)$ is parametrized by a neural network and learned by the following regression objective:
+\begin{equation}
+    \mathcal{L}_\text{CFM}(\theta) = \mathbb{E}_{t \sim \mathcal{U}(t; 0, 1), x_1 \sim p_1(x), x \sim p_t(x \vert x_1)} \left\Vert v_t(x; \theta) - u_t(x \vert x_1) \right\Vert^2.
+    \label{eq:cfm_loss}
+\end{equation}
+
+\subsection{Related Works}
+\label{sec:related_works}
+\paragraph{ML surrogates for dynamics simulation}
+Several works have explored ML surrogates for time-coarsened dynamics by learning transition probability densities.
+Timewarp \citep{klein2024timewarp} employs a conditional normalizing flow (CNF) with Markov chain Monte Carlo sampling, while ITO \citep{schreiner2024implicit} is a conditional diffusion model designed as an arbitrary time-lag propagator.
+\citet{arts2023two} models coarse-grained (CG) dynamics with diffusion models, SD \citep{hsu2024score} learns the score function of the transition density, F$^3$low \citep{li2024f3low} models protein CG frame transitions with flow matching, and FBM \citep{yu2024force} uses a conditional bridge process with a correction mechanism based on intermediate force fields.
+These methods are applied to biomolecular simulations, with less chemical diversity and different symmetry requirements and task formulations from our work.
+Notably, \citet{fu2023simulate} targets non-Markovian dynamics in CG polymer materials by learning the acceleration and using a score-based corrector.
+While CG allows for the explicit modeling of dynamics over longer timesteps using the equations of motion, our task requires all-atom modeling, necessitating a generative surrogate for the dynamics.
+Moreover, none of these approaches considered a task-specific, physically motivated adaptive prior, which was crucial to the improved performance in this work.
+
+\paragraph{Generative models for materials}
+As a time-hopping conditional generative model for material structures, our approach shares design principles with crystal generation models \citep{xie2022crystal,jiao2023crystal,ai4science2023crystal,zeni2024matter,yang2024scalable,miller2024flowmm}, which use diffusion or flow matching to generate atomic identities and positions within a unit cell.
+While these methods often handle position generation as fractional coordinates with periodic boundaries, our task requires modeling displacements in Cartesian coordinates directly without wrapping positions back into the unit cell (see \cref{sec:task_design}).
+
+\paragraph{Prior design}
+While the normal distribution is commonly used in diffusion and flow-based generative models, incorporating task-specific inductive biases into the prior can improve the performance.
+\citet{lee2022priorgrad} introduced data-dependent priors in diffusion models, \citet{guan2023decompdiff} used decomposed priors for ligand generation, \citet{jing2023eigenfold} applied harmonic priors for protein structure, and \citet{irwin2024efficient} employed scale-based priors for molecular conformation.
+The common goal in these methods is to reduce the transport cost by initializing the prior closer to the data distribution.
+We use a physically motivated prior based on the Maxwell--Boltzmann distribution, which additionally accounts for differences between atom types and reflects thermal and phase conditions.
+
+
+
+\section{Methods}
+
+
+\begin{figure}[!ht]
+\begin{center}
+\includegraphics[width=\textwidth]{figures/liflow_scheme.pdf}
+\caption{
+\textbf{\textsc{LiFlow} scheme.}
+\textsc{LiFlow} is a generative acceleration framework for MD simulations for crystalline materials, with \textit{Propagator} and \textit{Corrector} components leveraging a conditional flow matching scheme for accurate generation of atomic displacements during time propagation.
+}
+\label{fig:overview}
+\end{center}
+\end{figure}
+
+The \textsc{LiFlow} framework is illustrated in \cref{fig:overview}.
+We begin by outlining the problem of generating atomic displacements to accelerate simulations and discussing the symmetry constraints necessary for scalable generation.
+Next, we propose a physically motivated prior and a flow model parametrization that adheres to these constraints, followed by the training and inference processes.
+
+\subsection{Problem Setting}
+Similar to the ML-based MD acceleration methods in \cref{sec:related_works}, our goal is to model the transition probability density of a material structure over a time interval $\Delta \tau$, conditioned on the temperature $T$: $p(\mathcal{M}_{\tau + \Delta \tau} \vert \mathcal{M}_{\tau}, T)$.
+For this task, we fix the lattice $\bm{L}$ (constant volume) and atom types $\bm{a}$, and set $\Delta \tau$ as 1 ps, which is 1,000 times larger than the usual MD time step of 1 fs \citep{marx2009ab}.
+In MD simulations used to model the kinetics of materials, \textit{unwrapped} coordinates are utilized, meaning atomic coordinates are not confined to the unit cell, in order to keep track of the atomic displacements \citep{vonbulow2020systematic}.
+As a result, unlike previous ML surrogates for dynamics of bio/organic molecules (\cref{sec:related_works}) with a single connected component with the fixed center of mass, the distribution of positions does not have a finite support.
+Therefore, we opt to model the distribution of \textit{displacements} over time interval $\Delta \tau$, $\bm{D}_{\Delta \tau} := \bm{X}_{\tau + \Delta \tau} - \bm{X}_{\tau}$.
+In summary,
+\begin{greybox}
+\textbf{Task:} learn the conditional distribution of atomic displacements $p(\bm{D}_{\Delta \tau} \vert \bm{X}_{\tau}, \bm{L}, \bm{a}, T)$ from a dataset of time-separated pairs of structures $\mathcal{D} = \left\{ ((\bm{X}_{\tau}, \bm{X}_{\tau + \Delta \tau}), \bm{L}, \bm{a}, T)) \right\}$, extracted from MD trajectories across various material compositions and temperatures.
+\end{greybox}
+More details and rationale on the task design choices can be found in \cref{sec:task_design}.
+
+\subsection{Conditional flow matching for time propagation}
+
+\subsubsection{Symmetry Considerations}
+The conditional probability density of displacements is invariant to permutation of atomic indices, global translation and lattice shift of atomic coordinates, global rotation applied to relevant variables, and supercell choice (we omit the physical time $\tau$ and $\Delta \tau$ here for brevity):
+\begin{align}
+    & p(\bm{D} \vert \bm{X}, \bm{L}, \bm{a}, T) = p(\bm{P}\bm{D} \vert \bm{P}\bm{X}, \bm{L}, \bm{Pa}, T), & \bm{P} \in S_n \; \text{(permutation)} \label{eq:sym_perm} \\
+    & p(\bm{D} \vert \bm{X}, \bm{L}, \bm{a}, T) = p(\bm{D} \vert \bm{X} + \bm{1}_n \otimes \bm{t}, \bm{L}, \bm{a}, T), & \bm{t} \in \mathbb{R}^3 \; \text{(global translation)} \label{eq:sym_global_trans} \\
+    & p(\bm{D} \vert \bm{X}, \bm{L}, \bm{a}, T) = p(\bm{D} \vert \bm{X} + \bm{ZL}, \bm{L}, \bm{a}, T), & \bm{Z} \in \mathbb{Z}^{n \times 3} \; \text{(lattice periodicity)} \label{eq:sym_lattice} \\
+    & p(\bm{D} \vert \bm{X}, \bm{L}, \bm{a}, T) = p(\bm{D} \bm{R} \vert \bm{X} \bm{R}, \bm{LR}, \bm{a}, T), & \bm{R} \in \mathrm{O}(3) \; \text{(rotation/reflection)} \label{eq:sym_rot} \\
+    & p(\bm{D} \vert \bm{X}, \bm{L}, \bm{a}, T) = p(\bm{D}' \vert \bm{X}', \bm{L}', \bm{a}', T), & \; \text{(supercell, defined as \cref{eq:supercell})} \label{eq:sym_super}
+\end{align}
+In general, to model the invariant densities with CNFs, we need an invariant base distribution and equivariant flow vector fields \citep{kohler2020equivariant,klein2023equivariant}.
+Translational invariances \cref{eq:sym_global_trans,eq:sym_lattice} and supercell invariance \cref{eq:sym_super} are satisfied by our choice of representation for materials (\cref{sec:preliminaries}).
+For $\mathrm{O}(3)$ and $S_n$ symmetries, we model our prior and flow according to the following proposition. 
+\begin{proposition}
+    \label{prop:symmetry}
+    Given an invariant base distribution $p_0(\bm{D}_0)$ satisfying \cref{eq:sym_perm,eq:sym_rot} and an equivariant conditional vector field $u_t(\bm{D}_t \vert \bm{D}_1)$ with the following properties:
+    \begin{align}
+        u_t(\bm{P}\bm{D}_t \vert \bm{P}\bm{D}_1, \bm{P}\bm{X}, \bm{L}, \bm{P}\bm{a}, T) &= \bm{P} u_t(\bm{D}_t \vert \bm{D}_1, \bm{X}, \bm{L}, \bm{a}, T), &\qquad \bm{P} \in S_n \label{eq:flow_perm} \\
+         u_t(\bm{D}_t\bm{R} \vert \bm{D}_1\bm{R}, \bm{X}\bm{R}, \bm{L}\bm{R}, \bm{a}, T) &= u_t(\bm{D}_t \vert \bm{D}_1, \bm{X}, \bm{L}, \bm{a}, T) \bm{R}, &\qquad \bm{R} \in \mathrm{O}(3) \label{eq:flow_rot}
+    \end{align}
+    the generated conditional probability path $p_{t \vert 1}(\bm{D}_t \vert \bm{D}_1)$ is invariant.
+    Furthermore, given that the data distribution $q(\bm{D}_1)$ is invariant, the marginal probability path $p_t(\bm{D}_t)$ is also invariant.
+\end{proposition}
+Note that the group actions of $S_n$ and $\mathrm{O}(3)$ on the optional conditional variable $\bm{D}_1$ are the same as their actions on $\bm{D}_t$.
+The proof is given in \cref{sec:proof}.
+
+\subsubsection{Choice of Prior}
+\label{sec:prior_choice}
+
+We consider a Gaussian prior, $\bm{D}_0 \sim \mathcal{N}(\bm{D}_0; \bm{0}, \bm{\Sigma} \otimes \bm{I}_3)$, with a diagonal covariance $\bm{\Sigma} = \operatorname{diag}(\bm{\sigma})^2$, where $\bm{\sigma} = \bm{\sigma}(\bm{a}, T) \in \mathbb{R}^n$ is equivariant to atom index permutation.
+This prior distribution satisfies the symmetry constraints \cref{eq:sym_perm,eq:sym_global_trans,eq:sym_lattice,eq:sym_rot,eq:sym_super}.
+In MD simulation of materials, atomic displacements tend to be larger for lighter atoms and at higher temperatures.
+In the short-time, non-interacting limit, the displacements can be expressed as $\bm{D}_{\delta \tau} = \dot{\bm{X}}_{\tau} \delta \tau$, where the marginal distribution of velocity follows the Maxwell--Boltzmann distribution, $\dot{\bm{X}}_{\tau} \sim \mathcal{N}(\dot{\bm{X}}_{\tau}; \bm{0}, \operatorname{diag}(k_\text{B} T / \bm{m}) \otimes \bm{I}_3)$, with $k_\text{B}$ being the Boltzmann constant.
+Thus, it is reasonable to initialize the noise from a \textit{scaled} Maxwell--Boltzmann distribution with $\bm{\sigma} = \sigma \cdot (k_\text{B}T/\bm{m})^{1/2}$, where $\sigma$ is a constant hyperparameter controlling the scale.
+
+In the specific context of AIMD simulations in this work, where the simulations are often conducted at elevated temperatures, the material may undergo phase transitions (e.g., from solid to liquid) within the temperature range covered by the dataset.
+Additionally, for lithium-based solid-state electrolytes, lithium atoms may exhibit displacements several orders of magnitude larger than those of non-lithium (frame) atoms.
+To account for these variations, we introduce a material-dependent \textit{adaptive} scaling factor for the Maxwell--Boltzmann distribution:
+\begin{align}
+    \bm{\sigma} &= \left[ \sigma_\text{Li}(\mathcal{M}_0, T) \cdot \mathbb{I}_{\bm{a} = \text{Li}} + \sigma_\text{frame}(\mathcal{M}_0, T) \cdot \mathbb{I}_{\bm{a} \neq \text{Li}} \right] \odot (k_\text{B}T/\bm{m})^{1/2},
+    \label{eq:adaptive_prior}
+\end{align}
+where for each species $\mathcal{S} \in \{ \text{lithium}, \text{frame} \}$, $\sigma_\mathcal{S}$ selects a scale value from the hyperparameters $\{ \sigma_\mathcal{S}^\text{small}, \sigma_\mathcal{S}^\text{large} \}$ based on a binary classifier's prediction of whether the displacements for $\mathcal{S}$ will be small or large.
+The classifier utilizes temperature and the average-pooled atomic invariant features of $\mathcal{S}$, extracted from a pre-trained MACE model, based on the initial material structure $\mathcal{M}_0$.
+Further details about the classifier model are provided in \cref{sec:prior_classifier}.
+\subsubsection{Flow Parametrization}
+
+\paragraph{Conditional flow matching}
+
+Following \citet{pooladian2023multisample}, we select the linear interpolation between the prior sample and the data sample as a conditional flow:
+\begin{equation}
+    u_t(\bm{D}_t \vert \bm{D}_1) = \frac{\bm{D}_1 - \bm{D}_t}{1 - t} \quad \text{and} \quad \bm{D}_t = \psi_t(\bm{D}_0 \vert \bm{D}_1) = (1 - t) \bm{D}_0 + t \bm{D}_1.
+    \label{eq:ot_flow}
+\end{equation}
+This satisfies the symmetry constraints in \cref{eq:flow_perm,eq:flow_rot}.
+The marginal flow approximator $v_t(\bm{D}_t, \bm{X}_\tau, \bm{L}, \bm{a}, T; \theta)$ should also respect these symmetry constraints.
+We adopt the \textsc{PaiNN} model \citep{schutt2021equivariant} to balance expressiveness with inference speed.
+\textsc{PaiNN} is an equivariant graph neural network that outputs scalar and vector quantities based on the atomistic graph, incorporating scalar and vector node features.
+The structure is encoded using a radial basis function expansion of atomic distances and the unit vector directions along edges (\cref{eq:painn_scalar_message,eq:painn_vector_message}).
+We observed that encoding the intermediate structure $\bm{X}_\tau + \bm{D}_t$ significantly improves prediction performance (\cref{table:painn_ablation}).
+Thus, we modify the message-passing layers of \textsc{PaiNN} to accept two structural inputs: $\bm{X}_\tau$ and $\bm{X}_\tau + \bm{D}_t$.
+Additionally, the intermediate displacements $\bm{D}_t$ are used to construct the vector node features.
+Further details on the model architecture and modifications are given in \cref{sec:flow_architecture}.
+
+\paragraph{\textit{Propagator} and \textit{Corrector} models}
+While, in theory, a single generative model should suffice to learn the density, prediction errors would arise from two sources: inaccuracies in the marginal flow prediction and discretization errors in the flow integration.
+Moreover, since the trajectory generation is performed autoregressively, applying the generative model iteratively compounds these errors over time.
+To address this, in addition to the flow matching model described earlier (\textit{Propagator}), we introduce an auxiliary flow matching model named \textit{Corrector}, inspired by \citet{fu2023simulate}, to rectify potential errors in the predicted displacements.
+
+Although the \textit{Corrector} model is intended to correct errors in the final displacement resulting from the integration of \textit{Propagator}, directly mapping the generated output to an actual data sample to compute the target correction value can be complex, as it may require differentiating through the flow integration.
+Therefore, we decouple the \textit{Propagator} and \textit{Corrector} models, training the \textit{Corrector} to denoise positional noise of arbitrary small scale.
+Given a perturbed configuration $\tilde{\bm{X}}_\tau = \bm{X}_\tau + \bm{D}$, where the noise displacement is sampled from $\bm{D} \vert \bm{\sigma}' \sim \mathcal{N}(\bm{D}; \bm{0}, \operatorname{diag}(\bm{\sigma}')^2 \otimes \bm{I}_3$) with the noise scale $\bm{\sigma}' \sim \mathcal{U}(\bm{\sigma}'; \bm{0}, \sigma_\text{max} \bm{1}_n)$, the flow is trained to generate the possible denoising displacements $-\bm{D}$ conditioned on $\tilde{\bm{X}}_\tau$.
+\subsubsection{Training and inference}
+
+\begin{wrapfigure}{r}{0.6\textwidth}
+\begin{minipage}[t]{0.6\textwidth}
+\begin{algorithm2e}[H]
+\caption{\textsc{LiFlow} Inference}
+\label{alg:inference}
+\DontPrintSemicolon
+\KwIn{Initial position $\bm{X}_0$, lattice $\bm{L}$, atom types $\bm{a}$, atomic masses $\bm{m}(\bm{a})$, temperature $T$}
+\KwOut{Predicted position $\bm{X}_{\tau}$ at $\tau = N_\text{step}\Delta \tau$}
+Determine the prior from $\bm{X}_0$, $\bm{L}$, $\bm{a}$, $\bm{m}$, and $T$ \;
+\For{$i_\tau \gets 0$ \KwTo $N_\textup{step} - 1$}{
+    $\tau \gets i_\tau \Delta \tau$ and $\tau' \gets (i_\tau + 1) \Delta \tau$ \;
+    \tikzmk{A}
+    Sample $\bm{D}$ from the \textit{Propagator} prior \;
+    \For{$i \gets 0$ \KwTo $N_\textup{flow} - 1$}{
+        $\bm{D} \gets \bm{D} + \text{\textit{Propagator}}(\bm{D}, \bm{X}_\tau, \bm{L}, \bm{a}, T, t) / N_\text{flow}$
+    }
+    $\tilde{\bm{X}}_{\tau'} \gets \bm{X}_{\tau} + \bm{D}$ {\color{propcolor}\tcp*[r]{\textit{Propagator} step}}
+    \tikzmk{B}\boxit{propbg}
+    \\[-1.5ex]
+    \tikzmk{A}
+    Sample $\bm{D}$ from the \textit{Corrector} prior \;
+    \For{$i \gets 0$ \KwTo $N_\textup{flow} - 1$}{
+        $\bm{D} \gets \bm{D} + \text{\textit{Corrector}}(\bm{D}, \tilde{\bm{X}}_{\tau'}, \bm{L}, \bm{a}, T, t) / N_\text{flow}$
+    }
+    $\bm{X}_{\tau'} \gets \tilde{\bm{X}}_{\tau'} + \bm{D}$ {\color{corrcolor}\tcp*[r]{\textit{Corrector} step}}
+    \tikzmk{B}\boxit{corrbg}
+    $\bm{X}_{\tau'} \gets \bm{X}_{\tau'} - \text{CoM}(\bm{X}_{\tau'}, \bm{m}) + \text{CoM}(\bm{X}_\tau, \bm{m})$ \;
+}
+\end{algorithm2e}
+\end{minipage}
+\end{wrapfigure}
+
+\paragraph{\textsc{LiFlow} training}
+We train the model using time-separated pairs of structures, $((\bm{X}_{\tau}, \bm{X}_{\tau'}), \bm{L}, \bm{a}, T))$, sampled from MD trajectories in the training set.
+First, the prior displacements are sampled based on the possible choices outlined in \cref{sec:prior_choice}.
+The \textit{Propagator} and \textit{Corrector} are trained to approximate the marginal flows toward the distributions of the possible propagating displacements, $\bm{X}_{\tau'} - \bm{X}_\tau$, and denoising displacements, $\bm{X}_{\tau'} - \tilde{\bm{X}}_{\tau'}$, respectively.
+These are conditioned on the previous structure, $\bm{X}_\tau$, and the noisy structure, $\tilde{\bm{X}}_{\tau'}$, respectively.
+Given interpolated displacements $\bm{D}_t$ and the corresponding conditional variables, both models are trained to match the ground truth conditional flow $u_t(\bm{D}_t \vert \bm{D}_1)$ using the regression loss \cref{eq:cfm_loss}.
+Detailed training algorithms are reported in \cref{sec:training_algorithms}.
+
+\paragraph{\textsc{LiFlow} inference}
+The inference procedure is provided in \cref{alg:inference}.
+Starting from the initial atom positions $\bm{X}_0$, we alternate between \colorbox{propbg!50}{\textit{Propagator}} and \colorbox{corrbg!50}{\textit{Corrector}} flow integration for $N_\text{step}$ steps, generating the trajectory $\{ \bm{X}_0, \bm{X}_{\Delta \tau}, \cdots, \bm{X}_{N_\text{step}\Delta \tau} \}$.
+The flow integration for both the \textit{Propagator} and \textit{Corrector} begins by sampling prior displacements $\bm{D}_0$ from the chosen prior distribution.
+These displacements are then updated over $N_\text{flow}$ steps using Euler's method, based on the predicted marginal flow.
+Since MD simulations are often performed with a fixed center-of-mass (CoM) position, defined as $\text{CoM}(\bm{X}, \bm{m}) = \sum_j m_j \bm{x}_j / \sum_j m_j$, we correct for any CoM drift after each \textit{Propagator}--\textit{Corrector} inference step.
+
+
+\section{Experiments}
+
+
+\subsection{Datasets and Metrics}
+\paragraph{Universal MLIP dataset (\cref{sec:universal_model})}
+To train a compositionally transferable generative model for time-shifting conformational distributions, long-time simulation trajectories that span a diverse range of compositional spaces in solid-state materials are required.
+A total of 4,186 stable lithium-containing structures were retrieved from the Materials Project database \citep{jain2013commentary} to capture various modes of lithium-ion dynamics across different compositions.
+For each structure, 25 ps MD simulations were performed using the MACE-MP-0 small universal MLIP model \citep{batatia2024foundation} at temperatures of 600, 800, 1000, and 1200 K, with a time step of 1 fs (25k steps per structure).
+The distribution of elements in these structures, shown in \cref{fig:data}a, spans 77 elements across the periodic table.
+The mean squared displacement (MSD) of lithium atoms for each structure over the 25 ps trajectories is shown in \cref{fig:data}b, indicating that the dataset captures a broad range of atomic environments and dynamic behaviors.
+The dataset is divided into training (90\%) and test (10\%) sets based on material composition, with the validation set sampled from the training portion.
+Details of the simulations and dataset statistics are provided in \cref{sec:dataset_mace}.
+
+\paragraph{AIMD datasets (\cref{sec:aimd_models})}
+To evaluate the ability to extend accurate atomistic dynamics from short AIMD simulations, we employed two sets of AIMD trajectories that exhibit diffusive lithium dynamics.
+The first set includes LPS (\ce{Li3PS4}) simulations from \citet{jun2024nonexistence}, with $\sim$250 ps trajectories for 128-atom structures of $\alpha$-, $\beta$-, and $\gamma$-LPS, conducted at 600--800 K.
+The second set comprises LGPS (\ce{Li10GeP2S12}) simulations from \citet{lopez2024how}, which includes $\sim$150 ps MD trajectories for a $2 \times 2 \times 1$ supercell (200 atoms) of LGPS at temperatures of 650, 900, 1150, and 1400 K.
+We used the first 25 ps of each trajectory as the training set.
+Refer to \cref{sec:dataset_aimd} for the rationale behind system selection and further details.
+
+\paragraph{Metrics}
+To quantify the prediction of kinetic observables, we compared the MSD of lithium and frame atoms between generated and reference trajectories.
+The MSD measures the average squared distance that particles of type $\mathcal{S}$ move over time $\tau$, as defined in \cref{eq:msd}:
+
+\hfill
+\begin{minipage}[h]{0.5\linewidth}
+\begin{equation}
+    \text{MSD}_\mathcal{S}(\tau) = \frac{1}{\vert \mathcal{S} \vert} \sum_{i \in \mathcal{S}} \Vert \bm{x}_{\tau, i} - \bm{x}_{0, i} \Vert^2
+    \label{eq:msd}
+\end{equation}
+\end{minipage}
+\begin{minipage}[h]{0.45\linewidth}
+\begin{equation}
+    D_\mathcal{S}^\ast = \lim_{\tau \to \infty} \frac{\text{MSD}_\mathcal{S}(\tau)}{6 \tau}
+    \label{eq:diffusivity}
+\end{equation}
+\end{minipage}
+
+Given the wide range of magnitudes of MSD values, we compared the log values (base 10) of MSD, with MSD in units of \AA{}$^2$.
+We report the mean absolute error (MAE) and Spearman's rank correlation ($\rho$) for the log MSD predictions on the universal MLIP dataset.
+
+In the long-time limit, the MSD grows linearly with time, with a rate proportional to the self-diffusivity $D_\mathcal{S}^\ast$ (\cref{eq:diffusivity}).
+This is quantified using Bayesian regression of MSD against time \citep{mccluskey2024accurate,mccluskey2024kinisi}.
+According to the Arrhenius relationship, the temperature dependence of diffusivity follows $\log D^\ast(T) = \log D_0^\ast - E_\text{A} / k_\text{B}T$, where $E_\text{A}$ is the activation energy.
+Since activation energy is a key measure of the barrier to lithium diffusion in materials science literature, we also verify whether $E_\text{A}$ is accurately reproduced in the LGPS AIMD dataset.
+
+To evaluate the reproduction of structural features, we compare the all-particle radial distribution function (RDF), $g(r)$.
+The RDF describes how particle density varies as a function of distance from a reference particle, revealing spatial organization and local structure in the system.
+It is defined as:
+\begin{equation}
+    g(r) = \frac{1}{4 \pi r^2} \frac{1}{\rho n} \sum_i \sum_{j \neq i} \delta(r - \Vert \bm{x}_i - \bm{x}_j \Vert),
+    \label{eq:rdf}
+\end{equation}
+where $\rho$ is the number density of atoms.
+We average the RDF over the latter parts of the simulation, after discarding a short induction period (5 ps, 20 \% of the trajectory).
+The accuracy is quantified by the RDF MAE $= (1 / r_\text{cut}) \int_0^{r_\text{cut}} \vert \hat{g}(r) - g(r) \vert \, \mathrm{d}r$, with $r_\text{cut} = 5$ \AA{}.
+Note that a similar set of metrics has been adopted in the benchmark of MLIP-based simulations \citep{fu2023forces}.
+\subsection{Universal Model}
+\label{sec:universal_model}
+
+\subsubsection{Setup and Results}
+
+\sisetup{detect-all}
+\begin{table}[!ht]
+\definecolor{best}{rgb}{0.968, 0.987, 0.940}
+\definecolor{worst}{rgb}{0.800, 0.892, 0.964}
+\caption{
+\textbf{Results for the universal model.}
+Evaluation metrics for different \textit{Propagator} priors (isotropic and uniform/adaptive scale Maxwell--Boltzmann) with or without the \textit{Corrector}.
+\textit{Regressor}$^\dagger$: non-generative, directly predicting displacements.
+\textit{P}\textsubscript{adaptive} + \textit{C} $\color{rose}^\ast$ represents the baseline model without any ablations.
+Values are colored from \colorbox{worst}{worst} to \colorbox{best}{best} for each metric and $T$, and standard deviations are reported in \cref{table:universal_result_full}.
+}
+\label{table:universal_result}
+\begin{center}
+\begin{footnotesize}
+\begin{tabular}{ccl|S[table-format=1.3]S[table-format=1.3]S[table-format=1.3]S[table-format=1.3]S[table-format=3.1]}
+\toprule
+{\makecell{Train \\ $T$ (K)}} & {\makecell{Inference \\ $T$ (K)}} & {\makecell{Model}} & {\makecell{log MSD\textsubscript{Li} \\ MAE ($\downarrow$)}} & {\makecell{log MSD\textsubscript{Li} \\ $\rho$ ($\uparrow$)}} & {\makecell{log MSD\textsubscript{frame} \\ MAE ($\downarrow$)}} & {\makecell{RDF \\ MAE ($\downarrow$)}} & {\makecell{Stable traj. \\ \% ($\uparrow$)}} \\
+\midrule
+\multicolumn{8}{l}{\cellcolor{gray!5}\textbf{Exp 1} $\vert$ Single temperature: is Maxwell--Boltzmann prior required?} \\ \midrule
+\multirow{3}{*}{800}  &  \multirow{3}{*}{800}  &  \textit{Regressor}$^\dagger$  & \cellcolor[rgb]{0.800, 0.892, 0.964} 1.636  & \cellcolor[rgb]{0.800, 0.892, 0.964} 0.535  & \cellcolor[rgb]{0.800, 0.892, 0.964} 0.876  & \cellcolor[rgb]{0.800, 0.892, 0.964} 0.416  & \cellcolor[rgb]{0.800, 0.892, 0.964} 90.2 \\
+ &  &  \textit{P}\textsubscript{isotropic}  & \cellcolor[rgb]{0.959, 0.984, 0.941} 0.498  & \cellcolor[rgb]{0.956, 0.983, 0.941} 0.753  & \cellcolor[rgb]{0.960, 0.984, 0.941} 0.318  & \cellcolor[rgb]{0.958, 0.983, 0.941} 0.113  & \cellcolor[rgb]{0.958, 0.983, 0.941} 98.6 \\
+ &  &  \textit{P}\textsubscript{uniform}  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 0.396  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 0.779  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 0.274  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 0.084  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 99.4 \\
+\midrule
+\multicolumn{8}{l}{\cellcolor{gray!5}\textbf{Exp 2} $\vert$ Multiple temperatures: are adaptive prior scaling \cref{eq:adaptive_prior} and \textit{Corrector} required?} \\ \midrule
+ &  &  \textit{P}\textsubscript{adaptive}  & \cellcolor[rgb]{0.800, 0.892, 0.964} 0.376  & \cellcolor[rgb]{0.800, 0.892, 0.964} 0.709  & \cellcolor[rgb]{0.800, 0.892, 0.964} 0.286  & \cellcolor[rgb]{0.800, 0.892, 0.964} 0.118  & \cellcolor[rgb]{0.800, 0.892, 0.964} 99.6 \\
+ &  &  \textit{P}\textsubscript{adaptive} + \textit{C} $\color{rose}^\ast$  & \cellcolor[rgb]{0.957, 0.983, 0.941} 0.348  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 0.744  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 0.241   & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 0.069  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 100.0 \\
+\cmidrule{2-8}
+ &  \multirow{3}{*}{800}  &  \textit{P}\textsubscript{uniform}  & \cellcolor[rgb]{0.800, 0.892, 0.964} 0.417  & \cellcolor[rgb]{0.800, 0.892, 0.964} 0.737  & \cellcolor[rgb]{0.800, 0.892, 0.964} 0.307  & \cellcolor[rgb]{0.858, 0.945, 0.953} 0.091  & \cellcolor[rgb]{0.890, 0.957, 0.948} 99.8 \\
+ &  &  \textit{P}\textsubscript{adaptive}  & \cellcolor[rgb]{0.896, 0.959, 0.947} 0.385  & \cellcolor[rgb]{0.870, 0.950, 0.951} 0.759  & \cellcolor[rgb]{0.824, 0.930, 0.961} 0.294  & \cellcolor[rgb]{0.800, 0.892, 0.964} 0.110  & \cellcolor[rgb]{0.800, 0.892, 0.964} 99.5 \\
+ &  &  \textit{P}\textsubscript{adaptive} + \textit{C} $\color{rose}^\ast$  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 0.366  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 0.781  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 0.255  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 0.066  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 100.0 \\
+\cmidrule{2-8}
+ &  \multirow{3}{*}{1000}  &  \textit{P}\textsubscript{uniform}  & \cellcolor[rgb]{0.800, 0.892, 0.964} 0.505  & \cellcolor[rgb]{0.800, 0.892, 0.964} 0.705  & \cellcolor[rgb]{0.800, 0.892, 0.964} 0.400  & \cellcolor[rgb]{0.801, 0.900, 0.966} 0.124  & \cellcolor[rgb]{0.800, 0.892, 0.964} 98.6 \\
+ &  &  \textit{P}\textsubscript{adaptive}  & \cellcolor[rgb]{0.899, 0.961, 0.947} 0.456  & \cellcolor[rgb]{0.898, 0.960, 0.947} 0.746  & \cellcolor[rgb]{0.849, 0.940, 0.953} 0.374  & \cellcolor[rgb]{0.800, 0.892, 0.964} 0.126  & \cellcolor[rgb]{0.800, 0.892, 0.964} 98.6 \\
+ &  &  \textit{P}\textsubscript{adaptive} + \textit{C} $\color{rose}^\ast$  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 0.429  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 0.769  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 0.332  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 0.071  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 99.8 \\
+\cmidrule{2-8}
+ &  \multirow{3}{*}{1200}  &  \textit{P}\textsubscript{uniform}  & \cellcolor[rgb]{0.800, 0.892, 0.964} 0.448  & \cellcolor[rgb]{0.800, 0.892, 0.964} 0.788  & \cellcolor[rgb]{0.800, 0.892, 0.964} 0.493  & \cellcolor[rgb]{0.800, 0.892, 0.964} 0.168  & \cellcolor[rgb]{0.800, 0.892, 0.964} 95.5 \\
+ &  &  \textit{P}\textsubscript{adaptive}  & \cellcolor[rgb]{0.899, 0.961, 0.947} 0.410  & \cellcolor[rgb]{0.898, 0.960, 0.947} 0.809  & \cellcolor[rgb]{0.888, 0.957, 0.948} 0.416  & \cellcolor[rgb]{0.844, 0.937, 0.954} 0.137  & \cellcolor[rgb]{0.896, 0.959, 0.947} 98.1 \\
+ &  &  \textit{P}\textsubscript{adaptive} + \textit{C} $\color{rose}^\ast$  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 0.389  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 0.821  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 0.363  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 0.079  & \cellcolor[rgb]{0.968, 0.987, 0.940} \bfseries 99.6 \\
+
+\bottomrule
+\end{tabular}
+\end{footnotesize}
+\end{center}
+\end{table}
+
+\paragraph{Setup}
+For the adaptive prior, we set the scale hyperparameters as $(\sigma_\text{Li}^\text{low}, \sigma_\text{Li}^\text{high}, \sigma_\text{frame}^\text{low}, \sigma_\text{frame}^\text{high}) = (1, 10, 10^{-0.5}, 10^{0.5})$, based on the observation that lithium atoms are generally more diffusive than the frame atoms.
+For \textit{Corrector} model, we used a maximum noise scale of $\sigma_\text{max} = 0.25$ and a small uniform-scale Maxwell--Boltzmann prior with $\sigma = 0.1$.
+We conducted \textsc{LiFlow} inference iteratively for $N_\text{step} = 25$ steps to simulate dynamics over 25 ps with a time step of $\Delta \tau = 1$ ps.
+Each inference step involves $N_\text{flow} = 10$ flow matching iterations of both \textit{Propagator} and \textit{Corrector} models.
+During each inference process for a given structure, we terminated when either the maximum number of steps ($N_\text{step}$) was reached or the model prediction diverged due to instabilities.
+
+\begin{figure}[!ht]
+\begin{center}
+\includegraphics[width=\textwidth]{figures/universal_result.pdf}
+\caption{
+\textbf{Universal model inference example.}
+\textbf{(a, b)} Parity plots comparing the log MSD values for (a) lithium and (b) frame atoms in 800 K, 25 ps simulations across test materials.
+Data points are colored by their respective prior scales.
+\textbf{(c)} Reference and generated trajectories for \ce{Li6PS5Br} (highlighted points in a and b).
+}
+\label{fig:universal_result}
+\end{center}
+\end{figure}
+
+\paragraph{Reproducing kinetic properties}
+For \textsc{LiFlow} baseline model (\cref{table:universal_result}, \textit{P}\textsubscript{adaptive} + \textit{C} $\color{rose}^\ast$), we consistently observed a Spearman rank correlation of 0.7--0.8 for lithium MSD in unseen test compositions.
+This indicates the potential of the \textsc{LiFlow} model for computational screening to identify materials with high lithium diffusivity.
+The parity plot between log MSD values of reference and \textsc{LiFlow}-generated trajectories at 800 K, along with visualized example trajectories, is shown in \cref{fig:universal_result}.
+We observed that the diffusive behavior in well-known solid-state electrolytes, such as \ce{Li6PS5Br} (argyrodite), is accurately reproduced.
+Note that the stability reported in \cref{table:universal_result} refers to numerical stability---unlike the physical stability of MD trajectories, numerically stable but physically fictitious dynamics can be generated (as reflected in poorer kinetic metrics, see \cref{fig:universal_example}).
+
+\subsubsection{Ablation Experiments}
+
+\paragraph{Effect of the prior choice}
+First, in \cref{table:universal_result} (Exp 1), we compare the isotropic prior (\textit{P}\textsubscript{isotropic}, $\bm{\sigma} = \sigma \cdot \bm{1}_n$), to the scaled Maxwell--Boltzmann prior (\textit{P}\textsubscript{uniform}, $\bm{\sigma} = \sigma \cdot (k_\text{B}T/\bm{m})^{1/2}$), to evaluate the impact of atom-type-specific scaling on the prior.
+To focus solely on the relative scale between atoms, we vary the scaling factor $\sigma$ for both the isotropic and Maxwell--Boltzmann priors at a fixed temperature (800 K), then compare the relevant metrics for the optimal $\sigma$ in each case.
+The best results for isotropic ($\sigma = 10^{-1.5}$) and Maxwell--Boltzmann ($\sigma = 1$) priors are shown in the first row of \cref{table:universal_result}, and the results across all scales are provided in \cref{table:prior_iso_maxwell}.
+The scaled Maxwell--Boltzmann prior outperforms the isotropic prior in reproducing all kinetic metrics (log MSD), confirming that the relative scaling of priors among elements is crucial for performance across a wide range of compositions.
+Additionally, note that the poor performance of direct regression-based displacement prediction (\textit{Regressor}) highlights the necessity of generative modeling.
+
+Next, in \cref{table:universal_result} (Exp 2), we apply the scale for \textit{P}\textsubscript{uniform} determined in the previous experiment to the training and inference on trajectories across all temperatures, and compare to the adaptive scale Maxwell--Boltzmann prior (\textit{P}\textsubscript{adaptive}, \cref{eq:adaptive_prior}).
+With the exception of the lowest temperature (600 K), where the prior classifier is mostly ineffective (see \cref{fig:prior_scale_hist}), the model using the adaptive prior outperforms the one with the uniform scale prior.
+This suggests that the mixture-of-priors approach effectively guides the flow model in capturing the scale of atomic movements.
+\paragraph{Effect of the \textit{Corrector} model}
+In \cref{table:universal_result} (Exp 2), we then compare the \textit{Propagator}-only model (\textit{P}\textsubscript{adaptive}) and \textit{Propagator} + \textit{Corrector} model (\textit{P}\textsubscript{adaptive} + \textit{C} $\color{rose}^\ast$).
+We observed improved reproduction of static structural features, indicated by lower RDF MAE, across all temperatures when using the \textit{Corrector} model.
+Notably, all kinetic metrics also showed improvement with the use of \textit{Corrector}.
+Since the \textit{Propagator} is a generative model of displacements conditioned on the current time step structure $\bm{X}_\tau$, correcting errors in the conditional structure improves the accuracy of the predicted cumulative displacements, as reflected in the MSD metric.
+
+\subsection{AIMD Models}
+\label{sec:aimd_models}
+
+\paragraph{Setup}
+Since we are training on the same composition, the \textit{Propagator} error is expected to be smaller than that for the universal dataset, and we accordingly use a smaller maximum noise scale for the \textit{Corrector}.
+
+For each dataset (LPS and LGPS), a single \textit{Propagator} and \textit{Corrector} model is trained on the first 25 ps of trajectories across temperatures (and polymorph structures for LPS).
+Additional training and inference settings are provided in \cref{sec:hyperparameters}.
+
+\begin{figure}[!ht]
+\begin{center}
+\includegraphics[width=0.78\textwidth]{figures/diffusion_AIMD.pdf}
+\caption{
+\textbf{Reproducing diffusivity from AIMD models.}
+\textbf{(a)} Lithium $D^\ast$ for polymorphs of LPS (\ce{Li3PS4}).
+Values are derived from AIMD (25 ps training and $\sim$250 ps full trajectories) and 250 ps \textsc{LiFlow} inference.
+\textbf{(b)} Lithium $D^\ast$ is plotted as a function of $1000/T$ for LGPS (\ce{Li10GeP2S12}).
+$2 \times 2 \times 1$ supercell results from AIMD (25 ps training and $\sim$150 ps full trajectories) and 150 ps \textsc{LiFlow} inference.
+Shaded region represents 95\% confidence intervals (CIs) for the Arrhenius fit ($1/T$ vs. $\log D^\ast(T)$) from 25 ps AIMD data.
+\textbf{(c)} $4 \times 4 \times 4$ supercell results from fine-tuned MLIP and \textsc{LiFlow} inference (1 ns).
+}
+\label{fig:diffusion_AIMD}
+\end{center}
+\end{figure}
+
+\paragraph{Reproducing kinetic properties}
+\cref{fig:diffusion_AIMD}a shows the reference diffusivity values for LPS from the AIMD simulations (25 ps for training and $\sim$250 ps full dataset) alongside the 250 ps \textsc{LiFlow} inference results.
+Overall, the \textsc{LiFlow} results match the order of magnitude of the reference simulations, successfully reproducing the diffusivity differences among the LPS polymorphs.
+This suggests that the model can detect subtle local structural variations between polymorphs and generate displacements accordingly.
+In cases where diffusive behavior is expected but not sufficiently captured in a 25 ps trajectory to yield robust diffusivity statistics, \textsc{LiFlow} can \textit{infill} the correct diffusive dynamics based on other simulations (\cref{fig:diffusion_AIMD}a, box I).
+However, when lithium hopping events become exceedingly rare, as in $\gamma$-LPS at lower temperatures, the generative model suffers from mode collapse towards non-diffusive displacements, resulting in an underestimation of $D^\ast$ (\cref{fig:diffusion_AIMD}a, box II).
+
+\begin{wrapfigure}[8]{r}{0.45\textwidth}
+\begin{minipage}{0.45\textwidth}
+\begin{table}[H]
+\captionof{table}{
+\textbf{Activation energies for LGPS.}
+Arrhenius fit based on the data in \cref{fig:diffusion_AIMD}b.
+}
+\label{table:activation_energy}
+\begin{center}
+\begin{footnotesize}
+\begin{tabular}{l|cc}
+\toprule
+Method & $E_\text{A}$ [eV] & {\color{black}95\% CI [eV]} \\
+\midrule
+AIMD (25 ps) & 0.173 & {\color{black}(0.141, 0.205)} \\
+AIMD (all) & 0.192 & {\color{black}(0.175, 0.205)} \\
+\cellcolor{liflow}\textsc{LiFlow} & \cellcolor{liflow}0.185 & \cellcolor{liflow}{\color{black}(0.181, 0.190)} \\
+\bottomrule
+\end{tabular}
+\end{footnotesize}
+\end{center}
+\end{table}
+\end{minipage}
+\end{wrapfigure}
+
+\cref{fig:diffusion_AIMD}b similarly presents the diffusivity values for LGPS from AIMD simulations and \textsc{LiFlow} inference.
+For the $2 \times 2 \times 1$ supercell (\cref{fig:diffusion_AIMD}b), the temperature dependence of $D^\ast$, characterized by an activation energy of $E_\text{A} =$ 0.185 eV, is consistent with the reference AIMD value (0.192 eV, \cref{table:activation_energy}).
+Although the 25 ps AIMD $E_\text{A}$ (0.173 eV) lies outside the 95\% CI of the longer AIMD, \textsc{LiFlow} successfully matches the longer AIMD result and produces more reliable statistics with lower variance, owing to its extended simulation rollouts.
+
+\paragraph{Large-scale inference}
+By modeling the distribution of atomic displacements, the generative model can naturally generalize across different supercell sizes, as indicated by the supercell invariance (\cref{eq:sym_super}).
+We evaluated scalability and temperature transferability using a $4 \times 4 \times 4$ supercell, performing \textsc{LiFlow} inference over 1,000 steps (1 ns), with the resulting $D^\ast$ values presented in \cref{fig:diffusion_AIMD}c.
+For temperatures below the maximum training temperature (1400 K), the \textsc{LiFlow} model generates stable trajectories that extend far beyond the 25 ps length of the training set trajectories (25 ps).
+When compared to the reference dynamics from \citet{winter2023simulations} on LGPS, which used extensive simulations with a fine-tuned MLIP, $D^\ast$ values predicted by \textsc{LiFlow} closely match the reference values within the interpolative regime (i.e., the training temperature range).
+However, as we extend to lower $T$ (higher $1000/T$) beyond the training range, $D^\ast$ decreases much more slowly than the reference values (\cref{fig:diffusion_LGPS_ext}), indicating fictitious diffusive behavior when extrapolating to lower $T$.
+This behavior is expected, as the model was trained primarily on larger displacements of lithium atoms at higher $T$.
+
+\paragraph{Reproducing structural features}
+While reproducing kinetics is the main objective of this study, we additionally examined the reproduction of structural features, such as diffusion traces and probability densities of lithium positions.
+The diffusion traces indicate generalization beyond memorization, with the model exploring symmetrically related sites (\cref{fig:diffusion_trace}).
+The probability densities are well reproduced, with slight deviations and smoothing at higher temperatures due to the increased complexity of diffusion behavior (\cref{fig:pmf}).
+
+\begin{wrapfigure}[9]{r}{0.45\textwidth}
+\begin{minipage}{0.45\textwidth}
+\begin{table}[H]
+\captionof{table}{
+\textbf{Prediction speed.}
+Time required to predict the 1 ns trajectory for LGPS ($^\dagger$extrapolated).
+}
+\label{table:speed}
+\begin{center}
+\begin{footnotesize}
+\begin{tabular}{lcr|r}
+\toprule
+Method & Supercell & \# atoms & Time \\
+\midrule
+AIMD$^\dagger$ & $2 \times 2 \times 1$ & 200 & 340 days \\
+MLIP & $2 \times 2 \times 1$ & 200 & 5.8 hrs \\
+\cellcolor{liflow} & \cellcolor{liflow}$2 \times 2 \times 1$ & \cellcolor{liflow}200 & \cellcolor{liflow}48 s \\
+\multirow{-2}{*}{\cellcolor{liflow}\textsc{LiFlow}} & \cellcolor{liflow}$4 \times 4 \times 4$ & \cellcolor{liflow}3,200 & \cellcolor{liflow}352 s \\
+\bottomrule
+\end{tabular}
+\end{footnotesize}
+\end{center}
+\end{table}
+\end{minipage}
+\end{wrapfigure}
+
+\subsection{Computational Cost}
+The computation time for 1 ns of inference using the methods investigated in this paper is reported in \cref{table:speed}.
+MLIP-based simulations significantly reduce the time required for materials simulations (days to hours), and the \textsc{LiFlow} model accelerates this even further (hours to seconds).
+Even taking into account the training time of the \textsc{LiFlow} model ($\lesssim$ an hour), it remains significantly more efficient than AIMD simulations (see \cref{sec:implementation}).
+Given that AIMD scales as $\mathcal{O}(n^3)$ in theory, while both \textsc{LiFlow} and MLIPs scale as $\mathcal{O}(n)$ for large systems (assuming graphs with radius cutoffs), the \textsc{LiFlow} model enables efficient large-scale modeling of atomistic dynamics, as demonstrated in this work.
+
+
+\section{Discussion}
+
+\paragraph{Conclusion and outlook}
+We proposed the \textsc{LiFlow} model, a generative acceleration framework designed to accelerate MD simulations for crystalline materials, with a focus on lithium SSEs.
+The model consists of two key components: a \textit{Propagator}, which generates atomic displacements for time propagation, and a \textit{Corrector}, which applies denoising.
+Both components utilize a conditional flow matching scheme, and we introduced a thermally and chemically adaptive prior based on the Maxwell--Boltzmann distribution and modified the \textsc{PaiNN} model as a marginal flow approximator, both of which were critical for the accurate reproduction of dynamics.
+In our analysis of lithium-containing material trajectories, we consistently observed a Spearman rank correlation of 0.7--0.8 for lithium MSD in unseen compositions.
+This indicates the potential of the \textsc{LiFlow} model for computational screening to identify materials with high lithium diffusivity.
+Furthermore, we demonstrated the ability to extend short-length accurate AIMD trajectories by training the \textsc{LiFlow} model.
+This allowed us to infill insufficient observations, reproduce accurate temperature dependencies, and maintain high accuracy when scaling up to much larger supercells.
+Compared to simulations using MLIPs and AIMD, \textsc{LiFlow} offers significant speedups of 400$\times$ and 600,000$\times$, respectively.
+This provides a practical means of scaling MD simulations to larger spatiotemporal domains.
+
+\paragraph{Limitations and future directions}
+First, although we have demonstrated the importance of designing the prior for the flow matching process, determining the appropriate prior scale remains a hyperparameter.
+A theoretical analysis of the optimal prior distribution would provide a more principled approach to designing priors tailored to specific acceleration tasks and material systems.
+This also applies to the choice of time step $\Delta t$: we used a fixed time step based on observation (\cref{sec:task_design}), but given the site-to-site hopping nature of atomistic transport, our method may benefit from adaptive or controllable time stepping (e.g., \citet{schreiner2024implicit}).
+Additionally, while \textsc{LiFlow} performs well within the trained temperature range, it struggles to extrapolate beyond the training regime, where system dynamics may differ significantly from the training data.
+As a result, the current approach lacks the broad generalizability seen in universal MLIP models, which preserve the physical dynamics of systems while approximating the potential energy landscape.
+To improve reliability and develop a model capable of capturing emergent system behaviors, generative approaches would benefit from incorporating thermodynamic principles more explicitly \citep{tiwary2024generative,dibak2022temperature,herron2023inferring}.
+Lastly, the accuracy of \textsc{LiFlow} is inherently limited by the accuracy of the reference dynamics.
+Given the variety of MD simulation methods and their trade-offs between accuracy and speed, transfer learning or multi-fidelity frameworks could be considered for efficient training in practical applications.
+
+\subsubsection*{Reproducibility Statement}
+The code and trajectory dataset necessary to reproduce the results will be made publicly available upon acceptance of this work.
+The sources of the external AIMD trajectories are provided in \cref{sec:dataset_aimd}.
+
+\subsubsection*{Ethics Statement}
+This work raises ethical considerations related to the general use of machine learning in scientific simulations, particularly in the context of molecular dynamics.
+While the model presented, \textsc{LiFlow}, is intended to accelerate dynamics simulations for materials science, there is a potential for misuse in harmful applications, such as the development of dangerous materials or chemicals.
+Although unlikely in the current form of our methodology, we acknowledge the following potential scenarios for misuse, as ML-driven simulations could be misused to design materials with undesirable properties, such as highly reactive compounds that may be hazardous to health or the environment:
+\begin{itemize}[leftmargin=2em]
+\item Environmentally harmful materials: Simulations could lead to the creation of materials that, when manufactured or disposed of, could pose long-term environmental risks, such as non-biodegradable or highly polluting compounds.
+\item Unstable materials: Inaccurate predictions or malicious use of this framework could result in the generation of materials with undesirable or unstable properties, such as those prone to explosive reactions or dangerous degradation.
+\item Chemical weapons: Simulations may be applied to develop advanced nanomaterials with toxicological risks or harmful capabilities, including those used in biological or chemical warfare.
+\end{itemize}
+To mitigate these risks, we commit to working closely with materials experts to ensure responsible usage and oversight of the methodological developments.
+Additionally, no human subjects, sensitive data, or privacy-related issues are involved in this study, and there are no conflicts of interest or external sponsorships associated with this work.
+
+
+
+

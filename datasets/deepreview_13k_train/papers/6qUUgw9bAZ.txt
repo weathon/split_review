@@ -1,0 +1,444 @@
+\title{Learning How Hard to Think: Input-Adaptive Allocation of LM Computation}
+
+\begin{abstract}
+Computationally intensive decoding procedures---including search, reranking, and self-critique---can improve the quality of language model (LM) outputs in problems spanning code generation, numerical reasoning, and dialog.
+Existing work typically applies the same decoding procedure for every input to an LM. But not all inputs require the same amount of computation to process.
+Can we allocate decoding computation \emph{adaptively}, using more resources to answer questions whose answers will be harder to compute?
+We present an approach that 
+predicts the distribution of rewards given an input and computation budget, then allocates additional computation to inputs for which it is predicted to be most useful.
+We apply this approach in two decoding procedures: first, an \emph{adaptive best-of-$k$} procedure that dynamically selects the number of samples to generate as input to a reranker; second, a \emph{routing} procedure that dynamically responds to a query using a decoding procedure that is expensive but accurate, or one that is cheaper but less capable.
+Across a suite of programming, mathematics, and dialog tasks, we show that accurate computation-allocation procedures can be learned, and 
+reduce computation by up to 50\% at no cost to response quality, or improve quality by up to 10\% at a fixed computational budget.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+\begin{wrapfigure}{R}{0.5\textwidth}
+\centering
+\includegraphics[width=0.5\textwidth,trim = 0 10cm 13cm 4cm]{figures/teaser_fig.pdf}
+\caption{Overview of our approach. Given a set of input queries to a language model, we train a lightweight model to estimate the difficulty of these queries (more precisely, a model that estimates how much each query would benefit from a more computationally intensive decoding procedure.) We then allocate extra computation to those queries for which it would be most beneficial.}
+\label{fig:teaser}
+\end{wrapfigure}
+
+Recent improvements in language models (LMs) have dramatically enhanced their ability to tackle complex tasks in mathematics, coding, and reasoning. 
+However, as with natural and artificial intelligent agents of all kinds \citep{silver2016mastering}, LMs cannot solve all problems on the first try: they benefit from the ability to perform search \citep{yao2024tree}, sampling \citep{brown2024large}, or more sophisticated decoding procedures like chain-of-thought \citep{wei2022chain} and self-critique \citep{wang2023selfconsistency}.
+
+Importantly, computationally intensive problem \emph{domains}
+may exhibit considerable variation in the difficulty of individual problem \emph{instances}: {not all problems are equally hard to solve.}
+For example, even a novice programmer can likely write code to to test if an integer is even. Balancing a binary tree might require multiple attempts, and finding a polynomial-time set cover algorithm is likely impossible, and not be worth attempting at all.
+Maximally efficient use of computational resources thus requires identifying, \textit{a priori}, the inputs for which additional computation will improve outputs.
+In LMs, recent work has shown
+that significant gains from adaptive choice of decoding procedures are theoretically achievable \citep{snell2024scaling}. However, past work has relied on measures of problem difficulty that could only be estimated \emph{a posteriori}, using a sampling procedure significantly more expensive than the one used to generate model outputs.
+ 
+In this paper, we show that it is possible to perform inference-time scaling of computation \emph{before} responding to a set of user queries, by predicting how much computation will be required to respond successfully to each query, and allocating resources accordingly (\cref{fig:teaser}).
+Our approach has two parts.
+First, we describe how to train a \textit{difficulty model} that estimates the marginal improvement in response quality that would result from allocating an additional unit of computing power when responding to a query.
+We show that effective difficulty models can be constructed by training lightweight ``probes'' on top of a pre-trained LM's hidden representations, suggesting that LMs may already learn to encode problem difficulty as a result of pre-training. 
+Second, we describe an efficient allocation algorithm that, given a collection of queries and a computation budget, uses predictions from the difficulty model to allocate computation to individual queries. 
+We show how to perform this optimization online (exactly satisfying the budget for a batch of queries) or offline (computing a fixed mapping from queries to compute allocations so that constraints are satisfied on average).
+This approach is flexible with regard to the choice of compute-scaling procedure, and we demonstrate its effectiveness with two different inference procedures.
+In \textbf{best-of-\textit{k}} experiments, we choose how many samples to generate from an LM before re-ranking with a reward model.
+In \textbf{routing} experiments, we choose whether to respond to queries using a 
+computationally expensive but capable decoding procedure, or a less powerful but more cost-effective decoder. 
+For the best-of-$k$ setting, we present results across $3$ domains: Math, Code and Chat. 
+Adaptive sampling outperforms non-adaptive strategies on all three domains across a range of possible compute budgets. 
+On Math and Code, we achieve the same performance as non-adaptive methods using up to 50\% less compute; on Chat, we are able to match reward using up to 10\% less compute than base models.
+For routing, we experiment with both a pair of models (Gemma-2B, Gemma-7B) and a pair of decoding procedures (ordinary sampling and value-augmented sampling; \citealp{han2024value}). In both cases, we match the performance of the more expensive decoder while calling it only 50--75\% of the time.
+
+In summary, this work presents
+    (1) a generally applicable framework for adaptively scaling test-time LM computation;
+    (2) a learned model for estimating the marginal benefit of additional computation in LM decoding;
+    (3) an efficient algorithm for allocating computation to queries; and
+    (4) experiments demonstrating significant improvements in LM efficiency and output quality.
+
+
+
+\section{Preliminaries}
+
+\label{sec:preliminary}
+
+Suppose we have an LM-based agent that will interact with a large number of users in parallel. At any moment, each of a set of users has issued a \textbf{query} $x_i$, for which we wish to produce a \textbf{response} $y_i$. We have acccess to both a \textbf{language model (LMs)} $p(y \mid x)$, capable of generating candidate responses, as well as a \textbf{reward model} $r(x, y)$ capable of assessing the quality of candidate responses. In the absence of any computational constraints, we might wish to find the best response to every user query by optimizing
+$
+\argmax_{y} r(x_i, y)
+$
+independently for each query $x_i$.
+
+In practice, however, we generally do not have the ability to perform exhaustive search over candidate responses $y$. Instead, we use a \textbf{decoding procedure} $f(x, b)$ that (stochastically) generates a response $y$ subject to some constrained \textbf{computation budget} $b$. (In general, increasing the budget to a query should increase the quality of the response.) Many such decoding procedures are in wide use; our experiments will focus on two of the most widely used. 
+
+In \textbf{best-of-\textit{k}}, we generate a finite number of samples, then rerank them:
+\begin{equation}
+    f(x, b) = \argmax_{y_i \in \{y_1, \ldots, y_b\} \sim p(\cdot \mid x)} r(x, y_i) ~ .
+\end{equation}
+
+In \textbf{routing}, we have access to a \textbf{strong} but expensive decoding scheme $p^S$ (which could involve search, reasoning, or even just a larger model). For every query we can either use this decoding scheme or to fall back to a \textbf{weak} but cheaper decoding scheme $p^W$ (e.g.\ ordinary decoding or a smaller model). Then:
+\begin{equation}
+    f(x, b) = \begin{cases}
+        y \sim p^W(\cdot \mid x) & \textrm{if } b = b^W \\
+        y \sim p^{S\ \,}(\cdot \mid x) & \textrm{if } b = b^S
+    \end{cases}  ~ .
+\end{equation}
+Here $b^W$ and $b^S$ denote the cost of calling the weak and strong decoders respectively.
+Decoding procedures including consensus \citep{jacob2024the}, chain-of-thought \citep{wei2022chain}, self-critique \citep{luo2024sed} and debate~\citep{du2024improving} may all be expressed in this form, with the budget $b$ controlling the number of generated samples, tokens, or rounds of revision.
+
+In current practice, it is typical to set a \emph{fixed} budget $B$, and allocate this uniformly for all queries---returning $y_i \sim f(x_i, B)$ for each $x_i$. In this case, the expected reward for a set of queries is simply:
+\begin{equation}
+    \sum_i \mathbb{E}_{y_i \sim f(x_i, B)} [r(x_i, y_i)]
+\end{equation}
+But as noted in \cref{sec:intro}, different $x_i$ may in practice benefit differentially from increased budgets. 
+In this paper, we consider a more flexible version of the problem---if we are willing to set a fixed \emph{average} computational cost per query, can we improve overall accuracy by allocating this computation adaptively? 
+In this case, responding to a collection of queries $\{x_1, \ldots, x_n\}$ corresponds to solving:
+\begin{equation}
+\label{eq:const-opt}
+    \max_{b_1, \ldots, b_n} \quad {\sum_i \mathbb{E}_{y_i \sim f(x_i,b_i)}[r(x_i,y_i)}] \quad
+    \text{s.t.} \quad \sum_{i} b_i \leq B \cdot n
+\end{equation}
+Below, we develop a method for solving this \textbf{adaptive comptuation scaling problem} efficiently.
+
+
+\section{Method}
+
+\label{sec:method}
+
+In \cref{eq:const-opt}, we would like to allocate computation $b_i$ to queries $x_i$ to maximize \textbf{expected reward}, which we will denote 
+$q(x_i, b_i) = \mathbb{E}_{y_i \sim f(x_i, b_i)}[ r(x_i, y_i)]$. But there is a problem: without querying the LM, we cannot know the value of $q(x_i, b_i)$ for some new $x_i$. To make matters worse, Monte Carlo estimation of $q(x_i, b_i)$ (as in \citealp{snell2024scaling}) may in general require more computation (e.g.\ more LM samples) than we eventually wish to allocate to $x_i$! To efficiently allocate computation, we need some way to \emph{predict} $q(x_i, b_i)$ from $x_i$ alone, and then use these predictions to solve \cref{eq:const-opt}.
+
+When estimating problem difficulty and allocating decoding budget, it will be useful to reason about the benefits of \emph{incremental} changes in compute budgets.
+Formally, let us define the \textbf{marginal reward} $\Delta_{ij} = q(x_i, j) - q(x_i, j-1)$ (with $\Delta(\cdot, 0) = 0$). Under this definition, $q(x_i, b_i) = \sum_{j=1}^{b_i} \Delta_{ij}$; intuitively, $\Delta_{ij}$ represents the expected gain from allocating one more ``unit'' of computation to $x_i$, given that we have already allocated $j-1$ units.
+We may then re-write \cref{eq:const-opt} as:
+\begin{align}
+\label{eq:int-opt-framework}
+\begin{split}
+    \max \quad &\sum_{i=1}^{n}\sum_{j=0}^{B_\mathrm{max}}   c_{ij}\Delta_{ij} \quad  %
+    \text{s.t.} \quad \sum_{i,j} c_{ij} \leq B \cdot n ~ ;%
+     \quad c_{ij} \leq c_{i,j-1} ~ \forall i,j %
+    \end{split}
+\end{align}
+Here we have introduced auxiliary variables $c_{ij} \in \{0, 1\}$ to represent budget increments: intuitively, setting $c_{ij}=1$ means we have allocated a $j$th unit of computation to $x_i$, and constraints enforce that these units are allocated in sequence, as shown in Figure~\ref{fig:method-fig}. To determine how to allocate decoding computation across a set of queries $x_i$, it then suffices to predict the value of each term $\Delta_{ij}$ and then solve \cref{eq:int-opt-framework} to obtain $c$. Each of these steps is described in more detail below.
+
+\subsection{Estimating Problem Difficulty by Predicting Marginal Rewards}
+\label{subsec:method-estimation}
+
+Given a training set of queries $x_i$, we collect empirical estimates of $\Delta_{ij}$ by decoding from $f(x, b)$ at values of $b$ up to some $B_\mathrm{max}$.
+We then train a model $\hat{\mathbf{\Delta}}(x_i; \theta)$ that predicts a vector of marginal rewards for all budgets $j$ simultaneously
+by optimizing the mean squared error:
+\begin{equation}
+\label{eq:mse}
+\argmin_\theta ~ 
+    \sum_{x_i, \Delta_i} ~ \Vert \mathbf{\Delta}_{i} - \hat{\mathbf{\Delta}}(x_i;\theta)\Vert_2^2
+\end{equation}
+where $\mathbf{\Delta}_{i} = [\Delta_{i1}, \ldots, \Delta_{iB_\mathrm{max}}]$ is the vector of empirical marginal rewards for the query $x_i$. While training this model requires sampling from the LM at many budgets to obtain supervision, it can be called during inference without generating any outputs at all.
+We explore two simple parameterizations of $\hat{\mathbf{\Delta}}$: (1) a two-layer MLP that takes last the hidden state of the base LM $p$ (obtained by encoding the query) as input, and (2) parameter-efficient fine-tuning of the base LM with LoRA \citep{hu2022lora}. 
+During inference, the MLP variant adds extremely little overhead as its input are hidden states that are already computed as part of decoding procedure. 
+The LoRA variant is slightly more expensive; however, its overhead is also negligible, as the primary bottleneck during inference occurs when decoding outputs rather than encoding queries.
+
+\subsection{Allocating Computation}
+
+\begin{figure}[t!]
+\centering
+\includegraphics[width=\textwidth,trim=0 10cm 1.2cm 4cm]{figures/tech_fig.pdf}
+\caption{\textbf{Method overview}. In the first step, the marginal reward predictor is used to estimate the marginal reward gains for a batch of queries. In the second step, the allocation algorithm uses these predictions to assign compute budgets to individual queries. 
+The simple query \textit{what is your name?} is allocated a budget of $1$, while the harder query \textit{balance a binary tree} is allocated a budget of $2$.
+}
+\label{fig:method-fig}
+\end{figure}
+
+\label{subsec:method-allocation}
+
+\cref{eq:int-opt-framework} is an integer linear program, but in fact has a very special form that allows it to be solved in $O(B_\mathrm{max} \cdot n)$ time using a greedy algorithm that incrementally ``turns on'' $c_{ij}$ for which $\Delta_{ij}$ is largest. (Formally, the feasible sets of $c_{ij}$ form a matroid, \citealp{edmonds1971matroids}, so this greedy procedure is guaranteed to find an optimum.) We exploit this property in two ways:
+
+\textbf{Online allocation:} If queries $\{x_i\}$ are known \emph{a priori},
+we simply replace each $\Delta_{ij}$ in \cref{eq:int-opt-framework} with the corresponding estimate from $\hat{\mathbf{\Delta}}(x_i; \theta)$, solve for $c_{ij}$, then finally set each $b_i = \max_j c_{ij}$.
+
+One drawback of this procedure is that responses must be processed in a batch. However, in some cases it is also possible to effectively set budgets independently for each $x_i$:
+
+\textbf{Offline allocation:} 
+If allocations must be made without access to a full batch of samples, we construct a fixed allocation policy as follows:
+
+\textbf{(1)} Hold out a subset of the data used for training the reward estimator $\hat{\mathbf{\Delta}}$, then use it to label queries in this held-out set (e.g.\ based on the first-sample prediction $\hat{\Delta}(x_i)_{1}$). Divide these queries into a fixed set of bins according to their predicted marginal rewards.
+
+\textbf{(2)} Solve the allocation problem for this held-out as in \cref{eq:int-opt-framework}, with the additional constraint that all queries in a bin receive the same budget allocation. 
+For each bin, store the assigned budget.
+
+\textbf{(3)} During deployment, compute a reward prediction for each $x_i$, map it to a bin, and return the budget associated with that bin.
+
+During deployment, all queries can be processed independently
+(at the risk of a budget violation if the distribution of queries is significantly different from those used to compute the allocation policy).
+\subsection{Interesting Special Cases}
+\label{subsec:method-special} 
+
+\textbf{Binary Reward + Best-of-\textit{k}:} 
+In domains such as \textbf{coding} and \textbf{math}, rewards are often binary, indicating success or failure. 
+For instance, an outcome reward model can be used to assess correctness in math while unit tests indicate correctness in coding.
+In such settings, the probability that a single sample from the model succeeds may be used to analytically compute all marginal rewards.
+
+\newcommand{\pgood}{\lambda}
+Let $\pgood = \mathbb{E}_{y \sim p(\cdot \mid x)}[r(x, y)]$ denote the probability of obtaining a successful result from a single sample (for $r(x, y) \in \{0, 1\}$).
+Then the reward estimate $q(x, b)$ is simply the probability of getting at least one success in $b$ attempts:
+$
+    q(x,b) = 1 - (1-\pgood)^{b} 
+$.
+Then $\Delta(x_i,b_i) = \pgood_i(1-\pgood_i)^{b_i}$.
+
+In this case, rather than training the reward predictor $\hat{\mathbf{\Delta}}$ using a squared loss as in \cref{eq:mse}, we obtain empirical estimates of $\pgood_i$ at training, then minimize the cross-entropy:
+\begin{equation}
+     \sum_{x_i, \pgood_i} \Big[ \pgood_i \log(\hat{{\lambda}}(x_i;\theta)) + (1-\pgood_i)(\log(1-\hat{{\lambda}}(x_i;\theta)) \Big]
+\end{equation}
+with an appropriately parameterized $\hat{{\lambda}}(x; \theta)$.
+
+\textbf{Routing:} 
+For the routing setting, we learn $\hat{\mathbf{\Delta}}$ in a special form that  models the probability of outputs from the strong model $p^S$ being preferred over the weak model $p^W$ as:
+\begin{equation}
+\hat{\Delta}(x_i; \theta)_{b^S} \approx
+    p(p^S \succ p^W | x) = \mathbb{E}_{y_1 \sim p^S, y_2 \sim p^W} [\sigma(r(x,y_1) - r(x,y_2)) ]
+\end{equation}
+
+
+
+
+\section{Experiments}
+
+
+We apply our method to several adaptive decoding procedures: best-of-$k$ and routing (to either a large model or a sophisticated search algorithm). We evaluate improvements over standard decoding and procedures that allocate computation uniformly across problem instances, as well as performance relative to the theoretical upper bound. In addition, we provide \emph{intrinsic} evaluations of the accuracy and calibration of reward predictors $\hat{\mathbf{\Delta}}$.
+
+\subsection{Adaptive Best-of-k}
+We use best-of-$k$ reranking with a reward model in three settings: Math, Code and Chat.
+\textbf{Methods:}
+ We evaluate the following methods:
+\begin{enumerate}
+    \item \textbf{Online Ada-BoK (ours):} The online variant of our method that solves a joint optimization problem, as detailed in Section~\ref{subsec:method-allocation}.
+    \item \textbf{Offline Ada-BoK (ours):} The offline variant that solves the allocation problem on a held-out dataset, as detailed in Section~\ref{subsec:method-allocation}. This method is only used in Math and Code domains. 
+    \item \textbf{Best-of-$k$:} This baseline allocates the same number of samples $k=B$ to every query. 
+    \item \textbf{Oracle:} Oracle is a non-implementable method that uses the ground truth marginal rewards to solve the allocation problem. 
+    This method solves the allocation problem by plugging in the true marginal rewards.
+    It is \textbf{unrealizable} in practice, but provides an upper bound on the reward that could be obtained if the learned marginal reward predictor $\hat{\mathbf{\Delta}}$ were perfect. 
+\end{enumerate}
+
+\textbf{Evaluation Metrics:}
+Our main evaluation metric for Math and Code is the expected success rate under an oracle verification procedure:
+\begin{equation}
+    \textbf{Expected Success Rate} = \dfrac{1}{n}\sum_{i=1}^{n}\mathbb{E}_{y_i \sim f(x_i,b_i)} [\mathds{1} \text{\{$y_i$ is correct\}}]
+\end{equation}
+where $n$ is the number of queries. 
+Similarly, for Chat, it is the expected reward:
+\begin{equation}
+\label{eq:expected_reward}
+    \textbf{Expected Reward} = \dfrac{1}{n}\sum_{i=1}^{N}\mathbb{E}_{y_i \sim f(x_i,b_i)} [r(x,y_i)]
+\end{equation}
+To estimate these in practice, we sample a large number of generations $B_{max}$ for each query and then use bootstrapping to approximate the expectation for different $b_i$ .
+\begin{figure}[t!]
+\centering
+\includegraphics[width=\textwidth]{figures/bok.pdf}
+\caption{\textbf{Results on Code and Math}. The left column shows the distribution of LM success probabilities across queries. A significant number of problems on Code have $0\%$ success rate, while Math has a flatter distribution of difficulty. The middle column compares predicted marginal reward predictors to ground-truth values, alongside calibration curves (our predictors are well calibrated with the ground truth). Finally, the right column shows the performance curves for tested methods. Here, we observe that adaptive computation generally outperforms the best-of-$k$ baseline.}
+\label{fig:code-math}
+\end{figure}
+
+The compute budget $B$ is the average number of samples that may be drawn per query. Best-of-$k$ with $k=B$ uses the same number of total samples as our adaptive method.
+We plot the performance of different methods for different compute budgets, where budgets are specified in terms of $B$.
+Note that, in the binary reward-based Math and Code domains, it may be efficient to set $b_i = 0$ for some queries, as many problems have a $0$\% success rate. In these cases, a default response such as \textit{I don't know} may be returned, allowing the sample budget to be allocated more effectively elsewhere. For chat experiments, we require all $b_i \geq 1$ .
+
+\subsubsection*{Code}
+\textbf{Setup:} For the coding experiments, we adopt a subset of \textbf{TACO}, a dataset focused on algorithmic code generation with problems sourced from various programming contest platforms~\citep{li2023taco}.
+We use a custom off-the-shelf \textbf{Starcoder-15B} model, which was released by the creators of the TACO dataset after fine-tuning on the dataset.
+We use the official open-source evaluation framework released with TACO. A generation is classified as a success if it passes all test cases.
+Finally, as unit tests serve as a verifier, a method is considered successful on a query if at least one of its $k$ generations passes all test cases.
+We use the MLP variant to learn the marginal rewards.
+\textbf{Results:} 
+Figure~\ref{fig:code-math} present success rates for the code dataset. 
+We first observe that while our methods perform significantly better in the low-budget regime ($B < 8$), the results in the moderate-to-high budget regime are mixed.
+Counter-intuitively, while our offline variant always outperforms best-of-$k$, our online variant actually falls below the best-of-$k$ curve in the high-budget regime. 
+This is because small errors in the learned marginal reward predictor can hugely impact solutions to the allocation problem (if a problem has a true success rate of 0\%, but its success rate is predicted to be 1\%, it becomes an attractive candidate for a large budget).
+50\% of problems in the coding dataset have 0 success probability (for Math, this is only 5\%).  
+The offline variant avoids this pathology by binning impossible and low-probability solutions together, effectively ``regularizing'' allocations.
+In summary, the coding results bring to light the fact that prediction errors in marginal reward can adversely impact online allocation. 
+At the same time, the consistent outperformance of the offline variant over best-of-$k$ reinforces the value of adaptive compute budget allocation. 
+
+
+\subsubsection*{Math}
+\textbf{Setup:} We use a subset of the \textbf{Numina-COT Dataset}~\citep{numina_math_datasets}, which contains Math problems obtained from diverse sources.
+We use Mistral AI's \textbf{Mathstral-7B} model, which is specialized for mathematical tasks, and is based on Mistral 7B~\citep{jiang2023mistral}.
+We use this model directly off-the-shelf and do not perform any fine-tuning.
+We use an oracle verifier to select the best answer out of $k$. 
+This implies that if the model generates at least one correct answer out of $k$, it will be successful. 
+The verifier uses a $2$-stage pipeline that employs the evaluation framework of Hendrycks et al. in the first stage and a custom LLM-verifier in the second stage~\citep{hendrycks2021measuring}.
+We used the LoRa variant to learn the marginal rewards.
+
+\textbf{Results:}
+Figure~\ref{fig:code-math} illustrates the success rate across different compute budgets.
+Our online and offline methods consistently outperform best-of-$k$ for all compute budgets. 
+While the improvements are marginal in the low-budget regime ($B < 8)$, adaptive computation shines in the moderate-to-high budget settings ($B \geq 8)$,
+where they can achieve the same success rate as best-of-$k$ while using 25--50\% less computation.
+This efficiency likely stems from allocation of most of the compute resources to medium and hard problems, which require more samples, while easy problems need only a few to be solved optimally.
+Both the online and offline variants perform nearly identically, indicating that solving the optimization problem offline does not lead to any performance degradation in this setting.
+Finally, although we significantly outperform best-of-$k$, the oracle curve suggests that further improvements in the marginal reward predictor $\hat{\mathbf{\Delta}}$ could provide even greater gains.
+
+\begin{figure}[t!]
+\centering
+\includegraphics[width=0.8\textwidth]{figures/chat.pdf}
+\caption{\textbf{Results of adaptive best-of-$k$ in the Chat domain}. Our \textbf{full} variant achieves marginal improvements, enabling a 0-10\% reduction in compute budget while maintaining equivalent reward levels. More notably, the \textbf{tranches} variant exhibits substantial gains, achieving the same reward levels with a 25-40\% reduction in compute budget. }
+\label{fig:chat}
+\end{figure}
+
+
+\subsubsection*{Chat}
+\label{subsubsec:chat}
+\textbf{Setup:} For chat, we use a subset of the LMSYS-Chat dataset, which contains real-world conversations with $25$ LLMs~\citep{zheng2024lmsyschatm}. 
+We use the popular \textbf{Gemma-7b-it} model, which in an instruction-tuned model for chat~\citep{team2024gemma}.
+We use reward as our primary evaluation metric. We use an off-the-shelf reward model called \textbf{NCSOFT/Llama-3-OffsetBias-RM-8B}, which was ranked amongst the top $10$ on RewardBench at the time of writing.
+We used the MLP variant to learn the marginal rewards.
+Finally, we conduct evaluation on $2$ different subsets of the dataset- 
+\begin{enumerate}
+    \item \textbf{Full:} The vanilla experiment uses the the entire test set.
+    \item \textbf{Tranches:} The tranches experiment that uses a subset of $20\%$ from the full test set. 
+    To create this subset, we first generated multiple responses for each query in the test set and labeled them using the reward model. 
+    We then calculated the reward variance for each query and selected only those queries that fall in the lowest $10\%$ or highest $10\%$ of variance. 
+    In essence, the tranches test set is composed of queries with the lowest and highest variance in rewards, representing the two extremes. 
+    
+\end{enumerate}
+
+The main goal of the \textbf{tranches} experiment is to evaluate our method when the distribution of queries differs from typical datasets, which are often collected in somewhat controlled settings. 
+Such datasets may not fully capture the true diversity of user queries that are encountered by general chatbots. While understanding the true distribution of user queries is beyond the scope of this work, the tranches experiment simulates a more extreme distribution to provide performance insights.
+
+\textbf{Results:}
+Figure~\ref{fig:chat} present the results for the two subsets. 
+We focus on the small compute budget regime as chat requires much lesser search and we empirically observed rewards saturating quickly. 
+In the case of the \textit{full} variant, the gains are relatively modest.
+The Oracle curve shows a 15--25\% reduction in compute budget while maintaining the same average reward. 
+Although our adaptive method consistently outperforms best-of-k everywhere, the reductions in compute budget are relatively small, ranging from 0--10\%.
+This indicates that while adaptive allocation can provide some benefit, an equitable allocation performs almost at par.
+For the \textit{tranches} variant, the results are notably different. 
+Our adaptive method achieves substantial gains,  reducing the budget by 25--40\% while matching the rewards of best-of-$k$.
+\subsection{Routing}
+
+\begin{figure}[t!]
+\centering
+\includegraphics[width=\textwidth]{figures/routing.pdf}
+\caption{\textbf{Results for different routing procedures}. The left column shows the distribution of ground-truth preference probabilities for model size and value-augmented sampling. The middle column compares our learned preference predictors to ground-truth values, alongside calibration curves (our predictors are well calibrated). Finally, the right column shows the performance curves for tested methods. We observe that adaptive routing outperforms the random routing baseline, demonstrating that our learned predictor is able to effectively route more challenging queries to the stronger model while leaving simpler queries to the weaker model.}
+\label{fig:routing}
+\end{figure}
+
+Through this set of experiments, we aim to evaluate the effectiveness of our learned preference predictor in routing queries between a weak decoding procedure $p^W$ and a strong procedure $p^S$. 
+
+\textbf{Settings:} We present results for two different ($p^W$, $p^S$) pairs which are based on:
+
+\begin{enumerate}
+ \item \textbf{Model Size:} In this setting, $p^W$ and $p^S$ are models from the same family but with different model sizes. We use the instruction-tuned \textbf{Gemma-2b-it} and \textbf{Gemma-7b-it} models as $p^W$ and $p^S$. We use the \textit{full} variant of the LMSYS dataset described in Section~\ref{subsubsec:chat} .
+ 
+ \item \textbf{Value-Augmented Sampling:} In this setting, $p^W$ and $p^S$ have the same base LLM model. During decoding, a value function is used to guide search, improving performance but with significant computational overhead. In this experiment we use \textbf{Llama-2 7B} for both the LLM and the value function. In each decoding step, we compute the value of 10 possible tokens, increasing the cost of decoding by a factor of 10.
+ We use the harmless subset of the popular Anthropic HH dataset~\citep{bai2022training}. 
+ 
+\end{enumerate}
+
+\textbf{Methods:} 
+We present results for the following methods:
+\begin{enumerate}
+    \item \textbf{Online Routing (ours):} $\hat{\Delta}$ is used to predict the preference probabilities for a set of queries. These predictions are then routed using the online allocation procedure.  
+    \item \textbf{Random:} A simple baseline that randomly routes a fixed fraction of queries to $\pi^S$. 
+    Any target $B$ may be obtained by changing this fraction.
+    \item \textbf{Oracle:} As above, a non-realizable skyline that uses ground-truth information about the reward distribution of $p^W(\cdot \mid x_i)$ and $p^S(\cdot \mid x_i)$ for routing.
+\end{enumerate}
+\textbf{Setup:} 
+We use expected reward, defined in Eq~\ref{eq:expected_reward}, as our main evaluation metric.
+For reward prediction in experiments with variable model size, we use the smaller $p^W$ as the base LLM. 
+That is, we train using the hidden states of $p^W$ or perform LoRA fine-tuning of $p^W$. 
+This ensures that computational overhead during inference is minimal, and $p^S$ does not even have to be called at all for some queries. 
+
+
+\textbf{Results:}
+Figure~\ref{fig:routing} shows that for both experiments, the learned predictor effectively routes the more challenging queries to the stronger model, while simpler queries are handled by the weaker model. This leads to substantial compute savings without a significant loss in overall performance. For example, in Value augmentation, we achieve up to a 25-40\% reduction in calls to the more expensive decoding scheme while maintaining similar levels of reward. 
+
+Strikingly, in some cases our routing scheme actually outperforms the strong decoder---because the weak decoder sometimes outperforms the strong one, careful routing can achieve better overall performance. Our reward predictor learns and exploits this pattern.
+\subsection{Analysis}
+
+\subsubsection*{How do the learned marginal reward predictors perform?}
+
+So far, we have seen that our learned marginal reward predictors can be used effectively in adaptive compute allocation.
+However, we also evaluate their performance independently of the adaptive compute allocation. 
+To this end, we introduce three evaluation metrics:
+\begin{enumerate}
+    \item \textbf{Avg. (Average Loss):} The empirical loss when the prediction for every query is the average marginal reward, i.e., $\Bar{\Delta} = \frac{1}{N} \sum_i \Delta_i$. In this case, the model predicts the same marginal reward for each input. If the representations of the language model do not carry any meaningful information, we expect the performance to approximately equal this average loss.
+    \item \textbf{Opt.$^*$ (Oracle Loss):} The loss that a perfect predictor would achieve. Since we use soft labels rather than binary ($0$-$1$) labels, the minimum possible loss is a positive value. 
+    \item \textbf{Acc. (Accuracy):} The accuracy of predictions if the median of $\Delta$ values is used as a threshold. That is, if $\Delta_i > median$, the label for that query is $1$, and otherwise $0$. The accuracy of a random predictor would $50\%$. 
+\end{enumerate}
+
+\begin{wraptable}{r}{0.5\textwidth}
+\centering
+\footnotesize
+\renewcommand{\arraystretch}{1.25}
+\resizebox{0.5\textwidth}{!}{
+\begin{tabular}{|l|c|c|c|c|}
+\hline
+\textbf{Setting} & \textbf{Ours} & \textbf{Avg. } & \textbf{Opt.$^*$} & \textbf{Acc}  \\
+\hline
+Code & 0.33 & 0.58 & 0.20 & 74\% \\
+\hline
+Math & 0.48 & 0.69 & 0.34 & 84\%  \\
+\hline
+Chat (Model routing) & 0.64 & 0.67 & 0.58 & 72\%  \\
+\hline
+Chat (VAS routing) & 0.55 & 0.57 & 0.51 & 72\%  \\
+\hline
+\end{tabular}
+}
+\caption{Learned predictors achieve lower loss than fixed baselines (Avg.), approach optimal values (Min.), and accurately discriminate queries of above- and below-median difficulty (Acc.).}
+\end{wraptable}
+
+Table~1 summarizes the results. 
+In all cases, the achieved loss is lower than the baseline, indicating that the queries contain meaningful signals about the model's response distributions.
+In routing, the test loss is closer to the baseline, which can be attributed to the low entropy in the reward distribution, as shown in Figure~\ref{fig:routing}.
+Across all settings, accuracy exceeds 70\%, showing that difficulty is predictable but highlighting potential scope for improvement. 
+\begin{figure}[t!]
+\centering
+\includegraphics[width=0.8\textwidth]{figures/budget-fig.pdf}
+\caption{\textbf{Allocation of compute at different budgets.} The ``Easy'', ``Medium'', and ``Hard'' categories are obtained by binning queries according to their predicted success probability.
+In the low-budget regime, the majority of the budget is allocated to easy and medium queries; as budget increases, it is primarily allocated to hard queries. }
+\label{fig:bins}
+\end{figure}
+\subsubsection*{How does allocation vary with predicted difficulty?}
+Having established the performance benefits of adaptive allocation, we now explore what the distribution of compute budget for different marginal reward predictions looks like. 
+To investigate this, we focus on the Code and Math domains, where allocation is performed using $\pgood_x$, the success probability of a query.
+We stratify the predicted success probabilities into three \textbf{evenly-sized} bins according to their predicted success probability. 
+Figure~\ref{fig:bins} illustrates how the compute allocation changes across bins as the budget increases. 
+At the lowest budget, the majority of the allocation goes to queries predicted to be easy or medium in difficulty. 
+At the highest compute budget, by contrast, most of the compute is allocated to the hard bin. 
+This shift can be understood intuitively: easy-to-moderate queries typically require only a few samples to solve, beyond which the marginal gain of additional samples decays rapidly. In contrast, for queries with low success probabilities, the marginal gain remains high even with a large number of samples and decays extremely slowly.
+Finally, the distinct allocation patterns between Math and Code domains highlight how the underlying difficulty distributions of datasets significantly impact budget allocation strategies.
+
+
+
+\section{Related Work}
+
+
+\textbf{Decoding Procedures in LLMs.} 
+There has been extensive research into utilizing different decoding schemes to enhance LLM capabilities, usually by expending inference-time compute. 
+One of the most straightforward approaches is best-of-$k$ sampling, where $k$ different model responses are generated per user query, and the final model output is selected using a reward model \citep{gao2023scaling, beirami2024theoretical}, majority voting \citep{wang2023selfconsistency}, or verifiers \citep{li2022competition}. 
+Another line of work has shown that allowing LLMs to generate intermediate ``reasoning'' steps, or ``chain-of-thoughts'' (CoTs) can significantly improve their final answer across various tasks \citep{wei2022chain, nye2021show, zhou2023leasttomost}. 
+However, while this type of test-time search can boost performance, it incurs additional computational costs due to the need to decode (potentially many more) reasoning tokens. 
+LLM decoding can also be framed as sampling from a tree of possible sequences, inspiring research that uses inference-time compute to search through this tree more effectively \citep{yao2024tree, liudon2024, han2024value}. 
+
+\textbf{Adaptive Computation Time in NN.} Several works explored the idea of learning how to adapt inference-time compute in neural networks \citep{graves2016adaptive, dehghani2018universal, banino2021pondernet}. These works focus on networks with recurring components, where the decision is the number of times to pass the input through these components. Our work, however, is architecture-agnostic and focuses on adaptively selecting a decoding procedure. 
+Recently, \cite{snell2024scaling} demonstrated that allocating inference-time compute optimally can outperform simply using a larger model. %
+Here, we show how to realize these improvements in practice using learned difficulty predictors.
+
+
+
+\section{Conclusion}
+
+We have introduced an approach for adaptively scaling test-time computation by predicting which queries would benefit the most from additional computation.
+We first showed that it is possible to learn lightweight models that predict marginal rewards on top of pre-trained LMs---indicating that LMs encode usable information about the reward distribution of their responses to inputs.
+We then presented an allocation algorithm that adaptively allocates computation to queries. 
+Results in programming, mathematics, and chat show our approach gives significant reductions in computation at a target level of output quality, or improvements in quality given a fixed computation budget.
+
+
+\textbf{Limitations:} 
+In this work, we assumed that we have access to a verifier in the Math experiments. 
+However, such verifiers will generally not be available, and using reward models specializing in Math might be the more practical implementation of our method. 
+
+\textbf{Future Work:}
+The gap between our current performance and the oracle indicates that there is room for improvement in marginal reward prediction. This could be addressed by exploring more advanced prediction models or by developing techniques that allocate additional inference-time computation specifically to obtain better marginal reward estimates.
+
+
+

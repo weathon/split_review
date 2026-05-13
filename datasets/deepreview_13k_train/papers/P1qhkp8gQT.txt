@@ -1,0 +1,500 @@
+\title{InstructRAG: Instructing Retrieval-Augmented Generation via Self-Synthesized Rationales}
+
+\begin{abstract}
+
+Retrieval-augmented generation (RAG) has shown promising potential to enhance the accuracy and factuality of language models (LMs).
+However, imperfect retrievers or noisy corpora can introduce misleading or even erroneous information to the retrieved contents, posing a significant challenge to the generation quality.
+Existing RAG methods typically address this challenge by directly predicting final answers despite potentially noisy inputs, resulting in an \emph{implicit} denoising process that is difficult to interpret and verify.
+On the other hand, the acquisition of explicit denoising supervision is often costly, involving significant human efforts.
+In this work, we propose \model, where LMs \emph{explicitly} learn the denoising process through self-synthesized rationales --- First, we instruct the LM to explain how the ground-truth answer is derived from retrieved documents.
+Then, these rationales can be used either as demonstrations for in-context learning of explicit denoising or as supervised fine-tuning data to train the model.
+Compared to standard RAG approaches, \model requires no additional supervision, allows for easier verification of the predicted answers, and effectively improves generation accuracy.
+Experiments show \model consistently outperforms existing RAG methods in both training-free and trainable scenarios, achieving a relative improvement of 8.3\% over the best baseline method on average across five knowledge-intensive benchmarks.
+Extensive analysis indicates that \model scales well with increased numbers of retrieved documents and consistently exhibits robust denoising ability even in out-of-domain datasets, demonstrating strong generalizability.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+While large language models (LMs) have demonstrated remarkable text generation abilities~\citep{brown2020language,team2023gemini,touvron2023llama}, they may occasionally produce factually incorrect contents~\citep{dhuliawala2023chain,huang2023survey,ji2023survey,sun2023head,xu2024hallucination,zhang2023language}, particularly when the task at hand requires the most current information or out-of-domain knowledge not adequately represented in the pre-training corpus~\citep{ jiang2023active,shuster2021retrieval,yu2023improving,zhao2023verify}.
+This limitation significantly hinders the reliable deployment of LMs in high-stakes domains where factuality is crucial~\citep{magesh2024hallucination,singhal2023large,xiao2021lawformer,xiong2024benchmarking}.
+
+In light of this, retrieval-augmented generation (RAG)~\citep{asai2023self, guu2020retrieval,izacard2023atlas,khandelwal2019generalization, lewis2020retrieval} has been introduced to enhance the generation accuracy of LMs in knowledge-intensive tasks by leveraging the most up-to-date information and specialized knowledge from external sources~\citep{kasai2024realtime,vu2023freshllms,yang2024crag,zhou2022docprompting}.
+However, the retrieved contents are typically mixed with irrelevant or even erroneous information due to the absence of perfect retrieval solutions~\citep{izacard2021unsupervised,karpukhin2020dense,khattab2022demonstrate,khattab2023dspy,shi2023replug} and the presence of noisy data in the retrieval corpus~\citep{izacard2021leveraging,li2023large, yoranmaking2024}, posing a long-standing challenge to almost all RAG systems.
+Typically, vanilla RAG approaches address this issue \emph{implicitly} by training LMs to directly predict correct answers despite potentially noisy inputs.
+Such latent processes are not only difficult to interpret and verify but also vulnerable to higher noise ratios, especially when the number of retrieved documents is large~\citep{chen2024benchmarking,cuconasu2024power,liu2024lost,wu2024faithful}.
+On the other hand, obtaining high-quality explicit denoising supervision often requires substantial human efforts, which is time-consuming and costly.
+
+In this work, we introduce a new RAG framework, \model, which enables the LM to \textit{explicitly} denoise retrieved information and justify its predicted final answers by generating denoising responses (\ie, \emph{rationales}), as illustrated in Figure~\ref{fig:method_comparison}.
+Compared to vanilla RAG approaches, \model does not require any additional supervision, while enjoying improved generation accuracy and trustworthiness.
+Specifically, our method consists of two steps.
+First, given a set of question-answer pairs and potentially noisy retrieved documents, we prompt an instruction-tuned LM to synthesize denoising rationales that analyze the documents and articulate how they lead to the ground-truth answers (\S~\ref{sec:rationale_gen}).
+Then, these synthetic rationales can be utilized as in-context learning examples or as supervised fine-tuning data, allowing the LM to explicitly learn to denoise retrieved contents (\S~\ref{sec:learning_rationale}).
+The effectiveness of \model can be attributed to the strong instruction-following ability of LMs~\citep{jiang2024instruction,ouyang2022training,wei2021finetuned}, a significant feature that still remains underexplored in the context of RAG.
+We show that such self-synthesized rationales not only provide high-quality explicit denoising supervision for in-domain RAG tasks, but also facilitate superior out-of-domain generalization.
+This finding underscores how instruction-tuned LMs can synthesize generalizable 
+supervision to effectively overcome the inevitable noise in RAG.
+
+The main contributions of this work are as follows:
+(1) We propose \model, a simple yet effective RAG framework that allows LMs to explicitly denoise retrieved contents by generating rationales for better verifiability and trustworthiness.
+(2) \model is a self-synthesis method that does not require additional supervision compared to standard RAG methods, and can be seamlessly applied to both in-context learning and supervised fine-tuning settings.
+(3)~\model consistently outperforms state-of-the-art RAG approaches, yielding a relative improvement of 8.3\% on average compared to the best baseline method across five knowledge-intensive benchmarks.
+Extensive analysis and ablation studies further confirm the superiority of self-synthesized denoising rationales, and demonstrate \model's robust denoising ability against increased noise ratios and strong task transferability in various training-free and trainable scenarios.
+
+\begin{figure}[t]
+\includegraphics[width=\textwidth]{figure/method_comparison.pdf}
+\caption{Comparison between vanilla RAG and our \model. 
+In vanilla RAG, the model is tasked to directly predict answers given user queries and potentially noisy retrieved documents, without explicit denoising processes or explanations for how the answer is derived.
+In contrast, our proposed \model generates rationales that explicitly denoise the retrieved documents and justify the predicted answers, enhancing both the generation accuracy and trustworthiness.}
+\label{fig:method_comparison}
+\end{figure}
+
+
+\section{Our Method: \model}
+
+
+In this section, we first introduce our problem setting (\S~\ref{sec:problem_setting}) and then present the proposed framework~\model that enables LMs to explicitly denoise retrieved contents.
+As shown in Figure~\ref{fig:instruct_rag}, our method consists of two steps.
+First, we prompt an 
+instruction-tuned LM (\ie, rationale generator $\mathcal{M}_\phi$) to synthesize rationales that provide denoising supervisions (\S~\ref{sec:rationale_gen}).
+These rationales aim to explain how to derive the correct answer from potentially noisy retrieved documents for each training sample.
+Then, we guide the LM (\ie, rationale learner $\mathcal{M}_\theta$) to learn explicit denoising by leveraging these rationales as either in-context learning demonstrations or as supervised fine-tuning data (\S~\ref{sec:learning_rationale}).
+
+As detailed in Algorithm~\ref{alg:main}, during the entire process, \model does not require any additional supervisions beyond standard RAG methods.
+By default, we instantiate both $\mathcal{M}_\phi$ and $\mathcal{M}_\theta$ with the same off-the-shelf instruction-tuned model (\ie, \href{https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct}{meta-llama/Meta-Llama-3-8B-Instruct}), making \model a fully \emph{self-synthesis} method.
+We also experiment with different instantiations of $\mathcal{M}_\phi$ and $\mathcal{M}_\theta$ and conduct ablation study in both training-free and trainable settings (\S~\ref{sec:ablation_study}). 
+\begin{figure}[!t]
+\includegraphics[width=\textwidth]{figure/instructrag.pdf}
+\caption{An overview of \model. 
+In step one, given the question $q$, retrieved documents $\{d_1, \cdots, d_K\}$ and ground-truth answer $a$ from the training set, we prompt an instruction-tuned LM (\ie, rationale generator $\mathcal{M}_\phi$) to generate rationale $r$ that explains how the answer can be derived from the potentially noisy input. 
+In step two, we utilize the synthesized rationales from the first step to guide the LM (\ie, rationale learner $\mathcal{M}_\theta$) to explicitly learn denoising of the retrieved documents, either through in-context learning or supervised learning. By default, we use the same model for both $\mathcal{M}_\phi$ and $\mathcal{M}_\theta$, but they can be instantiated with different models as well (see ablation study~\S~\ref{sec:ablation_study}).\label{fig:instruct_rag}}
+\end{figure}
+\begin{table*}[!t]
+\caption{Rationale generation prompt for the $i$-th training sample.\label{tab:rationale_gen}}
+\begin{prompt}[title={Rationale Generation}, label=prompt:rationale_gen]
+{\bf Input:}
+Read the following documents relevant to the given question: \{$q_i$\} \\ \\
+Document [1] (Title: $\dotsm$): \{contents of~$d^1_i$\}\\
+$~~~~~~~~~~~\dotsm$ \\
+Please identify documents that are useful to answer the given question: \{$q_i$\}, and explain how the contents lead to the answer: \{$a_i$\}\\
+\\
+\{task-specific instruction\} \\ \\
+{\bf Output:} \{rationale $r_i$\}
+\end{prompt}
+\end{table*} 
+
+\subsection{Problem Setting}\label{sec:problem_setting}
+
+We adopt the standard RAG setting where the LM $\mathcal{M}_\theta$ has access to annotated datasets of downstream tasks (\eg, question-answering task $\mathcal{T} = \{\lb q,a \rb\}$), and an external knowledge base with the off-the-shelf retriever $\mathcal{R}$ for retrieval.
+Different from previous works~\cite{asai2023self,yoranmaking2024}
+which leverage additional supervisions from GPT-3~\cite{brown2020language} or GPT-4~\citep{achiam2023gpt}, we assume the model has strictly limited access to the above two information sources.
+Given a question $q$, the retriever $\mathcal{R}$ returns a set of potentially noisy documents $D=\{d_{1}, \cdots, d_{K}\}$ from the external knowledge base.
+The model is then tasked to predict the correct answer $a$ to the given question $q$ based on $D$ and its own parametric knowledge, denoted as $p_\theta(a\vert q, D)$.
+
+Our work focuses on investigating the noise robustness of LMs and developing efficient denoising techniques for RAG.
+Hence, we directly employ off-the-shelf retrievers instead of training our own, and prepend all retrieved documents to the question as input to the model, without any filtering or re-ranking.
+This setting is orthogonal to existing research efforts centered on optimizing the retriever or performing adaptive retrieval~\citep{asai2023self, wang2024rat,yang2024crag}.
+
+\subsection{Rationale Generation via Instruction-Following}\label{sec:rationale_gen}
+
+Recent studies~\citep{leike2018scalable, meng2024simpo, ouyang2022training} have made encouraging progress in aligning LMs with human preferences and intentions, enabling the synthesis of high-quality data that closely follows user instructions~\citep{xu2024magpie}.
+Inspired by these advances, we propose to leverage the LM's strong instruction-following ability to generate explicit denoising responses (\ie, \emph{rationales}) for RAG.
+As shown in Table~\ref{tab:rationale_gen}, given a QA pair $\lb q_i, a_i\rb \in \mathcal{T}$ and a set of retrieved documents $\{d^1_{i}, \cdots, d^K_{i}\}$, we prompt an off-the-shelf LM $\mathcal{M}_\phi$ (as the rationale generator) with denoising instructions to produce the corresponding rationale $r_i$ that distinguishes useful documents from noisy ones and explains how the contexts lead to the ground-truth answer $a_i$.
+To ensure the synthetic rationales are aligned with the ground-truth answers, we use a simple substring match to assess their consistency.
+The consistency ratio on training samples with at least one relevant document containing the ground-truth answer is 98\% on average across five benchmarks, supporting the reliability of synthetic rationales as a sanity check.
+This allows us to effectively augment the standard dataset $\mathcal{T} = \{\lb q,a \rb\} \rightarrow \mathcal{T}^+ = \{\lb q,r \rb\}$ with self-synthesized denoising rationales solely by instructing the LM, without any additional supervision.
+
+We also validate the necessity of using an LM-based generator (\ie, $\mathcal{M}_\phi$) to create the rationales instead of employing simple heuristics --- without the generator, rationales can be created in a template-based manner (Table~\ref{tab:rationale_template}), by roughly identifying relevant retrieved documents through simple substring-matching with the ground-truth answer.
+However, as demonstrated in our ablation study, this approach suffers from semantically inaccurate matching of relevant documents, leading to significant performance degradation.
+Another advantage of the LM-based generator is that it can produce high-quality rationales even \emph{without referring to the ground-truth answer}, which only results in a minor performance drop. 
+More detailed analyses on rationale generation design can be found in our ablation study (\S~\ref{sec:ablation_study}).
+
+\subsection{Learning Denoising Rationales in RAG}\label{sec:learning_rationale}
+With the rationale-augmented dataset $\mathcal{T}^+$, it becomes possible to develop a rationale learner $\mathcal{M}_\theta$ that directly learns explicit denoising for RAG tasks with efficient learning strategies.
+Next, we introduce two simple yet effective learning methods in the \emph{training-free} and \emph{trainable} RAG settings, namely,~\model-ICL and~\model-FT.
+
+\noindent {\bf \model-ICL} is a training-free instantiation of \model where the model learns denoising rationales via in-context learning (ICL).
+As shown in Table~\ref{tab:instruct_rag_prompting}, given a test question $q$ and a set of retrieved documents $D = \{d_1, \cdots, d_K\}$, we first randomly sample $N$ demonstrations $\lb q_i,r_i \rb \in \mathcal{T}^+$ from the rationale-augmented training dataset, and then prompt the model to follow the exemplars and generate rationale $r$.
+To save memory and enhance inference efficiency, we only show exemplary questions and their corresponding rationales in such ICL demonstrations.
+
+\noindent {\bf \model-FT} is a trainable instantiation of \model that learns denoising rationales via supervised fine-tuning (FT) with standard language modeling objective. 
+As defined in Eq.~\eqref{eq:instruct_rag_training}, it maximizes the likelihood of rationale $r$ conditioned on question $q$ and retrieved documents $D$.
+\begin{equation}\label{eq:instruct_rag_training}
+\max_{\mathcal{\theta}}\mathbb{E}_{(q,r) \sim \mathcal{T}^+} \log p_{\mathcal{\theta}} (r| q, D). 
+\end{equation}
+where $\theta$ represents the model parameters.
+Both the training and inference of~\model-FT share the same data format.
+As depicted in Table~\ref{tab:instruct_rag_ft}, it takes as input the retrieved documents followed by the question, and outputs the denoising rationale $r$.
+\begin{figure}[!t]
+\begin{algorithm}[H]
+\caption{\model}\label{alg:main}
+\begin{algorithmic}[1]
+\Require Retriever $\mathcal{R}$, Rationale Generator $\mathcal{M}_\phi$, Rationale Learner $\mathcal{M}_\theta$, Training data
+$\mathcal{T} = \{\lb q,a \rb\}$
+
+\noindent \textcolor{blue}{\texttt{/* Training data generation */}}
+\For {each $\lb q,a \rb \in \mathcal{T}$}
+    \State Retrieve $D=\{d_{1}, \cdots, d_{K}\} \leftarrow \mathcal{R}(q)$ 
+    \State Synthesize denoising rationale $r \leftarrow \mathcal{M}_\phi(q,a,D)$ \Comment{\textcolor{blue}{Rationale Generation (\S~\ref{sec:rationale_gen})} }
+\EndFor
+\State Augment training data $\mathcal{T} \rightarrow \mathcal{T}^+ = \{\lb q,r \rb\}$  
+
+\noindent \textcolor{blue}{\texttt{/* Two learning modes */}}
+\If{ \texttt{LearningMode} == \texttt{In-Context Learning}} \Comment{\textcolor{blue}{\model-ICL} }
+    \State Sample ICL examples $\mathcal{E} = \{\lb q,r \rb\} \subseteq \mathcal{T}^+$ 
+    \State $r \leftarrow \mathcal{M}_\theta(r|q, \mathcal{R}(q), \mathcal{E})$ given inference query $q$ \Comment{\textcolor{gray}{Detailed in Table~\ref{tab:instruct_rag_prompting}}}
+\ElsIf{ \texttt{LearningMode} == \texttt{Fine-Tuning}} \Comment{\textcolor{blue}{\model-FT} }
+    \State Fine-tune $\mathcal{M}_\theta$ on $\mathcal{T}^+$ with retrieved documents $\{\lb q,r,D \rb\}$ 
+    \State $r \leftarrow \mathcal{M}_\theta(r|q, \mathcal{R}(q))$ given inference query $q$ \Comment{\textcolor{gray}{Detailed in Table~\ref{tab:instruct_rag_ft}}}
+\EndIf
+\State \Return $r$
+ 
+\end{algorithmic}\label{algo:inference}
+\end{algorithm}
+\end{figure}
+
+
+\section{Experiments}
+
+
+\subsection{Experimental Setting}\label{sec:exp_setup}
+
+\begin{table*}[!ht]
+    \centering
+    \caption{Dataset statistics and retrieval setting.}\label{tab:data_stats}
+    \begin{tabular}{lccccc}
+    \toprule
+    Dataset& Train & Test & Retriever & Top-$K$ & Recall@$K$ \\
+    \midrule
+    PopQA & 12,868 & 1,399 & Contriever & 5 & 68.7 \\
+    TriviaQA & 78,785 & 11,313 & Contriever & 5 & 73.5 \\
+    Natural Questions & 79,168 & 3,610 & DPR & 5 & 68.8 \\
+    ASQA & 4,353 & 948 & GTR & 5 & 82.2 \\
+    2WikiMultiHopQA & 167,454 & 12,576 & BM25 & 10 & 40.7\\
+    \bottomrule
+    \end{tabular}
+
+\end{table*}
+
+{\bf RAG tasks and evaluation metrics.} We extensively validate the effectiveness of~\model on five knowledge-intensive benchmarks, including PopQA~\citep{mallen2023not}, TriviaQA~\citep{joshi2017triviaqa}, Natural Questions~\citep{kwiatkowski-etal-2019-natural}, ASQA~\citep{stelmakh2022asqa}, and 2WikiMultiHopQA~\citep{ho-etal-2020-constructing}.
+We use Wikipedia corpus as the retrieval source, and test our method with both sparse and dense off-the-shelf retrievers, including BM25~\citep{robertson1994some}, DPR~\citep{karpukhin2020dense}, GTR~\citep{ni2022large} and Contriver~\citep{izacard2021unsupervised}.
+The retrieval quality is measured by Recall@$K$, indicating whether the retrieved $K$ documents contain the correct answer.
+Table~\ref{tab:data_stats} shows the detailed dataset statistics.
+Following standard evaluation settings~\citep{asai2023self}, we adopt the official metric of correctness (\emph{str-em}), citation precision (\emph{pre}) and recall (\emph{rec}) for ASQA~\citep{gao2023enabling}, and use \emph{accuracy} for the other tasks, which measures whether the ground-truth answers are included in the model generations~\citep{mallen2023not,schick2023toolformer}.
+Additionally, we also adopt LLM-as-a-judge for further evaluation (\S~\ref{sec:analysis}), as the above standard metrics are subject to the limitations of pattern-matching, which cannot accurately handle semantic equivalence.
+
+{\bf Baselines.} We compare our method with a wide range of RAG baselines under both training-free and trainable settings.
+Given that state-of-the-art LMs have incorporated a large amount of world-knowledge during the pre-training stage, we also report the performance of a non-retrieval baseline (namely, {\bf vanilla zero-shot prompting}) for reference.
+Specifically, the training-free RAG baselines includes: (1) {\bf in-context retrieval-augmented language modeling (RALM)}~\citep{ram2023context}, a prompting method that extends the non-retrieval baseline by presenting the model with retrieved documents; (2) {\bf few-shot demonstration with instruction}, an ICL method using ground-truth question-answer pairs sampled from the training set as demonstration exemplars.
+
+The trainable RAG baselines include: (1) {\bf vanilla supervised fine-tuning (SFT)}, a supervised method with the training objective of maximizing the data likelihood of ground-truth answer given potentially noisy input; (2) {\bf RetRobust}~\cite{yoranmaking2024}, which fine-tunes the RAG model on a mixture of relevant and irrelevant contexts to make it robust to irrelevant contexts; (3) {\bf Self-RAG}~\citep{asai2023self}, a strong trainable baseline, focusing on adaptive retrieval controlled by special reflection tokens.
+Both RetRobust and Self-RAG were originally built on Llama-2~\citep{touvron2023llama} with additional supervisions.
+For example, RetRobust augments the training data for multi-hop reasoning tasks (\eg, 2WikiMultiHopQA) by prompting GPT-3 to decompose the original query and generate intermediate subqueries, and Self-RAG requires GPT-4 to generate additional reflective tokens to augment training samples.
+
+For a fair comparison, we re-implement the two methods on Llama-2$_{\textsc{7B}}$ and/or Llama-2$_{\textsc{13B}}$ with augmented training data released by their authors, and report their performance as the higher one between the original scores and our reproduced results.
+As our method adopts instruction-tuned Llama-3 as the backbone model, we also train RetRobust and Self-RAG with Llama-3-Instruct$_{\textsc{8B}}$ and optimize their performance through extensive hyper-parameters search.
+\subsection{Main Result}
+
+Table~\ref{tab:main} shows the overall experimental results, providing a comprehensive comparison between our~\model and baseline methods in both training-free and trainable RAG settings.
+
+\noindent {\bf Baselines without retrieval.}
+As shown in the first block, the basic instruction-tuned models (Llama-3-Instruct$_{\textsc{8B}}$ and Llama-3-Instruct${_\textsc{70B}}$) already achieve notable performance across all five benchmarks, with the 70B model exhibiting a surprisingly competitive performance of 80.6\% on the TriviaQA.
+This observation suggests that the required knowledge for these tasks mostly falls within the LM's parametric knowledge, probably due to what is known as \emph{data contamination} (\ie, the presence of test data of downstream tasks in the pre-training data of LMs)~\citep{golchin2023time,jacovi2023stop,magar2022data}.
+
+\begin{table*}[!t]
+\centering
+\footnotesize
+    \caption{
+    Overall results of~\model and baselines on five knowledge-intensive benchmarks in training-free and trainable RAG settings. We re-implement baselines and report their performance as the higher one between the original scores and our reproduced results. {*} indicates the results copied from~\citep{asai2023self} for reference. ``--'' indicates the  results are not reported in the original paper or not applicable (\eg, some methods cannot produce citations). The best performance is highlighted in {\bf \emph{bold}.}\label{tab:main}} 
+\begin{tabular}{lccccccc}
+\toprule
+& PopQA & TriviaQA & NQ & MultiHopQA & \multicolumn{3}{c}{ASQA} \\ 
+Method & (acc) & (acc) & (acc) & (acc) & (em) & (pre) & (rec)  \\ 
+\midrule
+\multicolumn{8}{c}{\it Baselines w/o Retrieval} \\
+\multicolumn{8}{l}{\bf Vanilla Zero-shot Prompting} \\
+\quad ChatGPT{*}  & {\color{gray}29.3} & {\color{gray}74.3} & -- & -- &  {\color{gray}35.3} & -- & --  \\
+\quad Llama-3-Instruct$_{\textsc{8b}}$  
+& 22.8 & 69.4 & 46.6 & 45.6 & 30.6 & -- & -- \\
+\quad Llama-3-Instruct$_{\textsc{70b}}$  
+& 28.9 & 80.6 & 57.9 & 57.5 & 39.1 & -- & -- \\
+\midrule
+
+\multicolumn{8}{c}{\it RAG w/o Training} \\
+{\bf In-Context RALM}~\citep{ram2023context} \\
+\quad ChatGPT{*}  
+& {\color{gray}50.8} & {\color{gray}65.7} & -- & -- &  {\color{gray}40.7} & {\color{gray}65.1} & {\color{gray}76.6}  \\
+\quad Llama-3-Instruct$_{\textsc{8b}}$  
+& 62.3 & 71.4 & 56.8 & 43.4 & 40.0 & 62.1 & 66.4 \\
+\quad Llama-3-Instruct$_{\textsc{70b}}$  
+& 63.8 & 76.3 & 60.2 & 51.2 & 43.1 & 62.9 & 67.6 \\
+{\bf Few-Shot Demo. w/ Instruction} \\
+\quad Llama-3-Instruct$_{\textsc{8b}}$
+& 63.1 & 74.2 & 60.1 & 45.3 & 42.6 & 55.0 & 64.4 \\
+\quad Llama-3-Instruct$_{\textsc{70b}}$ 
+& 63.9 & 79.1 & 62.9 & 53.9 & 45.4 & 49.3 & 57.1 \\
+{\bf \model-ICL} \\
+\quad Llama-3-Instruct$_{\textsc{8b}}$
+& 64.2 & 76.8 & 62.1 & 50.4 & 44.7 & {\bf 70.9} & {\bf 74.1} \\
+\quad Llama-3-Instruct$_{\textsc{70b}}$
+& {\bf 65.5} & {\bf 81.2} & {\bf 66.5} & {\bf 57.3}  & {\bf 47.8}  & 69.1 & 71.2 \\
+\midrule
+
+\multicolumn{8}{c}{\it RAG w/ Training} \\
+{\bf Vanilla Supervised Fine-tuning} \\
+\quad Llama-3-Instruct$_{\textsc{8b}}$  
+& 61.0 & 73.9 & 56.6 & 56.1   & 43.8 & -- & --    \\
+{\bf Self-RAG}~\citep{asai2023self} \\
+\quad Llama-2$_{\textsc{7b}}$
+& 55.8 & 68.9 & 42.4 & 35.9  & 30.0 & 66.9 & 67.8\\
+\quad Llama-2$_{\textsc{13b}}$
+& 56.3 & 70.4 & 46.4 & 36.0  & 31.4 & {\bf 70.3} & {\bf 71.3} \\
+\quad Llama-3-Instruct$_{\textsc{8b}}$
+& 55.8 & 71.4  & 42.8 & 32.9 & 36.9 & 69.7 & 69.7  \\
+{\bf RetRobust}~\citep{yoranmaking2024} \\
+\quad Llama-2$_{\textsc{13b}}$
+& -- & -- & 39.6 & 51.5  & -- & -- & -- \\
+\quad Llama-3-Instruct$_{\textsc{8b}}$
+& 56.5 & 71.5 & 54.2 & 54.7  & 40.5 & -- & -- \\
+{\bf \model-FT} \\
+\quad Llama-3-Instruct$_{\textsc{8b}}$
+& {\bf 66.2} & {\bf 78.5} & {\bf 65.7} & {\bf 57.2}  & {\bf 47.6} & 65.7 & 70.5 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\noindent {\bf RAG without training.}
+The second block shows the comparison among training-free RAG methods.
+In-context RALM and few-shot demonstration with instruction methods generally achieve higher performance than the non-retrieval baseline, highlighting the importance of retrieval for knowledge-intensive tasks.
+Encouragingly, our~\model-ICL consistently outperforms all training-free baselines across various metrics, confirming the effectiveness of self-synthesized denoising rationales.
+Moreover, the boost from 8B to 70B model also demonstrates that~\model-ICL scales effectively with larger backbone models, validating the generalizability of our method.
+
+\noindent {\bf RAG with training.} As present in the bottom block of Table~\ref{tab:main}, our~\model-FT not only surpasses all non-retrieval and training-free baselines across all five benchmarks, but also significantly outperforms trainable RAG baselines on almost every metric.
+The only exception is in the ASQA task, where our method slightly underperforms Self-RAG in terms of citation (\ie, \emph{pre} and \emph{rec}).
+This is because our work primarily focuses on explicit denoising for RAG to improve the correctness of generations, which is measured by \emph{em}.
+Despite not being explicitly optimized for citation metrics, our method still achieves competitive citation performance, significantly enhancing both generation accuracy and trustworthiness.
+Note that RetRobust achieves competitive performance on 2WikiMultiHopQA, which involves multi-hop reasoning.
+We attribute this to the additional training supervision provided by GPT-3, which enables the model to explicitly generate intermediate sub-queries and sub-answers.
+Another interesting finding is that Self-RAG consistently exhibits inferior performance compared to vanilla SFT, and even underperforms the training-free in-context RALM baseline across all benchmarks.
+We speculate the reason might be that these RAG tasks favor more domain-specific knowledge than general knowledge.
+However, it is challenging for Self-RAG to directly leverage in-domain features from existing training data as it requires GPT-4 to generate reflection tokens on these benchmarks, which is not available in our problem (\S~\ref{sec:problem_setting}).
+
+\subsection{Ablation Study}\label{sec:ablation_study}
+
+\begin{table*}[!t]
+\centering
+\footnotesize
+\caption{Ablation study on the impact of ground-truth answer,  retrieved documents, and model size on rationale generation, and the use of demonstrations during model inference. The results of our default setting in \model are \underline{underlined}.\label{tab:ablation_study}}
+\begin{tabular}{lllll}
+\toprule
+& \multicolumn{2}{l}{Trainable RAG Setting} & \multicolumn{2}{l}{Training-free RAG Setting} \\
+Method & PopQA & ASQA & PopQA & ASQA  \\
+\midrule
+\multicolumn{5}{c}{\it Rationale Generation Design} \\
+with both & \underline{66.2}  & \underline{47.6} & \underline{64.2} & \underline{44.7}   \\
+w/o ground-truth answer 
+& 65.2 {\color{purple}($\downarrow 1.5\%$)}  & 46.4 {\color{purple}($\downarrow 2.5\%$)} & 64.0 {\color{purple}($\downarrow 0.3\%$)} & 44.5 {\color{purple}($\downarrow 0.4\%$)}   \\
+w/o retrieved documents
+& 64.5 {\color{purple}($\downarrow 2.6\%$)}  & 45.2 {\color{purple}($\downarrow 5.0\%$)} & 64.1 {\color{purple}($\downarrow 0.2\%$)} & 44.3 {\color{purple}($\downarrow 0.9\%$)}   \\
+\midrule
+\multicolumn{5}{c}{\it Model Size of Rationale Generator} \\
+rationale template (no generator) & 59.6 {\color{purple}($\downarrow 10.0\%$)} & 46.3 {\color{purple}($\downarrow 2.7\%$)} & 60.0 {\color{purple}($\downarrow 6.5\%$)} & 41.4 {\color{purple}($\downarrow 7.4\%$)} \\
+Llama-3-Instruct (8B) & \underline{66.2 }& \underline{47.6} & \underline{64.2} & \underline{44.7} \\
+Llama-3-Instruct (70B) & 67.0 {\color{teal}($\uparrow 1.2\%$)} & 49.1 {\color{teal}($\uparrow 3.2\%$)} & 64.8 {\color{teal}($\uparrow 0.9\%$)}  & 47.9 {\color{teal}($\uparrow 7.1\%$)}\\
+\midrule
+\multicolumn{5}{c}{\it Inference Strategy Comparison} \\
+w/o demonstration & \underline{66.2}  & \underline{47.6} & 63.0 {\color{purple}($\downarrow 1.9\%$)} & 43.1 {\color{purple}($\downarrow 3.6\%$)} \\
+w/ demonstration & 66.1 {\color{purple}($\downarrow 0.2\%$)}  & 44.7 {\color{purple}($\downarrow 6.1\%$)} & \underline{64.2} & \underline{44.7} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+\noindent {\bf Providing ground-truth answers and retrieved documents is important for rationale generation.}
+As depicted in the first block of Table~\ref{tab:ablation_study}, we ablate the rationale generation design from two aspects: (1) \emph{w/o ground-truth answer}, where the model has no access to the ground-truth answer during rational generation and must predict the answer and explain how it is derived solely based on retrieved documents; (2) \emph{w/o retrieved documents}, where the model is not provided with any retrieved documents during rational generation, and in this case, it has to explain the given answer based on its own knowledge.
+Although it is not surprising that our default design consistently outperforms the two ablations, it is encouraging to find that our method still works well even without access to the retrieved documents or ground-truth answers.
+This finding suggests the great potential of our~\model to operate in a fully unsupervised manner, which we believe is an exciting direction for future work.
+
+\noindent {\bf Larger rationale generator leads to better results.} The middle block shows how different sizes of rationale generators impact the performance of our method.
+It is evident that the template-based rationale generation method significantly underperforms our method, highlighting the necessity of rationale generator.
+This is because the template-based method relies on pattern matching to identify relevant documents containing the ground-truth answer, which only considers lexical similarity while ignoring semantic meaning.
+The neglect of semantics inevitably introduces noise in template-generated rationales, making them less effective compared to rationales generated by LMs.
+Moreover, we also compare two variants of \model using Llama-3-Instruct$_{\textsc{8B}}$ and Llama-3-Instruct$_{\textsc{70B}}$ as rationale generators.
+The results show that the one with a 70B generator consistently outperforms its 8B counterpart in both training-free and trainable settings, indicating that the self-synthesized denoising rationales can provide better supervision when generated by stronger models.
+\noindent {\bf Inference with demonstrations should only be applied to \model-ICL.}
+In the bottom block, we study the use of demonstrations during the model inference. While demonstrations play an important role for \model-ICL, we find that they actually hurt the performance of \model-FT.
+We attribute this to the fact that \model-FT is optimized to directly generate denoising rationales given potentially noisy input, without referring to any demonstrations.
+Therefore, providing in-context demonstrations for \model-FT is redundant and may compromise its capability due to the discrepancy between training and inference.
+
+\subsection{Analysis}\label{sec:analysis}
+
+\noindent {\bf \model-ICL consistently benefits from more demonstrations.}
+Figure~\ref{fig:demo_study} shows the demonstration sensitivity of \model-ICL and the few-shot demonstration with instruction baseline.
+It is interesting to find that the baseline method achieves its best performance with only one demonstration, and presenting more demonstrations actually harms its performance.
+In contrast, our method consistently improves with the increasing number of demonstrations, confirming the superiority of self-synthesized rationales over plain answers in terms of denoising.
+
+\noindent {\bf \model-ICL and \model-FT are robust to increased noise ratios.} Figure~\ref{fig:noisy_study_prompting} and Figure~\ref{fig:noisy_study_trainable} show the generation accuracy of \model-ICL and \model-FT and the corresponding retrieval precision under an increasing number of retrieved documents.
+While retrieving more documents provides richer external knowledge to the RAG model, it also introduces more noise and lowers the retrieval precision.
+As a result, both the training-free and trainable baselines show diminishing improvements or even degrade as the number of documents increases, reflecting their vulnerability to high noisy ratios.
+In contrast, our \model-ICL and \model-FT are not negatively affected by this increased noise ratio but rather gain further improvement, demonstrating their robust denoising ability.
+\begin{figure}[!t]
+\begin{subfigure}[t]{0.285\textwidth}
+\centering
+\raisebox{.6pt}{\includegraphics[width=\textwidth]{figure/demo_sensitivity.pdf}}
+\caption{Training-free RAG setting. \label{fig:demo_study}}
+\end{subfigure}
+~
+\begin{subfigure}[t]{0.33\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figure/noisy_study_prompting.pdf}
+\caption{Training-free RAG setting. \label{fig:noisy_study_prompting}}
+\end{subfigure}
+~
+\begin{subfigure}[t]{0.33\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figure/noisy_study_trainable.pdf}
+\caption{Trainable RAG setting. \label{fig:noisy_study_trainable}}
+\end{subfigure}
+\caption{Impact of different number of demonstrations and retrieved documents. (a) Demonstration sensitivity study of \model-ICL. (b) Noise robustness study of \model-ICL. (c) Noise robustness study of \model-FT. \label{fig:analysis}}
+\end{figure}
+\begin{figure}[!t]
+\begin{subfigure}[t]{0.32\textwidth}
+\centering
+\raisebox{.6pt}{\includegraphics[width=\textwidth]{figure/short_to_long_transfer.pdf}}
+\caption{Short-form to long-form QA. \label{fig:short2long_transfer}}
+\end{subfigure}
+~
+\begin{subfigure}[t]{0.32\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figure/long_to_short_transfer.pdf}
+\caption{Long-form to short-form QA. \label{fig:long2short_transfer}}
+\end{subfigure}
+~
+\begin{subfigure}[t]{0.32\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figure/single_to_multi_transfer.pdf}
+\caption{Single-hop to multi-hop QA. \label{fig:short2short_transfer}}
+\end{subfigure}
+\caption{Generalizing \model from source domain task to target domain task, where ID and OOD denote in-domain and out-of-domain settings. (a) PopQA (short-form QA task) as source domain and ASQA (long-form QA task) as target domain. (b) ASQA as source domain and PopQA as target domain. (c) PopQA (single-hop QA task) as source domain and 2WikiMultiHopQA (multi-hop QA task) as target domain.
+We adopt \emph{few-shot demonstration with instruction} and \emph{vanilla supervised fine-tuning} as the training-free and trainable baselines.\label{fig:task_transferability}
+}
+\end{figure}
+\noindent {\bf \model-ICL and \model-FT generalize well to unseen tasks.}
+Figure~\ref{fig:task_transferability} demonstrates the generalization ability of our method in both training-free and trainable settings.
+For the in-domain (ID) method, it directly utilizes target domain demonstrations (in training-free settings) or is trained on the target domain task (in trainable settings).
+In contrast, the out-of-domain (OOD) method can only learn from demonstrations or training data in the source domain, and have no prior knowledge of the target domain.
+In this case, the model must leverage the knowledge learned from the source domain task to solve the unseen target domain task.
+The results show that our method (\ie, \model-ICL and \model-FT) consistently outperforms the baselines across various scenarios in both in-domain and out-of-domain settings, demonstrating strong task generalizability. 
+One counter-intuitive finding is that in the scenario of generalizing from long-form to short-form QA task (Figure~\ref{fig:long2short_transfer}), the training-free OOD method substantially outperforms its in-domain counterpart.
+We speculate that the training-free OOD method achieves better performance because it benefits from the demonstrations with long answers from the source domain (ASQA).
+The reason is that the questions in ASQA are ambiguous and can have multiple interpretations, and ground-truth long answers often address the questions from various perspectives, which can be regarded as a form of chain-of-thought demonstration.
+Furthermore, we also study the generalizability of \model to a non-QA knowledge-intensive task such as code generation. As presented in Table~\ref{tab:code_generation}, we directly apply \model-FT trained on the QA task (PopQA) to solve the unseen code generation task (HumanEval~\citep{chen2021evaluating}), following the CodeRAG-Bench setup~\citep{wang2024coderag}.
+We evaluate the code generation performance
+using the standard pass@k metric and compare our method with the off-the-shelf Llama-3-8B-Instruct as the baseline.
+It can be observed that our method consistently achieves better generalization performance in the unseen code generation task in both non-retrieval and RAG settings. This ﬁnding aligns with our observation that InstructRAG trained on QA tasks tends to generate more text-based comments that articulate the design of coding solutions compared to the off-the-shelf Llama-3-8B-Instruct, thereby leading to more accurate code generation.
+
+\noindent {\bf Evaluation with LLM-as-a-judge.} Despite being standard evaluation metrics for question-answering, accuracy or exact match are known to be imperfect~\citep{cuconasu2024power} as they mainly rely on pattern-matching to judge whether the predicted answer aligns with the ground-truth answer. Such metrics cannot handle cases where the predicted answer and ground-truth answer are synonyms (\eg, “Donald Trump” vs “Donald J. Trump” cannot be correctly recognized as a match), leading to biased evaluation results.
+
+Therefore, we adopt the LLM-as-a-judge~\citep{bubeck2023sparks, zheng2024judging} approach to evaluate whether the model response aligns with the ground-truth answer using GPT-4o~\citep{OpenAI2024gpt4o}, which allows the judge to consider semantic equivalence and is expected to yield a more fair evaluation.
+As shown in Table~\ref{tab:llm_as_judge}, we evaluate  our method and baseline models on the open-domain Natural Questions benchmark in both training-free and trainable RAG settings.
+Compared to pattern-matching based metrics, LLM-as-a-judge generally leads to higher evaluation results, mostly due to its capability to accurately match semantically equivalent phrasings.
+Notably, our method consistently outperforms baselines under both pattern-matching based and LLM-based evaluation metrics, further validating the effectiveness of \model.
+
+\begin{table}[t]
+    \centering
+    \caption{(a) Transfer from the QA task (PopQA) to the code generation task (HumanEval). Our method \model-FT is fine-tuned only on the QA task and is evaluated for solving the unseen code generation task. We compare it with off-the-shelf LLaMA-3-8B-Instruct in both non-retrieval and retrieval-augmented generation settings, and report the standard evaluation metrics pass@k~\citep{chen2021evaluating}. (b) Evaluation with GPT-4o as the judge. Compared to pattern-matching based metrics, it allows the judge to consider semantic equivalence and is expected to yield a more fair evaluation.\label{tab:combined_tables}}
+    \begin{subtable}[t]{0.48\textwidth}
+        \centering
+        \footnotesize
+        \setlength{\tabcolsep}{4pt}
+        \begin{tabular}{lcc}
+            \toprule
+            Method & pass@1 & pass@10 \\ 
+            \midrule
+            \multicolumn{3}{c}{\it Without Retrieval} \\
+            Llama-3-8B-Instruct   
+            & 58.5 & 64.6  \\
+            \model-FT   
+            & 60.4 & 65.2  \\
+            \midrule
+            \multicolumn{3}{c}{\it With Retrieval} \\
+            Llama-3-8B-Instruct
+            & 59.8 & 69.5  \\
+            \model-FT
+            & 64.6 & 71.3  \\
+            \bottomrule
+        \end{tabular}
+        \caption{Transfer from QA task to code generation task.\label{tab:code_generation}}
+    \end{subtable}
+    \hfill
+    \begin{subtable}[t]{0.48\textwidth}
+        \centering
+        \footnotesize
+        \setlength{\tabcolsep}{4pt}
+        \begin{tabular}{lcc}
+            \toprule
+            Method & Pattern-based & LLM-based \\ 
+            \midrule
+            \multicolumn{3}{c}{\it RAG w/o Training} \\
+            In-Context RALM   
+            & 56.8 & 64.5  \\
+            \model-ICL   
+            & 62.1 & 67.6  \\
+            \midrule
+            \multicolumn{3}{c}{\it RAG w/ Training} \\
+            Vanilla SFT
+            & {56.6} & {65.1}  \\
+            \model-FT
+            & {65.7} & {69.7}  \\
+            \bottomrule
+        \end{tabular}
+        \caption{Evaluation with GPT-4o as the judge.\label{tab:llm_as_judge}}
+    \end{subtable}
+\end{table}
+
+
+\section{Related Work}
+
+
+\subsection{Retrieval-augmented Generation}
+Retrieval-augmented generation (RAG) is a widely adopted approach to enhance large language models (LLMs) with external knowledge~\citep{asai2023retrieval,asai2024reliable,borgeaud2022improving,gao2023retrieval,guu2020retrieval,khandelwal2019generalization,lewis2020retrieval,ram2023context,shi2023replug}, demonstrating promising potential to reduce hallucinations and enhance the generation accuracy of LLMs across various real-world applications~\citep{chase2022langchain,jin2024flashrag,liu2022llamaindex,lu2022reacc,siriwardhana2023improving,tan2024prompt,zhou2022docprompting}.
+Recently, a growing research effort has been devoted to enhancing RAG from various aspects, such as improving decoding efficiency~\citep{merth2024superposition,jin2024ragcache,liu2023cachegen}, exploring long-context retrieval~\citep{xu2024retrieval,yen2024long}, compressing prompts~\cite{jiang2023llmlingua,xu2023recomp}, and addressing practical concerns such as adversarial retrieval~\citep{xiang2024certifiably,zhong2023poisoning,zou2024poisonedrag} and privacy leakage~\citep{huang2023privacy,zeng2024good}.
+Despite their advantages, these RAG systems inevitably suffer from irrelevant information introduced by imperfect retrievers or noisy retrieval corpora.
+However, most existing works typically address this issue by improving the retrieval quality and reducing noise exposure to the model~\citep{gupta2024rag,jiang2024piperag,sarthi2024raptor,wang2024rat,yan2024corrective,yang2024crag,zhang2024ratt,zhang2024raft}.
+Notable methods include adaptive retrieval~\citep{asai2023self,jiang2023active,yao2022react} and query rewriting~\citep{chan2024rq,mao2024rafe}. 
+In contrast, our work focuses on an orthogonal direction of developing explicit denoising methods for RAG, thereby enhancing the model's noise robustness and generation accuracy, even in highly noisy contexts.
+
+\subsection{Eliciting Reasoning in Large Language Models}
+Recent studies have extensively explored the reasoning capability of LMs, but typically not in the context of RAG where potentially noisy retrieved contents may mislead the reasoning if not properly addressed.
+Chain-of-thought (CoT) prompting~\citep{wei2022chain} is an effective method to elicit step-by-step reasoning from LMs by showing exemplars with detailed explanations (\ie, rationales~\citep{feng2024improving,lampinen2022can,rajani2019explain,zelikman2024quiet}) that lead to the final answer.
+However, such works often requires manually crafted demonstrations~\citep{wang2022self, xu2024search}, which is costly and requires extensive efforts and domain knowledge~\citep{zheng2024take}. 
+To mitigate this limitation, automatic chain-of-thought prompting (Auto-CoT)~\cite{zhang2022automatic} is introduced to automatically select instances from the corpus coupled with zero-shot CoT~\citep{kojima2022large}, where the rationales  are generated by LMs.
+Furthermore, it has been shown that CoT reasoning can be elicited even without explicit prompting, particularly for instruction-tuned LMs~\cite{wang2024chain}.
+Another related work shows rationales generated by small models can help large models reason better~\citep{lee2024can}.
+Although rationalization has been extensively investigated in many NLP tasks~\citep{chen2022can, ghoshal2022quaser, paranjape2020information, wiegreffe2021measuring}, none of them are designed for RAG, and how to leverage the instruction-following abilities of LMs for explicit denoising in the context of RAG is still underexplored.
+
+
+\section{Conclusion}
+
+
+In this work, we presented \model, a simple retrieval-augmented generation (RAG) approach that explicitly denoises retrieved contents and produces accurate generations. 
+By leveraging the strong instruction-following abilities of large language models, \model generates detailed rationales that articulate how the ground-truth answers can be derived from the retrieved documents. These synthetic rationales can serve as either in-context learning examples or supervised fine-tuning data, enabling the model to learn an explicit denoising process.
+Experiments on five knowledge-intensive benchmarks show~\model consistently outperforms state-of-the-art RAG approaches with significant improvements in both training-free and trainable settings.
+Compared to the best baseline method, \model achieves an average improvement of 8.3\% across all benchmarks, demonstrating its effectiveness in enhancing the noise robustness of retrieval-augmented generation.
+
+\paragraph{Limitations.} In this work, we mainly conduct experiments on question answering-type tasks, and it remains unclear how our method may generalize to other scenarios (\eg, open-ended generation).
+Moreover, despite being the standard evaluation metrics, both accuracy and exact match are biased and cannot perfectly reflect the quality of the model's generations.
+For instance, such metrics heavily rely on string matching, which assesses correctness at the lexical level rather than the semantic level, thereby failing to recognize different phrasings that convey identical meanings.
+The evaluation results also suffer from length bias, as longer generations tend to achieve higher accuracy.
+Exploring more advanced metrics like using LLMs as judges would better evaluate RAG model generations~\cite{yang2024crag}.
+Another potential limitation is that our model might be subject to sample bias in the training data. Incorporating bias mitigation methods~\cite{gallegos2024bias, kawamae2023friendly, yang2023adept} would be helpful for further improving our work.
+
+\paragraph{Future Work.} Future research directions include exploring more advanced techniques for generating high-quality rationales, such as incorporating domain-specific knowledge or leveraging multi-task learning to enable better generalization across various tasks. 
+For instance, although the consistency ratio between synthetic rationales and ground-truth answers on training samples with at least one relevant document achieves 98\%, the overall consistency ratio on all training samples is only 89\%. This is because for some samples, none of the retrieved documents is relevant to the question, which significantly compromises the quality of the generated rationales.
+Therefore, it will be interesting to fully explore the potential of our method by incorporating additional designs such as a filtering mechanism, which we leave as future work.
+Additionally, investigating the scalability of our method to larger datasets and models could further demonstrate its generalizability and robustness.
+It will also be interesting to evaluate the model performance under long-context settings with a dynamic or extremely large number of retrieved documents.
+Finally, integrating our method with other advanced retrieval techniques, such as active retrieval, could potentially lead to even better performance on knowledge-intensive tasks.
+
+
+
+

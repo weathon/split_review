@@ -1,0 +1,380 @@
+\title{No Need to Talk: Asynchronous Mixture of Language Models}
+
+\begin{abstract}
+
+ We introduce \smalltalk{}, an innovative method for training a mixture of language models in an almost asynchronous manner. Each model of the mixture specializes in distinct parts of the data distribution, without the need of high-bandwidth communication between the nodes training each model. At inference, a lightweight router directs a given sequence to a single expert, according to a short prefix. This inference scheme naturally uses a fraction of the parameters from the overall mixture model. Our experiments on language modeling demonstrate that \smalltalk{} achieves significantly lower perplexity than dense model baselines for the same total training FLOPs and an almost identical inference cost. Finally, in our downstream evaluations we outperform the dense baseline on $75\%$ of the tasks.
+ 
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Recent research has demonstrated that scaling large language models (LLMs) by increasing model capacity and expanding training data consistently leads to significant performance improvements on a wide range of downstream tasks \citep{kaplan2020scaling, brown2020language, henighan2020scaling, hoffmann2022training, dubey2024llama}. Scaling introduces substantial operating and engineering costs for both inference and training. In general, training is achieved on a large number of nodes via synchronous gradient descent techniques, which relies on high-bandwidth communication to scale. Inference of large models may require multiple compute nodes to distribute the model, which relies on low-latency communication. In both cases, state-of-the-art interconnect hardware is critical, and careful engineering is required to scale, and maintain a large compute cluster. While mainstream machine learning frameworks have eased the engineering work on the scaling side, access to a large number of well interconnected nodes remains a privilege in the machine learning community.
+
+In this paper, we explore strategies to mitigate the communication cost of large language models, both at training and inference, while keeping the inference efficient. We show that efficient training and inference can be achieved without relying on fast interconnects, and without compromising model performance, both in terms of perplexity or downstream task accuracy.
+
+In recent studies aimed at mitigating reliance on high-bandwidth interconnects, researchers have developed algorithms that reduce the need for frequent or comprehensive gradient synchronizations. Such techniques include asynchronous training \citep{douillard2023diloco, aji2017sparse, zhang2015deep, liu2024asynchronous} and gradient compression \citep{lin2017deep, dettmers20158} which effectively decrease communication overhead. By performing updates less frequently or by communicating less data, these methods sustain high training throughput while diminishing dependence on high-speed interconnects. However, these algorithms still require some level of gradient synchronization, and resulting models often under perform (in terms of perplexity) compared to training approaches synchronizing at every step~\citep{diskin2021distributed}.
+
+Regarding efficient inference, a number of sparse parameter activation techniques have recently become popular \citep{shazeer2017outrageously, fedus2022switch, artetxe2021efficient, lewis2021base, du2022glam}, in particular the Switch Transformer mixture of experts (MoE). These approaches are effective at reducing significantly the number of active model parameters at inference time. Yet, they require routing decisions to be made for each token, demanding rapid interconnections and requiring all parameters to be accessible in RAM.
+
+To achieve both low-bandwidth training and efficient inference, several prior works have explored asynchronously training mixtures of models \citep{gross2017hard, li2022branch, gururangan2023scaling}. In these methods, the input space is clustered using unsupervised techniques like K-Means, with each model in the mixture trained on an assigned cluster. These approaches reduce communication overhead and have demonstrated improvements in model perplexity, while maintaining similar inference costs to baseline models \citep{gross2017hard, gururangan2023scaling}. 
+However, in the context of language processing, their practical applicability on standard downstream tasks with relatively short input prefixes remains a subject of debate, as they rely on full corpus clustering or access to metadata \citep{li2022branch, gururangan2023scaling}.
+
+In this paper, we introduce \smalltalk{}, an asynchronous mixture of language models, which combines the advantage of asynchronous LM training methods (significantly reducing interconnect requirements), and sparse activation methods (it naturally uses only a subset of the overall architecture parameters during inference). \smalltalk{} achieves better perplexity, and better accuracy on a majority of downstream tasks, compared to a regular dense language model trained with the same amount of FLOPs. Our main contributions are as follows:
+
+\begin{itemize}
+   \item We introduce an algorithm that trains a mixture of independent language models, significantly reducing bandwidth requirements during training compared to regular distributed training methods. Our approach leverages a lightweight router (which accounts for less than $1.5\%$ of the size of each expert) to efficiently route sequences. This router determines the most suitable expert for a given sequence based on a short prefix (see \S~\ref{methods}).
+
+    \item We empirically demonstrate that our method achieves significantly lower perplexity than a dense baseline for near-identical training and inference FLOPs and identical training data volume (see Fig.~\ref{fig2}).
+    Furthermore, we show that for a constant mixture model size, the improvement in perplexity increases with the number of experts.
+    
+    \item We evaluate our method on a set of downstream tasks, showing that it achieves better or similar accuracy compared to a dense baseline on $75\%$ of the tasks (see \S~\ref{experiments:downstream_evaluation} and App.~\ref{app:downstream_evaluation}).
+   
+\end{itemize}
+
+
+
+\section{Method}
+
+\label{methods}
+
+In this section, we formalize our proposed method: \smalltalk{}. In \S~\ref{sec:background}, we introduce general language modeling background, and present a mixture of experts framework in this context. Subsequently, in \S~\ref{sec:smalltalk}, we show how we can use independent language models to perform routing to different experts in the mixture. We also present the training procedure and implementation details of our method. Finally, we discuss its marginal computational overhead and minimal distributed communication costs.
+
+\subsection{Background}
+\label{sec:background}
+
+\paragraph{Language modeling} Let \( \mathcal{V} \) denote a fixed vocabulary, and consider a sequence of tokens $\mathbf{x} = (x_1, x_2, \dots, x_S)$, where each $x_s \in \mathcal{V}$ for $s = 1, 2, \dots, S$. Language modeling is about modeling the data distribution $p(\mathbf{x})$, which in practice is cast as training a language model $p(x_{s+1} \mid \mathbf{x}_{1:s} \,;\, \theta)$ generating a token $x_{s+1}$ given a context sequence $\mathbf{x}_{1:s} = (x_1, x_2, \dots, x_s)$. Typically, the model parameterized by $\theta$ is a neural network, and parameters are obtained by minimizing the negative log-likelihood:
+\begin{equation}\label{eq:loss}
+    \mathcal{L}(\mathbf{x}; \theta) = - \, p(\mathbf{x}\,;\, \theta) = -\sum_{s=1}^{S-1} \log p(x_{s+1} \mid \mathbf{x}_{1:s} \,;\, \theta)\,.
+\end{equation}
+
+\paragraph{Mixture of Experts}
+There exist many variants of the mixture of experts model \citep{jacobs1991adaptive, jordan1994hierarchical, tresp2000mixtures, collobert2001parallel, shahbaba2009nonlinear}. Following the original formulation and applying it to language modeling, we factorize the conditional distribution for predicting a given token by summing over a set of \( E \) experts:
+
+\begin{equation}
+\label{eq:mixture-experts}
+    \mathcal{L}(\mathbf{x}; \theta) = -\sum_{s=1}^{S-1} \log \sum_{e=1}^E p(x_{s+1} \mid \mathbf{x}_{1:s}, e \,;\, \theta^e)\, p(e \mid \mathbf{x}_{1:s} \,;\, \theta^r),
+\end{equation}
+where each expert \( p(x_{s+1} \mid \mathbf{x}_{1:s}, e \,;\, \theta^e) \) is intended to focus on different parts of the data distribution, and the router \( p(e \mid \mathbf{x}_{1:s} \,;\, \theta^r) \) assigns weights to the expert predictions. Each expert \( e \) has its own set of independent parameters \( \theta^e \), and the router is parameterized by \( \theta^r \).
+
+While this type of mixture of experts partitions the input space across different models, all experts are still involved when computing the conditional likelihood in Equation~(\ref{eq:mixture-experts}), both at training and inference time. Hard mixtures of experts circumvent this issue by hard-assigning a sequence $\mathbf{x}_{1:s}$ to a \emph{single} expert $e^\star$, minimizing an upper bound of Equation~(\ref{eq:mixture-experts}):
+\begin{equation}
+\label{eq:mixture-experts-hard}
+    \mathcal{L}(\mathbf{x}; \theta) \leq -\sum_{s=1}^{S-1} \log p(x_{s+1} \mid \mathbf{x}_{1:s}, e^\star \,;\, \theta^{e^\star})\, p(e^\star \mid \mathbf{x}_{1:s} \,;\, \theta^r),
+\end{equation}
+The way $e^\star$ is chosen depends of the goal of the approach. For example, in \cite{jacobs1991adaptive}, $e^\star$ is sampled at training time, according to the distribution $p(e \mid \mathbf{x}_{1:s} \,;\, \theta^r)$. In other works, like \cite{collobert2001parallel}, it is chosen as the most relevant expert (that is $e^\star = \argmax_e p(e \mid \mathbf{x}_{1:s} \,;\, \theta^r)$), both at training and inference. Regarding the training procedure, mixture models with both soft and hard assignments are typically trained with an Expectation-Minimization (EM) scheme, alternating between experts and router optimization.
+
+\subsection{\smalltalk{}}
+\label{sec:smalltalk}
+\paragraph{Routing With Independent Language Models}
+\smalltalk{} can be viewed as an instance of hard mixture of experts, where a sequence is routed to the most relevant expert $e^\star$, according to the router posterior $p(e \mid \mathbf{x}_{1:s} \,;\, \theta^r)$, both at training and inference. However, instead of being a monolithic neural network model, the router is implemented as a language model per expert. More precisely, with Bayes' rule we have:
+\begin{align}
+\label{eq:routing}
+   e^\star & = \argmax_e p(e \mid \mathbf{x}_{1:s} \,;\, \theta^r) \\
+   & = \argmax_e \frac{p(\mathbf{x}_{1:s} \mid e\,;\, \theta^r)\, p(e)}{\sum_{i=1}^E p(\mathbf{x}_{1:s} \mid i\,;\, \theta^r)\, p(i)} \\
+   & = \argmax_e p(\mathbf{x}_{1:s} \mid e\,;\, \theta^r) \\
+   & = \argmax_e p(\mathbf{x}_{1:s} \mid \theta^{r,e})\,,
+\end{align}
+where the likelihood $p(\mathbf{x}_{1:s} \mid \theta^{r,e})$ defines a routing language model attributed to the $e$-th expert with \emph{independent} parameters $\theta^{r,e}$, and expert priors $p(e)$ are supposed to be uniform. So far, in our definition, there is nothing that prevents $\theta^{r,e} = \theta^e$, namely to use the experts themselves to implement the router. Interestingly, in that case selecting $e^\star$ as above is intuitive because it amounts to selecting the best expert for a given sequence (in terms of log-likelihood).
+
+\paragraph{Deriving a Practical Model}
+In order for the above formulation to result in a model that is useful in practice, we have to solve the following main challenges. Firstly, we need to be able to route using a small prefix of the full sequence since in most real world applications we do not have access to a full sequence (e.g. in question answering we do not have the answer). Secondly, using the experts to implement the router results in a large computational overhead since we need to evaluate every single one of them, largely negating the benefits of the hard mixture of experts.
+
+We solve both of the above problems with the following two key ideas:
+\begin{enumerate}
+    \item We use a \emph{short prefix} of length $M$ to compute the score for each expert as follows:
+    \begin{equation}
+        p(e^\star \mid \mathbf{x}_{1:s}) \approx p(e^\star \mid \mathbf{x}_{1:M}).
+    \end{equation}
+    This enables us to use \smalltalk{} in real-world applications where only a very small prefix may be available. We show in \S~\ref{experiments:routing} that our method outperforms the dense baseline even when using as little as $32$ tokens for routing.
+    \item We implement the router with $E$ language models that are \emph{orders of magnitude smaller} than the experts. This results in marginal computational overhead, as little as $1\%$ during training and $3\%$ during inference (\S~\ref{experiments:lm}).
+\end{enumerate}
+
+Using the log-likelihood of a prefix to route a sequence is an intuitive solution since a model that is good at predicting the beginning of a sequence is likely to be good at the full sequence. Another interpretation is that the prefix can be used to perform some sort of thematic identification of the whole sequence that is then used to route to the appropriate expert.
+
+On the other hand, the efficacy of smaller language models as routers is less intuitive. Even though one can expect a large model to be able to perform well on sequences that are beyond the capabilities of smaller models, the task of routing boils down to identifying whether a sequence is similar to the training data or not. We show that even really small models ($4.4$M parameters) can perform that task very well and result in no discernible difference in performance compared to larger routers (\S~\ref{experiments:routing}).
+
+\begin{algorithm}[h!]
+\caption{\textbf{\smalltalk{} training.} }
+\label{algorithm:training}
+\begin{algorithmic}[1]
+    \State \textcolor{gray}{Train the routers}
+    \State $\mathbf{X} \gets N$ new sequences from the dataset
+    \State $\mathbf{X}_{1:E} = \text{random\_assignments}(\mathbf{X})$
+    \For{$i = 1 \dots T$}
+        \For{$e = 1 \dots E$}
+            \State $\theta^{r,e} \approx
+                \argmin_{\theta^{r, e}} \mathcal{L}(\mathbf{X}_e ; \theta^{r, e})$
+                \codecomment{Optimize Equation~\ref{eq:router-train} with SGD for the $e$-th router}
+        \EndFor
+        \State $\mathbf{X} \gets N$ new sequences from the dataset
+        \State $\mathbf{X}_{1:E} = \text{balanced\_assignments}(\mathbf{X}, \theta^r)$
+            \codecomment{Segment the data according to Equation~\ref{eq:routing}}
+    \State \textcolor{gray}{Train the experts}
+    \State $\mathbf{X} \gets M$ new sequences from the dataset comprising the total number of training tokens
+    \State $\mathbf{X}_{1:E} = \text{balanced\_assignments}(\mathbf{X}, \theta^r)$
+    \For{$e = 1 \dots E$}
+        \State $\theta^{e} \approx
+            \argmin_{\theta^e} \mathcal{L}(\mathbf{X}_e ; \theta^{e})$
+            \codecomment{Optimize Equation~\ref{eq:loss} with SGD for the $e$-th expert}
+    \EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Training Procedure}
+We train our proposed hard mixture of experts with EM. Namely we alternate between a step of optimizing equation~\ref{eq:loss} and a step of assignments according to equation~\ref{eq:routing}. In our framework, assignments $e^\star$ purposefully do not depend on the experts, and the routers are independent language models. This allows us to split the training in two stages:
+\begin{enumerate}
+    \item We train the routers using EM without using the experts at all, namely we minimize
+    \begin{equation}
+        \label{eq:router-train}
+        \mathcal{L}(\mathbf{x}, \theta^r) = - \log p(e^\star \mid \mathbf{x}_{1:M}; \theta^r)
+            = - \sum_{s=1}^{M-1}
+                    \log p\left(x_{s+1} | \mathbf{x}_{1:s} ; \theta^{r,e^\star}\right),
+    \end{equation}
+    in the likelihood maximization step and perform the assignments using equation~\ref{eq:routing} in the expectation step.
+    \item We train the experts as $E$ independent language models on disjoint dataset segments selected by the trained routers.
+\end{enumerate}
+This procedure is described in pseudocode in Algorithm~\ref{algorithm:training}.
+In the specific case where the experts and the routers are the same language models ($\theta^e = \theta^{r,e}$) our training algorithm comes down to a regular EM algorithm where the sequences are routed to the best performing expert. In that light, we can think of each router as lightweight approximation of the corresponding expert. See \S~\ref{experiments:routing} for experiments where the experts themselves are used for routing.
+
+\paragraph{Balancing the Assignments to Experts}
+A common hurdle to overcome when training mixture of experts models is to ensure that the modeling load is shared as evenly as possible across all experts, or in other words that the model is utilizing the capacity of all experts efficiently instead of relying on a few good ones. 
+Common ways of tackling this problem are either introducing losses that penalize uneven assignments or introducing noise into the assignments namely by sometimes performing ``sub-optimal'' assignments to avoid local-minima. These techniques are used in all mixture models since their introduction in \cite{jacobs1991adaptive} until more recently in \cite{fedus2022switch}.
+
+\begin{figure}[t!]
+\centering
+\begin{subfigure}{.3555\textwidth}
+  \centering
+  \includegraphics[width=0.9\linewidth]{images/naive_assignment.pdf}
+  \caption{Naive assignments}
+  \label{fig:naive_assignments}
+\end{subfigure}%
+\begin{subfigure}{.6445\textwidth}
+  \centering
+  \includegraphics[width=0.9\linewidth]{images/sorted_assignment.pdf}
+  \caption{Assignment with respect to the minimum in a chunk.}
+    \label{fig:adv_assignments}
+\end{subfigure}
+\caption{\textbf{Balanced assignments.} In this scenario we have $3$ experts (columns with different colors) and $3$ sequences to assign (rows) under the constraint that each expert should get $1$ sequence. In~\textbf{(a)} we assign sequentially each row, by negative log-likelihood, leading to sub-optimal assignment because the first expert is full when we try to assign the last row. On the other hand, in~\textbf{(b)}, we first sort wrt to the minimum log-likelihood which results in optimal assignments.}
+\label{fig1:assignments}
+\end{figure}
+
+In our setup, we can solve this problem by ensuring that each expert is assigned equally sized distinct portions of the dataset.
+However, a challenge arises when assigning data sequentially based solely on Equation~\ref{eq:routing}. In such cases, an expert might already have more than its fair share of the dataset assigned yet we continue to find sequences for which it has the lowest loss among all experts, as illustrated in Figure~\ref{fig:naive_assignments}.
+
+To overcome this issue, during training we perform the assignments considering the whole set of sequences rather than one sequence at a time. In particular, we sort the sequences based on $- \max_e \log p(\mathbf{x}_{1:M} \mid e; \theta^r)$ and perform the assignments in that order. This ensures that sequences with high likelihood will be assigned first and avoids the edge-case where a sequence with low-loss cannot be assigned to the appropriate expert because it is at capacity. In Algorithm~\ref{algorithm:training} we refer to this procedure as \emph{balanced assignments} and it is demonstrated in Figure~\ref{fig:adv_assignments}.
+
+During inference, no balancing is performed, and the expert is selected solely based on equation~\ref{eq:routing}.
+
+\paragraph{Computational and Communication Cost}
+It is important to note that the computational cost of training and inference with the routers is significantly lower than that of training and inference with the experts. As a result, the additional computational overhead from training and inference with the routers is negligible. 
+
+Regarding communication requirements for a distributed implementation, in Algorithm~\ref{algorithm:training} all operations except for the balanced assignments are completely independent and embarrassingly parallelizable without any communication. Namely, each expert or each router can be trained on its own on a different node or set of nodes. The assignments, however, require that every node has access to the scores of every router in order to perform the assignment according to equation~\ref{eq:routing}. This requires a small amount of communication as each node needs to share $1$ score per sequence which results in $2$MB per $1$M sequences if we represent the scores in 16-bit floats.
+
+
+\section{Experiments}
+
+\label{experiments}
+
+In this section, we experimentally analyze the performance of our proposed method. 
+First, in \S~\ref{experiments:lm} we benchmark our approach against a dense LLM trained using regular distributed training techniques.
+
+Second, in \S~\ref{experiments:downstream_evaluation}, we evaluate our method on downstream tasks, demonstrating that it achieves performance comparable to baseline models at the same level of perplexity, improving upon a dense model given the total training FLOPs spent.
+Finally, in \S~\ref{experiments:routing}, we analyse the core component of our method, the routing. We show that the performance of the mixture does not depend significantly on the size of the router. Furthermore, we show that our approach outperforms less complex routing methods, such as the TF-IDF encoding with K-Means clustering proposed by ~\cite{gururangan2023scaling}. Moreover, we demonstrate that the perplexity gains are not driven by a few dominant experts but result from each expert contributing positively to the overall performance. 
+
+\subsection{Experimental Setup}
+\label{experiments:setup}
+We use the RedPajama-V2 dataset \citep{together2023redpajama}, which is a large-scale collection of text data designed for training language models. The dataset is built from the ground up based on publicly available web data, consisting of \(84\) crawls provided by \cite{commoncrawl}.
+
+Both the experts and routers utilize a Transformer architecture \citep{vaswani2017attention} with rotary positional encoding \citep{rope}. All experiments use sequences of $1,024$ tokens. We train the models using the AdamW optimizer \citep{loshchilov2017decoupled} with \(\beta_1 = 0.9\), \(\beta_2 = 0.99\), and a weight decay of $0.1$. Gradient clipping is applied with a maximum norm of $0.1$.
+
+For the experts, we employ a learning rate schedule featuring a linear warm-up to \(5 \times 10^{-4}\) over the first $3,000$ steps, followed by a cosine decay for the remainder of the training period. We experiment with two model sizes: a $335$M-parameter model with $4$, $8$, $16$, and $32$ experts and a $1.3$B-parameter model with $4$, $16$, and $32$ experts. Tables \ref{tab:model_size} and \ref{tab:training_params} describe the architectures and the training parameters in more detail.
+
+For the routers, we use models with \(4.4\)M parameters. The routers are trained for $128,000$ steps using a constant learning rate of \(1 \times 10^{-4}\), following a linear warm-up over the first $1,000$ steps. Routers are trained with a batch size of $32$ and perform all-to-all communication of the loss on the dataset chunk approximately every $45$ million training tokens (see App.~\ref{app:communication_cost}). The length of the prefix used for routing is set to $256$ tokens, which is $25\%$ of the context length.
+
+\paragraph{Comparison to the Dense Model} To ensure a fair comparison to the dense baseline, we designed our experiments such that the computational cost during inference and the total computational cost during training are the same. We achieve this by comparing the performance of models where each expert has the same architecture and number of parameters as the dense model, resulting in the same inference cost. In addition, we train \smalltalk{} for the same number of total tokens which means we spend the same number of total training FLOPs.
+\subsection{Language Modeling Results}
+\label{experiments:lm}
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}{.32\textwidth}
+  \centering
+  \includegraphics[width=1\linewidth]{images/experiments/perplexity_vs_cost_335M.pdf}
+  \caption{FLOPs vs perplexity, \(335\)M.}
+  \label{fig2:left}
+\end{subfigure}
+\begin{subfigure}{.32\textwidth}
+  \centering
+  \includegraphics[width=1\linewidth]{images/experiments/perplexity_vs_cost_1.3B.pdf}
+  \caption{FLOPsvs perplexity, \(1.3\)B.}
+  \label{fig2:center}
+\end{subfigure}
+\begin{subfigure}{.32\textwidth}
+  \centering
+  \includegraphics[width=1\linewidth]{images/experiments/perplexity_vs_tokens.pdf}
+  \caption{Tokens vs perplexity, \(1.3\)B. }
+  \label{fig2:right}
+\end{subfigure}
+\caption{\textbf{Better perplexity for the same price.} Test perplexity comparison between our approach and the dense baseline, as a function of training cost measured in PFLOPs. In \textbf{(a)}, we report results for models with $335$M parameters using $4$, $8$, $16$, and $32$ experts and in \textbf{(b)} for models with $1.3$B parameters using $4$, $16$, and $32$ experts. In addition, \textbf{(c)} shows the perplexity comparison between our approach and the dense baseline, plotted against the cumulative number of tokens processed throughout the training for the $1.3$B parameter models.
+We observe that our method significantly outperforms the baseline across all experimental configurations. Notably, our $335$M parameter model with $32$ experts achieves a perplexity of 9.07, outperforming the $1.3$B dense baseline's perplexity of $9.1$. This improvement is achieved with a training budget of \(2.5 \times 10^{21}\) FLOPs, which is comparable to the baseline's \(2.2 \times 10^{21}\) FLOPs, while requiring \textbf{three times less} computational cost during inference (\(0.87 \times 10^{12}\) FLOPs compared to \(2.81 \times 10^{12}\) FLOPs). See 
+\S~\ref{experiments:lm} and App.~\ref{app:lm_exp} for a detailed description of our experimental setup.}
+\label{fig2}
+\end{figure}
+
+Across all experimental configurations, our method \emph{consistently outperforms the baseline} while utilizing the same volume of data, with only minor increases in computational costs. Specifically, for the 1.3B parameter model, our approach results in less than a 1\% increase in training FLOPs and less than a 3\% increase in inference FLOPs, while achieving performance gains of up to almost 18\% in perplexity. Figures~\ref{fig2:left} and \ref{fig2:center} illustrate the perplexity on a held-out test set relative to the total training cost, measured in petaFLOPs, across different model sizes. Additionally, Figure~\ref{fig2:right} shows the test perplexity as a function of the number of training tokens for the 1.3B parameter model.
+
+Moreover, it is interesting to compare our model with the smaller 335M parameter experts to the 1.3B dense baseline. When using 32 experts and roughly the same training budget in FLOPs, \smalltalk{} achieves slightly better perplexity ($9.07$ vs $9.11$)  but requires \textbf{three times less} compute during inference.
+Finally, we observed that for a constant model size, the improvement in perplexity increases with the number of experts. This suggests that our method more efficiently utilizes the training data to improve performance, likely due to the specialization of experts on different segments of the data distribution.
+
+\paragraph{Communication Overhead} Our approach performs minimal communication and does not require a fast interconnect. As detailed in \S~\ref{methods}, we first train the routers which are then used to efficiently shard the dataset and each expert is trained completely independently. During their training, the routers communicate approximately $100$ times with each transmission involving less than $6$ megabytes per router resulting in truly minimal communication requirements. See \ref{app:communication_cost} for details about the calculation of these numbers.
+
+\subsection{Downstream evaluation}
+\label{experiments:downstream_evaluation}
+
+To demonstrate the applicability of our approach in real-world scenarios, we performed zero-shot evaluation on a set of natural language processing (NLP) tasks, including ARC Challenge and ARC Easy \citep{clark2018think}, HellaSwag \citep{zellers2019hellaswag}, SciQ \citep{SciQ}, and MMLU \citep{hendrycks2020measuring}. 
+
+Specifically, our largest configuration, a model with $32$ $1.3$B parameter experts, demonstrates better performance on four out of five tasks, achieving gains of $ 3\%$, $2\%$, $3\%$, and $1\%$ on ARC Challenge (\ref{fig5:0}), ARC Easy (\ref{fig5:1}), HellaSwag (\ref{fig5:2}), and MMLU (\ref{fig5:3}), respectively, under the same inference cost.
+
+Moreover, on the MMLU benchmark, our approach either beats the baseline or achieves the same performance on $75$\% of the tasks ($42$ out of $56$), as shown in Table~\ref{tab:downstream_eval}.
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}{.25\textwidth}
+  \centering
+  \includegraphics[width=1\linewidth]{images/experiments/downstream_eval/arc_challenge.pdf}
+  \caption{ARC Challenge}
+  \label{fig5:0}
+\end{subfigure}%
+\begin{subfigure}{.25\textwidth}
+  \centering
+  \includegraphics[width=1\linewidth]{images/experiments/downstream_eval/arc_easy.pdf}
+  \caption{ARC Easy}
+  \label{fig5:1}
+\end{subfigure}%
+\begin{subfigure}{.25\textwidth}
+  \centering
+  \includegraphics[width=1\linewidth]{images/experiments/downstream_eval/hellaswag.pdf}
+  \caption{HellaSwag}
+  \label{fig5:2}
+\end{subfigure}%
+\begin{subfigure}{.25\textwidth}
+  \centering
+  \includegraphics[width=1\linewidth]{images/experiments/downstream_eval/mmlu.pdf}
+  \caption{MMLU}
+  \label{fig5:3}
+\end{subfigure}
+\caption{\textbf{Downstream evaluation.} Accuracy with respect to perplexity on \textbf{(a)}~ARC Challenge, \textbf{(b)}~ARC Easy, \textbf{(c)}~HellaSwag and \textbf{(d)}~MMLU, for $1.3$B parameter dense baselines trained on $266$B, $1$T and $2$T tokens (empty symbols) and mixture models with $1.3$B parameter experts and $4$, $16$ and $32$ experts respectively (filled symbols). The models that have the same symbol shape have near identical training and inference FLOPs.}
+\label{fig5}
+\end{figure}
+\subsection{Routing analysis} \label{experiments:routing}
+
+In this section we analyse the most critical component of \smalltalk{}, the routing. In particular, we perform experiments to investigate the impact of the size of the router to the mixture model, the impact of the size of the prefix and finally whether the EM algorithm presented in \S~\ref{methods} is critical or it could be replaced by simple content based clustering.
+
+\paragraph{Impact of Router Size} One of the most critical findings of our work is the fact that \emph{the size of the model} used for routing \emph{does not impact} the performance of the mixture (Figure~\ref{fig4:0}). This allows us to utilize small router models which reduce dramatically the computational cost of routing during training and inference without compromising the model's performance.
+
+In detail, we investigated the effect of router size on the performance of our method by experimenting with a $335$M parameter model configured with $4$ experts, using four different router sizes for data partitioning: a $335$M parameter router (where the model routes data for itself, optimizing for the data it handles best), and routers with $110$M, $64$M, and $4.4$M parameters.
+
+ for more details about model architectures and training parameters). Figure~\ref{fig4:0} illustrates the test perplexity wrt the number of training tokens for these configurations. We observe that all router sizes perform practically identically.
+\begin{figure}[t]
+\centering
+\begin{subfigure}{.32\textwidth}
+  \centering
+  \includegraphics[width=1\linewidth]{images/experiments/routing_complex.pdf}
+  \caption{Router size}
+  \label{fig4:0}
+\end{subfigure}
+\begin{subfigure}{.32\textwidth}
+  \centering
+  \includegraphics[width=1\linewidth]{images/experiments/prefix_length_vs_perplexity.pdf}
+  \caption{Prefix length}
+  \label{fig4:1}
+\end{subfigure}
+\begin{subfigure}{.32\textwidth}
+  \centering
+  \includegraphics[width=1\linewidth]{images/experiments/tfidf.pdf}
+  \caption{Ours vs TF-IDF}
+  \label{fig4:3}
+\end{subfigure}
+
+ \caption{\textbf{Routing analysis.} \textbf{(a)}  Test perplexity over training steps for different router sizes using a $335$M parameter model with 4 experts. We compare routers of sizes $335$M (where the model routes data for itself), $110$M, $65$M, and $4.4$M parameters. 
+ \textbf{(b)} Test perplexity as a function of routing prefix length during inference for $1.3$B parameter model with $4$, $16$ and $32$ experts. We examine how reducing the prefix length $\hat{M}$ used during inference affects performance when the data is partitioned during training using a prefix size $M \geq \hat{M}$. \textbf{(c)} Test perplexity over training steps for a $335$M parameter model with $16$ experts, comparing our proposed routing using TF-IDF document encoding followed by SVD projection and balanced K-Means clustering. 
+}
+\label{fig4}
+\end{figure}
+
+\paragraph{Impact of Prefix Length} An important hyperparameter for our mixture model is the length of the context used for routing to the expert model. In our experiments, we use a prefix length of $256$ which may be too large for some real-world applications like conversational AI. However, we show in Figure~\ref{fig4:1} that \smalltalk{} outperforms the dense baseline even when routing with shorter prefixes. In particular, we show that even with prefixes of just $32$ tokens ($\frac{1}{8}$th of the length during training) the model still outperforms the dense baseline.
+
+\paragraph{Comparison With Routing Using TF-IDF} An alternative approach might suggest that if a tiny LLM suffices for routing, simpler methods such as TF-IDF encoding combined with balanced K-Means clustering, as proposed by \cite{gururangan2023scaling}, could be adequate. To test this hypothesis, we trained a 335M parameter model using the routing strategy outlined in \citep{gururangan2023scaling}: applying TF-IDF transformation to the text, followed by Singular Value Decomposition (SVD) projection into a low-dimensional space, and then clustering using balanced K-Means.
+
+We then trained $16$ experts on these clustered results. Our findings reveal that routing with TF-IDF encoding under performs when the prefix is short, indicating limitations of this simple routing approach. As shown in Figure~\ref{fig4:3}, our proposed routing method significantly outperforms the TF-IDF-based routing. This demonstrates that our approach is more effective in capturing the nuances of the data distribution, even when using limited context for routing decisions.
+
+\paragraph{Experts Do Specialize} A potential concern is that the observed performance gains might be driven primarily by a few experts among the \( E \), while the remaining contribute minimally or may even under perform on their assigned data. To address this concern, we conducted an analysis of each expert's performance individually. Figures \ref{fig3:left}, \ref{fig3:center}, and \ref{fig3:right} compare the perplexity achieved by our method and the dense baseline on the routed dataset segments for the $1.3$B parameter model, utilizing mixtures of $4$, $16$, and $32$ experts, respectively.
+
+Our findings demonstrate that all experts contribute positively, with consistent perplexity improvements observed across all routed dataset segments. Moreover, the performance gap between our method and the baseline widens as the number of experts increases, suggesting enhanced specialization due to finer partitioning of the data distribution.
+
+Notably, despite the absence of capacity constraints on experts during inference, unlike the enforced capacities during training, all experts are actively utilized and receive substantial portions of the data.
+The consistent improvements across all routed dataset segments confirm that the experts do specialize and they all contribute to the overall improvement instead of only a few dominant experts.
+\begin{figure}[h!]
+\centering
+\begin{subfigure}{.32\textwidth}
+  \centering
+  \includegraphics[width=1\linewidth]{images/experiments/perplexity_clusters_4.pdf}
+  \caption{$4$ experts vs dense, $266$B}
+  \label{fig3:left}
+\end{subfigure}
+\begin{subfigure}{.32\textwidth}
+  \centering
+  \includegraphics[width=1\linewidth]{images/experiments/perplexity_clusters_16.pdf}
+  \caption{$16$ experts vs dense, $1$T}
+  \label{fig3:center}
+\end{subfigure}
+\begin{subfigure}{.32\textwidth}
+  \centering
+  \includegraphics[width=1\linewidth]{images/experiments/perplexity_clusters_32.pdf}
+  \caption{$32$ experts vs dense, $2$T}
+  \label{fig3:right}
+\end{subfigure}
+
+\caption{\textbf{Experts Do specialize.} Test perplexity comparison between our method and the dense baseline on the routed dataset segments for the 1.3B parameter model, using mixtures of $4$ experts in \textbf{(a)} (trained on $266$B tokens), $16$ experts in \textbf{(b)} ($1$T tokens), and $32$ experts in \textbf{(c)} ($2$T tokens). Each bar represents a dataset segment, with the color intensity indicating the percentage of data assigned to that expert -- darker shades correspond to a higher proportion of data. Overlapping bars depict the perplexity achieved by the dense baseline (translucent) and our proposed mixture model (opaque). The results demonstrate that all experts specialize effectively on their assigned segments of the data distribution, leading to consistent improvements over the baseline. While the data distribution among experts is not perfectly even -- with some experts receiving more data than others -- all experts receive a substantial portion of the data. This shows that each expert contributes meaningfully to the overall performance gains.}
+\label{fig3}
+\end{figure}
+
+
+
+\section{Related Work}
+
+\label{related_work}
+
+Data-parallel training requires synchronization of the gradients after each backward pass, which can be slow if the network bandwidth is limited. In this section, we discuss existing methods that aim to make data parallelism more communication-efficient via reducing the frequency of the synchronization. Since our paper also explores methods for efficient inference without performance degradation, we discuss this branch of research as well.
+
+\vparagraph{Distributed optimization} To reduce the frequency of synchronisation during training of large models, researchers have explored distributed optimization techniques both theoretically and empirically 
+\citep{mcdonald2009efficient, stich2019local, lian2018asynchronous, wang2019adaptive, mcmahan2017communication, lin2018deep, zinkevich2010parallelized}. The core principle of these methods is to allow each worker to execute several local training iterations before engaging in global synchronization -- each device performs multiple optimizer updates per communication round. This technique also has been studied for LLM pre-training \citep{diskin2021distributed, douillard2023diloco} and fine-tuning \citep{borzunov2022petals, liu2024asynchronous, hilmkil2021scaling, ro2022scaling}.
+
+While theses approaches reduces the frequency of communication, thereby decreasing communication overhead, they often result in degraded model performance compared to every step synchronization \citep{diskin2021distributed}, or they lack direct performance comparisons in the context of pre-training \citep{douillard2023diloco}. The degradation in performance is often attributed to the staleness of gradients and the divergence between local and global models due to delayed synchronization \citep{zhang2016staleness, yu2019parallel, mitra2021linear}. Moreover, to our knowledge, all experiments have been conducted at a small scale ($\leq 400$M parameters) \citep{douillard2023diloco, liu2024asynchronous, ro2022scaling}. Therefore, scalable solutions that can reduce communication frequency for LLM training without compromising performance at larger scales are still needed.
+
+\paragraph{Mixture of Experts} Mixture of Experts (MoE) models have emerged as a prominent approach to increase model capacity without a proportional increase in inference costs \citep{jacobs1991adaptive, jordan1994hierarchical}. The key idea behind MoE is to partition the input space into subsets corresponding to specific subtasks, each managed by a specialized expert. By training different experts on distinct tasks, MoE models aim to enhance performance while reducing computational overhead during inference.
+
+Early implementations of MoE employed algorithms such as Gaussian Processes \citep{tresp2000mixtures, theis2015generative, deisenroth2015distributed}, Dirichlet Processes \citep{shahbaba2009nonlinear}, and Support Vector Machines (SVMs) \citep{collobert2001parallel} to model these specialized functions. Recent advancements have integrated deep neural networks as experts, providing scalable and flexible implementations suitable for large-scale models.
+
+In natural language processing, researchers have generalized the original MoE idea to enhance large-scale language models. For instance, \citet{shazeer2017outrageously} introduced a Mixture of Experts feed forward layer in which, in contrast to prior works, routing decision is made for every token. This layer takes a token representation as an input and routes it to the best-matched top-$k$ experts. By doing so the number of active parameters is decreased. Similar approaches have been effectively employed in models like the Switch Transformer \citep{fedus2022switch}, GShard \citep{lepikhin2021gshard}, GLaM \citep{du2022glam} and Mixtral of Experts \citep{jiang2024mixtral} which leverage MoE layers to achieve state-of-the-art results with reduced number of active parameters costs.
+However, since the routing decision in models like Switch Transformer MoE is made on the token level: (1) all experts must be retained in RAM during both training and inference phases, necessitating substantial memory resources, and (2) a high communication overhead is required for data transfer and gradient synchronization across experts \citep{lepikhin2021gshard, fedus2022switch, riquelme2021scaling}. 
+In that respect this approach is completely orthogonal to our proposed \smalltalk{}. In fact, each of the experts in our method could be such a token-level mixture model which would result in even smaller inference FLOPs for a specific achieved perplexity albeit with a significantly more complex implementation and higher RAM requirements during inference.
+
+\paragraph{Independent Training of Mixture of Experts Models}
+ To train experts fully in parallel, recent research has also explored independent training of the mixture of experts models \citep{gross2017hard, li2022branch, gururangan2023scaling}. 
+ For instance, \citet{gross2017hard} proposed to train a gater independently from the experts and use the output of the gater to hard assign the input image to experts. In language processing, \citet{li2022branch} and \citet{gururangan2023scaling} proposed methods that train expert models separately and merge them post-training. However, these approaches rely on full document context or metadata for routing, which can be impractical in real-time applications involving shorter inputs. For instance, \citet{gururangan2023scaling} focus on performance in text classification tasks, which may not fully reflect real-world scenarios. 
+
+
+
+\section{Conclusion}
+
+
+In this work, we present \smalltalk{} -- a method that significantly reduces communication overhead during LLM training. It also outperforms dense model baselines trained with a similar amount of FLOPs and the same data volume and comparable inference costs. In addition, our proposed lightweight routing with short prefixes makes \smalltalk{} practical for real-world downstream tasks, where we show it largely outperforms the dense baselines.
+
+These findings open up multiple directions for future research, including exploring different routing strategies for data partitioning among experts and investigating further the impact on downstream task performance. Another promising avenue is scaling the mixture to hundreds or even thousands of experts, which could further enhance model performance while benefiting from sparse inference. 
+
+
+

@@ -1,0 +1,1152 @@
+\title{The Unreasonable Ineffectiveness of the Deeper Layers}
+
+\begin{abstract}
+We 
+empirically study
+a simple layer-pruning strategy 
+for
+popular 
+families 
+of open-weight pretrained LLMs, 
+finding minimal degradation of performance on 
+different
+question-answering benchmarks until 
+after
+a large fraction (up to half) of the layers 
+are removed.
+To prune these models,
+we identify the optimal block of layers to prune 
+by considering 
+similarity 
+across
+layers;
+then,
+to ``heal'' the damage, we 
+perform a small amount of finetuning.
+In particular, we use
+parameter-efficient finetuning (PEFT) methods, 
+specifically quantization and Low Rank Adapters (QLoRA), 
+such that each of our experiments can be performed on a single A100 GPU.
+From a practical perspective, these results suggest that layer pruning methods can complement other PEFT strategies to further reduce computational resources of finetuning on the one hand, 
+and can improve the
+memory and latency of inference on the other hand.
+From a scientific perspective, 
+the robustness of these LLMs to the 
+deletion of 
+layers
+implies either that current pretraining methods 
+are
+not properly 
+leveraging
+the
+parameters in the deeper layers of the network
+or that the shallow layers play a critical role in storing knowledge.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+Over the last few years, large language models (LLMs) have evolved from mere research artifacts \cite{Radford2019LanguageMA} into useful products \cite{chatgpt_2022}. To a large extent this evolution can be attributed to a dramatic increase in scale of the resources used for training \cite{openai2023gpt4,team2023gemini}.
+Since
+these models will likely 
+see
+most of their total lifetime FLOPs
+in inference mode after training completes, the
+pretraining of LLMs 
+requires
+not only considerations for efficient, i.e. compute-optimal, training \cite{kaplan2020scaling,hoffmann2022training}, but 
+also requires inference awareness
+\cite{gosmol,sardana2023beyond}.
+
+What about models that have already been trained?
+Beyond the training considerations 
+indicated by
+neural scaling laws,
+there are also numerous post-training techniques for reducing the cost and time of finetuning and then inferencing LLMs. In particular, 
+\emph{quantization} 
+can be used to 
+reduce the memory footprint of models by
+decreasing the precision of the model weights \cite{dettmers2022llm,frantar2022gptq,dettmers2023case,xiao2023smoothquant},
+Low Rank Adapters (\emph{LoRA}) 
+can be used to 
+reduce the cost of finetuning and customization
+by only updating a small subset of the model parameters \cite{hu2021lora},
+or \emph{pruning} can be used to
+reduce the memory footprint and time for inference by
+directly eliminating unnecessary parameters or connections \cite{NIPS1989_6c9882bb,NIPS1992_303ed4c6,han2015learning,li2016pruning,frankle2018lottery}.
+As these three 
+strategies
+are more or less orthogonal, 
+in a resource constrained environment
+ideally we would want to
+leverage 
+all three of these post-training efficiency techniques in combination.
+Towards that direction,
+the 
+popular 
+method of \emph{QLoRA} \cite{dettmers2023qlora}
+introduced a handful of innovations that 
+enabled
+4-bit quantization of parameters and LoRA finetuning to work together.
+
+Building on that combination,
+in this work
+we study
+a very simple pruning strategy using
+open-weight LLMs. %
+In particular, we develop a 
+method
+that 
+uses the similarity between the representations at different layers to
+identify the optimal layers to prune for a given pruning fraction; 
+then,
+after removing these layers we ``heal'' the 
+pruning-induced 
+mismatch 
+with a small amount of fine tuning (using QLoRA).
+Our main result is that we can remove a substantial fraction of the \emph{deepest layers} from models with minimal degradation in downstream performance. 
+For example, 
+for Llama-2-70B \cite{touvron2023llama2} 
+we can eliminate up to roughly \emph{half} of the layers
+before the performance collapses.
+An overview of our strategy and the results of pruning Llama-2-70B are shown in Figure~\ref{fig:schematic-llama2-70b}.
+
+
+\begin{figure}[t]
+\begin{center}
+\centerline{\includegraphics[width=1.0\columnwidth]
+{final_figures_mar_8/figure_1_combined.pdf}}
+\caption{Overview of our layer-pruning strategy and example results: 
+\emph{(a)} a flowchart describing the algorithm: if removing $n$ layers, we find the layer, $\ell^*$, that minimizes the angular distance, $d$, between layers $\ell$ and $\ell\! +\! n$; we then remove the $n$ layers beginning with layer $\ell^*$; finally, if necessary, we can ``heal'' the damage with a small amount of (parameter-efficient) finetuning.
+\emph{(b)} a schematic depicting the removal of $n$ total layers, indexed from $\ell^*\!$ to $\ell^* \!\!+ \!n \!-\! 1$. %
+\emph{(c)} angular distance, $d$, between different numbers of layers, $n$, vs. the layer number, $\ell$, that indexes the beginning of the block of $n$; the bottom curve (darkest purple) represents $n=1$, while the top curve (lightest yellow) represents $n=64$; the black line traces $\ell^*(n)$, the minimum of the angular distance across the different sized layer blocks. 
+\emph{(d)} results of pruning Llama-2-70B with healing (dark blue) and without healing (light blue) as a function of the fraction of layers removed: the top (middle) panel gives the accuracy on the MMLU (BoolQ) question-answering benchmark, while the bottom panel the autoregressive loss on a subset of the C4 validation set;
+here, the dashed red lines (dashed gray lines) indicate the accuracy or loss of the original unpruned model (of random guessing);
+these plots illustrate that typical behavior we find in which there are sharp transitions in performance for the accuracy of question-answering tasks (here between 40\%-50\% pruning fraction), but continuity and very slow growth in the healed loss (dark blue) up to at least to 80\% pruning fraction.
+}
+\label{fig:schematic-llama2-70b}
+\end{center}
+\vskip -0.2in
+\end{figure}
+
+
+
+Pruning is not only useful for reducing the footprint of inference, but also for understanding how a network uses its parameters: if you can remove large blocks of the network with minimal effect on its performance, then those blocks are likely not very important. %
+In particular, our intuition for dropping layers comes considering the residual structure of the transformer architecture. In more detail, the output of the final layer can be decomposed as a sum over the outputs of all the model layers plus the 
+embedded input.
+If such a sum 
+had numerous
+and 
+independent terms, then removing a handful of 
+them
+should not significantly change the output. However, since the terms are not independent 
+-- each layer is 
+input to the following layer -- 
+we should expect to be able to remove terms if the residual contribution from a particular layer is small. In other words, if the output of each layer does not change too much from layer to layer.\footnote{This is strongly suggested 
+by 
+``lens'' investigations 
+that studied the evolution of the token distribution 
+as a function of layer index
+such as
+the ``logit lens'' \cite{logit_lens_2020} and the
+``tuned lens'' \cite{belrose2023eliciting}.
+A separate line of
+reasoning along these lines previously inspired neural ODEs \cite{chen2018neural},
+and led Ref.~\cite{yang2023tensor}
+to argue
+that 
+ideally representation should change substantially 
+from layer to layer 
+in order to most
+effectively make use of the parameters 
+of a network.
+} 
+In conjunction with our layer pruning, we investigate
+the similarity of layer representations at different separations
+and find broadly that deeper layers are qualitatively more similar to neighboring layers than shallow layers (with the exception of the very final layer).
+This suggests an even simpler pruning strategy: remove layers beginning at the penultimate layer and proceed from deep to shallow until the desired number of layers have been removed.\footnote{This strategy is especially interesting in situations where resource constraints inhibit the full application of the similarity-informed pruning algorithm described in Figure~\ref{fig:main-results-pruning}(a).}
+In this case, we find that,
+after healing the damage with a small amount of QLoRA finetuning,
+we can achieve performance that nearly matches the more involved similarity-informed layer pruning strategy.
+The effectiveness of this method is 
+evidence that LLMs might not properly leverage the parameters in the deeper layers of the network.
+
+
+
+
+Overall, we hope you take these three bulleted points with you:
+\begin{itemize}
+    \item The model's memory footprint \emph{and} inference 
+    time
+    decreases linearly with the number of removed layers.\footnote{Contrast this with quantization: the memory footprint decreases with the quantization ratio, but the inference time remains approximately fixed since parameters are typically de-quantized before any FLOPs.} This
+    makes layer pruning a powerful tool, especially if the model's performance is robust to dropping layers.
+    \item All the efficiency methods -- pruning, PEFT and quantization -- can be effectively combined with each other. Thus, in this work \emph{each experiment was performed on a single A100 GPU} and is easily accessible to the open source and academic communities.
+    \item The robustness of models to removing the deeper layers, 
+    the sharp transition in performance on downstream knowledge tasks (e.g. MMLU and BoolQ),
+    and the smooth behavior of the autoregressive loss 
+    with respect to those
+    pruning fractions, altogether suggest that the shallow layers
+    may play a critical role in 
+    storing knowledge.
+\end{itemize}
+
+The structure of this paper is as follows. In \S\ref{sec:review}, we first perform a literature review of both practical post-training strategies and science-of-deep-learning investigations that motivate our work. 
+Then, in \S\ref{sec:method}, we give intuition for our layer pruning strategy
+and explain our method in detail,
+while in \S\ref{sec:results} we
+iterate over all our experimental results. Finally, we conclude in \S\ref{sec:conclusion} 
+by highlighting directions of future work
+
+
+
+
+
+
+
+\textbf{Note:} As we were finalizing this work, 
+a preprint of
+Ref.~\cite{men2024shortgpt} was posted, which has a number of points of overlap with our work.
+
+
+
+\section{Literature Review}
+
+\label{sec:review}
+
+In this section, we review practical strategies for post-training efficiency 
+and discuss
+some
+scientific investigations 
+that 
+provide motivation for, or insight into,
+our approach:
+in \S\ref{sec:lit-review-pruning}, we first review the history of pruning and then discuss its modern 
+application to LLMs;
+in \S\ref{sec:lit-review-distil}, we contrast pruning with distillation, an alternative strategy for reducing the parameter count of LLMs;
+then in \S\ref{sec:lit-review-PEFT}, we discuss the various practical methods for efficient finetuning and inference acceleration that can be used in conjunction with our pruning strategy;
+finally in \S\ref{sec:science-of-dl} we highlight some scientific investigations into
+some
+depth-dependent statistical properties of LLMs that 
+are complementary to our results.
+
+
+\subsection{Pruning}\label{sec:lit-review-pruning}
+\emph{Pruning} is a method for reducing the size of a trained machine-learning model by removing unnecessary parameters, either individually or together as a group.
+Pruning for neural networks has a long history \citep{NIPS1989_6c9882bb, NIPS1992_303ed4c6},
+and, as originally conceived, 
+\emph{unstructured pruning} techniques
+sparsify networks by removing individual parameters based on pre-defined criteria. 
+For instance, if a parameter of the model has a very small value, then removing it -- i.e. by setting it to exactly zero -- will likely have minimal impact on 
+performance.
+Inspired by this early work, modern researchers began exploring different criteria for 
+such
+unstructured
+pruning, focusing mostly on computer vision models \citep{han2015learning, chen2015compressing, srinivas2015data}.
+In particular, Ref.~\cite{han2015learning} developed an \emph{iterative pruning} method for alternatively pruning and finetuning a network in order to 
+reach better compression ratios and performance.
+
+While these models were smaller, they were not 
+necessarily
+more efficient:
+sparsifying networks by removing individual parameters according to 
+a
+criterion leads to irregular or pseudorandom sparsification patterns that are difficult to accelerate without specialized hardware or libraries designed for sparsity \cite{li2016pruning}. 
+To that end, \emph{structured pruning} techniques were developed to remove irrelevant groups of parameters together, such as particular channels or filters in convolutional networks. 
+As this increased their practical relevance, 
+researchers then began exploring structured pruning across computer vision \citep{li2016pruning,wen2016learning, hu2016network,he2017channel,huang2018condensenet} and pre-transformer NLP architectures \citep{murray2015auto, see2016compression, kim2016sequence}. 
+
+Following 
+unprecedented progress in language modeling, recent work
+has focused on 
+applying structured pruning methods to the Transformer \cite{vaswani2017attention}. 
+These studies consider nearly every possible component of the model architecture for elimination, with methods
+ranging from dropping attention heads \citep{voita2019analyzing, michel2019sixteen, kim2020fastformers}, to dropping layers \citep{fan2019reducing, zhang2020accelerating, fan2021layer,jha2023large,sajjad2023effect,liu2023comflp}, to pruning hidden states \citep{hou2020dynabert}, 
+to rank reducing large weight matrices
+\cite{sharma2023truth}, replacing sparse weight matrices with smaller dense ones \cite{ashkboos2024sliceGPT},
+to 
+many
+combinations of the aforementioned groups \citep{xia2022structured, lagunas2021block}.
+Of the prior work that also considers transformer layer dropping, most \cite{fan2019reducing, zhang2020accelerating, fan2021layer, xia2022structured, sajjad2023effect}  study BERT-style models \cite{devlin2018bert}, while we consider decoder-only GPT-style models \cite{Radford2019LanguageMA} that are most commonly used for large-scale language modeling and generation. 
+BERT-style models are 
+naturally
+suited for 
+understanding tasks 
+due to their bidirectional masked language modeling (MLM) objective, 
+while GPT-style models are instead 
+suited for
+generation, 
+due to their autoregressive 
+objective.
+While this divide has been questioned in light of more powerful GPT-style models \citep{zhong2023can}, previous work \citep{ethayarajh2019contextual}
+has found significant qualitative differences between BERT and GPT models in terms of the evolution of the layer-wise representation of words. Altogether, this 
+suggests that layer-dropping strategies will behave differently between the two families.
+
+
+One study
+for BERT-style pre-trained models, Ref.~\cite{sajjad2023effect}, concludes that the best layer-pruning strategy is 
+dropping the final layers; 
+this partially resonates with our results, 
+although 
+in contrast
+we find that 
+\emph{(a)} for 
+some pruning sizes
+keeping the last few layers of the model is actually beneficial, and 
+that
+\emph{(b)} for all pruning sizes keeping the very last layer is essential.
+Additionally, 
+while the authors also
+study similarity between representations in different layers 
+-- as in our approach --
+they actually found a higher similarity between representations in the shallow layers compared to the deeper ones -- which 
+very sharply disagrees
+with our results. 
+Importantly, the models considered in Ref.~\cite{sajjad2023effect} consist of a few hundred million parameters, which is much smaller than the model scales we consider in our work.
+Perhaps as a consequence, the authors didn't observe the 
+sharp transition
+in downstream accuracies that we report in \S\ref{subsec:transition}, despite the fact that they also finetuned their pruned models. 
+
+
+
+In contrast, while Ref.~\cite{jha2023large} does consider GPT-style models, the methodology is quite different from ours:  \emph{(i)}  rather than pretraining first and then using a fixed layer-dropping strategy as we do, instead the authors incrementally drop layers in a modified pretraining procedure; and 
+\emph{(ii)} the authors study their own sub-1B parameter models, while we focus on the families of readily available, open-weight, large-scale 2.7B-70B parameter models 
+that are commonly used and/or finetuned
+for practical applications.
+Finally, a systematic approach to layer dropping in transformers has also been 
+studied
+in the context of \emph{wav2vec} models, 
+which are 
+encoder-only models that map speech to embeddings and are sized 
+in the hundred-million parameter regime \cite{baevski2020wav2vec}.
+With these models, Ref.~\cite{liu2023comflp} developed a layer-pruning algorithm
+based on the correlation between layers
+and downstream metrics.
+Beyond the model architecture and domain, one significant difference between this and our work is that Ref.~\cite{liu2023comflp} considered non-contiguous pruning proposals, e.g. dropping alternate layers. 
+Our intuition for layer pruning predicts that
+this shouldn't work as well 
+-- at least for decoder-only language models --
+as it creates multiple mismatches,
+one with each block of layers removed.
+
+
+
+
+\subsection{Model distillation}\label{sec:lit-review-distil}
+
+A completely different
+method for reducing the size of a trained machine-learning model is 
+\emph{model distillation} \cite{hinton2015distilling}, 
+in which knowledge is 
+transferred
+from a 
+large
+``teacher'' model 
+to a 
+smaller 
+``student''
+model by training the student on the distribution 
+predicted
+by the teacher.
+The essential insight
+is 
+that this can
+transform the very general knowledge and capabilities of the teacher into more streamlined, compressed, and possibly skill-specific representations. 
+
+While a very general technique, in the 
+setting of language models,
+distillation has been implemented with 
+\emph{(a)}
+white-box approaches, 
+in which the
+the student is trained to imitate the teacher's logits \cite{gu2023knowledge} or hidden states \cite{jiao2019tinybert}; as well as with 
+\emph{(b)} 
+black-box approaches, 
+in which the student
+only has access to the output tokens generated by the teacher. 
+This latter
+approach 
+broadly 
+covers cases where the student is trained on text
+that is augmented by the teacher in some way, such as 
+by adding
+synthetic labels \cite{wang2021want}, generating high quality synthetic text \cite{eldan2023tinystories, li2023textbooks, gunasekar2023textbooks} by providing chain of thought reasoning \cite{fu2023specializing,hsieh2023distilling}, which aims to enhance the student's reasoning skills, or by annotating 
+instructions 
+that enhance
+the student's
+instruction-following capabilities \cite{jiang2023lion}. 
+
+Compared to layer pruning, these distillation methods require
+considerable computational resources due to the 
+reliance on the large teacher to process a big corpus of data.
+Instead, our similarity-based pruning strategy only requires computing the similarity between representations at different layers on a small subset of a pretraining corpus, while our second simpler pruning strategy
+only 
+uses
+the reduced model post pruning.
+
+
+\subsection{Efficient finetuning
+and inference acceleration}\label{sec:lit-review-PEFT}
+
+Complementary to directly reducing 
+size of a model,
+\emph{parameter-efficient finetuning} (PEFT)
+focuses on reducing the cost of specializing LLMs to certain tasks.
+In particular, Low Rank Adapters (LoRA) reduce the memory and compute of fine tuning by freezing the pretrained model and introducing a parametrically small number of additional trainable weights
+\cite{hu2021lora}.
+We use its quantized cousin, QLoRA \cite{dettmers2023qlora}, to keep our experiments cost efficient. 
+Other PEFT methods that can be combined with our work are Refs.~\cite{li2023loftq} and \cite{zhang2023adaptive}: in the first, the initialization of the LoRA matrices is adjusted to a quantization scheme; in the second, %
+LoRA ranks for different LLM modules are chosen in an adaptive manner.
+
+
+For 
+additional
+efficiency gains we could 
+combine our layer-pruned models with methods that further accelerate inference: with speculative decoding \cite{leviathan2023fast}, tokens are rapidly generated from a smaller draft model and then evaluated in parallel by the main model; with Medusa \cite{cai2024medusa} the draft model is discarded for extra decoding heads, but ultimately achieves a similar effect.
+In particular, it could be interesting to consider highly-compressed layer-pruned models as 
+potential
+draft models in a speculative decoding setup.
+
+
+
+
+
+\subsection{A breadth of depth-dependent studies}
+\label{sec:science-of-dl}
+
+Finally, let us
+highlight some scientific work that 
+study the depth-dependent properties of LLMs.
+One relevant direction 
+considers
+how
+knowledge and linguistic properties are encoded in 
+language models.
+On the one hand, Refs. \cite{meng2022locating,dai2021knowledge} analyze the 
+\emph{storage
+and recall} 
+of factual associations: these works
+emphasize that knowledge localizes within the middle \cite{meng2022locating} or final \cite{dai2021knowledge} layers, 
+which has implications for
+directly
+editing or erasing part of a model's factual knowledge.
+On the other hand,
+attempts to perform such editing gives
+evidence that information 
+may be
+stored non-locally across layers \cite{hase2023does}.
+Relatedly,
+Ref. \cite{geva2023dissecting} investigates
+the way
+facts are \emph{processed} 
+during inference,
+distinguishing between the role of attention heads, 
+for attribute extraction,
+and the MLP blocks, 
+for subject enrichment:
+both 
+are delocalized across several layers.
+
+Next, following the earlier ``logic lens'' \cite{logit_lens_2020},
+Ref.~\cite{belrose2023eliciting} 
+invented a technique they called ``tuned lens'' to
+study the \emph{trajectory of predictions} by
+using a learnable affine transformation to convert intermediate representations into a distributions over tokens (see also \cite{din2023jump}).
+By studying the layer-to-layer dynamics of this distribution, the authors noted that it tended to converge. 
+This convergence is very suggestive that
+that the deeper layers could be prunable, while the fact that they had to train an affine probe is likely related to our observation that the final layer cannot be pruned.
+Somewhat relatedly,
+Ref. \cite{gurnee2023language}
+observed that 
+geographic features in the underlying text
+can be determined from linear probes trained on
+intermediate activations,
+as long as the activations are deeper than halfway.
+
+
+More abstractly,
+Refs. \cite{voita2023neurons,liu2023deja} 
+found that
+the sparsity of activations 
+transitions
+at around halfway through a network's forward pass,
+evolving from sparse to dense.
+Perhaps relatedly, 
+Ref. \cite{panigrahi2023task}
+investigated
+which model weights update the most during finetuning,
+finding that 
+it's those in the mid-layers.
+
+Altogether,
+these deep studies are complementary to our work, which, 
+on the one hand,
+provides evidence that removing the deepest layers of an LLM
+does not significantly alter the model's performance, 
+and,
+on the other hand,
+demonstrates
+a sharp pruning transition after removing approximately half of an LLM's deepest layers. 
+
+
+
+
+\section{Method}
+
+\label{sec:method}
+In this section, we give intuition for why 
+we think layer pruning works
+(\S\ref{subsec:intuition})
+and then we explain our method in detail (\S\ref{subsec:layer-pruning-algo}).
+
+\subsection{Intuition}\label{subsec:intuition}
+
+Our intuition for layer dropping comes from thinking about 
+the 
+representations
+as a slowly changing function of layer index. In particular, the
+layer-to-layer evolution of representations for a transformer is given by a \emph{residual} iteration equation
+\begin{equation}\label{eq:iteration-normal}
+x^{(\ell + 1)} = x^{(\ell)} +  f(x^{(\ell)}, \theta^{(\ell)}) \, ,
+\end{equation}
+where $(x^{(\ell)}$, $\theta^{(\ell)})$, respectively, are the multi-dimensional input and parameter vectors for layer $\ell$, and $f(x, \theta)$ describes the transformation of 
+one
+multi-head self-attention \emph{and} MLP
+layer block. As for any residual network, if we unroll this iteration, we see that after $L$ total layers the output is described as a sum over the transformations of all the layers
+\begin{equation}\label{eq:unrolled}
+x^{(L)} = x^{(0)} +  \sum_{\ell=0}^{L-1} f(x^{(\ell)}, \theta^{(\ell)}) \, .
+\end{equation}
+If the terms in the sum were 
+\emph{numerous}, ($L \gg 1$), 
+and
+\emph{independent}, e.g. if the block functions were instead a function of the overall input as $f(x^{(0)}, \theta^{(\ell)})$, 
+then
+perhaps any particular contribution to the sum \eqref{eq:unrolled} could be neglected.
+
+Of course, they are not at all independent:
+if we delete layer $\ell-1$, then we must now 
+connect
+the old input to that layer, 
+$x^{(\ell-1)}$,
+into the block function of layer $\ell$ as
+\begin{equation}\label{eq:iteration-deleted}
+x^{(\ell + 1)} = x^{(\ell-1)} +  f(x^{(\ell-1)}, \theta^{(\ell)}) \, ,
+\end{equation}
+where, for clarity, we are not relabeling layers or inputs despite the deletion.
+In general, such a \emph{mismatch} between the original input and new input should be very damaging for the network.
+However, if, after some number of initial layers, the representations converge to a slowly changing function with respect to layer index,
+\begin{equation}
+x^{(\ell)} \approx x^{(\ell-1)} + \epsilon \, ,
+\end{equation}
+with $\epsilon  \ll x^{(\ell)}$ in some appropriate sense, then the effect of deleting a particular layer $\ell$, e.g. making the replacement $x^{(\ell)} \to x^{(\ell-1)}$ in going from \eqref{eq:iteration-normal} to \eqref{eq:iteration-deleted}, 
+should
+only change the representation in the subsequent layer, $x^{(\ell + 1)}$, by a small amount. 
+Similarly, 
+to
+successfully prune the $n$  layers before layer $\ell$, i.e. those indexed
+from $\ell- n, \ldots, \ell -1$, 
+we'd %
+want
+that the input 
+to the pruned block
+should be very similar to the output of the pruned block:
+\begin{equation}\label{eq:mismatch-n}
+x^{(\ell)} \approx x^{(\ell-n)} + \epsilon \, .
+\end{equation}
+
+Regardless, any layer removal
+has a cascading effect:
+since post pruning $x^{(\ell + 1)}$ is computed by a different function than before, cf. \eqref{eq:iteration-normal} vs. \eqref{eq:iteration-deleted}, and since then $x^{(\ell + 1)}$ is directly or indirectly input to subsequent layers,
+$\ell + 2, \ldots, L$,
+deleting a shallow layer 
+should have a much greater impact
+than deleting a deeper layer.
+
+From this, we have the following 
+hypotheses
+that we will test experimentally:
+\begin{enumerate}
+\item[\emph{(0)}] We should be able to prune layers of a residual network.
+\item[\emph{(1)}] We should have greater success pruning deeper layers.
+\item[\emph{(2)}] Blocks of layers 
+we successfully prune should have outputs that are 
+similar to their inputs.
+\end{enumerate}
+In the next subsection, \S\ref{subsec:layer-pruning-algo} we will explain the details of our pruning algorithm and in the following section, 
+\S\ref{sec:results},
+we will present experimental evidence for points~\emph{(0)-(2)}.
+
+
+\subsection{Layer-pruning algorithm(s)}
+\label{subsec:layer-pruning-algo}
+
+Our principal layer pruning algorithm is very simple:
+\begin{enumerate}
+\item[0.] Pick a a number of layers to prune $n$.
+\item Compute the angular distance 
+$d(x^{(\ell)},x^{(\ell+n)})$, 
+cf. \eqref{eq:arccos-sim} below,
+between the input to layer $\ell$ and the input to layer $\ell +n$ on a neutral pretraining dataset or on a dataset representative of a downstream task of interest. 
+\item Find the layer, $\ell^*$, that minimizes that distance:
+\begin{equation}\label{eq:optimal-block}
+\ell^\star(n) \equiv \argmin_\ell~ d(x^{(\ell)},x^{(\ell+n)}) \,.
+\end{equation}
+\item Drop layers $\ell^\star$ to $\ell^\star\!\!+\!n\!-\!1$; connect the old input to layer $\ell^\star$ to the old $(\ell^\star\!\!+\!n)$th layer block.\footnote{Layers are often contained in a data structure, such a \texttt{ModuleList} in \emph{PyTorch}, so to drop these layers we would simply define a new \texttt{ModuleList} that removes the 
+layers from $\ell^\star$ to $\ell^\star + n - 1$.
+}
+\item (Optionally) heal the mismatch at layer $\ell^\star \!+ n$ with a small amount of fine tuning on a neutral pretraining dataset or particular dataset of interest.
+\end{enumerate}
+If fewer words inside of a figure are more helpful to you than the text in an enumerated list, then note that this algorithm is also depicted in panels (a)-(b) of Figure~\ref{fig:schematic-llama2-70b}.
+
+Elaborating on the first step, the angular distance on a single sequence of length $T$ is given by
+\begin{equation}\label{eq:arccos-sim}
+d(x^{(\ell)},x^{(\ell+n)}) \equiv \frac 1\pi \arccos\left(\frac{x^{(\ell)}_T\cdot x^{(\ell+n)}_T}{\left|\!\left|x^{(\ell)}_T\right|\!\right| \left|\!\left|x^{(\ell+n)}_T\right|\!\right| } \right)\,,
+\end{equation}
+where the inner product is
+over the hidden dimension of the model 
+for the final token $T$ of the sequence,
+$|\!|\cdot|\!|$ denotes the $L^2$-norm,
+and the factor of $1/\pi$ is a 
+convention.\footnote{Two comments: \emph{(i)}, we do not expect our choice of angular distance -- in lieu of any other reasonable metric, e.g., such as cosine similarity --
+to be particular significant; and \emph{(ii)},
+we chose to focus on the final token 
+since, 
+due to the causal attention mask,
+its embedding is the only one that depends on the entire sequence.
+} 
+This distance should then be summed over a number of examples that is large enough to get a low-fluctuation estimate but overall should be quite small.
+
+Elaborating on the ``optionality'' of the final step, we find that the near-lack of performance degradation on question-answering benchmarks, cf. Figure~\ref{fig:schematic-llama2-70b}(d) and others in \S\ref{subsec:transition}, can be extended to greater pruning fractions with a small amount of finetuning. Depending on resource constraints and intended application of the pruned model, this may not be necessary. However, 
+the healing procedure 
+does have
+a substantial impact on perplexity, cf. Figure~\ref{fig:schematic-llama2-70b}(d) and others in \S\ref{subsec:other_measures}.
+For both the angular distance measuring and the healing,
+if the ultimate goal is to supervise finetune (SFT) a model for a downstream task, it could be useful to evaluate the distance of a sample from that dataset and
+then
+combine the healing process with the SFT. 
+In contrast, for the greatest generality, it's most natural to measure distance and heal with a pretraining dataset that approximates the statistics under which the model was originally pretrained.
+
+
+Finally, we also investigated an even simpler pruning strategy inspired 
+by
+analyzing 
+the
+angular distances across different model families:
+drop
+the deepest layers, 
+excluding
+the final layer before the LLM head, and then (\emph{non-optionally}) heal the damage. For complete clarity, 
+this means that 
+if 
+we are 
+pruning $n$ layers from an $L$-layer model,
+then we would remove layers $(L - n)$ to $(L- 1)$, inclusive.
+
+
+
+
+
+
+
+\section{Results}
+
+\label{sec:results}
+
+In this section, we demonstrate the effectiveness of our pruning strategy
+on different 
+question-answering (QA) benchmarks
+and highlight
+a robust 
+pruning-driven transition in performance 
+(\S\ref{subsec:transition}),
+while,
+in contrast, 
+we 
+find
+that 
+the autoregressive perplexities of the healed pruned models
+are
+continuous across their transition points (\S\ref{subsec:other_measures});
+then, after comparing the similarity statistics between different layers across model sizes and families (\S\ref{subsec:activation}), we contrast our principal similarity-informed pruning strategy with a simpler remove-the-deepest-layers strategy (\S\ref{subsec:other_patterns}).
+
+
+For our experiments, 
+we pruned a wide variety of large-scale LLMs from 2.7B to 70B parameters spanning 32 to 80 total unpruned layers. Specifically, we used models in
+the Llama-2 family  
+\cite{touvron2023llama2},
+the Qwen family \cite{bai2023qwen},
+Mistral-7B \cite{jiang2023mistral},
+and  Phi-2 \cite{phi2}.
+For these models, we
+executed
+the ``healing'' step using
+QLoRA \cite{dettmers2023qlora}: our models were quantized to 4-bit precision and then finetuned, using QLoRA for efficient training, 
+on 
+either
+164M or 328M 
+tokens 
+from
+the Colossal Clean Crawled Corpus (C4) \cite{raffel2020exploring}, a common pretraining dataset. 
+As a result,
+\emph{each experiment of ours was performed on a single A$100$ GPU}. 
+For our QA evals, we used
+Massive Multitask Language Understanding (MMLU) \cite{hendrycks2020measuring}, 
+a common world-knowledge and problem solving benchmark,
+and
+BoolQ \cite{clark2019boolq}, a common 
+yes/no 
+reading comprehension
+benchmark 
+where the answer has to be inferred from the text itself.
+The specifics 
+of our 
+models,
+healing
+procedure, dataset choices, and evaluation details 
+
+ablations of different hyperparameter choices can be found across
+
+
+\subsection{Accuracy on QA benchmarks}
+\label{subsec:transition}
+Our first set of results are shown in
+Figure~\ref{fig:main-results-pruning}, 
+where
+we plot 
+$5$-shot
+MMLU accuracy as a function of the fraction of
+layers removed: 
+in the left panel
+we present the Llama-2 family, 
+in the middle panel
+we present models from the Qwen family,
+and in the right panel 
+we show Mistral-7B and Phi-2.
+In order to better compare models of different total %
+number of layers,
+in these plots we opted to
+normalize the $x$-axis by the
+fraction of layers removed (rather than the absolute number of layers removed).
+Note that since MMLU contains multiple choice questions with four possible responses, the expected accuracy of random guessing is 25\%.
+
+
+\begin{figure}[t]
+\begin{center}
+\centerline{\includegraphics[width=1.0\columnwidth]{final_figures_mar_8/figure_2_new.pdf}}
+\caption{MMLU accuracy (5-shot) vs. fraction of layers 
+dropped
+for different model families. 
+(\emph{Left:} Llama-2 family; \emph{Middle:} Qwen family; \emph{Right:} Mistral-7B and Phi-2.)
+The 
+solid lines
+represent 
+performance
+after dropping layers and healing, 
+dotted lines
+show 
+performance after dropping layers only (no healing),
+and the dashed gray line is the score for guessing randomly.
+For these models, healing leads to modest improvements, and performances 
+are quite robust 
+until 20\%-55\% pruning fractions, depending on model family and size, at which point they transitions to random guessing.
+}
+\label{fig:main-results-pruning}
+\end{center}
+\vskip -0.2in
+\end{figure}
+
+
+Importantly, we see a characteristic flat region of robust performance followed by a sharp transition to random accuracy at a pruning fraction around 45\%-55\%
+for models in the Llama-2 family, 35\% for Mistral 7B,  25\% for Phi-2, and 20\% for models from the Qwen family. 
+This implies that the essential knowledge required to achieve a model's top score 
+isn't removed by significant layer
+removal
+-- even 
+though the fraction can be quite
+large(!) -- 
+until eventually 
+that knowledge is lost
+at a critical model-dependent threshold.\footnote{This effect
+is rather
+robust
+}
+Contrasting the curves with and without healing, we see that finetuning offers a modest improvement by better preserving the unpruned performance and pushing the phase transition to random guessing to slightly larger pruning fractions.
+
+Broadly we see that layer pruning is more robust for the larger and deeper models, e.g. Llama-2-13B and Llama-2-70B, which we hypothesize could be related to the fact that either the smaller models are more overtrained, making parameters less redundant, or that the deeper models can afford to lose more layers in an absolute sense. Also, the Qwen family is strange, a fact we will further elaborate on in \S\ref{subsec:activation}.
+
+
+
+
+
+
+
+
+
+
+\subsection{Loss 
+on 
+next-token predictions}
+\label{subsec:other_measures}
+
+In this section, 
+we 
+look at
+the effect of layer pruning on 
+the pretraining optimization objective
+-- the cross-entropy loss of next-token prediction -- 
+when evaluated on a subset of
+the C4 validation dataset.\footnote{We make sure that none of the validation data are seen during the healing 
+stage.}
+In order to have a fair comparison across models with different sized vocabularies $V$, we normalize the loss by $\log V$, which corresponds to the loss of sampling tokens randomly with uniform probability.
+)
+
+
+
+In Figure~\ref{fig:c4-validation-plots} ,
+we plot the normalized C4 validation loss for 
+all seven of our models,
+after healing (left panel) and before healing (right panel), 
+as a 
+function of the fraction layers removed. Without healing, we see that there is a somewhat sharp(ish) transition to random guessing for each model at 
+approximately
+the pruning fraction that the QA benchmark accuracies also sharply transition to random guessing, suggesting that models are hopelessly harmed at this point, cf. Figure~\ref{fig:main-results-pruning}.
+Next, contrasting the scales of both plots, we see that healing significantly restores the next-token prediction ability of all the models to near-unpruned levels,
+with
+the loss 
+increasing slowly and linearly with layer dropping.
+Most strikingly -- from a scientific perspective -- is 
+the post-healing
+continuity 
+through the pruning fractions where we previously found
+sharp transitions
+for 
+the 
+QA benchmarks:
+this decoupling 
+illustrates 
+one way of
+disconnecting (or creating a miscalibration) between performance on downstream tasks -- such as MMLU and BoolQ -- and continuous measures of performance -- such as the cross-entropy loss.
+\footnote{This 
+is consistent with Ref.~\cite{schaeffer2023emergent} 
+that
+argued 
+jumps in one kind of metric may not be visible in others.
+}
+
+
+
+\begin{figure}[t]
+\begin{center}
+\centerline{\includegraphics[width=1.0\columnwidth]{final_figures_mar_8/figure_4_vocab_size_divide.pdf}}
+\caption{Normalized C4 validation loss vs. fraction of layers dropped
+before healing (\emph{left}) and after healing (\emph{right});
+each curve is normalized by the cross-entropy loss of sampling uniformly from the model's vocabulary.
+For the experiments before healing, the loss for each model transitions to random guessing (gray dashed line) at approximately the same pruning fractions that the QA benchmarks transition to random guessing; after healing, there is continuity through the regions of sharp transition on QA tasks, cf. Figure~\ref{fig:main-results-pruning}. Contrasting the overall scale of both plots, it's clear that healing significantly restores the performance on next-token prediction to near-unpruned levels.
+}
+\label{fig:c4-validation-plots}
+\end{center}
+\vskip -0.2in
+\end{figure}
+
+
+
+
+
+
+
+
+
+
+\subsection{Angular distances between representations}
+\label{subsec:activation}
+
+
+Given the central role the angular distance \eqref{eq:arccos-sim} plays in our pruning strategy, 
+let's take a subsection to look at
+these distances across our seven models. 
+For this analysis, the angular distances for each model were averaged over 10k samples from the C4 validation set.
+
+Recall from earlier Figure~\ref{fig:schematic-llama2-70b}(c): for Llama-2-70B this plotted the angular distance $d(x^{(\ell)}, x^{(\ell+n)})$ 
+that compared the $\ell$-th layer to the $(\ell+n)$-th layer, across all initial indexes $\ell$ for block sizes from $n=1$ to $n=64$;
+the minimum of the curves, $\ell^\star(n)$, gave the optimal block to prune for a given $n$, cf. \eqref{eq:optimal-block}.
+A more compact way
+to display this 
+same data
+is shown in the heat maps of Figure~\ref{fig:angular-distance-color}: each square is colored to depict the row-normalized angular distance 
+between layer $\ell$ and $\ell+n$ 
+across all possible $\ell$, 
+and $n$ up to very large fractions of the total number of layers;
+the optimal layer to prune for a given block size, $\ell^*(n)$, corresponds to the minimal distance in each row.
+
+Across models, we 
+make two generalizations:
+\emph{(i)} the smallest distances
+are found across the deeper blocks, 
+meaning 
+deeper layers are typically quite similar to each other and can be more easily dropped;
+\emph{(ii)} the distances across the deepest blocks -- the blocks that include the last layer
+-- take either maximal or nearly-maximal values,
+meaning one should never drop the final layer.
+While broadly true, there
+are a few exceptions. 
+For some models, e.g. Phi-2-2.7B, or for the largest blocks in some models, e.g. Llama-2-7B, final \emph{few} layers seem important. 
+As previously noted, the Qwen family is somewhat unusual: here we see 
+that
+there are a few 
+odd ``islands'' of high similarity for shallow blocks; 
+this
+likely
+explains the shorter region of robust performance in Figure~\ref{fig:main-results-pruning}.
+
+
+
+
+
+
+
+ 
+\begin{figure}[t]
+\begin{center}
+\centerline{\includegraphics[width=1.0\columnwidth]{final_figures_mar_8/ang_dist_plots.pdf}}
+\caption{
+Normalized angular distance \eqref{eq:arccos-sim}
+from initial layer $\ell$ (x-axis) with block size $n$ (y-axis) for each of the seven models we evaluated;
+the distance 
+for each 
+$n$
+is shifted and rescaled
+to span the same range, $[0,1]$ 
+(yellow to purple): the optimal block to prune, $\ell^*(n)$, 
+corresponds to
+the deepest yellow for each row.
+Across models, 
+the
+deeper layers tend 
+to be very similar,
+though 
+the deepest blocks that include the final layer 
+(squares along the outer diagonal)
+are 
+(near-)maximally dissimilar.
+}
+\label{fig:angular-distance-color}
+\end{center}
+\vskip -0.2in
+\end{figure}
+
+
+
+
+\subsection{A simpler pruning strategy}
+\label{subsec:other_patterns}
+
+Inspired by 
+our recent conclusions,
+we experiment with a very simple heuristic pruning strategy: \emph{(1)} if pruning $n$ layers from an $L$-layer model, drop layers $(L-n)$ to $(L-1)$
+so as to remove
+the deepest block that excludes the final layer; 
+then \emph{(2)} heal with a small amount of finetuning as before.
+Compared with our principal similarity-informed pruning strategy, this simpler heuristic algorithm has the advantage of 
+never
+requiring 
+practitioners
+to 
+load onto a GPU or inference the unpruned model. 
+It also provides a meaningful ablation of the importance 
+of optimizing the
+block to prune. %
+
+In Figure~\ref{fig:simple-vs-similarity}, we contrast our two pruning strategies, both before healing (left panels) and after healing (right panels), for the QA benchmarks (MMLU/BoolQ, top/middle panels) and the autoregressive loss (C4 validation, bottom panels). On the one hand, 
+the simple heuristic performs quite poorly without healing the damage incurred by pruning: accuracy on the QA benchmarks decays rapidly to (near-) random with increased pruning fraction, and the loss begins to increase very rapidly even with small amounts of pruning. 
+On the other hand, 
+the results for the two pruning strategies across evaluations are quite comparable after healing: for the QA benchmarks, the similarity-informed algorithm slightly better preserves the accuracy before the phase transition, 
+though the simple algorithm perhaps pushes the phase transition 
+to slightly 
+greater pruning factions; 
+and 
+for the loss, 
+the curves nearly lie on top of each other,
+though the similarity-informed strategy 
+does marginally outperform
+for all amounts of pruning.
+These experiments are strong evidence that the purpose of 
+post-pruning finetuning is 
+the 
+healing 
+of damage
+at the pruning interface 
+and not
+the
+acquisition of additional knowledge.
+
+
+\begin{figure}[t]
+\begin{center}
+\centerline{\includegraphics[width=1.0\columnwidth]{final_figures_mar_8/figure_5_legend_bottom.pdf}}
+\caption{Evaluation of Llama-2-70B 
+with
+the 
+simple pruning heuristic (solid red line), 
+shown along with 
+scores 
+for
+the similarity-informed pruning strategy (solid blue line), 
+scores of the unpruned Llama-2-70B (red dashed line), 
+and
+scores for
+randomly guessing (gray dashed line).
+(\emph{Left:} before healing, \emph{Right:} after healing; \emph{Top:} MMLU, \emph{Middle:} BoolQ, \emph{Bottom:} C4 Validation Loss.)
+Without healing, the simple heuristic performs poorly across all evals; with healing, the scores of both methods are quite similar.
+}
+\label{fig:simple-vs-similarity}
+\end{center}
+\vskip -0.2in
+\end{figure}
+
+
+
+
+
+
+
+\section{Discussion and Future Directions}
+
+\label{sec:conclusion}
+
+
+Beginning with the release of the open-weight LLaMA family \citep{touvron2023llama}, the open-source machine-learning community has rallied around the philosophy of making LLMs accessible to everyone. 
+This has engendered many innovations around efficiency, 
+such as LoRA \cite{hu2021lora} and 
+quantization (with LoRA) \cite{dettmers2023qlora},
+allowing large (near-)state-of-the-art 70B models to be finetuned on only 
+single 80GB A100 GPUs.
+In conjunction with these other tools,
+our work enables further efficiency gains via a simple-to-implement layer-pruning technique.
+
+In particular,
+the released version of Llama-2-70B 
+spans $140$ GB of memory
+and consumes approximately $3 \times 10^{10}$ FLOPs per token.
+With 4-bit quantization
+and
+a layer-pruning fraction of 50\%, the model fits in approximately $17.5$ GB of memory and requires roughly $1.5 \times 10^{10}$ FLOPs per token:
+quantization from 16-bit \texttt{bfloats} to 
+4-bit QLoRA precision reduces 
+model memory by a factor of 4, but keeps 
+FLOPs more or less the same, since calculations are performed in 16-bit precision;
+layer pruning will additionally reduce both memory and FLOPs by an amount equal to the layer-pruning fraction.%
+These memory and compute requirements enable open-weight state-of-the-art models to be run and even finetuned efficiently on consumer-level GPUs without any CPU off-loading and with only minor performance trade-offs.
+
+
+
+At the conclusion of the work, we are left with the following questions:
+
+\begin{itemize}
+\item What are
+better layer-pruning strategies? 
+What are
+better approaches to healing?\footnote{At the cost of introducing another hyperparameter and requiring both pruned and unpruned models to fit in memory during finetuning, one natural way to improve healing
+is 
+by adding
+an auxiliary student-teacher loss that explicitly addresses the pruning mismatch \eqref{eq:mismatch-n}, such as
+\begin{equation}
+\mathcal{L}_{\text{aux}} \sim \left(x^{(\ell^*\! + n)}(\theta_0) - x^{(\ell^*)}(\theta) \right)^2 \, ,
+\end{equation}
+where $\theta_0$ are the frozen parameters of the unpruned model, and $\theta$ are the parameters of the pruned model to be healed; thus, $x^{(\ell^*\! + n)}(\theta_0)$ is the input to 
+the $(\ell^*\! + n)$-th layer
+in the unpruned model, 
+$x^{(\ell^*)}(\theta)$ is the input to that same layer after pruning,
+and $\mathcal{L}_{\text{aux}}$ minimizes their mismatch. %
+ We thank Sho Yaida for 
+ this observation.
+}
+\item 
+Why does healing 
+eliminate the phase transition in the loss but not in the QA accuracies?
+\item With more comprehensive evals, will accuracy on different tasks degrade at different depths?
+\item Relatedly, is knowledge generally
+stored in 
+shallow or middle layers,
+or is it delocalized?
+\item Do pretraining details 
+affect 
+the
+ability to prune, e.g., are scaling-law
+over-trained or distilled models more difficult to prune?
+\item How can we enable 
+LLMs
+to more effectively use the parameters in their deepest layers?
+\end{itemize}
+Some of these questions would benefit from studying both layer similarity and pruning across different pretraining checkpoints; for instance, at what point does the sharp phase transition and critical depth in the QA accuracies emerge, 
+and does more training lead to better use of the prunable parameters? 
+Others
+suggest explorations with different pretraining architectures and objectives, e.g. in order
+better make use of the deeper layers. 
+With more comprehensive evaluations, if different kinds of tasks degrade at very different depths, then 
+this
+might indicate that
+the knowledge required to complete those tasks
+is
+stored 
+at different depths.\footnote{Alternatively, one could measure $d(x^{(\ell)},x^{(\ell+n)})$ or find
+$\ell^*(n)$ as a function of 
+different eval datasets. %
+}
+It would be very interesting to use pruning to systematically study these kind of interpretability questions.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\begin{ack}
+We thank Aaron Schwartz for his initial collaboration,
+Aaditya Singh 
+and
+Sho Yaida for discussions,
+and
+Aaditya Singh 
+for comments on the draft.
+We would also like to acknowledge the 2023 NeurIPS Large Language Model Efficiency Challenge 
+for initializing us 
+for
+work on this project.
+A.G. is supported by the NSF CAREER grant DMR-2045181, the Sloan Foundation, and
+by the Laboratory for Physical Sciences through the Condensed Matter Theory Center.
+D.R. acknowledges support from the National Science Foundation under Cooperative Agreement PHY-2019786 (the NSF AI Institute for Artificial Intelligence
+and Fundamental Interactions, \texttt{http://iaifi.org/}) and appreciates both the sanction and support of Sequoia Capital.
+This paper has been 
+brought to you residually by the letters $G$, $P$, and $U$, after summing over many layers.
+
+\end{ack}
+
+
+
+
+
+
+
+

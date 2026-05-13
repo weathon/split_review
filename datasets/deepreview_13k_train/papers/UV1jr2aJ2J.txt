@@ -1,0 +1,264 @@
+\title{ACCO: Accumulate while you Communicate, Hiding Communications in Distributed LLM Training}
+
+\begin{abstract}
+  Training Large Language Models (LLMs) relies heavily on distributed implementations, employing multiple GPUs to compute stochastic gradients on model replicas in parallel. However, synchronizing gradients in data parallel settings induces a communication overhead increasing with the number of distributed workers, which can impede the efficiency gains of parallelization. To address this challenge, optimization algorithms reducing inter-worker communication have emerged, such as local optimization methods used in Federated Learning. While effective in minimizing communication overhead, these methods incur significant memory costs, hindering scalability: in addition to extra momentum variables, if communications are only allowed between multiple local optimization steps, then the optimizer's states cannot be sharded among workers. In response, we propose \textbf{AC}cumulate while \textbf{CO}mmunicate (\acco), a memory-efficient optimization algorithm tailored for distributed training of LLMs. \acco~allows to shard optimizer states across workers, overlaps gradient computations and communications to conceal communication costs, and accommodates heterogeneous hardware. Our method relies on a novel technique to mitigate the one-step delay inherent in parallel execution of gradient computations and communications, eliminating the need for warmup steps and aligning with the training dynamics of standard distributed optimization while converging faster in terms of wall-clock time. We demonstrate the effectiveness of \acco~on several LLMs training and fine-tuning tasks.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Training modern Large Language Models (LLMs) with billions of parameters requires thousands of GPUs running in parallel. This is necessary to load the model and optimizer parameters in memory and reach the mini-batch size in the millions of tokens used to train them \cite{touvron2023llama}, relying on a distributed version of the backpropagation algorithm \cite{PytorchDDP2020} with a gradient-based optimizer such as Adam \cite{KingBa15} or AdamW \cite{loshchilov2018decoupled}. However at this scale, the communication overhead necessary to synchronize gradients between workers in the data parallel setting can dominate the time to compute the model updates \cite{ortiz2021tradeoffs}, and it has been estimated that it will remain the case even if models and hardware evolve \cite{pati2023computation}, hindering the benefits of parallelization. Moreover, as all workers are synchronized through gradient communication, the training only proceeds at the speed of the slowest machine (straggler) \cite{Dutta2021, mishchenko2022asynchronous}.
+
+To alleviate this issue, distributed optimization algorithms reducing the amount of communication between workers have been developed, such as local optimization methods \cite{stich2018local, Wang2020SlowMo} which are especially used in Federated Learning \cite{mcmahan17a, Konecn2016FederatedOD}. These methods authorize performing multiple optimization steps \emph{locally} before communicating and synchronizing the distributed workers, reducing the communication overhead. As communication rounds can last longer than a local gradient computation (see Fig. \ref{fig:speed}), they also naturally allow to hide the cost of communications in the training time by running them in parallel to several consecutive local computation steps \cite{OverlapSGD2020, COCOSGD2019, EASGD2015, sun2024co}. Moreover, on heterogeneous hardware, the number of computation steps can be tuned locally to the worker's speed so that slow ones compute less than fast ones, maxing out workers' usage \cite{diskin2021distributed, maranjyan2022gradskip}.
+
+However, this comes at a drastic memory cost. Indeed, in the standard data parallel setting, most of the memory consumption of model states comes from storing the optimizer's parameters, especially when training with mixed precision. To mitigate that, methods such as ZeRO \cite{Zero1} have been developed to avoid the replication of redundant optimizer states across the workers by sharding them. % shard the optimizer's parameters over the workers. 
+But these methods rely heavily on the fact that \emph{each} mini-batch gradient is averaged over all the workers during the backward step. This is no longer the case with local optimization algorithms: if it were, then an averaging would happen at each step, defeating the purpose of the local method. %(as each optimization step requires the entire optimizer states, this would result in a communication volume equivalent to All-Reduce that would defeat the purpose of the method). %(if it were, then a communication equivalent to All-Reduce would happen at each step, defeating the purpose of the local method). 
+This forces each worker to host a full copy of the optimizer's parameters, drastically increasing the memory requirements. Moreover, to prevent local steps from reducing the accuracy of the resulting model, local methods often introduce an outer optimizer step at each communication, which comes with additional momentum terms \cite{Wang2020SlowMo, sun2024co}. Hence, to store these variables, the latest state-of-the-art method CO2 \cite{sun2024co} needs a memory overhead of 4 model copies compared to a standard distributed Adam, which itself uses an order of magnitude more memory than its sharded version \cite{Zero1}. This raises the following question:
+\begin{center}
+    \textit{Is it possible to design a memory-efficient optimization algorithm that hides the communication cost of distributed training of LLMs and accommodates heterogeneous hardware?}
+\end{center}
+To completely hide the communication cost while being memory-efficient, making sharded optimizers compatible with the idea of overlapping gradient computations and communications seems natural. The concept of running two parallel processes is already present in the sharded optimization literature, but for a different purpose. ZeRO-Offload \cite{Zerooffload} introduces the "Delayed Parameter Update" (DPU) which allows running the optimizer on the CPU while computing and averaging gradients on the GPU. By running these processes in parallel, the gradients computed during one step are on a version of the model parameters that are no longer up to date, as they have been updated by the optimizer concurrently. In practice, this one-step staleness can hurt convergence, and the method can only be used after sufficiently many 
+ warmup steps of non-delayed optimization \cite{Zerooffload}.
+
+\paragraph{Contributions.} In this work, we introduce \textbf{AC}cumulate while \textbf{CO}mmunicate (\acco), a simple and memory-efficient optimization algorithm that \textbf{(1)} naturally allows to shard the optimizer parameters across workers, \textbf{(2)} overlaps gradients computations and communications, completely hiding the communication overhead while \textbf{(3)} maximizing GPU usage, even with heterogeneous hardware. \textbf{(4)} We introduce a novel method to compensate for the one-step delay induced by parallel execution of the gradient computations and communications, removing the need for warmup steps and \textbf{(5)} perfectly matching the training dynamic of standard distributed optimization. Moreover, our experiments across multiple LLMs training and fine-tuning tasks consistently show that \acco~allows for significant time gains. \textbf{(6)} We release an open-source implementation of \acco
+\begin{figure*}[ht]
+     \begin{center}
+          \includegraphics[width=1\columnwidth]{Images/parallel_acco.pdf}
+    \end{center}
+    \caption{Overview of \acco~with a slow and a fast worker running in parallel, showing no idle time on both and completely hiding communications. The delayed update is compensated by splitting the mini-batch in two, leading to two different steps in our timeline. The first uses half of the mini-batch to estimate "next step" parameters, and the second uses the full mini-batch to update parameters.}
+    \label{ACCO_method}
+\end{figure*}
+
+
+
+\section{Related work}
+
+\paragraph{Local optimization methods.} Local optimization methods allow to perform several local model updates between periodic averaging. With the SGD optimizer, these algorithms predate the deep learning era \cite{parallelSGDNIPS2010, DistributedPerceptron2010}, and their convergence properties are still investigated nowadays \cite{ijcai2018p447,  stich2018local, woodworth20a, mishchenko2022proxskip}. Due to their practical and efficient communication scheme, they have since been used for the Distributed Training of Deep Neural Networks (DNNs) with methods such as EASGD \cite{EASGD2015}, SlowMo \cite{Wang2020SlowMo} or Post-local SGD \cite{Lin2020Dont, ortiz2021tradeoffs}, and are ubiquitous in Federated Learning \cite{mcmahan17a, Konecn2016FederatedOD, Fedprox2019}, broadening the choice of optimizers beyond SGD \cite{reddi2021adaptive, Karimireddy2020MimeMC, Chen2020TowardCE}. By overlapping communications over consecutive steps of local computations, they allow to hide communication bottlenecks, resulting in algorithms such as Overlap local-SGD \cite{OverlapSGD2020}, COCO-SGD \cite{COCOSGD2019} or CO2 \cite{sun2024co}. Moreover, with heterogeneous hardware, they can adapt their local computation rate to their hardware capacity \cite{diskin2021distributed, maranjyan2022gradskip}. However this comes at the price of additional memory requirements: due to their local nature, not only do these methods prevent the use of sharded optimizers such as ZeRO \cite{Zero1}, but they also introduce additional control variables \cite{Wang2020SlowMo, mishchenko2022proxskip, sun2024co}, hindering their scalability as shown in Tab. \ref{tab:relatedwork}. Moreover, catering for heterogeneous hardware is not straightforward, as 
+using different numbers of local updates leads to models shifting at different speeds, requiring extra care to counter this effect \cite{maranjyan2022gradskip}. On the contrary, \acco~does not lead to such disparities: it just affects \emph{how} the required batch size is reached.
+
+\paragraph{Overlap decentralized optimization.} The communication complexity being a core concern in decentralized optimization \cite{DGD2016, Gorbunov2022}, strategies have been devised to reduce communication overheads. For synchronous methods, works focus on designing algorithms with accelerated communication rates, leveraging Chebyshev polynomials \cite{scaman17a, KovalevNEURIPS2020, Song2023}. For the asynchronous ones, they rely on the properties of the graph resistance \cite{even2021continuized, nabli2022dadao, nabli2023acid}. Alternatively, some approaches overlap gradient and communication steps, either explicitly \cite{assran19a}, or by modeling them with independent stochastic processes \cite{nabli2022dadao, nabli2023acid}. However, none of these works focus on memory efficiency. Thus, they introduce additional variables and do not consider sharding the optimizer states. Moreover, they do not study optimizers other than SGD, and extending their beneficial properties to adaptive methods commonly used for DNN training such as Adam is still an ongoing research topic \cite{Assran2020}.
+
+\paragraph{Memory-efficient distributed training of LLMs.} %(les differents Zero? FSDP ? TP, 3D parallelism, pipelining autre chose?) 
+The activation memory overhead required for training Transformers \cite{Vaswani2017} can be mitigated for an extra computational cost by reconstructing the input with reversible architectures \cite{jacobsen2018revnet, mangalam2022reversible}, or recomputing the activations via checkpointing \cite{chen2016training}. 
+Efficient LLM training also combines parallelism methods. Classical data parallelism (DP)~\cite{NIPS2012_6aca9700} suffers both from a high communication volume and a linear increase in memory due to the model replicas. ZeRO-DP~\cite{rajbhandari2020zero} and Fully-Sharded DP~\cite{zhao2023pytorch} avoid this issue by sharding the model states (i.e., the optimizer states, gradients, and parameters) between workers. This comes at the cost of further increasing the synchronization between workers and the communication volume, which can be mitigated by compression~\cite{wang2023zero}, memory trade-offs~\cite{zhang2022mics}, or delayed gradients~\cite{fournier2024cyclic}. The memory can be even more reduced using expensive CPU-GPU communications to unload states on the CPU~\cite{Zerooffload, rajbhandari2021zeroinfinity}. On the other hand, model parallelism partitions the DNN components for parallelization, either with tensor parallelism~\cite{shoeybi2019megatron} by slicing a layer's computation on several workers, or with pipeline parallelism, which divides a model into sets of layers trained in parallel on mini-batch slices. Popularized by \cite{huang2019gpipe}, this method leaves some workers idling and an inefficient memory overhead~\cite{fan2021dapple}. Allowing delay in the gradients avoids worker idleness~\cite{narayanan2019pipedream, zhuang2020accumulated} but exacerbates the memory overhead, which can be partially mitigated with gradient accumulation~\cite{narayanan2021memory, zhuang2021fully} and activation checkpointing~\cite{kim2020torchgpipe, liu2023colossalauto}. Combining these frameworks results in the effective 3D parallelism~\cite{smith2022using}.
+
+
+\paragraph{Delayed updates.} Delays being intrinsic to distributed asynchronous optimization, there is a rich literature studying them. In the case of distributed SGD in a parameter server setting, while early analysis showed convergence rates depending on the \emph{maximal} delay \cite{AgarwalNIPS2011, Stich2020EF}, recent lines of work improved these dependencies \cite{KoloskovaAsync2022, pwu22g, Feyzmahdavian2023}, proving that asynchronous SGD beats standard mini-batch SGD even with unbounded delays \cite{mishchenko2022asynchronous}. However, they only study plain SGD, which is hardly used for DNN training. In this context, some work focused on the interplay between SGD with momentum and delays \cite{Mitliagkas2016, Mitliagkas2019}, while delay compensation schemes such as re-scaling updates \cite{DelayCompensation2017, xie2020asynchronous} or buffering them \cite{FedBuffnguyen22b} were proposed for Federated Learning. But still, they only study versions of SGD and not adaptive methods commonly used for LLMs trainingsuch as Adam \cite{KingBa15} or AdamW \cite{loshchilov2018decoupled}. Closer to our work, DPU was introduced as a memory-efficient way to train LLMs by running the optimizer on the CPU while gradients are computed on the GPU \cite{Zerooffload}, inducing a one-step delay between the gradients computed and the corresponding optimizer step. To mitigate it, they advise starting training by warming up for several steps with a standard method with no delay. Perhaps surprisingly, we find in our experiments that this one-step delay has a noticeable influence on the convergence of LLMs training, even when using warmup steps. Contrary to DPU, we remove the need for them, with no impact on the convergence of our training. Moreover, as it is not its purpose, DPU still runs communications in the gradient computation stream, and is thus impacted both by the communication overhead of scaling and hardware heterogeneity. Finally, in pipeline parallelism, gradient delays also affect computation, and weight prediction methods have been proposed to mitigate the effect of staleness, by predicting the future weights using the optimizer's momentum  \cite{chen2019efficient}. More elaborate predictions have been proposed for SGD to further reduce the impact of the delay \cite{kosson2021pipelined, yang2020pipemare}.
+
+\begin{table}[h]
+\begin{center}
+\caption{Comparison of characteristics and memory consumption between several methods. $\Psi$: number of parameters in the model. $N$: number of workers. $K$: memory multiplier of the optimizer (we use Adam or AdamW). For SlowMo \cite{Wang2020SlowMo} and CO2 \cite{sun2024co}, no mention of mixed precision training is made. To be fair, we assume they use it and that their additional terms are stored in half precision. While no additional momentum is required for our method, we still need a communication buffer.}
+\label{tab:relatedwork}
+\resizebox{1\columnwidth}{!}{
+\begin{tabular}{l|cccc|cc}
+\toprule
+ \multicolumn{1}{c|}{\textbf{Method}} &\multicolumn{1}{c}{\textbf{No comm.}} & \multicolumn{1}{c}{\textbf{Handle hetero.}} & \multicolumn{1}{c}{\textbf{Sharded}} & \multicolumn{1}{c|}{\textbf{No add.}} & \multicolumn{1}{c}{\textbf{Memory consumed}} & \multicolumn{1}{c}{$K=12, \, N=64,$}\\
+  \multicolumn{1}{c|}{} &\multicolumn{1}{c}{\textbf{overhead}} & \multicolumn{1}{c}{\textbf{hardware}} & \multicolumn{1}{c}{\textbf{Opt.}} & \multicolumn{1}{c|}{\textbf{momentum}} & \multicolumn{1}{c}{\textbf{per worker}} & \multicolumn{1}{c}{$\Psi=7.5$B}\\
+\midrule
+Baseline DDP \cite{PytorchDDP2020} & \NO & \NO & \NO & \OK & $(2{+}2{+}K){\times}\Psi$ & 120 GB \\
+ZeRO-1 \cite{Zero1} & \NO & \NO & \OK & \OK &  $(2{+}2{+}\frac{K}{N}){\times}\Psi$& 31 GB \\
+SlowMo \cite{Wang2020SlowMo} & $\boldsymbol{\sim}$ & \NO & \NO & \NO & $(2{+}2{+}2{\times}2{+}K){\times}\Psi$ & 150 GB\\
+CO2 \cite{sun2024co} & \OK & \NO & \NO & \NO & $(2{+}2{+}4{\times}2{+}K){\times}\Psi$ & 180 GB \\
+\acco~(Ours) & \OK & \OK & \OK & \OK & $(2{+}2{+}2{+}\frac{K}{N}){\times}\Psi$ & 46 GB\\
+
+\bottomrule
+\end{tabular}}
+\end{center}
+\end{table}
+
+
+\section{Method}
+
+\label{sec:method}
+
+In this section, we describe our method, including the approach to compensate for the delayed update. The algorithm will be described from the point of view of each worker $i \in \{1, ..., N\}$.
+
+\paragraph{Delayed Parameter Update.} First, to explain the presence of a delay, we re-purpose the "Delayed Parameter Update" (DPU) \cite{Zerooffload} to fit in our framework and match our considerations of communication overheads. Contrary to the original DPU, we run gradient communications in the same stream as the optimizer step, in parallel to the gradient computations. Moreover, to prevent the GPU $i$ from being idle at step $t$, the computations process accumulates gradients over as many mini-batches $N_i^{(t)} \geq 1$ as necessary until the communication process finishes, which can vary depending on the speed of the worker as shown in Fig. \ref{ACCO_method}. Each worker $i$ starts from the same neural network parameters $\theta^{(0)} \in \mathbb R^d$. We denote by $F: \mathbb R^d \rightarrow \mathbb R$ the differentiable loss computed by our neural network. A random mini-batch (modeled through the random variable $\xi \in \Xi$ following some law $\mathcal P$) is drawn from the local data shard $\mathcal D_i$ to initialize the stochastic gradient $ {g_i}^{(-1)} = \nabla F(\theta^{(0)}, \xi_i^{(0)})$ and $N_i^{(-1)}=1$. Then, for $t \in [\![0, T]\!]$ %$t=0 \leq T$,
+we repeat the following step, with the left and right sides running in parallel:
+\begin{equation}
+    g_i^{(t)}  = \sum_{k=1}^{N_i^{(t)}} \nabla F(\theta^{(t)}, \xi_{i, k}^{(t)})
+    \quad , \quad
+    \theta^{(t+1)} = \texttt{Opt} \left( \theta^{(t)}, \frac{\sum_i g_i^{(t-1)}}{\sum_i {N_i}^{(t-1)}} \right) \, , \tag{DPU}
+\end{equation}
+where \texttt{Opt} is the optimizer of our choice (\eg~Adam or AdamW for LLM training). Note that the right side does indeed combine both the gradient averaging (communications) and the optimizer step, which runs in parallel to the gradient computations to the left. Then we remark that, except at the first step $t=0$, the gradients used by \texttt{Opt} are computed on parameters $\theta^{(t-1)}$ which differ from $\theta^{(t)}$, the ones we apply them to. This is inherently due to the parallel nature of our execution, and what we denote by "delayed update". We will show in Sec. \ref{sec:DelayedExpe} that this can have drastic impacts on the convergence in practice.
+
+\paragraph{Toward \acco.} To counter this, a natural fix is to estimate what \emph{would} be the parameters $\theta^{(t+2)}$ in addition to computing $\theta^{(t+1)}$. That would allow the gradients at the next round to be computed on these estimates rather than the parameters of the last step, meaning that the version of the gradients used in the \texttt{Opt} step would match the parameters. We denote this rule by "Weight Prediction" (WP). This time, we initialize a common $\theta^{(0)}$, $\tilde {g_i}^{(0)} = \nabla F(\theta^{(0)}, \xi_i^{(0)})$,  $N_i^{(0)}=1$ and $\tilde \theta^{(1)} = \texttt{Est}(\bullet)$, where  \texttt{Est} is our estimation function that could take any argument at this point. This leads to the following:
+
+\begin{equation}
+    \tilde g_i^{(t+1)}  = \sum_{k=1}^{N_i^{(t+1)}} \nabla F(\tilde \theta^{(t+1)}, \xi_{i, k}^{(t+1)})
+    \, , \,
+    \theta^{(t+1)} = \texttt{Opt} \left( \theta^{(t)}, \frac{\sum_i \tilde g_i^{(t)}}{\sum_i {N_i}^{(t)}} \right) \, , \, \tilde \theta^{(t+2)} = \texttt{Est}( \bullet ) \, .\tag{WP}
+\end{equation}
+ Thanks to \texttt{Est}, the optimizer now apply to the parameters $\theta^{(t)}$ the gradients that were computed on an \emph{estimated version} $\tilde \theta^{(t)}$, meaning that the one-step delay has been compensated. Akin to the idea of \cite{chen2019efficient} using the same SGD's momentum several times to counter delays in pipelining, a simple estimation function could be to re-use the gradients just received and apply a second optimizer step, \ie using $ \tilde \theta^{(t+2)} = \texttt{Opt} \left( \theta^{(t+1)}, \frac{\sum_i \tilde g_i^{(t)}}{\sum_i {N_i}^{(t)}} \right)$. This simple solution (denoted by \acco-wp) is investigated in our ablations in Sec. \ref{sec:WPExpe}, but we found that it leads to a training dynamic differing from the baseline, whereas \acco, the algorithm we present next, perfectly matches it.
+ \begin{figure*}[ht]
+     \begin{center}
+          \includegraphics[width=1\columnwidth]{Images/ACCO_timeline_bis.pdf}
+    \end{center}
+    \caption{Illustration of \acco's two-stage mechanism \eqref{step:1}-\eqref{step:2} to compensate the delayed updates.}
+    \label{two_steps_mechanism}
+\end{figure*}
+The crux of \acco~is to split the computation of the mini-batch gradients into two successive stages, where the first half of the mini-batch is used to estimate $\tilde \theta^{(t+1)}$ while $\theta^{(t+1)}$ is computed using the full mini-batch. %This is motivated by the fact that gradient accumulation is a mechanism often used for training LLMs [CITATION NEEDED], 
+This is motivated by the fact that training LLMs requires extremely large batch sizes~\cite{zhao2023survey}, leading to the usage of gradient accumulation in most cases, 
+and if gradients are computed \emph{sequentially} on a worker, we might as well leverage this to produce 
+ our estimate. Thus, starting with an initialized $\theta^{(0)}$, $\tilde {g_i}^{(0)} = \nabla F(\theta^{(0)}, \xi_i^{(0)})$ and $N_i^{(0)}=1$, the two stages are (left and right side running in parallel):
+\begin{alignat}{2}
+    {\color{blueschema} g_i^{(t)}}  & {\color{blueschema}= \sum_{k=1}^{N_i^{(t)}} \nabla F(\theta^{(t)}, \xi_{i, k}^{(t)})}   
+    &&\quad  , \quad {\color{orangeschema} \tilde \theta^{(t+1)} = \texttt{Opt} \left( \theta^{(t)}, \frac{\sum_i \tilde g_i^{(t)}}{\sum_i \tilde{N_i}^{(t)}} \right)} \, , \label{step:1}\\
+     {\color{orangeschema}\tilde{g_i}^{(t+1)}}  & {\color{orangeschema}= \sum_{k=1}^{\tilde{N_i}^{(t)}}  \nabla F(\tilde \theta^{(t+1)}, \tilde \xi_{i, k}^{(t+1)})}  
+       &&\quad  ,  \quad{\color{blueschema}\theta^{(t+1)} = \texttt{Opt} \left( \theta^{(t)}, \frac{\sum_i g_i^{(t)} + \tilde g_i^{(t)}}{\sum_i N_i^{(t)} + \tilde{N_i}^{(t)}} \right)} \, .\label{step:2}
+\end{alignat}
+We describe the different components of our two-stage mechanism as follows:
+\begin{itemize}
+    \item[\eqref{step:1}] {\color{blueschema} The gradient computation stream uses the second half of the mini-batch to compute the gradients $g_i^{(t)}$ with respect to parameters $\theta^{(t)}$} while {\color{orangeschema} the communication stream estimates what would be the next steps parameters $\tilde \theta^{(t+1)}$ using the estimated gradients $\tilde g_i^{(t)}$.}
+    \item[\eqref{step:2}] {\color{orangeschema} The computation stream uses the first half of the mini-batch to estimate what would be the gradients $\tilde g_i^{(t+1)}$ of the next parameters $\theta^{(t+1)}$ using estimated parameters $\tilde \theta^{(t+1)}$} while {\color{blueschema} the communication stream computes $\theta^{(t+1)}$ using the full mini-batch. Note that it starts from the same version of the parameters $\theta^{(t)}$ as in step \eqref{step:1}. The first half $\tilde g_i^{(t)}$ was estimated at step \eqref{step:2} of the \emph{last round}, while the second half $ g_i^{(t)}$ was just computed in \eqref{step:1}.}
+\end{itemize}
+
+As illustrated in Fig. \ref{two_steps_mechanism}, by splitting the computations of the mini-batch gradients into two halves, we do allow the gradient computations and communications timelines to run in parallel while performing \acco's weight prediction estimation to compensate for the delayed update.
+
+
+
+\section{Empirical motivation and cluster setting}
+
+\label{sec:motivations}
+\begin{wrapfigure}[16]{r}{0.46\textwidth}
+     \begin{center}
+          \includegraphics[width=0.46\columnwidth]{Images/speed_cluster.pdf}
+    \end{center}
+    \caption{Time (per worker) spent computing and averaging gradients of a Llama-2 7B model for different numbers of GPUs.}
+    \label{fig:speed}
+\end{wrapfigure}
+In this section, we empirically motivate the need for methods mitigating communication overhead in Distributed Data Parallel (DDP) \cite{PytorchDDP2020}. Our goal is to illustrate that the time spent communicating gradients can quickly trump the one used for computing them when using DDP to train LLMs. For that, we measure the time necessary to perform a forward and backward pass on a Llama-2 model \cite{touvron2023llama} with 7B parameters hosted on a single GPU, using a batch size maxing out its memory. We compare this to the time necessary to compute an All-Reduce on those gradients with the NCCL backend, varying the number of distributed workers. On all the following, we experiment on our local cluster of NVIDIA A100-80GB GPUs with 8 GPUs per node and an Omni-PAth interconnection network at 100 Gb/s for inter-node connections, intra-node connections being done with NVLink 300 GB/s. Each distributed worker is hosted on a single GPU. We observe in Fig. \ref{fig:speed} that when we communicate outside of a GPU node in our cluster, the time needed to average the gradients across workers can take more than \emph{four times} the one spent on the whole forward and backward step. As DDP only partially hides communications during the backward \cite{PytorchDDP2020}, this means that our GPUs remain idle the majority of the time when we use more than 24 distributed workers, motivating the need for methods leveraging this time to compute instead.
+
+
+\section{Experiments}
+
+\begin{wrapfigure}[14]{l}{0.5\textwidth}
+     \begin{center}
+          \includegraphics[width=0.5\columnwidth]{Images/memory_v2.pdf}
+    \end{center}
+    \caption{Memory requirements of \acco~ vs DDP and ZeRO-1, see Tab.\ref{tab:relatedwork} for quantitative details.}
+    \label{memfig}
+\end{wrapfigure}
+In this section, we lay down our experiments. First in Sec. \ref{sec:setup}, we detail the common setup for all our experiments. Second, in Sec. \ref{sec:tinystories}, we illustrate the failings of DPU and \acco-wp that we hinted at in Sec. \ref{sec:method}, which led us to crafting \acco. For this first exploration, we focus on small language models and datasets, using TinyStories \cite{eldan2023tinystories} as our test-bed. Then in Sec.  \ref{sec:owt}, we verify that \acco~allows to efficiently train LLMs at scale by considering a 125M parameters GPT-Neo architecture \cite{gpt-neo} and the OpenWebText dataset \cite{Gokaslan2019OpenWeb}.Finally in Sec. \ref{sec:finetuning}, we consider even larger models by using \acco~for an instruction fine-tuning task with a 2.7B parameters GPT-Neo, which accentuates the effects of the inter-node communication bottlenecks and highlights all the more the benefits of our method. Our method allows faster GPUs to accumulate while they wait for the slowest worker instead of remaining idle as in DDP, thus allowing us to compute gradients for large batch sizes faster than the baseline, resulting in quicker convergence in wall-clock time.
+
+\subsection{Experimental setup}
+\label{sec:setup}
+All of our experiments are performed on the GPU cluster described in Sec. \ref{sec:motivations}. Our implementation is in Pytorch \cite{Pytorch}, and we verified that our code for \acco~does indeed produces two different CUDA streams running in parallel for the computations and communications using NVIDIA's Nsight System to profile it, as shown in Fig. We trained all our models with AdamW \cite{loshchilov2018decoupled}, using mixed precision: our model parameters, gradient accumulation buffer, and communication buffers are in \texttt{bfloat16} \cite{bf16kalamkar2019} while our sharded optimizer states are in single precision, as shown in Fig. \ref{memfig}. We compared our algorithm \acco~to several baselines in different settings, including Pytorch's Distributed Data Parallel (DDP) method \cite{PytorchDDP2020} with ZeRO-1 \cite{Zero1}. 
+\subsection{Crafting \acco~on TinyStories}
+\label{sec:tinystories}
+
+Here, we experiment with small language models on the TinyStories dataset \cite{eldan2023tinystories}, following the configuration and training hyper-parameters of their paper \cite{eldan2023tinystories} to the best of our abilities. Hence, we use a 36M parameters GPT-Neo based \cite{gpt-neo} decoder-only transformer architecture. To match the 10k vocabulary they used, we trained our own BPE tokenizer on the TinyStories dataset. For our experiments, we used up to 8 workers on a single node.
+
+\paragraph{Impact of delayed updates.}
+\label{sec:DelayedExpe}
+First, we investigate the impact of using delayed updates, re-purposing DPU \cite{Zerooffload} as described in Sec. \ref{sec:method}. We run three variants of this algorithm: \textbf{(1)} with no warmup, \textbf{(2)} with 40 warmup steps of non-delayed optimization step before switching to DPU (recommended recipe in \cite{Zerooffload}), and \textbf{(3)} with 500 steps of warmup. We report in Fig. \ref{DPU_not_working} our training losses on 8 distributed workers averaged over $3$ runs.
+\begin{figure*}[ht]
+     \begin{center}
+     \subfigure[Training with the specified amount in \cite{eldan2023tinystories}.]{
+          \includegraphics[width=.45\columnwidth]{Images/DPU_does_not_work_v2.pdf}
+        }
+        \subfigure[Training for twice the specified amount.]{
+          \includegraphics[width=.45\columnwidth]{Images/DPU_does_not_work_90k_v2.pdf}
+        }
+    \end{center}
+    \caption{Impact of the delayed update and the amount of warmup steps on the training}
+    \label{DPU_not_working}
+\end{figure*}
+We remark that using delayed updates can greatly hurt convergence, especially when no or too few warmup steps are performed. Surprisingly, the number of warmup steps given in \cite{Zerooffload} does not work here, hinting that it is a sensitive hyper-parameter to tune for each use-case. When sufficiently many warmup steps are done, first the training loss follows exactly the baseline one, but immediately spikes as soon as the delay is introduced. If we train for twice as long than specified in \cite{eldan2023tinystories}, then the DPU training curve approaches the baseline one, without totally catching it. Contrary to this, the training curve of our algorithm \acco~perfectly matches DDP's one from the beginning.
+
+\paragraph{A simple approach to compensate delays.}
+\label{sec:WPExpe}
+\begin{wrapfigure}[15]{r}{0.46\textwidth}
+     \begin{center}
+          \includegraphics[width=0.46\columnwidth]{Images/WP_does_not_work_v2.pdf}
+    \end{center}
+    \caption{Comparison of \acco~with its Weight Prediction version on TinyStories.}
+    \label{WP}
+\end{wrapfigure}
+After noticing the detrimental impact of using delayed updates on the training performances of our models, we test our first approach to mitigate it. For that, we implement \acco-wp, the Weight Prediction method described in Sec. \ref{sec:method}. This method applies two consecutive optimizer steps, re-using the same mini-batch of gradients twice. The first step produces the usual updated parameters, and the second one is used to predict the parameters of the next step so that gradients can be computed on this estimate rather than on a stale version of the model. In Fig. \ref{WP} we compare the training curves of this delay-compensation method to ours. We remark that, while \acco~perfectly matches the DDP baseline at all times, \acco-wp displays worse behavior, especially at the beginning of the training. Thus, we dismiss this method and keep ours for the remaining of the experiments.
+
+\subsection{Passing the scaling test: training GPT-Neo on OpenWebText}
+\label{sec:owt}
+\begin{wraptable}[7]{r}{0.5\textwidth}
+    \centering
+    \caption{Perplexity of our trained LLMs}
+    \resizebox{0.5\columnwidth}{!}{
+    \begin{tabular}{l|c|c}
+    \toprule
+        \textbf{Method} &  \textbf{LAMBADA (ppl $\downarrow
+$)} & \textbf{OpenWebText (ppl $\downarrow
+$)} \\
+        \midrule
+        \acco~1x8  & 47.1 & 24.2 \\
+        DDP 1x8 & 47.5 &  24.3\\ 
+        \midrule
+        \acco~4x8  & 45.5 & 22.5 \\
+        DDP 4x8 & 44.1 & 21.7 \\  \bottomrule     
+    \end{tabular}}
+    \label{tab:evaluation_metrics}
+\end{wraptable}
+To assess how \acco~scales with larger models and more data, we pre-trained a model equivalent to GPT-2 \cite{GPT2} with both \acco~and DDP. Specifically, we used the GPT-Neo architecture \cite{gpt-neo} with 125 million parameters and the OpenWebText dataset \cite{Gokaslan2019OpenWeb}, which contains 40 GB of text. We used the GPT-Neo tokenizer, pre-trained on the Pile dataset \cite{gao2020pile}. The models were trained on sequences of 1024 tokens, with documents concatenated using end-of-sequence tokens. To assess the impact of using different hardware, the experiment was repeated on 2 different clusters. The first was conducted on 8 H100-PCIe 80GB on a single node. The second was on 32 A100-80G GPU distributed on 4 nodes. We maxed out the memory of our GPUs with a local mini-batch size of 24. To reach a sufficiently large overall batch size, we used 1 step of gradient accumulation for DDP, and none for \acco~as our method naturally accumulates over 1 step, resulting for the first and second experiments in respectively 400K and 1.5M tokens per effective batch for both \acco~and DDP. In Tab. \ref{tab:times}, we report additional experimental details, and notice that training with \acco~allows for significant time gains, which is additionally illustrated in Fig. \ref{expe:Owt}. Moreover, to prevent GPUs from idling while waiting for communications, \acco~adaptively scheduled 315 supplementary accumulation steps over the whole training.
+
+\begin{figure*}[ht]
+     \begin{center}
+     \subfigure[Evolution of the loss over the whole training.]{
+          \includegraphics[width=.45\columnwidth]{Images/ACCO_vs_DDP_OWT_50B.pdf}
+        }
+        \subfigure[Focus on the first part of the training w.r.t time.]{
+          \includegraphics[width=.45\columnwidth]{Images/ACCO_vs_DDP_OWT_50B_t_cut.pdf}
+        }
+    \end{center}
+    \caption{Training curves for \acco~and DDP with 32 workers trained for 50B tokens.}
+     \label{expe:Owt}
+\end{figure*}
+
+Tab. \ref{tab:evaluation_metrics} reports the perplexity of trained language models with both methods, which is a commonly used metric to evaluate pre-trained language models, as it quantifies the uncertainty of a model at predicting the next token. We evaluate the perplexity of language models on LAMBADA \cite{paperno-EtAl:2016:P16-1} and a test split of OpenWebText,  and report similar results for both methods.
+
+\subsection{Advantages of using \acco~for instruction fine-tuning}
+\label{sec:finetuning}
+In previous sections, we compared \acco~ against DDP in the pre-training stage. To further validate our algorithm, we additionally fine-tuned a pre-trained model on supervised instruction data. We consider the GPT-Neo 2.7B model \cite{gpt-neo} pre-trained on the Pile dataset \cite{gao2020pile} and finetuned it on the Alpaca dataset \cite{alpaca} containing 52k pairs of instruction/answer. We fine-tuned the model using two configurations: 8 A100-80G on a single node, and 8 A100-80G distributed equally across 2 nodes. Samples are padded to match the longest sequence in the mini-batch. We fixed the mini-batch size at 4, leading to a total batch size of 128 for all methods. For DDP and DPU, we used a gradient accumulation of 4, while for \acco~, a gradient accumulation of 2 to account for the \acco~ accumulation described in Sec. \ref{ACCO_method}. The learning rate was set to $2 \times 10^{-5}$ for all methods with a warmup of 50 steps, for DPU. 
+\begin{figure*}[ht]
+     \begin{center}
+          \includegraphics[width=0.45\columnwidth]{Images/ACCO_vs_DDP_finetuning_time.pdf}
+          \includegraphics[width=0.45\columnwidth]{Images/ACCO_vs_DDP_finetuning_step_2n.pdf}
+    \end{center}
+    \caption{Validation curve with 8 workers on 1 node \textbf{(left)}, and 4 workers/node on 2 nodes \textbf{(right)}.}
+    \label{expe:ft-1-2-node}
+\end{figure*}
+
+In this setting, padding to the longest sequence in the mini-batch induces more variability in the number of tokens per mini-batch. This results in more variability in the computational load for each worker, leading to increased wait times for synchronization.
+We observe in Fig. \ref{expe:ft-1-2-node} that \acco~hits a lower validation loss faster than DDP on both 1 node and 2 nodes settings. Note that the difference between \acco~and DDP is accentuated when workers are distributed on multiple nodes.
+In \ref{expe:ft-1-2-node-2}, we observe that \acco~is less data efficient at the beginning of training, as evidenced by a higher loss compared to DDP for the same number of seen tokens. This is likely due to the fact that \acco~favors using tokens to increase the batch size to hide communication delays, meaning that fewer optimizer steps are performed per token compared to DDP. However, both algorithms converge to very similar loss values by the end of the training.
+\begin{table}[htbp]
+\centering
+\caption{Pre-training and finetuning time speedup with \acco~ against DDP on various setups. }
+\begin{tabular}{llll|lll}
+\toprule
+\textbf{Stage}                       & \textbf{Model} &  \textbf{GPUs}   &\textbf{\#tokens} & \textbf{DDP}  & \acco~ &(\boldmath{$\Delta T$})            \\ 
+\midrule
+\multirow{2}{*}{\textbf{Pre-training}} & \multirow{2}{*}{GPT-Neo-125M} & 1x8 &6B& 4h41min    & 4h25min &($-5.69\%$)  \\ 
+
+                            & & 4x8  &50B& 14h41min &  10h55min&($-25.65\%$)\\ 
+\midrule
+\multirow{2}{*}{\textbf{Finetuning}} & \multirow{2}{*}{GPT-Neo-2.7B} & 1x8&  80M  & 43min & 25min&($-41.86\%$)   \\ 
+                            & & 2x4 & 80M & 3h46min  & 29min&($-87.17\%$)    \\ 
+
+\bottomrule
+\end{tabular}
+\label{tab:times}
+\end{table}
+
+
+
+\section{Limitations}
+
+\label{sec:limitations}
+\paragraph{Experiments mainly on one cluster environment.} Due to the lack of variety in the compute environments we have access to, the majority of our experiments were performed on a single cluster, described in Sec. \ref{sec:motivations}. This is a communication-constrained setting, as our hardware is not the most cutting-edge in that regard as discussed in Sec. \ref{sec:motivations}. This particularly flatters our method in comparison to DDP, as it accentuates the impact of the communication overhead in the wall clock time. However, to mitigate this one-sidedness, we also run a small pre-training study on one of the fastest hardware available today, and report in Tab. \ref{tab:times} that even in that case, \acco~leads to a 5\% time gain.
+\paragraph{Communication cost only \emph{hidden}, not reduced.} While local optimization methods tackle the communication overhead problem with scarce communications, here we only hide them. Thus, our method does not lead to energy savings, nor question the cost of highly synchronized infrastructure. However, \acco~naturally maximizes the hardware throughput, allowing to reduce their use time.
+\paragraph{Further memory savings avenue not explored.} Due to the parallel nature of \acco, removing the reliance on communication and gradient buffers seems hardly possible, questioning the feasibility of further memory savings if all executions are kept on the GPU. But, akin to ZeRO-Offload \cite{Zerooffload}, the communication and optimizer stream could entirely be run on CPU, which would allow significant memory gains. We did not experiment with this idea, and let this consideration for future work.
+
+
+

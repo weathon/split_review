@@ -1,8 +1,8 @@
 # CAKE: Cascading and Adaptive KV Cache Eviction with Layer Preferences
 
 - Decision: Accept
-- Avg Score: 3.80
-- Scores: 6, 6, 1, 0, 6
+- Avg Score: 7.00
+- Scores: 6, 6, 10, 6
 
 ## Abstract
 Large language models (LLMs)' proficiency in handling long sequences boosts KV caching demand. Recent efforts to evict KV cache have alleviated the burden for inference, but they often fail to allocate resources rationally across layers with different attention patterns. In this paper, we introduce Cascading and Adaptive KV cache Eviction (CAKE), a method that significantly improves LLM inference efficiency by optimizing KV cache eviction through an adaptive cache allocation strategy implemented via a cascading cache management and an innovative eviction indicator. We approach KV cache eviction as a ``cake-slicing problem,'' assessing each layer's KV cache needs by considering attention dynamics in both spatial and temporal dimensions. During the prompt prefilling, CAKE allocates rational cache size for layers by analyzing layer-specific KV cache preferences and manages the memory budgets with the guidance of these preferences in a cascading manner. This approach allows for a global view of cache size allocation, distributing resources optimally based on the diverse attention mechanisms across layers. Also, we've designed a new eviction indicator that considers the shifting importance of tokens over time, addressing a limitation in existing methods that often overlook temporal dynamics. Our comprehensive experiments on the LongBench and NeedleBench datasets show that CAKE is capable of preserving the performance of models when retaining only 3.2\% KV cache and consistently outperforms current baselines across various models and memory constraints, especially in low-memory situations. Moreover, CAKE outperforms full cache with FlashAttention implementation, achieving 10$\times$ faster decoding for 128K-token sequences and maintaining consistent decoding speed across sequence lengths.

@@ -1,0 +1,453 @@
+\title{Closed-Loop Long-Horizon Robotic Planning via Equilibrium Sequence Modeling}
+
+\begin{abstract}
+In the endeavor to make autonomous robots take actions, task planning is a major challenge that requires translating high-level task descriptions into long-horizon action sequences. Despite recent advances in language model agents, they remain prone to planning errors and limited in their ability to plan ahead. To address these limitations in robotic planning, we advocate a self-refining scheme that iteratively refines a draft plan until an equilibrium is reached. Remarkably, this process can be optimized end-to-end from an analytical perspective without the need to curate additional verifiers or reward models, allowing us to train self-refining planners in a simple supervised learning fashion. Meanwhile, a nested equilibrium sequence modeling procedure is devised for efficient closed-loop planning that incorporates useful feedback from the environment (or an internal world model). Our method is evaluated on the VirtualHome-Env benchmark, showing advanced performance with better scaling for inference computation. Code is available at~\web.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Recent advances in large language models (LLMs) have spurred tremendous progress in robotic planning~\citep{huang2022language, li2022pre, singh2023progprompt, driess2023palm, ahn2023can, huang2023inner, zhao2023large, hu2024tree}. Based on their extensive world knowledge, LLM agents seem close to autonomously performing robotic tasks, such as in household scenarios. However, growing evidence shows that existing LLM agents struggle with task planning~\citep{kaelbling2011hierarchical} that decomposes a high-level task into mid-level actions. While this problem requires long-horizon planning as well as consideration of environmental feedback, LLMs are often limited by: (1) \textit{unidirectional dependency}: due to autoregressive generation, previous tokens cannot attend to future tokens, resulting in limited ability to plan ahead~\citep{wu2024language}; (2) \textit{lack of error correction} for existing outputs, unless with a heavy system 2; (3) \textit{fixed forward process} hindering the allocation of more inference computation to further improve planning performance. These inherent limitations of LLMs lead to inefficiency in the closed-loop long-horizon robotic planning.
+
+To address above challenges of LLM planners in closed-loop long-horizon planning, we advocate the approach of self-refinement~\citep{welleck2023generating, shinn2023reflexion, kim2023language, madaan2023self} that iteratively improves a previously generated plan. The reasons behind are threefold: (1) \textit{bidirectional dependency}: since the output is conditioned on a previous draft plan, it can attend to all tokens in the plan (from an old version), thus improving its ability to plan ahead; (2) \textit{internal error correction} which allows implicit self-correction in a forward pass without an explicit, heavy system 2; (3) \textit{dynamic computation allocation} by iterating through a self-refinement process until convergence. However, such a self-refining strategy imposes significant training difficulties because it requires backpropagation through infinite self-refining steps~\citep{werbos1990backpropagation}. This may be seen as an extreme case that reflects some of the general challenges in teaching LLMs to plan and reason. Existing solutions include curating process supervision~\citep{uesato2022solving, lightman2024let} or applying reinforcement learning~\citep{zelikman2024quiet, openai2024learning, kumar2024training}, but they are considerably more complex than supervised training and difficult to implement.
+
+This work proposes an simple learning framework for planning via self-refinement. Specifically, we formulate the self-refining process as a fixed-point problem that recursively refines the plan until the equilibrium point, as illustrated in~\cref{fig:illustration}. While the forward process of this fixed-point problem could be solved efficiently using root-finding methods, more interestingly, its backpropagation can be \textit{skipped} since its gradient is explicated by the implicit function theorem~\citep{krantz2002implicit} as in deep equilibrium models~\citep{bai2019deep, geng2023torchdeq}.
+It is noted that the derived gradient term may be further simplified through a Jacobian-free approximation~\citep{fung2022jfb} to facilitate training. These analytical techniques allow end-to-end supervised training of the LLM planner to accomplish self-refinement without the need for additional verifiers or reward models in reinforcement learning-based counterparts, greatly enhancing simplicity and practicality. And after training, our equilibrium model-based planner is capable of dynamically allocating more inference computation in the equilibrium solving process to achieve better planning performance.
+
+Another important cue for self-refinement in robotic tasks is closed-loop feedback from the environment. To efficiently incorporate environmental feedback, we devise a nested equilibrium sequence modeling procedure consisting of inner and outer loops, where the inner loop iteratively refines a plan using previous feedback, while the outer loop updates the feedback by interacting with the environment. This enables closed-loop planning from even a few environmental interactions. Moreover, the nested equilibrium solving process is accelerated by reusing the previously derived equilibrium. We further implement the above design within an LLM agent framework, seamlessly integrating the equilibrium model-based planner, an experience memory buffer containing past plans and feedback, and a world model to estimate feedback in the absence of environmental interactions,
+thus enabling it to operate effectively in robotic planning.
+The contributions of our work are summarize as follows:
+\begin{itemize}[nosep,topsep=0pt,leftmargin=*]
+    \item We present equilibrium sequence modeling, a simple training approach for self-refining LLMs based on equilibrium models, allowing for end-to-end learning in a supervised manner.
+    \item A nested equilibrium solving process is proposed to efficiently incorporate closed-loop feedback into the equilibrium sequence modeling, reusing previous equilibrium solutions to alleviate inference computation. It is further implemented with a world model to improve practicality.
+    \item Our method is evaluated on the VirtualHome-Env benchmark~\citep{puig2018virtualhome, liao2019synthesizing}, demonstrating its advantageous performance with better scaling \wrt inference computation.
+\end{itemize}
+
+\begin{figure}[t]
+\captionsetup{aboveskip=5pt}
+    \centering
+    \includegraphics[width=\textwidth ]{figs/illustration.pdf}
+    \begin{subfigure}{.35\textwidth }
+        \caption{Equilibrium in planning}
+        \label{fig:illustration_a}
+    \end{subfigure}\hfill
+    \begin{subfigure}{.56\textwidth }
+        \caption{Iterative planning until an equilibrium is reached}
+        \label{fig:illustraton_b}
+    \end{subfigure}
+    \caption{Illustration of the equilibrium point in planning. We view planning as a self-refinement process in which the ideal plan emerges as an equilibrium point, remaining unchanged by any refinement attempts even with newer information (\eg feedback from the environment or a world model). This enables us to tackle robotic planning from an optimization perspective around its equilibrium.}
+    \label{fig:illustration}
+\end{figure}
+
+
+
+\section{Related Work}
+
+
+\textbf{LLMs for Planning.} Scaling up inference computation to improve LLMs' performance on planning and reasoning tasks has received increasing attention~\citep{brown2024large, snell2024scaling, wu2024empirical, openai2024learning}. Existing techniques involving chain-of-thought~\citep{wei2022chain, zelikman2022star, zelikman2024quiet}, repeated sampling~\citep{wang2023self, brown2024large} and tree search~\citep{yao2023tree, zhao2023large} showed preliminary results with handcraft system 2. Alternatively, a method called self-refinement~\citep{welleck2023generating, shinn2023reflexion, kim2023language, madaan2023self} suggests recursively refining the existing LLM output in an autonomous manner, but it relies heavily on prompting or intricate training procedures. To fully exploit its potential, we propose an end-to-end optimization method for self-refinement through deep equilibrium models.
+
+\textbf{Deep Equilibrium Models}~\citep{bai2019deep} are infinite-depth neural networks specified by fixed-point problems $x^*=f_\theta(x^*)$, where $f_\theta$ is an equilibrium layer. While their inference can take infinite steps by the fixed-point iteration, their gradients are estimated using implicit differentiation~\citep{krantz2002implicit} without backpropagating through all layers, thus enabling memory-efficient training. They have been extensively applied to tasks such as visual understanding~\citep{bai2020multiscale, bai2022deep} and image generation~\citep{pokle2022deep, geng2023one, bai2024fixed}. In this paper, we apply the fixed-point formulation of deep equilibrium models to the self-refinement process in LLM planners, allowing for simple supervised training of LLMs to refine themselves. More detailed introduction to deep equilibrium models is presented in~\cref{app:bg}.
+
+
+
+\section{Method}
+
+
+We study the problem of robot task planning which aims to decompose a high-level task description into long-horizon mid-level action sequences~\citep{kaelbling2011hierarchical}. In the following, we first discuss the limitations of LLM planners in self-refinement (\cref{sect:refine}) and address them with a novel equilibrium sequence modeling scheme (\cref{sect:deq}), which is compatible with various feedback from the designs in~\cref{sect:feedback}. Lastly, practical implementations are given in~\cref{sect:implementation}.
+
+\subsection{Preliminaries on Self-Refinement}
+\label{sect:refine}
+
+The prevailing LLMs are intrinsically limited in planning, as their unidirectional dependency results in limited capability to plan ahead~\citep{wu2024language}, and the lack of error correction hinders closed-loop planning. These reasons call for alternative mechanisms to address robot task planning.
+
+Recently,~\citet{welleck2023generating, shinn2023reflexion, kim2023language, madaan2023self} proposed self-refinement, which uses an LLM $f_\theta$ to iteratively refine the previous LLM output. This strategy naturally addresses the above limitations, since it introduces bidirectional token dependency and a dynamic error correction mechanism. Formally, let $x_t$ denote a draft plan and $c_t$ denote context (\eg environmental feedback), then planning may be viewed as a self-refinement process as follows:
+\begin{equation}
+\label{eq:self_refine}
+    x_{t+1} = f_{\theta}(x_t, c_t).
+\end{equation}
+However, self-refinement via prompting~\citep{shinn2023reflexion, kim2023language, madaan2023self} has been found to be very limited by~\citet{huang2024large}. Alternative training-based methods require careful curation of training sequences~\citep{welleck2023generating, havrilla2024glore} or reinforcement learning~\citep{qu2024recursive, kumar2024training} and are therefore difficult to train. Overall, they remain deficient for robotic planning compared to system 2-based alternatives, as shown in~\citet{hu2024tree}.
+
+\subsection{Self-Refinement as An Equilibrium Model}
+\label{sect:deq}
+
+To address the training inefficiency of self-refinement approaches, this section proposes equilibrium sequence modeling, a simple supervised training scheme for teaching LLM planners to self-refine through the lens of deep equilibrium models~\citep{bai2019deep, geng2023torchdeq}.
+
+Let us first consider a simplified scenario of self-refinement without environmental feedback, namely that the context $c_t$ is fixed, \eg to a predefined system message $c$. Then, the self-refinement process in~\cref{eq:self_refine} reduces to a fixed-point problem concerning only the plan $x_t$. Denote the initial plan by $x_0=\varnothing$ and the equilibrium plan, \ie the endpoint, by $x^*$, then its trajectory can be expressed as:
+\begin{equation}
+\label{eq:traj1}
+    (x_0,c)\rightarrow\ldots\rightarrow(x_t,c)\rightarrow\ldots\rightarrow(x^*,c).
+\end{equation}
+Although its forward process is tractable with existing root-solving techniques, such as the classic fixed-point iteration or alternative numerical methods~\citep{broyden1965class, anderson1965iterative}, its training requires recurrent backpropagation through multiple self-refining steps~\citep{werbos1990backpropagation}. This results in an extremely inefficient and unstable computational process where end-to-end training fails.
+
+Instead, we approach it directly from an analytical perspective. Assuming access only to an outcome supervision $L(\cdot,y)$ on the plan, \eg its distance to the ground truth plan $y$, then self-refinement is formulated as an optimization problem minimizing the loss function of the equilibrium plan:
+\begin{equation}
+\label{eq:opt}
+\begin{aligned}
+    \min_{\theta}\quad & L(x^*, y)\\
+    \textrm{s.t.}\quad &x^* = f_{\theta}(x^*, c).
+\end{aligned}
+\end{equation}
+Interestingly, the above optimization problem can be solved without backpropagating over the entire inference process. As the following theorem indicates, we can directly differentiate through its fixed point regardless of the solution path, with only a constant computational and memory cost.
+
+\begin{theorem} (Implicit Function Theorem~\citep{bai2019deep, krantz2002implicit}) 
+Assuming that $\big(I - \frac{\partial f_{\theta}}{\partial x^*}\big)$ is invertible, then the loss gradient of~\cref{eq:opt} \wrt $\theta$ is given by:
+\label{thm:thm1}
+\begin{equation}
+    \frac{\partial L}{\partial \theta}=\frac{\partial L}{\partial x^*}\left(I-\frac{\partial f_{\theta}}{\partial x^*}\right)^{-1}\frac{\partial f_{\theta}}{\partial \theta}.
+\end{equation}
+\end{theorem}
+
+Its proof is given in~\cref{app:proof}. It is noteworthy that the inverse Jacobian term $A=(I-\frac{\partial f_{\theta}}{\partial x^*})^{-1}$ within the above gradient is difficult to compute exactly, for which existing work often approximates through the damped fixed-point unrolling or the Neumann series~\citep{geng2021training}.
+For computa-tional efficiency, we drop the inverse Jacobian term using $A\approx I$ as in~\citet{fung2022jfb, geng2021attention, choe2023making}, the latter having been validated on Transformer-based LLMs:
+\begin{equation}
+    \frac{\partial L}{\partial \theta}=\frac{\partial L}{\partial x^*}\frac{\partial f_{\theta}}{\partial \theta}.
+\end{equation}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth ]{figs/method.pdf}
+    \begin{subfigure}{.72\textwidth}
+        \caption{Inference: solving equilibrium via fixed-point iteration}
+        \label{fig:method_a}
+    \end{subfigure}\hfill
+    \begin{subfigure}{.14\textwidth}
+        \caption{Training}
+        \label{fig:method_b}
+    \end{subfigure}
+    \caption{Illustration of equilibrium sequence modeling. Prior to training, our model first undergoes iterative inference to reach an equilibrium plan. It is then pushed away from the equilibrium towards ground truth by a supervised training loss. This process enables self-refinement of the model.}
+    \label{fig:method}
+\end{figure}
+
+\textbf{Equilibrium Sequence Modeling.}
+Based on the simplified gradient estimation, we reformulate its training into a supervised learning problem. According to the chain rule, the derived gradient is exactly the gradient of the following optimization problem associated with the equilibrium $x^*$:
+\begin{equation}
+\label{eq:obj}
+    \min_{\theta}\quad L(f_{\theta}(x^*, c), y).
+\end{equation}
+This new formula represents a new equilibrium sequence modeling scheme that can be implemented in two stages as in~\cref{fig:method}. In the first stage, we iterate over the fixed-point problem within~\cref{eq:opt} to solve the equilibrium plan $x^*$. Then, it is paired with the ground truth plan $y$ as a training sequence, which is used as in the standard supervised finetuning pipeline to teach the LLM to self-refine.
+
+It features two intuitive advantages: (1) instead of directly regressing the ground truth, it only adjusts the equilibrium point, which reduces overfitting compared to the vanilla supervised finetuning; (2) it teaches self-refinement by a simple supervised loss, without requiring additional value functions or reward models~\citep{welleck2023generating, havrilla2024glore, qu2024recursive, kumar2024training}.
+
+\subsection{Equilibrium Models with Feedback}
+\label{sect:feedback}
+
+This section extends the derived equilibrium sequence modeling to a more practical scenario where the environment may provide some closed-loop feedback, \eg failure details, during plan execution. Such auxiliary information would be an effective cue for planners to further refine their plan.
+
+To take into account environmental feedback, we consider an adaptive context $c_t$ that is influenced by the plan $x_t$ rather than fixed. Then, the previously concerned equilibrium solving process of~\cref{eq:traj1} should be revised as an iterative process that couples plan and feedback, starting from $x_0=c_0=\varnothing$:
+\begin{equation}
+    (x_0,c_0)\rightarrow\ldots\rightarrow(x_t,c_t)\rightarrow\ldots\rightarrow(x^*,c^*).
+\end{equation}
+After the modification, the existing derivations only hold when we neglect the derivatives related to $c^*$. Fortunately, this is a natural choice due to the non-differentiability of most feedbacks. Therefore, the equilibrium planner can be trained in a similar supervised way as in~\cref{eq:obj,fig:method}, and after training it would be able to self-refine based on the latest feedback just by forward passes. However, iteratively interacting with the environment to obtain feedback is costly and may not be recoverable. In response, we devise a nested equilibrium solving scheme for more efficient closed-loop planning.
+
+\begin{algorithm}[t]
+\caption{Inference of Equilibrium Planner}\label{alg:inference}
+\begin{algorithmic}
+\Require planner $f_\theta$, environment or world model Env, number of iterations $N$.
+\State Initialize a start point $x_{0}$ and feedback $c_{0}$.
+\For{$i \gets 0$ to $N$ or converged}
+    \State Solve inner equilibrium loop to obtain $x_{t}^{*}$. \Comment{\cref{eq:inner}}
+    \State Update next plan $x_{t+1}$ and feedback $c_{t+1}$ with Env. \Comment{\cref{eq:reuse1,eq:reuse2}}
+\EndFor
+\Ensure generated plan $x^*$.
+\end{algorithmic}
+\end{algorithm}
+
+\textbf{Nested Equilibrium Solving.} Inspired by the introspection process in human daily life, we propose to divide equilibrium solving into a nested loop process. The inner loop \textit{introspects} on the existing plan and feedback and takes no action, while the outer loop interacts with the environment to update the feedback. Formally, each inner loop is an equilibrium solving process with fixed feedback $c_{t}$:
+\begin{equation}
+\label{eq:inner}
+\begin{cases}
+    \;x_{t}^{1}=f_\theta(x_{t}^{0},c_{t})\\
+    \;\cdots\\
+    \;x_{t}^{*}=f_\theta(x_{t}^{*},c_{t}).
+\end{cases}
+\end{equation}
+Thanks to this inner-loop introspection mechanism, our equilibrium model can be more efficient in closed-loop planning, achieving superior performance with fewer environmental interactions. 
+
+\textbf{Reusing Equilibrium Solution.} Another efficiency bottleneck is the equilibrium solving. Considering that its speed depends largely on the initial plan, it is unnecessary to restart from $\varnothing$ every time. Therefore, we accelerate equilibrium solving by reusing the previously derived equilibrium plan as the starting point of the next iteration, similar to~\citet{bai2022deep, bai2024fixed}:
+\begin{equation}
+\label{eq:reuse1}
+    x_{t+1}=x_{t}^{*}.
+\end{equation}
+which corresponds to the starting point $x_{t+1}^0$ of the inner loop. Similarly, history feedback could be reused across different inner loops. This is achieved by initializing the context of the next inner loop by concatenating the previous feedback with the latest feedback (paired with its original plan):
+\begin{equation}
+\label{eq:reuse2}
+    c_{t+1}=(x_{t+1}, \text{Env}(x_{t+1})) \parallel c_{t},
+\end{equation}
+where $\parallel$ denotes concatenation. The whole nested inference procedure is described in~\cref{alg:inference}.
+
+\subsection{Practical Implementation}
+\label{sect:implementation}
+
+This section discusses the implementation of the proposed equilibrium planner. To enable effective training while interacting with the environment, the following two modules are carefully devised to complement the planner: an experience memory that caches all equilibrium plans and their feedback during equilibrium solving, and a world model to estimate the closed-loop feedback in the absence of environmental interactions. The planning framework is illustrated in~\cref{fig:framework}.
+
+\textbf{Equilibrium Experience Memory.} During the training process, our equilibrium model interacts with the environment only when the inner loop reaches the equilibrium point. This results in a small number of equilibrium points, which may not be sufficient for supervised training. To improve our training efficiency and stability, we opt to cache all previously obtained equilibrium points, along with their environmental feedback, in an experience memory. Thereafter, these equilibrium points can be sampled repeatedly for versatile training purposes. For example, for the planner, we~randomly sample a batch of equilibrium points at each training epoch, which are paired with the ground truth for supervised training. In particular, the most recent equilibrium points are sampled more frequently to reduce distribution shift. Next, we describe another crucial component of our framework.
+
+\textbf{Internal Feedback from World Model.} Due to inefficiency of interacting with the environment, we construct a world model~\citep{ha2018world} to provide the necessary feedback in closed-loop planning. Our world model takes the environmental context, task instruction and current plan as inputs and predicts some basic types of feedback. This definition is slightly simpler than the commonly used world model, which requires simulation of the environmental states, and therefore may be easier to train. Concretely, we implement the world model with an LLM and finetune it on the planner's equilibrium feedback over all iterations for better generalizability. And during inference, we alternate between using external and internal feedback in closed-loop robotic planning.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth ]{figs/framework.pdf}
+    \caption{Illustration of our proposed framework. It incorporates (1) a memory containing all the equilibrium experience during inference, (2) a self-refining planner trained on equilibrium plans with the ground truth, and (3) a world model trained on the memory to simulate environmental feedback.}
+    \label{fig:framework}
+\end{figure}
+
+
+
+\section{Experiments}
+
+
+\subsection{Experimental Settings}
+\label{sect:settings}
+
+\textbf{Benchmark.}
+The VirtualHome-Env benhmark~\citep{puig2018virtualhome, liao2019synthesizing} is adopted during the experiments. It contains 1360 long-horizon tasks with ground truth action sequence annotations (average length 10.8) and provides updated scene graphs after each action, allowing simulation of closed-loop feedback. To analyze the generalizability, we divided the dataset into a training set and three test subsets, including the novel scene set, the novel task set, and the novel scene and task set. More statistics and examples about VirtualHome-Env can be found in~\cref{app:benchmark}.
+
+\textbf{Metrics.}
+We use executability (Exec.), success rate (SR), goal conditions recall (GCR) following~\citet{hu2024tree}. Exec. evaluates whether the plan can be executed in given the environment, SR refers to whether the goal is accomplished, and GCR measures the proportion of goal conditions achieved. To examine the closed-loop planning capabilities, we study two test setups, without error correction or with up to 10 corrections, the latter allowing for self-correction based on environmental feedback. We also evaluate the computational efficiency by measuring TFLOPS at inference time.
+
+\textbf{Baselines.}
+Our method is compared with Tree-Planner~\citep{hu2024tree}, SELF-REFINE~\citep{madaan2023self}, and a supervised finetuned planner. They are all reproduced using Llama 3 8B~\citep{dubey2024llama3}. In addition, we consider several baseline methods that call the GPT-3.5 API, including ProgPrompt~\citep{singh2023progprompt}, Zero-shot Planner~\citep{huang2022language} and two self-refining planners, Local Replan~\citep{raman2022planning, guo2023doremi} and Global Replan~\citep{shinn2023reflexion}. Their results are presented for reference only. See~\cref{app:baselines} for more details.
+
+\textbf{Implementation Details.}
+Our implementation is consistent with the baseline methods by finetuning from Llama 3 8B~\citep{dubey2024llama3} on the VirtualHome-Env training set (paired with the equilibrium points). The number of finetuning epochs is set to 6, and the learning rate is set to 0.0002. The world model is finetuned on all planner interactions for 5 epochs using the same learning rate. A greedy LLM sampling strategy is used in later refinement steps until convergence. Moreover, we implement the KV cache to speed up inference. Further details are provided in~\cref{app:implementation}.
+
+\begin{table}[t]
+  \centering
+    \caption{Performance on VirtualHome-Env without correction. Our planner achieves state-of-the-art performance in most evaluations. Note that the Exec. metrics are marked in gray because they are already high and can easily exceed 99\% with simple automated rules (by truncating illegal output).}
+    \label{tab:results_wo_correct}%
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{lccccccccc}
+    \toprule
+    & \multicolumn{3}{c}{Novel Scene and Task} & \multicolumn{3}{c}{Novel Scene} & \multicolumn{3}{c}{Novel Task} \\
+    \cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(l){8-10}
+    & Exec. & SR & GCR & Exec. & SR & GCR & Exec. & SR & GCR \\
+    \midrule
+    \multicolumn{7}{l}{\textit{GPT-3.5 API:}} \\
+    Zero-shot Planner & 16.49 & 1.07 & 1.52 & - & - & - & - & - & - \\
+    ProgPrompt & 35.04 & 12.54 & 19.99 & - & - & - & - & - & - \\
+    Iterative-Planner & 44.54 & 27.04 & 33.25 & - & - & - & - & - & - \\
+    Tree-Planner\textsubscript{N=25} & 55.74 & 28.33 & 39.96 & - & - & - & - & - & - \\
+    Tree-Planner\textsubscript{N=50} & 49.01 & 28.14 & 35.84 & - & - & - & - & - & - \\
+    \cmidrule{1-10}
+    \multicolumn{7}{l}{\textit{Finetuned Llama 3 8B:}} \\
+    Supervised & \textcolor{gray}{93.55} & 24.19 & 32.55 & \textcolor{gray}{96.84} & 41.05 & 49.81 & \textcolor{gray}{95.94} & 26.07 & 35.53 \\  % maybe we need change its name
+    Tree-Planner\textsubscript{N=25} & \textcolor{gray}{95.16} & 38.71 & 63.18 & \textcolor{gray}{96.08} & 51.58 & 69.45 & \textcolor{gray}{95.50} & 40.38 & \textbf{63.75} \\
+    Tree-Planner\textsubscript{N=50} & \textcolor{gray}{94.94} & 38.71 & 63.50 & \textcolor{gray}{96.06} & 51.58 & 69.54 & \textcolor{gray}{95.40} & 39.74 & 63.29 \\
+    \rowcolor{gray!15}
+    \ours & \textcolor{gray}{90.32} & \textbf{40.32} & \textbf{65.40} & \textcolor{gray}{95.79} & \textbf{65.26} & \textbf{79.47} & \textcolor{gray}{93.38} & \textbf{41.88} & 62.76 \\
+    \bottomrule
+    \end{tabular}
+    }
+\end{table}
+
+\begin{table}[t]
+  \centering
+    \caption{Performance on VirtualHome-Env with up to 10 corrections. Our planner consistently leads in SR and GCR performance. The Exec. metrics are shown in gray  for the same reasons in~\cref{tab:results_wo_correct}.}
+    \label{tab:results_w_correct}%
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{lccccccccc}
+    \toprule
+    & \multicolumn{3}{c}{Novel Scene and Task} & \multicolumn{3}{c}{Novel Scene} & \multicolumn{3}{c}{Novel Task} \\
+    \cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(l){8-10}
+    & Exec. & SR & GCR & Exec. & SR & GCR & Exec. & SR & GCR \\
+    \midrule
+    \multicolumn{7}{l}{\textit{GPT-3.5 API:}} \\
+    Local Replan & 79.66 & 37.46 & 51.90 & - & - & - & - & - & - \\
+    Global Replan & 82.09 & 37.93 & 52.46 & - & - & - & - & - & - \\
+    Tree-Planner\textsubscript{N=25} & 89.13 & 35.30 & 56.65 & - & - & - & - & - & - \\
+    Tree-Planner\textsubscript{N=50} & 88.26 & 41.58 & 59.55 & - & - & - & - & - & - \\
+    \cmidrule{1-10}
+    \multicolumn{7}{l}{\textit{Finetuned Llama 3 8B:}} \\
+    SELF-REFINE & \textcolor{gray}{96.77} & 43.55 & 65.18 & \textcolor{gray}{92.63} & 54.74 & 70.24 & \textcolor{gray}{94.44} & 39.96 & 62.37 \\
+    Tree-Planner\textsubscript{N=25} & \textcolor{gray}{95.16} & 41.94 & 56.49 & \textcolor{gray}{96.08} & 55.79 & 68.82 & \textcolor{gray}{95.50} & 42.09 & 57.83 \\
+    Tree-Planner\textsubscript{N=50} & \textcolor{gray}{94.94} & 43.55 & 58.91 & \textcolor{gray}{96.06} & 58.95 & 70.00 & \textcolor{gray}{95.40} & 43.38 & 59.79 \\
+    \rowcolor{gray!15}
+    \ours & \textcolor{gray}{91.94} & \textbf{56.45} & \textbf{76.63} & \textcolor{gray}{97.89} & \textbf{77.89} & \textbf{87.07} & \textcolor{gray}{92.31} & \textbf{54.91} & \textbf{74.18} \\
+    \bottomrule
+    \end{tabular}
+    }
+\end{table}
+
+\subsection{Main Results}
+
+The experimental results in the two planning setups, without correction or with up to 10 corrections, are summarized in~\cref{tab:results_wo_correct,tab:results_w_correct}.
+Overall, our method achieves the leading performance on the majority of metrics. Specifically, the experimental results show that: (1) Even without error correction, our self-refining process still brings a significant improvement of 14\% on SR in the novel scene subset, with other metrics superior or comparable to the previous leading method. (2) By incorporating environmental feedback, our approach improves all metrics by more than 11\% and up to 19\%, showing clear advantages. (3) Similar to the existing finetuning-based methods, our generated plans exhibit a high executability of over 90\%, which can be improved to 99\% by simply truncating illegal overlength outputs. These results clearly confirm the advantages of our approach.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[t]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\textwidth ]{figs/correction_self.pdf}
+\begin{lstlisting}[style=mystyle]
+Output log
+[WALK] <home_office>
+[WALK] <chair>
+[FIND] <chair>
+[GRAB] <chair>
+[WALK] <dining_room>
+\end{lstlisting}
+\begin{lstlisting}[style=mystyle, backgroundcolor=\color{feedbackcolor}]
+Wrong relative pos:
+<chair> and <floor>
+<character> and <home_office>
+\end{lstlisting}
+\begin{lstlisting}[style=mystyle]
+[WALK] <home_office>
+[WALK] <chair>
+[FIND] <chair>
+[GRAB] <chair>
+[WALK] <dining_room>
+\end{lstlisting}
+\begin{lstlisting}[style=mystyle, backgroundcolor=\color{feedbackcolor}]
+Same plan, task fail
+\end{lstlisting}
+    \end{subfigure}\hfill
+    \begin{subfigure}[t]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\textwidth ]{figs/correction_tree.pdf}
+\begin{lstlisting}[style=mystyle]
+Output log
+[WALK] <home_office>
+[WALK] <chair>
+[FIND] <chair>
+[GRAB] <chair>
+[WALK] <dining_room>
+\end{lstlisting}
+\begin{lstlisting}[style=mystyle, backgroundcolor=\color{feedbackcolor}]
+Task fail, trackback
+\end{lstlisting}
+\begin{lstlisting}[style=mystyle]
+[WALK] <bedroom>
+\end{lstlisting}
+\begin{lstlisting}[style=mystyle, backgroundcolor=\color{feedbackcolor}]
+Tree traversal end, task fail
+\end{lstlisting}
+    \end{subfigure}\hfill
+    \begin{subfigure}[t]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\textwidth ]{figs/correction_ours.pdf}
+\begin{lstlisting}[style=mystyle]
+Output log
+[WALK] <home_office>
+[WALK] <chair>
+[FIND] <chair>
+[GRAB] <chair>
+[PUTBACK] <chair>
+          <home_office>
+\end{lstlisting}
+\begin{lstlisting}[style=mystyle, backgroundcolor=\color{feedbackcolor}]
+Wrong relative pos:
+<chair> and <floor>
+\end{lstlisting}
+\begin{lstlisting}[style=mystyle]
+[WALK] <home_office>
+[WALK] <chair>
+[FIND] <chair>
+[GRAB] <chair>
+[WALK] <floor> 
+[PUTBACK] <chair> <floor>
+\end{lstlisting}
+\begin{lstlisting}[style=mystyle, backgroundcolor=\color{successcolor}]
+Task success
+\end{lstlisting}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.32\linewidth}
+        \caption{SELF-REFINE}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.32\linewidth}
+        \caption{Tree-Planner}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.32\linewidth}
+        \caption{\ours}
+    \end{subfigure}
+    \caption{Visualization of our self-correction process compared to the baselines SELF-REFINE and Tree-Planner. The task instruction is ``Take a comfortable chair and place it in the entrance hall''.}
+    \label{fig:correction}
+\end{figure}
+
+\Cref{fig:correction} further compares our self-correction process with the baseline methods. As can be seen, our method is better at incorporating environmental feedback to improve the plan, while the baselines fail by simply repeating the previous plan, or by making only local adjustments that are insufficient. This exemplifies the effectiveness of equilibrium sequence modeling for self-correction.
+
+\begin{table}[t]
+  \centering
+    \caption{Effectiveness of different types of feedback. They are measured under the constraint of up to 10 rounds of internal or external feedback. The last two rows are reported in the main tables.}
+    \label{tab:ablation}%
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{ccccccccccc}
+    \toprule
+    & & \multicolumn{3}{c}{Novel Scene and Task} & \multicolumn{3}{c}{Novel Scene} & \multicolumn{3}{c}{Novel Task} \\
+    \cmidrule(lr){3-5} \cmidrule(lr){6-8} \cmidrule(l){9-11}
+    World model & Env. & Exec. & SR & GCR & Exec. & SR & GCR & Exec. & SR & GCR \\
+    \midrule
+    & & \textcolor{gray}{88.71} & 33.87 & 59.98 & \textcolor{gray}{96.79} & 49.47 & 66.60 & \textcolor{gray}{93.80} & 34.62 & 59.06 \\
+    & $\checkmark$ & \textcolor{gray}{83.87} & 51.61 & 75.13 & \textcolor{gray}{96.84} & 75.79 & 85.79 & \textcolor{gray}{92.31} & \textbf{56.62} & \textbf{75.53} \\
+    \rowcolor{gray!15}
+    $\checkmark$ & & \textcolor{gray}{90.32} & 40.32 & 65.40 & \textcolor{gray}{95.79} & 65.26 & 79.47 & \textcolor{gray}{93.38} & 41.88 & 62.76 \\
+    \rowcolor{gray!15}
+    $\checkmark$ & $\checkmark$ & \textcolor{gray}{91.94} & \textbf{56.45} & \textbf{76.63} & \textcolor{gray}{97.89} & \textbf{77.89} & \textbf{87.07} & \textcolor{gray}{92.31} & 54.91 & 74.18 \\
+    \bottomrule
+    \end{tabular}
+    }
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{0.49\linewidth}
+        \centering
+        \includegraphics[width=\textwidth ]{figs/ablation_a.pdf}
+        \caption{Scaling \wrt inference computation}
+        \label{fig:ablation_a}
+    \end{subfigure}\hfill
+    \begin{subfigure}{0.49\linewidth}
+        \centering
+        \includegraphics[width=\textwidth ]{figs/ablation_b.pdf}
+        \caption{Performance for long-horizon tasks}
+        \label{fig:ablation_b}
+    \end{subfigure}
+    \caption{Performance analysis vs. inference computation and plan length. Our method shows leading scaling \wrt inference computation and long-horizon planning capabilities. The inference computation is measured by TFLOPS, and we consider KV cache when computing inference TFLOPS.}
+    \label{fig:ablation}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{0.49\linewidth}
+        \centering
+        \includegraphics[width=\textwidth ]{figs/ablation2_a.pdf}
+        \caption{Effectiveness of reusing equilibrium}
+        \label{fig:ablation2_a}
+    \end{subfigure}\hfill
+    \begin{subfigure}{0.49\linewidth}
+        \centering
+        \includegraphics[width=\textwidth ]{figs/ablation2_b.pdf}
+        \caption{Dynamic computation allocation}
+        \label{fig:ablation2_b}
+    \end{subfigure}
+    \caption{Ablation study on computational efficiency.
+    Our nested equilibrium solving process reuses previous equilibrium solutions and dynamically allocates the inference budget for better efficiency. The latter is displayed as the number of fixed-point iterations with mean and standard deviation.
+    }
+    \label{fig:ablation2}
+\end{figure}
+
+\subsection{Ablation Study}
+
+\textbf{Effectiveness of equilibrium sequence modeling} is quantitatively verified in~\cref{tab:results_w_correct}. Compared to alternative methods, our approach shows more than 11\% improvement over the prompting-based self-refinement method SELF-REFINE~\citep{madaan2023self} and more than 12\% improvement over the system 2-based Tree-Planner~\citep{hu2024tree}. Meanwhile, we maintain a simplistic supervised finetuning fashion similar to the compared methods, without intricate reinforcement learning. This validates the effectiveness of equilibrium sequence modeling in our robot task planning problem.
+
+\textbf{Effectiveness of various feedback.} As can be observed in~\cref{tab:ablation}, incorporating external feedback from the environment or internal feedback from the world model consistently improves performance. Even though the world model does not provide as much improvement as the real environment, it also increases performance by over 3\%. In particular, the synergy of both types of feedback yields the highest performance on most of the metrics, further confirming their effectiveness. In the following analysis, we will focus on our method using only environmental feedback for simplicity.
+
+\textbf{Scaling of performance.} Here, we follow~\citet{brown2024large, snell2024scaling, wu2024empirical, openai2024learning} in considering the scaling \wrt inference computation. The results in~\cref{fig:ablation_a} show that our method achieves better performance-computation tradeoff along with leading scaling \wrt inference computation. Thus, more inference budget can be allocated to improve its performance. Furthermore, in~\cref{fig:ablation_b}, we show that its performance advantage is largely due to better long-horizon planning capabilities, achieving more than twice the success rate for extremely long plans.
+
+\textbf{Computational efficiency.} Although our training is slower than the baselines (36h vs. 12h) due to the equilibrium solving process for synthesizing training pairs ($\approx$24h), it exhibits a competitive inference efficiency. For example, our method takes 16h to evaluate, while Tree-Planner takes 24h. This can be attributed to our design of reusing equilibrium in nested equilibrium solving, As illustrates in~\cref{fig:ablation2_a}, it accelerates the convergence of feedback iterations, achieving better performance ($>$55\%) with significantly fewer interactions. Furthermore, we show in~\cref{fig:ablation2_b} that our method is able to dynamically allocate inference computation for planning tasks of different complexity.
+
+
+
+\section{Conclusion}
+
+
+This work proposes an equilibrium model-based LLM planner that is capable of self-refining plans from external and internal feedback. Unlike existing self-refinement methods based on prompting or sophisticated reinforcement learning, our proposed equilibrium sequence modeling allows simple supervised training of the self-refining planners. Moreover, it also enables the planner to efficiently incorporate environmental feedback or a world model for closed-loop planning. We implement the proposed approach on the VirtualHome-Env benchmark, and the experimental results suggest that it can dynamically allocate inference computation to achieve state-of-the-art planning performance.
+Code:~\web.
+
+
+
+
+

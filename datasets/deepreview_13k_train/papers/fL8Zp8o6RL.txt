@@ -1,0 +1,259 @@
+\title{FTP: Efficient Prefilling for Long-Context LLM Inference via FFN Token Pruning}
+
+\begin{abstract}
+Large Language Models (LLMs) have demonstrated remarkable performance across various NLP tasks, and have extended their capability to long-context scenarios. However, the increasing context length leads to longer inference time in both the prefilling and decoding stages.
+Existing token pruning methods primarily evict tokens to compress the KV cache, and only accelerate the decoding stage.
+Recent studies have extended token pruning to both stages, but they either yield subtle speedup during the prefilling stage or defer a portion of computations to the decoding phase. Critically, these approaches prioritize the attention module, overlooking the significant computations in the Feed-Forward Network (FFN) module.
+
+In this work, we focus on the prefilling stage and propose a novel token pruning method named FTP for long-context LLM inference.
+Our approach is based on the observation that the FFN module accounts for over 60\% of the inference time. FTP reduces this by pruning non-critical tokens before the inference of FFN. The importance of each token, along with the quantity to be pruned, are dynamically determined by the attention scores in each layer.
+Unlike previous token pruning methods, FTP preserves a substantial amount of information of the pruned tokens through the residual connection, thereby achieving a notable speedup with only a negligible decrease in performance.
+Specifically, the Qwen2-7B-Instruct model with FTP achieves a speedup of 1.24$\times$ in the prefilling stage with only a 1.30\% performance drop compared to the baseline model. The speedup is further boosted to 1.39$\times$ on a Qwen1.5-32B-Chat model.
+Extensive experiments on long-context datasets across various tasks demonstrate the potential and effectiveness of FTP.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large language models (LLMs) have shown remarkable performance in a wide range of natural language processing applications, including summarization, question-and-answer, dialogue systems, and contextual learning (Thoppilan et al., 2022; Yuan et al., 2022; Wei et al., 2022; Zhang et al., 2023a). Recently, long-context models have emerged as an important trend in the development of LLMs, and several of them have already been launched to process complex and long prompts. For example, GPT4 (Achiam et al., 2023) and Qwen2 (Yang et al., 2024a) are both capable of $128k$ context length, and Claude-3 (Anthropic, 2024) can even process up to $200k$ tokens.  
+
+Given the advantages of long-context models, they nevertheless pose enormous challenges at inference time. As depicted in Figure 1, the inference of transformer-based LLMs with a KV cache typically consists of two stages: 1) the prefilling stage, which applies the self-attention, normalization, and the Feed-Forward Network (FFN) modules to all input token parallelly, records the key and value in the KV cache, and finally produces the first generated token. 2) the decoding stage, which takes the last generated token as input and iteratively predicts the next token with the input and the KV cache. We refer to the time spent in the prefilling stage as time to first token (TTFT).  
+
+While there have been various methods trying to reduce the inference time of long-context LLMs by pruning the input prompt (Jiang et al., 2023b;a; Pan et al., 2024), compressing the KV cache (Li et al., 2024; Zandieh et al., 2024), improving the efficiency of decoding (Leviathan et al., 2022; Sun et al., 2023; Chen et al., 2023), and optimizing the attention kernel with sparse computation (Jiang et al., 2024), few works (Yang et al., 2024b; Fu et al., 2024) place attention to the reduction of TTFT. However, the computationally intensive nature of the prefilling stage implies that the TTFT for longcontext inputs is nontrivial. We profile the prefilling and decoding time with the Qwen2-7B-Instruct model on the NarrativeQA (Kocˇisky´ et al., 2018), MuSiQue (Trivedi et al., 2022), TriviaQA (Joshi et al., 2017), and the RepoBench-P (Liu et al., 2023) datasets in LongBench (Bai et al., 2023b). For example, in Figure 2, the TTFT accounts for up to $80\%$ of inference time on the NarrativeQA dataset, representing an obstacle to the application of LLMs in long-context scenarios.  
+
+![](images/de8dafeb958f915a11f5c6dd36cc67cdd6aa27f22c0f9942c567735e5b728ddb.jpg)  
+Figure 1: An illustration of the typical inference process of a transformer-based LLM with a KV cache. The first stage is called prefilling, which processes all input tokens in parallel and yields the first output token. The second stage is called decoding, which iteratively takes the latest generated token as input and generates the subsequent token until the termination condition is satisfied.  
+
+![](images/99703c310983550b1cf94f76160f79e5230815e21ddca4ddd332924e994a56cf.jpg)  
+Figure 2: Prefilling proportion during inference. The average prompt lengths are 18409, 11214, 8209, and 4206 respectively. The average generating lengths are 12.08, 16.91, 17.10, and 61.10 respectively.  
+
+![](images/c50bccfcaa9dcd1a9d5de2bc78b9a19b1eafc7571fabb752dc9cf7e9e43eba16.jpg)  
+Figure 3: Walltime proportion of the main modules in each decoder layer during prefilling. The time proportion is averaged across all test samples in the TriviaQA dataset.  
+
+To tackle this problem, we focus on the TTFT optimization of long-context LLM inference and propose a novel token pruning method named FFN Token Pruning (FTP) to alleviate computational demands in the prefilling stage. We first investigate the time proportion of the main modules (i.e., the self-attention, normalization, and FFN module) in each layer by conducting experiments on the TriviaQA (Joshi et al., 2017) dataset and profiling the walltime spent on each module. As shown in Figure 3, the FFN module consistently takes a large proportion of inference time on both the Llama3 (AI@Meta, 2024) model and the Qwen2 (Yang et al., 2024a) model, suggesting a large potential for TTFT acceleration by reducing the tokens involving the FFN computation.  
+
+Unlike previous token pruning methods (Xiao et al., 2024; Li et al., 2024; Zhang et al., 2023b; Yang et al., 2024b) where tokens are directly pruned from the whole layer, FTP dynamically selects a certain proportion of tokens with an attention-based strategy and prunes them before the inference of FFN. For the pruned tokens, their FFN outputs are logically set to zeros vectors and they remain identical before and after the FFN due to the residual connection. Since the attention scores typically concentrate on a small proportion of tokens, a substantial amount of the FFN calculation can be circumvented, thereby reducing the TTFT. Furthermore, since the attention mechanism of each layer is fully preserved, the underlying context information associated with the tokens is substantially retained, leading to negligible accuracy loss. Extensive experiments on LongBench (Bai et al., 2023b) have demonstrated that our method has a balanced performance both in speedup and accuracy.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+LLM inference optimization for long-context inputs has emerged as a significant area of NLP research. Several prior works (Dao et al., 2022; Kwon et al., 2023; Jiang et al., 2024) directly optimize the computing and memory footprint underlying the common operations in LLMs. In addition to these approaches, a substantial body of work concentrate on the logical inference of the model and optimize the inference process through two kinds of strategies: token pruning and layer skipping.  
+
+
+
+\section{2.1 TOKEN PRUNING  }
+
+
+Token pruning for sequence models has become a popular resesarch field before the era of LLM. Ren et al. (2023) proposes a model architecture named SeqBoat to skip non-activated sub-modules. Kim et al. (2022) and Guan et al. (2022) learn certain thresholds or parameterized modules to facilitate token pruning. For LLMs, many existing works (Liu et al., 2024; Adnan et al., 2024; Nawrot et al., 2024; Feng et al., 2024; Dong et al., 2024) accerlate inference by dropping irrelevant tokens, based on the observation that the attention scores are sparse in most layers. StreamingLLM (Xiao et al., 2024) only preserves the attention sink (i.e., initial tokens) as well as the recent tokens to enable efficient infinite prompt requests. H2O (Zhang et al., 2023b) introduces the concept of “heavy hitter” and evicts tokens according to the cumulative attention score. SnapKV (Li et al., 2024) votes important previous tokens with the attention scores obtained by the “observation window”, and prunes the unimportant ones to reduce the KV cache used in decoding. While these studies effectively compress the computation and memory footprint, they mainly accelerate the decoding phase without reducing the TTFT. On the other hand, PyramidInfer (Yang et al., 2024b) prunes tokens in both the prefilling and decoding phase, only reserving the “pivotal context” tokens in the KV cache. LazyLLM (Fu et al., 2024) also drops tokens from the prefilling stage and proposes an aux cache to avoid redundant computing, enabling the model to pick any subset of the input tokens at each layer, even if some tokens are already pruned. However, these methods either yield subtle speedup during prefilling or defer some computation to the decoding stage. More importantly, they prioritize the attention module and overlook the significant computation demands in the FFN module in practice, where flash attention (Dao et al., 2022) is a prevalent choice for efficient attention computation. Our work accelerates prefilling by pruning non-critical tokens prior to the FFN inference.  
+
+
+
+\section{2.2 LAYER SKIPPING  }
+
+
+Layer skipping accelerates the LLM inference by skipping the computation of some decoder layers. LayerSkip (Elhoushi et al., 2024) proposes a layer dropout strategy and an early exit loss during training, enabling layer skipping during inference, without a significant accuracy drop. MoD (Raposo et al., 2024) learns a router to determine for a token whether to skip both the self-attention and MLP blocks in a layer. Tyukin et al. (2024) investigates three types of layer skipping: 1) skipping MLP layers, 2) skipping attention layers, and 3) skipping transformer blocks on the 7B and 13B Llama2 Touvron et al. (2023) models, and observes that dropping the attention modules leads to much lower decrease in performance than dropping the FFN modules. Although our work focuses on reducing the computation in the FFN modules, the modules are not entirely bypassed, which results in slight degradation in performance.  
+
+
+
+\section{3 FTP  }
+
+
+
+
+\section{3.1 LLM INFERENCE PERFORMANCE ANALYSIS  }
+
+
+The inference of common LLMs comprises two phases: prefilling and decoding. The prefilling phase processes all prompt tokens in parallel, involving numerous GEMM operations, while the decoding phase iteratively takes the last generated token as input and predicts the next token until the stop condition is met.  
+
+As most existing LLMs utilize the transformer architecture, their inference process usually involves the forward of the stack of decoder layers, each of which mainly consists of three modules: normalization, self-attention and feed-forward network (FFN). As shown in Figure 3, the FFN module takes up over $60\%$ of walltime of each decoder layer, highlighting a clear opportunity for acceleration. Taking two commonly encountered models, Llama3 (AI $@$ Meta, 2024) and Qwen2 (Yang et al., 2024a), as examples, the FFN module takes the features of a sequence of $L$ tokens $\mathcal{T}\in\dot{\mathbb{R}}^{L\times\breve{C}}$ as input, and processes them token-wisely according to the function below:  
+
+![](images/e4141183b99dc8316da655a8b7995f1f390202b858a3b797fc1c56e3cfd426e3.jpg)  
+Figure 4: Overview of FTP in a layer. FTP starts from the end of the self-attention module. First, FTP obtains the attention scores from the last $N$ queries to all keys, and sums them in the head and query dimension (note that the head dimension is omitted in the figure) to derive the importance score $\boldsymbol{S}$ for each token. Next, the indices $\mathcal{R}$ of the tokens to prune are determined via Equation 2. Then token selection is performed based on $\mathcal{R}$ , and only the chosen tokens are processed through the FFN. Finally, the FFN results (i.e., residual) are utilized to update the corresponding token as specified by $\mathcal{R}$ , while the unimportant tokens are not updated during the FFN inference in this layer.  
+
+$$
+F F N({\mathcal{T}})=({\mathcal{T}}^{\prime}W_{U}\odot A({\mathcal{T}}^{\prime}W_{G}))W_{D},
+$$  
+
+where ${\mathcal T}^{\prime}\,=\,N o r m({\mathcal T})$ are the normalized features, $A(\cdot)$ refers to the activation fucntion (e.g., SiLU (Elfwing et al., 2018) in Llama3), and $W_{D}\in\mathbb{R}^{I\times C}$ , $\stackrel{\prime}{W}_{U}\in\mathbb{R}^{C\times I}$ , $W_{G}\in\mathbb{R}^{C\times I}$ refers to the Down Projection, Up Projection and Gate Projection matrices respectively. The formula indicates that most operations of FFN take place in the large and dense matrix multiplication with the three weight matrices, and the total FLOPs of these three matrix multiplication sum up to 6LCI (i.e., $2L C I$ for one matrix multiplication). Note that other LLMs probably have slightly different FFN architectures, but the most computationally expensive part of theirs are still the matrix multiplication, which matches our analysis. Since both the hidden size of tokens (i.e., $C_{.}$ ) and the size of weight matrices (i.e., $C$ and $I$ ) are fixed in an off-the-shelf model, reducing the sequence length $L$ emerges as a viable strategy for FFN acceleration.  
+
+
+
+\section{3.2 TOKEN PRUNING FOR FFN  }
+
+
+Based on the analysis above, in this work, we propose to reduce the number of tokens before feeding them into FFN to accelerate the prefilling stage. Let us denote the “important” and “unimportant” sets of tokens as $\mathcal{T}_{I}\in\mathbb{R}^{L_{I}\times C}$ and $\mathcal{T}_{U}\in\mathbb{R}^{L_{U}\setminus C}$ , where $L_{I}$ and $L_{U}$ are the number of “important” and “unimportant” tokens. As shown in Figure 4, only the “important” tokens are involved in the FFN calculation as formulated in Equation 1, and the FFN results for the “unimportant” tokens are logically set to zero vectors (i.e., $F F N(\mathcal{T}_{U})=\mathbf{0})$ ). Thanks to the residual connection surrounding the FFN module, setting the FFN results to be zeros vectors is equivalent to bypassing the updates in the FFN. Consequently, the FLOPs required for the FFN are reduced to $6L_{I}C I$ from $6L C I$ .  
+
+To this end, two critical questions arise: 1) how to divide the input tokens into “important” and “unimportant” ones, and 2) how many tokens could be pruned, without causing obvious harm to the model performance? We analyse and discuss them in the following Section 3.2.1 and Section 3.2.2.  
+
+![](images/0c4611ecb427e24175b328abc0cd9a6d8716fc0fa3f58b8fde273ac5277894a3.jpg)  
+Figure 5: Visualization of the normalized attention weight for each layer. The experiment is conducted on a Llama3-8B-Instruct model on the Qasper dataset. Since the input length is too long to visualize, we divide the tokens into several groups with a group size of 32. Each column in the graph represents the average attention weight of a group of tokens across all layers.2.  
+
+
+
+\section{3.2.1 TOKEN PRUNING WITH ATTENTION SCORE  }
+
+
+Token pruning is a common method to compress the input to LLM modules. Many existing works (Li et al., 2024; Fu et al., 2024; Yang et al., 2024b) propose to evaluate the importance of tokens with either the exact attention score matrix $\begin{array}{r l r}{\lefteqn{(i.e.,~s o f t m a x(\frac{Q K^{T}}{\sqrt{d_{k}}}))}}\end{array}$ ( Q√Kdk )) or an estimated one. Inspired by these studies and the computational order of self-attention and the FFN module, we propose to evaluate the importance of the tokens with the attention score from the current layer.  
+
+To investigate whether the attention score is suitable for token pruning for FFN, we visualize the attention score of layers from different depths in the Llama3-8B-Instruct (AI@Meta, 2024) model. As shown in Figure 5, we discover that 1) the attention scores in each layer are typically concentrated on a small number of tokens; 2) tokens with high attention scores in one layer may not necessarily be prioritized in the same manner across other layers; 3) the number of tokens with high attention scores varies among different layers.  
+
+Based on these observations, we propose an attention-based approach to evaluate the importance of the tokens in each layer. Let us denote the attention score matrices for all attention heads as $\begin{array}{r}{\mathcal{M}=\{M_{h}\in\mathbb{R}^{L\times L}\}_{h=1}^{H}=\{s o f t m a x(\frac{Q_{h}K_{h}^{T}}{\sqrt{d_{k}}})\}_{h=1}^{H}}\end{array}$ , where $H$ is the number of attention heads. Since prior work (Li et al., 2024) has empirically revealed that the attention pattern obtained by the queries at the end of the prompts is nearly consistent with that obtained by all queries, we only retain the attention scores $\mathcal{M}^{\prime}$ from the last $N$ queries to reduce overhead (i.e., $\mathcal{\bar{M}}^{\prime}=\}(M_{h}^{\prime}\in\mathbb{R}^{N\times\tilde{L}}\}_{h=1}^{H})$ . The attention scores $\mathcal{M}^{\prime}$ are summed over all heads and queries to form the importance score $\boldsymbol{S}$ for each token. Inspired by Xiao et al. (2024), we statically reserve the initial $P$ and the last $N$ tokens in the prompts to maintain accuracy. These tokens are excluded from $\boldsymbol{S}$ , resulting in the length of $\boldsymbol{S}$ being $L-P-N$ . After that, the reserved token indices $\mathcal{R}$ can be calculated as  
+
+$$
+\begin{array}{r l}&{{\mathcal R}=\{i|i\in\mathbb{Z}\wedge1<=i<=P\}}\\ &{\quad\cup\,\{i+P|i\in\Gamma(S,k)\}}\\ &{\quad\cup\,\{i|i\in\mathbb{Z}\wedge L-N<i<=L\},}\\ &{\quad\quad k=\underset{\Sigma_{i\in\Gamma(S,n)}}{\operatorname*{min}}S_{i}{\mathstrut}>={\eta}\Sigma_{i}S_{i}\;,}\end{array}
+$$  
+
+where $\Gamma(A,a)$ returns the set of indices corresponding to the top $a$ elements in vector $A$ . In this way, we reserve the top $k$ tokens such that their proportions of importance scores sums up to the reserve ratio $\eta$ , as well as the initial $P$ and last $N$ tokens. The pseudo-code for FTP is in Algorithm 1.  
+
+Given that the attention scores tend to concentrate on a small number of tokens, a substantial number of tokens can be pruned in each layer even when $\eta$ approaches to 1.0. More importantly, the importance score $\boldsymbol{S}$ is computed with little overhead at each layer, which alleviates the problem reflected by the second observation. Since we use a reserved ratio $\eta$ rather than a static number to determine the number of tokens to retain, our approach is capable of handling various distributions of attention scores in different layers, as revealed in the third observation.  
+
+270   
+271   
+272   
+273   
+274   
+275   
+276   
+277   
+278   
+279   
+280   
+281   
+282   
+283   
+284   
+285   
+286   
+287   
+288   
+289   
+290   
+291   
+292   
+293   
+294   
+295   
+296   
+297   
+298   
+299   
+300   
+301   
+302   
+303   
+304   
+305   
+306   
+307   
+308   
+309   
+310   
+311   
+312   
+313   
+314   
+315   
+316   
+317   
+318   
+319   
+320   
+321   
+322   
+323  
+
+![](images/b649d2bdc3d820d68027e316926f174d8269ac7397d00915efca82b9a54179cc.jpg)  
+Figure 6: The cumulative percentage of attention scores w.r.t. the normalized token length. The experiments are conducted on the Qasper (Dasigi et al., 2021) and HotpotQA (Yang et al., 2018) dataset with a Llama3-8B model. The results are averaged among all decoder layers and all samples.  
+
+3.2.2 TOKEN PRUNING PROPORTION  
+
+Since the number of pruned tokens is determined by the reserved ratio $\eta$ in each layer, we quantitatively investigate the relationship between $\eta$ and the number of reserved tokens by conducting an experiment on the Qasper (Dasigi et al., 2021) and HotpotQA (Yang et al., 2018) dataset with a Llama3-8B (AI@Meta, 2024) model. Concretely, we first derive the attention score matrices at each layer, average the scores along the head and query dimension, and obtain the averaged attention score for each token at each layer. Next, for each layer, we sort the tokens descendingly by their averaged attention score. Then we uniformly divide the input length into 100 steps, and record the cumulative percentage of attention score at each step. Finally, we average the cumulative percentage over all layers and all samples in the dataset, and the result is depicted in Figure 6. As shown in the result, a large proportion of attention score (i.e., $95\%)$ ) is occupied by only $60\%$ of tokens, which is consistent with the first observation in Section 3.2.1, and suggests an opportunity for token pruning.  
+
+On the other hand, we empirically discover that shallow layers are more sensitive to our FTP (see Section 4.6), which is consistent with the conclusions of previous works (Fu et al., 2024; Yang et al., 2024b). However, we propose to preserve the whole layer (i.e., $\eta=1.0,$ ) for the first $\mathcal{F}$ layers, and apply token pruning to the following layers. Thanks to the high pruning efficiency of FTP, the model maintains a considerable overall pruning rate.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+Datasets. We conduct experiments on the LongBench (Bai et al., 2023b) benchmark, containing 16 long-context datasets for 6 types of tasks (i.e., single-document QA, multi-document QA, summarization, few-shot learning, synthetic tasks, and code completion), which provides a comprehensive assessment on the long-context understanding capability of LLMs. The average context length across the datasets ranges from 5, 000 to 15, 000, with the number of test samples in each dataset typically being 200, except for the datasets of code completion, which contain 500 samples. We follow the official pipeline of LongBench to pre-process the data and evaluate the models.  
+
+Metrics. We utilize two kinds of metrics to assess the quality and efficiency of the generating process of the LLMs with our proposed FTP. The quality metric is the accuracy score from LongBench. Since the datasets in LongBench adopt various metrics for the accuracy evaluation, the accuracy score for each dataset is one of the following metrics: 1) F1 Score, 2) Rouge-L, 3) Accuracy, and 4) Edit Similarity. All of these metrics have a range from 0.0 to 1.0, hence we average them to represent the accuracy score of a task. The efficiency metric is the TTFT speedup (i.e. $\frac{T\overleftarrow{F}T_{b a s e l i n e}}{T T F T_{F T P}})$ w.r.t. the baseline model (i.e., inferencing the pre-trained model with the standard process).  
+
+4.1 IMPLEMENTATION DETAILS  
+
+Basic Configuration. We implement FTP on the Llama3-8B-Instruct (AI@Meta, 2024), Qwen2- 7B-Instruct (Yang et al., 2024a) and two larger models (see Section 4.5). The max context length for Qwen2 and Llama3 are $32k$ and $8k$ respectively, and the data samples that exceed the max context length of the models are truncated during the data pre-processing pipeline of LongBench. We set $P=100$ and $N=50$ for both models. For the Llama3-8B model, we set ${\mathcal{F}}=10$ to preserve the first 10 layers and $\eta=0.90$ for the following layers. When it comes to the Qwen2-7B model, $\mathcal{F}$ and $\eta$ are set as 10 and 0.95 respectively. Note that FTP is free of further training and shares the same weights with the original model. All experiments are conducted on NVIDIA A100 GPUs without model quantization.  
+
+Attention Implementation. Our method is implemented with the transformers library (Wolf et al., 2020) and flash attention, which is a prevalent choice in practical inference of LLMs. Given that flash attention inherently does not return attention weights, we recalculate the necessary attention weights to assess token importance, introducing only a negligible cost (refer to Section 4.6.1).  
+
+
+
+\section{4.2 RESULTS ON LONGBENCH  }
+
+
+We conduct experiments on LongBench (Bai et al., 2023b), including six long-context tasks, to evaluate the accuracy score and TTFT speedup of our method. In addition to the baseline model, we incorporate a state-of-the-art prompt compression method (Pan et al., 2024) for comparison, which formulates prompt compression as a token classification problem and utilizes a transformer encoder with a linear classification head to prune the prompt before feeding them into the LLM.  
+
+The performance for each task is calculated by averaging the results of datasets associated with that specific task. As shown in Table 1, FTP generally presents considerable speedup across all six long-context tasks with a negligible drop in accuracy score. Thanks to the longer context support (i.e., $32k)$ of Qwen2-7B-Instruct, FTP achieves even greater speed improvements, despite applying a higher reserved ratio $\eta$ . Furthermore, LLMLingua2 (Pan et al., 2024) on both models can hardly accelerate the pre-filling stage even with a compression ratio of 0.2.  
+
+
+
+\section{4.3 COMPARISON WITH STATE-OF-THE-ART METHOD  }
+
+
+We conduct a comparative analysis between FTP and PyramidInfer (Yang et al., 2024b), a state-ofthe-art method of prefilling acceleration. PyramidInfer accelerates both the prefilling and decoding stages by compressing the KV cache with different compression rates for each layer.  
+
+We conduct experiments on the Llama3-8B-Instruct and Qwen2-7B-Instruct models, and the results are in Table 1. We present two versions of PyramidInfer for comparison. The official implementation of PyramidInfer (denoted as PyramidInfer\* in Table 1) utilizes PyTorch-implemented attention module and fails to accelerate the prefilling stage. Furthermore, it encounters out-of-memory issues when applied to the Qwen2 model, which has a max context length of $32\mathbf{k}$ . On the other hand, we re-implement PyramidInfer (denoted as PyramidInfer in Table 1)with flash attention and re-calculate the necessary attention weights (i.e., $20\%$ attention weights following the official setting) for it. At this time, PyramidInfer gets rid of out-of-memory issues on Qwen2 model but is still slower with more accuracy degradation than FTP in most tasks.  
+
+
+
+\section{4.4 ACCURACY VS. TTFT SPEEDUP  }
+
+
+The TTFT speedup of FTP can be modulated from two aspects: 1) the number of layers to which FTP is applied, and 2) the reserved ratio $\eta$ at each decoder layer. We further examine the variation of accuracy score w.r.t. TTFT speedup by evaluating the accuracy score at various levels of inference efficiency. We incorporate LLMLinuga-2 for comparison and adjust the prompt compression rate to achieve different speedups. As shown in Figure 7, FTP achieves notable TTFT speedup with negligible performance drop across various tasks, presenting an effective balance between speedup and accuracy. Moreover, the accuracy score of FTP even surpasses that of the baseline in certain tasks (e.g., Single-Document QA and Synthetic Task). Conversely, LLMLingua2 experiences an evident decline in accuracy to accelerate the prefilling stage.  
+
+![](images/20ebc9d7f3a6988574adb867cd495485e9819cb7b04860ac0f0ef988f54c9ad8.jpg)  
+Figure 7: TTFT speedup vs. accuracy comparison for Qwen2-7B-Instruct across different tasks.  
+
+
+
+\section{4.5 FTP ON LARGER MODELS  }
+
+
+In this section, we further investigate the effectiveness of FTP on larger LLMs and evaluate our method on Qwen1.5-32B-Chat (Bai et al., 2023a) and Qwen2-72B-Instruct (Yang et al., 2024a), both of which support a max context length of $32\mathbf{k}$ . For the Qwen1.5-32B-Chat model, we preserve the first $\mathcal{F}=10$ layers and set $\eta=0.90$ for the subsequent 54 layers. For the Qwen2-72B-Instruct model, we preserve the first ${\mathcal{F}}=10$ and set $\eta\,=\,0.93$ for the following 70 layers. As shown in Table 2, FTP facilitates a significant speedup across all tasks with a subtle impact on the accuracy score, which indicates the potential of practical application of FTP.  
+
+We attribute this enhanced acceleration on the larger models to two primary factors. Firstly, larger models have deeper architectures. Therefore, compared to the smaller models, more tokens can be pruned even though the first $\mathcal{F}$ layers are fully preserved. Secondly, these models have up to $4\times$ and even $10\times$ of weights, and they exhibit robustness on accuracy even when a substantial number of tokens are pruned.  
+
+432 433 434 435 436 437 438 439 440 441 442 443 444 445 446 447 448 449 450 451 452 453 454 455 456 457 458 459 460 461 462 463 464 465 466 467 468 469 470 471 472 473 474 475 476 477 478 479 480 481 482 483 484 485   
+Table 2: TTFT speedup and accuracy on various tasks on Qwen1.5-32B and Qwen2-72B models.   
+
+![](images/13c63114b62da1ff5362799e3f169a0972e4ca0aa62d146cea460e0aa3a0e2b0.jpg)  
+
+
+
+\section{4.6 ABLATION STUDY  }
+
+
+We conduct an ablation study of FTP on the approaches and hyper-parameters we proposed in Section 3.2. The experiment for our token pruning strategy is in Section 4.6.1.  
+
+
+
+\section{4.6.1 TOKEN PRUNING STRATEGY  }
+
+
+To evaluate the token pruning strategy proposed in Section 3.2.1, we replace our attention-based strategy with a random selecting strategy and evaluate the model performance with Llama3-8BInstruct and Qwen2-7B-Instruct. Concretely, we first record the number of pruned tokens in each layer for each sample in our approach, and then randomly prune the same number of tokens in the “random” variant. As illustrated in Table 3, our attention-based strategy is crucial in determining which tokens to prune. The model accuracy consistently suffers a significant drop across all tasks when applied a random pruning strategy. On the other hand, the TTFT of FTP is only marginally higher than that of the random variant, indicating that the computational cost introduced by FTP is trivial. Specifically, the computational cost introduced by FTP on Llama3 and Qwen2 models are 7-10ms and $8{-}15\mathrm{ms}$ respectively, accounting for only $1\%{-3\%}$ and $0.8\%$ - $1.9\%$ of the TTFT.  
+
+![](images/588a01b35148fd11edfb5ce44d9c0c7d8f717d2a8781b9c86d4bfd378557ae91.jpg)  
+
+Table 3: Accuracy and TTFT comparison for Llama3-8B-Instruct and Qwen2-7B-Instruct employing random pruning strategy and our attention-based strategy. The random variant prunes the identical number of tokens at each layer as ours.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+In this work, we explore a novel approach of prefilling acceleration by pruning tokens for FFN, and propose the FFN Token Pruning (FTP) technique for long-context inference of LLMs, without additional training or finetuning. We start by analyzing the TTFT proportion in long-context inference of LLMs, and profiling the time proportion of the primary components in a typical LLM layer. Observing the substantial time allocation to FFN during prefilling, we reduces FFN computation time by “pruning” non-critical tokens with an attention-based strategy prior to FFN inference. In a addition, FTP preserves a large amount of information of the pruned toknes through the residual connection. Experiments on long-context datasets across various tasks indicate that FTP is capable of delivering significant acceleration while maintaining performance.  
+
+
+

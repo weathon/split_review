@@ -1,0 +1,324 @@
+\title{Thinking Forward and Backward: Effective Backward Planning with Large Language Models}
+
+\begin{abstract}
+Large language models (LLMs) have exhibited remarkable reasoning and planning capabilities. 
+Most prior work in this area has used LLMs to reason through steps from an initial to a goal state or criterion, thereby effectively reasoning in a \emph{forward} direction.
+Nonetheless, many planning problems exhibit an inherent \emph{asymmetry} such that planning \emph{backward} from the goal is significantly easier --- for example, if there are bottlenecks close to the goal.
+We take inspiration from this observation and demonstrate that this bias holds for LLM planning as well: planning performance in one direction correlates with the planning complexity of the problem in that direction. However, our experiments also reveal systematic biases which lead to poor planning in the backward direction.
+With this knowledge, we propose a backward planning algorithm for LLMs that first flips the problem and then plans forward in the flipped problem. This helps avoid the backward bias, generate more diverse candidate plans, and exploit asymmetries between the forward and backward directions in planning problems --- we find that combining planning in both directions with self-verification improves the overall planning success rates by 4-24\% in three planning domains.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+Large Language Models (LLMs) are increasingly capable in reasoning tasks --- they can perform commonsense reasoning in a broad set of contexts \citep{kojima2022large}, reason about abstract patterns in data \citep{mirchandani2023large}, and learn to reason from human feedback \citep{liang2024learning}. Such capabilities also open up the possibility of LLMs performing long-horizon planning \citep{valmeekam2024planbench}, where the model needs to reason about how the initial state and final goal of the problem can be connected through intermediate steps. 
+Most existing work has explored such problems by asking the model to reason in the \emph{forward} direction, i.e., generating intermediate steps from the initial state to the final goal. 
+However, in many planning problems, there is an inherent \emph{asymmetry}: generating the correct last steps leading to the goal can be much easier than generating the correct steps from the beginning. 
+This leads to the question: \emph{can LLMs plan better if they also reason in the backward direction?}
+
+As an example, consider a robot navigating in a room (\cref{fig:graph}): if the final goal is the bedroom at the end of a long and narrow hallway, it is natural to connect the bedroom with the beginning of the hallway first in the plan, and then search for the path that connects the hallway to the initial state. In this example, there is a ``bottleneck" that causes the asymmetry: the number of possibilities when planning backward from the goal is constrained by the bottleneck (hallway), while the possibilities fan out quickly when planning from the start. Such bottlenecks are ubiquitous in planning problems; for example, in proving mathematical theorems~\citep{loveland2016automated}, there may be many possible steps to start a proof of a theorem, but the final steps can be much more closely related to the theorem statement and thus easier to choose. In our experiments, we quantify this bottleneck effect by comparing the exact number of search steps used by common forward-search algorithm (e.g., Breadth-First Search) when applied in the forward and backward directions on the underlying graph of the planning problem (\cref{fig:graph}). 
+\begin{figure}
+  \centering
+  \includegraphics[width=0.95\linewidth]{figures/overview.pdf}
+  \caption{(Left) In planning problems such as navigation, it can often be easier to plan in the backward direction, especially when a ``bottleneck'' state (red node) exists and it is easier to find it from the goal rather than from the initial state. 
+  We consider \textsc{Graph Planning}, where the LLM needs to plan the shortest path from the initial node to the goal. (Right) Two other planning domains: \textsc{Array Transformation}, where an integer array is manipulated through different functions to the desired array, and \textsc{Blocksworld}, where stacks of blocks are re-oriented to the goal state.}
+  \label{fig:graph}
+\end{figure}
+
+The goals of this paper are twofold. First, we perform extensive experiments on three classical planning problems (\cref{sec:formulation}) and examine whether LLM-based planning is significantly impacted by the asymmetry described above, i.e., if LLMs achieve higher planning success rates in the direction (forward/backward) where fewer computations are needed. Second, we study whether LLMs can exploit bottleneck effects by effectively planning backward (\cref{sec:backward-result}).
+Our results provide strong evidence for the first hypothesis. However, unfortunately, we find that LLMs exhibit a systematic bias of performing worse when planning backward; this may be attributed to the forward autoregressive nature of LLM output generation, as well as biases from the training dataset. % This hinders LLMs reasoning in both directions to better solve planning problems. 
+
+Addressing the backward reasoning bias, we propose a simple solution (\cref{sec:approach}): many problems can be transformed such that the original goal becomes the initial state and the original initial state becomes the goal --- we ask LLMs to first ``flip'' the problem, and then plan in the forward direction (corresponding to the original backward direction). Given a planning problem, we ask LLMs to sample possible plans in the forward direction of both the original problem and the flipped one, and then self-verify \citep{stechly2024self} all the plans before choosing the final one. We find that this simple setup allows LLMs to generate many more diverse candidate plans and exploit the bottleneck structure of the problems, improving the overall success rate in multiple planning domains by 4-24\% (\cref{sec:flip-result}). Perhaps surprisingly, we also present evidence that in certain settings LLMs can also \emph{reason whether to flip} the problem or not by examining the problem structure.
+
+
+\section{Formulation and Planning Domains}
+
+\label{sec:formulation}
+
+We define a (text-based) planning problem as $P = (\mathcal{S}, \mathcal{A}_\mathcal{S}, s_0, g, T_\text{max}, f)$, where $\mathcal{S}$ is the space of possible states, $\mathcal{A}_\mathcal{S} = \{\mathcal{A}_s\}_{s \in \mathcal{S}}$ includes the space of possible actions (planned steps) at each state $s \in \mathcal{S}$, $s_0 \in \mathcal{S}$ is the initial state, $g \in \mathcal{S}$ is the goal, $T_\text{max}$ is the maximum allowable steps, and $f$ is a ground-truth solution verifier that determines if a plan solves $P$, i.e., whether a plan connects $s_0$ to $g$, and possibly, is of optimal length. 
+The generated plan $A = (a_0, ..., a_T)_{T \leq (T_\text{max}-1)}$ is verified by $f$ based on these rules. Each action $a_t$ converts state $s_t$ to $s_{t+1}$, and we denote this as $s_t \xrightarrow{a_t} s_{t+1}$. 
+
+We denote pre-trained LLMs with parameters $\theta$ as $p_\theta$. Instead of the usual token-level generation, for convenience we consider LLMs generating the next step in a plan by sampling $a_t \sim p_\theta(a_t | s_0, g, \{a_0, ..., a_{t-1}\}, q)$, where $q$ denotes the rest of the text prompt (e.g., few-shot exemplars and instructions). For convenience, from now on we also assume that $q$ includes text descriptions of $s_0$, $g$, and $(a_0, ..., a_{t-1})$. During planning, LLMs may also generate other intermediaries such as the estimated states along the plan $(\hat{s}_1, ..., \hat{s}_t)$, which might help the LLM reason about the next step given the current estimated state. 
+
+Next we introduce the three different planning domains (\cref{fig:graph}) considered in our work. \cref{app:domains} provides more details on the design of these domains.
+
+\paragraph{Graph Planning.}
+In \textsc{Graph Planning}, each problem consists of a graph with $N$ nodes (labeled with a number $1,...,N$). Each pair of nodes is connected with an edge with probability $\rho$; we consider both undirected and directed graphs. The initial state $s_0$ and goal $g$ are two different nodes. In order to vary difficulty, randomly generated graphs are filtered such that the shortest path from $s_0$ to $g$ has length $K$. In this domain, we consider a plan correct if it is optimal, i.e., shortest among paths between $s_0$ and $g$. We use a text-based \emph{incident representation} for graphs (e.g., ``Node 1 is connected to 2, 3''), which has been shown to be effective in the context of LLMs solving graph problems \citep{fatemi2023talk}.
+
+\paragraph{Array Transformation.}
+In \textsc{Array Transformation}, the LLM is asked to convert an initial array of integers of length $N$ to a goal array, e.g., from $[0, 1, 3]$ to $[1, 0, 3, 1, 0, 3]$, using a set of array functions. We consider functions including: \texttt{repeat} to repeat the array once, \texttt{cut} to cut the array in half if the first half matches the second half, \texttt{shift\_left} and \texttt{shift\_right} to shift the array to the left by one (e.g., $[0, 1, 3] \rightarrow [1, 3, 0]$) or to the right, \texttt{reverse} to reverse the array, and \texttt{swap} to swap the first and last elements. Notice that each function has an inverse. We generate the problems by randomly sampling an initial array and a set of $K$ functions which are applied to obtain the final array. We consider a plan correct if it is valid, i.e., if planned functions convert the initial array to the goal. This domain can also be seen as a form of probabilistic context-free grammar (PCFG) \citep{sipser1996introduction}.
+ 
+\paragraph{Blocksworld.}
+\textsc{Blocksworld} is part of the PlanBench benchmark introduced by \citet{valmeekam2024planbench} for examining the overall planning capabilities of LLMs. In each problem, there are four blocks colored red, yellow, blue, or orange. The initial and goal states involve different possible stacks of the blocks, and the possible actions include \texttt{unstack <color> block from <color> block}, \texttt{pick up <color> block (from table)}, \texttt{put <color> block on <table>/<color> block}. 
+We consider a plan correct if it is valid, i.e., if the planned steps move the initial stack to the goal.  
+
+
+\section{LLMs Cannot Plan Backward As Effectively As Forward}
+
+\label{sec:backward-result}
+
+As described in Section~\ref{sec:intro}, many planning problems have an asymmetry that makes a given direction (forward vs. backward) easier for classical planning algorithms such as breadth-first search (BFS). Here, we examine whether the planning performance of LLMs is similarly impacted, and if the LLM's performance in a given planning direction can be predicted by the number of search steps required by BFS in that direction.
+If this is the case, it opens up the possibility of improving LLM-based planning by planing backward when the backward direction is favorable. Below we first introduce the backward planning algorithm we use for LLMs before showing the experimental results.
+
+\begin{wrapfigure}[11]{R}{0.6\textwidth}
+  \centering
+  \includegraphics[width=0.999\linewidth]{figures/fwd-back-verify.pdf}  
+\caption{Sampling in forward or backward direction and then self-verifying the plans in \textsc{Array Transformation}.}
+  \label{fig:alg-fwd-back-verify}
+\end{wrapfigure}
+
+\subsection{Backward planning} 
+During backward planning, the LLM is given the same initial and goal states, but the prompt $q$ asks it to generate the plan $A$ in the reversed order. For example, consider an instance of \textsc{Graph Planning} where the shortest path from Node $1$ to Node $3$ is $(1, 5, 2, 3)$; then, the LLM should first output the backward plan as $(3, 2, 5, 1)$ and reverse the order before it proposes the plan to the verifier. 
+As described in Section~\ref{sec:intro}, backward planning can be useful when the search space from the goal is smaller than from the initial state. We can quantify the asymmetry between forward and backward planning by computing the number of search steps used by algorithms such as BFS in either direction. 
+
+\subsection{Algorithm: Sample forward (backward) then self-verify} 
+\label{subsec:alg-fwd-back-verify}
+While the basic version of LLM planning involves asking it to generate a single plan, we consider a more robust version where the LLM first samples multiple candidate solutions in one direction, and then self-verifies them to choose the final solution; then the verifier $f$ checks the final plan. 
+In both stages, the LLM is shown few-shot exemplars to familiarize itself with the problem and to learn to verify the candidate plans step by step. The overall algorithm is illustrated in \cref{fig:alg-fwd-back-verify}. Given the maximum number of attempts $M$, the sampling temperature of the LLM is set to be $0$ for the first attempt, and nonzero for the later ones. Self-verification works differently depending on the domain: in \textsc{Graph Planning}, since the solution needs to be optimal, we save all the unique candidate plans $\{A_j\}$ after all $M$ attempts, and then present all of them to the LLM and ask it to verify them as well as to choose the optimal one; in \textsc{Array Transformation} and \textsc{Blocksworld}, since the solution does not need to be optimal, the LLM verifies each candidate plan as soon as it is sampled, and either stops when it deems one plan correct or after all attempts. For all the experiments, we use the \texttt{GPT-4o} model from OpenAI unless noted otherwise.
+
+\subsection{Results}
+
+\paragraph{LLM plans better in the easier direction.}
+Here we run experiments with both directed and undirected graphs in \textsc{Graph Planning}, and ask the LLM to plan either forward or backward. We also compute the number of search steps used by BFS in both directions. \cref{fig:computations} shows the planning success rates achieved by forward and backward planning at different levels of forward/backward difficulty (as quantified by BFS computations).
+For either direction, the success rate is generally higher when the number of computations is lower in that direction. This finding suggests that LLM planning is akin to a forward-search algorithm such as BFS in terms of the difficulty of planning in a given direction, and thus can be potentially improved by planning backward when it is easier. We also find similar results with \textsc{Array Transformation} shown in \cref{app:results}.
+
+\begin{figure}[H]
+  \centering
+\includegraphics[width=0.999\linewidth]{figures/computations_flip.pdf}
+\caption{Success rates achieved by forward and backward planning in \textsc{Graph Planning} vs. difference between forward and backward BFS computations. The LLM plans better in the direction of fewer computations needed, but the forward direction outperforms backward in general.}
+  \label{fig:computations}
+\end{figure}
+
+\begin{wraptable}[9]{HR}{6.5cm}
+\small
+\begin{center}
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{ccc}
+    \toprule
+    Domain & Forward & Backward\\
+    \midrule
+    Graph Planning (undirected) & \bftab 82.5\scalebox{0.6}{$\pm$2.7}\% & 76.7\scalebox{0.6}{$\pm$3.0}\% \\
+    Graph Planning (directed) & \bftab 38.5\scalebox{0.6}{$\pm$3.4}\% & 29.7\scalebox{0.6}{$\pm$3.2}\% \\
+    Array Transformation & \bftab 67.5\scalebox{0.6}{$\pm$3.3}\% & 62.2\scalebox{0.6}{$\pm$3.4}\% \\
+    Blocksworld & \bftab 39.5\scalebox{0.6}{$\pm$3.5}\% & 20.5\scalebox{0.6}{$\pm$2.9}\% \\
+    \bottomrule
+\end{tabular}
+\caption{Average planning success rate in forward vs. backward direction in each setting.}
+\label{table:backward-results}
+\end{center}
+\end{wraptable}
+
+\paragraph{LLM plans worse in the backward direction.} Next, we study the effectiveness of backward planning by examining whether the LLM can achieve the same level of planning success in the backward direction as compared to forward. We find that this is not the case. \cref{fig:computations} shows that the backward success rate is consistently lower than forward. We also calculate the average planning success rates for all four settings (from experiments in \cref{sec:flip-result}) --- as shown in \cref{table:backward-results}, the LLM consistently plans worse in the backward direction. We conjecture that this bias may be attributed to the forward (i.e., left to right) autoregressive nature of LLM output generation, as well as biases from the training dataset. Next we propose a solution to such backward bias and allow LLMs to plan effectively in the backward direction (\emph{Flip} in \cref{fig:computations}).
+
+
+\section{Proposed Solution: Plan Backward by Flipping the Problem}
+
+\label{sec:approach}
+
+If the LLM cannot plan backward as well as forward, how can it effectively exploit the backward direction in planning? We propose a simple solution: \emph{flip} the problem such that the original goal becomes the new initial state and vice versa. The LLM can then plan in the forward direction for the flipped problem, which corresponds to the backward direction of the original problem. This avoids the bias of weak LLM planning in the backward direction. However, there are a few subtleties that must be taken care of when flipping the planning problem.
+
+\paragraph{Change of the state-dependent action space.} In some cases, $\mathcal{A}_\mathcal{S}$ needs to be adjusted for the flipped problem. For example, with a directed graph, an edge from Node $1$ to Node $3$ in the original problem corresponds to an edge from Node $3$ to Node $1$ in the flipped problem --- Node $3$ might not be reachable from Node $1$ in the flipped problem. In contrast, there is no change needed for undirected graphs, \textsc{Array Transformation}, and \textsc{Blocksworld}. With directed graphs, we prompt the LLM to first generate the new text representation of the graph (\cref{fig:flip-prompt} right), and then generate a plan for the flipped problem.
+
+\paragraph{Flipping back the plan.} 
+After the plan $A'$ for the flipped problem is generated, steps within it need to be reversed in order and also often ``flipped back'' to generate a forward plan for the original problem: 
+\begin{equation}
+    \text{Flip back the plan:} \ A' = \{a'_0, ..., a'_T\} \mapsto A = \{a_T, ..., a_0\}, \text{where} \ s_t \xrightarrow{a'_t} s_{t+1}, s_{t+1} \xrightarrow{a_t} s_t. 
+\end{equation}
+We assume that each action $a \in \mathcal{A}_s$ can be inverted, i.e., if $s \xrightarrow{a} s'$, there exists $a' \in \mathcal{A}_{s'}$ such that $s' \xrightarrow{a'} s$.
+In practice, we prompt the LLM to generate the corresponding $a_t$ after it generates $a'_t$. \cref{fig:flip-prompt} left shows an example for \textsc{Blocksworld}: the action ``put yellow on red'' is flipped back to ``unstack yellow from red'', after the order of the plan is flipped.
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.999\linewidth]{figures/flip_v2.pdf}
+  \caption{Flipping the problem and then plan in the new forward direction in \textsc{Blocksworld} (left) and \textsc{Graph Planning} with directed graph (Right).}
+  \label{fig:flip-prompt}
+\end{figure}
+
+\paragraph{Algorithm: Sample forward and flipped plans, then self-verify.} Extending the algorithm from \cref{subsec:alg-fwd-back-verify} where multiple plans in the forward or backward directions are sampled before self-verifying them, we can now sample in the forward direction of the flipped problem, instead of sampling backward in the original problem. Sampling forward with the original \emph{and the flipped} problem generates more diverse solutions for self-verification, while avoiding the backward bias and potentially exploiting asymmetries. We can either randomly sample the problem (original or flipped) at each attempt, or prompt the LLM to reason which direction is favorable.
+
+
+
+
+
+\section{Experiments with flipping the problem}
+
+\label{sec:flip-result}
+
+With experiments in the three planning domains introduced in \cref{sec:formulation}, we investigate the following questions in the corresponding subsections below:
+\begin{itemize}
+    \item [Q1:] Does flipping the problem help improve the planning success rate?
+    \item [Q2:] When does flipping the problem help the most?
+    \item [Q3:] How well can the LLM reason about when to flip the problem?
+\end{itemize}
+
+\paragraph{Baselines.} We compare a few different ways to sample candidate solutions before self-verification: (1) \Fwd: only planning in the forward direction; (2) \Back: only planning in the backward direction; (3) \Flip: only planning in the forward direction of the flipped problem; (4) \Fwdback: randomly choose either forward or backward direction and then plan; (5) \Fwdflip: randomly choose either forward direction of the original problem or forward direction of the flipped problem and then plan; (6) \textbf{Fwd-Flip-Reason}: have the LLM reason whether to plan forward in the original or flipped problem and then plan. 
+We expect our proposed \Fwdflip to outperform \fwd, \back, \flip, \fwdflip. 
+\subsection{Backward planning with the flipped problem helps improve success rate}
+\label{subsec:flip-better}
+
+In order to test whether flipping the problem can help planning success rate, we run extensive experiments with the three planning domains and compare \fwd, \back, \flip, \fwdback, and \fwdflip. We use a maximum $M=6$ attempts for all experiments. \cref{table:flip-full-results} shows each result averaged over 200 trials. \flip outperforms \back and matches \fwd performance; we also see the similar trends in \cref{fig:computations}. In addition, \fwdflip consistently leads to the highest planning success rate, improving by 4-24\% over \fwd, except for one setting where all baselines achieve close to 100\% success. These results corroborate that flipping the problem mitigates the backward bias. 
+
+\setlength{\tabcolsep}{2pt}
+\begin{table}[H]
+\small
+\begin{center}
+\begin{tabular}{ccccccccc}
+    \toprule
+    \multicolumn{4}{c}{Domain} & Fwd & Back & Flip & Fwd-Back & Fwd-Flip\\
+    \midrule
+    \multirow{7}{*}{Graph Planning} & Directed? & $\rho$ & $N$ & \\
+    & No & 0.2 & 12 & 82.5\scalebox{0.6}{$\pm$2.7}\% & 74.5\scalebox{0.6}{$\pm$3.1}\% & 84.5\scalebox{0.6}{$\pm$2.6}\% & 91.0\scalebox{0.6}{$\pm$2.0}\% & \bftab 93.5\scalebox{0.6}{$\pm$1.7}\% \\
+    & No & 0.2 & 10 & 89.5\scalebox{0.6}{$\pm$2.2}\% & 78.0\scalebox{0.6}{$\pm$2.9}\% & 88.0\scalebox{0.6}{$\pm$2.3}\% & 93.0\scalebox{0.6}{$\pm$1.8}\% & \bftab 96.5\scalebox{0.6}{$\pm$1.3}\% \\
+    & No & 0.3 & 10 & 90.5\scalebox{0.6}{$\pm$2.1}\% & 77.0\scalebox{0.6}{$\pm$3.0}\% & 91.0\scalebox{0.6}{$\pm$2.0}\% & 93.0\scalebox{0.6}{$\pm$1.8}\% & \bftab 94.5\scalebox{0.6}{$\pm$1.6}\% \\
+    & Yes & 0.2 & 12 & 62.5\scalebox{0.6}{$\pm$3.4}\% & 29.0\scalebox{0.6}{$\pm$3.2}\% & 67.0\scalebox{0.6}{$\pm$3.3}\% & 76.0\scalebox{0.6}{$\pm$3.0}\% & \bftab 80.0\scalebox{0.6}{$\pm$2.8}\% \\
+    & Yes & 0.2 & 10 & 73.0\scalebox{0.6}{$\pm$3.1}\% & 36.5\scalebox{0.6}{$\pm$3.4}\% & 73.5\scalebox{0.6}{$\pm$3.1}\% & 79.5\scalebox{0.6}{$\pm$2.9}\% & \bftab 88.5\scalebox{0.6}{$\pm$2.3}\% \\
+    & Yes & 0.3 & 10 & 69.5\scalebox{0.6}{$\pm$3.3}\% & 23.5\scalebox{0.6}{$\pm$3.0}\% & 64.0\scalebox{0.6}{$\pm$3.4}\% & 68.5\scalebox{0.6}{$\pm$3.3}\% & \bftab 86.5\scalebox{0.6}{$\pm$2.4}\% \\
+    \midrule 
+    \multirow{4}{*}{Array Transformation} & \multicolumn{3}{c}{Functions} & \\
+    & \multicolumn{3}{c}{
+    \texttt{shift},
+    \texttt{repeat}, 
+    \texttt{cut}} & 99.0\scalebox{0.6}{$\pm$0.7}\% & 98.5\scalebox{0.6}{$\pm$00.9}\% & 99.0\scalebox{0.6}{$\pm$0.7}\% & \bftab 100.0\scalebox{0.6}{$\pm$0.0}\% & 99.5\scalebox{0.6}{$\pm$0.5}\% \\
+    & \multicolumn{3}{c}{\texttt{shift}, \texttt{reverse}, \texttt{swap}}& 50.0\scalebox{0.6}{$\pm$3.5}\% & 36.0\scalebox{0.6}{$\pm$3.4}\% & 52.0\scalebox{0.6}{$\pm$3.5}\% & 46.0\scalebox{0.6}{$\pm$3.5}\% & \bftab 56.0\scalebox{0.6}{$\pm$3.5}\% \\
+    & \multicolumn{3}{c}{\texttt{repeat}, \texttt{cut}, \texttt{reverse}, \texttt{swap}} & 53.5\scalebox{0.6}{$\pm$3.5}\% & 52.0\scalebox{0.6}{$\pm$3.5}\% & 53.0\scalebox{0.6}{$\pm$3.5}\% & 54.5\scalebox{0.6}{$\pm$3.5}\% & \bftab 56.5\scalebox{0.6}{$\pm$3.5}\% \\
+    \midrule 
+    Blocksworld & \multicolumn{3}{c}{-} & 39.5\scalebox{0.6}{$\pm$3.5}\% & 20.5\scalebox{0.6}{$\pm$2.9}\% & 34.5\scalebox{0.6}{$\pm$3.4}\% & 27.0\scalebox{0.6}{$\pm$3.1}\% & \bftab 48.5\scalebox{0.6}{$\pm$3.5}\% \\
+    \bottomrule
+\end{tabular}
+\caption{Planning success rate averaged over 200 trials for the five methods in the three planning domains. \flip matches \fwd. \fwdflip generally achieves the highest success rate.}
+\label{table:flip-full-results}
+\end{center}
+\end{table}
+
+\begin{wrapfigure}[13]{R}{0.38\textwidth}
+\centering
+\includegraphics[width=0.99\linewidth]{figures/fwd-flip-diff.png}
+\caption{
+\fwdflip plans well even when the forward direction is difficult. 
+}
+\label{fig:fwd-flip-diff}
+\end{wrapfigure}
+
+\paragraph{Fwd-Flip exploits asymmetries in the problems.} One of the main motivations of planning backward is that many planning problems have a bottleneck structure: there exists a less connected part of the state space near the initial state or the goal --- this makes it easier to plan from the end closer to the bottleneck. In \cref{fig:fwd-flip-diff}, we calculate the difference between forward vs. backward computations for BFS in \textsc{Graph Planning}, bin them, and find the success rate of each bin for \fwd and \fwdflip\xspace --- the plot shows the average success rate over the three directed graph settings (shades show the minimum and maximum over the three). We find that \fwd tends to perform worse when the forward computations needed are higher, meaning that it cannot plan as effectively when the forward direction is more difficult. In contrast, \fwdflip maintains a similar level of success regardless of forward vs. backward planning difficulty.
+\paragraph{Flipping the problem generates more diverse candidate solutions.}
+
+The improved performance of \fwdflip over \fwd can also be partly attributed to the generation of more diverse solutions.
+\cref{fig:diversity-success} compares \fwd vs. \fwdback vs. \fwdflip in \textsc{Array Transformation} and shows both the average number of unique candidate solutions generated (top) and the planning success rate (bottom) vs. the number of planning attempts, $M$. \fwdflip generates a higher number of unique candidates, and improves the planning success rate by a large margin. \cref{fig:flip-examples} (left) shows an example where \fwd fails to solve the block task due to a persistent error (trying to move a block before ``unstacking'' it, which is not allowed by the rules of \textsc{Blocksworld}) even with significant sampling temperature (0.4), while \fwdflip generates a different solution and avoids the error. 
+\begin{wrapfigure}[15]{hR}{0.38\textwidth}
+  \centering \includegraphics[width=0.99\linewidth]{figures/diversity_success.png}
+\caption{
+\fwdflip generates diverse solutions and improves success rate.
+}
+\label{fig:diversity-success}
+\end{wrapfigure}
+
+\subsection{Improvement from flipping the problem varies}
+\label{subsec:flip-discussion}
+
+\paragraph{Effect of backward success rate without flipping.} While in \cref{subsec:flip-better} we have shown that flipping the problem helps the LLM exploit asymmetries between forward and backward planning, we tend to find that the performance difference between \fwdflip and \fwdback varies substantially in \textsc{Array Transformation} (\cref{table:flip-full-results}). When functions \texttt{repeat} and \texttt{cut} are used, \back does not perform significantly worse than \fwd\xspace --- we believe this is due to the backward step being easily recognizable by \back (\cref{fig:flip-examples} right) when the initial and goal array sizes differ (since \texttt{repeat} and \texttt{cut} change them). In this case, \fwdflip does not improve much over \fwdback. With functions \texttt{shift\_left|right}, \texttt{reverse}, \texttt{swap} that do not change array sizes, 
+we see a much more significant backward bias (53.5\% vs. 36\% between \fwd and \back) and there is a bigger margin between \fwdflip and \fwdback (56\% vs. 46\%).
+
+\begin{figure}[h]
+  \centering
+\includegraphics[width=0.99\linewidth]{figures/flip-success.pdf}
+\caption{(Left) Flipping the problem helps LLM avoid persistent error in one direction. (Right) With functions \texttt{cut} and \texttt{repeat} used in \textsc{Array Transformation} that change the array size, it can become obvious that one of them has to be used, which makes backward planning easier.}
+\label{fig:flip-examples}
+\end{figure}
+\paragraph{Effect of LLM capability.} We also hypothesize that the effect of planning in the flipped problem also depends on the inherent capability of the LLM. First, regardless of the choice of the LLM, \fwdflip should consistently improve the success rate. In \cref{fig:fwd-flip-oracle} we run \texttt{GPT-3.5-turbo} and \texttt{GPT-4-turbo} besides \texttt{GPT-4o} with a directed graph setting and in \textsc{Blocksworld}, and we see that \fwdflip consistently outperforms \fwd. We also find that the design choices of the algorithm can affect the performance, and we highlight two aspects below:
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\linewidth]{figures/oracle_v3.pdf}
+\caption{Planning performance of different LLMs with Fwd and Fwd-Flip in (directed) \textsc{Graph Planning} and \textsc{Blocksworld}. Flipping the problem helps all LLMs plan better, and better LLMs reduce errors when executing the algorithm.}
+\label{fig:fwd-flip-oracle}
+\end{figure}
+
+\begin{itemize}[leftmargin=20pt]
+    \item Reliability of self-verification: while we allow the LLM to generate multiple candidates (in either direction), it can only present a single solution after it self-verifies the candidates. Hence, the LLM needs to reliably self-verify the candidate plans to achieve a high success rate. In addition to the success rate, \cref{fig:fwd-flip-oracle} shows the self-verification error rate. We find that the self-verification error reduces as the LLM becomes more capable. In \textsc{Blocksworld}, we find that \texttt{GPT-3.5-turbo} always self-verifies its sampled plan to be correct, leading to close to zero success rate.
+    \item Reliability of flipping the state-dependent action space: in \cref{sec:approach} we described how flipping the problem requires flipping back the plan and possibly changing the state-dependent action space. While we find that the LLM can flip back the plan itself without error, sometimes it can be error-prone when flipping the action space, affecting the performance of \flip and \fwdflip. In \textsc{Graph Planning} with directed graphs, flipping the problem involves flipping the edges and re-ordering them --- \cref{fig:reorder-prompt} shows an example. Possible errors in re-ordering the edges cause \flip to under-perform \fwd in some of the directed graph settings, while \flip always matches \fwd with undirected graphs.
+\end{itemize}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.8\linewidth]{figures/reorder-prompt.pdf}
+\caption{When flipping the directed graph, we find it is helpful to re-order the flipped edges such that they appear in the order of ``Node 0'', ``Node 1'', etc., to achieve better success rate. However, this also introduces possible error, causing \flip to under-perform \fwd sometimes and affecting \fwdflip.}
+\label{fig:reorder-prompt}
+\end{figure}
+
+Nonetheless, as \cref{fig:fwd-flip-oracle} illustrates, these errors are reduced with better LLMs. Flipping the problem improves success rates significantly even with improvements in the underlying LLM, demonstrating the scalability of our method.
+
+\paragraph{Effect of initial/goal asymmetry.} We also notice that in \textsc{Blocksworld}, \flip under-performs \fwd (\cref{table:flip-full-results}). The reason is that while the initial states of the problems are completely specified (e.g., ``yellow block on red block, orange block on blue block''), the goal can be partially specified (e.g., ``red block on orange block''). This means that when the initial and goal states are flipped, the LLM needs to first generate a complete flipped initial state from the original goal state --- planning with full initial and goal states can be more challenging than with full initial and partial goal states.
+
+\begin{wrapfigure}[9]{R}{0.35\textwidth}
+  \centering \includegraphics[width=0.999\linewidth]{figures/block_attempts.png}
+\caption{
+\fwdflip performs better given more planning attempts.
+}
+\label{fig:fwd-flip-attempt}
+\end{wrapfigure}
+
+\paragraph{Effect of the number of planning attempts.} Lastly, we also find that the maximum number of planning attempts, $M$, can affect the relative performance between \fwd and \fwdflip\xspace --- this is particularly true when \flip under-performs \fwd such as in \textsc{Blocksworld} due to the inital/goal asymmetry mentioned above. In \cref{fig:fwd-flip-attempt} we show \fwd vs. \fwdflip as $M$ varies from 1 to 6 --- \fwdflip under-performs \fwd slightly at $M=1$, but out-performs \fwd with $M > 1$ with increasing improvements.
+
+\subsection{LLM can reason when to flip in certain settings}
+
+\begin{figure}[h]
+  \centering
+\includegraphics[width=0.99\linewidth]{figures/reason-prompt.pdf}
+\caption{LLM can analyze the graph and choose the easier direction for planning in zero-shot.}
+\label{fig:graph-reason}
+\end{figure}
+
+With \fwdflip we randomly choose between the original and the flipped problem for each candidate solution. We now explore whether the LLM can also reason when to flip the problem --- we hypothesize that the LLM can analyze the problem structure to some extent and reason whether the backward direction can be easier. We run experiments with one setting from each of the planning domains (\cref{table:reason-full-results}); unlike previous experiments, here we use $M=1$ as we find that the LLM is often certain about the direction. We find that Fwd-Flip-Reason out-performs \fwd and \flip in undirected graphs. \cref{fig:graph-reason} shows an example where the LLM identifies the bottleneck near the goal and chooses to plan backward, leading to the correct answer. We then calculate the rate at which the LLM chooses the direction where the number of computations is lower and find that the LLM can choose the easier direction 78.5\% of the time with undirected graphs and 60.5\% of the time with directed graphs. However, with directed graphs, the LLM suffers from possible errors when flipping the problem, and thus Fwd-Flip-Reason with $M=1$ does not perform better than \fwd.
+
+In \textsc{Array Transformation} and \textsc{Blocksworld}, since the problem asymmetry is less clear, we do not expect the LLM to find a better direction in general, and thus Fwd-Flip-Reason does not out-perform \fwd or \flip. \cref{app:domains} provides details on the prompts used to elicit LLM reasoning.
+
+\setlength{\tabcolsep}{3pt}
+\begin{table}[H]
+\small
+\begin{center}
+\begin{tabular}{cccc}
+    \toprule
+    Domain & Fwd & Flip & Fwd-Flip-Reason \\
+    \midrule
+    Graph Planning (Undirected) & 79.0\scalebox{0.6}{$\pm$2.9}\% & 78.5\scalebox{0.6}{$\pm$2.9}\% & \bftab 87.5\scalebox{0.6}{$\pm$2.3}\% \\
+    Graph Planning (Directed) & \bftab 50.5\scalebox{0.6}{$\pm$3.5}\% & 46.0\scalebox{0.6}{$\pm$3.5}\% & \bftab 50.5\scalebox{0.6}{$\pm$3.5}\% \\
+    \midrule 
+    Array transformation (\texttt{shift}, \texttt{reverse}, \texttt{swap}) & 
+    18.5\scalebox{0.6}{$\pm$2.7}\% & \bftab 19.5\scalebox{0.6}{$\pm$2.8}\% & 16.5\scalebox{0.6}{$\pm$2.6}\% \\
+    \midrule 
+    Blocksworld & \bftab 33.0\scalebox{0.6}{$\pm$3.3}\% & 21.5\scalebox{0.6}{$\pm$2.9}\% & 27.0\scalebox{0.6}{$\pm$3.1}\% \\
+    \bottomrule
+\end{tabular}
+\caption{Planning success rate averaged over 200 trials for the five methods in the three planning domains when the LLM is asked to choose the direction to reason in. The maximum planning attempt $M$ is set to 1.}
+\label{table:reason-full-results}
+\end{center}
+\end{table}
+
+
+
+\section{Related Work}
+
+\label{sec:related}
+
+\paragraph{Bidirectional planning.} It is well known in classical planning \citep{lavalle2006planning} that searching and planning from the backward direction can often reduce the computations needed. Bi-directional search has been incorporated into popular sampling-based planners (e.g., rapidly-exploring random trees) \citep{jordan2013optimal} and heuristics-based techniques (e.g., A*) \citep{kuroiwa2020front} to improve efficiency.
+
+\paragraph{Planning with LLMs.} LLMs have been widely applied in different planning problems \citep{kambhampatirole} such as text games \citep{yao2024tree, wang2023voyager}, robot planning \citep{huang2022language, ahn2022can,ren2023robots}, scientific experimentation \citep{wang2022scienceworld}, and web navigation \citep{deng2024mind2web} --- their strong planning capabilities originate from pre-training with enormous amounts of text data, which elicits reasoning capabilities \citep{wei2022emergent}. Beyond simple zero- or few-shot learning, LLMs have also been combined with classical planners \citep{liu2023llm+, silver2024generalized} and external tools \citep{zeng2022socratic} to further boost performance. However, no previous work has systematically studied asymmetries between forward and backward planning for LLMs, or leveraged backward reasoning to improve LLM planning.
+
+\paragraph{Backward reasoning in LLMs.} Despite not being applied in planning problems, backward reasoning has been used with LLMs for self-verifying forward-sampled solutions to math problems~\citep{jiang2023forward}. Another line of work \citep{kazemi2022lambada, lee2024symba} applies backward chaining, which recursively breaks the target into sub-targets based on defined rules, mostly for verifying a statement or proof. Our work instead proposes a general solution to planning problems using both forward and backward reasoning, and is motivated by a systematic examination of asymmetries in forward and backward planning for LLMs.
+
+
+\section{Conclusion and Future Work}
+
+\label{sec:conclusion}
+
+In this work, we investigate how to enable LLMs to effectively plan in the backward direction from the desired goal to improve the overall planning success rate. First, our experiments reveal consistently worse performance of LLMs when planning backward. To address this, we propose instructing the LLM to flip the problem first and then plan forward in the flipped problem. Combined with self-verification, we find that generating candidate solutions from both directions improves planning success rates by 4-24\% over forward-only planning in three different domains.
+
+One immediate future direction is to better teach LLMs to reason and plan backward, e.g., by fine-tuning with correct forward and \emph{backward} reasoning traces \citep{zelikman2022star}. We also believe that our framework of combining forward and backward reasoning can be extended to general reasoning problems, e.g., 
+allowing LLMs to generate more diverse reasoning traces from the backward direction \citep{yao2024tree}, or, enforcing reasoning self-consistency from both forward and backward directions \citep{wang2022self}.
+
+\newpage
+
+

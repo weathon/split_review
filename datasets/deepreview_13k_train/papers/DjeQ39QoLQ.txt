@@ -1,0 +1,498 @@
+\title{Robustifying State-space Models for Long Sequences via Approximate Diagonalization}
+
+\begin{abstract}
+
+State-space models (SSMs) have recently emerged as a framework for learning long-range sequence tasks. 
+An example is the structured state-space sequence (S4) layer, which uses the diagonal-plus-low-rank structure of the HiPPO initialization framework. 
+However, the complicated structure of the S4 layer poses challenges; and, in an effort to address these challenges, models such as S4D and S5 have considered a purely diagonal structure. 
+This choice simplifies the implementation, improves computational efficiency, and allows channel communication.
+However, diagonalizing the HiPPO framework is itself an ill-posed problem.
+In this paper, we propose a general solution for this and related ill-posed diagonalization problems in machine learning.
+We introduce a generic, backward-stable ``perturb-then-diagonalize'' (PTD) methodology, which is based on the pseudospectral theory of non-normal operators, and which may be interpreted as the approximate diagonalization of the non-normal matrices defining SSMs.
+Based on this, we introduce the S4-PTD and S5-PTD models.
+Through theoretical analysis of the transfer functions of different initialization schemes, we demonstrate that the S4-PTD/S5-PTD initialization strongly converges to the HiPPO framework, while the S4D/S5 initialization only achieves weak convergences. 
+As a result, our new models show resilience to Fourier-mode noise-perturbed inputs, a crucial property not achieved by the S4D/S5 models. 
+In addition to improved robustness, our S5-PTD model averages 87.6\% accuracy on the Long-Range Arena benchmark, demonstrating that the PTD methodology helps to improve the accuracy of deep learning models.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Sequential data are pervasive across a wide range of fields, including natural language processing, speech recognition, robotics and autonomous systems, as well as scientific machine learning and financial time-series analysis, among others. 
+Given that many of these applications produce exceedingly long sequences, sequential models need to capture long-range temporal dependencies in order to yield accurate predictions.
+To this end, many specialized deep learning methods have been developed to deal with long sequences, including recurrent neural networks (RNNs)~\cite{arjovsky2016unitary,chang2019antisymmetricrnn,erichson2021lipschitz,rusch2021unicornn,erichson2022gated,orvieto2023resurrecting}, convolutional neural networks (CNNs)~\cite{bai2018empirical,romero2021ckconv}, continuous-time models (CTMs)~\cite{gu2021combining,yildiz2021continuous}, and transformers~\cite{katharopoulos2020transformers,choromanski2020rethinking,kitaev2020reformer,zhou2022fedformer,nie2023a}.
+
+Over the past few years, the new class of state-space models (SSMs) gained vast popularity for sequential modeling due to their outstanding performance on the Long-Range Arena (LRA) dataset~\cite{tay2020long}. 
+An SSM is built upon a continuous-time linear time-invariant (LTI) dynamical system $\Sigma = (\mathbf{A},\mathbf{B},\mathbf{C},\mathbf{D})$, which is a system of linear ODEs given by
+\begin{equation}
+	\label{eq.LTIDS}
+	\begin{aligned}
+		\mathbf{x}'(t) &= \mathbf{A} \mathbf{x}(t) + \mathbf{B} \mathbf{u}(t), \\
+		\mathbf{y}(t) &= \mathbf{C} \mathbf{x}(t) + \mathbf{D} \mathbf{u}(t),
+	\end{aligned}
+\end{equation}
+where $\mathbf{A} \in \C^{n \times n}$, $\mathbf{B} \in \C^{n \times m}$, $\mathbf{C} \in \C^{p \times n}$, $\mathbf{D} \in \C^{p \times m}$ are the state, input, output and feedthrough matrices; and $\mathbf{u}(t) \in \C^m, \mathbf{x}(t) \in \C^n, \mathbf{y}(t) \in \C^p$ are the inputs, states, and outputs of the system, respectively. The system can be discretized at time steps $j\Delta t$, where $\Delta t > 0$ and $j = 1, \ldots, L$, to be fed with sequential inputs of length $L$. To store and process the information of the long sequential inputs online, the SSMs are often initialized by a pre-designed LTI system. 
+One of the most popular schemes is called ``HiPPO initialization''~\cite{voelker2019legendre,gu2020hippo}, in which the Legendre coefficients of the input history at time $t$, i.e., $\mathbf{u} \cdot \mathbbm{1}_{[0,t]}$, are stored and updated in the state vector $\mathbf{x}(t)$.
+This initialization is specifically designed to model long-range dependencies in sequential data. 
+The recently proposed S4 model~\cite{gu2022efficiently} leverages the HiPPO initialization and accelerates training and inference by decomposing $\mathbf{A}$ into the sum of a diagonal matrix and a low-rank one. 
+The diagonal-plus-low-rank (DPLR) structure yields a barycentric representation~\cite{antoulas1986scalar} of the transfer function of~\cref{eq.LTIDS} that maps inputs to outputs in the frequency domain, enabling fast computation in the frequency domain~\cite{aumann2023practical}.
+
+While the DPLR structure achieves an asymptotic speed-up of the model, considering $\mathbf{A}$ to be a diagonal matrix results in a simpler structure. Compared to a DPLR matrix $\mathbf{A}$, a diagonal SSM is not only faster to compute and easier to implement, but it also allows integrating channel communication via parallel scans~\cite{smith2023simplified}, thereby improving its performance on long-range tasks. Unfortunately, the problem of diagonalizing the HiPPO framework is exponentially ill-conditioned, as $n$ increases. Hence, while~\cite{gu2022efficiently} shows analytic forms of the eigenvalues and eigenvectors of HiPPO matrices, they suffer from an exponentially large variance and cannot be used in practice. 
+So far, the most popular way of obtaining a diagonal SSM is to simply discard the low-rank part from the DPLR structure, leveraging a stable diagonalization algorithm for a normal matrix. 
+Discarding the low-rank component changes the underlying diagonalization problem, however; and it abandons the theoretical insights about HiPPO.  Still, the resulting model almost matches S4's performance, in practice. Such diagonal models are called S4D~\cite{gu2022parameterization} when the systems are single-input/single-output (i.e., $m = p = 1$) and S5~\cite{smith2023simplified} when the systems are multiple-input/multiple-output (i.e., $m = p > 1$), which enables channel communication.
+
+The issue of ill-posed diagonalization problems is not merely specific to SSMs. For example, it is known that non-normal matrices make RNNs more expressive~\cite{kerg2019non,orhan2019improved}. 
+More generally, non-normality plays an important role in the training of certain neural networks~\cite{sengupta2018robust,kumar2022non}. While the ill-posedness of the diagonalization problem essentially prevents accurate computation of eigenvalues and eigenvectors (i.e., we cannot have a small forward error) --- in fact, the true spectral information becomes meaningless in this case --- using a backward stable eigensolver, one can recover the non-normal matrix accurately (i.e., we can have a small backward error) from the wrong eigenvalues and eigenvectors.
+
+In this paper, we propose a generic ``perturb-then-diagonalize" (PTD) methodology as a backward stable eigensolver. 
+PTD is based on the idea that a small random perturbation remedies the problem of the blowing up of eigenvector condition number~\cite{davies2008approximate,davies2009perturbations,banks2021gaussian}, regularizing the ill-posed problem into a close but well-posed one.
+It is based on the pseudospectral theory of non-normal operators~\cite{trefethen2005spectra} and may be interpreted as the approximate diagonalization of the non-normal matrices.
+In the context of SSMs, our PTD method can be used to diagonalize the highly non-normal HiPPO framework. Based on this, we introduce the S4-PTD and S5-PTD models. Our method is flexible, and it can be used to diagonalize many SSM initialization schemes that may be invented in the future.
+\textbf{Contribution.} \ Here are our main contributions:
+\begin{enumerate}[leftmargin=*]
+\item We propose a ``perturb-then-diagonalize" (PTD) methodology that solves ill-posed diagonalization problems in machine learning when only the backward error is important.
+
+\item We provide a fine-grained analysis that compares the S4 and the S4D initialization. In particular, we quantify the change of the transfer function when discarding the low-rank part of HiPPO, which is done in the diagonal S4D/S5 initialization. We show that while the outputs of the S4D/S5 system on a \textit{fixed} smooth input converge to those of the S4 system at a linear rate as $n \rightarrow \infty$ (see~\cref{sec:converge}), the convergence is not uniform across all input functions (see~\cref{sec:noconverge}). 
+
+\item Based on our theoretical analysis, we observe, using both a synthetic example (see~\cref{sec:failuremodes}) and the sequential CIFAR task (see~\cref{sec:robustness}), that the S4D/S5 models are very sensitive to certain Fourier-mode input perturbations, which impairs the robustness of the models. 
+
+\item Based on diagonalizing a perturbed HiPPO matrix, we propose the S4-PTD and S5-PTD models.
+Our models are robust to Fourier-mode input perturbations. We theoretically estimate the effect of the perturbation (see~\cref{sec:S4-PTD}). We propose computing the perturbation matrix by solving an optimization problem with a soft constraint. Moreover, our method is not restricted to the HiPPO matrix but can be applied to any initializations.
+
+\item We provide an ablation study for the size of the perturbation in our models. We also evaluate our S4-PTD and S5-PTD models on LRA tasks, which reveals that the S4-PTD model outperforms the S4D model, while the S5-PTD model is comparable with the S5 model (see~\cref{sec:LRA}).
+\end{enumerate}
+
+
+\section{Preliminaries and notation}
+
+\label{sec:prelim}
+
+Given an LTI system in~\cref{eq.LTIDS}, we say it is asymptotically stable if the eigenvalues $\lambda_j$ of $\mathbf{A}$ are all contained in the left half-plane, i.e., if $\text{Re}(\lambda_j) < 0$ for all $1 \leq j \leq n$. 
+The \emph{transfer function} of the LTI system is defined by
+\begin{equation}
+\label{eq.transfer}
+G(s) = \mathbf{C} (s\mathbf{I} - \mathbf{A})^{-1} \mathbf{B} + \mathbf{D}, \qquad s \in \C \setminus \Lambda(\mathbf{A}),
+\end{equation}
+where $\mathbf{I} \in \R^{n \times n}$ is the identity matrix and $\Lambda(\mathbf{A})$ is the spectrum of $\mathbf{A}$. 
+The transfer function $G$ is a rational function with $n$ poles (counting multiplicities) at the eigenvalues of $\mathbf{A}$. 
+Assume $\mathbf{x}(0) = \boldsymbol{0}$. 
+Then the transfer function maps the inputs to the outputs of the LTI system in the Laplace domain by multiplication, i.e.,
+$(\mathcal{L}\mathbf{y})({s}) = G({s}) (\mathcal{L}\mathbf{u})({s})$ for all $s \in \C$,
+where $\mathcal{L}$ is the Laplace transform operator (see~\cite{zhou1998essentials}). 
+Assume the LTI system in~\cref{eq.LTIDS} is asymptotically stable and the input $\mathbf{u}(t)$ is bounded and integrable (with respect to the Lebesgue measure) as $t$ ranges over $\R$.
+Then the Laplace transform reduces to the Fourier transform:
+\begin{equation}\label{eq.transferfourier}
+\hat{\mathbf{y}}(s) = G(is) \hat{\mathbf{u}}(s), \qquad s \in \R,
+\end{equation}
+where $\hat{\mathbf{y}}$ and $\hat{\mathbf{u}}$ are the Fourier transforms of $\mathbf{y}$ and $\mathbf{u}$, respectively, and $i$ is the imaginary unit. 
+Let $\mathbf{V} \in \C^{n \times n}$ be an invertible matrix. 
+We can conjugate the system $(\mathbf{A},\mathbf{B},\mathbf{C},\mathbf{D})$ by $\mathbf{V}$, which yields $(\mathbf{V}^{-1} \mathbf{A} \mathbf{V}, \mathbf{V}^{-1} \mathbf{B},\mathbf{C} \mathbf{V},\mathbf{D})$. 
+Since the transfer function is conjugation-invariant, the two systems map the same inputs $\mathbf{u}(\cdot)$ to the same outputs $\mathbf{y}(\cdot)$, while the states $\mathbf{x}(\cdot)$ are transformed by $\mathbf{V}$. If $\mathbf{A}$ is a normal matrix, i.e., $\mathbf{A} \mathbf{A}^* = \mathbf{A}^* \mathbf{A}$, then $\mathbf{V}$ is unitary, in which case transforming the states by $\mathbf{V}$ is a well-conditioned problem and can be done without loss of information. Issues arise, however, when $\mathbf{A}$ is non-normal and $\mathbf{V}$ is ill-conditioned.
+
+The state-space models use LTI systems to process time series inputs. 
+Different initializations can be tailored to tasks with different natures, such as the range of dependency~\cite{gu2022train}.
+A particularly successful initialization scheme used in the S4 model is the so-called HiPPO initialization. 
+While there exist several variants of HiPPO, the most popular HiPPO-LegS matrices are defined by
+\begin{equation}
+\label{eq.HiPPO}
+(A_H)_{jk} = - \begin{cases}
+	\mathbbm{1}_{\{j > k\}} \sqrt{2j-1}\sqrt{2k-1}&, \qquad \text{if } j \neq k,\\
+	j&, \qquad \text{if } j = k,
+\end{cases}
+\qquad
+(B_H)_{j\ell} = \sqrt{(2j-1)/2},
+\end{equation}
+for all $1 \leq j, k \leq n$ and $1 \leq \ell \leq m$, where $\mathbbm{1}_{\{j > k\}}$ is the indicator that equals $1$ if $j > k$ and $0$ otherwise. 
+Such a system guarantees that the Legendre coefficients of the input history $\mathbf{u} \cdot \mathbbm{1}_{[0,t]}$ (with respect to a scaled measure) are stored in the states $\mathbf{x}(t)$ over time~\cite{gu2020hippo}. 
+Since computing with the dense matrix $\mathbf{A}_H$ is practically inefficient, one conjugates the HiPPO system with a matrix $\mathbf{V}_H$ to simplify the structure of $\mathbf{A}_H$. The matrix $\mathbf{A}_H$ in~\cref{eq.HiPPO} has an ill-conditioned eigenvector matrix~\cite{gu2022efficiently}; consequently, instead of solving the ill-posed problem that diagonalizes $\mathbf{A}_H$, one exploits a diagonal-plus-low-rank (DPLR) structure: 
+\begin{equation}
+\label{eq.DPLR}
+\mathbf{A}_{H} = \mathbf{A}_{H}^\perp - \frac{1}{2}\mathbf{B}_{H}\mathbf{B}_{H}^\top, \qquad (A_H^\perp)_{jk} = -\frac{1}{2}\begin{cases}
+	(-1)^{\mathbbm{1}_{\{j < k\}}}\sqrt{2j-1}\sqrt{2k-1} & , \qquad j \neq k, \\
+	1 & , \qquad j = k,
+\end{cases}
+\end{equation}
+where $\mathbf{A}_{H}^\perp$ is a skew-symmetric matrix that can be unitarily diagonalized into $\mathbf{A}_{H}^\perp = \mathbf{V}_{H} \boldsymbol{\Lambda}_{H} \mathbf{V}_{H}^{-1}$. 
+The S4 model leverages the HiPPO matrices by initializing 
+\begin{equation}
+\label{eq.initS4}
+\mathbf{A}_{\text{DPLR}} = \boldsymbol{\Lambda}_{H} - \frac{1}{2}\mathbf{V}_{H}^{-1} \mathbf{B}_H \mathbf{B}_H^\top \mathbf{V}_{H}, \qquad \mathbf{B}_{\text{DPLR}} = \mathbf{V}_{H}^{-1} \mathbf{B}_H
+\end{equation}
+and $\mathbf{C}_{\text{DPLR}}$ and $\mathbf{D}_{\text{DPLR}}$ randomly. 
+Such a system $\Sigma_{\text{DPLR}} = (\mathbf{A}_{\text{DPLR}},\mathbf{B}_{\text{DPLR}},\mathbf{C}_{\text{DPLR}},\mathbf{D}_{\text{DPLR}})$ is conjugate via $\mathbf{V}_H$ to $(\mathbf{A}_H, \mathbf{B}_H, \mathbf{C}_{\text{DPLR}}\mathbf{V}_H^{-1}, \mathbf{D}_{\text{DPLR}})$.
+Hence, they share the transfer function and the same mapping from the inputs $\mathbf{u}(\cdot)$ to the outputs $\mathbf{y}(\cdot)$. 
+The S4D model further simplifies the structure by discarding the rank-$1$ part from $\mathbf{A}_H$ and therefore initializes 
+\begin{equation}
+\label{eq.initS4D}
+\mathbf{A}_{\text{Diag}} = \boldsymbol{\Lambda}_{H}, \qquad \mathbf{B}_{\text{Diag}} = \frac{1}{2} \mathbf{V}_{H}^{-1} \mathbf{B}_H,
+\end{equation}
+and $\mathbf{A}_{\text{Diag}}$ is henceforth restricted to be diagonal. 
+While both the S4 and S4D models restrict that $m = p = 1$, i.e., the LTI systems are single-input/single-output (SISO), the S5 model, which also initializes $\mathbf{A}_{\text{Diag}} = \boldsymbol{\Lambda}_H$ and requires it to be diagonal throughout training, leverages multiple-input/multiple-output (MIMO) systems by allowing $m = p > 1$.
+Throughout this paper, we use $\norm{\cdot}$ to denote a vector or matrix $2$-norm. Given an invertible square matrix $\mathbf{V}$, we use $\kappa(\mathbf{V}) = \|\mathbf{V}\| \|\mathbf{V}^{-1}\|$ to denote its condition number. Given a number $1 \leq p \leq \infty$ and a measurable function $f: \R \rightarrow \C$, we use $\norm{f}_{L^p}$ for the standard $L^p$-norm of $f$ with respect to the Lebesgue measure on $\R$ and $L^p(\R) = \{f: \R \rightarrow \C \mid \norm{f}_{L^p} < \infty\}$.
+
+
+\section{Theory of the diagonal initialization of state-space models}
+
+\label{sec:theorydiag}
+
+The S4 model proposes to initialize the SSM to store the Legendre coefficients of the input signal in the states $\mathbf{x}$~\cite{gu2020hippo}. This initialization, however, has an ill-conditioned spectrum, preventing a stable diagonalization of the SSM. On the other hand, the S4D model uses a different initialization scheme that has a stable spectrum, allowing for stable diagonalization; however, such initialization lacks an interpretation of the states $\mathbf{x}$. In this section, we conduct a fine-grained analysis of the two initializations, which shows that: 
+\begin{enumerate}
+    \item for any fixed input signal $\mathbf{u}(\cdot)$ with sufficient smoothness, the outputs of the two systems $\Sigma_{\text{DPLR}}$ and $\Sigma_{\text{Diag}}$ converge to each other with a linear rate (of which the previous analysis is devoid) as $n \rightarrow \infty$ (see~\cref{sec:converge}); and 
+    \item by viewing $\Sigma_{\text{DPLR}}$ and $\Sigma_{\text{Diag}}$ as linear operators that map input signals to the outputs, the operators do not converge in the operator norm topology as $n \rightarrow \infty$ (see~\cref{sec:noconverge}). 
+\end{enumerate}
+While the first observation partially justifies the success of the S4D model, the second one allows us to observe that the diagonal initialization is unstable under certain Fourier-mode input perturbations (see~\cref{sec:failuremodes}). 
+In this section, we assume $m = p = 1$, which is consistent with the S4 and S4D models. Still, our theory can be related to the S5 model, as shown in~\cite{smith2023simplified}.
+\subsection{A simplified formula for the transfer function deviation}
+
+Fix an integer $1 \leq \ell \leq n$. We assume that $\mathbf{C}_{\text{DPLR}} = \mathbf{C}_{\text{Diag}} = \mathbf{e}_\ell^\top \mathbf{V}_H$, where $\mathbf{e}_\ell^\top$ is the $\ell$th standard basis, and $\mathbf{D}_{\text{DPLR}} = \mathbf{D}_{\text{Diag}}$. For a general $\mathbf{C}_{\text{DPLR}} = \mathbf{C}_{\text{Diag}}$, we can decompose it onto the orthonormal basis $\{\mathbf{e}_\ell^\top \mathbf{V}_H \mid 1 \leq \ell \leq n\}$ and study each component separately using the theory developed in this section. Let $G_{\text{DPLR}}$ and $G_{\text{Diag}}$ be the transfer functions of $\Sigma_{\text{DPLR}}$ and $\Sigma_{\text{Diag}}$, respectively, i.e.,
+\begin{equation}\label{eq.twotransfer}
+G_{\text{DPLR}\!}(s) \!=\! \mathbf{C}_{\text{DPLR}\!} (s\mathbf{I} \!-\! \mathbf{A}_{\text{DPLR}})^{\!-1} \mathbf{B}_{\text{DPLR}\!} + \mathbf{D}_{\text{DPLR}}, \,\, G_{\text{Diag}\!}(s) \!=\! \mathbf{C}_{\text{Diag}\!} (s\mathbf{I} \!-\! \mathbf{A}_{\text{Diag}})^{\!-1} \mathbf{B}_{\text{Diag}\!} + \mathbf{D}_{\text{Diag}}.
+\end{equation}
+Our first result (\Cref{lem.difftransfer}) concerns $G_{\text{DPLR}} - G_{\text{Diag}}$. Recall that by~\cref{eq.transferfourier}, the difference between the two LTI systems is controlled by $G_{\text{DPLR}} - G_{\text{Diag}}$. In particular, $|G_{\text{DPLR}}(si) - G_{\text{Diag}}(si)|$ measures the difference between the outputs of the two systems given a frequency-$s$ input.
+We use Lemma~\ref{lem.difftransfer} to study the (non-)convergence of the two systems (see~\Cref{thm.weakstarconverge} and~\ref{thm.noconverge}); moreover, it reveals the ways that the S4D model can become unstable (see~\Cref{fig:transfer} and~\cref{sec:failuremodes}).
+
+\begin{lem}\label{lem.difftransfer}
+Let $G_{\text{DPLR}}$ and $G_{\text{Diag}}$ be defined by~\cref{eq.twotransfer}. For any $s \in \C$ with $\text{Re}(s) = 0$, we have
+\begin{equation}\label{eq.difftransfer}
+	G_{\text{DPLR}}(s) - G_{\text{Diag}}(s) = \frac{-s\frac{(-1)^{n-1} \prod_{j=1}^{n-1} (j-s)}{\prod_{j=1}^n (j+s)} \sqrt{2\ell-1} \frac{\prod_{j=0}^{\ell-2}(s-j)}{\prod_{j=1}^\ell (s+j)}}{\sqrt{2} \left(1 + s\frac{(-1)^{n-1} \prod_{j=1}^{n-1}(j-s)}{\prod_{j=1}^n (j+s)}\right)}.
+\end{equation}
+\end{lem}
+
+The proof of~\Cref{lem.difftransfer} is technical and therefore deferred to~\Cref{sec:proofdifftransfer}. The idea is to expand the term $(s\mathbf{I} - \mathbf{A}_{H}^\perp + \mathbf{B}_{H}\mathbf{B}_{H}^\top/2)^{-1}$ in the expression of $ G_{\text{Diag}}$ using the Woodbury matrix identity~\cite{woodbury1950inverting}, which leads to a primary term $(s\mathbf{I} - \mathbf{A}_{H}^\perp)^{-1}$ that gets canceled with that in $G_{\text{DPLR}}$ and residual terms that are expanded by Cramer's rule. The importance of~\cref{eq.difftransfer} is that it reduces the complicated matrix inversions to elementary operations, enabling further analysis.
+
+\begin{figure}
+\centering
+\begin{overpic}[angle=270, width = 0.8\textwidth]{./Figures/transfer_aligned.png}
+	\put(38,-1) {\small{frequency}}
+	\put(-2.5,17.5) {\rotatebox{90}{\small{magnitude}}}
+	\put(66,39.9) {\scalebox{.55}{$G_{\text{Diag}} (n \!=\! 10)$}}
+	\put(66,37.6) {\scalebox{.55}{$G_{\text{Diag}} (n \!=\! 100)$}}
+	\put(66,35.3) {\scalebox{.55}{$G_{\text{Diag}} (n \!=\! 1000)$}}
+	\put(66,33.0) {\scalebox{.55}{$G_{\text{Diag}} (n \!=\! 10000)$}}
+	\put(66,30.7) {\scalebox{.55}{$G_{\text{DPLR}}$}}
+\caption{The magnitude of transfer function of the S4 model, $\abs{G_{\text{DPLR}}(si)}$, and that of the S4D model, $\abs{G_{\text{Diag}}(si)}$ with $\mathbf{C}_{\text{DPLR}} = \mathbf{C}_{\text{Diag}} = \mathbf{e}_1^\top \mathbf{V}_H$ and the SSM size $n$ set to different values. Note that $G_{\text{DPLR}}$ stays the same regardless of $n$. By zooming into the last spike of $\abs{G_{\text{Diag}}(si)}$, we see that the peak remains $\Theta(1)$ as $n \rightarrow \infty$ (see the right panels). The figure shows that $G_{\text{Diag}}$ is oscillatory while $G_{\text{DPLR}}$ is smooth; moreover, $\abs{G_{\text{Diag}}(si)}$ does not converge to $\abs{G_{\text{DPLR}}(si)}$ uniformly.}
+\label{fig:transfer}
+\end{figure}
+
+In~\Cref{fig:transfer}, we plot the magnitude of transfer functions $\abs{G_{\text{DPLR}}}$ and $\abs{G_{\text{Diag}}}$ when $\ell = 1$ and $n = 10, 10^2, 10^3$, and $10^4$, respectively. Note that when $\ell = 1$, $G_{\text{DPLR}}$ is independent of $n$ (see~\Cref{sec:proofdifftransfer}). 
+We see that as $n$ increases, $G_{\text{Diag}}$ approaches $G_{\text{DPLR}}$ in the low-frequency domain, i.e., when $\abs{s}$ is small. 
+The spikes in the plot of $\abs{G_{\text{Diag}}}$ are caused by the winding of $\big(s(-1)^{n-1} \prod_{j=1}^{n-1}(j-s)\big)\big/\big(\prod_{j=1}^n (j+s)\big)$ around the origin in~\cref{eq.difftransfer}. 
+Moreover, for every $n \geq 1$, zooming into the last spike located at $\abs{s} = \Theta(n^2)$ reveals that it has a constant magnitude (see the subplots on the right in~\Cref{fig:transfer}). 
+Hence, the convergence of $G_{\text{Diag}}$ to $G_{\text{DPLR}}$ is non-uniform (see~\cref{sec:noconverge}). 
+Moreover, the frequency response is unstable at input frequencies $s$ near these spikes, suggesting that the S4D model is not robust to certain input perturbations (see~\cref{sec:failuremodes}).
+\subsection{Input-wise convergence of the diagonal initialization}
+\label{sec:converge}
+
+Here, we apply~\Cref{lem.difftransfer} to show that for a fixed input signal $\mathbf{u}(\cdot)$, the outputs of $\Sigma_{\text{DPLR}}$ and $\Sigma_{\text{Diag}}$ converge to each other as $n \rightarrow \infty$. 
+If we think of $\Sigma_{\text{DPLR}}$ and $\Sigma_{\text{Diag}}$ as linear operators on the Hilbert space $L^1(\R) \cap L^2(\R)$ that map the input $\mathbf{u}$ to the output $\mathbf{y}$, then in the language of functional analysis, we have $\Sigma_{\text{DPLR}} - \Sigma_{\text{Diag}}$ converges to zero in the weak$^*$ topology. Moreover, while the previous result~\cite{gu2022parameterization} does not have a rate of convergence, we show that the convergence is linear. This partially explains why the S4D model matches the performance of the S4 model in practice.
+
+\begin{thm}\label{thm.weakstarconverge}
+Let $\mathbf{u}(\cdot) \in L^2(\R)$ be an input function with $\norm{\mathbf{u}}_{L^2} = 1$. Let $\mathbf{y}_{\text{DPLR}}(\cdot)$ and $\mathbf{y}_{\text{Diag}}(\cdot)$ be the outputs of $\Sigma_{\text{DPLR}}$ and $\Sigma_{\text{Diag}}$ given the input $\mathbf{u}(\cdot)$ and the initial states $\mathbf{x}(0) = \boldsymbol{0}$, respectively. For some $q > 1/2$, suppose $\abs{\hat{\mathbf{u}}(s)} = \mathcal{O}(\abs{s}^{-q})$ as $\abs{s} \rightarrow \infty$. Then, we have $\norm{\mathbf{y}_{\text{DPLR}} - \mathbf{y}_{\text{Diag}}}_{L^2} = \mathcal{O}\big(n^{-1}\big)\sqrt{\ell}$ as $n \rightarrow \infty$, where the constant in the $\mathcal{O}$-notation only depends on $q$ and the constant in $\hat{\mathbf{x}}(s) = \mathcal{O}(\abs{s}^{-q})$. The constant does not depend on $q$ if we restrict $q \in [q',\infty)$ for a fixed $q' > 1/2$.
+\end{thm}
+
+ Since the Fourier transform interchanges smoothness and decay, what~\Cref{thm.weakstarconverge} says is that under a mild assumption that $\mathbf{u}(\cdot)$ is sufficiently smooth, the output of the diagonal system converges linearly to that of the DPLR system as $n \rightarrow \infty$.
+\subsection{System-wise divergence of the diagonal initialization}
+\label{sec:noconverge}
+
+We showed in section~\ref{sec:converge}  that the outputs of the diagonal system and the DPLR system converge for a fixed smooth input $\mathbf{u}(\cdot)$. 
+Two questions naturally arise from this result: 
+\begin{enumerate}
+    \item Can we remove the smoothness assumption on the input?
+    \item Is the convergence uniform across all input signals?
+\end{enumerate}
+Unfortunately, the answers to both questions are negative: 
+the outputs of the two systems diverge given the unit impulse (i.e., the Dirac delta function) as the input (see~\Cref{sec:experimentconverge}); moreover, the two systems are proven to diverge from each other in the operator norm topology.
+
+\begin{thm}\label{thm.noconverge}
+The function $G_{\text{DPLR}}(s) - G_{\text{Diag}}(s)$ does not converge to zero uniformly on the imaginary axis as $n \rightarrow \infty$. In particular, for every $n \geq 1$, there exists an input signal $\mathbf{u}_n(\cdot) \in L^1(\R) \cap L^2(\R)$ such that if we let $\mathbf{y}_{n,\text{DPLR}}$ and $\mathbf{y}_{n,\text{Diag}}$ be the outputs of $\Sigma_{\text{DPLR}}$ and $\Sigma_{\text{Diag}}$ of degree $n$, respectively, then we have $\|\mathbf{y}_{n,\text{DPLR}} - \mathbf{y}_{n,\text{Diag}}\|_{L^2}$ does not converge to $0$ as $n \rightarrow \infty$.
+\end{thm}
+
+The construction of $\mathbf{u}_n(\cdot)$ can be made explicit, as we show in the next subsection. We defer the proof to~\Cref{sec:proofnoconverge}. The strategy is to carefully analyze the location and magnitude of the last spike in the plot of $\abs{G_{\text{Diag}}}$ (see~\Cref{fig:transfer}) and show that it does not vanish as $n \rightarrow \infty$. In summary, while a sufficiently large S4D model mimics its S4 alternative on a fixed smooth input, when we predetermine a size $n$, they inevitably disagree, by a large amount, on some inputs.
+\subsection{Implication of the theory: non-robustness of the diagonal initialization}
+\label{sec:failuremodes}
+
+The analysis of $G_{\text{DPLR}}$ and $G_{\text{Diag}}$ in this section suggests the following caveat: while the S4 and the S4D models tend to pertain similar behaviors as $n$ gets large, the diagonal initialization scheme used by the S4D model is less robust to perturbations in the frequency domain (see~\Cref{fig:transfer}). 
+In particular, by~\cref{eq.transferfourier}, for a fixed state size $n$, input signals with frequency modes dense at the spikes of the plot of $\abs{G_{\text{Diag}}}$ are harder to process for the SSM. 
+In turn, the S4D model is unstable near these modes. This does not happen with the S4 model. Our observation suggests that instead of replacing the ill-posed diagonalization problem with a well-conditioned but distinct one (i.e., the S4D initialization), which creates a large backward error $|G_{\text{DPLR}}(s) - G_{\text{Diag}}(s)|$, one should solve the ill-posed problem using a backward stable algorithm, even if the forward error (i.e., the miscalculation of eigenvalues and eigenvectors) will be large (see~\cref{sec:S4-PTD}).
+
+We demonstrate on a synthetic example that the S4D model, regardless of its size $n$, is not robust under input perturbation of certain frequency modes (which depend on $n$).
+Our training set contains sinusoidal signals parameterized by a frequency $s$ and an amplitude $A$: 
+\[
+\mathbf{u}_j(t) = A_j \sin(s_jt),
+\]
+where $A_j \in [0,1]$ and $s_j \in S_{\text{interp}} := [0,40] \cup [60,100]$ for an interpolation problem or $s_j \in S_{\text{extrap}} := [0,80]$ for an extrapolation problem.
+We sample each input function $\mathbf{u}_j(\cdot)$ uniformly on $t \in [0,10^4]$ and train an S4 model and an S4D model, respectively. 
+Our goal is to learn $s$ and $A$ from the sequential input. 
+
+In~\Cref{fig:failuremodes}, we plot the model prediction of the amplitude $A$ over a test set of signals for which $s$ and $A$ are on a uniform grid on $[0,100] \times [0,1]$.
+\Cref{fig:failuremodes} shows that while both the S4 and S4D models predict well on sampled domains (i.e., $S_{\text{interp}}$ and $S_{\text{extrap}}$), the S4 model is significantly better at interpolating and extrapolating on the unsampled domains. In particular, the S4D model suffers from an extrapolation disaster: for $s > 80$, as the true amplitude of the signal increases from $0$ to $1$, the predicted amplitude decreases monotonically with a minimum value less than $-4$. 
+This happens because $\abs{G_{\text{Diag}}}$ has a spike around $\abs{s} = 83$, making the information of $s \in [0,80]$ impossible to transfer to $s \in [80,100]$. Hence, while the S4D initialization stabilizes the diagonalization process, making the computation more efficient, its underlying state-space model is unstable near certain Fourier modes, impairing its robustness (see also~\cref{sec:robustness}).
+
+\begin{figure}
+\centering
+\hspace{0.8cm}
+\begin{minipage}{0.22\textwidth}
+\begin{overpic}[width = 1.1\textwidth]{./Figures/true_interp.pdf}
+\put(-8,18) {\rotatebox{90}{\small{amplitude}}}
+\put(-25,10) {\rotatebox{90}{\textbf{Interpolation}}}
+\put(8,76) {{\textbf{True Amplitude}}}
+\end{overpic}
+\end{minipage}
+\hfill
+\begin{minipage}{0.22\textwidth}
+\begin{overpic}[width = 1.1\textwidth]{./Figures/S4interp.pdf}
+\put(12,76) {{\textbf{S4 Prediction}}}
+\end{overpic}
+\end{minipage}
+\hfill
+\begin{minipage}{0.22\textwidth}
+\begin{overpic}[width = 1.1\textwidth]{./Figures/S4Dinterp.pdf}
+\put(7,76) {{\textbf{S4D Prediction}}}
+\end{overpic}
+\end{minipage}
+\hfill
+\begin{minipage}{0.22\textwidth}
+\begin{overpic}[width = 1.1\textwidth]{./Figures/S4Pinterp.pdf}
+\put(-5,76) {{\textbf{S4-PTD Prediction}}}
+\end{overpic}
+\end{minipage}
+
+\hspace{0.8cm}
+\begin{minipage}{0.22\textwidth}
+\begin{overpic}[width = 1.1\textwidth]{./Figures/true_interp.pdf}
+\put(-8,18) {\rotatebox{90}{\small{amplitude}}}
+\put(27,-7) {{\small{frequency}}}
+\put(-25,8) {\rotatebox{90}{\textbf{Extrapolation}}}
+\end{overpic}
+\end{minipage}
+\hfill
+\begin{minipage}{0.22\textwidth}
+\begin{overpic}[width = 1.1\textwidth]{./Figures/S4extrap.pdf}
+\put(27,-7) {{\small{frequency}}}
+\end{overpic}
+\end{minipage}
+\hfill
+\begin{minipage}{0.22\textwidth}
+\begin{overpic}[width = 1.1\textwidth]{./Figures/S4Dextrap.pdf}
+\put(27,-7) {{\small{frequency}}}
+\end{overpic}
+\end{minipage}
+\hfill
+\begin{minipage}{0.22\textwidth}
+\begin{overpic}[width = 1.1\textwidth]{./Figures/S4Pextrap.pdf}
+\put(27,-7) {{\small{frequency}}}
+\end{overpic}
+\end{minipage}
+\caption{The predicted amplitude $A$ of signals in the test set whose frequencies $s$ are sampled uniformly from $[0,100]$ and amplitudes from $[0,1]$. The top row shows the interpolation result, where the functions in the training datasets have frequencies only in $[0,40] \cup [60,100]$. The bottom row shows the extrapolation result, where the functions in the training datasets have frequencies only in $[0,80]$. The figure shows the interpolation and extrapolation results for the S4 model, the S4D model, and the S4-PTD model (see~\cref{sec:S4-PTD}). We observe that our S4-PTD model interpolates and extrapolates better than the S4D model. In particular, the S4D model is not stable around $s = 80$, where the predicted amplitude decreases to $-4$ when the true value increases from $0$ to $1$.}
+\label{fig:failuremodes}
+\end{figure}
+
+
+\section{Perturbing the HiPPO initialization: a new way of diagonalizing the state-space model}
+
+\label{sec:S4-PTD}
+
+In~\cref{sec:failuremodes}, we saw the instability of the S4D model at certain Fourier modes. 
+Nevertheless, the diagonal structure of $\mathbf{A}$ is preferred over the DPLR one due to its training and inference efficiency and its adaptivity to the MIMO model (i.e., the S5 model)~\cite{smith2023simplified}. 
+To avoid the instability in a diagonal model, we want to leverage the HiPPO initialization in~\cref{eq.HiPPO} instead of the one in~\cref{eq.initS4D} that discards the rank-$1$ part. 
+One obvious solution is to diagonalize the HiPPO matrix $\mathbf{A}_H = \mathbf{V}_H \mathbf{\Lambda}_H \mathbf{V}_H^{-1}$ and conjugate $(\mathbf{A}_H, \mathbf{B}_H, \mathbf{C}, \mathbf{D})$ using $\mathbf{V}_H$. 
+However, as shown in~\cite{gu2022parameterization}, the eigenvector matrix $\mathbf{V}_H$ is exponentially ill-conditioned with respect to $n$, making the spectral information meaningless. While the exact eigenvalues and eigenvectors of $\mathbf{A}_H$ are very ill-conditioned, since we only care about the backward error of diagonalization,
+we propose the following initialization scheme. let $\mathbf{E} \in \C^{n \times n}$ be a perturbation matrix. 
+We diagonalize the perturbed HiPPO matrix as
+\begin{equation}
+\label{eq.perturbedHiPPO}
+\tilde{\mathbf{A}}_H = \mathbf{A}_H + \mathbf{E} = \tilde{\mathbf{V}}_H \tilde{\mathbf{\Lambda}}_H \tilde{\mathbf{V}}_H^{-1}.
+\end{equation}
+We then initialize the systems using $\Sigma_{\text{Pert}} = (\mathbf{A}_{\text{Pert}}, \mathbf{B}_{\text{Pert}}, \mathbf{C}_{\text{Pert}}, \mathbf{D}_{\text{Pert}}) = (\tilde{\boldsymbol{\Lambda}}_H, \tilde{\mathbf{V}}_H^{-1} \mathbf{B}_H, \mathbf{C}, \mathbf{D})$, where $\mathbf{C}$ and $\mathbf{D}$ are random matrices. Therefore, we approximately diagonalize the HiPPO initialization in the sense that although the diagonal entries in $\tilde{\boldsymbol\Lambda}$ do not approximate the eigenvalues of $\mathbf{A}_H$, the transfer function of $\Sigma_{\text{Pert}}$ is an approximation of that of $\Sigma_{\text{DPLR}}$ (see~\Cref{thm.perturbsys}). This is enough to guarantee a good initialization. Our proposed perturb-then-diagonalize method is not restricted to the HiPPO-LegS matrices in~\cref{eq.HiPPO}. 
+This endows our method with adaptivity to any (dense) initialization scheme. 
+This adaptivity was absent from the previous line of work on SSMs.
+
+We call our model S4-PTD or S5-PTD, depending on whether the model architecture is adapted from the S4D or the S5 model, where ``PTD'' stands for ``perturb-then-diagonalize.'' 
+Since our models are only different from the S4D and the S5 models in initialization, we refer interested readers to~\cite{gu2022parameterization,smith2023simplified} for a discussion of computation details and time/space complexity. 
+
+Centered around the perturbed initialization scheme~\cref{eq.perturbedHiPPO} are two important questions:
+\begin{enumerate}
+    \item What is the difference between the perturbed initialization $(\mathbf{A}_{\text{Pert}}, \mathbf{B}_{\text{Pert}}, \mathbf{C}_{\text{Pert}}, \mathbf{D}_{\text{Pert}})$ and the HiPPO initialization $(\mathbf{A}_{\text{DPLR}}, \mathbf{B}_{\text{DPLR}}, \mathbf{C}_{\text{DPLR}}, \mathbf{D}_{\text{DPLR}})$?
+    \item What is the condition number of $\tilde{\mathbf{V}}_H$?
+The first question is important because it controls the deviation of our perturbed initialization from the successful and robust DPLR initialization.
+\end{enumerate}
+The second question is important because it shadows the numerical robustness of conjugating the LTI system by $\tilde{\mathbf{V}}_H$. 
+Moreover, since the state vector $\mathbf{x}(t)$ is transformed by $\tilde{\mathbf{V}}_H$ via conjugation (see~\cref{sec:prelim}), a small condition number of $\tilde{\mathbf{V}}_H$ shows that its singular values are more evenly distributed.
+Hence, the transformation $\tilde{\mathbf{V}}_H$ does not significantly magnify or compress $\mathbf{x}(t)$ onto some particular modes.
+
+\subsection{Estimating the transfer function perturbation}
+
+To study the first question, we define the transfer function of the perturbed system to be
+\[
+G_{\text{Pert}}(s) = \mathbf{C}_{\text{Pert}} (s\mathbf{I} - \mathbf{A}_{\text{Pert}})^{-1} \mathbf{B}_{\text{Pert}} + \mathbf{D}_{\text{Pert}}.
+\]
+We control the size of the transfer function perturbation by proving the following theorem.
+\begin{thm}
+\label{thm.perturbsys}
+Assume ${\mathbf{C}_{\text{Pert}} \tilde{\mathbf{V}}_H^{-1}} = {\mathbf{C}_{\text{DPLR}} {\mathbf{V}}_H^{-1}}$ and $\mathbf{D}_{\text{Pert}} = \mathbf{D}_{\text{DPLR}}$. Suppose $\norm{\mathbf{E}}_2 \leq \epsilon$ and we normalize the matrices so that $\|{\tilde{\mathbf{V}}_H \mathbf{B}_\text{Pert}}\| = \|{{\mathbf{V}}_H \mathbf{B}_\text{DPLR}}\| = \|{\mathbf{C}_{\text{Pert}} \tilde{\mathbf{V}}_H^{-1}}\| = \|{\mathbf{C}_{\text{DPLR}} {\mathbf{V}}_H^{-1}}\| = 1$. For any $s$ on the imaginary axis, we have
+\[
+\abs{G_{\text{Pert}}(s) - G_{\text{DPLR}}(s)} = (2\ln(n)+4)\epsilon + \mathcal{O}(\sqrt{\log(n)}\epsilon^2).
+\]
+\end{thm}
+
+While our perturb-then-diagonalize method works for a general initialization and a bound on the transfer function error can always be established, the proof of~\Cref{thm.perturbsys} leverages the structure of HiPPO matrices to improve this bound.
+The error in~\Cref{thm.perturbsys} is the uniform error on the imaginary axis. 
+Using H\"older's inequality, for any bounded and integrable input function $\mathbf{u}(\cdot)$, if $\mathbf{y}_{\text{Pert}}$ and $\mathbf{y}_{\text{DPLR}}$ are the outputs of $\Sigma_{\text{Pert}}$ and $\Sigma_{\text{DPLR}}$, respectively, then we have
+\begin{equation}
+\begin{aligned}
+&\|\mathbf{y}_{\text{Pert}} - \mathbf{y}_{\text{DPLR}}\|_{L^2} = \|\hat{\mathbf{y}}_{\text{Pert}} - \hat{\mathbf{y}}_{\text{DPLR}}\|_{L^2} =  \|\hat{\mathbf{x}}(s) (G_{\text{Pert}}(is) - G_{\text{DPLR}}(is))\|_{L^2} \\
+&\qquad\leq \|\hat{\mathbf{x}}(s)\|_{L^2} \|G_{\text{Pert}}(is) \!-\! G_{\text{DPLR}}(is)\|_{L^\infty} \!\leq \|\mathbf{x}\|_{L^2} \big((2\ln(n)\!+\!4)\epsilon \!+\! \mathcal{O}(\sqrt{\log(n)}\epsilon^2)\big),
+\end{aligned}
+\end{equation}
+where the first and the last steps follow from Parseval's identity. 
+Hence,~\Cref{thm.perturbsys} gives us an upper bound on the distance between $\Sigma_{\text{Pert}}$ and $\Sigma_{\text{DPLR}}$ in the operator norm topology. 
+The theorem states that the error made by the perturbation is linear in the size of the perturbation. 
+Moreover, the error depends only logarithmically on the dimension $n$ of the state space. 
+
+\subsection{Perturbed initialization as an optimization problem}\label{sec:optimizeE}
+
+ This problem was studied by some numerical analysts~\cite{davies2008approximate,davies2009perturbations,banks2021gaussian,banks2022pseudospectral}. The following theorem can be derived from their results on perturbing a general square matrix by a Ginibre matrix.
+\begin{thm}\label{thm.averagecond}
+	Given any matrix $\mathbf{A} \in \C^{n \times n}$, perturbation size $\epsilon \in (0,1)$, and spectral radius $R > 0$. Let $\mathbf{G}_n \in \C^{n \times n}$ be the Ginibre matrix and let $\Omega$ be the event that the spectrum of $\mathbf{A} + \epsilon \mathbf{G}_n$ is contained in $D_R(0)$, the disk centered at zero of radius $R$. Then, we have
+	\[
+	\mathbb{E} \left[\kappa_{\text{eig}}(\mathbf{A} + \epsilon \mathbf{G}_n)^2 \middle| \Omega \right] \leq \norm{\mathbf{A}}^2 \frac{R^2 n^3}{\epsilon^2 \mathbb{P}(\Omega)},
+	\]
+	where the eigenvector condition number of $\mathbf{A} + \epsilon \mathbf{G}_n$ is defined by
+	\[
+	\kappa_{\text{eig}}(\mathbf{A} + \epsilon \mathbf{G}_n) = \inf\{\kappa(\tilde{\mathbf{V}}) \mid \mathbf{A} + \epsilon \mathbf{G}_n = \tilde{\mathbf{V}} \tilde{\boldsymbol{\Lambda}} \tilde{\mathbf{V}}^{-1}, \tilde{\boldsymbol{\Lambda}} \text{ diagonal}\}.
+	\]
+\end{thm}
+\Cref{thm.averagecond} states that we can get around the exponentially growing condition number of $\tilde{\mathbf{V}}_H$ by adding a small Gaussian perturbation to $\mathbf{A}_H$, which justifies our S4-PTD and S5-PTD models. While it shows an upper bound on the eigenvector condition number of the perturbed HiPPO matrix, in most circumstances, perturbation by the Ginibre matrix does not give us the smallest eigenvector condition number.
+The following theorem
+provides a deterministic estimate of the eigenvector condition number for the ``best perturbation scheme.''
+
+\begin{thm}[{\cite[Thm.~1.1.]{banks2021gaussian}}]\label{thm.bestcond}
+Given any $\mathbf{A} \in \C^{n \times n}$ and $\epsilon \in (0,1)$, there exists a matrix $\mathbf{E} \in \C^{n \times n}$ with $\norm{\mathbf{E}} \leq \epsilon$ and an eigenvector matrix $\tilde{\mathbf{V}}$ of $\mathbf{A} + \mathbf{E}$ such that
+\[
+\kappa(\tilde{\mathbf{V}}) \leq 4n^{3/2}\big(1+\epsilon^{-1}\norm{\mathbf{A}}\big).
+\]
+\end{thm}
+
+\Cref{thm.bestcond} shows the promise of finding a good perturbation matrix to reduce the eigenvector condition number.
+In this paper, we propose to compute $\mathbf{E}$ by solving the following optimization problem with a soft constraint:
+\begin{equation}
+\label{eq.optobjective}
+\text{minimize } \Phi(\mathbf{E}) = \kappa(\tilde{\mathbf{V}}_H) + \gamma \|\mathbf{E}\| \qquad \text{s.t.} \qquad \mathbf{A}_H + \mathbf{E} = \tilde{\mathbf{V}}_H \tilde{\boldsymbol{\Lambda}} \tilde{\mathbf{V}}_H^{-1},\quad \tilde{\boldsymbol{\Lambda}} \text{ diagonal},
+\end{equation}
+where $\gamma > 0$ is a hyperparameter that controls the trade-off between $\kappa(\tilde{\mathbf{V}}_H)$ and $\|\mathbf{E}\|$. We implement a solver to this optimization problem using gradient descent.
+As $\gamma$ increases, it is harder to recover the original states $\mathbf{x}(\cdot)$ from the transformed states $\tilde{\mathbf{V}}_H \mathbf{x}(\cdot)$ because $\kappa(\tilde{\mathbf{V}}_H)$ increases, but $\|\mathbf{E}\|$ decreases, resulting in a more robust SSM that is closer to the flawless HiPPO initialization.
+
+
+\section{Empirical evaluation and discussion}
+
+\label{sec:experiments}
+
+In this section, we present empirical evaluations of our proposed S4-PTD and S5-PTD models. 
+In~\cref{sec:LRA} we compare the performance of our full model with the existing ones in the Long Range Arena (LRA).
+In~\cref{sec:robustness}, we perform a sensitivity analysis using the CIFAR-10 dataset to provide real-world evidence that our perturbed initialization scheme is more robust than the one in the S4D/S5 model. 
+Finally, in~\cref{sec:ablation}, we study the relationship between the size of the perturbation matrix $\mathbf{E}$ and the performance of our models.
+
+\subsection{Performance in the Long-Range Arena}
+\label{sec:LRA}
+
+The LRA benchmark comprises six tasks with sequential data~\cite{tay2020long}. 
+This collection, with its sequence lengths ranging from $1024$ to $16000$, is designed to measure the model's capability of processing the long-range inputs. 
+We train an S4-PTD model and an S5-PTD model to learn these tasks, respectively. 
+We adopt the same SSM architectures, and thus the same number of parameters, from the original S4D~\cite{gu2022parameterization} and S5 papers~\cite{smith2023simplified}. Results are reported in~\Cref{tab:LRA}, along with the accuracies of other sequential models, including the Liquid-S4 model which is built upon S4~\cite{hasani2022liquid}.
+We report details of hyperparameters in~\Cref{sec:experimentdetail}. 
+While the perturbation matrix $\mathbf{E}$ is also tunable, we restrict its size to be less than $10\%$ of that of the HiPPO matrix $\mathbf{A}_H$, promoting the worst-case robustness of our model (see~\cref{sec:robustness}). 
+We note that the S4-PTD model outperforms the S4D model (and even the S4 model with the DPLR structure for most tasks), while the S5-PTD model matches the performance of the S5 model.
+
+\begin{table}
+\centering
+\begin{tabular}{c c c c c c c c}
+\specialrule{.1em}{.05em}{.05em}
+{Model} & \!\!\!\texttt{ListOps}\!\!\! & \texttt{Text} & \!\!\!\texttt{Retrieval}\!\!\! & \texttt{Image} & \!\!\!\!\texttt{Pathfinder}\!\!\!\! & \texttt{Path-X} & \!\!\!Avg. \\
+\hline
+Transformer & $36.37$ & $64.27$ & $57.56$ & ${{42.44}}$ & $71.40$ & \ding{55} & $53.66$  \\
+Luna-256 & $37.25$ & $64.57$ & $79.29$ & ${{47.38}}$ & $77.72$ & \ding{55} & $59.37$  \\
+H-Trans.-1D & $49.53$ & $78.69$ & $63.99$ & ${{46.05}}$ & $68.78$ & \ding{55} & $61.41$  \\
+CCNN & $43.60$ & $84.08$ & \ding{55} & ${{88.90}}$ & $91.51$ & \ding{55} & $68.02$  \\
+\hline
+S4 & $59.60$ & $86.82$ & $90.90$ & ${{88.65}}$ & $94.20$ & $96.35$ & $86.09$  \\
+Liquid-S4 & $\underline{\boldsymbol{62.75}}$ & $\underline{89.02}$ & $\underline{91.20}$ & $\underline{\boldsymbol{89.50}}$ & $\underline{94.80}$ & $\underline{96.66}$ & $\underline{87.32}$  \\
+\hline
+S4D & $60.47$ & $86.18$ & $89.46$ & $88.19$ & $93.06$ & $91.95$ & $84.89$ \\
+S4-PTD (ours) & $\underline{60.65}$ & $\underline{88.32}$ & $\underline{91.07}$ & $\underline{88.27}$ & $\underline{94.79}$ & $\underline{96.39}$ & $\underline{86.58}$ \\
+\hline
+S5 & $62.15$ & $89.31$ & $91.40$ & $\underline{88.00}$ & $95.33$ & $\underline{\boldsymbol{98.58}}$ & $87.46$ \\
+S5-PTD (ours) & $\underline{\boldsymbol{62.75}}$ & $\underline{\boldsymbol{89.41}}$ & $\underline{\boldsymbol{91.51}}$ & $87.92$ & $\underline{\boldsymbol{95.54}}$ & $98.52$ & $\underline{\boldsymbol{87.61}}$ \\
+\specialrule{.1em}{.05em}{.05em}
+\end{tabular}
+\caption{Test accuracies on LRA, where \ding{55} means the model isn't outperforming random guessing. We use the boldface number to indicate the highest test accuracy among all models for each task. We use the underlined number to indicate the highest test accuracy within the comparable group.}
+\label{tab:LRA}
+\end{table}
+
+
+\subsection{Robustness of our perturbed model over the diagonal model}
+\label{sec:robustness}
+
+In~\cref{sec:failuremodes}, we see the instability of the S4D model using a synthetic example. 
+Here, we demonstrate its practical implication regarding the robustness of the model. 
+We train an S4D model and an S4-PTD model (with $\|\mathbf{E}\| / \|\mathbf{A}_H\| \approx 10^{-1}$) to learn the sCIFAR task, where the images in the CIFAR-10 dataset~\cite{krizhevsky2009learning} are flattened into sequences of pixels. 
+We test the two models against two different test sets: one is taken from the original CIFAR-10 dataset while the other one is contaminated by $10\%$ of sinusoidal noises whose frequencies are located near the spikes of $\abs{G_{\text{Diag}}}$. 
+We plot the training and test accuracies of the two models in~\Cref{fig:experiments}\subref{fig:expS4D}~and~\subref{fig:expS4P}. 
+Whereas the two models both achieve high accuracies on the uncontaminated test set, the S4D model does not generalize to the noisy dataset as the S4-PTD model does. 
+That is, the S4D model is not robust to these noises. 
+In comparison, since the S4-PTD initialization is uniformly close to the S4 initialization (see~\Cref{thm.perturbsys}) when $\|\mathbf{E}\|$ is small, the S4-PTD model is robust to noises with any mode. 
+We remark, nevertheless, that the noises in this experiment are the ``worst-case'' noises and intentionally made to fail the S4D model; in practice, the distribution of sensitive modes of S4D in the frequency domain gets sparser as $n$ increases (see~\Cref{fig:transfer}), which improves its ``average-case'' robustness.
+
+\begin{figure}[!t]
+\centering
+\begin{subfigure}{.32\textwidth}
+\begin{overpic}[width=.93\textwidth]{./Figures/S4D_robust.pdf}
+\put(41,-4) {epochs}
+\put(0,22) {\rotatebox{90}{accuracy}}
+\end{overpic} 
+\subcaption{Accuracies for S4D}
+\label{fig:expS4D}
+\end{subfigure}
+\hspace{-0.3cm}
+\begin{subfigure}{.32\textwidth}
+\begin{overpic}[width=.93\textwidth]{./Figures/S4P_robust.pdf}
+\put(41,-4) {epochs}
+\put(0,22) {\rotatebox{90}{accuracy}}
+\end{overpic} 
+\subcaption{Accuracies for S4-PTD}
+\label{fig:expS4P}
+\end{subfigure}
+\begin{subfigure}{.32\textwidth}
+\begin{overpic}[width=0.93\textwidth]{./Figures/ablation.png}
+\put(32,-3.5) {\small{$\|\mathbf{E}\| / \|\mathbf{A}_H\|$}}
+\put(0,28) {\small{\rotatebox{90}{\textcolor{red}{accuracy}}}}
+\put(98,50.5) {\small{\rotatebox{270}{\textcolor{blue}{$\kappa(\tilde{\mathbf{V}}_H)$}}}}
+\end{overpic}
+\subcaption{Ablation study}
+\label{fig:expablation}
+\end{subfigure}
+\caption{(\subref{fig:expS4D}) and (\subref{fig:expS4P}): the training and test accuracies of the S4D model and the S4-PTD model on contaminated and uncontaminated CIFAR-10 dataset (see~\cref{sec:robustness}). (\subref{fig:expablation}): The effect of the perturbation size on the accuracy (shown in red) of the S4-PTD model and the eigenvector condition number (shown in blue) of the perturbed HiPPO matrix (see~\cref{sec:ablation}).
+}
+\label{fig:experiments}
+\end{figure}
+
+
+
+\subsection{Ablation study of our model}
+\label{sec:ablation}
+
+As mentioned in~\cref{sec:S4-PTD}, the size of the perturbation plays a key role in the performance of our S4-PTD and S5-PTD models. 
+When $\mathbf{E} = 0$, the eigenvector condition number of $\mathbf{A}_H$ is exponential in $n$, making it numerically impossible to diagonalize when $n$ is moderately large. On the other hand, when $\mathbf{E}$ overshadows $\mathbf{A}_H$, the initialization scheme becomes a random one, often leading to poor performance~\cite{gu2021combining}. 
+In this section, we train an S4-PTD model to learn the sequential CIFAR (sCIFAR) task. 
+We control the size of the perturbation $\|\mathbf{E}\|$ by changing the hyperparameter $\gamma$ in the optimization problem~\cref{eq.optobjective}. 
+For each perturbation matrix $\mathbf{E}$, we then initialize our S4-PTD model by diagonalizing $\mathbf{A}_H + \mathbf{E}$. 
+In~\Cref{fig:experiments}\subref{fig:expablation}, we plot (in red) the test accuracies with respect to different perturbation sizes. 
+We see that our S4-PTD model achieves its best performance when the ratio between the perturbation size and the size of the HiPPO matrix is between $10^{-2}$ and $1$, while the accuracy drops when this ratio gets too small or too large. 
+This aligns with our expectations. 
+In addition, the (blue) curve of the eigenvector condition number admits a straight-line pattern with a slope of roughly $-1$, corroborating the factor $\epsilon^{-1}$ in~\Cref{thm.bestcond}.
+
+
+
+
+
+

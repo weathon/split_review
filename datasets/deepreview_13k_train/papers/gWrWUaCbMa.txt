@@ -1,0 +1,266 @@
+\title{A Truncated Newton Method for Optimal Transport}
+
+\begin{abstract}
+Developing a contemporary optimal transport (OT) solver requires navigating trade-offs among several critical requirements: GPU parallelization, scalability to high-dimensional problems, theoretical convergence guarantees, empirical performance in terms of precision versus runtime, and numerical stability in practice. With these challenges in mind, we introduce a specialized truncated Newton algorithm for entropic regularized OT. In addition to proving that locally quadratic convergence is possible without assuming a Lipschitz Hessian, we provide strategies to maximally exploit the high rate of local convergence in practice. Our GPU-parallel algorithm exhibits exceptionally favorable runtime performance, achieving high precision orders of magnitude faster than many existing alternatives. This is evidenced by wall-clock time experiments on 4096-dimensional MNIST and color transfer problems. The scalability of the algorithm is showcased on an extremely large OT problem with $n \approx 10^6$, solved approximately under weak entopric regularization.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+The optimal transportation problem has long been a cornerstone of various disciplines, ranging from physics (Bokanowski & Grébert, 1996; Léonard, 2012; Levy et al., 2021) to machine learning and computer vision (Ferns et al., 2004; Pitie et al., 2005; Gulrajani et al., 2017; Genevay et al., 2018). Traditional approaches (Pele & Werman, 2009; Lee & Sidford, 2014), while exact and theoretically robust, encounter significant computational hurdles in high-dimensional settings. The (re-)introduction of entropic regularized OT (EOT), as pioneered by Cuturi (2013), has mitigated challenges in scalability by regularizing the classical problem, thereby enabling solutions via the GPU-friendly Sinkhorn-Knopp matrix scaling algorithm. This advancement has yielded substantial speed improvements, making it several orders of magnitude faster in high dimensions than traditional solvers. However, EOT methods necessitate a delicate balance between regularization strength and convergence speed, a trade-off that can compromise the precision of the solution.  
+
+Despite significant recent progress towards improving this trade-off, many state-of-the-art solvers still struggle to outperform aggressively tuned Sinkhorn iterations in practice (Jambulapati et al., 2019; Lin et al., 2019). While they offer superior theoretical guarantees, their practical performance is often less compelling, particularly in terms of speed and scalability. Existing algorithms either suffer from high computational complexity or fail to leverage modern hardware capabilities, such as GPU parallelization, effectively. To bridge this gap, we develop a new algorithm that remains numerically stable and converges rapidly even at extremely weak regularization levels, thereby enhancing precision in practice. By simultaneously exploiting the inherent parallelism of GPUs and superlinear local convergence of truncated Newton algorithms, our method scales effortlessly to high-dimensional problems, offering a pragmatic yet theoretically sound solution to the OT problem.  
+
+Our contributions are as follows: (i) we develop a specialized (linear) conjugate gradient algorithm for obtaining an approximation of the Newton direction for the EOT dual problem and analyze its convergence properties, (ii) we use the approximate (truncated) Newton direction in conjunction with a helper routine to develop a solver for the EOT dual problem and prove its superlinear local convergence, as well as per iteration computational cost, (iii) we develop an adaptive temperature annealing approach, based on the MDOT framework of Kemertas et al. (2023), to maximally exploit this fast local rate, and finally (iv) present compelling empirical results via wall-clock time benchmarking in a GPU setting against a large suite of alternative algorithms in $n=4096$ dimensions.  
+
+
+
+\section{2 BACKGROUND AND RELATED WORK  }
+
+
+Notation and Definitions. In this work, we are concerned with discrete OT. $\Delta_{n}\subset\mathbb{R}_{\geq0}^{n}$ denotes the $(n{-}1)$ -simplex. The row sum of an $n\times n$ matrix $P$ is given by $r(P):=P\mathbf{1}$ and the column sum by $c(P):=P^{\top}\mathbf{1}$ . Given target marginals $r,c\in\Delta_{n}$ , the transportation polytope is written as $\mathcal{U}(\pmb{r},\pmb{c})=\{P\in\mathbb{R}_{\ge0}^{n\times n}\mid\pmb{r}(P)=\pmb{r},\pmb{c}(P)=\pmb{c}\}$ . Division, exp and log over vectors or matrices indicate element-wise operations. Vectors in $\mathbb{R}^{n}$ are taken to be column vectors and concatenation of two column vectors $\mathbf{\boldsymbol{x}},\mathbf{\boldsymbol{y}}$ is $\left({\pmb x},{\pmb y}\right)$ . Elementwise minimum and maximum of a vector $\textbf{\em x}$ is written as $x_{\mathrm{min}}$ and $x_{\mathrm{max}}$ . Matrix and vector inner products alike are given by $\langle\cdot,\cdot\rangle$ . An $n\times n$ diagonal matrix with $\pmb{x}\in\mathbb{R}^{n}$ along the diagonal is written as ${\bf D}({\pmb x})$ . We write $\chi^{2}(y|x)$ for the $\chi^{2}$ -divergence given by $\langle\pmb{x},(\pmb{y}/\pmb{x})^{2}\rangle-1\geq\left\|\pmb{y}-\pmb{x}\right\|_{1}^{2}$ . For the square root of $\chi^{2}(\pmb{y}|\pmb{x})$ , we write $\chi(\pmb{y}|\pmb{x})$ with a slight abuse of notation. The Shannon entropy of $r\in\Delta_{n}$ is denoted $\begin{array}{r}{\dot{H}(\boldsymbol{r})=-\sum_{i}r_{i}\log r_{i}}\end{array}$ . We write $\begin{array}{r}{D_{\mathrm{KL}}({\pmb x}|{\pmb y})=\sum_{i}x_{i}\log(x_{i}/y_{i})+\sum_{i}\ddot{y_{i}}-\sum_{i}x_{i}}\end{array}$ for the KL divergence between $\pmb{x},\pmb{y}\in\mathbb{R}_{>0}^{n}$ . We denote LogSumExp reductions along the rows and columns of $X$ by $\operatorname{LSE}_{r}(X):=\log{\big(}\exp\{X\}\mathbf{1}{\big)}$ and $\mathrm{LSE}_{c}(X):=\log\left(\exp\{X^{\top}\}\mathbf{1}\right)$ .  
+
+2.1 OPTIMAL TRANSPORT AND ENTROPIC REGULARIZATION  
+
+We study the discrete optimal transport problem, formulated as the following linear program:  
+
+$$
+\operatorname*{minimize}_{P\in\mathcal{U}(r,c)}\quad\langle P,C\rangle,
+$$  
+
+where we assume the $n\times n$ cost matrix has entries $C_{i j}\in[0,1]$ . Cuturi (2013) re-popularized EOT, showing that entropic regularization can help quickly approximate the solution of (1) on GPUs:  
+
+$$
+\operatorname*{minimize}_{P\in\mathcal{U}(r,c)}\quad\langle P,C\rangle-\frac{1}{\gamma}H(P),
+$$  
+
+where the regularization weight $\gamma^{-1}\in\mathbb{R}_{>0}$ is called the temperature. It can be shown with ease that since the objective in (2) is strictly convex in $P$ , problem (2) has a unique solution of the form  
+
+$$
+P(u,v;\gamma)=\exp\{u\mathbf{1}^{\top}+\mathbf{1}v^{\top}-\gamma C\}.
+$$  
+
+Using the form of the solution of (2), the following unconstrained dual problem can be solved instead:  
+
+$$
+\operatorname*{minimize}_{\pmb{u},\pmb{v}\in\mathbb{R}^{n}}\quad g(\pmb{u},\pmb{v};\gamma)=\sum_{i j}P(\pmb{u},\pmb{v};\gamma)_{i j}-1-\langle\pmb{u},\pmb{r}\rangle-\langle\pmb{v},\pmb{c}\rangle,
+$$  
+
+where we keep the constant $-1$ as a convention. Solving (4) given some initial ${\pmb u},{\pmb v}$ amounts to a Bregman projection onto $\mathcal{U}(\boldsymbol{r},\boldsymbol{c})$ in the sense that $\begin{array}{r}{P(\pmb{u}^{*},\pmb{v}^{*})=\arg\operatorname*{min}_{P\in\mathcal{U}(\pmb{r},c)}D_{\mathrm{KL}}(P|P(\pmb{u},\pmb{v}))}\end{array}$ ; see derivations in Appx. A.1.2. Noting that $\nabla_{\pmb{u}}g=\pmb{r}(P)-\pmb{r}$ and $\nabla_{\pmb{v}}g=\pmb{c}(P)-\pmb{c}$ , we write:  
+
+$$
+\nabla^{2}g=\left({\bf D}(r(P))\begin{array}{c c}{{P}}\\ {{P^{\top}}}&{{{\bf D}(c(P))}}\end{array}\right)_{2n\times2n},
+$$  
+
+where the Hessian is positive semi-definite (PSD) with one zero eigenvalue.1  
+
+Related Work. The SK algorithm has long been known to enjoy an exponential convergence rate for minimizing (4) (Franklin & Lorenz, 1989; Knight, 2008). However, at low temperatures, this fast rate does not predict non-asymptotic behavior well due to a large constant. Altschuler et al. (2017) provided a simple analysis, in which they proved a rate $\tilde{O}(n^{2}\varepsilon^{-\bar{3}})$ for the SK algorithm, where $\langle P-P^{*},C\rangle\leq\varepsilon$ . A simple routine for rounding near-feasible plans onto $\mathcal{U}(\boldsymbol{r},\boldsymbol{c})$ was introduced and is now widely adopted. They also proposed a new algorithm, Greenkhorn, and showed a matching complexity bound. Unlike SK, Greenkhorn scales one greedily selected row/column at a time, which limits GPU utilization unless $n$ is extremely large. The complexity bounds for Sinkhorn and Greenkhorn were later improved to $\widetilde O(n^{2}\varepsilon^{-2})$ (Dvurechensky et al., 2018; Lin et al., 2019). However, our experiments suggest Sinkhorn typically behaves like $\widetilde{\cal O}(\varepsilon^{-1})$ . Moreover, Kemertas et al. (2023) showed it can enjoy better performance at lower temperatures if tuned.  
+
+Dvurechensky et al. (2018) proposed an Adaptive Primal-Dual Accelerated Gradient Descent (APDAGD) algorithm for solving the dual EOT problem (4). Lin et al. (2019) provided a refined rate of $\widetilde{O}(n^{5/2}\varepsilon^{-1})$ for APDAGD and proposed a generalization APDAMD, which applied mirror descent to (4). The complexity for APDAMD was shown to be ${\widetilde{O}}(n^{2}{\sqrt{c}}/\varepsilon)$ , where $c\in(0,n]$ is a constant. Following Altschuler et al. (2017), Lin et al. (2019) meas ured speed in terms of the number of row/col updates in their experiments (rather than wall-clock time) and only considered a strong regularization (low precision) setting. Targeting higher precision, Jambulapati et al. (2019) proposed an algorithm for the OT problem that is not based on entropic regularization, with complexity $\widetilde{O}(n^{2}\varepsilon^{-1})$ . While this rate is theoretically state-of-the-art, Jambulapati et al. (2019) noted that Sinkhorn iteration, when aggressively tuned, outperforms all other methods empirically (including their own). Guminov et al. (2021) proposed an Accelerated Alternating Minimization (AAM) algorithm, combining Nesterov’s momentum and Sinkhorn-type block coordinate descent, with complexity ${\mathcal{O}}(n^{5/2}\varepsilon^{-1})$ .  
+
+While APDAMD applied mirror descent to (4), MDOT of Kemertas et al. (2023) applied it to (1) and recovered connections to temperature annealing methods (see details in Sec. 2.2), such as those of Schmitzer (2019) and Feydy (2020). For instance, Alg. 3.5. of Feydy (2020) takes a single Sinkhorn update every time the temperature is decayed; while this can compute rough approximations quickly at high temperatures, a single Sinkhorn update is insufficient for keeping the dual objective value in check, so that their approach hits a precision wall as we empirically show; see also Xie et al. (2020). Ballu & Berthet (2023) derive a similar algorithm, but they guarantee convergence by maintaining a running average of plans $P$ computed this way. While effective at low precision and easy to implement on a GPU, this algorithm exhibits $\widetilde{O}(n^{2}\varepsilon^{-2})$ dependence on error. Most closely related to ours is the work of Kemertas et al. (2023), as we build on MDOT. In addition to the temperature annealing framework, Kemertas et al. (2023) proposed an algorithm (PNCG) to minimize (4) at each new value of the temperature, based on a non-linear conjugate gradient method (Fletcher & Reeves, 1964). The approach introduced here has several beneftis over PNCG, including added ease of theoretical analysis, faster runtime in practice and minimal line search overhead. While second order methods have been considered for OT (Mérigot, 2011; Blondel et al., 2018), they have not been implemented on GPUs with strong empirical performance in high dimensions to our knowledge. Indeed, Tang et al. (2024) also developed a 2nd order method recently, but their Hessian sparsification strategy is more amenable to a CPU setting, and as such was only tested on CPUs for $n=784$ .  
+
+
+
+\section{2.2 TEMPERATURE ANNEALING AS MIRROR DESCENT  }
+
+
+A well-known strategy to deal with the difficulty of solving (4) under weak regularization is annealing the temperature $\gamma^{-1}$ in (3) gradually towards zero. When viewed as mirror descent on (2), temperature annealing strategies (e.g., see Schmitzer (2019)) amount to a particular initialization of the dual variables $(u,v)$ in successive instances of (4) given approximate solutions at prior $\gamma$ (Kemertas et al., 2023). Each dual problem (4) at a given $\gamma^{(t+1)}$ for $t\geq1$ is warm-started in some neighborhood of the solution given some near-optimal $\pmb{z}^{(t)}{=}(\mathbf{\pmb{u}}^{(t)},\mathbf{\pmb{v}}^{(t)})\in\mathbb{R}^{2n}$ . The MDOT framework of Kemertas et al. (2023) specifically initializes $z^{(t+1)}$ via a Taylor approximation with respect to $\gamma$ under backward finite differencing. Further, they proposed to use a more stringent tolerance $O(\gamma^{-p})$ for $\|\nabla g\|_{1}$ (given some $p\geq1,$ ), whereas prior work used $O(\gamma^{-1})$ (Altschuler et al., 2017; Lin et al., 2019). Their tuned choice $p=1.5$ was shown to improve performance under weak regularization. The pseudo-code for MDOT is shown in Alg. 1, where some routines are defined with “· · · ” as a placeholder for extra parameters that may be required by specific implementations. Given $\gamma^{(t)}$ in each iteration $t\geq1$ , the algorithm picks a tolerance $\varepsilon_{\mathrm{d}}$ for the dual gradient norm (L4). Then, marginals $r,c$ are smoothed in L5 for numerical stability or improved convergence by mixing in the uniform distribution (with a combined weight of at most $\varepsilon_{\mathrm{d}}/2$ ) to stay away from the boundary of $\mathcal{U}(\boldsymbol{r},\boldsymbol{c})$ . L6 initializes the transport plan $P$ to be the independence coupling $\bar{r}\tilde{c}^{\top}$ , i.e., the solution of (2) for $\gamma\to0$ over $\mathcal{U}(\tilde{\boldsymbol{r}},\tilde{\boldsymbol{c}})$ . In L7, minimizing (4) to $\bar{\varepsilon}_{\mathrm{d}}\bar{/}2$ tolerance for the smoothed marginals guarantees $\|\nabla g(z;\gamma)\|_{1}\leq\varepsilon_{\mathrm{d}}$ by triangle inequality. Next, we add an AdjustSchedule routine in L8, whereas Kemertas et al. (2023) used a fixed decay rate, setting $q^{(t+1)}\gets q^{(t)}$ . After the temperature decay (L9), the dual variables are warm-started in L10 via an approximate 1st order expansion for the next iteration. Finally, the plan as given by (3) is rounded onto $\mathcal{U}(\boldsymbol{r},\boldsymbol{c})$ in L14 via Alg. 2 of Altschuler et al. (2017). Then, given that $\|\nabla g(z;\gamma_{\mathrm{f}})\|_{1}\leq\gamma_{\mathrm{f}}^{-1}\operatorname*{min}(H(r),H(c))$ the user is guaranteed error $\langle P-P^{*},C\rangle\leq2\gamma_{\mathrm{f}}^{-1}\operatorname*{min}(H(r),H(c))$ in the worst case (assuming ${\pmb r}(P)={\pmb r}$ or ${\pmb{c}}(P)={\pmb{c}}$ at loop termination). In Section 3, we develop and tune specific algorithms in tandem to carry out L5, 7 and 8 of Alg. 1 to maximize efficiency, and maintain GPU parallelization and numerical stability.  
+
+2.3 TRUNCATED NEWTON METHODS  
+
+For minimizing (4) in L7 of Alg. 1, we will rely on truncated Newton methods, which are briefly reviewed here (see Ch. 7 of Nocedal & Wright (2006) and Nash (2000) for a survey). While Newton’s method for non-linear optimization seeks an exact solution $d_{k}$ of the linear system $\nabla^{2}g_{k}\;\pmb{d}_{k}=-\nabla g_{k}$ at each optimization step $k$ (typically combined with line search or trust-region methods), truncated Newton methods find an approximate/inexact solution by “truncating” an iterative solver of the linear system (LS), e.g., a linear conjugate gradient (linear CG) algorithm. The particular termination criteria for the LS solver dictates the order of convergence;  
+
+![](images/296d57376843cac272966015243b96f3c15f387b7229a53dbd7fb8d5b415c076.jpg)  
+
+more stringent criteria yields higher order of convergence (up to quadratic), but requires more iterations for the LS solver (inner-most loop).  
+
+In particular, define the residual $\boldsymbol{e}_{k}:=\nabla^{2}g_{k}\:\boldsymbol{d}_{k}+\nabla g_{k}$ of the system in step $k$ for the approximate Newton direction $d_{k}$ . Given $\eta_{k}\in(0,1)$ , the LS solver is terminated when  
+
+$$
+\|e_{k}\|\leq\eta_{k}\|\nabla g_{k}\|
+$$  
+
+for some norm. If the Hessian is continuous in some neighborhood of the solution and we start sufficiently close to the solution, we have $\|\nabla g_{k+1}\|\,\leq\,\mathring{(\eta_{k}+o(1))}\,\|\nabla g_{k}\|$ . Then, choosing the forcing sequence $\{\eta_{k}\}$ such that $\eta_{k}=O(\|\nabla g_{k}\|^{r-1})$ for $r\in(1,2)$ , one obtains $Q$ -superlinear local convergence of order $r$ assuming $\begin{array}{r}{\operatorname*{lim}_{k\to\infty}\eta_{k}=0}\end{array}$ (Nocedal & Wright, 2006).  
+
+
+
+\section{3 MIXING TRUNCATED NEWTON & SINKHORN FOR BREGMAN PROJECTIONS  }
+
+
+This section is organized as follows. In Section 3.1, we first develop a technique for obtaining the truncated Newton direction with convergence guarantees (Alg. 2) and introduce a helper routine (Alg. 3) to improve the convergence rate of this algorithm. In Sec. 3.2, we integrate this approach with backtracking line search to arrive at a Bregman projection algorithm (L7 of Alg. 1). Its per-step cost and local convergence properties are shown theoretically. Then, in Sec. 3.3 an adaptive temperature decay schedule (L8 of Alg. 1) is proposed to maximally exploit the high rate of local convergence and its use is empirically demonstrated. Lastly, in Sec. 3.4, we discuss precautionary measures for numerical stability of this technique in practice via marginal smoothing as in L5 of Alg. 1.  
+
+3.1 THE DISCOUNTED HESSIAN AND THE BELLMAN EQUATIONS  
+
+Suppose we are interested in finding an approximate solution to the Newton system for the dual (Bregman projection) problem (4) with a linear CG solver. In this section, we propose a particular positive-definite (PD) approximation of the PSD Hessian in (5) for two reasons. First, although linear CG should converge in theory despite the presence of a zero eigenvalue (Axelsson, 2003), infinitesimal numerical errors along this zero-eigendirection, as well as other unknown near-zero eigendirections, may compound and lead to numerical instabilities due to machine precision limits. Second, since our PD substitute for the Hessian allows for the use of matrix inversion, this is convenient for obtaining theoretical guarantees. This approach also yields connections to reinforcement learning that may be of separate interest. Henceforth, we define the $\rho$ -discounted Hessian for $\rho\in[0,1)$ :  
+
+$$
+\nabla^{2}g(\rho):=\left(\!\!\begin{array}{c c}{{{\bf D}(r(P))}}&{{\sqrt{\rho}P}}\\ {{\sqrt{\rho}P^{\top}}}&{{{\bf D}(c(P))}}\end{array}\!\!\right).
+$$  
+
+By the Gerschgorin Circle Theorem, all eigenvalues $\lambda_{i}(\nabla^{2}g(\rho))\ge(1\!-\!\sqrt{\rho})\operatorname*{min}(r(P)_{\operatorname*{min}},c(P)_{\operatorname*{min}})$ are positive, so that $\nabla^{2}g(\rho)$ is invertible. The block matrix inversion formula yields:  
+
+$$
+\nabla^{2}g(\rho)^{-1}=\left(\!\!\begin{array}{c c}{{F_{r}(\rho)^{-1}}}&{{-F_{r}(\rho)^{-1}P_{c}^{\top}}}\\ {{-F_{c}(\rho)^{-1}P_{r}^{\top}}}&{{F_{c}(\rho)^{-1}}}\end{array}\!\!\right),
+$$  
+
+where we used the following definitions:  
+
+$$
+\begin{array}{c}{P_{r}:={\bf D}(r(P))^{-1}P,\;\;P_{c}:={\bf D}(c(P))^{-1}P^{\top}}\\ {P_{r c}:=P_{r}P_{c},\;\;P_{c r}:=P_{c}P_{r}}\\ {F_{r}(\boldsymbol\rho):={\bf D}(r(P))(I-\boldsymbol\rho P_{r c}),\;\;F_{c}(\boldsymbol\rho):={\bf D}(c(P))(I-\boldsymbol\rho P_{c r}).}\end{array}
+$$  
+
+Here, $P_{r},P_{c},P_{r c}$ and $P_{c r}$ are irreducible row-stochastic matrices since all their entries are positive and we have $P_{r}\mathbf{1}=\mathbf{D}(r(P))^{-1}P\mathbf{1}=\mathbf{D}(r(P))^{-1}r(P)=\mathbf{1}$ (likewise for $P_{c}$ ).2 Now, multiplying on the left by (8) both sides of the discounted Newton system $\nabla^{2}g(\rho)\,\pmb{d}=-\nabla g$ and re-arranging, we arrive at the well-known Bellman equations central in reinforcement learning:  
+
+$$
+d_{u}=s_{u v}+\rho P_{r c}d_{u},\,\,\,\,\,\,\,\,\,d_{v}=s_{v u}+\rho P_{c r}d_{v},
+$$  
+
+where $P_{r c}$ and $P_{c r}$ serve as “transition matrices”, and “reward vectors” are given by  
+
+$$
+\begin{array}{r}{\boldsymbol{s}_{u v}=D(\boldsymbol{r}(P))^{-1}(P_{c}^{\top}\nabla_{v}g-\nabla_{u}g),\quad\;\boldsymbol{s}_{v u}=D(c(P))^{-1}(P_{r}^{\top}\nabla_{u}g-\nabla_{v}g).}\end{array}
+$$  
+
+That is, the discounted Newton direction $\pmb{d}=(d_{u},d_{v})$ corresponds to the fixed point of the Bellman equations (or, “state-value function” of the finite Markov reward processes) in (10) and can be written as two $n$ -variable PD linear systems rather than a single $2n$ -variable PSD linear system. Further, without loss of generality, assuming that $\nabla_{v}g=\mathbf{0}$ (or equivalently ${\pmb{c}}(P)={\pmb{c}}$ , for example, following a single Sinkhorn update) yields a more intuitive understanding and a practical advantage. Using the form of the inverse discounted Hessian in (8), it can be shown that in this case (10) reduces to:  
+
+$$
+d_{u}=(r/r(P)-1)+\rho P_{r c}d_{u},\ \ \ \ d_{v}=-P_{c}d_{u},
+$$  
+
+where the second system is solved via a single matrix-vector product (effectively for free), thus reducing the problem further to a single $n$ -variable PD linear system. Moreover, an intuitive interpretation of the reward vector emerges, as the system now assigns a reward $r_{i}/r(P)_{i}-1$ to row index (state) $i$ . Next, we provide a theorem on the sufficiency of solving the discounted Newton system as a proxy for the undiscounted system (see Appx. A.1.3 for a more technical version of the following).  
+
+Theorem 3.1 (Forcing sequence under discounting). Assuming $c=c(P)$ and $d_{v}=-P_{c}d_{u}$ , define residuals $e_{u}(\rho){:=}F_{r}\bar{(}\rho)\bar{d}_{u}+\nabla_{u}g$ (cf. (12)), and $\pmb{e}:=\nabla^{2}g\,\pmb{d}+\nabla g$ (i.e., the Newton residual). For every $\tilde{\eta}<\eta/2$ , $\exists\rho_{0}\in[0,1)$ such that $\forall\rho\in[\rho_{0},1]$ ,  
+
+$$
+\begin{array}{r}{\|e_{u}({\boldsymbol\rho})\|_{1}\leq\tilde{\eta}\,\|\nabla g\|_{1}\implies\|e\|_{1}\leq\eta\,\|\nabla g\|_{1}\,.}\end{array}
+$$  
+
+In other words, discounting can be adopted while still enjoying the local convergence guarantees of truncated Newton methods (discussed in Sec. 2.3) for the original problem.  
+
+To find a suitable discount factor, we propose Algorithm 2, which anneals $1-\rho$ , approximately solving a sequence of linear systems to satisfy the forcing inequality (6). Note that CG in L3 is terminated when the $L_{1}$ norm of the residual is below $\tilde{\eta}=\eta/4$ . While the specific selection $\tilde{\eta}=\eta/4$ in L3 is only for simplicity, the decay factor 4 in L4 minimizes a theoretical upper bound on the number of operations until convergence (see proof of Thm. 3.2 in Appx. A.1.4). The following provides a rate on the overall cost of obtaining the truncated Newton direction with this approach.  
+
+Theorem 3.2 (Convergence of Algorithm 2). Suppose $r(P)_{\mathrm{min}}\geq\varepsilon_{\mathrm{d}}/(4n)$ given $\varepsilon_{\mathrm{d}}>0$ and each step of Alg. 2 runs diagonally-preconditioned $C G$ initialized with $\pmb{d}_{u}^{(0)}{=}\mathbf{0}$ . Alg. 2 terminates in  
+
+$$
+\widetilde{\cal O}\left(n^{2}\sqrt{\frac{(1-\mu)\chi({\pmb r}|{\pmb r}(P))}{(1-\lambda_{2})\eta\left\|{\pmb r}(P)-{\pmb r}\right\|_{1}}}\log\varepsilon_{\mathrm{d}}^{-1/2}\right)
+$$  
+
+operations, where $\lambda_{2}<1$ is the $2^{n d}$ largest eigenvalue of $P_{r c}$ and $\mu<1$ its smallest diagonal entry.  
+
+The proof of this theorem uses (i) the $O(\sqrt{\kappa})$ convergence of linear CG (Shewchuk, 1994), where condition number $\kappa=O((1-\rho)^{-1})$ in our setting, and (ii) an observation from the proof of Thm. 3.1 that $(1-\rho)^{-1}=\dot{O}((1-\lambda_{2})^{-1})$ at termination in the worst-case. However, as we discuss in more detail and validate empirically in Appx. F, this worst-case dependence on $\left(1-\lambda_{2}\right)^{-1}$ can be overly pessimistic; $(1-\rho)$ can be much better behaved than the spectral gap in practice. In other words, the Newton system can be discounted more aggressively than the worst-case analysis allows, thereby mitigating possible large values of $(1-\dot{\lambda}_{2})^{-1}$ . Furthermore, the convergence of CG can be much faster when preconditioned eigenvalues are tightly clustered on $\mathbb{R}$ (Nocedal &  
+
+![](images/aeefff9c1308d616cb8f94d5a68350d9b9c40a71769d604d74e3d8dbacf88e35.jpg)  
+
+$\mathbf{Algorithm\3\ChiSinkhorn}(u,v,\gamma,C,r,c,r(P),\varepsilon_{\chi})$ 1: while $\chi^{2}(r|r(P))>\varepsilon_{\chi}\,{\bf d o}$ 2: $\pmb{u}\leftarrow\pmb{u}+\log\pmb{r}-\log\pmb{r}(\pmb{P})$ 3: $\pmb{v}\leftarrow\log\pmb{c}-\mathrm{LSE}_{c}(\pmb{u}\mathbf{1}_{n}^{\top}-\gamma C)$ 4: $\log r(P)\gets\pmb{u}+\mathrm{LSE}_{r}(\pmb{1}_{n}\pmb{v}^{\top}-\gamma C)$ 5: end while 6: Output ${\pmb u},{\pmb v},{\pmb r}({\cal P})$ Wright, 2006). The rate in (14) captures this added efficiency only for the case when $P_{r c}\approx I$ so that its smallest diagonal entry $\mu\approx1$ ; for example, if plan $P$ is approximately a one-to-one mapping as in the Monge discrete matching problem (Brezis, 2018). Next, to control the possible dependence in (14) of the ratio $\chi(\pmb{r}|\pmb{r}(P))/\left||\pmb{r}(P)-\pmb{r}|\right|_{1}$ on $\varepsilon_{\mathrm{d}}$ , we propose to run Sinkhorn iteration before Alg. 2 is called until $\chi^{2}(\boldsymbol{r}|\boldsymbol{r}(P))$ is suitably bounded. Given dual variables $(u,v)$ and current row sum ${\pmb r}(P)$ where $c=c(P)$ by assumption, Alg. 3 performs this auxiliary task while maintaining $c=c(P)$ . Lemma 3.3 (Convergence of Algorithm 3). Assuming that $\|r(P)/r\|_{\infty}<\infty$ and $\|r/r(P)\|_{\infty}<\infty,$ , Algorithm 3 converges in $O(n^{2}/\varepsilon_{\chi})$ operations. 3.2 PROJECTING ONTO THE FEASIBLE POLYTOPE Combining Algorithms 2 and 3 with backtracking line search, we arrive at the TruncatedNewtonProject algorithm shown in Alg. 4 for solving (4). The choice of $\eta$ in L5 and the requirement that $\chi^{2}(r|r(P))\leq\varepsilon_{\mathrm{d}}^{2/5}$ by choosing $\varepsilon_{\chi}\,=\,\varepsilon_{\mathrm{d}}^{2/5}$ in L4, to control the ratio in (14), together yield the following corollary of Thm. 3.2 and Lemma 3.3 (see proof in Appx. A.1.5). Corollary 3.4 (Per-step Cost of Algorithm 4). If the backtracking line search in Alg. 4 converges in $S$ iterations, then an iteration of Alg. 4 costs $\widetilde{O}(n^{2}(S+\varepsilon_{\mathrm{d}}^{-2/5}(1-\lambda_{2})^{-1/2}))$ operations, where $\lambda_{2}<1$ is the 2nd largest eigenvalue of $P_{r c}$ defined as in (9) and evaluated at ${\pmb u},{\pmb v}$ (cf. (3)). In the next section, we outline an adaptive temperature annealing strategy to minimize the added cost of line search by initializing close to the solution. First, we pause for the next theorem, showing that TruncatedNewtonProject enjoys local quadratic convergence if $\eta={\cal O}(\|\nabla g\|_{1})$ as in L5 of Alg. 4. Theorem 3.5 (Per-step Improvement of Algorithm 4). Given a descent direction $\pmb{d}=(d_{u},-P_{c}d_{u})$ such that $\|\pmb{e}\|_{1}=\left\|\nabla^{2}g_{k}\pmb{d}+\nabla g_{k}\right\|_{1}\leq\eta\,\|\nabla g_{k}\|_{1},$ , let $\alpha\in(0,1]$ be the step size found via backtracking line search in the $k^{\mathrm{th}}$ step of Alg. 4. Then, $\nabla g_{k+1}:=\nabla g(\pmb{u}+\alpha\pmb{d}_{\pmb{u}},\pmb{v}-\alpha P_{c}\pmb{d}_{\pmb{u}})$ satisfies  
+
+$$
+\begin{array}{r}{\|\nabla g_{k+1}\|_{1}\leq(1-\alpha+\alpha\eta)\,\|\nabla g_{k}\|_{1}+\alpha\sqrt{\alpha}\,O(\|\nabla g_{k}\|_{1}^{2}).}\end{array}
+$$  
+
+The result differs from typical quadratic convergence results in two important ways: (i) we did not assume a Lipschitz Hessian, but instead leveraged the Armijo condition and the specific form of our descent direction, and (ii) we bounded the $L_{1}$ norm of the gradient (rather than $L_{2}$ ), which is more commonly used in optimal transport algorithms as stopping criteria. Given (15), we select $\eta$ in L5 of Alg. 4 with the local quadratic rate in mind, but avoid over-solving the system when $\|\nabla g\|_{1}$ is already close to the target $\varepsilon_{\mathrm{d}}$ by taking $\eta$ to be the maximum of $\|\nabla g\|_{1}$ and $0.8\varepsilon_{\mathrm{d}}/\left\|\nabla g\right\|_{1}$ .  
+
+3.3 INITIALIZING NEAR THE SOLUTION VIA ADAPTIVE MIRROR DESCENT  
+
+In this section, we outline a practical strategy for initializing the dual problem (4) sufficiently near the solution so that (i) the cost of line search is minimized $\alpha=1$ is almost always admissible),  
+
+$\mathbf{Algorithm4\;TruncatedNewtonProject}(u,v,\gamma,C,r,c,\varepsilon_{\mathrm{d}})$   
+1: $\pmb{v}\leftarrow\log\pmb{c}-\mathrm{LSE}_{c}(\pmb{u}\mathbf{1}_{n}^{\top}-\gamma C)$ ▷Ensure ${\pmb{c}}(P)={\pmb{c}}$ .   
+2: l $\begin{array}{r}{\lg r(P)\gets\pmb{u}+\mathrm{LSE}_{r}(\pmb{1}_{n}\pmb{v}^{\mathrm{~\tiny~1~}}-\gamma C)}\end{array}$   
+3: while $\|\nabla g\|_{1}=\|r-r(P)\|_{1}>\varepsilon_{\mathrm{d}}\,\mathbf{d}$ o   
+4: $u,v,r(P)\gets\mathrm{ChiSinkhorn}(u,v,\gamma,C,r,c,r(P),\varepsilon_{\mathrm{d}}^{2/5})$ ▷Choosing εχ = εd .   
+5: η ←∥∇g∥1 ∨0.8εd/ ∥∇g∥1 ▷Expect $\|\nabla g_{k+1}\|_{1}\leq\eta\|\nabla g_{k}\|_{1}$ .   
+6: $d_{u}\gets\mathrm{NewtonSolve}(\nabla_{u}g,P_{r c},r(P),\eta)$ ▷See Algorithm 2.   
+7: dv ←−Pcdu $\triangleright$ As in (12).   
+8: α ←1 $\triangleright$ Initial guess for step size.   
+9: $\log c(P)\gets\boldsymbol{v}+\alpha d_{\boldsymbol{v}}+\mathrm{LSE}_{c}((\boldsymbol{u}+\alpha d_{\boldsymbol{u}})\mathbf{1}_{n}^{\top}-\gamma C)$   
+10: while $||\boldsymbol{c}(P)||_{1}-1>0.99\alpha\langle-\nabla_{u}g,d_{u}\rangle\,\dot{\boldsymbol{\upalpha}}$ o ▷Armijo condition. See Appx. A.1.6.   
+11: α ←0.5α $\triangleright$ Backtracking line search.   
+12: log c(P) ←v + αdv + LSEc((u + αdu)1n⊤ −γC)   
+13: end while   
+14: $\begin{array}{r l}&{\pmb{u}\leftarrow\pmb{u}+\alpha\pmb{d}_{\pmb{u}},\pmb{v}\leftarrow\pmb{v}+\alpha\pmb{d}_{\pmb{v}}}\\ &{\pmb{v}\leftarrow\pmb{v}+\log\pmb{c}-\log\pmb{c}(P)}\\ &{\log\pmb{r}(P)\leftarrow\pmb{u}+\mathrm{LSE}_{r}(\mathbf{1}_{n}\pmb{v}^{\top}-\gamma\textsc{G})}\end{array}$   
+15: ▷Ensure ${\pmb{c}}(P)={\pmb{c}}$ .   
+16: C)   
+17: end while   
+18: $\pmb{u}\leftarrow\pmb{u}+\log\pmb{r}-\log\pmb{r}(\pmb{P})$ ▷Since $\log r(P)$ is readily available, take a Sinkhorn step.   
+19: Output u, v  
+
+and (ii) the last term in (15) is negligible. In Table 1, we observe that with a sufficiently slow fixed temperature decay schedule (i.e., setting $q^{(t+1)}\gets q^{(t)}$ in L8 of Alg. 1), the extra cost of line search (as well as ChiSinkhorn) disappears almost entirely (given small enough $\gamma^{(1)}$ ). However, with too slow temperature decay schedules $\mathit{\Delta}_{\mathit{g}}$ too close to 1), the overhead due to relatively costly LSE reductions (in lines 1, 2, 9 and 16 of Alg. 4) may slow down the overall algorithm (see $q=\mathrm{2^{1/8}}$ in Table 1). To eliminate the need for tuning $q$ , we develop an update rule to adjust the schedule as in L8 of Alg. 1; we seek to minimize the number of mirror descent steps while staying in the superlinear convergence zone for consecutive instances of problem (4). To this end, we first define the following parameter of interest, which is the ratio of the actual reduction in gradient norm to the predicted reduction given by (15) for $\alpha=1$ (in the ideal case, dropping the last term) at step $k$ of Alg. 4:  
+
+$$
+\delta_{k}:=\frac{\|\nabla g_{k}\|_{1}-\|\nabla g_{k+1}\|_{1}}{\left(1-\eta_{k}\right)\|\nabla g_{k}\|_{1}}.
+$$  
+
+This formula for $\delta_{k}$ is inspired by trust-region methods, which update the trust-region size based on the ratio of actual to predicted decrease under a model of the objective (rather than the gradient norm as we use here) (Nocedal & Wright, 2006). Let $\delta_{\mathrm{min}}^{(t)}$ be the smallest $\delta_{k}$ among the iterates of Alg. 4 at step $t$ of Alg. 1. In L5 of Alg. 1, we heuristically set  
+
+$$
+\begin{array}{r l}&{q^{(t+1)}\leftarrow(q^{(t)})^{2}\ \ \mathrm{if}\ \ \delta_{\mathrm{min}}^{(t)}>5/4}\\ &{q^{(t+1)}\leftarrow\sqrt{q^{(t)}}\ \ \ \mathrm{if}\ \ \delta_{\mathrm{min}}^{(t)}<4/5}\\ &{q^{(t+1)}\leftarrow q^{(t)}\ \ \ \ \ \mathrm{otherwise}.}\end{array}
+$$  
+
+![](images/17d8357eef2a0af672029142caafb9ac6306e11b864307a825e3abc3f4cafcbb.jpg)  
+
+Table 1: Breakdown of number of $O(n^{2})$ operations per subroutine and total wall-clock time for the upsampled MNIST dataset $(n=4096)$ ) with $L_{1}$ distance cost. Alg. 1 is called with $\gamma_{\mathrm{{i}}}=2^{5}$ , $\gamma_{\mathrm{f}}=2^{18}$ and $p=1.5$ . For the adaptive approach, $q=2$ initially. Results show median over 60 problems.  
+
+![](images/70c40f9dea467182b5908946358266edd50d89ed15ee18ec7a99624c7a0b5e59.jpg)  
+Figure 1: Ratio $\delta_{k}$ of actual to theoretically predicted reduction in $\|\nabla g_{k}\|_{1}$ per step for fixed (left) and adaptive (right) temperature decay (initialized with $q^{(1)}=q)$ . Each $\delta_{k}$ is the median at a given iter. $t$ of Alg. 1. Shaded areas show $80\%$ confidence intervals around median over 60 random problems from the upsampled MNIST dataset $n=4096)$ ) with normalized $L_{1}$ distance cost ( $\operatorname*{max}_{i,j}|C_{i,j}|=1)$ .  
+
+In Fig. 1 (left), we show that with a sufficiently slow fixed schedule, $\delta_{k}$ typically remains at or above 1 throughout the execution of Alg. 1. Fig. 1 (right) further confirms that the adaptive update rule arrives at such a schedule regardless of the initial value of $q^{(1)}$ , thereby showing its utility in eliminating the need for tuning. Table 1 verifies that the schedules found by the adaptive updating perform similarly to the best fixed schedule across OT problems. Section 4 details the experimental setup here, and further adds benchmarking against a suite of alternative algorithms in the literature.  
+
+3.4 ASYMMETRIC MARGINAL SMOOTHING FOR NUMERICAL STABILITY  
+
+Recall from (9) the form of the coefficient matrix $F_{r}(\rho)=D(r(P))(I-\rho P_{r c})$ of the $n$ -variable PD linear system that we are interested in solving. Since the smallest diagonal entry of $F_{r}(\rho)$ can be almost as small as $(1-\rho)r(P)_{\mathrm{min}}$ in the worst case, diagonal preconditioning used in Alg. 2 may cause numerical instabilities when solving the linear system (due to infinitesimal entries in ${\pmb r}(P)$ for $\rho\approx1$ ). To this end we require that, after  
+
+![](images/c85c74799ab82e679ff6fc6633a6e1be1f8cb883fd829334c07c057f9b37159c.jpg)  
+
+Table 2: Comparison of median and 90th percentile performance for varying smoothing weight $w_{r}$ .  
+
+smoothing, $\tilde{r}_{\mathrm{min}}$ is bounded away from zero, and find that running Alg. 3 in advance to bound $\chi^{2}(\tilde{\mathbf{r}}|r(\bar{P)})$ (i.e., the variance of $\dot{r}/r(P)-{\bf1})$ is sufficient for stable behavior in practice. Since log-domain Sinkhorn updates to ensure ${\pmb{c}}(P)={\tilde{\pmb{c}}}$ are numerically stable (Feydy, 2020), we allocate our “smoothing budget” $\varepsilon_{\mathrm{d}}/2$ mostly for the row-marginal $\pmb{r}$ . Specifically, in L5 of Alg. 1, we set:  
+
+$$
+\tilde{r}\gets(1-w_{r}\varepsilon_{\mathrm{d}})r+(w_{r}\varepsilon_{\mathrm{d}}/n)\mathbf{1},\qquad\tilde{c}\gets(1-w_{c}\varepsilon_{\mathrm{d}})c+(w_{c}\varepsilon_{\mathrm{d}}/n)\mathbf{1},
+$$  
+
+where $w_{r}+w_{c}=1/2$ and $w_{r}>w_{c}$ . This is in contrast to the more standard symmetric smoothing $w_{r}=w_{c}$ (Dvurechensky et al., 2018; Lin et al., 2019). We repeat the experiments in Table 1, but this time ablating $w_{r}$ (using the adaptive schedule introduced in Sec. 3.3); Table 2 confirms empirically that asymmetric smoothing improves both stability and median performance of the overall algorithm.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+In this section, we first provide the details of the MNIST experiments in Fig. 1 and Tables 1-2. Then we describe an additional color transfer problem set that we use for wall-clock time benchmarking of the combined MDOT-TruncatedNewton algorithm. Our setup follows that of Kemertas et al. (2023). All experiments were run on an NVIDIA GeForce RTX 2080 Ti GPU with 64-bit precision. Appx. E provides benchmarking on 10 additional datasets from Schrieber et al. (2017), showing similar results with confidence intervals and including operation counts alongside wall-clock time.  
+
+
+
+\section{4.1 EXPERIMENTAL SETUP  }
+
+
+Upsampled MNIST. Each image is a probability distribution over pixels, with probabilities given by $L_{1}$ -normalized intensity values. The cost matrix $C$ is fixed across OT problems and constructed from pairwise $L_{1}$ and $L_{2}^{2}$ distances between pixel locations in 2D space. Scalar division by the max. entry ensures $\operatorname*{max}_{i j}|C_{i j}|=1$ . MNIST images are upsampled to $64\times64$ resolution for benchmarking on higher dimensional problems $n\,=\,4096)$ ). In contrast, Tang et al. (2024) benchmarked their CPU-based algorithm on original MNIST images $n=784$ ). Luo et al. (2023) ran their PDASMD algorithm on downsampled MNIST images for $n=100$ at most; their code also runs on a CPU and includes an inner for loop of $n$ iterations which limits parallelization.  
+
+![](images/4a832e440dc2ff537d7f7529821d7b1e436fe9d68676b098ef0a3f9e81f88f03.jpg)  
+Figure 2: Error vs. wall-clock time for various algorithms. Each marker shows the excess cost and time taken (median across 18 problems) until termination at a given hyperparameter setting, followed by rounding of the output onto $\mathcal{U}(\boldsymbol{r},\boldsymbol{c})$ via Alg. 2 of Altschuler et al. (2017). Upsampled MNIST (top) and color transfer (bottom) problem sets $n=4096)$ ) using $L_{1}$ (left) and $L_{2}^{2}$ (right) distance costs. MDOT–TruncatedNewton outperforms others by orders of magnitude at high precision and exhibits much better practical dependence on error than best known theoretical rates $\bar{\tilde{O}}(\varepsilon^{-1})$ .  
+
+Color Transfer. We define the color transfer problem with all marginals set to the uniform distribution over $\Delta_{n}$ . The cost matrix $C$ varies across problems and is constructed from pairwise $L_{1}$ and $L_{2}^{2}$ distances between RGB values in 3D space. Scalar division by the max. entry ensures $\operatorname*{max}_{i j}|C_{i j}|=1$ . We use the 20 images provided by Kemertas et al. (2023), which were generated by prompting DALL-E 2 to produce vibrant, colorful images with intricate details. These are downsampled to $64\times64$ resolution for benchmarking on $n=4096$ problems, except in the case of Fig 3, where the scalability of our algorithm is visually demonstrated on the original $1024\times1024$ images $(n\approx10^{6})$ ) on an individual sample problem.  
+
+
+
+\section{4.2 WALL-CLOCK TIME BENCHMARKING  }
+
+
+While theoretical analysis and computational complexity provide valuable insights, it is the practical performance, measured in wall-clock time, that often determines the viability and adoption of an algorithm. In this section, we present wall-clock time benchmarking of the proposed algorithm against a broad range of available alternatives. Here, we compare to Alg. 3.5 of Feydy (2020), the Mirror Sinkhorn (MSK) algorithm of Ballu & Berthet (2023), Sinkhorn iteration with typical and stringent tolerance settings $p=1$ and $p=1.5$ resp. for MDOT–Sinkhorn called with $\gamma_{\mathrm{{i}}}=\gamma_{\mathrm{{f}}}$ ), the APDAGD algorithm of Dvurechensky et al. (2018), the Mirror Prox Sherman Optimized algorithm of Jambulapati et al. (2019) and the AAM algorithm of Guminov et al. (2021). We omit comparison to APDAMD (Lin et al., 2019), APDRCD (Guo et al., 2020) and PDASMD (Luo et al., 2023), as they exhibit significantly longer convergence times in our high-dimensional, GPU-parallel setting. See Appx. D for sources and configuration details. In Appx. C, we also perform experiments with varying problem size $n$ and show that the dependence is no worse than $\bar{O(n^{2})}$ for the problems considered.  
+
+![](images/b78e1c8af5a1b4bd5cec3f56124e230e10f1aea82c035fea7d37c48de67490a8.jpg)  
+Figure 3: The MDOT–TruncatedNewton algorithm applied to a large-scale color transfer problem on $1024\times1024$ images $(n=2^{20}$ ). For this visualization, the cost matrix is given by the $L_{2}^{2}$ distance in RGB color space, normalized so that $\operatorname*{max}_{i j}|C_{i j}|=1$ . Final temperature is $1/\gamma_{\mathrm{f}}=2^{\overline{{-}}10}$ . Source images (top row) were generated with DALL-E 2. This figure is best viewed digitally.  
+
+In Fig. 2, we observe that on a 2018-era GPU, MDOT–TruncatedNewton typically solves $n=4096$ dimensional problems in 1-5 seconds to 6-decimal precision, demonstrating numerical stability up to 9-decimal precision across a range of realistic OT problems. In the highest precision range, it is more than $10\times$ faster than the best alternative, MDOT–PNCG of Kemertas et al. (2023). In our implementation, we also include a scalable $O(n)$ memory footprint version of MDOT-TruncatedNewton, which computes via the PyKeOps package of Charlier et al. (2021) the cost matrix $C$ and the matrix $P$ on-the-fly every-time they are used in Alg. 4. As evidenced by Fig. 3, this implementation can solve very high dimensional OT problems $(n\,\approx10^{6})$ ) to high precision. It leaves a memory footprint of just $\approx600$ MBs, but takes $\approx10$ hours. Regardless, we believe that this is an important step towards high-precision discrete OT in very high dimensions.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+In this work, we set out to design a modular, practical algorithm to exploit the superlinear convergence of truncated Newton methods in weakly-regularized EOT. To improve the conditioning of the dual Hessian, rather than amplifying its diagonal entries as in Tikhonov regularization, we dampened off-diagonal entries (discounting) with inspiration from reinforcement learning. Then, Alg. 2 was presented for approximately solving the modified Newton system. This method of Hessian modification enabled a superlinear local convergence rate in terms of the $L_{1}$ norm of the gradient for the custom truncated Newton routine (Alg. 4) that used Alg. 2. We additionally introduced precautionary measures to improve the numerical stability of Alg. 4, which is crucial for reaching high precision. Lastly, Alg. 4 was integrated into a temperature annealing framework, MDOT (Kemertas et al., 2023), where adaptive temperature updates ensured superlinear convergence is maintained, a hyperparameter $\mathit{\Delta}_{\mathit{g}}$ in Alg. 1) is eliminated and line search overhead is minimized in practice. We implemented the resulting algorithm on a GPU and showed that it outperforms many recent algorithms by orders of magnitude in $n=4096$ dimensions, exhibiting fast empirical rates ranging from $O(\varepsilon^{-1/6})$ to $O(\varepsilon^{-1/2})$ . Furthermore, as visualized in Fig. 3, the algorithm holds potential to effortlessly scale to much larger problems $(n\approx10^{6})$ ).  
+
+One avenue for future research is the development of a variant of Alg. 4 with a global convergence rate, which may yield an explicit rate in terms of the error $\varepsilon$ for the overall algorithm. Another direction could be a stochastic generalization of Alg. 4 that leaves an $O(n m)$ memory footprint, where $m\in[1,n]$ is a user-defined parameter given hardware constraints. This added flexibility may enable a better trade-off between runtime and memory footprint in very high dimensions $\langle n\gg1000\rangle$ ).  
+
+
+

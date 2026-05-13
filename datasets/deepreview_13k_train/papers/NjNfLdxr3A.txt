@@ -1,0 +1,246 @@
+\title{VeRA: Vector-based Random Matrix Adaptation}
+
+\begin{abstract}
+Low-rank adapation (LoRA) is a popular method that reduces the number of trainable parameters when finetuning large language models, but still faces acute storage challenges when scaling to even larger models or deploying numerous per-user or per-task adapted models. In this work, we present \textbf{Ve}ctor-based \textbf{R}andom Matrix \textbf{A}daptation (VeRA), which significantly reduces the number of trainable parameters compared to LoRA, yet maintains the same performance. It achieves this by using a single pair of low-rank matrices shared across all layers and learning small scaling vectors instead. We demonstrate its effectiveness on the GLUE and E2E benchmarks, image classification tasks, and show its application in instruction-tuning of 7B and 13B language models.
+
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+In the era of increasingly large and complex language models, the challenge of efficient adaptation for specific tasks has become more important than ever. While these models provide powerful capabilities, their extensive memory requirements pose a significant bottleneck, particularly when adapting them for personalized use. Consider, for example, a cloud-based operating system assistant that continuously learns from and adapts to individual user behaviors and feedback. The need to store multiple checkpoints of finetuned models for each user rapidly escalates the required storage, even more so when multiple tasks come into play.
+
+The situation is further exacerbated when we look at the state-of-the-art models like GPT-4 \citep{openai2023gpt4}. Finetuning techniques like LoRA \citep{hu2022lora}, while effective, still introduce considerable memory overhead. As an illustrative example, applying LoRA with a rank of 16 to the query and value layers of GPT-3 \citep{gpt3} would demand at least 288MB of memory, if stored in singe-precision – at a million finetuned weights, e.g., one per user, that would amount to 275TB.
+Given the recent proliferation of language models and their deployment in personalized assistants, edge devices, and similar applications, efficient adaptation methods are paramount. We believe there is untapped potential for even more efficient approaches. Previous work~\citep{aghajanyan-etal-2021-intrinsic} pointed out the low intrinsic dimensionality of pretrained models' features. These studies reported numbers much lower than the trainable parameters used in LoRA, suggesting there is room for improvement.
+
+In parallel to this, recent research has shown the surprising effectiveness of models utilizing random weights and projections \citep{peng2021random, ramanujan2020whats, Lu_Grover_Abbeel_Mordatch_2022, schrimpf, frankle2021training}. 
+Such models serve as the basis of our proposed solution, \textbf{Ve}ctor-based \textbf{R}andom Matrix \textbf{A}daptation (VeRA), which minimizes the number of trainable parameters introduced during finetuning by reparametrizing the weights matrices. Specifically, we employ ``scaling vectors'' to adapt a pair of frozen random matrices shared between layers. With this approach, many more versions of the model can reside in the limited memory of a single GPU.
+
+\newpage
+In summary, our main contributions are as follows:
+\begin{itemize}
+    \item We introduce a novel finetuning method with no additional inference time cost. Our method further reduces the number of trainable parameters compared to the state-of-the-art LoRA method, while yielding comparable results. 
+    
+    \item We compare our approach with LoRA and other parameter-efficient adaptation methods on the natural language understanding (GLUE) and natural language generation (E2E) benchmarks, and compare against LoRA on instruction-following and image classification tasks.
+    
+    \item We perform an ablation study to better understand the individual components of our method and their effects on performance.
+\end{itemize}
+
+
+\section{Related Work}
+
+
+\paragraph{Low-Rank Adaptation (LoRA).}
+LoRA offers an innovative solution to the computational challenges posed by the finetuning of large pretrained language models. Introduced by \citet{hu2022lora}, the method employs low-rank matrices to approximate the weight changes during finetuning, effectively reducing the number of parameters that need to be trained. 
+Among its advantages, LoRA significantly lowers the hardware barrier for finetuning by reducing the need for gradient calculation and optimizer state maintenance for most parameters. It can also work with quantized model weights~\citep{dettmers2023qlora}, reducing the requirements even further.
+Furthermore, LoRA modules are easily swappable, making task-switching efficient and less resource-intensive. Importantly, and different to adapter-based finetuning approaches \citep{houlsby2019parameterefficient, lin-etal-2020-exploring, pfeiffer-etal-2021-adapterfusion, ruckle-etal-2021-adapterdrop}, LoRA incurs no additional inference time cost when deployed, as the trainable matrices can be merged with the frozen weights.
+
+Based on this, AdaLoRA~ \citep{zhang2023adaptive} extends the LoRA method, introducing dynamic rank adjustment for the low-rank matrices during finetuning. The core idea is to optimally distribute the parameter budget by selectively pruning less important components of the matrices based on an importance metric.
+
+
+\paragraph{Parameter Efficiency in Existing Methods}
+
+While methods such as LoRA have shown significant improvements in finetuning performance, they still require a considerable amount of trainable parameters. According to \citet{aghajanyan-etal-2021-intrinsic}, the upper bound for \emph{intrinsic dimensions} is much smaller than what is typically utilized in such methods. For instance, the \(d_{90}\)\footnote{The smallest dimension \(d\) that provides a \emph{satisfactory solution}, which is 90\% of the full training metric, as defined by \citet{li2018measuring}.} for RoBERTa\textsubscript{base} is reported to be \(896\), whereas authors of the LoRA paper reported using \(0.3\)M trainable parameters for this model, suggesting that the parameter count could be reduced further.
+
+Although AdaLoRA takes steps in this direction by dynamically allocating parameters to more critical layers, we posit that a different approach could achieve substantial parameter reduction, while tolerating a marginal performance degradation. This sets the stage for the method we introduce in the following section.
+\paragraph{Random Models and Projections.}
+The concept of using random matrices and projections for model efficiency is supported by multiple strands of research. \citet{frankle2018lottery} identified that randomly-initialized neural networks contain subnetworks that are capable of reaching high performance when trained. Meanwhile, \citet{ramanujan2020whats} revealed that there exist subnetworks that can achieve impressive results even in the absence of training. \citet{aghajanyan-etal-2021-intrinsic} showed that training only a small number of parameters, randomly projected back into the full space, could achieve 90\% of the full-parameter model performance. \citet{ruiz2023hyperdreambooth} introduced a parameter-efficient finetuning method for personalization of text-to-image models, utilising random frozen matrices inside LoRA. Other works \citep{Lu_Grover_Abbeel_Mordatch_2022, schrimpf, frankle2021training} have shown that frozen, randomly initialized models, with small sections finetuned, can perform surprisingly well.
+
+Collectively, these works create a compelling case for the utilization of frozen random matrices in finetuning methods, providing both a theoretical and an empirical foundation for the approach taken in this paper.
+
+
+\section{Method}
+
+
+\begin{figure}[tb]  
+\begin{center}
+        \includegraphics[width=1.0\columnwidth]{figures/methods.pdf}
+\end{center}
+\caption{Schematic comparison of LoRA (left) and VeRA (right). LoRA updates the weights matrix \(W\) by training the low-rank matrices \(A\) and \(B\), with intermediate rank $r$. In VeRA these matrices are frozen, shared across all layers, and adapted with trainable vectors \(d\) and \(b\), substantially reducing the number of trainable parameters. In both cases, low-rank matrices and vectors can be merged into original weights matrix \(W\), introducing no additional latency.
+}
+\label{fig:methods} 
+\end{figure}
+
+In this section, we introduce Vector-based Random Matrix Adaptation, a novel parameter-efficient finetuning method that builds upon and extends the state-of-the-art method, LoRA. The central innovation in VeRA lies in the reparameterization of the low-rank matrices. Specifically, we freeze a single pair of randomly initialized matrices, shared across all adapted layers, and introduce trainable scaling vectors that allow for layer-wise adaptation, as shown in Figure~\ref{fig:methods}. Similarly to LoRA, trained scaling vectors along with low-rank matrices can be merged into original weights, eliminating additional inference latency.
+
+\subsection{Method Formulation}
+
+LoRA \citep{hu2022lora} finetunes a matrix product of two low-rank matrices to adapt large-language models for a new task.
+Formally, for a pretrained weight matrix $W_0 \in \mathbb{R}^{m \times n}$, the weight update \( \Delta W \) is constrained to a low-rank decomposition, as expressed in Equation \ref{eq:lora}
+
+\begin{align}
+\label{eq:lora}   
+    h = W_0x + \Delta W x = W_0x + {\underline{B A}} x,
+\end{align}
+where we undeline the parameters updated via gradient descent. This approximation enables the model to keep the original weight \( W_0 \) frozen while optimizing only the new low-rank matrices \( A \) and \( B \). These matrices are much smaller in size than the original matrix due to their rank-reduced nature. \( A \) has shape \(m \times r\) and \( B \) has shape \(r \times n\), where \(r \ll \min(m, n)\) serves as the bottleneck dimension.
+In contrast, our VeRA method is expressed as:
+
+\begin{align}
+    h = W_0x + \Delta W x = W_0x + {\underline{\Lambda_{b}}} B {\underline{\Lambda_{d}}} A x \label{eq:elora_explicit}
+\end{align}
+
+In this approach, \(B\) and \(A\) are \textit{frozen, random}, and \textit{shared across layers}, while the scaling vectors \(b\) and \(d\) are \textit{trainable}, and formally denoted by diagonal matrices \(\Lambda_b\) and \(\Lambda_d\).
+This approach can effectively scale and disable rows and columns of both $A$ and $B$, allowing for layer-wise adaptation with a minimal number of trainable parameters.
+Note that in this setup, \(B \in \mathbb{R}^{m \times r}\) and \(A \in \mathbb{R}^{r \times n}\) are not required to be low-rank. This is because they remain static and we do not need to store their values.
+Instead, varying $r$ leads to a linear increase in the number of trainable parameters via $d \in \mathbb{R}^{1 \times r}$.
+
+\subsection{Parameter Count}
+
+\begin{table}[h]
+\input{tables/params}
+\end{table}
+
+We use \( L_{\text{tuned}} \) to denote the number of finetuned layers and \( d_{\text{model}} \) to represent the dimension of these layers. The number of trainable parameters in VeRA is then governed by \( |\Theta| = L_{\text{tuned}} \times (d_{\text{model}} + r) \), contrasting with LoRA's \( |\Theta| = 2 \times L_{\text{tuned}} \times d_{\text{model}} \times r \). Specifically, for the lowest rank (i.e., \( r=1 \)), VeRA requires approximately half the trainable parameters of LoRA. Moreover, as the rank increases, VeRA's parameter count increases by \( L_{\text{tuned}} \) for each increment, a substantial saving compared to LoRA's \( 2L_{\text{tuned}}d_{\text{model}} \). This parameter efficiency becomes notably significant in the context of extremely deep and wide models, such as GPT-3 \citep{gpt3}, which has 96 attention layers and a hidden size of 12288.
+
+Building on this efficiency, the main advantage of VeRA is its minimal memory footprint for storing the trained weight adjustments. Because the random frozen matrices can be regenerated from a random number generator (RNG) seed, these do not need to be stored in memory. This substantially reduces the memory requirement, which is now limited to the bytes needed for the trained \(b\) and \(d\) vectors and a single RNG seed. The memory efficiency in comparison to LoRA is shown in Table \ref{tab:params}.
+\subsection{Initialization Strategies}
+
+\begin{itemize}
+  \item \textbf{Shared Matrices}: In our method, we employ Kaiming initialization \citep{kaiming} for the frozen low-rank matrices \( A \) and \( B \). By scaling the values based on matrix dimensions, it ensures that a matrix product of \( A \) and \( B \) maintains a consistent variance for all ranks, eliminating the need to finetune the learning rate for each rank.
+  
+  \item \textbf{Scaling Vectors}: The scaling vector \( b \) is initialized to zeros, which aligns with the initialization of matrix \( B \) in LoRA and ensures that the weight matrix is unaffected during the first forward pass. The scaling vector \( d \) is initialized with a single non-zero value across all its elements, thereby introducing a new hyperparameter that may be tuned for better performance.
+\end{itemize}
+
+Figure \ref{fig:methods} illustrates example initializations for the low-rank matrices and scaling vectors in VeRA. Specifically, the low-rank matrices are initialized using a normal distribution, and the \(d\) vector is initialized with ones. Note that alternative initializations, such as uniform distribution for \(A\) and \(B\), and other non-zero constants for \(d\), are also explored in our experiments.
+
+
+
+\section{Experiments}
+
+
+In this section, we conduct a series of experiments to evaluate our finetuning method. We start by comparing our approach to LoRA and other baselines on the GLUE and E2E benchmarks. Following this, we turn our attention to instruction-tuning of Llama models, and image classification with Vision Transformers. Next, we select one task and vary the rank for both methods, LoRA and VeRA, to examine how performance scales with the number of trainable parameters. Lastly, an ablation study sheds light on the importance of each component in our method, including the influence of different initializations.
+
+\paragraph{Baselines.}
+
+We compare VeRA to the following baselines:
+\begin{itemize}
+\itemsep0.em
+    \item \emph{Full finetuning} - the model is initialized with pretrained weights and all parameters are being trained.
+    \item \emph{Bitfit} - this baseline involves the sole finetuning of bias vectors, keeping all other parameters fixed. This technique has been investigated in depth by \citet{zaken2022bitfit}.
+    \item \emph{Adapter tuning} - initially introduced by \citet{houlsby2019parameterefficient}, involves the integration of adapter layers between the self-attention and MLP modules, followed by a residual connection. This setup includes two fully connected layers and a nonlinearity and is denoted as $\textbf{Adapter}^{\textbf{H}}$. A variation by \citet{lin-etal-2020-exploring}, $\textbf{Adapter}^{\textbf{L}}$, employs the adapter layer solely after the MLP module and subsequent to a LayerNorm. This closely resembles an alternative design suggested by \citet{pfeiffer-etal-2021-adapterfusion}, referred to as $\textbf{Adapter}^{\textbf{P}}$. Another baseline, termed AdapterDrop by \citet{ruckle-etal-2021-adapterdrop}, enhances efficiency by omitting certain adapter layers and is represented as $\textbf{Adapter}^{\textbf{D}}$.
+    \item \emph{LoRA} \citep{hu2022lora} - as introduced in the earlier section.
+\end{itemize}
+
+\subsection{GLUE Benchmark}
+We evaluate our approach on the General Language Understanding Evaluation (GLUE) benchmark \citep{wang2018glue}, employing the RoBERTa\textsubscript{base} and RoBERTa\textsubscript{large} models \citep{liu2019roberta}. For RoBERTa\textsubscript{base} we use a rank of 1024, and for RoBERTa\textsubscript{large} a rank of 256. The shared matrices are initialized using the uniform version of Kaiming initialization as implemented in PyTorch \citep{pytorch}, with an initial value of 0.1 for the \( d \) vector.
+
+Our experimental setup generally aligns with that of \citet{hu2022lora}, applying our method to the query and value projection matrices in each self-attention module and fully training the classification head. Unlike \citet{hu2022lora}, who used an additional hyperparameter \(\alpha\) to adjust gradients for the adapted layers, we introduce separate learning rates for the classification head and the adapted layers. The batch size is set to 64 for RoBERTa\textsubscript{base} and 32 for RoBERTa\textsubscript{large}, with maximum sequence lengths of 512 and 128 respectively.
+
+Due to time constraints and budget limitations, we omit the time-intensive MNLI and QQP tasks, thus forgoing the use of the \emph{MNLI trick}\footnote{For the RoBERTa\textsubscript{base} model and MRPC, RTE and STS-B tasks, \citet{hu2022lora} initialized the model with the best weights finetuned on the MNLI task.} for tasks MRPC, RTE, and STS-B. In line with \citet{hu2022lora}, we report the number of trainable parameters attributable to the finetuned layers, explicitly excluding the classification head, which is trained in a standard way. We perform 5 runs with different random seeds, recording the best epoch's outcome for each run, and report the median of these results.
+
+\paragraph{Results.}
+
+\begin{table}[h]
+    \input{tables/glue}
+\end{table}
+
+Table \ref{tab:glue} reveals that VeRA performs competitively with LoRA across both models, yet achieves these results with an order of magnitude fewer parameters.
+\subsection{E2E Benchmark}
+
+For the E2E benchmark \citep{e2e}, we follow the experimental setup from \citet{hu2022lora} and finetune the GPT-2 \citep{gpt2} Medium and Large models. For LoRA we use the implementation and set of hyperparameters provided in \citet{hu2022lora}, while for VeRA we change the rank and learning rate, both of which are tuned.
+
+\paragraph{Results.}
+
+\begin{table}[h]
+    \input{tables/e2e}
+\end{table}
+
+We report results from the last epoch. Table \ref{tab:e2e} shows that VeRA outperforms LoRA with 3 and 4 times less trainable parameters, for GPT2 Medium and Large respectively.
+
+\subsection{Instruction tuning}
+Instruction tuning is a process by which language models are finetuned to follow specific instructions more effectively \citep{ouyang2022training}. We demonstrate the efficacy of VeRA in enabling Llama \citep{touvron2023llama} and Llama2 \citep{touvron2023llama2} models to follow instructions using only \(1.6\)M and \(2.4\)M trainable parameters, for 7B and 13B variants respectively, in contrast to \(159.9\)M and \(250.3\)M trainable parameters when employing LoRA with a rank of 64 as proposed by \citet{dettmers2023qlora}.
+
+We perform finetuning using both LoRA and VeRA, by applying both methods on all linear layers except the top one, similarly to \citet{dettmers2023qlora}. Additionally, we leverage the quantization techniques from \citet{dettmers2023qlora} to train the model on a single GPU. 
+
+For our experiment, we employ the Alpaca dataset \citep{alpaca}, specifically its cleaned version\footnote{\url{https://huggingface.co/datasets/yahma/alpaca-cleaned}}. This dataset comprises 51K instructions and demonstrations and is suitable for instruction-tuning. The cleaned version corrects multiple issues such as hallucinations, merged instructions, and empty outputs. We train for one epoch, preceded by a learning rate sweep.
+
+We evaluate finetuned models on MT-Bench \citep{zheng2023judging}, by generating model responses to a pre-defined set of 80 multi-turn questions and subsequently evaluating these using GPT-4 \citep{openai2023gpt4}. GPT-4 reviews the answers and assigns a quantitative score on a scale of 10 to each response. We present the average scores alongside the number of trainable parameters in Table \ref{tab:mtbench}.
+
+\begin{table}[ht]
+    \input{tables/mt_bench}
+\end{table}
+
+We find that despite the 100x reduction in the number of trainable parameters, our method closely matches the performance of LoRA-based finetuning.
+\subsection{Image Classification}
+
+To evaluate the method on the image classification task, we adapt Vision Transformer (ViT) \citep{vit}, Base and Large variants, on datasets - CIFAR100 \citep{cifar100}, Food101 \citep{food101}, Flowers102 \citep{flowers102}, and RESISC45 \citep{resisc45}. For each dataset we train on a subset of 10 samples per class, and evaluate on the full test set (CIFAR100, Food101, Flowers102) or on all the remaining samples (RESISC45). We use weights of ViT models pretrained on the ImageNet-21k \citep{imagenet} dataset.
+
+We evaluated LoRA and VeRA methods applied on the query and value layers of ViT, along with two baselines - fully-finetuned model (referred to as \emph{Full}), and training the classification head only (referred to as \emph{Head}). Similarly to the GLUE benchmark, we use rank 8 for LoRA, and rank 256 for VeRA. We tuned learning rates for all methods and reported results after 10 epochs in Table \ref{tab:vit}. The reported parameter count excludes the classification head, which has to be trained in all methods.
+
+\begin{table}[tb]
+    \input{tables/vit.tex}
+\end{table}
+
+We find that VeRA approaches performance of LoRA on the Base model for three datasets and outperforms it for Flowers102, despite using over 10x fewer trainable parameters. For ViT-Large, it outperforms LoRA for three datasets: CIFAR100, Flowers102 and RESISC45.
+\subsection{Scaling the Number of Trainable Parameters}
+
+Finally, we investigate the trade-offs involved in parameter scalability for both LoRA and our method using the RoBERTa\textsubscript{large} model on the RTE task from the GLUE benchmark. 
+We use a set of ranks \(r=\{1,4,16,64,256,1024\}\) for VeRA and \(r=\{1,2,4,8,16,32,64\}\) for LoRA, and observe the trade-off between trainable parameters and the accuracy. We replicate each configuration five times for different random seeds, and report the median of results. For LoRA, we employ the HuggingFace PEFT \citep{peft} implementation, adhering to the hyperparameters specified in \citet{hu2022lora}. Our own method uses the same hyperparameters as employed in the RTE experiments from the previous subsection. The results, depicted in Figure \ref{fig:tradeoff_performance}, reveal that our method is significantly more parameter-efficient. Notably, when the higher-rank VeRA has the same number of parameters as standard LoRA, it outperforms LoRA by 4 accuracy percentage points. 
+\begin{figure}[t]
+  \begin{minipage}{0.45\columnwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/tradeoff_rte.pdf}
+    \caption{Performance of LoRA and VeRA methods for varying ranks on RTE task.}
+    \label{fig:tradeoff_performance}
+  \end{minipage}
+  \hfill
+  \begin{minipage}{0.43\columnwidth}
+    \centering
+    \includegraphics[width=\linewidth, trim={0 0 0 0},clip]{figures/d_magnitude.pdf}
+    \caption{Magnitude of the adapted $d$ vector for query and value matrices across layers for RoBERTa-L on the RTE task.}
+    \label{fig:d_vs_layers}
+  \end{minipage}
+\end{figure}
+\subsection{Ablation Study}
+\setlength{\parskip}{3pt plus1pt minus1pt}
+
+In this section, we conduct an ablation study to examine the impact of individual components of our method. All subsequent experiments focus on the MRPC and RTE tasks and utilize the RoBERTa\textsubscript{large} model. We adhere to the hyperparameters used in previous experiments, modifying only the component under investigation for each test. Each experiment is run with 5 random seeds, and we report the mean and standard deviation of the results.
+
+\begin{table*}[tb]
+    \input{tables/ablations}
+\end{table*}
+\begin{table}[h]
+    \input{tables/ablations_sharing}
+\end{table}
+\paragraph{Single Scaling Vector}
+We first investigate the necessity of both the \(d\) and \(b\) scaling vectors in our method. We create two ablation setups: one that excludes \(d\) (termed as \emph{only \(\boldsymbol{b}\)}) and another that omits \(b\) (termed as \emph{only \(\boldsymbol{d}\)}). In the \emph{only \(\boldsymbol{d}\)} setup, \(d\) is initialized with zeros. As shown in Table \ref{tab:ablations}, omitting either scaling vector compromises performance. The \emph{only \(\boldsymbol{d}\)} configuration performs slightly better than its \emph{only \(\boldsymbol{b}\)} counterpart.
+This disparity in performance underscores the higher expressiveness of the \(d\) scaling vector over the \(b\) vector. Specifically, \(d\) modulates the rows of both low-rank matrices, thereby influencing a broader aspect of the final constructed matrix. In contrast, \(b\) only scales the rows of the final matrix resulting from the product of the low-rank matrices.
+
+\paragraph{Initialization of Shared Matrices}
+We examine three different initialization schemes for the shared matrices: Kaiming normal, Kaiming uniform, and uniform initialization within the range \([0, 0.1]\). As per the results in Table \ref{tab:ablations}, both Kaiming initializations outperform the uniform range initialization, with uniform variant having slightly better results than the normal one.
+\paragraph{Initialization of Scaling Vector}
+We further explore the impact of the initialization values for the \(d\) vector. Experiments are conducted with \(d_{\text{init}}\) set at \(1.0\), \(10^{-1}\), and \(10^{-7}\). The results in Table \ref{tab:ablations} show that the choice of \(d_{\text{init}}\) significantly influences the method's performance; in the settings we examined, values \(10^{-1}\) and \(10^{-7}\) outperformed \(1.0\), potentially offering more flexibility in the optimization process through early sign changes in selected rows of the frozen matrices.
+
+\paragraph{Magnitude of Adaptation}
+In Figure~\ref{fig:d_vs_layers} we provide a visualisation of the magnitude of the changes of the $d$ vectors after finetuning on RTE task. 
+Because the low-rank frozen matrices remain the same for each layer, we can directly compare the length of the $d$ vector across layers to account for its relative adaptation.
+Overall, we find that the largest adaptation happens for query matrices compared to the value ones, indicating a larger need or ease for finetuning a model there.
+Furthermore,  similar to previous efficient adaptation methods' findings~\citep{zhang2023adaptive,liu2021p} we also observe a higher adaptation for the later layers compared to earlier ones.
+
+\paragraph{Sharing Random Matrices}
+We conduct experiments on RTE, MRPC, CoLA, and STS-B tasks to assess the impact of sharing random matrices on the performance. We evaluate two setups - one with random matrices shared across all adapted layers, and another with uniquely generated ones. Results in Table \ref{tab:ablations_sharing} show that the mean performance is identical in case of tasks RTE and STS-B, and there is a slight improvement for MRPC and CoLA when using unique matrices.
+
+
+\section{Conclusion}
+
+
+In this work, we introduce a finetuning method that significantly reduces the number of trainable parameters compared to LoRA, yielding similar or better results on downstream tasks. Specifically, it achieved ten-fold reduction in parameters yielding the same performance on the GLUE benchmark for RoBERTa\textsubscript{large}, ten-fold reduction on image classification tasks, and three-fold reduction on the E2E benchmark. This method is particularly well-suited for scenarios that require frequent swapping of numerous finetuned models, such as cloud-based AI services personalized for individual users. Due to the minimal size of the scaling vectors, many versions can reside in the limited memory of a single GPU, thus substantially improving serving efficiency and removing the bottleneck of loading specific models into memory.
+
+While the current study focuses on language and vision models with Transformer architecture, the applicability of the method across different architectures and domains remains an area for future research. Moreover, the performance of the method may benefit from additional refinements, such as dynamic parameter budget allocation, or different initialization and regularization techniques.
+
+
+
+
+\subsection*{Acknowledgements}
+This work is financially supported by Qualcomm Technologies Inc., the University of Amsterdam and the allowance Top consortia for Knowledge and Innovation (TKIs) from the Netherlands Ministry of Economic Affairs and Climate Policy. We also acknowledge the use of the National Supercomputer Snellius and Distributed ASCI Supercomputer 6 \citep{das6} for essential computational tasks.
+
+
+
+
+
+
+
+

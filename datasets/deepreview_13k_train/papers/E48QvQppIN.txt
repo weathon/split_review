@@ -1,0 +1,528 @@
+\title{Bayesian Optimization of Antibodies Informed by a Generative Model of Evolving Sequences}
+
+\begin{abstract}
+\let\thefootnote\relax\footnotetext{* Equal contribution}
+    To build effective therapeutics, biologists iteratively mutate antibody sequences to improve binding and stability. Proposed mutations
+    can be informed by previous measurements or by learning from large antibody databases to predict only typical antibodies. Unfortunately, the space of typical antibodies is enormous to search, and experiments often fail to find suitable antibodies on a budget. We introduce Clone-informed Bayesian Optimization (CloneBO), a Bayesian optimization procedure that efficiently optimizes antibodies in the lab by teaching a generative model how our immune system optimizes antibodies. Our immune system makes antibodies by iteratively evolving specific portions of their sequences to bind their target strongly and stably, resulting in a set of related, evolving sequences known as a \emph{clonal family}. We train a large language model, CloneLM, on hundreds of thousands of clonal families and use it to design sequences with mutations that are most likely to optimize an antibody within the human immune system. We propose to guide our designs to fit previous measurements with a twisted sequential Monte Carlo procedure. We show that CloneBO optimizes antibodies substantially 
+    more efficiently than previous methods in realistic \textit{in silico} experiments and designs stronger and more stable binders in \textit{in vitro} wet lab experiments.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Antibody therapeutics are the fastest growing class of drugs, with approved treatments for a breadth of disorders ranging from cancer to autoimmune disease to infectious disease \citep{carter2018next}. Biologists wish to design antibodies that strongly bind to targets of interest while being stable in the human body. Stable antibodies do not unfold or cause an adverse immune reaction~\citep{jarasch2015developability}.
+To develop these antibodies, biologists first screen many diverse antibody sequences, or use a lab animal's immune system to find an initial candidate that binds a target.
+This candidate often does not bind strongly or is unstable in the human body, so it is used as a starting point in an iterative optimization experiment in which biologists predict mutations that result in better or more stable binders \citep{Lu2020-qy}.
+
+To make these predictions, we can learn from up to thousands of sequence measurements from many previous iterations \citep{Rapp2024-mo, Yang2019-xe, Fannjiang2022-jr, Brookes2019-fv}.
+We can also learn from databases of protein sequences to avoid predicting mutations that produce nonfunctional antibodies \citep{Gruver2023-sf, Stanton2022-ru, Hie2023-sr, Prihoda2022-zy}.
+However, even with this restriction, there are a combinatorial number of mutations we could predict, only a handful of which are beneficial.
+Therefore, optimization experiments regularly fail to find suitable sequences on a budget.
+
+To optimize more efficiently than current methods, we need an informed prior about where and how to mutate to positively affect binding and stability.
+Ideally we could learn what mutations often lead to better sequences in optimization experiments in the lab.
+Unfortunately such data is scarce.
+In principle, we can instead learn from abundant data about what mutations often lead to better sequences in our bodies.
+To make an antibody that binds a new target, our immune system evolves sets of related sequences known as \emph{clonal families};
+through selection, sequences in clonal families accumulate mutations that increase binding to a target while maintaining stability \citep{Burnett2018-fo}.
+Through large-scale sequencing efforts, we can now learn from databases that contain large numbers of these evolving sequences \citep{Olsen2022-nt}.
+\begin{figure}
+    \centering
+    \includegraphics[width=0.95\textwidth]{figs/antibody.pdf}
+    \caption{Our immune system introduces mutations (blue) to evolve weak binders of a target into strong binders (green). 
+    The result is a set of related sequences that bind the antigen strongly and stably known as a clonal family. We use a model trained on these families, CloneLM, to perform Bayesian optimization in a procedure called CloneBO. We use experimental data to generate a clonal family that might have evolved to bind our antigen and suggest sequences to test in the lab.
+    }\label{fig:concept}
+\end{figure}
+
+In this paper, we introduce Clone-informed Bayesian optimization (CloneBO), a Bayesian optimization procedure which efficiently optimizes antibody sequences in the lab by teaching a generative model how the human immune system optimizes antibodies (Fig.~\ref{fig:concept}).
+In Section \ref{sec: related work} we review related work. In Section \ref{sec: background} we introduce the problem of iterative Bayesian optimization.
+In Section \ref{sec: de finetti} we describe how in theory we can build a prior for where and how to mutate given observed clonal families.
+In Section \ref{sec: clonelm} we build such a prior in practice by fitting a large language model, CloneLM, to hundreds of thousands of clonal families.
+We take a martingale posterior approach to sampling in which we generate new clonal families that contain our candidate.
+In Section \ref{sec: clonebo} we describe how to condition on previous measurements using a twisted sequential Monte Carlo procedure so that good mutations are included in our clonal family, and bad mutations are excluded.
+We use our model to build a Bayesian optimization procedure, CloneBO.
+In Section \ref{sec: results} we show that CloneBO optimizes realistic oracles for stability and binding strength much more efficiently than current methods and also designs strong and stable binders in wet lab experiments.
+CloneBO outperforms naive and informed greedy methods as well as LaMBO, a state of the art method for optimizing sequences. 
+In Section \ref{sec: conclusion} we conclude and describe directions for future work.
+
+Our code and model weights are available at 
+
+
+\section{Related work}
+
+
+To iteratively optimize a protein, one can predict sequences using previous measurements \citep{Rapp2024-mo, Yang2019-xe, Fannjiang2022-jr, Brookes2019-fv}.
+To optimize antibodies for stability in the human body, \citet{Hie2023-sr} and \citet{Prihoda2022-zy} suggest introducing mutations to select for typicality, make them look more typical, measured by the likelihood of a model trained on large databases of protein sequences.
+More generally, \citet{Gruver2023-sf} and \citet{Stanton2022-ru} avoid suggesting atypical protein sequences by training a latent space to represent a database of sequences and then optimizing in this latent space.
+However, even the space of typical antibodies is combinatorially large, and therefore challenging to search using only up to thousands of previous measurements.
+CloneBO builds an informed prior to efficiently search this space.
+
+CloneBO builds this prior using clonal families --- sets of sequences evolving to strongly and stably bind a target \citep{Burnett2018-fo}.
+Biologists infer evolutionary pressures on antibodies by examining individual clonal families \citep{Mascola2013-dr} or comparing clonal families \citep{Phad2022-bh}.
+In the lab, ``repertoire mining'' optimizes antibodies by suggesting mutations from sequences in a clonal family that contains the candidate \citep{Richardson2021-xi, Olsen2023-fk}.
+In practice, such a family rarely exists. CloneBO optimizes a candidate by generating new clonal families that contain the candidate and that match experimental data.
+
+To build a prior over measurements in the lab, we assume that sequences in a clonal family are distributed with abundance according to their fitness, and that fitness is close to the function we measure in the lab.
+These are standard assumptions in generative modelling of protein sequences \citep{Weinstein2022-tv} --- one fits a distribution $p$ to a set of protein sequences, then uses $\log p(X)$ as an estimate of the fitness of a sequence $X$; this fitness then correlates strongly with the function of the protein as measured in the lab \citep{Frazer2021-hn, Riesselman2018-nm, Notin2022-qw, Shin2021-lc}.
+In our case, each clonal family has its own fitness function which we use to build a prior over fitness functions.
+Our model, CloneLM, models clonal families as sets of sequences, similar to the architecture of \citet{Truong2023-dk} who used a language model to model protein families as sets of sequences.
+
+For each clonal family we observe a set of sequences which evolve with respect to a latent fitness function drawn from a prior.
+Instead of attempting to build an explicit latent variable model, \citet{Fong2024-bx} suggest performing Bayesian inference with a ``martingale posterior''. Instead of sampling and conditioning on the latent variable, they do the same with a large number of observations.
+\citet{Lee2022-ij} suggests using this approach for Bayesian optimization.
+\citet{Falck2024-fm} suggests that, with some bias, large language models can perform martingale posterior inference.
+We take this approach when sampling from our prior. 
+We use a large language model to flexibly fit observed sequences and sample sets of sequences, i.e. clonal families, as draws from our prior.
+
+When proposing sequences, we sample a clonal family from an autoregressive language model, CloneLM, but condition its output to fit experimental measurements.
+To do so, we build a twisted sequential Monte Carlo procedure \citep{Whiteley2014-db} in which we bias the generation of each letter towards the posterior.
+This technique is used to sample from filtering models \citep{Lawson2023-hc, Lawson2024-jd}, large language models \citep{Zhao2024-au}, or diffusion models \citep{Trippe2023-ej}.
+
+Complementary with work on iterative design are structure-based \textit{de novo} design methods which aim to predict antibody sequences that bind a particular antigen \citep{Jin2021-ub, Luo2022-ha, Kong2023-yu}.
+These models have the potential to design starting sequences for iterative optimization.
+These models could in principle also be used for iterative design, but cannot make use of a pool of previous measurements, and must have access to structure.
+We show below empirically that these models are not well suited for this task.
+
+
+
+\section{Background}
+
+
+We start with an antibody variable domain $X_0$, a sequence of $110\sim130$ letters made of the 20 amino acids, identified to bind a target of interest. 
+$X_0$ often does not bind the target strongly enough
+or is unstable in the human body, making it unsuitable as a therapeutic. 
+We therefore iteratively propose sequences we expect are stronger or more stable binders, $\hat X_1, \dots, \hat X_N$, and measure their binding or stability in the lab $Y_1, \dots, Y_N$.
+
+We assume that our measurements are evaluations of a function $f$ that takes sequences to a scalar measurement of binding or stability in the lab: $Y_n=f(\hat X_n)$.
+To suggest the next sequence, $\hat X_{N+1}$, given $\hat X_{1:N}, Y_{1:N}$ we can perform Bayesian optimization \cite{Frazier2018-ze}.
+First we place a prior on $f$ given our known weak or unstable binder $X_0$, $p(f|X_0)$.
+Then we infer $f$ by building a posterior, $p(f|X_0, \hat X_{1:N}, Y_{1:N}).$
+Finally, we suggest $\hat X_{N+1}$ given our knowledge of $f$, for example by Thompson sampling: we sample a value of $f$ we believe to be plausible, $f\sim p(f|X_0, \hat X_{1:N}, Y_{1:N})$, and test the sequence that maximizes this sample, $\hat X_{N+1}=\mathrm{argmax}_Xf(X)$.
+
+In the lab we often have a limited experimental budget, and therefore want to find a strong or stable binder in as few iterations as possible.
+To do so, we need an accurate prior on $f$.
+The ideal prior could in principle be constructed by performing many optimization experiments in the lab for a diverse array of targets and starting candidates and measuring $f$ in each case.
+Unfortunately, performing a large number of these experiments is prohibitively expensive.
+
+
+
+\section{A prior from fitness functions of evolving antibody sequences}
+
+
+While we do not have access to a large number of optimization experiments in the lab, we do have access to a large number of similar optimization experiments that occur in our bodies.
+Our immune system generates antibodies by first identifying candidate sequences that bind a target.
+It then evolves this sequence towards binding its target more strongly while remaining stable in the body:
+    mutations are introduced to sequences and those sequences with higher ``fitness'' --- those that bind the target more strongly and stably --- are selected for reproduction.
+Each starting candidate sequence typically produces many diverse sequences that have been evolved to bind a target strongly and stably.
+For each optimization experiment the immune system performs, we therefore observe a set of evolved sequences $X_1, \dots, X_M$ known as a ``clonal family''.
+
+The $f$ we measure in the lab measures binding and stability, similar to a function of the fitness of sequences under selection.
+Therefore to build a prior over $f$ we start by building a prior over fitness functions $F$.
+Then in Section~\ref{sec: clonebo} we allow for some discrepancy between $f$ and $F$ which may be caused by a difference between measurements in the lab and selection in our bodies.
+
+To get a prior over functions $F$ from observed clonal families, we first note that the distribution of sequences we observe, $p(X_1, X_2, \dots)$, can be written as a Bayesian model.
+The probability of observing a set of sequences in a clonal family is \textit{exchangable}, i.e. it does not depend on their order; so, by De Finetti's theorem\footnote{We ignore the dependence between the number of sequences we observe, $M$, and the sequences themselves} \citep{Hewitt1955-ua}, sequences in each clonal family are generated iid conditional on a latent random variable which we call $\mathrm{clone}$:
+\[p(X_{1:M}) = \int \prod_{m=1}^M p(X_m|\mathrm{clone})p(\mathrm{clone}).\]
+Next we make the standard assumption that families of evolving proteins are distributed with abundance proportional to their fitness \citep{Weinstein2022-tv}, that is, 
+\begin{equation}\label{eqn: clone to fitness}
+    F(X)=\log p(X|\mathrm{clone}).
+\end{equation}
+\citet{Sella2005-to} showed that Eqn.~\ref{eqn: clone to fitness} holds exactly if a protein evolves under $F$ over long time scales. 
+In reality, sequences drawn from $p(X|\mathrm{clone})$ can also be correlated by being descendants of the same sequence, but we make the standard assumption that these correlations can be ignored \citep{Weinstein2022-tv}.
+Finally, we can represent that the initial candidate $X_0$ binds the target by assuming we have observed it in the clonal family, i.e., by looking at $p(\mathrm{clone}|X_0)\propto p(\mathrm{clone})p(X_0|\mathrm{clone})$.
+
+We can therefore sample fitness functions from $p(F|X_0)$ in theory by \textbf{1)} sampling clonal families that contain $X_0$, $\mathrm{clone}^*\sim p(\mathrm{clone}|X_0)$, and then \textbf{2)} we can set $F(X)=\log p(X|\mathrm{clone}^*)$.
+
+
+
+\section{CloneLM: Learning a prior over fitness functions}
+
+In this section we fit a model to the distribution of clonal families and use it to sample fitness functions in practice.
+In principle, we could build a model with an explicit latent variable meant to represent $\mathrm{clone}$.
+Instead, we take a martingale posterior approach~\cite{Fong2024-bx} --- simply by building an accurate model of clonal sequences we learn an implicit prior on $\mathrm{clone}$ that we can approximately sample from.
+
+In Section~\ref{sec: train clonelm} we fit an autoregressive large language model, CloneLM, to large scale clonal family data and show it can generate realistic clonal families $X_{1:M}$ that contain a candidate sequence $X_0$.
+In Section~\ref{sec: martingale} we show that given a clone, $X_{0:M}$, CloneLM implicitly infers the fitness function when predicting sequences: $F(X)\approx \log p_{\mathrm{CloneLM}}(X_{M+1}|X_{0:M})$.
+Finally in Section~\ref{sec: fitting llm} we show CloneLM can therefore sample fitness functions from an implicit prior on $\mathrm{clone}$ by generating realistic clonal families that contain $X_0$ then inferring their fitness functions.
+
+\subsection{Fitting a large language model to generate clonal families}\label{sec: train clonelm}
+
+\begin{figure}[ht!]
+    \centering
+    \includegraphics[width=\textwidth]{figs/2a.pdf}
+    \caption{\textbf{CloneLM samples plausible clones.} We compare sequences in a clonal family to families generated by CloneLM conditional on $X_0$ ("Prompt").
+    We align sequences to $X_0$ and highlight locations where sequences differ from $X_0$ in blue. The sampled clonal families 
+    have variants in similar places, are similarly diverse as the real one, 
+    and share similar variants within each family.
+    }
+    \label{fig: clone ex}
+\end{figure}
+We train a large language model on large scale human clonal family data.
+Each antibody is made up of two amino acid sequences --- the ``light chain'' and the ``heavy chain''.
+We train separate models on heavy and light chains of antibody sequences in clonal families.
+
+To build a training set, we collect all sets of human heavy and light chain antibody sequences from the database of Observed Antibody Space (OAS) \citep{Olsen2022-nt}.
+We annotate clonal families in each set of sequences using FastBCR \citep{Wang2023-vj} and remove any clonal family with fewer than 25 sequences.
+Our dataset contains 908 thousand heavy chain clonal families and 34 thousand light chain clonal families.
+
+We then train autoregressive language models with 377 million parameters based on the Mistral-7B architecture on the heavy and light chain datasets \citep{Jiang2023-yy}.
+We represent each clonal family as a sequence of tokens made up of all the amino acid sequences in the clonal family each separated by a special sequence-separator token.
+We place spaces between amino acids so that the tokenizer represents each amino acid with its own token.
+Our model, CloneLM, accurately fits this data --- it achieves a test perplexity of 1.276 on the heavy chain data and 1.267 on the light chain data.
+We provide details of the data curation and of training the models in App.~\ref{app: training data}.
+
+To see if CloneLM generates realistic clonal families, in Fig.~\ref{fig: clone ex} we compare a heavy chain clonal family from the test set to clonal families generated by CloneLM conditional on a randomly selected sequence from the original family $X_0$.
+We see the sampled clonal families are similarly diverse to the real clonal family, include variants in similar locations as the true clonal family, and sequences within the same sampled clonal families contain similar variants.
+\begin{figure}[ht!]
+    \centering
+    \begin{subfigure}[b]{0.182\textwidth}
+        \includegraphics[width=\textwidth]{figs/2b.pdf}
+        \captionsetup{labelformat=empty}
+        \caption{\hspace{0.7cm}(a)}
+        \label{fig: kl dec}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.182\textwidth}
+        \includegraphics[width=\textwidth]{figs/2c.pdf}
+        \captionsetup{labelformat=empty}
+        \caption{\hspace{0.8cm}(b)}
+        \label{fig: nll dec}
+    \end{subfigure}
+     \hspace{5mm}
+    \begin{subfigure}[b]{0.3\textwidth}
+        \raisebox{0.16\height}{\includegraphics[width=\textwidth]{figs/2d.pdf}}
+        \caption{}
+        \label{fig: concept fitness}
+    \end{subfigure}
+    \hspace{5mm}
+    \begin{subfigure}[b]{0.18\textwidth}
+        \includegraphics[width=\textwidth]{figs/2e.pdf}
+        \captionsetup{labelformat=empty}
+        \caption{\hspace{0.8cm}(d)}
+        \label{fig: humanization}
+    \end{subfigure}
+    \caption{\textbf{CloneLM is a prior over fitness functions.} (a) For 5 different clonal families, with starting sequences $X_0$, $p_{\mathrm{CloneLM}}(X_{M+1}|X_{1:M}')$ gets close to $p_{\mathrm{CloneLM}}(X_{M_{\mathrm{large}}+1}|X_{1:M_\mathrm{large}})$ in KL.
+    We shade one standard deviation across 10 samples of $X_{1:M_{\mathrm{large}}}, X'_{1:M}$.
+    (b) For 5 different heavy chain clonal families, $p_\mathrm{CloneLM}(X|X_{0:M})$ better predicts sequences in a clonal family when conditioned on more sequences from that same clonal family $X_{0:M}$.
+    We shade one standard deviation across 10 samples of $X_{1:M}$.
+    (c) To sample from our prior $F\mid X_0$ we perform a martingale posterior procedure.
+    (d) We evolve three antibody therapeutics with three mutations from 25 sampled fitness functions.
+    These sequences evolve to look more like human antibodies.
+    }
+    \label{fig:fitness}
+\end{figure}
+
+\subsection{Approximately extracting a fitness landscape from a clonal family}\label{sec: martingale}
+
+CloneLM does not explicitly represent the latent variable $\mathrm{clone}$ so we cannot exactly query the fitness function $F(X)=\log p(X|\mathrm{clone})$.
+However, CloneLM approximates the predictive distribution of a Bayesian model $p(X_{M+1}|X_{0:M})$ which implicitly integrates over the latent $\mathrm{clone}$:
+\[p(X_{M+1}|X_{0:M})=\int p(X_{M+1}|\mathrm{clone})dp(\mathrm{clone}|X_{0:M}).\]
+As $M\to\infty,$ $p(\mathrm{clone}|X_{0:M})$ converges to a point mass at the latent $\mathrm{clone}^*$ generating the sequences.
+Therefore, in theory, as $M$ becomes large, $\log p_{\mathrm{CloneLM}}(X_{M+1}|X_{0:M})$ should converge to $F$:
+\[\log p_{\mathrm{CloneLM}}(X_{M+1}|X_{0:M})\approx\log p(X_{M+1}|X_{0:M})\approx \log p(X_{M+1}|\mathrm{clone}^*)=F(X_{M+1}).\]
+
+We see that CloneLM can infer $F$ as such on real data as well --- as $M$ becomes large, the predictive of CloneLM, $p_{\mathrm{CloneLM}} (X_{M+1}|X_{1:M})$, approaches convergence and its limit increasingly approaches the distribution of sequences in a clonal family, $p(X|\mathrm{clone})$.
+First in Fig.~\ref{fig: kl dec} we take random sequences $X_{0:M_{\mathrm{large}}}, X'_{0:M}$ from heavy chain clonal families and see if $p_\mathrm{CloneLM}(X_{M+1}|X_{0:M}')$ converges to $p_\mathrm{CloneLM}(X_{M_{\mathrm{large}}+1}|X_{0:M_{\mathrm{large}}})$ in Kullback-Leibler divergence. 
+Setting $M_{\mathrm{large}}=24$, we see that
+    although the divergence does not go to $0$, the distributions become very similar as $M$ becomes large.
+Next in Fig.~\ref{fig: nll dec} we take random sequences $X_{0:M}$ from heavy chain clonal families and see if $p_\mathrm{CloneLM}(X|X_{0:M})$ approaches $p(X|\mathrm{clone})$.
+We see indeed that when we use $p_\mathrm{CloneLM}(X|X_{0:M})$ to predict sequences in the clonal family, its perplexity is decreasing in $M$.
+
+\subsection{Sampled fitness landscapes and evolving sequences}\label{sec: fitting llm}
+
+Given that our model samples realistic clonal families and it can recover $F(X)=\log p(X|\mathrm{clone})$, we can approximately sample from $p_\mathrm{CloneLM}(F|X_0)$ using a martingale posterior procedure~\cite{Fong2024-bx} --- we sample from the prior of clonal families that contain $X_0$, $X_{1:M}\sim p_{\mathrm{CloneLM}}(X_{1:M})$, and then approximate the fitness function as $F(X)\approx \log p_{\mathrm{CloneLM}}(X|X_{0:M})$ (Fig.~\ref{fig: concept fitness}).
+
+The fitness functions we sample reflect how our immune systems evolve antibodies.
+In Fig.~\ref{fig: humanization} we take the heavy chains of three antibody therapeutics, bococizumab, trastuzumab, and ranibizimab, sample fitness functions setting from CloneLM conditional on these sequences with $M=10$, and iteratively evolve these sequences by adding the most likely mutation under each sampled fitness functions three times.
+These therapeutics are not originally human sequences and therefore can be unstable in the human body --- in particular, bococizumab was discontinued due to harsh side effects.
+If they were to evolve in our bodies, we would expect them to become more human-like, and therefore likely more stable.
+Indeed we see that as we evolve these sequences they look more like human antibodies, where human-ness is measured by the likelihood of IgLM \cite{Shuai2022-gp}, a model trained on a large set of human antibodies.
+
+
+\section{CloneBO: Inference with experimental measurements}
+
+
+We now describe how to use our prior over fitness functions $F$ to optimize sequences in the lab.
+In Section~\ref{sec: lab prior} we build a prior for measurements in the lab $f$ using our prior for $F$.
+We cannot exactly condition on the implicit $\mathrm{clone}$, so in Section~\ref{sec: approx post} we approximate the posterior over the latent $\mathrm{clone}$ with a posterior over concrete clonal families $X_{1:M}$.
+In Section~\ref{sec: tsmc} we describe how to sample from our approximate posterior using a twisted sequential Monte Carlo (SMC) procedure.
+Finally in Section~\ref{sec: thompson} we describe how to suggest sequences to perform iterative optimization with CloneLM; we call our method Clone-informed Bayesian Optimization (CloneBO).
+
+\subsection{Building a prior on laboratory measurements}\label{sec: lab prior}
+In our bodies, antibodies are optimized to stably and strongly bind their targets.
+In principle, we are interested in doing same in the lab.
+We therefore assume that the function we optimize in the lab, $f$, is approximately drawn from our prior on fitness functions, $F$, while allowing for some discrepancy due to mismatches between measurements in the lab and those in our bodies. For simplicity, we assume that $f$ is an affine linear transformation of $F$ and that the deviation between experiment and fitness is independent normal with error $\sigma^2$; that is, for some $T>0, C$, calling $F_n = \log p(\hat X_{n}|\mathrm{clone})$,
+\[
+    Y_n \mid \mathrm{clone}\sim N(T F_n + C, \sigma^2I).
+\]
+
+To reflect our vague uncertainty about $T$ and $C$ we use uniform priors: $C\sim \mathrm{Uniform}(-\infty, \infty)$ and $T\sim \mathrm{Uniform}(0, \infty)$.
+With these priors, we get an analytical expression for the marginal likelihood.
+
+\begin{proposition}\label{prop: marginal lik}
+    (Proof in App.~\ref{app: marginal lik proof}.) For some constant $D$, and $R=\sqrt{N}\frac{\mathrm{Std}(Y_{1:N})}{\sigma}\mathrm{Cor}(F_{1:N}, Y_{1:N})$, with $\Phi$ as the Gaussian CDF,
+    \begin{equation}\label{eqn: likelihood}
+        \log p(Y_{1:N}|F_{1:N}) = -\frac 1 2 \log \mathrm{Cov}(F_{1:N})  + \frac 1 2 R^2 + \log\Phi(R)+D.
+    \end{equation}
+\end{proposition}
+
+The first term in Eqn.~\ref{eqn: likelihood} pushes the fitness values of the measured sequences, $F_{1:N}$, to be different, while the later terms push $F_{1:N}$ to strongly and positively correlate with $Y_{1:N}$.
+
+As before, we assume we have a starting candidate $X_0$ that belongs in the clonal family.
+Therefore,
+\[p(\mathrm{clone}|Y_{1:N}, \hat X_{1:N}, X_0)\propto p(\mathrm{clone})p(X_0|\mathrm{clone})p\left(Y_{1:N}|F_{1:N}\right)\]
+
+\subsection{Approximating the posterior}\label{sec: approx post}
+To infer $f$ given measurements $Y_{1:N}, \hat X_{1:N}$, we would like to sample from the posterior $F\sim p(F|Y_{1:N}, \hat X_{1:N}, X_0)$. As we only implicitly represent $\mathrm{clone}$, we approximate the posterior by swapping the latent $\mathrm{clone}$ for a concrete clonal family, $X_{1:M}$; then, as in Sec.~\ref{sec: martingale}, we can approximately query the fitness function $F(X)\approx \log p(X|X_{0:M})$.
+
+To create an approximate posterior, we replace $F_{n}$ with $F^M_n=\log p(\hat X_n|X_{0:M})$:
+\begin{equation}\label{eq: approx post}
+\tilde p_M(X_{1:M}|Y_{1:N}, \hat X_{1:N}, X_0)\propto p(X_{1:M}|X_0)p\left(Y_{1:N}|F^M_{1:N}\right).
+\end{equation}
+As $M\to\infty$, $F_{1:N}^M\to F_{1:N}$, so, $\tilde p_M$ converges to the distribution one obtains by sampling $\mathrm{clone}$ from the posterior and sampling $X_m\sim p(X_m|\mathrm{clone})$ iid:
+\begin{proposition}\label{prop: post converge}
+    (Proof in App.~\ref{app: approx post proof}) As $M\to\infty$, $\tilde p_M$ converges to the true posterior of $X_{0:M}$.
+\end{proposition}
+In practice, we approximate $p(X_{1:M}|X_0)$ and $F_{1:N}^M$ with CloneLM. 
+
+\subsection{Sampling from the approximate posterior with twisted SMC}\label{sec: tsmc}
+
+\begin{figure}
+    \centering
+    \begin{subfigure}[b]{0.3\textwidth}
+        \includegraphics[width=\textwidth]{figs/3a.pdf}
+        \caption{}
+        \label{fig: concept twisted}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.365\textwidth}
+        \includegraphics[width=\textwidth]{figs/3b.pdf}
+        \caption{}
+        \label{fig: tm fitness fit}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.305\textwidth}
+        \includegraphics[width=\textwidth]{figs/3c.pdf}
+        \captionsetup{labelformat=empty}
+        \caption{\hspace{-0.8cm}(c)}
+        \label{fig: tsmc}
+    \end{subfigure}
+    \caption{\textbf{We accurately sample functions from the posterior with a twisted SMC procedure.} a) To sample from our posterior, we bias our generated sequences to look more like those sequences that were measured in the lab to be good.
+    b) A sample from tSMC better fits the data than an importance sample.
+    We show a line of best fit between $F_{1:N}^M$ (fitness from a clone of $M$ sequences) and $Y_{1:N}$ (measurement) for example clonal families sampled by importance sampling or twisted SMC, with $M=6$, $D=300$ particles for IS, and $D=4$ for twisted SMC.
+    c) We quantify the result from (b) across 10 replicates for various clone sizes $M$.
+    }
+    \label{fig:tsmc}
+\end{figure}
+
+To sample from $\tilde p_M$, we
+need to generate $M$ sequences from CloneLM such that the probabilities of the $(M+1)$st sequence matches experimental measurements.
+Naively, we might sample $X_{1:M}$ from CloneLM and then importance sample.
+However, the space of sequences is large, and we may fail to resample a mutation that improved measurements in the lab.
+
+Instead we bias generation at each letter by adding measured sequences to our clonal family so that mutations that improve measurements are encouraged and those that harm measurements are avoided (Fig.~\ref{fig: concept twisted}).
+We call this bias a ``twisted'' distribution, a term from the sequential Monte Carlo literature. In practice, this bias does not exactly sample from the posterior, so we efficiently correct for the discrepancy with a sequential Monte Carlo procedure.
+
+\paragraph{Twisted distributions}
+Define $X^{(l)}$ to be the letter at the $l$th position of a sequence $X$ and $X^{(:l)}$ as the first $l$ letters in $X$; if $l$ is greater than the length of $X$, we define $X^{(l)}$ as an empty position.
+To build our twisted distributions, we decompose the likelihood of $\hat X_n$ given $M+1$ sequences into contributions from the first $M$ sequences and contributions from each letter in sequence $M+1$:
+\begin{equation}\label{eqn: f contrib}
+    \begin{aligned}
+        F^{M+1}_n=\log p(\hat X_n|X_{0:M+1}) = & \log \frac{p( X_{M+1}|X_{0:M}, \hat X_n)}{p( X_{M+1}|X_{0:M})}+\log p(\hat X_n|X_{0:M})\\
+        = &\sum_{l}\log\frac{p( X_{M+1}^{(l)}|X_{0:M}, X_{M+1}^{(:l-1)}, \hat X_n)}{p( X_{M+1}^{(l)}|X_{0:M}, X_{M+1}^{(:l-1)})} +F^{M}_n\\
+        =: &\sum_{l}F_n^{M+1, (l)} +F^{M}_n.
+    \end{aligned}
+\end{equation}
+We can calculate $F_n^{M+1, (l)}$ by adding $\hat X_n$ to the end of the clonal family $X_{1:M}$ and calculating how much the conditional likelihood of the $l$-th letter of $X_{M+1}$ increases. To approximately sample from the posterior therefore, when sampling each letter we bias towards letters with $F_n^{M+1, (l)}$ that better match experimental measurements (Fig.~\ref{fig: concept twisted});
+we call these approximations of the posterior the ``twisting distributions'' and we define them formally in App.~\ref{app:sequential_is}.
+\iffalse
+    We can therefore approximate the marginal $\tilde p_{M+1}(X_{M+1}^{(:l)}, X_{0:M})$ just as in Section~\ref{sec: approx post} by replacing $F_{1:N}^{M+1}$ in Eqn.~\ref{eq: approx post} with \mbox{$F_{1:N}^{M+1, (:l)} = \sum_{l'=1}^{l}F_n^{M+1, (l')} +F^{M}_n$},
+    \[\tilde p_{M+1}^{(:l)}(X_{M+1}^{(:l)}, X_{0:M})\propto p(X_{1:M}, X_{M+1}^{(:l)}|X_0)p(Y_{1:N}|F^{M+1, (:l)}_{1:N}).\]
+    We call this approximation the ``twisted'' distribution.
+    
+    If we pretend that these twisted distributions are exact marginals and that $\tilde p_M$ is also the marginal of $\tilde p_{M+1}$, we can therefore sample each sequence letter-by-letter according to
+    \begin{equation}\label{eqn: smc update}
+        X_{M+1}^{(l+1)}\sim \tilde p_{M+1}^{(:l+1)}(X_{M+1}^{(l+1)}|X_{M+1}^{(:l)}, X_{0:M})\propto p(X_{M+1}^{(l+1)}|X_{M+1}^{(:l)}, X_{0:M})p(Y_{1:N}|F^{M+1, (:l+1)}_{1:N}).
+    \end{equation}
+    The first term in Eqn.~\ref{eqn: smc update} samples the next letter according to the unconditional distribution.
+    The second term is a bias that upweights letters $X_{d, M+1}^{(l+1)}$ for which $F_{1:N}^{M+1, (:l+1)}$ correlates with $Y_{1:N}$;
+        this usually means upweighting letters that are more likely if sequences that were measured to have high $Y_n$, $\hat X_n$, were included in the clonal family (Fig.~\ref{fig: concept twisted}).
+\fi
+
+The twisted distributions are not the exact marginals.
+We correct for this discrepancy by sampling $D>1$ sequences at a time and importance sampling in a sequential Monte Carlo procedure (SMC), which we also describe in App.~\ref{app:sequential_is}.
+The final method is known as twisted SMC, and when $D=1$, it is equivalent to sampling from the approximations described above.
+
+\paragraph{Empirical results}
+We sample a clonal family conditional on laboratory measurements of the melting temperature of 75 related antibodies from an experiment described in Sec.~\ref{sec: results}.
+In Fig.~\ref{fig: tm fitness fit} and \ref{fig: tsmc} we see that clonal families from twisted SMC fit the experimental data substantially better than clonal families importance sampled from unconditional samples from CloneLM.
+We also see in Fig.~\ref{fig: tsmc} that correcting for bias with $D=4$ also improves the fit to the data and that as $M$ increases, the likelihood $p(Y_{1:N}|F_{1:N}^M)$ plateaus, reflecting the convergence of $\tilde p_M$ to the true posterior.
+We show similar results for laboratory measurements of binding in App.~~\ref{app:tsmc affinity res}
+
+\subsection{Bayesian optimization with CloneBO}\label{sec: thompson}
+
+After sampling $F$ from the posterior we would like to suggest sequences to test in lab.
+We take a Thompson sampling approach \citep{Russo2018-vr}: we propose testing the sequence predicted to maximize $F(X)$, and therefore maximize $f(X)$, in the lab.
+We cannot optimize $F(X)$ over all sequences, so in practice we start with $4$ sequences with the highest measurements $Y$ and iteratively optimize $F(X)$ over the top substitution for up to $3$ substitutions.
+
+In theory, $X_0$ represents a candidate sequence to optimize.
+In practice, we found it helpful to take a greedy approach --- we randomly select $X_0$ from the $4$ sequences with the highest measurements $Y$.
+
+Conditioning on a large number of measurements $\hat X_{1:N}, Y_{1:N}$ is computationally expensive.
+To accommodate large $N$, other Bayesian optimization methods build summaries of the measurements, for example by fitting a neural network to them \cite{Stanton2022-ru}.
+In our case, we only condition on the measurements of sequences predicted to be most informative -- we calculate the probability that each $\hat X_n$ appears in a clonal family with $X_0$, $p(X_0, \hat X_n)$ and condition on the measurements of the $75$ most likely sequences.
+Additional details of CloneBO are provided in App.~\ref{app: clonebo details}.
+
+
+
+\section{Experiments}
+
+
+Now we demonstrate that CloneBO efficiently optimizes antibody sequences against oracles trained on real stability and affinity data.
+In Section ~\ref{sec: in silico} we demonstrate that our method efficiently optimizes fitness functions or laboratory measurements \textit{in silico}.
+In Section~\ref{sec: lab results} we also show that our method suggests mutations that optimize sequences in \textit{in vitro} experiments the lab.
+We provide details of our experiments in App.~\ref{app: exp details}.
+
+\subsection{Optimizing antibodies \textit{in silico}}\label{sec: in silico}
+
+We show that CloneBO efficiently optimizes fitness functions or measurements in the lab \textit{in silico}.
+To simulate fitness functions or lab measurements, we train oracles $f$ on real data.
+We show that CloneBO outperforms naive and informed baselines.
+
+\subsubsection{Baselines}
+
+First we consider a naive \textbf{Greedy} baseline which suggests a random substitution of one of the top 4 sequences.
+We also compare to an informed greedy baseline which randomly picks one of the top 4 sequences and introduces the mutation predicted to make the antibody look most like a typical antibody, where typicality in measured by the likelihood of a masked language model trained on antibody sequences, \textbf{Sapiens} \citep{Prihoda2022-zy};
+    this is a popular strategy for making antibodies that are more stable in the body.
+We also compare to \textbf{LaMBO} \citep{Stanton2022-ru}, a state-of-the-art Bayesian optimization method for sequences which builds a latent space using a pool of sequences and fits experimental measurements in this latent space; by conditioning on this latent space, it is less likely to suggest atypical sequences.
+We also build a LaMBO model informed by the space of antibodies by pretraining its latent space using 100000 antibody sequences from the observed antibody space database~\citep{Olsen2022-nt}, \textbf{LaMBO-Ab}. 
+We also compare to other popular strategies for iterative optimization of sequences that do not have antibody-based priors, \textbf{Genetic}, \textbf{AdaLead}~\citep{sinai2020adalead}, and \textbf{EvoBO}~\citep{sinai2020adalead}; \textbf{CMA-ES}~\citep{Hansen2001-dn}, \textbf{Dyna-PPO}~\citep{Angermueller2020-pa}, and \textbf{CbAS}~\citep{Brookes2019-fv}.
+In total, we compare CloneBO to 10 baselines that represent state-of-the-art industry practice\footnote{Note that some of these methods are developed for different regimens, such as short sequences or large amounts of training data. 
+Their performance here does not necessarily represent their performance for the problems they are optimized for.}.
+
+\subsubsection{Results} 
+\begin{figure}
+
+    \centering
+    \begin{subfigure}[b]{0.23\textwidth}
+        \includegraphics[width=\textwidth]{figs/4a.pdf}
+        \captionsetup{labelformat=empty}
+        \caption{\hspace{0.5cm}(a)}
+        \label{fig: clone opt}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.76\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/4b.pdf}
+        \captionsetup{labelformat=empty}
+        \caption{(b)}
+        \label{fig: oracle opt}
+    \end{subfigure}
+    \caption{\textbf{CloneBO efficiently optimizes antibodies \textit{in silico}.}
+    We show the mean and standard deviation of the best acheived value across 10 replicates.
+    (a) CloneBO efficiently optimizes a fitness function. The blue line is CloneBO; the grey are LaMBO-Ab, LaMBO, Sapiens, and Greedy.
+    (b) CloneBO optimizes binding and stability \textit{in silico} over 100 steps of iterative design (p value is Mann-Whitney).
+    It does significantly better than the next best method for binding (p=0.018 Mann-Whitney) and stability (p=0.006 Mann-Whitney).
+    } 
+    \label{fig: in silico results}
+\end{figure}
+\paragraph{Oracle of a fitness function of a clonal family}
+We first demonstrate the potential of the CloneBO prior to accelerate optimization.
+We build an oracle to simulate the fitness function of a real human clonal family, that is, a function from the CloneBO prior.
+We trained a language model on a heavy chain clonal family of $10015$ sequences from our test set and try to maximize $f(X)=$ the log likelihood of $X$ of this model.
+We start with a single measurement $\hat X_1, Y_1$ where $\hat X_1$ is a sequence from the clonal family.
+Very few mutations of an antibody improve fitness, so in Fig.~\ref{fig: clone opt} we see some baselines struggle to identify positive mutations.
+CloneBO's prior on the other hand gives it knowledge about what sorts of mutations are most likely to improve fitness allowing it to quickly optimize $f$ even at very low $N$.
+
+\paragraph{Oracles from laboratory measurements of melting temperature and binding}
+We next demonstrate the utility of CloneBO in an \textit{in silico} simulation of a realistic in-lab setting.
+We trained oracles on lab measurements from an experiment that aimed to optimize a VHH domain, a sequence similar to an antibody heavy chain, for binding and stability at high temperature.
+We trained neural network ensembles on the melting temperature and binding (measured in $-\log K_D$) measurements and try to maximize $f(X)=$ the mean predictions of these ensembles.
+We simulate starting part way through this experiment by starting with 1000 measurements $\hat X_{1:1000}, Y_{1:1000}$ where $\hat X_{1:1000}$ are the first $1000$ sequences measured in the experiment and $ Y_{1:1000}$ are oracle predictions.
+We do not expect mutations outside of the CDR regions of an antibody to substantially affect binding, so we only allow mutations in these regions of the sequence when optimizing for binding.
+In Fig.~\ref{fig: oracle opt}, we see that after 100 steps, greedy methods and methods informed by an antibody prior optimize antibodies more efficiently than previous methods against these oracles; in particular, CloneBO outperforms all baselines.
+In App.~\ref{sec: against N} we plot these results against $N$ and in table form.
+
+\paragraph{Comparison to structure-based design model for binding SARS CoV.}
+In App.~\ref{sec: cov binding} we show that CloneBO can also efficiently optimize antibodies \textit{in silico} for SARS CoV binding as measured by a predictor trained on CoVAbDaB~\citep{Raybould2020-us}.
+In particular we see CloneBO beats structure-based design method DiffAb~\citep{Luo2022-ha}.
+
+\paragraph{Ablations and sensitivity}
+In App.~\ref{sec: ablations} we show that CloneBO accelerates optimization by building an accurate posterior -- the performance of CloneBO is harmed when we ablate sampling large clonal families, conditioning on experimental data, or our twisted SMC sampling strategy.
+We also perform two other ablations demonstrating that our results above are reliable -- we show 1) CloneBO is robust to different starting sequences and starting pool sizes, and 2) CloneBO can efficiently optimize antibodies when $f$ deviates from the CloneBO prior, especially at low $N$.
+Finally we sweep hyperparameters to show that CloneBO is not particularly sensitive to hyperparameters other than the amount of noise in the data;
+we describe a heuristic that allows us to make a good choice for the amount of noise.
+\subsection{Optimizing an antibody \textit{in vitro}}\label{sec: lab results}
+
+\begin{figure}
+    \centering
+    \begin{subfigure}[b]{0.33\textwidth}
+        \includegraphics[width=\linewidth]{figs/5a.pdf}
+        \caption{}  
+        \label{fig:synth pred}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.66\textwidth}
+        \includegraphics[width=0.495\textwidth]{figs/5ba.pdf}
+        \includegraphics[width=0.495\textwidth]{figs/5bb.pdf}
+        \caption{}
+        \label{fig: lab opt}
+    \end{subfigure}
+    \caption{\textbf{CloneBO efficiently optimizes antibodies \textit{in vitro}.}
+    \emph{LaMBO} in this plot refers to \emph{LaMBO-Ab}.
+    (a) CloneBO design sequences predicted to be synthesizable.
+    (b) CloneBO designs strong and stable binders in the lab. 
+    Measurements from previous rounds are shown in a histogram.
+    The vertical black line represents the best value previously achieved.
+    } 
+    \label{fig: in vitro results}
+\end{figure}
+We now demonstrate that CloneBO can design sequences as part of a real-world antibody optimization campaign.
+We started with 1000 lab measurements of binding and melting temperature\footnote{94 / 1000 sequences were measured for melting temperature and 997 / 1000 were measured for $K_D$.} (visualized in Fig.~\ref{fig:visualize train}) and designed 200 sequences using CloneBO and our strongest baseline, LaMBO-Ab, for one wetlab iteration of optimizing binding or melting temperature.
+In a real world optimization campaign, this one step would be repeated many times.
+
+Before measuring designed sequences, sequences need to be synthesized;
+    sequences which are atypical can fail to synthesize, making their measurement impossible.
+In Fig.~\ref{fig:synth pred} we plot the predicted synthesizability of sequences from CloneBO and LaMBO-Ab;
+sequences from CloneBO are significantly more synthesizable (Mann-Whitney $p<1e-5$), suggesting they are more realistic.
+We next measure 20 sequences designed by CloneBO and LaMBO-Ab that are predicted to synthesize.
+
+In Fig.~\ref{fig: lab opt} we plot sequences we were able to measure; 
+we include any sequences that were proposed that we had measured in previous experiments. 
+We see that sequences from CloneBO achieve the best binding and stability.
+Our strongest binder is only beaten by 2 / 997 previously measured sequences and our most stable sequence beats the previously measured sequences by a large margin. 
+We also conclude that sequences from CloneBO are significantly stronger binders than those from LamBO-Ab (Mann-Whitney $p=0.021$). We discuss these results in more detail in App.~\ref{sec: additional in vitro}.
+
+
+
+\section{Conclusion}
+
+
+To develop new disease treatments, antibodies must be optimized for a range of properties.
+By learning from the human immune system's approach to antibody maturation and therefore substantially accelerating optimization in the lab, CloneBO can help build safer and more effective therapeutics.
+
+An important direction of future work is addressing theoretical and practical limitations of CloneBO.
+First, CloneBO currently assumes a simple relationship between the fitness of a clonal family and measurements in the lab (Section~\ref{sec: lab prior}).
+Future work may account for heteroskedasticity or nonlinear relationships.
+As well, CloneBO evaluates the fitness of a sequence by assessing how likely it is to belong to a clonal family of $X_0$.
+Future work may attempt to incorporate patterns learned from measurements of diverse sequences which are unlikely to belong to the same clonal family.
+Finally, the cost of sampling from the CloneBO posterior scales with the number of laboratory measurements $N$ (Section~\ref{sec: tsmc}), so CloneBO scales by conditioning only a subset of measured sequences.
+Future work could instead build a more scalable model or approximate sampling procedure.
+
+Another important future direction is extending CloneBO to multi-objective iterative Bayesian optimization of antibodies for binding and stability simultaneously.
+We can do so for example by swapping Thompson sampling for other acquisition functions \citep{Daulton2020-nb}.
+
+
+
+\section{Reproducibility Statement}
+
+We include weights for our CloneBO models and code for implementing sampling in our code release.
+
+Sequences from the iterative optimization experiment are proprietary; we release all other data: 
+    we include the trained oracle for Fig.~\ref{fig: clone opt} in our code release;
+    we describe how implement baselines and the oracle in Fig.
+
+\subsection*{Acknowledgements}
+This work is supported by NSF CAREER IIS-2145492, NSF CDS\&E-MSS 2134216, NSF HDR-
+2118310, Capital One, and an Amazon Research Award.
+
+
+
+
+

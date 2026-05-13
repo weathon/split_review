@@ -1,0 +1,372 @@
+\title{Closed-Form Diffusion Models}
+
+\begin{abstract}
+Score-based generative models (SGMs) sample from a target distribution by iteratively transforming noise using the score function of the perturbed target. For any finite training set, this score function can be evaluated in closed form, but the resulting SGM memorizes its training data and does not generate novel samples. In practice, one approximates the score by training a neural network via score-matching. The error in this approximation promotes generalization, but neural SGMs are costly to train and sample, and the effective regularization this error provides is not well-understood theoretically. In this work, we instead explicitly smooth the closed-form score to obtain an SGM that generates novel samples without training. We analyze our model and propose an efficient nearest-neighbor-based estimator of its score function. Using this estimator, our method
+achieves sampling times competitive with neural SGMs while running on consumer-grade CPUs.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Score-based generative models (SGMs) draw samples from a target distribution $\rho_1$ by sampling Gaussian noise and flowing it through a possibly noisy velocity field $v_t$. This velocity field depends on the \emph{score function} of the perturbed target distribution $\rho_t$, which existing SGMs parameterize as a neural network and learn via \emph{score-matching} \citep{hyvarinen2005estimation} or denoising \citep{vincent2011connection, ho20}. Although the target distribution $\rho_1$ (for example, the distribution over human face images) is in principle continuous, in practice score-matching and denoising problems are solved using an empirical approximation $\hat{\rho}_1$ to the target distribution constructed from a finite training set.
+
+When $\hat{\rho}_1$ is the empirical distribution over a finite training set $\{x_i\}_{i=1}^N$, the perturbed target distribution $\rho_t$ is a mixture of Gaussians, whose score function $\nabla \log \rho_t(z)$ has a simple closed-form expression. This score function is a vector pointing from $z$ toward a distance-weighted average of all $N$ rescaled training points and is the \emph{exact} solution to the score-matching problem. By evaluating this \emph{closed-form score} during sampling, one obtains a training-free sampler for $\hat{\rho}_1$. While this approach seems tempting at first glance, two flaws render it unsuitable for real-world applications: (1) Many applications involve large training sets, prohibiting $O(N)$ computation of the closed-form score, and (2) flowing base samples through the closed-form velocity field simply outputs training samples $x_i$, which is not useful in practice.
+
+Existing work avoids these issues by neurally approximating the score of $\rho_t$. By compressing training data into the score model's weights, % during training, 
+neural score functions replace a sum over $N$ training points with a neural network evaluation whose complexity does not depend directly on $N$.
+Moreover, neural SGMs generate novel samples given finite training data thanks to approximation error (from limited model capacity) and optimization error (from undertraining) in learning the score \citep{pidstrigach2022score, yoon2023diffusiongeneralize, yi2023generalization}. 
+While neural SGMs are successful, % a successful class of generative models, 
+they are costly to train, and sampling them requires many (typically GPU-bound) neural network evaluations. Furthermore, the form of the error that enables neural SGMs to generalize is unknown, making it difficult to characterize the distribution from which these models sample in practice. 
+
+Our key insight is that the flaws of na\"ive closed-form SGMs (in particular, lack of generalization and poor scalability) can be addressed without resorting to costly black-box neural approximations. % to the score function.
+To this end, we introduce \emph{smoothed closed-form diffusion models} (smoothed CFDMs), a class of training-free diffusion models that require only access to the training set at sampling time. Smoothed CFDMs generate novel samples from a finite training set by flowing Gaussian noise through a velocity field built from a \emph{smoothed} closed-form score. Our method is highly efficient, has few hyperparameters, and generates good-quality samples in high-dimensional tasks such as image generation. Our specific contributions are as follows: (1) We show that smoothing the exact solution to the score-matching problem promotes generalization. (2) Using our smoothed score, we construct a closed-form sampler that generates novel samples without requiring any training, and characterize the support of its samples. (3) We accelerate our sampler using a nearest-neighbor-based estimator of our smoothed score and by taking fewer sampling steps, with analysis and experiments showing that in practice, one can aggressively approximate our smoothed score at little cost to sample accuracy. (4) We scale our method to high-dimensional tasks such as image generation. By operating in the latent space of a pretrained autoencoder, we generate good-quality, novel samples from CIFAR-10 at a rate of 138 latents per second on a \emph{consumer-grade laptop with no dedicated GPU}.
+
+
+
+\section{Related Work}
+
+
+
+
+\emph{Diffusion models} \citep{sohl-dickstein15, song19, ho20} have recently achieved state of the art performance in image~\citep{rombach2022high,Zhang2023AddingCC} and video generation~\citep{Ho2022ImagenVH,Ho2022VideoDM}. They have also shown promise in 3D synthesis~\citep{luo2021diffusion, poole2022dreamfusion,Watson2022NovelVS} and in crucial steps of the drug discovery pipeline such as molecular docking~\citep{corso2023diffdock} and generation~\citep{hoogeboom22a, schneuing2022structure}. Despite this progress, however, diffusion models remain costly to train and sample from~\citep{shih2023paradigms}. Prior work has sought to accelerate the sampling of diffusion models via model distillation~\citep{salimans2022progressive}, operating in a pre-trained autoencoder's latent space~\citep{vahdat2021score, rombach2022high}, modifying the generative process~\citep{song2020denoising}, using alternative time discretizations for sampling \citep{zhang2023fast, Liu2022PseudoNM, Wu2023FastDM}, or by parallelizing sampling steps~\citep{shih2023paradigms}. Latent diffusion models also benefit from lower training expenses~\citep{rombach2022high}, but publicly-reported training costs for state-of-the-art diffusion models remain high~\citep{stablediffusioncost}.
+
+Recent works propose alternative diffusion-like models that discard the Markov chain and SDE formalisms from earlier work. \citet{liu2023flow} introduce a unified framework for flow-based generative modeling that subsumes diffusion models and show that straightening their model's flows enables few-step sample generation. \citet{heitz-iterativealpha} use a similar objective to construct a straightforward graphics-inspired sampler, and \citet{delbracio2023inversion} concurrently generalize this framework to arbitrary data perturbations and apply it to image restoration and generation tasks. All of these methods parametrize their flows by neural networks that %, as with earlier diffusion models, 
+require extensive training.
+
+While diffusion models draw inspiration from mathematical theory \citep{Feller1949OnTT, stroock1969diffusion, stroock1969diffusion2, stroock1972diffusion}, there have been limited attempts to develop a theoretical understanding. \citet{salmona2022can, koehler2023statistical} study the statistical limitations of diffusion models trained via score-matching, \citet{debortoli2021diffusion, lee2023convergence} present convergence results for diffusion models with absolutely continuous targets, and \citet{debortoli2022convergence} extends these results to manifold-supported distributions. However, as diffusion models are trained on an empirical approximation to their target distributions, these results can only show that a diffusion model converges to the empirical distribution of its training set, whereas one is typically interested in generating \emph{novel} samples.% from the data distribution.
+
+\citet{pidstrigach2022score} takes an initial step in this direction by studying the support of an SGM's model distribution and providing conditions under which an SGM memorizes its training data or learns to sample from the true data manifold. \citet{Oko2023DiffusionMA} further show that diffusion models can attain nearly minimax estimation rates for the true data distribution provided its density lies in an appropriate function class. \citet{yoon2023diffusiongeneralize} propose and empirically test a memorization-generalization dichotomy, which states that diffusion models may only generalize when they are parametrized by neural networks with insufficient capacity relative to the size of their training set. \citet{yi2023generalization} note that standard training objectives for diffusion models have closed-form optima given finite training sets and show via experiments that the approximation error of neural score functions enables existing diffusion models to generalize. Whereas these works study the generalization of existing SGMs, we construct a novel SGM that explicitly perturbs the closed-form score to generalize without the indeterminate approximation error and training costs of a neural score.% and incurring the associated training costs.
+
+Recent works in graphics and vision have also noted that neural networks are unnecessary for tasks such as novel view synthesis, where neural radiance fields (NeRFs) had previously achieved SOTA results \citep{barron2022mip}. In light of this, \citet{kerbl20233d} use efficiently optimized 3D Gaussian scene representations to achieve SOTA visual quality in novel view synthesis while operating in real time. In this work, we adopt a similar perspective and investigate the extent to which neural networks can be replaced with efficient and well-understood classical approaches in generative modeling.
+
+
+
+\section{Preliminaries: The closed-form score}
+
+
+\emph{Flow-based generative models} draw samples from a target distribution $\rho_1$ by sampling from a known base distribution $\rho_0$ (typically $\mathcal{N}(0,I)$) and flowing these samples through a velocity field $v_t$ from $t=0$ to $t=1$. For an appropriately-chosen $v_t$, the samples will be distributed according to the target distribution $\rho_1$ at $t=1$. SGMs employ a $v_t$ that depends on the score function $\nabla \log \rho_t$ of the perturbed data distribution $\rho_t$. For example, when $\rho_0 = \mathcal{N}(0,I)$, one velocity field satisfying this property is $v^*_t(z) = \frac{1}{t}\left(z + (1-t) \nabla \log \rho^*_t(z) \right)$ \citep{liu2023flow}, where $\rho^*_t$ is the marginal distribution of the random variable $z = tx + (1-t)\epsilon$, whose samples are target samples $x \sim \rho_1$ that have been rescaled by $t$ and perturbed by Gaussian noise $(1-t)\epsilon \sim \mathcal{N}(0, (1-t)^2I)$. The score function $\nabla \log \rho^*_t(z)$ is typically learned via score-matching or denoising.
+
+In practice, one learns an SGM from a finite training set $\{x_i\}_{i=1}^N$. In this case, the target distribution $\hat{\rho}_1$ is the empirical distribution over $\{x_i\}_{i=1}^N$, and for the field $v^*_t$ defined above, the perturbed target distribution $\rho^*_t$ is a mixture of Gaussians with means $tx_i$ and common covariance matrix $(1-t)^2I$. (We will use the fact that $\rho^*_t$ is a mixture of Gaussians to accelerate our sampler in \S\ref{sec:fewer-steps}.) Its score $\nabla \log \rho^*_t(z)$ has a closed-form expression:
+\begin{align}\label{eq:closed-form-score}
+    &\nabla \log \rho^*_t(z) = \frac{1}{(1-t)^2} \left(k_t(z) - z \right),\\
+    \textrm{where }&k_t(z) = \sum_{i=1}^N \textrm{softmax}\left(-\frac{\|z - tX \|^2}{2(1-t)^2}\right)_i tx_i,\label{eq:convex-comb}
+\end{align}
+in which we let $\|z - tX \|^2$ denote the vector whose $i$-th entry is $\|z - tx_i \|^2$. This $\nabla \log \rho^*_t(z)$ is a vector pointing from $z$ toward a distance-weighted average $k_t(z)$ of all $N$ rescaled training points and is the \emph{exact} solution to the score-matching problem given finite training data.
+
+We define a \emph{closed-form diffusion model} (CFDM) to be the SGM that flows $\mathcal{N}(0,I)$ base samples through this $v^*_t(z)$ while evaluating the score $\nabla \log \rho^*_t(z)$ in closed-form throughout the flow. As this model can only generate samples from the empirical distribution over training data, CFDMs are not useful in practice.
+
+
+
+\section{Smoothed Closed-Form Diffusion Models}
+
+
+\citet{pidstrigach2022score, yi2023generalization} find that existing diffusion models generalize due to approximation error incurred during score-matching. Inspired by this observation, we construct a training-free SGM that generalizes by explicitly inducing error in the closed-form score.
+
+\subsection{Definition}\label{sec:scfdm-def}
+
+Deep neural networks fit the low-frequency components of their target functions first during training, a phenomenon known as ``spectral bias'' that results in excessively smooth approximations to the target function \citep{rahaman2019spectral}. Hence, to model the bias of a neural SGM, we induce error in the score function by \emph{smoothing} it. To smooth a function $f$, one chooses a zero-mean noise distribution $p_\epsilon$ and replaces $f(z)$ with the convolution $\tilde{f}(z) = \mathbb{E}_{\epsilon \sim p_\epsilon}[f(z+\epsilon)]$. In practice, we compute the smoothed score function $s_{\sigma,t}(z)$ by fixing a smoothing parameter $\sigma \geq 0$, drawing $M$ noise samples $\epsilon_m \sim p_\epsilon$, and computing
+\begin{equation}\label{eq:smoothed-score-defn}
+    s_{\sigma,t}(z)
+    = \frac{1}{(1-t)^2} \left( 
+    \frac{1}{M} \sum_{m=1}^M k_t(z + \sigma \epsilon_m) - z \right).
+\end{equation}
+That is, we \emph{average} the weights $k_t$ in \eqref{eq:convex-comb} over $M$ small perturbations $\sigma \epsilon_m$ of $z$; as $\sigma\to0$, we approach the unsmoothed score \eqref{eq:closed-form-score}. We do not add noise to the $-z$ term in the score because it vanishes in expectation. The smoothing procedure in~\eqref{eq:smoothed-score-defn} is the key ingredient enabling our model to generalize without a learned approximation to the score function. The smoothed score $s_{\sigma,t}$ can then be inserted into an SGM sampling loop to yield a closed-form sampler that generates novel samples. 
+\begin{wrapfigure}{l}{0.5\textwidth}
+    \begin{minipage}{\linewidth}
+    \centering\captionsetup[subfigure]{justification=centering}
+    \begin{subfigure}{0.45\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/unsmoothed_score_example.pdf}
+        \subcaption{Closed-form score}
+        \label{fig:cf-score-example}
+    \end{subfigure}
+    \begin{subfigure}{0.45\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/smoothed_score_example.pdf}
+        \subcaption{Smoothed score}
+        \label{fig:smoothed-cf-score-example}
+    \end{subfigure}
+\end{minipage}
+\caption{Effect of smoothing on the closed-form score (green arrows). Colors represent distance weights in $k_t(z)$; blue regions of space are drawn to the blue point on the left, and vice-versa.}\label{fig:cf-vs-smoothed-cf-score}
+\end{wrapfigure}
+
+To develop intuition for why this simple modification of the closed-form score \eqref{eq:closed-form-score} promotes generalization, we consider the behavior of the closed-form score as $t \rightarrow 1$. Figure \ref{fig:cf-vs-smoothed-cf-score} depicts the closed-form score \eqref{eq:closed-form-score} and its smoothed counterpart \eqref{eq:smoothed-score-defn} at $t=0.95$ for a simple case where the training data consists of two points $x_0$ (in blue) and $x_1$ (in red). In this regime, the temperature $(1-t)^2$ of the softmax in \eqref{eq:convex-comb} is low, and $k_t(z)$ is effectively equal to the nearest neighbor of $z$ within the training set. Flowing points $z$ through a velocity field such as \citet{liu2023flow}'s $v^*_t(z) = \frac{1}{t}\left(z + (1-t) \nabla \log \rho^*_t(z) \right)$ causes them to flow towards their nearest training sample. As a result, an SGM based on this score function simply outputs training data.
+
+On the other hand, the small perturbations $\sigma \epsilon_m$ in \eqref{eq:smoothed-score-defn} occasionally push points $z$ near the Voronoi boundary between $x_0$ and $x_1$ into their neighboring Voronoi cell. Averaging $k_t$ over these perturbations yields a score function that instead points towards the line segment connecting $x_0$ and $x_1$. An SGM based on the \emph{smoothed} score function will hence cause samples to flow towards weighted barycenters of the training points, which promotes generalization. We will make these intuitions rigorous in the following section by proving Proposition \ref{prop:smoothed-score-as-score}, which will enable us to constrain the support of our model's samples.
+\subsection{Effect of smoothing the score}\label{sec:effect-of-smoothing}
+
+In this section, we show that as $t\rightarrow1$, the smoothed score points towards barycenters of these tuples rather than towards training points, thereby enabling our sampler to generalize. We first note that via a straightforward computation,
+\begin{equation}\label{eq:smoothed-kt-via-ui}
+    k_t(z + \sigma \epsilon_m) = \sum_{i=1}^N \textrm{softmax}\left(-\frac{\|z - tX \|^2 + \sigma tu_{i,m}}{2(1-t)^2}\right)_i tx_i,
+\end{equation}
+
+where $u_{i,m} = -2\langle \epsilon_m, x_i \rangle$ is a scalar random variable. This shows that smoothing the score acts by perturbing the distance weights $-\|z - tx_i\|$, so one can directly add scalar noise $u_{i,m} \sim p_u$ to these weights instead of perturbing the inputs $z$ with noise $\epsilon_m \sim p_\epsilon$. To simplify our exposition, we will frame the remainder of our results from this perspective.
+
+We now show that smoothing the closed-form score yields a function $s_{\sigma,t}(z)$ that points from $z$ towards a convex combination $k_{\sigma,t}(z)$ of \emph{barycenters} $t\Bar{c}_k$ of tuples of training points. The weights of this convex combination depend not only on the distance $\|z - t\Bar{c}_k\|$ between $z$ and the barycenters $t\Bar{c}_k$, but also on the \emph{variance} of noisy tuples $t\tilde{C}_k$ that have been corrupted by noise $\bar{u}_k= \frac{1}{M} \sum_{m=1}^M u_{i(k,m)}$. Tuples consisting of tightly-clustered points have low variance and hence receive large weights in $k_{\sigma,t}(z)$, whereas tuples of distant points have high variance and receive small weights in $k_{\sigma,t}(z)$.
+
+\begin{proposition}[$s_{\sigma,t}$ points towards barycenters of training points]\label{prop:smoothed-score-as-score}
+    The smoothed score $s_{\sigma,t}(z)$ can be expressed as:
+    \begin{align}\label{eq:smoothed-score-as-cvx-comb}
+    &s_{\sigma,t}(z) = 
+        \frac{1}{(1-t)^2} \left(k_{\sigma,t}(z) - z \right),\\
+    \textrm{where }&k_{\sigma,t}(z) = \sum_{k=1}^{N^M} \textrm{softmax} \left(-\frac{M}{2(1-t)^2} \left(\|z - t\Bar{c}_k \|^2 + \textrm{Var}(t\tilde{C}_k) + \sigma t \Bar{u}_k \right)\right)_k t\Bar{c}_k.
+\end{align}
+\end{proposition}
+
+
+\section{Sampling algorithm}
+
+\subsection{Forward Euler scheme for sampling}\label{sec:forward-euler}
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+\begin{minipage}{0.5\textwidth}
+    \begin{algorithm}[H]
+    \caption{Sampling}\label{alg:sampling}
+    \begin{algorithmic}
+    \Require $\textrm{Training set } \{x_i\}_{i=1}^N,  \textrm{ noise } \{u_{i,m}\}  , \linebreak
+    \textrm{ step size } h=\frac{1}{S}, \textrm{ initial sample } z_0 \sim \mathcal{N}(0,I)$
+    \For{$n=0,...,S-1$} 
+    \State $t_n = \frac{n}{S}$
+    \State $z_{n+1} \gets z_n + hv_{\sigma, t_n}(z_n)$
+    \EndFor \\
+    \Return $z_T$
+    \end{algorithmic}
+    \end{algorithm}
+\end{minipage}
+\end{wrapfigure}
+
+Armed with the smoothed score $s_{\sigma,t}$, we are now in position to define our sampler. Following \citet{liu2023flow}, we draw $\mathcal{N}(0,I)$ base samples and flow them through
+\begin{equation}\label{eq:smoothed-vel}
+    v_{\sigma, t}(z) = \frac{1}{t}\left(z + (1-t) s_{\sigma, t}(z) \right),
+\end{equation}
+from $t=0$ to $t=1$. We discretize this ODE using a forward Euler scheme, leading to Algorithm \ref{alg:sampling} for sampling using the smoothed score. 
+
+The smoothed score \eqref{eq:smoothed-score-defn} and Algorithm \ref{alg:sampling} jointly define our \emph{smoothed closed-form diffusion model}; given a smoothing parameter $\sigma$, we call this a $\sigma$-CFDM. Using Algorithm \ref{alg:sampling}, we can sample from a $\sigma$-CFDM given access only to the training data $x_i$ and noise samples. Notably, no training phase or neural network is needed for this procedure. By explicitly smoothing the closed-form score rather than relying on a neural network's approximation error, we can determine the support of our $\sigma$-CFDM's distribution. For sufficiently small step sizes, our model's samples will lie at the barycenters of tuples of training points.
+
+
+\begin{theorem}[Support of $\sigma$-CFDM samples]\label{thm:support-of-model-dist}
+    All samples returned by Algorithm \ref{alg:sampling} are of form $z_S = \frac{S}{S-1}k_{\sigma, \frac{S-1}{S}}(z_{S-1})$. As the number of sampling steps $S \rightarrow \infty$ (equivalently, as the step size $\frac{1}{S} \rightarrow 0$), the model samples converge towards barycenters $z_S = \Bar{c}_k$ of $M$-tuples of training points.
+\end{theorem}
+
+ While our sampler is easy to implement and training-free, it may be costly if the number of sampling steps $S$ and the number of training samples $N$ are large. We address these issues in the following sections. In \S\ref{sec:fewer-steps} we show how to reduce sampling costs by taking fewer steps, and in \S\ref{sec:ann-score-approximation} we show how to approximate our smoothed score using efficient nearest-neighbor search. This will permit our method to scale to high-dimensional real-world datasets while achieving sampling times competitive with existing methods and running on consumer-grade CPUs.
+
+\subsection{Taking fewer sampling steps}\label{sec:fewer-steps}
+
+As a CFDM's distribution $\rho^*_t$ is simply a time-dependent mixture of Gaussians centered at training points, it can be directly sampled at any time $t$ by uniformly sampling a mixture mean $tx_i$ and then sampling from a Gaussian centered at $tx_i$. We use this fact to sample a $\sigma$-CFDM with fewer steps by starting at $T>0$ with samples from its corresponding unsmoothed CFDM. As a $\sigma$-CFDM does not have the same distribution as an unsmoothed CFDM, this approximation incurs some error, which we bound in the following theorem.
+
+\begin{theorem}[Approximation error from starting at $T>0$]\label{thm:starting-at-T}
+    Let $\rho^T_{1-\epsilon}$ be the model distribution at $t=1-\epsilon$ obtained by starting sampling a $\sigma$-CFDM at $T>0$ with samples from the unsmoothed CFDM, and let $\rho^0_{\sigma,1-\epsilon}$ be the corresponding $\sigma$-CFDM model distribution when sampling starting at $T=0$. Then,
+    \begin{equation}\label{eq:starting-at-T-thm}
+        W_2(\rho^0_{\sigma,1-\epsilon}, \rho^T_{\sigma,1-\epsilon})
+        = O\left( \exp\left(\frac{1}{(1-T)^2} \right) \cdot \frac{\sigma}{\epsilon^2 (1-T)^2} \right).
+    \end{equation}
+    where $W_2$ is the $2$-Wasserstein distance.
+\end{theorem}
+
+Following \citet{debortoli2022convergence}, we stop sampling at time $1-\epsilon$ for some truncation parameter $\epsilon>0$ to account for the fact that the smoothed score $s_{\sigma,t}$ blows up as $t \rightarrow 1$ due to division by $(1-t)^2$. 
+
+This result shows that initializing a $\sigma$-CFDM with samples from the unsmoothed CFDM $\rho^*_T$ at time $T>0$ results in bounded error that increases with starting time $T$ and smoothing parameter $\sigma$. Intuitively, increasing $\sigma$ causes the unsmoothed velocity field $v^*_t$ to be a worse approximation to the smoothed velocity field $v_{\sigma,t}$ at any time $t$, and starting sampling at $T$ farther from 0 allows this error to accumulate over a longer initial interval $[0,T]$. Note however, that \eqref{eq:starting-at-T-thm} is a pessimistic bound, especially in its dependence on $T$. In \S\ref{sec:computational-tradeoffs}, we show that one obtains highly accurate approximations to $\rho_{\sigma,1}$ while starting sampling at $T$ close to 1 and hence employing few sampling steps.
+
+
+\subsection{Fast score computation via approximate nearest-neighbor search}\label{sec:ann-score-approximation}
+
+In \S\ref{sec:fewer-steps}, we showed that by sampling a $\sigma$-CFDM starting at $T>0$ with samples from an unsmoothed CFDM, we can reduce the cost of sampling a $\sigma$-CFDM by taking fewer steps. However, each step requires the evaluation of the smoothed score $s_{\sigma,t}(z)$ and hence a sum over $O(N)$ terms. For large datasets, each evaluation of $s_{\sigma,t}(z)$ is therefore costly and places substantial demands on memory.
+
+In the $t \rightarrow 1$ regime, the temperature of the softmax in \eqref{eq:smoothed-kt-via-ui} is low, and the large sum is dominated by the handful of terms corresponding to the smallest values of $\|z - tx_i\|^2 - \sigma t u_{i,m}$. If $\sigma$ is sufficiently small, these terms correspond to the \emph{nearest neighbors} of $z$ among the rescaled training points $tx_i$. This suggests that we can approximate the smoothed score $s_{\sigma,t}$ via an importance sampling-like scheme that subsamples terms in the $O(N)$ sum while ensuring that the nearest neighbors of $z$ are included with high probability.
+
+Noting that the closed-form score $\nabla \log \rho^*_t(z) = \frac{\nabla \rho^*_t(z)}{\rho^*_t(z)}$ is the score of a Gaussian kernel density estimator (KDE) $\rho^*_t$, we employ \citet{deann22}'s unbiased nearest-neighbor estimator for KDEs to estimate the denominator, and take its gradient to obtain an unbiased estimate of the numerator. Our estimator is computed using the $K$ nearest neighbors of $z$ in the training set and $L$ random samples from the remainder of the training set; we study the accuracy tradeoffs associated with $K$ and $L$ in \S\ref{sec:computational-tradeoffs}.
+
+Given this estimator for the closed-form score, we estimate the smoothed score $\widehat{s_{\sigma,t}}$ via convolution against a smoothing kernel as in \S\ref{sec:scfdm-def}. By using the efficient approximate nearest neighbor search algorithms implemented in Faiss \citep{johnson2019billion}, we are able to scale our method to high-dimensional real-world datasets and achieve sampling times competitive with neural SGMs while running on consumer-grade CPUs; see \S\ref{sec:pixel-space-generation} and \S\ref{sec:latent-space-generation} for examples and runtime metrics.
+
+
+\section{Results}
+
+
+
+
+
+\subsection{Impact of $\sigma$ on generalization}\label{sec:generalization-exper}
+\begin{wrapfigure}{r}{0.4\textwidth}
+\includegraphics[width=0.4\textwidth]{figures/generalization_checkerboard_with_samples.png}
+\centering
+\caption{$W_2$ between $\sigma$-CFDM model samples and true samples. We depict model samples for $\sigma\in\{0,0.26,1\}$.}
+\label{fig:generalization-checkerboard}
+\end{wrapfigure}
+We now show that a $\sigma$-CFDM's model distribution approaches the true distribution $\rho_1$ of its training samples $x_i \sim \rho_1$ for appropriate values of $\sigma$. We fix a continuous target distribution $\rho_1$ and draw $N=5000$ samples $y_i$ to serve as a discrete approximation to $\rho_1$. We then draw a smaller subset of $n=500$ training samples $x_i$ and construct a $\sigma$-CFDM on these samples while varying $\sigma$. 
+
+For each $\sigma$, we measure the $2$-Wasserstein distance $W_2$ between the $\sigma$-CFDM's generated samples and the true samples $y_i \sim \rho_1$, and use this as a tractable proxy for the distance between the $\sigma$-CFDM's model distribution and the true underlying distribution $\rho_1$ of the training samples. We present the results of this experiment for the ``Checkerboard'' distribution in Figure \ref{fig:generalization-checkerboard}.
+
+When $\sigma=0$, the support of our model's samples (left side of Figure \ref{fig:generalization-checkerboard}) coincides with the training samples $x_i$. The $2$-Wasserstein distance between the model samples and true samples $y_i$ decreases for small values of $\sigma$ as the model samples become convex combinations of nearby points in the training set; we depict model samples for $\sigma=0.26$ in the center of Figure \ref{fig:generalization-checkerboard}. However, as $\sigma$ grows large, the model samples spread out to fill the convex hull of the training set (right side of Figure \ref{fig:generalization-checkerboard}) and the distance between our model's samples and true samples $y_i$ grows rapidly. These results suggest that by choosing an appropriate value for the smoothing parameter $\sigma$, our method can use a fixed training set $\{x_i\}$ to generate novel samples that remain close to the target distribution $\rho_1$ from which the training samples were drawn.
+\begin{wrapfigure}{r}{0.6\linewidth}
+    \begin{minipage}{\linewidth}
+    \centering
+    \begin{subfigure}[b]{0.32\textwidth}
+        \includegraphics[width=\linewidth]{figures/beetle_polyscope.png}
+        \captionsetup{justification=centering}
+        \caption{$\sigma=0.2$ \\ 28.9\% $\downarrow$ in $W_2$}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.32\textwidth}
+        \includegraphics[width=\linewidth]{figures/chair_polyscope.png}
+        \captionsetup{justification=centering}
+        \caption{$\sigma=0.375$ \\13.4\% $\downarrow$ in $W_2$}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.32\textwidth}
+        \includegraphics[width=\linewidth]{figures/spot_polyscope.png}
+        \captionsetup{justification=centering}
+        \caption{$\sigma=0.4$\\34.1\% $\downarrow$ in $W_2$}
+    \end{subfigure}
+    \caption{Sampling a $\sigma$-CFDM (blue points) yields a dense point cloud given sparse mesh samples (red points). We report \% drop in $W_2$ distance to a dense mesh sampling when using our $\sigma$-CFDM's samples relative to the sparse training samples.}
+    \label{fig:point-clouds}
+    \end{minipage}
+\end{wrapfigure}
+
+In Figure \ref{fig:point-clouds}, we demonstrate that with an appropriate choice of $\sigma$, our method can sample from a 2D surface embedded in $\mathbb{R}^3$ given a sparse blue noise sampling of the surface; this is a low-dimensional case of a manifold-supported distribution, which is typical in machine learning applications. Our method's samples (blue points) fill in the gaps between the sparse training samples (red points) while remaining close to the true manifold. We render our point clouds in Polyscope \citep{polyscope}.
+\subsection{Ablation and computational trade-offs}\label{sec:computational-tradeoffs}
+
+In this section, we investigate the impact of the start time $T$ and the parameters of our nearest-neighbor-based score estimator \eqref{eq:DEANN-score-est} on the distribution of our model's samples.
+\paragraph{Impact of $T$.}
+In \S\ref{sec:fewer-steps}, we showed that by sampling a smoothed CFDM starting at $T>0$ with samples from an unsmoothed CFDM, we can reduce the cost of sampling a smoothed CFDM by taking fewer steps. However, the bound on approximation quality in Proposition 4.2.3 has exponential dependence on $(1-T)$, suggesting the approximation error blows up for relatively small starting times $T$. In this section, we present empirical evidence that this bound is pessimistic, and that for practical values of $\sigma$ one can begin sampling at $T$ close to 1 with little accuracy loss.
+\begin{wrapfigure}{l}{0.4\textwidth}
+\includegraphics[width=0.4\textwidth]{figures/checkerboard_startingatT_pctchg.png}
+\centering
+\caption{\% change in $W_2$ between $\sigma$-CFDM model samples generated starting at $T=0$ and samples generated starting at $T>0$.}
+\label{fig:checkerboard-starting-at-T}
+\end{wrapfigure}
+
+We fix a continuous target distribution $\rho_1$, draw $n=500$ training samples $x_i$, and construct a $\sigma$-CFDM on these samples for smoothing parameters $\sigma \in \{0, 0.2, 0.4, 0.6, 0.8, 1.0 \}$. We then vary the initial sampling times $T$ and compute the $2$-Wasserstein distance $W_2$ between model samples generated starting at $T=0$ and model samples generated starting at $T>0$. We compare this to the average $W_2$ distance between batches of $\sigma$-CFDM samples generated by starting at $T=0$ (which is nonzero due to randomness in sampling) and report the percent change in $W_2$ relative to this baseline value. We present the results of this experiment for the ``Checkerboard'' distribution in Figure \ref{fig:checkerboard-starting-at-T}.
+
+For $\sigma < 0.4$, there is little accuracy loss when starting at $T>0$, even for start times close to 1. When $\sigma \geq 0.4$, the accuracy of this approximation begins to decline for start times $T \geq 0.4$, with large reductions in approximation quality when both $\sigma$ and $T$ are large. As we have found that our model has yielded its best results for $\sigma \leq 0.4$ in the applications considered in this work, the results in this section support the use of few sampling steps for practically useful values of $\sigma$.
+\paragraph{Impact of $K$ and $L$ on the NN-based score estimator.}
+In \S\ref{sec:ann-score-approximation}, we proposed an efficient estimator of the closed-form score based on fast nearest-neighbor search algorithms. We now study the impact of the number of nearest neighbors $K$ and the number of random samples $L$ from the remainder of the training set on our model's samples.
+We fix a continuous target distribution $\rho_1$, draw $n=500$ training samples $x_i$, and construct a $\sigma$-CFDM on these samples for $\sigma = 0.3$; this value is typical for real-world applications. We then vary the number of nearest neighbors $K$ and the number of random samples $L$ used to compute the score estimator \eqref{eq:DEANN-score-est} and measure the $2$-Wasserstein distance between model samples generated using the full smoothed score and model samples generated with the estimator \eqref{eq:DEANN-score-est}. We present the results of this experiment for the ``Checkerboard'' distribution in Figure \ref{fig:checkerboard-knn}. We center the diverging color scheme at the $W_2$ distance between two batches of samples from a $\sigma$-CFDM using the full smoothed score, which represents a noise threshold encoding the inherent randomness in our model's samples across batches.
+
+\begin{wrapfigure}{r}{0.35\textwidth}
+\includegraphics[width=0.3\textwidth]{figures/knn_checkerboard.png}
+\centering
+\caption{$W_2$ between $\sigma$-CFDM model samples generated using the full score and our NN-based estimator for varying \# of NN $K$ (horizontal axis) and \# of random samples $L$ (vertical axis).}
+\label{fig:checkerboard-knn}
+\end{wrapfigure}
+
+The error arising from the NN-based estimator is decreasing $K$ and $L$, with especially poor approximation quality arising from using a single random sample $x_\ell$. However, the accuracy of the model samples approaches the noise threshold for small values of $K,L$. For example, with $K=L=15$ (which samples just 6\% of the terms in $k_{\sigma,t}$), the $W_2$ distance between samples generated using the full score and the NN-based estimator is $0.1865$, a value close to the noise threshold of 0.1791. In \S\ref{sec:pixel-space-generation},\ref{sec:latent-space-generation}, we additionally show that one can generate high-quality images while subsampling $k_{\sigma,t}$ at a far lower rate, thereby enabling our method to scale to real-world datasets.
+
+\subsection{Image generation in pixel space}\label{sec:pixel-space-generation}
+In this section, we use our $\sigma$-CFDM to sample from the ``Smithsonian Butterflies'' dataset in pixel space\footnote{Dataset available on Hugging Face: \texttt{huggan/smithsonian\_butterflies\_subset}}. Using our accelerated sampling techniques from Sections \ref{sec:fewer-steps} and \ref{sec:ann-score-approximation}, we obtain in fast sampling times on consumer-grade CPUs.
+
+
+
+\begin{wrapfigure}{l}{0.65\linewidth}
+\begin{minipage}{\linewidth}
+\centering
+  \begin{subfigure}{0.32\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/butterfly_test_100.png}
+    \caption{Held-out samples}
+  \end{subfigure}
+  \begin{subfigure}{0.32\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/butterflies_generated_100.png}
+    \caption{DDPM}
+  \end{subfigure}
+  \begin{subfigure}{0.32\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/butterfly_generation_SCFM_100.png}
+    \caption{$\sigma$-CFDM}
+  \end{subfigure}
+  
+  \caption{Held-out images from Smithsonian Butterflies (left), DDPM (center), and $\sigma$-CFDM samples (right) using start time $T = 0.98$, $M=4$, step size $h=\frac{1}{S} = 10^{-2}$ and $\sigma = 0.2$}
+  \label{fig:pixelspace_generations_butterflies}
+\end{minipage}
+\end{wrapfigure}
+
+We display images from a held-out test partition along with DDPM samples and our model's samples in Figure \ref{fig:pixelspace_generations_butterflies}. Both our model and the DDPM (with 100 sampling steps) generate images that qualitatively resemble the test images, but as our model can only output barycenters of training samples (see Theorem~\ref{thm:support-of-model-dist}), our samples exhibit somewhat softer details than the test and DDPM samples. Table~\ref{tab:butterflies_results} records sample quality metrics and training and generation times for our method and the DDPM baseline. Our method achieves comparable sample quality to a DDPM that has been trained for 2.38 hours without any training, and achieves a sample throughput of 5.83 samples/sec on a consumer-grade CPU -- over 8 times the throughput of the DDPM running on a Tesla T4 GPU.
+
+
+
+
+  
+  
+  
+\clearpage
+
+\begin{wraptable}{r}{0.4\linewidth}%[hbpt!]
+\scalebox{0.4}{
+\begin{tabular}{|c|c|c|c|}
+\hline
+\textbf{Method} & \textbf{Metric} & \textbf{Butterflies (128 x 128)} & \textbf{CIFAR-10 (latents)} \\
+\hline
+\multirow{3}{*}{DDPM} & LPIPS $\downarrow$ & $0.42 \pm 0.00$ & $0.39 \pm 0.00$\\
+& Training Time & $2.38 \pm 0.02$ h &  $0.80 \pm 0.05$ h\\
+& GPU (Tesla T4) Generation & $37.5 \pm 0.43$ s & $1.85 \pm 0.27$ s\\
+\hline
+\multirow{3}{*}{$\sigma$-CFDM} & LPIPS $\downarrow$ &  $0.36 \pm 0.00$ & $0.41 \pm 0.00$\\
+& Training Time & $0 \pm 0$ h & $0 \pm 0$ h\\
+& CPU (x86-64) Generation & $4.29 \pm 0.94$ s & $0.18 \pm 0.05$ s \\
+\hline
+\end{tabular}}
+\caption{Metrics for sample quality and generation time. GPU and CPU generation times are based on batches of 25 images. DDPM sampling time on CPU is approximately 2 hours for butterflies.}
+\label{tab:butterflies_results}
+\end{wraptable}
+\subsection{Image generation in latent space}\label{sec:latent-space-generation}
+
+
+In this section, we follow \citet{rombach2022high} and sample from a $\sigma$-CFDM in the latent space of a pretrained autoencoder for the CIFAR-10 dataset. As in \S\ref{sec:pixel-space-generation}, we benchmark our model's sample quality, training time, and sampling time against a DDPM. We display our model's samples along with their nearest neighbors in the training set and the first two PCA dimensions of the latent codes in Figures \ref{fig:cifar10}. In Figure \ref{fig:cifar10_baselines}, we display decoded samples from a DDPM and from a Gaussian fitted to the training latents. Barycenters of natural images in pixel space typically do not resemble natural images unless they are well-registered (as with the butterflies in \S\ref{sec:pixel-space-generation}), but operating in an autoencoder's latent space allows our method to generate plausible and diverse samples from CIFAR-10. The final column of Table \ref{tab:butterflies_results} records metrics for our method and the DDPM baseline. Our method achieves comparable LPIPS to a DDPM that has been trained for 0.80 hours, and achieves a sample throughput of 138 latents/sec on a consumer-grade CPU, whereas the DDPM baseline's throughput is 13.5 latents/second on a Tesla T4 GPU. Decoding throughput is very high in comparison: Working in batches of 25 images, the autoencoder decodes latents at a rate of 22.1k images/second on a T4 GPU.
+
+
+\begin{figure}[hbtp!]
+  \centering
+  \begin{subfigure}{0.25\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/CIFAR10_SCFDM_samples.png}
+    \caption{$\sigma$-CFDM samples}
+  \end{subfigure}
+  \begin{subfigure}{0.25\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/CIFAR10_SCFDM_samples_nn.png}
+    \caption{Nearest training images}
+  \end{subfigure}
+  \begin{subfigure}{0.25\linewidth}
+  \centering
+    \includegraphics[width=\linewidth]{figures/cifar10_cfdm_latent_space.png}  
+  \caption{$\sigma$-CFDM latents}
+  \end{subfigure}
+  \caption{CIFAR-10 samples using a $\sigma$-CFDM with $T=0.98$, $M=2$, $h=10^{-2}$, and $\sigma=0.2$.}
+  \label{fig:cifar10}
+\end{figure}
+\begin{figure}[hbtp!]
+  \centering
+  \begin{subfigure}{0.24\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/CIFAR10_gaussian_samples.png}
+    \caption{Gaussian samples}
+  \end{subfigure}
+  \begin{subfigure}{0.24\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/cifar10_gaussian_latent_space.png}
+    \caption{Gaussian latents}
+  \end{subfigure}
+  \begin{subfigure}{0.24\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/CIFAR10_ddpm_samples.png}
+    \caption{DDPM samples}
+  \end{subfigure}
+  \begin{subfigure}{0.24\linewidth}
+  \centering
+    \includegraphics[width=\linewidth]{figures/cifar10_ddpm_latent_space.png}  
+  \caption{DDPM latents}
+  \end{subfigure}
+  \caption{CIFAR-10 samples generated by sampling a multivariate Gaussian fitted to the training latents (a) and a DDPM in latent space (c).}
+  \label{fig:cifar10_baselines}
+\end{figure}
+
+
+
+\section{Conclusion and future work}
+
+In this work, we introduced smoothed closed-form diffusion models (smoothed CFDMs): a class of \emph{training-free} diffusion models requiring only access to the training set at sampling time. Smoothed CFDMs leverage the availability of an exact solution to the score-matching problem---which alone does not yield generalization---and explicitly induce error by smoothing. This construction results in a model that generalizes by provably outputting barycenters of training points. Our method is efficient and scalable, achieving a sample throughput of 138 samples/second for CIFAR-10 latents while running on a consumer-grade laptop with no dedicated GPU. 
+
+Our results suggest that it is possible to design SGMs that generalize without relying on neural approximations to their score function. However, to generate high-quality images, our method samples in the latent space of a pretrained autoencoder. A natural question is then how to encode natural images to maximize the perceptual quality of samples from a smoothed CFDM drawn in the resulting latent space. In future work, we intend to investigate whether large training sets and appropriate latent encodings can enable our method to achieve competitive sample quality in image generation. We also intend to use our model as a tool to investigate whether smoothing is an adequate explanation for the generalization of neural SGMs, and whether employing alternative corruptions to the score function can yield a closed-form SGM that generates high-quality images while operating directly in pixel space.
+
+
+

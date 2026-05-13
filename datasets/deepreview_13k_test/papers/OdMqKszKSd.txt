@@ -1,0 +1,343 @@
+\title{SINGAPO: Single Image Controlled Generation of Articulated Parts in Objects}
+
+\begin{abstract}
+We address the challenge of creating 3D assets for household articulated objects from a single image.
+Prior work on articulated object creation either requires multi-view multi-state input, or only allows coarse control over the generation process.
+These limitations hinder the scalability and practicality for articulated object modeling.
+In this work, we propose a method to generate articulated objects from a single image.
+Observing the object in resting state from an arbitrary view, our method generates an articulated object that is visually consistent with the input image.
+To capture the ambiguity in part shape and motion posed by a single view of the object, we design a diffusion model that learns the plausible variations of objects in terms of geometry and kinematics.
+To tackle the complexity of generating structured data with attributes in multiple domains, we design a pipeline that produces articulated objects from high-level structure to geometric details in a coarse-to-fine manner, where we use a part connectivity graph and part abstraction as proxies.
+Our experiments show that our method outperforms the state-of-the-art in articulated object creation by a large margin in terms of the generated object realism, resemblance to the input image, and reconstruction quality.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Articulated objects are prevalent in our daily environments.
+Creating 3D assets that represent articulated objects is becoming increasingly important for building realistic and interactive virtual environments, which is essential for various indoor applications in robotics and embodied AI~\citep{shen2021igibson,li2021igibson,puig2023habitat,li2024behavior,kim2024parahome}.
+The creation of articulated assets typically requires manual labor from experts, which is time-consuming and expensive.
+Thus, it is desirable to automate this process to scalably enrich virtual environments.
+
+A line of recent works reconstructs articulated objects from images or videos that capture the object from multi-views or multiple articulated states~\citep{jiang2022ditto,liu2023paris,heppert2023carto,song2024reacto,weng2024neural,mandi2024real2code}.
+These works require careful alignment across views or across states, or recording the object in motion, which is not always feasible in practice.
+The challenges in acquisition of input data limit the scalability of these methods to real-world applications.
+Another line of work aims to generate articulated objects either unconditionally or guided by high-level constraints~\citep{lei2023nap,liu2024cage}.
+One of the primary challenges in content creation is providing users with the flexibility to specify the objects precisely. 
+However, although object images are widely available and serve as intuitive guidance, their usage to guide generating articulated objects is under-explored.
+In this work, we propose a method for generating articulated household objects from a single image to bridge this gap. 
+
+Creating articulated assets from an image is challenging when:
+1) the object is observed in the closed state where occlusions introduce ambiguity in the part shape and articulation;
+2) the part structures are complex and diverse within and between object categories such as cabinets, desks, and refrigerators;
+3) the parts are small and thin, making them hard to perceive from a single image.
+In this paper, we aim to tackle the task in the challenging setting where the input is an RGB image of an object in the resting state observed from a random view, and the output is the 3D asset of the articulated object.
+Our output consists of:
+1) a graph specifying the part connectivity and kinematic hierarchy;
+2) articulation parameters specifying the type, axis, and range of the joints connecting the parts; and
+3) geometry of each articulated part to the level of actionable part (e.g., handles, knobs).
+
+To address these challenges, we propose to create 3D assets of articulated household objects from a single image using a generative model paradigm.
+We believe this strategy offers two key advantages. 
+First, when an input image can be interpreted in various ways, a generative model produces multiple plausible solutions while ensuring consistency with the visual input, effectively capturing any ambiguity in the image as shown in \Cref{fig:teaser}.
+Second, learning the distribution of articulated objects, a generative model bridges the gap between 2D and 3D by leveraging prior knowledge from the learned data distribution. 
+This enables the model to more effectively handle input images of objects from arbitrary viewpoints to assemble a coherent 3D object, in contrast to regression-based methods from prior work that treat each part region independently~\citep{chen2024urdformer}.
+
+Addressing this problem necessitates a multi-level understanding of the object image, including recognizing all the articulated parts, inferring how these parts are connected, accurately recovering their 3D arrangement, imagining how each part articulates, and reconstructing the geometry of each part.
+To tackle this complexity, we propose a pipeline that decomposes the task into three progressive steps, synthesizing the articulated assets from coarse to fine details (see \Cref{fig:teaser} left).
+These steps include:
+1) leveraging large vision-language models to infer the part connectivity graph from the image;
+2) generating attributes to describe the articulated parts at the abstract level, guided by the graph and the image; and
+3) collecting meshes from a part shape library to assemble the final object based on the outputs from previous steps.
+This modular design makes our method more efficient and enables easier user interventions to edit and refine the results.
+Additionally, this breakdown ensures that core understanding occurs at the appropriate level of abstraction in the second step.
+Specifically, we propose a transformer-based diffusion model that learns the spatial layout of the parts through image cross-attention, captures the interplay between part motion and shape via self-attention, and structures the parts using a graph with masked attention.
+
+In summary, our main contributions are as follows: 
+1) to the best of our knowledge, we are the first to explore the task of generating articulated objects from a single image;
+2) we design a pipeline to create articulated objects from coarse to fine details in a modular way, which is more interpretable and editable for users;
+3) we propose a diffusion-based model to generate objects that are kinematically plausible and visually consistent with the input image, while allowing for variations to account for any ambiguity in the image;
+4) we demonstrate our better reconstruction quality and generalization compared to the prior methods through systematic evaluations on multiple datasets.
+
+\input{figs/teaser.tex}
+
+
+
+\section{Related Work}
+
+
+\mypara{Generation of structured data.}
+Our task is closely related to the generation of structured data~\citep{chaudhuri2020learning}.
+The generation of 3D shapes with semantic parts is a widely studied problem with the main goal of modeling objects with geometric details and semantic grouping at the part level.
+Prior work either synthesizes objects in voxels with semantic labels~\citep{wang2018global,li2020learning,wu2020pq} or further considers the spatial structure, such as symmetry and support relationship, by jointly learning in the latent space~\citep{wu2019sagnet} or explicitly modeling a tree structure~\citep{li2017grass,mo2019structurenet,gao2019sdm}.
+3D assembly is a similar problem that aims to place primitives~\citep{gadelha2020learning,paschalidou2021atiss,jones2020shapeassembly,xu2024brepgen}, joints~\citep{willis2022joinable,li2024category}, or parts~\citep{zhan2020generative,li2020learning,narayan2022rgl,xu2023unsupervised,koo2023salad} to form a shape.
+Scene generation work learns to compose scenes from objects by considering the spatial arrangement and relationship between objects~\citep{wang2021sceneformer,wei2023lego,tang2024diffuscene}.
+Similarly, building structure generation focuses on the general layout of the room or house~\citep{nauata2020house,nauata2021housegan,shabani2023housediffusion,tang2023graph}.
+Articulated objects are a type of structured data that considers both part geometry and articulation in 3D.
+Thus articulated object generation poses a unique challenge~\citep{liu2024survey}. 
+In this work, we focus on image-conditioned generation of articulated 3D objects.
+
+\mypara{Conditional generation on 3D structures.}
+Enabling control over the generation process is crucial for practical applications.
+This becomes more challenging for structured data generation, due to the need for fine-grained control and parsing the conditioning into structured components.
+Part-based object generation has been studied in settings driven by a partial shape to complete the object part-by-part or guided by an image~\citep{wu2020pq,niu2018im2struct}.
+These methods only work with specific categories of objects that share similar structures.
+The recent advances in large-language models and generative models promote conditional generation from 2D~\citep{yang2021layouttransformer,rombach2022high,zhang2023adding,blattmann2023stable} to 3D with structures~\citep{liu2024part123}.
+Many works on 3D scene generation have explored the control of object arrangements via text for room and object specification~\citep{zhang2023scenewiz3d,lin2024instructscene,aguina2024open,tam2024scenemotifcoder}, 2D/3D layout for spatial constraint~\citep{bahmani2023cc3d,eldesokey2024build,feng2024layoutgpt,po2024compositional,maillard2024debara,yang2024physcene}, and scene graphs as spatial or semantic priors~\citep{lin2024instructscene,zhai2024commonscenes,gao2024graphdreamer}.
+\citet{chen2024comboverse} generate objects from an image by decomposing the subscene into objects to generate separately.
+\citet{alam2024gencad} propose to generate parametric CAD command sequences conditioned on an image.
+Our work follows the trend of conditional generation on structured data. To the best of our knowledge, we are the first to explore articulated object generation from a single image.
+
+\mypara{Articulated object creation.}
+While more datasets have been introduced for articulated objects recently~\citep{xiang2020sapien,liu2022akb,geng2023gapartnet}, these datasets do not reach the scale and diversity of real-world objects, and still require manual annotation.
+To alleviate data scarcity, some works propose the creation of articulated objects from different input modalities.
+A-SDF~\citep{mu2021sdf} first learns to generate objects that can be deformed to different articulated states from a signed distance field.
+Then a line of work reconstructs articulated parts from point clouds collected at multiple states of the object~\citep{jiang2022ditto,liu2023building}, or from stereo-view~\citep{heppert2023carto} or multi-view images observing the object in an open state~\citep{mandi2024real2code} or multiple states~\citep{liu2023paris,weng2024neural}, or from a video observing the object in motion~\citep{song2024reacto,kerrrobot}.
+Generative models for articulated objects were recently proposed by NAP~\citep{lei2023nap} and extended to a more controllable setting by CAGE~\citep{liu2024cage} to generate objects via specifying the part connectivity graph and object category.
+However, these prior works either require a laborious data collection process or lack intuitive control for generation.
+Our work aims to take a single image as input to create articulated objects, which is much cheaper and more practical for real-world applications.
+The work that shares the most similar setting with us is URDFormer~\citep{chen2024urdformer}, which proposes a regression-based model to predict assets of articulated objects or a scene from an image.
+Considering the ambiguity posed by the image of an object in the resting state we propose to address the problem in a generative manner.
+This allows us to generate multiple plausible articulated objects from a single image while achieving better consistency to the input.
+
+
+
+\section{Methods}
+
+
+\input{figs/pipeline.tex}
+
+\subsection{Overview}
+
+Given an image $\mathcal{I}$ of an object in the resting (i.e. unopened) state, our goal is to generate a set of articulated parts $\{p_i\}_{i=1}^N$ assembling into a 3D object that is geometrically consistent with the input image while being kinematically plausible.
+To achieve this goal, we decompose the problem into two subtasks: 1) using the input image to guide the abstract-level generation of each part, and 2) fitting part meshes to the generated part arrangement and constructing them into a 3D articulated object.
+To create the 3D object, one can generate each part's geometry or retrieve it from a predefined part library.
+As many parts of household objects are often geometrically simple, we choose to retrieve part geometries from a library.
+This works well in practice to assemble coherent objects, as shown in our experiments and also in previous works~\citep{lei2023nap,liu2024cage}.  
+
+In this work, we focus on the first subtask and we visualize the pipeline in \Cref{fig:pipeline}.
+We propose a diffusion-based model $\phi$ to learn a distribution of objects with articulated parts that resemble the input image.
+This distribution of objects visually matches the input image, but can vary in the part geometry and articulation to capture the ambiguity posed by the single snapshot of the object in the resting state that sometimes can be interpreted in multiple ways.
+Examples are illustrated in \Cref{fig:teaser}.
+For each input image, our model learns to generate a list of attributes to describe each part in shape and motion.
+During generation, a part connectivity graph $G$ is also required as a guidance to determine the ordering of the list so that the parts are organized into a coherent articulated object.
+Thus, the model is essentially learning a distribution $p_{\phi}\left(\mathbf{x}:\{\mathbf{p}_i\}_{i=1}^N|\mathcal{I},G\right)$.
+We will further explain the details of the data representation in \Cref{sec:data_rep} and the model design in \Cref{sec:model_arch}.
+
+\subsection{Data Representation}
+\label{sec:data_rep}
+
+We assume objects to be normalized inside a cube of size $2$ centered at the origin and all the parameters are defined in the world coordinate system.
+We describe each articulated part with multiple attributes $\mathbf{p}_i=\{\mathbf{b}_i, l_i, t_i, \mathbf{a}_i, \mathbf{r}_i\}$ at abstract level, including the part bounding box $\mathbf{b}_i\in\mathbb{R}^6$, semantic label $l_i$, articulation type $t_i$, location and direction of joint axis $\mathbf{a}_i\in\mathbb{R}^6$, and motion range $\mathbf{t}_i\in\mathbb{R}^2$.
+The articulation type considered in this work includes \textit{fixed}, \textit{revolute}, \textit{prismatic}, \textit{continuous} and \textit{screw} joints.
+The semantic label includes \textit{base}, \textit{door}, \textit{drawer}, \textit{handle}, \textit{knob}, \textit{tray}.
+The semantic label will be used to retrieve the part geometry from the dataset.
+Spatially, the parts are organized into a connectivity graph, where each node represents a part, and the edge direction indicates the parent-child relationship. 
+This spatial relationship also defines the kinematic constraints between parts. 
+During training, the graph is represented as an adjacency matrix $A\in\{0,1\}^{N\times N}$, where $A_{ij}=1$ if part $i$ is in connection with part $j$.
+The matrix $A$ will serve as an attention mask to guide the part generation process.
+To handle a different number of parts in the denoising diffusion process, we pad the parts to a maximum number $32$ with all part attributes represented in $6$ dimensions.
+
+\subsection{Denoising Network}
+\label{sec:model_arch}
+
+\subsubsection{Image and Graph Guidance}
+
+\mypara{Image encoding.}
+To leverage images for generation guidance, we expect to encode the image into a latent feature that 
+1) is 3D-aware to capture the spatial orientation of the object; %
+2) is fine-grained to detail the individual part semantically; and
+3) contains the spatial information to infer the spatial structure and relationships between parts.
+We opt to use DINOv2~\citep{oquab2023dinov2}, a ViT model pre-trained on a large-scale dataset and that has been shown with rich semantics and strong 3D awareness~\citep{el2024probing}, to encode our input image into latent patch features.
+Practically, we use the ViT-B/14 model with the register version~\citep{darcet2023vision}, which results in a total of $256$ patches.
+These patch features are fed into our transformer-based denoising network as the conditioning input, where each patch acts as a token to be attended to.
+Our model learns to distill essential information from DINO features to understand the part semantic and spatial relationships.
+
+\mypara{Part connectivity graph.}
+This graph is required to guide the part generation process.
+During training, we use the ground-truth graph provided in the dataset.
+For inference, we extract the graph from the input image using large vision-language models, which have been shown advance in visual reasoning tasks, such as image captioning and visual question answering. 
+We empirically find that the connectivity graph of articulated parts can be effectively predicted from the image by leveraging the GPT-4o models with in-context learning.
+We prompt GPT-4o to take an object image as input, recognize all the articulated parts in the object, and then describe the part connectivity.
+Along with the instruction, we provide the model with examples of input-response pairs to help the model understand the context of the task.
+ 
+
+\subsubsection{Model architecture}
+We design our denoising network as a transformer-based architecture, which is shared for all timesteps. 
+For each step, the model takes the output from the previous timestep $\mathbf{x}_{t-1}$ with the current timestep $t$ as input and produces a residual noise $\epsilon_t$ to be subtracted from $\mathbf{x}_{t-1}$ to construct $\mathbf{x}_{t}$ for the next iteration.
+The network consists of $L=8$ layers in total, each of which has a layer normalization followed by attention modules with skip connections.
+
+\input{figs/attention.tex}
+
+\mypara{Attention modules.}
+Each part attribute is regarded as a separate token during the attention process.
+We select CAGE~\citep{liu2024cage} as our base model that equips each attention block with:
+a \textit{local attention} that harmonizes the attributes within each part;
+a \textit{global attention} that coordinates parts globally to form a coherent object; and
+a \textit{graph relation attention} that incorporates awareness of part connectivity from the graph.
+These self-attentions ensure the model to generate parts that adhere to the connectivity graph.
+To enforce geometric consistency with the input image, we further introduce an \textit{image cross attention} at the end of each block; see \Cref{fig:pipeline}.
+Since the bounding-boxes directly reflect the shape and spatial locations of parts in the image, we only let the bounding-box parameters as queries to attend to image patches. 
+Other attributes are then made compatible with the bounding box during the self-attention process followed.
+During cross-attention, we observe from the attention maps (see \Cref{fig:attn}) that each part is learned to focus on its relevant patches, indicating that each part is anchoring a specific region of the image during generation.
+This part-patch correspondence is learned without any explicit supervision during training, eliminating the need for taking part detection or segmentation as input.
+
+\mypara{Classifier-free training for conditioning.}
+Our denoising network takes image $\mathcal{I}$ as the main control and graph $G$ as auxiliary guidance.
+Both of them are critical as the image describes the spatial arrangement of parts and the graph determines the ordering of the parts to be generated so that the parts are organized correctly when articulating.
+Inherent from the base model, our network can also take object category $c$ as an additional condition, which is fused with the timestep embeddings via an adaptive norm layer~\citep{xu2019layernorm} prior to attentions in each block.
+We empirically find that the original design of CAGE that takes them as hard constraints will lead the generation to be biased towards a narrow distribution of objects and overfit to the training data.
+It causes limited generalization to unseen images.
+To alleviate this issue, we propose to train our model in a classifier-free manner by dropping $c$ and $G$ randomly at $50\%$ rate during training.
+In this way, the model is forced to generate objects that are visually consistent with the input image without being strictly constrained by them.
+Then $c$ can be regarded as an optional condition and $G$ as a condition secondary to the image input.
+At the same time, we also apply classifier-free training to $\mathcal{I}$ at $10\%$ dropping rate so that the image guidance can be further enhanced at inference by
+$\epsilon_\phi(\mathbf{x}_t;\mathcal{I},G) = (1+\omega)\epsilon_\phi(\mathbf{x}_t;t,\mathcal{I},G)-\omega\epsilon_\phi(\mathbf{x}_t;t,\varnothing,G)$
+, where $\omega$ is a hyperparameter to balance the influence of the image and the graph, and $\varnothing$ denotes the absence of the image.
+
+\subsubsection{Training Objectives}
+
+We supervise our model with the loss $\mathcal{L} = \mathcal{L}_\epsilon + \lambda\mathcal{L}_\text{fg}$, where $\mathcal{L}_\epsilon$ is noise residual loss and $\mathcal{L}_\text{fg}$ is object foreground loss.
+Our model follows the training procedure of the denoising diffusion probabilistic model~\citep{ho2020ddpm}, and $\mathcal{L}_\epsilon$ is the standard diffusion loss, which computes the mean squared error between the output $\epsilon_t$ and the ground truth residual noise $\hat{\epsilon}_t$ that is added to the input $\mathbf{x}_{t-1}$ in the timestep $t$ in the diffusion process.
+The loss $\mathcal{L}_\text{fg}$ is defined on the cross attention map $\mathcal{A}_{\mathbf{p}_i}^l$ for each part $\mathbf{p}_i$ at layer $l$, which records the attention scores from the part to all the image patches.
+$\mathcal{L}_\text{fg}$ is designed to encourage the part attention to focus on the foreground patches of the object across all parts and all layers.
+We define the loss as $\mathcal{L}_\text{fg}=\frac{1}{L}\sum_{l=1}^L{\sum_{i=1}^N{(1-\mathcal{A}_{\mathbf{p}_i}^l\circ\mathcal{M}_{\text{fg}}+\mathcal{A}_{\mathbf{p}_i}^l\circ\neg\mathcal{M}_{\text{fg}})}}$, where $\mathcal{M}_{fg}$ is the foreground mask of the object projected onto the patches, and $\circ$ denotes the element-wise product.
+We use $\lambda=0.1$ to balance the two losses. 
+
+
+
+\section{Experiments}
+
+\input{figs/qual_pm.tex}
+
+\subsection{Dataset}
+
+We collect data from PartNet-Mobility dataset~\citep{xiang2020sapien} to train our model across 7 categories (i.e., {\small\texttt{Storage, Table, Refrigerator, Dishwasher,
+Oven, Washer}}, and {\small\texttt{Microwave}}).
+We render 20 images per object from random viewpoints, sampled within a $90^{\circ}$ horizontal range and a $90^{\circ}$ upwards vertical range relative to the object's front.
+With several augmentation strategies applied, we end up with 3,063 objects paired with 20 images rendered from random views for training, and additional 77 objects paired with 2 random views for testing. 
+We also use 135 objects from the ACD dataset~\citep{iliash2024s2o} for additional evaluation in the zero-shot manner to test the generalization capability.
+In total, we have 55K training samples and 424 test samples in the experiments.
+\subsection{Baselines}
+
+We compare our method with two baselines: URDFormer~\citep{chen2024urdformer} as the state-of-the-art that works in the same setting and NAP~\citep{lei2023nap} as representative prior work that unconditionally generates articulated objects.
+For URDFormer, we take their pretrained model for part detection on the input image and re-implement their object-level module to finetune on our training data for articulated object prediction. 
+For NAP, we re-implement their method by plugging our image cross-attention module to attend with their node attributes after each of their graph attention layer to enable NAP to condition on an image.
+This variant of NAP is denoted by \textit{NAP-ICA}.
+We also replace the shape latent originally used in NAP with part semantic label for sharing our retrieval algorithm, which is a lightweight version of NAP that has been shown to perform better in a conditional setting by \citet{liu2024cage}.
+For comparison, all the methods are trained with or finetuned on the same training set and evaluated on the same test set.
+The final geometry of objects are from retrieval across all baseline methods.
+\subsection{Metrics}
+
+\input{tables/quant_pm.tex}
+
+To evaluate the reconstruction accuracy in terms of shape structure and kinematics, we adopt 3 sets of evaluation metrics to measure the similarity between the output and the ground-truth object that correspond to the given image.
+For each metric set, the object similarity is measured both in the resting state (\textbf{RS-}) and across the articulated states (\textbf{AS-}) uniformly sampling from resting to the end state.
+The overall object scale is normalized to the one of the ground-truth objects to account for scale ambiguity across methods.
+Each metric is reported by averaging over the pairwise distance per part per state, and the part pairing is determined by the Hungarian algorithm.
+
+To formalize all the evaluation metrics, we denote $p_i$ as the $i$-th part in one object $O_1$ and $q_j$ as the $j$-th part in the other object $O_2$.
+The pairwise distance between $p_i$ and $q_j$ is calculated as $d^s(p_i, q_j)$ in state $s$ among all sampling states $S$.
+The Hungarian matching algorithm $\mathcal{H}_{O_1\rightarrow O_2}(p_i)$ takes the centroid distance of the part as the cost matrix to determine the pairing of parts from $O_1$ to $O_2$ and returns the corresponding part for each part $p_i$ in $O_1$.
+Our metrics $\mathcal{D}$ are computed as follows.
+\begin{equation}
+    \mathcal{D} = \frac{1}{|S|}\sum_{s\in S}\left(\frac{1}{2} \left(\frac{1}{N}\sum_{i=1}^{N}d^s\left(p_i, \mathcal{H}_{O_1\rightarrow O_2}\left(p_i\right)\right) + \frac{1}{M}\sum_{j=1}^{M}d^s\left(q_j, \mathcal{H}_{O_2\rightarrow O_1}\left(q_j\right)\right)\right)\right)
+\end{equation}
+The three metrics we adopt to compute the pairwise distance $d^s(p_i, q_j)$ are as follows.
+\begin{itemize} \denselist
+    \item \textbf{$d_{\text{gIoU}}\downarrow$}: At the abstract level of the part description, we report the distance based on generalized intersection over union (gIoU)~\citep{rezatofighi2019giou} of the bounding box volume for each pair of parts as $1-\text{gIoU}$, lower-bounded by 0. 
+    \item \textbf{$d_{\text{cDist}}\downarrow$}: Since small and thin parts can easily miss the overlapping region, we also report the Euclidean distance between the centroids of two parts, lower bounded by 0. We find it to reflect the part-level similarity in a more fine-grained manner than gIoU.
+    \item \textbf{$d_{\text{CD}}\downarrow$}: At the mesh level, we report the Chamfer Distance averaged over the 2,048 points sampled on the mesh surface per part and computed in symmetric, lower-bounded by 0.
+\end{itemize}
+Our formulation of $\mathcal{D}$ is built upon the metrics Instantiation Distance (ID) introduced by NAP and Abstract Instantiation Distance (AID) proposed by CAGE.
+Initially, ID only accounts for CD over the entire object, minimizing across all possible articulated states while neglecting part-level similarity and state matching.
+AID addresses this by incorporating state pairing and part matching to compute IoU, but part pairing is determined using a greedy algorithm, which may not yield optimal results.
+In our refined metrics, we employ the Hungarian algorithm for optimal part pairing and extend the pairwise distance to three variations, capturing multiple aspects of part-level similarity more effectively.
+To evaluate the accuracy of the graph inferred from the image, we report the accuracy (\textbf{Acc}$\%\uparrow$) in terms of the percentage of correct graph topology.
+We also report the average overlapping ratio (\textbf{AOR}$\downarrow$) introduced by CAGE to detect unrealistic collisions among sibling parts in the graph.
+
+\input{figs/qual_acd.tex}
+\input{tables/quant_acd.tex}
+\subsection{Results}
+
+\mypara{Reconstruction quality.}
+We show the quantitative comparison on PartNet-Mobility dataset in Table~\ref{tab:quant_pm} and qualitative results in Figure~\ref{fig:qual_pm}.
+In terms of the \textbf{\textit{topological correctness of the predicted graph}}, our GPT-4o module achieves the highest accuracy.
+The graph prediction of URDFormer is less accurate and we observe that it is largely bottle-necked by their part detection module which often misses parts.
+NAP-ICA predicts more accurate graphs when node connectivity is not enforced as a constraint, which is consistent with the observation in CAGE that NAP struggles to adhere to graph conditioning.
+In terms of the \textbf{\textit{geometric consistency with the input image}}, we observe that our method and NAP-ICA handle more variational input views and have better part-level understanding from the image than URDFormer,
+which leads to higher reconstruction quality by referring to the ``RS-" metrics and qualitative results in Figure~\ref{fig:qual_pm}.
+This high performance is largely attributed to the ICA module we proposed that enables us and NAP to efficiently distill part knowledge from the rich DINO features.
+Our method further outperforms NAP-ICA, which is benefiting from the efficient graph guidance to better coordinate parts, especially when the number of parts gets larger.
+In terms of the \textbf{\textit{plausibility of the part articulation}}, our method can generate more kinematically plausible objects with less part collisions by referring to the ``AS-" and AOR metrics.
+It is important to note that the 'AS-' metrics cannot fully capture motion plausibility, as there are cases where the ground-truth motion is not unique.
+From Figure~\ref{fig:qual_pm}, we observe that URDFormer exhibits inaccurate joint axis of doors due to its reliance on a predicted label that conflates semantic and joint categorizations, thereby impairing joint parameter estimation in their post-processing step.
+NAP-ICA tends to produce more collisions and less plausible motions which is also reflected in the user study below.
+
+\mypara{Overall realism evaluated through user study.} 
+To further evaluate the realism of the reconstructed objects, we conduct a user study in terms of how realistic the generated objects refer to the input images.
+In our user study, participants were presented with three output objects given the same input image from three methods each time, and 15 pairs of results in total were shown.
+The task for each participant was to rank these objects based on their perceived realism, specifically evaluating how closely each object aligned with the input image in terms of visual consistency and how plausible the object articulation is.
+We collect responses from 48 participants and report the averaged ranking of each method ranging from 1 as the best to 3 as the worst.
+As a result, our method ranks the highest with an average score of 1.20, followed by NAP-ICA with 1.91 and URDFormer with 2.89.
+
+\mypara{Generalization to unseen dataset.}
+To further evaluate the generalization capability, we show the comparison results on ACD dataset in a zero-shot manner.
+The ACD dataset comprises objects with greater structural complexity, geometric diversity, and appearance variances compared to the PartNet-Mobility dataset.
+Figure~\ref{fig:qual_acd} shows examples from the ACD dataset, where our method generalize better to objects with more challenging textures and more complex part structures that are out-of-distribution. 
+As shown in Table~\ref{tab:quant_acd}, we outperform other baselines overall by a large margin.
+
+\input{tables/quant_real2code.tex}
+
+\mypara{Comparison with multi-view reconstruction.}
+We compare with Real2Code~\citep{mandi2024real2code}, a state-of-the-art method for articulated object reconstruction from multi-views.
+As their code is not fully open-sourced, we follow the evaluation protocol shown in their paper.
+Specifically, Real2Code reconstructs an object from 12 views observing the object in an opening state, which reveals much more geometric and kinematic information than our setting that only observes the object in a resting state from single view.
+We retrain our model on their data split with our augmented data and evaluate on their test set to ensure a fair comparison.
+From Table~\ref{tab:quant_real2code}, we observe that our method achieves a competitive results on simple objects with less parts and can even outperform Real2Code on objects with more parts in complex structures.
+Also, our score gap between CD on the whole and its part on average is smaller than Real2Code, indicating that our method reconstructs better part geometry.
+
+\mypara{Ablation studies.}
+We ablate the design components of our method as shown in Table~\ref{tab:ablation_acd}, where the average of 5 samples per input given GT part connectivity graph is reported on the ACD dataset.
+On top of our base model, the ICA module plays the main role in enabling image conditioning by distilling DINO features to part attributes via cross-attention.
+Its effectiveness is also demonstrated by adding this module to NAP and achieving performance close to our method.
+Removing object category (cCF) as a hard constraint allows the model to share knowledge across categories, which enhances the efficiency of training data utilization and leads to improved generalization.
+$\mathcal{L}_{\text{fg}}$ yields a modest improvement in performance by concentrating attention on the object region.
+The classifier-free training for the image and graph guidance enhances the model to the best performance by modulating the distribution farther to respect the input image and generalize better to unseen data.
+We also ablate on how the augmented data affects the performance in the supplement, where the augmentation strategies are shown to be effective in improving the generalization capability.
+
+\input{tables/ablation_acd.tex}
+
+\mypara{Failure cases and limitations.}
+Some failure cases are shown in Figure~\ref{fig:qual_acd} in the last two rows.
+We observe three failure modes in our method: 1) incorrect graph predictions from input images with challenging textures;
+2) less accurate part geometry, particularly for small parts (e.g., knobs in the second last example);
+and 3) inaccurate part arrangement, often due to missing components in the predicted graph or when the object's structure is highly cluttered and complex (see the last example).
+These failures are due to the low resolution of the input image that provides limited part details for our model to infer accurate part geometry and arrangement, especially for complex objects with large number of parts compacted in a small number of patch features.
+The unbalanced training on the data with less complex structure and simple textures also hinder the generalization ability of our model.
+Further augmentation to balance the object complexity and increase texture diversity will improve generalization to real settings for future work.
+
+
+
+\section{Conclusion and Future Work}
+
+
+We address the problem of reconstructing household articulated objects from a single image in a generative manner.
+We break down this complex task into sub-tasks solving the problem from coarse to fine:
+we first infer part connectivity into a graph from the image, and then use the extracted graph and input image as guidance to produce part arrangement and motion parameters to describe the parts abstractly, and we finally retrieve the mesh for each part to assemble the full object. 
+We develop a diffusion model with attention mechanism to distill DINOv2 features of the image and to leverage graph together to condition the part generation.
+We demonstrate the effectiveness and generalizabilty of our method on PartNet-Mobility and ACD datasets, and show that our method outperforms the state-of-the-art methods.
+
+While our work takes important first steps on this challenging task, several aspects remain open for further exploration.
+Currently, our method is tailored to specific object categories, primarily those with cuboid shapes. 
+Extending this approach to handle a wider range of object categories with more complex geometries is interesting for future research.
+From a geometric perspective, although our mesh retrieval algorithm performs well for cabinet-like objects, it falls short in capturing finer geometric details of parts as seen in the input image. 
+A promising avenue for future work lies in developing methods that generate part geometries more faithfully aligned with the input image, enhancing both the accuracy and realism of the reconstruction. 
+We hope this work encourages the community to explore these directions and push the boundaries of articulated object reconstruction. 
+
+
+
+

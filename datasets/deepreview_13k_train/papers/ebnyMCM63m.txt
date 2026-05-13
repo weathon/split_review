@@ -1,0 +1,362 @@
+\title{RE-Adapt: Reverse Engineered Adaptation of Large Language Models}
+
+\begin{abstract}
+
+We introduce RE-Adapt, an approach to fine-tuning large language models on new domains without degrading any pre-existing instruction-tuning. We reverse engineer an adapter which isolates what an instruction-tuned model has learned beyond its corresponding pretrained base model. Importantly, this requires no additional data or training. We can then fine-tune the base model on a new domain and readapt it to instruction following with the reverse engineered adapter. RE-Adapt and our low-rank variant LoRE-Adapt both outperform other methods of fine-tuning, across multiple popular LLMs and datasets, even when the models are used in conjunction with retrieval-augmented generation.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large Language Models (LLMs) require a significant investment to develop and train, requiring resources available to only a limited number of organizations. For instance, Meta's Llama-3 family of models was trained using two custom-built compute clusters, each containing 24,000 high-end GPUs \citep{meta}. 
+Parameter Efficient Fine Tuning (PEFT) enables resource efficient downstream customization of LLMs for new domains by adjusting a relatively small number of parameters while keeping the majority unchanged. However, an important distinction exists between the types of model used for further fine-tuning. It is common for LLM producers to release two versions of a model, one which is \textit{pretrained} on a general task such as next-token prediction and an \textit{instruct} version which is then continued trained on annotated data to learn how to follow instructions or respond to queries in a preferential manner \citep{Touvron2023Llama2O, jiang2023mistral, almazrouei2023falcon, Gemma}. The availability of both versions introduces a choice for organizations wanting to adapt a model to their custom task or domain. While an instruction-tuned model is generally more capable for popular tasks, the majority of data available for additional fine-tuning is unlabeled, lacking the annotations expected from instruct models. This poses a significant problem as annotation by the downstream organization can be too difficult, expensive, or error-prone \citep{label_data, pmlr-v133-desmond21a}. Additional fine-tuning can also degrade the performance of the instruction-tuned model outside of the new fine-tuning distribution \citep{kotha2024understanding}. On the other hand, pretrained models can be easily fine-tuned with unlabeled text but lack the additional capabilities of their instruct counterparts.
+
+To address this dilemma, we seek the ability to fine-tune existing LLMs on unlabeled text while retaining the capabilities from pre-existing instruction-tuning. We draw inspiration from \textit{adapters}, sets of learnable parameters added to an existing model for fine-tuning \citep{bapna-firat-2019-simple, houlsby2019parameterefficient}. We make the key observation that \textbf{the difference in weights between an instruction-tuned and corresponding pretrained model is effectively an adapter}. Isolating the information learned from instruction-tuning into this \textit{Reverse Engineered (RE)-Adapter} enables fine-tuning of the pretrained model, which can then be readapted with the instruction following capabilities (\autoref{cartoon}). In this work we:
+\begin{itemize}
+    \item Explore the differences in parameters between pretrained and instruct models and their use as instruction adapters;
+    \item Quantify RE-Adapt's effectiveness to leverage unstructured knowledge for question answering in new domains under both context-free and retrieval-augmented scenarios;
+    \item Introduce \textit{partial adaptation}, a technique for scaling the strength of adapters for fine-grain control of knowledge priorities; and
+    \item Demonstrate that RE-Adapters are \textit{effectively} low-rank, showing that low-rank RE-Adapters (LoRE-Adapters) are capable of similar performance using up to 5x fewer parameters.
+\end{itemize}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{images/readapt.png}
+    \caption{In RE-Adapt, an \emph{instruction adapter} is isolated by differencing weights between instruct (\includegraphics[width=6pt]{images/instruct_svg-tex.pdf}) and pretrained (\includegraphics[width=6pt]{images/pretrained_svg-tex.pdf}) versions of a model, which can be reapplied to the pretrained model after fine-tuning.}
+    \label{cartoon}
+\end{figure}
+
+
+
+\section{Background}
+
+
+\subsection{Adapters}
+
+Adapters \citep{bapna-firat-2019-simple, houlsby2019parameterefficient} have played an important role in the context of transfer learning for language models in recent years, particularly for fine-tuning pretrained models which are too large to fully train on commodity hardware. The concept introduced by \citet{houlsby2019parameterefficient} provides a lightweight alternative to full fine-tuning through the augmentation of models with small modular sets of trainable parameters. Adapters have been useful for enabling the use of pretrained models on new tasks \citep{pfeiffer-etal-2021-adapterfusion, karimi-mahabadi-etal-2021-parameter, ruckle-etal-2021-adapterdrop}, new domains \citep{malik-etal-2023-udapter,schopf-etal-2023-efficient,diao-etal-2023-mixture}, and adapting to multiple languages \citep{chronopoulou-etal-2023-language, ustun-etal-2022-udapter, parovic-etal-2023-cross}. 
+
+Low-Rank Adapters (LoRA) \citep{hu2021lora} are a particularly parameter efficient adaptation technique which adds a low-rank matrix to the weights of existing layers. Because the adapter is low-rank it can be represented as the product of two much smaller matrices, significantly lowering the number of trainable parameters. Weight-Decomposed Low-Rank Adaptation (DoRA) is an extension to LoRA with superior performance and similar efficiency \citep{liu2024dora}. \citet{liu2024dora} achieve this by decomposing the pretrained weights into both magnitude and direction components, applying LoRA for directional fine-tuning only. Important to this work, adapters learned with either LoRA or DoRA can be represented as a single matrix which captures the information learned during fine-tuning. The pretrained model is then adapted by simply adding the new matrix to the existing weights. We leverage DoRA to fine-tune our models on a new domain, and take inspiration from the additive nature of these techniques to derive our reverse engineered adapters.
+
+Several approaches have been developed which utilize the mixing or combination of adapters to benefit from diverse tasks or domains \cite{pfeiffer-etal-2021-adapterfusion, ruckle-etal-2021-adapterdrop, wang-etal-2022-adamix, chronopoulou-etal-2023-adaptersoup, fleshman2024adapterswap, zadouri2023pushing} or for parameter efficient federated learning \citep{babakniya2023slora, sun2024improving}. One method to categorize these approaches is by the mechanism used for combining the adapters. Either a weighted combination of adapters is applied to the base model \citep{chronopoulou-etal-2023-adaptersoup, fleshman2024adapterswap, babakniya2023slora, sun2024improving} or another set of parameters are used to learn adapter interactions \citep{pfeiffer-etal-2021-adapterfusion, ruckle-etal-2021-adapterdrop, wang-etal-2022-adamix, zadouri2023pushing}. We focus on the former, as we reframe instruction-tuned models as the summation of a pretrained model with an instruction adapter. We add new knowledge by combining domain-specific and instruction adapters via linear combination. As  highlighted by \citet{sun2024improving}, separate adapters can be incompatible when averaged. \citet{chronopoulou-etal-2023-adaptersoup} and \citet{fleshman2024adapterswap} try to mitigate this by initializing adapters with the same random weights, and \citet{sun2024improving} by doing the same through a data driven approach. Neither option is applicable here, as we have no control over the instruction adapter. This motivates our new approach for \textit{partial adaptation} which we introduce in \autoref{partial}. 
+ 
+\subsection{Instruct Models}
+Some of the most capable LLMs are \textit{instruct} variants, pretrained on massive amounts of unannotated text and further trained on curated datasets with a combination of instruction-tuning \citep{mishra-etal-2022-cross, wei2022finetuned, instructgpt, sanh2022multitask} and Reinforcement Learning from Human Feedback (RLHF) \citep{NIPS2017_d5e2c0ad, stiennon20}. For example, Llama-3 was pretrained on 15T tokens and the instruct version continued training with a combination of supervised fine tuning (SFT), rejection sampling, proximal policy optimization (PPO), and direct preference optimization (DPO) \citep{meta}. Open-source LLM producers generally release both the instruct versions as well as the pretrained models from which they were derived \citep{jiang2023mistral, almazrouei2023falcon, Gemma, meta}. Access to the pretrained LLM allows users to customize the model to a new task or domain while taking advantage of the large investment required for pretraining. Fine-tuning the instruct model directly is generally avoided due to \textit{catastrophic-forgetting}, a phenomenon where models lose previous abilities with subsequent rounds of continued training \citep{MCCLOSKEY1989109, kotha2024understanding}. This is unfortunate, as few organizations have the resources to conduct fine-tuning at the scale of the original instruction-tuned models. In this work, we explore methods of fine-tuning LLMs which take advantage of both the pretraining and instruction-tuning of existing LLMs. We specifically design our approach to minimize forgetting while fine-tuning instruction-capable models with unlabeled text.
+
+\subsection{Model Arithmetic}
+\label{tvecs}
+Previous works have looked at the ability to arithmetically manipulate models to isolate certain behaviors \citep{ilharco2023editing, mitchell2024an}. \citet{ilharco2023editing} constructed \textit{task vectors} by differencing weights between a pretrained model and several corresponding models each fine-tuned for a particular task. They observed for their models that task vectors are almost orthogonal to each other, preventing interference and allowing combinations of the vectors for negating certain behaviors, improving multi-task performance, or performing well on new tasks via more complicated task analogies \citep{ilharco2023editing}. We similarly solve for our reverse engineered adapter with a simple differencing, but using a single LLM fine-tuned for multi-task  instruction-following. By effectively isolating instruction-tuning into an adapter, we allow further fine-tuning of pretrained models, maximizing knowledge acquisition before readapting their ability to follow instructions. We introduce an optional step for reducing the rank of our RE-Adapter, lowering memory requirements while maintaining or improving performance in some scenarios. Unlike individual task vectors, our multi-purpose RE-Adapters are not assumed to be orthogonal to new training domains. We introduce a technique for mitigating potential interference in \autoref{partial} by controlling the adaptation strength.
+
+\citet{mitchell2024an} developed an alternative approach for isolating pretraining knowledge from fine-tuned behaviors which they call \textit{emulated fine-tuning}. Instead of differencing model weights, emulated fine-tuning considers the difference in outputs between pretrained and fine-tuned versions of a model. By combining this difference with the output of a larger pretrained model, \citet{mitchell2024an} found that they could benefit from the additional pretraining knowledge while still solving the task of the smaller model. Their technique could be extended to meet our goal but requires the storage and forward pass of multiple models for inference. Our approach isolates knowledge and instruction-following into adapters, merged into a single model at no extra cost.
+
+
+\section{Partial Adaptation}
+
+\label{partial}
+We detail our main methods in \autoref{methods}, but first we introduce a technique for controlling the strength of adaptation. Consider a model with weights $\mathbf{W}$ and an adapter $\mathbf{A}$ used to fine-tune the model on a new domain. Using additive adapters such as LoRA or DoRA, the combined weights: 
+\begin{equation}
+\label{adapter}
+    \mathbf{\hat{W}} = \mathbf{W + A}
+\end{equation} are then used for inference \citep{hu2021lora, liu2024dora}. We make the observation that the resulting model assigns equal weight to the original parameters and the new adapter, which is generally trained with significantly less data than the original weights. This potentially leads to overfitting in the new domain and degradation of performance in the general setting. These issues compound in situations where multiple adapters are combined. Both \citet{chronopoulou-etal-2023-adaptersoup} and \citet{fleshman2024adapterswap} discuss complications arising from mixing adapters, especially if they were not initialized with the same values to encourage compatibility. 
+
+To mitigate these challenges we propose a technique for \textit{partial adaptation} which introduces a post-hoc scaling factor for each fine-tuned adapter. Importantly, \autoref{adapter} is still used during fine-tuning, but inference becomes:
+\begin{equation}
+    \mathbf{\hat{W}} = \mathbf{W} + \lambda\mathbf{A}
+\end{equation}
+where $0 \leq \lambda \leq 1$ is used to scale the strength of adaptation. In our experiments, we find that partial adaptation improves performance when using either single or multiple combined adapters. 
+
+
+
+\section{Reverse Engineered Adaptation}
+
+\label{methods}
+Here we describe Reverse Engineered Adaptation (RE-Adapt), our approach to solve the challenge of updating an instruction-tuned model with unlabeled text without degrading the ability of the model to follow instructions. In \autoref{experiments}, we demonstrate the effectiveness of this approach for closed-book and retrieval-augmented question answering. 
+
+\subsection{RE-Adapters}
+
+First consider two language models: $\mathbf{T_\Phi}$, which has been pretrained with parameters $\mathbf{\Phi}$; and $\mathbf{T_\Theta}$, having the same architecture as $\mathbf{T_\Phi}$ but with parameters $\mathbf{\Theta}$ updated from the pretrained parameters $\mathbf{\Phi}$ via instruction-tuning. Given these models, we can solve for the RE-Adapter parameters $\mathbf{\Delta}$ using:
+\begin{equation}
+    \label{readapt_eq}
+    \mathbf{\Delta = \Theta - \Phi}
+\end{equation}
+to isolate the information learned during instruction-tuning. Next, we augment the pretrained model $\mathbf{T_\Phi}$ with a learnable adapter $\mathbf{\Psi}$ and fit $\mathbf{T_{\Phi + \Psi}}$ on a new domain by only updating the adapter weights $\mathbf{\Psi}$. We refer to $\mathbf{\Psi}$ as the \textit{knowledge adapter}. We utilize DoRA to fit $\mathbf{\Psi}$ in our experiments, but any fine-tuning approach is applicable. We construct our final model $\mathbf{T_\Omega}$ with parameters:
+\begin{equation}
+    \mathbf{\Omega} = \mathbf{\Phi} + \alpha\mathbf{\Psi} + \beta\mathbf{\Delta}
+\end{equation}
+where $\alpha$ and $\beta$ are the scaling factors for the partial adaptation of $\mathbf{\Psi}$ and $\mathbf{\Delta}$ respectively. We find that scaling down the strength of the knowledge adapter $\mathbf{\Psi}$ and RE-Adapter $\mathbf{\Delta}$ with partial adaptation leads to better performance in instruction-based tasks related to the new domain while maintaining or slightly improving on the performance of the original instruction-tuned model out-of-domain.
+
+\subsection{LoRE-Adapters}
+
+Inspired by LoRA, we explore the intrinsic dimensionality of RE-Adapters and their ability to be represented by low-rank approximations. The Eckart-Young-Mirsky theorem establishes the truncated singular value decomposition (SVD) as the best low-rank approximation of matrices under the Frobenius norm \citep{ eckart1936approximation}. We compute the SVD of the RE-Adapter $\mathbf{\Delta}$ from \autoref{readapt_eq} which yields $\mathbf{\Delta} = \mathbf{U} \mathbf{S} \mathbf{V^\intercal}$ with the diagonal of $\mathbf{S}$ containing the singular values of $\mathbf{\Delta}$ sorted by magnitude, with $\mathbf{U}$ and $\mathbf{V}$ the corresponding left and right singular vectors. We then compute the percentage of variance explained by each dimension by squaring the singular values and re-normalizing the results to sum to 1. The cumulative explained variance $v$ at rank $k$ is then: 
+\begin{equation}
+    v_k = \Sigma_{i=0}^k\frac{\sigma_i^2}{\Sigma\sigma_j^2}
+\end{equation}
+
+where $\sigma_i$ is the $i$th singular value. We replicate this analysis for multiple modern LLMs and find that the majority of total variation in parameters can be represented at low-rank. For example, \autoref{fig:variance} displays the cumulative explained variance plots for three layers from the RE-Adapter derived from  Llama-3: we see more than half of the variance in these layers can be captured by a rank 128 approximation. This suggests the potential for a low-rank RE-Adapter (LoRE-Adapter). 
+
+\begin{figure}[h]
+    \centering
+    \begin{minipage}{0.4\textwidth}
+    \centering
+    \begin{tikzpicture}
+        \begin{axis}[
+    width=.85\columnwidth,
+	xlabel=Singular Values,
+	ylabel=Explained Variance,
+	grid=both,
+    legend style={legend pos=south east,font=\tiny},
+	no marks]
+\addplot[line width=3pt,solid,color=darkblue] %
+	table[x=index,y=variance,col sep=comma]{data/layer_0_k.csv};
+\addlegendentry{Layer 1};
+\addplot[line width=3pt,loosely dashed, color=darkorange] %
+	table[x=index,y=variance,col sep=comma]{data/layer_15_k.csv};
+\addlegendentry{Layer 16};
+
+\addplot[line width=3pt,dotted,color=darkgreen] %
+	table[x=index,y=variance,col sep=comma]{data/layer_31_k.csv};
+\addlegendentry{Layer 32};
+
+    \end{axis}
+    \end{tikzpicture}
+    \captionof{figure}{Cumulative explained variance for singular values from Llama-3 RE-Adapt \textit{k\_proj} layers.}
+    \label{fig:variance}
+\end{minipage}\hspace{1cm}%
+\begin{minipage}{0.4\textwidth}
+    \centering
+    \begin{tikzpicture}
+    \begin{axis}[
+    width=.85\columnwidth,
+	xlabel=Explained Variance Retained,
+	ylabel=\% of Parameters,
+	grid=both,
+     legend style={legend pos=north west,font=\tiny},
+	no marks]
+\addplot[line width=3pt,solid,color=darkblue] %
+	table[x=tau,y=percent,col sep=comma]{data/llama-variance.csv};
+\addlegendentry{LLama-3};
+\addplot[line width=3pt,loosely dashed, color=darkorange] %
+	table[x=tau,y=percent,col sep=comma]{data/gemma-variance.csv};
+\addlegendentry{Gemma};
+\addplot[line width=3pt,dotted,color=darkgreen] %
+	table[x=tau,y=percent,col sep=comma]{data/mistral-variance.csv};
+\addlegendentry{Mistral};
+
+\end{axis}
+\end{tikzpicture}
+\captionof{figure}{Percent of original model's parameter count used for LoRE-Adapt with varying threshold of explained variance.}
+\label{fig:compress}
+\end{minipage}
+\end{figure}
+
+We can convert a RE-Adapter into a LoRE-Adapter using a similar approach as \citet{sharma2023truth} by representing each layer with its truncated SVD. In our case, we truncate to the rank that captures a total explained variance above a user-defined threshold $\tau$. \autoref{fig:compress} shows the relationship between $\tau$ and the reduction in total parameters when using Llama-3 models to derive the adapter. As $\tau$ increases we maintain a higher percentage of the original parameters. We use LoRE-Adapters with $\tau = 0.5$ for the experiments in this work and see similar or better performance when compared to RE-Adapt while using up to 5x less parameters. Like LoRA, the savings in memory is beneficial in cases where several LoRE-Adapters are swapped in and out of the same model.
+
+
+
+\section{Experiments}
+
+\label{experiments}
+
+We quantify the effectiveness of RE-Adapt using question answering (QA), a task for which instruction-tuned models should perform significantly better than their pretrained counterparts. Specifically, we want to see if RE-Adapt is better than alternatives for adding knowledge from data not annotated with question-answer pairs. We would like the resulting model to do well answering questions about the new domains, while maintaining the level of performance of the original instruction-tuned model when answering unrelated questions. 
+
+\subsection{Models}
+
+We replicate all experiments using the pretrained and instruct versions from the Gemma-7B \citep{Gemma},  Llama-3-8B \citep{meta}, and Mistral-7B \citep{jiang2023mistral} family of LLMs using the HuggingFace API \citep{wolf2020huggingfaces}. We utilize the parameter efficient fine-tuning library \citep{peft} for adding DoRA \citep{liu2024dora} knowledge adapters to each of these models. We perform all fine-tuning and inference with a single 80GB A100 GPU. We include hyper-parameters and other details of our fine-tuning in \autoref{training}.
+
+In \autoref{experiments} we compare RE-Adapt and LoRE-Adapt with the pretrained and instruct models of each family, as well as pretrained and instruct models fine-tuned with DoRA on the new domains. We perform experiments for closed-book QA as well as QA with retrieval-augmented generation (RAG).
+
+\subsection{Data}
+
+\citet{kotha2024understanding} showed that fine-tuning degrades performance outside of the fine-tuning distribution. We hypothesize that our approach mitigates this issue by isolating existing instruction-tuning from additional fine-tuning. We test this by measuring the changes in question-answering performance when various fine-tuning strategies are used to update models with unlabeled data. An optimal approach would benefit from the new knowledge when asked related questions, without losing the ability to answer unrelated questions.  
+
+We explore this hypothesis by fine-tuning models in two different settings. We use English WMT News Crawl \citep{kocmi-etal-2022-findings} articles published in the year 2020 as our first fine-tuning distribution.\footnote{Available at \url{https://data.statmt.org/news-crawl/README} under CC0 license.} These articles provide non-annotated information which we capture through DoRA adapters trained for next-token-prediction. We evaluate how well this knowledge is acquired by using the resulting models to answer related questions from the StreamingQA dataset \citep{streamingqa2022}, which contains 21,681 QA pairs derived from our subset of articles.0 license.} 
+
+We use the evidence passages from RetrievalQA \citep{zhang2024retrievalqa} as our second fine-tuning distribution and measure performance on the corresponding questions from the same dataset.\footnote{Available at \url{https://huggingface.co/datasets/zihanz/RetrievalQA} under MIT license.} \citet{zhang2024retrievalqa} curated the dataset by compiling the subset of questions from five other QA benchmarks for which GPT-4 \citep{openai2024gpt4} is unable to answer without access to external knowledge. The questions were selected with the goal of having the corresponding knowledge absent from current LLMs, making this dataset especially challenging in the closed-book setting. 
+
+To measure any performance degradation from fine-tuning, we also evaluate our models using a short-answer subset of the Natural Questions dataset \citep{kwiatkowski-etal-2019-natural} which is unrelated to either fine-tuning distribution.\footnote{Available at \url{https://huggingface.co/datasets/natural_questions} under CC-BY-SA 3.0 license.} We use these questions to measure performance before and after fine-tuning our models on the other domains. We would like our approach to result in improved performance when answering questions related to the fine-tuning data without a reduction in performance on the unrelated Natural Questions \autoref{questions}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{images/questions.png}
+
+    \caption{RE-Adapt enables the addition of new knowledge to an instruction-tuned model, without degrading capabilities on knowledge from pretraining.}
+    \label{questions}
+\end{figure}
+
+\subsection{Evaluation}
+
+We observe that instruction-tuned models will generally answer questions in long-form, often repeating the question and providing additional helpful context. An example of this behavior is shown in \autoref{example} where the model is asked for the number of episodes in a popular tv series. Here we see the reference answer is 291, which Llama-3 gets correct, but with a response containing full sentences and additional information to clarify its position. 
+
+\begin{table}[ht]
+    \centering
+    \small
+    \caption{Example from Natural Questions with a truncated response.  Llama-3's full response includes more details per country.\newline}
+    \begin{tabular}{cp{.6\columnwidth}}
+        \toprule
+        Question &  how many episodes are there in dragon ball z? \\
+        \midrule
+        Answer & 291 \\
+        \midrule
+        Llama-3 & There are a total of 291 episodes in the original Japanese version of Dragon Ball Z. However, the episode count can vary depending on the version and the country. \\
+    \end{tabular}
+    \label{example}
+\end{table}
+
+Popular QA metrics such as Rouge-L \citep{lin-2004-rouge} or exact match would penalize Llama-3 for not being precise. To alleviate this concern we evaluate using Rouge-L's recall, which is the percentage of the longest common sub-sequence of the reference answer found in the model's response. We additionally measure a version of exact match which looks for the exact reference answer anywhere in the response. In both cases, if the reference answer is in the response the score will be 1. If the answer is partially correct then exact match will be 0, but Rouge-L will provide partial credit.
+
+\begin{wrapfigure}[]{r}{.45\columnwidth}
+    \centering
+    \begin{tikzpicture}
+    \begin{axis}[
+    width=.4\columnwidth,
+	xlabel=RE-Adapter Strength,
+	ylabel=Score,
+	grid=both,
+    legend style={legend pos=south east,font=\tiny},
+	no marks]
+\addplot[line width=3pt,solid,color=darkblue] %
+	table[x=scale,y=rouge,col sep=comma]{data/llama-sqa-readapt.csv};
+\addlegendentry{Rouge-L};
+\addplot[line width=3pt,loosely dashed,color=darkorange]
+    table[x=scale,y=exact,col sep=comma]{data/llama-sqa-readapt.csv};
+\addlegendentry{Exact};
+\end{axis}
+\end{tikzpicture}
+\caption{StreamingQA performance as RE-Adapter is added to fine-tuned Llama-3 model with varying strengths.}
+\label{fig:preadapt}
+\end{wrapfigure}
+
+\subsection{Closed-Book QA}
+\label{closed_book}
+
+In our first experiment we conduct QA evaluation in a closed-book setting where the models must provide an answer given nothing but the question. We explore how RE-Adapt behaves in this setting with varying partial adaptation scaling factors. \autoref{fig:preadapt} shows the QA performance of LLama-3 using a fixed-factor of 1.0 for the knowledge-adapter with varying scaling factors for the RE-Adapter. We find that partial adaptation with a factor of 0.5 for both the knowledge adapter and instruction adapter provides robust results across models and datasets when using both RE-Adapt and LoRE-Adapt. 
+
+We use an explained variance threshold $\tau = 0.5$ for our LoRE-Adapters. The resulting percentage of original parameters for each model are: Llama-3 (19.2\%), Gemma (30.2\%), and Mistral (27.1\%). 
+
+The closed-book performance of all models across datasets is shown in \autoref{tab:closed}. Both RE-Adapt and LoRE-Adapt outperform the pretrained and instruction-tuned models on StreamingQA and RetrievalQA, even when those models are fine-tuned on the corresponding News Crawl or RetrievalQA passages. As expected, the pretrained models perform worse, although fine-tuning on the unlabeled data does improve the QA ability of both pretrained and instruct models in the domain used for adaptation. These in-domain results indicate that our approach is superior for knowledge acquisition. Next we will discuss the impact fine-tuning has on general QA performance by looking at results on the out of domain Natural Questions dataset. 
+
+\begin{table}[ht]
+\centering
+\small
+\caption{Closed-book QA performance. The QA dataset being evaluated is listed above the dataset used for fine-tuning DoRA adapters. R-L indicates Rouge-L and EM indicates exact match.}
+\centering
+\begin{tabular}{llcccccccc}
+        &  & \multicolumn{2}{c}{StreamingQA} & \multicolumn{2}{c}{RetrievalQA} & \multicolumn{4}{c}{Natural Questions}\\
+        &  & \multicolumn{2}{c}{News Crawl} & \multicolumn{2}{c}{RQA Passages} & \multicolumn{2}{c}{News Crawl} & \multicolumn{2}{c}{RQA Passages}\\
+        & Model & R-L& EM & R-L  & EM & R-L & EM & R-L & EM \\
+\toprule
+        & Pretrained        & 9      & 0 & 1  &  0 & 10      & 3 & 10 & 3 \\
+        & Pretrained + DoRA & 12      & 3 & 3  &  2 & 10      & 4 & 14 & 7 \\
+Llama-3 & Instruct          & 33      & 19 & 5  &  3 & 46      & 34 & 46 & 34 \\
+        & Instruct + DoRA   & 38      & 22 & 7  &  4 & 39      & 22 & 37 & 27\\
+        & LoRE-Adapt (Ours) & 46  & 26 & \textbf{10}  &  \textbf{6} & 51      & 34 & 53 & 35\\
+        & RE-Adapt (Ours)  & \textbf{46}  & \textbf{27} & 9 & 6 & \textbf{52}  & \textbf{34} & \textbf{54} & \textbf{36} \\
+\midrule
+        & Pretrained        & 11      & 2 & 1  &  0 & 10      & 3 & 10 & 3\\
+        & Pretrained + DoRA & 19      & 4 & 1  &  0 & 7 & 1 & 10 & 2\\
+Gemma   & Instruct          & 20      & 9 & 2  &  1 & 26      & 12  & 26 & 12 \\
+        & Instruct + DoRA   & 31      & 18 & 5 & 3 & 26      & 12 & 28 & 14\\
+        & LoRE-Adapt (Ours) & 31      & 15 & \textbf{7} & \textbf{4} & 24      & 14 & \textbf{30} & \textbf{20}\\
+        & RE-Adapt (Ours)   & \textbf{33}  & \textbf{18} & 6  &  4 & \textbf{26}      & \textbf{17} & 28 & 17 \\
+\midrule
+        & Pretrained        & 17      & 5 & 2  & 0 & 14      & 5 & 14  & 5 \\
+        & Pretrained + DoRA & 22      & 8 & 2  & 1 & 14      & 5 & 15 & 6\\
+Mistral & Instruct          & 29      & 16 & 4  & 2 & 33      & 22 & 33 & 22 \\
+        & Instruct + DoRA   & 36      & 21 & 6  & 5  & 27      & 13 & 33 & 18\\
+        & LoRE-Adapt (Ours)        & \textbf{39}          & \textbf{24} & \textbf{7}  & \textbf{5} & \textbf{39}      & \textbf{24} & \textbf{42} & \textbf{28} \\
+        & RE-Adapt (Ours)          & 37      & 22& 6  & 4 & 37      & 23 & 41 & 27\\
+\end{tabular}
+\label{tab:closed}
+\end{table}
+
+The closed-book results for the Natural Questions dataset on the right side of \autoref{tab:closed} demonstrate the issues with fine-tuning instruct models with non-annotated data, resulting in models that perform worse in their original setting. While fine-tuning on News Crawl or Retrieval QA passages improved the instruct models on the corresponding QA datasets, the majority of models saw a decrease in performance on Natural Questions. RE-Adapt alleviates this problem by using the data from the new domain to only fine-tune the pretrained model, keeping the instruction-tuning intact. Using our approach,%
+\begin{wrapfigure}[18]{l}{.45\columnwidth}
+    \centering
+    \begin{tikzpicture}
+    \begin{axis}[
+    width=.4\columnwidth,
+	xlabel=RE-Adapter Strength,
+	ylabel=Score,
+	grid=both,
+    legend style={legend pos=south east,font=\tiny},
+	no marks]
+\addplot[line width=3pt,solid,color=darkblue] %
+	table[x=scale,y=rouge,col sep=comma]{data/partial.csv};
+\addlegendentry{Rouge-L};
+\addplot[line width=3pt,loosely dashed,color=darkorange]
+    table[x=scale,y=exact,col sep=comma]{data/partial.csv};
+\addlegendentry{Exact};
+\end{axis}
+\end{tikzpicture}
+\caption{Natural Questions performance as the RE-Adapter is added to pretrained Llama-3 with varying strengths.}
+\label{fig:partial-plot}
+\end{wrapfigure}
+the resulting models performed significantly better on the fine-tuning distribution without a performance degradation out-of-domain. In fact, {\bf RE-Adapt and LoRE-Adapt performed better than the original instruction-tuned models out-of-domain}. This improvement indicates that instruction-tuning likely degrades knowledge from pretraining; an issue our approach mitigates through partial adaptation. We confirm this suspicion by applying RE-Adapt to  Llama-3 without any additional fine-tuning. This allows us to produce instruct models with instruction-tuning strengths ranging from 0 (the pretrained model) to 1 (the instruct model). We find that \textbf{we can improve existing instruct models with zero additional training by simply scaling down the strength of instruction-tuning} \autoref{fig:partial-plot}. Combined, these results demonstrate the effectiveness of RE-Adapt for knowledge acquisition with minimal \textit{forgetting}. 
+
+\subsection{RE-Adapt with RAG}
+\label{rag}
+
+Retrieval-augmented generation (RAG) \cite{lewis2021retrievalaugmented} is a popular alternative for utilizing new data with instruction-tuned models. Instead of altering the model directly, RAG maintains a database of all text and retrieves relevant documents to include in the prompt as context. This begs the question, is RE-Adapt still beneficial if the new data is already available via RAG?
+
+\begin{table}[ht]
+\centering
+\small
+\caption{QA performance when using RAG with BM25 and (Oracle) retrievers.}
+\begin{tabular}{llcccc}
+        & & \multicolumn{2}{c}{StreamingQA} & \multicolumn{2}{c}{RetrievalQA} \\
+        & Model             & Rouge-L   & Exact Match & Rouge-L & Exact Match \\
+\toprule
+        & Pretrained        & 38 (59) & 27 (48) &  13 (16) & 11 (14)\\
+Llama-3 & Instruct          & 55 (57) & 54 (58) &  14 (30) & 16 (32) \\
+        & LoRE-Adapt (Ours)        & \textbf{69 (74)} & 58 (64) & \textbf{24 (37)} & \textbf{21 (31)} \\
+        & RE-Adapt (Ours)          & 68 (71)     & \textbf{59 (64)} & 19 (36)& 18 (30) \\
+\midrule
+        & Pretrained        & 39 (41)      & 28 (29)  & 4 (26) & 3 (23)\\
+Gemma   & Instruct          & \textbf{52 (56)}     & 48 (53) & 17 (24) & 16 (24)\\
+        & LoRE-Adapt (Ours) & 46 (50)      & 49 (55) & 12 (17) & 18 (27) \\
+        & RE-Adapt (Ours)   & 50 (55)     & \textbf{50 (56)} & \textbf{21 (30)} & \textbf{18 (28)} \\
+\midrule
+        & Pretrained        & 33 (38)      & 26 (30) & 18 (12) & 16 (10) \\
+Mistral & Instruct          & 49 (52)      & 50 (56) & 14 (23) & 19 (28) \\
+        & LoRE-Adapt (Ours)       & 54 (58)     & \textbf{55 (61)} &  \textbf{18 (23)} &  20 (28) \\
+        & RE-Adapt (Ours)          & \textbf{55 (58)}      & 55 (60) & 15 (24) & \textbf{20 (29)}\\
+\end{tabular}
+\label{tab:open}
+\end{table}
+
+To answer this question, we replicate our experiments on StreamingQA and RetrievalQA, using a BM-25 index \citep{bm25} to retrieve the most relevant passage to be used as context for the models. In practice, RAG setups can retrieve more than one document, but each question in our datasets can be answered from a single passage, and therefore we avoid known issues which RAG can face when too much context is provided to the models \citep{Liu2023LostIT, barnett2024seven, gao2024retrievalaugmented}. Because a poor retriever could bias results in our favor, we also repeat the experiment using an oracle retriever. Instead of performing a heuristic search, the oracle retriever directly selects the passages capable of answering the question as context. While this idealized retriever is unrealistic in practice, it allows us to further isolate the benefit of combining RAG with fine-tuning by eliminating any impact from imperfect retrieval.
+
+The RAG results are shown in \autoref{tab:open}. Again we see significant improvements when using RE-Adapt and LoRE-Adapt even in this RAG setting where the model should already have access to the relevant information needed to answer the questions. The BM-25 search retrieved the correct document with approximately 73\% accuracy across models. Using RE-Adapt to incorporate the data outside of RAG alleviates the shortcomings of the retriever. However, RE-Adapt also improved results when using the oracle, suggesting that adding domain knowledge with an adapter also reduces incorrect interpretations of the context retrieved via RAG. 
+
+
+
+\section{Discussion}
+
+
+Combined, our results demonstrate RE-Adapt's effectiveness at incorporating new knowledge into existing LLMs without having to discard previous instruction-tuning. Our methods increase QA performance by a greater amount when compared to traditional fine-tuning strategies. We also find that our approach improves RAG based systems, even in the most optimistic case of perfect retrieval. Our improved results outside of the fine-tuning distribution suggest that we can recover additional pretraining knowledge by reducing the strength of instruction-tuning through partial adaptation. Importantly, an improvement is seen without any additional fine-tuning of the underlying models. These results encourage additional future research into controlling the competing priorities of knowledge acquisition and general problem solving capability.   
+
+\paragraph{Limitations.} 
+The limitations of our work are two-fold. First, instruction-tuned models perform better than pretrained models on a wide variety of tasks, but we limit our evaluations to the single task of question answering due to the large number of ablations required by our experiments and limited compute resources available. Second, we include the prompts used for instructing the models for QA in \autoref{prompts} but note that different prompting strategies could alter our results. We mitigate introducing bias in prompting by not optimizing the prompts for any particular method.
+
+\paragraph{Societal Impact.}
+We are unaware of any negative societal impacts likely to be caused by our contributions. We further amortize the costs of building open-source LLMs by enabling others to leverage existing instruction-tuning, hopefully decreasing the future energy consumption and environmental impacts caused by LLM customization.
+
+
+
+\section{Conclusion}
+
+
+In this work, we presented RE-Adapt, a new approach for adding knowledge to existing instruction-tuned models. RE-Adapt isolates the differences between an instruction-tuned model and its pretrained counterpart in order to preserve instruction-following capabilities during additional fine-tuning on unlabeled data. We demonstrated that our approach outperforms fine-tuning pretrained or instruction-tuned models directly, which otherwise causes performance to degrade outside of the new fine-tuning domain. Our findings are robust across three state of the art large language models.
+
+We achieved our best performance using \textit{partial adaptation}, a new method for controlling the strength of adaptation at inference time when using single or combined adapters. We found that partially adapting instruction-tuned models improved QA performance without any additional fine-tuning. 
+
+We also analyzed the spectrum of RE-Adapt's weight matrices, constructing a low-rank variant of our approach, LoRE-Adapt, which captures the majority of variation in the instruction-tuning weights at a much lower rank. LoRE-Adapt performed similarly to RE-Adapt with occasional out-performance, while decreasing the number of parameters by as much as 5x in our experiments.
+
+Finally, we demonstrated that RE-Adapt improves performance even when the information required to answer questions is available via retrieval augmented generation. Combined, our results suggest RE-Adapt is an effective approach for infusing new knowledge into already instruction-tuned LLMs.
+
+
+
+
+
+

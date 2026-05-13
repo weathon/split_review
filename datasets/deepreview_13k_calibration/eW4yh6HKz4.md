@@ -1,8 +1,8 @@
 # CBQ: Cross-Block Quantization for Large Language Models
 
 - Decision: Accept
-- Avg Score: 4.83
-- Scores: 8, 1, 0, 8, 6, 6
+- Avg Score: 7.60
+- Scores: 8, 10, 8, 6, 6
 
 ## Abstract
 Post-training quantization (PTQ) has played a key role in compressing large language models (LLMs) with ultra-low costs. However, existing PTQ methods only focus on handling the outliers within one layer or one block, which ignores the dependency of blocks and leads to severe performance degradation in low-bit settings. In this paper, we propose CBQ, a cross-block reconstruction-based PTQ method for LLMs. CBQ employs a cross-block dependency using a homologous reconstruction scheme, establishing long-range dependencies across multiple blocks to minimize error accumulation. Furthermore, CBQ incorporates a coarse-to-fine preprocessing (CFP) strategy for suppressing weight and activation outliers, coupled with an adaptive LoRA-Rounding technique for precise weight quantization. These innovations enable CBQ to not only handle extreme outliers effectively but also improve overall quantization accuracy.

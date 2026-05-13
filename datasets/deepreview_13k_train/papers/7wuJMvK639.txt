@@ -1,0 +1,362 @@
+\title{Hierarchical World Models as Visual Whole-Body Humanoid Controllers}
+
+\begin{abstract}
+Whole-body control for humanoids is challenging due to the high-dimensional nature of the problem, coupled with the inherent instability of a bipedal morphology. Learning from visual observations further exacerbates this difficulty. In this work, we explore highly data-driven approaches to visual whole-body humanoid control based on reinforcement learning, without any simplifying assumptions, reward design, or skill primitives. Specifically, we propose a hierarchical world model in which a high-level agent generates commands based on visual observations for a low-level agent to execute, both of which are trained with rewards. Our approach produces highly performant control policies in 8 tasks with a simulated 56-DoF humanoid, while synthesizing motions that are broadly preferred by humans.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begin{center}
+    \textbf{Code and videos: \url{https://nicklashansen
+\end{center}
+
+\label{sec:introduction}
+Learning a generalist agent in the physical world is a long-term goal of many researchers in AI. Among variant agent designs, humanoids stand out as versatile platforms capable of performing a wide range of tasks, by integrating whole-body control and perception. However, this is a very challenging problem due to the high-dimensional nature of the observation and action spaces, as well as the complex dynamics of a bipedal embodiment, and it makes learning successful yet natural whole-body controllers with reinforcement learning (RL) extremely difficult. For example, consider the task shown in Figure~\ref{fig:teaser}, where a humanoid is rewarded for forward progress while jumping over gaps. To succeed in this task, a humanoid needs to accurately perceive the position and length of oncoming floor gaps, while carefully coordinating full body motions such that it has sufficient momentum and range to reach across each gap.
+
+Due to the sheer complexity of such problems, prior work choose to make simplified assumptions, such as using low-dimensional (privileged) observations and actions \citep{heess2017emergence, Peng2018DeepMimic, wagener2022mocapact, jiang2023hgap}, or (learned) skill primitives \citep{merel2017learning, merel2018neural, hasenclever2020comic, cheng2024express}. While these approaches are able to solve a variety of tasks to some extent, we expect to find a solution that is entirely data-driven and relies on as few assumptions as possible. In this paper, we propose to directly learn a controller on high-dimensional humanoid robot joints, leveraging model-based RL with an existing large-scale motion capture (MoCap) dataset~\citep{CMU2003Mocap}.
+
+We propose a data-driven RL method for visual whole-body control that produces natural, human-like motions and can  solve diverse tasks. Our approach, dubbed \texttt{Puppeteer}, is a hierarchical JEPA-style \citep{lecun2022path} world model that consists of two distinct agents: a proprioceptive \emph{tracking} agent that tracks a reference motion via joint-level control, and a visual \emph{puppeteer} agent that learns to perform downstream tasks by synthesizing lower-dimensional reference motions for the tracking agent to track based on visual observations.
+
+Concretely, the two agents are trained independently in two separate stages using the model-based RL algorithm TD-MPC2 \citep{hansen2024tdmpc2} as a learning backbone. First, a \emph{single} tracking world model is (pre)trained to track reference motions from pre-existing human MoCap data \citep{CMU2003Mocap} re-targeted to a humanoid embodiment \citep{wagener2022mocapact}. It learns a single model to convert any reference kinematic motion to physically executable actions. This is a departure from previous work that often learns multiple low-level models \citep{merel2017learning, hasenclever2020comic}. Importantly, this tracking agent can be saved and reused across all downstream tasks. In the second stage, we train a puppeteering world model that takes visual observation as inputs and outputs the reference motion for the tracking agent based on the specified downstream task. The puppeteer agent is trained with online environment interaction using the fixed tracking agent. A key feature of our framework is its striking simplicity: both world models are algorithmically identical (but differ in inputs/outputs) and can be trained using RL without any bells and whistles. Different from a traditional hierarchical RL setting, our puppeteer agent (high-level policy) outputs geometric locations for a small number of end-effector joints instead of a goal embedding. The tracking agent (low-level policy) is thus only required to learn joint-level physics. This makes the tracking agent easily sharable and generalizable across tasks, leading to an overall small computational footprint.
+
+To evaluate the efficacy of our approach, we propose a new task suite for visual whole-body humanoid control with a simulated 56-DoF humanoid, which contains a total of 8 challenging tasks. We show that our method produces highly performant control policies across all tasks compared to a set of strong model-free and model-based baselines: SAC \citep{Haarnoja2018SoftAA}, DreamerV3 \citep{hafner2023dreamerv3}, and TD-MPC2 \citep{hansen2024tdmpc2}. Furthermore, we find that motions generated by our method are broadly preferred by humans in a user study with $46$ participants. We conclude the paper by carefully dissecting how each of our design choices influence results. Code for method and environments is available at \url{https://nicklashansen. Our main contributions can be summarized as follows:
+\vspace*{-6pt}
+{
+\setlist[itemize]{leftmargin=0.35in}
+\begin{itemize}
+    \itemsep0.05em
+    \item \textbf{Task suite.} We propose a new, challenging task suite for visual whole-body humanoid control with a simulated 56-DoF humanoid. The task suite has 8 tasks in total.
+    \item \textbf{Hierarchical world model.} We propose a method for high-dimensional continuous control that leverages a learned hierarchical world model for planning.
+    \item \textbf{Evaluating ``naturalness'' of controllers.} We develop several metrics for quantifying how natural and human-like generated motions are across tasks in our suite, including human preferences from a user study.
+    \item \textbf{Analysis \& ablations.} We carefully ablate each of our design choices, analyze the relative importance of each component, and provide actionable advice for future work in this area.
+\end{itemize}
+
+
+
+\section{Preliminaries}
+
+\label{sec:background}
+
+\textbf{Problem formulation.} We model visual whole-body humanoid control as a reinforcement learning problem governed by an episodic Markov Decision Process (MDP) characterized by the tuple $(\mathcal{S}, \mathcal{A}, \mathcal{T}, R, \gamma, \Delta)$ where $\mathbf{s} \in \mathcal{S}$ are states, $\mathbf{a} \in \mathcal{A}$ are actions, $\mathcal{S} \colon \mathcal{S} \times \mathcal{A} \mapsto \mathcal{S}$ is the environment transition (dynamics) function, $R \colon \mathcal{S} \times \mathcal{A} \mapsto \mathbb{R}$ is a scalar reward function, $\gamma$ is the discount factor, and $\Delta \colon \mathcal{S} \mapsto \{0, 1\}$ is an episode termination condition. We implicitly consider both proprioceptive information $\mathbf{q}$ and visual information $\mathbf{v}$ as part of states $\mathbf{s}$ and will only make the distinction clear when necessary. We aim to learn a policy $\pi \colon \mathcal{S} \mapsto \mathcal{A}$ that maximizes discounted sum of rewards in expectation: $\mathbb{E}_{\pi} \left[ \sum_{t=0}^{T} \gamma^{t} r_{t} \right],~r_{t} = R(\mathbf{s}_{t}, \pi(\mathbf{s}_{t}))$ for an episode of length $T$, while synthesizing motions that look \emph{``natural''}. We informally define natural motions as policy rollouts that are human-like, but develop several metrics for measuring the ``naturalness'' of policies in Section~\ref{sec:experiments}.
+
+\textbf{TD-MPC2.} We build upon the model-based reinforcement learning (MBRL) algorithm TD-MPC2 \citep{hansen2024tdmpc2}, which represents the state-of-the-art in continuous control and has been shown to outperform alternatives in tasks with high-dimensional action spaces \citep{Hansen2022tdmpc, hansen2024tdmpc2, sferrazza2024humanoidbench}. Specifically, TD-MPC2 learns a latent decoder-free world model from environment interactions and selects actions by planning with the learned model. All components of the world model are learned end-to-end using a combination of joint-embedding prediction \citep{Grill2020BootstrapYO}, reward prediction, and temporal difference \citep{Sutton1988LearningTP} losses, \emph{without} decoding raw observations. During inference, TD-MPC2 follows the Model Predictive Control (MPC) framework for local trajectory optimization using Model Predictive Path Integral (MPPI) \citep{Williams2015ModelPP} as a derivative-free (sampling-based) optimizer. To accelerate planning, TD-MPC2 additionally learns a model-free policy prior which is used to warm-start the sampling procedure.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{figures/method.pdf}
+    \caption{\textbf{Approach.} We pretrain a tracking agent (world model) on human MoCap data using RL; this agent takes proprioceptive information $\mathbf{q}_{t}$ and an abstract reference motion (command) $\mathbf{c}_{t}$ as input, and synthesizes $H$ low-level actions that tracks the reference motion. We then train a high-level puppeteering agent on downstream tasks via online interaction; this agent takes both state $\mathbf{q}_{t}$ and visual information $\mathbf{v}_{t}$ as input, and outputs commands for the tracking agent to execute.}
+    \label{fig:method}
+\end{figure}
+
+
+
+\section{A Hierarchical World Model for High-Dimensional Control}
+
+\label{sec:method}
+We aim to learn highly performant and \emph{``natural''} policies for visual whole-body humanoid control in a data-driven manner using hierarchical world models. A key strength of our approach is that it can synthesize human-like motions without any explicit domain knowledge, reward design, nor skill primitives. While we focus on humanoid control due to their complexity, our approach can in principle be applied to any embodiment. Our method, dubbed \texttt{Puppeteer}, consists of two distinct agents, both of which are implemented as TD-MPC2 world models \citep{hansen2024tdmpc2} and trained independently. Figure~\ref{fig:method} provides an overview of our method. The two agents are designed as follows:
+\vspace*{-6pt}
+\begin{enumerate}[leftmargin=0.35in]
+    \itemsep0.05em
+    \item A low-level \emph{\textbf{\textcolor{nhorange}{tracking}}} agent that takes a robot proprioceptive state $\mathbf{q}_{t}$ and an abstract command $\mathbf{c}_{t}$ as input at time $t$, and uses planning with a learned world model to synthesize a sequence of $H$ control actions $\mathbf{\{\mathbf{a}_{t}, \mathbf{a}_{t+1}, \dots, \mathbf{a}_{t+H}\}}$ that (approximately) obeys the abstract command.
+    \item A high-level \emph{\textbf{\textcolor{nhred}{puppeteering}}} agent that takes the same robot proprioceptive state $\mathbf{q}_{t}$ as input, as well as (optionally) auxiliary information and modalities such as RGB images $\mathbf{v}_{t}$ or task-relevant information, and uses planning with a learned world model to synthesize a sequence of $H$ high-level abstract commands $\mathbf{\{\mathbf{c}_{t}, \mathbf{c}_{t+1}, \dots, \mathbf{c}_{t+H}\}}$ for the low-level agent to execute.
+\end{enumerate}
+
+A unique benefit of our approach is that \emph{a single tracking world model can be (pre)trained and reused across all downstream tasks}. The tracking and puppeteering world models are algorithmically identical (but differ in inputs/outputs), and consist of the following 6 components:
+\begin{equation}
+    \label{eq:tdmpc-components}
+    \begin{array}{lll}
+        \text{Encoder} & \mathbf{z} = h(\mathbf{s}) & \color{gray}{\vartriangleright\text{Encodes state into a latent embedding}}\\
+        \text{Latent dynamics} & \mathbf{z}' = d(\mathbf{z}, \mathbf{a}) & \color{gray}{\vartriangleright\text{Predicts next latent state}}\\
+        \text{Reward} & \hat{r} = R(\mathbf{z}, \mathbf{a}) & \color{gray}{\vartriangleright\text{Predicts reward $r$ of a state transition}}\\
+        \color{nhorange}{\textbf{Termination}} & \color{nhorange}{\hat{\delta} = D(\mathbf{z}, \mathbf{a})} & \color{nhorange}{\vartriangleright\textbf{Predicts probability of termination}}\\
+        \text{Terminal value} & \hat{q} = Q(\mathbf{z}, \mathbf{a}) & \color{gray}{\vartriangleright\text{Predicts discounted sum of rewards}}\\
+        \text{Policy prior} & \hat{\mathbf{a}} = p(\mathbf{z}) & \color{gray}{\vartriangleright\text{Predicts an action $\mathbf{a}^{*}$ that maximizes $Q$}}
+    \end{array}
+\end{equation}
+where $\mathbf{z}$ is a latent state. Because we consider episodic MDPs with termination conditions, we additionally add a termination prediction head $D$ (\textcolor{nhorange}{\textbf{highlighted}} in Equation~\ref{eq:tdmpc-components}) that predicts the probability of termination conditioned on a latent state and action. Use of termination signals in the context of planning with a world model requires special care and has, to the best of our knowledge, not been explored in prior work; we introduce a novel method for this in Section~\ref{sec:planning-termination}. In the following, we describe the two agents and their interplay in the context of visual whole-body humanoid control.
+
+\begin{wrapfigure}[16]{r}{0.3\textwidth}
+    \vspace*{-0.155in}
+    \centering
+    \includegraphics[width=0.26\textwidth]{figures/tracking-illustration.pdf}
+    \caption{\textbf{MoCap tracking.} The low-level tracking agent is trained to track relative end-effector (head, hands, feet) positions of sampled reference motions in 3D space.}
+    \label{fig:tracking-illustration}
+\end{wrapfigure}
+
+\subsection{Low-Level Tracking World Model}
+\label{sec:low-level}
+
+We first train the low-level tracking world model independently from the high-level agent and any potential downstream tasks. We leverage pre-existing human MoCap data \citep{CMU2003Mocap} re-targeted to the 56-DoF ``CMU Humanoid'' embodiment \citep{deepmindcontrolsuite2018} during training of the tracking model, which (as we will later show empirically) implicitly encodes human motion priors. Specifically, we train our tracking world model by sampling $(\mathbf{s}_{t}, \mathbf{a}_{t}, r_{t}, \mathbf{s}_{t+1}, \dots, r_{H})$ sequences from MoCapAct \citep{wagener2022mocapact}, an offline dataset that consists of noisy, suboptimal rollouts from existing policies trained to track reference motions (836 MoCap clips). This is in contrast to prior literature that learn per-clip policies or skill primitives \citep{heess2017emergence, merel2017learning, hasenclever2020comic}.
+
+Observations include humanoid proprioceptive information $\mathbf{q}_{t}$ at time $t$, as well as a reference motion (command) $\mathbf{c}_{t}$ to track. During training of the tracking policy, we let $\mathbf{c}_{t} \doteq (\mathbf{q}^{\textrm{ref}}_{t+1\dots t+H})$ where each $\mathbf{q}^{\textrm{ref}}$ corresponds to relative end-effector (head, hands, feet) positions of the sampled reference motion at a future timestep; during downstream tasks, we train the high-level agent to output (via planning) commands $\mathbf{c}$ for the low-level agent to track. Figure~\ref{fig:tracking-illustration} illustrates our low-dimensional reference; the \textcolor{nhorange}{\textbf{controllable humanoid}} tracks \textcolor{nhred}{\textbf{end-effector positions}} of a \textcolor{gray}{\textbf{reference motion}}. We label all transitions using the reward function from \citet{hasenclever2020comic}. To improve state-action coverage of the tracking world model, we train with a combination of offline data and online interactions, maintaining a separate replay buffer for online interaction data and sampling offline/online data with a $50\%/50\%$ ratio in each gradient update as in \citet{Feng2023Finetuning}. We find this to be crucial for tracking performance when training a single world model on a large number of MoCap clips.
+
+\subsection{High-Level Puppeteering World Model}
+\label{sec:high-level}
+We now consider training a high-level puppeteering world model via online interaction in downstream tasks. As illustrated in Figure~\ref{fig:method}, the puppeteering model is trained (using downstream task rewards) to control the tracking model via commands $\mathbf{c}$, \emph{i.e.}, we redefine commands to now be the action space of the puppeteering agent. The tracking world model remains frozen (no weight updates) throughout this process, which allows us to reuse the \emph{same} tracking model across \emph{all} downstream tasks. Because the high-level agent uses planning for action selection, it natively supports temporal abstraction by outputting multiple commands $(\mathbf{c}_{t}, \mathbf{c}_{t+1}, \dots, \mathbf{c}_{t+H})$ for the low-level agent to execute; we treat the number of low-level steps per high-level step as a hyperparameter $k$ that allows us to trade strong motion prior (large $k$) for control granularity (small $k$).
+
+\subsection{Planning with Termination Conditions}
+\label{sec:planning-termination}
+We consider episodic MDPs with termination conditions. In the context of humanoid control, a common such termination condition is non-foot contact with the floor. Use of termination conditions requires special care in the context of world model learning and planning, as both components are used to simulate (latent) multi-step rollouts. We extend the world model of TD-MPC2 with a termination prediction head $D$, which predicts the probability of termination at each time step. This termination head is trained end-to-end together with all other components of the world model using
+\begin{equation}
+    \label{eq:termination-prediction}
+    \mathcal{L}_{\textrm{Puppeteer}}(\theta) \doteq \mathcal{L}_{\textrm{TD-MPC2}}(\theta) + \alpha \operatorname{CE}(\hat{\delta}, \delta)
+\end{equation}
+where $\hat{\delta},\delta$ are predicted and ground-truth termination signals, respectively, $\operatorname{CE}$ is the (binary) cross-entropy loss, and $\alpha$ is a constant coefficient balancing the losses. We additionally truncate TD-targets at terminal states during training. It is similarly necessary to truncate model rollouts and value estimates during planning (at test-time). However, we only have access to predicted termination signals at test-time, which can be noisy and consequently lead to high-variance value estimates for latent rollouts. To mitigate this, we maintain a cumulative weighting (discount) of termination probabilities when rolling out the model (capped at $0$), such that only a \emph{soft} truncation is applied.
+
+\begin{figure}
+    \centering
+    \begin{minipage}{0.185\textwidth}
+        \centering
+        \scalebox{-1}[1]{\includegraphics[width=\textwidth]{visualizations/stand.png}}
+        {\small \texttt{stand}}
+    \end{minipage}
+    \begin{minipage}{0.185\textwidth}
+        \centering
+        \scalebox{-1}[1]{\includegraphics[width=\textwidth]{visualizations/walk.png}}
+        {\small \texttt{walk}}
+    \end{minipage}
+    \begin{minipage}{0.185\textwidth}
+        \centering
+        \scalebox{-1}[1]{\includegraphics[width=\textwidth]{visualizations/run.png}}
+        {\small \texttt{run}}
+    \begin{minipage}{0.185\textwidth}
+        \centering
+        \scalebox{-1}[1]{\includegraphics[width=\textwidth]{visualizations/corridor.png}}
+        {\small \texttt{corridor}}
+    \end{minipage}
+    \begin{minipage}{0.185\textwidth}
+        \centering
+        \scalebox{-1}[1]{\includegraphics[width=\textwidth]{visualizations/hurdles.png}}
+        {\small \texttt{hurdles}}
+    \end{minipage}
+    \begin{minipage}{0.185\textwidth}
+        \centering
+        \scalebox{-1}[1]{\includegraphics[width=\textwidth]{visualizations/walls.png}}
+        {\small \texttt{walls}}
+    \end{minipage}
+    \begin{minipage}{0.185\textwidth}
+        \centering
+        \scalebox{-1}[1]{\includegraphics[width=\textwidth]{visualizations/gaps.png}}
+        {\small \texttt{gaps}}
+    \end{minipage}
+    \begin{minipage}{0.185\textwidth}
+        \centering
+        \scalebox{-1}[1]{\includegraphics[width=\textwidth]{visualizations/stairs.png}}
+        {\small \texttt{stairs}}
+    \end{minipage}
+    \caption{\textbf{Tasks.} We develop 5 visual whole-body humanoid control tasks with a 56-DoF simulated humanoid (bottom), as well as 3 non-visual tasks (top).}
+    \label{fig:tasks}
+\end{figure}
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+Our proposed method holds the promise of strong downstream task performance while still synthesizing natural and human-like motions. To evaluate the efficacy of our method, we propose a new task suite for whole-body humanoid control with multi-modal observations (vision and proprioceptive information) based on the ``CMU Humanoid'' model from DMControl~\citep{deepmindcontrolsuite2018}. Our simulated humanoid has 56 fully controllable joints ($\mathcal{A} \in \mathbb{R}^{56}$), and includes both head, hands, and feet. We aim to learn highly performant policies in a data-driven manner without the need for embodiment- or task-specific engineering (\emph{e.g.}, reward design, constraints, or auxiliary objectives), while synthesizing natural and human-like motions. Code for method and environments is available at \url{https://nicklashansen.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{figures/main.pdf}
+    \caption{\textbf{Learning curves.} Episode return as a function of environment steps on all 8 tasks from our proposed task suite. Our method matches the performance of TD-MPC2 while producing more natural motions. We evaluate SAC and DreamerV3 only on proprioceptive tasks as they do not achieve any meaningful performance. Average of 3 random seeds; shaded area is $95\%$ CIs.}
+    \label{fig:learning-curves}
+\end{figure}
+
+\subsection{Experimental Details}
+\label{sec:experimental-details}
+
+\textbf{Tasks.} Our proposed task suite consists of 5 vision-conditioned whole-body locomotion tasks, and an additional 3 tasks without visual input. We provide an overview of tasks in Figure~\ref{fig:tasks}; they are designed with a high degree of randomization and include running along a corridor, jumping over hurdles and gaps, walking up the stairs, and circumnavigating obstacles (walls). All 5 visual control tasks use a reward function that is proportional to the linear forward velocity, while non-visual tasks reward displacement in any direction. Episodes are terminated at timeout ($500$ steps) or when a non-foot joint makes contact with the floor. We empirically observe that the TD-MPC2 baseline degenerates to highly unrealistic behavior without a contact-based termination condition.
+
+\begin{wrapfigure}[20]{r}{0.285\textwidth}
+\vspace*{-0.185in}
+\centering
+\includegraphics[width=0.25\textwidth]{figures/preference.pdf}
+\caption{\textbf{Human preference in humanoid motions.} Aggregate results from a user study ($n=46$) where humans are presented with pairs of motions generated by TD-MPC2 and our method, and are asked to provide their preference.}
+\label{fig:preference}
+\end{wrapfigure}
+
+\textbf{Implementation.} We pretrain a single 5M parameter TD-MPC2 world model to track all 836 CMU MoCap~\citep{CMU2003Mocap} reference motions retargeted to the CMU Humanoid model. The tracking agent is trained for $10\textrm{M}$ steps using both offline data (noisy rollouts) from MoCapAct~\citep{wagener2022mocapact} and online interaction with a new reference motion sampled in each episode. We sample $50\%$ of each batch from the offline dataset, and $50\%$ from the online replay buffer for each gradient update; we did not experiment with other ratios. The puppeteering agent is similarly implemented as a 5M parameter TD-MPC2 world model, which we train from scratch via online interaction on each downstream task. Observations include a $212$-d proprioceptive state vector and $64\times 64$ RGB images from a third-person camera. Both agents act at the same frequency, \emph{i.e.}, we set $k=1$. Training the tracking world model takes approximately 12 days, and training the puppeteering world model takes approximately 4 days, both on a single NVIDIA GeForce RTX 3090 GPU.
+
+\textbf{Baselines.} We benchmark our method against state-of-the-art RL algorithms for continuous control, including \emph{(1)} widely used model-free RL method \textbf{Soft Actor-Critic} (SAC) \citep{Haarnoja2018SoftAA} which learns a stochastic policy and value function using a maximum entropy RL objective, \emph{(2)} model-based RL method \textbf{DreamerV3} \citep{Hafner2020DreamTC, hafner2020dreamerv2, hafner2023dreamerv3} which simultaneously learns a world model using a generative objective, and a model-free policy in the latent space of the learned world model, and \emph{(3)} model-based RL method \textbf{TD-MPC2} \citep{Hansen2022tdmpc, hansen2024tdmpc2} which learns a self-predictive (decoder-free) world model and selects actions by planning with the learned world model. Both our method and baselines use the \textbf{same} hyperparameters across all tasks.
+
+\begin{figure}
+    \centering
+    \begin{minipage}{0.05\textwidth}
+        \centering
+        {\small \rotatebox{90}{\textbf{Ours}}}
+    \end{minipage}%
+    \begin{minipage}{0.95\textwidth}
+        \centering
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-hurdles/0.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-hurdles/1.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-hurdles/2.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-hurdles/3.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-hurdles/4.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-hurdles/5.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-hurdles/6.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-hurdles/7.png}}%
+    \end{minipage}\\
+    \begin{minipage}{0.05\textwidth}
+        \centering
+        {\small \rotatebox{90}{TD-MPC2}}
+    \end{minipage}%
+    \begin{minipage}{0.95\textwidth}
+        \centering
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-no-hierarchy-hurdles/0.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-no-hierarchy-hurdles/1.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-no-hierarchy-hurdles/2.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-no-hierarchy-hurdles/3.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-no-hierarchy-hurdles/4.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-no-hierarchy-hurdles/5.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-no-hierarchy-hurdles/6.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-no-hierarchy-hurdles/7.png}}%
+    \end{minipage}
+        
+    \begin{minipage}{0.05\textwidth}
+        \centering
+        {\small \rotatebox{90}{\textbf{Ours}}}
+    \end{minipage}%
+    \begin{minipage}{0.95\textwidth}
+        \centering
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-stairs/0.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-stairs/1.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-stairs/2.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-stairs/3.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-stairs/4.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-stairs/5.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-stairs/6.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-stairs/7.png}}%
+    \end{minipage}\\
+    \begin{minipage}{0.05\textwidth}
+        \centering
+        {\small \rotatebox{90}{TD-MPC2}}
+    \end{minipage}%
+    \begin{minipage}{0.95\textwidth}
+        \centering
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-no-hierarchy-stairs/0.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-no-hierarchy-stairs/1.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-no-hierarchy-stairs/2.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-no-hierarchy-stairs/3.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-no-hierarchy-stairs/4.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-no-hierarchy-stairs/5.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-no-hierarchy-stairs/6.png}}%
+        \scalebox{-1}[1]{\includegraphics[width=0.125\textwidth]{visualizations/0421-no-hierarchy-stairs/7.png}}%
+    \end{minipage}
+    \caption{\textbf{Qualitative results.} Our hierarchical approach, \texttt{Puppeteer}, produces natural human motions, whereas TD-MPC2 trained end-to-end often learns high-performing but unnatural gaits.}
+    \label{fig:qualitative-results}
+\end{figure}
+
+\subsection{Main Results}
+\label{sec:results}
+
+We first present our main benchmark results, and then analyse and ablate each design choice.
+
+\textbf{Benchmark results.} We evaluate our method, \texttt{Puppeteer}, and baselines on all 8 whole-body humanoid control tasks. Episode return as a function of environment steps is shown in Figure~\ref{fig:learning-curves}. We observe that the performance of our method is comparable to that of TD-MPC2 across all tasks (except \emph{stairs}), whereas SAC and DreamerV3 does not achieve any meaningful performance within our computational budget of 3M environment steps. As we will soon reveal, TD-MPC2 produces better policies in terms of episode return on the \emph{stairs} task, but far less natural behavior; this phenomenon is commonly referred to as \emph{reward hacking} \citep{Clark2016Faulty, skalse2022defining}.
+
+\begin{wraptable}[11]{r}{0.39\textwidth}
+    \vspace*{-12pt}
+    \captionof{table}{\textbf{Proxies for ``naturalness''.} Evaluated on the \emph{hurdles} task. \emph{eplen} denotes the average episode length over the course of training; \emph{height} is the average torso height (gait) at end of training. Mean and std. across 3 seeds.}
+    \label{tab:proxies}
+    \resizebox{0.39\textwidth}{!}{%
+    \begin{tabular}[b]{ccc}
+    \toprule
+            & eplen $\uparrow$ & height (cm) $\uparrow$ \\ \midrule
+    TD-MPC2 & $70.7 \pm 5.5$            & $85.9 \pm 4.7$            \\
+    Ours    & $\mathbf{100.6 \pm 1.0}$  & $\mathbf{96 \pm 0.2}$            \\ \bottomrule
+    \end{tabular}
+    }
+\end{wraptable}
+
+\textbf{``Naturalness'' of humanoid controllers.} We conduct a user study ($n=46$) in which humans are shown pairs of short ($\sim$$10\textrm{s}$) clips of policy rollouts from TD-MPC2 and our method, and are asked to provide their preference. Participants are undergraduate and graduate students across multiple universities and disciplines. Results from this study are shown in Figure~\ref{fig:preference}, and Figure~\ref{fig:qualitative-results} shows two sample clips from the study. While both methods perform comparably in terms of downstream task reward, a super-majority of participants rate rollouts from our method as more natural than that of TD-MPC2, with only $4\%$ of responses rating them as ``equally natural'' and $0\%$ rating TD-MPC2 as more natural. This preference is especially pronounced in the \emph{stairs} task, where TD-MPC2 achieves a higher asymptotic return (higher forward velocity) but learns to ``roll'' up stairs as opposed to our method that walks. We also report several quantitative measures of naturalness in Table~\ref{tab:proxies}, which strongly support our user study results. These findings underline the importance of a more holistic evaluation of RL policies as opposed to solely relying on rewards.
+
+\subsection{Ablations \& Analysis}
+\label{sec:ablations}
+
+\begin{figure}
+    \centering
+    \begin{minipage}{0.5\textwidth}
+        \centering
+        \textcolor{nhorange}{\textbf{Pretraining (tracking)}}
+    \end{minipage}%
+    \begin{minipage}{0.5\textwidth}
+        \centering
+        \textcolor{nhred}{\textbf{Downstream tasks}}
+    \includegraphics[width=0.245\textwidth]{figures/tracking.pdf}%
+    \includegraphics[width=0.245\textwidth]{figures/clips.pdf}\hfill
+    \includegraphics[width=0.245\textwidth]{figures/planning.pdf}%
+    \includegraphics[width=0.245\textwidth]{figures/finetuning.pdf}%
+    \caption{\textbf{Ablations.} Normalized score for various ablations of \texttt{Puppeteer} during pretraining (\emph{left}) and downstream tasks (\emph{right}). Pretraining benefits from diverse data, as well as both pre-existing (offline) data and online interactions. We also observe that planning is critical to whole-body humanoid control. Mean across 3 seeds; downstream ablations are averaged across 5 tasks.}
+    \label{fig:ablations}
+\end{figure}
+
+\begin{figure}
+    \begin{minipage}{0.72\textwidth}
+        \centering
+        \begin{minipage}{0.24\textwidth}
+            \centering
+            \scalebox{-1}[1]{\includegraphics[width=\textwidth]{visualizations/gaps-length/0-1.png}}
+            {\small \texttt{0.1m}}
+        \end{minipage}
+        \begin{minipage}{0.24\textwidth}
+            \centering
+            \scalebox{-1}[1]{\includegraphics[width=\textwidth]{visualizations/gaps-length/0-4.png}}
+            {\small \texttt{0.4m}}
+        \end{minipage}
+        \begin{minipage}{0.24\textwidth}
+            \centering
+            \scalebox{-1}[1]{\includegraphics[width=\textwidth]{visualizations/gaps-length/0-8.png}}
+            {\small \texttt{0.8m}}
+        \end{minipage}
+        \begin{minipage}{0.24\textwidth}
+            \centering
+            \scalebox{-1}[1]{\includegraphics[width=\textwidth]{visualizations/gaps-length/1-2.png}}
+            {\small \texttt{1.2m}}
+        Visualization of gap lengths
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.275\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/gaps.pdf}
+    \end{minipage}
+    \caption{\textbf{Zero-shot generalization to larger gap lengths.} \emph{(Left)} Visualization of gap lengths. Agent is trained on gaps $[0.1,0.4]$m and evaluated on gaps up to $1.2$m. \emph{(Right)} Normalized performance as a function of gap length in the visual \emph{gaps} task. Mean of 3 seeds. Our method achieves non-trivial performance on gaps up to $3\times$ the training data. CIs omitted for visual clarity.}
+    \label{fig:gaps}
+\end{figure}
+
+We ablate each design choice of our method, including both the pretraining (tracking) and downstream task learning stages. Our experimental results are summarized in Figure~\ref{fig:ablations}.
+
+\textbf{Pretraining (tracking).} Our method leverages both offline and online data during pretraining of the tracking world model. We ablate this training mixture in two distinct ways: \emph{(i)} using only offline or online data, and \emph{(ii)} reducing the number of unique MoCap clips seen during training. Interestingly, we find that leveraging both data sources leads to better tracking policies overall. We hypothesize that this is because offline data may help in learning to track especially difficult motions such as jumping and balancing on one leg, while online data improves state-action coverage and thus leads to a more robust world model overall. Similarly, training on more diverse MoCap clips also leads to better tracking performance. Training on all $836$ MoCap clips results in the best tracking world model, and we expect tracking to further improve with availability of more MoCap data.
+
+\textbf{Downstream tasks.} We conduct three ablations that help us better understand the impact of a hierarchical approach to downstream tasks: \emph{(i)} using a learned model-free policy in lieu of planning in either level of the hierarchy, \emph{(ii)} pretraining of the \emph{high-level} agent in addition to the low-level agent, and \emph{(iii)} evaluating zero-shot generalization to unseen environment variations (gap length in the \emph{gaps} task). The first two ablations are shown in Figure~\ref{fig:ablations}, and the latter is shown in Figure~\ref{fig:gaps}. We find that planning at both levels is critical to effective whole-body humanoid control, which we conjecture is due to the high dimensionality of the problem; this is supported by concurrent studies on high-dimensional continuous control with TD-MPC2 \citep{hansen2024tdmpc2, sferrazza2024humanoidbench}. Next, we pretrain agents on the \emph{corridor} task and independently finetune on each visual control task. While the specific environments and motions differ between tasks, we find that our method benefits substantially from finetuning. We conjecture that this is because the need to control a low-level tracking agent is shared between all high-level agents, irrespective of the downstream task. Finally, we explore the zero-shot generalization ability of our method to harder, unseen variations of the \emph{gap} task. Interestingly, we observe that our method generalizes to gap lengths up to $3\times$ the training data without additional training. In light of these results, we believe that further investigation of the generalization ability of hierarchical world models will be a promising direction for future research.
+
+
+
+\section{Related Work}
+
+\label{sec:related-work}
+\textbf{Learning whole-body controllers for humanoids} is a long-standing problem at the intersection of the machine learning and robotics communities. Humanoids are of particular interest to the learning community because of the high-dimensional nature of the problem \citep{heess2017emergence, merel2017learning, Peng2018DeepMimic, merel2018neural, hasenclever2020comic, wagener2022mocapact, shi2022skill, MyoSuite2022, sferrazza2024humanoidbench}, and to the robotics community because it is a promising morphology for general-purpose robotic agents \citep{Grizzle2009Mabel, CassieJumpLi2023, BostonDynamics2024, unitree2024website, cheng2024express}. Prior work predominantly focus on learning control policies for individual tasks using model-free reinforcement learning algorithms, many of which train behavior cloning (BC) policies \citep{wagener2022mocapact} and/or skill encoders \citep{heess2017emergence, merel2018neural, hasenclever2020comic, shi2022skill} on human MoCap data \citep{CMU2003Mocap} re-targeted to their considered humanoid embodiment. For example, \citet{wagener2022mocapact} learn expert policies for each reference MoCap clip in the dataset, and then subsequently distills them into a single policy via supervised learning. Instead, we train a single tracking world model across all clips in the MoCapAct \citep{wagener2022mocapact} dataset, using only noisy rollouts and offline RL to do so. Concurrent work, HumanoidBench \citep{sferrazza2024humanoidbench}, similarly introduces a whole-body control benchmark using the less expressive Unitree H1 \citep{unitree2024website} embodiment. Our contributions differ in two important ways: \emph{(1)} we develop a method for synthesizing natural human motions with a highly expressive humanoid model, while \citet{sferrazza2024humanoidbench} focus on benchmarking existing methods for online RL, and \emph{(2)} our proposed method additionally takes vision as input, whereas HumanoidBench considers tasks with privileged state information in their experiments.
+
+\textbf{World models} (and model-based RL more broadly) are of increasing interest to researchers due to their strong empirical performance in an online RL setting \citep{ha2018worldmodels, hafner2023dreamerv3, hansen2024tdmpc2}, as well as their promise of generalization to structurally similar problem instances \citep{Zhang2018SOLARDS, Zheng2022OnlineDT, Lee2022MultiGameDT, lecun2022path, sobal2022joint, brohan2023rt}. Existing model-based RL algorithms can broadly be categorized into algorithms that select actions by planning with a learned world model \citep{Ebert2018VisualFM, schrittwieser2020mastering, ye2021mastering, sv2023gradient, hansen2024tdmpc2}, and algorithms that instead learn a model-free policy using imagined rollouts from the world model \citep{Kaiser2020ModelBasedRL, hafner2023dreamerv3}. We build upon the TD-MPC2 \citep{hansen2024tdmpc2} world model, which uses planning and has been shown to outperform other existing algorithms for continuous control \citep{hansen2022modem, lancaster2023modemv2, Feng2023Finetuning, sferrazza2024humanoidbench}. In this work, we demonstrate that planning is key to success in the high-dimensional continuous control problems that we consider.
+
+\textbf{Hierarchical RL} offers a framework for subdividing a complex learning problem into more approachable subproblems, often by, \emph{e.g.}, leveraging (learned or manually designed) skill primitives \citep{Pastor2009Skills, merel2017learning, merel2018hierarchical, shi2022skill} or facilitating learning over long time horizons via temporal abstractions \citep{nachum2019does, lecun2022path, hafner2022deep, gumbsch2023learning, chen2024simple}. Our method, \texttt{Puppeteer}, is also hierarchical in nature, but does not rely on skill primitives nor temporal abstraction for task learning. Instead, we learn a \emph{single} low-level world model that can be reused across a variety of downstream tasks, and instead introduce a hierarchy in terms of data sources and input modalities.
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+\texttt{Puppeteer} is a data-driven method for learning highly performant visual control policies for high-dimensional continuous control such as humanoids. We demonstrate that our method consistently produces motions that are considered natural and human-like by human evaluators compared to existing methods, and we find that our method is able to generalize zero-shot to gap lengths that far exceed the training data. These results are, to the best of our knowledge, unprecedented in the area of whole-body humanoid control. However, we acknowledge that our contributions have several limitations that may not be obvious:
+\vspace*{-4pt}
+\begin{itemize}[leftmargin=0.35in]
+    \itemsep0.05em
+    \item While our proposed task suite consists of challenging visual whole-body control tasks with a detailed humanoid model, tasks primarily evaluate the visio-locomotive capabilities of current methods. However, humanoids hold the promise of performing highly dexterous tasks (such as, \emph{e.g.}, manipulating and carrying objects in unstructured environments alongside humans) which is not covered by our existing set of tasks. We expect development of new tasks will be increasingly important as algorithms continue to improve, and we hope that the release of our benchmark will help facilitate that.
+    \item Our hierarchical approach currently consists of two levels, only one of which is pretrained in the majority of our experiments. Our experiment on high-level pretraining suggests that it can be beneficial to pretrain both levels, but we expect this conclusion to vary depending on the choice of source and target tasks \citep{Hansen2022pre, xu2022xtra, lin2023spawnnet}. Further research on how to pretrain and transfer the full hierarchical world model is warranted.
+\end{itemize}
+
+\newpage
+
+
+
+
+

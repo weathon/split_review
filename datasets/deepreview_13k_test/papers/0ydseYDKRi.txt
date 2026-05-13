@@ -1,0 +1,271 @@
+\title{Beyond The Rainbow: High Performance Deep Reinforcement Learning On A Desktop PC}
+
+\begin{abstract}
+Rainbow Deep Q-Network (DQN) demonstrated combining multiple independent enhancements could significantly boost a reinforcement learning (RL) agent’s performance. In this paper, we present ``Beyond The Rainbow'' (BTR), a novel algorithm that integrates six improvements from across the RL literature to Rainbow DQN, establishing a new state-of-the-art for RL using a desktop PC, with a human-normalized interquartile mean (IQM) of 7.4 on Atari-60. Beyond Atari, we demonstrate BTR's capability to handle complex 3D games, successfully training agents to play Super Mario Galaxy, Mario Kart, and Mortal Kombat with minimal algorithmic changes. Designing BTR with computational efficiency in mind, agents can be trained using a desktop PC on 200 million Atari frames within 12 hours. Additionally, we conduct detailed ablation studies of each component, analyzing the performance and impact using numerous measures.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\columnwidth]{IQM60.pdf}
+    \caption{Interquartile mean human-normalized performance for BTR against other RL algorithms on the Atari-60 benchmark. The results for DQN and Rainbow DQN are those reported on the Dopamine \citep{castro2018dopamine} implementation (Dopamine uses a ``compact'' version of the Rainbow DQN agent, using only multi-step updates, prioritized replay, and C51).}
+    \label{fig:BTR_vs_sota}
+\end{figure}
+
+\label{sec:intro}
+
+Deep Reinforcement Learning (RL) has achieved numerous successes in complex sequential decision-making tasks, most rapidly since \citet{mnih2015human} proposed Deep Q-Learning (DQN). With this success, RL has become increasingly popular among smaller research labs, the hobbyist community, and even the general public. However, recent state-of-the-art approaches \citep{schrittwieser2020mastering, badia2020agent57, hessel2021muesli, kapturowski2022human} are increasingly out of reach for those with more limited compute resources, either in terms of the required hardware or the walltime necessary to train a single agent. This is a unique issue in RL compared to natural language processing or image recognition which have foundation models that can be efficiently fine-tuned for a new task or problem \citep{lv2023full}. Meanwhile, RL agents must be trained afresh for each environment. Therefore, the development of powerful RL algorithms that can be trained quickly on inexpensive hardware is crucial for smaller research labs and the hobbyist community. 
+
+These concerns are not new. \citet{ceron2021revisiting} highlighted that Rainbow DQN \citep{hessel2018rainbow} required 34,200 GPU hours (equivalent to 1435 days) of training, making the research impossible for anyone except a few research labs, with more recent algorithms exacerbating this problem. Recurrent network architectures \citep{horgan2018distributed}, high update to sample ratio \citep{d2022sample}, and the use of world-models and search-based techniques \citep{schrittwieser2020mastering} all increase the computational resources necessary to train agents, many using distributed approaches requiring multiple CPUs and GPUs (or TPUs), or requiring numerous days and weeks to train a single agent. These features have dramatically decreased RL's accessibility.
+
+For this purpose, we develop ``Beyond the Rainbow'' (BTR), taking the same principle as Rainbow DQN \cite{hessel2018rainbow}, selecting 6 previously independently evaluated improvements and combining them into a singular algorithm (Section \ref{sec:btr}). These components were chosen for their performance qualities or to reduce the computational requirements for training an agent. As a result, BTR sets a new state-of-the-art score for Atari-60 \citep{bellemare2013arcade} (excluding recurrent approaches) with an Interquartile Mean (IQM) of 7.4\footnote{All reported IQM scores use the best single evaluation for each environment throughout training as is standard, rather than the agent's score at 200 million, hence the discrepancy between the overall score and Figure \ref{fig:BTR_vs_sota}.} using a single desktop machine in less than 12 hours, and outperforms Rainbow DQN on Procgen \citep{cobbe2020leveraging} in less than a fifth of the walltime (Section \ref{subsec:performance}). Further, we demonstrate BTR's potential by training agents to solve three modern 3D games for the first time, Mario Kart Wii, Super Mario Galaxy and Mortal Combat, that each contain complex mechanics and graphics (Section \ref{subsec:games}). To verify the effectiveness and effect of the six improvements to BTR, in Section \ref{subsec:ablations}, we conduct a thorough ablation of each component, plotting their impact on the Atari-5 environments and in Section \ref{subsec:hood}, we utilise seven different measures to analyse the component's impact on the agent's policy and network weights. This allows us to more precisely understand how the components impact BTR beyond performance or walltime.
+
+
+\begin{tcolorbox}[width=\linewidth, colback=white!95!black]
+In summary, we make the following contributions to state-of-the-art RL. 
+
+\begin{itemize}
+    \item \textbf{High Performance (Section \ref{subsec:performance}) - } BTR outperforms the state-of-the-art for non-recurrent RL on the Atari-60 benchmark, with an IQM of 7.4 (compared to Rainbow DQN's 2.7), outperforming humans on 52/60 games. Furthermore, BTR outperforms Rainbow DQN with Impala on the Procgen benchmark despite using a smaller model and 80\% less walltime. 
+    \item \textbf{Modern Environments (Section \ref{subsec:games}) -} Testing beyond Atari, we demonstrate BTR can train agents for 3 modern games: Super Mario Galaxy (final stage), Mario Kart Wii (Rainbow Road), and Mortal Combat (Endurance mode). These environments contain 3D graphics and complex physics and have never been solved using RL.
+    \item \textbf{Computationally Accessible (Figure \ref{BTR_walltime}) -} Using a desktop PC, BTR trains Atari agents for 200 million frames in under 12 hours, significantly faster than Rainbow DQN's 35 hours. This increases RL research's accessibility for smaller research labs and hobbists without the need for GPU clusters or excessive walltime.
+    \item \textbf{Component Impact Analysis (Section \ref{sec:analysis}) -} We conduct thorough ablations investigating BTR without each component in terms of performance and other measures. We discover that BTR widens action gaps (reducing the effects of approximation errors), is robust to observation noise, and reduces neuron dormancy and weight matrix norm (shown to improve plasticity throughout training).
+\end{itemize}
+\end{tcolorbox}
+
+
+
+\section{Background}
+
+\label{sec:background}
+Before describing BTR's extensions, we outline standard RL mathematics, how DQN is implemented, and Rainbow DQN's extensions.
+
+\subsection{RL Problem Formulation} 
+\label{subsec:rl-formulation}
+We adopt the standard formulation of RL \citep{sutton2018reinforcement}, described as a Markov Decision Process (MDP) defined by the tuple $\mathcal{(S, A, P, R)}$, where  $\mathcal{S}$ is the set of states, $\mathcal{A}$ is the set of actions, $\mathcal{P: S \times A \rightarrow} \Delta \mathcal{(S)}$ is the stochastic transition function, and $\mathcal{R:S \times A \rightarrow} \mathbb{R}$ is the reward function. The agent's objective is to learn a policy $\pi : S \rightarrow \Delta \mathcal{(A)}$ that maximizes the expected sum of discounted rewards $\mathbb{E}_\pi[\sum^\infty_{t=0} \gamma^t r(s_t, a_t)]$, where $\gamma \in [0,1)$ is the discount rate.
+
+\subsection{Deep Q-Learning (DQN)}
+\label{subsec:dqn}
+One popular method for solving MDPs is Q-Learning \citep{watkins1992q} where an agent learns to predict the expected sum of discounted future rewards for a given state-action pair. To allow agents to generalize over states and thus be applied to problems with larger state spaces, \citet{mnih2013playing} successfully combined Q-Learning with neural networks. To do this, training minimizes the error between the predictions from a parameterized network $\mathrm{Q}_\theta$ and a target defined by
+\begin{equation}
+    r_t + \gamma \max_{a \in A} \mathrm{Q_{\theta^{'}}} (s_{t+1}, a)\;,
+    \label{eq:dqn-target}
+\end{equation}
+where $Q_{\theta^{'}}$ is an earlier version of the network referred to as the target network, which is periodically updated from the online network $\mathrm{Q}_\theta$. The data used to perform updates is gathered by sampling from an Experience Replay Buffer \citep{lin1992self}, which stores states, actions, rewards, and next states experienced by the agent while interacting with the environment. 
+
+\subsection{Rainbow DQN and Improvements to DQN}
+\label{subsec:rainbow}
+In collecting 6 different improvements to DQN, Rainbow DQN \citep{hessel2018rainbow} proved cumulatively that these improvements could achieve a greater performance than any individually. We briefly explain the individual improvements, ordered by performance impact, most of which are preserved within BTR (see Table \ref{tab:btr-rainbow-changes}), for more detail, we refer readers to the extension's respective papers: 
+
+\begin{enumerate}
+    \item \textbf{Prioritized Experience Replay -} To select training examples, DQN sampled uniformly from an Experience Replay Buffer, assuming that all examples are equally important to train with. \citet{schaul2015prioritized} proposed sampling training examples proportionally to their last seen absolute temporal difference error, encouraging more training on samples for which the network most inaccurately predicts their future rewards. 
+    \item \textbf{N-Step -} Q-learning utilizes bootstrapping to minimize the difference between the predicted value and the resultant reward plus the maximum value of the next state (Eq. \ref{eq:dqn-target}). N-step \citep{sutton1998introduction} reduces the reliance on this bootstrapped next value by considering the next $n$ rewards and observation in $n$ timesteps (Rainbow DQN used $n=3$).
+    \item \textbf{Distributional RL -} Due to the stochastic nature of RL environments and agent's policies, \citet{bellemare2017distributional} proposed learning the return distribution rather than scalar expectation; this was done through modelling the return distributions using probability masses and the Kullbeck-Leibler divergence loss function.
+    \item \textbf{Noisy Networks -} Agents can often insufficiently explore their environment resulting in sub-optimal policies. \citet{fortunato2017noisy} added parametric noise to the network weights, causing the model's outputs to be randomly perturbed, increasing exploration during training, particularly for states where the agent has less confidence. 
+    \item \textbf{Dueling DQN -} The agent's Q-value can be rewritten as the sum of state-value and advantage ($Q(s, a) = V(s) + A(s, a)$). Looking to improve action generalisation, \citet{wang2016dueling} split the hidden layers into two separate streams for the value and advantage, recombining them with $Q(s, a) = V(s) + (A(s, a) - \frac{1}{|\mathcal{A}|}\sum_{a'}A(s, a'))$.
+    \item \textbf{Double DQN -} In selecting the next observation's maximum Q-value (Eq. \ref{eq:dqn-target}), this can frequently overestimate the target's Q-value, negatively affecting the agent's performance. To reduce this overestimation, \citet{van2016deep} propose utilising the online network rather than the target network to select the next action when forming targets, defined as:
+\begin{equation}
+    r_t + \gamma \mathrm{Q_{\theta^{'}}} (s_{t+1}, \argmax_{a \in A} \mathrm{Q_{\theta}} (s_{t+1}, a)) \;.
+    \label{eq:double}
+\end{equation}
+\end{enumerate}
+
+
+
+\section{Beyond the Rainbow - Extensions and Improvements}
+
+\label{sec:btr}
+Building on Rainbow DQN \citep{hessel2018rainbow}, BTR includes 6 more improvements undiscovered in 2018. In the appendices, we include a table of hyperparameters, a figure of the network architecture and the agent's loss function (Appendices \ref{app:hyperparams}, \ref{app:architecture} and \ref{app:loss_func}). Finally, the source code using Gymnasium \citep{towers2024gymnasium} is included within the supplementary material to help future work build upon or utilise BTR. 
+
+\begin{table}[h]
+    \centering
+    \caption{A comparison of components between Rainbow DQN \citep{hessel2018rainbow} and BTR.}
+    \label{tab:btr-rainbow-changes}
+    \begin{tabular}{ccc} 
+        \toprule
+        \textbf{Added To Rainbow DQN} & \textbf{Same As Rainbow DQN} & \textbf{Removed From Rainbow DQN} \\
+        \midrule
+        Impala (Scale=2) & N-Step TD Learning & Double (N/A with Munchausen) \\
+        Adaptive Maxpooling (6x6) & Prioritized Experience Replay & C51 (Upgraded to IQN)\\
+        Spectral Normalisation & Dueling & \\
+        Implicit Quantile Networks & Noisy Networks & \\
+        Munchausen &  & \\
+        Vectorized Environments & & \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{Extensions}
+\label{subsec:extensions}
+\textbf{Impala Architecture + Adaptive Maxpooling} -  \citet{espeholt2018impala} proposed a convolutional residual neural network architecture based on \cite{he2016deep} featuring three residual blocks\footnote{The network architecture is referred to as Impala due to the accompanying training algorithm IMPALA proposed in \citet{espeholt2018impala}}, substantially increasing performance over DQN's three-layer convolutional network. Following \citet{cobbe2020leveraging}, we 
+scale the width of the convolutional layers by 2 to enhance its capabilities. We include an additional 6x6 adaptive max pooling layer after the convolutional layers \citep{schmidt2021fast} found to speed up learning and support different input resolutions.
+
+\textbf{Spectral Normalisation (SN)} - To help stabilize the training of discriminators in Generative Adversarial Networks (GANs), \citet{miyato2018spectral} proposed Spectral Normalisation to help control the Lipschitz constant of convolutional layers. SN works to normalize the weight matrices of each layer in the network by their largest singular value, ensuring that the transformation applied by the weights does not distort the input data excessively, which can lead to instability during training. \citet{bjorck2021towards} found that SN could improve performance in RL, especially for larger networks and \citet{schmidt2021fast} found SN reduced the number of updates required before initial progress is made.
+
+\textbf{Implicit Quantile Networks (IQN)} - \citet{dabney2018implicit} improved upon \citet{bellemare2017distributional}, learning the return distribution over the probability space rather than probability distribution over return values. This removes the limit on the range of Q-values that can be expressed, and enables learning the expected return at every probability.
+
+\textbf{Munchausen RL} - Boostrapping is a core aspect of RL; used to calculate target values (Eq. \ref{eq:dqn-target}) with most algorithms using the reward, $r_t$, and the optimal Q-value of the next state, $Q^{*}$. However, since in practice the optimal policy is not known, the current policy $\pi$ is used. Munchausen RL \citep{vieillard2020munchausen} looks to leverage an additional estimate in the bootstrapping process by adding the {\color{red}scaled-log policy} to the loss function (Eq. \ref{eq:munchausen} where $\alpha \in [0, 1]$ is a scaling factor, $\sigma$ is the $\operatorname{softmax}$ function, and $\tau$ is the softmax temperature). This assumes a stochastic policy, therefore DQN is converted to {\color{blue}Soft-DQN} with $\text{with } {\color{blue}\pi_{\theta'} = \sigma(\frac{Q_{\theta'}}{\tau})}$. As Munchausen does not use $\operatorname{argmax}$ over the next state, Double DQN is obsolete. Munchausen RL's update rule is
+\begin{equation}
+ Q_{\theta}(s_{t}, a_{t}) = r_t + \textcolor{red}{\alpha\tau \ln \pi_{\theta'}(a_t |s_{t})} + \gamma \sum_{a' \in A}{\pi_{\theta'}(a' | s_{t+1}) (Q_{\theta'}(s_{t+1}, a') - {\color{blue}\tau \ln(\pi_{\theta'}(a'| s_{t+1}))}} \;.
+ \label{eq:munchausen}
+\end{equation}
+
+\textbf{Vectorization} - RL agents typically take multiple steps in a single environment, followed by a gradient update with a small batch size (Rainbow DQN took 4 environment steps, followed by a batch of 32). However, taking multiple steps in parallel and performing updates on larger batches can significantly reduce walltime. We follow \citet{schmidt2021fast}, taking 1 step in 64 parallel environments with one gradient update with batch size 256 (\citet{schmidt2021fast} took two gradient updates rather than the one we take). This results in a replay ratio (ratio of gradient updates to environment steps) of $\frac{1}{64}$. Higher replay ratios have been shown to improve performance \citep{d2022sample}, however we opt to keep this value low to reduce walltime. 
+ 
+\subsection{Hyperparameters}
+\label{subsec:btr-hyperparameters}
+How frequently the target network is updated is closely intertwined with batch size and replay ratio. We found that updating the target network every 500 gradient steps\footnote{This equates to 32,000 environment steps (128,000 frames), compared to Rainbow DQN's 8,000 steps.} performed best. Given our high batch size, we additionally performed minor hyperparameter tests using different learning rates finding that a slightly higher learning rate of \text{\num{1e-4}} performed best, compared to \num{6.25e-5} in Rainbow DQN.
+
+For many years, RL algorithms have used a discount rate of $0.99$, however, when reaching high performance, lower discount rates alter the optimal policy, causing even optimally performing agents to not collect the maximum cumulative rewards. To prevent this, we follow MuZero Reanalyse \citep{schrittwieser2021online} using $\gamma = 0.997$. For our Prioritized Experience Replay, we use the lower value of $\alpha = 0.2$, the parameter used to determine sample priority, recommended by \citet{toromanoff2019deep} when using IQN. Lastly, many previous experiments used only noisy networks or $\epsilon$-greedy exploration, however, we opt to use both until 100M frames, then set $\epsilon$ to zero, effectively disabling it.
+
+
+
+\section{Evaluation}
+
+\label{sec:eval}
+To assess BTR, we test it on two standard RL benchmarks, Atari \citep{bellemare2013arcade} and Procgen \citep{cobbe2020leveraging} in Section \ref{subsec:performance}. Secondly, we train BTR agents for three modern games (Super Mario Galaxy,  Mario Kart Wii, and Mortal Combat) with complex 3D graphics and physics in Section \ref{subsec:games}, never shown to be trainable with RL previously. 
+
+\subsection{Atari and Procgen Performance}
+\label{subsec:performance}
+ Figure \ref{fig:BTR_vs_sota} plots BTR against Rainbow DQN and DQN, achieving an IQM of 7.4 compared to Rainbow DQN's 2.7 and DQN's 0.9. In comparison to human expert performance, BTR equals or exceeds them in 52 of 60 and Rainbow DQN in 57. Importantly, we find that BTR appears to continue increasing performance beyond 200 million frames, indicating that higher performance is still possible with more time and data. Results tables and graphs can be found in Appendices \ref{app:full-results-table} and \ref{app:full-results-graph} respectively. 
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\columnwidth]{procgen_iqm.pdf}
+    \caption{IQM min-max Performance of BTR compared to Rainbow DQN + Impala (width x4) \citet{cobbe2020leveraging} after 200M frames on all 16 Procgen Environments.}
+    \label{fig:procgen_performance}
+\end{figure}
+
+To further confirm BTR's performance, we benchmark on Procgen \citep{cobbe2020leveraging}, a procedurally generated set of environments aiming to prevent overfitting to specific tasks, a prevalent problem in RL \citep{justesen2018illuminating, juliani2019obstacle}. BTR is able to exceed Rainbow DQN + Impala's performance, despite using significantly fewer convolutional filters (which \citet{cobbe2020leveraging} found to significantly improve performance) and using 8 hours of walltime compared to 41. These results demonstrate BTR's general learning capability across a wide range of standard RL benchmarks.
+
+\subsection{Applying BTR to Modern Games}
+\label{subsec:games}
+To demonstrate BTR's capabilities beyond standard RL benchmarks, we utilised Dolphin \citep{dolphin_emulator}, a Nintendo Wii emulator, to train agents for a range of modern 3D games: Super Mario Galaxy, Mario Kart Wii and Mortal Combat. Using a desktop PC, we were able to train the agent to complete some of the most difficult tasks within each game. For this, BTR required minimal adjustments: first, to input image resolution, 140x114 (from Atari's 84x84) due to the game's higher resolution and aspect ratio, and second, to reduce the number of vectorized environments to 4 as a result of the games' memory and CPU requirements.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\columnwidth]{GamesFigureNoNFS.png}
+\caption{BTR being used to play Super Mario Galaxy (final level), Mario Kart Wii (Rainbow Road) and Mortal Kombat: Armageddon (Endurance Mode) respectively.}
+\label{fig:games}
+\end{figure}
+
+For all the games, BTR was able to solve the game level, including consistently finishing in first place in Mario Kart. We provide videos of our agent playing all three Wii games, in addition to the games in the Atari-5 benchmark \footnote{\url{https://www.youtube.
+
+
+
+\section{Analysis}
+
+\label{sec:analysis}
+Given BTR's performance demonstrated in Section \ref{sec:eval}, in this Section, we ablate each component to evaluate their performance impact (Section \ref{subsec:ablations}). Using the ablated agents, we then measure numerous attributes during and after training to assess each component's impact (Section \ref{subsec:hood}). 
+ 
+\subsection{Ablations Studies} 
+\label{subsec:ablations}
+BTR amalgamates independently evaluated components into a single algorithm. To understand and verify each's contribution, Figures \ref{BTR_ablations} and \ref{BTR_ablations_per_game} plot BTR's performance without each component on the Atari-5 benchmark.\footnote{Due to computational resources required to evaluate each component on 60 environments, \citet{aitchison2023atari} proposes a subset of 5 games that closely correlate with the performance across all 60.}   
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.97\columnwidth]{BTR_ablation.pdf}
+    \caption{Individual game performance of BTR on Atari-5 with individual components removed averaged over 3 seeds. Shaded areas show 1 standard deviation. }
+    \label{BTR_ablations}
+\end{figure}
+
+We find that Impala had the largest effect on performance, with the other components generally causing a less significant effect on final performance. However, when BTR's performance is compared before 200 million frames, we find Munchausen and Spectral Normalisation provide significant performance improvements ($+24\%$ and $+25\%$ at 40M frames, and $+13\%$ and $+35\%$ at 120M frames).
+
+For vectorization and maxpooling, while their inclusion reduces performance, we find their secondary effects crucial to keep BTR computationally accessible. Omitting vectorization increases walltime by 328\% (Figure \ref{BTR_walltime}) by processing environment steps in parallel and taking fewer gradient steps (781,000 compared to Rainbow DQN's 12.5 million).\footnote{Another consequence of removing vectorization is using smaller batches, which \citet{obando2024small} finds improves exploration, possibly explaining our results found in Qbert.} We find maxpooling makes the agent more robust to noise as discussed in Section \ref{subsec:hood}, and decreases the model's parameters by 77\%.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.9\columnwidth]{walltime.pdf}
+    \caption{Walltime of BTR on a desktop PC with components removed, compared with \citet{hessel2018rainbow} and \citet{schmidt2021fast}.}
+    \label{BTR_walltime}
+\end{figure}
+
+\subsection{What are the effects of BTR's components?}
+\label{subsec:hood}
+
+To help interpret the results in Section \ref{subsec:ablations}, we measure seven different attributes of the agent either during or after training: action gaps and action swaps, linked to causing approximation errors \citep{bellemare2016increasing}; policy churn, which can cause excessive off-policyness \citep{schaul2022phenomenon}; score with additional noise indicating robustness and weight norm and SRank \citep{sokar2023dormant}, correlated with loss of plasticity.
+For why Impala contributes to performance so strongly, Figure \ref{fig:analy} shows that with Impala, BTR has fewer dormant neurons and higher weight matrix norms. Despite this, without BTR's other components, Impala exhibits a notable drawback, learning a highly noisy and unstable policy. Table \ref{tab:analy}, demonstrates that without IQN and Munchausen the agent experiences very low action gaps (absolute Q-value difference between the highest two valued actions), causing the agent to swap its argmax action almost every other step. This is likely to result in approximation errors altering the policy and causing a high degree of off-policyness in the replay buffer. This is particularly detrimental in games requiring fine-grained control, such as \textit{Phoenix} where the agent needs to narrowly dodge many projectiles, reflected in BTR's performance without these components.
+
+Furthermore, we find that spectral normalization and maxpooling are useful in dealing with noisy environments. To test this, we evaluate the performance of BTR's ablations when taking different quantities of $\epsilon$-actions, and find these two components prevent performance from dropping substantially \ref{tab:analy}. Lastly, we find Munchausen and IQN to have a significant impact on Policy Churn \citep{schaul2022phenomenon}, with Munchausen reducing it by 5.6\% and IQN increasing it by 2.4\%. As a result, when these components are used together, they appear to reach a level of policy churn which does not harm learning and potentially provides some exploratory benefits.
+
+\begin{table}[h]
+    \centering
+    \caption{Comparison of policy churn, action gaps, actions swaps and evaluation performance with different quantities of $\epsilon$-actions and color jitter (both only applied for evaluation). All measurements use the final agent, trained on 200 million frames, for Atari \textit{Phoenix}. Action Gap is the average absolute Q-value difference between the highest two valued actions. \% Actions Swap is the percentage of times the agent's argmax action has changed from the last timestep. Policy churn is the percentage of states which the agent's argmax action has changed on after a single gradient step. Color jitter applies a random 10\% change to the brightness, saturation and hue of each frame.}
+    \label{tab:analy}
+    \begin{tabular}{cccccccc} 
+        \toprule
+        Category & BTR & w/o Munchausen & w/o IQN & w/o SN & w/o Impala & w/o Maxpool\\
+        \midrule
+        Action Gap & 0.276 & 0.060 & 0.154 & 0.280 & 0.403 & 0.282\\
+         \% Action Swaps & 33.9\% & 47.0\% & 45.2\%  & 42.2\% & 30.9\% & 39.7\%\\
+        Policy Churn & 2.9\% & 8.5\% & 0.5\% & 2.1\% & 3.5\% & 2.8\%\\
+        Score ColorJitter & \textbf{196k} & 90k & 97k & 167k & 5k & 149k \\
+        Score $\epsilon=0.03$ & \textbf{96k} & 53k & 49k & 86k & 5k & 72k\\
+        Score $\epsilon=0.01$ & \textbf{211k} & 88k & 89k & 173k & 5k & 138k \\
+        Score $\epsilon=0$ & 351k & 211k & 196k & 366k & 5k & \textbf{500k} \\ 
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+
+
+\section{Related Work}
+
+\label{sec:related-work}
+The most similar work to BTR, developing a computationally-limited non-distributed RL algorithm, is ``Fast and Efficient Rainbow'' \citep{schmidt2021fast}. They optimised Rainbow DQN to maximise performance for 10 million frames through parallelizing the environments and dropping C51 along with hyperparameter optimisations. This differs from our goals of producing an algorithm that scales across training regimes (up to 200 million frames) and domains (Atari, Procgen, Super Mario Galaxy, Mario Kart and Mortal Combat), resulting in different design decisions.
+
+For less computation-limited approaches, Ape-X \citep{horgan2018distributed} was the first to explore highly distributed training, allowing agents to be trained on a billion frames in 120 hours through using \> 100 CPUs. Following this, \citet{kapturowski2018recurrent} proposed R2D2 using a recurrent neural network, increasing sample efficiency but slowing down gradient updates by 38\%. Agent57 \citep{badia2020agent57} was the first RL agent to achieve superhuman performance across 57 Atari games, though required 90 billion frames. MEME \citep{kapturowski2022human}, Agent57's successor, focused on achieving superhuman performance within the standard 200 million frames limit, achieved by used a significantly higher replay ratio and larger network architecture. Most recently, Dreamer-v3 \citep{hafner2301mastering} used a 200 million parameter model requiring over a week of training, achieving similar results as MEME. We detail some of the key differences between BTR, MEME and Dreamer-v3 in Table \ref{tab:dream_compare}. While these approaches perform equally to or better than BTR, all are inaccessible to smaller research labs or hobbyists due to their required computational resources and walltime. Therefore, while these algorithms have important research value demonstrating the possible performance of RL agents, performative algorithms with a lower cost of entry, like BTR, are a necessary component for RL to become widely applicable and accessible.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.95\columnwidth]{analysis_final.pdf}
+    \caption{Plot showing L2 norm of network weights, SRank $\delta = 0.01$ \citep{kumar2020implicit} and \% of dormant neurons (dormant defined as $<$ 0.}
+    \label{fig:analy}
+\end{figure}
+
+\begin{table}[h]
+    \centering
+    \caption{Comparison of performance, walltime, observations and complexity of different algorithms.}
+    \label{tab:dream_compare}
+    \begin{tabular}{cccccc} 
+        \toprule
+        Category & BTR & MEME & Dreamer-v3\\
+        \midrule
+        A100 GPU Days & 0.9 & Not Reported & 7.7 \\
+        Recurrent? & No (4 stacked frames) & Yes & Yes \\
+        Learns from? & Single Transitions & Trajectories (length 160) & Trajectories (length 64) \\
+        World Model & No & No & Yes \\
+        Parameters & 2.9M & Not Reported ($\approx>$20M) & 200M \\
+        Observation Shape & 84x84 & 210x160 & 64x64 \\
+        Gradient Steps & 781K & 3.75M & 1.5M \\
+        Atari-60 IQM & 7.4 & 9.6 & 9.6\\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+
+
+\section{Conclusion and Future work}
+
+\label{sec:conclusion}
+We have demonstrated that, once again, independent improvements from across Deep Reinforcement Learning can be combined into a single algorithm capable of pushing the state-of-the-art far beyond what any single improvement is capable of. Importantly, we find that this can be accomplished on desktop PCs, increasing the accessibility of RL for smaller research labs and hobbyists. 
+
+We acknowledge that there are many more promising improvements we were not able to include in BTR, leaving room for more future work in a few years to create even stronger integrated agents. For example, BTR does not add an explicitly exploration component, resulting in it struggling in hard-exploration tasks such as \textit{Montezuma's Revenge}; therefore, mechanisms used in Never Give Up \citep{badia2020never} or other components may prove useful. Section \ref{subsec:ablations} found that the neural network's core architecture, Impala, had the largest impact on performance, an area we believe is generally underappreciated in RL. Previous work \citep{kapturowski2018recurrent} has incorporated recurrent models enhancing performance, though we are uncertain how this can be incorporated into BTR without affecting its computational accessibility. 
+
+\newpage
+
+
+\section{Ethics and Reproducibility Statements}
+
+
+Our work does not involve human subjects or methodologies with direct ethical concerns such as discrimination, bias, or privacy violations. Additionally, we have no conflicts of interest, sponsorship issues, or violations of legal or research integrity were present during the development of this research. However, we acknowledge that by improving the accessibility and performance of Reinforcement Learning (RL), our contributions may inadvertently provide more powerful tools to malicious actors, thus, we urge the research community to remain vigilant regarding these issues.
+
+To ensure reproducibility, we provide a detailed background of the work we build upon and clearly explain all changes made to the base algorithm. Most importantly, we provide BTR's code within the supplementary material. Lastly, we provide many details regarding the Wii games tested BTR on, including the minor changes from BTR, how the environment was setup and the reward functions used.
+
+
+
+
+

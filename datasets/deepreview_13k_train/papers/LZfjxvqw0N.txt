@@ -1,0 +1,429 @@
+\title{Accelerating Auto-regressive Text-to-Image Generation with Training-free Speculative Jacobi Decoding}
+
+\begin{abstract}
+The current large auto-regressive models can generate high-quality, high-resolution images, but these models require hundreds or even thousands of steps of next-token prediction during inference, resulting in substantial time consumption. In existing studies, Jacobi decoding, an iterative parallel decoding algorithm, has been used to accelerate the auto-regressive generation and can be executed without training. However, the Jacobi decoding relies on a deterministic criterion to determine the convergence of iterations. Thus, it works for greedy decoding but is incompatible with sampling-based decoding which is crucial for visual quality and diversity in the current auto-regressive text-to-image generation. In this paper, we propose a training-free probabilistic parallel decoding algorithm, \textbf{Speculative Jacobi Decoding (SJD)}, to accelerate auto-regressive text-to-image generation. By introducing a probabilistic convergence criterion, our SJD accelerates the inference of auto-regressive text-to-image generation while maintaining the randomness in sampling-based token decoding and allowing the model to generate diverse images. Specifically, SJD facilitates the model to predict multiple tokens at each step and accepts tokens based on the probabilistic criterion, enabling the model to generate images with fewer steps than the conventional next-token-prediction paradigm. We also investigate the token initialization strategies that leverage the spatial locality of visual data to further improve the acceleration ratio under specific scenarios. We conduct experiments for our proposed SJD on multiple auto-regressive text-to-image generation models, showing the effectiveness of model acceleration without sacrificing the visual quality.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Auto-regressive models enable generative tasks by performing next-token prediction, which is widely used in multiple domains such as the language~\citep{gpt4_experiment}, image~\citep{yu2022scaling-parti}, and video~\citep{kondratyuk2023videopoet} generation.
+Notably, auto-regressive text-to-image generation models~\citep{ding2021cogview,dalle,yu2022scaling-parti} have shown promising results in generating high-quality images. Auto-regressive text-to-image generation models have better potential in scalability and pave the way for native multi-modal models~\citep{team2024chameleon}.
+However, the auto-regressive paradigm creates high latency during inference because it necessitates the decoding of tokens in a sequential, token-by-token manner.
+Therefore, the models have to sequentially go through hundreds or even thousands of forward passes to generate a single image.
+Unlike diffusion models of which the inference acceleration methods have been extensively investigated~\citep{consistency_model,luo2023latent-lcm,yin2024one-dmd}, there has been limited previous work exploring the acceleration of auto-regressive text-to-image generation models.
+Moreover, those auto-regressive models that are capable of text-to-image generation typically have several billions of parameters, making the common training-based generative model acceleration techniques such as self-consistency distillation computationally expensive~\citep{kou2024cllms}.
+Therefore, our work aims to accelerate the auto-regressive text-to-image generation models in a training-free manner.
+
+An intuitive approach is to enable the auto-regressive models to decode multiple tokens in parallel within a forward pass.
+In the early research on auto-regressive image generation, Jacobi decoding~\citep{ortega2000iterative-original-jacobi} has been employed to achieve this objective~\citep{song2021accelerating-jacobi}.
+Jacobi decoding is an iterative algorithm starting from a sequence of randomly initialized tokens, and this algorithm can be executed directly on pre-trained auto-regressive models in a training-free way.
+In each Jacobi iteration, the model performs a single forward pass on the input sequence with a causal mask, thus decoding tokens in parallel.
+The decoded tokens would converge after multiple iterations of parallel decoding.
+The criterion for this convergence is defined as follows: the difference between the values of decoded tokens remains within a sufficiently small threshold over two consecutive iterations.
+Since the number of iterations required for convergence is typically smaller than the sequence length and the parallel forward pass runs fast in GPUs, the generation can be accelerated with Jacobi Decoding.
+
+However, Jacobi decoding faces significant challenges when applied to recent auto-regressive text-to-image generation models.
+We observe that the recent auto-regressive text-to-image generation models~\cite{liu2024lumina-mgpt,chern2024anole,sun2024llamagen} greatly rely on sampling-based decoding with high randomness to generate diverse images.
+We present the generated images using top-$K$ sampling with various $K$ values, where a larger $K$ indicates higher randomness.
+As shown in~\cref{fig:res-deterministic-sampling-ar}, the model with high randomness in sampling generates images with diverse and high-fidelity details and structures, whereas it outputs monotonous or even incomprehensible images with greedy decoding.
+Unfortunately, Jacobi decoding with the deterministic criterion of convergence is incompatible with such highly random sampling~(analyzed in~\cref{sec:abla}), \ie, and it cannot accelerate the inference given such sampling decoding.
+\begin{figure}
+    \centering
+    \includegraphics[width=0.92\linewidth]{figs/real-teaser.pdf}
+    \caption{
+    We propose Speculative Jacobi Decoding, a training-free multi-token prediction algorithm, to accelerate auto-regressive text-to-image generation by reducing the number of model forward passes (denoted as \texttt{steps}) during inference.
+    We perform our algorithm on Lumina-mGPT, and the reduced steps are marked in \textcolor{red}{red}. The original steps are marked in black.
+    }
+    \label{fig:teaser}
+\end{figure}
+
+In this work, we propose a \textit{probabilistic Jacobi decoding} algorithm to accelerate the inference of auto-regressive text-to-image generation models and to support the sampling decoding methods for those models.
+We observe that the acceleration of Jacobi decoding relies on the assumption that multiple consecutive tokens can be correctly decoded in each Jacobi iteration~(shown by \textbf{\textcolor{forestgreen}{green stepped area} in~\cref{fig:jacobi}}). Similar ideas have been applied in other probabilistic algorithms for accelerating the decoding of large language models.
+For example, in speculative sampling~\citep{leviathan2023fast-speculative,chen2023accelerating-speculative}, an additional small model is trained for rapidly generating draft sequences, and then the large language model probabilistically accepts a subset of draft tokens from left to right.
+Drawing from the above analysis, in this paper, we advance the deterministic Jacobi decoding into a probabilistic algorithm, coined as Speculative Jacobi Decoding (SJD). Our method allows the auto-regressive text-to-image generation models to decode \textit{multiple tokens} within \textit{one} forward pass in a \textit{training-free} manner.
+In SJD, the model computes the conditional probability for a sequence of \textit{draft tokens} with a single forward pass. Then, we define a probabilistic criterion to determine which draft tokens to accept, from left to right. The accepted tokens are appended to the fixed pre-filling sequence. The remaining tokens are concatenated with a set of newly initialized tokens, serving as the \textit{draft tokens} for the next decoding iteration. Our SJD accelerates the inference of auto-regressive text-to-image generation models without requiring additional training or tuning of separate modules.
+Moreover, we propose the spatial locality-aware token initialization strategy to accelerate the generation process further. 
+
+We perform quantitative and qualitative experiments to demonstrate the effectiveness of our method.
+Results show that our method can accelerate several auto-regressive text-to-image generation models without sacrificing the quality of generated images.
+For example, it can accelerate Anole~\citep{chern2024anole} and Lumina-mGPT~\citep{liu2024lumina-mgpt} by about $2 \times$ with almost no loss in visual quality.
+Moreover, the acceleration ratio can be beyond $3 \times$ in certain scenarios containing simple patterns.
+
+To the best of our knowledge, SJD is the first method for accelerating the inference of auto-regressive text-to-image models that rely on sampling decoding. We summarize our contributions as follows:
+\begin{itemize}
+ \item We propose a new probabilistic multi-token decoding algorithm, coined as \textbf{Speculative Jacobi Decoding (SJD)}, to speed up the inference of auto-regressive image generation. Our approach addresses the problem that previous Jacobi decoding cannot be applied to recent auto-regressive text-to-image generation models, which rely on sampling-based decoding rather than greedy decoding.
+ \item Compared with previous Speculative Decoding to accelerate language models, our approach is training-free and does not require training an extra model to predict draft tokens.
+ \item Experiments demonstrate that our method can accelerate auto-regressive text-to-image generation by around $2 \times$ with almost no sacrifice in visual quality.
+\end{itemize}
+
+
+
+\section{Related Work}
+
+
+\noindent
+\textbf{Auto-regressive image generation.}
+Auto-regressive image generation models have two features: \textit{next-token-prediction} and \textit{discrete image tokenization}.
+Early works including PixelCNNs~\citep{van2016conditional-pixelcnn,salimans2017pixelcnn++} and PixelSNAIL~\citep{chen2018pixelsnail} use the auto-regressive strategy to model the image generation with the convolutional neural networks on the discretized pixel space. These works generate the pixels in the raster-scan ordering or the zigzag ordering.
+DALL-E~\citep{dalle} and CogView~\citep{ding2021cogview} pave the way for the pipeline of the auto-regressive image generation:
+A discrete autoencoder trained to compress RGB images into image tokens and a large auto-regressive model trained to make predictions based on these image tokens.
+Parti~\citep{yu2022scaling-parti} uses a transformer encoder~\citep{transformer} to provide the textual features for the auto-regressive model to perform the next image token prediction, thereby achieving text-to-image generation.
+LlamaGen~\citep{sun2024llamagen} acts as a class-to-image auto-regressive baseline on ImageNet dataset~\citep{imagenet}.
+MARS~\citep{he2024mars} performs multi-modal generation with a mixture of auto-regressive models, where its image model is initialized with the pre-trained large language model and is fine-tuned to perform image generation.
+Chameleon~\citep{team2024chameleon} aims to unify all multi-modal tasks with discrete tokens and perform the next token prediction on these tokens with a large auto-regressive model.
+Anole~\citep{chern2024anole} and Lumina-mGPT~\citep{liu2024lumina-mgpt} fine-tune Chameleon for better text-to-image generation.
+In this paper, we conduct experiments mainly on Lumina-mGPT and Anole to verify the effectiveness of our method.
+
+\noindent
+\textbf{Acceleration of image generation models.}
+The iterative image generation requires acceleration.
+For instance, the diffusion model, originally trained on a denoising trajectory with one thousand steps, has been accelerated to perform inference using just dozens or even a few steps.
+Given that the diffusion model has emerged as a leading approach in text-to-image generation~\citep{Dalle-2,stable_diffusion,sd3}, most acceleration methods in image generation are built upon it.
+Many acceleration methods focus on shortening the denoising trajectory by distillation technique~\citep{salimans2022progressive-distill,consistency_model,wang2024phased-cm,kim2023consistency-ctm,xu2024accelerating-sub-path,yin2024one-dmd,yin2024improved-dmd2} while some other studies focus on reducing the computational complexity~\citep{yuan2024ditfastattn,zhao2024mixdq,ma2024deepcache}.
+In contrast to the diffusion model, acceleration methods for auto-regressive image generation have not been extensively explored, primarily due to the absence of powerful base models. 
+Jacobi decoding is applied to PixelCNNs for inference acceleration in the early research~\citep{song2021accelerating-jacobi}, yet it lacks a careful design for the random token sampling, significantly impacting its acceleration on current auto-regressive models. In this paper, we enhance Jacobi decoding to be compatible with this random sampling.
+Also, the inference process of each iteration in our method is similar to that of non-auto-regressive models~\citep{chang2022maskgit,tian2024var,li2024autoregressive-mar}. Nevertheless, unlike these models, our approach only modifies the inference schedule of pre-trained auto-regressive models instead of training a separate non-auto-regressive model, thereby preserving the performance and scalability of the auto-regressive models.
+
+\noindent
+\textbf{Acceleration of language models.}
+Different from image generation, the auto-regressive paradigm prevails in language processing.
+A lot of works~\citep{zhou2024survey,devoto2024simple-kvcache,liu2024minicache-kvcache,liu2024scissorhands-kvcache,yang2024pyramidinfer-kvcache,deepseekv2-mla,zhang2024pyramidkv,fu2024moa,li2024evaluating} focus on compressing the models by weight pruning, activation sparsification, quantization, factorization, but the paradigm of token-by-token prediction remains unchanged. 
+There are also works fine-tuning the auto-regressive models to predict multiple tokens in parallel with several decoding heads~\citep{gloeckle2024better-multi-token}. However, these works require more memory to load these additional heads in GPUs.
+The speculative sampling~\citep{leviathan2023fast-speculative,chen2023accelerating-speculative,li2024eagle,sun2024spectr} uses a small language model to assist the large language model in sequence generation. This model is trained on the same domain as the large model and is small enough for faster generation.
+It first generates a sequence with its own inference paradigm. Then, the large model verifies and samples only one prefix of this sequence to serve as part of the final output by executing a single forward pass.
+The verification phase is well-designed to guarantee that each sampled token theoretically satisfies the conditional probability parameterized by the large model.
+Jacobi decoding~\citep{song2021accelerating-jacobi,santilli2023accelerating-jacobi-translation,fu2024break-lookahead,kou2024cllms} allows the model to iteratively decode multiple tokens in fewer steps than the token counts with the deterministic greedy sampling but without auxiliary modules.
+In this work, we adapt the probabilistic verification of speculative sampling into Jacobi decoding, thereby advancing it into a probabilistic algorithm.
+Additionally, unlike existing speculative decoding methods, our method utilizes the intermediate results of Jacobi iterations as draft sequences without requiring any additional training.
+
+
+
+\section{Preliminaries}
+
+
+\subsection{Auto-regressive Text-to-image Generation}
+
+The auto-regressive text-to-image generation models are composed of three components: a discrete image tokenizer that encodes images into discrete tokens, an auto-regressive transformer-based generator that generates discrete image tokens with next-token-prediction conditioned on the text prompts, and an image decoder that decodes the predicted image tokens to pixel-space images. The most time-consuming component for auto-regressive text-to-image generation is the auto-regressive transformer, and our work aims at accelerating the inference of the auto-regressive transformer to predict discrete image tokens based on text prompts.
+
+During each inference step of the auto-regressive transformer, the model predicts the probability distribution of the next token over the entire vocabulary of the tokenizer~(implemented through a softmax classifier) and then samples from this distribution to generate the token.
+Specifically, given a sequence of pre-filled or already decoded tokens $(x_1, x_2, \cdots, x_i)$, the auto-regressive model predicts a categorical distribution $p_\theta(x|\vx_{1:i})$, where we denote the input token sequence $(x_1, x_2, \cdots, x_i)$ as $\vx_{1:i}$ for simplicity, $\theta$ denotes the auto-regressive model parameters, and $x$ is the random variable representing the next token (category).
+Then, a token is sampled according to $p_\theta(x|\vx_{1:i})$, treated as $x_{i+1}$, and is subsequently appended to $(x_1, x_2, \cdots, x_i)$ for the next decoding step.
+In text-to-image auto-regressive generation, the above process starts with a sequence of text tokens and a special token to represent the beginning of image token prediction. 
+To facilitate the generation of diverse images, top-$K$ sampling is commonly employed as the token sampling strategy for text-to-image generation. 
+
+\begin{figure}
+\begin{minipage}[ht]{0.37\textwidth}
+        \includegraphics[width=1\linewidth]{figs/topk-diversity.pdf}
+        \caption{The results of the greedy decoding (no randomness), top-$10$, top-$100$, and top-$2000$ sampling (high randomness) of Lumina-mGPT~\citep{liu2024lumina-mgpt}. Each column presents samples with the same prompt but different \textit{random seeds}.}
+        \label{fig:res-deterministic-sampling-ar}
+\end{minipage}
+\hfill
+\begin{minipage}[ht]{0.6\textwidth}
+        \includegraphics[width=1\linewidth]{figs/jacobi-fig.pdf}
+        \caption{The pipeline of the vanilla Jacobi decoding on an auto-regressive model. The prediction with sampling is performed in parallel at each Jacobi \textit{iteration}. We use different shades of blue to indicate the differences between the tokens that have not been accepted.}
+        \label{fig:jacobi}
+\end{minipage}
+\end{figure}
+
+\subsection{Jacobi Decoding}
+
+Jacobi decoding deems the auto-regressive inference as a process of solving the fixed point of a nonlinear equation in a triangular system~\citep{song2021accelerating-jacobi}.
+This decoding algorithm iteratively performs multi-token decoding and can be executed without fine-tuning or auxiliary modules.
+We show the specific process of decoding one sequence of tokens in~\cref{fig:jacobi}.
+First, given the previously pre-filled or decoded tokens, we randomly initialize a sequence of candidate tokens.
+Then, \textit{in each iteration}, we execute one forward pass of the auto-regressive model for all the candidate tokens with a causal mask. 
+The predicted probabilities then generate the tokens via \textit{greedy sampling}, and these sampled tokens are taken as the inputs of the next iteration. This process can be formulated as: $x_{i}^{(j+1)} = \arg \max_x p_\theta(x|\vx_{1:i-1}^{(j)}),$
+where $i$ denotes the token index and $j$ denotes the iteration index.
+The Jacobi decoding process continues iterating until the convergence is reached, as determined by a deterministic criterion where these tokens remain unchanged between consecutive iterations.
+
+\noindent
+\textbf{Discussion.}
+The acceleration of Jacobi decoding derives from an assumption that multiple tokens can be correctly decoded within one forward pass in Jacobi iteration.
+\cref{fig:jacobi} illustrates this scenario, where the accepted tokens (\textbf{\textcolor{forestgreen}{\text{green stepped area}}}) extend beyond the dashed \textbf{\textcolor{forestgreen}{green triangle outline}}.
+Specifically, the model accepts \textit{two consecutive tokens} after the \textit{first} Jacobi iteration. Thus, it can generate at least four tokens through three forward passes.
+In the worst case, only three tokens can be generated through three forward passes~\citep{song2021accelerating-jacobi}. 
+Note that the number of forward passes in the worst case of Jacobi decoding is equal to that in the original auto-regressive case. 
+
+
+
+\section{Speculative Jacobi Decoding}
+
+
+\paragraph{Analysis.}
+The vanilla Jacobi decoding incorporates a deterministic criterion for determining the convergence, which works well with greedy sampling (no randomness) in language models~\citep{fu2024break-lookahead,kou2024cllms}.
+In contrast, in auto-regressive text-to-image generation, randomness plays a crucial role in the sampling-based decoding process, \ie, higher randomness corresponds to highly diverse details and structures in the generated images.
+As shown in~\cref{fig:res-deterministic-sampling-ar}, we use the text prompt {``a cat on a mat''} to generate images with different sampling strategies including greedy decoding and top-$K$ decoding with different values of $K$.
+We observe that the generated images would contain more details and diverse structures as the $K$ increases. The greedy decoding ($K=1$ with no equal probabilities) leads to suboptimal performance with low quality and no diversity in generated images
+Therefore, random sampling-based decoding is important to image generation, but the original Jacobi decoding is incompatible with such randomness in sampling.
+
+To address the aforementioned issue, we advance the deterministic Jacobi iteration into a new training-free probabilistic parallel decoding algorithm, inspired by speculative sampling~\citep{leviathan2023fast-speculative}.
+Specifically, in each iteration, we decode multiple tokens in parallel and utilize a probabilistic criterion to accept multiple decoded tokens from the outputs of the previous iteration.
+Moreover, to reduce the number of iterations required for inference, we propose a new image token initialization strategy incorporating spatial priors.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1\linewidth]{figs/speculative-jacobi-fig.pdf}
+    \caption{
+    \textbf{Overview of one iteration of our speculative Jacobi decoding (SJD).}
+    First, a sequence of draft tokens and the corresponding probabilities are taken as the inputs.
+    Second, we perform a forward pass with the auto-regressive model on the draft tokens, obtaining the probabilities of these tokens.
+    Third, we perform the verification according to these two types of probabilities, accepting a subset of tokens and (re-)sampling the remaining tokens.
+    Last, the accepted tokens are appended to the pre-filling tokens and fixed, while the resampled tokens, along with newly initialized tokens, will serve as the draft tokens for the next iteration.
+    }
+    \label{fig:speculative-Jacobi-decoding}
+\end{figure}
+
+\subsection{Speculative Jacobi Iteration}
+\label{sec:sjd-iter}
+
+After pre-filling the tokens of text prompts, we perform speculative Jacobi decoding for the image tokens.
+Acknowledging the computational expense of decoding all image tokens simultaneously, we decode multiple tokens per iteration in a sliding-window manner, termed the Jacobi window.
+Our method starts with a sequence of initialized candidate tokens, the length of which corresponds to the window size.
+During each decoding iteration, we predict the token probabilities for the draft token sequence within the current window. Then, a subset of these tokens is accepted based on a probabilistic criterion, and these accepted tokens are added to the fixed pre-filling tokens for the next iteration.
+The remaining unaccepted tokens are resampled for the next iteration.
+In the next iteration, the Jacobi windows slides to include the unaccepted tokens from the previous iteration plus some newly initialized tokens to maintain the Jacobi window size during decoding.
+The process of our iteration is illustrated in~\cref{fig:speculative-Jacobi-decoding}.
+Assuming that we have pre-filled or accepted $n$ tokens and the Jacobi window size is $W$, we would decode the next $W$ tokens.
+The iteration can be described as follows:
+
+\noindent
+\textbf{Step 1}: At the $j$-th iteration, we have the input tokens that are either predicted (but not accepted) in the previous $(j-1)$-th iteration or newly initialized (Sec.~\ref{subsec:initialization}).
+These tokens serve as the \textit{draft tokens} in this iteration, denoted as $(x_{n}^{(j)}, x_{n+1}^{(j)}, \cdots, x_{n+W-1}^{(j)})$.
+We denote the probability corresponding to the draft token $x_{i}^{(j)}$ as $ p_\theta( x |\vx_{1:i-1}^{(j-1)})$. This probability is \textit{set to be conditioned on the input tokens of the previous iteration}~(\textbf{Step 3} ensures this setting).
+
+\noindent
+\textbf{Step 2}:
+We execute \textit{a single forward pass} of the auto-regressive model to obtain the conditional probability for the draft tokens in parallel. The probability for $x_{i}^{(j)}$ is denoted as $ p_\theta( x |\vx_{1:i-1}^{(j)})$.
+
+\noindent
+\textbf{Step 3}: 
+We conduct the speculative verification between the conditional probability given the draft tokens from the previous iteration, $ p_\theta( x |\vx_{1:i-1}^{(j-1)})$, and the conditional probability from the current iteration, $p_\theta( x |\vx_{1:i-1}^{(j)})$.
+In this verification process, we scan the draft sequence from left to right and determine the acceptance of each token based on a probabilistic threshold.
+We measure the ratio of the probability conditioned on the draft tokens in the current iteration to that conditioned on the tokens from the previous iteration.
+Intuitively, this ratio measures how well the token is decoded from the previous iteration (the draft token) and whether further decoding is necessary.
+The acceptance criterion of a token $x_{i}^{(j)}$ can be formulated as follows:
+\begin{equation}
+    x_{i}^{(j+1)} \leftarrow x_{i}^{(j)}
+    \text{~~if~~}
+    r \sim \gU[0,1], ~
+    r < \min \left(1, \frac{p_\theta( x_{i}^{(j)} |\vx_{1:i-1}^{(j)} )}{p_\theta( x_{i}^{(j)} |\vx_{1:i-1}^{(j-1)} )}\right) ,
+\label{eq:acc-sjd}
+\end{equation}
+where $r$ is a random variable and $\gU[0,1]$ represents a uniform distribution between $0$ and $1$.
+If a token meets the above criterion, it is accepted and appended to the pre-filling token sequence for the next iteration, \ie, $ x_{i}^{(j')} = x_{i}^{(j)} ~\forall j' > j $. 
+After accepting one token, we continue this scan until a token is rejected.
+If the token $x_{i}^{(j)}$ is rejected, \ie, the inequality in~\cref{eq:acc-sjd} is not true, 
+we resample a new token by a calibrated distribution, and the resampled token will serve as the draft token for the next decoding iteration:
+\begin{equation}
+x_{i}^{(j+1)} \sim \frac{
+\max(0, p_\theta(x|\vx_{1:i-1}^{(j)}) - p_\theta(x|\vx_{1:i-1}^{(j-1)}))
+}{
+\sum_{x}\max(0, p_\theta(x|\vx_{1:i-1}^{(j)}) - p_\theta(x|\vx_{1:i-1}^{(j-1)}))
+}.
+\end{equation}
+Then, unlike the vanilla speculative sampling, we do not end this scan, but sample the tokens at the remaining indexes with the conditional probability calculated in this iteration.
+This sampling process is consistent with the original Jacobi iteration, and the specific process is as follows:
+\begin{equation}
+    x_{i'}^{(j+1)}  \sim p_\theta(x|\vx_{1:i'-1}^{(j)})
+    , ~~\forall i' > i.
+\end{equation}
+ 
+This conditional probability $p_\theta( x |\vx_{1:i-1}^{(j)})$ is exactly the probability predicted by the parallel forward pass on the input draft tokens,
+and is passed to the next iteration together with the sampled tokens.
+
+\noindent
+\textbf{Step 4}: we append the unaccepted tokens with newly initialized candidate tokens, forming a new Jacobi window with $W$ tokens, as the draft tokens for the next iteration. We use this fixed window size instead of the whole sequence to save the memory usage and accelerate the inference speed.
+\subsection{Token Initialization with Spatial prior}\label{subsec:initialization}
+Vanilla Jacobi decoding methods sample the initial candidate tokens from a uniform distribution. However, 2D images exhibit unique characteristics of spatial locality, \ie, spatially adjacent tokens tend to share similar semantics and textures. 
+Leveraging these characteristics for token initialization may enable faster convergence.
+Considering that auto-regressive models generate image tokens in a raster scan order (from the top-left to the bottom-right in 2D space),
+we propose the following strategies for initializing new tokens:
+(a) repeating the previously generated left adjacent token;
+(b) repeating the previously generated above adjacent token;
+(c) resampling from the predicted probability from the left adjacent token;
+(d) resampling from the predicted probability from the above adjacent token.
+Experimental results demonstrate that these strategies provide greater acceleration than random initialization under certain scenarios.
+
+
+
+\section{Experiments}
+
+
+\subsection{Implementation Details}
+We experiment with two recent and representative auto-regressive text-to-image generation models, Lumina-mGPT~\citep{liu2024lumina-mgpt} and Anole~\citep{chern2024anole}.
+For Lumina-mGPT~\citep{liu2024lumina-mgpt}, by default, we use its 7B version to generate $768 \times 768$ images for evaluation, and we measure the sampling \textit{randomness} by the value $K$ of its top-$K$ logit sampler.
+Following the basic setting of Lumina-mGPT, $K$ is set to $2000$ and the classifier-free guidance weight is set to $3.0$.
+Anole~\citep{chern2024anole} is another 7B auto-regressive generation model finetuned from Chameleon~\citep{team2024chameleon} that can generate $512 \times 512$ images.
+
+\begin{table}[]
+    \centering
+    \setlength{\tabcolsep}{9pt}
+    \caption{
+    \centering
+    The evaluation on the validation set of MSCOCO2017.
+    \texttt{JD}: Jacobi decoding. \texttt{ISP}: initialization with spatial prior. \texttt{SJD}: Speculative Jacobi decoding.
+    }
+    \begin{tabular}{l|cc|cc}
+    \toprule
+    \multirow{2}{*}{\begin{tabular}[c]{@{}l@{}} \textbf{Configuration} \end{tabular}}  & \multicolumn{2}{c|}{ Acceleration ($\uparrow$) } & \multirow{2}{*}{\begin{tabular}[c]{@{}l@{}} FID ($\downarrow$) \end{tabular}} & \multirow{2}{*}{\begin{tabular}[c]{@{}l@{}} CLIP-Score ($\uparrow$) \end{tabular}} \\
+      & Latency & Step &  \\
+    \midrule
+    \textbf{A~~~} Lumina-mGPT~\citep{liu2024lumina-mgpt} & $1.00 \times$ & $1.00 \times$  & 30.76 & 31.29  \\
+    \textbf{B~~~} \textit{\textbf{w.}} JD~\citep{song2021accelerating-jacobi} & $1.02 \times$ &  $1.04 \times$ & 30.66 & 31.38  \\
+    \textbf{C~~~} \textit{\textbf{w.}} \textbf{SJD} & $2.04 \times$  & $2.22 \times$  & 30.85 & 31.35  \\
+    \textbf{D~~~} \textit{\textbf{w.}} \textbf{SJD} (\textbf{ISP}) & $\mathbf{2.05 \times}$ & $\mathbf{2.23 \times}$  & 31.13 & 31.33  \\
+    \midrule
+    \textbf{E~~~} Anole~\citep{chern2024anole} & $1.00 \times$ & $1.00 \times$ & 28.87 & 30.59 \\
+    \textbf{F~~~} \textit{\textbf{w.}} \textbf{SJD} (\textbf{ISP}) & $1.87 \times$ & $1.97 \times$ & 29.14 & 30.61 \\
+    \bottomrule
+    \end{tabular}
+    \label{tab:mscoco2017}
+\end{table}
+
+\begin{table}[]
+    \centering
+    \setlength{\tabcolsep}{15pt}
+    \caption{
+    \centering
+    The evaluation on the validation set of Parti-prompt.
+    \texttt{JD}: Jacobi decoding. \texttt{ISP}: initialization with spatial prior. \texttt{SJD}: Speculative Jacobi decoding.
+    }
+    \begin{tabular}{l|cc|c}
+    \toprule
+    \multirow{2}{*}{\begin{tabular}[c]{@{}l@{}} \textbf{Configuration} \end{tabular}}  & \multicolumn{2}{c|}{ Acceleration ($\uparrow$) } & \multirow{2}{*}{\begin{tabular}[c]{@{}l@{}} CLIP-Score ($\uparrow$) \end{tabular}} \\
+      & Latency & Step &  \\
+    \midrule
+    \textbf{A~~~} Lumina-mGPT~\citep{liu2024lumina-mgpt} & $1.00 \times$ & $1.00 \times$   & 32.13  \\
+    \textbf{B~~~} \textit{\textbf{w.}} JD~\citep{song2021accelerating-jacobi} & $1.01 \times$ & $1.04 \times$ &  32.17  \\
+    \textbf{C~~~} \textit{\textbf{w.}} \textbf{SJD} & $2.12 \times$ &  $2.26 \times$ & 32.13   \\
+    \textbf{D~~~} \textit{\textbf{w.}} \textbf{SJD} (\textbf{ISP}) & $\mathbf{2.13 \times}$ & $\mathbf{2.28 \times}$ & 32.06  \\
+    \midrule
+    \textbf{E~~~} Anole~\citep{chern2024anole} & $1.00 \times$ &  $1.00 \times$ & 30.46  \\
+    \textbf{F~~~} \textit{\textbf{w.}} \textbf{SJD} (\textbf{ISP}) & $1.92 \times$ &  $2.11 \times$ &  30.48 \\
+    \bottomrule
+    \end{tabular}
+    \label{tab:parti}
+\end{table}
+
+\noindent
+\textbf{Metrics.} 
+For visual quality, we use FID~\citep{fid} and CLIP-Score~\citep{clip} as the metrics for evaluation.
+We use the \textit{step compression ratio}~\citep{fu2024break-lookahead}: $\gS = \frac{\text{\# generated tokens}}{\text{ \# decoding steps}}$ to show the theoretical acceleration ratio.
+For each benchmark, we report the average of the step compression ratio on all generated images.
+We also attach this ratio to each image sample in the qualitative comparison of our method with other approaches.
+Moreover, we also report the latency acceleration of the model forward passes on a single GPU for testing the actual speedup.
+
+\noindent
+\textbf{Benchmark.} 
+The parti-prompts~\citep{yu2022scaling-parti} and the validation set of MS-COCO 2017~\citep{coco} are taken as the benchmarks of image generation.
+On parti-prompts, we use the CLIP-Score and the acceleration of latency and steps excluding FID for evaluation because this benchmark only provides prompts without ground-truth images.
+
+\subsection{Quantitative Results}
+
+As shown in~\cref{tab:mscoco2017} and~\cref{tab:parti}, our speculative Jacobi decoding accelerates the auto-regressive text-to-image generation nearly without sacrificing visual qualities.
+When comparing our SJD (\textbf{config C} and \textbf{D}) with the vanilla Jacobi decoding (\textbf{config B}) on Lumina-mGPT, we observe that our probabilistic method greatly accelerates the generation by more than $2 \times$ while the Jacobi decoding cannot.
+Moreover, our method can provide a step compression of about $2 \times$ for Anole.
+We observe that the token initialization with spatial priors has a marginal influence on the speed of general image generation. We further analyze the specific scenarios of this modification in our ablation studies.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figs/compa-total-prompt-half1.pdf}
+\caption{
+The images generated by Lumina-mGPT with different acceleration methods.
+}
+\label{fig:lumina-mgpt-sjd}
+\end{figure}
+
+\subsection{Qualitative Results}
+
+As shown in~\cref{fig:lumina-mgpt-sjd}, we present the images generated with different configurations.
+For comparison, we set the same random seed for each image sample.
+According to our observation, the visual qualities of the images generated by different methods are similar, illustrating that our method can keep the visual quality for multiple styles of images.
+More importantly, our speculative Jacobi decoding with or without our spatial initialization can greatly reduce the inference steps by more than $2 \times$ for each case, and thus accelerate the inference process.
+
+\subsection{Ablation Studies}
+\label{sec:abla}
+
+We perform ablation studies on Lumina-mGPT 7B.
+Except for the experiments involving multiple resolutions, we use this model to generate $768 \times 768$ images for evaluation.
+
+\noindent
+\textbf{The correlation between the sampling strategy in decoding and the acceleration ratio.}
+We compare the deterministic Jacobi decoding to our method under various randomness of the logit sampling.
+In~\cref{fig:rel-sample-acc}, We show the correlation between their acceleration ratio and the randomness of logit sampling.
+According to this figure, our method is stable across multiple randomness and can achieve more than $2 \times$ step compression ratio.
+On the contrary, the Jacobi decoding can only accelerate the greedy sampling~(top-$1$ sampling), which is useless for image generation.
+
+\noindent
+\textbf{The relationship between the image resolution and the acceleration ratio.}
+We employ the 7B Lumina-mGPT to generate images with the resolutions $512 \times 512$ (about 1,000 tokens), $768 \times 768$ (about 2,300 tokens), and $1024 \times 1024$ (about 4,100 tokens).
+We calculate the average step compression ratio for each resolution given the same set of text prompts.
+Then, we present these ratios in~\cref{fig:reso-speed}. The results demonstrate that our method is stable across multiple resolutions, \ie, the acceleration on each resolution is larger than $2 \times$. Moreover, with higher resolutions, the acceleration can be slightly better. For example, SJD achieves $2.43 \times$ acceleration for $1024 \times 1024$ images.
+
+\noindent
+\textbf{Studies on the window size of each iteration.}
+As mentioned in~\cref{sec:sjd-iter}, we append newly initialized tokens onto the unaccepted tokens in each iteration, fixing the Jacobi window size. Accordingly, we perform the ablation studies on the size of the window.
+We report the acceleration ratios under various sequence lengths in~\cref{fig:len-speed}.
+The results show that our acceleration ratio reaches almost the maximum when the number of input tokens is greater than or equal to 16 tokens.
+
+\noindent
+\textbf{Studies on the initialization of candidate tokens.}
+The acceleration ratio of our speculative Jacobi decoding is also related to the application scenarios.
+For example, when generating images composed of many simple and repeating patterns, a token initialization correlated with the already sampled tokens can provide a more precise guess than the random initialization.
+As shown in~\cref{fig:quali-init}, we adopt an extreme case, the textual prompt ``2D logo of a pure white box in a pure black background'', for evaluation. We run the accelerated forward passes ten times with different random seeds for each initialization.
+The results show that the average step compression with the spatial-prior-aware initialization is much greater than that using the random initialization.
+Also, \cref{fig:teaser} shows that generating \texttt{2D logo} requires fewer steps than generating images containing exquisite details.
+
+\begin{figure}
+\centering
+\begin{minipage}[ht]{0.48\textwidth}
+    \includegraphics[width=1\linewidth]{figs/topk-speed.pdf}
+    \caption{
+    Our method beats the vanilla Jacobi decoding under various sampling randomness.
+    }
+    \label{fig:rel-sample-acc}
+\end{minipage}
+\hfill
+\begin{minipage}[ht]{0.48\textwidth}
+    \includegraphics[width=1\linewidth]{figs/reso-speed.pdf}
+    \caption{Higher image resolution can result in a slightly larger acceleration in our method.}
+    \label{fig:reso-speed}
+\end{minipage}
+\end{figure}
+
+\begin{figure}
+\centering
+\begin{minipage}[ht]{0.35\textwidth}
+    \includegraphics[width=1\linewidth]{figs/len-speed.pdf}
+    \caption{
+    The acceleration ratio is the largest when the Jacobi window size is at least 16.
+    }
+    \label{fig:len-speed}
+\end{minipage}
+\hfill
+\begin{minipage}[ht]{0.63\textwidth}
+    \includegraphics[width=1\linewidth]{figs/quali-init.pdf}
+    \caption{
+    The token initialization strategy impacts the acceleration ratio of image generation that contains simple and repeat patterns (examples of generated images on the right side).
+    }
+    \label{fig:quali-init}
+\end{minipage}
+\end{figure}
+
+
+\section{Conclusion}
+
+
+This paper proposes a new training-free probabilistic parallel decoding algorithm, called \textbf{Speculative Jacobi Decoding (SJD)}, to accelerate auto-regressive text-to-image generation.
+The sampling-based decoding is critical for image generation models, which prevents naive Jacobi Decoding from being applied to accelerate AR-based text-to-image generation models.
+By introducing a probabilistic convergence criterion, our SJD allows the model to iteratively predict-then-sample multiple tokens in fewer steps than the token counts for AR-based T2I models with sampling-based decoding rather than greedy decoding.
+We also propose the spatial-aware token initialization to reduce the number of iterations under specific scenarios.
+We conduct experiments to verify the effectiveness of SJD on multiple auto-regressive text-to-image generation models, and it accelerates the models without sacrificing visual quality.
+
+
+
+
+

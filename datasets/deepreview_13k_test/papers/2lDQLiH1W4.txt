@@ -1,0 +1,505 @@
+\title{Instant3D: Fast Text-to-3D with Sparse-view Generation and Large Reconstruction Model}
+
+\begin{abstract}
+label{sec:abstract}
+    
+
+Text-to-3D with diffusion models has achieved remarkable progress in recent years.  
+However, existing methods either rely on score 
+distillation-based optimization which suffer from slow inference, low diversity and Janus problems, or are feed-forward methods that generate 
+low-quality 
+results due to the scarcity of 3D training data. In this paper,
+we propose \methodname, a novel method that 
+generates high-quality  and diverse 3D assets 
+from  text prompts in a feed-forward manner. 
+We adopt a two-stage paradigm, which first generates a sparse set of four structured and consistent views from text in one shot with a fine-tuned 2D text-to-image diffusion model, and then directly regresses the NeRF from the generated images with a novel transformer-based sparse-view reconstructor.
+Through extensive experiments, we demonstrate that our method can generate 
+diverse 3D assets of high visual quality within 20 seconds, which is two
+orders of magnitude faster than previous optimization-based methods that can take 1 to 10 hours.
+Our project webpage is: \url{https://jiahao.ai/instant3d/}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+In recent years, remarkable progress has been achieved in the field of 2D image generation. %, particularly in applications like text-to-image synthesis. 
+This success can be attributed to two key factors: the development of novel generative models such as diffusion models
+~\citep{song2021denoising,ho2020denoising,ramesh2022hierarchical,rombach2021highresolution}, and the availability of large-scale datasets like Laion5B~\citep{schuhmann2022laion}.
+Transferring this success in 2D image generation to 3D presents challenges, mainly due to the scarcity of available 3D training data. 
+While Laion5B has 5 billion text-image pairs, Objaverse-XL~\citep{deitke2023objaversexl}, the largest public 3D dataset, contains only 10 million 3D assets with less diversity and poorer annotations. 
+As a result, previous attempts to directly train 3D diffusion models on existing 3D datasets~\citep{luo2021diffusion,nichol2022point,jun2023shap,gupta20233dgen,chen2023single} are limited in the visual (shape and appearance) quality, diversity and compositional complexity of the results they can produce.
+
+To address this, another line of methods~\citep{poole2022dreamfusion,swang2023score,lin2023magic3d,wang2023prolificdreamer,chen2023fantasia3d} leverage the semantic understanding and high-quality generation capabilities of pretrained 2D diffusion models. 
+Here, 2D generators are used to calculate gradients on rendered images, which are then used to optimize a 3D representation, usually a NeRF~\citep{mildenhall2020nerf}. 
+Although these methods yield better visual quality and text-3D alignment, 
+they can be incredibly time-consuming, taking hours of optimization for each prompt. 
+They also suffer from artifacts such as over-saturated
+colors and the ``multi-face" problem arising from the bias in pretrained 2D diffusion models, and struggle to generate diverse results from the same text prompt, with varying the random seed leading to minor changes in geometry and texture. 
+
+In this paper, we propose \methodname, a novel feed-forward method that generates high-quality and diverse 3D assets conditioned 
+on the text prompt. 
+\methodname, like the methods noted above, builds on top of pretrained 2D diffusion models. However, it does so by splitting 3D generation into two stages: 2D generation and 3D reconstruction. In the first stage, instead of 
+generating images sequentially~\citep{liu2023zero1to3},
+we fine-tune an existing text-to-image diffusion model~\citep{podell2023sdxl} to generate a sparse set of four-view images in the form of a $2\!\times\!2$ grid in a single denoising process. 
+This design allows the multi-view images to attend to each other during generation, leading to more view-consistent results. In the second stage, instead of relying on a slow optimization-based reconstruction method, 
+inspired by~\citep{hong2023lrm}, we introduce a novel sparse-view \emph{large reconstruction model} 
+with a transformer-based architecture that can directly regress a triplane-based~\citep{chan2022eg3d} NeRF from a 
+sparse set of multi-view images. 
+Our model projects sparse-view images into a set of pose-aware image tokens using pretrained 
+vision transformers~\citep{caron2021emerging}, which are then fed to an image-to-triplane decoder 
+that contains a sequence of transformer blocks with cross-attention and self-attention layers. 
+Our proposed model has a large capacity with more than $500$ million parameters 
+and can robustly infer correct geometry and appearance of objects from just four images.
+
+Both of these stages are fine-tuned/trained with multi-view rendered images of around $750$K 
+3D objects from Objaverse~\citep{deitke2023objaverse}, 
+where the second stage makes use of the full dataset and the first stage can be fine-tuned 
+with as little as $10$K data.
+While we use a relatively smaller dataset compared to the pre-training dataset for other modalities (e.g., C4~\cite{raffel2020exploring} for text and Laion5B for image), 
+by combining it with the power of pretrained 2D diffusion models,
+\methodname's two-stage approach is able to generate high-quality and diverse 3D assets even from input prompts that contain complex compositional concepts (see Figure~\ref{fig:teaser}) and do not exist  in the 3D dataset used for training. 
+Due to its feed-forward architecture, \methodname is exceptionally fast, requiring only about 20 seconds to generate a 3D asset, 
+which is $200\times$ faster than previous optimization-based methods~\citep{poole2022dreamfusion,wang2023prolificdreamer} while achieving comparable or even better quality.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1\textwidth]{figures/teaser_v3.pdf} 
+    \caption{
+    Our method generates high-quality 3D NeRF assets from the given text prompts within 20 seconds. Here we show 
+    novel view renderings from our generated NeRFs as well as the renderings of the extracted meshes from their density field. 
+    }
+    \label{fig:teaser}
+\end{figure}
+
+
+
+
+
+
+
+
+
+
+\section{Related Works}
+
+
+\subsection{3D Generation}
+Following the success of generative models on 2D images using 
+VAEs~\citep{kingma2013auto,van2017neural}, 
+GANs~\citep{goodfellow2014generative,karras2019style,gu2021stylenerf,kang2023gigagan}, 
+and autoregressive models~\citep{oord2016wavenet,van2016pixel},
+people have also explored 
+the applications of such models on 3D generation. 
+Previous approaches have explored different methods to generate 3D models in the form 
+of point clouds~\citep{wu2016learning, gadelha20173d,smith2017improved}, 
+triangle meshes~\citep{gao2022get3d,pavllo2020convolutional,chen2019learning,luo2021surfgen} 
+, volumes~\citep{chan2022eg3d,orel2022styleSDF,bergman2022generative,skorokhodov2022epigraf,mittal2022autosdf} 
+and implicit representations~\citep{liu2022towards,fu2022shapecrafter,sanghi2022clip}
+in an unconditional or text/image-conditioned manner. 
+Such methods are usually trained on limited categories of 3D objects and do not generalize 
+well to a wide range of novel classes. 
+Diffusion models~\citep{rombach2021highresolution, podell2023sdxl,ho2020denoising,song2021denoising,saharia2022photorealistic} 
+open new possibilities for 3D generation. A class of 
+methods directly train 3D diffusion models on the 
+3D representations~\citep{nichol2022point,liu2023meshdiffusion,zhou20213d,sanghi2023clip} or project the 3D models or multi-view rendered images into  
+latent representations~\citep{ntavelis2023autodecoding,zeng2022lion,gupta20233dgen,jun2023shap,chen2023single} and perform  the diffusion process in the latent space. 
+For example, Shap-E~\citep{jun2023shap} encodes each 3D shape into a set of parameters of an implicit 
+function, and then trains a conditional diffusion model on the parameters.
+These approaches face challenges due to the restricted availability and diversity of existing 3D data, consequently resulting in generated content with poor visual quality and inadequate alignment with the input prompt. Therefore, although trained on millions 
+of 3D assets, Shap-E still fails to generate 3D shapes with complex 
+compositional concepts and high-fidelity textures.
+
+To resolve this, another line of works try to make use of 2D diffusion models  
+to facilitate 3D generation.  Some works~\citep{jain2022zero,mohammad2022clip} optimize meshes or NeRFs to maximize the CLIP~\cite{radford2021learning} score between the rendered images and input prompt utilizing pretrained CLIP models. While such methods can generate 
+diverse 3D content, they exhibit a deficiency in visual realism.
+More recently, some works~\citep{poole2022dreamfusion,wang2023prolificdreamer,lin2023magic3d,chen2023fantasia3d} optimize 3D 
+representations using score distillation loss (SDS) based on 
+pretrained 2D diffusion models. Such methods can generate high-quality results, but suffer from slow optimization, over-saturated colors and the 
+Janus problem. For example, it takes $1.5$ hours for DreamFusion~\citep{poole2022dreamfusion} and 10 hours for ProlificDreamer~\cite{wang2023prolificdreamer} to generate a single 
+3D asset, which greatly limits their practicality.
+In contrast, our method enjoys the benefits of both worlds: it's able to borrow information from pretrained 2D diffusion models to generate diverse multi-view consistent images that are subsequently lifted to faithful 3D models, while still being fast and efficient due to its feed-forward nature. 
+
+
+\subsection{Sparse-View Reconstruction}
+Traditional 3D reconstruction with multi-view stereo~\citep{agarwal2011building,schoenberger2016mvs,furukawa2015multi} typically requires 
+a dense set of input images that have significant overlaps to find correspondence across views and infer the geometry correctly. 
+While NeRF~\citep{mildenhall2020nerf} and its 
+variants~\citep{mueller2022instant,chen2022tensorf,chen2023dictionary} have further alleviated the prerequisites for 3D reconstruction, 
+they perform per-scene optimization that still necessitates a lot of input images. 
+Previous methods~\citep{wang2021ibrnet,chen2021mvsnerf,long2022sparseneus,
+reizenstein2021common,trevithick2021grf} 
+have tried to learn data priors so as to infer NeRF from a sparse set of images.
+Typically they extract per-view features from each input image, and then for each point 
+on the camera ray, aggregate multi-view features and decode them to the density 
+(or SDF) and colors. Such methods are either trained in a category-specific manner, 
+or only trained on small datasets such as ShapeNet and ScanNet; they have not been demonstrated to generalize beyond these datasets especially to the complex text-to-2D outputs. 
+
+More recently, some methods utilize data priors from pretrained 2D diffusion 
+models to lift a single 2D image to 3D by providing supervision at 
+novel views using SDS loss~\citep{liu2023zero1to3,qian2023magic123,
+melaskyriazi2023realfusion} or generating multi-view images~\citep{liu2023one2345}.  
+For instance, One-2-3-45~\citep{liu2023one2345} generates 32 images 
+at novel views from a single input image using a fine-tuned 2D diffusion model, and reconstructs a 3D model from them, which suffers from inconsistency between the many generated views. 
+In comparison, our sparse-view reconstructor
+adopts a highly scalable transformer-based architecture and is trained on large-scale 3D data. This gives it the ability to accurately reconstruct 3D models of novel unseen objects from a sparse set of 4 images without per-scene optimization.
+
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\textwidth]{figures/instant3d_pip_v1.pdf}
+    \caption{Overview of our method. Given a text prompt (`a car made out of sushi'), we perform multi-view generation 
+    with Gaussian blobs as initialization using fine-tuned 2D diffusion model, 
+    producing a 4-view image in the form of a $2\times 2$ grid. Then we apply a transformer-based 
+    sparse-view 3D reconstructor on the 4-view image to generate 
+    the final NeRF. 
+    }
+    \label{fig:framework}
+\end{figure}
+
+
+
+\section{Method}
+
+
+
+Our method \methodname is composed of two stages: sparse-view generation and feed-forward NeRF reconstruction. In Section~\ref{sec:sparse_view_gen}, we present our approach for generating sparse multi-view images conditioned on the text input. 
+In Section~\ref{sec:spase_view_recon}, we describe our transformer-based sparse-view large reconstruction model.  
+\subsection{Text-Conditioned Sparse View Generation}
+\label{sec:sparse_view_gen}
+Given a text prompt, our goal is to generate a set of multi-view images that are aligned with the prompt and consistent with each other. 
+We achieve this by fine-tuning a pretrained text-to-image diffusion model to generate a 
+$2\times 2$ image grid as shown in Figure~\ref{fig:framework}.
+In the following paragraphs, we first illustrate that large text-to-image diffusion models (i.e., SDXL~\citep{podell2023sdxl}) have the capacity to generate view-consistent images thus a lightweight fine-tuning is possible.
+We then introduce three essential techniques to achieve it: the image grid, the curation of the dataset, and also the Gaussian Blob noise initialization in inference.
+As a result of these observations and technical improvements, we can fine-tune the 2D diffusion model for only 10K steps (on 10K data) to generate consistent sparse views. 
+
+
+\textbf{Multi-view generation with image grid.}
+Previous methods~\citep{liu2023zero1to3, liu2023one2345} on novel-view synthesis show that image diffusion models are capable of understanding the multi-view consistency.
+In light of this, we compile the images at different views into a single image in the form of an image grid, as depicted in Figure~\ref{fig:framework}. 
+This image-grid design can better match the original data format of the 2D diffusion model, and is suitable for simple direct fine-tuning protocol of 2D models.
+We also observe that this simple protocol only works when the base 2D diffusion has enough capacity, as shown in the comparisons of Stable Diffusion v1.5~\citep{rombach2021highresolution} and SDXL~\citep{podell2023sdxl} in Section~\ref{sec:ablation_study}.
+The benefit from simplicity will also be illustrated later in unlocking the lightweight fine-tuning possibility.
+
+Regarding the number of views in the image grid, there is a trade-off between the requirements of multi-view generation and 3D reconstruction.
+More generated views make the problem of 3D reconstruction easier with more overlaps but increase possibility of view inconsistencies in generation and reduces the resolution of 
+each generated view.
+On the other hand, too few views  may cause insufficient coverage, requiring the reconstructor to hallucinate unseen parts, which is challenging for a deterministic 3D reconstruction model.
+Our transformer-based reconstructor learns generic 3D priors from large-scale data,  
+and greatly reduces the requirement for the number of views. We empirically found that 
+using 4 views achieves a good balance in satisfying the two requirements above,
+and they can be naturally arranged in a $2\times 2$ grid as shown in Figure~\ref{fig:framework}. Next, we detail how the image grid data is created and curated.
+
+
+
+\paragraph{Multi-view data creation and curation.} 
+To fine-tune the text-to-image diffusion model, we create paired multi-view renderings and text prompts.
+We adopt a large-scale synthetic 3D dataset Objaverse~\citep{deitke2023objaverse} and render four $512\times 512$ views of about $750$K objects with Blender. 
+We distribute the four views at a fixed elevation (20 degrees) and four equidistant azimuths (0, 90, 180, 270 degrees) to achieve a better coverage of the object. 
+We use Cap3D~\citep{luo2023scalable} to generate captions for each 3D object, which 
+consolidates captions from multi-view renderings generated with pretrained image captioning
+model BLIP-2~\citep{li2023blip} using a large language model (LLM).
+Finally, the four views are assembled into a grid image in a fixed order and resized to the input resolution compatible with the 2D diffusion model.
+
+We find that naively using all the data for fine-tuning reduces the 
+photo-realism of the generated images and thus the quality of the 3D assets. 
+Therefore, we train a simple scorer on a small amount (2000 samples) of manually labeled data to predict the quality of each 3D object. 
+During training, our model only takes the top 10K data ranked by our scorer.
+We provide a quantitative study in Section~\ref{sec:ablation_study} 
+to validate the impact of different data curation strategies.
+Although the difference is not very significant 
+from the metric perspective, we found that our curated data is helpful in 
+improving the visual quality. 
+\paragraph{Inference with Gaussian blob initialization.} 
+While our training data is multi-view images with a white background, we observe that 
+during inference starting from standard Gaussian noise still results in 
+images that have cluttered backgrounds (see Figure~\ref{fig:ablate_gaussian}); 
+this introduces extra difficulty for the  
+feed-forward reconstructor in the second stage (Section~\ref{sec:spase_view_recon}). 
+To guide the model toward generating images with a clean white background, 
+inspired by SDEdit~\citep{meng2022sdedit}, we first create an image of a $2\times 2$ grid 
+with a solid white background that has the same resolution as the output image, 
+and initialize each sub-grid with a 2D \emph{Gaussian blob} that is placed 
+at the center of the image with a standard deviation of $0. 
+The visualization of this Gaussian Blob is shown in Figure~\ref{fig:framework}.
+The Gaussian blob image grid is fed to the auto-encoder to get its latent. 
+We then add diffusion noise (e.g., use t=980/1000 for 50 DDIM denoising steps), and use 
+it as the starting point for the denoising process. 
+As seen in Figure~\ref{fig:ablate_gaussian}, this technique 
+effectively guides the model toward generating images with a clean background.
+
+
+\paragraph{Lightweight fine-tuning.}
+With all the above observations and techniques, we are able to adapt a text-to-image diffusion model to a text-to-multiview model with lightweight fine-tuning.
+This lightweight fine-tuning shares a similar spirit to the `instruction fine-tuning'~\citep{mishra2022cross, wei2021finetuned} for LLM alignment. 
+The assumption is that the base model is already capable of the task, and the fine-tuning 
+is to unlock the base model's ability without introducing additional knowledge.
+
+Since we utilize an image grid, the fine-tuning follows the exactly same protocol as the 2D diffusion model pre-training, except that we decrease the learning rate to $10^{-5}$.
+We train the model with a batch size of 192 for only 10K iterations 
+on the 10K curated multi-view data.
+The training is done using 32 NVIDIA A100 GPUs for only 3 hours.
+We study the impact of different training settings in Section~\ref{sec:ablation_study}.
+ 
+
+
+
+
+
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1.\textwidth]{figures/instant3d_stage2_v2.pdf}
+    \caption{Architecture of our sparse-view reconstructor. The model applies a pretrained ViT 
+    to encode multi-view images into pose-aware image tokens, from which we decode a triplane representation 
+    of the scene using a transformer-based decoder. Finally we decode per-point triplane features 
+    to its density and color and perform volume rendering to render novel views. 
+    We illustrate here with 2 views and the actual implementation uses 4 views.
+    }
+    \label{fig:second_stage}
+\end{figure}
+
+\subsection{Feed-Forward Sparse-View Large Reconstruction Model}\label{sec:spase_view_recon}
+In this stage, we aim to reconstruct a NeRF from the four-view images $\imgset = \{\img_i~|~i=1,...,4\}$ generated in the first stage.
+3D reconstruction from sparse inputs with a large baseline is a challenging problem,
+which requires strong model priors to resolve the inherent ambiguity. 
+Inspired by a recent work LRM~\citep{hong2023lrm} that introduces a transformer-based model for single image 3D 
+reconstruction, we propose a novel approach that enables us to predict a NeRF from a sparse set of 
+input views with known poses.
+Similar to~\cite{hong2023lrm}, our model consists of an image encoder, 
+an image-to-triplane decoder, and a NeRF decoder. The image encoder encodes 
+the multi-view images into a set of tokens. We feed the concatenated image tokens to the 
+image-to-triplane decoder to output a triplane representation~\citep{chan2022eg3d} for the 3D object. Finally,
+the triplane features are decoded into per-point density and colors via the NeRF MLP decoder.
+
+In detail, we apply a pretrained Vision Transformer (ViT) DINO~\citep{caron2021emerging} as our image encoder. 
+To support multi-view inputs, we inject camera information in the image encoder to make the output image tokens pose-aware.
+This is different from \cite{hong2023lrm} that feeds the camera information in the image-to-triplane decoder 
+because they take single image input.
+The camera information injection is done by the AdaLN~\citep{huang2017arbitrary, peebles2022dit} camera 
+modulation as described in \cite{hong2023lrm}.
+The final output of the image encoder is a set of pose-aware image tokens $\feat_{\img_i}^*$,
+and we concatenate the per-view tokens together as the feature descriptors for the 
+multi-view images: $\feat_{\mathcal{I}} = \oplus(\feat_{\img_1}^*, ... \feat_{\img_4}^*)$
+
+We use triplane as the scene representation.  
+The triplane is flattened to a sequence of learnable tokens, and the image-to-triplane 
+decoder connects these triplane tokens with the pose-aware image tokens $\feat_{\mathcal{I}}$ 
+using cross-attention layers, followed by self-attention and MLP layers. 
+The final output  tokens are reshaped and upsampled using a de-convolution layer to the final triplane representation.
+During training, we ray march through the object bounding box and decode the triplane features  at each point to its density and color using a shared MLP, and finally get the  pixel color via volume rendering. 
+We train the networks in an end-to-end manner with image reconstruction loss at novel views using a combination of MSE loss and LPIPS~\citep{zhang2018perceptual} loss.
+
+\paragraph{Training details.} We train the model on multi-view renderings
+of the Objaverse dataset~\citep{deitke2023objaverse}. 
+Different from the first stage that performs data curation,
+we use all the 3D objects in the dataset and scale them to $[-1, 1]^3$; then we generate 
+multi-view renderings using  Blender under uniform lighting with a 
+resolution of $512 \times 512$. 
+While the output images from the first stage are generated in a structured setup with fixed camera poses, 
+we train the model using random views as a data augmentation mechanism to increase the robustness. 
+Particularly, we randomly sample $32$ views around each object. 
+During training, we randomly select a subset of $4$ images as input and another random set of $4$ images as supervision.
+For inference, we will reuse the fixed camera poses in the first stage as the camera input to the reconstructor.
+
+
+
+
+
+
+
+
+\section{Experiments}
+
+
+
+
+
+
+\input{figures/text_to_3d_qualitative}
+
+In this section, we first do comparisons against previous methods on 
+text-to-3D (Section~\ref{sec:exp_tex_to_3d}), and then perform ablation studies
+on different design choices of our method. 
+By default, we report the results generated with fine-tuned SDXL models, unless otherwise noted.
+
+\subsection{Text-to-3D}\label{sec:exp_tex_to_3d}
+We make comparisons to state-of-the-art methods on text-to-3D, including 
+a feed-forward method Shap-E~\citep{jun2023shap}, and optimization-based 
+methods including DreamFusion~\citep{poole2022dreamfusion} and 
+ProlificDreamer~\citep{wang2023prolificdreamer}. We use the 
+official code for Shap-E, and the implementation from 
+three-studio~\citep{threestudio2023} for the other two as there 
+is no official code. We use default hyper-parameters (number of optimization iterations, number of denoising steps) of these models. 
+For our own model we use the SDXL base model fine-tuned on 10K data for 10K steps. During inference we take 100 DDIM steps.
+
+\input{tables/text_to_3d_clip}
+\paragraph{Qualitative comparisons.} 
+As shown in Figure~\ref{fig:comp_text_to_3d}, our method generates visually better results than those of Shap-E, producing sharper textures, better geometry and substantially improved text-3D alignment.  
+Shap-E applies a diffusion model that is exclusively trained on million-level 3D data, which might be evidence for 
+the need of 2D data or models with 2D priors.
+DreamFusion and ProlificDreamer 
+achieve better text-3D alignment utilizing pretrained 
+2D diffusion models. 
+However, DreamFusion generates
+results with over-saturated colors and over-smooth textures.
+While ProlificDreamer results have better details, it still suffers from low-quality geometry (as in `A bulldozer clearing ...') and  the Janus problem (as in "a squirrel dressed like ...
+In comparison, our results have more photorealistic appearance with better geometric details.
+
+\paragraph{Quantitative comparisons.} In Table~\ref{fig:comp_text_to_3d}, 
+we quantitatively assess the coherence between the generated models 
+and text prompts using CLIP-based scores. 
+We perform the evaluation on results with 400 text prompts 
+from DreamFusion. 
+For each model, we render 10 random views and calculate the average 
+CLIP score between the rendered images and the input text.
+We report the metric using multiple variants of CLIP models
+with different model sizes and training data (i.e., ViT-L/14 from OpenAI and ViT-bigG-14 from OpenCLIP). 
+From the results we can see that our model achieves higher CLIP scores than Shap-E, indicating better text-3D alignment. 
+Our method even achieves consistently higher CLIP scores than optimization-based method DreamFusion  and competitive  scores to ProlificDreamer, from which we can see 
+that our approach can effectively inherit the great text understanding capability from the pretrained SDXL model and preserve them in the generated 3D assets  via consistent sparse-view generation and robust 3D reconstruction. 
+
+\paragraph{Inference time comparisons.} We present the time to generate a 3D asset in Table~\ref{tab:clip_comp_text_to_3d}. 
+The timing is measured using the default hyper-parameters of each method on an A100 GPU.  
+Notably, our method is significantly faster than the optimization-based methods: while it takes 1.5 hours for DreamFusion and 10 hours for ProlificDreamer to generate a single asset, our method can finish the generation within 20 seconds, resulting in a $270\times$ and $1800 \times$ speed up respectively. 
+In Figure~\ref{fig:diffusion_steps_comp}, we show that our inference time can be further reduced  
+without obviously sacrificing the quality by decreasing the number of DDIM steps.
+\subsection{Comparisons on Sparse View Reconstruction}
+We make comparisons to previous sparse-view NeRF reconstruction works. Most of 
+previous works~\citep{reizenstein2021common,trevithick2021grf,yu2020pixelnerf} are either 
+trained on small-scale datasets such as ShapeNet, or trained in a category-specific manner.
+Therefore, we make comparisons to a state-of-the-art method  
+SparseNeus~\citep{long2022sparseneus}, which is also applied in One2345~\citep{liu2023one2345} 
+where they train the model on the same Objaverse dataset for sparse-view reconstruction.
+We do the comparisons on the Google Scan Object (GSO) dataset~\citep{gso}, which consists 
+of 1019 objects. For each object, we render 4-view input following the 
+structured setup and randomly select another 10 views for testing. 
+We adopt the pretrained model from~\cite{liu2023one2345}.  Particularly, 
+SparseNeus does not work  well for 4-view inputs with such a large baseline; 
+therefore we add another set of $4$ input views in addition to our four input views
+(our method still uses 4 views as input),
+following the setup in~\cite{liu2023one2345}. We report the metrics 
+on novel view renderings in  Table~\ref{fig:sparseneus_comp}. From the table, we 
+can see that our method outperforms the baseline method even 
+with fewer input images, which demonstrates the superiority of our sparse-view 
+reconstructor.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\subsection{Ablation Study for Sparse View Generation}\label{sec:ablation_study}
+We ablate several key decisions in our method design, including (1) the choice of the larger 2D base model SDXL, (2) the use of Gaussian Blob during inference, (3) the quality and size of the curated dataset, and lastly, (4) the need and requirements of lightweight fine-tuning. We observe that qualitative results are more evident than quantitative results, thus we recommend a closer examination.
+
+\paragraph{Scalability with 2D text-to-image models.}
+One of the notable advantages of our method is that  its efficacy scales positively with the potency of the underlying 2D text-to-image model. 
+In Figure~\ref{fig:sdxl_sd15_comp}, we present qualitative comparisons between two distinct backbones (with their own tuned hyper-parameters): SD1.5~\citep{rombach2021highresolution} and SDXL~\citep{podell2023sdxl}.
+It becomes readily apparent that SDXL, which boasts a model size $3\times$ larger than that of SD1.5, exhibits superior text comprehension and visual quality.
+We also show a quantitative comparison on CLIP scores in Table~\ref{tab:ablation_data_amount}. By comparing Exp(l, m) with Exp(d, g), we can see that the model with SD1.5 achieves consistently lower CLIP scores indicating worse text-3D alignment. 
+
+
+\paragraph{Gaussian blob initialization.}
+In Figure~\ref{fig:ablate_gaussian}, we show our results generated with and without 
+Gaussian blob initialization. 
+From the results we can see that while  our fine-tuned model can generate multi-view images without Gaussian blob initialization, they tend to have cluttered backgrounds, which challenges the second-stage feed-forward reconstructor. 
+In contrast, our proposed Gaussian blob initialization enables the fine-tuned model to generate images with a clean white background, which better align with the requirements of the second stage. 
+
+\input{figures/blobs}
+
+
+\input{tables/stage1_data_ablation}
+
+\paragraph{Quality and size of fine-tuning dataset.}
+We evaluate the impact of the quality and size of the dataset used for fine-tuning 2D text-to-image models.
+We first make comparisons between curated and uncurated (randomly selected) data.
+The CLIP score rises slightly as shown in Table~\ref{tab:ablation_data_amount} (i.e.
+This aligns with the observation that the data quality can dramatically impact the results in the instruction fine-tuning stage 
+of LLM~\citep{zhou2023lima}.
+
+When it comes to data size, we observe a double descent from Table~\ref{tab:ablation_data_amount} Exp(a, d, g) with 1K, 10K, and 100K data.
+We pick Exp(a, d, g) here because they are the best results among different training steps for the same training data size.
+
+Figure~\ref{fig:data_amount_comp}, where training with 1K data can lead to inconsistent multi-view images, while training with 100K data can hurt the compositionality, photo-realism, and also text alignment.
+\paragraph{Number of fine-tuning steps.}
+We also quantitatively and qualitatively analyze the impact of fine-tuning steps.
+For each block in Table~\ref{tab:ablation_data_amount} 
+we show the CLIP scores of different training steps.
+Similar to the findings in instruction fine-tuning~\citep{ouyang2022training}, 
+the results do not increase monotonically regarding the number of fine-tuning steps but have a peak in the middle.
+For example, in our final setup with the SDXL base model and 10K curated data (i.e., Exp(c, d, e)), the results are peaked at 10K steps.
+For other setups, the observations are similar.
+
+There is an obvious degradation in the quality of the results for both 4K and 20K training steps. 
+
+Another important observation is that the peak might move earlier when the model size becomes larger.
+This can be observed by comparing between Exp(l,m) for SD1.5 and Exp(d,g) for SDXL.
+Note that this comparison is not conclusive yet from the Table given that SD1.5 does not perform reasonably 
+with our direct fine-tuning protocol.
+
+We also found that Exp(a) with 1K steps on 1K data can achieve the best CLIP scores but the view consistency is actually disrupted.
+A possible reason is that the CLIP score is insensitive to certain artifacts introduced by reconstruction from inconsistent images, which also calls for a more reliable evaluation metric for 3D generation.
+
+
+
+
+
+
+
+
+
+\section{Conclusions}
+
+In this paper we presented a novel feed-forward two-stage approach named \methodname{} that can generate 
+high-quality and diverse 3D assets from text prompts within 20 seconds. 
+Our method finetunes a 2D text-to-image diffusion model
+to generate consistent 4-view images, and lifts them to 3D with a
+robust transformer-based large reconstruction model. The experiment results 
+show that our method outperforms previous feed-forward methods in terms 
+of quality while being equally fast, and achieves comparable or better performance
+to previous optimization-based methods with a speed-up of more than $200$ times. 
+\methodname{} allows novice users to easily create 3D assets 
+and enables fast prototyping and iteration for various applications such as
+3D design and modeling.
+
+
+\paragraph{Ethics Statement.} 
+The generation ability of our model is inherited from the public 2D diffusion model SDXL.
+We only do lightweight fine-tuning over the SDXL model thus it is hard to introduce extra knowledge to SDXL.
+Also, our model can share similar ethical and legal considerations to SDXL.
+The curation of the data for lightweight fine-tuning does not introduce outside annotators.
+Thus the quality of the data might be biased towards the preference of the authors, 
+which can lead to a potential bias on the generated results as well.
+The text input to the model is not further checked by the model,
+which means that the model will try to do the generation for every text prompt it gets
+without the ability to acknowledge unknown knowledge.
+
+
+\paragraph{Reproducibility Statement.} 
+In the main text, we highlight the essential techniques to build our model for both the first stage (Section~\ref{sec:sparse_view_gen}) and the second stage (Section~\ref{sec:spase_view_recon}).
+We discuss how our data is created and curated in Section~\ref{sec:method}.
+
+We have detailed all the optimizer hyper-parameters and model dimensions.
+
+We also attach the IDs of our curated data in Supplementary Materials to further 
+facilitate the reproduction.
+
+
+
+
+
+
+
+

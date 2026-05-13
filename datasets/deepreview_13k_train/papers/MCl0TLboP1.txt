@@ -1,0 +1,612 @@
+\title{Improving Offline RL by Blending Heuristics}
+
+\begin{abstract}
+We propose \textbf{H}e\textbf{u}ristic \textbf{Bl}ending (\algo), a simple performance-improving technique for a broad class of offline RL algorithms based on value bootstrapping. 
+\algo modifies the Bellman operators used in these algorithms, partially replacing the bootstrapped values with heuristic ones that are estimated with Monte-Carlo returns. %with Monte-Carlo returns as heuristics.
+For trajectories with higher returns, \algo relies more on the heuristic values and less on bootstrapping; otherwise, it leans more heavily on bootstrapping.
+\algo is very easy to combine with many existing offline RL implementations by relabeling the offline datasets with adjusted rewards and discount factors.
+We derive a theory that explains \algo's effect on offline RL as reducing offline RL's complexity and thus increasing its finite-sample performance. 
+Furthermore, we empirically demonstrate that \algo consistently improves the policy quality of four state-of-the-art bootstrapping-based offline RL algorithms (ATAC, CQL, TD3+BC, and IQL), by 9\% on average over 27 datasets of the D4RL and Meta-World benchmarks.  
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Offline reinforcement learning (RL) aims to learn decision-making strategies from static logged datasets~\citep{lange2012batch,fujimoto2019off}. 
+It has attracted increased interest in recent years, because the availability of large offline datasets are on the rise and online exploration required by alternative approaches such as online RL~\citep{sutton2018reinforcement} remains expensive and risky in many real-world applications, such as robotics and healthcare.
+
+\begin{wrapfigure}{r}{0.4\textwidth}
+\begin{tikzpicture}[->,>={Stealth[scale=1.3]},node distance=4.0cm,
+thick,main node/.style={rectangle,font=\sffamily\small}]
+\node[main node] (1) {
+\begin{minipage}{0.96\linewidth}
+\begin{algorithm}[H]
+\caption*{\centering Base offline RL method}
+\begin{algorithmic}[1] 
+\STATE {\bfseries Input:} data $\mathbbm{D}=\{(s,a,s',r,\gamma)\}$
+\FOR{each iteration}
+\STATE Sample $(s,a,r,s',\gamma) \in \mathbbm{D}$
+\STATE DP update using $(s,a,r,s',\gamma)$%Dynamic Programming update using $(s,a,r,s',\gamma)$
+\ENDFOR
+\end{algorithmic}    
+\end{algorithm}
+\end{minipage}
+};
+\node[main node] (2) [below of=1] {
+\begin{minipage}{0.96\linewidth}
+\begin{algorithm}[H]
+\caption*{\centering \textbf{\textcolor{ballblue}{\algo}} + offline RL}
+\begin{algorithmic}[1]
+\STATE {\bfseries Input:} data $\mathbbm{D}=\{(s,a,s',r,\gamma)\}$
+\STATE {\color{ballblue}$\mathbbm{\tilde{D}} \gets$ Relabel $\mathbbm{D}$ with modified rewards $\tilde{r}$ \& discounts $\tilde{\gamma}$ using heuristics $h$}
+\FOR{each iteration}
+\STATE Sample $(s,a,\textcolor{ballblue}{\tilde{r}},s',\textcolor{ballblue}{\tilde{\gamma}}) \in \textcolor{ballblue}{\mathbbm{\tilde{D}}}$
+\STATE DP update using $(s,a,\textcolor{ballblue}{\tilde{r}},s',\textcolor{ballblue}{\tilde{\gamma}})$%Dynamic Programming update using $(s,a,r,s',\gamma)$
+\ENDFOR 
+\end{algorithmic}    
+\end{algorithm}
+\end{minipage}
+};
+
+\path[every node/.style={font=\sffamily\small}]
+(1.south) edge [->, shorten >=2cm] (2.center);
+
+\end{tikzpicture}
+\caption{\algo and offline RL} 
+    \label{fig:oneline}
+\end{wrapfigure}
+
+\begin{comment}
+\sinong{I updated the wording here. Previously it feels like model-free offline RL is better than model-based ones. }
+\end{comment}
+Among offline RL algorithms, we focus on model-free approaches using dynamic programming with value bootstrapping. These algorithms, including the commonly used CQL~\citep{kumar2020conservative}, TD3+BC~\citep{fujimoto2021minimalist}, IQL~\citep{kostrikov2021offline}, and ATAC~\citep{cheng2022adversarially}, have demonstrated strong performance in offline RL benchmarks~\citep{fu2020d4rl,gulcehre2020rl}.
+They follow the actor-critic scheme and adopt the principle of pessimism in the face of uncertainty to optimize an agent via a performance lower bound that penalizes taking unfamiliar actions.
+Despite their strengths, 
+existing model-free offline RL methods also have a major weakness: they do not perform \emph{consistently}.
+These performance fluctuations stand in the way of applying even the strongest offline RL approaches to practical problems.
+
+
+In this work, we propose \textbf{H}e\textbf{u}ristic \textbf{Bl}ending (\algo), an easy-to-implement technique to address offline RL's performance inconsistency. \algo is an ``aide'' that operates \emph{in combination with} a bootstrapping-based offline RL algorithm by using heuristic state value estimates\footnote{In this work, a heuristic is a mapping from states to $\mathbb{R}$~\citep{kolobov2012}. See \Cref{sec:dp-bootsrapping}.} to modify the rewards and discounts in the dataset that the base offline RL algorithm consumes. Effectively, this modification blends heuristic values into dynamic programming to partially replace bootstrapping. 
+Relying less on bootstrapping alleviates potential issues that bootstrapping causes and helps achieve more stable performance.
+Combining \algo with an offline RL method is very simple, as summarized in \Cref{fig:oneline}, and amounts to running this method on a version of the original dataset with modified rewards $\tilde{r}$ and discounts $\tilde{\gamma}$:
+$
+\tilde{r} = r + \gamma \lambda h$ and $\tilde{\gamma} = \gamma(1-\lambda)$,
+where $r$ is blended with a heuristic $h$, $\tilde{\gamma}$ is the reduced discount, and $\lambda\in[0,1]$ is a blending factor representing the degree of trust towards the heuristic. 
+We propose to set $h$ as the Monte-Carlo returns of the trajectories in the dataset for offline RL. 
+Such heuristics are efficient and stable to compute, unlike bootstrapped $Q$-value estimates. 
+The blending factor $\lambda$ in \algo can be trajectory-dependent. Intuitively, we want $\lambda$ to be large (relying more on the heuristic) at trajectories where the behavior policy that collected the dataset performs well, and small (relying more on bootstrapped $Q$-values) otherwise. 
+We provide three practical designs for $\lambda$; they use only one hyperparameter, which, empirically, does not need active tuning. 
+
+
+We analyze \algo's performance both theoretically and empirically. 
+Theoretically, we provide a finite-sample performance bound for a tabular offline RL with \algo by framing it as solving a reshaped Markov decision process (MDP). 
+To our knowledge, this is the first theoretical result for RL with heuristics in the \emph{offline} setting.
+Our analysis shows that \algo performs a bias-regret trade-off. 
+On the one hand, solving the reshaped MDP with a smaller discount factor requires less bootstrapping and is relatively ``easier'', so the regret is smaller. 
+On the other hand, \algo induces bias due to reshaping the original MDP. 
+Nonetheless, we demonstrate that the bias can be controlled by setting the $\lambda$ factor based on the above intuition, allowing \algo to improve the performance of the base offline RL method.
+
+Empirically, we run \algo with the four aforementioned offline RL methods -- CQL, TD3+BC, 
+IQL, and
+ATAC -- and show that enhancing these SoTA algorithms with \algo can improve their performance by $9\%$ on average across  27 datasets of D4RL~\citep{fu2020d4rl} and Meta-World~\citep{yu2020meta}. 
+Notably, in some datasets where the base offline RL method shows inconsistent performance, \algo can achieve more than 50\% relative performance improvement.  
+
+
+
+
+
+\section{Related Work}
+
+\textbf{Bootstrapping-based offline RL $\,$}
+A fundamental challenge of bootstrapping-based offline RL is the \emph{deadly triad}~\citep{sutton2018reinforcement}: a negative interference between
+\begin{enumerate*}[label={\textit{\arabic*)}}]
+    \item off-policy learning from data with limited support, 
+    \item value bootstrapping, and
+    \item the function approximator.
+\end{enumerate*}
+Modern offline RL algorithms such as CQL~\citep{kumar2020conservative}, TD3+BC~\citep{fujimoto2021minimalist}, IQL~\citep{kostrikov2021offline}, ATAC~\citep{cheng2022adversarially}, 
+PEVI~\citep{jin2021pessimism},
+MOReL~\citep{kidambi2020morel},
+and VI-LCB~\citep{rashidinejad2021bridging} employ pessimism to discourage the agent from taking actions unsupported by the data, which has proved to be an effective strategy to address the  issue of limited support. However, they still suffer from a combination of errors in bootstrapping and function approximation. \algo aims to address this with stable-to-compute Monte-Carlo return heuristics and thus is a \emph{complementary} technique to pessimism. 
+\textbf{RL by blending multi-step returns $\,$}
+The idea of blending multi-step Monte-Carlo returns into the bootstrapping operator to reduce the degree of bootstrapping and thereby increase its performance has a long history in RL. 
+This technique has been widely used in temporal difference methods~\citep{sutton2018reinforcement}, where the blending is achieved by modifying gradient updates~\citep{seijen2014true,sutton2016emphatic,jiang2021emphatic} and reweighting observations~\citep{imani2018off}. 
+It has also been applied to improve Q function estimation~\citep{wright2013exploiting}, online exploration~\citep{ostrovski2017count,bellemare2016unifying} and the sensitivity to model misspecification~\citep{zanette2021cautiously}, and is especially effective for sparse-reward problems~\citet{wilcox2022monte}. 
+In contrast to most of the aforementioned works, which focus on blending Monte-Carlo returns as part of an RL algorithm's \emph{online} operation, \algo is designed for the \emph{offline} setting and acts as a simple data relabeling step.
+Recently, \citet{wilcox2022monte} have also proposed the idea of data relabeling, but their design takes a max of multi-step returns and bootstrapped values and as a result tends to overestimate $Q$-functions. We observed this to be detrimental when data has a limited support.
+
+
+\textbf{RL with heuristics $\,$}
+More generally, \algo relates to the framework of blending heuristics (which might be estimating quantities other than a policy's value) into bootstrapping~\citep{cheng2021heuristic,hoeller2020deep,bejjani2018planning,zhong2013value}.
+However, the existing results focus only on the online case and do not conclusively show whether blending heuristics is valid in the offline case. 
+For instance, the theoretical analysis in~\citet{cheng2021heuristic} breaks when applied to the offline setting as we will demonstrate in Section~\ref{sec:theory}. 
+The major difference is that online approaches rely heavily on collecting new data with the learned policy, which is impossible in the offline case. 
+In this paper, we employ a novel analysis technique to demonstrate that blending heuristics is effective even in offline RL.
+To the best of our knowledge, ours is the first work to extend heuristic blending to the offline setting with both rigorous theoretical analysis and empirical results demonstrating performance improvement.
+One key insight, inspired by transition-dependent discount factor from \cite{white2017unifying}, is the adoption of a \emph{trajectory-dependent} $\lambda$ blending factor, which is both a performance-improving design as well as a novel analysis technicality. %Our trajectory-dependent blending is inspired by unifying task specification in online RL~\citep{white2017unifying}, where the discount factor is transition-dependent.
+
+\textbf{Discount regularization $\,$} 
+\algo modifies the reward with a heuristic \emph{and} reduces the discount. 
+Discount regularization, on the other hand, is a complexity reduction technique that reduces \emph{only} the discount. The idea of simplifying decision-making problems by reducing discount factors can be traced back to Blackwell optimality in the known MDP setting~\citep{blackwell1962discrete}.  
+Most existing results on discount regularization \citep{petrik2008biasing,jiang2015dependence} study the MDP setting or the online RL setting~\citep{van2019using}.
+Recently, \citet{hu2022role} has shown that discount regularization can also reduce the complexity of offline RL and serve as an extra source of pessimism. 
+However, as we will show, simply reducing the discount without the compensation of blending heuristics in the offline setting can be excessively pessimistic and introduce large bias that hurts performance.
+In Section~\ref{sec:d4rl}, we rigorously analyze this bias and empirically demonstrate the advantages of \algo over discount regularization.
+
+
+
+
+
+\section{Background}
+
+In this section, we define the problem setup of offline RL (Section~\ref{sec:offline-rl}), review dynamic programming with value bootstrapping, and briefly survey methods using heuristics (Section~\ref{sec:dp-bootsrapping}).  
+
+\subsection{Offline RL and Notation}
+\label{sec:offline-rl}
+We consider offline RL in a Markov decision process (MDP) $\mM = (\mS, \mA, \mP, r, \gamma)$, where $\mS$ denotes the state space, $\mA$ denotes the action space, $\mP$ denotes the transition function, $r: \mS \times \mA \to [0,1]$ denotes the reward function, and $\gamma\in [0,1)$ denotes the discount factor. 
+A decision-making \emph{policy}
+$\pi$ is a mapping from $\mS$ to $\mA$, and its \emph{value function} is defined as
+$
+V^{\pi}(s) = \EE[\sum_{t=0}^\infty\gamma^t r(s_t,a_t) |s_0=s, a_t\sim\pi(\cdot|s_t)]$. 
+In addition, we define $Q^\pi(s,a) \coloneqq r(s,a) + \gamma \EE_{s'\sim\mP|s,a}[V^\pi(s')]$ as its state-action value function (i.e., Q function).
+We use $V^*$ to denote the value function of the optimal policy $\pi^*$, which is our performance target. 
+In addition, we introduce several definitions of distributions. 
+First, we define the average state distribution of a policy $\pi$ starting from an initial state $s_0$ as $d^\pi(s,a; s_0) := (1-\gamma)\sum_{t=0}^\infty  \gamma^td_t^\pi(s,a; s_0) $, where $d_t^\pi(s,a;s_0)$ is the state-action distribution at time $t$ generated by running policy $\pi$ from an initial state $s_0$. 
+We assume that the MDP starts with a fixed initial state distribution $d_0$. 
+With slight abuse of notation, we define the average state distribution starting from $d_0$ as $d^\pi(s,a):=d^\pi(s,a; d_0)$, and $d^\pi(s,a,s') :=  d^\pi(s,a) \mathcal{P}(s'|s,a)$.
+
+The objective of offline RL is to learn a well-performing policy $\hat{\pi}$ while using a pre-collected offline dataset $\mathbbm{D}$. 
+The agent has no knowledge of the MDP $\mM$ except information contained in $\mathbbm{D}$, and it cannot perform online interactions with environment to collect more data.
+We assume $\mathbbm{D} := \{\tau\}$ contains multiple trajectories collected by a \emph{behavior policy}, where each $\tau=\{(s_t,a_t,r_t)\}_{t=1}^{T_\tau}$ denotes a trajectory with length $T_\tau$. 
+Suppose these trajectories contain $N$ transition tuples in total. With abuse of notation, we also write $\mathbbm{D} := \{(s,a,s', r, \gamma)\}$, where states $s$ and action $a$ follow a distribution $\mu(s,a)$ induced by the behavior policy, $s'$ is the state after each transition, $r$ is the reward at $s,a$, and $\gamma$ is the discount factor of the MDP. 
+Note that the value of discount $\gamma$ is the same in each tuple. 
+We use $\Omega$ to denote the support of $\mu(s,a)$. 
+\emph{We do not make the full support assumption, in the sense that the dataset $\mathbbm{D}$ may not contain a tuple for every $s,a,s'$ transition in the MDP.}
+
+
+\subsection{Dynamic Programming with Bootstrapping and Heuristics}
+\label{sec:dp-bootsrapping}
+\textbf{Bootstrapping $\,$} Many offline RL methods leverage dynamic programming with value bootstrapping. 
+Given a policy $\pi$, we recall $Q^{\pi}$ and $V^{\pi}$ satisfy the Bellman equation:
+\begin{equation}
+    \label{eq:dpe}
+    Q^{\pi}(s,a) = r(s,a) + \overbrace{\gamma \EE_{s' \sim \mP (\cdot|s,a)}[ V^{\pi}(s') ]}^{\textnormal{(bootstrapping)}}.
+\end{equation}
+These bootstrapping-based methods compute $Q^{\pi}(s,a)$ using an approximated version of \eqref{eq:dpe}: given sampled tuples $(s, a, s', \gamma, r)$, such methods minimize the difference between the two sides of \eqref{eq:dpe} with both $Q^\pi$ and $V^\pi$ replaced with function approximators~\footnote{Q-learning-based offline RL in \citet{kostrikov2021offline} uses a dynamic programming equation similar to \eqref{eq:dpe} but with $V^\pi(s) = \argmax_{a\in\mathcal{A}}Q^{\pi}(s,a)$.}.
+With limited offline data, learning the function approximator using bootstrapping can be challenging and yields inconsistent performance across different datasets~\citep{dulac2021challenges,sutton2018reinforcement,kumar2019stabilizing}, as we will also later see in the experiment section (\Cref{sec:experiment}).
+
+\textbf{Heuristics $\,$}
+A \emph{heuristic} is a value function $h: \mS \rightarrow \mathbb{R}$ calculated using domain knowledge, Monte-Carlo averages, or pre-training. 
+Heuristics are widely used in online RL, planning, and control to improve the performance of decision-making~\citep{kolobov2010mdp,zhong2013value,bejjani2018planning,hoeller2020deep,cheng2021heuristic}. 
+In this paper, we focus on the offline setting, and consider heuristics $h$ that approximate the value function of the behavior policy.
+They can be estimated from $\mathbbm{D}$ via Monte-Carlo methods.
+
+
+
+
+\section{\algofull (\algo)}
+
+\label{sec:hubo}
+In this section we describe our main contribution --- \textbf{H}e\textbf{u}ristic \textbf{Bl}ending (\algo), an algorithm that works in combination with bootstrapping-based offline RL methods and improves their performance.
+\subsection{Motivation}
+\begin{wrapfigure}{r}{0.45\textwidth}
+\centering
+\begin{minipage}{\linewidth}
+\begin{algorithm}[H]
+\caption{\algo + Offline RL} 
+		\label{alg:main}
+        \centering
+		\begin{algorithmic}[1]
+			\STATE {\bfseries Input:} Dataset $\mathbbm{D}=\curly{(s,a,s',r,\gamma)}$
+			\STATE Compute $h_t$ for each trajectory in $\mathbbm{D}$
+			\STATE Compute $\lambda_t$ for each trajectory in $\mathbbm{D}$
+			\STATE Relabel $r$ \& $\gamma$ by $h_t$ and $\lambda_t$ as $\tilde{r}$ and $\tilde{\gamma}$ and create $\tilde{\mathbbm{D}}=\curly{(s,a,s',\tilde{r},\tilde{\gamma})}$ 
+            \STATE $\hpi \gets$ Offline RL on $\tilde{\mathbbm{D}}$
+		\end{algorithmic}
+	\end{algorithm}
+\end{minipage}
+\end{wrapfigure}
+
+\algo uses a heuristic computed as the Monte-Carlo return of the behavior policy in the training dataset $\mathbbm{D}$ to improve offline RL.
+It reduces an offline RL algorithm's bootstrapping at trajectories where the behavior policy performs well, i.e., where the value of the behavior policy (i.e. the heuristic value) is high. 
+With less amount of bootstrapping, it mitigates bootstrapping-induced issues on convergence stability and performance.
+In addition, since the extent of blending between the heuristic and bootstrapping is trajectory-dependent, \algo introduces only limited performance bias to the base algorithm, and therefore can improve its performance overall.
+\subsection{Algorithm}
+\label{sec:algorithm}
+
+As summarized in Algorithm~\ref{alg:main}, \algo is easy to implement: first, relabel a base offline RL algorithm's training dataset $\mathbbm{D}=\curly{(s,a,s',r,\gamma)}$ with modified rewards $\tilde{r}$ and discount factors $\tilde{\gamma}$, creating a new dataset $\tilde{\mathbbm{D}}:=\curly{(s,a,s',\tilde{r},\tilde{\gamma})}$; next, run the base algorithm  on  $\tilde{\mathbbm{D}}$. 
+The data relabeling is done in three steps:
+
+\textbf{Step 0:} As a preparation step, we convert the data tuples in $\mathbbm{D}$ back to trajectories like $\tau = \{(s_t,a_t, r_t)\}_{t=1}^{T_\tau}$. 
+For the next two steps, we work on data trajectories instead of data tuples to compute heuristics and blending factors. 
+
+\textbf{Step 1: Computing heuristic $h_t$ $\,$}
+We compute heuristics by Monte-Carlo returns.
+For each $\tau =\{(s_t,a_t, r_t)\}_{t=1}^{T_\tau} \in \mathbbm{D}$, we calculate the heuristics as\footnote{In our implementation, we also train a value function approximator to bootstrap at the \emph{end} of a trajectory if the trajectory ends due to timeout as opposed to reaching the end of the problem horizon or a terminal state. }  $h_t=\sum_{k=t}^{T_{\tau}}\gamma^{k-t}r_{k}$ and update the data trajectory as $\tau \gets \curly{(s_t,a_t, r_t, h_t)}_{t=1}^{T_\tau}$.
+
+
+\textbf{Step 2: Computing blending factor  $\lambda_t$ $\,$}
+We append a scalar $\lambda_t = \lambda(\tau) \in[0,1]$ at each time point $t$ of each trajectory as the blending factor, leading to $\tau \gets \{(s_t,a_t, r_t,h_t, \lambda_t)\}_{t=1}^{T_\tau}$.
+$\lambda_t$ indicates the confidence in the heuristics on the trajectory. 
+Intuitively, $\lambda_t$ decides the contribution of heuristics over bootstrapped values in dynamic programming to update the $Q$-function. 
+We desire $\lambda_t$ to be closer to 1 when the heuristic value $h_t$ is higher (i.e., at states where the heuristic is closer to the optimal $Q$-value) to make offline RL rely more on the heuristic, and $\lambda_t$ closer to zero when heuristic is lower to make offline RL to use more bootstrapping. 
+We experiment with three different designs of $\lambda(\tau)$:
+\begin{itemize}[leftmargin=*]
+    \item \emph{Constant}: As a baseline, we consider $\lambda(\tau) =\alpha\in[0,1]$ for all $s$. 
+    We show that, despite forcing the same heuristic weight for every state, this formulation already provides performance improvements.
+    \item \emph{Sigmoid}: As an alternative, we use the sigmoid function to construct a trajectory-dependent blending function $\lambda(\tau) = \alpha\sigma(\sum_{t=1}^{T_\tau}h(s_t)/T_{\tau})$, where $\alpha\in[0,1]$ is a tunable constant and $\sigma$ is the sigmoid function. 
+    Thus, $\lambda(\tau)$ varies with the performance of the behavior policy over data. 
+    \item \emph{Rank}: Similar to the Sigmoid labeling function, we provide a rank labeling function $\lambda(\tau) = \alpha \sum_{\tau' \in \mathbbm{D}} \mathbbm{1}_{\bar{h}(\tau') \leq \bar{h}(\tau)}/n$
+    where $n$ is the number of trajectories in $\mathbbm{D}$, and $\bar{h}(\tau) = \frac{1}{T}\sum_{h_t\in\tau} h_t$. 
+\end{itemize}
+
+\textbf{Step 3: Relabeling $r$ and $\gamma$ $\,$} 
+Finally, we relabel the reward as $\tilde{r}$ and the discount factor as $\tilde{\gamma}$ in each tuple of $\mathbbm{D}$.
+To this end, we first convert the updated data trajectories $\{  \{(s_t,a_t, r_t,h_t, \lambda_t)\}_{t=1}^{T_\tau}\}$ back into data tuples $\{(s,a,s',r,\gamma,h',\lambda')\}$,
+where $h'$ and $\lambda'$ denote the next-step heuristic and blending factor.
+Then, for each data tuple, we compute
+\begin{align} \label{eq:hubo rule}
+\tilde{r} = r + \gamma \lambda' h' \textnormal{\qquad and \qquad} \tilde{\gamma} = \gamma(1-\lambda'),
+\end{align}
+to form a new dataset $\tilde{\mathbbm{D}} \coloneqq\curly{(s,a,s',\tilde{r},\tilde{\gamma})}$. 
+Intuitively, one can interpret $\tilde{r}$ as injecting a heuristic-dependent quantity $\gamma \lambda' h'$ into the original reward, and $\tilde{\gamma}$ as reducing bootstrapping by shrinking the original discount factor by a factor of $1-\lambda'$.
+We formally justify the design of $\tilde{r}$ and $\tilde{\gamma}$ in Section~\ref{sec:theory}.
+
+
+
+
+
+
+
+
+\section{Understanding \algo}
+
+\label{sec:theory}
+
+In this section, we take a deeper look into how \algo works. 
+At a high level, our theoretical analysis explains that the modification made by \algo introduces a trade-off between bias and regret (which is similar to the variance of policy learning) into the base offline RL algorithm. While an important part of our analysis is for tabular settings (\Cref{sec:upperbound}), we believe it still provides valuable intuitions as to why reshaping of rewards and discounts per \eqref{eq:hubo rule} gives a performance boost to state-of-the-art offline RL algorithms in the continuous-state-space benchmarks in Section~\ref{sec:experiment}. 
+
+\subsection{\algo as MDP Reshaping}
+\label{sec:mdp-shaped}
+We analyze \algo by viewing it as solving a reshaped MDP $\tmM := (\mS, \mA, \mP, \tir, \tgamma)$ constructed by blending heuristics into the original MDP.
+To this end, we make a simplification by assuming that both the heuristic and blending factor are functions of states. Specifically, let   $\Omega$ denote the support of the data distribution; we suppose that some functions $h(\cdot):\Omega \to \mathbbm{R}$ and $\lambda(\cdot):\Omega \to [0,1]$ are given to \algo. 
+For analysis, we extend them to out-of-$\Omega$ states as below:
+\begin{align}\label{eq:extended h and lambda}
+    h(s)   = \begin{cases}
+    h(s) &\textnormal{ for }s\in\Omega
+    \\ 0 &\textnormal{ otherwise}
+\end{cases}
+\,\quad
+\textnormal{and }
+\quad
+\lambda(s,s') =  
+    \begin{cases}        
+        \lambda(s') &\text{for } s,s' \in \Omega  \\
+        0 & \text{otherwise}
+    \end{cases}
+\end{align}
+We note that this extension is only for the purpose of analysis, since \algo never uses the values $h(\cdot)$ and $\lambda(\cdot)$ outside $\Omega$; the given $h$ on out-of-$\Omega$ can have any value and the following theorems still hold.
+
+We define the reshaped MDP $\tmM$ with redefined reward function and discount factor as
+$\tir(s,a) := r(s, a) + \gamma \EE_{s' \sim \mP(\cdot|s,a)} \big[ \lambda(s,s') h(s') \big] \textnormal{, and } \tgamma(s,s'):= \gamma(1- \lambda(s,s'))$
+respectively. 
+Note that we blend the original reward function with the expected heuristic and blending factor while adjusting the original discount factor correspondingly.
+The extent of blending is determined by the function $\lambda(\cdot)$. 
+Notice that this reshaped MDP has a transition-dependent\footnote{A special case of trajectory-dependent discounts.} discount factor $\tilde{\gamma}(s,s')$ which is compatible with generic unifying task specification of \citep{white2017unifying}. This novel definition of transition-dependent discount factor is a key analysis technique to show that blending heuristics is effective in the \emph{offline} setting.
+
+\textbf{Reshaped Dynamic Programming $\,$}
+When solving this reshaped MDP by dynamic programming, the Bellman equation changes from \eqref{eq:dpe} accordingly into 
+\begin{align}
+    \label{eq:shaped-dpe}
+    \begin{split}
+    \tQ^{\pi}(s,a) &= \tilde{r}(s,a) + \EE_{{s' \sim \mP (\cdot|s,a)}}[\tilde{\gamma}(s,s')\tV^\pi(s')] \\
+    &= r(s,a) + \gamma \overbrace{\EE_{s' \sim \mP (\cdot|s,a)}[ (1-\lambda(s,s'))\tV^{\pi}(s') ]}^{\textnormal{bootstrapping}} + \gamma \overbrace{\EE_{s' \sim \mP (\cdot|s,a)}[  \lambda(s,s')h(s') ]}^{\textnormal{heuristic}}.
+     \end{split}
+\end{align}
+Here $\tQ^{\pi}$ denotes the $Q$-function of policy $\pi$ in $\tmM$, and $\tV^{\pi}$ denotes $\pi$'s value function. 
+Compared to the original Bellman equation \eqref{eq:dpe}, it can be seen that $\lambda(\cdot)$ blends the heuristic with bootstrapping: the bigger $\lambda$'s values, the more bootstrapping is replaced by the heuristic.
+The effect of solving \algo's reshaped MDP $\tmM$ is twofold. 
+On the one hand, $\tmM$ is different from the original MDP $\mM$: the optimal policy for $\tmM$ may not be optimal for $\mM$, so solving for $\tmM$ could potentially lead to performance bias.
+One the other hand, $\tmM$ has a smaller discount factor and thus is easier to solve than $\mM$, as the agent needs to plan for a smaller horizon.
+Therefore, we can think of applying \algo to offline RL problems as performing a bias-variance trade-off, which reduces the learning variance due to bootstrapping at the cost of the bias due to using a suboptimal heuristic.
+We will explain this more concretely next.
+
+\subsection{Bias-Regret Decomposition}
+\label{sec:bias-regret}
+
+The insight that \algo reshapes the Bellman equation that the offline RL algorithm uses allows us to characterize \algo's effects on policy learning. 
+Namely, we use the modified Bellman equation from \eqref{eq:shaped-dpe} to decompose the performance of the learned policy into bias and regret terms. 
+
+\begin{theorem}
+\label{thm:bias-regret}
+For any $h:\Omega \to \mathbbm{R}$,  
+$\lambda: \Omega  \to[0,1]$, and policy $\pi$, with $V^*$ as the value function of the optimal policy, it holds that
+$
+\smash{V^*(d_0)-V^{\pi}(d_0) = \textnormal{Bias}(\pi, h, \lambda) + \textnormal{Regret}(\pi, h, \lambda)}
+$,
+where
+\alis{
+\textnormal{Bias}(\pi, h, \lambda)&:= 
+ \frac{\gamma}{1-\gamma} \EE_{(s,a,s')\sim d^{\pi^*}}[  \lambda(s')( \tilde{V}^{\pi^*}(s') - h(s') ) | s, s' \in \Omega ]  
+\\ \textnormal{Regret}(\pi,  h, \lambda)&:= 
+         \tilde{V}^{\pi^*}(d_0) - \tilde{V}^{{\pi}}(d_0) + \frac{\gamma}{1-\gamma}\EE_{(s,a,s')\sim d^\pi}[\lambda(s') ( h(s') - \tilde{V}^{{\pi}}(s')) | s, s'\in\Omega ].
+         }
+\end{theorem}
+
+The performance of $\pi$ depends on both bias and regret. 
+The bias term describes the discrepancy caused by solving the reshaped MDP with $\lambda(\cdot)$.
+When $\lambda(s') = 0$, the bias becomes zero.
+The regret term describes the performance of the learned policy in the reshaped MDP. 
+Intuitively, at states whose successors have bigger $\lambda(s')$ values, the reshaped MDP has a smaller discount factor and thus is easier to solve, which leads to smaller regret (i.e., smaller values for $\tilde{V}^{\pi^*}(d_0) - \tilde{V}^{\hat{\pi}}(d_0)$).   
+Therefore, solving a \algo-reshaped MDP induces a bias term but may generate a smaller regret.
+
+\textbf{Remark $\,$} The critical difference -- and novelty -- of Theorem~\ref{thm:bias-regret} compared to existing theoretical results for RL with heuristics in the offline setting is that both the bias and regret in Theorem~\ref{thm:bias-regret} depend only on states \emph{in the data distribution support $\Omega$}. 
+This is crucial, because in the offline setting we have no access to observations beyond $\Omega$. 
+In contrast, if in the preceding analysis we replace Theorem~\ref{thm:bias-regret} by, for example, Lemma A.1 from \citet{cheng2021heuristic} with a constant $\lambda$, we will get a performance decomposition 
+$
+V^*(d_0)-V^{\pi}(d_0) = (V^*(d_0) - \tV^{*}(d_0))+ \frac{\gamma\lambda}{1-\gamma} \EE_{s,a\sim d^{\pi}}\EE_{s'|s,a} [h(s') - \tilde{V}^*(s')] \\
+ + (1-\lambda)(\tV^*(d_0) - \tV^{\pi}(d_0)) + \frac{\lambda}{1-\gamma} (\tilde{V}^*(d^{\pi}) - \tilde{V}^{\pi}(d^\pi)).
+$
+The decomposition, however, suggests that the out-of-$\Omega$ values of $\lambda(s)$ or $h(s)$ are important to the performance of \algo. 
+
+\subsection{Finite-Sample Analysis for Bias and Regret}
+\label{sec:upperbound}
+
+The finite-sample analysis of policy learning that we provide next illustrates  more concretely how \algo trades off bias and regret.
+Our analysis uses offline value iteration with lower confidence bound (VI-LCB)~\citep{rashidinejad2021bridging} as the base offline RL method.
+Following its original convention, we make some technical simplifications to make the presentation cleaner. 
+Specifically, we consider a tabular setting with $\lambda(s)=\alpha \in [0,1]$ for $s\in\Omega$ as a constant value, which can be interpreted as the quality of the behavior policy averaged across states. 
+Note that although $\lambda(s) = \alpha$ is a constant on $\Omega$, the reshaped MDP is still defined by $\lambda(s,s')$ in \eqref{eq:extended h and lambda} (i.e., $\lambda(s,s')=\alpha$ if $s,s'\in\Omega$ and zero otherwise).
+
+ 
+Theorem~\ref{thm:bound} summarizes our finite-sample results.
+\begin{theorem}
+    \label{thm:bound}
+    Under the setup described above, assume that the heuristic $h(\cdot)$ satisfies $h(s) = V^{\mu}(s)$ for any $s\in \Omega$.
+    Then the bias and the regret in Theorem~\ref{thm:bias-regret} are bounded by
+    \begin{small}
+    \alis{
+\textnormal{Bias}(\hpi, \lambda) &\leq \frac{\gamma\lambda }{1-\gamma} \EE_{(s,a,s')\sim d^{\pi^*}}[ V^*(s')- V^{\mu}(s')  | s, s' \in \Omega ], 
+\\
+  \EE_{\mathbbm{D}}[\textnormal{Regret}(\hpi, \lambda)]  &\lesssim \min\left( V_{max}, 
+ \sqrt{\frac{ V_{max}^2 (1-\gamma)\abs{\mS}}{N(1-\gamma(1-\lambda))^4}}
+ \left( \sqrt{\max_{s,a}\frac{ d^{\pi^*}(s,a)}{\mu(s,a)}} 
+ + \frac{\gamma\lambda}{1-\gamma} \sqrt{\max_{(s,a)\in\Omega} \frac{1}{\mu(s,a)}}
+ \right) \right),
+ }  
+\end{small}
+where $V_{max}$ denotes a constant upper bound for the value function. 
+\end{theorem}
+For the bias bound, the assumption $h(s) = V^{\mu}(s) $ for any $s\in \Omega$ is made for the ease of presentation. 
+If it does not hold, an additive error term can be introduced in the bias bound to capture that.
+For the regret bound, $\max_{s,a}\frac{ d^{\pi^*}(s,a;d_{0})}{\mu(s,a)}$ can be infinite, whereby the best regret bound is just $V_{max}$. 
+But when it is bounded as assumed by existing works~\citep{rashidinejad2021bridging}, our results demonstrate how $N$, $\gamma$ and $\lambda$ affect the regret bound. 
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{0.4\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{support/d4rl_bar_rebuttal_ATAC.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.4\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{support/d4rl_bar_rebuttal_CQL.pdf}
+    \end{subfigure}
+    \begin{subfigure}{0.4\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{support/d4rl_bar_rebuttal_IQL.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.4\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{support/d4rl_bar_rebuttal_TD3+BC.pdf}
+    \end{subfigure}
+    \caption{Relative improvement of \algo with rank blending on 9 D4RL datasets.} 
+        \label{fig:d4rl_all}
+\end{figure}
+
+The implications of Theorem~\ref{thm:bound} are threefold. 
+First of all, it provides a finite-sample performance guarantee for \algo with VI-LCB under the tabular setting.
+Compared with the performance bound of the original VI-LCB,
+$\min\left( V_{max},\sqrt{\frac{V_{max}^2 \abs{\mathcal{S}}}{(1-\gamma)^3N }\max_{s,a} \frac{ d^{\pi^*}(s,a)}{\mu(s,a)}
+} \right)$,
+\algo shrinks the discount factor by $1-\lambda$ and thus potentially improves the performance while inducing bias.
+Second, Theorem~\ref{thm:bound} hints at the source of \algo's bias and regret of \algo. 
+The bias is related to the the performance of the behavior (data-collection) policy, characterized by $V^*(s) - V^{\mu}(s)$. 
+In the extreme case of data being collected by an expert policy, the bias induced by \algo is 0.
+The regret is affected by $\frac{ d^{\pi^*}(s,a)}{\mu(s,a)}$, which describes the deviation of the optimal policy from the data distribution.
+Finally, Theorem~\ref{thm:bound} also provides guidance on how to construct a blending factor function $\lambda(\cdot)$. 
+To reduce bias, $\lambda(s)$ should be small at states where $V^*(s)-V^{\mu}(s)$ is small.
+To reduce regret, $\lambda(\cdot)$ should be generally large but small at states where the learned policy is likely to deviate from the behavior policy. 
+Therefore, an ideal $\lambda(\cdot)$ should be large when the behavior policy is close to optimal but small when it deviates from the optimal policy. 
+This is consistent with our design principle in Section~\ref{sec:algorithm}. 
+
+\textbf{Extension to Model-based Offline RL} Conceptually, we can implement \algo with model-based offline RL methods by directly relabeling the data, learning the heuristic-modified reward model, and then doing model-based planning with a smaller discount, following \eqref{eq:hubo rule}. 
+Theorem~\ref{thm:bias-regret} still applies to model-based algorithms. 
+For Theorem~\ref{thm:bound}, we expect that a similar analysis can be applied to model-based algorithms like MOReL. We defer this direction to future work and focus on improving the stability of a wide range of model-free offline RL methods.
+
+
+
+\section{Experiments}
+
+\label{sec:experiment}
+We study 27 benchmark datasets in D4RL and Meta-World.
+We show that \algo improves the performance of existing offline RL methods by $9\%$ with easy modifications and simple hyperparameter tuning. 
+Remarkably, in some datasets where the base offline RL performs inconsistently or poorly, \algo can achieve more than 50\% performance improvement.  
+When the dataset is simple and the base offline RL is already near-optimal, HUBL does not significantly harm the performance.
+
+\textbf{\algo variants and base offline RL methods $\,$}
+We implement \algo with four state-of-the-art offline RL algorithms as base methods: CQL~\citep{kumar2020conservative}, TD3+BC~\citep{fujimoto2021minimalist}, IQL~\citep{kostrikov2021offline}, and ATAC~\citep{cheng2022adversarially}.
+For each base method, we compare the performance of its original version to its performance with \algo running three different blending strategies discussed in Section~\ref{sec:algorithm}: constant, sigmoid and rank.  
+Thus, we experiment with 16 different methods in total.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{0.4\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{support/mw_bar_rebuttal_ATAC.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.4\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{support/mw_bar_rebuttal_CQL.pdf}
+    \end{subfigure}
+    \begin{subfigure}{0.4\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{support/mw_bar_rebuttal_IQL.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.4\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{support/mw_bar_rebuttal_TD3+BC.pdf}
+    \end{subfigure}
+
+    \caption{Relative improvement of HUBL with rank labeling on MW datasets.}
+    \label{fig:mw}
+\end{figure}
+\textbf{Metrics $\,$} We use relative normalized score improvement, abbreviated as \emph{relative improvement}, as a measure of \algo's performance improvement. 
+Specifically, for a given task and base method, we first compute the normalized score $r_{base}$ achieved by the base method, and then the normalized score $r_{\algo}$ of \algo.
+The relative normalized score improvement is defined as $\frac{r_{\algo}-r_{base}}{\abs{r_{base}}}$.
+
+ 
+
+\textbf{Hyperparameter Tuning $\,$}
+For each dataset, the hyperparameters of the base methods are tuned over six different configurations suggested by the original papers.  
+\algo has one extra hyperparameter, $\alpha$, which is \emph{fixed} for all the datasets but different for each base method.
+Specifically, $\alpha$ is selected from $\curly{0.001, 0.01, 0.1}$ according to the relative improvement averaged over all the datasets. 
+In practice, we notice that a single choice of $\alpha$ around $0.
+
+\subsection{Performance Improvement of \algo}
+\label{sec:d4rl}
+
+The relative improvement of \algo with the rank labeling method is reported in \Cref{fig:d4rl_all} and \Cref{fig:mw}.
+First, despite being simple and needing little hyperparameter tuning, \algo improves the performance of base methods in most settings and only slightly hurts in some expert datasets where base offline RL methods are already performing very well with little space for improvement. 
+Second, there are cases where \algo achieve very significant relative improvement---more than 50\%.
+Such big improvement happens in the datasets where the base method shows inconsistent performance and underperforms other offline RL algorithms. 
+\algo solves this inconsistent performance issue by simply relabeling the data.
+Further, \algo improves performance even on data with few expert trajectories like hopper-med-rep-v2, walker2d-med-rep-v2, and hopper-med-v2, because \algo conducts more bootstrapping and relies less on the heuristic on suboptimal trajectories (see Section~\ref{sec:algorithm}). 
+
+
+
+
+\begin{comment}
+\subsection{Meta-World Experiments}
+\label{sec:mw}
+We also run considered methods on tasks from the Meta-World benchmark.
+ 
+These problems are goal-oriented, which is in contrast to locomotion tasks in the previous D4RL experiments.
+The achieved relative improvement of \algo in the Meta-World experiments are reported in \Cref{fig:mw}. 
+\algo is again able to generally improve the performance of existing offline RL methods. 
+\end{comment}
+
+
+\begin{wraptable}{r}{0.4\linewidth}	
+\centering
+\resizebox{0.4\textwidth}{!}{\begin{tabular}{|c|c|c|c|}	
+\hline	
+&Sigmoid&Rank&Constant	
+\\	
+\hline	
+Wins	
+&30&46&32	
+\\ \hline	
+\end{tabular}}
+\caption{Blending strategy comparison}	
+\label{tab:summary}
+\centering	
+\begin{subtable}{\linewidth}\centering	
+\resizebox{\textwidth}{!}{\begin{tabular}{c|ccc}	
+\hline	
+\textbf{ATAC}&Sigmoid&Rank&Constant	
+\\	
+\hline	
+\makecell{Ablations \\ without $\tilde{r}$}	
+&-0.01&-0.02&-0.02	
+\\ \hline	
+\algo&0.01&0.02&0.01	
+\\ \hline	
+\end{tabular}}	
+\end{subtable}	
+\begin{subtable}{\linewidth}\centering	
+\resizebox{\textwidth}{!}{\begin{tabular}{c|ccc}	
+\hline	
+\textbf{CQL}&Sigmoid&Rank&Constant	
+\\	
+\hline	
+\makecell{Ablations \\ without $\tilde{r}$}
+&0.04&0.04&0.04	
+\\ \hline	
+\algo&0.11&0.16&0.13	
+\\ \hline	
+\end{tabular}}	
+\end{subtable}	
+\begin{subtable}{\linewidth}\centering	
+\resizebox{\textwidth}{!}{\begin{tabular}{c|ccc}	
+\hline	
+\textbf{IQL}&Sigmoid&Rank&Constant	
+\\	
+\hline	
+\makecell{Ablations \\ without $\tilde{r}$}	
+&-0.04&-0.04&-0.07	
+\\ \hline	
+\algo&0.09&0.09&0.06	
+\\ \hline	
+\end{tabular}}	
+\end{subtable}	
+\begin{subtable}{\linewidth}\centering	
+\resizebox{\textwidth}{!}{\begin{tabular}{c|ccc}	
+\hline	
+\textbf{TD3+BC}&Sigmoid&Rank&Constant	
+\\	
+\hline	
+\makecell{Ablations \\ without $\tilde{r}$}	
+&-0.01&-0.03&-0.04	
+\\ \hline	
+\algo	
+&0.06&0.09&0.1	
+\\ \hline	
+\end{tabular}}	
+\end{subtable}	
+\caption{Average relative improvement of ablations without $\tilde{r}$.}
+\label{tab:ablation}
+\end{wraptable}
+\subsection{Ablation Studies}
+
+\textbf{Discount Relabeling $\,$}	
+\algo relabels \emph{both} the reward \emph{and} the discount factor, per \eqref{eq:hubo rule}. 	
+In contrast, existing methods like \citet{hu2022role} suggest that a lower discount factor \emph{alone}, without blending heuristics into rewards, can in general improve offline RL. 	
+To assess the need for modifying both the discount factor and rewards like \eqref{eq:hubo rule}, we consider ablation methods which shrink \emph{only} the discount factor as $\tilde{\gamma}$ \emph{without} $\tilde{r}$. 
+The achieved average relative improvement of these ablations is reported and compared with that of \algo in Table~\ref{tab:ablation}. 	
+\algo consistently outperforms these ablations, which justifies \algo's coordinated modifications in both the reward and the discount factor. 	
+The advantage of \algo is also consistent with what our theoretical analysis predicts. 	
+The considered ablations do not modify the rewards and thus are equivalent to solving 	
+$\tQ^{\pi}(s,a) = r(s,a) + \gamma \EE_{s' \sim \mP (\cdot|s,a)}[ (1-\lambda(s'))\tV^{\pi}(s') ]$.	
+Comparing it with \eqref{eq:dpe}, the solution will be consistently smaller than the true $Q$-function, inducing a pessimistic bias. 
+Crucially, this bias is much more challenging to tackle than the bias induced by \algo, because the former is inevitable even when the data is from an expert policy.
+
+
+\textbf{Comparison of Blending Strategies $\,$}	
+
+We notice that the rank blending outperforms the other two.
+With 27 datasets and 4 base methods, we have 108 cases.
+In Table~\ref{tab:summary} we report the number of cases where a given blending strategy provides the best performance among the three. We can see that rank is favored on average. 
+\algo shows consistent performance improvements in these settings. 
+
+
+
+\section{Conclusion}
+
+In this work, we propose \algo, a method for improving the performance of offline RL methods by blending heuristics with bootstrapping. 
+\algo is easy to implement and is generally applicable to various of offline RL methods. 
+Empirically, we demonstrate the performance improvement of \algo on 27 datasets in D4RL and Meta-World.  
+We also provide a theoretic finite-sample performance bound for \algo, which  sheds lights on \algo's bias-regret trade-off and blending factor designs. 
+
+
+
+
+
+
+

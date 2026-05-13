@@ -1,0 +1,154 @@
+# Autonomous Catheterization with Open-source Simulator and Expert Trajectory
+
+- Decision: Reject
+- Scores: 5, 5, 5
+
+## Abstract
+Endovascular robots have been actively developed in both academia and industry. However, progress toward autonomous catheterization is often hampered by the widespread use of closed-source simulators and physical phantoms. Additionally, the acquisition of large-scale datasets for training machine learning algorithms with endovascular robots is usually infeasible due to expensive medical procedures. In this chapter, we introduce CathSim, the first open-source simulator for endovascular intervention to address these limitations. CathSim emphasizes real-time performance to enable rapid development and testing of learning algorithms. We validate CathSim against the real robot and show that our simulator can successfully mimic the behavior of the real robot. Based on CathSim, we develop a multimodal expert navigation network and demonstrate its effectiveness in downstream endovascular navigation tasks. The intensive experimental results suggest that CathSim has the potential to significantly accelerate research in the autonomous catheterization field.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This manuscript introduces CathSim, an open-source real-time simulator designed for endovascular robots. The authors have also developed a navigation network that utilizes CathSim and performs effectively in downstream navigation tasks for endovascular procedures. CathSim is built on MuJoCo and features a discretized catheter, support for blood simulation, AR/VR applications, and force sensing. The authors claimed that they conducted extensive experiments using CathSim and found that it performs well on these tasks, surpassing other baselines in terms of speed.
+
+### Strengths
+1. The simulator is fully open-source with the code attached. I really appreciate the contribution from the code side.
+2. The simulator seems to be very fast so that it is enough to generate lots of data for training controller or any other components.
+3. The presented ENN (expert navigation network) further proved the effectiveness of the simulator.
+
+### Weaknesses
+1. I was very confused about the presentation. For example, I didn't find the definition of BCA, LCCA.
+2. Since this is a simulator designed specifically for endovascular robots, it will make little sense if the application of it involves modalities that is very inaccessible: for example the image as shown in the first input to the expert navigation network. I would expect real-world images are highly diverse than rendering images that has clean background, unified rendering parameters, and a fixed camera position. I don't think the propose ENN really showed the importance of the work.
+3. I am not sure why the authors skipped AR/VR and blood simulation parts in the experiment section but still claim the contribution of them in the table. I have a feeling that these contributions are not grounded.
+4. My main reservation is the contribution. The manuscript mainly created a new environment based on MuJoCo and only showed the effectiveness of the simulator in simulated tasks with rendered inputs. I need more evidence why the new environment based on an existing simulator is valuable to the community.
+
+### Questions
+See Weaknesses.
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper introduces an open-source simulator, CathSim, designed to generate real-time outputs to facilitate autonomous catheterization.  CathSim is used to generate semantic segmentations of guidewires, joint position, joint velocity, top camera images that are fed into a learning algorithm (CNN+MLP) to provide inputs into a reinforcement learning algorithm (soft actor critic) to predict desired catheter positions (this system is referred to as expert navigation network (ENN)). 
+ENN is evaluated on whether it can learn to imitate expert trajectories (imitation learning) and predict force. Various quantitative and qualitative results are provided:
+
+* Authors demonstrate that force distributions between real robots and CatSim simulation are nearly identically using hypothesis testing (p-value analysis).
+* User study assessing CatSim realism and user satisfaction is provided. 
+* Evaluation of trajectory planning, where two trajectories are compared: the first is generated by   a human expert using CatSim and the second is generated using ENN (automatic). Results show that ENN is competitive to human, using less force, shortest path, least episode length. Human output is safer. Also, ENN can use multimodal inputs (image, joints) while human relies only on images to perform trajectory planning. An ablation study with type of inputs is included.
+* Evaluation of whether ENN can imitate the human annotated trajectory (with respect to five considered metrics, Table 5) with an ablation study.
+
+### Strengths
+* The paper presents an innovative idea of generating simulated outputs for improving catheter path planning that generated data for learning path planning.  A network trained using this data outperforms human surgeon (to an extent), considering additional information (joint positions and joint velocities), where surgeon relies only on 2D image. 
+
+* Code is available and simulator will be publicly released.
+* The paper highlights importance and utility of using simulated data for medical AI.
+
+### Weaknesses
+Authors should clearly explain that the expert trajectory is creating using their own simulator, and therefore, may be biased so that the results may not be representative of practical use of their method. The fact that the expert trajectory is generated within the simulation environment itself raises concerns about the generalizability of the learned policies to real-world scenarios. The simulator's specific dynamics and constraints might lead to an expert policy that is overly tailored to the simulation, potentially limiting its effectiveness when deployed in a physical setting. This is a critical point that needs to be addressed to ensure the practical relevance of the proposed approach.
+
+Overall, I thought the idea was clever, but the implications for the ML community were not clearly described. Authors should discuss the importance of generating simulated images, relationship to other generative methods (e.g., purely DL based approaches that may not capture underlying physics), and most importantly, why is the approach important to ML. The paper needs to articulate the unique advantages of their physics-based simulation approach over purely data-driven methods, especially in the context of medical applications where physical accuracy is paramount. The discussion should also highlight how this work contributes to the broader ML community, particularly in areas where data scarcity is a major challenge.
+
+Below are some section specific weaknesses.
+
+**Methodology**
+* It is not clear what is a guidewire and what is its purpose. A more detailed explanation of the guidewire's role in catheterization is needed for readers unfamiliar with the procedure. The paper should clarify how the guidewire interacts with the catheter and the anatomical structures, and why its simulation is crucial for the overall system.
+* Not clear how force labels are extracted from CatSim outputs, which seems to be images + joint position info (as discussed in Section 4.1). The method for extracting force labels from the simulation outputs needs to be clearly explained. It is not obvious how image and joint position data are converted into force measurements, and this process requires a detailed description. The authors should specify the exact equations or algorithms used to derive force information from the simulation.
+* In Section 4.1, authors mention that the output is a feature vector Z, but it is unclear how it is used afterwards. The role of the feature vector Z in the subsequent steps of the learning process is not clear. The authors should explain how this feature vector is incorporated into the reinforcement learning algorithm and how it contributes to the final policy generation.
+
+**Manuscript Organization**
+
+Statement such as “Other aspects of our simulator such as blood simulation and AR/VR are designed for surgical training and, hence are not discussed in this paper” indicate that blood simulation information is not critical to be include in the main manuscript, yet there is a section on blood simulation in Section 3. The inclusion of blood simulation details in Section 3 seems inconsistent with the statement that it is not critical to the paper's main focus. The authors should either remove this section or justify its inclusion by explaining its relevance to the core contributions of the paper. The current presentation creates confusion about the scope of the work.
+
+On the other hand, more information about the number of labelled training samples would be helpful (e.g., in Section 4, where authors state “vast amount of labeled training samples” but do not provide additional details). The lack of specific details regarding the size of the training dataset is a significant omission. The authors should provide the exact number of labeled samples used for training, as well as details about the data generation process. This information is crucial for reproducibility and for assessing the validity of the results.
+
+Minor point: there is a typo in contribution 1: “and AR/VR ready” -> “and is AR/VR ready”.
+
+**Results**
+
+BCA and LCCA are not defined. The abbreviations BCA and LCCA are used without definition, making it difficult for readers to understand the experimental setup. The authors should explicitly define these terms when they are first introduced in the text.
+
+Authors state that they conducted a user study evaluating user satisfaction and realism of CatSim (Supplementary G, and main page 6,7) and report answers to questions, but do not include a scale for responses. In addition, it would help if the authors split user study questions by type (realism and satisfaction), so it is easier to interpret results. The lack of a clear scale for the user study responses makes it difficult to interpret the results. The authors should provide the scale used (e.g., Likert scale) and also categorize the questions into realism and satisfaction to improve clarity. Table 4 and 5 include various types of inputs (Image, Mask, Internal, Human). A visualization of what these inputs would help in understanding what is being compared. The different input types used in Tables 4 and 5 (Image, Mask, Internal, Human) are not clearly defined or visualized. The authors should provide a visual representation of these inputs to help the reader understand what is being compared in the experiments.
+
+### Questions
+“Both for the BCA and LCCA targets, the integration of expert trajectories results in lower force, shorter path and episode length, higher safety, and a high success rate and SPL score.” (Section 5.3)
+
+If the goal is to create an autonomous catheterization technique, why is integration of expert trajectories important and/or beneficial? It would seem the opposite is true.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The authors develop CathSim, an open source simulator for endovascular intervention in the field of autonomous catheterization. The simulator is real-time ready, exhibits force feedback, supports Unity, and allows ML model training. The authors validate the simulator against a real robot. Furthermore, the authors use CathSim to train a multimodal expert navigation network (ENN) and show that it outperforms a human baseline on relevant metrics.
+
+### Strengths
+* Open source simulator
+* Simulator is validated via comparison to real world robot
+* Expert navigation results beating the human baseline
+
+### Weaknesses
+ * ENN model architecture is not state-of-the-art, e.g. no transformer
+* Unclear how trustworth the user study is. 10 participants in user study is a small sample size and it’s unclear how they were recruited and how trustworthy their judgements are.
+* Lack of relevant details, e.g. what is the expert policy that the ENN is trained with. Why don’t you show results for the expert policy in the table?
+* If an expert policy exists, why do you train an ML model (ENN) model for the expert navigation task?
+* Some figures / tables are not easy to understand on their own, e.g. Table 2, for which e.g. instead of Q1 you could write “Anatomical accuracy”.
+
+### Questions
+Overall, this seems to be very relevant work. However, in terms of ML it is not pushing the boundary of the state-of-the-art. This work might fit better to a more applied conference.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

@@ -1,0 +1,389 @@
+\title{A second-order-like optimizer with adaptive gradient scaling for deep learning}
+
+\begin{abstract}
+In this empirical article, we introduce INNAprop, an optimization algorithm that combines the INNA method with the RMSprop adaptive gradient scaling. It leverages second-order information and rescaling while keeping the memory requirements of standard DL methods as AdamW or SGD with momentum. After giving geometrical insights, we evaluate INNAprop on CIFAR-10, Food101, and ImageNet with ResNets, VGG, DenseNet, and ViT, and on GPT-2 (OpenWebText) train from scratch and with LoRA fine-tuning (E2E). INNAprop consistently matches or outperforms AdamW both in training speed and accuracy, with minimal hyperparameter tuning in large-scale settings.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+As deep learning models grow in size, massive computational resources are needed for training, representing significant challenges in terms of financial costs, energy consumption, and processing time \citep{susnjak2024over,varoquaux2024hype}. According to the UN’s Environment Programme Training, the Big Tech sector produced between two and three percent of the world’s carbon emissions in 2021; some estimations for the year 2023 go beyond 4\%, see the latest Stand.earth reports, and also \citep{schwartz2020green, strubell2020energy, patterson2021carbon} for related issues. For instance, training GPT-3 is estimated to require 1,287 megawatt-hours (MWh) of electricity, equivalent to the annual usage of over 100 U.S. households \citep{anthony2020carbontracker, patterson2021carbon}. Similarly, the financial cost of specialized hardware and cloud computing is extremely high. OpenAI claimed that the training cost for GPT-4 \citep{achiam2023gpt} exceeded 100 million dollars. The PaLM model developed by Google AI was trained for two months using 6144 TPUs for 10 million dollars \citep{chowdhery2023palm}. All this implies a need for faster and more cost-efficient optimization algorithms. It also suggests that early stopping \citep{prechelt2002early, bai2021understanding} in the training phase is a desirable feature whenever possible. 
+We focus in this work on computational efficiency during the training phase and consider the problem of unconstrained minimization of a loss function $\J \colon \mathbb{R}^p \to \mathbb{R}$, as follows
+\begin{align}
+    \label{eq:mainProblem}
+    \min_{\theta \in \mathbb{R}^p} \J(\theta).
+\end{align}
+ 
+\paragraph{Continuous dynamical systems as optimization models.}
+To achieve higher efficiency, it is necessary to deeply understand how algorithms work and how they relate to each other. A useful way to do this is by interpreting optimization algorithms as discrete versions of continuous dynamical systems \citep{ljung1977analysis}, further developed in \citep{harold1997stochastic, benaim2006dynamics, borkar2008stochastic, attouch2016fast, aujol2019optimal}. 
+In deep learning, this approach is also quite fruitful; it has, in particular, been used to provide convergence proofs or further geometric insights \citep{davis2020stochastic, bolte2020conservative, barakat2021convergence, chen2023lion}.
+
+In the spirit of \cite{castera2021inertial}, we consider the following continuous-time dynamical system introduced
+in \cite{alvarez2002second} and referred to as DIN (standing for “dynamical inertial Newton”):
+\begin{align}
+\underbrace{\ddot\theta(t)}_{\text{\rm Inertial term}}+\underbrace{\alpha\,\dot\theta(t)}_{\text{\rm Friction term}}+\underbrace{\beta\,\nabla^{2}\J(\theta(t))\dot\theta(t)}_{\text{\rm Newtonian effects}}+\underbrace{\nabla \J(\theta(t))}_{\text{\rm Gravity effect}}= \ 0, \qquad t\geq 0,\label{eq:general_ode_din}
+ \end{align} where $t$ is the time, $\J \colon \mathbb{R}^p \to \mathbb{R}$ is a loss function to be minimized (e.g., empirical loss in DL applications) as in \Cref{eq:mainProblem}, assumed $C^2$ with gradient $\nabla \J$ and Hessian $\nabla^2\J$. A key aspect of Equation \eqref{eq:general_ode_din} that places it between first- and second-order optimization is that a change of variables allows to describe it using only the gradient $\nabla \J$, since $\nabla^{2}\J(\theta(t))\dot\theta(t) = \frac{d}{dt} \nabla \J(\theta(t))$ (see Section \ref{sec:derivation} for details). This greatly reduces computational costs, as it can be discretized as a difference of gradients which does not require Hessian vector product, making it possible to design more practical algorithms, as shown in \cite{chen2019first, castera2021inertial, attouch2022first}.
+
+We recover the continuous-time heavy ball system by assuming $\alpha>0$,  and removing the geometrical ``damping" term in Equation \eqref{eq:general_ode_din} through the choice $\beta=0$. A discrete version of this system corresponds to the Heavy Ball method  \citep{polyak1964some}, which is at the basis of SGD solvers with momentum in deep learning \citep{qian1999momentum, sutskever2013importance}. By allowing both $\alpha$ and $\beta$ to vary, we recover Nesterov acceleration \citep{nesterov1983method, su2016differential, attouch2019rate}.
+
+\paragraph{Adaptive methods.}
+Adaptive optimization methods, such as RMSprop \citep{tieleman2012lecture} and AdaGrad \citep{duchi2011adaptive}, modify the update dynamics by introducing coordinate-wise scaling of the gradient based on past information. These methods can be modeled by continuous-time ODEs of the following form, expressed here for the simple gradient system:
+\begin{align}
+    \label{eq:adaptiveMethods}
+    \dot{\theta}(t) + \frac{1}{\sqrt{G(t,\theta(t)) + \epsilon}} \odot \nabla \mathcal{J}(\theta(t)) = 0, \quad t \geq 0,
+\end{align}
+where $\epsilon > 0$, $G(t,\theta(t)) \in \mathbb{R}^p$ represents accumulated  information. The scalar addition, square root, and division are understood coordinatewise and $\odot$ denotes the coordinate-wise product for vectors in $\mathbb{R}^p$. In AdaGrad or RMSprop, $G(t,\theta(t))$ is a gradient amplitude averaged of the  form:
+\begin{align}
+    \label{eq:accumulationGradient}
+    G(t,\theta(t)) := \int_0^t \nabla \mathcal{J}(\theta(\tau))^2 \, d \mu_t(\tau),
+\end{align}
+for different choices of $\mu_t$ --- uniform for AdaGrad and moving average for RMSprop. This generally improves performance, see the pioneering work \citep{duchi2011adaptive, tieleman2012lecture}.
+
+\paragraph{Our approach.}
+We combine the ``dynamical inertial Newton" method (DIN)  from Equation \eqref{eq:general_ode_din} with an RMSprop adaptive gradient scaling. This allows us to take into account second-order information for the RMSProp scaling. Computationally, this second-order information is expressed using a time derivative. In discrete time, this will provide a second-order intelligence with the same computational cost as gradient evaluation. The resulting continuous time ODE is given as follows:
+\begin{align}
+    \label{eq:dynRMSprop}
+    &\ddot\theta(t) + \alpha\,\dot\theta(t) + \beta\,\frac{d}{dt} \rmsprop(\mathcal{J}(\theta(t))) + \rmsprop(\mathcal{J}(\theta(t))) = 0,  \qquad\,t \geq 0 \\ 
+    &\text{where }\rmsprop(\mathcal{J}(\theta(t))) = \frac{1}{\sqrt{G(t,\theta(t)) + \epsilon}} \odot \nabla \mathcal{J}(\theta(t)) \nonumber
+\end{align}
+with $G$ of the form \eqref{eq:accumulationGradient} with an adequate time-weight distribution $\mu_t$ corresponding to the RMSProp scaling. A discretization of this continuous time system, combined with careful memory management, results in our new optimizer INNAprop, see  Section \ref{sec:thealgorithm}. %\jer{donner lien vers l'algo avant sa "derivation"} Section \ref{sec:derivation} %for details of our derivation.
+\paragraph{Relation with existing work.}
+
+To improve the efficiency of stochastic gradient descent (SGD), two primary strategies are used: leverage local geometry for having clever directions and incorporate momentum to accelerate convergence. These approaches include accelerated methods (e.g., Nesterov’s acceleration \citep{nesterov1983method, dozat2016incorporating}, momentum SGD \citep{polyak1964some,qian1999momentum,sutskever2013importance}, and adaptive methods (e.g., Adagrad \citep{duchi2011adaptive}, RMSProp \citep{tieleman2012lecture}), which adjust learning rates per parameter.
+
+Adam remains the dominant optimizer in deep learning. It comes under numerous variants proposed to improve its performance or to adapt it to specific cases  \citep{dozat2016incorporating, shazeer2018adafactor, reddi2019convergence, loshchilov2017decoupled, zhuang2020adabelief}. Adafactor \citep{shazeer2018adafactor} improves memory efficiency, Lamb \citep{you2019large} adds layerwise normalization, and Lion \citep{chen2023symbolic} uses sign-based momentum updates. AdEMAMix \citep{pagliardini2024ademamix} combines two EMAs, while Defazio et al. \citep{defazio2024road} introduced a schedule-free method incorporating Polyak-Ruppert averaging with momentum.
+
+One of the motivations of our work is the introduction of second-order properties in the dynamics akin to Newton's method. Second-order optimizers are computationally expensive due to frequent Hessian computations \citep{gupta2018shampoo, martens2015optimizing}. Their adaptation to large scale learning settings require specific developments \citep{jahani2021doubly, qian2021basis}. For example, the Sophia optimizer \citep{liu2023sophia}, designed for large language models, uses a Hessian-based pre-conditioner to penalize high-curvature directions. In this work, we draw inspiration from  INNA  \citep{castera2021inertial}, based on the continuous time dynamics introduced by \citep{alvarez2002second}, which combines gradient descent with a Newtonian mechanism for first-order stochastic approximations. %They do not however use local geometry adaption.
+
+Our proposed method, INNAProp, integrates the algorithm INNA, which features a Newtonian effect with cheap computational cost, with the gradient scaling mechanism of RMSprop. This  preserves the efficiency of second-order methods and the adaptive features of RMSprop while significantly reducing the computational overhead caused by Hessian evaluation. Specific hyperparameter choices for our method allow us to recover several existing optimizers as special cases.
+\paragraph{Contributions.}
+They can be summarized as follows:
+\begin{itemize}[label=\small$\bullet$, left=0.2cm]
+    \item We introduce INNAprop, a new optimization algorithm that combines the Dynamical Inertial Newton (DIN) method with RMSprop’s adaptive gradient scaling, efficiently using second-order information for large-scale machine learning tasks.
+
+    \item We provide a continuous-time explanation of INNAprop, connecting it to second-order ordinary differential equations (see \Cref{sec:ourmethod} and \Cref{eq:dynRMSprop}). We discuss many natural possible discretizations and show that INNAprop is empirically the most efficient. Let us highlight a key feature of our method: it incorporates second-order terms in space without relying on Hessian computations or inversions of linear systems which are both prohibitive in deep learning.
+    
+    \item We show through extensive experiments that INNAprop matches or outperforms AdamW in both training speed and final accuracy on benchmarks such as image classification (CIFAR-10, ImageNet) and language modeling (GPT-2) (see Section \ref{sec:experiments}).
+\end{itemize}
+
+We describe our algorithm and its derivation in Section \ref{sec:ourmethod}. Hyperparameter tuning recommendations and our experimental results are provided in Section \ref{sec:experiments}.
+
+
+\section{INNAprop: a second-order method in space and time based on RMSProp}
+
+\label{sec:ourmethod}
+\subsection{The algorithm}
+\label{sec:thealgorithm}
+
+Our method is built on the following \Cref{alg:INNAprop}, itself derived from a combination of INNA 
+\citep{castera2021inertial} and RMSprop \citep{tieleman2012lecture} (refer to Section \ref{sec:derivation} for more details). The following version of the method is the one we used in all experiments. It includes the usual ingredients of deep-learning training: mini-batching, decoupled weight-decay, and scheduler procedure.
+
+\begin{algorithm}
+\caption{Deep learning implementation of $\INNAprop$ }
+\begin{algorithmic}[1]
+\STATE \textbf{Objective function:} $\J(\theta) = \frac{1}{n} \sum_{n = 1}^N \J_{n}(\theta)$ for $\theta \in \R^p$.
+\STATE \textbf{Learning step-sizes:} $ \gamma_k := \{\text{SetLrSchedule}(k)\}_{k \in \NN}$ where $\gamma_0$ is the initial learning rate.
+\STATE{\textbf{Hyper-parameters:} $\sigma \in [0,1]$, $\alpha \geq 0$, $\beta > \sup_{k \in \mathbb{N}} \gamma_k$, $\lambda \geq 0$, $\epsilon = 10^{-8}$.} 
+\STATE \textbf{Mini-batches:} $(\mb_k)_{k \in \N}$ of nonempty subsets of $\{1,\ldots,N\}$.
+
+\STATE \textbf{Initialization:}  time step $k \leftarrow 0$, parameter vector $\theta_0$, $v_0 = 0$, $\psi_0 = (1 - \alpha \beta) \theta_0$.
+\FOR{$k=1$ {\bfseries to} K}
+    \STATE $\bm{g}_k = \frac{1}{\lvert \mb_k \rvert}\sum_{n\in \mb_k} \nabla\J_n(\bm{\theta}_k)$ \COMMENT{select batch $\mb_k$ and return the corresponding gradient}
+    \STATE{$\gamma_k \leftarrow \text{SetLrSchedule}(k)$} \COMMENT{see above and \Cref{remark:wp}}
+    \STATE $\bm{\theta}_k \gets (1 - \lambda \gamma_k) \bm{\theta}_k $ \COMMENT{decoupled weight decay}
+    \STATE $\bm{v}_{k+1} \gets \sigma \bm{v}_{k} + (1-\sigma) \bm{g}_k^2$ 
+    \STATE $\bm{\hat{v}}_{k+1} \gets \bm{v}_{k+1}/(1 - \sigma^k)$
+    \STATE $\bm{\psi}_{k+1} \gets \left(1 - \frac{\gamma_k}{\beta}\right)\bm{\psi}_k + \gamma_k \left(\frac{1}{\beta} - \alpha\right) \bm{\theta}_k$
+    \STATE $\bm{\theta}_{k+1} \gets \left( 1 +  \frac{\gamma_k  (1 - \alpha\beta)}{\beta - \gamma_k} \right) \bm{\theta}_k  - \frac{\gamma_k}{\beta - \gamma_k} \bm{\psi}_{k+1} - \gamma_k\beta \left (\bm{g}_k / (\sqrt{\bm{\hat{v}}_{k+1}} + \epsilon \right)$
+
+\ENDFOR
+\RETURN{$\bm{\theta}_{K+1}$}
+\end{algorithmic}
+\label{alg:INNAprop}
+\end{algorithm}
+
+In \Cref{alg:INNAprop}, \text{SetLrSchedule} is the ``scheduler" for step-sizes; it is defined as a custom procedure for handling learning rate sequences for different networks and databases.
+
+\begin{remark}[Well posedness]{\rm 
+Observe that, for all schedulers $\gamma_k < \beta$ for $k \in \mathbb{N}$, so that $\INNAprop$ is well-posed (line 13 in Algorithm \ref{alg:INNAprop}, the division is well defined).}
+\label{remark:wp}
+\end{remark}
+
+\subsection{Derivation of the algorithm}
+\label{sec:derivation}
+There are several ways to combine $\rmsprop$ and INNA, or DIN its second-order form, as there exist several ways to do so with the heavy ball method and $\rmsprop$. 
+Consider the following dynamical inertial Newton method \citep{alvarez2002second}:
+ \begin{align}
+ \label{eq:physicalIntuitionSmooth}
+\ddot\theta(t)+\alpha\,\dot\theta(t)+\beta\,\frac{d}{dt}\nabla\J(\theta(t))+ \nabla \J(\theta(t))= \ 0, \quad t \geq 0,
+ \end{align}
+as in \Cref{eq:general_ode_din} and replacing  $\nabla^{2}\J(\theta(t))\dot\theta(t)$ by $\frac{d}{dt} \nabla \J(\theta(t))$. Using finite differences with a fixed time step $\gamma$ for discretization, replacing in particular the gradient derivatives by gradient differences:
+$$\frac{d}{dt}\nabla\J(\theta(t)) \simeq \frac{\nabla\J(\theta_{k+1})-\nabla\J(\theta_k)}{\gamma}, $$%\hspace{0.5cm} \dot{\theta(t)} \simeq \frac{\theta_{k+1} - \theta_k}{\gamma} $$
+where  
+$\theta_k,\theta_{k+1}$ correspond to two successive states around the time $t$.
+
+Setting $\nabla\J(\theta_{k}) = g_k$, we obtain $\displaystyle \frac{\theta_{k+1} - 2\theta_k + \theta_{k-1}}{\gamma} + \alpha \frac{\theta_{k} - \theta_{k-1}}{\gamma} + \beta \frac{{g_k} - g_{k-1}}{\gamma} + g_{k-1} = 0.   
+$
+
+To provide our algorithm with an extra second-order geometrical intelligence, we use the proxy of $\rmsprop$ direction in place of the gradient. 
+
+Choose $\sigma > 0$ and $\epsilon > 0$, and consider:
+\begin{align}
+& v_{k+1} = \sigma v_{k} + (1 - \sigma) g_{k}^2 \label{v}\\
+&\frac{\theta_{k+1} - 2\theta_k + \theta_{k-1}}{\gamma} + \alpha \frac{\theta_{k} - \theta_{k-1}}{\gamma} + \beta \frac{\frac{g_k}{\sqrt{v_{k+1}} + \epsilon} - \frac{g_{k-1}}{\sqrt{v_k} + \epsilon}}{\gamma} + \frac{g_{k-1}}{\sqrt{v_k} + \epsilon} = 0.
+\label{eq:dinrmsprop_start}
+\end{align}
+Although this system has a natural mechanical interpretation, its memory footprint is abnormally important for this type of algorithm: for one iteration of the system \eqref{v}-\eqref{eq:dinrmsprop_start}, it culminates at 6 full dimension memory slots, namely $g_{k-1}$, $g_k$, $\theta_{k-1}$, $\theta_{k}$, $v_k$, and $v_{k+1}$ before the evaluation of \eqref{eq:dinrmsprop_start}.
+
+Therefore, we proceed to rewrite the algorithm in another system of coordinates. We eventually obtain: 
+\begin{align*}
+& v_{k+1} = \sigma v_{k} + (1 - \sigma) g_{k}^2 \\
+\psi_{k+1} &= \psi_k \left(1 - \frac{\gamma}{\beta}\right) + \gamma \left(\frac{1}{\beta} - \alpha\right) \theta_k, \\
+\theta_{k+1} & = \left(  1 + \frac{\gamma  (1 - \beta\alpha)}{\beta - \gamma } \right) \theta_k   - \frac{\gamma}{\beta - \gamma } \psi_{k+1} - \gamma\beta \frac{g_k}{\sqrt{v_{k+1}} + \epsilon}
+\end{align*}
+which only freezes 3 full dimension memory slots corresponding to $v_{k}$, $\psi_{k}$, $\theta_k$. As a result, the memory footprint is equivalent to that of the Adam optimizer (see \Cref{table:updaterules}).
+
+\begin{remark}[On other possible discretizations]\label{remark:discret}{\rm 
+ Our motivation to start from the ``mechanical" version of the algorithm is to enhance our understanding of the geometrical features of the algorithm.\\
+(b) RMSprop with momentum \citep{graves2013generating} is obtained by a discretization of the heavy ball continuous time system, using a momentum term and an RMSprop proxy. However, the resulting algorithm appears to be numerically unstable (see Figure \ref{fig:innaprop_momentum} for an illustration). \\ %\ed{what does it mean ill posed?}.
+}
+\end{remark}
+
+\begin{remark}[A family of algorithms indexed by $\alpha,\beta$]\label{remark:family}{\rm $\INNAprop$ can be seen as a family of methods indexed by the hyperparameters $\alpha$ and $\beta$. By setting $\alpha=\beta=1$, we empirically recover the behavior of AdamW. Experiments demonstrate that this consistently aligns with AdamW, suggesting that AdamW can be seen as a special case within the broader INNAprop family.} We now explain how these hyperparameters ($\alpha,\beta$) have been tuned on ``small size" problems.
+\end{remark}
+
+
+
+\section{Empirical evaluation of INNAprop}
+
+\label{sec:experiments}
+We conduct extensive comparisons of the proposed algorithm and the AdamW optimizer, which is dominantly used in image classification \citep{chen2018closing, zhuang2020adabelief, touvron2021training, mishchenko2023prodigy} and language modeling tasks \citep{brown2020language, hu2021lora, liu2023sophia}. Hyperparameter tuning \citep{sivaprasad2020optimizer} is a crucial issue for this comparison, and we start with this. As a general rule, we strive to choose the hyperparameters that give a strong baseline for AdamW (based on literature or using grid search). Unless stated differently, our experiments use the AdamW optimizer \footnote{\url{https://pytorch.org/docs/stable/generated/torch.optim.AdamW.9$, $\beta_2=0.999$, $\lambda = 0.01$ and $\epsilon=1e-8$. For INNAprop, unless otherwise specified, the default settings for the RMSprop component align with those of AdamW: $\sigma=0.999$ and $\epsilon=1e-8$. 
+
+The INNAprop method and the AdamW optimizer involve different classes of hyperparameters; some of them are common to both algorithms, and some are specific. Our hyperparameter tuning strategy for both algorithms is summarized in Table \ref{tab:hyperparmTuningStartegy}. 
+
+We begin this section with the tuning of parameters $\alpha,\beta$ for INNAprop on CIFAR10 with VGG and ResNet architectures and then use these parameters on larger datasets and models. We use as much as possible the step size scheduler and weight decay settings reported in the literature for the AdamW optimizer, which we believe to be well-adjusted and provide adequate references for each experiment. These are used both for AdamW and INNAprop. With this protocol, we only perform minimal hyperparameter tuning for INNAprop for larger-scale experiments. This is due to constrained computational resources. We aim to demonstrate the typical performance of the Algorithm \ref{alg:INNAprop}, rather than its peak performance with extensive tuning. 
+
+\begin{table}[!ht]
+    \begin{center}
+        \caption{\footnotesize Hyperparameter tuning strategy for INNAprop and AdamW: AdamW is systematically favored.}
+        \label{tab:hyperparmTuningStartegy}
+        \setlength{\tabcolsep}{4pt}
+        \renewcommand{\arraystretch}{1.1}
+        {\fontsize{9}{11}\selectfont{
+        \begin{tabular}{l|c|c|c}
+        \toprule
+        \textbf{Parameters} & \textbf{AdamW tuning} & \textbf{INNAprop tuning} & \textbf{Comparative advantage} \\ \midrule
+        Learning rate & Literature or grid search tuning & Reused from AdamW & AdamW favored \\ \hline
+        Step size scheduler & Literature & Reused from AdamW & N/A \\ \hline
+        Weight decay & Literature or grid search tuning & Reused from AdamW & AdamW favored \\ \hline
+        RMSprop parameter & Default or literature & Reused from AdamW & AdamW favored \\ \hline
+        Inertial parameters ($\alpha, \beta$) & N/A & Tuned on CIFAR-10 & N/A \\ 
+        \bottomrule
+        \end{tabular}
+        }}
+    \end{center}
+\end{table}
+
+\subsection{Tuning INNAprop on CIFAR-10 with VGG11 and ResNet18}
+\label{sec:tuneinnaprop}
+
+\paragraph{Hyperparameter tuning:} We tune ($\alpha, \beta$) using VGG11 \citep{simonyan15very} and ResNet18 \citep{he2016deep} models trained on CIFAR10 \citep{krizhevsky2010cifar}, together with the initial learning rate $\gamma_0$ to ensure proper training. We fix a cosine scheduler where $T_{\text{max}} = 200$ and $\gamma_{\min} = 0$ (see \Cref{sec:schedulers} for more details) and we consider two weight decay parameters $\lambda = 0$ or $\lambda = 0.01$. Our experiment suggests using an initial learning rate $\gamma_0 = 10^{-3}$, which is the baseline value reported for AdamW in this experiment (see \Cref{sec:hyperparameterTuning}). For $\INNAprop$, we optimize only the hyperparameters $\alpha$ and $\beta$, using test accuracy and training loss as the optimization criteria. A grid search is performed over $(\alpha, \beta) \in \{0.1, 0.5, 0.9,\dots, 3.5, 4.0\}$ using \texttt{optuna} \citep{akiba2019optuna}.  In Figure \ref{fig:heatmaps_vgg_wd_0.01}, we detail the obtained training loss and test accuracy for various $(\alpha, \beta)$ configurations over short training durations (20 epochs) and long training durations (200 epochs) for VGG11 with weight decay $\lambda=0.01$. Our criteria (short and long training duration) are chosen to find parameters $(\alpha,\beta)$ that provide a rapid decrease in training loss in the early stages and the best test accuracy for long training duration.
+
+These results highlight a tendency for efficient couples; we choose for further experiments the values $(\alpha,\beta)=(0.1,0.9)$ which correspond to aggressive optimization of the training loss for short training durations, and $(\alpha,\beta)=(2.0,2.0)$ which provides very good results for longer training durations.
+
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}[b]{0.8\textwidth}
+        \begin{minipage}{0.2\textwidth} % Ajuster la largeur si nécessaire
+            \caption{20 epochs}
+        \end{minipage}%
+        \begin{minipage}{0.7\textwidth}
+            \includegraphics[width=\textwidth]{figures/heatmap_vgg11_20_epochs_wd_0_01.pdf}
+        \end{minipage}
+    \end{subfigure}
+    
+
+    \begin{subfigure}[b]{0.8\textwidth}
+        \begin{minipage}{0.2\textwidth} % Ajuster la largeur si nécessaire
+            \caption{200 epochs}
+        \end{minipage}%
+        \begin{minipage}{0.7\textwidth}
+            \includegraphics[width=\textwidth]{figures/heatmap_vgg11_200_epochs_wd_0_01.pdf}
+        \end{minipage}
+    \end{subfigure}
+    
+    \caption{\footnotesize Log-scale training loss and test accuracies for hyperparameters $(\alpha, \beta)$ with VGG11 on CIFAR10 at 20 and 200 epochs. Optimal learning rate $\gamma_0 = 10^{-3}$ and weight decay $\lambda = 0.01$, with one random seed.}
+    \label{fig:heatmaps_vgg_wd_0.01}
+\end{figure}
+
+\paragraph{Validation and comparison with AdamW:} We confirm our hyperparameter choices ($\gamma_0 = 10^{-3}$, $\lambda = 0.01$) by reproducing the experiment with 8 random seeds and comparing with AdamW using the same settings. Based on hyperparameter tuning, we select two pairs of $(\alpha, \beta)$ with different training speeds. As shown in Figure \ref{fig:vgg11_cifar10} (and \Cref{sec:additionalExperiments} for ResNet18), with $(\alpha, \beta) = (0.1, 0.9)$, INNAprop improves training loss and test accuracy rapidly by the 100th epoch, maintaining the highest training accuracy. With $(\alpha, \beta) = (2.0, 2.0)$, INNAprop trains more slowly but achieves higher final test accuracy. This is aligned with the experiments described in \Cref{fig:heatmaps_vgg_wd_0.01}. In \Cref{tab:cifar10}, we compare the performance of different networks on CIFAR-10 using INNAprop and AdamW optimizers.
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[width=\textwidth]{figures/vgg11_cifar10.pdf}
+    \caption{\footnotesize Training VGG11 on CIFAR10. Left: train loss, middle: test accuracy (\%), right: train accuracy (\%), with 8 random seeds.}
+    \label{fig:vgg11_cifar10}
+\end{figure}
+
+\begin{table*}[h!]
+    \begin{center}
+        \caption{\footnotesize Test accuracy (\%) of ResNet-18, VGG11, and DenseNet121 on CIFAR-10 using AdamW optimized weight decay and learning rate. Results are averaged over eight runs.}
+        \label{tab:cifar10}
+        \setlength{\tabcolsep}{4pt}
+        \renewcommand{\arraystretch}{1.1}
+        {\fontsize{8}{10}\selectfont{
+    \begin{tabular}{c|c|c}
+        \toprule
+        \textbf{Model} & \textbf{Optimizer} & \textbf{Test accuracy} \\ 
+        \midrule
+        \multicolumn{3}{c}{Training on CIFAR-10 over 200 epochs} \\
+        \midrule
+        \multirow{2}{*}{ResNet18} & AdamW & 91.14 \\
+         & INNAprop ($\alpha=2.0, \beta=2.0$) & \textbf{91.58} \\
+        \midrule
+        \multirow{2}{*}{VGG11} & AdamW & 90.79 \\
+         & INNAprop ($\alpha=2.0, \beta=2.0$) & \textbf{90.99} \\
+        \midrule
+        \multirow{2}{*}{DenseNet121} & AdamW & 86.19 \\
+         & INNAprop ($\alpha=0.1, \beta=0.9$) & \textbf{86.91} \\
+        \bottomrule
+    \end{tabular}
+        }}
+    \end{center}
+\end{table*}
+
+\begin{remark}[Trade-off between fast learning and good generalization]
+{\rm For CIFAR-10 experiments, INNAprop offers flexibility in adjusting convergence speed through $(\alpha, \beta)$. Faster training configurations generally lead to weaker generalization compared to slower ones, highlighting the trade-off between quick convergence and generalization \citep{wilson2017marginal, zhang2020adaptive}.}
+\label{remark:tradeoff}
+\end{remark}
+
+\subsection{Extensive experiments on large-scale vision models}
+\label{sec:imagexp}
+We present experiments on large-scale vision benchmarks with the hyperparameters of Section \ref{sec:tuneinnaprop}.
+
+\paragraph{Resnets on ImageNet:} We consider the larger scale ImageNet-1k benchmark \citep{krizhevsky2012imagenet}. We train a ResNet-18 and a ResNet-50 \citep{he2016deep} for 90 epochs with a mini-batch of size of 256 as in \cite{chen2023symbolic, zhuang2020adabelief}. We used the same cosine scheduler for both AdamW and INNAprop with initial learning rate $\gamma_0 = 10^{-3}$ as reported in \cite{chen2023symbolic, zhuang2020adabelief, chen2018closing}. The weight decay of AdamW is set to $\lambda=0.01$ for the ResNet18,  instead of $\lambda=0.05$ reported in \cite{zhuang2020adabelief, chen2018closing} because it improved the test accuracy from $67.93$ to $69.43$. The figure shows that our algorithm with $(\alpha, \beta) = (0.1, 0.9)$ outperforms AdamW in test accuracy (70.12 vs 69.34), though the training loss decreases faster initially but slows down towards the end of training.
+
+For the ResNet50, we kept the value $\lambda = 0.1$ as reported in \cite{zhuang2020adabelief, chen2018closing}. For INNAprop, we tried two weight decay values $\{0.1, 0.01\}$ and selected $\lambda = 0.01$ as it resulted in a faster decrease in training loss. We report the results in \Cref{fig:ResNetVit}, illustrating the advantage of INNAprop. As noted in Section \ref{sec:tuneinnaprop}, INNAprop with $(\alpha, \beta) = (0.1, 0.9)$ reduces training loss quickly but has lower test accuracy compared to AdamW or INNAprop with $(\alpha, \beta) = (2.0, 2.0)$. For $(\alpha, \beta) = (2.0, 2.0)$, the loss decrease is similar to AdamW, with no clear advantage for either method. This obviously suggests developing scheduling strategies for damping parameters $(\alpha, \beta)$. This would require a much more computation-intensive tuning, far beyond the numerical resources used in the current work. In \Cref{tab:imagenet}, we present the performance of INNAprop achieved using minimal hyperparameter tuning, as explained in \Cref{tab:hyperparmTuningStartegy}.
+
+\paragraph{Vision transformer (ViT) on ImageNet:} We performed the same experiment with a ViT-B/32 architecture over 300 epochs with a mini-batch size of 1024, following \cite{defazio2023learning, mishchenko2023prodigy}. For AdamW, we used a cosine scheduler with a linear warmup (30 epochs) and the initial learning rate and weight decay from \cite{defazio2023learning}. For INNAprop, we tested weight decay values of $\{0.1, 0.01\}$, selecting $\lambda = 0.1$ for better test accuracy. Results in \Cref{fig:ResNetVit} show the advantage of INNAprop. For faster convergence using INNAprop $(0.1,0.9)$, we recommend a weight decay of $\lambda=0.
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[width=\textwidth]{figures/resnet50_vit_imagenet.pdf}
+    \caption{\footnotesize Training a ResNet50 (top) and ViT-B/32 (bottom) on ImageNet. Left: train loss, middle: Top-1 test accuracy (\%), right: Top-1 train accuracy (\%). 3 random seeds.}
+    \label{fig:ResNetVit}
+\end{figure}
+In the ImageNet experiments, we evaluated INNAprop for rapid early training and optimal final test accuracy without tuning $(\gamma_0, \alpha, \beta)$. For ViT-B/32 with $\lambda=0.1$, INNAprop achieved lower training loss and higher final test accuracy than AdamW (75.23 vs. 75.02). %For ResNet-18, INNAprop also outperformed AdamW in final test accuracy with $\lambda=0.01$ (70.12 vs. 69.34).
+
+\begin{table*}[h!]
+    \begin{center}
+        \caption{ \footnotesize Top-1 and Top-5 accuracy (\%) of ResNet-18, ResNet-50, and ViT-B/32 on ImageNet. Results are averaged from three runs for ResNets and one run for ViT-B/32. AdamW favored as in \Cref{tab:hyperparmTuningStartegy}.} 
+        \label{tab:imagenet}
+        \setlength{\tabcolsep}{4pt}
+        \renewcommand{\arraystretch}{1.1}
+        {\fontsize{8}{10}\selectfont{
+    \begin{tabular}{c|c|c|c}
+        \toprule
+        \textbf{Model} & \textbf{Optimizer} & \textbf{Top-1 accuracy} & \textbf{Top-5 accuracy} \\ 
+        \midrule
+        \multicolumn{4}{c}{Train from scratch on ImageNet} \\
+        \midrule
+        \multirow{2}{*}{ResNet18} & AdamW & 69.34 & 88.71 \\
+         & INNAprop ($\alpha=0.1, \beta=0.9$) & \textbf{70.12} & \textbf{89.21} \\
+        \midrule
+        \multirow{2}{*}{ResNet50} & AdamW & 76.33 & 93.04 \\
+         & INNAprop ($\alpha=1.0, \beta=1.0$) & \textbf{76.43} & \textbf{93.15} \\
+        \midrule
+        \multirow{2}{*}{ViT-B/32} & AdamW & 75.02 & 91.52 \\
+         & INNAprop ($\alpha=0.1, \beta=0.9$) & \textbf{75.23} & \textbf{91.77} \\
+        \bottomrule
+    \end{tabular}
+        }}
+    \end{center}
+\end{table*}
+
+\paragraph{Fintetuning VGG11 and ResNet18 models on Food101:}
+We fine-tuned ResNet-18 and VGG-11 models on the Food101 dataset \citep{bossard2014food} for 20 epochs, using pre-trained models on ImageNet-1k. Since weight decay and learning rate values for AdamW were not found in the literature, we chose the default AdamW weight decay value, $\lambda = 0.01$. We used a cosine scheduler and tried one run for each initial learning rate value in $\{10^{-5}, 5 \times 10^{-5}, 10^{-4}, 5 \times 10^{-4}, 10^{-3}\}$. The best result for AdamW was obtained for $\gamma_0 = 10^{-4}$, and we kept the same setting for INNAprop. See for this \Cref{fig:food101}, where INNAprop performs no worse than AdamW on three random seeds. 
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[width=\textwidth]{figures/finetune_vgg11_food101.pdf}
+    \caption{\footnotesize Finetuning a VGG11 on Food101. Left: train loss, middle: test accuracy (\%), right: train accuracy (\%). 3 random seeds.}
+    \label{fig:food101}
+\end{figure}
+
+\paragraph{Conclusion and recommendation for image classification:}
+Tuning $(\alpha, \beta)$ significantly impacts training. Based on heatmaps in Section \ref{sec:tuneinnaprop} and figures in Section \ref{sec:imagexp}, we recommend using $\alpha = 0.1$ and $\beta \in [0.5, 1.5]$ for shorter training (e.g., fine-tuning). For longer training, $\alpha, \beta \geq 1$ is preferable. In both cases, our algorithm either matches or outperforms AdamW.
+
+\subsection{Pre-training and fine-tuning GPT2}
+\label{sec:llmxp}
+We present experimental results on LLMs using the hyperparameters selected as in Section \ref{sec:tuneinnaprop}.
+
+\paragraph{Training GPT-2 from scratch:}
+ For all models, gradients are clipped to a norm of 1, following \cite{mishchenko2023prodigy, liu2023sophia, brown2020language}. We use AdamW with hyperparameters from the literature \citep{liu2023sophia, brown2020language}, the standard configuration for LLM pre-training. The reported RMSprop parameter $\beta_2 = 0.95$ is different from AdamW's default (0.999), the weight decay is $\lambda=0.1$ and $\gamma_0$ depending on the network size (see \cite{brown2020language, liu2023sophia}). For example, GPT-2 small works with an initial learning rate $\gamma_0 = 6 \times 10^{-4}$. For INNAprop, we keep the same values for $\lambda$ and $\gamma_0$ as AdamW, and use the RMSprop parameter $\sigma = 0.99$ (corresponding to $\beta_2$ for AdamW), which provides the best results among values $\{0.9, 0.95, 0.99\}$ on GPT-2 mini. We use this setting for all our GPT-2 experiments with $(\alpha,\beta)=(0.1,0.9)$. The results are in \Cref{fig:gpt2-openwebtext}. INNAprop leads to a faster decrease in validation loss during the early stages compared to the baseline for GPT-2 models of Mini (30M), Small (125M), and Medium (355M) sizes. Its performance could be further improved with more thorough tuning of hyperparameters ($\alpha, \beta, \sigma, \lambda$).
+\begin{figure}[ht!]
+\centering
+\centering
+\includegraphics[width=\textwidth]{figures/gpt2_all_models_with_sophia.pdf}
+\caption{ \footnotesize GPT-2 training from scratch on OpenWebText.}
+\label{fig:gpt2-openwebtext}
+\end{figure}
+
+\paragraph{Fine-tune GPT-2 with LoRA:}
+Using LoRA \citep{hu2021lora}, we fine-tune the same GPT-2 models on the E2E dataset, consisting of roughly 42000 training 4600 validation, and 4600 test examples from the restauration domain. We compare AdamW and INNAprop for 5 epochs, as recommended in \cite{hu2021lora}. We use for both algorithms the same linear learning rate schedule, the recommended mini-batch size, and the RMSprop parameter ($\beta_2=\sigma=0.999$); these are listed in Table 11 in \cite{hu2021lora}. The results are displayed in Figure \ref{fig:gpt2-lora} and \Cref{tab:gpt2_table}, where we see the perplexity mean result over 3 random seeds. INNAprop with $(\alpha, \beta) = (0.1, 0.9)$ consistently achieves lower perplexity loss compared to AdamW across all GPT-2 fine-tuning experiments.
+
+\begin{figure}[ht!]
+\centering
+\includegraphics[width=\textwidth]{figures/gpt2_lora.pdf}
+\caption{\footnotesize Perplexity test with GPT-2 E2E Dataset with LoRA finetuning on five epochs. Three random seeds.}
+\label{fig:gpt2-lora}
+\end{figure}
+We synthetize the performance of our algorithm on LLMs below and we emphasize the capabilities of INNAprop compared to AdamW in the context of early training where gains are considerable.
+
+\begin{table}[h!]
+    \centering
+    \caption{\footnotesize Performance comparison for GPT-2 training from scratch on OpenWebText (validation loss) and fine-tuning with LoRA on the E2E dataset (perplexity).}
+    \label{tab:gpt2_table}
+    \setlength{\tabcolsep}{4pt}
+    \renewcommand{\arraystretch}{1.1}
+    {\fontsize{8}{10}\selectfont{
+    \begin{tabular}{l|c|c|c}
+        \toprule
+        \textbf{Model} & \textbf{AdamW best} & \textbf{INNAprop best} & \textbf{Steps to match AdamW} \\
+        \midrule
+        \multicolumn{4}{c}{\textbf{GPT-2 Training from scratch (Validation loss)}} \\
+        \midrule
+        GPT-2 mini & 3.57 & \textbf{3.47} & 51,000 ($1.96 \times$ faster) \\
+        GPT-2 small & 3.03 & \textbf{2.98} & 79,000 ($1.26 \times$ faster) \\
+        GPT-2 medium & 2.85 & \textbf{2.82} & 83,000 ($1.2 \times$ faster) \\
+        \midrule
+        \multicolumn{4}{c}{\textbf{GPT-2 with LoRA (Perplexity test)}} \\
+        \midrule
+        GPT-2 small & 3.48 & \textbf{3.44} & 19,000 ($1.31 \times$ faster) \\
+        GPT-2 medium & 3.20 & \textbf{3.17} & 20,000 ($1.25 \times$ faster) \\
+        GPT-2 large & 3.09 & \textbf{3.06} & 20,000 ($1.25 \times$ faster) \\
+        \bottomrule
+    \end{tabular}}
+    }
+\end{table}
+
+
+\section{Conclusion}
+
+INNAprop is an optimizer that leverages second-order geometric information while maintaining memory and computational footprints similar to AdamW. Experiments on text modeling and image classification show that INNAprop consistently matches or exceeds AdamW’s performance.
+
+We systematically favored AdamW through the choice of recommended hyperparameters (schedulers, learning rates, weight decay). Hyperparameter tuning for friction parameters $(\alpha, \beta)$ was conducted using a grid search on CIFAR-10 (see \Cref{fig:heatmaps_resnet_wd_0.0}).  Further experiments in that direction could greatly improve the efficiency of INNAprop.
+
+For language models, INNAprop with $(\alpha, \beta) = (0.1, 0.9)$ performs consistently well across all training durations, both for pre-training from scratch and for fine-tuning. We recommend that value for LLMs. Early training achieves notable successes (refer to \Cref{tab:gpt2_table}).
+
+In image classification, $(\alpha, \beta) = (0.1, 0.9)$ 
+ accelerates short-term learning, while higher values like $(\alpha, \beta) = (2.0, 2.0)$ improve test accuracy during longer training runs. Moreover, $(\alpha, \beta) = (2.0, 2.0)$ is effective for fine-tuning, offering a good balance between convergence speed and final accuracy. 
+
+These experiments illustrate consistent performances of the proposed method over a diversity of benchmarks, architecture, and model scales, making INNAprop a promising competitor for the training of large neural networks.  Future research will be focused on the design of schedulers for the hyperparameters $\alpha$ and $\beta$. 
+
+\newpage
+
+
+
+

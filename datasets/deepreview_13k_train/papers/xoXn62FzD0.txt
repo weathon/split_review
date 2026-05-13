@@ -1,0 +1,206 @@
+\title{Syntactic and Semantic Control of Large Language Models via Sequential Monte Carlo}
+
+\begin{abstract}
+A wide range of LLM applications require generating text that conforms to syntactic or semantic constraints. Imposing such constraints nontrivially alters the distribution over sequences, usually making exact sampling intractable. In this work, building on the Language Model Probabilistic Programming framework of Lew et al. (2023), we develop an approach to approximate inference for controlled LLM generation based on sequential Monte Carlo (SMC). Our SMC framework allows us to flexibly incorporate domain- and problem-specific constraints at inference time, and efficiently reallocate computation in light of new information during the course of generation. We demonstrate that our approach improves downstream performance on four challenging domains---Python code generation for data science, text-to-SQL, goal inference, and molecule synthesis. We compare to a number of alternative and ablated approaches, showing that our accuracy improvements are driven by better approximation to the full Bayesian posterior.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+The goal of controlled generation from language models (LMs) is to produce text guided by a set of syntactic or semantic constraints. One prominent setting for controlled generation is semantic parsing, or code generation, which involves generating text in a programming (or other formal) language. Much prior work in this space has focused on ensuring that the LM outputs adhere to the formal language using regular expressions or context-free grammars (Shin et al., 2021; Scholak et al., 2021; Poesia et al., 2022; Willard & Louf, 2023; Moskal et al., 2024; Ugare et al., 2024). But in practice, we may wish to use diverse signals beyond grammaticality to guide generation. For example:  
+
+• Checking (partial) code statically (type-checking, linting, partial evaluation);   
+• Running (partial) code on a test case and checking if it raises an error or returns the wrong answer;   
+• Simulating environments (e.g. in robotics or chemistry) and assigning a score to the resulting state;   
+• Rolling out possible completions of partial code and computing their max, min, or average score;   
+• Asking another language model to critique the code generated so far.  
+
+Such signals vary along several important dimensions: some are cheap to compute (linting), others are more costly (simulations); some can be evaluated incrementally with each sampled token (language model critique), others provide sparser guidance (running code); some enforce binary hard constraints (type-checking), others yield soft continuous scores (scoring).  
+
+One way to represent such signals uniformly is as potential functions $\phi:\mathcal{A}^{*}\to\mathbb{R}_{\geq0}$ , assigning non-negative scores to sequences of tokens from an alphabet $\boldsymbol{\mathcal{A}}$ . Given a set $\Phi$ of such potentials, we can then frame the problem of controlled generation probabilistically: we wish to sample from the global product of experts distribution on complete sequences $\textbf{\em x}$ . We define  
+
+$$
+p_{\mathrm{global}}({\pmb x})=\frac{1}{Z}\;p_{\mathrm{LM}}({\pmb x})\prod_{\phi\in\Phi}\phi({\pmb x}),
+$$  
+
+where $p_{\mathrm{{LM}}}$ is the LM’s distribution on complete token sequences, and $Z$ is the normalizing constant. Even when each $\phi$ can be evaluated relatively cheaply, sampling exactly from this distribution is generally intractable. Popular approaches based on per-token logit biasing or masking avoid the intractable global normalizing constant, but introduce greedy approximations that can badly distort the distribution (Lew et al., 2023; Park et al., 2024).  
+
+![](images/7600a49257d223ef650bc1984732a986fb78946096900309c74113cb587306eb.jpg)  
+Figure 1: Controlled generation from LLMs via sequential Monte Carlo. Left: We use sequential Monte Carlo to sample from high-quality approximations to Bayesian posteriors over LLM outputs. Partial sequences are repeatedly extended via grammar-constrained generation. We then apply weight corrections to mitigate the greediness of locally constrained decoding, as well as semantic potentials to encode rich information that cannot be included in logit masks. Finally, resampling focuses computation on promising particles. Right: Cumulative accuracy gains from these innovations, on challenging data science, text-to-SQL, goal inference, and molecule synthesis benchmarks.   
+054 055 056 057 058 059 060 061 062 063 064 065 066 067 068 069 070 071 072 073 074 075 076 077 078 079 080 081 082 083 084 085 086 087 088 089 090 091 092 093 094 095 096 097 098 099 100 101 102 103 104 105 106 107  
+
+Unnormalized densities over token sequences also arise in other difficult language modeling problems, such as infilling, prompt engineering, and prompt intersection, where Sequential Monte Carlo has been proposed as an effective means of approximating these intractable distributions (Lew et al., 2023; Zhao et al., 2024). In this paper, we use sequential Monte Carlo to tackle a number of challenging semantic parsing problems, using incremental static and dynamic analyses to inform both proposal distributions and twist functions—algorithm components that in previous work were learned via a costly contrastive fine-tuning procedure (Zhao et al., 2024). Our approach enables us to flexibly integrate heterogeneous signals that capture both syntactic and semantic aspects of each domain.  
+
+Our paper makes the following contributions:  
+
+• SMC for Constrained Semantic Parsing. We develop a variant of sequential Monte Carlo specialized for semantic parsing and code generation under diverse syntactic and semantic constraints (§2). Unlike many previous frameworks for constrained decoding, our algorithm can integrate constraints that cannot be incrementally evaluated to compute masks on the entire token vocabulary, as well as constraints that can only be evaluated at irregular intervals during generation. • Empirical Evaluation of Performance in Diverse Domains. We implement our approach, and five baselines, in four challenging problem domains: Python code generation for data science, text-to-SQL, goal inference, and molecule synthesis (§3.1). We find that sequential Monte Carlo significantly improves performance across domains (§3.2). • Empirical Evaluation of Algorithm Components. We run ablation experiments, and find that improved performance can be attributed to three algorithmic components: weight correction, which mitigates the greediness of popular locally constrained decoding methods; semantic potentials, which incorporate useful signals that some baseline methods cannot integrate; and adaptive resampling, which adaptively focuses computation on partial sequences that look more promising. • Empirical Validation of the Probabilistic Perspective. We find that generation quality is correlated with how well each method approximates the global product of experts distribution, and that the global product of experts distribution is calibrated, in that higher-probability generations are more likely to perform well in each domain (§3.3).  
+
+
+
+\section{2 MONTE CARLO INFERENCE FOR CONSTRAINED SEMANTIC PARSING  }
+
+
+Notation. Let $\boldsymbol{\mathcal{A}}$ be a vocabulary of tokens, including a distinguished token EOS marking the end of a complete sequence. We write $A_{\mathsf{E}0\mathsf{S}}^{\ast}$ for the set of EOS-terminated token sequences, and $A^{*}$ for the set of prefixes of strings in $A_{\mathsf{E}0\mathsf{S}}^{\ast}$ . We use $\textbf{\em x}$ to refer to a sequence of tokens, with $x_{i}$ being the $i^{\mathrm{th}}$ token in the sequence. We use the notation $\mathbf{\Delta}x_{<t}$ to refer to the sequence $x_{1}\cdots x_{t-1}$ , and $\mathbf{\boldsymbol{x}}_{\leq t}$ to refer to the sequence $\mathbf{\nabla}x_{<t}x_{t}$ . Here, juxtaposition indicates sequence concatenation.  
+
+We consider a set $\Phi$ of domain- or task-specific potential functions that encode relevant constraints. Each potential function $\phi:\mathcal{A}^{*}\to\mathbb{R}_{\geq0}$ returns a non-negative real $\phi(x)$ when evaluated on some sequence $\textbf{\em x}$ , freely using any structure in the sequence so far. We assume that all potentials satisfy $\phi(\pmb{x})=0\implies\phi(\pmb{x}\pmb{y})=0$ , for all $\mathbf{\boldsymbol{x}},\mathbf{\boldsymbol{y}}$ such that $\pmb{x}\pmb{y}\in\mathcal{A}_{\mathsf{E}0\mathsf{S}}^{*}$ . Intuitively, this means it is safe to cancel a partial generation if $\phi(\pmb{x})=0$ , because there is no completion that can make $\phi$ positive.  
+
+A language model $p_{\mathrm{{LM}}}$ is a probability distribution on $\mathcal{A}_{\sf E O S}^{*}$ . Note that any such distribution factors autoregressively into a product of conditional next-token distributions:  
+
+$$
+p_{\mathrm{LM}}(\pmb{x})=\prod_{t=1}^{|\pmb{x}|}p_{\mathrm{LM}}(x_{t}\mid\pmb{x}_{<t}).
+$$  
+
+Target distribution. Our goal in controlled generation is to sample the global product of experts distribution induced by the potentials $\Phi$ , which we write as $\boldsymbol{\left[p_{\mathrm{LM}}\otimes\bar{\Phi}\right]}$ :  
+
+$$
+p_{\mathrm{global}}(\pmb{x})=[p_{\mathrm{LM}}\otimes\Phi](\pmb{x})=\frac{p_{\mathrm{LM}}(\pmb{x})\prod_{\phi\in\Phi}\phi(\pmb{x})}{\sum_{y\in\mathcal{A}_{\mathrm{tos}}^{*}}p_{\mathrm{LM}}(y)\prod_{\phi\in\Phi}\phi(y)}=\frac{1}{Z}p_{\mathrm{LM}}(\pmb{x})\prod_{\phi\in\Phi}\phi(\pmb{x}).
+$$  
+
+The distribution is normalized globally with respect to all possible complete sequences of tokens. When each potential function takes values in $[0,1]$ , $p_{\mathrm{global}}$ can be understood intuitively as the rejection sampling distribution that arises by repeatedly generating $x\sim p_{\mathrm{LM}}$ until a sample $\textbf{\em x}$ is accepted, where each sample $\textbf{\em x}$ is accepted with probability $\textstyle\prod_{\phi\in\Phi}{\bar{\phi}}(x)$ . Depending on how frequently raw samples from $p_{\mathrm{{LM}}}$ satisfy all the constraints, rejection sampling can be extremely expensive. Our work aims to accurately approximate $p_{\mathrm{global}}$ with much less computation.  
+
+Locally constrained decoding. A popular approach to enforcing constraints at decode-time is to apply constraints before sampling each token, as a mask or bias applied to the logits computed by the LM (see, e.g., Shin et al., 2021; Scholak et al., 2021; Poesia et al., 2022; Willard & Louf, 2023; Ugare et al., 2024). In this approach, at each time step $t$ , the current sequence $\mathbf{\deltax}_{<t}$ is extended with a new token xt, drawn proportionally to pLM(xt | x<t) ·  ϕ∈Φϕϕ((xx<<ttx)t) . Samples drawn in this way are distributed according to a local product of experts distribution, which we write $\left[p_{\mathrm{LM}}\odot\Phi\right]$ :  
+
+$$
+p_{\mathrm{local}}(\pmb{x})=[p_{\mathrm{LM}}\odot\Phi](\pmb{x})=\prod_{t=1}^{|\infty|}\frac{p_{\mathrm{LM}}(x_{t}\mid\pmb{x}_{<t})\prod_{\phi\in\Phi_{\mathrm{eff}}}\frac{\phi(\pmb{x}_{<t}x_{t})}{\phi(\pmb{x}_{<t})}}{\sum_{x_{t}^{\prime}\in A}p_{\mathrm{LM}}(x_{t}^{\prime}\mid\pmb{x}_{<t})\prod_{\phi\in\Phi_{\mathrm{eff}}}\frac{\phi(\pmb{x}_{<t}x_{t}^{\prime})}{\phi(\pmb{x}_{<t})}}.
+$$  
+
+Note that unlike in Eqn. 2, the normalization is now performed locally, once per token.  
+
+Despite its popularity, locally constrained decoding has two important shortcomings. First, the local product of experts can only be sampled efficiently when it is possible to cheaply evaluate the potentials $\phi\in\Phi$ on all possible one-token continuations $\mathbf{\boldsymbol{x}}_{<t}\boldsymbol{x}_{t}^{\prime}$ of the current sequence. For some constraints (e.g., checking membership in the language of a regular expression or context-free grammar), there do exist algorithms for efficient parallel evaluation across tens of thousands of possible continuations. However, for many of the applications of interest in the present paper (including those listed in Tab. 1, e.g., error-checking with test-cases), this is not feasible. Second, even when potential functions can be incrementally and cheaply computed, the local and global product of experts do not define the same distribution (Lew et al., 2023; Park et al., 2024). In particular, the local product enforces constraints greedily, which can lead to myopic sampling down dead-end paths. Continuations with high probability in the short run may have zero mass under a potential just a few steps later.  
+
+Importance sampling. Both these problems can be addressed with importance sampling, a standard Monte Carlo technique for approximating intractable distributions. We describe a particular application of the technique specialized to this setting. First, from the overall set of potentials $\Phi$ , we identify a subset of efficient potentials $\Phi_{\mathrm{eff}}$ f, which admit efficient computation of local normalizing constants. This means that the local product of experts $\left[p_{\mathrm{LM}}\odot\Phi_{\mathrm{eff}}\right]$ with respect to just $\Phi_{\mathrm{eff}}$ f can be tractably sampled; we use it as a proposal distribution. The importance sampling algorithm repeatedly generates multiple particles $\mathbf{x}^{(i)}\sim\left[p_{\mathrm{LM}}\odot\Phi_{\mathrm{eff}}\right]$ , then computes corresponding importance weights  
+
+$$
+v(\mathbf{x}^{(i)})=\frac{Z\cdot\lceil p_{\mathrm{LM}}\otimes\Phi\rceil(\mathbf{x}^{(i)})}{\lceil p_{\mathrm{LM}}\odot\Phi_{\mathrm{eff}}\rceil(\mathbf{x}^{(i)})}=\left(\prod_{t=1}^{|\mathbf{x}^{(i)}|}\sum_{x_{t}^{\prime}\in A}p_{\mathrm{LM}}(x_{t}^{\prime}\mid\mathbf{x}_{<t}^{(i)})\prod_{\phi\in\Phi_{\mathrm{eff}}}\frac{\phi(\mathbf{x}_{<t}^{(i)}x_{t}^{\prime})}{\phi(\mathbf{x}_{<t}^{(i)})}\right)\cdot\prod_{\phi\in\Phi\setminus\Phi_{\mathrm{eff}}}\phi(\mathbf{x}^{(i)}).
+$$  
+
+The first term in the weight is a product of local normalizing constants that are already computed as a byproduct of sampling the local product of experts. The second term can be computed by running each of the less efficient potentials once, on the final generated sequence. The first term corrects for the greediness of locally constrained decoding, penalizing particles that wound up in “dead ends” where all possible continuations $x_{t}^{\prime}\,\in\,A$ scored poorly under some potential. The second term multiplies in the potentials that were not directly accounted for during the sample generation process.  
+
+Given samples $\pmb{x}^{(1)},\cdots\pmb{x}^{(N)}$ , importance sampling approximates the posterior using the distribution $\begin{array}{r}{\sum_{i=1}^{N}\frac{w(\pmb{x}^{(i)})}{\sum_{j=1}^{N}w(\pmb{x}^{(j)})}\,\cdot\,\delta_{\pmb{x}^{(i)}}}\end{array}$ . Under mild conditions, this approximation converges to the posterior as $N$ grows — however, the number of particles required to obtain a good approximation of the target distribution is exponential in the KL divergence between proposal and target (Chatterjee & Diaconis, 2018). This means that, in practice, if the local product of experts is too far from the target distribution, sampling and weighting a modest number of particles will not help.  
+
+Sequential Monte Carlo. One avenue for improvement comes from noticing that importance sampling waits until a particle has been completely generated before computing its weight. This is despite the fact that some terms in the weight can, in principle, be computed early, given just a partial sequence: at each step, we can compute a new local normalizing constant for the local product of experts, and even the less efficient potentials may be able to provide some useful signal before the entire sequence is generated. Sequential Monte Carlo (SMC; Chopin et al., 2020), is a natural generalization of importance sampling that samples from a sequence of related target distributions $p_{1},\ldots,p_{T}$ on state spaces of increasing dimension. In our case, we consider intermediate targets $p_{t}$ defined on the growing sequence of spaces $A_{\le t}^{\ast}=\{\pmb{x}\in\mathcal{A}^{\ast}\mid\exists\pmb{y}\in\mathcal{A}_{\mathsf{E0S}}^{\ast}$ . $\pmb{x}=\pmb{y}_{\leq t}\}$ . The targets are defined as partial-sequence versions of the global product of experts. For $\pmb{x}\in A_{\leq t}^{*}$ , we have  
+
+$$
+p_{t}(\pmb{x})=\frac{\left(\prod_{i=1}^{|\pmb{x}|}p_{\mathrm{LM}}(x_{i}\mid\pmb{x}_{<i})\right)\prod_{\phi\in\Phi}\phi(\pmb{x})}{\sum_{\pmb{y}\in\mathcal{A}_{\pmb{\xi}^{t}}^{*}}\left(\prod_{i=1}^{|\pmb{y}|}p_{\mathrm{LM}}(y_{i}\mid\pmb{y}_{<i})\right)\prod_{\phi\in\Phi}\phi(\pmb{y})}.
+$$  
+
+The key difference between the global product of experts and $p_{t}$ is that $p_{t}$ is defined on, and normalized with respect to, possibly incomplete token sequences of at most length $t$ , rather than complete sequences of arbitrary length. As such, unlike both $p_{\mathrm{global}}$ and $p_{\mathrm{local}}$ , $p_{t}$ depends on the behavior of the potentials $\phi\in\bar{\Phi}\setminus\bar{\Phi}_{\mathrm{eff}}$ when applied to partial sequences. But no matter how the partial potentials are defined, as $t$ approaches $\infty$ , $p_{t}(\pmb{x})$ approaches $p_{\mathrm{global}}(x)$ for all complete sequences $\pmb{x}\in\mathcal{A}_{\mathsf{E}0\mathsf{S}}^{*}$ .  
+
+The sequential Monte Carlo algorithm generates approximations to each intermediate target in turn. We begin with a collection of $N$ weighted particles $(\mathbf{x}^{i},w_{0}^{i})=(\epsilon,1)$ , where $\epsilon$ is the empty sequence of tokens. Then, starting at $t=1$ , we repeat the following three steps until all particles are EOS-terminated:  
+
+1. Extend. For each $i\in{1,\dots,N}$ , if $\pmb{x}^{(i)}\not\in\mathcal{A}_{\mathsf{E}0\mathsf{S}}^{*}$ , propose $\boldsymbol{x}_{t}^{(i)}\sim[p_{\mathrm{LM}}\odot\Phi_{\mathrm{eff}}](\boldsymbol{x}_{t}^{(i)}\mid\boldsymbol{x}_{<t})$ .  
+
+2. Reweight. For each extended particle $\pmb{x}^{(i)}$ , update the weight $w^{(i)}$ according to the formula  
+
+$$
+\begin{array}{r l}&{w_{t}^{(i)}=w_{t-1}^{(i)}\frac{Z_{t}p_{t}\left(\mathbf{x}^{(i)}\right)}{Z_{t-1}p_{t-1}\left(x_{<t}^{(i)}\right)}\frac{1}{\left[p_{\mathrm{LM}}\odot\Phi_{\mathrm{eff}}\right]\left(x_{t}^{(i)}\mid x_{<t}^{(i)}\right)}}\\ &{\phantom{m m m m m}=w_{t-1}^{(i)}\cdot\left(\sum_{x_{t}^{\prime}\in A}p_{\mathrm{LM}}(x_{t}^{\prime}\mid x_{<t}^{(i)})\prod_{\phi\in\Phi_{\mathrm{eff}}}\frac{\phi\left(x_{<t}^{(i)}x_{t}^{\prime}\right)}{\phi\left(\mathbf{x}_{<t}^{(i)}\right)}\right)\cdot\prod_{\phi\in\Phi\setminus\Phi_{\mathrm{eff}}}\frac{\phi\left(x^{(i)}\right)}{\phi\left(x_{<t}^{(i)}\right)}.}\end{array}
+$$  
+
+3. Resample. If the effective sample size $\begin{array}{r}{\widehat{N}_{\mathrm{ess}}:=\left(\sum_{i=1}^{N}(w^{(i)})^{2}\right)^{-1}}\end{array}$ is under a chosen threshold (e.g., $\frac{N}{3})$ , perform a resampling step: generate $N$ independent ancestor indices  
+
+$$
+a^{(i)}\sim\mathrm{Categorical}\left(\frac{w_{t}^{(1)}}{\sum_{j=1}^{N}w_{t}^{(j)}},\cdot\cdot\cdot,\frac{w_{t}^{(N)}}{\sum_{j=1}^{N}w_{t}^{(j)}}\right),
+$$  
+
+then simultaneously reassign all particles $\begin{array}{r}{({\pmb x}^{(i)},{\boldsymbol w}_{t}^{(i)})\gets({\pmb x}^{(a^{(i)})},\frac{1}{N}\sum_{j=1}^{N}{\boldsymbol w}_{t}^{(j)}).}\end{array}$  
+
+The extension step generates next tokens from the local product of experts proposal, just as in importance sampling. The reweighting step incrementally computes the importance weight, with a new factor at each token. The resampling step exploits any early signal available in the incremental weights to reallocate computation to promising particles (which are likely to be chosen as ancestors multiple times) and away from unpromising particles (which are unlikely to be chosen as ancestors, and will thus be culled before they can be completed). This reallocation of computation can lead to dramatic improvements in inference quality.  
+
+Further extensions. We further extend SMC in two ways. First, potentials in $\Phi_{\mathrm{eff}}$ f may still be modestly expensive to evaluate on the entire vocabulary. In these cases, we can develop cheap stochastic approximations to the full token-masking distributions $[p_{\mathrm{LM}}\odot\Phi_{\mathrm{eff}}](x_{t}\mid\mathbf{\lambda}x_{<t})$ , and use these as proposals during the Extend step. Second, the intermediate targets $p_{t}$ needn’t advance generation token-by-token; in some domains it may be beneficial to consider more semantically meaningful increments. For example, the intermediate target $p_{t}$ may be defined over the space of all partial Python programs containing $t$ or fewer lines of code (rather than tokens); the Extend step would then sample a different number of tokens per particle, waiting in each partial sequence until a new full line has been generated. Such strategies can lead to better particle alignment (Lundén et al., 2018), making resampling more effective. We exploit this in one of our experiments by implementing SMC steps over Python statements (§3.1).  
+
+
+
+\section{3 EXPERIMENTS  }
+
+
+We study the performance of our proposed sampling methods on four challenging semantic parsing domains: Goal Inference (STRIPS), Data Science (Python), Text-to-SQL (SQL), and Molecular Synthesis (SMILES). We compare seven approaches to constrained generation:  
+
+1. Language model $(p_{\mathrm{LM}})$ . As a baseline, we report the performance of the base language model (see $\S3.1$ for details on the language models used).   
+2. Language model with grammar constraint (Locally-constrained decoding; target: $\big[p_{\mathrm{LM}}\odot\phi_{\mathrm{CFG}}\big],$ ). This is the approach used by much prior work (Shin et al., 2021; Scholak et al., 2021; Poesia et al., 2022; Willard & Louf, 2023; Moskal et al., 2024; Ugare et al., 2024). In each of our domains, we formulate a context-free grammar (CFG) encoding a notion of syntactic well-formedness appropriate for the domain (see $\S3.1\rangle$ ). Writing $\phi_{\mathrm{CFG}}$ for the binary function that determines whether its input is a prefix of some valid string in the grammar’s language, this baseline directly samples the local product-of-experts $\big[p_{\mathrm{LM}}\odot\phi_{\mathrm{CFG}}\big].$ —i.e., it uses per-token logit masking to greedily enforce the CFG constraint.   
+3. Language model with grammar constraint and weight correction (Grammar-only IS; target: $\[p_{\mathrm{LM}}\otimes\phi_{\mathrm{CFG}}],$ ). This method generates particles from $\left[p_{\mathrm{LM}}\odot\phi_{\mathrm{CFG}}\right]$ , then computes importance  
+
+Table 1: Tasks, languages, their corresponding constraint-encoding potential functions, and an example output.   
+
+![](images/74919a028346ca521b296d58359dba020f98c5b94e8d9712688b91e199b2657b.jpg)  
+
+weights to correct toward the target $\left[p_{\mathrm{LM}}\otimes\phi_{\mathrm{CFG}}\right]$ . These weights mitigate some of the greediness of local-product-of-experts sampling, but do not yet integrate any potentials beyond $\phi_{\mathrm{CFG}}$ .  
+
+4. Language model with grammar constraint, weight correction and resampling (Grammar-only SMC; target: $\begin{array}{r}{[p_{\mathrm{LM}}\otimes\bar{\phi_{\mathrm{CFG}}}],}\end{array}$ ). This method is a straightforward application of Lew et al. (2023) to locally-constrained decoding; and is similar to Park et al. (2024), which also attempts to correct for the greediness of locally-constrained decoding. As in the previous method, it targets $\left[p_{\mathrm{LM}}\otimes\phi_{\mathrm{CFG}}\right]$ but uses resampling to reallocate computation to promising particles.  
+
+5. Language model with grammar constraint and semantic potential (Sample-Rerank; target: $[\lceil p_{\mathrm{LM}}\odot]$ $\phi_{\mathrm{CFG}}]\otimes\phi_{\mathrm{sem}}]\rangle$ )). Sample-Rerank is a common approach for incorporating an external signal into an LM’s generations post-hoc, for instance a reward model (e.g. (Nakano et al., 2021)), or a boolean encoding validity (e.g. (Olausson et al., 2023)). In each domain, we formulate an additional potential $\phi_{\mathrm{sem}}$ that encodes task-specific signals of sequence quality (see $\S3.1)$ . This baseline generates grammar-constrained sequences from the local product of experts $\left[p_{\mathrm{LM}}\odot\phi_{\mathrm{CFG}}\right]$ , then for each sequence $\textbf{\em x}$ , computes the weight $w(\pmb{x})=\phi_{\mathrm{sem}}(\pmb{x})$ .  
+
+6. Language model with grammar constraint, weight correction, and semantic potential (Full IS; target: $\left[p_{\mathrm{LM}}\otimes\left\{\phi_{\mathrm{CFG}},\phi_{\mathrm{sem}}\right\}\right]$ . This is the full importance sampling method described in $\S2$ , with $\Phi=\{\phi_{\mathrm{CFG}},\phi_{\mathrm{sem}}\}$ and $\Phi_{\mathrm{eff}}=\{\phi_{\mathrm{CFG}}\}$ . Unlike in the previous method, the importance weights now include correction terms that mitigate the greediness of local sampling. We include this method primarily as an ablation of our next method (SMC), modified not to include incremental resampling.  
+
+7. Language model with grammar constraint, weight correction, semantic potential, and resampling (Full SMC; target: $\left[p_{\mathrm{LM}}\otimes\left\{\phi_{\mathrm{CFG}},\phi_{\mathrm{sem}}\right\}\right]$ . This method includes all of the algorithmic contributions of our approach. It is the full sequential Monte Carlo algorithm, with $\Phi_{\mathrm{eff}}=\left\{\phi_{\mathrm{CFG}}\right\}$ and $\Phi\,=\,\{\phi_{\mathrm{CFG}},\phi_{\mathrm{sem}}\}$ . It targets the same global posterior as the previous method but uses resampling to reallocate computation to promising particles.  
+
+We report results using $N=10$ particles; see App. A.2 for downstream accuracy results for a varying number of particles. We ran experiments on GCP instances with 1 A100 GPU and 12 vCPUs (our CFG parser is implemented for CPU and is parallelized across particles), with the exception of the Data Science domain, for which we used 4 H100 GPUs and 64 vCPUs.  
+
+3.1 DOMAINS  
+
+  
+
+• Goal inference (Planetarium). Task: Produce a formal description of an agent’s goal in the STRIPS subset of the PDDL planning language (Fikes & Nilsson, 1971; Aeronautiques et al., 1998), given a natural-language description of the goal, as well as PDDL code describing the agent’s initial conditions and plan for achieving the goal. Data: Blocksworld tasks with up to 10 objects, from the Planetarium benchmark (Zuo et al., 2024). Metric: Accuracy with respect to ground-truth PDDL goal. Base LM: Llama 3.1 8B. Grammar: STRIPS syntax for goals within Planetarium Blocksworld’s domain definition. Semantic Potential: Evaluation (using the VAL plan validator (Howey et al., 2004)) of whether the known plan, when executed in the known initial conditions, can be proven not to satisfy the (partial) goal.  
+
+Table 2: Comparison of different methods with their scores on different domains. Errors are bootstrapped $95\%$ confidence intervals.   
+
+![](images/e0e5f01d1ef714e94628ebda07a6915fec04a6eb2f8142b3239f4898a16c54a3.jpg)  
+
+• Python for data science (DS-1000). Task: Generate Python code that uses standard data science libraries (NumPy, PyTorch, Pandas, etc.) to solve a task specified in natural language and via an (executable) test case. Data: The DS-1000 benchmark (Lai et al., 2023). Metric: Accuracy of the generated program with respect to the provided test cases. Base LM: Llama 3 70B. Grammar: We use a trivial potential $\phi_{\mathrm{CFG}}(\mathbf{x})=1$ , as we find that the unconstrained LM reliably generates grammatical Python (that may nonetheless induce runtime errors). Semantic Potential: Given a partial program $\textbf{\em x}$ , $\phi_{\mathrm{sem}}$ truncates $\textbf{\em x}$ to the last-generated newline not ending in :, and executes the resulting (partial) program on the provided test case, checking for runtime errors.  
+
+• Text-to-SQL (Spider). Task: Given a relational database schema and a natural-language question, generate a SQL query that answers the question. Data: The development split of Spider (Yu et al., 2018), a large-scale text-to-SQL dataset. Metric: Execution accuracy (whether the generated SQL query, when run against a test database, produces the same results as the ground-truth SQL query). Base LM: Llama 3.1 8B-Instruct. Grammar: We use the SQL context-free grammars released by Roy et al. (2024), which enforce valid SQL syntax and also schema-specific constraints that limit table and column names to those present in the given schema. Semantic Potential: Check whether column names in the generated (partial) query actually belong to the queried tables, modulo aliasing. (The grammar ensures only that the column names exist in some table.)  
+
+• Molecular synthesis (GDB-17). Task: Generate drug-like molecules in the SMILES format (Weininger, 1988). Data: Few-shot prompts constructed by repeatedly choosing 20 random examples from the GDB-17 dataset (Ruddigkeit et al., 2012). Metric: Quantitative Estimate of Drug-likeness (QED; Bickerton et al., 2012), a standard molecular ftiness function implemented in the Python RDKit library (Landrum et al., 2024); additional molecular properties of interest are reported in App. E.2. Base LM: Llama 3.1 8B. Grammar: SMILES syntax for molecules. Semantic Potential: A SMILES prefix validator implemented in the Python partialsmiles library (O’Boyle, 2024), which checks syntax, atom valences, and the ability to kekulize aromatic systems.  
+
+
+
+\section{3.2 EVALUATION OF DOWNSTREAM PERFORMANCE  }
+
+
+We begin by investigating whether our approach leads to significant performance gains. Table 2 reports posterior-weighted accuracy for our approach and ablations of its components: grammar constraints, weight corrections, semantic potentials, and resampling. We summarize four key results:  
+
+Grammar constraints. In line with previous literature (e.g., Shin et al., 2021; Scholak et al., 2021; Poesia et al., 2022; Wang et al., 2024), we find that the addition of a grammar constraint $\phi_{\mathrm{CFG}}$ improves downstream accuracy relative to the base LM across all domains in which it is used, even without the use of weight corrections.  
+
+Semantic potentials. Furthermore, we observe that integrating the semantic potential $\phi_{\mathrm{sem}}$ improves accuracy in models with and without any weight corrections. In the latter case, the improvement in the goal inference, data science and molecular synthesis domains is large; in the text-to-SQL domain, it is smaller but statistically significant (paired permutation test, $p<0.01)$ ). This suggests that making use of information that cannot be efficiently encoded in logit masks can greatly improve performance, even without the use of weight corrections.  
+
+Weight corrections. Although the use of $\phi_{\mathrm{CFG}}$ and $\phi_{\mathrm{sem}}$ alone lead to significant gains in downstream accuracy, these gains can be amplified with addition of weight corrections. In cases without the semantic potential, weight corrections provide significant albeit relatively small gains in accuracy across three domains; in goal inference it does not significantly affect performance. In the presence  
+
+![](images/e764cc8a3fc4518d71f73dcad4b97d5f7a831c95d0516544a37fa42c7cd4d14e.jpg)  
+
+Figure 2: Estimated KL between the algorithm and the global product of experts, for a representative problem instance in each domain. Values closer to 0 indicate that the algorithm is better at approximating the global product of experts $\left[p_{\mathrm{LM}}\otimes\left\{\phi_{\mathrm{CFG}},\phi_{\mathrm{sem}}\right\}\right]$ . Significant differences are indicated with $^{\ast\ast}\ast$ for $p<0.01$ and $^{\ast\ast\ast\ast}$ for $p<0.001$ (t-test). Algorithms are run with $N=10$ particles.  
+
+of the semantic potential, adding weight corrections improves accuracy for text-to-SQL, and has no effect in goal inference and molecular synthesis. Overall, these results indicate that debiasing samples from a local product of experts to correctly target the global product of experts can significantly improve downstream accuracy. That said, the accuracy gains attributable to weight corrections are modest compared to other components of the algorithm, which suggests that the bias from locally constrained decoding may be less severe in these semantic parsing domains than has been observed in other domains (e.g. constrained generation of natural language (Lew et al., 2023)).  
+
+Resampling. Finally, we observe that the addition of resampling steps improves downstream accuracy in all domains except text-to-SQL, in which they neither significantly improve nor hurt performance. These results motivate adaptively focusing computation on promising partial sequences.  
+
+3.3 VALIDATION OF THE PROBABILISTIC PERSPECTIVE  
+
+The best-performing methods from the previous section were designed to approximate the global product of experts distribution $\left[p_{\mathrm{LM}}\otimes\left\{\phi_{\mathrm{CFG}},\phi_{\mathrm{sem}}\right\}\right]$ . In this section, we investigate how closely each of these methods approximates this global distribution, and whether the quality of the probabilistic inference correlates with the downstream performance results from the previous section. In particular, we investigate several questions:  
+
+1 For each $q_{\mathrm{alg}}^{\mathrm{r}}$ , we computed an estimate of $\log Z-D_{\mathrm{KL}}(q_{\mathrm{alg}}^{\mathrm{r}}\parallel\left[p_{\mathrm{LM}}\otimes\left\lbrace\phi_{\mathrm{CFG}},\phi_{\mathrm{sem}}\right\rbrace\right])$ . We refer to this quantity as the approximation quality. Since the term $\log{Z}$ is algorithm-independent, we can directly compare the estimated approximation quality across algorithms to determine which ones have lower KL divergence relative to the global product of experts. However, because $\log{Z}$ is instance-specific, these comparisons can only be made at the instance level. Accordingly, for each domain, we select the instance with the median unique accuracy as a representative example. Figure 2 visualizes estimated approximation quality on these examples across the three methods which include $\phi_{\mathrm{sem}}$ : (i) Sample-Rerank; (ii) Full IS (iii) Full SMC.2 This set of methods can be viewed as the cumulative addition of weight corrections and resampling steps to the language model with grammar constraint and semantic potential. Estimates were computed across 100 runs of each algorithm.  
+
+Table 3: Pearson correlation between relative particle weights and accuracy scores for all weighted methods. Greater correlation indicates that relative weights are better associated with downstream performance (closer to 1 is better).  
+
+![](images/b40cfa70ddec1c6fb2f5d7bfe2ce01b2e7f25fdcc44ed8f2c2a93905037a9287.jpg)  
+
+![](images/3ab89e78becba605467e19213123b0e741285fc566896b29eed0ea2ea1b097f3.jpg)  
+Figure 3: Visualization of posterior distributions for key molecular property indexes. Middle: Qualitative Estimate of Drug-likeness (QED), used as the main evaluation metric in Tab. 2. Right: Additional metrics of interest Validity (proportion of valid SMILES), Weight (exact molecular weight), De Novo Similarity (average pairwise Tanimoto similarity to the target distribution, excluding exact duplicates), and Diversity (inverse average pairwise Tanimoto similarity among compounds generated by a particular method). Of the generation methods evaluated, Full SMC achieves near- $100\%$ validity and most closely matches the target data distribution (GDB-17).  
+
+In this work, our algorithms aim to unify and improve on each of these bodies of preceding work, tackling semantic parsing and code generation tasks with a combination of grammar constraints $\displaystyle(\phi_{\mathrm{CFG}})$ , arbitrary semantic potentials $(\phi_{\mathrm{sem}})$ , and asymptotically correct inference (via SMC).  
+
+In the space of conditional generation via approximate posterior inference through sampling, there are a few neighboring efforts. Lin & Eisner (2018) trained an SMC proposal distribution for a globally normalized neural tagger. Lew et al. (2023) proposed SMC steering of LMs, enabling provably accurate posterior sampling from conditional densities while only ever computing local constraints. This work forms the basis of the SMC algorithms designed and implemented in this paper. Shortly thereafter, Zhao et al. (2024) independently developed a framework for steering LMs via SMC, including the use of learned twist functions that act as intermediate targets. In contrast to their work, we leverage incremental static and dynamic analysis to guide compute to promising partial sequences during generation, as opposed to undergoing a costly contrastive fine-tuning procedure. Concurrent with our work, Park et al. (2024) have highlighted the distinction between locally-constrained vs globally-aligned decoding from LMs subject to grammar constraints. The authors presented an iterative inference algorithm with a slow-converging approximation to the true posterior. This approach was also optimized for CFG constraints, as opposed to an arbitrary broader collection of multiple intersecting potentials.  
+
+  
+
+
+
+\section{5 DISCUSSION  }
+
+
+The experiments in this paper show that it is possible to obtain significant improvements in controlled generation quality by wrapping language model generations in global probabilistic inference algorithms that account for varied constraints. Furthermore, the experiments demonstrate that generation quality is correlated with the probability of generation under our methods, and methods that better approximate the global product of experts also have better downstream performance.  
+
+Our approach offers a modular way to improve performance across a broad class of controlled generation problems, especially where task-specific structure can be captured in semantic potentials. One possible source of potentials in many domains is the static analyses implemented efficiently in language servers, which IDEs use to incrementally detect problems in code as users type.  
+
+This paper has not extensively explored the auxiliary benefits of taking a principled probabilistic approach to constrained generation. As one example, the weights that are maintained and updated by our SMC algorithm are unbiased estimates of the global product of experts’ normalizing constant, which can be interpreted as the probability that the unconstrained language model would have happened to satisfy all the constraints. This could be a proxy for whether a problem instance is in- or out-of-distribution for a model. Using such probabilistic quantities (also including, e.g., posterior uncertainty over parses), we may be able to build more rational systems, that ask clarifying questions or defer to larger models when there is reason to believe it may help.  
+
+
+

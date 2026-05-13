@@ -1,8 +1,8 @@
 # Joint Reward and Policy Learning with Demonstrations and Human Feedback Improves Alignment
 
 - Decision: Accept
-- Avg Score: 4.00
-- Scores: 5, 8, 6, 1, 0
+- Avg Score: 7.25
+- Scores: 5, 8, 6, 10
 
 ## Abstract
 Aligning to human preferences and/or intentions is an important requirement for contemporary foundation models. To ensure alignment, popular approaches such as reinforcement learning with human feedback (RLHF) break down the task into three stages: (i) a model is computed with supervised fine-tuning (SFT) based upon large demonstrations data, (ii) a reward model (RM) is estimated based upon human feedback data, and (iii) reinforcement learning (RL) is used to further refine the SFT model by optimizing the estimated reward model.  Demonstrations and human feedback data reflect human user preferences in different ways. As a result, the reward model estimate obtained from only human feedback data is likely not as accurate as a reward model estimate obtained from both demonstration and human feedback data. A policy model that optimizes the reward model estimate obtained from both demonstration and human feedback data will likely exhibit better alignment performance. We introduce a tractable algorithm for finding the reward and policy models and provide a finite-time performance guarantee. Additionally, we demonstrate the efficiency of the proposed solution with extensive experiments including alignment problems in LLMs and robotic control problems in MuJoCo. We observe that the proposed solutions outperform the existing alignment algorithm by large margins, especially when the amounts of demonstration and preference data are unbalanced.

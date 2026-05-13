@@ -1,8 +1,8 @@
 # SoftCVI: Contrastive variational inference with self-generated soft labels
 
 - Decision: Accept
-- Avg Score: 4.00
-- Scores: 6, 5, 1, 0, 8
+- Avg Score: 7.25
+- Scores: 6, 5, 10, 8
 
 ## Abstract
 \noindent

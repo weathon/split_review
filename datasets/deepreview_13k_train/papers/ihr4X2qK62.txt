@@ -1,0 +1,558 @@
+\title{Choosing Public Datasets for Private Machine Learning via Gradient Subspace Distance}
+
+\begin{abstract}
+Differentially private stochastic gradient descent privatizes model training by injecting noise into each iteration, where the noise magnitude increases with the number of model parameters.
+  Recent works suggest that we can reduce the noise by leveraging public data for private machine learning, by projecting gradients onto a subspace prescribed by the public data. 
+  However, given a choice of public datasets, it is not a priori clear which one may be most appropriate for the private task. 
+  We give an algorithm for selecting a public dataset by measuring a low-dimensional subspace distance between gradients of the public and private examples. We provide theoretical analysis demonstrating that the excess risk scales with this subspace distance.
+  This distance is easy to compute and robust to modifications in the setting.  
+  Empirical evaluation shows that trained model accuracy is monotone in this distance.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Recent work has shown that machine learning (ML) models tend to memorize components of their training data~\cite{model-memorize-data}, and in fact attackers can often recover training samples from published models through carefully designed attacks \cite{extract-gpt2, membership-infer}.
+This is a critical privacy issue when models are trained on private data. A popular approach to address this issue is to adopt 
+\textit{Differential Privacy} (DP) \cite{dwork-dp} as a rigorous privacy criterion that provably limits the amount of information attackers can infer about any single training point. \textit{Differentially private stochastic gradient descent} (DPSGD) \cite{DP-SGD, dpsgd2, dpsgd3} is one of the most commonly used methods to train a ML model (differentially) privately. It makes two main modifications to vanilla SGD: 1) clipping per-sample gradients to ensure a bound on their $\ell_2$ norms; 2) adding Gaussian noise to the gradient.
+
+One downside of adopting DP in ML is that we need to sacrifice utility of the trained model to guarantee privacy. Specifically, DPSGD noises the gradient at each step, with noise drawn from a spherical Gaussian distribution, $\mathcal{N}\left(\mathbf{0}, \sigma^{2} \mathbb{I}_{p\times p}\right)$, where $p$ is the model dimension (i.e., the number of model parameters) and the variance $\sigma^{2}$ scales the noise.
+In order to bound the privacy leakage, the magnitude of noise introduced in each step must scale with the square root of the number of parameters $p$.
+Consequently, for many large models, the noise introduced may overwhelm the signal contributed by the original gradients, significantly diminishing the utility.
+
+Several works have proposed methods to improve the utility of private machine learning~\cite{bypass,aws,cvpr,donot,KairouzRRT21}. One fruitful direction uses \emph{public} data, i.e., data that is not subject to any privacy constraint.
+There are primarily two types of approaches that incorporate public data in private training.
+The first involves \emph{transfer learning}, where we pretrain the model on a public dataset and then (privately) finetune the model on a sensitive dataset for our target task~\cite{cvpr, DP-SGD,YuNBGIKKLMWYZ22,LiTLH22}. Another approach is based on \emph{pre-conditioning}, which exploits the empirical observation that during training, the stochastic gradients (approximately) stay in a lower-dimensional subspace of the $p$-dimensional gradient space. Consequently, some works find this subspace using the public data, and then project the sensitive gradients to this (public) subspace before privatization~\cite{bypass,aws,donot,KairouzRRT21}.
+This reduces the magnitude of the introduced noise and generally improves utility over DPSGD without supplementary data.
+
+However, this raises a natural question: \textit{which public dataset should one select for a particular private task?} 
+It may be ideal if a fraction of the private dataset is public, as using it would incur minimal penalty due to distribution shift.
+But otherwise, it is unclear when one should prefer one public dataset over another.
+Our main contribution is an algorithm that quantifies a public dataset's fitness for use in private ML. 
+
+\begin{table}[!h]
+    \caption{GEP evaluation AUC and corresponding distance in descending order. We use the \emph{{same}} model setting for private training and distance computation. "-" means DP-SGD training without using any public data.}.
+    \centering
+    \begin{tabular}{llll}
+        \toprule
+        AUC     & Private Dataset               & Public Dataset & Distance \\ \hline
+        \textbf{69.02\%} & \multirow{4}{*}{ChestX-ray14} & ChestX-ray14   & \textbf{0.15}     \\ \cline{1-1} \cline{3-4} 
+        66.62\% &                               & KagChest       & 0.36     \\ \cline{1-1} \cline{3-4} 
+        64.90\% &                               & -              & -        \\ \cline{1-1} \cline{3-4} 
+        48.80\% &                               & CIFAR-100      & 0.55     \\
+        \bottomrule
+    \end{tabular}
+\label{eval2}
+\end{table}
+We demonstrate its efficacy in both transfer learning and pre-conditioning settings.
+To summarize our contributions:
+\begin{enumerate}
+    \item \textbf{We introduce Gradient Subspace Distance (GSD), an algorithm to quantify the difference between private and public datasets.} 
+    GSD is an easily computable quantity that measures the distance between two datasets.     
+    \item \textbf{We find GSD is useful for selecting public datasets in both pre-conditioning and transfer learning settings.} 
+    As a representative example, Table~\ref{eval2} shows the utility of a privately trained model using a public dataset increases monotonously as GSD decreases.
+    Our theoretical analysis demonstrates that the excess risk of Gradient Embedding Perturbation (GEP) (a private training algorithm that leverages public data for gradient pre-conditioning) scales with the GSD. %Empirical evaluation shows that the GSD distance provides a perfect ranking of the accuracy with using different public datasets in Table \ref{eval2}.    
+    \item \textbf{We show that GSD is \textit{transferable}.} 
+    The ordering of GSD for several choices of public dataset remains fixed across architectures,  both simple (e.g., 2-layer CNN) and complex. Using these simple architectures as a proxy, we can efficiently compute GSDs which are still useful for privately training large models.
+\end{enumerate}
+
+
+\section{Related Work}
+
+
+\paragraph{Transfer Learning.} In the differentially private setting, it is now common to pre-train a model on public data, and then privately fine-tune on private data.
+This can result in comparable utility as in the non-private setting, evidenced for both language models~\cite{donot, YuNBGIKKLMWYZ22, LiTLH22} and vision tasks~\cite{cvpr,DeBHSB22,MehtaTKC22}. 
+In many cases, due to computational requirements, it may be challenging to pre-train a large model on a public dataset.
+Instead, many practitioners will turn to pre-trained weights, which obviate the computational burden, but give less flexibility to choose an appropriate training dataset.
+As a result, we use second-phase pre-training, in which we perform a second phase of pre-training with a modestly-sized public dataset. This has been proven to be useful in non-private setting~\cite{dontstop}.
+
+\paragraph{Pre-conditioning.} Empirical evidence and theoretical analysis indicate that while training deep learning models,  gradients tend to live in a lower-dimensional subspace~\cite{subspace1, subspace2, subspace3, aws, precondtheo}. This has led to methods for private ML which project the sensitive gradients onto a subspace estimated from the public gradients.
+By using a small amount of i.i.d.\ public data, \cite{bypass} demonstrate that this approach can improve the accuracy of differentially private stochastic gradient descent in high-privacy regimes and achieve a dimension-independent error rate. Similarly, \cite{donot} proposed GEP, a method that utilizes public data to identify the most useful information carried by gradients, and then splits and clips them separately. 
+
+\paragraph{Domain Adaptation.} We aim to quantify the similarity between private and public datasets. One related area of research is distribution shift, or domain adaptation \cite {distshiftsurvey, distshiftsurvey2, distshiftsurvey3, distshiftsurvey4, Ben-DavidBCKPV10, Ben-DavidBCP06, tent}. At a high level, research in this area examines the problem of when the distributions of test and training data differ, which aligns with our goals. However, most work in this area focuses on reducing the gap between in- and out-of-distribution test errors, where target data is used repeatedly for accuracy improvement. Most of the work along this line assumes that the target data is also public or doesn't consider privacy, and is thus inappropriate for the private learning setting. To the best of our knowledge, the only work with a similar focus to us is Task2Vec \cite{task2vec}, which uses the Fisher information matrix to represent a dataset as a vector, allowing for the measurement of a distance between two datasets. However, it is not suitable for private learning tasks as our empirical evaluation shows that Task2Vec fails to accurately rank the utility of public datasets.
+
+
+
+\section{Preliminaries}
+
+\label{Preliminaries}
+\paragraph{Notation.}
+We use $p$ to denote the model dimension, i.e., the number of parameters in the model. $k$ is a parameter we will use to denote the dimension of the lower-dimensional space we choose. $m$ refers to the number of examples in a batch. We use superscripts and subscripts interchangeably to denote private or public data, like $x_{priv}$, $V^{pub}$.
+
+\paragraph{Definition 1 (Differential Privacy \cite{dwork-dp}).} 
+\textit{A randomized algorithm $\mathcal{A}$ is \emph{$(\epsilon, \delta)$-differential private} if for any pair of datasets D, D' that differ in exactly one data point and for all subsets E of outputs, we have:}
+$$
+\Pr[\mathcal{A}(D) \in E] \le e^{\epsilon}\Pr[\mathcal{A}(D') \in E] + \delta.
+$$
+
+\paragraph{Definition 2 (Principal Angles \cite{principleangles}).}
+\textit{Let $V_1$ and $V_2$ be two orthonormal matrices of $\mathbb{R}^{p \times k}$. The \emph{principal angles} $0 \le \theta_1 \le \cdot\cdot\cdot \le \theta_k \le \pi / 2$ between two subspaces span($V_1$) and span($V_2$), are defined recursively by}
+$$
+    \cos\theta_k = \max\limits_{\mathbf{u_k} \in span(V_1)} \max\limits_{\mathbf{v_k} \in span(V_2)} \mathbf{u_k'v_k}, \ \ \textit{subject to} 
+$$
+\begin{equation*}
+   \mathbf{u_k'u_k} = 1,  \mathbf{v_k'v_k} = 1,
+   \mathbf{u_k'u_i} = 0, \mathbf{v_k'v_i} = 0, i=1, ...,k-1
+\end{equation*}
+   
+
+That is, the first principal angle $\theta_1$ is the smallest angle between all pairs of unit vectors over two subspaces, the second $\theta_2$ is the second smallest angle, and the rest are similarly defined.
+\paragraph{Definition 3 (Projection Metric \cite{projectionmetric, projectionmetric2}).}
+\label{projmetricdef}
+\textit{The \emph{projection metric} between two $k$-dimensional subspaces $V_1$, $V_2$ is defined as:}
+$$
+d\left(V_1, V_2\right)=\left(\sum_{i=1}^k \sin ^2 \theta_i\right)^{1 / 2}=\left(k-\sum_{i=1}^k \cos ^2 \theta_i\right)^{1 / 2}
+$$
+\textit{where the $\theta_i$'s are the principal angles between $V_1$ and $V_2$}.
+
+\paragraph{Definition 4 (($\rho, \eta$)-close).} \textit{A randomized algorithm $\mathcal{A}(.)$ that outputs an approximate distance between to subspaces span($V_1$) and span($V_2$), $\hat{d}\left(V_1, V_2\right)$, is an \emph{($\rho, \eta$)-close} approximation to the true subspace distance $d\left(V_1, V_2\right)$, if they satisfy:}
+$$
+    \Pr\left[|\hat{d}\left(V_1, V_2\right) - d\left(V_1, V_2\right)| \le \rho \right] \geq 1 - \eta.
+$$
+\paragraph{Gradient Embedding Perturbation (GEP).} Our theoretical analysis is based on GEP \cite{donot}, a private learning algorithm that leverages public data for gradient pre-conditioning. Here we briefly introduce their algorithm. GEP involves three steps: 1) it computes an orthonormal basis for the lower-dimensional subspace; 2) it projects the private gradients to the subspace derived from step 1, thus dividing the private gradients into two parts: embedding gradients that contain most of the information carried by the gradient, and the remainder are called residual gradients; 3) it clips two parts of the gradients separately and perturbs them to achieve differential privacy.
+
+
+\section{Gradient Subspace Distance}
+
+\label{sec:GSD}
+Suppose we have a task that consists of a private dataset $X^{priv}$ and a differentially private deep learning algorithm $A$ that can leverage public data to improve model utility. We have a collection of potential choices of public dataset $[X_1^{pub}, X_2^{pub}, \cdots]$. We want a metric that can prescribe which public dataset to use with algorithm $A$ on the private task $X^{priv}$, in order to achieve the highest utility.
+
+\begin{algorithm}[htbp]
+    \caption{Gradient Subspace Distance (GSD)}
+    \label{myalgo}
+\begin{algorithmic}
+    \STATE {\bfseries Input:} Private examples  $x_{priv}$, public examples $x_{pub}$, loss function $\mathcal{L}$, model weights $\mathbf{w}_0$, dimension $k$
+    \STATE {\bfseries Output:} Distance between two image datasets $\boldsymbol{d}$
+\end{algorithmic}
+\begin{algorithmic}[1]
+    \STATE \texttt{// Compute per-sample gradient matrix for private and public examples}
+    \STATE {$G_{priv} = \nabla \mathcal{L}(\mathbf{w}_0, x_{priv})$}
+    \STATE {$G_{pub} = \nabla \mathcal{L}(\mathbf{w}_0, x_{pub})$}
+    \STATE \texttt{// Compute top-$k$ subspace of the gradient matrix}
+    \STATE {{\ $U^{priv}, S^{priv}, V^{priv} \leftarrow \mathbf{SVD}(G_{priv})$}}
+    \STATE {{$U^{pub}, S^{pub}, V^{pub} \leftarrow \mathbf{SVD}(G_{pub})$}}
+    \STATE \texttt{// Compute the distance between two subspaces}
+    \STATE {$\boldsymbol{d} = \mathbf{ProjectionMetric}(V_{k}^{priv}, V_{k}^{pub})$}
+\end{algorithmic}
+\end{algorithm}
+We present the pseudo-code of our algorithm, Gradient Subspace Distance (GSD) in Algorithm \ref{myalgo}. At a high level, our method involves the following two steps: finding the gradient subspace of the public and private data examples, and computing their gradient subspace distance. The algorithm uses the same model $A$ and a batch of randomly labeled data examples from private and public datasets. Following standard DPSGD, the algorithm will first compute and store per-example gradients from each data example, that is $G_{priv},  G_{pub} \in \mathbb{R}^{m \times p}$. Then it computes the top-$k$ singular vectors of both the private and public gradient matrix by performing singular value decomposition (SVD). % and picking first-$k$ columns from $\boldsymbol{V}$, the right singular vectors of the gradient matrix $\boldsymbol{G}$. 
+Finally we use projection metric to derive the subspace distance $\boldsymbol{d}$ by taking the right singular vectors $V_{k}^{pub}, V_{k}^{priv}$ from the previous step.
+
+GSD is naturally suited to the aforementioned pre-conditioning methods.
+In each iteration, these methods project the private gradients to a low-dimensional subspace, which ideally contains most of the signal of the gradients.}
+Since repeatedly selecting the top subspace of the gradients themselves is not a privacy-preserving operation, we instead choose a public dataset to use as a proxy.
+Thus intuitively, a public dataset with a ``similar top subspace'' should be suitable.
+This is what GSD tries to capture, and the best dataset should be the one with minimum GSD.
+
+However, following this intuition only gets us so far: taking it literally would measure distances between the public and private datasets at each step throughout the training process, an impractical procedure that would introduce significant overhead. 
+Remarkably, we instead find that a simple alternative is effective: compute the distance only once at initialization (Section~\ref{sec:uniform-distance}). 
+This requires only a single minibatch of each dataset, and as we show in our experiments, is surprisingly robust to changes in model architecture (Section~\ref{sec:transfer}). 
+Most importantly, we show that it is also effective for \emph{transfer learning} settings (Section~\ref{sec:sppt}), where subspace projections are not used at all, thus demonstrating that GSD more generally captures dataset similarity and fitness-for-use of public datasets.
+
+Finally, we note that, as stated, Algorithm~\ref{myalgo} is not differentially private, as it interacts with the unprotected gradients of the private data. 
+We discuss differentially private methods for GSD computation in Section~\ref{sec:priv-gsd}.
+Nonetheless, we expect non-private computation of GSD to have minimal privacy implications, comparable to the cost of non-private hyperparameter selection, which is usually disregarded in private ML and considered to be minimal~\cite{PapernotS22,MohapatraSHKT22}.
+\iffalse
+Our algorithm is based on the empirical observation that the stochastic gradients stay in a lower-dimensional subspace during the training procedure of a deep learning model \cite{subspace1, subspace2}. We also empirically evaluate this finding over different datasets and model settings. Such observation suggests that most of the information the gradient carries is contented in much lower-dimensional space. Our method finds such subspace for private and public data examples and then measures the distance between two subspaces. 
+
+We follow the conclusion in \cite{projectionmetric} and use projection metric \cite{projectionmetric1, projectionmetric2, projmetric3, projmetric4, projmetric5} to measure the subspace distance between $\boldsymbol{V_{k}^{pub}}$ and $\boldsymbol{V_{k}^{priv}}$. Intuitively, it considers all the principal angles by averaging them to show intermediate characteristics between the two subspaces. It is suggested to be robust to the distribution of data examples and enjoys great distance structure properties such as triangle inequality~\cite{projmetric5}.
+\fi
+
+\subsection{Excess Risk Scales with GSD}
+\label{riskanalysis}
+In this section, we theoretically prove that the excess risk of the GEP algorithm~\cite{donot} is bounded by the Gradient Subspace Distance (GSD) under standard statistical learning assumptions. 
+
+We first show that the reconstruction error $\|\mathbf{G}_{p r i v}-\mathbf{G}_{p r i v} V_k^{p u b} V_k^{p u b \top} \|_2$ is bounded by GSD. Then we show that the convergence bound of excess risk is determined by the reconstruction error.
+
+Lemma \ref{lemma1} indicates that the reconstruction error of the private gradient matrix using public examples at step $t$ is bounded by GSD, the subspace distance between the public and private gradient subspaces. A larger GSD may yield a larger reconstruction error at each step.
+\begin{lemma}
+\label{lemma1}
+For GEP, let $\mathbf{G}_{p r i v}$, $V_k^{p u b}$, $V_k^{priv}$ be the gradient matrix and top-$k$ gradient subspace from public examples at step t, respectively. Then we have the spectral norm of reconstruction error
+\begin{equation}
+    \left\| \mathbf{R} \right\|_2 \le \sqrt{2}s_{1, t}\mathbf{GSD}(V_k^{priv}, V_k^{p u b}) + s_{k + 1, t}
+\end{equation}
+where $\mathbf{R} = \mathbf{G}_{p r i v}-\mathbf{G}_{p r i v} V_k^{p u b} V_k^{p u b \top}$ is the reconstruction error of private gradient matrix $\mathbf{G}_{p r i v}$ using public examples, $s_{1, t} \ge ...\ge s_{k, t} \ge...$ are the singular values of $\mathbf{G}_{p r i v}$, $\mathbf{GSD}(V_k^{priv}, V_k^{p u b})$ is the gradient subspace distance given by our algorithm.
+\end{lemma}
+
+\begin{proof} We have
+
+\begin{equation}
+\begin{aligned}
+    \mathbf{R} &= \mathbf{G}_{p r i v}-\mathbf{G}_{p r i v} \Pi_k^{pub} \\
+    &= \mathbf{G}_{p r i v} - \mathbf{G}_{p r i v}\Pi_k^{priv} + \mathbf{G}_{p r i v}\Pi_k^{priv} - \mathbf{G}_{p r i v} \Pi_k^{pub}
+\end{aligned}
+\end{equation}
+\begin{equation}
+\Rightarrow \quad\left\| \mathbf{R} \right\|_2 - \left\| \mathbf{G}_{p r i v} (\Pi_k^{pub} - \Pi_k^{priv}) \right\|_2 \le \left\| \mathbf{G}_{p r i v}\left(\mathbb{I} - \Pi_k^{priv}\right)\right\|_2 \\
+\end{equation}
+\begin{equation}
+\Rightarrow \quad\left\| \mathbf{R} \right\|_2 \le \underbrace{\left\| \mathbf{G}_{p r i v} (\Pi_k^{pub} - \Pi_k^{priv}) \right\|_2}_{D_1} + \underbrace{\left\| \mathbf{G}_{p r i v}\left(\mathbb{I} - \Pi_k^{priv}\right)\right\|_2}_{D_2} \\
+\end{equation}
+
+where $\Pi_k^{pub} = V_k^{p u b} V_k^{p u b \top}$ denotes the orthogal projection to the subspace of span($V_k^{p u b}$), $\Pi_k^{priv} = V_k^{priv} V_k^{priv \top}$ denotes the orthogal projection to the subspace of span($V_k^{priv}$).
+
+For $D_2$, recall that the Eckart–Young–Mirsky theorem \cite{young} shows that the best rank-$k$ approximation of $\mathbf{G}_{p r i v}$ is given by its top-$k$ reconstruction using SVD. Therefore, we have
+
+\begin{equation}
+\begin{aligned}
+    D_2 &= \left\| \mathbf{G}_{p r i v}\left(\mathbb{I} - \Pi_k^{priv}\right)\right\|_2 \\
+    & = \left\|\sum_{i=1}^p s_i u_i v_i^{\top}-\sum_{i=1}^k s_i u_i v_i^{\top}\right\|_2 \\
+    & =\left\|\sum_{i=k+1}^p s_i u_i v_i^{\top}\right\|_2 \\
+    & = s_{k + 1}
+\end{aligned}
+\end{equation}
+
+For $D_1$, the definition of projection metric (Definition~\ref{projmetricdef}) shows that
+\begin{equation}
+\begin{aligned}
+    \mathbf{GSD}^2(V_k^{priv}, V_k^{p u b}) & = k - (\cos^2\theta_1 + ... + \cos^2\theta_k) \\
+    & \stackrel{(a)}{=} k - \operatorname{Tr}\left( V_k^{priv \top}V_k^{priv}V_k^{p u b \top} V_k^{p u b}\right) \\
+    & \stackrel{(b)}{=} \frac{1}{2} \left\| \Pi_k^{pub} - \Pi_k^{priv} \right\|_F^2
+\end{aligned}
+\end{equation}
+
+(a) and (b) hold according to Equation 5.4 in \cite{projmetric3}.
+
+Therefore, we have
+\begin{equation}
+\begin{aligned}
+    D_1 & = \left\| \mathbf{G}_{p r i v} (\Pi_k^{pub} - \Pi_k^{priv}) \right\|_2 \\
+    & \le \left\| \mathbf{G}_{p r i v} \right\|_2 \left\| \Pi_k^{pub} - \Pi_k^{priv} \right\|_2 \\
+    & \le s_{1} \left\| \Pi_k^{pub} - \Pi_k^{priv} \right\|_F \\
+    & = \sqrt{2}s_{1} \mathbf{GSD}(V_k^{priv}, V_k^{p u b})
+\end{aligned}
+\end{equation}
+
+Combining $D_1$ and $D_2$, we have
+\begin{equation}
+\begin{aligned}
+\left\| \mathbf{R} \right\|_2 & \le \left\| \mathbf{G}_{p r i v} (\Pi_k^{pub} - \Pi_k^{priv}) \right\|_2 + \left\| \mathbf{G}_{p r i v}\left(\mathbb{I} - \Pi_k^{priv}\right)\right\|_2 \\
+& \le \sqrt{2}s_{1, t} \mathbf{GSD}(V_k^{priv}, V_k^{p u b}) + s_{k + 1, t}
+\end{aligned}
+\end{equation}
+
+Thus we know that GSD bounds the reconstruction error at step $t$.
+\end{proof}
+Lemma \ref{lemma1} shows that the excess risk is affected by the GSD at each step. A larger GSD will result in a larger excess risk, which is often evaluated by the error rate in the experiments. 
+
+\begin{theorem}
+\label{theorem1}
+Assume that the loss $L(\mathbf{w}) = \frac{1}{n} \sum_{i=1}^n \ell\left(\mathbf{w}, z_i\right)$ is 1-Lipschitz, convex, and $\beta$-smooth. Let $\mathbf{w}^* = \mathrm{argmin}_{w \in \mathcal{W}} L(\mathbf{w})$. The excess risk of GEP obeys
+\begin{equation}
+\begin{aligned}
+    \mathbb{E}[L(\overline{\boldsymbol{\mathbf{w}}})]-L\left(\boldsymbol{\mathbf{w}}^*\right) \le O\left(\frac{\sqrt{k\log(1/\delta)}}{n\epsilon}\right) + O\left(\frac{\sqrt{p\log(1/\delta)}}{n\epsilon}\overline{\boldsymbol{\mathbf{d}}}\right)
+\end{aligned}
+\end{equation}
+ Here we set $\eta=\frac{1}{\beta}, T=\frac{n \beta \epsilon}{\sqrt{p}}$, $\overline{\boldsymbol{\mathbf{w}}} = \frac{1}{T}\sum_{t=1}^{T}\mathbf{w}_t$, $\overline{\boldsymbol{\mathbf{d}}} = \frac{1}{T}\sum_{t=1}^{T}d^2_t$, $d_t = \sqrt{2}s_{1, t}\mathbf{GSD} + s_{k + 1, t}$, and \textbf{GSD}, $s$ are the gradient subspace distance and singular values of the gradient matrix at step t.
+\end{theorem}
+
+\begin{proof}
+    Theorem 3
+    \begin{equation}
+    \begin{aligned}
+        \mathbb{E}[L(\overline{\boldsymbol{\mathbf{w}}})]-L\left(\boldsymbol{\mathbf{w}}^*\right) \le O\left(\frac{\sqrt{k\log(1/\delta)}}{n\epsilon}\right) + O\left(\frac{\overline{r}\sqrt{p\log(1/\delta)}}{n\epsilon}\right)
+    \end{aligned}
+    \end{equation}
+    where $\overline{r} = \frac{1}{T}\sum_{t=0}^{T-1}r^2_t$ and $r_t = \|\mathbf{G}_{p r i v}-\mathbf{G}_{p r i v} V_k^{p u b} V_k^{p u b \top}\|_2$ is the reconstruction error at step $t$.
+
+    ~\\
+    From Lemma~\ref{lemma1} we know that $r_t \leq d_t$ at each step $t$, thus completing the proof. 
+\end{proof}
+    
+    
+
+    
+    
+    
+    
+      
+
+
+\subsection{Ordering of GSD is Preserved over Training}\label{sec:uniform-distance}
+Theorem~\ref{theorem1} shows that the excess risk, measured by the error on the test set, can be predicted by GSD, assuming that we have \textit{fresh} private examples at each step. However, this will cause significant privacy leakage and computational overhead if we repeatedly compute this distance using the whole private dataset. 
+
+\begin{figure}[!h]
+    \centering
+    \subfloat[Distance in 1 Epoch]{\includegraphics[width=0.47\linewidth]{fig/uniform1_3.png}}
+    \hfil
+    \subfloat[Distance over 100 Epoch]{\includegraphics[width=0.47\linewidth]{fig/uniform100_3.png}}
+    \caption{The trend of distance during the process of training a ResNet20 model on CIFAR-10 using vanilla SGD. We follow a standard SGD training procedure and compute the distance between the current private batch and public examples at each iteration.}
+    \label{distance}
+\end{figure}
+
+We empirically measure the GSD for each of the public datasets throughout the training process, as shown in Figure~\ref{distance}. 
+This demonstrates that the relative ordering of the distances is preserved at almost all times.  
+As a result, it suffices to compute each of the GSDs only once at initialization, requiring only one batch of examples from the private dataset and one pass through the model, incurring minimal data exposure and computational overhead.
+We can then select the dataset with the smallest GSD for use as our public dataset.
+
+\subsection{Private Distance Measurement}\label{sec:priv-gsd}
+While Algorithm~\ref{myalgo} has relatively low data exposure (requiring only a single batch of private examples), it is not differentially private. 
+In this section, we give a general algorithm that computes GSD differential-privately: Differentially Private Gradient Subspace Distance (DP-GSD, Algorithm \ref{dpgsd}). As GSD needs top-$k$ singular vectors from private examples, we derive these singular vectors in a differentially private manner, and the rest of the algorithm remains DP because of post-processing.
+
+\begin{algorithm}[htbp]
+    \caption{Differentially Private Gradient Subspace Distance (DP-GSD)}
+    \label{dpgsd}
+\begin{algorithmic}
+    \STATE {\bfseries Input:} $m$ private examples  $x_{priv}$, $m$ public examples $x_{pub}$, loss function $\mathcal{L}$, model weights $\mathbf{w}_0$, dimension $k$, privacy parameter $\epsilon, \delta$, clip norm $c$
+    \STATE {\bfseries Output:} Distance between two image datasets $\boldsymbol{d}$
+\end{algorithmic}
+\begin{algorithmic}[1]
+    \STATE \texttt{// Compute per-sample gradient matrix for private and public examples}
+    \STATE {$G_{priv} = \nabla \mathcal{L}(\mathbf{w}_0, x_{priv})$}
+    \STATE {$G_{pub} = \nabla \mathcal{L}(\mathbf{w}_0, x_{pub})$}
+    \STATE \texttt{// \textbf{Privately} compute top-$k$ subspace of the private gradient matrix}
+    \STATE {Clip per-row: $G_{priv} = \mathbf{Clip}(G_{priv}, c)$}
+    \STATE {Compute $V_{k}^{priv} \leftarrow \mathbf{DPPCA}(G_{priv}, k, \epsilon, \delta)$ }
+    \STATE \texttt{// Compute top-$k$ subspace of the public gradient matrix}
+    \STATE {{$U^{pub}, S^{pub}, V^{pub} \leftarrow \mathbf{SVD}(G_{pub})$}}
+    \STATE \texttt{// Compute the distance between two subspaces}
+    \STATE {$\boldsymbol{d} = \mathbf{ProjectionMetric}(V_{k}^{priv}, V_{k}^{pub})$}
+\end{algorithmic}
+\end{algorithm}
+
+At a high level, DP-GSD makes one adaptation to GSD: we compute top-$k$ subspace of the private per-sample gradient matrix in a differentially private manner. $\mathbf{DPPCA}$ in line 6 of Algorithm \ref{dpgsd} can be any Differentially Private Principle Component Analysis (DPPCA), e.g., input perturbation \cite{dppca1}, subspace perturbation \cite{analysegauss}, exponential mechanism \cite{dppca1} and stochastic methods \cite{liu2022dppca}. We give a theoretical analysis of the privacy and utility guarantee of DP-GSD based on the techniques of~\cite{dppca1}, given in Algorithm \ref{ppca}.
+
+\begin{algorithm}[htbp]
+    \caption{Differentially Private Principle Component Analysis (DPPCA)}
+    \label{ppca}
+\begin{algorithmic}
+    \STATE {\bfseries Input:} $m \times p$ data matrix $X$, dimension $k$, privacy parameter $\epsilon$
+    \STATE {\bfseries Output:} $\hat{V}_k$: Top-$k$ subspace of $X$
+\end{algorithmic}
+\begin{algorithmic}[1]
+    \STATE {Set $A = \frac{1}{m}X^{\top}X$}
+    \STATE {Sample $\hat{V}_k = \mathbf{BMF}\left( \frac{m\epsilon}{2}A\right)$}
+\end{algorithmic}
+\end{algorithm}
+
+To achieve DP, DPPCA randomly samples a $k$-dimensional distribution from the matrix Bingham distribution, which has the following density function:
+\begin{equation}
+    f(V | A, k, p)=\frac{1}{{ }_1 F_1\left(\frac{1}{2} k, \frac{1}{2} p, A\right)} \exp \left(\operatorname{tr}\left(V^T A V\right)\right)
+\end{equation}
+where $V$ is the $p \times k$ subspace and ${ }_1 F_1\left(\frac{1}{2} k, \frac{1}{2} p, A\right)$ is a normalization factor. We use $\mathbf{BMF}(V)$ in Algorithm \ref{ppca} to denote this distribution
+
+\begin{theorem}
+    \textbf{(Privacy Guarantee)} Let Algorithm \ref{ppca} be an implementation of $\mathbf{DPPCA}$ in DP-GSD, then DP-GSD is $\epsilon/c^2$-differentially priate.
+    \label{privacy}
+\end{theorem}
+
+\begin{theorem}
+    \textbf{(Utility Guarantee)} Let Algorithm \ref{ppca} be an implementation of $\mathbf{DPPCA}$ in DP-GSD, then for $k = 1$, the distance given by DP-GSD, $\hat{d}(V^{priv}_k, V^{pub}_k)$ is $(\rho, \eta)$-close to the distance given by GSD, $d(V^{priv}_k, V^{pub}_k)$, if we have
+
+    \begin{equation}
+        m>\frac{pc^2}{\epsilon \alpha(1-\sqrt{1 - \rho ^ 2})}\left(4 \frac{\log (1 / \eta)}{p}+2 \log \frac{8 \lambda_1}{\rho^2 \alpha}\right)
+    \end{equation}
+    where $\lambda_1$ is the top eigenvalue, $\alpha = \lambda_1 - \lambda_2$ is the eigen-gap, $p$ is the model dimension, $c$ is clip norm and $\epsilon$ is the privacy parameter.
+    \label{utility}
+\end{theorem}
+
+
+
+
+\section{Second-Phase Pre-training}
+
+
+The standard method of private transfer learning consists of two phases: pre-training on a public dataset and fine-tuning on a private task.
+However, with large training sets and models, the computational burden of pre-training is prohibitive for most practitioners. 
+Consequently, it is common to instead use pre-trained weights (obtained through pre-training on a fixed dataset) rather than run pre-training on a public dataset of choice. While this is computationally convenient, it limits the choice of pre-training datasets, and thus limits the accuracy in downstream fine-tuning.
+
+\begin{figure*}[!h]
+    \begin{equation*}
+    \underbrace{f(\mathbf{W}_0; x) \xrightarrow[]{\mathbf{X}^{pub, 1}} f(\mathbf{W}_{PT}; x)}_{\texttt{Load pre-trained weights}} \underbrace{\xrightarrow[\theta]{X_{pub, 2}} f(\mathbf{W}_{PT}, \theta_0; x)}_{\texttt{Second-phase pre-training}} \underbrace{\xrightarrow[]{X_{priv}} f(\mathbf{W}_{PT}, \hat{\theta}; x)}_{\texttt{Private fine-tuning}}
+\end{equation*}
+\caption{Second-phase pre-training pipeline. We first choose a large model and download its pre-trained weights. Then we use an appropriate parameter-efficient fine-tuning mechanism and get trainable parameters $\theta$. We train $\theta$ on a public dataset and get $\theta_0$, called \textbf{\textit{second-phase pre-training}}. Finally, we pass $\theta_0$ as the initial weights for private fine-tuning on the target task.}
+\label{second-phase}
+\end{figure*}
+
+To alleviate this issue, we consider \emph{second-phase pre-training}, in which a set of pre-trained weights are pre-trained on a second public dataset.
+We can then (privately) fine-tune the model on a sensitive dataset for the downstream task of interest.
+While this paradigm has previously been considered in the non-private setting~\cite{dontstop}, to the best of our knowledge, we are the first to explore second phase pre-training in the differentially private setting. 
+Pre-trained models may be significantly out of distribution with respect to the downstream task.
+Due to the noise introduced, the ability to adapt during fine-tuning may be diminished under differential privacy. 
+Thus, the additional public data may be valuable for reducing the distribution shift. 
+Second-phase pre-training is illustrated in Figure \ref{second-phase}. 
+
+\iffalse
+The standard method of private transfer learning consists of two phases: pre-training on a public dataset and fine-tuning on a private task. However, using differentially private techniques during the fine-tuning phase needs to add unwanted noise to the model. The magnitude of this noise is directly proportional to the square root of the number of trainable parameters involved in the fine-tuning process. To mitigate this, it is beneficial to first obtain a strong representation of the model through the pre-training, and subsequently reduce the number of trainable parameters during the private fine-tuning step.
+
+On the other hand, large pre-trained language and vision models have been shown to achieve impressive results in a wide range of applications. These models, such as GPT-3~\cite{gpt3} and Vision Transformers (ViT)~\cite{vit}, even when considering privacy concerns, tend to outperform other models.
+For instance, the ViT model, pre-trained on the ImageNet21k dataset, can achieve close to 96\% accuracy on the CIFAR-10 dataset with only a few fine-tuning steps. However, it should be noted that such large-scale pre-training is often not feasible for researchers and practitioners due to the high costs and resources required. As a result, downloading pre-trained weights and using them to fine-tune on specific tasks is a common and practical solution.
+
+In this setting, we propose a method called ``second-phase pre-training'' where we continue to train some of the model's parameters on publicly available and closely related datasets before fine-tuning the model privately, as depicted in Figure \ref{second-phase}. In the following section, we will provide more details on how to achieve efficient fine-tuning and formally define the concept of second-phase pre-training.
+\fi 
+
+\subsection{Second-Phase Pre-training Step by Step}
+Now we formally define second-phase pre-training. Suppose $f(\mathbf{W}_{pt}; x)$ where $\mathbf{W}_{pt}$ denotes pre-trained weights and $x$ is input. To do second-phase pre-training, we first use a parameter-efficient fine-tuning mechanism and create new trainable parameters. Then we train these parameters on some public datasets. This step can be described by:
+\begin{equation}
+    f_{2pt}\left(\mathbf{W}_{pt}, \mathbf{\theta}; x_{pub}\right) \rightarrow \mathbf{\theta}_0
+\end{equation}
+where $x_{pub}$ are the public datasets and $\mathbf{\theta}$ are the new trainable parameters, which are of far lower dimensionality than $\mathbf{W}$. We get the parameter vector $\mathbf{\theta}_0$ after this second-phase pre-training step. Finally, we initialize $\mathbf{\theta} = \mathbf{\theta}_0$ and privately fine-tune it by running DPSGD on the private task:
+\begin{equation}
+    f_{ft}\left(\mathbf{W}_{pt}, \mathbf{\theta}_0; x_{priv}\right) \rightarrow \hat{\mathbf{\theta}}
+\end{equation}
+Our experiments show that second-phase pre-training can give additional accuracy improvements, even when we only have a small number of public data examples. Furthermore, our distance measurement GSD remains a good indicator for choosing good public data for the second phase pre-training. 
+
+\subsection{Parameter Efficiency in Private Fine-tuning}
+
+\iffalse
+Implementing DP entails adding noise sampled from a spherical Gaussian distribution to the gradients at each iteration, thereby affecting the information conveyed by the gradients. Formally, the excess risk achieves $O(\frac{\sqrt{p}}{\epsilon})$\cite{dpsgd3}, where $p$ is the number of model parameters. Larger models, which have more parameters, are better at learning stronger representations but also introduce greater noise to maintain DP. To mitigate this, it is common practice in private machine learning to make use of pre-training and fine-tune only a smaller number of parameters privately.
+\fi
+
+In both private and non-private settings, approaches frequently depart from the default of fine-tuning all model weights. 
+For example, one can freeze parameters and fine-tune only specific layers, or introduce new parameters entirely.
+The resulting number of tunable parameters is almost always chosen to be smaller  than during pre-training, leading to \emph{parameter efficient} methods.
+This can be beneficial in terms of portability and resource requirements, and the fine-tuned model utility frequently matches or compares favorably to full fine-tuning. 
+Parameter efficiency may be further advantageous in the differentially private setting, as it reduces the magnitude of noise one must introduce (though findings on the downstream impact on utility remain inconclusive).
+In the settings we consider, we will empirically find that parameter-efficient methods result in better utility.
+In general, there are two ways of parameter-efficient fine-tuning. One approach is to select a subset of layers or parameters for fine-tuning. For instance, \cite{bias-term} proposed fine-tuning only the bias terms of a model, which is both computationally and parameter-efficient while retaining similar accuracy compared to other methods. Another study by \cite{firstlast} found that fine-tuning the first and last layers of a model consistently improves its accuracy.  The other approach is to freeze all existing parameters and add new trainable parameters during fine-tuning. Some examples include Adapter~\cite{adapter}, Compacter~\cite{compacter} and LoRA~\cite{lora}. \cite{YuNBGIKKLMWYZ22,LiTLH22} demonstrated that private fine-tuning using parameter-efficient methods on large language models can be both computationally efficient and accurate.
+
+
+
+
+\section{Experiments}
+
+We explore the predictive power of GSD in both pre-conditioning and transfer learning settings.
+Specifically, we use GSD to choose a public dataset for GEP~\cite{donot} (representative of pre-conditioning methods) and second-phase pre-training (representative of transfer learning settings).
+We use a variety of datasets, including Fashion MNIST~\cite{fmnist}, SVHN~\cite{svhn}, and CIFAR-10~\cite{cifar10}, as three canonical vision tasks. 
+Based on the recommendations of~\cite{TramerKC22}, we also evaluate our methods on datasets closer to privacy-sensitive applications.
+In particular, we also work with two medical image dataset: ChestX-ray14~\cite{chestxray} and HAM10000~\cite{ham}. A variety of datasets are chosen as public data respectively. 
+We evaluate our algorithms using both CNN-based (e.g., ResNet152~\cite{resnet}, DenseNet121~\cite{densenet}) and Transformer-based (ViTs~\cite{vit}) architectures. 
+A variety of parameter-efficient fine-tuning mechanisms are considered, including freezing layers and LoRA~\cite{lora}.
+
+We compute GSD non-privately using Algorithm~\ref{myalgo}, for two reasons. First, as discussed in Section~\ref{sec:GSD}, the privacy leakage due to hyperparameter selection is considered to be minimal and often disregarded in private ML.
+We thus treat selection via GSD similarly.
+Second, beyond being a tool for public dataset selection, it is interesting in its own right to understand properties of GSD, including how it determines downstream utility across a variety of settings.
+Ideally, we would like our distance measure GSD to be model agnostic: it should depend only the two datasets, not on any particular model. 
+This is not the case, since, as stated, our algorithms take gradients of the two datasets on the model of interest. 
+However, we show that GSD is robust to changes in model architecture.
+We evaluate GSD on a 2-layer CNN (which we call a ``probe network''), and show that relative ordering of GSDs is preserved, even though the architecture is far simpler than the models of interest. 
+We also compare our algorithm with Task2Vec~\cite{task2vec}, which has a similar goal as GSD. At a high level, Task2Vec represents a task (i.e., dataset) by transforming it into a vector so that the similarity between different datasets can be prescribed by the distance between two vectors. Although experiments show that Task2Vec matches taxonomic relations for datasets like iNaturalist~\cite{inatural}, our empirical evaluation shows that it is outperformed by GSD in the differentially private setting.
+
+\subsection{Results for Pre-conditioning}
+We compute GSD and evaluate using GEP for the chosen datasets. The evaluation results are in Table \ref{eval1}. We find that, across several different private and public datasets, final accuracy is monotone as GSD decreases.
+Unexpectedly, we find that GSD between CIFAR-10 and CIFAR-100 is less than between CIFAR-10 and CIFAR-10. 
+Nonetheless, this is predictive of final performance, where we see using CIFAR-100 as a public dataset is better than CIFAR-10, despite the fact that the private dataset is also CIFAR-10.
+\begin{table}[!h]
+ \caption{GEP evaluation accuracy and corresponding distance in descending order. We use the \emph{{same}} model for private training and GSD computation. "-" means DP-SGD without public data.}.
+ \centering
+    \begin{tabular}{lcll}
+        \toprule
+        Accuracy & Private Dataset           & Public Dataset & Distance \\ \hline
+        \textbf{58.63\%}  & \multirow{4}{*}{CIFAR-10} & CIFAR-100      & \textbf{0.20}     \\ \cline{1-1} \cline{3-4} 
+        57.64\%  &                           & CIFAR-10       & 0.24     \\ \cline{1-1} \cline{3-4} 
+        56.75\%  &                           & SVHN           & 0.28     \\ \cline{1-1} \cline{3-4} 
+        52.16\%  &                           & -              & -        \\ \hline
+        \textbf{91.32\%}  & \multirow{4}{*}{SVHN}     & SVHN           & \textbf{0.25}     \\ \cline{1-1} \cline{3-4} 
+        89.29\%  &                           & CIFAR-100      & 0.31     \\ \cline{1-1} \cline{3-4} 
+        89.08\%  &                           & MNIST-M        & 0.39     \\ \cline{1-1} \cline{3-4} 
+        83.21\%  &                           & -              & -        \\ \hline
+        \textbf{85.25\%}  & \multirow{4}{*}{FMNIST}   & FMNIST         & \textbf{0.34}     \\ \cline{1-1} \cline{3-4} 
+        84.54\%  &                           & FLOWER         & 0.43     \\ \cline{1-1} \cline{3-4} 
+        83.91\%  &                           & MNIST          & 0.50     \\ \cline{1-1} \cline{3-4} 
+        79.77\%  &                           & -              & -        \\ 
+        \bottomrule
+    \end{tabular}
+\label{eval1}
+\end{table}
+For ChestX-ray14, we use AUC instead of prediction accuracy because of high class imbalance.
+The evaluation results are given in Table \ref{eval2}.
+Once again, lower GSD implies higher model utility.
+We see that ChestX-ray14 is the best public dataset, but the second best is another chest x-ray dataset.
+Furthermore, using a significantly different dataset (CIFAR-100) as the public dataset results in worse utility than using no public dataset at all.
+Therefore, it may be prudent for a practitioner to compute GSD in order to measure data suitability before proceeding to use it. 
+
+\subsection{Results for Second-Phase Pre-training} \label{sec:sppt}
+
+\begin{table}[!h]
+\caption{Second-Phase evaluation results and corresponding distance in descending order. We use DenseNet121 and choose two convolutional layers and the last layer for second-phase pre-training and private fine-tuning. We use the \emph{{same}} model setting for private training and distance computation. "-" means DP-SGD training.}.
+\centering
+\begin{tabular}{cccc}
+\hline
+AUC              & Private Dataset           & Public Dataset & Distance      \\ \hline
+\textbf{87.06\%} & \multirow{4}{*}{HAM10000} & HAM10000   & \textbf{0.50} \\ \cline{1-1} \cline{3-4} 
+85.53\%          &                           & KagSkin        & 0.68          \\ \cline{1-1} \cline{3-4} 
+85.40\%          &                           & -              & -             \\ \cline{1-1} \cline{3-4} 
+84.92\%          &                           & CIFAR-100      & 0.73          \\ \cline{1-1} \cline{3-4} 
+84.88\%          &                           & KagChest       & 0.73          \\ \hline
+\end{tabular}
+\label{2ndhamdensenet}
+\end{table}
+
+We compute the GSD and evaluate using second-phase pre-training for the chosen datasets. The evaluation results are given in Table \ref{2ndhamdensenet} and Table \ref{2ndchestvit}.
+As before, we consistently find that smaller GSD leads to larger utility.
+Like ChestX-ray14, HAM10000 is highly imbalanced, so we again use AUC. However, unlike ChestX-ray14, which contains roughly 100,000 images, HAM10000 is relatively small (only 10000 skin lesion images). We assume that we can only collect 300 images from it and treat them as public. As shown in Table \ref{2ndhamdensenet}, even this small public dataset can boost the utility through second-phase pre-training.  While even the worst public dataset does not dramatically hurt utility (in contrast to the pre-conditioning setting), GSD can still be a good indicator of the utility of public datasets. Similar results apply when we evaluate second-phase pre-training and GSD on ChestX-ray14 using ViTs, as shown in Table \ref{2ndchestvit}.
+
+\begin{table}[!h]
+\centering
+\caption{Second-Phase evaluation results and corresponding distance in descending order. We use ViT and LoRA fine-tuning. We use the \emph{{same}} model setting for private training and distance computation. "-" means DP-SGD training.}.
+\begin{tabular}{cccc}
+\hline
+AUC              & Private Dataset               & Public Dataset & Distance      \\ \hline
+\textbf{72.99\%} & \multirow{4}{*}{ChestX-ray14} & ChestX-ray14   & \textbf{0.44} \\ \cline{1-1} \cline{3-4} 
+71.86\%          &                               & KagChest       & 0.59          \\ \cline{1-1} \cline{3-4} 
+70.93\%          &                               & -              & -             \\ \cline{1-1} \cline{3-4} 
+70.84\%          &                               & CIFAR-100      & 0.98          \\ \hline
+\end{tabular}
+\label{2ndchestvit}
+\end{table}
+
+\subsection{Transferability: Simple Models Remain Predictive}\label{sec:transfer}
+\begin{table*}[!h]
+\caption{Transferability evaluation results. The left-most column denotes each pair of private-public datasets, e.g. (Xray, Xray) means we take ChestX-ray14 as a private dataset, split part of its testset and take those images as public. The first row denotes different model architectures. "Probe" is a simple CNN with around 30,000 parameters. ResNet152$^*$ and ResNet152$^{**}$ use different parameter-efficient fine-tuning settings. We use the same model for each Distance-Accuracy. The results show that this distance given by GSD is generally robust across different algorithms (pre-conditioning or second-phase pre-training) and different model architectures (from simple Probe to ViT). A smaller distance indicates that this public dataset is more similar to the private one, thus leveraging this public dataset for private learning will result in better accuracy.}
+\centering
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{cc|cccc}
+\hline
+                                   & Probe                 & ResNet152$^*$               & ResNet152$^{**}$               & DenseNet121                & ViT                     \\ \hline
+\multicolumn{2}{c|}{Task}                                  & Pre-conditioning        & Second-phase            & Second-phase            & Second-phase            \\ \hline
+\multicolumn{1}{l}{}               & \multicolumn{1}{l|}{} & \multicolumn{4}{c}{Distance | Accuracy}                                                               \\ \hline
+\multicolumn{1}{c|}{(Xray, Xray)}  & \textbf{0.39}         & \textbf{0.15 | 69.02\%} & \textbf{0.31 | 67.48\%} & \textbf{0.33 | 67.53\%} & \textbf{0.44 | 72.99\%} \\
+\multicolumn{1}{c|}{(Xray, Chest)} & 0.52                  & 0.36 | 66.62\%          & 0.34 | 67.27\%          & 0.37 | 67.40\%          & 0.59 | 71.86\%          \\
+\multicolumn{1}{c|}{(Xray, CIFAR)} & 0.58                  & 0.55 | 48.80\%          & 0.39 | 66.57\%          & 0.40 | 67.28\%          & 0.98 | 70.84\%          \\ \hline
+\multicolumn{1}{c|}{(HAM, HAM)}    & \textbf{0.42}         & -                       & \textbf{0.48 | 86.83\%} & \textbf{0.50 | 87.06\%} & \textbf{0.50 | 84.94\%} \\
+\multicolumn{1}{c|}{(HAM, Skin)}   & 0.55                  & -                       & 0.65 | 85.95\%          & 0.68 | 85.53\%          & 0.76 | 81.23\%                 \\
+\multicolumn{1}{c|}{(HAM, CIFAR)}  & 0.67                  & -                       & 0.70 | 85.49\%          & 0.73 | 84.92\%          & 0.97 | 77.07\%          \\
+\multicolumn{1}{c|}{(HAM, Chest)}  & 0.76                  & -                       & 0.70 | 85.41\%          & 0.73 | 84.88\%          & 0.93 | 78.65\%                 \\ \hline
+\end{tabular}
+\label{transferability}
+\end{adjustbox}
+\end{table*}
+Our empirical evaluation suggests that GSD is transferable over different architectures. In previous experiments, we used the same model architecture for both GSD and the (private) learning algorithm.
+We find that the relative GSD ordering of different public datasets is robust across different architectures. For example, \textbf{\textit{GSD}}(ChestX-ray14, KagChest) is consistently smaller than \textbf{\textit{GSD}}(ChestX-ray14, CIFAR-100), no matter what model architecture or parameter-efficient fine-tuning mechanism we choose. Inspired by this finding, we measure GSD with a very simple CNN, which we call a ``probe network.'' It consists of two convolutional layers and one linear layer, with roughly 30,000 parameters. Evaluation results are given in Table \ref{transferability}.
+They demonstrate that even using a simple CNN, GSD can still derive accurate distance measurement with regard to the utility of public data for private learning tasks. The similarity described by GSD is thus robust against the choice of model architecture. 
+
+\subsection{Task2Vec May Give Wrong Prediction}
+\paragraph{Result.} We evaluate the similarity between each public-private dataset pair using Task2Vec. Task2Vec gives similarity results of mixed quality: to highlight one notable failure case, we consider the ChestX-ray14 private dataset in Table \ref{more task2vec}. 
+The closest dataset is itself. However, following this, CIFAR-100 is as close as KagChest, while it is qualitatively very different from ChestX-ray14 and provides low utility when used as the public dataset.
+In contrast, GSD orders the quality of these datasets in a manner consistent with their quality.
+\begin{table}[htbp]
+    \caption{Results for GSD vs. Task2Vec. We evaluate ChestX-ray14 using GEP and compute the distance using Task2Vec and GSD. As suggested by Task2Vec, CIFAR-100 should be as close to ChestX-ray14 as KagChest, while it actually provides low utility.}
+    \centering
+    \begin{tabular}{llll}
+    \hline
+                 & AUC     & Task2Vec & GSD \\ \hline
+    ChestX-ray14 & 69.02\% & 0.052             & 0.15         \\
+    KagChest     & 66.62\% & 0.16              & 0.36         \\
+    -            & 64.90\% & -                 & -            \\
+    CIFAR-100    & 48.80\% & 0.16              & 0.55         \\ \hline
+    \end{tabular}
+    
+    \label{more task2vec}
+\end{table}
+
+
+
+\section{Conclusion}
+
+A recent line of work explores the power of public data in private machine learning. However, evaluating the quality of the data is still a question that must be addressed. We propose a new distance GSD to predict utility of public datasets in private ML. 
+We empirically demonstrate that lower GSD of a public dataset is strongly predictive of higher downstream utility. 
+Our algorithms require minimal data and are computationally efficient.
+Additionally, transferability of GSD demonstrates that it is generally model agnostic, allowing one to decouple the public dataset selection and private learning.
+We further demonstrate that GSD is effective for predicting utility in settings involving both pre-conditioning and second-phase pre-training, and that GSD compares favorably to other measures of dataset distance. 
+
+
+
+
+

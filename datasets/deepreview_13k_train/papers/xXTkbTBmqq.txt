@@ -1,0 +1,733 @@
+\title{OLMoE: Open Mixture-of-Experts Language Models}
+
+\begin{abstract}
+
+We introduce \model{}, a fully open, state-of-the-art language model leveraging sparse Mixture-of-Experts (MoE). \modelsmall{} has 7 billion (B) parameters but uses only 1B per input token. We pretrain it on 5 trillion tokens and further adapt it to create \modelsmalldpo{}. Our models outperform all available models with similar active parameters, even surpassing larger ones like Llama2-13B-Chat and DeepSeekMoE-16B. We present various experiments on MoE training, analyze routing in our model showing high specialization, and open-source all aspects of our work: model weights, training data, code, and logs.
+
+\begin{center}
+\begin{tabular}{rcl}
+\multirow{2}{*}{\huggingface} & \textbf{Weights} & \url{https://hf.co/allenai/OLMoE-1B-7B-0924}\\
+& \textbf{Data} & \url{{https://hf.ai/ai2-llm/olmoe/reports/OLMoE-1B-7B-0924--Vmlldzo4OTcyMjU3}{\texttt{https://wandb.ai/ai2-llm/olmoe/reports/}}\\
+& & \href{https://wandb.ai/ai2-llm/olmoe/reports/OLMoE-1B-7B-0924--Vmlldzo4OTcyMjU3}{\texttt{OLMoE-1B-7B-0924--Vmlldzo4OTcyMjU3}}\\
+\end{tabular}
+\end{center}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure*}[htbp]
+\centering
+\begin{center}
+\includegraphics[width=\textwidth]{figures/overview.pdf}
+\caption{\textbf{Performance, cost, and degree of openness of open MoE and dense LMs.} Model names contain rounded parameter counts: \texttt{model-active-total} for MoEs and \texttt{model-total} for dense LMs. \texttt{\#ckpts} is the number of intermediate checkpoints available. 
+We highlight MMLU as a summary of overall performance; see \autoref{sec:results} for more results. \modelsmall{} performs best among models with similar active parameter counts and is the most open MoE.}
+\label{fig:overview}
+\end{center}
+\end{figure*}
+
+\newpage
+\begin{spacing}{0.1}
+\tableofcontents
+\end{spacing}
+\newpage
+
+\label{sec:intro}
+
+Despite significant advances in Large Language Models (LMs) on various tasks, there remains a clear trade-off between performance and cost in both training and inference. High-performing LMs are inaccessible for many academics and open-source developers as they are prohibitively expensive to build and deploy.\footnote{For example, even with 16 H100 GPUs and several optimizations, Llama 3 405B only achieves a decoding throughput of around 100 tokens per second~\citep{dubey2024llama3herdmodels}.} One approach to improve the cost-performance trade-off lies in using sparsely-activated Mixture-of-Experts (MoEs)~\citep{shazeer2017outrageously}. MoEs have several experts in each layer, only a subset of which is activated at a time (see \autoref{fig:olmoe}). This makes MoEs significantly more efficient than dense models with a similar number of total parameters, which activate all parameters for every input~\citep{yun2024inferenceoptimalmixtureofexpertlargelanguage}. For this reason, industry frontier models use MoEs including Gemini-1.5~\citep{geminiteam2024gemini} and reportedly GPT-4~\citep{gpt4moe}.
+
+Most MoE models, however, are closed-source: while some have publicly released model weights~\citep{deepseekai2024deepseekv2,jiang2024mixtral,shen2024jetmoe,jambateam2024jamba15hybridtransformermambamodels,qwen_moe}, they offer limited to no information about their training data, code, or recipes (see Figure~\ref{fig:overview}). While there have been prior efforts in making language modeling research fully accessible~\citep{biderman2023pythiasuiteanalyzinglarge,groeneveld2024olmo,li2024datacomplmsearchgenerationtraining,liu2023llm360,workshop2023bloom,zhang2024mapneohighlycapabletransparent}, they have been largely limited to dense LMs. This comes despite MoEs requiring \textit{more} openness as they add complex new design questions to LMs, such as how many total versus active parameters to use, whether to use many small or few large experts, if experts should be shared, and what routing algorithm to use. The lack of open resources and findings about these details prevents the field from building cost-efficient open MoEs that approach the capabilities of closed-source frontier models.
+
+To address these issues, we introduce \model{}, a fully open Mixture-of-Experts language model with state-of-the-art performance among similarly-sized models. In particular, we pretrain \modelsmall{} for 5.1 trillion tokens with 6.9B total parameters, of which only 1.3B are activated for each input token. This leads to a similar inference cost as using dense models with around 1B parameters, such as OLMo 1B~\citep{groeneveld2024olmo} or TinyLlama 1B~\citep{zhang2024tinyllamaopensourcesmalllanguage}, but requires more GPU memory to store its 7B total parameters. Our experiments show that MoEs train $\sim$2$\times$ faster than dense LMs with equivalent active parameters. In \autoref{fig:overview}, we show that \modelsmall{} significantly outperforms all open 1B models and displays competitive performance to dense models with significantly higher inference costs and memory storage (e.g., similar MMLU scores to Llama2-13B, which is $\sim$10$\times$ more costly). Via instruction- and preference tuning, we create \modelsmalldpo{}, which we find exceeds various larger instruct models including Llama2-13B-Chat~\citep{touvron2023llama2openfoundation}, OLMo-7B-Instruct (0724), and DeepSeekMoE-16B~\citep{deepseekai2024deepseek} on common benchmarks (MMLU, GSM8k, HumanEval, etc.).
+
+Our comprehensive set of controlled experiments highlights key design choices for MoEs (see \autoref{tab:moedesign}) and LMs in general. One critical design decision for making MoEs performant is the use of fine-grained routing with granular experts~\citep{deepseekai2024deepseek}: we employ 64 small experts in each layer with 8 being activated. The choice of routing algorithm is also important: we find dropless~\citep{gale2022megablocksefficientsparsetraining} token-based routing~\citep{shazeer2017outrageously} outperforms expert-based routing~\citep{zhou2022mixtureofexperts}. Our findings also include those that challenge prior work, such as the ineffectiveness of shared experts~\citep{deepseekai2024deepseek} and the limited benefits of sparsely upcycling a pretrained dense LM into an MoE~\citep{komatsuzaki2023sparse} unless under small compute budgets. Finally, we analyze the routing behavior in \modelsmall{}, finding that routing saturates early in pretraining, experts are rarely co-activated, and experts exhibit domain and vocabulary specialization. 
+
+We hope our fully open MoE facilitates more research and analysis to improve our understanding of these models. We release training code, intermediate checkpoints (every 5000 steps), training logs, and training data under open-source licenses (Apache 2.0~{\url{http://www.apache.org/licenses/LICENSE-2.0}} or ODC-By 1.0~{\url{https://opendatacommons.org/licenses/by/1-0/}}).
+
+
+
+\section{Pretraining and Adaptation}
+
+\label{sec:pretraining}
+
+\begin{figure}[htbp]
+\centering
+\begin{center}
+\includegraphics[width=\textwidth]{figures/olmoe.pdf}
+\caption{\textbf{Comparison of the architecture of dense LMs and MoE models like \model{}.} The figure excludes some details, e.g., \modelsmall{} also uses QK-Norm (\autoref{sec:qknorm}).}
+\label{fig:olmoe}
+\end{center}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{>{\raggedright}p{2.7cm} p{6.4cm} p{1.2cm} p{2.6cm}}
+\toprule
+\textbf{Design choice} & \textbf{Description} & \textbf{Exper-iment} & \modelsmall{} \\
+\midrule
+Active params & \# active parameters per input token  & \autoref{sec:moevsdense} & 1.3B active\\
+Total params & Total \# of parameters in the model & \autoref{sec:moevsdense} & 6.9B total \\\addlinespace
+Expert granularity & Using fine-grained small experts vs.~a few large experts~\citep{dai2024deepseekmoeultimateexpertspecialization} & \autoref{sec:granularity} & 64 small experts with 8  activated \\\addlinespace
+Expert sharing & Whether or not to include a shared expert~\citep{dai2024deepseekmoeultimateexpertspecialization} & \autoref{sec:shared} & No shared expert \\\addlinespace
+Routing algorithm & How inputs are assigned to experts, e.g., assignment on a per token basis (e.g., 2 experts per token) or per expert basis (e.g., 2 tokens per expert), and whether or not all tokens get assigned or some get dropped~\citep{gale2022megablocksefficientsparsetraining,zhou2022mixtureofexperts} & \autoref{sec:expertchoice} & Dropless~\citep{gale2022megablocksefficientsparsetraining} MoE with token choice \\\addlinespace
+Sparse upcycling & Whether to start from a dense model~\citep{komatsuzaki2023sparse,zhang2024bamjustlikethat} & \autoref{sec:upcycling} & Not used \\\addlinespace
+Load balancing loss & Auxiliary loss to penalize unequal assignment to experts that may harm performance~\citep{shazeer2017outrageously} & \autoref{sec:lbloss} & Used with weight 0.01 \\\addlinespace
+Router z-loss & Auxiliary loss to penalize large logits in the router that may cause instabilities~\citep{zoph2022stmoe} & \autoref{sec:zloss} & Used with weight 0.001 \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Key MoE design choices and our setup for \modelsmall{} based on our experiments.} Full configuration for \modelsmall{} is in \autoref{sec:config}.}
+\label{tab:moedesign}
+\end{table}
+
+\begin{table}[htbp]
+\centering 
+\begin{tabular}{llrrrr}
+\toprule
+\multirow{3}{*}{\textbf{Source}} & \multirow{3}{*}{\textbf{Doc Type}} & \textbf{GPT-NeoX} & \multirow{3}{*}{\shortstack[l]{\textbf{~~~Words}\\\textit{(billions)}}} & \textbf{UTF-8} & \multirow{3}{*}{\shortstack[l]{\textbf{Documents}\\\textit{~~~~(millions)}}} \\
+& & \textbf{tokens} &  & \textbf{bytes} & \\
+& & \textit{(billions)} &  & \textit{(GB)} & \\
+\midrule
+DCLM-Baseline~\citep{li2024datacomplm} & web pages & 3,860 & 3,380 & 16,700 & 2,950 \\
+StarCoder~\citep{li2023starcoder,kocetkov2022stack3tbpermissively} & code & 101 & 63.9 & 325 & 78.7 \\
+peS2o~\citep{peS2o,soldaini2024dolma} & STEM papers & 57.2 & 51.3 & 268 & 38.8 \\
+arXiv~\citep{together2023redpajama} & STEM papers & 21.1 & 23.5 & 88.8 & 1.55 \\
+OpenWebMath~\citep{paster2023openwebmath} & math web pages & 12.7 & 10.2 & 42.4 & 2.91 \\
+Algebraic Stack~\citep{azerbayev2023llemma} & math proofs code & 12.6 & 9.6 & 39.3 & 2.83 \\
+\begin{tabular}{@{}l@{}}
+English Wikipedia \\
+\hspace{.5em}~\&  Wikibooks~\citep{soldaini2024dolma} 
+\end{tabular}
+& encyclopedic & 3.69 & 3.16 & 16.2 & 6.17 \\
+\midrule
+\multicolumn{2}{c}{\textbf{Total}} & \textbf{4,060} & \textbf{3,530} & \textbf{17,400} & \textbf{3,080} \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Composition of the pretraining data for \modelsmall{}}. StarCoder, peS2o, and Wikipedia parts come from Dolma 1.7~\citep{soldaini2024dolma}. Links to our data are in \autoref{sec:artifacts}.}
+\label{tab:data}
+\end{table}
+\paragraph{Pretraining architecture} \model{} is a decoder-only LM consisting of $N_{L}$ transformer~\citep{vaswani2023attention} layers. The feedforward network (FFN) in dense models like OLMo~\citep{groeneveld2024olmo}, is replaced with an MoE module consisting of $N_{E}$ smaller FFN modules called experts, of which a subset of $k$ experts are activated for each processed input token $x$ (also see \autoref{fig:olmoe}):
+\begin{equation}
+\label{eq:moe}
+\text{MoE module}(x)=\sum_{i=1}^{\text{Top}-k(r(x))} \mathrm{softmax} \left( r(x) \right)_i {E_i(x)}
+\end{equation}
+where $r$, called the router, is a learned linear layer mapping from the input logits to the chosen $k$ experts. A softmax is applied to the router outputs to compute routing probabilities for all $N_E$ experts. Each selected expert $E_i$ processes the input $x$, the output of which is then multiplied with its respective routing probability. The results are then summed across all chosen Top-$k$ experts to constitute the output of the MoE module for a single layer of the model out of its $N_L$ total layers. Key decisions in designing an MoE model include determining the number of activated and total parameters, the design of the experts (e.g., granularity, whether or not to include shared experts), and the choice of the routing algorithm. Moreover, training an MoE model can involve initializing from a dense model (sparse upcycling) and changing the training objective, such as including auxiliary load balancing and router z-losses. Experiments related to these design choices are in \autoref{sec:moespecific}; \autoref{tab:moedesign} shows our final decisions. 
+
+In summary, we use 1.3B active parameters out of a total of 6.9B, with 8 activated experts out of 64 per layer. We use dropless token choice routing~\citep{gale2022megablocksefficientsparsetraining}: for each input token, the learned router network determines 8 experts to process it. We train \modelsmall{} from scratch with two auxiliary losses: load balancing loss ($\mathcal{L}_{LB}$)~\citep{shazeer2017outrageously} and router z-loss ($\mathcal{L}_{RZ}$)~\citep{zoph2022stmoe}, which we define and experiment with in \autoref{sec:lbloss} and \autoref{sec:zloss}, respectively. We multiply them with respective loss weights, $\alpha$ and $\beta$, and sum them linearly with the cross entropy loss ($\mathcal{L}_{\textit{CE}}$) to arrive at our final training loss:
+\begin{equation}
+\label{eq:loss}
+\mathcal{L} = \mathcal{L}_{\textit{CE}} + \alpha \mathcal{L}_{\textit{LB}} + \beta \mathcal{L}_{\textit{RZ}}
+\end{equation}
+Our full pretraining configuration for \modelsmall{} is in \autoref{sec:config}.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{l|cr}
+\toprule
+\textbf{Source} & \textbf{Domain} & \textbf{Samples} \\
+\midrule
+\multicolumn{3}{c}{\textit{Instruction Tuning}} \\
+\midrule
+Tulu 2 SFT Mix~\citep{ivison2023camels} & Various & 326,154 \\
+No Robots~\citep{no_robots} & Various & 9,500 \\
+CodeFeedback-Filtered-Instruction~\citep{zheng2024opencodeinterpreter} & Coding & 156,526 \\
+MetaMathQA~\citep{yu2024metamathbootstrapmathematicalquestions} & Math & 98,750 \\
+Advanced (non-chat) subset of Daring Anteater~\citep{wang2024helpsteer2} & Various & 17,082 \\
+\midrule
+\multicolumn{3}{c}{\textit{Preference Tuning (DPO~\citep{rafailov2023direct})}} \\
+\midrule
+UltraFeedback~\citep{cui2023ultrafeedback} binarized and filtered for TruthfulQA~\citep{lin2022truthfulqa} contamination & Various & 60,800 \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Adaptation training data for \modelsmall{}.} Links to our data are in \autoref{sec:artifacts}.}
+\label{tab:adaptds}
+\end{table}
+\paragraph{Pretraining data} We use a mix of data from DCLM~\citep{li2024datacomplm} and Dolma 1.7~\citep{soldaini2024dolma}, which includes the following: (1) a quality-filtered subset of Common Crawl, referred to as DCLM-Baseline, (2) StarCoder, Algebraic Stack and arXiv, used in both DCLM and Dolma 1.7, and (3) peS2o and Wikipedia from Dolma 1.7. We refer to our pretraining dataset as \data{}.
+
+To all sources above, we apply a filter that removes all documents with a sequence of 32 or more repeated n-grams, where an n-gram is any span of 1 to 13 tokens. 
+We shuffle all samples randomly at the beginning of each epoch and train for a total of 5.133T tokens (1.3 epochs following \citet{muennighoff2023scaling}). During our annealing phase (final 100B tokens) we first reshuffle the entire dataset and then linearly decay the learning rate to 0, following prior work~\citep{groeneveld2024olmo,li2024datacomplm}. Our pretraining data statistics are in \autoref{tab:data}.
+
+\paragraph{Adaptation} We create \modelsmalldpo{} by following a standard adaptation recipe split into \textbf{instruction tuning}~\citep{mishra2022crosstask,wei2022finetuned, sanh2022multitask,shen2023mixtureofexperts,zadouri2023pushingmixtureexpertslimit} followed by \textbf{preference tuning}~\citep{christiano2023deep,bai2022constitutionalaiharmlessnessai,rafailov2023direct,ethayarajh2024kto} building on prior open models~\citep{tunstall2023zephyr,ivison2023camels,wang2023far}. In our instruction tuning dataset, we add more code and math data to boost performance on downstream coding and math applications. Other models, such as GPT-4~\citep{openai2023gpt4} and Llama 3~\citep{dubey2024llama3herdmodels}, instead include samples from math datasets like GSM8k~\citep{cobbe2021training} or MATH~\citep{hendrycks2021measuringmathematicalproblemsolving} during pretraining. We also include No Robots and a subset of Daring Anteater as they are of high quality and add diversity, two key factors for successful adaptation~\citep{wang2023far,zhou2023lima,longpre2023flancollectiondesigningdata,muennighoff2023octopack}. We describe our adaptation datasets in \autoref{tab:adaptds} and hyperparameters in \autoref{sec:config}.
+
+
+
+\section{Results}
+
+\label{sec:results}
+
+Our evaluation procedure consists of three parts: \textbf{During pretraining}, \textbf{After pretraining}, and \textbf{After adaptation}. We detail the setup for each in \autoref{sec:evalsetup}.
+
+\begin{figure}[htbp]
+\centering
+\begin{center}
+\includegraphics[width=\textwidth]{figures/trainingevalflops.pdf}
+\caption{\textbf{Evaluation of \modelsmall{} and the current best OLMo models during pretraining.} \modelsmall{} differs from the OLMo models in its MoE architecture, several training hyperparameters, and its training dataset, see \autoref{sec:pretraining}. A version of this plot with tokens as the x-axis and markers where annealing starts is in \autoref{sec:addeval}. More results, logs, and configurations: \url{https://wandb.ai/ai2-llm/olmoe/reports/Plot-OLMoE-1B-7B-vs-OLMo-7B-vs-OLMo-1B--Vmlldzo4OTcyMjEz}}
+\label{fig:trainingevalflops}
+\end{center}
+\end{figure}
+
+\paragraph{During pretraining} In \autoref{fig:trainingevalflops} we benchmark the performance of \modelsmall{} during pretraining with the current best OLMo models~\citep{groeneveld2024olmo} on commonly used downstream tasks. We find that across all tasks \modelsmall{} reaches better performance with less compute (FLOPs) than the dense OLMo models. \modelsmall{} matches or outperforms OLMo-7B at the end of training despite \modelsmall{} having used less than half as many FLOPs for training and using only 1B active parameters. This is likely a result of the dataset and modeling changes we make to the OLMo setup including MoE-related changes, stability, and performance improvements, outlined in \autoref{sec:config}. \autoref{sec:addeval} contains training and validation loss plots showing very smooth loss curves without major loss spikes during the 5T tokens of our pretraining. 
+
+\begin{table}[htbp]
+\centering
+{\footnotesize
+\begin{tabular}{l|cc|cccccc}
+\toprule
+& \textbf{Active} & \textbf{Open} & \multirow{2}{*}{\textbf{MMLU}} & \textbf{Hella-} & \textbf{ARC-} & \textbf{ARC-} & \multirow{2}{*}{\textbf{PIQA}} & \textbf{Wino-} \\
+& \textbf{params} & \textbf{Data} & & \textbf{Swag} & \textbf{Chall.} & \textbf{Easy} & & \textbf{Grande} \\
+\midrule
+\multicolumn{9}{c}{LMs with $\sim$7-9B active parameters} \\
+\midrule    
+Llama2-7B~\citep{touvron2023llama2openfoundation} & 6.7B & \emoji{olmoe_cross} & 46.2 & 78.9 & 54.2 & 84.0 & 77.5 & 71.7 \\
+OLMo-7B (0724)~\citep{groeneveld2024olmo} & 6.9B & \emoji{olmoe_checkmark} & 54.9 & 80.5 & 68.0 & 85.7 & 79.3 & 73.2 \\
+Mistral-7B~\citep{jiang2023mistral} & 7.3B & \emoji{olmoe_cross} & 64.0 & 83.0 & 78.6 & 90.8 & 82.8 & 77.9 \\
+DCLM-7B~\citep{li2024datacomplm} & 6.9B & \emoji{olmoe_checkmark} & 64.4 & 82.3 & 79.8 & 92.3 & 80.1 & 77.3 \\
+Llama3.1-8B~\citep{dubey2024llama3herdmodels} & 8.0B & \emoji{olmoe_cross} & 66.9 & 81.6 & 79.5 & 91.7 & 81.1 & 76.6 \\
+Gemma2-9B~\citep{gemmateam2024gemma2improvingopen} & 9.2B & \emoji{olmoe_cross} & \textbf{70.6} & \textbf{87.3} & \textbf{89.5} & \textbf{95.5} & \textbf{86.1} & \textbf{78.8} \\
+\midrule
+\multicolumn{9}{c}{LMs with $\sim$2-3B active parameters} \\
+\midrule
+OpenMoE-3B-9B~\citep{xue2024openmoe}& 2.9B & \emoji{olmoe_checkmark} & 27.4 & 44.4 & 29.3 & 50.6 & 63.3 & 51.9 \\
+StableLM-2B~\citep{bellagente2024stablelm216b} & 1.6B & \emoji{olmoe_cross} & 40.4 & 70.3 & 50.6 & 75.3 & 75.6 & 65.8 \\
+DeepSeek-3B-16B~\citep{dai2024deepseekmoeultimateexpertspecialization} & 2.9B & \emoji{olmoe_cross} & 45.5 & 80.4 & 53.4 & 82.7 & 80.1 & \textbf{73.2} \\
+JetMoE-2B-9B~\citep{shen2024jetmoe} & 2.2B & \emoji{olmoe_cross} & 49.1 & \textbf{81.7} & 61.4 & 81.9 & 80.3 & 70.7 \\
+Gemma2-3B~\citep{gemmateam2024gemma2improvingopen} & 2.6B & \emoji{olmoe_cross} & 53.3 & 74.6 & 67.5 & 84.3 & 78.5 & 71.8 \\ 
+Qwen1.5-3B-14B~\citep{qwen_moe} & 2.7B & \emoji{olmoe_cross} & \textbf{62.4} & 80.0 & \textbf{77.4} & \textbf{91.6} & \textbf{81.0} & 72.3 \\
+\midrule
+\multicolumn{9}{c}{LMs with $\sim$1B active parameters} \\
+\midrule
+Pythia-1B~\citep{biderman2023pythiasuiteanalyzinglarge} & 1.1B & \emoji{olmoe_checkmark} & 31.1 & 48.0 & 31.4 & 63.4 & 68.9 & 52.7 \\
+OLMo-1B (0724)~\citep{groeneveld2024olmo} & 1.3B & \emoji{olmoe_checkmark} & 32.1 & 67.5 & 36.4 & 53.5 & 74.0 & 62.9 \\
+TinyLlama-1B~\citep{zhang2024tinyllamaopensourcesmalllanguage} & 1.1B & \emoji{olmoe_checkmark} & 33.6 & 60.8 & 38.1 & 69.5 & 71.7 & 60.1 \\
+DCLM-1B~\citep{li2024datacomplm} & 1.4B & \emoji{olmoe_checkmark} & 48.5 & 75.1 & 57.6 & 79.5 & 76.6 & 68.1 \\
+\rowcolor{lightOlmoeYellow}
+\modelsmall{} & 1.3B & \emoji{olmoe_checkmark_yellow} & \textbf{54.1} & \textbf{80.0} & \textbf{62.1} & \textbf{84.2} & \textbf{79.8} & \textbf{70.2} \\
+\bottomrule
+\end{tabular}
+}
+\caption{\textbf{\modelsmall{} after pretraining versus larger MoEs and dense LMs.} We compare with dense LMs that assimilate \modelsmall{} either in active parameters (1B, approximates speed and cost) or total parameters (7B, approximates memory requirements). Model names contain rounded parameter counts: \texttt{model-active-total} for MoEs and \texttt{model-total} for dense LMs (this leads to some differences to official names, e.g., while called ``Gemma2-2B'' it actually has 2.6B active and total parameters~\citep{gemmateam2024gemma2improvingopen}). Chall.~= Challenge. We run all evaluations ourselves with 5 few-shots, see \autoref{sec:evalsetup} for details.
+}
+\label{tab:eval}
+\end{table}
+
+\begin{table}[htbp]
+{\footnotesize
+\begin{tabular}{l|ccccccc|c}
+\toprule
+&  &  &  & \textbf{Human-} & \textbf{Alpaca-} & & \\
+\textbf{Task ($\rightarrow$)} & \textbf{MMLU} & \textbf{GSM8k} & \textbf{BBH} & \textbf{Eval} & \textbf{Eval 1.0} & \textbf{XSTest} & \textbf{IFEval} & \textbf{Avg} \\
+\textbf{Setup ($\rightarrow$)} & \scriptsize{0-shot} & \scriptsize{8-shot CoT} & \scriptsize{3-shot} & \scriptsize{0-shot} & \scriptsize{0-shot} &\scriptsize{0-shot} & \scriptsize{0-shot} & \scriptsize{} \\
+\textbf{Metric ($\rightarrow$)} & \scriptsize{EM} & \scriptsize{EM} & \scriptsize{EM} & \scriptsize{Pass@10} & \scriptsize{\%win} & \scriptsize{F1} & \scriptsize{Loose Acc} \\
+\midrule
+OLMo-1B (0724) & 25.0 & 7.0 & 22.5 & 16.0 & - & 67.6 & 20.5 & - \\
++SFT & 36.0 & 12.5 & 27.2 & 21.2 & 41.5 & 81.9 & 26.1 & 35.9 \\
++DPO & 36.7 & 12.5 & 30.6 & 22.0 & 50.9 & 79.8 & 24.2 & 37.4\\
+\midrule
+OLMo-7B (0724) & 50.8 & 32.5 & 36.9 & 32.3 & - & 80.8 & 19.6 & - \\
++SFT & 54.2 & 25.0 & 35.7 & 38.5 & 70.9 & 86.1 & 39.7 & 49.3 \\
++DPO & 52.8 & 9.0 & 16.6 & 35.0 & 83.5 & \textbf{87.5} & 37.9 & 49.1 \\
+\midrule
+JetMoE-2B-9B & 45.6 & 43.0 & 37.2 & 54.6 & - & 68.2 & 20.0 & - \\
++SFT & 46.1 & 53.5 & 35.6 & 64.8 & 69.3 & 55.6 & 30.5 & 50.4 \\
+\midrule
+DeepSeek-3B-16B & 37.7 & 18.5 & 39.4 & 48.3 & - & 65.9 & 13.5 & - \\
++Chat & 48.5 & 46.5 & \textbf{40.8} & \textbf{70.1} & 74.8 & 85.6 & 32.3 & 57.0 \\
+\midrule
+Qwen1.5-3B-14B & \textbf{60.4} & 13.5 & 27.2 & 60.2 & - & 73.4 & 20.9 & - \\
++Chat & 58.9 & \textbf{55.5} & 21.3 & 59.7 & 83.9 & 85.6 & 36.2 & 57.3 \\
+\midrule
+{\modelsmall{}} & 49.8 & 3.0 & 33.6 & 22.4 & - & 59.7 & 16.6 & - \\
+\textbf{+SFT} & 51.4 & 40.5 & 38.0 & 51.6 & 69.2 & 84.1 & 43.3 & 54.0 \\
+\rowcolor{lightOlmoeYellow}
+\textbf{+DPO} & 51.9 & 45.5 & 37.0 & 54.8 & \textbf{84.0} & 82.6 & \textbf{48.1} & \textbf{57.7} \\
+\bottomrule
+\end{tabular}
+}
+\caption{\textbf{\modelsmall{} after adaptation versus other models.} We find the JetMoE chat model (\url{https://hf.co/jetmoe/jetmoe-8b-chat}) is broken leading to random scores thus we exclude it. Names contain rounded parameter counts: \texttt{model-active-total} for MoEs and \texttt{model-total} for dense LMs. We run all evaluations ourselves (\autoref{sec:evalsetup}). Models use different mixes for adaptation, e.g., \model{} is trained on an improved version of the pipeline used for OLMo models.}
+\label{tab:adaptresults}
+\end{table}
+
+\paragraph{After pretraining} In \autoref{tab:eval} we benchmark \modelsmall{} on common downstream tasks. We find that \modelsmall{} performs best among models that use less than 2B active parameters, making it the most economical option for many use cases of LMs. For larger budgets, Qwen1.5-3B-14B has stronger performance but has more than double the active and total parameters than \modelsmall{}. We find that despite requiring $\sim$6--7$\times$ less compute per forward pass, \modelsmall{} outperforms some dense LMs with 7B parameters such as Llama2-7B~\citep{touvron2023llama2openfoundation}, but falls short of others like Llama3.1-8B~\citep{dubey2024llama3herdmodels}. \autoref{fig:overview} compares MMLU performance with active parameters, a proxy for the value of a model given its cost, of \modelsmall{} and other LMs. \modelsmall{} is the state of the art in its cost regime.
+
+\paragraph{After adaptation} In \autoref{tab:adaptresults}, we benchmark our instruction (SFT) and preference (DPO) tuning of \modelsmall{}. SFT improves our model on all tasks measured. We observe a $>$10$\times$ gain on GSM8k, likely due to our inclusion of additional math data to account for the relatively small amounts of math data during pretraining (\autoref{sec:pretraining}). DPO helps on most tasks, especially AlpacaEval which aligns with findings from prior work~\citep{wang2023far,ivison2023camels,muennighoff2024generativerepresentationalinstructiontuning}. Our DPO model, which we refer to as \modelsmalldpo{}, has the highest average among all models benchmarked. We find it to outperform the chat version of Qwen1.5-3B-14B despite Qwen having $>$2$\times$ more parameters and its pretrained model outperforming \modelsmall{} in \autoref{tab:eval}. The 84\% score on AlpacaEval also outperforms much larger dense models on the leaderboard,\footnote{\url{https://tatsu-lab.io/alpaca_eval/}} such as Llama2-13B-Chat~\citep{touvron2023llama2openfoundation}.
+
+\FloatBarrier
+
+
+
+\section{Experimenting with Alternative Design Choices}
+
+\label{sec:ablations}
+
+In this section, we present pretraining and adaptation experiments that have led to \modelsmall{}. We group them into experiments on settings specific to Mixture-of-Experts (\autoref{sec:moespecific}), experiments on settings applicable to both dense LMs and MoEs (\autoref{sec:notmoespecific}), and adaptation experiments (\autoref{sec:adapt}). In pretraining experiments, we often use MMLU Var, a version of MMLU~\citep{hendrycks2021measuringmassivemultitasklanguage} with varying few-shots and a different format that provides signal earlier during training. We describe our full evaluation setup in \autoref{sec:evalsetup} and provide additional experiments in \autoref{sec:addablations}. Each experiment links to a Weights \& Biases report with more validation and downstream results, and the full configurations of the runs. To isolate the impact of changes and minimize confounders, we vary only one hyperparameter for each experiment. Nevertheless, due to the large number of hyperparameters, some results may change under different configurations and we cannot guarantee the correctness of each of our hyperparameter choices. Models are not comparable across different experiments, as we vary the base model to incorporate successful findings.
+
+\subsection{MoE-specific Pretraining Settings}
+\label{sec:moespecific}
+
+\subsubsection{Mixture-of-Experts vs.~Dense}
+\label{sec:moevsdense}
+
+\begin{figure*}[htbp]
+\centering
+\begin{center}
+\includegraphics[width=\textwidth]{figures/moevsdense.pdf}
+\caption{\textbf{MoE vs.~Dense.} We train a 1.3B parameter dense model and a 1.3B active, 6.9B total parameter MoE model, each on 128 H100 GPUs. Apart from MoE-related changes, we train both with the same configuration for 130B tokens. The MoE contains 64 experts out of which 8 are activated with an FFN dimension of 1,024, while the dense model has an FFN dimension of 8,192. Thus both have the same number of active parameters. \textbf{Top:} The MoE reaches the final dense performance with $\sim$3$\times$ fewer tokens (or FLOPs, as both have the same active parameters ignoring the trivial router parameters). \textbf{Bottom:} Due to some memory overhead, this equates to $\sim$2$\times$ faster training. More results, logs, and configurations: \url{https://wandb.ai/ai2-llm/olmoe/reports/Plot-MoE-vs-Dense--Vmlldzo4OTM0Mjkx}}
+\label{fig:moevsdense}
+\end{center}
+\end{figure*}
+
+Prior work reports various speed-ups of MoEs over dense models: \citet{artetxe2022efficientlargescalelanguage} report that MoEs require 2--4$\times$ less compute to match dense models, MoMa~\citep{lin2024momaefficientearlyfusionpretraining} exhibits 2.6$\times$ FLOP savings for language tasks, Arctic~\citep{arcticcookbook} yields 4$\times$ FLOP savings but for very different dense and MoE configurations, and Switch Transformers~\citep{fedus2022switch} train 2-7$\times$ faster with MoEs but for encoder-decoder models while the other works study decoder-only LMs~\citep{radford2019language}.
+
+In \autoref{fig:moevsdense}, we compare MoEs and dense models in a controlled setup. We find that our MoE reaches the performance of the dense model with $\sim$3$\times$ fewer tokens equivalent to $\sim$3$\times$ less compute measured in FLOPs. However, due to the additional memory overhead of training the MoE with its 7B total parameters, it processes fewer tokens per second than the dense model (23,600 tokens per second per GPU for the MoE vs. 37,500 for dense). Thus, in terms of training time, it reaches the performance of the dense model only $\sim$2$\times$ faster. There are likely optimizations possible that would bring the speed-up closer to the 3$\times$ token speed-up, which we leave to future work. Based on these results, \colorbox{lightOlmoeYellow}{we select an MoE configuration with 6.9B total and 1.3B active parameters} matching OLMo-7B in total and OLMo-1B in active parameter count, respectively.
+
+\subsubsection{Expert Granularity}
+\label{sec:granularity}
+
+\begin{figure*}[htbp]
+\centering
+\begin{center}
+\includegraphics[width=\textwidth]{figures/granularity.pdf}
+\caption{\textbf{Expert granularity.}   We vary the number of experts in tandem with the FFN dimension to ensure that active and total parameters and thus compute cost remain the same. For example, for 64 experts, the FFN dimension is 1,024 and 8 experts are activated, while for 32 experts it is 2,048 with 4 activated experts. More results, logs, and configurations: \url{https://wandb.ai/ai2-llm/olmoe/reports/Plot-Granularity--Vmlldzo4OTIxOTE4}}
+\label{fig:granularity}
+\end{center}
+\end{figure*}
+
+\citet{dai2024deepseekmoeultimateexpertspecialization} propose to use small fine-grained experts to allow more combinations of experts and thus make the model more flexible. For example, the Mixtral model~\citep{jiang2024mixtral} uses the common configuration of 8 experts per layer, 2 of which are activated. This allows for $\binom{8}{2}=28$ combinations per layer. By halving the size of each expert and therefore doubling the number of experts to maintain the same compute and parameter budget, we can increase the possible combinations to $\binom{16}{4}=1,820$. \citet{krajewski2024scaling} investigate compute-optimal granularity configurations finding that higher compute budgets warrant more granular experts.
+
+In \autoref{fig:granularity}, we observe that more granular experts improve training loss, validation loss, and downstream performance. The 8-expert configuration uses 1 active expert, which yields $\binom{8}{1}=8$ combinations. By quartering the size of each expert but increasing the number to 32 with 4 active ones ($\binom{32}{4}=35,960$ combinations), we observe an improvement of around 10\% on HellaSwag and MMLU at around 130 billion tokens. However, we find that there are diminishing returns to granularity. The additional increase to 64 experts with 8 active ones ($\binom{64}{8}=4,426,165,368$ combinations) improves downstream metrics by a smaller amount of 1--2\%. For our \modelsmall{} compute budget\footnote{Approximated via $6*N*D$~\citep{kaplan2020scalinglawsneurallanguage}, where $N$ are active parameters (1B) and $D$ are training tokens (5T).} of $3\times10^{22}$, \citet{krajewski2024scaling} predict an optimal number of experts of 256 ($G=32$ in their paper). However, their predictions are for compute-optimal models~\citep{hoffmann2022trainingcomputeoptimallargelanguage,clark2022unifiedscalinglawsrouted}, while we train for 5T tokens, which is orders of magnitude beyond what would be conventionally considered optimal for our model size. Thus, their predictions may not extend to our setup, and \colorbox{lightOlmoeYellow}{we stick with 64 experts for \modelsmall{}}, also due to the diminishing returns in \autoref{fig:granularity}.
+
+\subsubsection{Shared Experts}
+\label{sec:shared}
+
+\begin{figure*}[htbp]
+\centering
+\begin{center}
+\includegraphics[width=\textwidth]{figures/shared.pdf}
+\caption{\textbf{Shared experts.} Both setups have the same number of active and total parameters and use the same number of FLOPs. 4 of the 32 routed experts are activated, while it is 3 for the 31 routed experts of the other model, as it has 1 always-active shared expert. More results, logs, and configurations: \url{https://wandb.ai/ai2-llm/olmoe/reports/Plot-Expert-sharing--Vmlldzo4OTIyMjQz}}
+\label{fig:shared}
+\end{center}
+\end{figure*}
+
+\citet{dai2024deepseekmoeultimateexpertspecialization} propose training with a shared/fixed expert that is always used in addition to the routed experts. The intuition is to encourage the shared expert to learn common information and allow the other routed experts to learn more specialized knowledge. This should reduce redundancy among experts and thus lead to a better model as it can store more total information.
+
+In \autoref{fig:shared}, we benchmark having a single shared and a single routed expert versus two routed experts. While both settings lead to similar performance, sharing an expert performs slightly worse. Sharing an expert removes flexibility from the model and thus goes against the findings in \autoref{sec:granularity} suggesting that allowing for more expert combinations improves performance. Specifically, the two models in \autoref{fig:shared} have $\binom{32}{4}=35,960$ and $\binom{31}{3}=4,495$ possible combinations per layer. Thus, removing one of the routed experts and turning it into a shared one eliminates almost 90\% of possible combinations. This likely acts as a counterforce to the potential benefits of isolating common knowledge in a shared expert. Based on these results, \colorbox{lightOlmoeYellow}{we do not use shared experts in \modelsmall{}}, but we do think that there is merit to the idea of experts that are activated more often or even always. However, rather than enforcing this behavior via a shared expert, we believe that it should be learned by the model. This is difficult with current setups due to the necessity of a load balancing loss (\autoref{sec:lbloss}) penalizing the model if tokens are not distributed equally among experts. Potential future work can explore removing the load balancing loss to allow for more flexible usage of experts.
+
+\subsubsection{Expert Choice vs.~Token Choice}
+\label{sec:expertchoice}
+
+\begin{figure*}[htbp]
+\centering
+\begin{center}
+\includegraphics[width=\textwidth]{figures/expertchoice.pdf}
+\caption{\textbf{Expert choice (EC) vs.~token choice (TC).} Both models have an 8-expert MoE in every 2nd layer. For TC, 2 experts are activated per token, while for EC the capacity factor is 2. Thus, both models use the same number of active parameters. More results, logs, and configurations: \url{https://wandb.ai/ai2-llm/olmoe/reports/Plot-EC-vs-TC--Vmlldzo4MzkzMDM3}}
+\label{fig:ectc}
+\end{center}
+\end{figure*}
+
+The MoE router determines which experts process each input token (\autoref{sec:pretraining}). There are two common types~\citep{liu2024routersvisionmixtureexperts}: \textbf{expert choice (EC)}~\citep{zhou2022mixtureofexperts} and \textbf{token choice (TC)}~\citep{shazeer2017outrageously}. For EC, each expert selects a fixed number of tokens from the incoming sequence. By design, this leads to each expert processing the same number of tokens. This is the main benefit of EC as it ensures perfect load balance, which improves training throughput and removes the need for a load balancing loss. The main downside of EC is that it is not easily usable for autoregressive generation where a single token is processed at each step rather than the entire sequence in one~\citep{raposo2024mixtureofdepthsdynamicallyallocatingcompute}. Another potential downside is that EC can lead to token dropping, where some tokens are not selected by any expert, which can hurt performance~\citep{gale2022megablocksefficientsparsetraining}. At the same time, it can lead to some tokens being processed by multiple experts, which could also be beneficial as it allows the model to allocate more compute to some tokens~\citep{zhou2022mixtureofexperts}. For TC, each token selects a fixed number of experts. This can lead to many tokens choosing the same expert, hurting training efficiency. Therefore it is common to use TC with a load balancing loss~\citep{shazeer2017outrageously} to encourage equal distribution.
+
+In \autoref{fig:ectc}, we benchmark EC and TC. We find that TC outperforms EC for the same token budget for all tasks depicted as well as other tasks like PIQA, SciQ, etc. which we report at \url{https://wandb.ai/ai2-llm/olmoe/reports/Plot-EC-vs-TC--Vmlldzo4MzkzMDM3}. While \citet{zhou2022mixtureofexperts} find EC to be better, our configuration slightly differs in that we use dropless MoEs~\citep{gale2022megablocksefficientsparsetraining} with a load balancing loss. Thus, our TC variant is expected to perform better than the TC variant in \citet{zhou2022mixtureofexperts}. We confirm findings that EC runs around 20\% faster at 29,400 tokens per second per device versus 24,400 for TC~\citep{zhou2022mixtureofexperts}. EC may be more beneficial in a multimodal setup~\citep{lin2024momaefficientearlyfusionpretraining} as dropping noisy image tokens is likely less harmful than text tokens. Thus, while \colorbox{lightOlmoeYellow}{we stick with TC for this release of \model{}}, we may revisit EC for future multimodal models.
+
+\subsubsection{Sparse Upcycling}
+\label{sec:upcycling}
+
+\begin{figure*}[htbp]
+\centering
+\begin{center}
+\includegraphics[width=\textwidth]{figures/upcycle.pdf}
+\caption{\textbf{Sparse upcycling.} We upcycle OLMo-1B (0724) at 2T tokens into an MoE with 8 total experts of which 2 are activated and train it for an additional 610 billion tokens. We compare it to a model trained from scratch for 610 billion tokens. Except for this difference, both models use the same config, which includes some suboptimal settings that contribute to the instability, such as no QK-Norm (\autoref{sec:qknorm}) and no truncated normal init (\autoref{sec:init}). More results, logs, and configurations: \url{https://wandb.ai/ai2-llm/olmoe/reports/Plot-Scratch-vs-Upcycle--Vmlldzo4NDIyOTc4}}
+\label{fig:upcycle}
+\end{center}
+\end{figure*}
+
+\citet{komatsuzaki2023sparse} propose turning a dense model into a Mixture-of-Experts model via sparse upcycling: (1) The dense MLP is cloned for each desired expert to constitute MoE layers. (2) A newly initialized router is added in front of each MoE layer. (3) Pretraining continues with the new model so that the cloned MLPs can gradually specialize in different things and the router can be learned. They find that the upcycling approach maintains a performance advantage over a language model trained from scratch for up to 120\% of the compute budget of the original dense checkpoint that the sparse model was upcycled from. For example, if sparsely upcycling a 1.3B parameter model at 2 trillion tokens then only at 2.4 trillion tokens should an MoE trained from scratch catch up with the upcycled model. That is, the sparsely upcycled model would have been trained for another 400 billion tokens, thereby saving the equivalent of up to 2T tokens of compute. Other works such as MiniCPM~\citep{hu2024minicpm}, Qwen2~\citep{yang2024qwen2technicalreport} and reportedly Mixtral~\citep{mixtralupcycle,jiang2024mixtral} have adopted sparse upcycling but only share limited information about their configuration.
+
+In \autoref{fig:upcycle}, we compare sparse upcycling OLMo-1B (0724)~\citep{groeneveld2024olmo} with training an MoE from scratch. We find that after 500B tokens, an otherwise equivalent MoE trained from scratch already catches up with the upcycled model, both on the metrics in \autoref{fig:upcycle} and our additional metrics at \url{https://wandb.ai/ai2-llm/olmoe/reports/Plot-Scratch-vs-Upcycle--Vmlldzo4NDIyOTc4}. At around 600B tokens, the MoE from scratch starts outperforming the upcycled MoE. Thus, it only requires 25\% of the compute budget of the original dense model to catch up as opposed to the 120\% reported in \citet{komatsuzaki2023sparse}. However, they use expert choice routing and study encoder-decoder models~\citep{raffel2023exploring}. Meanwhile, we use token choice routing (\autoref{sec:expertchoice}) and decoder-only models (\autoref{sec:pretraining}). Further, we upcycle a model that has already been significantly overtrained~\citep{gadre2024language}, i.e., a 1B model trained for 2T tokens. Its parameters are likely already in a very optimal range for a dense model, which may limit the amount of additional exploration possible after upcycling. This motivates us to experiment with adding noise to the upcycled weights outlined in \autoref{sec:addablations}, but we do not find it to lead to better performance. A large disadvantage of upcycling is that the upcycled MoE is constrained by some hyperparameters of the dense model. Specifically, OLMo-1B (0724) was trained without QK-Norm and normal initialization, both of which hurt stability in our experiments (\autoref{sec:qknorm}, \autoref{sec:init}). While it may be possible to simply add new QK-Norms and train them from scratch similar to the new router layer trained from scratch, it is impossible to change the initialization of the original dense model when upcycling it. Thus, as we want to change these hyperparameters and also train \modelsmall{} for around 250\% of the compute budget of the dense model (5T vs.~2T tokens), \colorbox{lightOlmoeYellow}{we do not use upcycling.}
+
+\subsubsection{Load Balancing Loss}
+\label{sec:lbloss}
+
+\begin{figure*}[htbp]
+\centering
+\begin{center}
+\includegraphics[width=\textwidth]{figures/lbl.pdf}
+\caption{\textbf{Impact of applying a load balancing loss (LBL).} The training loss plot excludes the load balancing loss for both models. More results, logs, and configurations: \url{https://wandb.ai/ai2-llm/olmoe/reports/Plot-LBL-vs-No-LBL--Vmlldzo4OTkyNDg4}}
+\label{fig:lbloss}
+\end{center}
+\end{figure*}
+
+\begin{figure*}[htbp]
+\centering
+\begin{center}
+\includegraphics[width=0.9\textwidth]{figures/lbltoks.pdf}
+\caption{\textbf{Expert assignment during training when using or not using a load balancing loss for the first MoE layer.} More results, logs, and configurations: \url{https://wandb.ai/ai2-llm/olmoe/reports/Plot-LBL-vs-No-LBL--Vmlldzo4OTkyNDg4}}
+\label{fig:lbltoks}
+\end{center}
+\end{figure*}
+
+\citet{shazeer2017outrageously} propose the load balancing loss to penalize the model if it is unbalanced, i.e., if it routes all tokens to only a few experts. This is based on the observation that without such penalty, models tend to update only a select few experts in each layer~\citep{eigen2014learningfactoredrepresentationsdeep,bengio2016conditionalcomputationneuralnetworks}. To compute the load balancing loss ($\mathcal{L}_{\textit{LB}}$) we multiply the fraction of tokens $f_i$ routed to one expert $E_i$ with the total routing probability $P_i$ allocated to $E_i$ for one batch and sum it across the number of experts $N_{E}$:
+\begin{equation}  
+\label{eq:lbl}
+\mathcal{L}_{\textit{LB}} = N_{E} \cdot \sum_{i=1}^{N_{E}} f_i \cdot P_i
+\end{equation}
+The loss is further scaled by $N_{E}$ and a loss weight $\alpha$ (see \autoref{eq:loss}), which is an optional weight to determine the magnitude of the loss commonly set to 0.01~\citep{zoph2022stmoe,xue2024openmoe}. We do not experiment with changing the weight of 0.01.
+
+In \autoref{fig:lbloss} we investigate the performance impact of using the auxiliary load balancing loss. We find that across training loss and validation losses, using the load balancing loss leads to better performance even after only a few billion tokens. We still measure the load balancing loss even when it is not used (``No LBL'') and find that while it spikes initially, it slowly decreases over the next few billion tokens. This behavior is also visible in \autoref{fig:lbltoks} (left), where initially all tokens in the first layer are assigned to the 6th expert (pink). Eventually, the model also starts assigning some tokens to the 1st expert (yellow). However, all other experts remain largely flat and are thus ``dead weights'' that take up GPU memory but are not used. Given these results, \colorbox{lightOlmoeYellow}{we use the auxiliary load balancing loss with a weight of 0.01} following prior work~\citep{shazeer2017outrageously,shen2024jetmoe}. However, getting rid of the load balancing loss is an important direction for future research as it constrains the flexibility of the model by forcing it to use all experts approximately equally. This could prevent the experts from specializing in certain data domains and may be a reason prior work has failed to find strong evidence of expert specialization~\citep{jiang2024mixtral,zoph2022stmoe}.
+
+\subsubsection{Router Z-loss}
+\label{sec:zloss}
+
+\begin{figure*}[htbp]
+\centering
+\begin{center}
+\includegraphics[width=\textwidth]{figures/zloss.pdf}
+\caption{\textbf{Router z-loss.} We compare adding router z-loss with a loss weight of 0.001 versus no additional z-loss. More results, logs, and configurations: \url{https://wandb.ai/ai2-llm/olmoe/reports/Plot-Zloss-vs-none--Vmlldzo4NDM4NjUz}}
+\label{fig:zloss}
+\end{center}
+\end{figure*}
+
+\citet{zoph2022stmoe} propose the router z-loss to improve both the stability and quality of MoE models. This auxiliary loss penalizes large logits coming into the gating network. Such large logits can lead to numeric overflows in the large matrix multiplications happening in the MoE layer. It is computed by exponentiating the logits $x_j$ right before the router layer summed across the number of experts $N_E$ and averaged across the batch $B$, thereby making larger logits lead to a larger loss:
+\begin{equation}
+\label{eq:rzl}
+\mathcal{L}_{\textit{RZ}}(x) = \frac{1}{B} \cdot \sum_{i=1}^B \left(\log \sum_{j=1}^{N_{E}} \exp({x_j^{(i)}}) \right)^2
+\end{equation}
+The loss is further multiplied with an optional loss weight, $\beta$ (see \autoref{eq:loss}), to determine the magnitude of the loss commonly set to 0.001~\citep{zoph2022stmoe,shen2024jetmoe}. We do not experiment with changing the weight of 0.001.
+
+In \autoref{fig:zloss}, we confirm that across training loss, validation loss, and downstream performance adding the router z-loss improves stability (less spikes) and quality (lower loss and higher downstream performance). Thus, despite it reducing throughput by $\sim$2\% \colorbox{lightOlmoeYellow}{we use the router z-loss for \modelsmall{} with a weight of 0.001} as in \citet{zoph2022stmoe}. 
+
+\subsection{General Pretraining Settings}
+\label{sec:notmoespecific}
+
+\subsubsection{Dataset Experiments}
+\label{sec:data}
+
+\begin{figure*}[htbp]
+\centering
+\begin{center}
+\includegraphics[width=\textwidth]{figures/dataset.pdf}
+\caption{\textbf{\data{} vs.~Dolma 1.7.} We compare our data mix described in \autoref{sec:pretraining} with Dolma 1.7 used to train prior OLMo models. Lower training loss does not mean that one dataset is better, but rather suggests which dataset is easier for the model to learn. More results, logs, and configurations: \url{https://wandb.ai/ai2-llm/olmoe/reports/Plot-Dolma-1-7-vs-Dolma-OLMoE--Vmlldzo4OTIxNTg5}}
+\label{fig:dataset}
+\end{center}
+\end{figure*}
+
+\citet{li2024datacomplm} release the DCLM-Baseline dataset and establish that it leads to better language models than Dolma 1.7 and other datasets as measured on common benchmarks like MMLU~\citep{hendrycks2021measuringmassivemultitasklanguage}. This motivates us to mix their DCLM dataset with some components from Dolma 1.7 that we deem to be high-quality; see \autoref{sec:pretraining}. In \autoref{fig:dataset}, we compare our mix, \data{}, with Dolma 1.7 in a controlled setup. We find that \data{} leads to clear gains on all three downstream metrics, especially MMLU. DCLM-Baseline has been created through a series of dataset ablations targeting MMLU and other downstream metrics, which explains these results. We also compare adding Reddit and FLAN to our mix as detailed in \autoref{sec:addablations}, but do not find consistent performance gains. We do not have a strong intuition for why adding these datasets does not help and a more automatic approach to dataset mixing may be desirable for future iterations~\citep{liu2024regmixdatamixtureregression,albalak2024surveydataselectionlanguage}. \colorbox{lightOlmoeYellow}{We pretrain using our mix of DCLM-Baseline and Dolma 1.7 dubbed \data{}.}
+
+\subsubsection{Initialization}
+\label{sec:init}
+
+\begin{figure*}[htbp]
+\centering
+\begin{center}
+\includegraphics[width=\textwidth]{figures/init.pdf}
+\caption{\textbf{Initialization.} We compare a normal initialization with a standard deviation (std) of 0.02 with a truncated normal initialization with a maximum (minimum) cut-off of 0.06 (--0.06) corresponding to three stds~(3$\times$0.02). More results, logs, and configurations: \url{https://wandb.ai/ai2-llm/olmoe/reports/Plot-Init--Vmlldzo4NDIzMzM5}}
+\label{fig:init}
+\end{center}
+\end{figure*}
+
+Few prior works on Mixture-of-Experts share their initialization strategy. Even the most open MoEs prior to this work, JetMoE~\citep{shen2024jetmoe} and OpenMoE~\citep{xue2024openmoe}, do not mention their initialization scheme. For DeepSeekMoE~\citep{dai2024deepseekmoeultimateexpertspecialization} and DeepSeekV2~\citep{deepseekai2024deepseekv2}, the authors share that they use a normal initialization with a standard deviation (std) of 0.006. For dense language models, a normal initialization with an std of 0.02 has been commonly used as popularized by \citet{shoeybi2020megatronlmtrainingmultibillionparameter}.
+
+In \autoref{fig:init}, we find a truncated normal initialization leads to more stable training and better performance than a regular normal initialization. The difference between the two initializations only becomes clear at around 450 billion tokens, where the model with the normal initialization starts to diverge. This is despite both models using the same configuration except for the difference in weight initialization. Having to train for hundreds of billions of tokens until an experiment provides a clear signal is one of the key challenges of pretraining ablations. \colorbox{lightOlmoeYellow}{We use the truncated normal initialization for \modelsmall{}.}
+
+\subsubsection{RMSNorm}
+\label{sec:ln}
+
+\begin{figure*}[t]
+\centering
+\begin{center}
+\includegraphics[width=\textwidth]{figures/ln.pdf}
+\caption{\textbf{Non-parametric layer normalization vs. RMSNorm.} More results, logs, and configurations: \url{https://wandb.ai/ai2-llm/olmoe/reports/Plot-LN--Vmlldzo4NDQyMTAz}}
+\label{fig:ln}
+\end{center}
+\end{figure*}
+
+\begin{figure*}[t]
+\centering
+\begin{center}
+\includegraphics[width=\textwidth]{figures/lndecay.pdf}
+\caption{\textbf{Decaying the RMSNorm parameters.} More results, logs, and configurations: \url{https://wandb.ai/ai2-llm/olmoe/reports/Plot-Decay-LN--Vmlldzo4NDQ1NDYy}}
+\label{fig:normdecay}
+\end{center}
+\end{figure*}
+
+\begin{wrapfigure}{r}{0.34\textwidth}
+\centering
+\begin{center}
+\includegraphics[width=\linewidth]{figures/lngradnorm.pdf}
+\caption{\textbf{Total norm of the gradients when training with RMS or non-parametric normalization.} We increase the logging interval of the RMS run at 75B tokens, hence its change in thickness.}
+\label{fig:lngradnorm}
+\end{center}
+\end{wrapfigure}
+
+OLMo~\citep{groeneveld2024olmo} uses non-parametric layer normalization~\citep{ba2016layer}, mainly as it is significantly faster than the commonly used RMSNorm~\citep{zhang2019rootmeansquarelayer,mehta2024openelm}. This is an unusual choice as most LMs use RMSNorm, such as the Llama~\citep{touvron2023llama,touvron2023llama2openfoundation,dubey2024llama3herdmodels}, Gemma~\citep{gemmateam2024gemmaopenmodelsbased,gemmateam2024gemma2improvingopen}, and Qwen~\citep{bai2023qwen,yang2024qwen2technicalreport} model families.
+
+In \autoref{fig:ln}, we observe that replacing the non-parametric layer normalization in OLMo with a parametric RMSNorm leads to better performance. This is likely because the non-parametric layer normalization leads to a large number of spikes in the gradients as seen in \autoref{fig:lngradnorm}. We clip gradients at 1.0, which prevents these spikes from leading to very large and potentially disruptive parameter updates. However, the clipped gradients may still harm the performance of the model as they are no longer the true gradients. Thus, despite RMSNorm lowering our training throughput by 15\%, \colorbox{lightOlmoeYellow}{we train our final model with RMSNorm.} We include the RMSNorm parameters in weight decay as we find that it performs slightly better (\autoref{fig:normdecay}) even though it is common practice to exclude them
+
+\subsubsection{Decaying Embedding Parameters}
+\label{sec:embdecay}
+
+\begin{figure*}[t]
+\centering
+\begin{center}
+\includegraphics[width=\textwidth]{figures/embdecay.pdf}
+\caption{\textbf{Decaying the embedding parameters.} More results, logs, and configurations: \url{https://api.wandb.ai/links/ai2-llm/3h22onp5}}
+\label{fig:embdecay}
+\end{center}
+\end{figure*}
+
+Similar to the RMSNorm parameters (\autoref{sec:ln}), embedding parameters are commonly excluded from weight decay. Thus for simplicity, \colorbox{lightOlmoeYellow}{we weight decay all parameters in \modelsmall{} including embedding and RMSNorm.}
+
+\subsubsection{QK-Norm}
+\label{sec:qknorm}
+
+\begin{figure*}[t]
+\centering
+\begin{center}
+\includegraphics[width=\textwidth]{figures/qknorm.pdf}
+\caption{\textbf{Query-Key layer normalization (QK-Norm).} Both models use non-parametric layer normalization. QK-Norm corresponds to additional layer normalization of the query and key projections. More results, logs, and configurations: \url{https://wandb.ai/ai2-llm/olmoe/reports/Plot-QKNorm-vs-none--Vmlldzo4NDIzMzE2}}
+\label{fig:qknorm}
+\end{center}
+\end{figure*}
+
+Some works have reported stability improvements from adding layer normalization after the query and key projections (``QK-Norm'')~\citep{chameleonteam2024chameleon,mehta2024openelm,dehghani2023scaling}. QK-Norm can prevent the subsequent attention operation from leading to very large logits that may lead to numeric overflows and destabilize the network, especially when training in low precision. Like layer normalization at other places in the model, the QK-Norm could be non-parametric or use the parametric RMSNorm (\autoref{sec:ln}).
+
+In \autoref{fig:qknorm}, we compare using QK-Norm with no normalization after the query and key projections. We find that QK-Norm leads to some stability and performance improvements. We perform this experiment with non-parametric layer normalization as used in OLMo~\citep{groeneveld2024olmo}, while we used parametric RMS layer normalization~\citep{zhang2019rootmeansquarelayer} for \modelsmall{} (\autoref{sec:ln}). To ensure the benefit of QK-Norm is not an artifact of comparing with non-parametric layer normalization, we run another experiment with RMS layer normalization and still find QK-Norm to lead to slightly better training loss and to prevent a large grad norm spike.\footnote{\url{https://wandb.ai/ai2-llm/olmoe/reports/Plot-QKNorm-revisited--Vmlldzo4NTc2NTIz}} Thus, \colorbox{lightOlmoeYellow}{we use QK-Norm for \modelsmall{}} despite it reducing throughput by almost 10\%.
+
+\subsubsection{AdamW Epsilon}
+\label{sec:eps}
+
+\begin{figure*}[htbp]
+\centering
+\begin{center}
+\includegraphics[width=\textwidth]{figures/adamweps.pdf}
+\caption{\textbf{AdamW epsilon.} More results, logs, and configurations: \url{https://wandb.ai/ai2-llm/olmoe/reports/Plot-AdamW-eps--Vmlldzo4NDc5MDg0}}
+\label{fig:adamweps}
+\end{center}
+\end{figure*}
+
+\citet{groeneveld2024olmo} use an epsilon (``eps'') value of 1E-05 in the AdamW optimizer for training OLMo. A larger eps value leads to smaller steps of the optimizer but can be more stable~\citep{kingma2017adam}.
+
+In \autoref{fig:adamweps}, we find that decreasing eps to the recommended default of 1E-08~\citep{kingma2017adam} significantly improves performance while the run remains stable. Thus, \colorbox{lightOlmoeYellow}{we set eps to 1E-08} for our final run.
+\subsection{Adaptation Settings}
+\label{sec:adapt}
+
+\begin{wraptable}{r}{7cm}
+\begin{tabular}{l|ccc}
+\toprule
+\multirow{2}{*}{Data ($\downarrow$)}& \multicolumn{2}{c}{\modelsmall{}} \\
+& After pretraining & After SFT \\
+\midrule
+SFT data & 12.22 & 12.16 \\
+85 & 14.85 \\
+Wikipedia & 14.48 & 14.24 \\
+C4 & 9.09 & 9.13 \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Load balancing loss (\autoref{eq:lbl}) over a subset of the respective corpora prior to scaling with the load balancing loss weight $\alpha$}. While we use load balancing loss during pretraining, we do not use it during SFT.}
+\label{tab:adaptlbl}
+\end{wraptable}
+
+We experiment with small design choices for adaptation using our evaluation setup described in \autoref{sec:evalsetup}. \textbf{(1) Auxiliary losses:} \citet{zoph2022stmoe} find that using the auxiliary load balancing loss (\autoref{sec:lbloss}) during regular finetuning leads to small performance gains. For instruction tuning, however, \citet{shen2023mixtureofexperts} do not find conclusive evidence in favor of using the load balancing or router z-loss with only small differences in performance, both in support of and against the auxiliary losses. In \autoref{tab:adaptationablation} we display experiments with the load balancing loss during adaptation and find that not using it leads to better performance (54.0 vs. 52.8 after instruction tuning (SFT) and 57.7 vs. 57.1 after preference tuning (DPO)). One potential problem of deactivating the load balancing loss is that it may harm balance among experts and turn some into dead weights as observed during pretraining in \autoref{sec:lbloss}. However, when measuring the load balancing loss in \autoref{tab:adaptlbl} on our SFT data (\autoref{sec:pretraining}), we find that the loss actually decreases slightly during SFT (12.16 vs. 12.22).
+This is likely because which experts certain tokens get routed to is determined early during pretraining, as we find later in the analysis section (\autoref{sec:router}). We also visualize the activation patterns of experts of the model after pretraining, and the models after SFT and DPO trained without load balancing in \autoref{sec:addanalysis} (\autoref{fig:routing_tulu}) finding that the distribution remains around the same. Thus, as our models adapted without load balancing perform better and we find it not to impact routing substantially, \colorbox{lightOlmoeYellow}{we do not use load balancing during adaptation}. \textbf{(2) Annealing checkpoint:} We also experiment with using the checkpoint pre-annealing (\autoref{sec:pretraining}) for adaptation and find the checkpoint post-annealing leads to better performance (53.8 vs. 54.0 after SFT and 56.3 vs 57.7 after DPO), thus \colorbox{lightOlmoeYellow}{we use the post-annealing checkpoint.} \textbf{(3) Preference algorithm:} Since the release of DPO (Direct Preference Optimization)~\citep{rafailov2023direct}, a variety of preference algorithms have been proposed~\citep{ethayarajh2024kto,hong2024orpomonolithicpreferenceoptimization,meng2024simposimplepreferenceoptimization}. We experiment with KTO~\citep{ethayarajh2024kto} and find that it matches DPO in \autoref{tab:adaptationablation} for our setup (\autoref{sec:config}). While we release both models, \colorbox{lightOlmoeYellow}{we use DPO} for our final \modelsmalldpo{} model, as it scores higher on AlpacaEval, which has a smaller chance of data contamination than our other benchmarks~\citep{xu2024benchmarkdatacontaminationlarge}.
+
+\begin{table*}[htbp]
+\setlength{\tabcolsep}{3.9pt}
+\begin{tabular}{l|ccccccc|c}
+\toprule
+&  &  &  & \textbf{Human-} & \textbf{Alpaca-} & & \\
+\textbf{Task ($\rightarrow$)} & \textbf{MMLU} & \textbf{GSM8k} & \textbf{BBH} & \textbf{Eval} & \textbf{Eval 1.0} & \textbf{XSTest} & \textbf{IFEval} & \textbf{Avg} \\
+\textbf{Setup ($\rightarrow$)} & \scriptsize{0-shot} & \scriptsize{8-shot CoT} & \scriptsize{0-shot} & \scriptsize{0-shot} & \scriptsize{0-shot} &\scriptsize{0-shot} & \scriptsize{0-shot} & \scriptsize{0-shot} \\
+\textbf{Metric ($\rightarrow$)} & \scriptsize{EM} & \scriptsize{EM} & \scriptsize{EM} & \scriptsize{Pass@10} & \scriptsize{\%win} & \scriptsize{F1} & \scriptsize{Loose Acc} & \\
+\midrule
+\multicolumn{1}{l|}{\begin{tabular}[c]{@{}l@{}}\modelsmall\\ w/o annealing\end{tabular}} & 49.0 & 2.0 & 31.5 & 18.9 & - & 62.1 & 18.5 & - \\
+\multicolumn{1}{l|}{+SFT} & 50.2 & 43.0 & 35.6 & 55.5 & 68.9 & 83.8 & 39.7 & 53.8 \\
+\multicolumn{1}{l|}{+DPO} & 50.9 & 36.0 & 35.8 & \textbf{58.8} & 81.7 & 83.2 & 47.9 & 56.3 \\
+\midrule
+\modelsmall & 49.8 & 3.0 & 33.6 & 22.4 & - & 59.7 & 16.6 & - \\
+\multicolumn{1}{l|}{\begin{tabular}[c]{@{}l@{}}+SFT\end{tabular}} & 51.4 & 40.5 & 38.0 & 51.6 & 69.2 & 84.1 & 43.3 & 54.0 \\
+\rowcolor{lightOlmoeYellow}
+\multicolumn{1}{l|}{\begin{tabular}[c]{@{}l@{}}+DPO\end{tabular}} & \textbf{51.9} & \textbf{45.5} & 37.0 & 54.8 & \textbf{84.0} & 82.6 & \textbf{48.1} & \textbf{57.7} \\
+\multicolumn{1}{l|}{\begin{tabular}[c]{@{}l@{}}+KTO\end{tabular}} & 51.2 & \textbf{45.5} & 34.1 & 57.1 & 81.6 & \textbf{86.6} & 47.5 & \textbf{57.7} \\
+\midrule
+\multicolumn{1}{l|}{\begin{tabular}[c]{@{}l@{}}+SFT \\ (load balancing)\end{tabular}} & 50.9 & 36.5 & 35.7 & 52.4 & 66.9 & 84.8 & 42.3 & 52.8 \\
+\multicolumn{1}{l|}{\begin{tabular}[c]{@{}l@{}}+DPO \\ (load balancing)\end{tabular}} & 51.1 & 42.5 & \textbf{39.3} & 55.6 & 82.9 & 82.1 & 46.0 & 57.1 \\
+
+\bottomrule
+\end{tabular}
+\caption{\textbf{Adaptation experiments of \modelsmall{}.} We compare using the pretrained checkpoint prior to annealing for adaptation, using the checkpoint after the additional 100B tokens of annealing, and using the checkpoint after the additional 100B tokens of annealing and with load balancing loss (\autoref{sec:lbloss}) during adaptation. We apply DPO/KTO to the respective SFT model.}
+\label{tab:adaptationablation}
+\end{table*}
+
+
+\section{MoE Analysis}
+
+
+By advancing open and cost-efficient models (\autoref{sec:intro}), \modelsmall{} enables new research into LMs and MoEs. Making use of our released intermediate checkpoints, data, and code, we define and analyze four properties specific to MoEs: \textbf{Router saturation} (\autoref{sec:router}), \textbf{Expert co-activation} (\autoref{sec:expert}), \textbf{Domain specialization} (\autoref{sec:domain}), and \textbf{Vocabulary specialization} (\autoref{sec:token}).
+
+\subsection{Router Saturation}
+\label{sec:router}
+
+\begin{figure*}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/top18_changes_over_checkpoints.pdf}
+\caption{\textbf{Router saturation during pretraining measured on a random 0.5\% of the C4 validation data.} We compute saturation by comparing the routing to the top-$k$ experts at four intermediate checkpoints (1, 10, 20, and 40\% of pretraining) to the final pretraining checkpoint (\autoref{eq:routersaturation}).}
+\label{fig:saturation}
+\end{figure*}
+
+We define router saturation as the proportion of expert activations at some intermediary checkpoint at time $t$ that matches the expert IDs activated at some final checkpoint over the same dataset:
+\begin{equation}\label{eq:routersaturation}
+\text{Router Saturation}(t) = \frac{1}{N} \sum_{i=1}^{N} \frac{|\mathcal{E}_{i}^{(t)} \cap \mathcal{E}_{i}^{(T)}|}{k},
+\end{equation}
+where:
+\begin{itemize}
+\item $N$: The total number of tokens in the dataset.
+\item $k$: The number of top-$k$ experts activated per input token. While we train with $k=8$ (\autoref{sec:pretraining}), we also analyze $k=1$ by only looking at the expert with the highest routing probability.
+\item $\mathcal{E}_{i}^{(t)}$: The set of $k$ experts activated for the $i$th token at the $t$th checkpoint.
+\item $\mathcal{E}_{i}^{(T)}$: The set of $k$ experts activated for the $i$th token at the final checkpoint $T$.
+\item $|\mathcal{E}_{i}^{(t)} \cap \mathcal{E}_{i}^{(T)}|$: The number of common experts activated for the $i$th token between the $t$th and final checkpoints.
+\end{itemize}
+Router saturation thus corresponds to whether the router weights are still learning which expert will process certain data. A value of 100\% indicates that the router at the intermediate checkpoint will route to the same experts as the final checkpoint router. However, even at 100\% saturation the router weight can still change and adapt the exact router probability for each expert. These probabilities are used to scale the output of the respective expert in the model. For \modelsmall{} with its 64 experts, random routing equals a saturation of $1/64=1.6\%$ for $k=1$ and $8/64=12.5\%$ for $k=8$. 
+
+In \autoref{fig:saturation} we find that after 1\% of pretraining (5000 steps or 20B tokens), up to $\sim$60\% of routing to the top-8 activated experts has already saturated (right). Thus the model already uses the same 8 experts for given input data as it will at the end of pretraining. This early saturation aligns with prior work~\citep{xue2024openmoe}. At 40\% of pretraining, saturation reaches up to $\sim$80\%. However, which top-1 expert has the highest routing probability saturates slower (left). We find that routing in later layers saturates earlier during pretraining. Layer 0 is an outlier saturating significantly more slowly than other layers. \citet{dai2024deepseekmoeultimateexpertspecialization} do not use an MoE in the first layer as they find that load balancing converges more slowly for the first layer. This is likely linked to our findings on saturation. Because routing in the first layer saturates slower, the experts that certain input data get routed to frequently change. These changes may lead to one expert suddenly getting significantly more data than others thereby impairing load balancing. We are excited about future work further investigating what happens in the first layer by building on our open release.
+
+\subsection{Expert Co-activation}
+\label{sec:expert}
+
+\begin{figure*}[htbp]
+\centering
+\includegraphics[width=0.31\textwidth,trim={1cm .34cm 4cm .5cm},clip]{figures/layer_0_heatmap.pdf}
+\includegraphics[width=0.31\textwidth,trim={1cm .34cm 4cm .5cm},clip]{figures/layer_7_heatmap.pdf}
+\includegraphics[width=0.36\textwidth,trim={1cm .34cm 2cm .5cm},clip]{figures/layer_15_heatmap.pdf}
+\caption{\textbf{Co-activation among experts of \modelsmall{} on a random 0.5\% of the C4 validation data.} We display the 32 experts with the highest maximum co-activation score via their expert IDs on the x- and y-axis.}
+\label{fig:coactivation}
+\end{figure*}
+
+We define expert co-activation as the proportion of times two specific experts, $E_i$ and $E_j$, are simultaneously activated out of the total number of activations of one of those experts:
+\begin{equation}
+\text{Expert co-activation}(E_i, E_j) = \frac{N_{E_i, E_j}}{N_{E_i}},
+\end{equation}
+where:
+\begin{itemize}
+\item $E_i$: The first expert.
+\item $E_j$: The second expert.
+\item $N_{E_i, E_j}$: The number of times experts $E_i$ and $E_j$ are activated together.
+\item $N_{E_i}$: The total number of times expert $E_i$ is activated.
+\end{itemize}
+A co-activation of 100\% indicates that if $E_i$ is activated, $E_j$ is also always activated. A value of 0\% indicates that the experts never co-occur. If multiple expert pairs have high co-activation, it may suggest that these experts could be merged, benefiting less from keeping them separate. In a distributed setup, we could place highly co-activated experts on the same device to reduce communication costs during model inference. 
+
+In \autoref{fig:coactivation}, we find that there is no strong co-activation among experts in one layer, with only few exceptions. This may indicate that there is little redundancy across different experts. Overall, layers 7 and 15 show similar co-activation patterns with several groups of 3 or 2 experts that tend to get activated together. We investigate tokens that activate these experts in \autoref{sec:token}. Further, in \autoref{sec:addanalysis} (\autoref{fig:cross_layer_sankey}), we investigate whether experts across layers, rather than within one layer, tend to process tokens together.
+
+\subsection{Domain Specialization}
+\label{sec:domain}
+
+\begin{figure*}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/routing_olmoe_v2.pdf}
+\vskip 20pt
+\includegraphics[width=\textwidth]{figures/routing_mixtral_v2.pdf}
+\caption{\textbf{Domain specialization of \modelsmall{} (top) vs. Mixtral-8x7B (bottom).} We visualize how often tokens from different domains get routed to the  64 (\model{}) or 8 (Mixtral) experts at the end of pretraining. We consider tokens routed to any of the $k=8$ (\model{}) or $k=2$ (Mixtral) active experts (\autoref{eq:domainspec}). Horizontal gray lines correspond to random chance or uniform routing (8/64=12.5\% per expert for \modelsmall{} with 8 active out of 64 total experts per layer and 2/8=25\% for Mixtral with 2 active out of 8 total experts per layer). See \autoref{fig:domainspec_top1} for $k=1$ results.}
+\label{fig:domainspec}
+\end{figure*}
+
+We define domain specialization as the proportion of tokens from a particular domain $D$ that get routed to a particular expert $E_i$:
+\begin{equation}
+\label{eq:domainspec}
+\text{Domain specialization}(E_i, D) = \frac{N_{E_i, D}^{(k)}}{N_D},
+\end{equation}
+where:
+\begin{itemize}
+\item $E_i$: The $i$th expert in the model.
+\item $D$: The domain from which the data originates.
+\item $k$: The number of experts considered (e.g., $k = 8$ means considering the top 8 experts with the highest routing probabilities).
+\item $N_{E_i,D}^{(k)}$: The number of tokens from domain $D$ for which $E_i$ is among the top-$k$ selected experts.
+\item $N_D$: The total number of tokens from domain $D$ processed by the MoE.
+\end{itemize}
+
+Domain specialization thus refers to the specialization of expert $E_i$ to domain $D$. A value of 100\% indicates that all data from that domain is routed to $E_i$, whereas 0\% indicates the expert is never used for that domain and can be removed from the model without affecting performance in that domain.
+
+In \autoref{fig:domainspec} (top) we find many examples of experts that are activated significantly above or below random chance for \textit{specific domains}. E.g., for arXiv, which has a very specific distribution with lots of scientific text, the first expert in layer 0 is nearly 100\% specialized. This suggests that there is little redundancy in the knowledge of the experts in \modelsmall{}, as they specialize in different kinds of data. For \textit{generic domains}, such as C4~\citep{raffel2023exploring}, which is a web crawl containing various kinds of data, expert activations in \modelsmall{} are much more balanced. This highlights that the load balancing (\autoref{sec:lbloss}) works as intended and the model makes proper use of all experts for generic data. Mixtral-8x7B~\citep{jiang2024mixtral} in \autoref{fig:domainspec} (bottom), however, exhibits little domain specialization across both \textit{unique} and \textit{generic} \textit{domains}. Experts are activated close to the uniform routing baseline for all layers and domains. Thus, there may be more redundancy across experts in Mixtral, as they likely contain similar knowledge. We hypothesize that this is due to Mixtral being upcycled from Mistral~\citep{mixtralupcycle}. The initialization from a dense model may limit the amount of possible specialization in the experts as they all start from the same local optimum. This is likely why training from scratch eventually outperforms upcycling in our pretraining experiments (\autoref{sec:upcycling}).
+
+\subsection{Vocabulary Specialization}
+\label{sec:token}
+
+\begin{figure*}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/vocabulary_specialization_top1_olmoe.pdf}
+\caption{\textbf{Vocabulary specialization of \modelsmall{} across layers and experts.} To compute vocabulary specialization per layer (left) we average the specialization of each expert in that layer. Dashed lines (right) correspond to the average of layer 7 as depicted left. We display the first 32 experts out of 64. This plot is for $k=1$ (\autoref{eq:token}) and we provide $k=8$ and a comparison with Mixtral-8x7B in \autoref{sec:addanalysis}.}
+\label{fig:tokenspec}
+\end{figure*}
+
+\begin{table}[htbp]
+\centering 
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{p{1.4cm} p{6cm} p{6cm}}
+\toprule
+\textbf{Expert ID} & \textbf{Input token IDs} & \textbf{Predicted output token IDs} \\
+\midrule
+27 & \colorbox{lightOlmoeLightBlue}{\unicode{copyright}} (100\%) \colorbox{lightOlmoeLightBlue}{\unicode{latin_l}} (100\%) \colorbox{lightOlmoeLightBlue}{$^{3}$} (100\%) \colorbox{lightOlmoeLightBlue}{\unicode{latin_i}} (100\%) \colorbox{lightOlmoeLightBlue}{\unicode{jarai_i}} (100\%) \colorbox{lightOlmoeLightBlue}{\unicode{devanagari_virama}} (100\%) \colorbox{lightOlmoeLightBlue}{\unicode{devanagari_e}} (100\%) \colorbox{lightOlmoeLightBlue}{\unicode{devanagari_ka}} (100\%) \colorbox{lightOlmoeLightBlue}{\unicode{cyrillic_sha}} (100\%) \colorbox{lightOlmoeLightBlue}{\unicode{cyrillic_in}} (100\%) \colorbox{lightOlmoeLightBlue}{ \unicode{cyrillic_a}} (100\%) & \colorbox{lightOlmoeLightBlue}{\unicode{slovak_l}} (100\%) § (100\%) \colorbox{lightOlmoeLightBlue}{\unicode{copyright}} (100\%) \unicode{persian_j} (100\%) \colorbox{lightOlmoeLightBlue}{\unicode{dutch_ij}} (100\%) \colorbox{lightOlmoeLightBlue}{\unicode{chinese_dot}} (100\%) \colorbox{lightOlmoeLightBlue}{\unicode{japanese_no}} (100\%) \colorbox{lightOlmoeLightBlue}{\unicode{devanagari_ra}} (100\%) \colorbox{lightOlmoeLightBlue}{\unicode{devanagari_ka}} (100\%) \colorbox{lightOlmoeLightBlue}{\unicode{devanagari_virama}} (100\%) \colorbox{lightOlmoeLightBlue}{\unicode{devanagari_la}} (100\%) \\
+\midrule
+58 & \colorbox{lightOlmoeLightBlue}{ (“} (100\%) \colorbox{lightOlmoeLightBlue}{ ("} (100\%) \colorbox{lightOlmoeLightBlue}{ ‘} (94\%) \colorbox{lightOlmoeLightBlue}{ ’} (92\%) \colorbox{lightOlmoeLightBlue}{ “} (92\%) \colorbox{lightOlmoeLightBlue}{ (} (92\%) \colorbox{lightOlmoeLightBlue}{ "} (90\%) \colorbox{lightOlmoeLightBlue}{ '} (89\%) \colorbox{lightOlmoeLightBlue}{“} (88\%) \colorbox{lightOlmoeLightBlue}{ \$} (87\%) \colorbox{lightOlmoeLightBlue}{ [} (87\%) \colorbox{lightOlmoeLightBlue}{ £} (86\%) & \colorbox{lightOlmoeLightBlue}{such} (100\%) \colorbox{lightOlmoeLightBlue}{486} (100\%) \colorbox{lightOlmoeLightBlue}{see} (95\%) \colorbox{lightOlmoeLightBlue}{which} (91\%) \colorbox{lightOlmoeLightBlue}{driving} (91\%) \colorbox{lightOlmoeLightBlue}{UK} (90\%) \colorbox{lightOlmoeLightBlue}{who} (88\%) \colorbox{lightOlmoeLightBlue}{including} (88\%) \colorbox{lightOlmoeLightBlue}{normal} (88\%)
+\\
+\midrule
+7 & \colorbox{lightOlmoeLightBlue}{ Him} (100\%) \colorbox{lightOlmoeLightBlue}{inde} (100\%) \colorbox{lightOlmoeLightBlue}{ Jesus} (98\%) \colorbox{lightOlmoeLightBlue}{God} (90\%) \colorbox{lightOlmoeLightBlue}{ pray} (81\%) \colorbox{lightOlmoeLightBlue}{ Holy} (80\%) \colorbox{lightOlmoeLightBlue}{ Quran} (80\%) \colorbox{lightOlmoeLightBlue}{ God} (77\%) \colorbox{lightOlmoeLightBlue}{ Lord} (76\%) \colorbox{lightOlmoeLightBlue}{ glory} (75\%) \colorbox{lightOlmoeLightBlue}{ Spirit} (66\%) \colorbox{lightOlmoeLightBlue}{ Christ} (65\%) & \colorbox{lightOlmoeLightBlue}{rella} (100\%) \colorbox{lightOlmoeLightBlue}{ Him} (94\%) \colorbox{lightOlmoeLightBlue}{ sin} (90\%) \colorbox{lightOlmoeLightBlue}{ prince} (80\%) \colorbox{lightOlmoeLightBlue}{ glory} (72\%) \colorbox{lightOlmoeLightBlue}{ Jesus} (69\%) \colorbox{lightOlmoeLightBlue}{ Lord} (68\%) \colorbox{lightOlmoeLightBlue}{ Christ} (65\%) \colorbox{lightOlmoeLightBlue}{ Spirit} (55\%) \colorbox{lightOlmoeLightBlue}{ Holy} (53\%) \colorbox{lightOlmoeLightBlue}{ God} (50\%) \colorbox{lightOlmoeLightBlue}{ Prayer} (50\%) \\
+\midrule
+37 & \colorbox{lightOlmoeLightBlue}{ Sunday} (100\%) \colorbox{lightOlmoeLightBlue}{ Tuesday} (100\%) \colorbox{lightOlmoeLightBlue}{ Thursday} (100\%) \colorbox{lightOlmoeLightBlue}{ Olympic} (100\%) \colorbox{lightOlmoeLightBlue}{ Christmas} (100\%) \colorbox{lightOlmoeLightBlue}{ rugby} (100\%) \colorbox{lightOlmoeLightBlue}{ Championship} (100\%) \colorbox{lightOlmoeLightBlue}{ weekends} (100\%) & \colorbox{lightOlmoeLightBlue}{days} (91\%) \colorbox{lightOlmoeLightBlue}{ anniversary} (90\%) \colorbox{lightOlmoeLightBlue}{ month} (88\%) \colorbox{lightOlmoeLightBlue}{ week} (84\%) \colorbox{lightOlmoeLightBlue}{mpi} (83\%) \colorbox{lightOlmoeLightBlue}{ semester} (81\%) \colorbox{lightOlmoeLightBlue}{mand} (80\%) \colorbox{lightOlmoeLightBlue}{ Olympics} (78\%) \colorbox{lightOlmoeLightBlue}{ cent} (76\%) \colorbox{lightOlmoeLightBlue}{ season} (76\%) \colorbox{lightOlmoeLightBlue}{ perm} (75\%) \\
+\midrule
+43 & \colorbox{lightOlmoeLightBlue}{ Armenian} (100\%) \colorbox{lightOlmoeLightBlue}{ijan} (100\%) \colorbox{lightOlmoeLightBlue}{enia} (96\%) \colorbox{lightOlmoeLightBlue}{ Iraq} (95\%) \colorbox{lightOlmoeLightBlue}{ Iranian} (92\%) \colorbox{lightOlmoeLightBlue}{ Iran} (92\%) \colorbox{lightOlmoeLightBlue}{ Saudi} (90\%) \colorbox{lightOlmoeLightBlue}{ northern} (90\%) \colorbox{lightOlmoeLightBlue}{ Lebanon} (90\%) \colorbox{lightOlmoeLightBlue}{ Singapore} (88\%) \colorbox{lightOlmoeLightBlue}{ Turkey} (88\%)
+\colorbox{lightOlmoeLightBlue}{ Asia} (87\%) \colorbox{lightOlmoeLightBlue}{ Egypt} (86\%) \colorbox{lightOlmoeLightBlue}{ western} (86\%) &
+\colorbox{lightOlmoeLightBlue}{enia} (90\%) \colorbox{lightOlmoeLightBlue}{ invasion} (80\%) \colorbox{lightOlmoeLightBlue}{ Arabia} (76\%) \colorbox{lightOlmoeLightBlue}{ irregular} (66\%) \colorbox{lightOlmoeLightBlue}{ regions} (64\%) \colorbox{lightOlmoeLightBlue}{ border} (63\%) \colorbox{lightOlmoeLightBlue}{ Kong} (61\%) \colorbox{lightOlmoeLightBlue}{ians} (61\%) \colorbox{lightOlmoeLightBlue}{ bases} (60\%) \colorbox{lightOlmoeLightBlue}{ Republic} (59\%) \colorbox{lightOlmoeLightBlue}{ Ireland} (58\%) \colorbox{lightOlmoeLightBlue}{ Korea} (58\%) \colorbox{lightOlmoeLightBlue}{ War} (55\%) \colorbox{lightOlmoeLightBlue}{ Carolina} (52\%) \\
+\midrule
+4 & \colorbox{lightOlmoeLightBlue}{ sq} (89\%) \colorbox{lightOlmoeLightBlue}{Main} (70\%) \colorbox{lightOlmoeLightBlue}{ reversal} (69\%) \colorbox{lightOlmoeLightBlue}{YR} (63\%) \colorbox{lightOlmoeLightBlue}{GC} (56\%) \colorbox{lightOlmoeLightBlue}{Overall} (50\%) \colorbox{lightOlmoeLightBlue}{79} (50\%) \colorbox{lightOlmoeLightBlue}{main} (50\%) \colorbox{lightOlmoeLightBlue}{ RE} (46\%) \colorbox{lightOlmoeLightBlue}{ PCR} (46\%) \colorbox{lightOlmoeLightBlue}{ tomb} (45\%) \colorbox{lightOlmoeLightBlue}{normal} (43\%) \colorbox{lightOlmoeLightBlue}{ intensity} (41\%) \colorbox{lightOlmoeLightBlue}{ Overall} (41\%) \colorbox{lightOlmoeLightBlue}{ median} (41\%) & \colorbox{lightOlmoeLightBlue}{YR} (90\%) \colorbox{lightOlmoeLightBlue}{ Character} (88\%) \colorbox{lightOlmoeLightBlue}{ sq} (77\%) \colorbox{lightOlmoeLightBlue}{Os} (76\%) \colorbox{lightOlmoeLightBlue}{ GHz} (71\%) \colorbox{lightOlmoeLightBlue}{fluence} (60\%) \colorbox{lightOlmoeLightBlue}{amycin} (60\%) \colorbox{lightOlmoeLightBlue}{ pixels} (56\%) \colorbox{lightOlmoeLightBlue}{=} (53\%) \colorbox{lightOlmoeLightBlue}{arc} (52\%) \colorbox{lightOlmoeLightBlue}{ Story} (52\%) \colorbox{lightOlmoeLightBlue}{ =} (51\%) \colorbox{lightOlmoeLightBlue}{anth} (50\%) \colorbox{lightOlmoeLightBlue}{GHz} (50\%) \colorbox{lightOlmoeLightBlue}{ cm} (46\%) \\
+\midrule
+0 & \colorbox{lightOlmoeLightBlue}{ESM} (100\%) \colorbox{lightOlmoeLightBlue}{icillin} (100\%) \colorbox{lightOlmoeLightBlue}{agra} (98\%) \colorbox{lightOlmoeLightBlue}{ aust} (96\%) \colorbox{lightOlmoeLightBlue}{asa} (93\%) \colorbox{lightOlmoeLightBlue}{ pills} (92\%) \colorbox{lightOlmoeLightBlue}{ mg} (85\%) \colorbox{lightOlmoeLightBlue}{ uk} (82\%) \colorbox{lightOlmoeLightBlue}{ login} (82\%) \colorbox{lightOlmoeLightBlue}{doc} (81\%) \colorbox{lightOlmoeLightBlue}{ generic} (81\%) \colorbox{lightOlmoeLightBlue}{cd} (81\%) \colorbox{lightOlmoeLightBlue}{ Essay} (81\%) \colorbox{lightOlmoeLightBlue}{ password} (81\%) \colorbox{lightOlmoeLightBlue}{ Content} (80\%) &  \colorbox{lightOlmoeLightBlue}{*,} (100\%) \colorbox{lightOlmoeLightBlue}{ sil} (96\%) \colorbox{lightOlmoeLightBlue}{ pills} (91\%) \colorbox{lightOlmoeLightBlue}{ vi} (90\%) \colorbox{lightOlmoeLightBlue}{ xen} (87\%) \colorbox{lightOlmoeLightBlue}{ pharmacy} (87\%) \colorbox{lightOlmoeLightBlue}{ gener} (85\%) \colorbox{lightOlmoeLightBlue}{ aust} (82\%) \colorbox{lightOlmoeLightBlue}{ mg} (75\%) \colorbox{lightOlmoeLightBlue}{ Content} (75\%) \colorbox{lightOlmoeLightBlue}{ uk} (73\%) \colorbox{lightOlmoeLightBlue}{ THAT} (73\%) \colorbox{lightOlmoeLightBlue}{ dispens} (68\%) \colorbox{lightOlmoeLightBlue}{icillin} (68\%) \colorbox{lightOlmoeLightBlue}{ generic} (66\%) \\
+\midrule
+3 & \colorbox{lightOlmoeLightBlue}{ grandmother} (92\%) \colorbox{lightOlmoeLightBlue}{ brother} (91\%) \colorbox{lightOlmoeLightBlue}{ Daisy} (83\%) \colorbox{lightOlmoeLightBlue}{ daughter} (78\%) \colorbox{lightOlmoeLightBlue}{ mum} (75\%) \colorbox{lightOlmoeLightBlue}{ father} (72\%) \colorbox{lightOlmoeLightBlue}{ wife} (70\%) \colorbox{lightOlmoeLightBlue}{ husband} (70\%) \colorbox{lightOlmoeLightBlue}{ lady} (63\%) \colorbox{lightOlmoeLightBlue}{ dad} (62\%) \colorbox{lightOlmoeLightBlue}{ boy} (61\%) &  \colorbox{lightOlmoeLightBlue}{hood} (36\%) \colorbox{lightOlmoeLightBlue}{mother} (35\%) \colorbox{lightOlmoeLightBlue}{inde} (31\%) \colorbox{lightOlmoeLightBlue}{ boy} (29\%) \colorbox{lightOlmoeLightBlue}{ girl} (28\%) \colorbox{lightOlmoeLightBlue}{ married} (27\%) \colorbox{lightOlmoeLightBlue}{ tri} (21\%) \colorbox{lightOlmoeLightBlue}{ Gab} (20\%) \colorbox{lightOlmoeLightBlue}{ died} (18\%) \colorbox{lightOlmoeLightBlue}{ taught} (14\%) \colorbox{lightOlmoeLightBlue}{ lived} (13\%) \colorbox{lightOlmoeLightBlue}{ knew} (10\%) \\
+\midrule
+48 & \colorbox{lightOlmoeLightBlue}{ compared} (42\%) \colorbox{lightOlmoeLightBlue}{!)} (41\%) \colorbox{lightOlmoeLightBlue}{Then} (41\%) \colorbox{lightOlmoeLightBlue}{’,} (40\%) \colorbox{lightOlmoeLightBlue}{),} (35\%) \colorbox{lightOlmoeLightBlue}{",} (35\%) \colorbox{lightOlmoeLightBlue}{ instead} (33\%) &
+\colorbox{lightOlmoeLightBlue}{ except} (60\%) \colorbox{lightOlmoeLightBlue}{ tennis} (41\%) \colorbox{lightOlmoeLightBlue}{ Marks} (40\%) \colorbox{lightOlmoeLightBlue}{ Dunn} (33\%) \colorbox{lightOlmoeLightBlue}{ tears} (30\%) \colorbox{lightOlmoeLightBlue}{ Arizona} (30\%) \\
+\midrule
+23 & \colorbox{lightOlmoeLightBlue}{....} (58\%) \colorbox{lightOlmoeLightBlue}{ Therefore} (55\%) \colorbox{lightOlmoeLightBlue}{So} (46\%) \colorbox{lightOlmoeLightBlue}{!!!} (46\%) \colorbox{lightOlmoeLightBlue}{And} (44\%) \colorbox{lightOlmoeLightBlue}{ According} (41\%) \colorbox{lightOlmoeLightBlue}{."} (41\%) \colorbox{lightOlmoeLightBlue}{!!} (40\%) \colorbox{lightOlmoeLightBlue}{?"} (38\%) \colorbox{lightOlmoeLightBlue}{But} (38\%) & 
+\colorbox{lightOlmoeLightBlue}{ \unicode{english_d}} (53\%) \colorbox{lightOlmoeLightBlue}{ Republican} (50\%) \colorbox{lightOlmoeLightBlue}{Jack} (47\%) \colorbox{lightOlmoeLightBlue}{ THIS} (40\%) \colorbox{lightOlmoeLightBlue}{ Democratic} (40\%) \colorbox{lightOlmoeLightBlue}{ according} (39\%) \colorbox{lightOlmoeLightBlue}{ So} (38\%) \colorbox{lightOlmoeLightBlue}{Step} (33\%) \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Vocabulary specialization in the 7th layer of \modelsmall{}.} We use $k=1$ (\autoref{eq:token}) and a random 0.5\% of the C4 validation data excluding token IDs with $<$10 appearances.}
+\label{tab:tokens}
+\end{table}
+
+We define vocabulary specialization as the proportion of tokens with a token ID $x$ (also called vocabulary element) that are routed to one particular expert $E_i$ out of all experts in that layer:
+\begin{equation}
+\label{eq:token}
+\text{Vocabulary specialization}(E_i, x) = \frac{N_{x, E_i}^{(k)}}{N_x},
+\end{equation}
+where:
+\begin{itemize}
+\item $E_i$: The $i$th expert in the model.
+\item $x$: The token ID being analyzed.
+\item $k$: The number of experts considered (e.g., $k=8$ means considering the top 8 experts with the highest routing probabilities).    
+\item $N_{x, E_i}$: The number of times input data is routed to $E_i$ for $x$.
+\item $N_x$: The total number of times input data is routed across all experts for  $x$.
+\end{itemize}
+Vocabulary specialization thus refers to how specialized a particular expert is on some vocabulary item. We distinguish input and output variants of this specialization, where $x$ is either the input token ID or the next output token ID (either the ground-truth next token ID or the token ID predicted by the model). A value of 100\% indicates that for all occurrences of that vocabulary element, input data is routed to $E_i$, whereas 0\% indicates an expert that is fully irrelevant for that vocabulary element and can be effectively removed from the model without affecting performance whenever the token ID appears.
+
+In \autoref{fig:tokenspec} we find that vocabulary specialization is higher in later layers, similar to how later layers saturate earlier (\autoref{sec:router}). Later layers also specialize more on predicted output token IDs rather than input token IDs, i.e., the routing is decided more by the token the model is about to predict rather than the original input token. This is intuitive as in earlier layers there is more uncertainty about which token the model will predict. At $\sim$90\%, expert 27 specializes the most, which we find in \autoref{tab:tokens} to activate for many non-alphabetic tokens, such as Cyrillic and Devanagari letters. Expert 43 shows specialization on geographic terms in both input and output tokens. Experts 48 and 23 both focus on connector words, such as \colorbox{lightOlmoeLightBlue}{ Then} and \colorbox{lightOlmoeLightBlue}{ Therefore}. This is likely because they commonly process tokens together with a high co-activation of 60\% in \autoref{fig:coactivation} (middle). It seems to specialize in measurements, such as \colorbox{lightOlmoeLightBlue}{ sq}, \colorbox{lightOlmoeLightBlue}{YR} (year), and \colorbox{lightOlmoeLightBlue}{ GHz}. They are less likely to appear in books, which explains the low activation of expert ID 4 in layer 7 for book data in \autoref{fig:domainspec}. Expert 3 is among the three most active experts of layer 7 for book data in \autoref{fig:domainspec} (fourth yellow bar for layer 7). This resonates when looking at its specialization on family terms in \autoref{tab:tokens}, which are far more common in books than scientific papers or code. Overall, domain specialization and vocabulary specialization are closely linked to one another, as domains are usually characterized by their distinct word distribution. In \autoref{sec:addanalysis} (\autoref{fig:tokendomainspec}), we link them more closely by comparing the extent of vocabulary specialization across domains and expert IDs. In \autoref{sec:addanalysis} (\autoref{fig:tokenspecolmoe8}, \autoref{fig:tokenspecmixtral2}) we also find that \modelsmall{} exhibits stronger vocabulary specialization than Mixtral-8x7B.
+
+
+
+\section{Related Work}
+
+
+\paragraph{Advances in MoEs} Current LMs still largely follow the transformer architecture~\citep{vaswani2023attention} with only few architectural changes that have been widely adopted, such as decoder-only training~\citep{radford2019language}, SwiGLU activations~\citep{shazeer2020glu,dauphin2017languagemodelinggatedconvolutional}, RoPE~\citep{su2023roformerenhancedtransformerrotary}, MQA/GQA~\citep{shazeer2019fasttransformerdecodingwritehead,ainslie2023gqatraininggeneralizedmultiquery} and RMSNorm~\citep{zhang2019rootmeansquarelayer}. Model sparsity via Mixture-of-Experts is one modification still under active exploration with some early adoption but most LMs, including Llama 3~\citep{dubey2024llama3herdmodels}, still rely on a dense architecture. There has been a lot of progress in improving the sparsely-gated MoE layer since its introduction~\citep{shazeer2017outrageously}: New routing techniques~\citep{lewis2021baselayerssimplifyingtraining,roller2021hashlayerslargesparse,zuo2022tamingsparselyactivatedtransformer,gross2017hardmixturesexpertslarge,jaszczur2021sparsescalingtransformers,dua2021trickstrainingsparsetranslation,zhong2024lory,wu2024yuan20m32mixtureexperts,muqeeth2024softmergingexpertsadaptive}, fine-grained expert segmentation~\citep{dai2024deepseekmoeultimateexpertspecialization,he2024mixturemillionexperts}, stability~\citep{zoph2022stmoe} and efficiency~\citep{lepikhin2020gshardscalinggiantmodels,rajbhandari2022deepspeedmoeadvancingmixtureofexpertsinference,du2022glam,zhou2024brainformerstradingsimplicityefficiency,li2022branchtrainmergeembarrassinglyparalleltraining,sukhbaatar2024branchtrainmixmixingexpertllms,pan2024densetrainingsparseinference,ren2023pangusigmatrillionparameterlanguage} improvements. In this work, we perform many experiments to provide insights into training Mixture-of-Experts LMs. Subsequently, we train \modelsmall{} for 5T tokens. No prior MoE has been overtrained~\citep{gadre2024language} to this extent to our knowledge making \modelsmall{} the best testbed to research performance saturation of MoEs vs. dense models. With \model{} we hope to facilitate such and other research to help the field uncover whether MoEs should make it into all future LMs and with what precise configuration.
+
+\paragraph{Open LMs} A variety of model families have been proposed under varying degrees of openness commonly categorized based on whether model weights are available. \textbf{Closed-weight} models include GPT~\citep{brown2020language,openai2023gpt4}, Gemini~\citep{geminiteam2023gemini,geminiteam2024gemini}, PaLM~\citep{chowdhery2022palm,anil2023palm2technicalreport}, Reka~\citep{rekateam2024rekacoreflashedge}, and \textbf{open-weight} ones include Llama~\citep{touvron2023llama,touvron2023llama2openfoundation,dubey2024llama3herdmodels}, Mistral~\citep{jiang2023mistral,jiang2024mixtral}, Gemma~\citep{gemmateam2024gemmaopenmodelsbased,gemmateam2024gemma2improvingopen}, Falcon~\citep{almazrouei2023falcon,penedo2023refinedwebdatasetfalconllm}, MPT~\citep{MosaicML2023Introducing}, Qwen~\citep{bai2023qwen,yang2024qwen2technicalreport}, GLM~\citep{glm2024chatglm}, Yi~\citep{ai2024yiopenfoundationmodels}, DeepSeek~\citep{deepseekai2024deepseek,deepseekai2024deepseekv2,dai2024deepseekmoeultimateexpertspecialization}, Nemotron~\citep{parmar2024nemotron415btechnicalreport,nvidia2024nemotron4340btechnicalreport,wang2024helpsteer2opensourcedatasettraining}, InternLM~\citep{cai2024internlm2}, Baichuan~\citep{yang2023baichuan2openlargescale}, Phi~\citep{gunasekar2023textbooksneed,li2023textbooksneediiphi15,abdin2024phi3technicalreporthighly}, StableLM~\citep{bellagente2024stablelm216b}, OPT~\citep{zhang2022optopenpretrainedtransformer}. However, besides model weights, training data and code are key to enabling scientific research of these models~\citep{longpre2023dataprovenanceinitiativelarge,longpre2024consentcrisisrapiddecline} and distributing their benefits broadly~\citep{bommasani2023foundationmodeltransparencyindex}. There have been few releases also including data and code in addition to model weights which we refer to as \textbf{``fully open-source''}: BLOOM~\citep{workshop2023bloom,scao2022language,muennighoff2023crosslingual,yong2023bloom1addinglanguagesupport}, GPT-NeoX~\citep{black2022gptneox20b,gpt-neo,wang2021gpt}, StarCoder~\citep{li2023starcoder,lozhkov2024starcoder2stackv2,allal2023santacoder,muennighoff2023octopack,zhuo2024astraios}, Pythia~\citep{biderman2023pythiasuiteanalyzinglarge}, OLMo~\citep{groeneveld2024olmo}, LLM360~\citep{liu2023llm360}, Cerebras-GPT~\citep{dey2023cerebrasgptopencomputeoptimallanguage}, DCLM~\citep{li2024datacomplm}, MAP-Neo~\citep{zhang2024mapneohighlycapabletransparent}, RWKV~\citep{peng2023rwkv,peng2024eagle}, and SmolLM~\citep{allal2024SmolLM}. For Mixture-of-Experts only OpenMoE~\citep{xue2024openmoe} aims to be fully open-source, however, its poor performance limits its usefulness. We release \modelsmall{} as the first state-of-the-art Mixture-of-Experts LM that is fully open-source: model weights, data, code, and logs.
+
+
+
+\section{Conclusion}
+
+
+We open-source \modelsmall{} and \modelsmalldpo{} including model, data, code, and logs. At 1B active and 7B total parameters, our models yield state-of-the-art performance among models with a similar amount of active parameters even outperforming larger models including DeepSeekMoE-16B and Llama2-13B-Chat. We share various training experiments and define and analyze router saturation, expert co-activation, domain and vocabulary specialization of our model. Through our fully open release, we seek to help the field build better MoEs. We are excited about new iterations of \model{} to close the gap between frontier models and fully open models.
+
+
+

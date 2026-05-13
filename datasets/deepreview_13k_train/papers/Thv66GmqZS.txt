@@ -1,0 +1,254 @@
+\title{Bi-Share LoRA: Enhancing the Parameter Efficiency of LoRA with Intra-Layer and Inter-Layer Sharing}
+
+\begin{abstract}
+Low-Rank Adaptation (LoRA) is a widely adopted parameter-efficient fine-tuning method for large language models (LLMs) to adapt to downstream tasks. However, in scenarios where multiple LoRA models are deployed simultaneously, standard LoRA introduces substantial trainable parameters, resulting in significant memory overhead and inference latency, particularly when supporting thousands of downstream tasks on a single server. While existing methods reduce stored parameters via parameter sharing, they fail to capture both local and global information simultaneously. To address this issue, we propose Bi-Share LoRA, which integrates local parameters with intra-layer and inter-layer shared parameters to more effectively capture information at both local and global levels. By sharing parameters both within and across layers, our method significantly reduces the number of trainable parameters while preserving or improving model performance. Additionally, we set a local LoRA to capture local parameters, enabling more precise and fine-grained information extraction at the local level. The final implementation introduces three parallel sub-LoRAs and designs transformation techniques to adapt shared parameters of varying shapes, ensuring compatibility and efficient sharing. Experiments on the 7B, 8B, and 13B versions of Llama show
+that Bi-Share LoRA, with only 44.59% of the parameters of standard LoRA, outperforms LoRA by approximately 0.33% on commonsense reasoning and 2.08% on MMLU benchmarks.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large language models (LLMs), such as GPT-4o (Openai, 2023) and Claude-3 (Anthropic, 2024), have recently demonstrated remarkable generalization capabilities across a wide range of natural language tasks (Raiaan et al., 2024; Chang et al., 2024; Zhang et al., 2023). This enhanced performance is largely attributed to the rapid increase in model parameters, for example, GPT-3 (Brown et al., 2020) contains 175 billion parameters, while the largest version of Llama 3.1 (Touvron et al., 2023) features up to 405 billion parameters. However, the ever-increasing size of these models presents significant challenges for fine-tuning, as full parameter fine-tuning becomes computationally expensive and memory-intensive. To address this issue, Parameter-Efficient Fine-Tuning (PEFT) methods have been introduced, achieving performance comparable to full fine-tuning by adjusting only a small subset of parameters (Han et al., 2024) while keeping the majority of the model parameters frozen. Among these methods, LoRA (Hu et al., 2022) stands out by approximating parameter updates using the product of two low-rank matrices and has gained increasing popularity.  
+
+However, with the continued scaling up of models’ parameters, fine-tuning LLMs with LoRA would introduce a considerable number of additional parameters, even when using a relatively low rank. For instance, fine-tuning the Llama 70B model with a LoRA rank of 64 introduces approximately 360 million parameters (1.4G of memory), which makes the training process more challenging, an issue that becomes more severe when multiple LoRA services are deployed simultaneously (Wang et al., 2024). For the deployment scenario, LoRA modules are often kept separate from the pretrained parameters to facilitate multi-task inference services (Chen et al., 2024). Due to the multitude of downstream tasks, storing numerous LoRA weight backups consumes significant storage space. Additionally, during inference, the excessive quantity of LoRA parameters can occupy sub  
+
+![](images/b285ee2c29126bbbbc66a2259cea1afcd8d4aab02b17abd192fa656241110660.jpg)  
+Figure 1: The entropy similarity (Lin et al., 2024) of LoRA parameters for each module within the same layer (left) and across different layers (right). It shows that different modules within the same layer exhibit high entropy similarity, and this high similarity is also present across different layers. This indicates that LoRA parameters have a significant degree of redundancy.  
+
+stantial memory, increasing latency when loading and switching between weights for various tasks.   
+Consequently, there is a pressing need to further reduce the trainable parameters of LoRA.  
+
+Several existing methods target reducing LoRA’s parameters through parameter-sharing strategies (Mao et al., 2024; Sun et al., 2022a). Among these methods, inter-layer parameter sharing has proven to be an effective technique for reducing redundancy across different layers. Several methods like VeRA (Kopiczko et al., 2024) and VB-LoRA (Li et al., 2024) reduce the memory and compute requirements by sharing parameters across layers, capturing global patterns that exist throughout the model. However, these methods often overlook the local information and a critical source of redundancy: the intra-layer redundancy present in the different submodules of the same layer (Lin et al., 2024). For example, in Transformer models, the attention heads and feed-forward networks in the same layer often process similar features, leading to redundant parameter usage. Therefore, there is a need to design a new sharing technique that can capture both local and global features, while ensuring the shared parameters can be adapted to all modules with different shapes.  
+
+In this paper, we first analyze LoRA parameters and identify a high degree of redundancy (Figure 1), and we conduct a preliminary study, as shown in Table 1, which demonstrates that sharing parameters within and between layers can achieve comparable performance with fewer parameters. This indicates that we can eliminate high degree of redundancy in LoRA parameters by sharing them to capture global information. Accordingly, we propose Bi-Share LoRA, a method that combines intra-layer and inter-layer parameter sharing. We decompose the LoRA matrices into three components: local parameters, which capture module-specific information, intra-layer shared parameters, which are shared within the same layer to capture local consistent features, and interlayer shared parameters, which are shared across layers to capture global patterns. This enables Bi-Share LoRA to learn both local and global information efficiently. Additionally, to tackle the challenge of adapting shared parameters to all modules with different shapes, we present three shape transformation methods: Slice Sharing, Gate Transformation, and Kronecker Extension. To validate the effectiveness of Bi-Share LoRA, we conduct extensive experiments on the Llama model family across multiple commonsense reasoning and MMLU benchmarks. Our results demonstrate that Bi-Share LoRA achieves significant parameter savings of about $50\%$ while maintaining or even improving the model’s performance compared to standard LoRA and other existing methods. We also conduct experiments to analyze the rank value benefits and contributions of different configurations for local and shared weights.  
+
+In summary, our contributions are as follows:  
+
+• We propose Bi-Share LoRA, a unified sharing method that combines local parameters with intra-layer and inter-layer shared parameters to effectively capture both local and global information. This approach significantly reduces the number of trainable parameters while maintaining performance. • We introduce three shape transformation techniques to handle varying parameter shapes, thus increasing the flexibility and effectiveness of parameter sharing.  
+
+• We conduct extensive experiments on multiple tasks, demonstrating the effectiveness of Bi-Share LoRA in reducing parameter redundancy and improving parameter efficiency.  
+
+
+
+\section{2 BACKGROUND AND MOTIVATION  }
+
+
+
+
+\section{2.1 LOW-RANK ADAPTATION  }
+
+
+LoRA fine-tuning is employed to recover performance with minimal parameter updates. For an LLM consisting of $l$ layers, the weight matrix of each layer $W$ is adjusted using an update matrix $\Delta\pmb{W}\in\mathbb{R}^{m\times n}$ . This matrix is factorized into two low-rank matrices, $\pmb{A}$ and $_B$ , where $A\in\mathbb{R}^{r\times m}$ and $\b{B}\in\mathbb{R}^{n\times r}$ , with $r$ being a hyperparameter shared by all layers. The effectiveness of fine-tuning is highly dependent on rank selection. In this approach, the original weight matrix $W$ remains frozen, while only $\Delta W$ , represented by the product $_{A B}$ , is updated. The forward computation can be expressed as:  
+
+$$
+f({\pmb x})=({\pmb W}+\Delta{\pmb W}){\pmb x}=W{\pmb x}+B A{\pmb x}\enspace.
+$$  
+
+Given that the rank $r$ is typically much smaller than the dimension $d$ , the computational cost is significantly reduced from $d^{2}$ to $2d r$ . This optimization can reduce the trainable parameters during the learning process. Typically, the matrix $\pmb{A}$ is initialized by a Gaussian distribution with a small standard deviation, and $_B$ is initialized as a zero matrix. Hence, at the beginning of fine-tuning, the model behaves identically to the pre-trained model.  
+
+
+
+\section{2.2 MOTIVATION  }
+
+
+In large language models (LLMs), parameter redundancy is a common issue, especially in multitask learning scenarios. Redundancy commonly occurs within the same transformer block where the attention layer and MLP layer have overlapping functions or learn similar patterns (Lin et al., 2024), and the parameters across different blocks where similar feature representations might be learned in multiple layers (Li et al., 2024).2). Addressing both scenarios of parameter redundancy remains an open problem. We wonder whether sharing these superfluous parameters, both within a layer (intra-layer sharing) and across layers (inter-layer sharing), can significantly reduce the number of parameters without sacrificing performance? To this end, we conduct a simple experiment on intra-layer sharing, where all modules within the same transformer layer share the same LoRA parameters, and inter-layer sharing, where modules across different layers share the same LoRA fine-tuning parameters. From Table 1 (Individual), we find that the simple sharing may result in some performance degradation. We hypothesize that it may need module-specific parameters to learn the local features.  
+
+Table 1: Performance on instruction tuning with Alpaca 50K (Taori et al., 2023), evaluated with MMLU (Hendrycks et al., 2021) and GSM8K (Cobbe et al., 2021). Boldface indicates the best performance.   
+
+![](images/8c464933f9274ac5f2b7bb09358182bed25f1b6b1b89f8e8107e23956971fb82.jpg)  
+
+Therefore, we combine local parameters and shared parameters to fine-tune the model. Inspired by Wang et al. (2023) and Tian et al. (2024), we employ multiple LoRA modules in parallel to combine local parameters and shared parameters. This method can greatly expand the parameter search space, and enhance the model’s adaptability and flexibility. Therefore, the entire set of LoRA parameters is decomposed into three smaller LoRA parameter blocks: the first part acts on individual modules, the second part is shared among modules within the same layer, and the third part is shared by all modules. We assign different ranks for each smaller LoRA, the configuration and results are shown in Table 1 (Joint). The experimental results indicate that sharing parameters not only reduces the number of parameters but also improves model performance.  
+
+![](images/a5937dff1dd0019a438c4fa2165b010b109d8bae8d88ff5ef8e105a210d03d7c.jpg)  
+Figure 2: An overview of Bi-Share LoRA. The LoRA weights are decomposed into three sub-LoRA weights: local learns module-specific information, intra capture the shared features within the same transformer block, and inter learns the global information to interact with each module. The shape transformation enables the shared weights adaptive to different shapes of modules. By combining local, intra, and inter, the model can learn both local and global information during fine-tuning, so that improves the performance and generalizability.  
+
+
+
+\section{3 METHOD  }
+
+
+
+
+\section{3.1 PARAMETER SHARING  }
+
+
+Parameter sharing not only facilitates learning global information from the dataset but also significantly reduces the number of parameters in the model (Han et al., 2024). Leveraging this, we apply parameter sharing to enhance parameter efficiency in LoRA fine-tuning. Our approach first decomposes the LoRA module horizontally, expanding the optimization search space and allowing for more efficient learning. We divide the LoRA matrix into three sub-LoRA modules: local, intralayer, and inter-layer which collectively contribute to the parameter updates of the target module.  
+
+Intra-Layer Module refers to the sharing of parameters within the same transformer layer, such that all modules within a single layer (e.g., attention and MLP) share the same LoRA update matrix. This enables the model to capture consistent patterns and correlations within the layer, thereby improving the coherence of the information processed within each layer.  
+
+Inter-Layer Module denotes global parameter sharing, where the same LoRA update matrix is shared across different layers of the transformer. This facilitates better information flow and feature interaction between layers, which in turn enhance the overall expressiveness and depth of the model’s representations  
+
+Local Module refers to the traditional LoRA configuration, where the LoRA update matrix is applied only to the current module, allowing the model to learn highly specific local features. During training and inference, the parameters for each module are updated according to the following equation:  
+
+$$
+f({\pmb x})=({\pmb W}+\Delta{\pmb W}){\pmb x}={\pmb W}{\pmb x}+({\pmb B}A)_{l o c a l}{\pmb x}+({\pmb B}A)_{i n t r a}{\pmb x}+({\pmb B}A)_{i n t e r}{\pmb x}\enspace,
+$$  
+
+where the distinct rank values of aforementioned three sub-LoRA matrices are denoted as $r_{l o c a l}$ , $r_{i n t r a}$ , and $r_{i n t e r}$ , respectively. Specifically, $B_{l o c a l}\in\mathbb{R}^{n\times r_{l o c a l}}$ , $A_{l o c a l}\,\in\,\mathbb{R}^{r_{l o c a l}\times m}$ , $B_{i n t r a}\ \in$ $\mathbb{R}^{n\times r_{i n t r a}}$ , $A_{i n t r a}\in\mathbb{R}^{r_{i n t r a}\times m}$ , $B_{i n t e r}\in\mathbb{R}^{n\times r_{i n t e r}}$ , and $A_{i n t e r}\in\mathbb{R}^{r_{i n t e r}\times m}$ .  
+
+By introducing this novel decomposition, our Bi-Share LoRA fine-tuning approach is capable of learning both localized features and global interactions, providing a balance between task-specific adaptability and overall model robustness. Figure 2 presents an overview of our Bi-Share LoRA. This design is particularly beneficial in multi-task scenarios, enhancing the model’s performance and generalization while significantly reducing the computational resources required during training and inference. By decomposing LoRA into multiple smaller LoRA modules, we can assign a higher rank to the shared parameters, allowing the final parameters to achieve a greater overall rank, as discussed further in Section 4.4.  
+
+
+
+\section{3.2 SHAPE TRANSFORMATION  }
+
+
+We initially followed the LoRA setup (Hu et al., 2022) by applying LoRA parameters to the $q$ and $v$ modules in the attention layer, matching the shared parameter size to the $q v$ module, which yielded preliminary results (Table 1). Previous studies suggest that applying LoRA to more modules improves performance (Dettmers et al., 2023), so we extended it to the FFN layers. However, this caused a parameter shape mismatch. In the Transformer block (Vaswani et al., 2017), the qkvo modules in Llama’s attention layer have a consistent shape of (4096, 4096). Meanwhile, the FFN’s upand down-projection modules have dimensions of (4096, 11008) and (11008, 4096), respectively, making it difficult to apply a single shared $_{A B}$ parameters across these varying shapes. Similarly, in Llama3, the Grouped-Query Attention (GQA) changes the shape of $k$ module, further complicating the parameter sharing. To address this issue, we develop three transformation methods that adjust shared parameters to size of target modules.  
+
+
+
+\section{3.2.1 SLICE SHARING  }
+
+
+The straightforward method is to slice a larger trainable parameter matrix and train only the sliced portions (see Figure 3 (a)), which we refer to as the Slice Sharing (SS) method. Specifically, we determine the maximum input dimension $d_{i m}$ and output dimensions $d_{o m}$ , among all fine-tuning parameter modules. The shared matrices are then defined with dimensions $\bar{A_{s}}\stackrel{\cdot}{\in}\mathbb{R}^{r\times d_{i m}}$ and $\mathbf{\dot{B}}_{s}\in\mathbb{R}^{d_{o m}\times r}$ . During forward computation, the shared matrix is automatically sliced to match the parameter dimensions of the target module. The calculation is expressed as:  
+
+$$
+\Delta W=B_{s}[:,:d_{o}]{\cal A}_{s}[:d_{i},:]\;\;,
+$$  
+
+where $d_{i}$ and $d_{o}$ represent the input and output dimensions of target moddule, $B_{s}[:,:d_{o}]$ and $A_{s}[$ : $d_{i},:]$ represent the sliced parts of the shared weights of $B_{s}$ and $A_{s}$ . Algorithm 1 provides the pseudocode for Slice Sharing.  
+
+
+
+\section{3.2.2 GATE TRANSFORMATION  }
+
+
+The simple slicing method enables parameter sharing, but only a subset of the shared parameters is used by all modules, while the remaining parameters are only utilized by larger modules. This limits the efficiency of parameter sharing. To address this, we propose matrix multiplication for dynamic size transformation of shared parameters. By multiplying matrices $M_{a}\in\mathbb{R}^{m\times n}$ and $M_{b}\in\mathbb{R}^{n\times p}$ , the resulting matrix $M_{c}\,\,\in\,\,\mathbb{R}^{m\times p}$ transforms the shape. Based on this, we introduce the Gate Transformation (GT), which applies an input gate $G_{i}\,\in\,\mathbb{R}^{m\times d_{i}}$ and an output gate $G_{o}\,\in\,\mathbb{R}^{d_{o}\times n}$ . For an input $\pmb{x}\in\mathbb{R}^{b\times d_{i}}$ , $G_{i}$ transforms it to $(b,m)$ , and the shared matrix $W_{s}\in\mathbb{R}^{n\times m}$ processes it to produce an intermediate result $(b,n)$ . Finally, $G_{o}$ outputs the final shape $(b,d_{o})$ .  
+
+However, defining these transformation matrices introduces many learnable parameters, leading to high memory consumption for large inputs and outputs. To mitigate this, we apply one-rank decomposition to the input and output gates, reducing them to the product of two small rank-one matrices (see Figure 3 (b)). The final computation is as follows:  
+
+$$
+\Delta W=G_{o}W_{s}G_{i}=(G_{o u}G_{o d})(B_{s}A_{s})(G_{i u}G_{i d})\,\,\,,
+$$  
+
+where the $G_{i d}\in\mathbb{R}^{1\times d_{i}}$ projects down the input dimension into low a dimensional space, and then $G_{i u}\in\mathbb{R}^{m\times1}$ scales it up into the dimension that is comparable to the input dimension of the share  
+
+![](images/aa70d3576b023baecaafdd4fd11a3590684babf6b9f84b60135345839dfcf6b4.jpg)  
+
+Figure 3: Three methods for shape transformation: (a) Slice Sharing, slices parameters from a large shared trainable parameters; (b) Gate Transformation, an input gate and an output gate transforms input dimension and output dimension to match the shape of shared parameters, and they are implemented by one-rank decomposition; (c) Kronecker Extension, a module-specific kernel are used to extend the shared weights into target shape through the Kronecker Product.  
+
+weights $W_{s}$ . Similarly, $G_{o d}\,\in\,\mathbb{R}^{1\times n}$ and $G_{o u}\,\in\,\mathbb{R}^{d_{o}\times1}$ are applied to the transform the output.   
+By setting the input and output gates, the size of our shared parameters can be flexibly changed.   
+Algorithm 2 provides the pseudocode for Gate Transformation.  
+
+
+
+\section{3.2.3 KRONECKER EXTENSION  }
+
+
+While utilizing Gate Transformation allows us to define shared parameters of arbitrary shapes, lowrank decomposition may lead to information loss in both input and output transformations. Another approach is to concatenate multiple small shared parameters from identical copies to form a larger shared parameter (Wang et al., 2024; Edalati et al., 2022), but this limits the overall expressiveness. To address this, inspired by Karimi Mahabadi et al. (2021), we apply Kronecker matrix multiplication to expand the dimensions of the shared matrix by integer multiples, a method we term Kronecker Extension (KE). The Kronecker product between matrices $\b X\in\bar{\mathbb{R}}^{m\times n}$ and $\pmb{Y}\in\mathbb{R}^{p\times q}$ , denoted as $\pmb{X}\otimes\pmb{Y}\in\mathbb{R}^{m p\times n q}$ , is mathematically defined as:  
+
+$$
+{\pmb X}\otimes{\pmb Y}=\left(\begin{array}{c c c}{x_{11}{\pmb Y}}&{\cdots}&{x_{1f}{\pmb Y}}\\ {\vdots}&{\ddots}&{\vdots}\\ {x_{m1}{\pmb Y}}&{\cdots}&{x_{m f}{\pmb Y}}\end{array}\right)~,
+$$  
+
+where $x_{i j}$ shows the element in the $i^{t h}$ row and $j^{t h}$ column of $\mathbf{\deltaX}$ .  
+
+We assign a module-specific kernel $K\in\mathbb{R}^{d\times r}$ to each module in the model (see Figure 3(c)). By applying the Kronecker product, we expand the shared parameter $\mathbf{A}_{s}\in\mathbb{R}^{r\times\frac{m}{k}}$ and $\bar{B}_{s}\in\mathbb{R}^{\frac{n}{k}\times r}$ to match the size $A_{t}\in\mathbb{R}^{r\times m}$ and $B_{t}\in\mathbb{R}^{n\times r}$ of the target module. Here, $r$ is the rank value set for the shared parameter. Finally, according to our Kronecker Extension, $\Delta{W}$ is calculated as:  
+
+$$
+\Delta W=(K_{B}\otimes B_{s})(K_{A}\otimes A_{s})\,\,\,,
+$$  
+
+where $K_{B}\in\mathbb{R}^{k\times1}$ and $K_{A}\in\mathbb{R}^{1\times k}$ represent module-specific kernel for the $_B$ and $\pmb{A}$ matrices in the LoRA module. Algorithm 3 provides the pseudocode for Kronecker Extension.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+
+
+\section{4.1 SETTINGS  }
+
+
+LLMs. To demonstrate how Bi-Share LoRA performed on different models, we conduct experiments on Llama families (Touvron et al., 2023): Llama 1 and Llama 3.13.  
+
+
+
+\section{4.3 RESULTS ON MMLU BENCHMARK  }
+
+
+We evaluate the zero-shot and five-shot performance of Bi-Share LoRA on the MMLU benchmark using Llama 1-7B, Llama 3-8B, and Llama 1-13B models. The results, as shown in Table 3, demonstrate that Bi-Share LoRA consistently outperforms the baseline models in terms of average performance across both zero-shot and five-shot settings.5.2).  
+
+
+
+\section{4.4 ANALYSIS  }
+
+
+Rank Analysis. According to matrix rank theory, the rank of the sum of two matrices is given by $\mathcal{R}(A+B)\overset{\cdot}{\leq}\mathcal{R}(A)+\mathcal{R}(\bar{B})$ . This implies that decomposing a large LoRA matrix into multiple sub-LoRAs does not increase the overall rank of the matrix. Consequently, the rank of the combined LoRA matrices remains bounded by the sum of their individual ranks. We validate the actual rank of each module and calculate the average ranks across layers for each Shape Transformation method using rank configurations of $r=\{2,4,16\}$ . The results, shown in Figure 4(a), indicate that the Slice Sharing (SS) method achieves a combined rank equal to the sum of local and shared ranks (22), while the Kronecker Extension (KE) reaches approximately 21.53. In contrast, the Gate Transformation (GT) method yields rank value equivalent to the local rank plus 2, likely due to one-rank gates causing some information loss.  
+
+Contribution Analysis. We conduct further experiments to explore the contribution of each subLoRA matrix. By setting the rank of one sub-LoRA matrix to 8 and the others to 0, we examine the individual impact of each component. The Kronecker Extension method is used to reshape the shared parameters. In Figure 4(b), the results reveal the performance preferences of each component across datasets. Specifically, the local component of LoRA performs best on HellaSwag, ARC-e, BoolQ, and SIQA, while the intra-layer shared component excels on PIQA and ARC-c. Overall, the combination of local, intra-layer, and inter-layer shared parameters yields the best performance across all datasets.  
+
+Extension Analysis. We further analyze the scalability of the Kronecker Extension method. The shared matrix $\bar{W}\in\mathbb{R}^{n\times r}$ can be obtained by applying the Kronecker product to $M\in\mathbb{R}^{\frac{n}{k}\times r}$ and $K\in\mathbb{R}^{k\times1}$ . By adjusting their shapes to $M\in\mathbb{R}^{\hat{\frac{n}{k}}\times1}$ and ${\cal K}\in\mathbb{R}^{k\times r}$ , the same matrix shape for $W$ can be achieved. Furthermore, since one dimension is a constant 1, the resulting matrix rank equals $r$ . To explore its effect, we modify this constant to 2 to test whether it enhances the rank of $W$ . We denote configurations as $a_{-}b$ , where $r_{-1}$ means the shared matrix has a dimension $r$ and a modulespecific dimension of 1, while $2.r$ has a shared dimension of 2 and a module-specific dimension of $r$ . The results in Figure 4(c) show that modifying the constant improves both expressiveness and information content. Comparing $r_{-1}$ and $1.r$ , we observe that each configuration excels in different metrics, with $r_{-1}$ performing better overall while introducing fewer trainable parameters.  
+
+![](images/6247886b94f28b51b037b576668a18a9bf1beba32b579c2a73f5e0f789c73eb3.jpg)  
+Figure 4: Analysis. (a) Rank Analysis: the final rank benefit from different Shape Transformation methods. (b) Contribution Analysis: the different contribution across the sharing weights and local weights. (c) Extension Analysis: the rank extension analysis for different shape of share weights size and kernel size.  
+
+We conduct ablation studies to examine the impact of individual components of our method. All subsequent experiments focus on the MMLU (zero-shot) (Hendrycks et al., 2021) and GSM8K (5-shot) (Cobbe et al., 2021) benchmarks, utilizing the Llama 1-7B model.10.  
+
+Slicing Method. We evaluate three slicing methods for the shared matrix: top-left slice, bottomright slice, and center slice. We adopt the rank configuration of $r=\{2,4,8\}$ . The results are shown in Table 4. It indicates that the center slice outperforms the other two slice methods both on MMLU and GSM8K benchmark.  
+
+Gate Initialization. We initialize the input and output gates of the Gate Transformation using three schemes: Kaiming normal, Kaiming uniform, and constant one initialization. The rank configurations for different sub-LoRA weights are set for $r=\{2,8,16\}$ . As shown in Table 5, Kaiming uniform outperforms Kaiming normal initialization. Additionally, the constant ones initialization leads to gradient explosion or vanishing issues, making it unsuitable for gate initialization.  
+
+Initialization of Kronecker Kernel. We apply Kaiming normal, Kaiming uniform, and constant ones initialization to the Kronecker kernel to examine the impact of different initialization schemes. We set the ranks of $\{2,4,16\}$ for local, intra, and inter sub-LoRA matrices, respectively. From Table 6, the constant ones initialization performs better on the MMLU benchmark, while the Kaiming normal initialization outperforms the other two methods on the GSM8K benchmark. Overall, the Kaiming normal initialization performs best.  
+
+Table 4: Split Position   
+Table 5: Gate Initialization   
+Table 6: Kernel Initialization   
+
+![](images/04f9d0915daea8de974c8c422c31a0b3417f143f961a9d14cb3cac1edbf3f5da.jpg)  
+
+Shared Size of Gate and Kronecker kernel. The Gate Transformation (GT) and Kronecker Extension (KE) methods can flexibly adapt the shared weights to arbitrary shapes for different modules. We examine various sizes of the shared matrix, setting the rank $r=\bar{\{2,8,16\}}$ . For the GT, we test shared matrix sizes of [512, 1024, 2048], while for the KE, we test sizes of [64, 128, 256]. The results are presented in Table 7 and Table 8. We found that the parameters introduced by GT increase with the growth of the shared parameter size, which also leads to an improvement in performance on the MMLU benchmark. However, we observe a decrease in performance on the GSM8K dataset as the shared parameter size increases. In contrast, the parameters introduced by the KE method decrease with increasing shared parameter size, while the average performance improves. Overall, we select the shared parameter size of 1024 for the GT method and 256 for the KE method.  
+
+Table 7: Size of Shared weights of GT   
+
+![](images/4aa1c011fb4e20831f068026e706a653fa9a682ba63161661bedb27b04d17477.jpg)  
+
+Table 8: Size of Shared weights of KE   
+
+![](images/da889857d7712214e2efbdc53b4f3c24e3cb36a28da8023e16c34911c213f58a.jpg)  
+
+
+
+\section{5 RELATED WORK  }
+
+
+
+
+\section{5.1 MULTI-LORA ARCHITECTURE  }
+
+
+LoRA has demonstrated exceptional resource efficiency and performance in adapting LLMs for specific tasks, driving the demand for a single model capable of handling multiple tasks (Agiza et al., 2024). Several approaches have been proposed to improve their multi-task adaptability. In particular, LoraHub (Huang et al., 2023) assembles LoRA modules trained on different tasks to eliminate the need for human expertise and assumptions, enabling effective cross-task generalization. Similarly, MultiLoRA (Wang et al., 2023) improves adaptability by horizontally expanding LoRA modules and reducing the dominance of top singular vectors observed in LoRA. Building on these advancements, HydraLoRA (Tian et al., 2024) introduces an asymmetric architecture that shares a common matrix across tasks while using task-specific matrices for different sub-domains, further enhancing both fine-tuning and inference efficiency.  
+
+
+
+\section{5.2 PARAMETER SHARING OF LORA  }
+
+
+Recent advances in LoRA-based fine-tuning methods have explored various strategies for sharing LoRA weights to enhance parameter efficiency across multiple tasks. VeRA (Kopiczko et al., 2024) proposes sharing random matrices across all layers, reducing the number of parameters, but it results in some performance trade-offs and increased inference latency due to its high-rank requirements. In addition, Tied-LoRA (Renduchintala et al., 2024) takes a different approach by sharing LoRA matrices specifically across query, key, and value projection layers, using additional scaling vectors to differentiate the modules. However, its requirement for identical matrix shapes limits flexibility. In contrast, PRoLoRA (Wang et al., 2024) employs an intra-layer sharing mechanism with learnable parameters, but it only reduces parameters without capturing global features. Additionally, VB-LoRA (Li et al., 2024) introduces a “divide-and-share” approach that partitions shared vectors into a vector bank, addressing the limitations of traditional low-rank decomposition across matrix dimensions, modules, and layers. However, this approach selects vectors uniformly without accounting for the internal structure of the model, leading to suboptimal utilization of the model’s internal information  
+
+
+
+\section{6 CONCLUSION  }
+
+
+This paper presents Bi-Share LoRA, a method that enhances the parameter efficiency of large language models (LLMs) by combining shared intra-layer, inter-layer parameters, and local parameters. This approach reduces the number of trainable parameters while boosting model efficiency. Experiments on various Llama models demonstrate that Bi-Share LoRA significantly cuts down parameter usage by $56.40\%$ and improves average performance by $0.33\%$ on commonsense reasoning tasks and $2.08\%$ on MMLU benchmark. Overall, Bi-Share LoRA effectively reduces redundancy and enhances model adaptability across diverse tasks. In the future, we will explore more intelligent parameter sharing modes that can selectively select different modules or different layers for parameter sharing, ultimately further improving the performance of the model.  
+
+
+
+\section{7 ETHICS STATEMENT  }
+
+
+This paper is built upon pre-trained large language models (e.g., Llama1 and Llama3) and existing datasets for instruct fine-tuning (e.g., Alpaca). We do not introduce any new data and thus do not involve human annotation. This paper has no additional ethical concerns beyond a large corpus of research in LLMs.  
+
+
+
+\section{8 REPRODUCIBILITY STATEMENT  }
+
+
+We have thoroughly elucidated our design and training details throughout the paper to provide a comprehensive understanding of our methodology. Specifically, the overall sharing architecture is described in Section 3.1, where we outline how parameters are effectively shared across different layers and modules. The Shape Transformation methods are detailed in Section 3.2, illustrating the various techniques employed to adapt shared weights to different configurations.3, allowing readers to easily follow the implementation details.13, including the specifications of the computing resources and software versions that facilitated our experiments.12, ensuring clarity regarding the models’ configurations. The training datasets and evaluation benchmarks, crucial for assessing model performance, are detailed in Section 4.14. This includes a thorough description of the datasets employed for both training and evaluation phases. Finally, we outline the hyperparameters and configurations in Section 4.1, providing insight into the settings that governed the training process. By compiling these details, we aim to enhance the reproducibility of our work and assist other researchers in understanding and applying our methods effectively.  
+
+
+
+

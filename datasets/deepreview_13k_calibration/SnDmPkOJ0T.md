@@ -1,8 +1,8 @@
 # REEF: Representation Encoding Fingerprints for Large Language Models
 
 - Decision: Accept
-- Avg Score: 4.60
-- Scores: 1, 0, 8, 6, 8
+- Avg Score: 8.00
+- Scores: 10, 8, 6, 8
 
 ## Abstract
 Protecting the intellectual property of open-source Large Language Models (LLMs) is very important, because training LLMs costs extensive computational resources and data. Therefore, model owners and third parties need to identify whether a suspect model is a subsequent development of the victim model. To this end, we propose a training-free REEF to identify the relationship between the suspect and victim models from the perspective of LLMs' feature representations. Specifically, REEF computes and compares the centered kernel alignment similarity between the representations of a suspect model and a victim model on the same samples. This training-free REEF does not impair the model's general capabilities and is robust to sequential fine-tuning, pruning, model merging, and permutations. In this way, REEF provides a simple and effective way for third parties and models' owners to protect LLMs' intellectual property together.

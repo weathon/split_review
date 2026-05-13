@@ -1,0 +1,285 @@
+\title{GASLITEing the Retrieval: Poisoning Knowledge DBs to Mislead Embedding-based Search}
+
+\begin{abstract}
+Embedding-based text retrieval—retrieval of relevant passages from knowledge databases (KDBs) via deep learning encodings—has emerged as a powerful method attaining state-of-the-art search results and popularizing the use of Retrieval Augmented Generation (RAG). Still, like other search methods, embedding-based retrieval may be susceptible to search-engine optimization (SEO) attacks, where adversaries promote malicious content by introducing adversarial passages to KDBs. To faithfully assess the susceptibility of such systems to SEO, this work proposes the _GASLITE_ attack, a mathematically principled gradient-based search method for generating adversarial passages without relying on the KDB content or modifying the model. Notably,  _GASLITE_'s passages _(1)_ carry adversary-chosen information while _(2)_ achieving high retrieval ranking for a selected query distribution when inserted to KDBs. We extensively evaluated  _GASLITE_, testing it on nine advanced models and comparing it to three baselines under varied threat models, focusing on one well-suited for realistic adversaries targeting queries on a specific concept (e.g., a public figure). We found _GASLITE_ consistently outperformed baselines by $\ge$140\% success rate, in all settings. Particularly, adversaries using _GASLITE_ require minimal effort to manipulate search results—by injecting a negligible amount of adversarial passages ($\le$0.0001\% of the KDBs), they could make them visible in the top-10 results for 61-100\% of unseen concept-specific queries against most evaluated models. Among other contributions, our work also identifies several factors that may influence model susceptibility to SEO, including the embedding space's geometry. We will make our code publicly available.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+The rise of deep learning text encoders (Devlin et al., 2019; Reimers & Gurevych, 2019) has popularized the use of learned representation (a.k.a., embeddings) for semantic retrieval (Karpukhin et al., 2020; Lin et al., 2022) in systems that rank relevant text passages from large knowledge databases (KDBs) via vector similarity. Such retrieval systems have proven effective for knowledge-intensive tasks (Ram et al., 2023; Lewis et al., 2020), enabling real-world applications such as search engines (e.g., Meilisearch) and retrieval-augmented generation (RAG) (e.g., Google AI, Cursor).  
+
+Still, the popularity of dense embedding-based retrieval raises security concerns due to their reliance on public KDBs (e.g., Wikipedia or Reddit corpora) vulnerable to poisoning by adversaries (Carlini et al., 2024). A fundamental risk in search systems, and specifically in embedding-based retrieval, is Search-Engine Optimization (SEO), seeking to promote potentially malicious content’s ranking for certain query distributions (Sharma et al., 2019). E.g., attackers may target search results to spread misinformation, or RAG to inject prompts misleading generative models (Greshake et al., 2023).  
+
+Prior work has demonstrated the feasibility of content promotion against learned retrieval systems by merely poisoning the KDBs via inserting a few carefully crafted samples (without training). These studies included targeting image-to-image retrievers (Zhou et al., 2020; Xiao & Wang, 2021) text re-rankers, (Song et al., 2020a; Raval & Verma, 2020; Liu et al., 2022; Wu et al., 2023) and text embedding-based retrievers (Zhong et al., 2023; Zou et al., 2024; Shafran et al., 2024). However, these attacks target over-simplistic, single-query search, while common SEO does not control the particular user query (e.g., textual queries may vary in phrasing). Differently, Zhong et al. (2023) proposed indiscriminately targeting a wide set of diverse queries, while SEO typically targets a narrower audience aimed at consuming the promoted content (e.g., queries related to a promoted concept). Lastly, previous methods for crafting textual adversarial passages against retrieval have been limited to baseline techniques, such as repeating the targeted query in a crafted passage, or employing HotFlip gradient-based attack (Ebrahimi et al., 2018), which has been since outperformed by HotFlip-inspired, improved discrete optimizers used in LLM jailbreak attacks (Zou et al., 2023).  
+
+![](images/19f5c0eca0f501633ed6d9ac08dbd00f7986d622cf99ea6c1d9b48c89bd04a9d.jpg)  
+Figure 1: Attackers of retrieval system aim to promote specific information (info) within a selected query distribution. In this work, this is achieved by: (1) employing GASLITE and attacker’s knowledge of the query distribution (e.g., a sample query set) to craft a trigger (or multiple) appended to info; then (2) injecting this adversarial passage into the retrieval KDB; eventually, (3) at inference time, the retriever returns info among the top- ${\cdot k}$ results for in-distribution queries.  
+
+This work explores text embedding-based retrieval’s susceptibility to SEO via KDB poisoning, focusing on concept-specific queries, while also considering previously proposed query distributions. We argue that targeting concepts better reflects SEO goals, as targeted queries share commonalities with attack contexts (§3). To faithfully assess (§6) and better understand $(\S7)$ model susceptibility to attacks, we introduce GASLITE, a HotFlip-inspired method for crafting adversarial passages outperforming prior approaches (§4.2). E.g., as shown in Fig. 1, attackers may target Harry Potterrelated queries to promote malicious info (e.g., “Voldemort was right all along!”) by appending a GASLITE-crafted trigger (e.g., “So wizard tickets ideally ages Radcliffe trilogy typically 194 movies”; Tab. 10), making crafted passage(s) visible in top results for various Potter-related queries.  
+
+Our Contributions. We demonstrate potent SEO attacks against embedding-based retrievers, toward enabling a faithful assessment of their robustness.  
+
+• We introduce GASLITE, a mathematically grounded $(\S4.1)$ , gradient-based (§4.2) attack on embedding-based retrievers that surpasses prior attacks and text optimizers $(\S4.2,\S6)$ .   
+• We propose threat models reflecting common SEO adversarial goals, emphasizing the more pertinent concept-specific query distributions $(\S3)$ .   
+• We conduct, to our knowledge, the most extensive robustness evaluation across three SEO settings and nine popular models (§5–6). Key findings include: $(I)$ concept-specific SEO requires negligible scale of poisoning (e.g., $\leq\!0.0001\%$ of the KDB) to achieve content visibility in top results for most queries (§6.2); (2) attacking a single query is solved by GASLITE, which consistently attains the top-1 result (§6.1); (3) indiscriminate query targeting is challenging, requiring relatively high poisoning rates, albeit still possible $(\S6.3,\S7.1)$ .   
+• We identify factors correlated with model susceptibility (e.g., similarity metric and embeddingspace geometry), laying ground for future work testing and improving model robustness $(\S7.2)$ .  
+
+Next, we discuss related work and background (§2) and present our threat model (§3) and attack (§4), followed by the results (§5–6). We wrap with a discussion $(\S7)$ and a conclusion (§8).  
+
+
+
+\section{2 BACKGROUND AND RELATED WORK  }
+
+
+Embedding Models and Retrieval Task. Dense sentence embeddings (i.e., learning-based representations; Cer et al. (2018); Reimers & Gurevych (2019)) have been shown useful in downstream tasks such as semantic retrieval (Karpukhin et al., 2020), often after a contrastive fine-tuning stage (Gao et al., 2021; Izacard et al., 2021), with popular applications for search and RAG (App. A). Concretely, given an embedding model $(R)$ , a retrieval KDB (corpus of text passages $\mathcal{P}=\{p_{1},p_{2},\dotsc\})$ , and a query $(q),R$ retrieves the $k$ most relevant passages using vector similarity (e.g., dot product):  
+
+$$
+\mathrm{Top}{-k(q\mid\mathcal{P},R)}:=\arg\operatorname{sort}(\{E m b_{R}(p)\cdot E m b_{R}(q)\mid p\in\mathcal{P}\})[-k:]
+$$  
+
+where $E m b_{R}(\cdot)$ the $R$ ’s embedding of a given text. This scheme provides an efficient (retrieving cached KDB embeddings via a forward pass followed by matrix multiplication), and flexible (interchangeable KDB) relevance ranking system. We focus on undermining such systems by inserting a few adversarial passages into KDBs (Fig. 1).  
+
+Crafting Textual Adversarial Examples. While adversarial examples in computer vision (Szegedy et al., 2014; Biggio et al., 2013) mislead neural network by slightly modifying inputs, generating them in the discrete text domain is more challenging (Carlini et al., 2023). HotFlip (Ebrahimi et al., 2018) pioneered gradient-based methods for text, inspiring work on text adversarial examples for misclassification (Wallace et al., 2019), triggering toxic text generation (Jones et al., 2023), and bypassing LLM alignment (Zou et al., 2023; Zhu et al., 2023). Building on HotFlip’s mathematical foundation, we propose GASLITE (§4), a gradient-based method for crafting optimized adversarial passages, experimentally showcasing its superiority in retrieval attacks, even compared to powerful LLM discrete optimizers like GCG (Zou et al., 2023).   
+Poisoning Attacks. Differently than data poisoning attacks, that contaminate training data (Biggio et al., 2012; Shafahi et al., 2018), KDB poisoning attacks insert a small amount of fully-controlled new samples, without retraining the model (Zhou et al., 2020; Zhong et al., 2023). Our attack, like others of the latter type, targets models that use datasets at inference time, specifically, we poison textual KDB in embedding-based retrieval.   
+Attacking Text Retrieval via KDB Poisoning. Recent work has demonstrated the feasibility of retrieval KDB poisoning (Zhong et al., 2023; Zou et al., 2024; Shafran et al., 2024) and its utilization for misleading LLMs (Greshake et al., 2023; Kumar & Lakkaraju, 2024), particularly in the context of RAG. Yet, these studies either employ baseline methods for KDB poisoning or assume retrieval is successfully misled (often due to focusing on the generative RAG component), and are limited in targeted retrievers and query distributions. We focus on retrieval vulnerabilities, proposing GASLITE, which markedly outperforms past attacks (§6) allowing reliable assessment of retrievers’ robustness. Moreover, this work offers and employs more stringent threat models relevant to practical SEO (§3). 3 THREAT MODEL   
+Our threat model considers an attacker targeting an embedding-based retrieval model, aiming to promote information by inserting strategically-crafted passages into the retrieval KDB.   
+Attacker Goal. The attacker aims to promote malicious information (info) for queries distributed in $D_{\vec{Q}}$ and retriever model $R$ . Specifically, the attacker aspires to: $(I)$ maximize visibility of the adversarial passage in top-ranked results for targeted queries $(\sim\,D_{\check{Q}})$ ; (2) ensure the passage is informative, conveying attacker-chosen content. Additionally, the attacker may prioritize stealth by imposing constraints on the crafted passages (e.g., fluency) to evade potential defenses (App. G). Attacker Capabilities. The attacker can poison the retrieval KDB (a set $\mathcal{P}$ ) by inserting adversarial text passages, ${\mathcal P}_{a d v}\;:=\;\{p_{a d v}^{(1)},p_{a d v}^{(2)},\,\cdot\,\cdot\,\}$ {p(a1d)v, p(a2d)v, . . . } (|Padv|) whose amount defines the attack budget, with (e.g., $|\mathcal{P}_{a d v}|\,=\,10^{-5}\,\times\,|\mathcal{P}|)$ . Such poisoning capability is also assumed in prior work (Zhong et al., 2023; Shafran et al., 2024; Zou et al., 2024) and is practical, as many retrievalaided systems rely on textual KDBs from untrusted sourced (Carlini et al., 2024), including, e.g., large public corpora (e.g., Wikipedia, open-source documentations, or even Reddit comments2), app-specific sources (e.g., customer-service records), and other attacker-created content (e.g., web pages). We emphasize that our attacker controls adversarial passages’ text, per realistic settings, not the input tokens to models, as assumed in prior work (Zhong et al. (2023); see App. I).   
+We further assume white-box access (i.e., attackers can access $R$ ’s weights) to examine retrievers’ worst-case behavior, justified by the widespread use of open-source, leading models (Muennighoff et al., 2023), with some used in real-world applications (e.g., Meilisearch). Moreover, worst-case attacks can serve at the basis of defenses (Madry et al., 2018), and black-box attacks (see App. H.7). However, we emphasize that attackers cannot control model weights or training, nor do they have read access to the KDB $\mathcal{P}$ , as it often dynamically changes (e.g., Wikipedia is constantly updated). Targeted Query Distribution $(D_{\check{Q}})$ and Attacker’s Knowledge. We consider three levels of attacker knowledge about targeted queries, reflecting different SEO settings. Later, we evaluate all three variants (§5–6) and focus on the second, arguing it better reflects typical SEO scenarios.  
+
+1. “Knows All” Targeted Queries. The attacker targets a known, finite set of queries $Q$ (i.e., $D_{\check{Q}}\;:=\;U n i f o r m\bigl(\bigl\{q_{1},\ldots,q_{|Q|}\bigr\}\bigr)$ . Prior attacks (Zou et al., 2024; Shafran et al., 2024; Song et al., 2020a; Zhou et al., 2020) focus on this setting, mostly targeting a single query $\left[Q\right|=1)$ .  
+
+We propose and focus on this setting as it aligns with common SEO goals, where targeted queries typically depend on the promoted content or attack context. For instance, when spreading misinformation about a public figure in user-facing search, the relevant victims are users submitting queries related to the figure. Similarly, when targeting RAG, attackers aim for the indirect prompt injection string to be retrieved for queries related to the attack context (e.g., queries about schedules and meetings when targeting a personal calendar RAG) (Greshake et al., 2023).  
+
+We now derive the adversary’s objective (Eq. 2 in $\S4.1$ ) and build on it to introduce GASLITE (§4.2).  
+
+The adversary seeks to create textual adversarial passages, $\mathcal{P}_{a d v}$ , maximizing the probability of retrieving at least one adversarial passage $(p_{a d v}\in\mathcal{P}_{a d v})$ ranked in the top- $k$ results, over queries $(q)$ sampled from the targeted distribution $D_{\checkmark}$ . Formally:  
+
+$$
+\begin{array}{r l r}{\mathcal{P}_{a d v}:=}&{\underset{\left|\widetilde{\mathcal{P}}_{a d v}\right.\cup\left.\widetilde{\mathcal{P}}_{a d v}\right|=S}{\arg\operatorname*{max}}}&{\mathbb{P}_{q\sim D_{\widetilde{\mathcal{Q}}}}\left[\widetilde{\mathcal{P}}_{a d v}\cap\mathrm{Top}{-k\left(q\mid\mathcal{P}\cup\widetilde{\mathcal{P}}_{a d v},R\right)\neq\emptyset}\right]}\\ &{}&{\left|\widetilde{\mathcal{P}}_{a d v}\right.\cup\left.\mathcal{S}.\right.}\\ &{}&{\left.\left|\widetilde{\mathcal{P}}_{a d v}\right|\leq B\wedge\widetilde{\mathcal{P}}_{a d v}\right|\!\!=\!S}\end{array}
+$$  
+
+Here, $\mathcal{P}_{a d v}$ must satisfy constraints $S$ (e.g., carrying info) and stay within a budget of $B$ passages. The adversarial passages are inserted to poison the KDB $\mathcal{P}$ , and the retrieval model $R$ is queried with samples from $D_{\check{Q}}$ .  
+
+To simplify the objective, we assume no constraints in $S$ and that $|\mathcal{P}_{a d v}|{=}1$ , relaxing these assumptions later. Following our threat model, attackers cannot use $\mathcal{P}$ and may employ available sample queries $(Q\sim D_{\check{Q}})$ . We can then estimate the objective as (see App. B for detailed derivation):  
+
+$$
+\mathcal{P}_{a d v}:=\underset{\widetilde{\mathcal{P}}_{a d v}:=\{\widetilde{\mathcal{P}}_{a d v}\}}{\arg\operatorname*{max}}\left(\frac{1}{\vert Q\vert}\sum_{q\in Q}E m b_{R}\left(q\right)\right)\cdot E m b_{R}\left(\widetilde{\mathcal{p}}_{a d v}\right)
+$$  
+
+This estimated objective (Eq. 2) maximizes the alignment between the controlled adversarial passage $p_{a d v}$ and the centroid of the targeted query distribution $D_{\check{Q}}$ , suggesting that $p_{a d v}$ should reflect the “average” semantic of the targeted queries. Eq. 2 provides a compact, query-count-agnostic objective of a single-vector inversion, which we optimize efficiently with GASLITE (§4.2), and use to form an hypothetical baseline attack achieving this objective (perfect in $\S7.1$ ).  
+
+Constraining the Objective. To ensure informativeness (§3), we construct $p_{a d v}$ by concatenating a fixed prefix containing the malicious information (info) with an optimized trigger: $p_{a d v}:=i n f o\oplus$ trigger. The attack optimizes the trigger while keeping the prefix intact. For additional stealth, we can further constrain the attack (e.g., require a fluent trigger) by incorporating relevant terms (e.g., text perplexity) into the objective (as we do in defenses evaluation; App. G).  
+
+Generalizing for Larger Budgets. Finding the optimal solution for multi-budget settings is generally $N P$ -Hard (reduction to set cover in App. D.2). Thus, to accommodate larger budgets $\left.\!\!B\right.>1)$ ), we partition the query set $Q$ into $B$ subsets and attack each separately, optimizing Eq. 2 per subset. (see Alg. 2 in App. D.1). After empirical evaluation of various partitioning methods, including different clustering algorithms and variants of greedy set cover approximation (Korte & Vygen, 2012)  
+
+we found $k$ -means (Lloyd, 1982) to best use a given budget—although, in specific low-budget cases, the greedy algorithm performs slightly better (App. D.3). Hence, we choose $k$ -means as the querypartition method and further motivate it with a desired theoretical property it holds (App. D.3).  
+
+
+
+\section{4.2 OPTIMIZATION WITH GASLITE  }
+
+
+To systematically optimize toward the objective in Eq. 2, we introduce GASLITE (Gradient-based Approximated Search for maLIcious Text Embeddings), a multi-coordinate ascent gradient-based algorithm that iteratively refines textual triggers to maximize the similarity between adversarial passages and target queries within the embedding space (Eq. 2). We now describe GASLITE (Alg. 1), outlining the critical design decisions, and demonstrate its superiority as an optimizer for attacking retrieval compared to prior optimizers (Fig. 2), with more comprehensive evaluation to follow (§6).  
+
+While continuous optimization of Eq. 2 is straightforward, involving only the computation of the query centroid, the challenge lies in finding a text $p_{a d v}$ , in a discrete space, that satisfies this objective. Prior attacks on NLP models (§2) have addressed this by leveraging gradient information to reduce the search space. Specifically, Ebrahimi et al. (2018) proposed a well-established mathematical scheme, which we employ in our attack and is at the foundation of several LLM jailbreaks (GCG (Zou et al., 2023), ARCA (Jones et al., 2023)) and retrieval attacks (Cor.Pois. (Zhong et al., 2023)). This scheme: (1) computes the gradient of the objective w.r.t. the input to estimate a linear approximation (i.e., first-order Taylor) over all tokens; (2) uses this approximation to identify promising candidates for token substitutions (i.e., ones that are likely to increase the objective); and (3) evaluates the exact objective for these candidates (via forward passes), and performs the best substitution evaluated.  
+
+![](images/83ddb7fef1a23afd8455ff60876322c0bfda05c935d3b5b56e9411975f3e70d8.jpg)  
+(a) Objective (Eq. 2) ↑  
+
+![](images/ad9b34892eeb06813808155613a12487ae3a30b605220aa6861ac3a07f06617c.jpg)  
+(b) appeared@10 ↑ (on held-out queries)  
+
+GASLITE Algorithm. GASLITE improves upon past methods in three key ways: (i) it refines the objective approximation stage by averaging the linear approximations around multiple tokensubstitutions sampled from a vast vocabulary, extending ARCA; (ii) it performs multiple token substitutions in various positions per iteration, reducing the required backward passes per substitution; and (iii) it maintains the performance of adversarial passages throughout the attack (i.e., the text produced from decoding optimized input tokens), as attackers inserts adversarial text not tokens to the KDB (§3). Ablating each of these causes $4\mathrm{-}14\%$ drop in attack success (App. F.2), and comparison to prior  
+
+Figure 2: GASLITE and Other Text Optimizers. Demonstrating an attack on a concept in the KDB by inserting a single passage (Knows What, $\S6.2)$ , with our attack (GASLITE) compared with other text optimizers for LLM jailbreak (GCG, ARCA), and retrieval attack (Cor.Pois.). GASLITE converges faster and to higher objective (Fig. 2a), visible in the top-10 passages of $\mathrm{>65\%}$ unknown concept-related queries (Fig. 2b).  
+
+optimizers demonstrates GASLITE’s superior speed and efficacy (Fig. 2; App. F.1).  
+
+Alg. 1 outlines our method for generating an optimized text trigger $t$ of $\ell$ tokens, maximizing Eq. 2 for a retrieval model $R$ and query set $Q$ . We start by calculating the target vector per Eq. 2 (L1) and initialize the trigger $t$ with arbitrary text (L2). Then, for $n_{i t e r}$ iterations, we first calculate the linear approximation of the objective, averaged on $n_{g r a d}$ random single-token flips on $t$ (L4– 5). Next, we randomly choose a subset of $n_{f l i p}$ token positions (L6) where we perform the token substitutions, and, for each position, we use the linear approximation to identify $n_{c a n d}$ promising token substitutions (L8-9), filter irreversible tokenizations (L10), and evaluate the exact objective on the remaining candidate triggers, picking the objective-maximizing token substitution to update $t$ (L11).  
+
+
+
+\section{5 EXPERIMENTAL SETUP  }
+
+
+We develop an extensive setup to test the susceptibility of popular, leading retrievers to SEO under varied assumptions and compare GASLITE to adequate baselines (see App. E for more details).  
+
+$$
+I\stackrel{u n i.}{\sim}\binom{[\ell]}{n_{f l i p}}
+$$  
+
+Models. We evaluate diverse embedding-based retrievers ( Tab. 2): MiniLM (Wang et al., 2020); E5 (Wang et al., 2022); Arctic (Merrick et al., 2024); Contriever and Contriever-MS (Izacard et al., 2021), ANCE (Xiong et al., 2020); GTR-T5 (Ni et al., 2022); and MPNet (Song et al., 2020b). We select these models based on performance (per retrieval benchmarks (Muennighoff et al., 2023)), popularity (per HuggingFace’s downloads and open-source usage ), diverse architectures (i.e., backbone model, pooling method, and similarity function), usage in prior work, and size (specifically with ${\sim}110\mathrm{M}$ parameters, the size of BERT-base), as efficiency is a desired property when working with large KDBs. We include an additional evaluation with LLM-based embeddings in App. H.4.  
+
+Datasets. Focusing on retrieval for search, we use the MSMARCO passage retrieval dataset (Bajaj et al., 2016), containing a KDB of $8.8\mathrm{M}$ passages and $0.5\mathrm{M}$ real search queries, which we poison and target in attacks, respectively. For info, we sample toxic statements from ToxiGen (Hartvigsen et al., 2022), and for concept-specific content, we use GPT4 (OpenAI, 2024) to create negative statements. We also validate results on the NQ dataset (Kwiatkowski et al., 2019) (App. H.3).  
+
+Our Attack. To simulate worst-case attacks while ensuring passages remain within benign passage length (App. F.3), we evaluate GASLITE for crafting passages where a malicious prefix info is fixed, followed by a trigger of length $\ell=100$ (i.e., $p_{a d v}:=i n f o\oplus$ trigger). We extend GASLITE to a multi-budget attack using $k$ -means for query partitioning (§4.1). For additional hyperparamters we set $n_{i t e r}=100$ , $n_{g r a d}=50$ , $n_{c a n d}=128$ and $n_{f l i p}=20$ , as elaborated in App. F.3.  
+
+Baselines. We consider two na¨ıve baselines and a major prior work for comparison, all performing an informative attack $(p_{a d v}:=i n f o\oplus$ trigger). First, as a control, in info Only we attack with the chosen info alone $(p_{a d v}:=i n f o)$ . Second, following a common SEO baseline (Zuze & Weideman, 2013; Zou et al., 2024; Shafran et al., 2024), we use stuffing—i.e., filling the trigger with sample queries (App. E). Third, we employ Cor.Pois. attack (Zhong et al., 2023) as a strong baseline, using the original implementation, while allowing the attack to operate under its more permissive threat model where the attacker can access the KDB. For fair evaluation, all methods perform query partitioning using $k$ -means (§4.1) and share trigger length $\mathcal{E}=100)$ ).  
+
+Metrics. As informativeness is inherent in the attacks (info serves as a prefix in crafted passages), we measure the attack success in terms of visibility. To this end, we adopt the well-established metric of appeared $\mathbf{\mathcal{Q}}\mathbf{k}$ (Zhong et al., 2023; Song et al., 2020a), measuring the proportion of queries for which at least one adversarial passage $(p_{a d v}\in\mathcal{P}_{a d v})$ ) appears in the top- $k$ results; we typically set $k{=}10$ , per common search apps (e.g., the first page of Google search commonly displays 10 results), taking measurements over held-out queries (except in Knows All attacks in $\S6.1\rangle$ .  
+
+6 EXPERIMENTS  
+
+We evaluate our attack in three settings (§6.1–6.3), each corresponding to a different type and attacker knowledge of the targeted query distribution (per $\S3$ ). We chiefly focus on the Knows What setting (§6.2), as it better reflects realistic SEO. Appendices provide further results, including comparison across threat models (Tab. 7), a study on defenses and adapting GASLITE to them (App. G), transferability to black-box models (App. H.7), and generalizability to unseen datasets (App. H.5.2).  
+
+![](images/c53effb27e63c26597d8a78728e308f412ac79c443b8a773e3205ff6659123e3.jpg)  
+
+Table 1: Knows All. Attacking individual known queries (§6.1). For each model, we report the appeared@ $\{\mathfrak{10},\mathfrak{1}\}$ of the crafted adversarial passage for the targeted query, and the resulting objective (cosine or dot product similarity between the crafted passage and query; Eq. 2), averaged over 50 queries. The leftmost column denotes the models’ similarity metric.  
+
+6.1 “KNOWS ALL”  
+
+Takeaway: Our attack shows optimal success for single-query SEO, with crafted passages consistently visible as the top-1 result.  
+
+Setup. We attack a single query $q$ with one adversarial passage $p_{a d v}$ $(|\mathcal{P}_{a d v}|{=}1)$ . Taking an embedding-space perspective, this asks how similar one can get a suffix-controlled text $(p_{a d v})$ to an arbitrary text $(q)$ . We average results on 50 queries randomly sampled from MSMARCO.  
+
+Results. Tab. 1 shows that while the content alone (info Only) never appears in the top-10 results, simply appending the query (stuffing) boosts visibility to ${>}30\%$ avg. appeared $\tt e10$ . Cor.Pois. (Zhong et al., 2023) underperforms, sometimes worse than the na¨ıve stuffing; we find it is mainly, albeit not only, due to generating adversarial tokens that, once decoded into text and tokenized to model input, result in vastly different tokens than the ones optimized (see App. I). Importantly, carefully designing the suffix with GASLITE renders it optimally visible, consistently ranked as the top-1 passage for each query; we attribute this to GASLITE’s passages achieving an exceptionally high vector similarity with the target query (Tab. 8)—for some dot-product models (e.g., Contriever) this similarity is twice that of baselines, a phenomenon we discuss later $(\S7.2)$ .  
+
+6.2 “KNOWS WHAT”  
+
+Setup. We test attacks’ ability to increase visibility of specific info (e.g., a negative Harry Potter review) across queries on a targeted concept (e.g., Potter). To test this setting, we choose eight recurring concepts of varying semantics and frequency, from MSMARCO (see App. E.4). Per our threat model (§3), we employ a sample $(50\%)$ of concept-related queries—albeit this can be relaxed by generating synthetic queries (App. H.5)—leaving a held out set $(50\%)$ of concept-related queries for evaluation with varying budget sizes $(|\mathcal{P}_{a d v}|\,\in\,\{1,5,10\})$ . Tab. 10 and Tab. 11 list examples of crafted passages.  
+
+Results. Fig. 3 shows GASLITE outperforms all baselines, increasing appeared@10 by ${>}40\%$ . Unlike single-query attacks (§6.1), stuffing fails here (except with Contriever; $\S7.2)$ highlighting the increased attack difficulty compared to Knows All. Note that GASLITE remains superior even when evaluated under a more permissive, less realistic threat model, measuring the success directly on the crafted input tokens instead of text (Fig. 16, App. H.2). Fig. 4 demonstrates that attack success increases along the attack budget, with insertion of $|\mathcal{P}_{a d v}|{=}10$ passages to 8.8M-sized KDB (a poison rate of $\leq0.0001\%$ sufficing for ${>}50\%$ avg. appeared@10 on 6/9 retrievers for unknown concept-related queries.  
+
+![](images/a573ae01473e348ba07b42395fbd6f7fdd42b696cd359ed90fd586de8eb16832.jpg)  
+Takeaway: Our attack attains successful concept-specific SEO. By merely inserting 10 crafted passages (a negligible poisoning rate of ${\le}0.0001\%$ ), it achieves top-10 visibility in retrieved results for most queries and most models.   
+Figure 4: Knows What. GASLITE’s appeared@10 $(\uparrow)$ on held-out query set, averaged over eight different concepts, for budgets $|\bar{\mathcal{P}_{a d v}}|\in\{1,5,10\}$ .  
+
+![](images/c30e1c225c7a2f8f73354997258e79a7bb2b0426befc8a36a77448024385cb89.jpg)  
+Consistent with Zhong et al.’s (2023) findings, we find Contriever models highly susceptible (Figs. 3–4), with a single adversarial passage achieving $100\%$ appeared@10. Other models show varying success (see $\S7.2_{.}$ ), yet GASLITE’s results approach the optimal solution of Eq. 2 (see $\S7.1)$ . Last, we observe GASLITE attains ${\sim}100\%$ appeared@100 on all models for $|\mathcal{P}_{a d v}|=10$ (Fig. 18, App. H.2), indicating substantial content promotion, even if not into the top-10 results.   
+Figure 3: Knows What. Each cell represents the appeared@10 (↑) measure of the attack on a specific concept and model, with budget of $|P_{a d v}|{=}10$ (i.e., poisoning rate of $<\!0.0001\%$ (§6.2). Evaluation is done on held-out queries. Rows present different models, and columns correspond to different concepts and the avg. over them (rightmost column). In all cases, GASLITE achieves ${>}140\%$ of each of the baselines’ success.  
+
+378   
+379   
+380   
+381   
+382   
+383   
+384   
+385   
+386   
+387   
+388   
+389   
+390   
+391   
+392   
+393   
+394   
+395   
+396   
+397   
+398   
+399   
+400   
+401   
+402   
+403   
+404   
+405   
+406   
+407   
+408   
+409   
+410   
+411   
+412   
+413   
+414   
+415   
+416   
+417   
+418   
+419   
+420   
+421   
+422   
+423   
+424   
+425   
+426   
+427   
+428   
+429   
+430   
+431  
+
+6.3 “KNOWS [ALMOST] NOTHING”  
+
+Setup. We test attacks’ potency when targeting general, unknown queries from a wide and diverse query distribution; a setting Zhong et al. (2023) studied. To this end, we randomly sample $5\%$ of MSMARCO’s training queries (25K queries), made available for attacks with budgets $|\mathcal{P}_{a d v}|\ \in$ $\{1,5,10,50,100\}$ . We evaluate on MSMARCO’s entire, diverse evaluation queries (7K), held out from the attack.  
+
+![](images/71d129f9427c2b6ae5bfb637a0ce2d84b3b29703c25f33bc16de8c81fa8c69fa.jpg)  
+Takeaway: Concept-agnostic SEO is relatively challenging but still possible, mostly requiring poisoning of $\geq0.001\%$ of the KDB for top-10 visibility in retrieved results for ${>}10\%$ of queries.  
+
+Results. GASLITE markedly outperforms the baselines (Tab. 12): na¨ıve methods (info only, stuffing) fail to achieve any visibility in top-10 results (or even in top100) and Cor.Pois. achieves appeared@10 of ${<}6\%$ (Tab. 12). GASLITE’s performance significantly increases along the budget size, from $0\%$ appeared@10 for a singlepassage budget (Fig. 19, App. H.3) to appeared@10 of $5\%{-}20\%$ with $|\mathcal{P}_{a d v}|{=}100$ , for most models (Fig. 5). Consistent with Knows What evaluation (§6.2), we observe vari  
+
+Figure 5: Knows Nothing. Attacking diverse queries (§6.3) with GASLITE: appeared@{10 , $,100\}$ rates on held-out queries, with budget $|\mathcal{P}_{a d v}|{=}100$ ${<}0.001\%$ poisoning rate).  
+
+ance in attack success across models (see $\S7.2_{.}$ ). The potential performance for increased budget size is explored in $\S7.1$ .  
+
+
+
+\section{7 DISCUSSION  }
+
+
+We now analyze the results, suggesting a simple method to assess and extrapolate them (§7.1), identifying factors we suspect may explain attack success (§7.2) and discuss limitations $(\S7.3)$ .  
+
+
+
+\section{7.1 THE PERFECT ATTACK  }
+
+
+Motivated to understand how well GASLITE reflects models’ susceptibility, we compute the performance of a hypothetical attack, perfect, that perfectly optimizes Eq. 2, thus simulating an optimal run of GASLITE. 3 To this end, we perform the aforementioned evaluation (§5–6) on vectors providing an optimal solutions to Eq. 2 (i.e., query centroid per cluster; see App. E.5). Note this is merely a simulation, as an actual attack needs to invert the vectors into text.  
+
+![](images/0608069053fcdeb2944b3a8ff71385f32118836f0e302000e3700c2fba7f3c89.jpg)  
+(a) As a reference  
+
+![](images/c514534e64dceceb7511187f44d4e6dd95830e0c35d3de9a67ecb3b50ec45b3e.jpg)  
+Figure 6: Measuring the hypothetical attack’s (perfect) success (§7.1) vs. GASLITE’s (Fig. 6a; under Knows What), and to estimate attack success for larger budget sizes (Fig. 6b; under Knows Nothing).   
+(b) As an extrapolator  
+
+First, we treat perfect’s attack success as a strong reference measure, comparing it to GASLITE’s under Knows What setting $\S6.2$ with budget $|\mathcal{P}_{a d v}|{=}10$ (Fig. 6a). We observe that, while GASLITE’s success varies between models, in all cases it exhausts most of perfect’s attack success. This result shows that, under our framework, GASLITE’s performance is near-ideal.  
+
+Additionally, perfect can also be used to efficiently estimate the potential attack success without running the full attack. We use this to extrapolate the attack success for prohibitively large budgets (Fig. 6b), observing the attack performance in $\S6.3$ (Knows Nothing), attained with a budget of $|\mathcal{P}_{a d v}|{=}100$ , can be further increased via additional adversarial passages, while maintaining a relatively low poisoning rate (e.g., $0.01\%$ for $|\mathcal{P}_{a d v}|{=}1\mathrm{K})$ . Finally, this extrapolation further emphasizes the variability of models’ susceptibility, which we discuss next.  
+
+
+
+\section{7.2 ON THE VARIANCE IN THE ATTACK SUCCESS  }
+
+
+During evaluation, we came across an intriguing phenomenon—different models and settings significantly vary in their susceptibility to KDB poisoning. While we presume more to exist, we name three factors correlate with the attack success: the model’s similarity measure, its embedding-space geometry, and the characteristics of the targeted query distribution. We recommend future evaluations of KDB-poisoning attacks to diversify across these factors, and defer exploration of their causal relation with adversarial robustness to future work.  
+
+![](images/15c50e8e1bf73c5acbd70ef6d7fb31b28571ac682e9fb1314d343d22c156806f.jpg)  
+Figure 7: $\ell_{2}$ -norm distribution of benign and adversarial passages, crafted in $\S6.2$ .  
+
+Similarity Measure. Throughout the evaluation we observe dot-product models show higher susceptibility to attacks. Indeed, in theory, the objective (Eq. 2) allows to find $p_{a d v}$ with a very large $\ell_{2}$ -norm, such that it will be retrieved for any query. In practice, we found this property to be wellexploited by the attack, as evident in the large $\ell_{2}$ norms of crafted adversarial passages compared to the benign ones (Fig. 7), specifically, the larger the norms the higher GASLITE’s success rate on the model. A question that remains open is what aspect in each model contributes to (e.g., in Contriever) or limits (e.g., in mMPNet) the optimization of passages with a high $\ell_{2}$ -norm.  
+
+Geometry of the Embedding Space. Each model learns an embedding space of potentially different geometry. Focusing on cosine similarity models—limiting attacks to directions within the embedding space—we observed that, for example, the E5 model was consistently more vulnerable than MiniLM (e.g., Fig. 3). Inspecting the geometry of their embedding spaces, we find $\mathrm{E}5\,\mathrm{`s}$ , as opposed to MiniLM’s, to not be uniformly distributed (Fig. 8a); that is, random text pairs produce high similarities, contradicting mathematical intuition.4 This phenomenon, also observed in other evaluated models (Fig. 8a), is known as anisotropy of text representations (Ethayarajh, 2019).  
+
+While seemingly not correlated with benign performance (Ait-Saada & Nadif, 2023), anisotropy may impact adversarial robustness to KDB poisoning; as Fig. 8b demonstrates, we hypothesize that anisotropic embedding spaces are easier to attack (e.g., E5) and vice versa (e.g., MiniLM). Intuitively, this could be because “wider” query embedding subspaces require more adversarial passages for achieving high visibility.  
+
+Targeted Query Distribution. Through evaluating different settings (§6.1–6.3), we observed that the  
+
+![](images/9de0718637e92244ae5d316f83c8b98429fa16d75e74e65415bd79d707934634.jpg)  
+Figure 8: Assessing the anisotropy of different embedding spaces (i.e. non-zero expected cosine similarity of random text pairs; Fig. 8a) and its relation to the attack success rate (Fig. 8b; GASLITE in $\S6.2$ , for $|\mathcal{P}_{a d v}|{=}1)$ .  
+
+more semantically diverse the targeted query distribution, the more challenging the attack, and the more budget it requires (Tab. 7 in App. H). This stems from the desired property of embedding space, alignment with semantics, leading a diverse set to render a bigger subspace to attack. However, in common SEO the targeted query semantic is not extremely diverse, making pertinent attacks (e.g., Knows What) possible with high success (§6.2). Additionally, we posit that retrievers are more susceptible to attacks involving queries out of the training-set distribution, as evident in vision-domain adversarial examples (Sehwag et al., 2019), and as demonstrated by Contriever, which is not trained on MSMARCO (Izacard et al., 2021), and is susceptible even to the na¨ıve stuffing baseline (Fig. 3).  
+
+
+
+\section{7.3 LIMITATIONS  }
+
+
+While GASLITE demonstrates improved speed compared to previous attacks on text models (Fig. 2a), similarly to other gradient-based attacks, it remains compute-intensive, requiring approximately one hour on a GTX-3090 (24GB VRAM) per run (App. H.8). This computational demand has constrained the maximum evaluated attack budget, although, in certain scenarios (e.g., $\S6.3)$ , increasing the budget could potentially enhance attack performance $(\S7.1)$ , underscoring both the potential and risks of more efficient attacks. Additionally, like other text-domain attacks, GASLITE’s success can be mitigated by defenses such as perplexity filtering to eliminate non-fluent passages (Jain et al., 2023). Still, an effort can be made to bypass these defenses, as demonstrated with GASLITE in App. G, and noted in recent LLM jailbreak research (Paulus et al., 2024).  
+
+
+
+\section{8 CONCLUSION  }
+
+
+This work highlights the potential risks in embedding-based search through our method GASLITE (§4), surpassing prior approaches $(\S4.2,\ \S6)$ . Our extensive evaluation across nine widely used retrievers and three different threat models, demonstrates embedding-based search’s susceptibility to SEO via KDB poisoning. In particular, promoting concept-specific information with GASLITE can be done efficiently (requiring $<\!0.0001\%$ poisoning rate) and with high success (Fig. 3, $\S6.2_{.}$ ), nearing the performance of a strong hypothetical attack (perfect in $\S7.1$ ). Considering other SEO settings, we find single-query attacks possible with optimal success (Tab. 1, $\S6.1\$ ), as opposed to indiscriminately targeting a set of diverse queries, which we find more challenging and budgetdemanding, albeit possible (Fig. 5, $\S6.3\$ ). Furthermore, we observe some models are consistently more vulnerable to attacks than others; we identify factors potentially affecting model susceptibility to KDB poisoning (§7.2), including embedding space geometry and the anisotropy phenomenon.  
+
+Future work may explore further constraining retrieval attacks (e.g., requiring fluency), following our initial defense-bypass results (App. G). Additionally, as our formulation reduces KDB poisoning attacks to controlled embedding-inversion to text (Eq. 2), recent advances in such methods (Morris et al., 2023) may enable the development of more efficient attacks. Lastly, our insights into model susceptibility variance (§7.2) may provide a foundation for further exploration of embedding-based retrieval robustness.  
+
+
+

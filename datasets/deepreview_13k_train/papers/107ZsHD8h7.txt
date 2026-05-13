@@ -1,0 +1,325 @@
+\title{Autoformulation of Mathematical Optimization Models Using LLMs}
+
+\begin{abstract}
+
+Mathematical optimization is fundamental to decision-making across diverse domains, from operations research to healthcare. Yet, translating real-world problems into optimization models remains a formidable challenge, often demanding specialized expertise. This paper formally introduces the concept of \textit{autoformulation}---an automated approach to creating optimization models from natural language descriptions for commercial solvers.
+We identify the three core challenges of autoformulation: (1) defining the vast, problem-dependent hypothesis space, (2) efficiently searching this space under uncertainty, and (3) evaluating formulation correctness (ensuring a formulation accurately represents the problem).
+To address these challenges, we introduce a novel method leveraging \textit{Large Language Models} (LLMs) within a \textit{Monte-Carlo Tree Search} framework. This approach systematically explores the space of possible formulations by exploiting the hierarchical nature of optimization modeling.  LLMs serve two key roles: as dynamic formulation hypothesis generators and as evaluators of formulation correctness. To enhance search efficiency, we introduce a pruning technique to remove trivially equivalent formulations. 
+Empirical evaluations across benchmarks containing linear and mixed-integer programming problems demonstrate our method's superior performance. Additionally, we observe significant efficiency gains from employing LLMs for correctness evaluation and from our pruning techniques.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Mathematical optimization has long been a cornerstone of decision-making processes across various domains, from supply chain management \citep{bramel1997logic} and healthcare resource allocation \citep{delgado2022equity} to portfolio optimization \citep{mokhtar2014mathematical}. These problems are characterized by maximizing an objective function subject to constraints \citep{williams2013model}. Traditionally, optimization modeling follows a three-step process: \btr~gathering problem requirements, typically expressed in unstructured formats and domain terminology; \btr~formulating these requirements into a formal mathematical model, including variables, constraints, and objective functions; \btr~implementing the model computationally using specialized modeling language for solution using commercial solvers. These solvers (e.g.~Gurobi \citep{gurobi}, CPLEX \citep{cplex2009v12}), leverage sophisticated algorithms to tractably optimize a wide array of problems to \textit{global} optimality, including convex problems, (e.g.~linear and quadratic programs), and certain non-convex problems (e.g.~mixed-integer linear programs) \citep{boyd2004convex}.
+
+\textbf{Autoformulation.}~Despite major advances in solving algorithms over the past decades, the process of formulating optimization models still relies largely on human expertise \citep{karmarkar1984new}. Autoformulation aims to address this bottleneck by automating the formulation process, bridging the gap between problem descriptions and formal mathematical models. This approach enhances time and cost efficiency while enabling access for users without deep optimization expertise. 
+At its core, autoformulation can be conceptualized as a search for an optimal formulation within a vast hypothesis space. However, this process is complicated by several challenges. For one, the hypothesis space is highly problem-dependent, making it difficult to manually specify. Second, efficiently searching through this hypothesis space requires methods that can balance exploitation and exploration, particularly given the uncertainty in the optimal formulation. Lastly, the search should be guided by a signal of formulation correctness, which is itself an ill-posed problem. While solvers can indicate optimality gap and computational efficiency, evaluating that the formulated model accurately represents the intended real-world problem remains a distinct challenge.
+
+A keen insight of this work is that recent advances in \emph{Large Language Models} (LLMs) \citep{brown2020language,chowdhery2023palm} have opened new avenues for autoformulation. LLMs contribute several crucial capabilities to this process: contextual understanding for nuanced interpretation of problem descriptions, vast domain knowledge to incorporate relevant modeling techniques, and reasoning capabilities to support approximate evaluation of formulation correctness.
+Recent works \citep{ramamonjison2023nl4opt,xiao2023chain,ahmaditeshnizi2024optimus} have demonstrated the promising potential of LLMs in autoformulation, laying important groundwork in this field. Building upon these contributions, our work focuses on developing techniques for efficient, systematic exploration and introducing novel methods for evaluating formulation correctness.
+
+\textbf{Key considerations.}~We conceptualize autoformulation as a search problem, leveraging optimization modeling's inherent hierarchical structure to efficiently explore the vast hypothesis space, guided by feedback on formulation correctness.
+We decompose optimization modeling into hierarchical components and introduce a \textit{Monte-Carlo Tree Search} (MCTS) method to incrementally explore each component's formulation space \citep{coulom2006efficient}.
+We employ LLMs for two specialized roles: (1) as context-dependent \textit{hypothesis generators} to produce component formulations at each level of the tree search; (2) as \textit{evaluators} of formulation correctness, which is combined with solver-returned data to obtain a reward signal to guide exploration. 
+To further improve search efficiency, we introduce a pruning technique using \textit{Satisfiability Modulo Theories} solvers, eliminating redundant hypotheses that are syntactically different yet functionally equivalent \citep{barrett2018satisfiability}. Empirically, we observed that this significantly reduces search efforts expended on equivalent formulations.
+Our algorithm systematically explores the hypothesis space through multiple iterations, producing a set of functionally distinct models, each scored using our evaluation function.
+
+\textbf{Contributions.}~Our main contributions are: 
+\graycircled{1} We formally introduce \textit{autoformulation} of mathematical optimization models, framing it as a search problem and identifying its core challenges. 
+\graycircled{2} We propose a novel approach integrating LLMs as hypothesis generators and evaluators within an MCTS framework, enabling efficient systematic exploration of the optimization model space. 
+\graycircled{3} Across two benchmarks containing linear and mixed-integer programming problems, we demonstrate our method's superior performance in formulating correct models, observing efficiency gains from pruning and LLM evaluation of formulation correctness.
+
+
+\section{Autoformulation: Towards Automated Optimization Modeling}
+
+
+
+Optimization modeling seeks to minimize an objective function subject to specific constraints on decision variables \citep{dantzig1990origins}. The mathematical model can be expressed in a \textbf{general form}:
+\begin{equation}
+\begin{alignedat}{2}
+&\text{Minimize}    & \quad & f(\mathbf{x}) \\
+&\text{subject to}  & \quad & g_i(\mathbf{x}) \leq 0, \quad i=1,\ldots,I, \\
+&                   & \quad & h_j(\mathbf{x}) = 0, \quad j=1,\ldots,J.
+\end{alignedat}
+\label{eq:standard_form}
+\end{equation}
+Here $\mathbf{x}\in\mathcal{X}$ represents the vector of decision variables, and $\mathcal{X}\subseteq \mathbb{R}^\ell \times\mathbb{Z}^k$ is the domain of the problem for which the objective and constraints functions are all defined. Furthermore, $f:\mathcal{X}\rightarrow\mathbb{R}$ is the objective function to be minimized, $g_i:\mathcal{X}\rightarrow\mathbb{R}$ are inequality constraints, $h_j:\mathcal{X}\rightarrow\mathbb{R}$ are equality constraints, and $I$ and $J$ are the numbers of inequality and equality constraints respectively. 
+The feasible region is the set of all possible points that satisfy the problem constraints:~$\{\mathbf{x} \in \mathcal{X}\:|\:g_i(\mathbf{x})\leq 0, \:\forall i \in [I], h_j(\mathbf{x})=0, \:\forall j \in [J]\}$. 
+
+\textbf{Convex problems.}~An optimization problem is \textbf{convex} if $f$ and $g_i \:\forall i \in [I]$ are convex, and $h_j \:\forall\:j\in[J]$ are affine. Convexity is significant as any local optimum of a convex problem is globally optimal, and specialized solvers can efficiently solve convex problems to global optimality using advanced algorithms (e.g., Gurobi \citep{gurobi}, CVXPY \citep{diamond2016cvxpy}). For this reason, convexity is the widely accepted watershed between ``easy'' and ``hard'' problems. Before utilizing these solvers, the mathematical models are first represented in code as computational models, which are then passed to the solvers for optimization.
+\begin{figure}[t!]
+  \centering
+  \includegraphics[width=0.925\textwidth]{images/plot_general_4.pdf}
+    \caption{\textbf{Illustration of autoformulation and its challenges.}~Autoformulation involves translating a problem description \( d \in \mathcal{D} \) into a mathematical model \( m \in \mathcal{M} \). This model is then transformed into a program that can be executed by solvers (e.g., Gurobi).}
+    \label{fig:placeholder}
+    \tealline
+\end{figure}
+
+\subsection{Autoformulation: Problem Definition}
+\citet{boyd2004convex} aptly recognized that \textit{``the challenge, and art, in using convex optimization is in recognizing and formulating the problem. Once this formulation is done, solving the problem is ... (almost) technology''}. While solver technology has significantly matured, the process of formulating optimization models remains largely human expertise driven. Building on this insight, we define \textit{autoformulation} as the automated process of transforming natural language descriptions of real-world problems into formal optimization models. This process aims to bridge the gap between human-readable problem statements and computational models suitable for optimization solvers, thus automating the ``challenge and art" of problem formulation. 
+
+\begin{takeaway}[Formal Definition]
+
+Let $\mathcal{D}$ represent the space of natural language problem descriptions. Additionally, let $\mathcal{M}$ and $\mathcal{C}$ represent the space of all possible mathematical formulations and space of all possible computational models of optimization problems. Specifically, each $c \in \mathcal{C}$ is a computational representation (e.g.~Python code), which includes choice of solving algorithm and its configurations. Given a problem $d \in \mathcal{D}$, autoformulation involves two transformations:
+\begin{enumerate}[leftmargin=*,itemsep=0.4ex,parsep=-0.1ex,partopsep=0pt]
+    \item \textbf{Mathematical Formulation} $p_\phi: \mathcal{D} \rightarrow P(\mathcal{M})$:~Transforming problem description into a precise mathematical formulation. Here, $P(\cdot)$ represents the space of probability distributions.
+    \item \textbf{Computational Representation} $p_\psi: \mathcal{M}  \rightarrow P(\mathcal{C})$:~Converting the mathematical formulation into computational formats suitable for solvers. This includes encoding the model in a programming framework and specifying or configuring an appropriate solving algorithm.
+\end{enumerate}
+
+\textbf{Autoformulator.}~Here, $p_\phi$ and $p_\psi$ are models of each transformation, with $\phi$ and $\psi$ their respective parameters. The complete autoformulation process can thus be represented as inferring the joint distribution $p_{\phi, \psi}(m, c\:|\:d) = p_\psi(c\:|\:m)\cdot p_\phi(m\:|\:d)$. We refer to any algorithm designed for the autoformulation problem as an \textit{autoformulator}.
+
+\textbf{Objective.}~For a given problem $d$, autoformulation aims to find optimal parameters that, in expectation, maximize an evaluation measure $Q(\cdot)$ :
+\begin{equation}
+    ({\phi^*}, {\psi^*}) \in \textcolor{maroon}{\argmax}_{\textcolor{teal}{\phi, \psi}} \mathbb{E}_{m\sim p_\phi, c\sim p_\psi}[\textcolor{brown}{Q(m, c; d)}]
+    \label{eq:autoformulation_objective}
+\end{equation}
+
+\textbf{Evaluation criteria.}~Here, $Q$ assesses the quality of $(m, c)$ relative to $d$, considering factors such as correctness, solvability, and efficiency. The quality of a formulation is primarily evaluated based on \textbf{formulation correctness}---how accurately it reflects the problem description. Given that a formulation is correct, two additional criteria come into play. 
+\textbf{Optimality gap:}~the gap between the value of the objective function at the solution and the optimal value. For example, convex problems and certain non-convex problems like mixed-integer linear programs (MILPs) can be solved efficiently to global optimality (i.e.~zero optimality gap).
+\textbf{Computational efficiency:}~evaluating the resource requirements and solution time of a particular model. These latter two criteria are only meaningful for formulations that correctly capture the problem description.
+
+\textbf{Challenges.}~A closer scrutiny of \Cref{eq:autoformulation_objective} reveals a few key challenges:
+\begin{enumerate}[label={\textbf{[C\arabic*]}},leftmargin=*,itemsep=0.4ex,parsep=-0.1ex,partopsep=0pt]
+    \item \textcolor{teal}{\textbf{Problem-dependent hypothesis space:}}~Given a problem $d$, we define the \textit{problem-dependent} hypothesis space of an autoformulator as $\mathcal{H}_{\phi, \psi}(d)$.\footnote{For notational simplicity, we omit the subscript $(\phi, \psi)$, when the meaning is clear.} This space encompasses all plausible formulations, including correct, incorrect, or trivially redundant formulations. Manually specifying this hypothesis is highly challenging, due to complex interdependencies, the vast number of formulations, and the problem-specific nature of the space.
+    \item \textcolor{maroon}{\textbf{Efficient search under uncertainty:}}~Efficiently navigating the problem-dependent hypothesis space is challenging, as performant formulations (e.g.~efficient and globally optimal) can be sparse. This search involves managing two key sources of uncertainty: \textbf{a) modeling decisions:}~uncertainty in the optimal way to formulate the problem, \textbf{b) problem ambiguity:}~uncertainty due to ambiguous requirements such as implicit or `common-sense' constraints (e.g.~non-negativity or integer constraints for individual resources). An additional complexity is \textbf{trivial model equivalence}---formulations that are identical but have minor syntactic differences (e.g.~functions $2x+3y$ and $3y+2x$). Note, we term these `trivial' to distinguish this type of equivalence from mathematically equivalent reformulation such as converting a non-convex constraint to convex. Exploring these trivial variations inefficiently can lead to overlooking more diverse and potentially valuable formulations.
+    \item \textcolor{brown}{\textbf{Model evaluation:}}~While solvers can assess solvability and computational efficiency, they cannot evaluate \textbf{formulation correctness}---whether the model accurately represents all requirements in the problem description. This lack of feedback on semantic correctness significantly complicates the search process, as an efficient solution to an incorrectly formulated problem is ultimately invalid.
+\end{enumerate}
+\end{takeaway}
+
+Here are a few observations. Our definition of both steps as probabilistic distributions includes deterministic mappings as a special case (i.e. Dirac delta distributions). This formalism recognizes the inherent uncertainty in autoformulation, stemming from language ambiguity, domain knowledge limitations, and variability in modeling decisions. Additionally, the second transformation is assumed to be independent of the problem description $d$. In general, the first step (formulating mathematical models, $p_\phi$) presents a significantly greater challenge than the second step (creating computational models, $p_\psi$). The former requires deep domain understanding, the ability to abstract real-world complexities into mathematical constructs, and creativity in choosing effective problem formulations. In contrast, formulating computational models often follows more standardized patterns, with several commercial packages already offering automation in translating mathematical models into solver-compatible code \citep{fourer1990modeling}.\footnote{While generally more straightforward, the complexity of this step can vary depending on the problem, especially when it involves configuring solver algorithms and corresponding hyperparameters.} 
+
+\subsection{Categorization of Problem Difficulty}
+
+The exact challenges faced by an autoformulator depends on the nature of the problem $d$. Here, we provide a categorization of optimization problems and their characteristics. To help elucidate different types of problems, we introduce two concepts. First, we define the \textbf{set of correct formulations} for a problem $\mathcal{M}(d) \subset \mathcal{M}$ as the set of all equivalent formulations that \textit{correctly} model a problem $d$. Second, we introduce the set of \textbf{original forms} $\mathcal{M}_o(d) \subseteq \mathcal{M}(d)$---the set containing the natural representations of the problem, typically the initial models an optimization expert would create. This is a set, as it can contain trivially equivalent formulations. Finally, we partition the set $\mathcal{M}$ into the set of convex problems $\mathcal{M}_{\text{conv}}$ and the set of non-convex problems $\mathcal{M}_{\text{nonc}}$.
+
+\begin{enumerate}[leftmargin=*,itemsep=0.4ex,parsep=-0.1ex,partopsep=0pt]
+    \item \textbf{Type I problems.}~These are problems where the original form is inherently convex, namely $\mathcal{M}_o(d) \subseteq \mathcal{M}_{\text{conv}}$. Examples include certain resource allocation problems that can be naturally formulated as linear programs. The challenge of solving Type I problems is to ensure that the problem is correctly represented (\textbf{formulation correctness}, i.e.~$\mathcal{H}(d) \cap \mathcal{M}_o(d) \neq \emptyset$), which would entail that it can be efficiently solved to global optimality.
+    
+    \item \textbf{Type II problems.}~These are problems where the original form is non-convex, but can be reformulated into an equivalent convex problem, namely $\mathcal{M}_o(d) \subseteq \mathcal{M}_{\text{nonc}}$ but $\mathcal{M}(d) \cap \mathcal{M}_{\text{conv}} \neq \emptyset$. In addition to formulation correctness, another challenge of solving Type II problems is to ensure the autoformulator can identify and apply appropriate reformulation strategies (e.g.~change of variables) to transform the non-convex into an \textit{equivalent} convex form, namely $\mathcal{H}(d) \cap \left( \mathcal{M}(d) \cap \mathcal{M}_{\text{conv}} \right) \neq \emptyset$ (see \Cref{app:reformulation_strategies} for discussion). For such problems, evaluation extends beyond correctness to include the ability to achieve \textbf{global optimality} through reformulation.
+    
+    \item \textbf{Type III problems.}~These are problems where the original form is non-convex and cannot be reformulated into a convex problem, namely $\mathcal{M}(d) \subseteq \mathcal{M}_{\text{nonc}}$. In such cases, there are two general options: a) solve the non-convex problem using general-purpose algorithms (e.g.~gradient descent), or b) \textit{relax} into a convex problem that approximates, but is not equivalent to, the original problem (e.g.~semidefinite relaxation of a Max-Cut problem \citep{goemans1995improved}). 
+\end{enumerate}
+
+A crucial nuance here is that mathematically equivalent models, even when both are convex, can exhibit vastly different computational complexities. An example of this is quadratic programming and second-order cone programming (SOCP) reformulations of the same problems \citep{alizadeh2003second}. Although mathematically equivalent, SOCP formulations often allow for more efficient solution methods. Therefore, \textbf{computational efficiency} is an important evaluation metric across all three problem types, significantly impacting practical utility of model formulations. In \Cref{app:illustrative_examples}, we provide concrete examples to illustrate each type of optimization problems.
+
+
+\section{LLM-Enhanced MCTS Framework for Autoformulation}
+
+
+Building upon our analysis of key challenges in autoformulation, we present a novel approach that takes initial steps towards addressing them. In the scope of this work, our method primarily focuses on evaluating \textbf{formulation correctness}---ensuring that autoformulated models accurately represent the problem description. Hence, we focus on \textbf{Type I} and \textbf{Type II} problems and not on problems that require convex \textit{relaxation}. Moreover, we mainly focus on the first transformation, as we observed that the second transformation was relatively straightforward for problems in available benchmarks. Instead, we implement the second transformation using a custom deterministic parser (represented as $\texttt{parser}$, and detailed in \Cref{app:method_details}), which successfully parsed all available problems. By concentrating on these fundamental aspects, we aim to catalyze the development of more advanced and computationally efficient autoformulators that address more challenging problems of each type.
+
+\textbf{Overview.}~At a high level, our method integrates \textit{Large Language Models} (LLMs) within a \textit{Monte-Carlo Tree Search} (MCTS) framework, founded on two key insights: \textbf{1)} leveraging the inherent hierarchical structure of optimization modeling by decomposing the autoformulation process into distinct stages, enabling systematic exploration using a tailored MCTS algorithm, and \textbf{2)} employing LLMs in two specialized roles: as dynamic hypothesis generators in each formulation stage, and as approximate evaluators of formulation correctness. This approach harnesses LLMs' extensive domain knowledge and contextual understanding to implicitly create and search a problem-dependent hypothesis space. This strategy bypasses the need for manual specification of the search space, which would be intractable due to the vast number of possible formulations. Furthermore, it utilizes LLMs' reasoning capability to evaluate formulation correctness against problem descriptions, providing an approximate yet meaningful signal to guide the search process. \textbf{Note:}~In the interest of space, we present detailed information about all prompts used in the algorithm in \Cref{app:method_details}, providing only high-level details in the following subsections.
+
+\subsection{Structured Decomposition of Autoformulation}
+\label{sec:method:decomposition}
+
+Optimization modeling is inherently complex, involving multiple interconnected components. To manage this complexity and improve search efficiency, we propose a decomposition of the formulation process. This approach allows us to sequentially explore each model component rather than searching for entire formulations at once, potentially leading to more efficient search.
+
+Specifically, we structurally decompose the autoformulation process into four distinct stages, each represented by $m_i$. The complete mathematical formulation is defined as $m=\oplus_{i}^4 m_i$, where $\oplus$ denotes the composition of model components: $m_1$---\textbf{parameters and decision variables}, $m_2$---\textbf{objective function}, $m_3$---\textbf{equality constraints}, and $m_4$---\textbf{inequality constraints}. Given a problem description $d$, the joint distribution $p_{\phi, \psi}(c, m\:|\:d)$ is decomposed hierarchically:
+\begin{equation}
+    \textstyle p_{\phi, \psi}(c, m \:|\:d) = p_{\psi}(c\:|\:m) \prod_{i=1}^4 p_{\phi}(m_{i}\:|\:m_{<i}, d) 
+\end{equation}
+Here, $p_\phi(m_i\:|\:m_{<i}, d)$ represents the sequential nature of mathematical formulation, where each component $m_i$ depends on the \textit{partial formulation} $m_{<i}=\oplus_{j=0}^{i-1} m_j$ (with $m_0=\emptyset$) and the problem description $d$. Additionally, 
+the term $p_\psi(c\:|\:m)$ represents the computational model's dependency on the completed mathematical formulation. 
+
+\subsection{MCTS-Based Autoformulator}
+\label{sec:method:mcts}
+
+Having established a structured decomposition of the autoformulation process, we now address the challenge of efficiently navigating this hierarchical space. 
+We employ an MCTS-based algorithm, which is particularly well-suited for exploring complex, hierarchical search spaces \citep{coulom2006efficient}. Our MCTS constructs a search tree of depth $4$ to explore possible formulations, where each of the four levels corresponds to a component in our structured decomposition ($m_1$ to $m_4$). Nodes in this tree contain component formulations, and a complete formulation is represented by a path from the root to a terminal node, with each path yielding a unique formulation.
+
+The MCTS algorithm iteratively builds the search tree through four key steps: $\blacktriangleright$~\textbf{selection}, $\blacktriangleright$~\textbf{expansion}, $\blacktriangleright$~\textbf{evaluation}, and $\blacktriangleright$~\textbf{backpropagation}. 
+For notational clarity, we denote a tree node as $n$ and any of its child nodes as $n_{child} \in Child(n)$, where $Child(n)$ is the set of all child nodes of $n$. We use $\vec{n}$ to represent the \textit{partial} formulation contained in the path from root to node $n$. For instance, $\vec{n}$ for a node of depth $2$ is the partial formulation containing the parameters, decision variables, and the objective function. Terminal nodes are denoted as $n_t$.
+
+\subsubsection{Selection}
+
+The selection step guides the search towards promising regions of the tree. Starting from the root, the algorithm recursively selects child nodes using the Upper Confidence Bound for Trees (UCT): $n_{child}^* = \argmax_{n_{child} \in Child(n)} \left(V(n_{child}) + \omega\sqrt{\frac{\ln N(n)}{N(n_{child})}} \right)$ \citep{kocsis2006bandit}. This process continues until reaching an unexpanded node. Here, $n_{child}^*$ is the selected child node, $V(n_{child})$ is its estimated value, $N(n)$ and $N(n_{child})$ are visit counts for the parent and child nodes respectively and $\omega$ is an exploration constant. This formula balances exploitation (first term, favoring high-value nodes) with exploration (second term, favoring less-visited nodes).
+
+\subsubsection{Expansion}
+
+Upon reaching an unexpanded node $n$, we generate its child nodes $Child(n)$ through an expansion process. Unlike traditional MCTS, which typically operates within a predefined space, our expansion step explores an \textit{undefined} hypothesis space of component formulations. To address this challenge, we employ LLMs as \textit{dynamic hypothesis generators}, conditioned on the partial formulation constructed up to this level, to propose potential formulations for the next component. Our process involves two key steps: first, generating a diverse set of candidate formulations, and then pruning this set to remove trivial equivalences, thereby ensuring a manageable and meaningful search space.
+
+\textbf{Context-aware hypothesis generator.} At node $n$, the LLM generates potential child nodes (next component formulations) by conditioning on the partial formulation and problem description: $p_\phi(n_{child}\:|\:\vec{n}, d)$. When expanding nodes at depth $i$, this is equivalent to $p_\phi(m_i\:|\:m_{<i}, d)$. We represent formulations using \texttt{JSON} format, where keys are descriptive labels and values are mathematical expressions. For example, when generating possible inequality constraints, the LLM might return the formulation: ~\custombox{\{``material\_balance": $x_1 + x_2 \leq 100$, ``quality\_requirement": $0.8x_1 + 0.6x_2 \geq 75$\}}. The LLM is queried through a structured prompt with three elements: \textbf{(1) Problem description:}~the original natural language problem description $d$; \textbf{(2) Partial formulation:}~the current partial formulation $m_{<i}$ in \texttt{JSON} format; \textbf{(3) Level-specific instructions:} guidelines for the current modeling stage, including output format and relevant considerations. Note that we also request the LLM return potential formulations using the same dictionary format. For each node expansion, we sample $H \in \mathbb{N}$ hypotheses from the LLM's distribution: $\widehat{Child}(n) = \{\tilde{n}_{child}^{(h)}\:|\:\tilde{n}_{child}^{(h)}\sim p_\phi(\cdot\:|\:\vec{n}, d), \:\forall\: h \in [H]\}$, where $\tilde{n}_{child}^{(h)}$ represents the $h$-th candidate component formulation.
+
+\begin{wrapfigure}[18]{r}{0.3\textwidth}
+\centering
+\includegraphics[scale=2.]{images/figure_aux1.pdf}
+\caption{\label{fig_acq} \textbf{Expansion and node evaluation.}~Expansion involves generating candidate formulations, which are then pruned based on functionality, and remaining formulations are assigned a normalized ranking score.}
+{\color{gray}\rule[1ex]{\linewidth}{0.1pt}}
+\end{wrapfigure}
+
+\textbf{Approximate pruning.}~To ensure diversity in our search space and avoid redundant explorations, we prune candidates containing \textbf{trivially equivalent formulations}: $Child(n) = \texttt{pruning}(\widehat{Child}(n))$. This process removes formulations with minor syntactic differences that could lead to inefficient searches, while preserving meaningful reformulations. For this purpose, we employ \textit{Satisfiability Modulo Theories} (SMT) solvers to check pairwise equivalence of formulations \citep{barrett2018satisfiability}. SMT solvers determine the satisfiability of logical formulas with respect to background theories. We represent objective functions and constraints as systems of equations or inequalities (where objective functions form a single-equation system). For two such systems $S_1$ and $S_2$ over variables $x$, we check the satisfiability of $\neg(\forall x \:(S_1(x) \iff S_2(x)))$, where $\neg$ denotes negation. Unsatisfiability of this formula proves equivalence, as it indicates there exists no $x$ such that the systems differ. Conversely, satisfiability indicates the systems are distinct. We apply this check to each pair of candidate formulations in $\widehat{Child}(n)$, pruning those deemed trivially equivalent. This approach balances maintaining a diverse search space with computational efficiency. We detail the exact formulae used for SMT equivalence checks in \Cref{app:method_details}.
+
+We note that the satisfiability problem in SMT is not universally decidable \citep{monniaux2016survey}. While linear arithmetic over real and integer domains is generally decidable, mixed-integer domains or non-linear functions may be undecidable, depending on specific problem properties. When the solver cannot reach a conclusion, we assume the formulations are distinct. This approach trades efficiency for thoroughness, potentially exploring some equivalent formulations while avoiding premature pruning of unique components. Importantly, SMT solvers are only applicable to systems defined over the same variable domains. Consequently, we employ them solely for pruning redundant nodes in levels $m_2$--$m_4$, where child nodes share decision variables. For level $m_1$, which involves defining different variable domains, we utilize LLMs as approximate checkers. %This task leverages LLMs' natural language understanding capabilities, making them well-suited for comparing variable definitions.
+
+\subsubsection{Evaluation}
+
+After expanding a node, each newly created child node undergoes an initial evaluation to estimate its value, guiding subsequent selection. This evaluation is non-trivial, as assessing the correctness of a partial formulation with respect to the original problem description is complex. 
+Our method employs an LLM-based ranking evaluation for each set of child nodes to provide more informed initial evaluations. %The LLM assesses the formulation based on optimization principles and the specific problem context, potentially capturing aspects such as formulation correctness, constraint feasibility, and alignment with the problem.  
+Specifically, we rank the partial formulation from root to each child node, namely $\{\vec{n}_{child} \:|\: n_{child} \in Child(n)\}$. These ranks are then center-normalized to $[0, 1]$, with the middle rank centered at $0.5$. We denote this normalized score $s(\vec{n}_{child})$, which is used to initialize the child node's value $V_{prior}(n_{child}) \leftarrow s(\vec{n}_{child})$. We note that this approach diverges from traditional MCTS, which often uses \textit{uniform priors} for expanded nodes. Here, the LLM assesses the formulation based on optimization principles and the specific problem context, potentially capturing aspects such as formulation correctness, constraint feasibility, and alignment with the problem. 
+
+\subsubsection{Backpropagation}
+
+\textbf{Reward.}~Unlike conventional MCTS, which typically simulates the problem to a terminal state after expanding a child node, our approach continues expanding until a terminal node $n_t$ is reached, where $\vec{n}_t$ represents a complete formulation. This is computationally feasible due to our tree's limited depth of $4$ levels, and provides more accurate rewards. We evaluate the complete formulation to obtain a \textit{reward} $r(\vec{n}_t)$. We evaluate the complete formulation using a dual approach, combining assessments of both mathematical correctness and computational model's performance:
+\begin{comment}
+\begin{equation}
+    \label{eq:simulation_reward}
+    r(\vec{n}_t) =  (1-\lambda) \cdot E_{\texttt{LLM}}^m(\vec{n}_t; d) + \lambda \cdot E_{\texttt{solver}}^c(\texttt{parser}(\vec{n}_t)),
+\end{equation}
+\end{comment}
+\begin{equation}
+    \label{eq:simulation_reward}
+    r(\vec{n}_t) = \mathbb{I}\left(E_{\texttt{solver}}^c(\texttt{parser}(\vec{n}_t)) = 1\right) \cdot E_{\texttt{LLM}}^m(\vec{n}_t; d)
+\end{equation}
+where $\mathbb{I}$ is the indicator function.  $E_{\texttt{LLM}}^m(\vec{n}_t; d)$ is the LLM's evaluation of the mathematical formulation's correctness, assessing how well it captures the problem requirements and constraints in $d$. $E_{\texttt{solver}}^c(\texttt{parser}(\vec{n}_t))$ is the solver's evaluation of the computational model's performance, providing a binary signal of whether the model is solved optimally. Note that $E_{\texttt{solver}}^c(\texttt{parser}(\vec{n}_t))$ is an imperfect signal, as an incorrectly formulated model could be solved to optimality despite not faithfully representing the original problem, highlighting the importance of our dual evaluation approach. The computational model $c$ is derived using our custom deterministic parser: $c=\texttt{parser}(\vec{n}_t)$.  
+
+Here, it is inappropriate to use the same evaluation measure (based on ranking) as described before, as the reward score would need to be comparable across all terminal nodes (across different subtrees). As such, we introduce a comparative evaluation method to obtain an LLM-evaluated correctness score. This approach compares each formulation with a baseline, asking the LLM for its preference. Specifically, the LLM returns a score $\in [0, 1]$, where $<0.5$ values indicate preference for the baseline formulation, and value greater than $0.5$ favor the formulation in $\vec{n}_t$. Mathematically, we represent this as $E^m_{\texttt{LLM}}(\vec{n}_t; d)\sim p_\texttt{LLM}(\cdot\:|\:\vec{n}_t, m_b; d)$, where $m_b$ is the baseline formulation for comparison. This baseline serves as a consistent reference point for all child nodes, enabling more stationary and comparable evaluations of relative formulation correctness. In our implementation, we generate the baseline formulation $m_b$ through zero-shot prompting of the LLM. 
+
+\textbf{Backpropagation.}~Following the reward calculation, we backpropagate this value to update the statistics of all nodes along the trajectory. 
+For each node in this path from root to terminal node $n_t$, we apply the following updates: $\textstyle V_{back}(n) \leftarrow \frac{V_{back}(n) \cdot N(n) + r(\vec{n}_t)}{N(n)+1}, \quad N(n) \leftarrow N(n) +  1 , \quad \forall\: n \:\in\:\vec{n}_t.$
+Here, we increment the visit count $N(n)$ by 1 and update the value $V(n)$ with a weighted average of its previous value and the new reward $r(\vec{n}_t)$. This backpropagation process ensures that the tree gradually accumulates more accurate estimates of node values. These updated statistics then inform the selection strategy in subsequent iterations. The value of the node used for selection is then $V(n) = \lambda \cdot V_{prior}(n) + (1 - \lambda) \cdot V_{back}(n) $.
+
+\textbf{Summary.}~Our MCTS-based algorithm iterates through the aforementioned steps, progressively constructing and refining a tree of possible formulations. We execute this process for $T \in \mathbb{N}$ iterations, thoroughly exploring the space of potential models and identifying promising formulations. The final output is a set of $M \in \mathbb{N}$ \emph{functionally distinct} optimization models, where $M \leq T$. Each model is defined by a unique trajectory through the tree. Formally, we express the overall algorithm as: $\{(m^{(i)}, c^{(i)}, r^{(i)})\}_{i=1}^M = \texttt{MCTS}_{\texttt{LLM}}(d)$. The superscript $i$ indexes the functionally distinct formulation, and $r^{(i)}$ is the estimated value/reward of the corresponding terminal node.
+
+
+\section{Related Work}
+
+\textbf{Advances in LLMs.}~Recent works have demonstrated the substantial potential of Large Language Models (LLMs) in solving complex reasoning tasks, including language understanding \citep{hendrycksmeasuring}, commonsense reasoning \citep{brown2020language}, logical reasoning \citep{wei2022chain,yao2024tree}, mathematical problem-solving \citep{lewkowycz2022solving}, and coding tasks \citep{chen2021evaluating}. Of particular relevance are studies employing LLMs in optimization and search tasks, such as Bayesian Optimization \citep{liu2024largebo}, prompt optimization \citep{guo2023connecting}, evolutionary optimization \citep{yang2024large,liu2024large}, and symbolic program refinement \citep{madaan2024self}, as well as research exploring the integration of LLMs with planning algorithms \citep{huang2022language,zhao2024large,hao2023reasoning,zhoulanguage}.
+
+\textbf{Autoformulation.}~\citet{ramamonjison2023nl4opt} introduced an early competition focused on translating natural language descriptions of linear programming problems into mathematical formulations. The competition involved two tasks: tagging problem entities and predicting formulations in predefined formats. Entries primarily used pre-LLM NLP models tailored for these tasks, which lacked the ability to generalize beyond the given formats. More recently, \citet{xiao2023chain} and \citet{ahmaditeshnizi2024optimus} explored multi-agent LLM frameworks for optimization model formulation, where LLM agents generated complete formulations in each iteration, refining them locally in subsequent steps. Our approach differs by breaking down the formulation process into key stages and using MCTS to systematically explore the formulation space. Additionally, we guide the search with a composite reward function that combines solver feedback with LLM evaluation.
+
+
+\section{Experiments}
+
+
+
+The experiments aim to evaluate the performance of the autoformulation model across a diverse set of problems (\cref{sec:benchmark}). In addition, we study two key factors of our framework: (a) the use of LLM-based evaluation to ensure the correctness of formulations (\cref{sec:eval_llm}), and (b) enhanced efficiency by reducing search space in equivalent formulations (\cref{sec:efficiency}). Finally, the experiments examine failure modes to better understand the limitations of the model (\cref{sec:failure}).
+
+We use NL4OPT~\citep{ramamonjison2023nl4opt} and IndustryOR as benchmarks to evaluate our approach. NL4OPT is a standard dataset for operations research tasks, primarily focusing on linear programming problems. We used the filtered version presented in \citep{tang2024orlm}, consisting of 244 problems. IndustryOR, with 100 problems covers linear, integer, mixed-integer, and non-linear programming across three difficulty levels, offers a more complex challenge. This complexity is crucial for testing the robustness of our method in navigating larger, ambiguous solution spaces. Since neither benchmark provides enough information to fully evaluate optimization models—lacking ground truth for decision variables, objectives, and constraints—we adopt an approximately correct framework, measuring accuracy using a ground truth value found in \citep{tang2024orlm}, following the same methodology. All experiments were performed using GPT4o-mini, except for NL4OPT, where GPT4-1106 was used for fair comparison.%Consistency, we run our results, with GP4-1106 preview in NL4OPT. For Industry
+
+\subsection{Benchmark comparison}
+\label{sec:benchmark}
+
+\begin{wraptable}[10]{r}{0.35\textwidth} % 'r' means right, '0.5\textwidth' sets the width of the wrap
+\centering
+\captionsetup{font=scriptsize} % Adjusts the size of the caption text (options: footnotesize, scriptsize, etc.)
+\caption{\scriptsize Benchmark comparison \label{tab:benchmark}
+\scalebox{0.65}{ % Adjust the scale here
+\begin{tabular}{lcc}
+\toprule
+\textbf{Method} & \textbf{NL4OPT} & \textbf{IndustryOR} \\
+\midrule
+\rowcolor{gray!17} \multicolumn{3}{c}{\textit{Finetuned methods}} \\
+\makecell[l]{ORLM-\scriptsize{LLaMA-3-8B}} & 85.7\% & 38.0\% \\ 
+\midrule
+\rowcolor{gray!17} \multicolumn{3}{c}{\textit{Methods based on GPT-4}} \\
+\makecell[l]{Standard}   & 47.3\% & 28.0\%  \\   
+\makecell[l]{Reflexion}   & 53.0\% & -  \\ 
+\makecell[l]{Chain-of-Experts}   & 64.2\%& -  \\ 
+\makecell[l]{OptiMUS}   & 78.8\% & -  \\ \midrule
+\makecell[l]{MCTS (iter-1)}   & $85.24 \%$ & $35.0\%$ \\ 
+\makecell[l]{MCTS (iter-3)}   & $92.21 \%$ & $42.0\%$ \\ 
+\makecell[l]{MCTS (All)}   & $92.62 \%$ & $48.0\%$ \\ 
+\bottomrule
+\end{tabular}}
+
+\end{wraptable}
+
+For a comprehensive evaluation, we cover all relevant previous approaches, including: Reflexion \citep{shinn2023reflexion}, Chain-of-Experts \citep{xiao2023chain}, and OptiMUS \citep{ahmaditeshnizi2024optimus} in Table \ref{tab:benchmark}. These approaches employ agents to iteratively enhance both the mathematical formulation and the optimization outcomes, delivering strong results. For consistency, we report the performance of these methods based on both GPT-4 outputs. We also include methods based on finetuning through large synthetic data such as ORLM \citep{tang2024orlm}. Note that our approach is not directly comparable to previous approaches since it captures all possible interpretations of problems. We report the accuracy of the first solution found by MCTS, as well as the accuracy of the first three solutions and after 16 rollouts. At each step, we limit the number of generated solutions to 10, with a maximum of three children per node. A higher computational budget could potentially yield more solutions.
+
+\begin{comment}
+\begin{wrapfigure}{r}{0.5\textwidth} % Wrap the second table to the right as well
+\centering
+\scalebox{0.9}{ % Adjust the scale here
+\begin{tabular}{l|ccc}
+\toprule
+\textbf{Method} & \textbf{Easy} & \textbf{Medium} & \textbf{Hard} \\
+\midrule
+\makecell[l]{Standard} & 45.0\% & 17.5\% & 15.0\% \\
+\makecell[l]{ORLM-\scriptsize{LLaMA-3-8B}} & 57.5\% & 20.0\% & 35.0\% \\ 
+\rowcolor{gray!17} \makecell[l]{MCTS (ours)} & 62.5\% & 30.0\% & 40.0\% \\ 
+\bottomrule
+\end{tabular}}
+\end{wrapfigure}
+\end{comment}
+
+
+
+
+\subsection{Evaluating Critic Capabilities of LLM}
+\label{sec:eval_llm}
+We evaluate the critic capabilities of the LLM, which in our method is used to search the formulation space. We study  backpropagation (global score) and prior score (local score) independently. \textbf{(1) Getting a global score.} The score in \Cref{eq:simulation_reward} compares complete formulations. Unlike prior scoring, we compare full formulations without sharing partial structures. To isolate this component, we extract all solutions from IndustryOR that contain correct answers and compare them to wrong answers. Our goal is to show that correct solutions are generally preferred over incorrect ones when comparing formulations directly. Using this approach, we obtain a point biserial correlation coefficient of $0.48$ with a significant p-value of $2.0681 \times 10^{-3}$. We also compare this ranking method with a scoring method from the literature \cite{zhang2024accessing}, where formulations are scored from 1 to 100, yielding a correlation of 0.2325 with a p-value of $1.1185 \times 10^{-1}$, which is not significant.  \textbf{(2) Getting a Local Scores}. %Measuring local scores is challenging because they depend on the tree's global structure. For instance, a high ranking score may appear in an already poor branch, rendering it irrelevant. 
+\begin{wrapfigure}[8]{r}{0.3\textwidth}
+\centering
+\includegraphics[width=1\linewidth]{images/high_quality_plot_2.pdf}
+\caption{Prior score eval.}
+\label{fig:local}
+\end{wrapfigure} To measure prior scores, we use a simple greedy evaluation. To isolate the effect of the MCTS framework, we first construct a tree using Depth-First Search (DFS) with up to three children per node, and assign prior rewards via the LLM. For evaluation, we only consider trees containing the ground truth and measure the success rate using a greedy approach. Figure \ref{fig:local} shows the comparison with random prior scoring, illustrating that the chances of reaching the ground truth decrease as the number of tree leaves increases.
+ 
+
+\subsection{Efficiency of Detecting Functionally Equivalent Functions}
+
+\label{sec:efficiency}
+
+We evaluate the efficiency of our framework by analyzing the number of generated formulations at each step and the remaining formulations after two key filtering stages: (1) grouping equivalent formulations using SMT to eliminate redundancy, and (2) selecting the top three solutions based on rankings provided by the LLM. The top of Fig. \ref{fig:efficiency}
+ shows the initial number of generated formulations as a percentage (ten per experiment in practice) and tracks the results of each filtering step across all problems in IndustryOR. \begin{wrapfigure}[14]{r}{0.4\textwidth}
+\centering
+\includegraphics[width=0.92\linewidth]{images/nodes_with_table2.pdf}
+\caption{\textbf{(Top)} Number of nodes filtered. \textbf{(Bottom)} Estimated efficiency.}
+\label{fig:efficiency}
+\end{wrapfigure}The equivalent grouping step is the most impactful, reducing the solutions by a factor of five accross all steps. The final filtering step, which selects the top-ranked formulations, discards very few solutions—a positive outcome as we aim to retain viable formulations. Based on these results, the bottom of the figure contrasts efficiency with a non-hierarchical method, where errors in earlier stages compound and affect later steps. The results demonstrate that by the time the formulations reach the inequality constraint step, efficiency increases a thousandfold. In other words, a non-hierarchical approach without filtering would have required a thousand more simulations to arrive at the same number of solutions.
+
+\subsection{Failure modes}
+\label{sec:failure}
+
+\begin{wrapfigure}[10]{r}{0.35\textwidth}
+\centering
+\includegraphics[width=1\linewidth]{images/cumulative_solutions_found_flat.pdf}
+\caption{MCTS rollouts}
+\label{fig:rollout}
+\end{wrapfigure}
+
+We examine the failure modes of our method by (1) analyzing its search capabilities for detecting the ground truth and (2) identifying the problems where the model itself fails. For the first point, we observe that our MCTS approach efficiently explores the solution space. In most cases where the solution is found, only four iterations are needed. This insight is reflected in the results presented in Table \ref{sec:benchmark}. This indicates the better critic methods are necessary to improve recommendation of best candidates.
+
+\begin{wraptable}{r}{0.25\textwidth} % 'r' means right, '0.5\textwidth' sets the width of the wrap
+\centering
+\captionsetup{font=scriptsize} % Adjusts the size of the caption text (options: footnotesize, scriptsize, etc.)
+\caption{\scriptsize Analysis by categories}
+\scalebox{0.65}{ % Adjust the scale here
+\begin{tabular}{lcc}
+\toprule
+\textbf{Category} & \textbf{Accuracy} & \textbf{Entropy} \\
+\midrule
+\rowcolor{gray!17} \multicolumn{3}{c}{\textit{Grouped by Difficulty}} \\
+\makecell[l]{Easy}   & 0.6750  & 1.9638 \\
+\makecell[l]{Medium} & 0.2895  & 3.0408 \\
+\makecell[l]{Hard}   & 0.5000  & 2.7337 \\
+\midrule
+\rowcolor{gray!17} \multicolumn{3}{c}{\textit{Grouped by Type}} \\
+\makecell[l]{IP}     & 0.5484  & 1.6536 \\
+\makecell[l]{LP}     & 0.4167  & 2.1716 \\
+\makecell[l]{MIP}    & 0.5161  & 3.3201 \\
+\bottomrule
+\end{tabular}}
+\end{wraptable}
+
+We analyze failure modes based on the difficulty and problem characteristics in IndustryOR. Accuracy is measured by whether the mode finds the correct solution. In both grouping methods, the model with the highest accuracy also produces less entropic (less dense) trees. Similarly, when grouped by difficulty, the medium category exhibits lower accuracy and higher tree entropy. Our method does not show a significant weakness against any specific type of problems. For example, ORLM performs well in IPs but is weaker in MIPs (see \Cref{app:experimental_details}).
+
+
+
+\section{Discussions}
+
+
+In this paper, we formally define the problem of autoformulation for mathematical optimization models, establishing objectives, evaluation metrics, and a categorization of problem types based on their challenges to autoformulators. We introduce a novel approach that frames autoformulation as a search problem and effectively leveraging the hierarchical structure of optimization modeling. Our method integrates LLMs as hypothesis generators and evaluation functions of formulation correctness within an MCTS framework, systematically exploring the vast hypothesis space of possible formulations. The introduction of hypothesis pruning using SMT solvers further enhances efficiency by eliminating redundant formulations. Empirical evaluations across linear and mixed-integer programming benchmarks demonstrate our method's superior performance in formulating correct models, with notable efficiency gains from pruning and LLM-based correctness evaluation.
+\textbf{Future works.}~Looking ahead, we envision autoformulation as an exciting domain where LLMs can significantly augment human experts. Future research directions include developing collaborative frameworks to synergize with human expertise, exploring advanced LLM-based methods such as retrieval-augmented generation \citep{lewis2020retrieval} and test-time compute \citep{lightman2024lets}, and fine-tuning models to enhance autoformulator capabilities. To support these advancements, the development of large-scale, diverse benchmarks encompassing various problem types and complexities, particularly those requiring intricate reformulations, will be crucial.
+
+
+\newpage
+
+
+
+

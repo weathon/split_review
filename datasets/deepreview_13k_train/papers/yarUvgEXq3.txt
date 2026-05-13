@@ -1,0 +1,487 @@
+\title{Safe Collaborative Filtering}
+
+\begin{abstract}
+Excellent tail performance is crucial for modern machine learning tasks,
+such as algorithmic fairness, class imbalance, and risk-sensitive decision making,
+as it ensures the effective handling of challenging samples within a dataset.
+Tail performance is also a vital determinant of success for personalized recommender systems to reduce the risk of losing users with low satisfaction.
+This study introduces a \emph{``safe''} collaborative filtering method that prioritizes recommendation quality for less-satisfied users rather than focusing on the average performance.
+Our approach minimizes the conditional value at risk (CVaR), which represents the average risk over the tails of users' loss.
+To overcome computational challenges for web-scale recommender systems,
+we develop a robust yet practical algorithm that extends the most scalable method, implicit alternating least squares (\ials).
+Empirical evaluation on real-world datasets demonstrates the excellent tail performance of our approach while maintaining competitive computational efficiency.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Owing to the widespread implementation of collaborative filtering (CF) techniques~\citep{hu2008collaborative,koren2009matrix,steck2019embarrassingly,rendle2022revisiting},
+recommender systems have become ubiquitous in web applications and are increasingly impacting business profits.
+The quality of personalization is critical, particularly for users with low satisfaction,
+as they are essential for driving user growth, yet their disengagement poses a serious risk to the survival of the business.
+This is where the problem lies with conventional methods based on empirical risk minimization (ERM),
+which focus on performance in terms of \emph{averages} with no regard given to harmful errors for the tail users.
+In this paper, we address this problem
+by utilizing a risk measure, conditional value at risk (CVaR)~\citep{rockafellar2000optimization,rockafellar2002conditional,pflug2000some}, which represents the average risk for tail users.
+
+Thus far, significant research efforts have been devoted to the computational aspects of risk-averse optimization~\citep{alexander2006minimizing,xu2009smooth}.
+We are also interested in the scalability of CVaR minimization for web-scale recommender systems, which must meet strict computational requirements.
+The challenge of risk-averse CF is scalability in \emph{two dimensions}: users and items.
+In the context of personalized ranking, the focus has been on the scalability for the \emph{items} to be ranked.
+Numerous studies~\citep{weimer2007cofi,weimer2008improving,weimer2008adaptive,rendle2009bpr}
+have addressed the intractability of direct ranking optimization via the ``score-and-sort'' approach,
+where, given a user, a method predicts scores for all items and then sorts them according to their scores.
+To attain further scalability for a large item catalogue,  
+practical methods adopt pointwise loss functions, enabling parallel optimization for users and items~\citep{hu2008collaborative,he2016fast,bayer2017generic}.
+The key to these efficient methods is the \emph{separability} of pointwise objectives, which allows block coordinate algorithms, such as alternating least squares (ALS)~\citep{hu2008collaborative}.
+However, integrating CVaR minimization into this approach faces a severe obstacle because of the non-smooth and non-linear functions (i.e., check functions),
+which hinder the separability and parallel computation for items.
+
+Our contribution in this paper is to devise a practical algorithm for risk-averse CF by eliminating the mismatch between CVaR minimization and personalized ranking.
+The paper is structured as follows.
+In \cref{section:setting-and-challenge},
+we show that applying CVaR minimization to matrix factorization (MF) is computationally expensive.
+This is mainly due to the check function $\max(0, \cdot)$ even with a block multi-convex, separable loss.
+In \cref{section:proposed-method},
+we overcome this challenge by using a smoothing technique of quantile regression~\citep{fernandes2021smoothing,he2021smoothed,tan2022high}
+and
+establish a block coordinate solver that is embarrassingly parallelizable for both users and items.
+The related work is discussed in \cref{section:related-work}, and our experiments are described in \cref{section:experiments}.
+
+
+\section{Setting and Challenge}
+
+Following conventional studies (e.g., \citep{weimer2007cofi,weimer2008improving,weimer2008adaptive}), we view collaborative filtering as a ranking problem.
+In this setting,
+we have access to the set $\calS$ of implicit feedback $(i, j)$ indicating that user $i$ has preferred item $j$.
+We denote the sets of users and items observed in $\calS$ as $\calU$ and $\calV$, respectively.
+For convenience, we also define $\calV_i$ to be the set of items preferred by user $i$, i.e., $\calV_i \coloneqq \{j \in \calV \mid (i,j) \in \calS\}$, and $\calU_j$ to be the set of users that have selected item $j$, i.e., $\calU_j \coloneqq \{i \in \calU \mid (i,j) \in \calS\}$.
+The aim of this problem is to learn a scoring function $\boldsymbol{f}_{\theta}$ parameterized by $\theta$, which produces a structured prediction $\boldsymbol{f}_{\theta}(i) \in \R^{|\calV|}$ having the same order of underlying $i$'s preferences on $\calV$; we may denote the predicted score for $(i,j)$ by $f_\theta(i,j)$.
+\paragraph{Pairwise ranking optimization.}
+Conventional studies~\citep{rendle2009bpr,lee2014local,park2015preference} often formulate this problem as pairwise ranking optimization within the ERM framework, aiming to minimize a population risk $\min_\theta \E_{(i, \calV_i)}\left[\ell_{\mathrm{pair}}(\boldsymbol{f}_\theta(i), \calV_i)\right]$, where $\E_{(i,\calV_i)}$ represents the expectation over user $i$ with feedback $\calV_i$.
+Here, the loss function $\ell_{\mathrm{pair}}$ is expressed as follows:
+\begin{align}
+  \tag{Pairwise Loss}
+   \ell_{\mathrm{pair}}(\boldsymbol{f}_\theta(i), \calV_i) \coloneqq \frac{1}{|\calV_i|}\sum_{j \in \calV_i}\sum_{j' \in \calV}\ind{f_\theta(i, j') \geq f_\theta(i, j)},
+  \label{eq:pairwise-loss}
+\end{align}
+where $\ind{\cdot}$ is the indicator function.
+Because this loss function is piece-wise constant and intractable,
+its convex upper bounds are used, such as margin hinge loss~\citep{weimer2008improving} and softplus loss~\citep{rendle2009bpr}.
+However, such loss functions lead to non-separability for items;
+that is, a loss cannot be decomposed into the sum of independent functions $\{g_j\}_{j \in \calV}$ for items: $\ell_{\mathrm{pair}}(\boldsymbol{f}_\theta(i), \calV_i) \neq \sum_{j \in \calV}g_j(f_\theta(i, j))$.
+Thus, this approach often relies on gradient-based optimizers with negative sampling techniques~\citep{rendle2014improving}, which however suffer from slow convergence~\citep{yu2014parallel,chen2023revisiting}. 
+
+\paragraph{Convex and separable upper bound.}
+To address this non-separability issue, conventional methods utilize convex and separable loss functions (i.e., pointwise loss~\citep{hu2008collaborative,zhou2008large}).
+We also adopt the following convex and separable upper bound of \cref{eq:pairwise-loss},
+\begin{align}
+  \frac{1}{|\calV_i|}\sum_{j \in \calV_i}\left[1 - f_\theta(i, j)\right]^2 + \beta_0 \cdot \sum_{j \in \calV}f_\theta(i, j)^2,
+\end{align}
+where $\beta_0 \geq 1/|\calV|$ is a hyperparameter.
+We here implement the model of $\boldsymbol{f}_\theta$ using matrix factorization (MF), which is a popular model owing to its scalability~\citep{hu2008collaborative,koren2009matrix,rendle2022revisiting}.
+The model parameters of an MF comprise two blocks, i.e., $\theta=(\bfU, \bfV)$ where $\bfU \in \R^{|\calU|\times d}$ and $\bfV \in \R^{|\calV|\times d}$ are the embedding matrices of users and items, respectively.
+The prediction for user $i$ is then defined by $\boldsymbol{f}_\theta(i)=\bfV\bu_i$,
+where $\bu_i \in \R^{d}$ represents the $i$-th row of $\bfU$,
+and the ERM objective can be expressed as follows:
+\begin{equation}
+ \tag{ERM-MF}
+ \min_{\bfU, \bfV}\frac{1}{|\calU|}\sum_{i \in \calU}\ell(\bfV\bu_i, \calV_i) + \Omega(\bfU, \bfV),
+ \label{eq:erm-mf}
+\end{equation}
+where
+\begin{equation}
+ \tag{Implicit MF}
+ \ell(\bfV\bu_i, \calV_i) \coloneqq \frac{1}{|\calV_i|}\sum_{j \in \calV_i}\frac{1}{2}(1-\bu_i^\top \bv_j)^2 + \frac{\beta_0}{2}\|\bfV\bu_i\|_2^2.
+ \label{eq:imf-loss}
+\end{equation}
+Here, $\Omega(\bfU, \bfV)=\tfrac{1}{2}\|\bLambda_u^{1/2}\bfU\|_F^2 + \tfrac{1}{2}\|\bLambda_v^{1/2}\bfV\|_F^2$ denotes L2 regularization, with diagonal matrices $\bLambda_u \in \R^{|\calU|\times|\calU|}$ and $\bLambda_v \in \R^{|\calV|\times|\calV|}$ representing user- and item-dependent Tikhonov weights.
+Because a pointwise loss enables a highly scalable ALS algorithm
+owing to separability,
+it is widely used for scalable methods, such as implicit alternating least squares (\ials)~\citep{hu2008collaborative}.
+In fact, \ials is implemented in practical applications~\citep{meng2016mllib} and is still known as one of the state-of-the-art methods~\citep{rendle2022revisiting}.
+The only difference between our loss and \ials loss is the normalization factor $1/|\calV_i|$ in the first term.
+
+\begin{wrapfigure}{r}[0pt]{0.385\textwidth}
+ \centering
+ \raisebox{0pt}[\dimexpr\height-0.4\baselineskip\relax]{
+   \input{figures/cvar_fig.tex}
+}
+ \caption{Illustration of CVaR}
+ \label{figure:cvar}
+\end{wrapfigure}
+\paragraph{Conditional value at risk (CVaR).}
+In contrast to ERM, which corresponds to the \emph{average} case,
+we focus on a more pessimistic scenario.
+Specifically, the objective of $(1-\alpha)$-CVaR minimization involves a conditional expectation,
+\begin{equation}
+  \label{eq:cvar}
+  \min_\theta \E_{(i, \calV_i)}\left[\ell(\boldsymbol{f}_\theta(i), \calV_i) \mid \ell(\boldsymbol{f}_\theta(i), \calV_i) \geq \ell_{1-\alpha}\right],
+\end{equation}
+where $\ell_{1-\alpha}$ is the $(1-\alpha)$-quantile of the loss distribution, called \emph{value at risk (VaR)}~\citep{jorion2007value}.
+Since this is difficult to optimize, \citet{rockafellar2000optimization,rockafellar2002conditional} proposed the following reformulation:
+\begin{equation}
+  \label{eq:cvar-dual}
+  \min_{\theta,\xi}\left\{\xi + \alpha^{-1}\E_{(i, \calV_i) \sim \dsP}[\max(0, \ell(\boldsymbol{f}_\theta(i), \calV_i) - \xi)]\right\}.
+\end{equation}
+This objective is rather easy to optimize,
+as it is block multi-convex w.r.t. both $\xi$ and $\theta$
+when the loss function is convex w.r.t. $\theta$.
+
+\paragraph{CVaR-MF.}
+Now, we apply the above CVaR formulation to \cref{eq:erm-mf} as follows:
+\begin{equation}
+  \tag{CVaR-MF}\label{eq:cvar-mf}
+  \min_{\bfU, \bfV, \xi}\left\{\xi + \frac{1}{\alpha|\calU|}\sum_{i \in \calU}\max(0, \ell(\bfV\bu_i, \calV_i) - \xi) + \Omega(\bfU, \bfV)\right\}.
+\end{equation}
+However, optimizing this objective is still challenging.
+Although subgradient methods~\citep{rockafellar2000optimization} enable parallel optimization of non-smooth objectives without requiring separability, such gradient-based solvers are known to be impractical in the context of large-scale recommender systems.
+On the other hand, the obstacle in designing an efficient algorithm lies in the non-linearity of the ramp function $\rho_1(x) = \max(0, x)$.
+It destroys the objective's separability for items, making it impossible to solve the subproblem for each row of $\bfV$ in parallel, even with the separable upper bound in \cref{eq:imf-loss}.
+
+    
+
+
+\section{SAFER\textsubscript{2}
+
+\label{section:proposed-method}
+
+\begin{wrapfigure}{r}[0pt]{0.385\textwidth}
+\capstart
+\centering
+\raisebox{0pt}[\dimexpr\height-1.4\baselineskip\relax]{
+\includegraphics[keepaspectratio, width=0.34\textwidth]{figures/cts_fig_fixed.pdf}
+}
+\caption{Convolution-type smoothing.}
+\label{figure:cts-check-function}
+\end{wrapfigure}
+\subsection{Convolution-type smoothing for CVaR}
+To overcome the non-smoothness of CVaR, we utilize a smoothing technique for quantile regression~\citep{fernandes2021smoothing,he2021smoothed,tan2022high,man2022unified}, which
+involves the integral convolution with smooth functions, called mollifiers, as studied by \cite{schwartz1951theorie,Friedrichs1944,sobolev1938sur} among others.
+We introduce the notation $k_h(\cdot) \coloneqq h^{-1}k(\cdot/h)$,
+where $k(\cdot)$ is a kernel density function satisfying $\int k (u) du = 1$
+and
+$h>0$ denotes bandwidth, 
+}.
+We then define a smoothed check function $\rho_{1-\alpha} \ast k_h \colon \R \to \R$ as follows:
+\begin{equation}
+  (\rho_{1-\alpha} \ast k_h)(u) \coloneqq \int \rho_{1-\alpha}(v) k_h(v-u) dv,
+\end{equation}
+where $*$ is called the convolution operator.
+
+We then obtain the objective of convolution-type smoothed CVaR:
+\begin{align}
+  \tag{CtS-CVaR-MF}
+  \min_{\bfU, \bfV, \xi}&\Bigl\{\underbrace{\xi + \frac{1}{\alpha|\calU|}\sum_{i \in \calU}(\rho_1 \ast k_h)(\ell(\bfV\bu_i, \calV_i) - \xi)}_{\Psi_{1-\alpha}(\bfU, \bfV, \xi)} + \Omega(\bfU, \bfV)\Bigr\}.
+  \label{eq:cts-cvar-mf}
+\end{align}
+We hereafter denote the functional $\Psi_{1-\alpha}(\bfU, \bfV, \xi)$ as $(1-\alpha)$-\CtSCVaR.
+If $\ell$ is block multi-convex w.r.t. $\bfU$ and $\bfV$,
+then $\Psi_{1-\alpha}(\bfU, \bfV, \xi)$ is also block multi-convex w.r.t. $\bfU$, $\bfV$, and $\xi$ because $(\rho_1 \ast k_h)$ is convex and non-decreasing.
+Therefore, we consider a block coordinate algorithm, where we cyclically update each block while fixing the other blocks to the current estimates. That is,
+\begin{align}
+ \xi^{(t+1)} &= \argmin_{\xi}\Psi_{1-\alpha}(\bfU^{(t)}, \bfV^{(t)}, \xi), \\
+ (\bfU^{(t+1)}, \bfV^{(t+1)}) &= \argmin_{\bfU, \bfV}\Psi_{1-\alpha}(\bfU, \bfV, \xi^{(t+1)}).
+\end{align}
+Because the subproblems lack a closed-form update and block separability,
+we develop our proposed method, \emph{Smoothing Approach For Efficient Risk-averse Recommender} (\safer), which exploits the objective's smoothness to yield block multi-convex and separable optimization.
+  
+
+\subsection{Convolution-type smoothed quantile estimation}
+The smoothed $(\rho_{1-\alpha} \ast k_h)$ is twice differentiable,
+so a natural approach to finding the solution $\xi^*$ is to use the Newton-Raphson (NR) algorithm.
+At iteration $l < L$ in the $(k+1)$-th update, it estimates $\xi$ as follows:
+\begin{align}
+  \xi_{l+1}^{(t+1)} = \xi_{l}^{(t+1)} - \gamma_{l} \cdot d_{l}^{(t+1)},
+  \quad\text{where~} d_{l}^{(t+1)} \coloneqq \frac{\nabla_\xi \Psi_{1-\alpha}(\bfU^{(t)}, \bfV^{(t)}, \xi_l^{(t+1)})}{\nabla_\xi^2\Psi_{1-\alpha}(\bfU^{(t)}, \bfV^{(t)}, \xi_l^{(t+1)})},
+\end{align}
+where $\gamma_l>0$ represents the step size.
+The convolution-type smoothing was originally used with check functions for quantile regression, and we are the first to apply it to smooth the CVaR objective.
+Interestingly, even if we apply the convolution-type smoothing to $\max(0, \cdot)$ in CVaR,
+\paragraph{Efficient loss computation.}
+The na\"ive computation of $\ell(\bfV\bu_i, \calV_i)$ for every user is infeasible in large-scale settings owing to the score penalty $\|\bfV\bu_i\|_2^2$, which implies the materialization of the recovered matrix $\bfU\bfV^\top$ with the cost of $\calO(|\calU| |\calV| d^2)$.
+We can reduce this cost by pre-computing and caching the Gramian matrix $\bfV^\top\bfV \in \R^{d \times d}$ in $\calO(|\calV|d^2)$ and computing the loss of user $i$ with $\|\bfV\bu_i\|_2^2=\bu_i^\top(\bfV^\top\bfV)\bu_i$ in $\calO(d^2)$, thus leading to the overall cost of $\calO((|\calU|+|\calV|)d^2)$.
+
+\paragraph{Stochastic optimization for many users.}
+Estimating $\xi$ can be expensive because of the $\calO(|\calU|)$ computational cost for each NR step, particularly for many users.
+We can alleviate this extra cost by using stochastic algorithms~\citep{xu2016sub,roosta2019sub},
+in which we randomly sample the user subset $\calU_b \subset \calU$ and then estimate the direction by a sample average approximation $\widehat{\Psi}_{1-\alpha}(\bfU, \bfV, \xi) \coloneqq \xi + (\alpha|\calU_b|)^{-1}\sum_{i \in \calU_b}(\rho_1 \ast k_h)(\ell(\bfV\bu_i, \calV_i) - \xi)$.
+This also allows us to use a backtracking line search \citep{armijo1966minimization} to determine an appropriate step size $\gamma_t$ while keeping computational costs in $\calO(|\calU_b|L)$ where $L>0$ is the number of NR iterations.
+
+\subsection{Primal-dual splitting for parallel computation}\label{section:pd-splitting}
+The major obstacle to the scalability for items is the row-wise coupling of $\bfV$ stemming from non-linear composite $(\rho_1 \ast k_h)(\ell(\bfV\bu_i, \calV_i))$.
+Because $(\rho_1 \ast k_h)$ is closed and convex,
+we can express it as its biconjugate $(\rho_1 \ast k_h)(r) = \max_{z}\left\{z \cdot r - (\rho_1 \ast k_h)^{*}(z)\right\}$.
+This allows us to reformulate the original subproblem of $\bfU$ and $\bfV$ as the following saddle-point optimization:
+\begin{align}
+  \tag{PD-Splitting}
+  \min_{\bfU, \bfV}\max_{\z} \left\{\xi + \frac{1}{\alpha|\calU|}\sum_{i \in \calU}[z_i \cdot (\ell(\bfV\bu_i, \calV_i) - \xi) - (\rho_1 \ast k_h)^{*}\left(z_i\right)] + \Omega(\bfU, \bfV) \right\},
+  \label{eq:pd-splitting}
+\end{align}
+where $\z \in \R^{|\calU|}$ represents the vector of dual variables.
+Our algorithm alternatingly updates each block of variables (i.e., $\z$, $\bfU$ and $\bfV$) by solving its subproblem.
+As we will discuss below, owing to convolution-type smoothing, the inner maximization for the dual variable $\z$ can be solved exactly and efficiently, and thus our algorithm operates similarly to a block coordinate descent~\citep{tseng2001convergence} for the primal variables $\bfU$ and $\bfV$.
+Through numerical experiments, we will show this algorithm converges in practice when given a sufficiently large bandwidth $h$. 
+
+\paragraph{Dual-free optimization.}
+In the $\z$ step, we solve the problem for the dual variable $z_i$ of each user $i$,
+\begin{align}
+ z_i^{(t+1)} = \argmax_{z_i}\left\{z_i \cdot (\ell(\bfV^{(t)}\bu_i^{(t)}, \calV_i) - \xi^{(t+1)}) - (\rho_1 \ast k_h)^{*}(z_i)\right\},
+\end{align}
+where the convex conjugate $(\rho_1 \ast k_h)^*$ does not necessarily have a closed-form expression.
+Fortunately, with convolution-type smoothing,
+we can sidestep this issue and
+solve each subproblem without explicitly computing $(\rho_1 \ast k_h)^*$.
+Let $r_i^{(t)} \coloneqq \ell(\bfV^{(t)}\bu_i^{(t)}, \calV_i) - \xi^{(t+1)}$ denote the residual for user $i \in \calU$,
+then the first-order optimality condition for $z_i$ is:
+\begin{align*}
+ r_i^{(t)} - \nabla_{z_i}(\rho_1 \ast k_h)^{*}(z_i^{(t+1)}) = 0.
+\end{align*}
+Exploiting the property of convex conjugate,
+we can obtain the gradient $\nabla_{z_i}(\rho_1 \ast k_h)^{*}(z_i^{(t+1)})$ by
+\begin{align*}
+ \nabla_{z_i}(\rho_1 \ast k_h)^{*}(z_i) = \argmin_{x} \left\{-x \cdot z_i + (\rho_1 \ast k_h)(x)\right\}
+ \Longleftrightarrow & -z_i^{(t+1)} + 1 - K_h(-x^\ast) = 0 \\
+ \Longleftrightarrow & x^\ast = -K_h^{-1}(1-z_i^{(t+1)}).
+\end{align*}
+Recall that $K_h$ is the CDF of $k_h$ and has its inverse $K_h^{-1}$ (i.e., the quantile function).
+Consequently, we obtain the closed-form solution of $z_i^{(t+1)}$ as:
+\begin{align*}
+  r_i^{(t)} - \nabla_\z(\rho_1 \ast k_h)^{*}(z_i^{(t+1)}) = 0
+  \Longleftrightarrow z_i^{(t+1)} = 1-K_h(-r_i^{(t)}).
+\end{align*}
+Once we have $\xi^{(t+1)}$, all $z_i^{(t+1)}$ can be computed in parallel for users,
+and $K_h$ can also be computed effortlessly when using standard kernels for $k_h$, such as Gaussian, sigmoid, and logistic kernels\footnote{For explicit expressions with some kernels, see Remark 3.1 of \citet{he2021smoothed}.}.
+
+\paragraph{Re-weighted alternating least squares.}
+When given dual variables $\z$, the optimization problem of $\bfU$ and $\bfV$ forms a re-weighted ERM, i.e., $\min_{\bfU, \bfV} \left\{(\alpha|\calU|)^{-1}\sum_{i \in \calU}z_i \cdot \ell(\bfV\bu_i, \calV_i) + \Omega(\bfU, \bfV) \right\}$, which is separable and block strongly multi-convex w.r.t. the rows of $\bfU$ and $\bfV$.
+Consequently, this step is efficient to the same extent as the most efficient ALS solver of \citet{hu2008collaborative}.
+It is also worth noting that, as proposed in \citet{hu2008collaborative}, we pre-compute Gramian matrices $\bfV^\top\bfV$ and $\bfU^\top \text{diagMat}(\z) \bfU$ to reuse them for efficiently compute the separable subproblems in parallel (a.k.a. the Gramian trick~\citep{krichene2018efficient,rendle2022revisiting}).
+It is also possible to parallelize each pre-computation step by considering $\bfV^\top\bfV=\sum_{j \in \calV}\bv_j\bv_j^\top$ and $\bfU^\top \text{diagMat}(\z) \bfU=\sum_{i \in \calU}z_i \cdot \bu_i\bu_i^\top$.
+
+\paragraph{Tikhonov regularization.}
+Previous empirical observations show that Tikhonov weight matrices $\bLambda_u$ and $\bLambda_v$ are critical in enhancing the ranking quality of MF~\citep{zhou2008large,rendle2022revisiting}.
+Hence, we develop a regularization strategy for \safer based on \emph{condition numbers},
+which characterize the numerical stability of ridge-type problems.
+Let $\lambda_u^{(i)}$ and $\lambda_v^{(j)}$ denote the $(i,i)$-element of $\bLambda_u$ and the $(j,j)$-element of $\bLambda_v$, respectively.
+We propose the regularization weights for user $i$ and $j$ as follows:
+\begin{align*}
+ \lambda_u^{(i)} = \frac{\lambda}{\alpha|\calU|}\left(1 + \beta_0 |\calV|\right), \quad
+ \lambda_v^{(j)} = \frac{\lambda}{\alpha|\calU|}\Bigl(\sum_{i \in \calU_j}\frac{1}{|\calV_i|} + \beta_0 \alpha |\calU|\Bigr).
+\end{align*}
+Here, $\lambda>0$ represents the base weight that requires tuning.
+This strategy introduces only one hyperparameter and empirically improves final performance.
+
+\subsection{Computational complexity and scalability}
+The computational cost of the $\xi$ step is $\calO(|\calU_b|L)$,
+and for the $\bfU$ and $\bfV$ steps is $\calO(|\calS|d^2 + (|\calU|+|\calV|)d^3)$, which is identical to the complexity of \ials~\citep{hu2008collaborative}.
+Therefore, the overall complexity per epoch is $\calO(|\calU_b|L + |\calS|d^2 + (|\calU|+|\calV|)d^3)$.
+The linear dependency on $|\calU|$ and $|\calV|$ can be alleviated arbitrarily by increasing the parallel degree owing to separability.
+The cubic dependency on $d$ can be circumvented by leveraging
+inexact solvers such as the conjugate gradient method~\citep{tan2016faster} and subspace-based block coordinate descent~\citep{rendle2021ials++} to update each row of $\bfU$ and $\bfV$.
+The sketch of the algorithm is shown in \cref{algorithm:safer-sketch}.
+\input{algorithms/safer2_sketch}
+
+
+
+\section{Related work}
+
+
+\paragraph{Risk-averse optimization.}
+Coherent risk measures such as CVaR (also called expected shortfall~\citep{acerbi2002expected}) are widely used instead of (incoherent) VaR~\citep{artzner1997thinking, artzner1999coherent,jorion2007value}.
+Despite the desirable properties of CVaR~\citep{pflug2000some}, its optimization is often found challenging owing to the non-smooth check function.
+Thus, in CVaR optimization and statistical learning with CVaR~\citep{soma2020statistical,mhammedi2020pac,curi2020adaptive},
+smoothing techniques are utilized, e.g., piece-wise quadratic smoothed plus~\citep{alexander2006minimizing,xu2009smooth} and softplus~\citep{soma2020statistical}.
+Distributionally robust optimization (DRO) is another prevalent approach to risk-averse learning~\citep{rahimian2019distributionally}.
+Recent studies explore dual-free DRO algorithms to avoid maintaining large dual variables~\citep{levy2020large,jin2021non,qi2021online}.
+The dual-free algorithms introduce a Bregman distance defined on dual variables~\citep{wang2017exploiting,lan2018optimal}.
+By contrast, we apply convolution-type smoothing to CVaR for the efficient computation of $\xi$ and the separability via primal-dual splitting.
+
+\paragraph{Quantile regression.}
+In contrast to the least squares regression that models a conditional mean,
+quantile regression (QR) offers more flexibility to model the entire conditional distribution~\citep{koenker1978regression,koenker2001quantile,koenker2017handbook}.
+Our study is related to the computational aspects of QR that involve the piece-wise linear check function.
+\citet{gu2018admm} proposed a method based on the alternating direction method of multipliers (ADMM)~\citep{boyd2011distributed} for smoothness.
+
+In line with Horowitz's smoothing~\citep{horowitz1998bootstrap},
+recent studies developed methods using convolution-type smoothing for large-scale inference~\citep{fernandes2021smoothing}.
+These studies realize tractable estimation using ADMM~\citep{tan2022high}, Frisch-Newton algorithm~\citep{he2021smoothed}, and proximal gradient method~\citep{man2022unified}, whereas these QR methods cannot be used for our setting.
+
+\paragraph{Robust recommender systems.}
+There is a growing interest in controlling the performance distribution of a recommender model, such as fairness-aware recommendation, where fairness towards users is essential~\citep{patro2020fairrec,do2021two}. 
+Several recent studies have explored improving semi-worst-case performance for users.
+\cite{singh2020building} introduced a multi-objective optimization approach that balances reward and CVaR-based healthiness for online recommendation.
+\cite{wen2022distributionally} proposed a method based on group DRO over given user groups instead of individual users.
+By contrast, to optimize the worst-case performance for individual users,
+\cite{shivaswamy2022adversary} examined an adversarial learning approach, which trains two recommender models.
+However, these methods do not focus on practical scalability and rely on gradient descent to directly optimize their objectives.
+
+
+
+\section{Numerical experiments}
+
+
+\subsection{Experimental setup}
+\paragraph{Datasets and evaluation protocol.}
+We experiment with two MovieLens datasets (\MLs and \ML)~\citep{harper2015movielens} and Million Song Dataset (\MSD)~\citep{bertin2011million}.
+We strictly follow the standard evaluation methodology~\citep{weimer2007cofi,liang2018variational,steck2019markov,rendle2022revisiting} based on \emph{strong generalization}.
+To generate implicit feedback datasets.
+we retain interactions with ratings larger than 4 of MovieLens datasets,
+while we use all interactions for \MSD.
+We then consider 80\% of users for training (i.e., $\{\calV_i\}_{i \in \calU}$).
+The remaining 10\% of users in two holdout splits are used for validation and testing.
+During the evaluation phases,
+the 80\% interactions of each user are disclosed to a model as input to make predictions for the user,
+and the remaining 20\% are used to compute ranking measures.
+We use Recall@$K$ (R@$K$) as the quality measure of a ranked list and take the average over all testing users.
+We also evaluate the performance for semi-worst-case scenarios by considering the mean R@$K$ for worse-off users whose R@$K$ is lower than the $\alpha$-quantile among the testing users; note that setting $\alpha=1.0$ is equivalent to the average case.
+The mean R@$K$ with $\alpha=1.0$ may be referred to as R@$K$ for simplicity.
+For the validation measure, we used R@$20$ for \MLs and R@$50$ for \ML and \MSD.
+
+\paragraph{Models.}
+We compare \safer to \ials~\citep{rendle2022revisiting}, \ermmf in \cref{eq:erm-mf}, and \cvarmf in \cref{eq:cvar-mf}.
+To set strong baselines,
+we consider \multvae~\citep{liang2018variational} and a recent \ials variant with Tikhonov regularization, which is competitive to the state-of-the-art methods~\citep{rendle2022revisiting}. 
+We do not compare pairwise ranking methods (e.g., \citep{rendle2009bpr,weston2011wsabie}) as they are known to be non-competitive on the three datasets~\citep{sedhain2016effectiveness,liang2018variational,rendle2022revisiting}.
+We consider the instance of \safer with a Gaussian kernel $k_h(u)=(2\pi h^2)^{-1/2} \exp(-u^2/2h^2)$.
+In all models, we initialize $\bfU$ and $\bfV$ with Gaussian noise with standard deviation $\sigma/\sqrt{d}$ where $\sigma=0.1$ in all datasets~\citep{rendle2022revisiting}
+and tune $\beta_0$ and $\lambda$.
+We set $\alpha=0.3$ in \cref{eq:cvar-mf} and \cref{eq:cts-cvar-mf}.
+For \safer, we also search the bandwidth $h$ and set the number of NR iterations as $L=5$.
+For \cvarmf, we tune a global learning rate for all variables in the batch subgradient method.
+For \multvae, we tune the learning rate, batch size, and annealing parameter.  
+For \ML and \MSD, we use the sub-sampled NR algorithm in the $\xi$ step with sampling ratio $|\calU_b|/|\calU|=0.1$ for \safer.
+The dimensionality $d$ of user/item embeddings is set to $32$, $256$, and $512$ for \MLs, \ML, and \MSD, respectively; for \multvae, we use a three-layer architecture $[|\calV| \rightarrow d \rightarrow d-1 \rightarrow |\calV|]$ because the encoded representation can be viewed as $d$-dimensional user embeddings with an auxiliary dimension of one for the bias term in the last fully-connected layer.
+During the validation and testing phases,
+each method optimizes an embedding (i.e., $\bu$) of each user based on the user's 80\% interactions while fixing trained $\bfV$, and predicts the scores for all items.
+Notably, for each testing user,
+\cvarmf and \safer solve the objective of \ermmf in \cref{eq:erm-mf} as each user's subproblem is separable and can be solved independently.
+Our source code is publicly available at \url{https://anonymous.4open.science/r/safer2-BC1B}.
+\subsection{Results}
+\paragraph{Benchmark evaluation.}
+The evaluation results for the three datasets are summarized in \cref{table:benchmark-summary}.
+For the semi-worst-case scenarios ($\alpha=0.3$), \safer shows excellent quality in most cases, whereas baselines exhibit a decline in some cases.
+The quality of \cvarmf deteriorates in all settings, emphasizing the advantage of our smoothing approach.
+The average-case performance ($\alpha=1.0$) of \safer is also remarkable, which may be due to its robustness and generalization ability for limited testing samples.
+In fact, for the largest \MSD with $50{,}000$ testing users, \safer performs slightly worse than \ials in R@$50$ with $\alpha=1.0$.
+To break down the above results of \ML and \MSD, \cref{figure:quantile-vs-quality} compares the relative performance of each method with respect to \ials at each quantile level $\alpha$.
+Here, because the instances of R@$K$ with $\alpha$ vary on different scales depending on $K$ and $\alpha$,
+we show the relative performance of each method over \ials, obtained by
+dividing the method's performance by that of \ials,
+in the y-axis of each figure.
+We can see the clear improvement of \safer for smaller $\alpha$ while it maintains the average performance.
+It is particularly remarkable that \safer outperforms \multvae in terms of R@$50$ for tail users in \ML.
+
+\paragraph{Robustness.}
+Considering the unexpected improvement of \safer for the average scenario on \MLs,
+we conduct further analysis of the average performance for limited testing users.
+We repeatedly evaluate each model using the aforementioned protocol on $50$ data splits independently generated from \MLs with different random seeds.
+This evaluation procedure can be considered as a nested cross-validation~\citep{cawley2010over} with $50$ outer folds and $2$ inner folds.
+The resulting relative performances of \safer over \ermmf and \ials\footnote{We omitted \cvarmf and \multvae as this protocol is costly due to their slow convergence.} are shown
+in \cref{figure:robustness},
+with each point indicating the ratio of testing measurements for a particular data split.
+Each measurement is obtained by taking an average of $10$ models with different initialization weights on the same split.
+\safer generally exhibits a superior quality, even for the average cases.
+Furthermore, its advantage in the case with $\alpha=0.3$ highlights the robustness of the proposed approach.
+
+\input{tables/summary_table}
+\begin{figure}[t]
+  \begin{minipage}{1.0\linewidth}
+    \capstart
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/quantile_vs_ratio_50_100.pdf}
+    \caption{Relative performance of each method over \ials for each quantile level.}
+    \label{figure:quantile-vs-quality}
+  \end{minipage}
+  \begin{minipage}{1.0\linewidth}
+    \capstart
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/robustness_ratio.pdf}
+    \caption{Distributions of relative performances of \safer over \ermmf and \ials on \MLs.}
+    \label{figure:robustness}
+  \end{minipage}
+\end{figure}
+\paragraph{Runtime comparison.}
+\begin{wraptable}{r}[0pt]{0.35\linewidth}
+  \scriptsize
+  \capstart
+  \caption{Runtime per epoch.}
+  \label{table:runtime-comparison}
+  \centering
+  \begin{tabular}{@{}c|c|c@{}}
+    \hline
+    & \ML  &  \MSD \\
+    \hline
+    \textbf{Models} & Runtime/epoch & Runtime/epoch \\
+    \hline
+    \ials   & $3.16$ sec  & $53.5$ sec \\
+    \multvae  & $9.06$ sec  & $112.5$ sec \\
+    \cvarmf & $1.67$ sec  & $25.2$ sec \\
+    \safer  & $3.45$ sec  & $57.0$ sec \\ 
+    \bottomrule
+  \end{tabular}
+\end{wraptable}
+
+The runtime per epoch of each method\footnote{We omitted \ermmf as it is nearly identical to \ials.}
+is shown in \cref{table:runtime-comparison}.
+All experiments of MF-based methods (i.e., \ials, \ermmf, \cvarmf, and \safer) are performed using our multi-threaded C++ implementation, originally provided by \citet{rendle2022revisiting}, which utilizes Eigen to perform vector/matrix operations that support AVX instructions.
+The reported numbers are the averaged runtime through $50$ epochs
+measured using 86.4 GB RAM and Intel(R) Xeon(R) CPU @ 2.00GHz with 96 CPU cores.
+We implemented \multvae using PyTorch and utilized an NVIDIA P100 GPU to speed up its training. 
+We here consider a variant of \cvarmf with the Adam preconditioner~\citep{kingma2014adam} as a baseline.
+The runtime of \safer is competitive to \ials, which is the most efficient CF method.
+\cvarmf is faster than \safer and \ials in terms of runtime per epoch because it is free from the cubic dependency on $d$.
+However, as shown in \cref{figure:walltime},
+\cvarmf requires much more training epochs to obtain acceptable performance even with the Adam preconditioner;
+it has not converged yet even with $50$ epochs while \ials and \safer converge with around $10$ epochs.
+\multvae is inefficient in terms of both runtime/epoch and training epochs even with GPU; it thus shows very slow convergence in terms of wall time (the right side of \cref{figure:walltime}).
+These results show that \safer enables efficient optimization in terms of both runtime and convergence speed.
+
+\paragraph{Convergence profile.}
+Lacking a theoretical convergence guarantee, we empirically investigate the training behavior of \safer.
+\cref{figure:convergence-profile} demonstrates the effect of bandwidth $h$ on the convergence profile of \safer.
+The top row of the figures shows the residual norms of each block at each step, while the bottom row illustrates the validation measures.
+We observe that setting a small bandwidth (i.e., $h=0.01,0.05$) impedes convergence;
+in particular, the case with $h=0.01$, which almost degenerates to the non-smooth CVaR, experiences fluctuation in residual norms and ranking quality.
+By contrast, a large bandwidth (i.e., $h=0.18,1\mathrm{e}{16}$) ensures stable convergence, whereas $h=1\mathrm{e}{16}$, which is reduced to ERM, does not achieve optimal performance in semi-worst-case scenarios.
+These results support that convolution-type smoothing is vital for \safer.
+
+\begin{figure}[t]
+  \begin{minipage}{0.93\linewidth}
+    \capstart
+    \centering
+    \includegraphics[width=0.93\linewidth]{figures/walltime.pdf}
+    \caption{
+      Ranking quality vs. training epochs/wall time on \ML (top) and \MSD (bottom).
+    }
+    \label{figure:walltime}
+  \end{minipage}
+  \begin{minipage}{0.93\linewidth}
+    \capstart
+    \centering
+    \includegraphics[width=0.93\linewidth]{figures/convergence_bw.pdf}
+    \caption{Convergence profile of \safer with different bandwidth $h$ on \ML.}
+    \label{figure:convergence-profile}
+  \end{minipage}
+\end{figure}
+
+
+\section{Conclusion}
+
+Towards the modernization of industrial recommender systems, where the engagement of tail users is vital for business growth, 
+we presented a practical algorithm
+that ensures high-quality personalization for each individual user
+while maintaining scalability for real-world applications. 
+Our algorithm called \safer overcomes non-smoothness and non-separability in CVaR minimization
+by using convolution-type smoothing
+which is the essential ingredient to obtain its separable reformulation and attain scalability over two dimensions of users and items.
+Compared to the celebrated \ials,
+our \safer is scalable to the same extent yet exhibits superior semi-worst-case performance without sacrificing average quality.
+
+\newpage
+
+
+
+
+

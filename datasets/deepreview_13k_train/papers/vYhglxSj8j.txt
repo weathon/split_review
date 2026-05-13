@@ -1,0 +1,327 @@
+\title{CodeChain: Towards Modular Code Generation Through Chain of Self-revisions with Representative Sub-modules}
+
+\begin{abstract}
+Large Language Models (LLMs) have already become quite proficient at solving simpler programming tasks like those in HumanEval or MBPP benchmarks. However, solving more complex and competitive programming tasks is still quite challenging for these models - possibly due to their tendency to generate solutions as monolithic code blocks instead of decomposing them into logical sub-tasks and sub-modules. %This lack of modularity is a common deficiency across all SoTA inference frameworks (self-refine, self-debug, reflexion, etc). 
+On the other hand, experienced programmers instinctively write modularized code {with abstraction} for solving complex tasks, often reusing previously developed modules. To address this gap, we propose CodeChain, a novel \iffalse iterative \fi framework for inference that elicits modularized code generation through a chain of self-revisions, each being guided by some representative sub-modules generated in previous iterations. 
+Concretely, CodeChain first instructs the LLM to generate modularized codes through chain-of-thought prompting. Then it applies a chain of self-revisions by iterating the two steps: 1) extracting and clustering the generated sub-modules and selecting the cluster representatives as the more generic and re-usable implementations, and 2) augmenting the original chain-of-thought prompt with these selected module-implementations %as hints 
+and instructing the LLM to re-generate new modularized solutions. We find that by naturally encouraging the LLM to reuse the previously developed and verified sub-modules, CodeChain can significantly boost both modularity as well as correctness of the generated solutions, achieving relative pass@1 improvements of 35\% on APPS and 76\% on CodeContests. It is shown to be effective on both OpenAI LLMs as well as open-sourced LLMs like WizardCoder. We also conduct comprehensive ablation studies with different methods of prompting, number of clusters, model sizes, program qualities, etc.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+It has been a long-standing goal in AI to develop systems that can generate  executable and functionally correct computer programs to solve complex problems \citep{Zohar71}. In recent years, we have witnessed unprecedented progress in this field, specifically with  the remarkable success of large pretrained language models or LLMs \citep{koubaa2023gpt, gpt-j, radford2019language}. 
+Originally developed for natural languages, these models have been extended with a combination of code and text modeling capabilities \citep{roziere2023code, black10gpt, chen2021evaluating}, resulting in good performance in code generation from natural language problem description \citep{li2023starcoder, luo2023wizardcoder, wang2023codet5+}. 
+However, when evaluated on highly complex coding tasks, the current SoTA models still cannot match a skillful developer \citep{hendrycksapps2021, li2022competition, shinn2023reflexion}, mostly due to their naive generation approach. 
+
+Most prior approaches with LLMs adopt a naive generation method in which the models would typically generate the code solution as a single monolithic block of code instead of decomposing the task into logical sub-tasks. Another limit of this naive generation approach is that the models would simply generate a large number of solutions independently, with the hope that one of the solutions would pass all the private test cases \citep{chen2021evaluating, li2023starcoder, austin2021program}.
+More recently, \citet{li2022competition, chen2023codet, zhang2023coder} propose to sub-sample output programs using some forms of feedback from the public test results. 
+However, these approaches assume that the sub-sampled programs could pass the private test cases, even without revising or debugging the programs. 
+Some recent works like \citep{zhang2023self, olausson2023demystifying, le2022coderl, chen2023teaching, chen2023improving, shinn2023reflexion} have addressed this by performing self-revision with LLMs, utilizing feedbacks such as compiler error messages, test outcomes, and natural language explanation to improve the generated solutions. 
+However, these approaches limit to using only independent feedback from individual solutions, neglecting potential collective insights from all generation samples or their sub-components. 
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\textwidth]{figures/sample_codegen_task_v4.pdf}
+\caption{
+\emph{[Top]} An example of a code generation task from CodeContests \citep{li2022competition} where the problem description and public test cases are provided as inputs to the model. 
+\emph{[Down]} We illustrate a typical problem-solving process in which a developer attempts to solve the problem iteratively, revising and reusing parts of their previously developed codes until satisfied. 
+}
+\label{fig:sample_task}
+\end{figure}
+On the other hand, in today’s agile development environment, experienced developers are fully familiar with the concept of modularity in programming. 
+Given a problem, they would instinctively write solutions that are modularized by high-level logical sub-tasks and sub-modules. 
+The developers would then keep testing and analyzing their implementations, altering modular components from their previously developed solutions to efficiently improve their final solutions (see Figure \ref{fig:sample_task}). 
+Inspired by this problem-solving process, we propose \textbf{CodeChain}, a novel inference framework to improve code generation in LLMs through a chain of sub-module based self-revisions (see Figure \ref{fig:method_overview}). 
+Specifically, in CodeChain, to incorporate modularity in code generation, we first introduce chain-of-thought prompting to instruct LLMs to decompose their solutions into modular segments.
+Each modular segment represents an abstract function that is intended for a high-level logical sub-task.
+To leverage this modularity in programs, we propose to further improve the generation process through a chain of self-revisions, each of which is conditioned by a set of sampled sub-modules as follows:
+(i) we first extract the sub-modules found in generated programs and group them into clusters.
+Within each cluster, we sample the centroid sub-modules and treat them as representative and reusable code parts for self-revision.
+(ii) We then augment the original chain-of-thought prompt with these selected sub-modules and instruct LLMs to generate new modularized solutions.
+With this approach, LLMs can receive the collective insights from modular components of all past generation samples to improve their future generations, imitating the problem-solving process of an experienced developer. 
+Our experiments show that CodeChain can significantly boost LLM performance and achieve SoTA performance on challenging code tasks in APPS \citep{hendrycksapps2021} and CodeContests \citep{li2022competition}. 
+Concretely, CodeChain improves the average \emph{pass@1} performance by more than $35\%$ on APPS and $76\%$ on CodeContests. 
+We also observe consistent improvements for both OpenAI LLMs as well as open-sourced LLMs such as WizardCoder \citep{luo2023wizardcoder}.
+We further conducted comprehensive ablation studies, including analysis in single vs. multi-step revisions, feedback types, number of clusters, etc., and derived useful insights behind CodeChain's success.  
+
+
+\section{Related Work}
+
+Broadly related to our work is the research of large Transformer-based language models (LLMs) \citep{koubaa2023gpt, brown2020language, radford2019language, gpt-j, touvron2023llama}. 
+Originally designed for natural language processing, these models have been extended to learn from large-scale code data and become proficient in understanding contexts and generating outputs in programming languages \citep{roziere2023code, chen2021evaluating, li2023starcoder, gunasekar2023textbooks, wang2023codet5+, nijkamp2023codegen2}.
+Complementing the long-standing code generation research \citep{gulwani2012spreadsheet, kurach2015neural, devlin2017robustfill, parisotto2016neuro}, LLMs can generate programs of more general-purpose programming languages, correctly following programming syntactic rules \citep{codexglue, clement-etal-2020-pymt5} and solving simple coding problems with reasonable accuracy \citep{Lai2022DS1000, chen2021evaluating, austin2021program}. 
+
+In more direct relevance to our work is the recent line of work for improving code generation qualities through output feedback. 
+\citet{chen2021evaluating} introduced a simple filtering approach by selecting only output samples that successfully pass the public test cases. 
+AlphaCode \citep{li2022competition}, CodeT \citep{chen2023codet}, and MBR-Exec \citep{shi-etal-2022-natural} proposed to generate more test cases and use more sophisticated rule-based methods to rank generation samples by their execution behaviors. 
+LEVER \citep{ni2023lever}, Coder-Reviewer \citep{zhang2023coder} and Code Rankers \citep{inala2022faultaware} follow a similar principle but introduce more model-based ranking methods. 
+
+Recently, more related works have been proposed to boost generation quality through iterative self-revisions.
+\citet{zhang2023self} utilizes test outcomes from public test cases as a form of feedback for models to self-revise their codes.
+Self-correct \citep{welleck2023generating} and CodeRL \citep{le2022coderl} introduce secondary models to predict the correctness of output programs and revise them accordingly.  
+Self-debug \citep{chen2023teaching}, Sef-refine \citep{madaan2023self}, and Reflexion \citep{shinn2023reflexion} propose to facilitate better code revision with synthetic natural language explanation or reflection self-generated by LLMs. 
+Self-repair \citep{olausson2023demystifying} and ILF \citep{chen2023improving} follow a similar strategy but highlight the use of natural language explanation provided by human experts.
+\begin{figure}[t]
+\centering
+\includegraphics[width=1\textwidth]{figures/method_v3.pdf}
+\caption{
+An overview of CodeChain:
+a pretrained LLM is first instructed with chain-of-thought prompting to generate a set of modularized solutions. 
+Generated sub-modules are then extracted from potentially correct solutions and grouped into different {semantic} clusters. 
+The cluster centroids are selected as representative sub-modules to condition the next self-revision round. 
+The model is instructed to reuse or adapt these modules into its revised solutions.
+}
+\label{fig:method_overview}
+\end{figure}
+
+
+\section{CodeChain Framework}
+
+\subsection{Code Generation Task}
+We treat code generation as a sequence-to-sequence task, which consists of a problem description as an input sequence $D$ and an output sequence of a flattened solution program: $\hat{W}=(\hat{w}_1, ...,\hat{w}_T)$ with $\hat{w}_t \in \mathcal{V}$.
+Typically, a language model $\theta$ generates a code sequence by autoregressively sampling tokens $\hat{w}_t$ from the parameterized conditional distribution $p_\theta (.| \hat{w}_{1:t-1}, D)$.
+Generated codes are evaluated against (private) test cases to check the execution correctness \citep{hendrycksapps2021, chen2021evaluating, li2022competition}. 
+The test cases comprise a set of input-output pairs $\{(i_j, o_j)\}_{j=1}^{J}$. An output program $\hat{W}$ is correct when $\hat{W}(i_j)=o_j$ for all $j \in \{1,...,J\}$.
+If the problem description contains some test cases, we treat these as public test cases: $\{(i^{\prime}_m, o^{\prime}_m)\}_{m=1}^{M}$ (usually $M\ll J$).
+Models have the option to use these public test cases to improve its generation. 
+
+\subsection{Modular Code Generation with CoT prompting}
+
+LLMs, especially the instruction-tuned ones, can follow  complex natural language instructions describing novel unseen tasks \citep{ouyang2022training, touvron2023llama2, wang2023codet5+}. They have shown remarkable performance in many reasoning-based tasks when they are instructed to solve a problem step-by-step, i.e., chain-of-thought (CoT) prompting \citep{zhou2023leasttomost, wei2022chain, kojima2022large}.
+We propose to adapt this technique to generate codes by instructing the models to first outline the required sub-modules, generating only their function headers and docstrings describing their intended usage. 
+The model is then instructed to implement the modules and ultimately combine them into a final solution. 
+Following this generation scheme, we can define the output distributions:
+\begin{align}
+\hat{S_i} &\sim p_\theta (.| \hat{S}_{1:i-1}, D) \hspace{3.3em} \Rightarrow \text{sub-modules, including the function headers and docstrings} \label{eq:sub}\\ 
+\hat{w}_t &\sim p_\theta (.| \hat{w}_{1:t-1}, \{\hat{S}_i\}, D) \hspace{0.8em} \Rightarrow \text{tokens in final solution}   
+\end{align}
+where $\{\hat{S}_i\}$ is the set of sub-modules outlined by the model. We append the instruction with a one-shot demonstration. 
+Figure \ref{fig:cot} presents one example of the instruction prompt. 
+
+g., sub-modules, similarly to how a developer often tackles a challenging coding task by breaking a solution into modular components.
+Though this is a more pragmatic style of code-development, empirically we have found that this prompting approach can adversely impact the correctness of the generated end-to-end solutions (shown later in Table \ref{tab:apps_ablation}). This is expected as most of the current LLMs are not pretrained to generate perfectly functioning modularized programs. To address this, we introduce Chain of Self-Revisions which allows the LLM to iteratively revise a solution by re-using or adapting some of the representative sub-modules from the previous iterations. Further, we also establish empirically that our self-revision technique indeed benefits more from this modularized style of code generation.  
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=1\textwidth]{figures/CoT_short.pdf}
+\caption{
+An example of  CoT prompting for code generation in CodeChain. 
+The model is required to first outline the solution in terms of sub-module signatures, each of which is intended for solving a high-level sub-task in the final solution. 
+}
+\label{fig:cot}
+\end{figure}
+
+\subsection{Select Representative Sub-modules Across Multiple Samples}
+\label{subsec:submodule}
+
+Prior studies have demonstrated the benefits of generating multiple samples and selecting the best ones based on different ranking or scoring schemes \citep{li2022competition, chen2023codet, zhang2023coder}.
+A common approach is to simply select the representative candidates based on their execution results on the public test cases \citep{li2022competition, chen2021evaluating}. 
+However, all prior methods only select end-to-end program candidates.
+On challenging coding tasks, it is extremely rare to obtain such program-level correctness and the selected candidates are still likely to fail when tested on private test cases. Thus, we propose to perform selection at sub-module level instead of program level. 
+
+Specifically, given a generation budget of $N$ samples, we extract and combine the set of sub-modules  across all samples $\hat{S} = \{\{\hat{S}_i\}_n\}$ for all $n \in \{1,...,N\}$, where $\{\hat{S}_i\}_n$ is the set of sub-modules in the $n$-th generated sample. We then perform $K$-mean clustering on this set of sub-modules to group them into $K$ clusters.
+For each of these clusters, we then extract a ``centroid'' (representative) sub-module $\hat{C}_k$ that is closest to the true centroid of the cluster in the embedding space:
+\begin{align}
+    \hat{C}_k = \argmin_{\hat{S}^{k}} \| \mathcal{S}_i^k - \mu_k \|
+\end{align}
+where $\mathcal{S}_i^k$ is the embedding representation of sub-module $\hat{S}_i$ in cluster $k$ and $\mu_k$ is the centroid of cluster $k$. 
+By selecting these ``centroid'' sub-modules, we can sample the most semantically representative and re-usable functions across all samples. 
+Note that in cases where public test cases are available, one can filter out any failed samples first before further applying our selection method. 
+
+\subsection{Improve Code Generation with Chain of Self-Revisions}
+\begin{wrapfigure}{r}{0.4\textwidth}
+  \begin{center}
+    \includegraphics[width=0.4\textwidth]{figures/revise_prompt_v1.pdf}
+  \end{center}
+  \caption{
+ An example of prompting to self-revise programs.
+ The original instruction from CoT prompting (Fig. \ref{fig:cot}) is combined with this instruction and the model is provided with a set of representative sub-modules (<<sub-modules>>) selected from previously generated samples.
+ 
+}
+\label{fig:revise_prompt}
+\end{wrapfigure}
+Prior approaches improved code generation by regenerating code conditioned by different types of feedback, ranging from compiler error messages to natural language explanation of the output programs \citep{chen2023improving, madaan2023self, chen2023teaching, shinn2023reflexion, le2022coderl}. 
+However, these methods focus on the feedback extracted only per individual generation sample.
+
+We propose to utilize a new type of feedback in the form of clustered sub-modules extracted from all the $N$ generated samples (as described in Sec. \ref{subsec:submodule}).
+Augmenting our original CoT prompt with the implementations of these representative sub-modules can explicitly encourage the LLM to re-use or adapt these functions when generating the code conditioned on that prompt in the subsequent revision rounds. 
+Specifically, in revision round $R$, the output token is sampled from the conditional distribution: 
+\begin{align}
+\hat{w}_t^{R} \sim p_\theta (.| \hat{w}^{R}_{1:t-1}, \{\hat{S}_i^{R}\}, \hat{C}^{R-1}, D)   
+\end{align}
+where $\hat{C}^{R-1} = \{\hat{C}_k^{R-1}\}_{k=1}^{K}$ is the set of all centroid sub-modules from the previous generation round $R-1$.
+In round $R$, the new sub-modules are regenerated by the conditional probability (revised version of Eq. \ref{eq:sub}): 
+\begin{align}
+\hat{S}_i^{R} \sim p_\theta (.| \hat{S}^{R}_{1:i-1}, \hat{C}^{R-1}, D)
+\end{align}
+
+We enable this self-revision procedure by prompting the LLM with an additional instruction. Figure \ref{fig:revise_prompt} presents an example of the prompt with the new instruction. 
+This style of self-revision with selective sub-modules is reminiscent of the \emph{code reuse} process. In today's agile code-development environment, developers typically re-use or adapt snippets of previously developed code in order to program more modularly, accurately, and efficiently.
+Inspired by this process and combined with our representative sub-module selection method, our CodeChain framework allows the LLM to iteratively improve their generations more efficiently through a chain of reuse-based self-revisions. 
+
+
+\section{Experiments}
+
+\input{tables/apps_results}
+\subsection{Experimental Setups}
+\textbf{Benchmarks.} 
+We demonstrate the efficacy of CodeChain on challenging code generation tasks, specifically, on two major benchmarks: APPS \citep{hendrycksapps2021}, and CodeContests \citep{li2022competition}. A majority of test samples from these benchmarks are curated from competitive programming platforms such as Codeforces  \footnote{\url{https://codeforces. 
+ 
+
+\textbf{Evaluation.} We followed \citep{hendrycksapps2021, chen2021evaluating, li2022competition} and evaluated the models using the passing rate metric \emph{pass@k}, defined as the percentage of problems solved by using \emph{k} generated programs per problem. 
+We focused mainly on \emph{pass@1} in this work and followed \citep{chen2021evaluating} to calculate the normalized passing rate given a generation budget of $N$ outputs per problem. 
+To apply CodeChain, we fixed the budget in each generation/revision round to $N=20$ generation samples per problem.
+After the first round of direct generation, we let the models self-revise generated codes for up to $5$ rounds of revision. 
+On APPS and CodeContests, we reported the results on the test split following the best self-revision round performance on the validation set.
+Across all benchmarks, we fixed the one-shot sample in CoT prompting and revision prompting. 
+We randomly selected this one-shot sample from the APPS training split
+\textbf{Base language models.}
+We applied CodeChain to both open-sourced and closed-sourced pretrained LLMs, including OpenAI's GPT3.5 and GPT4 \citep{koubaa2023gpt}, and WizardCoder \citep{luo2023wizardcoder}.
+We evaluated different versions of WizardCoder, with model sizes ranging from 1B to 34B parameters.
+WizardCoder models are instruction-tuned from strong foundational code LLMs, including StarCoder \citep{li2023starcoder} and Code LLaMA \citep{roziere2023code}. 
+For OpenAI models, we obtained the generation samples by prompting through the public API access \footnote{\emph{gpt-3.5-turbo-16k} and \emph{gpt-4} on \url{https://platform.openai.
+For WizardCoder, we utilized the HuggingFace-hosted model parameters \citep{wolf2019huggingface} and vLLM \citep{kwon2023efficient} to generate programs. 
+We adopted a default temperature of $0.6$ to generate output tokens and a max output length of $2048$ tokens. 
+Finally, to fairly compare LLM generation capabilities, we chose to use StarEncoder \citep{li2023starcoder} to embed sampled sub-modules throughout all experiments. 
+
+\subsection{Experimental Results}
+\textbf{Results on APPS.} We compare our approach with prior LLM baselines like Codex \citep{chen2021evaluating}, CodeT5 \citep{codet5}, and code-davinci, as well as code-revision methods such as Self-edit \citep{zhang2023self}, CodeRL \citep{codet5, le2022coderl}, and Self-repair \citep{olausson2023demystifying}. 
+Table \ref{tab:apps_test} shows that CodeChain, when applied with base LLMs such as GPT3.5 and WizardCoder 15B, can achieve significant performance gains by the \emph{pass@k}. 
+Specifically, CodeChain can achieve $10.50\%$ \emph{pass@1} with WizardCoder as the base model, and $30.24\%$ \emph{pass@1} with OpenAI GPT3.5 as the base model, establishing a new SoTA result on APPS. 
+Previous works \citep{chen2021evaluating, li2022competition} introduced additional performance results by filtering out generation samples that fail public tests and computed \emph{pass@k} on the filtered set. 
+ 
+Table \ref{tab:apps_test_filtered} shows that when evaluated on filtered code samples, our CodeChain+GPT3.5 can achieve SoTA results across all levels of problem difficulty with an average of $35.34\%$ \emph{pass@1}.
+
+\input{tables/apps_self_repair_results}
+\input{tables/apps_val_results_ablation_short}
+From Table \ref{tab:apps_test}, when compared with related approaches such as Self-edit and CodeRL, we observed significant relative performance gains when using CodeChain. 
+In Table \ref{tab:apps_self_repair}, following  \cite{olausson2023demystifying}, to compare with Self-repair, we evaluated our approach over the same test subset of $20$ samples (14/3/3 samples of introductory/interview/competition level), using both GPT3.5 and GPT4 as base models. 
+We observed that CodeChain can improve the performance with both base models, with more significant gains using GPT4.
+Specifically, CodeChain+GPT4 can achieve a SoTA result of $61.50\%$ \emph{pass@1} on average, even outperforming Self-repair+GPT4 with human feedback. 
+
+\begin{figure}
+\begin{minipage}[c]{0.74\linewidth}
+\includegraphics[width=\linewidth]{figures/ablation_baselines_v1.pdf}
+\caption{
+APPS validation results with chain of self-revisions: we tested CodeChain+GPT3.5 for 5 self-revision rounds and reported \emph{pass@1} in each problem difficulty level. 
+Using GPT3.5 as base model, we compared with related approaches, including Self-debug (with unit test (UT) feedback or explanation (expl)) \citep{chen2023teaching} and Reflexion \citep{shinn2023reflexion}. 
+}
+\label{fig:ablation_multi_rounds}
+\end{minipage}
+\hfill
+\begin{minipage}[c]{0.23\linewidth}
+\includegraphics[width=\linewidth]{figures/apps_valid_cluster_numbers_v2.pdf}
+\caption{
+we tested CodeChain+GPT3.5 on different setups of cluster numbers and reported the average relative \emph{pass@1} improvements from direct generation (round $0$). 
+}
+\label{fig:ablation_num_clusters}
+\end{minipage}%
+\end{figure}
+\textbf{Analysis on single-round self-revision}.
+To understand the benefits of CodeChain, we conducted experiments with different variants on the validation split of APPS. 
+Table \ref{tab:apps_ablation} presents the results on single-round self-revision by $3$ main aspects: prompting, filtering by public tests, and sampling methods for conditional revisions. 
+First, we observed that without self-revisions (i.e. direct generation), CoT prompting actually negatively affects the model performance as compared to normal prompting. 
+ 
+However, after applying self-revision, we observe that the modularized approach is better, achieving better performance gains than non-modularized solutions. 
+
+Secondly, we found that the best strategy to select representative codes for conditional revision is through clustering.
+This method can reduce noisy data points and create a better form of feedback to improve the generated codes. 
+Finally, we observed that clustering alone is not sufficient to select the optimal representative samples.
+Additional filtering by public tests is needed to first shift the output distribution to more likely correct samples before clustering the outputs. 
+To avoid the need for public test cases, we suggest exploring better embedding models that can group output samples not just by their programming semantics but also by their functional correctness. 
+
+\textbf{Analysis on chain of self-revisions.}
+To analyze the trend of model performance over a chain of self-revisions, we monitored the passing rates of direct generation and $5$ subsequent self-revision rounds. 
+\begin{wrapfigure}{r}{0.29\textwidth}
+  \begin{center}
+    \includegraphics[width=0.29\textwidth]{figures/apps_val_open_source_ablation_v2.pdf}
+  \end{center}
+  \caption{
+  APPS validation \emph{pass@1} results of WizardCoder-1B to 34B. The dotted lines are direct generation results. 
+}
+\label{fig:apps_val_wizard}
+\end{wrapfigure}
+Figure \ref{fig:ablation_multi_rounds} presents relatively consistent improvements in all levels of problem difficulties, with optimal performance gain obtained in revision round $4$ and a slight performance drops in round $5$. 
+One possible reason for these performance drops is that the selected output samples become overfitting to the small set of available public test cases, negatively affecting the passing rates of subsequently revised codes on a more extensive private hidden test-suite.
+
+Secondly, we also observed that on different levels of problem difficulties, CodeChain has different rates of performance improvement.
+Specifically, we found that more challenging problems (i.e. competition and interview level) benefit more from CodeChain than basic problems (i.e. introductory level).
+Similar observations can be seen on open-sourced WizardCoder \citep{luo2023wizardcoder}, with clearer performance trends on $7$B, $15$B, and $34$B model sizes (see Figure \ref{fig:apps_val_wizard}). 
+
+\textbf{Analysis by types of feedback.}
+In Figure \ref{fig:ablation_multi_rounds}, we also observed that CodeChain can achieve better performance than other related self-revision approaches using other types of feedback, such as test outcomes with natural language explanations \citep{chen2023teaching} or reflection \citep{shinn2023reflexion}. 
+Note that CodeChain can be complemented with other self-revision approaches such as Self-debug by combining different feedback types and selecting more diverse and representative sub-modules, even on generation samples that initially fail public tests.
+
+\textbf{Analysis by number of representative sub-modules.}
+One hyper-parameter of CodeChain is the number of clusters in each round of self-revision. 
+We experimented with $4$ different scheme: 
+(i) fixed number of clusters across all rounds to $K$;
+(ii) decreasing order number of clusters: $\{K_i\}=\{K, K-1,...,1\}$;
+(iii) increasing order number of clusters: $\{K_i\}=\{K, K+1,...\}$;
+(iv) dynamic number of clusters based on the silhouette coefficients \citep{rousseeuw1987silhouettes}.
+We selected $K=5$ for all experiments. 
+From Figure \ref{fig:ablation_num_clusters}, we observed that the best approach to set the number of clusters is to follow a decreasing order. 
+This scheme offers the models more diverse centroid sub-modules in the beginning with a larger number of clusters. 
+Towards subsequent revision rounds, a smaller number of clusters is more beneficial as the sampled sub-modules become more and more closely semantically similar over time.
+We found that this scheme is reminiscent of the model training paradigm moving from \emph{exploration} to \emph{exploitation}, as the models become more confident in their generation. 
+
+ \begin{figure}
+\begin{minipage}[c]{0.75\linewidth}
+\resizebox{1.0\linewidth}{!} {
+\input{tables/codecontest_results_v1}
+}
+\end{minipage}
+\hfill
+\begin{minipage}[c]{0.22\linewidth}
+\includegraphics[width=\linewidth]{figures/codecontests_valid_v2.pdf}
+\end{minipage}%
+\caption{CodeContests results by \emph{pass@1} (\%):
+we report the results of CodeChain using WizardCoder-15B and GPT3.5 as base models.
+Left: test and validation results. 
+Right: validation results over sequential self-revision rounds. 
+The dotted lines are direct generation results. 
+}
+\label{fig:codecontest_val}
+\end{figure}
+
+\textbf{Results on CodeContests.} Figure \ref{fig:codecontest_val} presents the results of CodeChain with WizardCoder-15B and GPT3.5 as the base models. 
+We observed that on both \emph{pass@1} and \emph{pass@5}, CodeChain can achieve significant performance gains as compared to direct generation on the corresponding base models. 
+Applying additional filtering method \citep{chen2023codet}, CodeChain+GPT3.5 can achieve the SoTA results of $13.75\%$ \emph{pass@1} on the test split. 
+As opposed to APPS where optimal performance was reached at revision round $4$, from this validation results we noted  that the performance kept improving till the final revision round.
+Different from APPS, we used the official public test cases available in the CodeContests benchmark. 
+\begin{wrapfigure}[19]{r}{0.40\textwidth}
+  \begin{center}
+    \includegraphics[width=0.40\textwidth]{figures/qualitative_results.pdf}
+  \end{center}
+  \caption{
+  Distribution of output samples (\%) by code qualities in the APPS test subset. 
+  We obtained the qualitative scores by prompting GPT4 with specific evaluation instructions.}
+\label{fig:apps_qualitative}
+\end{wrapfigure}
+These test cases are generally more diverse than the ones we manually extracted in APPS, and hence, make the revised codes less overfitting even in the $5^{th}$ revision round.   
+
+\textbf{Qualitative Results.} To understand the modularity and reusability of CodeChain generation, we conducted experiments to evaluate these qualities on randomly sampled generated programs. 
+Specifically, we prompted GPT4 with instructions to rate output samples following a Likert scale from $0$ to $5$ where $5$ is the highest score for optimally modular/ reusable programs. 
+ 
+In this experiment, we reused the GPT3.5 generated samples for the set of $20$ random test tasks from Table \ref{tab:apps_self_repair}. 
+Figure \ref{fig:apps_qualitative} shows the distribution of output samples by Likert scores in each quality.
+We observed that when using CodeChain, GPT3.5 is more likely to generate programs with high levels of modularity and reusability, with the majority of outputs rated $3$ to $5$ on the Likert scale. 
+This is significantly higher than the conventional direct generation approach, with about $80\%$ of time generating non-modular or non-reusable codes (i.e. score $0$). 
+ 
+
+
+\section{Conclusion}
+
+We present CodeChain, a novel inference framework to improve code generation through a chain of self-revisions and sampling of representative sub-modules. 
+In CodeChain, we introduce chain-of-thought prompting to generate more modularized programs, which creates natural boundaries for the models to sample parts of the solutions for reuse and revision.
+In each revision step, we iterate between selecting representative sub-modules and augmenting chain-of-thought prompting with these selected sub-modules. 
+Our experiments indicate the significant performance improvement of CodeChain when using OpenAI GPT or open-sourced WizardCoder as the base models, achieving new SoTA results on APPS and CodeContests benchmarks. 
+We provided comprehensive ablation studies to understand the contributing factors behind CodeChain's outstanding results.
+
+
+
+
+
+

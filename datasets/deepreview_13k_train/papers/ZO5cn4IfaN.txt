@@ -1,0 +1,353 @@
+\title{CO2: Efficient Distributed Training with Full Communication-Computation Overlap}
+
+\begin{abstract}
+
+The fundamental success of large language models hinges upon the efficacious implementation of large-scale distributed training techniques. Nevertheless, building a vast, high-performance cluster featuring high-speed communication interconnectivity is prohibitively costly, and accessible only to prominent entities. In this work, we aim to lower this barrier and democratize large-scale training with limited bandwidth clusters. We propose a new approach called \textbf{\textit{CO2}} that introduces local-updating and asynchronous communication to the distributed data-parallel training, thereby facilitating the full overlap of \textbf{\textit{CO}}munication with \textbf{\textit{CO}}mputation. CO2 is able to attain a high scalability even on extensive multi-node clusters constrained by very limited communication bandwidth. We further propose the staleness gap penalty and outer momentum clipping techniques together with CO2 to bolster its convergence and training stability. Besides, CO2 exhibits seamless integration with well-established ZeRO-series optimizers which mitigate memory consumption of model states with large model training. We also provide a mathematical proof of convergence, accompanied by the establishment of a stringent upper bound. Furthermore, we validate our findings through an extensive set of practical experiments encompassing a wide range of tasks in the fields of computer vision and natural language processing. These experiments serve to demonstrate the capabilities of CO2 in terms of convergence, generalization, and scalability when deployed across configurations comprising up to 128 A100 GPUs. The outcomes emphasize the outstanding capacity of CO2 to hugely improve scalability, no matter on clusters with 800Gbps RDMA or 80Gbps TCP/IP inter-node connections.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Distributed optimization is crucial for the efficient training of large-scale deep neural networks. Mini-batch parallel optimization methods~\citep{goyal2017accurate,li2014scaling} like stochastic gradient decent (SGD) with distributed data parallel (DDP) paradigm are commonly used, but communication overhead can pose significant challenges when scaling out to larger GPU clusters. Existing techniques leverage gradient bucketing to partially overlap communication with backward computation to enhance training efficiency, but residual overhead remains a challenge in scenarios with large model sizes and limited inter-node communication bandwidth.
+
+Various strategies have been proposed to address the communication-related issues. These strategies can be classified into three following categories:
+1) \textit{Communication Compression in Single Iteration}, which comprises techniques such as gradient sparsification~\citep{Shi2019,Li2022,Barnes2020} and gradient quantization~\citep{Alistarh2016,Tang2021,Li2021,Dettmers2021}. These methods accelerate distributed training by minimizing the volume of communication traffic during each iteration.
+2) \textit{Communication Frequency Reduction} is represented by work such as~\citep{Lin2018,Wang2019,Wang2020,wang2021cooperative}, which maintains the communication volume per iteration but lessens the frequency of communication events.
+3) \textit{Communication and Computation Overlapping} aims to overlap communication with computation, either in a single step or across multiple steps. For instance, the distributed module in PyTorch~\citep{Li2020} leverages gradient bucketing to partially overlap gradient all-reducing with the backward pass. Additionally, asynchronous distributed training methods~\citep{Dutta2021,Cohen2021,Mishchenko2022,Su2022,Koloskova2022} synchronize the transmission of stale gradients with the latest local computation on each worker. 
+
+These communication-efficient approaches improve convergence speed but often yield sub-optimal final optimization outcomes. None of these methods have achieved complete overlap of communication with computation, \ie 100$\%$ scalability throughout the entirety of the training process on a large cluster, especially under varying communication conditions while preserving the performance.
+In this paper, we propose \name which enables complete overlap of {\textit{Co}}munication with {\textit{Co}}mputation. This is made possible through the use of the local updating strategy and asynchronous communication, where each worker node independently optimizes its model parameters without requiring synchronization with other peers at the local updating stage. As shown in Fig. \ref{fig:co2_ppt}, to guarantee parameter consistency across all workers, model parameter synchronization is performed asynchronously after completing every $\tau$ local updates. By selecting appropriate local updating step $\tau$ in accordance with the communication environment, we can achieve full overlap of model parameter synchronization with multiple local computation steps, thereby attaining 100$\%$ scalability.
+Maintaining training stability as well as performance with asynchronous parameter updates is crucial for the success of our method. We introduce two additional techniques: staleness gap penalty and outer momentum clipping. The staleness gap penalty mechanism effectively quantifies and penalizes the discrepancy between different parameter versions during the update of outer momentum. This approach significantly contributes to the overall training stability and performance by addressing the inconsistencies in parameter updates.
+Similarly, outer momentum clipping serves as an essential tool to mitigate the emergence of anomalous values in the outer momentum. This helps prevent extreme values, thus further bolsters the training stability.
+In addition to our empirical findings, we establish robust theoretical convergence bounds. These bounds provide compelling evidence that our proposed framework is capable of achieving a convergence rate that is on par with that of baseline optimizers.
+It is worth noting that \name can seamlessly integrate with widely adopted ZeRO-series optimizers~\citep{rajbhandari2020zero}, which are well-established for their capacity to reduce memory consumption within data-parallel distributed training scenarios. 
+
+We evaluate \name by testing it on various tasks such as image classification, semantic segmentation, point cloud processing, autoregressive language modeling, and bidirectional language modeling. Our thorough assessment demonstrates that \name performs equally well in terms of convergence speed and generalization capabilities when compared to other optimization methods. 
+
+Our primary contributions can be summarized as follows:
+\begin{compactitem}
+\item \textbf{Outstanding scalability.} CO2 enables outstanding scalability by fully overlapping communication with computation. This approach excels in large-scale multi-node clusters even with limited communication bandwidth.
+\item \textbf{Good convergence and generalization performance.} We empirically demonstrate that CO2 achieves convergence and generalization performance that is close to well-established baseline optimizers, such as SGD and Adamw. Our results underscore the robustness of CO2 across a diverse range of tasks and datasets.
+\item \textbf{Theoretical convergence analysis.}
+We provide a rigorous theoretical analysis that guarantees the convergence of CO2. This theoretical foundation enhances our understanding of the practical effectiveness of our approach.
+\item \textbf{Compatibility with ZeRO-series optimizers.} CO2 can integrate with ZeRO-series optimizers to reduce memory usage for large-scale model training.
+\end{compactitem}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/CO2-ppt-improved.pdf}
+    \caption{\textbf{Visualization of CO2 and SGD}. 
+    We exemplify the mechanism of CO2 with a local step count $\tau=2$. This configuration dictates that the outer update starts after every two local steps, concurrently launching an AAR operation on model parameters. This strategy is made to make the full overlap of AAR communication with local computation possible. CO2 can effectively reduce the wall time required for training compared to the conventional SGD in DDP paradigm.}
+    \label{fig:co2_ppt}
+\end{figure}
+
+
+
+\section{Related Work}
+
+\textbf{Local Updating.}
+To our known, local updating in distributed deep learning can date back to \citet{Zhang2016}. Subsequently, extensive research has delved into local updating methods. Local-SGD~\citep{stich2018local} provided rigorous theoretical convergence proof for local updating methods. Post-Local-SGD~\citep{Lin2018} and Overlap-Local-SGD~\citep{Wang2020} reduced communication costs but raised concerns about convergence. SlowMo~\citep{Wang2019} improved convergence stability and Cooperative SGD~\citep{wang2021cooperative} presented a unified framework of communication-efficient SGD algorithms. However, communication overhead remains a challenge. Our proposed \name introduces asynchronism to overlap parameter synchronization and local computation, achieving $100\%$ scalability with good convergence performance.
+
+\textbf{Asynchronism.}
+There is a longstanding history of asynchronous distributed training techniques~\citep{Chen2016}. Recently, \citet{Zhang2015, Barkai2019} have introduced methods that penalize gradient staleness in asynchronous SGD by employing well-defined gap metrics. \citet{Dutta2021} have delved into the trade-offs between staleness and convergence within the context of asynchronous training.
+Moreover, work like \citet{Cohen2021, Mishchenko2022}, through rigorous theoretical proofs and empirical experiments, have established that asynchronous SGD can achieve convergence comparable to that of mini-batch SGD, even in the presence of arbitrary gradient delays. In a related vein, \citet{Su2022} proposed GBA as an approach to seamlessly transition between synchronous and asynchronous training, for recommendation models. \citet{Koloskova2022} provided enhanced convergence guarantees for asynchronous SGD in the context of distributed federated learning. These contributions collectively advance our understanding of asynchronous training techniques in distributed settings. {Our method, as a comparison, only introduces one-step asynchronous staleness in the outer loop, thus obtaining more robust convergence and performance.}
+
+\textbf{Efficient Communication.}
+To improve communication efficiency in synchronizing gradients in distributed training, previous methods often utilized quantization techniques to reduce the communication overhead, such as 1-bit Adam~\citep{Tang2021}, 1-bit LAMB~\citep{Li2021}, and 0/1 Adam~\citep{Lu2022}. In a distinct vein, \citet{assran2019stochastic} proposed stochastic gradient push to perform approximate distributed averaging at each iteration, which offers an alternative dimension for accelerating communication.
+These methods significantly enhance communication efficiency by mitigating communication overhead within a single iteration, which is orthogonal to our proposed method. More substantial benefits can be realized when integrating with these methods.
+
+
+
+\section{Method}
+
+In this section, we start with an overview of our proposed CO2 and share two novel techniques that enhance its convergence and training stability. Additionally, we provide a mathematical proof of convergence, which proves that CO2 is capable of achieving a convergence rate that is comparable to those of previously widely used optimizers.
+\subsection{The Overview}
+For distributed data-parallel training of a large-scale deep neural network, the target can be formulated as:
+\begin{equation}
+\small
+\min_{x} \frac{1}{G}\sum_{i=1}^G \E_{\zeta_i\sim D_i} L^{(i)}(x;\zeta_i),
+\label{eq: formulation}
+\end{equation}
+where the objective is to minimize a function with respect to the parameters $x\in\R^n$. The optimization problem involves a summation over $G$ workers, each indexed by $i$. For each worker $i$, there are loss function $L^{(i)}$ and data samples $\zeta_i$ drawn from the distribution $D_i$.
+
+In the routine DDP training, model parameters are replicated across all workers within the communication group. Each worker $i$ is then provided with distinct batches of data samples and independently performs forward and backward passes to compute distinct losses $L^{(i)}$ and gradients $\bm{g}^{(i)}$.
+To ensure uniformity of model parameters across all workers within the same DDP communication group, the gradients on all workers are exactly synchronized through an \textit{all-reduce} operation, resulting in the aggregated gradient $\bm{g}$, i.e., $\bm{g} = \frac{1}{G}\sum_{i=1}^G \bm{g}^{(i)}$. This aggregated gradient is then utilized to update the model parameters across all workers, ensuring consistency of parameter values across each worker.
+
+\begin{wrapfigure}[27]{R}{0.6\textwidth}
+    \hspace{2mm}
+    \begin{minipage}{0.58\textwidth}
+      \begin{algorithm}[H]
+        \caption{\label{algo:CO2}CO2 Algorithm}
+        \textbf{Input:} Data samples $\bm{\zeta}^{(i)}$ on worker $i$; Inner learning rate $\gamma_t$; Inner loop steps $\tau$; Outer learning rate $\alpha$; Outer momentum factor $\beta$; Outer loop steps $T$; Initial outer momentum $\bm{m}_0=0$.\\
+        \For {$t\in \{0,1,\cdots, {T-1}\}$}
+        {
+          \For{$k\in \{0,1,\cdots, {\tau-1}\}$ on worker $i$}
+          {FP $\&$ BP: $\bm{g}_{t,k}^{(i)}=\nabla L^{(i)}(\bm{x}_{t,k}^{(i)};\bm{\zeta}_{t,k}^{(i)})$\\
+          LU: $\bm{x}_{t,k+1}^{(i)} = \bm{x}_{t,k}^{(i)} - \gamma_t \bm{g}_{t,k}^{(i)}$ 
+          }
+          Launch AAR for $\bm{x}_{t,\tau}^{(i)}$: $AAR(\bm{x}_{t,\tau}^{(i)})$ \\
+          \If {$\text{is\_completed}(AAR(\bm{x}_{{t-1},\tau}^{(i)}))$ is not $True$}
+          {$\bm{x}_{t-1,\tau}=\text{wait}(AAR(\bm{x}_{t-1,\tau}^{(i)}))$}
+          Update staleness gap: $\bm{\Lambda}_{t}=\frac{\|\bm{x}_{t,0}-\bm{x}_{t-1,0}\|}{\tau\|\bm{x}_{t-1,1}-\bm{x}_{t-1,0}\|}+\bm{1}^n$ \\
+          Update one-step stale outer momentum: $\bm{m}_{t} = \beta \bm{m}_{t-1} + \frac{1}{\bm{\Lambda}_{t}} \cdot (\bm{x}_{t-1,0}-\bm{x}_{t-1,\tau})$ \\
+          Update outer iterates: $\bm{x}_{t+1,0} = \bm{x}_{t,0} - \alpha \cdot \text{Clip}(\bm{m}_{t},\phi)$ 
+        }
+      \end{algorithm}
+    \end{minipage}
+  \end{wrapfigure}
+
+Local-updating methods, such as \textit{Local-SGD} or other variants, structure the overall training process into two discernible phases: the inner loop and the outer loop. The inner loop unfolds within each worker and encompasses localized updates. Within this phase, every worker maintains its dedicated set of model parameters, facilitating autonomous updates without the need for gradient synchronization at every step.
+Upon the completion of $\tau$ local updates, the training process transitions to the outer loop. In this phase, an \textit{all-reduce} operation on model parameters is executed to exactly synchronize the model parameters across all computational workers, i.e., $\bm{x} = \frac{1}{G}\sum_{i=1}^G \bm{x}^{(i)}_{t,\tau}$, ensuring convergence alignment. Recent work \citep{Wang2019} introduces additional outer iterates to enhance the convergence of communication-efficient base optimizers, which has been proven effective.
+CO2 introduces asynchronous \textit{all-reduce} on model parameters within the outer loop to achieve full overlap between communication and computation throughout the entire training procedure. 
+As delineated in Algorithm~\ref{algo:CO2}, during the outer iteration $t$, all workers independently perform local updates involving the FP, BP, and LU on their respective worker nodes. The inner loop iterates $\tau$ steps, from $k=0$ to $k=\tau-1$. Notably, during this process, no gradient synchronization takes place among the workers, resulting in distinct model parameters $\bm{x}^{(i)}_{t, \tau}$ on each worker $i$ at the conclusion of the inner loop. This necessitates a synchronization operation to harmonize the model parameters across all workers.
+
+{Consequently, upon the completion of inner loop, \name launches an \textit{all-reduce} operation on \small$\bm{x}^{(i)}_{t,\tau}$\normalsize for each worker $i$ to synchronize them, \ie \small$\text{AAR}(\bm{x}^{(i)}_{t,\tau})$\normalsize. In contrast to conventional methods, this \textit{all-reduce} is asynchronous with subsequent computations, which means the subsequent computations are not dependent upon the results obtained by \small$\text{AAR}(\bm{x}^{(i)}_{t,\tau})$\normalsize. Instead, it leverages the outdated model parameters \small$\bm{x}^{(i)}_{t-1,\tau}$\normalsize, which are subjected to a previous AAR operation in the preceding outer iteration $t-1$. It is worth noting that, at this moment, \small$\text{AAR}(\bm{x}^{(i)}_{t-1,\tau})$\normalsize ~may not have finished. Therefore, a waiting operation $\text{wait}(\cdot)$ should be conducted if it is checked not completed, this guarantees the execution of \small$\text{AAR}(\bm{x}^{(i)}_{t-1,\tau})$\normalsize. The resulting $\bm{x}_{t-1,\tau}$ is subsequently employed for updating the stale outer momentum, which is then applied to perform an outer iterate to obtain the initial parameters $\bm{x}_{t+1,0}$ for next outer loop.
+For the special case of first outer iteration, lines 8-13 in Algorithm~\ref{algo:CO2} is skipped, since there is no outdated parameters to be used for updating outer iterates.
+For each respective outer loop, the stale outer momentum lags by only one step compared to using the new version of $\bm{x}_{t,\tau}$. This strategy introduces minimal one-step staleness in the outer loop and has a subtle impact on network convergence.
+
+     
+The AAR operation runs in parallel with the subsequent outer updates as well as local computations in the next outer loop. Given the practical considerations of cluster sizes and variable communication conditions, configuring an appropriate number of local steps $\tau$ enables the seamless overlap of the entire asynchronous communication with computations.
+
+\subsection{Staleness Gap Penalty}
+
+\name achieves full overlap between communication and computation through one-step asynchronous communication, enhancing scalability up to 100\% with an appropriate number of local steps. However, the asynchronous nature adds noise to the optimization process, potentially causing discrepancies in training loss and generalization accuracy. To compensate, we propose a staleness gap penalty mechanism, which requires an accurate metric to quantify the staleness gap of outer momentum.
+
+Recall the formulation in (\ref{eq: formulation}), where $f_i(x)=\E_{\zeta_i\sim D_i} L^{(i)}(x;\zeta_i)$ is the local objective function at worker $i$. Before constructing the staleness gap, we first assume that each $f_i(x)$ is $L$-Lipschitz as stated in Assumption \ref{assum: 1}.
+\bassumption
+For some existed $L>0$, there is $\|\nabla f_i(x) - \nabla f_i(y) \| \leq L \|x-y\|$, for all inputs $x,y\in \R^n$ and $i\in \{1,2,\cdots, G\}$.
+\label{assum: 1}
+\eassumption
+The Lipschitz assumption stated above is intuitive, as it suggests that a viable alternative metric for precisely quantifying gradient differences is to consider the distinctions in model parameters. This insight serves as motivation for us to employ the model parameters from different versions as indicators of the staleness gap for outer momentum. 
+
+To quantify the staleness gap in outer momentum, a straightforward approach involves computing the difference in outer momentum between different iterations, such as iterations $t+1$ and $t$, and normalizing this difference to assess its magnitude.
+Considering $\bm{m}_{t+1} = \beta \bm{m}_t + (\bm{x}_{t,0}-\bm{x}_{t,\tau})$ and $\bm{m}_{t} = \beta \bm{m}_{t-1} + (\bm{x}_{t-1,0}-\bm{x}_{t-1,\tau})$, the staleness gap of $\bm{m}_{t}$ in comparison to $\bm{m}_{t+1}$ can be straightforwardly represented as:
+\begin{align}
+\small
+\|\bm{m}_{t+1}-\bm{m}_{t}\|
+&= \|\beta(\bm{m}_t-\bm{m}_{t-1}) + (\bm{x}_{t,0}-\bm{x}_{t,\tau}) - (\bm{x}_{t-1,0}-\bm{x}_{t-1,\tau})\| \cr
+&\leq \beta\|(\bm{m}_t-\bm{m}_{t-1})\| + \|\bm{x}_{t,0}-\bm{x}_{t-1,0}\| + \|\bm{x}_{t,\tau}-\bm{x}_{t-1,\tau}\|.
+\label{eq:outer_mom_diff}
+\end{align}
+
+It is essential to emphasize that at the initiation of iteration $t$, the ongoing asynchronous \textit{all-reduce} operation involving $\bm{x}_{t,\tau}$ is generally in progress and has may not reached completion. This situation implies that a globally averaged value for $\bm{x}_{t,\tau}$, accessible for all workers, is unavailable. Considering the outcomes presented in (\ref{eq:outer_mom_diff}), a suitable and readily accessible metric for measuring the staleness gap, denoted as $\bm{\Lambda}$, can be defined as:
+\bdefinition
+The staleness gap of the outer momentum $\bm{\Lambda}_t\in\R^n$ at step $t$ is quantified as the ratio of the model displacement within the outer loop to the maximum distance the parameters can traverse within the inner loop, in iteration $t-1$. This can be formally articulated as follows:
+\begin{align}
+\small
+\bm{\Lambda}_{t}=\frac{\|\bm{x}_{t,0}-\bm{x}_{t-1,0}\|}{\tau\|\bm{x}_{t-1,1}-\bm{x}_{t-1,0}\|}+\bm{1}^n.
+\label{eq:gap}
+\end{align}
+\edefinition
+
+In (\ref{eq:gap}), the term $\|\bm{x}_{t,0}-\bm{x}_{t-1,0}\|$ denotes the magnitude of the model parameter changes within the outer loop at iteration $t-1$, which occurred with the presence of stale outer momentum. $\tau{\|\bm{x}_{t-1,1}-\bm{x}_{t-1,0}\|}$ represents the maximum distance that the model parameters can traverse in inner steps without utilizing stale outer momentum. Typically, during the training process, both the gradient and the learning rate within the inner loop experience a decay, leading to a reduction in the model parameter distance within a single inner step. This behavior elucidates why ${\|\bm{x}_{t-1,1}-\bm{x}_{t-1,0}\|}$ signifies the maximum distance achievable in a single inner step.
+The notation $\bm{1}^n$ signifies the computation of $\bm{\Lambda}$ is parameter-wise, where $n$ corresponds to the number of parameters. All computations within (\ref{eq:gap}) are conducted element-wise.
+At each iteration, we recalculate the staleness gap by performing (\ref{eq:gap}), and then penalize it when updating the outer momentum via: 
+$
+\small
+\bm{m}_{t} = \beta \bm{m}_{t-1} + \frac{1}{\bm{\Lambda}_{t}} \cdot (\bm{x}_{t-1,0}-\bm{x}_{t-1,\tau}).
+$
+\subsection{Outer Momentum Clipping}
+Ensuring training stability is of paramount importance, particularly for large language models. We empirically find that the asynchronism introduced by CO2 can occasionally have adverse effects on training stability.
+To mitigate the potential issues related to unusual values in outer momentum and enhance overall training stability, we have implemented a coordinate-wise outer momentum clipping as
+$
+\small
+\text{Clip}(\chi,\phi)=\max\{-\phi, \min\{\chi,\phi\}\},$
+which is used to update the outer iterates as 
+$
+\small
+\bm{x}_{t+1,0} = \bm{x}_{t,0} - \alpha \cdot \text{Clip}(\bm{m}_{t},\phi),
+$
+where $\phi$ denotes the clipping threshold, which satisfies $\phi>0$.
+
+\subsection{Convergence Analysis}
+Considering the staleness introduced by our approach, it is imperative to establish its convergence guarantee from a theoretical standpoint. To do so, we begin by presenting the following assumptions, which align with standard practices in this domain.
+\bassumption
+For all $\small i \in\{1,2, \ldots, G\}$, there exists a finite positive constant $\sigma^2$ such that \small$\mathbb{E}_{\zeta \sim D_i}\left\|\nabla L^{(i)}(\bm{x} ; \zeta)-\nabla f_i(\bm{x})\right\|^2 \leq \sigma^2$\normalsize, i.e., the variance of $f_i(\bm{x})$ is bounded.
+\label{assum: 2}
+\eassumption
+\bassumption
+There exists a finite positive constant $V$ such that \small$\mathbb{E}\left\|\bm{g}_{t, k}-\mathbb{E}\left[\bm{g}_{t, k}\right]\right\|^2 \leq V$\normalsize.
+\label{assum: 3}
+\eassumption
+\newtheorem{conv}{Theorem}
+\label{conv}
+\begin{conv}
+If we take $\lambda=1/\Lambda_t,\gamma_t=\gamma$ and ignore the clip operation, such that \small $\bar \lambda = \alpha \lambda, \frac{ \bar \lambda \gamma}{1-\beta}=\sqrt{\frac{G}{T \tau}}$\normalsize ~and \small $T \tau \geq G L^2\left(1+\sqrt{3} \max \left\{\frac{3 \tau(1-\beta-\alpha)}{\alpha}, \frac{4 \tau \beta}{1-\beta}, 1\right\}\right)$, \normalsize then under Assumptions \ref{assum: 1}, \ref{assum: 2}, \ref{assum: 3} and \small $\frac{1}{G} \sum_{i=1}^G\left\|\nabla f(\mathbf{x})-\nabla f_i(\mathbf{x})\right\|^2 \leq \delta^2$\normalsize, where $\delta$ is a positive finite constant, we have:
+\begin{equation}
+\textstyle
+\frac{1}{T \tau} \sum_{t=0}^{T-1} \sum_{k=0}^{\tau-1} \mathbb{E}\left\|\nabla f\left(\bm{x}_{t, k}\right)\right\|^2=\mathcal{O}\left(\frac{1}{\sqrt{G T \tau}}\right)+\mathcal{O}\left(\frac{G \tau}{T}\right),
+\end{equation}
+\end{conv}
+where $f=\frac 1 G \sum_{i=1}^G f_i(x)$.
+The theorem indicates that, when the total steps $T\tau$ is sufficiently large, i.e, $T\gg G^3\tau^3$, the RHS is dominated by \small$\mathcal{O}\left(\frac{1}{\sqrt{G T \tau}}\right)$\normalsize. So, when the number of workers is $G$ times more, we only need $G$ times less total steps to achieve the same error.
+
+
+
+\section{Experiments}
+
+We conducted a thorough assessment of CO2 in a range of deep learning applications spanning computer vision (CV) and natural language processing (NLP). Our testing encompassed an array of model architectures, including convolution networks, transformer networks, and linear transformer networks.
+ It is worth noting that the TransNormer-LLM (7B)~\citep{qin2023scaling,qin2024ICLR,qin2024lightning} experiment mainly aims to evaluate CO2's scalability, so we only pre-train it on a relatively small dataset WikiText-103 to assess the convergence.
+
+\subsection{Experimental Setup}
+We compared \name against other state-of-the-art optimization techniques, including SGD, Adamw, Local-SGD/Adamw, Overlap-Local-SGD/Adamw, and SlowMo. Hyperparameters for each approach were meticulously tuned for maximum performance.
+For CO2, we conducted an extensive hyperparameter search for $\tau$, ranging from $\{1, 3, 6, 12, 24, 48, 96, 192\}$ to find the optimal balance between efficiency and performance.
+All experiments were executed five times with distinct random seeds to ensure robust results.
+
+\textbf{Image Classification (IC).}
+We train ResNet-50~\citep{he2016deep,zhou2020pbsgd}, ViT~\citep{dosovitskiy2020image,10336898}, and VVT~\citep{sun2023vicinity} on ImageNet-1K dataset, using eight A100 nodes with 64 GPUs. 
+For the training of ResNet-50, we use a total mini-batch size of 8192 and train for 90 epochs with a cosine learning rate schedule.
+For the training of ViT and VVT, they closely adhere to analogous hyperparameters. We use an uniform total batch size of 2048 for both and train for 300 epochs. 
+
+\textbf{Semantic Segmentation (SS).} We leverage the pre-trained VVT on ImageNet-1K as the backbone model, adopt semantic feature pyramid network (Semantic FPN)~\citep{Lin2016} as the decoder and finetune on the ADE20K dataset, using four 3090 nodes with 32 GPUs.
+
+\textbf{3D Point Cloud (PC) Reconstruction.}
+We pre-train the Point-MAE~\citep{pang2022masked,li2023sampled} via reconstruction task using ShapeNet dataset~\citep{shapenet2015}.
+We use a point number of 1024, a total batch size of 256, epoch number of 300, train on four 3090 nodes with 32 GPUs.
+
+\textbf{Autoregressive Language Modeling (ALM).} For ALM tasks, we train autoregressive GPT-2 models with 125M (Small), 355M (Medium), and 770M (Large) parameters on the OpenWebText dataset~\citep{radford2019language}. 
+All experiments use a context length of 1024 and a total batch size of 480, training on eight A100 nodes with 64 GPUs.
+Additionally, we train the large linear transformer~\citep{qin-etal-2022-devil,zhen2022cosformer,qin2023toeplitz,qin2023hierarchically} model TransNormer-LLM (7B) on WikiText-103 for 100K iterations on sixteen A100 nodes with 128 GPUs, in order to verify the performance of \name on large language models. The ZeRO-2 optimizer is integrated with \name to lessen memory redundancy during training TransNormer-LLM (7B).
+ 
+\textbf{Bidirectional Language Modeling (BLM).} For BLM tasks, we train a RoBERTa (Large)~\citep{Liu2019} model on a combined dataset consisting of Wikipedia and BookCorpus~\citep{wettig2022should} for approximately 3 epochs, using a total batch size of 4096 and sequence length of 128, train on four 3090 nodes with 32 GPUs.
+\subsection{Convergence and Generalization}
+
+\begin{table}[t]
+    \centering
+    \scriptsize
+    \caption{\textbf{Convergence performance on CV tasks.} \name performs better than other local-updating methods with a clear margin and is comparable to standard optimizers such as SGD/Adamw.}
+    \begin{tabular}{llccccc}
+    \toprule
+        \multirow{2}{*}{\textbf{Task}} & \multirow{2}{*}{\textbf{Model}} & \textbf{\makecell[c]{SGD\\(Adamw)}} & \textbf{\makecell[c]{Local-\\SGD(Adamw)}} & \textbf{\makecell[c]{Overlap-Local-\\SGD(Adamw)}} & \textbf{SlowMo} & \textbf{CO2}  \\
+        \midrule
+        ~ & ResNet-50  & 76.92 ($\pm$ 0.05) & 75.57 ($\pm$ 0.76) & 76.28 ($\pm$ 0.18) & 77.12 ($\pm$ 0.11) & 77.14 ($\pm$ 0.09)  \\ 
+        IC & ViT (Base) & 81.33 ($\pm$ 0.04) & 78.43 ($\pm$ 0.22) & 78.04 ($\pm$ 0.35) & 79.83 ($\pm$ 0.16) & 80.95 ($\pm$ 0.08) \\ 
+        ~ & VVT (Large)  & 83.64 ($\pm$ 0.06) & 81.09 ($\pm$ 1.15) & 80.33 ($\pm$ 0.49) & 82.75 ($\pm$ 0.27) & 83.38 ($\pm$ 0.06) \\
+        \midrule
+        SS & VVT (Large) & 47.82 ($\pm$ 0.05) & 44.25 ($\pm$ 2.24) & 45.21 ($\pm$ 1.36) & 47.51 ($\pm$ 0.12) & 47.80 ($\pm$ 0.11) \\
+        \midrule
+        PC & Point-MAE & 68.56 ($\pm$ 0.08) & 64.25 ($\pm$ 2.11) & 63.78 ($\pm$ 1.92) & 68.69 ($\pm$ 0.32) & 68.89 ($\pm$ 0.39) \\ 
+    \bottomrule
+    \end{tabular}
+    \label{tab:convergence_cv}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.345\textwidth]{figures/resnet50_val_acc_vs_epochs_zone.pdf}
+    \hspace{-5mm}
+    \includegraphics[width=0.345\textwidth]{figures/val_acc_vit_base_zone.pdf}
+    \hspace{-5mm}
+    \includegraphics[width=0.345\textwidth]{figures/val_acc_vvt_large_zone.pdf}
+    \caption{\textbf{Validation curves for image classification tasks.} Three models ResNet-50, ViT, and VVT are trained on ImageNet-1K for 90, 300 and 300 epochs, respectively. Our \name exhibits robust convergence and good generalization performance when compared to other existing methods.}
+    \label{fig:val_curve_cv}
+\end{figure}
+\textbf{Computer vision results.}
+Table~\ref{tab:convergence_cv} shows the results of convergence and generalization in computer vision tasks. \name optimizer consistently outperforms other efficient optimization techniques in terms of Top-1 validation accuracy for ResNet-50, ViT, and VVT architectures. Although \name has a slightly lower accuracy than the Adamw for both ViT and VVT, the reduction is marginal and falls within the expected range of random fluctuations. In addition to its good performance, \name achieves more efficient communication, including the potential for zero communication delay compared to the baseline methods. A similar trend is observed for VVT in semantic segmentation tasks. \name demonstrates a notable performance advantage over (Overlap-)Local-SGD and SlowMo, with only a slight performance gap of 0.02$\%$ when compared to Adamw. For 3D point cloud reconstruction, our proposed CO2 outperforms all other counterparts, exceeds the baseline Adamw by 0.33$\%$. 
+
+We also present validation curves that track the training progress of these models on image classification. As shown in Fig. \ref{fig:val_curve_cv}, \name features a more stable validation curve for ResNet-50 and maintains consistently higher accuracy curves compared to (Overlap-)Local-Adamw and SlowMo for ViT and VVT.
+\begin{table}[t]
+\centering
+\scriptsize
+\caption{\textbf{Convergence performance on NLP tasks.} Quantitative perplexity (PPL) results for GPT-2, TransNormer-LLM and RoBERTa are presented. \name shows lower perplexity (lower is better) than the baseline Adamw in all these experiments.}
+\label{tab:nlp_tasks}
+    \begin{tabular}{llccccc}
+    \toprule
+    \multirow{2}{*}{\textbf{Task}} & \multirow{2}{*}{\textbf{Model}} & \textbf{Adamw} & \textbf{Local-Adamw} & \textbf{\makecell[c]{Overlap-\\Local-Adamw}} & \textbf{SlowMo} & \textbf{CO2} \\
+    \midrule
+    \multirow{4}{*}{ALM} & GPT-2 (Small) & 7.44 ($\pm$ 0.36) & 7.95 ($\pm$ 2.04) & 8.11 ($\pm$ 1.03) & 7.34 ($\pm$ 0.89) & 7.37 ($\pm$ 0.73) \\
+     & GPT-2 (Medium) & 6.61 ($\pm$ 0.53) & 7.49 ($\pm$ 1.87) & 7.26 ($\pm$ 1.44) & 6.41 ($\pm$ 0.65) & 6.36 ($\pm$ 0.66) \\ 
+     & GPT-2 (Large) & 6.26 ($\pm$ 0.58) & 7.00 ($\pm$ 1.91) & 7.18 ($\pm$ 0.98) & 6.29 ($\pm$ 0.61) & 6.13 ($\pm$ 0.52) \\ 
+     \cmidrule(ll){2-7}
+     & TN-LLM (7B) & 16.82 ($\pm$ 0.86) & 18.63 ($\pm$ 3.13) & 17.83 ($\pm$ 2.95) & 16.95 ($\pm$ 1.01) & 16.78 ($\pm$ 0.95) \\ 
+    \midrule
+    BLM & RoBERTa (Large) & 3.96 ($\pm$ 0.37) & 4.38 ($\pm$ 0.83) & 4.52 ($\pm$ 1.42) & 3.98 ($\pm$ 0.85) & 3.95 ($\pm$ 0.96) \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.345\textwidth]{figures/gpt2s_val_ppl_vs_epochs.pdf}
+    \hspace{-5mm}
+    \includegraphics[width=0.345\textwidth]{figures/gpt2m_val_ppl_vs_epochs.pdf}
+    \hspace{-5mm}
+    \includegraphics[width=0.345\textwidth]{figures/gpt2l_val_ppl_vs_epochs.pdf}
+    \caption{\textbf{Validation curves for autoregressive language tasks.}
+    We train GPT-2 on OpenWebText for 100K steps in three sizes: 125M (Small), 355M (Medium), and 770M (Large). \name exhibits robust convergence and the best generalization performance when compared to other existing methods.}
+    \label{fig:val_curve_nlp}
+\end{figure}
+\textbf{Natural language processing results.}
+Table~\ref{tab:nlp_tasks} and Fig. \ref{fig:val_curve_nlp} presents the convergence and generalization outcomes for natural language processing tasks. The table shows that CO2 consistently outperforms alternative methods across GPT-2 variants (Small, Medium, and Large) for ALM tasks, resulting in lower validation perplexity values as the model size scales. Furthermore, \name achieves the best training perplexity on the large TransNormer-LLM (7B) model, when trained on a relatively small dataset. We also give validation curves with respect to relative time (in seconds) for GPT-2 models of varying sizes as illustrated in Fig.
+
+For BLM tasks, CO2 demonstrates comparable performance to the standard Adamw and SlowMo algorithms, surpassing (Overlap-)Local-Adamw by a significant margin. These results emphasize the capacity of \name to optimize encoder-only transformer models without compromising accuracy.
+
+\subsection{Scalability}
+\begin{figure}[t]
+    \centering
+    \subfigure[Scalability of CO2.]{\includegraphics[width=0.5\textwidth]{figures/scalability_wps.pdf}}
+    \subfigure[Effects of $\tau$.]{\includegraphics[width=0.4\textwidth]{figures/tau_ppl_tpi.pdf}}
+    \caption{{(a): \textbf{Scalability of CO2.} Throughput (words/sec) results on distinctive inter-node network configurations are presented. \name exhibits pecfect $100\%$ scalability on both configurations.} {(b): \textbf{Effects of $\tau$.} Training speed and generalization performance results w.r.t. $\tau$ are presented. A larger value of $\tau$ leads higher communication efficiency but worse generalization behaviors.}}
+    \label{fig:comm_and_tau}
+\end{figure}
+\begin{table}[t]
+\scriptsize
+\centering
+\caption{\textbf{Quantitative scalability performance of CO2.} Throughput (words/sec) results of \name and Adamw from 1 to 16 DGX-A100 servers are presented. Scalability ratio records the scalability from 2 to 16 nodes to take into account the inter-node connections. With suitable configuration of $\tau$, \name can reach the scalability ratio of 1, which outperforms the baseline Adamw.}
+\label{tab:scalability}
+\begin{tabular}{cccccccc}
+\toprule
+\multirow{2}{*}{\textbf{Ethernet}} & \multirow{2}{*}{\textbf{Method}} & \multicolumn{5}{c}{\textbf{Throughput}} & \multirow{2}{*}{\textbf{\makecell[c]{Scalability \\ Ratio\\($16\rightarrow128$)}}} \\
+\cmidrule(ll){3-7}
+ &  & 8 GPUs & 16 GPUs & 32 GPUs & 64 GPUs & 128 GPUs &  \\
+\midrule
+\multirow{2}{*}{RDMA} & \makecell[c]{CO2 \\ ($\tau$=12)} & 17980 ($\pm$ 48) & 35692 ($\pm$ 126) & 72491 ($\pm$ 183) & 150073 ($\pm$ 362) & 307557 ($\pm$ 617) & 1.08 \\
+\cmidrule(ll){2-8}
+~ & Adamw & 19276 ($\pm$ 59) & 38888 ($\pm$ 118) & 77782 ($\pm$ 93) & 151554 ($\pm$ 209) & 289106 ($\pm$ 423) & 0.93 \\
+\midrule
+\multirow{3}{*}{TCP/IP} & \makecell[c]{CO2 \\ ($\tau$=48)} & 18090 ($\pm$ 95) & 35969 ($\pm$ 193) & 71249 ($\pm$ 179) & 147507 ($\pm$ 315) & 304736 ($\pm$ 729) & 1.06 \\
+\cmidrule(ll){2-8}
+~ & \makecell[c]{CO2 \\ ($\tau$=12)} & 17995 ($\pm$ 72) & 18975 ($\pm$ 108) & 36095 ($\pm$ 151) & 70839 ($\pm$ 373) & 129865 ($\pm$ 564) & 0.86 \\
+\cmidrule(ll){2-8}
+~ & Adamw & 18444 ($\pm$ 49) & 3488 ($\pm$ 115) & 7077 ($\pm$ 127) & 12855 ($\pm$ 308) & 22810 ($\pm$ 526) & 0.82 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We tested our proposed \name using up to 16 DGX-A100 servers to train TransNormer-LLM with 7B parameters. Each server has 8 A100 GPUs interconnected via NVSwitch for an inter-GPU bandwidth of 600GBps. We evaluated CO2's scalability under different cluster communication conditions using two kinds of inter-node network configurations. The first uses RoCE solution with 8 RDMA adapters per server for inter-server communication at 800Gbps. The second uses TCP/IP Ethernet with significantly lower bandwidth at around 80Gbps. Note that, to mitigate fluctuations, the presented throughput results are averaged values extracted from iterations 100 to 200 for each experiment.
+We evaluated two methods, Adamw and CO2, on RoCE RDMA and TCP/IP networks. On the RoCE RDMA network, CO2's communication advantage became prominent in larger clusters (more than 64 GPUs) resulting in higher throughput than Adamw. On the TCP/IP network, CO2 performed similarly to its performance on the RoCE RDMA network when $\tau$ was set to 48. However, Adamw performed poorly due to pronounced communication latency. We also test the influence of $\tau$ on communication efficiency, with varying levels of overlap. Results are shown in Fig. \ref{fig:comm_and_tau}(a).
+Using \name with TCP/IP and $\tau=12$ caused a moderate reduction in speed and scalability, but it still outperformed Adamw on TCP/IP due to overlap between communication and computation.
+Transitioning from 8 GPUs to 16 GPUs caused a notable drop in throughput values for both \name and Adamw due to the diminished inter-node connectivity.
+Table \ref{tab:scalability} shows throughput and scalability of \name and Adamw. Scalability ratios were calculated for different communication scenarios, specifically when transitioning from 16 GPUs to 128 GPUs. \name exhibits scalability ratios exceeding 1, mainly due to inherent measurement fluctuations.
+
+\subsection{Ablation study}
+We conducted ablation studies on \name using a small-scale GPT-2 (Small) model across four servers, each with eight 3090 GPUs. The experiments lasted for 100K steps.
+
+\textbf{Performance and scalability w.r.t. $\tau$.}
+We conducted experiments to examine time per iteration and validation perplexity across different values of $\tau$. Increasing $\tau$ generally leads to faster training but higher perplexity. However, at $\tau=12$, computation and communication overlap, resulting in a significant acceleration. Larger $\tau$ values benefit from reduced communication frequency. $\tau=12$ also yields a slightly lower perplexity, which can be attributed to the regularization effect.
+\textbf{Staleness gap penalty and outer momentum clipping.}
+Table \ref{tab:ablation} shows that incorporating the staleness gap penalty has a more significant positive impact than outer momentum clipping. The latter mainly targets training stability rather than performance improvement.
+
+\begin{table}[htbp]
+\small
+\centering
+\caption{\textbf{Ablation results on staleness gap penalty and outer momentum clipping.} We pre-train GPT-2 (Small) with 100K steps for ablation. Both train and validation perplexity results indicate that staleness gap penalty has a noteworthy improvement for convergence performance.}
+\label{tab:ablation}
+\begin{tabular}{cccccc}
+\toprule
+\textbf{Model} & \textbf{Steps} & \textbf{Metric} & \textbf{\name} & \textbf{\name w/o Penalty} & \textbf{\name w/o Clipping}\\
+\midrule
+\multirow{2}{*}{GPT-2 (Small)} & \multirow{2}{*}{100K} & Train PPL & 7.36 & 7.52 & 7.39 \\
+ &  & Validation PPL & 7.39 & 7.56 & 7.42 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+
+\section{Conclusion}
+
+We proposed CO2, a method for large-scale distributed training on clusters with low-cost and limited-speed interconnections. CO2 enables exceptional scalability through local-updating and one-step asynchronous communication. Mathematical analysis is provided on its convergence rate. Our experiments in computer vision and natural language processing demonstrate CO2's ability to achieve 100\% scalability even on clusters with very limited communication bandwidth. 
+We have enhanced CO2's convergence and stability through the introduction of two techniques: the staleness gap penalty and outer momentum clipping. CO2 is highly compatible with established optimizers and can be integrated with ZeRO-series optimizers to reduce memory consumption for large model training. 
+
+
+

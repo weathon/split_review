@@ -1,0 +1,158 @@
+# Functional Geometry Guided Protein Sequence and Backbone Structure Co-Design
+
+- Decision: Reject
+- Scores: 3, 3, 6
+
+## Abstract
+Proteins are macromolecules responsible for essential functions in almost all living organisms. Designing reasonable proteins with desired functions is crucial.
+A protein's sequence and structure are strongly correlated and they together determine its function.
+In this paper, we propose \model, a model to jointly design Protein sequence and structure based on automatically detected functional and conserved sites. 
+\model is powered by an interleaving network of attention and equivariant layers, which can capture global correlation in a whole sequence and local influence from nearest amino acids in three dimensional~(3D) space.
+Such an architecture facilitates effective yet economic message passing at two levels.
+We evaluate our model and several strong baselines on two protein datasets, $\beta$-lactamase and myoglobin.
+Experimental results show that our model achieves the highest binding affinity scores among the top-5, top-10 and top-30 candidates. These findings prove the capability of our model to design functional proteins.git}}.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposed a new model called NAEPro to update the coordinate and AA types of proteins. In comparison to other baseline methods on the two protein datasets, NAEPro achieves the top recovery rate, TM-score, and the lowest RMSD. In silico evaluations also confirmed the model's ability to design proteins for binding to their target metallocofactors.
+
+### Strengths
+The paper is easy to read.
+
+### Weaknesses
+1. The identified problem or the motivation for designing such a method is not supported by existing literature (e.g., Questions 1-2);
+2. Some designed modules counter the intuition in biology (e.g., Questions 5);
+3. The method is not 'extensively evaluated' as claimed by the authors (they only selectively analyzed 2 proteins), and many results do not suggest that the proposed method is SOTA among baselines. Moreover, the evaluation does not include all relevant methods, which makes it too aggressive for the authors to claim in the Introduction that their method "achieves the HIGHEST...among ALL competitors" and "is faster than the FASTEST method".
+4. Results in Table 1 do not support the superiority of the proposed method. For instance, RMSD>1.7 Å means the two structures are different for myoglobin. No matter if the predicted result is 4 Å away for 10 Å away, neither of them are reliable prediction. For pLDDT, the prediction on $\beta$-lactamase is ~66%, which is much lower than 80%-90% which is conventionally believed reliable for folding predictions. The TM-score, if they are smaller than 0.5, then the two structures are believed different. In this case, both 0.48 and 0.46 are considered a failed design, and it is meaningless to yield the 2% outperformance in this case.
+
+### Questions
+1. Page 1: "The use of separate models for sequence and structure cannot ensure the consistency between the generated sequence and structure." I disagree with this statement. Generated protein sequences with higher than 30% identity to the wild-type protein merely change their geometry in space, while existing de novo methods usually generate new sequences with 30-90% sequence identity. Empirically, It has been proven by several recent research that the de novo method can generate new sequences for fixed backbone or desired functions [1-3]. 
+2. Page 2: "knowing the topology of a protein before design process is difficult and also cannot guarantee the designed proteins have the desired functions." I disagree with this statement. Although AlphaFold2 cannot predict structures for all proteins with no error, it's a great reference, and designing and screening with it is sufficiently powerful in many research work, including those conducted wet-lab experiments. 
+3. Page 2: what is the meaning of "generally-encoded" for 20 types of amino acids?
+4. Page 3: "The selection of motif varies from setting to setting..." I cannot understand this example regarding the difference between motifs for active sites and binding sites. Can the authors please provide a clearer explanation?
+5. Page 5: "motif mining". I don't see the rationale of this module. MSA essentially discovers the conserved sites of a protein sequence by comparing them with other sequences from the same family. However, these conserved sites might not be directly related to its central function. For instance, many conserved sites are buried within the proteins, but functional sites are generally exposed at the surface of the protein. Moreover, the active sites are usually spatially close, but they may distance sequentially. 
+6. Page 7: "evaluation metrics": ESMFold, as observed by their authors, performs as well as AlphaFold2 when the folded sequence exists in nature. However, for a novel sequence, its prediction is worse than AlphaFold2. Consequently, evaluating novel sequences should use AlphaFold2 instead of ESMFold. 
+7. Page 7: "Consistency - the RMSD between the designed structure and predicted one". I cannot understand this statement. What is the designed structure and the predicted structure? Which is from NAEPro? Where does the other one come from?
+
+
+
+Reference: 
+1. Watson et al., De novo design of protein structure and function with RFdiffusion (2023).
+2. Sumida et al., Improving protein expression, stability, and function with ProteinMPNN (2023).
+3. Zhou et al., Conditional Protein Denoising Diffusion Generates Programmable Endonuclease Sequences (2023).
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+This paper proposes NAEPro, a model to jointly design Protein sequence and structure. NAEPro is powered by an interleaving network of attention and equivariant layers, which can capture global correlation in a whole sequence and local influence from the nearest amino acids in three-dimensional (3D) space. The global attention sub-layer parameters are initialized with ESM-2. The author combines ESM2 and EGNN for co-modeling protein sequence and structure.
+
+### Strengths
+1. The reported performance is good.
+2. The method is simple.
+
+### Weaknesses
+1. Novelty: Both EGNN and ESM2 are existing models, and there are many existing works on antibody structure and sequence co-design. The combination may limit the novelty of this method.  
+2. Significance: It is likely that previous works can be readily applied to the motif-conditioned setting, and the authors can easily adapt their method to antibody design tasks. It would be beneficial if the authors further elaborate on the significance of their work
+3. Code: The authors do not provide code for checking the soundness of the methods.
+4. Experiment setting: The authors do not provide results on standard benchmarks, such as the CATH dataset, for fair comparison on both sequence and structure design.
+
+### Questions
+1. Could you provide experimental results from the CATH dataset to compare with the original SMCDiff and FrameDiff results?
+2. Similarly, could you provide head-to-head comparisons to ProteinMPNN, ESMIF, and PiFold on protein sequence design? Please follow the same setting.
+3. Could you provide the code for checking the results?
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+This manuscript proposed a transformer-like architecture for protein motif-scaffolding problem. Specifically, the protein motif, inferred from retrieved MSA profile, is input to the proposed model and both the sequence and structure of the rest region will be returned similar to the masked language models. The main contribution of this paper is the proposed network layer and the newly curated datasets, including beta-lactamase and myoglobin, for evaluating the scaffolding performance. Empirical results on the curated datasets show that the proposed method achieves better performance than baselines in several computational metrics.
+
+### Strengths
+- The author(s) proposed a new architecture for protein design w/ detailed introduction.
+- The curated datasets have good domain significance for studying computational protein design/scaffolding problem.
+- Ablation studies is performed for the proposed architecture.
+
+### Weaknesses
+Here are my concerns (w/ main questions):
+
+- Regarding the consistency metrics reported, I noticed that the consistency metric of NAEPro in Table 1 (as the main results) underperformed half of the baselines. Since the consistency is defined by comparing the designed structure and predicted structure from designed sequence just similar to scTM/scRMSD, I wonder whether the proposed method captures sequence-structure cross-modality pattern through the mapping of NAEPro.  In particular, by jointly modeling both sequence and structure, one important strength to be expected from NAEPro is its capability of sequence-structure co-awareness and therefore generate more consistent proteins, compared with two-stage models such as RFdiffusion+IF in Table 1. However, such key observation showed conflict with this intuition and greatly weakened the method. The authors can elaborate on this point. Specifically, the consistency metric, which measures the agreement between the designed structure and the structure predicted from the designed sequence, should ideally be high for a model that effectively captures sequence-structure relationships. The fact that NAEPro underperforms several baselines in this metric raises concerns about its ability to generate structurally consistent designs, undermining the claim of joint sequence-structure modeling.
+- For the experiments, how is the model trained to obtain the evaluation digits in Table 1 for each baseline. This is very important because as far as I acknowledged, all the baselines were simply pre-trained on general protein structure datasets such as PDB and CATH, plus the ProteinMPNN(IF). However, in the section 4.2, the author(s) mentioned that NAEPro, the proposed method, is trained on domain-specific dataset from beta-lactamase and myoglobin before inference stage. Do the author believe that such treatments for baseline comparison is fair? To contextualize, most of the protein design or engineering task (antibody/nanobody/enzyme; mutation effect) suffer from lack of domain-specific data, which therefore hinders the use of ML models. The presence of such specific dataset can have a significant effect on the performance of models. Therefore, the result shown in Table 1 may not as strong as it claimed. The lack of clarity regarding the training procedure for baseline models makes it difficult to assess the fairness of the comparison. If the baselines were not fine-tuned on the same domain-specific data as NAEPro, the comparison is skewed, potentially overestimating the performance of the proposed method. This is especially problematic given that domain-specific training can significantly boost performance in protein design tasks.
+- For the dataset, I found that in section 4.1, the author(s) mentioned that both beta-lactamase and myoglobin datasets are **split randomly.** This is worrying because the entries in PDB can usually be redundant, especially for such large and well-studied families that the authors selected for evaluation. Therefore, to prevent from data leakage, the sequence (even structure, since the structure-based metrics are also involved in this study) has to be redundant-removed by clustering or other strategy. Otherwise, highly similar (such as mutants) even the very same sequences and structures can present both in train and test dataset, making the result in Table 1 rather trivial. The most seemingly influenced metric is AAR, though it is itself questionable to reflect design models. However, due to the abnormally high AAR, other metrics can be biased more or less, due to the ESMFold-folded structures heavily rely on the single input sequence. The author(s) can elaborate on this point. Moreover, in the Table 3 (in appendix), I am curious about the column name “PDB”, does it mean the number of PDB entries (with unique ID) or the number of single chains? Any what is the sequence clustering statistics about the involved two metalloprotein datasets? The random splitting of the dataset without any redundancy removal is a major concern. The presence of highly similar sequences in both training and testing sets can lead to inflated performance metrics, as the model might be simply memorizing training examples rather than learning generalizable design principles. The lack of sequence clustering statistics further exacerbates this concern, making it difficult to assess the true generalization capability of the proposed method.
+- For the evaluation metrics, the problem to be studied is functional protein (as it is claimed in the title) design instead of general backbone generation(eg., RFDiffusion) or sequence generation (eg., ProteinMPNN). Thus, I found the the five of the metrics fail to (or indirectly if they potentially do) reflect the performance of functional protein design or scaffolding. For the common practice of protein engineering, one may conduct wet-lab validation for the designed candidates (such as in ProteinMPNN) or use a fitness regression model to approximately indicate the success rate of the inference output. All these metrics in Table 1 & 2 show the somehow sequence-structure matching between the predicted and native, but are not very suitable for proteins such as enzyme. The reliance on sequence-structure matching metrics, such as RMSD and AAR, is not ideal for evaluating functional protein design. These metrics primarily assess structural similarity to native proteins but do not directly measure the functionality of the designed proteins, which is the ultimate goal of the study. The absence of metrics that directly assess functional aspects, such as binding affinity or catalytic activity, weakens the evaluation.
+- The potential theoretical flaw in the equivariance analysis in Section 3.5. To contextualize, the SE(3)-equivariance represents the equivariant property of functions with respect to elements in the special Euclidean group in R^3 which encompass only translation and rotation transformations (or roto-translation equivariance). Corresponding, the special orthogonal group mentioned in Theorem 3.1 also excludes the reflection matrices which has determinant equal to -1. However, in the Theorem 3.1., the author claimed SE(3)-equivariance yet let the proposed NAEL layer be rotation or reflection equivariant. Suppose it is a typo, however, assuming reflection-equivariant property can be problematic for protein structure, because the protein chirality can be important for helical structure. The claim of SE(3)-equivariance while allowing reflection equivariance is a theoretical inconsistency. SE(3) only includes rotations and translations, not reflections. The inclusion of reflection equivariance can be problematic for protein structure, as it does not preserve the chirality of amino acids, which is crucial for protein function and folding. This theoretical flaw undermines the validity of the equivariance analysis.
+
+### Questions
+On top of the questions mentioned in the "Weakness" section, here are some further questions for the author(s) to answer:
+
+- The proposed architecture encoding both sequence and structure via the masked language modeling (MLM) scheme is somehow interesting. How do the author(s) see the similarity difference between the proposed NAEL layer and tensor field convolutional layer in SE(3)-transformer[1]? For example, in the SE(3)-transformer implementation, one can also enable kNN message passing to save computational overhead. Also, what is the advantage of NAEL over the SeqIPA of the PROTSEED[2], the most competitive baseline in Table 1?
+- In Section 3 - opening paragraph, the author(s) define/formulate the target task as generate a protein sequence and all 3D coordinates of N residues. However, in later model definition, the proposed NAEPro only operates on the C-alpha(CA) coordinates. Please explain this ambiguity. In fact, handling the all-atom coordinates and coarse-grained (CA-only) coordinates can have distinguishable scaling behavior/demand for the parameterized distribution / networks.
+- In section 4.2, the author(s) described that the weights of NAEPro is partially initialized from pretrained ESM2-8M, of the smallest model size among the ESM2 series. This is very problematic but the recent common practices[3,4]  leverage at least the 650M model. Do the author(s) try much larger model size as initialization? I found in the Table 2 that the 8M model has only marginal improvement upon random initialization.
+- How is the “target structure” in **evaluation metrics(Section 4.2)** determined? What is the difference between metrics RMSD and consistency?
+
+[1] Fuchs, Fabian, Daniel Worrall, Volker Fischer, and Max Welling. "Se (3)-transformers: 3d roto-translation equivariant attention networks." *Advances in neural information processing systems* 33 (2020): 1970-1981.
+
+[2] Shi, Chence, Chuanrui Wang, Jiarui Lu, Bozitao Zhong, and Jian Tang. "Protein sequence and structure co-design with equivariant translation." *arXiv preprint arXiv:2210.08761* (2022).
+
+[3] Zheng, Zaixiang, Yifan Deng, Dongyu Xue, Yi Zhou, Fei Ye, and Quanquan Gu. "Structure-informed language models are protein designers." *bioRxiv* (2023): 2023-02.
+
+[4] Verkuil, Robert, Ori Kabeli, Yilun Du, Basile IM Wicky, Lukas F. Milles, Justas Dauparas, David Baker, Sergey Ovchinnikov, Tom Sercu, and Alexander Rives. "Language models generalize beyond natural proteins." *bioRxiv* (2022): 2022-12.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

@@ -1,0 +1,279 @@
+\title{Less is More: Selective Layer Finetuning with SubTuning}
+
+\begin{abstract}
+Finetuning a pretrained model has become the standard approach for training neural networks on novel tasks, leading to rapid convergence and enhanced performance. In this work, we present a parameter-efficient finetuning method, wherein we selectively train a carefully chosen subset of layers while keeping the remaining weights frozen at their initial (pre-trained) values. We observe that not all layers are created equal: different layers across the network contribute variably to the overall performance, and the optimal choice of layers is contingent upon the downstream task and the underlying data distribution. We demonstrate that our proposed method, termed \emph{subset finetuning} (or SubTuning), offers several advantages over conventional finetuning. We show that SubTuning outperforms both finetuning and linear probing in scenarios with scarce or corrupted data, achieving state-of-the-art results compared to competing methods for finetuning on small datasets. When data is abundant, SubTuning often attains performance comparable to finetuning while simultaneously enabling efficient inference in a multi-task setting when deployed alongside other models. We showcase the efficacy of SubTuning across various tasks, diverse network architectures and pre-training methods.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+Transfer learning from a large pretrained model has become a widely used method for achieving optimal performance on a diverse range of machine learning tasks in both Computer Vision and Natural Language Processing~\cite{gpt3, palm, beit, coca}. Traditionally, neural networks are trained ``from scratch'', where at the beginning of the training the weights of the network are randomly initialized. In transfer learning, however, we use the weights of a model that was already trained on a different task as the starting point for training on the new task, instead of using random initialization. In this approach, we typically replace the final (readout) layer of the model by a new ``head'' adapted for the new task, and tune the rest of the model (the backbone), starting from the pretrained weights. The use of a pretrained backbone allows leveraging the knowledge acquired from a large dataset, resulting in faster convergence time and improved performance, particularly when training data for the new downstream task is scarce.
+
+The most common approaches for transfer learning are \emph{linear probing} and \emph{finetuning}.
+In linear probing, only the linear readout head is trained on the new task, while the weights of all other layers in the model are frozen at their initial (pretrained) values. This method is very fast and efficient in terms of the number of parameters trained, but it can be suboptimal due to its low capacity to fit the model to the new training data. Alternatively, it is also common to finetune all the parameters of the pretrained model to the new task. This method typically achieves better performance than linear probing, but it is often more costly in terms of training data and compute.
+\begin{figure}[ht]
+
+    \centering
+    \includegraphics[width=\textwidth]{2-NeurIPS/figures/figure2_new.pdf} \\
+    \includegraphics[width=0.85\textwidth,trim={0 8 0 10},clip]{2-NeurIPS/figures/single-task-subtuning.png}
+    
+    \caption{\textbf{Left.} The \textit{Finetuning Profile} of ResNet-50 pretrained on ImageNet and finetuned on CIFAR-10. On the x-axis we have 16 res-blocks where each Layer (with Capital L) corresponds to a drop in spatial resolution. \textbf{Middle.} SubTuning on CIFAR-10-C distribution shifts with a ResNet-26. Even with few appropriately chosen residual blocks, SubTuning can be better than Finetuning.
+    \\ \textbf{Right.} Effect of dataset size on SubTuning, Finetuning and Linear Probing. SubTuning exhibits good performance across all dataset sizes, showcasing its flexibility. \textbf{Bottom.} \emph{SubTuning illustration}. We only finetune a strategically selected subset of layers and the final readout layer, while the rest of the layers are frozen in their pretrained values.
+    }
+
+    \label{fig:cifar_resnet_one_block}
+\end{figure}
+
+In this paper, we propose a simple alternative method, which serves as a middle ground between linear probing and full finetuning. Simply put, we suggest to train a carefully chosen small \emph{subset} of layers in the network. This method, which we call SubTuning (see Figure \ref{fig:cifar_resnet_one_block}), allows finding an optimal point between linear probing and full finetuning. SubTuning enjoys the best of both worlds: it is efficient in terms of the number of trained parameters, while still leveraging the computational capacity of training layers deep in the network. We show that SubTuning is a preferable transfer learning method when data is limited (see Figure~\ref{fig:cifar_resnet_one_block}), corrupted or in a multi-task setting with computational constraints. We compare our method in various settings to linear probing and finetuning, as well as other recent methods for parameter-efficient transfer-learning (e.g., Head2Toe \cite{head2toe} and LoRA \cite{lora}).
+The primary contribution of this work is the development of the SubTuning algorithm, which bridges the gap between linear probing and full finetuning by selectively training a subset of layers in the neural network. This approach offers a more flexible and efficient solution for transfer learning, particularly in situations where data is scarce or compromised, and computational resources are limited. Furthermore, our empirical evaluations demonstrate the effectiveness of SubTuning in comparison to existing transfer learning techniques, highlighting its potential for widespread adoption in various applications and settings.  
+
+\textbf{Our Contributions.} We summarize our contributions as follows:
+
+\begin{itemize}[itemsep=1.5pt,topsep=2pt,listparindent=2pt,leftmargin=10pt]
+\item We advance our understanding of finetuning by introducing the concept of the \emph{finetuning profile}, a valuable tool that sheds new light on the importance of individual layers during the finetuning process. This concept is further elaborated in Section \ref{sec:finetuning profile}.
+
+\item We present \emph{SubTuning}, an simple yet effective algorithm that selectively finetunes specific layers based on a greedy selection strategy using the \emph{finetuning profile}. In Section \ref{sec:data}, we provide evidence that SubTuning frequently surpasses the performance of competing transfer learning methods in various tasks involving limited or corrupted data.
+
+\item We showcase the efficacy and computational run-time efficiency of SubTuning in the context of multi-task learning. This approach enables the deployment of multiple networks finetuned for distinct downstream tasks with minimal computational overhead, as discussed in Section \ref{sec:computationally_efficient_finetuning}.
+\end{itemize}
+\subsection{Related Work}
+
+\textbf{Parameter-Efficient Transfer-Learning.}
+In recent years, it became increasingly popular to finetune large pretrained models~\cite{bert, clip, masked}. As the popularity of finetuning these models grows, so does the importance of deploying them efficiently for solving new downstream tasks. Thus, there has been a growing interest, especially in the NLP domain, in Parameter-Efficient Transfer-Learning (PETL)~\cite{progressive, lst, head2toe, sidetuning, howfine, piggyback, bitfit, model_adaptation} 
+where we either modify a small number of parameters, add a few small layers or mask~\cite{Maskingalternative} most of the network. Using only a fraction of the parameters for each task can help in avoiding catastrophic forgetting \cite{catastrophicforgetting} and can be an effective solution for both multi-task learning and continual learning. These methods encompass Prompt Tuning~\cite{prefix-tuning, prompt-tuning, visual-prompt-tuning}, adapters~\cite{adapters-nlp, residual_adapters, adapters-conv,parallel-adapters}, LoRA~\cite{lora}, sidetuning~\cite{sidetuning}, feature selection~\cite{head2toe} and masking~\cite{howfine}. Fu et al. \cite{fu2022effectiveness}, and He et al. \cite{he2021towards}, (see also references therein) attempt to construct a unified approach of PETL and propose improved methods. 
+In a recent study, Lee et al. \cite{percy-surgical},  investigated the impact of selective layer finetuning on small datasets and found it to be more effective than traditional finetuning. They observed that the training of different layers yielded varied results, depending on the shifts in data distributions. Specifically, they found that when there was a label shift between the source and target data, later layers performed better, but in cases of image corruption, early layers were more effective.
+While our work shares some similarities with Lee et al., the motivations and experimental settings are fundamentally different. Primarily, we delve deeper into the complex interaction between the appropriate layers to finetune and the downstream task, pretraining objective, and model architecture, and observe that a more nuanced viewpoint is required. As evidenced by our \emph{finetuning profiles} (e.g., see Figure~\ref{fig:finetuning_profiles} and Figure~\ref{fig:subtuning_greedy_layer_selection}), a simple explanation of which layers to finetune based on the type of corruption is highly non-universal and the correct approach necessitates strategic layer selection, as demonstrated in our greedy method.
+
+Moreover, we show that finetuning with layer selection is viable not only for adaptation to small corrupted data but also for general distribution shifts (in some of which we achieve state-of-the-art performance) and even for larger datasets. Additionally, our approach can be optimized for inference time efficiency in the Multi-Task Learning (MTL) setting.
+
+ We note that our \emph{finetuning profiles} offer a unique insight into the mechanistic understanding of finetuning, making our research not only practical in the MTL and PETL settings but also scientifically illuminating. We also note that SubTuning is compatible with many other PETL methods, and composing SubTuning with methods like LoRA and Head2Toe is a promising research direction that we leave for future work.
+\textbf{Multi-Task Learning.}
+ Neural networks are often used for solving multiple tasks. These tasks typically share similar properties, and solving them concurrently allows sharing common features that may capture knowledge that is relevant for all tasks \cite{caruana1997multitask}. However, MTL also presents significant challenges, such as negative transfer \cite{liu2019loss}, loss balancing \cite{lin2022a, michel2022balancing}, optimization difficulty \cite{mtl-optimization}, data balancing and shuffling~\cite{purushwalkam2022challenges}. While these problems can be mitigated by careful sampling of the data and tuning of the loss function, these solutions are often fragile \cite{worsham2020multi}. In a related setting called \emph{Continual Learning} \cite{rusu2016progressive, rebuffi2017icarl, kirkpatrick2017overcoming, kang2022class}, adding new tasks needs to happen on-top of previously deployed tasks, while losing access to older data due to storage or privacy constraints, complicating matters even further.
+ In this context, we show that new tasks can be efficiently added using SubTuning, without compromising performance or causing degradation of previously learned tasks (Section \ref{sec:computationally_efficient_finetuning}).
+ 
+
+
+
+\section{Not All Layers are Created Equal}
+
+
+\begin{figure*}[ht]
+    \centering
+    \includegraphics[width=0.95\textwidth,trim={0 1.2cm 0 0}]{2-NeurIPS/figures/finetune_profiles.pdf}
+    \caption{Finetuning profiles for different architectures, initializations and datasets.}
+    \label{fig:finetuning_profiles}
+\end{figure*}
+
+In the process of finetuning deep neural networks, a crucial yet often undervalued aspect is the unequal contribution of individual layers to the model's overall performance. This variation in layer importance calls into question prevalent assumptions and requires a more sophisticated approach to effectively enhance the finetuning process. By selectively training layers, it is possible to strategically allocate computational resources and improve the model's performance. To pinpoint the essential components within the network, we examine two related methods: constructing the \emph{finetuning profile} by scanning for the optimal layer (or block of layers) with a complexity of $O(\mathrm{num~layers})$, and a Greedy SubTuning algorithm, where we iteratively leverage the finetuning profile to select $k$-layers one by one, while using a higher complexity of $O(\mathrm{num~layers} \cdot k)$.
+\textbf{The Finetuning Profile.} We commence by conducting a comprehensive analysis of the significance of finetuning different components of the network. This analysis guides the choice of the subset of layers to be used for SubTuning. To accomplish this, we run a series of experiments in which we fix a specific subset of consecutive layers within the network and finetune only these layers, while maintaining the initial (pretrained) weights for the remaining layers.
+
+For example, we take a ResNet-50 pretrained on the ImageNet dataset, and finetune it on the CIFAR-10 dataset, replacing the readout layer of ImageNet (which has 1000 classes) by a readout layer adapted to CIFAR-10 (with 10 classes). As noted, in our experiments we do not finetune all the weights of the network, but rather optimize only a few layers from the model (as well as the readout layer). Specifically, as the ResNet-50 architecture is composed of 16 blocks (i.e., \emph{ResBlocks}, see~\cref{par:profiles} and \cite{resnet} for more details), we choose to run 16 experiments, where in each experiment we train only one block, fixing the weights of all other blocks at their initial (pretrained) values. We then plot the accuracy of the model as a function of the block that we train, as presented in \cref{fig:cifar_resnet_one_block} left. We call this graph the \emph{finetuning profile} of the network. Following a similar protocol (see ~\cref{par:profiles}), we compute \emph{finetuning profiles} for various combinations of architectures (ResNet-18, ResNet-50 and ViT-B/16), pretraining methods (supervised and DINO \cite{dino}), and target tasks (CIFAR-10, CIFAR-100 and Flower102). In Figure~\ref{fig:finetuning_profiles}, we present the profiles for the different settings. 
+
+
+
+\begin{wrapfigure}{r}{0.4\textwidth}
+    \includegraphics[scale=0.35]{2-NeurIPS/figures/pairs_plot_cifar10_resnet50_finetune_layers.pdf}
+    \caption{
+        2-block finetuning profile for ResNet-50 over CIFAR-10.
+    }
+    \label{fig:2_subset}
+\end{wrapfigure}
+
+\textbf{Results.} Interestingly, our findings indicate that for most architectures and datasets, the importance of a layer cannot be predicted by simply observing properties such as the depth of the layer, the number of parameters in the layer or its spatial resolution. In fact, the same architecture can have distinctively different \emph{finetuning profiles} when trained on a different downstream task or from different initialization (see \cref{fig:finetuning_profiles}). While we find that layers closer to the input tend to contribute less to the finetuning process, the performance of the network typically does not increase monotonically with the depth or with the number of parameters\footnote{In the ResNet architectures, deeper blocks have more parameters, while for ViT all layers have the same amount of parameters.}, and after a certain point the performance often starts \emph{decreasing} when training deeper layers.
+For example, in the finetuning profile of ResNet-50 finetuned on the CIFAR-10 dataset (\cref{fig:cifar_resnet_one_block} left), we see that finetuning Block 13 results in significantly better performance compared to optimizing Block 16, which is deeper and has many more parameters. We also look into the effect of finetuning more consecutive blocks. In Figure~\ref{fig:finetuning_consecutive} (in \cref{additional_figures}) we present the finetuning profiles for training groups of 2 and 3 consecutive blocks. The results indicate that finetuning more layers improves performance, and also makes the finetuning profile more monotonic.
+
+\textbf{Greedy Selection.}\label{sec:greedy} 
+The discussion thus far prompts an inquiry into the consequences of training arbitrary (possibly non-consecutive) layers. First, we observe that different combinations of layers admit non-trivial interactions, and therefore simply choosing subsets of consecutive layers may be suboptimal. For example, in Figure \ref{fig:2_subset} we plot the accuracy of training all possible subsets of two blocks from ResNet-50, and observe that the optimal performance is achieved by Block 2 and Block 14. Therefore, a careful selection of layers to trained is needed.
+
+A brute-force approach for testing all possible subsets of $k$ layers would result in a computational burden of $O(\mathrm{num~layers}^k)$. To circumvent this issue, we introduce an efficient greedy algorithm with a cost of $O(\mathrm{num~layers} \cdot k)$. This algorithm iteratively selects the layer that yields the largest marginal contribution to validation accuracy, given the currently selected layers. The layer selection process is halted when the marginal benefit falls below a predetermined threshold, $\varepsilon$, after which the chosen layers are finetuned. We note that such greedy optimization is a common approach for subset selection in various combinatorial problems, and is known to approximate the optimal solution under certain assumptions. We show that SubTuning results in comparable performance to full finetuning even for full datasets (see Figure \ref{fig:cifar_resnet_one_block} right).
+
+\subsection{Theoretical Motivation}
+
+We now provide some theoretical justification for using Greedy SubTuning when data size is limited. 
+Denote by $\theta \in \reals^r$ an initial set of pretrained parameters, and by $f_{\theta}$ the original network that uses these parameters. In standard finetuning, we tune $\theta$ on the new task, resulting in some new set of parameters $\widetilde{\theta}$, satisfying $\norm{\widetilde{\theta}-\theta}_2 \le \Delta$. Using first-order taylor expansion, when $\Delta$ is small, we get:
+\[
+f_{\widetilde{\theta}}(\x) \approx f_\theta(\x) + \inner{\nabla f_\theta(\x), \tilde{\theta}-\theta} = \inner{\psi_\theta(\x), \bw}
+\]
+for some mapping of the input $\psi_\theta$ (typically referred to as the Neural Tangent Kernel \cite{jacot2018neural}), and some vector $\bw$ of norm $\le \Delta$. Now, if we optimize $\bw$ over some dataset of size $m$, using standard norm-based generalization bounds \cite{shalev2014understanding}, we can show that the generalization of the resulting classifier is $O\left(\frac{\sqrt{r}\Delta}{\sqrt{m}}\right)$, where $r$ is the number of parameters in the network.
+This means that if the number of parameters is large, we will need many samples to achieve good performance.
+
+SubTuning can potentially lead to much better generalization guarantees. Since in SubTuning we train only a subset of the network's parameters, we could hope that the generalization depends only on the number of parameters in the trained layers. This is not immediately true, since the Greedy SubTuning algorithm reuses the same dataset while searching for the optimal subset, which can potentially increase the sample complexity (i.e., when the optimal subset is ``overfitted'' to the training set). However, a careful analysis reveals that the Greedy SubTuning indeed allows improved generalization guarantees, and that the subset optimization only adds logarithmic factors to the sample complexity:
+\paragraph{Theorem 1.} Assume we run \emph{Greedy SubTuning} over a network with $L$ layers, tuning at most $k$ layers with $r'\ll r$ parameters. Then the generalization error of the resulting classifier is $O
+\left(\frac{\sqrt{r'}\Delta \log(k L)}{\sqrt{m}}\right)$.
+
+ Observe that the experiments reported in Figure \ref{fig:cifar_resnet_one_block} (right) indeed validate the superiority of SubTuning in terms of sample complexity.
+
+
+
+
+\section{SubTuning for Low Data Regime}
+
+
+\label{sec:data}
+In this section, we focus on finetuning in the low-data regime. As mentioned, transfer learning is a common approach in this setting, leveraging the power of a model that is already pretrained on large amounts of data. We show that in this context, SubTuning can outperform both linear probing and full finetuning, as well as other parameter efficient transfer learning methods. Additionally, we demonstrate the benefit of using SubTuning when data is corrupted.  %Finally, we demonstrate the efficacy of SubTuning for pool-based Active Learning (AL) \cite{mccallum1998employing}, where a pool of unlabeled examples can be labeled upon demand.
+
+\subsection{Evaluating SubTuning in Low-Data Regimes}
+\label{sec:scarce data}
+
+We study the advantages of using SubTuning when data is scarce, compared to other transfer learning methods. 
+Beside linear probing and finetuning, we also compare our method to highly performing algorithms in the low data regime: Head2Toe \cite{head2toe} and LoRA \cite{lora}.
+Head2Toe is a method for bridging the gap between linear probing and finetuning, which operates by training a linear layer on top of features selected from activation maps throughout the network. LoRA is a method that trains a ``residual'' branch (mostly inside a Transformer) using a low rank decomposition of the layer.
+
+\begin{table}[ht]
+\footnotesize	
+\centering
+\caption{Performance of ResNet-50 and ViT-b/16 pretrained on ImageNet and finetuned on datasets from VTAB-1k. FT denotes finetuning while LP stands for linear probing.}
+\label{table:performance}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccc|cccc}
+\toprule
+ & \multicolumn{4}{c}{ResNet50} & \multicolumn{4}{c}{ViT-b/16} \\
+ & CIFAR-100 & Flowers102 & Caltech101 & DMLAB & CIFAR-100 & Flowers102 & Caltech101 & DMLab \\
+\midrule
+Ours &\textbf{54.6} & \textbf{90.5} & 86.5 & \textbf{51.2} & \textbf{68.0} & \textbf{97.7} & 86.5 & 36.4 \\
+H2T \footnote{Hack} \cite{head2toe}  & 47.1 & 85.6 & \textbf{88.8} & 43.9 & 58.2 & 85.9 & \textbf{87.3} & \textbf{41.6} \\
+FT & 33.7 & 87.3 & 78.7 & 48.2 & 47.8 & 91.2 & 80.7 & 34.3 \\
+LP & 35.4 & 64.2 & 67.1 & 36.3 & 29.9 & 84.7 & 72.7 & 31.0 \\
+LoRA \cite{lora} & - & - & - & - & 40.4 & 88.3 & 79.2 & 36.4 \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+\footnotetext{Results from original paper. Pretrained models can differ due to difference in software suit (TensorFlow).} 
+\textbf{VTAB-1k.} First, we evaluate the performance of SubTuning on the VTAB-1k benchmark, focusing on the CIFAR-100, Flowers102, Caltech101, and DMLab datasets using the 1k examples split specified in the protocol. We employed the Greedy SubTuning approach described in Section \ref{sec:greedy} to select the subset of layers to finetune. For layer selection, we divided the training dataset into five parts and performed five-fold cross-validation. We used the official PyTorch ResNet-50 pretrained on ImageNet and ViT-b/16 pretrained on ImageNet-22k from the official repository of \cite{imagenetformasses}. The results are presented in Table~\ref{table:performance}.  Our findings indicate that SubTuning frequently outperforms competing methods and remains competitive in other cases.
+\textbf{Effect of Dataset Size.} The optimal layer selection for a given task is contingent upon various factors, such as the architecture, the task itself, and the dataset size.  We proceed to investigate the impact of dataset size on the performance of SubTuning with different layers by comparing the finetuning of a single residual block to linear probing and finetuning on CIFAR-10 with varying dataset sizes. We present the results in Figure~\ref{fig:num_samples}. Our findings demonstrate that layers closer to the output exhibit superior performance when training on smaller datasets.
+
+In addition to these experiments, we also explore the use of SubTuning in a pool-based active learning (AL) setting, where a large pool of unlabeled data is available, and additional examples can be labeled to improve the model’s accuracy. Our results suggest that SubTuning outperforms both linear probing and full finetuning in this setting.
+
+
+
+
+\begin{figure}
+\centering
+\begin{minipage}{.55\linewidth}
+\includegraphics[width=1\linewidth]{2-NeurIPS/figures/size_x_label_table.pdf}
+\caption{Single block SubTuning of ResNet-50 on CIFAR-10. The y axis is dataset size, x axis is the chosen block. With growing dataset sizes, training earlier layers proves to be more beneficial.}
+\label{fig:num_samples}
+\end{minipage}%
+\hspace{.3cm}
+\begin{minipage}{.35\linewidth}
+\includegraphics[width=\linewidth]{2-NeurIPS/figures/greedy_subtuning_layer_selection.png}
+\caption{Block selection profiling for the Greedy SubTuning method, showing the order of block selection for each data corruption.}
+\label{fig:subtuning_greedy_layer_selection}
+\end{minipage}
+\end{figure}
+
+
+
+\subsection{Distribution Shift and Data Corruption}
+\label{sec:dist_shift}
+Deep neural networks are known to be sensitive to minor distribution shifts between the source and target domains, which lead to a decrease in their performance \cite{recht19a_robustness_dist_shift, hendrycks2019benchmarking, koh2021wilds}. One cost-effective solution to this problem is to collect a small labeled dataset from the target domain and finetune a pretrained model on this dataset. In this section, we focus on a scenario where a large labeled dataset is available from the source domain, but only limited labeled data is available from the target domain. We demonstrate that Greedy SubTuning yields better results compared to finetuning all layers, and also compared to Surgical finetuning \cite{surgical}, where a large subset of consecutive blocks is trained. 
+
+\begin{table}[h]
+\footnotesize
+\small
+\setlength{\tabcolsep}{3pt}
+\centering
+\caption{CIFAR-10 to CIFAR-10-C distribution shift.}
+\label{table:distribution shift}
+\resizebox{.9\columnwidth}{!}{%
+\begin{tabular}{ccccccc}
+\toprule
+Distribution shift & \textbf{SubTuning} & \textbf{Finetuning} & \textbf{Surgical L1} & \textbf{Surgical L2} & \textbf{Surgical L3} & \textbf{Linear}\\ 
+\midrule
+zoom blur        &  $\mathbf{90.0\pm0.1}$ &    $87.8\pm0.4$ &           $89.2\pm0.1$ &     $89.1\pm0.2$ &     $85.5\pm0.3$ &  $68.7\pm0.04$ \\
+speckle noise    &  $\mathbf{81.5\pm0.2}$ &    $77.8\pm0.6$ &           $78.4\pm0.1$ &     $74.8\pm0.1$ &     $71.1\pm0.1$ &  $51.5\pm0.01$ \\
+spatter          &           $89.2\pm0.2$ &    $86.8\pm0.3$ &  $\mathbf{89.4\pm0.1}$ &     $87.4\pm0.2$ &     $85.3\pm0.0$ &  $80.4\pm0.07$ \\
+snow             &  $\mathbf{86.0\pm0.2}$ &    $84.1\pm0.2$ &           $84.8\pm0.2$ &     $84.3\pm0.1$ &     $82.2\pm0.2$ &  $78.7\pm0.07$ \\
+shot noise       &  $\mathbf{82.0\pm0.3}$ &    $77.6\pm0.4$ &           $77.0\pm0.9$ &     $74.2\pm0.1$ &     $69.9\pm0.1$ &  $46.4\pm0.01$ \\
+saturate         &  $\mathbf{92.0\pm0.1}$ &    $89.5\pm0.3$ &           $91.7\pm0.0$ &     $91.2\pm0.0$ &     $90.4\pm0.0$ &  $89.8\pm0.04$ \\
+pixelate         &  $\mathbf{86.1\pm0.0}$ &    $82.8\pm0.5$ &           $85.8\pm0.1$ &     $83.6\pm0.2$ &     $78.5\pm0.2$ &  $54.8\pm0.02$ \\
+motion blur      &  $\mathbf{87.3\pm0.1}$ &    $85.5\pm0.3$ &           $86.7\pm0.1$ &     $86.9\pm0.1$ &     $83.4\pm0.1$ &  $72.9\pm0.03$ \\
+jpeg compression &  $\mathbf{80.8\pm0.2}$ &    $76.5\pm0.7$ &           $80.1\pm0.5$ &     $76.8\pm0.1$ &     $74.9\pm0.1$ &  $72.0\pm0.04$ \\
+impulse noise    &  $\mathbf{75.4\pm0.5}$ &    $70.8\pm0.7$ &           $69.6\pm0.3$ &     $63.8\pm0.1$ &     $56.7\pm0.1$ &  $35.2\pm0.01$ \\
+glass blur       &  $\mathbf{74.3\pm0.3}$ &    $72.2\pm0.2$ &           $69.9\pm0.4$ &     $71.5\pm0.1$ &     $67.8\pm0.1$ &  $55.2\pm0.06$ \\
+gaussian noise   &  $\mathbf{80.0\pm0.2}$ &    $75.1\pm1.2$ &           $72.7\pm0.1$ &     $71.0\pm0.1$ &     $66.6\pm0.2$ &  $41.1\pm0.01$ \\
+gaussian blur    &  $\mathbf{89.5\pm0.2}$ &    $86.4\pm0.4$ &           $88.1\pm0.0$ &     $87.3\pm0.1$ &     $80.0\pm0.0$ &  $41.7\pm0.05$ \\
+frost            &  $\mathbf{84.2\pm0.2}$ &    $83.1\pm0.4$ &  $\mathbf{84.2\pm0.3}$ &     $83.2\pm0.1$ &     $80.4\pm0.2$ &  $68.5\pm0.03$ \\
+\midrule
+Average             &  $\mathbf{84.2\pm0.2}$ &    $81.1\pm0.5$ &           $82.0\pm0.2$ &     $80.4\pm0.1$ &     $76.6\pm0.1$ &  $61.2\pm0.04$ \\
+
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+Throughout this section we follow the setup proposed by \cite{surgical}, analyzing the distribution shift from CIFAR-10 to CIFAR-10-C \cite{hendrycks2019benchmarking} for ResNet-26. The task is to classify images where the target distribution is composed of images of the original distribution with added input corruption out of a predefined set of 14 corruptions. 
+
+\paragraph{Results.} In Table~\ref{table:distribution shift}, we display the performance of linear probing, finetuning, Surgical finetuning\footnote{Surgical finetuning focuses on training whole Layers (which consist of 4 blocks for ResNet26).} as well as SubTuning. We see that our method often outperforms and always is competitive with other methods. On average, SubTuning performs 3\% better than full finetuning and 2.2\% better than Surgical finetuning reproduced in our setting\footnote{We note that \cite{surgical} reports slightly higher performance than our reproduction, but still achieves accuracy that is lower by 1.4\% compared to SubTuning.}.
+Next, we analyse the number of residual blocks required for SubTuning as shown in Figure~\ref{fig:cifar_resnet_one_block}(middle). We report the average accuracy on 3 distribution shifts (glass blur, zoom blur and jpeg compression) and the average prerformance for the 14 corruptions in CIFAR-10-C. Even with as little as 2 appropriately selected residual blocks, SubTuning shows better performance than full finetuning.
+
+Finally, we analyze which blocks were used by the Greedy-SubTuning method above. Figure~\ref{fig:subtuning_greedy_layer_selection} illustrates the selected blocks and their respective order for each dataset. Our findings contradict the commonly held belief that only the last few blocks require adjustment. In fact, SubTuning utilizes numerous blocks from the beginning and middle of the network. Furthermore, our results challenge the claim made in \cite{surgical} that suggests adjusting only the first layers of the network suffices for input-level shifts in CIFAR-10-C. Interestingly, we found that the ultimate or penultimate block was the first layer selected for all corruptions, resulting in the largest performance increase.
+
+
+
+
+\section{Efficient Multi-Task Learning with SubTuning}
+
+\label{sec:computationally_efficient_finetuning}
+
+\begin{figure*}[ht]
+    \centering
+    \includegraphics[width=0.75\textwidth]{2-NeurIPS/figures/MTL-subtuning.png}
+    \caption{SubTuning for MTL. Each new task utilizes a consecutive subset of layers of a network and shares the others. At the end of the split, the outputs of different tasks are concatenated and parallelized along the batch axis for computational efficiency. }
+    \label{fig:mtl_subtuning}
+\end{figure*}
+
+So far, we demonstrated the varying impact of different layers on the overall performance of a finetuned model, showing that high accuracy can be achieved without training all parameters of the network, provided that the right layers are selected for training.
+In this section, we focus on utilizing SubTuning for Multi-Task Learning (MTL). 
+
+One major drawback of standard finetuning in the context of multi-task learning \cite{caruana1997multitask, ruder2017overview} is that once the model is finetuned on a new task, its weights may no longer be suitable for the original source task (a problem known as \emph{catastrophic forgetting} \cite{catastrophicforgetting}). Consider for instance the following multi-task setting, which serves as the primary motivation for this section. Assume we have a large backbone network that was trained on some source task, and is already deployed and running as part of our machine learning system. When presented with a new task, we finetune our deployed backbone on this task, and want to run the new finetuned network in parallel to the old one. This presents a problem, as we must now run the same architecture twice, each time with a different set of weights. Doing so doubles the cost both in terms of compute (the number of multiply-adds needed for computing both tasks), and in terms of memory and IO (the number of bits required to load the weights  of both models from memory). An alternative would be to perform multi-task training for both the old and new task, but this usually results in degradation of performance on both tasks, with issues such as data balancing, parameters sharing and loss weighting cropping up \cite{chen2018gradnorm, sun2020adashare, sener2018multi}. 
+We show that using  SubTuning, we can efficiently deploy new tasks at inference time (see~\cref{fig:mtl_subtuning}), with minimal cost in terms of compute, memory and IO, while maintaining high accuracy on the downstream tasks. Instead of training all tasks simultaneously, which can lead to task interference and complex optimization, we propose starting with a network pretrained on some primary task, and adding new tasks with SubTuning on top of it (Figure \ref{fig:mtl_subtuning}). This framework provides assurance that the performance of previously learned tasks will be preserved while adding new tasks.
+\subsection{Computationally Efficient Inference}
+
+We will now demonstrate how SubTuning improves the computational efficiency of the network at \textit{inference time}, which is the primary motivation for this section. %We discuss the improvements during \textit{training time} in Section \ref{subsec:train-eff}.
+
+\begin{figure*}[ht]
+    \centering
+    \includegraphics[width=0.9\textwidth]{2-NeurIPS/figures/side_by_side_inf_acc.pdf}
+    \caption{Accuracy on CIFAR-10 vs A100 latency with batch size of 1 and input resolution of 224. }
+    \label{fig:acc-vs-inf}
+\end{figure*}
+Let us consider the following setting of multi-task learning. We trained a network $f_\theta$ on some task. The network gets an input $\x$ and returns an output $f_\theta(\x)$. We now want to train a new network on a different task by finetuning the weights $\theta$, resulting in a new set of weights $\tilde{\theta}$. Now, at inference time, we receive an input $\x$ and want to compute both $f_\theta(\x)$ and $f_{\tilde{\theta}}(\x)$ with minimal compute budget. Since we cannot expect the overall compute to be lower than just running $f_\theta(\x)$\footnote{Optimizing the compute budget of a single network is outside the scope of this paper.}, we only measure the \emph{additional} cost of computing $f_{\tilde{\theta}}(\x)$, given that $f_\theta(\x)$ is already computed.
+
+Since inference time heavily depends on various parameters such as the hardware used for inference (e.g., CPU, GPU, FPGA), the hardware parallel load, the network compilation (i.e., kernel fusion) and the batch size, we will conduct a crude analysis of the compute requirements (see in depth discussion in \cite{li2021searching}). The two main factors that contribute to computation time are: 1) \textbf{Computational cost}, or the number of multiply-adds (FLOPs) needed to compute each layer and 2) \textbf{IO}, which refers to the number of bits required to read from memory to load each layer's weights.
+If we perform full finetuning of all layers, in order to compute $f_{\tilde{\theta}}(\x)$ we need to double both the computational cost and the IO, as we are now effectively running two separate networks, $f_\theta$ and $f_{\tilde{\theta}}$, with two separate sets of weights. Note that this does not necessarily mean that the computation-time is doubled, since most hardware used for inference does significant parallelization, and if the hardware is not fully utilized when running $f_\theta(\x)$, the additional cost of running $f_{\tilde{\theta}}(\x)$ in parallel might be smaller. However, in terms of additional compute, full finetuning is the least optimal thing to do.
+
+Consider now the computational cost of SubTuning. For simplicity we analyze the case where the chosen layers are consecutive, but similar analysis can be applied to the non-consecutive case. Denote by $N$ the number of layers in the network, and assume that the parameters $\tilde{\theta}$ differ from the original parameters $\theta$ only in the layers $\ell_\Start$ through $\ell_\End$ (where $1 \le \ell_\Start \le \ell_\End \le N$). Let us separate between two cases: 1) $\ell_\End$ is the final layer of the network and 2) $\ell_\End$ is some intermediate layer.
+
+The case where $\ell_\End$ is the final layer is the simplest: we share the entire compute of $f_\theta(\x)$ and $f_{\tilde{\theta}}(\x)$ up until the layer $\ell_\Start$ (so there is zero extra cost for layers below $\ell_\Start$), and then we ``fork'' the network and run the layers of $f_\theta$ and $f_{\tilde{\theta}}$ in parallel. In this case, both the compute and the IO are doubled \textit{only} for the layers between $\ell_\Start$ and $\ell_\End$. 
+
+In the second case, where $\ell_\End$ is some intermediate layer, the computational considerations are more nuanced. As in the previous case, we share the entire computation before layer $\ell_\Start$, with no extra compute. Then we ``fork'' the network, paying double compute and IO for the layers between $\ell_\Start$ and $\ell_\End$. For the layers after $\ell_\End$, however, we can ``merge'' back the outputs of the two parallel branches (i.e., concatenating them in the ``batch'' axis), and use the same network weights for both outputs. This means that for the layers after $\ell_\End$ we double the compute (i.e., in FLOPs), but the IO remains the same (by reusing the weights for both outputs). This mechanism is illustrated in Figure \ref{fig:mtl_subtuning}.
+
+More formally, let $c_i$ be the computational-cost of the $i$-th layer, and let $s_i$ be the IO required for the $i$-th layer.
+To get a rough estimate of how the IO and compute affect the backbone run-time, consider a simple setting where compute and IO are parallelized. Thus, while the processor computes layer $i$, the weights of layer $i+1$ are loaded into memory. The total inference time of the model is then:
+\begin{align*}
+  \mathrm{Compute = }
+   &\max(2s_{\ell_{\Start}},c_{\ell_{\Start}-1}) \ + 
+\sum_{i=\ell_\Start}^{\ell_{\End}}
+2\max(c_i, s_{i+1}) 
+&+\sum_{i=\ell_\End+1}^{N-1} %\hspace{-0.35cm}
+\max(2c_i,s_{i+1})+2c_N
+\end{align*}
+
+Thus, both deeper and shallower layers can be optimal for SubTuning, depending on the exact deployment environment, workload and whether we are IO or compute bound. We proceed to empirically investigate the performance vs latency tradeoffs of SubTuning for MTL. We conduct an experiment using ResNet-50 on an NVIDIA A100-SXM-80GB GPU with a batch size of 1 and resolution 224. We finetune 1 and 3 consecutive res-blocks and plot the accuracy against the added inference cost, as seen in Figure \ref{fig:acc-vs-inf}. This way we are able to achieve significant performance gains, with minimal computational cost. However, it is important to mention that the exact choice of which layer gives the optimal accuracy-latency tradeoff can heavily depend on the deployment environment, as the runtime estimation may vary depending on factors such as hardware, job load, and software stack. %While this is admittedly a limitation of our method, we argue that the flexibility of SubTuning allows us to use the same methodology across a wide range of deployment environments, providing a powerful tool for effective finetuning with small compute overhead.
+
+
+
+\section{Discussion}
+
+
+Neural networks are now becoming an integral part of software development.
+In conventional development, teams can work independently and resolve conflicts using version control systems. But with neural networks, maintaining independence becomes difficult. Teams building a single network for different tasks must coordinate training cycles, and changes in one task can impact others. We believe that SubTuning offers a viable solution to this problem. It allows developers to ``fork'' deployed networks and develop new tasks without interfering with other teams. This approach promotes independent development, knowledge sharing, and efficient deployment of new tasks. As we showed, it also results in improved performance compared to competing transfer learning methods in different settings. In conclusion, we hope that SubTuning, along with other efficient finetuning methods, may play a role in the ongoing evolution of software development in the neural network era.
+
+
+
+

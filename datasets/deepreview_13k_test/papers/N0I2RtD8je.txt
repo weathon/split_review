@@ -1,0 +1,354 @@
+\title{Vision-Language Models are Zero-Shot Reward Models for Reinforcement Learning}
+
+\begin{abstract}
+\looseness -1
+Reinforcement learning (RL) requires either manually specifying a reward function, which is often infeasible, or learning a reward model from a large amount of human feedback, which is often very expensive.
+We study a more sample-efficient alternative: using pretrained vision-language models (VLMs) as zero-shot reward models (RMs) to specify tasks via natural language.
+We propose a natural and general approach to using VLMs as reward models, which we call VLM-RMs.
+We use VLM-RMs based on CLIP to train a MuJoCo humanoid to learn complex tasks without a manually specified reward function, such as kneeling, doing the splits, and sitting in a lotus position. For each of these tasks, we only provide \emph{a single sentence text prompt} describing the desired task with minimal prompt engineering.
+We can improve performance by providing a second ``baseline'' prompt and projecting out parts of the CLIP embedding space irrelevant to distinguish between goal and baseline.
+Further, we find a strong scaling effect for VLM-RMs: larger VLMs trained with more compute and data are better reward models.
+The failure modes of VLM-RMs we encountered are all related to known capability limitations of current VLMs, such as limited spatial reasoning ability or visually unrealistic environments that are far off-distribution for the VLM.
+We find that VLM-RMs are remarkably robust as long as the VLM is large enough. This suggests that future VLMs will become more and more useful reward models for a wide range of RL applications.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Training reinforcement learning (RL) agents to perform complex tasks in vision-based domains can be difficult, due to high costs associated with reward specification.
+Manually specifying reward functions for real world tasks is often infeasible, and learning a reward model from human feedback is typically expensive.
+To make RL more useful in practical applications, it is critical to find a more sample-efficient and natural way to specify reward functions.
+
+One natural approach is to use pretrained vision-language models (VLMs), such as CLIP~\citep{radford2021learning} and Flamingo~\citep{alayrac2022flamingo}, to provide reward signals based on natural language.
+However, prior attempts to use VLMs to provide rewards require extensive fine-tuning VLMs~\citep[e.g.,][]{du2023vision} or complex ad-hoc procedures to extract rewards from VLMs \citep[e.g.,][]{mahmoudieh2022zero}.
+In this work, we demonstrate that simple techniques for using VLMs as \emph{zero-shot} language-grounded reward models work well, as long as the chosen underlying model is sufficiently capable.
+Concretely, we make four key contributions.
+
+First, we \textbf{propose VLM-RM}, a general method for using pre-trained VLMs as a reward model for vision-based RL tasks (\Cref{sec:method}). We propose a concrete implementation that uses CLIP as 
+a VLM and cos-similarity between the CLIP embedding of the current environment state and a simple language prompt as a reward function. We can optionally regularize the reward model by providing a ``baseline prompt'' that describes a neutral state of the environment and partially projecting the representations onto the direction between baseline and target prompts when computing the reward.
+
+Second, we \textbf{validate our method in the standard \texttt{CartPole} and \texttt{MountainCar} RL benchmarks} (\Cref{sec:exp-standard-rl}). We observe high correlation between VLM-RMs and the ground truth rewards of the environments and successfully train policies to solve the tasks using CLIP as a reward model. Furthermore, we find that the quality of CLIP as a reward model improves if we render the environment using more realistic textures.
+
+Third, we train a \textbf{MuJoCo humanoid to learn complex tasks}, including raising its arms, sitting in a lotus position, doing the splits, and kneeling (\Cref{fig:humanoid_screenshots}; \Cref{sec:exp-complex}) using a CLIP reward model derived from single sentence text prompts (e.g., ``a humanoid robot kneeling'').
+
+Fourth, we \textbf{study how VLM-RMs' performance scales} with the size of the VLM, and find that VLM scale is strongly correlated to VLM-RM quality (\Cref{sec:exp-scaling}). In particular, we can only learn the humanoid tasks in \Cref{fig:humanoid_screenshots} with the largest publicly available CLIP model.
+
+Our results indicate that VLMs are powerful zero-shot reward models.
+While current models, such as CLIP, have important limitations that persist when used as VLM-RMs, we expect such limitations to mostly be overcome as larger and more capable VLMs become available. Overall, VLM-RMs are likely to enable us to train models to perform increasingly sophisticated tasks from human-written task descriptions.
+
+
+\section{Background}
+
+\label{sec:background}
+
+\paragraph{Partially observable Markov decision processes.}
+We formulate the problem of training RL agents in vision-based tasks as a partially observable Markov decision process (POMDP).
+A POMDP is a tuple $(\mathcal{S}, \mathcal{A}, \theta, R, \mathcal{O}, \phi, \gamma, d_0)$ where: $\mathcal S$ is the state space; $\mathcal A$ is the action space; $\theta(s'|s, a) : \mathcal{S} \times \mathcal{S} \times \mathcal{A}\rightarrow \mathbb [0,1]$ is the transition function; $R(s, a, s'): \mathcal{S} \times \mathcal{A} \times \mathcal{S} \rightarrow \mathbb R$ is the reward function; $\mathcal{O}$ is the observation space; $\phi(o | s): \mathcal{S} \rightarrow \Delta(\mathcal{O})$ is the observation distribution; and $d_0(s) : \mathcal S \rightarrow [0,1]$ is the initial state distribution.
+
+At each point in time, the environment is in a state $s\in \mathcal S$. In each timestep, the agent takes an action $a\in \mathcal A$, causing the environment to transition to state $s'$ with probability $\theta(s'|s,a)$. The agent then receives an observation $o$, with probability $\phi (o|s')$ and a reward $r=R(s,a,s')$. A sequence of states and actions is called a trajectory $\tau = (s_0, a_0, s_1, a_1, \dots)$, where $s_i\in \mathcal S$, and $a_i\in \mathcal A$. The returns of such a trajectory $\tau$ are the discounted sum of rewards $g(\tau; R)=\sum_{t=0}\gamma^t R(s_t, a_t, s_{t+1})$. 
+
+The agent's goal is to find a (possibly stochastic) policy $\pi(s|a)$ that maximizes the expected returns $G(\pi)=\mathbb E_{\tau(\pi)} \left[g(\tau(\pi); R)\right]$.
+We only consider finite-horizon trajectories, i.e., $|\tau|<\infty$. 
+
+\looseness -1
+\paragraph{Vision-language models.}
+We broadly define vision-language models \citep[VLMs;][]{zhang2023vision} as models capable of processing sequences of both language inputs $l \in \mathcal{L}^{\leq n}$ and vision inputs $i \in \mathcal{I}^{\leq m}$. Here, $\mathcal{L}$ is a finite alphabet and $\mathcal{L}^{\leq n}$ contains strings of length less than or equal to $n$, whereas $\mathcal{I}$ is the space of 2D RGB images and $\mathcal{I}^{\leq m}$ contains sequences of images with length less than or equal to $m$.
+
+\paragraph{CLIP models.}
+One popular class of VLMs are Contrastive Language-Image Pretraining \citep[CLIP;][]{radford2021learning} encoders. CLIP models consist of a language encoder $\text{CLIP}_L : \mathcal{L}^{\leq n} \rightarrow \mathcal{V}$ and an image encoder $\text{CLIP}_I : \mathcal{I} \rightarrow \mathcal{V}$ mapping into the same latent space $\mathcal{V} = \mathbb R^k$. These encoders are jointly trained via contrastive learning over pairs of images and captions. Commonly CLIP encoders are trained to minimize the cosine distance between embeddings for semantically matching pairs and maximize the cosine distance between semantically non-matching pairs. %
+
+
+
+\section{Vision-Language Models as Reward Models (VLM-RMs)}
+
+\label{sec:method}
+This section presents how we can use VLMs as a learning-free (zero-shot) way to specify rewards from natural language descriptions of tasks. Importantly, VLM-RMs avoid manually engineering a reward function or collecting expensive data for learning a reward model.
+
+\subsection{Using Vision-Language Models as Rewards}
+\label{sec:vlm-rew}
+Let us consider a POMDP without a reward function $(\mathcal{S}, \mathcal{A}, \theta, \mathcal{O}, \phi, \gamma, d_0)$.
+We focus on vision-based RL where the observations $o \in \mathcal{O}$ are images. For simplicity, we assume a deterministic observation distribution $\phi(o|s)$ defined by a mapping $\psi(s): \mathcal{S} \rightarrow \mathcal{O}$ from states to image observation.
+We want the agent to perform a \textit{task} $\mathcal{T}$ based on a natural language description $l \in \mathcal{L}^{\leq n}$. 
+For example,  when controlling a humanoid robot (\Cref{sec:exp-complex}) $\mathcal{T}$ might be the robot kneeling on the ground and $\l$ might be the string ``a humanoid robot kneeling''.
+
+To train the agent using RL, we need to first design a reward function. We propose to use a VLM to provide the reward $R(s)$ as:
+\begin{equation}
+    R_{\text{VLM}}(s) = \text{VLM}(l,\psi(s),c) \text{ ,}
+\end{equation}
+where $c \in \mathcal{L}^{\leq n}$ is an optional context, e.g., for defining the reward interactively with a VLM.
+This formulation is general enough to encompass the use of several different kinds of VLMs, including image and video encoders, as reward models.
+
+\paragraph{CLIP as a reward model.}
+In our experiments, we chose a CLIP encoder as the VLM. A very basic way to use CLIP to define a reward function is to use cosine similarity between a state's image representation and the natural language task description:
+\begin{equation}
+\label{eq:clip-rew}
+    R_{\text{CLIP}}(s) = \frac{\text{CLIP}_L(l) \cdot \text{CLIP}_I(\psi(s))}{\|\text{CLIP}_L(l)\| \cdot \|\text{CLIP}_I(\psi(s))\|} \text{.}
+\end{equation}
+In this case, we do not require a context $c$. We will sometimes call the CLIP image encoder a \textit{state encoder}, as it encodes an image that is a direct function of the POMDP state, and the CLIP language encoder a \textit{task encoder}, as it encodes the language description of the task.
+
+\subsection{Goal-Baseline Regularization to Improve CLIP Reward Models}
+
+While in the previous section, we introduced a very basic way of using CLIP to define a task-based reward function, this section proposes \emph{Goal-Baseline Regularization} as a way to improve the quality of the reward by projecting out irrelevant information about the observation.
+
+So far, we assumed we only have a task description $l \in \mathcal{L}^{\leq n}$. To apply goal-baseline regularization, we require a second ``baseline'' description $b \in \mathcal{L}^{\leq n}$. The baseline $b$ is a natural language description of the environment setting in its default state, irrespective of the goal. For example, our baseline description for the humanoid is simply ``a humanoid robot,'' whereas the task description is, e.g., ``a humanoid robot kneeling.''
+We obtain the goal-baseline regularized CLIP reward model ($R_{\text{CLIP-Reg}}$) by projecting our state embedding onto the line spanned by the baseline and task embeddings.
+
+\begin{definition}[Goal-Baseline Regularization]
+    \label{def:goal-baseline-reg}
+    Given a goal task description $l$ and baseline description $b$, let $\mathbf{g} = \frac{\text{CLIP}_L(l)}{\|\text{CLIP}_L(l)\|}$, $\mathbf{b} = \frac{\text{CLIP}_L(b)}{\|\text{CLIP}_L(b)\|}$, $\mathbf{s}=\frac{\text{CLIP}_I(\psi(s))}{\|\text{CLIP}_I(\psi(s))\|}$ be the normalized encodings, and $L$ be the line spanned by $\mathbf{b}$ and $\mathbf{g}$. The goal-baseline regularized reward function is given by
+    \begin{equation}
+    R_{\text{CLIP-Reg}}(s)=1-\frac{1}{2}\|\alpha\proj_{L}\mathbf{s}+(1-\alpha)\mathbf{s}-\mathbf{g}\|_2^2,
+    \end{equation}
+    where $\alpha$ is a parameter to control the regularization strength.
+\end{definition}
+In particular, for $\alpha = 0$, we recover our initial CLIP reward function $R_{\text{CLIP}}$.
+On the other hand, for $\alpha=1$, the projection removes all components of $\mathbf{s}$ orthogonal to $\mathbf{g}-\mathbf{b}$.
+
+\looseness -1
+Intuitively, the direction from $\mathbf{b}$ to $\mathbf{g}$ captures the change from the environment's baseline to the target state. By projecting the reward onto this direction, we directionally remove irrelevant parts of the CLIP representation. However, we can not be sure that the direction really captures all relevant information. Therefore, instead of using $\alpha = 1$, we treat it as a hyperparameter. However, we find the method to be relatively robust to changes in  $\alpha$ with most intermediate values being better than $0$ or $1$.
+\subsection{RL with CLIP Reward Model}
+
+We can now use VLM-RMs as a drop-in replacement for the reward signal in RL. In our implementation, we use the Deep Q-Network \citep[DQN;][]{mnih2015human} or Soft Actor-Critic \citep[SAC;][]{haarnoja2018soft} RL algorithms. Whenever we interact with the environment, we store the observations in a replay buffer. In regular intervals, we pass a batch of observations from the replay buffer through a CLIP encoder to obtain the corresponding state embeddings. We can then compute the reward function as cosine similarity between the state embeddings and the task embedding which we only need to compute once. Once we have computed the reward for a batch of interactions, we can use them to perform the standard RL algorithm updates. \Cref{app:implementation-details} contains more implementation details and pseudocode for our full algorithm in the case of SAC.
+
+
+\section{Experiments}
+
+
+We conduct a variety of experiments to evaluate CLIP as a reward model with and without goal-baseline regularization. We start with simple control tasks that are popular RL benchmarks: \texttt{CartPole} and \texttt{MountainCar} (\Cref{sec:exp-standard-rl}). These environments have a ground truth reward function and a simple, well-structured state space. We find that our reward models are highly correlated with the ground truth reward function, with this correlation being greatest when applying goal-baseline regularization. Furthermore, we find that the reward model's outputs can be significantly improved by making a simple modification to make the environment's observation function more realistic, e.g., by rendering the mountain car over a mountain texture.
+
+We then move on to our main experiment: controlling a simulated humanoid robot (\Cref{sec:exp-complex}). We use CLIP reward models to specify tasks from short language prompts; several of these tasks are challenging to specify manually. We find that these zero-shot CLIP reward models are sufficient for RL algorithms to learn most tasks we attempted with little to no prompt engineering or hyperparameter tuning.
+
+Finally, we study the scaling properties of the reward models by using CLIP models of different sizes as reward models in the humanoid environment (\Cref{sec:exp-scaling}). We find that larger CLIP models are significantly better reward models. In particular, we can only successfully learn the tasks presented in \Cref{fig:humanoid_screenshots} when using the largest publicly available CLIP model.
+
+\paragraph{Experiment setup.}
+We extend the implementation of the DQN and SAC algorithm from the \texttt{stable-baselines3} library \citep{stable-baselines3} to compute rewards from CLIP reward models instead of from the environment. As shown in \Cref{algo:sac-clip} for SAC, we alternate between environment steps, computing the CLIP reward, and RL algorithm updates. We run the RL algorithm updates on a single NVIDIA RTX A6000 GPU. The environment simulation runs on CPU, but we perform rendering and CLIP inference distributed over 4 NVIDIA RTX A6000 GPUs.
+
+We provide the code to reproduce our experiments in the supplementary material.  %
+We discuss hyperparameter choices in \Cref{app:implementation-details}, but we mostly use standard parameters from \texttt{stable-baselines3}. \Cref{app:implementation-details} also contains a table with a full list of prompts for our experiments, including both goal and baseline prompts when using goal-baseline regularization.
+
+\subsection{How can we Evaluate VLM-RMs?}
+
+Evaluating reward models can be difficult, particularly for tasks for which we do not have a ground truth reward function. In our experiments, we use 3 types of evaluation: (i) evaluating policies using ground truth reward; (ii) comparing reward functions using EPIC distance; (iii) human evaluation.
+
+\paragraph{Evaluating policies using ground truth reward.}
+If we have a ground truth reward function for a task such as for the 
+\texttt{CarPole} and \texttt{MountainCar}, we can use it to evaluate policies. For example, we can train a policy using a VLM-RM and evaluate it using the ground truth reward. This is the most popular way to evaluate reward models in the literature and we use it for environments where we have a ground-truth reward available.
+
+\paragraph{Comparing reward functions using EPIC distance.}
+The ``Equivalent Policy-Invariant Comparison'' \citep[EPIC;][]{gleave2021quantifying} distance compares two reward functions without requiring the expensive policy training step. EPIC distance is provably invariant on the equivalence class of reward functions that induce the same optimal policy. We consider only goal-based tasks, for which the EPIC is distance particularly easy to compute. In particular, a low EPIC distance between the CLIP reward model and the ground truth reward implies that the CLIP reward model successfully separates goal states from non-goal states. \Cref{app:epic} discusses in more detail how we compute the EPIC distance in our case, and how we can intuitively interpret it for goal-based tasks.
+
+\paragraph{Human evaluation.}
+For tasks without a ground truth reward function, such as all humanoid tasks in \Cref{fig:humanoid_screenshots}, we need to perform human evaluations to decide whether our agent is successful. We define ``success rate'' as the percentage of trajectories in which the agent successfully performs the task in at least $50\%$ of the timesteps. For each trajectory, we have a single rater\footnote{One of the authors.} label how many timesteps were spent successfully performing the goal task, and use this to compute the success rate.
+However, human evaluations can also be expensive, particularly if we want to evaluate many different policies, e.g., to perform ablations. For such cases, we additionally collect a dataset of human-labelled states for each task, including goal states and non-goal states. We can then compute the EPIC distance with these binary human labels. Empirically, we find this to be a useful proxy for the reward model quality which correlates well with the performance of a policy trained using the reward model.
+
+For more details on our human evaluation protocol, we refer to \Cref{app:evaluation}. Our human evaluation protocol is very basic and might be biased. Therefore, we additionally provide videos of our trained agents at \websitelink.
+\subsection{Can VLM-RMs Solve Classic Control Benchmarks?} \label{sec:exp-standard-rl}
+
+\begin{figure}
+\centering
+\begin{subfigure}{0.31\linewidth}\centering
+\includegraphics[width=0.9\linewidth, height=2.5cm]{assets/cartpole.jpg} \\
+\includegraphics[width=\linewidth]{assets/reward_cartpole.pdf}
+\caption{\texttt{CartPole}}
+\label{fig:reward_cartpole}
+\end{subfigure}
+\begin{subfigure}{0.31\linewidth}\centering
+\includegraphics[width=0.9\linewidth, height=2.5cm]{assets/mountaincar.jpg} \\
+\includegraphics[width=\linewidth]{assets/reward_untextured.pdf}
+\caption{\texttt{MountainCar} (original)}
+\label{fig:reward_untextured_mountain_car}
+\end{subfigure}
+\begin{subfigure}{0.31\linewidth}\centering
+\includegraphics[width=0.9\linewidth, height=2.5cm]{assets/mountaincar_textured.jpg} \\
+\includegraphics[width=\linewidth]{assets/reward_textured.pdf}
+\caption{\texttt{MountainCar} (textured)}
+\label{fig:reward_textured_mountain_car}
+\end{subfigure}
+\begin{minipage}{0.04\linewidth}
+\includegraphics[height=2.2cm]{assets/colorscale.pdf}
+\end{minipage}
+\caption{We study the CLIP reward landscape in two classic control environments: \texttt{CartPole} and \texttt{MountainCar}. We plot the CLIP reward as a function of the pole angle for the \texttt{CartPole} (\subref{fig:reward_cartpole}) and as a function of the x position for the \texttt{MountainCar} (\subref{fig:reward_untextured_mountain_car},\subref{fig:reward_textured_mountain_car}). We mark the respective goal states with a vertical line. The line color encodes different regularization strengths $\alpha$.
+For the \texttt{CartPole}, the maximum reward is always when balancing the pole and the regularization has little effect.
+For the \texttt{MountainCar}, the agent obtains the maximum reward on top of the mountain. But, the reward landscape is much more well-behaved when the environment has textures and we add goal-baseline regularization -- this is consistent with our results when training policies.}
+\label{fig:toy_env_screenshots}
+\label{fig:toy_env_landscape}
+\end{figure}
+
+As an initial validation of our methods, we consider two classic control environments: \texttt{CartPole} and \texttt{MountainCar}, implemented in OpenAI Gym \citep{brockman2016openai}. In addition to the default \texttt{MountainCar} environment, we also consider a version with a modified rendering method that adds textures to the mountain and the car so that it resembles the setting of ``a car at the peak of a mountain'' more closely (see \Cref{fig:toy_env_screenshots}). This environment allows us to test whether VLM-RMs work better in visually ``more realistic'' environments.
+
+To understand the rewards our CLIP reward models provide, we first analyse plots of their reward landscape. In order to obtain a simple and interpretable visualization figure, we plot CLIP rewards against a one-dimensional state space parameter, that is directly related to the completion of the task. For the \texttt{CartPole} (\Cref{fig:reward_cartpole}) we plot CLIP rewards against the angle of the pole, where the ideal position is at angle $0$. For the (untextured and textured) \texttt{MountainCar} environments \Cref{fig:reward_untextured_mountain_car,fig:reward_textured_mountain_car}, we plot CLIP rewards against the position of the car along the horizontal axis, with the goal location being around $x = 0.5$.
+
+\Cref{fig:reward_cartpole} shows that CLIP rewards are well-shaped around the goal state for the \texttt{CartPole} environment, whereas \Cref{fig:reward_untextured_mountain_car} shows that CLIP rewards for the default \texttt{MountainCar} environment are poorly shaped, and might be difficult to learn from, despite still having roughly the right maximum.
+
+We conjecture that zero-shot VLM-based rewards work better in environments that are more ``photorealistic'' because they are closer to the training distribution of the underlying VLM. \Cref{fig:reward_textured_mountain_car} shows that if, as described earlier, we apply custom textures to the \texttt{MountainCar} environment, the CLIP rewards become well-shaped when used in concert with the goal-baseline regularization technique. For larger regularization strength $\alpha$, the reward shape resembles the slope of the hill from the environment itself -- an encouraging result.
+
+We then train agents using the CLIP rewards and goal-baseline regularization in all three environments, and achieve 100\% task success rate in both environments (\texttt{CartPole} and textured \texttt{MountainCar}) for most $\alpha$ regularization strengths. Without the custom textures, we are not able to successfully train an agent on the mountain car task, which supports our hypothesis that the environment visualization is too abstract.
+
+The results show that both and regularized CLIP rewards are effective in the toy RL task domain, with the important caveat that CLIP rewards are only meaningful and well-shaped for environments that are photorealistic enough for the CLIP visual encoder to interpret correctly.
+\subsection{Can VLM-RMs Learn Complex, Novel Tasks in a Humanoid Robot?} \label{sec:exp-complex}
+
+\begin{table}[]
+\centering
+\begin{minipage}{0.35\textwidth}
+\begin{tabular}{lc}
+\toprule
+Task & \specialcell{Success \\ Rate} \\
+\midrule
+Kneeling & \posres{100} \\
+Lotus position & \posres{100} \\
+Standing up & \posres{100} \\
+Arms raised & \posres{100} \\
+Doing splits & \posres{100} \\
+Hands on hips & \mixedres{64} \\
+Standing on one leg & \negres{0} \\
+Arms crossed & \negres{0}
+\end{tabular}
+\end{minipage}
+\hfill
+\begin{minipage}{0.64\textwidth}
+\caption{We successfully learned 5 out of 8 tasks we tried for the humanoid robot (cf. \Cref{fig:humanoid_screenshots}). For each task, we evaluate the checkpoint with the highest CLIP reward over $4$ random seeds. We show a human evaluator 100 trajectories from the agent and ask them to label how many timesteps were spent successfully performing the goal task. Then, we label an episode as a success if the agent is in the goal state at least $50\%$ of the timesteps. The success rate is the fraction of trajectories labelled as successful. We provide more details on the evaluation as well as more fine-grained human labels in \Cref{app:evaluation} and videos of the agents' performance at \websitelink.}
+\label{tab:humanoid-acc}
+\end{minipage}
+\end{table}
+Our primary goal in using VLM-RMs is to learn tasks for which it is difficult to specify a reward function manually. To study such tasks, we consider the \texttt{Humanoid-v4} environment implemented in the MuJoCo simulator \citep{todorov2012mujoco}.
+
+The standard task in this environment is for the humanoid robot to stand up. For this task, the environment provides a reward function based on the vertical position of the robot's center of mass. We consider a range of additional tasks for which no ground truth reward function is available, including kneeling, sitting in a lotus position, and doing the splits. For a full list of tasks we tested, see \Cref{tab:humanoid-acc}. \Cref{app:implementation-details} presents more detailed task descriptions and the full prompts we used.
+
+We make two modifications to the default \texttt{Humanoid-v4} environment to make it better suited for our experiments. (1) We change the colors of the humanoid texture and the environment background to be more realistic (based on our results in \Cref{sec:exp-standard-rl} that suggest this should improve the CLIP encoder). (2) We move the camera to a fixed position pointing at the agent slightly angled down because the original camera position that moves with the agent can make some of our tasks impossible to evaluate. We ablate these changes in \Cref{fig:ablations}, finding the texture change is critical and repositioning the camera provides a modest improvement.
+
+\Cref{tab:humanoid-acc} shows the human-evaluated success rate for all tasks we tested. We solve 5 out of 8 tasks we tried with minimal prompt engineering and tuning. For the remaining 3 tasks, we did not get major performance improvements with additional prompt engineering and hyperparameter tuning, and we hypothesize these failures are related to capability limitations in the CLIP model we use.
+We invite the reader to evaluate the performance of the trained agents themselves by viewing videos at \websitelink.
+
+The three tasks that the agent does not obtain perfect performance for are ``hands on hips'', ``standing on one leg'', and ``arms crossed''. We hypothesize that ``standing on one leg'' is very hard to learn or might even be impossible in the MuJoCo physics simulation because the humanoid's feet are round. The goal state for ``hands on hips'' and ``arms crossed'' is visually similar to a humanoid standing and we conjecture the current generation of CLIP models are unable to discriminate between such subtle differences in body pose.
+
+While the experiments in \Cref{tab:humanoid-acc} use no goal-baseline regularization (i.e., $\alpha=0$), we separately evaluate goal-baseline regularization for the kneeling task. \Cref{fig:humanoid-alpha-reg} shows that $\alpha \neq 0$ improves the reward model's EPIC distance to human labels, suggesting that it would also improve performance on the final task, we might need a more fine-grained evaluation criterion to see that.
+\begin{figure}
+\centering
+\begin{minipage}{0.33\linewidth}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{llc}
+\toprule
+\specialcell{Camera \\ Angle} & Textures & \specialcell{Success \\ Rate} \\
+\midrule
+Original & Original & \negres{36} \\
+Original & Modified & \mixedres{91} \\
+Modified & Modified & \posres{100} \\
+\end{tabular}
+\end{minipage}
+\begin{minipage}{0.65\linewidth}
+\begin{subfigure}{0.32\linewidth}
+ \centering
+ \includegraphics[width=\textwidth]{assets/kneeling_ablation_side_notexture.jpg}
+ \caption{Original\newline}
+ \label{fig:ablation_original}
+\end{subfigure}
+\begin{subfigure}{0.32\linewidth}
+ \centering
+ \includegraphics[width=\textwidth]{assets/kneeling_ablation_side_texture.jpg}
+ \caption{Modified textures\newline}
+ \label{fig:ablation_mod_textures}
+\end{subfigure}
+\begin{subfigure}{0.32\linewidth}
+ \centering
+ \includegraphics[width=\textwidth]{assets/ablation_standard.jpg}
+ \caption{Modified textures \& camera angle}
+ \label{fig:ablation_mod_both}
+\end{subfigure}
+\end{minipage}
+\caption{We test the effect of our modifications to the standard Humanoid-v4 environment on the kneeling task. We compare the original environment (\subref{fig:ablation_original}) to modifying the textures (\subref{fig:ablation_mod_textures}) and the camera angle (\subref{fig:ablation_mod_both}). We find that modifying the textures to be more realistic is crucial to making the CLIP reward model work. Moving the camera to give a better view of the humanoid helps too, but is less critical in this task.}
+\label{fig:ablations}
+\end{figure}
+\subsection{How do VLM-RMs Scale with VLM Model Size?} \label{sec:exp-scaling}
+
+Finally, we investigate the effect of the scale of the pre-trained VLM on its quality as a reward model. We focus on the ``kneeling'' task and consider 4 different large CLIP models: the original CLIP \texttt{RN50} \citep{radford2021learning}, and the \texttt{ViT-L-14}, \texttt{ViT-H-14}, and \texttt{ViT-bigG-14} from OpenCLIP \citep{cherti2023reproducible} trained on the LAION-5B dataset \citep{schuhmann2022laionb}.
+In \Cref{fig:scale_gbr} we evaluate the EPIC distance to human labels of CLIP reward models for the four model scales and different values of $\alpha$, and we evaluate the success rate of agents trained using the four models.
+The results clearly show that VLM model scale is a key factor in obtaining good reward models. We detect a clear positive trend between model scale, and the EPIC distance of the reward model from human labels. On the models we evaluate, we find the EPIC distance to human labels is close to log-linear in the size of the CLIP model (\Cref{fig:scale_compute}).
+
+This improvement in EPIC distance translates into an improvement in success rate. In particular, we observe a sharp phase transition between the \texttt{ViT-H-14} and \texttt{VIT-bigG-14} CLIP models: we can only learn the kneeling task successfully when using the \texttt{VIT-bigG-14} model and obtain $0\%$ success rate for all smaller models (\Cref{fig:scale_success}). Notably, the reward model improves smoothly and predictably with model scale as measured by EPIC distance. However, predicting the exact point where the RL agent can successfully learn the task is difficult. This is a common pattern in evaluating large foundation models, as observed by \citet{ganguli2022predictability}.
+\begin{figure}
+\centering
+\begin{subfigure}{\linewidth}
+\includegraphics[width=0.7\linewidth]{assets/legend.pdf}
+\end{subfigure}
+\begin{subfigure}{0.32\linewidth}
+\includegraphics[width=\linewidth]{assets/semantic_correlation_vs_regularization_strength.pdf}
+\caption{Goal-baseline regularization for different model sizes.}
+\label{fig:humanoid-alpha-reg}
+\label{fig:scale_gbr}
+\end{subfigure}\hfill
+\begin{subfigure}{0.32\linewidth}
+\includegraphics[width=\linewidth]{assets/scaling.pdf}
+\caption{Reward model performance by VLM training compute ($\alpha = 0$).}
+\label{fig:scale_compute}
+\end{subfigure}\hfill
+\begin{subfigure}{0.26\linewidth}
+\resizebox{\linewidth}{!}{
+    \begin{tabular}[b]{lc}
+    \toprule
+    Model & \specialcell{Success \\ Rate} \\
+    \midrule
+    RN50 & \negres{0} \\
+    ViT-L-14 & \negres{0} \\
+    ViT-H-14 & \negres{0} \\
+    ViT-bigG-14 & \posres{100} \\
+    \end{tabular}
+}
+\caption{Human-evaluated success rate (over $2$ seeds).}
+\label{fig:scale_success}
+\end{subfigure}
+\caption{VLMs become better reward models with VLM model scale. We evaluate the humanoid kneeling task for different VLM model sizes.
+We evaluate the EPIC distance between the CLIP rewards and human labels (\subref{fig:scale_gbr} and \subref{fig:scale_compute}) and the human-evaluated success rate of an agent trained using differently sized CLIP reward models (\subref{fig:scale_success}).
+We see a strong positive effect of model scale on VLM-RM quality. In particular, (\subref{fig:scale_success}) shows we are only able to learn the kneeling task using the largest CLIP model publically available, whereas (\subref{fig:scale_compute}) shows there is a smooth improvement in EPIC distance compared to human labels.
+(\subref{fig:scale_gbr}) shows that goal-baseline regularization improves the reward model across model sizes but it is more impactful for small models.}
+\label{fig:scaling-laws}
+\end{figure}
+
+
+
+\section{Related Work}
+
+
+Foundation models \citep{bommasani2021opportunities} trained on large scale data can learn remarkably general and transferable representations of images, language, and other kinds of data, which makes them useful for a large variety of downstream tasks. For example, pre-trained vision-language encoders, such as CLIP \citep{radford2021learning}, have been used far beyond their original scope, e.g., for image generation \citep{ramesh2022hierarchical, patashnik2021styleclip, nichol2021glide}, robot control \citep{shridhar2022cliport, khandelwal2022simple}, or story evaluation \citep{matiana2021cut}.
+
+Reinforcement learning from human feedback \citep[RLHF;][]{christiano2017deep} is a critical step in making foundation models more useful \citep{ouyang2022training}. However, collecting human feedback is expensive. Therefore, using pre-trained foundation models themselves to obtain reward signals for RL finetuning has recently emerged as a key paradigm in work on large language models \citep{bai2022constitutional}. Some approaches only require a small amount of natural language feedback instead of a whole dataset of human preferences \citep{scheurer2022training,scheurer2023training,chen2023improving}. However, similar techniques have yet to be adopted by the broader RL community.
+
+While some work uses language models to compute a reward function from a structured environment representation \citep{xie2023text2reward,ma2023eureka}, many RL tasks are visual and require using VLMs instead. \cite{sumers2023distilling} use generative VLMs to relabel the goal of agent trajectories for hindsight experience replay, but not for specifying rewards. \citet{cui2022can} use CLIP to provide rewards for robotic manipulation tasks given a goal image. However, they only show limited success when using natural language descriptions to define goals, which is the focus of our work. \citet{mahmoudieh2022zero} are the first to successfully use CLIP encoders as a reward model conditioned on language task descriptions in robotic manipulation tasks. However, to achieve this, the authors need to explicitly fine-tune the CLIP image encoder on a carefully crafted dataset for a robotics task. Instead, we focus on leveraging CLIP's zero-shot ability to specify reward functions, which is significantly more sample-efficient and practical. \citet{fan2022minedojo} train a CLIP model to provide a reward signal in Minecraft environments. But, that approach requires a lot of labeled, environment-specific data. \citet{du2023vision} finetune a Flamingo VLM \citep{alayrac2022flamingo} to act as a ``success detector'' for vision-based RL tasks tasks. However, they do not train RL policies using these success detectors, leaving open the question of how robust they are under optimization pressure. Concurrently to our work, \citet{sontakke2023roboclip} successfully use a VLM to provide reward signals for RL agents in robotics settings. However, they focus on specifying the reward with video demonstrations and only show basic results with natural language task descriptions.
+
+In contrast to these works, we do not require any finetuning to use CLIP as a reward model, and we successfully train RL policies to achieve a range of complex tasks that do not have an easily-specified ground truth reward function.
+
+
+
+\section{Conclusion}
+
+
+We introduced a method to use vision-language models (VLMs) as reward models for reinforcement learning (RL), and implemented it using CLIP as a reward model and standard RL algorithms. We used VLM-RMs to solve classic RL benchmarks and to learn to perform complicated tasks using a simulated humanoid robot. We observed a strong scaling trend with model size, which suggests that future VLMs are likely to be useful as reward models in an even broader range of tasks.
+
+\paragraph{Limitations.}
+Fundamentally, our approach relies on the reward model generalizing from a text description to a reward function that captures what a human intends the agent to do. Although the concrete failure cases we observed are likely specific to the CLIP models we used and may be solved by more capable models, some problems will persist. The resulting reward model will be misspecified if the text description does not contain enough information about what the human intends or the VLM generalizes poorly. While we expect future VLMs to generalize better, the risk of the reward model being misspecified grows for more complex tasks, that are difficult to specify in a single language prompt.
+Therefore, when using VLM-RMs in practice it will be crucial to use independent monitoring to ensure agents trained from automated feedback act as intended. For complex tasks, it will be prudent to use a multi-step reward specification, e.g., by using a VLM capable of having a dialogue with the user about specifying the task.
+
+\paragraph{Future Work.}
+There are many possible extensions of our approach that may improve performance but were not necessary in our tasks. For example, finetuning VLMs for specific environments is a natural next step to make them more useful as reward models.
+To move beyond goal-based supervision, future VLM-RMs could encode videos instead of images. To move towards specifying more complex tasks, future VLM-RMs could use dialogue-enabled VLMs. 
+
+For practical applications, it will be important to ensure robustness and safety of the reward model. Our work can serve as a basis for studying the safety implications of VLM-RMs. For instance, future work could investigate the robustness of VLM-RMs against optimization pressure by RL agents.
+
+More broadly, we believe VLM-RMs open up exciting avenues for future research to build useful agents on top of pre-trained models, such as building language model agents and real world robotic controllers for tasks where we do not have a reward function available.
+
+
+\subsubsection*{Author Contributions}
+
+\textbf{Juan Rocamonde} designed and implemented the experimental infrastructure, ran most experiments, analyzed results, and wrote large parts of the paper.
+
+\textbf{Victoriano Montesinos} implemented parallelized rendering and training to enable using larger CLIP models, implemented and ran many experiments, and performed the human evaluations.
+
+\textbf{Elvis Nava} advised on experiment design, implemented and ran some of the experiments, and wrote large parts of the paper.
+
+\textbf{Ethan Perez} proposed the original project and advised on research direction and experiment design.
+
+\textbf{David Lindner} implemented and ran early experiments with the humanoid robot, wrote large parts of the paper, and led the project.
+
+
+
+

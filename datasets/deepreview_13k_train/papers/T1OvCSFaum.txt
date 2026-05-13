@@ -1,0 +1,363 @@
+\title{Scaling Offline Model-Based RL via Jointly-Optimized World-Action Model Pretraining}
+
+\begin{abstract}
+A significant aspiration of offline reinforcement learning (RL) is to develop a generalist agent with high capabilities from large and heterogeneous datasets. However, prior approaches that scale offline RL either rely heavily on expert trajectories or struggle to generalize to diverse unseen tasks. Inspired by the excellent generalization of world model in conditional video generation, we explore the potential of image observation-based world model for scaling offline RL and enhancing generalization on novel tasks. In this paper, we introduce JOWA: \textbf{J}ointly-\textbf{O}ptimized \textbf{W}orld-\textbf{A}ction model, an offline model-based RL agent pretrained on multiple Atari games with 6 billion tokens data to learn general-purpose representation and decision-making ability. Our method jointly optimizes a world-action model through a shared transformer backbone, which stabilize temporal difference learning with large models during pretraining. Moreover, we propose a provably efficient and parallelizable planning algorithm to compensate for the Q-value estimation error and thus search out better policies. Experimental results indicate that our largest agent, with 150 million parameters, achieves 78.9\% human-level performance on pretrained games using only 10\% subsampled offline data, outperforming existing state-of-the-art large-scale offline RL baselines by 31.6\% on averange. Furthermore, JOWA scales favorably with model capacity and can sample-efficiently transfer to novel games using only 5k offline fine-tuning data (approximately 4 trajectories) per game, demonstrating superior generalization.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+In recent years, building large-scale generalist models capable of solving multiple tasks has become a dominant research focus in natural language processing (NLP) and multi-modality. Notable examples include large language models~\citep{brown2020language, ouyang2022training, touvron2023llama, team2023gemini} and large vision-language models~\citep{zhu2023minigpt, liu2024visual, bai2023qwen}, which deliver outstanding performance across a wide range of tasks and adapt quickly to new ones through few-shot or in-context learning. Their success is largely driven by the scaling law~\citep{kaplan2020scaling}, which posits that increasing model size and data leads to improved performance. However, similar scaling trends have not been extensively observed in reinforcement learning (RL).
+
+Unlike in vision and language domains, RL has traditionally favored smaller models tailored to single tasks or multiple tasks within the same environment. Concerningly, previous studies have shown that scaling model capacity can lead to instabilities or performance degradation~\citep{kumar2020implicit, ota2021training, sokar2023dormant}, explaining the continued dominance of shallow CNN networks in vision-based RL tasks~\citep{mnih2013playing}. While some efforts have been made to scale offline RL across multiple tasks~\citep{lee2022multi, reed2022generalist, xu2022prompting, wu2024elastic}, they predominantly rely on supervised learning (SL) approaches, such as conditional behavior cloning, rather than temporal difference (TD) learning, and heavily rely on large amounts of expert trajectories. \cite{kumar2023offline} scaled offline Q-learning using ResNet-based representation network with separate Q-heads for each game, but this approach only learns generalizable representations and still requires substantial data and gradient steps to adapt to unseen games due to reset of Q-heads during fine-tuning. Therefore, \textit{scaling TD-based offline RL for simultaneous \textbf{general-purpose representation and decision-making} remains a critical challenge.} While \cite{hansen2024tdmpc2} attempted to address this challenge for continuous control tasks with low-dimensional proprioceptive states using model-based RL, it lacks generalization due to heterogeneous proprioceptors across task domains.
+
+Meanwhile, world model has decoupled from model-based RL and evolved into a distinct research area within computer vision and multi-modality, primarily focusing on conditional video generation~\citep{hong2022cogvideo, blattmann2023stable, yu2023magvit, yang2024generalized, bruce2024genie}. Notably, SORA~\citep{videoworldsimulators2024} has demonstrated superior generalization performance as a world simulator through large-scale training of generative models on time-series image data. This motivates our investigation into a compelling question: ``\textit{Can image observation-based world model scale offline RL across multiple tasks while enhancing generalization to diverse unseen tasks?}"
+
+To address this question, we introduce JOWA: \textbf{J}ointly-\textbf{O}ptimized \textbf{W}orld-\textbf{A}ction model, an offline model-based RL agent pretrained across multiple visual games with approximately 6 billion tokens data. Crucially, JOWA unlocks scaling trends and achieves sample-efficient adaption to novel games. By utilizing a shared transformer backbone for both the world model and Q-value criticism, JOWA learns both generalizable representations and decision-making skills. This architecture allows the transformer to absorb gradients back-propagated from both world modeling and TD losses, enabling joint optimization. The world modeling loss acts as a regularizer, stabilizing TD-learning for large models. Additionally, we propose a provably efficient and parallelizable planning algorithm to compensate for the Q-value estimation error, allowing for consistent identification of the optimal policy at inference time and sample-efficient transfer to novel games.
+
+ To evaluate the performance of JOWA, we train a single model to play 15 Atari games, similar to \cite{lee2022multi,kumar2023offline} but using a reduced yet sufficient dataset of 10M transitions per game—termed as the low-data regime to highlight the data efficiency. This setup presents a significant challenge due to the diverse nature of games, each with unique dynamics, rewards, visuals, and agent embodiments. To further test JOWA's generalization ability, we perform offline fine-tuning on 5 unseen games, using minimal fine-tuning data.
+ 
+ Our contributions are threefold: First, we introduce JOWA, an offline model-based RL method capable of training a single high-performing generalist agent across multiple Atari games. JOWA attains 78.9\% human-level performance on pretrained games using only 10\% of the original dataset~\citep{agarwal2020optimistic}, outperforming existing state-of-the-art large-scale offline RL baselines by 31.6\% on averange. Second, we demonstrate that JOWA unlocks scaling trends, with performance improving as model capacity increases. Third, JOWA enables sample-efficient transfer to diverse unseen games with 64.7\% DQN-normalized score using only 5k transitions per game, surpassing baselines by 34.7\% on average. Our ablation studies highlight the significance of two key design features of JOWA: joint optimization and planning, along with other training choices. Due to the extensive training time, we will release all training, evaluation, and fine-tuning codes, as well as model weights, to support future research.
+
+
+\section{Related work}
+
+\paragraph{Offline Reinforcement Learning.}
+Offline RL algorithms learn a policy entirely from the static offline dataset without online interactions. Model-free offline RL incorporates conservatism to mitigate extrapolation error~\citep{jin2021pessimism} primarily through policy constraints~\citep{fujimoto2019off, kumar2019stabilizing, nair2020awac, kostrikov2021offline, fujimoto2021minimalist} and value regularization~\citep{kumar2020conservative}. In contrast, model-based offline RL approximates the environment using learned world models and performs conservative policy optimization~\citep{lu2021revisiting, yu2020mopo, yu2021combo, schrittwieser2021online}. While these works focus on single-task settings, our work explores scaling offline model-based RL across diverse, challenging multi-task Atari games~\citep{lee2022multi, kumar2023offline, wu2024elastic} aiming for sample-efficient transfer to novel games. We employ CQL~\citep{kumar2020conservative} and COMBO~\citep{yu2021combo} to estimate conservative Q-values, leveraging their simplicity and effectiveness on vision-based offline RL tasks.
+
+\paragraph{Mutli-Task Reinforcement Learning.}
+Multi-task reinforcement learning (MTRL) aims to learn a shared policy for diverse tasks, with various approaches proposed in the literature~\citep{teh2017distral, song2019v, xu2020knowledge, yang2020multi, sodhani2021multi}. A common approach is to formulate the multi-task model as task-condition~\citep{yu2020meta}, such as language-conditioned tasks~\citep{lynch2020language, ahn2022can, jang2022bc} and goal-conditional RL~\citep{plappert2018multi}. In multi-task offline RL, conditional sequence modeling approaches based on decision transformer~\citep{chen2021decision} or diffusion model~\citep{janner2022planning} typically rely on large amounts of expert trajectories~\citep{reed2022generalist, xu2022prompting, lee2022multi, wu2024elastic, hu2024harmodt, he2024diffusion}.
+Beyond conditional behavior cloning (BC) methods, Scaled-QL~\citep{kumar2023offline} scales offline Q-learning using a shared feature network across tasks with separate Q-value heads for each task. Our work advances offline TD learning to multi-task settings without task-specific Q-value heads through a jointly-optimized world-action model. Table \ref{tab:comparison of methods} compares experimental environments and open-source status of multi-task offline RL algorithms. Following \cite{lee2022multi, kumar2023offline, wu2024elastic}, we focus on the multi-game regime, which presents greater challenges due to high-dimensional observations and diverse, stochastic environment dynamics. Due to the prohibitive long training time, we advocate for open-sourcing codes and checkpoints to facilitate progress in this field.
+
+\begin{table}[htbp]
+    \small
+    \begin{center}
+    \caption{Comparison of methods in multi-task offline RL. $\clubsuit$ and $\spadesuit$ represent two training paradigms of agents, conditional BC and TD-learning, respectively.}
+    \scalebox{0.88}{
+    \setlength{\tabcolsep}{1.0mm}{
+    \begin{tabular}{l|ccc|cc|ccc}
+    \specialrule{.1em}{.05em}{.05em}
+        \multirow{3}{*}{Method} & \multicolumn{5}{c|}{Experimental environment} & \multicolumn{3}{c}{Open source} \\
+        \cline{2-9}
+         & \multirow{2}{*}{Benchmark} & Observation & Action & \multicolumn{2}{c|}{Dynamics} & \multirow{2}{*}{Train} & \multirow{2}{*}{Eval} & Check- \\
+         \cline{5-6}
+         & & space & space & per task & across tasks & & & points \\
+        \hline 
+        MTDIFF$\clubsuit$~\citep{he2024diffusion} & \multirow{2}{*}{Meta-World} & \multirow{3}{*}{state} & \multirow{3}{*}{continous} & \multirow{3}{*}{deterministic} & \multirow{2}{*}{same or} & \ding{51} & \ding{51} & \ding{55} \\
+        HarmoDT$\clubsuit$~\citep{hu2024harmodt} & \multirow{2}{*}{or DMControl} & & & & \multirow{2}{*}{similar} & \ding{51} & \ding{51} & \ding{55} \\
+        TD-MPC2$\spadesuit$~\citep{hansen2024tdmpc2} & & & & &  & \ding{51} & \ding{51} & \ding{51} \\
+        \hline
+        MGDT$\clubsuit$~\citep{lee2022multi} & \multirow{4}{*}{Atari 2600} & \multirow{4}{*}{pixels} & \multirow{4}{*}{discrete} & \multirow{4}{*}{stochastic} & \multirow{4}{*}{diverse} & \ding{55} & \ding{51} & \ding{51} \\
+        Elastic DT$\clubsuit$~\citep{wu2024elastic} & & & & & & \ding{51} & \ding{51} & \ding{55} \\
+        Scaled-QL$\spadesuit$~\citep{kumar2023offline}\footnotemark[1] & & & & & & \ding{51}\rotatebox[origin=c]{-9.2}{\kern-0.7em\ding{55}} & \ding{51}\rotatebox[origin=c]{-9.2}{\kern-0.7em\ding{55}} & \ding{55} \\
+        JOWA (ours)$\spadesuit$ & & & & & & \ding{51} & \ding{51} & \ding{51} \\
+        \specialrule{.1em}{.05em}{.05em}
+    \end{tabular}
+    \label{tab:comparison of methods}}}
+    \end{center}
+\end{table}
+\footnotetext[1]{Scaled-QL released the preliminary code in \url{https://tinyurl.}
+
+
+
+\section{Preliminaries and problem setup}
+
+\subsection{Online distributional rl (C51)}
+In distributional RL, the distribution $Z$ over returns replaces the Q-value in the Bellman optimality equation. The Q-value is the mean of the value distribution $Z$ that can be computed through a distributional Bellman optimality operator~\citep{bellemare2017distributional},
+\begin{equation}
+    \mathcal{T}^* Z(s, a) :\overset{D}{=} R(s, a) + \gamma Z(s', \arg\max_{a'}Q(s',a'))
+    \label{eq:distribution tau}
+\end{equation}
+where the formula $Y :\overset{D}{=} U$ denotes equality of probability laws, that is the random variable $Y$ is distributed according to the same law as $U$. The C51 algorithm~\citep{bellemare2017distributional} models $Z(s,a)$ using a discrete distribution supported on $N$ fixed atoms $z_1 \leq \cdots \leq z_N$ uniformly spaced over a predetermined interval. Given a current value distribution, C51 applies a projection step to map the target distribution onto its finite element support and optimizes as follows:
+\begin{equation}
+    \mathcal{L}_\text{TD} = \displaystyle \KL ( \mathcal{T}^* Z_{\theta^-}(s,a) \Vert Z_{\theta}(s,a) )
+\end{equation}
+
+\subsection{Value regularization based Offline rl (CQL and COMBO)}
+To be conservatism on unseen actions, CQL~\citep{kumar2020conservative} introduces a regularizer to the TD-loss, which minimizes Q-values for unseen actions while maximizing Q-values for actions in the dataset to counteract excessive underestimation. The loss function for CQL is given by:
+\begin{equation}
+    \mathcal{L}_\text{CQL} = \alpha\left(\mathbb{E}_{s\sim \mathcal{D}}\left[\log\left(\sum_{a'}\exp{\left(Q_\theta(s,a')\right)}\right)\right] - \mathbb{E}_{s,a\sim\mathcal{D}}\left[Q_\theta(s,a)\right]\right) + \mathcal{L}_\text{TD}
+\end{equation}
+
+COMBO~\citep{yu2021combo}, a model-based variant of CQL, uses the following loss function:
+\begin{equation}
+    \mathcal{L}_\text{COMBO} = \alpha \left(\mathbb{E}_{s,a\sim \rho_{\hat{\mathcal{M}}}(s,a)}\left[Q_\theta(s,a)\right] - \mathbb{E}_{s,a\sim\mathcal{D}}\left[Q_\theta(s,a)\right]\right)
+    + \mathbb{E}_{s,a,s'\sim d_f}\left[\mathcal{L}_\text{TD}\right] 
+    \label{eq:combo loss}
+\end{equation}
+where $\hat{\mathcal{M}}$ is the imagined Markovian Decision Process induced by the world model. $\rho_{\hat{\mathcal{M}}}(s,a)$ is the occupancy measure of current policy within $\hat{\mathcal{M}}$. $d_f$ is an $f$-interpolation between the offline dataset and synthetic rollouts from the world model: $d_f = f d_\mathcal{D} + (1-f) d_{\hat{\mathcal{M}}}$, where $f\in [0, 1]$.
+
+\subsection{Problem setup}
+We consider a multi-task offline RL problem: given a static dataset of transitions $\mathcal{D}=\{(s_t, a_t, r_t, d_t, s_{t+1})_i\}$ collected from various environments with arbitrary behaviour polices, our goal is to learn a single policy that maximizes the expected return $\mathcal{R}_t=\sum_{k\geq t}\gamma^{k-t} r_k$ on all considered environments and can be efficiently fine-tuned to new tasks, where $\gamma$ is the discount factor.
+
+Considering the computational budget, we use 15 Atari games for pretraining and 5 games for out-of-distribution (OOD) experiments. The whole training process took around 12 days on A100 GPUs. Our offline dataset is derived from the the DQN-Replay dataset~\citep{agarwal2020optimistic}, which consists of $84\times 84$ grayscale images as observations and a full action space with 18 discrete actions. 
+
+
+\section{Jointly-Optimized World-Action Model}
+
+In this section, we first detail the architecture of JOWA and the loss functions for joint optimization in section \ref{sec:world-action model}. Next, we introduce the provably efficient and parallelizable planning algorithm employed to compensate for the Q-value estimation error in section \ref{sec:planning}. Finally, we present the overall training and sample-efficient fine-tuning pipelines in section \ref{sec:transfer}.
+\subsection{World-Action Model} \label{sec:world-action model}
+\subsubsection{Architecture}
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\textwidth]{figures/architecture_lwm_03.pdf}
+\caption{Architecture of JOWA. We use a shared transformer backbone for both world modeling and Q-value criticism to enable joint optimization. VQ-VAE tokenizes images into visual tokens. The sum of vocabulary embeddings, position embeddings and task embeddings forms the input embeddings space for the transformer backbone.}
+\label{fig:architecture}
+\end{figure}
+
+Figure \ref{fig:architecture} illustrates JOWA's architecture, which uses a transformer backbone~\citep{vaswani2017attention} to simultaneously learn world dynamics and Q-values across environments. This dual capability is achieved through distinct prediction heads that process the transformer's output embedding $e$. The world dynamics are modeled via supervised learning using three heads: next observation token predictor $p_o$, reward predictor $p_r$, and termination predictor $p_d$. The Q-values head $h_Q$ learns the Q-function through TD-learning, based on implicit representations of historical trajectories. In the following sections, we refer to the \{transformer, $p_o$, $p_r$, $p_d$\} components as the "world-part" with parameters $\theta$, and the \{transformer, $h_Q$\} components as the "action-part" with parameters $\phi$.
+We use VQ-VAE, a discrete autoencoder, to tokenize image observations, representing high-dimensional images as a sequence of $K$ tokens. The VQ-VAE is trained with an equally weighted combination of $L_1$ reconstruction loss, commitment loss~\citep{van2017neural}, and perceptual loss~\citep{esser2021taming}. Then the transformer operates on the interleaved observation and action tokens represented as $(z_0^1, \dots, z_0^K, a_0, \dots, z_L^1, \dots, z_L^K, a_L)$, where $L$ is the maximum timesteps of the trajectory segments. For multi-task learning, we incorporate learnable task embeddings for both observation and action tokens.
+\subsubsection{Training of World-part Module}
+At each timestep $t$, the world-part module models the following distributions: 
+\begin{alignat}{4}
+& \text{Dynamics predictor: }   &   \hat{z}_{t}^k       &   \sim p_o\big(\hat{z}_{t}^k \mid f(z_{\le t-1}, z_{t}^{<k}, a_{\le t-1}, u) \big) & \\
+& \text{Reward predictor: }     &   \hat{r}_t    &   \sim p_r\big( \hat{r}_t  \mid f(z_{\le t}, a_{\le t}, u) \big) \\
+& \text{Termination predictor: }  & \hat{d}_t    &   \sim p_d\big( \hat{d}_t  \mid f(z_{\le t}, a_{\le t}, u) \big) 
+\end{alignat}
+where $f$ represents the transformer backbone, $u$ is the task ID to index the corresponding task embedding, $k \in \{1,\cdots,K\}$, and $t \in \{1,\cdots,L\}$.
+
+To unify the category of loss functions for balanced training~\citep{vandenhende2021multi}, we convert scalar rewards to ternary quantities $\{-1,0,1\}$ using the sign function. This allows all three predictors to be optimized as classification problems by cross-entropy loss. Given $L$-timesteps segments sampled from the offline dataset, the loss function for the world-part module is formulated as:
+\begin{align}
+    \mathcal{L}_{\text{world}}(\theta) = \frac{1}{L}\sum_{t=1}^L \big[ & \frac{1}{K}\sum_{k=1}^K -\ln p_o\big(z_{t}^k \mid f(z_{\le t-1}, z_{t}^{<k}, a_{\le t-1}, u) \big) \nonumber \\ 
+    &- \ln p_r\big(r_t \mid f(z_{\le t}, a_{\le t}, u) \big) 
+    - \ln p_d\big(d_t \mid f(z_{\le t}, a_{\le t}, u) \big) \big]
+\label{eq:loss of world-part}
+\end{align}
+\subsubsection{Training of Action-part Module}
+We use CQL for offline TD-learning during pretraining. To ensure training stability and enhance scaling performance~\citep{farebrother2024stop}, we employ distributional TD-error~\citep{bellemare2017distributional} instead of the mean-square TD-error, maintaining consistency with the $\mathcal{L}_\text{world}$ loss category.
+
+The action-part module computes the return distribution for all actions given an observation and historical information. For an observation-action pair $(o_t, a_t)$, the return distribution $\mathcal{Z}$ is formulated as: $\mathcal{Z}(o_t, a_t) = h_Q(f(z_{\le t}, a_{< t}, u))[a_t]$. The value function $Q(o_t, a_t)$ is the mean of $\mathcal{Z}(o_t, a_t)$. Then the loss function for the action-part module is formulated as:
+\begin{equation}
+\resizebox{0.9\hsize}{!}{
+$
+    \mathcal{L}_\text{action}(\phi) = \alpha\left[\log\left(\sum_{a}\exp{\left(Q(o_t,a)\right)}\right) - Q(o_t,a_t)\right] + \displaystyle \KL \left( \mathcal{T}^* \mathcal{Z}^-(o_t, a_t) \Vert \mathcal{Z}(o_t, a_t) \right)
+$}
+\end{equation}
+where $\mathcal{T}^*$ is the distributional Bellman optimality operator defined in Equation (\ref{eq:distribution tau}), and $\mathcal{Z}^-$ is the target distribution computed through a target Q-values head $h_{Q^-}$. We set $\alpha=0.1$ in experiments.
+
+Therefore, the joint optimization objective for the world-action model is formulated as:
+\begin{equation}
+    \mathcal{L}(\theta, \phi) = \beta \mathcal{L}_\text{world}(\theta) + \mathcal{L}_\text{action}(\phi)
+    \label{eq:loss of world-action}
+\end{equation}
+with the coefficient $\beta > 0$. We set $\beta=0.1$ in our experiments.
+
+Both $\mathcal{L}_\text{world}$ and $\mathcal{L}_\text{action}$ back-propagate gradients to the transformer. Previous works observed that TD methods suffer from greater instability with larger model size~\citep{kumar2020implicit, sokar2023dormant}. However, through jointly optimizing the world-action model, $\mathcal{L}_\text{world}$ serves as a regularizer to stabilize TD-learning in large-scale models. Moreover, the world-part module enables planning at decision time for optimal inference and sample-efficient transfer, detailed in the following sections.
+\subsection{Parallelizable planning at inference time} \label{sec:planning}
+
+The world-part module enables planning at decision time to compensate for inaccurate Q-value estimates, allowing JOWA to consistently search out the optimal policy. We model this process as a tree search problem and present a practical, parallelizable search algorithm. 
+
+Given an estimated optimal Q-value $\hat{Q}^*$, a learned world model with dynamic predictor $\hat{P}$ and reward predictor $\hat{r}$, our objective is to find the optimal action $a^*_0$ maximizing the ground-truth optimal Q-value $Q^*$, starting from state $s_0$. To do so, we rewrite the Bellman optimality equation as:
+\begin{equation}
+    Q^*(s_0, a_0) = \max_{\pi_{Q^*}} \expec_{\substack{s_1, \cdots, s_H \sim P \\ a_1, \cdots, a_{H-1} \sim \pi_{Q^*}}}\left[ \sum_{t=0}^{H-1} \gamma^t r(s_t, a_t) + \gamma^H \max_{a_H} Q^*(s_H, a_H) \right]
+    \label{eq:rewrite bellman optimality equation}
+\end{equation}
+where $\pi_{Q^*}$ is the policy induced by the optimal Q-function. For Equation (\ref{eq:rewrite bellman optimality equation}), the optimal policy is the greedy policy based on $Q^*$.
+
+To derive the search objective function, we follow three steps: (i) replace the ground-truth functions in the right side of Equation (\ref{eq:rewrite bellman optimality equation}) with estimated or learned functions. (ii) leverage the estimated optimal Q-function $\hat{Q}^*$ to reduce the policy space for search, restricting the actions to those with top-$K$ highest Q-values. Denote the constrained policy space as $\Pi_{\hat{Q}^*}$, where $\forall \pi \in \Pi_{\hat{Q}^*}, \forall s \in \mathcal{S}, \forall a \notin \text{top-}K(\hat{Q}^*(s, \cdot))$, we have $\pi(a|s)=0$. (iii) maximize over $a_0$ on both sides of Equation (\ref{eq:rewrite bellman optimality equation}) to find the optimal initial action, considering the restriction in the second step. Finally, the resulting objective function is formulated as:
+\begin{equation}
+    \max_{\pi \in \Pi_{\hat{Q}^*}} \expec_{\substack{s_1, \cdots, s_H \sim \hat{P} \\ a_0, \cdots, a_{H-1} \sim \pi}}\left[ \underbrace{\sum_{t=0}^{H-1} \gamma^t \hat{r}(s_t, a_t)}_{\text{income-to-date}} + \underbrace{\gamma^H \max_{a_H} \hat{Q}^*(s_H, a_H)}_{\text{income-to-go}} \right]
+    \label{eq:search objective}
+\end{equation}
+\begin{informaltheorem}
+    Denote the search-based optimal Q-function as $f(s,a)$. Assume the learned reward function $\hat{r}$ to be $L_r$-Lipschitz and the estimated optimal Q-function $\hat{Q}^*$ to be $L_Q$-Lipschitz. Assume the estimation errors of the learned state transition, reward, and Q-value are bounded by $\epsilon_s, \epsilon_r, \epsilon_Q$ respectively. Then we have the error between search-based optimal Q-value $f(s,a)$ and ground-truth optimal Q-value $Q^*(s,a)$ bounded as:
+    \begin{equation}
+        \left\Vert f(s,a) - Q^*(s,a) \right\Vert \leq \frac{1-\gamma^H}{1-\gamma}\epsilon_r + \left(\frac{\gamma-\gamma^H}{1-\gamma}\epsilon_r+\gamma^H\epsilon_Q\right)\epsilon_s + \gamma^H \epsilon_Q
+    \end{equation}
+
+    Under the following condition, the search-based optimal Q-function $f$ has an upper error bound no greater than the estimated optimal Q-function $\hat{Q}^*$:
+    \begin{equation}
+        \frac{1}{1-\gamma}\epsilon_r + \left( \frac{\gamma}{1-\gamma}\frac{L_r-\gamma^HL_Q}{1-\gamma^H}-\frac{L_r-L_Q}{1-\gamma}\frac{\gamma^H}{1-\gamma^H} \right)\epsilon_s \leq \epsilon_Q
+        \label{eq:condition for lower bound}
+    \end{equation}
+    \label{app:theorem of upper bound in main text}
+\end{informaltheorem}
+To optimize objective function (\ref{eq:search objective}), we interact with the imagined MDP induced by the learned world model using the constrained policy $\pi \in \Pi_{\hat{Q}^*}$ for $H$ steps, starting from $s_0$. We then compute the total income (income-to-date plus income-to-go) for all leaf nodes to identify the optimal path. The first edge of this path is the optimal initial action. 
+
+We implement this search using beam search, an efficient decoding algorithm common in NLP. At each timestep, we retain only $K$ states with the top-$K$ total income values. The horizon $H$ and beam width $K$ are hyper-parameters, with $K=1$ or $H=0$ degenerating to a $\hat{Q}^*$-based greedy policy. The algorithm calls the world model $K^2(H-1)+K$ times but only takes $H$ times as long as the forward propagation of the world model due to parallelizability across $K$ beams.
+
+\subsection{Training and Fine-tuning pipelines} \label{sec:transfer}
+Our multi-task offline RL pretraining consists of two stages:
+\begin{itemize} [leftmargin=8mm]
+\setlength\itemsep{0.1em}
+\item \textbf{Stage 1:} Sample trajectory segments from datasets. Train the VQ-VAE tokenizer using image observations. Train the world-part module using segments with loss (\ref{eq:loss of world-part}) for $M_1$ steps.
+\item \textbf{Stage 2:} Freeze the VQ-VAE tokenizer. Sample segments and jointly optimize the world-action model with loss function (\ref{eq:loss of world-action}) for $M_2$ steps. 
+\end{itemize}
+
+We employ this two-stage training approach to stabilize and accelerate the overall training process. In our pretraining experiments, we set $M_1=250$k and $M_2=1.5$M, totaling $1.75$M gradient steps.
+
+For sample-efficient transfer to unseen games, we adopt a similar two-stage offline fine-tuning pipeline, but unfreeze all components of JOWA in both two stages. In stage 1, we fine-tune JOWA using real data for 3k steps. In stage 2, we enable planning to synthesize high-quality data, using 3/4 batch of real and 1/4 batch of synthetic data with COMBO (\ref{eq:combo loss}) as the action-part loss  for 7k steps.
+
+
+\section{Experiments}
+
+We design our experiments to answer the following questions: \textbf{(1)} How does JOWA perform on multi-games in low-data regime? \textbf{(2)} Can JOWA effectively leverage higher model capacity? \textbf{(3)} Does the pre-trained JOWA sample-efficiently transfer to new games?
+
+\subsection{Experimental Setup} \label{sec:exp_setup}
+
+\paragraph{Dataset.}
+We use the Atari trajectory dataset from \cite{agarwal2020optimistic},  which contains 50M transitions from each of 5 separate training runs. Due to the prohibitive long training time on full games, we select a subset of 20 games, maintaining the difficulty distribution of full games defined by \cite{gulcehre2020rl}. 15 of those games are used for training, and 5 games are held out for OOD generalization experiments. Following \cite{lee2022multi,kumar2023offline,wu2024elastic}, we use data from 2 out of 5 training runs. To investigate performance in low-data regime, we uniformly draw 10\% of transitions at random, as per \cite{agarwal2020optimistic,kumar2020implicit}, resulting in 10M transitions per game.
+
+\paragraph{Training and Fine-tuning.}
+We implement our world-action model based on GPT-2 \citep{brown2020language}. We train three JOWA variants: JOWA-150M (150M parameters), JOWA-70M, and JOWA-40M. We set the number of visual tokens $K$ to 36, resulting in a total of approximately 6B tokens in our dataset. The sequence length $L$ is set to 8. We pretrain all JOWA models on A100 GPUs for 1.75M steps using the AdamW optimizer \citep{loshchilovdecoupled} with learning rates of $10^{-4}$ and $5\cdot10^{-5}$ for two stages respectively, and batch size of 512 for both stages. For fine-tuning, we train for 10k gradient steps with a batch size of 32, learning rate of $5\cdot10^{-5}$, and 5k transitions. 
+
+\paragraph{Evaluation and Metrics.}
+During evaluation, we enable planning for JOWA, setting the planning horizon $H$ to 2 for all games and adjust the beam width $K$ based on the valid action space size of each game. We measure performance using human normalized scores (HNS) \citep{mnih2015human}, i.e. $(\textrm{score} - \textrm{score}_\textrm{random})/(\textrm{score}_\textrm{human} - \textrm{score}_\textrm{random})$.
+To create an aggregate comparison metric across all games, we use inter-quartile mean (IQM) of human-normalized scores, following evaluation best practices proposed in \citep{agarwal2021deep}.
+
+
+\subsection{Baseline Methods}
+We compare JOWA with the following baselines: (i) \textbf{Multi-Task BC (MTBC).} Our method can be reduced to a transformer-based multi-task behavioral cloning~\citep{pomerleau1991efficient} agent by removing $\mathcal{L}_\text{world}$ and replacing the Q-values head with a policy head trained as a multi-class classification problem. We train MTBC models at 3 scales: 34M, 65M, 120M parameters. (ii) \textbf{Multi-Game DT (MGDT).} \cite{lee2022multi} used $\{o_{t+i}, \hat{R}_{t+i}, a_{t+i}, r_{t+i}\}_{i=0}^3$ as input sequences, where $\hat{R}$ is the target return, and expert-conditioned return distribution to induce expert-level actions during evaluation. We train MGDT models at 2 scales: 40M and 200M parameters. (iii) \textbf{Elastic DT (EDT).} Based on MGDT, \cite{wu2024elastic} removed the reward in the input sequences and dynamically selected history length to address challenges of trajectory stitching. We train EDT based on the architecture configuration of MGDT-200M. (iv) \textbf{Scaled-QL (SQL).} \cite{kumar2023offline} scaled offline Q-learning through pre-trained and shared representation network and separate Q-values head for each game. We reproduce the largest Scaled-QL with 80M parameters using ResNet-101 network. For fair comparison, all methods use the same batch size of 512 and 1.75M gradient steps.
+\subsection{How does JOWA perform on multi-games in low-data regime?}
+\begin{table}[t]
+    \caption{Returns on the 15 Atari games for best performing sizes of multi-game models trained with the 10\% subsampled dataset. Bold numbers indicate the top methods.}
+\begin{center}
+\begin{small}
+\centering
+\scalebox{0.85}{
+\centering
+\begin{tabular}{lrr|rrrrrrr}
+\toprule
+\multirow{2}{*}{Game} & \multirow{2}{*}{Random} & \multirow{2}{*}{Human} & MTBC & MGDT & EDT  & SQL & \multicolumn{3}{c}{JOWA} \\
+\cline{8-10}
+ & & & 120M & 200M & 200M & 80M & \multicolumn{1}{c}{40M} & \multicolumn{1}{c}{70M} & \multicolumn{1}{c}{150M} \\
+\midrule
+Assault & 222.4 & 742.0 & 1203.5 & 1741.5 & 1915.5 & 2292 & 1578.3 & 1733.9 & \textbf{2302}   \\
+Atlantis & 12850 & 29028.1 & 37812.5 & 2565750 & 2108166.7& 49100 & 41662.5 & 570862.5 & \textbf{2690387.5} \\
+BeamRider & 363.9 & 16926.5 & 786 & 6011.3 & 4149.8 & \textbf{7023.5} & 880.3 & 2547.4 & 3498 \\
+Berzerk & 123.7 & 2630.4 & 655 & 444.5 & 350 & 312.5 & 395 & 441.9 & \textbf{739} \\
+Carnival & 0 & 3800 & \textbf{5560} & 2610 & 3678.8 & 1940 & 4685 & 4070 & 5316 \\
+Centipede & 2090.9 & 12017 & 4046.6 & 4604 & 3389.9 & 3650.3 & \textbf{5669.3} & 4475.6 & 4677 \\
+ChopperCommand & 811.0 & 7387.8 & 256.3 & 3300.8 & 3443.8 & 853.8 & 3118.8 & 2568.8 & \textbf{3812.5} \\
+DemonAttack & 152.1 & 1971 & 2611.3 & 6549.4 & 3455.7 & \textbf{7936.5} & 1233.8 & 4584.4 & 3547.8 \\
+NameThisGame & 2292.3 & 8049 & 6045 & 6610.5 & 7060 & 6461.7 & 7335.6 & \textbf{12706.9} & 11421 \\
+Phoenix & 761.4 & 7242.6 & 1446.9 & 5120.5 & 5320 & 4961.7 & 1608.8 & 5065 & \textbf{5348} \\
+Seaquest & 68.4 & 42054.7 & 120 & 2720 & \textbf{3160.4} & 650 & 1033.1 & 1490 & 2725 \\
+SpaceInvaders & 148 & 1668.7 & 605 & 742.5 & 513.8 & 714.4 & 694.7 & \textbf{969.1} & 744.7 \\
+StarGunner & 664.0 & 10250 & 1493.8 & 8625.5 & 9550 & 4728.6 & 5737.5 & \textbf{21231.3} & 18150 \\
+TimePilot & 3568 & 5229.2 & 762.5 & 3866.7 & 2812.5 & \textbf{4072.7} & 3268.8 & 3831.3 & 3669 \\
+Zaxxon & 32.5 & 9173.3 & 0 & 462.5 & 325.5 & 0 & 0 & 225 & \textbf{2163} \\
+\midrule
+\#Superhuman & 0 & N/A & 4 & 3 & 4 & 3 & 3 & 4 & \textbf{6} \\
+Median HNS & 0.000 & 1.000 & 0.197 & 0.391 & 0.400 & 0.387 & 0.360 & 0.390 & \textbf{0.456} \\
+IQM HNS & 0.000 & 1.000 & 0.329 & 0.498 & 0.502 & 0.420 & 0.371 & 0.476 & \textbf{0.789} \\
+\bottomrule
+\end{tabular}
+ }
+\end{small}
+\end{center}
+\label{tab:main exp}
+\end{table}
+
+We summarize our main results in Table \ref{tab:main exp}. This table shows the performance of JOWA alongside all best performing sizes of baselines trained with 10\% subsampled dataset. MTBC, MGDT, and EDT represent (conditional) behavior cloning methods, while Scaled-QL and JOWA represent Q-learning methods. Despite the constraints on the amount of data, JOWA achieves superior performance with comparable or fewer parameters than baselines. Specifically, JOWA-150M attains an IQM human-normalized score of 78.9\% in low-data regime, surpassing MGDT-200M (49.8\%) and EDT-200M (50.2\%), despite these two models having more parameters and utilizing data augmentation during pretraining. JOWA-70M achieves an IQM human-normalized score of 47.6\%, outperforming Scaled-QL-80M (42.0\%). JOWA maintains its performance advantage when comparing median human-normalized scores. These results demonstrate JOWA's sample efficiency in learning from heterogeneous offline data.
+
+Next, we present experiments highlighting JOWA's scaling and generalization capabilities. These two key properties derived from multi-game pretraining align with recent advancements in SL.
+\subsection{How does JOWA scales with model size?}
+\begin{wrapfigure}{r}{0.35\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/scale.pdf}
+    \caption{
+    Scaling trends on training set games.
+    }
+    \label{fig:scales}
+\end{wrapfigure}
+Scaling law depicts the positive correlation between model capacity and performance. Following \cite{lee2022multi, kumar2023offline}, we investigate JOWA's ability to leverage higher capacity architectures. For comparison of scaling trends, we establish 2 baselines: (i) MTBC scaled to 34M, 65M and 120M parameters. (ii) MGDT with 40M and 200M parameters. We scale JOWA by increasing the size of the transformer backbone and Q-values heads, resulting in 3 variants with 40M, 70M, and 150M parameters. Figure \ref{fig:scales} shows the scaling trends for the 3 algorithms, which demonstrates that JOWA's performance reliably increases as the model size grows. Although previous works observed that TD-learning suffer from greater instability with larger model size~\citep{lee2022multi, sokar2023dormant}, JOWA scales TD-learning through a scalable transformer architecture and an auxiliary regularization loss $\mathcal{L}_\text{world}$ to stabilize the TD-learning in large models. Notably, JOWA exhibits the steepest scaling curve among all algorithms, highlighting the great scalability potential of offline model-based RL.
+
+\begin{table}[ht]
+    \centering
+    \small
+    \caption{Fine-tuning performance on unseen games using 5k transitions, measured
+ in terms of DQN-normalized score, following \cite{lee2022multi}.}
+    \begin{tabular}{l|rrrrrc}
+        \toprule
+        \multirow{2}{*}{Game} & MTBC & MGDT & EDT & SQL & JOWA & JOWA-150M \\
+         & 120M & 200M & 200M & 80M & 150M & \multicolumn{1}{c}{(scratch)} \\
+        \midrule
+        Mean & 0.164 & 0.422 & 0.430 & 0.360 & \textbf{0.647} & 0.196 \\
+        Median & 0.215 & 0.354 & 0.325 & 0.284 & \textbf{0.615} & 0.173 \\
+        IQM & 0.205 & 0.377 & 0.380 & 0.355 & \textbf{0.647} & 0.181 \\
+        \bottomrule
+    \end{tabular}
+    \label{tab:generalizes}
+\end{table}
+\subsection{Can JOWA sample-efficiently transfer to new games?}
+Rapid adaptation to downstream tasks is a natural and well-motivated benefit of pretraining. In this section, we study how the pretrained world-action model enables rapid and sample-efficient fine-tuning on new games. To investigate this question, we fine-tune pretrained agents on 5 held-out games using uniformly subsampled 5k expert-level transitions (from last 20\% of DQN-Replay~\citep{agarwal2020optimistic}) per game as the benchmark. These tiny amounts of transitions corresponding to approximately 4 trajectories from expert-level DQN-Replay per fine-tuned game on average, which is similar to the settings of few-shot learning and extremely challenging. For comparison, we fine-tune the largest agents of baselines alongside a no-pretrained baseline, JOWA-150M (scratch) trained on each held-out game from scratch. All pretrained agents are fine-tuned for 10k steps while JOWA-150M (scratch) is trained for 100k gradient steps. We report results in terms of DQN-normalized score, following \cite{lee2022multi, kumar2023offline}.
+
+We summarize the fine-tuning results in Table \ref{tab:generalizes}. This table shows that the fine-tuned JOWA-150M attains 64.7\% IQM DQN-normalized score across 5 held-out games, outperforming baselines by 34.7\% on averange. These results underscore JOWA's capacity for rapid and sample-efficient transfer to novel games, highlighting the efficacy of its learned general-purpose representation and decision-making capabilities.
+
+\subsection{Ablation Study}
+In this section, we conduct a series of controlled ablation studies to evaluate the impact of key design choices in JOWA, including planning, different training losses, and architecture designs. These experiments aim to provide empirical evidence to support our designs and offer valuable insights for future research in this domain.
+
+\begin{wraptable}{r}{0.55\textwidth}
+\caption{Performance on the 15 Atari games for 3 variants of JOWA evaluated with or without planning reported in terms of the IQM human-normalized score.}
+\label{tab:effects of planning}
+\begin{center}
+\begin{small}
+\centering
+\scalebox{0.82}{
+\begin{tabular}{lrrr}
+\toprule
+ & \textbf{JOWA-150M} & \textbf{JOWA-70M} & \textbf{JOWA-40M} \\
+\midrule
+\textbf{without planning} & 50.8\% & 45.1\% & 27.1\% \\
+\textbf{with planning} & 78.9\% & 47.6\% & 37.1\% \\
+\textbf{improvement ($\uparrow$)} & +28.1\% & +2.5\% & +10.0\% \\
+\bottomrule
+\end{tabular}
+ }
+\end{small}
+\end{center}
+\end{wraptable}
+
+\paragraph{Effects of planning at decision time.}
+We evaluate our 3 variants models with or without planning on the pretrained games and report the IQM aggregated human-normalized score across 15 games in Table \ref{tab:effects of planning}. Observe that the addition of planning improves 13.5\% performance on average and 28.1\% on maximum for JOWA-150M. Even without planning, JOWA still demonstrates scaling trends with the growth of parameter size, but at a slower scaling rate.
+
+The subsequent ablation experiments require training from scratch in multi-game regime. For time-saving, we consider a subset of 6 games in the following experiments: \texttt{Assault}, \texttt{Carnival}, \texttt{Centipede}, \texttt{NameThisGame}, \texttt{Phoenix}, \texttt{SpaceInvaders}. We train all models with 10\% randomly subsampled data per game for 1M gradient steps and fix the parameter size to 40M. 
+
+\begin{table}[ht]
+\caption{The mean, median, and IQM human-normalized score on the 6 Atari games for various training choices.}
+\label{tab:training choices}
+\begin{center}
+\begin{small}
+\centering
+\scalebox{0.82}{
+\begin{tabular}{l|r|rrrr|rr|r|r}
+\toprule
+\multirow{2}{*}{Game} & \multirow{2}{*}{Origin} & \multicolumn{4}{c|}{Different training losses} & \multicolumn{2}{c|}{Q-heads ensemble} & \multicolumn{1}{l|}{No task}  & \multicolumn{1}{l}{Synthetic data}  \\
+\cline{3-8}
+ & & No CQL & No $\mathcal{L}_\text{world}$ & $\operatorname{sg}(\mathcal{L}_\text{action})$ & MSE & Equal & Random & \multicolumn{1}{l|}{embedding} & \multicolumn{1}{l}{in pretraining} \\
+\midrule
+Mean HNS & 1.183 & 0.613 & 0.917 & 0.293 & 0.189 & \textbf{1.209} & 1.026 & 0.964 & 0.448 \\ 
+Median HNS & \textbf{1.078} & 0.696 & 0.489 & 0.304 & 0.118 & 0.975 & 0.921 & 0.721 & 0.452 \\
+IQM HNS & \textbf{1.123} & 0.637 & 0.659 & 0.307 & 0.126 & 1.049 & 0.931 & 0.824 & 0.464 \\ 
+\bottomrule
+\end{tabular}
+ }
+\end{small}
+\end{center}
+\end{table}
+\paragraph{Different training losses.}
+We train models with each of the following 5 loss functions to investigate the impact of each loss term: (i) original loss defined in Equation (\ref{eq:loss of world-action}), (ii) No CQL regularization in $\mathcal{L}_\text{action}$, which means no conservative constraints, (iii) No $\mathcal{L}_\text{world}$, which means training a model-free transformer-based critic network using $\mathcal{L}_\text{action}$, (iv) gradients of $\mathcal{L}_\text{action}$ not back-propagated to transformer backbone, denoted as $\operatorname{sg}(\mathcal{L}_\text{action})$ for short, which means optimizing the world model and critic network separately, (v) mean square error (MSE) instead of distributional TD-loss. The results of different training losses are shown in the third main column of Table \ref{tab:training choices}. 
+
+Observe that the $\operatorname{sg}(\mathcal{L}_\text{action})$ and MSE loss fail to train qualified multi-game agents. We empirically observe that agents trained with MSE TD-loss always over-optimize the CQL regularization term regardless of the value of coefficient $\alpha$ (tested with $\alpha \in \{0.01, 0.05, 0.1\}$), resulting in extreme Q-values for in-domain state-actions and low Q-values for OOD actions. The fail of $\operatorname{sg}(\mathcal{L}_\text{action})$ underscores the importance of joint-optimization in the world-action model. Comparing the original loss with the no $\mathcal{L}_\text{world}$ configuration demonstrates that scaling model-based multi-game RL is more efficient than model-free RL. Additionally, the CQL conservatism regularizer is also necessary in multi-game pretraining. Overall, the original loss outperforms all variant losses by a large margin, indicating the effectiveness of every loss terms.
+\paragraph{Ensemble of Q-value heads.}
+We run JOWA-40M with ensembled Q-heads, where the return distribution is a weighted sum of distributions from multiple Q-heads. The original configuration of JOWA-40M uses a single Q-head. In this experiment, we set the number of Q-heads to 3 and compare 2 ensemble approaches: equal weights or random weights like REM~\citep{agarwal2020optimistic}. We report the results in the forth main column of Table \ref{tab:training choices}. Although the equal weighted ensemble slightly outperforms random weights, we have not observed significant improvements of multi Q-heads over single Q-head. We leave the better way of distributional-Q ensemble for future work.
+\paragraph{Effects of task embedding.} 
+We run JOWA-40M without task embedding, using only the sum of vocabulary embedding and position embedding as input for transformer. We report results in the fifth main column of Table \ref{tab:training choices}. Observe that the addition of task embedding improves 21.9\% and 35.7\% for mean and median human-normalized score respectively. 
+\paragraph{Effects of synthetic data in pretraining.}
+By default, we do not employ planning or synthetic data during pretraining due to the significant increase in training time (approximately 10 times slower, extending training to months). For this ablation study, we enable synthetic data in pretraining for JOWA-40M and train on 6 games for 1M steps with the same batch size and all other hyperparameters, which takes 31 days. Specifically, we sample batch of 4-frames segments and interact in the imagined MDP with $\epsilon$-greedy policy to synthesis the last 4 steps. Then we optimize the world-action model with half batch of real data and half batch of synthetic data using COMBO~\citep{yu2021combo} loss in Equation (\ref{eq:combo loss}) as $\mathcal{L}_\text{action}$. The results are shown in the last main column of Table \ref{tab:training choices}.
+
+Suprisingly, we observe negative gains from incorporating synthetic data. We hypothesize twofold reasons: (i) accumulation of inference errors over steps causes later synthetic steps to deviate significantly from the ground-truth distribution, (ii) COMBO's over-penalization of Q-values for unseen state-action pairs results in overly conservative agents. Due to the unbearable training time, further investigation into more effective methods for utilizing synthetic data during multi-game RL pretraining is left for future work.
+
+
+\section{Conclusion}
+
+In this work, we introduce JOWA: \textbf{J}ointly-\textbf{O}ptimized \textbf{W}orld-\textbf{A}ction model, a single offline model-based RL agent capable of playing multiple Atari games. JOWA uses a shared transformer backbone for both the world modeling and the Q-value criticism, enabling joint optimization. We propose a provably efficient and parallelizable planning algorithm to consistently identify the optimal policy during inference. As we hoped, by increasing model parameters, JOWA unlocks scaling trends in performance and exceed prior large-scale offline RL methods in multi-games regime. Furthermore, by training a large-capacity model on a diverse set of games, we show that JOWA can sample-efficiently adapt to novel games, leveraging its generalizable world model for planning. Our ablation studies validate the efficacy of joint optimization and our planning method, while also demonstrating that scaling offline model-based RL is more efficient than offline model-free RL. To facilitate future research, we will release all training and evaluation codes, along with pretrained model checkpoints.
+
+\paragraph{Limitations.}
+Due to the computation resources required, we could not experiment on full Atari 2600 games with complete datasets~\citep{agarwal2020optimistic}, as this would take two months for training. Additionally, while using synthetic data to train agents is common in single-task online model-based RL, we observe it yields negative gains in multi-game RL pretraining. Therefore, how to effectively use synthetic data for multi-task pretraining is an interesting direction for future work.
+
+
+
+

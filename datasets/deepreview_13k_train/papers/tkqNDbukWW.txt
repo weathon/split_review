@@ -1,0 +1,330 @@
+\title{DeCoRe: Decoding by Contrasting Retrieval Heads to Mitigate Hallucinations}
+
+\begin{abstract}
+Large Language Models (LLMs) often hallucinate, producing unfaithful or factually incorrect outputs by misrepresenting the provided context or incorrectly recalling internal knowledge.
+Recent studies have identified specific attention heads within the Transformer architecture, known as \emph{retrieval heads}, responsible for extracting relevant contextual information.
+We hypothesise that masking these retrieval heads can induce hallucinations and that contrasting the outputs of the base LLM and the masked LLM can reduce hallucinations.
+To this end, we propose \textbf{De}coding by \textbf{Co}ntrasting \textbf{Re}trieval Heads (DeCoRe), a novel training-free decoding strategy that amplifies information found in the context and model parameters.
+DeCoRe mitigates potentially hallucinated responses by dynamically contrasting the outputs of the base LLM and the masked LLM, using conditional entropy as a guide.
+Our extensive experiments confirm that DeCoRe significantly improves performance on tasks requiring high contextual faithfulness, such as summarisation (XSum by 18.6\%), instruction following (MemoTrap by 10.9\%), and open-book question answering (NQ-Open by 2.4\% and NQ-Swap by 5.5\%).\footnote{Code is available at 
+\repo.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\setlength{\fboxsep}{1pt}
+\label{sec:intro}
+Large Language Models (LLMs) have emerged as powerful natural language generators, demonstrating remarkable capabilities across a range of tasks~\citep{radford2019language,brown2020gpt3,wei2022finetuned,ouyang2022instruct}.
+However, LLMs are prone to \emph{hallucinations}, where the model generates content that is not grounded in reality or misrepresents the facts \citep{ji2023survey,rawte2023survey,zhang2023siren,li2024dawn}.
+The tendency of LLMs to hallucinate undermines their reliability, especially when applied in high-stakes domains such as clinical decision-making or legal reasoning \citep{ahmad2023creating, dahl2024large}.
+
+Understanding the underlying mechanisms responsible for hallucinations in LLMs remains challenging.
+\citet{wu2024retrieval} found that there are special attention heads responsible for retrieving relevant information from a given context, which they called \emph{``retrieval heads''}.
+While identifying these mechanisms is key to understanding LLMs, little research has explored how to use these insights to effectively mitigate hallucinations, which is the focus of our work.
+
+\input{figures/decore_arch}
+
+We propose a novel decoding method termed \textbf{De}coding by \textbf{Co}ntrasting \textbf{Re}trieval Heads~(\textbf{DeCoRe}), as illustrated in Figure~\ref{fig:decore}.
+This method builds on the assumption that masking retrieval heads can induce hallucination by impairing the ability of the model to retrieve relevant information from the context.
+DeCoRe leverages Contrastive Decoding~\citep{li2023contrastive} to amplify the differences between the original and the hallucinating outputs, leading to more accurate final responses.
+Furthermore, we propose using the conditional entropy of the model's next-token distribution to control the contrastive decoding mechanism.
+
+Our findings show that DeCoRe significantly improves accuracy in tasks that require contextual faithfulness, such as XSum~\citep{xsum-emnlp}, MemoTrap~\citep{liu2023memotrap}, Open Book Natural Questions~\cite[NQ; ][]{kwiatkowski2019nq}, and NQ-Swap~\citep{longpre2021entity}.
+Furthermore, our experiments show that DeCoRe enhances the model's accuracy in factual recall tasks.
+For example, in the TriviaQA~\citep{2017arXivtriviaqa} and PopQA~\citep{mallen2023popqa} dataset, DeCoRe shows an accuracy gain compared to other hallucination mitigation methods.
+Similarly, when applied to TruthfulQA~\citep{lin2022truthfulqa}, the Llama3-8b-Instruct model~\citep{dubey2024llama}, when combined with DeCoRe, generates more truthful and informative responses than other comparable hallucination mitigation methods.
+Finally, our experiments on MuSiQue~\citep{trivedi-etal-2022-musique} show that DeCoRe can significantly improve the accuracy of the model in long-form generation and reasoning tasks, for example, when used jointly with Chain of Thought~\citep[CoT; ][]{wei2022chain} prompting.
+
+
+\section{DeCoRe: Decoding by Contrasting Retrieval Heads}
+
+\label{sec:decore}
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \centering
+    \includegraphics[width=0.5\textwidth]{assets/DeCoRe_hallu_example_v3.pdf}
+    \caption{
+    Example of hallucination induced by masking retrieval heads in the NQ-Swap task. The base model retrieves the correct answer from the substituted context, while the masked model generates an incorrect answer.
+    }
+    \label{fig:hallu_example}
+\end{wrapfigure}
+
+DeCoRe operates by masking specific retrieval heads to trigger hallucinations and then employs a contrastive mechanism that penalises outputs resembling those from the hallucinating model, thereby amplifying the more accurate predictions of the base model.
+We further enhance this approach with a dynamic entropy-controlled mechanism to adjust the contrastive effect based on the entropy of the next token distribution of the model.
+\cref{fig:decore} illustrates this process over time.
+
+\subsection{Masking Retrieval Heads} \label{sec:masking_retrieval_heads}
+
+In this section, we describe how we mask retrieval heads in our base LLM to induce hallucinations, following the notation from \citet{vaswani2017attention}.
+
+Given a base LLM $f_{\text{base}}$, let $x_{<t} = (x_1, x_2, \dots, x_{t-1})$ be a sequence of previous tokens, where $x_i \in \mathcal{X}$ and $\mathcal{X}$ denotes the vocabulary of the model. 
+The logits for the next token distribution at time step $t$ are given by $f_{\text{base}}(x_{<t}) \in \mathbb{R}^{|\mathcal{X}|}$, and the probability of the next token $x_t$ is:
+\begin{equation} \label{eq:basev2}
+p_{\text{base}}\left(x_t \mid x_{<t} \right) \propto \exp \left(f_{\text{base}}(x_{<t})\right)
+\end{equation}
+In our approach, we derive a variant of the base LLM by masking a set of \emph{retrieval heads}.
+We identify these heads using the method proposed by \citet{wu2024retrieval}, which involves analysing attention patterns on the Needle-in-a-Haystack~\citep[NitH;][]{needleinhaystack} dataset.
+The NitH dataset is designed to evaluate the ability of a model to retrieve specific information from a long context, making it suitable for identifying attention heads that contribute to information retrieval.
+We compute a \emph{retrieval score}, defining it as the ratio of successful copy-paste operations by each attention head, following \citet{wu2024retrieval}. Further details are provided in \cref{app:extracting_retrieval_heads}.
+We then rank the attention heads according to their retrieval scores and select the top $N$ heads as retrieval heads.
+Let $\mathcal{H}_{\text{retrieval}} = \{ (l_1, h_1), \ldots, (l_N, h_N) \}$ denote the set of retrieval heads to be masked, where $l_i$ is the layer index and $h_i$ is the head index within that layer.
+In a Transformer architecture, the output of the multi-head attention mechanism at layer $l$ is given by:
+\begin{equation}
+\text{MultiHead}^{(l)} \left( Q^{(l)}, K^{(l)}, V^{(l)} \right) = \text{Concat} \left( \text{head}^{(l)}_1, \dots, \text{head}^{(l)}_H \right) W^{(l)}_O,
+\end{equation}
+\noindent where $H \in \mathbb{Z}_{+}$ is the number of attention heads; $Q^{(l)}$, $K^{(l)}$, and $V^{(l)} \in \mathbb{R}^{d \times d_k}$ respectively denote the query, key, and value matrices at layer $l$; $d$ denotes the model hidden dimension and $d_k$ is the key dimension (where $d_k = d / H$); $W^{(l)}_O \in  \mathbb{R}^{Hd_k \times d}$ denotes output projection layer; and each head is computed as:
+\begin{equation}
+\text{head}^{(l)}_h = \text{Attention}\left( Q^{(l)} W^{(l)}_{Q,h}, K^{(l)} W^{(l)}_{K,h}, V^{(l)} W^{(l)}_{V,h} \right),
+\end{equation}
+\noindent where $W^{(l)}_{Q,h}$, $W^{(l)}_{K,h}$, $W^{(l)}_{V,h} \in \mathbb{R}^{d \times d_k}$ respectively denote query, key, value weight matrices at layer $l$. To mask each head $\text{head}^{(l)}_h$ such that $(l, h) \in \mathcal{H}_{\text{retrieval}}$, we define a mask $m^{(l)}_h \in \{ 0, 1 \}$ such that:
+\begin{equation}
+m^{(l)}_h = \begin{cases} 0 & \text{if } (l, h) \in \mathcal{H}_{\text{retrieval}}, \\
+1 & \text{otherwise}. \end{cases}
+\end{equation}
+Then, the masked multi-head attention output at layer $l$ becomes:
+\begin{equation}
+\text{MultiHead}^{(l)}_{\text{masked}} \left( Q^{(l)}, K^{(l)}, V^{(l)} \right) = \text{Concat} \left( m^{(l)}_1 \cdot \text{head}^{(l)}_1, \dots, m^{(l)}_H \cdot \text{head}^{(l)}_H \right) W^{(l)}_O,
+\end{equation}
+\noindent where $\cdot$ denotes the scalar multiplication.
+The token logits of the masked model is then given by $f_{\text{masked}}\left( x_{<t} \right)$, and the next-token distribution is:
+\begin{equation}
+p_{\text{masked}}\left(x_t \mid x_{<t} \right) \propto \exp \left( f_{\theta_{\text{masked}}} \left( x_{<t} \right) \right).
+\end{equation}
+We hypothesise that masking retrieval heads reduces the model's ability to retrieve relevant information from the context, leading to a higher likelihood of generating hallucinations.
+We empirically validate this hypothesis in \cref{app:res_baseline_masked}, where we evaluate the model on factuality and faithfulness evaluation tasks before and after masking retrieval heads.
+Figure~\ref{fig:hallu_example} shows an example of the induced hallucination after masking 10 retrieval heads in Llama3-8b-Instruct~\citep{dubey2024llama}.
+
+\subsection{Contrasting Base and Masked LLMs} \label{ssec:decore}
+
+Given the base and masked LLMs from \cref{sec:masking_retrieval_heads}, our goal is to improve the faithfulness of the generated output.
+To achieve this, we propose contrasting the next-token distributions of the base and masked models, effectively increasing the likelihood of the tokens selected by the former while decreasing the likelihood of the tokens selected by the latter.
+More formally, DeCoRe uses the following next-token distribution $p\left( x_t \mid x_{<t} \right)$:
+\begin{equation} \label{eq:decore}
+p \left( x_{t} \mid x_{<t} \right) \propto \exp \left[ (1 + \alpha) \log p_{\text{base}} \left( x_t \mid x_{<t} \right) - \alpha \log p_{\text{masked}} \left( x_t \mid x_{<t} \right) \right]. % \label{eq:decore}
+\end{equation}
+In \cref{eq:decore}, the new next-token distribution $p(x_{t} \mid x_{<t})$ is defined by contrasting the next-token distributions of the base model $p_{\text{base}}(x_t \mid x_{<t})$ and the masked model $p_{\text{masked}}(x_t \mid x_{<t})$, introduced in \cref{sec:masking_retrieval_heads}; and $\alpha \in \mathbb{R}$ is a scaling factor that controls the weight of the next-token distribution induced by the base model $p_{\text{base}}(x_t \mid x_{<t})$ and the one induced by the masked model $p_{\text{masked}}(x_t \mid x_{<t})$. % how much we want to contrast the output distributions of the masked model from the base one.
+The term $\left(1+\alpha\right) \log p_{\text{base}}\left(x_t \mid x_{<t}\right)$ in \cref{eq:decore} encourages the base LLM to predict a highly probably token under its distribution, while $\alpha \log p_{\text{masked}}\left(x_t \mid x_{<t}\right)$ penalises predictions that are also likely under the masked model’s distribution.
+
+\subsection{Dynamic Contrastive Decoding}
+\label{ssec:decore_entropy}
+We propose a method to dynamically select the hyper-parameter $\alpha$ using an uncertainty quantification approach, namely the \emph{conditional entropy}, which is considered a reliable predictor for whether a model might generate hallucinations~\citep{DBLP:conf/iclr/MalininG21,DBLP:journals/corr/abs-2207-05221}.\footnote{As we also validate in our experiments in \cref{app:correlation_entropy_correctness}.}
+For a given context $x_{<t}$, the conditional entropy $H\left( x_t \right)$ of the next-token distribution of a model $p \left( x_t \mid x_{<t} \right)$ is defined as:
+\begin{equation} \label{eq:ce}
+H(x_t) = - \sum_{x_t \in \mathcal{V}} p \left( x_t \mid x_{<t} \right) \log p \left( x_t \mid x_{<t} \right),
+\end{equation}
+\noindent where $\mathcal{V}$ denotes the vocabulary of the model; a high conditional entropy indicates that the model is uncertain about its prediction.
+We propose using the conditional entropy (\cref{eq:ce}) of the base model to dynamically tune the contrastive decoding process described in \cref{eq:decore}; more specifically, we propose setting the hyper-parameter $\alpha$ in \cref{eq:decore} to $\alpha = H(x_t)$ --- as the entropy of the next-token distribution of the base model increases, $\alpha$ also increases, making potentially hallucinated generations less likely to be selected.
+
+
+\section{Experiment Setup}
+
+\label{sec:setup}
+
+Hallucinations in LLMs can generally be categorised into two types -- \emph{factuality} and \emph{faithfulness hallucinations}~\citep{huang2023survey, hong2024hallucinations}.
+Factuality hallucinations refer to instances where the generated content is factually incorrect with respect to world knowledge.
+Faithfulness hallucinations refer to instances where the generated content fails to accurately adhere to the given source of information. 
+Moreover, hallucinations tend to ``snowball'' in longer generation tasks such as multi-hop reasoning, compounding errors across multiple generation steps due to the inherently sequential behaviour of auto-regressive decoding in LLMs~\citep{william2023parallelism, zhang2023language}.
+
+In this section, we describe our experimental setup to evaluate DeCoRe.
+We employ a diverse set of benchmarks to assess contextual faithfulness, factual accuracy, and multi-hop reasoning capability.
+Given that retrieval heads are important in correctly retrieving contextual information~\citep{wu2024retrieval} and looking back over \emph{long reasoning processes}~\citep{wu2024retrieval}, while attention heads play a significant role in information transfer between tokens~\citep{elhage2021mathematical}, our experimental setup is designed to answer the following key research questions:
+\begin{inparaenum}[1)]
+\item Can DeCoRe improve \emph{contextual faithfulness}?
+\item Can DeCoRe maintain or enhance the \emph{factual recall} capabilities of LLMs?
+\item Does coupling DeCoRe with CoT improve the multi-hop reasoning capability of the LLM?
+\end{inparaenum}
+
+\subsection{Datasets and Evaluation Metrics}
+
+\paragraph{Faithfulness.}
+We evaluate faithfulness on summarisation, instruction-following, and reading comprehension datasets.
+XSum~\citep{xsum-emnlp} is an abstractive summarisation dataset developed from BBC articles.
+We sub-sample 1,000 examples, following \citet{chuang2024lookback}, and evaluate summaries using ROUGE-L~\citep{lin-2004-rouge}, BERTScore~\citep{zhang2020bertscore}, and factKB~\citep{feng-etal-2023-factkb} for factual consistency.
+MemoTrap~\citep{liu2023memotrap} tests whether models can avoid \emph{memorisation traps} and adhere to the given instructions, with performance reported using macro- and micro-averaged accuracy.
+Instruction-Following Eval~\cite[IFEval;][]{zhou2023instruction} evaluates the ability of the models to follow instructions on a set of verifiable instructions such as ``write in more than 400 words''.
+The performance is reported using Prompt-level and Instruction-level strict accuracies, which measure the percentage of prompts where all verifiable instructions are followed, and the percentage of verifiable instructions followed overall.
+Open-Domain Natural Questions~\citep[NQ-Open; ][]{lee-etal-2019-latent} a QA dataset where we use an open-book configuration with one supporting document per question as described by \citet{liu-etal-2024-lost}.
+NQ-Swap~\citep{longpre2021entity} is a version of NQ where the answer entity in the context was replaced with another entity and is used to evaluate the faithfulness of the model to the modified context. %modifies NQ by replacing correct answer entities in the supporting documents with swapped entities, testing the faithfulness of the model to the modified context, also measured by EM.
+We evaluate the models with the Exact Match (EM) metric and, following \citet{kandpal2023large} and \citet{liu-etal-2024-lost}, we consider a prediction as correct if any sub-string of the prediction exactly matches any of the ground truth answers.
+
+\paragraph{Factuality.}
+For factuality evaluation, we use four datasets---TruthfulQA, TriviaQA, PopQA, and NQ-Open.
+TruthfulQA~\citep{lin2022truthfulqa} (MC1, MC2, MC3, and Gen) is used to evaluate whether models can avoid common human falsehoods; MC1, MC2, and MC3 are multi-label classification tasks, and Gen is a generation task where evaluations use fine-tuned GPT models to assess the correctness and informativeness of the generated outputs.
+TriviaQA~\citep{2017arXivtriviaqa}, PopQA~\citep{mallen2023popqa}, and NQ-Open are open-domain QA datasets used to evaluate the ability of a model to answer questions about trivia, long-tail entities, and Google searches, respectively.
+We use closed-book configuration on these datasets to evaluate factual recall.
+\paragraph{Chain of Thought Reasoning.}
+We evaluate DeCoRe in CoT-style reasoning tasks on both closed- and open-book setups; we use MuSiQue~\citep{trivedi-etal-2022-musique}, a multi-hop question-answering dataset that requires models to answer questions by reasoning using multiple and disconnected pieces of information.
+
+More details on the evaluation protocol are available in \cref{tab:exp_setup_details}.
+
+\subsection{Models}
+
+We evaluate two models from the Llama3 family~\cite{dubey2024llama}, namely Llama3-8B-Instruct and Llama3-70B-Instruct, to analyse the influence of model size on the downstream results.
+In \cref{app:ablation_models}, we also report results from other model families, such as Mistral~\citep{jiang2023mistral} and Qwen2~\citep{yang2024qwen2}.
+
+\subsection{Baselines}
+We compare DeCoRe against six baselines:
+\begin{inparaenum}[1)]
+    \item Greedy decoding;
+    \item Contrastive Decoding~\cite[CD;][]{li2023contrastive}, where LLaMA3-8B-Instruct serves as the amateur model and LLaMA3-70B-Instruct act as the expert model;
+    \item Context-Aware Decoding~\cite[CAD;][]{shi2024trusting}, a variant of CD where the amateur model is the same as the expert model but is not presented with the additional context;
+    \item Decoding by Contrasting Layers~\cite[DoLa;][]{chuang2023dola} that subtracts the logits in early layers to calibrate the final-layer logits. We evaluate two versions: DoLa-low (\ie contrasting the first half of the layers with the final layer) and DoLa-high (\ie contrasting the second half with the final layer);
+    \item Activation Decoding~\cite[AD;][]{chen2024incontext} which uses the sharpness of context activations within intermediate layers to calibrate the next token prediction;
+    \item ITI~\citep{li2024inference} that trains linear classifiers on TruthfulQA data to obtain ``factual'' heads and layers with corresponding ``factual'' direction vectors and then apply intervention during the decoding process.
+\end{inparaenum}
+Note that ITI requires a training process on labelled data
+, whereas other baselines and DeCoRe are training-free.
+Also note that CAD is only applicable on tasks with additional context (\ie XSum, open book NQ-Open, NQ-Swap, and open book MuSiQue).
+All implementation details are available in \cref{app:implementation_details}.
+
+\subsection{DeCoRe Variants}
+We evaluate three variants of DeCoRe:
+\begin{inparaenum}[1)]
+\item \decorestatic, which employs a static scaling factor $\alpha$ throughout generation;
+\item \decoreentropy, which entropy to dynamically adjust the strength of the contrastive decoding;
+\item \decoreentropylite, which is similar to \decoreentropy, except that it employs a smaller LLM with the same vocabulary space as the masked LLM.
+\end{inparaenum}
+
+
+
+\section{Results}
+
+
+In the following, we present the evaluation results of DeCoRe across faithfulness, factuality, and multi-hop reasoning tasks.
+We show that DeCoRe mitigates faithfulness and factuality hallucinations, and improves the accuracy of the model when combined with CoT prompting.
+These effectively answer our research questions stated in \cref{sec:setup}.
+Additionally, we examine the impact of the number of masked retrieval heads on task performance.
+Finally, we demonstrate that DeCoRe reduces conditional entropy over time in long-generation tasks, contributing to more accurate outputs.
+These results highlight DeCoRe’s broad effectiveness in enhancing LLM performance.
+
+\paragraph{DeCoRe Mitigates Faithfulness Hallucinations.}
+\label{sec:results_faithfulness}
+\input{tables/result_faithfulness}
+
+\cref{tab:result_faithfulness} shows the performance of various models and decoding methods on faithfulness evaluation tasks.
+The results show that \decorestatic, \decoreentropy, and \decoreentropylite consistently improve the base models across all tasks and model sizes.
+Specifically, \decoreentropy yields the best or very competitive results in several faithfulness-related tasks.%, demonstrating its effectiveness in enhancing model faithfulness.
+For instance, with Llama3-8b-Instruct, \decoreentropy attains a Macro Accuracy of 74.14\% and a Micro Accuracy of 74.87\% on MemoTrap, producing significantly more accurate results than all baselines. % the base model and other methods.
+\decoreentropy also achieves the highest EM scores on open-book NQ-Open and competitive results on NQ-Swap.
+Similarly, with Llama3-70b-Instruct, \decoreentropy achieves the highest EM score on NQ-Open and competitive results on NQ-Swap. %, indicating consistent enhancements across different model sizes.
+In instruction-following tasks, \decoreentropy also achieves competitive scores in the IFEval benchmark with Llama3-8b-Instruct, yielding Instruct and Prompt Strict Accuracy values of 68.39\% and 76.38\%, respectively.
+With Llama3-70b-Instruct, \decorestatic and \decoreentropy achieve the joint-highest Instruct and Prompt Strict Accuracy values of 78.56\% and 84.89\%, respectively.
+
+While CAD yields accurate results on tasks like XSum and NQ-Swap, its applicability remains limited to datasets that provide additional contexts, making it not trivial to adapt to tasks such as MemoTrap and IFEval. % and offers negligible improvements when the contextual knowledge may be aligned with the parametric knowledge of the base model, as in NQ-Open.
+On the other hand, \decorestatic and \decoreentropy both improve the base models in all tasks. %, highlighting their versatility and robustness in enhancing the faithfulness of language models.
+
+\paragraph{DeCoRe Mitigates Factuality Hallucinations.}
+\input{tables/result_factuality}
+While \decore is primarily designed to improve contextual faithfulness, its impact on factual recall tasks is an open question.
+To this end, we evaluate \decore on a range of tasks where the model needs to produce factually correct generations---results are outlined in \cref{tab:result_factuality}.
+We can see that \decore significantly improves the accuracy of the models across various factuality evaluation tasks.
+For the Llama3-8b-Instruct model, \decoreentropy demonstrates improvements in several TruthfulQA (Generation) metrics.
+Specifically, it achieves an informativeness score of 74.05\% and an intersection of truthfulness and informativeness score of 53.00\%, second only to ITI, which requires fine-tuning the model on TruthfulQA data.\footnote{The rejection rates---the frequency by which the model answers ``I have no comment''---of Llama3 models in TruthfulQA are higher than Llama2 models~\citep{touvron2023llama}, as reported by previous studies~\citep{li2024inference, chuang2023dola}; we report metrics for the non-rejection answers in \cref{app:res_add_truthfulqa_non_rejection}.}
+Furthermore, \decorestatic yields the highest EM score on TriviaQA (56.93\%) among all decoding strategies and achieves competitive EM scores on PopQA.
+For the larger Llama3-70b-Instruct model, \decoreentropy achieves the highest truthfulness score (89.23\%) on TruthfulQA (Gen); it performs competitively across informativeness and the intersection metrics, yielding the highest EM score on closed-book NQ-Open (40.45\%).
+Finally, \decorestatic yields the highest EM score on PopQA (40.74\%). %, indicating an enhanced ability to recall factual knowledge.
+
+These results suggest that \decore methods can improve contextual faithfulness and factual consistency across different datasets.
+We believe this phenomenon is closely related to the hypothesis of attention heads as Information Movement~\citep{elhage2021mathematical}, which suggests that attention heads facilitate the transfer of information between tokens and that the residual stream vector space of one token typically contains information from other tokens.
+Thus, while factual recall may occur in the Multi-Layer Perceptron~\citep{geva-etal-2021-transformer,meng2022locating}, masking retrieval heads may interfere with the information transfer from the question to the generated answer, potentially leading to hallucinations.
+We hypothesise that \decore leverages this phenomenon, improving downstream results in factual recall tasks.
+
+
+\paragraph{DeCoRe with Chain-of-Thought.}
+\input{tables/result_cot}
+To assess the effectiveness of \decore-based approaches in multi-hop reasoning tasks, we evaluate them on the MuSiQue dataset.
+Multi-hop reasoning requires models to integrate information across multiple reasoning steps, and retrieval heads may be crucial in this process as they allow models to reference earlier generated tokens.
+We conduct experiments in both closed-book and open-book settings, with and without CoT prompting.
+The closed-book setting resembles factuality evaluation, where a model can rely solely on its parametric knowledge, while the open-book setting is related to faithfulness evaluation since the model has access to a corpus of external knowledge.
+
+As shown in \cref{tab:result_cot}, \decore variants consistently improve the EM scores across various settings.
+For the Llama3-8b-Instruct model, \decorestatic enhances the EM score in the closed-book setup with CoT from 14.61\% (base model) to 14.69\%, while in the open-book setup without CoT, \decoreentropy achieves the highest score (61.98\%). %, indicating effectiveness when an external context is provided.
+\decoreentropy also yields accurate results in the open-book CoT scenario, achieving the most accurate results (74.47\% EM). %, showcasing its capacity to leverage CoT reasoning.
+For the Llama3-70b-Instruct model, both \decorestatic and \decoreentropy yield very accurate results, improving the EM score in the closed-book setup with CoT from 20.15\% (base model) to 20.60\%. % highlighting the impact of modulating retrieval heads on multi-step reasoning tasks.
+\decorestatic achieves the highest score in the open-book CoT setup (75.05\%), with \decoreentropy closely following at 74.93\%.
+These improvements underscore the effectiveness of DeCoRe in enhancing reasoning capabilities, especially when CoT prompting and external context are involved.
+
+Overall, the results indicate that DeCoRe improves information transfer between reasoning steps, leading to higher EM scores in both closed and open-book settings.
+This validates our hypothesis and demonstrates the usefulness of DeCoRe in tasks requiring complex reasoning, validating the insights from \citet{wu2024retrieval} on the significance of retrieval heads in multi-step reasoning.
+
+\paragraph{Effect of Retrieval Head Masking on Task Performance of DeCoRe.}
+\label{sec:results_correlation_retrieval}
+\input{figures/result_num_retrieval_heads_correlation}
+We now analyse the correlation between the number of masked retrieval heads and the downstream results of the Llama3-8B-Instruct model; results are outlined in \cref{fig:result_num_retrieval_heads_correlation}.
+We can see that the performance of \decoreentropy across various tasks strongly correlates with the number of masked retrieval heads.
+For example, in XSum and MemoTrap, we can observe positive correlations between the factKB and macro accuracy scores and the number of masked retrieval heads.
+We attribute this to the nature of summarisation (XSum) and instruction-following (MemoTrap) tasks, which rely heavily on the ability of the model to extract and copy relevant information accurately.
+However, we observe a moderate negative correlation as the number of masked retrieval heads increases on another Instruction following task, IFEval.
+We hypothesise that the reason behind this phenomenon is that IFEval requires a different copying mechanism than in MemoTrap.
+As opposed to having to provide an exact copy of a segment of the input, like in MemoTrap or partially XSum, IFEval requires the model to adhere to the instruction, which may not require an induction mechanism (\eg ``In your response, the letter \{letter\} should appear \{N\} times.'').
+
+In tasks such as open-book NQ-Open and NQ-Swap, we can see a moderate negative correlation between the number of masked retrieval heads and EM. %, indicating a more complex interaction between retrieval and other mechanisms involved in open-book QA tasks.
+Nevertheless, in all experiments, \decoreentropy produces more accurate results than the baseline in such tasks. %, indicating its robustness in maintaining faithfulness to the given context.
+
+In factual recall tasks (\ie TriviaQA, PopQA, and closed-book NQ-Open), we can see a negative correlation between EM scores and the number of masked retrieval heads. %, indicating that retrieval heads are not the most detrimental mechanism in the factual recall tasks.
+During decoding, when the masked retrieval heads fail to introduce significant differences between the ``hallucinating'' and the outputs of the base model, the effect of \decoreentropy becomes less pronounced.
+TruthfulQA differs from the other factuality tasks, showing a moderate positive correlation between downstream accuracy and the number of masked retrieval heads.
+This suggests that truthfulness, or the ability to discern popular misconceptions, may require different retrieval mechanisms than the typical factual recall tasks.
+These findings can be combined with the results of masking random attention heads (\cref{app:ablation_random_heads}) further supporting our hypothesis on the effectiveness of masking retrieval heads in contrastive decoding.
+
+\paragraph{DeCoRe yields lower entropy across time in long generation tasks.}
+\label{sec:results_entropy}
+\input{figures/avg_lcce}
+
+We found that lower conditional entropy is related to correct predictions; generated sequences with lower conditional entropy tend to be more reliable (see \cref{app:correlation_entropy_correctness}).
+Motivated by the importance of low conditional entropy, we evaluate the length-normalised conditional entropy of different decoding strategies in long-generation tasks (\ie XSum, and MuSiQue with CoT prompting).
+
+As shown in \cref{fig:cond_entropy}, \decoreentropy yields lower conditional entropy compared to the baselines.
+\decoreentropy demonstrates lower entropy in the open-book QA task (MuSiQue), with an average entropy of 0.29 compared to 0.30 for the baselines.
+Similarly, in XSum, \decoreentropy achieves an entropy of 0.38, outperforming the baselines.
+In tasks such as summarisation (XSum) and open-book QA (MuSiQue), lower entropy is crucial because the model must strictly adhere to the provided document or evidence while generating the summary or answer.
+Any deviation from the context can result in hallucinations or factually incorrect outputs.
+The lower entropy observed with \decoreentropy indicates that it generates less ``surprising'' sequences, reducing the likelihood of hallucinations.
+
+Overall, the reduction in conditional entropy shows that \decoreentropy is able to maintain lower uncertainty throughout long-generation tasks.
+This reinforces the effectiveness of \decoreentropy in applications requiring high contextual faithfulness, such as summarisation and open-book QA.
+
+
+
+\section{Related Works}
+
+\label{sec:relwork}
+\paragraph{Internal Mechanism of LLMs.} 
+Studies have attempted to dissect the inner workings of LLMs by focusing on layers~\citep{singh-etal-2020-bertnesia, geva-etal-2021-transformer, meng2022locating, yu2024mechanisms}, neurons~\citep{dai-etal-2022-knowledge}, and attention heads~\citep{elhage2021mathematical, geva2023dissecting, yuksekgonul2023attention}.
+A seminal discovery in this area is the identification of induction heads, the attention heads that perform an induction algorithm by looking back over the context to predict a similar completion~\citep{olsson2022context}.
+Similarly, \citet{wu2024retrieval} identified retrieval heads, a specific set of attention heads responsible for maintaining long-context factuality.
+These insights into the internal workings of LLMs is instrumental to our work, which focuses on these mechanisms to reduce hallucination.
+Our work leverages the idea that the masking of retrieval heads leads to hallucination.
+
+\paragraph{Constrained Decoding.}
+Constrained decoding focuses on intervening during the generation process to reduce hallucinations.
+One example of constrained decoding is Inference-Time Intervention~\cite[ITI;][]{li2024inference} which intervenes by probing and modifying attention heads or layers associated with model correctness.
+Contrastive Decoding~\cite[CD;][]{li2023contrastive} improves fluency and coherence by contrasting outputs from stronger expert LMs with those from weaker, smaller LMs.
+Building on CD, \citet{shi2024trusting} propose Context Aware Decoding (CAD) to mitigate contextual hallucinations by contrasting the output of an LLM with and without the provided context.
+Similarly, Induced-then-Contrast Decoding~\cite[ICD;][]{zhang2023alleviating} fine-tunes a factually weak LLM using an automatically generated non-factual dataset, although this approach depends on the quality of the dataset and requires fine-tuning.
+More closely related to \decore is Decoding by Contrasting Layers~\cite[DoLa; ][]{chuang2023dola} and Autocontrastive Decoding~\cite[ACD; ][]{gera-etal-2023-benefits}, which examines the internal mechanism of the LLMs without fine-tuning.
+Both DoLa and ACD proposed contrasting the predictions of the final layer against the earlier ones via \textit{early exiting}~\citep{teerapittayanon2016branchynet, elbayad2020depth}.
+Activation Decoding~\citep{chen2024incontext} also examines the internal mechanism of the LLMs, particularly the sharpness of context ativations to calibrate the next token’s probability distribution.
+\decore distinguishes itself by masking retrieval heads to induce hallucinations, followed by a dynamic entropy-controlled contrastive decoding to penalise uncertain outputs, effectively reducing hallucinations without the need for fine-tuning.
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+\decore (Decoding by Contrasting Retrieval Heads) is a novel decoding strategy that aims to reduce faithfulness and factuality hallucinations in LLMs.
+\decore is based on the assumption that masking retrieval heads can induce hallucinations by limiting the ability of the model to retrieve relevant information from the given context.
+Specifically, \decore uses retrieval head masking to create a version of the model that is more likely to generate hallucinations and combines it with the original model via a contrasting decoding scheme (\cref{ssec:decore}).
+Furthermore, we propose a simple approach to control the strength of the contrastive decoding scheme by using the conditional entropy of the next-token distribution of the model (\cref{ssec:decore_entropy}).
+Our experimental results show that \decore significantly improves the accuracy of the model in tasks requiring contextual faithfulness and in some factual recall and reasoning tasks.
+
+\paragraph{Limitations.}
+While \decore improves the performance of the base model across most tasks, there is no ``free lunch''; existing baselines may still produce more accurate results than \decore in specific tasks (\,  e.g., ITI in TruthfulQA or CAD in NQ-Swap).
+However, these baselines often offer limited improvements or may even generate less accurate responses in other tasks.
+We also observed that \decore offers only marginal enhancements in factual recall tasks, suggesting that retrieval heads may not play a primary role in factual recall except for information transfer.
+Finally, while we propose using the conditional entropy of the model's next-token distribution to control the contrastive decoding scheme in \decore, more ``semantic'' methods of uncertainty quantification may also be used~\citep{DBLP:journals/nature/FarquharKKG24}.
+
+
+

@@ -1,8 +1,8 @@
 # Generalizable Monocular 3D Human Rendering via Direct Gaussian Attribute Diffusion
 
 - Decision: Reject
-- Avg Score: 2.83
-- Scores: 3, 1, 0, 5, 5, 3
+- Avg Score: 5.20
+- Scores: 3, 10, 5, 5, 3
 
 ## Abstract
 This paper leverages 3D Gaussian Splatting to tackle the challenging task of generating novel views of humans from given single-view images. Existing methods typically adopt an indirect supervision manner, i.e., splat-based rasterization for differentiable rendering. However, the intricate coupling of various 3D Gaussian attributes complicates precise error backpropagation during optimization, often

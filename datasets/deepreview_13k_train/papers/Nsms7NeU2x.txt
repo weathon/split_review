@@ -1,0 +1,379 @@
+\title{How much can we Forget about Data Contamination?}
+
+\begin{abstract}
+The leakage of benchmark data into the training data has emerged as a significant challenge for evaluating the capabilities of large language models (LLMs). In this work, we use experimental evidence and theoretical estimates to challenge the common assumption that small-scale contamination renders benchmark evaluations invalid. First, we experimentally quantify the magnitude of benchmark overfitting based on scaling along three dimensions: The number of model parameters (up to 1.6B), the number of times an example is seen (up to 144), and the number of training tokens (up to 40B). We find that if model and data follow the Chinchilla scaling laws, minor contamination indeed leads to overfitting. At the same time, even 144 times of contamination can be forgotten if the training data is scaled beyond five times Chinchilla, a regime characteristic of many modern LLMs. We then derive a simple theory of example forgetting via cumulative weight decay. It allows us to bound the number of gradient steps required to forget past data for any training run where we know the hyperparameters of AdamW. This indicates that many LLMs, including Llama 3, have forgotten the data seen at the beginning of training. Experimentally, we demonstrate that forgetting occurs faster than what is predicted by our bounds. Taken together, our results suggest that moderate amounts of contamination can be forgotten at the end of realistically scaled training runs. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+A core principle of machine learning is that a model should not be trained on the test set used for evaluation \citep{donoho201750}. For foundation models trained on Internet-scale data, there are increasing concerns that this principle is violated due to the leakage of benchmark evaluation data into the training data \citep{xu2024benchmark,oren2023proving}.
+Indeed, many LLM developers have found overlap between their training data and the benchmark questions used for evaluation \citep{gpt3paper,dubey2024llama}. What is more, research on memorization \citep{carlini2019secret,carlini2021extracting} shows that text sequences from the training data are sometimes encoded within the model, including machine learning datasets \citep{nytimeslawsuit,liang2023holistic,nasr2023scalable,bordt2024colm}. 
+While the fact that data contamination {\it can} lead to invalid performance evaluations is now well-established \citep{magar2022data,li2024task,yang2023rethinking,jiang2024investigating}, little is known about the precise conditions under which this is the case. The main reason for this is that the training data is usually unknown, and contamination identified via clever research designs that work around this restriction \citep{golchin2023time,oren2023proving,deng-etal-2024-investigating}. Because modern foundation models are sometimes trained for over a million gradient steps \citep{dubey2024llama}, it is unclear whether a single update on contaminated data at some point during training necessarily impacts downstream evaluations. And indeed, there is quite some evidence that language models need to see samples repeatedly to have any impact on the final model. For example, many papers on memorization have found that it occurs only when a sample is frequently repeated in the training data \citep{carlini2022quantifying,Biderman_memorization,huang2024demystifying}. The same is true for research on knowledge acquisition, where a fact needs to be paraphrased many times before it is finally remembered by the model \citep{allen2023physics,retentive-or-forgetfull,chang2024large}. 
+
+In this work, we study the impact of data contamination in a controlled setting. This means we train language models from scratch on datasets where we explicitly insert contaminated examples \citep{jiang2024investigating}. We begin by quantifying how the overall magnitude of benchmark overfitting (or the cross-entropy loss of an observed sample) changes as we {\bf scale along three critical dimensions}: (1) the number of model parameters, (2) the number of training tokens, and (3) the number of repetitions of an example in the training data (Section \ref{sec scaling}). Holding the other two dimensions fixed, we find that {\it the effect of scaling is monotone in each dimension}. First, similar to many other works, we find that the tendency of a model to overfit increases in the number of parameters \citep{Goodfellow-et-al-2016,zhang2017understanding,carlini2022quantifying}. Second, and this is also expected, we find a clear scaling in the number of repetitions, where more frequently repeated observations exhibit stronger overfitting \citep{carlini2022quantifying,huang2024demystifying}. More surprisingly, we find that the effect of contamination can {\it vanish} as we increase the number of training tokens, up to the point where 12 repetitions of an entire dataset in the training data have no impact on the downstream evaluation {\it on that same dataset}.
+
+Our investigation reveals that the {\bf natural forgetting} dynamics of gradient descent \citep{tirumala2022memorization,jagielski2023measuring} is the reason why increasing the number of tokens alleviates the impact of contamination. Concretely, we show that training on five times Chinchilla \citep{hoffmann2022training} of clean data can cause a model to forget even 144 times repeated training examples (Section \ref{sec forgetting}). 
+Forgetting the bulk of the impact of a training example can occur rapidly, a point that we demonstrate using OLMo-1B \citep{groeneveld2024olmo} (Section \ref{sec olmo}). What is the reason for this rapid forgetting? We show that exposure to novel data is important. Interestingly, models tend to exhibit the strongest overfitting on examples seen repeatedly throughout training, even compared to those seen during the end (Section \ref{sec forgetting}).  
+
+Because running pre-training experiments is expensive, we also ask to what degree forgetting can be explained by the {\bf training dynamics of gradient descent}. We show that the weight decay parameter and learning rate schedule of the AdamW optimizer \citep{adamw} play a key part in forgetting past training examples (Section  \ref{sec adamw}). Concretely, we derive a simple theory of forgetting via cumulative weight decay (Section \ref{sec weight decay theory}) and show that it provides an upper bound on empirical forgetting, which usually occurs faster (Section \ref{weight decay experiments}). The key point is that this approach allows us to gauge the degree of forgetting present in any training run for which the optimization hyperparameters are known. It even allows us to approximate how the final model parameters balance the gradient updates from different stages of training. Overall, our analysis indicates that many LLMs, including OLMo-7B and Llama 3 405B \citep{dubey2024llama}, have forgotten the data seen at the beginning of their training run. 
+Taken together, our {\bf main contribution} is to show that the impact of individual examples in the training data depends on the precise characteristics of the setting. There are settings where the effect can be significant; Chinchilla training is an important example (Section \ref{sec scaling}). However, there are equally realistic settings where individual examples dont't matter - including quite likely the data-intensive training runs of many recent LLMs \citep{team2024gemma}. %
+
+
+
+
+
+\section{Related Work}
+
+\label{sec related work}
+{\bf Data Contamination.} The GPT-3 paper \citep{gpt3paper} uses an n-gram-based approach to differentiate between ``clean'' and ``dirty'' benchmark questions. This approach has since been used in many LLM reports \citep{chowdhery2023palm,llama2paper}, including Llama 3 \citep{dubey2024llama}, where it is estimated that there might be a performance gain of up to 8 and 14 percentage points on PiQA and HellaSwag, respectively. The GPT-4 technical report \citep{gpt4report} remarkably concluded that {\it ``contamination overall has very little effect on the reported results''}. This has since given rise to a literature that aims to {\it detect} \citep{oren2023proving}, {\it mitigate} \citep{li2024latesteval}, and {\it estimate the effect of} \citep{yang2023rethinking,bordt2024colm} data contamination under various assumptions, but crucially without access to the training data. This literature often challenges the conclusion that contamination overall has little effect in GPT-4 \citep{xu2024benchmark}.
+
+{\bf Forgetting.} In machine learning, the term {\it forgetting} is frequently associated with {\it ``catastrophic''} forgetting, where learning new tasks hurt the performance at previously solved tasks \citep{lopez2017gradient}. In the context of LLMs, catastrophic forgetting can occur during fine-tuning \citep{luo2023empirical}  or continual learning \citep{huang-etal-2024-mitigating}. In contrast, this paper studies forgetting as a potential {\it ``natural''} phenomenon of learning \citep{toneva2018empirical}. \citet{tirumala2022memorization} study forgetting in language modeling and find, similar to \citet{toneva2018empirical}, that forgetting can be exponentially slow. In contrast, \citet{jagielski2023measuring} find that models empirically do forget examples over time. In concurrent work, \citet{pagliardini2024ademamix} propose to add a second momentum term to the AdamW optimizer, and show that this slows down the forgetting of past gradients. 
+
+{\bf Data Attribution.} Data attribution methods \citep{pmlr-v70-koh17a, ilyas2022datamodels, park2023trak} aim to identify data points responsible for specific model behaviors. We ask how much a model's benchmark performance is influenced by seeing the example during training, which broadly falls within this field \citep{grosse2023studying, choe2024your}. Importantly, we directly measure the influence of contaminated examples through retraining, avoiding the approximation errors that can occur when using data attribution methods \citep{pmlr-v70-koh17a,ghorbani2019data} for large-scale models \citep{basu2021influence, bae2022if}
+
+
+
+
+\section{Background and Methods}
+
+\label{sec background and method}
+
+This Section gives additional details on the research questions and lays out our experimental setup. %
+
+\tcbset{
+    colframe=gray!50!white,  %
+    colback=gray!10!white,   %
+    coltitle=black,          %
+    fonttitle=\bfseries,     %
+    boxrule=0.8mm,           %
+    arc=2mm,                 %
+    width=\textwidth,        %
+    title={Research question},  %
+}
+
+\begin{tcolorbox} How does the presence of a text in the training data influence the final model's performance {\it on that same text}?
+\end{tcolorbox}
+
+While it is well known that an individual data point can be influential if the training data and model are small \citep{pmlr-v70-koh17a}, we are concerned with the large-data regime where the influence of any individual example may vanish \citep{basu2021influence,bae2022if}. To further clarify this setup, Section \ref{sec background chinchilla} gives a brief overview of recent developments in scaling the training data of LLMs. Section \ref{sec background contamination} details the used benchmarks and explains how we contaminate the training data. Section \ref{sec background near duplicates} discusses the problem of near-duplicate benchmark questions. 
+
+{\bf Models and Training Data.} We train language models of up to 1.6B parameters using the architecture and hyperparameters from the GPT-3 paper \citep{gpt3paper}.c}{llm.c} codebase. The training data is the 100BT split of the FineWeb-Edu dataset \citep{fineweb-edu}.
+\subsection{We consider the regime of n-times Chinchilla} 
+\label{sec background chinchilla}
+
+According to the Chinchilla scaling law, for every doubling of model size, the number of training tokens should also be doubled. The Chinchilla model itself has 70 billion (B) parameters and was trained on 1.4 trillion (T) tokens; suggesting that the number of training tokens should be roughly 20x the number of model parameters \citep{hoffmann2022training}. While the Chinchilla paper was highly influential, modern language models are trained on significantly more tokens \citep{sardana2024beyond}. For example, the OLMo-7B model was trained on 2.46T tokens, 17.5x the amount suggested by Chinchilla \citep{groeneveld2024olmo}. Similarly, the Llama 3 70B model was reportedly trained on 15T tokens, at over 10x Chinchilla \citep{,dubey2024llama,llama3blog}. The same holds for almost all recent LLMs at the 7B parameter scale \citep{team2024gemma}. In this paper, {\it we count the number of tokens a model is trained on as a multiple of its Chinchilla tokens}.
+
+\subsection{We evaluate on a mix of seven different benchmarks}
+\label{sec background contamination}
+
+We evaluate the impact of data contamination using a {\it mix} of seven different benchmarks: ARC-Easy \citep{allenai:arc}, Social-I-QA \citep{social-iaq}, WinoGrande \citep{winogrande}, PiQA \citep{PiQA}, BoolQ \citep{boolq}, MMLU \citep{mmlu}, and HellaSwag \citep{hellaswag}. This means that every evaluation contains questions from all seven benchmarks. To construct the mixed contamination data, we first concatenate the different benchmarks. We then partition the set of all benchmark questions into subsets ranging from 10,000 to 2,000 questions so that each subset contains all benchmarks in equal weight: HellaSwag: 19.58\%, SocialIQA: 8.27\%, PiQA: 19.7\%, MMLU: 21.82\%, BoolQ: 6.48\%, ARC-Easy: 5.92\%, and WinoGrande: 18.16\%.  A holdout set of 10,000 benchmark questions is never added to the training data. The other subsets are added to the training data, repeated either 4, 12, 36, or 144 times.\footnote{In preliminary experiments, we found that these numbers pleasantly cover the range from statistically significant contamination to complete overfitting. We also considered repeating observations a single time, as in \citep{jiang2024investigating}. However, we found this often leads to accuracy differences of about one or two percentage points, just within the margin of our confidence intervals, which is undesirable.} We consider {\it exact} contamination, that is we contaminate the training data with the same texts that the model is later evaluated on. We insert benchmark questions {\it individually} and at {\it random} positions into the training data. Models are evaluated zero-shot via the likelihood assigned to different sentence completions \citep{llmmultiplechoicenormalization}.  For more discussion and details about how contamination is performed, see Supplement \ref{apx contamination discussion} and Supplement \ref{apx contamination}.  
+\subsection{We filter near-duplicate Benchmark Questions}
+\label{sec background near duplicates}
+
+Our method requires that there are no side effects from contaminating the training data with one question on the evaluation of another question. However, upon closer inspection, it turns out that {\it all} the commonly used benchmarks from the literature contain questions that are either near-duplicates or where the context of one question contains the answer to another question (for example, because the same text document was used to create multiple questions). This is illustrated in Figure \ref{fig:near duplicates}, which depicts two near-duplicate questions on HellaSwag and questions from ARC-Easy and MMLU that are cross-benchmark duplicates. To address this problem, we perform extensive filtering, removing duplicate questions where the length-normalized Levenshtein distance falls below a certain threshold \citep{levenshtein1966binary,navarro2001guided}. This is documented in Supplement \ref{apx de-duplication}, where we also describe an experiment to verify that our method is not invalidated by near-duplicate questions.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/Presentation1.pdf}
+    \caption{Language modeling benchmarks frequently contain near-duplicate questions. We perform extensive filtering for duplicates using fuzzy string matching. The figure depicts a near-duplicate from HellaSwag and a cross-benchmark duplicate from ARC-Easy/MMLU.}
+    \label{fig:near duplicates}
+\end{figure}
+
+
+\section{Experimental Results}
+
+\label{sec results}
+
+We now present our main experimental results. We being in Section \ref{sec scaling} by discussing the scaling in model parameters, training tokens, and repetitions in the training data. The following Section \ref{sec forgetting} discusses various experiments on forgetting. The first two sections rely on training small GPT-3 models. Section \ref{sec olmo} complements this with an analysis of OLMo-1B \citep{groeneveld2024olmo}.
+\subsection{Contamination scales with Model, Data, and Repetitions}
+\label{sec scaling}
+
+\begin{figure}[t] 
+    \centering
+    \begin{subfigure}[b]{0.32\textwidth} %
+        \centering
+        \includegraphics[width=\linewidth]{figures/7B_acc_gap.pdf} 
+        \caption{Scaling the Model}
+        \label{fig:scaling model}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth} %
+        \centering
+        \includegraphics[width=\linewidth]{figures/nx_chinchilla_gap.pdf} 
+        \caption{Scaling the Data}
+        \label{fig:scaling data}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth} %
+        \centering
+        \includegraphics[width=\linewidth]{figures/chinchilla_scaling.pdf} 
+        \caption{Chinchilla Scaling Law}
+        \label{fig:chinchilla scaling}
+    \end{subfigure}
+    \vskip 0.5\baselineskip
+    \includegraphics[width=0.95\linewidth]{figures/chinchilla_legend.pdf}
+    \caption{{\bf Benchmark overfitting due to contamination.} {\bf (a)} We train different models on 7B tokens. {\bf (b)} We train 124M parameter models on increasingly many tokens. {\bf (c)} We train models according to the Chinchilla scaling laws. The figure depicts the accuracy difference in percentage points between the holdout (normalized to zero) and the contaminated examples. The results are across a mix of seven different benchmarks, as outlined in Section \ref{sec background contamination}. Different colors indicate different levels of contamination. Mean and bootstrapped 90\% confidence intervals.}
+    \label{fig:scaling main}
+\end{figure}
+We conduct three different experiments to understand how the effect of data contamination scales with the number of model parameters, training tokens, and the number of times a contaminated example is seen. First, we train increasingly large models on the same dataset of 7B tokens. Second, we train 124M parameter models on increasingly many tokens. Third, we train increasingly large models according to the Chinchilla scaling laws \citep{hoffmann2022training}, meaning that the number of training tokens scales linearly with the model parameters. In all experiments, we contaminate the training data {\it uniformly at random} with benchmark questions.
+
+Figure \ref{fig:scaling main} depicts the results of all three experiments. Because we are interested in the performance {\it difference} between the holdout data and the contaminated examples, Figure \ref{fig:scaling main} depicts the {\it accuracy gap} between the holdout and contaminated examples in percentage points. In Figure \ref{fig:scaling model}, we see that the accuracy gap due to contamination is {\it increasing in the number of model parameters}. For a 124M parameter model trained on 7B tokens, the overfitting due to 4 times contamination is 5 percentage points. For a 1.6B parameter model train on the same dataset, it is 20. Next, Figure \ref{fig:scaling data} shows that the accuracy gap is {\it decreasing in the number of training tokens}. For a 124M parameter model trained at 2x Chinchilla, the accuracy gap due to 12 times contamination is 18 percentage points. For a 124M parameter model trained at 15x Chinchilla, the same accuracy gap is within the confidence interval of the holdout. From Figure \ref{fig:scaling main}, we also see that the accuracy gap is {\it increasing in the number of times an example is repeated}. For a 350M parameter model trained on 7B tokens, the accuracy gap is 11, 25, 44, and 51 percentage points for 4, 12, 32, and 144 times repeated contamination, respectively.
+
+ \begin{wrapfigure}{r}{0.55\textwidth} %
+    \centering
+    \captionof{table}{Accuracy of the Chinchilla models.}
+    \label{tab chinchilla accuracies}
+    \footnotesize
+    \begin{tabular}{cccccc}
+        \toprule
+Model & Holdout & 4x & 12x & 32x & 144x \\
+\midrule
+124M & 42.22 & 48.14 & 56.92 & 80.70 & 96.45 \\
+350M & 44.72 & 55.69 & 69.90 & 89.20 & 95.50 \\
+760M & 49.16 & 64.76 & 81.30 & 92.95 & 96.05 \\
+$\,$ 1.6B & 52.06 & 67.61 & 82.32 & 91.85 & 95.40 \\
+        \bottomrule
+    \end{tabular}
+\end{wrapfigure}
+Because the accuracy gap {\it increases} in the number of model parameters and {\it decreases} in the number of tokens, the interesting question is how it behaves if model parameters and tokens are scaled {\it jointly}. A natural starting point is to double the number of training tokens for every doubling of model parameters, as specified by the Chinchilla scaling laws \citep{hoffmann2022training}. Figure \ref{fig:chinchilla scaling} depicts the accuracy gap due to contamination as we train increasingly large Chinchilla-optimal models. While there is no clear monotone pattern, we see that moderate amounts of contamination can lead to significant overfitting. For the 774M parameter model, 4 times repeated contamination leads to an accuracy gap of 15 percentage points, suggesting that {\it under Chinchilla training, a single time of contamination can lead to overfitting of as much as 3 percentage points}.\footnote{To contaminate the training data of a 774M model a single time with 10,000 benchmark questions, we need to insert $\sim$0.5 million tokens into 15.5 billion training tokens, about 0.003\% of the training data.}
+\subsection{Contamination can be completely Forgotten}
+\label{sec forgetting}
+
+\begin{figure}[t] 
+    \centering
+    \begin{subfigure}[b]{0.4\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figures/ce_loss_gap.pdf} 
+        \caption{Forgetting on Novel Data}
+        \label{fig:forgetting ce loss}
+    \end{subfigure}
+    \hfill    
+    \begin{subfigure}[b]{0.29\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figures/124M_15x_acc.pdf} 
+        \caption{After 3 Epochs}
+        \label{fig:forgetting at 3}
+    \end{subfigure}
+    \hfill    \begin{subfigure}[b]{0.29\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figures/124M_15x_final_acc.pdf} 
+        \caption{After 7 Epochs}
+        \label{fig:forgetting at 5}
+    \end{subfigure}
+    \vskip\baselineskip %
+    \begin{subfigure}[b]{0.4\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figures/124M_100M_ablation.pdf} 
+        \caption{Forgetting on 100M tokens}
+        \label{fig:fig 100M ablation}
+    \end{subfigure}
+    \hfill    
+    \begin{subfigure}[b]{0.29\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figures/when_in_training_124_15x.pdf} 
+        \caption{124M 15x Chinchilla}
+        \label{fig:forgetting 124M 15x}
+    \end{subfigure}
+    \hfill    \begin{subfigure}[b]{0.29\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figures/when_in_training_774_1x.pdf} 
+        \caption{774M 1x Chinchilla}
+        \label{fig:forgetting 774 1x}
+    \end{subfigure}
+    \vskip 0.5\baselineskip
+    \includegraphics[width=0.95\linewidth]{figures/chinchilla_legend.pdf}
+    \caption{{\bf The natural forgetting dynamic of neural network training.} \textbf{(a)} The development of the cross-entropy loss difference between contaminated and holdout benchmark questions over the course of training. Contamination occurs between the first and second Chinchilla (1 and 2 on the x-axis). \textbf{(b)} Accuracy gaps after training for 3 Chinchilla. \textbf{(c)} Accuracy gaps after training for 7 Chinchilla. \textbf{(d)} Same as (a). \textbf{(e)+(f)} The accuracy gap depends on the average position of an example in the training data. Mean and bootstrapped 90\% confidence intervals.}
+    \label{fig:forgetting}
+\end{figure}
+In the previous Section \ref{sec scaling}, we saw that the accuracy gap due to contamination decreases in the number of tokens up to the point where even 12 repetitions of a benchmark question in the training data can become insignificant. In this Section, we identify the natural forgetting dynamic of neural network training as the reason for this effect. We discuss how quickly forgetting occurs, whether examples are completely forgotten, and what kind of repetition makes a model remember. %
+To study the effect of forgetting, we train a 124M parameter model for 15 epochs. Instead of contaminating uniformly over the course of training like in the previous Section \ref{sec scaling}, we perform the contamination between the first and second Chinchilla.\footnote{Note that the model is already fairly trained after the first Chinchilla, meaning that the contamination is not very early during training. This is important because there is evidence that observations are more quickly forgotten if the model has not yet learned representations \citep{jagielski2023measuring,retentive-or-forgetfull,huang2024demystifying}. This is {\it not} the setting we are studying here.} Figure \ref{fig:forgetting ce loss} depicts the development of the {\it difference} in cross-entropy loss between contaminated and clean benchmark questions over the course of training. We see a strong peak after 2 Chinchilla, which is expected and shows the effect of contamination. What is interesting to us is the rate at which the cross-entropy loss difference decays as we continue training. After training for 1 additional Chinchilla (2.5B tokens for the 124M parameter model), it has already decayed significantly. However, the difference is still visible in Figure \ref{fig:forgetting ce loss}. Figure \ref{fig:forgetting at 3} depicts the corresponding accuracy gaps at this point, and we see that all contamination levels still lead to overfitting. As we continue training, the cross-entropy loss difference between contaminated and holdout questions further narrows. From Figure \ref{fig:forgetting at 5}, which depicts the accuracy gaps after forgetting for a total of 5 Chinchilla, we see that the effect of contamination is eventually {\it completely forgotten} in the sense that there is no longer any accuracy difference between contamination and holdout benchmark questions.
+
+The result that contamination can be completely forgotten is in contrast to some previous work on forgetting  which have found that forgetting approaches a stable baseline \citet[Figure 10]{tirumala2022memorization}, or that certain examples are never forgotten \citep{toneva2018empirical}. To understand this difference, observe that many previous works on forgetting have not trained on a continuous stream of data. Instead, they have trained on the same training set for multiple epochs. Consequently, we modify our forgetting experiment to repeatedly train on the same 100M tokens after the second epoch. The result of this experiment is depicted in Figure \ref{fig:fig 100M ablation} and should be compared to Figure \ref{fig:forgetting ce loss}. Interestingly, this simple modification causes the effect of forgetting to stabilize at a level strictly larger than zero. We conclude that {\it exposure to novel data is important for forgetting}, an observation similar to \citet{jagielski2023measuring}. 
+
+To further understand the impact of forgetting, we now ask whether examples seen late during training influence model behavior more strongly than examples seen early during training. To study this question, we average all the different {\it uniform} contamination levels from the models in the previous Section \ref{sec scaling} (to gain statistical power) and consider the amount of overfitting depending on whether a question is seen, on average, in the beginning, middle, or end of training. The result of this experiment is depicted in Figure \ref{fig:forgetting 124M 15x} and Figure \ref{fig:forgetting 774 1x}. As expected under forgetting, we see that benchmark questions seen early during training exhibit the smallest amount of overfitting. Interestingly and somewhat unexpectedly, questions that are neither clustered towards the beginning nor the end but as uniformly distributed throughout training as possible exhibit the strongest overfitting, suggesting that this spaced form of repetition helps the model remember (the middle peak is the most pronounced both in Figure \ref{fig:forgetting 124M 15x} and Figure \ref{fig:forgetting 774 1x}).
+
+
+
+\subsection{Contamination and rapid forgetting in OLMo-1B}
+\label{sec olmo}
+
+\begin{figure}[t] 
+    \centering
+    \begin{subfigure}[b]{0.24\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figures/olmo_hellaswag.pdf} 
+        \caption{HellaSwag}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.24\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figures/olmo_winogrande.pdf} 
+        \caption{WinoGrande}
+    \end{subfigure}
+    \hfill    \begin{subfigure}[b]{0.24\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figures/olmo_arc_easy.pdf} 
+        \caption{ARC-Easy}
+    \end{subfigure}
+    \hfill    \begin{subfigure}[b]{0.24\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figures/olmo_PiQA.pdf} 
+        \caption{PiQA}
+    \end{subfigure}
+    \caption{{\bf Contamination and forgetting in OLMo-1B.} We contaminate the OLMo-1B checkpoint at gradient step 369,000 four times with different benchmarks. This causes an average accuracy increase of 15 percentage points. We then continue pre-training for 1\% of the remaining training time, leading to a reduction of 96\% of the accuracy increase due to contamination. In this Figure, different colors simply correspond to different benchmarks, and the grey line depicts the clean accuracy without contamination. Mean and bootstrapped 90\% confidence intervals.}
+    \label{fig:olmo}
+\end{figure}
+
+In the previous sections, we trained small GPT-3 models from scratch. In this Section, we complement this analysis by pre-training from an intermediate OLMo-1B checkpoint \citep{groeneveld2024olmo}. Similar to the analysis in Section \ref{sec forgetting}, we insert the benchmark data at a specific point into the training data and then measure the subsequent forgetting. Unlike in the previous Section, we now insert the entire benchmark data -- we already have a ``clean'' baseline from the original OLMo-1B training run. We insert each benchmark question four times and contaminate with four different benchmarks: HellaSwag \citep{hellaswag}, WinoGrande \citealp{winogrande}, ARC-Easy \citep{allenai:arc}, and PiQA \citep{PiQA}.
+Figure \ref{fig:olmo} depicts the result of the experiment. The effect of contamination is visible from the five leftmost points of every plot. The leftmost point corresponds to the uncontaminated model, and the next four points each depict the effect of one time contamination. Again, we see that {\it the immediate effect of contamination is significant}, leading to an average accuracy increase of 15 percentage points across the different benchmarks. At the same time, we also see that {\it the effect of contamination decays considerably as we continue training}. To contextualize this result, note that Figure \ref{fig:olmo} depicts less than 2000 gradient steps. The pre-training stage of OLMo-1B model consists of 739,328 gradient steps. This means that Figure \ref{fig:olmo} depicts less than 1\% of the total forgetting until pre-training is done.  
+
+
+\section{What is the role of weight decay in forgetting?}
+
+\label{sec adamw}
+\begin{figure}[t] 
+    \centering
+    \begin{subfigure}[b]{0.32\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figures/124M_15x_wd.pdf} 
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figures/OLMo_7B_wd.pdf} 
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figures/LLama3_405B_wd.pdf} 
+    \end{subfigure}
+    \begin{subfigure}[b]{0.32\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figures/124M_15x_model_composition.pdf} 
+        \caption{124M 15x Chinchilla}
+        \label{fig:124M_10x_wd}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figures/OLMo_7B_model_composition.pdf} 
+        \caption{OLMo 7B}
+        \label{fig:olmo7B_wd}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figures/LLama3_405B_model_composition.pdf} 
+        \caption{Llama 3 405B}
+        \label{fig:405_wd}
+    \end{subfigure}
+    \vskip 0.5\baselineskip
+    \includegraphics[width=0.9\textwidth]{figures/OLMo_7B_wd_legend.pdf}
+    \caption{{\bf Theoretical estimates of forgetting and approximate model weight composition at the end of training.} {\it Top Row:} The cumulative weight decay $w_{t_1}^{t_2}$ as defined in equation \eqref{adamw_decomposition} for different training runs. The figures depict the decay of the gradient updates for every decile of the training run, indicated in different colors. {\it Bottom Row:} The approximate composition of the final model weights in terms of the gradient updates from different deciles of the training run. The deciles are indicated in colors depicted in the legend below the plot.}
+    \label{fig:wd}
+\end{figure}
+
+In the previous Section \ref{sec results}, we have seen that forgetting is an important empirical property of LLM training. In this Section, we show that the weight decay parameter and learning rate schedule of the AdamW optimizer play a key part in forgetting past training examples. This offers a novel perspective on the interplay between these two parameters, usually seen in terms of generalization and training stability \citep{van2017l2,zhang2018three,lewkowycz2020training,andriushchenko2023we}.
+
+\subsection{Weight Decay as a Mechanism for Forgetting Training Examples}
+\label{sec weight decay theory}
+
+Consider the parameter update of AdamW at gradient step $t\geq 1$. It consists of two decoupled updates \citep{paszke2019pytorch,adamw_pytorch}: A weight decay update given by 
+\begin{equation}\label{eq adamw wd}
+   \hat \theta_t = \theta_{t-1} - \gamma \lambda_t \theta_{t-1},
+\end{equation}
+and a gradient update given by
+\begin{equation}\label{eq adamw gradient}
+    \theta_t = \hat \theta_t - \lambda_i\, \hat{m_t} / (\sqrt{\hat{v_t}+\epsilon}).
+\end{equation}
+Here, $\theta_t$ are the model parameters, $\lambda_t$ is the learning rate, $\gamma$ is the weight decay parameter, and $\hat{m_t}$ and $\hat{v_t}$ are first- and second-order moment estimates of the gradient. Denoting the model weights at initialization by $\theta_0$, and the adaptive gradient by $\hat g_t = \hat{m_t} / (\sqrt{\hat{v_t}+\epsilon})$, we can iterate \eqref{eq adamw wd} and \eqref{eq adamw gradient} to obtain
+\begin{equation} \label{adamw_decomposition}
+    \theta_ T =w_0^T\,\theta_0 + \sum_{t=1}^T w_t^T\,\lambda_t\,\hat g_t \quad\quad\text{where}\quad w_{t_1}^{t_2}=\prod_{i=t_1}^{t_2} (1-\lambda_i\gamma).
+\end{equation}
+Here, the weights $w_{t_1}^{t_2}$ account for the {\it cumulative weight decay} between gradient step $t_1$ and $t_2$. Intuitively, the model weights after $t$ gradient steps are a weighted average of the initial model weights and all the adaptive gradient updates up to time step $t$. This is not specific to the AdamW optimizer and applies to every optimizer with weight decay. Analyzing equation \eqref{adamw_decomposition} reveals a critical factor influencing forgetting: The exponential decay of the $w^{t_2}_{t_1}$ with respect to increasing gap $t_2 - t_1$ in the optimization steps. In other words, the longer an update occurs in the past (i.e., the larger $t_2 - t_1$), the more the contribution of the update $\hat{g}_{t_1}$ is being scaled down due to the exponential decay of weights $w^{t_2}_{t_1}$. We can describe the evolution of these weights as the function of the time $T = t_2 - t_1$.
+
+\newtheorem{prop}{Proposition}
+\newcommand{\X}{\mathbf{x}}
+\newcommand{\Xclean}{\mathbf{x}^\text{clean}}
+\newcommand{\Xcont}{\mathbf{x}^\text{cont}}
+\newcommand{\grad}{{\nabla_{\theta}}}
+\newcommand{\Y}{\mathbf{y}}
+\newcommand{\Z}{\mathbf{z}}
+\newcommand{\R}{\mathbb{R}}
+
+\begin{prop}(The Decay of Past Gradients)
+    The number of optimization steps $T = t_2 - t_1$ that are required to make the contribution of a model update at time $t_1$ small, that is  $w^{t_2}_{t_1} \leq \epsilon$ for some small $\epsilon \in \R^+$, scales as
+    $T \gtrsim \frac{log(1/\epsilon)}{\gamma \lambda_\text{avg}}$, where $\lambda_\text{avg} = \frac{1}{T} \sum_{t={t_1}}^{t_2} \lambda_t$ is the average learning rate of the optimizer between $t_1$ and $t_2$.
+    \label{prop:weightdecay}
+\end{prop}
+
+We present a proof in the Supplement \ref{apx math}. If $w_{t_2}^{t_1} \leq \epsilon$ for some sufficiently small $\epsilon$, the term $w_{t_2}^{t_1} \lambda_{t_1} \hat g_{t_1}$ vanishes from the sum in \eqref{adamw_decomposition}. Intuitively, this is the same as saying that the gradient update at time step $t_1$ has been forgotten. 
+
+{\bf We now analyze the weight-decay mechanism of forgetting in different LLM training runs.} Of course, the decay of past gradients described in Proposition 1 is only one effect that contributes to forgetting. Indeed, there is also the potential for different gradient updates in the sum \eqref{adamw_decomposition} to cancel each other. However, because a term decayed to zero is definitively forgotten, we can consider the cumulative weight decay as an {\it upper bound} on forgetting. Figure \ref{fig:wd} depicts the evolution of the forgetting term $w_{t_1}^{t_2}$   for the 124M parameter model from Section \ref{sec forgetting}, OLMo 7B, and Llama 3 405B (where we assume the model trained with a weight decay of 0.1). For the training data at each decline of the training run, Figure \ref{fig:wd} depicts {\it forgetting curves} that indicate how much the corresponding gradients decay as we continue training. For the 124M model depicted in Figure \ref{fig:124M_10x_wd}, even the initialization is not completely decayed towards the end (the blue curve is still strictly larger than zero). In contrast, for OLMo-7B, the gradients of the first 40\% of the training data decay to zero until the end of training, meaning that this data is forgotten (Figure \ref{fig:olmo7B_wd}). Llama 3 405B also experiences significant decay of the early gradients (Figure \ref{fig:405_wd}).
+
+ {\bf The interplay between the weight decay parameter and learning rate schedule of AdamW} creates an interesting dynamic. Lower learning rates towards the end of training (1) slow down the forgetting of past training examples and (2) decrease the impact of later training examples on the final model weights. To better understand this dynamic, we plot the sum of the terms $\lambda_{t_1} w_{t_1}^{t_2}$ for each decile of the training run, normalized by the same sum over the entire training run. This is depicted in the bottom row of Figure \ref{fig:wd} and can be thought of as a simple approximation of how the final model weights are composed by the gradients of different training deciles. Interestingly, this approximation suggests that the Llama 3 405B training run, where supposedly a lot of expertise has gone into the choice of the hyperparameters, results in a model where the approximate influence of different training steps is symmetrically distributed around the middle of training (Figure \ref{fig:405_wd}). In contrast, the OLMo-7B training could seemingly benefit from further decaying the learning rate to give more weight to early versus late gradients.  
+
+While our analysis in this Section considers the mechanistic effect of individually decaying gradient updates, it does not model any interactions between different gradient updates. For example, if the weight updates at a later time step $t_2$ were aligned with past updates at $t_1$, then the model might not forget the information even if the effect of past updates vanishes from the sum. However, such complex interactions are avoided if the model updates from contaminated samples are orthogonal. Formalizing this observation leads to a more rigorous version of Proposition 1, presented in Supplement \ref{apx math}. The argument is that under suitable gradient orthogonality conditions, the decay of past gradients can guarantee forgetting. 
+\subsection{Practical forgetting occurs faster than what the theory predicts}
+\label{weight decay experiments}
+
+\begin{figure}[t] 
+    \centering
+    \begin{subfigure}[b]{0.245\textwidth} 
+        \centering
+                                                \includegraphics[width=\linewidth]{figures/32x_decay.pdf} 
+        \caption{Empirical}
+        \label{fig:empirical}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.23\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figures/32x_decay_factors.pdf} 
+        \caption{Theory}
+        \label{fig:theory}
+    \end{subfigure}
+    \hfill    \begin{subfigure}[b]{0.25\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figures/124M_15x_decay.pdf} 
+        \caption{Empirical \& Theory}
+        \label{fig:emp_and_theory}
+    \end{subfigure}
+    \hfill    \begin{subfigure}[b]{0.235\textwidth} 
+        \centering
+        \includegraphics[width=\linewidth]{figures/olmo_hellaswag_wd.pdf} 
+        \caption{Empirical \& Theory}
+        \label{fig:empirical_olmo}
+    \end{subfigure}
+    \caption{{\bf The theoretical estimates provide an upper bound on empirical forgetting, which can occur much faster.} {\bf (a)} Empirical forgetting for three different weight decay parameters. {\bf (b)} The corresponding cumulative weight decay. {\bf (c)} Empirical forgetting and theoretical estimate for the default weight decay of 0.1. The y-axis of the cumulative weight decay $w_{t_1}^{t_2}$ is calibrated to start at the peak of the empirically observed overfitting. {\bf(d)} Empirical forgetting and theoretical estimate for OLMo-1B (HellaSwag).}
+    \label{fig:empirical_forgetting}
+\end{figure}
+
+In the previous Section \ref{sec weight decay theory}, we have derived a simple theory of forgetting via cumulative weight decay. We now investigate how the theoretical estimates relate to the empirically observed forgetting. 
+
+The main parameter that controls the theoretical forgetting curves is the weight decay parameter. Therefore, we ask how forgetting changes empirically when we change the weight decay. Figure \ref{fig:empirical} depicts the result of repeating the forgetting experiment from Section \ref{sec forgetting} with three different choices for the weight decay parameter. From Figure \ref{fig:empirical}, we see that the weight decay parameter controls the impact of contamination at all time steps, where a larger weight decay parameter leads to more forgetting and a smaller weight decay parameter to less forgetting. This is consistent with the theoretical predictions depicted in Figure \ref{fig:theory}, meaning there is a {\it qualitative alignment between the empirical results and our theoretical predictions}.
+
+To better understand the quantitative relation between empirical forgetting and the theoretical estimates, we ask how the empirically forgotten fraction (of cross-entropy loss or accuracy) relates to the cumulative weight decay. Figure \ref{fig:emp_and_theory} depicts the empirical decay and corresponding theoretical prediction for the model from Section \ref{sec forgetting}. We see that the theoretical estimate is somewhat pessimistic and that {\it forgetting occurs faster than what is predicted by the theory}. Figure \ref{fig:empirical_olmo} is similar to Figure \ref{fig:emp_and_theory}, except that we consider the OLMo-1B forgetting experiment from Section \ref{sec olmo}. Figure \ref{fig:empirical_olmo} depicts a case where {\it forgetting occurs much faster} than what is predicted by the theory. Interestingly, we also see that the empirical rate of forgetting, at least in this experiment, is not smaller for the larger model. 
+
+
+
+\section{Discussion}
+
+\label{sec discussion}
+
+This work presents different experiments on data contamination and forgetting. We have seen that the impact of contamination can vanish as the size of the training data increases -- an aspect that has largely been overlooked in the literature \citep{yang2023rethinking,oren2023proving,jiang2024investigating}. We have also shown that the hyperparameters of AdamW play an important part in forgetting -- an insight that might inform the parametrization of future training runs. Of course, it would be interesting to study contamination and forgetting on a larger scale. Nevertheless, we have shown that the effects of contamination can vanish {\it even though} the number of steps we could train the models for was limited.  
+
+We have studied data contamination with a focus on the leakage of benchmark questions into the training data. This means that our work might be more informative about the topic than other works that study contamination in different contexts. At the same time,  one has to be careful when extrapolating our results, especially to a privacy setup \citep{carlini2019secret,jagielski2023measuring}. This is because empirical forgetting might behave differently for random strings or otherwise uniquely identifiable information \citep{carlini2021extracting}.   
+
+
+
+The {\it ``contamination problem''} as studied in this paper has interesting connections to many areas of machine learning, including privacy  \citep{graves2021amnesiac,jagielski2023measuring}, data attribution \citep{kirchenbauer2024lmd3}, and generalization \citep{bousquet2002stability,hardt2016train,mania2019model}. The connection to data attribution is especially relevant in light of our results. This is because we demonstrate cases where the presence or absence of a datapoint in the training data is irrelevant for the model behavior {\it on that same datapoint}, meaning it does not make sense to attribute model behavior to individual datapoints in this regime.
+
+
+
+
+
+
+
+

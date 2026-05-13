@@ -1,0 +1,374 @@
+\title{Discovering Minimal Reinforcement Learning Environments}
+
+\begin{abstract}
+Reinforcement learning (RL) agents are commonly trained and evaluated in the same environment. In contrast, humans often train in a specialized environment before being evaluated, such as studying a book before taking an exam. The potential of such specialized training environments is still vastly underexplored, despite their capacity to dramatically speed up training.
+
+The framework of \textit{synthetic environments} takes a first step in this direction by meta-learning neural network-based Markov decision processes (MDPs). The initial approach was limited to toy problems and produced environments that did not transfer to unseen RL algorithms. We extend this approach in three ways: 
+Firstly, we modify the meta-learning algorithm to discover environments invariant towards hyperparameter configurations and learning algorithms. Secondly, by leveraging hardware parallelism and introducing a curriculum on an agent's evaluation episode horizon, we can achieve competitive results on several challenging continuous control problems. Thirdly, we surprisingly find that contextual bandits enable training RL agents that transfer well to their evaluation environment, even if it is a complex MDP. Hence, we set up our experiments to train \textit{synthetic contextual bandits}, which perform on par with synthetic MDPs, yield additional insights into the evaluation environment, and can speed up downstream applications.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+
+\suppressfloats[t]
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{figures/conceptual_4.png}
+    \caption{
+    \textbf{(1)} Training process for synthetic contextual bandits. 
+    Firstly, an agent is trained in an SCB (blue), observing only an initial state and reward in each episode. 
+    After training, the agent is frozen and transferred to an evaluation environment. 
+    The achieved episodic return is the training signal to update the SCB (red). 
+    \textbf{(2)} Aggregated training results for challenging Brax environments. Training in the SCB yields policies that are competitive with EE experts, sometimes even outperforming them. The x-axis shows expert normalized performance as $(R - R_\text{random}) / (R_\text{expert} - R_\text{random})$, where $R_\text{random}$ and $R_\text{expert}$ are the episodic returns achieved in the EE by an expert and a random policy, respectively.
+    \textbf{(3)} Training curves for EE versus SCBs, saving orders of magnitude of environment steps. A complete visualization is given in figure~\ref{fig:training_one_row}.
+    \textbf{(4)} Visualization of observation feature importances for Pendulum-v1. For details refer to section~\ref{sec:results-interpret}.
+    }
+    \label{fig:conceptual}
+\end{figure}
+
+Reinforcement learning (RL) agents are commonly trained and evaluated in precisely the same environment. It is well known that this approach has several significant disadvantages: RL agents are brittle to minor changes in the environment dynamics, hyperparameter choices, or even the concrete implementation of an algorithm \citep{henderson2018deep,engstrom2019implementation, cobbe2020leveraging,agarwal2021deep}.
+Most recent research in RL has focused on improving RL algorithms to alleviate these challenges. But what about the RL environment or the underlying Markov decision process (MDP) itself? Unlike RL agents, professional athletes train under vastly different conditions than their final competition settings. For example, long-distance runners do not repeatedly run the target distance, but train shorter interval runs, progressively increase their pace, and occasionally mix in long runs. 
+Such specialized training environments have the potential to significantly speed up RL pipelines:
+They can be optimized to train agents rapidly, requiring several orders of magnitude fewer environment steps.  %  (see figure~\ref{fig:brax}).
+Additionally, when such environment proxies are parameterized by neural networks, modern hardware accelerators enable rapid simulation of the environment.
+Thus, they can be used in a myriad of applications including pretraining, neural architecture search, and downstream meta-learning.  %  (see section~\ref{sec:dpo}).
+\\
+Here, we scale the framework of \textit{synthetic environments} \cite[SEs,][]{ferreira2022learning} to explore the usefulness of synthetic training data for RL agent training.
+SEs are RL environments parameterized by neural networks and optimized for transfer performance:
+After training an agent in an SE, the agent achieves a high episodic return in a fixed evaluation environment (EE).
+A visualization of the optimization algorithm is shown in figure~\ref{fig:conceptual} (1).
+The initial approach parameterizes the SE using a single network to represent the transition, reward, and termination functions.  % , mapping $s_{t+1}, r_t, d_t = f_\theta(s_t, a_t)$.
+Combined with the initial state distribution of the EE, the SE becomes a full MDP.
+During our experiments, we found that extending the initial approach by additionally parameterizing the initial state distribution leads to synthetic MDPs that terminate most episodes after a single time step.  %  (see section~\ref{sec:discovering_scbs}).
+We propose that this is not an artifact of meta-learning, but a discovered property that is beneficial when training agents.
+Therefore, we purposefully constrain our environment parameterization towards synthetic contextual bandits (SCBs).
+SCBs perform competitively with synthetic MDPs, but have several practical benefits including much smaller models and a high degree of interpretability.
+We make the following contributions:
+
+\begin{itemize}
+    \item We give analytical and empirical evidence that it is possible to transform MDPs into CBs.
+    In other words, we show that we can obtain a policy that performs well in an MDP by training it in a CB.
+    We demonstrate that SCBs arise naturally when parameterizing fully synthetic MDPs (section~\ref{sec:discovering_scbs}).
+    \item We show that our meta-learning algorithm discovers CBs invariant towards learning algorithms and hyperparameters, and even generalize towards out-of-distribution agents and training algorithms. Furthermore, we are the first to show that it is possible to discover synthetic proxies for challenging control environments ((2) and (3) in figure~\ref{fig:conceptual}, and section~\ref{sec:metalearning_scbs}).
+    \item We demonstrate how the synthetic CBs can be analyzed to gain insights into their evaluation environment, including a measure of feature importance ((4) in figure~\ref{fig:conceptual}, and section~\ref{sec:results-interpret}).
+    \item We show how SCBs can be integrated into downstream meta-learning applications, such as Learned Policy Optimization \citep{lu2022discovered}, speeding them up significantly (section~\ref{sec:dpo}).
+    \item We implement several common RL algorithms in a way that supports GPU parallelism, which allows us to run experiments in a fraction of wall clock time compared to a multiprocessing-based approach.
+
+\end{itemize}
+
+
+
+\section{Background}
+
+\subsection{Contextual Bandits are a Special Case of Markov Decision Processes}
+\label{sec:cbs_and_mdps}
+The most widely used formalism for RL environments is the \textit{Markov decision process} (MDP), defined as a tuple $\langle S, A, P, R, \eta_0, d\rangle$. 
+At the beginning of each episode, a state $s_0 \in S$ is sampled from the initial state distribution $s_0 \sim \eta_0$. 
+At each succeeding time step $t$, the agent samples an action $a_t \in A$ from its policy $a \sim \pi(.|s_t)$. 
+The environment then generates the next state as $s_{t+1} \sim P(.|s_t, a_t)$ and issues a reward $r_t \sim R(.|s_t, a_t)$.
+As soon as the Boolean value of the termination function $d(s_t)$ indicates it, the episode is terminated.
+
+The basic reinforcement learning problem is to find a policy $\pi^*$ that maximizes the expected return $\E_\pi[\sum_{t=0}^\infty\gamma^t r_t]$, where $0 < \gamma < 1$ is called discount factor.
+Alternatively, this can be stated in terms of the Q-function as
+\begin{align}
+\pi^* &= \argmax_\pi \underset{\substack{s_0 \sim \eta_0 \\ a_0 \sim \pi(. | s_0)}}{\E}[Q^\pi(s_0, a_0)] \label{eq:pi_star}, \quad \text{where} \quad
+Q^\pi(s, a) = \E_\pi\left[\sum_{t=0}^\infty \gamma^t r_t \middle| s_0 = s, a_0 = a\right]. 
+\end{align}
+Note that any optimal policy chooses actions greedily with respect to its Q-function, meaning $\pi^*(a | s) = 1 \text{ iff } a = \argmax_{\tilde a} Q^{\pi^*}(s, {\tilde a})$.
+
+This work focuses on meta-learning a special case of MDPs, namely a \textit{contextual bandit} (CB). 
+In a CB, the transition function $P$ is deterministic, and always points towards a state $s_d$ with $d(s_d) = \text{true}$.
+From this constraint, it follows immediately that the Q-function of \textit{any policy} is equal to the expected immediate reward:
+\begin{equation}
+Q^\pi(s, a) = \E_\pi\left[\sum_{t=0}^\infty \gamma^t r_t \middle| s_0 = s, a_0 = a\right] = \E_\pi[\gamma^0 r_0 | s_0 = s, a_0 = a] = \E[R(. | s, a)]. \label{eq:cb_q_reward}
+\end{equation}
+Therefore in any contextual bandit, the optimal policy as defined in equation~\eqref{eq:pi_star} greedily maximizes the immediate reward, i.e. 
+\[
+\pi^*(a | s) = 1 \text{ iff } a = \argmax_{\tilde a} \E[R(.|s, {\tilde a})].
+\]
+
+\subsection{Meta-training Synthetic Environment and Parameterization}
+\begin{algorithm}[h]
+\caption{Bi-level optimization algorithm for meta-learning SEs}
+\begin{algorithmic}
+\Require number of generations $G$, population size $N$
+\State Initialize population of SCBs via random neural network initialization
+\For{$g = 1, \dots, G$} \Comment{Outer loop}
+\For{$i = 1, \dots, N$} \Comment{Inner loop}
+\State Train RL agent $A_i$ in $\text{SCB}_i$
+\State Evaluate fitness of $A_i$ as episodic return in evaluation environment
+\EndFor
+\State Update population using meta-optimizer and performances of the agents $A_i$
+\EndFor
+\end{algorithmic}
+\label{alg:meta_learning_ses}
+\end{algorithm}
+
+\citet{ferreira2022learning} introduce synthetic environments as RL environments parameterized by a neural network.
+They parameterize parts of an MDP, namely the transition, reward, and termination function, computed as $s_{t+1}, r_t, d_t = f_\theta(s_t, a_t)$, where $f_\theta$ refers to the forward pass of a neural network with parameters $\theta$.
+The resulting networks are then optimized using a bi-level optimization scheme consisting of two nested loops (see alg.~\ref{alg:meta_learning_ses}).
+In the \textit{inner loop}, an RL agent is trained in a synthetic environment.
+After training it is frozen, and its fitness, the episodic return in an evaluation environment, is calculated.
+At each generation (iteration) of the \textit{outer loop}, the inner loop is executed on a population (batch) of SEs.
+Afterward, the calculated fitness scores are used to generate the next population, such that the expected return is increased.
+
+
+
+
+\section{Methods: Improving the Discovery of Synthetic Environments by Sampling Inner Loop Algorithms \& Introducing an Outer Loop Curriculum}
+
+\label{sec:methods}
+\textbf{Meta-learning for generalization by sampling algorithms.}
+The meta-learned CBs should not be specific to certain RL algorithms. 
+Instead, it should be possible for any RL algorithm to train a good policy in the SCB, using a wide range of hyperparameters (HPs).
+To avoid overfitting to specific algorithms while meta-training, we extend the original optimization algorithm by sampling inner loop tasks, each of which is represented by a random algorithm/HP combination.
+We use PPO, SAC, DQN and DDQN \citep{schulman2017proximal,christodoulou2019soft,Mnih2015,vanhasselt2015deep} for discrete, and PPO, SAC, DDPG and TD3 \citep{schulman2017proximal,haarnoja2018soft,lillicrap2015continuous,fujimoto2018addressing} for continuous action spaces.
+\textbf{Scaling to locomotion environments using an outer loop curriculum.}
+Many continuous control problems in Brax \citep{freeman2021brax}, like hopper or walker2d, require learning balance and locomotion, and are truncated after 1000 steps.
+When evaluating SCB-trained agents for the full 1000 steps, SCBs quickly converge to balancing without forward movement. 
+To address this, we employ a curriculum on fitness evaluation rollout length: 
+We start meta-training with short episodes and gradually increase their length, shifting focus towards locomotion early in meta-training.
+
+\textbf{Leveraging automatic vectorization.
+This allows for hardware-parallel training using different values of hyperparameters that don't alter the memory layout or sequence of executed operations.
+While this does not include model architecture or the number of training steps, we find that the diversity in training algorithms allows for sufficient generalization (section~\ref{sec:results-generalization}).
+
+
+\section{Results: Synthetic CBs are General \& Scalable MDP Proxies}
+
+We first demonstrate that contextual bandits arise naturally from parameterizing fully synthetic MDPs (section~\ref{sec:discovering_scbs}).
+Subsequently, we show that meta-learned synthetic contextual bandits generalize out-of-distribution and scale towards challenging control environments (section~\ref{sec:metalearning_scbs}).
+
+\subsection{Contextual Bandits as a Discovered Property of Synthetic Environments}
+\label{sec:discovering_scbs}
+\begin{figure}
+    \centering
+    \hspace{0.015\textwidth}
+    \includegraphics[width=0.38\textwidth]{figures/synthetic_episode_lengths_henning.pdf}
+    \hspace{0.06\textwidth}
+    \includegraphics[width=0.42\textwidth]{figures/max_steps_scb_norm.pdf}
+    \hspace{0.015\textwidth}
+    \caption{CBs are a discovered property of synthetic environments. \textbf{Left:} Fraction of episode lengths in a synthetic MDP. In most environments, more than 80\% of episodes are terminated after a single time step. Episodes were generated using 50 episodes of agents trained with each algorithm. \textbf{Right:} Normalized performance of synthetic MDPs with decreasing maximum episode length. ``max'' refers to the maximum episode of the evaluation environment. Shown are the IQM scores and 95\% confidence intervals of 20 training runs, aggregated over all algorithms (see section~\ref{sec:methods}). Performance is normalized as $(R - R_\text{SCB}) / (R - R_\text{random})$ for each algorithm individually, where $R_\text{SCB}$ is the return in the EE after training in the SCB, and $R_\text{random}$ is the return of a random policy.}
+    \label{fig:episode_lengths}
+\end{figure}
+
+We begin our experiments by extending the setup of \citet{ferreira2022learning} with a parameterized initial state distribution of the form $s_0 = f_\phi(z)$, where $z \in \mathbb{R}^N$ is a latent variable sampled from a diagonal Gaussian distribution.
+After training these fully synthetic MDPs, we found that they often terminate episodes after a single time step (see Figure~\ref{fig:episode_lengths}, left).
+We interpret this as a \textit{discovered property} of SEs, and constrain our SEs to a single step, making them contextual bandits.
+Surprisingly, we find that this has next to no negative impact on the performance of the synthetic environments, sometimes even being beneficial (see Figure~\ref{fig:episode_lengths}, right).
+The usage of CBs has several practical advantages:
+\begin{enumerate}
+    \item The number of parameters is significantly lower.
+    The transition function takes $\mathcal{O}(\dim(S)^2)$ parameters, while the reward function only takes $\mathcal{O}(\dim(S))$ when parameterizing with fully connected networks, where $S$ is the state space.
+    \item It avoids instabilities related to the recurrent application of the transition function. 
+
+    \item It significantly simplifies the meta-learning problem for sparse reward environments.
+    We hypothesize that this is because critical states can be shown to the agent immediately, instead of having to be reached via multiple (meta-learned) transitions. 
+    \item The synthetic reward function is well-interpretable since the episodic return is equal to the immediate reward (eq.~\eqref{eq:cb_q_reward}). Neural parameterization allows differentiation and the application of interpretability methods.
+    We present two ways to interpret the CBs in section~\ref{sec:results-interpret}.
+\end{enumerate}
+
+Intuition suggests that being more general, MDPs have a richer class of solutions (i.e. optimal policies) compared to CBs.
+Perhaps surprisingly, this is not the case:
+\begin{restatable}{lemma}{cb}
+\label{lemma}
+Given any Markov decision process $M$, there exists a contextual bandit $B$, such that every policy $\pi^*$ that is optimal in $B$ is also optimal in $M$.
+\end{restatable}
+Theorem~\ref{lemma} makes no statement about the training efficiency in practice. 
+Thus, we dedicate the rest of our experiments to empirically demonstrate that training in CBs is not only possible but beneficial.
+
+\subsection{Meta-Learning Synthetic Contextual Bandits}
+\label{sec:metalearning_scbs}
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/flat_generalization_cont_mc.pdf}
+    \caption{
+    Meta-learned SCBs generalize across hyperparameters and towards out-of-distribution RL algorithms.
+    Each column shows the return of a policy after training in either the SCB (blue) or the EE directly (red), using sampled hyperparameters and 10,000 environment steps.
+    Additionally, we ablate the meta-training algorithm by using fixed hyperparameters in the inner loop. 
+    When sampling hyperparameters during the evaluation, the ablated SCBs (green) perform worse.
+    Additionally, the SCBs generalize towards agents not used in the inner loop (right of dashed line).
+
+    }
+    \label{fig:generalization}
+\end{figure}
+
+\textbf{SCB generalization.}
+\label{sec:results-generalization}
+Figure~\ref{fig:generalization} demonstrates the generality of a meta-learned SCB for ContinuousMountainCar-v0.
+It shows the performance of inner loop agents with random HPs, as well as the performance of several agents that were out-of-distribution, after training in the SCB and evaluation environment directly.
+SCBs are universally much more robust to hyperparameter changes than their respective evaluation environment.
+This is even the case when being meta-learned using fixed hyperparameters in the inner loop, but the robustness can be increased further by sampling them.
+Notably, SCBs enable consistently training PPO agents for MountainCar-v0, which is not the case in the evaluation environment directly, even when using tuned HPs\footnote{MountainCar-v0 has a sparse reward that is unlikely to be reached by random exploration. Thus, even standard reference implementations of PPO struggle to reach the goal. For example, this is the case for CleanRL \citep{huang2022cleanrl}, see \url{https://docs.cleanrl.
+Due to the technical constraints imposed by using JAX's vectorization, SCBs were trained using both a fixed set of gradient-based algorithms and a common fixed network architecture for each RL agent.
+Still, the meta-learned SCBs generalize \textit{out-of-distribution}.
+Replacing an RL agent's activation function or network architecture with one that was not used during meta-training does not hurt its performance.
+Additionally, optimizing a policy network using SNES \citep{wierstra2014natural}, an evolution strategy instead of a gradient-based algorithm, works well across SCBs.
+Finally, we show that the SCB-optimal policy performs well in the evaluation environment, meaning that SCBs should enable training capable agents using any RL algorithm that finds this policy.
+
+\textbf{Baselines and Ablations.}
+Since CBs lack the temporal dynamics of an MDP, training in a CB can be thought of as an (online) supervised learning problem. Instead of solving the temporal credit assignment problem, the agent simply has to predict which action maximizes the immediate reward. We, therefore, investigate how the discovered reward function compares with several baselines.
+First, we compare to online supervised learning of an expert policy, implemented by interacting with the evaluation environment and taking steps to minimize $\KL[\pi || \pi_\text{expert}]$ on batches of states.
+We refer to this setup as online behavioral cloning and interpret it as a replacement for the reward function of the SCB.
+Alternatively, we can replace the reward function with one that was constructed using an expert Q-function.
+We can construct it such that theorem~\ref{lemma} holds, thereby theoretically obtaining expert policies from training in the SCB.
+Finally, we can replace the synthetic initial state distribution with an expert state distribution, simulating the interaction of the evaluation environment and expert agent in the background. 
+A parameterized initial state distribution is needed for sparse-reward environments, our method performs best with a continuous latent distribution for the initial state, and meta-evolution is robust to the choice of meta-curriculum.
+\begin{figure}
+    \centering
+    \includegraphics[width=0.7\textwidth,valign=t]{figures/curriculum_and_meta_training_adjusted.pdf}
+    \caption{
+    Curriculum and training speed for Brax environments. 
+    \textbf{Left:} Visualization of different curricula. 
+    \textbf{Right:} Influence of curricula on the meta-training progress for the hopper environment. For no curriculum, we show the IQM and 95\% CIs over 9 seeds. One seed is shown per curriculum.
+    }
+    \label{fig:brax}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{figures/training_one_row.pdf}
+    \caption{Training curves for different algorithms on Brax environments. Training in an SCB is roughly two orders of magnitude faster.
+    We show the IQM performance with 95\% bootstrapped confidence intervals.
+}
+    \label{fig:training_one_row}
+\end{figure}
+
+\textbf{Scaling to complex control environments.}
+To scale to control environments requiring locomotion, we apply a curriculum to the meta-learning algorithm.
+It gradually increases the number of time steps for which we evaluate a trained inner loop agent in the evaluation environment.
+Different curricula and corresponding meta-learning curves are shown in figure~\ref{fig:brax}.
+While our experiments suggest that meta-learning is robust towards the choice of curriculum, training without a curriculum leads to quick convergence to a local optimum.
+Overall, this method allows us to successfully meta-learn SCBs for several complex control environments, as shown in figure~\ref{fig:conceptual} (2).
+Notably, agents only take 10,000 steps to learn these tasks in the SCB, whereas training in the evaluation environments typically takes millions of time steps.
+Training in the EE directly is roughly two orders of magnitude slower, as shown in figure~\ref{fig:training_one_row}.
+Additionally, achieving good returns on Brax environments typically needs extensive hyperparameter tuning and additional hacks such as observation normalization, which is unnecessary when training on the SCB.
+
+
+
+\section{Interpretability of Synthetic Contextual Bandits}
+
+\label{sec:results-interpret}
+\begin{figure}
+\centering
+\includegraphics[width=0.95\textwidth]{figures/interpretability_hyper.pdf}
+\caption{
+SCBs provide interpretable insights into their evaluation environment. 
+\textbf{Top}. Optimal actions given the differentiable synthetic reward function for different states and 5 environments. 
+Black box: observation space of the evaluation environment. 
+Black line: representative trajectory in the real environment. 
+Black x-marker: episode end. 
+\textbf{Bottom}. Normalized reward variance when varying observation parts. 
+Mean value over all observations in the space visualized in the top row.
+}
+\label{fig:interpretablility}
+\end{figure}
+
+In contextual bandits, the reward received is equal to the return, the state-, and the state-action value function (see eq.~\eqref{eq:cb_q_reward}). 
+This enables new ways to analyze the environment, such as easily finding the optimal action in each state via gradient descent or a simple grid search.
+We visualize the optimal actions in the top row of figure~\ref{fig:interpretablility}.
+The resulting visualizations yield insights into the way that the synthetic environment trains an agent to perform a task:
+For example, the SCB for MountainCar-v0 never induces nops, since the return is highest if terminating early, while the optimal action in the MountainCarContinuous-v0 SCB is often close to nop since it includes a control cost instead of a constant negative reward.
+Additionally, we can directly investigate the relationship between the observation and the return.
+We do so by fixing observation and action, and observing the variance in the reward when varying a single entry of the observation.
+The results are visualized in the bottom row of figure~\ref{fig:interpretablility}.
+We find that the reward is almost invariant to some parts of the observations.
+For example, varying the values of the angle in Acrobot-v1 has very little impact on the reward compared to the angular velocities.
+Similar findings hold for the position and angle in CartPole-v1.
+Thereby we rediscover the results of \citet{vischer2021lottery} and \citet{lu2023adversarial}.
+They found the same invariances in the context of the lottery ticket hypothesis and adversarial attacks respectively, where these input channels were pruned or used to manipulate learning dynamics.
+
+
+
+\section{Downstream Application: Learned Policy Optimization}
+
+\label{sec:dpo}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{figures/lpo_horizontal.pdf}
+    \caption{Meta-learning an objective function using an SCB. \textbf{From left to right:} \textbf{1.} Meta-training using SCB and EE achieves similar performance on Pendulum-v1. \textbf{2.} Meta-training on an SCB takes fewer environment steps since every episode has only one step. \textbf{3.} Training with the meta-learned objective is faster than using the original PPO objective. \textbf{4.} The meta-learned objectives generalize to an unseen, much more complex, environment (Hopper).}
+    \label{fig:dpo_synthenv}
+\end{figure}
+
+SCBs offer a significant training speedup both in terms of environment steps and simulation time.
+This offers several possibilities for downstream applications, such as in evolutionary meta-learning.
+As an example, we demonstrate their effectiveness in Learned Policy Optimization \citep[LPO,][]{lu2022discovered}.
+In LPO, the surrogate objective of PPO is replaced by a neural network\footnote{The neural network is parameterized to fulfill the conditions of a drift functional to uphold theoretical convergence guarantees, for more details see \citep{lu2022discovered,kuba2022mirror}.}.
+This neural network is meta-trained to maximize the final return when using it as an objective.
+
+We meta-learn an objective function both on the Pendulum-v1 environment, as well as an SCB that has Pendulum-v1 as its corresponding EE.
+In both cases, we obtain well-performing objective functions (figure~\ref{fig:dpo_synthenv}, 1.).
+However, meta-training on the SCB takes two orders of magnitude fewer environment steps (figure~\ref{fig:dpo_synthenv}, 2.).
+This is because to obtain fitness scores for the SCB, only a single environment step has to be simulated, while for Pendulum-v1 a whole episode of 200 steps is necessary.
+We then use the meta-learned surrogate objectives for training an agent on Pendulum-v1 and compare them to PPO (figure~\ref{fig:dpo_synthenv}, 3.).
+We find that both objectives outperform the original objective of PPO in terms of training speed and final performance.
+To probe the generalization to new environments, we additionally evaluate the meta-learned objectives on hopper (figure~\ref{fig:dpo_synthenv}, 4.).
+The results show that the meta-learned objectives are fully comparable to PPO.
+
+In this application, replacing the evaluation environment with its corresponding SCB had no negative effect on the final performance, but allowed for a significant speedup in meta-training time.
+The ability to not only train an RL agent but to successfully apply a meta-learning algorithm on the SCB further underscores its generality.
+
+
+\section{Related Work}
+
+\textbf{Training Reinforcement Learning Agents with Synthetic Data}. 
+Various methods for training machine learning models from synthetically generated data have been proposed. 
+For example, this includes dataset distillation for supervised training \citep{wang2018dataset} or synthetic experience replay and behavior distillation for RL \citep{lu2023synthetic,lupu2024behaviour}. 
+Applications for training with synthetic data include data augmentation and cheap data generation, which is especially important when requiring large amounts of data, such as in RL.
+Most closely related to our work is the approach outlined by \citet{ferreira2022learning} which learns the reward- and state transition function while using the initial state distribution of the original environment. 
+They report limited transfer to agents not used in the inner loop and do not scale their approach to continuous control environments.
+
+\textbf{Extensions to \citet{ferreira2022learning}}
+We overcome the limited scalability and transfer reported by \citet{ferreira2022learning} by extending their work in the following ways:
+\begin{itemize}
+    \item We limit the episode length in the synthetic MDP to one, turning it into a simple CB.
+    \item We meta-learn the initial state distribution instead of sampling from the EE.
+    \item We sample inner-loop algorithms during meta-training. This allows for broad generalization, even out-of-distribution, as shown in figure~\ref{fig:generalization}.
+    \item We introduce a curriculum on the evaluation episode length for control environments. This enables training SCBs for complex control environments of the Brax suite, as shown in figure~\ref{fig:brax}.
+    \item We leverage hardware acceleration by developing an efficient RL algorithm implementation. This allows us to run much larger experiments, using larger population sizes (256 vs. 16), more evaluation seeds (64 vs. 10), and more generations (2000 vs. 200).
+\end{itemize}
+
+\textbf{Discovering Algorithm Components via Evolutionary Meta-Learning}. Recently, the general combination of evolutionary optimization and neural network-based algorithm families has been used to discover various powerful algorithms. This includes the meta-discovery of gradient-based \citep{metz2022velo} and gradient-free \citep{les2022, lga_2023} optimization algorithms, policy optimization objective functions \citep{lu2022discovered, jackson2024discovering}, or reward functions \citep{faust2019evolving}. Furthermore, these synthetic artifacts can often be reverse-engineered to generate human-interpretable components. Here, we use the same paradigm to transform real environment simulators into SCBs.
+\textbf{Hardware Accelerated Reinforcement Learning Environments}. Commonly, RL environments have been bound to CPUs and constrained by limited parallelism. Recently, there has been a paradigm change with RL simulators being accelerated by accelerator parallelism. Still, most of them require the translation of the original step transition logic into hardware-specific coding frameworks (e.g. Here, we provide a means to automatically yield hardware-accelerated neural-network-based environment proxies for training RL agents that generalize to potentially non-accelerated environments.
+
+
+
+\section{Discussion}
+
+\label{sec:discussion}
+\textbf{Summary}. We have demonstrated that it is possible to transform Markov decision processes into contextual bandits, a much simpler class of reinforcement learning environments. 
+The meta-learned SCBs are capable of training RL agents that perform competitively in evaluation environments. 
+As shown by our extensive studies, they exhibit a high degree of generality and even generalize to RL agents out-of-distribution. 
+To enable successful meta-learning, we introduced improvements over the previous discovery process by \citet{ferreira2022learning}, including the sampling of inner loop algorithms, a curriculum on the evaluation episode length, and an efficient implementation. 
+The SCBs yield insights into the relevance of individual observation entries, are easy to interpret, and can be used to speed up downstream applications.
+
+\textbf{Limitations}. 
+Our goal for this project was to demonstrate the possibility of transforming Markov decision processes into contextual bandits, enabling fast training.
+Still, optimizing an SCB using black-box meta-learning is far more computationally expensive than training agents in the evaluation environment directly.
+Current limitations of black-box meta-learning also extend to this work, limiting the number of trainable parameters in practice.
+To recoup the high initial cost, the SCB has to be used in downstream applications, like Learned Policy Optimization \citep{lu2022discovered}.
+While a curriculum was necessary to discover SCBs for Brax environments, other hacks might be necessary for different classes of more complex tasks, all of which must be engineered.
+
+
+\textbf{Future Work}. 
+Going forward we are interested in the discovery of synthetic simulators capable of promoting a truly open-ended learning process. 
+Furthermore, we have focused on control environments with proprioceptive symbolic observation dimensions so far. 
+A natural extension of our work is to pixel- and vision-based environments leveraging transposed convolutional architectures for the initial state distribution.
+
+\textbf{Societal impact}. We find that neural networks are capable of representing various RL simulators in a compressed fashion. In principle, large models can therefore be capable of distilling data distributions and world models useful for self-training. Given that these systems are ultimately black-box, practitioners need to be careful when deploying them in real-world applications.
+
+
+\begin{ack}
+Andrei Lupu was partially funded by a Fonds de recherche du Québec doctoral training scholarship.
+Henning Sprekeler and Robert T. Lange are funded by the Deutsche Forschungsgemeinschaft (DFG, German Research Foundation) under Germany’s Excellence Strategy - EXC 2002/1 ``Science of Intelligence'' - project number 390523135. 
+\end{ack}
+
+
+
+
+

@@ -1,0 +1,497 @@
+\title{Solving Inverse Problems with Latent Diffusion Models via Hard Data Consistency}
+
+\begin{abstract}
+Latent diffusion models have been demonstrated to generate high-quality images, while offering efficiency in model training compared to diffusion models operating in the pixel space. However, incorporating latent diffusion models to solve inverse problems remains a challenging problem due to the nonlinearity of the encoder and decoder. To address these issues, we propose \textit{ReSample}, an algorithm that can solve general inverse problems with pre-trained latent diffusion models. Our algorithm incorporates data consistency by solving an optimization problem during the reverse sampling process, a concept that we term as hard data consistency. Upon solving this optimization problem, we propose a novel resampling scheme to map the measurement-consistent sample back onto the noisy data manifold and theoretically demonstrate its benefits. Lastly, we apply our algorithm to solve a wide range of linear and nonlinear inverse problems in both natural and medical images, demonstrating that our approach outperforms existing state-of-the-art approaches, including those based on pixel-space diffusion models. 
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Inverse problems arise from a wide range of applications across many domains, including computational imaging~\cite{inverse1, inverse2}, medical imaging~\cite{medicalimaging, medicalimaging2}, and remote sensing~\cite{angle, yolov5}, to name a few. When solving these inverse problems, the goal is to reconstruct an unknown signal $\bm{x}_* \in \R^n$ given observed measurements $\bm{y} \in \R^m$ of the form
+$$
+    \bm{y} = \mathcal{A}(\bm{x}_*) + \bm{\bm{\eta}},
+$$
+where $\mathcal{A}(\cdot):\R^n \to \R^m$ denotes some forward measurement operator (can be linear or nonlinear) and $\bm{\eta} \in \R^m$ is additive noise. Usually, we are interested in the case when $m < n$, which follows many real-world scenarios. When $m < n$, the problem is ill-posed and some kind of regularizer (or prior) is necessary to obtain a meaningful solution.
+In the literature, the traditional approach of using hand-crafted priors (e.g. sparsity) is slowly being replaced by rich, learned priors such as deep generative models. Recently, there has been a lot of interests in using diffusion models as structural priors due to their state-of-the-art performance in image generation~\cite{beatgan, karras2022elucidating, song2023consistency}.
+Compared to GANs, diffusion models are generally easier and more stable to train as they do not rely on an adversarial training scheme, making them a generative prior that is more readily accessible~\cite{beatgan}.
+The most common approach for using diffusion models as priors is to resort to posterior sampling, which has been extensively explored in the literature~\cite{score, dps, mcg, ddrm, song2023PiGDM, chung2023fast, meng2022diffusion, denoisingself}. However, despite their remarkable success, these techniques exhibit several limitations. 
+The primary challenge is that the majority of existing works that employ diffusion models as priors train these models directly in the pixel space, which requires substantial computational resources and a large volume of training data. In real-world applications such as computed tomography (CT) and magnetic resonance imaging (MRI) reconstruction, where images are inherently either 3D or even 4D~\cite{sparsemri}, training diffusion models directly in the pixel space is often infeasible.
+Latent diffusion models (LDMs), which embed data in order to operate in a lower-dimensional space, present a potential solution to this challenge, along with considerable improvements in computational efficiency~\cite{stablediffusion, latent2} by training diffusion models in a compressed latent space. They can also provide a great amount of flexibility, as they can enable one to transfer and generalize these models to different domains by fine-tuning on small amounts of training data~\cite{dreambooth}. 
+Nevertheless, using LDMs to solve inverse problems poses a significant challenge.
+The main difficulty arises from the 
+inherent nonlinearity and nonconvexity of the decoder, making it challenging to directly apply existing solvers designed for pixel space. 
+To address this issue, a concurrent work by Rout et al.~\cite{rout2023solving} recently introduced a posterior sampling algorithm operating in the latent space (PSLD), designed to solve \emph{linear} inverse problems with provable guarantees. However, we observe that PSLD may reconstruct images with artifacts in the presence of measurement noise.
+Therefore, developing an efficient algorithm capable of addressing these challenges remains an open research question. 
+\begin{figure}[t!]
+\centering
+\includegraphics[width=1.0\textwidth]{figures/motivation.pdf}
+\caption{\textbf{Example reconstructions of our algorithm (\textit{ReSample}) on two noisy inverse problems, nonlinear deblurring and CT reconstruction, on natural and medical images, respectively.}}
+\label{fig:resample_examples}
+\end{figure}
+
+In this work, we introduce a novel algorithm named \textit{ReSample}, which effectively employs LDMs as priors for solving inverse problems. Our algorithm can be viewed as a two-stage process that incorporates data consistency by (1) solving a hard-constrained optimization problem, ensuring we obtain the correct latent variable that is consistent with the observed measurements, and (2) employing a carefully designed resampling scheme to map the measurement-consistent sample back onto the correct noisy data manifold. 
+As a result, we show that our algorithm can achieve state-of-the-art performance on various inverse problem tasks and different datasets, compared to existing algorithms. Notably, owing to using the latent diffusion models as generative priors, our algorithm achieves improved computational efficiency with a reduction in memory complexity.
+Below, we highlight some of our key contributions.
+\begin{itemize}[leftmargin=*]
+
+
+    
+     
+     
+    
+
+    \item We propose a novel algorithm that enables us to leverage latent diffusion models for solving general inverse problems (linear and nonlinear) through hard data consistency. 
+    
+    
+    
+    \item Particularly, we carefully design a stochastic resampling scheme that can reliably map the measurement-consistent samples back onto the noisy data manifold to continue the reverse sampling process. We provide a theoretical analysis to further demonstrate the superiority of the proposed stochastic resampling technique.
+    
+
+    \item With extensive experiments on multiple tasks and various datasets, encompassing both natural and medical images, our proposed algorithm achieves state-of-the-art performance on a variety of linear and nonlinear inverse problems.
+    
+\end{itemize}
+
+
+\section{Background}
+
+
+\subsection{Diffusion Models}
+\paragraph{Denoising Diffusion Probabilistic Models.} We first briefly review the basic fundamentals of diffusion models, namely the denoising diffusion probabilistic model (DDPM) formulation~\cite{ddpm}. Let $\bm{x}_0 \sim p_{\text{data}}(\bm{x})$ denote samples from the data distribution. Diffusion models start by progressively perturbing data to noise via Gaussian kernels, which can be written as the variance-preserving stochastic differential equation (VP-SDE)~\cite{song2021scorebased} of the form
+\begin{align}
+\label{eq:forward_sde}
+    d\bm{x} = -\frac{\beta_t}{2}\bm{x}dt + \sqrt{\beta_t}d\bm{w},
+\end{align}
+where $\beta_t \in (0, 1)$ is the noise schedule that is a monotonically increasing sequence of $t$ and $\bm{w}$ is the standard Wiener process. This is generally defined such that we obtain the data distribution when $t=0$ and obtain a Gaussian distribution when $t=T$, i.e. $\bm{x}_T \sim \mathcal{N}(\bm{0}, \bm{I})$. The objective of diffusion models is to learn the corresponding reverse SDE of Equation~(\ref{eq:forward_sde}), which is of the form
+\begin{align}
+\label{eq:reverse_sde}
+    d\bm{x} = \left[  -\frac{\beta_t}{2}\bm{x} - \beta_t \nabla_{\bm{x}_t} \log p(\bm{x}_t)\right]dt + \sqrt{\beta_t}d\bar{\bm{w}},
+\end{align}
+where $d\bar{\bm{w}}$ is the standard Wiener process running backward in time and $\nabla_{\bm{x}_t} \log p(\bm{x}_t)$ is the (Stein) score function. In practice, we approximate the score function using a neural network $\bm{s}_{\theta}$ parameterized by $\theta$, which can be trained via denoising score matching~\cite{vincent}:
+\begin{align}
+\label{eq:score_matching}
+    \hat{\theta} = \underset{\theta}{\argmin} \, \mbb{E}\left[ \| \bm{s}_{\theta}(\bm{x}_t, t) - \nabla_{\bm{x}_t} \log p(\bm{x}_t | \bm{x}_0)\|_2^2 \right],
+\end{align}
+where $t$ is uniformly sampled from $[0, T]$ and the expectation is taken over $t$, $\bm{x}_t \sim p(\bm{x}_t | \bm{x}_0)$, and $\bm{x}_0 \sim p_{\text{data}}(\bm{x})$.
+Once we have access to the parameterized score function $\bm{s}_{\theta}$, we can use it to approximate the reverse-time SDE and simulate it using numerical solvers (e.g. Euler-Maruyama). 
+
+
+\begin{figure}[t!]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/resample_flowchart1.pdf}
+\caption{\textbf{Overview of our \textit{ReSample} algorithm during the reverse sampling process conditioned on the data constraints from measurement.} The entire sampling process is conducted in the latent space upon passing the sample through the encoder. The proposed algorithm performs hard data consistency at some time steps $t$ via a skipped-step mechanism.}
+\label{fig:resample_flowchart}
+\end{figure}
+
+\paragraph{Denoising Diffusion Implicit Models.}
+As the DDPM formulation is known to have a slow sampling process, Song et al.~\cite{ddim} proposed denoising diffusion implicit models (DDIMs) that defines the diffusion process as a non-Markovian process to remedy this~\cite{ddpm, ddim, song2023consistency, lu2022dpmsolver}.
+This enables a faster sampling process with the sampling steps given by
+\begin{align}
+\label{eq:ddimbackward}
+    \bm{x}_{t-1} = \sqrt{\bar{\alpha}_{t-1}}\hat{\bm{x}}_0(\bm{x}_t) + \sqrt{1 - \bar{\alpha}_{t-1} - \eta\delta_t^2 } \bm{s}_{\theta}(\bm{x}_t, t) + \eta\delta_t  \bm{\epsilon}, \quad t=T, \ldots, 0,
+\end{align}
+where $\alpha_t = 1 - \beta_t$,  $\bar{\alpha}_t = \prod_{i=1}^t \alpha_i$, $\bm{\epsilon} \sim \mathcal{N}(\bm{0}, \bm{I})$, $\eta$ is the temperature parameter, $\delta_t$ controls the stochasticity of the update step, and $\hat{\bm{x}}_0(\bm{x}_t)$ denotes the predicted $\bm{x}_0$ from $\bm{x}_t$ which takes the form 
+\begin{align}
+\label{eq:x0_ddim}
+\hat{\bm{x}}_0(\bm{x}_t) = \frac{1}{\sqrt{\bar{\alpha}_t}} (\bm{x}_t + \sqrt{1-\bar{\alpha}_t}\bm{s}_{\theta}(\bm{x}_t, t)),
+\end{align}
+which is an application of Tweedie's formula.
+Here, $\bm{s}_{\theta}$ is usually trained using the epsilon-matching score objective~\cite{ddim}. We use DDIM as the backbone of our algorithm and show how we can leverage these update steps for solving inverse problems.
+
+\subsection{Diffusion Models for Solving Inverse Problems}
+
+\paragraph{Solving Inverse Problems with Diffusion Models.}
+Given measurements $\bm{y} \in \R^m$ from some forward measurement operator $\mathcal{A}(\cdot)$, we can use diffusion models to solve inverse problems by replacing the score function in Equation~(\ref{eq:reverse_sde}) with the conditional score function $\nabla_{\bm{x}_t} \log p(\bm{x}_t | \bm{y})$. Then by Bayes rule, notice that we can write the conditional score as
+\begin{align*}
+    \nabla_{\bm{x}_t} \log p(\bm{x}_t | \bm{y}) = \nabla_{\bm{x}_t} \log p(\bm{x}_t) + \nabla_{\bm{x}_t} \log p(\bm{y} | \bm{x}_t).
+\end{align*}
+This results in the reverse SDE of the form
+\begin{align*}
+    d\bm{x} = \left[  -\frac{\beta_t}{2}\bm{x} - \beta_t ( \nabla_{\bm{x}_t} \log p(\bm{x}_t) + \nabla_{\bm{x}_t} \log p(\bm{y} | \bm{x}_t) )\right]dt + \sqrt{\beta_t}d\bar{\bm{w}}.
+\end{align*}
+In the literature, solving this reverse SDE is referred as \emph{posterior sampling}. However, the issue with posterior sampling is that there does not exist an analytical formulation for the likelihood term $\nabla_{\bm{x}_t} \log p(\bm{y} | \bm{x}_t)$. To resolve this, there exists two lines of work: (1) to resort to alternating projections onto the measurement subspace to avoid using the likelihood directly~\cite{mcg, ddrm, ddnm} and (2) to estimate the likelihood under some mild assumptions~\cite{dps, song2023PiGDM}. For example, Chung et al.~\cite{dps} proposed diffusion posterior sampling (DPS) that uses a Laplacian approximation of the likelihood, which results in the discrete update steps
+\begin{align}
+\label{eq:dps_updates}
+    \bm{x}_{t-1} &= \sqrt{\bar{\alpha}_{t-1}}\hat{\bm{x}}_0(\bm{x}_t) + \sqrt{1 - \bar{\alpha}_{t-1} - \eta\delta_t^2 } \bm{s}_{\theta}(\bm{x}_t, t) + \eta\delta_t  \bm{\epsilon} \\
+    \bm{x}_{t-1} &= \bm{x}'_{t-1} - \zeta \nabla_{\bm{x}_t} \|\bm{y} - \mathcal{A}(\hat{\bm{x}}_0(\bm{x}_t)) \|_2^2,
+\end{align}
+where $\zeta \in \R$ can be viewed as a tunable step-size.
+However, as previously mentioned, these techniques have limited applicability for real-world problems as they are all built on the pixel space. 
+\paragraph{Solving Inverse Problems with Latent Diffusion Models.}
+
+The limited applicability of pixel-based diffusion models can be tackled by alternatively utilizing more efficient LDMs as generative priors.
+The setup for LDMs is the following: given an image $\bm{x} \in \mbb{R}^n$, we have an encoder $\mathcal{E}: \mbb{R}^n \to \mbb{R}^k$ and a decoder $\mathcal{D}: \mbb{R}^k \to \mbb{R}^n$ where $k \ll n$.
+Let $\bm{z} = \mathcal{E}(\bm{x}) \in \mbb{R}^k$ denote the embedded samples in the latent space. 
+One way of incorporating LDMs to solve inverse problems would be to replace the update steps in Equation~(\ref{eq:dps_updates}) with
+\begin{align}
+\label{eq:latent_dps_updates}
+    \bm{z}'_{t-1} &= \sqrt{\bar{\alpha}_{t-1}}\hat{\bm{z}}_0(\bm{z}_t) + \sqrt{1 - \bar{\alpha}_{t-1} - \eta \delta_t^2} \bm{s}_{\theta}(\bm{z}_t, t) + \eta\delta_t \bm{\epsilon}, \\
+\label{eq:latent_dps_gradient}
+    \bm{z}_{t-1} &= \bm{z}'_{t-1} - \zeta \nabla_{\bm{z}_t} \|\bm{y} - \mathcal{A}  (\mathcal{D}(\hat{\bm{z}}_0(\bm{z}_t))) \|_2^2,
+\end{align}
+After incorporating LDMs, this can be viewed as a non-linear inverse problem due to the non-linearity of the decoder $\mathcal{D}(\cdot)$. As this builds upon the idea behind DPS, we refer to this algorithm as \emph{Latent-DPS}.
+While this formulation seems to work, we empirically observe that Latent-DPS often produces reconstructions that are often noisy or blurry and inconsistent with the measurements. We conjecture that since the forward operator involving the decoder is highly nonconvex, the gradient update may lead towards a local minimum.
+
+
+
+
+
+
+
+
+
+
+
+\section{ReSample: Inverse Problems using Latent Diffusion Models}
+
+\label{sec:resample}
+
+
+\subsection{Proposed Method}
+\label{sec:prop}
+
+\paragraph{Hard Data Consistency.} Similar to Latent-DPS, our algorithm involves incorporating data consistency into the reverse sampling process of LDMs. However, instead of a gradient-like update as shown in Equation~(\ref{eq:latent_dps_gradient}), we propose to solve an optimization problem on \emph{some time steps $t$} of the reverse process:
+\begin{align}
+\label{eq:hard_data_consistency}
+    \hat{\bm{z}}_0(\bm{y}) \in \underset{\bm{z}}{\argmin} \, \frac{1}{2} \| \bm{y} - \mathcal{A}(\mathcal{D}(\bm{z})) \|^2_2,
+\end{align}
+where we denote $\hat{\bm{z}}_0(\bm{y})$ as the sample consistent with the measurements $\bm{y} \in \R^m$. This optimization problem has been previously explored in other works that use GANs for solving inverse problems, and can be efficiently solved using iterative solvers such as gradient descent~\cite{csgm, robust_csgm, shah2021provably, dip}. However, it is well known that solving this problem starting from a random initial point may lead to unfavorable local minima~\cite{csgm}. To address this, we solve Equation~(\ref{eq:hard_data_consistency}) starting from an initial point $\hat{\bm{z}}_0(\bm{z}_{t+1})$, where $\hat{\bm{z}}_0(\bm{z}_{t+1})$ is the estimate of ground-truth latent vector at time $0$ based on the sample at time $t+1$. 
+The intuition behind this initialization is that we want to start the optimization process within local proximity of the global solution of Equation~(\ref{eq:hard_data_consistency}), to prevent resulting in a local minimum. We term this overall concept as \emph{hard data consistency}, as we strictly enforce the measurements via optimization, rather than a ``soft'' approach through gradient update like Latent-DPS.
+To obtain $\hat{\bm{z}}_0(\bm{z}_{t+1})$, we use Tweedie's formula~\cite{tweedie} that gives us an approximation of the posterior mean which takes the following formula:
+\begin{align}
+    \hat{\bm{z}}_0(\bm{z}_t) = \mbb{E}[\bm{z}_0 | \bm{z}_{t}] = \frac{1}{\sqrt{\bar{\alpha}_{t}}} (\bm{z}_{t} + (1-\bar{\alpha}_{t})\nabla \log p(\bm{z}_{t})).
+\end{align}
+
+However, we would like to note that performing hard data consistency on every reverse sampling iteration $t$ may be very costly. To address this, we first observe that as we approach $t=T$, the estimated $\hat{\bm{z}}_0(\bm{z}_t)$ can deviate significantly from the ground truth. In this regime, we find that hard data consistency provides only marginal benefits. Additionally, in the literature, existing works 
+point out the existence of a three-stage phenomenon~\cite{freedom}, where they demonstrate that data consistency is primarily beneficial for the semantic and refinement stages (the latter two stages when $t$ is closer to $0$) of the sampling process.
+Following this reasoning, we divide $T$ into three sub-intervals and only apply the optimization in the latter two intervals. This approach provides both computational efficiency and accurate estimates of $\hat{\bm{z}}_0(\bm{z}_t)$.
+
+Furthermore, even during these two intervals, we observe that we do not need to solve the optimization problem on every iteration $t$. Because of the continuity of the sampling process, after each data-consistency optimization step, the samples in the following steps can still remain similar semantic or structural information to some extent. Thus, we ``reinforce'' the data consistency constraint during the sampling process via a skipped-step mechanism. Empirically, we see that it is sufficient to perform this on every $10$ (or so) iterations of $t$. One can think of hard data consistency as guiding the sampling process towards the ground truth signal $\bm{x}^*$ (or respectively $\bm{z}^*$) such that it is consistent with the given measurements.
+Lastly, in the presence of measurement noise, minimizing Equation~(\ref{eq:hard_data_consistency}) to zero loss can lead to overfitting the noise. To remedy this, we perform early stopping, where we only minimize up to a threshold $\tau$ based on the noise level. We also observe that an additional Latent-DPS step after unconditional sampling can (sometimes) marginally increase the overall performance.
+
+\begin{algorithm}[t]
+\caption{ReSample: Solving Inverse Problems with Latent Diffusion Models}
+\label{alg:resample}
+\begin{algorithmic}
+\Require Measurements $\bm{y}$, $\mathcal{A}(\cdot)$, Encoder $\mathcal{E}(\cdot)$, Decoder $\mathcal{D}(\cdot)$, Score function $\bm{s}_{\theta}(\cdot, t)$, Pretrained LDM Parameters $\beta_t$, $\bar{\alpha}_t$, $\eta$, $\delta$, Hyperparameter $\gamma$ to control $\sigma^2_t$, Time steps to perform resample $C$
+\State{$\bm{z}_T \sim \mathcal{N}(\bm{0}, \bm{I})$}
+\Comment{Initial noise vector}
+\For{$t=T-1, \ldots, 0$}
+\State $\pmb{\epsilon}_1 \sim \mathcal{N}(\bm{0}, \bm{I})$
+\State $\hat{\bm{\epsilon}}_{t+1} = \bm{s}_{\theta}(\bm{z}_{t+1}, {t+1})$
+\Comment{Compute the score}
+\State $\hat{\bm{z}}_0(\bm{z}_{t+1}) = \frac{1}{\sqrt{\bar{\alpha}_{t+1}}} (\bm{z}_{t+1} - \sqrt{1-\bar{\alpha}_{t+1}}\hat{\bm{\epsilon}}_{t+1})$
+\Comment{Predict $\hat{\bm{z}}_0$ using Tweedie's formula}
+\State $\bm{z}'_{t} = \sqrt{\bar{\alpha}_{t}}\hat{\bm{z}}_0(\bm{z}_{t+1}) + \sqrt{1 - \bar{\alpha}_{t} - \eta\delta^2} \hat{\bm{\epsilon}}_{t+1} + \eta\delta \pmb{\epsilon}_1 $
+\Comment{Unconditional DDIM step}
+\If{$t \in C$}
+\Comment{ReSample time step}
+\State $\hat{\bm{z}}_0(\bm{y}) \in \underset{\bm{z}}{\argmin} \, \frac{1}{2}\|\bm{y} - \mathcal{A}(\mathcal{D}(\bm{z}))\|_2^2$
+\Comment{Solve with initial point $\hat{\bm{z}}_{0}(\bm{z}_{t+1})$}
+\State $\bm{z}_{t} = \text{StochasticResample}(\hat{\bm{z}}_0(\bm{y}), \bm{z}'_{t}, \gamma)$
+\Comment{Map back to $t$}
+\Else{}
+\State{$\bm{z}_{t} = \bm{z}'_{t}$}
+\Comment{Unconditional sampling if not resampling}
+\EndIf
+\EndFor
+\State{ $\bm{x}_0 = \mathcal{D}(\bm{z}_0)$}
+\Comment{Output reconstructed image}
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Remapping Back to $\bm{z}_t$.}
+\label{sec:resample_technique}
+Following the flowchart in Figure~\ref{fig:resample_flowchart}, the next step is to map the measurement-consistent sample $\hat{\bm{z}}_0(\bm{y})$ back onto the data manifold defined by the noisy samples at time $t$ to continue the reverse sampling process. Doing so would be equivalent to computing the posterior distribution $p(\bm{z}_{t} | \bm{y})$.
+To incorporate $\hat{\bm{z}}_0(\bm{y})$ into the posterior, we propose to construct an auxiliary distribution $p(\hat{\bm{z}}_{t} | \hat{\bm{z}}_0(\bm{y}), \bm{y}) $ in replace of $p(\bm{z}_{t} | \bm{y})$. Here, $\hat{\bm{z}}_t$ denotes the remapped sample and $\bm{z}'_t$ denotes the unconditional sample before remapping. One simple way of computing this distribution to obtain $\hat{\bm{z}}_t$ is shown in Proposition~\ref{prop:stochastic_enc}.
+\begin{proposition}[Stochastic Encoding]
+\label{prop:stochastic_enc}
+Since the sample $\hat{\bm{z}}_t$ given $\hat{\bm{z}}_0(\bm{y})$ and measurement $\bm{y}$ is conditionally independent of $\bm{y}$, we have that
+    \begin{align}
+        p(\hat{\bm{z}}_{t} |  \hat{\bm{z}}_0(\bm{y}), \bm{y}) = p(\hat{\bm{z}}_{t} |  \hat{\bm{z}}_0(\bm{y})) = \mathcal{N}(\sqrt{\bar{\alpha}_t} \hat{\bm{z}}_0(\bm{y}), (1 -\bar{\alpha}_{t})\bm{I}).
+    \end{align}
+\end{proposition}
+ 
+Proposition~\ref{prop:stochastic_enc} provides us a way of computing $\hat{\bm{z}}_t$, which we refer to as \emph{stochastic encoding}.
+However, we observe that using stochastic encoding can incur a high variance when $t$ is farther away from $t=0$, where the ground truth signal exists. This large variance can often lead to noisy image reconstructions.
+To address this issue, we propose a posterior sampling technique that reduces the variance by additionally conditioning on $\bm{z}'_t$, the unconditional sample at time $t$.
+Here, the intuition is that
+by using information of $\bm{z}'_t$, we can get closer to the ground truth $\bm{z}_t$, which effectively reduces the variance. In Lemma~\ref{lem:resample}, under some mild assumptions, we show that this new distribution $p(\hat{\bm{z}}_t | \bm{z}'_t, \hat{\bm{z}}_0(\bm{y}), \bm{y})$ is a tractable Gaussian distribution.
+\begin{proposition}[Stochastic Resampling]
+\label{lem:resample}
+    Suppose that $p(\bm{z}'_t| \hat{\bm{z}}_t, \hat{\bm{z}}_0(\bm{y}), \bm{y})$ is normally distributed such that  $p(\bm{z}'_t| \hat{\bm{z}}_t, \hat{\bm{z}}_0(\bm{y}), \bm{y}) = \mathcal{N}(\bm{ \mu }_t, \sigma_t^2)$. If we let $p(\hat{\bm{z}_t} | \hat{\bm{z}}_0(\bm{y}), \bm{y})$ be a prior for $\bm{\mu}_t$, then the posterior distribution $p(\hat{\bm{z}}_t | \bm{z}'_t, \hat{\bm{z}}_0(\bm{y}), \bm{y})$ is given by 
+    \begin{align}
+    p(\hat{\bm{z}}_t | \bm{z}'_t, \hat{\bm{z}}_0(\bm{y}), \bm{y}) = \mathcal{N}\left( \frac{ \sigma_{t}^2 \sqrt{\bar{\alpha}_t}\hat{\bm{z}}_0(\bm{y}) + (1-\bar{\alpha}_t)\bm{z}'_{t} }{ \sigma_{t}^2 + (1 - \bar{\alpha}_t) }, \frac{\sigma_{t}^2 (1-\bar{\alpha}_t)}{\sigma_{t}^2 + (1 - \bar{\alpha}_{t})}\bm{I}  \right).
+\end{align} 
+\end{proposition}
+
+We refer to this new mapping technique as \emph{stochastic resampling}. Since we do not have access to $\sigma_t^2$, it serves as a hyperparameter that we tune in our algorithm. The choice of $\sigma_t^2$ plays a role of controlling the tradeoff between prior consistency and data consistency. If $\sigma_t^2 \to 0$, then we recover unconditional sampling, and if $\sigma_t^2 \to \infty$, we recover stochastic encoding. 
+We observe that this new technique also has several desirable properties, for which we rigorously prove in the next section.
+
+
+\subsection{Theoretical Results}
+\label{sec:theory}
+
+In Section~\ref{sec:prop}, we discussed that stochastic resampling induces less variance than stochastic encoding. Here, we aim to rigorously prove the validity of this statement.
+
+\begin{lemma}
+\label{thm:smallvariance}
+Let $\tilde{\bm{z}}_t$ and $\hat{\bm{z}}_t$ denote the stochastically encoded and resampled image of $\hat{\bm{z}}_0(\bm{y})$, respectively. If $\text{VAR}(\bm{z}'_t) > 0$, then we have that $\text{VAR}(\hat{\bm{z}}_t) < \text{VAR}(\tilde{\bm{z}}_t)$.
+\end{lemma}
+
+\begin{theorem}
+\label{thm:unbias}
+If ${\hat{\bm{z}}}_0(\bm{y})$ is measurement-consistent such that $\bm{y} = \mathcal{A}(\mathcal{D}({\hat{\bm{z}}}_0(\bm{y})))$, i.e. $\hat{\bm{z}}_0= \hat{\bm{z}}_0(\bm{z}_t) = \hat{\bm{z}}_0(\bm{y})$, then stochastic resample is unbiased such that $\mathbb{E}[\hat{\bm{z}}_t |  \bm{y}] = \mathbb{E}[\bm{z}'_t]$.
+\end{theorem}
+These two results, Lemma~\ref{thm:smallvariance} and Theorem~\ref{thm:unbias}, prove the benefits of stochastic resampling. At a high-level, these proofs rely on the fact the posterior distributions of both stochastic encoding and resampling are Gaussian and compare their respective means and variances.
+In the following result, we characterize the variance induced by stochastic resampling, and show that as $t \to 0$, the variance decreases, giving us a reconstructed image that is of better quality.
+
+\begin{theorem}
+\label{thm:z0variance}
+ Let $\bm{z}_0$ denote a sample from the data distribution and $\bm{z}_t$ be a sample from the noisy perturbed distribution at time $t$. Then,
+ \begin{align*}
+     \text{Cov}(\bm{z}_0 | \bm{z}_t) = \frac{(1 - \bar{\alpha}_t)^2}{\bar{\alpha}_t}\nabla^2_{\bm{z}_t}\log p_{\bm{z}_t}(\bm{z}_t) + \frac{1 - \bar{\alpha}_t}{\bar{\alpha}_t}\bm{I}.
+ \end{align*}
+\end{theorem}
+By Theorem~\ref{thm:z0variance}, noice that since as $\alpha_t$ is an increasing sequence that converges to 1 as $t$ decreases,
+the variance between the ground truth $\bm{z}_0$ and the estimated $\hat{\bm{z}}_0$
+decreases to 0 as $t \to 0$, assuming that
+$\nabla^2_{\bm{z}_t}\log p_{\bm{z}_t}(\bm{z}_t) < \infty$.
+Following our theory, we empirically show that stochastic resampling can reconstruct signals that are less noisy than stochastic encoding, as shown in the next section.\let\thefootnote\relax\footnotetext{*We have updated the baseline results for PSLD.}
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+\setlength{\tabcolsep}{5pt}
+\begin{table}[t!]
+\begin{center}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{l|lll|lll}
+\hline
+ \multirow{2}{*}{Method} & \multicolumn{3}{c|}{Super Resolution $4\times$} & \multicolumn{3}{c}{Inpainting (Random $70\%$)} \\
+
+& LPIPS$\downarrow$ & PSNR$\uparrow$ & SSIM$\uparrow$  & LPIPS$\downarrow$ & PSNR$\uparrow$ & SSIM$\uparrow$  \\
+
+\hline
+DPS~\cite{dps} & $0.173\pm 0.04$ & $28.41 \pm 2.20$ & $0.782 \pm 0.06$ & $\underline{0.102} \pm 0.02$ & $\underline{32.48} \pm 2.30$ & $\underline{0.899} \pm 0.03$ \\
+MCG~\cite{mcg}  & $0.193 \pm 0.03$ & $25.92 \pm 2.35$ & $0.740 \pm 0.05$ &$0.134 \pm 0.03$ & $29.53 \pm 2.70$ & $0.847 \pm 0.05$\\
+ADMM-PnP~\cite{plugmri} & $0.304 \pm 0.04$ & $21.08 \pm 3.13$ & $0.631 \pm 0.11$   & $0.627 \pm 0.07$ & $15.40 \pm 2.09$ & $0.342 \pm 0.09$ \\
+  DDRM~\cite{ddrm} & $0.151 \pm 0.03$   & $\underline{29.49} \pm 1.93$  & $0.817 \pm 0.05$ & $0.166 \pm 0.03$ & $27.69 \pm 1.54$& $0.798 \pm 0.04$\\
+
+  DMPS~\cite{meng2022diffusion} & $\underline{0.147} \pm 0.03$ & $28.48 \pm 1.92$ & $\underline{0.811} \pm 0.05$ & $0.175 \pm 0.03$ & $28.84 \pm 1.65$  & $0.826 \pm 0.03$ \\
+\hline
+ Latent-DPS &  $0.272 \pm 0.05$& $26.83 \pm 2.00$  & $0.690 \pm 0.07$  & $0.226 \pm 0.04$ & $26.23 \pm 1.84$ & $0.703 \pm 0.07$\\
+  PSLD-LDM$^*$~\cite{rout2023solving}  & $0.209 \pm 0.10$  & $27.61 \pm 2.95$  & $0.704 \pm 0.17$   &$0.260 \pm 0.08$ & $27.07 \pm 2.45$ & $0.689 \pm 0.11 $ \\
+\hline
+
+\hline
+  ReSample (Ours) & $\bm{0.144} \pm 0.029$ & $\bm{30.45} \pm 2.09$  & $\bm{0.832} \pm 0.05$ & $\bm{0.082} \pm 0.02$ & $\bm{32.77} \pm 2.23$ & $\bm{0.903} \pm 0.03$\\
+\hline
+\end{tabular}}
+\end{center}
+\caption{\textbf{Quantitative results of super resolution and inpainting on the CelebA-HQ dataset.} Input images have an additive Gaussian noise with $\sigma_{\bm{y}} = 0.01$. Best results are in bold and second best results are underlined.}
+\label{table:celeb1}
+\end{table}
+
+\setlength{\tabcolsep}{5pt}
+\begin{table}[t!]
+\begin{center}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{l|lll|lll}
+\hline
+ \multirow{2}{*}{Method} & \multicolumn{3}{c|}{Nonlinear Deblurring} & \multicolumn{3}{c}{Gaussian Deblurring}  \\
+
+& LPIPS$\downarrow$ & PSNR$\uparrow$ & SSIM$\uparrow$  & LPIPS$\downarrow$ & PSNR$\uparrow$ & SSIM$\uparrow$ \\
+
+\hline
+ DPS~\cite{dps} & $0.230 \pm 0.065$ & $\underline{26.81} \pm 2.84$ & $\underline{0.720} \pm 0.077$ & $0.175 \pm 0.03$ &  $28.36 \pm 2.12$ & $0.772 \pm 0.07$  \\
+
+  MCG~\cite{mcg}  &-& -& - & $0.517 \pm 0.06$&$15.85 \pm 1.08$& $0.536 \pm 0.08$ \\
+
+  ADMM-PnP~\cite{plugmri} &$0.499 \pm 0.073$ & $16.17 \pm 4.01$& $0.359 \pm 0.140$ & $0.289 \pm 0.04$ & $20.98 \pm 4.51$  & $0.602 \pm 0.15$  \\
+
+  DDRM~\cite{ddrm}  & - & -  & -  & $0.193 \pm 0.04$ & $26.88 \pm 1.96 $ & $0.747 \pm 0.07 $ \\
+
+  DMPS~\cite{meng2022diffusion}  & - & -  & -  & $0.206 \pm 0.04$ & $26.45 \pm 1.83$ & $0.726 \pm 0.07$ \\
+
+\hline
+  Latent-DPS &  $\underline{0.225} \pm 0.04$& $26.18 \pm 1.73$  & $0.703 \pm 0.07$  & $0.205 \pm 0.04$ & $27.42 \pm 1.84$ & $0.729 \pm 0.07$ \\
+  PSLD-LDM$^*$~\cite{rout2023solving}  & - & -  & -  & $0.323 \pm 0.09$ & $24.21 \pm 2.79$ & $0.548 \pm 0.12$ \\
+\hline
+
+\hline
+  ReSample (Ours)  & $\bm{0.153} \pm 0.03$ & $\bm{30.18} \pm 2.21$  & $\bm{0.828} \pm 0.05$ & $\bm{0.148} \pm 0.04$ & $\bm{30.69} \pm 2.14$ & $\bm{0.832} \pm 0.05$ \\
+\hline
+\end{tabular}}
+\end{center}
+\caption{\textbf{Quantitative results of Gaussian and nonlinear deblurring on the CelebA-HQ dataset.} Input images have an additive Gaussian noise with $\sigma_{\bm{y}} = 0.01$. Best results are in bold and second best results are underlined. For nonlinear deblurring, some baselines are omitted, as they can only solve \emph{linear} inverse problems.}
+\label{table:celeb2}
+\end{table}
+
+We conduct experiments to solve both linear and nonlinear inverse problems on natural and medical images. We compare our algorithm to several state-of-the-art methods that directly use the pixel space: DPS~\cite{dps}, Manifold Constrained Gradients (MCG)~\cite{mcg}, Denoising Diffusion Destoration Models (DDRM)~\cite{ddrm}, Diffusion Model Posterior Sampling (DMPS)~\cite{meng2022diffusion}, 
+and plug-and-play using ADMM (ADMM-PnP)~\cite{plugmri}. 
+We also compare our algorithm to Latent-DPS and Posterior Sampling with Latent Diffusion (PSLD)~\cite{rout2023solving},
+a concurrent work we recently notice also tackling latent diffusion models.
+Various quantitative metrics are used for evaluation including Learned Perceptual Image Patch Similarity (LPIPS) distance, peak signal-to-noise-ratio (PSNR), and structural similarity index (SSIM).
+Lastly, we conduct ablation study to compare the performance of stochastic encoding and our proposed stochastic resampling technique as mentioned in Section~\ref{sec:resample_technique}, and also demonstrate the memory efficiency gained by leveraging LDMs. \\
+
+\subsection{Experimental Results}
+\paragraph{Experiments on Natural Images.} For the experiments on natural images, we use datasets FFHQ~\cite{ffhq}, CelebA-HQ~\cite{celeb}, and LSUN-Bedroom~\cite{lsun} with the image resolution of $256\times256\times3$. We take pre-trained latent diffusion models LDM-VQ4 trained on FFHQ and CelebA-HQ provided by Rombach et al.~\cite{stablediffusion} with autoencoders that yield images of size $64\times64\times3$, and DDPMs~\cite{ddpm} also trained on FFHQ and CelebA-HQ training sets. Then, we sample $100$ images from both the FFHQ and CelebA-HQ validation sets for testing evaluation. For computing quantitative results, all images are normalized to the range $[0, 1]$. All experiments had Gaussian measurement noise with standard deviation $\sigma_{\bm{y}} = 0.01$.
+
+
+
+For linear inverse problems, we consider the following tasks: (1) Gaussian deblurring, (2) inpainting (with a random mask), and (3) super resolution. For Gaussian deblurring, we use a kernel with size $61 \times 61$ with standard deviation $3.0$. 
+For super resolution, we use bicubic downsampling and a random mask with varying levels of missing pixels for inpainting. For nonlinear inverse problems, we consider nonlinear deblurring as proposed by Chung et al.~\cite{dps}.
+The quantitative results are displayed in Tables~\ref{table:celeb1} and~\ref{table:celeb2}, with qualitative results in Figure~\ref{fig:linear_results}. In Tables~\ref{table:celeb1} and~\ref{table:celeb2},
+we can see that ReSample significantly outperforms all of the baselines across all three metrics on the CelebA-HQ dataset.
+Interestingly, we observe that PSLD~\cite{rout2023solving} seems to struggle in the presence of measurement noise, often resulting in reconstructions that underperform compared to pixel-based methods. Remarkably, our method excels in handling nonlinear inverse problems, further demonstrating the flexibility of our algorithm. We further demonstrate the superiority of ReSample for handling nonlinear inverse problems in Figure~\ref{fig:nonlinear_ablation}, where we show that we can consistently outperform DPS.
+
+
+\begin{figure}[t!]
+\centering
+\includegraphics[width=1.0\textwidth]{figures/Natural_images.pdf}
+\caption{\textbf{Qualitative results of multiple tasks on the LSUN-Bedroom and CelebA-HQ datasets.} All inverse problems have Gaussian measurement noise with variance $\sigma_{\bm{y}} = 0.01$.}
+\label{fig:linear_results}
+\end{figure}
+
+
+
+
+\begin{figure}[t!]
+\centering
+\includegraphics[width=0.775\textwidth]{figures/ReSample_CT_demo.jpeg}
+\caption{\textbf{Qualitative results of CT reconstruction on the LDCT dataset.} 
+We annotate the critical image structures in a red box, and zoom in below the image.}
+\label{fig:resample_Medical}
+\end{figure}
+\setlength{\tabcolsep}{5pt}
+\begin{table}[t!]
+\begin{center}
+\resizebox{1.0\textwidth}{!}{%
+\begin{tabular}{l|ll|ll|ll}
+\hline
+ \multirow{2}{*}{Method} & \multicolumn{2}{c|}{Abdominal} & \multicolumn{2}{c|}{Head} & \multicolumn{2}{c}{Chest}\\
+
+& PSNR$\uparrow$ & SSIM$\uparrow$ & PSNR$\uparrow$ & SSIM$\uparrow$ & PSNR$\uparrow$ & SSIM$\uparrow$\\
+
+\hline
+ Latent-DPS & 26.80 $\pm 1.09$ &  0.870 $\pm 0.026$ & 28.64 $\pm 5.38$& 0.893 $\pm 0.058$ & 25.67$\pm 1.14$  & 0.822 $\pm 0.033$\\
+MCG \cite{mcg} & 29.41 $\pm 3.14$& 0.857 $\pm 0.041$ & 28.28 $\pm 3.08$& 0.795 $\pm 0.116$ & 27.92 $\pm 2.48$ & 0.842 $\pm 0.036$\\
+
+DPS~\cite{dps}  & 27.33 $\pm 2.68$& $0.715 \pm 0.031$ & 24.51 $\pm 2.77$ & 0.665 $\pm 0.058$ & 24.73 $\pm 1.84$ & 0.682 $\pm 0.113$\\
+\hline
+ PnP-UNet ~\cite{adaptive-inverse}& \underline{32.84} $\pm 1.29$&  \underline{0.942} $\pm 0.008$ & \underline{33.45} $\pm 3.25$ & \underline{0.945} $\pm 0.023$ & 29.67 $\pm 1.14$ & \underline{0.891} $\pm 0.011$\\
+
+  FBP & 26.29 $\pm 1.24$& 0.727 $\pm 0.036$ & 26.71 $\pm 5.02$ & 0.725 $\pm 0.106$& 24.12 $\pm 1.14$& 0.655 $\pm 0.033$\\
+
+ FBP-UNet \cite{unet} & 32.77 $\pm 1.21$ & 0.937 $\pm 0.013$& 31.95 $\pm 3.32$& 0.917 $\pm 0.048$ & \underline{29.78} $\pm 1.12$& 0.885 $\pm 0.016$\\
+\hline
+  ReSample (Ours) & \textbf{35.91} $\pm 1.22$ &  \textbf{0.965} $\pm 0.007$& \textbf{37.82} $\pm 5.31$ & \textbf{0.978} $\pm 0.014$ & \textbf{31.72} $\pm 0.912$& \textbf{0.922} $\pm 0.011$\\
+\hline
+
+\end{tabular}}
+\end{center}
+\caption{\textbf{Quantitative results of CT reconstruction on the LDCT dataset}. Best results are in bold and second best results are underlined.}
+\label{table:ct_errorbar}
+\end{table}
+
+\paragraph{Experiments on Medical Images.} 
+For experiments on medical images, we fine-tune LDMs on 2000 2D computed tomography (CT) images with image resolution of $256\times256$, randomly sampled from the AAPM LDCT dataset~\cite{ldct} of 40 patients, and test on the 300 2D CT images from the remaining 10 patients. We take the FFHQ LDM-VQ4 model provided by Rombach et al.~\cite{stablediffusion} as pre-trained latent diffusion model in this experimental setting followed by 100K fine-tuning iterations. Then, we simulate CT measurements (sinograms) with a parallel-beam geometry using 25 projection angles equally distributed across 180 degrees using the~\texttt{torch-radon} package~\cite{torch_radon}. Following the natural images, the sinograms were perturbed with additive Gaussian measurement noise with $\sigma_{\bm{y}} = 0.01$. Along with the baselines used in the natural image experiments, we also compare to the following methods:
+(1) Filtered Backprojection (FBP), which is a standard conventional CT reconstruction technique, and (2) FBP-UNet, a supervised learning method that maps the FBP reconstructed images to ground truth images using a UNet model.
+For FBP-Unet and PnP-UNet, we trained a model on 3480 2D CT from the training set. For MCG and DPS, we used the pre-trained checkpoints provided by Chung et al.~\cite{mcg}. We present visual reconstructions with highlighted critical anatomic structures in Figure~\ref{fig:resample_Medical} and quantitative results in Table~\ref{table:ct_errorbar}. Here, we observe that our algorithm outperforms all of the baselines in terms of PSNR and SSIM. Visually, we also observe that our algorithm is able to reconstruct smoother images that have more accurate and sharper details. %Although MCG can also reconstruct similar sharp details, it often incurs a lot of noise, which may not be acceptable for more realistic medical imaging settings. 
+
+\subsection{Ablation Studies}
+
+\paragraph{Effectiveness of the Resampling Technique.}
+
+Here, we validate our theoretical results by conducting ablation studies on stochastic resampling. Specifically, we perform experiments on the LSUN-Bedroom and CelebA-HQ datasets with tasks of Gaussian deblurring and super-resolution. As shown in Figure~\ref{fig:resampling_encoding}, we observe that stochastic resampling reconstructs smoother images with higher PSNRs compared to stochastic encoding, corroborating our theory.
+
+\paragraph{Effectiveness of Hard Data Consistency.} 
+In Figure~\ref{fig:nonlinear_ablation}, we perform an ablation study on the ReSample frequency on CT reconstruction. This observation is in line with what we expect intuitively, as more ReSample time steps (i.e., more data consistency) lead to more accurate reconstructions.
+More specifically, we observe in Figure~\ref{fig:nonlinear_ablation} (right) that if we perform more iterations of ReSample, we obtain reconstructions with higher PSNR.
+
+\begin{wraptable}{r}{10cm}
+\caption{Memory Usage of Different Methods for Gaussian Deblurring on the FFHQ Dataset}
+\label{table:memory256}
+\resizebox{0.6\textwidth}{!}{%
+\begin{tabular}{l | l|l | l | l}
+\hline
+Model & Algorithm & Model Only & Memory Increment & Total \\
+\hline
+DDPM & DPS & \textbf{1953MB} & +3416MB (175\%) & 5369MB \\
+& MCG &  & +3421MB (175\%) & 5374MB \\
+& DMPS &  & +5215MB (267 \%) & 7168MB \\
+& DDRM & & +18833MB (964 \%) & 20786MB \\
+\hline
+LDM & PSLD & 3969MB & +5516MB (140\%) & 9485MB \\ 
+& ReSample &  & \textbf{+1040MB (26.2\%)} & \textbf{5009MB}  \\
+\hline
+\end{tabular}}
+\label{table:memory}
+\end{wraptable}
+\begin{figure}[t!]
+\centering
+\includegraphics[width=0.8\textwidth]{figures/Stochastic_Resample.pdf}
+\caption{\textbf{Effectiveness of our resampling technique compared to stochastic encoding.} Results were demonstrated on the LSUN-Bedroom and CelebA-HQ datasets with measurement noise of $\sigma_{\bm{y}} = 0.05$ to highlight the effectiveness of stochastic resample.}
+\label{fig:resampling_encoding}
+\end{figure}
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\textwidth]{figures/nonlinear_ablation.pdf}
+    \caption{\textbf{Additional results on the performance of ReSample.} Left: Results on nonlinear deblurring highlighting the performance of ReSample. Right: Ablation study on the ReSample frequency on the performance.}
+    \label{fig:nonlinear_ablation}
+\end{figure}
+
+\paragraph{Memory Efficiency.}
+To demonstrate the memory efficiency of our algorithm, we use the command \\\texttt{nvidia-smi} to monitor the memory consumption during solving an inverse problem, in comparison to our baselines. We present the memory usage for Gaussian deblurring on the FFHQ dataset in Table~\ref{table:memory}. Although the entire LDM models occupy more memory due to the autoencoders, our algorithm itself exhibits memory efficiency, resulting in lower overall memory usage. This underscores its potential in domains like medical imaging, where memory complexity plays a crucial role in feasibility.
+
+
+
+
+
+
+
+\begin{comment}
+    \begin{figure}
+     \centering
+     \begin{subfigure}{0.6\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{figures/nonlinear_deblur_plus.pdf}
+         \caption{More examples of nonlinear deblurring.}
+         \label{fig:more_nonlinear}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}{0.38\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{figures/Timesteps_perf.png}
+         \caption{Performance v.s. number of time steps to perform resample}
+         \label{fig:resample_timestep}
+     \end{subfigure}
+     \caption{More experimental results of nonlinear inverse problems and ablation study.}
+     \label{fig:finalmaterials}
+\end{figure}
+\end{comment}
+
+
+
+
+\section{Conclusion}
+
+
+In this paper, we propose \textit{ReSample}, an algorithm that can effectively leverage LDMs to solve \emph{general} inverse problems. We demonstrated that (1) our algorithm can reconstruct high-quality images compared to many baselines and (2) we can fine-tune existing models for medical imaging tasks and achieve an additional reduction in memory usage. One fundamental limitation of our method lies in the computational overhead of hard data consistency, which we leave as a significant challenge for future work to address and improve upon.
+
+
+
+\section{Acknowledgement}
+
+BS and LS acknowledges support from U-M MIDAS PODS Grant and U-M MICDE Catalyst Grant, and computing resource support from NSF ACCESS Program and Google Cloud Research Credits Program. This work used NCSA Delta GPU through allocation CIS230133 and ELE230011 from the Advanced Cyberinfrastructure Coordination Ecosystem: Services \& Support (ACCESS) program, which is supported by National Science Foundation grants \#2138259, \#2138286, \#2138307, \#2137603, and \#2138296. SMK and QQ acknowledge support from U-M START \& PODS grants, NSF CAREER CCF-2143904, NSF CCF-2212066, NSF CCF-2212326, ONR N00014-22-1-2529, AWS AI Award, and a gift grant from KLA.
+
+
+\clearpage
+
+
+

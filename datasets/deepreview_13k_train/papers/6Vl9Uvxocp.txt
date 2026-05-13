@@ -1,0 +1,325 @@
+\title{Evolution guided generative flow networks}
+
+\begin{abstract}
+\acrfull{gfn} are a family of probabilistic generative models that learn to sample compositional objects proportional to their rewards. One big challenge of \acrshort{gfn} is training them effectively when dealing with long time horizons and sparse rewards. To address this, we propose \acrfull{egfn}, a simple but powerful augmentation to the \acrshort{gfn} training using \acrfull{ea}. Our method can work on top of any \acrshort{gfn} training objective, by training a set of agent parameters using \acrshort{ea}, storing the resulting trajectories in the prioritized replay buffer, and training the GFlowNets agent using the stored trajectories. We present a thorough investigation over a wide range of toy and real-world benchmark tasks showing the effectiveness of our method in handling long trajectories and sparse rewards.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:Introduction}
+\acrfull{gfn} \citep{Bengio2021FlowNB, gfn_foundations} are a family of probabilistic amortized samplers that learns to sample from a space proportionally to some reward function $R(x)$, effectively sampling compositional objects over some probability distribution. As a generative process, it composes objects by some sequence of actions, terminating by reaching a termination state.
+
+\acrshort{gfn} have shown great potential for diverse challenging applications, such as molecule discovery \cite{aiDriven}, biological sequence design \citep{gfn_biological}, combinatorial optimization \citep{gfn_combinatorial}, latent variable sampling \cite{liu2023gflowout}  and road generation \citep{ikram2023probabilistic}. The key advantage of \acrshort{gfn} over other methods such as \acrfull{rl} is that \acrshort{gfn}'s key objective is not reward maximization, allowing them to sample diverse samples from different peaks of high rewards. Although entropy-regularized RL also encourages randomness when taking actions, it is not general in when the underlying graph is not a tree (i.e., a state can have multiple parent states)~\citep{entropy_regularized_rl}.
+
+Despite the recent advancements, the real-world adaptation of \acrshort{gfn} is still limited by a major problem: temporal credit assignment for long trajectories and sparse rewards. For example, real-world problems such as protein design often are often long-horizon problems, necessitating long trajectories for sampling. Since reward is given only when the agent reaches the terminal states, associating intermediate actions with rewards over a lengthy trajectory becomes challenging. Additionally, reward space is sparse in real-world tasks, making temporal credit assignment more difficult. \acrfull{tb} objective \citep{trajectory_balance} attempts to tackle the problem by matching the flow across the entire trajectory, but in practice, it induces larger variance and is highly sensitive to sparse rewards~\citep{subtb_gfn}, making the training unstable.
+
+\acrfull{ea} \citep{ea_main}, a class of optimization algorithms inspired by natural selection and evolution, can be a promising candidate for tackling the said challenges. Indeed, the shortcomings of \acrshort{gfn} are the advantages of \acrshort{ea}, which makes it promising to consider incorporating \acrshort{ea} into the learning paradigm of \acrshort{gfn} to leverage the best from both worlds. First, the selection operation in \acrshort{ea} is achieved by fitness evaluation throughout the entire trajectory, which makes them robust to long trajectories and sparse rewards as they naturally bias towards regions with high expected returns. Secondly, mutation makes \acrshort{ea} naturally exploratory, which is crucial for \acrshort{gfn} training and mode-finding as they rely on diverse samples for better training~\citep{pan2022generative}. Third, \acrshort{ea}'s natural selection biases towards parameters that generate high reward samples, which, coupled with a replay buffer, can provide sample redundancy, resulting in a better gradient signal for stable \acrshort{gfn} training. 
+\begin{figure*}[bt!]
+    \centering
+    \includegraphics[width=.9\linewidth]{imgs/egfn_architecture.png}
+    \caption{The proposed \acrshort{egfn} architecture. \textbf{Step one} provides high-quality trajectories to the replay buffer. \textbf{Step two} gathers training trajectories from both online and offline trajectories. \textbf{Step three} trains the star agent using the training trajectories.}
+    \label{fig:egfn_architecture}
+\end{figure*}
+
+In this work, we introduce \acrfull{egfn}, a novel training method for \acrshort{gfn} combining gradient-based and gradient-free approaches and benefit from the best of both worlds. Our proposed approach is a three-step training process. First, using a fitness metric across sampled trajectories taken over a population of \acrshort{gfn} agents, we perform selection, crossover, and mutation on neural network parameters of \acrshort{gfn} agents to generate a new population. To reuse the population's experience, we store the evaluated trajectories in the \acrfull{prb}. For the second step, we sample the stored trajectories from a \acrfull{prb} and combine them with online samples from a different \acrshort{gfn} agent. Finally, using the gathered samples, we train a \acrshort{gfn} agent using gradient descent over some objectives such as \acrfull{fm}, \acrshort{tb}, and \acrfull{db}. The reward-maximizing capability of \acrshort{ea} enhances gradient signal through high reward training samples, ensuring stable \acrshort{gfn} training even in conditions with sparse rewards and long trajectories. Through extensive evaluation in experimental and a wide range of real-world settings, our method proves effective in addressing weaknesses related to temporal credit assignment in sparse rewards and long trajectories, surpassing \acrshort{gfn} baselines in terms of both the number of re-discovered modes and top-K rewards.
+
+
+
+\section{Preliminaries}
+
+\subsection{Generative Flow Networks (GFlowNets)}
+Generative Flow Networks (\acrshort{gfn}) are a family of generative models that samples compositional objects through a sequence of actions. Given a terminal state space $\mathcal{X}$, they aim to learn a stochastic policy $\pi$ that can sample terminal states $x \in \mathcal{X}$ proportionally to a non-negative reward function $R(x)$, i.e., $\pi(x) \propto R(x)$. \acrshort{gfn} construct objects $x \in \mathcal{X}$ by sampling constructive, irreversible actions $a \in \mathcal{A}$ that transition $s_t$ to $s_{t+1}$. We denote the Markovian composition trajectory $(s_0\rightarrow s_1\xrightarrow{}\dots \rightarrow x)$ as $\tau \in \mathcal{T}$, where $\mathcal{T}$ is the set of all trajectories. Thus, the problem is formulated as a directed acyclic graph (DAG), $(\mathcal{S}, \mathcal{E})$, where each node in $\mathcal{S}$ denotes a state with an initial state $s_0$, and each edge in $\mathcal{E}$ denotes a transition $s_t \rightarrow s_{t+1}$ with a special terminal action indicating $s = x \in \mathcal{X}$. There exist different paths leading to the same state in the DAG. An important advantage of \acrshort{gfn} is that GFN can sample proportionally to different peaks of reward and we can train it in both online and offline settings, allowing us to train from replay buffers.
+
+The key objective of \acrshort{gfn} training is to train $P_F$ such that $\pi(x) \propto R(x)$, where, 
+\begin{equation}
+    \pi(x) = \sum_{\tau\in\mathcal{T}:x\in\tau} \prod_{t=0}^{|\tau-2|}{P_F(s_{t+1}|s_{t};\theta)} 
+\end{equation}
+where, $P_F$ is a parametric model reprenting the forward transition probability of $s_t$ to $s_{t+1}$ with parameter $\theta$. There are several widely used loss functions to optimize \acrshort{gfn} including \acrshort{fm}, \acrshort{db} and \acrshort{tb}.
+
+\textbf{\acrlong{fm}}
+Following \citet{Bengio2021FlowNB}, we define the state flow and edge flow functions $F(s) = \sum_{s\in\tau}{F(\tau)}$ and $F(s\rightarrow s') = \sum_{\tau = (\dots s \rightarrow s' ...)}{F(\tau)}$, respectively. Then, the \acrshort{fm} criterion matches the in-flow and the out-flow for all states $s \in \mathcal{S}$, formally --
+\begin{equation}
+\label{flow_matching}
+    \sum_{s:(s\rightarrow s') \in \mathcal{A}}{F(s \rightarrow s')} = \sum_{s'':(s'\rightarrow s'') \in \mathcal{A}}{F(s' \rightarrow s'')} 
+\end{equation}
+
+where $F(s'\rightarrow s'') = R(s)$ if $s \in \mathcal{X}$. Using $P_F(s'|s,\theta) = F(s'\rightarrow s'')$, we turn equation \ref{flow_matching} to a loss function --
+\begin{equation}
+\label{flow_matching_loss}
+    \mathcal{L}_{\text{FM}}(s', \theta) = \left[\text{log}\frac{\sum_{(s\rightarrow s')\in\mathcal{A}}{P_F(s'|s,\theta)}}{\sum_{(s'\rightarrow s'')\in\mathcal{A}}{P_F(s'|s'',\theta)}}\right]^2
+\end{equation}
+
+\textbf{\acrlong{db}} Following \citet{gfn_foundations}, we parameterize $F(s)$, $F(s\rightarrow s')$, and $F(s'\rightarrow s)$ with $F_\theta(s)$, $P_F(s'|s,\theta)$, and $P_B(s|s',\theta)$, respectively. Then, the \acrshort{db} loss for a sampled trajectory $\tau \in \mathcal{T}$ is --
+\begin{equation}
+\label{detailed_balance_loss}
+    \mathcal{L}_{\text{DB}}(s, s', \theta) = \left[\text{log}\frac{F_\theta(s)P_F(s'|s, \theta)}{F_\theta(s')P_B(s|s',\theta)}\right]^2
+\end{equation}
+
+for all $(s \rightarrow s') \in \tau$.
+
+\textbf{\acrlong{tb}} \citet{trajectory_balance} extends the detail balance objective to the trajectory level, via a telescoping operation of Eq.~(\ref{detailed_balance_loss}). Specifically, $Z_\theta$ is a learnable parameter that represents the total flow: $\sum_{x\in\mathcal{X}}{R(x)} =  \sum_{s:s_0\rightarrow s\in\tau \forall \tau \in \mathcal{T}}{P_F(s|s_0;\theta)}$, and the \acrshort{tb} loss is defined as:
+\begin{equation}  
+\label{trajectory_balance_loss}
+    \mathcal{L}_{\text{TB}}(\tau, \theta) = \left[\text{log}\frac{Z_\theta \prod_{t=0}^{|\tau|-1}{P_F(s_{t+1}|s_t, \theta)}}{R(x)\prod_{t=0}^{|\tau|-1}{P_B(s_t|s_{t+1}, \theta)}}\right]^2.
+\end{equation}
+This can incur larger variance as demonstrated in~\citet{subtb_gfn}.
+
+We train the \acrshort{gfn} parameter $\theta$ by minimizing the loss $\mathcal{L}$ by performing stochastic gradient descent.
+
+\begin{algorithm*}[ht]
+    \SetKwFunction{eval}{EVALUATE}
+    \caption{Evolution Guided GFlowNet Training}
+    \label{Algo:EGFN}
+    \textbf{Input:}\\
+    $P_F^*$: Forward flow of the star agent with weights $\theta^*$\\
+    $pop_F$: Population of k agents with randomly initiated weights\\
+    $\mathcal{D}$ : Prioritized replay buffer\\
+    $\mathcal{E}$: Number of episodes in an evaluation\\
+    $\epsilon$: percent of greedily selected elites\\
+    $\delta$: online-to-offline sample ratio\\
+    $\gamma$: mutation strength\\
+    \For{each episodes}{
+        \For{each $P_F \in pop_F$}{
+            fitness, $\mathcal{D}$ = \eval{$P_F$, $\mathcal{E}$, noise = None, $\mathcal{D}$}\tcp*{store experience in replay buffer}
+        }
+        Sort $pop_F$ based on fitness in a descending order\\
+        Select the first $\epsilon$k $P_F$ from $pop_F$ as $elite$\\
+        Select (1 - $\epsilon$) $P_F$ from $pop_F$ stochastically based on fitness as $S$ \\
+        \While{$|S| <$ k}{
+            crossover between $P_F \in elite$ and $P_F \in S$ and append to $S$
+        }
+        \For{each $P_F \in S$}{
+            Apply mutation $\sim \mathcal{N}(0, \gamma) $ to $\theta_{P_F}$ with probability $p_{mutation}$
+        }
+        
+        fitness, $\mathcal{D}$ = \eval{$P_F^*$, $\mathcal{E}$, $\mathcal{D}$}\\
+        Sample a minibatch of $(1-\delta)T$ offline trajectories $\mathcal{T}$ from $\mathcal{D}$\\
+        Sample a minibatch of $\delta T$ online trajectories $\mathcal{T}$ from $P_F^*$\\
+        Compute loss $\mathcal{L}$ using trajectory balance loss from $\mathcal{T}$\\
+        Update parameters $\theta^*$ using stochastic descent on loss $\mathcal{L}$
+    }
+\end{algorithm*}
+\subsection{\acrfull{ea}}
+\acrfull{ea} \citep{ea1, ea2} are a class of combinatorial optimization algorithms that generally rely on three key techniques: mutation, crossover, and selection as in biological evolution. The crossover operation is responsible for generating new samples based on exchange of segments among a population of samples. The mutation operation alters the generated samples, usually with some probability $p_{mutation}$. Finally, the selection operation evaluates the \textit{fitness score} of the population and is responsible for generating the next population. In this work, we apply \acrshort{ea} in the context of the weights of the neural networks, often referred to as neuroevolution \citep{neuroevolution0, neuroevolution1, neuroevolution2, neuroevolution3}.
+
+
+\section{\acrfull{egfn}
+
+\acrshort{egfn} is an augmentation of existing training methods of \acrshort{gfn}. The evolutionary part in EGFN \textbf{(Step one)} samples discrete objects, e.g., a molecular structure, using a population of \acrshort{gfn} agents, evaluates the fitness of the agents based on the samples, and generates better samples by manipulating the weights of the agent population. We store the samples obtained from the population in a \acrshort{prb} that the \acrshort{gfn} sampler uses to, alongside on-policy samples, train its weights \textbf{(Step two \& three)}. To differentiate the  \acrshort{gfn} agent trained by gradient descent in \textbf{step two and three} from the agent population trained by \acrshort{ea} in \textbf{step one}, we refer to the agent trained by gradient descent as the \textit{star agent} and \acrshort{gfn} agents trained by EA as \textit{EA \acrshort{gfn} agents}. The training loop can be summarized in the following three steps:
+
+\begin{description}
+    \item[Step One] Generate a population of EA \acrshort{gfn} agents. Evaluate the fitness of the agents' weights by evaluating the samples gathered from the agents'. Apply the necessary selection, mutation, and crossover to the weights to generate the next population. Store the generated trajectories $\{(\tau_1, \dots, \tau_\mathcal{E})_1, \tau_1, \dots, \tau_\mathcal{E})_2, \dots, (\tau_1, \dots, \tau_\mathcal{E})_k\}$ to the \acrshort{prb}.
+    \item[Step Two] Gather online trajectories from star agent $P_F^*$ and offline samples from \acrshort{prb}.
+    \item[Step Three] Train $P_F^*$ using $\{\tau_1, \tau_2, \dots, \tau_T\}$ using gradient descent on any \acrshort{gfn} loss function such as equations \ref{flow_matching_loss}, \ref{detailed_balance_loss}, or \ref{trajectory_balance_loss}.
+\end{description}
+
+\subsection{Step one: Evolve}
+This step involves optimizing EA \acrshort{gfn} agent weights to produce trajectories that accelerate $P_F^*$ training using the \acrshort{prb}. To this end, before the train begins, we initialize $pop$, a population of $k$ EA \acrshort{gfn} agents with random weights. We optimize the population weights in a standard \acrshort{ea} process that contains selection, crossover, and mutation.
+
+\textbf{Selection} 
+The selection process begins with an evaluation of the population by calculating each agent's fitness scores. We define the fitness score of an agent by the mean reward of $\mathcal{E}$ trajectories $\{\tau_1, \tau_2, \dots, \tau_\mathcal{E}\}$ sampled from the agent. Next, based on fitness scores, we transfer the top $\epsilon$\% $elite$ agents' weights to the next population, unmodified. Notably, we store the $k\mathcal{E}$ trajectories sampled from this step to the \acrshort{prb} in this step.
+
+\textbf{Crossover} 
+The crossover step ensures weight mixing between agents', ensuring stochasticity. Here, we perform the crossover in two steps. First, we perform a selection tournament process among the agents to get $pop$ - $elite$ agents, sampling proportionally to their fitness value and performing crossover among them. Next, we perform a crossover between the unselected agents and $elite$. We combine the two sets of agents and pass them on to the mutation process.
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=.7\linewidth]{imgs/crossover.png}
+    \caption{The crossover operation in \acrshort{egfn}. Here, we fill a proportion of population through the crossover between agents selected proportionally to their fitness. We fill the rest with the crossover between the unselected agents and the \textit{elite} agents.}
+    \label{fig:crossover}
+\end{figure}
+
+\textbf{Mutation} 
+The mutation process ensures natural exploration among agents. We apply mutation by adding a gaussian perturbation $\mathcal{N}(0, \gamma)$ to the agent weights. In this work, we only apply mutation to the non-$elite$ agents.
+
+\subsection{Step two: Sample}
+In this step, we gather trajectory samples $\{\tau_1, \tau_2, \dots, \tau_T\}$ to train the star agent. We use both online trajectories sampled by the star agent and offline trajectories stored in the \acrshort{prb}. For online trajectories, we construct a trajectory $\tau$ by applying $P_F^*$ to get $s_0\rightarrow s_1\rightarrow\dots\rightarrow x, x \in \mathcal{X}$, where $\mathcal{X}$ is the set of all terminal states. It is noteworthy that there are many works \citep{thompson_gfn, temparature_gfn, gfn_local_credit, gfn_augmented} that augment or perturb the online trajectories by applying stochastic exploration, temperature scaling, etc. In this work, we choose a simple on-policy sampling from $P_F^*$ to get the online trajectories. For offline samples, we simply use \acrshort{prb} to sample trajectories collected from \textbf{step one} proportionally to the terminal reward. For this work, we take a simple approach for \acrshort{prb}, uniformly sampling 50\% trajectories from the 20 percentile and 50\% trajectories from the rest.
+
+\subsection{Step three: Train}
+We train the star agent by calculating loss $\mathcal{L}$ using equation \ref{flow_matching_loss}, \ref{detailed_balance_loss}, or \ref{trajectory_balance_loss} and minimizing the loss by applying stochastic gradient descent to the parameter $\theta$. 
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=.9\linewidth]{imgs/replay_buffer_trajectory.png}
+    \caption{Experimental results for the trajectory lengths of the trajectories stored in the replay buffer across different training steps. \textit{Left:} \acrshort{gfn} \textit{Right:} \acrshort{egfn}}
+    \label{fig:replay_buffer_trajectory}
+\end{figure}
+\begin{figure}[!b]
+    \centering
+    \includegraphics[width=.9\linewidth]{imgs/combined_trajectory.png}
+    \caption{Experimental results for the trajectory lengths of the trajectories stored in the training samples across different training steps for $R_0 = 10^{-2}$ (left) and $10^{-4}$ (right). \textit{Top:} \acrshort{gfn} \textit{Bottom:} 
+    \acrshort{egfn}}
+    \label{fig:combined_trajectory}
+\end{figure}
+
+
+\section{Experiments}
+
+In this section, we validate \acrshort{egfn} for different synthetic and real-world tasks. \ref{sub:synthetic_tasks} presents an investigation of \acrshort{egfn}'s performance in long trajectory and sparse rewards, generalizability across multiple \acrshort{gfn} objectives, and an ablation study on different components. Next, we present three real-world molecule generation experiments in \ref{sec:seh_protein}, \ref{sec:tfbind8}, and \ref{sec:qm9str}. Finally, we present an experiment summary. For all the following experiments, we use $k = 10$, $\mathcal{E} = 4$, $\epsilon = 0.2$, and $\gamma = 1$. For fair comparison, we equip all baselines with a replay buffer of comparable settings to the \acrshort{egfn}. All result figures report the mean and variance over three random seeds.
+\subsection{Synthetic tasks}
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=.2\linewidth]{imgs/hypergrid_sample.png}
+    \caption{An example hypergrid environment for $D = 2, H = 16$. Here, the $2^2 = 4$ yellow tiles refer to the modes.}
+    \label{fig:hypergrid_sample}
+\end{figure}
+\label{sub:synthetic_tasks}
+\begin{figure*}[ht]
+\centering
+    \begin{subfigure}[b]{0.25\linewidth}
+      \centering
+      
+      \raisebox{0.25\height}{\includegraphics[width=.7\linewidth]{imgs/hypergrid_sample.png}}
+    \end{subfigure}%%
+    \begin{subfigure}[b]{0.75\linewidth}
+      \centering
+      \includegraphics[width=.95\linewidth]{imgs/long_time_horizon_exp.png}
+    \end{subfigure}%%
+    \caption{\textit{Left:} An example hypergrid environment for $ \text{dimension } D = 2, \text{horizon } H = 16$. Here, the $2^2 = 4$ yellow tiles refer to the high reward modes. \textit{Right:} Experimental results comparison for the hypergrid task between \acrshort{egfn}, \acrshort{gfn}, \acrshort{rl}, and \acrshort{mcmc} baseline across increasing dimensions for 2500 training steps. \textit{Right top:} the \(\ell_1\) error between the learned distribution density and the true target density. \textit{Right bottom:} the number of discovered modes across the training process. As the dimension of the grid increases, the trajectory length also increases. The proposed \acrshort{egfn} method achieves better performance than all baselines, with broader performance gap between \acrshort{egfn} and \acrshort{gfn} with increasing trajectory length.}
+    \label{fig:long_time_horizon_experiment}
+\end{figure*}
+We first study the effectiveness of \acrshort{egfn} investigating the well-studied hypergrid task introduced by \citet{Bengio2021FlowNB}. The hypergrid is a $D$-dimensional environment of $H$ horizons, with a $H^D$ state-space, $D + 1$ action-space, and $2^D$ modes. The $i$th action in the action space corresponds to moving 1 step in the $i$th dimension, with the $D$th action being a termination action with which the agent completes the trajectory and gets a reward specified by equation \ref{eq:reward_hypergrid}.
+
+In this empirical experiment, two questions interest us.
+\begin{itemize}
+    \item \textit{Does EGFN augmentation provide improvement against the best \acrshort{gfn} baseline for longer trajectories and sparse rewards?}
+    \item \textit{Is this method generally applicable to other baselines?}
+\end{itemize}
+\textbf{Setup}
+We run all hypergrid experiments for $D \in \{3, 4, 5\}$, $H = 20$, and $R_0 \in \{10^{-3}, 10^{-4}, 10^{-5}\}$. To determine the best \acrshort{gfn} baseline, we run three objectives $\in \{\text{\acrshort{fm}}, \text{\acrshort{tb}}, \text{\acrshort{db}}\}$ (please see figure \ref{fig:generalizablity_experiment} below) and decide to use \acrshort{db} with a \acrshort{prb} of size 1000. For a fair comparison, we use \acrshort{db} for implementing EGFN. We use $R_0 = 10^{-5}$ for the long trajectory experiment and $D = 5$ for the reward sparsity experiment, keeping other variables fixed. Finally, we present an ablation study on different components used in our experiments for $H = 16, D = 5, \text{and } R_0 = 10^{-5}$. 
+
+For a complete picture, we compare our method with \acrshort{rl} baselines such as \acrshort{ppo} \citep{ppo} and \acrshort{sac} \citep{sac, sac_discrete} and \acrshort{mcmc} baseline such as \acrshort{mars} \citep{mars}.
+
+\textbf{Long time horizon result} In this experiment, as $D$ increases, $|\tau|$ increases, showing the performance over increasing $|\tau|$. Figure \ref{fig:long_time_horizon_experiment} demonstrates that \acrshort{egfn} outperforms \acrshort{gfn} baseline both in terms of mode finding efficiency and L1 error. Notably, as $|\tau|$ increases, the performance gap increases, confirming its efficacy in challenging environments. Unexpectedly, \acrshort{mars} prove to be very slow for these challenging environments. Besides, while \acrshort{rl} baseline such \acrshort{ppo} competes with \acrshort{gfn} and \acrshort{egfn} in the beginning, it fails to discover all modes due to its mode maximization objective. 
+\begin{figure}[!b]
+    \centering
+    \includegraphics[width=.94\linewidth]{imgs/ablation_exp_db.png}
+    \caption{Experimental results for the hypergrid task on different components of \acrshort{egfn}. \textit{Top:} the $\ell_1$ error between the learned distribution density and the true target density. \textit{Bottom:} the number of discovered modes across the training process. Here, $H=20, D=5$, and we use \acrshort{db} objective. We observe that \acrshort{prb} itself does not improve the results, but when it is coupled with mutation, the results improve.}
+    \label{fig:ablation_experiement}
+\end{figure}
+\textbf{Reward sparsity result} Next, to understand the effect of sparse rewards, we compare our method against \acrshort{gfn}. With a decreasing $R_0$, reward sparsity increases. Figure \ref{fig:sparsity_experiment} shows that \acrshort{egfn} outperforms traditional \acrshort{gfn}. Similar to the previous experiment, we see an increasing performance gap as the reward sparsity increases. Similar to previous experiment, both \acrshort{rl} and \acrshort{mcmc} baselines are no match for such difficult environments.
+
+\textbf{Different training objectives} To see how well \acrshort{egfn} works with different \acrshort{gfn} objectives, we show the result of augmentation of our method over all three \acrshort{gfn} objectives in figure \ref{fig:generalizablity_experiment}. We see that EGFN offers a steady improvement across all three \acrshort{gfn} objectives.
+
+\begin{figure*}[ht]
+    \centering
+    \includegraphics[width=.7\linewidth]{imgs/sparsity_exp.png}
+    \caption{Experimental results comparison for the hypergrid task between \acrshort{egfn}, \acrshort{gfn}, \acrshort{rl}, and \acrshort{mcmc} baseline across increasing dimensions for 2500 training steps. \textit{Top:} the $\ell_1$ error between the learned distribution density and the true target density. \textit{Bottom:} the number of discovered modes across the training process. Here, $H=20, D=5$. As the $R_0$ value decreases, the reward sparsity increases. The proposed \acrshort{egfn} method achieves better performance than all baselines, with broader performance gap between \acrshort{egfn} and \acrshort{gfn} with increasing sparsity.}
+    \label{fig:sparsity_experiment}
+\end{figure*}
+\textbf{Ablation study result} To understand the individual effect of each component of our method, we run the hypergrid experiment by comparing our method against the same without \acrshort{prb} and mutation. Figure \ref{fig:ablation_experiement} details the results of the experiment, underscoring the importance of the mutation operator in \acrshort{egfn}. It shows that \acrshort{prb} individually is not effective for improved results, but when it is coupled with mutation, our method delivers better results.
+\subsection{\acrfull{seh} binder generation task 
+$\left(|\mathcal{X}| \approx 10^{16}\right)$}
+\begin{figure}[b!]
+    \centering
+    \includegraphics[width=.3\linewidth]{imgs/seh_sample.png}
+    \caption{Example binder produced in the sEH task. Here the structure corresponds to the molecule with SMILES representaiton \texttt{O=P([O-])(O)c1ccc2ccccc2c1}}
+    \label{fig:seh_sample}
+\end{figure}
+\label{sec:seh_protein}
+\textbf{Setup} 
+In this experiment, we are interested in generating molecules with desired chemical properties that are not too similar to one another. Here, we represent molecules states as graph structures and actions as a vocabulary of blocks specified by junction tree modeling \citep{molecule_reward1, molecule_reward2}. In the pharmaceutical industry, drug-likeliness \citep{molecule_reward1}, synthesizability \citep{molecule_reward2}, and toxicity are crucial properties. Hence, we are interested in finding diverse candidate molecules for a given criteria to increase chances for post-selection. Here, the criteria is the molecule's binding energy to the 4JNC inhibitor of the soluble epoxide hydrolase (sEH) protein. To this end, we train a proxy reward function for predicting the negative binding energy that serves as the reward function. We perform the experiment following the experimental details and reward function specifications from \citet{Bengio2021FlowNB, distributional_gfn}. Since we are interested in both the diversity and efficacy of drugs, we define a mode as a molecule with a reward greater than 7.5 and a Tanimoto similarity among previous modes less than 0.7. We use \acrshort{fm} as the \acrshort{gfn} baseline and implement \acrshort{egfn} for the same objective.
+\textbf{Results} Since the state space is large, we show the result of the number of modes with reward threshold of 7.5 and 8.0, the top-100, and the top-1000 over the first $2.5\times 10^4$ states visited. Figure \ref{fig:molecule_experiment} confirms that \acrshort{egfn} outperforms \acrshort{gfn} baseline for mode discovery. Remarkably, \acrshort{egfn} discovers rare molecules with very high reward ($R > 8$) that \acrshort{gfn} fails to discover. Besides, \acrshort{egfn} has a better top-100 and top-1000 reward performance than \acrshort{gfn} baseline, soliciting its mode diversity, which is essential in a molecular discovery setting. 
+
+\subsection{Transcription factor binder generation task  $\left(|\mathcal{X}| \approx 70000\right)$}
+\label{sec:tfbind8}
+
+\textbf{Setup} In this experiment, we generate a nucleotide sequence as a string of length 8. Although the string could be generated autoregressively, in this experiment setting, we use a \acrfull{pamdp}, used in similar settings by \citet{understand_gfn, ikram2023probabilistic}. Using this \acrshort{mdp}, \acrshort{gfn} agent actions prepend or append to the nucleotide string. The reward is a DNA binding affinity to a human transcription factor provided by \citet{tfbind_reward}. We attempt three \acrshort{gfn} objectives, finally deciding to use \acrshort{tb} as the best \acrshort{gfn} baseline and implement \acrshort{egfn} with the same using a reward exponent $\beta = 3$. 
+
+\begin{figure}[!b]
+    \centering
+    \includegraphics[width=.8\linewidth]{imgs/tfbind_exp.png}
+    \caption{Experiment results for transcription factor binder generation task over 2000 training steps for $\beta = 3$. \textit{Top:} the number of discovered modes across the training process. \textit{Bottom:} the relative mean error. The proposed augmentation with \acrshort{egfn} achieves better results. \acrshort{gfn} implementation uses \acrshort{tb} objective. }
+    \label{fig:tfbind_experiment}
+\end{figure}
+
+\textbf{Results} Figure \ref{fig:tfbind_experiment} shows the result over 2000 training steps, showing that \acrshort{gfn} outperforms \acrshort{gfn} baseline both in terms of the number of modes discovered and the mean relative error. 
+
+\begin{figure*}[ht]
+    \centering
+    \includegraphics[width=.7\linewidth]{imgs/generalizability_exp.png}
+    \caption{Experimental results for the hypergrid task between \acrshort{egfn} and GFN across different \acrshort{gfn} objectives. \textit{Top:} the $\ell_1$ error between the learned distribution density and the true target density. \textit{Bottom:} the number of discovered modes across the training process. The proposed augmentation with \acrshort{egfn} achieves better results for all three objectives.}
+    \label{fig:generalizablity_experiment}
+\end{figure*}
+
+\begin{figure}[!b]
+\centering
+    \begin{subfigure}[b]{\linewidth}
+      \centering
+      \includegraphics[width=.34\linewidth]{imgs/qm9_sample.png}
+    \end{subfigure}
+    \begin{subfigure}[b]{\linewidth}
+      \centering
+      \includegraphics[width=.8\linewidth]{imgs/qm9_exp.png}
+    \end{subfigure}%%
+    \caption{From top to bottom: Example molecule produced in the qm9 task with SMILES representation \texttt{C1CCCCC1NOCFO}. Experiment results for small molecule generation task on the QM9 data over 2000 training steps for $\beta = 1$. The number of discovered modes across the training process. The relative mean error. The proposed augmentation with \acrshort{egfn} achieves better results. \acrshort{gfn} implementation uses \acrshort{tb} objective. }
+    \label{fig:qm9_experiment}
+\end{figure}
+\subsection{Small molecule generation Task $\left(|\mathcal{X}| \approx 60000\right)$} 
+\label{sec:qm9str}
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=.4\linewidth]{imgs/qm9_sample.png}
+    \caption{Example molecule produced in the qm9 task. Here the structure corresponds to the molecule with SMILES representaiton \texttt{C1CCCCC1NOCFO}}
+    \label{fig:qm9_sample}
+\end{figure}
+\textbf{Setup} In this experiment, we generate a small molecule graph based on the QM9 data \citep{qm9_main} that maximizes the energy gap between its \acrshort{homo} and \acrshort{lumo} orbitals, thereby increasing its stability. The resulting molecule is a 5-block molecule, having a choice among 12 blocks for its two stems. For the reward function, we use a pre-trained MXMNet proxy by \citet{qm9_reward} with a reward exponent $\beta = 1$. Similar to \ref{sec:tfbind8}, we use \acrshort{tb} for this experiment.
+
+\textbf{Results}
+In figure \ref{fig:qm9_experiment}, we report the mode discovery and L1 error results over 2000 training steps. Similar to previous experiments, \acrshort{egfn} maintains a steady improvement over the \acrshort{gfn} baseline for mode discovery while decreasing the L1 error quicker.
+
+\subsection{Result summary}
+\label{sec:result_summary}
+In both the synthetic and real-world experiments, \acrshort{egfn} performs well for mode discovery using fewer training steps than \acrshort{gfn} baseline. The performance gap increases with increasing trajectory length and reward sparsity. We also discover that the mutation operator is the most important factor for performance improvement.
+\begin{figure}[!b]
+    \centering
+    \includegraphics[width=.9\linewidth]{imgs/combined_trajectory.png}
+    \caption{Experimental results for the trajectory lengths of the trajectories stored in the training samples across different training steps for $R_0 = 10^{-2}$ (left) and $10^{-4}$ (right). \textit{Top:} \acrshort{gfn} \textit{Bottom:} 
+    \acrshort{egfn}}
+    \label{fig:combined_trajectory}
+\end{figure}
+
+\begin{figure*}[ht]
+\centering
+    \begin{subfigure}[b]{0.15\linewidth}
+      \centering
+      \raisebox{0.5\height}{\includegraphics[width=\linewidth]{imgs/seh_sample.png}}
+    \end{subfigure}%%
+    \begin{subfigure}[b]{0.85\linewidth}
+      \centering
+      \includegraphics[width=.95\linewidth]{imgs/molecule_exp.png}
+    \end{subfigure}%%
+    \caption{From left to right. (Example binder produced in the \acrfull{seh} binder generation task. Here the structure corresponds to the molecule with SMILES representation \texttt{O=P([O-])(O)c1ccc2ccccc2c1}. \acrshort{seh} binder generation experiment over $2.5\times10^4$ training steps. \acrshort{gfn} implementation uses \acrshort{fm} objective. The number of modes with a reward threshold of 7.5 and 8.0. The average reward across the top-100 and 1000 molecules. The proposed augmentation with \acrshort{egfn} achieves better results both in terms of mode discovery and average reward.}
+    \label{fig:molecule_experiment}
+\end{figure*}
+
+
+\section{Discussion}
+
+\textit{Why does \acrshort{egfn} work?} To explore this, we compare the trajectories stored in the training step for \acrshort{gfn} and \acrshort{egfn} across training steps $\in \{500, 1000, 1500, 2000, 2500\}$ in the hypergrid task in figure \ref{fig:combined_trajectory} for different levels of sparsity ($R_0 \in \{10^{-2}, 10^{-5}\}$). We see that when reward sparsity is low (left), training trajectory length distribution of both methods is similar. However, when the reward sparsity increases (right), \acrshort{gfn} training trajectories center around a lower trajectory length than that of \acrshort{egfn}. However, for a reward-symmetrical environment like hypergrid, the trajectory length's distribution must tend towards the mean to truly capture the data distribution. \acrshort{egfn} can achieve this by its reward-maximizing evolutionary process which supplies diverse modes to the \acrshort{prb}, ensuring a better training for the star agent. 
+
+
+\section{Related work}
+
+\subsection{Evolution in learning}
+There has been many attempts to augment learning, especially \acrshort{rl}, with \acrshort{ea}. Early works such \citet{qlearning_neat} combine NEAT \citep{neat} and Q Learning \citep{q_learning} by using evolutionary strategies to better tune the function approximators. In a similar manner, \citet{ea_for_exploration} uses \acrshort{ea} for exploration in policy gradient, generating diverse samples using mutation. \citet{ea_transfer_learning} use \acrshort{ea} for allowing parameter reuse without catastrophic forgetting. Recently, many methods use \acrshort{ea} to enhance deep \acrshort{rl} architectures such as \acrfull{ppo} \citep{ea_ppo}, \acrfull{sac} \citep{ea_sac}, and Policy Gradient \citep{erl}. The key idea from these approaches is to use \acrshort{ea} to overcome the temporal credit assignment and improve exploration by getting diverse samples~\citep{erl2}, with some exceptions such as \citet{ea_policy, actor_credit_error_ea, cem_rl} where they utilize \acrshort{ea} to tune the parameter of the actor itself.
+
+\subsection{\acrshort{gfn}}
+GFlowNets have recently been applied to various problems~\citep{liu2023gflowout,Bengio2021FlowNB}. There have also been recent efforts in extending GFlowNets to continuous~\citep{c_gfn} and stochastic worlds~\citep{stochastic_gfn}, and also leveraging the power of pre-trained models~\citep{pretrain_gfn}. In \acrshort{gfn} training, exploration is an important concept for training convergence, which many works attempt in different ways. For example, \citet{Bengio2021FlowNB} use $\epsilon$-greedy exploration strategy, \citet{temparature_gfn} learn the logits conditioned on different annealed temperatures, \citet{pan2022generative} introduces augmented flows into the flow network represented by intrinsic rewards, etc. The temporal credit assignment for long trajectories and sparse reward is a more recently studied topic for \acrshort{gfn}. Recent works such as \citet{trajectory_balance} attempt to tackle this problem by minimizing the loss over an entire trajectory as opposed to state-wise \acrshort{fm} proposed by \citet{Bengio2021FlowNB}, however, it may incur large variance as demonstrated in \citet{subtb_gfn}.
+
+
+
+
+\section{Conclusion}
+
+
+In this work, we presented EGFN, a simple but effective augmentation \acrshort{ea} strategy for training \acrshort{gfn}, especially for credit assignment in long trajectories and sparse rewards. This strategy mixes the best of both worlds: \acrshort{ea}'s population-based approach biases towards regions with long-term returns, and GFlowNet's gradient-based objectives handle the matching of the reward distribution with the sample distribution by leveraging better gradient signals. Besides, \acrshort{ea} promotes natural diversity of the explored region, removing the need to use any other exploration strategies for \acrshort{gfn} training. Furthermore, by incorporating \acrshort{prb} for offline samples, \acrshort{ea} promotes redundancy of high region samples, stabilizing the GFlowNet training with better gradient signals. We validate our method on a wide range of challenging toy and real-world benchmarks with exponentially large combinatorial search spaces, showing that our method outperforms the best GFlowNet baselines on long time horizon and sparse rewards. 
+
+In this work, we implement a standard evolutionary algorithm for EGFN. Incorporating more complex sub-modules of \acrshort{ea} for \acrshort{gfn} training such as Covariance Matrix Adaptation and Evolution Strategy (CMA-ES) such as the work in \citet{cem_rl} can be an exciting future work. Another future direction could be integrating the gradient signal from the \acrshort{gfn} objectives into the \acrshort{ea} strategy, creating a feedback loop. Besides, while we use a reward-maximization formulation for the EA in this work, there are works such as \citet{effective_diversity_rl} that directly improves diversity by formulation. We leave that for the future work.
+
+
+

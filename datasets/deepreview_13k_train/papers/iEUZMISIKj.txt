@@ -1,0 +1,424 @@
+\title{SwitchLoRA: Switched Low-Rank Adaptation Can Learn Full-Rank Information}
+
+\begin{abstract}
+  In the training of large language models, parameter-efficient techniques such as LoRA optimize memory usage and reduce communication overhead during the fine-tuning phase. However, applying such techniques directly during the pre-training phase results in poor performance, primarily because the premature implementation of low-rank training significantly reduces model accuracy.
+  Existing methods like ReLoRA and GaLore have attempted to address this challenge by updating the low-rank subspace. However, they still fall short of achieving the accuracy of full-rank training because they must limit the update frequency to maintain optimizer state consistency, hindering their ability to closely approximate full-rank training behavior.
+In this paper, we introduce SwitchLoRA, a parameter-efficient training technique that frequently and smoothly replaces the trainable parameters of LoRA adapters with alternative parameters. SwitchLoRA updates the low-rank subspace incrementally, targeting only a few dimensions at a time to minimize the impact on optimizer states. This allows a higher update frequency, thereby enhancing accuracy by enabling the updated parameters to more closely mimic full-rank behavior during the pre-training phase.
+  Our results demonstrate that SwitchLoRA actually surpasses full-rank training, reducing perplexity from 15.23 to 15.01 on the LLaMA 1.3B model while reducing communication overhead by 54\% on the LLaMA 1.3B model.
+  Furthermore, after full fine-tuning the SwitchLoRA pre-trained model and the full-rank pre-trained model on the GLUE benchmark, the SwitchLoRA pre-trained model showed an average accuracy gain of about 1\% over the full-rank pre-trained model. This demonstrates enhanced generalization and reasoning capabilities of SwitchLoRA.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\setcounter{equation}{0}
+
+The size of large language models (LLMs) has increased rapidly due to the advent of the transformer architecture \cite{gpt1}. To support the training of large models, distributed training techniques such as data parallelism \cite{dataParallel,dataParallelPS}, tensor parallelism \cite{Megatron1}, pipeline parallelism \cite{GPipe, Megatron2} and the Zero Redundancy Optimizer \cite{zero} have been employed.
+However, distributed training of trillion-scale models incurs significant inter-node communication overhead from synchronizing extensive parameter gradients across multiple nodes.
+
+To address these challenges, various parameter-efficient strategies have been proposed. Techniques such as model sparsification \cite{SparseGrad, sparseSGD} and progressive model pruning during training \cite{lottery} have shown promise. Additionally, methods leveraging Singular Value Decomposition (SVD) to approximate full-rank matrices in low-rank spaces have been explored \cite{elrt, Pufferfish, inrank}.
+Beyond the entire training process, several techniques improve adaptability and efficiency during the fine-tuning phase. For example, methods such as the Adapter \cite{Adapter:Houlsby, SparseAdapter} and Prefix-tuning \cite{Prefix-Tuning} introduce additional trainable layers while freezing the remaining parameters.
+
+Another noteworthy fine-tuning strategy is Low-Rank Adaptation (LoRA) \cite{hu2022lora}, which introduces no computational overhead during inference while maintaining training accuracy.
+However, previous studies \cite{Pufferfish, wang2023cuttlefish, lialin2023relora} have observed that parameter-efficient methods such as LoRA perform less efficiently during the pre-training phase because the premature use of low-rank training leads to a considerable loss in model accuracy.
+To increase the rank of updated parameters and benefit from low-rank training, ReLoRA \cite{lialin2023relora} applies the structure of LoRA and periodically resets LoRA adapters. Similarly, GaLore \cite{Galore} projects gradients onto a subspace, updating this subspace periodically.
+These approaches update the descent direction of trainable parameters to mimic the behavior of full-rank training, thereby overcoming the limitations observed in existing implementations of low-rank adaptation.
+However, we find that the intervals between resetting/updating steps in ReLoRA and GaLore are set to relatively large values because too frequent changes in the updating direction can cause inconsistency in optimizer states, which may not sufficiently approximate the behavior of full-rank training, resulting in a loss of accuracy.
+  To address this challenge, as illustrated in Figure \ref{fig:SwitchLoRA}, we introduce SwitchLoRA, which enables smooth and frequent adjustments to the trainable parameters of the LoRA matrices while introducing negligible additional computational overhead.
+  SwitchLoRA maintains a set of candidate vectors for each matrix within the LoRA adapters. At each training step, it replaces portions of the column or row vectors with these candidate vectors, subsequently training the LoRA adapters.
+  This process minimizes the impact on optimizer states, thus allowing for a higher update frequency compared to ReLoRA and GaLore. By more closely approximating full-rank parameter updating behaviors during the pre-training phase, this approach enhances overall accuracy.
+
+\begin{figure}
+  \centering
+  \includegraphics[width=0.95\linewidth]{figures/switchlora.png}
+  \caption{SwitchLoRA: An enhanced LoRA with dynamic vector switching for pre-training. In traditional LoRA, an adapter $\mathbf{B}\mathbf{A}$ is added to the matrix $\mathbf{W}$ of linear layers. $\mathbf{B}$ and $\mathbf{A}$ are trained while $\mathbf{W}$ is kept frozen (as depicted in the left part of the figure). SwitchLoRA enhances this by dynamically switching vectors within $\mathbf{B}$ and $\mathbf{A}$. The figure illustrates an example of this process: when the third column(labeled as black \textcircled{\raisebox{-0.9pt}{3}}) of $\mathbf{B}$ is switched, the corresponding third row(labeled as white \textcircled{\raisebox{-0.9pt}{3}}) of $\mathbf{A}$ is temporarily frozen. Similarly, when the second row(labeled as black \textcircled{\raisebox{-0.9pt}{2}}) of $\mathbf{A}$ is switched, the corresponding second column(labeled as white \textcircled{\raisebox{-0.9pt}{2}}) of $\mathbf{B}$ is also temporarily frozen.}
+  \label{fig:SwitchLoRA}
+\end{figure}
+\paragraph{Our contribution: }
+\begin{itemize}
+\item
+We propose SwitchLoRA to facilitate smooth and frequent adjustments to the trainable parameters of the LoRA matrices through low-rank adaptation, maintaining the accuracy of full-rank training while reducing communication overhead.
+\item
+  To mitigate inconsistencies in optimizer states when parameters are switched, SwitchLoRA resets the corresponding optimizer states and temporarily freezes the affected parameters. Additionally, SwitchLoRA employs a different initialization rule for LoRA adapter parameters and their associated candidate vectors, thereby improving the overall efficiency of the training process.
+\item
+
+We experimentally validate SwitchLoRA on various sizes of the LLaMA model. SwitchLoRA shows significant perplexity improvements when compared to ReLoRA \cite{lialin2023relora} and GaLore \cite{Galore}. For the 1.3B model, SwitchLoRA achieves a perplexity of 15.01, surpassing the 15.23 perplexity obtained with full-rank training.
+Furthermore, by performing full fine-tuning on the resulting 1.3B model using the GLUE \cite{glue} tasks to validate the reasoning capabilities, we demonstrate that SwitchLoRA enhances model accuracy by approximately 1\% on average, compared to the full-rank training method.
+
+\end{itemize}
+
+
+
+\section{Methodology}
+
+
+A substantial body of research, such as various pruning methods \cite{prune1, prune2}, has demonstrated that neural networks tend to exhibit low-rank characteristics after certain stages of training. Techniques for parameter-efficient fine-tuning, such as LoRA, capitalize on this observation.
+Concurrently, studies like \cite{overparameterize1, overparameterize2} have revealed that overparameterization in neural networks can lead to implicit regularization, thereby enhancing generalization. These findings underscore the importance of training with full parameters during the initial phase. Further empirical evidence supporting this phenomenon is provided in works like \cite{Pufferfish, wang2023cuttlefish, lialin2023relora, Galore}.
+Based on these insights, this section proposes a method designed to train a substantial number of parameters while selectively updating only a portion of the parameters at any one time to reduce communication overhead.
+
+\subsection{Low-Rank Adaptation (LoRA)}
+
+Introduced in \cite{hu2022lora}, LoRA is designed specifically for the fine-tuning stage of model training.
+
+Consider a pre-trained model with a weight matrix $\mathbf{W} \in \mathbb{R}^{m \times n}$ from a specific linear layer. LoRA proposes an innovative modification: transforming $\mathbf{W}$ into $\mathbf{W} + \frac{\alpha}{r}\mathbf{B}\mathbf{A}$. Here, $\mathbf{B} \in \mathbb{R}^{m \times r}$ and $\mathbf{A} \in \mathbb{R}^{r \times n}$ are newly introduced matrices, where $r$ is a positive integer significantly smaller than both $m$ and $n$. And $\alpha$ is a constant hyperparameter, set to $r$ in the following description to clarify the algorithm's mechanics. Then during fine-tuning, $\mathbf{W}$ is kept frozen while matrices $\mathbf{B}$ and $\mathbf{A}$ are trained. At the inference stage, $\mathbf{B}\mathbf{A}$ is added to $\mathbf{W}$ which preserves the model's original structure. The matrix $\mathbf{A}$ is initialized using Kaiming initialization \cite{kaimingInit}, while $\mathbf{B}$ is initially set to a zero matrix to ensure consistency.
+
+\subsection{SwitchLoRA}
+
+Below, we detail our proposed SwitchLoRA algorithm, the steps of which are outlined in Algorithm \ref{alg:switchAlg} and Algorithm \ref{alg:trainingProcess}.
+\paragraph{Switching process}
+
+Now, let us delve deeper into the linear system $(\mathbf{W}+\mathbf{B}\mathbf{A})\mathbf{x}=\mathbf{y}$. As illustrated in Figure \ref{fig:SwitchLoRA}, we decompose the matrix $\mathbf{B}$ into its column vectors $\mathbf{b}_{k} \in \mathbb{R}^{m\times 1}$ for $k = 1, \ldots, r$, represented as $\mathbf{B} = [\mathbf{b}_{1}, \ldots, \mathbf{b}_{r}]$.
+Similarly, we decompose matrix $\mathbf{A}$ into its row vectors $\mathbf{a}_{k}^{T} \in \mathbb{R}^{1\times n}$ for $k = 1, \ldots, r$, leading to $\mathbf{A}^{T} = [\mathbf{a}_{1}^{T}, \ldots, \mathbf{a}_{r}^{T}]$. Hereafter, we call these vectors $\mathbf{b}_{k}$ and $\mathbf{a}_{k}$ as LoRA vectors.
+
+The product $\mathbf{B}\mathbf{A}$ can be expressed using these LoRA vectors as follows:
+\begin{eqnarray}\label{eq:ba_decompose}
+\mathbf{B}\mathbf{A} = \sum_{k=1}^{r}\mathbf{b}_{k}\mathbf{a}_{k}^{T}.
+\end{eqnarray}
+
+Let $\mathcal{C}(\mathbf{B})$ denote an ordered set containing $\min(m,n)$ vectors, each having the same dimensions as $\mathbf{b}_{k}$. Furthermore, ensure that $\{\mathbf{b}_{1},\ldots,\mathbf{b}_{r}\}\subset \mathcal{C}(\mathbf{B})$. Similarly, define $\mathcal{C}(\mathbf{A}^{T})$ as an ordered set containing $\min(m,n)$ vectors, each having the same dimensions as $\mathbf{a}_{i}$. Also, let $\{\mathbf{a}_{1}^{T},\ldots,\mathbf{a}_{r}^{T}\}\subset \mathcal{C}(\mathbf{A}^{T})$.
+Moving forward, we will refer to $\mathcal{C}(\mathbf{B})$ and $\mathcal{C}(\mathbf{A}^{T})$ as the candidate vectors for $\mathbf{B}$ and $\mathbf{A}$, respectively.
+
+It is known for $k$ matrices $\mathbf{W}_{1}, \mathbf{W}_{2},\ldots, \mathbf{W}_{k}$, the following inequality holds:
+\begin{eqnarray}\label{eq:rank_ineq}
+rank(\sum_{i=1}^{k}\mathbf{W}_{i})\leq \sum_{i=1}^{k}rank(\mathbf{W}_{i}).
+\end{eqnarray}
+If we adopt the strategy in LoRA to add $\mathbf{B}\mathbf{A}$ to $\mathbf{W}$ and only update $\mathbf{B}$ and $\mathbf{A}$ from the pre-training stage, according to \eqref{eq:rank_ineq}, the rank of updated parameters of the local linear system through the entire training process will be limited to $2r$.
+This limitation can potentially impede the training efficacy.
+To mitigate this issue, we alter the values of $\mathbf{b}_{k}$ and $\mathbf{a}_{k}$ to $\mathbf{b}^{\prime}_{k}\in \mathcal{C}(\mathbf{B})$ and $\mathbf{a}^{\prime}_{k}\in \mathcal{C}(\mathbf{A}^{T})$ at appropriate frequencies, respectively, with these new values randomly selected from predefined candidate vectors list $\mathcal{C}(\mathbf{B})$ and $\mathcal{C}(\mathbf{A}^{T})$(one of $\mathbf{b}_{k}^{\prime}$ or $\mathbf{a}_{k}^{\prime}$ can be the same as $\mathbf{b}_{k}$ or $\mathbf{a}_{k}$).
+To maintain the consistency of the model's output, we adjust $\mathbf{W}$ by adding the difference between the old and new LoRA components.
+To be more precise, when $\mathbf{b}_{k}$ and $\mathbf{a}_{k}$ are updated to $\mathbf{b}^{\prime}_{k}$ and $\mathbf{a}^{\prime}_{k}$, we accordingly adjust $\mathbf{W}$ with the equation $\mathbf{W} \leftarrow \mathbf{W} + \mathbf{b}_{k}\mathbf{a}_{k}^{T} - \mathbf{b}_{k}^{\prime}\mathbf{a}_{k}^{\prime T}$.
+
+When implementing these updates, the updated parameters of both $\mathbf{B}$ and $\mathbf{A}$ are derived from $\min(m, n)$ distinct candidate vectors, which ensures updated parameters are full-rank. 
+Readers can refer to \cite{lialin2023relora, DeltaLoRA, chainOfLora} for more details.
+
+When selecting candidate vectors, we have the option to choose randomly from $C(\mathbf{B})$ or $C(\mathbf{A}^{T})$. Alternatively, we can select candidate vectors sequentially from $C(\mathbf{B})$ or $C(\mathbf{A}^{T})$, restarting from the beginning once the end of the set is reached. We find that varying the matching orders of vectors $\mathbf{b}_k$ and $\mathbf{a}_k$ yields only minor differences in outcomes. Additionally, to conserve GPU memory, spare candidate vectors can be offloaded to the CPU.
+\paragraph{Switching frequency}
+As mentioned in \cite{lottery, Pufferfish, lialin2023relora}, the model initially exhibits full internal rank during pre-training, and the internal rank of each layer decreases progressively over time. Consequently, we have adopted an exponential decay function for the switching frequency, namely $frequency=C e^{-\theta step}$, where the coefficients are determined empirically.
+Besides, the selection of LoRA rank $r$ for $\mathbf{B}\mathbf{A}$ is influenced by the final internal rank of the layers, which has been extensively explored in \cite{hu2022lora, valipour-etal-2023-dylora, AdaLoRA}. 
+
+\paragraph{Optimizer states resetting}
+Currently Large Language Models (LLMs) predominantly utilize Adam \cite{Adam} and AdamW \cite{AdamW} optimizers over SGD, which rely on optimizer states. It is crucial to note that after switching LoRA vectors, the gradients associated with these parameters are also changed, which prevents the reuse of optimizer states. To address this issue, when $\mathbf{a}_{k}$ is switched, we reset the optimizer states of $\mathbf{b}_{k}$. And conversely, when $\mathbf{b}_{k}$ is switched, we reset optimizer states of $\mathbf{a}_{k}$. Note that we reset optimizer states of counterpart pair rather than optimizer states of the switched parameters itself.
+Additionally, when the optimizer states are reset to zero, we freeze corresponding parameters for $N$ steps to maintain the robustness of the training. In this study, $N$ is set to $5$.
+
+{
+\begin{algorithm}[t]
+\caption{\textbf{Switch algorithm:} $\mathbf{W},\mathbf{P},\mathbf{Q}=\text{switch}(\mathbf{W},\mathbf{P},\mathbf{Q},i,j)$. $\mathcal{C}(\mathbf{P})[i]$ is $i$-th predefined candidate vectors for $\mathbf{P}$. }
+\label{alg:switchAlg}
+\begin{algorithmic}[1] 
+  \REQUIRE $\mathbf{W}, \mathbf{P}, \mathbf{Q}, i,  j$
+  \STATE $\mathbf{W}\gets\mathbf{W} + \mathbf{P}_{:,i}\mathbf{Q}_{i,:}$
+  \STATE $\mathbf{P}_{:, i}, \mathcal{C}(\mathbf{P})[j]\gets\mathcal{C}(\mathbf{P})[j], \mathbf{P}_{:, i}$
+  \STATE opt\_state$(\mathbf{Q}_{i,:})\gets\mathbf{0}$
+  \STATE $\mathbf{W}\gets\mathbf{W} - \mathbf{P}_{:,i}\mathbf{Q}_{i,:}$
+  \RETURN $\mathbf{W},\mathbf{P},\mathbf{Q}$
+\end{algorithmic}
+\end{algorithm}
+}
+
+{
+\begin{algorithm}[t]
+  \caption{\textbf{SwitchLoRA training process}.
+    switch\_num$(step, r, interval_{0}, \theta)$ is an integer generator function which yields $\lfloor s\rfloor+ X$ numbers sampled from $1$ to $r$ where $s=r/(interval_{0}e^{\theta step})$ and random variable $X \sim \text{Bernoulli}(s-\lfloor s\rfloor)$, i.e. $P(X=1)=1-P(X=0)=s-\lfloor s\rfloor$.}
+\label{alg:trainingProcess}
+\begin{algorithmic}[1] 
+  \REQUIRE $interval_{0}, \theta, N$
+  \FOR{step \textbf{in} all training steps}
+    \STATE Train model with Adam/AdamW optimizer for one step
+    \FOR{all linear layers}
+      \STATE Freeze $\mathbf{W}$
+      \FOR{$i$ in switch\_num$(step, r, interval_{0}, \theta)$}
+        \STATE Sample $j\sim \{k\}_{k=1}^{\min(m,n)}$
+        \STATE $\mathbf{W}, \mathbf{B}, \mathbf{A}\gets \text{switch}(\mathbf{W},\mathbf{B}, \mathbf{A}, i, j)$
+        \STATE Freeze $\mathbf{A}_{i,:}$ for $N$ steps
+      \ENDFOR
+      \FOR{$i$ in switch\_num$(step, r, interval_{0}, \theta)$}
+        \STATE Sample $j\sim \{k\}_{k=1}^{\min(m,n)}$
+        \STATE $\mathbf{W}^{T}, \mathbf{A}^{T}, \mathbf{B}^{T}\gets \text{switch}(\mathbf{W}^{T},\mathbf{A}^{T}, \mathbf{B}^{T}, i, j)$
+        \STATE Freeze $\mathbf{B}_{:,i}$ for $N$ steps
+      \ENDFOR
+    \ENDFOR
+  \ENDFOR
+\end{algorithmic}
+\end{algorithm}
+}
+\paragraph{Initialization of SwitchLoRA}
+Results in \cite{loraPlus, LoRAFA} have demonstrated the importance of initialization of LoRA matrices $\mathbf{B}$ and $\mathbf{A}$ to the training effects.
+Unlike these works, which are applied only during the fine-tuning stage, our method is utilized throughout the entire training process.
+To achieve appropriate initialization for matrices $\mathbf{B}$ and $\mathbf{A}$ along with their candidate vectors, we follow the idea of Xavier initialization \cite{Xavier} and Kaiming initialization \cite{kaimingInit}. The derived initialization values are presented as follows:
+\begin{eqnarray}
+std[\mathbf{B}] = std[\mathbf{b}] = (\frac{r}{\sqrt{m n}})^{\frac{1}{4}}gain^{\frac{1}{2}}\quad\forall \mathbf{b}\in \mathcal{C}(\mathbf{B}),\nonumber\\
+std[\mathbf{A}] = std[\mathbf{a}]= (\frac{\sqrt{m}r}{\sqrt{n}n})^{\frac{1}{4}}gain^{\frac{1}{2}}\quad\forall \mathbf{a}\in \mathcal{C}(\mathbf{A}^{T}),
+\end{eqnarray}
+where $gain$ is a constant dependent on the type of activation function used.
+
+
+
+\section{Related work}
+
+
+  \paragraph{Direct low-rank factorization method}
+  Numerous studies \cite{linearCNNSVD2014, cnnRankRegularization, coorFilters, lowRankNets} have demonstrated the effectiveness of using low-rank factorization to approximate the weights of linear layers in deep neural networks. They employ methods such as SVD to achieve a factorization $\mathbf{U}\mathbf{V}$ that minimizes $\|\mathbf{W} - \mathbf{U}\mathbf{V}\|$.
+  Later on, Pufferfish \cite{Pufferfish} and subsequent work in Cuttlefish \cite{wang2023cuttlefish} employ full-rank training prior to low-rank training to enhance efficiency. Additionally, they introduce adaptive strategies to determine the necessary duration of full-rank training and to select the appropriate rank for each linear layer for SVD.
+  Further developments in this field include InRank \cite{inrank}, which proposes a low-rank training approach based on greedy low-rank learning \cite{GLRL}. Additional research such as \cite{elrt} integrates orthogonality into the low-rank models to enhance training accuracy, while \cite{horvath2024maestro} introduces low-rank ordered decomposition, a generalization of SVD aimed at improving low-rank training efficiency.\\
+  These innovations mainly focus on convolutional neural networks (CNNs) and smaller-scale language models.
+
+  \paragraph{LoRA variants}
+  After the introduction of LoRA in \cite{hu2022lora}, which facilitated fine-tuning with very few trainable parameters, numerous works are proposed to improve the performance of LoRA. 
+  Improvements include better initialization strategies for LoRA matrices as demonstrated in \cite{loraGA, loraPro, pissaLora}. Additionally, \cite{loraPlus, rsLora} have adjusted learning rates for $\mathbf{B}$ and $\mathbf{A}$ to optimize training outcomes.
+  Other research efforts, such as those in \cite{kopiczko2024vera, dora}, have modified the training process of LoRA.
+  Moreover, some studies, such as \cite{sltrain, sst}, focus on training models from scratch within a sparse model structure.
+
+  Similar to our approach, various LoRA variants employ strategies to increase the rank of updated parameters by merging parameters of adapters into $\mathbf{W}$. For instance,  Chain of LoRA \cite{chainOfLora} and ReLoRA \cite{lialin2023relora} merge $\mathbf{B}\mathbf{A}$ into $\mathbf{W}$ and restart training at regular intervals. ReLoRA enables low-rank training during the early phases, yet it still requires 33\% of the steps to be full-rank training.
+Delta-LoRA \cite{DeltaLoRA}, another variant, targets the fine-tuning phase by updating the matrix $\mathbf{W}$ using the gradients from the LoRA matrices $\mathbf{B}$ and $\mathbf{A}$ as they are updated, enhancing accuracy for fine-tuning.
+
+  \paragraph{Other compression methods}
+  In addition to previously discussed techniques, there are many other methods to compress models during training.
+  For instance, several studies have introduced quantization to LoRA \cite{qlora, loftq, l4q}, effectively reducing memory overhead during fine-tuning.
+  Other research employs iterative pruning and growth techniques during training \cite{lottery, earlyBirdTicket, pruneTrain, ticketsWinner}.
+  Additionally, some works focus on compressing gradients through quantization \cite{adam8bit, opt4bit} or gradient projection \cite{Galore}.
+  Notably, \cite{Galore} presents a recent method for training from scratch that utilizes SVD to project gradients into a periodically updated subspace.
+  This approach also enables the addition of quantization, offering enhanced memory efficiency compared to LoRA.
+
+
+
+
+
+
+\section{Experiments}
+
+
+
+\subsection{Experimental setup}
+
+Our studies are carried out on the LLaMA model \cite{llama1}, with model sizes reduced to 130M, 250M, and 350M. 
+We designed our experiments based on the settings described in \cite{lialin2023relora} to benefit from established hyperparameter configurations.
+The specific hyperparameters for these models are detailed in Table \ref{tab:model_param}. We use Adam optimizer to train the model with $\beta_{1} = 0.9, \beta_{2}=0.999$.
+We use a cosine learning rate schedule with 100 warm-up steps and a total of 40,000 training steps. 
+
+The pre-training experiments utilize the C4 dataset \cite{C4}, with the first 46M samples of the training dataset serving as our training data, and samples from the entire validation dataset used for testing. The evaluation of validation loss is performed on 10M tokens for all our experiments, with evaluations conducted every 1,000 steps.
+Additionally, we utilize some of tasks from the GLUE benchmark \cite{glue} to assess the reasoning capabilities of the models.
+All experiments are conducted using 8xNVIDIA Tesla A100 80GB PCIe GPUs. Gradient accumulation is applied when GPU memory reaches its limit.
+
+\begin{table}[ht]
+  \caption{Model sizes and architectures used in our experiments}
+  \label{tab:model_param}
+  \centering
+\begin{tabular}{ccccccccc}
+\toprule
+Params & Hidden & Heads & Layers &  Batch size &Batch size per GPU & Seq. len.  \\ 
+\midrule
+130M   & 768    & 12    & 12     &  600        & 150               & 256        \\
+250M   & 768    & 16    & 24     &  1152       & 72                & 512        \\
+350M   & 1024   & 16    & 24     &  1152       & 72                & 512        \\
+1.3B   & 2048   & 32    & 24     &  1536       & 16                & 512        \\
+\bottomrule
+\end{tabular}\end{table}
+To ensure fairness across all experiments, the initialization method described in Section \ref{sec:metho} is applied to both LoRA and SwitchLoRA experiments. We deploy LoRA adapters across all attention layers and fully connected layers in these experiments.
+
+For the hyperparameters in Algorithm \ref{alg:trainingProcess}, we initiate with $interval_{0} = 40$ and set $N=5$. The parameter $\theta$ is adjusted to ensure that the switching frequency is one-third of its initial frequency at the $1/10$ of total steps.
+
+All experiments were repeated multiple times to select the best results. The learning rates for pre-training experiments were selected from a predefined set $\cup_{n=2,3,4}$\{1e-n 2e-n, 5e-n\}.
+We have determined that the optimal learning rate remains consistent across different model sizes for all methods. Specifically, the learning rate for full-rank training is set at 0.001, while the learning rate for the LoRA method is 0.01. For SwitchLoRA, the learning rate is slightly higher at 0.02.
+
+\subsection{Basic experiments}\label{sec:basicExp}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.31\linewidth]{figures/test_loss/llama130m_batch600_step40000.png}
+  \includegraphics[width=0.31\linewidth]{figures/test_loss/llama250m_batch1152_step40000.png}
+  \includegraphics[width=0.31\linewidth]{figures/test_loss/llama350m_batch1152_step40000.png}
+  \caption{Loss results for 130M, 250M, and 350M models with a LoRA rank of $128$.}
+  \label{fig:loss_128rank}
+\end{figure}
+
+Figures \ref{fig:loss_128rank} displays the experimental results for the 130M, 250M, and 350M models, respectively, with the LoRA rank set to $128$. The data reveal that while LoRA alone does not yield satisfactory training results, SwitchLoRA approaches the performance of full-rank training. The performance gap continues to grow as model size increases. This suggests that the low-rank training approach, such as LoRA, might cause models to become trapped in local minima, while SwitchLoRA mitigates this issue by dynamically changing trainable parameters.
+
+
+\begin{table}[ht]
+  \caption{Perplexity results at step 38,000 for 130M, 250M and 350M.}
+  \label{tab:main_ppl350m}
+  \centering
+  {
+  \begin{tabular}{l|ccccc}
+    \toprule
+                                     & 130M      & 250M    & 350M   \\
+    \midrule
+    Full-rank                        & 27.71     & 20.19   & 18.72  \\
+    LoRA(rank$=128$)                 & 34.74     & 29.56   & 31.87  \\
+    SwitchLoRA(rank$=128$)           & 30.26     & 20.97   & 19.96  \\
+    SwitchLoRA(rank$=256$)           & $\backslash$      & 19.82   & 18.70  \\
+    \bottomrule
+  \end{tabular}
+  }
+\end{table}
+\begin{table}[ht]
+  \caption{Perplexity results at step 38,000 for 1.3B models.}
+  \label{tab:main_ppl1b}
+  \centering
+  {
+  \begin{tabular}{l|ccccc}
+    \toprule
+                                     &  1.3B \\
+    \midrule
+    Full-rank                        &  15.23 \\
+    SwitchLoRA(rank$=256$)           &  15.89 \\
+    SwitchLoRA(rank$=512$)           &  15.01 \\
+    \bottomrule
+  \end{tabular}
+  }
+\end{table}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.31\linewidth]{figures/test_loss/llama250m_batch1152_step40000_rank256.png}
+  \includegraphics[width=0.31\linewidth]{figures/test_loss/llama350m_batch1152_step40000_rank256.png}
+  \includegraphics[width=0.31\linewidth]{figures/test_loss/llama1b_batch1536_rank256.png}
+  \caption{Loss results for 250M, 350M and 1.3B models using higher LoRA ranks.}
+  \label{fig:loss_256rank}
+\end{figure}
+As shown in Figure \ref{fig:loss_256rank}, additional experiments conducted on the 250M, 350M and 1.3B models using higher LoRA ranks demonstrates improved performance compared to those with the rank set at $128$, achieving outcomes close to those of full-rank training.
+Although utilizing a higher rank yields better outcomes, it may not be more economical to increase the LoRA rank instead of increasing the model size for larger models for several reasons. First, the method still has potential for further refinement. Second, a lower LoRA rank enables training on devices with limited memory capacities.
+Furthermore, in the context of 3D parallelism, inter-node communication is predominantly influenced by data parallelism, where communication overhead is proportional to trainable parameters. The trainable parameters for each model are detailed in Table \ref{tab:trainable_param}. For further discussions on potential ways to enhance the SwitchLoRA strategy, refer to Section \ref{sec:future}.
+
+\begin{table}[ht]
+  \caption{Comparison of trainable parameters: full-rank models vs. LoRA and SwitchLoRA.}
+  \label{tab:trainable_param}
+  \centering
+  {
+  \begin{tabular}{l|cccccc}
+    \toprule
+    Full-rank                        & 247.5M  & 247.5M  & 368.2M & 368.2M  & 1339.5M & 1339.5M\\
+    \midrule
+    \multirow{2}{*}{(Switch)LoRA}    & $r=128$ & $r=256$ & $r=128$& $r=256$ & $r=256$ & $r=512$ \\
+                                     & 98.9M   & 148.4M  & 125.6M & 185.4M  & 370.7M  & 609.7M\\
+    \bottomrule
+  \end{tabular}
+  }
+\end{table}
+\subsection{Comparison with other methods}
+
+Among all related methods, the works which are most close to ours are ReLoRA \cite{lialin2023relora} and GaLore \cite{Galore}. We do comparison experiments on these two methods to further validate the effectiveness of our algorithm.
+The learning rates for all methods are tuned in $\cup_{n=2,3,4}$\{1e-n 2e-n, 5e-n\}.
+
+\paragraph{Comparison with ReLoRA}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.4\linewidth]{figures/test_loss/relora250m_batch1152_warm1000_approx.png}
+  \includegraphics[width=0.4\linewidth]{figures/test_loss/relora250m_batch1152_warm1000_full1000.png}
+  \caption{Comparison between ReLoRA and SwitchLoRA. In the figure, red circles denotes the steps at which the parameters of the LoRA adapter are reset.}
+  \label{fig:relora_loss}
+\end{figure}
+Since ReLoRA requires full-rank pre-training as warm-up, we do full-rank pre-training on SwitchLoRA too to do a fair comparison. In the Figure \ref{fig:relora_loss}, we compare ReLoRA and SwitchLoRA with different full-rank pre-training steps. It shows that our method can still perform better when ReLoRA uses 5,000 steps full-rank pre-training and SwitchLoRA uses 200 steps full-rank pre-training. Furthermore, when both algorithms are subjected to the same 1,000 steps of full-rank pre-training, SwitchLoRA shows significant improvements on ReLoRA.
+
+The frequency for resetting the LoRA adapters in ReLoRA is set to 1/5,000, significantly lower than the initial switching frequency of 1/40 in SwitchLoRA experiments. As illustrated in Figure \ref{fig:relora_loss}, we observe a rapid decrease in loss at each resetting step in the ReLoRA experiments. In contrast, the loss reduction in SwitchLoRA experiments is steady and more rapid.
+
+\paragraph{Comparison with GaLore}
+
+In the comparison experiments with GaLore, we strictly follow the setup in Galore \cite{Galore}. 
+For the 350M LLaMA model, GaLore achieves a perplexity of 20.29, whereas SwitchLoRA performs slightly better, with a perplexity of 19.58.
+In addition, we conducted additional experiments on the 350M model, changing only one hyperparameter to assess its impact. The perplexity results are shown in Table \ref{tab:galore_perp}.
+When further reducing the rank, as shown in Table \ref{tab:galore_perp}, our method performs significantly better.
+This improvement may be because GaLore's use of SVD focuses on the most significant directions, whereas SwitchLoRA covers all update directions, including less important ones that still require training.
+\begin{table}[ht]
+  \caption{Perplexity comparison for GaLore and SwitchLoRA with different experimental setup.}
+  \label{tab:galore_perp}
+  \centering
+  {
+  \begin{tabular}{l|ccccc}
+    \toprule
+                                     & Standard       & Model size=130M    & Rank=128 & Rank=32 & Seq. len. = 512  \\
+    \midrule
+    GaLore                           & 20.29          & 26.17   & 22.52    & 34.09   & 19.03 \\
+    SwitchLoRA                       & 19.58          & 25.93   & 20.93    & 25.26   & 18.19 \\
+    \bottomrule
+  \end{tabular}
+  }
+\end{table}
+
+The gradient projection subspace update frequency in GaLore is set at 1/200, while the initial switching frequency for SwitchLoRA is 1/40. Additionally, since updates in GaLore are performed via SVD, the subspace changes are less frequent compared to approaches that randomly select a new subspace. Consequently, the subspace changes in GaLore are, in fact, less efficient.
+
+\subsection{Reasoning ability comparison}\label{sec:finetune}
+  Current works on low-rank training for LLMs, such as \cite{lialin2023relora, Galore}, primarily evaluate models based on perplexity and lack validation of reasoning abilities.
+  To validate the reasoning abilities, we also conducted full fine-tuning using the resulting checkpoints from the aforementioned experiments. We fine-tuned the models on GLUE tasks \cite{glue}. For the checkpoints trained using SwitchLoRA, all LoRA adapters are merged into the original weights such that $\mathbf{W} \leftarrow \mathbf{W} + \mathbf{B} \mathbf{A}$ before the fine-tuning process.
+
+\begin{table}[ht]
+  \caption{GLUE benchmark of the full-rank, SwitchLoRA and GaLore pre-trained 350M models. The metric for STS-B is the Pearson correlation, while Matthew's correlation coefficient is used for CoLA. Accuracy is reported for the other tasks.}
+  \label{tab:glue350m}
+  \centering
+  \begin{tabular}{l|ccccc}
+  \toprule
+  & CoLA & STS-B & MRPC & RTE & SST2 \\ 
+  \midrule
+  Full-rank pre-trained & 42.95$\pm$5 & 87.26$\pm$0.2 & 79.16$\pm$1 & 59.86$\pm$1 & 90.88$\pm$0.5 \\ 
+  SwitchLoRA pre-trained & 23.13$\pm$15 & 87.71$\pm$0.5 & 76.86$\pm$2 & 56.24$\pm$5 & 90.83$\pm$0.3 \\
+  GaLore pre-trained & 40.23$\pm$2 & 86.14$\pm$0.5 & 72.70$\pm$4 & 54.66$\pm$4 & 89.35$\pm$0.5 \\
+  \bottomrule
+  \end{tabular}
+\end{table}
+
+We first perform full fine-tuning on the pre-trained 350M models. The full-rank pre-trained model is from Section \ref{sec:basicExp}. Similarly, the SwitchLoRA pre-trained model, with a LoRA rank of 256, is also from Section \ref{sec:basicExp}. The GaLore pre-trained model originates from newly conducted experiments, where the batch size, sequence length, and rank are the same as in the SwitchLoRA experiment. This GaLore pre-training experiment resulted in a perplexity of 21.61.
+
+The full fine-tuning results for these three models are shown in Table \ref{tab:glue350m}. From the results, we observe that for the 350M models, except for the CoLA task, SwitchLoRA outperforms GaLore by [insert performance difference], and outperforms the full-rank model by [insert performance difference].
+
+  We also conduct fine-tuning experiments on the 1.3B LLaMA models, one pre-trained using full-rank and the other pre-trained using SwitchLoRA with a LoRA rank of 512.
+  Both pre-trained models are from Section \ref{sec:basicExp}.
+  As shown in Table \ref{tab:glue1b}, SwitchLoRA performs slightly worse in some tasks and better in others compared to the full-rank results. Overall, the average score of SwitchLoRA exceeds the full-rank results by approximately 1\%.
+  
+\begin{table}[h]
+  \caption{GLUE benchmark of the Full-rank pre-trained and SwitchLoRA pre-trained models. The metrics for all tasks except STS-B are accuracy. The metric for STS-B is Pearson correlation coefficient.}
+  \label{tab:glue1b}
+  \centering
+  \begin{tabular}{l|ccccc}
+  \toprule
+                         & CoLA        & STS-B          & MRPC        & RTE         & SST2 \\ 
+  \midrule
+  Full-rank pre-trained  & 48.60$\pm$2 & 87.64$\pm$0.1  & 78.43$\pm$1 & 58.05$\pm$3 & 91.93$\pm$1 \\ 
+  SwitchLoRA pre-trained & 47.43$\pm$3 & 88.49$\pm$0.3 & 80.15$\pm$2 & 61.37$\pm$3 & 92.39$\pm$0.5 \\
+  \bottomrule
+  \end{tabular}
+\end{table}
+
+
+
+\section{Limitations and future work}
+
+
+While our results are promising, there are several areas for future exploration.
+In our experiments, we have demonstrated that selecting a larger LoRA rank is necessary to achieve accuracy comparable to full-rank training. Additionally, finely tuning the switching frequency of the LoRA vectors presents significant challenges.
+To address these limitations, we propose the following directions for future work, as illustrated in Figure \ref{fig:future_work}.
+\begin{itemize}
+\item In our experiments, we simply used exponentially decreasing switching frequencies, which may not be the optimal approach. Guidelines should be developed to help set appropriate switching frequencies throughout the training process.
+\item Going further, a more detailed idea is to examine each layer of the model to adjust the switching frequencies.
+For instance, LoRA-drop \cite{LoRA-drop} evaluates whether the rank is sufficient using a norm of $\Delta\mathbf{W}\mathbf{x}$. This is rational because different types of layers, such as the $Q, K, V$ matrices in transformer layers, exhibit significantly varied behaviors.
+\item In our work, we simply chose candidate vectors at random or sequentially. However, during training, all candidates are updated separately, leading to significant differences among them. The selection of these candidates may improve the training outcomes.
+\end{itemize}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.6\linewidth]{figures/future_work.png}
+  \caption{Future work roadmap.}
+  \label{fig:future_work}
+\end{figure}
+
+
+\section{Conclusions}
+
+In this work, we introduce SwitchLoRA, a novel training strategy designed for parameter-efficient pre-training. Our approach achieves comparable accuracy to full-rank training while reducing the trainable parameters to approximately 50\% to 60\% of those in traditional full-rank training. Moreover, the computational overhead and memory usage are nearly identical to those of LoRA when using the same number of trainable parameters.
+We further validate the reasoning abilities of models trained with SwitchLoRA using the GLUE benchmark. The results from the 1.3B model indicate that SwitchLoRA not only matches but also slightly outperforms full-rank training by about 1\% in accuracy.
+
+\newpage
+
+\medskip
+
+
+
+{
+\small
+
+    
+
+
+

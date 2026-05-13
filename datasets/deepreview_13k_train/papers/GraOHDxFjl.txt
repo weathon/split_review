@@ -1,0 +1,253 @@
+\title{LLaMA Decoder As Vision Transformer}
+
+\begin{abstract}
+This work examines whether decoder-only Transformers such as LLaMA, which were originally designed for large language models (LLMs), can be adapted to the computer vision field. 
+We first "LLaMAfy" a standard ViT step-by-step to align with LLaMA's architecture, and find that directly applying a causal mask to the self-attention brings an attention collapse issue, resulting in the failure to the network training. 
+We suggest to reposition the class token behind the image tokens with a \textit{post-sequence class token} technique to overcome this challenge, enabling causal self-attention to efficiently capture the entire image's information. 
+Additionally, we develop a \textit{soft mask} strategy that gradually introduces a causal mask to the self-attention at the onset of training to facilitate the optimization behavior. 
+The tailored model, dubbed as \textit{image LLaMA (iLLaMA)}, is akin to LLaMA in architecture and enables direct supervised learning. 
+Its causal self-attention boosts computational efficiency and learns complex representation by elevating attention map ranks.
+iLLaMA rivals the performance with its encoder-only counterparts, achieving 75.1\% ImageNet top-1 accuracy with only 5.7M parameters. 
+Scaling the model to $\sim$310M and pre-training on ImageNet-21K further enhances the accuracy to 86.0\%. 
+Extensive experiments demonstrate iLLaMA's reliable properties: shape-texture bias, calibration, quantization compatibility, ADE20K segmentation and CIFAR transfer learning. 
+We hope our study can kindle fresh views to visual architectures in the wave of LLMs and inspire the development of unified multimodal models. 
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+The year 2024 saw the meteoric rise of large language models (LLMs), as well as the 4th anniversary of the Vision Transformer (ViT)~\cite{dosovitskiy2020image}. Born in 2020, ViT was influenced by the prevailing \textit{encoder-only} text Transformers at the time, such as BERT~\cite{devlin2018bert}, \etc. Accordingly, ViT is allowed to borrow the encoder-only design, \ie, self-attention do not use any causal mask. 
+As a result, advanced vision backbones~\cite{touvron2021training, wang2021pyramid, guo2022cmt} and training paradigms~\cite{bao2021beit, he2022masked} have followed such convention by default. 
+
+Meanwhile, the development of text Transformers did not stand still. A series of LLMs with a \textit{decoder-only} architecture (\eg, LLaMA~\cite{touvron2023llama}), have sparked a new wave. Pre-trained decoder-only Transformers have demonstrated remarkable performance in diverse textual~\cite{touvron2023llama2} and multimodal tasks~\cite{liu2023visual, liu2023improved, zhu2023minigpt, chen2023minigpt}. 
+In this context, designing unified architectures for language and vision is a promising direction. Specifically, unified models employ shared types of operators to process both visual and textual data, reducing the cost of hardware implementation. Moreover, compared to using separate models for image and text, unified models~\cite{fuyu-8b, li2023otterhd} simplify the inference process by handling different modalities simultaneously, thereby improving practical efficiency. 
+
+\textit{Toward this goal, we took the initial step of exploring whether decoder-only Transformers can hold its effectiveness in the unimodal vision domain.} In this study, we demonstrate that through straightforward supervised learning, LLaMA architecture itself can process input images with simple yet crucial modifications. We start by modifying a standard encoder-only ViT (\eg, ViT-T/16), progressively adapting its components to align with those in LLaMA. 
+In practice, we observe an \textit{attention collapse} issue, \ie, the training loss fails to converge by directly adding a causal mask to the attention map. The causal mask restricts the class token from accessing the image's global information, thereby hindering the optimization of the training loss. To this end, we propose a \textit{post-sequence class token} technique, repositioning the class token to the end of image tokens (details in Section~\ref{sec:3.3}). As a result, causal mask can keep the attention score between the class token and others, allowing the model to optimize stably. We also evaluate the advantages of the causal self-attention in reducing computational complexity and enhancing the attention map rank. 
+
+\input{figText/fig_architecture}
+
+Moreover, we explore several training techniques for the proposed causal Transformer. 
+When observing things, humans start by broadly catching global connections, then narrow down to focus on specifics.
+Motivated by this, we develop a \textit{soft mask} approach -- bi-directional self-attention degenerates to a causal self-attention at the onset of training -- to further boost the network performance. Soft mask does not alter the causal self-attention during inference but improves the initial training behavior of the network. (details in Section~\ref{sec:3.6}). We illustrate different types of masks in Figure~\ref{fig:softmask2}. 
+
+Equipped with these modifications, we propose a decoder-only vision Transformer with causal self-attention inside, dubbed \textit{image LLaMA (iLLaMA)}, as shown in Figure~\ref{fig:architecture}. We conduct a thorough evaluation of iLLaMA's properties, including ImageNet-1K classification~\cite{deng2009imagenet}, calibration, shape-texture bias, quantization compatibility, ADE20K semantic segmentation~\cite{zhou2019semantic}, and CIFAR transfer learning~\cite{krizhevsky2009learning}. Experimental results show that iLLaMA delivers favorable and reliable performance to its encoder-only counterparts (\ie, ViT, VisionLLaMA), while maintaining a pure decoder design. 
+More importantly, a spectral analysis on the attention map empirically shows that compared to bi-directional counterparts, causal self-attention has a higher rank (see Figure~\ref{fig:rank_analysis}), which allows for learning complex image representation. The contribution of our work can be summarized as follows:
+
+\begin{itemize}[leftmargin=*,topsep=0pt,itemsep=0pt,noitemsep]
+\item We explore the adaption of the LLaMA decoder to visual tasks and identify the attention collapse issue caused by causal self-attention. To address this, we introduce the \textit{PS [CLS]} method. 
+\item We propose a \textit{soft mask} strategy to optimize causal self-attention and analyzed the improvement in the rank of the causal attention map. 
+\item We develop a series of \textit{iLLaMA} models and empirically validate its performance on ImageNet, along with practical properties such as quantization compatibility, calibration, shape-texture bias. 
+\end{itemize}
+
+We hope our work to inspire a re-evaluation of vision backbone design in the era of LLMs and provide fresh insights for their architectural unification. 
+
+
+
+\section{Preliminaries and Motivation}
+
+\label{sec:prelimi}
+
+\textbf{Encoder and decoder.} We briefly summarize the encoder and decoder in Transformer~\cite{vaswani2017attention}. Both of them basically consist of attention module and a MLP module, each followed by a residual connection. \textit{The key difference between them is the mask scheme in their self-attention}. Encoders use bi-directional self-attention, and decoders employ causal self-attention and cross-attention. However, the latter is typically omitted in decoder-only 
+LLMs~\cite{touvron2023llama, touvron2023llama2}, we thus focus on comparing causal and bi-directional self-attention as follows, in terms of the \textit{mask} setting. Denote ${\bf X}\in\mathbb{R}^{N\times d}, {\bf O}\in\mathbb{R}^{N\times d}$ as the input and output sequences, where $N$ is the number of tokens and $d$ is the embedding dimension. $W_{\bf q}, W_{\bf k}, W_{\bf v}\in\mathbb{R}^{d\times d}$ denotes the linear mapping of query, key and value, respectively. Generally, self-attention module can be formulated as (set the head number and batch size as $1$ for simplicity): 
+\begin{equation}
+\small
+{\bf A} = \frac{1}{\sqrt{d}}(W_{\bf q}({\bf X}) \cdot W_{\bf k}({\bf X})^{\top}), ~~~
+{\bf O} =\operatorname{Softmax}({\bf A} + {\bf M})\cdot W_{\bf v}({\bf X}),~~~ {\bf P}_{i,j} = 0,~~~{\bf Q}_{i,j}=\left\{
+\begin{aligned}
+0 & , i\ge j \\
+-\infty & , i<j 
+\end{aligned}
+\right.
+\label{eq:preliminary1}
+\end{equation}
+where $i,j\in [1,N]$, ${\bf A}\in\mathbb{R}^{N\times N}$, ${\bf M}\in\mathbb{R}^{N\times N}$ denote the attention map and mask. ${\bf P}\in\mathbb{R}^{N\times N}$, ${\bf Q}\in\mathbb{R}^{N\times N}$ are masks in the encoder and decoder, respectively. 
+For a causal self-attention, we have ${\bf M}={\bf Q}$. 
+Such design allows subsequent tokens only attend to the preceding ones, but not vice versa. For a bi-directional self-attention, we have ${\bf M}={\bf P}$, ensuring mutual 
+visibility for each token.
+
+
+\textbf{Recent LLMs-related image models.} Recent image models~\cite{bai2023sequential, guo2024data, el2024scalable} are trained with an autoregressive objective, targeting at solving visual tasks. Pang et al.~\cite{pang2023frozen} add a text pre-trained frozen LLM block to a ViT encoder to facilitate the performance. Our work, on the other hand, is motivated to explore in-depth how the decoder design in LLMs can be adapted to image models using simple supervised learning to achieve an architectural alignment. A concurrent work VisionLLaMA~\cite{chu2024visionllama} proposes vision models for recognition and generation tasks based on the LLaMA components. Differently, we: 1) introduce causal self-attention from LLaMA, addressing the associated attention collapse issue, while VisionLLaMA retains an encoder architecture; 2) develop a soft mask technique to assist training the decoder; 3) expand the dataset to the larger ImageNet-21K to demonstrate scalability, achieving 86.0\% ImageNet accuracy that outperforms VisionLLaMA's best results. 
+
+
+
+\section{A Roadmap: Solving Attention Collapse and Optimization Improvement}
+
+\label{sec:method_vision}
+
+This section introduces the design roadmap of iLLaMA. As we aim to adapt LLMs to vision, we choose LLaMA~\cite{touvron2023llama} and ViT~\cite{dosovitskiy2020image} as language and vision baselines due to their successful practices.
+The trajectory can be divided into two dimensions, \ie, architecture (Section~\ref{sec:3.1}-\ref{sec:3.4}) and training techniques (Section~\ref{sec:3.5}-\ref{sec:3.6}). First, we focus on block designs including 1) feed foward network, 2) normalization layer, 3) self-attention, 4) positional embedding, illustrated in Figure~\ref{fig:architecture}. Next, we study training techniques and develop a soft mask strategy to facilitate optimization. 
+Finally, we provide an analysis in terms of efficiency and attention map rank (Section~\ref{sec:3.7}). 
+We start with ViT-T/16 and ViT-B/16 with around 5.7M and 86.4M parameters, respectively, and gradually replace the corresponding components with those from LLaMA.3.1}). Considering the differences between visual perception and text generation tasks, we maintain ViT's non-autoregressive manner in our network.4}. 
+\subsection{Feed Forward Network (FFN)} 
+\label{sec:3.1}
+
+FFN in Transformer are implemented differently in ViT and LLaMa, \ie, multi-layer perceptron (MLP) and SwiGLU~\cite{shazeer2020glu}. MLP consists of two sequential linear mappings, with a GELU~\cite{hendrycks2016gaussian} function inserted. Meanwhile, SwiGLU combines three linear mappings, integrating a SiLU~\cite{hendrycks2016gaussian, elfwing2018sigmoid, ramachandran2017searching} function. This structure allows for the modulation of high-dimensional features through a gating mechanism.
+We substitute the Transformer's MLPs with SwiGLUs, while maintaining comparable computational cost. As shown in Figure~\ref{fig:architecture}, this improves performance from $73.8\%$ to $74.3\%$, and from $81.3\%$ to $82.0\%$ for the ViT-T/16 and ViT-B/16 regime.
+This highlights SwiGLU's effectiveness not only in language models but also in vision, inspiring further exploration of other components. 
+
+\textit{We will now use SwiGLU to substitute MLP in each block.}
+
+\subsection{Normalization Layer} 
+\label{sec:3.2}
+Transformers need normalization layer for stable training, \ie, layer normalization (LN)~\cite{ba2016layer} in ViT and root mean square layer normalization (RMSNorm)~\cite{zhang2019root} in LLaMA, respectively. We replace all LNs with RMSNorms in our network and empirically observed that the accuracy of the ViT-T/16 regime increased from $74.3\%$ to $74.5\%$. However, similar improvements in precision were not observed in the ViT-B/16 regime (from $82.0\%$ to $81.7\%$). Nonetheless, compared to LN, RMSNorm removes the shift term computation, bringing simplicity to the network~\cite{touvron2023llama2, vicuna2023, roziere2023code, jiang2023mistral}. 
+
+\textit{We will use RMSNorm instead of LN as the normalization layer in each block.}
+
+\input{figText/fig_mask}
+
+\subsection{Causal Self-Attention Leads to Attention Collapse} 
+\label{sec:3.3}
+\textbf{Attention collapse issue.} As a common practice for Transformer decoders, the key component for causal self-attention is the causal mask, \ie, a lower triangular mask matrix, illustrated in Eq.~\ref{eq:preliminary1} and Figure~\ref{fig:mask3}(a). With such, each token can get the attention score of all its previous ones.
+We add the causal mask to our network via a non-autoregressive way. 
+The reason is that visual perception tasks, unlike text generation, require only inference once. 
+As a result, we observe that the training loss fails to converge in both ViT-T/16 and ViT-B/16 regimes (line 1 in Table~\ref{tab:abl_post}). We posit that such issue stems from the influence of the lower triangular matrix, which prevents the class token from "seeing" other image tokens. As illustrated in Figure~\ref{fig:mask3}(a), when the class token is positioned at the start of the patch embedding, its attention score for all other image tokens gets zero due to a causal mask. We term this occurrence as the \textit{attention collapse} issue, which leads to a loss of connection between the class token and other image patches, thereby hindering the optimization of the network. 
+
+\input{figText/tab_abl_post} 
+
+\textbf{Post-sequence class token (\textit{PS [cls]}).} 
+The attention collapse issue stems from the inappropriate placement of the token. To this end, we suggest a \textit{PS [cls]} strategy, by placing it at the end of the token sequence, without changing the causal mask, as shown in Figure~\ref{fig:mask3}(b) and Figure~\ref{fig:architecture}. Such modification ensures that the class token can achieve global information about all image tokens, while maintaining a causal self-attention property. 
+As a result, we observe that the attention collapse issue is eliminated and the training process starts to stabilize, leading the network performance to $71.9\%$ for ViT-T/16 and $80.6\%$ for ViT-B/16 regime, respectively (line 2 in Table~\ref{tab:abl_post}). 
+
+To test our hypothesis about the reason of the attention collapse issue, we also explore a mask setting in Figure~\ref{fig:mask3}(c). In this setting, we do not change the position of the class token. Instead, we unmask the first row of the mask (\ie, attention score of the class token) on the basis of the causal self-attention, termed as "modified causal mask". Ablation results (line 3 in Table~\ref{tab:abl_post}) shows that both settings can solve the attention collapse issue as expected, and the "modified causal mask" leads to a better $72.5\%$ accuracy for ViT-T/16 regime, validating our hypothesis about the reason. 
+Although the results do not surpass the performance of bi-directional counterpart, they demonstrate the potential for optimizing causal self-attention in a decoder-only image model. 
+We also observe that the \textit{PS [cls]} method yields higher accuracy with a slightly larger training loss for ViT-B/16 regime, suggesting lower overfitting. 
+
+\textit{We will employ causal self-attention with \textbf{the proposed \textit{PS [cls]} method} in each block.}
+\subsection{Positional Embedding} 
+\label{sec:3.4}
+A standard ViT use learnable positional embedding (LPE) to preserve positional information, typically adding it directly to the patch embedding. Meanwhile, rotary positional embedding (RoPE)~\cite{su2024roformer} is widely employed in LLMs~\cite{touvron2023llama, touvron2023llama2}, which functions in the attention of each block. 
+We first use RoPE alone, which boosts the accuracy of ViT-T/16 and ViT-B/16 regimes to $72.6\%$ and $81.2\%$, from $71.9\%$ and $80.6\%$, respectively. 
+The encouraging results illustrate that the concepts of "position" in image and text do not exist an inherent gap. Since LPE functions only once before all Transformer blocks, keeping it does not disrupt the alignment with LLaMA within each block. Thus, we reintroduce the LPE, which improves the accuracy of ViT-T/16 regime from $72.6\%$ to $73.2\%$, suggesting that the two positional embeddings are not redundant but rather synergistic, enhancing network performance. 
+
+\textit{We will use both LPE and RoPE for positional embedding. So far, we have investigated each block component, and thus fix the final architecture dubbed iLLaMA. Next, we explore training strategies.}
+
+\subsection{Data Augmentation} 
+\label{sec:3.5}
+Mixup~\cite{zhang2017mixup} and cutmix~\cite{yun2019cutmix} that we used to train our iLLaMA (0.8 and 1.0), are borrowed from DeiT~\cite{touvron2021training}'s recipe. Unlike the bi-directional self-attention used in DeiT, causal self-attention affects the connection between image tokens. Meanwhile, these two hyper-parameters affect the content of the input image, which further influences the subsequent embedding. Thus, we reevaluate their impact on iLLaMA optimization. Specifically, we discover that a combination of 0.1 mixup and 0.1 cutmix improves the performance of the iLLaMA-T/16 from $73.2\%$ to $74.3\%$, whereas a combination of 0.95 and 1.0 leads the iLLaMA-B/16 to a $81.3\%$ accuracy. Other ablations are detailed in Section~\ref{sec:4.1}. 
+\subsection{Soft Mask Strategy: Optimization Improvement} 
+\label{sec:3.6}
+When observing objects, humans tend to perceive broad connections, then focus on specific details. Motivated by this, we propose a \textit{soft mask} technique to improve the model's optimization: \textit{starting with bi-directional self-attentions in the early training epochs and gradually shifting completely to causal self-attentions as the optimization goes}. Specifically, self-attention can be formulated as: 
+
+\begin{equation}
+\small
+\begin{aligned}
+{\bf A} &= \frac{1}{\sqrt{d}}(W_{\bf q}({\bf X}) \cdot W_{\bf k}({\bf X})^{\top}), ~~~{\bf O} =(\operatorname{Softmax}({\bf A})\odot {\bf S})\cdot W_{\bf v}({\bf X}),
+\\ 
+{\bf S} &=\alpha {\bf B} +(1-\alpha){\bf C}, ~~~
+{\bf B}_{i,j} = 1,~~~
+{\bf C}_{i,j}=\left\{
+\begin{aligned}
+1 & , i\ge j \\
+0 & , i<j 
+\end{aligned}
+\right.
+\end{aligned}
+\label{eq:softmask1}
+\end{equation}
+
+\input{figText/fig_softmask2}
+where $i,j \in [1,N]$, ${\bf S}\in\mathbb{R}^{N\times N}$ denotes the soft mask, which is defined as a linear combination of a bi-directional mask ${\bf B}$ and a causal mask ${\bf C}$. $\alpha$ is the hyper-parameter controlling the mask configuration, \ie, soft mask degenerates into ${\bf B}$ or ${\bf C}$ when $\alpha=1$ or $\alpha=0$, respectively. As illustrated in Figure~\ref{fig:softmask2}(a), $\alpha$ involves three related hyper-parameters: 1) scheme: how $\alpha$ drops from 1 to 0: we try a linear or a constant scheme. 2) cutoff epochs: when will $\alpha$ drops to 0. 3) learning rate (lr) warmup~\cite{he2016deep, goyal2017accurate}: this hyper-parameter overlaps with the duration of soft mask. We initially set the lr warmup epochs at 50, consistent with previous settings. When using a linear scheme with 50 and 25 cutoff epochs, we observe an improvement in performance for both iLLaMA-T/16 and iLLaMA-B/16 models, reaching $74.9\%$ and $81.6\%$ from $74.3\%$ and $81.3\%$, respectively. Ablations results are detailed in Section.~\ref{sec:4.1}. 
+To intuitively observe the impact of soft mask, we plot the training curve of the iLLaMA-T/16 in Figure~\ref{fig:softmask2}(b), using a constant scheme with 50 cutoff epochs. When soft mask ends, we observe that although there was a sharp drop in accuracy, the model ends up achieving better performance.6}. Additionally, we discover that a lower learning rate warmup helps iLLaMA-T/16 achieve $75.0\%$ top-1 accuracy, by using a constant scheme with 50 cutoff epochs.  Therefore, we use this warmup method for iLLaMA-T/16. Notably, the final training loss within both iLLaMA-T/16 and iLLaMA-B/16 decreases when using soft masks, suggesting a mitigation of potential underfitting concerns. 
+\subsection{Analysis of causal Self-attention}
+\label{sec:3.7}
+
+Next, we analyze the advantages of using causal self-attention in iLLaMA, in terms of computational efficiency and expressive ability of visual representation through the lens of attention map rank. 
+
+\textbf{Computational Complexity.} We compare the efficiency of causal self-attention and bi-directional baseline. For a self-attention with a sequence length $N$ and embedding dimension $D$, FLOPs are reported in Table~\ref{tab:flops} (RoPE is not involved as only attention computations are considered). causal self-attention, in light of the lower triangular property of its attention map, slightly reduces the FLOPs compared to the bi-directional baseline --- the degree of reduction grows as sequence length increases. 
+
+\input{figText/tab_flops}
+
+\textbf{Attention map rank.} We examine the representation learning power of causal attention through a spectrum analysis. Following~\cite{wang2020linformer, shu2021adder}, we perform singular value decomposition on the attention maps of the pre-trained ViT-T/16 and iLLaMA-T/16 models.
+Next, we sort the singular values and plot a curve illustrating the relationship between the cumulative normalized singular values and matrix indices. The results are conducted using $30$ images randomly selected from the ImageNet-1K validation set. As shown in Figure~\ref{fig:rank_analysis}, the curve of ViT exhibits concave function characteristics, while the curve of iLLaMA is close to a linear function, indicating a more uniform distribution of singular values in iLLaMA's attention map. Approximating the matrix rank by the index at which the cumulative normalized singular value reaches 0.8, we observe that the index value of iLLaMA is about 48 higher than that of ViT ($\sim$129-th v.s. $\sim$81-th). Under such premise, compared to ViT, the attention map of iLLaMA can be approximated with a certain error by a higher-rank matrix. Accordingly, the rank of the attention map may affect the expressive capabilities of the learned representations~\cite{dong2021attention}, suggesting that the causal self-attention in iLLaMA has the potential to learn complex visual representations, as empirically demonstrated in Section~\ref{sec:4.2}.5}. 
+
+\input{figText/fig_rank}
+
+\textbf{Closing remarks.} 
+So far, we have finished the design roadmap of iLLaMA through architectural and training strategy modification.
+iLLaMA, a decoder-only Transformer, shows advantages in computational complexity and attention map rank through its causal self-attention mechanism. Notably, while all components of iLLaMA are essentially derived from LLaMA, relying only on them is insufficient for an effective weight optimization, as demonstrated in Section~\ref{sec:3.3}. In fact, the proposed \textit{PS [cls]} and soft mask strategy effectively address this issue and assist in iLLaMA training. However, to achieve a comprehensive understanding of iLLaMA's properties, some useful evaluation should be conducted:
+1) Scalability for large model  capacities (>300M parameters) and dataset sizes (>10M training images, \eg, ImageNet-21K). 2) Other practical evaluation dimensions, such as model calibration, shape-texture bias, downstream task performance, quantization compatibility, discussed below. 
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+This section provide a comprehensive evaluation of iLLaMA. We first report ablation results, \eg, the effectiveness of data augmentation and different soft mask strategies. Next, we compare iLLaMA with other strong baselines on ImageNet classification. Beyond ImageNet accuracy, we also examine its efficacy on calibration, shape-texture bias, and evaluate its compatibility with quantization-aware training and downstream task performance. 
+
+\subsection{Ablation Study} 
+\label{sec:4.1} 
+
+\textbf{Influence of data augmentation.} Base on the observation in Section~\ref{sec:3.5}, we examined multiple sets of cutmix and mixup settings, as reported in Table~\ref{tab:da_schedule}. We empirically observe that the smaller iLLaMA-T/16 are more sensitive to two data augmentation strategies and perform better with lower hyper-parameters, whereas the larger iLLaMA-B/16 are suited to higher ones. This may be related to the architectural differences between LLaMA's Transformer decoder and ViT's encoder type. 
+
+\textbf{Influence of soft mask scheduling strategies and epochs.} As mentioned in Section~\ref{sec:3.6}, the proposed soft mask technique includes three hyper-parameters, \ie, schedule, cutoff epochs and lr warmup epochs. Here we evaluate the robustness of soft mask to hyper-parameter settings, with results detailed in Table~\ref{tab:abl_schedule}. Beyond the \textit{linear} schedule, inspired by~\cite{liu2023dropout}, we also implemented a \textit{constant} option. Additionally, we fixed the learning rate warm-up epochs at 50 and experimented with different cutoff epochs. The results reveal that the soft mask facilitates the optimization of iLLaMA under both linear and constant scheduling, suitable for models of both tiny and base sizes. Moreover, setting the cutoff epochs to span a wide range from 25 to 100 is advantageous. Notably, the soft mask can be easily integrated into existing code frameworks (\eg, timm~\cite{pytorchmodels}) with negligible additional training costs, thereby facilitating its effortless application on future related architectures. 
+
+\input{figText/tab_abl_schedule}
+
+\input{figText/tab_abl_augmentation}
+
+\textbf{Influence of soft mask for training and testing loss.} 
+Deep neural networks often face underfitting, marked by difficulty in continuously reducing training loss and resulting in poor test accuracy~\cite{liu2023dropout}. 
+We compare the training and testing losses of the iLLaMA-T/16 and iLLaMA-B/16 models with and without the use of the soft mask strategy. As shown in Table~\ref{tab:abl_softmask}, soft mask can reduce training loss in both regimes, mitigating potential underfitting issue and reducing testing loss. 
+
+\subsection{Comparison with Recent Architectures on ImageNet-1K Classification} 
+\label{sec:4.2}
+
+We conducted experiments on the ImageNet-1K~\cite{deng2009imagenet} benchmark with different model sizes (\ie, iLLaMA-T/S/B/L).1}.3}. 
+9}. 
+
+\textbf{ImageNet-1K training.} We train iLLaMA-T/S/B on ImageNet-1K for 300 epochs with AdamW optimizer~\cite{loshchilov2017decoupled} and a batch size of 4096. The ImageNet-1K trained iLLaMA-T/B models are, in fact, the outcome of the explorations completed in Section~\ref{sec:3.6}. For the settings of soft mask schedule, cutoff epochs, and learning rate warmup epochs, we tune slightly for the iLLaMA-S model. 
+
+\textbf{ImageNet-21K pre-training.} We use the `Winter21 variant of ImageNet-21K-P' (refered to as ImageNet-21K) dataset~\cite{ridnik2021imagenet} \footnote{downloaded from: https://www.image-net.org/download-images.php} for the large-scale pre-training of our iLLaMA, which contains 11,060,223 training images and 522,500 testing images from 10,450 classes. Only the training set was used. We pre-train iLLaMA-B/L on ImageNet-21K for 90 epochs using a constant soft mask schedule, with cutoff epochs and learning rate warmup epochs set to 30 and 5, respectively. 
+
+\textbf{ImageNet-1K fine-tuning.} For iLLaMA-B model trained on ImageNet-1K, we fine-tune at a resolution of 384$\times$384. Similarly, for the iLLaMA-B/L model trained on ImageNet-21K, we fine-tune at resolutions of 224$\times$224 and 384$\times$384, respectively. All fine-tuning was conducted for 30 epochs using the AdamW optimizer. We follow DeiT~\cite{touvron2021training} for interpolating positional embeddings to allow our iLLaMA to handle inputs at a higher resolution.  
+
+\textbf{Results.} Table~\ref{tab:imagenet} shows a comparison between iLLaMA and other strong visual baselines, including ConvNets (ConvNeXt~\cite{liu2022convnet}, ConvNeXt-V2~\cite{woo2023convnext}), vision Transformers (ViT~\cite{dosovitskiy2020image}, Swin Transformer~\cite{liu2021swin}), MLPs (PoolFormer~\cite{yu2022metaformer}, VanillaNet~\cite{chen2023vanillanet}), and recent language model inspired models (AIM~\cite{el2024scalable}, VisionLLaMA~\cite{chu2024visionllama}). We present three observations: 1) The performance-parameter trade-off of iLLaMA surpasses other LM-inspired models such as AIM and VisionLLaMA, presumably due to its use of causal attention and soft mask training techniques. 2) iLLaMA exhibits a superior accuracy-throughput trade-off compared to strong hierarchical baselines such as ConvNeXt-V2-N/T/B and Swin-S/B. We attribute this to iLLaMA's isotropic design (each intermediate block has the same feature resolution), which benefits from a straightforward and efficient architecture, enhancing inference speed. 3) Scalability of model capacity and dataset size: After comprehensive pre-training on the expanded ImageNet-21K dataset, the iLLaMA-B model achieves more than $85.0\%$ accuracy on ImageNet-1K with under 100M parameters, significantly outperforming ViT-B's $84.0\%$. Upon scaling up to the larger iLLaMA-L, accuracy reaches $86.0\%$, exceeding that of ViT-L pre-trained on ImageNet-21K and the AIM-7B pre-trained on the DFN-2B+ dataset. To our knowledge, this showcases SOTA performance for LLaMA-type architectures. 
+
+\input{figText/tab_in1k}
+
+\subsection{Model Calibration and Shape-Texture Bias} 
+\label{sec:4.3}
+Beyond ImageNet accuracy, we also examined iLLaMA's calibration properties and shape-texture bias for a more detailed evaluation, following~\cite{vishniakov2023convnet}. Besides iLLaMA, we also explore two prevalent architectures, \ie, ConvNeXt~\cite{liu2022convnet} and DeiT3~\cite{touvron2022deit}, representing ConvNets and Transformers, respectively. We apply ImageNet-21K pre-trained and ImageNet-1K fine-tuned models in this section. 
+
+\textbf{Model calibration.} 
+Model calibration represents the relationship between a model's precision and confidence across samples of varying difficulty, \ie, poor-calibrated models tend to produce overly confident yet incorrect predictions, whereas well-calibrated models demonstrate a strong correlation between confidence and accuracy~\cite{guo2017calibration}. Calibration is commonly measured using the Expected Calibration Error (ECE), where a lower ECE is favorable. ECE results for different models on ImageNet-1K are presented in Table~\ref{tab:beyond}. The calibration of iLLaMA is lower than that of DeiT3, suggesting a more reliable output confidence.7}. 
+\textbf{Shape-texture bias.} Shape-texture bias measures the extent to which the model relies on the shape or texture of the image when performing recognition~\cite{geirhos2018imagenet}. We generally prefer models to mimic human eye behavior, relying more on shape rather than texture~\cite{tuli2021convolutional, geirhos2020shortcut}. We calculate the shape ratio for all models on cue-conflict images and report the results in Table~\ref{tab:beyond}, following~\cite{vishniakov2023convnet}. Our iLLaMA shows the largest shape ratio of $41.45\%$ among the three compared baselines, suggesting the potential of the LLM architecture for vision.8}. 
+
+\subsection{Compatibility with Quantization} 
+\label{sec:4.4}
+
+Since a practical goal for neural networks is deployment on low-bit hardware chips, we further examine iLLaMA's compatibility with quantization. We basically follow Q-ViT~\cite{li2022q} to apply quantization-aware training (QAT) to iLLaMA, with weights and activations of all blocks' FFN and causal self-attention layers to 8 bits.3.4} and Table~\ref{tab:quant}. Different sizes of low-bit iLLaMA maintain accuracy well, and 8-bit iLLaMA-T is even compete favorably with the full-precision DeiT-T~\cite{touvron2021training} ($72.4\%$ \text{v.s.} $72.2\%$). 
+\input{figText/tab_quant}
+
+
+\subsection{Transferability on Downstream Tasks} 
+\label{sec:4.5}
+
+\textbf{CIFAR transfer learning.} We fine-tune ViT-T and iLLaMA-T on the CIFAR datasets~\cite{krizhevsky2009learning}, including an ablation of the soft mask on iLLaMA.3.5}. iLLaMA's performance on CIFAR datasets is essentially on par with ViT, assuring that iLLaMA can be confidently applied in the transfer learning field as a practical alternative to ViT. Additionally, soft mask is helpful in the relatively complicated CIFAR100, demonstrating its generalizability. 
+
+\textbf{ADE20K semantic segmentation.} We fine-tune our ImageNet-1K pre-trained iLLaMA and ViT models on ADE20K~\cite{zhou2019semantic} dataset using UperNet~\cite{xiao2018unified} to perform semantic segmentation task. For both iLLaMA and ViT, we set the learning rate as 6e-5 and weight decay as 0.01. Table~\ref{tab:seg} presents the results. iLLaMA's performance is marginally lower than ViT's, which we attribute to the potential impact of the masking mechanism in iLLaMA's causal attention on high-resolution dense prediction tasks. This suggests there is still space for optimization, a subject for future investigation.   
+
+\input{figText/tab_downstream}
+
+
+
+\section{Conclusions}
+
+\label{sec:conclusions}
+In this paper, we systematically studies whether Transformer decoder, an architecture that has shown amazing potential in LLMs, can also take root in learning visual representation through straightforward supervised training. The key component -- causal self-attention we used -- is not novel and is inherited from existing LLM architectures, but we propose pivotal techniques, \ie, PS [cls] and soft mask strategies, to effectively adapt them to visual tasks. The proposed iLLaMA outperforms many ConvNets, ViTs, and MLPs on imagenet, and demonstrates robust quantization compatibility, calibration, and shape-texture bias, thereby showing its practicality. We hope that this work will inspire a rethinking of generic yet practical architecture that can fully unify both vision and text. 
+
+
+
+
+
+\medskip
+
+{\small 
+	
+
+
+

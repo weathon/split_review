@@ -1,0 +1,1145 @@
+\title{Newton Losses: Using Curvature Information for Learning with Differentiable Algorithms}
+
+\begin{abstract}
+
+When training neural networks with custom objectives, such as ranking losses and shortest-path losses, a common problem is that they are, per se, non-differentiable.
+A popular approach is to continuously relax the objectives to provide gradients, enabling learning.
+However, such differentiable relaxations are often non-convex and can exhibit vanishing and exploding gradients, making them (already in \mbox{isolation}) hard to optimize.
+Here, the loss function poses the bottleneck when training a deep neural network.
+We present Newton Losses, a method for improving the performance of existing hard to optimize losses by exploiting their second-order information via their empirical Fisher and Hessian matrices.
+Instead of training the neural network with second-order techniques, we only utilize the loss function's second-order information to replace it by a Newton Loss, while training the network with gradient descent. 
+This makes our method computationally efficient.
+We apply Newton Losses to eight differentiable algorithms for sorting and shortest-paths, achieving significant improvements for less-optimized differentiable algorithms, and consistent improvements, even for well-optimized differentiable algorithms.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Traditionally, fully-supervised classification and regression learning relies on convex loss functions such as MSE or cross-entropy, which are easy-to-optimize in isolation. %
+However, the need for large amounts of ground truth annotations is a limitation of fully-supervised learning; thus, weakly-supervised learning with non-trivial objectives~\cite{dehghani2017neural, cuturi2019differentiable, caron2020unsupervised, wang2020weakly, petersen2021diffsort, shukla2023unified, shvetsova2023learning} has gained popularity.
+Rather than using fully annotated data, these approaches utilize problem-specific algorithmic knowledge incorporated into the loss function via a continuous relaxation. 
+For example, instead of supervising ground truth values, supervision can be given in the form of ordering information (ranks), e.g., based on human preferences~\cite{swezey2021pirank, thonet2022listwise}. 
+However, incorporating such knowledge into the loss can make it difficult to optimize, e.g., by making the loss non-convex in the model output, introducing bad local minima, and importantly leading to vanishing as well as exploding gradients, slowing down training~\cite{jain2017non, petersen2022monotonic}.
+
+Loss functions that integrate problem-specific knowledge can range from rather simple contrastive losses \cite{bachman2019learning} to rather complex losses that require the integration of differentiable algorithms~\cite{cuturi2019differentiable, shvetsova2023learning, swezey2021pirank, petersen2022monotonic, petersen2022thesis}.
+In this work, we primarily focus on the (harder) latter category, which allows for solving specialized tasks such as inverse rendering~\cite{liu2019soft, chen2019learning, petersen2022gendr}, learning-to-rank~\cite{burges2005ranknet, taylor2008softrank, cuturi2019differentiable, rolinek2020optimizing, petersen2021diffsort, swezey2021pirank, petersen2022monotonic, ustimenko2020stochasticrank}, self-supervised learning~\cite{caron2020unsupervised}, differentiation of optimizers~\cite{berthet2020learning, vlastelica2019differentiation}, and top-k supervision~\cite{xie2020differentiable, cuturi2019differentiable, petersen2021diffsort}.
+In this paper, we summarize these loss functions under the umbrella of algorithmic losses~\cite{petersen2021learning} as they introduce algorithmic knowledge via continuous relaxations into the training objective. 
+
+While the success of neural network training is primarily due to the backpropagation algorithm and stochastic gradient descent (SGD), there is also a promising line of work on second-order optimization for neural network training \cite{agrawal2017second, martens2015optimizing,ref:Schaul-13,frantar2021mfac,ref:Botev-17,ref:Shazeer-18, nocedal2006numerical, li2018natural, li2019affine}.
+Compared to first-order methods like SGD, second-order optimization methods exhibit improved convergence rates and therefore require fewer training steps; 
+however, they have two major limitations \cite{nocedal2006numerical}, namely
+~(i) computing the inverse of the curvature matrix for a large and deep neural network is computationally substantially more expensive than simply computing the gradient with backpropagation, which makes second-order methods practically inapplicable in many cases~\cite{dangel2020backpack}; %
+~(ii) networks trained with second-order information have been shown to exhibit reduced generalization capabilities~\cite{wadia2021whitening}.
+
+Inspired by ideas from second-order optimization, in this work, we propose a novel method for incorporating second-order information into training with non-convex and hard to optimize algorithmic losses.
+Loss functions are usually cheaper to evaluate than a neural network.
+Further, loss functions operate on lower dimensional spaces than those spanned by the parameters of neural networks. 
+If the loss function becomes the bottleneck in the optimization process because it is difficult to optimize,  
+it suggests to use a stronger optimization method that requires fewer steps like second-order optimization.
+However, as applying second-order methods to neural networks is expensive and limits generalization, we want to train the neural network with first-order SGD. 
+Therefore, we propose Newton Losses, a method for locally approximating loss functions with a quadratic with second-order Taylor expansion. 
+Thereby, Newton Losses provides a (locally) convex loss leading to better optimization behavior, while training the actual neural network with gradient~descent. %
+
+For the quadratic approximation of the algorithmic losses, we propose two variants of Newton Losses:
+~(i)~~\textit{Hessian-based Newton Losses}, which comprises a generally stronger method but requires an estimate of the Hessian~\cite{nocedal2006numerical}. 
+Depending on the choice of differentiable algorithm, choice of relaxation, or its implementation, the Hessian may, however, not be available.
+Thus,\,we\,further\,relax\,the\,method\,to 
+~(ii)~~\textit{empirical~Fisher matrix-based Newton Losses}, which derive the curvature information from the empirical Fisher matrix~\cite{kunstner2019limitations}, which depends only on the gradients.
+The empirical Fisher variant can be easily implemented on top of existing algorithmic losses because it does not require to compute their second derivatives, while the Hessian variant requires computation of second derivatives and leads to greater improvements when available. 
+We evaluate Newton Losses for an array of eight families of algorithmic losses on two popular algorithmic benchmarks: the four-digit MNIST sorting benchmark~\cite{grover2019neuralsort} and the Warcraft shortest-path benchmark~\cite{vlastelica2019differentiation}.
+We find that Newton Losses leads to consistent performance improvements for each of the algorithms---for some of the algorithms (those which suffer the most from vanishing and exploding gradients) more than doubling the accuracy.
+
+
+
+
+\section{Background \& Related Work}
+
+The related work comprises algorithmic supervision losses and second-order optimization methods.
+To the best of our knowledge, this is the first work combining second-order optimization of loss functions with first-order optimization of neural networks, especially for algorithmic losses.
+
+\paragraph{Algorithmic Losses.} 
+Algorithmic losses, i.e., losses that contain some kind of algorithmic component, have become quite popular in recent machine learning research.
+In the domain of recommender systems, early learning-to-rank works already appeared in the 2000s~\cite{burges2005ranknet, burges2007lambdarank, taylor2008softrank}, but more recently Lee~\textit{et al.}~\cite{lee2021differentiable} proposed differentiable ranking metrics, and Swezey~\textit{et al.}~\cite{swezey2021pirank} proposed PiRank, which relies on differentiable sorting.
+For differentiable sorting, an array of methods has been proposed in recent years, which includes
+NeuralSort~\cite{grover2019neuralsort}, SoftSort~\cite{prillo2020softsort}, Optimal Transport Sort~\cite{cuturi2019differentiable}, differentiable sorting networks (DSN)~\cite{petersen2021diffsort}, and the relaxed Bubble Sort algorithm~\cite{petersen2021learning}.
+Other works explore differentiable sorting-based top-k for applications such as differentiable image patch selection~\cite{cordonnier2021differentiable}, differentiable k-nearest-neighbor~\cite{xie2020differentiable, grover2019neuralsort}, top-k attention for machine translation~\cite{xie2020differentiable}, differentiable beam search methods~\cite{xie2020differentiable, goyal2018continuous}, survival analysis~\cite{vauvelle2023differentiable}, and self-supervised learning~\cite{shvetsova2023learning}.
+But algorithmic losses are not limited to sorting: other works have considered learning shortest-paths~\cite{vlastelica2019differentiation, berthet2020learning, petersen2021learning, petersen2024generalizing}, learning 3D shapes from images and silhouettes~\cite{kato2017neural, petersen2019pix2vex, liu2019soft, chen2019learning, petersen2021learning, petersen2022style, petersen2022gendr}, learning with combinatorial solvers for NP-hard problems~\cite{vlastelica2019differentiation}, learning to classify handwritten characters based on editing distances between strings~\cite{petersen2021learning}, learning with differentiable physics simulations~\cite{hu2019difftaichi}, and learning protein structure with a differentiable simulator~\cite{ingraham2018learning}, among many others.
+
+\paragraph{Second-Order Optimization.} 
+Second-order methods have gained popularity in machine learning due to their fast convergence properties when compared to first-order methods~\cite{agrawal2017second}.
+One alternative to the vanilla Newton's method are quasi-Newton methods, which, instead of computing an inverse Hessian in the Newton step (which is expensive), approximate this curvature from the change in gradients~\cite{nocedal2006numerical,ref:Byrd-16,ref:JMLR:v16:mokhtari15a}.
+In addition, a number of new approximations to the pre-conditioning matrix have been proposed in the literature, i.a., \cite{martens2015optimizing,pilnaci2017newton,frantar2021mfac, petersen2023isaac, doikov2024super}. 
+While the vanilla Newton method relies on the Hessian, there are variants which use the empirical Fisher matrix, which can coincide in specific cases with the Hessian, but generally exhibits somewhat different behavior. For an overview and discussion of Fisher-based methods (including natural gradient descent), see~\cite{kunstner2019limitations, martens2020new}.
+
+
+
+\section{Newton Losses}
+
+\subsection{Preliminaries}
+\label{sec:preliminaries}
+We consider the training of a neural network $f(x; \theta)$, where $x\in\mathbb{R}^n$ is the vector of inputs, $\theta\in\mathbb{R}^d$ is the vector of trainable parameters and $y=f(x; \theta)\in\mathbb{R}^m$ is the vector of outputs. 
+As per vectorization, $\xb=[x_1, \dots,x_N]^\top\in\mathbb{R}^{N\times n}$ denotes a set of $N$ input data points, and $\yb = f(\xb; \theta)\in\mathbb{R}^{N\times m}$ denotes the neural network outputs corresponding to the inputs. 
+Further, let $\ell:\mathbb{R}^{N\times m}\to\mathbb{R}$ denote the loss function, and let the ``label'' information be implicitly encoded in~$\ell$. 
+The reason for this choice of implicit notation is that, for many algorithmic losses, it is not just a label, e.g., it can be ordinal information between multiple data points or a set of encoded constraints.
+We assume the loss function to be twice differentiable, but also present an extension for only once differentiable losses, as well as non-differentiable losses via stochastic smoothing in the remainder of the paper. 
+
+
+
+
+
+
+
+
+Conventionally, the parameters $\theta$ are optimized using an iterative algorithm (e.g., SGD~\cite{kiefer1952stochastic}, Adam~\cite{kingma2015adam}, or Newton's method~\cite{nocedal2006numerical}) that updates them repeatedly according to:
+\begin{align}\label{eq:training:update}
+    ~\,\theta_t &\leftarrow \text{One optim.~step of }~\ell(f(\xb; \theta))~\text{ wrt.~}\theta\text{ at~}\theta=\theta_{t-1}\,.\qquad\quad
+\end{align}
+However, in this work, we consider splitting this optimization update step into two alternating steps:
+\begin{subequations} \label{eq:two:step:scheme}
+\begin{align}
+    \zb^{\revB{\star}}_t & \leftarrow \text{One optim.~step of }~\ell(\zb)~\text{ wrt.~}\zb\text{ at~}\zb=f(\xb; \theta_{t-1}) \,, \label{eq:training:update-z} \\ 
+    \theta_t &\leftarrow \text{One optim.~step of }{\textstyle\frac12}\| \zb^{\revB{\star}}_t - f(\xb; \theta)\|_2^2\text{ wrt.~}\theta\text{ at~}\theta=\theta_{t-1} \,. \label{eq:training:update-theta}
+\end{align}
+\end{subequations}%
+
+More formally, this can also be expressed via a function $\phi(\,\cdot, \cdot, \cdot\,)$ that describes one update step (its first argument is the objective to be minimized, its second argument is the variable to be optimized, and its third argument is the starting value for the variable) as follows:
+\begin{equation}\label{eq:one:step:scheme-formal}
+    \theta_{t} \leftarrow \phi\,(\,\,\ell(f(\xb; \theta)), \kern1.53em\,\theta,\,\kern1.53em \theta_{t-1}\,\,)~~
+\end{equation}
+And, for two update step functions $\phi_1$ and $\phi_2$, we can formalize \eqref{eq:two:step:scheme} to
+\begin{subequations} \label{eq:two:step:scheme-formal}
+\begin{align}
+    \zb^{\revB{\star}}_{t} & \leftarrow \phi_1(\,\ell( \zb ), \kern1.7em \,\zb,\, \kern1.7em f(\xb;\theta_{t-1})\,)\,, \label{eq:phi-1-formal}\\ 
+    \theta_{t} &\leftarrow  \phi_2(\, {\textstyle\frac12}\| \zb^{\revB{\star}}_{t} - f(\xb; \theta)\|_2^2,\,\, \theta,\,\, \theta_{t-1} \,)\,.  \label{eq:phi-2-formal}
+\end{align}
+\end{subequations}%
+
+The purpose of the split is to enable us to use two different iterative optimization algorithms $\phi_1$ and $\phi_2$.
+This is particularly interesting for optimization problems where the optimization of the loss function $\ell$ is a difficult optimization problem.
+For standard convex losses like MSE or CE, gradient descent is a perfectly sufficient choice for $\phi_1$ (MSE will recover the goal, and CE leads to outputs $\zb^\star$ that achieve a perfect argmax classification result).
+However, if there is the asymmetry of $\ell$ being harder to optimize (requiring more steps), while \eqref{eq:phi-1-formal} being much cheaper per step compared to \eqref{eq:phi-2-formal}, then the optimization of the loss \eqref{eq:phi-1-formal} comprises a bottleneck  compared to the optimization of the neural network \eqref{eq:phi-2-formal}. 
+Such conditions are prevalent in the space of algorithmic supervision losses.
+
+
+A similar split (for the case of splitting between the layers of a neural network, and using gradient descent for both~\eqref{eq:training:update-z} and~\eqref{eq:training:update-theta}, i.e., the requirement of $\phi_1=\phi_2$) is also utilized in the fields of biologically plausible backpropagation~\cite{meulemans2020theoretical, bengio2015towards, bengio2014auto, lee2015difference} and proximal backpropagation~\cite{frerix2018proximal}, leading to reparameterizations of backpropagation.
+For SGD, we show that \eqref{eq:one:step:scheme-formal} is exactly equivalent to \eqref{eq:two:step:scheme-formal} in Lemma~\ref{lem:gradient:equiv-sm}, and for a special case of Newton's method, we show the equivalence in Lemma~\ref{lem:Newton:equiv} in the SM.
+Motivated by the equivalences under the split, in the following, we consider the case of $\phi_1\neq\phi_2$.
+\subsection{Method}
+
+Equipped with the two-step optimization~\eqref{eq:two:step:scheme} / \eqref{eq:two:step:scheme-formal}, we can introduce the idea behind Newton Losses:\\[.55em]
+\centerline{\emph{We propose $\phi_1$ to be Newton's method, while $\phi_2$ remains stochastic gradient descent.}}
+\vskip-\parskip\vskip.55em
+In the following, we formulate how we can solve optimizing \eqref{eq:training:update-z} with Newton's method, or, whenever we do not have access to the Hessian of $\ell$, using a step pre-conditioned via the empirical Fisher matrix.
+This allows us to transform an original loss function $\ell$ into a Newton loss $\ell^*$, which allows optimizing $\ell^*$ with gradient descent only while maintaining equivalence to the two-step idea, and thereby making it suitable for common machine learning frameworks.
+
+Newton's method relies on a quadratic approximation of the loss function at location ${\ybb}=f(\xb;\theta)$
+\begin{equation}
+\tilde\ell_\ybb(\zb) \;=\; \ell(\ybb) + (\zb - \ybb)^{\!\top} \nabla_\ybb \ell(\ybb)
+      + {\textstyle\frac12} (\zb - \ybb)^{\!\top}\, \nabla^2_\ybb \ell(\ybb)\, (\zb - \ybb)\,,
+\end{equation}
+and sets its derivative to $0$ to find the location~$\zb^\star$ of the stationary point of $\tilde\ell_\ybb(\zb)$: %
+\begin{equation}
+    \nabla_{\zb^\star} \tilde\ell_\ybb(\zb^\star) = 0 
+    ~~\Leftrightarrow~~ \nabla_\ybb \ell(\ybb) + \nabla^2_\ybb \ell(\ybb) (\zb^\star - \ybb) = 0
+    ~~\Leftrightarrow~~ \zb^\star = \ybb - (\nabla^2_\ybb \ell(\ybb))^{-1} \nabla_\yb \ell (\ybb).
+\end{equation}
+However, when $\ell$ is non-convex or the smallest eigenvalues of $\nabla^2_\ybb  \ell(\ybb)$ either become negative or zero, this $\zb^\star$ 
+may not be a good proxy for a minimum of $\ell$, but may instead be any other stationary point or lie far away from $\ybb$, leading to exploding gradients downstream.
+To resolve this issue, we introduce Tikhonov regularization~\cite{ref:Tikhonov-77} with a strength of $\lambda$, which leads to a well-conditioned curvature matrix:
+\begin{equation}\label{eq:first-with-tik}
+    \zb^\star = \ybb - (\nabla^2_\ybb \ell(\ybb) + \lambda \cdot \mathbf{I})^{-1} \, \nabla_\ybb \ell (\ybb)\,. 
+\end{equation}
+Using $\zb^\star$, we can plug the solution into \eqref{eq:training:update-theta} to find the Newton loss $\ell^*$ and compute its derivative as
+\begin{equation}
+    \ell_{\zb^\star}^*(\yb) = {\textstyle\frac12} (\zb^\star - \yb)^\top (\zb^\star - \yb) = {\textstyle\frac12} \left\| {\zb^\star - \yb} \right\|_2^2
+    \qquad\text{and}\qquad \nabla_\yb \ell_{\zb^\star}^*(\yb) = \yb - \zb^\star \,.
+    \label{eq:newton-loss-grad-first}
+\end{equation}
+Here, as in Section~\ref{sec:preliminaries}, $\yb = f(\xb, \theta)$.
+Via this construction, we obtain the Newton loss $\ell_{\zb^\star}^*$, a new convex loss, which itself has a gradient that corresponds to one Newton step of the original loss.
+In particular, on $\yb$, one gradient descent step on the Newton loss~\eqref{eq:newton-loss-grad-first} reduces to
+\begin{equation}
+    \yb ~~\gets~~ \yb - \eta\cdot\nabla_\yb \ell_{\zb^\star}^*(\yb) = \yb - \eta\cdot(\yb - \zb^\star)
+    ~~=~~ \yb - \eta\cdot(\nabla^2_\yb  \ell(\yb) + \lambda \cdot \mathbf{I})^{-1} \, \nabla_\yb \ell (\yb)\,,
+\end{equation}
+which is exactly one step of Newton's method on~$\yb$.
+Thus, we can optimize the Newton loss $\ell_{\zb^\star}^*(f(\xb;\theta))$ with gradient descent, and obtain equivalence to the proposed concept.
+
+In the following definition, we summarize the resulting equations that define the Newton loss $\ell^*_{\zb^\star}$.
+\begin{definition}[Newton Losses (Hessian)]
+\label{def:hessian-newton-loss}
+    For a loss function $\ell$ and a given current parameter vector~$\theta$, we define the Hessian-based Newton loss via the empirical Hessian as
+    \begin{equation}
+    \ell^*_{\zb^\star}(\yb) = {\textstyle\frac{1}{2}}\|\zb^\star - \yb\|^2_2 
+        \qquad \text{where} \qquad
+    z_i^\star ={\bar y_i} - \Big({\textstyle\frac1N\sum_{j=1}^N} \nabla^2_{\bar y_j} \ell({\bar \yb}) + \lambda\mathbf{I}\Big)^{\!-1} \nabla_{\bar y_i} \ell({\bar \yb})
+    \end{equation}
+    for all~~$i\in\{1,...,N\}$~~and~~$\bar \yb = f(\xb;\theta)$.
+\end{definition}
+We remark that computing and inverting the Hessian of the loss function is usually computationally efficient.
+(We remind the reader that the Hessian of the loss function is the second derivative wrt.~the inputs of the loss function and we further remind that the inputs to the loss are \textbf{not} the neural network parameters / weights.)
+Whenever the Hessian matrix of the loss function is not available, whether it may be due to limitations of a differentiable algorithm, large computational cost, lack of a respective implementation of the second derivative, etc., we may resort to using the empirical Fisher matrix (i.e., the second uncentered moments of the gradients) as a source for curvature information.
+We remark that the empirical Fisher matrix is not the same as the Fisher information matrix~\cite{kunstner2019limitations}, and that the Fisher information matrix is generally not available for algorithmic losses.
+While the empirical Fisher matrix, as a source for curvature information, may be of lower quality than the Hessian matrix, it has the advantage that it can be computed from the gradients, i.e.,
+\begin{equation}
+    \mathbf{F} = \mathbb{E}_{x}\left[ \nabla_{\!f(x, \theta)}\, \ell(f(x, \theta)) \cdot \nabla_{\!f(x, \theta)}\, \ell(f(x, \theta))^{\!\top} \right].
+\end{equation}
+This means that, assuming a moderate dimension of the prediction space $m$, computing the empirical Fisher comes at no significant overhead and may, conveniently, be performed in-place as we discuss later.
+Again, we regularize the matrix via Tikhonov regularization with strength $\lambda$ and can, accordingly, define the empirical Fisher-based Newton loss as follows.
+\begin{definition}[Newton Loss (Fisher)]
+\label{def:fisher-newton-loss}
+    For a loss function $\ell$, and a given current parameter vector $\theta$, we define the empirical Fisher-based Newton loss as
+    \[ \ell^*_{\zb^\star}(\yb) = {\textstyle\frac{1}{2}}\|\zb^\star - \yb\|^2_2 
+       \qquad \text{where} \qquad
+       z_i^\star = \bar y_i - \Big( {\textstyle\frac1N\sum_{j=1}^N} \nabla_{\bar y_j} \ell({\bar \yb})\, \nabla_{\bar y_j} \ell({\bar \yb})^{\!\top} {+} \lambda\mathbf{I} \Big)^{\!-1} \nabla_{\bar y_i} \ell({\bar \yb}) %
+    \]
+    for all~~$i\in\{1,...,N\}$~~and~~$\bar \yb = f(\xb;\theta)$.
+\end{definition}
+
+Before continuing with the implementation, integration, and further computational considerations, we can make an interesting observation.
+In the case of using the trivial MSE loss, i.e., $\ell(y) = \frac{1}{2}\|y - y^\star\|^2_2$ where $y^\star$ denotes a ground truth, the Newton loss collapses to the original MSE loss. 
+This illustrates that Newton Losses requires non-trivial original losses.
+Another interesting aspect is the arising fixpoint---the Newton loss of a Newton loss is equivalent to a simple Newton loss.
+\label{sec:last-paragraph-of-method-for-mse-trivial}
+\begin{figure*}[t]
+\begin{minipage}[h]{190pt}
+\begin{algorithm}[H]
+{
+\begin{minted}[escapeinside=||,fontsize=\small,fontfamily=cmtt]{python}
+# Python style pseudo-code
+model = ...      # neural network
+loss = ...       # original loss fn
+optimizer = ...  # optim. of model
+tik_l = ...      # hyperparameter
+
+for data, label in data_loader:
+  # apply a neural network model
+  y = model(data)
+
+  # compute gradient of orig. loss
+  grad = gradient(loss(y, label), y)
+  # compute Hessian (or alt. Fisher)
+  hess = hessian(loss(y, label), y)
+  
+  # compute the projected optimum
+  z_star = (y - grad @ inverse(hess 
+    + tik_l * eye(g.shape[1]))).detach()
+
+  # compute the Newton loss
+  l = MSELoss()(y, z_star)
+
+  # backpropagate and optim. step
+  l.backward()
+  optimizer.step()
+\end{minted}
+\caption{\small Training with a Newton Loss
+\label{algo:newton-loss}}
+}
+\end{algorithm}
+\end{minipage}\hfill%
+\begin{minipage}[h]{190pt}\small
+\begin{algorithm}[H]
+{
+\begin{minted}[escapeinside=||,fontsize=\small,fontfamily=cmtt]{python}
+# implements the Fisher-based Newton 
+# loss via an injected modification
+# of the backward pass:
+class InjectFisher(AutoGradFunction):
+  def forward(ctx, x, tik_l):
+    assert len(x.shape) == 2
+    ctx.tik_l = tik_l
+    return x
+    
+  def backward(ctx, g):
+    fisher = g.T @ g * g.shape[0]
+    input_grad = g @ inverse(fisher 
+        + ctx.tik_l * eye(g.shape[1]))
+    return input_grad, None
+
+for data, label in data_loader:
+  # apply a neural network model
+  y = model(data)
+  # inject the Fisher backward mod.
+  y = InjectFisher.apply(y, tik_l)
+  # compute the original loss
+  l = loss(y, label)
+  # backpropagate and optim. step
+  l.backward()
+  optimizer.step()
+\end{minted}
+\caption{\small Training with InjectFisher\label{algo:fisher-loss}}
+}
+\end{algorithm}
+\end{minipage}
+\end{figure*}%
+
+
+\subsection{Implementation}
+
+After introducing Newton Losses, in this section, we discuss aspects of implementation %
+and illustrate its implementations in Algorithms~\ref{algo:newton-loss} and~\ref{algo:fisher-loss}.
+Whenever we have access to the Hessian matrix of the algorithmic loss function, it is generally favorable to utilize the Hessian-based approach (Algo.~\ref{algo:newton-loss} / Def.~\ref{def:hessian-newton-loss}), whereas we can utilize the empirical Fisher-based approach (Algo.~\ref{algo:fisher-loss} / Def.~\ref{def:fisher-newton-loss}) in any case.
+
+In Algorithm~\ref{algo:newton-loss}, the difference to regular training is that we use the original {\fontfamily{cmtt}\selectfont loss} only for the computation of the gradient ({\fontfamily{cmtt}\selectfont grad}) and the Hessian matrix ({\fontfamily{cmtt}\selectfont hess}) of the original loss.
+Then we compute $\zb^\star$ ({\fontfamily{cmtt}\selectfont z\_star}). 
+Here, depending on the automatic differentiation framework, we need to ensure not to backpropagate through the target {\fontfamily{cmtt}\selectfont z\_star}, which may be achieved, e.g., via ``{\fontfamily{cmtt}\selectfont .detach()}'' or ``{\fontfamily{cmtt}\selectfont .stop\_gradient()}'', depending on the choice of library.
+Finally, the Newton loss {\fontfamily{cmtt}\selectfont l} may be computed as the squared / MSE loss between the model output {\fontfamily{cmtt}\selectfont y} and {\fontfamily{cmtt}\selectfont z\_star} and an optimization step on {\fontfamily{cmtt}\selectfont l} may be performed.~~
+We note that, while we use a {\fontfamily{cmtt}\selectfont label} from our {\fontfamily{cmtt}\selectfont data\_loader}, this label may be empty or an abstract piece of information for the differentiable algorithm; in our experiments, we use ordinal relationships between data points as well as shortest-paths on graphs. 
+
+In Algorithm~\ref{algo:fisher-loss}, we show how to apply the empirical Fisher-based Newton Losses.
+In particular, due to the empirical Fisher matrix depending only on the gradient, we can compute it in-place during the backward pass / backpropagation, which makes this variant particularly simple and efficient to apply.
+This can be achieved via an injection of a custom gradient right before applying the original {\fontfamily{cmtt}\selectfont loss}, which replaces the gradient in-place by a gradient that corresponds to Definition~\ref{def:fisher-newton-loss}.
+The injection is performed by the {\fontfamily{cmtt}\selectfont InjectFisher} function, which corresponds to an identity during the forward pass but replaces the gradient by the gradient of the respective empirical Fisher-based Newton loss.
+In both cases, the only additional hyperparameter to specify is the Tikonov regularization strength $\lambda$ ({\fontfamily{cmtt}\selectfont tik\_l}).~
+$\lambda$ heavily depends on the algorithmic loss function, particularly, on the magnitude of gradients provided by the algorithmic loss, which may vary drastically between different methods and implementations.
+Other factors may be the choice of Hessian / Fisher, the dimension of outputs $m$, the batch size $N$.
+Notably, for very large $\lambda$, the direction of the gradient becomes more similar to regular gradient descent, and for smaller $\lambda$, the effect of Newton Losses increases. 
+We provide an ablation study for $\lambda$ in Section~\ref{sec:ablation}.
+
+
+
+
+
+
+
+
+
+  
+    
+
+
+
+
+
+
+
+
+
+\section{Experiments\protect\footnote{Our implementation is openly available at \href{https://github.com/Felix-Petersen/newton-losses}
+
+For the experiments, we apply Newton Losses to eight methods for differentiable algorithms and evaluate them on two established benchmarks for algorithmic supervision, i.e., problems where an algorithm is applied to the predictions of a model and only the outputs of the algorithm are supervised.
+Specifically, we focus on the tasks of ranking supervision and shortest-path supervision because they each have a range of established methods for evaluating our approach.
+In ranking supervision, only the relative order of a set of samples is known, while their absolute values remain unsupervised. 
+The established benchmark for differentiable sorting and ranking algorithms is the multi-digit MNIST sorting benchmark~\cite{grover2019neuralsort, prillo2020softsort, cuturi2019differentiable, petersen2021diffsort, petersen2022monotonic}.
+In shortest-path supervision, only the shortest-path of a graph is supervised, while the underlying cost matrix remains unsupervised.
+The established benchmark for differentiable shortest-path algorithms is the Warcraft shortest-path benchmark~\cite{vlastelica2019differentiation, berthet2020learning, petersen2021learning}.
+As these tasks require backpropagating through conventionally non-differentiable algorithms, the respective approaches make the ranking or shortest-path algorithms differentiable such that they can be used as part of the loss.
+
+
+
+
+\subsection{Ranking Supervision}
+\label{sec:ranking-supervision}
+
+
+
+In this section, we explore ranking supervision \cite{grover2019neuralsort} with an array of differentiable sorting-based losses.
+Here, we use the four-digit MNIST sorting benchmark \cite{grover2019neuralsort}, where sets of $n$ four-digit MNIST images are given, and the supervision is the relative order of these images corresponding to the displayed value, while the absolute values remain unsupervised.
+The goal is to learn a CNN that maps each image to a scalar value in an order preserving fashion. 
+As losses, we use sorting supervision losses based on the NeuralSort~\cite{grover2019neuralsort}, the SoftSort~\cite{prillo2020softsort}, the logistic Differentiable Sorting Network~\cite{petersen2021diffsort}, and the monotonic Cauchy DSN~\cite{petersen2022monotonic}.
+\textit{NeuralSort} and \textit{SoftSort} work by mapping an input list (or vector) of values to a differentiable permutation matrix that is row-stochastic and indicates the order / ranking of the inputs. 
+\textit{Differentiable Sorting Networks} offer an alternative to NeuralSort and SoftSort. 
+DSNs are based on sorting networks, a classic family of sorting algorithms that operate by conditionally swapping elements. 
+By introducing perturbations, DSNs relax the conditional swap operator to a differentiable conditional swap and thereby continuously relax the sorting and ranking operators. 
+We discuss the background of each of these diff.\ sorting and ranking algorithms in greater detail in Supplementary Material~\ref{sec:algorithmic-losses}.
+\begin{wrapfigure}[13]{r}{.5775\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/newton-diffsort-3.pdf}
+    \captionof{figure}{
+        Overview over ranking supervision with a differentiable sorting / ranking algorithm. 
+        A set of input images is (element-wise) processed by a CNN, producing a scalar for each image. The scalars are sorted / ranked by the differentiable ranking algorithm, which returns the differentiable permutation matrix, which is compared to the ground truth permutation matrix.  
+    }
+\end{wrapfigure}
+
+\paragraph{Setups.}
+The sorting supervision losses are cross-entropy losses defined between the differentiable permutation matrix produced by a respective differentiable sorting operator and the ground truth permutation matrix corresponding to a ground truth ranking.
+The Cauchy DSN may be an exception to the hard to optimize classification as it is quasi-convex~\cite{petersen2022monotonic}.
+We evaluate the sorting benchmark for numbers of elements to be ranked $n\in\{5,10\}$ and use the percentage of rankings correctly identified as well as percentage of individual element ranks correctly identified as evaluation metrics.
+For each of the four original baseline methods, we compare it to two variants of their Newton losses: the empirical Hessian and the empirical Fisher variant.
+For each setting, we train the CNN on 10 seeds using the Adam optimizer~\cite{kingma2015adam} at a learning rate of $10^{-3}$ for $10^5$ steps and batch size of $100$.
+
+\newcommand{\sa}[2]{{$#1$\scalebox{.8}{$\pm#2$}}}             %
+\newcommand{\sd}[2]{{\color{black!70!white}\pmb{\sa{#1}{#2}}}}  %
+\newcommand{\sg}[2]{\pmb{\sa{#1}{#2}}}                          %
+\newcommand{\sap}[2]{$($\sa{#1}{#2}$)$}
+\newcommand{\sdp}[2]{$($\sd{#1}{#2}$)$}
+\newcommand{\sgp}[2]{$($\sg{#1}{#2}$)$}
+
+\begin{table*}
+\centering
+    \small
+    \captionof{table}{
+    Ranking supervision with differentiable sorting. 
+    The metric is the percentage of rankings correctly identified (and individual element ranks correctly identified, in parentheses) avg.\ over $10$ seeds.
+    Statistically significant improvements (sig.\ level $0.05$) are indicated bold black; improved means are indicated in bold grey.
+    \label{tab:mnist-softsort-neuralsort-diffsort}
+    }
+    \setlength{\tabcolsep}{2.5pt}
+    \resizebox{\linewidth}{!}%
+    {
+    \begin{tabular}{lcccccccc}
+    \toprule
+$\pmb{n=5}$ & \multicolumn{2}{c}{NeuralSort\,\cite{grover2019neuralsort}} & \multicolumn{2}{c}{SoftSort\,\cite{prillo2020softsort}} & \multicolumn{2}{c}{Logistic\,DSN\,\cite{petersen2021diffsort}} & \multicolumn{2}{c}{Cauchy\,DSN\,\cite{petersen2022monotonic}} \\
+\cmidrule(r){1-1}\cmidrule(l){2-3}\cmidrule(l){4-5}\cmidrule(l){6-7}\cmidrule(l){8-9}
+Baseline        & \sa{71.33}{2.05} & \sap{87.10}{0.96}         & \sa{70.70}{2.60} & \sap{86.75}{1.26}         & \sa{53.56}{18.04} & \sap{77.04}{10.30}         & \sa{85.09}{0.77} & \sap{93.31}{0.39}      \\
+NL (Hessian)    & \sg{83.31}{1.70} & \sgp{92.54}{0.73}         & \sg{83.87}{0.81} & \sgp{92.72}{0.39}         & \sg{75.02}{12.59} & \sgp{88.53}{06.00}         & \sd{85.11}{0.78} & \sap{93.31}{0.34}       \\
+NL (Fisher)     & \sg{83.93}{0.62} & \sgp{92.80}{0.30}         & \sg{84.03}{0.59} & \sgp{92.82}{0.24}         & \sd{63.11}{30.63} & \sdp{79.28}{22.16}         & \sa{84.95}{0.79} & \sap{93.25}{0.37}               \\
+\bottomrule
+\toprule
+$\pmb{n=10}$ & \multicolumn{2}{c}{NeuralSort} & \multicolumn{2}{c}{SoftSort} & \multicolumn{2}{c}{Logistic DSN~} & \multicolumn{2}{c}{Cauchy DSN} \\
+\cmidrule(r){1-1}\cmidrule(l){2-3}\cmidrule(l){4-5}\cmidrule(l){6-7}\cmidrule(l){8-9}
+Baseline        & \sa{24.26}{01.52} & \sap{74.47}{0.83}         & \sa{27.46}{3.58} & \sap{76.02}{1.92}      & \sa{12.31}{10.22} & \sap{58.81}{16.79}         & \sa{55.29}{2.46} & \sap{87.06}{0.85}        \\
+NL (Hessian)    & \sg{48.76}{05.88} & \sgp{84.83}{2.13}         & \sg{55.07}{1.08} & \sgp{86.89}{0.31}      & \sg{42.14}{22.30} & \sgp{75.35}{23.77}         & \sd{56.49}{1.02} & \sdp{87.44}{0.40}        \\
+NL (Fisher)     & \sg{39.23}{11.38} & \sgp{81.14}{4.91}         & \sg{54.00}{2.24} & \sgp{86.56}{0.68}      & \sd{25.72}{27.42} & \sap{52.18}{36.51}         & \sd{56.12}{1.86} & \sdp{87.35}{0.65}        \\
+\bottomrule
+    \end{tabular}
+    }
+\end{table*}
+
+
+\paragraph{Results.}
+As displayed in Table~\ref{tab:mnist-softsort-neuralsort-diffsort}, we can see that---for each original loss---Newton Losses improve over their baselines.
+For NeuralSort, SoftSort, and Logistic DSNs, we find that using the Newton losses substantially improves performance.
+Here, the reason is that these methods suffer from vanishing and exploding gradients, especially for the more challenging case of $n=10$.
+As expected, we find that the Hessian Newton Loss leads to better results than the Fisher variant, except for NeuralSort and SoftSort in the easy setting of $n=5$, where the results are nevertheless quite close.
+Monotonic differentiable sorting networks, i.e., the Cauchy DSNs, provide an improved variant of DSNs, which have the property of quasi-convexity and have been shown to exhibit much better training behavior out-of-the-box, which makes it very hard to improve upon the existing results.
+Nevertheless, Hessian Newton Losses are on-par for the easy case of $n=5$ and, notably, improve the performance by more than $1\%$ on the more challenging case of $n=10$.
+To explore this further, we additionally evaluate the Cauchy DSN for $n=15$ (not displayed in the table): here, the baseline achieves \sa{30.84}{2.74} \sap{82.30}{1.08}, whereas, using NL (Fisher), we improve it to \sa{32.30}{1.22} \sap{82.78}{0.53}, showing that the trend of increasing improvements with more challenging settings (compared to smaller $n$) continues.
+Summarizing, we obtain strong improvements on losses that are hard to optimize, while in already well-behaving cases the improvements are smaller.
+This perfectly aligns with our goal of improving performance on losses that are hard to optimize.
+
+
+
+
+
+
+
+\begin{wrapfigure}[9]{r}{.55\linewidth}
+    \centering
+    \vskip-6.ex
+    \includegraphics[width=2.5cm]{figures/warcraft_12x12_input.png}\hfill
+    \includegraphics[width=2.5cm]{figures/warcraft_12x12_hidden_costs.png}\hfill
+    \includegraphics[width=2.5cm]{figures/warcraft_12x12_shortest_path.png}
+    \captionof{figure}{
+    $12\times12$ Warcraft shortest-path problem. An input terrain map (left), unsupervised ground truth cost embedding (center) and ground truth supervised shortest path (right). 
+    \label{fig:shortest-path-imgs}
+    }
+\end{wrapfigure}
+
+\subsection{Shortest-Path Supervision}
+
+In this section, we apply Newton Losses to the shortest-path supervision task of the $12\times12$ Warcraft shortest-path benchmark~\cite{vlastelica2019differentiation, berthet2020learning, petersen2021learning}.
+Here, $12\times12$ Warcraft terrain maps are given as $96\times96$ RGB images (e.g., Figure~\ref{fig:shortest-path-imgs} left) and the supervision is the shortest path from the top left to the bottom right (Figure~\ref{fig:shortest-path-imgs} right) according to a hidden cost embedding (Figure~\ref{fig:shortest-path-imgs} center).
+The hidden cost embedding is not available for training.
+The goal is to predict $12\times12$ cost embeddings of the terrain maps such that the shortest path according to the predicted embedding corresponds to the ground truth shortest path.
+Vlastelica~et~al.~\cite{vlastelica2019differentiation} have shown that integrating an algorithm in the training pipeline substantially improves performance compared to only using a neural network with an easy-to-optimize loss function, which has been confirmed by subsequent work~\cite{berthet2020learning, petersen2021learning}.
+For this task, we explore a set of families of algorithmic supervision approaches: 
+\textit{Relaxed Bellman-Ford}~\cite{petersen2021learning} is a shortest-path algorithm relaxed via the AlgoVision framework, which continuously relaxes algorithms by perturbing all accessed variables with logistic distributions and approximating the expectation value in closed form. 
+\textit{Stochastic Smoothing}~\cite{abernethy2016perturbation} is a sampling-based differentiation method that can be used to relax, e.g., a shortest-path algorithm by perturbing the input with probability distribution.
+\textit{Perturbed Optimizers with Fenchel-Young Losses}~\cite{berthet2020learning} build on stochastic smoothing and Fenchel-Young losses~\cite{blondel2020learning} and identify the argmax to be the differential of max, which allows a simplification of stochastic smoothing, again applied, e.g., to shortest-path learning problems.
+We use the same hyperparameters as shared by previous works~\cite{berthet2020learning, petersen2021learning}.
+In particular, it is notable that, throughout the literature, the benchmark assumes a training duration of $50$ epochs and a learning rate decay by a factor of $10$ after $30$ and $40$ epochs each. 
+Thus, we do not deviate from these constraints.
+
+\begin{wrapfigure}[6]{r}{.6\linewidth}
+    \centering
+    \captionof{table}{
+        Shortest-path benchmark results for different variants of the AlgoVision-relaxed Bellman-Ford algorithm~\cite{petersen2021learning}.
+        The metric is the percentage of perfect matches averaged over $10$ seeds.
+        Significant improvements are bold black, and improved means are bold grey.
+    \label{tab:shortest-path-algovision}
+    }
+    \resizebox{\linewidth}{!}{\footnotesize
+    \begin{tabular}{lcccc}
+    \toprule
+Variant     &      For+$L_1$ & For+$L_2^2$ & While+$L_1$ & While+$L_2^2$    \\
+    \midrule
+Baseline        &     \sa{94.19}{0.33} & \sa{95.90}{0.21} & \sa{94.30}{0.20} & \sa{95.77}{0.41} \\
+NL (Fisher)     &     \sg{94.52}{0.34} & \sd{96.08}{0.46} & \sd{94.47}{0.34} & \sd{95.94}{0.27} \\
+\bottomrule
+    \end{tabular}
+    }
+\end{wrapfigure}
+\subsubsection{Relaxed Bellman-Ford} 
+The~relaxed Bellman-Ford algorithm~\cite{petersen2021learning} is a continuous relaxation of the Bellman-Ford algorithm via the AlgoVision library.
+To increase the number of settings considered, we explore four sub-variants of the algorithm:
+For+$L_1$, For+$L_2^2$, While+$L_1$, and While+$L_2^2$. 
+Here, For / While refers to the distinction between using a While and For loop in Bellman-Ford, while $L_1$ vs.~$L_2^2$ refer to the choice of metric between shortest paths.
+As computing the Hessian of the AlgoVision Bellman-Ford algorithm is too expensive with the PyTorch implementation, for this evaluation, we restrict it to the empirical Fisher-based Newton loss.
+The results  displayed in Table~\ref{tab:shortest-path-algovision}. %
+While the differences are rather small, as the baseline here is already strong, we can observe improvements in all of the four settings and in one case achieve a significant improvement.
+This can be attributed to ~(i)~the high performance of the baseline algorithm on this benchmark, and ~(ii)~that only the empirical Fisher-based Newton loss is available, which is not as strong as the Hessian variant.
+
+
+
+\subsubsection{Stochastic Smoothing}
+
+After discussing the analytical relaxation, we continue with stochastic smoothing approaches.
+First, we consider stochastic smoothing~\cite{abernethy2016perturbation}, which allows perturbing the input of a function with an exponential family distribution to estimate the gradient of the smoothed function.
+For a reference on stochastic smoothing with a focus on differentiable algorithms, we refer to the author's recent work~\cite{petersen2024generalizing}.
+For the baseline, we apply stochastic smoothing to a hard non-differentiable Dijkstra algorithm based loss function to relax it via Gaussian noise (``SS of loss'').
+We utilize variance reduction via the method of covariates.
+As we detail in Supplementary Material~\ref{sec:stoch-smooth-sm}, stochastic smoothing can also be used to estimate the Hessian of the smoothed function.
+Based on this result, we can construct the Hessian-variant Newton loss.
+As an extension to stochastic smoothing, we apply stochastic smoothing only to the non-differentiable Dijstra algorithm (thereby computing its Jacobian matrix) but use a differentiable loss to compare the predicted relaxed shortest-path to the ground truth shortest-path (``SS of algorithm'').
+In this case, the Hessian Newton loss is not applicable because the output of the smoothed algorithm is high dimensional and the Hessian of the loss becomes intractable. An extended discussion of the ``SS of algorithm'' fomulation can be found in SM~\ref{sm:ss-of-algo}.
+Nevertheless, we can apply the Fisher-based Newton loss.
+We evaluate both approaches for $3$, $10$, and $30$ samples.
+\begin{wrapfigure}[16]{r}{.49\linewidth}
+    \centering
+    \includegraphics[width=1.03\linewidth]{figures/table_newton_shortest_path_2_new_3.pdf}
+    \caption{Test accuracy (perfect matches) plot for `SS of loss' with $10$ samples on the Warcraft shortest-path benchmark.
+    Lines show the mean and shaded areas show the 95\% conf.\ intervals.
+    \label{fig:ss-training}}
+\end{wrapfigure}
+
+In Table~\ref{tab:shortest-path-stochastic}, we can observe that Newton Losses improves the results for stochastic smoothing in each case with more than $3$ samples.
+The reason for the poor performance on $3$ samples is that the Hessian or empirical Fisher, respectively, is estimated using only $3$ samples, which makes the estimate unstable.
+For $10$ and $30$ samples, the performance improves compared to the original method.
+In Figure~\ref{fig:ss-training}, we display a respective accuracy plot.
+When comparing ``SS of loss'' and ``SS of algorithm'', we can observe that the extension to smoothing only the algorithm improves performance for at least $10$ samples.
+Here, the reason, again, is that smoothing the algorithm itself requires estimating the Jacobian instead of only the gradient; thus, a larger number of samples is necessary; however starting at $10$ samples, smoothing the algorithm performs better, which means that the approach is better at utilizing a given sample budget.
+
+
+\begin{table*}[t]
+    \centering
+    \caption{
+        Shortest-path benchmark results for the stochastic smoothing of the loss (including the algorithm), stochastic smoothing of the algorithm (excluding the loss), and perturbed optimizers with the Fenchel-Young loss.
+        The metric is the percentage of perfect matches averaged over $10$ seeds. 
+        Significant improvements are bold black, and improved means are bold grey.
+    }
+    \resizebox{\linewidth}{!}%
+    {\small
+    \setlength{\tabcolsep}{2pt}
+    \begin{tabular}{lccccccccc}
+    \toprule
+Method          & \multicolumn{3}{c}{SS of loss} & \multicolumn{3}{c}{SS of algorithm} & \multicolumn{3}{c}{PO~w/ FY loss} \\
+\cmidrule(r){1-1}\cmidrule(l){2-4}\cmidrule(l){5-7}\cmidrule(l){8-10}
+\# Samples      & 3 & 10 & 30 & 3 & 10 & 30 & 3 & 10 & 30 \\
+\midrule
+Baseline              & \sd{62.83}{5.29} & \sa{77.01}{2.18} & \sa{85.48}{1.23}       & \sd{57.55}{4.58} & \sa{78.70}{1.90} & \sa{87.26}{1.50}            & \sa{80.64}{0.75} & \sa{80.39}{0.57} & \sa{80.71}{1.28} \\ 
+NL (Hessian)          & \sa{62.40}{5.48} & \sg{78.82}{2.12} & \sd{85.94}{1.33}       & --- & --- & ---                                                   & \sg{83.09}{3.11} & \sd{81.13}{3.58} & \sg{83.45}{2.21} \\ 
+NL (Fisher)           & \sa{58.80}{5.10} & \sg{78.74}{1.68} & \sd{86.10}{0.60}       & \sa{53.82}{8.45} & \sd{79.24}{1.78} & \sd{87.41}{1.13}            & \sd{80.70}{0.65} & \sa{80.37}{0.98} & \sa{80.45}{0.78} \\ 
+\bottomrule
+    \end{tabular}
+    }
+    \label{tab:shortest-path-stochastic}
+\end{table*}
+\subsubsection{Perturbed Optimizers with Fenchel-Young Losses}
+Perturbed optimizers with a Fenchel-Young loss~\cite{berthet2020learning} is a formulation of solving the shortest path problem as an $\arg\max$ problem, and differentiating this problem using stochastic smoothing-based perturbations and a Fenchel-Young loss.
+By extending their formulation to computing the Hessian of the Fenchel-Young loss, we can compute the Newton loss, and find that we can achieve improvements of more than $2\%$.
+However, for Fenchel-Young losses, which are defined via their derivative, the empirical Fisher is not particularly meaningful, leading to equivalent performance between the baseline and the Fisher Newton loss.
+Berthet~\textit{et al.}~\cite{berthet2020learning} mention that their approach works well for small numbers of samples, which we can confirm as seen in Table~\ref{tab:shortest-path-stochastic} where the accuracy is similar for each number of samples.
+An interesting observation is that perturbed optimizers with Fenchel-Young losses perform better than stochastic smoothing in the few-sample regime, whereas stochastic smoothing performs better with larger numbers of samples.
+
+
+
+
+
+
+
+
+
+
+
+\subsection{Ablation Study}
+\label{sec:ablation}
+
+In this section, we present our ablation study for the (only) hyperparameter $\lambda$.
+$\lambda$ is the strength of the Tikhonov regularization (see, e.g., Equation~\ref{eq:first-with-tik}, or {\fontfamily{cmtt}\selectfont tik\_l} in the algorithms). This parameter is important for controlling the degree to which second-order information is used as well as regularizing the curvature.
+For the ablation study, we use the experimental setting from Section~\ref{sec:ranking-supervision} for NeuralSort and SoftSort and $n=5$.
+In particular, we consider $13$ values for $\lambda$, exploring the range from $0.001$ to $1000$ and plot the element-wise ranking accuracy (individual element ranks correctly identified) in Figure~\ref{fig:lambda-ablation-sort}. We display the average over $10$ seeds as well as each seed's result individually with low opacity. 
+We can observe that Newton Losses are robust over many orders of magnitude for the hyperparameter $\lambda$. Note the logarithmic axis for $\lambda$ in Figure~\ref{fig:lambda-ablation-sort}.
+In general, we observe that choices within a few orders of magnitude around $1$ are generally favorable.
+Further, we observe that NeuralSort is more sensitive to drastic changes in $\lambda$ compared to SoftSort. 
+
+
+\begin{figure*}[b]
+    \centering
+    \includegraphics[width=.495\linewidth]{figures/plot_nov22_ablation_individual_jan_24_2_0.pdf}\hfill%
+    \includegraphics[width=.495\linewidth]{figures/plot_nov22_ablation_individual_jan_24_2_1.pdf}%
+    \caption{Ablation study wrt.~the Tikhonov regularization strength hyperparameter $\lambda$. Displayed is the element-wise ranking accuracy (individual element ranks correctly identified), averaged over $10$ seeds, and additionally each seed with low opacity in the background. \textbf{Left}: NeuralSort. \textbf{Right}: SoftSort. Each for $n=5$. Newton Losses, and for both the Hessian and the Fisher variant, significantly improve over the baseline for up to (or beyond) 6 orders of magnitude in variation of its hyperparameter $\lambda$. Note the logarithmic horizontal axis.}
+    \label{fig:lambda-ablation-sort}
+\end{figure*}
+
+\subsection{Runtime Analysis}
+
+We provide tables with runtimes for the experiments in Supplementary Material~\ref{sec:runtimes}. 
+We can observe that the runtimes between the baseline and empirical Fisher-based Newton Losses are indistinguishable for all cases.
+For the analytical relaxations of differentiable sorting algorithms, where the computation of the Hessian can become expensive with automatic differentiation (i.e., without a custom derivation of the Hessian and without vectorized Hessian computation), we observed overheads between $10\%$ and $2.6\times$.
+For all stochastic approaches, we observe indistinguishable runtimes for Hessian-based Newton Losses.
+In summary, applying the Fisher variant of Newton Losses has a minimal computational overhead, whereas, for the Hessian variant, any overhead depends merely on the computation of the Hessian of the algorithmic loss function.  
+While, for differentiable algorithms, the neural network's output dimensionality or algorithm's input dimensionality $m$ is typically moderately small to make the inversion of the Hessian or empirical Fisher cheap, when the output dimensionality $m$ becomes very large such that inversion of the empirical Fisher becomes expensive, we refer to the Woodbury matrix identity~\cite{woodbury1950inverting}, which allows simplifying the computation via its low-rank decomposition. 
+A corresponding deviation is included in SM~\ref{sm:woodbury}. 
+Additionally, solver-based inversion implementations can be used to make the inversion more efficient.
+
+
+
+\section{Conclusion}
+
+
+In this work, we focused on weakly-supervised learning problems that require integration of differentiable algorithmic procedures in the loss function.
+This leads to non-convex loss functions that exhibit vanishing and exploding gradients, making them hard to optimize.
+We proposed a novel approach for improving performance of algorithmic losses building upon the curvature information of the loss.
+For this, we split the optimization procedure into two steps: optimizing on the loss itself using Newton's method to mitigate vanishing and exploding gradients, and then optimizing the neural network with gradient descent. 
+We simplified this procedure via a transformation of an original loss function into a Newton loss, which comes in two flavors:
+a Hessian variant for cases where the Hessian is available and an empirical Fisher variant as an alternative. 
+We evaluated Newton Losses on a set of algorithmic supervision settings, demonstrating that the method can drastically improve performance for weakly-performing differentiable algorithms.
+We hope that the community adapts Newton Losses for learning with differentiable algorithms and see great potential for combining it with future differentiable algorithms in unexplored territories of the space of differentiable relaxations, algorithms, operators, and simulators.
+
+
+\begin{ack}
+This work was in part supported by the IBM-MIT Watson AI Lab, the DFG in the Cluster of Excellence EXC 2117 ``Centre for the Advanced Study of Collective Behaviour'' (Project-ID 390829875), the Land Salzburg within the WISS 2025 project IDA-Lab (20102-F1901166-KZP and 20204-WISS/225/197-2019), the U.S. DOE Contract No. DE-AC02-76SF00515, the ARO~(W911NF-21-1-0125), the ONR~(N00014-23-1-2159), and the CZ~Biohub.
+\end{ack}
+
+
+\printbibliography
+
+\clearpage
+
+
+
+
+
+
+
+\doparttoc
+\faketableofcontents
+
+\parttoc
+
+
+
+\section{Characterization of Meaningful Settings for Newton Losses}
+
+\label{sm:meaningful-settings}
+
+For practical purposes, to decide whether applying Newton Losses is expected to improve results, we recommend that a loss $\ell$ fulfills the following 3 minimal criteria: 
+\begin{itemize}
+    \item (i) non-convex,
+    \item (ii) smoothly differentiable,
+    \item (iii) cannot be solved by a single GD step.
+\end{itemize}
+
+Regarding (ii), the stochastic smoothing formulation enables any non-differentiable function (such as Shortest-paths as considered in this work) to become smoothly differentiable.
+
+Regarding (iii), we note that, e.g., for the MSE loss, the optimum of the loss (when optimizing loss inputs) can be found using a single step of GD (see last paragraph of Section~\ref{sec:last-paragraph-of-method-for-mse-trivial}).
+For the cross-entropy classification loss, a single GD step leads to the correct class.
+
+
+
+\section{Algorithmic Supervision Losses}
+
+\label{sec:algorithmic-losses}
+
+In this section, we extend the discussion of SoftSort, DiffSort, AlgoVision, and stochastic smoothing. %
+
+\subsection{SoftSort and NeuralSort}
+\label{sec:softsort}
+SoftSort~\cite{prillo2020softsort} and NeuralSort~\cite{grover2019neuralsort} are prominent yet simple examples of a differentiable algorithm.
+In the case of ranking supervision, they obtain an array or vector of scalars and return a row-stochastic matrix called the differentiable permutation matrix $P$, which is a relaxation of the argsort operator.
+Note that, in this case, a set of $k$ inputs yields a scalar for each image and thereby $y\in\mathbb{R}^k$.
+As a ground truth label, a ground truth permutation matrix $Q$ is given and the loss between $P$ and $Q$ is the binary cross entropy loss $\,\ell_{\mathrm{SS}}(y) = \mathrm{BCE}\,(P(y), Q)\,$.
+Minimizing the loss enforces the order of predictions $y$ to correspond to the true order, which is the training objective.
+SoftSort is defined as
+\begin{align}
+    P(y) &= \operatorname{softmax} \left(- \left|y^\top \ominus \operatorname{sort} (y)\right| / \tau\right) = \operatorname{softmax} \left(- \left|y^\top \ominus S y\right| / \tau\right)
+\end{align} 
+where $\tau$ is a temperature parameter, ``$\operatorname{sort}$'' sorts the entries of a vector in non-ascending order, $\ominus$ is the element-wise broadcasting subtraction, $|\cdot|$ is the element-wise absolute value, and ``$\operatorname{softmax}$'' is the row-wise softmax operator. %
+NeuralSort is defined similarly and omitted for the sake of brevity.
+In the limit of $\tau\to0$, SoftSort and NeuralSort converge to the exact ranking permutation matrix~\cite{grover2019neuralsort, prillo2020softsort}. 
+A respective Newton loss can be implemented using automatic differentiation according to Definition~\ref{def:hessian-newton-loss} or via the empirical Fisher matrix using Definition~\ref{def:fisher-newton-loss}.
+
+\subsection{DiffSort}
+Differentiable sorting networks (DSN)~\cite{petersen2021diffsort, petersen2022monotonic} offer a strong alternative to SoftSort and NeuralSort. 
+They are based on sorting networks, a classic family of sorting algorithms that operate by conditionally swapping elements~\cite{knuth1998sorting}.
+As the locations of the conditional swaps are pre-defined, they are suitable for hardware implementations, which also makes them especially suited for continuous relaxation.
+By perturbing a conditional swap with a distribution and solving for the expectation under this perturbation in closed-form, we can differentiably sort a set of values and obtain a differentiable doubly-stochastic permutation matrix $P$, which can be used via the BCE loss as in Section~\ref{sec:softsort}.
+We can obtain the respective Newton loss either via the Hessian computed via automatic differentiation or via the Fisher matrix. 
+
+\subsection{AlgoVision}
+AlgoVision~\cite{petersen2021learning} is a framework for continuously relaxing arbitrary simple algorithms by perturbing all accessed variables with logistic distributions.
+The method approximates the expectation value of the output of the algorithm in closed-form and does not require sampling. 
+For shortest-path supervision, we use a relaxation of the Bellman-Ford algorithm~\cite{bellman1958routing, ford1956network} and compare the predicted shortest path with the ground truth shortest path via an MSE loss.
+The input to the shortest path algorithm is a cost embedding matrix predicted by a neural network.
+
+
+\subsection{Stochastic Smoothing}
+\label{sec:stoch-smooth-sm}
+Another differentiation method is stochastic smoothing~\cite{abernethy2016perturbation}.
+This method regularizes a non-differentiable and discontinuous loss function $\ell(y)$ by randomly perturbing its input with random noise $\epsilon$ (i.e., $\ell(y+\epsilon)$).
+The loss function is then approximated as $\ell(y)\approx \ell_\epsilon(y) = \mathbb{E}_\epsilon[\ell(y+\epsilon)]$. 
+While $\ell$ may be non-differentiable, its smoothed stochastic counterpart $\ell_\epsilon$ is differentiable and the corresponding gradient and Hessian can be estimated via the following result.
+\begin{lemma}[Exponential Family Smoothing, adapted from Lemma 1.5 in~Abernethy~\textit{et al.}~\cite{abernethy2016perturbation}]
+Given a distribution over $\mathbb{R}^m$ with a probability density function $\mu$ of the form $\mu(\epsilon)=\exp(-\nu(\epsilon))$ for any twice-differentiable~$\nu$, then
+\begin{eqnarray}
+    \nabla_{\!y} l_\epsilon(y)
+    & = & \nabla_{\!y}^{\phantom{2}} \mathbb{E}_\epsilon\left[\ell(y+\epsilon) \right]
+    ~~=~~ \mathbb{E}_\epsilon\big[\ell(y+\epsilon)\, \nabla_\epsilon\nu(\epsilon) \big], \label{eq:stoch-smooth-grad} \\
+    \nabla_{\!y}^2 l_\epsilon(y)
+    & = & \nabla_{\!y}^2 \mathbb{E}_\epsilon\left[\ell(y+\epsilon) \right]
+    ~~=~~ \mathbb{E}_\epsilon\!\left[\ell(y+\epsilon)\, \Big(\nabla_{\!\epsilon}\nu(\epsilon) \nabla_{\!\epsilon}\nu(\epsilon)^{\!\top}\! - \nabla_{\!\epsilon}^2\nu(\epsilon)\Big) \right]\!. \label{eq:stoch-smooth-hess}
+\end{eqnarray}
+\end{lemma}
+A \textit{variance-reduced form} of \eqref{eq:stoch-smooth-grad} and \eqref{eq:stoch-smooth-hess} is
+\begin{eqnarray}
+    \nabla_y \mathbb{E}_\epsilon\left[\ell(y+\epsilon) \right] 
+    & = & \mathbb{E}_\epsilon\big[(\ell(y+\epsilon) - \ell(y))\, \nabla_\epsilon\nu(\epsilon) \big],  \\
+    \nabla_y^2 \mathbb{E}_\epsilon\left[\ell(y+\epsilon) \right] 
+    & = & \mathbb{E}_\epsilon\!\left[(\ell(y+\epsilon) - \ell(y))\, \Big(\nabla_\epsilon\nu(\epsilon) \nabla_\epsilon\nu(\epsilon)^{\!\top}\! - \nabla_\epsilon^2\nu(\epsilon)\Big) \right]\!. 
+\end{eqnarray}
+
+In this work, we use this to estimate the gradient of the shortest path algorithm.
+By including the second derivative, we extend the perturbed optimizer losses to Newton losses. 
+This also lends itself to full second-order optimization.
+
+\subsubsection{SS of Algorithm}
+\label{sm:ss-of-algo}
+
+SS of algorithm is an extension of this formulation, where stochastic smoothing is used to compute the Jacobian of the smoothed algorithm, e.g., $f:\mathbb{R}^{144}\to\mathbb{R}^{144}$ and the loss is, e.g., $\ell(y) = \mathrm{MSE}(f(y), \mathrm{label})$. Here, we can backpropagate through $\mathrm{MSE}$ and can apply stochastic smoothing to $f$ only. 
+(The idea being that for many samples, it is better to estimate the Jacobian rather than the gradient of smoothing the entire loss.) While computing the Jacobian of $f$ is simple with stochastic smoothing, the Hessian here would be of size $144 \times 144 \times 144 \times 144$, making it infeasible to estimate this Hessian via sampling.
+
+\subsection{Perturbed Optimizers with Fenchel-Young Losses}
+
+Berthet~\textit{et al.}~\cite{berthet2020learning} build on stochastic smoothing and Fenchel-Young losses~\cite{blondel2020learning} to propose perturbed optimizers with Fenchel-Young losses.
+For this, they use algorithms, like Dijkstra, to solve optimization problems of the type $\max_{w\in\mathcal{C}}\langle y, w \rangle$, where $\mathcal{C}$ denotes the feasible set, e.g., the set of valid paths.   
+Berthet~\textit{et al.}~\cite{berthet2020learning} identify the argmax to be the differential of max, which allows a simplification of stochastic smoothing.
+By identifying similarities to Fenchel-Young losses, they find that the gradient of their loss is 
+\begin{equation}
+    \nabla_y \ell(y) = \mathbb{E}_\epsilon\left[\arg\max_{w\in\mathcal{C}}\langle y + \epsilon, w \rangle\right] - w^\star
+\end{equation}
+where $w^\star$ is the ground truth solution of the optimization problem (e.g., shortest path). 
+This formulation allows optimizing the model without the need for computing the actual value of the loss function.
+Berthet~\textit{et al.}~\cite{berthet2020learning} find that the number of samples---surprisingly---only has a small impact on performance, such that $3$ samples were sufficient in many experiments, and in some cases even a single sample was sufficient. 
+In this work, we confirm this behavior and also compare it to plain stochastic smoothing. 
+We find that for perturbed optimizers, the number of samples barely impacts performance, while for stochastic smoothing more samples always improve performance.
+If only few samples can be afforded (like $10$ or less), perturbed optimizers are better as they are more sample efficient; however, when more samples are available, stochastic smoothing is superior as it can utilize more samples better.
+
+
+
+\section{Hyperparameters and Training Details}
+
+\label{sm:training-details}
+
+\paragraph{Sorting and ranking.} 
+100,000 training steps with Adam and learning rate 0.001. Same convolutional network as in all prior works on the benchmark: Two convolutional layers with a kernel size of 5x5, 32 and 64 channels respectively, each followed by a ReLU and MaxPool layer; after flattening, this is followed by a fully connected layer with a size of 64, a ReLU layer, and a fully connected output layer mapping to a scalar.
+
+\begin{itemize}
+    \item NeuralSort
+    \begin{itemize}
+        \item Temperature $\tau=1.0$ [Best for baseline from grid 0.001, 0.01, 0.1, 1, 10]
+    \end{itemize}
+    \item SoftSort
+    \begin{itemize}
+        \item Temperature $\tau=0.1$ [Best for baseline from grid 0.001, 0.01, 0.1, 1, 10]
+    \end{itemize}
+    \item Logistic DSN
+    \begin{itemize}
+        \item Type: \verb|odd_even|
+        \item Inverse temperature
+        \begin{itemize}
+            \item For $n=\phantom{0}5$: $\beta=10$ [Best for baseline from grid 10, 15, 20]
+            \item For $n=10$: $\beta=10$ [Best for baseline from grid 10, 20, 40]
+        \end{itemize}
+    \end{itemize}
+    \item Cauchy DSN
+    \begin{itemize}
+        \item Type: \verb|odd_even|
+        \item Inverse temperature
+        \begin{itemize}
+            \item For $n=\phantom{0}5$: $\beta=\phantom{0}10$
+                  [Best for baseline from grid 10, 100]
+            \item For $n=10$: $\beta=100$
+                  [Best for baseline from grid 10, 100]
+        \end{itemize}
+    \end{itemize}
+\end{itemize}
+
+\paragraph{Shortest-path.}
+Model, Optimizer, LR schedule, and epochs same as in prior work: First block of ResNet18, Adam optimizer, training duration of 50 epochs, and a learning rate decay by a factor of 10 after 30 and 40 epochs each.
+
+\begin{itemize}
+\item AlgoVision:
+    \begin{itemize}
+    \item $\beta=10$
+    \item \verb|n_iter=18| \\
+          (number iterations in for loop / max num iteration in algovision while loop)
+    \item \verb|t_conorm='probabilistic'|
+    \item Initial learning rate, for each (as it varies between for/while loop and L1/L2 loss), \\
+          best among [1, 0.33, 0.1, 0.033, 0.01, 0.0033, 0.001].
+    \end{itemize}
+\item SS of loss / algorithm:
+    \begin{itemize}
+    \item Distribution: Gaussian with $\sigma=0.1$ \\
+          {[best $\sigma$ on factor 10 exponential grid for baseline]}
+    \item Initial LR: $0.001$
+    \end{itemize}
+\item PO / FY loss:
+    \begin{itemize}
+    \item Distribution: Gaussian with $\sigma=0.1$ \\
+         {[best $\sigma$ on factor 10 exponential grid for baseline]}
+    \item Initial LR: $0.01$
+    \end{itemize}
+\end{itemize}
+
+\subsection[Hyperparameter lambda]{Hyperparameter $\lambda$}
+For the experiments in the tables, select $\lambda$ based one seed from the grid $\lambda\in[0.001, 0.01, 0.1, 1, 10, 100, 100, 1000, 3000]$.
+For the experiments in Tables~\ref{tab:shortest-path-algovision} and~\ref{tab:shortest-path-stochastic-sm}, we present the values in the Tables~\ref{tab:mnist-softsort-neuralsort-diffsort-sm} and~\ref{tab:shortest-path-stochastic-sm}, respectively.
+For the experiments in Table~\ref{tab:shortest-path-algovision}, we use a Tikhonov regularization strength of $\lambda=1000$ for the $L_1$ variants and $\lambda=3000$ for the $L_2^2$ variants.
+\begin{table}[h]
+    \centering
+    \caption{
+    {Tikhonov regularization strengths $\lambda$ for the experiment in Table~\ref{tab:mnist-softsort-neuralsort-diffsort}.} 
+    \label{tab:mnist-softsort-neuralsort-diffsort-sm}
+    }
+    \resizebox{\linewidth}{!}%
+    {\footnotesize
+    \setlength{\tabcolsep}{2.5pt}
+    \begin{tabular}{lcccccccc}
+    \toprule
+    & \multicolumn{4}{c}{$n=5$} & \multicolumn{4}{c}{$n=10$}  \\
+    \cmidrule(r){2-5}\cmidrule(r){6-9}
+    & NeuralSort & SoftSort & Logistic\,DSN & Cauchy\;DSN & NeuralSort & SoftSort & Logistic\,DSN & Cauchy\;DSN   \\
+\midrule
+NL (Hessian)    & $\lambda=0.01$            & $\lambda=10$              & $\lambda=0.1$             & $\lambda=0.1$             & $\lambda=0.01$            & $\lambda=1$              & $\lambda=0.1$             & $\lambda=0.1$      \\
+NL (Fisher)     & $\lambda=0.1$             & $\lambda=10$              & $\lambda=0.1$             & $\lambda=0.1$             & $\lambda=100$             & $\lambda=100$            & $\lambda=0.1$             & $\lambda=0.1$                \\
+\bottomrule
+    \end{tabular}
+    }
+    \centering
+    \caption{
+        {Tikhonov regularization strengths $\lambda$ for the experiment in Table~\ref{tab:shortest-path-stochastic}.} 
+    \label{tab:shortest-path-stochastic-sm}
+    }
+    \resizebox{\linewidth}{!}
+    {\footnotesize
+    \setlength{\tabcolsep}{3pt}
+    \begin{tabular}{l|ccc|ccc|ccc}
+    \toprule
+Loss            & \multicolumn{3}{c}{SS of loss} & \multicolumn{3}{c}{SS of algorithm} & \multicolumn{3}{c}{PO~w/ FY loss} \\
+\# Samples      & 3 & 10 & 30 & 3 & 10 & 30 & 3 & 10 & 30 \\
+\midrule
+NL (Hessian)       & $\lambda=1000$ & $\lambda=1000$ & $\lambda=1000$  &---&---&---&  $\lambda=1000$ & $\lambda=1000$ & $\lambda=1000$ \\
+NL (Fisher)        & $\lambda=0.1$ & $\lambda=0.1$ & $\lambda=0.1$ & $\lambda=1000$ & $\lambda=1000$ & $\lambda=1000$ & $\lambda=1000$ & $\lambda=1000$ & $\lambda=1000$ \\
+\bottomrule
+    \end{tabular}
+    }
+\end{table}
+
+\subsection{List of Assets}
+\label{sm:assets}
+\begin{itemize}
+    \item Multi-digit MNIST~\cite{grover2019neuralsort}, which builds on MNIST~\cite{lecun2010mnist} ~~[MIT License / CC License]
+    \item Warcraft shortest-path data set~\cite{vlastelica2019differentiation} ~~[MIT License]
+    \item PyTorch~\cite{paszke2019pytorch} ~~[BSD 3-Clause License]
+\end{itemize}
+
+
+\section{Runtimes}
+
+\label{sec:runtimes}
+
+In this supplementary material, we provide and discuss runtimes for the experiments.
+All times are of full training on a single A6000 GPU.
+
+In the differentiable sorting and ranking experiment, as shown in Table~\ref{tab:mnist-softsort-neuralsort-diffsort-runtime}, we observe that the runtime from regular training compared to the Newton loss with the Fisher is only marginally increased. 
+This is because computing the Fisher and inverting it is very inexpensive.
+We observe that the Newton loss with the Hessian, however, is more expensive: due to the implementation of the differentiable sorting and ranking operators, we compute the Hessian by differentiating each element of the gradient, which makes this process fairly expensive. 
+An improved implementation could make this process much faster. 
+Nevertheless, there is always some overhead to computing the Hessian compared to the Fisher.
+
+\begin{table}[h]
+    \centering
+    \caption{
+    Runtimes  [h:mm] for the differentiable sorting results corresponding to Table~\ref{tab:mnist-softsort-neuralsort-diffsort}. 
+    }
+    {\footnotesize
+    \setlength{\tabcolsep}{2.5pt}
+    \begin{tabular}{lcccccc}
+    \toprule
+    & \multicolumn{3}{c}{$n=5$} & \multicolumn{3}{c}{$n=10$}  \\
+    \cmidrule(r){2-4}\cmidrule(r){5-7}
+    & DSN & NeuralSort & SoftSort & DSN & NeuralSort & SoftSort   \\
+\midrule
+Baseline        & 1:10 & 1:02 & 1:01 & 1:43 & 1:27 & 1:24     \\
+NL (Hessian)    & 2:24 & 1:07 & 1:10 & 6:17 & 1:42 & 1:40     \\
+NL (Fisher)     & 1:11 & 1:03 & 1:02 & 1:44 & 1:27 & 1:25     \\
+\bottomrule
+    \end{tabular}
+    }
+    \label{tab:mnist-softsort-neuralsort-diffsort-runtime}
+\end{table}
+
+In Table~\ref{tab:shortest-path-algovision-runtime}, we show the runtimes for the shortest-path experiment with AlgoVision. Here, we observe that the runtime overhead is very small.
+\begin{table}[h]
+    \centering
+    \caption{
+        Runtimes  [h:mm] for the shortest-path results corresponding to Table~\ref{tab:shortest-path-algovision}. 
+    }
+    {\footnotesize
+    \begin{tabular}{l|cc|cc}
+    \toprule
+Algorithm Loop  &     \multicolumn{2}{c}{\texttt{For}}  & \multicolumn{2}{c}{\texttt{While}} \\
+Loss            &      $L_1$ & $L_2^2$                  &  $L_1$ & $L_2^2$   \\
+    \midrule
+Baseline         &     0:10 & 0:10 & 0:15 & 0:15 \\
+NL (Fisher)      &     0:10 & 0:11 & 0:15 & 0:15 \\
+\bottomrule
+    \end{tabular}
+    }
+    \label{tab:shortest-path-algovision-runtime}
+\end{table}
+
+In Table~\ref{tab:shortest-path-stochastic-runtime}, we show the runtimes for the shortest-path experiment with stochastic methods. Here, we observe that the runtime overhead is also very small. Here, the Hessian is also cheap to compute as it is not computed with automatic differentiation.
+
+\begin{table}[h!]
+    \centering
+    \caption{
+        Runtimes  [h:mm] for the shortest-path results corresponding to Table~\ref{tab:shortest-path-stochastic}.
+    }
+    {\footnotesize
+    \setlength{\tabcolsep}{3pt}
+    \begin{tabular}{l|ccc|ccc|ccc}
+    \toprule
+Loss            & \multicolumn{3}{c}{SS of loss} & \multicolumn{3}{c}{SS of algorithm} & \multicolumn{3}{c}{PO~w/ FY loss} \\
+\# Samples      & 3 & 10 & 30 & 3 & 10 & 30 & 3 & 10 & 30 \\
+\midrule
+Baseline         & 0:15 & 0:23 & 0:53 & 0:15 & 0:23 & 0:53 & 0:11 & 0:19 & 0:49   \\ 
+NL (Hessian)     & 0:15 & 0:23 & 0:53 & $  -$ & $   -$ & $   -$ & 0:11 & 0:19 & 0:50   \\ 
+NL (Fisher)      & 0:15 & 0:23 & 0:54 & 0:15 & 0:23 & 0:53 & 0:11 & 0:19 & 0:50   \\ 
+\bottomrule
+    \end{tabular}
+    }
+    \label{tab:shortest-path-stochastic-runtime}
+\end{table}
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=.6\linewidth]{figures/table_newton_shortest_path_2_new_3_by_time.pdf}
+    \caption{
+    Training time plot corresponding to Figure~\ref{fig:ss-training}: Test accuracy (perfect matches) plot for `SS of loss' with $10$ samples on the Warcraft shortest-path benchmark.
+    }
+\end{figure}
+
+
+
+
+
+
+
+\section{Equivalences under the Split}
+
+
+
+Using gradient descent step according to \eqref{eq:training:update} is equivalent to using two gradient steps of the alternating scheme \eqref{eq:two:step:scheme}, namely one step for \eqref{eq:training:update-z} and one step for \eqref{eq:training:update-theta}.
+This has also been considered by \cite{frerix2018proximal} in a different context.
+
+\begin{lemma}[Gradient Descent Step Equality between \eqref{eq:training:update} and \eqref{eq:training:update-z}+\eqref{eq:training:update-theta}] \label{lem:gradient:equiv-sm}
+A gradient descent step according to \eqref{eq:training:update} with arbitrary step size $\eta$ coincides with two gradient descent steps, one according to \eqref{eq:training:update-z} and one according to \eqref{eq:training:update-theta}, where the optimization over $\theta$ has a step size of\/ $\eta$ and the optimization over $z$ has a unit step size. %
+\end{lemma}
+\begin{proof}
+Let $\theta\in\Theta$ be the current parameter vector and let $\zb = f(\xb;\theta)$. Then the gradient descent steps according to \eqref{eq:training:update-z} and \eqref{eq:training:update-theta} with step sizes $1$ and $\eta>0$ are expressed as
+\begin{eqnarray}
+    \zb &\!\!\leftarrow\!\! & \zb - \nabla_{\!\zb}\,\ell(\zb) = f(\xb;\theta) - \nabla_{\!f} \,\ell(f(\xb;\theta)) \label{eq:gd:z} \\
+    \theta &\!\!\leftarrow\!\! & \theta - \eta\, \nabla_{\!\theta} \, {\textstyle\frac{1}{2}}\|\zb - f(\xb; \theta)\|^2_2 \nonumber \\
+           & \!\!=\!\! & \theta - \eta\, \frac{\partial\,f(\xb; \theta)}{\partial\,\theta} \cdot (f(\xb; \theta) - \zb) \,. \label{eq:gd:theta}
+\end{eqnarray}
+Combining \eqref{eq:gd:z} and \eqref{eq:gd:theta} leads to
+\begin{align}
+    \theta &\leftarrow \theta - \eta\, \frac{\partial\,f(\xb; \theta)}{\partial\,\theta} {\cdot} (f(\xb; \theta) {-} f(\xb;\theta) {+} \nabla_{\!f} \,\ell(f(\xb;\theta))) \nonumber \\
+    & \rgtbox{{}\leftarrow{}}{$=\;$} \theta - \eta\, \nabla_{\!\theta}\,\ell(f(\xb;\theta)),
+\end{align}
+which is exactly a gradient descent step starting at $\theta\in\Theta$ with step size $\eta$.
+\end{proof}
+
+
+
+
+Moreover, we show that a corresponding equality also holds for a special case of the Newton step.
+
+\begin{lemma}[Newton Step Equality between \eqref{eq:training:update} and \eqref{eq:training:update-z}+\eqref{eq:training:update-theta} for $m=1$] \label{lem:Newton:equiv}
+In the case of $m=1$ (i.e., a one-dimensional output), a Newton step according to \eqref{eq:training:update} with arbitrary step size $\eta$ coincides with two Newton steps, one according to \eqref{eq:training:update-z} and one according to \eqref{eq:training:update-theta}, where the optimization over $\theta$ has a step size of\/ $\eta$ and the optimization over $z$ has a unit step size.
+\end{lemma}
+\begin{proof}
+Let $\theta\in\Theta$ be the current parameter vector and let $\zb = f(\xb;\theta)$. 
+Then applying Newton steps according to \eqref{eq:training:update-z} and \eqref{eq:training:update-theta} leads to
+\begin{align}
+    \zb &\leftarrow \zb - (\nabla^2_{\!\zb}\ell(\zb))^{-1} \nabla_{\!\zb}\, \ell(\zb) \nonumber \\
+    &\rgtbox{{}\leftarrow{}}{$=\;$} f(\xb;\theta) - (\nabla_{\!f}^2\ell(f(\xb;\theta)))^{-1} \nabla_f \ell(f(\xb;\theta)) \label{eq:newton:pf:1}\\
+    \theta &\leftarrow \theta - \eta \left( \nabla^2_\theta \frac{1}{2}\|\zb - f(\xb; \theta)\|^2_2 \right)^{\!\!-1} 
+    \nabla_\theta \frac{1}{2}\|\zb - f(\xb; \theta)\|^2_2\\ 
+    &\rgtbox{{}\leftarrow{}}{$=\;$} \theta - \eta\left( \frac{\partial}{\partial\theta}\left[   \frac{\partial\,f(\xb; \theta)}{\partial\,\theta} \cdot (f(\xb; \theta) - \zb)    \right] \right)^{\!\!-1}
+    \frac{\partial\,f(\xb; \theta)}{\partial\,\theta} \cdot (f(\xb; \theta) - \zb) \label{eq:newton:pf:2}\\
+    &\rgtbox{{}\leftarrow{}}{$=\;$} \theta - \eta \left(\! \frac{\partial}{\partial\theta}\!\!\left[\!\frac{\partial\,f(\xb; \theta)}{\partial\,\theta} \!\right]\! (f(\xb; \theta) {-} \zb) {+} \left(\! \frac{\partial\,f(\xb; \theta)}{\partial\,\theta} \!\right)^{\!\!2} \right)^{\!\!\!-1} 
+    \frac{\partial\,f(\xb; \theta)}{\partial\,\theta} \cdot (f(\xb; \theta) - \zb) \nonumber
+\end{align}
+Inserting \eqref{eq:newton:pf:1}, we can rephrase the update above as
+\begin{equation}\label{eq:newton:pf:3}
+\begin{aligned}
+    \theta &\leftarrow \theta - \eta \!\left(\! \frac{\partial}{\partial\theta}\!\left[\!\frac{\partial\,f(\xb; \theta)}{\partial\,\theta} \!\right]\! (\nabla_{\!f}^2\ell(f(\xb;\theta)))^{-1} \nabla_{\!f} \ell(f(\xb;\theta))\right. 
+     + \left( \frac{\partial\,f(\xb; \theta)}{\partial\,\theta} \right)^{\!\!2} \bigg)^{\!\!-1} \\ &\qquad \qquad \cdot \frac{\partial\,f(\xb; \theta)}{\partial\,\theta} \cdot (\nabla_{\!f}^2\ell(f(\xb;\theta)))^{-1} \nabla_{\!f} \ell(f(\xb;\theta)) 
+\end{aligned}
+\end{equation}
+By applying the chain rule twice, we further obtain
+\begin{align*}
+    \nabla^2_{\theta} \ell(f(\xb;\theta)) 
+    &= \frac{\partial}{\partial\theta} \left[\frac{\partial\,f(\xb; \theta)}{\partial\,\theta} \nabla_{\!f}\ell(f(\xb;\theta))  \right] \\
+    &=\frac{\partial}{\partial\theta} \left[\frac{\partial\,f(\xb; \theta)}{\partial\,\theta}   \right]\nabla_{\!f}\ell(f(\xb;\theta)) 
+     + \frac{\partial\,f(\xb; \theta)}{\partial\,\theta} \frac{\partial}{\partial\theta} \nabla_{\!f}\ell(f(\xb;\theta))  \\
+    &= \frac{\partial}{\partial\theta} \left[\frac{\partial\,f(\xb; \theta)}{\partial\,\theta}   \right]\nabla_{\!f}\ell(f(\xb;\theta)) 
+      + \frac{\partial\,f(\xb; \theta)}{\partial\,\theta}  \nabla_{\!f} \frac{\partial}{\partial\theta} \ell(f(\xb;\theta))  \\
+    &= \frac{\partial}{\partial\theta} \left[\frac{\partial\,f(\xb; \theta)}{\partial\,\theta}   \right]\nabla_{\!f}\ell(f(\xb;\theta)) 
+      + \left(\!\frac{\partial\,f(\xb; \theta)}{\partial\,\theta}\!\right)^{\!2}   \!\nabla^2_{\!f}\ell(f(\xb;\theta)),
+\end{align*}
+which allows us to rewrite \eqref{eq:newton:pf:3} as
+\begin{align*}
+    \theta' &= \theta - \left( (\nabla_{\!f}^2 \ell(f(\xb;\theta)))^{-1} \nabla^2_{\!\theta} \ell(f(\xb;\theta)) \right)^{-1} 
+     (\nabla_{\!f}^2\ell(f(\xb;\theta)))^{-1} \nabla_{\!\theta}\,\ell(f(\xb;\theta)) \\
+    &=\theta - \phantom{\big(} (\nabla^2_{\!\theta} \ell(f(\xb;\theta)))^{-1} \nabla_{\!\theta}\,\ell(f(\xb;\theta)),
+\end{align*}
+which is exactly a single Newton step starting at $\theta\in\Theta$.
+\end{proof}
+
+
+
+
+
+
+
+
+    
+
+
+
+
+
+
+
+
+
+
+\section{Woodbury Matrix Identity for High Dimensional Outputs}
+
+\label{sm:woodbury}
+
+For the empirical Fisher method, where $\zb^\star\in\mathbb{R}^{N\times m}$ is computed via 
+$$
+z_i^\star = \bar y_i - \Big( {\textstyle\frac1N\sum_{j=1}^N} \nabla_{\bar y_j} \ell({\bar \yb})\, \nabla_{\bar y_j} \ell({\bar \yb})^\top + \lambda \cdot \mathbf{I} \Big)^{\!-1} \nabla_{\bar y_i} \ell({\bar \yb})
+$$
+for all~~$i\in\{1,...,N\}$~~and~~$\bar \yb = f(\xb;\theta)$, we can simplify the computation via the Woodbury matrix identity~\cite{woodbury1950inverting}.
+In particular, we can simplify the computation of the inverse to 
+\begin{align}
+    & \Big( {\textstyle\frac1N\sum_{j=1}^N} \nabla_{\bar y_j} \ell({\bar \yb})\, \nabla_{\bar y_j} \ell({\bar \yb})^\top + \lambda \cdot \mathbf{I} \Big)^{\!-1} \\
+    =& ~\Big( {\textstyle\frac1N} ~\nabla_{\bar \yb} \ell({\bar \yb})^\top \, \nabla_{\bar \yb} \ell({\bar \yb}) ~+ \lambda \cdot \mathbf{I} \Big)^{\!-1} \\
+    =& ~\frac{1}{\lambda} \cdot \mathbf{I}_m - \frac1{N\cdot \lambda^2} \cdot \nabla_{\bar \yb} \ell({\bar \yb})^\top \cdot \Big({\textstyle\frac1{N\cdot \lambda}} \nabla_{\bar \yb} \ell({\bar \yb}) \, \nabla_{\bar \yb} \ell({\bar \yb})^\top + \mathbf{I}_N\Big)^{\!-1}\cdot  \nabla_{\bar \yb} \ell({\bar \yb})\,.
+\end{align}
+This reduces the cost of matrix inversion from $\mathcal{O}(m^3)$ down to $\mathcal{O}(N^3)$.
+We remark that this variant is only helpful for cases where the batch size $N$ is smaller than the output dimensionality $m$.
+
+Further, we remark that in a case where the output dimensionality $m$ and the batch size $N$ are both very large, i.e., the cost of the inverse is typically still small in comparison to the computational cost of the neural network.
+To illustrate this, the dimensionality of the last hidden space (i.e., before the last layer) $h_l$ is typically larger than the output dimensionality $m$.
+Accordingly, the cost of only the last layer itself is $\mathcal{O}({N\cdot m \cdot h_l})$, which is typically larger than the cost of the inversion in Newton Losses.
+In particular, assuming $h_l > m$,  $\mathcal{O}({N\cdot m \cdot h_l}) > \mathcal{O}(\min(m, N)^3) $.
+
+We remark that the Woodbury inverted variation can also be used in \texttt{InjectFisher}. 
+
+
+
+\section{InjectFisher for CVXPY Layers}
+
+
+In this section, we provide an extension of the presented method, from algorithmic losses to optimizing the parameters in differentiable convex optimization layers~\cite{agrawal2019differentiable}.
+ipynb}}.
+
+Because there are no Hessians or second-order derivatives available in \texttt{cvxpylayers}, we applied the empirical Fisher variant, via the \texttt{InjectFisher} function, to \texttt{cvxpylayers}.
+We apply \texttt{InjectFisher} to (the vector of) all weights and biases of a given layer, and choose $\lambda=0.1$.
+
+We ran it for 5 seeds, and the loss improves in each case (see Table~\ref{tab:cvxpy}).
+Importantly, we note that these are paired results (only networks with the same initialization are comparable).
+
+\begin{table}[h]
+    \centering
+    \caption{
+        Loss of a \texttt{cvxpylayers} model. Results comparable only within each seed.
+        \label{tab:cvxpy}
+    }
+    \begin{tabular}{lcc}
+        \toprule
+        Seed & cvxpy & cvxpy + InjectFisher \\
+        \midrule
+        1 & 0.322 & \textbf{0.185} \\
+        2 & 0.186 & \textbf{0.157} \\
+        3 & 0.522 & \textbf{0.247} \\
+        4 & 0.225 & \textbf{0.179} \\
+        5 & 0.260 & \textbf{0.211} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\clearpage
+
+
+\section{Gradient Visualizations}
+
+
+\begin{figure}[h!]
+    \centering
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/vis-neuralsort-1.pdf}
+        \caption{NeuralSort gradients in dependence of $x_1$}
+        \label{fig:subfig1}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/vis-log-dsn-1.pdf}
+        \caption{Logistic DSN gradients in dependence of $x_1$}
+        \label{fig:subfig2}
+    \end{subfigure}
+    \vskip\baselineskip
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/vis-neuralsort-2.pdf}
+        \caption{NeuralSort gradients (larger spread)}
+        \label{fig:subfig3}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/vis-log-dsn-2.pdf}
+        \caption{Logistic DSN gradients (larger spread)}
+        \label{fig:subfig4}
+    \end{subfigure}
+    \vskip\baselineskip
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/vis-neuralsort-3.pdf}
+        \caption{Newton loss gradients (empirical Fisher) for NeuralSort (larger spread)}
+        \label{fig:subfig5}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/vis-log-dsn-3.pdf}
+        \caption{Newton loss gradients (empirical Fisher) for Logistic DSN (larger spread)}
+        \label{fig:subfig6}
+    \end{subfigure}
+    \caption{We illustrate the gradient of the NeuralSort and logistic DSN losses in dependence of one of the five input dimensions for the $n=5$ case.
+In the illustrated example, one can observe that both algorithms experience exploding gradients when the inputs are too far away from each other (which is also controllable via steepness $\beta$ / temperature $\tau$), see Figures (c) / (d).
+Further, we can observe that the gradients themselves can be quite chaotic, making the optimization of the loss rather challenging.
+In Figures (e) / (f), we illustrate how using the empirical Fisher Newton Loss recovers from the exploding gradients experienced in (c) / (d).
+The input examples are a simplification of actual inputs, as here, $x_0, x_2, x_3, x_4$ are already in their correct order, and having multiple disagreements makes the loss more chaotic. 
+}
+    \label{fig:2x2}
+\end{figure}
+
+
+
+\end{document}
+
+
+
+

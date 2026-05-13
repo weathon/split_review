@@ -1,0 +1,408 @@
+\title{DiSK: Differentially Private Optimizer with Simplified Kalman Filter for Noise Reduction}
+
+\begin{abstract}
+Differential privacy (DP) offers a robust framework for safeguarding individual data privacy. To utilize DP in training modern machine learning models, differentially private optimizers have been widely used in recent years. A popular approach to privatize an optimizer is to clip the individual gradients and add sufficiently large noise to the clipped gradient. This approach led to the development of DP optimizers that have comparable performance with their non-private counterparts in fine-tuning tasks or in tasks with a small number of training parameters. However, a significant performance drop is observed when these optimizers are applied to large-scale training. This degradation stems from the substantial noise injection required to maintain DP, which disrupts the optimizer's dynamics.
+This paper introduces \algname, a novel framework designed to significantly enhance the performance of DP optimizers. \algname \ employs Kalman filtering, a technique drawn from control and signal processing, to effectively denoise privatized gradients and generate progressively refined gradient estimations. To ensure practicality for large-scale training, we simplify the Kalman filtering process, minimizing its memory and computational demands.
+We establish theoretical privacy-utility trade-off guarantees for \algname and demonstrate provable improvements over standard DP optimizers like DPSGD in terms of iteration complexity upper-bound.
+Extensive experiments across diverse tasks, including vision tasks such as CIFAR-100 and ImageNet-1k and language fine-tuning tasks such as GLUE, E2E, and DART, validate the effectiveness of \algname.  The results showcase its ability to significantly improve the performance of DP optimizers, surpassing state-of-the-art results under the same privacy constraints on several benchmarks.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Data privacy  has become one of the major concerns in modern machine learning systems. Differential Privacy (DP), with its rigorous mathematical foundation, offers a powerful solution. DP provides a framework for developing training algorithms that safeguard the privacy of individuals' data used to train machine learning models. 
+Among various algorithms, Differentially Private Stochastic Gradient Descent (DPSGD)~\citep{abadi2016deep} and its variants~\citep{li2021large,yu2021differentially,tang2024dp} have emerged as popular choices for training various models, including computer vision~\citep{de2022unlocking} and language models~\citep{bu2023differentially,bu2024automatic}.
+These algorithms inject noise into the training process to guarantee privacy. However, this noise injection often comes at a significant cost to model performance, limiting the widespread adoption of DP optimizers~\citep{jayaraman2019evaluating}. For example, \citep{mcmahan2018learning, de2022unlocking} observed  that DP training led to a $15\%$ drop in model accuracy on the Reddit dataset and a $30\%$ drop on CIFAR-10 compared to non-private training. This challenge has limited the application of DP optimizers primarily to small models or parameter-efficient fine-tuning, as highlighted by~\citep{li2021large}.
+Many recent works aim to improve differentially private (DP) training performance.  These include applying low-pass filters to separate gradients from noise ~\citep{zhang2024doppler}, injecting correlated noise with algorithms like DP-FTLR~\citep{koloskova2023gradient,choquettecorrelated}, using sharpness-aware minimization for flatter loss landscapes that are less sensitive to DP noise~\citep{park2023differentially}, adaptive clipping~\citep{andrew2021differentially,lin2022understanding,hu2021adaptive}, and model structure optimization~\citep{bu2024automatic, papernot2021tempered,de2022unlocking}. However, these methods often require extra memory, lack theoretical guarantees, or have limited applicability.  Therefore, there is a strong demand to design a new approach that 1) is memory and computation efficient for implementation, 2) has a theoretical guarantee, and 3) is compatible with a wide range of existing DP optimization algorithms and models. 
+To meet this demand, we leverage the Kalman filter, a tool from control theory, to improve gradient estimates in DP optimization. We further simplify our algorithm for memory and computational efficiency, while maintaining theoretical grounding and broad compatibility with existing DP algorithms and models.
+
+The tools in signal processing and control theory have been leveraged to design novel optimization algorithms. In the context of DP optimization, the error-feedback approach has been adopted to reduce the bias caused by the clipping operation~\citep{zhangdifferentially}; the low-pass and high-pass filters have been used to separate the gradient from the DP noise~\citep{zhang2024doppler,koloskova2023gradient,choquettecorrelated}; the low-pass spatial filter, including Gaussian and Laplace filters have been used to smooth the privatized model or gradient across dimensions~\citep{wang2020dp,wang2021dplis,liu2022laplacian}. These methods effectively improve DP optimizers' performance.
+\subsection{Contributions}
+Our approach centers on constructing a dynamic system where the gradient serves as its state. We treat the privatized gradient as a noisy observation of the true gradient within this system. By applying a Kalman filter, we obtain a more accurate estimate of the true gradient by leveraging the gradient dynamics and past estimates, thereby enhancing the performance of DP optimizers. To address the inherent inefficiency of the Kalman filter, we introduce a series of simplifications that reduce memory and computational overhead. Our main contributions can be summarized as follows:
+
+\begin{itemize}[leftmargin=6pt]
+    \item {\bf Algorithm Design:} We introduce a novel Kalman filter-based approach designed to mitigate DP noise and enhance the performance of various DP optimizers.
+    \item {\bf Algorithm Simplification:}  We simplify the Kalman filtering process to significantly reduce memory and computational overhead. This simplified approach, \algname, requires only one additional forward step and two extra optimizer states. 
+ 
+
+    \item {\bf Theoretical Analysis:}  We provide theoretical analyses of \algname, demonstrating that the algorithm is convergent. Moreover, we showed that, compared to DPSGD, \algname \ improves the iteration complexity upper-bound by a constant factor. 
+
+    \item {\bf Numerical Results:}  Extensive experiments across various models, datasets, and optimizers demonstrate that \algname \ significantly boosts DP training performance. 
+    Specifically, under the same privacy budgets, \algname \ exhibits substantial improvements in test accuracy for training-from-scratch scenarios: a notable increase from $32.4\%$ to $36.9\%$ on the ImageNet-1k dataset, a considerable rise from $63\%$ to $75\%$ on CIFAR-10, and a remarkable improvement from $21\%$ to $42\%$ on CIFAR-100.
+    Furthermore, in fine-tuning tasks, \algname  \ demonstrates remarkable improvements: an increase from $85\%$ to $89\%$ on CIFAR-100 and an improvement from $81\%$ to $86\%$ on the GLUE dataset. \textit{These results surpass state-of-the-art DP training performance under the same privacy guarantees}.
+
+
+    
+\end{itemize}
+
+
+
+\section{Preliminaries}
+
+\subsection{Problem Definition \& Notations}
+Typical training procedures require solving the empirical risk minimization (ERM) problem
+\begin{equation}\label{eq:problem}
+    \begin{aligned}
+        \min_{\xx\in\R^d} \left( F(\xx) = \frac{1}{N}\sum_{\xi \in \cD} f(\xx; \xi) \right),
+    \end{aligned}
+\end{equation}
+where $\xx\in\R^d$ is the optimization variable, $\cD =\{\xi_1, \ldots, \xi_N\}$ is the training dataset with $\abs{\cD} = N$ samples, and $f(\cdot)$ denotes the (possibly non-convex) loss function parameterized by $\xx$ and evaluated on sample $\xi$. For solving the above optimization problem, we rely on iterative procedures, such as SGD, where the parameters are updated over the iterations $t=1,2, \ldots$.
+Throughout the paper, we use $(\cdot)_t$ to denote the variables at iteration $t$, and use $\mI_d$ to denote the identity matrix of dimension~$d$.
+
+\subsection{Differentially private optimization}
+Let us start by recalling the definition of $(\epsilon,\delta)$-Differential Privacy:
+\begin{definition}[$(\epsilon,\delta)$-DP~\citep{dwork2014algorithmic}]\label{def:dp}
+A randomized mechanism $\cM$ is said to be $(\epsilon,\delta)$-differentially private if for any two neighboring datasets $\cD,\cD'$ ($\cD,\cD'$ differ only by one sample) and for any measurable output set $\cS$, it holds that $\mathrm{Pr}[\cM(\cD)\in\cS]\leq \e^\epsilon\mathrm{Pr}[\cM(\cD')\in\cS]+\delta.$    
+\end{definition}
+
+A widely used approach to achieving differential privacy (DP) when solving ERM problem~\eqref{eq:problem} is to employ differentially private stochastic gradient descent~\citep{abadi2016deep} and its variants, such as DP-Adam and DP-Lora~\citep{yu2021differentially}. To ensure DP, DPSGD leverages the Gaussian mechanism~\citep{dwork2014algorithmic,abadi2016deep}, injecting carefully calibrated Gaussian noise into the gradients at each iteration of the optimization process. This noise injection effectively masks the contribution of individual data points, thereby providing the desired privacy guarantee.
+
+\begin{definition}[Gaussian Mechanism~\citep{dwork2014algorithmic,balle2018improving}] Suppose an algorithm $\mathcal{A}:\cD\rightarrow \R^d$ has $\ell_2$ sensitivity $\Delta_{\mathcal{A}}$, i.e., 
+$
+\max_{\cD,\cD'}\norm{\mathcal{A}(\cD)-\mathcal{A}(\cD')}\leq \Delta_{\mathcal{A}}.
+$ 
+Then, for any $\epsilon>0$ and $\delta\leq 0.05$, by adding a carefully chosen random Gaussian noise to the output of the algorithm, we can make the algorithm $(\epsilon,\delta)$-DP. More specifically, 
+the mechanism~$M(x) = \mathcal{A}(x) + \ww,\mathrm{with }~\ww\sim\cN(0,\sigma_\textup{DP}^2 I_d)$
+and $\sigma_\text{DP}$ \xwedit{satisfies $\Phi\left(\frac{\Delta_\cA}{2\sigma_\text{DP}} - \frac{\epsilon\sigma_\text{DP}}{\Delta_\cA}\right) - \e^\epsilon\Phi\left(-\frac{\Delta_\cA}{2\sigma_\text{DP}} - \frac{\epsilon\sigma_\text{DP}}{\Delta_\cA}\right) \leq \delta$ is $(\epsilon,\delta)$-DP, where $\Phi(t) = \mathbb{P}[\cN(0,1)\leq t]$ is the cumulative
+density function of normal distribution.}
+\end{definition}
+
+  \begin{wrapfigure}{r}{0.5\textwidth}
+    \begin{minipage}{0.5\textwidth}
+      \begin{algorithm}[H]
+        \caption{DPSGD algorithm}
+        \begin{algorithmic}
+        \STATE {{\bfseries Input:} $\xx_0, \cD, C, \eta, \sigma_\text{DP}$}\\
+		\FOR{$t=0,\dots,T-1$}
+            \STATE {Uniformly draw minibatch $\cB_t$ from $\cD$}
+            \STATE {$\gg_t = \frac{1}{B}\sum_{\xi\in\cB_t}\clip{\nabla f(\xx_t;\xi), C} +  \ww_t$}
+            \STATE{\qquad where $\ww_t \sim\cN(0,\sigma_\text{DP}^2\cdot \mI_d)$}
+            \STATE {$\xx_{t+1} = \xx_{t} - \eta_t\gg_t$,}
+		\ENDFOR
+        \end{algorithmic}
+      \label{alg:dpsgd}
+      \end{algorithm}
+    \end{minipage}
+  \end{wrapfigure}
+The DPSGD algorithm, outlined in \algref{alg:dpsgd}, operates by first sampling a mini-batch $\cB_t$ of size $B$ and computing the per-sample gradients at each iteration $t$. To guarantee differential privacy, it then applies the Gaussian mechanism, which involves clipping each per-sample gradient to bound its sensitivity to a maximum value $C$ and subsequently injecting Gaussian noise. The clipping operation
+$
+\clip{\nabla f, C} = \min\left\{1, \frac{C}{\norm{\nabla f}}\right\}\cdot\nabla f,
+$
+often implemented by scaling the gradient when its norm exceeds $C$,  limits the influence of any single data point, while the added noise further masks individual contributions, ensuring the desired privacy level~\citep{abadi2016deep}.
+
+  
+\begin{theorem}[Privacy Guarantee~\citep{abadi2016deep}]\label{thm:dpsgd:dp}
+    Given the number of samples~$N$, the batch-size~$B$, total number of iterations $T$ and clipping threshold $C$, there exist positive constants $u,v$, such that for any $\epsilon<\frac{uB^2T}{N^2}$ and $0< \delta$, by choosing $\sigma_\textup{DP}^2\geq v\frac{C^2T\ln(\frac{1}{\delta})}{N^2\epsilon^2}$, \algref{alg:dpsgd} is $(\epsilon,\delta)$-DP.
+\end{theorem}
+\thref{thm:dpsgd:dp} implies that the variance of the DP noise injected into the gradients, $\E[\norm{\ww_t}^2] = d\sigma^2_\mathrm{DP}$, scales linearly with both the number of iterations $T$ and the number of parameters $d$.  This presents a significant challenge in modern deep learning, where models size~$d$ is large (e.g., $22M$-$632M$ for ViT~\citep{dosovitskiy2020image}, $137M$-$1.6B$ for GPT-2~\citep{radford2019language}) and require extensive training (e.g., $300K$ for ViT~\citep{dosovitskiy2020image} and $250K$ for training Llama~\citep{touvron2023llama}).  Consequently, the magnitude of the injected DP noise can become substantial, leading to a considerable degradation in model performance. 
+\subsection{Kalman filter}
+The Kalman filter is a powerful algorithm that provides estimates of unknown variables by iteratively incorporating a series of measurements over time~\citep{welch1995introduction}. To illustrate its application, let us consider a linear dynamic system characterized by the  \textit{System update} and \textit{Observation} equations:
+\begin{equation}\label{eq:dyn_sys}
+\begin{aligned}
+    \ttheta_{t} &= \mA\ttheta_{t-1} + \uu_t + \vv_t, && \textit{(System update)}\\
+    \ppsi_{t} &= \mC\ttheta_{t} + \ww_t, && \textit{(Observation)}
+\end{aligned}
+\end{equation}
+where $\mA \in \R^{d_\theta \times d_\theta}$, $\mC \in \R^{d_\psi \times d_\theta}$ are the transition and observation matrices; $\ttheta_t \in \R^{d_\theta}$ is the unknown variable to be tracked/estimated; $\ppsi_t \in \R^{d_\psi}$ denotes the observation of the system; $\uu_t \in \R^{d_\theta}$ denotes the known input; and $\vv_t \in \R^{d_\theta}, \ww_t\in\R^{d_\psi}$ are the process and observation noises that follow Gaussian distribution $\cN(0, \Sigma_\vv), \cN(0, \Sigma_\ww)$, respectively. Then, the Kalman filter uses the following updates to  track  $\{\ttheta_t\}$~\citep{welch1995introduction}:
+\begin{equation}\label{eq:kalman}
+    \begin{aligned}
+    \tilde{\ttheta}_{t|t-1} & = \mA\tilde{\ttheta}_{t-1} + \uu_t && \textit{(Prediction)}\\
+    \mP_{t|t-1} & = \mA\mP_{t-1}\mA^\top + \Sigma_{\vv} \\
+    \mK_t & = \mP_{t|t-1}\mC^\top(\mC\mP_{t|t-1}\mC^\top + \Sigma_\ww)^{-1}\\
+    \tilde{\ttheta}_{t} & = (\mI_{d_\theta} - \mK_t \mC)\tilde{\ttheta}_{t|t-1}+\mK_t \ppsi_t && \textit{(Correction)}\\
+    \mP_{t} & = (\mI_{d_\theta} - \mK_t \mC) \mP_{t|t-1}.
+\end{aligned}
+\end{equation}
+
+The filter first {\it predicts} the state $\tilde{\ttheta}_{t|t-1}$ by the system dynamics, and compute the {\it filter gain} $\mK_t \in \R^{d_\theta\times d_\psi}$ based on the covariance matrix $\mP_t \in \R^{d_\theta\times d_\theta}$, and {\it corrects} the prediction with system observation $\ppsi_t$ to obtain $\tilde{\ttheta}_t$. The Kalman filter makes use of both the noisy observation and the prior knowledge of the system dynamics to obtain an accurate estimation of the state $\ttheta_t$.
+
+In this work, we treat the privatized gradients in the DP optimization as noisy observations of the true underlying gradients. By constructing gradient dynamics using Taylor expansion, we establish a framework for applying the Kalman filter to refine these noisy observations and obtain more accurate gradient estimates. To ensure practical applicability for large-scale models, we simplify the Kalman filter, significantly reducing its memory and computational footprint. These improved gradient estimates ultimately lead to enhanced performance in differentially private optimizers.
+
+\subsection{Related Works}\label{sec:related}
+{\bf Optimization with filters and controllers:} The use of filters and controllers in designing and analyzing optimization algorithms has a rich history.  Researchers have leveraged high-pass and low-pass filters to enhance gradient estimation in zeroth-order optimization~\citep{chen2022improve}, employed PID controllers for both centralized and distributed optimization~\citep{wang2020pid}, and analyzed optimizers through the lens of control theory, treating them as dynamic systems~\citep{lessard2016analysis, hu2017dissipativity, muehlebach2019dynamical, mohammadi2024tradeoffs, badithela2019analysis, cyrus2018robust, scherer2023optimization,zhang2023understanding}.
+
+{\bf Kalman filter for optimization:} The Kalman filter has been utilized in convex optimization for reducing stochastic gradient noise~\citep{bittner2004kalman,vuckovic2018kalman}. \citet{vuckovic2018kalman} uses the dynamics of the optimization variable and the gradient to construct the Kalman filter to analyze and improve the performance of momentum methods. \citet{bittner2004kalman} uses gradient and Hessian as its states to construct the dynamic system for SGD to construct a stopping rule. However, these approaches, with their direct application of the Kalman filter, incur prohibitively high computational and memory costs, ranging from  $\cO(d^3)$ to $\cO(d^{6})$, rendering them impractical for training large-scale machine learning models.
+
+{\bf Improving DP optimization:} Numerous techniques have been proposed to enhance DP optimization by mitigating the impact of DP noise. These include adaptive gradient clipping methods that dynamically adjust clipping thresholds~\citep{andrew2021differentially,bu2024automatic}, parameter-efficient training strategies employing adapters, low-rank weights, or quantization~\citep{yu2021differentially,luo2021scalable,yu2021differentially}, and the design of specialized model architectures less susceptible to noise perturbations~\citep{de2022unlocking,papernot2021tempered,wang2020dp}.  Furthermore, drawing inspiration from signal processing, researchers have explored the use of colored high-frequency DP noise to separate it from the gradient~\citep{koloskova2023gradient} and the application of low-pass filters to extract the gradient signal from noisy observations~\citep{zhang2024doppler}.
+
+
+\section{Algorithm design}
+
+This section introduces the general Noise Reduction for {\bf Di}fferentially Private Optimizers with {\bf S}implified {\bf K}alman Filter (\algname) framework. This approach leverages the inherent dynamics of the gradient and employs Kalman filtering to obtain denoised estimates of the true gradients from their noisy, privatized counterparts. To enhance its practicality for modern deep learning, \secref{sec:simple} details a simplified version of the Kalman filter updates, designed for  memory and computational efficiency.
+
+\subsection{Gradient dynamic and Kalman filter}
+To explain our idea of using the Kalman filter for denoising, let us start by first establishing a dynamic system for the gradients, comprising a ``system update" equation and an ``observation" equation: The {\bf system update} of the gradient dynamics can be derived by the Taylor expansion and quantifying the change of the gradient at iteration $t$:
+\begin{equation}\label{eq:system:update}
+    \begin{aligned}
+        \nabla F(\xx_{t}) &= \nabla F(\xx_{t-1}) + \nabla^2 F(\xx_{t-1})^\top (\xx_t -\xx_{t-1}) + R(\xx_t)\\ %
+        & =  \nabla F(\xx_{t-1}) + \mH_t(\xx_{t} - \xx_{t-1}) + \vv_t,
+    \end{aligned}
+\end{equation}
+where $\mH_t:= \nabla^2 F(\xx_{t-1}) \in \R^{d\times d} $ and $\vv_t = \frac{1}{2}\int_0^1 \nabla^3 F(\xx_{t-1})(z\xx_t + (1-z)\xx_{t-1})^{\otimes 2}\mathrm{d}z$ is the remainder and $(\cdot)^{\otimes}$ denotes the tensor vector product.
+The {\bf observation} of the system is defined as the privatized gradient $\gg_t$, which is a stochastic mapping of the true gradient:
+\begin{equation}\label{eq:system:observe}
+    \gg_t = \frac{1}{B}\sum_{\xi\in\cB_t} \clip{\nabla f(\xx_t, \xi), C} + \ww_t = \mC_t \nabla F(\xx_t) + \ww'_t,
+\end{equation} 
+where $\ww'_t$ is the observation noise containing the DP noise and sub-sampling noise.  $\mC_t$ is the observation matrix. If the clipping operation is inactive and $\cB = \cD$, i.e., the full batch gradient is used, then $\mC_t = \mI_d$. Otherwise, $\mC_t$ depends on the clipping factor and the mini-batch $\cB$.
+Combining the system update \eqref{eq:system:update} and the observation \eqref{eq:system:observe}, we can model the system dynamic of the gradient as:
+\begin{equation}\label{eq:alg:system}
+    \begin{aligned} 
+        \nabla F(\xx_{t}) &= \nabla F(\xx_{t-1}) + \mH_t(\xx_{t} - \xx_{t-1}) + \vv_t, \qquad  &&\textit{(System update)}\\
+        \gg_t &= \mC_t \nabla F(\xx_t) + \ww'_t. \qquad && \textit{(Observation)} 
+    \end{aligned}
+\end{equation}
+Let us compare our dynamic system with the general one in~\eqref{eq:dyn_sys}:
+In our dynamic system, the gradient $\nabla F(\xx_{t})$ plays the role of the state $\ttheta_t,$. Other parameters in \eqref{eq:dyn_sys} must change to the followings to obtain our gradient dynamic: $\mA=\mI_d, \mC=\mC_t$, the input $\uu_t =\mH_t(\xx_{t} - \xx_{t-1})$, and the observation $\ppsi_t = \gg_t$. With the above mapping, we can apply the Kalman filter that combines the {\bf system update} and the {\bf observation} of the gradient to improve the overall estimation quality of the actual gradient beyond only using the observation $\gg_t$. However, there are two key challenges when applying Kalman filter to \eqref{eq:alg:system}: 1) the input $\mH_t(\xx_{t} - \xx_{t-1})$ is hard to obtain as computing the Hessian matrix $\mH_t$ is challenging for large models, and we can only approximate $\mH_t(\xx_{t} - \xx_{t-1})$; 2) the observation matrix $\mC_t$ is an unknown time-varying random matrix. Due to these differences, the traditional Kalman filter~\citep{welch1995introduction} cannot be directly applied. Instead, we apply the Kalman filter with noisy input and multiplicative observation noise proposed in \citet{wu2016kalman} to our system \eqref{eq:alg:system}, leading to the update rules:
+\begin{align*}
+    \tilde{\gg}_{t|t-1} &= \tilde{\gg}_{t-1} + {\magenta \tilde{\mH}_t}(\xx_{t} - \xx_{t-1}) && \textit{(Prediction)}\\
+    \mP_{t|t-1} &= \mP_{t-1} + {\magenta\Sigma_{\mH}} + \Sigma_{\vv} \\
+    \mK_{t} &= \mP_{t|t-1}{\magenta\E[\mC_t]^\top}\left(\Sigma_{\ww} + {\magenta\E[\mC_t]}\left({\magenta\Sigma_{\mC}\mS_t}+\mP_{t|t-1}\right){\magenta\E[\mC_t]^\top - \Sigma_{\mH}}\right)^{-1} \\
+    \tilde{\gg}_{t} &= \tilde{\gg}_{t|t-1} + \mK_t(\gg_t - {\magenta\E[\mC_t]}\tilde{\gg}_{t|t-1})  && \textit{(Correction)}\\
+    \mP_{t} &= (\mI - \mK_{t}{\magenta\E[\mC_t]})\mP_{t|t-1}\\
+    {\magenta\mS_t} &{\magenta = \E[\tilde{\gg}_{t}\tilde{\gg}_{t}^\top]},
+\end{align*}
+where $\mP_t$ denotes the covariance matrix of $\tilde{\gg}_t,$ $\Sigma_\mH, \Sigma_\ww, \Sigma_\mC, \Sigma_\vv$ denote the covariance matrices of the random variables $\mH_t, \ww_t, \mC_t, \vv_t$, respectively, and $\tilde{\mH}_t$ is an instantiation/observation of the unknown Hessian matrix $\mH_t$. The difference between the above Kalman filter and the original Kalman filter~\eqref{eq:kalman} is highlighted in {\magenta magenta} color. The variance of the Hessian $\tilde{\mH}_t$ plays a role in updating $\mP_{t|t-1}, \mK_t$, and the expectation $\E[\mC_t]$ of the random observation matrix $\mC_t$ is used for the updates and its variance $\Sigma_\mC$ also appears in the update of $\mK_t$.
+Compared to the noisy gradient $\gg_t$, the output of the Kalman filter $\tilde{\gg}_t$ has a smaller variance, resulting in improved performance when used in DP optimizers. 
+
+The resulting optimizer with the Kalman filter is given in \algref{alg:KFOpt}. The hyper-parameters of the Kalman filter are the expected observation matrix $\E[\mC]$ and the variances of the noises in the system, i.e., $\sigma^2_{\ww}, \Sigma_{\mC}, \Sigma_\mH$.   Here, we dropped subscript $t$ for $\mC_t$ for simplicity in our modeling. 
+
+\begin{algorithm}[ht!]
+    \begin{algorithmic}[1]
+        \STATE {{\bfseries Input:} $\xx_0, \cD, \eta, \E[\mC], \sigma^2_{\ww}, \Sigma_{\mC}, \Sigma_\mH$} \\
+		\STATE {{\bfseries Initialize:} $\tilde{\gg}_{-1} = 0, \dd_{-1}=0, \mP_{-1} = \sigma_\ww^2 \mI_d$} \\
+		\FOR{$t=0,\dots,T-1$}
+		    \STATE {Randomly draw minibatch $\cB_t$ from $\cD$}
+                \STATE {Compute privatized gradient $\gg_t =\frac{1}{B}\sum_{\xi\in\cB_t}\clip{\nabla f(\xx_t;\xi), C} +  \ww_t$ \hfill {\it \# Gradient observation}}
+                \STATE {$\tilde{\gg}_{t|t-1} = \tilde{\gg}_{t-1} + \mH_t\dd_{t-1}$ \hfill {\it \# Prediction}}
+                \STATE {$\mP_{t|t-1} =\mP_{t-1} + \Sigma_{\mH}$}
+                \STATE {$\mK_{t} = \mP_{t|t-1}\E[\mC]^\top\left(\E[\mC](\mP_{t|t-1}+\Sigma_\mC\tilde{\gg}_{t}\tilde{\gg}_{t}^\top)\E[\mC]^\top+\sigma^2_\ww\mI_d -\Sigma_\mH\right)^{-1}$ \hfill {\it \# Compute gain}} \label{alg:step:K}
+                \STATE {$\tilde{\gg}_t = \tilde{\gg}_{t|t-1} + \mK_{t}(\gg_t-\E[\mC]\tilde{\gg}_{t|t-1})$ \hfill {\it \# Compute denoised private gradient}}
+		    \STATE {$\xx_{t+1} = \text{OptimizerUpdate}(\xx_t, \eta, \tilde{\gg}_t)$ \hfill {\it \# Parameter update}}
+                \STATE {$\dd_t = \xx_{t+1} - \xx_{t}$ \hfill {\it \# Record update direction}}
+                \STATE {$\mP_{t} = (\mI - \mK_{t}\E[\mC])\mP_{t|t-1}$ \hfill {\it \# Update covariance matrix}}
+		\ENDFOR
+    \end{algorithmic}
+    \caption{Optimizer with Kalman Filter}
+    \label{alg:KFOpt}
+\end{algorithm}
+\subsection{Algorithm simplification}\label{sec:simple}
+While \algref{alg:KFOpt} provides a general framework for applying Kalman filtering to various optimizers, it faces significant challenges in terms of computational and memory demands.  Specifically, accurately computing the Hessian matrix ($\mH$) for large models under DP constraints is infeasible, the matrix inversion step introduces a cubic computational complexity ($\cO(d^3)$), and storing the covariance matrix ($\mP_t$) at each iteration requires quadratic memory ($\cO(d^2)$). To address these limitations and arrive at a practical and memory-efficient algorithm, we propose the following simplifications:
+
+{\bf Constant $\mC_t$:} We simplify the random matrix $\mC_t$ to an identity matrix $\mI_d$, and simply model the randomness in the observation as additive noise only. This simplification is achieved in two steps corresponding to the two sources of randomness in $\mC_t$. First, we remove the impact of clipping in $\mC_t$. This is justified  when 1) the clipping threshold $C$ is large enough so that clipping is inactive; or when 2) the clipped gradient $\nabla F_C(\xx)$ has zero curl, so that our method optimizes $F_C(\xx)$, where
+\begin{equation}\label{eq:clipped_problem}
+    F_C(\xx) = \int^1_{0}\nabla F_C(z\xx)^\top\xx \mathrm{d} z, \; \nabla F_C(\xx) = \frac{1}{N}\sum_{\xi\in \cD} \clip{\nabla f(\xx;\xi), C}.
+\end{equation}
+Under this assumption, the minibatch clipped gradient $\frac{1}{B}\sum_{\xi\in\cB} \clip{\nabla f(\xx, \xi), C}$ is an unbiased estimation of $\nabla F_C(\xx).$ Thus,  $\E[\mC_t] = \mI_d$. Second, the randomness of sub-sampling in $\mC_t$ is removed by assuming that the sub-sampled mini-batch gradient only causes additive noise, i.e., $\frac{1}{B}\sum_{\xi\in\cB} \clip{\nabla f(\xx, \xi), C} = \nabla F_C(\xx) + \ww_\mathrm{SGD},$ so that $\mC = \mI_d$ and $\Sigma_\mC = 0.$ 
+
+{\bf Hessian estimation:} We apply the following ``trick" to bypass the explicit computation of the Hessian matrix, $\mH_t$. Instead, we approximate the Hessian-vector product, $\mH_t(\dd_{t-1})$, using a finite difference method~\citep{pearlmutter1994fast}:
+{\small \[\mH_{t}\dd_{t-1} = \frac{\nabla F(\xx_{t}+\gamma \dd_{t-1}) - \nabla F(\xx_{t})}{\gamma} + \cO(\gamma) \approx \frac{1}{B}\sum_{\xi \in \cB}\frac{\nabla f(\xx_{t}+\gamma \dd_{t-1}; \xi) - \nabla f(\xx_{t};\xi)}{\gamma},\]}%
+\normalsize%
+This estimation eliminates the need for expensive Hessian computations and significantly reduces both memory and computational complexity.
+{\bf Simplification of $\Sigma_H$:} Few matrix computation steps in \algref{alg:KFOpt} are extremely time-consuming and memory inefficient. 
+Specifically, the matrix inversion in Line~\ref{alg:step:K} of \algref{alg:KFOpt} incurs a cubic computational cost ($\cO(d^3)$), which becomes prohibitive for large models with billions of parameters. Therefore, we simplify the algorithm by assuming that the covariance matrix in the Kalman filter is a time-invariant diagonal matrix, i.e., $\Sigma_H = \sigma_H^2\mI_d$. Under this assumption, the matrices $\mP_t$ and $\mK_t$ become $p_t\mI_d, k_t\mI_d$, for some scalars $p_t,k_t$. Thus, we reduce all matrix computations to efficient scalar-vector multiplications.  Furthermore, the memory complexity for storing these matrices is reduced to $\cO(1)$, making our algorithm a viable option for DP training of large-scale models.
+ 
+ 
+ 
+
+{\bf Filter gain simplification:} With the above simplification, the updates of $p_t, k_t$ simplifies to $p_t=\frac{(\sigma^2_\ww-\sigma^2_H)(p_{t-1}+\sigma^2_\vv+\sigma^2_H)}{p_{t-1}+\sigma^2_\vv+\sigma^2_\ww}$, $k_t = \frac{p_{t-1}+\sigma^2_\vv+\sigma^2_H}{p_{t-1}+\sigma^2_\vv+\sigma^2_\ww}.$ Therefore, 
+$k_t$ converges to its stable value with a linear rate, i.e., $\norm{k_t - k_\infty} = \cO(c_k^{t}),$ where $c_k = \frac{2\sigma^2_\ww+3\sigma^2_H+\sigma^2_\vv-\sqrt{(\sigma_\vv^2+\sigma^2_H)(4\sigma^2_\ww + \sigma^2_\vv - 3\sigma^2_H)}}{2\sigma^2_\ww+3\sigma^2_H+\sigma^2_\vv+\sqrt{(\sigma_\vv^2+\sigma^2_H)(4\sigma^2_\ww + \sigma^2_\vv - 3\sigma^2_H)}} \in (0,1)$ (see derivations in \appref{app:discuss:simplify}). So we can use constant $k_t = \kappa, \forall\; t$ to further simplify the algorithm and avoid iteratively updating $p_t$ and recomputing $k_t$ for each step.
+
+With the above simplifications, the complex \algref{alg:KFOpt} simplifies to \algname \ in \algref{alg:main}. For a detailed walkthrough of this simplification process, please refer to \appref{app:discuss:simplify}. This simplified algorithm computes and privatizes the linear combination of the gradient evaluated at two points, $\xx_t, \xx_t + \gamma \dd_t$. Then, this privatized combination undergoes exponential weighted averaging to obtain $\tilde{\gg}_t$, which serves as the input to the base optimizer (Line \ref{alg:step:update} of \algref{alg:main}). 
+
+\begin{algorithm}[t!]
+    \begin{algorithmic}[1]
+        \STATE {{\bfseries Input:} $\xx_0, \cD, \eta, \gamma, \kappa, C, \sigma_\mathrm{DP}$} \\
+		\STATE {{\bfseries Initialize:} $\tilde{\gg}_{-1} = \gg_0, \dd_{-1}=0$} \\
+		\FOR{$t=0,\dots,T-1$}
+		    \STATE {Randomly draw minibatch $\cB_t$ from $\cD$} \label{alg:step:sample}
+                \STATE {Compute $\gg_t = \frac{1}{B}\sum_{\xi \in \cB_t}\clip{\frac{1-\kappa}{\kappa\gamma}\nabla f(\xx_{t}+\gamma \dd_{t-1};\xi) + (1-\frac{1-\kappa}{\kappa\gamma}) \nabla f(\xx_{t};\xi), C} + \ww_t$ \\ \qquad where $\ww_t \sim \cN(0, \sigma^2_\mathrm{DP}\cdot \mI_d)$} \label{alg:step:dp}
+                \STATE {$\tilde{\gg}_t = (1 - \kappa)\tilde{\gg}_{t-1} + \kappa\gg_t$ \hfill {\it \# Apply filter}}
+		    \STATE {$\xx_{t+1} = \text{OptimizerUpdate}(\xx_t, \eta, \tilde{\gg}_t)$ \hfill {\it \# Parameter update}}\label{alg:step:update}
+                \STATE {$\dd_t = \xx_{t+1} - \xx_{t}$ \hfill {\it \# Record update direction}}
+		\ENDFOR
+    \end{algorithmic}
+    \caption{\algname: {\bf Di}fferentially private optimizer with {\bf S}implified {\bf K}alman filter}
+    \label{alg:main}
+\end{algorithm}
+
+\subsection{Additional discussion} 
+
+{\bf Memory and computation cost:} \algref{alg:main} requires one additional forward step to compute $f(\xx_{t}+\gamma \dd_{t-1};\xi)$. This means that the algorithm has at most twice the computational cost of the baseline DP-SGD algorithm. Moreover, \algref{alg:main} only requires two additional states to store: $\tilde{\gg}_t$ and $\dd_t$. Compared to DPSGD, which requires storing the model and the gradient, \algname \ has at most twice the memory cost; and compared to DPAdam, which requires storing the first- and second-order moments, the algorithm has at most $1.5\times$ the memory cost. 
+
+{\bf Connection to NAG and \xwedit{STORM}:} Remarkably,  \algref{alg:main} 
+has an implicit connection to the (unified) Nesterov accelerated gradient (NAG) method~\citep{shen2023unified,sutskever2013importance} \xwedit{and the Stochastic Recursive Momentum (STORM) algorithm~\citep{cutkosky2019momentum}. Specifically, by letting the OptimizerUpdate be SGD, assuming clipping is inactive, and setting $\ww_t = 0$ (i.e., without privatizing the gradient) in \algref{alg:main}, we can make a clear connection: 
+On one hand, \algname \ reduces to NAG by choosing $\gamma = \frac{1-\kappa}{\kappa}, \eta = \kappa, 1-\kappa = \mu$, and $B=N$. On the other hand, the update of \algname \ matches STORM by choosing $\gamma=-1, \kappa=\alpha$, and $B=1$. A detailed derivation and discussion is provided in \appref{app:discuss:connection}. 
+ This observation reveals an intriguing connection between NAG (designed for acceleration) and STORM (focused on variance reduction), unifying them within the framework of \algname, a Kalman filtering-based algorithm.
+
+}
+{\bf Connection to DOPPLER:} DOPPLER~\citep{zhang2024doppler} and \algname~both use a filter to separate the gradient signal from the DP noise. If $\gg_t$ only evaluates the gradient at one point instead of using the linear combination of gradients at two points in \algref{alg:main}, Line 5, \algname~becomes DOPPLER with a first-order filter. The key difference is that DOPPLER assumes an underlying low-frequency dynamic of the gradient and applies a time-invariant low-pass filter. Designing the optimal low-pass filter relies on the prior knowledge of the gradient frequency spectrum, which is hard to obtain in practice, and implementing such a high-order low-pass filter results in a large memory overhead. While in \algname, we do not assume the frequency property of the gradient signal. Instead, we incorporate the gradient dynamics into the filtering procedure and use the Kalman filter, a predictive filtering approach, to reduce the impact of DP noise. 
+
+
+
+\section{Theoretical analysis}
+
+This section includes theoretical analyses of  \algref{alg:main}. Our study  establishes the  convergence, provable noise reduction, and the privacy-utility trade-off of the algorithm. 
+To facilitate our analysis, we make the following assumptions: 
+\begin{assumption}[Smoothness]\label{as:smooth}
+    $f(\cdot, \xi)$ is $L$-smooth for any $\xi$, i.e., 
+    $\norm{\nabla f(\xx;\xi) - \nabla f(\yy;\xi)} \leq L\norm{\xx - \yy}, \;\forall \xi\in\cD, \; \forall \xx, \yy \in \R^d.$
+\end{assumption}
+\begin{assumption}[Bounded Variance]\label{as:variance}
+    The per-sample gradient has bounded variance with 
+    $\E_{\xi\in\cD}\norm{\nabla f(\xx; \xi) - \nabla F(\xx)}^2 \leq \sigma^2_\text{SGD}, \; \forall \xx\in \R^d,$
+    where $\E_{\xi\in \cD} [\cdot]$ denotes the expectation taken on the randomness over $\xi$ that is uniformly sampled from dataset $\cD$.
+\end{assumption}
+\begin{assumption}[Bounded Gradient]\label{as:bg}
+    Each per-sample gradient has a bounded norm, i.e., 
+    $\norm{\nabla f(\xx; \xi)} \leq G, \; \forall \xx\in\R^d, \forall \xi\in\cD.$
+\end{assumption}
+Let us briefly comment on these assumptions: \asref{as:smooth} and \asref{as:variance} are standard in non-convex optimization~\citep{allen2016variance,zaheer2018adaptive,abadi2016deep}; and \asref{as:bg} is commonly used in analyzing the convergence of DP algorithms~\citep{abadi2016deep,wang2020dp,andrew2021differentially} to avoid introducing the clipping bias. Since the impact of clipping is not the major focus of this paper, we follow this tradition and use \asref{as:bg} to simplify our theoretical analysis.
+\subsection{Convergence analysis}
+We provide the following convergence results for \algref{alg:main}, assuming $\sigma_\mathrm{DP}$ being a constant. %
+\begin{theorem}\label{thm:convergence}
+    Assume \asref{as:smooth}-\asref{as:bg} hold. Fix $\sigma_\mathrm{DP}^2$ and choose $C \geq (1+\frac{2(1-\kappa)}{\kappa})G$, $\kappa, \eta$ satisfy \[\eta < \frac{1+\kappa}{2L(1+2(1-\kappa)^2\beta L(2+\abs{1+\gamma}C_\gamma))}, \; \kappa > 1-\frac{1}{\sqrt{1+4\eta^2L^2 + \xwedit{\abs{1+\gamma}\left(\kappa+2\eta^2L^2C_\gamma\right)}}},\] and run \algref{alg:main} for $T$ iterations. Then, 
+    {\small
+     \begin{align}\label{eq:convergence}
+        \frac{1}{T}\sum^T_{t=0}\E\norm{\nabla F(\xx_t)}^2 & \leq \frac{2(F(\xx_0) + \beta\norm{\nabla F(\xx_0)}^2 - F^\star)}{C_1\eta T}  \nonumber \\
+        & \quad + \frac{2(\beta + \eta^2L)\kappa^2}{C_1\eta}\left(\frac{\xwedit{(2+\abs{1+\gamma})}\sigma^2_\mathrm{SGD}}{B}+d\sigma^2_\mathrm{DP}\right),
+    \end{align}
+    }
+where $C_\gamma= 1+\frac{4(2+1/\kappa+\abs{1+\gamma})}{\gamma^2}$, $C_1 = (1+\kappa-2\eta L) - 4(\beta + \eta^2L)(1-\kappa)^2L^2\eta\xwedit{\left(2+\abs{1+\gamma}C_\gamma\right)} > 0,$
+and $\beta \geq \frac{\eta(1-\kappa)/2+\eta^2L(1-\kappa)^2(1+4\eta^2L^2+\xwedit{\abs{1+\gamma}\left(\kappa+2\eta^2L^2C_\gamma\right)})}{1 - (1-\kappa)^2(1+4\eta^2L^2 + \xwedit{\abs{1+\gamma}\left(\kappa+2\eta^2L^2C_\gamma\right)})}\geq 0$ are some non-negative constants. 
+\end{theorem}
+The proof of \thref{thm:convergence} is relegated to \appref{app:proof}. Notice that when $\kappa = 1$, we have $\beta=0, C_1=2(1-\eta L)$ and the convergence result recovers that of DPSGD~\citep{ghadimi2013stochastic,zhang2017efficient}.
+With this theorem, we can choose specific parameters and obtain the following corollary:
+\begin{corollary}\label{cor:convergence}
+    Under the conditions of \thref{thm:convergence}, choose $\gamma = -1,$
+    {\small
+    \begin{align*}
+        \eta &= \min\left\{\frac{1}{L(2+4/C_\kappa - C_\kappa)}, \frac{1}{C_\kappa L}\sqrt{\frac{2C_\kappa L(F(\xx_0) - F^\star)+\norm{\nabla F(\xx_0)}^2}{T(2\sigma^2_\mathrm{SGD}/B+d\sigma^2_\mathrm{DP})}}\right\}, \\
+        \beta &= \frac{\eta(1-\kappa)/2+\eta^2L(1-\kappa)^2(1+4\eta^2L^2)}{1 - (1-\kappa)^2(1+4\eta^2L^2)} \leq \frac{1}{2C_\kappa L}, \\
+        \kappa &= C_\kappa L \eta \leq 1, \;\; \textrm{and}\;\; C_\kappa = \min\left\{\frac{\norm{\nabla F(\xx_0)}^2}{2L(F(\xx_0) - F^\star)}, 1\right\},
+    \end{align*}
+    }
+    then \algref{alg:main} satisfies:
+    {\small
+    \begin{equation} \label{eq:CorrConstImprovement}
+        \frac{1}{T}\sum^T_{t=0}\E[\norm{\nabla F(\xx_t)}^2] \leq 4\sqrt{\frac{C_\kappa L(F(\xx_0) - F^\star))(2\sigma^2_\mathrm{SGD}/B+d\sigma^2_\mathrm{DP})}{T}} = \cO\left(\sqrt{\frac{d}{T}}\right).
+    \end{equation}
+    }
+\end{corollary}
+{\bf Convergence improvement:} The above result implies that the {\it order} of the number of iterations~$T$ needed for convergence of \algref{alg:main} is the same as of DPSGD~\citep{ghadimi2013stochastic,zhang2017efficient}. 
+However, \algref{alg:main} has a {\it constant factor} improvement in its convergence rate over DPSGD. This improvement is resulted from the presence of $C_\kappa\leq 1$ in the numerator in the RHS of~\eqref{eq:CorrConstImprovement}.  More specifically, if $C_\kappa<1,$ i.e., $\norm{\nabla F(\xx_0)}^2 <2L(F(\xx_0) - F^\star),$ then the convergence bound reduces by a factor of $\sqrt{1/C_\kappa},$ 
+and  \algname~ has clear theoretical improvement over vanilla DPSGD. {\bf Case I:} For ($\mu$-strongly) convex problems, it is guaranteed that $2\mu(F(\xx_0) - F^\star)\leq\norm{\nabla F(\xx_0)}^2 \leq2L(F(\xx_0) - F^\star).$ Therefore, the factor $C_\kappa \in [\mu/L, 1].$ {\bf Case II:} When training highly non-convex deep learning models, the Lipschitz constant $L$ can be large~\citep{herrera2020estimating}, and $2L(F(\xx_0) - F^\star)$ can be much larger than $\norm{\nabla F(\xx_0)}^2$, which results in a considerable algorithm performance improvement compared to vanilla DPSGD. 
+
+While the above corollary is for the case of $\gamma = -1$, we can obtain performance improvement for $\gamma \neq -1$ as well. The choice $\gamma = -1$ is optimized for the \textit{worst case} (function satisfying our assumptions) based on our upper-bound in \eqref{eq:convergence}. However, it is possible that for functions satisfying additional assumptions, other choices of $\gamma$ lead to better convergence result. This fact is further explained after presenting the proof of the theorem in \appref{app:proof:thm:1}. 
+
+
+As a last remark in this subsecion, notice that our iteration complexity improvement does not require any additional assumption on the problem. In contrast, existing works with convergence improvement require additional assumptions, e.g., on the correlation between the gradients~\citep{zhang2024doppler}, or on the trace of Hessian~\citep{choquettecorrelated,li2022does}.
+
+\subsection{Privacy-utility trade-off}
+To provide DP, the Subsampled Gaussian mechanism is used in Lines \ref{alg:step:sample} and \ref{alg:step:dp} of \algref{alg:main}. 
+Instead of $\nabla f(\xx_t;\xi)$, we treat $\frac{1-\kappa}{\kappa\gamma}\nabla f(\xx_{t}-\gamma \dd_{t-1};\xi) + (1-\frac{1-\kappa}{\kappa\gamma}) \nabla f(\xx_{t};\xi)$ as the per-sample gradient and apply the Subsampled Gaussian mechanism to privatize it. Therefore, \algref{alg:main} and DPSGD share a similar privacy guarantee, as the privacy proof directly follows the Subsampled Gaussian mechanism and the composition of $T$ iterations in \thref{thm:dpsgd:dp}. Specifically, by combining \thref{thm:dpsgd:dp} and \thref{thm:convergence}, we obtain the following privacy-utility trade-off:
+\begin{theorem}
+     Assume \asref{as:smooth}-\asref{as:bg} holds. Run \algref{alg:main} for $T = \frac{\sqrt{2}N\epsilon\sigma_\mathrm{SGD}}{C\sqrt{Bd\ln(1/\delta)}}$ iterations, and choose $\kappa, \beta$ according to the choices in \coref{cor:convergence}, then
+     \begin{equation}
+         \frac{1}{T}\sum^T_{t=0}\E\norm{\nabla F(\xx_t)}^2 \leq \frac{8C\sigma_\mathrm{SGD}\sqrt{C_\kappa L(F(\xx_0) - F^\star)d\ln(1/\delta)}}{\sqrt{B}N\epsilon} = \cO\left(\frac{\sqrt{d\ln(1/\delta)}}{N\epsilon}\right)
+     \end{equation}
+\end{theorem}
+Similar to our convergence result, compared to vanilla DPSGD, the privacy-utility trade-off of \algref{alg:main} reduces by a constant factor of $\sqrt{1/C_\kappa}$. To the best of our knowledge, this is the first theoretical result on the utility improvement of a DPSGD-type algorithm without any additional assumptions on the problem.
+
+
+\section{Numerical experiments}
+
+We perform extensive pre-training and fine-tuning experiments on various image classification (CV) and natural language processing (NLP) tasks using different base algorithms, privacy budgets, and models. The implementation details of the experiments are given in \appref{app:exp:detail}. The link to the code is \url{https://anonymous.4open.science/r/KalmanDP-BEDB}.
+\subsection{Experiment settings}
+{\bf Dataset:} We train the models on one synthetic dataset, four CV datasets, including MNIST~\citep{deng2012mnist}, CIFAR-10/CIFAR-100~\citep{krizhevsky2009learning}, and ImageNet-1k~\citep{deng2009imagenet}, and three NLP dataset, including GLUE~\citep{wang2018glue}, E2E~\citep{novikova2017e2e}, and DART~\citep{nan-etal-2021-dart}.
+
+{\bf Model:} For the CV tasks, we use three different models, including a 5-layer CNN, WideResNet (WRN)~\citep{de2022unlocking}, and ViT~\citep{dosovitskiy2020image}, representing three typical CV model structures. For the NLP task, we use the RoBERTa~\citep{liu2019roberta} and the GPT-2~\citep{radford2019language} models. For pre-training, the models are initialized with random weights, and for fine-tuning with ViT, RoBERTa, and GPT-2, we directly use the checkpoints on HuggingFace~\citep{wolf-etal-2020-transformers}.
+
+{\bf Algorithm:} We use the DP version of SGD and Adam for CV tasks, and AdamW for NLP tasks as baselines. Then, we apply \algname~to compare their performance. Additional results on LoRA~\citep{li2021large} are given in \appref{app:exp:NLP}. In the results, we use {\bf KF-} to denote the privatized version of the  algorithms with the \algname \ framework.
+
+{\bf Hyper-parameter choices:} We tune the hyper-parameters using a grid search. Specifically, we conduct a grid search on the batch size $B$, total epochs $E = NT/B$, and step size $\eta$ for each given privacy budget $\epsilon$. For all experiments, we fix the privacy parameter $\delta = 1/N^{1.1}$ to obtain a reasonable privacy notion. Detailed hyper-parameter choices are discussed in \appref{app:exp:params}.
+
+\subsection{Numerical results}
+{\bf CV tasks:} We first train the CV models with randomly initialized weights on different image datasets. The results for 5-layer CNN on the MNIST dataset, 5-layer CNN on the CIFAR-10 dataset, and WRN-16-4 on the CIFAR-100 datasets with different privacy budgets are given in \figref{fig:datasets_eps}. \algname~ significantly outperforms the base algorithm across all used privacy budgets.
+
+The test accuracy curves during the training for 5-layer CNN on the MNIST dataset, WRN-16-4 on the CIFAR-100 dataset, and ViT-small on the ImageNet-1k dataset are given in \figref{fig:datasets_epoch}. The optimizer with \algname~ convergence faster than the base algorithm on all tasks and reaches a higher final accuracy at a given privacy budget. The test accuracy of CIFAR-100 achieves $41.8\%$, and ImageNet-1k achieves $36.4\%$, which outperforms the SOTA results that apply data augmentation under the same privacy budget ($40.6\%$ for CIFAR-100~\citep{bao2024dp} and $32.4\%$ for ImageNet-1k~\citep{de2022unlocking}). Additional comparisons on different models, algorithms, and fine-tuning CIFAR-100 are given in \appref{app:exp:CV}.
+
+{\bf NLP tasks:} We fine-tune a pre-trained RoBERTa-base model\footnote{\url{https://huggingface.co/FacebookAI/roberta-base}} on the GLUE datasets. The final test accuracy for is given in Table~\ref{tab:glue}. We follow the same training script and hyper-parameter choices in the experiments as \citet{bu2024automatic}. Compared with the base algorithm (DPAdamW), \algname~improves the final accuracy on all tasks by at least $3.8\%$ when $\epsilon=1$ and $1.3\%$ when $\epsilon=6.7$. Additional results for text generation tasks on the E2E ad DART datasets are given in \appref{app:exp:NLP}.
+
+\begin{figure}[tb!]
+     \centering
+     \begin{subfigure}[b]{0.32\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{figures/MNIST-epsilon.png}
+         \caption{MNIST}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.32\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{figures/CIFAR-10-epsilon-kappa07gamma05.png}
+         \caption{CIFAR-10}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.32\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{figures/CIFAR-100.png}
+         \caption{CIFAR-100}
+     \end{subfigure}
+        \caption{Test accuracy of training from scratch on MNIST, CIFAR-10, and CIFAR-100 datasets with and without \algname~for different privacy budgets.}
+        \label{fig:datasets_eps}
+\end{figure}
+
+\begin{figure}[tb!]
+     \centering
+     \begin{subfigure}[b]{0.32\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{figures/MNIST.png}
+         \caption{MNIST, $\epsilon=0.5$}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.32\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{figures/CIFAR-100-eps8.png}
+         \caption{CIFAR-100, $\epsilon=8$}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.32\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{figures/ImageNet-1k.png}
+         \caption{ImageNet-1k, $\epsilon=8$}
+     \end{subfigure}
+        \caption{Test accuracy on MNIST, CIFAR-100, and validation accuracy on ImageNet-1k datasets training from scratch with and without \algname~for fixed privacy budgets.}
+        \label{fig:datasets_epoch}
+\end{figure}
+
+
+
+\begin{table}[tb!]
+    \centering
+    \caption{Test accuracy of fine-tuning result on the GLUE dataset.}
+    \label{tab:glue}
+    \begin{tabular}{c|c|ccc|ccc}
+    \toprule
+         \multirow{2}{*}{Task}       & ($\epsilon=\infty$) & \multicolumn{3}{|c}{$\epsilon = 6.7$} & \multicolumn{3}{|c}{$\epsilon = 1$} \\
+           & {\footnotesize Non-DP}  & {\footnotesize DP} & {\footnotesize\bf KF-DP} & {\footnotesize\bf KF-DPLora}   & {\footnotesize DP}  & {\footnotesize\bf KF-DP}  & {\footnotesize\bf KF-DPLora}  \\
+        \midrule
+        MNLI     & 87.6 & 83.2 & 84.8 & 85.9 & 80.7 & 82.0 & 84.7 \\
+        QNLI     & 92.8 & 87.5 & 88.9 & 90.5 & 86.0 & 88.7 & 90.3 \\
+        SST-2    & 94.8 & 91.5 & 92.8 & 93.1 & 91.4 & 91.5 & 92.9 \\
+        QQP      & 91.9 & 85.8 & 88.5 & 89.0 & 84.2 & 86.9 & 87.8 \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+
+
+{\bf Ablation study:} We conduct ablation studies on the choice of the hyper-parameters of \algname, specifically, how $\kappa, \gamma$ impact the algorithm performance. The results are presented in \appref{app:exp:CV}.
+
+{\bf Improvements over the SOTA:} Table~\ref{tab:app:sota} in \appref{app:exp:sota} summarizes the improvements of \algname \ over the SOTA on different tasks.
+
+
+
+
+
+

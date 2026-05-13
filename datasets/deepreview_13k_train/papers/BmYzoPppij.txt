@@ -1,0 +1,439 @@
+\title{LLMCO2: Advancing Accurate Carbon Footprint Prediction for LLM Inferences}
+
+\begin{abstract}
+
+Throughout its lifecycle, a large language model (LLM) generates a substantially larger carbon footprint during inference than training. LLM inference requests vary in batch size, prompt length, and token generation number, while cloud providers employ different GPU types and quantities to meet diverse service-level objectives for accuracy and latency. It is crucial for both users and cloud providers to have a tool that quickly and accurately estimates the carbon impact of LLM inferences based on a combination of inference request and hardware configurations before execution. Estimating the carbon footprint of LLM inferences is more complex than training due to lower and highly variable model FLOPS utilization, rendering previous equation-based models inaccurate. Additionally, existing machine learning (ML) prediction methods either lack accuracy or demand extensive training data, as they inadequately handle the distinct prefill and decode phases, overlook hardware-specific features, and inefficiently sample uncommon inference configurations. We introduce \coo, a graph neural network (GNN)-based model that greatly improves the accuracy of LLM inference carbon footprint predictions compared to previous methods.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{s:intro}
+
+Large language models (LLMs)~\citep{Le:ARXIV2022,Meta:LLaMA2023,Mistral:Mistral2024} have demonstrated high efficacy across various generative Natural Language Processing (NLP) tasks, such as code completion~\citep{Nam:ICSE2024}, question-answering~\citep{Shao:CVPR2023}, and text summarization~\citep{Pilault:EMNLP2020}. Their integration into daily activities (e.g., web browsing~\citep{Campello:IQ2023}) highlights their increasing prevalence. However, this widespread adoption has led to significant carbon dioxide equivalent (CO2eq) emissions~\citep{Luccioni:FAT2024}. For instance, training the Google T5 LLM generates 40\% more carbon emissions than a round-trip flight between San Francisco and New York~\citep{Faiz:ICLR2024}.
+Inferences for LLMs can produce an even larger carbon footprint than their initial training. Conservative estimates suggest that OpenAI handles over 270 million daily inference requests~\citep{Chien:HotCarbon2023}, with an average prompt length of 1.2K tokens per request~\citep{Patel:ISCA2024}. Training GPT-4 requires approximately 13 trillion tokens~\citep{OpenAI:2024}, with a single epoch requiring three times the FLOPs of an inference~\citep{Faiz:ICLR2024}. Consequently, the carbon emissions from 121 days of serving GPT-4 inferences equate to those of its training. As the volume of daily inference requests rises, and with increased adoption of LLMs across various applications~\citep{OpenAI:2024}, the period required for inference emissions to match training emissions is rapidly decreasing.
+Given the significant environmental impact, it is essential for both end users and cloud providers to understand the carbon emission costs of different service-level objectives (SLOs)~\citep{Patel:ISCA2024} for LLM inference accuracy and latency. An accurate carbon footprint prediction tool is crucial before initiating inference requests, enabling users to assess trade-offs between accuracy, latency, and carbon emissions. This tool would also help cloud providers justify billing policies transparently, promoting low-carbon practices among users.
+
+However, \textit{there is a lack of modeling tools for accurately estimating the carbon footprint of LLM inferences}. Users submit LLM inference requests with varying configurations (e.g., batch size, prompt length, and token generation number) to cloud services, while cloud providers employ different GPU types and quantities to meet diverse SLOs for accuracy and latency. Prior studies~\citep{Nguyen:HotCarbon2024,Luccioni:FAT2024} have reported LLM inference carbon emissions on a limited range of GPUs, but exhaustively profiling all possible configurations is impractical. Although a carbon footprint model for LLM training~\citep{Faiz:ICLR2024} exists, its equation-based approach fails to accurately capture LLM inference emissions due to lower and highly variable model FLOPS utilization (MFU)~\citep{Reiner:MLSYS2023}. While machine learning (ML)-based tools have been developed to predict inference latency~\citep{Liu:ICPP2023,Zhang:MobiSys2021} and energy~\citep{Tu:SEC2023} for neural networks on mobile devices, applying them to LLM inference carbon footprints results in low accuracy or requires extensive training data for the following reasons:
+\begin{itemize}[leftmargin=*, nosep, topsep=0pt, partopsep=0pt]
+\item \textit{Lack of autoregressive consideration}. Existing tools treat CNN inference as a single task, failing to account for the distinct autoregressive phases of LLMs: the compute-intensive prefill and the memory-bound decode~\citep{Patel:ISCA2024}. This oversight reduces prediction accuracy or necessitates large training datasets.
+
+\item \textit{Neglect of hardware-specific features}. Prior tools overlook critical hardware characteristics such as GPU peak computing throughput, memory bandwidth, and network bandwidth. Accurate predictions thus require exhaustive profiling across different GPU platforms~\citep{Reiner:MLSYS2023}, making these methods inefficient and less reliable for new hardware.
+
+\item \textit{Disregard for prevalent configurations}. Previous tools treat all inference configurations equally, ignoring that most real-world LLM inference requests, such as those in Azure Cloud~\citep{Microsoft:Trace2024}, feature small batch sizes, shorter prompts, and limited token generation. This approach fails to improve prediction accuracy for typical usage scenarios.
+\end{itemize}
+
+We introduce \coo, an accurate carbon footprint regression model for LLM inferences. \coo~employs a novel graph embedding technique that represents each transformer layer's kernels as a graph, with nodes indicating kernels and edges capturing data dependencies. Node features for the prefill and decode phases are encoded separately, incorporating each node's Roofline performance as a hardware-specific feature. We also develop a focused data sampling algorithm that emphasizes common configurations of inference requests, LLM architectures, and GPU setups. \coo~improves carbon footprint prediction accuracy by 51\%-123\% over existing ML-based energy predictors for LLMs across diverse inference requests and GPU configurations.
+\begin{figure}[t!]
+\centering
+\begin{minipage}{0.48\linewidth}
+\begin{center}
+\includegraphics[width=\linewidth]{figures/co2_autore_style.pdf}
+\caption{A decoder-only LLM's autoregressive inference consists of prefill and decode phases.}
+\label{f:co2_autore_style}
+\end{center}
+\end{minipage}
+\hspace{0.05in}
+\begin{minipage}{0.48\linewidth}
+\begin{center}
+\includegraphics[width=\linewidth]{figures/co2_phase_energy.pdf}
+\caption{Comparing the energy of 2 phases in a Bloom-3B inference on an Nvidia L4 GPU.}
+\label{f:co2_phase_energy}
+\end{center}
+\end{minipage}
+\end{figure}
+
+
+
+\section{Background}
+
+
+
+\textbf{Autoregressive LLM Inferences}. As shown in Figure~\ref{f:co2_autore_style}, during autoregressive inference~\citep{Reiner:MLSYS2023} of a decoder-only LLM, all input tokens are processed in parallel during the first iteration, generating the first token—this is the prefill phase~\citep{Patel:ISCA2024}. The context from the LLM's attention layers is stored in the key-value (KV) cache for future iterations. Subsequent tokens are then generated using the latest token and the KV cache as inputs, forming the decode phase~\citep{Patel:ISCA2024}.
+\textbf{Distinct Characteristics of Two Phases}. In autoregressive LLM inference, the prefill phase computes and stores context in the KV cache, while the decode phase primarily accesses this cache. The prefill phase is compute-bound, relying on GPU cores, whereas the decode phase is memory-bound, relying on GPU memory. Consequently, the phases differ in latency, energy consumption, and carbon footprint. As shown in Figure~\ref{f:co2_phase_energy}, during a Bloom-3b inference~\citep{Le:ARXIV2022} with a batch size of 1 on an Nvidia L4 GPU, the prefill phase's energy use is negligible for requests with many generated tokens but dominates when fewer tokens are generated. Treating both phases as a single task without sufficient training data significantly reduces energy prediction accuracy.
+
+\textbf{Kernels in a transformer Layer}. As illustrated in Figure~\ref{f:co2_transformer_kernel}, a transformer layer~\citep{Vaswani:NIPS2017} comprises a masked multi-head attention (MHA) layer and a feed-forward (FF) layer framed by normalization layers. In the MHA layer, the attention mechanism is executed via $Q_{proj}$, $K_{proj}$, and $V_{proj}$ kernels. Techniques like Grouped-Query Attention~\citep{Ainslie:EMNLP2023} and Flash Attention~\citep{Dao:ICLR2024} reduce memory overhead in LLM inferences by employing fewer key-value heads and fusing attention computations ($fuse_{atten}$). The FF layer operates as a two-layer MLP. To enable tensor parallelism~\citep{Narayanan:SC2021}, two all-reduce kernels are employed to distribute General Matrix Multiply (GEMM) operations across GPUs. %In both prefill and decode phases, the all-reduce kernels remain network-bound.
+\begin{figure}[t!]
+\centering
+\includegraphics[width=0.8\linewidth]{figures/co2_all_reduce.pdf}
+\caption{An example of a all-reduce kernel running on four GPUs.}
+\label{f:co2_all_reduce}
+\end{figure}
+
+\begin{wrapfigure}[9]{r}{0.5\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/co2_transformer_kernel.pdf}
+\caption{The kernels in a transformer layer.}
+\label{f:co2_transformer_kernel}
+\end{wrapfigure}
+\textbf{All-reduce}. Given the huge memory demands of LLMs and the limited capacity of individual GPUs, multiple GPUs connected via PCIe or NVLink~\citep{Patel:ISCA2024} are crucial for LLM inferences. Tensor parallelism~\citep{Aminabadi:SC2022} splits tensors across GPUs and replicates all layers, providing a significant speedup over other parallelism strategies. To support tensor parallelism, two all-reduce kernels are incorporated into each transformer layer. An all-reduce kernel~\citep{Hidayetoglu:ICS2024} consists of a reduce-scatter operation followed by an all-gather operation, as shown in Figure~\ref{f:co2_all_reduce}. For instance, a $4\times4$ matrix, evenly distributed across four GPUs (each holding a column), undergoes reduce-scatter, where each row is assembled and summed on one GPU, followed by all-gather, where the summed values are shared across all GPUs.
+
+\begin{figure}[ht!]
+\centering
+\subfigure[memory.]{
+   \includegraphics[width=0.46\linewidth]{figures/co2_mem_roofline.pdf}
+   \label{f:co2_mem_roofile}
+}
+\subfigure[network.]{
+   \includegraphics[width=0.46\linewidth]{figures/co2_net_roofline.pdf}
+   \label{f:co2_net_roofile}
+}
+\caption{The memory and network Roofline models for an Nvidia V100 GPU.}
+\label{f:co2_roofline_model}
+\end{figure}
+
+\textbf{Roofline model}. The Roofline model~\citep{Cardwell:ICHPC2019} is a performance analysis tool that estimates a kernel's performance on a GPU, measured in operations per second (OPs/s). It considers factors like peak GPU throughput, peak memory and network bandwidth, and the kernel's memory- and network-specific arithmetic intensities. The memory and network Roofline models for an Nvidia V100 GPU~\citep{Nvidia:V100} are shown in Figures~\ref{f:co2_mem_roofile} and~\ref{f:co2_net_roofile}, respectively. The X-axes represent arithmetic intensity, calculated as total kernel operations divided by total memory or network bytes transferred. A ridge point, or `balance' point, indicates where compute and data movement performance meet. The Nvidia V100 supports FP32, FP16, and INT8 operations with HBM or GDDR memory, resulting in six ridge points in Figure~\ref{f:co2_mem_roofile}. Two network interfaces (NVLink and PCIe) yield two ridge points in Figure~\ref{f:co2_net_roofile}. Kernels with arithmetic intensities below the ridge point are memory- or network-bound, while those above are compute-bound. For instance, in Figure~\ref{f:co2_mem_roofile}, the INT8 kernel 0 ($K_0$) is compute-bound with HBM but memory-bound with GDDR.
+\begin{figure}[ht!]
+\centering
+\subfigure[code prompt.]{
+   \includegraphics[width=1.35in]{figures/code_prompt.pdf}
+   \label{f:code_prompt}
+}
+\hspace{-0.15in}
+\subfigure[chat prompt.]{
+   \includegraphics[width=1.35in]{figures/conv_prompt.pdf}
+   \label{f:conv_prompt}
+}
+\hspace{-0.15in}
+\subfigure[code generation.]{
+   \includegraphics[width=1.35in]{figures/code_gen.pdf}
+   \label{f:code_gen}
+}
+\hspace{-0.15in}
+\subfigure[chat generation.]{
+   \includegraphics[width=1.35in]{figures/conv_gen.pdf}
+   \label{f:conv_gen}
+}
+\caption{The distribution of prompt and generated tokens in Microsoft Azure cloud.}
+\label{f:co2_dis_pgen}
+\end{figure}
+
+\textbf{Request characterization}. In real-world LLM serving clouds like Microsoft Azure, the distribution of inference configurations such as prompt length and generated token count is not uniform. We analyzed public production traces~\citep{Microsoft:Trace2024} from Azure's code completion and conversation services. The prompt length distributions are shown in Figures~\ref{f:code_prompt} and~\ref{f:conv_prompt}, respectively. Code completion prompts are often longer, with a median length of 1.5K tokens, compared to chat prompts with a 1.02K median, as they include substantial chunks of existing code. Most requests have prompt lengths under 3K tokens. The distributions of generated tokens are in Figures~\ref{f:code_gen} and~\ref{f:conv_gen}; the median is 13 tokens for code completion and 129 for chat, with most requests generating under 600 tokens. Major LLM serving clouds, including Azure, use a mixed continuous batching policy~\citep{Agrawal:OSDI2024}, keeping batch sizes typically at $\leq 2$~\citep{Patel:ISCA2024}.
+
+
+\begin{table}[t!]
+\caption{The comparison of \coo~against prior work.}
+\setlength{\tabcolsep}{3pt}
+\footnotesize
+\label{t:co2_related_work}
+\rao{0.9}
+\begin{center}
+\begin{tabular}{@{}cccccc@{}}\toprule
+
+\bf advantage                                      & LLMCarbon & nn-Meter   & DeepEn     & NNLQP        & \textbf{ours} \\\midrule
+ML-based regression technique                      & \ding{55} & \ding{51}  & \ding{51}  & \ding{51}    & \ding{51}      \\
+prefill and decode phases                          & \ding{55} & \ding{55}  & \ding{55}  & \ding{55}    & \ding{51}     \\
+hardware (core, mem, \& net) features              & \ding{51} & \ding{55}  & \ding{55}  & \ding{55}    & \ding{51}     \\
+tensor parallelism on multi-GPUs	                 & \ding{55} & \ding{55}  & \ding{55}  & \ding{55}    & \ding{51}     \\
+sampling common inference configs                  & \ding{55} & \ding{55}  & \ding{55}  & \ding{55}    & \ding{51}     \\							
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+
+
+\section{Related Work}
+
+
+We compare \coo~with prior work in Table~\ref{t:co2_related_work}. LLMCarbon~\citep{Faiz:ICLR2024} employs an equation-based approach using FLOPs to estimate LLM inference carbon footprints, resulting in inaccuracies. Other models like nn-Meter~\citep{Zhang:MobiSys2021}, DeepEn~\citep{Tu:SEC2023}, and NNLQP~\citep{Liu:ICPP2023} use random forests or neural networks to predict latency or energy for CNNs and transformers but treat predictions as a single task, overlooking the autoregressive nature of LLM inferences and failing to distinguish between prefill and decode phases. These methods focus solely on architecture-specific features like input sizes and network structures, relying on brute-force sampling across hardware platforms, yet they omit hardware-specific features such as GPU peak throughput, memory bandwidth, and network bandwidth, resulting in reduced accuracy for unseen hardware configurations. Furthermore, they do not address tensor parallelism across multiple GPUs and uniformly sample inference configurations, neglecting common settings like medium prompt lengths and small batch sizes. In contrast, \coo~separates prefill and decode phases, incorporates hardware-specific features, supports multi-GPU tensor parallelism, and prioritizes frequently occurring inference configurations, achieving more precise carbon footprint predictions.
+
+
+
+\section{LLMCO2}
+
+
+\begin{wrapfigure}[12]{r}{0.5\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/co2_tech_overview.pdf}
+\caption{The overview of \coo.}
+\label{f:co2_tech_overview}
+\end{wrapfigure}
+We introduce \coo, an accurate carbon footprint regression model for LLM inferences, as outlined in Figure~\ref{f:co2_tech_overview}. Firstly, \ding{182} we propose a novel graph embedding method that encodes a transformer's layer, running on one or more GPUs during inference, as a graph. In the graph, nodes correspond to the kernels within the transformer layer, while edges depict data dependencies between kernels. Each node is annotated with architectural features such as operation count, memory access size, and network transfer size, along with a hardware-specific feature, i.e., its Roofline performance. Node features are divided into two sets, one for the prefill phase and the other for the decode phase. We then employ graph convolution layers to process this graph. Global LLM architectural features, including total operation count, memory access, and network transfer size, are integrated with the processed graph features, and two linear layers use these to predict the LLM inference's operational energy. To convert operational energy consumption to carbon footprint, we apply the equation from~\citet{Faiz:ICLR2024}:
+\begin{equation}
+CO2eq_{oper} = energy_{oper} \cdot PUE \cdot carb\_inten,
+\end{equation}
+where $CO2eq_{oper}$ represents the operational carbon footprint, $PUE$ denotes the power usage effectiveness, and $carb\_inten$ indicates the carbon intensity of the data center. The embedded carbon footprint is calculated using the equations provided in~\citet{Faiz:ICLR2024}. Secondly, \ding{183} we introduce a focused data sampling technique that targets common inference configurations, LLM architectures, and GPU setups frequently encountered by commercial cloud users. This technique generates numerous combinations of inference, LLM architecture, and GPU configurations to build the training dataset. For each combination, the configurations extract kernels in each transformer layer and global LLM features, following various kernel optimizations. These kernels, global LLM features, and hardware configurations form the input data for \coo, while ground truth energy data is gathered from real GPUs, adhering to the specified configurations.
+
+
+
+
+
+\begin{figure}[t!]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/co2_llm_tech2.pdf}
+\caption{Converting the kernels in a transformer layer into a graph.}
+\label{f:co2_llm_tech}
+\end{figure}
+
+\subsection{Graph Embedding}
+
+We introduce a graph embedding technique for \coo~to represent a transformer layer as a directed acyclic graph (DAG) of kernels: $\mathcal{G}=(\mathcal{V},\mathcal{E})$, where $\mathcal{V}$ is the set of nodes (kernels), and $\mathcal{E}$ denotes the edges (data dependencies between kernels). Each edge's source kernel supplies input data to the destination kernel. The key advantages of this technique are: (1) each node has two distinct feature sets---one for the prefill phase and the other for the decode phase, and (2) each node includes a hardware-specific feature, i.e., Roofline performance. Figure~\ref{f:co2_llm_tech} provides an example of this graph embedding for a transformer layer.
+\textbf{Node features}. A node $v \in \mathcal{V}$ corresponds to a kernel in the transformer layer. To accurately estimate the carbon footprint of the two distinct phases in an LLM inference, each node is assigned two sets of features: one for the prefill phase and the other for the decode phase. Each feature set concatenates the following elements:
+\begin{itemize}[leftmargin=*, nosep, topsep=0pt, partopsep=0pt]
+\item $T$: Defines the type of the kernel. For instance, the value projection kernel $V_{proj}$ multiplies the input with its weight matrix $\mathbf{W}_{V}$. A one-hot vector is used to encode $T$.
+
+\item $S$: Represents the dimensions of the kernel's input, weight, and output.
+
+\item $O$: Refers to the number of operations of the kernel. While tools like CALFLOPS~\citep{calflops} can compute operation counts for kernels based on LLM architecture, they do not differentiate between the prefill and decode phases, or support the all-reduce kernel. For the same kernel, the operation count in the decode phase ($O^{dec}$) is proportional to the number of generated tokens ($N_{gT}$), while in the prefill phase ($O^{pre}$), it is proportional to the input sequence length ($L_{seq}$). For the all-reduce kernel operating on an $n \times m$ matrix distributed across $l$ GPUs (each holding an $n/l \times m$ portion), the operation count during the decode phase is given by Equation~\ref{e:op_allr_dec}, and during the prefill phase by Equation~\ref{e:op_allr_pre}. These operations occur during the reduce-scatter step.
+\begin{minipage}{0.47\linewidth}
+\begin{equation}
+O_{allr}^{dec} = n \cdot \frac{m}{l} \cdot (N_{gT}-1)
+\label{e:op_allr_dec}
+\end{equation}
+\end{minipage}
+\begin{minipage}{0.47\linewidth}
+\begin{equation}
+O_{allr}^{pre} = n \cdot \frac{m}{l} \cdot L_{seq}
+\label{e:op_allr_pre}
+\end{equation}
+\end{minipage}
+\item $M$: Denotes the total memory footprint accessed by the kernel. As with $O$, the memory footprint during the decode phase ($M^{dec}$) is proportional to $N_{gT}$, while in the prefill phase ($M^{pre}$), it is proportional to $L_{seq}$. For the all-reduce kernel, the total memory footprint during the decode phase is determined by Equation~\ref{e:mem_allr_dec}, where $D_{A}$ represents the data type of activations (e.g., FP16), and in the prefill phase by Equation~\ref{e:mem_allr_pre}.\\
+\begin{minipage}{0.48\linewidth}
+\begin{equation}
+M_{allr}^{dec} = 2O_{allr}^{dec} \cdot D_{A}
+\label{e:mem_allr_dec}
+\end{equation}
+\end{minipage}
+\begin{minipage}{0.48\linewidth}
+\begin{equation}
+M_{allr}^{pre} = 2O_{allr}^{pre} \cdot D_{A}
+\label{e:mem_allr_pre}
+\end{equation}
+\end{minipage}
+\item $I$: Indicates the data size transferred over the GPU network interface for an all-reduce kernel. When the all-reduce kernel operates on an $n \times m$ matrix distributed across $l$ GPUs, the data size transferred during the decode phase is calculated using Equation~\ref{e:net_allr_dec}, and during the prefill phase using Equation~\ref{e:net_allr_pre}.\\
+\begin{minipage}{0.51\linewidth}
+\begin{equation}
+I_{allr}^{dec} = \frac{n}{l} \cdot  m \cdot (l-1) \cdot D_{A} \cdot (N_{gT}-1)
+\label{e:net_allr_dec}
+\end{equation}
+\end{minipage}
+\begin{minipage}{0.47\linewidth}
+\begin{equation}
+I_{allr}^{pre} = \frac{n}{l} \cdot  m \cdot (l-1) \cdot D_{A} \cdot L_{seq}
+\label{e:net_allr_pre}
+\end{equation}
+\end{minipage} 
+\item $P$: Denotes the kernel's Roofline performance. The memory-related arithmetic intensity (MAI) for a non-all-reduce kernel is calculated as $O / M$, while the network-related arithmetic intensity (NAI) for an all-reduce kernel is $O / I$. The memory-related ridge point (MRP) of a GPU is computed as $Th_{max} / BW_{max}$, and the network-related ridge point (NRP) as $Th_{max} / NET_{max}$. Here, $Th_{max}$ is the GPU's peak computational throughput for a specific data type (e.g., INT8), $BW_{max}$ is the maximum memory bandwidth, and $NET_{max}$ represents the peak network bandwidth. The kernel's Roofline performance is determined by Equation~\ref{e:roof_line_perf}. For non-all-reduce kernels, if the MAI is below the MRP, $P$ equals the product of $BW_{max}$ and the MAI; otherwise, $P$ equals $Th_{max}$. For all-reduce kernels, if the NAI is less than the NRP, $P$ is the product of $NET_{max}$ and the NAI; otherwise, $P$ is $Th_{max}$. Including $P$ as a node feature is essential to account for hardware-specific characteristics, such as $Th_{max}$, $BW_{max}$, and $NET_{max}$, in LLM inference energy modeling. 
+\end{itemize}
+\begin{minipage}{\linewidth}
+\begin{equation}
+P = \begin{cases}
+BW_{max}\cdot MAI\text{ (}NET_{max}\cdot NAI\text{)}  & \text{if }MAI < MRP\text{ (}NAI < NRP\text{)}\\
+Th_{max}                                & \text{otherwise}
+\end{cases}
+\label{e:roof_line_perf}
+\end{equation}
+\end{minipage}
+
+\textbf{Global LLM features}. In addition to node features, \coo~incorporates global LLM features, covering the overall architecture of an LLM, batch size, prompt length, generated token count, total FLOP count, memory read/write data size, and network transfer data size. The architectural details include quantization bitwidth, hidden size, intermediate size, head count, and layer count.
+
+\textbf{Graph Conv}. We adopted the GraphSAGE layer~\citep{Hamilton:NIPS2017} for \coo.
+\subsection{Focused Energy Data Sampling}
+
+\SetKwInput{KwInput}{Input}                
+\SetKwInput{KwOutput}{Output} 
+\SetAlgoLined
+\SetKwProg{Def}{def}{:}{}
+\begin{wrapfigure}[30]{r}{0.6\textwidth} 
+\centering
+\begin{algorithm}[H]
+\small
+\DontPrintSemicolon
+\KwInput{$\mathcal{A}$: prior distribution of LLM architectural configs from public repositories; $\mathcal{I}$: prior distribution of inference configs in cloud-based LLM services; $\mathcal{H}$: prior GPU hardware config distribution; TD: initial test dataset; $e$: the error threshold for regression accuracy.}
+\KwOutput{Training dataset ($X_{train}$, $Y_{train}$) and test dataset ($X_{test}$, $Y_{test}$)}
+
+\Def{FineGraindSampling(X)}{\label{l:co2_detail_start}
+\For{$x\in X$}
+{
+$D\leftarrow$ randomly sample $B$ data points within a range of $\pm C$ from the original values in $\mathcal{A}\times \mathcal{I}\times \mathcal{H}$
+
+$X_{new}\leftarrow X_{new}+D$
+}
+
+$Y_{new}\leftarrow$measure $X_{new}$'s energy on GPU
+
+\Return $(X_{new}, Y_{new})$ \label{l:co2_detail_end}
+}
+
+($X$, $Y$) $\leftarrow$ sample $A$ data points from prior distributions $\mathcal{A}\times \mathcal{I}\times \mathcal{H}$.\label{l:co2_start_point}
+
+$f\leftarrow$ train the regression model with ($X_{train}$, $Y_{train}$) \label{l:co2_eval_start}
+
+TD$\leftarrow$TD $+$ ($X_{test}$, $Y_{test}$)
+
+$e(f)\leftarrow$ test $f$ on TD \label{l:co2_eval_end}
+
+\While{$e(f)>e$} 
+{\label{l:co2_alg_start}
+$X^*\leftarrow$ select data points with large error from TD
+
+($X_i$, $Y_i$)$\leftarrow$$FinedGrainedSampling(X^*)$
+
+Add ($X_i$, $Y_i$) to $(X_{train},Y_{train})$ or $(X_{test},Y_{test})$
+
+update $f$ with $(X_{train},Y_{train})$
+
+TD$\leftarrow$TD $+ (X_{test},Y_{test})$
+
+$e(f)\leftarrow$ test $f$ on TD \label{l:co2_alg_end}
+}
+
+\caption{Focused energy data sampling.}
+\label{e:co2_focus_sample}
+\end{algorithm}
+\end{wrapfigure}
+To train a carbon footprint regression model, it is crucial to construct a training dataset by sampling a variety of LLM architectural, inference, and hardware configurations. However, random sampling proves ineffective, often resulting in suboptimal predictive models due to the exclusion of vital data related to LLM architecture and inference configurations. Creating a new LLM demands considerable resources, including substantial training data and computational power. Consequently, most LLMs in academia and industry are based on a few foundational models~\citep{Meta:2023}, sharing similar architectural attributes, such as head count, layer number, hidden size, and intermediate size. Neglecting these established architectural parameters and relying on random sampling leads to poor regression accuracy. Additionally, as depicted in Figure~\ref{f:co2_dis_pgen}, the distributions of input prompt lengths and generated token counts are non-uniform in major cloud-based LLM services. Treating all inference configurations uniformly and sampling evenly across all possible inference configurations yields an ineffective training dataset, failing to capture the prevalent configuration ranges of inference requests, thereby compromising the accuracy of carbon footprint predictions.
+
+\textbf{Focused data sampling}. Instead of employing random sampling, we propose a focused energy data sampling strategy, as outlined in Algorithm~\ref{e:co2_focus_sample}, to identify the most influential data points within the space of LLM architectural, inference, and hardware configurations that significantly affect prediction accuracy. Our approach deliberately omits rarely encountered configurations, such as an LLM with a hidden size of 32 or an inference request generating 16K tokens. Instead, our method iteratively samples additional data around points with high prediction errors. In line~\ref{l:co2_start_point} of Algorithm~\ref{e:co2_focus_sample}, we initially select $A=50K$ data points from the combined space of LLM architecture $\mathcal{A}$, inference $\mathcal{I}$, and hardware $\mathcal{H}$ configurations. We curated $\mathcal{A}$ using 17 state-of-the-art LLMs, adjusting parameters such as head count, layer count, intermediate size, quantization bitwidth, and hidden size. Inference configurations ($\mathcal{I}$) were derived from public LLM inference request traces~\citep{Microsoft:Trace2024}, while four GPU configurations (as detailed in Table~\ref{t:co2_gpu_config}) were considered for $\mathcal{H}$. Our experimental setup is further explained in Section~\ref{s:em}. To assess the quality of the sampled data, we train a GNN-based predictor and construct a test dataset (lines~\ref{l:co2_eval_start}-\ref{l:co2_eval_end}), incorporating 20\% of the newly sampled data in each iteration. We then perform fine-grained sampling on data points with significant regression errors (lines~\ref{l:co2_detail_start}-\ref{l:co2_detail_end}). For each data point, we randomly sample $B = 100$ data points within a range of $\pm C$ from their original values in $\mathcal{A}\times \mathcal{I}\times \mathcal{H}$, where $C$ varies for different configurations. For instance, $C=10$ for input prompt length, $C=1$ for generated token count, and $C=1$ for layer number. This iterative process continues until the energy predictor's accuracy reaches the desired target (lines~\ref{l:co2_alg_start}-\ref{l:co2_alg_end}).
+\begin{table}[t!]
+\caption{The configuration of GPUs used for LLM inferences.}
+\footnotesize
+\label{t:co2_gpu_config}
+\begin{center}
+\begin{tabular}{*{10}{l}}\toprule
+
+\multirow{2}{*}{GPU} & \multicolumn{3}{c}{max throughput (TOPs/s)}  & memory  & network   & power  & node  & area     & tech    \\\cline{2-4}
+                     & FP32 & FP16 & INT8                             & (GB/s)  & (GB/s) & ($W$) & size  & ($mm^2$) & (nm) \\\midrule
+T4	  & 8.1	 & 65	   & 130	 & 320	& 64	& 70	& 4	& 545	& 12\\
+L4	  & 121  & 242	 & 485	 & 300	& 64	& 72	& 4 &	294	& 5\\
+A100  & 312	 & 624	 & 1248	 & 2039	& 600 &	400	& 4	& 826	& 7\\
+H100	& 989	 & 1979	 & 3958	 & 3350	& 900	& 700	& 4	& 814	& 5\\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+
+\section{Evaluation}
+
+
+\subsection{Experimental methodology}
+\label{s:em}
+
+\textbf{Dataset construction}. We developed an energy dataset to evaluate the performance of various energy prediction methods, selecting six LLM series: Bloom (Bloom-560m, Bloom-1b1, Bloom-1b7, Bloom-3b, Bloom-7b1)~\citep{Le:ARXIV2022}, Gemma (Gemma-2b, Gemma-7b)~\citep{Gemma1:2024}, Gemma2 (Gemma2-2b, Gemma2-9b, Gemma2-27b)~\citep{Gemma:ARXIV2024}, Qwen2 (Qwen2-0.5b, Qwen2-1.5b, Qwen2-7b, Qwen2-72b)~\citep{Yang:ARXIV2024}, Llama3.1 (Llama3.1-8b, Llama3.1-70b)~\citep{Meta:LLaMA2023}, and Mixtral (Mixtral-8×7b)~\citep{Jiang:ARXIV2024}. The LLM architectural design space was explored by varying parameters such as quantization bitwidth, hidden size, intermediate size, head count, and layer count. Public Azure LLM serving traces~\citep{Microsoft:Trace2024} were used to generate inference requests, encompassing two distinct traces: one for chat (19,336 entries) and the other for code completion (8,199 entries), for \coo. We sampled inference configurations by adjusting input prompt lengths and generated token numbers, ensuring batch sizes remained under two. We adopted random sampling to generate inference requests with different input prompt lengths and generated token numbers for our baseline schemes. LLM inferences were executed using the GPU configurations detailed in Table~\ref{t:co2_gpu_config}, with the number of GPUs per inference ranging from the minimum required to a maximum of four, regardless of each hardware configuration's total GPU capacity. For the training dataset, we considered L4, A100, and H100 GPUs, while all four GPU configurations were included in the test dataset.
+
+\textbf{Measurement and implementation}. We used the Nvidia Management Library (NVML)~\citep{Nvidia:NVML2024} to measure the energy consumption of LLM inferences on the target GPUs. Each inference was executed 5 times, and the average energy consumption was recorded as the ground truth. \coo~consists of two graph convolution layers and two linear layers. \coo~was developed using the PyG package~\citep{pytorch:geometric} and trained on a Tesla L4 GPU. The model training used the Adam optimizer, with a learning rate of 0.001 and a batch size of 512.
+
+\textbf{Evaluation metrics}. We evaluated prediction accuracy using the Mean Absolute Percentage Error (MAPE) and Error Bound Accuracy (EBA($\delta$)). MAPE quantifies the average absolute percentage deviation between predicted and actual energy values, with lower values indicating higher accuracy. EBA($\delta$) represents the percentage of predictions within a specified error bound $\delta$ of the ground truth, with higher values reflecting greater regression precision.
+\textbf{Baseline Schemes}. To assess the performance of \coo, we compared it against three baseline schemes: LLMCarbon~\citep{Faiz:ICLR2024}, DeepEn~\citep{Tu:SEC2023}, and NNLQP~\citep{Liu:ICPP2023}. LLMCarbon is an equation-based approach that estimates carbon footprint by counting only the FLOPs involved in an LLM inference. DeepEn~\citep{Tu:SEC2023} samples the energy consumption of each kernel across different GPUs and utilizes this dataset to train a random forest-based predictor. The only distinction between DeepEn and nn-Meter~\citep{Zhang:MobiSys2021} is that nn-Meter is trained to predict inference latency instead of energy consumption. NNLQP~\citep{Liu:ICPP2023}, a GNN-based energy predictor, represents each model layer as a graph. However, neither DeepEn nor NNLQP distinguishes between the prefill and decode phases of LLM inferences, incorporates hardware-specific features, or emphasizes sampling common LLM architecture, inference, and GPU configurations frequently used in cloud environments.
+\subsection{Operational energy results}
+
+\begin{table}[t!]
+\caption{The mean absolute percentage error (MAPE) comparison between various energy predictors. (The lower, the better)}
+\footnotesize
+\label{t:co2_mape_result}
+\rao{0.95}
+\begin{center}
+\begin{tabular}{@{}cccccccc@{}}\toprule
+Scheme         & Gemma  & Bloom  & Gemma2  & Qwen2   & Mixtral  & Llama3.1 & Mean\\ \midrule
+LLMCarbon      & 89.2\% & 98.5\% & 101.2\% & 71.3\%	& 156\%	   & 233\%	 & 124.9\%\\
+DeepEn         & 34.3\% & 39.1\% & 41.7\%  & 33.8\%	& 23.2\%	 & 19.7\%	 & 31.9\%\\
+NNLQP          & 26.8\%	& 30.6\% & 31.6\%  & 21.5\%	& 34.1\%	 & 26.2\%	 & 28.5\%\\
+\textbf{\coo}  & 15.8\% & 11.9\% & 21.1\%  & 6.3\%	  & 19.4\%	 & 18.3\%	 & 15.5\%\\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+\textbf{MAPE}. Table~\ref{t:co2_mape_result} presents the comparison of Mean Absolute Percentage Error (MAPE) between \coo~and various baseline schemes. On average, \coo~achieves the lowest MAPE values across different LLMs. LLMCarbon estimates operational energy consumption based solely on FLOP counts, neglecting memory accesses within transformer layers and critical hardware-specific features, such as peak GPU memory and network bandwidth, resulting in the highest MAPE values for all LLMs. The two ML-based predictors, DeepEn and NNLQP, exhibit comparable average MAPE values. Due to a smaller training energy dataset size for Mixtral and Llama3.1, DeepEn, leveraging its random forest model, performs slightly better than NNLQP on these LLMs. Overall, \coo~outperforms DeepEn and NNLQP, reducing the average MAPE by 51.4\% and 45.6\%, respectively, by treating the prefill and decode phases separately, incorporating kernel-specific Roofline performance, and training with energy data derived from public Azure LLM serving traces.
+
+\begin{table}[ht!]
+\caption{The error bound accuracy (EBA) comparison between various energy predictors. (The higher, the better)}
+\footnotesize
+\label{t:co2_acc_result}
+\rao{0.95}
+\begin{center}
+\begin{tabular}{@{}ccccccccc@{}}\toprule
+Metric                       & Scheme        & Gemma   & Bloom   & Gemma2   & Qwen2   & Mixtral & Llama3.1  & Mean\\ \midrule
+\multirow{4}{*}{EBA($30\%$)} & LLMCarbon     & 7.8\%   & 6.1\%   & 3.8\%    & 11.9\%  & 4.2\%    & 3.5\%    & 6.2\%\\
+                             & DeepEn        & 58.5\%  & 48.9\%  & 44.8\%   & 60.5\%  & 41\%     & 36.6\%    & 48.4\%\\
+                             & NNLQP         & 60\%    & 50.1\%  & 45.6\%   & 65.2\%  & 37.5\%   & 33.4\%    & 48.6\%\\
+                             & \textbf{\coo} & 77.9\%  & 85.3\%  & 71.3\%   & 80.1\%  & 64.8\%   & 62.6\%    & 73.6\%\\\midrule
+														
+														
+
+\multirow{4}{*}{EBA($10\%$)} & LLMCarbon     & 2.1\%   & 1.9\%   & 0.8\%   & 7.7\%   & 1.3\%      & 0.8\%    & 2.4\%\\
+                             & DeepEn        & 25\%    & 13\%    & 12.5\%  & 30.2\%  & 13.2\%     & 11.6\%   & 17.6\%\\
+                             & NNLQP         & 32.6\%  & 15.7\%  & 19.3\%  & 36.5\%  & 9.8\%      & 9.2\%    & 20.5\%\\
+                             & \textbf{\coo} & 53.3\%  & 60\%  & 40.3\%   & 53.1\%  & 35.3\%     & 32.1\%    & 45.7\%\\\midrule
+														
+														
+														
+\multirow{4}{*}{EBA($5\%$)}  & LLMCarbon     & 0.1\%   & 0\%    & 0.1\%   & 0.3\%   & 0\%        & 0\%    & 1.1\%\\
+                             & DeepEn        & 11.6\%  & 8.2\%  & 4.7\%   & 16.1\%  & 7.2\%     & 6.8\%    & 9.1\%\\
+                             & NNLQP         & 11.9\%  & 13.2\%  & 7.4\%   & 19.2\%  & 6.3\%     & 6.1\%    & 10.7\%\\
+                             & \textbf{\coo} & 27.1\%  & 46.7\%  & 12.1\%   & 33.7\%  & 9.3\%     & 7.3\%    & 22.7\%\\
+														
+													
+
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+\textbf{EBA}. Table~\ref{t:co2_acc_result} presents the Error Bound Accuracy (EBA) for various energy predictors at 5\%, 10\%, and 30\% error bounds. \coo~consistently achieves the highest EBA values across all error bounds and LLMs. In contrast, LLMCarbon records the lowest EBA values, as it fails to account for memory accesses and network data transfers, resulting in poor performance, especially with LLMs featuring complex decode phases, such as Gemma2, and those constrained by all-reduce kernels, like Mixtral and Llama3.1. Although DeepEn and NNLQP exhibit similar MAPE values, NNLQP achieves higher EBA values at smaller error bounds due to its more effective GNN model in energy data regression when ample training data is available. Ultimately, \coo~outperforms DeepEn and NNLQP, improving the average EBA($10\%$) by 160\% and 123\%, respectively.
+\subsection{Ablation studies}
+We conducted ablation studies on EBA($10\%$) to evaluate the contribution of each component of \coo, as summarized in Table~\ref{t:co2_eba10_result}. By using distinct node features for the prefill and decode phases, \coo~improves EBA($10\%$) by 67\% compared to NNLQP. In real-world LLM serving clouds, most inference requests involve medium-length prompts and fewer generated tokens, leading to significant errors when combining the two phases for carbon overhead prediction. Incorporating Roofline performance as a node feature further boosts \coo's EBA($10\%$) by 13.1\%, as this feature facilitates knowledge transfer from L4 to T4 GPUs in the test dataset. Finally, the focused energy data sampling technique elevates \coo's EBA($10\%$) improvement to 123\% of NNLQP, since training with data distributions that mirror real-world LLM inference configurations enhances its performance on test datasets with similar prompt lengths and generated token distributions.
+\begin{table}[t!]
+\caption{The EBA($10\%$) comparison between various components of \coo.}
+\footnotesize
+\label{t:co2_eba10_result}
+\rao{0.95}
+\begin{center}
+\begin{tabular}{@{}cccccccc@{}}\toprule
+Scheme          & Gemma   & Bloom   & Gemma2  & Qwen2   & Mixtral & Llama3.1 & Mean\\ \midrule
++prefill/decode & 41.5\%	& 38.5\%	& 29.5\%	& 44.6\%	& 26.9\%	 & 24.6\%	 & 34.3\%\\
++Roofline       & 45.6\%	& 46.3\%	& 33.5\%	& 47.9\%	& 30.8\%	 & 28.6\%	 & 38.8\%\\
++focused sample & 53.3\%  & 60\%  & 40.3\%   & 53.1\%  & 35.3\%     & 32.1\%    & 45.7\%\\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+\begin{figure}[ht!]
+\centering
+\begin{minipage}{0.32\linewidth}
+\begin{center}
+\includegraphics[width=\linewidth]{figures/co2_train_infer.pdf}
+\caption{The comparison of carbon per GPU per second.}
+\label{f:co2_train_infer}
+\end{center}
+\end{minipage}
+\begin{minipage}{0.32\linewidth}
+\begin{center}
+\includegraphics[width=\linewidth]{figures/co2_infer_gpu.pdf}
+\caption{The oper. carbon per GPU of a Bloom-7b1 inference.}
+\label{f:co2_train_infer}
+\end{center}
+\end{minipage}
+\begin{minipage}{0.32\linewidth}
+\begin{center}
+\includegraphics[width=\linewidth]{figures/co2_infer_gpu_t.pdf}
+\caption{The total carbon of a Bloom-7b1 inference.}
+\label{f:co2_train_infer_t}
+\end{center}
+\end{minipage}
+\end{figure}
+
+
+
+\section{User Case Studies}
+
+
+
+\textbf{Carbon comparison between training and inference}. LLM training requires numerous GPUs operating at high throughput over extended periods. For example, Mixtral-8×7b training uses 512 A100 GPUs at about 50\% peak throughput for three months~\citep{Jiang:ARXIV2024}. In contrast, INT8 Mixtral-8×7b inference utilizes four A100 GPUs at 10\%–40\% peak throughput for around 4 seconds. Figure~\ref{f:co2_train_infer} shows the normalized carbon footprint per GPU per second for Mixtral-8×7b training and inference, relative to the training baseline. The embodied carbon per GPU per second is consistent across all configurations since A100 GPUs are used. The prefill phase of an inference with a batch size of 4 and a 6K prompt length has a similar operational carbon footprint per GPU per second to training, while the decode phase with a batch size of 1 and a 1K prompt length has a much lower footprint. Unlike training, the embodied carbon overhead dominates the decode phase of Mixtral-8×7b inferences.
+\textbf{Inference on multiple GPUs}. Additional GPUs can accelerate LLM inference~\citep{Reiner:MLSYS2023}, but using more GPUs than necessary is often unsustainable, particularly for real-world cloud inference configurations with small batch sizes and short prompts. Figure~\ref{f:co2_train_infer} shows the operational carbon footprint of Bloom-7b1 inferences across different GPU counts with varying prompt lengths and batch sizes. For example, although an inference with a batch size of 4 and a 1K-token prompt benefits from 2 or 4 GPUs, lowering the per-GPU carbon footprint, an inference with a batch size of 1 and a 64-token prompt incurs increased latency and higher per-GPU operational carbon due to the communication overhead of all-reduce kernels when using more GPUs. As shown in Figure~\ref{f:co2_train_infer_t}, the total carbon overhead rises considerably with more GPUs for inferences with smaller batch sizes and prompts.
+
+
+
+\section{Conclusion}
+
+LLM inference produces a larger carbon footprint than training, necessitating accurate estimation tools for both users and cloud providers. Existing models fall short due to their inability to capture LLM autoregressive behaviors, hardware-specific features, and real-world configuration distribution. We presented \coo, a GNN-based model to address these challenges, offering improved accuracy in predicting the carbon footprint of LLM inferences compared to prior methods. 
+
+
+
+
+

@@ -1,0 +1,401 @@
+\title{Federated Dynamical Low-Rank Training with Global Loss Convergence Guarantees}
+
+\begin{abstract}
+n this work, we propose a federated dynamical low-rank training (FeDLRT) scheme to reduce client compute and communication costs - two significant performance bottlenecks in horizontal federated learning. Our method builds upon dynamical low-rank splitting schemes for manifold-constrained optimization to create a global low-rank basis of network weights, which enables client training on a small coefficient matrix. A consistent global low-rank basis allows us to incorporate a variance correction scheme and prove global loss descent and convergence to a stationary point. Dynamic augmentation and truncation of the low-rank bases automatically optimizes computing and communication resource utilization. We demonstrate the efficiency of FeDLRT in an array of computer vision benchmarks and show a reduction of client compute and communication costs by up to an order of magnitude with minimal impacts on global accuracy.
+\renewcommand{\thefootnote}{\fnsymbol{footnote}}
+
+\footnotetext[1]{{
+This manuscript has been authored by UT-Battelle, LLC under Contract No. DE-AC05-00OR22725 with the U.S. Department of Energy. The United States Government retains and the publisher, by accepting the article for publication, acknowledges that the United States Government retains a non-exclusive, paid-up, irrevocable, world-wide license to publish or reproduce the published form of this manuscript, or allow others to do so, for United States Government purposes. The Department of Energy will provide public access to these results of federally sponsored research in accordance with the DOE Public Access Plan(\url{http://energy.gov/downloads/doe-public-access-plan}).}
+\renewcommand{\thefootnote}{\arabic{footnote}}}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Federated learning (FL) \cite{kairouz2021advances,li2020federated,shamir2014communication,mcmahan2016communicationefficient} builds a global model on a central \textit{server} from data distributed on multiple devices, i.e., \textit{clients}, by iteratively aggregating local models trained with the computation resource on the clients.
+In horizontal FL, where all clients share identical model architecture and data features, computation is often limited by (i) the communication bandwidth between clients and the server and (ii) the restricted compute and memory resources at each client. 
+The former could be addressed by deploying various compression techniques, such as sparse randomized sketching~\cite{haddadpour2020fedsketch,kone2017federated}, subsampling~\cite{kone2017federated}, and low-rank approximation~\cite{qiao2021communicationefficient, vogels2020powersgd, 10146425}, or by allowing for partial \cite{mcmahan2016communicationefficient,cho2020client,nishio2019client} or asynchronous \cite{sprague2018asynchronous,chen2020asynchronous} communications.
+The latter could be addressed by sparse training \cite{dai2022dispfl,qiu2022zerofl,yang2020federated}, low-rank training~\cite{liu2023differentially,yi2024pfedlora, yao2022fedhm, hyeon-woo2022fedpara, kone2017federated}, and transfer learning \cite{chen2020fedhealth,saha2021federated}.
+
+This work addresses both challenges simultaneously by leveraging dynamical low-rank approximation of the gradient flow with a Galerkin-type operator splitting. It yields a consistent orthogonal low-rank basis across all clients and updates the low-rank factorization without reconstructing the full-weight matrices on either clients or servers. The proposed method yields
+1) \textbf{Efficient communication} by only sending and receiving low-rank factors; 2) \textbf{Low client compute and memory footprint}, where the client optimizes only a small coefficient matrix; 3) \textbf{Automatic server-side compression} during training, by augmenting and truncating the weight matrix rank based on the training dynamics. This scheme robustly identifies suitable low-rank manifolds to represent the weight matrices at minimal memory requirements; 4) 
+\textbf{Global loss convergence guarantees} to a stationary point of the FL problem, since a globally consistent low-rank basis allows formulation of a variance correction~\cite{NEURIPS2021_7a6bda9a} term to bound each client coefficient drift. 
+
+We demonstrate a significant performance increase in federated scenarios with many clients compared to non-variance corrected methods.
+
+
+
+\section{Background and problem statement}
+
+
+\textbf{Federated optimization}  typically considers \textit{distributed} setups and with \textit{limited communication} and \textit{limited client compute and memory} resources~\cite{mcmahan2016communicationefficient}. 
+In this work, we consider a general federated optimization problem, i.e., 
+\begin{align}\label{eq_federated_learning}
+\textstyle
+ \min_{w} \mathcal{L}(w)\,:=\, \frac{1}{C}\sum_{c=1}^C \mathcal{L}_c(w),
+\end{align}
+where $w$ is a trainable weight, $\mathcal{L}$ is the global loss function associated to a global dataset $X$, and $\mathcal{L}_c$ is the local loss function of client $c$ with local dataset $X_c$ in a federated setup with $C$ clients. 
+For notational simplicity, we consider that $X=\cup_{c=1}^C X_c$ and each $X_c$ is of the same size. Therefore, $\mathcal{L}$ is an average of $\mathcal{L}_c$ with uniform weights.
+The extension to handle a (non-uniform) weighted average case is straightforward.
+\begin{wrapfigure}{r}{0.5\textwidth}
+\centering \includegraphics[width=0.5\textwidth]{assets/figures/convex/convex_multi_objective_convergence.pdf}
+\caption{Federated, heterogeneous least squares regression problem, see \Cref{subsec:lin_regression}, for $C=4$ clients, $s_*=100$ iterations, learning rate $\lambda=1\rm{e}-3$ and $C$ rank-$1$ local target functions. FL methods without variance correction plateau quickly, whereas FedLin and FeDLRT with variance correction converge to $1\rm{e}-5$. FeDLRT converges faster than FedLin and has lower communication costs.
+}
+    \label{fig:LSS_multi_obj}
+\end{wrapfigure}
+As the first baseline for federated optimization, we consider FedAvg~\cite{mcmahan2016communicationefficient}, see~\Cref{alg:FedAvg}. Here, each client optimizes its local loss function $\mathcal{L}_c$ for $s_*$ local iterations using gradient descent,
+\begin{align}\label{eq_FedAvg_loc_update}
+\textstyle
+    w_c^{s+1} = w_c^s - \lambda\nabla_w\mathcal{L}(w_c^s),
+\end{align}
+with learning rate $\lambda$, for $s=0,\dots,s_*-1$. The initial value for the local iteration is the last global weight, i.e., $w_c^{0}=w^t$. After local iterations, the weights are communicated to and aggregated at the server to update the global weight following
+\begin{align}\label{eq_FedAvg_aggr}    
+\textstyle
+    w^{t+1} = \frac{1}{C}\sum_{c=1}^C  w_c^{s_*}.
+\end{align}
+\textbf{Client-drift effect} is a common challenge in FL, where the iterative client updates \eqref{eq_FedAvg_loc_update} of FedAvg converge to local minima and jeopardize global training performance since the average of the local minimizers may be far away from the global minimizer. 
+These effects are particularly pronounced for a large number of local iterations $s_*$, or high discrepancies between local loss functions $\mathcal{L}_c$, as illustrated by \Cref{fig:LSS_multi_obj}. Multiple methods~\cite{shamir2014communication, li2020federated, pathak2020fedsplit, karimireddy2020scaffold, wang2020tackling} have been proposed to mitigate this issue. However, these methods often exhibit a \textit{speed-accuracy conflict}, where learning rates need to be heavily reduced; thus, convergence is slow.
+
+\textbf{Variance correction}\footnote{Variance correction is commonly referred to as ``variance reduction''~\cite{kone2016federated, NEURIPS2021_7a6bda9a}.} introduced in the FedLin method~\cite{NEURIPS2021_7a6bda9a} constructs a variance correction term $V_c =\nabla_w\mathcal{L}_c(w^t) -\frac{1}{C}\sum_{c=1}^C\nabla_w\mathcal{L}_c(w^t)$ and modifies the client update iteration to 
+\begin{align}\label{eq_FedLin_loc_update}
+    w_c^{s+1} = w_c^s - \lambda\left(\nabla_w\mathcal{L}(w_c^s) -V_c\right) ,\qquad  s=0,\dots,s_*-1.
+\end{align}
+This technique leads to global convergence to the minimizer of \eqref{eq_federated_learning} with constant learning rates \cite{NEURIPS2021_7a6bda9a} for convex $\mathcal{L}$ and else to convergence to a stationary point, at the cost of an additional communication round for computing the variance correction.
+
+\textbf{Federated neural network training} considers problem \eqref{eq_federated_learning} with the trainable weight $w$ being the set of weight matrices $\set{W_i}_i^L$ of an $L$ layer neural network. In each iteration, the weight updates in \eqref{eq_FedAvg_loc_update} and \eqref{eq_FedLin_loc_update} are applied to all layers simultaneously. Therefore, w.l.o.g., we express the local loss function as $\mathcal{L}_c(W)$, where $W\in\mathbb{R}^{n\times n}$ denotes the weight matrix of an arbitrary layer.
+
+\textbf{Low-rank neural network training:} An array of recent work has provided theoretical and experimental evidence that layer weights of over-parameterized networks tend to be low rank \cite{arora2019implicit, Bah_2022,galanti2022sgd,martin2018implicit} and that removing small singular values may even lead to increased model performance while dramatically reducing model size \cite{sharma2023_laser, Schothoefer_2022} in non-federated scenarios. 
+This beneficial feature has spawned a rich landscape of methods to compress neural networks to a low-rank factorization after training with subsequent fine-tuning~\cite{6638949,denton2014exploiting,tjandra2017compressing,lebedev2015speeding}, train the factorized network with fixed rank~\cite{low_rank_conv,wang2021pufferfish,khodak2021initialization}, dynamically adjust the rank during training~\cite{Schothoefer_2022, zangrando2023rankadaptive}, or use low-rank adapters for fine-tuning foundation models~\cite{hu2021lora,dettmers2023qlora,zhao2024galore}. 
+
+\textbf{Why is innovation upon existing low-rank methods needed?}
+Since FedAvg~\cite{mcmahan2016communicationefficient}, several low-rank methods~\cite{qiao2021communicationefficient,yi2024pfedlora,liu2023differentially,yao2022fedhm,10146425,hyeon-woo2022fedpara,kone2017federated,reisizadeh2020fedpaq} have been proposed to increase communication and compute efficiency for FL.
+These low-rank methods can be categorized into: 1) methods that purely reduce communication cost by communicating only the low-rank factors obtained by performing a full-size SVD (or similar factorization methods) on the full weight matrix after client optimization \cite{qiao2021communicationefficient, vogels2020powersgd, 10146425} and
+2) methods that reduce both communication and client compute costs by learning only low-rank factors on clients~\cite{liu2023differentially,yi2024pfedlora, yao2022fedhm, hyeon-woo2022fedpara, kone2017federated}. 
+
+To the best of the authors' knowledge, there is no existing low-rank method that combines 1) efficient communication, 2)
+low client compute and memory footprint, 3) automatic server side compression during training, and 4) global loss convergence guarantees using variance correction in the sense of FedLin~\cite{NEURIPS2021_7a6bda9a}, to achieve a globally consistent, robust, and efficient optimization scheme for FL. 
+
+
+
+\section{FeDLRT: Federated dynamical low-rank training with variance correction}
+
+In this section, we present the core contribution of this paper, \textit{federated dynamical low-rank training} (FeDLRT), which features a low-rank client optimization step with optional variance correction and an efficient server aggregation process that dynamically determines the optimal weight matrix rank for automatic compression. 
+
+FeDLRT builds on the dynamical low-rank approximation (DLRA) method, which was initially proposed for solving matrix equations \cite{KochLubich07} and recently extended to neural network training~\cite{Schothoefer_2022,zangrando2023rankadaptive, HnatiukPaper}. 
+
+Let $\dot W(t)=-\nabla_W\mathcal{L}(W(t))$ denote the gradient flow for minimizing $\mathcal{L}$.
+
+The DLRA method restricts the trajectory of $W$ to $\mathcal{M}_r$, the manifold of $n\times n$, rank-$r$ matrices, by projecting $\dot W$ onto a local tangent plane of $\mathcal{M}_r$ via an orthogonal projection.
+This guarantees a low-rank solution when following the projected dynamics from a low-rank initial guess.
+
+Let the low-rank matrix take the form $W_r =USV^\top\in\mathcal{M}_r$
+with $U,V\in\mathbb{R}^{n\times r}$ the orthonormal bases of $\mathcal{M}_r$ and $S\in\mathbb{R}^{r\times r}$ the coefficient matrix. 
+The dynamics for each low-rank factor in DRLA are then derived in \cite[Proposition 2.1]{KochLubich07} as
+\begin{align}\label{eq:gradient_flow_system}
+\textstyle
+{
+\begin{aligned}
+\dot S(t) &= -U^\top(t)\nabla_{W}\mathcal{L}(U(t) S(t)V(t)^\top)V(t), \\
+\dot U(t) &= -\left(I - P_{U(t)}\right)\nabla_{W}\mathcal{L}(U(t)S(t)V(t)^\top) V(t)S(t)^{-1}, \\
+\dot V(t) &= -\left(I - P_{V(t)}\right)\nabla_{W}\mathcal{L}(U(t)S(t)V(t)^\top) U(t)S(t)^{-\top},
+\end{aligned}
+}
+\end{align}
+
+where $P_{U}=UU^\top$ and $P_{V}=VV^\top$ are the projections onto the column spaces of $U$ and $V$, respectively. 
+By using the \textit{basis update \& Galerkin} (BUG) scheme~\cite{ceruti2021rank}, \eqref{eq:gradient_flow_system} can be split into a basis update step for $U$ and $V$ and a coefficient update step for $S$.
+This splitting scheme allows for dynamic adjustment of the rank via a basis augmentation before the coefficient update step and a basis truncation after the coefficient update, as shown in \cite{Schothoefer_2022}.
+
+In the context of FL, the BUG splitting scheme is particularly interesting since it allows for learning the low-rank bases and coefficients in separate steps. This gives rise to a globally shared basis for the local client iterations, reducing communication and client compute cost of the proposed FeDLRT scheme, see \Cref{fig:illustration}: First, the factorization is broadcast to the clients (panel 1), and the basis gradients\footnote{and later on the coefficient gradients for variance correction} $U,V$ are aggregated on the server (panel 2). Next, the basis is augmented on the server (panel 3) and broadcast. On the clients, only the augmented coefficient matrix $S$ is updated repeatedly  (panel 4) before aggregation to the server. After aggregation of the local augmented coefficient matrices, redundant basis directions are eliminated to optimize the accuracy-to-compression ratio of the model on the server. 
+
+The strategy yields the following benefits compared to ``full-rank'' FL schemes as FedLin~\cite{NEURIPS2021_7a6bda9a} and low-rank schemes with local compression:\\
+\textbf{Low client compute cost:} Server-based basis augmentation and compression enables an automatic compression without a-priori knowledge of the layer rank $r$ and at no cost for the resource-constrained clients. 
+The clients only evaluate gradients of low-rank factors and optimize the small matrix $S\in\mathbb{R}^{r\times r}$. 
+When the clients are equipped with GPUs, this further implies that all ``GPU unfriendly'' parts of the low-rank scheme, i.e., SVD and QR decomposition for augmenting and compressing the representation, are performed on the server. \\
+\textbf{Efficient communication:} Similar to FedLin, FeDLRT requires \textit{in practice} two communication rounds -- one for aggregating and distributing global gradients for basis augmentation and variance correction and one for aggregating locally updated coefficients. However, communication cost for each round is significantly reduced since only low-rank factors are communicated. We refer to \Cref{subsec_com_cost} on communication and compute cost.
+\begin{wrapfigure}{l}{0.4\textwidth}
+    \centering
+\includegraphics[trim=1.2cm 5cm 22.5cm 1cm, clip, width=0.41\textwidth]{assets/figures/FeDLR_com_grid.pdf}
+    \caption{Communication of FeDLRT without variance correction. 1) Broadcast current global basis $U,V$ (blue). 2) Aggregate basis gradients $G_{c,U}, G_{c,V}$ (orange). 3) Broadcast global augmented basis $\Bar{U},\Bar{V}$ (green). 4) Aggregate individual client coefficient update $\augSc^{s_*}$(purple). }
+ \label{fig:illustration}
+\end{wrapfigure}
+Existing federated low-rank schemes effectively generate individual and incompatible representations of $\Wr\in\mathcal{M}_r$ for each client. While the factors can still be efficiently communicated, averaging on the server requires a reconstruction of the full weigh matrix $W^*=\frac{1}{C}\sum_{c=1}^C U_cS_cV_c^\top$, since the local manifolds possibly diverge. Thus, the local rank information is lost and needs to be costly recovered by a full $n\times n$ SVD on the server; see \Cref{alg:naive_FeDLRT} for details. Since the average of low-rank matrices is not necessarily of low rank, these schemes may lose crucial information on the manifold if client solutions drift too far apart from each other. FeDLRT, in contrast, provides the advantage of \textbf{client-wide manifold consistency:} Splitting the low-rank update and sharing bases amongst clients provides a globally consistent manifold basis. This furthermore allows for bounding the coefficient drift, see \Cref{lem_drift_bound_full}, and enables a variance correction for the federated low-rank similar to the FedLin scheme.
+
+
+\subsection{Description of \Cref{alg:FeDLRT_variance_reduction} - FeDLRT}
+
+In this section, we elaborate on the details in \Cref{alg:FeDLRT_variance_reduction}.
+The orthonormal factors $U^t,V^t$ and the coefficient matrix $S^t$ are initialized with rank $r$ and then broadcast to the clients. Note that FeDLRT ensures that, for all $t>1$, $U^t$ and $V^t$ are orthonormal, and $S^t$ is diagonal and full rank.
+
+\textbf{Basis augmentation} of the bases $U^t$ and $V^t$ is performed using concatenation with the corresponding global basis gradients $G_U = \frac{1}{C} \sum_{c=1}^C\nabla_U\mathcal{L}_c(U^tS^tV^{t,\top})$ and $G_V = \frac{1}{C} \sum_{c=1}^C \nabla_V\mathcal{L}_c(U^tS^tV^{t,\top})$, obtained by aggregating the local basis gradients. 
+$G_U$ and $G_V$ encapsulate the gradient flow dynamics \eqref{eq:gradient_flow_system} projected onto the original bases, thus yielding an intuitive choice for basis augmentation. Further, this choice is consistent with the basis update step of the augmented BUG splitting scheme, see \Cref{sec:grad_dynamics}, which ensures the robustness of the client optimizer. 
+Subsequent orthonormalization, e.g., by a QR decomposition, yields the augmented basis, i.e.,
+\begin{align}\label{eq_basis_augmentation}
+\textstyle
+[U^t \mid \Bar{U}]R = \texttt{qr}([U^t \mid G_U])\in\mathbb{R}^{n\times 2r}, \quad\text{and}\quad [V^t \mid \Bar{V}]R= \texttt{qr}([V^t \mid G_V])\in\mathbb{R}^{n\times 2r}.
+\end{align}
+We denote the augmented bases by $\augU=[U^t \mid \Bar{U}]$ and $\augV=[V^t \mid \Bar{V}]$.
+The orthonormalization is performed on the server, providing compute cost reduction for the client.  
+
+\textbf{Basis broadcasting} of $\augU$ and $\augV$ only requires to broadcast the new bases $\Bar{U}$ and $\Bar{V}$, since $U^t$ and $V^t$ are readily available on the clients. Formally, the coefficients $S^t$ are projected onto the augmented basis, i.e., $
+    \augS=\augU^\top U^t S^t V^{t,\top} \augV \in\mathbb{R}^{2r\times 2r}$, 
+before broadcasting them to the clients. Exploiting the orthonormality of the basis results in further reduction of the communication and compute cost:
+\begin{lemma}\label{lem_aug_coeff}
+    $\augS=\augU^\top U^t S^t V^{t,\top} \augV$ takes the form  $\augS =
+\begin{bmatrix}
+S^t & 0 \\
+0 & 0
+\end{bmatrix}$.
+\end{lemma}
+See~\Cref{sec:basis_com} for the proof. 
+With \Cref{lem_aug_coeff}, only $\Bar{U}$ and $\Bar{V}$ have to be broadcast, and the augmented bases and coefficients $\augU$, $\augV$, and $\augS$ can be assembled on each client as needed. Furthermore, only $S\in\mathbb{R}^{r\times r}$, instead of $\augS\in\mathbb{R}^{2r\times 2r}$, needs to be communicated.
+
+Below, we discuss three options for the client coefficient update step.
+
+\textbf{Client coefficient update} without variance correction is implemented similarly to FedAvg~\eqref{eq_FedAvg_aggr}. On each client $c$, the augmented coefficient matrix $\augS_c$ is trained for $s_*$  iterations%
+\footnote{Our analysis focuses on the case where all clients share the same number of local iterations $s_*$. The analysis can be extended to the case where $s_*$ is client dependent, following an approach similar to the one in \cite{NEURIPS2021_7a6bda9a}.} with learning rate $\lambda$,
+\begin{align}
+     \augS_c^{s+1} = \augS_c^s - \lambda\nabla_{\augS}\mathcal{L}_c(\augU\augS_c^s\augV^\top) ,\quad  s=0,\dots,s_*-1,\quad \text{with}\qquad  \augS_c^{s=0}=\augS.
+\end{align}
+\textbf{Client coefficient update with variance correction} is required in certain federated scenarios, e.g., the case considered in \Cref{fig:LSS_multi_obj}. Based on FedLin~\cite{NEURIPS2021_7a6bda9a}, we introduce a correction step for the local coefficient update of FeDLRT.
+It extends the above local iteration by another communication round, where the gradient of the augmented coefficients $G_{\augS,c}= \nabla_\augS \mathcal{L}_c(\augU\augS\augV^{\top})$ is computed, aggregated to $ G_\augS = \frac{1}{C}\sum_{c=1}^CG_{\augS,c}$ and subsequently broadcast. This yields a correction term  $V_c = G_\augS - G_{\augS,c}$  for each client $c$ and thus the client iterations read
+\begin{align}\label{eq_grad_update_var_full}
+\textstyle
+       \augS_c^{s+1} = \augS_c^s -\lambda\left( \nabla_{\augS}\mathcal{L}_c(\augU\augS_c^s\augV^\top)  +V_c \right),\quad  s=0,\dots,s_*-1,\quad \text{with}\qquad  \augS_c^{s=0}=\augS.
+\end{align}
+The correction term results in a bound on the coefficient drift and leads to convergence guarantees for FeDLRT, as detailed in \Cref{sec_theory}.
+
+\textbf{Client coefficient update with simplified variance correction}: 
+Empirically, we observe that a simplified variance correction, which only considers the correction term of the \textit{non-augmented} coefficients $S^t$, is sufficient, see \Cref{fig:cifar10_resnet18}. 
+The simplified variance correction term takes the form
+\begin{align}\label{eq_var_cor_simplified}
+\textstyle
+   V_c = G_\augS - G_{\augS,c} %=\nabla_\augS \mathcal{L}_c(\augU\augS\augV^{\top}) 
+   \approx \check{V}_c := \check{G}_\augS - \check{G}_{\augS,c} = 
+\begin{bmatrix}
+\nabla_S \mathcal{L}(U^tS^tV^{t,\top}) - \nabla_S \mathcal{L}_c(U^tS^tV^{t,\top}) & 0 \\
+0 & 0
+\end{bmatrix},
+\end{align}
+which makes lines 10 and 12 in \Cref{alg:FeDLRT_variance_reduction} redundant, since $\check{G}_\augS$ can be aggregated in one step with the basis gradients $G_U$,$G_V$ in line 4 and broadcast with $\Bar{U},\Bar{V}$ in line 6, reducing the communication rounds to two - the same as FedLin. See \Cref{alg:modified_FeDLRT_var_cor} for details.
+
+\textbf{Coefficient averaging} is performed after (any of the above variants of) the client iterations. The server computes the updated global coefficients by averaging the local updates, i.e., $\augS^{*} = \frac{1}{C} \sum_{c=1}^C \augS_c^{s_*}$. 
+With the shared augmented bases $\augU$ and $\augV$, this is equivalent to the FedAvg aggregation
+\begin{align}
+\textstyle
+    \augWr^*=  \frac{1}{C} \sum_{c=1}^C\augWr^{s_*} =\frac{1}{C}\sum_{c=1}^C \left(\augU  \augS_c^{s_*} \augV^\top\right) = \augU(\frac{1}{C}\sum_{c=1}^C  \augS_c^{s_*} )\augV^\top =\augU\augS^*\augV^\top.
+\end{align}
+Since the basis is fixed, the rank $2r$ is preserved in the aggregation, which is
+in contrast to other federated low-rank schemes where the aggregated weights could be full rank and, in turn, require a full matrix SVD to determine the new rank \cite{qiao2021communicationefficient,10146425}.
+
+\textbf{Automatic compression via rank truncation} is necessary 1) to identify the optimal rank of the weight matrix and 2) to ensure that $S$ is full rank\footnote{Full rank $S$ is required to show consistency of the basis update step \eqref{eq_basis_augmentation} with the robust operator splitting of \cite{ceruti2021rank, Schothoefer_2022}, see \Cref{sec:grad_dynamics}.}. 
+To this end, a truncated SVD of $\augS^{*} \in\mathbb{R}^{2r\times 2r}$ is performed, i.e.
+$P_{r_1}, \Sigma_{r_1}, Q_{r_1}^\top = \texttt{svd}(\augS^{*})$, where $P_{r_1},Q_{r_1}\in\mathbb{R}^{2r\times r_1}$ and $\Sigma_{r_1}=\text{diag}(\sigma_{1},\dots,\sigma_{r_1})$ contains the $r_1$ largest singular values of $\augS^{*}$. The new rank $r_1$ can be chosen by a variety of criteria, e.g., a singular value threshold $\norm{[\sigma_{r_1},\dots,\sigma_{2r}]}_2<\vartheta$.
+Once a suitable rank is determined, the factorization is updated by the projection of the bases 
+$U^{t+1}=\augU P_{r_1}\in\mathbb{R}^{n\times r_1}$, $V^{t+1}=\augV Q_{r_1}\in\mathbb{R}^{n\times r_1}$ and update of the coefficient $S^{t+1}=\Sigma_{r_1}$. Remarkably, \Cref{alg:FeDLRT_variance_reduction} is a federated low-rank learning scheme whose solution is close to a full-rank solution, see \Cref{robust_error_bound}.
+
+\begin{algorithm}[t]
+\caption{FeDLRT (See \Cref{alg:aux_funcs} for auxiliary function definitions)}\label{alg:FeDLRT_variance_reduction}
+\DontPrintSemicolon
+\SetAlgoLined
+\SetKwInOut{Input}{Input}
+\SetKwComment{Comment}{$\triangleright$\ }{}
+
+\Input{Initial orthonormal bases $U^1,V^1\in\mathbb{R}^{n\times r}$ and full rank $S^1\in\mathbb{R}^{r\times r}$;\;
+Client-server setup with clients $c=1,\dots,C$;\;
+{\tt var\_cor}: Boolean flag to activate variance correction;\;
+$\tau$: singular value threshold for rank truncation.}
+\For {$t=1,\dots, T$}{
+ {\tt  broadcast}$\left(\set{U^t,V^t,S^t}\right)$ \;
+ $G_{U,c}\gets\nabla_U \mathcal{L}_c(U^tS^tV^{t,\top})$;  $G_{V,c}\gets \nabla_V \mathcal{L}_c(U^tS^tV^{t,\top})$\tcc*{On client}
+$G_{U},G_{V}\gets$ {\tt  aggregate}$\left(\set{G_{U,c},G_{V,c}}\right)$ \;
+ $\Bar{U}\gets${\tt  basis\_augmentation}($U^t$, $G_U$);  $\Bar{V}\gets${\tt  basis\_augmentation}($V^t$, $G_V$) \;
+ {\tt  broadcast}$(\{\Bar{U},\Bar{V}\})$ \;
+$\widetilde{U}\gets [U^t\mid \Bar{U}]$;   $\widetilde{V} \gets [V^t\mid \Bar{V}]$ \tcc*{Basis assembly on client}
+$\widetilde{S}^{s=0}\gets \begin{bmatrix}
+S^t & 0 \\
+0 & 0
+\end{bmatrix} $ \tcc*{Coefficient matrix assembly on client}
+\If (){\tt var\_cor} {
+ $G_{\augS,c}\gets\nabla_\augS \mathcal{L}_c(\augU\augS\augV^{\top})$\tcc*{Augmented gradient on client}
+$G_{\augS}\gets$ {\tt  aggregate}$(\{G_{\augS,c}\})$ \;
+ {\tt  broadcast}$(\{G_{\augS}\})$ \;
+ {\tt  coefficient\_update\_var\_cor}$(c,\,G_\augS-G_{\augS,c})$\tcc*{On client}
+}
+\Else{
+ {\tt  coefficient\_update}$(c)$\tcc*{On client}
+}
+$\widetilde{S}^*\gets$  {\tt  aggregate}$(\{ \widetilde{S}_c^{s_*}\})$ \;
+$P_{r_1}, \Sigma_{r_1}, Q_{r_1} \gets$ \texttt{svd}$(\widetilde{S}^*)$ with threshold  $\vartheta$ \tcc*{Compression step}
+$U^{t+1}\gets   \widetilde{U}P_{r_1}$;
+$V^{t+1}\gets   \widetilde{V}Q_{r_1}$;
+$S^{t+1}\gets \Sigma_{r_1}$  \tcc*{Basis and coefficient update}
+}
+
+\end{algorithm}
+
+\subsection{Analysis of FeDLRT with variance correction}\label{sec_theory}
+In this section, we analyze the FeDLRT algorithm under the general assumption that $\mathcal{L}_c$ and $\mathcal{L}$ are $L$-smooth with constant $L$.
+Theorems~\ref{theo_loss_descent_full_var_cor} and \ref{theo_glob_convergence} give the convergence results for FeDLRT with full variance correction \eqref{eq_grad_update_var_full} in \Cref{alg:FeDLRT_variance_reduction}. \Cref{theo_loss_descent_red_var_cor} and \Cref{theo_glob_convergence_simple} provide the convergence for FeDLRT with simplified variance correction in \eqref{eq_var_cor_simplified}, as detailed in \Cref{alg:modified_FeDLRT_var_cor}, under additional assumptions given therein.
+We note that the analysis does not require convexity of $\mathcal{L}_c$ or $\mathcal{L}$.
+
+\paragraph{FeDLRT convergence with full variance correction.} The variance-corrected client iteration \eqref{eq_grad_update_var_full} leads to the following bound the client coefficient drift.
+\begin{theorem}\label{lem_drift_bound_full} 
+Given augmented basis and coefficient matrices $\augU$, $\augV$, and $\augS$. 
+If the local learning rate $0<\lambda\leq\frac{1}{Ls_*}$ with $s_*\geq 1$ the number of local steps, for all clients $c$,
+    \begin{align}
+    \textstyle
+        \|{\augSc^s-\augSc}\|\leq \exp(1)s_* \lambda\|{\nabla_\augS \mathcal{L}(\augU\augS\augV^\top)}\|, \quad\textup{for}\quad s=1,\dots,s^*-1,
+    \end{align}
+where $\augSc^s$ is the variance corrected coefficient as given in \eqref{eq_grad_update_var_full}.
+\end{theorem}
+The critical ingredient for the proof, provided in \Cref{sec:var_reduction_FeDLRT_full}, is the globally shared augmented bases. \Cref{lem_drift_bound_full} bounds the drift of the low-rank representations of the local weight, which gives rise to the following global loss descent guarantee.
+
+\begin{theorem}\label{theo_loss_descent_full_var_cor}
+Let $U^t S^t V^{t,\top}$ and $U^{t+1} S^{t+1} V^{t+1,\top}$ be the factorization before and after iteration $t$ of 
+\Cref{alg:FeDLRT_variance_reduction} with variance correction and singular value truncation threshold $\vartheta$.  Let the local learning rate be $0<\lambda\leq\frac{1}{12 Ls_*}$, then the global loss descent is bounded by
+\begin{align}\label{eq_descent_bound_var_corr_full_trunc}
+\begin{aligned}
+          \mathcal{L}(U^{t+1} S^{t+1} V^{t+1,\top}) - \mathcal{L}(U^t S^t V^{t,\top}) \leq
+          - s_*\lambda(1- 12 s_*\lambda L) \|{\nabla_\augS \mathcal{L}(\augU\augS\augV^\top)}\|^2 + L\vartheta.
+\end{aligned}
+     \end{align}
+     \end{theorem}
+
+The proof is provided in \Cref{sec_app_proof_theo_bound_deterministic_variance_reduction_full}. 
+\Cref{theo_loss_descent_full_var_cor} paves the way for the following result on convergence to a global stationary point.
+\begin{table}[]
+    \centering
+        \caption{Comparison of the computational footprint of FeDLRT with FedAvg, FedLin and several low-rank FL methods. The FeDLRT variants are the only low-rank schemes with linearly scaling (in $n$) memory, compute, and communication costs with automatic compression and variance correction.}
+\include{assets/tables/tab_compute_cost}
+    \label{tab:com_cost}
+\end{table}
+\begin{theorem}\label{theo_glob_convergence}
+      Algorithm ~\ref{alg:FeDLRT_variance_reduction} guarantees that, for learning rate $\lambda\leq\frac{1}{12 Ls_*}$ and final iteration $T$,
+    \begin{align}
+          \min_{t=1,\dots,T}\norm{\nabla_\augS\mathcal{L}(U^t S^t V^{t,\top})}^2\leq \frac{48 L}{T}\left(\mathcal{L}(U^{1}S^{1}V^{1,\top})-\mathcal{L}(U^{{T+1}}S^{{T+1}}V^{{T+1},\top})\right) + {48 L^2}{\vartheta}.
+    \end{align}
+\end{theorem}
+
+The proof is given in \Cref{sub_global_convergence}. In particular, this theorem implies convergence 
+of \Cref{alg:FeDLRT_variance_reduction} for $T\rightarrow\infty$ up to a $\vartheta$-distance to a global stationary point. This is consistent with the numerical results in \Cref{fig:LSS_multi_obj}, where FedLin converges to the global minimizer (the only stationary point) while FeDLRT with variance correction stops at a point with slightly higher loss value due to a nonzero $\vartheta$. In the case that the FL problem has a low-rank solution, the truncation error bounded by $\vartheta$ vanishes, and convergence to a stationary point is guaranteed, see, e.g., \Cref{fig:convex}.
+\begin{wrapfigure}{l}{0.25\textwidth}
+    \centering   
+  \includegraphics[width=0.25\textwidth]{assets/figures/compute_cost_illustration.pdf}
+    \caption{Scaling of communication cost (top) compute cost at a single client (middle), and client memory footprint (bottom) for $s_*=1$ client iteration and a single data-point for $W\in\mathbb{R}^{n\times n}$ with $n=512$. The costs drop by orders of magnitude after the amortization point of $r\approx 200$, which is $40\%$ of full rank. The numerical evaluations in \Cref{sec:experiments} show that, in practice, the matrix ranks are typically below the amortization threshold.}
+ \label{fig:compute_cost}
+\end{wrapfigure}
+\paragraph{FeDLRT convergence with simplified variance correction.} 
+FeDLRT with simplified variance correction is detailed in \Cref{alg:modified_FeDLRT_var_cor} with the variance correction term given in \eqref{eq_var_cor_simplified}, which makes variance correction more communication and computation efficient but comes at a cost of the following additional assumption for convergence analysis. 
+\begin{assumption}\label{assump:delta_bound}
+There exists $\delta \ll 1$ such that, at each client coefficient update, 
+\begin{equation}
+\|{\nabla_\augS\mathcal{G}(\augU\augSc^s\augV^\top) }\|
+-\|{\nabla_S\mathcal{G}(\augU\augSc^s\augV^\top) }\|
+< \delta\|{\nabla_{\augS}\mathcal{L}(\augU\augS\augV^\top)}\|,
+\end{equation}
+for functions $\mathcal{G} = \mathcal{L}$ and $\mathcal{G} = \mathcal{L}_c$, $c=1,\dots,C$.
+\end{assumption}
+This assumption can be interpreted as that most of dynamics in the gradient flow are captured in the coefficient update for the original rank-$r$ matrix $S$, and the basis augmentation provides little information. This scenario occurs when FeDLRT identifies the optimal rank, which could happen early for simpler problems as shown in \Cref{fig:convex}, or when FeDLRT approaches a stationary point.
+
+\begin{theorem}\label{theo_loss_descent_red_var_cor}
+Under \Cref{assump:delta_bound}, if the local learning rate $0<\lambda\leq\frac{1}{12 Ls_*}$, then \Cref{alg:modified_FeDLRT_var_cor} leads to the global loss descent
+\begin{align*}
+\mathcal{L}(U^{t+1} S^{t+1} V^{t+1,\top}) - \mathcal{L}(U^t S^t V^{t,\top})\leq 
+ -\mathsf{C} \|{\nabla_{\augS}\mathcal{L}(\augWr)}\|^2 + L\vartheta
+\end{align*}
+with $\mathsf{C}=s_*\lambda(1-\delta^2 - 12s_*\lambda L + \delta^2\,s_*\lambda)$.
+\end{theorem}
+The proof is provided in \Cref{sec_app_proof_theo_bound_deterministic_simple_variance_reduction}. 
+When $\delta$ is small, this bound is slightly weaker than the one in \Cref{theo_loss_descent_full_var_cor}, which leads to the following corollary.
+\begin{corollary}\label{theo_glob_convergence_simple}
+      Assume that \Cref{assump:delta_bound} holds. 
+      \Cref{alg:modified_FeDLRT_var_cor} guarantees that, for the local learning rate $0<\lambda\leq\frac{1}{s_*(12 L +\delta^2)}$, 
+    \begin{align*}
+          \min_{t=1,\dots,T}\norm{\nabla_\augS\mathcal{L}(U^t S^t V^{t,\top})}^2\leq&\\ \frac{96 L}{T}(\mathcal{L}(U^{1}S^{1}V^{1,\top})- &\mathcal{L}(U^{{T+1}}S^{{T+1}}V^{{T+1},\top})) + {96 L^2}{\vartheta}.
+    \end{align*}
+\end{corollary}
+The proof is analogous to the one for \Cref{theo_glob_convergence}, see \Cref{sub_global_convergence_simple}.
+
+
+\subsection{Compute and communication cost}\label{subsec_com_cost}
+The proposed FeDLRT methods significantly reduce server and client memory footprint, the required communication bandwidth, as well as the client compute cost compared to various baselines, see \Cref{tab:com_cost}. {On the clients}, FeDLRT provides significant memory and compute efficiency since the optimizer only requires the coefficient gradients for the local iterations. To the best of our knowledge, FeDLRT is the only low-rank method with adaptive compression  incorporating variance correction, whose server compute cost scales linearly with the layer dimension since the SVD for rank truncation only needs to be computed on the augmented coefficient matrix of size $2r\times 2r$. We remark that the complete federated learning process is performed on the low-rank factors, and the full matrix $\Wr$ is never required, as, e.g., in \cite{qiao2021communicationefficient,10146425}. FeDLRT significantly reduces the communication cost between server and clients of a compressed layer and the compute cost on the client and server side, compared to FedLin, see \Cref{fig:compute_cost}, see \Cref{alg:FeDLRT_variance_reduction}. The client cost of the simplified variance corrected FeDLRT, see \Cref{alg:modified_FeDLRT_var_cor} is slightly reduced compared to the full variance corrected since only non-augmented coefficient gradients have to be computed and communicated. However, the asymptotic behavior is the same. Its main advantage is the reduced number of communication rounds.
+
+\begin{figure}
+    \centering
+       \begin{subfigure}[t]{0.24\textwidth}	
+        \centering
+        \includegraphics[width=\textwidth]{assets/figures/convex/FeDLRT_rank4_ranks_lr.pdf}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.24\textwidth}	
+        \centering
+        \includegraphics[width=\textwidth]{assets/figures/convex/FeDLRT_rank4_err_w_lr.pdf}
+    \end{subfigure}
+\begin{subfigure}[t]{0.24\textwidth}	
+        \centering
+        \includegraphics[width=\textwidth]{assets/figures/convex/FeDLRT_rank4_val_loss_lr.pdf}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.24\textwidth}	
+        \centering
+        \includegraphics[width=\textwidth]{assets/figures/convex/FeDLRT_rank4_val_loss_base.pdf}
+    \end{subfigure}
+    \caption{Comparison between FeDLRT with simplified variance correction and FedLin in the homogeneous linear least squares regression test.  Each line represents the median result of $20$ random initialization with $C$ clients.
+    The plots from left to right show the rank evolution, the distance to the global optimizer, the global loss values by FeDLRT, and the global loss values by FedLin.
+    The results show that FeDLRT converges faster in this low-rank test case by identifying (and never underestimating) the target rank $r=4$ early in the training.}
+    \label{fig:convex}
+\end{figure}
+
+
+\section{Numerical evaluation}
+
+\paragraph{Homogeneous test.}
+We first consider a (convex) FL problem \eqref{eq_federated_learning} for linear least squares regression with local loss $\mathcal{L}_c(W)= \frac{1}{2\abs{X_c}}\sum_{(x,y)\in X_c}\norm{p(x)^\top W p(y) - f(x,y)}_2^2$,
+where $W\in\mathbb{R}^{n\times n}$ and $p:[-1,1]\rightarrow \mathbb{R}^n$ is the Legendre polynomial basis of degree $n-1$. 
+The target function $f$ is manufactured as $f(x,y)= p(x)^\top W_r p(y)$, where $\text{rank}(W_r)=r$. 
+We consider problems with $n=20$, $r=4$, and randomly generated $W_r$, with $10,000$ data points uniformly sampled on $[-1,1]^2$ and uniformly distributed among clients.
+We compare FeDLRT with variance correction and FedLin with $s_*=20$ local iterations and $\lambda=1e-3$ learning rate on $C=1,2,4,8,16,32$ clients. This setting satisfies the step-size restriction given in \Cref{theo_loss_descent_full_var_cor}. 
+In FeDLRT, the singular value truncation threshold $\vartheta=\tau||\augS^*||$ with $\tau=0.1$ was used.
+
+Figure~\ref{fig:convex} reports the dynamically updated ranks, errors, and loss values with respect to the aggregation rounds. The reported data are the medians over $20$ randomly generated initial weights%
+\footnote{We chose to display the median trajectory to point out its convergence and monotonicity. The test case also converges in the mean.} 
+The results indicate that FeDLRT is able to identify the correct rank within a few aggregation rounds and, furthermore, never underestimates it -- which would have increased the loss value significantly. 
+FeDLRT converges to the minimizer $W^*=W_r$ up to a $1e-5$ error and converges faster with more clients. On this problem, FeDLRT shows up to 10x faster convergence than FedLin. 
+We attribute this behavior to the fact that, by identifying a suitable low-rank manifold early in the training, FeDLRT significantly reduces the degrees of freedom in the FL problem.
+\paragraph{Heterogeneous test.}
+Inspired by~\cite{NEURIPS2021_7a6bda9a}, we consider a variation of the linear least squares regression with $\mathcal{L}_c(W) = \frac{1}{2\abs{X}}\sum_{(x,y)\in X} \norm{p(x)^\top W p(y) - f_c(x,y)}^2$, where the target function $f_c$ is different for each client, and the $10,000$ training data points are available to all clients. We choose problem size $n=10$ with $C=4$ clients and use learning rate $\lambda=1\rm{e}-3$ with $s_*=100$ local epochs. As seen in \Cref{fig:LSS_multi_obj}, FeDLRT with variance correction converges (to single precision accuracy) to the minimizer $W^*$ of \eqref{eq_federated_learning} much faster than FedLin, whereas FeDLRT without correction quickly plateaus, similar to FedAvg.
+
+
+\begin{figure}
+    \centering
+  \includegraphics[width=\textwidth]{assets/figures/cifar10/resnet_cifar10_xval.pdf}
+    \caption{Comparisons for training ResNet18 on CIFAR10 benchmark. Top row compares FeDLRT without variance correction to FedAvg, middle and bottom rows compare FeDLRT with full and simplified variance correction to FedLin, respectively.
+    In each row, the left two panels show the model compression ratio and the communication cost reduction from FeDLRT, and the right two panels show the validation accuracy for FeDLRT and the full-rank counterparts. 
+    In each plot, the results are reported for $C=1,\dots,16$ or $32$ clients with $240/C$ local iterations.    
+    FeDLRT matches the accuracy of FedAvg and FedLin well, while substantially reducing the server and client memory and communication costs. 
+    Variance correction leads to an up to $12\%$ increase in validation accuracy for large $C$, mitigating the client drift problem. The simplified variance correction (bottom row) gives comparable results to full version (middle row) at a lower communication and computation cost.}
+ \label{fig:cifar10_resnet18}
+\end{figure}
+We demonstrate the performance of FeDLRT for training the exemplary ResNet18 model on CIFAR10, where we apply FeDLRT to train its fully connected head. The truncation tolerance is set to $\vartheta=\tau||\augS^*||$ with $\tau=0.01$.
+ The test case setup is summarized in \Cref{tab:object_detection_setup}. The training data is equally partitioned across clients; see \Cref{sec_data} for the data-preprocessing details. 
+A local iteration of \Cref{alg:FeDLRT_variance_reduction} at client $c$ describes one mini-batch update on the client training data set $X_c$ for a given batch size, $s_*$ is the maximum number of local iterations, and $T$ denotes the number of aggregation rounds. 
+We display the statistics for $10$ random initializations;
+ each warm-started with $5$ iterations with one client.
+We set $s_*=240/C$ so that in each training run, the global network iterates through the same amount of data. This setup favors low client counts, and, as expected, the validation accuracy drops as $C$ grows for FedAvg and FeDLRT without variance correction, see \Cref{fig:cifar10_resnet18} (upper row). We note that FeDLRT ties or outperforms FedAvg in terms of accuracy. 
+Using full variance correction (second row) increases the validation accuracy of FeDLRT by up to $12\%$ in this test case, matching the accuracy of FedLin and enabling FL with $93\%$ accuracy for $32$ clients. For $C=8$ clients, the communication cost saving of the compressed layers is up to $90\%$. 
+The computationally more efficient simplified variance correction, using \Cref{alg:modified_FeDLRT_var_cor}, (third row), yields similar validation accuracy, notably at higher compression ratio and communication cost reduction. 
+Similar results are obtained for AlexNet, VGG16 on CIFAR10, and ViT on CIFAR100 , see \Cref{sec:add_numerical_results}, where we observe that FeDLRT closely matches the full-rank accuracy of FedLin.
+
+\textbf{In conclusion}, 
+ we have presented with FeDLRT an efficient low-rank FL scheme with convergence guarantees and automatic server side compression, and demonstrated its capabilities in several test cases. We remark that the underlying assumption for this work is that the target model can be expressed sufficiently well via a low-rank representation.
+While this work is baseline algorithmic research, we believe that it leads to positive societal impacts by providing an energy efficient FL algorithm.
+
+
+
+
+\newpage
+
+
+
+

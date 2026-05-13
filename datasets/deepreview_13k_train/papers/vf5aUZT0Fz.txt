@@ -1,0 +1,232 @@
+\title{DEPT: Decoupled Embeddings for Pre-training Language Models}
+
+\begin{abstract}
+Language model pre-training benefits from diverse data to enhance performance across domains and languages. However, training on such heterogeneous corpora requires extensive and costly efforts. Since these data sources vary lexically, syntactically, and semantically, they cause \textit{negative interference} or the ``\textit{curse of multilinguality}''.  We propose a novel pre-training framework to alleviate this curse. Our method, \dept, decouples embeddings from the transformer body while simultaneously training the latter in multiple contexts. \dept enable training without a shared global vocabulary and: (1) can train robustly and effectively under significant data heterogeneity, (2) reduces token embedding parameters by up to \textbf{80\%} and the communication costs by $\mathbf{675 \times}$ for billion-scale models, (3) enhances model generalization and plasticity in adapting to new languages and domains, and (4) permits training with custom optimized vocabularies per data source. We demonstrate \dept's potential via the first vocabulary-agnostic federated multilingual pre-training of a $\mathbf{1.3}$ \textbf{billion}-parameter model, limiting its embedding size to $\mathbf{102.4}$ million instead of $\mathbf{512}$ million.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Language models (LMs) rely on large data volumes to generalize across tasks~\citep{gpt2}, contexts~\citep{gpt3}, and languages~\citep{HowGoodIsMultilingualBert, MonolingualTransferArtetxe,zhao2024breaking}. Incorporating more data during pre-training effectively enhances models' generalization and language acquisition~\citep{TrainingComputeOptimalLLMs}. However, scaling pre-training datasets leads to a more heterogeneous mix of \textbf{data sources}, such as different domains and languages, posing challenges to LMs. Issues like \textit{Negative interference}~\citep{NegativeInterferenceMetaLearning}, where diverse sources compete for model capacity, and the \textit{Curse of Multilinguality}~\citep{CurseOfMultilingualityUnsupervisedCrossLingual}, where more languages yield diminishing returns, can emerge when increasing heterogeneous sources. The latter notably affects LMs' performance on low-resource languages~\citep{CurseOfMultilingualityUnsupervisedCrossLingual,LowResourceLanguagesSurvey}.
+
+Addressing these challenges requires efforts to prevent divergence and train performant models. Multilingual models like \texttt{BERT}~\citep{BERT}, \texttt{XLM}~\citep{CurseOfMultilingualityUnsupervisedCrossLingual}, and \texttt{mT5}~\citep{mC4} are sensitive to language sampling ratios during pre-training, necessitating temperature tuning of sampling distributions for each model-tokenizer pair. This process requires training numerous models to find a temperature that optimizes validation perplexity across languages. Other models, like Llama, address heterogeneous data with meticulous "language-specific heuristics and model-based filters"~\citep{llama3}. These solutions are costly, requiring extensive Hyperparameter Optimization (HPO), and restrictive, potentially leading to vocabulary dilution~\citep{HowGoodIsYourTokenizer} and sub-optimal cross-lingual and domain performance~\citep{WhenIsMultilingualityCurse}. For example, while using up to $150\,000$ tokens may be beneficial for English~\citep{VocabularyScalingLaws}, multilingual models often allocate only $250\,000$ tokens to hundreds of languages, causing vocabulary dilution, capacity contention, and under-representation of \textbf{low-resource} languages~\citep{LowResourceLanguagesSurvey}.
+
+In this paper, we propose a novel pre-training pipeline designed to address the challenges of training on heterogeneous data, including the \emph{curse of multilinguality}. Observing that custom vocabularies enhance performance across languages~\citep{HowGoodIsYourTokenizer} and domains~\citep{TransfomersCanDoArithmetic}, we suggest partially or fully \emph{decoupling} the \emph{embedding space} from the transformer body during pre-training. This allows optimization of embedding matrices for specific contexts, with the transformer body learning abstract representations from these specialized spaces. We introduce \textbf{D}ecoupled \textbf{E}mbeddings for \textbf{P}re-\textbf{T}raining (\dept) in three variants (see \cref{fig:summary_diagram}.right), each increasingly leveraging the local context of data sources, ultimately enabling pre-training with distinct domains/languages, embedding matrices, and vocabularies. For instance, it allows training with an effective embedding size of $400\,000$ while instantiating only $50\,000$ token embeddings at any time.
+
+A standard pre-training pipeline trains a model over random samples drawn from a carefully balanced distribution of all data sources simultaneously, using shared embeddings. In contrast, \dept handles heterogeneous data sources as follows: (1) It tokenizes data sources independently, using either a shared global vocabulary or a specialized vocabulary per source; (2) It randomly initializes LM parameters; (3) It trains the model iteratively over random subsets of the sources~(see \cref{sec:methodology}).
+\begin{figure}[t]
+    \centering
+    \noindent\includegraphics[width=0.4\columnwidth]{diagrams/McLR-CDS.pdf}
+    \noindent\includegraphics[width=0.4\columnwidth]{diagrams/McLR-DDS.pdf}
+    \caption{\textbf{Left}: Standard centralized pre-training couples the global Embedding Layer (\texttt{EL}) and Transformer Body (\texttt{TB}) while training over random samples from a mixture of data sources with a shared vocabulary.. \textbf{Right}: \dept offers three variants (\texttt{Spec}, \texttt{Trim}, \texttt{Glob}), decoupling \texttt{TB} from \texttt{EL}, which is specialized (\texttt{S-EL} for \texttt{Spec}), trimmed (\texttt{T-EL} for \texttt{Trim}), or global (\texttt{G-EL} for \texttt{Glob}). These methods~(see  \cref{subsec:method}) are part of the pre-training stage in a practical LM pipeline, followed by continued pre-training and downstream fine-tuning.
+    }
+    \label{fig:summary_diagram}
+\end{figure}
+
+In summary, our work brings the following scientific contributions:
+\begin{enumerate}
+    \item \dept offers a solution to train an effective transformer body without shared global embeddings, avoiding the time, electricity, and carbon-intensive HPO tuning.
+    \item \dept-based transformer bodies show \textbf{better generalization}, achieving lower perplexities on validation and out-of-distribution data. \dept models also excel in \textbf{model plasticity}, effectively adapting to new languages or domains.
+    \item \dept reduces the memory requirements of token embedding matrices by a factor of $\tfrac{|\mathcal{V}_k|}{|\mathcal{V}| }\times d_{\mathrm{model}}$, where $\mathcal{V}_k$ is a data source's vocabulary size and $\mathcal{V}$ the global vocabulary size. For multilingual models, this can save up to $\mathbf{80\%}$ in embedding-matrix size, reducing $\mathbf{409}$M parameters for our \textbf{billion}-scale model.
+    \item \dept is communication-efficient in distributed settings, with communication costs up to $\mathbf{675 \times}$ lower than standard distributed data parallelism~\citep{FSDP_Pytorch} and $25\%$ lower than Local SGD~\citep{LocalSGD} for billion-scale models. Additionally, \dept enables training vocabulary-agnostic federated pre-training for the first time.
+\end{enumerate}
+
+
+
+\section{Decoupled Embeddings For Pre-training~(\dept)}
+
+Previous works attribute the \textit{curse of multilinguality} to capacity contention, vocabulary dilution~\citep{CurseOfMultilingualityUnsupervisedCrossLingual}, and suboptimal tokenization~\citep{HowGoodIsYourTokenizer}. While the transformer body is vocabulary-agnostic, these issues impact embeddings. We propose decoupling embeddings during training, enabling custom parameters to reduce capacity contention and custom vocabularies to avoid vocabulary dilution and suboptimal tokenization.
+
+We \textbf{argue} that training the transformer body without shared embeddings is feasible. Our \textbf{intuition} is based on evidence that: (a) transformers adapt to new languages by re-learning embeddings~\citep{MonolingualTransferArtetxe}; (b) syntactic similarity is more important for multilingual performance than subword sharing~\citep{HowGoodIsMultilingualBert}; (c) periodically re-initializing embeddings enhances model plasticity~\citep{ActiveForgetting}. These findings suggest transformer body performance is partly independent of embeddings, allowing potential decoupling.
+
+We propose \dept, enabling model training on multiple heterogeneous data sources with unique vocabularies and linguistic features. Instead of mixing data sources, they are distributed as isolated data silos, akin to clients in cross-silo Federated Learning (FL)~\citep{mcmahan2017communication}. \dept trains on each silo and aggregates their contributions similar to FL client models. This work explores progressive forms of contextual specialization, investigating if an LM can converge in multiple contexts without a shared (1) output vocabulary, (2) embedding matrices, or (3) tokenization.
+
+\subsection{Method}\label{subsec:method}
+Akin to federated and meta-learning algorithms, \dept optimizes a global set of parameters $\theta$ (the transformer body) along with optional token and positional embeddings $\phi,\psi$ across data sources $S$. \dept trains \emph{iteratively}, selecting a subset $S_t\subset S$ for each iteration (federated round) $t$. On each data source ($k\in S_t$), \dept performs inner-loop optimization \texttt{InnerOPT}, e.g., SGD, \emph{independently}. After each iteration, it aggregates the transformer body of $|S_t|$ trained models using the outer-loop optimizer \texttt{OuterOPT}, e.g., FedAvg. We present three variants for handling the token and positional embeddings $\phi$ and $\psi$, offering progressively stronger embedding-space specialization, and compare them in \cref{subsec:variant_assumptions_and_benefits}.
+
+
+We start with distributed training methods like FedAvg, embodied by \colorbox{blue!30}{\glob}. Each data source receives a global transformer body and global embeddings (token and positional). Then, it trains the body and embeddings on the local data distribution. The updated model (transformer body and embeddings) is then aggregated with models from other data sources via \texttt{OuterOPT}, allowing \glob's use in both federated and centralized settings. From \glob, we design the variants below to further decouple embeddings from the body and summarize the entire \dept pipeline in \cref{alg:1}.
+
+\input{algorithms/mclr}
+\begin{itemize}
+    \item[\colorbox{red!30}{\trim}] \textbf{Partially-decoupled}: Each data source is assigned the global transformer and embeddings; it then trims the token embeddings by selecting only tokens in its local vocabulary $\mathcal{V}_k$, restricting the model's input and output space. During \texttt{OuterOPT}, the token embeddings are projected to the global vocabulary and aggregated. 
+    \item[\colorbox{green!30}{\spec}] \textbf{Fully-decoupled}: Each data source is assigned the global transformer body. It then randomly initializes specialized token and position embeddings when first sampled. In subsequent iterations, these embeddings are used to train on the data source. However, they are never aggregated. \spec can thus accommodate any local vocabulary, including ones built with a custom and optimized tokenizer.
+\end{itemize}
+We emphasize that \dept replaces the standard pipeline for broad pre-training (\cref{fig:summary_diagram}) preceding continued pre-training or adaptation phases~\citep{llama3}.
+Inspired by distributed SGD methods, \cref{alg:1} can operate in parallel, matching the user's computational capabilities.
+Given \dept's reduced communication, it is also suitable for low-bandwidth settings like cross-silo FL.
+
+\subsection{On Trimmed Embedding Aggregation (\trim)}
+
+The global token embeddings \(\phi \in \mathbb{R}^{|\mathcal{V}| \times d_{\mathrm{model}}}\), where \(|\mathcal{V}|\) is the global vocabulary size and \(d_{\mathrm{model}}\) the embedding dimension, are trimmed using an indicator matrix \(\mathcal{I}_k \in R^{|\mathcal{V}_k| \times V}\):
+
+\begin{equation}
+\mathcal{I}_k(i, j) = 
+\begin{cases} 
+1, & \text{if the } j\text{-th global token corresponds to the } i\text{-th local token in } \mathcal{V}_k \\
+0, & \text{otherwise},
+\end{cases}
+\end{equation}
+
+which selects relevant rows of $\phi$ for the trimmed embeddings \(\phi_k \in \mathbb{R}^{|\mathcal{V}_k| \times d_{\mathrm{model}}}\) of source \(k\):
+
+\begin{equation}
+\phi_k = \mathcal{I}_k \phi.
+\end{equation}
+
+After inner-loop optimization (\texttt{InnerOPT}), the trimmed embedding matrices \(\phi_k\) are aggregated. We create a matrix \(\hat{\phi}_k \in \mathbb{R}^{V \times d_{\mathrm{model}}}\), initialized with zeros (padding) for tokens in \(\mathcal{V} \setminus \mathcal{V}_k\), and use \(\mathcal{I}_k^\top \in \mathbb{R}^{V \times |\mathcal{V}_k|}\) to project \(\phi_k\) back to the global shape:
+   
+   \begin{equation}
+   \hat{\phi}_k = \mathcal{I}_k^\top \phi_k,
+   \end{equation}
+
+when using FedAvg as the \texttt{OuterOPT} procedure, zero-padded tokens are ignored during aggregation to prevent interference from non-shared tokens across data sources.
+\subsection{On Positional Embedding Specialization (\spec)}
+
+Unlike the other variants, we specialize both the token  $\phi$ and positional embeddings $\psi$  for \texttt{Spec} based on evidence showing that subword sharing is less important than syntactic and typographic elements~\citep{HowGoodIsMultilingualBert}. Without positional embedding specialization, \spec is equivalent to \trim when vocabularies $\{\mathcal{V}_k\}_{k=1}^{K}$ are disjoint with $\mathcal{V} = \cup_{k=1}^{K} \mathcal{V}_k$. \spec thus makes no assumptions on the nature of the tokens it receives, allowing it to be completely vocabulary and sequence-length agnostic.
+This unique property of \spec enables federated learning without knowledge of the underlying data or agreements regarding tokenization.
+
+\subsection{Variants Assumptions and Benefits}\label{subsec:variant_assumptions_and_benefits}
+In most scenarios, practitioners can deploy any of our proposals, obtaining an improved transformer body over past approaches, with a breakdown of their memory and communication costs shown in \cref{tab:memory_comms_costs}.
+However, some settings are appropriate for a given variant.
+
+\textbf{Glob} closely resembles a standard pre-training pipeline. While it doesn't explicitly decouple embeddings from the transformer body, they become increasingly decoupled with each step since only tokens present locally affect the embeddings. As a communication-efficient form of SGD, \texttt{Glob} \textit{reduces communication costs}. However, it requires sufficient knowledge of the data to construct a global vocabulary, risking vocabulary dilution and capacity contention.
+
+\textbf{Trim} uses the same assumptions as \glob and can be deployed in similar settings. It additionally \textit{reduces memory requirements} for the token embeddings to the data source's needs ($d_{\mathrm{model}} \times \mathcal{V}_k$), also \textit{further lowering communication costs} proportional to this reduction. Such savings are significant for multilingual models, given their embedding matrices~\citep{VocabularyTrimming}, e.g., \texttt{mT5, mBART}~\citep{mC4,BART} allocate $40\%-80\%$ of parameters to embeddings. Since our models use tied weights, \texttt{Trim} restricts their output space, unlike \texttt{Glob}. Experimentally, this has a slight but inconsistent impact on perplexity.
+
+\textbf{Spec} allows pre-training across data sources without a shared vocabulary, offering all \texttt{Trim} benefits with full local adaptation. Communication costs are further reduced proportionally to the size of the token and position embeddings since \texttt{Spec} transfers only the transformer body to the outer optimizer. This decoupling enables vocabulary-agnostic training. The lack of shared embeddings makes \spec ideal for training a performant transformer body, e.g., on private data, and then performing continued pre-training to obtain global embeddings.
+\begin{table}[]
+\caption{Memory and communication costs of \dept, where: $\mathcal{M}$ is the number of model parameters; $|\mathcal{V}|$ is the global vocabulary size; $\overline{|\mathcal{V}_k|}$ is the mean data source vocabulary size; $d_{\mathrm{model}}$ is the embedding dimension; $N_{\mathrm{local}} = N/T$ is the number of local steps done per iteration for a total number steps $N$; $\mathcal{L}$ is the sequence length. \spec brings further reductions over \trim by not sharing token or position embeddings. Concrete numbers for our models~(see \cref{tab:model_architectures}) are shown in \cref{tab:dept_params}.}
+\label{tab:memory_comms_costs}
+\centering
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Method} & \textbf{Memory Cost} & \textbf{Per-step Comms Cost} & \textbf{Vocab Agnostic} \\ \midrule
+\textbf{STANDARD} & {\scriptsize $\mathcal{O}(\mathcal{M}$})& {\scriptsize $\mathcal{O}(\mathcal{M})$} & {\scriptsize $\times$} \\ \midrule
+\textbf{GLOB}     & {\scriptsize $\mathcal{O}(\mathcal{M}$}) & {\scriptsize$\mathcal{O}$}$(\frac{\mathcal{M}}{N_\mathrm{local}})$ & {\scriptsize $\times$} \\ \midrule
+\textbf{TRIM}     & {\scriptsize $\mathcal{O}(\mathcal{M} - (|\mathcal{V}| - \overline{|\mathcal{V}_k|}) d_{\mathrm{model}})$} & {\scriptsize $\mathcal{O}$}$(\frac{\mathcal{M} - (|\mathcal{V}| - \overline{|\mathcal{V}_k|}) d_{\mathrm{model}}}{N_\mathrm{local}})$ & {\scriptsize $\times$} \\ \midrule
+\textbf{SPEC}     & {\scriptsize $\mathcal{O}(\mathcal{M} - (|\mathcal{V}| - \overline{|\mathcal{V}_k|}) d_{\mathrm{model}})$} &  {\scriptsize $\mathcal{O}$}$(\frac{\mathcal{M} - (|\mathcal{V}| + \mathcal{L}) d_{\mathrm{model}}}{N_\mathrm{local}})$ & {\scriptsize \checkmark} \\ \bottomrule
+\end{tabular}
+\end{table}
+
+
+
+\section{Evaluation}
+
+
+In our evaluation of \dept we aim to answer the following research questions.
+
+\begin{itemize}[noitemsep,topsep=0pt,parsep=2pt,partopsep=0pt]
+    \item[\textbf{RQ1}] Does \dept allow us to scale the number of training tokens from heterogeneous data past standard training? 
+    \item[\textbf{RQ2}] Does \dept improve efficiency, in terms of memory and training times?
+    \item[\textbf{RQ3}] Does \dept improve \textbf{zero-shot generalization} to out-of-distribution data?
+    \item[\textbf{RQ4}] Does \dept improve model \textbf{plasticity} when learning new distributions?
+\end{itemize}
+
+\subsection{Experimental Setup}
+For our experimentation, we train decoder-only transformers with $12$ and $24$ blocks, while for our federated application, we train a \textbf{billion}-scale model. Our \texttt{OuterOpt} optimizer is parameter averaging~\citep{fedavg,LocalSGD} while our \texttt{InnerOpt} is \texttt{AdamW}~\citep{AdamW}. Full experimental details relating to our architecture and training hyperparameters~(\cref{tab:model_architectures,tab:dept_params}), dataset, and baseline implementation are available in \cref{app:experimental_details}.
+\subsubsection{Multi-domain and Multilingual Methodology}
+
+To evaluate \dept on \textbf{multi-domain} data, we use The Pile~\citep{ThePile}, containing $22$ subsets from various domains. We use Ubuntu IRC~(\texttt{UI}) as our out-of-distribution dataset.
+
+For \textbf{multilingual} data, we use a subset of MC4~\citep{mC4}, including a mix of high, medium, and low-resource languages with: English (\texttt{EN}), Italian (\texttt{IT}), and Chinese (\texttt{ZH}) as high-resource languages; Serbian (\texttt{SR}) and Malay (\texttt{MS}) as medium-resource languages; and Swahili (\texttt{SW}), Urdu (\texttt{UR}), and Latin (\texttt{LA}) as low-resource languages.
+When using custom tokenizers, we follow prior work~\citep{HowGoodIsYourTokenizer} and train unigram \texttt{SentencePiece}~\citep{SentencePiece} tokenizers with a $50\,257$ vocabulary for each data source.
+
+\subsubsection{Baselines}
+
+We compare \dept against standard pre-training methods used in previous works~\citep{CurseOfMultilingualityUnsupervisedCrossLingual}.
+For multilingual data we employ temperature-weighted sampling~\citep{BERT} with $\alpha = 0.3$ as well as uniform and proportional sampling.
+Here $\alpha = 0.3$ represents a compromise found effective in prior work~\citep{BERT,CurseOfMultilingualityUnsupervisedCrossLingual,mC4}, used as the default pre-training method for multilingual models.
+For multi-domain data, we consider uniform and proportional sampling.
+Given the random sampling of data sources in \cref{alg:1}, baselines with uniform sampling are closest to \dept.
+
+Additionally, we compare against the ``pre-training with active forgetting''~(\texttt{ACT}) methodology~\citep{ActiveForgetting}, which aims to improve plasticity and generalization by regularly resetting the embedding matrix to a random initialization.
+While \citet{ActiveForgetting} transfer monolingual models to other languages, we only reuse their pre-training phase due to our different setting. Like \spec,
+\texttt{ACT} does not produce a fully trained embedding matrix. 
+
+\subsubsection{Evaluating Generalization and Plasticity}
+
+The key characteristics of interest for multi-domain and multilingual pre-training are model \textbf{generalization} and \textbf{plasticity}. \textbf{Generalization} refers to the model's ability to perform well on out-of-distribution (OOD) data, whether in-domain or out-of-domain. We assess in-domain generalization by testing the model on the test set of each data source used during training, while OOD generalization is evaluated with unseen datasets.
+
+To ensure fair comparison, we examine methods that produce a global embedding matrix, such as \texttt{Glob} and \texttt{Trim}, and those that do not, like \texttt{Spec} and \texttt{ACT}, after a phase of continued pre-training or adaptation~\citep{llama3} lasting $15\%-19\%$ of the total pre-training steps. To isolate the effect of embeddings from the transformer body, this phase is done twice: once using randomly initialized embeddings and once using global embeddings if available. Randomly initialized embeddings allow us to evaluate transformer body by itself.
+
+\textbf{Plasticity} refers to the model's ability to \textbf{quickly} and \textbf{effectively} adapt to a new domain, either to reach a target performance with minimal steps or to achieve the highest possible performance.
+We evaluate the plasticity of \dept models by training them on new data, such as a different domain or language, and the most heterogeneous subset of the training data, as determined by the size of its local vocabulary in the shared global vocabulary.
+
+\subsection{Results}
+
+Our experimental results indicate that \dept can serve as a viable alternative to conventional pre-training pipelines by allowing the training under highly heterogeneous data sources and by building a better transformer body to serve as a foundation model. 
+
+\subsubsection{\dept Is Robust To Data Heterogeneity~(RQ1)}
+
+\begin{figure}[]
+    \centering
+    \noindent\subfloat[For our $350$M, $24$-block model trained on The Pile, the standard pre-training pipeline tends to diverge due to a spike in the average activation norms of the output layer. The denoising effects of the \dept make activation norms only experience minor spikes for \texttt{OuterLoop} calls. ]
+    {\includegraphics[width=0.485\columnwidth]{plots/MCLR_PILE_ACT_act.pdf}}  \hfill
+    \noindent\subfloat[For our $350$M, $24$-block model trained on the The Pile, the standard pre-training pipeline tends causes rapid increases in the $L2$ norm of the parameters. \dept models avoid this because the \texttt{OuterLoop} uses a parameter-averaging algorithm which reduces parameter norms.]
+    {\includegraphics[width=0.485\columnwidth]{plots/MCLR_PILE_ACT_l2_norms.pdf}} \hfill
+    \caption{The activations and model norms of standard versus \dept models. \dept provides regularization effects constraining these common causes of model divergence. This shows that: (a) restricting the output space with \trim does not harm training stability, (b) in the case of \spec, regularizing the transformer body also regularizes the embeddings.}
+    \label{fig:motivation:pre_train_Activations}
+\end{figure}
+
+Our experiments show \dept is highly robust to multilingual and multi-domain data heterogeneity. As shown in \cref{fig:motivation:pre_train_Activations}, it is more resilient to activation divergence and model norm increases---factors that can cause model divergence or stop perplexity improvements~\citep{meta_opt}. Models trained with \dept maintain lower activation norms due to the regularization effect of \texttt{OuterOpt} (see \cref{alg:1}). All three variants handle heterogeneous data distributions well, enabling comparable pre-training steps without activation, norm, or perplexity spikes. This stability allows \dept to outperform baselines in generalization and plasticity. For fairness, we always compare checkpoints with the lowest validation perplexity.
+
+\subsubsection{\dept Improve Training Efficiency~(RQ2)}
+
+The large improvements in communication efficiency of \dept compared to standard DDP, enabled us to perform all of our experiments on poorly connected servers combining our resources with those of cloud providers. When using \trim, we were able to reduce the global embedding matrix size by $8\%$ to $32\%$ for multilingual data and by $2\%$ to $78\%$ for \texttt{The Pile}, with the $78\%$ reduction being obtained for the mathematics subset. Furthermore, when using a custom vocabulary per data source on \texttt{MC4}, \spec shows its benefits in allowing \dept to train our $12$-block transformer much faster on multilingual data due to the improved throughput brought by its $80\%$ reduction in embedding parameters.
+When used to enable the training of a parameter-efficient and vocabulary-agnostic \textbf{billion}-scale model, shown in \cref{app:big_model}, \spec enables cross-lingual transfer via the body of the transformer alone, allowing data sources not previously sampled to quickly catch-up in perplexity to the rest of the cohort. This is despite a $24\%$ reduction in total parameters and $30\%$ reduction in communicated parameters. Full details on efficiency improvements are shown in \cref{tab:dept_params}.
+\subsubsection{\dept Improves Zero-shot Generalization~(RQ3)}
+
+\input{tables/mc4_125M-r}
+\input{tables/mc4_125M-m}
+\input{tables/the_pile_350M-r}
+
+When starting from an equal point with randomly initialized matrices, \cref{tab:mc4_125M_r,tab:the_pile_350M_r} show that \dept variants significantly outperform all baselines across all validations sets for multilingual and multidomain data source on high and low-resource subsets. Min and max improvements are calculated by taking the worst and the best \dept variant, respectively, and comparing it against the best-performing baseline. This outperformance shows that \dept can produce superior transformer bodies that generalize better. Crucially, \trim is comparable to \glob despite significant reductions in parameter counts and communication costs during pre-training, indicating that out-of-vocabulary mistakes do not have a significant impact on the transformer body training. Furthermore, \spec is very similar in effectiveness to \glob and \trim despite never sharing token embeddings across data sources. This allows it to reduce communication costs further over trim proportional to the difference between the size of the global vocabulary and the size of the local data source vocabulary. 
+
+As can be seen from \cref{tab:mc4_125M_m,tab:the_pile_350M_m}, \dept variants with global embeddings tend to outperform their standard pre-training and active forgetting~(\act) counterparts when undergoing continued pre-training from a pre-trained embedding matrix, winning $16$ out of $28$ total comparisons. Crucially, since \dept variants win all comparisons when starting from random, this is indicative that the transformer body is superior to that produced by standard pre-training methods, and more accurate embedding matrices induce the $12/28$ losses. For the multilingual data, \dept variants tend to lose for high-resource languages while outperforming lower-resource languages, an artifact of the sampling policy used by the standard approaches favoring high-resource languages. \trim continues to perform similarly to \glob, making it a direct parameter and communication-efficient substitute for the class of algorithms, which includes FedAvg and Local SGD.
+\subsubsection{\dept Improves Model Plasticity~(RQ4)}
+
+Finally, we investigate how plastic \dept models are in adapting to either a new data source or to the most heterogeneous subset of the pre-training set \Cref{fig:fed:mc4:125M:balanced:perplexity_ratio} fig shows the perplexity adaptation plots when starting from a random initialization on: the full pre-training set~(serving as a baseline), the data source with the smallest vocabulary~(\texttt{SW}), or new languages (\texttt{HI,DE}). \dept variants are always the fastest to adapt to each data source and provide the lowest final perplexity; for the full pre-training set, we use perplexity taken over all language validation sets. 
+\begin{figure}[]
+    \centering
+    \subfloat[\texttt{MC4-FULL}, $12$-block.]{\includegraphics[width=0.485\textwidth]{plots/DEPT_IMPROVE_125M_MC4-B_ppl}}\hfill
+    \subfloat[\texttt{SW}, $12$-block.]{\includegraphics[width=0.485\textwidth]{plots/DEPT_IMPROVE_SW_125M_MC4-SW_ppl.pdf}}\hfill \\
+      \subfloat[\texttt{HI}, $12$-block.]{\includegraphics[width=0.485\textwidth]{plots/DEPT_IMPROVE_HI_125M_MC4-HI_ppl.pdf}}\hfill
+    \subfloat[\texttt{DE}, $12$-block.]{\includegraphics[width=0.485\textwidth]{plots/DEPT_IMPROVE_DE_125M_MC4-DE_ppl.pdf}}\hfill
+    \caption{Adaptation curves starting from a randomly initialized matrix. \dept is always stable in its convergence, reaching the \textbf{lowest perplexity} for the pre-training distribution~(\texttt{MC4-FULL}), for the lowest-resource languages in the distribution~(\texttt{SW}), and for the two out-of-distribution languages~(\texttt{HI}, \texttt{DE}). It is also always the \textbf{fastest} to adapt.}
+    \label{fig:fed:mc4:125M:balanced:perplexity_ratio}
+\end{figure} 
+
+
+\section{Related Work}
+
+
+
+\subsection{Multilingual LLMs Training}
+
+Large language models (LLMs), even those pre-trained mainly with English data, show some cross-lingual alignment due to "incidental bilingualism" \citep{briakou2023searching} and cross-lingual data sharing \citep{choenni2023languages} in the training sets. An intuitive way to enhance multilingual capacity is to increase the size of multilingual data during pre-training \citep{le2023bloom}. However, the imbalanced distribution and varying quality of training data across languages \citep{ding2024data} lead to uneven multilingual capabilities, which quickly degrade for extremely low-resource languages \citep{lai2023chatgpt}. A common solution involves supervised parallel data in pre-training—e.g., XLM \citep{conneau2019cross} and PaLM2 \citep{anil2023palm}. Other strategies include Knowledge Transfer \citep{zhang2023bayling,wang2023openchat,zhang2024enhancing}, Knowledge Accumulation, and Domain Adaptation for non-English contexts \citep{huang2024survey}. However, these methods struggle with adaptability to truly low-resource languages \citep{chang2023multilinguality, li2024quantifying}, and may introduce challenges like training instability and catastrophic forgetting \citep{kirkpatrick2017overcoming}. Thus, we advocate for a novel pre-training pipeline that addresses language heterogeneity while improving generalization and plasticity.
+The topic of constructing a proper shared vocabulary has received extensive attention from the multilingual pre-training community. Previous proposals have included tokenizing all sources simultaneously with a given temperature~\citep{BERT}, building language-clustered vocabularies~\citep{LanguageClusteredVocabularies}. The first method is one of our baselines. In contrast, the second requires constructing language clusters, selecting the appropriate cluster count, and assuming new incoming languages will easily fit into the pre-existing structure.
+
+
+
+ 
+
+\subsection{Active Forgetting}
+
+A work similar in spirit to ours is that of \citet{ActiveForgetting}, introducing the concept of active forgetting into the pre-training stage by re-initializing embeddings at regular intervals. Their work shows that via this simple noise injection they can improve the plasticity of the model in adapting to new downstream tasks. Models trained in this way are meant to be easy to rewire to new languages by training a new embedding matrix. 
+
+
+
+\section{Conclusion}
+
+In this work, we investigated pre-training Language Models (LMs) under data heterogeneity. We proposed a novel, efficient, and robust pipeline, \dept, that allows training under significant data heterogeneity, while avoiding the \textit{model divergence} problem resulted from the \textit{negative interference} or \textit{curse of multilinguality}. The core idea behind \dept is to decouple the embedding space from the transformer body during pre-training. \dept comes in three variants, each providing different levels of separation, from fully shared to fully decoupled. Our experimental results showed that \dept: (1) enables training under significant data heterogeneity without the costs of the previous methods, (2) reduces the parameter count of the token embeddings by up to \textbf{80\%} (3) improves the generalization and plasticity of the model by achieving lower perplexity on validation and out-of-distribution test datasets, as well as when adapting to new languages (4) provides training with custom vocabulary per data source, allowing us to pre-train the first $\mathbf{1.3}$ \textbf{billion}-parameter vocabulary-agnostic federated multilingual model across high and low-resource languages.
+
+\subsection{Limitations \& Future Work}
+\dept provides a \textit{pre-training} pipeline for language models meant to precede any continued pre-training, adaptation, or downstream fine-tuning. \dept-based models, however, require a final global embedding to be used in practice. The first two variants of \dept, namely \texttt{Glob} and \texttt{Trim}, naturally provide such global embedding at the end of pre-training, although with a different performance across the pre-training subsets compared to standard methods. Since \texttt{Spec} does not directly provide a means of obtaining a global embedding, future directions include devising methods to generate one. Potential approaches include zero-shot embedding matrix transfer~\citep{mosin2023fine}, vocabulary matching over the local embeddings~\citep{VocabMatching}, and devising more sample-efficient methods to train new embedding matrices. Furthermore, future work can study the internal representations that \dept-based models build. Finally, a practical direction is scaling \dept to bigger models and broader mixture of data sources, including larger number of languages.
+
+\FloatBarrier
+
+
+

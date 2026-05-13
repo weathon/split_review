@@ -1,8 +1,8 @@
 # Turning Up the Heat: Min-p Sampling for Creative and Coherent LLM Outputs
 
 - Decision: Accept
-- Avg Score: 2.67
-- Scores: 8, 1, 0, 1, 0, 6
+- Avg Score: 8.50
+- Scores: 8, 10, 10, 6
 
 ## Abstract
 Large Language Models (LLMs) generate text by sampling the next token from a probability distribution over the vocabulary at each decoding step. However, popular sampling methods like top-\( p \) (nucleus sampling) often struggle to balance quality and diversity, especially at higher temperatures, leading to incoherent or repetitive outputs. To address this challenge, we propose \textbf{min-\( p \) sampling}, a dynamic truncation method that adjusts the sampling threshold based on the model's confidence by scaling according to the top token's probability. We conduct extensive experiments on benchmarks including GPQA, GSM8K, and AlpacaEval Creative Writing, demonstrating that min-\( p \) sampling improves both the quality and diversity of generated text, particularly at high temperatures. Moreover, human evaluations reveal a clear preference for min-\( p \) sampling in terms of both text quality and diversity. Min-\( p \) sampling has been adopted by multiple open-source LLM implementations, highlighting its practical utility and potential impact.

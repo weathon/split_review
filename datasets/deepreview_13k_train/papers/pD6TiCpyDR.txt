@@ -1,0 +1,891 @@
+\title{Jump Your Steps: Optimizing Sampling Schedule of Discrete Diffusion Models}
+
+\begin{abstract}
+
+
+Diffusion models have seen notable success in continuous domains, leading to the development of discrete diffusion models (DDMs) for discrete variables. Despite recent advances, DDMs face the challenge of slow sampling speeds. While parallel sampling methods like $\tau$-leaping accelerate this process, they introduce \textit{Compounding Decoding Error} (CDE), where discrepancies arise between the true distribution and the approximation from parallel token generation, leading to degraded sample quality. In this work, we present \textit{Jump Your Steps} (JYS), a novel approach that optimizes the allocation of discrete sampling timesteps by minimizing CDE without extra computational cost. More precisely, we derive a practical upper bound on CDE and propose an efficient algorithm for searching for the optimal sampling schedule. Extensive experiments across image, music, and text generation show that JYS significantly improves sampling quality, establishing it as a versatile framework for enhancing DDM performance for fast sampling.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+
+
+{
+Diffusion models~\citep{sohl2015deep, song2020score, ho2020denoising, song2020denoising, karras2022elucidating} have achieved remarkable success in generation tasks within the continuous domain. However, certain modalities, such as text and music, inherently possess discrete features. Recently, discrete diffusion models (DDMs)~\citep{austin2021structured, campbell2022continuous, campbell2024generative, gat2024discrete} have demonstrated performance comparable to state-of-the-art methods in various areas, including text~\citep{lou2023discrete, shi2024simplified} and image~\citep{chang2022maskgit, gu2022vector} generation. Nevertheless, like their continuous counterparts, DDMs encounter a significant bottleneck in sampling speed due to their progressive refinement process.
+
+In contrast to continuous-domain diffusion models, where sampling dynamics are driven by sample-wise differential equations~\citep{song2020score}, allowing for the direct application of well-established numerical methods to accelerate generation, enhancing speed in DDMs poses a significant challenge. To address this, researchers have proposed fast and efficient samplers, including notable methods such as the $\tau$-leaping~\citep{campbell2022continuous, lezama2022discrete, sun2022score} and $k$-Gillespie algorithms~\citep{zhao2024informed}, which facilitate parallel sampling of multiple tokens in a single step. However, this parallel but independent sampling introduces \textit{Compounding Decoding Error} (CDE)~\citep{lezama2022discrete}, which arises from a mismatch between the training and inference distributions of intermediate latents during parallel sampling. Specifically, while each token is generated according to its marginal distribution, the joint distribution deviates from the learned distribution. To mitigate this issue, the predictor-corrector (PC) sampler~\citep{campbell2022continuous} has been proposed. This sampler slightly perturbs the generated data to correct incorrectly generated tokens. However, these methods have limitations, including impracticality under low computational budgets~\citep{campbell2022continuous}, the need for an additional corrector~\citep{lezama2022discrete}, or reliance on specialized architectures and loss functions~\citep{zhao2024informed}.
+
+\begin{figure}[!h]
+    \centering
+    \includegraphics[width=1\linewidth]{figures-pdf/teaser-cond_prob.pdf}
+    \caption{
+    \figtop{}~Comparison of sampling trajectories: ground truth vs. parallel sampling using a uniform schedule and the Jump Your Steps (JYS) schedule. \figbottom{}~\yh{Uniform schedule exhibits compounding decoding errors during parallel sampling, while JYS reduces them by using fewer steps in deterministic phases and reallocating skipped steps to other timesteps.}
+    }
+    \label{fig:teaser}
+\end{figure}
+
+To reduce CDE and enable fast sampling in DDM fundamentally, we first introduce a rigorous quantity to measure CDE (see \fref{fig:teaser} Top, and \sref{subsection:section3.1}) and propose a novel approach called \textit{Jump Your Steps} (JYS), which optimizes the allocation of discrete sampling timesteps \(\{ T \shortto t_1  \shortto \dots \shortto t_{N-1} \shortto 0 \}\) under a fixed total sampling budget $N$ to minimize CDE. Our core idea is to derive efficiently computable bounds for CDE (see \sref{subsection:section.add} and \sref{subsection:section3.2}) and strategically select sampling timesteps by solving minimization problems to reduce these bounds (\sref{subsection:section3.3} and \sref{subsection:section3.4}), theoretically ensuring a decrease in the gap between the ground truth distribution and the approximated distribution through parallel sampling (see \fref{fig:theory-relationship}). 
+Unlike previous methods such as the PC sampler, our approach requires no additional computational resources or modifications to the model architecture or loss function. We empirically validate the effectiveness of our sampling schedule across various datasets, including synthetic sequential data, CIFAR-10 (image), Lakh Pianoroll (music), and text modeling. Our approach accelerates DDM sampling across models using different forward corruption transition kernels, such as uniform, Gaussian, and absorbing transition matrices. Our comprehensive experiments cover both unconditional and conditional generation tasks, consistently showing that optimizing the sampling schedule significantly enhances sampling quality. These results indicate that our method serves as a general framework for speeding up discrete diffusion model sampling.}
+
+
+\section{Background}
+
+
+\subsection{Continuous Time Framework for Discrete Diffusion Models.}
+
+
+{
+
+Discrete diffusion models (DDMs) define the generative process as the reverse of the data-corrupting forward process, expressed as a Continuous Time Markov Chain (CTMC) on a finite state space $\mathcal{S}$~\citep{campbell2022continuous}. For the data-corrupting process $(X_t)_{t\in [0,T]}$, the density evolution is described as: 
+\begin{equation}
+q_{t+dt|t}(y \mid x) = \delta_{x y} +R_t(x,y) dt + o(dt)
+\end{equation}
+Here, $\delta_{x y}$ is the Dirac delta function, $R_t \in \mathbb{R}^{S\times S}$ is the transition rate matrix of the forward CTMC, with $S=|\mathcal{S}|$, and $dt > 0$. Rate matrices ensure the marginal distribution $q_t(x_t) = \int q_t(x_t|x_0)q_0(x_0) dx_0$, where $q_0 = p_{\mathrm{data}}$ and $q_T \approx \pi$, the stationary distribution of the forward CTMC. Various transition matrices have been proposed, allowing $\pi$ to follow a uniform or Gaussian distribution, or converting samples into masked tokens.
+
+For generation, we reverse the forward process, moving from the marginal $q_T$ back to $p_{\mathrm{data}}$. This time-reversal CTMC is also a CTMC~\citep{campbell2022continuous, campbell2024generative}: 
+\begin{equation} \label{eq:reverse_kolmo}
+q_{t-dt|t}(y \mid x) = \delta_{x y} +\tilde{R}(x, y) dt + o(dt), \end{equation} 
+where the backward transition rate $\tilde{R}$ is defined as: 
+\begin{equation*}
+\tilde{R}(x, y) 
+= R(y, x)\underbrace{\frac{q_t(y)}{q_t(x)}}_{\mathclap{\textrm{Score Parametrization}}} 
+= R(y, x)\sum_{x_0} \frac{q_t(y \mid x_0)}{q_t(x\mid x_0)} \underbrace{q_{0|t}(x_0 \mid x)}_{\mathclap{\textrm{Denoising Parametrization}}} 
+\end{equation*}
+The literature primarily falls into two parameterizations: Denoising parameterization~\citep{campbell2024generative, austin2021structured, campbell2022continuous} approximates a parameterized denoising model as $p^\theta_{0|t}(x_0|x) \approx q_{0|t}(x_0 | x)$. Conversely, score parameterization~\citep{lou2023discrete, meng2022concrete} estimates the ratio of the data distribution as $s_t^\theta(y|x)={q_t(y)}/{q_t(x)}$.}
+
+\subsection{Sampling from the backward CTMC}
+\label{section:background}
+
+\yh{
+\paragraph{Gillespie’s Algorithm} was proposed as a simulation algorithm for a given CTMC \citep{gillespie2007stochastic}. Gillespie's algorithm simulates the CTMC by calculating the rate matrix at each state transition. If the rate matrix of the CTMC depends only on the state, Gillespie’s algorithm serves as an exact simulation method. However, since it allows for only one token transition each time the rate matrix is calculated, it is computationally inefficient.
+
+\paragraph{$k$-Gillespie’s Algorithm} Instead of updating only one token for each rate matrix calculation, the $k$-Gillespie's algorithm \citep{zhao2024informed} updates \( k \) tokens in parallel. This reduces the computation by a factor of \( 1/k \) compared to the original Gillespie algorithm.
+
+\paragraph{$\tau$-Leaping} On the other hand, \cite{campbell2022continuous} proposes sampling through $\tau$-leaping. Unlike the $k$-Gillespie algorithm, which update $k$ tokens in parallel, $\tau$-leaping simultaneously updates all tokens according to the given fixed rate matrix within the specified time interval $[t, t+\tau)$. Recently, Tweedie $\tau$-leaping, which considers changes in the rate matrix according to the noise schedule, has been proposed \citep{sun2022score, lou2023discrete}. 
+}
+
+
+\section{Optimizing the sampling schedule of discrete diffusion models}
+
+
+In this section, our objective is to find an optimal sampling schedule \((T, t_1, \dots, t_n, 0)\) that minimizes the \textit{compounding decoding error} (CDE) caused by parallel sampling. In Section 3.1, we define and analyze the CDE, providing an intuitive understanding of how the sampling schedule is related to it. Next, we derive an upper bound on the CDE induced by parallel sampling (Section 3.2) and introduce techniques to compute the upper bound tractable and applicable for sampling schedule optimization (Section 3.3). Finally, in Section 3.4, we propose a hierarchical breakdown strategy that finds the optimal sampling schedule by decomposing a coarse schedule into finer steps. Although this section focuses on samplers based on \(\tau\)-leaping, all methods are also applicable to the \(k\)-Gillespie algorithm.
+\subsection{Motivating Examples: The Time-Dependent Nature of Compounding Errors}
+
+Before formally introducing our method, we begin with a simple analysis to illustrate why an improved sampling schedule can reduce the compounding error. Recall that the compounding error denotes the mismatch between the true joint distribution and the distribution resulting from the parallel generation of different tokens. The compounding error can be quantified using the KL divergence between the joint distribution \( P_{X,Y} \) and the product of the marginal distributions \( P_X \otimes P_Y \), where \( X \) and \( Y \) refer to different tokens:
+
+\begin{equation}
+\text{Compounding Error} 
+\triangleq D_{\mathrm{KL}}(
+\underbrace{P_{X,Y}}_{\textrm{True distribution}} 
+\| 
+\underbrace{P_X \otimes P_Y }_{\textrm{Approx.\ distribution}} 
+) 
+= I(X; Y)
+\label{equation:CDE}
+\end{equation}
+
+\begin{equation}
+\text{Compounding Error of }  \mathbf{X}_t 
+\triangleq D_{\mathrm{KL}}(
+\underbrace{q_t(\mathbf{X}_t)}_{\textrm{True distribution}} 
+\| 
+\underbrace{P_{x_t^{(1)}} \otimes P_{x_t^{(2)}} \otimes\cdots \otimes P_{x_t^{(S)}}}_{\textrm{\jc{Approx.\ distribution with parallel sampling}}} 
+) 
+=?? I((x_t^{(i)})_{i=1,\cdots,S}),
+\label{equation:CDE}
+\end{equation}
+where $\mathbf{X}_t = (x_t^{(i)})_{i=1,\cdots,S}$
+
+Want to say: 
+$I\Big((x_t^{(i)})_{i=1,\cdots,S}\Big) \geq I\Big((x_t^{(i)})_{i=1,\cdots,S} | (x_t^{(i_k)})_{i_k \in\{1,\cdots,S\}} \Big)$
+
+where \( I(X; Y) \) denotes the mutual information between \( X \) and \( Y \). This expression shows that the compounding error is directly related to the mutual information between the tokens; the smaller the mutual information, the less error is introduced by parallel sampling.
+
+\begin{wrapfigure}{r}{6cm}
+\includegraphics[width=5cm]{figures-png/MI.png}
+\caption{
+    \textbf{MI.}
+    MI.
+}
+\label{homogenity-sample}
+\end{wrapfigure}
+
+Our key intuition is that when we sample sequences using discrete diffusion models (DDMs), the mutual information between tokens evolves over time, leading to variations in the compounding error at different timesteps. For example, consider generating text using masked DDMs. In the early stages of generation (those close to \( T \)), the mutual information between tokens \( I(X; Y) \) is high due to the strong dependencies among text tokens. This results in a higher likelihood of compounding error when tokens are generated in parallel. In contrast, as the timestep approaches zero, the mutual information between tokens conditioned on previously generated tokens \( Z \), denoted as \( I(X; Y \mid Z) \), decreases\footnote{
+\( I(X; Y) \geq I(X; Y \mid Z) \) because conditioning on \( Z \) reduces the uncertainty about \( X \) and \( Y \), and \( Z \) may explain some of the shared information between them.}. Since \( Z \) reduces the mutual information between \( X \) and \( Y \), the error introduced by parallel token generation becomes negligible at these later timesteps.
+
+Motivated by this observation, we thought that improving the sampling schedule to allocate more sampling steps in regions where the compounding error is larger could help reduce the compounding error. 
+\jcc{I think the relation between Sec 3.1 and 3.2's result is not obvious. We need to clarify it (talk to you later)}
+
+\subsection{Estimating the Compounding Error Using Girsanov's Theorem}
+
+\jc{which causes a mismatch between the inference and training distributions of the intermediate latents
+produced during the parallel sampling process.}
+
+As seen in Equation~\eref{equation:CDE}, estimating the compounding error requires computing the KL divergence between the true distribution and the approximated distribution. One effective method for computing the KL divergence between two stochastic processes is to use \textbf{Girsanov's theorem} \citep{ding2021markov, chen2022sampling}
+
+\begin{theorem}
+{
+\normalfont{(KL-divergence Upper bound, KLUB)}} Consider the following two CTMCs: 
+\[
+    \begin{cases}
+    
+    \textrm { CTMC 1} : &  q^1_{t+dt|t}(y \mid x) = \delta_{xy} +R^1_t(x,y) dt + o(dt) \\ 
+    \textrm { CTMC 2} : &  q^2_{t+dt|t}(y \mid x) = \delta_{xy} +R^2_t(x,y) dt + o(dt)  \end{cases}
+\]
+Here, $\delta_{xy}$ refers to Dirac delta function, $R^1_t$ and $R^2_t$ represent the rate matrices of each CTMC, with a finite state space $S = \{x_1, \cdots, x_N\}$. Let $\mathbb{P}_T$ and $\mathbb{Q}_T$ be the resulting probability distributions at the time $T$ of the outputs of CTMC 1 and 2, respectively. 
+\yh{If CTMC 1 and 2 start from the same initial distribution
+\(\pi=\mathbb{P}_0=\mathbb{Q}_T\)}, then we have:
+\begin{equation}
+D_\mathrm{KL}(\mathbb{P}_T \| \mathbb{Q}_T) 
+\le D_\mathrm{KL}(\mathbb{P}_{\text{paths}} \| \mathbb{Q}_{\text{paths}}) 
+= 
+\underbrace{\mathbb{E}_{\mathbb{P}_{\text{paths}}} \left[
+\sum_{i,j} \sum_{\substack{0 < u \le T}} H_{u}^{ij} \log \frac{R^1_u(i,j)}{R^2_u(i,j)}
+\right]}_{\mathclap{\textrm{\normalfont{KLUB}}(\mathbb{P}_T \| \mathbb{Q}_T)}} 
+\label{equation:KLUB}
+\end{equation}
+where \( \mathbb{P}_{\text{paths}} \) and \( \mathbb{Q}_{\text{paths}} \) denote the distributions over the path space \( \{ X_t \}_{t \in [0, T]} \), generated by CTMC 1 and CTMC 2, respectively. \(H_u^{ij}\) is an indicator function, where \( H_u^{ij} = 1 \) if a transition from state \( x_i \) to state \( x_j \) occurs at time \( u \); otherwise \( H_u^{ij} = 0 \).
+\end{theorem}
+
+We refer to the rightmost term in Equation~\eref{equation:KLUB} as the Kullback-Leibler divergence Upper Bound (KLUB). This value allows us to measure the mismatch between distributions generated by different continuous-time Markov chains (CTMCs) based on the differences in their rate matrices. Let us now consider CTMC 1 as the ground truth reverse CTMC, and CTMC 2 as the reverse CTMC with parallel sampling. The compounding error can be quantified as the KL divergence between the output distributions generated by the two CTMCs; therefore, the KLUB provides an upper bound for this error.
+
+\yh{Q: Do we need this paragraph? $\shortto$} Notably, samplers that use parallel sampling can also be represented in the form of a CTMC. For example, in the case of \(\tau\)-leaping, the rate matrix is \yh{approximately} fixed as \( \tilde{R}'_u = \tilde{R}_t \) for \( u \in [t - \tau, t) \), where \( \tilde{R}' \) is the reverse rate matrix used by \(\tau\)-leaping and \( \tilde{R} \) is the ground truth reverse rate matrix at time \( t \). As a result, we can use the theorem above to quantify the compounding error of parallel sampling by computing the KLUB between the outputs of the exact reverse CTMC and the reverse CTMC using parallel sampling.
+
+\jc{
+---------------------------
+
+As seen in Eq.~\eref{equation:CDE}, estimating the compounding error requires computing the KL divergence between the true distribution and the approximated distribution. One effective method for computing the KL divergence between two stochastic processes is to use \textbf{Girsanov's theorem} \citep{ding2021markov, chen2022sampling}
+
+\begin{theorem}
+{
+\normalfont{(KL-divergence Upper bound, KLUB)}} Consider the following two CTMCs: 
+\[
+    \begin{cases}
+    
+    \textrm { CTMC 1} : &  q^1_{t+dt|t}(y \mid x) = \delta_{xy} +R^1_t(x,y) dt + o(dt) \\ 
+    \textrm { CTMC 2} : &  q^2_{t+dt|t}(y \mid x) = \delta_{xy} +R^2_t(x,y) dt + o(dt)  \end{cases}
+\]
+Here, $\delta_{xy}$ refers to Dirac delta function, $R^1_t$ and $R^2_t$ represent the rate matrices of each CTMC, with a finite state space $S = \{x_1, \cdots, x_N\}$. Let $\mathbb{P}_T$ and $\mathbb{Q}_T$ be the resulting probability distributions at the time $T$ of the outputs of CTMC 1 and 2, respectively. 
+\yh{If CTMC 1 and 2 start from the same initial distribution
+\(\pi=\mathbb{P}_0=\mathbb{Q}_T\)}, then we have:
+\begin{equation}
+D_\mathrm{KL}(\mathbb{P}_T \| \mathbb{Q}_T) 
+\le D_\mathrm{KL}(\mathbb{P}_{\text{paths}} \| \mathbb{Q}_{\text{paths}}) 
+= 
+\underbrace{\mathbb{E}_{\mathbb{P}_{\text{paths}}} \left[
+\sum_{i,j} \sum_{\substack{0 < u \le T}} H_{u}^{ij} \log \frac{R^1_u(i,j)}{R^2_u(i,j)}
+\right]}_{\mathclap{\textrm{\normalfont{KLUB}}(\mathbb{P}_T \| \mathbb{Q}_T)}} 
+\label{equation:KLUB}
+\end{equation}
+where \( \mathbb{P}_{\text{paths}} \) and \( \mathbb{Q}_{\text{paths}} \) denote the distributions over the path space \( \{ X_t \}_{t \in [0, T]} \), generated by CTMC 1 and CTMC 2, respectively. \(H_u^{ij}\) is an indicator function, where \( H_u^{ij} = 1 \) if a transition from state \( x_i \) to state \( x_j \) occurs at time \( u \); otherwise \( H_u^{ij} = 0 \).
+\end{theorem}
+
+We refer to the rightmost term in Equation~\eref{equation:KLUB} as the Kullback-Leibler divergence Upper Bound (KLUB). This value allows us to measure the mismatch between distributions generated by different continuous-time Markov chains (CTMCs) based on the differences in their rate matrices. Let us now consider CTMC 1 as the ground truth reverse CTMC, and CTMC 2 as the reverse CTMC with parallel sampling. The compounding error can be quantified as the KL divergence between the output distributions generated by the two CTMCs; therefore, the KLUB provides an upper bound for this error.
+
+\yh{Q: Do we need this paragraph? $\shortto$} Notably, samplers that use parallel sampling can also be represented in the form of a CTMC. For example, in the case of \(\tau\)-leaping, the rate matrix is \yh{approximately} fixed as \( \tilde{R}'_u = \tilde{R}_t \) for \( u \in [t - \tau, t) \), where \( \tilde{R}' \) is the reverse rate matrix used by \(\tau\)-leaping and \( \tilde{R} \) is the ground truth reverse rate matrix at time \( t \). As a result, we can use the theorem above to quantify the compounding error of parallel sampling by computing the KLUB between the outputs of the exact reverse CTMC and the reverse CTMC using parallel sampling.
+
+}
+
+\begin{theorem}
+{
+\normalfont{(KL-divergence Upper bound, KLUB)}} Consider the following two CTMCs: 
+\[
+    \begin{cases}
+    
+    \textrm { CTMC 1} : &  q^1_{t+dt|t}(y \mid x) = \delta_{xy} +R^1_t(x,y) dt + o(dt) \\ 
+    \textrm { CTMC 2} : &  q^2_{t+dt|t}(y \mid x) = \delta_{xy} +R^2_t(x,y) dt + o(dt)  \end{cases}
+\]
+Here, $\delta_{xy}$ refers to Dirac delta function, $R^1_t$ and $R^2_t$ represent the rate matrices of each CTMC, with a finite state space $S = \{x_1, \cdots, x_N\}$. \jc{Consider an interval of interest $[\alpha, \beta]$} Let $\mathbb{P}_\beta$ and $\mathbb{Q}_\beta$ be the resulting probability distributions at the time $t=\beta$ of the outputs of CTMC 1 and 2, respectively. 
+\jc{If CTMC 1 and 2 start from the same initial distribution
+\(\mathbb{P}_\alpha=\mathbb{Q}_\alpha\)}, then we have:
+\begin{equation}
+D_\mathrm{KL}(\mathbb{P}_\beta \| \mathbb{Q}_\beta) 
+\le D_\mathrm{KL}(\mathbb{P}_{\text{paths}} \| \mathbb{Q}_{\text{paths}}) 
+= 
+\underbrace{\mathbb{E}_{\mathbb{P}_{\text{paths}}} \left[
+\sum_{i,j} \sum_{\substack{\jc{\alpha < u \le \beta}}} H_{u}^{ij} \log \frac{R^1_u(i,j)}{R^2_u(i,j)}
+\right]}_{\mathclap{\textrm{\normalfont{KLUB}}(\mathbb{P}_T \| \mathbb{Q}_T)}} 
+\label{equation:KLUB}
+\end{equation}
+where \( \mathbb{P}_{\text{paths}} \) and \( \mathbb{Q}_{\text{paths}} \) denote the distributions over the path space \jc{\( \{ X_t \}_{t \in [\alpha, \beta]} \)}, generated by CTMC 1 and CTMC 2, respectively. \(H_u^{ij}\) is an indicator function, where \( H_u^{ij} = 1 \) if a transition from state \( x_i \) to state \( x_j \) occurs at time \( u \); otherwise \( H_u^{ij} = 0 \).
+\end{theorem}
+\subsection{Practical algorithm of KLUB estimation}
+
+\yh{This section seems mathematically heavy
+
+Using the KLUB derived above, we can formulate the sampling schedule optimization as a minimization problem. Starting with a simple case, suppose our sampling schedule is given by \((T, t, 0)\). Let \(\mathbb{Q}_0^{T \shortto t \shortto 0}\) represent the distribution generated by this schedule. Our objective is to find the optimal value of \(t\) that minimizes the compounding error. Restating our minimization problem, we aim to minimize the KLUB:
+
+\begin{equation}
+t^* = \argmin_{t\in(T,0)} \textrm{\normalfont{KLUB}}(
+\mathbb{P}_0 \| \mathbb{Q}_0^{T \shortto t \shortto 0})
+\label{equation:optimization}
+\end{equation}
+However, directly estimating \(\textrm{\normalfont{KLUB}}(\mathbb{P}_0 \| \mathbb{Q}_0^{T \shortto t \shortto 0})\) is practically infeasible. There are two main issues: First, sampling a single path \((X_u)_{u \in [T, 0]}\) under \(\mathbb{P}_{\text{paths}}\) is computationally expensive because it requires simulating the exact reverse CTMC from \(T\) to \(0\), which involves a high number of function evaluations (NFEs). Second, in the sampled trajectory \((X_u)_{u \in [T, 0]}\), only the transitions where \(H_{u}^{ij} = 1\) contribute to the expected value calculation in the KLUB. To obtain a reliable estimate, we need to compute the ratio of the rate matrices \( {R^1_u(i,j)}/{R^2_u(i,j)} \) for various \( i, j, u \). However, obtaining sufficient samples that cover all possible transitions across the state space and time is extremely challenging. To address this challenge, we employ two key techniques.
+
+\paragraph{Technique 1: Maximizing KL Divergence from a Coarser Approximation}
+Instead of minimizing the mismatch between the ground truth distribution \(\mathbb{P}_0\) and \(\mathbb{Q}_0^{T \shortto t \shortto 0}\), we opt to maximize the discrepancy between \(\mathbb{Q}_0^{T \shortto t \shortto 0}\) and a simpler, coarser approximation \(\mathbb{Q}_0^{T \shortto 0}\). The key insight is that by maximizing this divergence, we can identify the optimal sampling time \(t\) that indirectly minimizes the compounding error relative to the true distribution. Specifically, the relationship can be approximated as:
+
+\[
+D_\mathrm{KL}(\mathbb{Q}_0^{T\shortto t \shortto 0} \| \mathbb{Q}_0^{T\shortto 0})
+\approx 
+D_\mathrm{KL}(\mathbb{P}_0 \| \mathbb{Q}_0^{T\shortto 0})
+- D_\mathrm{KL}(\mathbb{P}_0 \| \mathbb{Q}_0^{T\shortto t \shortto 0}),
+\]
+
+thus, maximizing the left-hand side divergence helps minimize the discrepancy \(D_\mathrm{KL}\big(\mathbb{P}_0 \,\big\|\, \mathbb{Q}_0^{T\shortto t \shortto 0}\big)\) between the true distribution \(\mathbb{P}_0\) and the optimized schedule \(\mathbb{Q}_0^{T\shortto t \shortto 0}\).
+
+By comparing the two approximate distributions instead of the ground truth distribution, we reduce the sampling cost by sampling \((X_u)_{u \in [0, T]}\) under \(\mathbb{Q}_{\text{paths}}^{T \shortto t \shortto 0}\) instead of \(\mathbb{P}_{\text{paths}}\). Moreover, thanks to the fixed rate matrix under \(\tau\)-leaping, we can simplify the calculations significantly. Specifically:
+
+\begin{subequations}
+\begin{align}
+\textrm{\normalfont{KLUB}}\big(\mathbb{Q}_0^{T\shortto t \shortto 0} \,\big\|\, \mathbb{Q}_0^{T \shortto 0}\big) 
+&= \mathbb{E}_{\mathbb{Q}_{\text{paths}}^{T\shortto t \shortto 0}} \left[
+\sum_{u=0}^{T} H_{u}^{ij} \log 
+\frac{R^{T\shortto t \shortto 0}_u(i,j)}{R^{T \shortto 0}_u(i,j)}
+\right] \\
+&= \mathbb{E}_{\mathbb{Q}_{\text{paths}}^{T\shortto t \shortto 0}} \left[
+\sum_{u=0}^{t} H_{u}^{ij} \log 
+\frac{R_t(i,j)}{R_T(i,j)}
++ \sum_{u=t}^{T} H_{u}^{ij} 
+\cancel{\log \frac{R_T(i,j)}{R_T(i,j)}}
+\right] 
+\label{equation:KLUB-coarse_to_fine-b}
+\\
+&= \mathbb{E}_{\mathbb{Q}_{\text{paths}}^{T\shortto t \shortto 0}} \left[
+\log \frac{R_t(i,j)}{R_T(i,j)} 
+\sum_{u=0}^{t} H_{u}^{ij} 
+\right]
+\label{equation:KLUB-coarse_to_fine}
+\end{align}
+\end{subequations}
+
+In \eref{equation:KLUB-coarse_to_fine-b}, we utilized the fact that under \(\tau\)-leaping, \(R^{T\shortto t \shortto 0}_u(i,j) = R_T(i,j)\) for \(u \in [t, T]\) and \(R^{T\shortto t \shortto 0}_u(i,j) = R_t(i,j)\) for \(u \in [0, t]\). In \eref{equation:KLUB-coarse_to_fine}, the rate matrices are constant over intervals, allowing us to pull \(\log \frac{R_t(i,j)}{R_T(i,j)}\) outside the summation.
+
+\paragraph{Technique 2: Applying the Law of Total Expectation}
+Consider the meaning of \(\mathbb{E}\left[\sum_{u=0}^{t} H_{u}^{ij}\right]\); it calculates the average probability of a transition from \(i\) to \(j\) occurring between time \(0\) and \(t\). If we knew \(\partial_u p(x_u=j, x_{u-}=i)\), this could be found by \(\int_0^t \partial_u p(x_u=j, x_{u-}=i) \, du\). However, we do not have access to \(\partial_u p(x_u=j, x_{u-}=i)\).
+
+Fortunately, we do know the conditional transition rate \(\partial_u p(x_u=j \mid x_{u-}=i) = R_t(i,j) \). Using this, we can rewrite \eref{equation:KLUB-coarse_to_fine}:
+\begin{subequations}
+\begin{align}
+\mathbb{E}_{\mathbb{Q}_{\text{paths}}^{T\shortto t \shortto 0}}
+\left[
+\log \frac{R_t(i,j)}{R_T(i,j)} 
+\sum_{t < u \leq T} H_{u}^{ij}
+\right] 
+&= \mathbb{E}_{\mathbb{Q}_{\text{paths}}^{T\shortto t}}
+\left[
+\mathbb{E}_{\mathbb{Q}_{\text{paths}}^{t \shortto 0}}
+\left[
+\log \frac{R_t(i,j)}{R_T(i,j)} \sum_{t < u \leq T} H_{u}^{ij} 
+\Bigg| X_t = i\right]
+\right] \label{equation:KLUB-simple-prev} \\
+&= \mathbb{E}_{\mathbb{Q}_{\text{paths}}^{T\shortto t}}
+\left[
+\sum_{X_t\ne j}\log \frac{R_t(X_t,j)}{R_T(X_t,j)} \times R_t(X_t, j) \Delta t  
+\right]
+\label{equation:KLUB-simple}
+\end{align}
+\end{subequations}
+Equation \eref{equation:KLUB-simple-prev} applies the Law of Total Expectation, and in \eref{equation:KLUB-simple}, we utilize the equation:
+\[
+\mathbb{E}_{\mathbb{Q}_{\text{paths}}^{t\shortto 0}}\left[ \log \frac{R_t(i,j)}{R_T(i,j)} \sum_{u=0}^{t} H_{u}^{ij} \Bigg| X_t = i\right] = \log \frac{R_t(i,j)}{R_T(i,j)} \times R_t(i,j) \Delta t,
+\]
+where \(\Delta t = t - 0 = t\).
+
+In the original form of KLUB, Equation~\eref{equation:KLUB}, we needed to sample the ratio of rate matrices across \(i\), \(j\), and \(u\), but in Equation~\eref{equation:KLUB-simple}, sampling is only required over \(i\). This is because, given \(i\), we derived the expected value of the rate matrices ratio over \(j\) and \(u\) in closed form.
+
+Now, we can maximize \eref{equation:KLUB-simple}, using a standard optimization algorithm. Since we are dealing with a single variable \(t\), we employ the golden section search \citep{press2007numerical}, a well-known one-dimensional search algorithm, to find the value of \(t\) that maximizes the KLUB.
+
+\subsection{Hierarchical Breakdown Strategy}
+
+Up to this point, we have discussed how to decompose a coarse sampling schedule \((T, 0)\) into a finer sampling schedule \((T, t_1, 0)\) by finding an optimal intermediate timestep \( t_1 \). Now, we extend this approach to obtain sampling schedules with more steps. Our strategy is straightforward: we recursively split larger intervals into smaller ones, optimizing each new breakpoint to minimize the compounding error (see Figure X).
+
+We begin with the coarsest sampling schedule \((T, 0)\) and use the golden section search to find the optimal \( t_1 \) that minimizes the KLUB. This refines the initial schedule into \((T, t_1, 0)\), effectively splitting the original interval into two parts.
+
+Next, we further refine the sampling schedule into four intervals. We treat \((T, t_1)\) as a new coarse interval and find the optimal \( t_2 \) that maximizes the KLUB within this range, effectively splitting \((T, t_1)\) into \((T, t_2, t_1)\). We repeat the same process for the interval \((t_1, 0)\), finding the optimal \( t_3 \) that splits \((t_1, 0)\) into \((t_1, t_3, 0)\). After this step, the entire time range is divided into five timesteps: \((T, t_2, t_1, t_3, 0)\).
+
+By repeating this process iteratively, we continue splitting each interval into two smaller intervals, each time optimizing the new breakpoint using the KLUB criterion. After \( K \) iterations, this hierarchical breakdown strategy yields a sampling schedule with \( 2^K \) NFEs, effectively optimizing the sampling schedule as the number of steps increases.
+
+
+\section{Optimizing the sampling schedule of discrete diffusion models}
+
+
+For a fixed budget of sampling steps $n$, i.e., Number of Function Evaluation (NFE), our goal is to find an optimal sampling timestep \((T, t_1, \dots, t_n, 0)\) that minimizes the \textit{compounding decoding error} (CDE) caused by parallel sampling. In Section 3.1, we define and analyze the CDE, providing an intuitive understanding of how the sampling schedule is related to it. Next, we derive an upper bound on the CDE induced by parallel sampling (Section 3.2) and introduce techniques to compute the upper bound tractable and applicable for sampling schedule optimization (Section 3.3). Finally, in Section 3.4, we propose a hierarchical breakdown strategy that finds the optimal sampling schedule by decomposing a coarse schedule into finer steps. Although this section focuses on samplers based on \(\tau\)-leaping, all methods are also applicable to the \(k\)-Gillespie algorithm.
+\subsection{Motivating Examples: The Time-Dependent Nature of Compounding Errors}
+
+\jc{We introduce a measure for the \emph{compounding decoding error} (CDE), $\mathcal E_{\mathrm{CDE}}$, which quantifies the discrepancy between the true joint distribution and the distribution obtained from parallel generation of different tokens. For demonstration, we consider a discrete process $\mathbf{X}_t = (X_t, Y_t, Z_t)$ with a sequence length of 3, consisting of tokens \( X_t \), \( Y_t \), and \( Z_t \).}
+
+
+\jc{We propose measuring the CDE using the KL divergence between the joint distribution \( P_{X_t,Y_t,Z_t} \) and the product of marginal distributions \( P_{X_t} \otimes P_{Y_t} \otimes P_{Z_t} \) from parallel sampling:
+\begin{equation}
+\mathcal E_{\mathrm{CDE}}(t) 
+\triangleq \mathcal D_{\mathrm{KL}}(
+\underbrace{P_{X_t,Y_t, Z_t}}_{\textrm{True distribution}} 
+\| 
+\underbrace{P_{X_t} \otimes P_{Y_t} \otimes P_{Z_t} }_{\textrm{Approx.\ distribution from parallel sampling}} 
+) 
+\label{equation:CDE}
+\end{equation}
+We note that the defined CDE is equivalent to the mutual information \( I(X_t; Y_t; Z_t) \) of tokens \( X_t, Y_t, Z_t \):
+\[
+\mathcal E_{\mathrm{CDE}}(t) = \mathcal I(X_t; Y_t; Z_t).
+\]
+
+This expression links the compounding error to mutual information between tokens; lower mutual information reduces parallel sampling error. In general, $\mathcal E_{\mathrm{CDE}}(t)$ varies over time based on the data distribution, corruption kernel (see Fig.~\ref{} for illustration), and DDM sampling methods. 
+
+Motivated by this observation, we will derive a tractable upper bound for $\mathcal E_{\mathrm{CDE}}(t)$ in the next section, depending on $t$. This allows us to allocate sampling timesteps in regions with higher CDE, thereby reducing the CDE — our strategy for optimizing sampling timesteps.}
+\subsection{Estimating the Compounding Error Using Girsanov's Theorem}
+
+\jc{
+As shown in \eref{equation:CDE}, computing $\mathcal{E}_{\mathrm{CDE}}(t)$ involves determining the KL divergence between the true distribution and the approximated distribution from DDM's parallel sampler, which is often intractable.
+
+To address this, we treat the ground truth reverse process and the sampling process from DDM's parallel samplers (introduced in Sec.~\ref{}) as two CTMCs, starting from the same initial distribution. By applying \textbf{Girsanov's theorem}~\citep{ding2021markov, chen2022sampling}, we derive a tractable formula to compare the KL divergence between the distributions of these stochastic processes terminate at any time $t$. We summarize this as the following general theorem applicable to any two (forward/backward) CTMCs with $R^1_t$ and $R^2_t$ as their respective transition rate matrices:
+\[
+\begin{cases}
+\textrm{CTMC 1}: & q^1_{t+dt|t}(y \mid x) = \delta_{xy} + R^1_t(x,y) dt + o(dt) \\ 
+\textrm{CTMC 2}: & q^2_{t+dt|t}(y \mid x) = \delta_{xy} + R^2_t(x,y) dt + o(dt),
+\end{cases}
+\]
+
+
+\begin{theorem}
+\normalfont{(KL-Divergence Upper Bound, KLUB)} 
+Consider an interval $[\alpha, \beta]$. If both CTMCs start from the same initial distribution, $\mathbb{P}_\alpha = \mathbb{Q}_\alpha$, then we have:
+
+\begin{equation}
+\mathcal{D}_\mathrm{KL}(\mathbb{P}_\beta \| \mathbb{Q}_\beta) 
+\le \mathcal{D}_\mathrm{KL}(\mathbb{P}_{\mathrm{paths}} \| \mathbb{Q}_{\mathrm{paths}}) 
+= 
+\underbrace{\mathbb{E}_{\mathbb{P}_{\mathrm{paths}}} \left[
+\sum_{i,j} \sum_{\substack{\alpha < u \le \beta}} H_{u}^{ij} \log \frac{R^1_u(i,j)}{R^2_u(i,j)}
+\right]}_{\triangleq~\textrm{\normalfont{KLUB}}(\mathbb{P}_\beta \| \mathbb{Q}_\beta)}. 
+\label{equation:KLUB}
+\end{equation}
+
+Here, $\mathbb{P}_\beta$ and $\mathbb{Q}_\beta$ are the probability distributions at time $t$ resulting from CTMC 1 and CTMC 2, respectively. $\mathbb{P}_{\mathrm{paths}}$ and $\mathbb{Q}_{\mathrm{paths}}$ denote the distributions over their path spaces $\{ X_u \}_{u \in [\alpha, \beta]}$, generated by CTMC 1 and CTMC 2, respectively. The indicator function $H_u^{ij}$ is defined as $H_u^{ij} = 1$ if a transition from state $\rvx_i$ to state $\rvx_j$ occurs at time $u$, and $H_u^{ij} = 0$ otherwise.
+
+\end{theorem}
+We denote the rightmost term in \eref{equation:KLUB} as the \emph{Kullback-Leibler Divergence Upper Bound (KLUB)}, which quantifies the mismatch between distributions generated by different CTMCs based on their rate matrices. Consider CTMC 1 as the ground truth reverse CTMC and CTMC 2 as the reverse CTMC obtained via parallel sampling by substituting the forward transition kernel with the corresponding reverse-in-time kernel. Thus, $\mathcal{E}_{\mathrm{CDE}}(t)$ can be expressed as the KL divergence between the output distributions of the two CTMCs at time $t$, starting from the initial distribution $\pi$ at time $T$. This leads to the upper bound:
+\begin{align*}
+    \mathcal{E}_{\mathrm{CDE}}(t) \le \textrm{\normalfont{KLUB}}(\mathbb{P}_t \| \mathbb{Q}_t).
+\end{align*}
+
+\yh{Q: Do we need this paragraph? $\shortto$} Notably, samplers that use parallel sampling can also be represented in the form of a CTMC. For example, in the case of \(\tau\)-leaping, the rate matrix is \yh{approximately} fixed as \( \tilde{R}'_u = \tilde{R}_t \) for \( u \in [t - \tau, t) \), where \( \tilde{R}' \) is the reverse rate matrix used by \(\tau\)-leaping and \( \tilde{R} \) is the ground truth reverse rate matrix at time \( t \). As a result, we can use the theorem above to quantify the compounding error of parallel sampling by computing the KLUB between the outputs of the exact reverse CTMC and the reverse CTMC using parallel sampling.
+
+
+\subsection{Coarse-to-Fine Timestep Searching Strategy}
+Using the derived KLUB, we can formulate the timestep search as a minimization problem over KLUB. In a coarse-to-fine manner, suppose our sampling schedule is given by \((T, t, 0)\). Let \(\mathbb{Q}_0^{T \shortto t \shortto 0}\) represent the distribution generated by this schedule. Our goal is to find the optimal \(t\) that minimizes the CDE at time $0$ to match \(D_\mathrm{KL}(\mathbb{P}_0 \| \mathbb{Q}_0)\). This is approximately achievable by minimizing its KLUB upper bound:
+\begin{equation}
+t_1 \in \argmin_{t\in(T,0)} \textrm{\normalfont{KLUB}}(
+\mathbb{P}_0 \| \mathbb{Q}_0^{T \shortto t \shortto 0})
+\label{equation:optimization}
+\end{equation}
+With the initial refined interval \((T, t_1, 0)\), we seek optimal timesteps \(t_2 \in (T, t_1)\) and \(t_3 \in (t_1, 0)\) by solving the following minimization problems: 
+\[
+t_2 \in \argmin_{t\in(T,t_1)} \textrm{\normalfont{KLUB}}(
+\mathbb{P}_{t_1} \| \mathbb{Q}_{t_1}^{T \shortto t \shortto t_1}) \quad \text{and} \quad t_3 \in \argmin_{t\in(t_1,0)} \textrm{\normalfont{KLUB}}(
+\mathbb{P}_{0} \| \mathbb{Q}_{0}^{t_1 \shortto t \shortto 0}).
+\] 
+The first minimization problem targets matching \(D_\mathrm{KL}(\mathbb{P}_{t_1} \| \mathbb{Q}_{t_1})\), while the second focuses on matching \(D_\mathrm{KL}(\mathbb{P}_{0} \| \mathbb{Q}_{0})\).
+This results in a further refined interval \((T, t_2, t_1, t_3, 0)\). By iterating this process, we continue splitting each interval into smaller ones, optimizing breakpoints using the KLUB criterion. After \(K\) iterations, this hierarchical strategy yields a sampling schedule with \(2^K\) NFEs, optimizing the schedule as the number of steps increases.
+
+We visualize this recursive process of splitting larger intervals and optimizing each breakpoint to minimize CDE at these endpoints in Figure X.
+
+}
+
+\subsection{Practical algorithm of KLUB estimation}
+
+\yh{This section seems mathematically heavy
+However, directly estimating \(\textrm{\normalfont{KLUB}}(\mathbb{P}_0 \| \mathbb{Q}_0^{T \shortto t \shortto 0})\) is practically infeasible. There are two main issues: First, sampling a single path \((X_u)_{u \in [T, 0]}\) under \(\mathbb{P}_{\text{paths}}\) is computationally expensive because it requires simulating the exact reverse CTMC from \(T\) to \(0\), which involves a high number of function evaluations (NFEs). Second, in the sampled trajectory \((X_u)_{u \in [T, 0]}\), only the transitions where \(H_{u}^{ij} = 1\) contribute to the expected value calculation in the KLUB. To obtain a reliable estimate, we need to compute the ratio of the rate matrices \( {R^1_u(i,j)}/{R^2_u(i,j)} \) for various \( i, j, u \). However, obtaining sufficient samples that cover all possible transitions across the state space and time is extremely challenging. To address this challenge, we employ two key techniques.
+
+\paragraph{Technique 1: Maximizing KL Divergence from a Coarser Approximation}
+Instead of minimizing the mismatch between the ground truth distribution \(\mathbb{P}_0\) and \(\mathbb{Q}_0^{T \shortto t \shortto 0}\), we opt to maximize the discrepancy between \(\mathbb{Q}_0^{T \shortto t \shortto 0}\) and a simpler, coarser approximation \(\mathbb{Q}_0^{T \shortto 0}\). The key insight is that by maximizing this divergence, we can identify the optimal sampling time \(t\) that indirectly minimizes the compounding error relative to the true distribution. Specifically, the relationship can be approximated as:
+
+\[
+D_\mathrm{KL}(\mathbb{Q}_0^{T\shortto t \shortto 0} \| \mathbb{Q}_0^{T\shortto 0})
+\approx 
+D_\mathrm{KL}(\mathbb{P}_0 \| \mathbb{Q}_0^{T\shortto 0})
+- D_\mathrm{KL}(\mathbb{P}_0 \| \mathbb{Q}_0^{T\shortto t \shortto 0}),
+\]
+
+thus, maximizing the left-hand side divergence helps minimize the discrepancy \(D_\mathrm{KL}\big(\mathbb{P}_0 \,\big\|\, \mathbb{Q}_0^{T\shortto t \shortto 0}\big)\) between the true distribution \(\mathbb{P}_0\) and the optimized schedule \(\mathbb{Q}_0^{T\shortto t \shortto 0}\).
+
+By comparing the two approximate distributions instead of the ground truth distribution, we reduce the sampling cost by sampling \((X_u)_{u \in [0, T]}\) under \(\mathbb{Q}_{\text{paths}}^{T \shortto t \shortto 0}\) instead of \(\mathbb{P}_{\text{paths}}\). Moreover, thanks to the fixed rate matrix under \(\tau\)-leaping, we can simplify the calculations significantly. Specifically:
+
+\begin{subequations}
+\begin{align}
+\textrm{\normalfont{KLUB}}\big(\mathbb{Q}_0^{T\shortto t \shortto 0} \,\big\|\, \mathbb{Q}_0^{T \shortto 0}\big) 
+&= \mathbb{E}_{\mathbb{Q}_{\text{paths}}^{T\shortto t \shortto 0}} \left[
+\sum_{u=0}^{T} H_{u}^{ij} \log 
+\frac{R^{T\shortto t \shortto 0}_u(i,j)}{R^{T \shortto 0}_u(i,j)}
+\right] \\
+&= \mathbb{E}_{\mathbb{Q}_{\text{paths}}^{T\shortto t \shortto 0}} \left[
+\sum_{u=0}^{t} H_{u}^{ij} \log 
+\frac{R_t(i,j)}{R_T(i,j)}
++ \sum_{u=t}^{T} H_{u}^{ij} 
+\cancel{\log \frac{R_T(i,j)}{R_T(i,j)}}
+\right] 
+\label{equation:KLUB-coarse_to_fine-b}
+\\
+&= \mathbb{E}_{\mathbb{Q}_{\text{paths}}^{T\shortto t \shortto 0}} \left[
+\log \frac{R_t(i,j)}{R_T(i,j)} 
+\sum_{u=0}^{t} H_{u}^{ij} 
+\right]
+\label{equation:KLUB-coarse_to_fine}
+\end{align}
+\end{subequations}
+
+In \eref{equation:KLUB-coarse_to_fine-b}, we utilized the fact that under \(\tau\)-leaping, \(R^{T\shortto t \shortto 0}_u(i,j) = R_T(i,j)\) for \(u \in [t, T]\) and \(R^{T\shortto t \shortto 0}_u(i,j) = R_t(i,j)\) for \(u \in [0, t]\). In \eref{equation:KLUB-coarse_to_fine}, the rate matrices are constant over intervals, allowing us to pull \(\log \frac{R_t(i,j)}{R_T(i,j)}\) outside the summation.
+
+\paragraph{Technique 2: Applying the Law of Total Expectation}
+Consider the meaning of \(\mathbb{E}\left[\sum_{u=0}^{t} H_{u}^{ij}\right]\); it calculates the average probability of a transition from \(i\) to \(j\) occurring between time \(0\) and \(t\). If we knew \(\partial_u p(x_u=j, x_{u-}=i)\), this could be found by \(\int_0^t \partial_u p(x_u=j, x_{u-}=i) \, du\). However, we do not have access to \(\partial_u p(x_u=j, x_{u-}=i)\).
+
+Fortunately, we do know the conditional transition rate \(\partial_u p(x_u=j \mid x_{u-}=i) = R_t(i,j) \). Using this, we can rewrite \eref{equation:KLUB-coarse_to_fine}:
+\begin{subequations}
+\begin{align}
+\mathbb{E}_{\mathbb{Q}_{\text{paths}}^{T\shortto t \shortto 0}}
+\left[
+\log \frac{R_t(i,j)}{R_T(i,j)} 
+\sum_{t < u \leq T} H_{u}^{ij}
+\right] 
+&= \mathbb{E}_{\mathbb{Q}_{\text{paths}}^{T\shortto t}}
+\left[
+\mathbb{E}_{\mathbb{Q}_{\text{paths}}^{t \shortto 0}}
+\left[
+\log \frac{R_t(i,j)}{R_T(i,j)} \sum_{t < u \leq T} H_{u}^{ij} 
+\Bigg| X_t = i\right]
+\right] \label{equation:KLUB-simple-prev} \\
+&= \mathbb{E}_{\mathbb{Q}_{\text{paths}}^{T\shortto t}}
+\left[
+\sum_{X_t\ne j}\log \frac{R_t(X_t,j)}{R_T(X_t,j)} \times R_t(X_t, j) \Delta t  
+\right]
+\label{equation:KLUB-simple}
+\end{align}
+\end{subequations}
+Equation \eref{equation:KLUB-simple-prev} applies the Law of Total Expectation, and in \eref{equation:KLUB-simple}, we utilize the equation:
+\[
+\mathbb{E}_{\mathbb{Q}_{\text{paths}}^{t\shortto 0}}\left[ \log \frac{R_t(i,j)}{R_T(i,j)} \sum_{u=0}^{t} H_{u}^{ij} \Bigg| X_t = i\right] = \log \frac{R_t(i,j)}{R_T(i,j)} \times R_t(i,j) \Delta t,
+\]
+where \(\Delta t = t - 0 = t\).
+
+In the original form of KLUB, Equation~\eref{equation:KLUB}, we needed to sample the ratio of rate matrices across \(i\), \(j\), and \(u\), but in Equation~\eref{equation:KLUB-simple}, sampling is only required over \(i\). This is because, given \(i\), we derived the expected value of the rate matrices ratio over \(j\) and \(u\) in closed form.
+
+Now, we can maximize \eref{equation:KLUB-simple}, using a standard optimization algorithm. Since we are dealing with a single variable \(t\), we employ the golden section search \citep{press2007numerical}, a well-known one-dimensional search algorithm, to find the value of \(t\) that maximizes the KLUB.
+
+
+
+
+\section{Optimizing the sampling schedule of discrete diffusion models}
+
+
+
+In this section, we aim to optimize sampling schedule \(\{ T \shortto t_1 \shortto t_2 \shortto \dots \shortto t_{N-1} \shortto 0 \}\) to minimize the \textit{Compounding Decoding Error} (CDE) introduced by parallel sampling. First, we define and analyze the CDE, examining its relationship to both the sampling schedule (\sref{subsection:section3.1}) and sampling quality (\sref{subsection:section.add}). In \sref{subsection:section3.2}, we derive an upper bound on the CDE, which serves as the objective for the sampling schedule optimization. Finally, we introduce a hierarchical breakdown strategy (\sref{subsection:section3.3}) and computational techniques (\sref{subsection:section3.4}) to make the optimization tractable. 
+\fref{fig:theory-relationship} summarizes the relationships between the theoretical analyses discussed in this section.
+
+Although this section focuses on samplers based on \(\tau\)-leaping, all methods are also applicable to the \(k\)-Gillespie algorithm. For extensions to \(k\)-Gillespie, please refer to the Algorithm~\ref{alg:klub}.
+\paragraph{Notations} 
+To begin, we introduce some essential mathematical notation. \( X : \) a random variable, \( \mathbf{x} : \) its observation, \( \mathbb{P}, \mathbb{Q} : \) distributions, \(\{ T \shortto t_1 \shortto \dots \shortto t_{N-1} \shortto 0 \} :\) sampling schedule, and \(\mathbb{Q}^{a \shortto b \shortto \cdots \shortto c} :\) the distribution generated by the sampling schedule \(\{ a \shortto b \shortto \cdots \shortto c \}\). For clarity, when working with backward CTMCs, we slightly abuse notation and express intervals as \([s, t] \triangleq \{u \mid s \ge u \ge t\}\);
+the same applies to open and half-open intervals.
+
+\begin{figure}[th]
+    \centering
+    \usetikzlibrary{calc} 
+    \begin{tikzpicture}[
+        node distance=3cm and 3.5cm, 
+        every node/.style={align=center, font=\footnotesize},
+        block/.style={rectangle, draw, minimum height=2em, text centered, font=\footnotesize},
+        root/.style={rectangle, draw, thick, font=\footnotesize, text centered, minimum height=2em},
+        dashedblock/.style={rectangle, draw, dashed, thick, minimum height=2em, font=\footnotesize}
+    ]
+    
+    \node (DKL_0) {$\mathcal D_{\mathrm{KL}}(\mathbb{P}_0 \| \mathbb{Q}_0^{t_0\shortto t_1 \shortto \cdots \shortto 0})$ }; % \jcc{should the $\mathbb{Q}_0$  be discretized chain: $$?}
+    \node[right=0.1cm of DKL_0] (leq1) {$\leq$};
+    \node[right=0.1cm of leq1] (DKL_t) {$\sum_{i=0}^{N-1} \mathcal D_{\mathrm{KL}}(\mathbb{P}_{t_{i+1}} \| \mathbb{Q}^{t_{i}\shortto t_{i+1}}_{t_{i+1}})$};
+    \node[right=0.1cm of DKL_t] (leq2) {$\leq$};
+    \node[right=0.1cm of leq2] (DKL_path) {$\mathcal D_{\mathrm{KL}}(\mathbb{P}_{\mathrm{paths}} \| \mathbb{Q}_{\mathrm{paths}}^{t_0\shortto t_1 \shortto \cdots \shortto 0})$};
+
+    \node[above=0.025cm of leq1] (thm_3_1) {Theorem \ref{theorem:1}};
+    \node[above=0.025cm of leq2] (eq6) {\eref{equation:CDE-KLUB}};
+
+    \node[below=0.75cm of DKL_t] (CDE) {$\sum_{i=0}^{N-1} \mathcal{E}_{\mathrm{CDE}}(t_{i} \shortrightarrow t_{i+1})$};
+    \node[below=0.75cm of DKL_path] (KLUB) {KLUB$(\mathbb{P}_{0} \| \mathbb{Q}_{0}^{t_0\shortto t_1 \shortto \cdots \shortto 0})$};
+    \node[below=0.75cm of KLUB] (JYS) {$\{ T \shortto t_1 \shortto \dots \shortto t_{N-1} \shortto 0 \}$};
+
+    \draw[dashed] (DKL_t) -- (CDE) node[midway, right] {Eqs.~(\ref{equation:CDE}, \ref{equation:CDE_marginal})};
+    \draw[dashed] (DKL_path) -- (KLUB) node[midway, right] {Theorem \ref{theorem:2}};
+    \draw[->] (KLUB) -- (JYS) node[midway, right] {Algorithm \ref{alg:klub}, \ref{alg:jump-your-steps}.};
+    
+    \end{tikzpicture}
+    \caption{
+    An illustration of the relationship between the KL divergence of the distribution, the compounding error \(\mathcal{E}_{\mathrm{CDE}}\) (\sref{subsection:section3.1}), and KLUB (\sref{subsection:section3.2}). The sampling schedule \(\{ T \shortto t_1 \shortto \dots \shortto t_{N-1} \shortto 0 \}\) is optimized to minimize KLUB using the efficient algorithms detailed in Section~\ref{subsection:section3.3}, and \ref{subsection:section3.4}.
+    }
+\label{fig:theory-relationship}
+\end{figure}
+
+\subsection{
+Time-Dependent Nature of Compounding Decoding Errors}
+\label{subsection:section3.1}
+
+We introduce a measure for the \emph{Compounding Decoding Error} (CDE), $\mathcal E_{\mathrm{CDE}}$, which quantifies the discrepancy between the true joint distribution and the distribution from parallel token generation. For illustration, we consider a discrete process $X_t = (X^1_t, X^2_t)$ with sequence length 2, consisting of tokens \( X^1_t \) and \( X^2_t \).
+
+We propose measuring the CDE for a single parallel sampling step $\{s \shortto t\}$ start from $\mathbf{x}_s$ by using the KL divergence between the joint distribution \( P_{X^1_t,X^2_t|\mathbf{x}_s} \) and the product of marginal distributions \( P_{X^1_t|\mathbf{x}_s} \otimes P_{X^2_t|\mathbf{x}_s} \):
+
+\begin{equation}
+\mathcal E_{\mathrm{CDE}}(s \shortrightarrow t | \mathbf{x}_s) 
+\triangleq 
+\mathcal D_{\mathrm{KL}}(
+\underbrace{P_{X^1_t, X^2_t|\mathbf{x}_s}}_{\textrm{True distribution}} 
+\| 
+\underbrace{P_{X^1_t|\mathbf{x}_s} \otimes P_{X^2_t|\mathbf{x}_s}  }_{\textrm{Approx.\ distribution from parallel sampling}} 
+).
+\label{equation:CDE}
+\end{equation}
+We note that the defined CDE is equivalent to the conditional mutual information \( \mathcal I(X^1_t; X^2_t | \mathbf{x}_s) \) of tokens \( X^1_t, X^2_t\):
+\begin{equation}
+\mathcal E_{\mathrm{CDE}}(s \shortrightarrow t | \mathbf{x}_s) = \mathcal I(X^1_t; X^2_t  | \mathbf{x}_s).
+\label{equation:mi}
+\end{equation}
+
+This expression links the compounding error to the mutual information between tokens; lower mutual information reduces parallel sampling errors. For example, as shown in \fref{fig:teaser} \figbottom{}, as generation progresses, the uncertainty of each token decreases over time due to the tokens already generated, reducing mutual information and preventing CDE. In general, CDE depends on the timesteps, and its behavior varies with the data distribution, corruption kernel (see Fig.~\ref{figure:jump-your-steps} for illustration), and DDM sampling methods. \yh{Motivated by this observation, we hypothesize that we can reduce the CDEs during generation process by optimizing the sampling schedule.} % $(T, t_1, t_2, \dots, t_{N-1}, 0)$} % \( T = t_0 > t_1 > t_2 > \dots > t_{N-1} > t_N = 0 \).
+\subsection{Relation between Compounding Decoding errors and generation quality}
+\label{subsection:section.add}
+
+While the \eref{equation:CDE} allows us to estimate the CDE starting from a specific state \(\mathbf{x}_s\), in practice, we are interested in the average compounding error over all possible starting states at time \( s \). To assess the overall impact of the CDE when transitioning over the timesteps \( s \shortrightarrow t \), we consider the expected value of \(\mathcal{E}_{\mathrm{CDE}}(s \shortrightarrow t | \mathbf{x}_s)\) with respect to \(\mathbf{x}_s \sim \mathbb{P}_s\). This leads us to consider:
+\begin{equation}
+\mathcal E_{\mathrm{CDE}}(s \shortrightarrow t) 
+\triangleq \mathbb{E}_{\mathbf{x}_s} \left[ \mathcal E_{\mathrm{CDE}}(s \shortrightarrow t | \mathbf{x}_s) \right].
+\label{equation:CDE_marginal}
+\end{equation}
+
+Consider a sampling schedule \( \{ T = t_0 \shortto t_1 \shortto \dots \shortto t_{N-1} \shortto 0 = t_{N} \} \), which will be specified later. Our goal is to minimize the cumulative CDE that arises from each parallel sampling step within the given schedule. If we ignore the accumulated error from the previous steps that affects the consecutive steps, our objective is as follows:
+\begin{equation}
+    \min_{t_1, t_2, \dots, t_{N-1}} \sum_{i=0}^{N-1} \mathcal{E}_{\mathrm{CDE}}(t_i \shortrightarrow t_{i+1}).
+\end{equation}
+
+
+\begin{theorem} 
+\label{theorem:1}
+We have the following bound on the KL divergence between \( \mathbb{P}_0 \) and \( \mathbb{Q}_0^{T \shortto t_1 \shortto \cdots \shortto 0} \) in terms of cumulative CDEs:
+\begin{equation}\label{eq:KL_CDE}
+    \mathcal{D}_{\mathrm{KL}}(\mathbb{P}_0 \| \mathbb{Q}_0^{T\shortto t_1 \shortto \cdots \shortto 0}) \le \sum_{i=0}^{N-1} \mathcal{E}_{\mathrm{CDE}}(t_i \shortrightarrow t_{i+1}).
+\end{equation}
+\end{theorem}
+{This theorem suggests that effectively allocating the time schedule to minimize the CDEs can implicitly reduce the discrepancy between the true distribution and the approximate distribution obtained from parallel sampling. Motivated by this, in the next section, we derive a tractable upper bound for 
+\( \sum_{i=0}^{N-1} \mathcal{E}_{\mathrm{CDE}}(t_i \shortrightarrow t_{i+1}) \) that depends on the sampling schedule \( \{  T \shortto t_1 \shortto \dots \shortto t_{N-1} \shortto 0 \} \) to facilitate its optimization.}
+
+\subsection{Estimating the Compounding Decoding Error Using Girsanov's Theorem}
+\label{subsection:section3.2}
+
+As shown in \eref{equation:CDE}, computing $\mathcal E_{\mathrm{CDE}}(s \shortrightarrow t | \mathbf{x}_s)$ involves determining the KL divergence between the true distribution and the approximated distribution from DDM's parallel sampler, which is often intractable. To address this, we treat the ground truth reverse process and the sampling process from DDM's parallel samplers (introduced in \sref{section:background}) as two CTMCs, starting from the same initial distribution. By applying \textbf{Girsanov's theorem}~\citep{ding2021markov, chen2022sampling}, we derive a tractable formula to compare the KL divergence between the distributions of these stochastic processes at any time interval $[s, t]$. We summarize this as the following general theorem applicable to any two backward CTMCs with $R^1_t$ and $R^2_t$ as their respective transition rate matrices:
+\[
+\begin{cases}
+\textrm{CTMC 1}: & q^1_{u - du|u}(y \mid x) = \delta_{xy} + R^1_t(x,y) du + o(du), \\ 
+\textrm{CTMC 2}: & q^2_{u - du|u}(y \mid x) = \delta_{xy} + R^2_t(x,y) du + o(du).
+\end{cases}
+\]
+\begin{theorem}
+\label{theorem:2}
+{\normalfont{(KL-Divergence Upper Bound, KLUB)}}
+Consider an interval $[s, t]$ ($s > t$). If both CTMCs start from the same initial distribution, $\pi_s=\mathbb{P}_s = \mathbb{Q}_s$, then we have:
+\begin{equation}
+\mathcal{D}_{\mathrm{KL}}(\mathbb{P}_t \| \mathbb{Q}_t) 
+\le \mathcal{D}_{\mathrm{KL}}(\mathbb{P}_{\mathrm{paths}} \| \mathbb{Q}_{\mathrm{paths}}) 
+= 
+\underbrace{\mathbb{E}_{\mathbb{P}_{\mathrm{paths}}} \left[
+\sum_{i \ne j} \sum_{\substack{t < u \le s}} H_{u}^{ij} \log \frac{R^1_u(i,j)}{R^2_u(i,j)}
+\right]}_{\triangleq~\textrm{\normalfont{KLUB}}_{\pi_s}(\mathbb{P}_t \| \mathbb{Q}_t)}. 
+\label{equation:KLUB}
+\end{equation}
+
+Here, $\mathbb{P}_t$ and $\mathbb{Q}_t$ are the probability distributions at time $t$ resulting from CTMC 1 and CTMC 2, respectively. $\mathbb{P}_{\mathrm{paths}}$ and $\mathbb{Q}_{\mathrm{paths}}$ denote the distributions over their path spaces $(X_u)_{u \in [t, s]}$, generated by CTMC 1 and CTMC 2, respectively. The indicator function $H_u^{ij}$ is defined as $H_u^{ij} = 1$ if a transition from state $i$ to $j$ occurs at time $u$, and $H_u^{ij} = 0$ otherwise.
+
+\end{theorem}
+
+We denote the rightmost term in \eref{equation:KLUB} as the \emph{Kullback-Leibler Divergence Upper Bound (KLUB)}, which quantifies the mismatch between distributions generated by different CTMCs based on their rate matrices. Theorem~\ref{theorem:2} demonstrates that the difference in trajectories sampled from different CTMCs depends on the \textbf{ratio of their rate matrices}. 
+
+Consider CTMC 1 as the ground truth reverse CTMC and CTMC 2 as the reverse CTMC obtained via parallel sampling by substituting the forward transition kernel with the corresponding reverse-in-time kernel. Thus, $\mathcal{E}_{\mathrm{CDE}}(s \shortrightarrow t | \mathbf{x}_s)$ can be expressed as the KL divergence between the output distributions of the two CTMCs at time $t$, starting from the initial point $\mathbf{x}_s$
+\begin{equation}
+\mathcal E_{\mathrm{CDE}}(s \shortrightarrow t) 
+\le 
+\textrm{\normalfont{KLUB}}_{\mathbb{P}_s}(\mathbb{P}_t \| \mathbb{Q}^{s\shortto t}_t),
+\label{equation:CDEbound}
+\end{equation}
+{where $\mathbb{Q}^{s\shortto t}_t$ is given by the process discretized at time $s$ and $t$.
+}
+This expectation considers the distribution of states at time \( s \) and offers a more comprehensive measure of the CDE over the interval \( [s, t] \).
+{
+Moreover, from the additivity of KLUB, we can bound the sum of CDEs as
+\begin{equation}
+    \mathcal E_{\mathrm{CDE}}(s \shortrightarrow t) + \mathcal E_{\mathrm{CDE}}(t \shortrightarrow u)
+    \le \textrm{\normalfont{KLUB}}_{\mathbb{P}_s}(\mathbb{P}_t \| \mathbb{Q}^{s\shortto t}_t)
+    + \textrm{\normalfont{KLUB}}_{\mathbb{P}_t}(\mathbb{P}_u \| \mathbb{Q}^{t\shortto u}_u)
+    = \textrm{\normalfont{KLUB}}_{\mathbb{P}_s}(\mathbb{P}_u \| \mathbb{Q}^{s\shortto t\shortto u}_u),
+\label{equation:CDE-KLUB}
+\end{equation}
+which shows that the KLUB can be useful for comparing the quality of
+discretization of the interval $[s, u]$ with different break point $t$. 
+}
+\yh{We can easily extend this result for the sum of CDEs over the entire sampling schedule $\{ T = t_0 \shortto t_1 \shortto \dots \shortto t_{N-1} \shortto 0 = t_{N} \}$.}
+\yh{
+\begin{equation}
+    \mathcal{D}_{\mathrm{KL}}(\mathbb{P}_0 \| \mathbb{Q}_0^{T\shortto t_1 \shortto \cdots \shortto 0}) 
+    \le 
+    \sum_{i=0}^{N-1} \mathcal{E}_{\mathrm{CDE}}(t_i \shortrightarrow t_{i+1})
+    \le 
+    \textrm{\normalfont{KLUB}}_{\mathbb{P}_T}(\mathbb{P}_0 \| \mathbb{Q}^{T\shortto t_1 \shortto \cdots \shortto 0}_0)
+    ,
+\end{equation}
+where inequality on the left-hand side comes from Theorem~\ref{theorem:1}. 
+
+To summarize, optimizing the sampling schedule involves finding a set of timesteps \( \{ T \shortto t_1 \shortto \dots \shortto t_{N-1} \shortto 0 \} \) that minimizes the KLUB on the right-hand side. This approach approximately reduces the cumulative CDE (middle) and provides an upper bound on the KL divergence between the true distribution and the sampled distribution for the given schedule (left-hand side).
+
+} 
+
+\subsection{Feasible Computation with Hierarchical Breakdown Strategy}
+\label{subsection:section3.3}
+
+Using the derived KLUB, we can formulate the timestep search as a minimization problem over KLUB. Here, we employ a hierarchical breakdown strategy, dividing a coarser sampling schedule into a finer one, as shown in \fref{figure:hierarchical-breakdown}. Suppose our sampling schedule is given by \(\{ T \shortto t \shortto 0 \}\). Let \(\mathbb{Q}_0^{T \shortto t \shortto 0}\) represent the distribution generated by this schedule. Our goal is to find the optimal \(t\) that minimizes cumulative CDE, i.e., 
+$\mathcal{E}_{\mathrm{CDE}}(T \shortrightarrow t) + \mathcal{E}_{\mathrm{CDE}}(t \shortrightarrow 0)$. 
+This is approximately achievable by minimizing its KLUB upper bound:
+\begin{equation}
+t_1 = \argmin_{t\in(T,0)} \textrm{\normalfont{KLUB}}(
+\mathbb{P}_0 \| \mathbb{Q}_0^{T \shortto t \shortto 0})
+\label{equation:optimization}
+\end{equation}
+With the initial refined interval \(\{ T \shortto t_t \shortto 0 \}\), we seek optimal timesteps \(t_2 \in (T, t_1)\) and \(t_3 \in (t_1, 0)\) by solving the following minimization problems: 
+\[
+t_2 \in \argmin_{t\in(T,t_1)} \textrm{\normalfont{KLUB}}(
+\mathbb{P}_{t_1} \| \mathbb{Q}_{t_1}^{T \shortto t \shortto t_1}) \quad \text{and} \quad t_3 \in \argmin_{t\in(t_1,0)} \textrm{\normalfont{KLUB}}(
+\mathbb{P}_{0} \| \mathbb{Q}_{0}^{t_1 \shortto t \shortto 0}).
+\] 
+
+\begin{wrapfigure}{r}{7.0cm}
+\includegraphics[width=6.5cm]{figures-pdf/hierarchical-breakdown.pdf}
+\caption{
+    We optimize the sampling schedule by refining it from coarse intervals to finer intervals, using a hierarchical breakdown strategy.
+}
+\label{figure:hierarchical-breakdown}
+\end{wrapfigure}
+
+The first minimization problem targets matching \(\mathcal{D}_\mathrm{KL}(\mathbb{P}_{t_1} \| \mathbb{Q}_{t_1})\), while the second focuses on matching \(\mathcal{D}_\mathrm{KL}(\mathbb{P}_{0} \| \mathbb{Q}_{0})\).
+This results in a further refined sampling schedule \(\{T \shortto t_2 \shortto t_1 \shortto t_3 \shortto 0 \}\). By iterating this process, we continue splitting each interval into smaller ones, optimizing breakpoints using the KLUB criterion. After \(K\) iterations, this hierarchical strategy yields a sampling schedule with \(2^K\) NFEs, optimizing the schedule as the number of steps increases.
+\subsection{Feasible Computation for KLUB Estimation}
+\label{subsection:section3.4}
+
+Directly estimating \(\textrm{\normalfont{KLUB}}_{\mathbb{P}_T}(\mathbb{P}_0 \| \mathbb{Q}_0^{T \shortto t \shortto 0})\) by using \eref{equation:KLUB} is practically infeasible due to computational complexities. To address this issue, we propose two techniques that simplify the estimation process.
+
+\paragraph{Technique 1: Maximizing KL Divergence from a Coarser Approximation}
+Instead of minimizing the mismatch between the ground truth distribution \(\mathbb{P}_\text{paths}\) and \(\mathbb{Q}_\text{paths}^{T \shortto t \shortto 0}\), we choose to maximize the discrepancy between \(\mathbb{Q}_\text{paths}^{T \shortto t \shortto 0}\) and a simpler, coarser approximation \(\mathbb{Q}_\text{paths}^{T \shortto 0}\). The key insight is that maximizing this divergence, we can find the optimal sampling time \(t\), which helps reduce the compounding error relative to the true distribution
+
+\[
+\mathcal{D}_\mathrm{KL}(\mathbb{Q}_\text{paths}^{T\shortto t \shortto 0} \| \mathbb{Q}_\text{paths}^{T\shortto 0})
+\approx 
+\mathcal{D}_\mathrm{KL}(\mathbb{P}_\text{paths} \| \mathbb{Q}_\text{paths}^{T\shortto 0})
+- \mathcal{D}_\mathrm{KL}(\mathbb{P}_\text{paths} \| \mathbb{Q}_\text{paths}^{T\shortto t \shortto 0}),
+\]
+
+Thus, by maximizing the divergence on the left-hand side, we effectively minimize the discrepancy \(\mathcal{D}_\mathrm{KL}(\mathbb{P}_\text{paths} \,\big\|\, \mathbb{Q}_\text{paths}^{T\shortto t \shortto 0})\) between the true distribution \(\mathbb{P}_\text{paths}\) and the optimized schedule \(\mathbb{Q}_\text{paths}^{T\shortto t \shortto 0}\).
+\begin{equation}
+t^*
+= \argmax_{t\in(T,0)} 
+\textrm{\normalfont{KLUB}}_{\mathbb{Q}_T}(
+\mathbb{Q}_0^{T \shortto t \shortto 0} \| \mathbb{Q}_0^{T \shortto 0})
+= \argmax_{t\in(T,0)} \mathbb{E}_{\mathbb{Q}_{\text{paths}}^{T\shortto t \shortto 0}} \left[
+\sum_{i \ne j} \log \frac{R_t(i,j)}{R_T(i,j)} 
+\sum_{0 < u \le t} H_{u}^{ij} 
+\right]
+\label{equation:technique1}
+\end{equation}
+
+Equation \eref{equation:technique1} offers a significant computational advantage over \eref{equation:KLUB} by eliminating the need to compute the rate matrix at every transition time. Note that, calculating the reverse rate matrix involves neural network evaluations. Given a trajectory \((X_u)_{u \in [T, 0]}\), \eref{equation:KLUB} requires computing the rate matrix \(R_u\) for all transitions where \(H_u^{ij} = 1\). In contrast, \eref{equation:technique1} decouples the rate matrix from the transition times \(u\), requiring computations only at times \(T\) and \(t\). Moreover, between times \(T\) and \(t\), the rate matrices for both \(\mathbb{Q}^{T \shortto t \shortto 0}_{\text{paths}}\) and \(\mathbb{Q}^{T \shortto 0}_{\text{paths}}\) are equal to \(R_T\), eliminating the need for additional computations in this interval. 
+
+
+\paragraph{Technique 2: Applying the Law of Total Expectation} 
+Instead of directly compute the expectation over $\mathbb{Q}_{\text{paths}}^{T\shortto t \shortto 0}$, we compute expectation of conditional expectation, using the law of total expectation, i.e., $\mathbb{E}[X] = \mathbb{E}[\mathbb{E}[X|Y]]$: 
+\[
+\mathbb{E}_{\mathbb{Q}_{\text{paths}}^{T\shortto t \shortto 0}}
+\left[ 
+\sum_{i \ne j} \log \frac{R_t(i,j)}{R_T(i,j)} 
+\sum_{0 < u \le t} H_{u}^{ij} 
+\right] = 
+\mathbb{E}_{\mathbb{Q}_{\text{paths}}^{T\shortto t}}
+\left[ 
+\mathbb{E}_{\mathbb{Q}_{\text{paths}}^{t \shortto 0}}
+\left[ 
+\sum_{i \ne j} \log \frac{R_t(i,j)}{R_T(i,j)} 
+\sum_{0 < u \le t} H_{u}^{ij} 
+\Bigg| X_t = i
+\right]
+\right]
+\]
+
+On the left side, to compute the expected value, we would need to sample the entire trajectory \((X_u)_{u \in [T, 0]}\) and then calculate the inner sum. On the right side, this process is broken down into two steps: first, we sample a trajectory from \(X_T\) to \(X_t\), and then, given \(X_t\), we sample from \(X_t\) to \(X_0\) to compute the inner expectation. Our main insight is that the expected value in the second step can be obtained in closed form.
+
+The term \(\sum_{0 < u \le t} H_u^{ij}\) counts the number of transitions from state \(i\) to state \(j\) in the interval \([t, 0)\). Since \(\mathbb{Q}_{\text{paths}}^{t \shortto 0}\) uses a single rate matrix over this interval, for \(i \ne j\), the expected number of transitions from \(i\) to \(j\) is approximately given by
+\citep[Sec.~4.3]{campbell2022continuous}:
+\[
+\mathbb{E}_{\mathbb{Q}_{\text{paths}}^{t \shortto 0}}
+\left[\sum_{0 < u \le t} H_{u}^{ij}\right] 
+\approx
+R_t(i, j) \Delta t
+\]
+where $\Delta t$ represents the size of the time interval.
+\begin{equation}
+\textrm{KLUB}_{\mathbb{Q}_T} \big(\mathbb{Q}_0^{T \shortto t \shortto 0} \,\big\|\, \mathbb{Q}_0^{T \shortto 0}\big) 
+\approx \mathbb{E}_{\mathbb{Q}_{\text{paths}}^{T \shortto t}}
+\left[
+\sum_{j \ne X_t} \log \frac{R_t(X_t, j)}{R_T(X_t, j)} \times R_t(X_t, j) \Delta t  
+\right].
+\label{equation:technique2}
+\end{equation}
+\begin{wrapfigure}{r}{4.75cm}
+\includegraphics[width=4.75cm]{figures-pdf/klub-distribution.pdf}
+\caption{
+    The values of 
+    KLUB with respect to \(t\).
+    Blue lines show estimated results from individual $(X_t)_{t\in[T,0]}$, while the red line is the average.
+}
+\label{figure:klub-distribution}
+\end{wrapfigure}
+
+In \eref{equation:technique1}, obtaining a reliable KLUB estimation requires sampling trajectories to capture transitions between various states \(i\) and \(j\), which is both inaccurate and sample-inefficient—especially when dealing with large state spaces. For instance, in text generation tasks where the state space can be around 50,257, it's practically impossible to estimate the transition ratios between all pairs \((i, j)\) through sampling alone. In contrast, \eref{equation:technique2} allows us to compute this component in closed form, leading to more reliable and efficient calculations.
+Now, we can maximize \eref{equation:technique2} using a standard optimization algorithm. Before selecting the algorithm, we conduct a preliminary check to observe how the KLUB value changes with respect to \(t\) (\fref{figure:klub-distribution}). Interestingly, it exhibits a unimodal shape. Since we are working with a single variable \(t\) in the unimodal optimization landscape, we use the golden section search \citep{press2007numerical}, a well-known one-dimensional search algorithm, to find the value of \(t\) that maximizes KLUB. This method has the advantage of not relying on hyperparameters like learning rate, which can significantly affect performance.
+
+
+
+
+
+
+
+\section{Experiments}
+
+
+In this section, we evaluate the \textit{Jump Your Steps} (JYS) sampling schedule across various datasets and models. We compare the JYS schedule with the uniform sampling schedule, which sets all intervals to the same size. Except for the Countdown dataset, we use open-sourced pretrained models for our experiments. It is important to note that the Gillespie algorithm is only applicable to an absorbing transition matrix, as uniform or Gaussian transition kernels do not have a fixed number of transitions.
+
+\begin{wrapfigure}{r}{5.5cm}
+\includegraphics[width=5.5cm]{figures-pdf/countdown-quant.pdf}
+\caption{
+    Performance comparisons on Countdown. 
+    The JYS schedule enhances sampling quality across different types of samplers.
+}
+\label{figure:countdown}
+\end{wrapfigure}
+
+\subsection{The CountDown Dataset}
+
+Following \cite{zhao2024informed}, to evaluate our sampling schedule performance, we created a synthetic sequence dataset with a strong position-wise correlation structure. Each sample consists of 256 tokens, and each token has a value between 0 and 31. Each data sequence \( X^{0:255} \) is generated according to the following rules:
+
+\begin{align*}
+X^0 
+&\sim \text{Uniform} \{1, \ldots, S\}, \\
+X^{d+1} \mid X^d &\sim 
+\begin{cases}
+\delta_{X^d-1} & \text{if } X^d \neq 0 \\
+\text{Uniform} \{1, \ldots, S\} & \text{if } X^d = 0
+\end{cases}
+\end{align*}
+
+We trained a SEDD \citep{lou2023discrete} with an absorb transition matrix on this generated data. We measure the model performance by the proportion of generated samples that violated the rule, i.e., failed to count downwards from the previous token. The results are shown in \fref{figure:countdown}. We observe that the JYS schedule has fewer errors compared to the uniform schedule for the same NFE.
+\subsection{CIFAR-10}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1\linewidth]{figures-pdf/CIFAR10.pdf}
+    \caption{
+    \figleft~Performance comparisons on CIFAR-10.
+    \figright~Samples generated using the uniform and JYS schedules, both with NFE 64.
+    }
+    \label{figure:CIFAR-10-qual}
+\end{figure}
+We demonstrate our sampling schedule in the image domain. For this experiment, we use a pretrained model from \cite{campbell2022continuous}, which employs a gaussian transition matrix and denoising parameterization. Each data sample is a flattened image with a length of $3\times32\times32$, composed of tokens with values ranging from 0 to 255.
+
+\fref{figure:CIFAR-10-qual} (left) shows the FID score using 50k samples with the number of function evaluations (NFE) from 32 to 256. We observe that, for all NFEs, the JYS schedule yields a better FID score at the same NFE compared to the uniform schedule. \fref{figure:CIFAR-10-qual} (right) shows randomly generated unconditional CIFAR-10 samples with NFE = 64. The uniform schedule produces blurry images, whereas the images generated using the JYS schedule exhibit clearer colors and shapes of objects. 
+
+\subsection{Monophonic Music}
+
+We test our method on conditional music generation using the Lakh pianoroll dataset \citep{raffel2016learning, dong2018musegan}. For this experiment, we employ a pretrained model from \cite{campbell2022continuous}, which uses a uniform transition matrix and denoising parameterization. Each data sequence contains 256 timesteps (16 per bar), and we measure performance by conditioning on two bars to generate the remaining 14 bars, following the setup in \cite{campbell2022continuous}.
+
+We evaluate how different the generated results were when using a smaller NFE (from 2 to 64), compare to samples generated with an NFE of 512. Specifically, we calculate the Hellinger distance between the note distributions in the generated samples. The results are presented in \fref{figure:piano}. 
+Given the same NFE, we observe that samples generated using our method were more similar to those generated with a high NFE.
+
+\begin{figure}[t]
+   \begin{floatrow}
+     \ffigbox[\FBwidth]{% Adjust \FBwidth for width of the figure box
+       \includegraphics[width=0.35\textwidth]{figures-pdf/piano.pdf} 
+     }{
+       \caption{Performance comparisons on Monophonic music.}
+       \label{figure:piano}
+     }
+     \ffigbox[\FBwidth]{%
+       \includegraphics[width=0.61\textwidth]{figures-pdf/text-quant.pdf}
+     }{
+        \caption{
+        Performance comparisons on text generation. 
+        Generative perplexity is measured by using GPT-2-large.
+        }
+        \label{figure:text-uncond}
+     }
+   \end{floatrow}
+\end{figure}
+\subsection{Text modeling}
+
+Finally, we validate our method on text generation. For this experiment, we use a pretrained model from \cite{lou2023discrete}, which employs an absorbing transition matrix and score-based parameterization. We use two model sizes, SEDD-small and SEDD-medium, in the experiments; both models use the GPT-2 tokenizer and were trained on OpenWebText. The JYS schedule, optimized on SEDD-small, is also used for the experiments with SEDD-medium.
+
+Following \cite{lou2023discrete}, we measure the generative perplexity of sampled sequences (using a GPT-2 large for evaluation). We generated 1,024 samples and each sample constructed with sequences of 1,024 tokens. We simulate 16 to 256 NFE for generation. \fref{figure:text-uncond} shows the results, demonstrating better perplexity at the same NFE.
+
+
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1\linewidth]{figures-pdf/jump-your-steps.pdf}
+    \caption{
+    Sampling trajectories for different dataset-transition matrix combinations.
+    \figtop{} Trajectories using infinitesimal timesteps.
+    \figmiddle{} Trajectories using the JYS schedule.
+    \figbottom{} Optimized sampling schedule with JYS.
+    }
+    \label{figure:jump-your-steps}
+\end{figure}
+\subsection{Characteristics of Jump-Your-Step Sampling schedule}
+
+In \sref{subsection:section3.1}, we hypothesized that in regions where the conditional mutual information is low, the CDE would also be small, allowing steps to be skipped with minimal performance degradation. Here, we aim to verify if the JYS operates as expected according to this hypothesis.
+
+\fref{figure:jump-your-steps} shows the JYS sampling schedules optimized for various transition matrices. First, in the \textit{absorb} case (Left), as discussed in \fref{fig:teaser} (Bottom), we observe that large intervals are concentrated toward the latter part of the process. This occurs because the previously generated tokens help reduce the uncertainty of other tokens. In contrast, in the \textit{uniform} case (Middle), large intervals appear at the beginning. This can be understood as a result of \( X_t \) following a uniform distribution, making the tokens independent, leading to lower mutual information for larger \( t \). Lastly, for the \textit{Gaussian} transition (Right), large intervals appear initially and then increase again over time. This pattern suggests that, initially, tokens behave independently like in the uniform case, but after a certain timestep, the effect of resolving uncertainty, similar to the absorb case, becomes more significant as more tokens are generated.
+
+These observations demonstrate how the JYS schedule adapts to the underlying data distribution and token dependencies, effectively allocating computational resources where they are most needed to minimize the compounding error during parallel sampling.
+
+
+
+\section{Related Work}
+
+
+\subsection{Efficient Sampling for Continuous Diffusion Models}
+
+After the seminal work by \cite{song2020score}, which interpreted diffusion models as a Stochastic or Ordinary Differential Equations (SDE/ODE), various SDE~\citep{jolicoeur2021gotta, xu2023restart} and ODE solvers~\citep{song2020denoising, lu2022dpm, zhang2022fast, dockhorn2022genie, liu2022pseudo, zheng2023dpm} have been proposed to improve sampling speed. 
+
+The work most closely related to ours is ``Align Your Step''~\citep{sabour2024align}, which focuses on sampling schedule optimization in continuous diffusion models. In contrast, our approach targets discrete diffusion models, where we derive the KLUB for CTMCs to optimize the sampling schedule. We also propose a computationally efficient algorithm for KLUB computation and optimization.
+\subsection{Discrete Diffusion Models}
+Several approaches have been developed for training discrete diffusion models, including denoising parameterization~\citep{austin2021structured, campbell2022continuous, gu2022vector, gat2024discrete, campbell2024generative, shi2024simplified} and score parameterization~\citep{sun2022score, meng2022concrete, lou2023discrete}. Recently, SEDD has outperformed GPT-2 in text modeling, gaining traction as an alternative to autoregressive models~\citep{deschenaux2024promises}.
+
+In terms of sampling, two main directions have emerged. The first focuses on efficient sampling, with $\tau$-leaping for CTMC and methods like analytic sampling~\citep{sun2022score}, Tweedie sampling \citep{lou2023discrete}, and $k$-Gillespie \citep{zhao2024informed} improving accuracy. The second aims to reduce compounding error via corrector steps, such as random correctors \citep{campbell2022continuous}, separate corrector training \citep{lezama2022discrete}, or enabling the model to act as an informed corrector \citep{zhao2024informed}.
+
+These methods complement the sampling schedule optimization explored in this paper and can be used together for further improvements.
+
+
+
+\section{Conclusions}
+
+
+We present \textit{Jump Your Steps}, a principled method designed to optimize the sampling schedule and minimize these numerical errors without incurring additional computational costs during inference. Unlike existing approaches that rely on extra computational efforts, such as predictor-corrector methods, our technique operates independently and efficiently. Through extensive evaluations on synthetic and real-world datasets—including monophonic piano, image, and text generation—we demonstrate that our method consistently enhances performance across different transition kernels in discrete diffusion models and effectively complements various samplers.
+
+\newpage
+
+
+
+

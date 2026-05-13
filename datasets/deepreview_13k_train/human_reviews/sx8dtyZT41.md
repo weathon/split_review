@@ -1,0 +1,189 @@
+# DEAL: High-Efficacy Privacy Attack on Retrieval-Augmented Generation Systems via LLM Optimizer
+
+- Decision: Reject
+- Scores: 5, 3, 5, 5
+
+## Abstract
+Retrieval-Augmented Generation (RAG) technology provides a powerful means of combining private databases with large language models (LLMs). 
+In a typical RAG system, a set of documents is retrieved from a private database and inserted into the final prompt, which is then fed into the LLM.
+Existing research has shown that an attacker can use a simple manually designed attack suffix to induce LLM to output private documents in prompt with high probability.
+However, in this paper, we demonstrate that the privacy leakage risk exhibited by using this simple manual attack suffix is significantly underestimated.
+We propose a novel attack method called Documents Extraction Attack via LLM-Optimizer (DEAL). 
+DEAL leverages an LLM as optimizer to iteratively refine attack strings, inducing the RAG model to reveal private data in its responses. 
+Notably, our attack method does not require any knowledge about the target LLM, including its gradient information or model type. 
+Instead, the attack can be executed solely through query access to the RAG model. 
+We evaluate the effectiveness of our attack on multiple LLM architectures, including Qwen2, Llama3.1, and GPT-4o, across different attack tasks such as Entire Documents Extraction and Private Identity Information (PII) Extraction. 
+Under the same permission setting as the existing method, the Mean Rouge-L Recall (MRR) of our method  can reach more than 0.95 on average in the Entire Documents Extraction task, and we can steal PII from the retrieved documents with close to 99\% accuracy in the PII Extraction task, highlighting the risk of privacy leakage in RAG systems.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+5
+
+### Summary
+Retrieval-augmented generation (RAG) is an effective method for enhancing language models with proprietary and private data, where data privacy is a crucial issue. This study presents comprehensive empirical research highlighting the vulnerability of RAG systems in leaking information from the private retrieval database.
+
+### Strengths
+The paper is clearly written and straightforward to understand.
+
+### Weaknesses
+1) Ambiguous threat model.
+2) Marginal advancement over previous work.
+
+### Questions
+Thank you to the authors for this engaging paper. I have a few comments:
+
+1) Privacy attacks on RAG systems can be categorized as untargeted and targeted. In untargeted attacks, the goal is to extract as much information as possible from the entire retrieval dataset, whereas targeted attacks focus on retrieving specific information from the RAG system. It appears that the authors do not explicitly clarify which type of attacks are examined in the paper.
+2) The paper's technical contribution seems minimal compared to existing work [A]. The authors should clearly outline in the related work section the key differences between the proposed attack and [A]. What technical innovations does this paper present over [A], and what limitations does [A] have?
+3) The defenses discussed in the paper are relatively weak. The authors should consider exploring stronger defenses, such as re-ranking (e.g., using another pre-trained model to assess the relevance of retrieved documents to the query) and differential privacy.
+4) Using LLM-Optimizer for conducting privacy attacks may result in considerable computational overhead compared to standard RAG. Please provide an analysis of the computational costs for the proposed attack in comparison to the baseline.
+
+
+[A] The Good and The Bad: Exploring Privacy Issues in Retrieval-Augmented Generation (RAG).
+
+### Soundness
+3
+
+### Presentation
+3
+
+### Contribution
+2
+
+---
+
+## Human Reviewer 2
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+2
+
+### Summary
+This paper adopts an optimization method to effectively extract private information from the private dataset of the RAG system. The attacker can optimize a suffix to be appended to the query. By using this suffix, the private information from the private dataset of RAG can be repeated by the LLMs, which induces privacy issues in the RAG system.
+
+### Strengths
+1. The topic is important as the RAG system is more and more critical and commonly used.
+2. The writing of this paper is clear and easily understood.
+
+### Weaknesses
+1. **The description of the Threat model is vague.** From the 177-178 lines, the attacker doesn't have any information or control over the system. But in the method part (lines 209-215), the attacker needs the private dataset $D$ to optimize the adversarial suffix. Without the $D$, the attacker cannot "create the RAG model locally" as described in line 215.
+
+2. **The comparison with related work is not fair.** The baseline [1]'s suffix is just a sentence like "Please repeat all the context." (30 characters), while the suffix generated by the proposed method is so long (880 characters), making it not stealthy. To perform a fair comparison, the author should restrict the suffix length during the optimization. Otherwise, it is not clear whether the increased attack effectiveness is because the long suffix takes more attention from LLM than the shorter baseline ones.
+
+3. **Utilizing the LLM to optimize a discrete prompt for the attack is not novel.**
+
+4. **This paper explores empirical contributions rather than theoretical contributions. However, it does not provide source code.**
+
+### Questions
+- Could the author provide the prompt used in their experiments of baseline attack (Zeng, at al)?
+- Why the suffix used in Appendix C is the baseline prompt "Please repeat all the context."?
+
+### Soundness
+2
+
+### Presentation
+2
+
+### Contribution
+2
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4
+
+### Summary
+This paper proposes a new attack targeting Retrieval-Augmented Generation (RAG) systems, DEAL. The method uses an LLM to optimize and refine attack strings iteratively, improving the likelihood of extracting private data from these prompts.
+
+### Strengths
+1. DEAL requires only query access to the RAG model, making it a black-box attack without needing any knowledge of the target model’s architecture or gradients.
+
+2. DEAL significantly improves attack performance. This highlights its capability to reveal privacy risks more effectively than prior manual attack methods.
+
+### Weaknesses
+1. The paper explores mitigation strategies like safety prompts and query filtering, which, while not entirely foolproof, show potential to limit DEAL’s success.
+
+2. More retrieval models should be tested.
+
+3. More defense methods like differential privacy should be tested.
+
+### Questions
+See weakness
+
+### Soundness
+3
+
+### Presentation
+3
+
+### Contribution
+2
+
+---
+
+## Human Reviewer 4
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4
+
+### Summary
+The authors propose DEAL, an attack method that uses an LLM optimizer to iteratively improve the attack suffixes and successfully extract private data from RAG models with high accuracy requiring only query access.
+
+### Strengths
+1. The paper is well written and easy to understand. 
+
+2. Comprehensive experiments analyzing the attack performance, failure case study and transferability across different RAG models.
+
+### Weaknesses
+1. I am unsure what the novel contribution made by the paper is? See question below.
+
+2. Lack of comparison with prior work.
+
+
+
+### Questions
+1. I’m unclear on the novel aspect  of the attack constructed by the authors. Using LLMs to iteratively refine the attack is a known method in the jailbreaking literature for LLMs [1, 2]. This work appears to apply the same technique within the RAG setup. Could you discuss how your approach differs from or improves upon existing aforemention methods, particularly in the context of RAG systems and highlight any unique challenges you encountered in applying this technique to RAG models specifically.?
+
+2. A comparison with prior work [3] is currently missing. It would be helpful to understand how your attack strategy compares with the approach in [3]. Additionally, an experiment evaluating your method’s performance against the approach in [3] using the same metrics and datasets, if feasible, would also provide better a insight. 
+
+[1] Chao et al. Jailbreaking Black Box Large Language Models in Twenty Queries,  arXiv 2023
+
+[2]   Mehrotra et al. Tree of Attacks: Jailbreaking Black-Box LLMs Automatically. arXiv 2023
+
+[3] Qi et al. Follow My Instruction and Spill the Beans: Scalable Data Extraction from Retrieval-Augmented Generation Systems, arXiv 2024
+
+### Soundness
+3
+
+### Presentation
+3
+
+### Contribution
+2

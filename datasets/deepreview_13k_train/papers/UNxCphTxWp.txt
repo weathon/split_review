@@ -1,0 +1,578 @@
+\title{Programming Every Example: Lifting Pre-training Data Quality like Experts at Scale}
+
+\begin{abstract}
+Large language model pre-training has traditionally relied on human experts to craft heuristics for improving the corpora quality, resulting in numerous rules developed to date.
+However, these rules lack the flexibility to address the unique characteristics of individual example effectively.
+Meanwhile, applying tailored rules to every example is impractical for human experts.
+In this paper, we demonstrate that even small language models, with as few as 0.3B parameters, can exhibit substantial
+data refining capabilities comparable to those of human experts.
+We introduce Programming Every Example~(\method), a novel framework that treats data refinement as a \emph{programming task}, enabling models to refine corpora by generating and executing fine-grained operations, such as string normalization, for each individual example at scale.
+Experimental results show that models pre-trained on \method-curated data outperform either original data or data filtered by other selection methods by more than \m{2\%} across various downstream benchmarks.
+Its effectiveness spans various model sizes and pre-training corpora, including C4, \redpj, and \fineweb.
+Furthermore, \method exhibits significant potential in domain-specific continual pre-training: without 
+domain specific design, models trained on \owm refined by \method outperform human-crafted rule-based methods, improving average accuracy by \m{\mathbf{7.6\%}} over \mistral-7B, with \m{\mathbf{14.6\%}} for \llamaii-7B and \m{\mathbf{20.3\%}} for \codellama-7B, all within \m{\mathbf{10}}B tokens to be comparable to models like \llemma{}-7B trained on \m{\mathbf{200}}B tokens.
+Further analysis highlights that \method significantly saves training FLOPs, offering a promising path for efficient LLM pre-training.
+We are open-sourcing \method with \m{\mathbf{\ge100}}B corpus, models, and sharing all training and implementation details for reproducible research and future innovation.
+\begin{itemize}
+    \item \small{\huggingface \textbf{HF Repo}: \url{https://huggingface
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[htbp]
+    \centering
+    \begin{minipage}[t]{0.43\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{pics/corpora_flops_performance_curve.pdf}
+    \end{minipage}
+    \hspace{1.0mm}
+    \begin{minipage}[t]{0.43\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{pics/math_codellama_corpora_flops_performance_curve.pdf}
+    \end{minipage}
+    \caption{Training FLOPs v.s. average downstream performance. Although these corpora have gone through expert-crafted rules, applying \method still yields significant improvements over these baseline models trained with original data corpus. Moreover, with much less training FLOPs, 
+    model trained on \method curated data show comparable performance with existing models.
+     }
+    \label{fig:combined_plots}
+\end{figure}
+\newpage
+Large Language Models (LLMs) have made significant strides in capabilities~\citep{metallama3,achiam2023gpt,anthropic2024claude,reid2024gemini}, excelling in tasks such as creative writing~\citep{yuan2022wordcraft}, complex reasoning~\citep{wei2022chain,kojima2022large}, and agentic task planning and execution~\citep{fan2022minedojo,park2023generative}. Behind these, massive, high-quality pre-training corpora form the backbone of these models, equipping them with the essential knowledge and reasoning abilities crucial for a wide range of downstream tasks~\citep{together2023redpajama,penedo2024fineweb}.
+
+The Internet offers vast amounts of data, but much of it is noisy and unrefined, requiring extensive cleaning and quality enhancement before being applied for pre-training. 
+Previous works focus primarily on designing heuristic-based pipelines to lift data quality, such as 
+document filtering~\citep{rae2021gopher, penedo2024fineweb, soldaini-etal-2024-dolma} and 
+perplexity-based scoring methods~\citep{together2023redpajama}, relying heavily on human expertise and manual adjustments~\citep{zhang2024map}. While widely adopted, these labor-intensive solutions are inherently limited by rule coverage and their inability to address every specific case. Recently, some efforts have explored leveraging LLMs for high-quality data acquisition. On the one hand, language models have been applied for data filtering or selection~\citep{xie2023data,wettig2024qurating,yu2024mates,dubey2024llama3}, but their role is largely limited to identifying low-quality documents without enabling fine-grained refinements (e.g., string-level). On the other hand, LLMs are also being used directly generating high-quality data, \emph{i.e.}, data synthesis~\citep{gunasekar2023textbooks-phi1,li2023textbooks-phi1.5,benallal2024cosmopedia}. Unlike filtering, synthesis methods actively create or refine data to produce new documents, but they require substantial computational resources, limiting scalability. Despite their success, these methods can also inherit issues like hallucination~\citep{maini2024rephrasing}, and assessing their correctness and completeness in an interpretable manner remains a challenge~\citep{liu2024best}.
+Standing at the intersection of data processing efficiency and data quality improvement, in this work, we propose \method, a model-based framework for pre-training level data refinement.
+\method focuses on refining large-scale data with relatively smaller models, offering a more efficient alternative.
+As shown in Figure~\ref{fig:tlm-intro}, in practice, \method first adapts 
+a small base language model (less than $1$B) 
+to data refining tasks via fine-tuning on seed data.
+This \method's refining model then determines the appropriate operations for each example in the pre-training corpora
+through versatile programs, including operations such as filtering, string normalization and noisy line removal.
+Finally, the generated program is executed by a pre-defined 
+executor, producing refined corpus ready for pre-training.
+In this way, \method is empowered with language models to autonomously refine pre-training corpora, leveraging flexible function calls to enhance data quality.
+
+Experimental results demonstrate that the proposed \method framework consistently lifts data quality for \textbf{pre-training}.
+Specifically, \method achieves an average improvement of $2.1\%$ over $10$ downstream benchmarks and outperforms state-of-the-art data selection methods by over $2.0\%$.
+Furthermore, \method shows broad applicability across model sizes from \m{0.3}B to \m{1.7}B and shows consistent performance gains across diverse pre-training corpora of varying quality, including \redpj~\citep{together2023redpajama}, C4~\citep{raffel2020exploring}, and \fineweb~\citep{penedo2024fineweb}.
+In domain-specific \textbf{continual pre-training}, \method yields an $11\%$ gain over \owm~\citep{paster2023openwebmath} for \tinylm and $7.6\%$ for \mistral-7B across \m{9} mathematical tasks, with similar improvements seen on \llamaii-7B and \codellama-7B. 
+Beyond performance gains, results also suggest that pre-training on the refined corpus significantly boosts pre-training efficiency, achieving similar downstream performance with up to \m{\mathbf{20}\times} less computing.
+We believe it is worthwhile to \textbf{scale up computing FLOPs for data refinement}, which enables similar performance with much less training cost and offers a promising path for efficient LLM pre-training.
+
+
+
+\section{Approach: Programming Every Example}
+
+\subsection{Data Refinement Task Formulation}
+\label{subsec:task-formulation}
+Given any document in the corpus $d\in\mathcal{D}$, such as an HTML extract or a textbook, we define data refinement as the process of transforming $d$ into $\hat{d}$, where $\hat{d}$ exhibits higher quality.
+While it is challenging to formally define ``higher quality'' for pre-training data, we assume it can be described through qualitative improvements, such as the removal of advertisements, meaningless URL links, random code gibberish, and content lacking educational value, just as shown on the left side of Figure~\ref{fig:tlm-intro}.
+Specifically, we formulate this refining process as the generation of a data processing program $\mathcal{Z}$, conditioned on $d$.
+The refined document $\hat{d}$ is then produced by executing program $\mathcal{Z}$ on the original document $d$.
+For instance, the ``string normalization'' can be a very fine-grained process transforming noisy strings into clean ones with executor \m{\mathcal{E}} and program \m{\mathcal{Z}_{\text{normalize}}} :  
+\begin{equation}
+\mathcal{E}(\mathcal{Z}_{\text{normalize}}, d) = (s'_i)_{i=1}^{|d|}, \text{ where } s'_i = 
+\text{normalize}(s_i) \text{ if } s_i \text{ needs normalization else } s_i
+\end{equation}
+Here, 
+$d = (s_1, s_2, ..., s_{|d|})$ is the original document represented as a sequence of strings, and
+{\texttt{normalize()}}
+is our normalization function that maps certain strings to their normalized versions.
+Moreover, the document filtering process can be regarded as a special case of such refining transformation where executing on $\mathcal{Z}_{\text{filter}}$ will lead to removing the whole document, \emph{i.e.}, $\mathcal{E}(\mathcal{Z}_{\text{filter}}, d) = \varnothing$.
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=0.92\textwidth]{pics/intro-figure-draft-v44.pdf}
+    \caption{An overview of \method framework: (1) we adapt a base language model to perform data refinement; (2)~\method refining models are able to generate complex programs for each document, including document level filtering and more fine-grained chunk level refining; (3) A \includegraphics[height=0.8em]{pics/python.png}~Python executor will execute the programs with the docs, producing the refined high-quality corpora. 
+    }
+    \label{fig:tlm-intro}
+\end{figure}
+
+In this manner, data quality improvement operations, such as data cleaning or normalizing, can be unified into the standardized function that applies a specific transformation or cleaning process to the document.
+These operations can be represented as various instantiations of the general executor $\mathcal{E}(\mathcal{Z}, d)$, where $\mathcal{Z}$ encodes the function calling snippets or heuristics for the specific task.
+
+\subsection{\method Framework}
+\paragraph{Overview}
+As shown in Figure~\ref{fig:tlm-intro}, given any document $d$ as input, the \method framework utilizes the language model itself with parameter $\theta$ to generate the data refinement program $\mathcal{Z}=f(\theta, d)$.
+The snippet is executed within the executor
+$\mathcal{E}$, producing the refined document $\Hat{d} = \mathcal{E}(f(\theta, d), d)$.
+We include two stages in the \method framework, aiming to refine the data progressively, from rough to fine-grained.
+These two stages are referred to as 
+\textit{{document-level programming}} and \textit{{chunk-level programming}}, as illustrated in Figure~\ref{fig:tlm-intro}.
+In each stage, the \method refining model will generate programs $\mathcal{Z}_\text{doc}$ and $\mathcal{Z}_\text{chunk}$ that refine the corpora at varying levels of granularities.
+
+\paragraph{\method Program Design}
+
+The detailed program space design is also crucial for maximizing the capabilities of language models.
+We believed designing such model-based operations should consider several realistic factors when scaling to large pre-training corpora:
+(1) the model does not need to be very powerful or very large to handle these tasks, it only needs to recognize several patterns; 
+(2) the solution, though requiring more computing budget compared to heuristic-rule-based pipelines, still needs to be simple and efficient.
+Under such consideration, we simply let the language models generate function calls without detailed implementations.
+These design choices aim to balance functionality with the limitations of small language models, enabling effective document manipulation while maintaining simplicity and coherence.
+
+\begin{table}[!t]
+  \centering
+  \small
+  \caption{\method program design of document-level and chunk-level refining stage. For input, \texttt{doc} and \texttt{chunk} will be sent into the corresponding function as string-type inputs for execution.}
+  \setlength{\tabcolsep}{3.5pt}
+  \label{tab:program-space}
+  \resizebox{0.97\linewidth}{!}{%
+    \begin{tabular}{clp{15.em}}
+    \toprule
+\multicolumn{1}{c}{\textbf{Stage}} & \multicolumn{1}{l}{\textbf{Function Interface}} & \multicolumn{1}{l}{\textbf{Description}} \\
+    \midrule
+    \multicolumn{1}{c}{\multirow{2}[2]{*}{\begin{tabular}[c]{@{}c@{}}Document\\ Level\end{tabular}}} &
+    \multicolumn{1}{l}{\multirow{1}{*}{\begin{tabular}[c]{@{}l@{}}\texttt{drop\_doc()}$\rightarrow$ \texttt{<None>}\end{tabular}}}& 
+    Delete the whole doc. \\
+\cmidrule{2-3}          
+    & \multicolumn{1}{l}{\multirow{1}{*}{\begin{tabular}[c]{@{}l@{}}\texttt{keep\_doc()}$\rightarrow$ \texttt{<str>}\end{tabular}}}& Return the orignal doc.\\
+    \midrule
+    \multicolumn{1}{c}{\multirow{7}[7]{*}{\begin{tabular}[c]{@{}c@{}}Chunk\\ Level\end{tabular}}} & \multicolumn{1}{p{25.5em}}{\texttt{remove\_lines(line\_start, line\_end)}$\rightarrow$ \texttt{<str>}\newline{}$~~\triangleright$ \texttt{line\_start<int>}, index of the first line to be removed\newline{}$~~\triangleright$ \texttt{line\_end<int>}, index of the last line to be removed} & Delete noisy lines from chunk;\newline{}Return chunk after removal. \\
+\cmidrule{2-3}          & \multicolumn{1}{p{25.5em}}{\texttt{normalize(source\_str, target\_str)}$\rightarrow$ \texttt{<str>}\newline{}$~~\triangleright$ \texttt{source\_str<str>}, the noisy string pattern\newline{}$~~\triangleright$ \texttt{target\_str<str>}, the string for replacement} & Replace strings with normalized ones;\newline{}Return chunk after replacement. \\
+\cmidrule{2-3}          & \multicolumn{1}{l}{\multirow{1}{*}{\begin{tabular}[c]{@{}l@{}}\texttt{keep\_chunk()}$\rightarrow$ \texttt{<str>}\end{tabular}}} & Return the orignal chunk. \\
+    \bottomrule
+    \end{tabular}%
+    }
+  \label{tab:addlabel}%
+\end{table}%
+
+The most fundamental operations we aim to perform on a document, are deletion and replacement.
+We incorporate these types of operations across different programming stages aiming to refine the corpus with different granularities in \method:
+(1) In the document-level programming stage, we simply define the function~\texttt{drop\_doc()}to delete a document and~\texttt{keep\_doc()}to retain it.
+(2) In chunk-level programming, we split the lengthy documents into smaller chunks 
+and apply fine-grained operations to these chunks.
+These operations include deleting specific lines \texttt{remove\_lines()} and replacing strings \texttt{normalize()}, providing flexibility in modifying content rather than simply dropping the whole document.
+Also for high-quality chunks that do not require any modifications, we use the \texttt{keep\_chunk()} function for flagging.  
+We present the detailed function definition in Table~\ref{tab:program-space}, which is also the generation space of \method's refining models.
+While the individual functions may seem straightforward, their design space is flexible and capable of expressing complex rules previously developed by human experts as shown in Table~\ref{tab:program-space}.
+In fact, these rules can be projected into the program space of \method, showcasing that our approach not only simplifies but also enhances the rule-creation process, offering more systematic and scalable refinement capabilities.
+\paragraph{\method Execution}
+During the execution stage, the generated program snippets $\mathcal{Z}$ will be executed by the executor $\mathcal{E}$ to refine the document.
+For simplicity and flexibility, \method integrates Pythonic grammars, wrapping all operations into different function calling with parameters and implements these function in Python for later execution.
+For example, in Figure~\ref{fig:tlm-intro}, the document contains some noisy patterns including navigation bars, meaningless HTML links and page indexes.
+The refining model will then generate programs to remove the corresponding lines and patterns.
+In the document-level and chunk-level cleaning stage, \method utilizes an independent refining model to generate programs with various function calls described in Table~\ref{tab:program-space}.
+We believe this sequential approach ensures a structured and effective refinement, addressing the larger document noise first, and then focusing on finer-grained cleaning.
+
+\subsection{Model Adaptation for \method}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.92\textwidth]{pics/pipeline_figure-draft-v5.pdf}
+    \caption{
+    The illustration of the model adaptation in \method. We employ powerful LLMs~(\textsc{Llama-3}) to annotate random seed documents with valid programs, and use this \textit{doc-program} pairs to fine-tune a small base model, obtaining the refining model suitable for fine-grained data refining tasks. 
+    }
+    \label{fig:tlm-overview}
+\end{figure}
+
+It is generally difficult for base models to directly generate \method programs.
+In fact, even for the most powerful post-trained LLMs, generating custom API calls is relatively challenging at the current stage~\citep{zhuo2024bigcodebench}.
+Thus, it will be necessary that we curate some seed data to adapt the model for these scenarios.
+Under such consideration, we employ strong LLMs to annotate these operations via zero-shot and few-shot prompting, and then adapt our base model to these tasks by supervised fine-tuning~(SFT).
+We first use two additive scale scoring prompts~\citep{yuan2024self,penedo2024fineweb} to split the corpus into kept documents and dropped documents.
+And then we use large models to annotate fine-grained programs based on kept documents.
+Specifically, we leverage the \textsc{Llama-3} series of models~\citep{dubey2024llama3} for data collection and annotation.
+In \method, this data collection is performed only once, and all base models are adapted with the same curated data.
+To ensure the reliability of the collected data, we also conduct necessary checks for grammar correctness and control the removal ratio threshold. 
+The detailed procedure for program synthesis and post-processing can be found in \S~\ref{app:subsec-seed-data-collection}.
+
+
+For simplicity, we directly use a small language model (\emph{e.g.}, $0.3$B parameters) that we have trained on approximately $26$B tokens of original unrefined data as the base model, which also serves as the comparison baseline in subsequent experiments.
+The adapted model's performance is then evaluated using the F1 score on the split validation dataset, ensuring a robust assessment.
+We select the highest-performing model checkpoint and employ the model to generate programs $\mathcal{Z}$, for each document or chunk of the dataset. These programs together with the documents are then executed using the corresponding function implementation, resulting in the final processed corpus. 
+
+
+
+
+\section{Experiments}
+
+In this section, we first describe our experimental setup, then verify the effectiveness of each \method stage and compare it with existing data selection methods tailored for pretraining corpus (\S~\ref{subsec:exp1-verify-walle}).
+We then apply \method 
+to various model sizes and corpora to demonstrate its broad applicability (\S~\ref{subsec:exp2-beyond-size-and-corpora}).
+Finally, we apply \method to the mathematical domain, demonstrating its superiority and universality in domain-specific training (\S~\ref{subsec:exp3-math-cpt}).
+\subsection{Experiment Setup}
+
+\paragraph{Training Corpora}
+We utilize various corpora for both general and specific domain data in our experiments. For general domain data, we begin with \redpj~\citep{together2023redpajama}, a preprocessed large-scale dataset of $30$ trillion tokens from diverse Internet sources, ready for pre-training. We further apply \method on the C4 corpus~\citep{raffel2020exploring} with $198$ billion tokens and the \fineweb dataset~\citep{penedo2024fineweb} containing $15$ trillion tokens, noted for high data quality. For specific domain experiments, we use \owm~\citep{paster2023openwebmath}, a math-focused dataset with $15$ billion tokens.
+Given the limitations in computational resources, we conduct experiments on a randomly sampled subset of the entire pre-training dataset.
+See Table~\ref{app:tab-pt-corpora}~(\S~\ref{app:sub-sec-pt-corpora}) for sampling details.
+\paragraph{Base Model Selection}
+Our pre-training experiments are conducted using various sizes of decoder-only language models. Detailed specifications of these models and all training recipes are provided in \S~\ref{app:subsec-model-and-train-config}, especially in Table~\ref{app-tab:tlm-architecture} and Table~\ref{tab:app-training-params}.
+\begin{enumerate}[leftmargin=1.25em,itemindent=0.25em,labelsep=0.4em,itemsep=0.15em]
+\item To verify different stages' effectiveness of \method{}, we employ a $750$M sized model sharing \llamaii{} architecture~\citep{touvron2023llama}, denoted as \tlms{}, used for both pre-training from scratch and refining.
+We also compare \method{} with data selection methods using \pythia-410M{}/1B's architecture~\citep{biderman2023pythia}, as those employed in MATES~\citep{yu2024mates}.
+\item For further evaluation of \method{} using different refining and base model sizes, we scale the model sizes from $350$M~($0.5\times$ smaller, denoted as \tlmxs{}) and $1.7$B~($2\times$ larger, denoted as \tlmm), all based on the \llamaii{} architecture.
+\item For domain-specific continual pre-training, we select \tinylm{}~\citep{zhang2024tinyllama}, \llamaii~\citep{touvron2023llama}, \codellama~\citep{DBLP:journals/corr/abs-2308-12950-codellama} and \mistral-7B{}~\citep{jiang2023mistral} as representative base models for their adequate training and solid performance.
+\end{enumerate}
+
+\paragraph{Baselines}
+To ensure a fair comparison w.r.t. training cost, we keep all training hyperparameters, such as training steps and batch size, consistent across baselines, with only the data refining and selection pipelines differing.
+We compare \method to a series of baselines:
+\begin{enumerate}[leftmargin=1.25em,itemindent=0.25em,labelsep=0.4em,itemsep=0.15em]
+\item In \S~\ref{subsec:exp1-verify-walle}, to verify \method's effectiveness, we first compare with \method with regular pre-training over the raw \redpj data.
+We also introduce heuristic baselines used to curate the \fineweb corpora, which is the combination of three filtering strategies from C4~\citep{raffel2020exploring}, \gopher~\citep{rae2021gopher}, and newly crafted rules~(as \fineweb rules). 
+Apart from rule-based baselines,
+we also introduce existing data selection techniques proposed in previous works, including 
+(1) importance resampling: DSIR~\citep{xie2023data};
+(2) model-based selection:~DsDm~\citep{engstrom2024dsdm}, MATES~\citep{yu2024mates}, and QuRating~\citep{wettig2024qurating}.
+
+\item In \S~\ref{subsec:exp2-beyond-size-and-corpora}, to test \method on different model sizes and training corpora, we finally scale the \tlmm's training tokens to $50$B over \redpj, C4, and \fineweb.
+To show \method efficiency, we then directly compare with models covering a variety of pre-training approaches including (1) large-scale pre-training: \tinylm~\citep{zhang2024tinyllama} trained on $3$T tokens;
+(2) model pruning from existing models:~(\textsc{SheadLlama}~\citep{xiasheared} pruned from \llamaii and trained on extra 50B tokens);
+(3) LLM synthesis~(\textsc{InstructionLM}-1.3B~\citep{cheng2024instruction} trained on \mistral-7B generated data and \textsc{cosmo}-1.8B~\citep{benallal2024cosmopedia} trained on \mixtral-8x7B generated data).
+\item In \S~\ref{subsec:exp3-math-cpt}'s specific domain continual pre-training, apart from standard continual pre-training on \tinylm, \textsc{Llama-2}-7B, \textsc{CodeLlama}-7B, and \mistral-7B, we additionally introduce with well-known and strong baselines trained on public~(or partially public) data, including \textsc{Rho}-1~\citep{lin2024rho}, \internmath~\citep{ying2024internlm-math}, \llemma~\citep{azerbayev2024llemma}, and an internal checkpoint reported in \textsc{DeepSeek-Math}~\citep{shao2024deepseekmath}. 
+\end{enumerate}
+\paragraph{Evaluation Setup}
+We compare the base models' performance over a vast of datasets  for comprehensive evaluation:
+(1) For general pre-training, we evaluate the performance across ten selected tasks using lighteval's implementation~\citep{lighteval}, and report the zero-shot
+accuracy; we have also included LM-eval-harness~\citep{biderman2024lessons} for fair comparison with data selection methods.
+(2) For domain-specific continual pre-training evaluation, \emph{i.e.}, mathematical related benchmarks, we use the same nine implementation and benchmarks used in \textsc{Rho}-1~\citep{lin2024rho} and evaluate all the base models with few-shot chain-of-thought (CoT) examples~\citep{wei2022chain}. 
+The selected evaluation benchmarks, number of evaluation examples, and full details can be found in \S~\ref{app:sec-eval-details}.
+
+\subsection{Verifying \method's effectiveness}
+\label{subsec:exp1-verify-walle}
+\paragraph{Verifying Effectiveness for Each \method Operation}
+We first conduct a series of experiments to verify the effectiveness of each \method operation. We begin by training \tlms on the \redpj raw data for approximately $26$B tokens (or $12.5$K steps) as the initial baseline.
+Following~\citet{wettig2024qurating} and for convenience, we then sequentially apply the doc-level and chunk-level refining pipelines by fine-tuning the \m{0.7}B model itself.
+We then perform large-scale program synthesis and execution using the refining models, resulting in $\mathcal{D}_{\text{Doc}}$ and $\mathcal{D}_{\text{Doc+Chunk}}$.
+Such $2$-stage synthesis requires approximately $192$ A100-80G GPU hours for processing
+$60$B tokens of data.
+The resulting zero-shot downstream performance is presented in Table~\ref{tab:exp1-zero-shot-avg-performance}, including base models trained on the data produced by \method refinement methods and different rule-based filtering methods.
+Moreover, we visualize the dynamic benchmark performance in Figure~\ref{fig:exp1-bench}, implying the consistent improvement of \method over all baselines. 
+See \S~\ref{subsec:full-lighteval-performance} for full detailed results of all intermediate checkpoints.
+
+These results show that \method is highly effective, outperforming the raw corpus with an average boost of $2.5\%$, including significant improvements such as $7.6\%$ on ARC-E, $3.3\%$ on HellaSwag, and $2.1\%$ on MMLU.
+We believe such consistent performance is significant given that these improvements were achieved even on benchmarks that are typically prone to performance instability, such as SIQA, WinoGrande, and CSQA.
+By contrast, rule-based methods demonstrate relatively marginal overall improvement.
+For instance, \gopher rules achieve only a $0.2\%$ boost, while C4 shows a modest $0.5\%$ improvement.
+Furthermore, combining all three rules~(as is done in constructing the official \fineweb corpus), does not lead to any larger enhancement in overall performance.
+
+\begin{table}[!t]
+  \centering
+  \caption{Zero-shot performance on $10$ selected tasks. All models use the same \tlms architecture and are trained on \redpj. The doc-level~(\method-D) and chunk-level~(\method-C) refining are done by fine-tuning the raw data pre-trained model as a refining model.
+  \textbf{Bolded} entries represent the best results.
+  \textbf{\#Win} represents the number of tasks where the method achieved the best performance.
+  }
+  \newcommand{\B}[1]{\textbf{#1}}
+  \newcommand{\degrad}{\color[rgb]{0.8,0,0}{\raisebox{0.3ex}{\scalebox{1.0}[0.8]{$\bm{\downarrow}$}}}}
+  \setlength{\tabcolsep}{3.0pt}
+  \resizebox{0.98\textwidth}{!}{%
+ \begin{tabular}{l|cccccccccc|ll}
+\toprule    \textbf{Method} & \textbf{ARC-C} & \multicolumn{1}{c}{\textbf{ARC-E}} & \multicolumn{1}{c}{\textbf{CSQA}} & \multicolumn{1}{c}{\textbf{HellaS}} & \multicolumn{1}{c}{\textbf{MMLU}} & \multicolumn{1}{c}{\textbf{OBQA}} & \multicolumn{1}{c}{\textbf{PIQA}} & \multicolumn{1}{c}{\textbf{SIQA}} & \multicolumn{1}{c}{\textbf{WinoG}} & \multicolumn{1}{c|}{\textbf{SciQ}} & \multicolumn{1}{c}{\textbf{AVG}} & \multicolumn{1}{c}{\textbf{\#Win}} \\
+    \midrule
+    Raw   & 26.1  &            44.3  &            29.7  &            39.1  &            27.3  &            29.2  &            66.9  &            39.0  &            52.0  &            67.4  &            42.1  & 0 / 10 \\
+    \midrule
+    \multicolumn{13}{c}{{Rule-based filtering}: \textsc{Go} = \gopher rules, \textsc{C4} = C4 rules, \textsc{Fw} = \fineweb rules.} \\
+    \midrule
+    \textsc{Go}  & 25.7  & 44.0  & 31.3 & 40.2  & 27.3  & 29.0  & 66.3  & 39.0 & 51.2  & 68.9  & 42.3  & 0 / 10 \\
+    \textsc{C4}  & 25.0 & 46.0 & 31.0 & {40.5} & 27.1 & 29.2 & \textbf{68.5} & \textbf{40.5} & 51.7 & 66.6 & 42.6  & 2 / 10 \\
+    \textsc{Fw}  & 25.2 & 46.8 & \textbf{32.6} & 39.6 & 27.2 & 29.0 & 66.5 & 39.4 & \textbf{52.4} & 69.2 & 42.8   & 2 / 10 \\
+    \textsc{Go}+\textsc{C4}+\textsc{Fw}  & 25.2  & 43.9  & 30.0 & 41.9  & 27.5  & 31.0  & 67.0  & 39.9 & 51.9  & 65.3  & 42.3  & 0 / 10 \\
+    \midrule
+    \multicolumn{13}{c}{\method~(ours): \textsc{D} = Doc-level Programming, \textsc{C} = Chunk-level Programming.}\\
+    \midrule
+    \rowcolor{cellHighlight}
+    \method-D    & \textbf{26.6} & 49.7  & 30.1  & 40.5  & \textbf{29.4} & 30.4  & 66.3  & 39.0  & 51.2  & 71.6  & 43.5  & 2 / 10 \\
+    \rowcolor{cellHighlight}
+    \method-D+C & {26.4}  & \textbf{51.9} & 30.9  & \textbf{42.4} & \textbf{29.4} & \textbf{31.6} & {67.9} & 40.0  & {52.2} & \textbf{73.5} & \textbf{44.6} & \textbf{5} / \textbf{10} \\
+    \bottomrule
+    \end{tabular}%
+ }%
+  \label{tab:exp1-zero-shot-avg-performance}%
+\end{table}
+
+\begin{figure}[!t]
+    \centering
+    \begin{minipage}[]{0.37\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{pics/exp1-full-redpj_avg_comparison-main.pdf}
+        \caption{Downstream zero-shot performance w.r.t. different training steps: first $0.5$K, then evenly from $2.5$K to $12.5$K. Rule: the best performing \fineweb{} rule in Table~\ref{tab:exp1-zero-shot-avg-performance}.
+        }
+        \label{fig:exp1-bench}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[]{0.6\textwidth}
+        \centering
+        \captionof{table}{Comparison with different data selection methods on $8$ benchmarks using the C4 corpus and \pythia architecture.
+        \textbf{\#Win} represents the count of best performance.
+        }
+        \input{tables/exp-1-data-selection-baselines}
+        \label{tab:exp1-data-selection-baseline}
+    \end{minipage}
+    \label{fig:exp1-performance}
+\end{figure}
+\paragraph{Comparing with Data Selection Methods}
+Apart from comparing with heuristic methods, we also include 
+existing representative model-based data selection methods tailored for pertaining corpus to verify \method's effectiveness in Table~\ref{tab:exp1-data-selection-baseline}, where we report both \m{0}-shot and \m{2}-shot performance under the same settings used in MATES~\citep{yu2024mates}.
+While we merely apply document-level stage~(\emph{i.e.}, \method-D) which is indeed similar to data selection methods, we can see that \method outperforms the strongest data selection method MATES, by $2.2\%$ and $2.5\%$ in \m{0}-shot and \m{2}-shot average performance for $410$M model, and by $1.0\%$ and $2.0\%$ for $1$B model.
+Additionally, \method achieves the best performance on $7$ out of $8$ benchmarks tested, demonstrating its superiority over existing data selection methods. Full evaluation results are provided in Table~\ref{tab:exp-1-full-results-mates}~(\S~\ref{app:subsec-full-lmeval-performance}). 
+
+\subsection{Applying \method across model sizes and pretraining corpora}
+\label{subsec:exp2-beyond-size-and-corpora}
+
+In this section, we demonstrate that \method can effectively benefit models beyond scale and across different corpora, showing potential for iterative pre-training improvements.
+
+\paragraph{\method works well across different scales.}
+We train a family of models from $350$M to $1.7$B~(\emph{i.e.}, \tlmxs, \tlms, and \tlmm) on the same $26$B tokens used in \S~\ref{subsec:exp1-verify-walle}, and then fine-tune these models on doc-level and chunk-level tasks, obtaining refining models with different sizes.
+We then apply these models in doc-level refining and chunk-level refining stages, and use the curated data for from-scratch pre-training.
+We report in Table~\ref{tab:walle-adaptation-metrics} the adaptation performance on refining tasks of different refining model sizes.
+According to the validation performance, adapting \method works well across all model sizes, all achieving $80\%$ F1 on doc-level 
+refinement, and $75\%$ F1
+on chunk-level refinement.
+We further train these models of different sizes from scratch using data produced by refining models of varying sizes.
+In Figure~\ref{fig:exp2-walle-on-different-model-size}, the results indicate that refining models of all sizes help improve performance over raw data, with a consistent absolute gap of $2\%$ over all base model sizes.
+While in Figure~\ref{fig:exp2-walle-on-different-model-size}, \tlmxs curated data shows slightly better downstream performance, it has a significantly lower token-level retention ratio (\m{\mathbf{23.2\%}} vs. \m{\mathbf{28.8\%}}) compared to larger models as reflected in Table~\ref{tab:walle-adaptation-metrics}.
+This implies that moderately larger models suggest a favorable balance between data quality and quantity.
+These additional tokens likely provide more knowledge during pre-training without compromising downstream benchmark performance, showcasing an effective trade-off between data refinement and information preservation.
+
+\begin{figure*}[!t]
+  \centering
+  \begin{minipage}{0.35\textwidth}
+    \centering
+    \small
+    \captionof{table}{Refining model's performance on valid set and token retention ratio of original corpus.}
+    \resizebox{0.95\textwidth}{!}{%
+    \setlength{\tabcolsep}{1.5pt}
+      \begin{tabular}{l|cc|c}
+      \toprule
+      \multicolumn{1}{l}{\textbf{Size}} & \textbf{Doc-level} & \multicolumn{1}{c}{\textbf{Chunk-level}} & \multicolumn{1}{l}{\textbf{Kept Ratio}}\\
+      \midrule
+      \tlmxs{}    & 82.6  & 75.2 & 23.2\%\\
+      \tlms{}     & 81.3  & 75.6 & 25.6\%\\
+      \tlmm{}     & 83.7  & 77.3 & 28.8\%\\
+      \bottomrule
+      \end{tabular}%
+    }
+    \label{tab:walle-adaptation-metrics}%
+    \includegraphics[width=1.\textwidth]{pics/model_scale_hmap.pdf}
+    \captionof{figure}{\method's effect over different model sizes.
+    }
+    \label{fig:exp2-walle-on-different-model-size}%
+  \end{minipage}%
+  \hfill
+  \begin{minipage}{0.63\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{pics/exp2_corpora.pdf}
+    \captionof{figure}{Performance of original data and \method{} curated data trained models across different datasets using $\approx50$B tokens and comparison with existing models trained using different techniques.
+    Inst-LM represents \textsc{InstructionLM}-1.3B; Cosmo represents \textsc{Cosmo}-1.8B; S-Llama represents \textsc{ShearedLlama}-1.3B.
+    }
+    \label{fig:across-corpora-bar-chart}
+  \end{minipage}
+\end{figure*}
+
+
+\paragraph{\method works well across pre-training corpora.}
+
+To assess the applicability of \method across various pre-training corpora, we extend our experiments beyond \redpj to include C4~\citep{raffel2020exploring}, and the recently released \m{15}-trillion-token pre-training corpus, \fineweb~\citep{penedo2024fineweb}. For consistency, we apply exactly the same \method-xs refining models detailed in Table~\ref{tab:walle-adaptation-metrics} to these corpora without constructing new SFT data for each corpus. 
+We conducted larger-scale experiments by training our model on approximately \m{50} billion tokens, again achieving notable improvements. On ten downstream benchmarks, models trained on our method's curated data showed improvements of \m{+2.0\%} on \redpj, \m{+3.1\%} on C4, and \m{+2.4\%} on \fineweb.
+\paragraph{ProX trains language models with much greater efficiency.}
+To demonstrate the non-trivial nature of these results, we compared models trained on \method curated data against various models trained by different approaches.
+These include models like
+\tinyllama-1.1B-3T (trained directly on $3$ trillion tokens, about $\mathbf{60}\times$ of our training tokens and $\mathbf{40}\times$ training FLOPs),
+\textsc{SheadLlama}-1.3B (denoted as S-Llama, a pruned version of \llamaii{}-7B, with extra training on $50$ billion tokens),
+and models using LLM data synthesis, such as \textsc{InstructionLM}-1.3B~(denoted as Inst-LM) and \textsc{Cosmo}-1.8B.
+Our results, including \tlmm~(\method) and \tlmm~(Raw), are presented alongside all these baselines in Figure~\ref{fig:across-corpora-bar-chart}.
+On \fineweb, which is recognized for its high-quality data, \tlmm using \method-refined data performs comparably to pruned models like \textsc{SheadLlama}-1.3B and \tinyllama-1.1B, despite their reliance on additional pruning techniques or much larger datasets.
+Moreover, using much less inference-time computing overhead, our model surprisingly outperforms models that rely heavily on LLM data synthesis, underscoring \method's efficiency.
+Notably, models like \textsc{Instruct-LM}-1.3B, trained on $100$ billion tokens leveraging a fine-tuned \mistral-7B synthesizer, and \textsc{Cosmo}-1.8B, trained on $180$ billion tokens (including $25$ billion tokens synthesized by \mistral-8x7B), require significantly more computational resources than \method.
+
+
+\subsection{Applying \method to Domain-Specific Contiual Preraining}~\label{subsec:exp3-math-cpt}
+We also demonstrate the potential of \method in the continual pre-training scenario, specifically, in the mathematical domain.
+We apply the very same pipeline as in general domains to the already cleaned \owm corpus~\citep{paster2023openwebmath}, aiming to further refine and mine the high quality and clean data from the vast web pages crawled in it. 
+We then adapt and apply \method-xs series, which was initially trained on general text as described in \S~\ref{subsec:exp2-beyond-size-and-corpora}, and further adapted on math text for the doc-level and chunk-level refining tasks.
+Finally, we obtain about $5.5$B tokens left after the document-level cleaning stage and about $4.7$B tokens left after the chunk-level refining stage.
+We present the final mathematical evaluation results of models trained on the refined OpenWebMath in Table~\ref{tab:exp3-owm-ct}, with full evaluation results presented in \S~\ref{app:subsec:owm}.
+
+\begin{table}[!t]
+  \small
+  \centering
+  \setlength{\tabcolsep}{2.0pt}
+  \caption{OpenWebMath Continual Pre-training~(CPT) Results. All models are tested using few-shot CoT prompts. \llemma{} and \internmath{} are continual pre-trained models from \codellama{} and \textsc{InternLM2}~\citep{team2023internlm} with public available data, respectively.
+  \textsc{DeepSeek-LLM} denotes an internal DeepSeek model, and the model trained on \owm{} introduced by~\citet{shao2024deepseekmath}. Note that the unique tokens and training tokens in the column refer exclusively to the token numbers from math-specific corpora (calculated by corresponding tokenizers). $^\dag$: MQA evaluation of \intern{} is based on an alternative prompt due to non-prediction issues with the original prompt. The \textbf{bolded} entries represent the best results within the same base model.
+  }
+  \newcommand{\U}[1]{{#1}}
+  \resizebox{\linewidth}{!}{%
+    \begin{tabular}{l|ll|cc|ccccccccc|c}
+    \toprule
+    \textbf{Model} & \multicolumn{1}{c}{\textbf{Size}} & \multicolumn{1}{l}{\textbf{Method}} & \begin{tabular}[c]{@{}c@{}}\textbf{Uniq}\\ \textbf{Toks}\end{tabular} & \multicolumn{1}{c|}{\textbf{\begin{tabular}[c]{@{}c@{}}Train\\ Toks\end{tabular}}} & \textbf{GSM8K} & \textbf{MATH} & \textbf{SVAMP} & \textbf{ASDiv} & \textbf{MAWPS} & \textbf{TAB} & \textbf{MQA} & \begin{tabular}[c]{@{}c@{}}\textbf{MMLU}\\ \textbf{STEM}\end{tabular} & \textbf{\begin{tabular}[c]{@{}c@{}}{SAT}\\ {MATH}\end{tabular}} & \textbf{AVG} \\
+    \midrule
+    \multicolumn{15}{c}{\cellcolor[HTML]{F2F2F2}Existing Continual Pre-training for Reference} \\
+    \midrule
+    \multirow{2}{*}{\centering\textsc{DeepSeek-LLM}}& 1.3B 
+        & - & - & - & 2.9  &  3.0 &  - & -  & - & - & - &  19.5 & 15.6 & - \\
+        & 1.3B & - & 14B & 150B & 11.5  &  8.9 &  - & -  & - & - & - &  29.6 & 31.3 & - \\
+    \midrule
+    \multirow{2}[2]{*}{\centering\codellama{}~(Base)} & 7B    &  -     &  -  & - & 11.8 & 5.0 & 44.2 & 50.7 & 62.6 & 30.6 & 14.3 & 20.4 & 21.9 & 29.1  \\
+    &  34B  & -     & -   &  -  & 31.8 & 10.8 & 61.9 & 66.0 & 83.4 & 51.6 & 23.7 & 43.0 & 53.1 & 47.3  \\
+    \midrule
+    \multirow{2}{*}{\centering\llemma{}} & 7B    & -     & 55B   & 200B  & 38.8  & 17.2  & 56.1  & 69.1  & 82.4  & 48.7  & 41.0  & 45.4  & 59.4  & 50.9~(+21.8) \\
+         & 34B   & -     & 55B   & 50B   & 54.2  & 23.0  & 67.9  & 75.7  & 90.1  & 57.9  & 49.8  & 54.7  & 68.8  & 60.1~(+12.8) \\
+    \midrule
+    \multirow{2}{*}{\centering\intern{}} & 7B    &  -     &  -  & - & 27.0 & 6.6 & 49.0 & 59.3 & 74.8 & 40.1 & 20.9$^\dag$ & 19.0 & 28.1 & 36.1  \\
+    &  20B  & -     &  -  & -   & 50.6 & 18.8 & 72.5 & 75.9 & 93.9 & 45.4 & 33.1 & 53.7 & 59.4 & 55.9  \\
+    \midrule
+    \multirow{2}{*}{\centering\internmath{}} & 7B    & -     & 31B   & 125B  & 41.8  & 14.4  & 61.6  & 66.8  & 83.7  & 50.0  & 57.3  & 24.8  & 37.5  & 48.7~(+12.6) \\
+          & 20B   & -     & 120B  & 500B  & 65.4  & 30.0  & 75.7  & 79.3  & 94.0  & 50.9  & 38.5  & 53.1  & 71.9  & 62.1~(+6.2) \\
+    \midrule
+    \multicolumn{15}{c}{\cellcolor[HTML]{F2F2F2}Applying Data Refinement Approaches} \\ \midrule
+    \tinyllama (Base) & 1.1B  & -     & -     & -     & 2.8   & 3.2   & 10.9  & 18.0  & 20.2  & 12.5  & 14.6  & 16.4  & 21.9  & 14.7 \\ \midrule
+    \multirow{4}[1]{*}{\centering\tinyllama (CPT)} & 1.1B  & -     & 15B   & 15B   & 6.2   & 4.8   & 22.3  & 36.2  & 47.6  & 19.3  & 11.6  & 20.7  & \U{25.0}  & 21.5 (+8.1) \\
+          
+          & 1.1B  & \textsc{Rho}   & 15B   & 9B$^*$\tablefootnote{\textsc{Rho}-1 only counts the selected tokens that are used for training~(loss calculation).}   & 7.1   & 5.0   & \U{23.5}  & \U{41.2}  & 53.8  & -     & \textbf{18.0} & -     & -     & - \\
+          & 1.1B  & Rule  & 6.5B  & 15B   & 4.5   & 2.8   & 17.5  & 29.4  & 39.3  & 15.1  & 12.4  & 19.4  & \U{25.0}  & 18.4 (+3.7) \\
+          
+          
+          & \HL{1.1B}  & \HL{\method} & \HL{5B}  & \HL{15B}   & \HL\textbf{9.0} & \HL\textbf{5.6} & \HL\textbf{23.8} & \HL\textbf{41.9} & \HL\textbf{56.9} & \HL\textbf{22.2} & \HL\U{15.6} & \HL\textbf{26.8} & \HL\textbf{31.2} & \HL\textbf{25.7~(+11.0)} \\\midrule
+    \llamaii (Base) & 7B    & -     & -     & -     & 14.1 & 3.8          & 39.5 & 51.6 & 63.6 & 30.9  & 12.5  & 32.9      & 34.4     & 31.5 
+    \\ \midrule
+    \multirow{2}[1]{*}{\llamaii (CPT)} & 7B    & -     & 15B     & 10B   & 29.6 & 13.6 & 49.2 & 61.9 & 78.4 & \U{36.3} & 31.9 & 40.5 & 43.8 & 42.8 (+11.3) \\ 
+    & \HL{7B}    & \HL{\method}     & \HL{5B}     & \HL{10B}     &  \HL{\textbf{30.6}} & \HL{\textbf{16.8}} & \HL{\textbf{50.2}} & \HL{\textbf{63.7}} & \HL{\textbf{79.3}} & \HL{\textbf{37.3}} & \HL{\textbf{40.1}} & \HL{\textbf{43.8}} & \HL{\textbf{53.1}} & \HL{\textbf{46.1 (+14.6)}} \\ \midrule
+    \codellama{}~(Base) & 7B    &  -     &  -  & - & 11.8 & 5.0 & 44.2 & 50.7 & 62.6 & 30.6 & 14.3 & 20.4 & 21.9 & 29.1  \\ \midrule
+    \multirow{2}[1]{*}{\codellama (CPT)} & 7B    & -     & 15B   & 10B  &  31.1  & 14.8          & 51.4  & 62.1  & 81.2  & 33.6   & 30.4   & 40.5       & 43.8      & 43.2 (+14.1) \\ 
+    & \HL{7B}    & \HL{\method}  & \HL{5B}   & \HL{10B}  & \HL{\textbf{35.6}}          & \HL{\textbf{17.6}} & \HL{\textbf{55.8}} & \HL{\textbf{67.9}} & \HL{\textbf{82.7}}          & \HL{\textbf{41.3}} & \HL{\textbf{38.9}}          & \HL{\textbf{42.6}}          & \HL{\textbf{62.5}} & \HL{\textbf{49.4} \textbf{(+20.3)}} \\ \midrule
+    \mistral (Base) & 7B    & -     & -     & -     & 40.6  & 11.4  & \textbf{65.4}  & 68.5  & 87.0  & \textbf{52.9}  & 32.3  & 50.0  & 56.2  & 51.6 \\ \midrule
+    \multirow{2}[1]{*}{\mistral (CPT)} & 7B    & -     & 15B   & 10B   & 44.4  & 19.2  & \U{65.2}  & 69.6  & 88.4  & 46.6  & 43.1  & 50.8  & \U{65.6}  & 54.8 (+3.2) \\
+          & \HL{7B}    & \HL{\method} & \HL{4.7B}  & \HL{10B}   & \HL\textbf{51.0} & \HL{\textbf{22.4}} & \HL{64.9} & \HL\textbf{72.9} & \HL\textbf{89.2} & \HL\U{49.8} & \HL\textbf{53.0} & \HL\textbf{54.2} & \HL\textbf{75.0} & \HL\textbf{59.2 (+7.6)} \\ 
+    \bottomrule
+    \end{tabular}%
+    }
+  \label{tab:exp3-owm-ct}%
+\end{table}%
+
+\paragraph{\method boosts math continual pre-training efficiency vastly.} 
+Without any domain-specific design, Table~\ref{tab:exp3-owm-ct} shows that pre-training on OpenWebMath refined by \method brings $11.0\%$ average performance improvements for base \tinylm, $14.6\%$ for base \llamaii, $20.3\%$ for base \codellama, $7.6\%$ for base \mistral, which clearly exceed the improvements of all baselines, including their counterparts pre-trained on the original corpus, under the same settings. It is also worth noticing that,  applying the rule-based filtering method does not bring improvements; instead, it leads to a $3.1\%$ performance degradation compared to continual pre-training on the original corpus. This finding implies that there are no universal workable heuristics for all domains, highlighting the demands for automated pipelines just like \method.
+Moreover, compared with some existing state-of-the-art math continual pre-training models like \llemma and \internmath typically requiring hundreds of billions of tokens continual pre-training, our \method demonstrates remarkable efficiency gains. 
+A more controlled comparison further highlights this efficiency: \llemma{}-7B, based on \codellama-7B, was trained on $200$B tokens, whereas our \method, also starting from \codellama-7B, reaches similar performance levels with just $10$B tokens of training, indicating a $\mathbf{20}$ times reduction in training computes. 
+These results suggest that our approach may contribute to more efficient and accessible development of LLMs and could offer a new perspective in domain-specific model adaptation, potentially enhancing how to address specialized LLM in resource-constrained settings.
+
+
+\section{Analysis}
+
+
+\subsection{Impact on the original data}
+
+
+What changes occur in the corpora after applying \method? We compare the document length distribution of the original corpus with that of the \method-refined corpus in Figure~\ref{fig:token-distribution}.
+In the general domain corpora~(\redpj, C4, and \fineweb), the data refined by \method exhibits a noticeable shift in the average number of tokens per document.
+For instance, in \redpj, we observe that documents with fewer than \m{100} tokens make up a significant portion of the corpus. After applying the \method, the majority of documents contain more than \m{200} tokens, with an average number of tokens per document increasing from \m{1217} to over \m{2000}.
+This suggests that very short documents may be noisy and lack sufficient meaningful information to be suitable for pre-training. This shift, however, is not observed in \owm, where the average number of tokens per document is already larger. 
+One possible reason for this outlier is that the \owm corpus is collected mostly from sources different from the general domain, \emph{e.g.,} online forums like Stack Exchange, and academic publisher websites such as arXiv.
+The noises of these sources can be quite different from general domains.
+Further case studies on these documents are provided in \S~\ref{app:subsec-case-study}.
+
+\begin{figure}[h]
+    \centering
+    \begin{minipage}{0.245\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{pics/redpj_token_length_distribution_logscale.pdf}
+        \caption*{\small{\redpj}}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.245\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{pics/c4_token_length_distribution_logscale.pdf}
+        \caption*{\small{C4}}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.245\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{pics/fw_token_length_distribution_logscale.pdf}
+        \caption*{\small{\fineweb}}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.245\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{pics/owm_token_length_distribution_logscale.pdf}
+        \caption*{\small{\owm}}
+    \end{minipage}
+    \caption{Comparison of doc's token length distributions between original and \method-refined data.}
+    \label{fig:token-distribution}
+\end{figure}
+
+\subsection{Computing Overhead Analysis}~\label{subsec:analyze-compute-flops}
+
+Although \method demonstrates promising results in downstream tasks, it is important to acknowledge that large-scale model inference still requires a substantial computing budget. 
+For example, as mentioned in \S~\ref{subsec:exp1-verify-walle}, and in Table~\ref{app:tab-pt-corpora}, the \redpj corpus used for training \tlms was refined from about $60$B raw tokens.
+As calculated in \S~\ref{app:subsec-flops-analysis},
+if we utilize \method-XS for both two refining stages, the additional computational overhead will amount to approximately $C = 5 \times 10^{19}$ FLOPs, 
+which is equivalent to training an additional $12$B tokens on \tlms and $5$B tokens on \tlmm. It is noteworthy that this overhead ratio keeps decreasing as model size increases, meaning that the relative computational cost diminishes for larger models.
+\begin{wrapfigure}[15]{r}{0.44\textwidth}
+\centering
+\includegraphics[width=0.90\linewidth]{pics/performance_vs_total_flops_with_bars_controlled.pdf}
+\caption[FLOPs comparison]{%
+FLOPs comparison for comparable downstream performance with/without \method refining: 0.3B(Avg.Perf = 40.5), 0.7B (41.6), and 1.7B (42.9).\footnotemark}
+\label{fig:analyze-perf-vs-flops}
+\end{wrapfigure}
+\footnotetext{The train FLOPs for the base model (approximately $5.3\times10^{19}$) used to create the refining model are excluded. This is because any pre-trained LLM can theoretically serve as the base for refinement. This also reflects \method's flexibility.}
+In Figure~\ref{fig:analyze-perf-vs-flops}, we compare the FLOPs consumed by checkpoints with similar performance, both with and without applying \method, across three different model sizes. 
+As the model size increases, the proportion of inference FLOPs required for applying \method decreases.
+For the \m{0.7}B model, the total FLOPs when using \method are already lower than without it ($6.3\times1e19$ vs. $6.7\times1e19$).
+Notably, for the largest \m{1.7}B model, we achieve performance comparable to a model pre-trained on the original data, but with only $58\%$ of the total FLOPs. This demonstrates that refining methods like \method not only enhances data quality but also becomes more computationally efficient as model sizes grow, reinforcing the value of allocating additional resources to refining pre-training data.
+
+
+
+\section{Related Works}
+
+
+\paragraph{Pre-training Data Processing}
+Raw data collected from public sources (\emph{e.g.}, CommonCrawl) are noisy, and directly using these data can greatly hurt model performance; thus, it has been a common practice to execute extensive pre-processing before pre-training~\citep{touvron2023llama1, together2023redpajama,penedo2024fineweb}.
+The pipeline usually starts with document preparation, which includes URL filtering, text extraction, language-based filtering~\citep{smith2022using}.
+The remaining document will then undergo several quality checks with heuristic rules like overall length, symbol-to-word ratio, and other
+criteria to determine whether it is kept, partially or fully aborted~\citep{zhang2024map,dou2024sailor,qiu2024wanjuan}.
+Finally, these documents are deduplicated using different matching methods, \emph{e.g.}, fuzzy match like MinHash~\citep{broder1997resemblance}, or exact sequences matches~\citep{penedo2023refinedweb}.
+In \method, we uses the language model for further data refining, outperforming heuristic rules with acceptable computational overhead.
+\paragraph{Data Selection Methods}
+Data selection, slightly distinct from data processing, is more commonly applied in the later stages of large-scale data pre-processing.
+In supervised fine-tuning~(SFT), it typically involves selecting a much smaller subset of samples to minimize tuning overhead while maintaining performance~\citep{liu2024what}.
+Recent efforts have extended these selection strategies to the pre-training stage~\citep{engstrom2024dsdm, xie2023data, ankner2024perplexed,sachdeva2024train,liu2024regmix}.
+For instance, \citet{wettig2024qurating} train a rater model to score documents on four quality criteria in SlimPajama~\citep{cerebras2023slimpajama} and conduct pre-training on a resampled subset based on scores.
+MATES~\citep{yu2024mates} apply a smaller model for estimating data influence during pre-training, enabling dynamic data selection schema.
+Moreover, as mentioned in \textsc{Llama-3}~\citep{metallama3}, \llamaii models~\citep{touvron2023llama} was used as text-quality classifiers that underpin \textsc{Llama-3}'s training data.
+Instead of merely selecting documents, \method enables more fine-grained operations within documents, contributing to further performance improvements.
+\paragraph{Model-based Data Synthesizing}
+Another branch of research focuses on editing or rephrasing existing data with models to improve the data quality.
+\citet{fan2024reformatted} use ChatGPT to rephrase several instruction-tuning datasets for a clear format based on massive scenario-based criteria. 
+\citet{yue2024mammoth2} use LLMs to extract and refine $5$M QA pairs from web documents,
+obtaining \m{10}M instruction-response pairs.
+Synthesis techniques have also been applied in the pre-training phase such as the \textsc{Phi} series~\citep{gunasekar2023textbooks-phi1,li2023textbooks-phi1.5}.
+Recently, \citet{maini2024rephrasing} and \citet{cheng2024instruction} utilize off-the-shelf instruction-tuned models to paraphrase web documents in specific styles such as QA, and mix these synthetic rephrases with real data in pre-training.
+\citet{benallal2024cosmopedia} further synthesize from mere seed topics, by prompting LLMs to generate pre-training samples in a cleaner format like textbooks. However, despite its success, it typically requires substantial computation to synthesize a pre-training-scale corpus, and more critically, it inevitably inherits flaws from the advanced model, also suffering from hallucination issues~\citep{liu2024best}.
+In this work, we focus on leveraging language models to lift data quality through the synthesis of executable and interpretable programs, rather than directly generating data. We demonstrate that \method could clearly improve data quality at scale only with acceptable extra computing.
+
+\paragraph{Inference Time Scaling} Recent trends in language models have begun to explore the potential of allocating additional computing at inference time, complementing the extensive computations already deviated to the pre-training and post-training phases. Several studies have demonstrated the potential of this approach, showing that smaller language models equipped with additional inference-time computing can perform comparably to, or even outperform, significantly larger models, evidenced across various domains, including code generation~\citep{hassid2024the, DBLP:journals/corr/abs-2407-21787-large-language-monkeys-scaling-inference-compute}, and math problem-solving~\citep{DBLP:journals/corr/abs-2408-03314-scaling-llm-test-time-compute, DBLP:journals/corr/abs-2408-00724-an-empirical-analysis-compute-optimal-inference}. The significance of this approach has been further corroborated by OpenAI's latest o1 model release~\citep{openaio1}. While these studies focus on scaling computing on test time, our work demonstrates \textbf{an alternative perspective on inference computing scaling}. We advocate for allocating computing to refine pre-training corpora, particularly given that Internet-based corpora have been extensively utilized in language model pre-training. Our proposed \method demonstrates remarkable gains in pre-training efficiency by investing moderately additional compute in the corpus refinement, facilitating more efficient and accessible development of LLMs.
+
+
+
+
+
+
+
+\section{Conclusion}
+
+
+
+We introduced \method, a framework that uses language models to refine pre-training data at scale through program generation.
+Our extensive experiments show that \method curated data improves model performance by over \m{2\%} on various downstream benchmarks and is effective across different model sizes and pre-training datasets. 
+For domain-specific continual pre-training, models trained on \method curated tokens also yield significant improvements in $20\times$ fewer tokens, and comparable to state-of-the-art models trained on $200$B tokens.
+Further analysis also implies applying \method can achieve similar results with less computing power for large-scale LLM pre-training. 
+In summary, these results demonstrate \method's potential for greatly improving data quality and reducing costs in language model training. 
+
+
+
+\section{Implications and Future Directions}
+
+The strong results from \method highlight the potential of automated data refinement to significantly improve model performance while reducing computational costs. By refining data more effectively, \method opens new possibilities for improving training efficiency and achieving better results across a range of benchmarks.
+Looking ahead, these results suggest several future directions.
+First, incorporating additional refining operations like reformatting and rephrasing could further enhance data quality. 
+Second, improving efficiency by reducing model size and applying inference acceleration techniques is a key goal. Expanding \method to domains like code and multilingual data is also promising. 
+Scaling up with more computational resources will allow for a thorough evaluation of its potential. Finally, we believe that prioritizing data refinement before pre-training can greatly improve training efficiency, and we encourage continued exploration in this area.
+
+
+
+
+
+

@@ -1,0 +1,241 @@
+\title{ZETA: Leveraging $Z$-order Curves for Efficient Top-$k$ Attention}
+
+\begin{abstract}
+Over recent years, the Transformer has become a fundamental building block for sequence modeling architectures. Yet at its core is the use of self-attention, whose memory and computational cost grow quadratically with the sequence length $N$, rendering it prohibitively expensive for long sequences. A promising approach is top-$k$ attention, which selects only the $k$ most relevant tokens and achieves performance comparable to vanilla self-attention while significantly reducing space and computational demands. However, causal masks require the current query token to only attend to past tokens, preventing existing top-$k$ attention methods from efficiently searching for the most relevant tokens in parallel, thereby limiting training efficiency. In this work, we propose ZETA, leveraging Z-Order Curves for Efficient Top-k Attention, to enable parallel querying of past tokens for entire sequences. We first theoretically show that the choice of key and query dimensions involves a trade-off between the curse of dimensionality and the preservation of relative distances after projection. In light of this insight, we propose reducing the dimensionality of keys and queries in contrast to values and further leveraging Z-order curves to map low-dimensional keys and queries into one-dimensional space, which permits parallel sorting, thereby largely improving the efficiency for top-$k$ token selection. Experimental results demonstrate that ZETA~matches the performance of standard attention on synthetic tasks Associative Recall and outperforms attention and its variants on Long-Range Arena and WikiText-103 language modeling.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Transformers (Vaswani et al., 2017) have become indispensable for sequence modeling across various domains, including natural language processing (NLP) (Devlin et al., 2019; Brown et al., 2020; OpenAI et al., 2024; Jiang et al., 2024), computer vision (Dosovitskiy et al., 2021; Ramesh et al., 2021; Brooks et al., 2024), etc. The foundation of Transformer models is the self-attention mechanism. This mechanism (Bahdanau et al., 2015), inspired by recurrent neural networks (RNNs) and their ability to construct representations from all elements in a sequence, has revolutionized numerous fields, enabling breakthroughs in tasks such as language modeling (Radford et al., 2019), machine translation (Ott et al., 2018), text generation (Brown et al., 2020), image classification (Touvron et al., 2021) and video generation (Brooks et al., 2024). However, self-attention has a quadratic complexity in both memory and computation as the sequence length $N$ increases, which presents a significant challenge when scaling to long sequences (Child et al., 2019; Beltagy et al., 2020). This makes the direct application of self-attention in large-scale problems computationally prohibitive for many real-world applications, particularly when long sequences are involved (Tay et al., 2021).  
+
+Recent advances have explored strategies to mitigate the inefficiencies of vanilla self-attention. One such approach is top- $k$ attention, which focuses computation on a subset of the most relevant tokens, significantly reducing memory and computation costs while maintaining competitive performance (Kitaev et al., 2020; Gupta et al., 2021; Bertsch et al., 2023; Mao et al., 2024). However, existing top- $\cdot k$ attention methods (Kitaev et al., 2020; Zhuoran et al., 2021) typically apply causal masking after selecting the top- $k$ tokens, causing earlier tokens $(i\ll N)$ to often attend to nothing as their top- $k$ relevant tokens may include future tokens that are masked out by the causal mask. Alternatively, Mao et al. (2024) process input tokens by token to exclude masked-out keys from the $k$ -nearest neighbors search, preventing future tokens from influencing currently generated ones.  
+
+Consequently, with causal masks, current top- $k$ attention approaches fail to fully leverage the parallel computation abilities of modern accelerators, limiting their efficiency in long-sequence modeling.  
+
+To overcome the limitations of existing top- $k$ attention methods, we introduce ZETA, a novel model designed to search for the top- $k$ tokens within chunked one-dimensional (1-D) sorted key sequences projected via $Z$ -order curves. Specifically, our approach strikes a balance between mitigating the ”curse of dimensionality” and preserving the relative distance of token represntations after projection by carefully selecting a lower dimensionality for keys and queries in contrast to values. This reduction allows the query and key to map to a 1-D space using $Z$ -order curves, preserving proximity. As a result, ZETA efficiently performs top- $k$ token selection in parallel within this 1-D space with accelerators. Additionally, since the aforementioned top- $k$ search is based on the Euclidean metric for low dimensional data, directly applying the traditional dot-product based softmax function is not appropriate. To address this, we propose an Adaptive Cauchy-Softmax mechanism that replaces the exponential function in the attention operation with a trainable Cauchy kernel (Billingsley, 1986). This enables dynamic adjustment of receptive fields across layers, providing greater flexibility in capturing both short and long-range dependencies.  
+
+Extensive empirical evaluations show that ZETA matches the performance of standard self-attention on the Associative Recall task and consistently outperforms existing attention variants on the LongRange Arena (LRA) and WikiText-103 datasets. We summarize our key contributions as follows:  
+
+• Efficient Parallel Top- $\mathbf{\nabla}\cdot\mathbf{k}$ Attention: We introduce ZETA, a novel model that enables top- $k$ attention to operate in parallel across entire sequences, significantly improving training and inference efficiency with a time complexity of $\mathcal{O}(N\log N)$ .   
+• Dimensionality Selection for Key and Query Pairs: We theoretically show that the dimensionality of keys and queries decides the trade-off between the curse of dimensionality and the preservation of relative distances for keys and queries.   
+• $Z$ -order Curve Integration: By leveraging $Z$ -order curves, we enable efficient top- $k$ token selection in 1-D space, allowing the use of parallel sorting algorithms on GPUs for faster attention computation.   
+• Adaptive Cauchy-Softmax Mechanism: We introduce Adaptive Cauchy-Softmax, a Softmax variant with trainable parameters based on the Cauchy kernel, dynamically adjusting receptive fields to enhance attention’s flexibility.  
+
+
+
+\section{3 METHODOLOGY  }
+
+
+3.1 PRELIMINARIES  
+
+Attention The attention mechanism is a cornerstone in modern deep learning, particularly in natural language processing and sequence modeling tasks. It allows a model to focus on specific parts of the input sequence, thereby capturing long-range dependencies more effectively. In the standard formulation of attention (Vaswani et al., 2017), given a set of queries $Q~\in~\mathbb{R}^{\tilde{N}\times d_{Q}}$ , keys $\kappa\ \in$ $\mathbb{R}^{N\times d_{K}}$ , and values $V\in\dot{\mathbb{R}}^{N\times d_{V}}$ , the attention scores are computed as follows:  
+
+$$
+\mathrm{Attention}(Q,K,V)=\mathrm{softmax}\left(Q K^{T}/\sqrt{d_{K}}\right)V
+$$  
+
+where $d_{K}$ is the dimension of the keys and the queries.  
+
+Top- $k$ Attention approaches aim to enhance the efficiency and flexibility of traditional self-attention mechanisms by focusing attention to only the most relevant tokens in a sequence. Both methods reduce the computational overhead associated with self-attention, especially for long sequences, by selectively attending to the most important tokens rather than computing attention scores across the entire sequence. This process lowers the computational complexity from $\mathcal{O}(N^{2})$ in traditional selfattention to $O(N\cdot k)$ , where $N$ is the sequence length and $k$ is the number of selected tokens. The top- $k$ highest scores are selected for each query:  
+
+$$
+I_{q}=\left\{i\mid q{\cal K}_{i}^{T}/\sqrt{d_{\cal K}}\geq\tau_{k}\right\}
+$$  
+
+where $I_{q}$ represents the set of indices corresponding to the top- $k$ highest attention scores for the query $q$ , $\tau_{k}$ is the threshold defined as the $k$ -th highest attention score. The attention is then restricted to the tokens in this subset, reducing the number of operations required for long sequences. Specifically, the attention score for the top- $k$ tokens is recalculated using the self-attention mechanism but limited to the selected indices:  
+
+$$
+\mathrm{Attention}_{\mathrm{top}-k}(q,K,V)=\sum_{i\in I_{q}}\mathrm{softmax}\left(q K_{i}^{T}/\sqrt{d_{K}}\right)V_{i}
+$$  
+
+where $\pmb q$ denotes the query vector, $\kappa_{i}$ and $V_{i}$ denote the key and value vectors corresponding to the top- $k$ relevant tokens, respectively.  
+
+$Z$ -order Curves (Dugundji, 1966), also known as Morton codes, provide a way to map multidimensional data into a 1-D space while preserving locality, whereas other dimensionality reduction methods (Abdi & Williams, 2010; McInnes et al., 2018) are not designed for mapping data to a 1D space. This approach is valuable in tasks that require efficient spatial indexing or key-query matching, such as attention. By maintaining the relative proximity of data points after projection, $Z$ -order curves ensure that points that are close together in the original multi-dimensional space remain close in the projected 1-D space.  
+
+The $Z$ -order curve interleaves the binary representations of each coordinate in a multi-dimensional point. For a point in $d$ -dimensional space with coordinates $\pmb{x}\,=\,(x_{1},x_{2},...\,,x_{d})$ , where each $\pmb{x}_{i}$ is a binary number, the $Z$ -order curve computes a scalar value $Z$ by interleaving the bits of each coordinate. Given the binary representation of $x_{i}$ as $b_{i1}b_{i2}\dots b_{i n}$ , the $Z$ -order curve is expressed as:  
+
+$$
+Z=b_{11}b_{21}\dots b_{d1}b_{12}b_{22}\dots b_{d2}\dots b_{1n}b_{2n}\dots b_{d n}
+$$  
+
+where $n$ refers to the number of bits used to represent each coordinate $x_{i}$ in its binary form. Through this interleaving of bits, the $Z$ -order curve creates a scalar value that allows efficient sorting or indexing of points while approximately maintaining their original spatial relationships.  
+
+The primary advantage of $Z$ -order curves is their ability to preserve locality. In other words, nearby points in the original multi-dimensional space have similar $Z$ -values in the projected 1-D space. This property enables efficient search and selection processes in attention mechanisms or spatial indexing, where key-query pairs can be processed more efficiently in the 1-D space without significantly losing the locality information from the higher-dimensional space. ${{Z}}$ -order curves are designed to preserve locality, and hence not suitable for dot-production similarity, which does not reflect locality.  
+
+3.2 SEARCH TOP-K ATTENDED TOKENS IN 1-DIMENSIONAL SPACE  
+
+Since we project the key and query vectors into 1-D space using $Z$ -order curves, setting a very large $d_{K}$ still would distort locality shown in Figure 3 and compromise the preservation of relative distances. This raises the question of whether we can reduce $d_{K}$ such that even after mapping to one dimension, the relative distances between tokens are still maintained. Importantly, the key and query dimensions $d_{K}$ and $d_{Q}$ do not have to match the dimension of the values $d_{V}$ . This is because $d_{V}$ should remain large to capture more semantic information, as seen with Gaussian distributions, where higher dimensionality increases the measure of information entropy (Cover & Thomas, 2006). Hence, as long as the relative distances between queries and keys are preserved, we can reduce $d_{K}$ and $d_{Q}$ . The following theoretical analysis provides insights into the selection of $d_{K}$ .  
+
+
+
+\section{3.2.1 THEORETICAL ANALYSIS ON $d_{K}$  }
+
+
+We first introduce the Johnson–Lindenstrauss Lemma (Johnson et al., 1986), which states that data in high-dimensional space can be projected into a much lower-dimensional subspace using random projections while approximately preserving the pairwise distances between the points. Since random projections can preserve locality, this provides justification for setting a smaller $d_{K}$ with trainable projection functions for keys and queries, which could also preserve locality.  
+
+Lemma 3.1. (Johnson–Lindenstrauss Lemma) For any $0<\epsilon<1$ and any integer $m$ , let d be a positive integer such that $d=\Omega(\frac{\ln m}{\epsilon^{2}})$ . Then for any set $x$ of m points in $\dot{\mathbb{R}}^{D}$ , there exists a map $f:\mathbb{R}^{D}\to\mathbb{R}^{d}$ such that for all $x_{i},x_{j}\in\mathcal{X}$ ,  
+
+$$
+(1-\epsilon)\|x_{i}-x_{j}\|^{2}\leq\|f(x_{i})-f(x_{j})\|^{2}\leq(1+\epsilon)\|x_{i}-x_{j}\|^{2}
+$$  
+
+The below assumption provides a mathematical depiction that attention weights are constrained within an $m$ -dimensional simplex, and the learnable similarity function $\Gamma$ outputs the attention scores, ensuring the most relevant tokens are emphasized during the information aggregation process. This reflects the primary goal of attention mechanisms: to aggregate critical information for more accurate predictions.  
+
+Assumption 3.2. Let $\alpha\ \in\ \Delta_{m-1}$ be an element of the $m$ -dimensional simplex, defined as $\Delta_{m-1}\ \triangleq\ \{\alpha\in\mathbb{R}^{m}\mid\alpha_{i}\geq0,\sum_{i=1}^{m}\alpha_{i}=1\}$ . Assume that $h_{\mathrm{atm}}$ equipped with $\alpha$ can achieve an optimal learnable similarity critic function $\Gamma$ , where the attention scores are given by $\alpha=$ softmax $(\Gamma(f_{k}(x_{i}),f_{q}(x)))$ , such that $\Gamma$ is trained to be optimal to have the minimal expected risk: $\mathrm{min}_{\alpha}\left|\left|h_{\mathrm{attn}}(x,S_{x};\alpha)-y\right|\right|$ , where $h_{\mathrm{atm}}$ denotes the attention-based hypothesis, $x$ is the input, and $S_{x}$ is the context.  
+
+Theorem 3.3 highlights the importance of choosing $d_{K}$ carefully, as it reflects a trade-off between locality preservation and the curse of dimensionality. Higher $d_{K}$ allows for more detailed feature capture but tends to suffer from the high-dimensional curse, leading to increased complexity. On the other hand, a lower $d_{K}$ loses locality between tokens, which is crucial for efficient query. The bounds provided give valuable insights into the underlying mechanisms of attention and can guide future designs of more efficient attention models. For simplicity, it is assumed without loss of generality that keys and queries share the same projection functions, as Kitaev et al. (2020).  
+
+Theorem 3.3. Let $\mathcal{X}\in\mathbb{R}^{d}$ , $\boldsymbol{\upgamma}\in\mathbb{R}^{D}$ , and $\mathcal{D}$ be a distribution over $\mathcal X\times\mathcal Y$ for which the conditional probability function, $h:\mathbb{R}^{d}\rightarrow\mathbb{R}^{D}$ , is a $l$ -Lipschitz function. Let $h$ denote a hypothesis, and $h_{a t t n}$ denote the one-layer attention model to aggregate the predictions of a sample set $S\sim\mathcal{D}^{m}$ to predict for another i.i.d sample $x$ . Specifically, here we assume the same linear map for a key mapping $f_{k}$ and a query mapping $f_{q}$ as $\mathbf{\bar{\alpha}}^{f}:\mathbb{R}^{d}\mathbf{\bar{\alpha}}\rightarrow[-B,B]^{d_{K}}$ where $B$ is the bound of projection of $x$ by $f$ , and we assume the value mapping $f_{v}$ be the Bayes optimal rule $h^{*}=\mathbb{E}[Y|X=x]$ , which is the hypothesis that minimizes $L_{\ensuremath Ḋ \mathcal Ḋ D Ḍ Ḍ }(h)$ over all functions. Then, the expected risk of the regression tasks $\begin{array}{r}{\dot{L_{\mathcal{D}}}(h)=\mathbb{E}_{(x,y)\sim\mathcal{D}}||h(x)-y||}\end{array}$ with $h$ as $h_{a t t n}$ can be upper bounded by  
+
+$$
+\underbrace{\mathbb{E}}_{S\sim\mathcal{D}^{m}}[L_{\mathcal{D}}(h_{a t t n})]\leq L_{\mathcal{D}}(h^{*})+\frac{4l c\sqrt{d_{K}}B m^{-1/(d_{K}+1)}}{\sqrt{1-\sqrt{\frac{C\ln m}{d_{K}}}}}
+$$  
+
+Theorem 3.3 indicates $d_{K}$ should be carefully chosen, rather than simply equating $d_{V}$ . In experiments, we show that the dimension of query and key can be chosen to a small number but not degrade the model performance in Figure 2b of Section 4.2.  
+
+3.2.2 TOP- $k$ SEARCH IN 1-DIMENSION  
+
+As $N$ becomes extremely large, iterating through the entire context history to search for the top $k$ tokens becomes infeasible. Ideally, searching should be efficient and aim to achieve the optimal time complexity of $\mathcal{O}(N\log N)$ , similar to general sorting problems with arbitrary inputs. To achieve this, we map both keys and queries into a 1-D space using the $Z$ -order curve and sort them with a sorting operation that can be executed in parallel on an accelerator, e.g. the torch.sort operator in PyTorch (Paszke et al., 2019). The insertion position of a query in the key sequence can then be found using a binary search (e.g. with torch.searchsorted), allowing us to retrieve the top- $k$ attended tokens using a window centered on the insertion position.  
+
+Specifically, the key and query dimensions are set to be significantly smaller than that of the values, i.e. $d_{K}=d_{Q}\ll d_{V}$ . While values need a high dimensionality to carry rich semantic information, keys and queries primarily serve to preserve relative distances, which can be achieved with much lower dimensionality as argued by Lemma 3.1. To facilitate the fast retrieval of queries from keys, we leverage sorting, which can be efficiently parallelized, after mapping queries and keys into 1-D space via the $Z_{\l}$ -order curve. We define $Q$ , $\dot{\boldsymbol{K}}^{*}\!\in\mathbb{R}^{B\times N\times d_{K}}$ , where $B$ is the batch size and $N$ is the sequence length. The $Z$ -order transformation is applied as follows:  
+
+$$
+\begin{array}{r}{Q_{z}=Z\mathrm{-order}(Q),~~~K_{z}=Z\mathrm{-order}(K)}\end{array}
+$$  
+
+where $Q_{z}$ and $\kappa_{z}$ are the 1-D representations of $Q$ and $\kappa$ , respectively.  
+
+With causal masks, directly collecting the top- $k$ tokens from the entire sequence is not guaranteed to have plenty of tokens to make inference. For instance, for a query at position 32 in a sequence of length 2048, selecting the top 16 tokens from the entire sequence followed by causal masking would leave approximately $\textstyle{\frac{32}{2048}}\times16={\frac{1}{4}}$ tokens to attend to, effectively leaving no tokens available for the query. Consequently, the query at this position would not attend to anything, rendering top- $k$ attention ineffective. To enable parallel $k$ -nearest neighbors $(k\mathsf{N N})$ searching considering causal masks, we first sort the $Z$ -order keys and divide them into chunks. For query $i$ in the $m$ -th chunk (where $m=\lfloor i/M\rfloor$ and $M$ is the chunk size), we restrict search to the first $m$ chunks, indexing the original unsorted keys from 0 to $m\times M-1$ in the sorted list. This ensures that future keys $j\in\{j:j>m\times M\}$ are excluded, in accordance with the causal mask requirements. This process is performed in parallel for every query.  
+
+Next, we perform the nearest neighbor search in these 1-D $Z$ -order spaces. For each query, the insertion position is first found using a binary search and followed by selecting the nearest keys using a window of size $K$ centered around the insertion point to collect top- $k$ tokens as $I_{q}$ , denoting the indices of the $k$ -nearest neighbors. This ensures efficient and accurate retrieval while maintaining the constraints imposed by causal masking.  
+
+
+
+\section{3.3 ADAPTIVE CAUCHY-SOFTMAX  }
+
+
+![](images/2f89bd6484450a0dc087f036859dc4822b65b4d701456902c52e68d2194e021f.jpg)  
+
+Top- $k$ token searching relies on a similarity metric between data points, and we prefer the Euclidean metric for top- ${\cdot k}$ attention with small $d_{K}$ for two main reasons. First, as illustrated in Figure 1, Euclidean distance is more effective for lowdimensional data in top- $\cdot k$ methods: it reliably identifies the correct class in one-dimensional classifica  
+
+Figure 1: Illustration of attention using Euclidean distance vs. dot product. Euclidean distance correctly classifies points into classes $\pm1$ , while the dot product leads to a misclassified area.  
+
+tion tasks, leading to accurate predictions, whereas the dot product can be misleading (samples in the misclassified area will be classified as $"+1"$ using the dot-product metric). Second, $k$ -NN search is typically based on the Euclidean metric, while using the dot-product requires normalization that loses token magnitudes.  
+
+To better align with the Euclidean measure for low-dimensional representations, we propose the Adaptive Cauchy Softmax function, to replace the exponential function in traditional attention mechanisms. The Cauchy kernel, with its heavier tails, ensures that distant tokens retain influence, overcoming the limitations of the exponential function, which suppresses distant tokens (Shen et al., 2023). This allows the attention mechanism to capture both local and global dependencies, with the shape of the kernel determining how key vectors influence the query. Specifically, the Adaptive  
+
+Cauchy-Softmax between a query vector $\pmb q$ and keys $\kappa$ is computed as:  
+
+$$
+\mathrm{softmax}_{c}(q,K)={\frac{{\frac{\gamma}{\pi}}\left[\|q-K_{i}\|^{2}+\gamma^{2}\right]^{-1}}{\sum_{j\in I_{q}}{\frac{\gamma}{\pi}}\left[\|q-K_{j}\|^{2}+\gamma^{2}\right]^{-1}}}={\frac{\left[\|q-K_{i}\|^{2}+\gamma^{2}\right]^{-1}}{\sum_{j\in I_{q}}\left[\|q-K_{j}\|^{2}+\gamma^{2}\right]^{-1}}}
+$$  
+
+where $\gamma$ is a trainable parameter that controls the shape of the distribution. By training a task-specific $\gamma$ for each attention layer, the model adjusts receptive fields dynamically. We define $\bar{\gamma}^{2}$ as the output of a sigmoid function applied to a trainable parameter, to ensure a range of [0, 1], with smaller values sharpening attention and improving focus on relevant inputs (Qin et al., 2022a; Zhang et al., 2024), while larger values allow for smoother attention. The adaptive Cauchy softmax effectively handles long-range dependencies, preventing entropy collapse (Zhai et al., 2023) or explosion (Zhang et al., 2024) and adaptively balancing attention across the sequence.  
+
+
+
+\section{3.4 SPARSE ATTENTION WITH $Z$ -ORDER CURVE FOR EFFICIENT KNN RETRIEVAL  }
+
+
+Instead of calculating full attention scores, which is computationally expensive and memory intensive, we compute sparse attention scores by leveraging the $Z$ -order curve for efficient nearest neighbor retrieval. ZETA is then computed as below, according to Equation 6:  
+
+$$
+\operatorname{Attention}_{\mathbb{Z}\mathbb{F}\cap\left(Q,K,V\right)}=\sum_{i\in I_{q}}\operatorname{softmax}_{c}\left(Q,K_{i}\right)V_{i}
+$$  
+
+where $\kappa_{i}$ and $V_{i}$ are the corresponding keys and values for the indices $i\,\in\,I_{q}$ . As a result of the sparsity of top- $k$ , most of the tokens will not join the predictions, which stops the gradient back-propagated through the low-probabilities tokens and fails to leverage this current prediction’s information. We append the mean vector of the history tokens to the top- $k$ tokens matrix using cumsum function in $I_{q}$ , to keep the attention from assigning zero probability, which can be regarded as smoothing in n-gram language model (Jurafsky & Martin, 2024).  
+
+
+
+\section{4 EXPERIMENTAL RESULTS  }
+
+
+We evaluate ZETA’s performance on several aspects: ZETA’s ability to solve the synthetic MULTIQUERY ASSOCIATIVE RECALL (MQAR) task (Arora et al., 2024a), long sequence modeling ability on the LONG RANGE ARENA (LRA) benchmark and auto-regressive language modeling on WIKITEXT-103. Then we conduct extensive analysis experiments: an ablation study examining the influence of dimensionality on attention model performance (Section 4.2), ablations on various Euclidean-based Softmax operators (Section 4.3), the empirical results of locality preservation using $Z$ -order curves (Section 4.4) and an ablation study over the number of $k$ in ZETA (Section 4.5).  
+
+4.1 EMPIRICAL VALIDATION  
+
+Associative Recall. Associative recall tasks (Arora et al., 2024a) have been popular for testing the ability of language models to look up information in their context. Broadly, they involve feeding auto-regressive model pairs of key-value associations and then prompting the model to produce the correct completion upon being shown a previously seen key. The MULTI-QUERY ASSOCIATIVE RECALL (MQAR) task is a particular formulation of this task that requires the model to memorize multiple associations (Arora et al., 2024a). We evaluate the performance of various models on the Associative Recall task, a classical sequence-to-sequence task that requires the model to recall the first token associated with a target token after processing a long sequence. The task is tests the ability of models to capture long-range dependencies and to maintain information over time.  
+
+We compare the performance of four models: a vanilla Transformer, Performer (Choromanski et al., 2021), BASED (Arora et al., 2024b), and ZETA, with different model dimensions (32, 64, 128, and 256). As illustrated in Figure 2a, accuracy increases as the model dimension grows. Attention and Based models show strong performance with higher dimensions, achieving nearly perfect accuracy for dimensions larger than 64. ZETAfollows a similar trend and achieves competitive performance, especially for larger model dimensions, with perfect accuracy at dimension 256. In contrast, the Performer struggles, showing significantly lower accuracy across all dimensions.  
+
+![](images/2788d81319f3aea483dede71073223ea5169cb24198d0229b219c5b5ae31626c.jpg)  
+Figure 2: Experiments on Associative Recall: (a) Model Accuracy (b) Performance of Transformer with varying $d_{K}$ across different model dimensions; even with low $d_{K}$ , the model achieves nearperfect performance (c) Comparison of different Euclidean-based Softmax operators across varying key-query dimensions $d_{K}$ (d) Ablation on $k$ in ZETA.  
+
+Long Range Arena (LRA). The LONG RANGE ARENA (LRA) benchmark (Tay et al., 2021) is a comprehensive suite designed to evaluate the performance of models on long sequence tasks. It includes tasks that span across multiple domains, such as natural language processing, image classification, and mathematical reasoning. LRA focuses on sequence classification, challenging models to efficiently process longer input sequences while capturing long-range dependencies, providing an ideal testbed for Transformer models and their efficient variants.  
+
+LRA consists of five key tasks: LISTOPS, TEXT, RETRIEVAL, IMAGE, and PATHFINDER. Each task evaluates different aspects of long-range dependency handling such as the ability to handle mathematical reasoning tasks on long sequences of operations (LISTOPS), capture dependencies over long textual inputs (TEXT), retrieve relevant elements from a long sequence (RETRIEVAL) and capture spatial dependencies (IMAGE). PATHFINDER presents a difficult problem where models must distinguish between connected and disconnected paths within maze-like patterns. A modified version of PATHFINDER, called PATHFINDER-X, is also included where the patterns are presented in a larger image $256\!\times\!256$ compared to $32\!\times\!32$ ) but has yet to be solved by existing attention-based methods.  
+
+Table 1: Test perplexity (lower is better) on WIKITEXT-103.   
+
+![](images/b3b779ff6045803c9c738b68fc9cd12fe3125d6e6b9e0177d1849b1c5ba246a7.jpg)  
+
+We evaluate various Transformer-based models, including several linear and efficient variants, trained from scratch on the LRA sequence classification tasks. For each model, we adopt the same hyperparameter settings provided by the official LRA benchmark (Tay et al., 2021) to ensure a fair comparison. Results are summarized in Table 2, which compares the performance of the models across all five tasks, along with their average accuracy, showing that ZETA significantly outperforms other attention-based models.  
+
+Autoregressive Language Modeling. Furthermore, we evaluate several models on the WIKITEXT-103 (Merity et al., 2017), a widely used benchmark for language modeling containing over 100 million tokens extracted from high-quality Wikipedia articles characterized by a large vocabulary and long-range dependencies. This makes it a challenging benchmark for testing a model’s ability to predict the next token in a sequence. We use perplexity (PPL) as the primary evaluation metric, where lower scores indicate a better ability to capture the sequential structure within natural language text. Table 1 shows a vanilla Transformer1 to achieve a test perplexity of 26.2. However, linear approximation models such as the Linear Transformer (Qin et al., 2022a) struggle to compete, with higher perplexity values of 30.2 on the test set. The table further compares several other models, including efficient attention mechanisms like Performer (Choromanski et al., 2021), Reformer (Kitaev et al., 2020), and CosFormer (Qin et al., 2022b). Notably, CosFormer achieves the lowest perplexity on the test set with a score of 23.1, outperforming all other models. Reformer also shows competitive results, achieving a perplexity of 25.6, improving on the Vanilla Transformer. ZETA achieves a perplexity of 26.3, comparable to the Vanilla Transformer.  
+
+![](images/ca48b94760d68dc917e6c654fa245d1f42ebc3f04793c629b63b0cea648778ae.jpg)  
+Table 2: Results of the Transformer and various variants on LRA. We consistently outperform the next closest competitor (Zhu & Soricut, 2021).  
+
+The results highlight the trade-offs between using conventional transformers, linear transformers, and models adopting approximate attention mechanisms like ZETA. It reinforces the importance of balancing computational efficiency with model performance, particularly in the context of longsequence language modeling tasks, especially as the information necessary to solve a task becomes sparsely located within long contexts.  
+
+
+
+\section{4.2 EFFECT OF VARYING $d_{K}$ ON ASSOCIATIVE RECALL TASK  }
+
+
+We next evaluate the effect of different key-query dimensions $d_{K}$ on the Transformer model’s performance for MQAR. The model dimensions are varied between $\{32,64,128,256\}$ while adjusting $d_{K}$ to values $\{1,2,3,8,32\}$ . As shown in Figure 2b, the performance remains near-perfect even with low $d_{K}$ values, such as $d_{K}=2$ . The model achieves close to $100\%$ accuracy across all model dimensions, except for the smallest dimension $\mathit{a}_{K}\;=\;1)$ ), where performance slightly drops for lower model dimensions. This demonstrates that the Transformer is capable of handling long-range dependencies in the Associative Recall task, even with relatively low key-query dimensionality. These results suggest that reducing $d_{K}$ does not significantly impair the model’s ability to recall information in sequence tasks. In fact, maintaining a low $d_{K}$ can provide computational savings without sacrificing performance, especially when model dimensions are large. This indicates that while random projections—such as those used in the Johnson-Lindenstrauss Lemma—approximately preserve distances, trainable projection networks $f_{k}$ and $f_{q}$ can better adapt to task-specific data and more effectively retain locality even with a low $d_{K}$ . For instance, by setting $d_{K}$ as low as 3, we reduce it from the typical head dimension (normally 32, i.e. feature dimension as 512 with 8 heads). We can further mitigate information loss by configuring $f_{k}$ and $f_{q}$ as two-layer neural networks rather than single-layer ones.  
+
+
+
+\section{4.3 PERFORMANCE OF EUCLIDEAN-BASED SOFTMAX OPERATORS  }
+
+
+We further evaluate the performance of transformers with various Euclidean-based Softmax operators on MQAR. Specifically, we compare Negative Euclidean, Cauchy Softmax (our proposed method), and Inverse Euclidean operators. The goal of this experiment is to test how these different formulations of Softmax handle varying key-query dimensions $d_{K}$ in terms of accuracy.  
+
+As shown in Figure 2c, the proposed Cauchy Softmax consistently outperforms the other operators across all values of $d_{K}$ . It achieves near-perfect accuracy for $d_{K}\geq2$ , whereas Negative Euclidean shows a drop in accuracy for lower $d_{K}$ values. Inverse Euclidean, while performing comparably at higher dimensions, struggles significantly at lower values of $d_{K}$ (e.g., $d_{K}=1$ ).  
+
+These results highlight the advantage of using the Cauchy distribution for a smaller $d_{K}$ , as it allows for better handling of long-range dependencies and achieves more stable performance across various key-query dimensions. The heavier tails of the Cauchy distribution enable distant tokens to retain non-negligible influence, which is crucial for tasks like Associative Recall where long-range token relationships are important.  
+
+4.4 LOCALITY PRESERVATION AFTER Z-ORDER CURVE PROJECTION  
+
+Next, we evaluate how well $Z$ -order curve projections preserve locality across different dimensions and sample sizes. Specifically, we test the locality preservation by measuring the overlap between the top-64 nearest neighbors before and after projection, with sample sizes $N\in\{512,1024,2048\}$ .  
+
+Figure 3 shows the relationship between locality preservation and the dimensionality $d_{K}$ . As $d_{K}$ increases, the overlap between the top-64 nearest neighbors diminishes for all sample sizes, indicating a decrease in locality preservation. Lower $d_{K}$ values exhibit a higher level of locality preservation across all sample sizes. However, for larger sample sizes, such as $N\,=\,2048$ , the drop in locality preservation is more pronounced as the dimensionality increases. We select $d_{K}=3$ for ZETA.  
+
+![](images/1655f62c90d1ce8e1259e70e275efa3d44384404dd6a393aa4c63e6998b95060.jpg)  
+Figure 3: The effect of dimensionality reduction before and after $Z$ -order curves projection on locality preservation for different sample sizes.  
+
+These results highlight the importance of choosing an appropriate $d_{K}$ for maintaining locality, especially for larger datasets where higher dimensionality can lead to distortions in spatial proximity after a projection.  
+
+4.5 THE EFFECTS OF $k$ IN ZETA  
+
+As an ablation study, we explore the effect of varying $k$ in the attention mechanism of ZETA. The goal of this experiment is to analyze how different values of $k$ influence the model’s performance on the associative recall task across different model dimensions.  
+
+Figure 2d shows ZETA to achieve near-perfect accuracy across all model dimensions (32, 64, 128, and 256) for different values of $k$ ranging from 16 to 48. In most of our experiments, we set $k=32$ , as it provides a good balance between performance and computational efficiency. Interestingly, there is little variation in accuracy between different values of $k$ , indicating that ZETA is robust to changes in this parameter.  
+
+4.6 EFFICIENCY BENCHMARKING  
+
+In order to better understand the effectiveness of ZETA, we further conduct an experimental study to demonstrate its computational efficiency in comparison to existing attention methods. In particular, we compare with a naive attention implementation from PyTorch (based on Vaswani et al. (2017)) as well as an IO-aware Flash-Attention (Dao et al., 2022; Dao, 2024). Our implementation is based on Triton and we conduct this benchmarking on a single NVIDIA A100 80GB GPU.  
+
+Table 3 indicates the time required for both a forward pass as well as a forward-backward pass using our efficient ZETA implementation as well as the aforementioned attention implementations. We observe that our implementation significantly outspeeds a naive implementation of attention and do not suffer from out of memory issues while also outperforming Flash-Attention for long sequences, with a widening gap as the sequence length increases. This indicates both the computational efficiency of our method as well as serves as an empirical validation of the $\mathcal{O}(N\log N)$ complexity of ZETA which we previously justify theoretically. Furthermore, if we compare with Mamba (Gu & Dao, 2024), we demonstrate that ZETA has a faster forward pass while the forward-backward pass maintains a similar relative performance as the sequence length increases.  
+
+Table 4 meanwhile shows that ZETA uses less memory than a naive attention implementation while also only slightly utilizing more memory than a highly optimized Flash Attention implementation.  
+
+![](images/f45b08c7c528d60d178124c8129974237e04dbd7464ac9a884e88a1cdff9c53b.jpg)  
+Table 3: Time (in milliseconds) for different operations to compute for a fixed-sized batch of varying sequence length. Our method outperforms a naive attention implementation across all lengths while also outperforming Flash-Attention by a signficant margin as the sequence length increases.  
+
+![](images/12eec6719ac76c11321411a010fb1f3d8436bbe32531d2796813dea8eda7b2dd.jpg)  
+Table 4: Memory consumption (in MB) for different operations to compute for a fixed-sized batch of varying sequence length. Our method outperforms a naive attention implementation across all lengths while only marginally trailing a highly optimized Flash Attention implementation.  
+
+Nevertheless, in comparison to a sequence model such as Mamba, all attention models predictably use more memory due to the use of softmax-type operations.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+In this paper, we presented ZETA, a model designed to enhance the efficiency of top- $k$ attention by leveraging $Z$ -order curves for parallel token selection in one-dimensional space, reducing both time and space complexity to $\mathcal{O}(N\log N)$ . By carefully selecting the dimensionality of key and query pairs, ZETA effectively preserves relative distances, improving both locality and computational efficiency. Our comprehensive experiments on synthetic associative recall, LRA, and WIKITEXT-103 demonstrate that ZETA consistently matches or outperforms traditional attention mechanisms, making it particularly well-suited for long-sequence tasks that demand scalability and efficiency. Additionally, the introduction of the Adaptive Cauchy-Softmax mechanism enhances ZETA’s flexibility, enabling it to handle long-range dependencies more effectively and efficiently. Overall, ZETA offers a robust, scalable, and efficient solution for sequence modeling, combining adaptive token selection with dynamic softmax to optimize performance across a range of tasks and datasets.  
+
+
+

@@ -1,0 +1,249 @@
+\title{FreeFlow: Latent Flow Matching for Free Energy Difference Estimation}
+
+\begin{abstract}
+Estimating free energy differences between molecular systems is fundamental for understanding molecular interactions and accelerating drug discovery. Current techniques use molecular dynamics to sample the Boltzmann distributions of the two systems and of several intermediate "alchemical" distributions that interpolate between them. From the resulting ensembles, free energy differences can be estimated by averaging importance weight analogs for multiple distributions. Instead of time-intensive simulations of intermediate alchemical systems, we learn a fast-to-train flow to bridge the two systems of interest. After training, we obtain free energy differences by integrating the flow's instantaneous change of variables when transporting samples between the two distributions. To map between molecular systems with different numbers of atoms, we replace the previous solutions of simulating auxiliary "dummy atoms" by additionally training two autoencoders that project the systems into a same-dimensional latent space in which our flow operates. A generalized change of variables formula for trans-dimensional mappings allows us to employ the dimensionality collapsing and expanding autoencoders in our free energy estimation pipeline. We validate our approach on systems of increasing complexity: mapping between Gaussians, between subspaces of alanine dipeptide, and between pharmaceutically relevant ligands in solvent. All results show strong agreement with reference values.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Estimating free energy differences between two states of a thermodynamic system allows us to compare the relative likelihoods of the two states (Chipot et al., 2007; Stoltz et al., 2010). This task underpins insights in computational chemistry, biology, and is extensively used in drug discovery, where free energy differences can inform which ligand is more likely to bind to a protein. In this paper, we explore estimating free energy differences via a neural mapping that is based on flow matching (Lipman et al., 2023; Albergo et al., 2023; Liu et al., 2022) between the Boltzmann distributions of the two molecular systems of interest.  
+
+In the free energy difference estimation problem (see Figure 1), we are given two molecular systems, A and B, and their unnormalized densities (energy functions) over their 3D structures. Their free energy difference is $\Delta F\,=\,-k_{B}T\ln(Z_{B}/Z_{A})$ where $Z_{A}$ and $Z_{B}$ are their normalizing constants. For instance, in the context of drug discovery, the systems A and $\mathbf{B}$ could be two different molecules bound to the same protein. Their free energy difference (together with the molecules’ free energy differences in solvent) determines the difference in their binding affinities to the protein. Thus, access to estimates between a set of molecules allows for identifying the strongest binder out of a pool of candidate molecules.  
+
+![](images/d07a163970efbecc78fa872e46e418f0a530fc2e1f5ee3d7dfefda4984d44b67.jpg)  
+Figure 1: Free energy difference as the log ratio of two Boltzmann distributions’ normalizing constants. Intractability of the normalizing constants makes the problem challenging.  
+
+![](images/c1aa3c4377eea2cea04b404a82e0d7d762805d5545f5ce5be0af3340a599d376.jpg)  
+Figure 2: Overview of approaches for estimating free energy differences between systems $A$ and $B$ . Free Energy Perturbation: importance sampling between the two systems with samples obtained via molecular dynamics simulations, and the negative log of the average importance weight estimates the free energy difference. Alchemical $F E P$ : importance sampling between a sequence of systems interpolating from $A$ to $B$ . Increased overlap between the subsequent systems makes importance sampling converge faster at the cost of running separate simulations for each intermediate system. Targeted $F E P$ : a learned mapping is used instead to map $A$ to $B^{\prime}$ , which is expected to have a higher overlap with $B$ . FreeFlow: encode $A$ and $B$ into a low dimensional latent space and learn a latent mapping to be able to bridge systems of different dimensions. On the right we highlight that traditional methods often materialize non-physical systems by the addition of “dummy atoms” to be able to bridge between systems of different dimensions, which FreeFlow avoids by mapping both systems to a fixed-dimensional latent space.  
+
+The common traditional approaches for such estimations are based on Free Energy Perturbation (FEP). The FEP identity (Zwanzig, 1954) reduces estimating free energy differences to importance sampling between distributions A and B: the negative log of the average importance weights is the free energy difference. For molecules, the distributions are sampled by running molecular dynamics (MD) simulations. The convergence of this estimate depends on the variance of the importance weights, which is large if there is insufficient overlap between distributions A and B. Thus, in practice, one turns to alchemical FEP (Bash et al., 1987; Mey et al., 2020) where a series (typically a few tens) of “alchemical” molecular systems between systems A and B are simulated (see Figure 2). Modeling these additional intermediate distributions yields a lower variance free energy difference estimate at the cost of additional molecular dynamics simulation time.  
+
+Instead of bridging distributions A and B via additional MD simulations, FreeFlow learns a neural map between them and estimates their free energy differences by observing the change of density when transporting samples from system A to system B or back. The aim is to overfit and run inference with such a map faster than carrying out a series of MD simulations for FEP (while maintaining or improving upon the accuracy of FEP). For this purpose, previous work (Wirnsberger et al., 2020) employed normalizing flows (Rezende & Mohamed, 2016) with the same input and output dimensionality that do not accommodate different dimensionality (different numbers of atoms) between systems A and B.  
+
+Concretely, we propose FreeFlow to map between distributions of arbitrary dimensions by encoding the systems into a lower dimensional latent space and learning a flow model in that latent space using flow matching. The autoencoders to produce the latent spaces for systems A and B are fast-totrain and overfitting a flow between their small dimensional latent spaces is equally efficient. After training this map, computing the free energy difference requires evaluating the change of density a sample incurs when transporting it between the distributions. While this is trivial for normalizing flows, FreeFlow involves changes in dimensionality, which we accommodate with a generalized change of variables formula for “trans-dimensional” mappings.  
+
+Empirically, we evaluate FreeFlow on a series of free energy difference estimations of increasing complexity. First, we confirm that FreeFlow is able to recover analytically computed free energy differences between Gaussians of different dimensionalities. Next, we turn to a well-explored molecular system, alanine dipeptide, and estimate free energy differences between partitions of its state space. Lastly, we tackle the real-world task of computing free energy differences between different pharmaceutically relevant ligands in solvent. In this experiment, we observe Spearman and Pearson correlations of up to 0.93 between our free energy difference and the Free Energy Perturbation reference values.  
+
+We summarize our key contributions as:  
+
+unlike older flows.   
+2. A map that translates between systems of arbitrary dimensionality via a same-dimensional latent space, avoiding the introduction of dummy atoms and requiring an order of magnitude fewer MD simulations compared to intermediate-window-based methods such as Alchemical FEP.   
+3. Using a generalized change of variables formulation for computing density changes in trans-dimensional maps.   
+4. Validation on real-world pharmaceutically relevant ligands of varying numbers of atoms.  
+
+
+
+\section{2 BACKGROUND  }
+
+
+Flow Matching. Flow Matching (FM) (Lipman et al., 2023; Albergo et al., 2023; Liu et al., 2022) is a training framework for CNFs that avoids the need for simulation during training. Instead of integrating the ODE, FM directly trains the vector field $v_{\theta}(t,x)$ to match a target probability flow defined by a prescribed time-dependent probability path $p_{t}(\boldsymbol{x})$ . The objective minimizes the discrepancy between the model’s vector field and the target vector field that transports $p_{t}(\boldsymbol{x})$ along the flow:  
+
+$$
+\mathcal{L}_{\mathrm{FM}}(\theta)=\mathbb{E}_{t,x\sim p_{t}}\left|u_{t}(x)-v_{\theta}(t,x)\right|^{2},
+$$  
+
+where $u_{t}(x)$ is the target vector field derived from the continuity equation. To construct more expressive probability paths $p_{t}(\boldsymbol{x})$ , Conditional Flow Matching (CFM) (Lipman et al., 2023; Tong et al., 2023) introduces a conditioning variable $z$ and expresses $p_{t}(\boldsymbol{x})$ as a combination of simpler distributions $p_{t}(x|z)$ such as Gaussians conditioned on $z$ .  
+
+Free Energy Calculations in Molecular Systems. Free energy calculations are essential for understanding molecular interactions and predicting binding affinities in drug discovery (Chipot et al., 2007). The accuracy of these methods depends on the overlap between the configurations sampled from the different states. Insufficient overlap can lead to high variance and unreliable estimates. Techniques like stratification and the use of intermediate states help mitigate this issue but increase computational complexity.  
+
+The Free Energy Perturbation (FEP) method, introduced by Zwanzig (1954), provides an exact relationship for computing $\Delta F$ between two thermodynamic states $A$ and $B$ :  
+
+$$
+\mathbb{E}_{A}\left[e^{-\beta\Delta U(\mathbf{x})}\right]=e^{-\beta\Delta F},
+$$  
+
+where $\beta=1/(k_{B}T)$ is the inverse temperature, $\Delta U(\mathbf{x})=U_{B}(\mathbf{x})-U_{A}(\mathbf{x})$ is the potential energy difference at configuration $\mathbf{x}$ , and $\mathbb{E}_{A}[\cdot]$ denotes the expectation over the equilibrium distribution $\rho_{A}(\mathbf{x})\ \propto\ e^{-\beta U_{A}(\mathbf{x})}$ . However, the convergence of the FEP estimator critically depends on the overlap between the configurations sampled from $\rho_{A}$ and those relevant under $\rho_{B}$ . Insufficient overlap can lead to high variance and slow convergence (Jarzynski, 2006).  
+
+To address this challenge, Jarzynski (2002) introduced Targeted Free Energy Perturbation (TFEP), which employs an invertible mapping $M:\mathcal{X}\rightarrow\mathcal{X}$ to transform configurations from $A$ to a new distribution $B^{\prime}$ , thereby increasing the overlap with $B$ . The generalized FEP identity in TFEP is given by:  
+
+$$
+\mathbb{E}_{A}\left[e^{-\beta\Phi_{F}(\mathbf{x})}\right]=e^{-\beta\Delta F},
+$$  
+
+where the generalized energy difference $\Phi_{F}(\mathbf{x})$ is defined as:  
+
+$$
+\Phi_{F}({\bf x})=U_{B}(M({\bf x}))-U_{A}({\bf x})-\beta^{-1}\log\left|\operatorname*{det}J_{M}({\bf x})\right|,
+$$  
+
+and $J_{M}(\mathbf{x})$ is the Jacobian matrix of $M$ at $\mathbf{x}$ . By appropriately choosing $M$ , one can enhance the overlap between $B^{\prime}$ and $B$ , improving the efficiency of the free energy estimation.  
+
+Building upon TFEP, Wirnsberger et al. (2020) introduced Learned Free Energy Perturbation (LFEP), using normalizing flows to learn the mapping $M$ . Instead of relying on hand-crafted transformations, LFEP learns $M$ by optimizing a neural network to maximize the overlap between the transformed distribution $B^{\prime}$ and the target distribution $B$ . This approach provides a data-driven way to enhance free energy estimations without the need for explicit intermediate states or extensive physical intuition.  
+
+
+
+\section{3 METHOD  }
+
+
+Our aim is to estimate the free energy difference $\Delta F$ between thermodynamic systems $A$ and $B$ with equilibrium distributions $\rho_{A}$ and $\rho_{B}$ , and potentially different numbers of atoms $n_{A}$ and $n_{B}$ . For this purpose, we assume access to samples $\mathbf{x}_{0}\sim\rho_{A}$ and $\mathbf{x}_{1}\sim\rho_{B}$ , which are obtained via molecular dynamics simulations when considering molecular systems. Unlike FEP, we do not carry out additional MD for intermediate alchemical systems to bridge between systems $A$ and $B$ . Instead, we overfit a fast-to-train neural mapping to transport samples between them over a lower-dimensional latent space. Given this map, we estimate the free energy difference by transporting samples between $A$ and $B$ and averaging their incurred change of density.  
+
+Concretely, our neural mapping consists of separate autoencoders $\left(E_{A}\circ D_{A}\right)$ and $\left(E_{B}\circ D_{B}\right)$ to map the samples from the two systems to the latent space and back, and an ODE parametrized via a flow model $\boldsymbol{v}(\boldsymbol{x},t)$ between the latent spaces. Then we combine the encoder $E_{A}$ , the  
+
+![](images/a08e578d7e603618d4747bda969731afd73ec287126c200d69cf6f6901bf3181.jpg)  
+Figure 3: The change of dimensionality problem. The Jacobian of a trans-dimensional mapping is rectangular and hence does not have a determinant.  
+
+flow, and the decoder $D_{B}$ to map system $A$ to system $B$ . In Section 3.1, we first summarize how neural maps (including ODEs parameterized as flow models) and their change of density can be employed to estimate free energy differences. Next, we present our autoencoders to map systems of arbitrary sizes $n_{A},n_{B}$ to a fixed size same-dimensional latent space and how the change of density for such “trans-dimensional” maps (Section 3.2). Finally, in Section 3.3, we lay out our full free energy difference estimation procedure of 1) training autoencoders, 2) training a flow between their latent spaces, 3) and mapping samples from system A to system B while observing the map’s change of variables.  
+
+3.1 FREE ENERGY DIFFERENCES VIA NEURAL MAPS  
+
+We seek a mapping $f$ such that the pushforward distribution of $\rho_{A}$ through $f$ approximates $\rho_{B}$ . Traditional normalizing flows (Rezende & Mohamed, 2016) model $f$ as a composition of invertible mappings with the likelihoods computed via the change of variables (CoV) formula as  
+
+$$
+\rho_{B}(\mathbf{x}_{1})=\rho_{A}(\mathbf{x}_{0})\left\vert\operatorname*{det}\left(\frac{\partial f}{\partial\mathbf{x}}\right)\right\vert^{-1}
+$$  
+
+where $\mathbf{x}_{1}=f(\mathbf{x}_{0})$ and $\frac{\partial f}{\partial\mathbf{x}}$ is the Jacobian of $f$ at $\mathbf{x}_{\mathrm{0}}$ . We denote such models discrete normalizing flows. For discrete NFs, free energy differences can then be estimated via TFEP by computing the expectation in Equation 3 with  
+
+$$
+\Phi_{F}(\mathbf{x})=U_{B}(f(\mathbf{x}))-U_{A}(\mathbf{x})-\beta^{-1}\log\left|\operatorname*{det}\left({\frac{\partial f}{\partial\mathbf{x}}}\right)\right|.
+$$  
+
+However, normalizing flows requiring invertible components with efficiently-computable Jacobians might limit their expressivity. Flow matching on the other can be used with arbitrary neural networks as the flow model, and learn to map arbitrary distributions in simulation-free manner. It is thus an expressive yet efficient alternative to discrete normalizing flows.  
+
+Using flow matching, we train our normalizing flow between the same-dimensional latent representations of the two systems learned by our autoencoders, which are low-dimensional and hence lead to fast training, minimizing the objective  
+
+$$
+\begin{array}{r}{\mathcal{L}_{\mathrm{CFM}}(\theta)=\mathbb{E}_{t\sim\mathcal{U}(0,1),(\mathbf{x}_{0},\mathbf{x}_{1})\sim\pi(X_{0},X_{1}),\mathbf{z}_{t}\sim p_{t}(E_{A}(x_{0}),E_{B}(x_{1}))}\left\|v_{\theta}(\mathbf{z}_{t},t)-(E_{B}(\mathbf{x}_{1})-E_{A}(\mathbf{x}_{0}))\right\|_{2}^{2}}\end{array}
+$$  
+
+where $\pi$ denotes the optimal transport coupling between the datasets $X_{0},X_{1}$ approximated with mini-batches. Using OT couplings is advantageous as the learned vector field has straighter trajectories which lead to lower integration error. In particular for free energy estimation, approximating the OT map between $\rho_{A}$ and $\rho_{B}$ has been shown to result in paths with lower free energy, improving the convergence of the $\Delta F$ estimate (Decherchi & Cavalli, 2023).  
+
+The flow model leads to an ordinary differential equation (ODE) which we can integrate through time to transport the samples. For an ODE, the change in log-density w.r.t. time is given by the instantaneous change of variables formula (Chen et al., 2018)  
+
+$$
+\frac{\partial\log\rho(\mathbf{x}_{t})}{\partial t}=-\operatorname{tr}\left(\frac{\partial v(\mathbf{x}_{t},t)}{\partial\mathbf{x}_{t}}\right).
+$$  
+
+We integrate over time to obtain  
+
+$$
+\log\rho(\mathbf{x}_{1})=\log\rho(\mathbf{x}_{0})-\int_{0}^{1}\mathrm{tr}\left(\frac{\partial v(\mathbf{x}_{t},t)}{\partial\mathbf{x}_{t}}\right)d t
+$$  
+
+which we use to obtain free energy difference estimates by employing the following generalized energy difference to take the expectation over in Equation 3:  
+
+$$
+\Phi_{F}(\mathbf{x})=U_{B}(\mathbf{x}_{1})-U_{A}(\mathbf{x}_{0})-\beta^{-1}\int_{0}^{1}\mathrm{tr}\left(\frac{\partial v(\mathbf{x}_{t},t)}{\partial\mathbf{x}_{t}}\right)d t.
+$$  
+
+3.2 AUTOENCODER CHANGE OF VARIABLES  
+
+As noted above, we train our flow over a low-dimensional latent space, which enables fast training and allows FreeFlow to map between systems with different numbers of atoms. This is opposed to previous classical and ML solutions for estimating energy differences between systems of different dimensionality, which commonly simulate additional dummy-atoms in the lower-dimensional system.  
+
+Concretely, we first train two separate autoencoders, consisting of the encoders $E_{A},E_{B}$ and the decoders $D_{A},D_{B}$ for the two states $A$ and $B$ . As the autoencoders are not required to generalize, we choose simple MLPs that map the flattened vectors of atom coordinates (ignoring the atom types) to the latent space $\mathcal{Z}$ . In our experiments, we set this latent space to have 32 dimensions. We train our autoencoders until the reconstruction MSE converges on training data since we will be using the training data to estimate $\Delta F$ . We chose MLPs instead of more popular architectures for molecular representation learning such as equivariant graph neural networks after validating their performance on alanine dipeptide (see Figure 7). The MLP achieved a lower reconstruction error, while being $8\mathrm{{x}}$ faster in terms of training speed.  
+
+Given these autoencoders, the end-to-end mapping from $A$ to $B$ can then be expressed as  
+
+$$
+\mathbf{x}_{1}=f(\mathbf{x}_{0})=D_{B}\left(\mathbf{ODE}\left(E_{A}(\mathbf{x}_{0})\right)\right)
+$$  
+
+where ODE denotes integrating $v_{\theta}(\mathbf{z}_{t},t)$ starting from $\mathbf{z}_{0}=E_{A}(\mathbf{x}_{0})$ , i.e., $\begin{array}{r}{\mathbf{z}_{0}+\int_{0}^{1}v_{\theta}(\mathbf{z}_{t},t)d t}\end{array}$ .  
+
+Thus, our neural map $f$ involves changes of dimensionality, and evaluating its change of density when mapping samples requires a generalization of the standard change of variables formula in Equation 5. A simple way to see this is that the Jacobian for what we will proceed to term a transdimensional mapping is a rectangular matrix (not square) and hence does not have a well-defined determinant.  
+
+In obtaining a change of variables formulas for trans-dimensional mappings such as $E:X\mapsto{\mathcal{Z}}$ and $D:\mathcal{Z}\mapsto\mathcal{X}$ , we consider an autoencoder’s decoder manifold  
+
+$$
+{\mathcal{M}}=\{D(z):z\in{\mathcal{Z}}\}
+$$  
+
+for which the change of variables formula will hold. Since we overfit our autoencoder on samples and do not require generalization to new data points, the points for which we evaluate the change of variables will lie in this manifold (assuming the size of the latent space and the expressivity of $E$ and $D$ are sufficient for encoding our dataset). If $E$ and $D$ are each other’s inverse, then, for points on the decoder manifold $x_{m}\in\mathcal{M}$ , the decoder’s change of density between their projection $z=E(x_{m})$ and their projection’s fibers ${\mathcal{F}}(z):=\{x\in{\mathcal{X}}:z=E(x)\}$ is (Ko¨the, 2023)  
+
+$$
+\rho_{\mathcal{Z}}(z)=\rho_{\mathcal{X}}(\mathcal{F}(z))\sqrt{\left|\operatorname*{det}(J_{D}^{T}J_{D})\right|}
+$$  
+
+where $J_{D}$ is the decoder’s Jacobian. For the encoder, for points on the decoder manifold and with $J_{E}$ as the encoder’s Jacobian, the change of density is  
+
+$$
+\rho_{X}(x)=\rho_{\mathcal{Z}}(z)\sqrt{\left|\operatorname*{det}(J_{E}J_{E}^{\top})\right|}.
+$$  
+
+These generalized change of variables formulae rescale a√ density by the mapping’s Jacobian (or transposed Jacobian) volume (Ben-Israel, 19√99): ${\mathrm{vol}}J={\sqrt{\operatorname*{det}J^{T}J}}.$ . For square Jacobians of maps between same-dimensional spaces, $\operatorname{vol}J=\sqrt{\operatorname*{det}J^{T}J}=|\operatorname*{det}J|$ which recovers the scaling factor of the standard change of variables formula (Equation 5).  
+
+3.3 FREEFLOW FREE ENERGY DIFFERENCE ESTIMATION  
+
+To obtain the change of variables between the two systems, we need to apply Equation 14 twice, once for mapping $\chi_{A}$ to ${\mathcal{Z}}_{A}$ with the encoder $E_{A}$ and once for mapping $\mathcal{Z}_{B}$ to $\scriptstyle{\mathcal{X}}_{B}$ with the decoder $D_{B}$ . We also integrate the instantenous change of variables (Equation 8) over the latent continuous normalizing flow for our architecture to calculate the generalized energy difference as:  
+
+$$
+\begin{array}{r l}&{\Psi_{F}(\mathbf{x})=U_{B}\left(D_{B}\left(f_{z}\left(E_{A}(\mathbf{x})\right)\right)\right)-U_{A}(\mathbf{x})}\\ &{\qquad-\beta^{-1}\left(\underbrace{\log\left|\operatorname*{det}\left(\mathbf{J}_{E_{A}}\mathbf{J}_{E_{A}}^{\top}\right)\right|^{-\frac{1}{2}}}_{\mathrm{Cov}\,x_{A}\rightarrow Z_{A}}+\underbrace{\int_{0}^{1}\mathrm{tr}\left(\frac{\partial v\left(\mathbf{z}\left(t\right),t\right)}{\partial\mathbf{z}\left(t\right)}\right)d t}_{\mathrm{Cov}\,z_{A}\rightarrow Z_{B}}+\underbrace{\log\left|\operatorname*{det}\left(\mathbf{J}_{D_{B}}^{\top}\mathbf{J}_{D_{B}}\right)\right|^{-\frac{1}{2}}}_{\mathrm{Cov}\,z_{B}\rightarrow X_{B}}\right)}\end{array}
+$$  
+
+To estimate the free energy difference between systems A and B, we proceed as follows for training and inference:  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+We evaluate FreeFlow on tasks of increasing complexity, starting with bridging Gaussian distributions of different dimensions, then two metastable states of the small molecule alanine dipeptide, and finally we bridge the Boltzmann distributions of different pairs of pharmaceutically relevant ligands with varying numbers of atoms.  
+
+4.1 GAUSSIAN DISTRIBUTIONS OF DIFFERENT DIMENSIONS  
+
+We first demonstrate that our generalized change of variables framework can be applied to transdimensional mappings, such as FreeFlow’s encoder and decoder. Additionally, we aim to demonstrate the ability to bridge distributions with differing dimensionality. To address these two questions, we construct simplified toy problems using Gaussian distributions, which can be easily compressed to lower-dimensional spaces. These distributions allow us to compute the free energy difference analytically for reference values. Specifically, for two Gaussians of arbitrary dimensionalities with covariance matrices $\Sigma_{1},\Sigma_{2}$ , their free energy difference is the logarithmic ratio of their partition functions:  
+
+$$
+\begin{array}{r}{\Delta F=\log\frac{Z_{2}}{Z_{1}}=\log\frac{\sqrt{(2\pi)^{d_{2}}\operatorname*{det}(\Sigma_{2})}}{\sqrt{(2\pi)^{d_{1}}\operatorname*{det}(\Sigma_{1})}}\qquad\qquad\qquad}\\ {=\frac{1}{2}\left((d_{2}-d_{1})\log(2\pi)+\log\left(\frac{\operatorname*{det}(\Sigma_{2})}{\operatorname*{det}(\Sigma_{1})}\right)\right).}\end{array}
+$$  
+
+First, to validate the change of variables formulation, we let both system A and system $B$ be 30- dimensional zero-mean Gaussians with covariance matrices $\Sigma_{A}\,=\,I$ and $\Sigma_{B}\,=\,0.5I$ . Then, to evaluate the trans-dimensional mapping, we let system A and B be zero-mean Gaussians with identity covariance, but in 60 and 30 dimensions. For both tasks, we use a latent space of 16 dimensions, and after sampling 50,000 samples from each distribution, we train the autoencoders for 100 and the flow model for 200 epochs.  
+
+Figure 4 shows the histogram of the energy distributions and the convergence of the $\Delta F$ estimates using FreeFlow. The convergence of the estimator towards the ground truth values empirically validates the use of the generalized energy difference of Equation 15 to bridge distributions of different dimensions. Thus by the convergence of the estimate in Figure $4\mathrm{a}$ , we first empirically validate our modification of the generalized energy difference in Equation 15 between, and then by the convergence in Figure 4b, we conclude that the formulation also holds for trans-dimensional mappings. The estimate in Figure 4b exhibits a slight deviation in its mean from the true value. We believe to be due to the transdimensional change of variables formula being an approximation. More specifically, unless we can obtain a zero-loss autoencoder, there will be data points outside its decoder manifold and the change of variables formula will not hold exactly for those values.  
+
+
+
+\section{4.2 METASTABLE STATES OF ALANINE DIPEPTIDE  }
+
+
+After empirically validating our approach on toy cases, we evaluate if FreeFlow can be applied to a small physical system simpler than the larger molecules used in drug discovery tasks. For this purpose, we estimate the free energy difference between two metastable states of the small molecule alanine dipeptide. It is a small (32 atoms) yet non-trivial molecule commonly used as a benchmark in computational chemistry due to its well-known conformational dynamics. We distinguish the two metastable states with respect to the dihedral angle $\phi$ , with system A $\phi\in[-\pi,0]\cup[2.15,\pi]$ and system B to $\phi\in(0,2.15)$ .  
+
+Using the OpenMM library (Eastman et al., 2017), we simulate alanine dipeptide in vacuum for 400 ns with step size 2 fs and save the state every 500 steps to obtain 400,000 samples in total, and then separate the source and target distributions with respect to the angle $\phi$ . In the end, we obtain 371,094 source and 28,906 target samples. For the reference free energy difference, we use the values in (Invernizzi et al., 2022) obtained via OPES simu  
+
+![](images/5ba849675aad4031182b88e39f8e52e67c214d132fe65260e3639850bf0542c9.jpg)  
+Figure 5: Pairwise distances for alanine dipeptide samples. $D(\cdot,\cdot)$ denotes the distribution of pairwise distances between two sets with $A,B$ , the source and target systems, and $M(A)$ , the set $A$ is mapped to via FreeFlow.  
+
+lations (Invernizzi, 2021) and estimations of the ratio of the partition functions of the two states.  
+
+Figure 5 displays the distributions of pairwise distances between samples from $A,B$ , and the estimated samples $\operatorname{\check{M}}(A)$ , where for two sets $A$ and $B$ , we define $D(A,B):=\{d(a,b):a\in A,b\in B\}$ with $d$ being the Euclidean distance. We observe a strong agreement between the pairwise distances of samples from $B$ among themselves, and the distances between $B$ and the mapped samples $M(A)$ , which is a desirable property for a flow model but not by itself sufficient to determine its accuracy. Similar to Figure 4b, the estimated pairwise distributions show a deviation from the true values, which we again attribute to the approximate nature of the trans-dimensional change of variables formula. Nevertheless the accuracy of the flow model is further supported by the estimate we obtain of $19.03\pm1.69\,\mathrm{kj/mol}$ (averaged over five runs, $\pm$ standard deviation) compared to the reference of $20.87\,\mathrm{kj/mol}$ . We thus conclude that FreeFlow can be applied to physical systems before we move on to more relevant real-world use cases.  
+
+![](images/b4d6c3d25dfbc8d10d54697575834027044076e1f2372a76f06ee63913d2a17b.jpg)  
+Figure 6: Estimated and reference $\Delta F$ values $(\mathbf{kj}/\mathbf{mol})$ between ligands in water, separated based on the subset of the Protein-Ligand Benchmark they belong to. Each dot represents one pair, with the $\mathbf{X}$ -axis denoting our estimates and the $\mathrm{y}$ -axis to the values calculated in the pmx library (Gapsys et al., 2020). The color of each dot corresponds to the absolute difference between its coordinates (red: higher, blue: lower), and the gray line is a linear regression fit to the points. We report various correlation measures as well as the mean absolute difference (MAE) above each plot.  
+
+4.3 PHARMACEUTICALLY RELEVANT LIGANDS IN SOLVENT  
+
+Finally, we evaluate FreeFlow on a real-world use case commonly addressed by FEP: comparing the binding free energies of ligands to a protein, a key task in drug discovery. This process involves two main legs: the solvent leg, where the free energy difference between the two ligands is estimated in solution, and the complex leg, where they are bound to the protein. For this evaluation, we focus on the solvent leg, using a set of pharmaceutically relevant ligands of varying sizes. More specifically for this task, the solvent leg involves system A, where one ligand is in water, and system B, where a different ligand is in water. The task is to learn a mapping between the Boltzmann distributions of these two systems in order to estimate the free energy difference between them.  
+
+Data Collection and Reference Values. We separately simulate each ligand in water at temperature $300\;\mathrm{K}$ for 400 ns with a step size of 2 fs using the OpenMM library (Eastman et al., 2017). As force field, we use the implicit GBn2 solvation model (Nguyen et al.) with the gaff-2.11 force field (Wang et al., 2004). We save a sample every 200 steps for a total of 1,000,000 samples from each ligand. The reference values we use are free energy differences from the pmx library (Gapsys et al., 2020) which were calculated using alchemical FEP (see Figure 2) and an explicit solvent potential. We use the OpenMM bridge within the bgmol1 library to evaluate the energy functions. Before we train FreeFlow on a pair of ligands, we align each sample of the two ligands to a single reference by rotating and translating to minimize the root-mean-square distance between the sample and the reference. This minimizes the distance between the samples while leaving their potential energies unchanged, and makes training easier. We then train the two autoencoders for 500 epochs each, and the flow model for 200 epochs.  
+
+Figure 6 displays the agreement between the estimates we obtain and the reference values along with the resulting $\dot{R^{2}}$ values, Pearson and Spearman correlations, and the mean absolute error between the estimates and the reference values. We acknowledge the high absolute error of the method, however, this can be attributed to some of the simplifications we made such as using an implicit solvent potential. Nonetheless, FreeFlow shows a very strong agreement for four of the six subsets of ligands with correlation coefficient greater than or equal to 0.8, which demonstrates its effectiveness in obtaining free energy differences between arbitrary ligands. These results indicate that FreeFlow can be beneficial in comparing relative binding free energies, an important real-world use case in drug discovery, where good correlation to reference values is necessary for accurate comparisons.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+In this paper, we proposed FreeFlow, a novel method for estimating free energy differences between two systems by first encoding both systems into lower dimensional latent space, and training a flow model via Flow Matching to bridge the two latent distributions. This leads to fast training through the simulation-free regression objective of Flow Matching, and has the main benefit that free energy differences between systems of different dimensions can be estimated without resorting to nonphysical modifications such as dummy atoms. The trans-dimensional latent map not being invertible makes the typical formulations of change of variables inapplicable, and we build on previous work to solve this challenge by separating the change of variables among the three components of the map.  
+
+We evaluated FreeFlow first between simple Gaussian distributions to empirically validate our approach to learning a trans-dimensional map and our change of variables formulation. We then estimated the free energy difference between two states of the small molecule alanine dipeptide, which confirmed FreeFlow’s applicability to physical systems. We finally estimated the free energy differences between pairs of pharmaceutically relevant ligands of various dimensionality in water, which represents one leg of the thermodynamic cycle commonly used to compare different molecules’ binding affinities to a protein, a critical task in drug discovery.  
+
+We anticipate that as future work FreeFlow can be extended to the other leg of the thermodynamic cycle, learning a mapping between two bound protein-ligand complexes. This considerably increases the dimensionality of the problem but can be tackled by FreeFlow since the lower dimensional latent flow would still be fast to train.  
+
+
+
+\section{6 REPRODUCIBILITY STATEMENT  }
+
+
+We have implemented our method and experiments using publicly available libraries, primarily the PyTorch library (Paszke et al., 2019) for architectures and training, the torchcfm package (Tong et al., 2023) for an implementation of flow matching, and OpenMM (Eastman et al., 2017) for molecular dynamics simulations. All reference values were either computed by us as explained in the paper (e.g. in Section 4.1) or taken from the referenced resources. We finally provide the steps required to use our method, as well as the trans-dimensional change of variables formulation in Section 3.3. Our full implementation of the method and the experiments will also be made available with the paper being publicly available.  
+
+
+
+\section{7 ETHICS STATEMENT  }
+
+
+We propose a method to estimate free energy differences between molecular systems, which is an important problem in drug discovery, particularly to compare the binding affinities of different ligands to proteins such as when screening a large number of candidate molecules to identify potential binders. The use of our method is not inherently ethical or unethical since it can be applied for a variety of goals, depending on the properties of the molecules and proteins involved. Nevertheless, methods to accelerate the drug discovery process have immense potential benefits, especially when  
+
+speed is a concern such as during a pandemic.   
+
+

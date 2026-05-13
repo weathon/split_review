@@ -1,0 +1,399 @@
+\title{Training Free Exponential Context Extension via Cascading KV Cache}
+
+\begin{abstract}
+The transformer's context window is vital for tasks such as few-shot learning and conditional generation as it preserves previous tokens for active memory. However, as the context lengths increase, the computational costs grow quadratically, hindering the deployment of large language models (LLMs) in real-world, long sequence scenarios. Although some recent key-value caching (KV Cache) methods offer linear inference complexity, they naively manage the stored context, prematurely evicting tokens and losing valuable information. Moreover, they lack an optimized prefill/prompt stage strategy, resulting in higher latency than even quadratic attention for realistic context sizes. In response, we introduce a novel mechanism that leverages cascading sub-cache buffers to selectively retain the most relevant tokens, enabling the model to maintain longer context histories without increasing the cache size. Our approach outperforms linear caching baselines across key benchmarks, including streaming perplexity, question answering, book summarization, and passkey retrieval, where it retains better retrieval accuracy at 1M tokens after four doublings of the cache size of 65K. Additionally, our method reduces prefill stage latency by a factor of 6.8 when compared to flash attention on 1M tokens. These innovations not only enhance the computational efficiency of LLMs but also pave the way for their effective deployment in resource-constrained environments, enabling large-scale, real-time applications with significantly reduced latency. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{wrapfigure}[15]{r}{0.35\textwidth}
+   \centering
+   \includegraphics[width=\linewidth]{plots/cascade_pattern_visualize-fig1.pdf}
+   \caption{\small Attention matrices from Streaming LLM~\citep{sink} and Cascading KV Cache (Ours), \textbf{both with the same total cache size}.}
+   \label{fig:intro_visualization}
+\end{wrapfigure}
+Large language models (LLMs) have become indispensable in a wide range of applications, from natural language processing to AI-driven content generation. However, their deployment is often hindered by the significant computational resources required, particularly during the quadratic attention operation in inference. Despite recent advancements like Flash Attention, which reduce memory overhead, the quadratic growth of latency and compute costs with input size remains a bottleneck, especially when processing long input sequences. This challenge is exacerbated in streaming applications, where high latency directly impacts user experience and operational costs.
+
+Existing methods, such as sliding window approaches \citep{longformer, mistral}, attempt to manage long sequences but impose a static limit on the model's ability to retain context due to the fixed window size. As a result, valuable tokens are naively discarded once they fall outside the window, leading to irreversible loss of context. While some recent methods have tried to stabilize this process by preserving a small number of initial tokens \citep{sink}~(\cref{fig:concept}~top), they still operate within a rigid, static framework with a naive eviction policy that fails to account for the relative importance of tokens within the sequence. Additionally, the linear inference procedure from~\cite{sink} processes a single token per step which makes it impractical to apply the method during the prompting stage when many tokens need to be processed together in parallel.
+
+\begin{wrapfigure}[15]{r}{0.4\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{plots/passkey-average.pdf}
+    \caption{\small Passkey retrieval accuracy up to 1M tokens given a cache size of 65K. Our Cascading cache maintains higher accuracy even after four doublings of the context length.}
+    \label{fig:intro-passkey}
+\end{wrapfigure}
+
+Our work addresses these critical limitations by proposing a novel linear inference approach that extends the effective context length of sliding windows without increasing computational complexity or requiring additional training. We introduce a dynamic caching mechanism that organizes the key-value (KV) cache into cascading sub-caches, each designed to selectively retain tokens based on their historical importance. This approach allows for a more intelligent eviction policy, preserving tokens that are likely to play a crucial role in future predictions.
+
+To demonstrate the effectiveness of our method, we present two compelling examples: First, we visualize the attention matrix on the PG19 test set, showing how our cascading KV cache retains context far beyond the reach of a static sliding window, while maintaining the same total cache size (\cref{fig:intro_visualization}). Second, we provide an example on passkey retrieval up to 1M tokens given a total cache size of 65K (\cref{fig:intro-passkey}), illustrating that our method consistently outperforms static window attention in terms of retrieval accuracy, maintaining superior performance over prior work even after \textbf{four doublings} of the context size. These results underscore the potential of our approach to transform the efficiency and accuracy of LLMs in both research and real-world applications.
+
+Our contributions are as follows:
+
+\begin{itemize}
+    \item We introduce a simple yet powerful training-free linear attention modification to sliding window attention on pretrained quadratic transformers that selectively retains important tokens, significantly extending the effective context length.
+    \item Given the same total KV cache size, our method delivers substantial improvements of 12.13\% average in long context benchmarks (LongBench), 0.4\% in streaming perplexity (PG19), 4.48\% in Book Summarization, and increases passkey retrieval accuracy by 24 percentage points (pp) at 1M token after four doublings of the context size and 18pp  higher accuracy after 5 doublings of the context size.
+    \item We provide a linear prefill strategy that avoids the restrictive quadratic prompt complexity of previous works. Our strategy reduces latency on 1M tokens by a factor of 6.8 compared to flash attention.
+    \item We provide an efficient implementation of our KV cache, which achieves a more than two order of magnitude speedup over Streaming LLM.
+\end{itemize}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{plots/cascading-cache-with-attention-scores.pdf}
+    \caption{\small Comparison of Streaming LLM~\citep{sink} and Cascading Cache (Ours). \textbf{Top}: Streaming LLM stores \textcolor{berryred}{\textbf{fixed sink tokens (red)}} along with a \textbf{\textcolor{Blue}{sliding window}} of $N$ recent tokens. \textbf{Bottom}: Our method segments the cache into smaller cascading sub-caches, where each successive sub-cache conditionally accepts a fraction of tokens based on the magnitude of past attention scores. This simple technique allows for important tokens to remain in the cache for a longer time instead of being naively evicted too early.
+    }
+    \label{fig:concept}
+\end{figure}
+
+
+\section{Related Work}
+
+\label{sec:related-work}
+
+Previous research has explored sparse attention patterns to reduce computational costs, such as in BigBird~\citep{longformer}, where a sliding window with random sparse context is applied. While effective in reducing time complexity, this approach relies on uninformative random attention patterns that lack adaptability. Linear attention mechanisms, including locality-sensitive hashing~\citep{reformer}, kernel-based approximations~\citep{performer}, attention matrix compression~\citep{sea}, and token compression techniques~\citep{infiniattention, compressedcontext, landmarkattention}, offer promising alternatives but often require extensive retraining, limiting their broad applicability to existing models.
+
+Our work builds on insights from Streaming LLM~\citep{sink}, which identified a key phenomenon in transformers: as features progress through layers, attention scores increasingly concentrate on the initial tokens, referred to as "sink tokens." This phenomenon presents a challenge in traditional fixed sliding windows, as evicting sink tokens from the cache disrupts the attention score distribution, forcing the model to redistribute probability mass onto less ideal tokens. \citet{sink} demonstrated that this distribution shift leads to significant performance degradation unless the sink tokens are retained. We extend this insight by introducing an efficient, scalable method that increases the effective context window while maintaining a static cache size, improving throughput during the prompt stage, and enhancing performance on long-sequence tasks.
+
+Subsequent approaches, such as SnapKV~\citep{snapkv} and H2O~\citep{h2o}, have introduced score-based KV cache eviction policies, but these focus primarily on quadratic prompts, with cache utilization limited to the decoding phase. These methods lack a linear prefill strategy, which results in the prefill attention operation remaining quadratic. Our method diverges from these previous approaches by offering a fast linear prefill strategy that is compatible with a cache that selectively retains important tokens through dynamic sparsity. This makes our approach not only more adaptive but also significantly more efficient, providing a practical path to extend transformer models' context length with linear complexity and without incurring the high costs of retraining.
+
+
+\section{Method}
+
+\label{sec:method}
+\textbf{Notation.} We use the common notation of a boldface lowercase letter to denote a vector $\vx$ and a boldface uppercase letter to denote a matrix $\mX$. A superscript $(l)$ denotes that an object belongs to layer $l$, where $l \in [1, 2, \dots, L]$. To simplify notation for attention, we omit the head dimension, output projections, and multi-layer perceptron (MLP) transformations, please see ~\citet{attention} for an overview regarding those topics. We refer to a generic cache as $\mC$, using subscripts $\mC_K$ and $\mC_V$ to refer to key and value caches, respectively.
+
+\textbf{Attention.} Let $S \in \sN$ represent a token sequence length, where each token at layer $l$ is represented by a vector $\vx_i^{(l)} \in \sR^{d}$. The collection of tokens in the sequence can be represented as a matrix $\mX^{(l)} \in \sR^{S \times d}$.  With $\sigma$ being the softmax function, and different learnable query, key, and value matrices $\mQ^{(l)}, \mK^{(l)}, \mV^{(l)} \in \sR^{d \times d}$ the standard attention operation is as follows:
+
+\begin{equation}
+    \mX^{(l+1)} = \sigma\left(\frac{1}{\sqrt{d}} \left(\mX^{(l)}\mQ^{(l)}\right)\left(\mX^{(l)}\mK^{(l)}\right)^\top\right) \mX^{(l)}\mV^{(l)} \in \sR^{S \times d} 
+\end{equation}
+
+\textbf{Key-Value (KV) Caching.} During LLM inference, a single token is generated at each time step. Combined with a causality condition such that token $\vx_i$ cannot influence $\vx_j$ \textit{iff} $i > j$, it becomes more efficient to cache the $K^{(l)}$ and $V^{(l)}$ projected tokens in each layer $l$ rather than recomputing the full set of key, and value projections at each generation time step. Specifically, with $\cup$ representing a concatenation operation along the $S$ dimension, the calculation of the attention operation for the current token $\vx_j$ during inference becomes,
+
+\begin{equation}
+    \vx_j^{(l+1)} = \sigma\left(\frac{1}{\sqrt{d}} 
+        \left(\vx_j^{(l)}\mQ^{(l)}\right)
+        \left(\mC^{(l)}_K \cup \left(\vx_j^{(l)}\mK^{(l)}\right)\right)^\top\right) 
+        \left(\mC^{(l)}_V \cup \left(\vx_j^{(l)}\mV^{(l)}\right)\right) \in \sR^{d} 
+\end{equation}
+
+After the concatenation operation, $\vx_j^{(l)}\mK^{(l)}$ and $\vx_j^{(l)}\mV^{(l)}$ are considered to be added to the $\mC_K$ and $\mC_V$ caches for the next iteration in the sequence. 
+
+Sliding window attention, as used by Streaming LLM, treats the KV cache as a fixed size buffer which must evict tokens from the cache when the cache reaches its storage limit. Considering a cache which is fully populated (denoted by an overbar $\overline{\mC}_K^{(t)}$ and omitting the layer index $l$), when a new token comes in, the cache must drop the oldest token in order to make space for the new token such that,
+
+\begin{equation}
+     \overline{\mC}_K^{(t+1)} = \overline{\mC}^{(t)}_K \cup \vx_j \mK = \left[ \left\{ \vx_i\mK, \vx_{i+1}\mK, \dots, \vx_{j-1}\mK \right\} \cup \left\{ \vx_j\mK \right\} \right] \setminus \left\{ \vx_i\mK \right\}.
+\end{equation}
+
+The only difference between standard sliding window attention and sink cache of Streaming LLM~\citep{sink} is that the sink cache perpetually retains the first $\alpha$ tokens in the sequence such that if a full cache starts from the first token $\vx_i\mK$, it is not token $\vx_i\mK$ which is evicted, but token $\vx_{i + \alpha}\mK$, with $\alpha \in \sN$ being a fixed hyperparameter. Both sliding window attention and sink cache have the benefit of linear complexity, and a fixed overhead computation and memory cost for the window, as the size of the cache can only grow to a fixed, predetermined amount. However, this has the downside of constraining the information available in the cache, which may be needed for later predictions in the sequence. To illustrate, imagine streaming generation of an entire book with an LLM. If the cache can only contain tokens representing the average length of one chapter, then important information from previous chapters may be forgotten which could prove to be crucial for later steps of generation.
+
+\begin{wrapfigure}[10]{r}{0.42\textwidth}
+  \begin{minipage}{0.42\textwidth}
+    \begin{algorithm}[H]
+    \small
+    \caption{\small Strided Prefill}
+    \label{alg:strided-prefill}
+    \begin{algorithmic}
+    \Require inputs, cache, model, stride\_size
+    \For{chunk \textbf{in} stride(inputs, stride\_size)}
+        \For{layer \textbf{in} model}
+            \State KV $\gets$ cache.get()
+            \State output, scores $\gets$ layer(chunk, KV)
+            \State cache.update(chunk, scores)
+        \EndFor
+    \EndFor
+    \end{algorithmic}
+    \end{algorithm}
+  \end{minipage}
+\end{wrapfigure}
+
+\subsection{Linear Prefill}
+\label{sec:linear-prefill}
+A crucial limitation of Streaming LLM~\citep{sink}, H2O~\citep{h2o}, and SnapKV~\citep{snapkv} lies in the handling of the prompt/prefill stage of the LLM. Each of the aforementioned works only considers that either 1) tokens are processed one-by-one during the prompt or 2) the prompt is processed with full quadratic attention and then proceeds to apply the relevant caching strategy during the generation phase. Being limited in this way, even a linear model like Streaming LLM exhibits slower latency than a quadratic prompt utilizing flash attention in the non-asymptotic regime (see~\cref{fig:attention-latency}). To bridge this gap, our method utilizes an attention kernel which processes fixed-sized chunks (strides) of the prompt in a single operation before adding the keys and values to our cascading cache. Specifically, for a sequence length of $S$, quadratic attention can be seen as having a stride size of $S$, Streaming LLM can be seen as having a stride size of $1$, and our prefill method can be seen as having a stride size $K \in [1, S]$ that is somewhere in between. \cref{alg:strided-prefill} contains pseudocode for our strided prefill process, and \cref{fig:strided-prefill-visualization} contains an illustration. Our strided prefill allows for a more than two order of magnitude decrease in latency compares to single token processing and reduces latency by a factor of $6.8$ over quadratic flash attention when processing 1M tokens. This significant improvement delivers the benefits of linear attention on realistic, non-asymptotic sequence lengths.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{plots/cascade-method-horizontal-with-cases.pdf}
+    \caption{\small \textbf{Top:} Each successive sub-cache window accepts a fraction of tokens evicted from the previous sub-cache. \textbf{Bottom:} At the boundaries between sub-caches, there are four possible cases where our method takes a different conditional action, creating a dynamic attention pattern. Circular buffers are not depicted for simplicity of visualization.}
+    \label{fig:method-small-illustration}
+\end{figure}
+
+\subsection{Cascading KV Cache}
+\label{subsec:our-method}
+
+Our cache is a generalization of sliding window attention which allows for important historical tokens to be kept in the cache history for a longer period of time. To accomplish this, we view a fixed sized sliding window KV cache $\mC$ with cardinality $\vert \mC \vert$ as a collection of sub-caches $\mC_i$ for $i \in [1, \dots, N]$, each with cardinality $\vert \mC_i \vert \leq \vert \mC \vert$ such that $\vert \bigcup_{i=1}^N \mC_i \vert = \vert \mC \vert$. Assuming a sub-cache is full, each full sub-cache $\overline{\mC}_i$ evicts tokens when a new token is accepted into the sub-cache. However, each sub-cache accepts new tokens at a different rate, which in turn means that tokens may be discarded between the sub-caches and not solely at the end of the total cache window. An example of this process is depicted in~\cref{fig:method-small-illustration}~(top), where the blue cache accepts all new incoming tokens. The green sub-cache, however, accepts only half of the tokens which are evicted from the blue sub-cache (every $2^{\text{nd}}$ iteration). The yellow sub-cache accepts half of the tokens evicted from the green sub-cache (every $4^{\text{th}}$ iteration) and so on. 
+
+\begin{wrapfigure}[15]{r}{0.35\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{plots/strided-prefill-method.pdf}
+    \caption{\small Our strided prefill. We first compute attention for a chunk (stride) of \textcolor{purple}{\textbf{new queries}} and \textcolor{purple}{\textbf{new}} + \textbf{\textcolor{red}{c}\textcolor{orange}{a}\textcolor{yellow}{c}\textcolor{green}{h}\textcolor{blue}{ed}} keys, forming a rectangular slice of the attention matrix at each step.}
+    \label{fig:strided-prefill-visualization}
+\end{wrapfigure}
+
+As \citet{sink} discovered, the initial attention sink tokens are vital for the stability of generation. Therefore, we too keep a fixed sub-cache of the initial tokens as attention sinks. With our method, a sink cache is a special case of a cascading cache, where the number of cascades (sub-caches) is set to 1, and it accepts all incoming tokens (\ie using only the blue cache \textit{and} red cache in~\cref{fig:method-small-illustration}).
+
+\textbf{Token Selection.} The process outlined in the preceding paragraph would result in a fixed heuristic pattern of tokens being dropped. However, such a heuristic pattern is not ideal, as it may be the case that the model naively holds onto tokens with limited value, while discarding important tokens. To remedy this, instead of discarding tokens naively, we dynamically select the most important tokens to retain by tracking the average attention score each token receives throughout time via an exponential moving average (EMA). We then selectively discard the token with the lower attention score EMA where possible. Given a hyperparameter $\gamma \in [0, 1]$, and a vector of attention scores for all keys in the cache $\bm{s}_{k}^{(t)}$ at timestep $t$, we update the stored average attention scores $\boldsymbol{\mu}^{(t)}$ as, $\boldsymbol{\mu}^{(t+1)} = \gamma \boldsymbol{\mu}^{(t)} + (1 - \gamma) \bm{s}_k^{(t)}$.
+
+Consider the two sub-caches depicted in cases 2-4 of~\cref{fig:method-small-illustration}. The blue sub-cache must accept all incoming tokens, while the green cache only accepts tokens every other iteration. Let the green cache be accepting tokens at the current timestep (case 2). When a new token comes in, it is added to the blue cache, which must then evict a token as the cache is full. The evicted token then goes to the green cache which accepts it unconditionally. The same process repeats on the next iteration, however, this time the green cache will not be accepting tokens (cases 3-4). At this step, when the blue cache accepts and subsequently evicts a token, we compare the attention score of the token evicted from the blue cache with the attention score of the newest token in the green cache. The token with the higher attention score is set (or remains) as the newest token in the green cache, while the token with the lower attention score is discarded. 
+
+\textbf{Positional Encoding.} We use the same positional encoding strategy as Streaming LLM, which reapplies positional encodings for each token relatively and consecutively, always starting with the 0 index. With $\text{PE}_{\text{index}}: \sN \mapsto \sN$ signifying a positional encoding index mutation function, and $i,j \in \sN$ representing the original token positions in the input sequence, it follows that $i < j \iff \text{PE}_{\text{index}}(i) < \text{PE}_{\text{index}}(j)$. For example, if our cascading cache holds the token indices from the original sequence $[0, 1, 3, 5, 7, 8]$, they would in turn receive positional encodings $[0, 1, 2, 3, 4, 5]$.
+
+\textbf{Circular Buffers.} Previous approaches have relied on tensor concatenation during cache add operations. However, this results in excessive copying operations, as each concatenation requires retrieving and storing all entries into a block of memory. We utilize more efficient circular buffers by tracking the location of the oldest token $\xi^{(t)}$ at timestep $t$ (where insertion should occur). We then increment $\xi$ after each insertion to the buffer such that $\xi^{(t + 1)} = \left( \xi^{(t)} + 1 \right) \mod \vert \mC_i \vert$.  This way, at timestep $t$, we know that the oldest token in the buffer resides at $\xi^{(t)}$. When it is time to remove a token, we simply overwrite the content of the memory address of $\xi^{(t)}$ rather than performing a costly concatenation.
+
+\textbf{Cache Token Span.} Given previously outlined cascading cache, we have lengthened the span of the tokens which currently reside in the cache. The process outlined above effectively extends sliding window context length by allowing older tokens to remain as keys and values for a longer time, with gaps between tokens. Assuming that each sub-cache has the same capacity (\ie $\vert \mC \vert = \vert \bigcup_i^N \mC_i \vert = N \vert \mC_1 \vert$), and each will accept tokens with a different frequency function defined as $\frac{1}{f(i)}$, then the approximate context length will be a summation over the cache sizes and the inverse of the frequency functions. For example, if each successive sub-cache accepts half of the tokens evicted from the previous cache, the total span of the cache $\tilde{S}$ becomes,
+
+\begin{equation}
+   \label{eq:token-span}
+   \tilde{S} = \sum_{i=1}^N f(i) \vert \mC_i \vert = \vert \mC_1 \vert \sum_{i=1}^N 2^{i-1} = \frac{\vert \mC \vert}{N} \sum_{i=1}^N 2^{i-1}.
+\end{equation}
+
+We can then calculate the overall sparsity of the cache as $1 - \vert C \vert / \tilde{S}$.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+\textbf{Setup.} We conduct experiments on streaming books (PG19)~\citep{pg19}, Long Context Understanding (LongBench)~\citep{longbench}, book summarization (Booksum)~\citep{booksum}, and 1M token passkey retrieval. We evaluate our method with pretrained transformers from the Llama3.1~\citep{llama} and Qwen2~\citep{qwen} families of models. Please see~\cref{tab:huggingface-pretrained-urls} for model paths. In all our experiments, we keep the first 64 initial tokens as attention sinks. When considering the number of tokens in the cache, we always consider the sink tokens to be in addition to the cache size. Therefore a window size of $W$ has a total of $W + 64$ tokens when accounting for the 64 sink tokens. We set the EMA parameter to $\gamma = 0.9999$. We use the cascade token acceptance setting depicted in~\cref{fig:method-small-illustration,eq:token-span}, where each sub-cache accepts half of the tokens from the previous sub-cache. Unless otherwise indicated, our models use four cascading sub-caches. For experiments utilizing 8B model sizes, we use one NVIDIA A6000 (49GB) GPU, and for experiments utilizing 70B model sizes, we utilize 4 NVIDIA A100 GPUs. As Streaming LLM is a special case of our model, and 1 token per step is prohibitively slow, all results involving Streaming LLM results use our strided prefill strategy. Note that the strided prefill improves results over the original Streaming LLM with one token per step as shown in~\cref{fig:stride-ablation}. 
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.32\textwidth}
+        \input{plots/cache-latency-tikz}
+        \caption{Cache Latency}
+        \label{fig:cache-latency}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.32\textwidth}
+        \includegraphics[width=\linewidth]{plots/attention-latency.pdf}
+        \caption{Attention Latency}
+        \label{fig:attention-latency}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.32\textwidth}
+        \includegraphics[width=\linewidth]{plots/attention-latency-by-stride.pdf}
+        \caption{Strided Prefill Latency}
+        \label{fig:attention-latency-by-stride}
+    \end{subfigure}
+    \caption{\small \textbf{Latency.} \textbf{a)} Our efficient cache implementation offers more than two orders of magnitude speedup over naive concatenation for cache add operations. \textbf{b)} Our strided prefill strategy is the only linear caching method which outperforms flash attention latency on realistic sequence lengths (1M tokens). We fit a second degree polynomial (dotted lines) to predict latencies after quadratic models run out of memory on a 49GB GPU. \textbf{c)} Strided prefill latency for 1M tokens by different stride sizes.}
+    \label{fig:latency}
+\end{figure}
+
+\subsection{Latency}
+\label{subsec:latency}
+We compare the latency of our cascading cache to the implementation from~\citet{sink} which uses tensor concatenation to add/evict tokens from the cache. Our implementation utilizes circular buffers and the Triton compiler~\citep{triton} to create an efficient CUDA kernel for the caching operation. To perform this experiment, we initialize a cache with 64 sink tokens and a total window size of $\vert \mC \vert = 16$K with 4 and 1 cascades, which are equivalent to our Cascading KV Cache and Streaming LLM, respectively. We also initialize the original Streaming LLM that uses concatenation. We then process a total of 16K tokens into the cache, and report the cumulative time spent on caching operations. Our method with one cascade (equivalent to Streaming LLM) takes just $0.01\% = 1/10000$ of the total caching time of the original Streaming LLM, and our method with 4 cascades takes just $0.038\% = 3.8/10000$ of the total caching time in~\cref{fig:cache-latency}. In~\cref{fig:attention-latency}, we show the overall attention latency, including caching, for a single attention layer processing 1M tokens. Our model uses a strided prefill of 4K with a total cache size of 16K. Our method is the only method which processes 1M tokens faster than flash attention, and takes only $14.8\%$ of the time of quadratic flash attention. In other words, flash attention is 6.8 times slower than ours for processing 1M tokens. We also study the effect of the size of our strided prefill on overall 1M token latency in~\cref{fig:attention-latency}, finding that a stride of 4K delivers the lowest latency.
+
+\subsection{PG19}
+\label{sec:pg19}
+We measure perplexity on the PG19~\citep{pg19} test set consisting of full-length books. Each book is streamed independently from start to finish without concatenation. We compare against a quadratic flash attention model, as well as BigBird and Streaming LLM, which are also training-free inference adaptations. We use three cache sizes of $16$K, $32$K, and $65$K with a strided prefill of 1K. Since our cache is equivalent to Streaming LLM sequence lengths that are less than the total cache size, we only run each experiment on the subset of books which exceed the given cache size. Flash Attention and Bigbird would exceed the GPU memory capacity, therefore, they are limited to processing books in chunk sizes equivalent to the total cache size. Results are displayed in~\cref{tab:pg19}. Our method delivers a consistently lower perplexity for all tested cache and model sizes. Additionally, we show examples of how our model behaves during the streaming process in~\cref{fig:pg19-plots}. After the cache size is exceeded, our eviction policy begins to differ from Streaming LLM, and our model tends to show lower perplexity due to the increased total token span in our cascading cache. Additional plots for Llama3.
+\begin{table}[t]
+\newcommand{\fmtdiff}[1]{{\small #1}}
+\centering
+\caption{\small PG19 Perplexity. Across all tested cache sizes, our cascading model maintains lower perplexity than baselines. Flash Attention and Bigbird operate by stepping through the entire sequence with a stride equivalent to the total cache size. They perform attention at each step until reaching the end of the sequence. The Qwen model is excluded from 65K cache size due to having only 32K positional embeddings.}
+\label{tab:pg19}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{ccc l rr rr rr c}
+\toprule
+\multirow{3.5}{*}{\makecell{Total \\ Cache Size}} & \multirow{3.5}{*}{\makecell{Num.\\Books}} & \multirow{3.5}{*}{\makecell{Token\\Count}} & \multirow{3.5}{*}{Model} & \multicolumn{7}{c}{Methods / Perplexity ($\downarrow$)} \\
+\cmidrule{5-11}
+& & & & \multicolumn{2}{c}{\makecell{Flash Attn.\\(strided)}} & \multicolumn{2}{c}{\makecell{Big Bird\\(strided)}} & \multicolumn{2}{c}{\makecell{Streaming\\LLM}} & \multicolumn{1}{c}{\centering \makecell{\textbf{Cascading KV}\\\textbf{Cache (Ours)}}} \\
+\midrule
+\multirow{2}{*}{16384} & \multirow{2}{*}{91} & \multirow{2}{*}{9.78M} & Qwen2$_{\text{7B}}$ & 9.50 & \fmtdiff{(+0.36)} & 10.65 & \fmtdiff{(+1.51)} & 9.18 & \fmtdiff{(+0.04)} & \textbf{9.14} \\
+   & & & LLaMA3.1$_{\text{7B}}$ & 8.08 & \fmtdiff{(+0.36)} & 12.76 & \fmtdiff{(+5.04)} & 7.78 & \fmtdiff{(+0.06)} & \textbf{7.72} \\
+\midrule
+\multirow{2}{*}{32768} & \multirow{2}{*}{77} & \multirow{2}{*}{9.42M} & Qwen2$_{\text{7B}}$ & 9.26 & \fmtdiff{(+0.26)} & 10.38 & \fmtdiff{(+1.35)} & 9.05 & (+0.02) & \textbf{9.03} \\
+   & & & LLaMA3.1$_{\text{8B}}$ & 7.86 & \fmtdiff{(+0.26)} & 11.33 & \fmtdiff{(+3.73)} & 7.65 & (+0.05) & \textbf{7.60} \\
+\midrule
+\multirow{1}{*}{65536} & \multirow{1}{*}{62} & \multirow{1}{*}{8.25M} & LLaMA3.1$_{\text{8B}}$ & 7.73 & \fmtdiff{(+0.13)} & OOM & \fmtdiff{(-)} & 7.61 & \fmtdiff{(+0.01)} & \textbf{7.60} \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.5\linewidth]{plots/pg19/legend.pdf} \\
+    \includegraphics[width=0.32\linewidth]{plots/pg19/book-37.pdf}
+    \includegraphics[width=0.32\linewidth]{plots/pg19/book-64.pdf}
+    \includegraphics[width=0.32\linewidth]{plots/pg19/book-80.pdf}
+    \caption{\small PG19. For Llama with a total cache size of 65K, our cascade model stays equivalent to Streaming LLM until the cache size is exceeded and our eviction policy and token selection begin. Our intelligent eviction policy leads to better perplexity for the total stream.}
+    \label{fig:pg19-plots}
+\end{figure}
+
+\begin{table}[t]
+\newcommand{\fmtdiff}[1]{{\small #1}}
+\centering
+\caption{\small Booksum book summarization. Among linear baseline models, our Cascading KV cache offers a consistent improvement. Averaged over all models and metrics, ours performs 4.48\% better than linear baselines.}
+\label{tab:booksum}
+\resizebox{0.9\textwidth}{!}{
+\begin{tabular}{l crrr | rrr}
+\toprule
+\multirow{2}{*}{Method} & \multirow{2}{*}{Complexity} & \multicolumn{3}{c}{Llama 3.1$_{8B}$} & \multicolumn{3}{c}{Qwen 2$_{7B}$} \\
+\cmidrule{3-8}
+& & Rouge-1 & Rouge-2 & Rouge-L & Rouge-1 & Rouge-2 & Rouge-L \\
+\midrule
+\textcolor{lightgrey}{Vanilla Transformer} & \textcolor{lightgrey}{$\mathcal{O}(N^2)$} & \textcolor{lightgrey}{35.37} & \textcolor{lightgrey}{7.29} & \textcolor{lightgrey}{21.24} & \textcolor{lightgrey}{31.70} & \textcolor{lightgrey}{5.70} & \textcolor{lightgrey}{17.8} \\
+\textcolor{lightgrey}{Snap KV} & \textcolor{lightgrey}{$\mathcal{O}(N^2)$} & \textcolor{lightgrey}{36.80} & \textcolor{lightgrey}{8.11} & \textcolor{lightgrey}{21.63} & \textcolor{lightgrey}{-} & \textcolor{lightgrey}{-} & \textcolor{lightgrey}{-} \\
+\textcolor{lightgrey}{H2O} & \textcolor{lightgrey}{$\mathcal{O}(N^2)$} & \textcolor{lightgrey}{35.62} & \textcolor{lightgrey}{7.42} & \textcolor{lightgrey}{21.16} & \textcolor{lightgrey}{31.10} & \textcolor{lightgrey}{5.47} & \textcolor{lightgrey}{17.58} \\
+\midrule
+BigBird & $\mathcal{O}(N)$ & 33.36 & 6.55 & 18.59 & 20.83 & 2.31 & 12.62 \\
+Streaming LLM & $\mathcal{O}(N)$ & 33.04 & 6.04 & 19.85 & 29.14 & 4.51 & 16.91 \\
+Cascade (Ours) & $\mathcal{O}(N)$ & \textbf{34.47} & \textbf{6.63} & \textbf{20.52} & \textbf{30.34} & \textbf{5.02} & \textbf{17.54} \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.45\textwidth}
+        \includegraphics[width=\linewidth]{plots/passkey/passkey-cascade-32k-cache.pdf}
+        \caption{Ours 32K Total Cache Size}
+        \label{fig:passkey-ours-32k}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.45\textwidth}
+        \includegraphics[width=\linewidth]{plots/passkey/passkey-streaming-llm-32k-cache.pdf}
+        \caption{Streaming LLM 32K Total Cache Size}
+        \label{fig:passkey-sllm-32k}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.45\textwidth}
+        \includegraphics[width=\linewidth]{plots/passkey/passkey-cascade-65k-cache.pdf}
+        \caption{Ours 65K Total Cache Size}
+        \label{fig:passkey-ours-65k}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.45\textwidth}
+        \includegraphics[width=\linewidth]{plots/passkey/passkey-streaming-llm-65k-cache.pdf}
+        \caption{Streaming LLM 65K Total Cache Size}
+        \label{fig:passkey-sllm-65k}
+    \end{subfigure}
+    \caption{\small Passkey Retrieval. For a total cache size of 65K, our Cascading KV Cache is able to maintain better than random (10\%) accuracy even after 4 doublings of the context length beyond the cache size.}
+    \label{fig:passkey}
+\end{figure}
+\subsection{Passkey Retrieval}
+\label{subsec:passkey}
+
+We perform passkey retrieval on both Streaming LLM and our Cascading KV Cache. For this experiment, we generate a random 5 digit passkey which is hidden in a random uniform point in the total sequence length. The rest of the text consists of random English words from the dictionary. We perform 20 trials for each insertion location range and sequence length for a total of 600 retrievals. We calculate accuracy for each digit, counting a correct digit prediction if it falls in the proper place in the output sequence. Therefore, a model which outputs random digits would receive an accuracy of 10\%. We evaluate total cache sizes of 32K and 65K and sequence lengths with 8 cascades and a strided prefill of 4K. Context lengths start from 32K and double until we reach 1M tokens. Results are shown in~\cref{fig:passkey}. For both 32K and 65K cache sizes, Streaming LLM begins to show near random accuracy after the first doubling, while our Cascading KV Cache is still better than random after 4 doublings of the context length. 
+
+\subsection{LongBench}
+\label{subsec:longbench}
+
+We evaluate our method against other linear scaling models on the same subset of tasks as~\citep{sink} in the LongBench long context understanding benchmark~\citep{longbench}. We limit the total cache size of each model to be approximately 1/4 of the original prompt length $L$ of each input using the function $L^\prime = 2^{\floor{\log_2(L / 4)}}$ and uses a strided prefill of 512. The results are displayed in~\cref{fig:longbench}. Averaged over all datasets and tested models, our cascading cache improves performance over the next best model by 12.13\%. For tabular results, please see~\cref{tab:longbench}. 
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.75\linewidth]{plots/longbench/legend.pdf} \\
+    \begin{subfigure}[b]{0.24\textwidth}
+        \includegraphics[width=\linewidth]{plots/longbench/llama-3.1-8b-w-1-4.pdf}
+        \caption{Llama 3.1$_{8B}$}
+        \label{fig:longbench-llama8b}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+        \includegraphics[width=\linewidth]{plots/longbench/qwen-2-7b-w-1-4.pdf}
+        \caption{Qwen 2$_{7B}$}
+        \label{fig:longbench-qwen7b}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+        \includegraphics[width=\linewidth]{plots/longbench/llama-3.1-70b-w-1-4.pdf}
+        \caption{Llama 3.1$_{70B}$}
+        \label{fig:longbench-llama70b}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.24\textwidth}
+        \includegraphics[width=\linewidth]{plots/longbench/qwen-2-72b-w-1-4.pdf}
+        \caption{Qwen 2$_{72B}$}
+        \label{fig:longbench-qwen72b}
+    \end{subfigure}
+    \caption{\small LongBench. Our cascade model consistently outperforms linear inference baselines. All models are limited to a context window which is roughly 1/4 of the total original prompt length. Averaged over all models and datasets, our Cascading KV cache results in an average performance gain of 12.3\%. Please see~\cref{tab:longbench} for a tabular presentation of results.}
+    \label{fig:longbench}
+\end{figure}
+
+\subsection{Visualization}
+\label{subsec:visualization}
+
+To visualize the effect of our method on the attention matrices, we reconstruct the full attention matrices of both Streaming LLM and our Cascading KV Cache using Llama3.1 8B on the first 8K tokens of the first book of the PG19 test set. We use a total cache size of 2048 and 4 cascades with a strided prefill of 256. The attention matrices are displayed in~\cref{fig:attn-viz}. Naive sliding window attention~\cref{fig:attn-viz}~(a,c) forms short static barrier where tokens are evicted regardless of their importance. Our method~\cref{fig:attn-viz}~(b,d) maintains those tokens in the context history for a longer time where they may retain influence over future predictions, effectively increasing the available context. 
+
+We demonstrate the cascade boundaries of our proposed KV eviction policy in~\cref{fig:attn-viz}(b), where the sparsity of each cascade gradually increases with the size of the cascade.
+Additionally, our method preserves the attention patterns more thoroughly than Streaming LLM, such as the annotated preserved key value in~\cref{fig:attn-viz}(d) which falls well outside of the range of the sliding window pattern.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{plots/cascade_pattern_visualize-fig10.pdf}
+\caption{\small Attention matrix reconstruction for Sink Cache and our Cascading Cache. Both methods result in $\mathcal{O}(n)$ inference time complexity with the same total cache size ($\vert \mC \vert = 2048$).}
+\label{fig:attn-viz}
+\end{figure}
+
+\begin{wraptable}{r}{0.35\textwidth}
+\caption{\small The token selection process outlined in~\cref{sec:method} is crucial for creating dynamic attention patterns.}
+\label{tab:pg19-token-selection-ablation}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{lcccc}
+    \toprule        
+    \multicolumn{1}{l}{} & \multicolumn{2}{c}{$\vert C \vert = 2048$}\\
+    KV Cache & {\small LLaMA3.1$_{\text{8B}}$} \\
+    \midrule
+    Streaming LLM & 8.03 \\
+    Ours w/o token selection & 8.03 \\
+    \midrule
+    Ours w/ token selection & $\mathbf{7.88}$ \\
+    \bottomrule
+\end{tabular}
+}
+\end{wraptable}
+
+\subsection{Ablation Study}
+\label{subsec:ablation}
+
+To study the effect of different parts of our model, we provide three ablation studies including the effect of the strided prefill and token selection using the first book of PG19, and the effect of sparsity induced by the number of cascades. The effect of the strided prefill is shown in~\cref{fig:stride-ablation}. We find a decrease in perplexity with an increasing stride size. Intuitively, this comes from the fact that a larger stride provides a larger dense window at the leading edge of the attention matrix as shown in~\cref{fig:strided-prefill-visualization}. We study the token selection process outlined in~\cref{sec:method} in~\cref{tab:pg19-token-selection-ablation} and find that without the token selection process, our model matches the performance of Streaming LLM, which highlights the importance of selecting higher scoring tokens. Lastly, we study the effect of the number of cascades, and thus overall sparsity, in~\cref{fig:passkey-cascade-ablation}. For this experiment, we use a total cache size of 4K and consider context lengths from 4K which double until 262K. We average the passkey retrieval accuracy over all insertion locations. We find that accuracy steadily increases until the number of cascades exceeds 8 (more than 98\% sparse). 
+\begin{wrapfigure}[11]{r}{0.35\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{plots/pg19-stride-ablation-sink.pdf}
+    \caption{\small Streaming LLM with our strided prefill achieved a progressively better perplexity and latency (\cref{fig:attention-latency-by-stride}) when increasing the stride due to a larger region of dense attention.}
+    \label{fig:stride-ablation}
+\end{wrapfigure}
+
+Interestingly, the token span in the cache remains a good predictor of accuracy for a moderate number of cascades. Given a token span, we may roughly calculate the expected accuracy in~\cref{fig:passkey-cascade-ablation-expected} by considering the probability that the passkey falls within the span of the tokens. For example, with a token span of 1024, and a context size of 2048, we would expect an accuracy of approximately 50\%. We find the token span to be a reliable predictor of accuracy until 4 cascades (73\% sparsity). 
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{plots/passkey/passkey-cascade-ablation-legend.pdf}
+    \begin{subfigure}[b]{0.32\textwidth}
+        \includegraphics[width=\linewidth]{plots/passkey/passkey-cascade-ablation.pdf}
+        \caption{Actual Accuracy}
+        \label{fig:passkey-cascade-ablation-actual}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.32\textwidth}
+        \includegraphics[width=\linewidth]{plots/passkey/passkey-cascade-ablation-approx-context-len.pdf}
+        \caption{Expected Accuracy}
+        \label{fig:passkey-cascade-ablation-expected}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.32\textwidth}
+        \includegraphics[width=\linewidth]{plots/passkey/passkey-cascade-ablation-approx-context-len-diff.pdf}
+        \caption{Expected - Actual}
+        \label{fig:passkey-cascade-ablation-diff}
+    \end{subfigure}
+    \caption{\small The effect of more cascades. \textbf{a)} For a fixed cache size, increasing the number of cascades leads to more sparsity. We find passkey retrieval accuracy increases until 8 total cascades. \textbf{b)} Expected accuracy using total token span~(\cref{eq:token-span}) as a rough predictor. \textbf{c)} measuring the difference between predicted and actual accuracy (\cref{fig:passkey-cascade-ablation-actual} - \cref{fig:passkey-cascade-ablation-expected}), we see that token span remains a strong predictor until the number of cascades exceeds four.}
+    \label{fig:passkey-cascade-ablation}
+\end{figure}
+
+
+\section{Limitations \& Future Work}
+
+\label{sec:limitations}
+As outlined in \cref{eq:token-span} and visualized in \cref{fig:passkey-cascade-ablation}, our model’s overall sparsity increases as the number of cascades $N$ grows. This introduces a trade-off, as demonstrated in \cref{fig:passkey-cascade-ablation-actual}, where performance improves up to a point, but diminishes once the number of cascades exceeds eight. Therefore, while our method enables substantial context length extrapolation, this process is not unbounded. Eventually, tokens must be discarded to maintain linear inference complexity, which inherently limits the scope of extrapolation. A promising direction for future work involves addressing the need to discard tokens while preserving linear complexity. One potential solution could involve developing methods for logarithmic complexity searches within the KV cache. By efficiently identifying the top-k relevant key-value pairs, such an approach could eliminate the need for token eviction and allow the model to maintain an overall complexity of $\mathcal{O}(N \log N)$. This would open new avenues for expanding transformer models’ context memory without compromising efficiency.
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+In this paper, we introduced a novel, training-free method for extending the context memory of streaming LLMs, offering significant improvements without increasing computational complexity. Our approach treats the fixed-size KV cache as a series of cascading sub-caches, allowing for dynamic token retention based on their historical importance. By selectively preserving high-impact tokens and evicting less critical ones, our method effectively extends the context window far beyond the limitations of traditional sliding windows. Our results demonstrate clear performance gains: a 12.13\% average improvement on LongBench, a 4.48\% boost in Book Summarization tasks, and superior passkey retrieval accuracy at 1M tokens, maintaining a significant edge even after four doublings of the context size. Additionally, our linear prefill strategy eliminates the quadratic complexity of previous approaches, achieving latency reduction by a factor of 6.8 compared to flash attention. These advancements highlight the potential of our method to significantly enhance the efficiency and accuracy of LLMs, making it a practical and impactful solution for both research and real-world applications that require long-context processing.
+
+
+
+\section{Reproducibility Statement}
+
+\label{sec:reproducibility}
+
+In order to aid in reproducibility of our experiments, we have provided our code which has been zipped into the supplementary file. We also provide exact pretrained model URL's which are listed in~\cref{tab:huggingface-pretrained-urls}. We provide an algorithm for our strided prefill method in~\cref{alg:strided-prefill} and a full algorithm for our Cascading KV Cache in~\cref{alg:cascade}. We have explained the parameters and computation budgets for all experiments in~\cref{sec:experiments}. As our method is deterministic and requires no stochastic training process, we have omitted error bars in our results.
+
+
+

@@ -1,0 +1,399 @@
+\title{Soft Mixture Denoising: Beyond the Expressive Bottleneck of Diffusion Models}
+
+\begin{abstract}
+Because diffusion models have shown impressive performances in a number of tasks, such as image synthesis, there is a trend in recent works to prove (with certain assumptions) that these models have strong approximation capabilities. In this paper, we show that current diffusion models actually have an \textit{expressive bottleneck} in backward denoising and some assumption made by existing theoretical guarantees is too strong. Based on this finding, we prove that diffusion models have unbounded errors in both local and global denoising. In light of our theoretical studies, we introduce \textit{soft mixture denoising} (SMD), an expressive and efficient model for backward denoising. SMD not only permits diffusion models to well approximate any Gaussian mixture distributions in theory, but also is simple and efficient for implementation. Our experiments on multiple image datasets show that SMD significantly improves different types of diffusion models (e.g., DDPM), espeically in the situation of few backward iterations.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+	Diffusion models (DMs)~\citep{sohl2015deep} have become highly popular generative
+	models for their impressive performance in many research domains---including high-resolution image synthesis~\citep{NEURIPS2021_49ad23d1}, natural language generation~\citep{li2022diffusionlm}, speech processing~\citep{kong2021diffwave}, and medical image analysis~\citep{pinaya2022brain}. 
+	
+	\parag{Current strong approximator theorems.} To explain the effectiveness of diffusion models, recent work~\citep{lee2022convergence,lee2022polynomial,chen2023sampling} provided theoretical guarantees (with certain assumptions) to show that diffusion models can approximate a rich family of data distributions with arbitrarily small errors. For example, \citet{chen2023sampling} proved that the generated samples from diffusion models converge (in distribution) to the real data under ideal conditions. Since it is generally intractable to analyze the non-convex optimization of neural networks, a potential weakness of these works is that they all supposed \textit{bounded score estimation errors}, which means the prediction errors of denoising functions (i.e., reparameterized score functions) are bounded.
+	
+	\parag{Our limited approximation theorems.} In this work, we take a first step towards the opposite direction: Instead of explaining why diffusion models are highly effective, we show that their approximation capabilities are in fact limited and the assumption of \textit{bounded score estimation errors} (made by existing theoretical guarantees) is too strong. 
+	
+	In particular, we show that current diffusion models suffer from an \textbf{expressive bottleneck}---the Gaussian parameterization of backward probability $p_{\theta}(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$ is not expressive enough to fit the (possibly multimodal) posterior probability $q(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$. Following this, we prove that \textit{diffusion models have arbitrarily large denoising errors for approximating some common data distributions $q(\mathbf{x}_0)$ (e.g., Gaussian mixture)}, which indicates that some assumption of prior works---bounded score estimation errors---is too strong, which undermines their theoretical guarantees. Lastly and importantly, we prove that \textit{diffusion models will have an arbitrarily large error in matching the learnable backward process $p_{\theta}(\mathbf{x}_{0:T})$ with the predefined forward process $q(\mathbf{x}_{0:T})$}, even though matching these is the very optimization objective of current diffusion models~\citep{ho2020denoising,song2021scorebased}. This finding indicates that diffusion models might fail to fit complex data distributions.
+	
+	\begin{figure}[htb]
+		\centering
+		\begin{subfigure}{0.48\textwidth}
+			\includegraphics[width=\linewidth]{images/intro_demo/latent_ddpm_celeba_100.png}
+			\caption{Baseline: vanilla LDM; FID: $11.29$.}
+		\end{subfigure}
+		\hfill
+		\begin{subfigure}{0.48\textwidth}
+			\includegraphics[width=\linewidth]{images/intro_demo/latent_smd_celeba_100.png}
+			\caption{Our model: LDM w/ SMD; FID: $6.85$.}
+		\end{subfigure}
+		\caption{\textbf{SMD improves quality and reduces the number of backward iterations.} Results for CelebA-HQ $256 \times 256$ with \textit{only $100$ backward iterations}, for LDM with and without SDM. SDM achieves better realism and FID. Achieving the same FID with vanilla LDM would require $8\times$ more steps (see Fig. \ref{fig:few iters}). Note that SMD differs from fast samplers (e.g., DDIM~\citep{song2021denoising} and DPM~\citep{lu2022dpm}): \textit{while those methods focus on deterministic sampling and numerical stability, SMD improves the expressiveness of diffusion models}.}
+		\label{fig:demo}
+	\end{figure}
+
+	\parag{Our method: Soft Mixture Denoising (SMD).} In light of our theoretical findings, we propose Soft Mixture Denoising (SMD), which aims to represent the hidden mixture components of the posterior probability with a continuous relaxation. We prove that \textit{SMD permits diffusion models to accurately approximate any Gaussian mixture distributions}. For efficiency, we reparameterize SMD and derive an upper bound of the negative log-likelihood for optimization. All in all, this provides a new backward denoising paradigm to the diffusion models that improves expressiveness and permits few backward iterations, yet retains tractability.
+
+	\parag{Contributions.} In summary, our contributions are threefold:
+	\begin{enumerate}\itemsep0em 
+		\item In terms of theory, we find that current diffusion models suffer from an \textit{expressive bottleneck}. We prove that the models have unbounded errors in both local and global denoising, demonstrating that the assumption of \textit{bounded score estimation errors} made by current theoretical guarantees is too strong; 
+		\item In terms of methodology, we introduce SMD, an expressive backward denoising model. Not only does SMD permit the diffusion models to accurately fit Gaussian mixture distributions, but it is also simple and efficient to implement;
+		\item In terms of experiments, we show that SMD significantly improves the generation quality of different diffusion models (DDPM~\citep{ho2020denoising}, DDIM~\citep{song2021denoising}, ADM~\citep{NEURIPS2021_49ad23d1}, and LDM~\citep{rombach2022high}), especially for few backward iterations---see Fig.~\ref{fig:demo} for a preview. Since SMD lets diffusion models achieve competitive performances at a smaller number of denoising steps, it can speed up sampling and reduce the cost of existing models.
+	\end{enumerate}
+
+
+
+\section{Background: Discrete-time Diffusion Models}
+
+
+	In this section, we briefly review the mainstream architecture of diffusion models in discrete time (e.g., DDPM~\citep{ho2020denoising}). The notations and terminologies introduced below are necessary preparations for diving into subsequent sections.
+	
+	A diffusion model typically consists of two Markov chains of $T$ steps. One of them is the forward process---also known as the diffusion process---which incrementally adds Gaussian noises to the real sample $\mathbf{x}_0 \in \mathbb{R}^{D}, D \in \mathbb{N}$, giving a chain of variables $\mathbf{x}_{1:T} = [\mathbf{x}_1, \mathbf{x}_2, \cdots, \mathbf{x}_T]$:
+	\begin{equation}
+		\label{eq:forward def}
+		q(\mathbf{x}_{1:T} \mid \mathbf{x}_0) = \prod_{t=1}^T q(\mathbf{x}_t \mid \mathbf{x}_{t-1}), \ \ \ q(\mathbf{x}_t \mid \mathbf{x}_{t-1}) = \mathcal{N}(\mathbf{x}_t; \sqrt{1 - \beta_t} \mathbf{x}_{t-1}, \beta_t \mathbf{I}),
+	\end{equation}
+	where $\mathcal{N}$ denotes a Gaussian distribution, $\mathbf{I}$ represents an identity matrix, and $\beta_t, 1 \le t \le T$ are a predefined variance schedule. By properly defining the variance schedule,  the last variable $\mathbf{x}_T$ will approximately follow a normal Gaussian distribution.
+
+	The second part of diffusion models is the \textit{backward} (or \textit{reverse}) \textit{process}. Specifically speaking, the process first draws an initial sample $\mathbf{x}_T$ from a standard Gaussian $p(\mathbf{x}_T) = \mathcal{N}(\mathbf{0}, \mathbf{I})$ and then gradually denoises it into a sequence of variables $\mathbf{x}_{T-1:0} = [\mathbf{x}_{T-1}, \mathbf{x}_{T-2}, \cdots, \mathbf{x}_0]$:
+	\begin{equation}
+		\label{eq:backward proc}  
+		p_{\theta}(\mathbf{x}_{T:0}) = p(\mathbf{x}_T) \prod_{t=T}^1 p_{\theta}(\mathbf{x}_{t-1} \mid \mathbf{x}_{t}), \ \ \ p_{\theta}(\mathbf{x}_{t-1} \mid \mathbf{x}_{t}) = \mathcal{N}(\mathbf{x}_{t-1}; \bm{\mu}_{\theta}(\mathbf{x}_t, t), \sigma_t\mathbf{I}),
+	\end{equation}
+	where $\sigma_t \mathbf{I}$ is a predefined covariance matrix and $\bm{\mu}_\theta$ is a learnable module with the parameter $\theta$ to predict the mean vector. Ideally, the learnable backward probability $p_{\theta}(\mathbf{x}_{t-1} \mid \mathbf{x}_{t})$ is equal to the inverse forward probability $q(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$ at every iteration $t \in [1, T]$ such that the backward process is just a reverse version of the forward process.
+
+	Since the exact negative log-likelihood $\mathbb{E}[-\log p_{\theta}(\mathbf{x}_0)]$ is computationally intractable, common practices adopt its upper bound $\mathcal{L}$ as the loss function
+	\begin{equation}
+		\label{eq:jensen}
+		\begin{aligned}
+			\mathbb{E}_{\mathbf{x}_0 \sim q(\mathbf{x}_0)}[-\log p_{\theta}(\mathbf{x}_0)] & \le \underbrace{\mathbb{E}_q [\mathcal{D}_{\mathrm{KL}}[q(\mathbf{x}_T \mid \mathbf{x}_0), p(\mathbf{x}_T) ]]}_{\mathcal{L}_T}  + \underbrace{\mathbb{E}_q [-\log p_{\theta} (\mathbf{x}_0 \mid \mathbf{x}_1)  ]}_{\mathcal{L}_0} \\
+			& + \sum_{1 < t \le T} \underbrace{\mathbb{E}_q [ \mathcal{D}_{\mathrm{KL}} [ q(\mathbf{x}_{t-1} \mid \mathbf{x}_t, \mathbf{x}_0), p_{\theta} (\mathbf{x}_{t-1} \mid \mathbf{x}_{t})  ]]}_{\mathcal{L}_{t-1}} = \mathcal{L},
+		\end{aligned}
+	\end{equation}	
+	where $\mathcal{D}_{\mathrm{KL}}$ denotes the KL divergence. Every term of this loss has an analytic form so that it is computationally optimizable. \cite{ho2020denoising} further applied some reparameterization tricks to the loss $\mathcal{L}$ for reducing its variance. As a result, the module $\bm\mu_{\theta}$ is reparameterized as
+	\begin{equation}
+		\label{eq:mean def}
+		\bm{\mu}_{\theta}(\mathbf{x}_t, t) = \frac{1}{\sqrt{\alpha_t}} \Big(\mathbf{x}_t - \frac{\beta_t}{\sqrt{1 - \widebar{\alpha}_t}}\bm{\epsilon}_{\theta}(\mathbf{x}_t, t) \Big),
+	\end{equation}
+	where $\alpha_t = 1 - \beta_t$, $\widebar{\alpha}_t = \prod_{t'=1}^t \alpha_{t'}$, and $\bm{\epsilon}_{\theta}$ is parameterized by neural networks. Under this popular scheme, the loss $\mathcal{L}$ is finally simplified as
+	\begin{equation}
+		\label{eq:simplified loss}
+		\mathcal{L} = \sum_{t=1}^T \mathbb{E}_{\mathbf{x}_0 \sim q(\mathbf{x}_0), \bm{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})} \Big[ \| \bm{\epsilon} - \bm{\epsilon}_{\theta} (\sqrt{\widebar{\alpha}_t} \mathbf{x}_0 + \sqrt{1 - \widebar{\alpha}_t} \bm{\epsilon}, t) \|^2 \Big],
+	\end{equation}
+	where the denoising function $\bm{\epsilon}_{\theta}$ is tasked to fit Gaussian nosie $\bm{\epsilon}$.
+
+
+
+\section{Theory: DMs Suffer from an Expressive Bottleneck}
+
+\label{sec:theory}
+
+	In this section, we first show that the Gaussian denoising paradigm leads to an \textit{expressive bottleneck} for diffusion models to fit multimodal data distribution $q(\mathbf{x}_0)$. Then, we properly define two errors $\mathcal{M}_t, \mathcal{E}$ that measure the approximation capability of general diffusion models and prove that they can both be unbounded for current models.
+	
+\subsection{Limited Gaussian Denoising}
+
+	The core of diffusion models is to let the learnable backward probability $p_{\theta}(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$ at every iteration $t$ fit the posterior forward probability $q(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$. From Eq.~(\ref{eq:backward proc}), we see that the learnable probability is configured as a simple Gaussian $\mathcal{N}(\mathbf{x}_{t-1}; \bm{\mu}_{\theta}(\mathbf{x}_t, t), \sigma_t\mathbf{I})$. While this setup is analytically tractable and computationally efficient, our proposition below shows that its approximation goal $q(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$ might be much more complex.
+
+	\begin{proposition}[Non-Gaussian Inverse Probability]
+	\label{lemma:posterior form}
+	
+	For the diffusion process defined in Eq.~(\ref{eq:forward def}), suppose that the real data follow a Gaussian mixture: $q(\mathbf{x}_0) = \sum_{k=1}^K w_k \mathcal{N}(\mathbf{x}_0; \bm{\mu}_k, \bm{\Sigma}_k)$, which consists of $K$ Gaussian components with mixture weight $w_k$, mean vector $\bm{\mu}_k$, and covariance matrix $\bm{\Sigma}_k$, then the posterior forward probability $q(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$ at every iteration $t \in [1, T]$ is another mixture of Gaussian distributions:
+    \begin{equation}
+        q(\mathbf{x}_{t-1} \mid \mathbf{x}_{t}) = \sum_{k=1}^K w_k' \mathcal{N}  ( \mathbf{x}_{t-1}; \bm{\mu}_k',  \bm{\Sigma}_k'),
+    \end{equation}
+    where $w_k', \bm{\mu}_k'$ depend on both variable $\mathbf{x}_t$ and $\bm{\mu}_t$.
+    
+	 \begin{remark}
+		The Gaussian mixture in theory is a universal approximator of smooth probability densities~\citep{dalal1983approximating,goodfellow2016deep}. Therefore, this proposition implies that the posterior forward probability $q(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$ can be arbitrarily complex.
+	\end{remark}
+	
+	\begin{proof}
+
+	\end{proof}
+	
+	\end{proposition}
+
+	While diffusion models perform well in practice, we can infer from above that the Gaussian denoising paradigm $p_{\theta}(\mathbf{x}_{t-1} \mid \mathbf{x}_t) = \mathcal{N}(\mathbf{x}_{t-1}; \bm{\mu}_{\theta}(\mathbf{x}_t, t), \sigma_t\mathbf{I})$ causes a bottleneck for the backward probability to fit the potentially multimodal distribution $q(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$. Importantly, this problem is not rare since real-world data distributions are commonly non-Gaussian and multimodal. For example, classes in a typical image dataset are likely to form separate modes, and possibly even multiple modes per class (e.g. different dog breeds).
+	
+	\begin{mdframed}[leftmargin=0pt, rightmargin=0pt, innerleftmargin=10pt, innerrightmargin=10pt, skipbelow=0pt]
+		\textbf{\emph{Takeaway}}: The posterior forward probability $q(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$ can be arbitrarily complex for the Gaussian backward probability $p_{\theta}(\mathbf{x}_{t-1} \mid \mathbf{x}_{t}) = \mathcal{N}(\mathbf{x}_{t-1}; \bm{\mu}_{\theta}(\mathbf{x}_t, t), \sigma_t\mathbf{I})$ to approximate. We call this problem the \textit{expressive bottleneck} of diffusion models.
+	\end{mdframed}
+
+\subsection{Denoising and Approximation Errors}
+
+	To quantify the impact of this expressive bottleneck, we define two error measures in terms of local and global denoising errors, i.e., the discrepancy between forward process $q(\mathbf{x}_{0:T})$ and backward process $p_{\theta}(\mathbf{x}_{0:T})$.
+	
+	\parag{Derivation of the local denoising error.} Considering the form of loss term $\mathcal{L}_{t-1}$ in Eq.~(\ref{eq:jensen}), we apply the KL divergence to estimate the approximation error of every learnable backward probability $p_{\theta}(\mathbf{x}_{t-1} \mid \mathbf{x}_t), t \in [1, T]$ to its reference $q(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$ as $\mathcal{D}_{\mathrm{KL}}[q(\mathbf{x}_{t-1} \mid \mathbf{x}_t),  p_{\theta}(\mathbf{x}_{t-1} \mid \mathbf{x}_t)]$. Since the error depends on variable $\mathbf{x}_t$, we normalize it with density $q(\mathbf{x}_t)$ into $\mathbb{E}[\mathcal{D}_{\mathrm{KL}}[\cdot]] = \int_{\mathbf{x}_t} q(\mathbf{x}_t) \mathcal{D}_{\mathrm{KL}}[\cdot] d\mathbf{x}_t$. Importantly, we take the infimum of this error over the parameter space $\Theta$ as $\inf_{\theta \in \Theta} ( \int_{\mathbf{x}_t} q(\mathbf{x}_t) \mathcal{D}_{\mathrm{KL}}[q(\cdot), p_{\theta}(\cdot)] d\mathbf{x}_t )$, which means neural networks are globally optimized. In light of the above derivation, we have the following definition.
+	\begin{definition}[Local Denoising Error]
+		
+		For every learnable backward probability $p_{\theta}(\mathbf{x}_{t-1} \mid \mathbf{x}_t), 1 \le t \le T$ in a diffusion model, its error of best approximation (i.e., parameter $\theta$ is globally optimized) to the reference $q(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$ is defined as
+		\begin{equation}
+			\label{eq:def of error metric}
+			\begin{aligned}
+				\mathcal{M}_t & = \inf_{\theta \in \Theta}\Big(\mathbb{E}_{\mathbf{x}_t \sim q(\mathbf{x}_t)}[\mathcal{D}_{\mathrm{KL}}[q(\mathbf{x}_{t-1} \mid \mathbf{x}_t),  p_{\theta}(\mathbf{x}_{t-1} \mid \mathbf{x}_t)]]\Big) \\ & = \inf_{\theta \in \Theta} \Big( \int_{\mathbf{x}_t} \underbrace{q(\mathbf{x}_t)}_{\textrm{Density Weight}} \underbrace{\mathcal{D}_{\mathrm{KL}}[q(\mathbf{x}_{t-1} \mid \mathbf{x}_t),  p_{\theta}(\mathbf{x}_{t-1} \mid \mathbf{x}_t)]}_{\textrm{Denoising Error w.r.t. the Input}~\mathbf{x}_t}  d\mathbf{x}_t \Big),
+			\end{aligned}
+		\end{equation}		
+		where space $\Theta$ represents the set of all possible parameters. Note that the inequality $\mathcal{M}_t \ge 0$ always holds because KL divergence is non-negative.
+		
+	\end{definition}
+
+	\parag{Significance of the global denoising error.} Current practices~\citep{ho2020denoising} expect the backward process $p_{\theta}(\mathbf{x}_{0:T})$ to exactly match the forward process $q(\mathbf{x}_{0:T})$ such that their marginals at iteration $0$ are equal: $q(\mathbf{x}_0) = p_{\theta}(\mathbf{x}_0)$. For example, \citet{song2021scorebased} directly configured the backward process as the reverse-time diffusion equation. Hence, we have the following error definition to measure the global denoising capability of diffusion models.
+	
+	\begin{definition}[Global Denoising Error]
+		The discrepancy between learnable backward process $p_{\theta}(\mathbf{x}_{0:T})$ and predefined forward process $q(\mathbf{x}_{0:T})$ is estimated as
+		\begin{equation}
+			\mathcal{E} = \inf_{\theta \in \Theta} \Big( \mathcal{D}_{\mathrm{KL}}[q(\mathbf{x}_{0:T}), p_{\theta}(\mathbf{x}_{0:T})] \Big),
+		\end{equation}
+		where again $\mathcal{E} \ge 0$ always holds since KL divergence is non-negative.
+		
+	\end{definition}
+
+\subsection{Limited Approximation Theorems}
+
+	In this part, we prove that the above defined errors are unbounded for current diffusion models.\footnote{It is also worth noting that these errors already overestimate the performances of diffusion models, since their definitions involve an infimum operation $\inf_{\theta \in \Theta}$.}
+	\begin{theorem}[Uniformly Unbounded Denoising Error]
+	\label{prop:upper bound}
+		
+		For the diffusion process defined in Eq.~(\ref{eq:forward def}) and the Gaussian denoising process defined in Eq.~(\ref{eq:backward proc}), there exists a continuous data distribution $q(\mathbf{x}_0)$ (more specifically, Gaussian mixture) such that $\mathcal{M}_t$ is uniformly unbounded---given any real number $N\in\mathbb{R}$, the inequality $\mathcal{M}_t > N$ holds for every denoising iteration $t \in [1, T]$.
+	
+		\begin{proof}
+
+		\end{proof}
+		
+	\end{theorem}
+	The above theorem not only implies that current diffusion models fail to fit some multimodal data distribution $q(\mathbf{x}_t)$ because of their limited expressiveness in local denoising, but also indicates that the assumption of \textit{bounded score estimation errors} (i.e., bounded denoising errors) is too strong. Consequently, this undermines existing theoretical guarantees~\citep{lee2022convergence,chen2023sampling} that aim to prove that diffusion models are universal approximates.
+	
+	\begin{mdframed}[leftmargin=0pt, rightmargin=0pt, innerleftmargin=10pt, innerrightmargin=10pt, skipbelow=0pt]
+		\textbf{\emph{Takeaway}}: The denoising error $\mathcal{M}_t$ of current diffusion models can be arbitrarily large at every denoising step $t \in [1, T]$. Thus, the assumption of \textit{bounded score estimation errors} made by existing theoretical guarantees is too strong.
+	\end{mdframed}
+	
+	Based on Theorem~\ref{prop:upper bound} and Proposition~\ref{lemma:posterior form}, we finally show that the global denoising error $\mathcal{E}$ of current diffusion models is also unbounded.
+	
+	\begin{theorem}[Unbounded Approximation Error]
+		\label{theorem:inconsistent backward proc}
+		
+		For the forward and backward processes respectively defined in Eq.~(\ref{eq:forward def}) and Eq.~(\ref{eq:backward proc}), given any real number $N\in \mathbb{R}$, there exists a continuous data distribution $q(\mathbf{x}_0)$ (specifically, Gaussian mixture) such that $\mathcal{E} > N$.
+		\begin{proof}
+
+		\end{proof}
+		
+	\end{theorem}
+	Since the negative likelihood $\mathbb{E}[-\log p_{\theta}(\mathbf{x}_0)]$ is computationally feasible, current practices (e.g., DDPM~\citep{ho2020denoising} and SGM~\citep{song2021scorebased}) optimize the diffusion models by matching the backward process $p_{\theta}(\mathbf{x}_{0:T})$ with the forward process $q(\mathbf{x}_{0:T})$. This theorem indicates that this optimization scheme will fail for some complex data distribution $q(\mathbf{x}_0)$. 
+    
+    \textbf{Why diffusion models already perform well in practice.} The above theorem may bring unease---how can this be true when diffusion models are considered highly-realistic data generators? The key lies in the number of denoising steps. The more steps are used, the more the backward probability, Eq. (\ref{eq:backward proc}), is centered around a single mode, hence the more the simple Gaussian assumption holds~\citep{sohl2015deep}. As a result, we will see in Sec.~\ref{sec:inference speed} that our own method, which makes no Gaussian posterior assumption, improves quality especially for few backward iterations.
+	
+	\begin{mdframed}[leftmargin=0pt, rightmargin=0pt, innerleftmargin=10pt, innerrightmargin=10pt, skipbelow=0pt]
+		\textbf{\emph{Takeaway}}: Standard diffusion models (e.g. DDPM) with simple Gaussian denoising poorly approximate some multimodal distributions (e.g. Gaussian mixture). This is problematic, as these distributions are very common in practice.
+	\end{mdframed}
+
+
+\section{Method: Soft Mixture Denoising}
+
+
+	Our theoretical studies showed how current diffusion models have limited expressiveness to approximate multimodal data distributions. To solve this problem, we propose \textbf{soft mixture denoising} (SMD), a tractable relaxation of a Gaussian mixture model for modelling the denoising posterior.
+	
+\subsection{Main Theory}
+
+	Our theoretical analysis highlight an expressive bottleneck of current diffusion models due to its Gaussian denoising assumption. Based on Proposition~\ref{lemma:posterior form}, an obvious way to address this problem is to directly model the backward probability $p_{\theta}(\mathbf{x}_{t - 1} \mid \mathbf{x}_t)$ as a Gaussian mixture. For example, we could model:
+	\begin{equation}
+		\label{eq:mixture backward}
+		p_{\theta}^{\mathrm{mixture}}(\mathbf{x}_{t - 1} \mid \mathbf{x}_t) = \sum_{k=1}^K z_{\theta_k}(\mathbf{x}_t, t) \mathcal{N}(\mathbf{x}_{t - 1}; \bm{\mu}_{\theta_k}(\mathbf{x}_t, t), \bm{\Sigma}_{\theta_k}(\mathbf{x}_t, t)),
+	\end{equation}
+	where $\theta = \bigcup_{k=1}^K \theta_k$, the number of Gaussian components $K$ is a hyperparameter, and where weight $z^k_t(\cdot)$, mean $\bm{\mu}_{\theta_k}^k(\cdot)$, and covariance $\bm{\Sigma}_{\theta_k}^k(\cdot)$ are learnable and determine each of the mixture components. While the mixture model might be complex enough for backward denoising, it is not practical for two reasons: 1) it is often intractable to determine the number of components $K$ from observed data; 2) mixture models are notoriously hard to optimize. Actually, \cite{jin2016local} proved that a Gaussian mixture model might be optimized into an arbitrarily bad local optimum.
+	
+	\parag{Soft mixture denoising.} To efficiently improve the expressiveness of diffusion models, we introduce \textit{soft mixture denoising} (SMD) $p_{\widebar{\theta}}^{\mathrm{SMD}}(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$, a soft version of the mixture model $p_\theta^{\mathrm{mixture}}(\cdot)$, which avoids specifying the number of mixture components $K$ and permits effective optimization. Specifically, we define a continuous latent variable $\mathbf{z}_t$, as an alternative to mixture weight $z^k_t$, that represents the potential mixture structure of posterior distribution $q(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$. Under this scheme, we model the learnable backward probability as
+	\begin{equation}
+		\label{eq:backward redef}
+			p_{\widebar{\theta}}^{\mathrm{SMD}} (\cdot) = \int p_{\widebar{\theta}}^{\mathrm{SMD}}(\mathbf{x}_{t-1}, \mathbf{z}_t \mid \mathbf{x}_t) d\mathbf{z}_t = \int p_{\widebar{\theta}}^{\mathrm{SMD}}(\mathbf{z}_t \mid \mathbf{x}_t) p_{\widebar{\theta}}^{\mathrm{SMD}}(\mathbf{x}_{t-1} \mid \mathbf{x}_t, \mathbf{z}_t) d\mathbf{z}_t,
+	\end{equation}
+	where $\widebar{\theta}$ denotes the set of all learnable parameters. We model $p_{\widebar{\theta}}(\mathbf{x}_{t-1} \mid \mathbf{x}_t, \mathbf{z}_t)$ as a learnable multivariate Gaussian and expect that different values of the latent variable $\mathbf{z}_t$ will correspond to differently parameterized Gaussians: 
+	\begin{equation}
+		p_{\widebar{\theta}}^{\mathrm{SMD}}(\mathbf{x}_{t-1} \mid \mathbf{x}_t, \mathbf{z}_t) = \mathcal{N}\big(\mathbf{x}_{t-1}; \bm{\mu}_{\theta\bigcup f_{\phi}(\mathbf{z}_t, t)}\big(\mathbf{x}_t, t\big), \bm{\Sigma}_{\theta\bigcup f_{\phi}( \mathbf{z}_t, t)}\big(\mathbf{x}_t, t\big)\big),
+	\end{equation}
+        where $\theta \subset \widebar{\theta}$ is a set of vanilla learnable parameters and $f_{\phi}(\mathbf{z}_t, t)$ is another collection of parameters computed from a neural network $f_{\phi}$ with learnable parameters $\phi \subset \widebar{\theta}$. Both $\theta$ and $f_{\phi}(\mathbf{z}_t, t)$ constitute the parameter set of mean and covariance functions $\bm{\mu}_{\bullet}, \bm{\Sigma}_{\bullet}$ for computations, but only $\theta$ and $\phi$ will be optimized. This type of design is similar to the hypernetwork~\citep{ha2017hypernetworks,krueger2018bayesian}. For implementation, we follow Eq.~(\ref{eq:backward proc}) to constrain the covariance matrix $\bm{\Sigma}_{\bullet}$ to the form $\sigma_t \mathbf{I}$ and parameterize mean $\bm{\mu}_{\bullet}(\mathbf{x}_t, t)$ similar to Eq.~(\ref{eq:mean def}):
+	\begin{equation}
+		\label{eq:new mean parameterization}
+		\bm{\mu}_{\theta \bigcup  f_{\phi}(\mathbf{z}_t, t)}(\mathbf{x}_t, t) = \frac{1}{\sqrt{\alpha_t}} \Big(\mathbf{x}_t - \frac{\beta_t}{\sqrt{1 - \widebar{\alpha}_t}}\bm{\epsilon}_{\theta \bigcup f_{\phi}(\mathbf{z}_t, t)}\big(\mathbf{x}_t, t\big) \Big),
+	\end{equation}
+	where $\bm{\epsilon}_{\bullet}$ is a neural network. For image data, we build it as a U-Net~\citep{ronneberger2015u} (i.e., $\theta$) with several extra layers that are computed from $f_{\phi}(\mathbf{z}_t, t)$.
+
+	For the mixture component $p_{\widebar{\theta}}(\mathbf{z}_t \mid \mathbf{x}_t)$, we parameterize it with a neural network such that it can be an arbitrarily complex distribution and adds great flexibility into the backward probability $p_{\widebar{\theta}}^{\mathrm{SMD}}(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$.  For implementation, we adopt a mapping $g_{\xi}:(\bm{\eta},\mathbf{x}_t,t) \mapsto \mathbf{z}_t,\xi \subset \widebar{\theta}$ with $\bm{\eta}\overset{\mathrm{i.i.d.}}{\sim} \mathcal{N}(\mathbf{0}, \mathbf{I})$, which converts a standard Gaussian into a non-Gaussian distribution.
+	
+	\parag{Theoretical guarantee.} We prove that SMD $p_{\widebar{\theta}}^{\mathrm{SMD}}(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$ improves the expressiveness of diffusion models---resolving the limitations highlighted in Theorems~\ref{prop:upper bound}~and~\ref{theorem:inconsistent backward proc}.
+	
+	\begin{theorem}[Expressive Soft Mixture Denoising]
+		\label{theorem:zero error measure}
+		
+		For the diffusion process defined in Eq.~(\ref{eq:forward def}), suppose soft mixture model $p_{\widebar{\theta}}^{\mathrm{SMD}}(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$ is applied for backward denoising and data distribution $q(\mathbf{x}_0)$ is a Gaussian mixture, then both $\mathcal{M}_t = 0, \forall t \in [1, T]$ and  $\mathcal{E} = 0$ hold.
+	
+		\begin{proof}
+
+		\end{proof}
+		
+	\end{theorem}
+
+		\begin{figure}[t]
+		\begin{minipage}[t]{0.495\textwidth}
+			\begin{algorithm}[H]
+				\caption{Training} \label{alg:training}
+				\small
+				\begin{algorithmic}[1]
+					\Repeat
+					\State $\mathbf{x}_0 \sim q(\mathbf{x}_0)$
+					\State $t \sim \mathcal{U}\{1, T\}$, $\bm{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$
+					\State $\mathbf{x}_t = \sqrt{\widebar{\alpha}_t}\mathbf{x}_0 + \sqrt{1 - \widebar{\alpha}_t} \bm{\epsilon}$
+                    \State \colorbox{blue!10}{$\bm{\eta} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$}
+					\State \colorbox{blue!10}{Latent variable sampling: $\mathbf{z}_t = g_{\xi}(\bm{\eta}, \mathbf{x}_t, t)$}
+					\State  \colorbox{blue!10}{Param. for computation: $\widehat{\theta} = \theta\bigcup f_{\phi}(\mathbf{z}_t, t)$}
+					\State \colorbox{blue!10}{Param. to optimize: $\widebar{\theta} = \theta \bigcup \phi \bigcup  \xi$}
+					\State Update $\widebar{\theta}$ w.r.t. $\nabla_{\widebar{\theta}}\|\bm{\epsilon} - \highlight{\bm{\epsilon}_{\widehat{\theta}}}(\mathbf{x}_t, t)\|^2$
+					\Until{converged}
+				\end{algorithmic}
+			\end{algorithm}
+		\end{minipage}
+		\hfill
+		\begin{minipage}[t]{0.495\textwidth}
+			\begin{algorithm}[H]
+				\caption{Sampling} \label{alg:sampling}
+				\small
+				\begin{algorithmic}[1]
+					\State $\mathbf{x}_T \sim p(\mathbf{x}_T) = \mathcal{N}(\mathbf{0}, \mathbf{I})$
+					\For{$t=T, \dotsc, 1$}
+					\State $\bm{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$ if $t > 1$, else $\bm{\epsilon} = 0$
+                    \State \colorbox{blue!10}{$\bm{\eta} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$}
+					\State \colorbox{blue!10}{Latent variable sampling: $\mathbf{z}_t = g_{\xi}(\bm{\eta}, \mathbf{x}_t, t)$}
+					\State \colorbox{blue!10}{Param. for computation: $\widehat{\theta} = \theta \bigcup f_{\phi}(\mathbf{z}_t, t)$}
+					\State $\mathbf{x}_{t-1} = \frac{1}{\sqrt{\alpha}_t}\Big(\mathbf{x}_t - \frac{1 - \alpha_t}{\sqrt{1 - \widebar{\alpha}_t}} \highlight{\bm{\epsilon}_{\widehat{\theta}}}(\mathbf{x}_t, t)\Big) + \sigma_t \bm{\epsilon}$
+					\EndFor
+					\State \textbf{return} $\mathbf{x}_0$
+				\end{algorithmic}
+			\end{algorithm}
+		\end{minipage}
+	\end{figure}
+    
+    \begin{remark}
+        The Gaussian mixture is a universal approximator for continuous probability distributions~\citep{dalal1983approximating}. Therefore, this theorem implies that our proposed SMD permits the diffusion models to well approximate arbitrarily complex data distributions.
+    \end{remark}
+
+    \begin{mdframed}[leftmargin=0pt, rightmargin=0pt, innerleftmargin=10pt, innerrightmargin=10pt, skipbelow=0pt]
+		\textbf{\emph{Takeaway}}: Soft mixture denoising (SMD) parameterizes the backward probability as a continuously relaxed Gaussian mixture, which potentially permits the diffusion models to well approximate any continuous data distribution.
+	\end{mdframed}
+    
+\subsection{Efficient Optimization and Sampling}
+
+	While Theorem~\ref{theorem:zero error measure} shows that SMDs are highly expressive, it assumes the neural networks are globally optimized. Plus, the latent variable in SMD introduces more complexity to the computation and analysis of diffusion models. To fully exploit the potential of SMD, we thus need efficient optimization and sampling algorithms.
+
+	\parag{Loss function.} The negative log-likelihood for a diffusion model with the backward probability $p^{\mathrm{SMD}}_{\widebar{\theta}}(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$ of a latent variable model is formally defined as
+	\begin{equation}
+		\mathbb{E}_{q}[-\ln p_{\widebar{\theta}}^{\mathrm{SMD}}(\mathbf{x}_0)] = \mathbb{E}_{\mathbf{x}_0 \sim q(\mathbf{x}_0)} \Big[-\ln \Big(  \int_{\mathbf{x}_{1:T}} p(\mathbf{x}_T) \prod_{t=T}^{1} p^{\mathrm{SMD}}_{\widebar{\theta}}(\mathbf{x}_{t-1} \mid \mathbf{x}_t)  d\mathbf{x}_{1:T} \Big) \Big].
+	\end{equation}
+	Like vanilla diffusion models, this log-likelihood term is also computationally infeasible. In the following, we derive its upper bound for optimization.
+	
+	\begin{proposition}[Upper Bound of Negative Log-likelihood]
+		\label{prop:new loss}
+		
+		Suppose the diffusion process is defined as Eq.~(\ref{eq:forward def}) and the soft mixture model $p_{\widebar{\theta}}^{\mathrm{SMD}}(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$ is applied for backward denoising, then an upper bound of the expected negative log-likelihood $\mathbb{E}_{q}[-\ln p_{\widebar{\theta}}^{\mathrm{SMD}}(\mathbf{x}_0)]$ is
+		\begin{equation}
+			\label{eq:new approx loss}
+			\mathcal{L}^{\mathrm{SMD}} = C + \sum_{t=1}^{T}  \mathbb{E}_{\bm{\eta}, \bm{\epsilon}, \mathbf{x}_0} \Big[ \Gamma_t \big\| \bm{\epsilon} - \bm{\epsilon}_{\theta \bigcup  f_{\phi}(g_\xi(\cdot), t)} \big(\sqrt{\widebar{\alpha}_t} \mathbf{x}_0 + \sqrt{1 - \widebar{\alpha}_t} \bm{\epsilon}, t\big)  \big\|^2 \Big],
+		\end{equation}
+		where $g_\xi(\cdot) = g_\xi(\bm{\eta}, \sqrt{\widebar{\alpha}_t} \mathbf{x}_0 + \sqrt{1 - \widebar{\alpha}_t} \bm{\epsilon}, t)$, $C$ is a constant that does not involve any learnable parameter $\widebar{\theta} = \theta\bigcup \phi \bigcup \xi$, $\mathbf{x}_0 \sim q(\mathbf{x}_0)$, $\bm{\eta}, \bm{\epsilon}$ are two independent variables drawn from standard Gaussians, and $\Gamma_t = \beta_t^2 / (2\sigma_t\alpha_t(1 - \widebar{\alpha}_t))$.
+		\begin{proof}
+
+		\end{proof}
+		
+\end{proposition}
+
+	Compared with the loss function of vanilla diffusion models, Eq.~(\ref{eq:simplified loss}), our upper bound mainly differs in the hypernetwork $f_{\phi}$ to parameterize the denoising function $\bm{\epsilon}_{\bullet}$ and an expectation operation $\mathbb{E}_{\bm{\eta}}$. The former is computed by neural networks and the latter is approximated by Monte Carlo sampling, which both add minor computational costs.
+	
+	\parag{Training and Inference.} The SMD training and sampling procedures are respectively shown in Algorithms~\ref{alg:training} and \ref{alg:sampling}, with blue highlighting differences with vanilla diffusion. For the training procedure, we follow common practices of ~\citep{ho2020denoising,NEURIPS2021_49ad23d1}, and (1) apply Monte Carlo sampling to handle iterated expectations $\mathbb{E}_{\bm{\eta}, \bm{\epsilon}, \mathbf{x}_0}$ in Eq.~(\ref{eq:new approx loss}), and (2) reweigh loss term $\|\bm{\epsilon} - \bm{\epsilon}_{\bullet}(\mathbf{x}_t, t)\|^2$ by ignoring coefficient $\Gamma_t$. 
+ One can also sample more noises (e.g., $\bm{\eta}$) in one training step to trade run-time efficiency for approximation accuracy.
+
+
+
+\section{Experiments}
+
+
+Let us verify how SMD improves the quality and speed of existing diffusion models. First, we use a toy example to visualise that existing diffusion models struggle to learn multivariate Gaussians, whereas SMD does not. Subsequently, we show how SMD significantly improves the FID score across different types of diffusion models (e.g., DDPM, ADM~\citep{NEURIPS2021_49ad23d1}, LDM) and datasets. Then, we demonstrate how SMD significantly improves performance at low number of inference steps. This enables reducing the number of inference steps, thereby speeding up generation and reducing computational costs. Lastly, we show how quality can be improved even further by sampling more than one $\bm{\eta}$ for loss estimation at training time, which further improves the performance but causes an extra time cost.
+
+\subsection{Visualising the Expressive Bottleneck}
+From Proposition \ref{lemma:posterior form} and Theorems \ref{theorem:inconsistent backward proc}, \ref{prop:upper bound}  it follows that vanilla diffusion models would struggle with learning a Gaussian Mixture model, whereas Theorem \ref{theorem:zero error measure} proves SMD does not. Let us visualise this difference using a simple toy experiment. In Figure \ref{fig:toy_experiment} we plot the learnt distribution of DDPM over the training process, with and without SMD. We observe that DDPM with SMD converges much faster, and provides a more accurate distribution at time of convergence.
+    \begin{figure}
+  \centering
+    \includegraphics[width=1.0\linewidth]{images/syn/all.pdf}
+  \caption{\textbf{Visualising the expressive bottleneck of standard diffusion models.} Experimental results on synthetic dataset with $7\times 7$ Gaussians (right), for DDPM with $T=1000$. Even though DDPM has converged, we observe that the modes are not easily distinguishable. On the other hand, SMD converges much faster and results in distinguishable modes.}
+  \label{fig:toy_experiment}
+\end{figure}
+
+		\begin{table}[bt]
+		\centering
+		\caption{\textbf{SMD consistently improves generation quality.} FID score of different models across common image datasets and resolutions. We use $T = 1000$ for all models.}
+		\begin{tabular}{ccc|cc}
+			
+			\hline
+			
+			Dataset / Model & DDPM & DDPM w/ SMD & ADM & ADM w/ SMD \\
+			
+			\hline
+			
+			CIFAR-10 ($32 \times 32$) &  $3.78$ & $\mathbf{3.13}$ &  $2.98$ & $\mathbf{2.55}$ \\
+			
+			LSUN-Conference ($64 \times 64$) & $4.15$ & $\mathbf{3.52}$ & $3.85$ & $\mathbf{3.29}$ \\
+			
+			LSUN-Church ($64 \times 64$) & $3.65$ & $\mathbf{3.17}$ & $3.41$ & $\mathbf{2.98}$ \\
+			
+			CelebA-HQ ($128 \times 128$) & $6.78$ & $\mathbf{6.35}$ & $6.45$ & $\mathbf{6.02}$ \\
+			
+			\hline
+			
+		\end{tabular}
+		\label{tab:real_world_mid}
+	\end{table}
+
+\subsection{SMD Improves Image Quality}
+
+	We select three of the most common diffusion models and four image datasets to show how our proposed SMD quantitatively improves diffusion models. Baselines include DDPM~\cite{ho2020denoising}, ADM~\citep{NEURIPS2021_49ad23d1}, and Latent Diffusion Model (LDM)~\citep{pinaya2022brain}. Datasets include CIFAR-10~\citep{krizhevsky2009learning}, LSUN-Conference, LSUN-Church~\citep{yu2015lsun}, and CelebA-HQ~\citep{liu2015faceattributes}. For all models, we set the backward iterations $T$ as $1000$ and generate $10000$ images for computing FID scores.
+
+ 	\begin{wraptable}{r}{0.6\textwidth}
+		\centering
+		\caption{\textbf{SMD improves LDM generation quality.} FID score of latent diffusion with and without SMD on high-resolution image datasets ($T = 1000$).}
+    \begin{tabular}{ccc} \hline
+    Dataset / Model                & LDM    & LDM w/ SMD      \\ \hline
+    LSUN-Church ($256 \times 256$) & $5.86$ & $\mathbf{5.21}$ \\
+    CelebA-HQ ($256 \times 256$)   & $6.13$ & $\mathbf{5.48}$ \\ \hline
+    \end{tabular}
+    		\label{tab:real_world_high}
+    	\end{wraptable}
+	In Table~\ref{tab:real_world_mid}, we show how the proposed SMD significantly improves both DDPM and ADM on all datasets, for a range of resolutions. For example, SDM outperforms DDPM by $15.14\%$ on LSUN-Church and ADM by $16.86\%$. Second, in Table~\ref{tab:real_world_high} we include results for high-resolution image datasets, see Fig.~\ref{fig:demo} for example images ($T=100$). Here we employed LDM as baseline to reduce memory footprint, where we use a pretrained and frozen VAE. We observe that SMD improves FID scores significantly. These results strongly indicate how SMD is effective in improving the performance for different baseline diffusion models.
+
+\subsection{SMD Improves Inference Speed}
+\label{sec:inference speed}
+	\begin{wrapfigure}{r}{0.5\textwidth}
+	\centering
+			\includegraphics[width=0.5\textwidth]{images/few_iters.png}
+			\caption{\textbf{SMD reduces the number of sampling steps.} Latent DDIM and DDPM for different iterations on CelebA-HQ ($256 \times 256$).}
+			\label{fig:few iters}
+	\end{wrapfigure}%
+	Intuitively, for few denoising iterations the distribution $q(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$ is more of a mixture, which leads to the backward probability $p_{\theta}(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$---a simple Gaussian---being a worse approximation. Based on Theorems~\ref{theorem:inconsistent backward proc}~and~\ref{theorem:zero error measure}, we anticipate that our models will be more robust to this effect than vanilla diffusion models. 
+	
+	The solid blue and red curves in Fig.~\ref{fig:few iters} respectively show how the F1 scores of vanilla LDM and LDM w/ SMD change with respect to increasing backward iterations. We can see that our proposed SMD improves the LDM much more at fewer backward iterations (e.g., $T = 200$). We also include LDM with DDIM~\citep{song2021denoising}, a popular fast sampler. We see that the advantage of SDM is consistent across samplers.
+		
+\subsection{Sampling Multiple $\eta$: a Cost-Quality Trade-off}
+\begin{wrapfigure}{r}{0.5\textwidth}
+               \centering\includegraphics[width=0.5\textwidth]{images/eta.png}
+			\caption{\textbf{SMD quality is further improved by sampling multiple $\eta$,} see Alg.~\ref{alg:training} on LSUN-Conference ($64 \times 64$) for DDPM w/ SMD.}
+			\label{fig:eta}
+	\end{wrapfigure}
+	In Algorithm~\ref{alg:training}, we only sample one $\bm{\eta}$ at a time for maintaining high computational efficiency. We can sample multiple $\eta$ to estimate the loss better. Figure \ref{fig:eta} shows how the training time of one training step and FID score of DDPM with SMD changes as a function of the number of $\eta$ samples. While the time cost linearly goes up with the increasing sampling times, FID monotonically decreases (6.5\% for 5 samples).
+
+
+
+\section{Future Work}
+
+We have proven that there exists an expressive bottleneck in popular diffusion models. Since multimodal distributions are so common, this limitation does matter across domains (e.g., tabular, images, text). Our proposed SMD, as a general method for expressive backward denoising, solves this problem. Regardless of network architectures, SMD can be extended to other tasks, including text-to-image translation and speech synthesis. Because SMD provides better quality for fewer steps, we also hope it will become a standard part of diffusion libraries, speeding up both training and inference.
+
+\clearpage
+
+
+
+

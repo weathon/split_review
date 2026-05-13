@@ -1,8 +1,8 @@
 # Mockingbird: Platform for Adapting LLMs to General Machine Learning Tasks
 
 - Decision: Reject
-- Avg Score: 2.25
-- Scores: 1, 0, 3, 5
+- Avg Score: 6.00
+- Scores: 10, 3, 5
 
 ## Abstract
 Large language models (LLMs) are now being used with increasing frequency as chat bots, tasked with the summarizing information or generating text and code in accordance with user instructions.

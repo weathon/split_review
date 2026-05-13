@@ -1,0 +1,210 @@
+\title{Elastic and Balanced End-to-end Training of Dynamic LLMs with DynMo}
+
+\begin{abstract}
+To reduce the computational and memory costs of Large Language Models (LLMs), schemes that introduce dynamic training are increasingly emerging. Examples of dynamic models are: a) Mixture of Experts (MoEs) at which token routing affects the compute balance, b) gradual pruning of the parameters of a model, c) dynamically freezing layers, d) dynamic sparse attention schemes, e) early exit of tokens as they pass through the model layers, and f) Mixture of Depths (MoDs) schemes where tokens bypass blocks. One side effect that limits the practical value of dynamic models is the introduction of workload imbalance among workers, which in turn negatively affects the efficiency in distributed training. We propose a dynamic load balancing solution DynMo), with a proof that it satisfies maximum reduction in imbalance, to adaptively maintain equal compute workloads among different workers in pipeline parallelism. In addition, DynMo dynamically packs work into fewer workers, while sustaining training throughput, to release the idle workers back to the job manager. DynMo supports both single nodes with multi-GPUs and systems with multi-GPU multi-nodes. In comparison to static distributed training solutions (Megatron-LM and DeepSpeed), DynMo accelerates the end-to-end training of dynamic GPT models by up to 1.23x (MoEs), 3.18x (parameter pruning), 2.23x (layer freezing), 4.02x (sparse attention), 4.52x (early exit), and 1.17x (MoDs). DynMo is available at https://anonymous.4open.science/r/DynMo-4D04/.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Sizes of neural networks used to train LLMs has exponentially grown since the introdution of transformers Vaswani et al. (2017). This growth demands more memory and compute power. Yet, neither the memory capacity nor the compute capability of a single accelerator increases at the same rate Sevilla et al. (2022). As a result, high-performance computing centers and cloud providers use a mix of model and data parallelism for training large models Narayanan et al. (2021). One of the most commonly used forms of model parallelism in LLMs is pipeline parallelism, in which consecutive layers are grouped into stages, with each stage assigned to one accelerator (worker) Kahira et al. (2021). Input mini-batches are split into micro batches (chunks) to improve accelerator utilization by overlapping computation in a pipeline fashion Huang et al. (2019); Harlap et al. (2018); Fan et al. (2021); Li & Hoefler (2021); Qi et al. (2024).  
+
+In traditional LLMs training schemes, the workload for each pipeline stage is known in advance and remains static throughout the training. To reduce computational resource requirements, new training schemes that introduce dynamic training workloads are emerging. This includes: a) neural networks where different input samples take different pathways through the model layers 1, e.g. gated neural networks Shazeer et al. (2017a), sparsely activated Mixture of Experts (MoEs) Zhou et al. (2022b), Switch Transformers Fedus et al. (2022), Mixture of Depths (MoDs) Raposo et al. (2024) etc., b) gradual pruning where the parameters of a model are pruned (i.e. sparsified) during training Gale et al. (2019), c) freeze training where some of the layers of the model are adapatively frozen during training Wang et al. (2022), d) different schemes to dynamically sparsify the attention matrix Liu et al. (2022a); Pagliardini et al. (2023); Tay et al. (2020), and e) early exit strategies where tokens skip remaining layers based on an exit decision Elbayad et al. (2020); Schuster et al. (2022); Liu et al.  
+
+Mixture of Prune Layer Sparse Early Mixture of Experts (MoEs) Parameters Freezing Attention Exit Depths (MoDs) 30% Bub\~b2le5 %ratio Bub↑b l\~e 5rxatio 80% Bub\~b4le0 %ratio 60% Bub↑b l\~e 4rxatio 60 Bubble ratio ↑ \~5x Bub\~b1le8 %ratio 三 三   
+20%   
+0%MixtraMl ix8trxal 78xb7 B  LLLaLaMMAA--MMoEo-3E.5-B3. ACLALMM   ADADPP--C   
+S-BASE Load Bal. Loss 24 Layers 32 Lay 40 Layer 4488  LLaayyeerrss   
+Figure 1: Average idleness percentage of GPUs (per iteration) for training dynamic GPT models Radford et al. (2018). Five example cases use models parameterized to have between 24 and 48 layers, and for one example case (MoEs) we report the average idleness percentage for Mixtral 8x7b and LlaMA-MoE-3.5B models. For pipeline parallelism, we use the highest performing pipeline parallelism scheme known to the authors: the ”almost zero-bubble pipeline parallelism” scheme Qi et al. (2024). All reported bubble ratios are measured on a hybrid of pipeline parallelism and data parallelism on $720\;\mathrm{H100}$ GPUs in total, excluding MoEs which uses $128\ \mathrm{H100}$ GPUs in total. Mixture of Experts: we observe ${\sim}25\%$ bubble ratio in the pipeline on Mixtral 8x7b Jiang et al. (2024) and LLaMA-MoE-3.5b Team (2024), arising from the load imbalance imposed by the routing schemes used in token choice (S-BASE Lewis et al. (2021b) and load imbalance with auxiliary loss Jiang et al. (2024)). Gradual prunning of model parameters: we observe almost a five fold increase in idleness at $90\%$ sparsity levels. Note that idleness at Dense is the inherent pipeline bubbles of a static model. Layer freezing: SoTA freezing schemes that incorporate load balancing (Egeria Wang et al. (2022) and AutoFreeze Liu et al. (2021)) yield ${\sim}40\%$ bubble ratio. Dynamic Sparse Flash Attention: locality sensitive hashing with support for flash attention Pagliardini et al. (2023) exhibits a $4\mathbf{x}$ increase in the bubble ratio over the baseline dense attention. Early exit: SoTA early exit methods (CALM Schuster et al. (2022) and ADP-C Liu et al. (2022b)) exhibits up to $5\mathrm{x}$ increase in the bubble ratio over the baseline (w/o early exit), mainly due to the accumulation of bubbles in late layers. Mixture of Depths: we observe $\mathord{\sim}18\%$ bubble ratio in the pipeline, arising from the load imbalance imposed by the routing scheme of expert choices that lacks information about future tokens Raposo et al. (2024).   
+(2022b); Kim et al. (2022). Other than computational efficiency, there is a wide range of reasons that motivate the use of different forms of dynamic models to improve certain model attributes, such as explainability and generalization. We refer the reader to the surveys Han et al. (2021); Tay et al. (2022) on different forms of dynamic models.   
+One of the main downsides of using dynamic models is that they introduce load imbalance in pipeline parallelism, effectively decreasing the throughput of LLM training Zhou et al. (2022a); He et al. (2022). For example, Figure 1 shows the average idleness of GPUs for GPT language models with different numbers of layers, for different types of dynamic models. Load imbalance manifests itself as bubbles that appear in the pipeline due to a stalling accelerator waiting to receive work from its late neighboring worker(s). Since a pipeline is only as fast as its slowest stage, load balancing becomes crucial for efficient resource utilization.   
+Production distributed training solutions typically implement a static load balance at the beginning of training and maintain the same load distribution throughout the training. For instance, MegatronLM Shoeybi et al. (2019) evenly distributes all transformer layers across the accelerators. DeepSpeed Smith (2023) currently offers three partitioning methods for distributing model layers: Uniform, which balances the number of layers; param, which balances the number of parameters in each stage; and regex, which balances layers whose names match a given regex pattern. However, this approach operates on the assumption that the accelerators’ workloads remain roughly unchanged throughout training. As a result, it fails to address the pipeline stalls introduced by dynamic models, ultimately leading to a decrease in computational efficiency.   
+Considering the increasing importance of efficient MoEs/MoDs, sparse dynamic models, layer freezing, and other dynamic training workloads, this work aims to mitigate the pipeline stalls introduced by dynamic models. We introduce DYNMO, an elastic load-balancing framework designed for dynamic models, to ensure balanced pipeline stages during training. DYNMO dynamically redistributes the workload among accelerators whenever an imbalance arises during training, consequently enhancing computational efficiency and leading to cost savings. DYNMO incorporates two different dynamic balancers, both proven to converge to the optimal workload balance among workers. Our experiments demonstrate that DYNMO incurs negligible overhead and can scale effectively in both: a) single-node multi-GPU environments and b) multi-node multi-GPU environments typically used for training LLMs with hybrid parallelism.   
+DYNMO not only enhances performance through dynamic load balancing but also offers the capability to elastically adapt GPU resources. Specifically, as the total workload decreases during training due to gradual pruning or early exit, the load balancer consolidates the work onto fewer GPUs –subject to memory capacity constraints– while maintaining performance. GPUs that are no longer needed for training can then potentially be released back to the job scheduler.   
+DYNMO is the first work to study pipeline stalls caused by training dynamic models. Innovative designs of dynamic models struggle to deliver practical impact, at large scale training, unless there is a platform from which those models can be made efficient. DYNMO provides the essential platform for achieving efficiency in these models. Additionally, considering the substantial costs required for each training run of GPT-class models Li (2022); Heim (2022); Morgan (2022), improving the efficiency of dynamic models can result in significant cost savings.   
+Finally, we emphasize that DYNMO has no impact on model accuracy, as its role is solely to redistribute workload, without interfering with the learning process or changing the learning regime in any way, i.e., DYNMO functions as a complementary system software solution that operates independently of the underlying strategies used for parameters pruning, early exist strategy, layer freezing, experts routing etc. This makes DYNMO extendable and compatible with various dynamic schemes. In principle, it can even be applied to models that undergo dynamic changes for reasons other than the six example cases we list in this paper, such as manufacturing variability of computing units Sinha et al. (2022). In short, our contributions are:   
+• We introduce DYNMO, which enables researchers to explore dynamic models and significantly improves the end-to-end training efficiency of such models, making their practical application more feasible. We invoke DYNMO to rebalance at regular intervals without prior knowledge of dynamism, hence balancing the load in a fully automated and transparent manner. DYNMO is orthogonal to the underlying pipeline parallelism and dynamism scheme; it allows for compatibility with various dynamic compute and model reduction schemes.   
+• saWlclhee evpimraoet epf ootsrh eer  etndweuogc ailtnoigva edt  hebef afnleaucntmsc ibonefgr   doafyl gnGoaPrmitUihcs  mumss eopddr eodlvsu erionn ntg o pt ircpaoienlniivnneegr  gubety i tlrioez -aoptpiatocinkm.i anlgW  bewa lfoaurnrkt cthioen rfg e iinwnte rroo rdGduePcrUe t soa. • We show the benefits of the framework with six different example cases of dynamic models, in both single-node and multi-node settings. DYNMO achieves $1.23\mathbf{x}$ (MoEs), $3.18\mathrm{x}$ (parameter pruning), $2.23\mathbf{x}$ (layer freezing), $4.02\mathbf{x}$ (sparse attention), $4.52\mathbf{x}$ (early exit), and $1.17\mathbf{x}$ (MoDs) speedups over (static) Megatron-LM on multi-node hybrid data and pipeline parallelism with up to $720\:\mathrm{H100}$ GPUs. We demonstrate that the re-packing strategy can be effective in reducing the number of GPUs by up to half while sustaining comparable performance.   
+2 MOTIVATION AND BACKGROUND   
+2.1 BUBBLES IN PIPELINE PARALLELISM   
+There are two types of bubbles in pipeline parallelism: (i) inherent bubbles of the pipeline schedule (e.g. bubbles in-between forward and backward passes in GPipe Huang et al. (2019)), and (ii) bubbles introduced by the dynamic models during training (e.g. bubbles introduced by sparsification during training). We aim to reduce the latter type of bubbles by carefully redistributing the layers among stages to minimize the workload imbalance in the pipeline.  
+
+
+
+\section{2.2 DYNAMIC MODELS  }
+
+
+To reduce the compute and memory costs, training schemes that introduce dynamic training workloads are increasingly emerging. The irregular control-flow in those dynamics models lead inevitably to load imbalance. This leads to inefficiencies that often cause the dynamic model to be slower than the baseline, hence defeating the purpose of using a dynamic model.  
+
+The load balancing problem considered can be formally defined as follows. Given a set of workers ${\mathcal N}=\left\{{\mathcal N}_{1},{\mathcal N}_{2},\ldots,{\mathcal N}_{n}\right\}$ and a set of tasks $\mathcal{T}=\{t_{1},t_{2},\dots,t_{m}\}$ , each task $t_{j}\,\in\,{\mathcal{T}}$ is associated with a workload $c_{j}$ . The total workload is denoted by:  
+
+$$
+C=\sum_{j=1}^{m}c_{j}.
+$$  
+
+Let $A:\mathcal{T}\rightarrow\mathcal{N}$ be a load assignment function that maps each task to a worker. The load of a worker $\mathcal{N}_{i}\in\mathcal{N}$ , denoted $\boldsymbol{L}_{i}$ , is defined as the sum of the workloads of tasks assigned to it:  
+
+$$
+L_{i}=\sum_{t_{j}\in A^{-1}(\mathcal{N}_{i})}c_{j}.
+$$  
+
+The objective of the load balancing problem is to minimize the maximum load among all workers:  
+
+$$
+\operatorname*{min}_{A}\operatorname*{max}_{i\in\{1,\ldots,n\}}L_{i}=\operatorname*{min}_{A}\operatorname*{max}_{i\in\{1,\ldots,n\}}\left(\sum_{t_{j}\in A^{-1}(\mathcal{N}_{i})}c_{j}\right).
+$$  
+
+This optimization problem aims to distribute the tasks such that the workload is balanced across the workers, minimizing the worst-case scenario in terms of load.  
+
+In the following we list the dynamic model example cases we examine in this paper.  
+
+
+
+\section{3 DYNMO: ELASTIC AND BALANCED END-TO-END TRAINING OF DYNAMIC LLMS  }
+
+
+In this work, we use six example cases of dynamic models for which current (static) distributed training systems are not ready to handle efficiently. Even though we show the efficiency of our load balancing system for dynamic LLMs with these example cases, they can be a basis for expanding to other forms of dynamic models.  
+
+Algorithm 1 shows the overall flow of operations of DYNMO with model dynamism. The dynamism function (line 10) depends on the target case. For instance, if the target case is parameter pruning, the dynamism function would apply global pruning on different worker. The algorithm takes as input a model, the number of training iterations, the rank of the accelerator, and several arguments for managing the dynamism, balancing, and packing the model’s workloads. We start the training with the original model and train it until a user-specified dynamism to apply is reached. The frequency varies by the target case, in layer freezing it is as frequent as every 50 iterations, while in parameter tuning the pruning frequency is in the range of 3000-7000 iterations. The model or control flow is altered only if the training is in the dynamism stage. In this stage, the model is adjusted every dynamism freq iteration, where the model (or control flow inside the model) is modified until it meets the specified stopping criteria (lines 9-16). The first iteration after each dynamism operation is used for profiling the time it takes to execute each layer in the altered model and the memory usage of all workers (accelerators) in the pipeline. Next, DYNMO collects the profiling information and decides on balancing the workload by moving layers across pipeline stages based on the execution times of individual layers to minimize the pipeline stalls, subject to the constraints of memory capacity per worker (line 17-20). DYNMO also attempts to re-pack the total workload into fewer number of GPUs if the re-packing feature is enabled by the end user (line 21-23). Once the training is out of the dynamism region, the balanced pipeline continues to execute with the model. Figure  
+
+![](images/0aa3563ca9ada7854c0d70f5df5ea3d9373659f15b1c785e704e05e1f90f50df.jpg)  
+
+Figure 2: Overview of DYNMO. The flow in the figure (top to bottom) is repeated until training is completed. Each yellow and orange rectangle represents a transformer layer. The size of a rectangle illustrates the amount of work in a layer. (1) shows the pipeline before the model starts to change due to dynamism. (2) some action (dynamically) changes the model, or the flow of work inside the model. (3) profiles the pipeline to check if there is any imbalance between stages, (4) performs load balancing based on the profiling results, (5) trains the balanced pipeline until the next time to rebalance, optionally it reduces the number of resources (GPUs) used in training by re-packing.  
+
+2 illustrates the overview of DYNMO with all its steps. The implementation of individual steps of model (or control-flow) altering, load balancing, and re-packing can be found in their respective sections.  
+
+
+
+\section{3.2 PROFILING THE DYNAMISM  }
+
+
+To use DYNMO with different example cases of dynamic models, we profile the dynamism mechanism for each example case. By large, the mechanism for measuring the load balance, redistributing the load, and re-packing (when possible) does not vary from case to case. DYNMO operates as a black-box approach where the load balancing happens at regular fixed intervals, without any knowledge of whether the model has changed or not. As will be shown in the results section, the very low overhead allows DYNMO to be invoked even at the granularity of each iteration.  
+
+
+
+\section{3.3 LOAD BALANCING  }
+
+
+DYNMO implements two load balancing algorithms, and can be extended to support other algorithms. The first is centralized parameter-based partitioning that balances partitions based on the number of parameters. The load balancing algorithm is built on top of DeepSpeed’s load balancing utility functions for partitioning in model parallelism Smith (2023). The second algorithm is an iterative decentralized diffusion-based algorithm that aims to minimize the variance between the workload of each rank by attempting to move layers from overloaded workers to underloaded ones in an iterative way. The workload cost can be described by either the layer execution times, or the parameter counts as in the centralized partitioning method.  
+
+The diffusion-based load balancing algorithm achieves ideal load balancing by iteratively minimizing workload imbalances using a Lyapunov-inspired approach. The potential function $\phi$ , defined as the sum of workload gaps between workers, serves as a measure of imbalance in the system. Each iteration of the algorithm reduces $\phi$ by redistributing tasks from overloaded to underloaded workers, prioritizing layer transfers that yield the largest reductions in imbalance while satisfying memory constraints. The algorithm’s probabilistic analysis guarantees that $\phi$ decreases towards a convergence threshold $\gamma$ , with the rate of convergence bounded by $O(\mathcal{N}^{2}\log(S\mathcal{N}/\gamma)\log\mathcal{N})$ , where $\mathcal{N}$ is the number of workers and $S$ is the total pipeline size. This systematic reduction ensures that workload imbalances, quantified by the bubble ratio, are minimized, driving the system towards an optimally balanced state. The theoretical guarantees of convergence and imbalance reduction underpin the algorithm’s robustness in dynamic environments.  
+
+We demonstrate that the two load balancing schemes (used in Algorithm 1) meet the goals for optimal load balancing by using the following lemmas.  
+
+Lemma 1. A centralized load balancer $L_{c}$ over $\mathcal{N}$ workers satisfies maximum reduction in the imbalance ${\mathcal N}_{i}$ if and only if ${\mathcal N}_{i}$ reduces the bubble ratio to minimum.  
+
+Lemma 2. An iterative decentralized diffusion based load balancer $L_{d}$ over $\mathcal{N}$ workers satisfies maximum reduction in the imbalance ${\mathcal N}_{i}$ if and only if ${\mathcal N}_{i}$ reduces the bubble ratio to minimum. Also the load balancer is guaranteed to converge to the maximum reduction in imbalance in the following number of rounds  
+
+$$
+O\left(\operatorname*{min}\left\{\mathcal{N}^{2}\mathrm{log}\left(\frac{S\mathcal{N}}{\gamma}\right)\log\mathcal{N},\frac{S\mathcal{N}\log\mathcal{N}}{\gamma}\right\}\right)
+$$  
+
+where $\gamma\in\mathbb{R}_{>0}$ is the convergence factor and $\in\mathbb{R}_{>0}$ is the total number of stages in the pipeline.  
+
+3.4 RE-PACKING DYNAMIC MODELS TO FEWER WORKERS  
+
+Workload re-packing is the process of merging the total workload into a smaller number of workers (GPUs) with the purpose of using the available resources more efficiently, i.e. unused GPUs are released when the overall amount of work in training drops. This can be achieved with simple algorithms (in small scale) such as first-fit, best-fit, and round-robin as well as complex optimization heuristics. Workload re-packing aims to increase the worker utilization and reduce the overall number of workers employed to continue the training process. For long training schedules that are common in LLM training, workload packing can result in substantial cost savings. It may also provide improved performance due to reduction in the number of cross-worker communication calls, and smaller pipeline bubbles.  
+
+Re-packing Definition Re-packing occurs when the total workload $C^{(k)}$ decreases below a threshold $\tau$ . At this point, the model layers (tasks) are redistributed across a smaller subset of workers to optimize resource utilization. Let ${\mathcal{N}}^{(k)}\subseteq{\mathcal{N}}$ denote the active set of workers after re-packing at time step $k$ , where $|\mathcal{N}^{(k)}|\leq n$ .  
+
+The load assignment function after re-packing is denoted by $A^{(k)}:\mathcal{T}\to\mathcal{N}^{(k)}$ . The load of an active worker $N_{i}\in\mathcal{N}^{(k)}$ is defined as:  
+
+$$
+L_{i}^{(k)}=\sum_{t_{j}\in(A^{(k)})^{-1}(N_{i})}c_{j}^{(k)}.
+$$  
+
+The objective after re-packing is to minimize the maximum load across the active workers:  
+
+$$
+\operatorname*{min}_{A^{(k)},\mathcal{N}^{(k)}\;i\in\{1,...,|\mathcal{N}^{(k)}|\}}L_{i}^{(k)}.
+$$  
+
+Re-packing Condition Re-packing is triggered if:  
+
+$$
+C^{(k)}<\tau\quad\mathrm{and}\quad|{\mathcal N}^{(k)}|<n.
+$$  
+
+The aim of re-packing is to reduce the number of active workers $|\mathcal{N}^{(k)}|$ , while ensuring that the maximum load remains balanced:  
+
+$$
+\operatorname*{max}_{i\in\{1,\dots,|\mathcal{N}^{(k)}|\}}L_{i}^{(k)}\approx\frac{C^{(k)}}{|\mathcal{N}^{(k)}|}.
+$$  
+
+We use a first-fit algorithm for workload consolidation. The goal of this algorithm is to reduce the number of active workers (subject to memory capacity constraints). When the combined memory usage of every pair of workers is less than the memory capacity of a single worker, we migrate the layers in order to free one of the GPUs. This repeats in an iterative fashion for every two pairs until no more GPUs can be eliminated.  
+
+When possible, repacking is an additional advantage to load balancing. We implement repacking in DYNMO at the load balancer level to enable the release of GPUs. To ensure the GPUs are released in a practical manner, we use the NCCL communicator splitting functionality to allow idle GPUs to be used by a concurrent communicator of the new job without the risk of deadlock. DYNMO’s task ends at releasing the GPUs; reclamation of the released GPUs and assigning them new jobs by the middleware or scheduler is outside the scope of this paper. That being said, it is worth noting that in single-node multi-GPU systems, Nvidia Multi-Instance GPU (MIG) Nvidia (2023) supports node partitioning for multi-tenancy. GPUs that have been released can be returned to MIG for allocation to other tenants. In multi-node environments, cloud schedulers have the ability to acquire released resources and reassign them to other jobs, often leveraging technologies like elastic Kubernetes Elastic (2023).  
+
+
+
+\section{3.5 OVERHEAD OF DYNMO AND FREQUENCY OF DYNAMISM  }
+
+
+The overhead of DYNMO is negligible. For all the results we show in this paper, for all model sizes and different dynamism example cases, the percentage of overhead is a few single digits at its highest; this includes the complete overhead of DYNMO: profiling data collection, rebalancing algorithm, and layers migration between GPUs. The evaluation section reports the load balancing overheads.  
+
+As a basic rule, we apply the rebalancing (via DYNMO) every time the model or the control flow changes. Since the overhead of DYNMO is very low, we could apply it as frequently as needed, based on the requirements of the applications. For example in gradual pruning the typical frequency of dynamism (i.e. model changes requiring load rebalancing) is in the order of 1,000s of iterations. On the other hand, for MoEs and MoDs the rebalancing in every iteration since the imbalance is unpredictable and dependent on point the routing decision is taken, i.e., in the forward pass at each FFN. For MoEs and MoDs we rebalance in the back propagation phase where we attach the movement of layers to the pipeline parallelism scheme (i.e. we migrate the layers as we propagate the gradients back down the pipeline from the last layer to the first layer).  
+
+
+
+\section{3.6 LIMITATIONS  }
+
+
+We focus on dynamism for LLMs and currently do not support other types of DNNs. Our method cannot automatically detect imbalance in a way that is transparent to the training process, i.e., we apply DYNMO at a fixed frequency regardless of whether the model has changed or not. We also allow the user to set the frequency. As future work, a background light weight tracker can be used to identify the dynamism pattern. Another alternative would be training our method to forecast the imbalance during training.  
+
+
+
+\section{4 EVALUATION  }
+
+
+This section contains empirical results and analysis of DYNMO’s effectiveness.  
+
+We conducted experiments using two dynamic load balancing algorithms, each with two different configurations. These algorithms were employed consistently the experiments for all six example cases of dynamic models. The first algorithm, referred to as Partition: by Param, is based on a DeepSpeed Rajbhandari et al. (2020) API. It uses a combination of binary search and linear probing to determine the optimal partitioning based on the parameter counts of the decoder layers. Another variation of this algorithm, called Partition: by Time, employs execution times of decoder layers as input. The second algorithm is a decentralized iterative diffusion-based load balancing approach, which iteratively minimizes load variances among workers. Similar to DeepSpeed, this balancer has two variants: Diffusion: by Param and Diffusion: by Time.  
+
+![](images/165722a190b6943ff596880ba1b930862fb5e4b38f0a4a332a48eeb5da22fe6c.jpg)  
+Figure 3: Throughput of end-to-end training for six different example cases. DYNMO rebalances at regular intervals w/o prior knowledge of dynamism. MoE, Sparse Attn., and MoDs: invoke DYNMO every iteration. Pruning, layer freezing, and early exit: invoke DYNMO every 100s to 1,000s iterations. Speedup we report is the highest among balancing by number of parameters or layer execution time, divided by the highest among static Megatron-LM and DeepSpeed (or SoTA baseline, when available). MoEs and MoDs: we use 128 GPUs (16 nodes each with 4x H100s) in a hybrid of 8-way data parallel $+\ 16\cdot$ -way pipeline). For gradual pruning, layer freezing, dynamic sparse attention, and early exit we use a total of 720 H100 GPUs (90 nodes each with $4\mathbf{x}$ H100s) in a hybrid of 30-way data parallel $+\,24$ -way pipeline.  
+
+4.1 END-TO-END TRAINING THROUGHPUT AND SPEEDUP  
+
+All our throughput and speedup results include the load balancing overhead, unless specified otherwise. We trained GPT models Radford et al. (2018) having different numbers of layers to determine the training throughput and speedup over static Megatron-LM and DeepSpeed (or SoTA baseline, when available). Figure 3 for MoEs, gradual pruning, and MoDs presents the highest throughput of two static and four dynamic load balancers. The first static balancer, Megatron-LM Shoeybi et al. (2019), evenly distributes layers across accelerators. The second static balancer, DeepSpeed Microsoft (2023), balances the number of parameters before training begins. In contrast, each of the two the dynamic load balancers (Partition and Diffusion) has two variants to redistribute the layers after each dynamism step: redistribute based on number of parameters or based on the layer execution time. Parameter-based balancers require profiling after the pruning step for memory usage information, while time-based balancers require profiling for memory usage and layer execution time information. We report the highest among both. Figure 3 for layer freezing, dynamic sparse attention, and early exit compare the two dynamic load balancers (Partition and Diffusion) over SoTA baseline that exists for those example cases. We observed that the use of layer execution time for dynamic load balancing, such as diffusion or partitioning, consistently outperforms parameter count-based implementations across all scales. In every scale, execution time-based dynamic balancers surpass the baseline static balancers. As seen in the figure, most of the speedup reported  
+
+![](images/28fb4c51de17b8c78510b84947fd26346997af7177960d6517db5f9dbcf49b12.jpg)  
+
+In addition to the Megatron-LM and DeepSpeed baselines, we also compare a highly MoE-tailored system: Tutel Hwang et al. (2022). DYNMO significantly outperforms Tutel: $1.18\mathbf{x}$ on Mixtral $8\mathrm{x}7\mathrm{b}$ and $1.21\mathbf{x}$ on LLaMA-MoE-3.5B.  
+
+The improvement margins on MoEs and MoDs are in fact among the top in all six use cases, relative to how much for the bubble ratio was eliminated. DYNMO reduces the bubble ratios of MoEs and MoDs from $25\%$ to $8\%$ and $18\%$ to $4\%$ , respectively. As a result, the end-to-end training of two production models improve $1.21\mathbf{x}$ on Mixtral $8\mathrm{x}7\mathrm{b}$ and $1.23\mathbf{x}$ on LLaMA-MoE-3.5B. Those improvements would translate to significant cost savings, considering the huge cost of training those models (and other similar models).  
+
+Gradual Pruning The pruning region starts from iteration 3000 and continues until iteration 7000 and the model is pruned every 1000 iterations until the $90\%$ target sparsity is reached. This corresponds to sparsity levels of $52\%$ , $79\%$ , and $90\%$ after each pruning step. All other hyperparameters are the same as Megatron-LM. Using layer execution time for diffusion or partitioning dynamic load balancing outperforms the parameter count-based implementations in each scale, for up to $3.18\mathrm{x}$ .  
+
+Layer Freezing DYNMO ourperforms the SoTA layer freezing tool Egeria Wang et al. (2022). We can observe two main points. First, the speedups of different load balancing algorithms over static algorithms are largely similar. This is mainly because the different algorithms tend to arrive at similar load balancing solutions when entire layers are frozen. Second, DYNMO shows increased speedup as the number of layers increases, particularly with diffusion, primarily because Egeria’s overhead grows fast with the number of layers, while DYNMO overhead remains almost flat.  
+
+Dynamic Sparse Attention DYNMO achieves between $2.71\mathrm{x}{-}4.02\mathrm{x}$ speedup over the baseline dense attention (w/o sparsification). Dynamic sparse attention is the example case where DYNMO is most efficient at removing the pipeline bubbles. That is since using layer time execution, which fluctuates a lot in dynamic sparse attention, enables effective redistribution of the layers.  
+
+Early Exit DYNMO achieves more than $4\mathbf{x}$ on average over the baseline w/o exit, i.e. when all tokens pass through the entire model. Similar to dynamic sparse attention, early exit benefits the most from DYNMO due to the big variance in load between earlier and later layers.  
+
+Mixture of Depths Like MoEs, MoDs layer loads vary from iteration to iteration. DYNMO shows $1.17\mathbf{x}$ improvement on the baseline in continual training. We suspect MoDs will in the future be able to benefit more from custom load balancers that leverage the knowledge of how MoEs is used in hybrid with MoDs.  
+
+
+
+\section{4.2 OVERHEAD OF LOAD BALANCING  }
+
+
+Figure 4 (right) reports the load balancing overheads. This includes both the load balancing decision and the actual transfer of the parameters and other data of the layers to be sent or received, e.g., row offsets and column indices in CSR format for gradual pruning, and gradients in the case of MoEs and MoDs. The overhead is generally negligible, hence giving the opportunity for the use of DYNMO in other forms of dynamic models, and not just the six example cases in this paper.  
+
+
+
+\section{4.3 RE-PACKING MODELS TO FEWER GPUS  }
+
+
+In the re-packing experiments, the training starts with 8 GPUs per node in pipeline parallelism. After a dynamism step, DYNMO attempts to re-pack the total workload into fewer GPUs while satisfying the memory capacity constraints. Figure 4 reports the throughput/number of GPUs for each model size where the model is packed into 6, 4, and 2 GPUs. The 8 GPU setting for each model size serves as a baseline where there is no re-packing. This measurement also corresponds to the performance per dollar metric as the cost is directly proportional to the number of GPUs used in training.  
+
+We observe that in all model scales, re-packing can allow the training to be continued with fewer GPUs which may result in significant cost savings. For example, in gradual pruning we reduce the GPU count from 8 to an average of 5.8 GPUs while sustaining the training throughout.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+DYNMO is a load-balancing system for dynamic models where the loads of the workers change during training. DYNMO provides better load balance than state-of-the-art static load balancing approaches, which results in better efficiency and faster end-to-end training time. Empirical results for LLMs with six example cases of dynamic models show that DYNMO significantly improves the training throughput over the counterparts. We foresee that dynamic models will be more prominent in the future and dynamic load distribution will be of utmost importance.  
+
+
+

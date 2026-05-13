@@ -1,0 +1,186 @@
+\title{PrefixQuant: Static Quantization Beats Dynamic through Prefixed Outliers in LLMs}
+
+\begin{abstract}
+\vspace{-0.2cm}
+Quantization is essential for deploying Large Language Models (LLMs) by enhancing memory efficiency and inference speed. Existing methods for activation quantization mainly address channel-wise outliers, often neglecting token-wise outliers, leading to reliance on costly per-token dynamic quantization. 
+To address this, we introduce \methodshort, a novel technique that isolates outlier tokens offline without re-training. Specifically, \methodshort identifies high-frequency outlier tokens and prefixes them in the KV cache, preventing the generation of outlier tokens during inference and simplifying quantization. To our knowledge, \methodshort is the first to enable efficient per-tensor static quantization to outperform expensive per-token dynamic quantization. 
+For instance, in W4A4KV4 (4-bit weight, 4-bit activation, and 4-bit KV cache) Llama-3-8B, \methodshort with per-tensor static quantization achieves a 7.43 WikiText2 perplexity and 71.08\% average accuracy on 5 common-sense reasoning tasks, outperforming previous per-token dynamic quantization methods like QuaRot with $0.98$ perplexity improvement and $+5.98$ points accuracy.
+Additionally, the inference speed of W4A4 quantized models using PrefixQuant is $1.60\times$ to $2.81\times$ faster than FP16 models and exceeds QuaRot models by $1.2\times$ to $1.3\times$.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Recently, Large Language Models (LLMs)\citep{llama,gpt4} demonstrate remarkable capabilities across various tasks, significantly improving the convenience of daily work and life. 
+However, their large parameters and computational demands pose significant challenges for deployment. This makes quantization~\citep{gptq,awq,omniquant} a crucial technology for reducing memory usage and speeding up inference~\citep{llm-unveil}.
+
+Despite advancements, large outliers in LLMs activations can lead to significant quantization errors and accuracy loss. Many current methods address this by focusing on alleviating channel-wise outliers \citep{llm-int8} through techniques like channel-wise scaling \citep{smoothquant,omniquant,os+}, mixed-precision quantization \citep{llm-int8,atom}, Hadamard rotation \citep{quarot,spinquant}, and channel-level assembly \citep{qllm}. However, activations of LLMs include not only channel-wise but also token-wise outliers. For example, Figure~\ref{fig:teaser} (a) shows that some tokens, can be termed as outlier tokens, have extreme values exceeding 1,000, making it impractical to share quantization scales between outlier and normal tokens. 
+The current leading method, Hadamard rotation~\citep{quarot}, redistributes outlier values across all channels, reducing the maximum value in outlier tokens from over 1,000 to about 15 (see Figure~\ref{fig:teaser} (b)). Nevertheless, the magnitude of outlier tokens remains hundreds of times greater than that of normal tokens, still suffering significant performance degradation when sharing quantization scales across different tokens.
+
+Due to such dramatic discrepancies between normal and outlier tokens, previous quantization methods have to rely on per-token dynamic quantization to adjust quantization scales on-the-fly for each token. 
+While per-token dynamic quantization adapts better to distribution changes, it faces more computational effort~\citep{smoothquant} and less compatible with operator fusion~\citep{whitepaper} than per-tensor static quantization which use a fixed quantization parameter for all token. 
+This leads to an important question: \textbf{\textit{Can we eliminate token-wise outliers to enhance the precision of efficient per-tensor static quantization?}}
+
+
+\input{figure_text/teaser}
+In this paper, we propose \methodshort, an efficient solution for static activation quantization in LLMs. \methodshort is based on a key observation: outlier tokens usually appear at fixed positions in the token sequence (such as the initial token) or in tokens with low semantic value (such as ``\textbackslash n'', ``.'', ``the'', \emph{etc}).
+Based on this observation, \methodshort pre-processes the outlier tokens offline in the KV cache to prevent generate new outlier tokens during inference. Specifically, given a LLM, \methodshort firstly counts the number $N$ of outlier tokens,  and selects the Top-$N$ high-frequency outlier tokens to prefix in the KV cache. This process is efficient and does not require any retraining, unlike previous methods~\citep{massive,remove-outliers}, and can be completed quickly, such as in 12 seconds for Llama-2-7B.
+As illustrated in Figure~\ref{fig:teaser} (c), \methodshort effectively eliminates outlier tokens, achieving excellent performance with per-tensor static activation quantization. For example, with 4-bit per-tensor static activation quantization on Llama-2-7B, \methodshort achieves 5.91 perplexity, significantly outperforms QuaRot which has a perplexity of 17.95.
+Furthermore, we introduce a block-wise fine-tuning optimization~\citep{omniquant,efficientqat} to improve performance by simultaneously training the quantization parameters of both weight and activation.
+Additionally, we also find that isolating the outlier tokens enhances the convergence stability of training through avoiding large outliers magnitude during the calculation of Mean Square Error (MSE) loss. Thus, the proposed method of prefixed outliers can also serve as a plug-and-play enhancement for existing optimization-based quantization methods~\citep{omniquant,efficientqat}.
+Experiments demonstrate that, without any fine-tuning, \methodshort achieves comparable or better performance than previous per-token dynamic quantization methods~\citep{quarot,smoothquant,qserve} using coarser per-tensor static  quantization. Furthermore, fine-tuning significantly enhances \methodshort's performance. For example, \methodshort with fine-tuning achieves a 7.43 WikiText2~\citep{wikitext2} perplexity and 71.08\% average accuracy across five common-sense reasoning tasks in W4A4KV4 Llama-3-8B, significantly outperforming previous QuaRot~\citep{quarot} with $0.98$ perplexity benefit and $+5.98$ points accuracy.
+To the best of our knowledge, \methodshort is the first to outperform previous per-token dynamic quantization methods~\citep{quarot,smoothquant,qserve} using coarse per-tensor static quantization. 
+We also benchmark the end-to-end inference of W4A4 quantization, where \methodshort achieves a $1.60\times$ to $2.81\times$ speedup over FP16 models, and surpasses QuaRot models by $1.2\times$ to $1.3\times$.
+We hope \methodshort inspires future developments in LLM compression.
+
+
+
+\section{Related Works}
+
+In this section, we discuss works related to outliers in LLMs, including quantization methods that enhance performance by eliminating activation outliers. %We divide the discussion into channel-wise and token-wise outliers.
+
+\textbf{Channel-Wise Outliers.} \cite{llm-int8} identifies that outliers in activation consistently occur in the same channels across different input tokens and proposes isolating these outlier channels with 16-bit precision. Other works, such as Atom~\citep{atom} and QUIK~\citep{quik}, follow a similar mixed-precision approach to handle outliers. Instead of introducing mixed-precision matrix manipulation, which lacks native hardware support, another line of work addresses outliers through mathematically equivalent transformations. For example, SmoothQuant~\citep{smoothquant}, OmniQuant~\citep{omniquant}, and Outlier Suppression~\citep{outlier,outlier-plus} mitigate outliers by scaling activations to weights on a channel-wise basis. QLLM~\citep{qllm} reduces outlier values by dividing each outlier channel into multiple sub-channels. Recently, QuaRot~\citep{quarot} proposed a simple and effective method, random Hadamard rotation, to redistribute outliers across all channels. Building on QuaRot, SpinQuant~\citep{spinquant} suggests training the orthogonal matrix instead of using a random Hadamard matrix to further enhance performance.
+DuQuant~\citep{duquant} leverages channel permutation to evenly distribute outlier to each block and uses block-rotation to smoothen outliers. 
+Although these methods significantly improve activation quantization performance, they all rely on fine-grained per-token dynamic quantization, which incurs additional overhead to manage token-wise fluctuations.
+
+
+\textbf{Token-Wise Outliers.} The SoftMax function used in the self-attention mechanism naturally prevents producing zero attention scores. As a result, the model tends to assign unnecessary scores to special tokens, leading to token-wise outliers (or termed as massive activation)~\citep{massive,streamingllm}. Based on this, StreamingLLM~\citep{streamingllm} and LM-infinite~\citep{lm-infinite} support infinite sequences by retaining the initial token. 
+Unlike StreamingLLM and LM-infinite, which simply preserve initial tokens in the KV-cache for long-context generation, our \methodshort carefully selects prefixed tokens in the KV-cache to isolate outliers for quantization.
+Some studies explore eliminating outliers with training techniques. For example, \cite{remove-outliers} allows SoftMax to produce zero values, and \cite{massive} shows that adding attention bias in the KV cache during training can effectively reduce outliers.
+Our \methodshort efficiently isolates outlier tokens without needing retraining.
+The works closest to our approach are QFeP~\citep{qfep} and CushionCache~\citep{cushioncache}, which also set prefixed tokens in the KV cache. However, CushionCache~\citep{cushioncache} takes 12 hours to find the prefixed tokens for Llama-3-8B through a greedy search, while our method completes this process in 12 seconds. QFeP~\citep{qfep} fixes the outlier token number for all models at 3, which lacks flexibility. Additionally, both QFeP and CushionCache suffer significant performance degradation when using per-tensor static quantization instead of per-token dynamic quantization. Our \methodshort is the first to make per-tensor static quantization outperform per-token dynamic quantization.
+
+
+\section{Preliminaries}
+
+
+
+Quantization in LLMs involves weight, activation, and KV cache quantization. Weight quantization~\citep{efficientqat} and KV cache quantization~\citep{kivi} reduce memory usage and speed up memory-bound computations~\citep{llm-unveil}. Combining weight and activation quantization enables low-bit matrix manipulation to accelerate computation-bound tasks~\citep{llm-unveil}. Specifically, the symmetric quantization process is:
+\begin{equation}\label{eq:quant}
+    \mathbf{X}_{\texttt{INT}} = \mathrm{clamp}(\lfloor \frac{\mathbf{X}}{\mathbf{s}_{\texttt{X}}} \rceil, -2^{N-1}, 2^{N-1}-1),
+\end{equation}
+where $\lfloor \cdot \rceil$ denotes rounding operation, $N$ is the target bit number, $\mathbf{X}_{\texttt{INT}}$ and $\mathbf{X}$ are the quantized integer and full-precision activation, respectively. $\mathbf{s}_{\texttt{X}}$ is the step size. Full precision weight $\mathbf{W}$ can also be quantized into $\mathbf{W}_{\texttt{INT}}$ and $\mathbf{s}_{\texttt{W}}$ similarly. Then, full-precision matrix manipulation transfer into efficient low-bit matrix manipulation:
+\begin{equation}\label{eq:low-bit-mm}
+    \mathbf{X}\mathbf{W} \approx (\mathbf{s}_{\texttt{W}} \cdot \mathbf{s}_{\texttt{X}}) \cdot \mathbf{X}_{\texttt{INT}} \mathbf{W}_{\texttt{INT}}
+\end{equation}
+
+\textbf{Granularity.} Finer granularity in quantization results in more overhead but less information loss. Per-tensor quantization shares $\mathbf{s}$ across the entire tensor. Per-channel quantization of weight and per-token quantization of activation means $\mathbf{s}$ is shared within each row of the tensor.
+
+\textbf{Dynamic and Static.} 
+Activation quantization divides into dynamic and static quantization based on how quantization parameters are calculated. Specifically, dynamic quantization calculates $\mathbf{s}_{\texttt{X}}=\frac{\text{max}(|X|)}{2^{N-1}-1}$ during inference, offering better adaptability to different distributions. In contrast, static quantization precomputes $\mathbf{s}_{\texttt{X}}$ and $(\mathbf{s}_{\texttt{W}} \cdot \mathbf{s}_{\texttt{X}})$ in Eq.(\ref{eq:low-bit-mm}) offline, leading to more efficient inference and more feasible operator fusion~\citep{whitepaper}. Table~\ref{tab:static_vs_dynamic_quant} shows that the overhead of static quantization is nearly $3\times$ lower than dynamic quantization. Additionally, we initialize both $\mathbf{s}_{\texttt{W}}$ and $\mathbf{s}_{\texttt{X}}$ through grid search~\citep{awq,llmc} on a small calibration dataset for all experiments with static quantization.
+
+\textbf{Hadamard Rotation.} 
+Random Hadamard rotation~\citep{quarot,spinquant} addresses channel-wise outliers. Our method focus on removing token-wise outliers. Therefore, We build our method upon the Hadamard rotation technique, and the detailed is provided in Sec.~\ref{sec:details_of_rotation}. 
+
+\input{figure_text/input_distribution/llama-2-7b}
+
+
+\section{Difficulty of Static Quantization}
+
+Both channel-wise and token-wise outliers can cause information loss during quantization. While channel-wise outliers have been thoroughly explored and addressed in prior research~\citep{quarot}, this discussion focuses on token-wise outliers, which occur within specific tokens.
+
+Let $\mathbf{X} \in \mathbb{R}^{T \times C}$ represent the token sequence, with $T$ tokens and a dimension size of $C$. We calculate token-wise maximum values $\mathbf{M} \in \mathbb{R}^{T}$, indicating the maximum value of each token.
+Per-tensor static quantization uses one pre-computed scale for all tokens. If the token-wise maximum values $\mathbf{M}$ vary significantly across tokens, this can lead to substantial information loss after per-tensor static quantization. To analyze the distribution of token-wise maximum values $\mathbf{M}$ and understand the challenges for per-tensor static quantization, we define top-1, median, and min-1 as the largest, median, and smallest values of $\mathbf{M}$, respectively. We then measure discrepancies using the ratios $\frac{\text{top-1}}{\text{median}}$ and $\frac{\text{median}}{\text{min-1}}$.
+Specifically, a larger $\frac{\text{top-1}}{\text{median}}$ indicates upper outliers, while a larger $\frac{\text{median}}{\text{min-1}}$ represents lower outliers. Both ratios highlight the variability in $\mathbf{M}$.
+Specifically, we identify the following patterns that motivate our method.
+
+\textbf{1. Upper Outlier Tokens in Inputs.} As shown in Figure~\ref{fig:llama-2-7b-input}, the input activation of down\_proj layers exhibits significant outliers with $\frac{\text{top-1}}{\text{median}}=4127$. Although Hadamard rotation (Figure~\ref{fig:llama-2-7b-input-rotate}) reduces the ratio to 478, it remains impractical to share a quantization scaling factor  across tokens due to the large gap in maximum values.
+
+\textbf{2. Lower Outlier Tokens in $\mathbf{Q}$/$\mathbf{K}$/$\mathbf{V}$.} We also investigate the distribution of $\mathbf{Q}$/$\mathbf{K}$/$\mathbf{V}$ within the self-attention mechanism. We only quantize the KV cache for fair comparisons with previous works~\citep{quarot,qserve}. However, quantization of $\mathbf{Q}$ is also crucial, as used in FlashAttention-3~\citep{flashattention3}. In Figure~\ref{fig:llama-2-7b-output-all}, $\mathbf{Q}$/$\mathbf{K}$/$\mathbf{V}$ display a different outlier pattern than the inputs of linear layers, with some tokens having extremely small magnitudes instead of large ones. Specifically, $\mathbf{Q}$/$\mathbf{K}$ have $\frac{\text{top-1}}{\text{median}} \approx 1.5$, but $\frac{\text{median}}{\text{min-1}}>9$. Additionally, as shown in Figure~\ref{fig:llama-2-7b-output-rotate}, Hadamard rotation has no effect on these outliers.
+
+\input{figure_text/output_distribution/llama-2-7b}
+\input{figure_text/deep_exploration/llama-2-7b}
+
+\textbf{3. Outlier Tokens in Initial or Low-Semantic Tokens.} Though outlier tokens occur in different patterns, we find that they are the same tokens in inputs of linear layers and $\mathbf{Q}$/$\mathbf{K}$/$\mathbf{V}$. Consistent with Massive Attention~\citep{massive}, we find that outlier tokens appear only in small fractions (nearly 1 to 4 tokens in the input sequence) with fixed patterns. For example, Llama-2-7B has outlier tokens in both initial and delimiter tokens (``.'' or ``\textbackslash n'' as shown in Figure~\ref{fig:content}). However, unlike outlier channels that exist in some fixed channel indexes~\citep{llm-int8}, the position indexes of outlier tokens relate to the input sequence and are diverse, as shown in Figure~\ref{fig:position}. Therefore, it is not feasible to decide offline on the outlier token to achieve mixed-precision quantization like previous works on outlier channels~\citep{llm-int8,atom}.
+
+Previous works~\citep{quarot,qserve,kivi} take per-token dynamic quantization for inputs of linear layers and KV cache to deal with outlier tokens. In this paper, we focus on eliminating outlier tokens to facilitate per-tensor static quantization.
+
+
+
+\input{figure_text/framework}
+
+
+\section{\methodshort}
+
+
+As shown in Figure~\ref{fig:framework}, we propose prefixing outlier tokens in the KV cache to improve the performance of more efficient per-tensor static quantization, instead of using costly per-token dynamic quantization. Section~\ref{sec:prefixed_outliers} explains how to find these prefixed outliers. Section~\ref{sec:fine-tuning} introduces block-wise fine-tuning to further enhance performance.
+
+\subsection{Prefixed Outliers}\label{sec:prefixed_outliers}
+
+\input{tables/prefixed_token}
+
+\textbf{Definition of Outlier Token.} Given that both upper outlier tokens in the inputs of the linear layer and lower outlier tokens in $\mathbf{Q}$/$\mathbf{K}$/$\mathbf{V}$ are same tokens, we choose to identify outlier tokens using the upper outliers in the inputs of the down\_proj layers due to the outlier in down\_proj is more highlight and easier to be detected. Given token-wise maximum values $\mathbf{M} \in \mathbb{R}^{T}$, which represents the maximum values of each token. Then, outlier token in the $i$-th index of token sequence is identified when the ratio of their maximum values to the median of all maximum values exceeds a threshold $\eta$:
+\begin{equation}\label{eq:definition}
+    \frac{\mathbf{M}_{i}}{\text{median}(\mathbf{M})} > \eta,
+\end{equation}
+where $\mathbf{M}_{i}$ is the maximum value of the $i$-th token, $\text{median}()$ denotes the function to find the median value from the vector, and the threshold $\eta$ is empirically set to $64$ in our experiments.
+
+\textbf{Number of Outlier Tokens.} We determine the number of outlier tokens by calculating the average number of outlier tokens in a small calibration dataset. Specifically, we compute the average outlier token count $\mathbf{O} \in \mathbb{R}^{b}$ for each transformer block according to Eq~(\ref{eq:definition}), where $b$ is the total number of transformer blocks. Since outlier tokens are nearly consistent across layers that contain them, we set the number of outlier tokens as $o = \lceil \max(\mathbf{O}) \rceil$.
+
+\textbf{Which Tokens to Prefix?} Outlier tokens act as attention sinks~\citep{streamingllm}, occupying only a few tokens ($1\sim4$) to help the attention mechanism do nothing~\citep{remove-outliers,massive}. Given the outlier token number $o$, we find that prefixing the top-$o$ high-frequency\footnote{The frequencies are calculated without considering initial token.} outlier tokens and the special `[BOS]` token can successfully constrains the outliers in prefixed tokens as shown in Figure~\ref{fig:position-prefix}.  For special models (such as Llama-3-8B and Qwen-2-7B) with outlier tokens only in the initial tokens, we simply set the prefix token as ``[BOS]''. 
+The detailed prefixed tokens for different models are illustrate in Table~\ref{tab:prefixed_token}. Considering the auto-regressive inference pipeline of LLMs, we store these prefix tokens in the KV cache to prevent generating new outlier tokens during inference. As shown in Figure~\ref{fig:llama-2-7b-input-rotate-prefix} and Figure~\ref{fig:llama-2-7b-output-rotate-prefix}, prefixing outliers in the KV cache reduces the $\frac{\text{top-1}}{\text{median}}$ ratio of down\_proj inputs from 476 to 2.7 and the $\frac{\text{median}}{\text{min-1}}$ ratio of $\mathbf{Q}$/$\mathbf{K}$ from $>9$ to $<3.5$.
+\input{tables/quantitative}
+
+\textbf{Quantitative Analysis.} Table~\ref{tab:teaser} presents separate performance of static quantization on input activation and KV cache quantization. We can find that the model suffers significant performance degradation with static quantization becuase of outlier tokens. For example, in Llama-3-8B, WikiText2 perplexity increases from 6.14 to 22.14 with 4-bit per-tensor activation quantization and from 6.14 to 8.12 with 4-bit per-head static KV cache quantization even with Hadamard rotation. After further setting prefix outliers in the KV cache, performance significantly improves: perplexity of 4-bit per-tensor activation decreases to 7.23 and perplexity of 4-bit per-head static KV cache quantization decreases to 6.30, demonstrating the effectiveness of prefixed outlier
+tokens for static quantization.
+
+\subsection{Block-wise Fine-tuning}\label{sec:fine-tuning}
+Recent studies demonstrate that block-wise fine-tuning~\citep{omniquant,efficientqat} enhances performance by considering inter-layer interactions~\citep{brecq}. We initialize all quantization parameters using grid search~\citep{awq,qserve} and then fine-tune each transformer block with mean square error loss sequentially.
+For trainable parameters, we follow EfficientQAT~\citep{efficientqat} by activating the training of all quantization parameters and original full-precision weights. Additionally, unlike dynamic activation quantization, the offline pre-computed quantization parameters of static activation quantization are inherently trainable.
+To maintain simplicity, we use block-wise quantization in this work and leave the end-to-end finr-tuning of EfficientQAT~\citep{efficientqat} for future performance improvements.
+
+
+\input{tables/w4a4kv4}
+
+
+\section{Experiments}
+
+
+\subsection{Setups}~\label{sec:setups}
+
+\textbf{Baseline.} \methodshort is a versatile method applicable to any precision. We conduct experiments on three precisions: W8A8KV8, W4A8KV4, and W4A4KV4. In \methodshort, weight uses per-channel symmetric quantization. KV cache uses per-head symmetric static quantization for 4-bit and per-tensor symmetric static quantization for 8-bit. Activation (inputs of linear layers) uses per-tensor static quantization. We compare \methodshort with QuaRot~\citep{quarot}, Atom~\citep{atom}, DuQuant~\citep{duquant}, QoQ~\citep{qserve}, SmoothQuant~\citep{smoothquant} and SpinQuant~\citep{spinquant}. Following QoQ, we reproduce all these methods except SpinQuant
+with Pile~\citep{pile} calibration dataset to avoid over-fitting for fair comparisons. The detailed quantization configuration and results sources of these comparison methods can be found at Sec.~\ref{sec:setting_and_results_source}. Note that all comparison methods use dynamic quantization if without specific mentioned, and would suffer dramatic performance degeneration likes ``+ static quantization'' in Table~\ref{tab:ablation_techniques}.
+\textbf{Models and datasets.} We evaluate \methodshort on the Llama-2, Llama-3, Llama-3-Instruct families, Mistral-7B-v0.3, and Qwen-2-7B models. Following previous literature~\citep{omniquant,qserve}, we assess \methodshort quantized models on language modeling and zero-shot tasks. Specifically, we evaluate on WikiText2~\citep{wikitext2} with a 2048 context length for perplexity, and on PIQA~\citep{piqa}, ARC~\citep{arc}, HellaSwag~\citep{hellaswag}, and WinoGrande~\citep{winogrande} using \texttt{lm\_eval v0.4.2}~\citep{eval-harness}. For accuracy, we report \texttt{acc} for WinoGrande and \texttt{acc\_norm} for HellaSwag, Arc\_Challenge, Arc\_Easy, and PIQA, following Qserve~\citep{qserve}\footnote{Some weight-only quantization works such as EfficientQAT~\citep{efficientqat} and QuiP\#~\citep{quip-sharp} report \texttt{acc} for all tasks.}.
+
+\textbf{Grid Search Setting.} For all experiments with static quantization, we initialize the quantization parameters through grid search on 8 Pile~\citep{pile} samples with a 1024 sequence length. We minimize the layer outputs for fine-grained quantization (per-channel/per-head) and block outputs for per-tensor quantization. In the performance comparison tables, ``PrefixQunt w/o FT'' indicates finishing the quantization only with grid search and without fine-tuning.
+\textbf{Fine-Tuning Setting.} During fine-tuning, we optimize block output mean square error following existing works~\citep{omniquant,efficientqat}. The dataset for fine-tuning consists of 512 samples from Pile with a 1024 context length. The learning rates for quantization parameters (step sizes) and full-precision weights are set to 5e-5 and 5e-6, respectively, and to 2e-5 and 2e-6 for Llama-3-70B(-Instruct) models. The fine-tuning batch size is set to 4, and the number of epochs is set to 10 for W4A8KV4 and 20 for W4A4KV4.
+
+\subsection{Comparison Results}
+
+\textbf{Results on W4A4KV4.} Table~\ref{tab:w4a4} shows the comparison results for W4A4KV4. \methodshort with static quantization significantly outperforms the previous state-of-the-art QuaRot, which uses dynamic quantization. For instance, in Llama-3-8B, \methodshort without fine-tuning surpasses QuaRot by $0.48$ in WikiText2 perplexity and $+3.22$ points in average accuracy. Fine-tuning further improves these results to $0.98$ in WikiText2 perplexity and $+5.98$ points in average accuracy.
+
+\input{tables/w4a8kv4}
+
+\textbf{Results on W4A8KV8.} Table~\ref{tab:w4a8} presents the comparison results for W4A8KV8. Without fine-tuning, \methodshort performs comparably to QoQ~\citep{qserve}. After fine-tuning, \methodshort outperforms both QoQ and QuaRot in most models. For instance, \methodshort surpasses QoQ~\citep{qserve} by $0.27$ perplexity and $+1.11$ accuracy points in Llama-3-8B.
+
+\textbf{Results on W8A8KV8.} Table~\ref{tab:full_acc_results} includes the comparison with various methods in W8A8KV8 quantization. We can find that SmoothQuant, QuaRot, and \methodshort all attain near lossless performance without fine-tuning. Notably, our \methodshort is unique in employing static quantization, which enhances inference efficiency. Additionally, earlier methods like CushionCache~\citep{cushioncache} and QFeP~\citep{qfep}, despite also using prefixed tokens in the KV cache to support coarser quantization, exhibit marked performance decline even under W8A8 as illustrated in Table~\ref{tab:prefix_comparisons}.
+
+\textbf{Results on more models.} The results in Table~\ref{tab:other_models} demonstrate that \methodshort consistently achieves excellent performance on other models such as Mistral-7b-v0.3 and Qwen-2-7B, as well as instruction-tuned models like Llama-3-\{7B,70B\}-Instruct.
+
+\textbf{Results on weight-only quantization.}
+\methodshort can also improve existing weight-only quantization methods by reducing outlier noise in MSE loss calculations. As shown in Table~\ref{tab:full_acc_results_weight_only}, \methodshort enhances the average accuracy by $+5.05$ and $+4.73$ points on W2A16g128 Llama-3-8B and Llama-3-70B, respectively, based on the state-of-the-art uniform quantization method EfficientQAT~\citep{efficientqat}. See Sec.~\ref{sec:weight-only-quantization} for more details.
+
+\input{tables/e2e_prefilling}
+\subsection{Inference Speed}
+In this section, we evaluate the end-to-end inference speed of PrefixQuant in the W4A4 quantization scenario. We do not consider KV quantization here because it saves memory footprint through more computation overhead and only achieves speedup with large batch sizes~\citep{kivi}. Table~\ref{tab:e2e_prefilling} shows the speedup of W4A4 quantization in the prefilling stage. Our PrefixQuant improves the QuaRot speedup from $2.30\times$ to $2.81\times$ on the A100-80GB GPU, and from $1.31 \times \sim 1.39 \times$ to $1.60 \times \sim 1.82 \times$ on the RTX 3090 GPU.
+In Sec.~\ref{sec:inference_details}, we also provide comprehensive apple-to-apple comparisons of sub-modules, such as quantization kernels and quantized linears, demonstrating the significant superiority of PrefixQuant over the existing dynamic quantization approach QuaRot~\citep{quarot}.
+
+\input{tables/ablation_techniques}
+\subsection{Ablation Studies}
+We examine the impact of various quantization techniques implemented in \methodshort. Our analysis starts with W4A4KV4 round-to-nearest (RTN) quantization on Llama-3-8B, involving per-channel weight quantization, per-token dynamic activation quantization, and per-head dynamic KV-cache quantization. We apply different techniques step-by-step and report the WikiText2 perplexity in Table~\ref{tab:ablation_techniques}. We find that both Hadamard rotation and grid search initialization improve performance. Then, perplexity collapses due to static quantization of activation and KV cache, but introducing prefixed outliers significantly recovers performance, even surpassing results before introducing static quantization. These benefits arise not only by reducing information loss from outlier tokens but also by helping to find accurate quantization parameters in grid searches through isolating extremely large outliers ($>1e3$) in activation. Additionally, block-wise fine-tuning improves performance except on W8A8KV8, which is nearly lossless without fine-tuning. More ablation results related to the training dataset, training epochs, dynamic quantization, the number of prefixed tokens, and the content of prefixed tokens are in Sec.
+
+
+
+\section{Conclusion}
+
+We propose \methodshort, which enables static quantization to outperform dynamic quantization by effectively handling token-wise outliers through a novel prefixing approach. This technique also stabilizes model training, making it a plug-and-play module that enhances the performance of other optimization-based methods. The simplicity and broad applicability of \methodshort make it a promising direction for future LLM compression and optimization research.
+
+
+
+
+
+
+

@@ -1,0 +1,483 @@
+\title{PRF: Parallel Resonate and Fire Neuron for Long Sequence Learning in Spiking Neural Networks}
+
+\begin{abstract}
+Recently, there is growing demand for effective and efficient long sequence modeling, with State Space Models (SSMs) proving to be effective for long sequence tasks. To further reduce energy consumption, SSMs can be adapted to Spiking Neural Networks (SNNs) using spiking functions. However, current spiking-formalized SSMs approaches still rely on float-point matrix-vector multiplication during inference, undermining SNNs' energy advantage. In this work, we address the efficiency and performance challenges of long sequence learning in SNNs simultaneously. First, we propose a decoupled reset method for parallel spiking neuron training, reducing the typical Leaky Integrate-and-Fire (LIF) model's training time from $O(L^2)$ to $O(L\log L)$, effectively speeding up the training by $6.57 \times$ to $16.50 \times$ on sequence lengths $1,024$ to $32,768$. To our best knowledge, this is the first time that parallel computation with a reset mechanism is implemented achieving equivalence to its sequential counterpart. Secondly, to capture long-range dependencies, we propose a Parallel Resonate and Fire (PRF) neuron, which leverages an oscillating membrane potential driven by a resonate mechanism from a differentiable reset function in the complex domain. The PRF enables efficient long sequence learning while maintaining parallel training. Finally, we demonstrate that the proposed spike-driven architecture using PRF achieves performance comparable to Structured SSMs (S4), with two orders of magnitude reduction in energy consumption, outperforming Transformer on Long Range Arena tasks. \footnote{The GitHub repository will be released after paper accepted.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\textbf{Long Sequence Modeling.} Long sequence modeling is a fundamental problem in machine learning. This significant advancement has yielded wide-ranging impact across various fields (such as Transformer \cite{vaswani2017attention} and Mamba \cite{gu2023mamba}), including reinforcement learning (e.g., robotics and autonomous driving) \cite{chen2021decision}, autoregressive task (e.g., large language models) \cite{zhao2023survey}, generative tasks (e.g., diffusion model) \cite{peebles2023scalable} and etc. The Transformer architecture \cite{vaswani2017attention}, which combines token mixing with self-attention and channel mixing with dense matrices, has been successfully applied in these fields, since sequence data  (with length $L$) is well modeled by the self-attention mechanism. 
+
+State space models (SSMs) \cite{gu2022efficiently} effectively address the limitations of self-attention machanism in processing long sequences by reducing computational complexity from $O(L^2)$ to $O(L)$ during inference \cite{feng2024attention}. The recurrent form of SSMs allows themselves to scale to longer sequence lengths more efficiently. Furthermore, the (Structured) SSMs utilize orthogonal polynomial bases to initialize recurrent weights \cite{gu2020hippo} for token mixing, and to compress input history \cite{gu2021combining} into hidden state that enables long sequence learning yielding superior performance than Transformer models on long sequence tasks \cite{gu2022efficiently}.
+As a result, variants of SSMs (e.g. Mamba \cite{gu2023mamba}) are successfully applied across various fields. However, SSMs still requires large number of float-point matrix-vector multiplications for both token mixing and channel mixing to effectively extract information. These dense matrix multiplication computations scale quadratically with model size $(D)$, consuming significant amount of energy during inference.
+
+\textbf{Spiking Neural Networks.} SNNs benefit from the ability to convert the Float-Point (FP) Multiply Accumulate (MAC) computations into sparse Accumulate (AC) computations through their spike-driven mechanism \cite{hu2021spiking, yao2024spike}. Prior arts incorporated the spiking function at the input of token and channel mixing in SSMs to reduce energy consumption in channel mixing \cite{stan2023learning,bal2024rethinking,shen2024spikingssms}. However, the token mixing operation within the SSMs blocks has yet been optimized, resulting in extensive FP matrix-vector multiplications and thus compromising the overall energy efficiency \cite{stan2023learning}. To avoid FP matrix-vector multiplication computations in both channel mixing and token mixing, it is also crucial to reduce the complexity of token mixing. Therefore, we must revisit and design novel the spiking neurons in SNNs to enabl effective long sequence learning capabilities, while maintaining computation efficiency.
+
+\textbf{The Challenges for SNNs.} There are two challenges in implementing long sequence learning in SNNs. (i) First, the Backpropagation Through Time (BPTT) is the commonly used training method for SNNs \cite{wu2018spatio}. However, BPTT leads to a quadratic growth in training time with respect to sequence length, scaling as $O(L^2)$ \cite{kag2021training}. While there are some existing SNN efficient training methods that can improve training efficiency \cite{bellec2020solution, xiao2022online, yin2023accurate}, they are still outperformed by BPTT for longer sequences \cite{meng2023towards}. (ii) Secondly, commonly used spiking neuron models struggle to capture long-range dependencies. Specifically, the widely used LIF neuron has difficulty in capturing and distinguishing dependencies in membrane potential over long intervals, which limits its performance on long-range tasks.Previous work attempted to address the training efficiency and performance improvement separately by improving neuron models \cite{fang2024parallel, spieler2024the}. \cite{fang2024parallel, spieler2024the}. However, efforts made to tackle these challenges on long sequence tasks at the same time remains unveiled. In this work, we aim for addressing these two challenges simultaneously. \textbf{Our contributions are summarized as follows}:
+\begin{itemize}
+    \item To accelerate the training process, we propose a novel    decoupled reset method to implement parallel training that is equivalent to sequential training. This approach accelerates the back propagation by three orders of magnitude and can be applied to any types of spiking neurons.
+    \item To effectively extract long range dependencies, we propose the Parallel Resonate and Fire (PRF) neuron with oscillating membrane potential in complex domain leveraging an adaptive and differentiable reset mechanism. 
+    \item To minimize inference energy, we further incorporate PRF into the design of Spike Driven Temporal and Channel Mixer (SD-TCM) module. This module achieves performance comparable to S4 in long range arena tasks while reducing the inference energy by two orders of magnitude.
+\end{itemize}
+
+
+\section{Related Work}
+
+
+\paragraph{State Space Models} A general discrete form of SSMs is given by the equation: $\boldsymbol{u}_t = \boldsymbol{A} \boldsymbol{u}_{t-1} + \boldsymbol{B} \boldsymbol{x}_t$, $\boldsymbol{y}_t = \boldsymbol{C} \boldsymbol{u}_t $, where $\boldsymbol{A} \in \mathbb{R}^{H \times H}$, $\boldsymbol{B} \in \mathbb{R}^{D \times H}$, $\boldsymbol{C} \in \mathbb{R}^{H \times D}$ matrices is shape with the model size $D$ and hidden size $H$. The success of the Structured SSMs (S4) arises from the fact that the coefficients of the orthogonal bases are solved to fit an arbitrary sequence curve \cite{gu2020hippo}. By leveraging orthogonal polynomial bases for initializing structured matrices $\boldsymbol{A}$ and $\boldsymbol{B}$, S4 effectively compresses input history and outperforms transformers in long-range sequence tasks \cite{gu2021combining}. Subsequent variants of SSMs have also achieved great success on long sequence task \cite{gu2022efficiently, goel2022sashimi, gu2023hippo, gu2022s4d, orvieto2023resurrecting}. However, these SSMs-based model still exist power consumption issues that scale quadratically with model size $D$. This is largely due to the use of the dense matrices for channel mixing after $\boldsymbol{y}_t$, such as in the GLU block \cite{dauphin2017language}, which requires $2D^2$ computation in matrices, leading to a significant number of FP-MAC operations. 
+
+\paragraph{Spikinglized SSMs} The spike mechanism can alleviate the energy problem in dense matrices by converting the FP-MAC as sparse FP-AC computation. Some spiking-formalized (spikinglized) approaches integrate the spike function into SSMs after token mixing to reduce the FP-MAC computation of channel mixing. For instance, Oliver et al.\cite{stan2023learning} make intersection of SNNs with S4D model \cite{gu2022s4d} for long-range sequence modelling, by adding Heaviside function to token mixing output, $\boldsymbol{y}_t$, at each SSMs layer. Similarly, Abhronil et al.\cite{bal2024rethinking} combine stochastic spiking function at the output of $\boldsymbol{y}_t$. These spikinglized method can harvest the long sequence learning capability of SSMs models, but also retain nonlinear activation computation and FP matrix-vector multiplications, as they retain the $\boldsymbol{A}$, $\boldsymbol{B}$ and $\boldsymbol{C}$ matrices during recurrent inference. However, this retention limits the energy efficiency advantages of SNNs and poses challenges for deploying the model on neuromorphic chips. Therefore, we aim to further optimize the inference process by reducing matrices $\boldsymbol{A}$ and $\boldsymbol{B}$ to vectors and eliminating $\boldsymbol{C}$. This requires rethinking the role of spiking neurons in long sequence learning.
+
+
+\section{Problem Formulation}
+
+In this section, we first introduce the commonly used Leaky Integrate-and-Fire (LIF) neuron, then we describe the two main challenge for long range learning ability with spiking neuron.
+
+\subsection{The Leaky Integrate-and-Fire (LIF) Neuron}
+The LIF model is a widely used spiking neuron model. It simulates neurons by integrating input signals and firing spikes when the membrane potential exceeds a threshold. The dynamic of membrane potential $u(t)$ is followed by:
+\begin{equation}\label{eq.bio.lif}
+\frac{du(t)}{dt} = - \frac{1}{\tau} \left( u(t) - u_\mathrm{reset} \right) + \frac{R}{\tau} c(t),
+\end{equation}
+where the $c(t)$ is the input current. The constants $\tau$, $u_\mathrm{reset}$, and $R$ denote the membrane time constant, reset potential, and resistance. We use $R = \tau$ as in previous work. When $u(t)$ reaches the threshold $V_{\mathrm{th}}$, the neuron fires a spike, and then $u(t)$ resets to $u_\mathrm{reset}$. The discrete LIF model is expressed as:
+\begin{align} \label{eq.lif_seq}
+u_t &= \beta \cdot (u_{t-1} - V_{\mathrm{th}} s_{t-1}) + c_t, \\
+s_t &= \mathcal{H}(u_t - V_{\mathrm{th}})
+=\begin{cases}
+1, & \text{if }  u_t \geq V_{\mathrm{th}} \\
+0, & \text{otherwise}
+\end{cases}, \label{eq.s_t.seq}
+\end{align}
+where $\beta \triangleq 1 - \frac{1}{\tau} \in (0, 1)$, and the discrete timesteps $t = 1, 2, \ldots, T$, the initial situation $s_0 = u_0 = 0$. After firing, the membrane potential resets according to previous spike $s_{t-1}$.
+This spiking neuron face two primary challenges for long sequence tasks: (i) The coupled reset prevents parallel training along timesteps, causing training time significantly for long sequences. (ii) The commonly used LIF neuron model struggles to capture long-range dependencies, hindering the performance on long sequence tasks. The overview as shown in Figure \ref{fig.problem}.
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[width=1. \textwidth,trim=0 80 0 80, clip]{figures/problem_fig.pdf}
+    \caption{
+    (a) The reset mechanism prevents parallelization as the state update relies on previous spike output, causing $O(L^2)$ timing cost.
+    (b) The proposed decoupled reset mechanism enables parallel computation.
+    (c) Fast decay causes long-range dependencies to vanish in the membrane potential.
+    (d) Slow decay could generate dependency over long sequence, but causes dependency ambiguity.
+    (e) The resonate mechanism with membrane potential helps distinguish relevant inputs.
+    }
+    \label{fig.problem}
+\end{figure}
+
+\subsection{Problem 1: Coupled Reset Prevents Parallelism along Timesteps} 
+The first problem is that the training cost of LIF-based sequential computation increases exponentially as the number of timesteps extends, with a complexity of $O(L^2)$. This occurs because BPTT method requires the computational graph to expand along the time dimension \cite{kag2021training}. While the sequential computation of linear combination can be parallelized to reduce the time cost complexity from $O(L^2)$ to $O(LlogL)$ during training, as done in SSMs. However, the $u_t$ dependency on previous spikes output $s_{t-1}$ with nonlinear Heaviside function. By recursively expanding $u_t$ and simplifying in \Eqref{eq.seq.ut.expand}: 
+\begin{align}\label{eq.seq.ut.expand}
+    u_t =  c_t + \beta c_{t-1} + ... + \beta^{t-1} c_{1} -  V_{\mathrm{th}} ( \beta s_{t-1} + \beta^2 s_{t-2} + ... + \beta^{t-1} s_{1} )  .
+\end{align}
+The reset mechanism causes $u_t$ to depend on all previous spike outputs. This coupling hinders the neuron's ability to perform parallel computations, further limiting effective parallel computation for both $u_t$ and $s_t$, as illustrated in Figure \ref{fig.problem} (a). This forces the spiking neuron to compute sequentially. Consequently, as the number of timesteps increases during training, the time cost grows quadratically. To address this issue, we propose the decoupled reset method, which facilitates parallel computation of spiking neurons with the reset mechanism (Illustrated in Figure \ref{fig.problem}(b) and discussed in Method \ref{method.decouple.reset}).
+\subsection{Problem 2: Commonly Used LIF Struggle with Long-Range Dependencies}\label{problem.2}
+The second problem is that the commonly used LIF model struggles to capture and distinguish the dependencies in the membrane potential over long interval. This limitation arises due to the dilemma of decay factor $\beta$ in the membrane potential dynamics. When $\beta$ is small, the membrane potential decreases rapidly. This \textbf{Fast Decay} cause the neuron to quickly forget past inputs (Figure \ref{fig.problem} (c)). For example, in Case $1$, if there are two inputs, $c_{t_0}$ and $c_T$, separated by $T$ time steps, result in $u_T$ becoming independent of $c_{t_0}$. Similarly, in Case $2$, with zero input $c_{t_0}$, the result is identical with Case $1$. This failure to retain long-term information leads to the vanishing of dependencies. Conversely, when $\beta$ is large, the membrane potential retains its value over an extended period $T$ (Figure \ref{fig.problem} (d)). This \textbf{Slow Decay} can solve the dependency vanishing problem, but causing ambiguity between closely spaced inputs. For instance, input $c_{t_0} = c_{t_0^{\prime}}$ with $t_0^{\prime} = t_0 + \delta t$ result in similar membrane potentials, there is small difference between the membrane potential $u_{T} = \beta^{(T)} \cdot c_{t_0} + c_{T}$ in Case $1$ and the $u_{T} = \beta^{(T - \delta t)} \cdot c_{t_0^\prime} + c_{T}$ in Case $2$, as shown in Figure \ref{fig.problem} (d). To address this challenge, we propose enhancing the neuron's dynamics by incorporating resonate mechanism. This allows neurons to remain sensitive to input, even after a long interval of $T$. (Illustrated in Figure \ref{fig.problem} (e) and discussed in detail in Method \ref{method.resonate}).
+
+
+\section{Method}
+
+In this section, we present our approach to address two primary challenges in SNNs: parallel training and long-range dependency learning. For parallel training, we decouple the reset mechanism from the integrate computation to implement parallel training while maintaining equivalence with sequential computation. For long-range dependency learning, we propose the Parallel Resonate and Fire (PRF) Neuron by incorporating the reset process as an imaginary part into the time constant, enabling the neuron to achieve long-range learning ability.
+
+\subsection{decoupled reset for Parallel Computation}\label{method.decouple.reset} 
+
+To enable parallel computation, we need to decouple the causal relationship with previous spikes, by separating the linear combination part from the nonlinear causal dependency part. To achieve this, we first substitute the \Eqref{eq.seq.ut.expand} into the \Eqref{eq.s_t.seq} by expanding the $u_t$ in the Heaviside function. Then we merge the reset part into the threshold $V_\mathrm{th}$. As such, \Eqref{eq.s_t.seq} is rewritten as \Eqref{eq.method.st.decouple}:
+\begin{align}\label{eq.method.st.decouple}
+s_t = \mathcal{H} (\underbrace{c_t + \beta c_{t-1} + ... + \beta^{t-1} c_{1}}_{\text{Leaky and Integrate} \quad \triangleq \quad u_t^{\prime} } 
+    - \underbrace{V_{\mathrm{th}} \cdot  \left( ( \beta s_{t-1} + \beta^2 s_{t-2} + ... + \beta^{t-1} s_{1} ) + 1 \right)}_{\text{decoupled reset} \quad \triangleq \quad d_t } ) ,
+\end{align}
+where the linear combination of leaky and integrate part is defined as $u_t^\prime$, the second part is defined as the decoupled reset $d_t$. Now the spike output is:
+\begin{align}
+s_t &= \mathcal{H}\left(u^{\prime}_t - d_t \right)
+=\begin{cases}
+1, & \text{if }  u^{\prime}_t \geq d_t \\
+0, & \text{otherwise}
+\end{cases}, \label{eq.decouple.s_t.seq}
+\end{align}
+where this spike output $s_t$ depends on $u^\prime_t$ and $d_t$. Note that the first part is linear combination of $u^{\prime}_t = \beta u^{\prime}_{t-1} + c_t$, we define the sequence of $\mathbf{U}_T^{\prime}$ as the ordered set $\{u^\prime_1, u^\prime_2, ... This linear combination of $u^\prime_t$ can be computed using convolution and further accelerated by converting the convolution into multiplication after applying the Fast Fourier Transform: $\mathbf{U}_T^{\prime} = \mathbf{C}_T * \mathbf{K}_T = \mathcal{F}^{-1} \left( \mathcal{F}(\mathbf{C}_T) \odot \mathcal{F}(\mathbf{K}_T) \right)$, with the $O(LlogL)$ computation complexity, avoiding the $O(L^2)$ training time in BPTT.
+
+After efficient parallel computation of $u_t^\prime$, the $d_t$ still remains the dependency relationship with previous spikes $s_t$. To further decouple this dependency from the spike output $s_t$, the key idea is \textbf{converting the recursive form to the iterative form}. We first define the dependency part as $A_t$, as shown in \Eqref{eq.At.define}. Now, we only need to convert the  $A_t$ from its recursive form into an iterative form. By separating the last spike from all previous spikes, we obtain \Eqref{eq.At.expand}. The left part of this equation corresponds to \Eqref{eq.decouple.s_t.seq}, while the right part refers to the recursive dependency itself, leading to \Eqref{eq.At.expand.final} and \Eqref{eq.vth.dynamic2}:
+\begin{align}
+A_t \triangleq &  \beta s_{t-1} + \beta^2 s_{t-2} + ... + \beta^{t-1} s_{1}\label{eq.At.define} \\  
+     = & \beta s_{t-1} + \beta \left( \beta s_{t-2} + ... + \beta^{t-2} s_{1} \right) \label{eq.At.expand} \\
+    = & \beta \mathcal{H}\left( u^{\prime}_{t-1} - d_{t-1} \right) + \beta A_{t-1} \label{eq.At.expand.final} \\
+    = & \begin{cases}
+       \beta \cdot ( 1 +  A_{t-1} ), & \text{if } u_{t-1}^{\prime} \geq d_{t-1} \\
+       \beta \cdot A_{t-1}, & \text{if } u_{t-1}^{\prime} < d_{t-1} 
+    \end{cases} \label{eq.vth.dynamic2} ,
+\end{align}
+where the sequence of $d_t$ is calculated according to the sequence of $u^\prime_t$, by dynamically updating $A_t$:
+\begin{equation}
+    d_t = V_{\mathrm{th}} \cdot ( A_t + 1) , \quad A_0 = u^{\prime}_0 = 0. \label{eq.vth.dynamic1} 
+\end{equation}
+At this point, all recursive forms have been converted into dynamic equations. The formation of $d_t$ is completely independent of $s_t$. The decoupled reset function $\mathbf{D}_T = f_D(\mathbf{U}_T^{\prime})$ is deduced as shown in \Eqref{eq.vth.dynamic2} and \ref{eq.vth.dynamic1}, where $d_t$ can be dynamically scanned from all $u_t^\prime$ with $O(L)$ complexity.
+
+In summary, we convert the all calculation of $s_t$ with $O(L^2)$ complexity into a combination of $u^\prime_t$ with $O(L\log L)$ complexity and subsequently $d_t$ with $O(L)$ complexity, achieving a training speed-up of approximately $L/(\log L+1)$. To summarize, this approach facilitates parallel computation:
+\begin{minipage}{0.5\textwidth}
+    \begin{subequations}
+    \begin{align}
+    \mathbf{U}_T^{\prime} &= \mathbf{C}_T * \mathbf{K}_T \\
+                 &= \mathcal{F}^{-1} \left( \mathcal{F}(\mathbf{C}_T) \odot \mathcal{F}(\mathbf{K}_T) \right) \\
+    \mathbf{D}_T &= f_D(\mathbf{U}_T^{\prime}) \label{eq.reset.pal}\\
+    \mathbf{S}_T &= \mathcal{H}(\mathbf{U}_T^{\prime} - \mathbf{D}_T) \label{eq.S_T.pal}
+    \end{align}
+    \end{subequations}
+\end{minipage}%
+\hfill
+\begin{minipage}{0.5\textwidth}
+    \begin{subequations}
+    \begin{align}
+    \mathbf{U}_T^{\prime} &= (u_1^{\prime}, u_2^{\prime}, \ldots, u_T^{\prime}) \label{eq.U_t_list.pal}\\
+    \mathbf{C}_T &= (c_1, c_2, \ldots, c_T) \\
+    \mathbf{K}_T &= (\beta^0, \beta^1, \ldots, \beta^{T-1}) \\
+    \mathbf{D}_T &= (d_1, d_2, \ldots, d_T) 
+    \end{align}
+    \end{subequations}
+\end{minipage}
+
+Where the outputs $\mathbf{S}_T = (s_1, s_2, \ldots, s_T)$ from \Eqref{eq.S_T.pal} is equivalent with the sequential generated from \Eqref{eq.s_t.seq}. The kernel vector $\mathbf{K}_T$ with $\beta = 1 - \frac{1}{\tau}$.By combining the above equations, we obtain the parallel computation process, as shown in Algorithm.\ref{algorithm.par.training} and \ref{algorithm.\ref{apx.algorithm}.Although parallelized LIF solves the training problem for long sequences (Experiment \ref{experiment.Parallel}), it still does not perform well on long sequences (Experiment \ref{experiment.long.range}), due to the common issue of long-range dependencies in LIF models (Problem \ref{problem.2}).
+
+\subsection{Resonate for Long-Range Learning Ability}\label{method.resonate}
+To address the challenge of capturing long-range dependencies in spiking neural networks, we introduce the \textit{Parallel Resonate-and-Fire} (PRF) neuron. This neuron model extends the standard LIF neuron by incorporating a resonance mechanism into its dynamics, enabling it to retain information over longer periods while maintaining computational efficiency.
+
+Firstly, recall the commonly used LIF model from \Eqref{eq.bio.lif}, the dynamics are given by: $\label{eq.bio.lif.rewrite} \frac{du(t)}{dt} = \gamma u(t) - \gamma u_\mathrm{reset} + c(t)$, where $\gamma \triangleq -1/\tau$. To introduce more dynamic behavior, we use $r(t)$ and $\theta$ to replace $u_\mathrm{reset}$ and $\gamma$ in the reset part, in respectively. Then the dynamic are rewritren as: \begin{equation}\label{eq.lif.redefine} \frac{du(t)}{dt} = \gamma u(t) - \theta r(t) + c(t). \end{equation}
+To introduce membrane potential oscillations, we define a complex decay constant $\tilde{\gamma} = \gamma + i \theta$, where $i = \sqrt{-1}$. In the vanilla LIF model, the reset $r(t)$ is a non-continuous \textit{conditional function} with $\theta = \gamma$ in \Eqref{eq.lif.redefine}, and the reset result is instantaneous process: 
+\begin{align}\label{eq.reset.LIF} 
+\frac{d r(t)}{dt} = 
+\begin{cases} V_{\mathrm{th}} \delta(t), & \text{if } u(t) \geq V_{\mathrm{th}} \\
+0, & \text{if } u(t) < V_{\mathrm{th}} \end{cases}.
+\end{align}
+While this reset has proven effective, it poses challenges for efficient computation. We introduce a reset function that is both effective and computationally simple for both forward and backward propagation. We define the reset function to satisfy the condition: $\tilde{u}(t) \triangleq u(t) + i r(t)$. Substituting this definition into \Eqref{eq.lif.redefine}, we obtain the PRF model: \begin{align}\label{eq.method.resonate.ode} 
+\frac{d\tilde{u}(t)}{dt} &= \tilde{\gamma} \tilde{u}(t) + c(t), 
+\end{align} where the real part $\Re\{\tilde{u}(t)\}$ corresponds to the membrane potential dynamics. This formulation incorporates the reset mechanism into the time constant via the imaginary component $\theta$, introducing resonance into the neuron's behavior. When $\theta = 0$, the model reduces to the standard LIF neuron without reset. If we extend the \Eqref{eq.method.resonate.ode}, we can be expressed in matrix form: 
+\begin{equation}\label{u_t.r_t.matrix}
+\begin{pmatrix}
+\dot{u}(t)   \\
+\dot{r}(t)
+\end{pmatrix}
+=
+\begin{pmatrix}
+\gamma &  -\theta \\
+\theta  &  \gamma   
+\end{pmatrix}
+\begin{pmatrix}
+u(t)   \\
+r(t)
+\end{pmatrix}
++ 
+\begin{pmatrix}
+c(t)   \\
+0
+\end{pmatrix} ,
+\end{equation}
+which give us the insight that this reset process is continuous function:
+\begin{align}\label{eq.drdt.defined}
+\frac{d r(t)}{dt} = \gamma u(t) + \theta r(t) ,
+\end{align}
+where this formulation treats the reset as a continuous function controlled by $\theta$, allowing for a more gradual and reset process.
+
+We then discretize the model (\Eqref{eq.method.resonate.discrete.dynamic.reset}), yielding the sequential and parallel formulations of the PRF neuron, as shown in \Eqref{method.temporal.neuron.seq} and \ref{method.temporal.neuron.par} in respectively: 
+
+\begin{minipage}{0.45\textwidth}
+    \begin{subequations} \label{method.temporal.neuron.seq}
+    \begin{align}
+    \tilde{u}_t &= \exp(\Delta \tilde{\gamma}) \tilde{u}_{t-1} + \Delta c_t \\
+    s_t &= \mathcal{H}\left(\Re\{\tilde{u}_t\} - V_{\mathrm{th}}\right) \\
+    \tilde{\gamma} &= \gamma + i \theta 
+    \end{align}
+    \end{subequations}
+\end{minipage}%
+\hfill
+\begin{minipage}{0.45\textwidth}
+    \begin{subequations} \label{method.temporal.neuron.par}
+    \begin{align}
+    \mathbf{\tilde{U}}_T 
+                 &= \mathcal{F}^{-1} \left( \mathcal{F} \left( \mathbf{C}_T \right) \odot \mathcal{F} ( \mathbf{\tilde{K}}_T ) \right) \\
+    \mathbf{S}_T &= \mathcal{H}\left( \Re\{ \mathbf{\tilde{U}}_T \} - V_\mathrm{th} \right)
+    \end{align}
+    \end{subequations}
+\end{minipage}%
+
+Now the membrane potential $\widetilde{u}_t \in \mathbb{C}$ ,where $\Delta$ is the time step size. The details of parallel computation is described in Algorithm.\ref{algorithm.par.Dynamic training}. Where $\mathbf{C}_T = (c_1, c_2, \ldots, c_T)$ is the input current sequence, and the kernel $\mathbf{\tilde{K}}_T$ is calculated by: \begin{equation}
+\mathbf{\tilde{K}}_T = \left(\Delta A^{(0)}, \Delta A^{(1)}, \ldots, \Delta A^{(T-1)} \right), \end{equation} with $A = \exp\left(\Delta \tilde{\gamma} \right)$.freq.resp} for details). This oscillation phenomenon can be found in biological neurons \cite{izhikevich2001resonate}. Our model differs from variants of resonant models, like BHRF \cite{higuchi2024balanced}, which combine adaptive thresholds and refractory mechanisms. Instead, we incorporate the reset directly into the time constant through the imaginary component while enabling efficient parallel computation for training.deploy}).
+
+\subsection{Theory Analysis}
+\textit{(1) Sequential Perspective on Dynamic.} Decoupling the reset can be viewed as transforming the reduction in membrane potential caused by increased threshold value. This means that the soft reset mechanism could be equivalent to the adaptive threshold mechanism \cite{bellec2020solution} as deduced in the Theorem \ref{theorem.equal}. Furthermore, the LIF model without a reset can be considered a specific instance of a PRF, as demonstrated in Theorem \ref{theorem.drlif.to.lif}. Moreover, the $u_t$ in PRF will converge as shown in Theorem \ref{theorem.upper.bounds}. This indicates that the membrane potential of PRF is stable and bounded.
+
+\begin{theorem}\label{theorem.equal}
+Let $V_\mathrm{th} = 1$ and $\rho = 1$ in Adaptive-LIF model, then the LIF neuron with soft reset model is equivalent to the Adaptive-LIF without reset mechanism.\ref{apx.proof.lif.alif})
+\end{theorem}
+
+\begin{theorem}\label{theorem.drlif.to.lif}
+Let $\Delta = 1$ and $\theta = 0$, then the PRF model could degenerate as Valina LIF model without reset mechanism.\ref{apx.proof.TLIF.equal.LIF})
+\end{theorem}
+
+\begin{theorem}\label{theorem.upper.bounds}
+If the inputs $c_t \sim \mathcal{N}(0, \sigma^2)$ follow a normal distribution, then the membrane potential of PRF will converge as a distribution $u_t\sim \mathcal{N}(0, \frac{\tau \Delta}{2} \sigma^2)$, as $t \to +\infty$.\ref{apx.proof.upper.bounds})
+\end{theorem}
+
+\textit{(2) Parallel Perspective on Gradients.} The issue of membrane potential dependence described in Problem \ref{problem.2} is fundamentally a problem of gradients, which are correlated with the kernel and previous spikes. Assuming the input current is $ \mathbf{C}^{l}_T = \boldsymbol{W}^{l} \mathbf{S}^{l-1}_T$ across all $T$, the gradients are proportional to:
+\begin{align}\label{problem.gradients.sequential}
+\nabla_{\boldsymbol{W}^l}\mathcal{L} \propto \underbrace{\frac{\partial\mathcal{L}}{\partial u^l_T} \sum_{t=1}^T \frac{\partial u^l_T}{\partial u^l_{t}} \frac{\partial u^l_{t}}{\partial \boldsymbol{W}^{l}}}_{\text{Sequential Perspective}}
+\propto \underbrace{ \sum_{t=1}^T \beta^{(t)} s^{l-1}_t = \left< \mathbf{K}_T, \mathbf{S}^{l-1}_{T:1} \right> ,
+}_{\text{Parallel Perspective}}
+\end{align}
+here $\left< \cdot, \cdot \right>$ denotes the inner product, $\mathbf{S}_T^{l-1} = (s_1^{l-1}, s_2^{l-1}, \ldots, s_T^{l-1})$ is the sequence of spike outputs from the previous layer $l-1$, and $\mathbf{K}_T$ represents the parallelism kernel. The subscript ($T:1$) indicates the sequence reversal. A small $\beta$ causes gradient vanishing due to a narrow receptive field, making it likely for sparse spikes to fall outside this field and yield an inner product close to zero. Conversely, a large $\beta$ results in a long-range, slow-decaying kernel, leading to overly consistent gradient values across spike positions.kernel.gradients} for details). Experiment \ref{experiment.long.range} verifies this insight.
+
+
+\subsection{Architecture }
+
+The \textit{Spike-Driven Token and Channel Mixer} (SD-TCM) Module (Figure \ref{fig.architecture}) is inspired by token and channel mixing in Transformer and S4 architectures. For token mixing, we use a PRN Neuron followed by a Linear layer, while for channel mixing, the Neuron is replaced by a Spatial Neuron. The Spatial Neuron, a variant of the LIF Neuron, focuses on instantaneous information at each timestep by setting the time constant $\tau$ close to 1: $\lim_{\tau \to 1^+} u_t = \left(1 - \frac{1}{\tau}\right) u_{t-1} + c_t \approx c_t$. This simplifies the output to $s_t = \mathcal{H}(c_t - V_{\mathrm{th}})$, resembling motor neurons in biology with rapid decay.
+
+During training, a trainable amplitude $\alpha$ acts as a gate, and during inference, $\alpha$ can be merged into the Linear layer: $(\alpha \boldsymbol{s}_t ) \times \boldsymbol{W} \equiv \boldsymbol{s}_t \times (\alpha \boldsymbol{W})$. Membrane shortcut residual connections are used to maintain event-driven, spike-based communication. As shown in Table \ref{tab.comparision.complexity}, the PRF requires only $O(5D)$ computational complexity, while SSMs and Spikinglized SSMs require $O(H^2+2DH)$. This makes the architecture rely only on FP-AC and element-wise multiplication, reducing energy consumption and simplifying deployment on neuromorphic chips.energy}).
+
+\begin{figure}[!hb]
+\begin{minipage}{0.35 \linewidth}
+    \centering
+    \includegraphics[width=1. \textwidth, trim=220 80 220 60, clip]{figures/SDTCM.pdf}
+    \caption{Diagram of the SD-TCM.}
+    \label{fig.SDTCM}
+\end{minipage}
+\quad
+\begin{minipage}{0.6 \linewidth}
+\captionof{table}{The comparison for inference complexity. Where $H$ and $D$ mean the hidden and model dimension, respectively.
+$\mathcal{H}$ denotes Heaviside function.\ref{apx.energy}} 
+\centering
+\label{tab.comparision.complexity}
+\resizebox{0.95 \textwidth}{!}{
+\begin{tabular}{clc}
+\toprule
+  & \textbf{Dynamic Equation} & \textbf{Infer. Complexity} \\
+\midrule
+\textbf{SSMs}             
+&  
+\makecell[l]{
+$\boldsymbol{u}_t = \boldsymbol{A}^{H \times H} \boldsymbol{u}_{t-1} + \boldsymbol{B}^{D \times H} \boldsymbol{x}_t$  \\ 
+$\boldsymbol{y}_t = \boldsymbol{C}^{H \times D} \boldsymbol{u}_t$
+}
+&
+$O( H^2 + 2DH )$ \\
+\midrule
+\textbf{\makecell[c]{Spikinglized SSMs}} 
+& 
+\makecell[l]{
+$\boldsymbol{u}_t = \boldsymbol{A}^{H \times H}  \boldsymbol{u}_{t-1} + \boldsymbol{B}^{D \times H}  \boldsymbol{x}_t$  \\ 
+$\boldsymbol{y}_t = \mathcal{H}(\boldsymbol{C}^{H \times D}  \boldsymbol{u}_t - V_\mathrm{th})$
+}
+& 
+$O( H^2 + 2DH )$
+\\
+\midrule
+\textbf{PRF}            
+&   
+\makecell[l]{
+$\boldsymbol{u}_t = \boldsymbol{a}^D \odot \boldsymbol{u}_{t-1} + \boldsymbol{b}^D \odot \boldsymbol{x}_t$  \\ 
+$\boldsymbol{y}_t = \mathcal{H}(\Re\{\boldsymbol{u}_t\} - V_{\mathrm{th}})$
+}
+&
+$O(5D)$
+\\
+\bottomrule
+\end{tabular}
+}
+\end{minipage}
+\end{figure}
+
+
+\section{Experiments}
+
+To evaluate the efficiency and effectiveness of the parallel method, as well as the performance improvement on long sequence tasks, we first demonstrate that parallel significantly accelerates training while maintaining equivalence with sequential computation. Next, we explore the PRF neuron's ability to handle long-range dependencies, showing that kernel oscillations improve both performance and gradient stability. Finally, the SD-TCM module achieves performance comparable to S4 while reducing energy consumption by over 98.57\% on Long Range Arena tasks.dataset.detail}.
+\subsection{The Parallel Process} \label{experiment.Parallel}
+
+\begin{wrapfigure}{rb}{0.68\textwidth} 
+\centering 
+\subfigure{ \includegraphics[width=0.32\textwidth]{figures/Exp_lif_par_runtime.pdf} } 
+\subfigure{ \includegraphics[width=0.32\textwidth]{figures/1_run_time_bottleneck.pdf} } 
+\caption{\textit{(left)} Comparison of training runtime for LIF and Parallelized LIF models. \textit{(right)} Comparison of sequential and parallel training runtime across different categories per batch.} 
+\label{fig.seq.par.train.time} 
+\end{wrapfigure}
+
+First, we compare the training runtime across different timesteps in Figure \ref{fig.seq.par.train.time} \textit{(left)} using three repeated experiments. Beyond 4 timesteps, parallel training consistently outperforms sequential training. For example, at 1,024 timesteps, sequential training takes 4.6 seconds per iteration, while parallel training takes only 0.7 seconds, achieving a speedup of $6.57\times$. This acceleration becomes more significant as the number of timesteps increases, with a speedup of $9.35\times$ at 16,384 timesteps and $16.50\times$ at 32,768 timesteps.equivalenc.infer.train}), which we tentatively attribute to numerical error.
+The speedup is primarily due to parallel training avoiding the recursive unfolding of the computational graph. The forward and backward passes are accelerated by $1.77\times$ and $132.55\times$, respectively, as shown in Figure \ref{fig.seq.par.train.time} \textit{(right)}. The significant speedup in the backward pass occurs because sequential training requires unfolding the graph at each timestep, which is time-consuming, whereas parallel training computes the graph only once.par.runtime.detail}.
+
+\subsection{The Long Range Learning Ability}\label{experiment.long.range}
+
+\begin{wrapfigure}{rb}{0.68\textwidth} 
+  \centering
+  \subfigure{
+    \includegraphics[width=0.32\textwidth]{figures/2_ablation_mnist.pdf}
+}
+  \subfigure{
+    \includegraphics[width=0.32\textwidth]{figures/exp_long_range_dependency.pdf}
+}
+\caption{\textit{(left)} Ablation Study on sMNIST datasets (Par. means parallel training). \textit{(right)} Accuracy across different decay on psMNIST.}
+  \label{fig.long.range.dependency.perspective}
+\end{wrapfigure}
+Although parallelized LIF can speed up training, it still struggles with performance on simple long-sequence tasks, such as sequential-MNIST, as shown in Figure \ref{fig.long.range.dependency.perspective} \textit{(left)}. However, after introducing oscillations in the kernel, the PRF neuron successfully solves the sequential-MNIST problem, achieving both training efficiency and effectiveness.
+
+To better understand how oscillating membrane potential improves performance, we compare the performance of various $\beta$ values, with and without oscillations, on the more challenging permuted-sMNIST dataset. The results after training for 50 epochs are summarized in Figure \ref{fig.long.range.dependency.perspective} \textit{(right)}. (We fit $\Delta=1$ and set $\theta=\frac{\pi}{2}$ while varying the $\beta$ hyperparameter without training.) Without the oscillating term, as $\beta$ increases, accuracy initially improves as expected but then decreases beyond a certain point. In contrast, the introduction of oscillations helps counteract this decline and further enhances performance, indicating that oscillations can improve performance for long sequences.
+
+\begin{figure}[htb]{} 
+  \centering
+  \subfigure[Fast Decay \newline Gradients Vanishing]{ 
+    \includegraphics[width=32mm, trim=10 0 8 0, clip]{figures/gamma01theta0.h5_test_loss_2dcontour.pdf}
+}
+  \subfigure[Moderate Decay \newline Gradients Appearing]{
+    \includegraphics[width=32mm, trim=10 0 8 0, clip]{figures/gamma05theta0.h5_test_loss_2dcontour.pdf}
+}
+  \subfigure[Slow Decay \newline Gradients Ambiguity]{
+    \includegraphics[width=32mm, trim=10 0 8 0, clip]{figures/gamma09theta0.h5_test_loss_2dcontour.pdf}
+}
+  \subfigure[Resonate \newline Smooth Gradients]{
+    \includegraphics[width=32mm, trim=10 0 8 0, clip]{figures/gamma09fs8.h5_test_loss_2dcontour.pdf}
+}
+  \caption{Comparison of loss landscapes: (a) Fast decay causes gradient vanishing. (b) Moderate decay improves but keeps optimal local. (c) Further slow decay makes gradient ambiguity, hindering optimization. (d) The resonance creates a smooth gradient field, aiding efficient convergence.}
+  \label{fig.loss.landscape}
+\end{figure}
+We further examine the loss landscape contours \cite{li2018visualizing} for each case in Figure \ref{fig.loss.landscape}, corresponding to Figure \ref{fig.long.range.dependency.perspective} \textit{(right)}. Gradients are perpendicular to the contour lines, with sparse or dense contours indicating smaller or larger gradients, respectively. Extremely sparse or dense contours suggest vanishing or exploding gradients. In Figure \ref{fig.loss.landscape} (a), \textbf{fast decay} with a small $\beta$ shows gradient vanishing, with extremely sparse contours. Increasing $\beta$ with \textbf{moderate decay} can alleviate gradient vanishing, but the model still encounters a local optima region (Figure \ref{fig.loss.landscape} (b)). Further increasing $\beta$ with \textbf{slow decay} is expected to fully address the vanishing problem but introduces gradient ambiguity with overlapping contours (Figure \ref{fig.loss.landscape} (c)). In contrast, the introduced oscillation from \textbf{resonate} results in smoother gradients (Figure \ref{fig.loss.landscape} (d)), enabling more effective feature extraction.
+As shown in Table \ref{tab:SMNIST.result}, the PRF neuron uses only $68.9k$ parameters ($768$ for neurons and $67.2k$ for synapses) to achieve state-of-the-art (SOTA) results while maintaining training efficiency. Previous models required recurrent connections in the linear layers to solve the (p)s-MNIST task. To align the training parameters, we modified the architecture to a feedforward linear layer with a 1-(128)$^3$-10 structure. Using parallel computation, we completed the entire training process in only $1.60$ hours with a batch size of 256 for 200 epochs.
+
+\begin{table}[ht]
+\caption{The neuron for (permute)-sequential MNIST task. The pixel-level image classification captures the hierarchical structure to verify the long-range capture ability. The symbol $*$ denotes including the \textbf{feedback linear connection}, while the symbol of $\uparrow$ and $\downarrow$ indicate that larger and smaller values are better, respectively. The BHRF result is referenced from \cite{higuchi2024balanced}, while other results are from \cite{zhang2024tc}.}
+\centering
+\label{tab:SMNIST.result}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{llcccc}
+\toprule
+\begin{tabular}[c]{@{}c@{}}\textbf{Task}\\ (Length)\end{tabular}
+& \textbf{Spiking Neuron} 
+& \textbf{\begin{tabular}[c]{@{}c@{}}Seq.\\ Infer.\end{tabular}} 
+& \textbf{\begin{tabular}[c]{@{}c@{}}Par.\\ Train.\end{tabular}} 
+& \begin{tabular}[c]{@{}c@{}}\textbf{No. Params.}\\ (k) $\downarrow$\end{tabular}
+& \begin{tabular}[c]{@{}c@{}}\textbf{Top-1 Test Acc.}\\ (\%) $\uparrow$\end{tabular}
+\\
+\midrule
+\multirow{9}{*}{\begin{tabular}[c]{@{}c@{}}\textbf{sMNIST}\\ (784)\end{tabular}}  
+ & LIF        & \Checkmark &  \XSolidBrush  & 85.1 / 155.1* & 72.06 / 89.28       \\
+ & PLIF \cite{fang2021incorporating}$^{\text{2021' ICCV}}$      & \Checkmark &  \XSolidBrush  & 85.1 / 155.1* & 87.92 / 91.79  \\
+ & GLIF \cite{yao2022glif}$^{\text{2022' NeurIPS}}$     & \Checkmark &  \XSolidBrush  & 87.5 / 157.5* & 95.27 / 96.64     \\
+ & TC-LIF \cite{zhang2024tc}$^{\text{2024' AAAI}}$    & \Checkmark &  \XSolidBrush  & 85.1 / 155.1* & 97.35 / \underline{99.20}   \\
+ & ALIF \cite{yin2021accurate}$^{\text{2021' Nat. MI}}$ & \Checkmark &  \XSolidBrush  & 156.3*        & 98.70           \\
+ & AHP \cite{rao2022long}$^{\text{2022' Nat. MI}}$ & \Checkmark &  \XSolidBrush  & 68.4*         & 96.00             \\
+ & BHRF \cite{higuchi2024balanced}$^{\text{2024' ICML}}$     & \Checkmark  &  \XSolidBrush & 68.9          & 99.1 ± 0.1   \\
+ & \textbf{PRF (Ours)}  
+            & \Checkmark & \Checkmark & 68.9          & \textbf{99.18}  \\
+\midrule
+\multirow{7}{*}{\begin{tabular}[c]{@{}c@{}}\textbf{psMNIST}\\ (784)\end{tabular}}  
+ & LIF        & \Checkmark &  \XSolidBrush  & 155.1*        & 80.36      \\
+ & GLIF \cite{yao2022glif}$^{\text{2022' NeurIPS}}$      & \Checkmark &  \XSolidBrush  & 157.5*        & 90.47         \\
+ & TC-LIF \cite{zhang2024tc}$^{\text{2024' AAAI}}$    & \Checkmark &  \XSolidBrush  & 155.1*        & \underline{95.36}     \\
+ & ALIF \cite{yin2020effective,yin2021accurate}$^{\text{2021' Nat. MI}}$  & \Checkmark &  \XSolidBrush  & 156.3*        & 94.30   \\
+ & BHRF \cite{higuchi2024balanced}$^{\text{2024' ICML}}$      & \Checkmark &  \XSolidBrush  & 68.9          & 95.2       \\
+ & \textbf{PRF (Ours)} 
+              & \Checkmark &  \Checkmark    & 68.9          & \textbf{96.87}  \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+\subsection{Long Range Arena Tasks}
+
+To demonstrate the long-range dependency analysis capability of our SD-TCM module, we evaluate it using the Long Range Arena (LRA) benchmark \cite{tay2020long}. This benchmark covers a wide range of classification tasks, including both textual and image domains. For the \textbf{ListOps}, \textbf{Text}, and \textbf{Retrieval} tasks, we use the \textbf{causal} architecture, while S4 employs a bidirectional architecture for all tasks. For the \textbf{Image} and \textbf{Pathfinder} tasks, we use a \textbf{bidirectional} architecture.
+
+\begin{table}[ht]
+    \begin{minipage}{.6\linewidth}
+        \caption{Comparison of Accuracy, Parameters and Energy.}\label{tab:comparison}
+        \scalebox{0.65}{
+        \begin{tabular}{c|c|c|c|c|c|c|c}
+        \toprule
+        \textbf{Metric} & \textbf{Model} & \textbf{ListOps} & \textbf{Text} & \textbf{Retrieval} & \textbf{Image} & \textbf{Pathfinder}  & \textbf{Avg.} \\ \midrule
+        \textbf{En.(mJ)} & \makecell{S4 \\ Ours}   
+                       & \makecell{5.104 \\ \textbf{\textcolor{red}{0.075}}} 
+                       & \makecell{3.718 \\ \textbf{\textcolor{red}{0.298}}} 
+                       & \makecell{24.439 \\ \textbf{\textcolor{red}{0.211}}} 
+                       & \makecell{19.222 \\ \textbf{\textcolor{red}{0.187}}} 
+                       & \makecell{6.256 \\ \textbf{\textcolor{red}{0.067}}} 
+                       & \makecell{11.748 \\ \textbf{\textcolor{red}{0.168}}} \\  \midrule
+        \textbf{Acc.(\%)} & \makecell{S4 \\ Ours}   
+                       & \makecell{59.60 \\ 59.20} 
+                       & \makecell{86.82 \\ 86.33} 
+                       & \makecell{90.90 \\ 89.88} 
+                       & \makecell{88.65 \\ 84.77} 
+                       & \makecell{94.20 \\ 91.76} 
+                       & \makecell{84.03 \\ 82.39}     \\ \midrule
+        \textbf{Par.}  & \makecell{S4 \\ Ours}   
+                       & \makecell{815 k \\ 272 k} 
+                       & \makecell{843 k \\ 830 k} 
+                       & \makecell{3.6 M \\ 1.1 M} 
+                       & \makecell{3.6 M \\ 4.1 M} 
+                       & \makecell{1.3 M \\ 1.3 M} 
+                       & \makecell{- \\ -}         \\ 
+        \bottomrule
+        \end{tabular}}
+    \end{minipage}%
+    \begin{minipage}{.38\linewidth}
+        \caption{Text (4096) ablation on $\alpha$ effective with casual architecture.}\label{tab:ablation}
+        \scalebox{0.8}{
+        \centering
+        \begin{tabular}{lcc}
+        \toprule
+        \textbf{Text (4096)}           & \textbf{Acc. } (\%) & \textbf{Diff.} (\%) \\ \midrule
+        without $\alpha$                  & 85.75              &   $-$     \\
+        + $\alpha$ on $\mathcal{SN}$ \& $\mathcal{TN}$ & 85.69 & $-$ 0.06  \\
+        + $\alpha$ on $\mathcal{TN}$      & 86.11              & $+$ 0.36  \\
+        + $\alpha$ on $\mathcal{SN}$      & \textbf{86.33}     & \textbf{$+$ 0.58}  \\ 
+        \bottomrule
+        \end{tabular}
+        }
+    \end{minipage}
+\end{table}
+
+The SD-TCM module achieves performance comparable to S4 while reducing energy consumption by over \textbf{98.57\%} on average, as shown in Table \ref{tab:comparison}. Specifically, the accuracy on ListOps is 59.60\%, compared to S4’s 59.20\%. The key advantage is the significant reduction in energy consumption, as shown in Table \ref{tab:comparison}, with ListOps dropping from 5.104 mJ to 0.075 mJ.fire.rate}.ablation} for details). Table \ref{tab:ablation} shows an ablation study on the $\alpha$ parameter in the Text (4096) task. Applying $\alpha$ to both the spatial ($\mathcal{SN}$) and PRF ($\mathcal{TN}$) components slightly lowers accuracy from 85.75\% to 85.69\%, but applying it only to $\mathcal{SN}$ improves accuracy to 86.33\%, demonstrating its benefit for spatial dependencies. Finally, as shown in Table \ref{tab:lra_tasks}, our module achieves performance comparable to the S4 baseline across tasks while preserving spike-driven feature, avoiding nonlinear activation functions and FP MAC operations.
+\begin{table}[ht]
+\centering
+\caption{Test Accuracy Comparison on LRA Tasks (\%) $(\uparrow)$. 'NL Act. Free' and 'FP MAC Free' denote models that do not use nonlinear activation functions or floating-point multiply-accumulate operations in the block, respectively. The \underline{underline} and \textbf{bold} formatting indicate the SoTA result for Spikinglized SSMs and Improving Neuron methods, respectively.} 
+\label{tab:lra_tasks}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{l|cc|ccccc|c}
+\toprule
+\textbf{Model} 
+& \textbf{NL Act.}
+& \textbf{FP MAC}
+& \textbf{ListOps}  
+& \textbf{Text} 
+& \textbf{Retrieval}  
+& \textbf{Image} 
+& \textbf{Pathfinder} 
+& \multirow{2}{*}{\textbf{Avg.}} \\
+(Input length) & \textbf{-Free} & \textbf{-Free} & (2,048) &  (4,096) &  (4,000) &  (1,024) &  (1,024)  \\
+\midrule
+Random (Lower Bound) & - & - & 10.00 & 50.00 & 50.00 & 10.00 & 50.00  & 34.00  \\
+Transformer \cite{vaswani2017attention} & \XSolidBrush & \XSolidBrush & 36.37 & 64.27 & 57.46 & 42.44 & 71.40 & 54.39 \\
+S4 (\textbf{\textit{Bidirectional}}) \cite{gu2022efficiently} & \XSolidBrush & \XSolidBrush & 59.60 & 86.82 & 90.90 & 88.65 & 94.20  & 84.03 \\
+\midrule
+Binary S4D \cite{stan2023learning} $^{\text{2024' Sci. Rep.}}$  & \XSolidBrush & \XSolidBrush & 54.80 & 82.50 & 85.03 & 82.00 &  82.60 & 77.39 \\
+$\hookrightarrow +$ GSU \& GeLU  & \XSolidBrush  & \XSolidBrush & 59.60 & \underline{86.50} & \underline{90.22} & 85.00 & 91.30 & \underline{82.52} \\
+Stoch. SpikingS4 \cite{bal2024rethinking} $^{\text{2024' arXiv}}$  & \XSolidBrush & \XSolidBrush & 55.70 & 77.62 & 88.48 & 80.10 & 83.41 & 77.06 \\
+SpikingSSMs \cite{shen2024spikingssms} $^{\text{2024' arXiv}}$  & \XSolidBrush & \XSolidBrush & \underline{60.23} & 80.41 & 88.77 & \underline{88.21} & \underline{93.51} & 82.23 \\
+\midrule
+Spiking LMU \cite{liu2024lmuformer} $^{\text{2024' ICLR}}$ & \Checkmark & \XSolidBrush & 37.30 & 65.80 & 79.76 & 55.65 & 72.68 & 62.23 \\
+ELM Neuron \cite{spieler2024the} $^{\text{2024' ICLR}}$ & \XSolidBrush & \XSolidBrush & 44.55 & 75.40 & 84.93 & 49.62 & 71.15  & 69.25 \\
+\textbf{Spike-Driven TCM} & \Checkmark & \Checkmark & 
+\textbf{59.20} 
+& 
+\textbf{86.33} 
+& 
+\textbf{89.88} 
+& 
+\textbf{84.77} 
+&
+\textbf{91.76}    
+& \textbf{82.39} \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+
+
+\section{Conclusion}
+
+This study aims to solve the SNNs problem of parallelization and performance on long sequences. We propose the decoupled reset method, enabling spiking neurons could parallel training. This method can be applied to any type of neuron to speed up. Additionally, we introduce the PRF neuron, incorporating the reset as an imaginary part to formulate oscillations in the membrane potential, which solves the long-range dependency problem. The SD-TCM model, combined with PRF neurons, achieves performance comparable to S4 on the LRA task while reducing energy consumption by two orders of magnitude. However, due to the sensitivity of training to neuron initialization, the PathX problem remains unsolved. This issue could be solved in the future by using better hyperparameters and initialization strategies.
+
+
+
+

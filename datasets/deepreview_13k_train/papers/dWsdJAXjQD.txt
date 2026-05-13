@@ -1,0 +1,585 @@
+\title{ImProver: Agent-Based Automated Proof Optimization}
+
+\begin{abstract}
+Large language models (LLMs) have been used to generate formal proofs of mathematical theorems in proofs assistants such as Lean.
+However, we often want to optimize a formal proof with respect to various criteria, depending on its downstream use.
+For example, we may want a proof to adhere to a certain style, or to be readable, concise, or modularly structured. 
+Having suitably optimized proofs is also important for learning tasks, especially since human-written proofs may not optimal for that purpose.
+To this end, we study a new problem of automated proof optimization: rewriting a proof so that it is correct and optimizes for an arbitrary criterion, such as length or readability.
+As a first method for automated proof optimization, we present \methodname{}, a large-language-model agent that rewrites proofs to optimize arbitrary user-defined metrics in Lean.
+We find that naively applying LLMs to proof optimization falls short, and we incorporate various improvements into \methodname{}, such as the use of symbolic Lean context in a novel Chain-of-States technique, as well as error-correction and retrieval. We test \methodname{} on rewriting real-world undergraduate, competition, and research-level mathematics theorems, finding that \methodname{} is capable of rewriting proofs so that they are substantially shorter, more modular, and more readable.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+The fundamental virtue of a mathematical proof is that it provides certainty: a deductive argument shows that the assumptions of a mathematical statement logically guarantee the conclusion. In practice, however, informal, natural-language proofs are prone to imprecision, ambiguity, and error.
+Using a formal language such as Lean~\citep{mouralean4} removes ambiguity and precision and enables a proof assistant to verify correctness down to the primitives of a formal axiomatic system.
+
+Formal proofs, however, can be hard to read and often suffer from low reusability or excessive detail. 
+For example, formal proofs in Lean's extensive mathematical library, Mathlib~\citep{The_mathlib_Community_2020}, are generally designed to be concise and very general, often at the expense of readability. 
+Formal proofs in an expository text, in contrast, may include detailed calculations steps, making them readable but verbose.
+Machine learning systems trained on such proofs learn to mimic these varied conventions~\citep{hu2024minictxneuraltheoremproving}, which may not be the optimal use of the limited supply of human-written proofs.
+As a result, we would like to be able to automatically refactor proofs to meet a secondary objective such as length or readability.
+
+To this end, we study a new problem of \textit{automated proof optimization}: rewriting a proof so that it is correct and optimizes a criterion such as length or readability.
+We find that naively applying LLMs to proof optimization falls short, often resulting in incorrect or poorly optimized proofs. 
+We develop various improvements that can be applied on top of a black-box language model, including Chain-of-States prompting--an analogy to chain-of-thought prompting~\citep{wei2022chain} that shows intermediate proof states--along with error-correction and retrieval.
+We incorporate these  into \methodname{}: a large language model agent that rewrites proofs to optimize arbitrary user-defined metrics in Lean.
+
+We test \methodname{} on rewriting real-world undergraduate theorems, competition problems, and research-level mathematics, finding that \methodname{} is capable of rewriting proofs so that they are substantially shorter, more readable, and more declarative in style.}}
+
+\setlength{\columnsep}{0.2cm}
+\begin{figure}[ht]
+\begin{multicols}{2}
+{
+\textbf{Original (human-written)}
+\begin{lstlisting}[basicstyle=\scriptsize\ttfamily]
+lemma lemma0 {α : Type} {p : α → α → Prop}
+    (h1 : ∀ x, ∃! y, p x y) 
+    (h2 : ∀ x y, p x y ↔ p y x) :
+    ∀ x, Classical.choose 
+        (h1 (Classical.choose (h1 x).exists)).exists=x := by
+        
+  -- PROOF START
+  intro x
+  obtain ⟨y, h1e, h1u⟩ := h1 x
+  have h2' : Classical.choose (h1 x).exists = y :=
+    h1u _ (Classical.choose_spec (h1 x).exists)
+  rw [h2']
+  obtain ⟨w, h1e', h1u'⟩ := h1 y
+  have h4 := Classical.choose_spec (h1 y).exists
+  have hxw : x = w := by
+    apply h1u'
+    rw [h2]
+    exact h1e
+  rw [hxw]
+  exact h1u' _ h4
+\end{lstlisting}
+}
+\vfill\null
+\columnbreak
+{
+\textbf{\methodname{} (length-optimized)}
+\begin{lstlisting}[basicstyle=\scriptsize\ttfamily]
+lemma lemma0 {α : Type} {p : α → α → Prop}
+    (h1 : ∀ x, ∃! y, p x y) 
+    (h2 : ∀ x y, p x y ↔ p y x) :
+    ∀ x, Classical.choose 
+        (h1 (Classical.choose (h1 x).exists)).exists=x := by
+        
+  -- PROOF START
+  intro x
+  obtain ⟨y, h1e, h1u⟩ := h1 x
+  rw [h1u _ (Classical.choose_spec _)]
+  obtain ⟨w, h1e', h1u'⟩ := h1 y
+  rw [h1u' _ ((h2 _ _).mpr h1e)]
+  exact h1u' _ (Classical.choose_spec _)
+\end{lstlisting}
+}
+
+\end{multicols}
+\caption{\methodname{} automatically rewrites formal proofs to optimize a criterion such as length or readability while remaining correct. 
+In this example, \methodname{} optimizes a human-written lemma (right) from the 2022 International Math Olympiad (Question 2, solution from Compfiles~\citep{compfiles}) for length.
+\methodname{}'s optimized proof is correct and more concise.}
+\label{fig:ex1-comp-len}
+\end{figure}
+
+
+
+\section{Related work}
+
+
+Recently there has been wide interest in automating theorem proving in interactive proof assistants; see \citep{lu-etal-2023-survey,li2024survey} for surveys.
+
+A typical approach~\citep{polu2020generative} is to train on a large corpus of mathematical proofs such as Lean's Mathlib~\citep{The_mathlib_Community_2020,han2022proof,polu2022formal,lample2022hypertree,yang2023leandojo,hu2024minictxneuraltheoremproving}. 
+A model learns from the distribution of proofs in the corpus, such as Mathlib-style proofs.
+Recently, the AlphaProof~\citep{alphaproof} system was shown to produce proofs with an arcane, non-human structure and syntax.
+We consider the new problem of rewriting a proof to optimize a metric, such as rewriting a proof into a more readable or more concise one. 
+Proof optimization is more general than  theorem proving, since we can also rewrite an empty proof to optimize correctness.
+Finally, there is a rich literature on the varied styles of (human) formal proofs (e.g.,~\citep{serge2010,Wiedijk}).
+Our model, \methodname{}, builds on neural theorem proving techniques including full proof generation~\citep{jiang2023draft,first2023baldur}, conditioning on example proofs~\citep{jiang2023draft},  retrieval~\citep{yang2023leandojo,thakur2024incontext}, and preceding file context~\citep{first2023baldur,hu2024minictxneuraltheoremproving}, as well as error correction~\citep{madaan2023selfrefine,chen2023teachinglargelanguagemodels} and documentation retrieval~\citep{zhou2023docprompting} from code generation.
+\methodname{} brings these code generation techniques, along with new Chain-of-States prompting and meta-programmed contextual information, into a unified proof optimization agent.
+  
+
+
+
+\section{Automated Proof Optimization with \methodname{}
+
+
+\paragraph{Automated Proof Optimization.}
+
+Given a theorem statement $x$, additional context $c$, and an initial proof $y_0$, proof optimization consists of generating a new proof $y$ that is correct and minimizes (or maximizes) a metric $\mu(x,c,y_0, y)\rightarrow \mathbb{R}$. 
+ 
+By varying the metric, we can perform tasks such as shortening proofs, making them more readable, or even automated proving. 
+We consider 3 metrics:
+
+\textbf{Length Metric:} The length metric measures the number of tactic invocations in the tactic proof, aiming to reduce the proof's length while ensuring its correctness. Note that shorter proofs often represent more efficient proofs.
+
+\textbf{Readability Metric:} We consider a proof to be readable if it is written in a declarative style~\citep{serge2010,Wiedijk}, which is related to the number of independent subproofs in a proof. Concretely, we evaluate this using the ratio of number of explicitly typed \texttt{have} tactics to total number of tactic invocations.
+
+\textbf{Completion Metric:} The completion of a proof simply describes its correctness. This is a trivial metric which measures the number of errors present. The completion metric is used for concretely viewing proof optimization as a generalization of neural theorem proving.
+\subsection{Improver}
+\label{ssec:improver}
+We develop several improvements that can be applied to a black-box LLM generator $y_{out}\sim G(\cdot|x_{in})$, such as GPT-4~\citep{openai2024gpt4technicalreport}, and specify \methodname{} with respect to these parameters. The explicit prompts and templates that are sent to the LLM can be found in (\S\ref{prompting}).
+
+\subsubsection{Chain-of-States Prompting}
+
+ Typical formal proofs are a sequence of tactics (akin to steps) and \textit{states} that show the hypotheses and goals at each step.
+The intermediate states often contain valuable information (e.g., an expression after it has been simplified) that is not present in the tactics. To allow the model to reason about these intermediate goals and hypotheses, we use tools from Lean metaprogramming to automatically annotate each proof state as a comment prior to each tactic.
+We refer to this method as \textit{Chain-of-States} (CoS) prompting since it makes intermediate states explicit, akin to how chain-of-thought prompting~\citep{wei2022chain} makes intermediate steps of a solution explicit.
+
+These states are extracted directly and symbolically from the underlying Lean compilation steps using Lean's rich metaprogramming suite. The implementation of this extraction system is modeled from the work~\citep{Trainingdata}. Specifically, in the compiler's elaboration and evaluation stages -- where the parsed theorem code is first converted into concrete syntax trees (in practice, \texttt{Syntax} objects) and abstract syntax trees (\texttt{Expr} objects) -- we convert the CST and AST output objects into the relevant proof data and proof states in the form of proof trees (\texttt{Lean.Elab.InfoTree}). These proof trees contain detailed context and information on a tactic-by-tactic level relating to the modification of the proof state, metavariable context, and proof correctness. 
+After state extraction is completed and cached for efficient future access, we annotate the proof text itself to contain the intermediate states in the form as comments. 
+\autoref{fig:cos} shows an example.
+ 
+This explicit reasoning aims to help the generator model construct more optimized proofs via additional symbolic data.
+
+\setlength{\columnsep}{0.2cm}
+\begin{figure}[t!]
+
+\begin{multicols}{2}
+
+{
+\textbf{Without Chain-of-States}
+\begin{scriptsize}
+\begin{lstlisting}[basicstyle=\scriptsize\ttfamily]
+example : s ∩ t ∪ s ∩ u ⊆ s ∩ (t ∪ u)  := by
+  rintro x (⟨xs, xt⟩ | ⟨xs, xu⟩)
+  · use xs; left; exact xt
+  . use xs; right; exact xu
+\end{lstlisting}
+\end{scriptsize}
+}
+\vfill\null
+\columnbreak
+{
+\textbf{With Chain-of-States}
+\begin{scriptsize}
+\begin{lstlisting}[basicstyle=\scriptsize\ttfamily]
+example : s ∩ t ∪ s ∩ u ⊆ s ∩ (t ∪ u)  := by
+  rintro x (⟨xs, xt⟩ | ⟨xs, xu⟩)
+  /-
+  case inl.intro
+  α : Type u_1
+  s t u : Set α
+  x : α
+  xs : x ∈ s
+  xt : x ∈ t
+  ⊢ x ∈ s ∩ (t ∪ u)
+  case inr.intro
+  α : Type u_1
+  s t u : Set α
+  x : α
+  xs : x ∈ s
+  xu : x ∈ u
+  ⊢ x ∈ s ∩ (t ∪ u)
+  -/
+  · use xs; left; exact xt
+  /-
+  Goals Solved!
+  -/
+  . use xs; right; exact xu
+  /-
+  Goals Solved!
+  -/
+\end{lstlisting}
+\end{scriptsize}
+}
+\end{multicols}
+\caption{A Lean proof (left) with Chain-of-States prompting annotations (right).}
+\label{fig:cos}
+\end{figure}
+
+
+\subsubsection{Output formatting.} LLM outputs often contain ancillary and syntactically invalid content, especially before and after the actual proof. Additionally, by applying additional structure to the LLM outputs, we may hope to generate more structured proofs. To analyze this hypothesis, we introduce two additional output formats to the standard \verb|str| output: \verb|flat| and \verb|structured|. The former enforces a tactic sequence output as a list of strings, and the latter enforces a proof tree output as a tree of strings. 
+
+\subsubsection{Sampling Method}
+
+We also introduce different methods of sampling between many (sequential or parallel) LLM inference calls, involving best-of-n and iterative refinement implementations, as well as combinations thereof.
+\paragraph{Best-of-n} The best-of-n technique generates multiple ($n$) calls to the language model and selects the ``best'' via a simple selection policy that first prioritizes output correctness, and secondly prioritizes the evaluated metric delta score. More specifically, our scoring function is given by the $2$-ary comparison function $S$, whose arguments are output objects $y,y'$.
+\[S(y,y')=\begin{cases}
+    \max(y,y',\text{key: } x\mapsto \mu(x)),&E(y)=E(y')=0\\
+    y,&E(y)=0, E(y')>0\\
+    y',&E(y)>0, E(y')=0\\
+    \min(y,y',\text{key: } x\mapsto E(x)),&E(y)=E(y')>0\\
+\end{cases}\]
+
+Where $\mu(x)$ is the metric score of $x$, and $E(x)$ is the number of errors in $x$.
+ 
+ 
+This comparison function can be extended to evaluate the best output of any finite $n$ via induction.
+This best-of-n technique is implemented as a curried function such that each of the $n$ calls can be handled by any arbitrary sampling method, or just a single standard prompt at user discretion. It utilizes thread-based parallelism to speed up the relatively large number of calls to the language model, as well as process-based parallelism for the $n$ evaluation calls to the Lean language server.
+\paragraph{Error correction and Refinement} Inspired by self-debugging techniques in code generation~\citep{madaan2023selfrefine,chen2023teachinglargelanguagemodels}, \methodname{} identifies and corrects errors in the generated proofs by iteratively refining its outputs.
+The refinement process relies on user-defined parameters \verb|n| and \verb|prev_num| to specify the number of iterations and the number of previous iteration info to forward, respectively. Each iteration carries information on the last \verb|prev_num| iterations, including input, output, metric score, correctness, and error messages.
+
+
+The refinement technique iteratively improves the prompt output by feeding back the results into the prompt function, additionally forwarding errors and metric scores. Similar to the best-of-n technique, it relies on an argument $n$ for the number of refinement steps, and is curried such that each refinement step can be handled by any other prompting function. However, unlike best-of-n, there is no opportunity for parallelism as each iteration is dependent on information from the previous call.
+
+\paragraph{Combination Sampling and Compound Prompt Functions}
+Compound prompt functions utilize the curried nature of the implementations of best-of-n and refinement to nest these techniques within one another. For example:
+\verb|best_of_n((refinement,m),n)| is a compound sampling method that run a best-of-$n$, where each call is a $m$-step refinement.
+\verb|refinement((best_of_n,m),n)| is a compound sampling method that runs a $n$-step refinement, where each call is a best-of-$m$ call to the LLM.
+Note that with each of these compound prompt functions, there are always a total of $mn$ iterations.
+
+\subsubsection{Retrieval} \methodname{} uses MMR (Maximum Marginal Relevance)-based~\citep{10.1145/290941.291025} retrieval-augmented generation to select relevant examples and documents. 
+More specifically, example retrieval selects the most relevant user-generated examples of proof optimization on a specific metric. Namely, each metric is loaded with a cached (vector) database populated with human-made examples of preoptimized and postoptimized pairs of Lean theorems. The number of examples that are retrieved is user-specified.
+
+Document retrieval extracts information using MMR from a pair of fixed (vector) databases. The databases store semantically chunked data from the Theorem Proving in Lean (TPiL) handbook -- containing syntax guides and tactic explanations -- and the Mathlib mathematics libary -- containing thousands of theorems and lemmas. The chunking is handled by a recursive character splitter, which splits the TPiL markdown files at on its headers and Mathlib files at the start of theorems, examples, lemmas, and definitions -- with chunk sizes of 1000 characters with a 200 character overlap.
+
+The Mathlib retriever finds the top $k$ documents that score the highest MMR score against the current theorem, the TPiL retriever finds the top $k$ documents that score the highest MMR score against the current theorem in context and all current error messages. This retrieval process helps in generating more contextually accurate prompts that allow the language model to better correct its own errors as well as find useful lemmas to reference.
+
+
+
+
+
+\section{Experiments}
+
+
+We test \methodname{} on rewriting real-world undergraduate theorems, competition problems, and research-level mathematics and compare its results to those of the base GPT-4o and GPT-4o-mini models. We examine the optimization capabilities of \methodname{} for the length and readability metrics - studying the effectiveness in maintaining the correctness of the tactic proof while making it more concise, as well as making it more declarative in style and readable in practice.
+
+\subsection{Setup}
+
+Our experimentation is split into three distinct stages. We first perform ablation testing on the \methodname{} model parameters (\S\ref{ssec:improver})  to ensure that \methodname{}'s parameter specification is the optimal one with respect to correctness and metric optimization score. We then evaluate this optimal parameter combination on datasets of varying complexity and analyze the performance and results thereof. Lastly, we note the performance of \methodname{} in NTP applications in comparison to the base GPT-4o and GPT-4o-mini models.
+\paragraph{Datasets.}
+We evaluate \methodname{} on subsets of the following datasets. 
+\textit{Mathematics in Lean (MIL)~\citep{MIL}: } this dataset contains pedagogical solutions of common undergraduate-level exercises, and as such contains many readable, yet verbose and inefficient proofs.
+We use exercise solutions from set theory, elementary number theory, group theory, topology, differential calculus, and integration \& measure theory. This dataset contains theorems at an undergraduate-level of complexity.
+For our main results, we evaluated on $72$ theorems from exercise solutions from MIL chapters $4,5,8,9,$ and $10$.
+\textit{Compfiles~\citep{compfiles}: } Solutions of International Mathematics Olympiad (IMO) and American Mathematics Olympiad (USAMO) competition problems from 2016 to 2024. This is a dataset of internationally-renowned competitive math problems, many of which are readable, yet quite verbose. This dataset contains theorems of a competitive format, and although they contain concepts only at a high-school level, the logical complexity of internationally-renowned competition results is far above that.
+For our main results, we used all $26$ theorems and lemmas from the Compfiles database of complete solutions to the International Mathematics Olympiad (IMO) and the American Mathematics Olympiad (USAMO) from 2016-2024.
+    
+\textit{Mathlib~\citep{The_mathlib_Community_2020}:} Mathlib contains many  advanced results at the forefront of mathematics, and has been at the center of research-level formalizations. These proofs are extremely efficient, concise, and generalized - which often comes at the cost of readability and understandability. These results and theorems often are at the cutting edge of research.
+
+For our main results, we evaluated our methods on $43$ advanced research-level proofs from {\small\texttt{Mathlib/AlgebraicTopology/FundamentalGroupoid}}. This is the most difficult dataset.
+    
+\paragraph{Models.}
+Our base generator uses GPT-4o~\citep{openai2024gpt4technicalreport}. Since no prior methods currently exist for automated proof optimization, we consider a prompted GPT-4o without the improvements described in (\S\ref{ssec:improver}) as our baseline. Additionally, for a given metric, we write a prompt that briefly describes the metric and the proof optimization task. We also provide instructions, context, and information depending on the features selected, and add the theorem and proof to the prompt. Specific prompt information is detailed in (\S\ref{prompting})
+\paragraph{Performance metrics.}
+
+Since proof optimization is a new task, we define four performance metrics for measuring aspects of correctness and improvement.
+
+First, we define \textbf{improvement} for length as percentage change in length, $\frac{\mu_{\text{len}}(y_0)-\mu_{\text{len}}(y)}{\mu_{\text{len}}(y_0)}\times 100$.
+For readability, we use the difference, $\mu_{\text{read}}(y)-\mu_{\text{read}}(y_o)$.
+If no correct output is generated by the model for a specific theorem, improvement is defined to be zero. We define \textbf{nonempty improvement} as the improvement restricted to theorems for which some output has nonzero improvement.
+
+Intuitively, improvement is the expected improvement in metric score from the input to output, accounting for errors in the generation. The nonempty improvement score is the expected improvement in metric score, given that there are no errors in the generation.
+Similar improvement scores can be defined for other metrics using a binary function of the metric assigned to the original and optimized proofs.
+
+Additionally, the \textbf{accuracy} is the percentage of theorems in the dataset which the model was able to generate a correct output for. The \textbf{improved accuracy} is the percentage of theorems in the dataset which the model was able to generate a correct output for, as well as improve the metric to be nonzero.
+
+\subsubsection{Ablations}
+\label{sssec:ablations}
+
+When performing our ablation studies, we used a fixed dataset (MIL) and metric (length) and varied the parameters of all the features to find the optimal combination. However, as there are over $8640$ possible combinations, it is inefficient to test all combinations at once. As such, we evaluate using a factorial testing method.
+
+\paragraph{Testing Groups.}
+
+We define the following testing groups with the specified parameter combinations:
+
+\textit{GPT-4o-mini/GPT-4o: }This varies the GPT-4o model, outputting a \texttt{string} with no other features.
+
+\textit{Output and CoS: } We evaluate the effects of different output formatting styles (\texttt{string}, \texttt{string list}, \texttt{string tree}) and CoS (True, False), with the model fixed as GPT-4o, with no other features enabled.
+\textit{Example Retrieval: } We evaluate the effects of increasing the number of examples provided (multi-shot prompting) in the range of $0,3,5,7,$ and $10$, with the model fixed as GPT-4o, CoS and output formatting fixed as the best combination from the previous test, and no other features enabled.
+\textit{Sampling Method: }Here, we evaluate the effects of best-of-n and refinement for a fixed $n=5$. Additionally we test on the refinement cases if forwarding the most recent iteration result, or all previous iteration results is the best, and if we should keep the best out of the iterations, or the most recent. The model is fixed as GPT-4o, CoS, output formatting, and examples are fixed as the best combination from the previous test, and no other features enabled.
+\textit{$n$ and Model: }Here, we evaluate the effects of larger $n$ values and different models. We test $n=3,5,7,10,15$ on GPT-4o and GPT-4o-mini, as well as $n=20$ for GPT-4o-mini (as it is of a far lower token cost). CoS, output formatting, examples, and sampling method are fixed as the best combination from the previous test, and no other features enabled.
+\textit{Combos and RAG: } We evaluate combination methods \verb|refinement(best_of_m',m)| and \verb|best_of_m'(refinement(m))|, for $m\neq m'$ with $mm'$ equal to the optimal value $m$ from the previous test. We also test the effect of enabling document retrieval. Model, CoS, output formatting, examples, $n$, and sampling method are fixed as the best combination from the previous test.
+
+\paragraph{Ablation data.} We evaluate our ablations on a subset of MIL. However, due to the increase in model calls for larger $n$ values, we switch a representative sample of this subset for some test groups. Namely,
+GPT-4o-mini, GPT-4o, Output and Cos, Example Retrieval, and Sampling Method are tested on the $133$ theorems in the solutions of \texttt{C03\_Logic}, \texttt{C04\_Sets\_and\_Functions}, and \texttt{C05\_Elementary\_Number\_Theory}.
+$n$ and Model are tested on $55$ theorems from a representative sample of the aforementioned, and Combos and RAG are tested on a representative sample of $32$ theorems from the aforementioned.
+
+\subsection{Results}
+\paragraph{\methodname{} is capable of optimizing proofs in all settings.}
+
+
+\begin{table}[t]
+\caption{Average Proof optimization results.}
+\label{tab:main-avg}
+\centering
+\small
+\begin{tabular}{ll|cccc}
+\toprule
+Metric& Model &Improvement & Nonempty Improvement &Accuracy& Improved Acc.\\
+\midrule
+\multirow{2}{*}{\textbf{Length}} & GPT-4o & 3.7 & 15.15 & 26.36\% & 8.31\% \\
+&\textbf{\methodname{}} &\textbf{20.96} & \textbf{55.29} & \textbf{100.0\%} & \textbf{35.44\%} \\
+\midrule
+\multirow{2}{*}{\textbf{Readability}} & GPT-4o &2.21 & 8.02 & 18.75\% & 6.13 \%\\
+&\textbf{\methodname{}} & \textbf{9.34} & \textbf{30.53} & \textbf{100.0}\%& \textbf{24.56\%}\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\caption{MIL Proof optimization results.}
+\label{tab:main-mil}
+\centering
+\small
+\begin{tabular}{ll|cccc}
+\toprule
+Metric& Model &Improvement & Nonempty Improvement &Accuracy& Improved Acc.\\
+\midrule
+\multirow{2}{*}{\textbf{Length}} & GPT-4o & 6.25 & 18.58 & 37.5\% & 14.42\% \\
+&\methodname{} & \textbf{30.54} & \textbf{56.56} & \textbf{100.0\%} & \textbf{50.0\%} \\
+\midrule
+\multirow{2}{*}{\textbf{Readability}} & GPT-4o &4.18 & 14.48 & 28.85\% & 11.54\% \\
+&\methodname{} & \textbf{13.45} & \textbf{30.97} & \textbf{100.0\%} & \textbf{34.21\%}\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\caption{Compfiles Proof optimization results.}
+\label{tab:main-compfiles}
+\centering
+\small
+\begin{tabular}{ll|cccc}
+\toprule
+Metric& Model &Improvement & Nonempty Improvement &Accuracy& Improved Acc.\\
+\midrule
+\multirow{2}{*}{\textbf{Length}} & GPT-4o & 2.75 & 30.7 & 11.54\% & 5.13\% \\
+&\methodname{} & \textbf{18.86} & \textbf{54.48} & \textbf{100.0\%} & \textbf{34.62\%}\\
+\midrule
+\multirow{2}{*}{\textbf{Readability}} & GPT-4o & 0.39 & 3.38 & 14.1\% & 1.28\% \\
+&\methodname{} & \textbf{5.74} & \textbf{24.89} & \textbf{100.0\%} & \textbf{19.23\%}\\
+\bottomrule
+\end{tabular}
+
+\end{table}
+
+\begin{table}[h]
+\caption{Mathlib Proof optimization results.}
+\label{tab:main-lib}
+\centering
+\small
+\begin{tabular}{ll|cccc}
+\toprule
+Metric& Model &Improvement & Nonempty Improvement &Accuracy& Improved Acc.\\
+\midrule
+\multirow{2}{*}{\textbf{Length}} & GPT-4o & 0.0 & 0.0 & 16.67\% & 0.0\% \\
+&\methodname{} & \textbf{6.19} & \textbf{53.65} & \textbf{100.0\%} & \textbf{11.54\%}\\
+\midrule
+\multirow{2}{*}{\textbf{Readability}} & GPT-4o & 0.0 & 0.0 & 4.65\% & 0.0\% \\
+&\methodname{} & \textbf{4.63} & \textbf{33.19} & \textbf{100.0\%} & \textbf{11.63\%}\\
+\bottomrule
+\end{tabular}
+
+\end{table}
+From \autoref{tab:main-mil}, \autoref{tab:main-compfiles}, and \autoref{tab:main-lib}, we can see that \methodname{} is capable of optimizing proofs on all datasets for both the length and readability metrics.
+Furthermore, \autoref{tab:main-avg} shows that across all metrics, \methodname{} significantly outperforms GPT-4o on proof optimization tasks on every experimental measure -- aggregated from all datasets. Additionally, from \autoref{tab:main-mil}, \autoref{tab:main-compfiles}, and \autoref{tab:main-lib}, we can see that \methodname{} outperforms GPT-4o on each dataset as well. 
+ 
+ 
+We proceed to analyze this data and its implications.
+
+\paragraph{Length optimization.} First focusing on the length metric, we see that \methodname{} outperforms GPT-4o with respect to the improvement score by $566\%$ (aggregated over all datasets). Additionally, we are guaranteed that \methodname{} produces a correct output, although that output may just be the same as the input. However, $35.44\%$ of the time, it generates a correct output that is not the same length as the input, and in that case, we expect an average of a $55.29\%$ reduction in length. Comparing this with GPT-4o, we conclude that not only can \methodname{} optimize at a higher level on arbitrary theorems, but its ability to generate nontrivial correct outputs is far greater in comparison to GPT-4o.
+
+\paragraph{Readability optimization.} Readability optimization is similar, with \methodname{} outperforming GPT-4o by $423\%$. Moreover, the accuracy, improved accuracy, and nonempty improvement disparities for readability parallel those of the length tests. However, it should be noted that for both GPT-4o and \methodname{}, the accuracy and improved accuracy scores were markedly smaller for readability than length optimization. This suggests that for both models, it was generally more ``difficult'' to generate a correct output, and moreover, generate a correct output with a better metric score than the input, for readability optimization than length optimization. In other words, optimizing for readability is more difficult for the underlying generator than optimizing for length. However, we speculate with higher-quality prompts, descriptions of the metric, and examples, this disparity can be minimized. Regardless, we note that different metrics can be less likely to be correctly optimized, and that model performance is correlated with the metric it seeks to optimize -- both for GPT-4o and \methodname{}.
+
+\paragraph{Optimization varies based on dataset difficulty.} Additionally noting \autoref{tab:main-mil}, \autoref{tab:main-compfiles}, and \autoref{tab:main-lib}, we observe that the improvement score for both metrics for both GPT-4o and \methodname{} is highest for the MIL dataset, lower for Compfiles, and the lowest on the Mathlib theorems. This suggests that the expected improvement in metric score decreases with higher difficultly -- with undergraduate-level theorems having a significantly higher expected improvement than research-level theorems. However, it should be noted that for both metrics, the nonempty improvement of \methodname{} stayed consistent, whereas for GPT-4o, it followed the aforementioned trend of decreasing with difficulty. Similarly, the accuracy and improved accuracy scores for both metrics and models decreased with higher difficulty datasets (disregarding \methodname{}'s accuracy scores, as they are ensured to be 100\%). This suggests that although the base GPT-4o generator is less likely to generate a correct output for higher difficulty datasets, the improvements that \methodname{} makes to the base generator allows it to maintain its improvement in the metric score whenever a correct output is generated. As such, we can speculate that the bottleneck in the improvement score is not the model's ability to optimize the proof for a metric, but rather its ability to generate a new correct proof at all. As such, we conjecture that with more capable generator models, the accuracy -- and thus, the improvement score -- in optimization tasks will continue to increase, until the improvement scores match the nonempty improvement.
+
+Overall, we conclude that although the performance of both \methodname{} and GPT-4o decreases on length and readability optimization on more difficult datasets, \methodname{} significantly outperforms GPT-4o on all datasets for length and readability optimization. 
+
+\subsubsection{Ablation Testing}
+\begin{table}[h]
+\caption{Ablation results. Each cell in the ablation tests shows \texttt{best} / \texttt{worst}, which are the \texttt{best} and \texttt{worst} parameter combinations in the test group. The ImProver specification outputs the input theorem when no correct proof is generated, which results in an accuracy of 100\% on MIL.}
+\label{tab:abl}
+\centering
+\small
+\begin{tabular}{l|cccc}
+\toprule
+& Improvement& Nonempty Improve.& Accuracy & Improved Acc.\\
+\midrule
+GPT-4o-mini&  0 & 0 & 3.62\% & 0\%\\
+GPT-4o & 7.03 & 19.67 & 35.77\% & 15.33\%\\
++ Output and CoS &8.04 / 6.31 & 12.38 / 14.17 & 64.96\% / 44.53\% & 21.17\% / 16.06\% \\
++ Example Retrieval & 9.34 / 5.67 & 14.7 / 8.44 & 63.5\% / 67.15\% & 21.9\% / 16.79\% \\
++ Sampling Method &15.35 / 9.34 & 18.44 / 14.7 & 83.21\% / 63.5\% & 36.5\% / 21.9\% \\
++ $n$ and Model & 23.51 / 3.65 & 26.28 / 4.63 & 89.47\% / 78.95\% & 45.61\% / 8.77\% \\
++ Combos and RAG & 34.88 / 28.25 & 57.56 / 33.48 & 60.61\% / 84.38\% & 54.55\% / 53.12\% \\
+\midrule
+\textbf{\methodname{}} & \textbf{34.88} & \textbf{57.56} & \textbf{100\%} & \textbf{54.55\%}\\
+\bottomrule
+\end{tabular}
+
+\end{table}
+
+We perform ablation studies using a subset of the MIL dataset as discussed in \S\ref{sssec:ablations}. The results of this factorial study are aggregated in \autoref{tab:abl}. We measure the baseline results from the GPT-4o and GPT-4o-mini models, noting that GPT-4o is the better-scoring model (with respect to the improvement score). Thus, fixing this model, we vary the output formatting type and if CoS is enabled, and determine that outputting \texttt{flat} with CoS enabled maximizes the improvement score. Fixing these parameters, we now vary the number of examples retrieved, noting that prompting with $10$ examples maximizes the improvement score. Fixing this parameter, we vary the sampling methods (excluding compound methods and fixing $n=5$) and observe that best-of-n is the best parameter combination. Now, as GPT-4o-mini is significantly less computationally expensive than its GPT-4o counterpart, we test both models with the sample method fixed to best-of-n, and vary $n=1,3,5,7,10,15$, and for GPT-4o-mini, also $n=20$. We conclude that GPT-4o with $n=15$ is the most effective. Fixing these parameters, we consider all mixed compound sampling methods with and without document retrieval enabled, concluding that a $5$-step refinement with best-of-$3$ on each iteration, with RAG enabled, is the optimal combination.
+Thus, as we can see from \autoref{tab:abl}, the optimal parameter combination comes from gpt-4o outputting as a \texttt{string list} with CoS, RAG, $10$ examples, $5$-step refinement with each iteration being a best-of-$3$ evaluation. Changing any one of these parameters them leads to a reduction in performance. Additional ablation data can be found at (\S\ref{addnl-abl}).
+
+\paragraph{Readability and Chain-of-States (CoS) Ablation.}
+
+\begin{table}[t]
+\caption{CoS Readability Ablation results.}
+\label{tab:read-abl}
+\centering
+\small
+\begin{tabular}{l|cccc}
+\toprule
+& Improvement& Nonempty Improve.& Accuracy & Improved Acc.\\
+\midrule
+GPT-4o&{4.97} & {15.89} & {37.5\%} & {12.5\%} \\
+\methodname{}, CoS Disabled &  9.23 & 24.61 & 100.0\% & 28.12\% \\
+\textbf{\methodname{}} &  \textbf{16.69} & \textbf{31.42} & \textbf{100.0\%} & \textbf{46.88\%} \\
+\bottomrule
+\end{tabular}
+
+\end{table}
+
+We additionally examine the effects of disabling CoS on readability optimization tasks, as the previous study focused on length optimization tasks, and we speculate that CoS has a high impact on the performance of readability optimization tasks, as the proof states that are embedded due to CoS seem to be a critical aspect to generating the explicit declarations that the readability metric measures.
+
+We confirm this result by considering \autoref{tab:read-abl} and observe that simply enabling CoS nearly doubles the improvement score, and significantly improves the nonempty improvement score, suggesting that CoS has a high degree of impact on optimizing for the readability metric, as conjectured. However, we also note a significant increase in improved accuracy, which suggests that embedding the chain of states also improves the ability of the model to generate nontrivial correct outputs, implying that the symbolic information contained in the states are critical to effectively modifying the structure and content of a proof.
+
+\subsubsection{Neural Theorem Proving Evaluation}
+
+\begin{table}[t]
+\caption{Proof generation results. Each cell shows percent accuracy. }
+\label{tab:comp}
+\centering
+\small
+
+\begin{tabular}{l|ccc}
+\toprule
+\textbf{MIL} & Set Theory & Group Theory & Overall\\
+\midrule
+GPT-4o & 18.18\% & 25\% & 21.73\%\\
+\textbf{\methodname{}} & \textbf{45.45\%} &\textbf{33.33\%} & \textbf{39.13\%}\\ 
+\bottomrule
+\end{tabular}
+\end{table}
+
+We evaluate \methodname{}'s neural theorem proving (NTP) performance using the completion metric. We evaluate on 23 exercises in group theory (12) and set theory (11) from MIL, with an empty input proof. \autoref{tab:comp} shows the accuracy on the dataset split by topic for both \methodname{} and GPT-4o. \methodname{} substantially outperforms GPT-4o across all topics, with an  80\% increase in accuracy compared to the base model, showing that proof optimization systems are easily extendable to NTP systems.
+
+
+\subsection{Qualitative Results}
+\label{qualitative}
+
+Next, we discuss qualitative examples showing the improvements from \methodname{} in proof optimization. These examples show the balance between correctness and the desired optimization metric, showing how \methodname{} can produce more concise or readable proofs depending on the use case. Additional examples can be found in (\S\ref{addnl-qual})
+
+\paragraph{Example 1: Compfiles Optimization.}
+\label{ex1}
+Consider \autoref{fig:ex1-comp-len},  a lemma from the 2022 IMO Question 2 (Compfiles) that we optimize for length.
+ 
+ 
+The original proof consisted of 12 tactic steps and multiple intermediate calculations. After applying \methodname{} for length optimization, the proof was halved to only 6 tactics, eliminating redundant steps while maintaining correctness.
+ 
+In comparison, the shortened proof makes multiple nontrivial optimizations, such as eliminating the \texttt{h2'} and \texttt{h4} and \texttt{hxw} hypotheses, as well as fully generating proof terms for specific rewrites and other tactics.
+
+\paragraph{Example 2: MIL.}
+\label{ex2}
+Consider \autoref{fig:ex2-MIL-read}, a result from MIL that we optimize for readability.
+\setlength{\columnsep}{0.2cm}
+\begin{figure}[ht]
+\begin{multicols}{2}
+
+{
+\textbf{Original (human-written)}
+\begin{scriptsize}
+\begin{lstlisting}[basicstyle=\scriptsize\ttfamily]
+def iso₁ [Fintype G] (h : Disjoint H K) (h' : card G = card H * card K) 
+: K ≃* G / H  := by
+  apply MulEquiv.ofBijective ((QuotientGroup.mk' H).restrict K)
+  rw [bijective_iff_injective_and_card]
+  constructor
+  · rw [← ker_eq_bot_iff, (QuotientGroup.mk' H).ker_restrict K]
+    simp [h]
+  · symm
+    exact aux_card_eq h'
+\end{lstlisting}
+\end{scriptsize}
+}
+\vfill\null
+\columnbreak
+{
+\textbf{\methodname{} (readability-optimized)}
+\begin{scriptsize}
+\begin{lstlisting}[basicstyle=\scriptsize\ttfamily]
+def iso₁ [Fintype G] (h : Disjoint H K) (h' : card G = card H * card K) 
+: K ≃* G / H   := by
+  have injectivity : Function.Injective ((QuotientGroup.mk' H).restrict K) := by
+    rw [← ker_eq_bot_iff, (QuotientGroup.mk' H).ker_restrict K]
+    simp [h]
+  have card_eq : card (G / H) = card K := by
+    exact aux_card_eq h'
+  apply MulEquiv.ofBijective ((QuotientGroup.mk' H).restrict K)
+  rw [bijective_iff_injective_and_card]
+  constructor
+  exact injectivity
+  symm
+  exact card_eq
+\end{lstlisting}
+\end{scriptsize}
+}
+\end{multicols}
+\caption{Optimizing a group-theoretic result from MIL Chapter 8 Section 1 for readability. We define a proof to be readable if it is written in a declarative style, which consists of intermediate conjectures ({\small \texttt{have} $\cdots$} statements). \methodname{} introduces two intermediate conjectures into the proof.  }
+\label{fig:ex2-MIL-read}
+\end{figure}
+
+
+This original proof carried a score of $0$, as it does not contain any declarative statements. In comparison, after applying \methodname{}, we transformed the proof to be more declarative, with many more intermediate steps with explicit \texttt{have} tactics for improved clarity. Additionally observe how the model defines hypotheses for use in the latter half of the proof; these predefined hypotheses could easily be converted into standalone lemmas for reuse.
+\paragraph{Example 3: Full Proof Generation.}
+\label{ex3}
+We analyze the application of \methodname{} to neural theorem proving in the MIL example from \autoref{fig:ex3-MIL-completion}.
+\setlength{\columnsep}{0.2cm}
+\begin{figure}[ht]
+\begin{multicols}{2}
+
+{
+\textbf{Original (human-written)}
+\begin{scriptsize}
+\begin{lstlisting}[basicstyle=\scriptsize\ttfamily]
+example (φ : G →* H) (S T : Subgroup H) (hST : S ≤ T) : comap φ S ≤ comap φ T  := by
+  sorry
+\end{lstlisting}
+\end{scriptsize}
+}
+\vfill\null
+\columnbreak
+{
+\textbf{\methodname{} (completeness-optimized)}
+\begin{scriptsize}
+\begin{lstlisting}[basicstyle=\scriptsize\ttfamily]
+example (φ : G →* H) (S T : Subgroup H) (hST : S ≤ T) : comap φ S ≤ comap φ T   := by
+  intro g
+  simp only [mem_comap]
+  intro hS
+  exact hST hS
+\end{lstlisting}
+\end{scriptsize}
+}
+\end{multicols}
+\caption{Solving a group theorem exercise from MIL Chapter 8 Section 1 for readability. }
+\label{fig:ex3-MIL-completion}
+\end{figure}
+
+This theorem relating to group theory originally has no proof, however, \methodname{} generates one from scratch. This generated proof is verified to be correct by Lean, utilizing all the included hypotheses as well as a retrieved mathlib theorem.
+
+
+
+
+\section{Conclusion}
+
+
+In this paper, we introduced \methodname{}, a novel agent-based tool for automated proof optimization in Lean. By incorporating CoS, RAG, and other features, \methodname{} significantly outperforms base language models in proof optimization over undergraduate, competition, and research-level problems.
+
+However, \methodname{} is limited by its high cost and slow runtime, which is exacerbated by its reliance on black-box LLM's. We intend to address this inefficiency in future work by applying fine-tuning and RL on a smaller model to match performance at a lower cost.
+
+
+\methodname{} demonstrates its ability to generate substantially shorter, more readable, and modular proofs while maintaining correctness. As such, we believe that \methodname{} sets the stage for further work on proof optimization to advance the study and use of AI in mathematics.
+
+\hide{
+\subsubsection*{Acknowledgements}
+Riyaz Ahuja thanks the L3 Lab and Hoskinson Center for Formal Mathematics for their support.
+
+Sean Welleck thanks Convergent Research, the Lean FRO, and the OpenAI Researcher Access Program for their support.
+
+}
+\newpage
+{
+
+
+
+

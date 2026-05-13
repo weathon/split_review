@@ -1,0 +1,506 @@
+\title{CosPGD: an efficient white-box adversarial attack for pixel-wise prediction tasks}
+
+\begin{abstract}
+While neural networks allow highly accurate predictions in many tasks, their lack of robustness towards even slight input perturbations often hampers their deployment.
+Adversarial attacks such as the seminal \emph{projected gradient descent} (PGD) offer an effective means to evaluate a model's robustness and dedicated solutions have been proposed for attacks on semantic segmentation or optical flow estimation. While they attempt to increase the attack's efficiency, a further objective is to balance its effect, so that it acts on the entire image domain instead of isolated point-wise predictions. This often comes at the cost of optimization stability and thus efficiency.  
+Here, we propose CosPGD, an attack that encourages more balanced errors over the entire image domain while increasing the attack's overall efficiency.
+To this end, CosPGD leverages a simple alignment score computed from any pixel-wise prediction and its target to scale the loss in a smooth and fully differentiable way. 
+It leads to efficient evaluations of a model's robustness for semantic segmentation as well as regression models (such as optical flow, disparity estimation, or image restoration), and it allows it to outperform the previous SotA attack on semantic segmentation.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begin{figure}[!ht]
+    \centering % <-- added
+  \includegraphics[width=\linewidth]{figures/gradients/grad_diff.pdf}
+  \includegraphics[width=\linewidth]{figures/gradients/sign_flips.pdf}
+\caption{%
+Change in pixel-wise image gradients over attack iterations on DeepLabV3 performing semantic segmentation on PASCAL VOC 2012 validation subset.
+We observe that the absolute difference between gradient values (top) is larger for PGD and increasing for SegPGD, while being stable for CosPGD.
+Further, CosPGD has fewer changes in gradient direction over attack iterations (bottom) compared to PGD and SegPGD.
+This shows CosPGD is more stable during optimization compared to PGD and SegPGD.
+} \label{fig:semseg:nontarget:l_infinity:change_grad}
+\end{figure}
+
+\label{sec:intro}
+Deep Neural Networks~(DNNs) have been gaining popularity for estimating solutions to various complex tasks including numerous vision tasks like classification~\citep{alexnet, resnet, resnext, convnext,lukasik2023improving}, generative models~\cite{steffen,jung2021internalized,lukasik2022learning,jung2023happy}, image segmentation~\citep{unet, semsegzhao2017pspnet, jung2022optimizing,sommerhoff2023differentiable}, or disparity~\citep{sttr} and optical flow~\citep{flownet, flownet2, raft,schmalfuss2023distracting} estimation, due to their overall precise predictions. %amongst many other tasks with many exciting real-world applications.
+However, DNNs are inherently black-box function approximators~\citep{blackboxanalysis}, known to find shortcuts to map the input to a target~\citep{shortcut}, to learn biases~\citep{texturebias,gavrikov2024vision} and to lack robustness~\cite{szegedy2014intriguing,hoffmann2021towards}. 
+\begin{figure}[t]
+     \centering
+     \scriptsize
+     \begin{tabular}{@{}c@{\hspace{0.1cm}}c@{}}
+         \includegraphics[width=3.8cm]{figures/optical_flow/sintel/orig_00002_clean_left.png}
+         &\frame{\includegraphics[width=3.8cm]{figures/optical_flow/sintel/00002_clean_init.png}}\\
+         (a) Input at $\mathit{time}=t$&      (d) Initial flow prediction\\
+           \includegraphics[width=3.8cm]{figures/optical_flow/sintel/orig_00002_clean_right.png}
+         &
+          \frame{\includegraphics[width=3.8cm]{figures/optical_flow/sintel/pgd_40_00002_clean.png}}\\
+          (b) Input at $\mathit{time}=t+1$&(e) PGD, 40 iterations\\
+         \includegraphics[width=3.8cm]{figures/optical_flow/sintel/sintel_gt.png}
+         &
+         \frame{\includegraphics[width=3.8cm]{figures/optical_flow/sintel/cospgd_40_00002_clean.png}}
+     \\
+     (c) Target flow $\overrightarrow{0}$ & (f) CosPGD, 40 iterations
+     \end{tabular}
+        \caption{Optical flow predictions using RAFT~\citep{raft} on Sintel~\citep{sintel1, sintel2} validation.
+        (a)~and~(b) show two consecutive frames for which the initial optical flow in (d) was predicted.
+        The results of attacking the model with target $\overrightarrow{0}$ (c) are depicted in (e) for PGD and (f) for CosPGD.
+        For the same perturbation magnitude and number of iterations, the proposed CosPGD alters the estimated optical flow more strongly and brings it closer to target (c).
+        \label{fig:teaser}}
+\end{figure}
+\iffalse
+
+\begin{figure}[t]
+     \centering
+     \scriptsize
+     \begin{tabular}{@{}c@{\hspace{0.05cm}}c@{\hspace{0.05cm}}c@{}}
+         \includegraphics[width=2.6cm]{figures/optical_flow/sintel/orig_00002_clean_left.png}
+   &      \includegraphics[width=2.6cm]{figures/optical_flow/sintel/orig_00002_clean_right.png}
+         &\frame{
+         \includegraphics[width=2.6cm]{figures/optical_flow/sintel/sintel_gt.png}
+         }
+     \\
+     Input at $time=t$&Input at $time=t+1$&Target flow $\overrightarrow{0}$\\
+         \frame{\includegraphics[width=2.6cm]{figures/optical_flow/sintel/00002_clean_init.png}}
+       &  \frame{\includegraphics[width=2.6cm]{figures/optical_flow/sintel/pgd_40_00002_clean.png}}
+      &   \frame{\includegraphics[width=2.6cm]{figures/optical_flow/sintel/cospgd_40_00002_clean.png}}\\
+      Initial flow prediction&PGD, 40 iterations&CosPGD, 40 iterations
+     \end{tabular}
+        \caption{Optical flow predictions using RAFT~\citep{raft} on Sintel~\citep{sintel1, sintel2} validation.
+        (a)~and~(b) show two consecutive frames for which the initial optical flow in (d) was predicted.
+        The results of attacking the model with target $\overrightarrow{0}$ (c) are depicted in (e) for PGD and (f) for CosPGD.
+        For the same perturbation magnitude and number of iterations, the proposed CosPGD alters the estimated optical flow more strongly and brings it closer to target (c).
+        \label{fig:teaser}}
+\end{figure}
+\fi
+
+An adversarial attack adds a crafted, small (epsilon-sized) perturbation to the input of a neural network that aims to alter the prediction, thus assessing a network's robustness as in the benchmarks by \citet{croce2021robustbench,jung2023neural}. 
+Due to the practical relevance to evaluating and analyzing DNN models, such attacks have been extensively studied~\citep{fgsm, pgd, apgd, pgdl2, deepfool, ifgsm,schrodi2022towards, agnihotri2023improving,grabinski2022frequencylowcut,grabinski2023fix,lukasik2023evaluation}. %Single step attacks such as FGSM \citep{fgsm} are most efficient but often less effective and reliable than multistep versions such as \emph{projected gradient descent} (PGD)~\citep{pgd} and subsequent attacks~\citep{schrodi2022towards,croce2020reliable,croce2021mind} for image classification. 
+
+Existing approaches predominantly focus on attacking image classification models. However, arguably, the robustness of models for pixel-wise prediction tasks is highly relevant for many safety-critical applications such as motion estimation in autonomous driving or semantic segmentation. 
+The application of existing attacks to pixel-wise prediction tasks such as semantic segmentation or optical flow estimation is possible in principle (e.g.~as in \citet{fgsm_segmentation}), albeit carrying only limited information since the pixel-specific loss information is not fully leveraged. 
+In \autoref{fig:teaser}, we illustrate this effect for a targeted attack on optical flow estimation and show that classical classification attacks such as PGD (see \autoref{fig:teaser}(e)) only fool the network predictions to some extent: PGD tends to only fit the target (all zeros, i.e.~white) in parts of the optical flow, while a few predictions remain intact.
+
+For semantic segmentation, \citet{segpgd} showed that harnessing pixel-wise information for adversarial attacks leads to much stronger attacks. They argue that, during the attack, the loss to be backpropagated needs to be altered such that already flipped pixel predictions are less important for the gradient computation. 
+Thus, SegPGD~\citep{segpgd} makes a binary decision for each pixel based on the classification result at this location, to weigh the attack loss for incorrect and correct model predictions individually.
+While this is intuitive for semantic segmentation, it can not extend to pixel-wise regression tasks by definition.
+Furthermore, due to the discrete nature of the loss scaling, SegPGD faces stability issues and has to fade back in the loss of already incorrectly predicted pixels over time~\citep{segpgd}. 
+
+In this work, we propose CosPGD, an efficient white-box adversarial attack that considers the cosine-alignment between the prediction and target for each pixel, leading to a smooth and fully differentiable attack objective. 
+Due to its principled formulation, CosPGD can be used for a wide range of pixel-wise prediction tasks beyond semantic segmentation. \autoref{fig:teaser}(f) shows its effect on optical flow estimation, where, in contrast to PGD, it can fit the target at almost all locations. 
+Since it leverages the (continuous) posterior distribution of the prediction to allow for a smooth and differentiable loss computation, it can significantly outperform SegPGD on semantic segmentation. 
+The main contributions of this work are as follows:
+\begin{itemize}
+    \item{We propose CosPGD, an efficient white-box adversarial attack, that can be applied to any pixel-wise prediction task, and thus allows for an efficient evaluation of their robustness in a unified setting. %including semantic segmentation, optical flow prediction, or image restoration 
+    }
+    \item{We provide theoretical and empirical proofs for the stability and spatial balancing of CosPGD during attack optimization.}
+    \item{For semantic segmentation, we compare CosPGD to the recently proposed SegPGD which also uses pixel-wise information for generating attacks. CosPGD outperforms SegPGD by a significant margin.}
+   
+    \item{To demonstrate CosPGD's versatility, %is widely applicable and can in principle extend to all pixel-wise prediction tasks (classification and regression), 
+    we also evaluate it as a \emph{targeted} attack and as a \emph{non-targeted} attack, for both $\ell_2$ and $\ell_\infty$ bounds %as a $l_{\infty}$ bounded targeted attack 
+    on semantic segmentation, optical flow estimation %comparing to PCFA~\cite{pcfa},
+    and image restoration in several settings and datasets.}
+    
+\end{itemize}
+
+
+\section{Related work}
+
+\label{sec:related}
+The vulnerability of DNNs to adversarial attacks was first explored in \cite{fgsm} for image classification, proposing the Fast Gradient Sign Method (FGSM).
+FGSM is a single-step (one iteration) white-box adversarial attack that perturbs the input in the direction of its gradient, generated from backpropagating the loss, with a small step size, such that the model prediction becomes incorrect. Due to its fast computation, it is still a widely used approach.
+Numerous subsequent works have been directed towards generating effective adversarial attacks for diverse tasks including NLP~\citep{nlp_attack1, nlp_attack2, nlp_attack3}, or 3D tasks~\citep{3d_attack1, 3d_attack2}. Yet, the high input dimensionality of image classification models results in the striking effectiveness of adversarial attacks in this field~\citep{fgsm, jia2022multiguard}. %, especially for vision tasks.
+A vast line of work has been dedicated to assessing the quality and robustness of representations learned by the network, including the curation of dedicated evaluation data for particular tasks~\citep{unforeseenadvasaries, commoncorruptions, naturaladversarial} or the crafting of effective adversarial attacks. 
+These adversarial attacks can be image-wide or localized in a small region or patch.
+These perturbations are in a small region of the image and are called Patch Attacks~(e.g.~\cite{advpatch1,scheurer2024detection}),%\sct{CITE PATCH ATTACKS}.
+ while methods such as proposed in \cite{fgsm,pgd,pgdl2,apgd,deepfool,croce2020reliable,ACFH2020square,c_and_w,decoupling, mifgsm} argue in a Lipschitz continuity motivated way that a robust network's prediction should not change drastically if the perturbed image is within the epsilon-ball of the original image and thus optimize attacks globally within the epsilon neighborhood of the original input. Our proposed CosPGD follows this line of work.
+
+White-box attacks assume full access to the model and its gradients~\citep{fgsm,pgd,pgdl2,apgd,segpgd,deepfool,proximal_splitting,mifgsm,schmalfuss2022attacking} while black-box attacks optimize perturbations in a randomized way~\citep{ACFH2020square,ilyas2018blackbox,qu2023certified}. 
+The proposed CosPGD derives its optimization from PGD~\citep{pgd} and is a white-box attack.
+
+Further, one distinguishes between \emph{targeted} attacks~(e.g.~\cite{wong2020targeted,9840784,pcfa}) that turn the network predictions towards a specific target and \emph{untargeted} (or non-targeted) attacks that optimize the attack to cause any incorrect prediction. PGD~\citep{pgd}, and CosPGD by extension, allows for both settings~\citep{pgd_target}. 
+
+While previous attacks predominantly focus on classification tasks, only a few approaches specifically address the analysis of pixel-wise prediction tasks such as semantic segmentation, optical flow, or disparity estimation. 
+For example, PCFA~\citep{pcfa} was applied to the estimation of optical flow and specifically minimizes the average end-point error ($AEE$) to a target flow field.
+A notable exception of pixel-wise white-box adversarial attack is proposed in \cite{segpgd}. 
+The SegPGD attack could showcase the importance of pixel-wise attacks for semantic segmentation. 
+In this work, we propose CosPGD to provide a principled and efficient adversarial attack, that can be applied to a wide range of pixel-wise prediction tasks and provides stable optimization. CosPGD outperforms SegPGD by a significant margin when attacking semantic segmentation models while preserving its efficiency and extending it to other pixel-wise prediction tasks.
+
+
+\section{Preliminaries}
+
+\label{sec:preliminaries}
+The projected gradient descent (PGD) \cite{pgd} attack is an iterative white box adversarial attack. It is known to be a strong attack and builds the basis for follow-up methods such as \cite{apgd}. Such methods leverage the gradients of a model's loss to create strong adversarial attacks, e.g.~the PGD update is given as
+\begin{equation}
+    \label{eqn:pgd_attack_1}
+    \boldsymbol{X}^{\mathrm{adv}_{t+1}} = \boldsymbol{X}^{\mathrm{adv}_t}+\alpha \cdot \mathrm{sign}\nabla_{\boldsymbol{X}^{\mathrm{adv}_t}}L(f_{\theta}(\boldsymbol{X}^{\mathrm{adv}_t}), \boldsymbol{Y})
+\end{equation}
+\begin{equation}
+    \delta = \phi^{\epsilon}(\boldsymbol{X}^{\mathrm{adv}_{t+1}} - \boldsymbol{X}^{\mathrm{clean}}), 
+\end{equation}
+\begin{equation}
+\label{eqn:pgd_attack}
+    \boldsymbol{X}^{\mathrm{adv}_{t+1}} = \phi^{r}(\boldsymbol{X}^{\mathrm{clean}}+ \delta)
+\end{equation}
+Here,  $L(\cdot)$ is a function (differentiable at least once) of the model prediction and the target, which defines the loss the model $f_\theta$ aims to minimize,  $\boldsymbol{X}^{\mathrm{adv}_{t+1}}$ is a new adversarial example for time step $t+1$, generated using $\boldsymbol{X}^{\mathrm{adv}_{t}}$, the adversarial example at time step $t$ and initial clean sample $\boldsymbol{X}^{\mathrm{clean}}$. 
+$\boldsymbol{Y}$ is the ground truth label for non-targeted attacks and the target for targeted attacks, $\alpha$ is the step size for the perturbation ($\alpha$ is multiplied by $-1$ for targeted attacks to take a step in the direction of the target), and the function $\phi^{\epsilon}$ is clipping the $\delta$ in $\epsilon$-ball for $\ell_{\infty}$-norm bounded attacks or the $\epsilon$-projection in $l_{2}$-norm bounded attacks, complying with the $\ell_\infty$-norm or $l_2$-norm constraints, respectively. 
+$\phi^{r}$ is clipping the generated example in the valid input range (usually between [0, 1]).
+$\nabla_{\boldsymbol{X}^{\mathrm{adv}_t}}L(\cdot)$ denotes the gradient of $\boldsymbol{X}^{\mathrm{adv}_t}$ generated by backpropagating the loss and is used to determine the direction of the perturbation step.
+
+Originally, PGD has been conceived to attack image classification models. For pixel-wise prediction tasks, its update in \autoref{eqn:pgd_attack_1} considers the sum of pixel-wise losses $\bar{L}$, i.e.~
+\begin{align}
+    \label{eqn:pgd_attack_3}
+&\boldsymbol{X}^{\mathrm{adv}_{t+1}}&=&\boldsymbol{X}^{\mathrm{adv}_t}+\\&&&\alpha \cdot \mathrm{sign}\nabla_{\boldsymbol{X}^{\mathrm{adv}_t}}\sum_{i\in {H\times W}}\bar{L}\left(f_{\theta}(\boldsymbol{X}^{\mathrm{adv}_t})_i, \boldsymbol{Y}_i\right)\nonumber
+\end{align}
+where $i$ iterates over all positions in the prediction $f_{\theta}(\boldsymbol{X})$ with $f_{\theta}(\boldsymbol{X})$, $\boldsymbol{Y}\in\mathbb{R}^{H\times W\times M}$ for images of size $H\times W$ and $M$ output dimensions (e.g.~$M$ classes for semantic segmentation). The update in PGD thus aims to increase the overall loss maximally summing over all locations. It does not take into account that the prediction in some locations might remain correct while it further increases the loss in other locations (that might already be predicted incorrectly). 
+
+
+
+\section{Prediction Alignment Scaling - CosPGD}
+
+\label{sec:method}
+
+We argue that the above formulation neglects an interesting aspect:
+It does not facilitate inducing equally manipulated predictions in all locations.
+This can be disadvantageous for targeted attacks, where one wants to ensure that the target is fit at all locations equally.
+In particular, it is however problematic for, for example, attacks on semantic segmentation where models use cross-entropy-like losses that do not saturate.
+Thus, after flipping a few point-wise label predictions, PGD-based attacks might continue to increase the overall loss even without altering any further labels.
+Thus, we argue that the alignment between the current prediction and the target or ground truth has to be taken into account to efficiently compute strong adversaries.
+
+In the following, we introduce CosPGD. Its goal is to employ a continuous pixel-wise measure of prediction alignment inside the computation of the attack update step so that the gradient-based CosPGD iterations smoothly converge to a strong adversary that acts on all pixel locations. 
+The update step in CosPGD is defined as 
+\begin{align}
+    \label{eqn:cospgd_attack}
+&\boldsymbol{X}^{\mathrm{adv}_{t+1}}=\boldsymbol{X}^{\mathrm{adv}_t}+\alpha \cdot \mathrm{sign}\nabla_{\boldsymbol{X}^{\mathrm{adv}_t}}\\
+& \sum_{i\in H\times W}\mathrm{cos}\left(\psi(f_\theta(\boldsymbol{X}^{\mathrm{adv}_t})_i), \boldsymbol{Y}_{i}^{'}\right) \cdot \bar{L}\left(f_{\theta}(\boldsymbol{X}^{\mathrm{adv}_t})_i, \boldsymbol{Y}_i\right),
+\end{align}
+
+where $\psi$ is a continuously differentiable, monotonous function that can be used to normalize the model output, i.e.~we assume $\|\psi(f_{\theta}(\boldsymbol{X}))\| =1 \quad\forall f_{\theta}(\boldsymbol{X})$, and
+\begin{equation}
+    \mathrm{cos}(\boldsymbol{P},\boldsymbol{Y}) =  \frac{\boldsymbol{P}\cdot \boldsymbol{Y}}{\| \boldsymbol{P}\| \cdot \| \boldsymbol{Y}\|}
+\end{equation}
+is the cosine similarity between two vectors, in this case, a (normalized) network prediction $\boldsymbol{P}$ and the target or ground truth $\boldsymbol{Y}\in\mathbb{R}^M$. For the example of semantic segmentation, $\boldsymbol{Y}^{'}$ is one-hot encoded and therefore normalized, in other cases $\boldsymbol{Y}^{'}=\psi(\boldsymbol{Y})$. Cosine similarity provides a measure of similarity between the direction of two vectors and should therefore be well-suited to represent the alignment of the prediction with the target at the posterior level.
+It scales in a fixed range [-1, 1], such that no further normalization of the scaling is needed.
+
+As the loss in CosPGD is scaled with a pixel-wise measure of alignment between the current prediction and the target in \autoref{eqn:cospgd_attack}, the resulting gradient update emphasizes on changing those pixel-wise predictions that are correct in the current prediction.
+
+This yields several desirable properties.   
+First, it facilitates to optimize adversaries to pixel-wise tasks so that the prediction in all pixels is affected. As such, it is a stronger attack than PGD on tasks such as semantic segmentation. Further, it can be applied to pixel-wise classification and regression tasks in a principled way.
+Second, the loss is scaled with a smooth scaling function, i.e.~if the prediction changes only a little, the change in the proposed alignment score will also be small, specifically
+\begin{proposition}
+\label{prop1}
+    For any two pixel-wise network predictions $f_\theta(\boldsymbol{X})_i$ and $f_\theta(\boldsymbol{\bar{X}})_i \in\mathbb{R}^{M}$, a target $\boldsymbol{Y}_i\in\mathbb{R}^{M}$ and a continuously differentiable function $\psi:\mathbb{R}^{M}\rightarrow  \mathbb{R}^{M}$ with $\|\psi(f_{\theta}(\boldsymbol{X}))\| =1 \quad\forall f_{\theta}(\boldsymbol{X})$, it is 
+     \begin{align*}
+    & d\cdot\|f_\theta(\boldsymbol{X})_i - f_\theta(\boldsymbol{\bar{X}})_i\|\geq\qquad\\
+    &\qquad \|\mathrm{cos}\left(\psi(f_\theta(\boldsymbol{X})_i), \boldsymbol{Y}_{i}^{'}\right) -  \mathrm{cos}\left(\psi(f_\theta(\boldsymbol{\bar{X}})_i), \boldsymbol{Y}_{i}^{'}\right)\|
+    \end{align*}
+    for a real, constant $d\geq 0$.
+\end{proposition}
+ As a result of the above proposition, the gradient in \autoref{eqn:cospgd_attack} will change smoothly over the attack iterations for a sufficiently small step-size $\alpha$ and allow for fast convergence properties, i.e.~CosPGD should provide strong adversaries with relatively few iterations while providing a balance over the pixel locations.   
+
+\paragraph{Untargeted versus Targeted Attacks.}
+Untargeted attacks intend to drive the model's predictions away from the model's intended target (ground truth). Specifically, for non-targeted attacks, CosPGD, therefore, scales the loss pixel-wise in proportion to the pixel-wise predictions' similarity to the ground truth, while also accounting for the decrease in similarity over iterations.
+Using cosine similarity as an alignment measure, pixels at which the network predictions are closer to the intended target (ground truth), have a higher similarity (approaching $1$) and thus higher loss.
+Pixels with lower similarity, have a lower loss but are not rendered benign.
+In contrast, for the targeted setting, %we consider cosine dissimilarities (refer to~\autoref{eqn:final_loss_targeted}), and thus, 
+the attack aims to drive predictions towards the target at all locations, such that pixels at which the network predictions are closer to the target and have higher similarity should have a lower loss than pixels with lower similarity.
+
+To scale the loss by the dissimilarity of the prediction to the target prediction, for targeted settings, the targeted CosPGD update step is given by Eqn~\ref{eqn:cospgd_attack_2} in analogy to Eqn~\ref{eqn:cospgd_attack}.
+\begin{align}
+\label{eqn:cospgd_attack_2}
+&\boldsymbol{X}^{\mathrm{adv}_{t+1}}=\boldsymbol{X}^{\mathrm{adv}_t}-\alpha \cdot \mathrm{sign}\nabla_{\boldsymbol{X}^{\mathrm{adv}_t}}\\
+& \sum_{i}\left({\small 1-\mathrm{cos}\left(\psi(f_\theta(\boldsymbol{X}^{\mathrm{adv}_t})_i), \boldsymbol{Y}_{t}^{'}\right)}\right) \cdot\bar{L}\left(f_{\theta}(\boldsymbol{X}^{\mathrm{adv}_t})_i, \boldsymbol{Y}_t\right) \nonumber
+\end{align}
+
+\iffalse
+For non-targeted attacks, we have
+\begin{equation}
+    \label{eqn:final_loss}
+    L_\mathrm{cos} = \dfrac{1}{H\times W} \sum_{H\times W}\cos\left(\overrightarrow{\mathrm{pred}}, \overrightarrow{\mathrm{target}}\right) \cdot L\left(f_{\mathrm{net}}(\boldsymbol{X}^{\mathrm{adv}_t}), \boldsymbol{Y}\right),
+\end{equation}
+and for targeted attacks, we have
+\begin{equation}
+    \label{eqn:final_loss_targeted}
+    L_\mathrm{cos} = \dfrac{1}{H\times W} \sum_{H\times W}(1 - \cos\left(\overrightarrow{\mathrm{pred}}, \overrightarrow{\mathrm{target}}\right)) \cdot L\left(f_{\mathrm{net}}(\boldsymbol{X}^{\mathrm{adv}_t}), \boldsymbol{Y}\right),
+\end{equation}
+\iffalse
+\begin{eqnarray}
+    \label{eqn:final_loss}
+    L_\mathrm{cos} = \dfrac{1}{H\times W} \sum_{H\times W}\cos\left(\overrightarrow{\mathrm{pred}}, \overrightarrow{\mathrm{target}}\right) \cdot \\
+   L\left(f_{\mathrm{net}}(\boldsymbol{X}^{\mathrm{adv}_t}), \boldsymbol{Y}\right) \nonumber
+\end{eqnarray}
+\fi
+where $H$ and $W$ are the height and width of a sample $\boldsymbol{X}$.
+\fi
+
+
+\paragraph{Choice of $\psi$ and Algorithm Description.}
+In \autoref{eqn:cospgd_attack}, we require $\psi$ to be monotonically increasing, differentiable, and, to ensure smooth convergence, smooth. To obtain a distribution over the predictions, 
+we calculate the softmax of the predictions before taking the argmax
+\begin{align}
+    \label{eqn:sigmoid_pred}
+    \psi(f_\theta(\boldsymbol{X})) = \textit{softmax}%\footnote{$}
+    (f_\theta(\boldsymbol{X})), \quad \\ \text{where}, \quad \textit{softmax}(x_{i}) = \frac{\exp(x_i)}{\sum_j \exp(x_j)}.
+\end{align}
+\iffalse
+\begin{equation}
+    \label{eqn:target_psi_definition}
+    \Psi^{'}(\boldsymbol{Y}_i) = \left\{\begin{matrix}
+        \textit{one-hot}(\boldsymbol{Y}_i), & if \quad \text{Semantic Segmenation}\\
+        \textit{softmax}(\boldsymbol{Y}_i) & otherwise
+    \end{matrix}\right.
+\end{equation}
+\fi
+ 
+In the case of semantic segmentation, we obtain the distribution of the target $\boldsymbol{Y}_i$ for every point $i$ by generating a \textit{one-hot encoded vector} of the label (i.e.~encoding the argmax label) while we also apply softmax to compute $\boldsymbol{Y}_{i}^{'}$ from $\boldsymbol{Y}_{i}$ from continuous targets, e.g.~for optical flow or disparity estimation. One-hot encoding and softmax to represent $\boldsymbol{Y}_i$ are summarized by function $\Psi^{'}$  in Algorithm~\ref{alg:cospgd}.
+$\boldsymbol{X}^\mathrm{adv}$ is initialized to the clean input sample $\boldsymbol{X}^{\mathrm{clean}}$ with added randomized noise in the range $[-\epsilon, +\epsilon]$, $\epsilon$ being the maximum allowed perturbation.
+Over attack iterations $\boldsymbol{X}=\boldsymbol{X}^{\mathrm{adv}_t}$, the adversarial example generated at iteration $t$, such that $t\in[0, T)$, where $T$ is the total number of attack iterations.
+
+\paragraph{Loss Scaling in Previous Approaches.}
+When optimizing $\delta$ for an adversarial attack for semantic segmentation, \citet{segpgd} have argued before that pixels which are already misclassified by the model are less relevant than pixels correctly classified by the model, because the intention of the attack is to make the model misclassify as many pixels as possible while perturbing the $\delta$ inside the $\epsilon$-ball. As a consequence, they make a hard decision based on each pixels argmax prediction as of whether it is taken into account for attack computation. 
+In \cite{segpgd}, the PGD update from \autoref{eqn:pgd_attack_3} is thus modified to
+\begin{align}
+\mathrm{sign}\nabla_{\boldsymbol{X}^{\mathrm{adv}_t}}\biggl((1-\lambda)\sum_{i\in P^T} \bar{L}\left(f_{\theta}(\boldsymbol{X}^{\mathrm{adv}_t})_j, \boldsymbol{Y}_j\right)  + \nonumber \\\lambda\sum_{k\in P^F} \bar{L}\left(f_{\theta}(\boldsymbol{X}^{\mathrm{adv}_t})_k, \boldsymbol{Y}_k\right)
+\biggr),
+\end{align}
+where  $P^T$
+is the set of correctly classified pixels and  $P^F$ 
+is the set of wrongly classified pixels, $\lambda$ is a scaling factor between the two parts of the loss that is set heuristically, and $\boldsymbol{Y}$ is the one-hot encoded ground truth for semantic segmentation. See their equation (4) for details. 
+
+For positive $\lambda$ and for categorical labels (i.e.~$\boldsymbol{Y}^{'}$ one-hot encoded), we can rewrite the SegPGD update as
+\begin{align}
+\mathrm{sign}\nabla_{\small \boldsymbol{X}^{\mathrm{adv}_t}}\biggl(\sum_{i}& \left(1- \left|\lambda - {\small \frac{|(\mathit{argmax}(f_\theta(\boldsymbol{X}^{\mathrm{adv}_t})_i)-\boldsymbol{Y}_{i}^{'}|}{2}}\right|\right) \nonumber \\ & \cdot \bar{L}\left(f_{\theta}(\boldsymbol{X}^{\mathrm{adv}_t})_i, \boldsymbol{Y}_i\right)\biggr) 
+\label{eqn:segpgd}
+\end{align}
+for all locations $i\in P^T\cup P^F$, 
+i.e.~$|\lambda - |(argmax(f(\boldsymbol{X}^{\mathrm{adv}_t}))-\boldsymbol{Y}|/2|$ equals $1-\lambda$ for incorrect predictions, it equals $\lambda$ for correct predictions.
+
+Thus, the approach by \citet{segpgd} resembles a discrete approximation of the proposed CosPGD. Yet, the discrete nature of this weighting scheme has several disadvantages: First, it limits SegPGD to applications where the correctness of the prediction can be evaluated in a binary way, and it disregards the actual prediction scores. For pixel-wise regression tasks (like optical flow, or image reconstruction) there is no absolute measure of correctness, so SegPGD can not be directly applied.
+Second, 
+as the number of misclassified pixels increases, the attack loses effectiveness if it only focuses on correctly classified pixels in a binary way. The $\lambda$ scaling in \cite{segpgd} has been proposed as a heuristical remedy. 
+It scales the loss over iterations such that the impact of the proposed scheme decays over time. 
+At the end of the attack iterations, $\lambda \approx 1/2$.
+This avoids the concern of the attack becoming benign after a few iterations, yet it fades out the effect of SegPGD and may reduce its efficiency.
+CosPGD, operating on continuous predictions, does not require such a heuristic.
+
+Last, but maybe most importantly, the scaling based on discrete labels is not smooth, i.e. the $\mathit{argmax}$ operation in \autoref{eqn:segpgd} is not differentiable, such that, during the iterations, the direction of the gradient update can fluctuate, potentially leading to slower convergence of the SegPGD attack, compared to the proposed CosPGD. 
+We show empirical evidence for this issue in \cref{fig:semseg:nontarget:l_infinity:change_grad} where we report the change in gradients and their directions during the attack optimization for PGD, SegPGD and the proposed CosPGD.% for semantic segmentation. 
+\begin{figure}[!ht]
+    \centering % <-- added
+  \includegraphics[width=\linewidth]{figures/gradients/grad_diff.pdf}
+  \includegraphics[width=\linewidth]{figures/gradients/sign_flips.pdf}
+\caption{%
+Change in pixel-wise image gradients over attack iterations on DeepLabV3 performing semantic segmentation on PASCAL VOC 2012 validation subset.
+We observe that the absolute difference between gradient values (top) is larger for PGD and increasing for SegPGD, while being stable for CosPGD.
+Further, CosPGD has fewer changes in gradient direction over attack iterations (bottom) compared to PGD and SegPGD.
+This shows CosPGD is more stable during optimization compared to PGD and SegPGD.
+} \label{fig:semseg:nontarget:l_infinity:change_grad}
+\end{figure}
+
+
+\section{Experiments}
+
+\label{sec:exp}
+To demonstrate the wide applicability of CosPGD, we conduct our experiments on distinct downstream tasks: semantic segmentation, optical flow estimation, and image restoration.
+For semantic segmentation, we compare CosPGD to SegPGD and PGD and empirically validate its improved stability over the attack iterations. Further, we verify that CosPGD indeed encourages the attack to act on the entire image domain, with quantitative and qualitative results on non-targeted attacks on semantic segmentation and targeted attacks on optical flow. For optical flow estimation and other tasks (such as image deblurring and image denoising), we compare CosPGD to PGD in the main paper. The subsequent experiments provide evidence of CosPGD being a strong adversarial attack in diverse tasks and setups. In the main paper, we report $\ell_{\infty}$-norm constrained attacks with $\epsilon\approx\frac{8}{255}$ for CosPGD, SegPGD, and PGD. 
+For $\alpha$, we follow \cite{segpgd} and set the step size to $\alpha=0. 
+ 
+ 
+
+\iffalse
+Following \cite{segpgd, rony2023proximal, semseg_nontarget}, we compute $\ell_{\infty}$-norm and $\ell_{2}$-norm constrained \textbf{non-targeted} attacks for semantic segmentation.
+
+For image restoration, we report $\ell_{\infty}$-norm \textbf{non-targeted} attacks.
+\fi
+
+\label{subsec:exp:setup}
+
+\subsection{Stability during Attack Optimization}
+We evaluate the stability of CosPGD on semantic segmentation PASCAL VOC 2012~\citep{pascal-voc-2012}.
+\cref{fig:semseg:nontarget:l_infinity:change_grad}(top) shows the change in gradients (i.e.~the absolute distance between gradients in two subsequent iterations) due to PGD, SegPGD and CosPGD over 100 iterations.
+Both PGD and CosPGD gradients change constantly over time, with PGD having much stronger change.
+\begin{figure}[t]
+\scalebox{0.9}{
+\begin{tabular}{@{}c@{}}
+\scriptsize 
+DeepLabV3  \\
+  \includegraphics[width=\columnwidth]{figures/plots/deeplab_seeds.pdf}
+
+\scriptsize PSPNet\\
+  \includegraphics[width=\columnwidth]{figures/plots/pspnet_nontarget.pdf}
+\end{tabular}
+}
+\caption{CosPGD versus PGD and SegPGD ($\ell_{\infty}$-norm constrained) for semantic segmentation on PASCAL VOC2012 validation set on DeepLabV3  and PSPNet. CosPGD outperforms competing attacks even in early iterations by a large margin. 
+\label{fig:semseg:semseg_pgd}
+}
+
+\end{figure}
+Yet, as expected, the change in gradients of SegPGD increases over the iterations, potentially leading to oscillations in the optimization.
+To further analyze the effect on the optimization, \cref{fig:semseg:nontarget:l_infinity:change_grad} (bottom) shows the respective change in gradient direction (note that PGD, SegPGD, and CosPGD update all consider the sign of the gradient).
+The evaluation verifies that the CosPGD updates are more stable over the iterations, such that we can expect faster convergence,~i.e.~a stronger attack at fewer iterations.
+However, after more attack iterations (iterations$\geq$5), SegPGD reveals that DeepLabV3 is more robust than PSPNet.
+Contrary to this, CosPGD even at low attack iterations correctly predicts DeepLabV3 to be more robust than PSPNet.
+
+\begin{figure}[!ht]
+    \centering % <-- added
+    \begin{tabular}{@{}c@{\hspace{0.04cm}}c@{\hspace{0.04cm}}c@{\hspace{0.04cm}}c@{}}
+    \scriptsize
+    Ground Truth&  \scriptsize{PGD}&  \scriptsize{SegPGD} &  \scriptsize{CosPGD}\\
+    &  \scriptsize{ mIoU$=6.79\%$}&  \scriptsize{mIoU$=2.69\%$} &  \scriptsize{mIoU$=0.08\%$}\\
+  \includegraphics[width=0.118\textwidth]{figures/deeplab/deeplab_1133_target.png}&
+  \includegraphics[width=0.118\textwidth]{figures/deeplab/deeplab_pgd_40_1133_overlay.png}&
+  \includegraphics[width=0.118\textwidth]{figures/deeplab/deeplab_segpgd_40_1133_overlay.png}&
+  \includegraphics[width=0.118\textwidth]{figures/deeplab/deeplab_cospgd40_1133_overlay.png}\\
+  \includegraphics[width=0.118\textwidth]{figures/deeplab/deeplab_35_target.png}&
+  \includegraphics[width=0.118\textwidth]{figures/deeplab/deeplab_pgd_40_35_overlay.png}&
+  \includegraphics[width=0.118\textwidth]{figures/deeplab/deeplab_segpgd_40_35_overlay.png}&
+  \includegraphics[width=0.118\textwidth]{figures/deeplab/deeplab_cospgd_40_35_overlay.png}
+\end{tabular}
+
+\caption{Example predictions of DeepLabV3 on PASCAL VOC 2012 val set after $\ell_\infty$ PGD, SegPGD, and CosPGD attacks with 40 iters.
+The ground truth segmentations are given on the left.
+Both PGD and SegPGD are able to successfully change most of the predicted labels to one of the ground truth labels (here in green). Yet, the region with this label is predicted correctly.
+Here, only CosPGD also changes the prediction in this region to a third class. % that is not present in the image.
+}
+\label{fig:deeplab_comparison}
+\end{figure}
+\subsection{Spatial Balancing of the Attack}
+In the following, we show empirically that CosPGD encourages the attack to alter predictions over the entire image domain while PGD and SegPGD are weaker in this respect. 
+\paragraph{Semantic Segmentation.}
+\label{subsec:exp:semseg}
+We first discuss the spatial balancing of CosPGD for untargeted attacks on semantic segmentation on PASCAL VOC2012, the standard setting evaluated in \cite{segpgd}. 
+
+Therefore, we consider the mean Intersection over Union (mIoU) and mean accuracy (mACC) over the attack iterations as reported in \autoref{fig:semseg:semseg_pgd}. 
+The first observation is that CosPGD yields a much stronger attack compared to PGD or SegPGD for both DeepLabV3~\cite{deeplabv3} and PSPNet~\cite{semsegzhao2017pspnet}. Second, we observe that CosPGD pushes the mIoU to values close to zero even in the first attack iterations, meaning that almost all pixel labels are flipped, while the mIoU for PGD stagnates at a high level as it decreases slowly for SegPGD, leading to significantly higher mIoUs even after 100 iterations, that for CosPGD.
+
+For example in Figure~\ref{fig:deeplab_comparison} after 40 attack iterations, all attacks are considerably fooling the network into making incorrect predictions.
+However, once the dominant class label is changed by SegPGD or PGD, they do not further optimize over small regions of correct predictions.
+In contrast, CosPGD successfully fools the model into making incorrect predictions even in these small regions by either swapping the region prediction with an already existing class or forcing the model into predicting a different class. 
+
+PGD can bring down the $mIoU$ of DeepLabV3 to 6.79\%.
+SegPGD, by na\"{i}vely utilizing the pixel-wise segmentation error, deteriorates the model performance further to 2.69\%. However, CosPGD can fool the network into making incorrect predictions for almost all pixels, bringing down the model performance to almost 0\% after 100 iterations.
+
+\begin{figure}[htb]
+    \centering % <-- added
+\scriptsize DeepLabV3 $\ell_2$-norm constrained
+  \includegraphics[width=\linewidth]{figures/plots/plot_deeplab_l2.pdf}
+\end{figure}
+\paragraph{Optical Flow.}
+\label{subsec:exp:optical}
+The evaluation of whether an attack alters the prediction in all regions is less trivial to conduct than for semantic segmentation, since there is no absolute measure of correctness. Therefore, in \cref{fig:optical:target:l_infinity:epe_distribution}, we evaluate CosPGD versus PGD for targeted attacks on optical flow (using RAFT~\cite{raft}) on the KITTI-2015 validation set such that we see how many of the point-wise flow predictions have an end point error (epe) to the target that is below a certain threshold. Ideally, we would see a curve that is rising to the maximum value very quickly, indicating that all predictions are very close to the target. \cref{fig:optical:target:l_infinity:epe_distribution} indicates that CosPGD achieves to bring more pixel-wise predictions very close to the target whereas only few predictions have larger epe. For PGD, more predictions remain with higher epe to the target.
+SegPGD can not directly be compared to in this regard, since it is conceived for semantic segmentation and requires an absolute measure of correctness (i.e. is the predicted label correct).
+
+A comparison of CosPGD to PGD in terms of epe over the iterations is shown in \autoref{fig:optical:target:l_infinity}.
+Here, we quantitatively observe better performance of CosPGD compared to PGD.
+As this is the targeted setting, we intend to close the gap between the target prediction and the model predictions, thus a lower $epe$ of the model prediction w.r.t.~the target prediction is desired. As the attack iterations increase, across datasets, CosPGD can significantly fool the network into making predictions closer to the target, bringing down the $epe$ to as low as $1.
+\begin{figure}[t]
+    \centering % <-- added
+  \includegraphics[width=\linewidth]{figures/plots/epes_200_250_cumu_log.pdf}
+\caption{Comparing the distributions of epe w.r.t.~Target flow $\overrightarrow{0}$ after $\ell_{\infty}$-norm constrained targeted 40 iterations CosPGD and PGD attacks on RAFT for optical flow estimation over KITTI-2015 validation dataset.
+A lower epe w.r.t.~Target flow is desirable.
+We observe that CosPGD can reduce the gap to Target for more pixels than the PGD attack.
+Moreover, the highest epe w.r.t.~Target after a CosPGD attack is significantly lower than after a PGD attack.
+\label{fig:optical:target:l_infinity:epe_distribution}
+}
+\end{figure}
+\begin{figure}[!h]
+    \centering % <-- added
+  \includegraphics[width=0.9\linewidth]{figures/plots/target_small.pdf}
+\caption{Comparison of performance of CosPGD to PGD for optical flow estimation over KITTI-2015~(left) and Sintel~(clean $\rightarrow$ right)
+ validation datasets as $\ell_{\infty}$-norm constrained targeted attacks using RAFT.
+CosPGD is a stronger targeted attack than PGD for optical flow. \label{fig:optical:target:l_infinity}
+}
+\end{figure}
+We qualitatively observe in \autoref{fig:kitti_comparison} that the initial optical flow estimation by the model (which is substantially different to the target) is only moderately changed when the model is attacked with PGD.
+As the attack was designed for classification tasks, the model is not substantially fooled even as the intensity of the attack is increased to 40 iterations.
+\begin{figure*}[t]
+    \centering % <-- added
+    \scalebox{1}{
+    \begin{tabular}{@{}c@{}c@{}c@{}}
+  \includegraphics[width=0.32\linewidth]{figures/optical_flow/kitti15/kitti_gt.png}
+  &
+  \frame{\includegraphics[width=0.32\linewidth]{figures/optical_flow/kitti15/pgd_5_00000.png}}
+&
+  \frame{\includegraphics[width=0.32\linewidth]{figures/optical_flow/kitti15/pgd_40_00000.png}}
+\\
+(a) Target flow & (b) PGD 5~itrs $epe=14.42$ &(c) PGD 40~itrs $epe=7.32$ 
+\\
+  \frame{\includegraphics[width=0.32\linewidth]{figures/optical_flow/kitti15/00000_init.png}}
+&
+  \frame{\includegraphics[width=0.32\linewidth]{figures/optical_flow/kitti15/cospgd_5_00000.png}}
+&
+ \frame{ \includegraphics[width=0.32\linewidth]{figures/optical_flow/kitti15/cospgd_40_00000.png}}
+  \\
+  (d) Initial~flow~$epe=31.1$&
+  (e) CosPGD~5~itrs~$epe=14.28$&
+  (f) CosPGD~40~itrs~$epe=4.84$\\
+\end{tabular}
+}
+\caption{Comparing PGD and CosPGD as a targeted $\ell_{\infty}$-norm constrained attack on RAFT using KITTI15 validation set over various iterations. (a) shows the targeted prediction, a $\overrightarrow{0}$, and (d) shows the initial optical flow estimation by the network before adversarial attacks.
+EPEs between the target and the final prediction are reported, thus lower epe is better.
+(b) and (c) show flow predictions after PGD attack over 5 and 40 iterations respectively, while figures (e) and (f) show flow predictions after CosPGD attack over 5 and 40 iterations respectively. CosPGD significantly reduces the gap to target (a).}
+\label{fig:kitti_comparison}
+\end{figure*}
+
+\autoref{fig:kitti_comparison}(b), shows qualitatively that the model predictions are not significantly different from the initial predictions.
+The shape of the moving car is preserved to a considerable extent.
+The limited effectiveness of the PGD attack is further highlighted by increasing attack iterations to 40 (see \autoref{fig:kitti_comparison}(c)).
+Here, some initial predictions are still preserved, for example, the bark of the tree. 
+This is in contrast to when the model is attacked with CosPGD, a method that utilizes pixel-wise information.
+In \autoref{fig:kitti_comparison}(e), we observe that even at a small number of attack iterations (5), the model predictions are significantly different from the initial predictions, especially in the background and the shape of the moving car.
+The model is incorrectly predicting the motion of the pixels around the moving car.
+At high attack intensity, as shown in \autoref{fig:kitti_comparison}(f) with 40 iterations, the model's optical flow predictions are significantly inaccurate and exceedingly different from the initial predictions and very close to the target of $\overrightarrow{0}$.
+The model fails to differentiate the moving car from its background, moreover, the bark of the tree has completely vanished.
+In a real-world scenario, this vulnerability of the model to a relatively small perturbation~($\epsilon=\frac{8}{255}$) could be hazardous. 
+\revision{CosPGD provides us with this new insight.}
+A similar observation is made for the Sintel dataset as shown in \autoref{fig:teaser}.
+ %, demonstrating the 
+\subsection{Benchmarking on Further Tasks and Settings}
+\label{subsec:exp:gopro}
+\noindent\paragraph{Semantic Segmentation.}
+We observed the strength of CosPGD as a $\ell_{\infty}$-norm constrained attack in Figures~\ref{fig:semseg:semseg_pgd} \& \ref{fig:deeplab_comparison}.
+Furthermore, we show that the improved performance of CosPGD is not limited to $\ell_{\infty}$-norm constrained attacks.
+We observe that across $\ell_{p}$-norm constraints, the gap in performance of CosPGD w.r.t~other adversarial attacks significantly increases when increasing the number of attack iterations.
+This demonstrates that CosPGD can utilize the increase in attack iterations best and highlights the significance of scaling the pixel-wise loss with the cosine alignment of predictions rather than using a heuristic, argmax-based scaling as in SegPGD.
+
+Thus, we successfully demonstrate the benefit of CosPGD over existing adversarial attacks for semantic segmentation.
+
+
+\noindent\paragraph{Optical Flow.}
+\noindent\paragraph{Image Deblurring.}
+\begin{figure}[htb]
+    \centering % <-- added
+ \includegraphics[width=\linewidth]{figures/plots/nafnet_gopro_comparison.pdf}
+    \caption{Non-targeted $\ell_{\infty}$-norm constrained  CosPGD, PGD, and SegPGD attacks on NAFNet, recently proposed by \cite{nafnet} as the state-of-the-art network for image de-blurring on the GoPro dataset.CosPGD significantly outperforms the other attacks.
+    Lower PSNR and SSIM indicate a worse restoration and thus a stronger attack.
+    }
+    \label{fig:gopro}
+\end{figure}
+To demonstrate CosPGD's versatility, we last consider the vision transformer-based image restoration model NAFNet~\citep{nafnet}.
+NAFNet outperforms Restormer~\citep{Zamir2021Restormer} for image restoration tasks like image de-blurring and image denoising on clean data, thus implying that NAFNet learns good representations.
+\autoref{fig:gopro} depicts results for NAFNet on image deblurring of the GoPro dataset images.
+We observe that CosPGD is a significantly stronger attack than both PGD and SegPGD on this task.
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+In this work, we demonstrated across different downstream tasks and architectures that our proposed adversarial attack, CosPGD, is significantly more effective than other existing and commonly used adversarial attacks on several pixel-wise prediction tasks.
+We provide a new algorithm for evaluating the adversarial robustness of models on pixel-wise tasks.
+By comparing CosPGD to attacks like PGD, which were originally proposed for image classification tasks, we expanded on the work by \citet{segpgd} and highlighted the need and effectiveness of attacks specifically designed for pixel-wise prediction tasks beyond segmentation.
+We illustrated the intuition behind using cosine similarity as a measure for generating stronger adversaries and leveraging more information from the model and backed it with experimental results from different downstream tasks.
+This further highlights the simplicity and principled formulation of CosPGD, making it applicable to a wide range of pixel-wise prediction tasks and in principle extendable to all Lipschitz continuous bounds as a targeted as well as a non-targeted attack.
+
+
+\paragraph{Limitations.} 
+Most white-box adversarial attacks require access to ground truth labels ~\citep{fgsm, pgd, pgdl2, apgd, segpgd}.
+While this is beneficial for generating adversaries, it limits the applications of the non-targeted attacks like SegPGD as many benchmark datasets~\citep{kitti15, sintel1, sintel2, pascal-voc-2012} do not provide the ground truth for test data. %. 
+The wide-applicability of CosPGD allows it to be used as a targeted attack thus mitigating this limitation to a great extent.
+Yet, it would be interesting to study the attack on the ground truth test images in the non-targeted setting as well, due to the potential slight distribution shifts pre-existing in the test data.
+
+
+
+
+

@@ -1,0 +1,745 @@
+\title{Filtered not Mixed: Filtering-Based Online Gating for Mixture of Large Language Models}
+
+\begin{abstract}
+We propose \textbf{\colorwblk{MoE-F}} -- a formalised mechanism for combining \bm{$N$} pre-trained expert Large Language Models (LLMs) in online time-series prediction tasks by adaptively forecasting the best weighting of LLM predictions at every time step. Our mechanism leverages the conditional information in each expert's running performance to forecast the best combination of LLMs for predicting the time series in its next step. Diverging from static (learned) Mixture of Experts (MoE) methods, MoE-F employs time-adaptive stochastic filtering techniques to combine experts. By framing the expert selection problem as a finite state-space, continuous-time \textit{Hidden Markov model} (HMM), we can leverage the \textit{\colorwblk{Wohman-Shiryaev}} filter. Our approach first constructs $N$ parallel filters corresponding to each of the $N$ individual LLMs. Each filter proposes its best combination of LLMs, given the information that they have access to. Subsequently, the $N$ filter outputs are aggregated to optimize a lower bound for the loss of the aggregated LLMs, which can be optimized in closed-form, thus generating our ensemble predictor. Our contributions here are: \textbf{(I)} the MoE-F algorithm -- deployable as a plug-and-play filtering harness, \textbf{(II)} theoretical optimality guarantees of the proposed filtering-based gating algorithm, and \textbf{(III)} empirical evaluation and ablative results using state of the art foundational and MoE LLMs on a real-world \textit{Financial Market Movement} task where MoE-F attains a remarkable \emph{17\%} absolute and {48.5\%} relative F1 measure improvement over the next best performing individual LLM expert.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[H]% [h!] [b!]
+    \centering
+    \includegraphics[width=\textwidth]{figs/MoEF-Workflow/MoEF.pdf}
+    \caption{\textbf{\colorwblk{MoE-F} Gating Mechanism (Algorithm~\ref{algo:MoEFAbridged}):} Traditional MoEs, which process an input signal $x_{\cdot}$ by gating (at-most  \colorwg{\bm{$N$} experts}) and combining their predictions using a \colorwb{mixture mechanism}.  The \colorwblk{MoE-F} mechanism dynamically gathers feedback on each expert's performance and uses it to heuristically adapt its mixture mechanism online ({\color{arrowredfig1}{red arrow}}).  This updating step is performed optimally using stochastic filtering.}
+    \label{fig:MoEFSummary}
+\end{figure}
+Mixture of expert models (MoEs), such as the seminal Switch Transformers~\cite{moe_switch_fedus2022switch}, and more recently Mixtral~\cite{moe_jiang2024mixtral}, Gemini~\citep{Gemini}, DBRX~\cite{dbrx_MosaicAI2024} and many others (e.g.~\cite{saad2023active,chowdhury2023patch,li2024merge,puigcerver2024from}), have taken a center stage in the generative AI zeitgeist since they allow the number of parameters in large language models (LLMs) to be scaled-up while maintaining a roughly constant computational cost. 
+This is due to the sparse activation strategy employed by MoEs, wherein several offline experts are banked, and a gating network routes each input to a small subset of expert models when generating a prediction~\cite{moe_zhou2022mixture}.  Thus, only a few experts must be loaded into active memory at any given time, to generate a prediction from any novel input.  
+
+Currently, however, most MoE pipelines are designed for static tasks, i.e.\ where the gating mechanism is \textit{constant-in-time} which is tailored for tasks in which the input signal can reasonably be expected to remain unchanged as time passes.  This is, however, not compatible with most time series prediction paradigms, where the structure of inputs (fed into the LLM) evolves dynamically (often stochastically) in time. Such settings appear in a plethora of modelling fields; e.g.\ when inputs follow a \textit{stochastic differential equation} (SDE) as in mathematical finance~\cite{sharp1990stochastic} or physics~\cite{mao2007stochastic}.  In decision science~\cite{mdp_feinberg2012handbook} inputs are often assumed to follow a Markov process, or evolve according to an ordinary differential equation as in most reservoir computing applications~\cite{esn_jaeger2002adaptive}.  
+
+This paper addresses this gap by considering the case where the input signal $x_{\cdot}$ is a $d$-dimensional smooth path and the target process $Y_{\cdot}$ is a continuous-time $D$-dimensional stochastic process.  
+We are given $N$ auto-regressive, causal pre-trained expert models, 
+$f^{(1)},\dots,f^{(N)}: \bigcup_{t\ge 0} C([0:t],\mathbb{R}^d)\to \mathbb{R}$ 
+which map input paths such as $x_{\cdot}$ to one-dimensional predictions in time such that their predictions do not depend on future states of $x_{\cdot}$ or $Y_{\cdot}$ when predicting at any time $t\ge 0$.
+
+Instead of treating the target as being static we allow it to evolve dynamically in time.  We assume that there is a \textit{Hidden Markov process} $w_{\cdot}$ dictating which expert best approximates $Y_{\cdot}$, up to some Brownian measurement noise $W_{\cdot}$; thus, we postulate that $Y_{\cdot}$ evolves according to the stochastic differential equation (SDE) with stochastic drift given by Eq.~\eqref{eq:Y_agenti__mainform_specialcase}:
+\begin{equation}
+\label{eq:Y_agenti__mainform_specialcase}
+            Y_t
+        = 
+            Y_0
+        +
+            \underbrace{
+                \int_0^t\, 
+                    w_t^{\top}
+                    \,
+                    F(x_{[0,s]})
+                \,ds
+            }_{\text{Best Expert Estimate}}
+        + 
+            \underbrace{
+                    \int_0^t\,
+                        \,dW_s
+,
+            }_{\text{Idiosyncratic Residual Noise}}
+\end{equation}
+where the Markov process $w_{\cdot}$ randomly masks \textit{all but one} expert at any given time and concatenates the experts $F(x_{[0:t]})\eqdef (f^{(n)}(x_{[0:t]}))_{n=1}^N$.  
+The first term in~\eqref{eq:Y_agenti__mainform_specialcase}, 
+$\int_0^t\, w_t^{\top}\,F(x_{[0,s]})\,ds$, represents the true best sparse approximation of $Y_{\cdot}$ -- i.e. the maximally sparse ``single expert'' -- by the ensemble of experts $F$.  The second term, $ \int_0^t\,\,dW_s$, is an additive Gaussian noise with mean $0$ and variance $t$.
+
+The key challenge is that we cannot directly observe which expert has been masked by $w_{\cdot}$.  Thus, $w_{\cdot}$ acts as a \textit{unobservable signal} which we indirectly observe through our \textit{measurements} of each expert's running performance (process) $\ell^{(n)}_{\cdot}\eqdef (\ell^{(n)}_t)_{t\ge 0}$;
+}
+\begin{equation}
+\label{eq:observations_process}
+        \ell_t^{(n)} 
+     \eqdef 
+        - \left( Y_t \log(f^{(n)}(X_t)) + (1 - Y_t) \log(1 - f^{(n)}(X_t)) \right)
+.
+\end{equation}
+\hfill\\
+From this perspective, \textit{the online mixture of experts problem} defines $N$ parallel stochastic filtering problems; wherein each expert seeks to \textit{individually} construct an \textit{optimal estimate} $\pi_t^{(n)}$ of which experts are being masked by $w_t$, at time $t\ge 0$, given only the information accessible to them in~\eqref{eq:observations_process}.  
+Our objective is thus three-fold: 1) How to solve each individual filtering problem thus yielding $N$ separate estimates $\{\pi_t^{(n)}\}_{n=1}^N$ of the masking probabilities $w_{\cdot}$ at any time $t\ge 0$. 2) How to dynamically aggregate each of these estimates into a single mixture of experts.  3) How to dynamically infer changes in the transition probabilities, $Q_{\cdot}$ from the data to optimize steps (1) and (2); preferably using a closed-form updates of $Q$.   The solution to steps (1)-(3) is given by our MoE-F procedure (Algorithm~\ref{algo:MoEFAbridged}).
+\paragraph{Contributions}
+We construct a dynamic gating mechanism (Algorithm~\ref{algo:main}) for an online mixture of expert (LLM) models for time-series prediction tasks.  
+Using tools from stochastic calculus and stochastic filtering theory, we derive an expression for an optimal gating mechanism (Theorem~\ref{thrm:filtering_equations}), where optimality is in the sense that gating mechanism is the conditional expectation of $w_{\cdot}$ given the information in the cumulative loss function available to each expert.   
+We also show that our gating mechanism (Algorithm~\ref{algo:main} lines 32-42) to update our prior belief on the unobservable infinitesimal generator, $Q$, of $w$ optimizes a lower bound for the expected performance of the online MoE (Theorem~\ref{thrm:filtering_equations}).  
+Additionally, we provide various other theoretical guarantees (Propositions~\ref{prop:invertibile_pertrubations_rowstochmatrix} and~\ref{prop:pertrubation_bound_KL}) supporting the main regularization used in post-filtering steps of our algorithm.
+
+ 
+
+
+
+
+
+\section{Preliminaries}
+
+\label{sec:prelim}
+Fix one continuously differentiable path $x_{\cdot}:[0,\infty)\to \R^d$ and a complete filtered probability space $(\Omega,\mathcal{F},\mathbb{F}\eqdef (\mathcal{F}_t)_{t\ge 0},\mathbb{P})$ with right-continuous filtration $\mathbb{F}$ taking values in $\mathbb{R}^D$ supporting a $1$-dimensional Brownian motion $W_{\cdot}\eqdef (W_t)_{t\ge 0}$.  We consider a $1$-dimensional \textit{target (stochastic) process} $Y_{\cdot}\eqdef (Y_t)_{t\ge 0}$, which we would like to predict with our MoE models $F$, where $F$ is as in~\S~\ref{sec:intro}.  
+Assume that $Y_{\cdot}$ evolves according to the dynamics in Eq.~\eqref{eq:Y_agenti__mainform_specialcase}.  
+We assume that $w_{\cdot}$ is a hidden Markov process with values in the standard basis $\{e_n\}_{n=1}^N$ of $\mathbb{R}^N$.  The evolution of $w_{\cdot}$ is governed by its intensity, or \textbf{Q}, matrix; by which we mean a map $Q_{\cdot}^{(n)}:[0,\infty)\to \R^{N\times N}$ describes the \textit{rate at which the transition probabilities} of the Markov chain $w_{\cdot}$ change.  Formally, for $i,j=1,\dots,N$ and $t,\Delta > 0$ its $(i,j)^{th}$ entry  $Q_t^{i,j}\eqdef  (Q_t)_{i,j}$ is given by
+$%\begin{align*}
+    \big|
+        \mathbb{P}(w_{t+\Delta}=e_i|w_t = e_j)
+        -
+        I_{i=j}
+        -
+        \Delta \cdot 
+        Q_t^{n:i,j}
+    \big|
+        \in 
+    o\big(\Delta \big)
+.
+$%\end{align*}
+\begin{comment}
+The key challenge is that we cannot directly observe $w_{\cdot}$ as $Y_{\cdot}$ need not be \textit{realizable} by our mixture of experts.  Thus, $w_{\cdot}$ acts as a \textit{unobservable signal} which can only implicitly observe via the \textit{observable measurements} made through the running performance (process) of each expert $\ell^{(n)}_{\cdot}\eqdef (\ell^{(n)}_t)_{t\ge 0}$; where $t\ge 0$ and $n=1,\dots,N$.}
+\[
+        \ell_t^{(n)} 
+     \eqdef 
+        - \left( Y_t \log(f^{(n)}(X_t)) + (1 - Y_t) \log(1 - f^{(n)}(X_t)) \right)
+.
+\]
+The objective of the $n^{th}$ expert is to construct an \textit{optimal prior} distribution $\pi_t^{(n)}$ at time $t\ge 0$, dictating their best guess of which model was not masked by $w$, at any given time $t$, i.e.\ which expert $f(x_{[0:t]})$ is responsible for the behaviour of $Y_{\cdot}$ at time $t$, up to the idiosyncratic Brownian noise term $\int_0^t\,W_s\,ds$.
+\end{comment}
+The following regularity conditions of the path $x_{\cdot}$ and on the transition matrix $Q_{\cdot}$ will be required throughout our paper.
+\begin{assumptions}[Regularity Conditions]
+\label{ass:regularity_SW_filter}
+The path $x_{\cdot}:[0,\infty)\to \mathbb{R}^d$ is once continuously differentiable and there is a constant $C>0$ such that, for each $t\ge 0$ and $i,j=1,\dots,d$, $(Q_t)_{i,j}\le C$.
+\end{assumptions}
+
+\paragraph{Helper Functions}
+Our MoE-F algorithm will rely on the following helper functions: \bm{$A$}, \bm{$\bar{A}$}, \bm{$B$}, \bm{$F$}, which we describe before providing the recursions for $\pi_{\cdot}^{(n)}$. Intuitively, the first two helper functions, \bm{$A_t$}  and \bm{$\bar{A}_t$} compute the gradient and average the gradient of the $n^{th}$ expert's prediction of the target time series's path $y_{\cdot}$ up to time $t$, accounting for the sensitivity of the $n^{th}$ expert to changes in the input path at time $t$. Here, the averaging is taken uniformly over which ``latent expert'' is truly active.
+\begin{equation}
+\label{eq:helperfunctions__Grad}
+\resizebox{0.9\linewidth}{!}{$% <------ Don't forget this %
+\begin{aligned}
+    A_t^{(n)}(w,y_t)
+    & \eqdef 
+    \ifthenelse{\boolean{is_loss_L2}}{
+        2\left(y_t - f^{(n)}(x_{[0:t]})\right)
+        \left(
+            w_t^{\top} F(x_{[0:t]}) 
+            - 
+            \Delta f^{(n)}(x_{[0:t]})
+            +
+            1 % e^{t\ln(\delta^8)}
+        \right)
+    }{
+        -\frac{
+            \big(y_t - f^{(n)}(x_{[0:t]})\big)
+            \,
+            \Delta f^{(n)}(x_{[0:t]})
+        }{
+            \big(1 - f^{(n)}(x_{[0:t]})\big)
+            \,
+            f^{(n)}(x_{[0:t]})
+        } 
+        -
+        \log\biggl(
+            \frac{
+                f^{(n)}(x_{[0:t]})
+            }{
+                1 - f^{(n)}(x_{[0:t]})
+            }
+        \biggr)
+        \,
+        [w_s^{\top} F(x_{[0:s]})]
+    }, 
+\end{aligned}
+$}
+\end{equation}
+where the helper functions $A_t$ and $\bar{A}_t$ are given by:
+\begin{equation}
+\begin{aligned}
+    A_t(w,Y_t) 
+    &
+    = 
+    \left(A_t^{(n)}(w,Y_t)\right)_{1 \leq n \leq N}
+\\
+    \bar{A}_t^{(n)}(\pi^{(n)},y_t) 
+    & 
+    \eqdef \sum_{i=1}^N A_t^{(n)}(e_i,y_t) \pi^{(n:i)}
+\end{aligned}
+\end{equation}
+where the sensitivity of the $n^{th}$ expert at time $t$ to changes in the input path $x_{\cdot}$ is: 
+\begin{equation*}
+    \Delta f^{(n)} \eqdef f^{(n)}(x_{[0:t]}) - f^{(n)}(x_{[0:t-1]})
+    .
+\end{equation*}
+Helper \textbf{function} \bm{$B$} quantifies the gradient of the $n^{th}$ expert prediction's loss function (e.g. $L^2$, cross-entropy) w.r.t. $y_{\cdot}$ ignoring changes in the input path $x_{\cdot}$
+\begin{equation}
+\label{eq:helperfunctions_B}
+    B_t^{(n)}(y_t) \eqdef 
+    \ifthenelse{\boolean{is_loss_L2}}{
+            2^{3/2} \left( y_t - f^{(n)}(x_{[0:t]}) \right) e^{t\ln(\delta^4)}
+        }{
+            -\log\biggl(
+                \frac{
+                    f^{(n)}(x_{[0:t]})
+                }{
+                    1 - f^{(n)}(x_{[0:t]})
+                }
+            \biggr)
+        }
+\end{equation}
+The helper \textbf{function}~\bm{$F$} concatenates the $N$ experts $ F(x_{[0:t]}) \eqdef \big(f^{(1)}(x_{[0:t]}), \dots, f^{(N)}(x_{[0:t]})\big)$.
+
+
+
+\section{Main Theoretical Guarantee}
+
+\label{s:Theoretical_Gauarantees}
+Our MoE-F algorithm revolves around the following set of \textit{stochastic filtering equations}.  Each filtering equation corresponds to the best estimate of a single expert on masking process $w_{\cdot}$ given only the information available in their \textit{running performance}. 
+Interpreting ``best estimate'' in the $L^2$ sense, see \citep[page 104]{kallenberg1997foundations}, each seeks to predict the conditional distribution of $w_{\cdot}$ given the $\sigma$-algebra $\mathcal{F}_t^{(n)}\eqdef \sigma\{\ell_s^{(n)}\}_{0\leq s \leq t}$ generated by the running loss process $\ell_{\cdot}^{(n)}$, defined in~\eqref{eq:observations_process}; i.e.\ 
+\begin{equation*}
+    \pi_t^{(n)} \eqdef \big( \mathbb{P}\big( w_t = e_i \mid \mathcal{F}_t^{(n)} \big) \big)_{i=1}^N 
+.
+\end{equation*}
+An essential property of our filtering equations are that they provide a \textit{closed-form} recursion for $\pi_{\cdot}^n\eqdef (\pi_t^n)_{t\ge 0}$ depending only on each of the expert models and on the accumulating observations from the target process $Y_{\cdot}$.  
+This recursion is key as: 1) it avoids any Monte-Carlo simulation in estimating $\pi_t^{(n)}$, and 2) it is available in closed-form, which is rarely the case in stochastic filtering.
+
+\begin{theorem}[Optimal Optimistic Prior for $n^{th}$ Expert]
+\label{thrm:filtering_equations}
+Consider the binary cross-entropy loss $
+        \ell(\hat{y},y)
+    \eqdef 
+        y\,\log(\hat{y}) + (1-y)\,\log(1-\hat{y})
+$ and fix a path $x_{\cdot}\in C^1(\mathbb{R})$. 
+Under Assumptions~\ref{ass:regularity_SW_filter}, the best a posteriori estimate of the $n^{th}$ expert, $\pi_t^{(n)}$, satisfies the 
+following 
+stochastic differential equation
+\begin{align}
+\label{eq_thrm:filtering_equations__MAINTEXT}
+        \pi_t^{(n:i)}
+    = 
+        w_0^i
+        + 
+        \int_0^t \,
+            (Q_s)_{i}^{\top}\pi_s^{(n)}
+        \,
+        ds
+    + 
+        \int_0^t \,
+            \frac{
+                \pi_s^{(n:i)}
+                \,
+                \big(
+                    A_s(e_i,Y_{[0:s]})
+                    -
+                    \bar{A}_s(
+                    \pi^{(n)}_{s}
+                    ,
+                    Y_{[0:s]})
+                \big)
+            }{
+                B_s(Y_{[0:s]})
+            }
+        d\overline{W}_u^{(n)}
+,
+\end{align}
+where $(Q_t)_{i}$ denotes the $i^{th}$ row of the transitions matrix $Q_t$ at time $t\ge 0$, $w_0^i\eqdef \mathbb{P}(w_0=e_i)$, 
+and the ``innovations process'' $\overline{W}_{\cdot}^{(n)}\eqdef (\overline{W}_t^{(n)})_{t\ge 0}$ is the following $(\mathbb{P},\mathcal{F}_{\cdot}^{n})$-Brownian motion
+    \begin{equation*}
+            \overline{W}_s^{(n)}
+        \eqdef 
+            \int_0^s
+                \frac{
+                    dL^{(n)}_{[0:u]}
+                    -
+                    \bar{A}_u(Y_{[0:u]})
+                }{
+                    B_u(Y_{[0:u]})
+                }
+            du
+    ,
+    \end{equation*}
+where the (stochastic) differential of the ``running loss process'' is given by
+\begin{equation*}
+\resizebox{1\linewidth}{!}{$%% BEGIN RESIZE BOX$}
+\begin{aligned}
+        dL^{(n)}_{[0:u]}
+    =
+        d\ell(Y_t,\hat{f}^{(n)}(x_{[0:t]})
+    =
+            \frac{
+                \big(Y_s-f^{(n)}(x_{[0:t]})\big)
+                \,
+                \Delta f^{(n)}(x_{[0:t]})
+            }{
+                \big(1-f^{(n)}(x_{[0:t]})\big)
+                \,
+                f^{(n)}(x_{[0:t]})
+            } 
+        +
+            \log\biggl(
+                \frac{
+                    f^{(n)}(x_{[0:t]})
+                }{
+                    1- f^{(n)}(x_{[0:t]})
+                }
+            \biggr)
+            \,
+            [w_t^{\top}F(x_{[0:t]})]
+        \,dt
+    +
+        \log\biggl(
+            \frac{
+                f^{(n)}(x_{[0:t]})
+            }{
+                1- f^{(n)}(x_{[0:t]})
+            }
+        \biggr)
+            \,
+            dW_t
+    .
+\end{aligned}
+$}
+\end{equation*}
+\end{theorem}
+We are now prepared to describe our MoE-F algorithm, which is build on Theorem~\ref{thrm:filtering_equations} and Gibbs-measure based aggregation techniques, e.g.\ as in~\cite{alquier2008pac,meta-learning_andrychowicz2016learning,rothfuss2023scalable}.
+
+
+
+
+
+\section{The MoE Filtering (MoE-F) Algorithm and Its Guarantees}
+
+\begin{wrapfigure}[16]{r}[0pt]{0.60\textwidth}
+\begin{minipage}[t]{0.65\textwidth}
+\scalebox{0.9}{
+  \begin{algorithm}[H]
+    \caption{MoE-F Algorithm}
+    \label{algo:MoEFAbridged}
+    \SetAlgoLined
+    \footnotesize % Adjust the font size as needed
+      Initialize $\pi$, $P$, and $Q$\;
+      \tcc{Step 1 - Dynamically Filter Mixture Weights}
+      \SetKwBlock{ForParallel}{For $n=1,\dots,N$ in parallel}{end}
+    \ForParallel{% \For{$i=1,\dots,N$}{
+      $\operatorname{drift} \gets Q_{t-1}^{\top}\pi_{t-1}^{(n)}  $\;
+      $\Delta L 
+      \gets
+      \ell(f^{(n)}(x_{[0:t-1]}))-\ell(f^{(n)}(x_{[0:t-2]}))
+      $\;
+      $\Delta W \gets 
+            (
+               \Delta L 
+               -
+               \bar{A}_{t-1}(\pi^{(n)}_{t-1},Y_{[0:t-1]}))
+             ) 
+      /B_{t-1}^{(n)}(Y_t)
+      $\;
+      $\operatorname{diff}\gets 
+        (
+            \pi^{(n:i)}(A_{t-1}(e_i,Y_{[0:t-1]}) - \bar{A}_{t-1}(\pi^{(n)}_{t-1},Y_{[0:t-1]})))
+        )
+      /%}{
+        B_{t-1}^{(n)}(Y_t)
+      $
+      \;
+      $\pi_t^{(n)}\gets \pi_{t-1}^{(n)} + \operatorname{drift} +\operatorname{diff} \, \Delta W$\;
+        $\hat{Y}^{(n)}_t
+        \gets 
+        (\pi^{(n)})^{\top} F(x_{[0:t]})
+        $\;
+        $s_n \gets 
+            \ell
+            \big(
+                Y_t 
+                ,
+                    \hat{Y}_t^{(n)}% ({\pi^{(n)}})^{\top}\, F(x_{[0:t]})
+            \big)
+        $
+        \;
+      }
+    \tcc{Step 2 - Create Mixture}
+    $\bar{\pi} \gets \big( e^{-\lambda \, s_n} / (\sum_{i=1}^N\, e^{-\lambda \, s_i} \big) \big)_{n=1}^N$;
+    $\hat{Y}_t\eqdef \bar{\pi}^{\top} (\hat{Y}^{(n)}_t)_{n=1}^N$;
+
+    \tcc{Step 3 - Use Feedback to Update $Q$}
+            For{$n = 1,\dots, N$}{
+                $P^{(n)}\gets \bar{\pi}$
+            }
+    $
+    P\gets (1-\alpha) \, P + \alpha I_N
+    $\;
+    $Q
+    \gets 
+    \operatorname{ReLU}(\log(P))-\operatorname{diag}(\bar{1}_N^{\top}\operatorname{ReLU}(\log(P)))$
+    \;
+\Return{MoE-F Prediction $\hat{Y}_t$
+}\;
+  \end{algorithm}
+}
+\end{minipage}
+\end{wrapfigure}
+
+Our MoE-F%
+}%
+~(Algorithm~\ref{algo:MoEFAbridged}) operates in \textit{three} steps.  In step \bm{$1$}, each expert proposes their best estimate of the $w_t$, given information in their running loss by using their respective filtering equation in Theorem~\ref{thrm:filtering_equations}.  
+Next, in step \bm{$2$}, each of the expert weight estimates $\pi_t^{(1)},\dots,\pi_t^{(N)}$ are aggregated using a Gibbs measure-based aggregation wherein the relative importance of each expert prediction is weighted according to the credibility they have gained from showcasing accurate historical predictions. 
+Finally, in step \bm{$3$}, the $Q$ matrix estimate is updated using the updated belief on the transition of masking process $w_{\cdot}$ based on the historical performance of each expert congruent with Markov chains theory.
+
+\paragraph{{Step \bm{$1$} : Parallel Optimal Filtering for each Expert (\texorpdfstring{\Cref{algo:MoEFAbridged}}{Algorithm}, Lines \texorpdfstring{$3$-$11$)}{3-11}}}
+Lines $3$-$8$ of our \algoacronym algorithm is simply a time discretization of the stochastic optimal filtering equations in~\eqref{eq_thrm:filtering_equations__MAINTEXT} according to the standard Euler-Maruyama scheme, see e.g.~\cite{hutzenthaler2015numerical}.  This can be performed in parallel, with each parallel computing branch corresponding to a single expert.  
+As in most discrete-time filtering implementations, e.g.~\cite{grewal2014kalman,kim2018introduction}, the discretized infinitesimal change in the running loss of the $n^{th}$ expert given by $d\ell_{[0:t]}^{(n)}$ is straightforward to computed as: 
+\[
+    \ell_t^{(n)} - \ell_{t-\Delta}^{(n)}
+\]
+(granted that $t\ge \Delta$). Thus, the \textit{innovations process} $\bar{W}$ is simply the change in $\ell^{(n)}$ over the time increment $[t-\Delta:t]$ minus $\bar{A}(Y_{[0:t]})$, re-normalized by $B_i(Y_{[0:t]})$.  Importantly, this means that it is \textit{computable online from the incoming target process} $Y_{\cdot}$.
+
+Next, in line $8$, each expert (still in parallel) proposes their best estimate $\hat{Y}_t^{(n)}$ for $Y_t$ using their mixture weights, estimated only using their (local) information in their historical loss.  This yields
+\begin{equation}
+\label{eq:best_prediction__filter___n}
+    \hat{Y}^{(n)}_t 
+\eqdef 
+    \sum_{i=1}^N\,
+        \pi_t^{(n:i)}\, f^{(n)}(x_{[0:t]})
+.
+\end{equation}
+Finally, in line $9$, the \textit{credibility} of each expert is measured (still in parallel) by evaluating the loss between the target process $Y_t$ and their best (individual) prediction $\hat{Y}_t^{(n)}$ of it.  This credibility metric is summarized by their score:
+\begin{equation}
+\label{eq:score}
+        s_m 
+    \eqdef 
+        - \left( Y_t \log(f^{(n)}(X_t)) + (1 - Y_t) \log(1 - f^{(n)}(X_t)) \right)
+.
+\end{equation}
+
+\paragraph{Step \bm{$2$} - Robust Expert Aggregation (\texorpdfstring{\Cref{algo:MoEFAbridged}}{Algorithm}, Lines \texorpdfstring{$13$-$14$)}{13-14}}
+\hfill\\
+Since the prediction quality of each expert $\hat{Y}_t^{(n)}$ has been compressed into a score $s_n$, via~\eqref{eq:score}, these scores are used to aggregate the expert predictions into a single prediction $\hat{Y}_t$ of $Y_t$.  This is done using the well-studied Gibbs-aggregation approach with the soft\textit{min} function (since \textit{lower} loss implies \textit{better} score here).
+Line $13$ computes these aggregation weights
+\begin{equation}
+\label{eq:barpi}
+        \bar{\pi}_t
+    =
+        \Big(
+            e^{-\lambda \, s_n}/
+            \sum_{i=1}^N
+            \,
+                e^{-\lambda \, s_i}
+        \Big)
+.
+\end{equation}
+Using these aggregation weights, our MoE-F algorithm generates a joint predictor in line $14$ via
+\begin{equation}
+\label{eq:softmax_aggregation}
+        \hat{Y}_t
+    =
+        \sum_{n=1}^N\,
+            \hat{Y}_t^{(n)}
+            \, (\bar{\pi}_t)_n
+.
+\end{equation}
+We skip the discussion on the optimality of softmin/softmax-type aggregation mechanisms, as these are well-understood; e.g.\ in the meta-learning~\cite{meta-learning_andrychowicz2016learning} and Bayesian optimization communities~\cite{meta-learning_chen2017learning}.
+\paragraph{Step \bm{$3$} - Follow-The-Leader Updates for the HMM Dynamics \texorpdfstring{i.e.~$Q$ -  (\Cref{algo:MoEFAbridged}}{Algorithm}, Lines \texorpdfstring{$13$-$14$)}{13-14}}
+\hfill\\
+
+\begin{wrapfigure}[21]{l}{0.3\textwidth}
+\centering
+\includegraphics[width=1\linewidth]{figs/MoEF-Workflow/MoE_Step3a.pdf}
+\caption{\textbf{Step 3 - Transition Probability Updates:} The \colorwr{probabilities (in red)} symbolize the old transition probabilities for $w_{\cdot}$ before the performance of each expert has been scored with new arrived data.  The \colorwg{probabilities (in green)} are the updated transitions of $w_{\cdot}$ using new data.  
+After the update $w_{\cdot}$ tends not to transition a poorly predicting experts randomly; rather, it tends to randomly move to well-forming experts and stay there.}
+\end{wrapfigure}
+
+It remains to infer dynamics, namely $Q$, for the hidden Markov process $w_{\cdot}$, which further improves the predictive performance of our ensemble. 
+We will employ a data-dependant ``follow-the-leader'' type of update rule where we increase our assumed probability that the HMM $w_t$ will be using the $n^{th}$ user if that expert is performing relatively well.  Thus, over time, poorly performing experts will be almost ignored, and well-performing experts will be focused on.  We thus begin by defining our estimate for the \textit{Markov transition matrix} at time $t\ge 0$, of $w_t$, as having all its rows given by the ``credibility type scores'' in~\eqref{eq:barpi}
+\begin{equation}
+\label{eq:Markov_transition}
+        P_t 
+    = 
+        (\bar{\pi}_t\dots,\bar{\pi}_t)^{\top}
+.%,
+\end{equation}
+If $(Q_t)_{t\ge 0}$ were constant in time, i.e.\ $Q_t=Q$ for all $\ge 0$, then the Markov transition-rates matrix $Q_t$ would be given by $P_t=e^{tQ}$, where $e^{\cdot}$ is a matrix exponential.  
+Unfortunately, however, the matrix~\eqref{eq:Markov_transition} is singular, and thus its matrix logarithm need not be well-defined (just as $\log(0)$ is not defined in the $1\times 1$ case).  This can be solved with a surprisingly simple perturbation of $P_t$
+\begin{equation}
+\label{eq:perturbation_def}
+    P_t^{\alpha} 
+\eqdef 
+    (1-\alpha)P_t^{\alpha}
+    +
+    \alpha I_N
+,
+\end{equation}
+where $\alpha$ is any hyperparameter in $(0,1)$ (see Proposition~\ref{lem:invertibile_pertrubations_rowstochmatrix} below).  
+
+If, moreover, $P_t^{\alpha}$ has no negative eigenvalues, then the (principle branch of its) matrix logarithm $\log(P_t^{\alpha})$ is well-defined, and it is a \textit{valid candidate} for being an infinitesimal generator of a Markov process since its rows all sum to $0$ (see Proposition~\ref{lem:invertibile_pertrubations_rowstochmatrix} below).  However, it is not generally the case that $\log(P_t)$ is a valid generator of a Markov chain.  Thus, we take our \textit{update} for $Q_t$ to be the best approximation of $\log(P_t)$ in the $\ell_{\infty}$-matrix norm
+\begin{equation}
+\label{eq:best_approx}
+Q_t \eqdef 
+\operatorname{argmin}\, \max_{i,j=1,\dots,N}\, |Q_{i,j} - \log(P_t^{\alpha})_{i,j}|
+,
+\end{equation}
+where the (arg)minimum is taken over all $N\times N$ matrices, which are Markov generators; which is a closed subset of the set of stochastic matrices by~\cite{kingman1962imbedding}.
+We use the surprising result of~\citep[Theorem 12]{davies2010embeddable} which shows that $Q_t$ exist and its off-diagonal elements are given in closed-form by
+\[
+    (Q_t)_{i,j} 
+    =
+        \operatorname{ReLU}(
+            \log(P)
+        )
+\]
+and its diagonal elements are given by the constraint that $\sum_{j=1}^N\,(Q_t){i,j}=0$.  Thus, each $Q_{i,i} = -\sum_{j\neq i}\, Q_{i,j}$.  
+
+
+\subsection{Auxiliary Guarantees for Step 3}
+We provide guarantees for the validity of the perturbation to the transition probability defined in~\eqref{eq:perturbation_def}.
+\label{s:AuxGaurstep3}
+\begin{proposition}[Regularity of Perturbations]
+\label{prop:invertibile_pertrubations_rowstochmatrix}
+Let $\lambda>0$, $s_1,\dots,s_N\in\mathbb{R}$, $\bar{\pi}$ be as in~\eqref{eq:barpi} and $P_t$ be defined by~\eqref{eq:Markov_transition}.  
+For every $\alpha \in (0,1)$, the matrix $P_t^{\alpha}$ in~\eqref{eq:perturbation_def}, is invertible and (row) stochastic.  
+If, moreover, all its real eigenvalues are non-negative, then $\log(P_t^{\alpha})$ is well-defined and its rows sum
+to $0$.
+In particular, setting $\alpha\ge 1-1/N$ guarantees that $\log(P_t^{\alpha})$ exists, if $P_t^{\alpha}$ has real eigenvalues.
+\end{proposition}
+Since we are perturbing the rows of $P_t$, when building $P_t^{\alpha}$, it is natural to ask whether the probability distributions defined by the rows of $P_t^{\alpha}$ (whose state-space is $\{e_n\}_{n=1}^N$) depend continuously on $\alpha$.  Indeed, this is the case, and the next result shows that the $\operatorname{KL}$-divergence of the rows of $P_t^{\alpha}$ and those of $P_t$ (i.e.~$\bar{\pi}$) are necessarily very close when $\alpha$ is small.
+\begin{proposition}[{Stability of Perturbations}]
+\label{prop:pertrubation_bound_KL}
+In the setting of Proposition~\ref{prop:invertibile_pertrubations_rowstochmatrix}, we have that
+\[
+        \max_{i=1,\dots,N}
+        \,
+        \operatorname{KL}(\bar{\pi}|(P_t^{\alpha})_i)
+    \le 
+        2\alpha
+        \,
+        \Big(
+            -\frac{
+                \log(\pi_{\operatorname{min}})
+            }{
+                1/\pi_{\operatorname{min}} - 1
+            }
+            -
+            \frac{
+                \log((1-\alpha)\,\pi_{\operatorname{min}})
+            }{
+                1/((1-\alpha)\,\pi_{\operatorname{min}}) - 1
+            }
+        \Big)
+\]
+where $\pi_{\operatorname{min}}=\min_{i=1,\dots,N}\, \bar{\pi}(>0)$ and $(P_t^{\alpha})_i$ denotes the $i^{th}$ row of $P_t^{\alpha}$. 
+\end{proposition}
+
+
+
+\section{Experiments}
+
+\subsection{Experimental Setup}\label{ssec:experiments-setup}
+We show the efficacy of our proposed \algoacronym algorithm by using various SOTA class large language models on the \textit{financial market movement} prediction task. 
+
+\paragraph{Task} 
+The Financial Market Movement (FMM) prediction task for experts' evaluation can be defined as a ternary or binary market movement direction \textit{classification task} among the labels' set $C$: \{ \colorwr{\textit{`Fall'}}, \colorwb{\textit{`Neutral'}}, \colorwg{\textit{`Rise'}} \} conditioned on a history (or, expert memory) of window size $H$ (i.e., $P_{w_{t+1}|w_{t-H:t}}$) -- similar to the auto-regressive or causal generative language model (causal LM) training objective.
+
+\paragraph{Experts}\label{ss:experts} 
+We set up a diverse list of SOTA general purpose instruction-tuned LLMs as experts for the experiments on our proposed \algoacronym filtering algorithm. 
+For single LLM experts, we use Meta's open-weights models: Llama-2 (7B, 70B), Llama-3 (8B, 70B)~\cite{touvron2023llama}. For mixture of experts (MoE) architecture models, we pick a couple of SOTA open-weights models: Mixtral (8x7B)~\cite{moe_jiang2024mixtral} -- which is a mixture of 8 Mistral (7B)~\cite{mistral_jiang2023mistral} models -- and DBRX-Instruct~\cite{dbrx_MosaicAI2024} with 132B total parameters and a mixture of 16 (fine-grained, smaller, 65x more combinations of) experts. 
+For evaluation, we deployed these open-weights models as vLLM~\cite{vllm_kwon2023efficient} OpenAI compatible API endpoints and ran the dataset queries against them. We use API/model configurations like \textit{guided-choice}, \textit{max-tokens} to format class label converged expert responses alongside specific prompt instructions. Additionally, we use the closed-source, latest variant of the GPT-4~\cite{openai2023gpt4} class of models: GPT4o, using the OpenAI API. These collection of experts are leading foundation models on current performance benchmarks on language understanding (MMLU~\cite{benchmark_mmlu_hendrycks2020measuring}), programming (HumanEval~\cite{benchmark_humaneval_chen2021evaluating}), math (GSM8K~\cite{benchmark_gsm8k_cobbe2021training}) tasks and other relevant concurrent LLM benchmarks~\cite{song2023globalbench, liang2022holistic}. 
+
+\paragraph{Datasets}\label{ss:datasets} 
+For real-world experiments on the defined FMM task, we use the US equities market movement (NYSE ticker: \$SPY) dataset \colorwb{NIFTY}~($\mathcal{D}_{LM}$)~\cite{fin-dataset_saqur2024nifty}. Table~\ref{tab:NIFTY-test-stats} tabulates its test split statistics.
+
+Each sample of the $\mathcal{D}_{LM}$ contains high-quality, processed (one-turn) conversational queries for an expert instruction fine-tuned LLM, where a query, $x_q^t$, comprises of a prompt $x_p^t$ and a response $x_r^t$, i.e.,  \( x_q^t = (x_p^t; x_r^t) \) corresponding to a day (or, time-step) $t$.
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+\begin{minipage}[t]{0.5\textwidth}
+    \centering
+    \captionof{table}{Statistics of NIFTY test split}
+    \label{tab:NIFTY-test-stats}
+    \setlength{\tabcolsep}{2pt} % Adjust the space between columns
+    \renewcommand{\arraystretch}{1.2}
+    \begin{adjustbox}{width=\textwidth}
+    \begin{tabular}{lc}
+    \toprule
+    Category & Statistics \\
+    \midrule
+    Number of days ( \bm{$T$}) / \colorwblk{increment} (\colorwblk{$\Delta t$})                           & \bm{$317$}  / \colorwblk{1} \\
+    Label support (\colorwr{Fall} / \colorwb{Neutral} / \colorwg{Rise})     & \colorwr{73} / \colorwb{143} / \colorwg{101} \\
+    Date range (\textit{start} to \textit{end})                                 & 2019-02-13 to 2020-09-21 \\
+    \bottomrule
+    \end{tabular}
+    \end{adjustbox}
+\end{minipage}
+\end{wrapfigure}
+
+For evaluation, at each time step $t$, an expert LLM is prompted ($x_{p}^t$) to predict the market movement the following day (i.e., $t+1$), based on the market's current contextual information (relevant financial news headlines and the market's financial numerics -- like the standard OHLCV and common technical indicators -- from past few days capturing trends). Fig.~\ref{fig:nifty-news} depicts a snapshot of an expert prompt $x_p^t$ for elucidation. Please see Fig.
+
+\begin{figure}[tp!]
+    \begin{center}
+    \centerline{\includegraphics[width=\textwidth]{figs/nifty-news-2c-12fsz.pdf}}
+    \caption{Example snapshot of the `news` component on 2020-02-06, at the upstart of the global coronavirus epidemic (the text colors here convey \colordr{negative} and \colorwg{positive} sentiments). An expert policy, $\pi_{LM}$'s prompt is composed of a task instruction as prefix,  concatenated with the market context, and this news value concatenated: $s.t.$ 
+    $x_p \leftarrow (x_{prefix}; x_{context}; x_{news})$. 
+    }
+    \label{fig:nifty-news}
+    \end{center}
+    \vskip -0.2in
+\end{figure}
+
+For our ablative experiments, we utilise three additional datasets, namely StockNet aka. \colorwb{\texttt{ACL18}}, \colorwb{\texttt{BigData22}} and \colorwb{\texttt{CIKM}} datasets~\cite{fin-dataset_acl18_stocknet_xu2018stock, fin-dataset_bigdata22_soun2022accurate, fin-dataset_cikm_wu2018hybrid}. These datasets have similar overarching (FMM) task design, but the prompted contextual information (e.g. social media opinions) and targeted asset classes (e.g. individual stock tickers, or price of gold) differ.
+
+\begin{figure}[tp]
+    \centering
+    \includegraphics[width=.98\textwidth]{figs/market_movement_plot.pdf} 
+    \caption{Depicts three randomly sampled windows of seven (trading) days within the NIFTY~\cite{fin-dataset_saqur2024nifty} \textit{test} period, for process visualization across varying market regimes --- \textbf{left}: \textit{mixed} market with high fluctuations, \textbf{middle}: \textit{neutral}, and \textbf{right}: \textit{bearish} market. In all sub-plots, the ground-truth (market) trajectory is in \colorwblk{black}, and the filtered trajectory is depicted in \colorwg{dotted green}. All other seven experts' (Table~\ref{tab:moe-llms-nifty-results}) predictions are over-layed as scatter-plot points. No values for non-trading days.}
+    \label{fig:trajectory_moe-f}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=.98\textwidth]{figs/expert_weights_heatmap_coolwarm.pdf} 
+    \caption{The heatmap of expert weights and subsequent rankings (as annotations) for the sampled windows in Fig.~\ref{fig:trajectory_moe-f}.}
+    \label{fig:expert-weights_heatmap}
+\end{figure}
+\newpage
+\subsection{Results: \colorwblk{MoE-F} on Mixture of (Mixture of) Experts }
+\label{ss:results-main}
+\begin{table}[tp!]
+\centering
+\captionsetup{skip=5pt}
+\caption{Results of applying \textbf{MoE-F} on a collection of SOTA experts on the NIFTY (\textit{test split}). All values are mean of 3 (random seed) runs except GPT-4o. Best value in each metric row is in \textbf{bold}.}
+\label{tab:moe-llms-nifty-results}
+\resizebox{\textwidth}{!}{%
+    \renewcommand{\arraystretch}{1.3} 
+    \begin{tabular}{@{}lcccccccc@{}}
+    \toprule
+    & \multicolumn{7}{c}{LLM Experts} &  Experts Filter \\
+    \cmidrule(lr){2-8} 
+    \cmidrule(lr){9-9}
+    Metrics $\uparrow$ & \begin{tabular}[c]{@{}c@{}}Llama-2\\7b-chat\end{tabular}
+                       & \begin{tabular}[c]{@{}c@{}}Llama-2\\70b-chat\end{tabular}
+                       & \begin{tabular}[c]{@{}c@{}}Llama-3\\8B-Instruct\end{tabular}
+                       & \begin{tabular}[c]{@{}c@{}}Llama-3\\70B-Instruct\end{tabular}
+                       & \begin{tabular}[c]{@{}c@{}}Mixtral-8x7B\\Instruct-v0.1\end{tabular} 
+                       & \begin{tabular}[c]{@{}c@{}}DBRX\\Instruct\end{tabular}
+                       & \begin{tabular}[c]{@{}c@{}}OpenAI\\GPT-4o\end{tabular}
+                       & \begin{tabular}[c]{@{}c@{}}MoE-F\\(ours)\end{tabular} \\
+    \midrule
+    F1          & $0.22$ & $0.33$ & $0.35$ & $0.20$ & $0.34$ & $0.34$ & $0.34$ & \textbf{0.52} \\
+    Acc         & $0.27$ & $0.37$ & $0.39$ & $0.30$ & $0.33$ & $0.34$ & $0.37$ & \textbf{0.57} \\
+    Precision   & $0.35$ & $0.33$ & $0.31$ & $0.32$ & $0.36$ & $0.36$ & $0.33$ & \textbf{0.61} \\
+    Recall      & $0.27$ & $0.37$ & $0.39$ & $0.30$ & $0.33$ & $0.34$ & $0.37$ & \textbf{0.57} \\
+    \bottomrule
+    \end{tabular}%
+}
+\end{table}
+
+Table~\ref{tab:moe-llms-nifty-results} show the results of running \algoacronym on the collection of SOTA experts. While none of these remarkable experts out-performs others exceedingly or has an overall outstanding performance on the FMM task, filtering the expert decisions using \algoacronym yields remarkable performance both in terms of overall task results and gains --- with \textbf{17\% real and 48.5\% relative F1} measure \textbf{improvement} over the next best performing expert values ($\approx$ 35\%). Fig.~\ref{fig:trajectory_moe-f} depicts our \algoacronym mechanism's decisions trajectory overlayed on the true market movement and expert decision trajectories.
+\subsection{Results: Ablations using Llama-2 7B, Llama-3 8B and Variants (SFT LoRA adapters)}
+\label{ss:results-ablations} We use the Llama~\cite{touvron2023llama} instruction-tuned, open-weights class of experts to further analyse \algoacronym at work. For ablation experiments, we create 4 additional expert variants (as standard LoRA~\cite{peft_lora_hu2021lora} LLM adapters) by fine-tuning the base expert with the  4 stock movement datasets, namely: \{\texttt{nifty, acl18, cikm18, bigdata22}\}, and run them against the same task and evaluation test split from before. Table~\ref{tab:combined-results} shows the combined results of Llama 2 and 3 along with the 4 expert variants.
+
+\begin{table}[htbp!]
+\centering
+\captionsetup{skip=5pt}
+\caption{Performance of Llama-2-7b-chat and Llama-3-8B-Instruct base models with (SFT LoRA adapter) variants on the NIFTY Stock Price Movement Prediction Task (\textit{test} split).}
+\label{tab:combined-results}
+\resizebox{\textwidth}{!}{%
+\renewcommand{\arraystretch}{1.2} % Increase the space between rows
+\begin{tabular}{@{}lcccccc|cccccc@{}}
+\toprule
+& \multicolumn{6}{c}{\textbf{Llama-2-7b-chat}} & \multicolumn{6}{c}{\textbf{Llama-3-8B-Instruct}} \\
+\cmidrule(lr){2-7} \cmidrule(lr){8-13}
+Metrics $\uparrow$ & \colorwblk{Base} & +nifty & +acl18 & +bigdata22 & +cikm18 & MoE-F & \colorwblk{Base} & +nifty & +acl18 & +bigdata22 & +cikm18 & MoE-F \\
+\midrule
+F1 Score & 0.22 & 0.28 & 0.20 & 0.29 & 0.27 & \textbf{0.43} & 0.34 & 0.36 & 0.19 & 0.23 & 0.24 & \textbf{0.43} \\
+Accuracy & 0.27 & \textbf{0.45} & 0.25 & 0.29 & 0.27 & \textbf{0.45} & 0.39 & 0.41 & 0.26 & 0.26 & 0.28 & \textbf{0.47} \\
+Precision & 0.35 & 0.20 & 0.36 & 0.32 & 0.31 & \textbf{0.44} & 0.31 & \textbf{0.56} & 0.44 & 0.28 & 0.31 & 0.48 \\
+Recall & 0.27 & \textbf{0.45} & 0.25 & 0.29 & 0.27 & \textbf{0.45} & 0.39 & 0.41 & 0.26 & 0.26 & 0.28 & \textbf{0.47} \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\paragraph{Discussions} As before, using MoE-F delivers superior results for each of the two cases. However, we notice that the overall performance on the FMM task is lower than from earlier: $43\%$ compared to $52\%$ (Table~\ref{tab:moe-llms-nifty-results}). This aligns with our proposed theoretical performance guarantee relative to experts. Increasing the quality and quantity of experts with specialized capabilities improves MoE-F results. Intutitively, in presence of a vastly superior expert, MoE-F will levy higher weight on it for its decisions. If any under-performing (specialized) expert does better over a certain time-window (say during bearish market regime), it percolates up the decision weighting map accordingly. 
+
+\paragraph{Decomposing Expert Performance by Class Labels} 
+Table~\ref{tab:Llama-2-3_nifty-detailed-results} tabulates experts' performance by each of the three movement labels detailing another insight and verification of MoE-F's mechanism at work. While some experts have overall equivalent performance (e.g. the F1 score of \textit{`+nifty'} and \textit{`+bigdata22'} adapters), examining their label-specific results show these experts performance emanates from different decisions. To elucidate, the Llama-2 base expert was far better in predicting market `Fall' than Llama-3, however, the latter handily outperforms when predicting `Rise'. Similarly, we also see some experts are degenerate for some label predictions, like the `+nifty' expert that only tends to predict `Neutral' (the imbalanced class label with highest support).
+
+\begin{table}[h]
+\centering
+\captionsetup{skip=5pt}
+\caption{\textbf{Llama-2, 3} experts and MoE-F's performance decomposition by class labels on NIFTY test split.}
+\label{tab:Llama-2-3_nifty-detailed-results}
+\resizebox{\textwidth}{!}{%
+    \renewcommand{\arraystretch}{1.1} % Increase the space between rows
+    \begin{tabular}{@{}lccccccccc@{}}
+    \toprule
+    & \multicolumn{3}{c}{\colorwr{Fall} (support: 73)} & \multicolumn{3}{c}{\colorwb{Neutral} (support: 143)} & \multicolumn{3}{c}{\colorwg{Rise} (support: 101)} \\
+    \cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10}
+    Expert & F1 & Precision & Recall & F1 & Precision & Recall & F1 & Precision & Recall \\
+    \midrule
+    Llama-2-7b-chat & \textbf{0.35} & 0.23 & \textbf{0.75} & 0.19 & 0.40 & 0.13 & 0.17 & 0.34 & 0.11 \\
+    nifty       & \colorwr{\textit{0.00}} & \colorwr{\textit{0.00}} & \colorwr{\textit{0.00}} & \textbf{0.62} & 0.45 & \textbf{1.00} & \colorwr{\textit{0.00}} & \colorwr{\textit{0.00}} & \colorwr{\textit{0.00}} \\
+    acl18       & 0.28 & 0.20 & 0.45 & 0.08 & 0.46 & 0.04 & \textbf{0.32} & 0.28 & \textbf{0.39} \\
+    cikm18      & 0.21 & 0.18 & 0.25 & 0.34 & 0.43 & 0.29 & 0.29 & 0.26 & 0.32 \\
+    bigdata22   & 0.21 & 0.19 & 0.23 & 0.31 & 0.42 & 0.24 & 0.31 & 0.26 & 0.38 \\
+    \cmidrule(lr){2-10}
+    \colorwblk{MoE-F}       & 0.30 & \textbf{0.27} & 0.33 & 0.60 & \textbf{0.54} & 0.66 & 0.30 & \textbf{0.43} & 0.23 \\
+    \thickmidrule %\midrule
+    Llama-3-8B-Instruct & \colorwr{\textit{0.00}} & \colorwr{\textit{0.00}} & \colorwr{\textit{0.00}} & 0.49 & 0.46 & 0.51 & 0.38 & 0.31 & 0.49 \\
+    nifty       & \colorwr{\textit{0.00}} & \colorwr{\textit{0.00}} & \colorwr{\textit{0.00}} & 0.48 & 0.46 & 0.51 & 0.42 & 0.35 & 0.54 \\
+    acl18       & \textbf{0.15} & 0.17 & \textbf{0.14} & 0.04 & 0.30 & 0.02 & 0.41 & 0.29 & \textbf{0.70} \\
+    cikm18      & 0.13          & 0.16 & 0.11 & 0.27 & 0.42 & 0.20 & 0.39 & 0.29 & 0.58 \\
+    bigdata22   & 0.14          & 0.17 & 0.12 & 0.20 & 0.38 & 0.13 & 0.40 & 0.29 & 0.62 \\
+    \cmidrule(lr){2-10}
+    \colorwblk{MoE-F}       & 0.12          & \textbf{0.45} & 0.07 & \textbf{0.56} & \textbf{0.56} & \textbf{0.57} & \textbf{0.48} & \textbf{0.39} & 0.62 \\
+    \bottomrule
+    \end{tabular}%
+}
+\end{table}
+
+
+
+\section{Related Work}
+
+\paragraph{Closed-Form Finite Dimensional Filters}
+The feasibility of our MoE-F algorithm relied on the discrete state-space structure of the signal process $w_{\cdot}$ and a univariate  observation process $\ell^{(n)}(Y_{[0:\cdot]})_{\cdot}$ to have access to finite-dimensional closed-form filtering equations via the Wonham-Shiryaev filter~\cite{wonham1964some,Sirjaev1965Filtering}.  However, such closed-form filtering equations rarely exist as the general stochastic filtering theory is infinite-dimensional~\cite{stratonovich1959optimum,stratonovich1960application,zakai1969optimal} and thus computationally intractable in practice.  Other than the Wonham-Shiryaev filter, which allows for relatively general dynamics given the finite state-space assumption for the signal process, there is only a handful of such finite-dimensional filters with closed-form recursions.  E.g.~the Kalman-Bucy filter~\cite{Kalman60, bucy2005filtering} or the Bene\v{s} filter~\cite{benevs1981exact}, both of which require highly rigid assumptions.  Otherwise, one does typically have access to interacting systems of particles, so-called particle filters~\cite{djuric2003particle,DelMoralBook_2013}, which can often approximate optimal filters but which are computationally intractable in high dimensions. In our case $N$ can be large and thus these latter techniques may not be suitable for other MoE-F-type approaches to online mixture models.  
+
+\paragraph{Bayesian Mixture of Experts}
+In the context of mixtures of experts, or large foundation models, one typically relies on a
+gating mechanism, or a learned routing among expert models~\cite{moe_jacobs1991adaptive, moe_jordan1994hierarchical}.  These gating mechanisms are often using a \textit{static} Bayesian optimization approach via Gibbs posterior mixtures; e.g.~\cite{alquier2008pac,alquier2016properties,meta-learning_andrychowicz2016learning,rothfuss2021pacoh,rothfuss2023scalable}. %Nevertheless, both these types of approaches rely on static gating mechanisms, 
+What the gating mechanisms involved in these approaches have in common is that they all are \textit{static} in the sense that they do not learn in an online manner from dynamically arriving inputs and feedback.  
+In contrast to these, our MoE-F model is an online/dynamic Bayesian optimization algorithm which dynamically generates posteriors using a different ($L^2$) notion of optimality rather than the extremal version used to define (static) Gibbs posterior mixtures. 
+
+\paragraph{Learned Routing vs. Ours} Most concurrent MoE of LLMs build on the idea of trainable/learned experts mixing, and use a routing layer~\cite{moe_zhou2022mixture} as introduced by ~\cite{moe_jacobs1991adaptive, moe_jordan1994hierarchical} in the 90s. Their efficacy was later shown in~\cite{moe_shazeer2017outrageously} and numerous models and variants of this core idea have been successfully showcased in the current LLM context~\cite{moe_switch_fedus2022switch, moe_jiang2024mixtral, moe_deepseekmoe_dai2024deepseekmoe, moe_gale2023megablocks}. Our work is orthogonal to this approach since this framework has no dependency on learned routing. Our online heuristic approach alongside with formal optimality guarantee allows online adaptation like adding, removing or hot-swapping experts on the fly. Further, the adaptive online ranking of top-experts implicitly subsumes underlying (environmental) regime adaptation as the expert ranking reflects the top-performing experts given the current time step. In case of a sharp shift in the underlying environment, the experts specialized for the shifted environment climbs in ranking ahead of the underperforming (previously better) experts.
+
+\paragraph{Novelty and Impact in Finance}
+In quantitative finance, there is a push for the development of machine-learning-powered models which comes hand-in-hand with the need for the generation of rich synthetic datasets for their training. Importantly, following the 2008 financial crisis, large financial actors,
+have come under stringent financial regulatory supervision~\cite{king2011basel, doddfrank_acharya2012implications} requiring financial models to pass stringent model validation before being introduced into production. 
+As a result, models cannot be significantly modified without lengthy administrative hurdles.
+In this context it is of immense value to have access to an algorithm that can actively interpolate between (i) existing or (ii) pre-trained models that the financial actor has access to: 
+(i) Our model makes it possible to efficiently and dynamically interpolate between existing models and makes an online extrapolation possible beyond a prevalent set of vetted models validated by regulators.  
+(ii) The other advantage of not having to retrain an entire model but only to readjust the weights of their individual (pre-trained) parts lies in it's dynamism. This permits the large
+models to remain lightweight and to quickly adapt to the dynamically evolving market environments at a very limited cost. This is key in intra-day trading, but also important from the perspective of computational cost which is an additional central consideration in the financial sector.  
+Therefore, a major benefit of our dynamic mixture models is that they combine pre-vetted models on the fly and therefore, grant the financial actor additional flexibility and agility. 
+
+\begin{comment}
+
+\end{comment}
+
+
+
+\section{Limitations \& Future Work}
+
+\label{sec:limitations-future.works}
+In the numerical portion of our work, we only considered LLM experts, which do not incorporate random structures such as neural SDEs, e.g.~\cite{kidger2021neural}, thus our MoE implementation may be missing out on technical market movements and stochastic effects.  In future work, we would like to combine both LLM experts and SDE-based experts, such as neural SDEs, to leverage both news information and technical market movement information.  
+
+While we show the efficacy of our approach using the FMM prediction task, the downstream applications of our proposed MoE-F algorithm can be easily extended to other problems -- like price prediction (a regression task with L2 loss) -- or any other domains/benchmarks using LLMs as a means to achieving some task. Since MoE-F can be used as an add-on harness over existing LLM experts, it is readily adaptable to various other challenging tasks across different domains. We look forward to exploring its utility across general LLM benchmarks, which we identify as an avenue for future research.
+
+
+
+\section{Conclusion}
+
+We proposed a stochastic filtering-based gating mechanism which is capable of dynamically adapting its mixing procedure to incoming information, unlike classical MoE mechanisms designed for static problems.  We showed that the components of our algorithm satisfy several optimality guarantees in Theorem~\ref{thrm:filtering_equations} and its regularization steps satisfy the guarantees in Propositions~\ref{prop:invertibile_pertrubations_rowstochmatrix} and~\ref{prop:pertrubation_bound_KL}, respectively.  Our algorithm was shown to effectively predict financial market movements from new data, thus providing the first viable online mixture of expert frameworks used in quantitative finance.  
+
+
+\paragraph{Acknowledgements and Funding}  
+AK acknowledges financial support from an NSERC Discovery Grant No.\ RGPIN-2023-04482 and their McMaster Startup Funds. RS is supported by Canada NSERC CGS-D Doctoral Grant. 
+RS and AK acknowledge that resources used in preparing this research were provided, in part, by the Province of Ontario, the Government of Canada through CIFAR, and companies sponsoring the Vector Institute \href{https://vectorinstitute.ai/partnerships/current-partners/}{https://vectorinstitute.ai/partnerships/current-partners/}. The authors would like to thank Marshall Wang for helping with reference code for computing DBRX experiments.
+
+\newpage
+
+

@@ -1,0 +1,485 @@
+\title{UNComp: Uncertainty-Aware Long-context Compressor for Efficient Large Language Model Inference}
+
+\begin{abstract}
+Deploying large language models (LLMs) is challenging due to their high memory and computational demands, especially during long-context inference. While key-value (KV) caching accelerates inference by reusing previously computed keys and values, it also introduces significant memory overhead. Existing KV cache compression methods—such as eviction and merging—typically compress the KV cache after it is generated and overlook the hidden states, failing to improve the speed of the prefilling stage. Additionally, applying a uniform compression rate across different attention heads can harm crucial retrieval heads in needle-in-a-haystack tasks due to excessive compression. In this paper, we propose \textit{UNComp}, an uncertainty-aware compression scheme that leverages matrix entropy to estimate model uncertainty across layers and heads at the token sequence level. By grouping layers and heads based on their uncertainty, \textit{UNComp} adaptively compresses both the hidden states and the KV cache. Our method achieves a 1.6$\times$ speedup in the prefilling stage and reduces the KV cache to 4.74\% of its original size, resulting in a 6.4$\times$ increase in throughput and a 1.4$\times$ speedup in inference with only a 1.41\% performance loss. Remarkably, in needle-in-a-haystack tasks, \textit{UNComp} outperforms the full-size KV cache even when compressed to 9.38\% of its original size. Our approach offers an efficient, training-free Grouped-Query Attention paradigm that can be seamlessly integrated into existing KV cache schemes.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+The proliferation of large language models (LLMs) has led to unprecedented advancements in natural language processing~\citep{achiam2023gpt, kaplan2020scaling}, enabling capabilities ranging from simple text generation to complex reasoning and dialogue. However, deploying and scaling LLMs are significantly hindered by extensive memory requirements and computational costs~\citep{shazeer2017outrageously}, especially during long-context inference. Processing long contexts leads to significant computational time during the prefilling stage, and the ``attention sink'' phenomenon~\citep{xiao2023efficient} during decoding impedes efficient long-text generation.
+
+To mitigate these issues, \textit{KV caching}~\citep{pope2023efficiently, liu2024minicache} stores and reuses keys and values to avoid redundant computations, improving inference speed. However, the memory overhead of maintaining the KV cache remains prohibitive for long contexts~\citep{liu2024minicache}, prompting the development of methods to reduce KV cache size while preserving performance.
+
+Existing optimization methods include: \textit{i}) \textbf{Eviction Strategies}~\citep{ge2023model, zhang2024h2o, li2024snapkv, zhang2024pyramidKV}; \textit{ii}) \textbf{Merging Strategies}~\citep{liu2024minicache, wan2024d2o, wang2024model, zhangcam}; \textit{iii}) \textbf{Quantization}~\citep{hooper2024KVquant, zhang2024KV, liu2024kivi}; \textit{iv}) \textbf{Compressing KV Cache Heads}~\citep{ainslie2023gqa, shazeer2019fast, liu2024deepseek, yu2024effectively}. However, these methods often compress the KV cache after generation and neglect hidden states, failing to speed up the prefilling stage. Moreover, uniform compression across attention heads can degrade important retrieval heads due to over-compression.
+
+Multi-Query Attention (MQA)~\citep{ainslie2023gqa, yu2024effectively, brandon2024reducing} reduces attention heads during inference by grouping heads and using a single head per group, significantly reducing memory and improving speed while maintaining performance comparable to Multi-Head Attention (MHA). However, these methods typically require fine-tuning or training from scratch, which can be costly. A training-free approach to group heads during inference is more practical.
+
+Inspired by these insights, we propose estimating the internal \textit{uncertainty} across layers and heads within the KV cache and hidden states. Previous metrics based on cumulative attention distributions focus on token-level importance but overlook sequence-level sampling strategies such as estimating heads and layers. By measuring the effective information via \textit{matrix entropy}, we quantify uncertainty across heads and layers, enabling adaptive compression of the KV cache and pruning of hidden states for faster inference. Our key contributions are:
+
+\begin{enumerate}
+    \item We propose a novel method based on matrix entropy to explore the uncertainty within the hidden states and KV cache, analyzing their information compression patterns. This approach enables grouped compression of heads and layers. By compressing the hidden states, we achieve a 1.6$\times$ speedup in the prefilling stage in a single batch.
+
+    \item We employ a training-free approach to adaptively determine the compression ratios for heads and layers across different groups. Compared to the full-size KV cache, our method achieves a compression rate of 4.74\%, with a throughput increase of 6.4$\times$ and a 1.4$\times$ inference speedup in a single batch, incurring only a 1.41\% performance loss.
+
+    \item Our method maintains performance even under extreme compression rates where some heads are removed. In the needle-in-a-haystack task, with a 9.38\% compression rate (viz. compressed size over original size), our method even surpasses the performance of the full-size KV cache version.
+\end{enumerate}
+
+
+
+\section{Related Work}
+
+
+\subsection{Attention-Based Token Eviction Policies}
+\label{Eviction Policy}
+
+Early works identify interesting attention patterns in long-context settings, such as the \textit{attention sink} phenomenon~\citep{liu2024lost, xiao2023efficient}, where models aggregate information using tokens at the beginning and end. Additionally, certain parameters in LLMs remain in an active state~\citep{sun2024massive}, inspiring researchers to explore the eviction of input prompts and generated tokens. Recent methods employ cumulative attention scores for token eviction strategies~\citep{zhang2024pyramidKV, li2023compressing, jiang2024minference, zhang2024h2o, ge2023model, sheng2023flexgen, liu2024scissorhands, li2024snapkv}. These methods aim to optimize memory usage while preserving performance. However, they overlook compressing hidden states during the prefilling stage, which is often the most time-consuming aspect. Further exploration is needed to leverage the sparsity of hidden states to optimize compression rates and eviction strategies at this stage.
+
+\subsection{Compression of the KV Cache Heads}
+\label{Compression Head}
+
+Recent studies show that Multi-Head Attention (MHA) varies across heads; some are highly effective at retrieval tasks~\citep{wu2024retrieval}, while others specialize in preserving different token types, reflecting inherent patterns of the model~\citep{ge2023model, jiang2024minference}. Leveraging the sparsity across these head dimensions allows for designing different KV cache eviction strategies for each head, thereby improving inference speed. Methods like Multi-Query Attention (MQA)~\citep{shazeer2019fast} share keys and values across heads to reduce the KV cache but at the cost of degraded performance. Grouped-Query Attention (GQA)~\citep{ainslie2023gqa} merges heads and fine-tunes the model, while Multi-Head Latent Attention (MLA)~\citep{liu2024deepseek} compresses keys and values into a low-rank subspace, reusing the KV cache during inference. However, these methods often require retraining. \citet{yu2024effectively} use LoRA~\citep{hu2021lora} to fine-tune compressed models, minimizing errors in MHA-to-GQA transitions. CHAI~\citep{agarwal2024chai} clusters tokens in the prefilling stage but adds significant computational overhead. Efficiently setting compression rates for different heads without training remains an open challenge, requiring further exploration of the sparsity patterns in the heads.
+
+\subsection{The Compression Behavior of Large Language Models}
+Sections~\ref{Eviction Policy} and~\ref{Compression Head} discuss compressing the KV cache by utilizing sparsity patterns of the layer and head dimensions. However, this sparsity pattern is closely related to the model's internal matrix rank and can alter the model's compression behavior~\citep{feng2022rank}. Recent work~\citep{deletang2023language} reveals that models exhibit spontaneous compression behavior during training, demonstrating that LLMs are powerful general compressors and showcasing the scaling laws of model compression capability. Similar phenomena are observed in~\citep{tao2024scaling, huang2024compression}. Moreover, certain aggregation patterns within prompts in in-context learning are also noted~\citep{wang2023label}. These observations inspire us to further explore the internal compression patterns of the model, particularly between different heads and across different layers. We introduce \textit{matrix entropy}~\citep{zhang2023matrix}, which can be considered a measure of the rank of the KV cache; higher entropy indicates more uncertainty and information aggregated by the tokens.
+
+
+
+\section{Method}
+
+
+Inspired by \cite{giraldo2014measures}, we derive the definition of matrix entropy and introduce our concept of truncated matrix entropy in this section. Additionally, we explore the relationship between matrix entropy and effective rank.
+
+\subsection{Matrix Entropy}
+
+To derive the definition of matrix entropy, we first define the covariance matrix of the model's parameter matrix. In this context, it typically refers to the various heads of the KV cache and the different layers of the hidden state. The covariance matrix, \(\mathbf{\Sigma}_{\mathbf{X}}\), is derived from the token sequence matrix \(\mathbf{X} = [\mathbf{x}_1, \mathbf{x}_2, \dots, \mathbf{x}_N]\), where \(\mathbf{x}_i\) represents the \(i\)-th token vector in the sequence, and \(N\) denotes the sequence length. The covariance matrix is then computed as the average outer product of the centered token vectors:
+\begin{equation}
+\mathbf{\Sigma}_{\mathbf{X}} = \frac{1}{N} \sum_{i=1}^{N} \left( \frac{\mathbf{x}_i - \bar{\mathbf{x}}}{\|\mathbf{x}_i - \bar{\mathbf{x}}\|} \right) \left( \frac{\mathbf{x}_i - \bar{\mathbf{x}}}{\|\mathbf{x}_i - \bar{\mathbf{x}}\|} \right)^T,
+\end{equation}
+where \(\bar{\mathbf{x}}\) is the mean vector of the sequence:
+\begin{equation}
+\bar{\mathbf{x}} = \frac{1}{N} \sum_{i=1}^{N} \mathbf{x}_i.
+\end{equation}
+It can be shown that $\text{Tr}(\mathbf{\Sigma}_{\mathbf{X}}) = 1$, where \(\text{Tr($\cdot$)}\) represents the trace operator.
+
+Based on the above definition of the covariance matrix, we derive the definition of matrix entropy. Specifically, following \cite{giraldo2014measures}, the matrix entropy of order \(\alpha > 0\) based on  \(\mathbf{\Sigma}_{\mathbf{X}}\) is defined as:
+\begin{equation}
+S_{\alpha}(\mathbf{\Sigma}_{\mathbf{X}}) = \frac{1}{1 - \alpha} \log \left[ \text{Tr} \left( \left(\mathbf{\Sigma}_{\mathbf{X}} \right)^{\alpha} \right) \right].
+\end{equation}
+
+\begin{lemma}
+\textit{As \(\alpha \to 1\), we obtain the definition of the von Neumann (matrix) entropy~\citep{von2013mathematische}}:
+\label{eq:Lemma 3.1.}
+
+\begin{equation}
+\label{eq:matrix_entropy}
+H(\mathbf{\Sigma}_{\mathbf{X}}) = - \text{Tr} \left(  \mathbf{\Sigma}_{\mathbf{X}} \log \left(  \mathbf{\Sigma}_{\mathbf{X}} \right) \right).
+\end{equation}
+\end{lemma}
+
+\begin{lemma}
+\textit{Let} \(\mathbf{\Sigma}_{\mathbf{X}}\) \textit{be a symmetric positive definite matrix with eigenvalues} \(\sigma=(\sigma_1,\sigma_2, \dots, \sigma_D)^T\). \textit{The matrix entropy of} \( \mathbf{\Sigma}_{\mathbf{X}} \) \textit{can be expressed as}:
+\label{eq:Lemma 3.2.}
+\begin{equation}
+H(\mathbf{\Sigma}_{\mathbf{X}}) = - \sum_{i=1}^{D} \sigma_i \log \sigma_i,
+\end{equation}
+\end{lemma}
+where \( D \) is the dimension of the covariance matrix of the model's hidden state layer or head.
+ To give an intuitive explanation of its role in the parameter matrix, we introduce effective rank, which links matrix entropy to dimensionality, such as sequence length and number of heads, leading to meaningful conclusions.
+
+Recent works~\citep{zhang2023matrix, zhuo2023towards} explore the relationship between matrix entropy and effective rank~\citep{roy2007effective}. \citet{zhuo2023towards} discuss dimensional collapse and use effective rank to explain asymmetric contrastive learning. Inspired by this, we use effective rank, i.e., matrix entropy, to measure uncertainty across heads and layers, associating higher matrix entropy with more information per token. We remark here that \textbf{contrary to the conventional perception that a higher rank represents more information and is less ready for truncation, we observe that to the opposite, as the layer depth increases, since each token becomes more informative by itself, we can thereby directly discard more tokens without hurting the overall information content.} This novel observation is justified by \textit{i)}: Previous efforts~\citep{wang2023label} find that higher-layer tokens gather more information, and a small number of tokens can represent the entire sequence. \textit{ii)}: We observe the same phenomenon in Figure~\ref{fig:matrix_entropy_query_key_value}: the higher the layer, the higher the matrix entropy of the entire sequence, which means that each token is more informative. \textit{iii)}: \textbf{For heads on the same layer, those with a higher effective rank should evict fewer tokens because this head is more informative.} \textit{iv)}: Tokens of the same head in different layers gradually share information as the layers deepen, while tokens of different heads do not share information as the layers deepen. Based on effective rank, we set different compression rates for different heads and layers. The effective rank of \( \mathbf{\Sigma}_{\mathbf{X}} \), denoted $\text{erank}(\mathbf{\Sigma}_{\mathbf{X}})$, is defined as:
+\begin{equation}
+\label{erank}
+\text{erank}(\mathbf{\Sigma}_{\mathbf{X}}) = \exp ( H(\mathbf{\Sigma}_{\mathbf{X}}) ).
+\end{equation}
+
+\begin{lemma}
+\textit{The rank of the covariance matrix} \(\mathbf{\Sigma}_{\mathbf{X}}\) \textit{is upper bounded by the rank of the input matrix} \(\mathbf{X}\):
+\begin{equation}
+\label{inequality_erank} 
+\text{rank}(\mathbf{\Sigma}_{\mathbf{X}}) \leq \text{rank}(\mathbf{X}).
+\end{equation}
+\end{lemma}
+
+\begin{lemma}
+\textit{Eq.~\ref{erank} can be interpreted as the dimension of the affine subspace spanned, i.e., the effective dimensionality of the parameter matrix in the head and layer dimensions. The bounds are:}
+\begin{equation}
+1 \leq \text{erank}(\mathbf{\Sigma}_{\mathbf{X}}) \leq \text{rank}(\mathbf{\Sigma}_{\mathbf{X}}) \leq D.
+\end{equation}
+\end{lemma}
+\begin{figure}[ht]
+\centering
+\begin{subfigure}[b]{1\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{ICLR_2025_Template/figure/effective_rank_trend_new.pdf}
+\end{subfigure}
+\caption{Effective ranks for the  \( Q_m \),  \( K_m \), and  \( V_m \) across three different datasets in LongBench~\citep{bai2023longbench} and various layers.}
+\label{fig:matrix_entropy_query_key_value}
+\end{figure}
+
+We consider \(\text{erank}(\mathbf{\Sigma}_{\mathbf{X}})\) as a measure of the model's uncertainty. In this work, we extend this concept to quantify the model's uncertainty in token sequence representations and derive an uncertainty measure for both the KV cache and the hidden states.
+
+\subsection{Truncated Matrix Entropy}
+To identify compression patterns in the hidden states and KV cache, we use matrix entropy. A key question is which matrix—key (\( K_m \)), query (\( Q_m \)), or value (\( V_m \))—best captures the compression patterns in the token sequences mapped from the hidden states. To investigate this, we plot the matrix entropy trends for \( Q_m \), \( K_m \), and \( V_m \) across different layers and datasets (Figure~\ref{fig:matrix_entropy_query_key_value}). In our analysis, entropy fluctuations indicate ongoing compression and aggregation within the model layers. Figure~\ref{fig:matrix_entropy_query_key_value} reveals: \textit{i}) \( Q_m \) and \( K_m \) show a stronger compression trend than \( V_m \). \textit{ii}) \( Q_m \) and \( K_m \) have similar effective rank variation, making them equivalent in measuring the KV cache's compression rate. \textit{iii}) \( Q_m \) generally has a larger effective rank compared to \( K_m \). Based on \citet{zhuo2023towards}, a larger rank implies less representation collapse. Thus, we select \( Q_m \) to measure effective rank, using randomly sampled data to estimate the matrix entropy of the parameter matrix before testing.
+
+\begin{figure}[ht]
+\centering
+\begin{subfigure}[b]{1\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{ICLR_2025_Template/figure/eigenvalues_trend/eigenvalues_trend.pdf}
+\end{subfigure}
+\caption{The eigenvalue distribution across three datasets in LongBench and various heads.}
+\label{fig:eigenvalue_distribution}
+\end{figure}
+
+We visualize the eigenvalue distribution of \( Q_m \) across different heads in the model's final layer. As the distributions show minimal differences across layers, we focus on the last layer over 128 hidden dimensions. Figure~\ref{fig:eigenvalue_distribution} reveals: \textit{i}) The initial part of the eigenvalue distribution varies significantly. \textit{ii}) Eigenvalue distributions across heads differ significantly in the leading part of the distribution. \textit{iii}) Different datasets exhibit a similar long-tailed distribution. These findings suggest some heads operate in limited dimensions, suffering from representation collapse, motivating the use of varying compression rates during inference.
+
+\textbf{According to \textbf{Lemma~\ref{eq:Lemma 3.2.}}, we require \(\mathbf{\Sigma}_{Q_m}\) to be a positive definite matrix, though it is typically positive semi-definite. To address this, we compute the effective rank using a submatrix because it is positive definite.} Intuitively, to exclude collapsed dimensions when calculating matrix entropy, we adopt a PCA-like method, selecting the top-$k$ eigenvalues before the elbow point~\citep{thorndike1953belongs} to determine the effective rank, which represents the entropy of the low-rank matrix. Thus, we introduce the concept of truncated matrix entropy, obtaining the effective rank of a positive definite submatrix to quantify uncertainty. From Eq.~\ref{eq:eigenvalues_entropy} and Eq.~\ref{erank}, the truncated effective rank of matrix \(Q_m\) is defined by its top \(k\) eigenvalues:
+\begin{equation}
+\label{eq:eigenvalues_entropy}
+H_{k}(\mathbf{\Sigma}_{Q_m}) = - \sum_{i=1}^{k} \sigma_i \log \sigma_i,
+\end{equation}
+\begin{equation}
+\text{erank}_{k}(\mathbf{\Sigma}_{Q_m}) = \exp \left( H_{{k}}\left(\mathbf{\Sigma}_{Q_m}\right) \right),
+\end{equation}
+where \(H_{{k}}(\mathbf{\Sigma}_{Q_m})\) denotes the entropy calculated using the top-\(k\) eigenvalue vector \(\sigma\) of the matrix \(\mathbf{\Sigma}_{{Q_m}}\). With the definition of \( \text{erank}_{k}(\mathbf{\Sigma}_{Q_m}) \) established, we apply it to the different heads of \( Q_m \) across various layers.
+
+\subsection{Uncertainty-Aware Compression Strategy}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{ICLR_2025_Template/figure/Algorithm_flow_chart_8.pdf}
+    \caption{Overview of \textit{UNComp} method. During the preparation stage, before inference on all datasets, we use a small amount of data in Wikitext2~\citep{merity2016wikitext} to group the model's layers and heads. Layer grouping is based on Inter-layer Compression, while attention head grouping is determined by Inter-head Compression. At the token level, we determine the cumulative attention score by comparing matrix entropy trends before and after \(K_m\) compression (Section \ref{recent_l_token}). In the inference stage, compression is guided by the groupings from the preparation phase, and the KV cache size is dynamically managed. The darker the color, the higher the effective rank of the \(Q_m\) of the head, and thereby fewer tokens can be evicted. The \(Q_{mi}\) refers to the query matrix at layer \(i\) before compression. The \(H/R^j\) (Section \ref{recent_l_token}) refers to the ratio of the number of historical tokens (\(H\)) to the number of recent tokens (\(R\)) , where \(j\) represents the \(j\)-th ratio in different \(H/R\) ratio combination. The \(K_{mi}^j\) means the key matrix sampled at layer \(i\) with \(H/R^j\).  Correlation coefficient refers to the Pearson correlation coefficient~\citep{cohen2009pearson}. }
+    \label{fig:model}
+\end{figure}
+With the aforementioned conclusions, we begin to apply them to compress the heads of the KV cache and each layer of the hidden state. Given that the hidden state and KV cache exhibit similar matrix entropy behavior, we similarly use matrix entropy to adaptively estimate their compression rates. We consider \(\text{erank}_{k}(\mathbf{\Sigma}_{\mathbf{X}})\) as a measure of uncertainty for these matrices. The higher the value, the greater the uncertainty, which implies more information in the token sequence matrix and a lower compression rate for layer and a higher compression rate for head. We present the workflow of our method in Figure~\ref{fig:model}.
+
+\paragraph{Inter-layer Compression}
+
+Regarding inter-layer compression, we focus on compressing hidden states \(H_m\), used to generate \(Q_m\), \(K_m\), and \(V_m\). This involves measuring model uncertainty of hidden states during the prefilling stage to obtain sparse attention. Unlike previous work~\citep{xu2023recomp, li2023compressing}, which prunes the input prompt with a retrieval method before the prefilling stage, we don't require an additional retrieval model, and pruning is conducted internally. Previous work computes all hidden states during the prefilling stage and generates the complete KV cache before evicting them. Our method differs: we perform eviction on hidden states before generating the KV cache, and the compressed \(H_m\) are used to generate the KV cache.
+
+We divide the hidden states of tokens from all layers into \(C\) groups, where the token length in each group is consistent across layers. As the group number increases, \(\text{erank}_{k}(\mathbf{X})\) increases, and more tokens are pruned. By observing Figure~\ref{fig:matrix_entropy_query_key_value}(a), we can identify some patterns. We determine whether to perform compression at two layers where \(\text{erank}_{k}(\mathbf{X})\) decreases beyond a threshold \( \epsilon \). This results in the total number of compression stages, \( C \):
+\begin{equation}
+\label{eq:stage}
+C = \sum_{i=1}^{n-1} \mathbf{1} \left( \text{erank}_{k}(\mathbf{\Sigma}_{H_m}^{(i)}) - \text{erank}_{k}(\mathbf{\Sigma}_{H_m}^{(i+1)}) > \epsilon \, \land \, \text{erank}_{k}(\mathbf{\Sigma}_{H_m}^{(i)}) > \text{erank}_{k}(\mathbf{\Sigma}_{H_m}^{(i+1)}) \right),
+\end{equation}
+where \( \mathbf{1} \) is the indicator function that evaluates to 1 if the decrease in effective rank between layer \( i \) and \( i+1 \) exceeds the threshold \( \epsilon \), and 0 otherwise, and \( n \) represents the total number of layers in the model. Eq.~\ref{eq:stage} is a partition function that determines the division of the model's layers into \(C\) groups. The context size at each subsequent group is calculated as follows:
+\begin{equation}
+\label{eq:token_number}
+S_{i+1} = S_i + \Delta s, \quad i = 1, 2, \dots, C-1,
+\end{equation}
+\begin{equation}
+\Delta s = \frac{S_{\max} - S_{\min}}{C - 1},
+\end{equation}
+where \( S_{\max} = S_1 \), \( S_{\min} = S_C \). \( \Delta s \) represents the incremental increase in context size between consecutive groups.
+
+After obtaining the specific compression rate for each layer group, we start to evict tokens from group 2. The hidden states of the tokens in group 1 are usually full-size because in the initial layer, the matrix entropy is typically small, and we want to retain as much information as possible. From group 2 to group \(C\), for all layers, we choose the attention distribution of the final tokens from the previous layer in the prefilling stage and evict the hidden states of the tokens with lower attention scores. In other words, we use the attention scores of the current layer to predict the tokens to be evicted in the next layer.
+
+After generating all the hidden states for the prefilling stage at each layer, we map \( H_m \) onto the three matrices \( Q_m \), \( K_m \), and \( V_m \), and during the decoding phase, we maintain a fixed cumulative attention score window, denoted as \( w_h \). The window size is \( S_{i,h} \), which we will introduce in the next part. Each time a new token is generated, the token with the smallest cumulative attention score in \( w_h \) is discarded.
+
+\begin{figure}[ht]
+\centering
+\begin{subfigure}[b]{1\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{ICLR_2025_Template/figure/thermodynamic_chart/thermodynamic_chart_with_heads.pdf}
+\end{subfigure}
+\caption{The heatmap of \( \text{erank}_{k}(\mathbf{\Sigma}_{Q_m}) \) across different layers and heads.}
+\label{fig:eigenvalue_heatmap_distribution}
+\end{figure}
+\paragraph{Inter-head Compression}
+
+Similar to previous works like MQA, GQA, and MLA, we estimate the compression rate in the head dimension. However, unlike their approaches, our method focuses solely on the training-free setting, and we apply different compression rates to different head groups.
+
+ Therefore, we conclude that the effective rank of the heads is not data-dependent, as it is an intrinsic characterization of the model's uncertainty measures. We rank the heads within each layer based on their effective rank and divide them into \( m \) groups. The groups are then arranged according to the ranking of the truncated effective rank of each group. Typically, the larger the effective rank, the more information the head contains, the greater the compression ratio, and the fewer tokens are evicted.
+
+After determining the context window \( S_i \) from Eq.~\ref{eq:token_number} for each layer, we set different compression rates for head groups based on their truncated effective rank. Specifically, we set the step size \( \Delta s_h \), decreasing the context size from \( S_{i,1} \), which has the largest effective rank, down to \( S_{i,m} \) as follows:
+\begin{equation}
+S_{i,h} = S_{i,h-1} - (h-1) \cdot \Delta s_h, \quad h = 1, 2, \dots, m,
+\end{equation}
+where \( S_{i,h} \) represents the context size for the \( h \)-th head group at layer \( i \), and \( \Delta s_h \) is the fixed step size applied between consecutive groups. During decoding, each head maintains its context window according to the compression rate of the group it belongs to. For different heads, we maintain a window of size \( S_{i,h} \) using the cumulative attention scores of the last \(l\) tokens.
+
+Additionally, we investigate scenarios with extreme compression rates where certain groups with low effective rank are completely removed, excluding them from the forward process. In such cases, the dimensions of the modified attention output are dictated by the altered key and value, leading to a dimensional mismatch with the original attention output. To resolve this, we compute the cosine distance between the attention distributions of the removed and retained heads. These distributions are based on the cumulative attention over the last \(l\) tokens. We then fill the attention output matrix with the attention distribution from the head most similar to the removed head's distribution, ensuring alignment with the dimension of the original attention output.
+
+
+
+\section{Experiment}
+
+\subsection{Experimental Settings}
+\paragraph{Models, Baselines, and Tasks}
+We evaluate three models: Llama2-7B/13B-chat-hf~\citep{touvron2023llama}, Llama-3-8B-Inst~\citep{meta2024llama3}, and Mistral-7B-Instruct-v0.1~\citep{jiang2023mistral}. Llama2 and Llama3 are optimized for dialogue and question-answering, while Mistral is instruction-tuned for similar tasks. We compare our method with existing KV cache eviction methods H2O~\citep{zhang2024h2o}, PyramidKV~\citep{zhang2024pyramidKV}, SnapKV~\citep{li2024snapkv}, and the head pruning method CHAI~\citep{agarwal2024chai} under the same compression rate. \textit{UNComp} is tested on 16 LongBench~\citep{bai2023longbench} benchmarks, including 2WikiMQA, GovReport, NarrativeQA, HotpotQA, Musique, Qasper, QMSum, MultiNews, MultifieldQA, TriviaQA, SAMSum, TREC, PCount, PRe, Lcc, and RB-P. We also compare our model's accuracy, inference speed, and throughput under extreme compression and evaluate it on the 'Needle in a Haystack' task~\citep{liu2024lost}.
+
+\begin{table}[h]
+\centering
+\adjustbox{max width=\textwidth}{%
+\scriptsize
+\begin{tabular}{c@{}c@{}c@{}c@{} c@{}c@{}c@{} c@{}c@{}c@{} c@{}c@{}c@{} c@{}c@{} c@{}c@{} c}
+\toprule
+\multirow{2}{*}{\raisebox{-4ex}{\textbf{Methods}}}  % Moves the text down
+& \multicolumn{3}{c}{\textbf{Single-Document QA}} 
+& \multicolumn{3}{c}{\textbf{Multi-Document QA}} 
+& \multicolumn{3}{c}{\textbf{Summarization}} 
+& \multicolumn{3}{c}{\textbf{Few-shot Learning}} 
+& \multicolumn{2}{c}{\textbf{Synthetic}} 
+& \multicolumn{2}{c}{\textbf{Code}} 
+& \multirow{2}{*}{\raisebox{-4ex}{\textbf{Avg.}}} \\  % Moves the text down
+
+\cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10} \cmidrule(lr){11-13} \cmidrule(lr){14-15} \cmidrule(lr){16-17}
+\setlength{\tabcolsep}{1pt} % 默认值是6pt，减小这个值来减少列间距
+& \makebox[1cm]{\raisebox{0.5ex}{\rotatebox{30}{\textbf{NtrvQA}}}} 
+& \makebox[1cm]{\raisebox{0.7ex}{\rotatebox{30}{\textbf{Qasper}}}} 
+& \makebox[1cm]{\raisebox{0.8ex}{\rotatebox{30}{\textbf{MF-en}}}} 
+& \makebox[1cm]{\raisebox{0.4ex}{\rotatebox{30}{\textbf{HotpotQA}}}} 
+& \makebox[1cm]{\raisebox{0.3ex}{\rotatebox{30}{\textbf{2WikiMQA}}}} 
+& \makebox[1cm]{\raisebox{0.7ex}{\rotatebox{30}{\textbf{Musique}}}} 
+& \makebox[1cm]{\raisebox{0.5ex}{\rotatebox{30}{\textbf{GovReport}}}} 
+& \makebox[1cm]{\raisebox{0.8ex}{\rotatebox{30}{\textbf{QMSum}}}} 
+& \makebox[1cm]{\raisebox{0.6ex}{\rotatebox{30}{\textbf{MultiNews}}}} 
+& \makebox[1cm]{\raisebox{0.8ex}{\rotatebox{30}{\textbf{TREC}}}} 
+& \makebox[1cm]{\raisebox{0.6ex}{\rotatebox{30}{\textbf{TriviaQA}}}} 
+& \makebox[1cm]{\raisebox{0.6ex}{\rotatebox{30}{\textbf{SAMSum}}}} 
+& \makebox[1cm]{\raisebox{0.6ex}{\rotatebox{30}{\textbf{PCount}}}}  
+& \makebox[1cm]{\raisebox{1.4ex}{\rotatebox{30}{\textbf{PRe}}}}    
+& \makebox[1cm]{\raisebox{1.6ex}{\rotatebox{30}{\textbf{Lcc}}}} 
+& \makebox[1cm]{\raisebox{1.4ex}{\rotatebox{30}{\textbf{RB-P}}}} \\
+
+\midrule
+\multicolumn{18}{c}{\textbf{Llama2-7B-chat-hf, KV Size = FULL}} \\
+\arrayrulecolor[gray]{0.8}
+\midrule
+\arrayrulecolor{black}
+FullKV & 19.34 & 18.61 & 35.19 & 30.66 & 28.42 & 10.05 & 25.19 & 20.18 & 25.73 & 63.00 & 83.62 & 41.60 & 5.00 & 10.00 & 61.40 & 55.45 & 33.34 \\
+\midrule
+\multicolumn{18}{c}{\textbf{Llama-2-7B-chat-hf, KV Size = 384 , Compressibility is 9.38\%  (Except CHAI method)}} \\
+\arrayrulecolor[gray]{0.8}
+\midrule
+\arrayrulecolor{black}
+H2O & 14.96 & 14.60 & 17.40 & 26.72 & 27.97 & 6.11 & 17.83 & 18.76 & 20.17 & 47.00 & 77.56 & \textbf{39.39} & 4.50 & 5.00 & 57.08 & 50.31 & 27.84 \\
+SnapKV & 16.27 & 17.34 & 30.37 & 33.04 & 27.82 & 9.92 & 19.34 & 20.33 & 22.63 & 59.50 & 83.50 & 38.45 & \textbf{5.50} & \textbf{12.50} & 59.18 & \textbf{55.28} & 31.94 \\
+Pyramidkv  new & 16.86 & 18.26 & 31.01 & \textbf{31.59} & 27.93 & 8.69 & 19.88 & 20.15 & 22.43 & 62.00 & 83.86 & 38.98 & \textbf{5.50} & 10.00 & 58.94 & 52.80 & 31.81 \\
+CHAI & 16.75 & 16.91 & \textbf{34.69} & 26.09 & 20.80 & 9.20 & \textbf{20.79} & 20.23 & 23.33 & 57.00 & 75.52 & 35.67 & 4.00 & 6.33 & 50.10 & 46.55 & 29.00 \\
+Ours-group-stage & \textbf{17.61} & \textbf{20.39} & 33.56 & 30.52 & 26.75 & 9.91 & 20.42 & \textbf{20.55} & \textbf{23.54} & \textbf{63.00} & 82.51 & 38.16 & 4.50 & 8.00 & 59.76 & 52.55 & 31.98 \\
+Ours-group & 17.33 & 19.34 & 34.16 & 31.54 & \textbf{28.23} & \textbf{10.04} & 20.38 & 20.51 & 23.33 & \textbf{63.00} & \textbf{84.11} & 39.35 & \textbf{5.50} & 9.50 & \textbf{59.93} & 54.87 & \textbf{32.57} \\
+
+\midrule
+\multicolumn{18}{c}{\textbf{Llama2-13B-chat-hf, KV Size = FULL}} \\
+\arrayrulecolor[gray]{0.8}
+\midrule
+\arrayrulecolor{black}
+FullKV & 18.20 & 26.07 & 37.06 & 36.20 & 32.44 & 14.19 & 25.82 & 20.20 & 26.00 & 66.50 & 87.49 & 35.93 & 3.12 & 11.50 & 53.29 & 52.73 & 34.17 \\
+\midrule
+\multicolumn{18}{c}{\textbf{Llama-2-13B-chat-hf, KV Size = 384 , Compressibility is 9.38\%  (Except CHAI method)}} \\
+\arrayrulecolor[gray]{0.8}
+\midrule
+\arrayrulecolor{black}
+H2O & 14.11 & 18.36 & 22.78 & 33.03 & 27.58 & 12.94 & 18.97 & 18.69 & 20.37 & 53.50 & 85.75 & 34.15 & 3.55 & 6.00 & 50.97 & 47.56 & 29.27 \\
+PyramidKV & 16.33 & 22.81 & 34.19 & \textbf{37.54} & 30.25 & 13.82 & 19.79 & \textbf{20.11} & 23.14 & 64.50 & 86.45 & 36.62 & 4.05 & \textbf{12.00} & \textbf{52.06} & 50.58 & 32.77 \\
+SnapKV & 17.09 & 22.77 & 34.37 & 36.73 & \textbf{31.04} & 13.02 & 19.70 & 20.00 & 22.91 & 62.00 & 87.48 & \textbf{37.44} & 4.05 & 11.50 & 51.76 & 51.27 & 32.70 \\
+CHAI & 17.06 & 23.51 & 31.01 & 33.70 & 27.78 & 11.73 & \textbf{23.03} & 19.59 & \textbf{24.66} & 65.00 & 86.18 & 15.93 & 4.00 & 8.50 & 45.57 & 48.74 & 30.37 \\
+Ours-group-stage  & 15.20 & 23.03 & 35.44 & 36.66 & 30.21 & 12.67 & 20.70 & 19.53 & 24.05 & 63.50 & 85.10 & 35.71 & 3.65 & 9.50 & 49.76 & 46.78 & 31.97 \\
+Ours-group & \textbf{18.16} & \textbf{23.90} & \textbf{36.56} & 36.29 & 30.48 & \textbf{14.36} & 21.22 & 19.93 & 24.06 & \textbf{67.00} & \textbf{88.11} & 36.02 & 4.00 & 11.50 & 51.59 &\textbf{51.53} & \textbf{33.42} \\
+\midrule
+\multicolumn{18}{c}{\textbf{Llama3-8B-Instruct, KV Size = FULL}} \\
+\arrayrulecolor[gray]{0.8}
+\midrule
+\arrayrulecolor{black}
+FullKV & 23.31 & 31.18 & 38.09 & 43.67 & 35.26 & 21.43 & 28.42 & 22.9 & 26.64 & 73.5 & 89.76 & 42.2 & 4.78 & 67.88 & 60.12 & 56.76 & 41.62 \\
+\midrule
+\multicolumn{18}{c}{\textbf{Llama-3-8B-Instruct, KV Size = 384 , Compressibility is 4.74\%  (Except CHAI method)}} \\
+\arrayrulecolor[gray]{0.8}
+\midrule
+\arrayrulecolor{black}
+H2O & 18.80 & 13.76 & 21.20 & 38.90 & 31.38 & 14.81 & 20.38 & 20.70 & 22.03 & 61.00 & 82.07 & 39.49 & \textbf{5.12} & 66.92 & 58.59 & 54.98 & 35.63 \\
+SnapKV & 21.47 & 19.77 & 33.97 & 43.10 & 32.79 & \textbf{21.48} & 21.69 & 22.01 & 22.92 & 63.00 & 89.69 & 39.78 & 5.06 & 67.83 & 60.19 & 56.82 & 38.85 \\
+Pyramidkv & 22.08 & 19.43 & 32.99 & 42.51 & 32.01 & 19.62 & 21.73 & 22.24 & 22.74 & \textbf{71.00} & 89.59 & \textbf{40.51} & 4.23 & \textbf{68.50} & 58.92 & 53.92 & 38.88 \\
+CHAI & 18.99 & 23.44 & 31.82 & 33.37 & 22.63 & 19.07 & \textbf{24.46} & 21.74 & 23.78 & 69.00 & 89.28 & 37.15 & 4.92 & 67.75 & 44.44 & 36.12 & 35.50 \\
+Ours-group-stage  & 21.08 & \textbf{24.60} & 33.87 & 44.07 & 33.72 & 20.42 & 22.12 & 21.76 & \textbf{24.06} & \textbf{71.00} & \textbf{91.11} & 40.07 & 4.43 & 60.50 & \textbf{62.10} & 57.36 & 39.52 \\
+Ours-group & \textbf{22.85} & 24.27 & \textbf{35.32} & \textbf{44.30} & \textbf{34.42} & 20.46 & 22.25 & \textbf{22.25} & 23.74 & \textbf{71.00} & 89.64 & 40.43 & 4.56 & 68.00 & 61.71 & \textbf{58.13} & \textbf{40.21} \\
+\midrule
+\multicolumn{18}{c}{\textbf{Mistral-7B-Instruct, KV Size = FULL}} \\
+\arrayrulecolor[gray]{0.8}
+\midrule
+\arrayrulecolor{black}
+FullKV & 20.53 & 27.28 & 47.67 & 38.57 & 26.75 & 15.46 & 30.88 & 22.00 & 26.99 & 70.50 & 86.28 & 43.23 & 1.30 & 29.42 & 56.60 & 52.18 & 37.22 \\
+\midrule
+\multicolumn{18}{c}{\textbf{Mistral-7B-Instruct, KV Size = 384 , Compressibility is 9.38\%  (Except CHAI method)}} \\
+\arrayrulecolor[gray]{0.8}
+\midrule
+\arrayrulecolor{black}
+H2O & 14.68 & 14.92 & 28.43 & 30.04 & 20.92 & 11.21 & 20.03 & 19.37 & 21.05 & 58.00 & 81.48 & 41.08 & \textbf{2.42} & 11.04 & 54.76 & 48.78 & 29.89 \\
+Pyramidkv  & 17.59 & 22.82 & 46.34 & 36.01 & 25.07 & 14.47 & 22.64 & 21.83 & 22.83 & 69.00 & 85.85 & 42.42 & 1.67 & 27.98 & 53.32 & 49.03 & 34.93 \\
+SnapKV  & 19.09 & 23.06 & 46.73 & 35.76 & \textbf{25.41} & \textbf{15.37} & 23.23 & 21.61 & 23.78 & 64.00 & 85.34 & 41.79 & 1.09 & \textbf{28.92} & \textbf{55.46} &\textbf{51.52} & 35.14 \\
+CHAI & 15.01 & 17.23 & 39.41 & 23.53 & 21.12 & 9.00 & 24.83 & 20.59 & 23.17 & 49.50 & 84.08 & 33.28 & 1.07 & 19.25 & 46.85 & 44.62 & 29.53 \\
+Ours-group-stage  & \textbf{19.65} & 21.93 & 44.08 & 35.30 & 23.21 & 12.84 & 24.61 & \textbf{22.08} & \textbf{24.36} & 67.00 & 84.31 & 41.81 & 1.48 & 28.81 & 54.84 & 52.10 & 34.90 \\
+Ours-group & 18.98 & \textbf{23.30} & \textbf{48.77} & \textbf{36.80} & 24.83 & 15.22 & \textbf{24.87} & 21.65 & 23.78 & \textbf{69.50} & \textbf{85.93} & \textbf{43.17} & 0.94 & 27.38 & 55.28 & 50.91 & \textbf{35.71} \\
+\bottomrule
+\end{tabular}
+}
+\caption{Performance Comparison across Different Tasks: Ours-group-stage compresses both hidden states and KV cache, while Ours-group compresses only the KV cache. For 150 data points, Ours-group-stage is 1.4x faster than Ours-group, with only a 0.59\% performance loss. All methods, except CHAI, compress key and value caches at the same compression ratio. In contrast, CHAI primarily compresses the key cache, leaving the value cache uncompressed and performing selection at the attention head level, achieving a 77.54\% compression ratio.}
+\label{main-table}
+
+\end{table}
+
+\subsection{Experimental Comparison in Memory-Constrained Setting}
+\paragraph{Main Results} Our main experimental results are shown in Table~\ref{main-table}, where we present the performance of current mainstream LLMs tested on LongBench. We perform the comparison under a unified setting with a KV cache size of 384. The heads in the main table are divided into two groups, with KV cache sizes set to 512 and 256, respectively, in descending order of effective rank. To ensure a fair comparison with others, we set the KV cache size of the other models to 384.
+
+From Table~\ref{main-table}, we draw the following conclusions: \textit{i)} Our method achieves the best performance on LLaMA3, delivering a speedup of up to 1.4 times on a single batch instance with a compression rate of 4.68\%, confirmed by averaging multiple repeated experiments. \textit{ii)} Our method exhibits near-lossless performance in certain models, especially compared to the full-size KV cache setting in Llama2-7B/13B-chat-hf, with only a 0.77\% performance loss while achieving a 9.38\% compression rate. \textit{iii)} In comparison with the training-free head-pruning method CHAI, our \textit{UNComp} outperforms in both single-batch inference speed and overall performance. With a KV cache compression rate lower than CHAI's 68.55\%, our method achieved 5.4 times faster inference speed.
+
+\begin{table}[t]
+\centering
+\adjustbox{max width=\textwidth}{%
+\scriptsize
+\begin{tabular}{cccccccc}
+\toprule
+
+\multicolumn{8}{c}{\textbf{Llama2-7B-chat-hf, KV Size = 64}} \\
+
+\midrule
+\multirow{1}{*}{{\textbf{Methods}}}  
+& \multicolumn{1}{c}{\multirow{1}{*}{\textbf{Qasper}}}
+& \multicolumn{1}{c}{\multirow{1}{*}{\textbf{Musique}}}
+& \multicolumn{1}{c}{\multirow{1}{*}{\textbf{GovReport}}}
+& \multicolumn{1}{c}{\multirow{1}{*}{\textbf{TREC}}}
+& \multicolumn{1}{c}{\multirow{1}{*}{\textbf{PCount}}}
+& \multicolumn{1}{c}{\multirow{1}{*}{\textbf{Lcc}}}
+& \multirow{1}{*}{{\textbf{Average score}}} \\
+\renewcommand{\arraystretch}{1} % 恢复默认行间距
+FullKV & 18.61 & 10.05 & 25.19 & 63.00 & 5.00 & 61.40 & 30.54    \\
+
+\arrayrulecolor[gray]{0.8}
+\midrule
+\arrayrulecolor{black}
+H2O  & 13.84 & 1.33 & 8.57 & 18.00 & 0.50 &  28.86 & 11.85   \\ 
+PyramidKV & 16.10 & 6.58 & 12.07 & 46.00 & \textbf{5.50} & 46.09 & 22.06  \\ 
+SnapKV & 15.70 & 6.15 & 11.16 & 40.50 & 5.00 & 43.77 & 20.38 \\ 
+Ours-group-stage & \textbf{17.57} & 6.58 & \textbf{15.25} & \textbf{59.00} & 4.50 & 49.75 & \textbf{25.44}  \\ 
+Ours-group & 15.40 & \textbf{6.96} & 14.88 & 55.50 & 5.00 & \textbf{50.00} & 24.62  \\ 
+
+\arrayrulecolor[gray]{0.7}
+\midrule
+\arrayrulecolor{black}
+\multicolumn{8}{c}{\textbf{Llama2-7B-chat-hf, KV Size of One Group With Extreme Compression }} \\
+
+\midrule
+\multirow{1}{*}{{\textbf{Methods}}}  
+& \multicolumn{1}{c}{\multirow{1}{*}{\textbf{Qasper}}}
+& \multicolumn{1}{c}{\multirow{1}{*}{\textbf{Musique}}}
+& \multicolumn{1}{c}{\multirow{1}{*}{\textbf{GovReport}}}
+& \multicolumn{1}{c}{\multirow{1}{*}{\textbf{TREC}}}
+& \multicolumn{1}{c}{\multirow{1}{*}{\textbf{PCount}}}
+& \multicolumn{1}{c}{\multirow{1}{*}{\textbf{Lcc}}}
+& \multirow{1}{*}{{\textbf{Average score}}} \\
+FullKV & 18.61 & 10.05 & 25.19 & 63.00 & 5.00 & 61.40 & 30.54 \\
+\arrayrulecolor[gray]{0.8}
+\midrule
+\arrayrulecolor{black}
+Ours-remain-tokens-256  & 19.67 & 9.80 & 20.19 & 63.00 & 5.50 & 60.28 & 29.74 \\
+Ours-remain-tokens-128 & 18.67 & 9.75 & 20.02 & 63.00 & 5.50 & 59.60 & 29.42 \\
+Ours-remain-tokens-64 & 18.13 & 9.79 & 19.84 & 63.00 & 5.50 & 58.09 & 29.06 \\
+Ours-remain-tokens-32 & 18.04 & 9.24 & 19.31 & 63.00 & 5.50 & 57.04 & 28.69 \\
+Ours-remain-tokens-16 & 18.48 & 8.08 & 18.21 & 63.00 & 5.00 & 47.29 & 26.68 \\
+Ours-remain-tokens-12 & 17.31 & 8.78 & 18.16 & 62.00 & 5.00 & 45.23 & 26.08 \\
+Ours-delete-2-heads & 18.30 & 8.58 & 18.98 & 63.00 & 5.50 & 59.38 & 28.96 \\
+Ours-delete-4-heads &13.29 & 7.96 & 19.12 & 62.50 & 5.50 & 53.94 & 27.05 \\
+Ours-delete-8-heads & 12.64 & 6.60 & 9.87 & 63.50 & 3.21 & 37.87 & 22.28 \\
+
+\bottomrule
+\end{tabular}
+}
+\caption{Extreme Compression Conditions.}
+\label{2_extreme_compression}
+
+\end{table}
+\paragraph{The Result of Extreme Compression}
+We compare performance under extreme compression settings to highlight our method's advantages. For this investigation, we use Llama-2-7B-chat-hf as the baseline model, categorizing the layer into five groups and attention heads into two groups. As shown in Table~\ref{2_extreme_compression}, we evaluate the effectiveness of our approach across increasingly extreme compression ratios. Importantly, when the compression rate of the KV cache is set to 1.56\%, our method shows a substantial enhancement over existing alternatives.
+
+We further explore the minimum achievable compression rate for the group with the lower effective rank, as detailed in Table~\ref{2_extreme_compression} where \textit{Ours-remain-tokens-N} indicates the retention of $N$ tokens per attention head within the group of lower effective rank, while the other group maintains a KV cache size of 512. Furthermore, \textit{Ours-delete-K-head} denotes the complete pruning of $K$ heads per layer, contingent on the effective rank order. \textbf{The results underscore that our methodology can sustain a high level of accuracy relative to the full KV cache size when only 12 tokens are preserved or even certain heads are pruned.} This finding further corroborates the validity of employing differentiated compression ratios for various heads, aligned with their respective effective ranks.
+
+\begin{table}[ht]
+    \centering
+    \adjustbox{max width=\textwidth}{%
+    \scriptsize
+    \begin{tabular}{c c c c c cc c c }
+    \toprule
+    \multirow{2}{*}{\textbf{Methods}} 
+    & \multicolumn{4}{c}{\textbf{NVIDIA A100 80GB GPU}} 
+    & \multicolumn{4}{c}{\textbf{AMD Instinct MI210 64G GPU}} \\
+    \cmidrule(lr){2-5} \cmidrule(lr){6-9}
+    & \textbf{Attention} & \textbf{Prefill} & \textbf{Decoding} & \textbf{Max Memory} 
+    & \textbf{Attention} & \textbf{Prefill} & \textbf{Decoding} & \textbf{Max Memory} \\
+    & \textbf{Time (s)} & \textbf{Time (s)} & \textbf{Time (s)} & \textbf{Usage (MB)} 
+    & \textbf{Time (s)} & \textbf{Time (s)} & \textbf{Time (s)} & \textbf{Usage (MB)} \\
+    \midrule
+    FullKV & 129.13 & 77.34 & 51.79 & 25900 & 189.92 & 116.64 & 73.27 & 23195 \\
+    H2O & 140.92 & 90.56 & 50.37 & \textbf{22908} & 241.42 & 173.08 & 68.34 & \textbf{20247} \\
+    PyramidKV & 126.03 & 78.98 & 47.05 & 22936 & 185.85 & 119.17 & 66.68 & 20295 \\
+    SnapKV & 123.71 & 78.71 & 45.00 & 22920 & 184.59 & 120.26 & 64.33 & 20276 \\
+    Ours-group-stage & \textbf{91.56} & \textbf{48.78} & 42.78 & 22964 & \textbf{155.60} & \textbf{100.17} & \textbf{55.43} & 20300 \\
+    Ours-group & 121.85 & 79.60 & \textbf{42.25} & 22978 & 184.76 & 121.04 & 63.72 & 20335 \\
+    \bottomrule
+    \end{tabular}
+    }
+    \caption{Single Batch Time Consumption and Memory Usage Analysis on Different GPUs. Analysis based on MultifieldQA dataset with 150 samples, and KV size is 384 per layer. The compression ratio of Ours-group-stage to hidden states in the prefill stage is 63.09\%.}
+    \smallskip
+    \small
+    \label{tab:time_analysis}
+\end{table}
+\paragraph{Analysis of Inference Time Latency and Performance}
+We analyze the inference time latency and the specific time costs of each component. To achieve reliable time analysis, we synchronize the CPU and GPU clock frequencies to facilitate our measurements. We use the Llama2-7B-chat-hf model to measure 150 data points from the MultifieldQA collection in a single batch on an NVIDIA A100 80G GPU and an AMD INSTINCT MI210 64G GPU. We focus on the duration of the prefilling stage, the decoding duration, and the total duration of the attention mechanism. We also record the maximum memory usage during runtime.
+
+In Table~\ref{tab:time_analysis}, we compare our experimental results and present the following observations: \textit{i)} For long-context generation tasks, the prefilling stage takes up more time throughout the inference process. \textit{ii)} Our method is optimized in the prefilling stage, greatly speeding up inference and outperforming other methods, with up to 1.58$\times$ acceleration over the full-size KV cache in a single batch. For throughput analysis, experiments with prompt and generation lengths set to $2048+8096$ show that FullKV supports a maximum batch size of 6 with a token generation time of 15.67 ms. In contrast, our method supports a batch size of 32 with a token generation time of 2.45 ms, achieving 6.4 times the throughput of FullKV.
+
+\begin{wraptable}{r}{0.4\textwidth} % 'r' 表示右对齐，宽度为 45%
+    \centering
+    \adjustbox{max width=\textwidth}{%
+    \scriptsize
+    \begin{tabular}{c@{}c@{}c}
+    \toprule
+    \multirow{1}{*}{{\textbf{Methods}}}  
+    & \multirow{1}{*}{{\textbf{Llama2-4k}}} 
+    & \multirow{1}{*}{{\textbf{ Llama3-8k}}} \\
+    
+    \midrule
+    FullKV & 98.70 & 84.99   \\
+    H2O & 61.14 & 51.56  \\ 
+    PyramidKV & 93.24 & 79.08 \\ 
+    SnapKV  & 94.50 & 81.27 \\ 
+    CHAI  & 97.80  & 64.69 \\ 
+    Ours-group & 98.42 & \textbf{84.13} \\
+    Ours-group-stage  & \textbf{98.80} & 83.73  \\ 
+    \bottomrule
+    \end{tabular}
+    }
+    \caption{Needle-in-a-haystack results.}
+    \label{Needle-in-a-haystack}
+\end{wraptable}
+
+\paragraph{Needle in a Haystack Task}
+
+The 'Needle in a Haystack' task~\citep{liu2024lost} involves embedding key information randomly in long contexts to assess the model's ability to handle complex, extended text. Table~\ref{Needle-in-a-haystack} compares Llama2-4k and Llama3-8k, both with a KV size of 384. The results show that our method outperforms FullKV at a 9.38\% compression rate, demonstrating its superiority. This indicates that our uncertainty measurement method based on effective rank can identify the heads crucial for the retrieval task and effectively compress noisy heads.
+
+\begin{figure}
+\centering
+\begin{subfigure}[b]{1\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{ICLR_2025_Template/figure/combined_charts_consistent_colors.pdf}
+\end{subfigure}
+\caption{Comparison of Inter-Layer Matrix Entropy Trends Across Different \(H/R\).}
+\label{fig:matrix_entropy_trend}
+\end{figure}
+\paragraph{The Ratio of Recent Tokens to Historical Window Tokens}
+\label{recent_l_token}
+
+This part examines the ratio \(H/R\), comparing the number of historical tokens (\(H\)) to the most recent \(l\) tokens (\(R\)). Our experiment reveals that matrix entropy trends across layers at various \(H/R\) ratios align with those of the full-size KV cache. As shown in Figure~\ref{fig:matrix_entropy_trend}(a), different proportions of historical and recent tokens produce distinct trends. Notably, a compressed key matrix trend more similar to the full KV cache indicates better performance, given the same KV cache compression ratio. We confirm this through multiple experiments. To measure this similarity, we use the Pearson correlation coefficient. As depicted in Figure~\ref{fig:matrix_entropy_trend}(b), higher similarity in matrix entropy trends corresponds to improved model performance.
+
+
+\section{Conclusion}
+
+
+We introduced \textit{UNComp}, an uncertainty-aware approach for compressing the KV cache and hidden states in LLMs. By employing matrix entropy to measure model uncertainty across layers and heads, \textit{UNComp} adaptively determines compression rates, achieving a balance between memory efficiency and model performance. Our experiments demonstrate that \textit{UNComp} can reduce memory usage significantly, achieving up to a 1.6$\times$ speedup during the prefilling stage, a 6.4$\times$ throughput improvement, and compressing the KV cache to 4.74\% of its original size. Despite this high compression, \textit{UNComp} maintains a minimal performance loss of only 1.41\%, and even surpasses the performance of the full-size KV cache in specific needle-in-a-haystack tasks. This indicates that our method provides an effective solution for optimizing long-context LLM inference without requiring additional training. Moving forward, our approach can serve as a foundation for further exploration into adaptive compression techniques in large-scale model deployment.
+\clearpage
+
+
+
+
+

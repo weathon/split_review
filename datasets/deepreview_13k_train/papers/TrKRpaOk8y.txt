@@ -1,0 +1,460 @@
+\title{A Little Goes a Long Way: Efficient Long Context Training and Inference with Partial Contexts}
+
+\begin{abstract}
+
+Training and serving long-context large language models (LLMs) incurs substantial overhead. 
+To address this, two critical steps are often required: a pretrained LLM typically undergoes a separate stage for context \term{length extension} by training on long-context data, followed by architectural modifications to \term{reduce the overhead of KV cache} during serving. 
+This paper argues that integrating length extension with a GPU-friendly KV cache reduction architecture not only reduces training overhead during length extension,
+but also achieves better long-context performance. 
+This leads to our proposed \name, which finetunes a pretrained LLM into an efficient architecture during length extension. 
+\name builds on three key insights: 
+(1) Sparse attention patterns, such as window attention (attending to recent tokens), attention sink (initial ones), and blockwise sparse attention (strided token blocks) are well-suited for building efficient long-context models, primarily due to their GPU-friendly memory access patterns, enabling efficiency gains not just theoretically but in practice as well. 
+(2) It is essential for the model to have direct access to all tokens. 
+A hybrid architecture with 1/3 full attention layers and 2/3 efficient ones achieves a balanced trade-off between efficiency and long-context performance.
+(3) Lightweight training on 5B long-context data is sufficient to extend the hybrid model's context length from 4K to 128K.
+
+We evaluate \name on both Llama-2 7B and Llama-2 70B, demonstrating its effectiveness across different scales. 
+During training with 128K-long contexts, \name achieves 1.55x training speedup and reduces wall-clock time by 36\%, compared to a full-attention baseline. 
+During inference, \name reduces KV cache memory by 62\%, achieving 1.67x prefilling speedup and 1.41x decoding speedup.
+Compared to baselines that apply KV-cache reduction techniques to full-attention long-context LLMs, \name achieves substantially stronger performance not only on the Needle-in-a-Haystack retrieval task, but also on more challenging long-context reasoning tasks, including BABILong and RULER.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Transformer-based large language models (LLMs) capable of processing long contexts have unlocked new opportunities across a wide range of applications, such as processing long multi-turn dialogue, understanding code repositories, and answering complex queries that require synthesizing information from multiple documents. 
+However, their quadratic complexity incurs  substantial overhead for both training and inference with long contexts~\citep{jiang2024minference,sun2024you}.
+To address this, typical approaches involve a two-stage framework~\citep{xiong2023effective,llama3}.
+\begin{itemize}
+    \item To enhance the model long context capabilities without the substantial overhead of training with long contexts, an LLM is typically pretrained on large short-context datasets (e.g., 2TB of 4K tokens) and undergoes a separate context length extension phase, usually through continual pretraining on a smaller amount of long-context data (e.g., 5B of 128K tokens). 
+    \item Serving a long-context LLM is also challenging due to high memory requirements for caching key and value vectors (KV cache). For example, a 7B Llama-2 model in BF16 precision uses 14 GB for model weights, while the KV cache for a single 128K sequence adds 69 GB - exceeding an H100 GPU's capacity. Recent works have sought to reduce KV cache memory overhead post-hoc by analyzing LLM attention patterns and leveraging these insights to create sparse attention mechanisms, usually without additional fine-tuning.
+\end{itemize}
+Despite their promising performance in language modeling perplexity, these methods underperform on long-context retrieval and complex reasoning tasks (\S\ref{sec:background}). 
+This paper argues that integrating the two stages not only builds an efficient long-context LLM with improved long-context performance, but also reduces the cost of length extension training.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\textwidth]{figures/model_architecture.png}
+\caption{Overview of \name. 
+\textbf{Left:} It uses a hybrid architecture, and applies KV-reduced attention in 2/3 layers at the top and bottom, while keeping the middle 1/3 layers full attention. 
+\textbf{Right:} Two KV-reduced attention variants are explored.
+}
+\label{fig:overview_longgen}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.33\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/efficiency_1.pdf}
+    \end{minipage}\hfill
+    \begin{minipage}{0.33\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/efficiency_2.pdf}
+    \end{minipage}\hfill
+    \begin{minipage}{0.33\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/efficiency_3.pdf}
+    \end{minipage}
+    \caption{Training and inference efficiency under different sparsity levels. 
+    \textbf{Left:} Training wall-clock speedup. \textbf{Mid:} KV memory reduction. \textbf{Right:} Inference speedup.
+    We compare training wall-clock time with FlashAttention and benchmark inference on vLLM.
+    All results are measured on Llama2-7B, which consists of 32 layers in total.
+    ``1/7'', ``1/5'', ``1/3 Full'' and ``All Full'' indicate using 5, 7, 12, and 32 full layers, respectively.} 
+    \label{fig:exp_efficiency}
+\end{figure}
+
+Our proposed approach \name, as illustrated in Figure~\ref{fig:overview_longgen}, is a simple and effective hybrid transformer architecture that could be built upon any pretrained transformer to extend its context length. 
+ \name incorporates two key designs: 
+(1) It conducts context extension with various GPU-friendly KV cache-saving designs, including but not limited to window attention~\citep{mistral}, attention sink~\citep{sink}, and blockwise strided attention~\citep{blocksparse}.
+Compared with delicately curated KV cache reduction methods, \name employs a simpler and more efficient KV design, which maintains uniform memory access patterns for attention heads and achieves load balance among token blocks.
+Practically, our customized triton training kernel inherits from FlashAttention-2~\citep{flash2}, but achieves faster speed in sparse settings, and the inference kernel is well-suited to vLLM~\citep{vllm} for high-throughput serving.
+(2) \name uses this sparse attention in a hybrid architecture, where 2/3 of the attention layers use sparse attention while the remaining 1/3 retain full attention, which we find is essential for handling complex tasks requiring direct access to long-context information(\S\ref{sec:abl}). 
+
+
+
+Experiments are conducted on a Llama-2-7B base model~\citep{llama2} and its 70B counterpart with group query attention. 
+We extend their context length from 4K to 128K and perform evaluations on multiple long-context benchmarks, including the needle-in-a-haystack (NIAH) retrieval, and two more distinguishing benchmarks, BABILong~\citep{babilong} and RULER~\citep{ruler}, where long-context reasoning is also needed.
+Through ablations on the position and number of sparse attention layers, we study how sparsity level affects long-context capability.
+Results show that with full layers in the middle, \name could achieve comparable performances with standard transformers even with 2/3 of its remaining layers being with sparse attention.
+Meanwhile, \name only requires lightweight training on 5B Slimpajama~\citep{slimpajama} tokens (less than 0.1\% GPU hours of pretraining) and maintains its short context capability, as indicated by the MMLU~\citep{mmlu} score.
+With our customized kernel, it achieves a 1.55x wall-clock training speedup, as shown in Figure~\ref{fig:exp_efficiency}.
+During inference, it reduces 62\% KV cache memory, bringing 1.67x prefilling speedup and 1.41x decoding speedup.
+
+
+\section{Background}
+
+\label{sec:background}
+\paragraph{LLM context length extension.}
+Due to the overhead of training transformers on long sequences, context extension is usually separated from standard pretraining as a dedicated post-training stage.
+State-of-the-art models, such as Gemini~\citep{gemini}, Llama series~\citep{llama2,llama3} and Qwen~\citep{qwen} are typically pretrained on large short-sequence corpora, then undergo length extension on relatively smaller amounts of longer sequences. 
+For example, Llama-3 is pre-trained on 15T tokens within an 8K context length, then post-trained on an additional 800B tokens to extend to 128K length~\citep{llama3,xiong2023effective}.
+A related data engineering work~\citep{fu2024data} significantly reduce the tokens needed for context extension to only 5B by carefully balancing the data source to be similar with that of the pretraining corpus.
+Typically, there is no architectural modifications during length extension.
+As a result, these long-context models are challenging to serve due to the memory overhead incurred by KV cache~\citep{minference}.
+Therefore, techniques are required to reduce the inference-time memory overhead of these models.
+
+\paragraph{Inference-time KV reduction fails to generalize to long contexts.}
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.99\textwidth]{figures/inference_fail.png}
+\caption{Inference time KV cache reduction methods fail on long context.}
+\label{fig:sink_pyramidkv}
+\end{figure}
+To reduce the inference cost of large transformer models, one straightforward idea is to apply inference time KV reduction methods.
+By only saving the mostly attended KV Cache, they reduce inference memory consumption and forward computing FLOPs.
+For efficient decoding, the key and value vectors over the context are kept in the GPU memory, usually called KV cache.
+Its memory overhead has become the primary bottleneck of serving LLMs.
+Various techniques have been developed to reduce KV cache overhead by storing only a subset of the KV and evicting the rest~\citep{sink,scissorhands,fastgen}. 
+However, as we show here, they often underperform in long-context scenarios, where KV cache reduction is needed the most.
+
+We evaluate two established KV cache reduction methods, Attention Sink~\citep{sink}, and PyramidKV~\citep{pyramidkv} on a context-extended Llama2-7B-128K model.\footnote{Details about this Llama2-7B-128K model can be found in \S\ref{sec:exp_setting}.}
+Attention Sink (AttnSink) only retains initial and local tokens, while PyramidKV identifies the unique attention distribution at each layer and allocates a dynamic KV budget.
+Similarly to Heavy-Hitter (H2O)~\citep{h2o}, PyramidKV preserves tokens that have the largest cumulative attention scores.
+Additionally, we include the original Llama2-7B-128K baseline and our \name, and report their performance in Figure~\ref{fig:sink_pyramidkv}.
+For fair comparison, we keep the same KV cache budget for Attn Sink, PyramidKV, and \name, i.e., 60\% of the original full transformer.
+Figure~\ref{fig:sink_pyramidkv} shows the results on the needle-in-a-haystack (NIAH) retrieval task.
+Both the original Llama2-7B-128K base model and \name can pass the needle retrieval task with 100\% accuracy, which we will analyze later in the experiment section \S \ref{subsec:overall_perf}.
+However, both KV eviction methods underperform on NIAH, especially with $>32$K contexts.
+Intuitively, their underperformance can be attributed to two factors:
+\begin{itemize}
+    \item \textbf{Lack of full context access.} Due to KV reduction at all layers, the model loses \emph{direct} access to certain positions, making it more challenging for the model to perform accurate retrieval.
+\item\textbf{Lack of sparse context adaption.}
+The model parameters, especially position embeddings, remain fixed during cache reduction. 
+However, it has been observed that the widely used RoPE-style position embedding~\citep{rope} struggles to generalize to unseen position ranges~\citep{rope1}.
+After KV reduction, the position range becomes non-contiguous, 
+creating a mismatch with the training setup.
+This can potentially hurt the model's ability to adapt to longer contexts. 
+\end{itemize}
+The lessons from the above experiment motivates \name's key design choices:
+(1) retaining full context at some layers, and (2) training the model to adapt to sparse attention at the others.
+
+
+\section{\name}
+
+\name improves long-context training and inference efficiency.
+It finetunes a pretrained LLM into an efficient architecture during length extension.
+\name uses a hybrid architecture,
+with KV-reduced attention patterns in bottom and top layers, while retaining full contexts in the middle layers (Figure~\ref{fig:overview_longgen}).
+We will explore various strategies to initialize the sparse attention,
+followed by a comprehensive analysis of FLOPs and memory savings to demonstrate the theoretical efficiency benefits of \name.
+\subsection{Context Extension with Efficient Architectures}
+\paragraph{A hybrid architecture} 
+Previous work has found attention is relatively specialized in the middle layers.
+Some middle-layer attention heads are shown to be strongly related to retrieval and reasoning, indicating refined information aggregation in those layers~\cite{wu2024retrieval,fu2024language,zhang2024pyramidkv}.
+Inspired by their findings, we design \name to be in an hourglass shape---sparse attention in both ends to efficiently reduce computing cost, and full attention in the middle to maximize long context performance.
+We will show the necessity of preserving full contexts for middle layers in \S\ref{sec:abl}.
+We post-train this hybrid architecture on on longer sequences with the same loss function as in pretraining.
+
+\paragraph{Different KV-Reduced Attention Strategies} 
+Efficient attention layers in \name can be initialized using various KV cache reduction strategies.
+Instead of choosing attention patterns that adaptively allocate memory for each head, \name prefers uniformly structured attention patterns.
+Specifically, we introduce two criteria for sparse attention patterns:
+(1) \textbf{\textit{Static access of position. }}
+For each head, the position to be retained should be consistent and agnostic of input tokens.
+This enables a uniform GPU memory access pattern in training, which allows for optimized sparse training kernel and memory IO.
+During inference, it is also feasible to enforce the a fixed cache management strategy, thus avoiding extra computation and tensor replacement.
+From both sides, static attention patterns lead to better efficiency.
+(2) \textbf{\textit{Block-wise context handling. }}
+In GPU, threads are assigned to streaming multiprocessors in block granularity, where each block handles consequent memory space, which is usually significantly larger than the memory occupied by each token.
+Consequently, token-wise KV design will create idling threads and lower the utilization rate of SRAM.
+Therefore, we load context by blocks and set the block size to be similar with each thread block size.
+Guided by the two principles, we equip \name with two existing KV cache reduction strategies and illustrate them in Figure~\ref{fig:overview_longgen}.
+Our first variant is Attention Sink, which combines initial tokens with local blocks of context window~\citep{sink}. 
+This technique builds upon the proven effectiveness of sliding window attention in long context training, as demonstrated by Mistral~\citep{mistral}.
+An alternative initialization strategy is block sparse attention, which divides the context into multiple blocks and selectively attends to specific block indices based on a predetermined stride~\citep{bigbird,qiu2019blockwise}.
+
+\subsection{Kernel-Level Optimization to Improve Efficiency}
+Since our implementation differs from traditional transformers in sparse attention computation only, \name can benefit from the tools developed to improve transformer efficiency, such as flash attention.
+In fact, we build our customized kernel upon flash attention.
+Similarly to FlashAttention~\citep{flash}, \name takes an attention mask matrix as input.
+The attention mask is represented in compressed sparse row format, which consumes $O(N)$ memory instead of the original $O(N^2)$.
+Note that the sparse mask is static for all heads, so there is no overhead in building the dynamic masks.
+During forward and backward steps, we skip computing a position by avoiding loading it into HBM if its mask value is zero.
+This implementation enables FLOPs saving, significantly accelerating training and inference.
+
+During inference, the bottleneck is to load KV cache as fast as possible.
+Instead of loading the entire head dimension, we split the loading of the head dimension across different thread blocks.
+We empirically found this to be more efficient than the original FlashAttention, probably because of reduced SRAM usage per loading cycle.
+For the attention sink initialization, we follow Mistral to use the rolling buffer cache for local sliding window tokens~\citep{mistral}.
+
+\subsection{Theoretical Training and Inference Advantage}
+
+\begin{table}[t]
+\centering
+\begin{adjustbox}{max width=\textwidth}
+    \begin{tabular}{@{} l ccc @{}}
+    \toprule
+    & \textbf{Training FLOPs } & \textbf{KV Cache Mem} & \textbf{Inference Prefilling Time}\\
+    \midrule
+    Full Attention & $\mathcal{O}(L_{\text{full}}(ND^2+N^2D))$ & $\mathcal{O}(L_{\text{full}}ND)$ & $\mathcal{O}(L_{\text{full}}(N^2D+ND^2))$ \\
+    \midrule
+    Sparse Attention in \scalebox{0.85}{\name} &{$\mathcal{O}(L_{\text{sparse}}(SD^2+S^2D))$} &$\mathcal{O}(L_{\text{sparse}}SD)$ & $\mathcal{O}(L_{\text{sparse}}(S^2D+SD^2))$ \\
+    \bottomrule
+    \end{tabular}
+\end{adjustbox}
+    \caption{Efficiency comparison between conventional full attention and the sparse attention in \name. 
+    Training FLOPs count both attention forward and backward operations.
+    $L_{\text{full}}$ and $L_{\text{partial}}$ are the number of full context and partial context layers.
+    $N$ and $D$ represent sequence length and head dimension, respectively.
+    In \name's attention sink variant, $S$ represents a fixed window block size.
+    In the block sparse variant, $S$ represents a fixed total block size. In both variants, $S$ does not grow with context length, and $S \ll N$.}
+    \label{tab:training_advantage}
+\end{table}
+
+\paragraph{Training}
+Since each token needs to be stored to calculate the loss function, \name does not provide any memory savings during the training process. 
+The major efficiency gain comes from a substantial reduction in training FLOPs. 
+Table~\ref{tab:training_advantage} demonstrates that when the context length $N$ significantly exceeds the block size $S$, the FLOPs required for sparse attention layers become negligible ($S \ll N$).
+Consequently, \name effectively reduces the total FLOPs to a fraction of $L_{\text{full}}/(L_{\text{full}}+L_{\text{sparse}})$ compared to the original transformer model. 
+Empirical studies indicate that a ratio of $L_{\text{full}}:L_{\text{sparse}}=1:2$ provides an optimal balance, achieving significant efficiency gains without compromising the model's long-context performance.
+\paragraph{Inference}
+ During the inference phase, \name demonstrates notable improvements in both prefilling time and KV cache memory usage, as shown in the last two columns of Table~\ref{tab:training_advantage}. 
+ In models with full layers, KV cache typically grows linearly with sequence length, while prefilling time exhibits quadratic growth. 
+ However, \name effectively mitigates these factors. Analogous to the training phase analysis, when $S \ll N$, the cost induced by sparse attention layers becomes negligible, reducing both metrics to $L_{\text{full}}/(L_{\text{full}}+L_{\text{sparse}})$ of the original values.
+ 
+ With our customized triton kernels, \name can translate the theoretical efficiency gain to wall-clock speedup and GPU memory saving, which we will further illustrate in \S~\ref{sec:exp_efficiency}.
+
+
+\section{Experiments}
+
+\subsection{Experimental Settings}
+\label{sec:exp_setting}
+In order to evaluate \name across different model scales and architecture, we experiment with Llama-2-7B-base (regular multihead attention) and Llama-2-70B-base (grouped-query attention).
+Following~\cite{fu2024data}, we continue pretraining them on the same SlimPajama data blend, an open-source reproduction of Llama-2's pretraining corpus~\citep{slimpajama}.
+We curate long sequence training data by concatenating short texts
+in Slimpajama to 128K length and marking the document boundary with <bos> token.
+We train models on 5B tokens, which only account for 0.2\% of its 2.4T pretraining corpus.
+With 32 Nvidia A100-80G GPUs, the post-training of 7B and 70B models with full attention consumes 74 and 387 GPU hours, respectively.
+The learning rate is 2e-5, the global batch size is 32, and we modify the RoPE base to 5M.
+Each kernel block handles 64 tokens.
+For \name with attention sink, we retain the first block for sink tokens and the most recent 32 blocks for local context.
+Similarly, for \name with block sparse, we set the stride length as 64 blocks, meaning we only retain one context block for every 64 blocks.
+This ensures that when having the same numbers of sparse layers, \name w/ AttnSink and \name w/ BlockSparse share similar KV cache budgets, which are estimated as 2K retained tokens for a 128K sequence length.
+We run inference on the vLLM benchmark~\footnote{vllm/benchmark/benchmark\_latebcg.py} and compare efficiency accordingly.
+\begin{table}
+\centering
+\begin{adjustbox}{max width=0.9 \textwidth}
+    \begin{tabular}{@{} l cccc@{}}
+    \toprule
+    \tabincell{l}{\textbf{KV Cache} \\ \textbf{Eviction Methods}} & Attn Sink & H2O & RazorAttention & PyramidKV \\
+    \midrule
+    NIAH Pass Rate & 28\% & 32\% & 46\% & 51\% \\
+    \toprule
+    \tabincell{l}{\textbf{Long-context} \\\textbf{Training Methods}} & Sliding Window & YOCO & \tabincell{c}{\name \\ w/ AttnSink} & \tabincell{c}{\name \\ w/ BlockSparse} \\
+    \midrule
+    NIAH Pass Rate & 48\% & 88\% & \textbf{100\%} & \textbf{100\%} \\
+    \bottomrule
+    \end{tabular}
+\end{adjustbox}
+    \caption{Averaged pass rate of different methods on the needle-in-a-haystack retrieval task. 
+    All methods are based on a Llama2-7B model.
+    Evaluation context length ranges from 512 to 128K.}
+    \label{tab:needle_baseline_compare}
+\end{table}
+
+\begin{table}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/all_methods.png}
+    \caption{Evaluation results on the first five tasks of BABILong. Columns correspond to sequence lengths, rows denote models.
+    Each number indicates the average accuracy of the model over 5 tasks at a given sequence length, calculated over 1000 samples.}
+    \label{tab:all_methods}
+\end{table}
+
+We evaluate on three long-context benchmarks---Needle-in-a-Haystack (NIAH) retrieval, BABILong~\citep{babilong}, and RULER~\citep{ruler}.
+The latter two require models to not only retireve multiple pieces of evidence from the long context, but also reason over them; each evidence sentence is randomly placed in a long sequence.
+Following BABILong paper, we used 3 different random seeds to generate 2250 test samples for each task, and average model performance on the first five tasks.
+For RULER, we only evaluate models on its two QA subtasks for two reasons: 
+(1) We observe huge performance variance on multi-needle retrieval and other synthetic tasks. When varying random seeds, the performance can fluctuate up to 40\%.
+(2) Compared with other synthetic counting tasks, the two multi-hop QA tasks are more practical and close to real-world application.
+For short-context evaluation, we followed Llama2 to test on MMLU~\citep{mmlu}, Math~\citep{math}, and BigBenchHard(BBH)~\citep{bbh}. 
+\subsection{Overall Performance}
+\label{subsec:overall_perf}
+\paragraph{Baselines}
+We evaluate \name against various baselines, reporting performance on NIAH and BABILong datasets in Tables~\ref{tab:needle_baseline_compare} and~\ref{tab:all_methods}, respectively. The comparative methods span three categories:
+(1) \textit{Full Attention}: Serving as an upper-bound reference, this approach lacks efficiency optimizations and is computationally expensive for long contexts.
+(2) \textit{KV Cache Eviction Methods}: We incorporate two widely adopted inference-time KV reduction techniques: Attention Sink~\citep{sink} and Heavy Hitter (H2O)~\citep{h2o}. 
+Additionally, we include recently proposed methods such as RazorAttention~\citep{razorattention} and PyramidKV~\citep{pyramidkv}, which capture fine-grained attention distribution patterns and adaptively allocate KV budgets.
+(3) \textit{Long Context Training Methods}: This category includes sliding window attention, YOCO~\citep{yoco}, and our proposed approach with both patterns. 
+Sliding window attention at all layers is employed by Mistral for long context training, while YOCO utilizes a cross-decoder design to reuse the KV cache from earlier layers.
+To ensure a fair comparison, we maintain consistent KV cache budgets across all methods by adjusting the corresponding hyperparameters. 
+Due to variations in implementation, KV budgets may fluctuate by approximately 5\% between different methods.
+\paragraph{Performance Evaluation on Long-Context}
+Analysis of the NIAH results in Table~\ref{tab:needle_baseline_compare} yields two key findings:
+(1) Long context training methods consistently outperform inference-time KV eviction techniques. 
+As discussed in \S \ref{sec:background}, ensuring full access to the context window and training models to adapt to longer context lengths is crucial.
+(2) Among the long context training methods, \name uniquely achieves perfect needle retrieval results. 
+In contrast to window attention, \name retains the entire sequence. 
+Compared to YOCO, \name more closely resembles the original transformer architecture in pretraining. 
+Furthermore, our method takes advantage of the information aggregation capabilities in middle layers.
+
+To assess advanced retrieval and reasoning capabilities, we present results on BABILong in Table~\ref{tab:all_methods}, detailing accuracy at each sequence length. 
+While exhibiting similar trends to NIAH, BABILong provides better differentiation between methods. 
+Among efficient models, \name demonstrates superior performance, achieving an average accuracy of 0.27. 
+Notably, despite achieving 100\% accuracy on NIAH, \name still slightly underperforms full attention on more challenging tasks. 
+These findings underscore the importance of evaluating models on challenging reasoning tasks.
+
+\begin{table}[t]
+\centering
+\begin{adjustbox}{max width=0.8\textwidth}
+    \begin{tabular}{@{} lcccccc @{}}
+    \toprule
+    & NIAH & BABILong & RULER & MMLU & Math & BBH\\
+    \midrule
+    Full Attention-7B& 100\% &0.29&0.41 & 0.419 &0.12 &0.32 \\
+    \midrule
+    \textbf{\name}-7B& 100\% &0.27&0.38 & 0.415 &0.13 &0.31 \\
+    \toprule
+    Full Attention-70B& 100\% &0.46&0.67 &0.661 &0.32 &0.49 \\
+    \midrule
+    \textbf{\name}-70B& 100\% &0.46&0.65 & 0.658&0.32 &0.49 \\
+    \bottomrule
+    \end{tabular}
+\end{adjustbox}
+    \caption{Overall long context performance of \name compared with full attention baseline. Evaluation context length ranges from 512 to 128K. NIAH measures the averaged correct answer rate of the models on the needle-in-a-haystack retrieval task. BABILong refers to the averaged accuracy score on the first five tasks on the BABILong benchmark. RULER reports the averaged accuracy on two multi-hop question answering subtasks from RULER.
+    }
+    \label{tab:7b_70b}
+\end{table}
+
+\paragraph{Comprehensive Comparison with Full Attention}
+We compare \name-7B and \name-70B with their full attention counterparts, which serves as the upper bound for our hybrid sparse architecture.
+Our experiments revealed no significant performance disparities between \name w/ AttnSink and \name w/ BlockSparse since their accuracies exhibited minor fluctuations across different training iterations. 
+For simplicity, we present the evaluation results of \name w/ AttnSink on both short-context and long-context benchmarks in Table~\ref{tab:7b_70b}. It is worth noting that we do not express a preference for either strategy in terms of performance.
+
+Although our proposed models demonstrate marginally lower performance compared to the full attention models, they achieve comparable results across various context scales while offering substantial efficiency improvements. Our analysis yielded two key findings:
+(1) Their performance gap is more significant in long-context scenarios compared to short-context ones. 
+This can be attributed to the fact that most short context is fully captured by the local blocks in \name, whereas information from longer distances is only sparsely represented.
+(2) The performance gap between ours and the upper bound narrows as the model scale increases. 
+This trend may be attributed to the higher degree of information sparsity exhibited by larger models, thus highlighting the potential for applying our approach to models with even larger parameter counts.
+These findings underscore \name's potential for scaling to more expansive parameter spaces.
+
+\subsection{Efficiency Improvement}
+\label{sec:exp_efficiency}
+\paragraph{Training}
+Similar to FlashAttention~\citep{flash}, we use wall-clock training speedup to evaluate training efficiency.
+We measured the latency of training a Llama2-7b model on 128K sequence length with 256 A100-80G GPUS.
+We set tensor parallel size as 8 and use distributed optimizer and checkpoint activation.
+Results are presented in the leftmost part of Figure~\ref{fig:exp_efficiency}.
+By adding sparse layers, \name significantly improves training throughput.
+Our chosen ``1/3 Full'' setting could achieve 1.55 times speedup in total wall-clock training time.
+While increasing the sparsity level will bring us more efficiency gain, we avoid doing this in pursuit of optimal long-context performance.
+We will explain more details in \S \ref{sec:abl}.
+\paragraph{Inference}
+
+To verify that \name will bring practical system-level improvement during serving, we pair our inference kernel to be compatible with vLLM. 
+Using vLLM's official benchmarking tools, we report KV cache memory saving and inference latency reduction in Figure~\ref{fig:exp_efficiency}.
+Both memory and latency are measured on one single 128K sequence with a tensor parallel size of 4.
+From the figure, our chosen ``1/3 Full (12 Full layers)'' setting reduces memory consumption from 69.2 GB to 26.5 GB (a 62\% reduction).
+Meanwhile, it saves 40\% profiling time and 29 \% decoding time.
+The results demonstrates \name's potential for efficient long-context serving.
+Similarly, we do not opt for sparser architecture due to performance consideration.
+\begin{table}
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/position_abl.png}
+    \caption{Ablation on the placement of the full attention layers. 
+    We train the base Llama2-7B model with 32 layers in total on 128K context length, and report results on BABILong.
+    We fix the full attention layer budget as one-third of all layers (12 sparse layers in total) and test varied locations of full layers. Top, middle, and bottom settings stack all full layers together while interleaving setting inserts every full layer between two sparse ones. }
+    \label{tab:position_abl}
+\end{table}
+
+\begin{table}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/layernum_abl.png}
+    \caption{Ablation on the number of full layers in \name w/ AttnSink.
+    The base model is Llama2-7B-128K with 32 layers in total.
+    We locate all full attention layers in the middle of the model for the best performance.
+    All, 1/3, 1/5, and 1/16 Full indicate using 32, 12, 6, and 2 full layers, respectively.
+    }
+    \label{tab:number_abl}
+\end{table}
+
+\subsection{Identifying Essential Factors for Long-Context}
+\label{sec:abl}
+In this section, we investigate the impact of varying the number and location of full attention layers on long-context performance.
+
+\paragraph{Position of Full Layers}
+We first examine the effect of full layer positioning by maintaining a constant number of 12 full layers and altering their placement. 
+We explore four configurations: (1) stacking in the top layers, (2) stacking in the middle layers, (3) stacking in the bottom layers, and (4) interleaving in the middle layers. 
+Table~\ref{tab:position_abl} presents the results on the BABILong dataset, demonstrating that the position of full layers significantly influences long-context performance. 
+Notably, positioning full layers in the middle of the network yields optimal results. 
+These findings align with previous research indicating that attention heads in the middle layers play a crucial role in information aggregation.
+
+\paragraph{Number of Full Layers}
+Subsequently, we investigate the relationship between the number of full layers and model performance. 
+While increasing the number of full layers is expected to approach the performance upper bound, we aim to identify an optimal balance between computational efficiency and accuracy. 
+Table~\ref{tab:number_abl} illustrates the performance for various numbers of full layers. 
+Our analysis reveals that maintaining full layers between 1/5 (6 layers) and 1/3 (12 layers) of the total network depth adequately preserves satisfactory long-context accuracy.
+
+These empirical observations inspire the final architectural design of \name, which incorporates 1/3 full layers positioned in the middle of the network.
+
+
+
+
+
+
+\section{Related Work}
+
+\subsection{Efficient Long Context Training Architecture}
+To overcome the  quadratic complexity of transformers, several model architecture alternatives have been introduced.
+With recent key modifications \citep{mamba} to enhance training efficiency, state-space models emerged as they only require linear computation complexity.
+\citet{hippo,cnnssm} first mitigate the training scalability issue of sequential models with hippo matrix and parallelizable operands.
+Mamba~\citep{mamba,mamba2} introduces input-dependent state parametrization to SSMs and optimized hardware-aware implementations.
+\citep{mambaformer,hybridssm1,hybridssm2,hybridssm3,zamba,samba} propose hybrid architectures by integrating different variations of transformer layers into SSMs.
+However, as recent studies suggests, SSMs are less competitive in long context capabilities compared to transformers~\citep{poorctx1, poorctx2}.
+Earlier, several works attempts to inject sparsity into transformers to improve efficiency in long context settings~\citep{efficientsurvey,sparsetransformer,longformer,bigbird}.
+However, as pointed out in \citet{flash}, these algorithms can hardly bring wall-clock speed-up due to poor compatibility with accelerators.
+Meanwhile, \citet{yoco} revives the encoder-decoder architecture to save KV cache, where  
+all decoder layers consume the same KV vectors from the encoder side with cross attention.
+However, it's unclear how to use the architecture in context extension, as it diverges significantly from default decoder-only models.
+\subsection{Inference Time KV Cache Reduction}
+Recently, many attempts have been made to evict KV cache at inference time for faster long context serving scenarios~\citep{tianqisurvey}. 
+\citet{h2o,scissorhands} proposes to discard less important KV vectors based on the accumulated attention score.
+\citet{lminf,sink} find LLMs tend to store important global information into initial tokens, known as attention sink. 
+By keeping only the attention sink and recent tokens in cache, LLMs can maintain a reasonably well performance.
+\citet{fastgen,snapkv} design algorithms to adaptively maintain KV cache with hybrid eviction policies.
+PyramidKV~\citep{zhang2024pyramidkv} find that the sparsity in attention varies between layers and proposes to dynamically allocate KV cache budget for each layer.
+This line of work shows that LLMs can work with partial context at inference time. 
+\citep{snapkv,zhang2024pyramidkv}
+However, \citet{minference,zhang2024pyramidkv} shows that many of the methods will have significant degradation in long context tasks.
+Also, it's questionable whether complex eviction methods are compatible with realistic serving systems, as calculating accumulative attention score and releasing arbitrary memories are challenging to implement in PagedAttention and Prefix Caching ~\citep{vllm,sglang}.
+
+
+
+\section{Conclusion}
+
+In this paper, we propose \name to finetune a pretrained LLM into an efficient architecture during length extension.
+We incorporate GPU-friendly sparse attention to enable practical efficiency gain.
+Additionally, we find using a hybrid architecture with 1/3 full attention layers and
+2/3 efficient ones can achieve a balanced trade-off between efficiency and long-context performance.
+Through light-weight training, we extend the context length of llama2-7B and 70B from 4K to 128K.
+Evaluations on multiple long-context benchmarks suggest that \name reaches on-par performance with full attention on long-context retrieval and reasoning.
+While at the same time, it reduces wall-clock training time by 36\% and KV-cache by 62\%, reaching 1.67x acceleration on prefilling and 1.41x on decoding stage.
+Our study motivates future work on efficient transformer architectures and low-cost methods for long context extension.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

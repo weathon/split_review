@@ -1,0 +1,528 @@
+\title{Truncated Consistency Models}
+
+\begin{abstract}
+Consistency models have recently been introduced to accelerate sampling from diffusion models by directly predicting the solution~(i.e., data) of the probability flow ODE (PF ODE) from initial noise.
+However, the training of consistency models requires learning to map all intermediate points along PF ODE trajectories to their corresponding endpoints. This task is much more challenging than the ultimate objective of one-step generation, which only concerns the PF ODE's noise-to-data mapping.
+We empirically find that this training paradigm limits the one-step generation performance of consistency models.
+To address this issue, we generalize consistency training to the truncated time range, which allows the model to ignore denoising tasks at earlier time steps and focus its capacity on generation.
+We propose a new parameterization of the consistency function and a two-stage training procedure that prevents the truncated-time training from collapsing to a trivial solution.
+Experiments on CIFAR-10 and ImageNet $64\times64$ datasets show that our method achieves better one-step and two-step FIDs than the state-of-the-art consistency models such as iCT-deep,
+using more than 2$\times$ smaller networks. Project page: \href{https://truncated-cm.io/}{https://truncated-cm.io/}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Diffusion models~\citep{ho2020denoising, song2020score} have demonstrated remarkable capabilities in generating high-quality continuous data such as images, videos, or audio~\citep{ramesh2022hierarchical, ho2022video,huang2023make}.
+Their generation process gradually transforms a simple Gaussian prior into data distribution through a probability flow ordinary differential equation~(PF ODE). Although diffusion models can capture complex data distributions, they require longer generation time due to the iterative nature of solving the PF ODE.
+
+Consistency models~\citep{song2023consistency} were recently proposed to expedite the generation speed of diffusion models by learning to directly predict the solution of the PF ODE from the initial noise in a single step. To circumvent the need for simulating a large number of noise-data pairs to learn this mapping, as employed in prior works~\citep{liu2022flow,luhman2021knowledge}, consistency models learn to minimize the discrepancy between the model's outputs at two neighboring points along the ODE trajectory. The boundary condition at $t=0$ serves as an anchor, grounding these outputs to the real data.  Through simulation-free training, the model gradually refines its mapping at different times, propagating the boundary condition from $t=0$ to the initial $t=T$. \looseness=-1
+
+However, the advantage of simulation-free training comes with trade-offs. Consistency models must learn to map any point along the PF ODE trajectory to its corresponding data endpoint, as shown in Fig.~\ref{fig:main}a. This requires the learning of both \emph{denoising} at smaller times on the PF ODE, where the data are only partially corrupted, and \emph{generation} towards $t=T$, where most of the original data information has been erased. This dual task necessitates larger network capacity, and it is challenging for a single model to excel at both tasks. Our empirical observations in Fig.~\ref{fig:tradeoff} demonstrate the model would gradually sacrifice its denoising capability at smaller times to trade for generation quality as training proceeds. While this behavior is desirable as the end goal is generation rather than denoising, we argue for explicit control over this trade-off, rather than allowing the model to allocate capacity uncontrollably across times. This raises a key question: \textit{Can we explicitly reduce the network capacity dedicated to the denoising task in order to improve generation?}
+In this paper, we propose a new training algorithm, termed \textit{\textbf{T}runcated \textbf{C}onsistency \textbf{M}odels}~(TCM), to de-emphasize denoising at smaller times while still preserving the consistency mapping for larger times. TCM relaxes the original consistency objective, which requires learning across the entire time range $[0, T]$ of PF ODE trajectories, to a new objective that focuses on a truncated time range $[t', T]$, where $t'$ serves as the dividing time between denoising and generation tasks. This allows the model to dedicate its capacity primarily to generation, freeing it from the denoising task at earlier times $[0, t')$. Crucially, we show that a proper boundary condition at $t'$ is necessary to ensure the new model adheres to the original consistent mapping. To achieve this, we propose a two-stage training procedure~(see Fig.~\ref{fig:main}a): The first stage involves pretraining a standard consistency model over the whole time range. This pretrained model then acts as the boundary condition at $t'$ for the subsequent truncated consistency training stage of the TCM.
+
+Experimentally, TCM improves both the sample quality and the training stability of consistency models across
+different datasets and sampling steps.
+On CIFAR-10 and ImageNet $64\times64$ datasets, TCM outperforms the  iCT~\citep{song2023improved}, the previous best consistency model, in both one-step and two-step generation using similar network size.
+TCM even outperforms iCT-deep that uses a $2\times$ larger network across datasets and sampling steps. By using our largest network, we achieve a one-step FID of $2.20$ on ImageNet $64\times64$, which is competitive with the current state-of-the-art. In addition, the divergence observed during standard consistency training is not present in TCM. {We show through extensive ablation experiments why the various design choices of truncated consistency models (including the strength of mandating boundary conditions, two-stage training, etc.) are necessary to obtain these results.} 
+
+\textbf{Contributions.} \textit{(i)} We identify an underlying trade-off between denoising and generation within consistency models, which negatively impacts both stability and generation performance.
+\textit{(ii)} Building on these insights, we introduce Truncated Consistency Models, a novel two-stage training framework that explicitly allocates network capacity towards generation while preserving consistency mapping. \textit{(iii)} Extensive validation of TCM demonstrates significant improvements in both one-step and two-step generation, achieving state-of-the-art results within the consistency models family on multiple image datasets. Additionally, TCM exhibit improved training stability. \textit{(iv)} We provide in-depth analyses, along with ablation and design choices that demonstrate the unique advantages of the two-stage training in TCM.
+
+
+\section{Preliminaries}
+
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.87\textwidth]{figs/main.pdf}
+    \caption{\textbf{(a)} Two-stage training of TCM. In \textcolor{color_stage1}{Stage 1}, a standard consistency model is trained to provide both the boundary condition and initialization for TCM training in \textcolor{color_stage2}{Stage 2}. TCM focuses on learning in the $[t',T]$ range, discarding denoising tasks at earlier times and allocating network capacity toward generation-like tasks at later times. \textbf{(b)} Sample quality (FID, lower is better) of the two training stages. TCM~(Stage 2) improves over standard consistency training~(Stage 1) across datasets. Additionally, standard consistency training shows instability on challenging datasets like ImageNet 64x64, where the model could diverge during training.
+    }
+    \label{fig:main}
+\end{figure*}
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figs/motivation_fig_grid.pdf}
+    \caption{Evolution of the denoising FID (dFID$_t$) during standard consistency training for different $t$, where $0 < t \le 80$ follows the EDM noise schedule~\citep{karras2022elucidating}. The model gradually sacrifices its denoising capability at smaller times ($t<1.0$) to trade for the improved generation quality at $t=80$ as training proceeds. }
+    \label{fig:tradeoff}
+\end{figure}
+
+\subsection{Diffusion models}
+Diffusion models are a class of generative models that synthesize data by reversing a forward process in which the data distribution $p_{\text{data}}$ is gradually transformed into a tractable Gaussian distribution.
+In this paper, we use the formulation proposed in \citet{karras2022elucidating}, where the forward process is defined by the following stochastic differential equation (SDE):
+\begin{align}
+    d\x_t = \sqrt{2t} d\w_t,
+    \label{eq:sde}
+\end{align}
+where $t\in[0,T]$ and $\w_t$ is the standard Brownian motion from $t=0$ to $t=T$.
+Here, we define $p_t$ as the marginal distribution of $\x_t$ along the forward process, where $p_0=p_{\text{data}}$.
+In this case, $p_t$ is a perturbed data distribution with the noise from $\mathcal N(0, t^2 \Ib)$.
+In diffusion models, $T$ is set to be large enough so that $p_T$ is approximately equal to a tractable Gaussian distribution $\mathcal N(0, T^2 \Ib)$.
+Diffusion models come with the reverse probability flow ODE (PF ODE) that starts from $t=T$ to $t=0$ and yields the same marginal distribution $p_t$ as the forward process in Eq.~\eqref{eq:sde}~\citep{song2020score}: \looseness=-1
+\begin{align}
+    d\x_t = -t  \s_t(\x_t) dt,
+\end{align}
+where $\s_t(\x_t) := \nabla_{\x} \log p_t(\x)$ is the score function at time $t \in [0,T]$. To draw samples from the data distribution $p_{\text{data}}$, we first train a neural network to learn $\s_t(\x)$ using the denoising score matching~\citep{vincent2011connection}, initialize $\x_T$ with a sample from $\mathcal N(0, T^2 \I)$,
+and solve the PF ODE backward in time: $\x_0 = \x_T + \int_T^0 (-t  \s_t(\x_t)) dt$. 
+However, numerically solving the PF ODE requires multiple forward passes of the neural score function estimator, which is computationally expensive.
+
+\subsection{Consistency models}
+\label{sec:consistency-model}
+Consistency models instead aim to directly map from noise to data, by learning a consistency function that outputs the solution of PF ODE starting from any $t \in [0,T]$. The desired consistency function $\f$ should satisfy the following two properties~\citep{song2023consistency}: (i) $\f(\x_0, 0) = \x_0$, and (ii) $\f(\x_t, t) = \f(\x_s, s), \; \forall (s, t) \in [0,T]^2$.
+The first condition can be satisfied by the reparameterization 
+\begin{align}
+    \f_{\thetab}(\x, t) := c_{\text{out}} (t) \Fb_{\thetab}(\x, t) + c_{\text{skip}} (t) \x,
+    \label{eq:cm-param}
+\end{align}
+where $\thetab$ is the parameter of the free-form neural network $\Fb_{\thetab}: \mathbb R^d \times \mathbb R \to \mathbb R^d$, and $c_{\text{out}}(0) = 0$, $c_{\text{skip}}(0) = 1$ following the similar design of \citet{karras2022elucidating}.
+Here, instead of training ${\f}_\thetab$ directly, we train a surrogate neural network $\Fb_\thetab$ under the above reparameterization.
+The second condition can be learned by optimizing the following \textit{consistency training} objective:
+\begin{align}
+    &\mathcal L_{\text{CT}}(\f_\thetab, \f_\thetab^-) := \mathbb E_{t \sim \psi_t, \x \sim p_{\text{data}}, \epsb \sim \mathcal N(0, \Ib)} [\frac{\omega(t)}{\Delta_t} d(\f_{\thetab}(\x + t \epsb, t), \f_{\thetab^{-}}(\x + (t - \Delta_t) \epsb, t - \Delta_t )], 
+    \label{eq:ct-objective} 
+\end{align}
+where $\thetab^- = \text{stopgrad}(\thetab)$, $\psi_t$ denotes the probability of sampling time $t$ that also represents the noise scale, $\epsb$ denotes the standard Gaussian noise, $\omega(t)$ is a weighting function, $d(\cdot, \cdot)$ is a distance function defined in Sec.~\ref{sec:consistency-function}, and $\Delta_t$ represents the nonnegative difference between two consecutive time steps that is usually set to a monotonically increasing function of $t$.
+\citet{song2023consistency} empirically suggests that $\Delta_t$ should be large at the beginning of training, which incurs biased gradients but allows for stable training, and should be annealed in the later stages, which reduces the error term but increases variance. \looseness=-1
+\paragraph{Denoising FID}
+By definition, consistency models can both generate data from pure Gaussian noise as well as noisy data sampled from $p_t$ where $0 < t < T$.
+To understand how consistency models propagate end solutions through diffusion time, we need to empirically measure their denoising capability across different time steps. To this end, we define denoising FID at time step $t$, termed dFID$_t$, as the Fréchet inception distance (FID)~\citep{heusel2017gans} between the original data $p_{\text{data}}$ and the denoised data by consistency models with inputs sampled from $p_t$.
+When computing dFID$_t$, we first add Gaussian noise from $\mathcal N(0, t^2 \Ib)$ to 50K clean samples
+and then denoise them using consistency models.
+Hence, dFID$_0$ is close to zero, and dFID$_T$ is the standard FID.
+
+
+
+\section{Truncated consistency model}
+
+Standard consistency models pose a higher challenge in training than many other generative models:
+instead of simply mapping noise to data, consistency models must learn the mapping from \emph{any} point along the PF ODE trajectory to its data endpoint.
+Hence, a consistency model must divide its capacity between denoising tasks (i.e., mapping samples from intermediate times to data) and generation (i.e., mapping from pure noise to data).
+This challenge mainly contributes to  consistency models'  underperformance relative to other generative models with similar network capacities (see Table~\ref{tab:nfe_fid_cifar10}).
+
+Interestingly, standard consistency models navigate the trade-off between denoising and generation tasks implicitly. 
+We observe that during standard consistency training, the model gradually loses its denoising capabilities at the low $t$. Specifically,
+Fig.~\ref{fig:tradeoff} shows a trade-off in which, after some training iterations, denoising FIDs at lower $t$ ($t<1$) \emph{increase} while the denoising FIDs at larger $t$ ($t>1$) (including the generation FID at the largest $t=80$) continue to decrease.
+This suggests that the model struggles to learn to denoise and generate simultaneously, and  sacrifices one for the other.
+
+
+Truncated consistency models (TCM) aim to explicitly control this tradeoff by forcing the consistency training to ignore the denoising task for small values of $t$, thus improving its capacity usage for generation. 
+We thus \emph{generalize} the consistency model objective in Eq.~(\ref{eq:ct-objective}) and apply it only in the truncated time range $[t', T]$ where the dividing time $t'$ lies within $(0,T)$. The time probability $\psi_t$ in TCM only has support in $[t', T]$ as a result.
+
+\paragraph{Naive solution}
+A straightforward approach is to directly train a consistency model on the truncated time range.
+However, the model outputs can collapse to an arbitrary constant because a constant function (i.e., $\f_\thetab(\x, t) = \text{const}$) is a minimizer of the consistency training objective~(Eq.~\eqref{eq:ct-objective}).
+In standard consistency models, the boundary condition $\f(\x_0, 0) = \x_0$ prevents collapse, but in this naive example, there is no such meaningful boundary condition.
+For example, if the free-form neural network $ \Fb_{\thetab}(\x, t) = -c_{\text{skip}} (t) \x / c_{\text{out}} (t)$ for all $t \in [t',T]$, $\f_\thetab(\x, t)$ is $\zerob$, and thus Eq.~\eqref{eq:ct-objective} becomes zero. 
+To handle this, we propose a two-stage training procedure and design a new parameterization with a proper boundary condition, as outlined below.
+\paragraph{Proposed Solution}
+Truncated consistency models conduct  training in two stages:
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Stage 1 (Standard consistency training):} We pretrain a consistency model to convergence in the usual fashion, with the training objective in Eq.~\eqref{eq:ct-objective}; we denote the pre-trained model as $\f_{\thetab_0}$.\looseness=-1
+    \item \textbf{Stage 2 (Truncated consistency training):} We initialize a new consistency model $\f_\thetab$ with the first-stage pretrained weights $\f_{\thetab_0}$, and train over a truncated time range $[t', T]$. The boundary condition at time $t'$ is provided by the pretrained $\f_{\thetab_0}$. This stage is explained further below. 
+\end{enumerate} 
+To explain the details of TCM, we first introduce the following parameterization:
+\begin{align}
+    \f_{\thetab, \thetab_0^-}^{\text{trunc}}(\x, t) = {\f}_{\thetab}(\x, t) \cdot \mathds{1}\{t \geq t'\} + \f_{\thetab_0^-}(\x, t) \cdot \mathds{1}\{t < t'\},
+    \label{eq:f-param-approx}
+\end{align}
+where $\mathds{1}\{\cdot\}$ is the indicator function, and similarly, $\thetab_0^- = \text{stopgrad}(\thetab_0)$.
+Intuitively, we only use our final model $\f_{\thetab}$ when $t \geq t'$, and we inquire the pre-trained $\f_{\thetab_0^-}$ otherwise. 
+This approach ensures that (1) $\f_{\thetab}$ does not waste its capacity learning in the $[0, t')$ range, and (2) if $\f_{\thetab}$ is trained well, it will learn to generate data by mimicking the pre-trained model $\f_{\thetab_0^-}$ at the boundary. 
+When $t' = 0$, we recover the standard consistency model parameterization Eq.~\eqref{eq:cm-param}.
+During sampling, as $\f_{\thetab, \thetab_0^-}^{\text{trunc}} = \f_{\thetab}$ for all $t \in [t', T]$, we can discard this parameterization and just use $\f_{\thetab}$ for generating samples.
+
+To describe the boundary condition, we then partition the support of the time sampling distribution $\psi_t$, i.e., $[t',T]$ into two time ranges: (i) the boundary time region $S_{t'} := \{t \in \mathbb R : t' \leq t \leq t' + \Delta_t \}$, and (ii) the consistency training time region $S_{t'}^- \triangleq [t',T] \setminus S_{t'} = \{t \in \mathbb R : t' + \Delta_t <  t \leq T \}$.
+To effectively enforce the boundary condition using the first-stage pre-trained model $\f_{\thetab_0}$, a nonnegligible amount of $t$'s, sampled from $\psi_t$, must fall within the interval $S_{t'}$. Otherwise the consecutive time steps $t$ and $t- \Delta_t$ in consistency training will mostly be larger or equal to $t'$, limiting the influence of the pre-trained model.
+With this time partitioning and our new parameterization, Eq.~\eqref{eq:ct-objective} can be decomposed as follows: 
+\begin{align}
+\begin{split}
+    \mathcal L_{\text{CT}}(\f_{\thetab, \thetab_0^-}^{\text{trunc}}, \f_{\thetab^-, \thetab_0^-}^{\text{trunc}}) 
+        & =  \underbrace{\int_{t \in S_{t'}} \psi_t(t)  \frac{\omega(t)}{\Delta_t} d(\f_{\thetab}(\x + t \epsb, t), \f_{\thetab_0^-} (\x + (t-\Delta_t) \epsb, t-\Delta_t ) dt}_{\text{Boundary loss}} \\
+        & +  \underbrace{\int_{s \in S_{t'}^- } \psi_t(t)  \frac{\omega(t)}{\Delta_t} d(\f_{\thetab} (\x + t \epsb, t), \f_{\thetab^-} (\x + (t-\Delta_t) \epsb, t-\Delta_t ) dt}_{\text{Consistency loss}} ,
+\end{split}
+        \label{eq:derivation1}
+    \end{align}
+where we apply our parameterization in Eq.~\eqref{eq:f-param-approx} in the above two time partitions separately, and we drop the expectation over $\x \sim p_{\text{data}}, \epsb \sim \mathcal N(0, \Ib)$ for notation simplicity.
+Unlike standard consistency training, TCM have two terms: the boundary loss and consistency loss.
+The boundary loss allows the model to learn from the pre-trained model, preventing collapse to a constant.
+
+Training on the objective \eqref{eq:derivation1} can still collapse to a constant if we do not utilize the boundary condition sufficiently by not sampling enough time $t$'s in $S_{t'}$.
+In particular, this can happen for $\Delta_t$ close to zero when consistency training is near convergence~\citep{song2023improved,geng2024consistency}. 
+To prevent this, we design $\psi_t$ to satisfy $\int_{t \in S_{t'}} \psi_t(t) dt > 0$.
+In other words, we have a strictly positive probability of sampling a point in $S_{t'}$, even when $\Delta_t$ is close to zero.
+Specifically, we define $\psi_t$ as a mixture of the Dirac delta function $\delta(\cdot)$ at point $t'$ and another distribution $\bar \psi_t$: 
+\begin{align} \label{eq:psi}
+    \psi_t(t) = \lambda_b \delta(t-t') + (1-\lambda_b) \bar \psi_t (t),
+\end{align}
+where the weighting coefficient $\lambda_b \in (0, 1)$.
+$\bar \psi_t$ has the support $(t', T]$  and can be instantiated in different ways (e.g., log-normal or log-Student-$t$ distributions); the effect of different $\bar \psi_t$ choices is explored in Section \ref{sec:pt}.
+
+By definition, we can see that $\int_{t \in S_{t'}} \psi_t(t) dt \geq \lambda_b$, and $\lambda_b$ controls how significantly we emphasize the boundary condition.
+Assume that the first-stage consistency model is perfectly trained in $[0, t']$, \textit{i.e.,} $\f_{\thetab_0}(\x_t, t) = \x_0$ for all $t \in [0, t']$. 
+If $\f_{\thetab}(\x_{t'}, t') \neq \f_{\thetab_0}(\x_{t'}, t')$, 
+$\f_{\thetab}$ will be penalized by the boundary loss.
+Minimizing the boundary loss enforces the boundary condition in second-stage model $\f_{\thetab}$~(\textit{i.e.,} $\f_{\thetab}(\x_{t'}, t') = \f_{\thetab_0}(\x_{t'}, t') = \x_0$), while minimizing the consistency loss propagates the boundary condition to the end time~(\textit{i.e.,} $\f_{\thetab}(\x_{T}, T) = \f_{\thetab}(\x_{t'}, t')$). Consequently, the loss in Eq. (\ref{eq:derivation1}) effectively guides the model towards the desired solution $\f_{\thetab}(\x_{T}, T) = \x_0$.
+With the time distribution $\psi_t$ defined in Eq. (\ref{eq:psi}), our training objective becomes \looseness=-1
+\begin{align}
+        \mathcal L_{\text{CT}}(\f_{\thetab, \thetab_0^-}^{\text{trunc}}, \f_{\thetab^-, \thetab_0^-}^{\text{trunc}}) \approx
+         {\lambda}_b \underbrace{\frac{\omega(t')}{\Delta_{t'}} d(\f_{\thetab}(\x + t' \epsb, t'), \f_{\thetab_0^-} (\x + (t'-\Delta_{t'}) \epsb, t' - \Delta_{t'} )  )}_{\text{Boundary loss} := \mathcal L_B(\f_\thetab, \f_{\thetab_0^-})} \label{eq:boundary-loss} \\
+        + (1-\lambda_b)\underbrace{\mathbb E_{\bar \psi_t}  [ \frac{\omega(t)}{\Delta_t} d(\f_{\thetab} (\x + t \epsb, t), \f_{\thetab^-} (\x + (t-\Delta_t) \epsb, t-\Delta_t ) ]}_{\text{Consistency loss} := \mathcal L_C(\f_\thetab, \f_{\thetab^-})}. \label{eq:consistency-loss}
+\end{align}
+where 
+the approximation in Eq. \eqref{eq:boundary-loss} holds when $\Delta_{t}$ is sufficiently small (which is true for the truncated training stage). 
+
+For simplicity of notation,
+we relax the above objective by absorbing the $(1-\lambda_b)$ factor into ${\lambda}_b$ and express our final training loss as:
+\begin{align}
+    \mathcal L_{\text{TCM}} := w_b \mathcal L_B(\f_\thetab, \f_{\thetab_0^-}) +  \mathcal L_C(\f_\thetab, \f_{\thetab^-}),
+    \label{eq:objective-final}
+\end{align}
+where $w_b=\lambda_b/(1-\lambda_b)$ is a tunable hyperparameter that
+controls the weighting of the boundary loss. To estimate the two losses, we partition each mini-batch of size $B$ into two subsets. The boundary loss $L_B$ is estimated using $N_B$ = $\lfloor B\rho \rfloor$ samples, where $\rho \in (0,1)$ is a hyperparameter controlling the allocation of samples. The consistency loss $L_C$ is estimated with the remaining $B-N_B$ samples. Increasing $\rho$ reduces the variance of the boundary loss gradient estimator but increases the variance of the consistency loss gradient estimator, and vice versa. The final mini-batch loss is as follows:
+\begin{align}
+    \mathcal L_{\text{TCM}} 
+    & \approx \frac{w_b}{N_B} \sum_{i=1}^{N_B} \nabla_{\thetab} ({\mathcal L_B})_i(\f_\thetab, \f_{\thetab_0^-}) + \frac{1}{B-N_B} \sum_{j=N_B + 1}^{B} \nabla_{\thetab} ({\mathcal L_C})_j(\f_\thetab, \f_{\thetab^-}),
+    \label{eq:tcm-gradient}
+\end{align}
+where $({\mathcal L_B})_i$ and $({\mathcal L_C})_j$ are the boundary loss and the consistency loss at the $i$-th sample from $\delta(t - t')$ and the $j$-th sample from $\bar \psi_t$, respectively. 
+We provide the training algorithm in Algorithm~\ref{alg:truncated_consistency_training}.
+
+\begin{algorithm}[t]
+\small
+    \caption{Truncated Consistency Training }
+    \label{alg:truncated_consistency_training}
+    \begin{algorithmic}[1]
+        \State \textbf{Standard consistency training}
+        \State $\thetab_0 \gets \arg \min_{\hat{\thetab}} \mathcal{L}_{\text{CT}}(\f_{\hat{\thetab}}, \f_{\hat{\thetab}^-})$
+        \Comment{Optimize consistency training loss for the regular model}
+        
+        \State \textbf{Truncated training}
+        \State $N_B \gets \lfloor B \rho \rfloor$ \Comment{Number of boundary samples}
+        \For{each training iteration}
+            \State $\x_1,...,\x_B \sim p_{\text{data}}$, $\epsb_1,...,\epsb_B \sim \mathcal N(\zerob, \Ib)$
+            \State \text{Set} $t_1,...,t_{N_B}$ \text{to} $t'$, \text{and} $t_{N_B+1},...,t_B \sim \bar \psi_t$
+            \State Compute $\sum_{i=1}^{N_B} ({\mathcal L_B})_i(\f_\thetab, \f_{\thetab_0^-})$ using Eq.~\eqref{eq:boundary-loss} with $(\x_i, \epsb_i, t_i)$ for $i=1,...,N_B$
+            \State Compute $\sum_{j=N_B+1}^{B} ({\mathcal L_C})_j(\f_\thetab, \f_{\thetab^-})$ using Eq.~\eqref{eq:consistency-loss} with $(\x_j, \epsb_j, t_j)$ for $j=N_B+1,...,B$
+            \State Compute $\nabla_{\thetab} \mathcal L_{\text{TCM}}$ using Eq.~\eqref{eq:tcm-gradient}
+            \State Update $\thetab$ using the computed gradient
+        \EndFor
+    \end{algorithmic}
+    \end{algorithm}
+    
+
+
+
+ 
+
+
+
+\section{Experiments}
+
+In this section, we evaluate TCM on standard image generation benchmarks and compare it against state-of-the-art generative models. We begin by detailing the experimental setup in Sec.~\ref{sec:setup}. We then study the behavior of denoising FID and its impact on generation FID in Sec.~\ref{sec:capacity}. We benchmark TCM against a variety of existing methods in Sec.~\ref{sec:sota}, and provide detailed analysis on various design choices in Sec.~\ref{sec:pt}. \looseness=-1
+
+\label{sec:exp}
+\subsection{Setup}
+\label{sec:setup}
+
+We evaluate TCM on the CIFAR-10~\citep{krizhevsky2009learning} and ImageNet $64{\times}64$~\citep{deng2009imagenet} datasets. 
+We consider the  unconditional generation task on CIFAR-10 and class-conditional generation on ImageNet $64{\times} 64$. 
+We measure sample quality with Fr\'{e}chet Inception Distance (FID)~\citep{heusel2017gans}~(lower is better), as is standard in the literature. 
+
+For consistency training in TCM, we mostly follow the hyperparameters in ECT~\citep{geng2024consistency}, including  the discretization curriculum and continuous-time training schedule. For all experiments, we choose a dividing time $t'=1$ and set $\bar \psi_t$ to the log-Student-$t$ distribution. We use $w_b=0.1$ and $\rho=0.25$ for the boundary loss. We discuss these choices in Sec.~\ref{sec:pt}. 
+In line with \citet{geng2024consistency}, we initialize the model with the pre-trained EDM~\citep{karras2022elucidating} / EDM2~\citep{karras2024analyzing} for CIFAR-10 /  ImageNet $64\times64$, respectively. On CIFAR-10, we use a batch size of 512 and 1024 for the first and the second stage, respectively.
+On ImageNet with EDM2-S architecture, we use a batch size of 2048 and 1024 for the first and the second stage, respectively.
+For EDM2-XL, to save compute, we initialize the truncated training stage with the pre-trained checkpoint from the ECM work~\citep{geng2024consistency} that performs the standard consistency training, and conduct the second-stage training with a batch size of 1024. 
+
+
+\subsection{Truncated training allocates capacity toward generation}
+\label{sec:capacity}
+
+
+\begin{figure}[]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figs/dfid_stage2_grid.pdf}
+\caption{Denoising FID~(dFID) for continuation of standard consistency training at later iterations~(\textcolor{color_stage1}{Stage 1}) and TCM model~(\textcolor{color_stage2}{Stage 2}) at various $t$s on CIFAR-10 during the course of training. For TCM, we set the dividing time $t'=1$.
+We can see, in the second stage, the dFID exhibits a dramatic increase at times below the dividing time $t'$, while the dFID at times above $t'$ and FID at $t=T$ continue to improve. Notably, the rate of dFID in the truncated stage increase at earlier times is significantly faster compared to standard consistency training, suggesting a more efficient ``forgetting'' of the denoising tasks.
+\looseness=-1
+    }
+    \label{fig:dfid_stage2}
+\end{figure}
+
+\begin{wraptable}{r}{7cm}
+
+    \centering
+    \scriptsize
+    \captionsetup{font=small}
+        \caption{FID, NFE and \# param. on CIFAR-10. 
+        Bold indicates the best result for each category and NFE. 
+}
+        \begin{tabular}{@{}lccc@{}}
+            \toprule
+            \textbf{Method} & \textbf{NFE} & \textbf{FID} & \textbf{\# param. (M)} \\
+            \addlinespace[2ex]
+            \midrule
+            \multicolumn{4}{@{}l}{\textbf{Diffusion models}}\\
+            
+    EDM~\citep{karras2022elucidating} & 35 & 1.97 & 55.7 \\
+    PFGM++~\citep{Xu2023PFGMUT} & 35 & \textbf{1.91} & 55.7 \\
+    DDPM~\citep{ho2020denoising} & 1000 & 3.17 & 35.7 \\        LSGM~\citep{vahdat2021score} & 147 & 2.10 & 475 \\
+            \addlinespace[2ex]
+            \midrule
+            \multicolumn{4}{@{}l}{\textbf{Consistency models}}\\
+            
+            \multicolumn{4}{@{}l}{\textbf{1-step}}\\
+            iCT~\citep{song2023improved} & 1 & 2.83 & 56.4 \\
+            iCT-deep~\citep{song2023improved} & 1 & 2.51 & 112 \\
+            CTM~\citep{kim2023consistency}~(\textit{w/o GAN}) & 1 & 5.19 & 55.7 \\
+            ECM~\citep{geng2024consistency} & 1 & 3.60 & 55.7 \\
+            TCM~(\textit{ours}) & 1 & \textbf{2.46} & 55.7 \\
+            \addlinespace[2ex]
+            \multicolumn{4}{@{}l}{\textbf{2-step}}\\
+            iCT~\citep{song2023improved} & 2 & 2.46 & 56.4 \\
+            iCT-deep~\citep{song2023improved} & 2 & 2.24 & 112 \\
+              ECM~\citep{geng2024consistency} & 2 & 2.11 & 55.7 \\
+            TCM~(\textit{ours}) & 2 & \textbf{2.05} & 55.7 \\
+
+            \midrule
+            \multicolumn{4}{@{}l}{\textbf{Variational score distillation}}\\
+            
+            DMD~\citep{yin2024one} & 1 & 3.77 & 55.7 \\
+            Diff-Instruct~\citep{luo2024diff} & 1 & 4.53 & 55.7 \\
+            SiD~\citep{zhou2024score} & 1 & \textbf{1.92} & 55.7 \\
+            \midrule
+            \multicolumn{4}{@{}l}{\textbf{Knowledge distillation}}\\
+            
+      KD~\citep{luhman2021knowledge} & 1 & 9.36 & 35.7 \\
+            DSNO~\citep{zheng2022fast} & 1 & \textbf{3.78} & 65.8 \\
+            TRACT~\citep{berthelot2023tract} & 1 & \textbf{3.78} & 55.7 \\
+            &   2 & \textbf{3.32} & 55.7 \\
+            PD~\citep{salimans2022progressive} & 1 & 9.12 & 60.0 \\
+            & 2 & 4.51 & 60.0 \\
+            \bottomrule
+        \end{tabular}
+    \label{tab:nfe_fid_cifar10}
+\end{wraptable}
+
+ 
+Our proposed TCM aims to explictly reallocate network capacity towards generation by de-emphasizing denoising tasks at smaller $t$'s. Empirical analysis in Fig.~\ref{fig:dfid_stage2} further characterizes this behavior, showing a rapid increase in dFIDs at smaller $t$'s below the threshold $t'$ during the truncated training stage. Conversely, dFIDs continue to decrease at larger $t$'s. In addition, TCM exhibit a more pronounced ``forgetting'' of the denoising task compared to consistency training (Fig.~\ref{fig:tradeoff}) at earlier times. For instance, dFID at $t=0.2$ increases up to $3.5$ in the truncated training, whereas it remains below $1$ in the standard consistency training. TCM also significantly accelerate the process of forgetting the denoising tasks at these earlier times, achieving a substantially improved generation FID. This suggests that by explicitly controlling the training time range, the neural network can effectively shift its capacity towards generation. \looseness=-1
+Fig.~\ref{fig:main}(b) demonstrates how this reallocation of network capacity directly translates to improved sample quality and training stability. For CIFAR-10 / ImageNet $64\times64$, the truncated training stage (Stage 2) is initialized from the Stage 1 model at 250K / 150K iterations, respectively.
+We can see that the truncated training improves FID over the consistency training on the two datasets.
+Moreover, we find that the truncated training is more stable than the original consistency training, as their ImageNet FID blows up after 150K iterations, while TCM continues to improve FID from $2.83$ to $2.46$, showcasing its robustness (See Figure~\ref{fig:grad_norm} for more analysis).
+
+\begin{wraptable}{r}{7.7cm}
+        \centering
+         \captionsetup{font=small}
+        \scriptsize
+        \caption{FID, NFE and \# param. on ImageNet $64\times64$. 
+        Dotted lines separate results by \# param.
+            Bold indicates the best result for each category and NFE.}
+        
+            
+            \begin{tabular}{@{}lccc@{}}
+                \toprule
+                \textbf{Method} & \textbf{NFE} & \textbf{FID} & \textbf{\# param. (M)} \\
+                \addlinespace[2ex]
+                \midrule
+                \multicolumn{4}{@{}l}{\textbf{Diffusion models}} \\
+                EDM2-S~\citep{karras2024analyzing} & 63 & 1.58 & 280 \\
+                EDM2-XL~\citep{karras2024analyzing} & 63 & 1.33 & 1119 \\ 
+                \addlinespace[2ex]
+                \midrule
+                \multicolumn{4}{@{}l}{\textbf{Consistency models}}\\
+                \multicolumn{4}{@{}l}{\textbf{1-step}}\\
+                iCT~\citep{song2023improved} & 1 & 4.02 & 296 \\
+                iCT-deep~\citep{song2023improved} & 1 & 3.25 & 592 \\
+                ECM~\citep{geng2024consistency} (\textit{EDM2-S}) & 1 & 4.05 & 280 \\
+                TCM~(\textit{ours}; \textit{EDM2-S}) & 1 & \textbf{2.88} & 280 \\
+                \addlinespace[1.9ex]
+                \cdashline{1-4}
+                \addlinespace[1.9ex]
+                MultiStep-CD~\citep{heek2024multistep} & 1 & 3.20 & 1200 \\          
+                ECM~\citep{geng2024consistency} (\textit{EDM2-XL}) & 1 & 2.49 & 1119 \\
+                TCM~(\textit{ours}; \textit{EDM2-XL}) & 1 & \textbf{2.20} & 1119 \\
+                \addlinespace[2ex]
+                \multicolumn{4}{@{}l}{\textbf{2-step}}\\
+                iCT~\citep{song2023improved} & 2 & 3.20 & 296 \\
+                iCT-deep~\citep{song2023improved} & 2 & 2.77 & 592 \\
+                ECM~\citep{geng2024consistency} (\textit{EDM2-S}) & 2 & 2.79 & 280 \\
+                TCM~(\textit{ours}; \textit{EDM2-S}) & 2 & \textbf{2.31} & 280 \\
+                \addlinespace[1.9ex]
+                \cdashline{1-4}
+                \addlinespace[1.9ex]
+                MultiStep-CD~\citep{heek2024multistep} & 2 & 1.90 & 1200 \\
+                ECM~\citep{geng2024consistency} (\textit{EDM2-XL}) & 2 & 1.67 & 1119 \\
+                TCM~(\textit{ours} ; \textit{EDM2-XL}) & 2 & \textbf{1.62} & 1119 \\
+                \midrule
+                \multicolumn{4}{@{}l}{\textbf{Variational score distillation}}\\
+                DMD2 w/o GAN~\citep{yin2024improved} & 1 & 2.60 & 296 \\
+                Diff-Instruct~\citep{luo2024diff} & 1 & 5.57 & 296 \\
+                EMD-16~\citep{xie2024distillation} & 1 & 2.20 & 296 \\
+                Moment Matching~\citep{salimans2024multistep} %
+                & 1 & 3.00 & 400 \\
+                 & 2 & 3.86 & 400 \\
+                SiD~\citep{zhou2024score} & 1 & \textbf{1.52} & 296 \\
+                \midrule
+                \multicolumn{4}{@{}l}{\textbf{Knowledge distillation}}\\
+                DSNO~\citep{zheng2022fast} & 1 & 7.83 & 329 \\
+                TRACT~\citep{berthelot2023tract} & 1 & 7.43 & 296 \\
+                &   2 & \textbf{4.97} & 296 \\
+                PD~\citep{salimans2022progressive} & 1 & 15.4 & 296 \\
+                & 2 & 8.95 & 296 \\
+                \bottomrule
+            \end{tabular}
+            \label{fig:nfe_fid_imagenet}
+    \end{wraptable}
+
+    
+\subsection{TCM improves the sample quality of consistency models}
+\label{sec:sota}
+To demonstrate the effectiveness of TCM, we compare our method with three lines of works that distill diffusion models to one or two steps: (i) \textit{consistency models}~\citep{song2023improved, kim2023consistency, geng2024consistency} that distills the PF ODE mapping in a simulation-free manner; (ii) \textit{variational score distillation}~\citep{yin2024one, luo2024diff, zhou2024score} that performs distributional matching by utilizing the score of pre-trained diffusion models; (iii) \textit{knowledge distillation}~\citep{luhman2021knowledge, zheng2022fast, berthelot2023tract, salimans2022progressive} that distill the PF ODE through off-line or on-line simulation using the pre-trained diffusion models. We exclude the methods that additionally use the GAN loss, which causes more training difficulties, for fair comparison. \looseness=-1
+
+\textbf{Results.}
+In Table~\ref{tab:nfe_fid_cifar10} and Table~\ref{fig:nfe_fid_imagenet}, we report the sample quality measured by FID and the sampling speed measured by the number of function evaluations~(NFE), on CIFAR-10 and ImageNet-64$\times$64, respectively. We also include the number of model parameters. Our main findings are: \textbf{(1) TCM significantly outperforms improved Consistency Training (iCT)~\citep{song2023improved}, the state-of-the-art consistency model, across datasets, number of steps and network sizes}. For example, TCM improves the one-step FID from $2.83$ / $4.02$ in iCT to $2.46$ / $2.88$, on CIFAR-10 / ImageNet.
+Further, TCM's one-step FID even rivals iCT's two-step FID on both datasets. When using EDM2-S model, TCM also surpasses iCT-deep, which uses \emph{$2\times$} deeper networks, in both one-step ($2.88$ vs $3.25$) and two-step FIDs ($2.31$ vs $2.77$) on ImageNet.
+\textbf{(2) TCM beats all the knowledge distillation methods and performs competitively to variational score distillation methods.} Note that TCM do not need to train additional neural networks as in VSD methods, or to run simulation as in knowledge distillation methods. 
+\textbf{(3) Two-step TCM performs comparably to the multi-step EDM~\citep{karras2022elucidating}, the state-of-the-art diffusion model}. For example, when both using the same EDM network, two-step TCM obtains a FID of $2.05$ on CIFAR-10, which is close to $1.97$ in EDM with 35 sampling steps. We further provide the uncurated one-step and two-step generated samples in Fig.~\ref{fig:samples}.
+
+\subsection{Analyses of design choices}
+\label{sec:pt}
+\textbf{Time sampling distribution $\bar \psi_t$.} We explore various time sampling distributions $\bar \psi_t$ supported on $[t', T]$, and find that the truncated log-Student-$t$ distribution works best (\textit{i.e.}, $\ln (t)$ follows Student-$t$ distribution). The Student-$t$ distribution, being heavier-tailed than the Gaussian distribution employed in previous consistency training~\citep{song2023improved,geng2024consistency}, inherently allocates more probability mass towards larger $t$'s. This aligns with the motivation of TCM, which emphasizes enhancing generation capabilities at later times. The degree of freedom $\nu$ effectively controls the thickness of the tail, with the Student-$t$ distribution converging to a Gaussian distribution as $\nu \to \infty$. Figure~\ref{fig:ablation_pt_dist} shows the shape of $\bar \psi_t$ with varying standard deviation $\sigma$ and the degree of freedom $\nu$ in three cases: 
+(1) heavy-tailed and a low probability mass around small $t$'s ($\sigma=2, \nu=10000)$,
+(2) heavy-tailed and a high probability mass around small $t$'s ($\sigma=0.2, \nu=0.01)$, 
+(2) light-tailed ($\sigma=0.2, \nu=2)$.
+From Fig.~\ref{fig:ablation_pt_fid}, we observe that the log-Student-$t$ distribution with $\sigma=0.2, \nu=0.01$ is the best among the three.
+Hence we use $\sigma=0.2, \nu=0.01$ in all the experiments.
+\begin{figure*}[htbp]
+    \centering
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/ablation_pt.pdf}
+        \caption{}
+        \label{fig:ablation_pt_dist}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/ablation_pt_fid.pdf}
+        \caption{}
+        \label{fig:ablation_pt_fid}
+    \end{subfigure}\hfill
+        \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\textwidth,]{figs/rho_wb_ablation.pdf}
+        \caption{}
+        \label{fig:rho_wb}
+    \end{subfigure}
+    \caption{\textbf{(a)} Comparison of Student-$t$ distributions with different standard deviations $\sigma$ and degree of freedom $\nu$. \textbf{(b)} FID evolution on CIFAR-10 for different $\sigma$ and $\nu$.
+    $w_b=0.1, \rho=0.25$, $t'=1$, and a batch size of 128 are used for all plots. \textbf{(c)} Effect of $\rho$ and $w_b$ on the FID on CIFAR-10. We use a batch size of 128. $t'$ is set to 1.}
+    \label{fig:ablation_pt}
+\end{figure*}
+
+\begin{table}[t]
+\begin{minipage}{0.45\textwidth}
+\centering
+\captionsetup{font=small}
+\small
+    \caption{CIFAR-10 FID when varying the dividing time $t'$.}
+    \label{tab:t_prime_fid}
+    \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    $t'$ value & 0.17 & 0.8 & 1.0 & 1.5 \\
+    \midrule
+    FID & 2.70 & 2.69 & \textbf{2.56} & 2.79 \\
+    \bottomrule
+    \end{tabular}
+\end{minipage}\hfill
+\begin{minipage}{0.45\textwidth}
+\centering
+\captionsetup{font=small}
+\small
+    \caption{CIFAR-10 FID for different training stages. }
+        \label{tab:multi_stage_fid}
+    \begin{tabular}{@{}lcccc@{}}
+    \toprule
+     & Stage 1 & Stage 2 & Stage 3 \\
+    \midrule
+    FID & 2.77 & 2.46 & 2.46 \\
+    \bottomrule
+    \end{tabular}
+\end{minipage}
+\end{table} 
+
+\textbf{Strength for boundary loss.} Figure~\ref{fig:rho_wb} shows the effect of two key hyper-parameters that control the strength of imposing boundary condition in the TCM objective~(Eq.~\ref{eq:objective-final}).
+We observe that the FID is relatively stable with a wide range of $\rho$ and $w_b$ (from $0.1$ to $0.5$ for $\rho$ and from $0.1$ to $1$ for $w_b$).
+However, when using a very small weight for the boundary loss~($w_b=0.01$), FID explodes as the model fails to maintain the boundary condition.
+Thus, we use $\rho=0.25, w_b=0.1$ in all the experiments. \looseness=-1
+
+\textbf{Dividing time $t'$.}
+The boundary $t'$ ideally represents the point where the task in the PF ODE transitions from denoising to generation. However, this transition is gradual, and there is no single definitive point. Fig.~\ref{fig:tradeoff}b suggests this transition occurs roughly between $t'=0.8$ and $t'=1.5$, where we observe a change in dFID behavior: it primarily deteriorates during training before this range, but then stabilizes afterwards (more indicative of a generation task). Based on this analysis, we experimented with multiple $t'$ values around this range. Table~\ref{tab:t_prime_fid} shows that $t'=1$ provides the best results among the choices. Note that here we use a batch size of 128, while it is 1024 in our default setting. \looseness=-1
+\textbf{Are two stages enough?}
+A natural question is whether we can extend our two-stage training procedures to three or more stages by gradually  increasing $t'$. 
+ However, recall that our methodology was motivated by the fact that in the first-stage training (standard consistency training), we observe increasing dFIDs at smaller $t$ values of the training range, as seen in Fig.~\ref{fig:tradeoff}.  This trade-off is notably absent in the second stage over the time range $[t',T]$, as seen in Fig.~\ref{fig:dfid_stage2}. This suggests that during the second stage, the model tackles tasks that are more or less similar to generation, and introducing another truncated training stage may not yield further gains. 
+ In support of this hypothesis, we implement the third stage where the dividing time is $t'=4$, but do not observe improvement, as shown  in Table~\ref{tab:multi_stage_fid}.
+
+ \looseness=-1
+
+
+
+
+
+
+\section{Related work}
+
+
+\textbf{Consistency models.}
+\cite{song2023consistency} first proposed consistency models as a new class of generative models that synthesize samples with a single network evaluation. Later, \cite{song2023improved,geng2024consistency} presented a set of improved techniques to train consistency models for better sample quality. \cite{luo2023latent} introduced latent consistency models (LCM) to accelerate the sampling of latent diffusion models.
+\citet{kim2023consistency} proposed consistency trajectory models (CTM) that generalize consistency models by enabling the prediction between any two intermediate points on the same PF ODE trajectory.
+The training objective in CTM becomes more challenging than standard consistency models that only care about the mapping from intermediate points to the data endpoints.
+\citet{heek2024multistep} proposed multistep consistency models that divide the PF ODE trajectory into multiple segments to simplify the consistency training objective. They train the consistency models in each segment separately, and need multiple steps to generate a sample.
+\citet{ren2024hyper} combined CTM with progressive distillation~\citep{salimans2022progressive}, by  performing segment-wise consistency distillation where the number of ODE trajectory segments progressively reduces to one. Similar to CTM, it relies on the adversarial loss \citep{goodfellow2014generative} to achieve good performance.
+
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figs/samples.pdf}
+    \caption{Uncurated one-step (top) and two-step (bottom) generated samples from TCM (EDM) on CIFAR-10 and TCM (EDM2-XL) on ImageNet 64$\times$64, respectively.}
+    \label{fig:samples}
+\end{figure}
+
+\textbf{Fast sampling of diffusion models.} While a line of work aims to accelerate diffusion models via fast numerical solvers for the PF-ODE \citep{lu2022dpm,karras2022elucidating,liu2022pseudo, xu2023restart}, they usually still require more than $10$ steps. To achieve low-step or even one-step generation, besides consistency models, other training-based methods have been proposed from three main perspectives: (i) \emph{Knowledge distillation}, which 
+first used the pre-trained diffusion model to generate a dataset of noise and image pairs, and then applied it to train a single-step generator~\citep{luhman2021knowledge,zheng2022fast}. 
+Progressive distillation \citep{salimans2022progressive, meng2023distillation} iteratively halves the number of sampling steps required, without needing an offline dataset. 
+(ii) \emph{Variational score distillation}, which aims to match the distribution of the student and teacher output via an approximate (reverse) KL divergence \citep{yin2024one, yin2024improved,xie2024distillation}, implicit score matching \citep{zhou2024score} or moment matching \citep{salimans2024multistep}. (iii) \emph{Adversarial distillation}, which leverages the adversarial training to fine-tune pre-trained diffusion models into a few-step generator \citep{sauer2023adversarial,sauer2024fast,lin2024sdxl,xu2024ufogen}. Compared with these training-based diffusion acceleration methods, our method is most memory and computation efficient. \looseness=-1
+
+
+
+
+
+
+
+\section{Conclusion}
+
+We have introduced a truncated consistency training method that significantly enhances the sample quality of consistency models.
+To generalize consistency models to the truncated time range, we have proposed a new parameterization of the consistency function and a two-stage training process that explicitly allocates network capacity towards generation. 
+We also discussed about our design choices arising from the new training paradigm.
+Our approach achieves superior performance compared to state-of-the-art consistency models, as evidenced by improved one-step and two-step FID scores across different datasets and network sizes.
+Notably, these improvements are achieved while utilizing similar or even smaller network architectures than baselines.
+
+\textbf{Limitation.}
+TCM introduces a slight increase in computational cost due to the additional boundary loss in Eq.~\eqref{eq:objective-final}, beyond the standard consistency training loss. Standard consistency training necessitates two forward passes per training iteration, while our parameterization~(Eq.~\ref{eq:f-param-approx}) requires three. Also, our method incurs a minor additional memory cost as we need to maintain a pre-trained consistency model (in evaluation mode) for the boundary loss. We observe that on ImageNet 64$\times$64 with EDM2-S, TCMs have an 18\% increase in training time and an 15\% increase in memory cost.
+Moreover, TCM still has a considerate performance gap from the diffusion models with a large NFE, but we believe this is an important step towards closing the gap.
+
+
+
+\section{Reproducibility statement}
+
+~\ref{app:implementation},
+including a pseudo code of the training algorithm, model initialization and architecture, model parameterization, learning rate schedules, time step sampling procedures, and other training details. We also specify hyperparameter choices like the dividing time $t'$, boundary loss weight $w_b$, and boundary ratio $\rho$. Additionally, we discuss the computational costs of our method compared to standard consistency training.
+For evaluation, we describe our sampling procedure for both one-step and two-step generation. %
+
+
+\section{Ethics statement}
+
+This paper raises similar ethical concerns to other papers on deep generative models. Namely, such models can be (and have been) used to generate harmful content, such as disinformation and violent imagery. We advocate for the responsible deployment of such models in practice, including guardrails to reduce the risk of producing harmful content. The design of these protections is orthogonal to our work.
+Other ethical concerns may arise regarding the significant resource costs required to train and use deep generative models, including energy and water usage.  This work increases the training cost of consistency models, but it also enables the models to be run with only 1 NFE and requires smaller neural network architectures, both of may which reduce inference-time costs relative to other diffusion-based models. Nonetheless, the environmental impact of training and deploying deep generative models remains an important limitation. 
+
+
+

@@ -1,0 +1,421 @@
+\title{Restructuring Vector Quantization with the Rotation Trick}
+
+\begin{abstract}
+Vector Quantized Variational AutoEncoders (VQ-VAEs) are designed to compress a continuous input to a discrete latent space and reconstruct it with minimal distortion. 
+They operate by maintaining a set of vectors---often referred to as the codebook---and quantizing each encoder output to the nearest vector in the codebook. 
+However, as vector quantization is non-differentiable, the gradient to the encoder flows \textit{around} the vector quantization layer rather than \textit{through} it in a straight-through approximation.
+This approximation may be undesirable as all information from the vector quantization operation is lost. 
+In this work, we propose a way to propagate gradients through the vector quantization layer of VQ-VAEs. 
+We smoothly transform each encoder output into its corresponding codebook vector via a rotation and rescaling linear transformation that is treated as a constant during backpropagation. 
+As a result, the relative magnitude and angle between encoder output and codebook vector becomes encoded into the gradient as it propagates through the vector quantization layer and back to the encoder.
+Across 11 different VQ-VAE training paradigms, we find this restructuring improves reconstruction metrics, codebook utilization, and quantization error.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Vector quantization~\citep{gray1984vector} is an approach to discretize a continuous vector space. It defines a finite set of vectors---referred to as the codebook---and maps any vector in the continuous vector space to the closest vector in the codebook. 
+However, deep learning paradigms that use vector quantization are often difficult to train because replacing a vector with its closest codebook counterpart is a non-differentiable operation~\citep{huh2023straightening}. 
+This characteristic was not an issue at its creation during the Renaissance of Information Theory for applications like noisy channel communication~\citep{cover1999elements}; however in the era deep learning, it presents a challenge as gradients cannot directly flow through layers that use vector quantization during backpropagation. 
+
+In deep learning, vector quantization is largely used in the eponymous Vector Quantized-Variational AutoEncoder (VQ-VAE)~\citep{vqvae}. A VQ-VAE is an AutoEncoder with a vector quantization layer between the encoder's output and decoder's input, thereby quantizing the learned representation at the bottleneck. While VQ-VAEs are ubiquitous in state-of-the-art generative modeling~\citep{ldm, jukebox, sora}, their gradients cannot flow from the decoder to the encoder uninterrupted as they must pass through a non-differentiable vector quantization layer. 
+
+A solution to the non-differentiability problem is to approximate gradients via a ``straight-through estimator'' (STE)~\citep{ste}. During backpropagation, the STE copies and pastes the gradients from the decoder's input to the encoder's output, thereby skipping the quantization operation altogether. 
+However, this approximation can lead to poor-performing models and codebook collapse: a phenomena where a large percentage of the codebook converge to zero norm and are unused by the model~\citep{fsq}. Even if codebook collapse does not occur, the codebook is often under-utilized, thereby limiting the information capacity of the VQ-VAEs's bottleneck~\citep{jukebox}. 
+\begin{figure*}[t] 
+    \centering
+    \includegraphics[width=1.0\textwidth]{figures/v4_method.pdf}
+    \caption{\footnotesize{Illustration of the rotation trick. In the forward pass, encoder output $e$ is rotated and rescaled to $q_1$. 
+    Not shown is the rotation of the other encoder outputs to their corresponding codebook vectors. In the backward pass, the gradient at $q_1$ moves to $e$ so that the angle between 
+    $\nabla_{q_1} \mathcal{L}$ and $q_1$ is preserved. Now, points within the same codebook region receive different gradients depending on their relative angle and magnitude to the codebook vector. For example, points with high angular distance can be \textit{pushed} into new codebook regions, thereby increasing codebook utilization.}}
+    \label{fig:rotation_trick}
+
+\end{figure*}
+\begin{wrapfigure}{R}{0.5\textwidth}
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \begin{algorithm}[H]
+            \caption{VQ-VAE with the Rotation Trick}\label{alg:rotation_trick}
+                \begin{algorithmic}
+                    \Require input example $x$
+                    \State $e \gets \text{Encoder}(x)$
+                    \State $q \gets$ nearest codebook vector to $e$
+                    \State \textcolor{ourblue}{$R \gets$ rotation matrix that aligns $e$ to $q$}
+                    \State \textcolor{ourblue}{$\tilde{q} \gets \text{stop-gradient}\left[\frac{\norm{q}}{\norm{e}}R\right]e$}
+                    \State $\tilde{x} \gets \text{Decoder}($\textcolor{ourblue}{$\tilde{q}$}$)$
+                    \State loss $\gets \mathcal{L}(x, \tilde{x})$
+                    \State \Return loss
+                \end{algorithmic}
+            \end{algorithm}
+    \end{minipage}
+\end{wrapfigure} 
+
+In this work, we propose an alternate way to propagate gradients through the vector quantization layer in VQ-VAEs. 
+For a given encoder output $e$ and nearest codebook vector $q$, we smoothly transform $e$ to $q$ via a rotation and rescaling linear transformation and then send this output---rather than the direct result of the codebook lookup---to the decoder. 
+As the input to the decoder, $\tilde{q}$, is now treated as a smooth linear transformation of $e$, gradients flow back from the decoder to the encoder unimpeded. 
+To avoid differentiating through the rotation and rescaling, we treat both as constants with respect to $e$ and $q$. We explain why this choice is necessary in \Cref{appx:detach}.
+Following the convention of \citet{vae}, we call this restructuring ``the rotation trick.'' It is illustrated in \Cref{fig:rotation_trick} and described in \Cref{alg:rotation_trick}. 
+
+
+The rotation trick does not change the output of the VQ-VAE in the forward pass. 
+However, during the backward pass, it transports the gradient $\nabla_q \mathcal{L}$ at $q$ to become the gradient $\nabla_e \mathcal{L}$ at $e$ so that the angle between $q$ and $\nabla_q \mathcal{L}$ \textit{after} the vector quantization layer equals the angle between $e$ and $\nabla_e \mathcal{L}$ \textit{before} the vector quantization layer. Preserving this angle encodes relative angular distances and magnitudes into the gradient and changes how points within the same codebook region are updated. 
+
+The STE applies the same update to all points within the same codebook region, maintaining their relative distances. However as we will show in \Cref{sec:voronoi_analysis}, the rotation trick can push points within the same codebook region farther apart---or pull them closer together---depending on the direction of the gradient vector.
+The former capability can correspond to increased codebook usage while the latter to lower quantization error. In the context of lossy compression, both capabilities are desirable for reducing the distortion and increasing the information capacity of the vector quantization layer.
+
+When applied to several open-source VQ-VAE repositories, we find the rotation trick substantively improves reconstruction performance, increases codebook usage, and decreases the distance between encoder outputs and their corresponding codebook vectors. For instance, training the VQGAN from \citet{ldm} on ImageNet~\citep{imagenet} with the rotation trick improves reconstruction FID from 5.0 to 1.6, reconstruction IS from 141.5 to 190.3, increases codebook usage from 2\% to 9\%, and decreases quantization error by over an order of magnitude. 
+
+
+\section{Related Work}
+
+Many researchers have built upon the seminal work of \citet{vqvae} to improve VQ-VAE performance. While non-exhaustive, our review focuses on methods that address training instabilities caused by the vector quantization layer. We partition these efforts into two categories: (1) methods that sidestep the STE and (2) methods that improve codebook-model interactions.
+
+\textbf{Sidestepping the STE.} Several prior works have sought to fix the problems caused by the STE by avoiding deterministic vector quantization. \citet{gumbelvq} employ the Gumbel-Softmax trick~\citep{gumbel} to fit a categorical distribution over codebook vectors that converges to a one-hot distribution towards the end of training, \citet{gautam2023soft} quantize using a a convex combination of codebook vectors, and \citet{takida2022sq} employ stochastic quantization. Unlike the above that cast vector quantization as a distribution over codebook vectors, \citet{huh2023straightening} propose an alternating optimization where the encoder is optimized to output representations close to the codebook vectors while the decoder minimizes reconstruction loss from a fixed set of codebook vector inputs. While these approaches sidestep the training instabilities caused by the STE, they can introduce their own set of problems and complexities such as low codebook utilization at inference and the tuning of a temperature schedule~\citep{zhang2023regularized}. As a result, many applications and research papers continue to employ VQ-VAEs that are trained using the STE~\citep{ldm, maskgit, huang2023towards, zhu2023designing, dong2023peco}.
+
+\textbf{Codebook-Model Improvements.} Another way to attack codebook collapse or under-utilization is to change the codebook lookup. Rather than use Euclidean distance, \citet{vitvqgan} employ a cosine similarity measure, \citet{goswami2024hypervq} a hyperbolic metric, and \citet{lee2022autoregressive} stochastically sample codes as a function of the distance between the encoder output and codebook vectors. Another perspective examines the learning of the codebook. \citet{splitting} split high-usage codebook vectors, \citet{jukebox, lancucki2020robust, zheng2023online} resurrect low-usage codebook vectors throughout training, \citet{dynamiccodebook} dynamically selects one of $m$ codebooks for each datapoint, and \citet{fsq, bsq, lfq, chiu2022self} fix the codebook vectors to an \textit{a priori} geometry and train the model without learning the codebook at all. Other works propose loss penalties to encourage codebook utilization. \citet{zhang2023regularized} add a KL-divergence penalty between codebook utilization and a uniform distribution while \citet{lfq} add an entropy loss term to penalize low codebook utilization. While effective at targeting specific training difficulties, as each of these methods continue to use the STE, the training instability caused by this estimator persist. Most of our experiments in \Cref{sec:experiments} implement a subset of these approaches, and we find that replacing the STE with the rotation trick further improves performance.
+
+
+
+
+\section{Straight Through Estimator (STE)}
+
+\label{sec:ste_gradients}
+In this section, we review the Straight-Through Estimator (STE) and visualize its effect on the gradients. We then explore two STE alternatives that---at first glance---appear to correct the approximation made by the STE. 
+
+For notation, we define a sample space $\mathcal{X}$ over the input data with probability distribution $p$. For input $x \in \mathcal{X}$, we define the encoder as a deterministic mapping that parameterizes a posterior distribution $p_\mathcal{E}(e|x)$. The vector quantization layer, $\mathcal{Q}(\cdot)$, is a function that selects the codebook vector $q \in \mathcal{C}$ nearest to the encoder output $e$. Under Euclidean distance, it has the form:
+\begin{align*}
+        \mathcal{Q}(q=i|e) &= \begin{cases} 1 \text{ if } i = \argmin_{1 \leq j \leq |\mathcal{C}|} \norm{e -q_j}_2 \\ 0 \text{ otherwise} \end{cases}
+\end{align*}
+The decoder is similarly defined as a deterministic mapping that parameterizes the conditional distribution over reconstructions $p_\mathcal{D}(\tilde{x}|q)$. As in the VAE~\citep{vae}, the loss function follows from the ELBO with the KL-divergence term zeroing out as $p_\mathcal{E}(e|x)$ is deterministic and the utilization over codebook vectors is assumed to be uniform. \citet{vqvae} additionally add a ``codebook loss''  term $\norm{sg(e) - q}_2^2$ to learn the codebook vectors and a ``commitment loss'' term $\beta \norm{e - sg(q)}_2^2$ to pull the encoder's output towards the codebook vectors. $sg$ stands for stop-gradient and $\beta$ is a hyperparameter, typically set to a value in $[0.25, 2]$. For predicted reconstruction $\tilde{x}$, the optimization objective becomes: 
+\begin{align*}
+    \mathcal{L}(\tilde{x}) &= \norm{x - \tilde{x}}_2^2 + \norm{sg(e) - q}_2^2 + \beta \norm{e - sg(q)}_2^2
+\end{align*}
+In the subsequent analysis, we focus only on the $\norm{x - \tilde{x}}_2^2$ term as the other two are not functions of the decoder. During backpropagation, the model must differentiate through the vector quantization function $\mathcal{Q}(\cdot)$. We can break down the backward pass into three terms: 
+\begin{align*}
+    \frac{\partial \mathcal{L}}{\partial x} &= \frac{\partial \mathcal{L}}{\partial q} \frac{\partial q}{\partial e} \frac{\partial e}{\partial x}    
+\end{align*}
+where $\frac{\partial \mathcal{L}}{\partial q}$ represents backpropagation through the decoder, $\frac{\partial q}{\partial e}$ represents backpropagation through the vector quantization layer, and $\frac{\partial e}{\partial x}$ represents backpropagation through the encoder. As vector quantization is not a smooth transformation, $\frac{\partial q}{\partial e}$ cannot be computed and gradients cannot flow through this term to update the encoder in backpropagation.
+
+\begin{figure*}[t] 
+    \centering
+    \includegraphics[width=1.0\textwidth]{figures/v2_gradient_field.pdf}
+    \caption{\footnotesize{Visualization of how the straight-through estimator (STE) transforms the gradient field for $16$ codebook vectors for (top) $f(x,y) = x^2 + y^2$ and (bottom) $f(x,y) = \log(|\frac{1}{2}x + \tanh(y)|)$. The STE takes the gradient at the codebook vector $(q_x,q_y)$ and ``copies-and-pastes'' it to all other locations within the same codebook region, forming a ``checker-board'' pattern in the gradient field.
+    }}
+    \label{fig:gradient_field}
+\end{figure*}
+
+To solve the issue of non-differentiability, the STE copies the gradients from $q$ to $e$, bypassing vector quantization entirely. Simply, the STE sets $\frac{\partial q}{\partial e}$ to the identity matrix $I$ in the backward pass:
+\begin{align*}
+    \frac{\partial \mathcal{L}}{\partial x} &= \frac{\partial \mathcal{L}}{\partial q} I \frac{\partial e}{\partial x}    
+\end{align*}
+The first two terms $\frac{\partial \mathcal{L}}{\partial q} \frac{\partial q}{\partial e}$ combine to $\frac{\partial \mathcal{L}}{\partial e}$ which, somewhat misleadingly, does not actually depend on $e$. As a consequence, the location of $e$ within the Voronoi partition generated by codebook vector $q$---be it close to $q$ or at the boundary of the region---has no impact on the gradient update to the encoder.
+
+An example of this effect is visualized in \Cref{fig:gradient_field} for two example functions. In the STE approximation, the ``exact'' gradient at the encoder output is replaced by the gradient at the corresponding codebook vector for each Voronoi partition, irrespective of where in that region the encoder output $e$ lies. As a result, the exact gradient field becomes ``partitioned'' into $16$ different regions---all with the same gradient update to the encoder---for the $16$ vectors in the codebook. 
+
+Returning to our question, is there a better way to propagate gradients through the vector quantization layer? At first glance, one may be tempted to estimate the curvature at $q$ and use this information to transform $\frac{\partial q}{\partial e}$ as $q$ moves to $e$. This is accomplished by taking a second order expansion around $q$ to approximate the value of the loss at $e$:
+\begin{align*}
+    \mathcal{L}_e &\approx \mathcal{L}_q + (\nabla_q \mathcal{L})^T(e-q) + \frac{1}{2} (e-q)^T(\nabla_q^2 \mathcal{L})(e-q)
+\end{align*}
+Then we can compute the gradient at the point $e$ instead of $q$ up to second order approximation with:
+\begin{align*}
+    \frac{\partial \mathcal{L}}{\partial e} &\approx \frac{\partial}{\partial e}\left[\mathcal{L}_q + (\nabla_q \mathcal{L})^T(e-q) + \frac{1}{2} (e-q)^T(\nabla_q^2 \mathcal{L})(e-q)\right]\\
+    &= \nabla_q \mathcal{L} + (\nabla_q^2 \mathcal{L})(e-q)
+\end{align*}
+
+While computing Hessians with respect to model parameters are typically prohibitive in modern deep learning architectures, computing them with respect to only the codebook is feasible. Moreover as we must only compute $(\nabla_q^2 \mathcal{L})(e-q)$, one may take advantage of efficient Hessian-Vector products implementations in deep learning frameworks~\citep{dagréou2024howtocompute} and avoid computing the full Hessian matrix. 
+
+Extending this idea a step further, we can compute the exact gradient $\frac{\partial \mathcal{L}}{\partial e}$ at $e$ by making two passes through the network. Let $\mathcal{L}_q$ be the loss with the vector quantization layer and $\mathcal{L}_e$ be the loss without vector quantization, i.e. $q = e$ rather than $q = \mathcal{Q}(e)$. 
+Then one may form the total loss $\mathcal{L} = \mathcal{L}_q + \lambda \mathcal{L}_e$, where $\lambda$ is a small constant like $10^{-6}$, to scale down the effect of $\mathcal{L}_e$ on the decoder's parameters and use a gradient scaling multiplier of $\lambda^{-1}$ to reweigh the effect of $\mathcal{L}_e$ on the encoder's parameters to $1$. As $\frac{\partial q}{\partial e}$ is non-differentiable, gradients from $\mathcal{L}_q$ will not flow to the encoder.
+
+\textbf{While seeming to correct the encoder's gradients, replacing the STE with either approach will likely result in worse performance.} This is because computing the exact gradient with respect to $e$ is actually the AutoEncoder~\citep{hinton1993autoencoders} gradient, the model that VAEs~\citep{vae} and VQ-VAEs~\citep{vqvae} were designed to replace given the AutoEncoder's propensity to overfit and difficultly generalizing. Accordingly using either Hessian approximation or exact gradients via a double forward pass will cause the encoder to be trained like an AutoEncoder and the decoder to be trained like a VQ-VAE. This mis-match in optimization objectives is likely another contributing factor to the poor performance we observe for both methods in \Cref{tab:vqvae}.
+
+
+\section{The Rotation Trick}
+
+\label{sec:rot_trick}
+As discussed in \Cref{sec:ste_gradients}, updating the encoder's parameters by approximating, or exactly, computing the gradient at the encoder's output is undesirable. 
+Similarly, the STE appears to lose information: the location of $e$ within the quantized region---be it close to $q$ or far away at the boundary---has no impact on the gradient update to the encoder. 
+Capturing this information, i.e. using the location of $e$ in relation to $q$ to transform the gradients through $\frac{\partial q}{\partial e}$, could be beneficial to the encoder's gradient updates and an improvement over the STE.
+
+Viewed geometrically, we ask how to move the gradient $\nabla_q \mathcal{L}$ from $q$ to $e$, and what characteristics of $\nabla_q \mathcal{L}$ and $q$ should be preserved during this movement. The STE offers one possible answer: move the gradient from $q$ to $e$ so that its direction and magnitude are preserved. However, this paper supplies a different answer: move the gradient so that the angle between $\nabla_q \mathcal{L}$ and $q$ is preserved as $\nabla_q \mathcal{L}$ moves to $e$. We term this approach ``the rotation trick'', and in \Cref{sec:voronoi_analysis} we show that preserving the angle between $q$ and $\nabla_q \mathcal{L}$ conveys desirable properties to how points move within the same quantized region.
+
+
+\subsection{The Rotation Trick Preserves Angles}\label{sec:angle_preservation}
+In this section, we formally define the rotation trick. For encoder output $e$, let $q = \mathcal{Q}(e)$ represent the corresponding codebook vector. $\mathcal{Q}(\cdot)$ is non-differentiable so gradients cannot flow through this layer during the backward pass. 
+The STE solves this problem---maintaining the direction and magnitude of the gradient $\nabla_q \mathcal{L}$---as $\nabla_q \mathcal{L}$ moves from $q$ to $e$ with some clever hacking of the backpropagation function in deep learning frameworks:
+\begin{align*}
+    \tilde{q} &= e - \underbrace{(q-e)}_{\text{constant}}
+\end{align*}
+\begin{wrapfigure}{r}{0.45\textwidth} 
+    \centering
+    \includegraphics[width=0.45\textwidth]{figures/v3_angle_preservation.pdf}
+    \caption{\footnotesize{Illustration of how the gradient at $q$ moves to $e$ via the STE (middle) and rotation trick (right). The STE ``copies-and-pastes'' the gradient to preserve its direction while the rotation trick moves the gradient so the angle between $q$ and $\nabla_q \mathcal{L}$ is preserved.}}
+    \label{fig:rotation_trick}
+\end{wrapfigure}
+which is a parameterization of vector quantization that sets the gradient at the encoder output to the gradient at the decoder's input. The rotation trick offers a different parameterization: casting the forward pass as a rotation and rescaling that aligns $e$ with $q$: 
+\begin{align*}
+    \tilde{q} &= \underbrace{\left[\frac{\norm{q}}{\norm{e}}R\right]}_{\text{constant}} e
+\end{align*}
+$R$ is the rotation\footnote{A rotation is defined as a linear transformation so that $RR^T = I$, $R^{-1} = R^T$, and det($R$) = 1.} transformation that aligns $e$ with $q$ and $\frac{\norm{q}}{\norm{e}}$ rescales $e$ to have the same magnitude as $q$. Note that both $R$ and $\frac{\norm{q}}{\norm{e}}$ are functions of $e$. To avoid differentiating through this dependency, we treat them as fixed constants---or detached from the computational graph in deep learning frameworks---when differentiating. This choice is explained in \Cref{appx:detach}.
+
+While the rotation trick does not change the output of the forward pass, the backward pass changes. Rather than set $\frac{\partial q}{\partial e} = I$ as in the STE, the rotation trick sets $\frac{\partial q}{\partial e}$ to be a rotation and rescaling transformation: 
+\begin{align*}
+    \frac{\partial \tilde{q}}{\partial e} &= \frac{\norm{q}}{{\norm{e}}} R
+\end{align*}
+As a result, $\frac{\partial q}{\partial e}$ changes based on the position of $e$ in the codebook partition of $q$, and notably, the angle between $\nabla_q \mathcal{L}$ and $q$ is preserved as $\nabla_q \mathcal{L}$ moves to $e$. This effect is visualized in \Cref{fig:rotation_trick}. While the STE translates the gradient from $q$ to $e$, the rotation trick rotates it so that the angle between $\nabla_q \mathcal{L}$ and $q$ is preserved. In a sense, the rotation trick and the STE are sibilings. They choose different characteristics of the gradient as desiderata and then preserve those characteristics as the gradient flows around the non-differentiable vector quantization operation to the encoder.
+
+\subsection{Efficient Rotation Computation}
+The rotation transformation $R$ that rotates $e$ to $q$ can be efficiently computed with Householder matrix reflections. We define $\hat{e} = \frac{e}{\norm{e}}$, $\hat{q} = \frac{q}{\norm{q}}$, $\lambda = \frac{\norm{q}}{\norm{e}}$, and $r = \frac{\hat{e} + \hat{q}}{\norm{\hat{e} + \hat{q}}}$. Then the rotation and rescaling that aligns $e$ to $q$ is simply: 
+\begin{align*}
+    \tilde{q} &= \lambda R e \\
+    &= \lambda (I - 2rr^T + 2\hat{q}\hat{e}^T)e\\
+    &= \lambda [e - 2rr^Te + 2\hat{q}\hat{e}^Te]
+\end{align*}
+Due to space constraints, we leave the derivation of this formula to \Cref{appx:householder}. Parameterizing the rotation in this fashion avoids computing outer products and therefore consumes minimal GPU VRAM. Further, we did not detect a difference in wall-clock time between VQ-VAEs trained with the STE and VQ-VAEs trained with the rotation trick for our experiments in \Cref{sec:experiments}.
+
+\subsection{Voronoi Partition Analysis}
+\label{sec:voronoi_analysis}
+\begin{figure*}[t] 
+    \centering
+    \includegraphics[width=1.0\textwidth]{figures/v2_voronoi.pdf}
+    \caption{\footnotesize{Depiction of how points within the same codebook region change after a gradient update (red arrow) at the codebook vector (orange circle). The STE applies the same update to each point in the same region. The rotation trick modifies the update based on the location of each point with respect to the codebook vector.}}
+    \label{fig:voronoi}
+\end{figure*}
+
+\begin{wrapfigure}{R}{0.32\textwidth} 
+    \centering
+    \includegraphics[width=0.32\textwidth]{figures/v4_angle_heatmap.pdf}
+    \caption{\footnotesize{With the STE, the distances among points within the same region do not change. However with the rotation trick, the distances among points \textit{do} change. When $\Tilde{\theta} < \pi / 2$, points with large angular distance are pushed away (\textcolor[HTML]{064884}{blue: increasing distance}). When $\Tilde{\theta} > \pi / 2$, points are \textit{pulled} towards the codebook vector (\textcolor[HTML]{008000}{green: decreasing distance}).}}
+    \label{fig:angle_heatmap}
+\end{wrapfigure}
+
+In the context of lossy compression, vector quantization works well when the distortion, or equivalently quantization error $\norm{e-q}_2^2$, is low and the information capacity---equivalently codebook utilization---is high~\citep{cover1999elements}. 
+Later in \Cref{sec:experiments}, we will see that VQ-VAEs trained with the rotation trick have this \textit{desiderata}---often reducing quantization error by an order of magnitude and substantially increasing codebook usage---when compared to VQ-VAEs trained with the STE. However, the underlying reason \textit{why} this occurs is less clear. 
+
+In this section, we analyze the effect of the rotation trick by looking at how encoder outputs that are mapped to the same Voronoi region are updated. While the STE applies the same update to all points within the same partition, the rotation trick changes the update based on the location of points within the Voronoi region. It can push points within the same region farther apart or pull them closer together depending on the direction of the gradient vector. The former capability can correspond to increased codebook usage while the latter to lower quantization error.
+
+Let $\theta$ be the angle between $e$ and $q$ and $\tilde{\theta}$ be the angle between $q$ and $\nabla_q \mathcal{L}$. Intuitively, when $\theta$ is large, $e$ maps to $q$ with high distortion. In this case, we'd like $e$ to commit one way or another. Either (1) make $e$ commit to its current codebook vector by \textcolor[HTML]{008000}{pulling} $e$ closer to $q$ or (2) \textcolor[HTML]{064884}{push} $e$ to a different codebook vector entirely. This behavior is preferable to maintaining states of high distortion where the distance between $e$ and $q$ remains constant. We will show the rotation trick enables both (1) and (2); however, the STE perpetuates the latter as visualized in \Cref{fig:angle_heatmap}. 
+
+When $\nabla_q \mathcal{L}$ and $q$ point in the same direction, i.e. $-\pi / 2 < \tilde{\theta} < \pi/2$, encoder outputs with large angular distance to $q$ are pushed \textit{farther} away than they would otherwise be moved by the STE update. 
+\Cref{fig:angle_heatmap} illustrates this effect. The points with large angular distance (\textcolor[HTML]{064884}{blue regions}) move further away from $q$ than the points with low angular distance (ivory regions). 
+
+The top right partitions of \Cref{fig:voronoi} present an example of this effect. The two clusters of points at the boundary---with relatively large angle to the codebook vector---are pushed away while the cluster of points with small angle to the codebook vector move with it. The ability to push points at the boundary out of a quantized region and into another is desirable for increasing codebook utilization. Specifically, codebook utilization improves when points are pushed into the Voronoi regions of previously unused codebook vectors. This capability is not shared by the STE, which moves all points in the same region by the same amount.
+When $\nabla_q \mathcal{L}$ and $q$ point in opposite directions, i.e. $\pi / 2 < \tilde{\theta} < 3\pi / 2$, the distance among points within the same Voronoi region decreases as they are pulled towards the location of the updated codebook vector. This effect is visualized in \Cref{fig:angle_heatmap} (\textcolor[HTML]{008000}{green regions}) and the bottom partitions of \Cref{fig:voronoi} show an example. Unlike the STE update---that maintains the distances among points---the rotation trick pulls  points with high angular distances closer towards the post-update codebook vector. This capability is desirable for reducing the quantization error and enabling the encoder to \textit{lock on}~\citep{vqvae} to a target codebook vector.
+
+Taken together, both capabilities can form a push-pull effect that achieves two \textit{desiderata} of vector quantization: increasing information capacity and reducing distortion. Encoder outputs that have large angular distance to the chosen codebook vector are ``pushed'' to other, possibly unused, codebook regions by outwards-pointing gradients, thereby increasing codebook utilization. Concurrent with this effect, center-pointing gradients will ``pull'' points loosely clustered around the codebook vector closer together, locking on to the chosen codebook vector and reducing quantization error. 
+A third and final difference with the STE occurs when $\nabla_q \mathcal{L}$ is exactly orthogonal to $q$, i.e. $\tilde{\theta} = \pi / 2$. For this event, each point within the Voronoi region generated by $q$ is rotated by the same amount in the direction of $\nabla_q \mathcal{L}$. The top left Voroni regions of \Cref{fig:voronoi} visualize this case. While it is unlikely that the gradient is exactly orthogonal to the codebook vector, the gradient's orthogonal component to $q$ 
+enables points to move in orthogonal directions via a rotation and expansion (if $\tilde{\theta} < \pi / 2$) or a rotation and contraction (if $\tilde{\theta} > \pi / 2$).
+
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+In \Cref{sec:voronoi_analysis}, we showed the rotation trick enables behavior that would increase codebook utilization and reduce quantization error by changing how points within the same Voronoi region are updated. However, the extent to which these changes will affect applications is unclear. In this section, we evaluate the effect of the rotation trick across many different VQ-VAE paradigms. 
+
+We begin with image reconstruction: training a VQ-VAE with the reconstruction objective of \citet{vqvae} and later extend our evaluation to the more complex VQGANs~\citep{taming}, the VQGANs designed for latent diffusion~\citep{ldm}, and then the ViT-VQGAN~\citep{vitvqgan}. Finally, we evaluate VQ-VAE reconstructions on videos using a TimeSformer~\citep{timesformer} encoder and decoder.
+In total, our empirical analysis spans 11 different VQ-VAE configurations.
+For all experiments, aside from handling $\boldsymbol{\frac{\partial q}{\partial e}}$ differently, the models, hyperparameters, and training settings are identical.
+
+\begin{table*}[t]
+  \centering
+  \small
+  \caption{\footnotesize{Comparison of VQ-VAEs trained on ImageNet following \citet{vqvae}.}}
+  \label{tab:vqvae}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{lcccccc}
+    \toprule
+    \multirow{2}{*}{Approach} & \multicolumn{3}{c}{Training Metrics} & \multicolumn{3}{c}{Validation Metrics}\\
+    \cmidrule(lr){2-4} \cmidrule(lr){5-7} 
+    & Codebook Usage ($\uparrow$) & Rec. Loss ($\downarrow$) & Quantization Error ($\downarrow$) & Rec. Loss ($\downarrow$) & r-FID ($\downarrow$) & r-IS ($\uparrow$)\\
+    \midrule
+    \multicolumn{6}{l}{Codebook Lookup: Euclidean \& Latent Shape: $32\times32\times32$ \& Codebook Size: $1024$}\\
+    VQ-VAE & 100\% & 0.107 & 5.9e-3 & \textbf{0.115} & 106.1 & 11.7 \\
+    VQ-VAE w/ Rotation Trick & 97\% & 0.116 & 5.1e-4 & 0.122 & \textbf{85.7} & \textbf{17.0} \\
+    \midrule
+    \multicolumn{6}{l}{Codebook Lookup: Cosine \& Latent Shape: $32\times32\times32$ \& Codebook Size: $1024$}\\
+    VQ-VAE & 75\% & 0.107 & 2.9e-3 & 0.114 & 84.3 &  17.7 \\ 
+    VQ-VAE w/ Rotation Trick & 91\% & 0.105 & 2.7e-3 & \textbf{0.111} & \textbf{82.9} & \textbf{18.1} \\ 
+    \midrule
+    \multicolumn{6}{l}{Codebook Lookup: Euclidean \& Latent Shape: $64\times64\times3$ \& Codebook Size: $8192$}\\
+    VQ-VAE & 100\% & 0.028 & 1.0e-3 & \textbf{0.030} & 19.0 & 97.3 \\ 
+    VQ-VAE w/ Hessian Approx. & 39\% & 0.082 & 6.9e-5 & 0.112 & 35.6 & 65.1 \\
+    VQ-VAE w/ Exact Gradients & 84\% & 0.050 & 2.0e-3 & 0.053 & 25.4 & 80.4 \\
+    VQ-VAE w/ Rotation Trick & 99\% & 0.028 & 1.4e-4 & \textbf{0.030} & \textbf{16.5} & \textbf{106.3} \\
+    \midrule
+    \multicolumn{6}{l}{Codebook Lookup: Cosine \& Latent Shape: $64\times64\times3$ \& Codebook Size: $8192$}\\
+    VQ-VAE & 31\% & 0.034 & 1.2e-4 &  0.038 & 26.0 & 77.8 \\
+    VQ-VAE w/ Hessian Approx. & 37\% & 0.035 & 3.8e-5 & 0.037 & 29.0 & 71.5 \\
+    VQ-VAE w/ Exact Gradients & 38\% & 0.035 & 3.6e-5 & 0.037 & 28.2 & 75.0 \\
+    VQ-VAE w/ Rotation Trick & 38\% & 0.033 & 9.6e-5 & \textbf{0.035} & \textbf{24.2} & \textbf{83.9} \\
+    \bottomrule
+  \end{tabular}
+}
+\end{table*}
+\subsection{VQ-VAE Evaluation}\label{sec:vqvae}
+We begin with a straightforward evaluation: training a VQ-VAE to reconstruct examples from ImageNet~\citep{imagenet}. Following \citet{vqvae}, our training objective is a linear combination of the reconstruction, codebook, and commitment loss:
+\begin{align*}
+    \mathcal{L} = \norm{x - \tilde{x}}_2^2 + \norm{sg(e) - q}_2^2 + \beta \norm{e - sg(q)}_2^2
+\end{align*}
+where $\beta$ is a hyperparameter scaling constant. Following convention, we drop the codebook loss term from the objective and instead use an exponential moving average to update the codebook vectors. 
+
+\textbf{Evaluation Settings.} For $256\times 256 \times 3$ input images, we evaluate two different settings: (1) compressing to a latent space of dimension $32 \times 32 \times 32$ with a codebook size of $1024$ following \citet{vitvqgan} and (2) compressing to $64 \times 64 \times 3$ with a codebook size of $8192$ following \citet{ldm}. In both settings, we compare with a Euclidean and cosine similarity  codebook lookup.
+
+\textbf{Evaluation Metrics.} We log both training and validation set reconstruction metrics. Of note, we compute reconstruction FID~\citep{fid} and reconstruction IS~\citep{is} on reconstructions from the full ImageNet validation set as a measure of reconstruction quality. We also compute codebook usage, or the percentage of codebook vectors that are used in each batch of data, as a measure of the information capacity of the vector quantization layer and quantization error $\norm{e-q}_2^2$ as a measure of distortion.
+
+\textbf{Baselines.} Our comparison spans the STE estimator (\textit{VQ-VAE}), the Hessian approximation described in \Cref{sec:ste_gradients} (\textit{VQ-VAE w/ Hessian Approx}), the exact gradient backward pass described in \Cref{sec:ste_gradients} (\textit{VQ-VAE w/ Exact Gradients}), and the rotation trick (\textit{VQ-VAE w/ Rotation Trick}). There is no functional difference among methods in the forward pass; the only differences relates to how gradients are propagated through $\frac{\partial q}{\partial e}$ during backpropagation.
+
+\textbf{Results.} \Cref{tab:vqvae} displays our findings. We find that using the rotation trick reduces the quantization error---sometimes by an order of magnitude---and improves low codebook utilization. Both results are expected given the Voronoi partition analysis in \Cref{sec:voronoi_analysis}: points at the boundary of quantized regions are likely pushed to under-utilized codebook vectors while points loosely grouped around the codebook vector are condensed towards it. These two features appear to have a meaningful effect on reconstruction metrics: training a VQ-VAE with the rotation trick substantially improves r-FID and r-IS. 
+
+We also see that the Hessian Approximation or using Exact Gradients results in poor reconstruction performance. While the gradients to the encoder are, in a sense, ``more accurate'', training the encoder like an AutoEncoder~\citep{hinton1993autoencoders} likely introduces overfitting and poor generalization. Moreover, the mismatch in training objectives between the encoder and decoder is likely an aggravating factor and partly responsible for both models' poor performance. 
+
+\begin{table*}[t]
+  \centering
+  \small
+ Experiments on ImageNet and the combined dataset FFHQ~\citep{ffhq} and CelebA-HQ~\citep{celebahq} use a latent bottleneck of dimension $16 \times 16 \times 256$ with $1024$ codebook vectors.}}
+  \label{table:vqgan_1}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{lcccccc}
+    \toprule
+    Approach & Dataset & Codebook Usage & Quantization Error ($\downarrow$) & Valid Loss ($\downarrow$) & r-FID ($\downarrow$) & r-IS ($\uparrow$) \\ 
+    \midrule
+    VQGAN (reported) & ImageNet  &  --- & --- & --- & 7.9 & 114.4  \\
+    VQGAN (our run) & ImageNet  & 95\% & 0.134 & 0.594 & 7.3 & 118.2 \\
+    VQGAN w/ Rotation Trick & ImageNet  & 98\% & 0.002 &  \textbf{0.422} & \textbf{4.6} & \textbf{146.5} \\
+    \midrule
+    VQGAN & FFHQ \& CelebA-HQ  & 27\% & 0.233 & 0.565 & 4.7 & 5.0 \\
+    VQGAN w/ Rotation Trick & FFHQ \& CelebA-HQ  & 99\% & 0.002 & \textbf{0.313} & \textbf{3.7} & \textbf{5.2}  \\
+    \bottomrule
+  \end{tabular}
+}
+\end{table*}
+\begin{table*}[t]
+  \centering
+  \small
+ Both settings train on ImageNet.}}
+  \label{table:vqgan_2}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{lccccccc}
+    \toprule
+    Approach & Latent Shape & Codebook Size & Codebook Usage & Quantization Error ($\downarrow$) & Valid Loss ($\downarrow$) & r-FID ($\downarrow$) & r-IS ($\uparrow$) \\ 
+    \midrule
+    VQGAN & $64\times64\times3$ & $8192$ & 15\% & 2.5e-3 & 0.183 & 0.53 & 220.6 \\
+    VQGAN w/ Rotation Trick & $64\times64\times3$ & $8192$ & 10\% & 2.9e-4 & \textbf{0.173} & \textbf{0.38} &  \textbf{222.4} \\
+    \midrule
+    VQGAN & $32\times 32\times 4$ & $16384$ & 2\% & 1.2e-2 & 0.385 & 5.0 & 141.5  \\
+    VQGAN w/ Rotation Trick & $32\times 32\times 4$ & $16384$ & 9\% & 7.2e-4 & \textbf{0.287} & \textbf{1.6} & \textbf{190.3}  \\
+    \bottomrule
+  \end{tabular}
+}
+\end{table*}
+
+\subsection{VQGAN Evaluation}\label{sec:vqgan}
+Moving to the next level of complexity, we evaluate the effect of the rotation trick on VQGANs~\citep{taming}. The VQGAN training objective is:
+\begin{align*}
+\mathcal{L}_{\text{VQGAN}} &= \mathcal{L}_{\text{Per}} + \norm{sg(e) - q}_2^2 + \beta \norm{e - sg(q)}_2^2 + \lambda \mathcal{L}_{\text{Adv}}
+\end{align*}
+where $\mathcal{L}_{\text{Per}}$ is the perceptual loss from~\citet{johnson2016perceptual} and replaces the $L_2$ loss used to train VQ-VAEs. $L_{Adv}$ is a patch-based adversarial loss similar to the adversarial loss in Conditional GAN~\citep{conditional_gan}. $\beta$ is a constant that weights the commitment loss while $\lambda$ is an adaptive weight based on the ratio of $\nabla \mathcal{L}_{\text{Per}}$ to $\nabla \mathcal{L}_{\text{Adv}}$ with respect to the last layer of the decoder.
+
+\textbf{Experimental Settings.} 
+We evaluate VQGANs under two settings: (1) the paradigm amenable to autoregressive modeling with Transformers as described in \citet{taming} and (2) the paradigm suitable to latent diffusion models as described in \citet{ldm}. The first setting follows the convolutional neural network and default hyperparameters described in \citet{taming} while the second follows those from \citet{ldm}.
+
+\textbf{Results.} Our results are listed in \Cref{table:vqgan_1} for the first setting and \Cref{table:vqgan_2} for the second. Similar to our findings in \Cref{sec:vqvae}, we find that training a VQ-VAE with the rotation trick substantially decreases quantization error and often improves codebook usage. Moreover, reconstruction performance as measured on the validation set by the total loss, r-FID, and r-IS are significantly improved across both modeling paradigms. 
+
+\begin{table*}[t]
+  \centering
+  \small
+  \caption{\footnotesize{Results for ViT-VQGAN~\citep{vitvqgan} trained on ImageNet. The latent shape is $8\times8\times32$ with $8192$ codebook vectors. r-FID and r-IS are reported on the validation set.}}
+  \label{table:vitvqgan}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{lccccccc}
+    \toprule
+    Approach & Codebook Usage ($\uparrow$) & Train Loss ($\downarrow$) & Quantization Error ($\downarrow$) & Valid Loss ($\downarrow$)  & r-FID ($\downarrow$) & r-IS ($\uparrow$)\\
+    \midrule
+    ViT-VQGAN [reported] & --- & --- & --- & --- & 22.8 & 72.9 \\
+    ViT-VQGAN [ours] & 0.3\% & 0.124 & 6.7e-3 & 0.127  & 29.2 & 43.0 \\
+    ViT-VQGAN w/ Rotation Trick & 2.2\% & 0.113 & 8.3e-3 & \textbf{0.113}  & \textbf{11.2} & \textbf{93.1} \\
+    \bottomrule
+  \end{tabular}
+}
+\end{table*}
+
+\begin{table*}[t]
+  \centering
+  \small
+  \caption{\footnotesize{Results for TimeSformer-VQGAN trained on BAIR and UCF-101 with 1024 codebook vectors. $\dagger$: model suffers from codebook collapse and diverges. r-FVD is computed on the validation set.}}
+  \label{table:video}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{lcccccc}
+    \toprule
+    Approach & Dataset & Codebook Usage & Train Loss ($\downarrow$) & Quantization Error ($\downarrow$) & Valid Loss ($\downarrow$) & r-FVD ($\downarrow$) \\ 
+    \midrule
+    TimeSformer$^\dagger$ & BAIR  & 0.4\% & 0.221 & 0.03 & 0.28 & 1661.1 \\
+    TimeSformer w/ Rotation Trick & BAIR  & 43\% & 0.074 & 3.0e-3 & \textbf{0.074} & \textbf{21.4} \\
+    \midrule
+    TimeSformer$^\dagger$ & UCF-101  & 0.1\% & 0.190 & 0.006 & 0.169 & 2878.1 \\
+    TimeSformer w/ Rotation Trick & UCF-101  & 30\% & 0.111 & 0.020 & \textbf{0.109} & \textbf{229.1} \\
+    \bottomrule
+  \end{tabular}
+}
+\end{table*}
+\subsection{ViT-VQGAN Evaluation}\label{sec:vitvqgan}
+Improving upon the VQGAN model, \citet{vitvqgan} propose using a ViT~\citep{vit} rather than CNN to parameterize the encoder and decoder. The ViT-VQGAN uses factorized codes and $L_2$ normalization on the output and input to the vector quantization layer to improve performance and training stability. Additionally, the authors change the training objective, adding a logit-laplace loss and restoring the $L_2$ reconstruction error to $\mathcal{L}_{\text{VQGAN}}$.
+
+\textbf{Experimental Settings. 
+
+\textbf{Results.} \Cref{table:vitvqgan} summarizes our findings. Similar to our previous results for VQ-VAEs in \Cref{sec:vqvae} and VQGANS in \Cref{sec:vqgan}, codebook utilization and reconstruction metrics are significantly improved; however in this case, the quantization error is roughly the same. 
+
+\subsection{Video Evaluation}\label{sec:video}
+Expanding our analysis beyond the image modality, we evaluate the effect of the rotation trick on video reconstructions from the BAIR Robot dataset~\citep{bair} and from the UCF101 action recognition dataset~\citep{ucf101}. We follow the quantization paradigm used by ViT-VQGAN, but replace the ViT with a TimeSformer~\citep{timesformer} video model. Due to compute limitations, both encoder and decoder follow a relatively small TimeSformer model: 8 layers, 256 hidden dimensions, 4 attention heads, and 768 MLP hidden dimensions. A complete description of the architecture, training settings, and hyperparameters are provided in \Cref{appx:video}.
+
+\textbf{Results.} \Cref{table:video} shows our results. For both datasets, training a TimeSformer-VQGAN model with the STE results in codebook collapse. We explored several different hyperparameter settings; however in all cases, codebook utilization drops to almost 0\% within the first several epochs. On the other hand, models trained with the rotation trick do not exhibit any training instability and produce high quality reconstructions as indicated by r-FVD~\citep{fvd}. Several non-cherry picked video reconstructions are displayed in \Cref{appx:video}.
+
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+In this work, we explore different ways to propagate gradients through the vector quantization layer of VQ-VAEs and find that preserving the angle---rather than the direction---between the codebook vector and gradient induces desirable effects for how points within the same codebook region are updated. Specifically, the gradient to the encoder changes as it propagates through the vector quantization layer to push points with high distortion to new codebook regions or to pull them closer to the chosen codebook vector. 
+The former capability corresponds to increased codebook usage and higher information capacity and the latter to decreased quantization error and lower distortion. 
+
+These effects cause a substantial improvement in model performance. Across 11 different settings, we find that training VQ-VAEs with the rotation trick improves their reconstructions. For example, training one of the VQGANs used in latent diffusion with the rotation trick improves r-FID from 5.0 to 1.6 and r-IS from 141.5 to 190.3, reduces quantization error by two orders of magnitude, and increases codebook usage by 4.5x.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

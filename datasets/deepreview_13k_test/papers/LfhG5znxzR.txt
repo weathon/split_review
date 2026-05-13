@@ -1,0 +1,334 @@
+\title{Codebook Features: Sparse and Discrete Interpretability for Neural Networks}
+
+\begin{abstract}
+
+Understanding neural networks is challenging in part because of the dense, continuous nature of their hidden states. 
+We explore whether we can train neural networks to have hidden states that are sparse, discrete, and more interpretable by quantizing their continuous features into what we call \textbf{codebook features}. 
+Codebook features are produced by finetuning neural networks with vector quantization bottlenecks at each layer, producing a network whose hidden features are the sum of a small number of discrete vector \textit{codes} chosen from a larger codebook.
+Surprisingly, we find that neural networks can operate under this extreme bottleneck with only modest degradation in performance.
+This sparse, discrete bottleneck also provides an intuitive way of \textbf{controlling} neural network behavior: first, find codes that activate when the desired behavior is present, then activate those same codes during generation to elicit that behavior.
+We validate our approach by training codebook Transformers on several different datasets.
+First, we explore a finite state machine dataset with far more hidden states than neurons. In this setting, our approach overcomes the \textit{superposition} problem by assigning states to distinct codes, and we find that we can make the neural network behave as if it is in a different state by activating the code for that state.
+Second, we train Transformer language models with up to 410M parameters on two natural language datasets. We identify codes in these models representing diverse, disentangled concepts (ranging from negative emotions to months of the year) and find that we can guide the model to generate different topics by activating the appropriate codes during inference.
+Overall, codebook features appear to be a promising \textit{unit of analysis and control} for neural networks and interpretability.}
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+The strength of neural networks lies in their ability to learn \textit{emergent} solutions that we could not program ourselves. Unfortunately, the learned programs inside neural networks are challenging to make sense of, in part because they differ from traditional software in important ways. Most strikingly, the \textit{state} of a neural network program, including intermediate computations and features, is implemented in dense, continuous vectors inside of a network. As a result, many different pieces of information are commingled inside of these vectors, violating the software engineering principle of \textit{separation of concerns} \citep{dijkstra1982role}. Moreover, the continuous nature of these vectors means no feature is ever truly \textit{off} inside of a network; instead, they are activated to varying degrees, vastly increasing the complexity of this state and the possible interactions within it.  
+
+A natural question is whether it is possible to recover some of the sparsity and discreteness properties of traditional software systems while preserving the expressivity and learnability of neural networks.
+To make progress here, we introduce a \textit{structural constraint} into training that \textit{refactors} a network to adhere more closely to these design principles. Specifically, we finetune a network with trainable vector quantization bottlenecks  \citep{gray1984vector} at each layer, which are sparse and discrete. We refer to each vector in this bottleneck as a \textit{code} and the entire library of codes as the \textit{codebook}. See \Cref{fig:header} for a visual depiction of this motivation.
+\begin{figure}
+    \centering
+    \includegraphics[width=0.90\linewidth]{img/header-old.png}
+    \caption{
+    Codebook features attempt to combine the expressivity of neural networks with the sparse, discrete state often found in traditional software.
+    }
+    \label{fig:header}
+\end{figure}
+
+The resulting codebooks learned through this process are a promising interface for understanding and controlling neural networks. For example, when we train a codebook language model on the outputs of a finite state machine, we find a precise mapping between activated codes in different layers of the model to the states of the state machine, overcoming the challenge of \textit{superposition} \citep{elhage2022superposition}. Furthermore, we demonstrate a \textbf{causal} role for these codes: changing which code is activated during the forward pass causes the network to behave as if it were in a different state. Additionally, we apply codebook features to transformer language models with up to 410M parameters, showing that despite this bottleneck, they can be trained with only modest accuracy degradation compared to the original model. We find codes that activate on a wide range of concepts, spanning punctuation, syntax, lexical semantics, and high-level topics. We then show how to use codebook features to control the topic of a model's generations, providing a practical example of how to use our method to understand and control real language models.
+
+
+\section{Method}
+
+\label{sec:method}
+
+Codebook features aim to improve our understanding and control of neural networks by compressing their activation space with a sparse, discrete bottleneck. Specifically, we aim to learn a set of \textit{discrete states} the network can occupy, of which very few are active during any single forward pass. As we will show later in the paper (\Cref{sec:lm,sec:fsm}), this bottleneck encourages the network to store useful and disentangled concepts in each code. Even more importantly, we show that these interpretations enable us to make causal interventions on the network internals, producing the expected change in the network's behavior. Crucially, codebooks are \textit{learned}, not hand-specified, enabling them to capture behaviors potentially unknown by human researchers.
+
+Concretely, codebook features are produced by replacing a hidden layer's activations with a sparse combination of code vectors. Let $a \in \mathbb{R}^N$ be the activation vector of a given N-dimensional layer in a network. We have a codebook $\mathcal{C} = \{c_1, c_2, ..., c_C\} \in \mathbb{R}^{C \times N}$, where $C$ is the codebook size. To apply the codebook, we first compute the cosine similarities $\text{sim}(a, c_i) = \frac{a \cdot c_i}{|a| |c_i|}$ between $a$ and each code vector $c_i$. We then replace $a$ with $\sum_{i \in S} c_i$, where $S$ contains the indices of the top $k$ most similar code vectors. In other words, we activate and sum the $k$ code vectors most similar to the original activation $a$. The value of $k$ controls the bottleneck's sparsity; we aim to make $k$ as small as possible while achieving adequate performance. $k$ is a small fraction of $C$ in our experiments, typically less than $1\%$, and as a result, we find that codebooks are tight information bottlenecks, transmitting much less information than even 4-bit quantized activations 
+ (\Cref{sec:codebooks-as-information-bottlenecks}).
+
+While codebook features can be applied to any neural network, we primarily focus on Transformer networks, placing codebooks after either the network's MLP blocks or attention heads. \Cref{fig:architecture} shows the precise location of the codebook for each type of sublayer. Note that this positioning of the codebooks preserves the integrity of the residual stream of the network, which is important for optimizing deep networks \citep{he2016deep,elhage2021mathematical}.
+
+\begin{SCfigure}[1.2]
+\centering
+\includegraphics[width=0.47\linewidth]{img/architecture.png}
+\caption{\textbf{Applying codebook features to transformers.} \textit{Attention heads}: We add one codebook (depicted by the colored rectangles) for each attention head. The codebook is inserted before the projection into the residual stream. \textit{Feedforward block}: We insert the codebook after the feedforward block, before addition into the residual stream. 
+}
+    \label{fig:architecture}
+\end{SCfigure}
+
+\subsection{Training with codebooks}
+To obtain codebook features, we add the codebook bottlenecks to existing pretrained models and finetune the model with the original training loss. Thus, the network must learn to perform the task well while adjusting to the discrete codebook bottleneck. Using a pretrained model enables us to produce codebook features more cheaply than training a network from scratch. When finetuning, we use a linear combination of two losses:
+
+\textbf{Original training loss \;} In our work, we apply codebooks to Transformer-based causal language models and thus use the typical cross-entropy loss these models were trained with: 
+${\mathcal{L}_{\text{LM}}(\theta) = -\sum_{i=1}^N \log p_\theta(x_i|x_{<i})}$
+where $\theta$ represents the model parameters, $x_i$ is the next token of input sequence $x_{<i}$, $p_\theta(x_i|x_{<i})$ is the model's predicted probability of token $x_i$ given input $x_{<i}$, and $N$ is the length of the input sequence.
+
+\para{Reconstruction loss} Because we compute the similarity between activations and codebook features using the cosine similarity, which is invariant to magnitude, the code vectors can often grow in size throughout training, leading to instability. For this reason, we find it helpful to add an auxiliary loss to the codes: ${\mathcal L_{\text{MSE}} = \text{MSE}(\mathcal C (x), \text{stop-gradient}(x))}$, where $x$ is the input to the codebook, ${\mathcal C (x)}$ is its output, and MSE is the mean squared error, to keep the distance between inputs and chosen codes small. The stop gradient means the gradient of this operation only passes through the codebook, not the input\ $x$, which we found was important to avoid damaging the network's capabilities.\footnote{We performed preliminary experiments that only used the reconstruction loss (keeping the language model's parameters fixed), similar to a VQ-VAE \citep{van2017neural} at every layer. However, we achieved significantly worse performance. See \Cref{tab:lm-ablations} for more details.}
+
+\para{Final loss and optimization} The final loss is simply a combination of both losses above $\mathcal L = \mathcal L_{\text{LM}} + \lambda L_{\text{MSE}}$ where $\lambda$ is a tradeoff coefficient. We set $\lambda$ to $1$ in this work. To optimize the codebooks despite the discrete choice of codes, we use the straight-through estimator: we propagate gradients to the codes that were chosen on each forward pass and pass no gradients to the remaining codes \citep{bengio2013estimating, van2017neural}. We use this strategy to successfully perform end-to-end training of networks up to 24 layers deep, with each layer having a codebook.
+
+\subsection{Using codebooks for understanding and control}
+\label{subsec:using-condebooks}
+
+A trained codebook model enables a simple and intuitive way of controlling the network's behavior. This method consists of two phases:
+
+\para{1) Generating hypotheses for the role of codes.} Most codes are activated infrequently in the training dataset. We can gain an intuition for the \textit{functional role} of each code in the network's hidden state by retrieving many examples in the dataset where that code was activated. For example, if a code activates mainly around words like ``candle,'' ``matches,'' and ``lighters,'' we might hypothesize that the token is involved in representations of fire. The discrete on-or-off nature of codes makes this task more manageable than looking at continuous values like neuron activations, as past work has speculated that lower-activating neurons can ``smuggle'' important information across layers, even if many neurons appear interpretable \citep{elhage2022solu}. As we will show in the following sections, the codes we discover activate more often on a single interpretable feature, while neurons may activate on many unrelated features. \Cref{subsec:points-vs-directions} discusses the advantages and tradeoffs of codebooks over neuron- and feature direction--based approaches in more detail.
+\para{2) Steering the network by activating codes.} After we have identified codes that reliably activate on the concept we are interested in, we can directly activate those codes to influence the network's behavior. For example, if we identified several codes related to fire, we could activate those codes during generation to produce outputs about fire (e.g., as in \Cref{sec:lm-interventions}). This intervention confirms that the codes have a \textit{causal role} in the network's behavior.
+
+In the following sections, we apply this same two-step procedure across several different datasets, showing that we can successfully gain insight into the network and control its behavior in each case.
+\begin{SCfigure}
+    \centering
+    \includegraphics[width=0.71\linewidth]{img/tokfsm.png}
+    \caption{\textbf{Codebook features learn the hidden structure of an algorithmic sequence modeling task.} 
+    The codebook transformer learns to detect the states of a finite state machine and assigns a code to each state. We can then manipulate these codes to cause the network to make predictions as if it were in a different state.}
+    \label{fig:tokfsm}
+\end{SCfigure}
+
+
+
+\section{Algorithmic sequence modeling}
+
+\label{sec:fsm}
+
+The first setting we consider is an algorithmic sequence modeling dataset called TokFSM. The purpose of this dataset is to create a controlled setting exhibiting some of the complexities of language modeling, \textit{but where the latent features present in the sequence are known}. This setting enables us to evaluate how well the model learns codes that activate on these distinct features. An overview of the section and our findings is shown in \Cref{fig:tokfsm}. Below, we describe the dataset, and then (following \Cref{subsec:using-condebooks}) we first generate hypotheses for the role of codes, then show how one can predictably influence the network's behavior by manipulating these codes.
+
+\para{The TokFSM Dataset} The TokFSM dataset is produced by first constructing a simplified finite state machine (FSM). Our FSM is defined by $(V, E)$ where $V = \{0,\cdots,N-1\}$ is a set of nodes and $E \subseteq V \times V$ indicates the set of valid transitions from one state to the next. In our setting, we choose $N=100$ and give each node 10 randomly chosen outbound neighbors, each assigned an equal transition probability ($0.1$).
+Entries in the dataset are randomly sampled rollouts of the FSM up to 64 transitions.
+We tokenize the sequences at the digit level; this gives a sequence length of 128 for each input. For example, if our sampled rollout is [18, 00, 39], we would tokenize it as [1, 8, 0, 0, 3, 9] for the neural network. Thus, the model must learn to detokenize the input into its constituent states, predict the next FSM state, and then retokenize the state to predict the next token.
+
+\para{Training and evaluating the codebook models}
+We train 4-layer Transformers with 4 attention heads and an embedding size of 128 based on the GPTNeoX architecture \citep{Black2022GPTNeoX20BAO} on the TokFSM dataset. We train several models with different numbers of codes and sparsity values $k$, with codebooks either at the network's attention heads or both the attention heads and MLP Layers (see \Cref{fig:architecture}). In \Cref{tab:toy-metrics}, we report the accuracy of the resulting models both in terms of their language modeling loss, next token accuracy, and their ability to produce valid transitions of the FSM across a generated sequence. The $k=1$ model with codebooks at only the attention layers achieves comparable performance across all metrics to the original model. At the same time, larger values of $k$ enable the model with codebooks at both attention and MLP blocks to attain comparable performance. It is striking that networks can perform so well despite this extreme bottleneck at every layer.
+
+\begin{SCtable}
+\centering
+\caption{\textbf{Performance of original and codebook models on TokFSM}. A $k=1$ codebook model on only attention layers attains similar performance to the original model, while attention-and-MLP codebooks require a higher $k$ to match performance. \boldsymbol{\textdagger} \ indicates the model we analyze in the rest of the section.}
+
+\label{tab:toy-metrics}
+\begin{tabular}{lllll}
+\toprule
+\textbf{Codebook Type} & \textbf{Loss} & \textbf{LM Acc}  & \textbf{State Acc} \\
+\midrule
+No Codebook & 1.179 & 46.36  & 96.77 \\
+\midrule
+Attn Only \textsubscript{$C$=2k} & 1.18 & 46.33  & 96.39 \\
+\midrule
+\textdagger Attn+MLP \textsubscript{$k$=1, $C$=10k} & 1.269 & 45.27  & 63.65 \\
+Attn+MLP \textsubscript{$k$=4, $C$=2k} & 1.204 & 46.04  & 76.32 \\
+Attn+MLP \textsubscript{$k$=16, $C$=20k} & 1.183 & 46.32  & 91.53 \\
+Attn+MLP \textsubscript{$k$=128, $C$=20k} & 1.178 & 46.38  & 95.82 \\
+
+\bottomrule
+\end{tabular}
+\end{SCtable}
+
+\subsection{Generating hypotheses for the role of codes}
+\label{subsec:toy-patterns}
+
+After training these models, we examine the $k=1$ attention and MLP codebook transformer following \Cref{subsec:using-condebooks}. Looking at activating tokens reveals a wide range of interesting-looking codes. We provide descriptions of these codes along with a table of examples in \Cref{tab:activations-fsm}, and focus our analysis on two families of codes here: in the last three MLP layers (layers 1, 2, and 3), we identify \textbf{state codes} that reliably activate on the second token of a specific state (of which there are 100 possibilities), as well as \textbf{state-plus-digit codes} that activate on a specific digit when it follows a specific state (686 possibilities in our state machine). For example, code 2543 in MLP layer 2 activates on the 0 in the state 40 (e.g., 50-4\bb{0}-59). This finding is notable because there are only 128 neurons in a given MLP layer, far lower than the total number of these features. Thus, the codebooks must disentangle features represented in a distributed manner across different neurons inside the network. (Anecdotally, the top-activating tokens for the neurons in these layers do not appear to follow any consistent pattern.)
+
+We quantify this further with an experiment where we use state codes to \textit{classify} states and compare them to the neuron with the highest precision at that state code's recall level. As shown in \Cref{fig:codes-vs-neurons-fsm}, codes have an average precision of 97.1\%, far better than the average best neuron precision of 70.5\%. These pieces of evidence indicate that codebooks can minimize the superposition problem in this setting.
+\begin{figure}
+    \centering
+    \begin{subfigure}{0.45\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{plots_final/js_div_w_code_intervention_bigrams_full_ctx_len.pdf}
+        \caption{State code interventions}
+        \label{fig:jsd-bigrams}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.45\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{plots_final/js_div_w_code_intervention_trigrams_full_ctx_len.pdf}
+        \caption{State-plus-digit code interventions}
+        \label{fig:jsd-trigrams}
+    \end{subfigure}
+    \caption{\textbf{Interventions on the state and state-plus-digit codes in a sequence.} Changing just the MLP codes to codes associated with another state shifts the output distribution almost entirely to the target state. Changing codes in other layers has a much smaller effect. Normalized JS Div stands for the normalized Jensen-Shannon Divergence, where the initial difference (None) is normalized to 1.}
+    \label{fig:jsd-code-patching}
+\end{figure}
+
+\subsection{Steering the network by activating codes}
+\label{sec:toy-causal}
+
+While these associations can provide hypotheses for code function, they do not provide causal evidence that codes causally influence the network's behavior. For this, interventional studies are necessary \citep{spirtes2000causation, pearl2018book, geiger2020neural, geiger2021causal}.
+The state and state-plus-digit codes presented in \Cref{subsec:toy-patterns} suggest a natural causal experiment: set the activated code in a given codebook to the code corresponding to another state and see whether the next token distribution shifts accordingly.\footnote{This experiment is similar to what \citet{geiger2020neural} call an interchange intervention, and more generally establish a \textit{causal abstraction} over the neural network \citep{geiger2021causal}.} More specifically, let $\mathcal C^{(l)}(x_t)$ be the codebook at layer $l$ applied to input token $x_t$. As we consider a $k=1$ model, $C^{(l)}(x_t)$ returns a single code $c^{(l)}_t \in \mathbb{R}^d$. We replace this code with $\tilde c^{(l)}_t$, a code that activates when a different state is present. We then recompute the forward pass from that point and observe whether the network's next token distribution resembles the next token distribution for the new state.
+
+In \Cref{fig:jsd-bigrams}, we find that this is precisely the case---changing only the state codes in the MLP layers to a different state code shifts the next token distribution towards that other state, as measured by the  Jensen-Shannon Divergence \citep[JSD][]{lin1991divergence}, averaged over 500 random state transitions. This effect is even more substantial for the state-plus-digit codes, where changing the codes in the MLP layers makes the next-state distribution almost identical to that of the new state (\Cref{fig:jsd-trigrams}). These results provide strong evidence that these codes perform the expected causal role in the network. Note that applying a similar perturbation to just a single MLP layer or all the attention layers causes a much smaller drop in JSD, indicating that this information is mainly stored across several MLP layers. 
+
+\begin{SCfigure}
+    \centering
+    \includegraphics[width=0.71\linewidth]{img/steering.png}
+    \caption{\textbf{Steering a language model with topic codes.} We identify several codes that activate on examples of a given topic (e.g., dragons). We then activate these codes at each generation step, producing generated text about that topic. 
+    See \Cref{tab:lm_generations} for examples.}
+    \label{fig:steering}
+\end{SCfigure}
+
+
+
+\section{Language modeling}
+
+\label{sec:lm}
+
+Next, we apply codebook features to language models (LMs) trained on naturalistic text corpora. We demonstrate the generality and scalability of our approach by training two models of different sizes on two different datasets. After describing the models we train and the training data, we follow the strategy described in \Cref{subsec:using-condebooks} and identify hypotheses for the role of codes in the network. Then, we validate these hypotheses by steering the models through targeted activation of codes. 
+
+\begin{table}[tbp]
+  \centering
+  \caption{\textbf{Codebook models are still capable language models.}. Asterisks (*) denote the base model we apply the codebooks to, while daggers ($\dagger$) indicate the codebook models we analyze in the rest of the paper. While we use a pretrained TinyStories model as our base model, we also report the loss/accuracy of a finetuned model for comparison to account for any subtle differences in how we process the finetuning data (e.g., padding).}
+  \label{tab:lm_perf}
+  \begin{subtable}[t]{0.4\textwidth}
+    \centering
+    \caption{TinyStories 1-Layer Model}
+    \begin{tabular}{lcc}
+      \toprule
+      \textbf{Language Model} & \textbf{Loss} & \textbf{Acc} \\
+      \midrule
+      *Pretrained & 1.82 & 56.22 \\
+      Finetuned & 1.57 & 59.27 \\
+      \midrule
+      $\dagger$Attn, $k=8$ & 1.66 & 57.91  \\
+      MLP, $k=100$  & 1.57 & 59.47 \\
+      \bottomrule
+    \end{tabular}
+    \label{subtab:lm_perf_tinystories}
+  \end{subtable}
+  \hfill
+  \begin{subtable}[t]{0.55\textwidth}
+    \centering
+    \caption{WikiText-103 410M 24-Layer Model}
+    \begin{tabular}{lcc}
+      \toprule
+      \textbf{Language Model} & \textbf{Loss} & \textbf{Acc} \\
+      \midrule
+      *Finetuned (Wiki) & 2.41 & 50.52 \\
+      Finetuned 160M (Wiki) & 2.72 & 46.75 \\
+      \midrule
+      $\dagger$Attn, $k=8$ & 2.74 & 46.68 \\
+      Attn, $k=64$ & 2.55 & 48.44 \\
+      MLP, $k=100$  & 3.03 & 42.47 \\
+      MLP, grouped $16 \times (k=64)$  & 2.57 & 48.46 \\
+      \bottomrule
+    \end{tabular}
+    \label{subtab:lm_perf_wiki}
+  \end{subtable}
+\end{table}
+
+\para{Trained models} We finetune a small, 1-layer, 21 million parameter model on the TinyStories dataset of children's stories \citep{eldan2023tinystories}. We also finetune a larger, 24-layer 410M parameter model on the WikiText-103 dataset, consisting of high-quality English-language Wikipedia articles \citep{merity2016pointer}.
+\para{Codebook models are still strong language models} 
+Remarkably, despite the extreme bottleneck imposed by the codebook constraint, the codebook language models can still achieve strong language modeling performance. As shown in \Cref{tab:lm_perf}, codebook models can attain a loss and accuracy close to or better than the original models with the proper settings. In addition, the generations of the codebook look comparable to the base models, as shown in \Cref{tab:lm_generations}. Finally, in \Cref{subsec:faiss}, we profile the inference speed of these codebook models, showing how sparsity and fast maximum inner product search (MIPS) algorithms enable codebooks to run much more efficiently than the naive implementation of two large matrix multiplications.
+
+\para{Generating hypotheses for the role of codes}
+We also explore the interpretability of codes by looking at examples that the code activates on. In \Cref{tab:lm-activations}, we catalog codes that selectively activate on a wide range of linguistic phenomena, spanning orthography (e.g., names starting with ``B"), word types (e.g., months of the year), events (e.g., instances of fighting), and overall topics (e.g., fire or football). 
+Interestingly, codes for a particular linguistic phenomenon may not always activate on the words most relevant to that concept. For example, in our TinyStories model, we find a code that activates on mentions of fighting and violence might trigger on the word \textbf{the} but not the adjacent word \textbf{quarrel}.  We suspect this may be because the network can store pieces of information in nearby tokens and retrieve them when needed via attention.
+
+\begin{figure}
+   \centering
+   \begin{subfigure}{0.49\linewidth}
+       \centering
+       \includegraphics[width=\linewidth]{plots_final/fsm_neuron_v_code_interp.pdf}
+       \caption{Finite-state machine dataset (TokFSM)}
+       \label{fig:codes-vs-neurons-fsm}
+   \end{subfigure}
+   \begin{subfigure}{0.49\linewidth}
+       \centering
+       \includegraphics[width=\linewidth]{plots_final/neuron_v_code_interp.pdf}
+       \caption{WikiText-103}
+       \label{fig:codes-vs-neurons-wikitext}
+   \end{subfigure}
+   \caption{\textbf{Codes are better classifiers of simple textual features than neurons.} \textit{Y-axis}: precision of a given code at classifying a regular expression. \textit{X-axis}: precision of the best neuron in the network, with a threshold chosen to match the recall of the code. \textit{Red line}: $y=x$}
+   \label{fig:codes-vs-neurons}
+\end{figure}
+
+\para{Comparison to neuron-level interpretability}
+As in \Cref{subsec:toy-patterns}, we would like to compare the interpretability of the codebook to neuron-level interpretability. While natural language features are more complex than the states in \Cref{sec:fsm}, we conduct a preliminary experiment comparing both neuron- and code-based classifiers to regular expression-based classifiers. 
+We first collect a set of codes that appear to have simple, interpretable activation patterns (e.g., ``fires on years beginning with 2'’). We then created heuristic regular expressions targeting those features (e.g., \verb|2\d\d\d| ). Next, we compute the precision of the code classifier, using the regular expression as our source of truth. We then take the recall of our code classifier and search across all neurons, thresholding each at the same recall as the code and reporting the highest precision found. As \Cref{fig:codes-vs-neurons-wikitext} demonstrates, codes are far better classifiers of these features than neurons on average, with over \textbf{30\%} higher average precision.
+
+\begin{table}
+   \centering
+   \caption{\textbf{Activating topic codes causes the model to discuss those topics.} Percentage of generations that mention the topic before and after setting one or all codes in each attention head to the topic code. Numbers in (parentheses) indicate the number of activated topic codes. This number is smaller for the \textit{all codes} condition because only one topic code will be activated if multiple topic codes are located in the same attention head.}
+   \label{tab:lm-topic-codes-quant}
+   \begin{subtable}{0.49\textwidth}
+      \centering
+      \caption{Wikitext}
+      \begin{tabular}{p{1.0cm}p{1.1cm}p{1.6cm}p{1.6cm}}
+      \toprule
+      \textbf{Topic} & \textbf{Baseline Freq} & \textbf{Steered (one code)} & \textbf{Steered (all codes)} \\
+      \midrule
+      Video game & 2.5 & 55.0 \textsubscript{(18)} & \textbf{75.0} \textsubscript{(4)} \\
+      Football & 7.5 & 47.5 \textsubscript{(18)} & \textbf{95.0} \textsubscript{(8)} \\
+      Movie & 27.5 & 42.5 \textsubscript{(12)} & \textbf{90.0} \textsubscript{(5)} \\
+      Song & 20.0 & 32.5 \textsubscript{(17)} & \textbf{85.0} \textsubscript{(11)} \\
+      \bottomrule
+      \end{tabular}
+   \end{subtable}
+   \begin{subtable}{0.49\textwidth}
+      \centering
+      \caption{TinyStories}
+      \begin{tabular}{p{1.7cm}p{1.3cm}p{1.6cm}}
+      \toprule
+      \textbf{Topic} & \textbf{Baseline Freq} & \textbf{Steered (one code)} \\
+      \midrule
+      Dragon & 2.5 & \textbf{65.0} \textsubscript{(8)} \\
+      Slide & 2.5 & \textbf{95.0} \textsubscript{(12)} \\
+      Friend & 42.5 & \textbf{75.0} \textsubscript{(9)} \\
+      Flower & 0.0 & \textbf{90.0} \textsubscript{(8)} \\
+      Fire & 2.5 & \textbf{100.}0 \textsubscript{(16)} \\
+      Baby & 0.0 & \textbf{90.0} \textsubscript{(15)} \\
+      Princess & 40.0 & \textbf{87.5} \textsubscript{(14)} \\
+      \bottomrule
+      \end{tabular}
+   \end{subtable}
+\end{table}
+\subsection{Steering the network by activating topic codes}
+\label{sec:lm-interventions}
+
+As in \Cref{sec:toy-causal}, we would like to validate that codes do not merely fire in a \textit{correlated} way with different linguistic features but that they have a \textit{causal} role in the network's behavior. As an initial investigation of this goal, we study a subset of codes in the attention codebook model that appear to identify and control the \textit{topic} discussed by a model.
+To identify potential \textit{topic codes}, we use a simple heuristic and select only codes that activate on more than $50\%$ of tokens in a given sequence.\footnote{This heuristic is inspired by past work connecting activation patterns in frequency space to different linguistic phenomena \citep{tamkin2020language}} Of these, we manually filter by looking at the activating tokens of these codes and choose only those that appear to activate frequently on other examples related to that topic.
+To shift the output generations of the model, we then take an input prompt (e.g., the start-of-sequence token) and activate the topic codes in the model for every token of this prompt. Then, we sample from the model, activating the topic codes for each newly generated token. Unlike \Cref{sec:fsm}, our models here have $k>1$. Thus, we explore two types of interventions: First, activating a \textbf{single} code in each codebook (replacing the code with the lowest similarity with the input) and second, replacing \textbf{all} activated codes in each codebook with $k$ copies of the topic code.\footnote{If $m > 1$ codes map to the steering topic in a given codebook, we replace the $m$ lowest-scoring codes in the first case and randomly select one code to replace all the codes in that codebook in the second case.} We use the attention-only codebook with $k=8$ in our experiments. See \Cref{fig:steering} for a graphical depiction.
+
+Remarkably, activating the topic codes causes the model to introduce the target topic into the sampled tokens in a largely natural way. We show several examples of this phenomenon in \Cref{tab:lm-interventions-wikitext,tab:lm-interventions-ts,tab:lm-interventions-ts-full}. Interestingly, even though the topic code is activated at every token, the topic itself is often only introduced many words later in the sequence, when it would be contextually appropriate. We quantify the success of this method by generating many steered sequences and classifying the generated examples into different categories with a simple word-based classifier. The results, presented in \Cref{tab:lm-topic-codes-quant}, demonstrate that the steered generations mention the topic far more often, with almost all generations successfully mentioning the topic when all codes in a codebook are replaced. These interventions constitute meaningful evidence of how codebook features can enable the interpretation and control of real language models.
+\small
+\begin{table}
+\caption{\textbf{Example steered generations for TinyStories model.} More examples in \Cref{tab:lm-interventions-ts-full}}
+\label{tab:lm-interventions-ts}
+\centering
+\begin{tabular}[h!]{llp{9.5cm}}
+\toprule
+Code Concept & \# codes & Example steered generation \\
+\midrule
+Dragon & 8 & \textbf{Once upon a time,} there was a little girl named Lily. She was very excited to go outside and explore. She flew over the trees and saw a big, scary dragon. The dragon was very scary. [...] 
+\\
+Flower & 8 & \textbf{Once upon a time,} there was a little girl named Lily. She liked to pick flowers in the meadow. One day, she saw a big, green  [...] 
+\\
+Fire & 16 & \textbf{Once upon a time,} there was a little boy named Timmy. Timmy loved his new toy. He always felt like a real fireman. [...] \\
+
+Princess & 14 & \textbf{Once upon a time,} there was a little bird named Tweety. One day, the princess had a dream that she was invited to a big castle. She was very excited and said, ``I want to be a princess and [...] \\
+\bottomrule
+\end{tabular}
+\end{table}
+\normalsize
+
+
+
+\section{Related work}
+
+\label{sec:related-work}
+
+\para{Mechanistic interpretability} Our work continues a long stream of work since the 1980s on understanding how neural networks operate, especially when individual neurons are uninterpretable \citep{servan1988learning, elman1990finding}\footnote{As \citet{elman1990finding} phrases the problem: ``A given node participates in representing multiple concepts. It is the activation pattern in its entirety that is meaningful. The activation  of an individual node may be uninterpretable in isolation (i.e., it may not even refer to a feature or micro-feature).''}. Recent work has continued these investigations in modern computer vision models \citep{olah2018the, olah2020zoom, bau2020understanding} and language models \citep{elhage2021mathematical, geva2021transformer}, with special focus on the problem of understanding \textit{superposition}, when many features are distributed across a smaller number of neurons \citep{elhage2022superposition}. Recent work has investigated whether sparse dictionary learning techniques can recover these features \citep{yun2021transformer, sharkey2022taking}, including the concurrent work of \citet{bricken2023monosemanticity} and \citet{cunningham2023sparse}. Our work shares similar goals as the above works. Codebook features attempt to make it easier to identify concepts and algorithms inside of networks by refactoring their hidden states into a sparse and discrete form. We also show how codebooks can mitigate superposition by representing more features than there are neurons and that we can intervene on the codebooks to alter model behavior systematically.
+
+\para{Discrete structure in neural networks} Our work also connects to multiple streams of research on incorporating discrete structure into neural networks \citep{andreas2016neural, mao2019neuro}. Most relevant is VQ-VAE \citep{van2017neural}, which trains an autoencoder with a vector quantized hidden state \citep{gray1984vector}. Our work also leverages vector quantization; however, unlike past work, we extend this method by using it as a sparse, discrete bottleneck that could inserted between the layers of any neural network (and apply it to autoregressive language models), enabling better understanding and control of the network's intermediate computation.
+
+\para{Inference-time steering of model internals} Finally, our work connects to recent research on steering models based on inference-time perturbations. For example, \citet{merullo2023language} and \citet{turner2023activation} steer networks by adding vectors of different magnitudes to different layers in the network. Our work supports these aims by making it easier to localize behaviors inside the network (guided by activating tokens) and making it easier to perform the intervention by substituting codes (so the user does not have to try many different magnitudes of a given steering vector at each layer).
+
+
+
+\section{Discussion and future work}
+
+\label{sec:discussion}
+
+We present \textit{codebook features}, a method for training neural networks with sparse and discrete hidden states. Codebook features enable unsupervised discovery of algorithmic and linguistic features inside language models, making progress on the superposition problem \citep{elhage2022superposition}. We have shown how the sparse, discrete nature of codebook features reduces the complexity of a neural network's hidden state, making it easier to search for specific features and control the network's behavior with them.
+
+Our work has limitations. First, we only study Transformer neural networks on one algorithmic dataset and two natural language datasets; we do not study transformers applied to visual data or other architectures, such as convolutional neural networks, leaving this for future work. In addition, we only explore topic manipulation in language models; future work can explore the manipulation of other linguistic features in text, including sentiment, style, and logical flow.
+
+Ultimately, our results suggest that codebooks are an appealing unit of analysis for neural networks and a promising foundation for the interpretability and control of more complex phenomena in models. Looking forward, the sparse, discrete nature of codebook features should aid in discovering circuits across layers, more sophisticated control of model behaviors, and making automated, larger-scale interpretability methods more tractable.}
+
+
+

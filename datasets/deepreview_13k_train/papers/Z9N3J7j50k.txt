@@ -1,0 +1,590 @@
+\title{Autoregressive Moving-average Attention Mechanism for Time Series Forecasting}
+
+\begin{abstract}
+We propose an Autoregressive (AR) Moving-average (MA) attention structure that can adapt to various linear attention mechanisms, enhancing their ability to capture long-range and local temporal patterns in time series. In this paper, we first demonstrate that, for the time series forecasting (TSF) task, the previously overlooked decoder-only autoregressive Transformer model can achieve results comparable to the best baselines when appropriate tokenization and training methods are applied. Moreover, inspired by the ARMA model from statistics and recent advances in linear attention, we introduce the full ARMA structure into existing autoregressive attention mechanisms. By using an indirect MA weight generation method, we incorporate the MA term while maintaining the time complexity and parameter size of the underlying efficient attention models. We further explore how indirect parameter generation can produce implicit MA weights that align with the modeling requirements for local temporal impacts. Experimental results show that incorporating the ARMA structure consistently improves the performance of various AR attentions on TSF tasks, achieving state-of-the-art results.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+In recent years, autoregressive (AR) decoder-only Transformer-based models \citep{vaswani2017attention, radford2018gpt} have been widely used in sequence modeling tasks across fields such as NLP \citep{gpt3, touvron2023llamaopenefficientfoundation}, CV \citep{chen2020generative,esser2021taming,chang2022maskgit}, and audio \citep{borsos2023audiolm}. This structure is well-suited for various sequential generation and prediction tasks. However, in typical sequence modeling tasks like time series forecasting (TSF), there has been less exploration of this architecture compared to other structures. Most of the best-performing recent TSF models are encoder-only Transformers \citep{liu2024itransformer,nie2023time}, MLPs \citep{das2023longterm,lu2024cats}, or even linear models \citep{zeng2022dlinear,xu2024fits}. The few relevant discussions mainly focus on using pretrained autoregressive LLMs or similar structures for few-shot and zero-shot prediction \citep{gruver2023large,jin2024timellm,das2024a,liu2024autotimes}, with little research directly evaluating their TSF performance in end-to-end training. Therefore, this paper will first briefly demonstrate that with appropriate tokenization and training methods, a basic AR Transformer is enough to achieve results comparable to the state-of-the-art (SOTA) baselines, as shown in Fig. \ref{fig:arma_overall} and Fig. \ref{fig:arma_result_introduction}.
+
+Recently, efficient linear AR attention variants have been explored and developed \citep{katharopoulos2020transformers,hua2022transformer}, reducing the time complexity of standard softmax attention from \( O(N^2) \) to \( O(N) \). Researchers have found that adding a gating decay factor or a similar exponential moving average (EMA) structure to AR structure, as in gated linear attention \citep{ma2022mega,yang2024gated}, enhances linear attention's ability to model local patterns and improves performance. The success of these approaches inspired us to introduce a more comprehensive full autoregressive moving-average (ARMA) structure into existing AR attention mechanisms and explore the performance of the ARMA Transformers in TSF.
+
+In TSF models, EMA, connecting back to the historic work of Holt-Winters \citep{winters1960forecasting,holt2004forecasting}, focuses on smoothed local data, which improves the modeling of short-term fluctuations but reduces the ability to capture long-term information. In contrast, ARMA, connecting back to the historic work of Box-Jenkins \citep{box1974some}, a classic structure in TSF, considers both historical data and the cumulative impact of prediction errors. This allows it to handle and decouple long-term and short-term effects, significantly improving forecasting performance on data with complicated temporal patterns.
+
+We propose the ARMA attention mechanism, which integrates a moving-average (MA) term into various existing AR attention mechanisms. Our method improves the TSF performance of AR Transformers without significantly increasing computational costs, maintaining \( O(N) \) time complexity and original parameter size. We design an indirect MA weight generation to obtain the MA output without explicitly computing the MA attention matrix, preserving efficiency of linear attentions. We explore specific techniques for generating implicit MA weights to ensure proper decoupling and handling of short-term effects. Extensive experiments and visualization analyses demonstrate that ARMA balances long- and short-term dependencies, significantly improving AR Transformers and achieving state-of-the-art TSF results.
+
+The main contributions of this paper can be summarized as follows:
+
+a) We demonstrate that, with appropriate tokenization and preprocessing methods, an AR Transformer is enough to achieve the level of existing SOTA baselines. Furthermore, the introduction of ARMA attention enables the decoder-only Transformer to outperform SOTA baselines.
+
+b) We propose the ARMA attention mechanism, which introduces an MA term into existing AR attention without increasing time complexity or parameter size. By adding the MA term to various AR attention mechanisms, the resulting ARMA Transformers significantly improve forecasting performance compared to their AR counterparts.
+
+c) We design an indirect MA weight generation method that is computationally efficient while ensuring that the implicit MA weights effectively capture the important short-term effects in TSF, allowing the AR term to focus more on long-term and cyclic patterns.
+
+
+
+\section{Method}
+
+
+\subsection{Time series forecasting}
+
+In Time Series Forecasting (TSF), the goal is to predict the future part in a multivariate time series \( \mathbf{S} \in \mathbb{R}^{L \times C} \), where \( L \) is the length of the series, and \( C \) is the number of channels or input series. The time series is divided into historical input \( \mathbf{S}_I \in \mathbb{R}^{L_I \times C} \), and future data \( \mathbf{S}_P \in \mathbb{R}^{L_P \times C} \), where \( L = L_I + L_P \), and \( L_I \) and \( L_P \) represent the lengths of the input and forecasting periods, respectively. The objective is to learn a mapping function \( f: \mathbb{R}^{L_I \times C} \rightarrow \mathbb{R}^{L_P \times C} \) that predicts the future values \( \widehat{\mathbf{S}}_P = f(\mathbf{S}_I) \), given the historical input \( \mathbf{S}_I \).
+
+\subsection{Appropriate tokenization for autoregressive forecasting}
+
+\begin{wrapfigure}{r}{0.25\textwidth}
+  \centering
+  \includegraphics[width=1\linewidth]{figs/arma_overall.pdf}
+  \caption{Overall architecture of our decoder Transformer for TSF.}\label{fig:arma_overall}
+\end{wrapfigure}
+
+Recently, most time series forecasting research utilizes encoder-decoder or encoder-only Transformers for TSF \citep{li2019logtrans,zhou2021informer,wu2022autoformer,nie2023time,liu2024itransformer}, with limited focus on end-to-end decoder-only autoregressive Transformer because of error accumulation issue. For long-term forecasts, The autoregressive Transformers requires iteratively doing one-step prediction, leading to error accumulation and higher MSE compared to non-autoregressive models that generate the entire forecast at once.
+
+To prevent error accumulation, we use an autoregressive Transformer (Fig. \ref{fig:arma_overall}) that treats one-step prediction as the complete forecast. Inspired by PatchTST \citep{nie2023time}, we adopt a channel-independent approach, predicting each series separately and applying RevIN \citep{kim2022reversible} to each. For an input series of length \( L_I \) in $\mathbf{S}_I$, we apply non-overlapping patches with a patch size \( L_P \), dividing the input into \( N = \frac{L_I + P}{L_P} \) patches, where \( P \) is zero-padding for divisibility. This ensures that each out-of-sample prediction token covers the entire forecasting length \( L_P \), thereby avoiding error accumulation.
+
+\begin{figure}
+  \centering
+  \includegraphics[width=1\linewidth]{figs/arma_main_result.pdf}
+  \vskip -10pt
+  \caption{Box plots of performance rankings from 48 sub-experiments across 12 datasets. Green represents ARMA Transformers, yellow AR Transformers, and red the baselines, with triangles indicating mean rankings. AR Transformers perform comparably to baselines, while ARMA Transformers significantly outperform their AR counterparts. See Table \ref{tab:summary_main_results} and \ref{tab:ap_main_results} for more details.}\label{fig:arma_result_introduction}
+\end{figure}
+
+Fig. \ref{fig:arma_result_introduction} shows that autoregressive Transformers using this method can achieve performance comparable to existing SOTA models. Additionally, decoder-based architectures may have significant advantages in extended lookback length and varying output horizon, highlighting their potential.
+
+\subsection{Preliminaries: decoder-only Transformer}
+
+We use a GPT-2–style decoder-only Transformer \citep{radford2019language} for autoregressive TSF. Token patches of length \( L_P \) are linearly projected to \( d \)-dimensional vectors and combined with learnable positional embeddings to form the input sequence \( \mathbf{X} \in \mathbb{R}^{N \times d} \), where each token is \( \bm{x}_t \in \mathbb{R}^{1 \times d} \). Each of the \( m \) Transformer layers applies layer normalization \( \text{LN}(\cdot) \), attention \( \text{Attn}(\cdot) \), and a channel-wise MLP \( \text{MLP}(\cdot) \). With single-head softmax attention, a Transformer layer is defined as:
+\begin{equation}
+\label{eq:transformer}
+\begin{gathered}
+\text{Attn}(\mathbf{X}) = \text{softmax} \left( \mathbf{M} \odot (\mathbf{Q}\mathbf{K}^\top) \right)\mathbf{V} \mathbf{W}_o, \ \ \text{with} \ \ \mathbf{Q},\mathbf{K},\mathbf{V} = \mathbf{X}\mathbf{W}_q,\mathbf{X}\mathbf{W}_k,\mathbf{X}\mathbf{W}_v \\
+\mathbf{X} := \mathbf{X} + \text{Attn}(\text{LN}(\mathbf{X})), \ \ \text{then} \ \ \mathbf{X} := \mathbf{X} + \text{MLP}(\text{LN}(\mathbf{X}))
+\end{gathered}
+\end{equation}
+where \( \mathbf{W}_q, \mathbf{W}_k, \mathbf{W}_v, \mathbf{W}_o \in \mathbb{R}^{d \times d} \) are the projection matrices for the query, key, value, and output, respectively, and \( \mathbf{M} \in \mathbb{R}^{N \times N} \) is the causal mask, defined as \( \mathbf{M}_{ij} = 1\{i \geq j\} - \infty \cdot 1\{i < j\} \).
+
+\subsection{Preliminaries: efficient linear attention mechanisms}
+
+Recent autoregressive efficient attention mechanisms reduce computational complexity from \( O(N^2) \) to \( O(N) \) by avoiding the explicit calculation of the \( N \times N \) attention matrix \citep{katharopoulos2020transformers,choromanski2021rethinking,hua2022transformer,sun2023retentive}. Most of them can be reformulated as parallel linear RNNs with identity or diagonal state updates. Although these efficient attentions do not outperform standard softmax attention for large models, they achieve comparable results on smaller tasks \citep{katharopoulos2020transformers,choromanski2021rethinking}. This paper investigates integrating these mechanisms into TSF and shows that adding a moving-average term significantly improves their performance. We begin by expressing the recurrent form of standard softmax attention. For a single head without output projection, let \( \bm{q}_t, \bm{k}_t, \bm{v}_t \) be the vectors at step \( t \) from \( \mathbf{Q}, \mathbf{K}, \mathbf{V} \). The output \( \bm{o}_t \) is given by:
+$
+\bm{o}_t = \frac{\sum_{i=1}^t \exp (\bm{q}_t \bm{k}_i^\top) \bm{v}_i} {\sum_{i=1}^t \exp (\bm{q}_t \bm{k}_i^\top)}
+$.
+
+\textbf{Linear attention} \  Linear Attention replaces the \( \exp(\bm{q}_t \bm{k}_i^\top) \) term in standard attention with a kernel function \( k(\bm{x}, \bm{y}) = \langle \phi(\bm{x}), \phi(\bm{y}) \rangle \), resulting in \( \phi(\bm{q}_t) \phi(\bm{k}_i) \) \citep{katharopoulos2020transformers}. This change reduces the time complexity from \( O(N^2) \) to \( O(N) \) by eliminating the need to compute the full \( N \times N \) attention matrix. Instead, it computes \( \phi(\bm{k}_i)^\top \bm{v}_i \) for each \( i \) and aggregates over \( N \). Various kernel functions have been explored, with identity kernels without denominators performing well enough \citep{mao-2022-fine,qin-etal-2022-devil,sun2023retentive,yang2024gated}. In this setup, Linear attention can be viewed as an RNN with a hidden state matrix \( \bm{k}_i^\top \bm{v}_i \in \mathbb{R}^{d \times d} \) that updates using the identity function. The output at each step is:
+$
+\bm{o}_t = \bm{q}_t \sum_{i=1}^t \bm{k}_i^\top \bm{v}_i
+$.
+
+\textbf{Element-wise linear attention} \  In multi-head linear attention with \( h \) heads, we handle \( h \) hidden state matrices of size \( \frac{d}{h} \times \frac{d}{h} \). When \( h = d \), this simplifies to \( h \) scalar hidden states, effectively transforming linear attention into a linear RNN with a \( d \)-dimensional hidden state vector \( \phi(\bm{k}_i) \odot \bm{v}_i \) and enabling element-wise computations of \( \bm{q}, \bm{k}, \bm{v} \). This approach, also known as the Attention Free Transformer (AFT) \citep{zhai2021attention}, is favored for its simplicity and efficiency in recent works \citep{peng2023rwkv}. We adopt the structure in AFT, where \( \sigma(\cdot) \) is the sigmoid function, and the output at each step is:
+$
+\bm{o}_t = \sigma(\bm{q}_t) \odot \frac{\sum_{i=1}^t \exp (\bm{k}_i) \odot \bm{v}_i}{\sum_{i=1}^t \exp (\bm{k}_i)}
+$.
+
+\textbf{Gated linear attention} \  Recent studies have explored adding a forget gate, commonly used in traditional RNNs, to linear attention, allowing autoregressive models to forget past information and focus on local patterns \citep{mao-2022-fine,sun2023retentive,qin2024hgrn2,yang2024gated}. We implement a simple gating mechanism where each input \( \bm{x}_t \) is converted into a scalar between [0, 1] and expanded into a forget matrix \( \mathbf{G}_i \) matching the shape of \( \bm{k}_i \bm{v}_i \). With gating parameters \( \mathbf{W}_g \in \mathbb{R}^{d \times 1} \), the output at each step is:
+$
+\bm{o}_t = \bm{q}_t \sum_{i=1}^t \mathbf{G}_i \odot  \bm{k}_i^\top \bm{v}_i , \ \ \mathbf{G}_i = \prod_{k=1}^{i} \sigma(\bm{x}_k \mathbf{W}_g ) \mathbf{1}^\top \mathbf{1}
+$.
+
+\textbf{Fixed Attention} \  We additionally explore an autoregressive structure with fixed, data-independent weights \( w_{t,i} \), replacing the dynamically generated attention weights \( \phi(\bm{q}_t) \phi(\bm{k}_i) \). Without dynamic parameter generation, this becomes a linear layer with a causal mask \( \mathbf{M} \) rather than a true attention mechanism. We use this structure to examine the effect of adding a moving-average term. This autoregressive causal linear layer is expressed as:
+$
+\bm{o}_t = \sum_{i=1}^t w_{t,i} \bm{v}_i
+$.
+
+\subsection{ARMA attention mechanism} 
+\begin{wrapfigure}{r}{0.6\textwidth}
+  \centering
+  \includegraphics[width=1\linewidth]{figs/arma_architecture_compact.pdf}
+  \caption{ARMA attention structure with the indirect MA weight generation method applied to softmax and linear attention. See Table \ref{tab:ARMA_summary} for more calculation details.}\label{fig:arma_architecture}
+\end{wrapfigure}
+
+In these attention mechanisms, the next-step prediction at time \( t \) is a weighted sum of all previous values \( \bm{v}_i \in \mathbb{R}^{1 \times d} \), with weights \( \mathbf{w}_{t,i} \in \mathbb{R}^{1 \times d} \) derived from interactions between \( \bm{q}_t \) and \( \bm{k}_i \). Naturally, we can write these attention mechanisms in an AR model structure: $$
+\bm{v}_{t+1} = \bm{o}^{\text{AR}}_t + \bm{r}_t = \sum_{i=1}^t \mathbf{w}_{t,i} \odot \bm{v}_i + \bm{r}_t,
+$$ where \( \bm{r}_t \) is the AR error. In an ARMA model, the MA term captures short-term fluctuations, allowing the AR component to focus on long-term dependencies. Let \( \bm{\epsilon}_t \) be the error after introducing the MA term and \( \bm{\theta}_{t-1,j} \) the MA weights generated by some attention mechanism. We expand the AR error \( \bm{r}_t \) into an MA form and extend the model to an ARMA structure as:
+\begin{equation}\label{eq:ARMA_full}
+\bm{v}_{t+1} = \bm{o}^{\text{AR}}_t + \bm{o}^{\text{MA}}_t + \bm{\epsilon}_t = \sum_{i=1}^t \mathbf{w}_{t,i} \odot \bm{v}_i + \sum_{j=1}^{t-1} \bm{\theta}_{t-1,j} \odot \bm{\epsilon}_j + \bm{\epsilon}_t, \ \ \bm{r}_t = \sum_{j=1}^{t-1} \bm{\theta}_{t-1,j} \odot \bm{\epsilon}_j + \bm{\epsilon}_t
+\end{equation}
+The structure of the MA output \( \bm{o}^{\text{MA}}_t = \sum_{j=1}^{t-1} \bm{\theta}_{t-1,j} \odot \bm{\epsilon}_j \) resembles the AR term and could potentially be computed using an attention mechanism. For simplicity, we consider a single channel of the \( d \)-dimensional space, with other channels an be handled in parallel. We express  the matrix form of the \( \bm{r}_t \) in Eq. \ref{eq:ARMA_full} for one channel as:
+\begin{equation}
+\label{eq:ARMA_error}
+\begin{gathered}
+\begin{pmatrix}
+r_1 \\
+r_2 \\
+\vdots \\
+r_{t}
+\end{pmatrix} = 
+\begin{pmatrix}
+0 & 0 & \cdots & 0 & 0 \\
+\theta_{1,1} & 0 & \cdots & 0 & 0 \\
+\theta_{2,1} & \theta_{2,2} & \cdots & 0 & 0 \\
+\vdots & \vdots & \ddots & \vdots & \vdots \\
+\theta_{t-1,1} & \theta_{t-1,2} & \cdots & \theta_{t-1,t-1} & 0
+\end{pmatrix}
+\begin{pmatrix}
+\epsilon_1 \\
+\epsilon_2 \\
+\vdots \\
+\epsilon_{t}
+\end{pmatrix} + \begin{pmatrix}
+\epsilon_1 \\
+\epsilon_2 \\
+\vdots \\
+\epsilon_{t}
+\end{pmatrix} \\
+\mathbf{r} = (\mathbf{I} + \mathbf{\Theta}) \epsilon, \ \ \mathbf{\epsilon} = (\mathbf{I} + \mathbf{\Theta})^{-1} \mathbf{r},
+\end{gathered}
+\end{equation}
+
+where \( \mathbf{\Theta} \) is a strictly lower triangular matrix of MA weights for this channel. Once the attention mechanism determines \( \bm{o}^{\text{AR}}_t \) and \( \bm{\theta}_{t-1,j} \), we can calculate \( \bm{r}_j = \bm{v}_{j+1} - \bm{o}^{\text{AR}}_j \) (token shifting) for all \( j \leq N-1 \) and determine \( \epsilon_j \) via matrix inversion. Substituting these back into Eq. \ref{eq:ARMA_full} yields the final ARMA attention output \( \bm{o}^{\text{AR}}_t + \bm{o}^{\text{MA}}_t \) for step \( t \).
+
+However, computing \( \bm{o}^{\text{MA}}_t \) requires inverting \( \mathbf{I} + \mathbf{\Theta} \), which involves calculating all \( \bm{\theta}_{t-1,j} \) in the \( N \times N \) matrix. This increases the complexity of linear attentions back to \( O(N^2) \) and may also cause training instability. To maintain linear time complexity, we need a method to compute \( \bm{o}^{\text{MA}}_t \) without explicitly calculating all \( \bm{\theta}_{t-1,j} \) values.
+
+\subsection{Indirect MA weight generation}
+
+We need an approach that can leverage linear attention's efficiency to compute \( \bm{o}^{\text{MA}}_t \) without the costly \( \mathbf{\Theta}^{N \times N} \) matrix operations. Instead of separately calculating attention weights to determine \( \bm{\epsilon_j} \) as value input and recomputing the whole MA output, we aim to use a linear RNN to collect all keys and values at once. We observe from Eq. \ref{eq:ARMA_error} that there is already a sequential relationship between \( \bm{r}_j \) and \( \bm{\epsilon}_j \), and \( \bm{r}_j \) can be computed directly once \( \bm{o}^{\text{AR}}_t \) is determined. Therefore, we implicitly compute the MA weights of \( \bm{\epsilon_j} \) by using \( \bm{r}_j \) as value input for the MA component instead of \( \bm{\epsilon}_j \). Let \( \bm{\beta}_{t-1,j} \) denote the generated attention weights corresponding to \( \bm{r}_j \) at step \( t \), and let \( \bm{\theta}_{t-1,j} \) here be the implicit MA weights hiddenly linked to the generated \( \bm{\beta}_{t-1,j} \). Based on Eq. \ref{eq:ARMA_error}, we establish:
+\begin{equation}
+\begin{gathered}
+\sum_{j=1}^{t-1} \bm{\beta}_{t-1,j} \odot \bm{r}_j =  \sum_{j=1}^{t-1} \bm{\theta}_{t-1,j} \odot \bm{\epsilon}_j \Leftrightarrow \mathbf{B} \mathbf{r} = \mathbf{\Theta} \mathbf{\epsilon} \ \ \text{(for one channel)} \\
+\mathbf{B} = \mathbf{\Theta} \cdot (\mathbf{I} + \mathbf{\Theta})^{-1}, \ \ \mathbf{\Theta} = \mathbf{B} \cdot (\mathbf{I} - \mathbf{B})^{-1}
+\end{gathered}
+\end{equation}
+With \( \mathbf{\Theta} = \mathbf{B} \cdot (\mathbf{I} - \mathbf{B})^{-1} \), as long as the indirectly generated \( \mathbf{\Theta} \) accurately reflects the characteristics of the MA weights we want, we can use \( \sum_{j=1}^{t-1} \bm{\beta}_{t-1,j} \odot \bm{r}_j \) as \( \bm{o}^{\text{MA}}_t \). Since \( \bm{r}_j \) is known after computing \( \bm{o}^{\text{AR}}_t \), linear attention can be used to compute \( \bm{o}^{\text{MA}}_t \) without increasing the time complexity. To ensure the implicitly generated \( \mathbf{\Theta} \) from \( \mathbf{B} \) captures the desired MA properties, we must carefully design how \( \mathbf{B} \) is generated. The invertibility of \( (\mathbf{I} - \mathbf{B})^{-1} \) is guaranteed since \( \mathbf{B} \) is strictly lower triangular. To efficiently compute the generated weights, we use the \( \bm{\beta}_{t-1,j} = \phi_q^{\text{MA}}(\bm{q}^{\text{MA}}_{t-1}) \phi_k^{\text{MA}}(\bm{k}^{\text{MA}}_j) \) to generate \( \mathbf{B} \), similar to linear attention. Previous dynamic ARMA models in statistics often update MA weights based on observations \citep{grenier1983time,azrak2006asymptotic}, so we derive \( \bm{q}^{\text{MA}}_{t-1} \) and \( \bm{k}^{\text{MA}}_j \) by multiplying the attention input \( \bm{x}_{\cdot} \) with \( \mathbf{W}^{\text{MA}}_q \) and \( \mathbf{W}^{\text{MA}}_k \). Now, the effectiveness of MA weights lies in selecting the most suitable functions \( \phi_q^{\text{MA}}(\cdot) \) and \( \phi_k^{\text{MA}}(\cdot) \).
+
+\subsection{\texorpdfstring{Selection of $\phi(\cdot)$ and characteristics of implicit MA weights}{Selection of phi(.) and characteristics of implicit MA weights}}
+
+The MA term models short-term effects and local temporal relationships, so we want the implicit \( \mathbf{\Theta} \) to follow a pattern where elements near the diagonal have larger absolute values, and those farther away gradually decrease. The expanded form of \( \mathbf{\Theta} \) is given by \( \mathbf{\Theta} = \mathbf{B} \cdot (\mathbf{I} - \mathbf{B})^{-1} = \mathbf{B} + \mathbf{B}^2 + \mathbf{B}^3 + \cdots \).  The elements along the diagonal direction in \( \mathbf{B} \) continually accumulate as products into the elements below them in \( \mathbf{\Theta} \). Since \( \mathbf{B} \) is strictly lower triangular, the elements of the subdiagonal in \( \mathbf{\Theta} \) remain constant, while the elements further down progressively accumulate additional terms formed by the product of different \( \beta_{\cdot} \) elements above. Assuming \( \beta_{\cdot} \) follows a distribution and simplifying by setting each \( \beta_{\cdot} \) to the distribution mean \( b \), the elements of \( \mathbf{\Theta} \) can be expressed as:
+\begin{equation}
+\theta_{ij} = b(1 + b)^{i-j-1}, \quad \text{where} \ i > j
+\end{equation}
+This simplification offers valuable insights. To prevent longer-term errors from having a larger impact, we aim to avoid large absolute values accumulating in \( \mathbf{\Theta} \) far from the diagonal. We also want \( \theta_{\cdot} \) to decay steadily as it moves away from the diagonal. Therefore, constraining \( \beta_{\cdot} \) between -1 and 0, with a preference of smaller absolute values, is a practical approach.
+
+We tested various activation function combinations for \( \phi_q^{\text{MA}}(\cdot) \) and \( \phi_k^{\text{MA}}(\cdot) \) to generate \( \bm{\beta}_{t-1,j} = \phi_q^{\text{MA}}(\bm{q}^{\text{MA}}_{t-1}) \phi_k^{\text{MA}}(\bm{k}^{\text{MA}}_j) \) values, as shown in Fig. \ref{fig:vis_phi_selection}, \ref{fig:vis_phi_selection_alpha_selection}, and \ref{fig:vis_phi_selection_positive}. We used the sigmoid function \( \phi_k^{\text{MA}}(\bm{k}^{\text{MA}}_{j}) = \sigma( \alpha \bm{k}^{\text{MA}}_{j} / \sqrt{d}) \) to obtain values between 0 and 1, where \( \alpha = 0.05 \) \footnote{In the key activation, \( \alpha \) controls the variance of each row in the \( \mathbf{B} \) matrix, indirectly influencing the amount of long-term information (lower left) in the MA weights \( \mathbf{\Theta} \). Increasing \( \alpha \) would make the MA weights focus more on modeling long-term information. However, since we want the AR weights to handle the long-term component, we set \( \alpha \) to a relatively small value. This explains why the rows of the \( \mathbf{B} \) matrix appear smooth in the visualization. Refer to Fig. \ref{fig:vis_phi_selection_alpha_selection} for more details on $\alpha$, and see Fig. \ref{fig:vis_phi_selection_positive} for the effects of reversed positive $\phi_q$.} and \( \sqrt{d} \) are scaling factors to maintain small absolute values. Then, we selected a function \( \phi_q^{\text{MA}}(\cdot) \) to make the product negative. We ultimately chose \( \phi^{\text{MA}}_q (\bm{q}^{\text{MA}}_t)=- \text{LeakyReLU}( - \bm{q}^{\text{MA}}_t / \sqrt{d} ) \) with a negative slope of 0.02. The inner negative sign maintains directional consistency (for later parameter sharing), and the outer negative sign encourages a negative output.
+
+\begin{wrapfigure}{r}{0.65\textwidth}
+\vskip -8pt
+	\centering
+    	\subfigure[$\phi_q^{\text{MA}}$: -LeakyReLU, $\phi_k^{\text{MA}}$: $\sigma$]{
+    		\begin{minipage}[b]{0.3\textwidth}
+    			\includegraphics[width=1\textwidth]{vis_matrices/LeakyReLU_Sigmoid_0.05.pdf}
+    		\end{minipage}
+    	}
+    	\subfigure[$\phi_q^{\text{MA}}$: -ReLU, $\phi_k^{\text{MA}}$: $\sigma$]{
+    		\begin{minipage}[b]{0.3\textwidth}
+   		 	\includegraphics[width=1\textwidth]{vis_matrices/ReLU_Sigmoid_0.05.pdf}
+    		\end{minipage}
+    	}
+     \vskip -8pt
+         \subfigure[$\phi_q^{\text{MA}}$: -$\sigma$, $\phi_k^{\text{MA}}$: $\sigma$]{
+    		\begin{minipage}[b]{0.3\textwidth}
+    			\includegraphics[width=1\textwidth]{vis_matrices/Sigmoid_Sigmoid_0.05.pdf}
+    		\end{minipage}
+    	}
+    	\subfigure[$\phi_q^{\text{MA}}$: -Swish, $\phi_k^{\text{MA}}$: $\sigma$]{
+    		\begin{minipage}[b]{0.3\textwidth}
+   		 	\includegraphics[width=1\textwidth]{vis_matrices/Swish_Sigmoid_0.05.pdf}
+    		\end{minipage}
+    	}
+     \vskip -8pt
+	\caption{Visualization of the \( \mathbf{B} (\textrm{left}) -\mathbf{\Theta} (\textrm{right}) \) relationship with different \( \phi(\cdot) \). We construct the simulated \( \mathbf{B} \) matrices using randomly sampled \( \bm{q} \) and \( \bm{k} \) ($N=64$, $d=32$) from the normal distribution, and display the corresponding implicit \( \mathbf{\Theta} \) matrices.}
+	\label{fig:vis_phi_selection}
+\end{wrapfigure}
+
+Fig. \ref{fig:vis_phi_selection} shows that LeakyReLU provides a balanced lag weight pattern. Unlike ReLU and Sigmoid, which only output values of the same sign, LeakyReLU offers some relaxation while keeping most values negative. This adds flexibility by enabling the desired negative smoothing effect of the MA term, with occasional positive values to enhance modeling flexibility.
+
+To summarize the ARMA attention process with indirect MA weight generation: First, we compute all \( \bm{o}^{\text{AR}}_t \) using the selected attention mechanism. Then, we apply token shifting and compute all \( \bm{r}_j \) for \( j \leq N-1 \). Next, using \( \phi^{\text{MA}}_q (\bm{q}^{\text{MA}}_t) \), \( \phi_k^{\text{MA}}(\bm{k}^{\text{MA}}_{j}) \), and \( \bm{r}_j \), we calculate \( \bm{o}^{\text{MA}}_t \) with the efficient method matching AR attention, as illustrated in Fig. \ref{fig:arma_architecture}. Finally, the ARMA output is \( \bm{o}_t = (\bm{o}^{\text{AR}}_t + \bm{o}^{\text{MA}}_t) \mathbf{W}_o \). A summary of MA computation methods for each attention mechanism is in Table \ref{tab:ARMA_summary}.
+
+\textbf{Computational cost and model performance} \  The introduction of MA term adds three weight matrices \( \mathbf{W}^{\text{MA}}_{\{q,k,v\}} \), increasing parameter size. To ensure fair comparison, we use weight-sharing to match the parameter sizes of ARMA and AR models. Specifically, we share \( \mathbf{W}_q \) between the AR and MA terms and set \( \mathbf{W}_v \) to an identity matrix, with minimal impact due to the existance of \( \mathbf{W}_o \) and the MLP layer (see Eq. \ref{eq:transformer}). This reduces ARMA’s trainable weights to \( \mathbf{W}_q, \mathbf{W}^{\text{AR}}_k, \mathbf{W}^{\text{MA}}_k, \mathbf{W}_o \), as shown in Fig. \ref{fig:arma_architecture}. While ARMA attention has the same time complexity in order of magnitude as efficient AR attention, its two-stage structure may increase computational costs on constant level. We compare models with different number of layer in the experiements section to show that ARMA’s improved performance is due to structural enhancements, but not increased complexity.
+
+\begin{table}[ht]
+  \caption{Summary of ARMA attention for various attention mechanisms, detailing the calculation methods for AR output and MA output, where \( \bm{r}_j = \bm{v}_{j+1} - \bm{o}^{\text{AR}}_j \).}\label{tab:ARMA_summary}
+  \centering
+  \begin{threeparttable}
+  \renewcommand{\multirowsetup}{\centering}
+  \begin{small}
+  \resizebox{\textwidth}{!}{ 
+\begin{tabular}{lcc}
+\midrule
+ Model & AR term output $\bm{o}^{\text{AR}}_t$ & Indirect MA term output $\bm{o}^{\text{MA}}_t$ \\
+\midrule
+Standard Softmax Attention & \multirow{2}{*}{$\frac{\sum_{i=1}^t \exp (\bm{q}_t (\bm{k}^{\text{AR}}_i)^\top) \bm{v}_i} {\sum_{i=1}^t \exp (\bm{q}_t (\bm{k}^{\text{AR}}_i)^\top)}$} & \multirow{2}{*}{$ \sum_{j=1}^{t-1} \phi^{\text{MA}}_q(\bm{q}_{t-1})\phi^{\text{MA}}_k(\bm{k}^{\text{MA}}_{j})^\top \bm{r}_j$} \\
+\noalign{\vskip -2pt}
+(Std Attn) & \\
+\noalign{\vskip 1pt}
+
+Linear Attention & \multirow{2}{*}{$ \bm{q}_t \sum_{i=1}^t  (\bm{k}^{\text{AR}}_i)^\top \bm{v}_i $} & \multirow{2}{*}{$ \phi^{\text{MA}}_q(\bm{q}_{t-1}) \sum_{j=1}^{t-1} \phi^{\text{MA}}_k(\bm{k}^{\text{MA}}_{j})^\top \bm{r}_j$} \\
+\noalign{\vskip -2pt}
+(Lin Attn) & \\
+\noalign{\vskip 1pt}
+
+Element-wise Linear Attention & \multirow{2}{*}{$\sigma(\bm{q}_t) \odot \frac{\sum_{i=1}^t  \exp (\bm{k}^{\text{AR}}_i) \odot \bm{v}_i}{\sum_{i=1}^t \exp (\bm{k}^{\text{AR}}_i)} $} & \multirow{2}{*}{$\phi^{\text{MA}}_q(\bm{q}_{t-1}) \odot \sum_{j=1}^{t-1} \phi^{\text{MA}}_k(\bm{k}^{\text{MA}}_{j}) \odot \bm{r}_j$} \\
+\noalign{\vskip -2pt}
+(ELin Attn) & \\
+\noalign{\vskip 1pt}
+
+Gated Linear Attention & \multirow{2}{*}{$\bm{q}_t \sum_{i=1}^t \mathbf{G}_i \odot  (\bm{k}^{\text{AR}}_i)^\top \bm{v}_i $} & \multirow{2}{*}{$\phi^{\text{MA}}_q(\bm{q}_{t-1}) \sum_{j=1}^{t-1} \phi^{\text{MA}}_k(\bm{k}^{\text{MA}}_{j})^\top \bm{r}_j$} \\
+\noalign{\vskip -2pt}
+(GLin Attn) & \\
+\noalign{\vskip 1pt}
+
+Fixed Attention & \multirow{2}{*}{$\sum_{i=1}^t w^{\text{AR}}_{t,i} \bm{v}_i$} & \multirow{2}{*}{$\phi^{\text{MA}}_q(\bm{w}^{\text{MA,q}}_{t-1}) \sum_{j=1}^{t-1} \phi^{\text{MA}}_k(\bm{w}^{\text{MA,k}}_{j})^\top \bm{r}_j$} \\
+\noalign{\vskip -2pt}
+(Fixed Attn) & \\
+\bottomrule
+\end{tabular}
+  }
+  \end{small}
+  \end{threeparttable}
+\end{table}
+
+
+
+\section{Experiments}
+
+
+We conducted comprehensive experiments on 12 widely-used TSF datasets, including Weather, Solar, Electricity (ECL), ETTs, Traffic, and PEMS. See \S \ref{ap:dataset} for detailed description of datasets.
+
+\textbf{Baselines} \  We built AR Transformers using the five attention mechanisms from Table \ref{tab:ARMA_summary} and added MA terms to create ARMA attention for comparison in TSF tasks. Additionally, we included five recent SOTA baselines: FITS \citep{xu2024fits}, iTransformer \citep{liu2024itransformer}, CATS \citep{lu2024cats}, PatchTST \citep{nie2023time}, and DLinear \citep{zeng2022dlinear}. We also used a simple channel-dependent encoder-only Transformer, modified by repeating the last input value (like NLinear) to address distribution shift. This model already surpasses older architectures like Autoformer \citep{wu2022autoformer} and Informer \citep{zhou2021informer}, so we excluded these from our comparison.
+
+In the main experiments, both AR and ARMA Transformers use a consistent setup: \( m=3 \) Transformer layers, 8 heads, and model dimension determined by a empirical method \( d=16\sqrt{C} \), where \( C \) is the number of series. We evaluate their performance using one-step prediction for each test datapoint, aligned with the baselines. Baseline hyperparameters are set to the reported values from their original papers. For more details on hyperparameters and implementation, see \S \ref{ap:hyperparameter_implementation}.
+
+\textbf{$L_I$, $L_P$, and fair comparison} \  AR/ARMA Transformers maintain stable performance across different input lengths \( L_I \) and forecasting horizons \( L_P \). In the main experiments, we set \( L_I = 512 \) and test with \( L_P \in \{12, 24, 48, 96\} \). We did not select longer \( L_P \) values for the \textbf{main experiments} because the token length in our AR/ARMA Transformer is determined by \( L_I / L_P \). For longer horizons like \( L_P = 720 \), AR/ARMA Transformers need a larger \( L_I \) (e.g., 4096). If \( L_I = 512 \) is used, it results in only one token, reducing the model to a simple MLP, which is feasible but fails to demonstrate the strengths of the AR/ARMA structure. However, increasing \( L_I \) for baselines would hurt their performance, as \( L_I = 512 \) is within the optimal range for them. To ensure fairness, we use these settings for the main experiments and later include additional experiments extending \( L_I \) to 4096 and \( L_P \) to 720.
+
+We ran all models on all datasets for the four different \( L_P \). In the main text, we report the average test set MSE for each model across different \( L_P \) on each dataset and provide the full results in \S \ref{ap:raw_results}.
+
+\textbf{Main TSF results} \  Table \ref{tab:summary_main_results} highlights the significant performance gains from extending AR Transformers to the ARMA structure. All ARMA attention mechanisms outperform their AR counterparts in both average test MSE and ranking, with linear and standard attention showing the best results.
+
+\textbf{Performance of linear attention} \  Linear attention outperforms softmax attention in TSF, suggesting that simpler attention patterns and non-normalized input shortcuts (without denominator) can improve generalization on time-varying distributions. This aligns with earlier findings where linear models can outperform more complex Transformers in TSF \citep{zeng2022dlinear,xu2024fits}. 
+
+\textbf{Performance of gated linear attention} \  ARMA brought the greatest improvement to gated linear attention. In gated AR models, the decay factor helps the AR term focus on important local patterns, but it weakens the ability to capture long-term or stable cyclic patterns. By introducing the MA term, local effects are absorbed, allowing the decay factor to function properly in the AR forgetting mechanism, leading to significant performance gains.
+
+\textbf{Performance of fixed attention} \  Fixed attention, which lacks dynamic parameter generation, performs worse than other attention. However, its significant improvement with MA terms shows that ARMA enhances the model's ability structurally to capture comprehensive sequence patterns.
+
+\begin{table}[tb]
+\caption{Summary of main TSF results with forecasting horizons \( L_P \in \{12, 24, 48, 96\} \) and \( L_I = 512 \). See Table \ref{tab:ap_main_results} for the original results. Averages of test set MSE for each model on each dataset are presented. Average rankings (AvgRank) of each model, along with the count of first-place rankings (\#Top1), are also included. Green indicates better performance, while red indicates worse. For each comparison between AR and ARMA attention, the better model is underlined.}
+\label{tab:summary_main_results}
+\centering
+\begin{threeparttable}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{l|cc|cc|cc|cc|cc|cccccc}
+\toprule
+\multirow{3}{*}{Model} & \multicolumn{10}{c|}{AR/ARMA Transformer} & \multicolumn{6}{c}{Baseline}
+\\
+\cmidrule(lr){2-11}\cmidrule(lr){12-17}
+&
+\multirow{2}{*}{Std Attn} &
+Std Attn &
+\multirow{2}{*}{Lin Attn} &
+Lin Attn &
+\multirow{2}{*}{GLin Attn} &
+GLin Attn &
+\multirow{2}{*}{ELin Attn} &
+ELin Attn &
+\multirow{2}{*}{Fixed Attn} &
+Fixed Attn &
+\multirow{2}{*}{FITS} &
+iTrans- &
+\multirow{2}{*}{CATS} &
+\multirow{2}{*}{PatchTST} &
+\multirow{2}{*}{DLinear} &
+Enc-
+\\
+& & +ARMA & & +ARMA & & +ARMA & & +ARMA & & +ARMA & & former
+& & & & Former\\
+\cmidrule(lr){1-1}\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}\cmidrule(lr){8-9}\cmidrule(lr){10-11}\cmidrule(lr){12-17}
+Weather & \scalecolor{0.100}{0.135}{0.104} & \underline{\scalecolor{0.100}{0.135}{0.101}} & \scalecolor{0.100}{0.135}{0.104} & \underline{\scalecolor{0.100}{0.135}{0.100}} & \scalecolor{0.100}{0.135}{0.119} & \underline{\scalecolor{0.100}{0.135}{0.105}} & \scalecolor{0.100}{0.135}{0.104} & \underline{\scalecolor{0.100}{0.135}{0.103}} & \scalecolor{0.100}{0.135}{0.105} & \underline{\scalecolor{0.100}{0.135}{0.104}} & \scalecolor{0.100}{0.135}{0.114} & \scalecolor{0.100}{0.135}{0.117} & \scalecolor{0.100}{0.135}{0.105} & \scalecolor{0.100}{0.135}{0.107} & \scalecolor{0.100}{0.135}{0.124} & \scalecolor{0.100}{0.135}{0.135} \\
+Solar & \scalecolor{0.119}{0.152}{0.134} & \underline{\scalecolor{0.119}{0.152}{0.124}} & \scalecolor{0.119}{0.152}{0.122} & \underline{\scalecolor{0.119}{0.152}{0.119}} & \scalecolor{0.119}{0.152}{0.148} & \underline{\scalecolor{0.119}{0.152}{0.124}} & \scalecolor{0.119}{0.152}{0.136} & \underline{\scalecolor{0.119}{0.152}{0.133}} & \scalecolor{0.119}{0.152}{0.142} & \underline{\scalecolor{0.119}{0.152}{0.135}} & \scalecolor{0.119}{0.152}{0.152} & \scalecolor{0.119}{0.152}{0.145} & \scalecolor{0.119}{0.152}{0.122} & \scalecolor{0.119}{0.152}{0.150} & \scalecolor{0.119}{0.152}{0.149} & \scalecolor{0.119}{0.152}{0.125} \\
+ECL & \scalecolor{0.104}{0.124}{0.110} & \underline{\scalecolor{0.104}{0.124}{0.106}} & \scalecolor{0.104}{0.124}{0.106} & \underline{\scalecolor{0.104}{0.124}{0.104}} & \scalecolor{0.104}{0.124}{0.110} & \underline{\scalecolor{0.104}{0.124}{0.108}} & \scalecolor{0.104}{0.124}{0.115} & \underline{\scalecolor{0.104}{0.124}{0.114}} & \scalecolor{0.104}{0.124}{0.121} & \underline{\scalecolor{0.104}{0.124}{0.118}} & \scalecolor{0.104}{0.124}{0.124} & \scalecolor{0.104}{0.124}{0.106} & \scalecolor{0.104}{0.124}{0.110} & \scalecolor{0.104}{0.124}{0.111} & \scalecolor{0.104}{0.124}{0.114} & \scalecolor{0.104}{0.124}{0.201} \\
+ETTh1 & \scalecolor{0.316}{0.351}{0.323} & \underline{\scalecolor{0.316}{0.351}{0.318}} & \scalecolor{0.316}{0.351}{0.318} & \underline{\scalecolor{0.316}{0.351}{0.316}} & \scalecolor{0.316}{0.351}{0.408} & \underline{\scalecolor{0.316}{0.351}{0.321}} & \scalecolor{0.316}{0.351}{0.323} & \underline{\scalecolor{0.316}{0.351}{0.321}} & \scalecolor{0.316}{0.351}{0.330} & \underline{\scalecolor{0.316}{0.351}{0.328}} & \scalecolor{0.316}{0.351}{0.333} & \scalecolor{0.316}{0.351}{0.351} & \scalecolor{0.316}{0.351}{0.327} & \scalecolor{0.316}{0.351}{0.335} & \scalecolor{0.316}{0.351}{0.329} & \scalecolor{0.316}{0.351}{0.817} \\
+ETTh2 & \underline{\scalecolor{0.190}{0.229}{0.192}} & \underline{\scalecolor{0.190}{0.229}{0.192}} & \underline{\scalecolor{0.190}{0.229}{0.193}} & \scalecolor{0.190}{0.229}{0.195} & \scalecolor{0.190}{0.229}{0.217} & \underline{\scalecolor{0.190}{0.229}{0.198}} & \scalecolor{0.190}{0.229}{0.193} & \underline{\scalecolor{0.190}{0.229}{0.190}} & \scalecolor{0.190}{0.229}{0.200} & \underline{\scalecolor{0.190}{0.229}{0.194}} & \scalecolor{0.190}{0.229}{0.197} & \scalecolor{0.190}{0.229}{0.229} & \scalecolor{0.190}{0.229}{0.194} & \scalecolor{0.190}{0.229}{0.201} & \scalecolor{0.190}{0.229}{0.198} & \scalecolor{0.190}{0.229}{0.597} \\
+ETTm1 & \scalecolor{0.222}{0.300}{0.264} & \underline{\scalecolor{0.222}{0.300}{0.239}} & \scalecolor{0.222}{0.300}{0.238} & \underline{\scalecolor{0.222}{0.300}{0.222}} & \scalecolor{0.222}{0.300}{0.407} & \underline{\scalecolor{0.222}{0.300}{0.260}} & \scalecolor{0.222}{0.300}{0.246} & \underline{\scalecolor{0.222}{0.300}{0.244}} & \scalecolor{0.222}{0.300}{0.267} & \underline{\scalecolor{0.222}{0.300}{0.251}} & \scalecolor{0.222}{0.300}{0.237} & \scalecolor{0.222}{0.300}{0.259} & \scalecolor{0.222}{0.300}{0.222} & \scalecolor{0.222}{0.300}{0.244} & \scalecolor{0.222}{0.300}{0.235} & \scalecolor{0.222}{0.300}{0.429} \\
+ETTm2 & \scalecolor{0.115}{0.162}{0.131} & \underline{\scalecolor{0.115}{0.162}{0.128}} & \scalecolor{0.115}{0.162}{0.126} & \underline{\scalecolor{0.115}{0.162}{0.121}} & \scalecolor{0.115}{0.162}{0.142} & \underline{\scalecolor{0.115}{0.162}{0.128}} & \scalecolor{0.115}{0.162}{0.134} & \underline{\scalecolor{0.115}{0.162}{0.128}} & \scalecolor{0.115}{0.162}{0.129} & \underline{\scalecolor{0.115}{0.162}{0.127}} & \scalecolor{0.115}{0.162}{0.115} & \scalecolor{0.115}{0.162}{0.135} & \scalecolor{0.115}{0.162}{0.116} & \scalecolor{0.115}{0.162}{0.119} & \scalecolor{0.115}{0.162}{0.120} & \scalecolor{0.115}{0.162}{0.311} \\
+Traffic & \scalecolor{0.330}{0.435}{0.341} & \underline{\scalecolor{0.330}{0.435}{0.333}} & \scalecolor{0.330}{0.435}{0.337} & \underline{\scalecolor{0.330}{0.435}{0.330}} & \scalecolor{0.330}{0.435}{0.429} & \underline{\scalecolor{0.330}{0.435}{0.350}} & \scalecolor{0.330}{0.435}{0.352} & \underline{\scalecolor{0.330}{0.435}{0.348}} & \scalecolor{0.330}{0.435}{0.373} & \underline{\scalecolor{0.330}{0.435}{0.365}} & \scalecolor{0.330}{0.435}{0.385} & \scalecolor{0.330}{0.435}{0.330} & \scalecolor{0.330}{0.435}{0.372} & \scalecolor{0.330}{0.435}{0.358} & \scalecolor{0.330}{0.435}{0.375} & \scalecolor{0.330}{0.435}{0.847} \\
+PEMS03 & \scalecolor{0.096}{0.160}{0.112} & \underline{\scalecolor{0.096}{0.160}{0.100}} & \scalecolor{0.096}{0.160}{0.100} & \underline{\scalecolor{0.096}{0.160}{0.096}} & \scalecolor{0.096}{0.160}{0.209} & \underline{\scalecolor{0.096}{0.160}{0.101}} & \scalecolor{0.096}{0.160}{0.116} & \underline{\scalecolor{0.096}{0.160}{0.112}} & \scalecolor{0.096}{0.160}{0.121} & \underline{\scalecolor{0.096}{0.160}{0.116}} & \scalecolor{0.096}{0.160}{0.133} & \scalecolor{0.096}{0.160}{0.096} & \scalecolor{0.096}{0.160}{0.105} & \scalecolor{0.096}{0.160}{0.140} & \scalecolor{0.096}{0.160}{0.134} & \scalecolor{0.096}{0.160}{0.111} \\
+PEMS04 & \scalecolor{0.098}{0.167}{0.118} & \underline{\scalecolor{0.098}{0.167}{0.106}} & \scalecolor{0.098}{0.167}{0.103} & \underline{\scalecolor{0.098}{0.167}{0.098}} & \scalecolor{0.098}{0.167}{0.167} & \underline{\scalecolor{0.098}{0.167}{0.105}} & \scalecolor{0.098}{0.167}{0.122} & \underline{\scalecolor{0.098}{0.167}{0.119}} & \scalecolor{0.098}{0.167}{0.128} & \underline{\scalecolor{0.098}{0.167}{0.124}} & \scalecolor{0.098}{0.167}{0.151} & \scalecolor{0.098}{0.167}{0.098} & \scalecolor{0.098}{0.167}{0.108} & \scalecolor{0.098}{0.167}{0.164} & \scalecolor{0.098}{0.167}{0.148} & \scalecolor{0.098}{0.167}{0.099} \\
+PEMS07 & \scalecolor{0.077}{0.132}{0.092} & \underline{\scalecolor{0.077}{0.132}{0.083}} & \scalecolor{0.077}{0.132}{0.087} & \underline{\scalecolor{0.077}{0.132}{0.077}} & \scalecolor{0.077}{0.132}{0.093} & \underline{\scalecolor{0.077}{0.132}{0.087}} & \scalecolor{0.077}{0.132}{0.101} & \underline{\scalecolor{0.077}{0.132}{0.097}} & \scalecolor{0.077}{0.132}{0.106} & \underline{\scalecolor{0.077}{0.132}{0.100}} & \scalecolor{0.077}{0.132}{0.132} & \scalecolor{0.077}{0.132}{0.079} & \scalecolor{0.077}{0.132}{0.094} & \scalecolor{0.077}{0.132}{0.093} & \scalecolor{0.077}{0.132}{0.129} & \scalecolor{0.077}{0.132}{0.102} \\
+PEMS08 & \scalecolor{0.116}{0.201}{0.148} & \underline{\scalecolor{0.116}{0.201}{0.132}} & \scalecolor{0.116}{0.201}{0.119} & \underline{\scalecolor{0.116}{0.201}{0.116}} & \scalecolor{0.116}{0.201}{0.159} & \underline{\scalecolor{0.116}{0.201}{0.125}} & \scalecolor{0.116}{0.201}{0.150} & \underline{\scalecolor{0.116}{0.201}{0.144}} & \scalecolor{0.116}{0.201}{0.161} & \underline{\scalecolor{0.116}{0.201}{0.152}} & \scalecolor{0.116}{0.201}{0.201} & \scalecolor{0.116}{0.201}{0.117} & \scalecolor{0.116}{0.201}{0.135} & \scalecolor{0.116}{0.201}{0.121} & \scalecolor{0.116}{0.201}{0.193} & \scalecolor{0.116}{0.201}{0.183} \\
+
+\cmidrule(lr){1-1}\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}\cmidrule(lr){8-9}\cmidrule(lr){10-11}\cmidrule(lr){12-17}
+
+AvgRank & \scalecolor{2.333}{12.813}{7.958} & \underline{\scalecolor{2.333}{12.813}{4.292}} & \scalecolor{2.333}{12.813}{4.271} & \underline{\scalecolor{2.333}{12.813}{2.333}} & \scalecolor{2.333}{12.813}{12.375} & \underline{\scalecolor{2.333}{12.813}{6.229}} & \scalecolor{2.333}{12.813}{8.938} & \underline{\scalecolor{2.333}{12.813}{7.125}} & \scalecolor{2.333}{12.813}{11.146} & \underline{\scalecolor{2.333}{12.813}{8.688}} & \scalecolor{2.333}{12.813}{12.042} & \scalecolor{2.333}{12.813}{7.271} & \scalecolor{2.333}{12.813}{5.938} & \scalecolor{2.333}{12.813}{9.792} & \scalecolor{2.333}{12.813}{11.250} & \scalecolor{2.333}{12.813}{12.813} \\
+\#Top1 & \scalecolorreverse{0.000}{25.000}{0} & \underline{\scalecolorreverse{0.000}{25.000}{4}} & \scalecolorreverse{0.000}{25.000}{4} & \underline{\scalecolorreverse{0.000}{25.000}{25}} & \scalecolorreverse{0.000}{25.000}{0} & \underline{\scalecolorreverse{0.000}{25.000}{1}} & \scalecolorreverse{0.000}{25.000}{1} & \underline{\scalecolorreverse{0.000}{25.000}{3}} & \scalecolorreverse{0.000}{25.000}{1} & \underline{\scalecolorreverse{0.000}{25.000}{3}} & \scalecolorreverse{0.000}{25.000}{0} & \scalecolorreverse{0.000}{25.000}{5} & \scalecolorreverse{0.000}{25.000}{4} & \scalecolorreverse{0.000}{25.000}{1} & \scalecolorreverse{0.000}{25.000}{2} & \scalecolorreverse{0.000}{25.000}{4} \\
+
+\bottomrule
+\end{tabular}
+}
+\end{threeparttable}
+\end{table}
+
+\begin{table}[ht]
+\renewcommand{\arraystretch}{0.75}
+\caption{Summary showing that ARMA Transformers with \( m=3 \) layers consistently outperform their AR counterparts across a wide range of \( m \). The same experimental settings and data presentation method as in Table \ref{tab:summary_main_results} are used. See Table \ref{tab:ap_num_layers} for the original results.}
+\label{tab:layer_m_effects}
+\centering
+\begin{threeparttable}
+\setlength{\tabcolsep}{20pt}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{ll|c|cccccccc}
+\toprule
+\multicolumn{2}{c|}{\multirow{2}{*}{Model}} &
+$m=3$ &
+$m=1$ &
+$m=2$ &
+$m=3$ &
+$m=4$ &
+$m=5$ &
+$m=6$ &
+$m=7$ &
+$m=8$
+\\
+& & ARMA & AR & AR & AR & AR & AR & AR & AR & AR
+\\
+\cmidrule(lr){1-2}\cmidrule(lr){3-3}\cmidrule(lr){4-11}
+\multirow{5}{*}{\rotatebox{90}{Weather}} & Std Attn & \scalecolor{0.101}{0.113}{0.101} & \scalecolor{0.101}{0.113}{0.109} & \scalecolor{0.101}{0.113}{0.108} & \scalecolor{0.101}{0.113}{0.104} & \scalecolor{0.101}{0.113}{0.108} & \scalecolor{0.101}{0.113}{0.113} & \scalecolor{0.101}{0.113}{0.111} & \scalecolor{0.101}{0.113}{0.113} & \scalecolor{0.101}{0.113}{0.112} \\
+  & Lin Attn & \scalecolor{0.100}{0.104}{0.100} & \scalecolor{0.100}{0.104}{0.104} & \scalecolor{0.100}{0.104}{0.103} & \scalecolor{0.100}{0.104}{0.104} & \scalecolor{0.100}{0.104}{0.103} & \scalecolor{0.100}{0.104}{0.103} & \scalecolor{0.100}{0.104}{0.103} & \scalecolor{0.100}{0.104}{0.102} & \scalecolor{0.100}{0.104}{0.103} \\
+ & GLin Attn  & \scalecolor{0.105}{0.122}{0.105} & \scalecolor{0.105}{0.122}{0.122} & \scalecolor{0.105}{0.122}{0.122} & \scalecolor{0.105}{0.122}{0.119} & \scalecolor{0.105}{0.122}{0.121} & \scalecolor{0.105}{0.122}{0.121} & \scalecolor{0.105}{0.122}{0.122} & \scalecolor{0.105}{0.122}{0.121} & \scalecolor{0.105}{0.122}{0.120} \\
+ & ELin Attn & \scalecolor{0.103}{0.111}{0.103} & \scalecolor{0.103}{0.111}{0.110} & \scalecolor{0.103}{0.111}{0.107} & \scalecolor{0.103}{0.111}{0.104} & \scalecolor{0.103}{0.111}{0.108} & \scalecolor{0.103}{0.111}{0.109} & \scalecolor{0.103}{0.111}{0.111} & \scalecolor{0.103}{0.111}{0.110} & \scalecolor{0.103}{0.111}{0.111} \\
+ & Fixed Attn & \scalecolor{0.104}{0.113}{0.104} & \scalecolor{0.104}{0.113}{0.113} & \scalecolor{0.104}{0.113}{0.109} & \scalecolor{0.104}{0.113}{0.105} & \scalecolor{0.104}{0.113}{0.110} & \scalecolor{0.104}{0.113}{0.112} & \scalecolor{0.104}{0.113}{0.110} & \scalecolor{0.104}{0.113}{0.110} & \scalecolor{0.104}{0.113}{0.110} \\
+\cmidrule(lr){1-2}\cmidrule(lr){3-3}\cmidrule(lr){4-11}
+\multirow{5}{*}{\rotatebox{90}{ETTm1}} & Std Attn  & \scalecolor{0.239}{0.272}{0.239} & \scalecolor{0.239}{0.272}{0.265} & \scalecolor{0.239}{0.272}{0.270} & \scalecolor{0.239}{0.272}{0.264} & \scalecolor{0.239}{0.272}{0.266} & \scalecolor{0.239}{0.272}{0.269} & \scalecolor{0.239}{0.272}{0.270} & \scalecolor{0.239}{0.272}{0.270} & \scalecolor{0.239}{0.272}{0.272} \\
+  & Lin Attn & \scalecolor{0.222}{0.241}{0.222} & \scalecolor{0.222}{0.241}{0.241} & \scalecolor{0.222}{0.241}{0.233} & \scalecolor{0.222}{0.241}{0.238} & \scalecolor{0.222}{0.241}{0.232} & \scalecolor{0.222}{0.241}{0.230} & \scalecolor{0.222}{0.241}{0.230} & \scalecolor{0.222}{0.241}{0.231} & \scalecolor{0.222}{0.241}{0.231} \\
+ & GLin Attn  & \scalecolor{0.260}{0.413}{0.260} & \scalecolor{0.260}{0.413}{0.411} & \scalecolor{0.260}{0.413}{0.413} & \scalecolor{0.260}{0.413}{0.407} & \scalecolor{0.260}{0.413}{0.409} & \scalecolor{0.260}{0.413}{0.410} & \scalecolor{0.260}{0.413}{0.410} & \scalecolor{0.260}{0.413}{0.409} & \scalecolor{0.260}{0.413}{0.404} \\
+ & ELin Attn & \scalecolor{0.244}{0.259}{0.244} & \scalecolor{0.244}{0.259}{0.253} & \scalecolor{0.244}{0.259}{0.251} & \scalecolor{0.244}{0.259}{0.246} & \scalecolor{0.244}{0.259}{0.253} & \scalecolor{0.244}{0.259}{0.257} & \scalecolor{0.244}{0.259}{0.259} & \scalecolor{0.244}{0.259}{0.256} & \scalecolor{0.244}{0.259}{0.258} \\
+ & Fixed Attn  & \scalecolor{0.251}{0.269}{0.251} & \scalecolor{0.251}{0.269}{0.269} & \scalecolor{0.251}{0.269}{0.264} & \scalecolor{0.251}{0.269}{0.267} & \scalecolor{0.251}{0.269}{0.260} & \scalecolor{0.251}{0.269}{0.258} & \scalecolor{0.251}{0.269}{0.259} & \scalecolor{0.251}{0.269}{0.258} & \scalecolor{0.251}{0.269}{0.257} \\
+\bottomrule
+\end{tabular}
+}
+\end{threeparttable}
+\end{table}
+
+\textbf{Performance and complexity} \  The improvement of adding the MA term comes from its ability to model short-term impacts, allowing the AR term to focus on long-term and cyclic effects, not from increased computational costs. Table \ref{tab:layer_m_effects} shows that, regardless of the number of layers $m$ (1 to 8), AR Transformers consistently underperform compared to ARMA Transformers with a fixed \( m=3 \).
+
+\begin{table}[ht]
+\caption{Summary showing that AR/ARMA Transformers effectively utilize extended lookback \( L_I \), while baselines experience performance degradation. \( L_I \in \{512, 1024, 2048, 4096\} \) with \( L_P \in \{12, 24, 48, 96\} \) are evaluated and averaged. Original results can be found in Table \ref{tab:ap_li_effects}.}
+\label{tab:li_effects}
+\centering
+\begin{threeparttable}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{llcccccccccccccccc}
+\toprule
+\multicolumn{2}{c}{\multirow{3}{*}{Model}} & \multicolumn{10}{c}{AR/ARMA Transformer} & \multicolumn{6}{c}{Baseline}
+\\
+\cmidrule(lr){3-12}\cmidrule(lr){13-18}
+& &
+\multirow{2}{*}{Std Attn} &
+Std Attn &
+\multirow{2}{*}{Lin Attn} &
+Lin Attn &
+\multirow{2}{*}{GLin Attn} &
+GLin Attn &
+\multirow{2}{*}{ELin Attn} &
+ELin Attn &
+\multirow{2}{*}{Fixed Attn} &
+Fixed Attn &
+\multirow{2}{*}{FITS} &
+iTrans- &
+\multirow{2}{*}{CATS} &
+\multirow{2}{*}{PatchTST} &
+\multirow{2}{*}{DLinear} &
+Enc-
+\\
+& & & +ARMA & & +ARMA & & +ARMA & & +ARMA & & +ARMA & & former & & & & Former
+\\
+\cmidrule(lr){1-2}\cmidrule(lr){3-4}\cmidrule(lr){5-6}\cmidrule(lr){7-8}\cmidrule(lr){9-10}\cmidrule(lr){11-12}\cmidrule(lr){13-18}
+\multirow{4}{*}{\rotatebox{90}{Weather}} & $L_I=512$ & \scalecolor{0.100}{0.136}{0.104} & \scalecolor{0.100}{0.136}{0.101} & \scalecolor{0.100}{0.136}{0.104} & \scalecolor{0.100}{0.136}{0.100} & \scalecolor{0.100}{0.136}{0.119} & \scalecolor{0.100}{0.136}{0.105} & \scalecolor{0.100}{0.136}{0.104} & \scalecolor{0.100}{0.136}{0.103} & \scalecolor{0.100}{0.136}{0.105} & \scalecolor{0.100}{0.136}{0.104} & \scalecolor{0.100}{0.136}{0.114} & \scalecolor{0.100}{0.136}{0.117} & \scalecolor{0.100}{0.136}{0.105} & \scalecolor{0.100}{0.136}{0.108} & \scalecolor{0.100}{0.136}{0.124} & \scalecolor{0.100}{0.136}{0.135} \\
+  & $L_I=1024$ & \scalecolor{0.100}{0.136}{0.107} & \scalecolor{0.100}{0.136}{0.102} & \scalecolor{0.100}{0.136}{0.102} & \scalecolor{0.100}{0.136}{0.101} & \scalecolor{0.100}{0.136}{0.116} & \scalecolor{0.100}{0.136}{0.104} & \scalecolor{0.100}{0.136}{0.106} & \scalecolor{0.100}{0.136}{0.106} & \scalecolor{0.100}{0.136}{0.108} & \scalecolor{0.100}{0.136}{0.105} & \scalecolor{0.100}{0.136}{0.120} & \scalecolor{0.100}{0.136}{0.117} & \scalecolor{0.100}{0.136}{0.108} & \scalecolor{0.100}{0.136}{0.120} & \scalecolor{0.100}{0.136}{0.118} & \scalecolor{0.100}{0.136}{0.124} \\
+ & $L_I=2048$ & \scalecolor{0.100}{0.136}{0.110} & \scalecolor{0.100}{0.136}{0.102} & \scalecolor{0.100}{0.136}{0.101} & \scalecolor{0.100}{0.136}{0.100} & \scalecolor{0.100}{0.136}{0.114} & \scalecolor{0.100}{0.136}{0.102} & \scalecolor{0.100}{0.136}{0.108} & \scalecolor{0.100}{0.136}{0.108} & \scalecolor{0.100}{0.136}{0.123} & \scalecolor{0.100}{0.136}{0.110} & \scalecolor{0.100}{0.136}{0.121} & \scalecolor{0.100}{0.136}{0.119} & \scalecolor{0.100}{0.136}{0.113} & \scalecolor{0.100}{0.136}{0.122} & \scalecolor{0.100}{0.136}{0.119} & \scalecolor{0.100}{0.136}{0.128} \\
+ & $L_I=4096$ & \scalecolor{0.100}{0.136}{0.108} & \scalecolor{0.100}{0.136}{0.102} & \scalecolor{0.100}{0.136}{0.100} & \scalecolor{0.100}{0.136}{0.100} & \scalecolor{0.100}{0.136}{0.115} & \scalecolor{0.100}{0.136}{0.105} & \scalecolor{0.100}{0.136}{0.109} & \scalecolor{0.100}{0.136}{0.107} & \scalecolor{0.100}{0.136}{0.110} & \scalecolor{0.100}{0.136}{0.108} & \scalecolor{0.100}{0.136}{0.124} & \scalecolor{0.100}{0.136}{0.132} & \scalecolor{0.100}{0.136}{0.123} & \scalecolor{0.100}{0.136}{0.125} & \scalecolor{0.100}{0.136}{0.121} & \scalecolor{0.100}{0.136}{0.136} \\
+\cmidrule(lr){1-2}\cmidrule(lr){3-18}
+\multirow{4}{*}{\rotatebox{90}{ETTm1}} & $L_I=512$ & \scalecolor{0.222}{0.320}{0.264} & \scalecolor{0.222}{0.320}{0.239} & \scalecolor{0.222}{0.320}{0.238} & \scalecolor{0.222}{0.320}{0.222} & \scalecolor{0.222}{0.320}{0.407} & \scalecolor{0.222}{0.320}{0.260} & \scalecolor{0.222}{0.320}{0.246} & \scalecolor{0.222}{0.320}{0.244} & \scalecolor{0.222}{0.320}{0.267} & \scalecolor{0.222}{0.320}{0.251} & \scalecolor{0.222}{0.320}{0.237} & \scalecolor{0.222}{0.320}{0.259} & \scalecolor{0.222}{0.320}{0.222} & \scalecolor{0.222}{0.320}{0.244} & \scalecolor{0.222}{0.320}{0.235} & \scalecolor{0.222}{0.320}{0.429} \\
+ & $L_I=1024$ & \scalecolor{0.222}{0.320}{0.280} & \scalecolor{0.222}{0.320}{0.241} & \scalecolor{0.222}{0.320}{0.239} & \scalecolor{0.222}{0.320}{0.227} & \scalecolor{0.222}{0.320}{0.423} & \scalecolor{0.222}{0.320}{0.236} & \scalecolor{0.222}{0.320}{0.265} & \scalecolor{0.222}{0.320}{0.253} & \scalecolor{0.222}{0.320}{0.281} & \scalecolor{0.222}{0.320}{0.263} & \scalecolor{0.222}{0.320}{0.240} & \scalecolor{0.222}{0.320}{0.258} & \scalecolor{0.222}{0.320}{0.238} & \scalecolor{0.222}{0.320}{0.245} & \scalecolor{0.222}{0.320}{0.239} & \scalecolor{0.222}{0.320}{0.364} \\
+ & $L_I=2048$ & \scalecolor{0.222}{0.320}{0.278} & \scalecolor{0.222}{0.320}{0.239} & \scalecolor{0.222}{0.320}{0.233} & \scalecolor{0.222}{0.320}{0.223} & \scalecolor{0.222}{0.320}{0.327} & \scalecolor{0.222}{0.320}{0.232} & \scalecolor{0.222}{0.320}{0.281} & \scalecolor{0.222}{0.320}{0.252} & \scalecolor{0.222}{0.320}{0.288} & \scalecolor{0.222}{0.320}{0.268} & \scalecolor{0.222}{0.320}{0.246} & \scalecolor{0.222}{0.320}{0.248} & \scalecolor{0.222}{0.320}{0.261} & \scalecolor{0.222}{0.320}{0.250} & \scalecolor{0.222}{0.320}{0.239} & \scalecolor{0.222}{0.320}{0.415} \\
+ & $L_I=4096$ & \scalecolor{0.222}{0.320}{0.275} & \scalecolor{0.222}{0.320}{0.234} & \scalecolor{0.222}{0.320}{0.237} & \scalecolor{0.222}{0.320}{0.226} & \scalecolor{0.222}{0.320}{0.324} & \scalecolor{0.222}{0.320}{0.229} & \scalecolor{0.222}{0.320}{0.282} & \scalecolor{0.222}{0.320}{0.265} & \scalecolor{0.222}{0.320}{0.287} & \scalecolor{0.222}{0.320}{0.266} & \scalecolor{0.222}{0.320}{0.252} & \scalecolor{0.222}{0.320}{0.274} & \scalecolor{0.222}{0.320}{0.340} & \scalecolor{0.222}{0.320}{0.260} & \scalecolor{0.222}{0.320}{0.250} & \scalecolor{0.222}{0.320}{0.428} \\
+\bottomrule
+\end{tabular}
+}
+\end{threeparttable}
+\end{table}
+
+\textbf{Adaptability to Longer \( L_I \)} \  Previous baseline models typically use \( L_I \) between 96 and 720, as longer \( L_I \) often leads to overfitting to long-term patterns, ignoring more important local effects \citep{zeng2022dlinear,nie2023time,liu2024itransformer}. However, the next-step prediction and varying lookback inputs in AR/ARMA Transformers help the model focus on tokens closer to the next step, improving generalization. As shown in Table \ref{tab:li_effects}, increasing \( L_I \) from 512 to 4096 improves AR/ARMA performance, demonstrating scalability and the ability to properly leverage long-term effects. Also, the ARMA structure consistently boosts AR model performance across different \( L_I \).
+
+\textbf{Varying \( L_P \)} \  We evaluated AR/ARMA Transformers with \( L_I = 4096 \) on long-term output \( L_P = 720 \) while keeping the best-performing \( L_I = 512 \) for the baselines. We also compared short-term output with \( L_P = 1 \) using \( L_I = 512 \) for all models. As shown in Table \ref{tab:lp_effects}, across different \( L_P \), AR models performed comparably to baselines, and the ARMA structure consistently improved performance over AR models.
+
+\begin{table}[ht]
+\caption{Summary of model performance on varying horizons \( L_P \). AR/ARMA Transformers uses \( L_I = 512 \) for \( L_P = 1 \) and \( L_I = 4096 \) for \( L_P = 720 \). Baselines are consistently set to their best-performing \( L_I = 512 \) configuration. Original results can be found in Table \ref{tab:ap_lp_table}.}
+\label{tab:lp_effects}
+\centering
+\begin{threeparttable}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{llcccccccccccccccc}
+\toprule
+\multicolumn{2}{c}{\multirow{3}{*}{Model}} & \multicolumn{10}{c}{AR/ARMA Transformer} & \multicolumn{6}{c}{Baseline}
+\\
+\cmidrule(lr){3-12}\cmidrule(lr){13-18}
+& &
+\multirow{2}{*}{Std Attn} &
+Std Attn &
+\multirow{2}{*}{Lin Attn} &
+Lin Attn &
+\multirow{2}{*}{GLin Attn} &
+GLin Attn &
+\multirow{2}{*}{ELin Attn} &
+ELin Attn &
+\multirow{2}{*}{Fixed Attn} &
+Fixed Attn &
+\multirow{2}{*}{FITS} &
+iTrans- &
+\multirow{2}{*}{CATS} &
+\multirow{2}{*}{PatchTST} &
+\multirow{2}{*}{DLinear} &
+Enc-
+\\
+& & & +ARMA & & +ARMA & & +ARMA & & +ARMA & & +ARMA & & former & & & & Former
+\\
+\cmidrule(lr){1-2}\cmidrule(lr){3-4}\cmidrule(lr){5-6}\cmidrule(lr){7-8}\cmidrule(lr){9-10}\cmidrule(lr){11-12}\cmidrule(lr){13-18}
+\multirow{2}{*}{Weather} & $L_P=1$ & \scalecolor{0.031}{0.038}{0.037} & \scalecolor{0.031}{0.038}{0.032} & \scalecolor{0.031}{0.038}{0.032} & \scalecolor{0.031}{0.038}{0.031} & \scalecolor{0.031}{0.038}{0.033} & \scalecolor{0.031}{0.038}{0.031} & \scalecolor{0.031}{0.038}{0.037} & \scalecolor{0.031}{0.038}{0.034} & \scalecolor{0.031}{0.038}{0.036} & \scalecolor{0.031}{0.038}{0.034} & \scalecolor{0.031}{0.038}{0.038} & \scalecolor{0.031}{0.038}{0.038} & \scalecolor{0.031}{0.038}{0.033} & \scalecolor{0.031}{0.038}{0.035} & \scalecolor{0.031}{0.038}{0.034} & \scalecolor{0.031}{0.038}{0.032} \\
+  & $L_P=720$ & \scalecolor{0.295}{0.330}{0.299} & \scalecolor{0.295}{0.330}{0.301} & \scalecolor{0.295}{0.330}{0.308} & \scalecolor{0.295}{0.330}{0.305} & \scalecolor{0.295}{0.330}{0.310} & \scalecolor{0.295}{0.330}{0.299} & \scalecolor{0.295}{0.330}{0.296} & \scalecolor{0.295}{0.330}{0.295} & \scalecolor{0.295}{0.330}{0.299} & \scalecolor{0.295}{0.330}{0.297} & \scalecolor{0.295}{0.330}{0.327} & \scalecolor{0.295}{0.330}{0.317} & \scalecolor{0.295}{0.330}{0.311} & \scalecolor{0.295}{0.330}{0.325} & \scalecolor{0.295}{0.330}{0.319} & \scalecolor{0.295}{0.330}{0.404} \\
+\cmidrule(lr){1-2}\cmidrule(lr){3-18}
+
+\multirow{2}{*}{ETTm1} & $L_P=1$ & \scalecolor{0.041}{0.054}{0.048} & \scalecolor{0.041}{0.054}{0.043} & \scalecolor{0.041}{0.054}{0.042} & \scalecolor{0.041}{0.054}{0.041} & \scalecolor{0.041}{0.054}{0.051} & \scalecolor{0.041}{0.054}{0.043} & \scalecolor{0.041}{0.054}{0.053} & \scalecolor{0.041}{0.054}{0.051} & \scalecolor{0.041}{0.054}{0.054} & \scalecolor{0.041}{0.054}{0.052} & \scalecolor{0.041}{0.054}{0.047} & \scalecolor{0.041}{0.054}{0.049} & \scalecolor{0.041}{0.054}{0.043} & \scalecolor{0.041}{0.054}{0.046} & \scalecolor{0.041}{0.054}{0.044} & \scalecolor{0.041}{0.054}{0.044} \\
+  & $L_P=720$ & \scalecolor{0.391}{0.450}{0.396} & \scalecolor{0.391}{0.450}{0.391} & \scalecolor{0.391}{0.450}{0.417} & \scalecolor{0.391}{0.450}{0.408} & \scalecolor{0.391}{0.450}{0.396} & \scalecolor{0.391}{0.450}{0.393} & \scalecolor{0.391}{0.450}{0.395} & \scalecolor{0.391}{0.450}{0.391} & \scalecolor{0.391}{0.450}{0.403} & \scalecolor{0.391}{0.450}{0.399} & \scalecolor{0.391}{0.450}{0.420} & \scalecolor{0.391}{0.450}{0.438} & \scalecolor{0.391}{0.450}{0.418} & \scalecolor{0.391}{0.450}{0.408} & \scalecolor{0.391}{0.450}{0.420} & \scalecolor{0.391}{0.450}{0.802} \\
+\cmidrule(lr){1-2}\cmidrule(lr){3-18}
+
+\multirow{2}{*}{ETTm2} & $L_P=1$ & \scalecolor{0.030}{0.035}{0.034} & \scalecolor{0.030}{0.035}{0.031} & \scalecolor{0.030}{0.035}{0.032} & \scalecolor{0.030}{0.035}{0.030} & \scalecolor{0.030}{0.035}{0.033} & \scalecolor{0.030}{0.035}{0.030} & \scalecolor{0.030}{0.035}{0.035} & \scalecolor{0.030}{0.035}{0.033} & \scalecolor{0.030}{0.035}{0.033} & \scalecolor{0.030}{0.035}{0.031} & \scalecolor{0.030}{0.035}{0.034} & \scalecolor{0.030}{0.035}{0.034} & \scalecolor{0.030}{0.035}{0.032} & \scalecolor{0.030}{0.035}{0.033} & \scalecolor{0.030}{0.035}{0.031} & \scalecolor{0.030}{0.035}{0.035} \\
+  & $L_P=720$ & \scalecolor{0.326}{0.420}{0.329} & \scalecolor{0.326}{0.420}{0.327} & \scalecolor{0.326}{0.420}{0.341} & \scalecolor{0.326}{0.420}{0.338} & \scalecolor{0.326}{0.420}{0.334} & \scalecolor{0.326}{0.420}{0.328} & \scalecolor{0.326}{0.420}{0.327} & \scalecolor{0.326}{0.420}{0.326} & \scalecolor{0.326}{0.420}{0.331} & \scalecolor{0.326}{0.420}{0.327} & \scalecolor{0.326}{0.420}{0.360} & \scalecolor{0.326}{0.420}{0.369} & \scalecolor{0.326}{0.420}{0.351} & \scalecolor{0.326}{0.420}{0.362} & \scalecolor{0.326}{0.420}{0.403} & \scalecolor{0.326}{0.420}{2.641} \\
+\bottomrule
+\end{tabular}
+}
+\end{threeparttable}
+\end{table}
+\begin{table}[ht]
+\renewcommand{\arraystretch}{0.7}
+\caption{Summary of the performance comparison with MEGA. See Table \ref{tab:ap_mega} for the original result.}
+\label{tab:mega_comparison}
+\centering
+\begin{threeparttable}
+\setlength{\tabcolsep}{24pt}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l|cccccc|c}
+\toprule
+\multirow{2}{*}{Model} &
+\multirow{2}{*}{Std Attn} &
+Std Attn &
+\multirow{2}{*}{Lin Attn} &
+Lin Attn &
+\multirow{2}{*}{GLin Attn} &
+GLin Attn &
+\multirow{2}{*}{MEGA}
+\\
+& & +ARMA & & +ARMA & & +ARMA
+\\
+\cmidrule(lr){1-1}\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}\cmidrule(lr){8-8}
+
+Weather & \scalecolor{0.100}{0.121}{0.104} & \scalecolor{0.100}{0.121}{0.101} & \scalecolor{0.100}{0.121}{0.104} & \scalecolor{0.100}{0.121}{0.100} & \scalecolor{0.100}{0.121}{0.119} & \scalecolor{0.100}{0.121}{0.105} & \scalecolor{0.100}{0.121}{0.121} \\
+Solar & \scalecolor{0.119}{0.226}{0.134} & \scalecolor{0.119}{0.226}{0.124} & \scalecolor{0.119}{0.226}{0.122} & \scalecolor{0.119}{0.226}{0.119} & \scalecolor{0.119}{0.226}{0.148} & \scalecolor{0.119}{0.226}{0.124} & \scalecolor{0.119}{0.226}{0.226} \\
+ETTh1 & \scalecolor{0.316}{0.408}{0.323} & \scalecolor{0.316}{0.408}{0.318} & \scalecolor{0.316}{0.408}{0.318} & \scalecolor{0.316}{0.408}{0.316} & \scalecolor{0.316}{0.408}{0.408} & \scalecolor{0.316}{0.408}{0.321} & \scalecolor{0.316}{0.408}{0.404} \\
+ETTh2 & \scalecolor{0.192}{0.217}{0.192} & \scalecolor{0.192}{0.217}{0.192} & \scalecolor{0.192}{0.217}{0.193} & \scalecolor{0.192}{0.217}{0.195} & \scalecolor{0.192}{0.217}{0.217} & \scalecolor{0.192}{0.217}{0.198} & \scalecolor{0.192}{0.217}{0.214} \\
+ETTm1 & \scalecolor{0.222}{0.412}{0.264} & \scalecolor{0.222}{0.412}{0.239} & \scalecolor{0.222}{0.412}{0.238} & \scalecolor{0.222}{0.412}{0.222} & \scalecolor{0.222}{0.412}{0.407} & \scalecolor{0.222}{0.412}{0.260} & \scalecolor{0.222}{0.412}{0.412} \\
+ETTm2 & \scalecolor{0.121}{0.142}{0.131} & \scalecolor{0.121}{0.142}{0.128} & \scalecolor{0.121}{0.142}{0.126} & \scalecolor{0.121}{0.142}{0.121} & \scalecolor{0.121}{0.142}{0.142} & \scalecolor{0.121}{0.142}{0.128} & \scalecolor{0.121}{0.142}{0.137} \\
+PEMS03 & \scalecolor{0.096}{0.209}{0.112} & \scalecolor{0.096}{0.209}{0.100} & \scalecolor{0.096}{0.209}{0.100} & \scalecolor{0.096}{0.209}{0.096} & \scalecolor{0.096}{0.209}{0.209} & \scalecolor{0.096}{0.209}{0.101} & \scalecolor{0.096}{0.209}{0.161} \\
+\bottomrule
+\end{tabular}
+}
+\end{threeparttable}
+\end{table}
+
+\textbf{Comparison to MEGA} \  The MEGA structure \citep{ma2022mega} uses an exponential moving average (EMA) in gated attention to model local patterns. However, applying EMA directly to AR weights weakens the model’s ability to capture long-term and stable seasonal patterns, making it less effective than ARMA at decoupling long-term and short-term effects. Table \ref{tab:mega_comparison} shows that the performance of using MEGA as the attention mechanism is similar to using gated linear attention without the MA term. It provides less improvement compared to gated linear attention with ARMA.
+
+\textbf{Visualization analysis} \  Fig. \ref{fig:vis_test_loss} shows test loss curves for different AR/ARMA attention mechanisms on the Weather and ETTm1 datasets, with ARMA consistently outperforming AR in both convergence speed and final loss. Fig. \ref{fig:vis_real_weights} visualizes attention input sequence, AR weights, \( \mathbf{B} \), and \( \mathbf{\Theta} \) matrices of a test datapoint on Weather, showing how MA weights decouple local patterns, allowing AR weights to focus on cyclic and long-term patterns. Additional visualizations in Figs. \ref{fig:vis_real_weights_additional_1}–\ref{fig:vis_real_weights_additional_4} reinforce that there are important long-term stable seasonal patterns for AR weights to capture that should not be disrupted by applying forget gates or EMA. This explains why gated linear attention underperforms linear attention in our experiments.
+
+\begin{figure}[htb]
+	\centering
+    	\subfigure{
+    		\begin{minipage}[b]{1\textwidth}
+    			\includegraphics[width=1\textwidth]{figs/test_loss_weather.pdf}
+    		\end{minipage}
+    	}
+     \vskip -12pt
+         \subfigure{
+    		\begin{minipage}[b]{1\textwidth}
+    			\includegraphics[width=1\textwidth]{figs/test_loss_ETTm1.pdf}
+    		\end{minipage}
+    	}
+     \vskip -12pt
+	\caption{Visualization of test loss curves. We show the testing performance of five attention mechanisms using AR/ARMA structures on the Weather and ETTm1 datasets (\( L_I = 512 \), \( L_P = 48 \)).}
+	\label{fig:vis_test_loss}
+\end{figure}
+
+\begin{figure}[htb]
+	\centering
+    	\begin{minipage}[b]{1\textwidth}
+    			\includegraphics[width=1\textwidth]{vis_real_weights/real_vis_Weather96_layer0_ts0_CNone.pdf}
+    	\end{minipage}
+     \vskip -12pt
+	\caption{Visualization of the ARMA attention weights (first attention layer, averaged across the multiple heads or $d$-dimensional channels) for the first test set data point in the Weather dataset ($L_I=4096$, $L_P=96$). More ARMA weight visualization can be found in Fig. \ref{fig:vis_real_weights_additional_1}, \ref{fig:vis_real_weights_additional_2}, \ref{fig:vis_real_weights_additional_3}, and \ref{fig:vis_real_weights_additional_4}.}
+	\label{fig:vis_real_weights}
+\end{figure}
+
+\textbf{Computational cost} \  Table \ref{tab:computationalcostresult} compares the computational cost of AR/ARMA Transformers with baselines on the ETTm1 dataset. Our tokenization method reduces the token size \( N \), keeping AR/ARMA models' computational cost comparable to the baselines. Additionally, parameter sharing ensures the MA term doesn't increase the number of parameters, and the extra FLOPs from using ARMA are not significant.
+
+\begin{table}[htb]
+\renewcommand{\arraystretch}{0.8}
+  \caption{Comparison of computational costs utilizing the data format of ETTm1 to build model inputs $(L_I=512)$. The hyper-parameters for models are set according to their default configurations.}\label{tab:computationalcostresult}
+  \centering
+  \begin{threeparttable}
+  \begin{small}
+  \renewcommand{\multirowsetup}{\centering}
+  \setlength{\tabcolsep}{10pt}
+  \resizebox{\columnwidth}{!}{ 
+\begin{tabular}{lcccccccccccc}
+\midrule
+ Models & \multicolumn{2}{c}{EncFormer} & \multicolumn{2}{c}{CATS} & \multicolumn{2}{c}{PatchTST}& \multicolumn{2}{c}{iTransformer} & \multicolumn{2}{c}{DLinear} & \multicolumn{2}{c}{FITS} \\
+ \cmidrule(lr){2-3} \cmidrule(lr){4-5}\cmidrule(lr){6-7}\cmidrule(lr){8-9} \cmidrule(lr){10-11}\cmidrule(lr){12-13}
+ Metric & FLOPs & Params & FLOPs & Params & FLOPs & Params 
+ & FLOPs & Params & FLOPs & Params & FLOPs & Params \\
+\midrule
+$L_P=96$ & 1.442G & 1.646M & 262.9M & 1.326M & 180.9M & 1.046M & 81.96M & 1.857M & 4.337M & 98.50K & 334.0K & 24.02K \\
+$L_P=48$ & 1.328G & 1.646M & 243.5M & 1.227M & 163.6M & 652.9K & 81.69M & 1.851M & 2.174M & 49.25K & 308.1K & 22.16K \\
+$L_P=24$ & 1.271G & 1.645M & 233.9M & 1.178M & 155.0M & 456.3K & 81.56M & 1.848M & 1.093M & 24.62K & 294.2K & 21.16K \\
+$L_P=12$ & 1.242G & 1.645M & 229.0M & 1.154M & 150.7M & 358.0K & 81.49M & 1.847M & 552.5K & 12.31K & 288.3K & 20.74K \\
+\midrule
+\multirow{2}{*}{Model} & \multicolumn{2}{c}{\multirow{2}{*}{GLin Attn}} & \multicolumn{2}{c}{GLin Attn} & \multicolumn{2}{c}{\multirow{2}{*}{Lin Attn}}& \multicolumn{2}{c}{Lin Attn} & \multicolumn{2}{c}{\multirow{2}{*}{ELin Attn}} & \multicolumn{2}{c}{ELin Attn} \\
+ & & & \multicolumn{2}{c}{+ARMA} & & & \multicolumn{2}{c}{+ARMA} & & & \multicolumn{2}{c}{+ARMA}
+ \\
+  \cmidrule(lr){2-3} \cmidrule(lr){4-5}\cmidrule(lr){6-7}\cmidrule(lr){8-9} \cmidrule(lr){10-11}\cmidrule(lr){12-13}
+ Metric & FLOPs & Params & FLOPs & Params & FLOPs & Params 
+ & FLOPs & Params & FLOPs & Params & FLOPs & Params \\
+\midrule
+$L_P=96$ & 7.403M & 45.81K & 7.431M & 45.81K & 7.387M & 45.79K & 7.415M & 45.79K & 7.258M & 45.79K & 7.266M & 45.79K \\
+$L_P=48$ & 12.63M & 43.97K & 12.77M & 43.97K & 12.60M & 43.95K & 12.74M & 43.95K & 12.36M & 43.95K & 12.37M & 43.95K \\
+$L_P=24$ & 24.30M & 45.22K & 24.70M & 45.22K & 24.25M & 45.21K & 24.64M & 45.21K & 23.77M & 45.21K & 23.80M & 45.21K \\
+$L_P=12$ & 46.58M & 49.82K & 47.45M & 49.82K & 46.46M & 49.80K & 47.34M & 49.80K & 45.54M & 49.80K & 45.60M & 49.80K \\
+\bottomrule
+\end{tabular}
+  }
+  \end{small}
+  \end{threeparttable}
+\end{table}
+
+
+
+\section{Related works}
+
+\textbf{Linear attention with exponential moving-average} \  Beyond using a gating decay factor on the hidden state matrix of linear attention \citep{mao-2022-fine,sun2023retentive,yang2024gated}, recent studies have explored incorporating EMA mechanisms into gated linear attention by applying a smoothing factor (summing to 1) to the two terms in the state update \citep{ma2022mega}. Similar EMA mechanisms have also been used in many modern RNN structures \citep{gu2022on,peng2023rwkv,orvieto2023resurrecting,qin2024hgrn2}. Additionally, \citet{schiele2022arma} attempted to introduce the ARMA structure into traditional RNNs, but their method could not ensure that the generated MA weights can properly model short-term patterns, and the final results did not significantly surpass traditional RNNs nor compare with recent attention models.
+
+\textbf{TSF Structures} \   The use of neural network structures for TSF has been widely explored \citep{hochreiter1997long, rangapuram2018deep, salinas2020deepar}. Recently, many Transformer-based TSF models with encoder-only and encoder-decoder structures have emerged \citep{li2019enhancing,zhou2021informer,wu2022autoformer,zhang2023crossformer,nie2023time,liu2024itransformer}. However, these complex Transformer architectures have not significantly outperformed simpler MLP or linear models \citep{zeng2022dlinear,das2023longterm,xu2024fits,lu2024cats}. Additionally, these models struggle to handle short-term effects properly with longer lookback windows, where, paradoxically, longer inputs often lead to worse performance.
+
+
+
+\section{Conclusion, limitation, and future works}
+
+We propose the ARMA attention mechanism, which integrates an MA term into existing AR attention using a novel indirect MA weight generation method. This approach maintains the same time complexity and parameter size while ensuring the validity of the implicit MA weights. Experiments demonstrate that ARMA attention successfully decouples and handles long-term and short-term effects. The ARMA Transformer, enhanced with the MA term, outperforms their AR counterparts and achieves state-of-the-art results, offering consistent improvements in training with minimal added computational cost.
+
+One limitation is that we have not explored combining the channel-independent ARMA Transformer with multivariate forecasting models to improve its handling of inter-series relationships. For future work, ARMA attention could be applied to general sequence modeling tasks beyond TSF. Testing on larger-scale datasets, such as using ARMA Transformers for large-scale NLP pretraining, is another promising direction.
+
+
+
+
+

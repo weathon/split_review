@@ -1,0 +1,538 @@
+\title{Uncertainty-Guided Optimization on Large Language Model Search Trees}
+
+\begin{abstract}
+Tree search algorithms such as greedy and beam search are the standard when it comes to finding sequences of maximum likelihood in the decoding processes of large language models (LLMs).
+However, they are myopic since they do not take the complete root-to-leaf path into account.
+Moreover, they are agnostic to prior knowledge available about the process:
+For example, it does not consider that the objective being maximized is a probability and thereby has specific properties like being bound in the unit interval.
+Taking a probabilistic approach, we define prior beliefs over LLMs' transition probabilities and obtain posterior beliefs over the most promising paths in each iteration.
+These beliefs are useful for defining a sample-based, non-myopic acquisition function that allows for a more data-efficient exploration scheme than standard search algorithms on LLMs.
+Crucially, unlike expensive simulation-based non-myopic methods like the Monte Carlo tree search, our method only requires samples from the beliefs.
+Our formulation thus views LLM decoding as Bayesian optimization on trees.
+We discuss how to select the prior and the acquisition function, and demonstrate in experiments with various LLMs that our method achieves higher efficiency than recent baselines:
+Our method achieves the same or a higher likelihood while expanding fewer nodes.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+The decoding process of an autoregressive large language model (LLM) can be seen as finding an optimal path in a search tree.
+The number of such paths is exponential, often exceeding the computational budget required to examine them all.
+This inevitably leads to \textit{computational uncertainty} \citep{hennig2022probabilistic}: an uncertainty that \textit{could be} fully resolved if enough compute was available to examine all paths, but in practice is present due to the limited resources.
+Standard algorithms for LLM decoding, such as beam search \citep{koehn2003statistical}, completely ignore this uncertainty.
+
+We posit that quantifying this uncertainty can be beneficial to ensure better explorations on LLMs' search trees.
+To this end, we incorporate computational uncertainty into the search process to guide it in a non-myopic fashion (i.e., accounting for our belief about the values of future nodes) and importantly, in a more data-efficient manner, akin to Bayesian optimization methods \citep[BO,][]{kushner1964bayesopt,movckus1975bayesopt,garnett_bayesoptbook_2023}.
+BO methods are recognized for their data efficiency, not merely because they quantify uncertainty, but because they exploit the structural characteristics within that uncertainty.
+E.g., in continuous optimization problems, prior knowledge, such as the smoothness of a function, is often available through Gaussian processes \citep{rasmussen2003gaussian} or (Bayesian) neural networks \citep{hernandez2017parallelTS,kristiadi2023promises,kristiadi2024sober}.
+
+\begin{figure}
+  \centering
+  \footnotesize
+  \includegraphics{figures/fig1.tikz}
+
+  \caption{
+    The intuition of our method---faded color represents unexplored subtrees.
+    We sequentially expand a node of the LLM search tree based on the posterior belief.
+    The latter is obtained by conditioning the {\color{unknown}unknown} (the optimal total likelihood $\max c_{x_0 \to x_i \to x_n}$ from the root \(\vx_0\) to a leaf \(x_n\) when continuing down a particular node $x_i$) on the current {\color{observed}observations} (the total likelihood \(c_{\vx_0 \to x_i}\) up until that node).
+    This belief is induced by a simple prior belief on the LLM softmax probabilities $\vc$.
+    The samples of the posterior belief are used to decide which child node should be expanded next.
+  }
+  \label{fig:one}
+\end{figure}
+
+Unlike standard BO, however, LLM decoding is a structured, discrete optimization problem---its search space is the set of all root-leaf paths in a tree.
+Moreover, commonly, the values or rewards associated with each node are probabilities, bounded between \(0\) and \(1\).
+Hence, uncertainty quantification here is not as well-studied as in standard BO.
+We will, therefore, assume that rewards at a node of the search tree are components of a discrete distribution.
+The characteristic property we aim to exploit is the \textit{concentration strength}: whether the Categorical distributions are all highly concentrated at a few realistic options, or if some of them are nearly uniform, making any individual option drastically less likely to be the optimal one.
+Intuitively, one would expect this to have a strong influence on the number of paths that need to be considered.
+For instance, when the distribution is concentrated, it is less likely under our belief that other paths will overtake later on and one can be more greedy.
+Meanwhile, when the distribution has high entropy, the uncertainty of our belief about ``which next token is best'' is higher and thereby requires more exploration and computational budget.
+
+In this work, we propose a probabilistic framework that captures this aspect of the search space, which can help to decide which paths should be pursued and which can be ignored based on the posterior belief (\cref{fig:one}).
+We do so by using a non-myopic acquisition function based on the samples of such a belief, which can be seen as a generalization of Thompson sampling \citep{thompson1933sampling}.
+Crucially, these samples are cheap, unlike other sample-based tree-search methods like Monte Carlo tree search.
+Moreover, we show that our acquisition function can easily be extended, e.g., to prefer sequences with higher diversity and less text degeneration \citep{holtzman2019curious}.
+
+Experiments on real-world text-generation benchmarks with various LLMs suggest that our method, called \emph{\textbf{\methodlongname{} (\methodname{})}}, finds sentences with higher rewards than recent baselines with significantly fewer expensive node expansions.
+Moreover, \methodname{} only adds a small runtime overhead relative to the forward passes of the LLM.
+In summary:
+\begin{enumerate}[(i)]
+  \setlength\itemsep{0em}
+  \item We propose \methodname{}: a probabilistic decision-making framework on LLM search trees, where a prior belief is put on LLM softmax outputs.
+        We show how to easily sample from the implied posterior over optimal values, and how to use these samples to make decisions when searching the tree. Our work thus bridges natural language processing with Bayesian optimization.
+  \item We demonstrate the efficiency and extensibility of \methodname{} in decoding recent LLMs.
+
+\end{enumerate}
+
+
+\section{Background}
+
+\label{sec:background}
+
+\subsection{Decoding large language models}
+\label{subsec:llm}
+
+Let \(\gA = \{ a_1, \dots, a_b \}\) be a \emph{vocabulary}---a set of natural-language tokens.
+A \emph{large language model (LLM)} is a neural network that utilizes the attention mechanism \citep{vaswani2017attention}, taking a \emph{context}, an ordered sequence of tokens \(\vx_0 = ( x_{01}, \dots, x_{0k} )\)---each component takes values in the set \(\gA\)---and outputs a distribution over \(\gA\), i.e.\ \(\vc = (c_1, \dots, c_b)\) where each \(c_i \geq 0\) and \(\smash{\sum_{i=1}^b} c_i = 1\).
+The \emph{de facto} way of generating a sequence of tokens given a context via an LLM \(f\) is by generating each \(x_{i+1}\) autoregressively given the previous sequence \((\vx_0, x_1, \dots, x_i)\).
+That is, for each \(i = 1, \dots, d\), we pick an \(x_{i+1} \in \gA\) according to the Categorical distribution \(\vc_{i(i+1)} := f(\vx_0, x_1, \dots, x_i)\) over the next token predicted by the LLM \(f\) given the input \((\vx_0, x_1, \dots, x_i)\).
+We call this sequence-generating process a \emph{decoding} process.
+
+LLM decoding can be seen as a tree-search problem (\cref{fig:one}).
+The context \(\vx_0\) is the root of the tree and at each step \(i = 1, \dots, d\), we are given a choice of \(b\) many tokens to pick.
+This process is done recursively until termination; either when a specified depth \(d\) has been reached or when a special token like ``<EOS>'' is selected.
+This means, the LLM search tree is an exponentially large tree (w.r.t.\ the number of tokens \(b\) in the vocabulary) with depth \(d\)---the number of paths \(\vx_{0} \to x_d\) from the root to leaves is \(b^d\).
+Considering the fact that \(b\) ranges from around \(32\)k to \(256\)k \citep{radford2019language,chowdhery2023palm}, generating a sequence of tokens requires search over an intractably large space.
+
+To address this problem, one can use a cheaper but heuristic way to explore this tree.
+The simplest way to do so is by sampling a token from the distribution \(\vc\) at each level of the tree \citep{holtzman2019curious}.
+In some domains like machine translation and summarization, however, one often wants to find the sequence that maximizes the \emph{total/joint} likelihood
+\footnote{Implementation wise, this is usually done in the logarithmic space.}
+\(c_{\vx_0 \to x_d} := \smash{\prod_{i=1}^d} c_{(i-1)i}\) associated with each possible sequence \((\vx_0, x_1, \dots, x_d)\) \citep{wiher2022decoding}.
+This is an optimization-on-tree problem---heuristic optimization algorithms like greedy and beam search along with their variants \citep[etc.]{vijayakumar2016diverse, meister2021determinantal, freitag2017beam} are the standard.
+
+One can also view the decoding process as follows.
+On each of the tree's node $x_i$, we can define an optimal value $v_{x_i}$ associated with it:
+If $x_d$ is a leaf node, then $v_{x_d}$ corresponds to the total likelihood $c_{\vx_0 \rightarrow x_d}$ from the root until that leaf node.
+Meanwhile, for inner nodes $x_i$ it is defined recursively in a bottom-up fashion as the maximum of the children's optimal values $\max_{x_c \in \children(x_i)}{v_{x_c}}$.
+Intuitiveley, \(v_{x_i}\) tells us ``what is the total likelihood we would get if we continue descending the tree through the node \(x_i\) in an \emph{optimal} manner''.
+The optimization-on-tree problem can then be recast as finding a path $\vx_0 \to x_d$ that corresponds to the optimal value $v^*$ of the root.
+While for all \(x_i\), the quantity \(v_{x_i}\) cannot be feasibly computed, they are useful for our probabilistic treatment of LLM decoding in \cref{sec:method}.
+\subsection{Probabilistic decision-making on trees}
+\label{subsec:decision_making}
+
+Bayesian optimization \citep{kushner1964bayesopt,movckus1975bayesopt} approaches black-box optimization as a probabilistic sequential decision-making problem.
+This is done by first modeling a \emph{belief} about the unknown given the current observation.
+This belief is then used to make decision, by computing an \emph{acquisition function} which scores possible candidates.
+The candidate that has the highest acquisition value is then selected and the process is repeated until termination.
+
+In the context of tree-structured problem, the approach to perform probabilistic decision-making is to perform probabilistic modeling over the unknown values \(v_{x_i}\)'s and use the posterior beliefs to make decision about which path should be followed next.
+This kind of optimization has been done for game (e.g., Go) trees and directed-acyclic graphs \citep{hennig2010coherent,grosse2021probabilistic}.
+They assume that the optimal value $v_{x_i}$ is decomposed into a latent score $g_i$ for the utility of the node if all remaining steps are taken randomly and additional increment $\Delta_i$ to quantify how much better this score can get when all remaining steps are taken optimally instead of randomly, i.e. $v_{x_i} = g_i + \Delta_i$.
+They assume a Gaussian process with the Brownian motion kernel as their prior belief.
+
+
+
+\section{\methodname{}
+
+\label{sec:method}
+
+Here, we discuss \emph{\textbf{\methodlongname{} (\methodname{})}} which places a prior belief over any pre-trained LLM's softmax outputs and computes the implied posterior beliefs over the optimal likelihood values.
+We introduce and discuss the modeling assumptions in \cref{model-likelihood-rewards} and show how to derive approximate beliefs over the optimal values in the search tree in \cref{optimal values}.
+The samples of the posterior beliefs are then used to make decisions about which subtree to expand next and when to stop the search (\cref{acquisition function}).
+\Cref{fig:beliefs} gives an overview of our probabilistic model.
+\subsection{Prior beliefs over LLMs softmax outputs}
+\label{model-likelihood-rewards}
+
+For a node $x_i$ in an LLM search tree, let $\vc_i = (c_{i1},..., c_{ib})$ be the vector containing the transition probabilities on the edges between $x_i$ and its $b$ children.
+Note that $\vc_i$ defines a Categorical/discrete distribution, and we aim to exploit its structures by defining a prior belief over it.
+\begin{wrapfigure}[15]{r}{0.45\linewidth}
+
+  \begin{center}
+    \resizebox{\linewidth}{!}{%
+      \includegraphics{figures/beliefs.tikz}
+    }
+  \end{center}
+
+  \caption{
+    The beliefs we consider.
+  }
+  \label{fig:beliefs}
+\end{wrapfigure}
+A straightforward belief one can consider is the Dirichlet distribution.
+For tractability, we assume that the LLM's softmax probabilities are iid.~draws from a symmetric Dirichlet distribution with parameter $\alpha > 0$, i.e., \(p(\vc_i) = \Dir(\alpha)\).
+Thus, $\alpha$ controls how concentrated the sampled probability vectors are.
+In the context of LLMs, for small $\alpha$, the LLM would typically strongly favor a few tokens, whereas for large $\alpha$ the discrete distribution would closely resemble a uniform distribution over the tokens.
+The symmetry of the prior implies in our context that we do not have a preference for particular tokens \textit{a priori}.
+
+Another belief that we can consider is an empirical prior over \(\vc_i\).
+Let $\smash{\{\vx_n\}_{n=1}^{N}}$ be samples of contexts, e.g. a subset of the training/validation data.
+Given an LLM \(f\), we can then obtain the set \(\{ (\vx_i, x_{i1}, \dots, x_{id}) \}\) of \(d\)-step completions of \(\vx_i\)'s through the LLM (e.g.\ through a greedy decoding).
+We can then collect samples of the Categorical distributions from this generation process: \(\mathcal{C} = \smash{\coprod_{n = 1}^N} \{ \vc_{n1}, \dots, \vc_{nd} \}\).
+Then, instead of sampling from \(\Dir(\alpha)\), we can sample from \(p(\vc_i) = \mathrm{Unif}(\mathcal{C})\).
+This prior is more flexible than the Dirichlet prior since no symmetric nor unimodality assumptions are made at the cost of more compute and memory overhead.
+Note, however, that all these priors are precomputed and can be reused across subsequent decoding runs, so they incur a fixed \(\mathcal{O}(1)\) cost.
+\subsection{Prior beliefs over optimal values}
+\label{optimal values}
+
+\begin{wrapfigure}[18]{r}{0.5\linewidth}
+  \footnotesize
+
+  \begin{algorithm2e}[H]
+    \caption{Prior belief over \(\Delta\).}
+    \label{alg:beta}
+
+    \KwIn{Depth of the tree $d$, branching size of tree $b$, prior \(p(\vc)\) over LLM softmax outputs, number of samples used for the approximation $N$}
+    \KwOut{Table of parameters $\text{params}_{l}$ for Beta distributions $\mathcal{B}_{l}$ for each level $l$ of the tree}
+
+    \For{$l\leftarrow d-1$ \KwTo $1$}{
+
+      \For{$n\leftarrow 1$ \KwTo $N$}{
+        $c_n \sim p(\vc)$ \\
+
+        \For{$j\leftarrow 1$ \KwTo $b$}{
+          \uIf{$l=d-1$}{
+            $\Delta_{nj} \leftarrow 1$
+          }
+          \Else{
+            $\Delta_{nj} \sim \mathcal{B}_{l+1} (\Delta \mid \text{params}_{l+1})$
+          }
+        }
+
+        $\Delta_{n} \leftarrow \max_{j=1,...,b} (c_{nj} \cdot \Delta_{nj})$
+      }
+
+      $\text{params}_{l} \leftarrow \texttt{beta-MLE}(\{\Delta_{n}\}_{n=1}^N)$
+    }
+  \end{algorithm2e}
+\end{wrapfigure}
+Having picked a prior over the LLM's softmax outputs, we can derive the implied priors over the optimal values $v_{x_i}$ for each node \(x_i\) in the tree \citep{hennig2010coherent}.
+From the definition of an optimal value (\cref{sec:background}), it factorizes as the product $c_{\vx_0 \rightarrow x_i}$ of the transition probabilities from the root node $x_0$ to $x_i$ and a remaining term which we refer to as $\Delta_i$, i.e., we have $v_{x_i} = c_{\vx_0 \rightarrow x_i} \cdot \Delta_i$.
+Intuitively, the term $\Delta_i$, quantifies the likelihood that we get in the remaining steps from $x_i$ to a leaf node when we take all remaining decisions optimally.
+It can be defined by the following recurrence relation:
+\begin{align*}
+  \scalebox{0.85}{%
+    $\Delta_i = \begin{cases}
+                    1                                                                 & \text{if $x_i$ is a leaf,} \\
+                    \underset{x_j \in \children(x_i)}{\max} \{c_{ij} \cdot \Delta_j\} & \text{otherwise.}          \\
+                  \end{cases}$
+  }
+\end{align*}
+Due to the iid.~assumption above (\cref{model-likelihood-rewards}), we have the joint distribution $p(c_{\vx_0 \rightarrow x_i}, \Delta_i) = p(c_{\vx_0 \rightarrow x_i})\, p(\Delta_i)$.
+Note that all these quantities are not analytically available.
+Thankfully, sampling from the \emph{posterior} belief \(p(v_{x_i} \mid c_{\vx_0 \to x_i})\) is easy if we are able to sample from \(p(\Delta_i)\) (\cref{subsec:posterior}).
+
+Let us, therefore, derive an approximate sampling scheme for $p(\Delta_i)$ (Alg.~\ref{alg:beta}).
+It follows \citet{hennig2010coherent, grosse2021probabilistic} who used Gaussian priors.
+We recursively approximate the prior distribution of the $\Delta_i$'s at level \(l\) with Beta distributions $\mathcal{B}_{l}(\Delta_i)$.
+In a bottom-up approach, we generate samples $\{\max_j c_{nj} \mid c_n \sim p(\vc) \}_{n=1}^N$ for a $\Delta_i$ at level $l=d-1$.
+Using these samples, we empirically fit the parameters of the Beta distribution $\mathcal{B}_{d-1}(\Delta_i)$ via maximum likelihood \citep{abourizk1994fitting}.
+The distributions of the $\Delta_i$ are the same for all nodes on the same level due to the iid.\ assumption, so this has to be done only once.
+Note that we need this approximation since the distribution of the maximum \(\max_j c_{ij}\) has no known analytic solution.
+We then continue by recursively sampling sets of the form (one per level)
+$\{\max_j c_{nj}\cdot \Delta_j \mid c_n \sim p(\vc), \Delta_j \sim \mathcal{B}_{l+1}(\Delta) \}_{n=1}^N$
+for a $\Delta_i$ of the level $l$ and using it to fit the parameters of $\mathcal{B}_{l}(\Delta_i)$.
+The time complexity is $\mathcal{O}(d \cdot b \cdot N)$ for computing the approximations, i.e.,\ it is linear in the depth and width of the tree.
+We emphasize that they can be pre-computed before the search and reused across different decoding runs.
+\subsection{Posterior beliefs over optimal values}
+\label{subsec:posterior}
+Notice that whenever a new node $x_i$ is added to the search tree, the likelihood associated with the path from the root to that node $c_{\vx_0 \rightarrow x_i}$ is fully observed---its distribution is simply a Dirac delta.
+This means, the joint distribution becomes \(p(c_{\vx_0 \to x_i}, \Delta_i) = \delta(c_{\vx_0 \to x_i}) \, p(\Delta_i)\).
+Therefore, to sample \(v_{x_i}\) given that we have observed \(c_{\vx_{0} \to x_i}\)---i.e., sampling from the posterior $p(v_{x_i} \mid c_{\vx_0 \rightarrow x_i})$---it is sufficient to sample from $p(\Delta_i)$ and then simply scale all samples by $c_{\vx_0 \rightarrow x_i}$.
+We leverage these posterior samples to make decisions in exploring the tree.
+Notice that these samples are cheap to get, unlike empirical samples based on simulations/rollouts.
+\subsection{Decision making}
+\label{acquisition function}
+\begin{wrapfigure}[26]{r}{0.48\linewidth}
+  \footnotesize
+
+  \begin{algorithm2e}[H]
+    \caption{\methodname{}.}
+    \label{alg:treesearch}
+
+    \KwIn{Num.\ of tokens to generate $d$, number of samples $N$, approximate priors $\{\mathcal{B}_l\}_{l=1}^d$, confidence parameter $\varepsilon$}
+    \KwOut{A leaf $x^*$ and its likelihood $c^*$}
+    \textcolor{gray}{// Initialization} \\
+    $\mathcal{L} \leftarrow \{\vx_0\}$\\
+
+    \For{$n \in 1,...,N$}{
+      $(v_{\vx_0})_n \sim \mathcal{B}_{1}(\Delta)$
+    }
+    $c^*, x^* \leftarrow -\infty, \mathrm{None}$\\
+
+    \While{$\hat{\mathbb{P}}(c^* < v_{\vx_0}) > \varepsilon$}{
+    \textcolor{gray}{// Selection always starts from root} \\
+    $x_i \leftarrow \texttt{select}(\vx_0)$ \\
+    \textcolor{gray}{// Expand} \\
+    $\mathcal{L} \leftarrow (\mathcal{L} \setminus \{x_i\})\cup \children(x_i)$ \\
+
+    \For{$x_c \in \children(x_i)$}{
+      \textcolor{gray}{// Generate posterior samples}\\
+      \For{$n \in 1,...,N$}{
+        ${\color{unknown} {(\Delta_{x_c})}_n \sim \mathcal{B}_{\level(x_c)}(\Delta)}$\\
+        ${(v_{x_c})}_n \leftarrow {\color{observed} c_{\vx_0 \rightarrow x_c}} \cdot {\color{unknown}{(\Delta_{x_c})}_n}$
+      }
+
+      \textcolor{gray}{// Update best complete path so far}\\
+      \If{$\level(x_c) = d \,\mathrm{and}\,  c_{\vx_0 \rightarrow x_c} > c^*$}{
+        $c^* \leftarrow  c_{\vx_0 \rightarrow x_c}$;\enspace $x^* \leftarrow  x_c$
+      }
+
+    }
+
+    $\texttt{backup}(\{(v_{x_c})_n\}_c, \vx_0 \rightarrow x_c)$\\
+
+    \textcolor{gray}{// termination probability}\\
+    \scalebox{0.9}{$\hat{\mathbb{P}}(c^* < v_{\vx_0}) \leftarrow \frac{1}{N} \sum_{n=1}^N \mathbb{I}\left[c^* \leq (v_{\vx_0})_n\right]$}\\
+    }
+  \end{algorithm2e}
+\end{wrapfigure}
+At each iteration, we use the posterior samples by following the steps of Monte Carlo tree search, but without the expensive rollout step.
+Alg.~\ref{alg:treesearch} contains the pseudocode for the decoding portion of ULTS.
+
+\textbf{1. Selection}\quad
+Starting from the root node \(\vx_0\), we recursively pick a child that has the highest empirical probability to be the best child, as computed based on the posterior samples.
+I.e. at a node $x_i$, we recursively maximize the following acquisition function $a_i(x_c)$ over its children:
+\begin{equation}\label{eq:acqf}
+  \scalebox{0.85}{$a_i(x_c) = \frac{1}{N} {\displaystyle \sum_{n=1}^N} \mathbb{I}\bigl[(v_{\hat{x}_c})_n = \underset{x_j \in \mathrm{children}(x_i)}{\max} (v_{\hat{x}_j})_n  \bigr] ,$}
+\end{equation}
+Different realizations of \(\hat{x}_c\) and \(\hat{x}_j\) can be used:
+The most straightforward is to use the children's posterior samples themselves.
+This corresponds to simply setting \(\hat{x}_j = x_j\) and \(\hat{x}_c = x_c\).
+Intuitively, this means that we are estimating the probability that a child \(x_c\) is the best child among other children of \(x_i\).
+Another strategy is to use the posterior samples of each child's best descendant---intuitively, it performs a ``lookahead''.
+In this case, \(\hat{x}_j\) is defined as (similarly for \(\hat{x}_c\)):
+\begin{equation}\label{eq:acqf_recurrence}
+  \scalebox{0.85}{
+    $\hat{x}_j = \begin{cases}
+        x_j                                                         & \text{if } x_j \text{ is a leaf,} \\
+        \underset{x_c \in \mathrm{children}(x_j)}{\argmax} a_j(x_c) & \text{otherwise}.
+      \end{cases}$
+  }
+\end{equation}
+Note that they have the same costs since the posterior samples for both strategies are readily available due to the backup step below, i.e., we do not actually perform the recursion \eqref{eq:acqf_recurrence} in this step.
+Furthermore, the acquisition function \eqref{eq:acqf} can be extended further, e.g.\ to take into account a penalty term (\cref{subsec:extension}).
+In any case, this selection process is done until an unexpanded node is selected.
+\textbf{2. Expansion}\quad
+Given an unexpanded node $x_i$, we query the LLM to obtain the top-\(k\) most likely children and their corresponding likelihoods.
+These likelihoods are new observations and we combine them with the prior samples to obtain \(n\) posterior samples $(v_{x_c})_n$ of each child $x_c$.
+This step is the most expensive part of any tree-search algorithm since querying the LLM is costly.
+Akin to BO, ULTS strives to reduce the number of node expansions and thus minimize the number of LLM calls.
+
+\textbf{3. Backup}\quad
+We recursively propagate the newly obtained posterior samples $\{ (v_{x_c})_n \}_c$ back up the tree until the root via the path selected in the previous steps.
+This is done to update the posterior samples contained in each node of the path.
+They will then influence the selection process in the next iteration, updating the exploration-exploitation tradeoff.
+Different update strategies can be used depending on the choice of the acquisition function \eqref{eq:acqf}.
+When posterior samples of the children node \(x_c\) are used to compute \(a_i(x_c)\), then we propagate up the posterior samples of the newly expanded nodes as in when computing the prior, i.e.\ by recursively taking their maximum.
+When the posterior samples of the best descendant of \(x_c\) are used in \(a_i(x_c)\), we simply propagate up the posterior samples of the best child among the newly expanded nodes, without taking further maximums along the path.
+
+\textbf{Termination criterion} \quad
+Finally, the posterior samples over the optimal values can not only be used for the selection of new nodes but also to monitor the progress of the optimization.
+For instance, one can compute the following empirical probability
+$\hat{\mathbb{P}}(c^* < v_{\vx_0}) = \frac{1}{N} \sum_{n=1}^N \mathbb{I}\left[c^* \leq  (v_{\vx_0})_n\right]$,
+which corresponds to the probability of the current best likelihood \(c^*\) among all leaves ULTS has visited so far is lower than the best value \(v_{\vx_0}\) at the root, according to our posterior belief.
+Note that the computation of such a probability is done as in the acquisition function \(a(x)\), i.e., using the posterior samples of the root node $\vx_0$ or the posterior samples of the best descendant.
+Then, one can decide to stop the search once this probability is below some confidence level $\varepsilon > 0$.
+
+\subsection{Remarks}
+
+\textbf{Practical considerations} \quad
+In order to put a tractable upper bound on the runtime of ULTS, we introduce a hyperparameter $k_{\max}$ on the maximum number of nodes that can be expanded per level, similar to beam search or top-\(k\) sampling.
+
+Moreover, we stop the search as soon as a set of $k_{\max}$ leaves is attained or the termination probability exceeds below $1-\varepsilon$.
+We shall see in \cref{sec:experiments} that even under these further constraints, we still obtain good results while being efficient.
+
+\textbf{Limitations} \quad
+\label{subsec:limitations}
+There are strong reasons to assume that the iid.\ assumption might not fully hold.
+
+Indeed, our modeling assumptions are chosen with practicality in mind.
+This is akin to how priors in Bayesian neural networks \citep{wilson2020bayesian} are chosen, which are usually simply just isotropic Gaussians.
+Even in standard BO, a generic Gaussian-process prior/kernel is often assumed by default \citep{balandat2020botorch}. For a further discussion of the prior assumptions, see \cref{apd:discussions}.
+Moreover, our work does not take the miscalibration of LLM softmax outputs into account.
+Indeed, it has been shown that higher likelihood is not always correlated with human preferences \citep{holtzman2019curious,wiher2022decoding}.
+However, LLM calibration is orthogonal to the focus of the present paper---we leave this for future work.
+Nevertheless, ULTS is extensible: One can construct a different prior or use a different utility function to address this; see \cref{subsec:extension} for example.
+
+
+
+\section{Related Work}
+
+\label{sec:related}
+
+Probabilistic/Bayesian optimization on trees has been proposed for game trees.
+\citet{hennig2010coherent} developed a roll-out based probabilistic tree search algorithm for game trees, e.g.\ for playing Tic-Tac-Toe and Go.
+Crucially, the structure of the game tree is different than the LLM search tree.
+Moreover, they assumed a Gaussian process prior with the Brownian motion kernel in conjunction with the expectation propagation algorithm \citep{minka2001family} to model their beliefs.
+\citet{grosse2021probabilistic} extended their approach for a more general directed acyclic graph structure.
+In contrast, we focus on the tree implied by the sequential generation process in LLMs with a Dirichlet or empirical prior.
+
+Our method can be seen as utilizing a best-first search strategy, of which the A* algorithm \citep{hart1968astar} is the most famous.
+Moreover, an A*-like beam search algorithm, under the name of best-first beam search, has also been proposed for decoding LLMs \citep{meister2020best}.
+Unlike the non-probabilistic A$^*$ and best-first beam search, we approach optimization-on-tree problems via the lens of decision-making under uncertainty---putting a prior belief about the unknown, updating it based on the observations, and making decision based on the posterior belief.
+Furthermore, best-first beam search \citep{meister2020best} has different goals to ours: it is designed to output the same set of leaves (and thus the optimal likelihood value) as the standard beam search.
+ULTS, meanwhile, focuses on both performance (i.e., attaining higher likelihood than beam search) and efficiency (reducing the number of costly LLM forward passes).
+
+Finally, Monte Carlo tree search, which also utilizes samples to make decisions, has also been proposed for decoding LLMs \citep{leblond2021machine, liu2023don, hao2023reasoning, feng2023alphazero, zhang2023planning, zhou2023language, delorenzo2024make}.
+Different from our goal, they focused on incorporating external rewards that are only observable at the leaf nodes.
+For instance, \citet{zhang2023planning} defined the reward to be the unit-test results for code-generating LLMs.
+Moreover, Monte-Carlo tree search does not define a probabilistic model (i.e.\ a prior and posterior beliefs) over quantities in the search tree---its decision making is based on the statistics obtained by exploring the search tree on the fly.
+In contrast, ULTS does not require costly gathering of those statistics during the decoding process; instead, it makes decisions based on precomputed samples from its beliefs.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+\textbf{Setup} \quad
+In this section, we evaluate ULTS in both close-ended and open-ended text generation problems.
+We set ULTS' $k_{\max} \in \{2,3,4,5,10,20\}$ and set $\epsilon$ to a default value of $0.1$.
+The error bars indicate \(\pm 1\) standard error of the mean based on all test sentences.
+We compare ULTS against beam search (the \emph{de-facto} decoding method for machine translation), as well as the recent baselines multinomial beam search \citep[Multinomial BS;][]{kool2019stochastic},
+contrastive search \cite{su2022contrastiveframeworkneuraltext} nucleus sampling \citep{holtzman2019curious}, best-of-k sampling \citep{stiennon2020learning}, speculative decoding \citep{leviathan2023fastinferencetransformersspeculative}, and DoLA \citep{chuang2024doladecodingcontrastinglayers}.
+For beam search, multinomial beam search, and best-of-k baselines, we evaluate beam sizes and numbers of samples \(k \in \{ 1, 2, 3, 4, 5, 10, 20 \}\), respectively.
+We set any other hyperparameters of all baselines as suggested by the original papers or by Huggingface. We use Huggingface's implementation of the baselines and provide our implementation of ULTS in the supplements.
+
+\textbf{Choice of the prior} \quad
+We sampled a set $\mathcal{C}$ of Categorical distributions from the LLM on training sequences for each of the datasets and both of the LLMs.
+We used \(1000\) samples from the training set for each of the datasets and LLMs we considered.
+They are used for the empirical prior, as well as training data for fitting the concentration parameter $\alpha$ of the Dirichlet prior.
+
+\Cref{fig:prior} in \cref{apd:smalleralpha} shows samples for the maximum of Categorical distributions returned by the LLM, as well as the distribution of the maximum of the Categorical distribution from a Dirichlet prior for $\alpha = 10^{-1}, 10^{-4}, 5 \times 10^{-6}$.
+For the experiments below, we picked a value for $\alpha$ based on the histograms in \Cref{fig:prior}. For a comparison between different values of the concentration parameter, please refer to \cref{fig:smalleralpha} (\cref{apd:smalleralpha}).
+Note that this way of choosing the hyperparameter $\alpha$ is very convenient compared to performing costly cross-validation.
+
+\begin{figure}
+  \centering
+  \begin{minipage}[t]{.475\textwidth}
+    \centering
+    \includegraphics[]{figures/wmt19_results_t5.pdf}
+    \label{fig:wmt19_results_t5}
+  \end{minipage}%
+  \hfill
+  \begin{minipage}[t]{.475\textwidth}
+    \centering
+    \includegraphics[]{figures/bleu_score.pdf}
+
+    \label{fig:bleu}
+  \end{minipage}
+
+  \caption{
+    \textbf{Left:} Machine translation results with the WMT-19 English-to-German dataset in term of log-likelihood.  \textbf{Right:} The corresponding BLEU scores.
+  }
+\end{figure}
+\subsection{Close-ended generation}
+
+We compare ULTS with the baselines in a machine translation task with 1000 randomly sampled sequences from the WMT-19 English to German dataset in \cref{fig:wmt19_results_t5} in terms of likelihood and BLEU score.
+For the LLM, we use T5-large \citep{raffel2020t5}; for ULTS, we use a Dirichlet prior with \(\alpha = 5 \times 10^6\).
+Unless specified otherwise, we use the strategy in \eqref{eq:acqf_recurrence} for the selection and backup steps.
+See \cref{apd:add_results} for results with the other strategy and further dataset/setting.
+All experiments are done on single NVIDIA GeForce RTX 2080 Ti and NVIDIA A40 48GB GPUs for GPT-2 and Llama-2-7b, respectively.
+We stop the exploration of a path in the tree the <EOS> token is found or when the maximum depth of 60 is exceeded.
+The results are in \cref{fig:wmt19_results_t5,fig:bleu}.
+ULTS are both more efficient (fewer node expansion) and more performant (higher average log-likelihood) at all values of \(k\)/\(k_\text{max}\).
+For all methods, small to medium beam sizes of $k=3$ seem to work best in terms of BLEU scores---these scores decrease for a larger (maximum) beam with, in contrast to the log-likelihood in \cref{fig:wmt19_results_t5} .
+See \cref{apd:machinetranslation}, for qualitative examples of the translated sentences.
+
+\subsection{Open-ended generation}
+
+We use GPT-2 \citep{radford2019language} and Llama-2-7b \citep{touvron2023llama2} for text generation on articles from the Wikipedia \citep{see-etal-2017-get}, CNN Daily Mail \citep{hermann2015teaching}, and Reddit TL;DR \citep{volske2017tldr} datasets.
+Since many of the text samples in the Wikipedia dataset end with e.g., references instead of full sentences, we filter for text samples with at least \(500\) tokens, resulting in a test set with \(332\) token sequences (out of a random subset of originally \(1000\) sequences).
+We use \(200\) tokens as input and predict \(20\) tokens.
+We do the same for the CNN Daily Mail dataset, where we end up with \(790\) token sequences.
+We use context length of \(300\) and generate \(60\) tokens.
+We also include a summarization task, where the goal is to generate a \(40\) token long summary of the input sequence.
+For this, we use \(1000\) random samples from the TL;DR dataset with variable-length contexts.
+Here, we decode sequences of fixed length instead of stopping at the <EOS> token.
+We run ULTS with both the Dirichlet prior with $\alpha=10^{-4}$ and the empirical prior.
+
+\begin{figure}
+  \includegraphics[width=\textwidth]{figures/main_plot_new_baselines_cutoff.pdf}
+  \caption{
+    Decoding experiments with Llama-2-7b and GPT-2.
+  }
+  \label{fig:combined_eff}
+\end{figure}
+Figure \ref{fig:combined_eff} shows the results.
+No matter the choice of $k_{\max}$ (and \(k\)), \methodname{} yields sequences with the same or a higher log-likelihood while expanding fewer nodes.
+For example in the summarization task with GPT-2, \methodname{} with the empirical prior and $k_\text{max}=20$ achieves an average log-likelihood of $-18.31$ while expanding only $137.90$ nodes.
+In contrast, beam search with $k=5$ returns sequences of average log-likelihood $-21.33$ even though expanding more nodes (196 nodes).
+This is the case for both choices of priors, with the empirical prior encouraging exploration a bit more.
+The histogram in \cref{fig:dirichletsamples} (\cref{apd:smalleralpha}) suggests that the distribution $\max_{i} c_{ji}$ is bimodal and not fully captured by the Dirichlet prior.
+In particular, our choice of Dirichlet prior is slightly too pessimistic.
+As a result, the search may stop too early and the available budget may not be fully utilized.
+However, the budget that \textit{is} used, is used efficiently.
+
+Our recommendation is thus as follows.
+When efficiency is the main goal, a Dirichlet prior with low concentration is preferable---it performs similarly to beam search with smaller beam widths, while being more efficient.
+If the search performance is important and an additional tree exploration can be afforded (still more efficient than beam search), then the empirical prior is the best choice---it is also hyperparameter-free.
+\subsection{Runtime}
+
+We analyze the runtime overhead on top of the LLM's forward pass due to ULTS.
+\Cref{fig:runtime} shows the wall-clock time per iteration, averaged over all sentences and all iterations, broken down into the time spent on the LLM's forward pass and the time spent on sampling the optimal values and optimizing the acquisition function.
+The error bars indicate the $95\%$- confidence intervals.
+Results are shown for the experiments with $k_\text{max}=20$ and the Dirichlet prior---the empirical prior performs similarly since ULTS does not differentiate between them in Alg.~\ref{alg:treesearch}.
+We note that the runtime overhead of ULTS is small compared to the time spent to do an LLM forward pass.
+However, note that our current implementation only expands one node of the search tree in each iteration and thereby only evaluate one token sequence per forward-pass.
+ULTS can be extended similar like BO can be extended into batch BO.
+It outside of the present work's scope but is a promising future work.
+
+\begin{figure}
+  \includegraphics[width=\textwidth]{figures/timeplot_025.pdf}
+
+  \caption{
+    Average wall-clock time per iteration.
+  }
+  \label{fig:runtime}
+\end{figure}
+\subsection{Extensions}
+\label{subsec:extension}
+\begin{wraptable}[12]{r}{0.5\linewidth}
+  \footnotesize
+  \centering
+
+  \begin{tabular}{lrrr}
+    \toprule
+    \textbf{Method}         & \textbf{Perplexity} \(\downarrow\) & \textbf{Diversity} \(\uparrow\) \\
+    \midrule
+    Beam search             & 1.16$\pm$0.01                      & 0.33$\pm$0.01                   \\
+    Nucleus sampling        & 3.69$\pm$0.07                      & 0.82$\pm$0.01                   \\
+    Contrastive search      & 1.27$\pm$0.01                      & 0.4$\pm$0.01                    \\
+    \midrule
+    ULTS                    & 1.16$\pm$0.01                      & 0.33$\pm$0.01                   \\
+    ULTS with \(\tilde{u}\) & 1.3$\pm$0.01                       & 0.55$\pm$0.01                   \\
+    \bottomrule
+  \end{tabular}
+
+  \caption{
+    Different utility functions (here, \(\tilde{u}\)) can be used in ULTS' acquisition function. E.g., to enforce low perplexity \emph{and} high diversity.
+  }
+  \label{tab:penalty}
+\end{wraptable}
+
+Let \(\vv_i\) contains the optimal values of the descendants of \(x_i\) and let \(u(x_c, \vv_i) := \mathbb{I} [ v_{\hat{x}_c} = \max_{x_j \in \mathrm{children}(x_i)} v_{\hat{x}_j} ]\).
+The acquisition function \eqref{eq:acqf} we employed so far can be seen as a sample-based approximation to the expectation
+\begin{equation} \label{eq:acqf_integral}
+  \textstyle \int u(x_c, \vv_i) \, p(\vv_i \mid c_{v_{\vx_0 \to x_i}}) \, d\vv_i ,
+\end{equation}
+From the Bayesian decision-theoretic perspective, \(u(x_c, \vv_i)\) can thus be seen as a utility function, encoding our preferences when making decisions under the posterior belief.
+Hence, we can replace it with \emph{any} other utility function just like in standard Bayesian optimization \citep{garnett_bayesoptbook_2023} and then use the posterior samples to derive the acquisition function \citep{wilson2018maximizing}.
+
+For example, we can use a utility function that encodes our preference of picking sequences with minimal repetition, which is desirable to avoid text degeneration \citep{holtzman2019curious}.
+Concretely, we can employ a new utility function that contains a repetition-penalty term:
+\(\tilde{u}(x_c, \vv_i) = \mathbb{I} [ (\log v_{\hat{x}_c} + \lambda \, b(\hat{x}_c)) = \max_{x_j \in \mathrm{children}(x_i)} (\log v_{\hat{x}_j} + \lambda \, b(\hat{x}_j)) ]\),
+where \(b(\hat{x}_c)\) is a log-diversity term \citep{su2022contrastiveframeworkneuraltext}.
+Details in \cref{apd:penalty}.
+The results of this new utility function is in \cref{tab:penalty}: ULTS can achieve good perplexity and diversity at the same time, showing the flexibility of our probabilistic decision-theoretic perspective.
+More results  can be found in \cref{tab:penalty_full} in \cref{apd:penalty}.
+
+
+
+\section{Conclusion}
+
+
+We have discussed our method, \methodname{}, a probabilistic decision-making algorithm for the decoding process of large-language-model (LLM) search trees.
+Our method quantifies and leverages computational uncertainty over the maximum value of the optimization process.
+\methodname{} exploits the structure of the optimization problem---in particular, the concentration strength of the LLM softmax outputs---by putting a prior over the LLM's softmax outputs and using the implied posterior samples to guide exploration-exploitation in a non-myopic manner.
+Our work thus connects two seemingly disjoint fields: Bayesian optimization and natural language processing, opening up opportunities for interesting future work in probabilistic inference for LLMs.
+
+
+\textbf{Future work} \quad
+One can study the effect of using more sophisticated priors, e.g.\ where iid.\ is not assumed.
+One can also consider batched acquisition strategies, similar to batch Bayesian optimization techniques \citep{gonzalez2016batch, wu2016parallel}.
+Moreover, it is also interesting to incorporate the uncertainty over the LLM's outputs (e.g.\ in the context of Bayesian LLMs) in order to account for possible miscalibration of the likelihood.
+Another research direction is to extend the approach to reasoning tasks beyond language tasks, e.g.\ by including beliefs over external rewards \citep{zhang2023planning}, such as ones coming from an RLHF-trained reward model, in addition to the current likelihood rewards.
+Finally, our work in connecting Bayesian optimization with LLMs paves the way to perform probabilistic reasoning with the tree of thoughts framework \citep{yao2024tree}.
+
+
+
+

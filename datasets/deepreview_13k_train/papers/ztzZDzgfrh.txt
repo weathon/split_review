@@ -1,0 +1,396 @@
+\title{ReDeEP: Detecting Hallucination in Retrieval-Augmented Generation via Mechanistic Interpretability}
+
+\begin{abstract}
+Retrieval-Augmented Generation (RAG) models are designed to incorporate external knowledge, reducing hallucinations caused by insufficient parametric (internal) knowledge. However, even with accurate and relevant retrieved content, RAG models can still produce hallucinations by generating outputs that conflict with the retrieved information. Detecting such hallucinations requires disentangling how Large Language Models (LLMs) utilize external and parametric knowledge. Current detection methods often focus on one of these mechanisms or without decoupling their intertwined effects, making accurate detection difficult. In this paper, we investigate the internal mechanisms behind hallucinations in RAG scenarios. We discover hallucinations occur when the \textit{Knowledge FFNs} in LLMs overemphasize parametric knowledge in the residual stream, while \textit{Copying Heads} fail to effectively retain or integrate external knowledge from retrieved content. Based on these findings, we propose \textbf{ReDeEP}, a novel method that detects hallucinations by decoupling LLM’s utilization of external context and parametric knowledge. Our experiments show that ReDeEP significantly improves RAG hallucination detection accuracy. Additionally, we introduce AARF, which mitigates hallucinations by modulating the contributions of Knowledge FFNs and Copying Heads. %These methods demonstrate notable improvements in both hallucination detection and mitigation in RAG models.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.95\textwidth]{graphs/introduction.pdf}
+    \caption{Two examples of RAG where the retrieved document is correct but conflicts with parametric knowledge. The left example shows a correct response based on external knowledge, while the right example demonstrates hallucination despite accurate external context.}
+    \label{fig:introduction}
+\end{figure}
+
+LLMs have made significant advancements in natural language processing tasks~\citep{dubey2024llama,achiam2023gpt}. However, they still face challenges with hallucinations, often generating factually inaccurate outputs~\citep{huang2023survey}. To mitigate this issue, many researchers have introduced Retrieval-Augmented Generation (RAG) models, which aim to improve the accuracy of LLM responses by incorporating relevant information retrieved from external knowledge bases~\citep{shuster2021retrieval,gao2023retrieval}.
+
+Despite the use of accurate and relevant retrieved context, RAG models may still produce statements that are either unsupported or contradict the retrieved information, a phenomenon we term \textbf{RAG Hallucination}~\citep{niu-etal-2024-ragtruth,magesh2024hallucination}. Recent studies have examined the potential conflicts between the \textbf{external context} and the LLM's \textbf{parametric knowledge} in RAG models~\citep{xu2024knowledge}. As shown in~\autoref{fig:introduction}, these conflicts can lead to hallucinations but do not always cause them. Therefore, it is important to distinguish RAG hallucination from Knowledge Conflict as a new research direction. \emph{Our work focuses on detecting RAG hallucinations, specifically in cases where the retrieved external context is accurate and relevant.}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.98\textwidth]{graphs/related_work.pdf}
+    \caption{Causal perspectives on hallucination detection methods. \textcolor{custompurple}{(i)}: parametric knowledge is confounded by external context, \textcolor{customgreen}{(ii)}: external context is confounded by parametric knowledge, and \textcolor{customblue}{(iii)}: mixes both without decoupling their contributions. \textbf{(Ours)}: decouple these confounders using mechanistic interpretability, incorporating them as covariates to improve hallucination detection.}
+    \label{fig:related_work}
+\end{figure}
+
+
+ From a knowledge storage perspective~\citep{geva2021transformer}, hidden states represent the result of querying the parametric knowledge ($\ermP$) with external context ($\ermE$), establishing a causal path from $\ermE$ to $\ermP$ (\textcolor{custompurple}{graph (a)}). The presence of $\ermE$ as a confounder complicates the accurate prediction of hallucinations based on $\ermP$ alone~\citep{chyzhyk2022remove}. (ii) \textbf{External Confounded by Parametric:} which focuses on hallucination detection by leveraging external context and model responses. Here, parametric knowledge ($\ermP$) is a confounder between the external context ($\ermE$) and hallucinations ($\ermH$), creating a causal link from $\ermP$ to $\ermE$ (\textcolor{customgreen}{graph (b)}) due to the unavoidable presence of parametric knowledge in the response. (iii) \textbf{Mixed Parametric and External:} which combines both parametric and external knowledge directly, often using uncertainty or sampling techniques (e.g., token probability) to detect hallucinations~(\textcolor{customblue}{graph (c)}). However, this mixing of $\ermE$ and $\ermP$ without decoupling their roles obscures their individual contributions~\citep{bengio2013representation}.
+
+To address the challenges of hallucination detection in RAG models, we first leverage mechanistic interpretability~\citep{ferrando2024primer,transformercircuits2021} to decouple the LLM's utilization of parametric knowledge and external context. Specifically, we conduct an empirical study to explore the internal mechanisms behind hallucination generation in RAG scenarios. We introduce two metrics: the \textbf{External Context Score}, which uses attention heads to quantify the model’s utilization on external context, and the \textbf{Parametric Knowledge Score}, which is based on FFNs to evaluate LLM’s utilization of parametric knowledge (\S~\ref{sec:metrics}). Correlation analysis and causal intervention reveals that hallucinations typically occur when \textbf{Knowledge FFNs} (from later LLM layers) over-add parametric knowledge into the residual stream, while \textbf{Copying Heads} (attention heads exhibiting copying behaviours) neglect the necessary external knowledge from retrieved content or LLM loses the information attended to by Copying Heads during the generation process (\S~\ref{sec:rq1}).
+
+Building on our causal analysis and mechanistic interpretability, we propose \textbf{ReDeEP} (\textbf{Re}gressing \textbf{De}coupled \textbf{E}xternal context score and \textbf{P}arametric knowledge score) for detecting hallucinations in LLM-based RAG, which treat parametric knowledge ($\ermP$) and external context ($\ermE$) as covariates to solve the confounding problem~\citep{kahlert2017control} (see \textbf{Ours} in~\Figref{fig:related_work}).  Additionally, we introduce \textbf{AARF} (\textbf{A}dd \textbf{A}ttention \textbf{R}educe \textbf{F}FN), which mitigates hallucinations by modulating the contributions of Knowledge FFNs and Copying Heads in the residual stream (\S~\ref{sec:methods}). Experiments on RAGTruth and Dolly (AC) confirm that ReDeEP significantly outperforms existing detection methods, while AARF improves the truthfulness of LLaMA models (\S~\ref{sec:exp}).
+
+
+
+
+
+\section{Background and Related Works}
+
+\subsection{Background}
+\label{sec:back}
+Our work is grounded in mechanistic interpretability~\citep{ferrando2024primer,nostalgebraist2020,meng2022locating,transformercircuits2021}, which aims to explain how individual components of language models (LMs) contribute to predictions. In this study, we focus on transformer decoder-only architectures (GPT-like models) due to their widespread use~\citep{achiam2023gpt,dubey2024llama}. Transformers use residual connections, where each layer adds information from \textit{Attention Heads} and \textit{Feed-Forward Networks} (FFNs) to the hidden state via the residual stream, contributing to the final prediction~\citep{transformercircuits2021}.
+
+\textbf{Attention Heads:} Attention heads play a crucial role in contextualizing token representations by selectively attending to previous tokens and updating the residual stream~\citep{ferrando2024information,clark-etal-2019-bert,wu2024retrieval}. Notably, some attention heads, referred to as \textit{Copying Heads}, have been shown to copy information from one token to another through their OV (output-value) circuits~\citep{transformercircuits2021}. These heads can be identified by analyzing the positive eigenvalues of the OV matrix, which indicate copying behavior. Copying Heads contributes to preserving previously attended tokens in the residual stream, which is critical for external context utilization.
+
+\textbf{FFNs:} FFN layers primarily function as knowledge storage in transformers~\citep{geva2021transformer}. Each FFN layer transforms the hidden state by linearly combining key-value pairs, where keys encode specific knowledge and values represent the output of this knowledge.  Research shows that FFNs are critical for the utilization of parametric knowledge within LLMs, enabling the model to retrieve and integrate stored information effectively for prediction~\citep{dai2022knowledge}.
+
+\textbf{Logit Lens:} The \(\operatorname{LogitLens}\) is a technique that decodes hidden states \(\boldsymbol{x}^{l}\) directly into the vocabulary distribution using the LayerNorm and the unembedding matrix $\boldsymbol{W}_U$ of the LLM for interpretability~\citep{nostalgebraist2020}:
+\begin{equation}
+    \operatorname{LogitLens}\left(\boldsymbol{x}^{l}\right) = \operatorname{LayerNorm}(\boldsymbol{x}^{l}) \boldsymbol{W}_U
+    \label{eq:logit_lens}.
+\end{equation}
+
+By understanding the roles of Attention Heads (e.g., Copying Heads) and FFNs, we can better interpret the internal states of LLMs and identify the mechanisms behind hallucinations in RAG scenarios.
+
+\subsection{Related Work}
+\textbf{Hallucination of LLMs:} LLMs often generate hallucinations—content inconsistent with real-world facts or inputs~\citep{huang2023survey}. As depicted in Figure~\ref{fig:related_work}, although there has been extensive research on detecting hallucinations~\citep{niu-etal-2024-ragtruth,manakul2023selfcheckgpt,han2024semantic}, few studies have concentrated on RAG hallucinations, particularly on the internal mechanisms driving these hallucinations. Inspired by research on Knowledge Conflicts~\citep{xu2024knowledge}, our work is the first to apply mechanistic interpretability to lens the internal mechanisms of RAG hallucinations from the perspectives of LLM's utilization of external and parametric knowledge, leading to a more accurate detection method than previous approaches.
+
+\textbf{Mechanistic Interpretability:} Mechanistic interpretability~\citep{ferrando2024primer,transformercircuits2021} seeks to explain the internal processes of LLMs, enabling the interpretation of how individual model components contribute to the final prediction. Our work builds on insights into FFN layers, attention heads~\citep{vaswani2017attention}, residual streams~\citep{transformercircuits2021}, and the logit lens~\citep{nostalgebraist2020} to analyze the internal mechanisms of LLMs when RAG hallucinations occur.
+
+
+\section{Empirical study}
+
+\label{sec:empirical}
+
+Our empirical study investigates how hallucinations in RAG models relate to the internal states of the LLM. Using Mechanistic Interpretability techniques, we focus on how the LLM’s use of external context and parametric knowledge contributes to hallucinations.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{graphs/method.pdf}
+    \caption{Expanded views of Unrolled LLMs' Attention and FFN blocks. (a): The calculation process of the External Context Score and Parametric Knowledge Score. (b): Example of intervening on attention heads. (c): Example of intervening on FFN modules.} 
+    \label{fig:method}
+\end{figure}
+
+\textbf{Experiment Setting:}
+We conduct experiments on the Llama2-7B-chat model~\citep{touvron2023llama} using the training set of RAGTruth dataset~\citep{niu-etal-2024-ragtruth}, a high-quality, manually annotated dataset for RAG hallucinations (Details in~\Secref{sec:setting}). Each data point in RAGTruth consists of a query \(\mathbf{q}\), retrieved context \(\mathbf{c}\), response \(\mathbf{r}\), and the hallucination label \(h\) (where 0 is truth and 1 is hallucination). 
+During generation, the input to the LLM \(f\) is a sequence of tokens \(\mathbf{t} = \left\langle t_1, t_2, \ldots, t_n \right\rangle\), including the query \(\mathbf{q} = \left\langle t_{1}, \ldots, t_{q} \right\rangle\), retrieved context \(\mathbf{c} = \left\langle t_{q+1}, \ldots, t_{c} \right\rangle\), and a partial generated response \(\hat{\mathbf{r}} = \left\langle t_{c+1}, \ldots, t_{n} \right\rangle\).
+
+
+
+
+
+
+\subsection{Metrics for LLMs' Utilization of External Context and Parametric Knowledge}
+\label{sec:metrics}
+To quantify how LLMs use external context and parametric knowledge, we design two specific metrics, as shown in \Figref{fig:method} (a):
+
+\textbf{External Context:}  Considering attention heads primarily function to retrieve relevant information (as discussed in \Secref{sec:back}), we measure the LLM’s utilization of external context by assessing (1) whether attention heads focus on the correct context, and (2) whether the LLM effectively retains and utilizes this information during generation. To evaluate these aspects, we define the following metric based on the semantic difference between the external context attended by attention heads and the generated information:
+
+For the last token \(t_n\), the attention weights on the context are \(\boldsymbol{a}^{l, h}_{n, q:c}\), where \(\boldsymbol{a}_{n}^{l,h}\) is obtained from~\Eqref{eq:attention_weight}. We select the top \(k\%\) tokens with the highest attention scores as attended tokens:
+\begin{equation}
+    \mathcal{I}_{n}^{l,h} = \operatorname{arg\,top}_{k\%}(\boldsymbol{a}_{n,q:c}^{l,h}).
+\end{equation}
+Given that attention often shows high sparsity~\citep{zhu2024near,zhang2024h2o}, with only a few tokens capturing most of the attention scores, we choose \( k = 10 \) to ensure coverage of high-attention tokens and maintain token diversity.
+
+Inspired by~\citep{luo2024foundations, chen2024inside}, which validated that the hidden states of LLM can serve as token semantic representations, we compute the token-level \textbf{E}xternal \textbf{C}ontext \textbf{S}core (ECS) based on the cosine-similarity between the mean-pooling of the last layer hidden states of attended tokens and the hidden state of token \(t_n\):
+\begin{equation}
+    \mathcal{E}_{n}^{l,h} = \frac{\boldsymbol{e} \cdot \boldsymbol{x}^{L}_{n}}{\|\boldsymbol{e}\| \|\boldsymbol{x}^{L}_{n}\|}, \quad \boldsymbol{e} = \frac{1}{|\mathcal{I}_{n}^{l,h}|} \sum_{j \in \mathcal{I}_{n}^{l,h}} \boldsymbol{x}^{L}_{j}.
+\end{equation}
+The response-level ECS is the average of token-level scores:
+\begin{equation}
+    \mathcal{E}^{l,h}_{\mathbf{r}} =  \frac{1}{|\mathbf{r}|}\sum_{t \in \mathbf{r}} \mathcal{E}^{l,h}_{t}.
+    \label{eq:external_score}
+\end{equation}
+
+
+\textbf{Parametric Knowledge:} Considering FFNs store parametric knowledge, to assess how LLM use Parametric Knowledge (as discussed in \Secref{sec:back}), we use the \(\operatorname{LogitLens}\) to map residual stream states before (i.e., \(\boldsymbol{x}_{n}^{\mathrm{mid},l}\), calculated from~\Eqref{eq:x_mid}) and after the FFN layer (i.e., \(\boldsymbol{x}_{n}^{l}\), calculated from~\Eqref{eq:x_final}) to vocabulary distributions. The difference in vocabulary distributions represents the parametric knowledge added by the FFN layer to the residual stream, which is measured by Jensen-Shannon divergence (JSD), gives the token-level \textbf{P}arametric \textbf{K}nowledge \textbf{S}core (PKS):
+\begin{equation}
+    \mathcal{P}_{n}^{l} = \operatorname{JSD}\left(q(\boldsymbol{x}_{n}^{\mathrm{mid},l}) \parallel q(\boldsymbol{x}_{n}^{l})\right),
+\end{equation}
+where \(q(\boldsymbol{x}) = \operatorname{softmax}(\operatorname{LogitLens}(\boldsymbol{x}))\). 
+The response-level PKS is the average of token-level scores:
+\begin{equation}
+    \mathcal{P}^{l}_{\mathbf{r}} =  \frac{1}{|\mathbf{r}|}\sum_{t \in \mathbf{r}} \mathcal{P}^{l}_{t}.
+    \label{eq:parametric_score}
+\end{equation}
+Although these metrics may not be exact due to the complexity of LLMs, they serve as intuitive proxies that are sufficiently aligned with the understanding of existing works to analyze the LLM's use of external context and parametric knowledge in relation to hallucinations, as explored in the following questions.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{graphs/empirical_study_1.pdf}
+    \caption{\textbf{Relationship Between LLM Utilization of External Context, Parametric Knowledge, and Hallucinations.} \emph{Top} shows the internal mechanism of LLM's utilization of external context and the occurrence of hallucinations, where the Pearson correlation coefficient between (c) and (a) is 0.41, and between (c) and (b) is 0.46, indicating correlations among them. \emph{Bottom} illustrates the internal mechanism of LLM's utilization of parametric knowledge and the occurrence of hallucinations, where (d) is scaled by $1e^{7}$.}
+    \label{fig:empirical_1}
+\end{figure}
+\subsection{Experiments}
+\label{sec:rq1}
+
+\emph{\textbf{RQ1:} Relationship Between LLM Utilization of External Context, Parametric Knowledge, and Hallucinations}
+\hypertarget{rq1-1}{\textit{(1) We first analyze the relationship between \textbf{External Context and RAG Hallucinations}:}}
+
+\textbf{ECS Differences between Truthful and Hallucinated Responses:}  To investigate the relationship between LLM utilization of external context and hallucinations, we compare the external context score \(\mathcal{E}\) between truthful responses (\(h = 0\)) and hallucinated responses (\(h = 1\)). Specifically, we construct two subsets from the dataset: \(\mathcal{D}^{H}\) for hallucinations (\(h = 1\)) and \(\mathcal{D}^{T}\) for truthful responses (\(h = 0\)), and calculate the external context score difference for different attention heads:
+
+\[
+\Delta \mathcal{E}^{l,h} = \mathcal{E}_{T}^{l,h} - \mathcal{E}_{H}^{l,h} = \frac{1}{|\mathcal{D}^{T}|}\sum_{\mathbf{r} \in \mathcal{D}^{T}} \mathcal{E}^{l,h}_{\mathbf{r}} - \frac{1}{|\mathcal{D}^{H}|}\sum_{\mathbf{r} \in \mathcal{D}^{H}} \mathcal{E}^{l,h}_{\mathbf{r}}.
+\]
+
+\textbf{Result:} As shown in~\Figref{fig:empirical_1}(a), in Llama2-7B, 1006 out of 1024 attention heads show higher external context scores on the truthful dataset \(\mathcal{D}^{T}\) compared to the hallucination dataset \(\mathcal{D}^{H}\) (i.e., \(\Delta \mathcal{E}^{l,h} > 0\)). Since the external context score represents the LLM's utilization of external context through attention heads, we can conclude that, at a group level, LLMs utilize external context information less than truthful responses when generating hallucinations.
+
+\textbf{Correlation between ECS and Hallucination:} To examine whether neglecting external context relates to RAG hallucinations, we analyzed the Pearson Correlation Coefficient (PCC) between the hallucination label and the external context score across data points in \(\mathcal{D}\). Given the expected negative correlation, we inverted the hallucination label \(h\) (denoted as \(\bar{h}\)) and used PCC to quantify the relationship between \(\{\bar{h}_{i}\}_{i=1}^{N}\) and external context scores \(\{\mathcal{E}_{i}\}_{i=1}^{N}\).
+
+\textbf{Result:} As shown in~\Figref{fig:empirical_1}(b), most attention heads show negative correlation between external context scores and hallucination labels \(h\). Since the external context score indicates LLMs' utilization of external context, \Figref{fig:empirical_1}(a) and (b) suggest that RAG hallucinations occur when the LLM inadequately leverages external context.
+
+\textbf{Relation between Copying Heads and Hallucination:} We observed that the external context score \(\mathcal{E}^{l,h}\) of certain attention heads correlates strongly with hallucinations, prompting further exploration of these heads' characteristics. Inspired by the Copying Heads concept from \Secref{sec:back}, we examined the relationship between these heads and Copying Heads.
+
+\textbf{Result:} As shown in~\Figref{fig:empirical_1}(c), the correlation with the results in~\Figref{fig:empirical_1}(a) and (b) indicates that attention heads associated with hallucinations are often Copying Heads (PCC between (c) and (a) is 0.41, and (c) and (b) is 0.46). When these Copying Heads have low external context scores, they either fail to attend to the correct external context or, if attended, fail to retain and utilize this information effectively. This reduces the LLM's copying ability and leads to hallucinations, explaining the negative correlation between these heads' external context scores and the hallucination label \(h\).
+
+\hypertarget{rq1-2}{{\textit{(2) Next, we analyze the relationship between \textbf{Parametric Knowledge and RAG Hallucinations}:}}}
+
+\textbf{PKS Differences between Truth and Hallucination:} We compare the Parametric Knowledge Score \(\mathcal{P}\) across different layers when the LLM generates hallucinations versus truthful responses:
+
+\[
+\Delta \mathcal{P}^{l} = \mathcal{P}_{H}^{l} - \mathcal{P}_{T}^{l} = \frac{1}{|\mathcal{D}^{H}|}\sum_{\mathbf{r} \in \mathcal{D}^{H}} \mathcal{P}^{l}_{\mathbf{r}} - \frac{1}{|\mathcal{D}^{T}|}\sum_{\mathbf{r} \in \mathcal{D}^{T}} \mathcal{P}^{l}_{\mathbf{r}}.
+\]
+
+\textbf{Result:} As shown in~\Figref{fig:empirical_1}(d), parametric knowledge scores in the later layers of FFN modules are significantly higher in the hallucination dataset compared to the truthful dataset (i.e., \(\Delta \mathcal{P}^{l} > 0\)). On average, across all layers, hallucination responses exhibit higher parametric knowledge scores than truthful ones.
+
+\textbf{Correlation between PKS and Hallucination:} To further explore the relationship between parametric knowledge and hallucinations, we calculate the Pearson correlation between the hallucination label and parametric knowledge scores.
+
+\textbf{Result:} As shown in~\Figref{fig:empirical_1}(e), parametric knowledge scores in the later layers' FFN modules are positively correlated with the hallucination label \(h\) and we define the FFN modules from later layers that show strong correlations with hallucinations as \textbf{Knowledge FFNs}.  Since these scores represent the amount of parametric knowledge added to the residual stream, we conclude excessive addition of parametric knowledge by these Knowledge FFNs leads to hallucinations. This aligns with findings from LLM early exit studies~\citep{chuang2024dola,schuster2022confident}: when external context provides sufficient information, shallow layers can generate truthful responses, but over-reliance on parametric knowledge from deeper layers can confuse the model, causing hallucinations.
+
+
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{graphs/intervene_combined_result.pdf}
+    \end{minipage}%
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{graphs/parametric_know_unknow_socre.pdf}
+    \end{minipage}
+    \caption{(\emph{Left}) Intervention Result for Attention Heads and FFNs. (\emph{Right}) External Context Scores and Parametric Knowledge Scores (scaled by $1e^{5}$) comparing Truth \& Known (where LLM knows the truthful answer) and Hallucination (where LLM is unknown about the answer and hallucinated).}
+    \label{fig:int_know_unknow}
+\end{figure}
+
+\hypertarget{rq2}{{\emph{\textbf{RQ2:} Can the relationship identified in RQ1 be validated from a causal perspective?}
+\label{sec:rq2}}}
+
+To validate the causal relationship between Copying Heads, Knowledge FFN modules, and RAG hallucinations identified in~\Secref{sec:rq1}, we employ \textbf{Causal Intervention}~\citep{ferrando2024primer} by intervening on attention heads and FFNs, where we applied noise to the attention scores and amplified the contributions of FFN modules to the residual stream (as shown in~\Figref{fig:method} (b) and (c)). We compare the Negative Log-Likelihood Loss (NLL)~\citep{pytorch_nllloss} difference for the experimental group (Copying Heads/Knowledge FFNs) and the control group (Other heads/FFNs) on truthful dataset \(\mathcal{D}^{T}\). 
+
+
+\textbf{Result:} As shown in~\Figref{fig:int_know_unknow} (\emph{Left}), the experimental group's impact on NLL difference was significantly greater than that of the control group for both attention heads and FFN modules. These results, combined with findings from~\Secref{sec:truth}, validate parametric knowledge added by Knowledge FFNs and the ability of Copying Heads to retrieve relevant external knowledge and LLM effectively utilizes this information during generation, have a significant causal relationship with the RAG hallucinations.
+
+
+
+
+
+\begin{tcolorbox}[colback=gray!20, colframe=gray, coltitle=white, fonttitle=\bfseries,boxsep=0mm]
+\textbf{Finding:} The occurrence of RAG hallucinations is causally related to two primary factors: \\ (1) while the Copying Heads may occasionally neglect necessary knowledge from the external context, a more prominent cause is the LLM losing the Copying Heads retrieved information during the generation process (\hyperlink{rq1-1}{RQ1-1}, \hyperlink{rq2}{RQ2}, \S~\ref{sec:dive_ecs}), and (2) the Knowledge FFNs within LLM excessively injecting parametric knowledge into the residual stream (\hyperlink{rq1-2}{RQ1-2}, \hyperlink{rq2}{RQ2}).
+\end{tcolorbox}
+
+
+
+\emph{\textbf{RQ3:} Hallucination Behavior Analysis from the Parametric Knowledge Perspective}
+
+In this section, we focus on parametric knowledge to analyze hallucination behavior when the LLM either knows or does not know the truthful answer. 
+
+\textbf{Result:} Our results in~\Figref{fig:int_know_unknow} (\emph{Right}) show that when the LLM knows the truthful answer, Copying Heads more accurately capture and utilize external knowledge, and Knowledge FFNs add less parametric knowledge to the residual stream compared to hallucination scenarios, which also supports by~\citep{wadhwa2024rags}. The results support leveraging our \textbf{Finding} to detect RAG hallucination.
+
+
+
+
+
+\section{Methods}
+
+\label{sec:methods}
+Building on our empirical findings (\S~\ref{sec:empirical}), we propose \textbf{ReDeEP} (Regressing Decoupled External Context and Parametric Knowledge) to detect hallucinations in LLM-based retrieval-augmented generation (\S~\ref{sec:token_det}, \S~\ref{sec:chunk_det}), and \textbf{AARF} (Add Attention Reduce FFN) to mitigate hallucinations by reweighting the contributions of Knowledge FFNs and Copying Heads to the residual stream (\S~\ref{sec:truth}).
+
+\subsection{Token-level Hallucination Detection --- ReDeEP (token)}
+\label{sec:token_det}
+
+Our empirical study identified RAG hallucinations as stemming from insufficient utilization of external context by Copying Heads (set \(\mathcal{A}\)) and excessive reliance on parametric knowledge by Knowledge FFNs (set \(\mathcal{F}\)). To address the confounding issues shown in~\Figref{fig:related_work}, we developed a multivariate analysis approach that regresses decoupled External Context Score and Parametric Knowledge Score to predict hallucinations~\citep{kahlert2017control}. For a response \(\mathbf{r}\), the hallucination score \({\mathcal{H}}_{t}\) is:
+
+\[
+{\mathcal{H}}_{t}(\mathbf{r}) =  \frac{1}{|\mathbf{r}|}\sum_{t \in \mathbf{r}}{\mathcal{H}}_{t}(t), \quad {\mathcal{H}}_{t}(t) = \sum_{l \in \mathcal{F}} \alpha \cdot\mathcal{P}^{l}_{t} - \sum_{l,h \in \mathcal{A}} \beta\cdot  \mathcal{E}^{l,h}_{t},
+\]
+where \(\alpha\) and \(\beta\) are regression coefficients for external context and parametric knowledge with \(\alpha, \beta > 0\), and this linear regression leverages the high Pearson correlation identified in \S~\ref{sec:empirical}.
+\subsection{Chunk-level Hallucination Detection --- ReDeEP (chunk)}
+\label{sec:chunk_det}
+ As the \textit{Token-level Hallucination Detection} computes scores for each token, it is computationally expensive and lacks full contextual consideration. To improve efficiency and accuracy, we propose \textit{Chunk-level Hallucination Detection} as a more suitable method for RAG hallucination detection. Our approach is inspired by the common chunking operation in RAG~\cite{fan2024survey,finardi2024chronicles}, where the retrieved context \(\mathbf{c}\) and the response \(\mathbf{r}\) are divided into manageable segments \(\left\langle\boldsymbol{\tilde{c}}_i\right\rangle_{i=1}^{N}\) and \(\left\langle\boldsymbol{\tilde{r}}_j\right\rangle_{j=1}^{M}\). 
+For the chunk-level external context score \(\hat{\mathcal{E}}^{l,h}\), we first calculate chunk-level attention weights \(W_{i,j}^{l,h} = \operatorname{Mean-Pooling}\left(A_{\mathbf{\tilde{c}}_i, \mathbf{\tilde{r}}_j}^{l,h}\right)\),  where \(A\) is the original token-level attention weight matrix, then determine the highest attention chunk pairs \((\mathbf{\tilde{c}}, \mathbf{\tilde{r}})\). Using an embedding model ($\operatorname{emb}$), we compute the external context score for each chunk as follows:
+
+\[
+\tilde{\mathcal{E}}^{l,h}_{\mathbf{r}} =  \frac{1}{M}\sum_{\tilde{\mathbf{r}} \in \mathbf{r}} \tilde{\mathcal{E}}^{l,h}_{\tilde{\mathbf{r}}}, \quad \tilde{\mathcal{E}}_{\mathbf{\tilde{r}}}^{l,h} = \frac{\operatorname{emb}(\mathbf{\tilde{r}}) \cdot \operatorname{emb}(\mathbf{\tilde{c}})}{\|\operatorname{emb}(\mathbf{\tilde{r}})\| \|\operatorname{emb}(\mathbf{\tilde{c}})\|}.
+\]
+
+For the chunk-level parametric knowledge score \(\tilde{\mathcal{P}}^{l}\), we sum the token-level parametric knowledge scores for each chunk:
+
+\[
+\tilde{\mathcal{P}}^{l}_{\mathbf{r}} =  \frac{1}{M}\sum_{\tilde{\mathbf{r}} \in \mathbf{r}} \tilde{\mathcal{P}}^{l}_{\tilde{\mathbf{r}}}, \quad  \tilde{\mathcal{P}}^{l}_{\mathbf{\tilde{r}}} =  \frac{1}{|\mathbf{\tilde{r}}|}\sum_{t \in \mathbf{\tilde{r}}} \mathcal{P}^{l}_{t}.
+\]
+
+Finally, the Chunk-level Hallucination Detection score \({\mathcal{H}}_{c}(\mathbf{r})\) is defined as:
+
+\[
+{\mathcal{H}}_{c}(\mathbf{r}) = \sum_{l \in \mathcal{F}} \alpha \cdot \tilde{\mathcal{P}}^{l}_{\mathbf{r}} - \sum_{l,h \in \mathcal{A}} \beta \cdot \tilde{\mathcal{E}}^{l,h}_{\mathbf{r}}.
+\]
+
+
+
+\subsection{Truthful RAG Generation  --- AARF}
+\label{sec:truth}
+
+ AARF operates in two stages: (1) token-level hallucination detection and (2) reweighting the contributions of attention heads and FFN modules to the residual stream. 
+
+During the generation of token \(t_n\), we compute the hallucination score \({\mathcal{H}}_{t}(t_n)\). If \({\mathcal{H}}_{t}(t_n) \leq \tau\), we proceed with the normal output computation \(f(\mathbf{x})\) (see \Eqref{eq:final_output}). If \(\mathcal{H}_{t}(t_n) > \tau\), we adjust the weights of Copying Heads \(\mathcal{A}\) and Knowledge FFN modules \(\mathcal{F}\), shifting focus toward external context and reducing reliance on parametric knowledge:
+
+\[
+f(\mathbf{x}) = \sum_{l=1}^L \sum_{h=1}^H \widehat{\operatorname{Attn}}^{l, h}\left(\boldsymbol{X}_{\leq n}^{l-1}\right) \boldsymbol{W}_U + \sum_{l=1}^L \widehat{\operatorname{FFN}}^l\left(\boldsymbol{x}_n^{\mathrm{mid}, l}\right) \boldsymbol{W}_U + \boldsymbol{x}_n \boldsymbol{W}_U,
+\]
+
+\[
+\widehat{\operatorname{Attn}}^{l, h}(\cdot) = 
+\begin{cases}
+\alpha_2 \cdot \operatorname{Attn}^{l, h}\left(\boldsymbol{X}_{\leq n}^{l-1}\right), & \text{if } (l, h) \in \mathcal{A}, \\
+\operatorname{Attn}^{l, h}\left(\boldsymbol{X}_{\leq n}^{l-1}\right), & \text{otherwise}
+\end{cases},
+\quad
+\widehat{\operatorname{FFN}}^l(\cdot) = 
+\begin{cases}
+\beta_2 \cdot \operatorname{FFN}^l\left(\boldsymbol{x}_n^{\mathrm{mid}, l}\right), & \text{if } l \in \mathcal{F}, \\
+\operatorname{FFN}^l\left(\boldsymbol{x}_n^{\mathrm{mid}, l}\right), & \text{otherwise}.
+\end{cases}
+\]
+
+Here, \(\alpha_2\) is a constant greater than 1 for amplifying attention head contributions, and \(\beta_2\) is a constant between (0, 1) for reducing FFN contributions.
+
+
+
+
+
+\section{Experiments}
+
+\label{sec:exp}
+\begin{table}[t]
+    \centering
+    \resizebox{0.96\linewidth}{!}{
+        \renewcommand\arraystretch{1.1}
+    \centering
+    \setlength{\tabcolsep}{1.5mm}
+    \begin{tabular}{l|c|c|ccccc|ccccc}
+    \toprule 
+        \multirow{2}{*}{\textbf{LLMs}} & \multirow{2}{*}{\textbf{Categories}} & \multirow{2}{*}{\textbf{Models}}& \multicolumn{5}{c}{\textbf{RAGTruth}} & \multicolumn{5}{c}{\textbf{Dolly (AC)}}\\ \cmidrule(lr){4-8} \cmidrule(lr){9-13}
+        ~ & ~ & ~ & \textbf{AUC} & \textbf{PCC} & \textbf{Acc.} & \textbf{Rec.} & {$\mathbf{F_1}$} & \textbf{AUC} & \textbf{PCC} & \textbf{Acc.} & \textbf{Rec.} & {$\mathbf{F_1}$} \\ \midrule 
+        \multirow{18}{*}{\textbf{LLaMA2-7B}} & \multirow{5}{*}{\textbf{MPE}} & SelfCheckGPT & -- & -- & 0.5844 & 0.3584 & 0.4642 & -- & -- & 0.5300 & 0.1897 & 0.3188 \\ 
+        ~ & ~ & Perplexity & 0.5091 & -0.0027 & 0.5333 & 0.5190 & 0.6749 & 0.6825 & 0.2728 & 0.6363 & 0.7719 & 0.7097 \\ 
+        ~ & ~ & LN-Entropy & 0.5912 & 0.1262 & 0.5600 & 0.5383 & 0.6655 & 0.7001 & 0.2904 & 0.6162 & 0.7368 & 0.6772 \\ 
+        ~ & ~ & Energy & 0.5619 & 0.1119 & 0.5088 & 0.5057 & 0.6657 & 0.6074 & 0.2179 & 0.5656 & 0.6316 & 0.6261 \\ 
+        ~ & ~ & Focus & 0.6233 & 0.2100 & 0.5533 & 0.5309 & 0.6622 & 0.6783 & 0.3174 & 0.6262 & 0.5593 & 0.6534 \\ \cmidrule(lr){2-13}
+        ~ & \multirow{7}{*}{\textbf{ECP}} & Prompt & -- & -- & 0.6700 & 0.7200 & 0.6720 & -- & -- & 0.6200 & 0.3965 & 0.5476 \\ 
+        ~ & ~ & LMvLM & -- & -- & 0.5946 & 0.7389 & 0.6473 & -- & -- & 0.6500 & 0.7759 & 0.7200 \\ 
+        ~ & ~ & ChainPoll & 0.6738 & 0.3563 & 0.6741 & \underline{0.7832} & \underline{0.7066} & 0.6593 & 0.3502 & 0.6200 & 0.4138 & 0.5581 \\ 
+        ~ & ~ & RAGAS & 0.7290 & 0.3865 & \underline{0.6822} & 0.6327 & 0.6667 & 0.6648 & 0.2877 & 0.6500 & 0.5345 & 0.6392 \\ 
+        ~ & ~ & Trulens & 0.6510 & 0.1941 & 0.6422 & 0.6814 & 0.6567 & \underline{0.7110} & 0.3198 & \underline{0.6800} & 0.5517 & 0.6667 \\ 
+        ~ & ~ & RefCheck & 0.6912 & 0.2098 & 0.6467 & 0.6280 & 0.6736 & 0.6494 & 0.2494 & 0.6100 & 0.3966 & 0.5412 \\ 
+        ~ & ~ & P(True) & 0.7093 & 0.2360 & 0.5466 & 0.5194 & 0.5313 & 0.6011 & 0.1987 & 0.5444 & 0.6350 & 0.6509 \\ \cmidrule(lr){2-13}
+        ~ & \multirow{4}{*}{\textbf{PCE}}  & EigenScore & 0.6045 & 0.1559 & 0.5422 & 0.7469 & 0.6682 & 0.6786 & 0.2428 & 0.6596 & 0.7500 & 0.7241 \\ 
+        ~ & ~ & SEP & 0.7143 & 0.3355 & 0.6177 & 0.7477 & 0.6627 & 0.6067 & 0.2605 & 0.6060 & 0.6216 & 0.7023 \\ 
+        ~ & ~ & SAPLMA & 0.7037 & 0.3188 & 0.5155 & 0.5091 & 0.6726 & 0.5365 & 0.0179 & 0.5600 & 0.5714 & 0.7179 \\ 
+        ~ & ~ & ITI & 0.7161 & 0.3932 & 0.5667 & 0.5416 & 0.6745 & 0.5492 & 0.0442 & 0.5800 & 0.5816 & 0.6281 \\ \cmidrule(lr){2-13}
+        ~ & \multirow{2}{*}{\textbf{Ours}} & \textbf{ReDeEP(token)} & \underline{0.7325} & \underline{0.3979} & \bf 0.7067 & 0.6770 & 0.6986 & 0.6884 & \underline{0.3266} & 0.6464 & \underline{0.8070} & \underline{0.7244} \\ 
+        ~ & ~ & \textbf{ReDeEP(chunk)} & \bf 0.7458 & \bf 0.4203 & \underline{0.6822} & \bf 0.8097 &  \bf 0.7190 & \bf 0.7949 & \bf 0.5136 & \bf 0.7373 & \bf 0.8245 & \bf 0.7833 \\ \midrule \midrule
+        \multirow{18}{*}{\textbf{LLaMA2-13B}} & \multirow{5}{*}{\textbf{MPE}} & SelfCheckGPT & -- & -- & 0.5844 & 0.3584 & 0.4642 & -- & -- & 0.5300 & 0.1897 & 0.3188 \\ 
+        ~ & ~ & Perplexity & 0.5091 & -0.0027 & 0.5333 & 0.5190 & 0.6749 & 0.6825 & 0.2728 & 0.6363 & 0.7719 & 0.7097 \\ 
+        ~ & ~ & LN-Entropy & 0.5912 & 0.1262 & 0.5600 & 0.5383 & 0.6655 & 0.7001 & 0.2904 & 0.6162 & 0.7368 & 0.6772 \\ 
+        ~ & ~ & Energy & 0.5619 & 0.1119 & 0.5088 & 0.5057 & 0.6657 & 0.6074 & 0.2179 & 0.5656 & 0.6316 & 0.6261 \\ 
+        ~ & ~ & Focus & 0.7888 & 0.4444 & 0.6000 & 0.6173 & 0.6977 & 0.7067 & 0.1643 & 0.5900 & 0.7333 & 0.6168 \\ \cmidrule(lr){2-13}
+        ~ & \multirow{7}{*}{\textbf{ECP}} & Prompt & -- & -- & 0.7300 & 0.7000 & 0.6899 & -- & -- & 0.6700 & 0.4182 & 0.5823 \\ 
+        ~ & ~ & LMvLM & -- & -- & 0.5956 & \bf 0.8357 & 0.6553 & -- & -- & 0.6300 & 0.7273 & 0.6838 \\ 
+        ~ & ~ & ChainPoll & 0.7414 & 0.4820 & 0.7378 & \underline{0.7874} & 0.7342 & 0.7070 & \underline{0.4758} & \underline{0.6800} & 0.4364 & 0.6000 \\ 
+        ~ & ~ & RAGAS & 0.7541 & 0.4249 & 0.7000 & 0.6763 & 0.6747 & 0.6412 & 0.2840 & 0.6200 & 0.4182 & 0.5476 \\ 
+        ~ & ~ & Trulens & 0.7073 & 0.2791 & 0.6756 & 0.7729 & 0.6867 & 0.6521 & 0.2565 & 0.5700 & 0.3818 & 0.4941 \\ 
+        ~ & ~ & RefCheck & 0.7857 & 0.4104 & 0.7200 & 0.6800 & 0.7023 & 0.6626 & 0.2869 & 0.5700 & 0.2545 & 0.3944 \\ 
+        ~ & ~ & P(True) & 0.7998 & 0.3493 & 0.6266 & 0.5980 & 0.7032 & 0.6396 & 0.2009 & 0.5600 & 0.6180 & 0.5739 \\ \cmidrule(lr){2-13}
+        ~ & \multirow{4}{*}{\textbf{PCE}} & EigenScore & 0.6640 & 0.2672 & 0.5267 & 0.6715 & 0.6637 & 0.7214 & 0.2948 & 0.6211 & \underline{0.8181} & \underline{0.7200} \\ 
+        ~ & ~ & SEP & 0.8089 & 0.5276 & 0.7288 & 0.6580 & 0.7159 & 0.7098 & 0.2823 & \underline{0.6800} & 0.6545 & 0.6923 \\ 
+        ~ & ~ & SAPLMA & 0.8029 & 0.3956 & 0.5488 & 0.5053 & 0.6529 & 0.6053 & 0.2006 & 0.6000 & 0.6000 & 0.6923 \\ 
+        ~ & ~ & ITI & 0.8051 & 0.4771 & 0.6177 & 0.5519 & 0.6838 & 0.5511 & 0.0646 & 0.5200 & 0.5385 & 0.6712 \\ \cmidrule(lr){2-13}
+        ~ &  \multirow{2}{*}{\textbf{Ours}} & \textbf{ReDeEP(token)} & \underline{0.8181} & \underline{0.5478} & \underline{0.7711} & 0.7440 & \underline{0.7494} & \underline{0.7226} & 0.3776 & 0.6465 & 0.8148 & 0.7154 \\ 
+        ~ & ~ & \textbf{ReDeEP(chunk)} & \bf 0.8244 & \bf 0.5566 & \bf 0.7889 & 0.7198 & \bf 0.7587 & \bf 0.8420 & \bf 0.5902 & \bf 0.7070 & \bf 0.8518 & \bf 0.7603 \\ \midrule \midrule
+         \multirow{18}{*}{\textbf{LLaMA3-8B}} & \multirow{5}{*}{\textbf{MPE}} & SelfCheckGPT & -- & -- & 0.4911 & 0.4111 & 0.5111 & -- & -- & 0.6800 & 0.2195 & 0.3600 \\ 
+        ~ & ~ & Perplexity & 0.6235 & 0.2100 & \underline{0.6800} & 0.6537 & 0.6778 & 0.5924 & 0.1095 & 0.6200 & 0.3902 & 0.4571 \\ 
+        ~ & ~ & LN-Entropy & 0.7021 & 0.3451 & 0.6422 & 0.5596 & 0.6282 & 0.6011 & 0.1150 & 0.6100 & 0.5365 & 0.5301 \\ 
+        ~ & ~ & Energy & 0.5959 & 0.1393 & 0.5466 & 0.5514 & 0.6720 & 0.5014 & -0.0678 & 0.4300 & 0.4047 & 0.5440 \\ 
+        ~ & ~ & Focus & 0.6378 & 0.3079 & 0.4844 & 0.6688 & 0.6879 & 0.6177 & 0.1266 & 0.5900 & 0.6918 & 0.6874 \\ \cmidrule(lr){2-13}
+        ~ & \multirow{7}{*}{\textbf{ECP}} & Prompt & -- & -- & 0.6400 & 0.4403 & 0.5691 & -- & -- & 0.6800 & 0.3902 & 0.5000 \\ 
+        ~ & ~ & LMvLM & -- & -- & 0.6222 & 0.5109 & 0.6986 & -- & -- & 0.5500 & 0.6341 & 0.5361 \\ 
+        ~ & ~ & ChainPoll & 0.6687 & 0.3693 & 0.6311 & 0.4486 & 0.5813 & 0.6114 & 0.2691 & 0.6600 & 0.3415 & 0.4516 \\ 
+        ~ & ~ & RAGAS & 0.6776 & 0.2349 & 0.5933 & 0.3909 & 0.5094 & 0.6870 & \underline{0.3628} & \underline{0.7100} & 0.8000 & 0.5246 \\ 
+        ~ & ~ & Trulens & 0.6464 & 0.1326 & 0.5867 & 0.3909 & 0.5053 & \underline{0.7040} & 0.3352 & \bf 0.7200 & 0.3659 & 0.5172 \\ 
+        ~ & ~ & RefCheck & 0.6014 & 0.0426 & 0.5511 & 0.3580 & 0.4628 & 0.5260 & -0.0089 & 0.5800 & 0.1951 & 0.2759 \\ 
+        ~ & ~ & P(True) & 0.6323 & 0.2189 & 0.6311 & 0.7083 & 0.6835 & 0.6871 & 0.3472 & 0.6500 & 0.5707 & 0.6573 \\ \cmidrule(lr){2-13}
+        ~ &\multirow{4}{*}{\textbf{PCE}}& EigenScore & 0.6497 & 0.2120 & 0.6311 & 0.7078 & 0.6745 & 0.6612 & 0.2065 & 0.5584 & 0.7142 & 0.5952 \\ 
+        ~ & ~ & SEP & 0.7004 & 0.3713 & 0.6189 & 0.7333 & 0.6915 & 0.5159 & 0.0639 & 0.4500 & 0.6829 & 0.5385 \\ 
+        ~ & ~ & SAPLMA & 0.7092 & 0.4054 & \bf 0.7133 & 0.5432 & 0.6718 & 0.5019 & -0.0327 & 0.4000 & 0.4040 & 0.5714 \\ 
+        ~ & ~ & ITI & 0.6534 & 0.3404 & 0.6600 & 0.6850 & 0.6933 & 0.5011 & 0.0024 & 0.5400 & 0.3091 & 0.4250 \\ \cmidrule(lr){2-13}
+        ~ &  \multirow{2}{*}{\textbf{Ours}} & \textbf{ReDeEP(token)} & \bf 0.7522 & \bf 0.4493 &  0.6533 & \bf 0.7984 & \bf 0.7132 & 0.6701 & 0.2421 & 0.6700 & \underline{0.8293} & \underline{0.6901} \\ 
+        ~ & ~ & \textbf{ReDeEP(chunk)} & \underline{0.7285} & \underline{0.3964} & 0.6288 & \underline{0.7819} & \underline{0.6947} & \bf 0.7354 & \bf 0.3652 &  \underline{0.7100} & \bf 0.8392 & \bf 0.7100 \\ \bottomrule
+    \end{tabular}}
+     \caption{Performance comparisons between ReDeEP and the baselines. The boldface represents the best performance, and the underline represents the second-best. }
+    \label{tab:main_results}
+     
+\end{table}
+
+\subsection{Settings}
+\label{sec:setting}
+\textbf{Data:} We evaluate ReDePE and AARF on two public RAG hallucination datasets.
+\textbf{RAGTruth} is the first high-quality, manually annotated RAG hallucination dataset. The data includes three RAG task types: Question Answering (QA), Data-to-Text Writing, and News Summarization.
+\textbf{Dolly (AC)} is a dataset with Accurate Context obtained from~\citep{hu2024refchecker}, including tasks such as text summarization, closed-QA, and information extraction.
+
+\textbf{Baselines:} We conduct experiments on three variants of LLaMA, including LLaMA2-7B-Chat, LLaMA2-13B-Chat, and LLaMA3-8B-Chat. For hallucination detection methods, we follow the classification of existing methods as shown in~\Figref{fig:related_work}. We use (1) Parametric Confounded by External Methods (\textbf{PCE}), {(2) External Confounded by Parametric Methods} (\textbf{ECP}), and {(3) Mixed Parametric and External Methods} (\textbf{MPE}). We used AUC, Pearson Correlation Coefficient (PCC), Accuracy (Acc.), Recall (Rec.), and $\text{F}_{1}$ as evaluation metrics for detection accuracy.
+
+\subsection{Experiments}
+\textbf{RAG Hallucination Detection:} As shown in Table~\ref{tab:main_results}, ReDeEP consistently improves performance across two datasets, various backbone methods, and different metrics, validating its effectiveness in detecting RAG hallucinations. ReDeEP outperforms MPE methods, demonstrating that mechanistic interpretability effectively decouples the LLM's utilization of external context and parametric knowledge, enabling more accurate detection of RAG hallucinations.
+Additionally, ReDeEP surpasses both ECP and PCE methods by incorporating both the External Context Score and Parametric Knowledge Score as covariates in a multivariate regression approach, effectively addressing the confounding problem. 
+ReDeEP(chunk) generally outperforms ReDeEP(token) in most metrics, suggesting that chunk-level processing better preserves semantic integrity and improves detection performance.
+
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{0.5\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{graphs/ragtruth_truth.pdf}
+        \label{fig:dolly-truth}
+    \end{subfigure}%
+    \begin{subfigure}{0.5\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{graphs/dolly_truth.pdf}
+        \label{fig:ragtruth-truth}
+    \end{subfigure}
+    \caption{Comparison between LLMs+AARF vs LLMs judged by GPT-4o.}
+    \label{fig:reduce_hallucination}
+\end{figure}
+\textbf{Truthful RAG Generation:}
+ Pairwise comparisons rated by GPT-4-o are shown in Figure~\ref{fig:reduce_hallucination}, demonstrating that AARF can reduce hallucinations to a certain extent compared to the baseline model. These results validate the effectiveness of our intervention experiments and confirm the findings presented in \textbf{RQ2} of Section~\ref{sec:rq1}.
+
+
+
+\section{Conclusion}
+
+
+Detecting RAG hallucinations is critical for enhancing the security and reliability of RAG systems. In this work, we introduced ReDeEP, a novel method that detects RAG hallucinations by analyzing LLMs' utilization of parametric knowledge and external context. Our empirical study shows that hallucinations arise from insufficient utilization of external context by Copying Heads and over-reliance on parametric knowledge by Knowledge FFN modules. These insights also guided the development of interventions to reduce hallucinations without updating model parameters. ReDeEP demonstrates significant performance improvements across the LLaMA family and RAG hallucination benchmarks, outperforming existing detection methods.
+
+
+
+
+
+
+
+
+

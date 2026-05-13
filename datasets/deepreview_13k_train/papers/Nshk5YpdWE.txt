@@ -1,0 +1,509 @@
+\title{Lagrangian Flow Networks for Conservation Laws}
+
+\begin{abstract}
+We introduce \textit{Lagrangian Flow Networks} (LFlows) for modeling fluid densities and velocities continuously in space and time.
+By construction, the proposed LFlows satisfy the continuity equation,
+a PDE describing mass conservation in its differentiable form. 
+Our model is based on the insight that solutions to the continuity equation can be expressed as
+time-dependent density transformations via differentiable and invertible maps.
+This follows from classical theory of the existence and uniqueness of Lagrangian flows for smooth vector fields.
+Hence, we model fluid densities by transforming a base density with parameterized diffeomorphisms conditioned on time.
+The key benefit compared to methods relying on numerical ODE solvers or PINNs is that the analytic expression of the velocity is always consistent with changes in density.
+Furthermore, we require neither expensive numerical solvers, nor additional penalties to enforce the PDE.
+LFlows show higher predictive accuracy in density modeling tasks compared to competing models in 2D and 3D,
+while being computationally efficient.
+As a real-world application, we model bird migration based on sparse weather radar measurements.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+The development of physics-informed Machine Learning (PI-ML) \citep{physml:karniadakis2021physics} opens new opportunities to 
+combine the power of modern ML methods with physical constraints that serve as meaningful regularizers.
+These constraints might, for example, be available in the form of partial differential equations (PDEs).
+Within PI-ML we consider hydrodynamic flow problems governed by the physical law of mass conservation.
+This law is described in its local and differentiable form by a PDE commonly known as the \textit{continuity equation} (CE)
+\begin{align}
+\label{eq:continuity_eq:euler}
+&\left\{
+\begin{aligned}
+\partial_t \rho + \nabla \cdot (\vel \rho) & = 0 & (t,\x) \in (t_0, T)\times \domain,
+\\
+\rho(t_0,\x) & = \rho_{t_0} (\x) & \x \in \domain.
+\end{aligned} \right. 
+\end{align}
+For any time $t \in [t_0,T)$ the function $\rho(t, \cdot)$ can be thought of as the density of parcels advected by the velocity field $\vel$, with initial density $\rho_{t_0}$.
+Here, $[t_0, T] \times \domain$ is the space-time domain, which is a subset of $\R \times \R^d$.
+The partial derivative w.r.t.~time $t$ is denoted by $\partial_t$ and $\nabla \cdot \bs b = \nabla_{\x} \cdot \bs b = \sum_{i=1}^{d} \frac{\partial {\bs b}_i}{\partial x_i}$ is the spatial divergence
+of a $d$ dimensional vector field $\bs b: [t_0,T] \times \Omega \mapsto \R^d $. 
+
+Unlike classical initial value problems, we consider challenging settings where exact boundary and initial conditions are unknown.
+That is, the continuous density and velocity fields have to be inferred from sparse and noisy data.
+The important physical constraint is that the solution must comply with the CE in Eq.~\ref{eq:continuity_eq:euler}.
+To this end we propose a neural network based model that fulfills the CE by construction and provides physically consistent velocity and density fields.
+
+We specifically consider two distinct application settings.
+In both settings we are restricted to sparse and noisy measurements.
+In setting (i) we measure the fluid density $\rho$ and velocity $\vel$, without knowing any additional equations aside from the CE.
+This occurs for example within the area of radar ornithology \citep{chilson2017radar},
+where density and velocity of birds can be inferred from radar data.
+Such radar-based measurements are to date the only practical high-throughput data source for birds.
+The goal is to spatiotemporally estimate brid migration densities \citep{nussbaumer2019geostatistical}.
+Since more migration-specific dynamics are unknown, mass conservation is usually considered as a physical constraint \citep{nussbaumer2021quantifying, lippert2022learning, lippert2022physics}.
+In setting (ii) we exclusively have sparse density observations, but we know additional equations constraining the velocity. 
+This might, for example, occur in dynamical optimal transport problems. 
+Here, two densities are to be interpolated while adhering to the CE. 
+Therefore, minimizing the total transport cost constrains the velocity field.
+More generally, setting (ii) includes a wide range of compressible fluids dynamic problems.
+In both settings we are mainly interested in accurately modeling the density, with the velocity measurements or additional equations serving as an informative prior.
+
+\paragraph{Main contributions.}
+The main contributions of this paper are as follows: % cover theory,  methods, applicability and 
+\begin{itemize}
+\item 
+We outline a fundamental link between densities modeled by conditional Normalizing Flows and spatiotemporal density fields that satisfy the  CE.
+\item %We introduce \textit{Lagrangian Flow Networks} as a neural network architecture that fulfills the continuity equation by design, continuously in space and time. In addition, two principled regularization methods are suggested. 
+We leverage this link to introduce models for ill-posed hydrodynamic flow problems that always satisfy the CE by construction, coined \textit{Lagrangian Flow Networks} (LFlows). We do so without requiring an explicit representation of the initial density.
+\item We provide a way to calculate the velocity without inverting the conditional normalizing flow, enabling the use of flexible bijective layers with otherwise costly inverses.
+\item We assess LFlows in multiple application settings and show better predictive performance than existing methods while staying computationally feasible and physically consistent.
+\end{itemize}
+
+
+\section{Related Work}
+
+
+\paragraph{Neural Networks for Conservation Laws.}
+Physics-informed neural networks (PINNs) \citep{PINN:raissi2019physics} enforce PDEs in neural networks by introducing an additional PDE-loss that penalizes pointwise deviations from the PDE.
+The PDE-loss is enforced on so-called \textit{collocation points} that are sampled in the signal domain.
+The accuracy of PINNs is thus limited by the amount (and distribution) of sampled collocation points, as well as the dimension of the signal domain.
+For conservation laws, recent improvements in PINNs suggest more sophisticated sampling approaches \citep{PINN:torres2022mesh}, or introduce domain decompositions \citep{PINN:discrete_conservation:jagtap2020conservative}.
+Although this alleviates scaling problems, the fundamental limitation due to the number of possible collocation points (or subdomains) still remains.
+
+In contrast, \citet{physml:richter2022neural} propose a parameterization of neural networks that enforces mass conservation by design, which we refer to as \textit{divergence-free Neural Networks} (DFNNs).
+Solutions to the CE in Eq.~\ref{eq:continuity_eq:euler} are represented as divergence-free $(d+1)$ dimensional vector field $\bs b=(\rho, \rho\vel)$ with an augmented $(d+1)$ dimensional input space $\bs s = (t, \x)$:
+\begin{equation}
+   \frac{\partial \rho}{\partial t} + \nabla_{\x} \cdot (\rho \vel) 
+   =\sum_{i=1}^{d+1} \frac{\partial b_i}{\partial s_i} 
+    = \nabla_{\bs s} \cdot \begin{pmatrix}
+        \rho \\ \rho \vel 
+    \end{pmatrix}
+   =
+   \nabla_{\bs s} \cdot \bs b 
+    = 0 .
+\end{equation}
+The generalization of divergence-free vector fields to higher dimensions is achieved through the concept of differential forms.
+The resulting parameterization, however, heavily relies on expensive higher-order automatic differentiation, posing limitations in terms of scalability.
+
+Concurrent to our work, \citet{TIPF} (TIPF) proposes the use of Lagrangian flow maps to model continuous probability flows that fulfill the CE.
+Unlike LFlows, TIPF considers well-posed PDE settings with known initial conditions. 
+Specifically, they focus on Fokker-Planck equations and Wasserstein gradient flows by additionally introducing an unbiased self-consistency loss. 
+In contrast, we consider ill-posed data-assimilation for physical problems with sparse and noisy data where initial conditions are unknown.
+Additionally, LFlows stand out as they don't require the inversion of bijective layers for computing the velocity, allowing for more expressive bijections.
+
+Deep operator learning \citep{lu2019deeponet, li2020fourier} was proposed as a general approach to learn dynamics from dense observations. 
+In these settings, the PDE is not provided, but has to be learned from large amounts of dense data often provided through simulations. 
+As such, it is not applicable to our setting with spatially sparse data obtained at irregular time steps.
+Further notable mentions are Lagrangian and Hamiltonian neural networks \citep{cranmer2020lagrangian, greydanus2019hamiltonian}, 
+which can learn conservation laws from observed trajectories of individual particles. 
+
+\paragraph{Data assimilation with the Adjoint.}
+The adjoint method \citep{cacuci1981sensitivitya, cacuci1981sensitivityb, pontryagin1987mathematical} allows to differentiate through numerical solvers by integrating adjoint equations backward in time.
+By minimizing an objective function, it is then possible to infer the initial conditions and parameters of a dynamical system from data.
+Within adjoint methods, the well-established semi-Lagrangian data assimilation (SLDA) approach is the closest one conceptually to our  model and setting \citep{lagr:robert1982semi, lagr:staniforth1991semi, diamantakis2016sensitivity}.
+SLDA is widely used for for integrating transport equations into atmospheric models \citep{diamantakis2013semi, lagr:hersbach2020era5}.
+It is based on the Lagrangian form of the CE, which can be written as an ODE:
+\begin{equation}
+\label{eq:CNF}
+\left[
+\begin{array}{l}
+     \phantom{\ln}\x(0, \bs z) %= \bs z
+     \\
+     \ln \rho(0, \bs z) %= \ln \rho_0(\bs z)
+ \end{array}
+ \right]
+ =
+\left[
+\begin{array}{l}
+     \bs z
+     \\
+     \ln \rho_0(\bs z)
+ \end{array}
+ \right],
+ \qquad \qquad 
+\partial_t 
+ \left[
+ \begin{array}{l}
+     \phantom{\ln }\x(t, \bs z) %= \phantom{\nabla \cdot \ \  } \vel_\Theta(t, \x(t, \bs z)) 
+ \\
+    \ln\rho(t, \bs z) %= \nabla \cdot \vel_\Theta(t, \x(t, \bs z)) 
+\end{array}
+\right]
+=
+ \left[
+ \begin{array}{l}
+     \phantom{- \nabla \cdot \ \  } \vel(t, \x(t, \bs z)) 
+ \\
+    - \nabla \cdot \vel(t, \x(t, \bs z)) 
+\end{array}
+\right],
+\end{equation}
+where $\bs z \in \R^d$, $\vel: [t_0,T)\times \R^d \mapsto \R^d, t\in (t_0,T)$.
+Given the initial position $\bs{z}$ and (log-) density $\ln \rho_0(z)$ of the parcel, the ODE describes their temporal evolution according to the CE.
+The density at the departure points (i.e. the initial time) is represented by an interpolated mesh.
+The data-loss for the density is computed by mapping observations backwards in time with Eq.~\ref{eq:CNF} and then comparing it to the interpolated initial density.
+An efficient autograd implementation of the adjoint method was presented by \citet{nflows:chen2018neural}. 
+The implementation enables black-box differentiation for numerically solved ODEs, and further allows to specify the dynamics of ODEs with a neural network.
+The introduced Continuous Normalizing Flows can be regarded as a special case of the SLDA that propagates probability densities and models the velocity with a neural network, while fixing the density at the departure points.
+A limiting factor of neural adjoint based methods is their computational cost,
+since input derivatives of the velocity $\vel$ are repeatedly evaluated for every step of the solver.
+Furthermore, dynamics given by neural networks can become stiff during training.
+To avoid these issues \citet{bilovs2021neural} propose time-dependent bijections instead of neural ODEs for modeling time series data. 
+
+
+\paragraph{(Conditional) Normalizing Flows}
+Normalizing Flows (NFs) are a general approach to warping a simple probability distribution into a more complex target distribution via invertible and differentiable transformations, i.e. diffeomorphisms.
+Let $\bs R\in \mathbb{R}^d$ be a random variable with a known density function $\bs{R} \sim p_{\bs R}(\bs r)$ and let $\bs Y = \mathcal{T}(\bs R)$, where $\mathcal{T}$ is a diffeomorphism with trainable parameters.
+With a change of variables the probability density of $\bs Y$ can be expressed in terms of the \textit{base density} $p_{\bs{R}}$, the map $\mathcal{T}$, and its Jacobian:
+\begin{equation}
+\label{eq:change_of_variables}
+    p_{\bs Y}(\bs y) = p_{\bs R}(\mathcal{T}\inv(\bs y)) \big|\det J{\mathcal{T}\inv}(\bs y)\big| .
+\end{equation}
+NFs usually rely on transformations for which the Jacobian determinant can be efficiently and easily calculated.
+A parameterization for conditional distributions $p_{\bs Y}(\bs y| \bs c)$ can be obtained by additionally conditioning the parameters of $\mathcal{T}$ on another variable $\bs{c}$ through a hypernetwork \citep{nflows:ha2016hypernetworks}.
+This is commonly called a conditional Normalizing Flow \citep{nflows:atanov2019semi, nflows:kobyzev2020normalizing}.
+For a review of NFs, we refer to \cite{nflows:kobyzev2020normalizing} and \cite{nflows:papamakarios2021normalizing}.
+
+
+\section{Lagrangian Flow Networks}
+
+\label{section:lagrangian_flow_networks}
+We first present some key results of the classical theory of Lagrangian flows for smooth vector fields. %, and hence to the continuity equation.
+These provide us a framework for evolving densities and velocities that always fulfill the CE.
+We then propose parameterizations that result in simple expressions for the velocity and density.
+The resulting LFlow models densities and velocities by building upon conditional Normalizing Flows.
+\begin{figure*}[ht!]
+    \centering
+    \includegraphics[width=0.9\linewidth]{images/misc/visual_abstract_lagr_flow_nets_compact.pdf}
+    \caption{Illustration of the transformations and involved fields for modeling the temporal evolution of a 2D density with LFlows. The red lines inbetween the planes indicate trajectories of fluid parcels.}
+\label{figure:visual_abstract}
+\end{figure*}
+
+\subsection{Flow Maps and the Continuity Equation}
+The Lagrangian view describes fluids from the perspective of moving fluid parcels, i.e. infinitesimal volumes with constant mass.
+From this point of view the CE states that density changes of the fluid are described by volume changes of parcels.
+That is, spatial contraction increases the density of a parcel, and expansion decreases it. In order to compute the density of any parcel, we then only need to know its initial density, and how much its volume was distorted. 
+
+More formally, let $\x_{t_0}$ denote the initial position of a parcel at time $t_0$.
+In addition, let $\X_t: \Omega \mapsto \Omega$ for a fixed $t\in [t_0,T]$ be a diffeomorphism that maps $\x_{t_0}$ to the parcel position at time $t$:
+\begin{align}
+\label{eq:hat_Xt}
+    \X_{t}(\x_{t_0}) &= \x_{t} ,
+\end{align}
+with $\X_{t_0}$ being the identity map.
+That is, $\X_t$ provides the continuous trajectory of the parcel $\x_{t_0}$.
+We further assume basic regularity of $\X_t$ and $\X_t\inv$ such as %continuity, 
+smoothness and globally bounded derivatives.
+Since $\X_t$ provides the trajectory of a parcel, the velocity of a given parcel at position $\x_t$ and time $t$ follows naturally.
+First, the parcel is mapped back to its initial position with $\X_t^{-1}$. 
+The velocity is then the change in position along its trajectory with respect to time $t$:
+\begin{equation}
+\label{eq:vel:lagr}
+    \vel(t, \x) =  \frac{\partial{\X}_t}{\partial t} \left( \X_t\inv(\x)\right) .
+\end{equation}
+Following classical Cauchy Lipschitz theory, it is known that such a map $\X_t$ is the unique flow map of $\vel$ starting at time $t_0$. 
+Specifically, for any $\x \in \domain$ the curve $t \mapsto {\X}_t(\x)$ is the unique solution to the Cauchy Problem
+\begin{align}
+\label{eq:vel:lagr_flow}
+&\left\{
+\begin{aligned}
+\partial_t {{\X}}_{t\ }(\x)  &= \bs v\left(t, {{\X}}_{t} (\x)\right) & t \in [t_0,T),
+\\
+{{\X}}_{t_0} (\x) &=  \x .
+\end{aligned}\right .
+\end{align}
+ %, as well as any book in basic differential calculus. 
+
+With the velocity given by Eq.~\ref{eq:vel:lagr}, we further need to define a density to describe a fluid.
+Let $\rho_{t_0}: \Omega \mapsto \R_+$ be the (known) initial fluid density at time $t_0$.
+We can then define the time-evolved density as a transformation of $\rho_{t_0}$ using the change of variables formula: %$\rho_{t_0}$ 
+\begin{align}
+\label{eq:density:lagr_flow}
+\rho(t, \x) &=
+    \rho_{t_0}\Big({\bs X}_{t}\inv(\x)\Big)\abs{\det J {\X}_{t}\inv (\x)}.
+\end{align}
+Given the velocity in Eq.~\ref{eq:vel:lagr} and a smooth $\rho_{t_0}$, Eq.
+Proofs for this statement vary significantly in their complexity and depend on the regularity assumptions for the velocity. 
+That is, they range from classical theory to current mathematical research.
+
+The appended proofs are based on the well-established classical theory for the existence and uniqueness of Lagrangian flows for smooth vector fields and we refer to \citet{Ambrosio-Crippa} for basic and advanced results.
+ 
+
+\subsection{Lagrangian Flow Networks}
+We can now exploit the derived connection between the CE and time-evolving diffeomorphisms to model densities and velocities that satisfy the CE by construction.
+Instead of directly parameterizing both $\X_t$ and $\rho_{t_0}$ (as in \citet{TIPF}), we model the density at each time $\rho_t$, including $\rho_{t_0}$, as a transformation of a simple fixed density $\rho_{\text{base}}$.
+This requires only a single time-conditioned bijection $\Phi_t$. %, which still adheres to the CE by construction.
+We call the resulting model Lagrangian Flow Networks (LFlows) and provide a high-level illustration in Figure~\ref{figure:visual_abstract}.
+
+
+
+
+Let $\Phi_{t}: \Omega \mapsto \mathbb{R}^d$ be a learnable diffeomorphism with $t\in [t_0,T]$. 
+We propose to parameterize $\X_t$ as the composition
+\begin{equation}
+\label{eq:parameterized_X}
+    \hat{\X}_t(\x) = \Phi_{t}\inv\left( \Phi_{t_0}(\x) \right).
+\end{equation}
+In practice, we implement $\Phi_t$ as an invertible neural network with its parameters conditioned on time. % and are for example provided by a hypernetwork. % $\f (t)$.
+We further define the initial density as a transformation of a simple base density:
+\begin{equation}
+\label{eq:initial_density}
+    \hat{\rho}_{t_0}(\x)=\rho_{\text{base}}\Big(\Phi_{t_0}(\x)\Big) \  
+    \left|\det J{\Phi_{t_0}} \big(\x \big)\right| .
+\end{equation}
+The base density $\rho_{\text{base}}: \R^d\mapsto \R_+$ is an unnormalized probability density:
+\begin{equation}\label{eq:base_density}\rho_{\text{base}}(\bs z) = c \cdot \mathcal{N}(\bs 0, {I}), \end{equation}
+where $c\in\R_{+}$ is the total mass of the system and a freely learnable parameter.
+
+We now substitute $\X_t$ in Eq.~\ref{eq:density:lagr_flow} with the parameterized $\hat{\X_t}$ from Eq.~\ref{eq:parameterized_X}.
+We further substitute the density $\rho_{t_0}$ with the parameterized $\hat{\rho}_{t_0}$ (Eq.~\ref{eq:initial_density}). 
+The modeled density then simplifies to
+\begin{align}
+\label{eq:lflow_density}
+    \hat{\rho}(t, \x) &= \hat{\rho}_{t_0}\left( \hat{\X}_t\inv (\x) \right)\ \abs{\det J {\hat{\X}}_{t}\inv (\x)}
+    =  \rho_{\text{base}}\Big(\Phi_t(\x)\Big) \  
+    \left|\det J{\Phi_t} \big(\x \big)\right| .
+\end{align}
+
+Note that the resulting expression coincides with the change of variable formula for probability densities in Eq.~\ref{eq:change_of_variables}.
+This allows us to elegantly model the evolving density through a conditional normalizing flow with unnormalized base density $\rho_{\text{base}}$ and bijective layers conditioned on time $\Phi_t$.
+
+The parameterization of $\X_t$ with $\hat{\X_t}$ in Eq.~\ref{eq:vel:lagr} also results in a simple expression for the velocity:
+\begin{align}
+\hat{\vel}(t, \x) 
+          =  \frac{\partial{\hat{\X}}_t}{\partial t} \left( \hat{\X}_t\inv(\x)\right) 
+        = 
+        \label{eq:velocity:forward}
+            - \Big( J{\Phi_{t}} \big(\x \big)\Big)\inv \ \frac{\partial \Phi_t}{\partial t} \left( \x \right). 
+\end{align}
+We provide the explicit steps for arriving at Eq.
+Note that in order to evaluate $\hat{\rho}$ and $\hat{\vel}$ we now require only the forward map $\Phi_t$, but not its inverse.
+This proves useful for layers with expensive inverses, or if the inverse is unknown.
+An illustration that unifies the Lagrangian view and the provided parametrization of LFlows is given in Figure \ref{figure:visual_abstract}.
+
+\paragraph{Limitations.}
+LFlows model fluid densities and velocities by transforming a base density with bijective layers.
+As such, similar limitations as for Normalizing Flows apply.
+If the target density has disconnected modes, the base density must have the same number of disconnected modes due to topological constraints \citep{nflows:papamakarios2021normalizing}.
+If not, the space inbetween disconnected modes will be covered by a small but non-zero density.
+Furthermore, LFlows are limited by the expressive power of the bijective layers. 
+Even though state-of-the-art bijective layers are highly flexible, each layer might still be limited in terms of the number of modes that can be modeled \citep{liao2021jacobian}.
+
+
+
+\section{Implementation}
+
+\label{section:implementation}
+To implement LFlow as outlined in Section \ref{section:lagrangian_flow_networks}, we require conditional bijective layers.
+That is, the diffeomorphism $\Phi_t$ required for Eq.~\ref{eq:lflow_density} and Eq.~\ref{eq:velocity:forward} has to be conditioned on time $t$.
+To allow for a flexible parameterization, we first embed $t$ into a higher-dimensional space with an embedding network and then condition the bijections on this embedding, i.e.  $\Phi_t := \Phi(\x; \f(t))$ with $\f: [t_0, T] \mapsto \R^{k}$.
+The $k$-dimensional embedding is shared between the individual layers.
+
+We implement $\f(t)$ as MLPs with residual skip connections and swish activations \citep{swish}.
+
+We implement flexible $\Phi(\x; \f(t))$ with Lipschitz-constrained invertible densenets \citep{perugachi2021invertible}, which have free-form Jacobians.
+For a conditional variant of these layers we pass the embedding $f_\Theta(t)$ as an additional input.
+That is, each invertible densenet layer is a function $g(\x, t) = \x + h(\x, f_\Theta(t))$ with $h: \R^{d+k} \mapsto \R^d$ and $Lip(h)<1$.
+The activations of $h$ are sinusoidal $s(x) = \sin(\omega x)/\omega$ with $\omega \in \R_+$, where the division by $\omega$ ensures $Lip(s)=1$.
+Invertible densenets provide numerical inversion via fixed-point iterations.
+In addition to densenet blocks, we employ (unconditional) intermediate activation normalizations \citep{kingma_glow} and (conditional) SVD layers.
+The orthogonal components of the SVD layers are parameterized by conditional Householder reflections.
+
+\paragraph{Normalization Constant.}
+In all our settings the total mass, i.e. the normalization constant $c$ in Eq.~\ref{eq:base_density}, is not known. 
+Therefore, we treat $c$ as a freely learnable hyperparameter, which we initialize based on a validation set.
+We further encourage solutions with a small total mass $c$ during training with the penalty $L_{\text{mass}} = w_c \cdot c$, where  $w_c\in \mathbb{R}_{\geq0}$ is a hyperparameter.
+In practice, this penalty discourages learning significant densities in areas where there are no measurements.
+\paragraph{Baseline Models.}
+
+
+\section{Experiments}
+
+We showcase LFlows for two distinct settings. In setting (i), density and velocity are observed, but no equations are available (Section \ref{subsection:synthetic}  and \ref{subsection:bird_migr}). 
+In setting (ii) only the density is observed but further equations for the velocity are known (Section \ref{subsection:ot}).
+
+We will compare LFlows with methods that enforce the CE through different means, namely divergence-free neural networks (DFNNs), physics-informed neural networks (PINNs), and semi-Lagrangian data assimilation (SLDA).
+
+\paragraph{Numerical Evaluation of Physical Consistency.}
+Physical consistency in terms of the CE implies that the 
+predicted density at any time coincides with the inital density transformed forward in time by the learnt velocity field.
+An inconsistent model would imply that the predicted velocity field fundamentally disagrees with the predicted density movements.
+This would make any downstream interpretation of the two learned fields futile.
+We quantitatively evaluate this potential inconsistency in the following experiments.
+We compare the predicted density $\hat{\rho}_{\text{model}}(t,\x)$ with the numerical solution of the IVP defined by $\hat{\rho}_{\text{model}}(t_0,\x)$, $\hat{\vel}_{\text{model}}(t, \x)$, and Eq.~\ref{eq:CNF}. 
+We evaluate the symmetric mean absolute percentage error $\text{sMAPE} = \frac{1}{n} \sum_{i=1}^{n} \frac{|\hat{\rho}_{\text{model}}(t_i, \x_i) - \hat{\rho}_{\text{ODE}}(t_i, \x_i)|}{|\hat{\rho}_{\text{model}}(t_i, \x_i)| + |\hat{\rho}_{\text{ODE}}(t_i, \x_i)|}$ that ranges from $0$ to $1$.
+\subsection{Simulated Fluid Flow}
+\label{subsection:synthetic}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{images/toy/combined_3d_with_results.pdf}
+    \caption{Evaluation of the predicted density on the $xy$-plane with $z=0$ for different methods. Arrows indicate velocity, except for the DFNNs, where the normalized flux is shown.
+    The lower left plot shows the spatial splitting into train (green), validation (yellow), and test (purple) subsets.}
+    \label{fig:exp3d_vis}
+\end{figure}%
+For a synthetic example of setting (i) we simulate densities in 2D and 3D over time by transforming a mixture of four unnormalized Gaussians.
+We parameterize time-dependent bijections in $t\in[0, 1.2], \Omega = (-4,4)^d$, which provide us analytical forms for the densities and velocities.
+During training, only sub-regions of the domain $\Omega$ are observed.
+The dynamics in 3D are similar to the 2D setting, with the $xy$-velocity being the same for all $z$ values and the $z$ velocity being 0. 
+The only added difficulty is a higher-dimensional domain.
+We limit all models to the computing resources of a NVIDIA Titan X Pascal, and optimize based on the explained variance\footnote{ $R^2 =1 - \frac{MSE(y_{obs}, \hat{y})}{Var(y_{obs})}\leq 1$ with $R^2 = 1$ indicating a perfect reconstruction.} ($R^2$) of the density on the validation set. For the PINN this resulted in $2^{16}$ collocation points.
+We do not include consistency results for DFNNs due to numerical instabilities.
+As DFNNs only provide access to the flux $\hat{\bs F}$, the velocity $\hat{\bs v} = \hat{\bs F}/\hat{\rho}$ becomes numerically unstable in low-density regions, which are abundant in this experiment.
+
+Results for 10 random seeds are provided in Figure \ref{fig:exp3d_vis}.
+In addition, snapshots of the 3D prediction for $z=0$ are shown.
+All methods aside from the PINN have a low consistency sMAPE on the order of 1e-4 or lower. 
+This is expected, as LFlows enforce the CE by construction. 
+Furthermore, SLDA computes the density similarly to our numerical reference, although with a lower order ODE solver.
+Low error tolerances or low-order solvers for SLDA would of course still result in inconsistencies. 
+Looking at the predictive performance, LFlows show the highest average $R^2$ for the density in both 2D and 3D.
+While PINNs perform competitively in 2D, they severely degrade in 3D,
+as the number of collocation points used (limited by GPU memory) is insufficient to enforce the PDE.
+This is also reflected in their increase of the consistency sMAPE in 3D.
+Finally, DFNNs and SLDA are roughly comparable in terms of predictive accuracy, with DFNNs being in our experience most prone to overfitting.
+We note that small displacements of the density can already lead to large differences in $R^2$.
+\subsection{Dynamical Optimal Transport}
+\label{subsection:ot}
+As an example of setting (ii), in which no velocity is observed but additional equations dictating the dynamics are known, we consider dynamical optimal transport problems.
+Our experimental setting closely follows \citet{physml:richter2022neural}.
+Specifically, we consider the Benamou-Brenier formulation of the optimal transport problem between two densities $p_{t_0}$ and $p_{t_1}$.
+In this case the optimal transport map is the solution map $\X_{t}$ of a flow that is defined by the vector field $\vel$ and minimizes the following objective:
+\begin{equation}
+\label{eq:dynamical_optimal_transport}
+\min_{\vel, \rho} \bigintssss_{t_0}^{t_1} \bigintssss_{\Omega}{\abs{\vel (t, \x)}^2  \rho(t, \x) \, d x \, dt} 
+\end{equation}
+subject to the constraints $\rho(t_0, \x) =p_{t_0} (\x)$ and  $\rho(t_1, \x) =p_{t_1}(\x)$.
+Furthermore, $\rho$ and $\vel$ are subject to the continuity equation  $\partial_t \rho = - \nabla \cdot \left( \rho \vel \right)$.
+
+Both DFNNs and LFlows can solve the minimization problem in Eq.~\ref{eq:dynamical_optimal_transport} without needing a separate estimation of $\rho$. 
+Instead, one fits the densities at $t_0$ and $t_1$ and additionally minimize  Eq.~\ref{eq:dynamical_optimal_transport}.
+However, to obtain the transport map from the learned velocity field, DFNNs need to numerically solve the Cauchy problem in Eq.~\ref{eq:vel:lagr_flow}.
+An ODE solver might however struggle due to the numerical instability of the DFNNs velocity in low-density regions.
+In contrast, LFlows elegantly provide an analytical form for the continuous transport map through the learned bijections, i.e. $\hat{\X}_t(\x) = \Phi_{t}^{-1}\left( \Phi_{t_0}(\x) \right)$.
+\begin{figure}[h]%
+    \centering
+    \includegraphics[width=\textwidth]{images/optimal_transport/ot_2d.pdf}
+    \caption{\textit{Left:} Approximations of the 2D optimal transport map with LFlows, DFNN and a discrete reference.
+    \textit{Right:} Corresponding estimated Wasserstein distances for different methods for a single run. 
+    The red vertical lines denote the minimum, median, and maximum estimates of 5 runs with a discrete OT solver.
+    Datasets: Circles $\leftrightarrow$ Pinwheel, Pinwheel $\leftrightarrow$ 8Gaussians, 8Gaussians  $\leftrightarrow$ Circles.
+    }
+    \label{fig:ot2d}
+\end{figure}%
+
+We train the models by optimizing
+\begin{equation}
+    \min_{\hat{\rho}, \hat{\vel}} \lambda \mathbb{E}_{\Tilde{p}_{0}}\left[ \abs{\hat{\rho}(0, \x)- p_{0}(\x)} \right] + \lambda \mathbb{E}_{\Tilde{p}_{1}}\left[ \abs{\hat{\rho}(1, \x)- p_{1}(\x)} \right] + \bigintssss_{0}^{1} \bigintssss_{\Omega}{\abs{\hat{\vel} (t, \x)}^2  \hat{\rho}(t, \x) \, d x \, dt} 
+\end{equation}
+where data is drawn from $\Tilde{p}_{i}$, which is a mixture of $p_{i}$ and a uniform density (for $i=0, 1$); $\lambda$ is a hyperparameter.
+At test time we empirically estimate the $W_2^2$ distance by mapping $5 000$ samples of $p_0$ from $t=0$ to $t=1$.
+Different to \citet{physml:richter2022neural} we repeat this estimate 50 times.
+We compare the $W^2_2$ estimates of (i) LFlows, (ii) DFNNs and (iii) a minimax formulation of the optimal transport map % an optimal transport map 
+learned via input convex neural network %based on a minimax formulation 
+\citep{makkuva2020optimal}.
+For DFNNs the samples are transported through the estimated velocity with an ODE solver.
+We further compare to the $W_2^2$ estimates of a discrete OT-solver \citep{bonneel2011displacement} from the \textit{pot} library \citep{flamary2021pot} based on 50000 samples.   
+The $\lambda$ for LFlows is chosen by matching the $W_2^2$ distance between the \textit{moons} and \textit{swissroll} datasets with the discrete estimate. For DFNNs a $\lambda$ value is provided by  \citet{physml:richter2022neural}.
+In this experiment we restrict ourselves to methods that can exactly enforce the CE and thus exclude PINNs.
+
+We considered three different pairs of toy 2D distributions.
+Figure \ref{fig:ot2d} shows the approximated optimal transport maps learned with LFlows and the $W_2^2$ estimates of the different methods.
+We verified that the DFNN and the LFlow fit the target densities well, with a test MSEs below 8e-5 for all settings. 
+We excluded SLDA, as it was unstable and did not consistently result in low errors for the two target densities.
+The LFlow estimates of $W_2^2$ are closest to the range of discrete estimates (Figure \ref{fig:ot2d}).
+In contrast, the minimax model underestimates the distance which is consistent with the results of \citet{physml:richter2022neural}.
+DFNNs significantly overestimated $W^2_2$ and we were unable to fully reproduce results obtained by \citet{physml:richter2022neural}.
+We assume that this is due to the ODE solver struggling with the unstable velocity calculation in low-density regions.
+
+
+\subsection{Modeling Bird Migration}
+\label{subsection:bird_migr}
+As a real-world application for setting (i) we model bird migration within Europe based on weather radar measurements.
+The data provided by \citet{nussbaumer2021quantifying} contains estimated bird densities ($birds/km^3$) and velocities ($m/s$).
+Measurements are taken from 37 weather radar stations in France, Germany, and the Netherlands at up to 5-minute intervals at 200$m$ altitude bins, reaching up to 5$km$. 
+The velocity data does not include a $z$-axis component.
+We model the bird migration of 3 subsequent nights of April 2018.
+We assume that the mass is mostly conserved within the three nights during migration. 
+We test the predictions on radars located in the center of the covered region, which were excluded during training (see Figure \ref{fig:birds_europe}).
+Hyperparameters of all models are selected by minimizing the density MSE on three nights of March 2018. % during which a comparable wave of bird migration is observed.
+As a baseline, we compare the results with a 10-layer multilayer perceptron (MLP) with skip connections, 256 hidden units per layer, ReLU activations, and Batch normalization.
+We additionally evaluate the PINN, DFNN, and SLDA.
+The PINN has the same general architecture as the MLP but additionally minimizes the penalty $\lambda \cdot \norm{\partial_t\hat{\rho} + \nabla\cdot (\hat{\rho}\hat{\vel})}_2$ evaluated on $100\ 000$ collocation points, where $\lambda \in \R_+$ is a hyperparameter. %  enforce the CE by a penalty term evaluated on sampled collocation points.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{images/birds/bird_maps.pdf}
+    \caption{Snapshots of predicted bird density at three consecutive nights within central Europe. 
+    The 2D projection was obtained by integrating over altitudes covered by the radars. Orange lines indicate 2D ($xy$) projections of 3D trajectories from $t_0$ to $t$  using randomly sampled departure points.}
+    \label{fig:birds_europe}
+\end{figure}%
+Figure~\ref{fig:birds_europe} shows snapshots of the vertically integrated density and flux predicted by LFlows.
+
+Aside from the velocity and density, LFlows readily provide the trajectories (shown in orange).
+In practice, experts could compare these with the migration paths taken by individual birds, which are for example obtained from bird-ringing studies. 
+We compare test density errors for each model in Figure \ref{fig:bird_results} (c). 
+Methods enforcing the CE result in a lower error than the baseline MLP.
+The consistency sMAPE shows the PINN and MLP lead to inconsistent density and velocity. 
+LFlows, SLDA and DFNNs again have a sMAPE that is on the order of 1e-4 or lower.
+Figure \ref{fig:bird_results} (a) and (b) show the pointwise values of the sMAPE for the PINN and LFlow.
+
+While DFNNs and SLDA are nearly competitive with LFlows in terms of the density MSE, they suffer from high computational costs.
+SLDA requires to evaluate a neural network many times to numerically solve the ODE. In addition, SLDA gets slower during training because the dynamics given by the neural network become more stiff.
+This is shown by the increasing runtime for each epoch in Figure \ref{fig:bird_results} (e) and is a known limitation of models of the neural ODE family \citep{bilovs2021neural}. 
+DFNNs on the other hand result in huge memory requirements due to the required second order derivatives.
+Figure \ref{fig:bird_results} (f) shows the peak memory use in terms of VRAM for varying minibatch sizes of the models. In practice, high memory requirements result in small minibatch sizes, which ultimately lead to a slower training and inference pipeline \citep{shallue2018measuring}.
+The high peak memory and runtime of PINNs is due to the large amount of collocation points. 
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{images/birds/bird_results_all.pdf}
+    \caption{ Results of the bird migration experiment. \textit{(a)} Consistency sMAPE of PINNs and \textit{(b)} LFlows at a fixed time (2018-04-08 00:00). \textit{(c)} Test MSE of the (log1p) density and \textit{(d)} consistency sMAPE evaluated at multiple timesteps. \textit{(e)} Time per training epoch during training and \textit{(f)} peak memory usage during training in GB VRAM for varying minibatch sizes.
+             }
+    \label{fig:bird_results}
+\end{figure}%
+
+
+\section{Conclusion}
+
+We introduced LFlows for modeling densities and velocities %such that the law of mass conservation is fulfilled by construction.
+that adhere to the continuity equation by construction.
+We did so by establishing a link between time-conditioned diffeomorphisms and Lagrangian solution maps for the continuity equation.
+The resulting parametrization allows us to elegantly model time evolving densities with a single time-conditioned Normalizing Flow.
+Furthermore, we can calculate the velocity without inverting the conditional bijections, allowing the use of expressive bijective layers.
+We showed that LFlows can be applied to settings where we have sparse data on both density and velocity, and to settings where we have no data on velocity, but instead enforce additional equations.
+
+In terms of density prediction LFlows outperform all competing models on both synthetic and real experiments.
+Different to methods like PINNs, which weakly enforce the continuity equation, LFlows always provide physically consistent predictions.
+In addition, LFlows avoid scaling limitations of DFNNs (peak memory usage) and neural adjoint based methods (training time).
+For downstream tasks, LFLows directly provide Lagrangian maps without the need for additional numerical solvers.
+In dynamical optimal transport settings, LFLows directly provide the analytic expression of the transport map.
+When modeling bird migration, the Lagrangian maps provide access to trajectories, which could be compared to migration paths obtained from different data modalities.
+
+ 
+
+
+
+\section{Reproducibility Statement}
+
+
+
+
+
+The supplementary material contains code for all experiments and models.
+A readme file lists the random seeds used for experiments and plots.
+The selected hyperparameters for each experiment are provided.
+The code further includes the generation of the synthetic datasets, as well as automated scripts for downloading and preprocessing the bird-migration data.
+A cleaned anaconda environment file for reproducing the python environment is provided.
+
+
+
+

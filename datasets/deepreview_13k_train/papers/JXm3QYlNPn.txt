@@ -1,0 +1,449 @@
+\title{Optimize Weight Rounding via Signed Gradient Descent for the Quantization of LLMs}
+
+\begin{abstract}
+Large Language Models (LLMs) have demonstrated exceptional proficiency in language-related tasks, but their deployment poses significant challenges due to substantial memory and storage requirements. Weight-only quantization has emerged as a promising solution, significantly reducing memory and storage needs without sacrificing too much performance.
+In this study, we introduce SignRound, a method that leverages signed gradient descent (SignSGD) to optimize rounding values and weight clipping in just 200 steps. SignRound integrates the advantages of Quantization-Aware Training (QAT) and Post-Training Quantization (PTQ), delivering exceptional results across 2 to 4 bits while minimizing tuning costs and avoiding additional inference overhead. For example, SignRound achieved absolute average accuracy improvements ranging from 6.91\% to 33.22\% at 2 bits, as measured by the average zero-shot accuracy across 11 tasks. It also demonstrates strong generalization in recent models, achieving near-lossless 4-bit quantization in most scenarios.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:Introduction}
+
+In recent years, there has been a significant surge in the adoption of Large Language Models (LLMs), leading to their widespread deployment demand even on devices with constrained resources. However, deploying LLMs on these devices poses significant challenges due to their extensive memory and storage requirements. Additionally, the computational demands of these models create obstacles for real-time applications. Therefore, studying techniques such as quantization is crucial for enabling the efficient deployment of LLMs. Quantization techniques can be broadly categorized into two main types: quantization-aware training (QAT) \citep{esser2020learned, zhuang2021effective, lee2021cluster, liu2023llm} and post-training quantization (PTQ) \citep{nagel2019data, xiao2023smoothquant, frantar2022gptq, nagel2020up}.
+QAT involves training the model with quantization in mind, using simulated lower-precision representations to allow the model to learn and adapt to the effects of quantization. This approach often results in better accuracy compared to PTQ. However, QAT has drawbacks, including increased training complexity, longer training times, and the need to tune hyperparameters. The application of QAT to LLMs can be particularly resource-intensive, despite recent efforts \citep{hu2021lora, dettmers2023qlora} to improve the efficiency of fine-tuning LLMs.
+
+On the other hand, PTQ directly quantizes the model without any simulated training or fine-tuning. While PTQ is a more straightforward approach, it is susceptible to significant accuracy drops. This underscores the importance of further advancements in PTQ methods to enhance their accuracy preservation capabilities.
+
+Quantization commonly applies to two types of tensors: activations and weights. Quantizing activations for LLMs can be challenging \citep{Wei_2023, xiao2023smoothquant, bondarenko2024quantizable}, making weight-only quantization a more practical option. Moreover, the main bottleneck in generating new tokens for LLMs often arises from memory bandwidth limitations \citep{kim2023squeezellm}, emphasizing the advantage of weight-only quantization. 
+
+This study focuses on weight-only quantization. In quantizing weights, a critical step involves rounding, primarily achieved through rounding-to-nearest (RTN). RTN quantizes each weight independently by rounding it to the nearest integer, but it overlooks the relationships between weights and between weights and activations. Adaptive Rounding \citep{nagel2020up} explored the potential for an enhanced rounding strategy to improve accuracy. They approached the rounding task by formulating it as a quadratic unconstrained binary optimization problem and approximating the loss using a Taylor series expansion. However, relying solely on the second-order term may not yield accurate results, as rounding can significantly modify weights, making other order terms non-negligible.
+We select SignSGD\citep{balles2020geometry, li2023faster, safaryan2021stochastic} as our optimization method to approach the optimal rounding solution within a limited number of steps. The motivation behind this choice, which is elaborated in Section \ref{sec:Methodology}, stems from the well-defined boundaries of the solution space and the inherent simplicity of the method that necessitates only minimal hyperparameter tuning. Figure \ref{fig:signround_overview} provides an overview of our method. Our contributions primarily lie in three aspects:
+\begin{itemize}
+
+\item We introduce a concise yet effective method for optimizing the weight only quantization, combining the strengths of both QAT and PTQ. Our approach leverages SignSGD to tune the rounding with the weight clipping, without introducing any additional overhead during inference.
+
+\item Our empirical results demonstrate a significant performance enhancement compared to recent works across various quantization configurations, ranging from 2-bit to 4-bit.
+
+\item We demonstrate that SignRound's performance can be further enhanced by fine-tuning model-specific hyperparameters within a constrained space. Moreover, our method demonstrates strong generalization across various models and delivers nearly lossless results across the majority of scenarios using 4-bit quantization.
+\end{itemize}
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.8\textwidth]{imgs/signround_overview.png}
+\caption{An illustration of SignRound. Unlike the direct rounding in RTN, SignRound performs signed gradient descent to fine-tune the rounding and weight clipping through block-wise output reconstruction. After lightweight forward and backward steps, $\textbf{W}_{\text{INT4}}$ has been well optimized. Note that Quant and Dequant are two standard operations for quantization and dequantization respectively.}
+\label{fig:signround_overview}
+\end{figure*}
+
+
+
+\section{Related Work}
+
+\label{sec:RelatedWork}
+\paragraph{Quantization Aware Training.}
+ 
+ QAT methods have gained widespread popularity in model compression, as they enable the fine-tuning process ~\citep{esser2020learned,zhuang2021effective,lee2021cluster}, often leading to superior accuracy compared to the PTQ method.
+
+\paragraph{Post-training Quantization (PTQ).}
+PTQ methods simplify the quantization process without the need for additional training.~\citep{nagel2019data,liu2021post,frantar2022optimal,hassibi1993optimal,yao2021hawq}. Given its low resource requirement, PTQ is particularly suitable for the quantization of Large Language Models.
+
+\paragraph{Large Language Models Quantization.}
+Significant strides have been made in addressing the pressing need for quantizing large language models (LLMs). GPT3.int8() \citep{dettmers2022gpt3} introduces a mixed-precision approach to preserve crucial channels in high precision.  
+AQLM \citep{mao2024compressibility} builds upon Additive Quantization, a classic algorithm from the Multi-Codebook Quantization family, adapting it to LLM quantization. ZeroQuantV2 \citep{yao2024exploring} employs low-rank matrices to enhance model quality recovery. RPTQ \citep{yuan2023rptq} addresses range differences between channels by rearranging and quantizing them in clusters. LLM-QAT \citep{liu2023llm} employs QAT to enhance performance. Some other methods, such as SPIQ \citep{yvinec2023spiq}, SmoothQuant \citep{xiao2023smoothquant}, and Outlier Suppression+ \citep{Wei_2023}, utilize handcrafted equivalent transformations to mitigate quantization errors. These methods rely on the  model architecture to fuse the equivalent transformation operations. LRQ \citep{lee2024lrq} only needs to learn significantly fewer parameters while enabling the individual scaling of weights, thus boosting the generalization capability of quantized LLMs.
+
+\paragraph{Weight Only Quantization.}
+Weight-only quantization reduces the memory footprint and bandwidth demands by quantizing only the weights while retaining activations in floating-point precision, offering a promising balance between accuracy and compression. GPTQ~\citep{frantar2022gptq} optimizes weights using the Optimal Brain Surgeon technique \citep{hassibi1993optimal}, achieving low-bit quantization on LLMs with minimal tuning overhead. AWQ~\citep{lin2023awq} follows the equivalent transformation approach with additional tuning in a constrained space, sharing similar limitations with SmoothQuant \citep{xiao2023smoothquant}. TEQ~\citep{cheng2023teq} and OmniQuant~\citep{shao2023omniquant} both utilize a trainable equivalent transformation, while OmniQuant employs extra weight clip tuning. HQQ~\citep{badri2023hqq} accelerates quantization for large models by eliminating the need for calibration data, making the quantization process extremely fast. Some other works have incorporated optimization methods with extra inference overhead to improve quantization accuracy, such as dense-and-sparse decomposition techniques in SqueezeLLM~\citep{kim2023squeezellm} and EasyQuant~\citep{tang2023easyquant}, as well as nonuniform quantization methods in NUPES~\citep{yvinec2023nupes}, QuIP\#~\citep{tseng2024quip},\citep{gong2024makes}, AQLM~\citep{mao2024compressibility}, etc. Additionally, FineQuant~\citep{kim2023finequant} introduces a straightforward heuristic weight quantization approach that adaptively determines quantization granularity.
+In this work, we focus on approaches that do not introduce overhead during inference.
+ 
+
+\paragraph {Rounding Methods.}
+Adaptive Rounding \citep{nagel2020up} has already showcased the potential of an advanced rounding strategy to enhance accuracy \citep{li2021brecq, wei2022qdrop}. They used the rounding task as a quadratic unconstrained binary optimization problem by approximating the task loss through a Taylor series expansion. However, considering only the second-order term may not yield accurate results. This is because the rounding value gets multiplied by a scaling coefficient during de-quantization, potentially introducing significant weight changes that make other order terms non-negligible. FlexRound \citep{lee2023flexround} introduces a more flexible approach to  rounding by incorporating element-wise division. However, it's not easily scalable to apply to LLMs due to the needs of specialized hyperparameters for each specific model and task. Furthermore, Oscillation-free \citep{liu2023oscillation} suggests that the introduction of learnable parameters might result in weight oscillation problems. AQuant \citep{li2022efficient} introduced a dynamic approach where the border becomes a function dependent on the activation value to reduce the quantization error of activation.
+
+\paragraph {Signed Gradient Descent.} Signed gradient descent is not commonly utilized and is typically applied in specific scenarios, such as reducing communication costs. This is because signed gradient carries significantly less information compared to original gradient.  Recent studies have shed light on the advantages of sign-based methods over gradient descent in certain conditions. Balles et al. \citep{balles2020geometry} found that sign-based methods are preferable when the Hessian matrix is concentrated on its diagonal and the maximal eigenvalue is much larger than the average eigenvalue. Li et al. \citep{li2023faster} investigated a variant of sign-based gradient descent that exhibits faster convergence.  Safaryan et al. \citep{safaryan2021stochastic} proposed a stochastic sign descent with momentum, which converges under the standard bounded variance assumption with the optimal asymptotic rate. These findings contribute to a better understanding of the potential benefits and applications of signed gradient descent methods.
+
+
+
+\section{Methodology}
+
+\label{sec:Methodology}
+
+We begin with an overview of quantization before delving into the specifics of our approach. The following operations can be utilized to quantize and dequantize the weights $\textbf{W}$:
+\begin{equation}
+\mathbf{\widetilde{W}} = s*clip(\left\lfloor\frac{\mathbf{W}}{s}+zp \right\rceil,n,m),n,m \in \mathbb{N}
+\label{eq 1}
+\end{equation}
+where the rounding operation $\left \lfloor \cdot \right \rceil $
+ is typically performed using the RTN method. Although RTN is a straightforward approach, it quantizes each element independently, which results in the loss of the ability to model the correlation among different weights or activations. The $s$ represents the quantization scale, which can be obtained using the following equation, and $zp$ is the zero point.
+
+\begin{equation}
+\label{eq 2}
+s = \frac{max(\mathbf{W})-min(\mathbf{W})}{2^{bit}-1}
+\end{equation}
+
+\begin{algorithm}[t]
+\caption{SignRound}
+\label{algorithm signround}
+\textbf{Input:} Calibration Data $\mathcal{D}$, learning rate $lr$, total steps $T$, Model $M$, block module $m_w$ with weights $w$, batch size $bs$ 
+
+\textbf{Output:}  $best\_V$, $best\_\alpha$, $best\_\beta$
+\begin{algorithmic}[1]
+\State  $V \gets 0$, $\alpha \gets  1.0$,  $\beta \gets  1.0$ , $best\_l \gets maximum$
+\For{$i \gets 0$ to $T$}
+        \State $d \gets \textit{draw $bs$ samples}$
+        \State $x \gets M(d)_m $  \Comment{get the inputs of m} 
+        \State $y_f \gets  m_w(x) $  \Comment{get the output of original module} 
+        \State $\widetilde{w}\gets qdq(w,\alpha, \beta, V)$  \Comment{quantize and dequantize w via Eq.\ref{eq 3}}
+        \State $y_q \gets  m_{\widetilde{w}}(x)$ \Comment{get the output of quantized module}
+        \State $loss \gets mse(y_q, y_f) $ \Comment{get the loss via Eq.\ref{eq 5}}
+        \State $loss.backward()$
+        \If{$loss< best\_l$}
+            \State $best\_V, best\_\alpha, best\_\beta \gets V, \alpha, \beta$
+            \State $best\_l \gets loss $
+       \EndIf  
+        \State \textit{update $\alpha$, $\beta$ and V via SignSGD optimizer }
+
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+In order to improve the efficacy of the rounding quantization operation, we build upon prior research \citep{nagel2020up} by introducing a trainable parameter $V$ to adjust the rounding values.
+
+\begin{equation}
+\widetilde{\mathbf{W}} = s*clip(\left \lfloor\frac{\mathbf{W}}{s}+zp +\mathbf{V} \right \rceil,n,m),n,m \in \mathbb{N}
+\label{eq 3}
+\end{equation}
+
+Additionally, following recent works \citep{lin2023awq,shao2023omniquant}, we introduce two additional trainable parameters, denoted as $\alpha  \in [0,1 ]$ and $\beta 
+ \in [0,1 ]$, to fine-tune the scale of weight clipping. These parameters are incorporated into the equations as follows:
+\begin{equation}
+\label{eq 4}
+s = \frac{max(\mathbf{W})*\alpha-min(\mathbf{W})*\beta}{2^{bit}-1}
+\end{equation}
+These modifications enable a more adaptable quantization process. We utilize block-wise output reconstruction to train these parameters via optimizer, thus framing the optimization as follows.
+\begin{equation}
+\label{eq 5}
+\min_{\alpha, \beta, \mathbf{V}} \|\mathbf{WX}-\mathbf{\widetilde{W}X}\|_F^2 
+\end{equation}
+where $\textbf{X}$ is the input of the block and $||\cdot||_F$  denotes the Frobenius norm.  
+Our method distinguishes itself primarily by leveraging SignSGD, which optimizes parameters based on the sign of the gradients as follows:
+
+\begin{equation}
+\label{eq 6}
+\mathbf{W}_{t+1} = \mathbf{W}_t - lr_t * sign(\mathbf{g}_t)
+\end{equation}
+where t represents the step, lr is the learning rate and g denotes the gradient.
+ The motivation is detailed below.  \textit{\textbf{Firstly}}, the optimal values for up and down rounding typically reside in a large region rather than a single float, as only the threshold for altering the rounding value is significant. This eliminates the necessity for the gradient magnitude to converge precisely to a single point. \textit{\textbf{Secondly}}, due to the confined boundaries, i.e.$[-0.5, 0.5]$ for rounding and $[0, 1]$ for weight clipping, SignSGD allows efficient navigation of this space within a limited number of steps. In contrast, optimizers like Adam \citep{kingma2014adam} may struggle due to significant variations in gradient magnitude, making it challenging to converge to the optimal value within a restricted number of steps. \textit{\textbf{Thirdly}}, SignSGD is inherently intuitive, facilitating easy adjustment of the step size (learning rate). For example, we employed the same optimizer hyperparameters across all experiments unless explicitly stated, consisting of 200 steps and a learning rate of 5e-3 with linear weight decay. Based on Eq. \ref{eq 6}, the maximum adjustment for each parameter is the sum of the learning rates over all steps, that is, $200 \times 0.005 / 2 = 0.5$. As a result,the adjustment can cover a range of [-0.5,0.5] when initialized at 0 for rounding, and a range of [0.5,1.0] when initialized at 1 and clipped to $\leq 1.0$ for weight clipping, which works well in practice. \textit{\textbf{Fourth}}, SignSGD distinguishes itself by its lightweight design, demanding fewer memory and computational resources than  optimizers like Adam\citep{kingma2014adam}.
+
+ Figure \ref{fig:signround_overview} provides an illustration of our approach. And the Pseudocode \ref{algorithm signround} presents more details of SignRound.
+ 
+\begin{table*}
+\centering
+\scalebox{0.82}{
+\setlength{\tabcolsep}{2pt}{
+    \begin{tabular}{|cl|cccc|}
+    \hline
+        \textbf{Config} & \textbf{Method} & \textbf{Mistral-7B} & \textbf{V2-7B} & \textbf{V2-13B} & \textbf{V2-70B} \\ \hline
+         & 16 bits & 63.30 & 57.98 & 61.42 & 66.12 \\ 
+        \hline
+         \multirow{7}*{\fontsize{9}{12}\selectfont W4G-1} & RTN & 58.84 & 55.49 & 60.46 & 65.22 \\
+         ~ & GPTQ & 61.37 & 56.76 & 59.79 & 65.75 \\
+        ~ & AWQ & 61.36 & 57.25 & 60.58 & \textbf{66.28} \\
+         ~ & HQQ & 58.40 & 46.05 & 46.82 & 57.47 \\
+        ~ & Omni & 60.52 & 56.62 & 60.31 & 65.80 \\
+        ~ & Ours & \textbf{62.33} & \textbf{57.48} & \textbf{61.20} & 66.27 \\
+        \cline{3-6}
+        ~ & Ours*   & \textbf{62.64} & \textbf{57.52} & \textbf{61.23} & 66.27 \\
+        \hline
+         \multirow{7}*{\fontsize{9}{12}\selectfont W4G128} & RTN & 62.36 & 56.92 & 60.65 & 65.87 \\
+         ~ & GPTQ & 62.32 & 56.85 & \textbf{61.00} & 66.22 \\
+        ~ & AWQ & 62.16 & 57.35 & 60.91 & 66.23 \\
+         ~ & HQQ & \textbf{62.75} & 57.41 & 60.65 & 66.06 \\
+        ~ & Omni & 62.18 & 57.30 & 60.51 & 66.02 \\
+        ~ & Ours & 62.62 & \textbf{57.57} & 60.85 & \textbf{66.39} \\
+        \cline{3-6}
+        ~ & Ours* & \textbf{62.87} & \textbf{57.97} & 60.90 & \textbf{66.41} \\
+        \hline
+    \end{tabular}
+
+    \begin{tabular}{|cl|cccc|}
+     \hline
+        \textbf{Config} & \textbf{Method} & \textbf{Mistral-7B} & \textbf{V2-7B} & \textbf{V2-13B} & \textbf{V2-70B} \\ \hline
+         & 16 bits & 63.30 & 57.98 & 61.42 & 66.12 \\
+         \hline
+        \multirow{7}*{\fontsize{10}{12}\selectfont W3G128} & RTN & 58.20 & 53.81 & 58.57 & 64.08 \\
+        ~ & GPTQ & 59.91 & 54.14 & \textbf{59.58} & 65.08 \\
+        ~ & AWQ & 59.96 & 55.21 & 58.86 & 65.12 \\
+        ~ & HQQ & 59.33 & 54.31 & 58.10 & 64.80 \\
+        ~ & Omni & 58.53 & 54.72 & 59.18 & 65.12 \\
+        ~ & Ours & \textbf{60.43} & \textbf{56.68} & 59.44 & \textbf{65.31} \\
+        \cline{3-6}
+        ~ & Ours* & \textbf{60.96} & \textbf{56.68} & \textbf{59.78} & \textbf{65.59} \\
+        \hline
+        \multirow{7}*{\fontsize{10}{12}\selectfont W2G128} & RTN & 30.52 & 29.94 & 33.51 & 38.14 \\
+        ~ & GPTQ & 39.61 & 35.37 & 42.46 & 28.47 \\
+        ~ & AWQ & 30.06 & 30.10 & 32.16 & 32.23 \\
+         ~ & HQQ & 31.41 & 29.87 & 35.28 & 37.42 \\
+        ~ & Omni & 32.17 & 40.74 & 46.55 & 51.31 \\
+        ~ & Ours & \textbf{52.71} & \textbf{48.64} & \textbf{53.46} & \textbf{61.69} \\
+        \cline{3-6}
+         ~ & Ours* & \textbf{53.01} & \textbf{50.34} & \textbf{54.16} & \textbf{61.77} \\
+        \hline
+    \end{tabular}
+}}
+\caption{\label{tab:llama and mistral at W2-W4}
+Average accuracies ($\uparrow$) across 11 tasks, as detailed in Section \ref{sec:tasks}, for LLaMA and Mistral models at W2-W4. 'Our*' denotes the highest accuracy achieved among the 8 hyperparameter choices, outlined in Section \ref{sec:our* detail}, whereas for the 70B model, we tested only a few options.}
+
+\end{table*}
+
+
+\section{Experiments}
+
+
+This section presents a comprehensive evaluation of SignRound from multiple perspectives. We begin with a brief overview of the LLM architectures and tasks included in our assessment. Next, we provide a detailed comparison between our method and several existing approaches, emphasizing the unique advantages of SignRound. Furthermore, we conduct ablation studies to reinforce the efficacy of our choices and investigate the sensitivity of hyperparameters. Lastly, we evaluate the generation ability of our method across various recent models.
+
+\subsection{Experimental Settings}
+\label{sec:4.1}
+
+\begin{table*}[t]
+\centering
+\scalebox{0.86}{
+\setlength{\tabcolsep}{1pt}{
+\begin{tabular}{ll|cccccccccccc}
+\hline
+  \textbf{Config} &  \textbf{Method} &  \textbf{Mmlu} &  \textbf{Lamb.}  &  \textbf{Hella.} &  \textbf{Wino.} &  \textbf{Piqa}  &  \textbf{Truth.} &  \textbf{Open.}  &  \textbf{Boolq}  &  \textbf{RTE} &  \textbf{ARC-e}  &  \textbf{ARC-c.}  &  \textbf{Avg.} \\ \hline
+    \multirow{8}*{W4G-1} & 16 bits  & 61.35 & 75.68 & 61.27 & 74.03 & 80.79 & 28.03 & 32.80 & 83.67 & 67.51 & 80.81 & 50.34 & 63.30 
+    \\
+    
+    ~ & RTN  & 55.92 & 66.10 & 59.01 & 71.35 & 80.14 & 24.85 & 29.00 & 79.17 & 57.76 & 77.95 & 45.99 & 58.84 
+    \\ 
+    
+    ~ & GPTQ & 58.22 & 73.45 & 59.47 & \textbf{74.03}  & \textbf{80.20}  & 26.93 & 31.00 & 81.50 & 64.98 & 78.24 & 47.01 & 61.37 
+      \\ 
+       
+    ~ & AWQ  & 57.20 & 71.45 & 59.21 & 73.64 & 79.43 & 25.34 & 30.40 & \textbf{82.69}  &\textbf{68.95}  & 79.25 & 47.44 & 61.36 
+      \\
+    
+    ~ &  HQQ & 52.65  & 66.58  & 59.09  & 70.56  & 79.60  & 23.13  & 27.80  & 80.03  & 59.57  & 77.02  & 46.33  & 58.40  \\
+    
+    ~ &  Omni & 57.52  & 70.00  & 60.27  & 72.93  & 79.87  & 23.99  & 30.80  & 81.53  & 63.90  & 78.54  & 46.42  & 60.52  \\
+       
+    ~ &  Ours   & \textbf{59.52}  & \textbf{73.76}  & \textbf{60.75}  & 73.32 & 80.09 & \textbf{27.17}  & \textbf{33.00}  & 82.02 & 66.07 & \textbf{80.47}  & \textbf{49.49}  & \textbf{62.33}  \\ 
+    
+    \cline{3-14}
+    
+    ~ &  Ours* & \textbf{60.00} & 73.30 & 60.57 & \textbf{74.35} & 80.09 & \textbf{27.91} & 32.20 & \textbf{83.52} & 67.51 & 79.92 & \textbf{49.66} & \textbf{62.64}   \\
+    
+    \hline
+    
+    & 16 bits & 61.35 & 75.68 & 61.27 & 74.03 & 80.79 & 28.03 & 32.80 & 83.67 & 67.51 & 80.81 & 50.34 & 63.30 \\
+        
+    & RTN  & 23.45 & 0.14 & 27.43 & 49.64 & 54.30 & 24.24 & 15.20 & 38.69 & 51.99 & 29.08 & 21.59 & 30.52 \\ 
+    
+    & GPTQ & 25.23 & 30.47 & 38.28 & 53.83 & 64.91 & 24.11 & 17.40 & 58.29 & 50.90 & 47.77 & 24.57 & 39.61 \\ 
+       
+     W2G128 & AWQ  & 25.38 & 0.00 & 25.71 & 52.01 & 51.58 & 23.99 & 17.60 & 37.83 & 47.29 & 26.98 & 22.27 & 30.06 \\
+    
+     & HQQ & 23.35 & 0.85 & 27.77 & 51.62 & 56.69 & \textbf{26.68} & 15.80 & 40.55 & 53.43 & 28.62 & 20.14 & 31.41 \\
+     
+     & Omni & 23.24 & 5.38 & 29.38 & 49.72 & 56.09 & 26.32 & 16.60 & 41.99 & 52.71 & 32.11 & 20.39 & 32.17 \\
+       
+     &  Ours  & \textbf{40.46} & \textbf{58.61} & \textbf{50.87} & \textbf{62.90} & \textbf{75.84} & 24.85 & \textbf{22.80} & \textbf{78.56} & \textbf{57.04} & \textbf{70.88} & \textbf{37.03} & \textbf{52.71 } \\
+
+     \cline{3-14}
+     
+     &  Ours* & \textbf{43.72} & \textbf{59.75}  & \textbf{51.87} & \textbf{64.25} & 75.14 & 24.72 & \textbf{23.60} & 75.78 & 55.23 & \textbf{71.80} & \textbf{37.20} & \textbf{53.01} \\
+
+\hline
+\end{tabular}}
+}
+\caption{\label{tab:mistral at W4G-1 and W2G128}
+Detailed accuracies($\uparrow$) across 11 tasks(0-shot) of Mistral models at W4G-1 and W2G128.  'Our*' denotes the highest accuracy achieved among the 8 hyperparameter choices, outlined in Section \ref{sec:our* detail}.}
+\end{table*}
+
+\begin{table}
+\centering
+\scalebox{0.90}{
+\setlength{\tabcolsep}{2pt}{
+\begin{tabular}{c|ll|ccc}
+\hline
+    \textbf{Model} & \textbf{Method} & \textbf{Steps} & \textbf{Mistral-7B} & \textbf{V2-7B} & \textbf{V2-13B} \\
+  \hline 
+  \multirow{7}*{\fontsize{10}{12}\selectfont W4G-1} & \multirow{3}*{Flex} & 200 & 58.93 & 56.10 & 60.06 \\
+    ~ & ~ & 1000 & 60.62 & 56.98 & 60.29 \\
+    ~ & ~ & 5000 & 60.94 & 57.49 & 60.69 \\
+    \cline{2-3}
+    ~ & \multirow{2}*{Ada}  &  200  & 58.30 & 55.06 &  59.86  \\
+    ~ & ~  & 1000 & 58.38  & 55.05 & 59.92  \\
+    \cline{2-3}
+    ~ & \multirow{2}*{Ours} & 200 & 62.33 & 57.48 & 61.20  \\
+    ~ & ~ & 200* & \textbf{62.64} & \textbf{57.52} & \textbf{61.23} \\
+  \hline
+  \multirow{6}*{\fontsize{10}{12}\selectfont W2G128} & \multirow{2}*{Flex} & 200 & 30.10 & 30.01 & 30.66 \\ 
+    ~ & ~ & 1000 & 30.16 & 31.26 & 32.29 \\
+    \cline{2-3}
+    ~ & \multirow{2}*{Ada}  &  200 & 30.74 & 30.21 & 30.36  \\
+    ~ & ~  & 1000 & 30.84 & 30.30 & 30.02 \\
+    \cline{2-3}
+    ~ & \multirow{2}*{Ours} & 200 & 52.71 & 48.64 & 53.46 \\
+    ~ & ~ & 200* & \textbf{53.01} & \textbf{50.34} & \textbf{54.16} \\
+  \hline
+\end{tabular}}}
+\caption{\label{tab:Rounding_comparing}
+Comparing with some other rounding methods, the average accuracies ($\uparrow$) across 11 tasks (detailed in Section \ref{sec:tasks}) for Mistral and LLaMA models at W4G-1 and W2G128.}
+\end{table}
+\paragraph{Evaluation and Tasks.}
+\label{sec:tasks}
+We evaluate multiple language tasks to address the task-agnostic setting. Specifically, we present the average accuracy results for 11 zero-shot tasks, including HellaSwag \citep{Zellers_2019}, WinoGrande \citep{sakaguchi2021winogrande}, PIQA \citep{bisk2020piqa}, LAMBADA \citep{paperno2016lambada}, TruthfulQA \citep{lin2022truthfulqa}, OpenBookQA \citep{mihaylov2018can}, BoolQ \citep{clark2019boolq}, RTE \citep{dagan2010recognizing}, ARC-Easy, ARC-Challenge \citep{clark2018think}, and MMLU \citep{hendrycks2020measuring}. We use lm-eval-harness \citep{eval-harness} for all the above tasks. However, we argue that perplexity is notably influenced by outliers, as illustrated in Table \ref{tab:llama mistral ppl} for different algorithms. This susceptibility likely arises from the mathematical expression
+$\mathrm{PPL}(X)=\exp\left(-\frac{1}{t}\sum_{i=1}^{t}\log p_\theta(x_i|x_{<i})\right)$, where assigning a low probability to even one token can significantly inflate the perplexity score. Consequently, we prioritize the accuracy of the 11 tasks mentioned above as the primary metric, with perplexity data serving as supplementary reference.
+
+\paragraph{Quantization Configurations.}
+In alignment with GPTQ \citep{frantar2022gptq}, our focus is specifically on weight-only quantization, targeting the linear layers within transformer blocks. Layers such as the embedding layer and typically the last linear layer like 'lm-head' are excluded from the quantization process. 
+Our evaluation primarily centers on W4G-1, W4G128, W3G128 and W2G128 configurations, where W4 indicates quantizing weights with 4 bits and G represents finer-grained grouping as described in \citep{park2022nuqmm, frantar2022gptq}. We adopt asymmetric quantization.
+To mitigate overfitting on the WikiText and C4 datasets, for all the methods that need calibration, we randomly select 512 calibration samples with the same seed from the readily available pile-10k dataset \footnote{\url{https://huggingface.co/datasets/NeelNanda/pile-10k}} , which comprises the first 10k samples from pile \citep{gao2020pile}. We used a sequence length of 2048 for calibration, while for other methods, we adhere to their official settings.
+
+\paragraph{Large Language Models.}
+We compare different algorithms on commonly used models such as LLaMA-V1 \citep{touvron2023llama}, LLaMA-V2 \citep{touvron2023llamav2}, and Mistral-7B-v0.1 \citep{jiang2023mistral}. Our comparison covers a wide range of LLM parameters, ranging from 7B to 70B, to ensure comprehensive coverage and analysis.
+
+\paragraph{SignRound Hyperparameters.}
+Unless explicitly stated, the tuning process involved adjusting each block for 200 steps with a learning rate of $5 \times 10^{-3}$, a batch size of 8, and linear learning rate decay. Additionally, we employed automatic mixed precision (AMP) to accelerate the tuning.
+\subsection{Comparing With Recent Methods}
+\label{sec:4.2}
+
+In this section, we compare our methods with those that have already demonstrated remarkable results and impose no additional overhead on our tested models in weight-only quantization for LLMs, including GPTQ \citep{frantar2022gptq}, AWQ \citep{lin2023awq}, HQQ \citep{badri2023hqq}, OmniQuant \citep{shao2023omniquant} with a naive method RTN.
+
+To ensure fair comparison as much as possible, we enabled act-order and true-sequential in GPTQ and also activated static\_group in scenarios with   group\_size. The notation GPTQ$^+$ indicates that we adjusted the random seed or data pre-processing to address issues related to the non-positive definite Hessian matrix or other issues. For OmniQuant\citep{shao2023omniquant}, we adhere to the official settings, which include running for 20 epochs including W2G128 for saving time and disabling 'let'. We conducted calibration tests using sample sizes of 512 and 128, as well as a sample size of 512 with a batch size of 4. Our findings show that using a sample size of 512 typically results in comparable or slightly higher performance for models less than or equal to 13B. Therefore, we present the results based on the sample size of 512.  For 70B models, due the the Not a Number (NAN) loss issue and to reduce the tuning cost of OmniQuant, we adopted 128 samples for calibration.
+\begin{table*}
+\centering
+\scalebox{0.9}{
+\setlength{\tabcolsep}{2pt}{
+\begin{tabular}{ll|cccccccccc}
+\hline
+\textbf{Config}  &  \textbf{Model} & \textbf{2.5e-3} & \textbf{5e-3}  & \textbf{7.5e-3} & \textbf{1e-2}  & \textbf{1.25e-2} & \textbf{1.5e-2} & \textbf{1.75e-2} & \textbf{2e-2} & \textbf{SignSGD} \\
+  \hline 
+\multirow{3}*{\fontsize{10}{12}\selectfont W4G-1} & Mistral-7B  & 61.82 & 61.16   & 61.30   & 60.69   &  60.80  & 61.07   &    61.53 &  61.23  &  \textbf{62.33}  \\
+
+~ & V2-7B  & 56.79  &  57.45 &  57.09  &  57.28  &  56.88  &  57.24  &  57.40  &  57.10  &  \textbf{57.48}  \\
+
+~ & V2-13B  & 60.58 &  60.73 & 60.76  &  60.86 &  61.02  &  60.79   &  61.06  &  60.85  &  \textbf{61.20}  \\  
+\hline
+
+\multirow{3}*{\fontsize{10}{12}\selectfont W2G128} & Mistral-7B  & 37.12 &  40.37 & 41.11  & 42.02 &  42.86  &  43.55  &  43.44  &  42.44  &  \textbf{52.71}  \\
+
+~ & V2-7B  & 42.26  & 44.64  &  45.08  & 45.04   &  45.15  &  43.13  & 38.71  &  35.73  &  \textbf{48.64}  \\
+
+~ & V2-13B  & 47.81  & 50.01  & 49.55   &  50.80  & 48.67   & 51.94   & 38.28  &  34.67 &  \textbf{53.46}  \\ \hline
+\end{tabular}}}
+\caption{\label{tab:signgd_adam}
+Comparison of Adam optimizer with various learning rates against the SignSGD optimizer.. The average accuracies($\uparrow$) across 11 tasks (detailed in Section \ref{sec:tasks}) for Mistral and LLaMA models at W4G-1 and W2G128.}
+\end{table*}
+\begin{table*}
+\centering
+\scalebox{0.9}{
+\setlength{\tabcolsep}{2pt}{
+\begin{tabular}{l|ccc|ccc}
+\hline
+\textbf{Config} & \textbf{Mistral-7B} & \textbf{V2-7B} & \textbf{V2-13B} & \textbf{Mistral-7B} & \textbf{V2-7B} & \textbf{V2-13B} \\ \hline
+ & \multicolumn{3}{c|}{W4G-1}& \multicolumn{3}{c}{W2G128} \\ 
+\hline
+RTN & 58.84& 55.49  &60.46 &30.52 & 29.94 & 33.51 \\
+
+Weight clip only &61.10 & \textbf{57.41}& 60.10& 46.60 & 40.53& 49.77 \\
+
+Rounding only &\textbf{61.62} & 56.74 &\textbf{60.64} &\textbf{52.32} &\textbf{49.14} &\textbf{54.41} \\
+\hline
+Default  &\textbf{62.33} &\textbf{57.48} &\textbf{61.20} &\textbf{52.71} &48.64 & 53.46\\
+\hline
+\end{tabular}}}
+\caption{\label{tab:round_weight_clip_tuning}
+Ablation study of round tuning and weight clip tuning. The average accuracies($\uparrow$) across 11 tasks(detailed in Section \ref{sec:tasks}) for Mistral and LLaMA models at W4G-1 and W2G128.}
+\end{table*}
+ In summary, our approach demonstrated superior performance compared to GPTQ \citep{frantar2022gptq}, achieving scores of 30/32, AWQ \citep{lin2023awq} with 27/32, HQQ \citep{badri2023hqq} with 15/16, and OmniQuant \citep{shao2023omniquant} with a score of 29/32 across LLaMAV1/LLaMAV2/Mistral-7B on various quantization settings, including W4G-1, W4G128, W3G128, and W2G128. These evaluations were based on the average accuracies of 11 zero-shot tasks.
+
+It's worth noting that as the bit depth decreases, the advantages of SignRound become more notable.  For example, as shown in Table \ref{tab:mistral at W4G-1 and W2G128}, SignRound could yield absolute average accuracy improvements ranging from 6.91\% to 33.22\% at W2G128.
+\label{sec:our* detail} Moreover, we can enhance the performance by tuning the model's hyperparameters from a selection of eight choices, denoted as ours*. These choices include steps (200, 1000), weight clip learning rate (1.0/steps, 2.0/steps), and the option to either enable or disable quantized inputs, which refers to utilizing the output from the previous quantized block or the previous original block.
+
+
+\subsection{Comparing with Rounding Methods}
+In this section, we conduct a comparative analysis between SignRound, FlexRound\citep{lee2023flexround}, and AdaRound\citep{nagel2020up}. Notably, during the experiment, there is no formal official implementation available for FlexRound and AdaRound for LLMs. Hence, we reference the implementations \footnote{\url{https://openreview.  However, it's important to highlight that due to the lack of AMP support and other optimizations, the implementation is notably slow, especially when adhering to the official settings, which involve tuning 5000 steps, as presented in Table \ref{tab:rounding_runtime}. Therefore, our comparison is limited to models of size 13B or smaller. We set the learning rate to 2e-4 for LLaMA-v2-7b and Mistral-7B, and 1e-4 for LLaMA-v2-13b to align with the official settings as closely as possible. As shown in Table \ref{tab:Rounding_comparing}, SignRound achieves better results in just 200 steps compared to the 5000 steps required by other rounding methods.
+\subsection{Ablation Studies}
+
+\paragraph{SignSGD versus Adam.} To validate the effectiveness of SignSGD, Table \ref{tab:signgd_adam} compares it with the Adam optimizer \cite{kingma2014adam}. SignSGD employs a fixed learning rate of 5e-3 throughout all experiments, comprising 200 steps, with linear weight decay. For Adam, we explored learning rates ranging from 2.5e-3 to 2e-2. We choose to quantize models of 13B or less with W4G-1 due to the experiment's cost. SignSGD demonstrated a distinct advantage in average accuracy metrics across 11 tasks, which demonstrate the unique advantage of signed gradient descent in this scenario.
+\paragraph{Round and Weigh Clip Tuning.} To validate the contributions of rounding tuning and weight clip tuning, we conducted ablation studies on three models with two quantization configurations. As shown in Table \ref{tab:round_weight_clip_tuning}, each component provides benefits over RTN, with rounding tuning offering greater advantages. However, when combined, weight clip tuning can sometimes result in lower accuracy in certain  cases at W2G128.
+\begin{table*}
+\centering
+\scalebox{0.9}{
+\begin{tabular}{l|cccccccc}
+\hline
+\textbf{Model}  & \textbf{Seqlen\_512} & \textbf{Samples\_128}  & \textbf{Batch\_4} & \textbf{Steps\_100} & \textbf{Steps\_1000}   & \textbf{LR\_1e-2} & \textbf{Default} \\
+  \hline 
+Mistral-7B &  60.32  &  61.82  &  61.78  &   61.06  &  \textbf{62.58}  &  61.27   &  62.33  \\
+
+V2-7B      &  \textbf{57.91}  &  56.41  &  57.21   &  57.10  &  57.19  &  55.89   &  57.48  \\
+
+V2-13B     &  60.88  &  60.87  &  \textbf{61.21}   &  60.80  &  61.01  &   61.03  &  61.20  \\
+\hline
+\end{tabular}}
+\caption{\label{tab:hyperparameter sensitivity}
+Ablation study of hyperparameter sensitivity. The average accuracies($\uparrow$) across 11 tasks(detailed in Section \ref{sec:tasks}) for LLaMA models at W4G-1.}
+\end{table*}
+\paragraph{Hyperparameters Sensitivity.} To validate the sensitivity of hyperparameters in SignRound, we conducted ablation studies on sequence length for calibration, the number of samples for calibration, tuning batch size, tuning steps, and tuning learning rate. The results are presented in Table \ref{tab:hyperparameter sensitivity}. Overall, our default hyperparameters achieved balanced results.
+
+
+\begin{table*}
+\centering
+\scalebox{0.9}{
+\setlength{\tabcolsep}{2pt}{
+\begin{tabular}{ll|cc}
+\hline
+    \textbf{Model} & \textbf{Method} &  \textbf{Average Acc} & \textbf{Variation \%} \\ \hline
+        \multirow{2}*{Gemma-2b} & BF16 & 53.69  & - \\
+        ~ & Ours & 53.40 & -0.54\% \\ \hline
+        \multirow{2}*{Llama-2-7b-chat-hf} & FP16  & 59.01 & - \\
+        ~ & Ours  & 58.97 & -0.07\% \\ \hline
+        \multirow{2}*{Llama-3-8B-Instruct}
+        & BF16  & 63.52  & - \\
+        ~ & Ours   & 63.12  &  -0.63\% \\ \hline
+        \multirow{2}*{Mistral-7B-Instruct-v0.2} & BF16  & 66.47 & - \\
+        ~ & Ours  & 66.21 & -0.39\% \\ \hline
+        \multirow{2}*{Mixtral-8x7B} & BF16  & 66.98 & - \\
+        ~ & Ours  & 66.33 & -0.97\% \\ \hline
+        \multirow{2}*{Mixtral-8x7B-Instruct} & BF16  & 70.00 & - \\
+        ~ & Ours & 69.77 & -0.33\% \\ \hline
+        \multirow{2}*{Phi-3-mini-4k-instruct} & BF16  & 66.62 & - \\
+        ~ & Ours  & 66.33 & -0.44\% \\ \hline
+\end{tabular}}
+}
+\caption{\label{tab:generalization of LLMs}
+ The average accuracies($\uparrow$) across 11 tasks(detailed in Section \ref{sec:tasks})) with 1000 steps for LLMs at W4G128. Table \ref{tab:details of LLM generalization} provides the detailed data.}
+\end{table*}
+\subsection{Generalization to Other Models}
+\label{sec4.3}
+
+To assess the generalization of our method on LLMs, we evaluate SignRound on various mainstream LLMs such as Gemma \citep{team2024gemma}, Phi \citep{li2023textbooks}, Mistral \citep{jiang2023mistral}, Mixtral \citep{jiang2024mixtral} and Llama3 \citep{meta2024llama3}. Table \ref{tab:generalization of LLMs} demonstrated that all int4 models maintained an accuracy drop within 1\% of FP16 or BF16 accuracy by employing 1000 tuning steps and model wise hyperparameters among 4 choices detailed in Section \ref{sec:4.1}. Notably, the generalization experiments utilized an updated version (0.4.0+) of lm-eval-harness \citep{eval-harness} and real quantized models, which may result in minor discrepancies compared to other benchmark data.
+
+
+\section{Conclusions}
+
+
+In this paper, we introduce SignRound, an efficient and concise approach for optimizing weight rounding in the quantization of large language models. SignRound employs signed gradient descent for tuning rounding value and weight clipping in 200 steps, completing the quantization of LLAMA-V2-70B in approximately 2.5 hours. Our extensive experiments show that SignRound outperforms other quantization methods across various models and weight bits in the majority of scenarios. Additionally, SignRound shows promising generation capabilities in recent models and achieves enhanced performance through model-specific hyperparameter tuning.
+\newpage
+
+
+\section{Limitations}
+
+Despite the advantages, we observed a noticeable gap in accuracy performance for ultra-low bit quantization, particularly with 2-bit quantization, compared to the original model. This challenge could potentially be addressed by exploring non-uniform quantization and mixed-precision quantization, which we leave for future work.
+
+
+
+\section{Ethics Statement}
+
+Our research  aims to advance knowledge in LLM quantization. SignRound utilizes open-source models and publicly available datasets, and is not tied to particular applications, requiring only minimal fine-tuning steps on the original models. This ensures that the technical details of our method carry no potential ethical implications. We acknowledge the contributions of the creators and maintainers of these resources and provide citations to the original sources.
+
+
+
+
+
+
+
+
+

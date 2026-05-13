@@ -1,0 +1,474 @@
+\title{Simple Hierarchical Planning with Diffusion}
+
+\begin{abstract}
+Diffusion-based generative methods have proven effective in modeling trajectories with offline datasets. However, they often face computational challenges and can falter in generalization, especially in capturing temporal abstractions for long-horizon tasks. To overcome this, we introduce the \emph{Hierarchical Diffuser}, a simple, fast, yet surprisingly effective planning method combining the advantages of hierarchical and diffusion-based planning. Our model adopts a ``jumpy'' planning strategy at the higher level, which allows it to have a larger receptive field but at a lower computational cost---a crucial factor for diffusion-based planning methods, as we have empirically verified. Additionally, the jumpy sub-goals guide our low-level planner, facilitating a fine-tuning stage and further improving our approach's effectiveness. We conducted empirical evaluations on standard offline reinforcement learning benchmarks, demonstrating our method's superior performance and efficiency in terms of training and planning speed compared to the non-hierarchical Diffuser as well as other hierarchical planning methods. Moreover, we explore our model's generalization capability, particularly on how our method improves generalization capabilities on compositional out-of-distribution tasks.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+Planning has been successful in control tasks where the dynamics of the environment are known~\citep{rlbook,silver2016mastering}. Through planning, the agent can simulate numerous action sequences and assess potential outcomes without interacting with the environment, which can be costly and risky. When the environment dynamics are unknown, a world model~\citep{worldmodels, planet, dreamer} can be learned to approximate the true dynamics. Planning then takes place within the world model by generating future predictions based on actions. This type of model-based planning is considered more data-efficient than model-free methods and tends to transfer well to other tasks in the same environment~\citep{mbrlsurvey, hamrick2020role}.
+
+For temporally extended tasks with sparse rewards, the planning horizon should be increased accordingly~\citep{nachum2019does,vezhnevets2017feudal,director}. However, this may not be practical as it requires an exponentially larger number of samples of action sequences to cover all possible plans adequately. Gradient-based trajectory optimization addresses this issue but can encounter credit assignment problems. A promising solution is to use hierarchical planning \citep{singh1992reinforcement,pertsch2020long,sacerdoti1974planning,knoblock1990learning}, where a high-level plan selects subgoals that are several steps apart, and low-level plans determine actions to move from one subgoal to the next. Both the high-level plan and each of the low-level plans are shorter than the original flat plan, leading to more efficient sampling and gradient propagation.
+Conventional model-based planning typically involves separate world models and planners. However, the learned reward model can be prone to hallucinations, making it easy for the planner to exploit it \citep{talvitie2014model}. Recently, \citet{diffuser} proposed \emph{Diffuser}, a framework where a single diffusion probabilistic model \cite{sohl2015deep, ho2020denoising, song2021scorebased} is learned to serve as both the world model and the planner. It generates the states and actions in the full plan in parallel through iterative refinement, thereby achieving better global coherence. Furthermore, it also allows leveraging the guided sampling strategy \cite{adm} to provide the flexibility of adapting to the objective of the downstream task at test time.
+
+Despite such advantages of Diffuser, how to enable hierarchical planning in the diffusion-based approach remains elusive to benefit from both diffusion-based and hierarchical planning simultaneously. Lacking this ability, Diffuser is computationally expensive and sampling inefficient due to the current dense and flat planning scheme. Moreover, we empirically found that the planned trajectories produced by Diffuser have inadequate coverage of the dataset distribution. This deficiency is particularly detrimental to diffusion-based planning.
+
+In this paper, we propose the \emph{Hierarchical Diffuser}, a simple framework that enables hierarchical planning using diffusion models. The proposed model consists of two diffusers: one for high-level subgoal generation and another for low-level subgoal achievement. To implement this framework, we first split each training trajectory into segments of equal length and consider the segment's split points as subgoals. We then train the two diffusers \textit{simultaneously}. The high-level diffuser is trained on the trajectories consisting of only subgoals, which allows for a "jumpy" subgoal planning strategy and a larger receptive field at a lower computational cost. This sparseness reduces the diffusion model's burden of learning and sampling from high-dimensional distributions of dense trajectories, making learning and sampling more efficient. The low-level diffuser is trained to model only the segments, making it the subgoal achiever and facilitating a fine-tuning stage that further improves our approach's effectiveness. At test time, the high-level diffuser plans the jumpy subgoals first, and then the low-level diffuser achieves each subgoal by planning actions.
+
+The contributions of this work are as follows. First, we introduce a diffusion-based hierarchical planning framework for decision-making problems. Second, we demonstrate the effectiveness of our approach through superior performance compared to previous methods on standard offline-RL benchmarks, as well as efficient training and planning speed. For example, our proposed method outperforms the baseline by 12.0\% on Maze2D tasks and 9.2\% on MuJoCo locomotion tasks. Furthermore, we empirically identify a key factor influencing the performance of diffusion-based planning methods, and showcase our method's enhanced generalization capabilities on compositional out-of-distribution tasks. Lastly, we provide a theoretical analysis of the generalization performance. 
+
+
+
+\section{Preliminaries}
+
+\subsection{Diffusion Probabilistic Models} \label{sec:dpm}
+Diffusion probabilistic models \citep{sohl2015deep, ho2020denoising, song2021scorebased} have achieved state-of-the-art generation quality on various image generation tasks \citep{adm, ldm, dalle2, imagen}. They model the data generative process as $M$ steps of iterative denoising, starting from a Gaussian noise $\rvx_M \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$:
+\begin{equation}
+    p_\theta (\rvx_0) = \int p(\rvx_M) \prod_{m=0}^{M-1} p_\theta (\rvx_m \mid \rvx_{m+1})\,\mathrm{d}\rvx_{1:M}\ .
+\end{equation}
+Here, $\rvx_{1:M}$ are latent variables of the same dimensionality as the data $\rvx_0$, and
+\begin{equation} \label{eqn:denoising}
+    p_\theta (\rvx_m \mid \rvx_{m+1}) = \mathcal{N}(\rvx_m; \bm{\mu}_\theta (\rvx_{m+1}), \sigma_m^2 \mathbf{I})
+\end{equation}
+is commonly a Gaussian distribution with learnable mean and fixed covariance. The posterior of the latents is given by a predefined diffusion process that gradually adds Gaussian noise to the data:
+\begin{equation}
+    q(\rvx_m \mid \rvx_0) = \mathcal{N}(\rvx_m; \sqrt{\bar{\alpha}_m}\rvx_0, (1 - \bar{\alpha}_m)\mathbf{I})\ ,
+\end{equation}
+where the predefined $\bar{\alpha}_m \rightarrow 0$ as $m \rightarrow \infty$, making $q(\rvx_M \mid \rvx_0) \approx \mathcal{N}(\mathbf{0}, \mathbf{I})$ for a sufficiently large $M$.
+
+In practice, the learnable mean $\bm{\mu}_\theta (\rvx_m)$ is often parameterized as a linear combination of the latent $\rvx_m$ and the output of a noise-prediction U-Net $\bm{\epsilon}_\theta (\rvx_m)$~\citep{unet}. The training objective is simply to make $\bm{\epsilon}_\theta (\rvx_m)$ predict the noise $\bm{\epsilon}$ that was used to corrupt $\rvx_0$ into $\rvx_m$:
+\begin{equation}
+    \Ls(\theta) = \E_{\rvx_0, m, \bm{\epsilon}} \left[\lVert \bm{\epsilon} - \bm{\epsilon}_\theta (\rvx_m) \rVert^2\right]\ ,
+\end{equation}
+where $\rvx_m = \sqrt{\bar{\alpha}_m}\rvx_0 + \sqrt{1 - \bar{\alpha}_m}\bm{\epsilon}$, $\bm{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$.
+
+\subsection{Diffuser: Planning with Diffusion}
+Diffuser \citep{diffuser} is a pioneering model for learning a diffusion-based planner from offline trajectory data. It has shown superior long-horizon planning capability and test-time flexibility. The key idea is to format the trajectories of states and actions into a two-dimensional array, where each column consists of the state-action pair at a single timestep:
+\begin{equation}
+    \rvx =
+    \begin{bmatrix}
+        \rvs_0 & \rvs_1 & \dots & \rvs_T \\
+        \rva_0 & \rva_1 & \dots & \rva_T
+    \end{bmatrix}\ .
+\end{equation}
+Diffuser then trains a diffusion probabilistic model $p_\theta(\rvx)$ from an offline dataset. After training, $p_\theta(\rvx)$ is able to jointly generate plausible state and action trajectories through iterative denoising. Importantly, $p_\theta(\rvx)$ does not model the reward, and therefore is task-agnostic. To employ $p_\theta(\rvx)$ to do planning for a specific task, Diffuser trains a separate guidance function $\mathcal{J}_\phi(\rvx)$, and samples the planned trajectories from a perturbed distribution:
+\begin{equation}
+    \tilde{p}_\theta(\rvx) \propto p_\theta(\rvx) \exp{(\mathcal{J}_\phi(\rvx))}\ .
+\end{equation}
+Typically, $\mathcal{J}_\phi(\rvx)$ estimates the expected return of the trajectory, so that the planned trajectories will be biased toward those that are plausible and also have high returns. In practice, $\mathcal{J}_\phi(\rvx)$ is implemented as a regression network trained to predict the return $R(\rvx)$ of the original trajectory $\rvx$ given a noise-corrupted trajectory $\rvx_m$ as input: 
+\begin{equation}
+    \Ls(\phi) = \E_{\rvx, m, \bm{\epsilon}} \left[\lVert R(\rvx) - \mathcal{J}_\phi(\rvx_m) \rVert^2\right]\ ,
+\end{equation}
+where $R(\rvx)$ can be obtained from the offline dataset, $\rvx_m = \sqrt{\bar{\alpha}_m}\rvx + \sqrt{1 - \bar{\alpha}_m}\bm{\epsilon}$, $\bm{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$.
+
+Sampling from $\tilde{p}_\theta(\rvx)$ is achieved similarly as classifier guidance \citep{adm, sohl2015deep}, where the gradient $\nabla_{\rvx_m}\mathcal{J}_\phi$ is used to guide the denoising process (\Eqref{eqn:denoising}) by modifying the mean from $\bm{\mu}_m$ to $\tilde{\bm{\mu}}_m$:
+\begin{equation}
+    \label{guide-sampling}
+    \bm{\mu}_m \leftarrow \bm{\mu}_\theta (\rvx_{m+1}), \quad \tilde{\bm{\mu}}_m \leftarrow \bm{\mu}_m + \omega \sigma_m^2 \nabla_{\rvx_m}\mathcal{J}_\phi(\rvx_m)|_{\rvx_m = \bm{\mu}_m}\ .
+\end{equation}
+Here, $\omega$ is a hyperparameter that controls the scaling of the gradient. To ensure that the planning trajectory starts from the current state $\rvs$, Diffuser sets $\rvs_0 = \rvs$ in each $\rvx_m$ during the denoising process. After sampling a full trajectory, Diffuser executes the first action in the environment, and replans at the next state $\rvs'$. In simple environments where replanning is unnecessary, the planned action sequence can be directly executed.
+
+
+\section{Hierarchical Diffuser}
+
+\begin{figure}[t]
+  \begin{center}
+    \includegraphics[width=\textwidth]{images/hd-architecture_v3.png}
+  \end{center}
+  \caption{\textbf{Test and train-time differences between Diffuser models.} Hierarchical Diffuser (HD) is a general hierarchical diffusion-based planning framework. Unlike the Diffuser's training process (\textbf{A, left}), the HD's training phase reorganizes the training trajectory into two components: a sub-goal trajectory and dense segments. These components are then utilized to train the high-level and low-level denoising networks in parallel (\textbf{B, left}). During the testing phase, in contrast to Diffuser (\textbf{A, right}), HD initially generates a high-level plan consisted of sub-goals, which is subsequently refined through the low-level planner (\textbf{B, right}).}
+  \label{hd-overview}
+\end{figure}
+
+While Diffuser has demonstrated competence in long-horizon planning and test-time flexibility, we have empirically observed that its planned trajectories inadequately cover the dataset distribution, potentially missing high-return trajectories. Besides, the dense and flat planning scheme of the standard Diffuser is computationally expensive, especially when the planning horizon is long. Our key observation is that hierarchical planning could be an effective way to address these issues. To achieve this, we propose Hierarchical Diffuser, a simple yet effective framework that enables hierarchical planning while maintaining the benefits of diffusion-based planning. As shown in~\Figref{hd-overview}, it consists of two Diffusers: one for high-level subgoal generation (\Secref{sparse_diffuser}) and the other for low-level subgoal achievement (\Secref{hierarchical_diffuser}).
+\subsection{Sparse Diffuser for Subgoal Generation} \label{sparse_diffuser}
+
+To perform hierarchical planning, the high-level planner needs to generate a sequence of intermediate states $(\rvg_1, \dots, \rvg_H)$ that serve as subgoals for the low-level planner to achieve. Here, $H$ denotes the planning horizon. Instead of involving complicated procedures for finding high-quality subgoals~\citep{hdmi} or skills~\citep{pmlr-v202-rajeswar23a, laskin2021urlb}, we opt for a simple approach that repurposes Diffuser for subgoal generation with minimal modification. In essence, we define the subgoals to be every $K$-th states and model the distribution of subsampled trajectories:
+\begin{equation}
+    \rvx^\text{SD} =
+    \begin{bmatrix}
+        \rvs_0 & \rvs_K & \dots & \rvs_{HK} \\
+        \rva_0 & \rva_K & \dots & \rva_{HK}
+    \end{bmatrix} \eqqcolon
+    \begin{bmatrix}
+        \rvg_0 & \rvg_1 & \dots & \rvg_H \\
+        \rva_0 & \rva_K & \dots & \rva_{HK}
+    \end{bmatrix}\ .
+\end{equation}
+We name the resulting model \emph{Sparse Diffuser (SD)}. 
+While using every $K$-th states as subgoalas is a simplifying assumption, it is widely adopted in hierarchical RL due to its practical effectiveness~\citep{zhang2023leveraging, director, li2022hierarchical, Ajay2020iris, vezhnevets17a}. We will empirically show that, desipite this simplicity, our approach is effective and efficient in practice, substantially outperforming HDMI~\citep{hdmi}, a state-of-the-art method that adaptively selects subgoals.
+
+The training procedure of Sparse Diffuser is almost the same as Diffuser. The only difference is that we need to provide the subsampled data $\rvx^\text{SD}$ to the diffusion probabilistic model $p_{\theta_\text{SD}}(\rvx^\text{SD})$ and the guidance function $\mathcal{J}_{\phi_\text{SD}}(\rvx^\text{SD})$. It is important to note that, although the guidance function uses the subsampled data as input, it is still trained to predict the return of the full trajectory. Therefore, its gradient $\nabla_{\rvx^\text{SD}}\mathcal{J}_{\phi_\text{SD}}$ will direct toward a subgoal sequence that is part of high-return trajectories. However, due to the missing states and actions, the return prediction may become less accurate than Diffuser. In all of our experiments, we found that even if this is the case, it does not adversely affect task performance when compared to Diffuser. Moreover, our investigation suggests that including dense actions in $\rvx^\text{SD}$ can improve return prediction and, in some environments, further improve task performance. We provide a detailed description in Section~\Secref{model-variants} and an ablation study in ~\Secref{analysis}.
+
+It is worth noting that Sparse Diffuser can itself serve as a standalone planner, without the need to involve any low-level planner. This is because Sparse Diffuser can generate the first action $\rva_0$ of the plan, which is sufficient if we replan at each step. Interestingly, Sparse Diffuser already greatly outperforms Diffuser, mainly due to its increased receptive field (\Secref{analysis}). 
+
+\subsection{From Sparse Diffuser to Hierarchical Diffuser} \label{hierarchical_diffuser}
+While Sparse Diffuser can be used as a standalone planner, it only models the environment dynamics at a coarse level. This is beneficial for generating a high-level plan of subgoals, but it is likely that some low-level details are not taken into consideration. Therefore, we use a low-level planner to further refine the high-level plan, carving out the optimal dense trajectories that go from one subgoal to the next. This also allows us to avoid per-step replanning when it is not necessary. We call this two-level model \emph{Hierarchical Diffuser (HD)}.
+
+\textbf{Low-level Planner.} The low-level planner is simply implemented as a Diffuser $p_{\theta} (\rvx^{(i)})$ trained on trajectory segments $\rvx^{(i)}$ between each pair of adjacent subgoals $\rvg_i = \rvs_{iK}$ and $\rvg_{i+1} = \rvs_{(i+1)K}$:
+\begin{equation}
+    \rvx^{(i)} =
+    \begin{bmatrix}
+        \rvs_{iK} & \rvs_{iK+1} & \dots & \rvs_{(i+1)K} \\
+        \rva_{iK} & \rva_{iK+1} & \dots & \rva_{(i+1)K}
+    \end{bmatrix}\ , \quad 0 \leq i < H\ .
+\end{equation}
+We also train a low-level guidance function $\mathcal{J}_\phi(\rvx^{(i)})$ that predicts the return $R(\rvx^{(i)})$ for each segment. The low-level Diffuser and guidance function are both shared across all trajectory segments, and they can be trained in parallel with the high-level planner.
+
+\textbf{Hierarchical Planning.} After training the high-level and low-level planners, we use them to perform hierarchical planning as follows. Given a starting state $\rvg_0$, we first use the high-level planner to generate subgoals $\rvg_{1:H}$. This can be achieved by sampling from the perturbed distribution $\tilde{p}_{\theta_\text{SD}}(\rvx^\text{SD}) \propto p_{\theta_\text{SD}}(\rvx^\text{SD}) \exp{(\mathcal{J}_{\phi_\text{SD}}(\rvx^\text{SD}))}$, and then discarding the actions. Since the actions generated by the high-level planner are not used anywhere, in practice we remove the actions from subsampled trajectories $\rvx^\text{SD}$ when training the high-level planner. In other words, we redefine
+\begin{equation}
+    \rvx^\text{SD} =
+    \begin{bmatrix}
+        \rvs_0 & \rvs_K & \dots & \rvs_{HK}
+    \end{bmatrix} \eqqcolon
+    \begin{bmatrix}
+        \rvg_0 & \rvg_1 & \dots & \rvg_H
+    \end{bmatrix}\ .
+\end{equation}
+Next, for each pair of adjacent subgoals $\rvg_i$ and $\rvg_{i+1}$, we use the low-level planner to generate a dense trajectory that connects them, by sampling from the distribution $\tilde{p}_\theta(\rvx^{(i)}) \propto p_\theta(\rvx^{(i)}) \exp{(\mathcal{J}_\phi(\rvx^{(i)}))}$. To ensure that the generated $\rvx^{(i)}$ indeed has $\rvg_i$ and $\rvg_{i+1}$ as its endpoints, we set $\rvs_{iK} = \rvg_i$ and $\rvs_{(i+1)K} = \rvg_{i+1}$ in each denoising step during sampling. Importantly, all low-level plans $\{\rvx^{(i)}\}_{i=0}^{H-1}$ can be generated in parallel. In environments that require per-step replanning, we only need to sample $\rvx^{(0)} \sim \tilde{p}_\theta(\rvx^{(0)})$, then execute the first action $\rva_0$ in the environment, and replan at the next state.
+
+\subsection{Improving Return Prediction with Dense Actions}\label{model-variants}
+
+\textbf{Sparse Diffuser with Dense Actions (SD-DA).}
+The missing states and actions in the subsampled trajectories $\rvx^\text{SD}$ might pose difficulties in accurately predicting returns in certain cases. Therefore, we investigate a potential model improvement that subsamples trajectories with sparse states and dense actions. The hypothesis is that the dense actions can implicitly provide information about what has occurred in the intermediate states, thereby facilitating return prediction. Meanwhile, the sparse states preserve the model's ability to generate subgoals. We format the sparse states and dense actions into the following two-dimensional array structure:
+\begin{equation}
+    \rvx^\text{SD-DA} =
+    \begin{bmatrix}
+        \rvs_0 & \rvs_K & \dots & \rvs_{HK} \\
+        \rva_0 & \rva_K & \dots & \rva_{HK} \\
+        \rva_1 & \rva_{K+1} & \dots & \rva_{HK+1} \\
+        \vdots & \vdots & \ddots & \vdots \\
+        \rva_{K-1} & \rva_{2K-1} & \dots & \rva_{(H+1)K-1} \\
+    \end{bmatrix} \eqqcolon
+    \begin{bmatrix}
+        \rvg_0 & \rvg_1 & \dots & \rvg_H \\
+        \rva_0 & \rva_K & \dots & \rva_{HK} \\
+        \rva_1 & \rva_{K+1} & \dots & \rva_{HK+1} \\
+        \vdots & \vdots & \ddots & \vdots \\
+        \rva_{K-1} & \rva_{2K-1} & \dots & \rva_{(H+1)K-1} \\
+    \end{bmatrix}\ ,
+\end{equation}
+where $\rva_{\geq HK}$ in the last column are included for padding. Training proceeds similarly as Sparse Diffuser, where we train a diffusion model $p_{\theta_\text{SD-DA}}(\rvx^\text{SD-DA})$ to capture the distribution of $\rvx^\text{SD-DA}$ in the offline dataset and a guidance function $\mathcal{J}_{\phi_\text{SD-DA}}(\rvx^\text{SD-DA})$ to predict the return of the full trajectory.
+
+\textbf{Hierarchical Diffuser with Dense Actions (HD-DA).}
+This is obtained by replacing the high-level planner in Hierarchical Diffuser with SD-DA. The subgoals are generated by sampling from $\tilde{p}_{\theta_\text{SD-DA}}(\rvx^\text{SD-DA}) \propto p_{\theta_\text{SD-DA}}(\rvx^\text{SD-DA}) \exp{(\mathcal{J}_{\phi_\text{SD-DA}}(\rvx^\text{SD-DA}))}$, and then discarding the actions.
+\subsection{Theoretic Analysis}
+ Moreover, our analysis also sheds light on the tradeoffs in the value of $K$ and the kernel size. With a larger value of $K$, it is expected to have a better generalization gap for the diffusion process but a more loss of state-action details to perform RL tasks. With a larger kernel size, we expect a worse generalization gap for the diffusion process but a better receptive field to perform RL tasks.
+
+
+
+\section{Experiments}
+
+
+In our experiment section, we illustrate how and why the Hierarchical Diffuser (HD) improves Diffuser through hierarchcial planning. We start with our main results on the D4RL \citep{d4rl} benchmark. Subsequent sections provide an in-depth analysis, highlighting the benefits of a larger receptive field (RF) for diffusion-based planners for offline RL tasks. However, our compositional out-of-distribution (OOD) task reveals that, unlike HD, Diffuser struggles to augment its RF without compromising the generalization ability. Lastly, we report HD's efficiency in accelerating both the trainig time and planning time compared with Diffuser.
+
+\subsection{Long-horizon Planning}
+We first highlight the advantage of hierarchical planning on long-horizon tasks. Specifically, we evaluate on Maze2D and AntMaze~\citep{d4rl}, two sparse-reward navigation tasks that can take hundreds of steps to accomplish. The agent will receive a reward of $1$ when it reaches a fixed goal, and no reward elsewhere, making it challenging for even the best model-free algorithms~\citep{diffuser}. The AntMaze adds to the challenge by having higher-dimensional state and action space. Following Diffuser~\citep{diffuser}, we also evaluate multi-task flexibility on Multi2D, a variant of Maze2D that randomizes the goal for each episode.
+
+\textbf{Results.} As shown in Table~\ref{offline-rl-maze2d}, Hierarchical Diffuser (HD) significantly outperforms previous state of the art across all tasks. The flat learning methods MPPI~\citep{williams2016aggressive}, IQL~\citep{kostrikov2022offline}, and Diffuser generally lag behind hierarchical learning methods, demonstrating the advantage of hierarchical planning. In addition, the failure of Diffuser in AntMaze-Large indicates that Diffuser struggles to simultaneously handle long-horizon planning and high-dimensional state and action space. Within hierarchical methods, HD outperforms the non-diffusion-based IRIS~\citep{Ajay2020iris} and HiGoC~\citep{li2022hierarchical}, showing the benefit of planning with diffusion in the hierarchical setting. Compared with the diffusion-based HDMI~\citep{hdmi} that uses complex subgoal extraction procedures and more advanced model architectures, HD achieves ${>}20\%$ performance gain on Maze2D-Large and Multi2D-Large despite its simplicity.
+\begin{table}[t]
+\centering
+\caption{\textbf{Long-horizon Planning.} HD combines the benefits of both hierarchical and diffusion-based planning, achieving the best performance across all tasks. HD results are averaged over $100$ planning seeds.}
+\begin{adjustbox}{max width=0.75\linewidth}
+\label{offline-rl-maze2d}
+\begin{tabular}{llrrrrrrr}
+
+\toprule 
+\multicolumn{2}{c}{\multirow{2}{*}{\textbf{Environment}}} & \multicolumn{3}{c}{\textbf{Flat Learning Methods}} & \multicolumn{4}{c}{\textbf{Hierarchical Learning Methods}} \\ \cmidrule(r){3-5} \cmidrule(l){6-9}
+& &\textbf{MPPI}      &\textbf{IQL}     &\textbf{Diffuser}    & \textbf{IRIS}    & \textbf{HiGoC}         & \textbf{HDMI}  & \textbf{HD (Ours)}\\ \midrule      
+Maze2D              & U-Maze             & $33.2$   & $47.4$ &$113.9 \! \pm \! 3.1$ & -  & -  & $120.1 \! \pm \! 2.5$   & $\mathbf{128.4} \! \pm \! 3.6$\\
+Maze2D              & Medium             & $10.2$   & $34.9$ &$121.5 \! \pm \! 2.7$ & -  & -  & $121.8 \! \pm \! 1.6$   & $\mathbf{135.6} \! \pm \! 3.0$\\
+Maze2D              & Large              & $5.1$   & $58.6$  &$123.0 \! \pm \! 6.4$ & -  & -   & $128.6 \! \pm \! 2.9$  & $\mathbf{155.8} \! \pm \! 2.5$\\ \midrule
+\multicolumn{2}{c}{\textbf{Single-task Average}}  & $16.2$  & $47.0$ & $119.5$  & -           & -     & $123.5$          &$\mathbf{139.9}$\\ \midrule
+Multi2D             & U-Maze             &$41.2$ & $24.8$ &$128.9 \! \pm \! 1.8$    & -  & -     & $131.3 \! \pm \! 1.8$  & $\mathbf{144.1} \! \pm \! 1.2$\\
+Multi2D             & Medium             &$15.4$ &$12.1$ &$127.2 \! \pm \! 3.4$     & -  & -     & $131.6 \! \pm \! 1.9$  & $\mathbf{140.2} \! \pm \! 1.6$\\
+Multi2D             & Large              &$8.0$ &$13.9$ &$132.1 \! \pm \! 5.8$      & -  & -     & $135.4 \! \pm \! 2.5$  & $\mathbf{165.5} \! \pm \! 0.6$\\ \midrule
+\multicolumn{2}{c}{\textbf{Multi-task Average}}   &$21.5$ &$16.9$ &$129.4$    & -          & -             & $132.8$      &$\mathbf{149.9}$\\ \midrule
+AntMaze & U-Maze &- & $62.2$ & $76.0 \! \pm \! 7.6$  &$89.4 \! \pm \! 2.4$ & $91.2 \! \pm \! 1.9$ &- & $\mathbf{94.0} \! \pm \! 4.9$\\
+AntMaze & Medium &- & $70.0$ & $31.9 \! \pm \! 5.1$ &$64.8 \! \pm \! 2.6$ & $79.3 \! \pm \! 2.5$  &- & $\mathbf{88.7} \! \pm \! 8.1$\\
+AntMaze & Large  &- & $47.5$ & $0.0 \! \pm \! 0.0$ &$43.7 \! \pm \! 1.3$ & $67.3 \! \pm \! 3.1$ &-  & $\mathbf{83.6} \! \pm \! 5.8$\\ \midrule
+\multicolumn{2}{c}{\textbf{AntMaze Average}}   &- &$59.9$ &$36.0$   &$66.0$   &$79.3$    & -          &$\mathbf{88.8}$\\
+\bottomrule
+
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\subsection{Offline Reinforcement Learning}
+We further demonstrate that hierarchical planning generally improves offline reinforcement learning even with dense rewards and short horizons. We evaluate on Gym-MuJoCo and FrankaKitchen~\citep{d4rl}, which emphasize the ability to learn from data of varying quality and to generalize to unseen states, respectively. We use HD-DA as it outperforms HD in the dense reward setting. In addition to Diffuser and HDMI, we compare to leading methods in each task domain, including model-free BCQ~\citep{bcq},  BEAR~\citep{kumar2019stabilizing}, CQL~\citep{kumar2020conservative}, IQL~\citep{kostrikov2022offline}, Decision Transformer~\citep[DT;][]{chen2021decisiontransformer}, model-based MoReL~\citep{kidambi2020morel}, Trajectory Transformer~\citep[TT;][]{janner2021offline}, and Reinforcement Learning via Supervised Learning~\citep[RvS;][]{emmons2022rvs}.
+
+\textbf{Results.} As shown in Table~\ref{offline-rl}, HD-DA achieves the best average performance, significantly outperforming Diffuser while also surpassing the more complex HDMI. Notably, HD-DA obtains ${>}35\%$ improvement on FrankaKitchen over Diffuser, demonstrating its superior generalization ability.
+\begin{table*}[t]
+\small
+\centering
+\caption{\textbf{Offline Reinforcement Learning.} HD-DA achieves the best overall performance. Results are averaged over $5$ planning seeds. Following~\citet{kostrikov2022offline}, we emphasize in bold scores within $5\%$ of maximum.}
+\begin{adjustbox}{width=\linewidth}
+\label{offline-rl}
+\begin{tabular}{llrrrrrrrrr}
+\toprule \multicolumn{2}{c}{ \textbf{Gym Tasks} } & \textbf{BC} & \textbf{CQL} & \textbf{IQL} & \textbf{DT} & \textbf{TT} & \textbf{MOReL} & \textbf{Diffuser} &\textbf{HDMI} & \textbf{HD-DA (Ours)} \\ \midrule
+ Med-Expert & HalfCheetah & $55.2$ & $\mathbf{91.6}$ & $86.7$ & $86.8$ & $\mathbf{95.0}$ & $53.3$ & $88.9 \! \pm \! 0.3$ & $\mathbf{92.1} \! \pm  \!1.4$ & $\mathbf{92.5} \! \pm \! 0.3$ \\
+Med-Expert & Hopper & $52.5$ & $1 0 5 . 4$ & $91.5$ & $1 0 7 . 6$ & $\mathbf{1 1 0 . 0}$ & $1 0 8 . 7$ & $103.3 \! \pm \! 1.3$ &$\mathbf{113.5} \! \pm \! 0.9$ & $\mathbf{115.3} \! \pm \! 1.1$ \\
+Med-Expert & Walker2d & $\mathbf{1 0 7 . 5}$ & $\mathbf{1 0 8 . 8}$ & $\mathbf{1 0 9 . 6}$ & $\mathbf{1 0 8 . 1}$ & $101.9$  & $95.6$ & $\mathbf{1 0 6 . 9} \! \pm \! 0.2$ & $\mathbf{107.9} \! \pm \! 1.2$ & $\mathbf{107.1} \pm 0.1$  \\ \midrule 
+Medium & HalfCheetah & $42.6$ & $44.0$ & $\mathbf{4 7 . 4}$ & $42.6$ & $\mathbf{4 6 . 9}$ & $42.1$ & $42.8 \pm 0.3$ &$\mathbf{48.0} \! \pm \! 0.9$ & $\mathbf{46.7} \! \pm \! 0.2$ \\
+Medium & Hopper & $52.9$ & $58.5$ & $66.3$ & $67.6$ & $61.1$ & $\mathbf{9 5 . 4}$ & $74.3 \pm 1.4$ & $76.4 \! \pm \! 2.6$& $\mathbf{99.3} \! \pm \! 0.3$ \\
+Medium & Walker2d & $75.3$ & $72.5$ & $7 8 . 3$ & $74.0$ & $7 9 . 0$ & $7 7 . 8$ & $7 9 . 6 \! \pm \! 0.6$ &$\mathbf{79.9} \! \pm \! 1.8$ & $\mathbf{84.0} \! \pm \! 0.6$ \\ \midrule
+Med-Replay & HalfCheetah & $36.6$ & $\mathbf{45.5}$ & $\mathbf{44.2}$ & $36.6$ & $41.9$ & $40.2$ & $37.7 \! \pm \! 0.5$ & $\mathbf{44.9} \! \pm \! 2.0$ & $38.1 \! \pm \! 0.7$ \\
+Med-Replay & Hopper & $18.1$ & $\mathbf{9 5 . 0}$ & $\mathbf{9 4 . 7}$ & $82.7$ & $9 1 . 5$ & $9 3 . 6$ & $9 3 . 6 \! \pm \! 0.4$ & $\mathbf{99.6} \! \pm \! 1.5$& $ \mathbf{94.7} \! \pm \! 0.7$ \\
+Med-Replay & Walker2d & $26.0$ & $77.2$ & $73.9$ & $66.6$ & $\mathbf{8 2 . 6}$ & $49.8$  & $70.6 \! \pm \! 1.6$ & $\mathbf{80.7} \! \pm \! 2.1$ & $\mathbf{84.1} \! \pm \! 2.2$  \\ \midrule 
+\multicolumn{2}{c}{ \textbf{Average} } & $51.9$ & $7 7 . 6$ & $7 7 . 0$ & $74.7$ & $7 8 . 9$ & $72.9$ & $7 7 . 5$ & $\mathbf{82.6}$ & $\mathbf{84.6}$ \\ \midrule \midrule
+\multicolumn{2}{c}{ \textbf{Kitchen Tasks}}  & \textbf{BC} &\textbf{BCQ} &\textbf{BEAR} & \textbf{CQL} & \textbf{IQL} & \textbf{RvS-G} & \textbf{Diffuser} &\textbf{HDMI} & \textbf{HD-DA (Ours)} \\ \midrule 
+Partial & FrankaKitchen & $33.8$ &$18.9$ &$13.1$ & $49.8$ &$46.3$ &$46.5$ & $56.2 \pm 5.4$ &- & $\mathbf{73.3} \! \pm \! 1.4$ \\
+Mixed   & FrankaKitchen & $47.5$ &$8.1$ &$47.2$ & $51.0$ &$51.0$ &$40.0$ & $50.0 \pm 8.8$ & $\mathbf{69.2} \! \pm \! 1.8$ &$\mathbf{71.7} \! \pm \! 2.7$ \\ \midrule
+\multicolumn{2}{c}{ \textbf{Average} } & $40.7$ &$13.5$ &$30.2$ & $50.4$ & $48.7$ &$43.3$  &$53.1$  &-  & $\mathbf{72.5}$\\ 
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table*}
+\subsection{Analysis}\label{analysis}
+To obtain a deeper understanding on HD improvements over Diffuser, we start our analysis with ablation studies on various model configurations. Insights from this analysis guide us to investigate the impact of effective receptive field on RL performance, specifically for diffusion-based planners. Furthermore, we introduce a compositional out-of-distribution (OOD) task to demonstrate HD's compositional generalization capabilities. We also evaluate HD's performance on varied jumpy step $K$ values to test its robustness and adaptability.
+
+\textbf{SD already outperforms Diffuser. HD further improves SD via low-level refinement.} This can be seen from Table~\ref{offline-rl-variant}, where we report the performance of Diffuser, SD, and HD averaged over Maze2D, Multi2D, and Gym-MuJoCo tasks respectively. As mentioned in \Secref{sparse_diffuser}, here we use SD as a standalone planner. In the following, we investigate potential reasons why SD outperforms Diffuser.
+
+\begin{table}[t]
+\begin{minipage}[t]{0.49\linewidth}
+\centering
+\caption{\textbf{Ablation on Model Variants.} SD yields an improvement over Diffuser, and the incorporation of low-level refinement in HD provides further enhancement in performance compared to SD.}
+\label{offline-rl-variant}
+\begin{adjustbox}{max width=0.7\linewidth}
+\setlength{\tabcolsep}{8pt}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+\textbf{Dataset} & \textbf{Diffuser}    & \textbf{SD}    & \textbf{HD}  \\ \midrule
+Gym-MuJoCo &$77.5$ &$80.7$ &$\mathbf{81.7}$ \\
+Maze2D & $119.5$  & $133.4$  & $\mathbf{139.9}$\\
+Multi2D & $129.4$ & $145.8$  & $\mathbf{149.9}$ \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.49\linewidth}
+    \centering
+    \caption{\textbf{Guidance Function Learning.} The included dense action helps learn guidance function, resulting in better RL performance.}
+    \begin{adjustbox}{max width=0.9\linewidth}
+    \begin{tabular}{lrrrr}
+    \toprule
+    \multirow{2}{*}{\textbf{Dataset}} & \multicolumn{2}{c}{$\mathbf{\mathcal{J}_\phi}$} & \multicolumn{2}{c}{\textbf{RL Performance}} \\
+    \cmidrule(lr){2-3} \cmidrule(lr){4-5}
+                         & \multicolumn{1}{c}{\textbf{HD}}       & \multicolumn{1}{c}{\textbf{HD-DA}}      & \multicolumn{1}{c}{\textbf{HD}}       & \multicolumn{1}{c}{\textbf{HD-DA}}       \\ 
+    \midrule
+    Hopper               &$101.7$   &$\mathbf{88.8}$      &$93.4 \! \pm \! 3.1$    &$\mathbf{94.7} \! \pm \! 0.7$  \\
+    Walker2d             &$166.1$   &$\mathbf{133.0}$     &$77.2 \! \pm \! 3.3$     &$\mathbf{84.1} \! \pm \! 2.2$   \\
+    HalfCheetah          &$228.5$   &$\mathbf{208.2}$     &$37.5 \! \pm \! 1.7$     &$\mathbf{38.1} \! \pm \! 0.7$   \\
+    \bottomrule
+    \end{tabular}
+    \label{guidance}
+    \end{adjustbox}
+\end{minipage}
+\end{table}
+
+\textbf{Large kernel size improves diffusion-based planning for in-distribution tasks.}
+A key difference between SD and Diffuser is that the subsampling in SD increases its effective receptive field. This leads us to hypothesize that a larger receptive field may be beneficial for modeling the data distribution, resulting in better performance. To test this hypothesis, we experiment with different kernel sizes of Diffuser, and report the averaged performance on Maze2D, Multi2D, and Gym-MuJoCo in \Figref{ablation-ks-k}. We find that Diffuser's performance generally improves as the kernel size increases up to a certain threshold. (Critical drawbacks associated with increasing Diffuser's kernel sizes will be discussed in detail in the subsequent section.) Its best performance is comparable to SD, but remains inferior to HD. In \Figref{data_coverage}, we further provide a qualitative comparison of the model's coverage of the data distribution. We plot the actual executed trajectories when the agent follows the model-generated plans. Our results show that HD is able to generate plans that cover all distinct paths between the start and goal state, exhibiting a distribution closely aligned with the dataset. Diffuser has a much worse coverage of the data distribution, but can be improved with a large kernel size.
+\begin{figure}[h!]
+    \centering
+    \begin{tikzpicture}
+        \pgfplotsset{
+            scale only axis,
+            xmin=5, xmax=31
+        }
+        \begin{axis}[
+        width=3.2cm,
+        height=2cm,
+        ylabel near ticks,
+        ylabel={Performance - Maze2D},
+        xlabel={Kernel Size},
+        xlabel near ticks,
+        xtick={5, 10, 15, 20, 25, 30},
+        xtick pos=left,
+        xmin=5, xmax=31,
+        ytick={120, 130, 140},
+        ymin=118, ymax=142,
+        enlarge x limits=0.1,
+        enlarge y limits=0.1,
+        title style={font=\tiny},
+        label style={font=\tiny},
+        tick label style={font=\tiny},
+        legend style={draw=none, fill=none, text opacity = 1,column sep=0.04cm, {at={(0.5,1.2)}}, font=\tiny, legend columns=-1,anchor=north, line width = 0.5pt},
+        legend image code/.code={
+        \draw [#1] plot coordinates {(0.35cm,0cm) (0.0cm,0cm)}; },
+        legend entries = {HD, SD, Diffuser},
+        ymajorgrids=true,
+        grid style=dashed,
+    ]
+    \addplot[domain = 0:34, color=xanthous, dashed, line width=2pt]{139.9};
+    \addplot[domain = 0:34, color=cyan, dashed, line width=2pt]{132.5};
+    \addplot[
+        color=lightcoral,line width=2pt,
+        ]
+        coordinates {
+        (5,119.5)(13,130.4)(19,133.3)(25, 136.3)(31,131.4)
+        };\label{d_Maze2D}
+    \end{axis}
+    \end{tikzpicture}
+    \hspace{2mm}
+    \begin{tikzpicture}
+        \pgfplotsset{
+            scale only axis,
+            xmin=5, xmax=31
+        }
+        \begin{axis}[
+        width=3.2cm,
+        height=2cm,
+        ylabel near ticks,
+        ylabel={Performance - Multi2D},
+        xlabel={Kernel Size},
+        xlabel near ticks,
+        xtick={5, 10, 15, 20, 25, 30},
+        xtick pos=left,
+        ytick={130,140,150},
+        xmin=5, xmax=31,
+        ymin=128, ymax=152,
+        enlarge x limits=0.1,
+        enlarge y limits=0.1,
+        title style={font=\tiny},
+        label style={font=\tiny},
+        tick label style={font=\tiny},
+        legend style={draw=none, fill=none, text opacity = 1,column sep=0.04cm, {at={(0.5,1.2)}}, font=\tiny, legend columns=-1,anchor=north, line width = 0.5pt},
+        legend image code/.code={
+        \draw [#1] plot coordinates {(0.35cm,0cm) (0.0cm,0cm)}; },
+        legend entries = {HD, SD, Diffuser},
+        ymajorgrids=true,
+        grid style=dashed,
+    ]
+    \addplot[domain = 0:34, color=xanthous, dashed, line width=2pt]{149.9};
+    \addplot[domain = 0:34, color=cyan, dashed, line width=2pt]{145.4};
+    \addplot[
+        color=lightcoral,line width=2pt,
+        ]
+        coordinates {
+        (5,129.4)(13,139.6)(19,141.2)(25, 142.9)(31,141.6)
+        };\label{d_MazeMulti}
+    \end{axis}
+    \end{tikzpicture}
+    \hspace{2mm}
+    \begin{tikzpicture}
+        \pgfplotsset{
+            scale only axis,
+            xmin=5, xmax=31
+        }
+        \begin{axis}[
+        width=3.2cm,
+        height=2cm,
+        ylabel near ticks,
+        ylabel={Performance - Gym},
+        xlabel={Kernel Size},
+        xlabel near ticks,
+        xtick={5, 10, 15, 20},
+        xtick pos=left,
+        xmin=5, xmax=20,
+        ytick={75,80,85},
+        ymin=74, ymax=86,
+        enlarge x limits=0.1,
+        enlarge y limits=0.1,
+        title style={font=\tiny},
+        label style={font=\tiny},
+        tick label style={font=\tiny},
+        legend style={draw=none, fill=none, text opacity = 1,column sep=0.04cm, {at={(0.5,1.2)}}, font=\tiny, legend columns=-1,anchor=north, line width = 0.5pt},
+        legend image code/.code={
+        \draw [#1] plot coordinates {(0.35cm,0cm) (0.0cm,0cm)}; },
+        legend entries = {HD-DA, SD-DA, Diffuser},
+        ymajorgrids=true,
+        grid style=dashed,
+    ]
+    \addplot[domain = 0:22, color=xanthous, dashed, line width=2pt]{84.6};
+    \addplot[domain = 0:22, color=cyan, dashed, line width=2pt]{80.8};
+    \addplot[
+        color=lightcoral, line width=2pt,
+        ]
+        coordinates {
+        (5,77.5)(13,81.5)(21, 81.2)
+        };
+    
+    \end{axis}
+    \end{tikzpicture}
+    \caption{\textbf{Impact of Kernel Size.} Results of the impact of kernel size on performance of Diffuser in offline RL indicates that
+reasonably enlarging kernel size can improves the performance.}
+    \label{ablation-ks-k}
+\end{figure}
+
+\begin{figure}[h]
+\vskip -0.21in
+\begin{center}
+\centerline{\includegraphics[width=\linewidth]{images/data_coverage.png}}
+\caption{\textbf{Coverage of Data Distribution.} Empirically, we observed that Diffuser exhibits insufficient coverage of the dataset distribution. We illustrate this with an example featuring three distinct paths traversing from the start to the goal state. While Diffuser struggles to capture these divergent paths, both our method and Diffuser with an increased receptive field successfully recover this distribution.}
+\label{data_coverage}
+\end{center}
+\vskip -0.2in
+\end{figure}
+
+\textbf{Large kernel size hurts out-of-distribution generalization.}
+While increasing the kernel size appears to be a simple way to improve Diffuser, it has many drawbacks such as higher memory consumption and slower training and planning. Most importantly, it introduces more model parameters, which can adversely affect the model's generalization capability. We demonstrate this in a task that requires the model to produce novel plans between unseen pairs of start and goal states at test time, by stitching together segments of training trajectories. We report the task success rate in Table~\ref{ood}, as well as the discrepancy between generated plans and optimal trajectories measured with cosine similarity and mean squared error (MSE). HD succeeds in all tasks, generating plans that are closest to the optimal trajectories, while Diffuser variants fail this task completely.
+
+\begin{table}[h!]
+\centering
+\small
+\caption{\textbf{Out-Of-Distribution (OOD) Task Performance.} Only Hierarchical Diffuser (HD) can solve the compositional OOD task and generate plans that are most close to the optimal.}
+\label{ood}
+\begin{adjustbox}{width=0.8\columnwidth}
+\label{offline-rl-K}
+\begin{tabular}{lrrrrr}
+
+\toprule 
+\textbf{Metrics}                 & \textbf{Diffuser-KS5}      & \textbf{Diffuser-KS13}    & \textbf{Diffuser-KS19}  & \textbf{Diffuser-KS25}  & \textbf{HD}\\ \midrule      
+Successful Rate             & $0.0\%$                    & $0.0\%$                   & $0.0\%$                 & $0.0\%$                 & $\mathbf{100.0\%}$      \\
+Cosine Similarity       & $0.85$                     & $0.89$                    & $0.93$                  & $0.93$                  & $\mathbf{0.98}$     \\
+Deviation (MSE)       & $$1269.9$$                 & $1311.1$                  & $758.5$                 & $1023.2$               & $\mathbf{198.2}$ \\ \bottomrule
+
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\textbf{Effect of Dense Actions.}
+Though the dense actions generated from high-level planer are discarded tn the low-level refinement phase, we empirically find that including dense actions facilitates the learning of the guidance function. As shown in Table \ref{guidance}, validation loss of guidance fuction learned from HD-DA is lower than that of SD-SA, leading to better RL performance. We conduct the experiment on the Medium-Replay dataset where learning the value function is hard due to the mixed policies.
+
+\textbf{Efficiency Gains with Hierarchical Diffuser.} A potential concern when introducing an additional round of sampling might be the increase in planning time. However, the high-level plan, being $K$ times shorter, and the parallel generation of low-level segments counteract this concern. In Table \ref{wall-clock}, we observed a $10\times$ speed up over Diffuser in medium and large maze settings with horizons beyond $250$ time steps.
+\begin{table*}[h]
+    \centering
+    \caption{{\textbf{Wall-clock Time Comparison.}} Hierarchical Diffuser (HD) is more computationally efficient compared to Diffuser during both training and testing stages.}
+    \begin{adjustbox}{max width=0.8\linewidth}
+    \begin{tabular}{ccrrrcrrr}
+    \toprule
+    \multirow{2}{*}{Environment} & \multicolumn{4}{c}{Training [s]}                                                                                              & \multicolumn{4}{c}{Planning [s]}                                                                                              \\
+    \cmidrule(lr){2-5} \cmidrule(lr){6-9}
+                             & U-Maze                           & \multicolumn{1}{c}{Med-Maze} & \multicolumn{1}{c}{L-Maze} & \multicolumn{1}{c}{MuJoCo} & U-Maze                           & \multicolumn{1}{c}{Med-Maze} & \multicolumn{1}{c}{L-Maze} & \multicolumn{1}{c}{MuJoCo} \\ \midrule
+HD                           & \multicolumn{1}{r}{\textbf{8.0}} & \textbf{8.7}                 & \textbf{8.6}               & \textbf{9.9}              & \multicolumn{1}{r}{\textbf{0.8}} & \textbf{3.1}                 & \textbf{3.3}               & \textbf{1.0}               \\
+Diffuser                     & \multicolumn{1}{r}{26.6}         & 132.7                        & 119.7                      & 12.3                       & \multicolumn{1}{r}{1.1}          & 9.9                          & 9.9                        & 1.3                       \\ \bottomrule
+    \end{tabular}
+    \end{adjustbox}
+    \label{wall-clock}
+\end{table*}
+
+
+
+
+
+\section{Related Works}
+
+\textbf{Diffusion Models.} 
+ Diffusion models have recently emerged as a new type of generative model that supports generating samples, computing likelihood, and flexible-model complexity control. In diffusion models, the generation process is formulated as an iterative denoising process \cite{sohl2015deep, ho2020denoising}. The diffusion process can also be guided to a desired direction such as to a specific class by using either classifier-based guidance \cite{nichol2021glide} or classifier-free guidance \cite{ho2022classifier}. Recently, diffusion models have been adopted for agent learning. \citet{diffuser} have adopted it first and proposed the diffuser model which is the non-hierarchical version of our proposed model, while subsequent works by \citet{decision_diffuser, lu2023contrastive} optimized the guidance sampling process. Other works have utilized diffusion models specifically for RL \cite{wang2022diffusion, chen2023offline}, observation-to-action imitation modeling \cite{pearce2022imitating}, and for allowing equivariance with respect to the product of the spatial symmetry group \cite{brehmer2023edgi}. A noteworthy contribution in this field is the hierarchical diffusion-based planning method \cite{hdmi}, which resonates closely with our work but distinguishes itself in the subgoal preprocessing. While it necessitates explicit graph searching, our high-level diffuser to discover subgoals automatically. 
+
+\textbf{Hierarchical Planning.} Hierarchical planning has been successfully employed using temporal generative models, commonly referred to as world models \cite{worldmodels,dreamer}. These models forecast future states or observations based on historical states and actions. Recent years have seen the advent of hierarchical variations of these world models \cite{hmrnn,vta,clockwork_vae}. Once trained, a world model can be used to train a separate policy with rollouts sampled from it \cite{dreamer, deisenroth2011pilco, ghugare2023simplifying, buckman2018sample, director}, or it can be leveraged for plan searching \cite{muzero, Wang2020Exploring, pertsch2020long, hu2023planning, zhu2023making}. Our proposed method draws upon these principles, but also has connections to hierarchical skill-based planning such as latent skill planning \cite{lsp,shi2022skimo}. However, a crucial distinction of our approach lies in the concurrent generation of all timesteps of a plan, unlike the aforementioned methods that require a sequential prediction of future states.
+
+
+
+\section{Conclusion}
+
+We introduce Hierarchical Diffuser, a comprehensive hierarchical framework that leverages the strengths of both hierarchical reinforcement learning and diffusion-based planning methods. Our approach, characterized by a larger receptive field at higher levels and a fine-tuning stage at the lower levels, has the capacity to not only capture optimal behavior from the offline dataset, but also retain the flexibility needed for compositional out-of-distribution (OOD) tasks. Expanding our methodology to the visual domain, which boasts a broader range of applications, constitutes another potential future direction.
+
+\textbf{Limitations} Our Hierarchical Diffuser (HD) model has notable strengths but also presents some limitations. Foremost among these is its dependency on the quality of the dataset. Being an offline method, the performance of HD is restriced by the coverage or quality of datasets. In situations where it encounters unfamiliar trajectories, HD may struggle to produce optimal plans. Another restriction is the choice of fixed sub-goal intervals. This decision simplify the model's architecture but might fall short in handling a certain class of complex real-world scenarios. Furthermore, it introduces a task-dependent hyper-parameter. Lastly, the efficacy of HD is tied to the accuracy of the learned value function. This relationship places limits on the magnitude of the jump steps $K$; excessively skipping states poses challenge to learn the value function.
+
+
+

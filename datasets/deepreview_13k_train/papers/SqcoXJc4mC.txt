@@ -1,0 +1,256 @@
+\title{Q-based Variational Inverse Reinforcement Learning}
+
+\begin{abstract}
+The development of safe and beneficial AI requires that systems can learn and act in accordance with human preferences. However, explicitly specifying these preferences by hand is often infeasible. Inverse reinforcement learning (IRL) addresses this challenge by inferring preferences, represented as reward functions, from expert behavior. We introduce Q-based Variational IRL (QVIRL), a novel Bayesian IRL method that recovers a posterior distribution over rewards from expert demonstrations via primarily learning a variational distribution over Q-values. Unlike previous approaches, QVIRL combines scalability with uncertainty quantification, important for safety-critical applications. We demonstrate QVIRL's strong performance in apprenticeship learning across various tasks, including classical control problems and safe navigation in the Safety Gymnasium suite, where the method's uncertainty quantification allows us to produce safer policies.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Stuart Russell (2019) has suggested three principles to guide the development of beneficial artificial intelligence, from autonomous industrial robots and autonomous vehicles to advanced future systems: AI’s only objective is realizing human preferences; AI is initially uncertain about what these preferences are; and the ultimate source of information about human preferences is human behavior. Apprenticeship learning1 via Bayesian inverse reinforcement learning (IRL) can be understood as a possible operationalization of these principles: Bayesian IRL starts with a prior distribution over reward functions representing initial uncertainty about human preferences.2 It then combines this prior with demonstration data from a human expert acting approximately optimally with respect to an unknown reward, to produce a posterior distribution over rewards. In apprenticeship learning, this posterior over rewards is then used to produce a policy that should perform well according to the unknown reward function.  
+
+Non-Bayesian IRL has been successfully applied in apprenticeship learning in settings including robotics (Kretzschmar et al., 2016; Okal & Arras, 2016; Woodworth et al., 2018; Das et al., 2021; Liu et al., 2022), navigation in Google Maps on a global scale (Barnes et al., 2023), or autonomous driving (Sun et al., 2018; Rosbach et al., 2019; Huang et al., 2022), including on vehicles deployed in real-world heavy traffic (Phan-Minh et al., 2022). However, this body of work that has scaled IRL to real-world settings generally learns only a point-estimate of the reward function, which can be problematic for several reasons: first, the IRL task is generally underspecified – there exist multiple reward functions that equally well explain given behaviour, even in the limit of many demonstration trajectories (Russell, 1998; Cao et al., 2021; Kim et al., 2021; Skalse et al., 2023). Second, further uncertainty is induced by working only with a limited amount of demonstrations. Especially in safety-critical applications, it is desirable to track this uncertainty to subsequently produce policies that are robust with respect to a range of rewards consistent with the observed data, rather than producing a policy optimizing a point-estimated reward that could be wrong.  
+
+![](images/af9170b4592025c1cd9a1f5daad8e986605c026e993e08ab1ce4d4c65b693ca5.jpg)  
+Figure 1: Illustration of a simplified QVIRL architecture. A state-action pair $(s,a)$ and a successor pair $(s^{\prime},a^{\prime})$ are fed into an encoder network, which for each pair $(s,a)$ produces the mean $\mu_{Q}$ and the standard deviation $\sigma_{Q}$ of the associated Q value $Q(s,a)$ , as well as a latent embedding $e$ . These embeddings of a set of state-action pairs can be passed to a kernel to produce their correlation matrix and, combined with individual variances, their covariance $\Sigma_{Q Q^{\prime}}$ . These together define the joint variational distribution of the Q-values associated with a given set of state-action pairs. This distribution, together with the Bellman equation, can then be used to cheaply deduce the distribution over the corresponding reward.  
+
+Bayesian IRL addresses these problems head-on by recovering a posterior distribution over reward functions,3 rather than a point estimate, which can be used to produce policies robust with respect to this posterior uncertainty.4 However, prior methods for Bayesian IRL (see the Related Work section) are generally applicable only to finite state and action spaces, or continuous spaces with only a handful of dimensions (Ramachandran & Amir, 2007; Mandyam et al., 2023; Bajgar et al., 2024), thus hindering their applicability to real-world settings. Alternatively, other work (Chan & van der Schaar, 2021) sacrifices posterior uncertainty quantification in the interest of scalability.  
+
+The contribution of this paper is providing a method that preserves both scalability – in terms of the dimensionality of the state space as well as the amount of demonstrations, which we demonstrate by applying it to higher dimensional settings than any previous article on Bayesian IRL – and full posterior uncertainty estimation, whose usefulness we demonstrate by producing risk-averse policies that can avoid hazards in the Safety Gymnasium. We achieve this by combining variational inference (generally notably more computationally efficient than Markov chain Monte Carlo used in much previous work) and by primarily working in the space of Q-values rather than rewards, which avoids the need to repeatedly solve the forward planning problem – a notorious obstacle in IRL. We see this as a step in scaling Bayesian IRL methods to higher-dimensional settings, broadening the range of tasks that can benefit from the improved robustness that posterior uncertainty quantification can bring, and opening the door to further work on scaling, robust apprenticeship learning, or active IRL.  
+
+2 TASK  
+
+The goal of Bayesian inverse reinforcement learning is recovering a posterior distribution over reward functions based on observing a set of demonstrations $\mathcal{D}=\{(\bar{\phi}(\bar{s_{1}}),a_{1}),...,(\phi(s_{n}),a_{n})\}$ from an expert acting in a Markov decision process (MDP) $\mathcal{M}=(S,\mathcal{A},p,r,\gamma,t_{\operatorname*{max}},\rho_{0})$ where $\boldsymbol{S}$ and $\boldsymbol{\mathcal{A}}$ are the state and action spaces respectively, $\phi:S\rightarrow\Phi$ is a feature function that maps each state to its representation in a feature space $\Phi$ , $p:S\times A\to{\mathcal{P}}(S)$ is the transition function where ${\mathcal{P}}(S)$ is a set of probability measures over $\boldsymbol{S}$ , $r:\Phi\times\mathcal{A}\to\mathbb{R}$ is an (expected) reward function,5 $\gamma\in(0,1)$ is a discount rate, $t_{\mathrm{max}}\in\mathbb{N}\cup\{\infty\}$ is the time horizon, and $\rho_{0}$ is the initial state distribution. Where there is no risk of confusion, we sometimes write rewards, $\mathrm{{Q}}.$ -functions, and policies directly as functions of the state, omitting the feature function, to simplify notation.  
+
+In IRL, we know all elements of the MDP except for the reward function and, possibly, the transition function.6 Instead, we have a model of how the expert policy is linked to the reward and, in the case of Bayesian IRL, we also have a prior distribution over reward functions. Commonly used expert models include: Boltzmann rationality models such as  
+
+$$
+\mathbb{P}[a_{i}|\phi(s_{t})]=\frac{e^{\alpha Q^{*}(\phi(s_{t}),a_{i})}}{\sum_{a^{\prime}\in\mathcal{A}}e^{\alpha Q^{*}(\phi(s_{t}),a^{\prime})}}
+$$  
+
+(Ramachandran & Amir, 2007; Chan $\&$ van der Schaar, 2021) where $Q^{*}(s,a)$ is the expected (discounted) return if action $a$ is taken in state $s$ and the optimal policy is subsequently followed, and $\alpha$ is a rationality coefficient; the maximum entropy approach (Ziebart et al., 2008), where the probability of each trajectory is assumed to be proportional to the exponential of the trajectory’s return; or sparse behaviour noise models (Zheng et al., 2014), where the expert is assumed to behave rationally except for sparse deviations. Beside these approximately rational models, various models of irrationality can also be considered (Evans et al., 2015). The Bayesian IRL framework is flexible with respect to the choice of expert model (each such model just resulting in a different likelihood function), and can also be extended to the case where the model is not fully known.  
+
+In this article, we adopt the Boltzmann rationality model (Eq. 1). We will assume that conditional on the Q values, the actions chosen by the expert are independent, yielding the likelihood  
+
+$$
+p(\mathcal{D}|r)=\prod_{(s_{t},a_{t})\in\mathcal{D}}\frac{e^{\alpha Q^{*}(\phi(s_{t}),a_{t})}}{\sum_{a^{\prime}\in\mathcal{A}}e^{\alpha Q^{*}(\phi(s_{t}),a^{\prime})}}
+$$  
+
+for a discrete action space $\boldsymbol{\mathcal{A}}$ (the expression can readily be adapted to a continuous setting by replacing the sum by an integral). Given this likelihood together with the prior over rewards $p(R)$ , we can calculate the posterior using the Bayes Theorem as $p(r|T)=p(\mathcal{D}|r)p(r)/p(\mathcal{D})$ . Note that the full probability of the demonstrations (including the likelihood) would involve also the transition probabilities, but since the same term would appear in both the numerator and the denominator of the posterior, it would cancel out, so we are omitting this probability from the formula for the likelihood.  
+
+Generally, we cannot calculate the posterior analytically, so in practice, we need to resort to approximate methods. We propose to use variational inference, in a manner that substantively improves upon the only previous use of variational inference for this problem.  
+
+
+
+\section{2.1 RELATED WORK  }
+
+
+Inverse reinforcement learning (IRL) has been introduced by Russell (1998), though essentially the same problem had been formulated and studied before as inverse optimal control (Kalman, 1964) (though the two communities have been somewhat separate and using different sets of methods; see Ab Azar et al. (2020) for a comparison). The already vast IRL literature is well reviewed by Arora & Doshi (2021) and Adams et al. (2022) – we will concentrate on approaches closest to ours, i.e. Bayesian inverse reinforcement learning methods.  
+
+The problem of Bayesian IRL was first addressed by Ramachandran & Amir (2007) using Markov chain Monte Carlo (MCMC) sampling. MCMC can produce samples from the true posterior over rewards, but scales poorly to higher dimensions. Furthermore Ramachandran’s method needs to solve the forward RL many times. Michini & How (2012) tried to improve the efficiency by focusing only on the most relevant parts of the state-action space. Mandyam et al. (2023) instead tried to reduce the number of times the forward RL problem needs to get solved by solving it a few times with different reward functions and then trying to learn a joint density over rewards and demonstrations using kernel density estimation, but the method can still address only very small problems. Bajgar et al. (2024) significantly reduced the computational burden by performing inference primarily in the space of Q-values, also avoiding the need to repeatedly solve the forward RL problem – a trick we also use. However, the method is still based on MCMC sampling, which is computationally intensive and has trouble scaling to higher-dimensional inference problems.  
+
+Chan & van der Schaar (2021) have applied the much more scalable variational inference to the problem. Their approach avoids having to repeatedly solve the forward RL problem by jointly learning a reward encoder (a network producing a mean and variance for the reward in any state) and a Q-network, capturing the current estimate of the expert policy, the two being tied together by the Bellman equation applied as a soft constraint. The Q-network is then used to produce the apprentice policy. However, since the method models only a point estimate of the Q-function, it does not provide any uncertainty estimation for the apprentice policy. Furthermore, since the reward posterior is tied to this point-estimate of the Q-function, its posterior variance is greatly reduced relative to the true Bayesian posterior. Our method, focusing on modelling the uncertainty over Q-values, does not suffer from these flaws.  
+
+Other methods (Choi & Kim, 2015; Qiao & Beling, 2011; Wei et al., 2023) have applied elements of Bayesian reasoning in IRL, but do not provide posterior uncertainty quantification instead learning e.g. a MAP estimate, while Balakrishnan et al. (2020) use Bayesian optimization to make (otherwise non-Bayesian) IRL more efficient. Bayesian IRL has also been extended beyond the basic setting studied here e.g. to multiple experts (Choi & Kim, 2012).  
+
+
+
+\section{3 METHOD  }
+
+
+We first provide a high-level summary of our method, $Q$ -based Variational IRL (QVIRL), and then proceed by describing each of its components in detail. Our method takes as input a set of demonstrations and a prior over the reward functions, and produces as output (1) a variational approximation to the posterior over Q-functions (which can be understood as encoding the optimal policy under the unknown reward), which can be used to deduce (2) a variational distribution over reward functions. Classical Bayesian IRL (Ramachandran & Amir, 2007) evaluates the posterior of each hypothetical reward by calculating the associated optimal Q-values, which are then used to evaluate the likelihood (2). However, that can be extremely costly, especially since it needs to be done many times. Thus, we build on an insight used already by Chan & van der Schaar (2021), Garg et al. (2021) and Bajgar et al. (2024): going from the Q-values to the reward is computationally much simpler than going from rewards to the Q-function. Our model therefore centres on modelling a posterior distribution over Q-values. The Q-values can be used to evaluate the likelihood. And the Bellman equations then allow us to deduce the corresponding rewards in one step, rather than having to solve the whole forward RL problem. By pushing the Q-value distribution through the inverse Bellman operator, we can deduce the corresponding distribution over rewards, which can be used to link the distribution over Q-values to the prior over rewards. We approximate both posteriors by variational distributions, which are optimized using the evidence lower bound (ELBO), as is usual in variational inference. The architecture is illustrated in Fig. 1. We will now describe each component in turn. For a clearer initial explanation, we will first concentrate on the case of discrete state and action spaces, though most of the equations almost directly transfer to the continuous cases – an exact continuous version of the equations can generally be obtained by appropriately replacing summation by integration. In practice, the integrals need to be approximated by discrete samples, reverting back to the discretespace equations (where we no longer sum over all states or actions but only over a sample).  
+
+3.1 Q-VALUE VARIATIONAL POSTERIOR  
+
+We model the posterior distribution over Q values using a variational family $q_{\theta}$ , parameterised by a vector of parameters $\theta\in\ensuremath{\mathbb{R}}^{d}$ , which we can use to evaluate the joint distribution of Q-values for any given set of state-action pairs. Let us highlight why it is important for the Q-value posterior to be able to model the covariances between different Q-values: Adding a constant to all $\mathrm{{Q}}.$ -values does not change the associated Boltzmann policy. Thus, any demonstration data result in a likelihood that is invariant with respect to adding the same value to all Q-values, usually creating positive correlation amongst them. Also, $\mathrm{{Q}}.$ -values of states lying on the same optimal trajectory all depend on rewards of states towards the end of that trajectory, thus again creating a positive correlation.  
+
+A range of variational distributions could be used. As a baseline, we work out the details here using a multi-variate Gaussian (in a discrete-space case), or a Gaussian process (in the continuous-statespace case).7  
+
+The particular architecture we will use for our experiments, and which is outlined in Figure 1 is one based on a neural-network encoder with parameters $\theta$ , which for any given state-action pair $s,a$ , produces a mean $\mu_{Q}(s,a;\theta)$ , a log standard deviation $\log\sigma_{Q}(s,a;\theta)$ , as well as latent-space embedding $e(s,a;\theta)$ , which can then be used as an input to a standard Gaussian process kernel $k$ to calculate the correlation matrix of any set of state-action pairs (by default, we will be using a radialbasis function (RBF) kernel, but our method can accommodate any kernel). Thus, for any collection $(s_{1},a_{1}),\ldots,(s_{n},a_{n})$ of state-action pairs, the variational posterior will yield a joint multivariate Gaussian distribution with mean and covariance  
+
+$$
+\begin{array}{r l}&{\mu_{Q}=\left[\mu_{Q}(s_{i},a_{i};\theta)\right]_{i=1}^{n}}\\ &{\Sigma_{Q}=\left[\sigma_{Q}(s_{i},a_{i};\theta)\sigma_{Q}(s_{j},a_{j};\theta)k\big(e(s_{i},a_{i};\theta),e(s_{j},a_{j};\theta)\big)\right]_{i,j=1}^{n}.}\end{array}
+$$  
+
+As is usual in variational inference, we will optimize the parameters $\theta$ of this variational distribution using stochastic gradient ascent on the evidence lower bound (ELBO)  
+
+$$
+\begin{array}{r}{\operatorname{ELBO}(\theta)=\sum_{s,a\sim\mathcal{D}}[\log p(a|s;\theta)]-\operatorname{KL}(q_{R}(R;\theta)||p(R)),}\end{array}
+$$  
+
+where the first term is the likelihood (2), $q_{R}(R;\theta)$ is the implicit variational distribution over the reward which we describe in the next section, and $p(R)$ is the prior distribution over the reward. We now turn to the distribution over rewards and the evaluation of the KL divergence to the prior, and then address the evaluation of the likelihood.  
+
+
+
+\section{3.2 EVALUATING THE REWARD PRIOR AND POSTERIOR  }
+
+
+In a discounted MDP, there is a bijection between the expected reward function and the optimal Q function. Thus, the variational posterior that we have just introduced implicitly fully defines a posterior over rewards. In particular, according to the inverse Bellman equation,  
+
+$$
+R(s,a)=Q(s,a)-\gamma\sum_{s^{\prime}\in\mathcal{S}}p(s^{\prime}|s,a)\operatorname*{max}_{a^{\prime}}Q(s^{\prime},a^{\prime})
+$$  
+
+if the state space is discrete (otherwise, we replace the sum by an integral), which, at the very least, enables us to sample from this distribution by sampling from the joint distribution over $\mathrm{{Q}}.$ -values and then using Eq. 5 to get the corresponding reward samples.  
+
+Unfortunately, the final term – a maximum of (by default, jointly Gaussian) random variables – cannot be evaluated analytically to yield a closed-form distribution for the reward. Monte Carlo sampling is an option to get an empirical sample from the reward posterior. However, this may make it difficult to efficiently propagate gradient during training.  
+
+Noting that the posterior $\mathrm{{Q}}.$ -values, treated as random variables, are often correlated (as explained earlier) and that the variance of $\mathrm{^Q}$ -values of proximate states is often similar, during optimization, we will approximate the maximum of the Q-values by the Q-value with the highest posterior mean  
+
+$$
+R(s,a)\approx Q(s,a)-\gamma\sum_{s^{\prime}\in\cal S}p(s^{\prime}|s,a)Q(s^{\prime},\underset{a^{\prime}}{\arg\operatorname*{max}}\,\mu_{Q}(s^{\prime},a^{\prime})).
+$$  
+
+That linearizes the Bellman equation and allows us to approximate the posterior over rewards corresponding to a given posterior over Q-values by a Gaussian with mean and variance given by the following lemma:  
+
+Lemma 1. Let $R(s,a)$ be a random variable derived, using Equation 6 from the multivariate normal $\{Q(s,a)|s\,\in\,S,a\,\in\,A\}$ with mean and variance from Equation 3. Then, $R(s,a)$ is normally distributed with mean  
+
+$$
+\mu_{R}(s,a)=\mu_{Q}(s,a)-\gamma\sum_{s^{\prime}\in S}p(s^{\prime}|s,a)\operatorname*{max}_{a^{\prime}}\mu_{Q}(s^{\prime},a^{\prime})
+$$  
+
+and variance  
+
+$$
+\begin{array}{r}{\sigma_{R}^{2}(s,a)=\sigma_{Q}^{2}\big(s,a\big)-2\gamma\sigma_{Q}\big(s,a\big)\sum_{s^{\prime}\in\mathcal{S}}p(s^{\prime}|s,a)\Sigma_{s s^{\prime}}+\gamma^{2}\sum_{s^{\prime}\in\mathcal{S}}\sum_{s^{\prime\prime}\in\mathcal{S}}p(s^{\prime}|s,a)p(s^{\prime\prime}|s,a)\Sigma_{s^{\prime}s^{\prime\prime}}}\end{array}
+$$  
+
+where ${\hat{\pi}}(s):=\arg\operatorname*{max}_{a}\mu_{Q}(s,a)$ and  
+
+$$
+\Sigma_{s s^{\prime}}=\sigma_{Q}\big(s^{\prime},{\hat{\pi}}(s^{\prime})\big)\sigma_{Q}\big(s^{\prime\prime},{\hat{\pi}}(s^{\prime\prime})\big)k\Big(e\big(s^{\prime},{\hat{\pi}}(s^{\prime})\big),e\big(s^{\prime\prime},{\hat{\pi}}(s^{\prime\prime})\big)\Big)
+$$  
+
+is the covariance between the $Q$ -values of top actions in states $s$ and $s^{\prime}$ .  
+
+  
+
+This implicit reward posterior can be used to calculate the KL divergence to the prior, which is needed to calculate the ELBO (4). If we need an explicit representation of the reward distribution for downstream use, we can also fit a further variational distribution to encode the reward posterior directly. This can be done post-hoc, after the main training of the Q-value posterior is finished.  
+
+3.3 LIKELIHOOD  
+
+Besides the prior, we need to be able to evaluate the likelihood. If the posterior over Q-values is approximated using a variational density $q_{\theta}$ , then the likelihood can be written as $p({\mathcal{D}}|\theta)\;=$ $\textstyle\prod_{(s,a)\in{\mathcal{D}}}p(a|s;\theta)$ with  
+
+$$
+p(a|s;\theta)=\int_{Q(s,\cdot)\in\mathbb{R}^{|A|}}\frac{e^{\alpha Q(s,a)}}{\sum_{a^{\prime}}e^{\alpha Q(s,a^{\prime})}}q_{\theta}(Q(s,\cdot))\ d Q(s,\cdot)
+$$  
+
+where by $Q(s,\cdot)$ we denote the vector of Q-values for each action in state $s$ .  
+
+The above integral is not known to have a closed-form solution; however, following the mean-field approximation proposed by Lu et al. (2021),8we can approximate  
+
+$$
+\begin{array}{r}{p(a|s;\theta)\approx\left(\sum_{a^{\prime}}\exp\left(-\frac{\alpha\left(\mu_{Q}(s,a)-\mu_{Q}(s,a^{\prime})\right)}{\sqrt{1+3\pi^{-2}\alpha^{2}(\sigma_{Q}(s,a)^{2}+\sigma_{Q}(s,a^{\prime})^{2}-2\Sigma_{a a^{\prime}})}}\right)\right)^{-1}}\end{array}
+$$  
+
+where $\Sigma_{a a^{\prime}}$ is the covariance between the Q-values of $a$ and $a^{\prime}$ as calculated via the embeddings and the kernel as $\Sigma_{a a^{\prime}}:=\sigma_{Q}(s,a)\sigma_{Q}(s,a^{\prime})k(e(s,a),e(s,a^{\prime}))$ .  
+
+
+
+\section{3.4 ELBO  }
+
+
+If we take a further mean-field approximation for the KL term, we can now calculate the ELBO over a batch of demonstrations $\mathcal{D}_{b}$ as  
+
+$$
+\operatorname{ELBO}(\theta)\approx\sum_{s,a\in{\mathcal{D}}_{b}}\log p(a\mid s;\theta)-\sum_{s,a\in{\mathcal{S}}\times A}\operatorname{KL}\Bigl({N\bigl(R;\mu_{R}(s,a;\theta),\sigma_{R}(s,a;\theta)\bigr)}\mid\mid p\bigl(R(s,a)\bigr)\Bigr),
+$$  
+
+where the first term is evaluated using Equation 9 and the second can be evaluated analytically as the KL divergence between two Gaussians. Here we neglect the covariance structure for calculating the KL, but it can be easily accommodated. The parameters $\theta$ of the encoder are then trained by maximizing this ELBO using stochastic gradient ascent.  
+
+3.5 APPRENTICE POLICIES  
+
+Once a Q-value model (and possibly a reward model) have been trained, they can be used to produce an apprentice policy for performing the task represented by the learnt reward. In the simplest case, this maximizes either the expected Q-value (which is cheaper if environment dynamics remain the same in deployment) or reward (which may be useful for transfer, but requires running forward RL).  
+
+However, since we retain a full posterior distribution, we can also generate conservative apprentice policies that instead optimize for other statistics of the posterior, such as some lower quantile or conditional value at risk (CVaR), choosing actions that should lead to outcomes robust with respect to the epistemic uncertainty encoded by the model. This can also have an effect discouraging the model from entering regions of the state space unseen during training – something that is often addressed using ad-hoc heuristics in literature based on behavioural cloning. We use this conservative apprentice policy in our experiments on the Mujoco and Safety Gymnasium environments, where we use the lower-confidence-bound (LCB) apprentice policy  
+
+$$
+\pi_{\mathrm{LCB}}(s)=\arg\operatorname*{max}_{a}\mu_{Q}(s,a)-\kappa\sigma_{Q}(s,a)\;.
+$$  
+
+where $\kappa$ can be chosen to match a particular quantile.  
+
+
+
+\section{3.6 OTHER SETTINGS  }
+
+
+  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+We ran experiments in plain apprenticeship learning (where the apprentice aims to maximize expected reward) on 3 classic control environments as well as 3 tasks (each for 3 different demonstration datasets) in the Mujoco physics simulator, which we will now describe in turn. To more explicitly demonstrate the advantages of posterior uncertainty estimation, we also test our method in environments with safety constraints from the Safety Gymnasium suite (Ji et al., 2023a).  
+
+
+
+\section{4.1 CLASSIC CONTROL ENVIRONMENTS  }
+
+
+First, we evaluate QVIRL in the strictly-batch imitation learning setting against a number of baselines on 3 simulated control environments – Cartpole, Acrobot, and Lunar Lander – which were used for evaluation by both the authors of AVRIL (Chan & van der Schaar, 2021) and ValueWalk (Bajgar et al., 2024) – the two closest prior methods for Bayesian inverse reinforcement learning. Beside ValueWalk and AVRIL, we also include a successful method for strictly-batch imitation learning, Energy-Density Maximization (EDM) (Jarrett & Bica, 2020), as well as simple behavioural cloning (BC) and a random policy.  
+
+We reuse the same expert demonstrations as prior work (which were generated using a PPO-trained expert policy) and train the model using 1, 3, 7, 10, or 15 expert trajectories. Similarly to prior work, the learnt (mean) Q-model is then used in an apprentice policy, which is tested from 300 new random initializations of the environment. We repeat each experiment 10 times with a different set of expert trajectories and report mean performance, as well as a confidence interval.  
+
+Results The results can be seen in Figure 2. Our method, QVIRL, robustly achieves expert-level performance with just a single expert trajectory for both Acrobot and Cartpole, unlike any of the other methods. On Lunar Lander, our method outperforms AVRIL – the closest IRL method – and performs comparably to BC, EDM, and ValueWalk. However, compared to ValueWalk – the prior state-of-the-art Bayesian IRL method on these tasks – QVIRL’s training time is under a minute (similarly to AVRIL) while in contrast the MCMC-based ValueWalk takes hours and thus our method presents a much faster alternative to the exact inference of ValueWalk, making QVIRL useful in cases where ValueWalk’s computational cost cannot be afforded.  
+
+![](images/909de80e645b3114be5e52e4491820da64f4ab6ffa215a386680ce500feac1e8.jpg)  
+
+Figure 2: The performance of an apprentice agent for QVIRL and 4 baseline methods. For each number of demonstration trajectories, we report a mean episode return across 10 runs of the algorithm with a different set of expert demonstrations (drawn randomly from a pool of 900). The shaded region for QVIRL and ValueWalk indicates a $90\%$ confidence interval on the value of the mean calculated using a nested bootstrap (resampling the trained models in the outer loop and the episode rewards in the inner loop). For the left two plots, the performance of QVIRL starts at approximately expert level already for a single expert demonstration trajectory, so more challenging settings may be needed for evaluation (and furthermore the horizontal expert performance line is mostly hidden behind the other curves). In the left plot, the random performance is -500, but the plot was cropped to make the differences between the methods easier to see.  
+
+Running times A single run of our experiment on the above environments took on average 8.4 minutes of wall time on a single 8-core CPU, similarly to AVRIL’s 5.5 minutes. By comparison, the MCMC-based ValueWalk (which has claimed to be already significantly faster than prior work based on MCMC) takes 21 hours to achieve good mixing.  
+
+
+
+\section{4.2 MUJOCO  }
+
+
+To illustrate the method’s performance in a more challenging, continuous-action setting, we also evaluate on 3 environments using the Mujoco simulator (Todorov et al., 2012), namely Hopper, Half-cheetah, and Walker2D, as was done in recent work on continous-action imitation learning (Lyu et al., 2024), whose experimental protocol we also follow. That means we train the model based on a single expert trajectory drawn from the D4RL dataset (Fu et al., 2021) while using other trajectories from the dataset as auxiliary data to approximate the environment dynamics (and thus compare the Q-value variational posterior to the reward prior at various points of the state-action space). Note that these auxiliary trajectories are not assumed to come from an expert and could be generated using an arbitrary (even) random policy. We then evaluate of the apprentice on the environment, reporting the normalized test score following Lyu et al. (2024). We adapt QVIRL to the continuous-action setting by sampling 100 random actions in each step and then use the discrete-action equations given in the previous section. We compare the performance of our algorithm to that of recent algorithms for offline imitation learning: DemoDICE (Kim et al., 2022), SMODICE (Ma et al., 2022), PWIL (Dadashi et al., 2021), and SEABO (Lyu et al., 2024), using IQL (Kostrikov et al., 2022) as the basis for PWIL and SEABO.  
+
+Results The results are shown in Table 1. It shows that even on the setting of plainly maximizing the expected return, for which all other methods were optimized, QVIRL produces results competitive with the state of the art and thus constitutes a competitive apprenticeship learning method. That said, we think its main advantage lies in being able to produce conservative policies as we demonstrate on the Safety Gymnasium environment.  
+
+
+
+\section{4.3 SAFETY GYMNASIUM  }
+
+
+Finally, to demonstrate how we can usefully leverage the posterior uncertainty esimation, we evaluated our model on 3 tasks from the Safety Gymnasium suite (Ji et al., 2023a). Each task has a primary goal (such as reaching a target location) associated with a primary reward as well as a set of  
+
+432 433 434 435 436 437 438 439 440 441 442 443 444 445 446 447 448 449 450 451 452 453 454 455 456 457 458 459 460 461 462 463 464 465 466 467 468 469 470 471 472 473 474 475 476 477 478 479 480 481 482 483 484 485   
+
+![](images/3359efd18bbf8b8ab8cf7f2b26ff6e4bf18e18a785c63554492aff52472bb1c0.jpg)  
+
+Table 1: Imitation learning on Mujoco. Beyond safety settings with risk-averse policies, QVIRL is also a competitive method on general imitation learning, which we illustrate by results on Mujoco with D4RL demonstrations. We use IQL as the base algorithm for SEABO and PWIL. PWILaction means that we concatenate state and action to compute rewards in PWIL. We report the mean performance at the final 10 episodes of evaluation for each algorithm, $\pm$ standard deviation.  
+
+Table 2: Safe imitation on the Safety Gymnasium. The numbers in the table are the average episode returns with respect to the primary reward ( $J_{R}$ , in green) and the safety cost $J_{c}$ , in red). QVIRL-mean and QVIRL-RA stand for QVIRL-based apprentice policies optimizing for the mean or a (risk-averse) 0.1-quantile of the posterior Q-function distribution respectively.   
+
+![](images/5bb29a331e67bcae5af02efcd6fad0e840fe53bd811ab426f290f29cf7f80e8b.jpg)  
+
+safety constraints (such as avoiding hazardous obstacles or leaving the boundaries of a safe region) whose violation produces a safety cost. We provide each method with 10 demonstration trajectories that never violate the constraints. These experiments were run in the online setting, where additional auxilliary trajectories for evaluating the KL term are sampled from the apprentice policy throughout the training. This setting is used for QVIRL, Inverse Soft Q-Learning (IQ; Garg et al.3). BC and original AVRIL were run in the offline setting for which the algorithms were designed (we are including BC as a standard simplest baseline, and offline AVRIL as the closest prior method). To test it potential for producing risk-averse policies, we used QVIRL to either choose the action with the highest mean Q value, or the action with maximum 0.1-quantile Q-value, according to the learnt posterior over Q-values. For each method we evaluated both the return with respect to the primary reward, and the return with respect to the safety cost, where 0 represents no constraint violation, and higher values represent increasingly frequent safety violations.  
+
+Note that our method does not internally separate the cost and the reward, but its internal representation can represent unsafe (high-cost) regions with negative rewards, thus still resulting in apprentice policies that avoid these regions. This makes our setting distinct from the constrained-MDP setting Altman (1999), where the primary reward should be maximized subject to a constraint on the cost.  
+
+Results Results are shown in Table 2. The mean version of QVIRL outperforms BC, and AVRIL in terms of the primary reward, while being comparable to IQ. However, the behaviour leads to frequent safety violations. Our posterior uncertainty quantification allows us to also produce a riskaverse policy, and the results show that although it can lead to a slight reduction in the primary reward, the amount of safety violations is significantly reduced, as seen by a lower safety cost on all studied tasks. While Chan & van der Schaar (2021) present AVRIL as a Bayesian IRL method, they learn only a point estimate of the Q-function and use that as a basis for the apprentice policy. This does not straightforwardly allow producing a risk-averse policy.  
+
+5 DISCUSSION AND CONCLUSION  
+
+5.1 LIMITATIONS AND ASSUMPTIONS  
+
+First-person demonstrations This article assumes that the demonstrations come from an expert acting from the same perspective as the apprentice agent. This may be true in settings such as autonomous driving, where the AI apprentice should be trying to get to destination fast but safely, similarly to what a human driver (from which the demonstration data may come) would be trying to achieve. However, in general, a human and an AI assistant may be acting in the same environment together with the common goal of fulfilling the human’s preferences. If the human is observed drinking coffee, our naive IRL framing would teach the AI assistant to also drink coffee. Instead, in such situations, we would want the AI to assist the human in fulfilling their preferences – e.g. brew and bring them a mug of coffee. Such a setting has been formalized as cooperative inverse reinforcement learning (Hadfield-Menell et al., 2016) or assistance games (Shah et al., 2020). However, solving those is generally more demanding than plain IRL, so we see Bayesian IRL as a natural step toward applying similar methods in assistance games.  
+
+Expert model The method as presented is assuming that the expert is behaving Boltzmannrationally (per Eq. 1) with a known rationality coefficient $\alpha$ . Although this model is known to be relatively robust, real human experts are unlikely to behave exactly according to this model, which can constitute model mispecification. A principled approach to tackle this would be to include uncertainty over reward models, or at the very least, to use Bayesian inference to infer also the rationality parameter, both of which can be readily included in our method, though we have not tested it experimentally so far. More fundamentally, human preferences may be evolving over time and even be influenced by the actions of an AI system (Carroll et al., 2024), all of which would need to be taken into account when robustly aligning AI systems with real users. Still, we hope the probabilistic modelling tools examined in this paper could be used in that endeavour.  
+
+Gaussian variational distribution While the general framework presented in the paper is compatible with any variational distribution family, the version empirically tested in this paper was using a Gaussian variational distribution. This means that the method assumes that the two posterior distributions (one over Q-values and one over rewards) are well approximated by this Gaussian (e.g., is unimodal and symmetric), which may not hold in general. The variational distribution needs to be adapted to correspond reasonably well to the true posterior. One way of testing the goodness of fit would be to first use one of MCMC-based methods, such as those by Ramachandran & Amir (2007) or Bajgar et al. (2024), on a smaller instance of a task to produce samples from the true posterior, and only then scaling up in a way that preserves the general shape of the distribution.  
+
+Na¨ıve sampling of continuous actions The extension of the method to continuous action has so far used na¨ıve random sampling. This works for low-dimensional action spaces (that is, those comprising a few input signals), but it suffers from the curse of dimensionality, which may prevent this approach from scaling to higher dimensional settings such as robots with many actuators. In such cases, relevant actions – e.g. meaningful movement of the robot, such as a step forward or grabbing an object – may occupy only a small manifold within the many-dimensional action space. In that case, uniform sampling may mostly produce completely irrelevant actions, such as random jerks in a robot. Instead of uniform sampling, one could train a generative policy model that would propose only a few relevant actions which could then be evaluated using the Boltzmann rationality model, with some similarity to actor-critic methods, which we leave for future work.  
+
+
+
+\section{5.2 CONCLUSIONS  }
+
+
+We have introduced the first method for Bayesian inverse reinforcement learning that both scales beyond small environments, and at the same time preserves the desirable posterior uncertainty quantification of Bayesian inference. The algorithm performs well not only against baselines within Bayesian IRL, but is competititve also with state-of-the-art algorithms in offline imitation learning. Thus it presents an important step forward in scaling Bayesian inverse reinforcement learning, with its desirable uncertainty quantification properties, into higher-dimensional settings.  
+
+
+

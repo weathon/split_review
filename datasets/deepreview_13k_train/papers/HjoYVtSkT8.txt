@@ -1,0 +1,457 @@
+\title{Learning to Ground VLMs without Forgetting}
+
+\begin{abstract}
+Spatial awareness is key to enable embodied multimodal AI systems. Yet, without vast amounts of spatial supervision, current Visual Language Models (VLMs) struggle at this task. In this paper, we introduce LynX, a framework that equips pretrained VLMs with visual grounding ability without forgetting their existing image and language understanding skills.
+To this end, we propose a \textit{Dual Mixture of Experts} module that modifies only the decoder layer of the language model, using one frozen Mixture of Experts (MoE) pre-trained on image and language understanding and another learnable MoE for new grounding capabilities. This allows the VLM to retain previously learned knowledge and skills, while acquiring what is missing.
+To train the model effectively, we generate a high-quality synthetic dataset we call \ourDataset, which mimics human reasoning in visual grounding. This dataset provides rich supervision signals, describing a step-by-step multimodal reasoning process, thereby simplifying the task of visual grounding. We evaluate LynX on several object detection and visual grounding datasets, demonstrating strong performance in object detection, zero-shot localization and grounded reasoning while maintaining its original image and language understanding capabilities on seven standard benchmark datasets.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+Visual language models (VLMs) have significantly advanced multimodal vision and language tasks, enabling impressive capabilities such as image captioning and visual question answering~\citep{alayrac2022flamingo, li2023blip, dai2024instructblip, liu2024visual}. Models like CLIP~\citep{clip_icml21} leveraged extensive image-caption data for multimodal training, while generative models like Flamingo~\citep{alayrac2022flamingo} and BLIP2~\citep{li2023blip} generate descriptive captions for images. Because of their caption-based nature, these models often lack object localization abilities, making them less suited for applications requiring precise spatial understanding~\citep{wen2023road, luo2024delving, driess2023palm, jin2023alphablock, cheng2024empowering}. Naturally, one can equip a model with localization ability by pre-training,~\citep{wang2023cogvlm, chen2023shikra}. However, this requires massive datasets, human-annotated bounding boxes, and substantial computational resources, making it costly and impractical for smaller setups. Rather than pre-training from scratch, we aim to equip a pre-trained VLM with spatial understanding by fine-tuning. 
+
+Closest to our work is PIN~\citep{dorkenwald2024pin}, which fine-tunes a VLM for the specific task of object localization by adding learned spatial parameters to the vision encoder. Trained on a synthetic dataset of superimposed object renderings, PIN is evaluated on single-object localization, predicting a bounding box given a query object name. Despite the obtained ability for object localization, PIN suffers from catastrophic forgetting, losing image understanding abilities after fine-tuning. Moreover, its synthetic data lacks inter-object relationships, limiting its utility for more complex tasks beyond object localization, like multi-object detection and reasoning~\citep{wang2023cogvlm, chen2023shikra}. Additionally, as demonstrated by PIN, even parameter-efficient methods like LoRA~\citep{hu2021lora} underfit due to the complexity differences between image understanding and grounding tasks. These challenges underscore the need for a solution that adds grounding capabilities for many tasks without compromising a model’s pre-existing strengths, which is the focus of our work.
+
+Specifically, we introduce LynX (\underline{Lin}king e\underline{X}perts for visual grounding), a novel framework that leverages a Dual Mixture of Experts (MoE) architecture. This design allows the model to specialize in both image understanding and visual grounding simultaneously, preventing the catastrophic forgetting seen in PIN and enabling fine-tuning for grounding without sacrificing existing capabilities. Further, to address the shortcomings of PIN’s localization-only dataset, we propose \ourDataset: Synthetic Chain-of-Thought with Grounding, a high-quality synthetic dataset with step-by-step grounded chain-of-thought annotations. Unlike PIN’s object-pasting approach, \ourDataset captures meaningful spatial relationships and reasoning steps, providing a richer training signal for grounding tasks. We complement this with a step-by-step training methodology inspired by~\citet{lightman2023let}, breaking down tasks into intermediate steps with individual loss functions, providing clearer learning signals for handling complex multimodal tasks. Additionally, to address the challenge of evaluating VLMs with free-form grounded responses—where existing metrics fall short—we propose an open-source evaluation metric to fairly compare performance. 
+
+Our contributions can be summarized as follows:
+\begin{enumerate} 
+    \item We introduce LynX, a Dual Mixture of Experts framework that enables VLMs to acquire new grounding capabilities via fine-tuning without forgetting pre-trained skills (Figure~\ref{fig:teaser}.a).
+    \item We present \ourDataset, a high-quality synthetic dataset with step-by-step grounded chain-of-thought annotations, specifically designed to facilitate effective training of VLMs on grounding tasks (Figure~\ref{fig:teaser}.b).
+    \item We propose a step-by-step training methodology, breaking down tasks into intermediate steps with individual loss functions, improving model performance by scaling the generated dataset (Figure~\ref{fig:teaser}.c).
+    \item We introduce an open-source evaluation pipeline for VLMs on object detection tasks, accommodating their open-ended generative nature.
+\end{enumerate}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\textwidth]{figures/teaser.png}
+    \caption{\textbf{Contributions overview.} Our contributions include \textbf{(a)} enabling a pre-trained caption-based vision-language model to learn new grounding skills by fine-tuning without forgetting old ones, \textbf{(b)} improving model performance by scaling the generated dataset, and \textbf{(c)} enabling visual grounding tasks through step-by-step training on our synthetic dataset.}
+    \label{fig:teaser}
+\end{figure}
+
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+
+\noindent\textbf{Caption-based Visual Language Models (VLMs).}
+Large language models, efficient at instruction following and generalization, have been seamlessly integrated with vision-only encoder models, yielding impressive results in multimodal tasks \citep{alayrac2022flamingo,li2023blip,bai2023qwen,chen2023minigpt,wang2023cogvlm,chen2023internvl,zhang2023internlm,lin2023video,cha2023honeybee,dai2024instructblip,ye2023mplug,zhao2023svit,chen2023sharegpt4v,liu2023mitigating,zhang2023llavar}. 
+Flamingo \citep{alayrac2022flamingo} and BLIP-2 \citep{li2023blip} are pioneering works in this area. Flamingo combines a pretrained CLIP \citep{radford2021learning} image encoder with a pretrained LLM using perceiver and gated cross-attention blocks, while BLIP-2 employs a lightweight Querying Transformer, pretrained in two stages: vision-language representation from a frozen image encoder and vision-to-language generation from a frozen language model.
+Subsequently, recent works have focused on improving performance through optimizing training strategies \citep{bai2023qwen,chen2023minigpt}, increasing resolution of image \citep{bai2023qwen,chen2023minigpt,wang2023cogvlm}, enhancing image encoders \citep{chen2023internvl,zhang2023internlm,bai2023qwen}, aligning the input \citep{lin2023video} and projection layers \citep{cha2023honeybee,alayrac2022flamingo,dai2024instructblip,ye2023mplug,zhao2023svit,chen2023sharegpt4v}. 
+More importantly, many recent works have focused on improving the model performance by expanding the instruction-tuning dataset \citep{liu2023mitigating, zhang2023llavar,zhao2023svit}. Instruction tuning in these models typically results in image captioning or simple question answering, overlooking spatial reasoning and object localization. So, they excel at generating descriptive text but struggle with tasks requiring precise spatial comprehension or multi-object grounding. In contrast, our work addresses these gaps by enabling spatial understanding and complex visual reasoning, extending beyond captioning to tasks like visual grounding and object localization.
+
+\noindent\textbf{Grounded Visual Language Models.}
+Extending the capabilities of VLMs beyond image and language understanding, many models now enable visual grounding to localize objects in an image \citep{chen2021pix2seq,wang2022ofa,lu2022unified,yang2022unitab,wang2022git,wang2024visionllm,chen2023shikra,wang2023cogvlm,bai2023qwen,dorkenwald2024pin}. Pix2Seq \citep{chen2021pix2seq} formulates object detection as an auto-regressive language modeling task, conditioned on observed input pixels.
+Inspired by this approach, models such as OFA \citep{wang2022ofa}, Unified-IO \citep{lu2022unified}, UniTab \citep{yang2022unitab}, GIT \citep{wang2022git}, and VisionLLM \citep{wang2024visionllm} incorporate coordinate vocabulary alongside language vocabulary for grounding tasks. In contrast, models like Shikra \citep{chen2023shikra}, CogVLM \citep{wang2023cogvlm}, and Qwen-VL \citep{bai2023qwen} treat positional input/output as natural language, demonstrating the ability to generate interleaved grounded visual captions for images.
+While these models perform impressively, they need large annotated datasets and significant computational resources. To address this, PIN \citep{dorkenwald2024pin} introduces a learnable positional insert module and a synthetic dataset to enhance spatial understanding in pretrained VLMs. However, their method shows limited grounding performance and leads to forgetting pretrained knowledge. In contrast, we introduce LynX, a framework that equips VLMs with grounding capabilities while retaining their image understanding skills.
+
+
+
+\section{Method}
+
+\label{sec:method}
+
+In the following sections, we briefly review standard VLMs and the concept of Mixture of Experts (MoE). We then introduce \textit{LynX}, our dual MoE framework that equips VLMs with grounding abilities while preserving their image understanding skills, without extensive pretraining. We also present \textit{SCouT}, a synthetic dataset with step-by-step reasoning supervision for learning complex grounding tasks. Finally, we explain how \textit{step-by-step} learning modifies the training loss to integrate grounding and reasoning within the Dual MoE framework.
+
+
+\subsection{Preliminaries}
+
+\noindent\textbf{Visual Language Models (VLMs).}
+VLMs process both image and text data for multimodal generative tasks. These models consist of a vision encoder $\psi(\cdot)$, a language decoder, $\phi(\cdot)$, and a mapper function $f(\cdot)$. The language decoder takes a sequence of tokens as inputs $\left[v_{1}, v_{2}, \ldots, v_{m}, t_1, t_2, \ldots, t_{n}\right]$ being composed of visual and textual tokens. Visual tokens are computed from an image $\textbf{x}$ as $\left[v_1, v_2, \ldots, v_{m}\right] = f(\psi(\textbf{x}))$, and textual tokens are computed from the text input $\textbf{t}$ as $\left[t_1, t_2, \ldots, t_{n}\right] = \mathrm{Tokenizer}(\textbf{t})$. 
+VLMs are trained via cross-entropy loss on a next-token prediction task.
+\noindent\textbf{Mixture of Expert.}
+Mixture of Experts (MoEs) are a way to increase the small model capacity to compete with large models performance without a proportional increase in computational cost \citep{shazeer2017outrageously}. Specifically, a MoE layer is composed of $E$ ``experts'' and a gating network $g(\cdot)$. The gating network decides which expert is most suitable for a given token:
+\begin{equation}
+    l_{n} = \texttt{MoE}(l_{n-1}) = \sum_{i=1}^{E} g_i(l_{n-1}) \cdot e_i(l_{n-1}),
+    \label{eq:moe}
+\end{equation}
+where $l_{n}$ represents the output of the $n$-th layer, $l_{n-1}$ the input, $E$ the total number of experts, $g_i(\cdot)$ the gating function's weight for the $i$-th expert, and $e_i(\cdot)$ the $i$-th expert's output.
+During inference, only the top-$k$ experts can be used, reducing inference costs considerably.
+
+
+\subsection{LynX: Linking experts for visual grounding}
+
+We start with a caption-based mixture-of-expert VLM~\citep{lin2024moe} adept at visual question answering tasks, and extend it for the task of object grounding as depicted in Figure \ref{fig:arch}. A transformer block of the language decoder of a VLM is composed of multi-head attention (MHA) and feed-forward network (FFN), which processes the input tokens as follows:
+\begin{align}
+    \hat{l}_{n} & = \texttt{MHA}(\texttt{LN}(l_{n-1})) + l_{n-1}, \label{eq:attention_block}\\ 
+    l_{n} &= \texttt{FFN}(\texttt{LN}(\hat{l}_{n})) + \hat{l}_{n},    \label{eq:ffn_block}
+\end{align}
+where $l_{n-1}$ is the input from layer $n-1$, $\hat{l}_{n}$ is the hidden representation at layer $n$, and $l_{n}$ is the output of the $n$-th layer.
+The mixture of expert module only modifies Eq.~\eqref{eq:ffn_block} by replacing the FFN module with a MoE in the transformer block computation as follows:
+\begin{equation}
+    l_{n} = \texttt{MoE}(\texttt{LN}(\hat{l}_{n})) + \hat{l}_{n}.
+    \label{eq:moe_block}
+\end{equation}
+We introduce a parallel MoE module for visual grounding and modify above equations as follows:
+\begin{equation}
+    l_{n}^{\texttt{\color{iucolor}IU}} = \texttt{MoE}^{\texttt{{\color{iucolor}IU}}}(\texttt{LN}(\hat{l}_{n})) + \hat{l}_{n},  \; \; \; \; \;  l_{n}^{\texttt{\color{gcolor}VG}} = \texttt{MoE}^{\texttt{\color{gcolor}VG}}(\texttt{LN}(\hat{l}_{n})) + \hat{l}_{n}, 
+    \label{eq:lynx_block_iu}
+\end{equation}
+\begin{equation}
+    l_{n} = \alpha \cdot l_{n}^{\texttt{\color{iucolor}IU}} + (1-\alpha) \cdot l_{n}^{\texttt{\color{gcolor}VG}},
+    \label{eq:lynx_block}
+\end{equation}
+where $\texttt{MoE}^{\texttt{\color{iucolor}IU}}$ is a frozen MoE module pretrained on image understanding tasks, $\texttt{MoE}^{\texttt{\color{gcolor}VG}}$ is a learnable MoE module trained for object localization task, and $\alpha$ is a learnable coefficient weight adjusting the contribution of each MoE module. 
+This design choice prevents catastrophic forgetting of pretrained image understanding skills of VLMs. Moreover, the shared modules allow knowledge transfer from the pretrained MoE into the grounding MoE, helping the latter to better interpret grounding tasks.
+
+\noindent\textbf{Training step.} We train our method using a cross-entropy loss for the next token prediction task:
+\begin{equation}
+    L = -\left[\sum_{i=1}^{N} \log P_{\theta}(t_i | v_{1}, \ldots, v_{m}, t_1, \ldots, t_{i-1})\right] + \lambda \cdot R(g),
+    \label{eq:loss_function}
+\end{equation}
+where $L$ is the next token prediction loss, $N$ represents the length of the text sequence, $v_i$ refers to the $i$-th visual token in the sequence, $t_i$ denotes the $i$-th textual token in the sequence, $\theta$ refers to the model parameters, $\lambda$ is a regularization coefficient, and $R(g)$ is a regularization term for sparsifying the gating mechanism. This loss function aims to minimize the discrepancy between the predicted and actual next token in the sequence.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=1\textwidth]{figures/method.png}\\[-5pt]
+    \caption{\textbf{LynX architecture overview.} Our dual Mixture of Experts (MoE) module replaces the feed-forward network in every other transformer block of the language decoder, preserving the visual encoder and self-attention modules. It includes two parallel MoE blocks: one frozen for image understanding and one trainable for visual grounding. Outputs are combined using a learnable $\alpha$ coefficient, facilitating knowledge transfer and faster training. During inference, alpha is adjusted based on the task, classified by our BERT token classifier.}
+    \label{fig:arch}
+\end{figure}
+
+\noindent\textbf{Inference step.} During inference, we automatically determine the task type (image understanding or visual grounding) based on the input prompt and adjust $\alpha$ accordingly. Instead of relying on manual task tokens, we employ a lightweight BERT-based classifier \citep{devlin2018bert} which takes an input prompt and classifies it into one of the two task categories. Based on the classifier's output, we adjust $\alpha$ dynamically: 
+\begin{equation}
+\alpha = 
+\begin{cases} 
+1 & \text{for Image Understanding }, \\
+\text{unchanged} & \text{for Visual Grounding}.
+\end{cases}
+\end{equation}
+Thus, at test time, the output of the dual MoE module is as follows: 
+\begin{equation}
+l_{n+1} = 
+\begin{cases} 
+l_{n+1}^{\texttt{\color{iucolor}IU}} & \text{for Image Understanding}, \\
+\alpha \cdot l_{n+1}^{\texttt{\color{iucolor}IU}} + (1-\alpha) \cdot l_{n+1}^{\texttt{\color{gcolor}VG}} & \text{for Visual Grounding}.
+\end{cases}
+\end{equation}
+
+This automated task classification eliminates the need for manual task tokens, making the system more user-friendly and robust. The BERT classifier adds minimal computational overhead, as it is an 8-bit quantized tiny model with approximately 1 million parameters, bringing the total active parameters from 1.67B to 1.671B. Our experiments show that the classifier achieves 99.98\% accuracy, ensuring negligible impact on performance.
+\subsection{\ourDataset: Synthetic Chain-of-Thought with Grounding}
+\label{subsection:gcot}
+Visual question answering datasets often incorporate spatial reasoning, such as \textit{“What object is to the left of the girl?”} or \textit{“Is there a bowl on top of the table?”}. Grounding tasks particularly benefit from this spatial reasoning, as describing relationships like "A cat at [x1, y1, x2, y2] sits to the left of a dog at [a1, b1, a2, b2]" offers clearer relative positioning, improving the interpretation of localization data for VLMs. Following this intuition, recent works such as Shikra~\citep{chen2023shikra} have made progress in creating grounded chain-of-thought datasets. Shikra uses an LLM to generate reasoning-based question-answer pairs from image captions, without access to the actual visual content.
+To address the hallucination problem, we introduce the \textit{SCouT} dataset, which integrates visual information with textual descriptions from captions. In a comparison of 100 randomly selected samples from each dataset, SCouT achieved an accuracy of 94.7\%, significantly outperforming Shikra’s 63.1\%. A correct response is defined as one where the generated grounding steps accurately reflect the relationships and spatial positions of objects in the image, without hallucinations. This demonstrates the effectiveness of our method in producing reliable, contextually grounded data.
+
+\noindent\textbf{Step-by-step loss function.} Inspired by \citet{lightman2023let}, we then decompose the generated answers, focusing on one task per sentence, to make it easily digestible for training our small visual language model, as seen in Figure~\ref{fig:teaser} (c). These steps are not separate tasks but subtasks of a unified task. To illustrate this concept mathematically, the loss function for training under step-by-step reasoning supervision can be expressed as follows:
+
+\begin{equation} 
+    L_{\text{step-by-step}} = \sum_{j=1}^{J} \left[ - \left( \sum_{i=1}^{N_j} \log P_{\theta}(t_{i}^{(j)} \mid v_{1}, \ldots, v_{m}, t_{1}^{(j)}, \ldots, t_{i-1}^{(j)}) \right) \right] + \lambda \cdot R(g) ,
+\end{equation}. 
+
+where $L_{\text{step-by-step}}$ represents the step-by-step reasoning loss function, $J$ is the number of reasoning steps, ${N_j}$ is the number of tokens in step $j$, $t_{i}^{(j)}$ represents the $i^{th}$ token in the $j^{th}$ step output, $v_{1}....v_{m}$ are the image tokens, $P_{\theta}$ is the probability predicted by the model and $R(g)$ is the regularization term with weight $\lambda$.
+
+
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+We perform our evaluation of LynX on three different grounding tasks:
+i) object localization, ii) object detection and iii) visual grounding, on top of standard image understanding tasks. The details of our architectural implementation and the dataset splits for each task is explained as follows.
+
+\paragraph{\textbf{Implementation details.}} LynX is built on MoE-llava~\citep{lin2024moe}, which uses Phi2 as its pretrained language model. MoE-llava has 4 experts dedicated to image understanding tasks. For LynX, we add a separate MoE module with two experts for grounding tasks, initialized from the image understanding MoE in the same decoder layer. The vision encoder and multi-head attention layers remain frozen, as do the interleaved decoder layers. LynX is optimized with AdamW~\citep{loshchilov2018decoupled} using a $2e-5$ learning rate, and trained on $4 \times \text{A}6000$ GPUs for about 1.5 days. LynX contains 1.67B trainable parameters, with only 0.8B active, roughly one fourth the size of Shikra-7B.
+
+\paragraph{\textbf{Datasets.}} We train LynX using three types of datasets:
+
+\noindent\textbf{1. Referential expression comprehension (REC):} The task is to use textual references to accurately identify and locate objects in a scene.
+We use the standard RefCOCO \citep{yu2016modeling} dataset which consists of three splits: RefCOCO, RefCOCO+ and RefCOCO$_\text{g}$. In total, we have $128{,}000$ samples of image-referential expression pairs from the COCO$2014$ \citep{lin2014microsoft} train dataset.
+
+\noindent\textbf{2.
+For this task, we process $108k$ images from the COCO$2017$ \citep{lin2014microsoft} train dataset using CogVLM to produce interleaved captions with corresponding bounding boxes for each object described.
+
+\noindent\textbf{3. Synthetic grounded visual question answering (\ourDataset):} This task requires the object to have image understanding and spatial reasoning along with localization capability (see section \ref{subsection:gcot} for more detail). We use the Flickr30k \citep{plummer2015flickr30k} image dataset consisting of image captions. Given the generated questions and the corresponding image, we prompt CogVLM to generate step-by-step answers for each query. For all tasks, bounding box locations are integers, with $x$ and $y$ coordinates ranging from $0$ to $99$, creating a $100 \times 100$ grid.
+
+\subsection{Object Localization}
+We begin by comparing LynX with PIN~\citep{dorkenwald2024pin} in Table \ref{tab:pin_comparison}, as both methods involve fine-tuning pretrained models for grounding tasks. PIN evaluates its object localization ability on a task that requires generating bounding boxes when prompted with object names. Their evaluation is conducted on subsets of COCO, PVOC, and LVIS, with up to three objects per image, totaling 3,582, 2,062, and 6,016 test images, respectively. For each image, the model is provided with a ground truth object name and tasked with localizing it. The mean Intersection over Union (mIoU) is reported for all bounding boxes, as well as for medium ($32 \times 32$ to $96 \times 96$ pixels) and large (over $96 \times 96$ pixels) bounding boxes, quantifying the overlap between the predicted and true bounding boxes.
+
+LynX outperforms PIN in single-object localization, with a $22\%$ improvement in mIoU on PVOC, $32\%$ on COCO, and $39\%$ on LVIS, particularly excelling with medium-sized objects. Notably, LynX achieves this without being exclusively trained for localization, whereas PIN, despite being tailored for this specific task, struggles to match our performance. Attempts to fine-tune MoE-LLaVA using LoRA also underperform across all datasets, reinforcing the robustness of our dual MoE architecture for both localization and image understanding.
+
+Although PIN uses fewer parameters (1.4M vs. 1.67B), it is limited to single-object detection and suffers from catastrophic forgetting of its image understanding capabilities. This disparity in backbones may introduce unfairness in the comparison. To better showcase LynX’s full potential, we introduce a protocol-based evaluation that assesses more complex multi-object grounding tasks -- areas where PIN cannot compete -- and standardizes evaluation for comparing VLMs.
+\begin{table*}[t]
+\centering
+\caption{\textbf{Comparison with PIN}~\citep{dorkenwald2024pin} on their COCO, PVOC, and LVIS subsets. Our model outperforms PIN across all datasets and metrics, despite not being specifically fine-tuned for this task.}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{l ccc | ccc | ccc }
+\toprule
+& \multicolumn{3}{c}{$\text{PVOC}_{\leq 3 \text{ Objects}}$ } & \multicolumn{3}{c}{$\text{COCO}_{\leq 3 \text{ Objects}}$ } & \multicolumn{3}{c}{$\text{LVIS}_{\leq 3 \text{ Objects}}$ }\\
+\cmidrule(r){2-4} \cmidrule(r){5-7} \cmidrule(r){8-10}
+\textbf{Method} & mIoU & $\text{mIoU}_M$ & $\text{mIoU}_L$ & mIoU & $\text{mIoU}_M$ &  $\text{mIoU}_L$ &  mIoU & $\text{mIoU}_M$ &  $\text{mIoU}_L$  \\
+\midrule
+
+PIN & 0.45 & 0.27 & 0.62 & 0.35 & 0.26 &  0.59 &  0.26&  0.24&  0.61 \\
+MoE-LLaVA w/ LoRA  &  0.43  & 0.21 &  0.65 & 0.36 & 0.29 & 0.60 &  0.24 &  0.21 &  0.62\\
+LynX  &  \textbf{0.68}  & \textbf{0.58} &  \textbf{0.81} & \textbf{0.66} & \textbf{0.57} & \textbf{0.78} &  \textbf{0.65} &  \textbf{0.55} &  \textbf{0.76}\\
+\bottomrule
+
+\end{tabular}
+}
+\label{tab:pin_comparison}
+\end{table*}
+
+\subsection{Object Detection}
+While the comparison with PIN highlights LynX’s superiority in standard localization tasks, we aim to demonstrate its full potential in more complex visual grounding challenges. Unlike PIN, which is limited to single-object detection, LynX handles multi-object localization and complex grounding across multiple entities. However, traditional object detection datasets like COCO~\citep{lin2014microsoft}, PASCAL VOC~\citep{everingham2010pascal}, and LVIS~\citep{gupta2019lvis} are not fully suited for VLMs, as LynX generates free-form captions and predicts objects from an open vocabulary. To fairly evaluate its performance against larger models like CogVLM and Shikra we introduce a protocol-based framework that bridges this gap.
+\noindent \textbf{Protocol 1 - Common Class Comparison:}  
+In this evaluation, CogVLM serves as the ground truth, providing object names and bounding boxes. The task asks models to “Locate objects in this image along with their bounding box coordinates,” with responses in free-form text. We focus on the top 50 shared object classes between each model and CogVLM. From Table \ref{tab:protocol_1&2}, we see that LynX—after incorporating \ourDataset into its training—significantly outperforms all models, including Shikra 7B, with an increase of $\text{AP}_{50}$ by 7.4 on COCO, 6.8 on PVOC, and 7.9 on LVIS. Despite having fewer parameters and no pretraining, LynX surpasses Shikra in these metrics, while PIN scores zero as it only generates bounding boxes without object names. The importance of dataset quality is evident in LynX’s performance gains. Initial training with the REC dataset resulted in low scores, as single-object annotations failed to generalize to multi-object detection. Adding the GIC dataset led to improvements of 28.5 on COCO, 31.7 on PVOC, and 27.6 on LVIS. However, incorporating Visual Genome (VG)—a noisy dataset—negatively impacted performance, highlighting the detrimental effect of noisy data. Replacing VG with \ourDataset yielded substantial improvements, demonstrating the necessity of high-quality, contextually grounded annotations for complex tasks.
+
+\noindent \textbf{Protocol 2 - Class Grouping:}  
+In this protocol, we map open-vocabulary predictions from LynX and CogVLM to predefined categories in COCO, PVOC, and LVIS using a sentence transformer. This groups similar classes (e.g., “man” and “woman” into “person”), standardizing labels across models. LynX—trained with \ourDataset continues to outperform other models under these stricter class mappings, with $\text{AP}_{50}$ increasing by 5.7 on COCO, 6.0 on PVOC, and 3.9 on LVIS compared to the GIC variant in Table \ref{tab:protocol_1&2}. As in Protocol 1, \ourDataset proves essential for maintaining strong performance, while the noise in VG continues to hinder results.
+
+\noindent \textbf{Protocol 3 - Reference Ground Truth Annotation:}  
+In this protocol, we use COCO’s standardized 
+\begin{wraptable}{r}{0.51\textwidth}
+\centering
+\caption{\textbf{Comparison on COCO for Protocol 3.} LynX peform comparably to CogVLM and surpasses Shikra7B, despite fewer parameters. Low scores highlight the challenge of this task, where VLMs predict less objects than dataset annotations.}
+\setlength{\tabcolsep}{8pt}
+\begin{tabular}{lccc}
+\toprule
+ \textbf{Method} & {$\text{AP}\!\uparrow$} &{$\text{AP}_{\text{50}}\!\!\uparrow$} & {$\text{AP}_{\text{L}}\!\uparrow$} \\
+ \midrule
+ PIN     & 0    & 0    & 0 \\
+ Shikra  & 13.2 & 46.8 & 16.7 \\
+ LynX    & 14.0 & 48.3 & 17.3 \\
+ CogVLM  & 16.1 & 52.7 & 21.3 \\
+ \bottomrule
+\end{tabular}
+\label{tab:protocol_3}
+\end{wraptable}
+annotations as the ground truth to ensure a fair comparison between VLMs, as relying on model-generated outputs (as in Protocols 1 and 2) can be misleading due to different object focuses by different VLMs. By using COCO annotations, we objectively evaluate each model’s accuracy in detecting objects.
+LynX, despite being much smaller (1.67B parameters), performs comparably to CogVLM (17B), our dataset generator and upper bound as can be seen from Table \ref{tab:protocol_3}. LynX also outperforms Shikra (7B), even though both Shikra and CogVLM have significantly more parameters and pretraining. The relatively low average precision (AP) scores across all models highlight the difficulty of this task—COCO averages 7 annotations per image, while VLMs typically predict 3-4 objects. This protocol provides a standardized way to evaluate object detection across VLMs, demonstrating LynX's strong balance of model size and performance.
+
+\begin{table*}[t!]
+\centering
+\vskip 0.1in
+\caption{\textbf{Results on the COCO, PVOC, and LVIS validation sets for Protocols 1 and 2.}
+LynX, trained with \ourDataset, consistently outperforms other variants across all evaluated metrics. In Protocol 1, despite being a zero-shot evaluation with training only on COCO, LynX generalizes effectively to PVOC and LVIS without prior exposure. In Protocol 2, which maps open-vocabulary predictions to predefined object categories, LynX maintains strong performance, demonstrating robustness even under class-mapping constraints. Adding the Visual Genome (VG) dataset negatively impacts performance, emphasizing the need for high-quality, contextually grounded data like \ourDataset for effective training on complex grounding tasks.}
+\vskip 0.1in
+  \resizebox{\textwidth}{!}{%
+\begin{tabular}{ccccccccccccc}
+\toprule
+ \multicolumn{4}{c}{\textbf{Dataset Type}} & \multicolumn{3}{c}{\textbf{COCO}} & \multicolumn{3}{c}{\textbf{VOC}} & \multicolumn{3}{c} 
+{\textbf{LVIS}} \\
+  \cmidrule(r){1-4} \cmidrule(r){5-7} \cmidrule(r){8-10} \cmidrule(r){11-13}
+    REC & GIC & VG & \ourDataset & AP$\uparrow$ & $\text{AP}_{\text{50}}\!\!\uparrow$ & $\text{AP}_{\text{L}}\!\!\uparrow$ & AP$\uparrow$ & $\text{AP}_{\text{50}}\!\!\uparrow$ & $\text{AP}_{\text{L}}\!\!\uparrow$ & AP$\uparrow$ & $\text{AP}_{\text{50}}\!\!\uparrow$ & $\text{AP}_{\text{L}}\!\!\uparrow$ \\ 
+  \midrule
+  \multicolumn{4}{c}{\centering \textbf{Protocol 1: Common Class}} & \multicolumn{3}{c}{\textbf{50 Classes}} & \multicolumn{3}{c}{\textbf{50 Classes}} & \multicolumn{3}{c}{\textbf{50 Classes}} \\
+ \midrule
+ $\checkmark$ & \texttimes & \texttimes & \texttimes & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0\\
+ $\checkmark$ & $\checkmark$ & \texttimes & \texttimes & 8.2 & 28.5 & 10.1 & 10.3 & 31.7 & 12.4 & 8.0 & 27.6 & 9.6\\
+ $\checkmark$ & $\checkmark$ & $\checkmark$ & \texttimes & 6.5 & 23.1 & 8.2 & 8.6 & 29.7 & 11.0 & 6.2 & 24.1 & 7.9 \\ 
+ $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ & 10.4 & 34.7 & 13.0 & 12.5 & 37.2 & 15.1 & 10.3 & 34.2 & 13.5 \\ 
+ $\checkmark$ & $\checkmark$ & \texttimes & $\checkmark$ & 11.1 & 35.9 & 13.7 & 13.1 & 38.5 & 15.9 & 11.1 & 35.5 & 14.0 \\
+ \midrule
+ \textbf{PIN} & - & - & - & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 \\
+ \textbf{Shikra 7B} & - & - & - & 8.9 & 29.3 & 12.7 & 11.7 & 33.8 & 13.6 & 9.2 & 28.5 & 10.2 \\
+ \midrule
+ \multicolumn{4}{c}{\textbf{Protocol 2: Class Grouping}} & \multicolumn{3}{c}{\textbf{80 Classes}} & \multicolumn{3}{c}{\textbf{20 Classes}} & \multicolumn{3}{c}{\textbf{200 Classes}}\\
+ \midrule
+ $\checkmark$ & \texttimes & \texttimes & \texttimes & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0\\
+ $\checkmark$ & $\checkmark$ & \texttimes & \texttimes & 6.9 & 23.4 & 9.4 & 12.1 & 38.0 & 15.5 & 4.1 & 12.1 & 5.5 \\
+ $\checkmark$ & $\checkmark$ & $\checkmark$ & \texttimes & 4.8 & 20.3 & 7.2 & 10.1 & 36.5 & 13.2 & 2.4 & 9.7 & 4.0 \\
+ $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ & 8.7 & 27.8 & 12.2 & 13.7 & 41.0 & 17.1 & 5.2 & 14.8 & 6.9 \\
+ $\checkmark$ & $\checkmark$  & \texttimes & $\checkmark$ & 9.3 & 29.1 & 13.3 & 14.5 & 44.0 & 19.2 & 5.8 & 16.0 & 7.8 \\
+ \midrule
+ \textbf{PIN} & - & - & - & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 \\
+ \textbf{Shikra 7B} & - & - & - & 7.2 & 25.5 & 10.8 & 13.3 & 39.1 & 16.7 & 4.9 & 13.4 & 5.8 \\
+ \bottomrule
+\end{tabular}}
+\label{tab:protocol_1&2}
+\vskip -0.1in
+\end{table*}
+
+\subsection{Visual Grounding}
+We evaluate LynX on two key visual grounding tasks: referential expression comprehension (REC) and phrase grounding in \ref{tab:visual_grounding}. For REC, we use the RefCOCO, RefCOCO+, and RefCOCOg~\citep{yu2016modeling} datasets, where the objective is to identify a single object in an image based on a descriptive query. In contrast, phrase grounding, evaluated on the Flickr30k Entities~\citep{plummer2015flickr30k} dataset, involves linking multiple objects to their corresponding noun phrases in a sentence, requiring more complex contextual reasoning.
+
+Unlike most models in this comparison, which rely on pretraining, LynX and PIN are fine-tuning approaches. Despite this, LynX trained with \ourDataset outperforms Shikra-7B on the complex Flickr30k phrase grounding task by 1.4\%, demonstrating our model’s strength in relational tasks. On REC tasks, LynX remains highly competitive despite Shikra's specialized training, particularly given our smaller model size and fine-tuning approach. We also outperform OFA-L and VisionLLM-H on all REC benchmarks and exceed PIN by 62\% on RefCOCO test-A, where PIN struggles with more complex queries. The \ourDataset variant further improves performance, highlighting the value of step-by-step supervision.
+
+\begin{table*}[ht]
+\centering
+\caption{\textbf{Comparison of LynX variants on the REC task.} We compare LynX with OFA-L, VisionLLM-H, Shikra, and PIN. LynX outperforms OFA-L, VisionLLM-H, and PIN, with the \ourDataset-trained variant showing enhanced performance compared to the variant trained without it. We also report results on the Flickr30k Entities dataset for both Shikra-7B and LynX. Numbers for OFA-L, VisionLLM-H, and Shikra are taken from Shikra~\citep{chen2023shikra}.}
+\vskip 0.1in
+  \resizebox{\textwidth}{!}{%
+\begin{tabular}{l|ccc|ccc|cc|cc}
+\toprule
+ & \multicolumn{3}{c}{\textbf{RefCOCO}} & \multicolumn{3}{c}{\textbf{RefCOCO+}} & \multicolumn{2}{c}{\textbf{RefCOCOg}} & \multicolumn{2}{c}{\textbf{Flickr30k Entities}} \\
+\cmidrule(r){2-4} \cmidrule(r){5-7} \cmidrule(r){8-9} \cmidrule(r){10-11}
+ \textbf{Model} & val & test-A & test-B & val & test-A & test-B & val & test & val & test \\ \midrule
+ OFA-L*~\citep{wang2022ofa} & 80.0 & 83.7 & 76.4 & 68.3 & 76.0 & 61.8 & 67.6 & 67.6 & - & - \\
+ VisionLLM-H~\citep{wang2024visionllm} & - & 86.7 & - & - & - & - & - & - & - & - \\
+ Shikra-7B~\citep{chen2023shikra} & 87.0 & 90.6 & 80.2 & 81.6 & 87.4 & 72.1 & 82.3 & 82.2 & 75.84 & 76.54 \\
+ \midrule
+ PIN~\citep{dorkenwald2024pin} & - & 26.4 & - & - & - & - & - & - & - & - \\
+ LynX w/ REC & 83.9 & 89.1 & 77.6 & 77.0 & 84.3 & 68.1 & 79.3 & 78.3 & - & - \\
+ LynX w/ REC + \ourDataset & 85.4 & 90.2 & 79.3 & 78.4 & 85.7 & 68.5 & 80.3 & 80.6 & 76.83 & 77.91 \\
+ \bottomrule
+\end{tabular}}
+\label{tab:visual_grounding}
+\vskip -0.1in
+\end{table*}
+
+\subsection{Image understanding evaluation}
+
+A major strength of LynX is its ability to retain image understanding capabilities even after fine-tuning for grounding tasks—unlike PIN, which suffers from catastrophic forgetting. As shown in Table~\ref{tab:image_understanding}, LynX matches the performance of MoE-LLaVA and is even better than much larger models like LLaVA-phi2~\citep{liu2024visual}, despite being nearly ten times smaller. This is achieved without the extensive pretraining on multiple datasets that models like Shikra require, which cannot even perform these image understanding tasks. The reported numbers, except for MME, reflect accuracy scores, while MME represents a cumulative perception score with a maximum value of 2000.
+
+\begin{table*}[t]
+\centering
+\caption{\textbf{Benchmark evaluation results for LynX on standard image understanding tasks.} Despite its smaller size, LynX performs better than larger models like LLaVA-phi2 and I-80B, successfully retaining the image understanding abilities of its base (MoE-LLava) through the dual MoE module.}
+
+\vskip 0.1in
+  \resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccccc}
+\toprule
+& & \multicolumn{3}{c}{\textbf{Image Question Answering}} & \multicolumn{4}{c}{\textbf{Benchmark Toolkit}} \\
+\cmidrule(r){3-5} \cmidrule(r){6-9}
+\textbf{Model} & \textbf{Active} & $\text{GQA}$ & $\text{SQA}^{\text{1}}$ & $\text{VQA}^{\text{T}}$ & $\text{POPE}$ & $\text{MME}$ & $\text{LLaVA}^{\text{W}}$ & $\text{MM-Vet}$ \\
+
+\midrule
+I-80B \citep{laurenccon2024obelics}     & 65B & 45.2 & - & 30.9 & - & - & - & - \\
+LLaVA-phi2 & 13B & - & 68.4 & 48.6 & 85.0 & 1335.1 & - & 28.9 \\
+MoE-LLaVA-phi2 (our base) & 3.6B & 61.4 & 68.5 & 51.4 & 86.3 & 1423.0 & 94.1 & 34.3 \\
+LynX      & 1.6B & 61.4 & 68.5 & 51.4 & 86.3 & 1423.0 & 94.1 & 34.3 \\
+ \bottomrule
+\end{tabular}}
+\label{tab:image_understanding}
+\vskip -0.1in
+\end{table*}
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 
+
+  
+
+
+
+
+
+
+
+\section{Ablations}
+
+\subsection{Fine-Tuning Challenges}
+
+From Tables~\ref{tab:finetune1} and~\ref{tab:finetune2}, fine-tuning MoE-LLaVA on both image understanding (task A) and grounding (task B) significantly degrades task A performance, while fine-tuning solely on task B leads to catastrophic forgetting, where task A abilities are entirely lost. Despite substantial training, these methods fall short compared to our Dual MoE approach.
+
+\begin{wraptable}{r}{0.5\textwidth}
+\caption{\textbf{Grounding results on COCO validation set.} LynX achieves better grounding performance compared to MoE-LLaVA finetuned variants.}
+\footnotesize
+\setlength{\tabcolsep}{7pt}
+\begin{tabular}{lccc}
+\toprule
+ \textbf{Method} & {$\text{AP}\!\uparrow$} &{$\text{AP}_{\text{50}}\!\!\uparrow$} & {$\text{AP}_{\text{L}}\!\uparrow$} \\
+ \midrule
+ MoE-LLaVA (base)   & 0    & 0    & 0 \\
+ MoE-LLaVA (A \& B) & 8.1  & 32.6 & 10.3 \\
+ MoE-LLaVA (only B) & 10.7 & 35.2 & 12.9 \\
+ LynX               & 11.1 & 35.9 & 13.7 \\
+ \bottomrule
+\end{tabular}
+\label{tab:finetune1}
+\end{wraptable}
+
+The zero results in Table~\ref{tab:finetune2} illustrate catastrophic forgetting: the model generates bounding boxes for task A prompts (e.g., GQA expects "brown" as an answer but receives a bounding box), resulting in zero accuracy. Similarly, the zero average precision (AP) scores in Table~\ref{tab:finetune1} reflect the model’s inability to generate bounding boxes without specific training, leading to zero AP on MS-COCO. This highlights the necessity of our Dual MoE module, for overcoming the limitations of traditional fine-tuning.
+
+\begin{table*}[t]
+\centering
+\caption{\textbf{Image understanding results.} Fine-tuning MoE-LLaVA on both task A and B leads to poor performance on image understanding tasks, while fine-tuning only on task B causes catastrophic forgetting of task A. LynX preserves performance across both tasks.}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccccc}
+\toprule
+ & $\text{GQA}\!\uparrow$ & $\text{SQA}\!\uparrow$ & $\text{VQA}^{\text{T}}\!\uparrow$ & $\text{POPE}\!\uparrow$ & $\text{MME}\!\uparrow$ & $\text{LLaVA}^{\text{W}}\!\uparrow$ & $\text{MM-Vet}\!\uparrow$ \\
+ \midrule
+ MoE-LLaVA (base) & 61.4 & 68.5 & 51.4 & 86.3 & 1423.0 & 94.1 & 34.3 \\
+ MoE-LLaVA (A \& B) & 53.1 & 56.9 & 46.3 & 65.7 & 1347.0 & 71.8 & 28.6 \\
+ MoE-LLaVA (only B) & 0 & 0 & 0 & 0 & 0 & 0 & 0 \\
+ LynX & 61.4 & 68.5 & 51.4 & 86.3 & 1423.0 & 94.1 & 34.3 \\
+ \bottomrule
+\end{tabular}
+}
+\label{tab:finetune2}
+\end{table*}
+\subsection{Effect of training LynX with negative supervision data.}
+ This approach offers two key advantages: First, as demonstrated in Table \ref{tab:negative_samples}, training with negative samples leads to notable improvements in object detection performance, enhancing the model's ability to distinguish relevant objects. Second, negative supervision significantly reduces hallucinations, a common issue in VLMs. If no dog is present, and only a girl is in the image, LynX recognizes the question as invalid, thereby avoiding incorrect assumptions and improving overall accuracy.
+
+\subsection{Effect of number of experts.}
+We investigate the impact of varying the number of experts in the grounding MoE module, experimenting with configurations that use 2 and 4 experts, corresponding to approximately 1.67B and 3.3B trainable parameters, respectively in Table \ref{tab:num_experts}. While increasing the number of experts to 4 results in a slight performance improvement, the gains are marginal compared to the increased computational cost. This diminishing return suggests that beyond a certain point, additional experts do not significantly enhance model performance for the grounding tasks. As a result, we adopt the 2-expert configuration in all our experiments, striking an optimal balance between performance and efficiency, as reflected in the results across different datasets.
+\begin{table*}[h]
+\centering
+\begin{minipage}{0.35\textwidth}
+\centering
+\caption{\textbf{LynX trained with negative samples} shows enhanced object detection performance.}
+\vskip 0.1in
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{cccc}
+\toprule
+Pos. & Neg. & {$\text{AP}\!\uparrow$} & {$\text{AP}_{\text{50}}\!\!\uparrow$} \\
+\midrule
+$\checkmark$ & \texttimes & 10.8 & 34.9 \\
+$\checkmark$ & $\checkmark$ & 11.1 & 35.9 \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:negative_samples}
+\end{minipage}%
+\hspace{0.05\textwidth} % adjust space between tables
+\begin{minipage}{0.55\textwidth}
+\centering
+\caption{\textbf{Effect of number of experts.} 2 experts perform on par with 4, using half the trainable parameters.}
+\vskip 0.1in
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{cccccc}
+\toprule
+ & & \multicolumn{2}{c}{\textbf{RefCOCO}} & \multicolumn{2}{c}{\textbf{RefCOCO+}} \\
+\cmidrule(r){3-4} \cmidrule(r){5-6} 
+Experts & Param. & test-A & test-B & test-A & test-B \\ \midrule
+2 & 1.6B & 90.2 & 79.3 & 85.7 & 68.5 \\
+4 & 3.3B & 90.9 & 79.8 & 86.3 & 68.8 \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:num_experts}
+\end{minipage}
+\vskip -0.1in
+\end{table*}
+\subsection{Scaling properties of our synthetic dataset.}
+We explore the scalability of SCouT in Figure \ref{fig:teaser} (part b). Leveraging our efficient data generation pipeline, we experiment with varying dataset sizes ranging from $64\text{k}$ to $3\text{M}$ samples. As seen in our results, model performance improves consistently with increase in dataset size, particularly up to $512\text{k}$ data points, after which the improvements begin to plateau. This trend highlights the effectiveness of SCouT in providing high-quality, diverse training samples, outperforming conventional human-annotated datasets in scaling the model's capabilities for complex grounding tasks.
+
+\noindent\textbf{Limitations.}
+We generated our \ourDataset dataset using CogVLM and trained LynX with this data, making us dependent on its quality. Since the data quality relies on CogVLM's reasoning capability, this sets an upper bound on our performance.
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+We introduce LynX, a versatile framework with a dual mixture of experts module, enabling a small VLM to retain pretrained knowledge while acquiring new skills. Training step-by-step with our scalable \ourDataset dataset provides an effective learning signal and highlights the potential of synthetic data. We also present an open-source evaluation pipeline for comparing VLMs at various granularities. LynX demonstrates SOTA effectiveness in object localization on multiple visual grounding benchmarks and matches pretrained performance on image understanding benchmarks.
+
+
+
+
+

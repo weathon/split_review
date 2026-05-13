@@ -1,0 +1,583 @@
+\title{Effective Interplay between Sparsity and Quantization: From Theory to Practice}
+
+\begin{abstract}
+The increasing size of deep neural networks necessitates effective model compression to improve computational efficiency and reduce their memory footprint.
+Sparsity and quantization are two prominent compression methods that have individually demonstrated significant reduction in computational and memory footprints while preserving model accuracy.
+While effective, the interplay between these two methods remains an open question.
+In this paper, we investigate the interaction between these two methods and assess whether their combination impacts final model accuracy.
+We mathematically prove that applying sparsity before quantization is the optimal sequence for these operations, minimizing error in computation.
+Our empirical studies across a wide range of models, including OPT and Llama model families (125M-8B) and ViT corroborate these theoretical findings.
+In addition, through rigorous analysis, we demonstrate that sparsity and quantization are \emph{not} orthogonal; their interaction can significantly harm model accuracy, with quantization error playing a dominant role in this degradation.
+Our findings extend to the efficient deployment of large models in resource-limited compute platforms and reduce serving cost, offering insights into best practices for applying these compression methods to maximize efficacy without compromising accuracy. \footnote{Code and data are available at: \url{https://bit.ly/quantization-sparsity-interplay}}
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Recent breakthroughs in deep neural networks (DNNs) have surpassed human-level capabilities across various tasks such as text generation, machine translation, and computer vision. 
+However, this success comes with significant challenges due to the exponential growth in the size and complexity of DNN models and datasets~\cite{brown_language_2020, zhang_opt_2022, scao_bloom_2022, touvron_llama2_2023, almazrouei_falcon_2023,  anil_gemini_2023, jiang_mistral_2023, openai_gpt4tech_2023, mesnard_gemma_2024}, which complicates their practical deployment and efficient serving.
+Delivering efficient and real-time inference for these large models is constrained by arithmetic density (throughput/silicon area~\cite{drumond_training_2018,rouhani_msfp_2020,harma_accuracy_2022}), memory footprint, and the pressure on memory bandwidth across various hardware platforms (e.g. GPU~\cite{nvidia_h100whitepaper_2022}, TPU~\cite{nvidia_tpuv5_2023}).
+
+Among various efficiency efforts, model compression has emerged as a crucial solution to effectively address the challenges associated with large models~\cite{micikevicius_mixedfp16_2018, drumond_training_2018, wang_bfloat16_2019, rouhani_msfp_2020, dai_vs_2021,  zhang_fast_2022, yeh_like_2022, harma_accuracy_2022,rouhani_mx_2023, rouhani_microscaling_2023, hassibi_optimal_1993, lecun_optimal_1989, frantar_scaling_2023, kao_training_2022, lasby_dynamic_2023, kuzmin_svsq_2023}
+with quantization standing out as a prominent method in terms of overall compression ratio.
+Quantization effectively reduces the precision of model tensors from native floating-point representation to formats such as FP16~\cite{micikevicius_mixedfp16_2018}, BFloat16~\cite{wang_bfloat16_2019}, INT8~\cite{baalen_int8_2023,zafrir_q8bert_2019}, and others~\cite{drumond_training_2018, rouhani_msfp_2020, dai_vs_2021,  zhang_fast_2022, yeh_like_2022, harma_accuracy_2022, rouhani_mx_2023, rouhani_microscaling_2023}.
+
+To further enhance compression, researchers often use sparsity, pruning elements of tensors that are least significant to model accuracy.
+This reduction in parameters decreases the memory footprint of models and potentially improves computational efficiency by eliminating unnecessary computations~\cite{Sze_efficientprocssing_2020}.
+Sparsity methods typically prune elements of a tensor based on their magnitudes (a proxy for the importance of an element to model accuracy)~\cite{han_learning_2015, mishra_accelerating_2021, lu_step_2023, ding_usmlite_2023, bambhaniya_progressive_2024}.
+Magnitude-based sparsity, especially when combined with fine-tuning, offers straightforward implementation and the potential to achieve noticeable compression rates with negligible impact on accuracy \cite{kurtic_optimal_2022, sanh_movement_2020}.
+While prior work has extensively studied the impact of sparsity and quantization in isolation, their combined impact is less explored. A few studies~\cite{han_deep_2015, wang_apq_2020, liu_deja_2023} suggest that the combination of these two methods does \emph{not} significantly hurt accuracy. Unfortunately, these studies either primarily focus on CNNs~\cite{han_deep_2015} or do not fully investigate the potential combined impact because they exclusively quantize weight tensors while keeping activations in high precision~\cite{wang_apq_2020, liu_deja_2023}. 
+
+In this paper, we aim to systematically study the interplay between quantization and sparsity.
+Quantization and sparsity leverage two fundamentally separate computational properties of DNNs, presenting an opportunity for their combined use.
+However, their combined impact on model accuracy involves complex dynamics due to the introduction of errors in tensors. We hypothesize that the interplay between quantization and sparsity can result in additional errors, based on the following insights.
+\underline{\textbf{First}}, applying quantization before sparsity (Q$\rightarrow$S) may adversely disrupt the relative importance of tensor elements, potentially leading to the removal of significant elements of a tensor.
+\underline{\textbf{Second}}, applying sparsity before quantization (S$\rightarrow$Q) can introduce additional errors in dot product calculations, as these are influenced by the magnitudes and precision of the involved elements.
+To the best of our knowledge, we are the first to study the interplay between quantization and sparsity in depth, to identify the conditions under which accuracy can be preserved or compromised.
+Our contributions are summarized below:
+\begin{itemize}[leftmargin=*]
+\itemsep0em 
+\item \textbf{Theoretical Analysis of Sparsity-Quantization Interplay}: We provide the first in-depth theoretical analysis of how sparsity and quantization interact. Our mathematical proofs establish that applying sparsity \emph{before} quantization (S $\rightarrow$ Q) is the optimal sequence for compression.
+\item \textbf{Non-orthogonality and Error Dynamics of Compression Methods}: We mathematically demonstrate that sparsity and quantization are \emph{not} orthogonal operations. Combining them introduces additional errors beyond the sum of their individual errors. We analyze the specific error dynamics arising from this interaction, highlighting the dominant role of quantization error in the overall degradation of model accuracy.
+\item \textbf{Extensive Empirical Study}: We validate our theoretical findings through extensive experiments covering a diverse range of models, including prominent LLMs (OPT, LLaMA) and ViTs. These experiments support our hypotheses about the optimal order of compression operations and underscore the non-orthogonality of sparsity and quantization, affirming the practical relevance of our theoretical analysis. 
+Our experiments demonstrate that applying quantization and sparsity in a sub-optimal order can cause up to 7.96 point increase in perplexity.
+\end{itemize}
+
+
+
+\section{Related work}
+
+\label{sec:related_work}
+\niparagraph{Quantization.} 
+The ever-growing size of DNN models has spurred extensive research into using narrow numerical formats for inference to reduce memory footprint and improve computational efficiency~\cite{micikevicius_mixedfp16_2018, drumond_training_2018, wang_bfloat16_2019, rouhani_msfp_2020, dai_vs_2021,  zhang_fast_2022, yeh_like_2022, harma_accuracy_2022,rouhani_mx_2023, rouhani_microscaling_2023}.
+Numerical formats employ scaling factors to adjust their dynamic range and can be categorized based on the granularity and their levels. 
+
+\niparagraph{Sparsity.}
+Sparsity methods~\cite{hassibi_optimal_1993, lecun_optimal_1989, frantar_scaling_2023, kao_training_2022, lasby_dynamic_2023} aim to reduce computational and storage overhead in DNNs by selectively eliminating tensor elements according to various sparsity mask selection criteria.
+Broadly, these methods fall into two main categories based on sparsity patterns: unstructured~\cite{han_deep_2015, guo_dynamic_2016, frankle_lottery_2019, evci_rigging_2020} and structured~\cite{wen_learning_2016,yao:balancedsparsity,kang:accaware,mishra_accelerating_2021, nvidia_nmtraining, zhou_nmfromscratch_2021, sun_dominosearch_2021, hubara_transposable_2021, lu_step_2023}.
+
+\niparagraph{Combining quantization and sparsity.}
+Prior work has studied the combination of quantization and sparsity and its impact on model performance: sparsity followed by quantization~\cite{yu_boost_2023, frantar_sparsegpt_2023,frantar_optimal_2022, park_quantized_2022, mishra_accelerating_2021, li_train_2020, han_deep_2015} and quantization followed by sparsity~\cite{hu_opq_2021, hawks_ps_2021,wu2023understanding, mishra_accelerating_2021}.
+There are two missing pieces of information from these pieces of prior work. 
+First, consensus on the optimal order of compression operations is not clear. Some favor one order without clear justification, while others treat the methods as independent compression schemes.
+Second, there is lack of theoretical grasp on how sparsity and quantization errors interact and influence final model performance.
+
+\newcommand*{\vsq}{\varepsilon_{q \circ s}}
+\newcommand*{\vc}{\varepsilon_c}
+\newcommand*{\vqc}{\varepsilon_{q,c}^D}
+\newcommand*{\vsqt}{\varepsilon_{\tilde q \circ s}}
+\newcommand*{\vs}{\varepsilon_{s}}
+\newcommand*{\vq}{\varepsilon_{q}}
+\newcommand*{\vqt}{\varepsilon_{\tilde q}}
+\newcommand*{\tq}{\tilde q}
+\newcommand*{\vt}{\tilde \varepsilon}
+\newcommand*{\bx}{\mathbf{x}}
+\newcommand*{\bw}{\mathbf{w}}
+\newcommand*{\vi}{\varepsilon_{i}}
+\newcommand*{\vten}{\varepsilon_t}
+\newcommand*{\tv}{\tilde \varepsilon}
+
+
+
+\section{Mathematical analysis of orthogonality of quantization and sparsity}
+
+\label{sec:theory}
+This section provides a mathematical analysis of the interplay between quantization and sparsity, formalizing these compression methods and examining their composition at both the tensor and dot product levels.
+Our analysis centers on quantization methods that reduce the bit-width of model weights and activations using block-wise numerical formats, which are prevalent in practical implementations
+\cite{rouhani_msfp_2020, drumond_training_2018, zhang_fast_2022, rouhani_mx_2023, rouhani_microscaling_2023, fp8_micikevicius_2022}.
+These formats determine the scaling factor based on the maximum element within a block of elements.
+We denote a quantization method employing these numerical formats as \textit{max-scaled block-wise quantization}.
+We use magnitude-based sparsity for both unstructured and N:M structured sparsity.
+
+\begin{definition}[\textbf{Max-scaled block-wise quantization}]
+Let \(\mathbf{x} \in \mathbb{R}^n\) be a block of $n$ numbers and $m \in \mathbb{N}$ denotes the quantization bit-width. 
+Max-scaled block-wise quantization $q: \mathbb{R}^n \rightarrow \mathbb{R}^n$ is a transformation of the block $\bx$ such that
+\begin{equation}
+    x_i \xrightarrow{q} Q_m(x_i, scale)
+\end{equation}
+where $scale = \max(|x_1|, \dots, |x_n|)$ is the scaling factor.
+$Q_m(\cdot, scale)$ quantizes the given element with the scaling factor $scale$ and the number of mantissa bits $m$. 
+
+For instance, INT$m$ quantization transformation is defined as follows:
+\begin{equation}
+Q_m(x_i, scale) = s \cdot \left \lfloor \frac{x_i}{s} \right \rceil, 
+\text{where } 
+s=\frac{scale}{2^{m-1}-1},
+\text{ and } 
+\left \lfloor \cdot \right \rceil
+\text{ is the rounding to the nearest integer.} 
+\end{equation}
+\end{definition}
+\begin{definition}[\textbf{Magnitude-based sparsity}]
+Let $\mathbf{x} \in \mathbb{R}^n$ be a block of $n$ numbers.
+We assume $n$ is divisible by $M$ and we consider each group of $M$ elements in the block.
+The magnitude-based N:M sparsity transformation can be formulated as:
+\begin{equation}
+   \tilde x_i \coloneqq   
+   \begin{cases}
+        0 & \text{if } |x_i| < \xi\\
+        x_i & \text{otherwise}
+    \end{cases}, \text{for } i=1,2,...,M
+\end{equation}
+where $\xi$ is the $N$-th largest element in $\mathbf{x}=\{|x_1|, \dots, |x_M|\}$. The same formula can be adjusted to represent $p \%$ unstructured sparsity by defining $\xi$ as the $N$-th largest element in the tensor, where $N = \left[ M \cdot p / 100 \right]$, $M$ is the number of elements in the tensor, and $[\cdot]$ is the operation of rounding to the nearest integer.
+\end{definition}
+
+In the remaining of this section, we delve into the composition of quantization and sparsity at two different levels.
+First, we examine the effects of applying this composition in different orders at the tensor level, observing how individual tensors are altered.
+Then, we explore how the composition influences the result of the dot product operation.
+
+\subsection{Tensor-level analysis}
+\label{sec:order}
+Quantization and sparsity transformations inherently introduce errors by decreasing precision or pruning tensor elements.
+To study the composition of quantization and sparsity transformations at the tensor level, we introduce formal definitions of transformation error and orthogonality.
+We prove that orthogonality between sparsity and quantization \emph{does not} persist within this composition.
+The following definition formalizes the error for a specific transformation at the block level, which consists of a subset of tensor elements.
+
+\begin{definition}[\textbf{Transformation error}]
+\label{def:transformation_error}
+    Let $\mathbf{x} \in \mathbb{R}^n$ be a block of $n$ numbers, which are the input of a transformation $f: \mathbb{R}^n \rightarrow \mathbb{R}^n$. 
+    We define $\varepsilon_f(\mathbf{x}) \coloneqq \mathbf{x} - f(\mathbf{x}) $ as the error of the transformation $f$. 
+\end{definition}
+
+Definition~\ref{def:transformation_error} can be extended to the tensor level, despite being defined at the block level.
+The cumulative error of a tensor can be viewed as the summation of individual errors across all its constituent blocks.
+Hence, the theorems analyzed at the block level are indicative of the behavior when scaled up to the tensor level.
+
+Combining two compression methods (transformations) is expected to introduce additional error.
+Any error introduced by the first transformation becomes part of the input to the second transformation, potentially amplifying the initial error and resulting in a larger overall error.
+\begin{definition}[\textbf{Tensor-level orthogonality}]
+\label{def:orthogonal}
+    We define two transformations $f$ and $g$ to be \textit{orthogonal} if any order of their composition does not introduce any additional error, and thus, the following inequalities hold:
+    \begin{equation}
+        \forall \mathbf{x} \in \mathbb{R}^n, ~ \left\| \varepsilon_{g \circ f}(\mathbf{x}) \right\| \le \left\| \varepsilon_f(\mathbf{x}) \right\| + \left\| \varepsilon_g(\mathbf{x}) \right\| \wedge \left\| \varepsilon_{f \circ g}(\mathbf{x}) \right\| \le \left\| \varepsilon_f(\mathbf{x}) \right\| + \left\| \varepsilon_g(\mathbf{x}) \right\|
+    \end{equation}
+\end{definition}
+
+\begin{theorem}
+\label{q_ind_s}
+Let $q$ be the max-scaled block-wise quantization and $s$ be the magnitude-based sparsity transformation. 
+Applying sparsity before quantization does not introduce additional error:
+\begin{equation}
+    \forall \mathbf{x} \in \mathbb{R}^n, ~ \left\| \varepsilon_{q \circ s}(\mathbf{x}) \right\| \le \left\| \varepsilon_q(\mathbf{x}) \right\| + \left\| \varepsilon_s(\mathbf{x}) \right\|
+\end{equation}
+Moreover, the equality is attainable.
+\end{theorem}
+\begin{proof}
+
+Let $n_s$ represent the number of elements pruned from the block by the sparsity transformation. 
+Without loss of generality, we assume that the last $n_s$ elements in the block are pruned, as permuting the elements does not affect the block's norm.
+Since the sparsity transformation does not prune the largest element in the block, the $scale$ parameter of quantization remains unchanged.
+Consequently, the quantization error for the non-zero components before and after sparsity remains the same:
+\begin{gather}
+   \left\| \varepsilon_{q \circ s} (\mathbf{x}) \right\| = \left\|
+   \begin{pmatrix}
+        x_{1}  \\
+        \vdots \\
+        x_{n - n_s} \\
+        x_{n - n_s + 1} \\
+        \vdots \\
+        x_n
+   \end{pmatrix} 
+   - q
+   \begin{pmatrix}
+        x_{1}  \\
+        \vdots \\
+        x_{n - n_s} \\
+        0 \\
+        \vdots \\
+        0
+   \end{pmatrix} 
+\right\| = 
+\left\| 
+\begin{pmatrix}
+  \varepsilon_q(\bx)_1 \\
+  \vdots \\
+  \varepsilon_q(\bx)_{n - n_s} \\
+  x_{n - n_s + 1}  \\
+  \vdots \\
+  x_{n} \\
+\end{pmatrix} 
+\right\| \le
+\left\| 
+\begin{pmatrix}
+  \varepsilon_q(\bx)_1 \\
+  \vdots \\
+  \varepsilon_q(\bx)_{n - n_s} \\
+  0  \\
+  \vdots \\
+  0 \\
+\end{pmatrix} 
+\right\| +
+\\
++ 
+\left\| 
+\begin{pmatrix}
+  0 \\
+  \vdots \\
+  0 \\
+  x_{n - n_s +1}  \\
+  \vdots \\
+  x_{n} \\
+\end{pmatrix} 
+\right\|
+\le
+\left\| 
+\begin{pmatrix}
+  \varepsilon_q(\bx)_{1}  \\
+  \vdots \\
+  \varepsilon_q(\bx)_{n - n_s} \\
+  \varepsilon_q(\bx)_{n - n_s + 1}  \\
+  \vdots \\
+  \varepsilon_q(\bx)_{n} \\
+\end{pmatrix} 
+\right\| +
+\left\| 
+\begin{pmatrix}
+  \varepsilon_s(\bx)_{1} \\
+  \vdots \\
+  \varepsilon_s(\bx)_{n - n_s} \\
+  \varepsilon_s(\bx)_{n - n_s + 1}  \\
+  \vdots \\
+  \varepsilon_s(\bx)_{n} \\
+\end{pmatrix} 
+\right\| = \left\| \varepsilon_{s} (\mathbf{x}) \right\| +
+\left\| \varepsilon_{q} (\mathbf{x}) \right\|
+\end{gather}
+To demonstrate that equality is attainable, we consider the block of floating-point numbers $\mathbf{x} = (4.0, 4.1)^T $, INT4 quantization and $1:2$ sparsity. 
+\begin{equation}
+    s(\mathbf{x}) =
+    \begin{pmatrix}
+        0.0 \\
+        4.1 \\
+    \end{pmatrix}
+    \quad
+    q(\mathbf{x}) = 
+    \begin{pmatrix}
+        4.0 \\
+        4.0 \\
+    \end{pmatrix}
+    \quad
+    q(s(\mathbf{x})) = 
+    \begin{pmatrix}
+        0.0 \\
+        4.0 \\
+    \end{pmatrix}
+\end{equation}
+The L1-norms of the transformation errors are the following:
+\begin{equation}
+   \left\| \varepsilon_s(\mathbf{x}) \right\|_1 =
+   \left\| 
+    \begin{pmatrix}
+        4.0 \\
+        0.0 \\
+    \end{pmatrix}
+    \right\|_1 = 4.0
+    \quad
+    \left\| \varepsilon_q(\mathbf{x}) \right\|_1 = 
+    \left\|
+    \begin{pmatrix}
+        0.0 \\
+        0.1 \\
+    \end{pmatrix}
+    \right\|_1 = 0.1
+    \quad
+    \left\| \varepsilon_{q \circ s} (\mathbf{x}) \right\|_1 = 
+    \left\| 
+    \begin{pmatrix}
+        4.0 \\
+        0.1 \\ 
+    \end{pmatrix}
+    \right\|_1 = 4.1
+\end{equation}
+
+Therefore, $ \left\| \varepsilon_{q \circ s}(\mathbf{x}) \right\|_1 = \left\| \varepsilon_q(\mathbf{x}) \right\|_1 + \left\| \varepsilon_s(\mathbf{x}) \right\|_1 $ is attainable.
+\end{proof}
+
+\begin{theorem}
+\label{s_not_ind_q}
+Let $q$ be the max-scaled block-wise quantization and $s$ be the magnitude-based sparsity transformation.
+Applying quantization before sparsity \emph{may} introduce additional error:
+\begin{equation}
+    \exists \mathbf{x} \in \mathbb{R}^n, ~ \left\| \varepsilon_{s \circ q}(\mathbf{x}) \right\| > \left\| \varepsilon_q(\mathbf{x}) \right\| + \left\| \varepsilon_s(\mathbf{x}) \right\|
+\end{equation}
+\end{theorem}
+\begin{proof}
+Consider the block of floating-point numbers $\mathbf{x} = (3.9, 4.0)^T $, INT4 quantization $q$ and $1$:$2$ sparsity $s$. 
+After applying the quantization transformation to the block, initial relation between its elements $x_i < x_j$ is no longer preserved and both elements have equal probability to be zeroed out by the sparsity transformation. 
+If sparsity zeroes out the element that was initially larger, the resulting error can exceed the sum of the errors caused by each transformation individually:
+\begin{gather}
+    s(\mathbf{x}) =
+    \begin{pmatrix}
+        0.0 \\
+        4.0 \\
+    \end{pmatrix}
+    \quad
+    q(\mathbf{x}) = 
+    \begin{pmatrix}
+        4.0 \\
+        4.0 \\
+    \end{pmatrix}
+    \quad
+    s(q(\mathbf{x})) = 
+    \begin{pmatrix}
+        4.0 \\
+        0.0 \\
+    \end{pmatrix}
+\\
+   \left\| \varepsilon_s(\mathbf{x}) \right\| =
+   \left\| 
+    \begin{pmatrix}
+        3.9 \\
+        0.0 \\
+    \end{pmatrix}
+    \right\|_1 = 3.9
+    \quad
+    \left\| \varepsilon_q(\mathbf{x}) \right\| = 
+    \left\|
+    \begin{pmatrix}
+        -0.1 \\
+        0.0 \\
+    \end{pmatrix}
+    \right\| = 0.1
+    \quad
+    \left\| \varepsilon_{q \circ s} (\mathbf{x}) \right\|_1 = 
+    \left\| 
+    \begin{pmatrix}
+        -0.1 \\
+        4.0 \\ 
+    \end{pmatrix}
+    \right\|_1 = 4.1
+\end{gather}    
+Thus, for this particular input $\mathbf{x}$, the inequality $\left\| \varepsilon_{q \circ s}(\mathbf{x}) \right\|_1 > \left\| \varepsilon_q(\mathbf{x}) \right\|_1 + \left\| \varepsilon_s(\mathbf{x}) \right\|_1 $ holds true.
+\end{proof}
+
+Moreover, a global upper bound exists for the additional error arising from this specific order of transformations (quantization$\rightarrow$sparsity).
+This upper bound is solely determined by the quantization method and the parameters of the sparsity scheme, independent of the input data.
+The following theorem precisely quantifies the magnitude of this additional error.
+\begin{theorem}
+    \label{s_not_ind_q_upper}
+    Let $q$ be the max-scaled block-wise quantization and $s$ be the magnitude-based N:M sparsity transformation. Let $step$ be the least upper bound for the magnitude of the quantization error for one element: $step = \sup \{ |\vq(\bx)_i| \; | \; \bx \in \mathbb{R}^n, i \in \{1 \dots n \} \}$. Then the error of the composition $s \circ q$ with respect to $L_1$ norm has the following upper bound:
+    \begin{equation}
+        \forall \mathbf{x} \in \mathbb{R}^n, ~ \left\| \varepsilon_{s \circ q}(\mathbf{x}) \right\|_1 \le \left\| \varepsilon_q(\mathbf{x}) \right\|_1 + \left\| \varepsilon_s(\mathbf{x}) \right\|_1 + \underbrace{2 \cdot step \cdot \frac{M - N}{M} \cdot n}_{\text{additional error}} 
+    \end{equation}
+\end{theorem}
+
+As a corollary of Theorem~\ref{q_ind_s}, \ref{s_not_ind_q}, and \ref{s_not_ind_q_upper}, it follows that the optimal order of transformations is sparsity followed by quantization, as this sequence \emph{does not} introduce any additional error.
+Moreover, according to Definition~\ref{def:orthogonal}, quantization and sparsity are \emph{not} orthogonal at the tensor level.
+
+\subsection{Orthogonality of dot product operation}
+\label{sec:orthogonality}
+In this section, we delve into the error linked with the dot product operation, which is the primary operation in DNNs.
+Our analysis focuses on scenarios where weight tensors undergo sparsification and quantization, while activation tensors solely undergo quantization.
+We first extend the definition of transformation error to the dot product level.
+\begin{definition}[\textbf{Transformation error over the dot product}]
+Let $\mathbf{x}, \mathbf{w} \in \mathbb{R}^n$ denote the inputs of a transformation $f: \mathbb{R}^n \rightarrow \mathbb{R}^n$ and the dot product operation $\langle .,.\rangle: \mathbb{R}^n \times \mathbb{R}^n \rightarrow \mathbb{R}$.
+We define $\varepsilon_f^D(\mathbf{x}, \mathbf{w}) \coloneqq \langle \mathbf{x}, \mathbf{w} \rangle - \langle f(\mathbf{x}), f(\mathbf{w}) \rangle $ as the error of the transformation $f$ over dot product.
+Similarly, we define $\varepsilon_{f,g}^D(\mathbf{x}, \mathbf{w}) \coloneqq \langle \mathbf{x}, \mathbf{w} \rangle - \langle f(\mathbf{x}), g(\mathbf{w}) \rangle $ as the error over the dot product when different transformations are applied to $x$ and $w$.
+\end{definition}
+
+At the dot product level, we define two compression methods as \textit{orthogonal} if any order of their composition does not introduce additional error, akin to Definition~\ref{def:orthogonal}. 
+In the following theorem, we demonstrate that any combination of sparsity and quantization yields additional error, rendering these two methods non-orthogonal.
+
+\begin{theorem}
+\label{thm:dotp}
+Let $q$ be the max-scaled block-wise quantization, $s$ be the magnitude-based sparsity transformation, $c$ be the composition which is either $s \circ q$ or $q \circ s$ and $I$ be the identity function.
+Max-scaled quantization $q$ and sparsity $s$ produce additional error in any order, given that only the second operand, i.e., weight, is sparsified: 
+\begin{equation}
+    \exists \bx, \bw \in \mathbb{R}^n, ~ | \varepsilon_{q,c}^D(\mathbf{x}, \mathbf{w}) | > | \varepsilon_{I,s}^D(\mathbf{x}, \mathbf{w})| + |\varepsilon^D_{q}(\mathbf{x}, \mathbf{w}) |
+\end{equation}
+Moreover,
+\begin{equation}
+    | \varepsilon_{q,c}^D(\mathbf{x}, \mathbf{w}) | \le | \varepsilon_{I,s}^D(\mathbf{x}, \mathbf{w})| + |\varepsilon^D_{q}(\mathbf{x}, \mathbf{w}) | + \underbrace{|\langle q(\bx), \tilde \varepsilon_c(\bw) \rangle| + |\langle \vq(\mathbf{x}), \vs(\mathbf{w}) \rangle|}_{\text{additional error}}
+\end{equation}
+where $\tilde \varepsilon_c(\bx)$ is the correction error vector of the composition:
+\begin{equation}
+    \varepsilon_c(\bx) = \varepsilon_q(\bx) + \varepsilon_s(\bx) + \tilde \varepsilon_c(\bx)
+\end{equation}
+    
+\end{theorem}
+
+\begin{proof}
+    Error of the composition can be written as the following:
+    \begin{align}
+        \vqc(\bx, \bw) &= \langle \bx, \bw \rangle - \langle q(\bx), c(\bw) \rangle \\
+                       &= \langle \bx, \bw \rangle - \langle \bx - \vq(\bx), \bw - \vc(\bw) \rangle \\
+                       &= \langle \vq(\bx), \bw \rangle + \langle \bx, \vc(\bw) \rangle - \langle \vq(\bx), \vc(\bw) \rangle \\
+                       &= \langle \vq(\bx), \bw \rangle + \langle \bx, \vq(\bw) + \vs(\bw) + \vt_c(\bw) \rangle - \langle \vq(\bx), \vq(\bw) + \vs(\bw) + \vt_c(\bw) \rangle \\
+                       &=
+                        \underbrace{\langle \bx, \vs(\bw) \rangle}_{\varepsilon_{I,s}^D(\mathbf{x}, \mathbf{w})} + 
+                        \underbrace{\langle \bx, \vq(\bw) \rangle + \langle \vq(\bx), \bw \rangle - \langle \vq(\bx), \vq(\bw) \rangle}_{\varepsilon^D_{q}(\mathbf{x}, \mathbf{w})} + 
+                        \langle \underbrace{\bx - \vq(\bx)}_{q(\bx)}, \vt_c(\bw) \rangle 
+                       \\
+                       &\phantom{{}={}} - \langle \vq(\bw), \vs(\bw) \rangle \\
+                       &= \varepsilon_{I,s}^D(\mathbf{x}, \mathbf{w}) + \varepsilon^D_{q}(\mathbf{x}, \mathbf{w}) + \langle q(\bx), \tilde \varepsilon_c(\bw) \rangle - \langle \vq(\mathbf{x}), \vs(\mathbf{w}) \rangle
+    \end{align}
+    
+    After adding the norms, we obtain the following:
+    \begin{equation}
+        | \varepsilon_{q,c}^D(\mathbf{x}, \mathbf{w}) | \le | \varepsilon_{I,s}^D(\mathbf{x}, \mathbf{w})| + |\varepsilon^D_{q}(\mathbf{x}, \mathbf{w}) | + |\underbrace{\langle q(\bx), \tilde \varepsilon_c(\bw) \rangle}_{\varepsilon_t}| + |\underbrace{\langle \vq(\mathbf{x}), \vs(\mathbf{w}) \rangle}_{\varepsilon_i}|
+    \end{equation} 
+    where $\vten$ and $\vi$ are the additional error terms. 
+
+To prove non-orthogonality, consider the blocks of floating-point numbers $x = (1.0, 1.0)^T$  and $w = (0.6, 1.3)^T$, HBFP4 quantization $q$ and 1:2 sparsity $s$.
+For these particular values of $\bx$ and $\bw$, the inequality: $
+    | \varepsilon_{q,c}^D(\mathbf{x}, \mathbf{w}) | > | \varepsilon^D_{q}(\mathbf{x}, \mathbf{w}) | + | \varepsilon_{I,s}^D(\mathbf{x}, \mathbf{w}) |$ holds true.
+\end{proof}
+\niparagraph{Analysis of the additional error.}
+As a corollary of Theorem~\ref{thm:dotp}, the combination of max-scaled quantization and sparsity is \emph{not} orthogonal, resulting in two additional error terms. 
+
+The term $\vten$ encompasses the correction vector of the composition $\vt_c$, which propagates the error from the tensor level to the dot product level. 
+Depending on the order of the composition the value of $\vten$ varies. 
+
+If sparsity precedes quantization, the correction vector $\vt_{q \circ s}(\bw)$ exclusively comprises negative quantization errors for the elements pruned by the sparsity transformation:
+\begin{equation}
+    \vt_{q \circ s}(\bw)_i = 
+    \begin{cases}
+        -\vq(\bw)_i, & s(\bx)_i = 0 \\
+        0, & \text{otherwise}
+    \end{cases}
+\end{equation}
+However, if quantization is applied first, certain elements in the block may become equal, resulting in the sparsity removing a different set of elements.
+Formally, if $w_i$ is pruned by $s$ but not by $s \circ q$, there exists a $w_j$, where $j \neq i$, such that $q(\bw)_i = q(\bw)_j$. 
+In this scenario, $\vt_{s \circ q}(\bw)_i = -\vs(\bw)_i$ and $\vt_{s \circ q}(\bw)_j = \vs(\bw)_j - \vq(\bw)_j$. 
+Otherwise, it only contains the quantization errors of the pruned elements. 
+Therefore, the magnitude of the correction vector for the composition $s \circ q$ is generally larger than that of the reverse order.
+Apart from the quantization errors, the correction vector also contains pruned elements, which are larger by orders of magnitude except in a few improbable edge cases. 
+This results in the overall value of $\vten$ being larger, implying that \emph{the order of applying sparsity first and then quantization is optimal for dot product.}
+The term $\vi$ also contributes to the additional error, encoding the interaction between the error vectors $\vq(\bx)$ and $\vs(\bw)$. 
+However, $\vi$ is less significant than $\vten$, as it contains the quantization error, the norm of which is generally orders of magnitude lower than the norm of the original block. 
+In addition, $\vi$ contains the sparsity error, which involves the smallest weights, diminishing the significance of this additional error. 
+
+Finally, to experimentally validate our theoretical findings, we define orthogonality bound to assess whether the transformations are orthogonal.
+
+\begin{definition}[\textbf{Orthogonality bound}]
+    Let $M$ be a DNN model under consideration, $\text{EM}(M)$ be an evaluation metric that measures the performance of the model $M$ (e.g. Perplexity or Cross-Entropy Loss), $\text{EM}_C(M)$ be the evaluation metric of the model $M$ with transformation $C$, which is either sparsity $S$ or quantization $Q$. Moreover, let $\text{Err}_C(M) = \text{EM}_C(M) - \text{EM}(M)$ be the evaluation metric error of the transformation $C$ for the model $M$. We define \textit{orthogonality bound} as:
+    \begin{equation}
+        \label{eq:bound}
+        \text{Orthogonality Bound} = \text{EM}(M) + \text{Err}_Q(M) + \text{Err}_S(M)
+    \end{equation}
+\end{definition}
+If the compression methods are not orthogonal, and the evaluation metric indicates better model performance with lower values, we expect the compressed model's evaluation metric to exceed the orthogonality bound.
+
+
+
+\section{Experimental methodology and results}
+
+\label{sec:results}
+\niparagraph{Models, datasets, and evaluation setup.}
+We study the most widely adopted Transformer-based models, including OPT~\cite{zhang_opt_2022} and LLaMA~\cite{touvron_llama2_2023} model families.
+In line with prior work~\cite{xiao_smoothquant_2023, frantar_sparsegpt_2023, sun_wanda_2023}, we fine-tune pretrained models and evaluate perplexity on the WikiText2~\cite{merity_wikitext2_2017} dataset.
+In addition, we assess orthogonality across different metrics of ViT~\cite{dosovitskiy_vit_2021} on ImageNet-1k~\cite{deng_imagenet_2009}.
+In all experiments, we designate the dense FP32 configuration as our primary baseline. 
+Our experiments span a diverse range of configurations to validate our theoretical findings, including various variants of max-scaled formats, such as INT8 quantization with per channel scaling~\cite{dettmers_llmint8_2022}, HBFP8/6~\cite{drumond_training_2018}, and MXFP8/6~\cite{rouhani_microscaling_2023}.
+We primarily study magnitude-based 50\% unstructured and 2:4 structured sparsity with sparsity-aware fine-tuning.
+We evaluate the impact of increased compression on \bench{ViT-B/16} by applying 75\% unstructured sparsity, 1:4 structured sparsity, and HBFP4.
+
+In our experiments, we evaluate the impact of each compression method by analyzing the variations in perplexity and cross-entropy loss compared to the baseline, thereby focusing on the cumulative error in the final model output.
+
+Note that we focus on cross-entropy loss for \bench{ViT-B/16} instead of classification accuracy. 
+This is because accuracy remains unaffected as long as the most likely label remains unchanged, regardless of its absolute value. 
+However, our primary metric for orthogonality bound is the aggregated errors introduced in the final model output distribution. 
+\niparagraph{Experimental setup.}
+We exclusively sparsify and/or quantize layers with trainable parameters.
+Specifically, we target all linear layers in LLMs, and all linear and convolution layers (including the initial embedding layer) in \bench{ViT-B/16}.
+These layers collectively constitute approximately 99\% of the total parameters.
+In all experiments, we sparsify weights while keeping activation dense.
+Both weights and activation tensors are quantized before matrix multiplication operations.
+For OPT, LLaMA, and ViT fine-tuning, we employ sparse fine-tuning on a dense FP32 pre-trained model, recomputing sparsity masks at each iteration.
+In experiments involving sparsity followed by quantization (S$\rightarrow$Q), we apply one-shot quantization to sparse fine-tuned models.
+Conversely, for experiments with the reverse order (Q$\rightarrow$S), we directly fine-tune the model in a quantized and sparsified manner.
+At each iteration, we quantized activations and weights while applying sparsity to weight tensors. 
+
+\subsection{Empirical study 1: Order of sparsity and quantization}
+\input{tables/order_onlymagnitude}
+This section presents empirical evidence demonstrating that applying sparsity before quantization leads to better perplexities compared to the reverse order.
+These results align with the theoretical arguments in Section~\ref{sec:order}.
+Table~\ref{tab:order} presents perplexities for \bench{OPT-125M} and \bench{LLaMA-2-7B} under various number formats and sparsity types. 
+We compare the order of operations across different configurations: sparsity followed by quantization (S$\rightarrow$Q) and quantization followed by sparsity (Q$\rightarrow$S). Configurations with lower perplexities are highlighted in bold.
+Consistently, we observe that the S$\rightarrow$Q order yields better perplexities across all number formats for magnitude-based sparsity. 
+As discussed in Section~\ref{sec:order}, in the case of Q$\rightarrow$S, quantizing a tensor can alter the order of its elements due to changes in magnitudes. 
+If magnitude-based sparsity removes elements of the quantized tensor that were originally larger before quantization, the error of the composition may exceed the sum of the errors caused by each transformation individually. 
+This compounded error further propagates through subsequent dot-product and vector operations, impacting overall model performance.
+\subsection{Empirical study 2: Non-Orthogonality between sparsity and quantization}
+\input{tables/orthogonality-upd}
+This section demonstrates that combining sparsity and quantization results in additional error, surpassing the sum of their individual errors. 
+Table~\ref{tab:orthogonality-upd} presents perplexities for \bench{OPT-125M}, \bench{OPT-6.7B}, \bench{LLaMA-2-7B} and \bench{LLaMA-3-8B} on WikiText2, and cross-entropy (CE) loss for \bench{ViT-B/16} on ImageNet-1k for various combinations of number formats and sparsity schemes. 
+Following our conclusions regarding the order of operations, we only report results for S$\rightarrow$Q. 
+We compute the orthogonality bound for each combination by summing the individual errors from quantization and sparsity relative to the baseline dense FP32 model, using Equation~\ref{eq:bound}.
+Each model's performance is compared against this bound, with superior results highlighted in bold.
+In the majority of configurations, perplexity and cross-entropy loss values exceed the orthogonality bounds, validating the non-orthogonality of sparsity and quantization.
+
+We mathematically show (Section~\ref{sec:orthogonality}) that the additional error introduced by combining sparsity and quantization significantly depends on the values of quantized activation tensors and the quantization error of sparsified weights. 
+This error tends to amplify through successive dot products and vector operations. 
+Consequently, the quantization error affects the additional error caused by the composition more than the sparsification error. 
+The gap between the model's performance and the orthogonality bound is minimal for number formats with minimal performance decrease, whereas larger errors are observed for formats with larger errors.
+For instance, HBFP6 results in a \xx{2.26} increase in perplexity for \bench{OPT-125M}, while its combination with 50\% unstructured sparsity leads to a \xx{4.86} increase.
+
+Our analysis reveals that both model size and compression ratio significantly influence the additional error introduced by combining sparsity and quantization.
+Larger models exhibit greater tolerance to these compression methods, resulting in lower additional errors. 
+Moreover, formats with minimal quantization errors (e.g. MXFP8), and sparsity types with minimal sparsification errors (e.g. unstructured sparsity) lead to lower additional errors, even for smaller models.
+The effect of high quantization error is more pronounced for sparsity schemes known for higher errors. 
+For instance, HBFP6's combination with 2:4 sparsity causes a \xx{6.93} perplexity increase for \bench{OPT-125M} and a \xx{6.12} perplexity increase for \bench{OPT-6.7B}.
+In contrast, combining HBFP6 with unstructured sparsity results in smaller increases of \xx{4.86} and \xx{0.79} for the respective models.
+
+We also observe instances where the orthogonality bound is slightly higher than the actual perplexity: (a) INT8 with 50\% unstructured sparsity for both OPT models, (b) MXFP8 with 2:4 sparsity for \bench{OPT-6.7B}, (c) MXFP6 with 2:4 sparsity for \bench{LLaMA-2-7B}, and (d) MXFP6 50\% unstructured sparsity for \bench{LLaMa-3-8B}.
+Although these occurrences do not consistently correlate with specific formats, sparsity types, or model sizes, they do not contradict our theoretical analysis, which primarily concerns upper bounds of errors and does not entirely rule out orthogonal cases.
+Furthermore, orthogonal configurations still result in larger errors compared to applying either sparsity or quantization alone.
+Our mathematical analysis (Theorem~\ref{thm:dotp}) indicates that there \emph{exists at least one occurrence} where the orthogonality is \emph{not} preserved.
+This underscores the need for careful examination when applying these compression methods together, as they do not guarantee high accuracies.
+Delving into cases where orthogonality is preserved falls beyond the scope of this paper and we leave it for future work.
+
+We also observe that although the cross-entropy loss for \bench{ViT-B/16} is higher than the calculated orthogonality bound in most cases in Table~\ref{tab:orthogonality-upd}, the difference is relatively small. We hypothesize the reason behind this  behavior is due to the fact that \bench{ViT-B/16} being a vision model that operates on images is more robust to quantization and sparsity errors than LLMs that operate on text.
+Hence, the quantization and sparsity levels shown in Table~\ref{tab:orthogonality-upd} are not sufficient to induce large errors, and hide the non-orthogonality of quantization and sparsity. 
+ 
+The results show that the difference between the baseline cross-entropy loss and the calculated orthogonality bound for these cases increases significantly validating the non-orthogonality of quantization and sparsity. 
+This increase in cross-entropy loss translates to a significant non-orthogonal drop in accuracy as well.
+
+
+
+\section{Discussion}
+
+\label{sec:discussion}
+Our theoretical analysis and experimental results offer multiple insights for ML model practitioners.
+First, our analysis demonstrates a risk-free method to improve model performance, measured by lower perplexity and/or higher accuracy, through choosing the optimal ordering of compression operations for any max-scaled number format and magnitude-based pruning scheme.
+This contribution is particularly important in the current ML landscape, where sparsity and quantization are pivotal methods for reducing the memory footprint and bandwidth requirements of state-of-the-art LLMs.
+Second, we show that calculating the orthogonality bound offers a close enough estimate of model performance (e.g., accuracy, perplexity, etc.) under conditions of quantization and sparsity.
+This bound can streamline the search for optimal sparse-quantized model configurations by effectively narrowing the search space.
+There is an inherent tradeoff between the hardware benefits of various sparse-quantized configurations and the achieved model performance.
+Quantization bit-width and sparsity level are key factors influencing the memory and bandwidth requirements for serving these models.
+For example, at a 50\% sparsity level, 8-bit and 6-bit quantization result in total reductions in memory footprint and bandwidth requirements by \xx{8}$\times$ and \xx{10.7}$\times$, respectively.
+
+Ideally, practitioners aim to maximize compression (increase sparsity ratio and/or reduce quantization effective bitwidth.
+Our analysis elucidates the individual and combined impacts of these factors across a range of recent large models, providing practical guidelines to achieve the highest compression without compromising model performance.
+Typically, 8-bit quantization with any max-scaled number format can serve as a direct replacement for FP32 when combined with any form of sparsity in the optimal order (S$\rightarrow$Q).
+As discussed in Section~\ref{sec:results}, certain models exhibit sensitivity to sub-8bit number formats and structured sparsity combinations, even when applied in an optimal order.
+In scenarios where improvements in arithmetic density (TOPS/mm$^2$) and memory footprint justify a slight reduction in model performance, such as the deployment of large models on edge devices, these combinations may still be viable.
+
+In this work, we do not consider heterogeneous sparsity and quantization schemes, where the sparsity fraction and quantization bit-width vary across layers and differ between activation and weight tensors. Such approaches~\cite{rouhani_microscaling_2023, ma2024era, harma_accuracy_2022, evci_rigging_2020} have demonstrated to be effective in maintaining model accuracy or perplexity while improving compressing ratio.
+However, these schemes may not be hardware-friendly, introduce noticeable overhead, and are impractical to implement on off-the-shelf hardware platforms (e.g., GPU, TPU).
+We leave the investigation of the interactions between these heterogeneous quantization and sparsity schemes for future work.
+
+
+
+\section{Conclusion}
+
+We provide a comprehensive analysis of the interplay between quantization and sparsity in DNNs, showing that applying sparsity before quantization (S$\rightarrow$Q) minimizes additional errors and yields better model accuracy.
+Moreover, our mathematical analysis and extensive empirical study with large language models (OPT, LLaMA) and vision transformers (ViT) demonstrate that quantization and sparsity are \textit{not} orthogonal and their combined use can adversely affect model accuracy.
+Our findings provide valuable insights for optimizing the compression of large models while preserving accuracy.
+
+
+\begin{ack}
+We extend our gratitude towards Zhifeng Chen, Cliff Young, James Laudon, and Shashwat Shrivastava for reviewing the paper and providing insightful feedback. We also thank the extended team at Google DeepMind, who enabled and supported this research direction. 
+This work was partially supported by the SNSF project “Unified Accelerators for Post-Moore Machine Learning” (200021\_212757) and a Microsoft Research PhD Fellowship.
+\end{ack}
+
+
+\newpage
+
+
+
+

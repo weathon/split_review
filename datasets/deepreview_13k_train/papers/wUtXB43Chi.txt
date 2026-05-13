@@ -1,0 +1,347 @@
+\title{FlashMask: Efficient and Rich Mask Extension of FlashAttention}
+
+\begin{abstract}
+The computational and memory demands of vanilla attention scale quadratically with the sequence length $N$, posing significant challenges for processing long sequences in Transformer models. FlashAttention alleviates these challenges by eliminating the $\mathcal{O}(N^2)$ memory dependency and reducing attention latency through IO-aware memory optimizations. However, its native support for certain attention mask types is limited, and it does not inherently accommodate more complex masking requirements. Previous approaches resort to using dense masks with $\mathcal{O}(N^2)$ memory complexity, leading to inefficiencies. In this paper, we propose \ours{}, an extension of FlashAttention that introduces a column-wise sparse representation of attention masks. This approach efficiently represents a wide range of mask types and facilitates the development of optimized kernel implementations. By adopting this novel representation, \ours{} achieves linear memory complexity $\mathcal{O}(N)$, making it suitable for modeling long-context sequences. Moreover, this representation enables kernel optimizations that eliminate unnecessary computations by leveraging sparsity in the attention mask, without sacrificing computational accuracy, resulting in higher computational efficiency. We evaluate \ours{}'s performance in fine-tuning and alignment training of LLMs such as SFT, LoRA, DPO, and RM. \ours{} achieves significant throughput improvements, with end-to-end speedups ranging from 1.65x to 3.22x compared to existing FlashAttention dense method. Additionally, our kernel-level comparisons demonstrate that \ours{} surpasses the latest counterpart, FlexAttention, by 12.1\% to 60.7\% in terms of kernel TFLOPs/s, achieving 37.8\% to 62.3\% of the theoretical maximum FLOPs/s on the A100 GPU.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+The Transformer architecture~\cite{vaswani2017attention} has become a foundational model in a wide range of tasks across natural language processing (NLP), computer vision (CV), and multimodal applications. Central to its effectiveness is the attention mechanism, which enables the model to focus on relevant parts of the input data. In the vanilla attention mechanism, the attention weights are computed as a scaled dot-product between query and key vectors, as shown in Equation (1). To implement complex logic, the mask $M$ can be added to the $QK^T$ term before applying the softmax function, controlling token visibility by setting certain elements to $-\infty$.
+
+\begin{equation}
+    \text{Attention}(Q, K, V, M) = \text{Softmax}\left(\frac{QK^T}{\sqrt{d_k}} + M\right) V
+    \label{eq:2}
+\end{equation}
+
+In NLP tasks, large language model (LLM) training can generally be categorized into two main stages: PreTraining and PostTraining. During PreTraining, different masking strategies are employed to guide the model's learning process. For instance, GPT-style \cite{radford2018improving} models use unidirectional causal masking, as illustrated in Figure \ref{fig:mask_types} (a)(1), while T5-style \cite{raffel2020exploring} models utilize a combination of unidirectional and bidirectional masking, as shown in Figure \ref{fig:mask_types} (a)(9). PostTraining, which typically includes Supervised Fine-Tuning (SFT) \cite{iyer2022opt,chung2024scaling,hu2021lora,liu2024dora,chen2023longlora}, Direct Preference Optimization (DPO) \cite{rafailov2024direct,dong2023raft,liu2023statistical,ethayarajh2024kto,liu2024lipo}, and Reward Model (RM) training within Reinforcement Learning from Human Feedback (RLHF) \cite{schulman2017proximal,shao2024deepseekmath}, also employs a variety of masking techniques depending on the specific task, as depicted in Figure \ref{fig:mask_types} (a)(3) and (5).
+
+The increasing complexity and diversity of masking strategies pose significant challenges to the efficiency of the attention mechanism. Specifically, the vanilla attention mechanism suffers from a quadratic increase in computational and memory demands, denoted as $\mathcal{O}(N^2)$, where $N$ represents the sequence length. As models scale to longer sequences, ranging from 128K to 1M tokens in advanced systems like GPT-4~\cite{achiam2023gpt}, Claude~\cite{anthropic2024claude}, and Gemini~\cite{reid2024gemini}, these quadratic dependencies become prohibitive, necessitating more efficient computational approaches. The memory load for masked attention computations also grows quadratically, further exacerbating the challenge of managing various mask configurations across different tasks.
+
+Recent efforts such as Memory Efficient Attention (MEA)~\cite{rabe2021self} and FlashAttention \cite{dao2022flashattention,dao2023flashattention} have made strides in addressing these issues by reducing memory overhead and attention latency. FlashAttention, in particular, eliminates the $\mathcal{O}(N^2)$ memory dependency and reduces attention latency through IO-aware memory read/write optimizations. However, while FlashAttention natively supports certain mask types without additional memory overhead, its support for more complex masking requirements remains limited.
+
+In this paper, we introduce \textbf{\ours{}}, an extension of FlashAttention that leverages a novel column-wise representation of attention masks. This approach allows for the efficient handling of a broader range of mask types without compromising computational accuracy. \ours{} achieves linear memory complexity while enabling kernel optimizations that reduce unnecessary computations, resulting in significant computational speedups and enhanced training efficiency.
+
+Our contributions are threefold:
+\begin{enumerate}%[noitemsep,nolistsep]
+    \item We introduce a novel column-wise sparse mask representation that efficiently accommodates a broader range of mask types, enabling more flexible attention mechanisms.
+    \item We extend FlashAttention's masking capabilities by integrating optimized kernel implementations, ensuring high computational efficiency without sacrificing computational accuracy.
+    \item We demonstrate the effectiveness of \ours{} across various attention mask types and models, underscoring its versatility and robustness in large-scale LLM training. \ours{} notably reduces both computational and memory overheads, significantly enhancing its suitability for long-context modeling.
+\end{enumerate}
+
+
+
+\section{Background}
+
+
+\subsection{Attention Mask Types}
+
+Transformer-based models have demonstrated exceptional versatility across a variety of tasks, each benefiting from different attention mask types, as shown in Figure \ref{fig:mask_types}. \textit{Causal Mask} is predominantly used in autoregressive models to predict the next token in a sequence, ensuring that each token only attends to previous tokens and avoids information leakage from future tokens \cite{vaswani2017attention}. \textit{Sliding Window Mask} captures local context by allowing tokens to attend to a fixed-size window of neighboring tokens, balancing computational efficiency with the ability to capture local dependencies \cite{beltagy2020longformer}. \textit{Causal Document Mask}, employed in methods like efficient sequence packing and in-batch/in-tokens techniques, accelerates large language models without performance degradation by ensuring tokens attend only to previous tokens within the same document \cite{krell2021efficient, iyer2022opt, dubey2024llama}. \textit{Document Mask}, or bi-directional attention, permits tokens to attend to all other tokens within the same document, facilitating context learning from both directions and is widely used in models like BERT and vision transformers like NaViT \cite{devlin2018bert, dehghani2024patch}. 
+
+\textit{Shared Question Mask} is utilized in Reward Models (RM) and Direct Preference Optimization (DPO) models, allowing multiple answers to share a single question, thus eliminating redundant computations and speeding up training \cite{ouyang2022training}. The \textit{Global + Sliding Window Mask} combines global attention with sliding window attention, where global tokens attend to all tokens while others use a sliding window mask, effectively handling tasks requiring both global context and local details \cite{zaheer2020big}. 
+
+\textit{Causal BlockWise Mask}, primarily used in in-context learning, divides sequences into blocks, where demonstrations only attend to nearby examples within small blocks, while the test example can attend to all demonstrations, allowing the study of model performance improvements in long-context tasks \cite{bertsch2024context}. \textit{Prefix LM Causal Mask} is tailored for language modeling tasks, allowing a prefix to attend to all tokens to generate coherent text based on the prefix \cite{raffel2020exploring}. \textit{Prefix Document Mask} extends this concept to multiple documents, where a prefix in each document attends to all tokens within that document but not across documents. 
+
+\textit{QK-Sparse Mask} optimizes self-attention by sparsifying query-key pairs, reducing computational load while maintaining performance, which is particularly beneficial for large-scale models \cite{Kitaev2020Reformer}. \textit{Hash-Sparse Mask} employs locality-sensitive hashing to partition sequences into smaller chunks, enabling efficient sparse attention for long sequences \cite{Kitaev2020Reformer}. Lastly, \textit{Random Eviction Mask} introduces randomness by randomly masking out tokens during training, aiding in generalization and simulating Key-Value (KV) cache eviction processes to handle long sequences without memory overflow \cite{chen-etal-2024-nacl}.
+
+\begin{figure}[t]
+\centering
+\subfigure[]{
+\includegraphics[width=0.396\textwidth]{Figures/mask_type.pdf}
+}
+\subfigure[]{
+\includegraphics[width=0.286\textwidth]{Figures/flashmask_rep.pdf}
+}
+\subfigure[]{
+\includegraphics[width=0.267\textwidth]{Figures/flashmask.pdf}
+}
+\caption{Overview of \ours{}. (a) Types of Masks Supported by \ours{}, (b) Column-Wise Sparse Representation in \ours{}, (c) Efficient Implementation of \ours{}.} 
+\label{fig:mask_types}
+\end{figure}
+\subsection{Attention Mask Supported}
+
+Attention mechanisms are fundamental to transformer-based models, with various mask types enabling different attention patterns. The vanilla attention mechanism, as shown in Equation \ref{eq:vanilla_attention}, supports arbitrary mask types through a dense mask matrix:
+
+\begin{equation}
+\label{eq:vanilla_attention}
+S = \frac{QK^\top}{\sqrt{d_k}} \in \mathbb{R}^{N \times N}, \quad P = \text{Softmax}(S+M) \in \mathbb{R}^{N \times N}, \quad O = PV \in \mathbb{R}^{N \times d},
+\end{equation}
+
+where $Q$, $K$, $V \in \mathbb{R}^{N \times d}$ are input sequences, $M \in \mathbb{R}^{N \times N}$ is the attention mask, $N$ is the sequence length, and $d$ is the head dimension. The mask $M$ modulates token visibility through element-wise addition with $S$. While this approach supports arbitrary mask types, it incurs a memory complexity of $O(N^2)$, limiting its scalability for long sequences.
+
+FlashAttention \cite{dao2022flashattention,dao2023flashattention} addresses this limitation through IO-aware read/write operations and tiling techniques, eliminating the need for the intermediate $S \in \mathbb{R}^{N \times N}$ and explicit mask $M$. However, FlashAttention only supports predetermined mask patterns within its kernel, such as causal, sliding window, causal document, and document masks, as shown in Figure \ref{fig:mask_types}.
+
+xFormers \cite{xFormers2022} extends FlashAttention's capabilities, offering support for masks with diagonal offsets. It represents document masks using cumulative sequence lengths, achieving a memory complexity of $O(N)$.
+
+FlexAttention \cite{he2024flexattention} introduces a more flexible mask description method based on deep learning compiler techniques. By combining block masks with expression-based descriptions, it can support arbitrary mask types. While this approach significantly reduces memory overhead through block-based processing, its memory complexity remains $O(\frac{N^2}{B_rB_c})$.
+
+Our proposed method, \ours{}, extends FlashAttention's mask support capabilities. It introduces a flexible, column-wise sparse mask representation that covers the majority of mainstream Transformer modeling requirements. As illustrated in Figure \ref{fig:mask_types}(b), \ours{} expresses which intervals need to be masked on a per-column basis, achieving a memory complexity of $O(N)$. This approach bridges the gap between mask flexibility and computational efficiency, offering a more versatile solution for attention mechanisms in large-scale transformer models.
+\subsection{Attention Optimization Techniques}
+
+The attention mechanism, as formulated in Equation~\ref{eq:vanilla_attention}, presents significant computational and memory challenges, particularly in the computation of $Q K^T$. As the sequence length $N$ increases, the resultant attention scores matrix grows quadratically, leading to a complexity of $\mathcal{O}(N^2)$. To address this scalability issue, researchers have proposed various optimization techniques, focusing on both memory efficiency and computational speed.
+
+Memory Efficient Attention (MEA) \cite{rabe2021self} marks a notable advancement in model training optimizations. By leveraging Online Softmax \cite{milakov2018online} and chunking techniques, MEA reduces memory requirements from $\mathcal{O}(N^2)$ to $\mathcal{O}(\sqrt{N})$, enabling the use of larger models or extended sequence lengths within existing hardware constraints. Building upon this foundation, FlashAttention \cite{dao2022flashattention,dao2023flashattention} focuses on reducing attention latency through IO-aware memory read/write optimizations. Utilizing tiling techniques during computation, FlashAttention achieves a memory overhead of $\mathcal{O}(N)$, proving particularly effective in tasks without custom masking requirements. Furthermore, FlashAttention extends to Block-Sparse FlashAttention, introducing a two-dimensional block mask matrix representation to indicate masked tiling blocks. This innovation allows for the skipping of computations for masked blocks, thereby accelerating the process.
+
+For scenarios requiring specific attention masks, several tailored solutions have emerged. Sparse Causal Flash Attention (SCFA) \cite{pagliardini-et-al-2023b} extends FlashAttention to optimize QK-Sparse and Hash-Sparse scenarios in causal attention structures. SCFA employs indices of queries and keys in the original uncompressed tensors to describe masks, enabling the omission of computations for masked blocks and enhancing computational efficiency. FlexAttention \cite{he2024flexattention} leverages compiler techniques to simplify mask attention implementations, exploiting sparsity in the attention mask to skip certain masked blocks and achieve improved speed. However, there remains room for optimization, particularly for complex masking patterns.
+
+Our proposed method, \ours{}, builds upon these advancements to support customized complex attention masks. \ours{} reduces memory complexity from $\mathcal{O}(N^2)$ to $\mathcal{O}(N)$ while leveraging sparsity in the attention mask to skip masked blocks. Through rigorous engineering optimizations, \ours{} achieves superior computational speed compared to FlexAttention, particularly in tasks with complex masking requirements. By synthesizing the strengths of existing approaches with novel optimization techniques, \ours{} represents a significant advancement in attention mechanism efficiency, addressing both memory constraints and computational speed in large-scale transformers.
+
+
+
+\section{Observation}
+
+
+In the current paradigm of training Transformer-based models, attention mechanisms can be broadly categorized based on their causality, as introduced in Section 2.1 and illustrated in Figure 1(a). These representations encompass the majority of mask types encountered in training scenarios. Consider the attention score matrix $S$, where each element $S_{ij}$ represents the attention of the $i$-th query token to the $j$-th key token. From the perspective of the key tokens, we observe a critical pattern in how query tokens attend to each key token.
+
+Our key observation is that the inability of query tokens to attend to certain key tokens exhibits a continuous nature. This continuity allows us to transform the two-dimensional dense mask $M$ into a more compact, one-dimensional representation using row index intervals, as depicted in Figure \ref{fig:mask_types}(b). Formally, we can express this transformation as:
+
+\begin{equation}
+    M_{j} = [start_j, end_j), \quad \forall j \in \{1, \ldots, N\}
+\end{equation}
+
+where $M_{j}$ represents the interval of row indices that are masked for the $j$-th key token, and $N$ is the sequence length.
+
+While this column-wise, one-dimensional interval representation may not capture arbitrary mask patterns, it effectively covers the predominant mask types encountered in practice. Moreover, this representation offers a significant advantage: it facilitates a straightforward conversion to masked blocks in tiling-based computations. This conversion enables the elimination of unnecessary calculations, thereby enhancing the computational efficiency of the attention kernel.
+
+This concept of interval representation can be generalized to other forms of continuous intervals. For instance, by transposing the attention matrix, we can obtain a row-wise representation using column index intervals. The flexibility of this approach allows for efficient handling of various attention patterns while maintaining a compact representation that is conducive to optimized computation.
+
+
+
+\section{\ours{}
+
+
+In this section, we introduce the novel column-wise mask representation of \ours{}, extend FlashAttention to support complex mask patterns, and provide a comprehensive complexity analysis of our approach.
+\subsection{Column-wise Mask Representation}
+To efficiently handle complex mask patterns in both causal and bidirectional attention scenarios, we propose a novel column-wise sparse representation for \ours{}. The attention score matrix is partitioned into lower-left and upper-right triangular sections relative to the diagonal. \ours{} expresses the mask using four one-dimensional vectors:
+
+\begin{itemize}%[noitemsep,nolistsep]
+    \item $\boldsymbol{LTS}$: \textbf{L}ower \textbf{T}riangular \textbf{S}tart - the starting row of the mask in the lower-left triangle.
+    \item $\boldsymbol{LTE}$: \textbf{L}ower \textbf{T}riangular \textbf{E}nd - the ending row of the mask in the lower-left triangle.
+    \item $\boldsymbol{UTS}$: \textbf{U}pper \textbf{T}riangular \textbf{S}tart - the starting row of the mask in the upper-right triangle.
+    \item $\boldsymbol{UTE}$: \textbf{U}pper \textbf{T}riangular \textbf{E}nd - the ending row of the mask in the upper-right triangle.
+\end{itemize}
+
+The indices of rows to be masked in the lower triangular section are given by $[LTS, LTE)$, and in the upper triangular section by $[UTS, UTE)$. Specifically, each column is described by two mask intervals. For the $j$-th token, tokens within the intervals $[LTS_j, LTE_j) \cup [UTS_j, UTE_j)$ cannot attend to it. For example, as illustrated in Figure 1(b)(6), for the fifth column, $[LTS_5, LTE_5) \cup [UTS_5, UTE_5) = [7, 10) \cup [2, 4)$ indicates that rows 2 to 4 and 7 to 9 are masked.
+
+This representation offers several advantages:
+
+\begin{enumerate}%[noitemsep,nolistsep]
+    \item \textbf{Compactness}: It reduces a dense 2D mask to a more efficient 1D representation.
+    \item \textbf{Flexibility}: It can capture a wide range of practical mask patterns, including causal, bidirectional, and more complex attention mechanisms.
+    \item \textbf{Computational Efficiency}: It facilitates easy conversion to masked blocks in tiling-based computations, enabling the elimination of unnecessary calculations.
+\end{enumerate}
+
+\subsection{Extending FlashAttention for Complex Masks}
+
+We integrate the column-wise mask representation of \ours{} into the FlashAttention-2 algorithm, extending its mask support capabilities. The high-performance kernel implementation of \ours{} consists of two key steps:
+
+\textbf{Preprocessing}: Given the input column-wise sparse mask vectors, we first partition them into $T_c$ blocks along the column dimension in high-bandwidth memory (HBM). For each mask vector, we compute the maximum and minimum values within each block. This results in 8 intermediate vectors: $LTStart^{max}$, $LTStart^{min}$, $LTEnd^{max}$, $LTEnd^{min}$, $UTStart^{max}$, $UTStart^{min}$, $UTEnd^{max}$, and $UTEnd^{min}$, each of size $T_c$.
+
+\textbf{Real-time Block Skip Computation}: Using these min-max vectors, we can classify each tiling block of attention score matrix into three categories during kernel computation. The block mask type $T_{block}$ is determined as follows:
+\begin{equation}
+    T_{block} = \begin{cases}
+        \text{Fully masked}, & \text{if } BlockRow_{min} \geq Start^{max} \text{ and } BlockRow_{max} \leq End^{min} \\
+        \text{Partially masked}, & \text{elif } BlockRow_{min} < End^{max} \text{ and } BlockRow_{max} > Start^{min} \\
+        \text{Unmasked}, & \text{otherwise}
+    \end{cases}
+\end{equation}
+
+\newcommand{\LTS}{\mathbf{LTS}}
+\newcommand{\LTE}{\mathbf{LTE}}
+\newcommand{\UTS}{\mathbf{UTS}}
+\newcommand{\UTE}{\mathbf{UTE}}
+\newcommand{\vQ}{\mathbf{Q}}
+\newcommand{\vK}{\mathbf{K}}
+\newcommand{\vV}{\mathbf{V}}
+\newcommand{\vdQ}{\mathbf{dQ}}
+\newcommand{\vdK}{\mathbf{dK}}
+\newcommand{\vdV}{\mathbf{dV}}
+\newcommand{\vS}{\mathbf{S}}
+\newcommand{\vdS}{\mathbf{dS}}
+\newcommand{\vP}{\mathbf{P}}
+\newcommand{\vdP}{\mathbf{dP}}
+\newcommand{\vU}{\mathbf{U}}
+\newcommand{\vW}{\mathbf{W}}
+\newcommand{\vT}{\mathbf{T}}
+\newcommand{\vX}{\mathbf{X}}
+\newcommand{\vO}{\mathbf{O}}
+\newcommand{\vdO}{\mathbf{dO}}
+\newcommand{\vM}{\mathbf{M}}
+\newcommand{\vZ}{\mathbf{Z}}
+\newcommand{\abs}[1]{\left\lvert#1\right\rvert}
+\newcommand{\norm}[1]{\left\|{#1}\right\|} % A norm with 1 argument
+\newcommand{\diag}{\mathrm{diag}}
+\newcommand{\dsoftmax}{\mathrm{dsoftmax}}
+\providecommand{\tr}{\mathop{\rm tr}}
+
+\newcommand{\fms}{\mathbf{FMS}}
+\newcommand{\fme}{\mathbf{FME}}
+\newcommand{\vD}{\mathbf{D}}
+\newcommand{\ltstart}{LTStart}
+\newcommand{\ltend}{LTEnd}
+\newcommand{\utstart}{UTStart}
+\newcommand{\utend}{UTEnd}
+\newcommand{\maxlts}[1]{\ltstart^{max}_{#1}}
+\newcommand{\minlts}[1]{\ltstart^{min}_{#1}}
+\newcommand{\maxlte}[1]{\ltend^{max}_{#1}}
+\newcommand{\minlte}[1]{\ltend^{min}_{#1}}
+\newcommand{\maxuts}[1]{\utstart^{max}_{#1}}
+\newcommand{\minuts}[1]{\utstart^{min}_{#1}}
+\newcommand{\maxute}[1]{\utend^{max}_{#1}}
+\newcommand{\minute}[1]{\utend^{min}_{#1}}
+
+\begin{algorithm}[t]
+  \footnotesize
+  \caption{FlashAttention-2 Forward Pass Extended with \ours{}}
+  \label{alg:flashmask}
+  \begin{algorithmic}[1]
+    \Require Matrices $\vQ, \vK, \vV \in \mathbb{R}^{N \times d}$ in HBM, block sizes $B_c$, $B_r$, \colorbox{blue!10}{vectors $\LTS, \LTE, \UTS, \UTE \in \mathbb{R}^{N}$}.
+    \State \label{alg:stream_attn_split_qkv} Divide $\vQ$ into $T_r = \left\lceil\frac{N}{B_r} \right\rceil$ blocks $\vQ_1, \dots, \vQ_{T_r}$ of size $B_r \times d$ each,
+    and divide $\vK, \vV$ in to $T_c = \left\lceil \frac{N}{B_c} \right\rceil$ blocks $\vK_1, \dots, \vK_{T_c}$ and
+    $\vV_1, \dots, \vV_{T_c}$, of size $B_c \times d$ each.
+    \State Divide the output $\vO \in \mathbb{R}^{N \times d}$ into $T_r$ blocks $\vO_1, \dots, \vO_{T_r}$ of size
+    $B_r \times d$ each, and divide the logsumexp $L$ into $T_r$ blocks $L_1, \dots, L_{T_r}$ of size
+    $B_r$ each.
+
+    \SetBgColor{blue!10}{
+    \State Divide $\LTS, \LTE, \UTS, \UTE$ into $T_c$ blocks $\LTS_1, \dots, \LTS_{T_c}$, $\LTE_1, \dots, \LTE_{T_c}$, $\UTS_1, \dots, \UTS_{T_c}$, $\UTE_1, \dots, \UTE_{T_c}$, of size $B_c$ each.
+    \State Precompute the min and max row index $\minlts{j}=min(\LTS_j)$,  $\maxlts{j}=max(\LTS_j)$, $\minlte{j}=min(\LTE_j)$,  $\maxlte{j}=max(\LTE_j)$, $\minuts{j}=min(\UTS_j)$,  $\maxuts{j}=max(\UTS_j)$, $\minute{j}=min(\UTE_j)$,  $\maxute{j}=max(\UTE_j)$, $\forall j \in \{1, \ldots, {T_c}\}$, write to HBM.
+    }
+    \For{$1 \le i \le T_r$} \label{alg:stream_attn_outer_loop}
+      \State \label{alg:stream_attn_load_q} Load $\vQ_i$ from HBM to on-chip SRAM.
+      \State \label{alg:stream_attn_init} On chip, initialize $\vO_{i}^{(0)} = (0)_{B_r \times d} \in \mathbb{R}^{B_r \times d}, \ell_{i}^{(0)} = (0)_{B_r} \in \mathbb{R}^{B_r}, m_{i}^{(0)} = (-\infty)_{B_r} \in \mathbb{R}^{B_r}$.
+      \For{$1 \le j \le T_c$}
+
+        { % 这个括号非常重要，不然会导致不正常缩进
+        \SetBgColor{blue!10}{
+        \If {{$(i-1) \times B_r \ge \maxlts{j} \: \textbf{and} \: i \times B_r \le \minlte{j}$}}
+            \State Continue \texttt{// lower triangular skip calculation of masked block}
+        \EndIf
+        
+        \If {{$(i-1) \times B_r \ge \maxuts{j} \: \textbf{and} \: i \times B_r \le \minute{j}$}}
+            \State Continue \texttt{// upper triangular skip calculation of masked block}
+        \EndIf
+        }
+        \State \label{alg:stream_attn_load_kv} Load $\vK_j, \vV_j$ from HBM to on-chip SRAM.
+        \State \label{alg:stream_attn_qk} On chip, compute $\vS_{i}^{(j)} = \vQ_i \vK_j^T \in \mathbb{R}^{B_r \times B_c}$.
+        
+        \SetBgColor{blue!10}{
+        \If{$i \times B_r > \minlts{j} \: \mathbf{and} \:  (i-1) \times B_r < \maxlte{j}$}
+            \State Load $\LTS_j$ and $\LTE_j$ from HBM to on-chip SRAM.
+            \State On chip, apply mask: $\vS_{i}^{(j)}[x][y] = -\infty, \forall x,y$, such that $ \LTS_j[y] \le (i-1) \times B_r + x < \LTE_j[y]$
+        \EndIf
+        
+        \If{$i \times B_r > \minuts{j} \: \mathbf{and} \:  (i-1) \times B_r < \maxute{j}$}
+            \State Load $\UTS_j$ and $\UTE_j$ from HBM to on-chip SRAM.
+            \State On chip, apply mask: $\vS_{i}^{(j)}[x][y] = -\infty, \forall x,y$, such that $ \UTS_j[y] \le (i-1) \times B_r + x < \UTE_j[y]$
+        \EndIf}
+        }% 这个括号非常重要，不然会导致不正常缩进
+        \State \label{alg:stream_attn_statistics} On chip, compute $m_{i}^{(j)} = \mathrm{max}(m_{i}^{(j-1)}, \mathrm{rowmax}(\vS_{i}^{(j)})) \in \mathbb{R}^{B_r}$, $\tilde{\vP}_{i}^{(j)} = \exp(\vS_{i}^{(j)} - m_{i}^{(j)}) \in $
+        \Statex \hspace{2.9em} $\mathbb{R}^{B_r \times B_c}$ (pointwise), $\ell_{i}^{(j)} = e^{m_{i}^{j-1} - m_{i}^{(j)}} \ell_{i}^{(j-1)} + \mathrm{row sum}(\tilde{\vP}_{i}^{(j)}) \in \mathbb{R}^{B_r}$.
+        \State \label{alg:stream_attn_update} On chip, compute
+        $\vO_{i}^{(j)} = \diag(e^{m_{i}^{(j-1)} - m_{i}^{(j)}}) \vO_{i}^{(j-1)} + \tilde{\vP}_{i}^{(j)} \vV_j$.
+      \EndFor
+      \State On chip, compute $\vO_{i} = \diag(\ell_{i}^{(T_c)})^{-1} \vO_{i}^{(T_c)}$.
+      \State On chip, compute $L_{i} = m_{i}^{(T_c)} + \log(\ell_i^{(T_c)})$.
+      \State Write $\vO_{i}$ to HBM as the $i$-th block of $\vO$.
+      \State Write $L_{i}$ to HBM as the $i$-th block of $L$.
+    \EndFor
+    \State Return the output $\vO$ and the logsumexp $L$.
+  \end{algorithmic}
+\end{algorithm}
+
+This classification allows us to skip fully masked blocks, reduce computation for unmasked blocks, and apply element-wise masking only for partially masked blocks. Figure \ref{fig:mask_types}(c) illustrates the entire kernel computation process for a causal scenario with $LTS$ and $LTE$ in the lower-left triangle. Algorithm \ref{alg:flashmask} details the forward computation process of \ours{} extended from FlashAttention-2, with blue-shaded parts indicating \ours{} computations.
+
+For the backward pass, \ours{}'s column-sparse representation is particularly advantageous.
+
+\subsection{Complexity Analysis}
+
+We define block sparsity in attention mask as $\rho = \frac{\alpha}{\left\lceil \frac{N}{B_r} \right\rceil \times \left\lceil \frac{N}{B_c} \right\rceil}$, where $B_r, B_c$ are block sizes, and $\alpha$ is the number of completely masked blocks.
+
+\textbf{Space Complexity:} The dense mask requires $\mathcal{O}(N^2)$ space, while \ours{} uses $\mathcal{O}(N)$ space for $LTS, LTE, UTS, UTE \in \mathbb{R}^N$ and 8 precomputed min-max vectors $\in \mathbb{R}^{\left\lceil \frac{N}{B_c} \right\rceil}$. This significant reduction in memory usage enables training on longer sequences.
+
+\textbf{Memory Access Complexity:} The dense mask requires $\mathcal{O}(N^2)$ memory accesses on HBM. \ours{} reads the $\LTS, \LTE, \UTS, \UTE \in \mathbb{R}^{N}$ vectors from HBM as shown in lines 16 and 19 of Algorithm ~\ref{alg:flashmask}, with each $\vQ_i$ reading the entire $\LTS, \LTE, \UTS, \UTE$, totaling $4 \times T_r \times N$ memory accesses. This reduces the memory access to approximately $\frac{N^2}{4 \times T_r \times N} = \frac{B_r}{4}$, significantly boosting performance. Furthermore, \ours{}'s compact representation allows preloading of mask vectors into SRAM, further enhancing memory access efficiency.
+
+\textbf{Computational Complexity:} While the standard attention computation has a complexity of $\mathcal{O}(N^2)$, \ours{} leverages sparsity in the attention mask to reduce it to $\mathcal{O}((1-\rho)T_rT_c)$ by skipping entirely masked blocks.
+
+These improvements in space, memory access, and computational complexities contribute to \ours{}'s superior performance and efficiency in handling complex attention patterns.
+\subsection{Correctness Analysis}
+
+As shown in Equation~\ref{eq:vanilla_attention}, the computation of the attention matrix $P = \text{Softmax}(S + M)$ involves augmenting the attention scores $S$ with a mask $M$, where the masked elements are set to $-\infty$. This operation ensures that the softmax outputs at these masked positions are zero, effectively omitting them from attention. Consequently, if an entire block is fully masked, the resulting output for that block will be all zeros. \ours{} exploits sparsity in the attention mask by skipping computations involving these entirely masked blocks, thus reducing computational overhead without altering the outcome. Importantly, \ours{} maintains bit-level numerical equivalence with the computations performed using a dense mask in FlashAttention, ensuring that there is no loss in precision. This exactness is corroborated in our experimental evaluations, where we verify that the loss convergence curves from end-to-end training align precisely at the bit level (see Section~\ref{sec:e2e_training_convergence}).
+
+
+
+\section{Experiments}
+
+
+In this section, we evaluate the performance of \ours{} through a series of experiments designed to demonstrate its end-to-end acceleration and memory efficiency under different model scales and sequence lengths, its training convergence in practical scenarios, its relationship with block sparsity in the attention mask, and its effectiveness across various attention mask patterns. All experiments were conducted on machines equipped with NVIDIA A100-SXM 80G GPUs, Intel(R) Xeon(R) Platinum 8350C CPUs, CUDA 12.0, and driver version 525.125.06.
+
+\subsection{End-to-End Training Throughput}
+To showcase the practical effectiveness of \ours{}, we evaluated the end-to-end training throughput on Llama-2 models of three scales (7B, 13B, and 70B) across four downstream tasks involving the fine-tuning and alignment training (SFT, LoRA, DPO, and RM) with varying sequence lengths. We compared \ours{} with two dense mask methods. The experimental results are presented in Figure~\ref{fig:endtoend}. The results lead to two key conclusion. \textbf{Higher Throughput:} \ours{} achieves higher throughput compared to dense mask methods with quadratic memory complexity. Specifically, \ours{} attains a 1.65x to 3.22x improvement over the maximum sequence length supported by FlashAttention dense mask. This demonstrates that, in practical applications, \ours{} can significantly enhance training throughput of large language models, thereby reducing training costs. \textbf{Linear Memory Overhead:} \ours{}'s linear memory overhead enables it to support longer sequence lengths. In the Llama-2 7B LoRA training, \ours{} supports sequence lengths up to 544K, whereas other methods are limited to 64K. At a sequence length of 64K, the memory overhead for dense mask methods amounts to 8GB. Figure~\ref{fig:sparsity_exp_and_mem}\,(b) depicts the memory overhead curve, highlighting the efficiency of \ours{} in terms of memory consumption.
+\begin{figure}[t]
+\centering
+\includegraphics[width=1\textwidth]{Figures/e2e_combined.pdf}
+\caption{End-to-end training throughput was assessed across varying sequence lengths for different Llama2 model scales in four downstream training tasks: SFT, LoRA, DPO, and RM.} 
+\label{fig:endtoend}
+\end{figure}
+
+
+\subsection{End-to-End Training Convergence Verification}
+\label{sec:e2e_training_convergence}
+The core innovation of \ours{} lies in introducing a column-wise sparse mask representation, which leverages sparsity in the attention mask to skip computations on fully masked blocks, thereby enhancing speed without altering the algorithm's precision. To verify that \ours{} does not compromise convergence accuracy, we conducted end-to-end training experiments on the Llama 3.1 \cite{dubey2024llama} 8B model across four fine-tuning and alignment training tasks of LLMs.
+
+It is important to \textbf{note that} the backward computation of $\vdQ$ in the CUDA kernel implementation may introduce randomness due to the accumulation order (see line 27 of Algorithm~\ref{alg:2}). Therefore, we performed convergence experiments under conditions with and without deterministic control. The loss curves are shown in Figure~\ref{fig:loss_comp}. When deterministic control is enabled, the loss curves of \ours{} and FlashAttention dense mask align precisely, demonstrating identical numerical behavior. When deterministic control is disabled, both methods exhibit the same loss convergence trends. These results conclusively prove that \ours{} is an exact algorithm that preserves convergence accuracy.
+\begin{figure}[t]
+\centering
+\subfigure{
+\includegraphics[width=1\textwidth]{Figures/loss_comp.pdf}
+}
+\caption{End-to-end training loss.}
+\label{fig:loss_comp}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\subfigure[]{
+\includegraphics[width=0.718\textwidth]{Figures/flashmask_sparsity_bf16_32768_128.pdf}
+}
+\subfigure[]{
+\includegraphics[width=0.23\textwidth]{Figures/mem_comp.pdf}
+}
+\caption{(a) Kernel execution latency at different sparsity levels, (b) Memory usage, Y-axis uses a base-10 logarithmic scale.} 
+\label{fig:sparsity_exp_and_mem}
+\end{figure}
+
+\subsection{Sparsity-Related Experiments}
+\ours{} leverages block sparsity in the attention mask to skip computations on fully masked blocks, resulting in computational complexity proportional to $\mathcal{O}((1-\rho)T_rT_c)$. To verify this relationship, we performed experiments on three different mask cases under the configuration of BFloat16 data type, sequence length of 32K, head dimension of 128, and 32 heads. We sampled data with varying sparsity levels for testing. Figure~\ref{fig:sparsity_exp_and_mem}\,(a) illustrates the kernel execution latency at different sparsity levels, demonstrating a linear relationship between latency and sparsity.
+
+\subsection{Kernel Performance Comparison}
+To thoroughly evaluate the expressiveness and computational efficiency of \ours{} under common attention mask patterns, we conducted kernel-level comparisons with FlexAttention. The experiments were carried out across 12 different mask cases, with sequence lengths of 8K, 32K, and 128K, and head dimensions of 64 and 128, using BFloat16 data type. The total number of tokens was fixed at 128K; varying sequence lengths yielded corresponding batch sizes, and a fixed hidden size of 4096 allowed us to adjust the number of heads by changing the head dimension. Both \ours{} and FlexAttention exploit sparsity in the attention mask. We measured kernel speed using the TFLOPs/s metric. As shown in Figure~\ref{fig:flashmask_vs_flexattention_bf16_128}, \ours{} outperforms FlexAttention in terms of total TFLOPs/s for both forward and backward passes across all cases, with improvements ranging from 12.1\% to 60.7\%. \ours{} achieves 37.8\% to 62.3\% of the theoretical maximum FLOPs/s on the A100 GPU.
+
+\begin{figure}[tbp]
+\centering
+\caption{Kernel forward and backward speed (head dim 128, BF16) on A100-SXM 80G GPU. FlexAttention using PyTorch 2.6.0.dev20240920+cu124.}
+\label{fig:flashmask_vs_flexattention_bf16_128}
+\end{figure}
+    
+
+
+\section{Limitations and Future Directions}
+
+While \ours{} significantly advances the efficiency of attention mechanisms for long sequences, it has limitations. The column-wise mask representation reduces memory complexity from $\mathcal{O}(N^2)$ to $\mathcal{O}(N)$, offering substantial memory savings for long sequence training and effectively capturing the most common mask patterns. However, it cannot represent arbitrary masks, particularly those with irregular masked regions within a single column. Extreme cases, such as completely random masks, pose challenges for both representation and efficient computation. Future research should focus on developing more sophisticated sparse representations that simultaneously maximize expressiveness and computational efficiency, particularly those amenable to tiling techniques for high-performance kernels. Extending \ours{} to leverage features of newer architectures, such as NVIDIA’s Hopper, could further enhance performance. Additionally, while our current implementation is based on the PaddlePaddle \cite{ma2019paddlepaddle} framework, integrating \ours{} into other popular deep learning frameworks could broaden its impact and accessibility. These efforts aim to address current limitations while expanding \ours{}’s applicability across a broader range of tasks, contributing to the ongoing evolution of efficient transformer models for long sequence processing.
+
+
+
+\section{Conclusion}
+
+
+In this paper, we introduced \ours{}, an innovative extension of the FlashAttention algorithm that introduces a column-wise sparse mask representation to efficiently handle a wide spectrum of attention mask patterns in Transformer models. Our approach reduces the memory complexity from $\mathcal{O}(N^2)$ to $\mathcal{O}(N)$, enabling the processing of significantly longer sequences, which is crucial for modern large language models. By integrating this representation into the FlashAttention algorithm and implementing optimized kernels, \ours{} leverages sparsity in the attention mask to skip computations on fully masked blocks without sacrificing computational accuracy. This strategic approach achieves notable computational speedups, with observed end-to-end enhancements ranging from 1.65x to 3.22x during fine-tuning and alignment training of large language models, compared to the existing FlashAttention dense method. Furthermore, \ours{} significantly decreases the memory overhead associated with attention mask storage, thereby extending support for even longer sequence modeling. Additionally, \ours{} outperforms the latest counterpart, FlexAttention, by 12.1\% to 60.7\% in kernel TFLOPs/s, achieving 37.8\% to 62.3\% of the theoretical maximum FLOPs/s on the A100 GPU. Our approach has been validated on downstream tasks of large language models, and we anticipate its widespread adoption in the industry.
+
+\clearpage
+
+
+
+
+

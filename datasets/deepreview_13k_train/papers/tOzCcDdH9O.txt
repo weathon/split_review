@@ -1,0 +1,221 @@
+\title{Matryoshka Diffusion Models}
+
+\begin{abstract}
+
+Diffusion models are the \emph{de-facto} approach for generating high-quality images and videos but learning high-dimensional models remains a formidable task due to computational and optimization challenges. Existing methods often resort to training cascaded models in pixel space, or using a downsampled latent space of a separately trained auto-encoder. In this paper, we introduce {\Model} ({\model}), an end-to-end framework for high-resolution image and video synthesis. We propose a diffusion process that denoises inputs at multiple resolutions jointly and uses a NestedUNet architecture where features and parameters for small scale inputs are nested within those of the large scales. In addition, {\model} enables a progressive training schedule from lower to higher resolutions which leads to significant improvements in optimization for high-resolution generation. We demonstrate the effectiveness of our approach on various benchmarks, including class-conditioned image generation, high-resolution text-to-image, and text-to-video applications. Remarkably, we can train a \emph{single pixel-space model} at resolutions of up to $1024\times1024$ pixels, demonstrating strong zero shot generalization using the CC12M dataset, which contains only 12 million images.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Diffusion models~\citep{sohl2015deep,ho2020denoising,nichol2021improved,song2020score} have become increasingly popular tools for generative applications, such as image~\citep{dhariwal2021diffusion,rombach2022high,ramesh2022hierarchical,saharia2022photorealistic}, video~\citep{ho2022video,ho2022imagen}, 3D~\citep{poole2022dreamfusion,gu2023nerfdiff,liu2023zero1to3,ssdnerf}, audio~\citep{liu2023audioldm}, and text~\citep{li2022diffusion,zhang2023planner} generation.
+However scaling them to high-resolution still presents significant challenges as the model must re-encode the entire high-resolution input for each step ~\citep{kadkhodaie2022learning}. Tackling these challenges necessitates the use of deep architectures with attention blocks which makes optimization harder and uses more computation and memory.
+
+Recent works~\citep{jabri2022scalable,hoogeboom2023simple} have focused on efficient network architectures for high-resolution images. However, none of the existing methods have shown competitive results beyond $512\times 512$, and their quality still falls behind the main-stream cascaded/latent based methods. For example, DALL-E 2~\citep{ramesh2022hierarchical}, IMAGEN~\citep{saharia2022photorealistic} and eDiff-I~\citep{balaji2022ediffi} save computation by learning a low-resolution model together with multiple super-resolution diffusion models, where each component is trained separately. On the other hand, latent diffusion methods (LDMs)~\citep{rombach2022high,peebles2022scalable,xue2023raphael} only learn low-resolution diffusion models, while they rely on a separately trained high-resolution autoencoder~\citep{vqvae,taming}.
+In both cases, the multi-stage pipeline complicates training \& inference, often requiring careful tuning of hyperparameters.
+
+In this paper, we present {\Model} Models ({\model}), a novel family of diffusion models for end-to-end high-resolution synthesis. Our main insight is to include the low-resolution diffusion process as part of the high-resolution generation, taking similar inspiration from multi-scale learning in GANs~\citep{karras2017progressive,eg3d,kang2023scaling}. 
+We accomplish this by performing a joint diffusion process over multiple resolution using a Nested UNet architecture ( (see \cref{fig:process} and \cref{fig:arch}). Our key finding is that MDM, together with the Nested UNets architecture, enables 1) a multi- resolution loss that greatly improves the speed of convergence of high-resolution input denoising and 2) an efficient progressive training schedule, that starts by training a low-resolution diffusion model and gradually adds high-resolution inputs and outputs following a schedule.
+Empirically, we found that the multi-resolution loss together with progressive training allows one to find an excellent balance between the training cost and the model's quality. 
+
+We evaluate {\model} on class conditional image generation, and text conditioned image and video generation. {\model} allows us to train high-resolution models without resorting to cascaded or latent diffusion. Ablation studies show that both multi-resolution loss and progressive training greatly boost training efficiency and quality. In addition, {\model} yield high performance text-to-image generative models with up to $1024^2$ resolution, trained on the reasonably small CC12M dataset. Lastly, {\model} generalize gracefully to video generation, suggesting  generality of our approach.
+
+
+
+\section{Diffusion Models\label{sec:diffusion}
+
+\paragraph{Diffusion models~\citep{sohl2015deep,ho2020denoising}} are latent variable models given a pre-defined posterior distribution (named the forward diffusion process), and trained with a denoising objective. 
+More specifically, given a data point $\vx \in \mathbb{R}^N$ and a fixed signal-noise schedule $\{\alpha_t, \sigma_t\}_{t = 1,\ldots, T}$, % where the SNR ${\alpha_t^2}/{\sigma_t^2}$ monotonically decreases with $t$, and satisfies that $\frac{\alpha_1^2}{\sigma_1^2} \to \infty$, $\frac{\alpha_T^2}{\sigma_T^2} \to 0$. For  
+we define a sequence of latent variables $\{\vz_t\}_{t=0,\ldots,T}$ that satisfies:
+\begin{equation}
+    q(\vz_t | \vx) = \mathcal{N}(\vz_t;\alpha_t\vx, \sigma_t^2I),
+    \; \text{and} \;
+    q(\vz_t | \vz_s) = \mathcal{N}(\vz_t; \alpha_{t|s}\vz_s, \sigma^2_{t|s}I), %\ \ \ 0 \leq s < t \leq 1,
+\label{eq:ddpm_posterior}
+\end{equation}
+where $\vz_0=\vx$, $\alpha_{t|s} = \alpha_t/\alpha_s, \sigma^2_{t|s}=\sigma_t^2-\alpha_{t|s}^2\sigma_s^2$, $s < t$. By default, the signal-to-noise ratio (SNR, $\alpha_t^2/\sigma_t^2$) decreases monotonically with t.
+The model then learns to reverse the process with a backward model $p_\theta(\vz_{t - 1} | \vz_{t})$, which can be re-written as a denoising objective:
+\begin{equation*}
+    \mathcal{L}_\theta = \mathbb{E}_{t\sim[1, T], \vz_t\sim q(\vz_t | \vx)}\left[\omega_t\cdot\|\vx_\theta(\vz_t, t) - \vx\|_2^2\right],
+\label{eq:ddpm_loss}
+\end{equation*}
+where $\vx_\theta(\vz_t, t)$ is a neural network (often a variant of a UNet model~\citep{Ronneberger2015}) that maps a noisy input $\vz_t$ to its clean version $\vx$, conditioned on the time step $t$; $\omega_t \in \mathbb{R}^{+}$ is a loss weighting factor determined by heuristics. 
+In practice, one can reparameterize $\vx_\theta$ with noise- or v-prediction~\citep{salimans2022progressive} for improved performance.
+Unlike other generative models like GANs~\citep{goodfellow2014generative}, %assuming coarse-to-fine computation, 
+diffusion models require repeatedly applying a deep neural network $\vx_\theta$ in the ambient space as enough computation with global interaction is crtical for denoising~\citep{kadkhodaie2022learning}. 
+This makes it challenging to design efficient diffusion models directly for high-resolution generation, especially for complex tasks like text-to-image synthesis. As common solutions, existing methods have focused on learning hierarchical generation:
+\paragraph{Cascaded diffusion~\citep{ho2022cascaded,ramesh2022hierarchical,saharia2022photorealistic,ho2022imagen}}
+utilize a cascaded approach where a first diffusion model is used to generate data at lower resolution, and then a second diffusion model is used to generate a super-resolution version of the initial generation, taking the first stage generation as conditioning. 
+Cascaded models can be chained multiple times until they reach the final resolution.  \citet{ho2022imagen,singer2022makeavideo} uses a similar approach for video synthesis as well -- models are cascaded from low spatio-temporal resolution to high spatio-temporal resolution. However, since each model is trained separately, the generation quality can be bottlenecked by the exposure bias \citep{bengio2015scheduled} from imperfect predictions and several models need to be trained corresponding to different resolutions.
+\paragraph{Latent diffusion~\citep[LDM,][]{rombach2022high}} and its follow-ups~\citep{peebles2022scalable,xue2023raphael,podell2023sdxl}, on the other hand, handle high-resolution image generation by performing diffusion in the lower resolution latent space of a pre-trained auto-encoder, which is typically trained with adversarial objectives~\citep{taming}. This not only increases the complexity of learning, but bounds the generation quality due to the lossy compression process. 
+\paragraph{End-to-end models}
+Recently, several approaches have been proposed~\citep{hoogeboom2023simple,jabri2022scalable,chen2023importance} to train end-to-end models directly on high-resolution space. Without relying on separate models, these methods focus on efficient network design as well as shifted noise schedule to adapt high-resolution spaces. Nevertheless, without fully considering the innate structure of hierarchical generation, their results lag behind cascaded and latent models.  
+
+
+\section{{\Model}
+
+\begin{figure}[t]
+    \centering
+  \includegraphics[width=\linewidth]{figures/process2.jpg}
+    \caption{\footnotesize An illustration of {\Model}. $z^L_t$, $z^M_t$ and $z^H_t$ are noisy images at three different resolutions, which are fed into the denoising network together, and predict targets independently.
+    }%\JS{Should we say terms are defined in the text in section X?}}
+    \label{fig:process}
+\end{figure}
+In this section, we present {\Model} Models ({\model}), a new class of diffusion models that is trained end-to-end in high-resolution space, while exploiting the hierarchical structure of data formation. {\model} first generalizes standard diffusion models in the extended space (\cref{sec.process}), for which specialized nested architectures (\cref{sec.arch}) and training procedures (\cref{sec.training}) are proposed. %Finally, we show that {\model} can be naively applied in challenging tasks like text-to-image and text-to-video (\cref{sec.application}).
+\subsection{Diffusion Models in Extended Space}
+\label{sec.process}
+Unlike cascaded or latent methods, {\model} learns a single diffusion process with hierarchical structure by introducing a multi-resolution diffusion process in an extended space. An illustration is shown in \cref{fig:process}. Given a data point $\vx\in \mathbb{R}^N$, we define time-dependent latent $\vz_t = \left[\vz^1_t,\ldots,\vz^R_t\right]\in \mathbb{R}^{N_1+\ldots N_R}$. Similar to \cref{eq:ddpm_posterior}, for each $\vz_r, r=1,\ldots,R$:
+\begin{equation}
+    q(\vz_t^r|\vx)=\mathcal{N}(\vz_t^r;\alpha_t^rD^r(\vx), {\sigma_t^r}^2I),
+\end{equation}
+where $D^r: \mathbb{R}^N\rightarrow\mathbb{R}^{N_r}$ is a deterministic ``down-sample'' operator depending on the data. Here, $D^r(\vx)$ is a coarse / lossy-compressed version of $\vx$.
+For instance, $D^r(.)$ can be $\texttt{avgpool}(.)$ for generating low-resolution images. 
+By default, we assume compression in a progressive manner such that $N_1 < N_2 \ldots  <N_R=N$ and $D^R(\vx)=\vx$.
+Also, $\{\alpha^r_t, \sigma^r_t\}$ are the resolution-specific noise schedule. In this paper, we follow~\citet{gu2022f} and shift the noise schedule based on the input resolutions. %(see more details in \cref{sec.hyperparameters}). 
+{\model} then learns the backward process $p_\theta(\vz_{t-1}|\vz_t)$ with $R$ neural denoisers $\vx_\theta^r(\vz_t)$.
+Each variable $\vz^r_{t-1}$ depends on all resolutions $\{\vz_t^1\ldots\vz_t^R\}$ at time step $t$. During inference, {\model} generates all $R$ resolutions in parallel. There is no dependency between $\vz^r_t$.
+
+Modeling diffusion in the extended space has clear merits: (1) since what we care during inference is the full-resolution output $\vz^R_t$, all other intermediate resolutions are treated as additional hidden variables $\vz^r_t$, enriching the complexity of the modeled distribution;%\footnote{Unlike the standard backward process, $p_\theta(\vz^R_{t-1}|\vz^R_{t})=\mathbb{E}_{\vz^r_t, r<R}\left[ p_\theta(\vz^R_{t-1}|\vz_t)\right]$ is non-Markovian.}; 
+(2) the multi-resolution dependency opens up opportunities to share weights and computations across $\vz_t^r$, enabling us to re-allocate computation in a more efficient manner for both training and inference efficiency.
+
+\subsection{NestedUNet Architecture}
+\label{sec.arch}
+Similar to typical diffusion models, we implement {\model} in the flavor of UNet~\citep{Ronneberger2015,nichol2021improved}: skip-connections are used in parallel with a computation block to preserve fine-grained input information, where the block consists of multi-level convolution and self-attention layers.
+In {\model}, under the progressive compression assumption, it is natural that the computation for $\vz^r_t$ is also beneficial for $\vz^{r+1}_t$. This leads us to propose \emph{NestedUNet}, an architecture that groups the latents of all resolutions $\{\vz_t^r\}$ in one denoising function as a  nested structure, where low resolution latents will be fed progressively along with standard down-sampling. Such multi-scale computation sharing greatly eases the learning for high-resolution generation.
+A pseudo code for NestedUNet compared with standard UNet is present as follows.
+\input{sections/pseudo}
+Aside from the simplicity aspect relative to other hierarchcal approaches, NestedUNet also allows to allocate the computation in the most efficient manner. As shown in \cref{fig:arch}, % \JS{The figure just shows the arch of the denoiser. Not sure how the arch shows the efficiency}, 
+our early exploration found that {\model} achieved much better scalibility when allocating most of the parameters \& computation in the lowest resolution.
+Similar findings have also been shown in \citet{hoogeboom2023simple}.
+\subsection{Learning}
+\label{sec.training}
+We train {\model} using the normal denoising objective jointly at multiple resolutions, as follows:
+\begin{equation}
+    \mathcal{L}_\theta = \mathbb{E}_{t\sim[1,T]}\mathbb{E}_{\vz_t\sim q(\vz_t | \vx)}\sum_{r=1}^R\left[\omega^r_t\cdot\|\vx^r_{\theta}(\vz_t, t) - D^r(\vx)\|_2^2\right],
+\label{eq:mdm_loss}
+\end{equation}
+where $\omega_t^r$ is the resolution-specific weighting, and by default we set $\omega_t^r/\omega_t^R = N_R/N_r$.
+\paragraph{Progressive Training}
+While {\model} can be trained end-to-end directly following \cref{eq:mdm_loss} which has already shown better convergence than naive baselines, we found a simple progressive training technique, similarly proposed in GAN literature~\citep{karras2017progressive,gu2021stylenerf}, greatly speeds up the training of high-resolution models w.r.t. wall clock time. 
+More precisely, we divide up the training into $R$ phases, where we progressively add higher resolution into the training objective in \cref{eq:mdm_loss}. This is equivalent to learning a sequence of {\model}s on $[\vz_t^1,\ldots\vz_t^r]$ until $r$ reaching the final resolution.
+Thanks to the proposed architecture, we can achieve the above trivially as if progressive growing the networks~\citep{karras2017progressive}.
+This training scheme avoids the costly high-resolution training from the beginning, and speeds up the overall convergence. 
+Furthermore, we can incorporate mixed-resolution training, a technique that involves the concurrent training of samples with varying final resolutions within a single batch. 
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/architecture.jpg}
+    \caption{\footnotesize An illustration of the NestedUNet architecture used in {\Model}. We follow the design of~\citet{podell2023sdxl} by allocating more  computation in the low resolution feature maps (by using more attention layers for example), where in the figure we use the width of a block to denote the parameter counts.}
+    \label{fig:arch}
+\end{figure}
+
+
+
+\section{Experiments}
+
+\label{sec.experiment}
+{\model} is a versatile technique applicableto any problem where input dimensionality can be progressively compressed. We consider two applications beyond class-conditional image generation that demonstrate the effectiveness of our approach -- text-to-image and text-to-video generation.
+\subsection{Experimental Settings}
+\paragraph{Datasets}
+In this paper, we only focus on datasets that are publicly available and easily reproducible. For image generation, we performed class-conditioned generation on ImageNet~\citep{Deng2009ImageNet:Database} at $256\times 256$, and performed general purpose text-to-image generation using Conceptual 12M~\citep[CC12M,][]{changpinyo2021cc12m} at both $256\times 256$ and $1024\times 1024$ resolutions. 
+As additional evidence of generality, we show results on text-to-video generation using WebVid-10M~\citep{Bain21} at $16\times 256\times 256$. We list the dataset and preprocessing details in~\cref{sec.dataset}.
+The choice of relying extensively on CC12M for text-to-image generative models in the paper is a significant departure from prior works~\citep{saharia2022photorealistic,ramesh2022hierarchical} that rely on exceedingly large and sometimes inaccessible datasets, and so we address this choice here. We find that CC12M is sufficient for building high-quality text-to-image models with strong zero-shot capabilities in a relatively short training time\footnote{2-5 days of training with 4 nodes of 8 GPU A-100 machines was often enough to build high quality models and assess relative performance of different approaches.}. This allows for a much more consistent comparison of methods for the community because the dataset is freely available and training time is feasible. We submit here, that CC12M is much more amenable as a common training and evaluation baseline for the community working on this problem.
+
+\paragraph{Evaluation} In line with prior works, we evaluate our image generation models using Fr\'echet Inception Distance~\citep[FID,][]{heusel2017gans} (ImageNet, CC12M) and CLIP scores~\citep{radford2021learning} (CC12M). To examine their zero-shot capabilities, we also report the FID/CLIP scores using COCO~\citep{Lin2014} validation set  togenerate images with the CC12M trained models.
+We also provide additional qualitative samples for image and video synthesis in supplementary materials.
+\paragraph{Implementation details}
+We implement {\model}s based on the proposed NestedUNet architecture, with the innermost UNet resolution set to $64\times 64$. Similar to \cite{podell2023sdxl}, we shift the bulk of self-attention layers to the lower-level ($16\times 16$) features, resulting in total $450$M parameters for the inner UNet. As described in \cref{sec.arch}, the high-resolution part of the model can be easily attached on top of previous level of the NestedUNet, with a minimal increase in the parameter count. For text-to-image and text-to-video models, we use the frozen FLAN-T5 XL~\citep{t5xl} as our text encoder due to its moderate size and performance for language encoding. Additionally, we apply two learnable self-attention layers over the text representation to enhance text-image alignment.
+
+For image generation tasks, we experiment with {\model}s of $\{64^2,256^2\}$, $\{64^2,128^2,256^2\}$ for $256\times 256$, and $\{64^2,256^2,1024^2\},\{64^2,128^2,256^2,512^2,1024^2\}$ for $1024\times 1024$, respectively. 
+For video generation, {\model} is nested by the same image $64\times 64$ UNet with additional attention layers for learning temporal dynamics. The overall resolution is $\{64^2,16\times 64^2, 16\times 256^2\}$. 
+We use bi-linear interpolation for spatial $D^r(.)$, and first-frame indexing for temporal $D^r(.)$. %We list the detailed diagrams for each model in~\cref{sec.hyperparameters}
+Unless specified, we apply progressive and mixed-resolution training for all {\model}s. We use $8$ A100 GPUs for ImageNet, and $32$ A100 GPUs for CC12M and WebVid-10M, respectively. See~\cref{sec.hyperparameters,sec.training} for more implementation hyper-parameters and training details.
+
+\paragraph{Baseline models}
+Aside from the comparisons with existing state-of-the-art approaches, we also report detailed analysis on {\model}s against three baseline models under controlled setup:
+
+    1. \textit{Simple DM}: A standard UNet architecture directly applied to high resolution inputs; We also consider the Nested UNet architecture, but ignoring the low resolution losses; Both cases are essentially identical to recent end-to-end diffusion models like \cite{hoogeboom2023simple}.
+    
+    2. \textit{Cascaded DM}: we follow the implementation details of \cite{saharia2022photorealistic} and train a CDM that is directly comparable with MDM where the upsampler has an identical configuration to our NestedUNet. We also apply noise augmentation to the low resolution conditioning image, and sweep over the optimal noise level during inference. 
+    
+    3
+    and subsequently train diffusion models that match the dimensions of the {\model} UNet.
+
+\input{tables/comparison_sota}
+\subsection{Main Results}
+
+\input{tables/comparison_learning}
+
+\paragraph{Comparison with baseline approaches} 
+Our comparisons to baselines are shown in \cref{fig:baseline_curves}.
+On ImageNet $256\times 256$, we select a standard UNet our simple DM baseline. For the Cascaded DM baseline, we pretrain a 64x64 diffusion model for 200K iterations, and apply an upsampler UNet also in the same size. We apply standard noise augmentation and sweep for the optimal noise level during inference time (which we have found to be critical). For LDM experiments, we use pretrained autoencoders from \cite{rombach2022high} which downsamples the input resolution and we use the same architecture for these experiments as our 64x64 low resolution models. For MDM variants, we use a NestedUNet of the same size as the baseline UNet. We experiment with two variants, one trained directly with the multi resolution loss \cref{eq:mdm_loss} (denoted as no PT), and another one resuming from the 64x64 diffusion model (ie, progressive training). CC12M 256x256 follows a similar setting, except that we use a single loss NestedUNet as our simple DM architecture. We monitor the FID curve on ImageNet, and the FID and CLIP curves on CC12M. 
+Comparing simple DM to MDM, we see that MDM clearly has faster convergence, and reaches better performance in the end. This suggests that the multi resolution diffusion process together with the multi resolution loss effectively improves the models convergence, with negligible added complexities. When following the progressive training schedule, we see that MDM's performance and convergence speed further improves. As a direct comparison, we see that the Cascaded DM baseline significantly under performs MDM, while both starting from the same 64x64 model. Note that this is remarkable because Cascaded DM has more combined parameters than MDM (because MDM has extensive parameter sharing across resolutions), and uses twice as many inference steps. We hypothesize that the inferior performance of Cascaded DM is largely due to the fact that our 64x64 is not aggressively trained, which causes a large gap between training and inference wrt the conditioning inputs. Lastly, compared to LDM, MDM also shows better performance. Although this is a less direct control as LDM is indeed more efficient due to its small input size, but MDM features a simpler training and inference pipeline. 
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/imagenet_cfg2_v2.png}
+    \caption{\footnotesize Random samples from our class-conditional {\model} trained on ImageNet $256\times 256$.}
+    \label{fig:imagenet_256x256.png}
+\end{figure}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/cc12m_1024_3.5.jpg}
+    \caption{\footnotesize Samples from the model trained on CC12M at $1024^2$ with progressive training.}
+    \label{fig:cc12m_1024}
+\end{figure}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/text_to_video1.jpg}
+    \caption{\footnotesize Samples from the model trained on WebVid-10M at $16\times256^2$ with progressive training. Videos are subsampled for ease of visualiation.}
+    \label{fig:video}
+\end{figure}
+
+\paragraph{Comparison with literature}
+In \cref{tab:literature}, {\model} is compared to existing approaches in literature, where we report FID-50K for ImageNet 256x256 and zero shot FID-30K on MSCOCO.  We see that MDM provides comparable results to prior works.
+
+\paragraph{Qualitative Results}
+We show random samples from the trained {\model}s on for image generation (ImageNet $256\times 256$, \cref{fig:imagenet_256x256.png}), text-to-image (CC12M, $1024\times 1024$~\cref{fig:cc12m_1024}) and text-to-video (WebVid-10M, \cref{fig:video}). Despite training on relatively small datasets, {\model}s show strong zero-shot capabilities of generating high-resolution images and videos. Note that we use the same training pipelines for all three tasks, indicating its versatile abilities of handling various data types.
+
+\subsection{Ablation Studies}
+\textbf{Effects of progressive training}
+ We experiment with the progressive training schedule, where we vary the number of iterations that the low-resolution model is trained on before continuing on the target resolution (\cref{fig:imagenet_fid_ablation}). We see that more low resolution training clearly benefits that of the high-resolution FID curves. Note that training on low resolution inputs is much more efficient w.r.t. both memory and time complexity, progressive training provides a straightforward option for finding the best computational trade-offs during training.
+
+\input{tables/comparison_ablation}
+\textbf{Effects of nested levels}
+Next, we compare the performance of using different number of nested resolutions with experiments on CC12M. The result is shown in~\cref{fig:cc12m_clip_ablation}. We see that increasing from two resolution levels to three consistently improves the model's convergence. It's also worth noting that increasing the number of nesting levels brings only negligible costs. 
+
+\textbf{CLIP-FID trade-off}
+Lastly, we show in \cref{fig:coco_tradeoff} the pereto curve of CLIP-FID on the zero-shot evaluation of COCO, achieved by varying the classifier free guidance (CFG) weight. MDM is similarly amendable to CFG as other diffusion model variants. Interesting, because our MDM is trained on a significantly smaller training set compared to other models (eg \cite{saharia2022photorealistic}), it still demonstrates strong CLIP score (for example, \cite{saharia2022photorealistic} reports a maximum CLIP score of ~31 in Figure A.11 which is similar to MDM). 
+
+
+
+\section{Related Work}
+
+In addition to diffusion methods covered in \cref{sec:diffusion},
+multiscale models have been widely used in image generation. A well-known Generative Adversarial Network (GAN) is the LAPGAN model~\citep{Denton2015} which generates lower-resolution images using lower-resolution models, that are subsequently fed into higher-resolution models to produce higher resolution images. %Pyramidal Diffusion~\citep{ryu2022pyramidal}, applies a similar strategy with denoising diffusion models that are trained at multiple resolutions.% During inference it first generates a lower-resolution image using the denoising model, followed by upsampling. Subsequently, a forward step of adding noise is performed before denoising at the higher-resolution using the denoising model.
+Autoregressive models have also been applied for generation -- from early works such as PixelCNN~\citep{Oord2016a} and PixelRNN~\citep{van2016pixel} and videos~\citep{videopixelnetworks,weissenborn2020scaling}, to more recent text-to-image models\citep{makeascene,yu2022scaling} and text to video models\citep{wu2021nuwa,singer2022makeavideo}.  While earlier works often operate in pixel space, recent works, such as Parti\citep{yu2022scaling} and MakeAScene\citep{makeascene} use autoencoders to preprocess images into discrete latent features which can be modeled autoregressively using large sequence-to-sequence models based on transformers. 
+f-DM~\citep{gu2022f} proposed a generalized framework enabling progressive signal transformation across multiple scales, and derived a corresponding de-noising scheduler to transit from multiple resolution stages. This scheduler is employed in our work. Similarly, IHDM~\citep{rissanen2023generative} does coarse-to-fine generation end-to-end, by reversing the heat equation, where resolution increase is implicit.
+\
+
+
+
+\section{Discussions and Future Directions}
+
+In this paper we showed that sharing representations across different resolutions can lead to faster training with high quality results, when lower resolutions are trained first. We believe this is because the model is able to exploit the correlations across different resolutions more effectively, both spatially and temporally. While we explored only a small set of architectures here, we expect more improvements can be achieved from a more detailed exploration of weight sharing architectures, and new ways of distributing parameters across different resolutions in the current architecture. 
+
+Another unique aspect of our work is the use of an augmented space, where denoising is performed over multiple resolutions jointly. In this formulation resolution over time and space are treated in the same way, with the differences in correlation structure in time and space being learned by different parameters of the weight sharing model. A more general way of conceptualizing the joint optimization over multiple resolutions is to decouple the losses at different resolutions, by weighting them differently. It is conceivable that a smooth transition can be achieved from training on lower to higher resolution. 
+We also note that while we have compared our approach to LDM in the paper, these methods are complementary. It is possible to build {\model} on top of autoencoder codes. 
+
+
+
+
+
+
+
+
+
+
+
+
+

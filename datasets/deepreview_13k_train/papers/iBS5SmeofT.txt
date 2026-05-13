@@ -1,0 +1,397 @@
+\title{Implicit Dynamical Flow Fusion (IDFF) for Generative Modeling}
+
+\begin{abstract}
+Conditional Flow Matching (CFM) models can generate high-quality samples from a non-informative prior, but they can be slow, often needing hundreds of network evaluations (NFE). To address this, we propose Implicit Dynamical Flow Fusion (IDFF); IDFF learns a new vector field with an additional momentum term that enables taking longer steps during sample generation while maintaining the fidelity of the generated distribution. Consequently, IDFFs reduce the NFEs by a factor of ten (relative to CFMs) without sacrificing sample quality, enabling rapid sampling and efficient handling of image and time-series data generation tasks. We evaluate IDFF on standard benchmarks such as CIFAR-10 and CelebA for image generation, where we achieve likelihood and quality performance comparable to CFMs and diffusion-based models with fewer NFEs. IDFF also shows superior performance on time-series datasets modeling, including molecular simulation and sea surface temperature (SST) datasets, highlighting its versatility and effectiveness across different domains
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Diffusion models have emerged as powerful tools for modeling complex, high-dimensional data by iteratively transforming random noise into meaningful information \citep{cachay2023dyffusion,myers2022practical}. These models have demonstrated remarkable success in various domains, including high-quality image generation \citep{song2020score} and text production \citep{liu2024sora, kim2019design}. However, their training process remains computationally intensive, often requiring hundreds of function evaluations (NFEs) to achieve high-quality results \citep{ho2020denoising}. While techniques such as DPM-solver \citep{lu2022dpm, lu2022dpm2} and Denoising Diffusion Implicit Models (DDIMs) \citep{song2020denoising} have made strides in reducing NFEs for diffusion-based generative models, significant computational challenges persist.
+
+In contrast to diffusion models, which parameterize the dynamics of noise-to-data transformation, Conditional Flow Matching (CFMs) directly parameterize vector fields governing this transformation \citep{liu2022flow, albergo2022building, albergo2023stochastic}. CFMs leverage the change of variable theory in statistics to define conditional probability paths, enabling faster convergence during training compared to diffusion models \citep{lipman2022flow}. However, generating high-quality samples with CFMs still requires hundreds of NFEs, making the process computationally expensive \citep{dao2023flow} and limiting the extension of CFM models to time-series data modeling, as NFEs scale with sequence length.
+
+To address these challenges, we introduce a novel method to enhance the efficiency of CFMs, allowing for longer sampling steps without compromising the fidelity of the target distribution. Our approach draws inspiration from Hamiltonian Monte Carlo (HMC) algorithms \citep{neal2012bayesian, neal2011mcmc}, which utilize the conservation properties of Hamiltonian dynamics to couple target and momentum variables.
+The key contributions of our work are as follows:
+
+\begin{enumerate}[leftmargin=*,itemsep=0pt,labelsep=12pt]
+    \item We propose Implicit Dynamical Flow Fusion (IDFF), which integrates a momentum term into the vector field of conditional flow models. Similar to how HMC reduces the number of samples required to reach the target distribution \citep{neal2012bayesian, neal2011mcmc}, \textbf{IDFF reduces the NFE by a factor of 10 compared to traditional CFMs} while maintaining identical marginal distributions. Additionally, we introduce a training objective that directly aligns generated samples with actual data rather than solely focusing on matching conditional flows.
+    
+    \item We validate IDFF through extensive experiments on image generation using datasets such as CIFAR-10 and CelebA. Additional results on ImageNet-64, CelebA-HQ, LSUN-Church, and LSUN-Bedroom are presented in Figure \ref{fig:img-gen-iff}. Our models achieve a superior balance between computational cost and sample quality compared to both traditional diffusion models (e.g., DDPM \citep{ho2020denoising}, DDIM \citep{song2020denoising}) and current CFMs.
+    
+    \item We demonstrate that reducing NFEs makes IDFF practical for other generation tasks, such as time-series modeling. We showcase IDFF's effectiveness in capturing complex dynamical systems, including 3D attractors, molecular dynamics (MD), and sea surface temperatures (SST). Our results indicate that IDFF surpasses other methods in sample quality for MD and SST datasets while maintaining computational efficiency, with NFE $\leq$ 5 for each generated sample.
+\end{enumerate}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=1\linewidth]{figures/Figure_1.png}
+\caption{Image generation using IDFF (with NFE=10) applied to multiple datasets: CIFAR10, CelebA-64, ImageNet-64, LSUN-Bedroom, LSUN-Church, and CelebA-HQ. The quality of the generated images demonstrates IDFF's ability to capture and reproduce realistic visuals across varying levels of complexity and resolution.}
+\label{fig:img-gen-iff}
+\end{figure}
+
+
+\section{Background}
+
+
+\paragraph{Score-based generative models.} Let $p_{\text{data}} = \{ \mathbf{x}^1, \mathbf{x}^2, \dots, \mathbf{x}^N \}$, where $\mathbf{x}^i \overset{\text{iid}}{\sim} p(\mathbf{x})$ and $\mathbf{x}^i \in \mathbb{R}^d$ for all $i = 1, 2, \dots, N$. We aim to build a generative model for this dataset given empirical samples. Moving forward, we suppress the superscript on each $\mathbf{x}^i$. 
+
+Score-based models \citep{song2019generative} represent a broad class of diffusion models that describe a continuous-time stochastic process characterized by a stochastic process $\mathbf{x}_t$, which is governed by the following Itô stochastic differential equation (SDE):
+\begin{equation}
+\label{eq:traditional-sde}
+d\mathbf{x}_t = \mathbf{f}(\mathbf{x}_t,t) dt + g(t) d\mathbf{w},
+\end{equation}
+where $t \in [0, 1]$, $\mathbf{f}(\cdot, t): \mathbb{R}^d \rightarrow \mathbb{R}^d$ 
+is the drift coefficient, $g(\cdot): \mathbb{R} \rightarrow \mathbb{R}$ is
+the diffusion coefficient of $\mathbf{x}_t$, and $\mathbf{w} \in \mathbb{R}^d$ is a standard Wiener process. 
+
+The time-reversed version of this diffusion process, derived from the Fokker--Planck equations \citep{song2019generative}, is also a diffusion process. This reverse-time SDE is defined as:
+\begin{equation}
+\label{eq:reverse_sde}
+d\mathbf{x}_t = \left( \mathbf{f}(\mathbf{x}_t, t) - g(t)^2 \nabla_{\mathbf{x}_t} \log p_t(\mathbf{x}_t) \right) dt + g(t) d\bar{\mathbf{w}},
+\end{equation}
+where $\bar{\mathbf{w}}$ is a standard Wiener process. Equation \ref{eq:reverse_sde} produces the same marginal distributions as the forward diffusion process defined by Equation \ref{eq:traditional-sde}.
+
+Equation \ref{eq:reverse_sde} must be solved to generate samples from this model. The score-matching approach simplifies this process by redefining $\mathbf{f}(\mathbf{x}_t, t) = h(t)\mathbf{x}_t$, where $h: \mathbb{R} \rightarrow \mathbb{R}$ typically assumes an affine form, such as $\mathbf{f}(\mathbf{x}_t, t) = \mathbf{x}_t$. Moreover, $g(\cdot)$, which governs the noise intensity added to the process, often follows a linear or exponential schedule in time.
+
+This reformulation enables a simplification of solving Equation \ref{eq:reverse_sde} by focusing solely on learning $\nabla_{\mathbf{x}} \log p_t(\mathbf{x}_t)$ for all $t$. With this approach, and initializing with random noise, e.g., $\mathbf{x}_0 \sim \mathcal{N}(0, \mathbf{I})$, the process gradually converges to the data distribution $p_{\text{data}}$, reaching it at $t = 1$.
+\paragraph{(Conditional) Flow Matching (CFM).} 
+Flow-matching (FM) transforms a simple prior distribution into a complex target distribution. FM is defined by a time-dependent vector field $\mathbf{v}_t$, which governs the dynamics of an ordinary differential equation (ODE):
+\begin{equation} 
+\label{eq:ode-fm} 
+\frac{d}{dt}(\mathbf{x}_t) = \mathbf{v}_t(\mathbf{x}_t) 
+\end{equation}
+The solution to this ODE, represented by $\phi(\mathbf{x}_t)$, evolves along the vector field $\mathbf{v}_t$ from time $0$ to time $1$, producing $\mathbf{x}_1 \sim p_1$. As samples move along the vector field $\mathbf{v}_t$, $p_t(\rvx_t)$ changes over time, described by the continuity equation.
+\begin{equation} 
+\label{eq:push-forward} 
+\frac{\partial p_t}{\partial t} = - \nabla \cdot (p_t \mathbf{v}_t) 
+\end{equation}
+where $p_t(\mathbf{x}_t)$ is determined by $\mathbf{v}_t(\mathbf{x}_t)$, $\nabla \cdot$ is the divergence operator, with $p_1 \approx p_{\text{data}}$.
+
+If the probability path $p_t(\rvx_t)$ and the vector field $\rvv_t(\rvx_t)$ are given, and if $p_t(\rvx_t)$ can be efficiently sampled, we can then define a parameterized vector field $\hat{\rvv}_t(\rvx_t; \boldsymbol{\theta})$ using a neural network with weights $\boldsymbol{\theta}$. This parameterized vector field approximates $\mathbf{v}_t(\mathbf{x}_t)$, and our goal is to learn how to generate samples from the ODE defined in equation \ref{eq:ode-fm}. The parameters of the neural network are trained using the following objective: $\mathcal{L}_{\text{FM}}(\boldsymbol{\theta}) := \mathbb{E}_{t \sim \mathcal{U}(0,1), \rvx_t \sim p_t(\rvx_t)} \| \hat{\mathbf{v}}_t(\rvx_t;\boldsymbol{\theta}) - \mathbf{v}_t(\rvx_t) \|^2
+$ to solve the ODE defined in equation \ref{eq:ode-fm}. Here, $\mathbf{v}_t(\rvx_t)$ can be defined as $\mathbf{v}_t(\rvx_t) := \mathbb{E}_{q(\rvz)} \left[ \frac{\mathbf{v}_t(\rvx_t|\rvz) p_t(\rvx_t|\rvz)}{p_t(\rvz)} \right]$ with some conditional variable $\rvz$ with distribution $q(\rvz)$; refer to Theorem 3.1 in \cite{tong2023improving} for more details.
+
+However, this learning objective becomes intractable for general source and target distributions. To mitigate this, we can focus on cases where the conditional probability paths $p_t(\mathbf{x}_t|\mathbf{x}_1)$ and vector fields $\rvv_t(\rvx_t|\rvx_1)$ associated with $p_t(\mathbf{x}_t)$ and  $\rvv_t(\rvx_t)$ are known and have simple forms \citep{tong2023simulation}. In such cases, we can recover the vector field $\rvv_t(\rvx_t)$ using an unbiased stochastic objective known as the Conditional Flow Matching (CFM) loss, defined as:
+
+\begin{equation}
+\label{eq:CFM-obj}
+\mathcal{L}_{\text{CFM}}(\boldsymbol{\theta}) := \mathbb{E}_{t, \mathbf{x}_1, \mathbf{x}_t} \left\|  \hat{\mathbf{v}}_t(\mathbf{x}_t | \mathbf{x}_1; \boldsymbol{\theta})-\mathbf{v}_t(\mathbf{x}_t) \right\|^2
+\end{equation}
+
+where $t \sim \mathcal{U}[0,1]$, $\mathbf{x}_1 \sim p_{\text{data}}$, and $\mathbf{x}_t \sim p_t(\mathbf{x}_t|\mathbf{x}_1)$. The training objective in Equation \ref{eq:CFM-obj} ensures that the marginalized vector field $\hat{\mathbf{v}}_t(\mathbf{x}_t|\mathbf{x}_1; \boldsymbol{\theta})$, denoted as $\hat{\mathbf{v}}_t(\mathbf{x}_t)$, generates $p_t(\mathbf{x}_t)$, similar to FM models.
+
+\paragraph{CFMs vs Diffusion Models.} CFMs share similarities with diffusion models; both rely on defining continuous probability paths over time. However, diffusion models use stochastic processes to transform data distributions, typically governed by an SDE. However, CFMs utilize a vector field to directly map an initial prior distribution to the target distribution via a deterministic process (Equation \ref{eq:push-forward}). Diffusion models, such as denoising score matching models, rely on stochastic diffusion paths to approximate the data distribution. CFMs bypass this stochastic process by constructing a conditional vector field and sampling from the ODE defined in Equation \ref{eq:ode-fm}.
+
+\paragraph{Optimal Transport CFMs (OT-CFMs).} The CFM objective defined in Equation \ref{eq:CFM-obj} appears simple. However, it is nearly intractable due to the absence of prior knowledge regarding an appropriate mapping that links between the initial ($p_0$) and target ($p_{\text{data}}$) distributions. To address this challenge, optimal transport (OT) \citep{tong2020trajectorynet} is used to couple the initial and target distributions. This approach seeks a mapping from $p_0$ to $p_1$ that minimizes the displacement cost between these two distributions, resulting in flows that can be integrated accurately. This CFM variant is known as Optimal Transport CFMs (OT-CFMs), and the conditional vector field corresponds to this is $\hat{\mathbf{v}}_t(\mathbf{x}_t|\mathbf{x}_1) = \frac{\mathbf{x}_1 - \mathbf{x}_t}{1-t}$. While OT improves training efficiency in CFMs, traditional sampling methods for CFMs require over a hundred function evaluations (NFE) to produce high-quality samples \citep{tong2023improving}. The lack of flexibility in sampling steps during training further limits their ability to efficiently generate samples, often resulting in a high NFE.
+
+Additionally, the OT-CFM vector field, which can be reformulated as $\hat{\mathbf{v}}_t(\mathbf{x}_t|\mathbf{x}_1) =\mathbf{x}_1 - \mathbf{x}_0$ \cite{pooladian2023multisample}, focuses on exactly transporting all points $\rvx_0$ to $\rvx_1$ along straight-line paths. This implies that all points along the path from $0$ to $t$ means that the transport map shares the same regression weights when training with the $\mathcal{L}_{\text{CFM}}(\boldsymbol{\theta})$ objective. However, this uniform weighting across the trajectory may overlook that points closer to $t=1$ need finer attention to detail and, consequently, a more complex flow; this may limit the model's ability to effectively represent complex structures in the final generated samples. Furthermore, the deterministic sample generation in CFMs, $\rvx_{t}=\rvx_{t-\Delta t}+ \Delta t \hat{\rvv}_t(\rvx_t;\boldsymbol{\theta})$ (see Figure \ref{fig:2d-toy-traj-moment}.B for visualization), may restrict the flexibility of CFM, as it prevents the introduction of stochasticity that could otherwise enhance the diversity and richness of generated samples. This might manifest in a lack of expressiveness when generating fine-grained or high-dimensional data. These limitations underscore the need for new approaches to sample diversity and NFE of CFMs. Our paper tackles these limitations by proposing an alternative vector field that better balances deterministic transport with elements of stochasticity to improve sample quality. 
+\begin{figure*}[ht]
+\centering
+    \includegraphics[width=1\linewidth]{figures/fig2d_toy_trj.png}
+    \caption{
+A) Comparison of trajectory sampling between IDFF and OT-CFMs: The figure displays 4096 final samples generated by IDFF. As shown, IDFF takes larger steps toward the target distribution, guided by the momentum term. While OT-CFM follows a nearly straight path to reach the target distribution, it requires a higher number of function evaluations (NFEs). B) OT-CFMs sampling process. C) IDFF sampling process. In this process, $\hat{\mathbf{x}}_1(.)$ approximates the data sample $\rvx_1$, $\hat{\epsilon}(.)$ approximates the scores associated with $\boldsymbol{\xi}_t$, and $\rvw_t(.)$ is the calculated vector field by equation \ref{eq:prob_ode_idff}. For further details, see Algorithm \ref{alg:iff-te-st}. The key difference between IDFF and OT-CFMs is that instead of directly generating the vector field with, IDFF generates $\hat{\mathbf{x}}_1(.)$ and $\hat{\epsilon}(.)$, and then reconstructs the vector field, following it. Additionally, IDFF uses a Gaussian distribution to sample $\rvx_t$ rather than calculating it deterministically.}
+    \label{fig:2d-toy-traj-moment}
+\end{figure*}
+\paragraph{Hamiltonian Monte Carlo (HMC).} HMC is a powerful sampling algorithm designed to improve efficiency in exploring complex probability distributions by introducing auxiliary momentum variables. In HMC, particle dynamics are simulated in a potential field using Hamiltonian dynamics, which describe the total energy of a system through the Hamiltonian function $H(\mathbf{x}, \mathbf{p}) = U(\mathbf{x}) + K(\mathbf{p})
+$. $\mathbf{x}$ represents the position, $\mathbf{p}$ represents momentum, $ U(\mathbf{x}) $ represents the potential energy related to the target distribution, and $K(\mathbf{p}) = \frac{1}{2} \mathbf{p}^T \mathbf{M}^{-1} \mathbf{p}$ is the kinetic energy, with $\mathbf{M} $ being the mass matrix. The dynamics of this system evolve according to:  
+$$
+\frac{d\mathbf{x}}{dt} = \nabla_{\mathbf{p}} H(\mathbf{x}, \mathbf{p}) = \mathbf{M}^{-1} \mathbf{p},\ \ \ 
+\frac{d\mathbf{p}}{dt} = -\nabla_{\mathbf{x}} H(\mathbf{x}, \mathbf{p}) = -\nabla U(\mathbf{x}).
+$$
+These dynamics preserve the system's total energy, enabling efficient exploration of the probability space. HMC achieves this by leveraging momentum to facilitate directed movement, reducing random walk behavior, and overcoming local energy barriers. These properties lead to faster convergence to the target distribution with fewer function evaluations.  
+HMC generates a sample from some target distributions by following Hamiltonian dynamics in an extended state space $(\mathbf{x}, \mathbf{p})$. IDFF attempts to design a flow-matching procedure with a similar intuition. 
+
+
+
+\section{Implicit Dynamical Flow Fusion Model (IDFF)}
+
+\label{sec:method}
+IDFF aims to improve sampling efficiency while enhancing sample quality of OT-CFMs through two key innovations: (1) the incorporation of a learnable Hamiltonian momentum term, $\boldsymbol{\xi}_t$, into the conditional vector field, which enhances sampling efficiency; and (2) the proposal of a new objective function that learns the IDFF's vector field in input space. 
+\subsection{Learning CFMs with Momentum}
+To improve sampling efficiency while preserving distribution accuracy in CFMs, we introduce a learnable Hamiltonian momentum term, $\boldsymbol{\xi}_t$, integrated with the original vector field $\mathbf{v}_t(\mathbf{x}_t)$. This integration yields a new, more flexible vector field:
+\begin{equation}
+\label{eq:flow_idff}
+\Tilde{\mathbf{v}}_t(\mathbf{x}_t) = \sqrt{1-\sigma^2_t}{\mathbf{v}}_t(\mathbf{x}_t) + \sigma^2_t\boldsymbol{\xi}_t,
+\end{equation}
+where $\sigma_t$ is a time-dependent interpolation factor balancing ${\mathbf{v}}_t$ and $\boldsymbol{\xi}_t$. 
+
+\emph{Interpolating the vector field:} We define the interpolation factor $\sigma_t$ as $\sigma_t = \sigma_0 \sqrt{t(1-t)}$, where $\sigma_0$ is a hyperparameter that controls the overall influence of the momentum term. While the IDFF vector field converges to OT-CFMs in either limit, outside of it, it enables the flow to leverage the momentum variables to guide the flow based on the momentum variables. Our empirical results demonstrate that this approach significantly improves sampling efficiency by substantially reducing the NFEs required. Our approach also overcomes the limitations of uniform weighting across trajectories by prioritizing samples near $t=0,1$, allowing finer attention to complex structures; see Figure \ref{fig:2d-toy-traj-moment}.A. 
+
+\emph{Designing momentum variables:} The term $\boldsymbol{\xi}_t$ is designed to guide the new vector field toward the correct probability flow for the next time step, ensuring its role in accurately modeling the distribution. There are many potential choices to make here. Still, we take inspiration from Hamiltonian Monte Carlo, which showcases how to leverage momenta to sample complex multi-modal posterior distributions rapidly \cite{neal2012mcmc}. A  design for $\boldsymbol{\xi}_t$ is $\boldsymbol{\xi}_t = \gamma \nabla_x \log p_t(\mathbf{x}_t)$, which aligns with the gradient of the log probability of the samples $\mathbf{x}_t$. If   \( p_t(\mathbf{x}_t \mid \mathbf{x}_1) \) is a Gaussian with variance $\sigma_t^2$, $\boldsymbol{\xi}_t$ can be simplified to \( -\frac{\boldsymbol{\epsilon_0}}{\sigma_t} \), where \( \boldsymbol{\epsilon_0} \sim \mathcal{N}(\boldsymbol{0}, \boldsymbol{\text{I}}) \). $\boldsymbol{\xi}_t$ directs the flow similarly to HMC's momentum, promoting efficient exploration of complex distributions. The theoretical connection between HMC and IDFF can be understood through their respective probability flows. HMC generates samples by following Hamiltonian dynamics in an extended state space $(\mathbf{x}, \mathbf{p})$. In contrast, IDFF’s probability flow operates directly in the sample space while incorporating momentum-like behavior through $\boldsymbol{\xi}_t$. Both methods use auxiliary variables to enhance sampling efficiency and preserve the desired target distribution.
+Alternatively, higher-order choices for momentum terms could capture even more complex interactions in the flow. $\boldsymbol{\xi}_t = \gamma \nabla_x \log p_t(\mathbf{x}_t)$ drives the vector field toward regions of high probability, thereby improving the accuracy of the generated samples. $\gamma$ serves as a weighting factor that controls the influence of this term.
+
+To maintain the same probability path as the original CFM, the vector field must satisfy the continuity constraint defined in equation \ref{eq:push-forward}
+\begin{equation}
+\mathbf{w}_t(\mathbf{x}_t) = \Tilde{\mathbf{v}}_t(\mathbf{x}_t) - \frac{\sigma_t^2}{2} \nabla \log p_t(\mathbf{x}_t) = \sqrt{1 - \sigma_t^2} {\mathbf{v}}_t(\mathbf{x}_t) + \frac{(2\gamma - 1)}{2} \sigma_t^2 \nabla \log p_t(\mathbf{x}_t),
+\label{eq:prob_ode_idff}
+\end{equation}
+To ensure that our new marginal vector field $\mathbf{w}_t(\mathbf{x}_t)$ converges to the standard ${\mathbf{v}}_t(\mathbf{x}_t)$ at the start and end points of the process, $\sigma_t$ must approach zero as $t \to {0,1}$. This convergence is crucial for maintaining consistent marginal distributions at these points.
+
+Therefore, $\rvw_t(\rvx_t)$ now replaces the vector field $\rvv(\rvx_t)$ in the probability flow ODE (equation \ref{eq:ode-fm}), enabling the construction of a new generative process that follows the same probability path $p_t(\mathbf{x}_t)$. This process starts with $\mathbf{x}_0 \sim \mathcal{N}(0, \mathbf{I})$ and follows $p_t(\mathbf{x}_t)$ to produce $\mathbf{x}_1$.
+The resulting model thus \emph{implicitly} models the score function using flow matching which motivates the name \emph{Implicit Diffusion Flow Fusion}. 
+
+\begin{lemma}
+\label{lemma1}
+Given that ${\mathbf{v}}_t(\mathbf{x}_t)$ generates $p_t(\mathbf{x}_t)$ and $\sigma_t$ approaches 0 for $t \in {0, 1}$, the IDFF probability flow ODE (Eq. \ref{eq:prob_ode_idff}) follows the same marginal distribution as the CFMs with the ODE defined in equation \ref{eq:ode-fm}.
+\end{lemma}
+
+\begin{proof}[Proof Schema for Lemma \ref{lemma1}]
+Our goal is to show that the IDFF probability flow ODE shares the same marginal distribution as CFMs when $\sigma_t$ is small for $t \in {0, 1}$.
+\begin{itemize}
+\item \textbf{Step 1: Define the vector fields.} We introduce $\Tilde{\mathbf{v}}_t(\mathbf{x}_t)$ governed by the $\boldsymbol{\xi}_t$ and ${\mathbf{v}}_t(\mathbf{x}_t)$ from the original CFM.
+\item \textbf{Step 2: Apply the continuity equation.} By substituting $\Tilde{\mathbf{v}}_t(\mathbf{x}_t)$ into the continuity equation, we derive the IDFF ODE, ${\mathbf{w}}_t(\mathbf{x}_t)$.
+\item \textbf{Step 3: Analyze boundary conditions.} We show that at $t = 0$ and $t = 1$, where $\sigma_t$ approaches 0, the IDFF ODE converges to the CFM-ODE, ensuring the same marginal distributions.
+\end{itemize}
+\end{proof}
+ This lemma and its proof establish the consistency of IDFF concerning existing CFMs. The approach showcases how to design a new flow augmented with momentum variables with an interpolant that guarantees that it matches OT-CFM in the limit. In what follows, we discuss how to parameterize and learn such a flow.  
+
+\subsection{Learning Flows in Input Space}
+One of the challenges in our formalism is learning $\rvw_t$. 
+This challenge arises because $\rvv_t$ operates in vector space while $\boldsymbol{\xi}_t$ remains in the input space. Rather than training one part of the model in vector space and the other in input space, we define a new objective defined entirely within the input space to address this. Learning the vector field in the input space implies optimizing the vector itself, which is the reasoning behind naming the IDFF model an implicit model of dynamical flows.
+We begin by defining an OT path $p_t(\mathbf{x}_t|\mathbf{x}_1)$, which acts as a probability bridge between $\mathbf{x}_0$ and $\mathbf{x}_1$. This path is a stochastic interpolator between the source $\mathbf{x}_1$ and target $\mathbf{x}_0$, as follows:
+\begin{equation}
+\label{eq:ppath}
+p_t(\mathbf{x}_t | \mathbf{x}_1) = \mathcal{N}(\mathbf{x}_t\mid t \mathbf{x}_1 + (1 - t) \mathbf{x}_0, \sigma_t^2\mathbf{I}),\ \ \sigma_t =\sigma_0 \sqrt{t (1-t)}
+\end{equation}
+The corresponding conditional vector field is given by:
+\begin{equation}
+\label{eq:vector-ot-paths}
+\hat{\mathbf{v}}_t(\mathbf{x}_t | \mathbf{x}_1)= \frac{\mathbf{x}_1-\mathbf{x}_t}{1-t}
+\end{equation}
+This definition aligns with the conditional OT paths between $\mathbf{x}_1$ and $\mathbf{x}_0$. For large datasets, computing this OT map can be challenging. We employ a minibatch approximation of OT to address this, similar to \citep{fatras2021unbalanced}. While this introduces some errors compared to the exact OT solution, it has proven effective in numerous applications such as domain adaptation and generative modeling \citep{genevay2018learning}.
+
+Current CFM objectives typically use a loss function (defined in equation \ref{eq:CFM-obj}) that optimizes the prediction of the vector field. We propose an alternative approach: defining a denoising neural network $\hat{\mathbf{x}}_1(\mathbf{x}_t, t;\theta)$ and reparameterizing $\hat{\mathbf{v}}_t(\mathbf{x}_t \mid \mathbf{x}_1; \theta)$ as follows:
+\begin{equation}
+\label{eq:reparam-denosing-model}
+\hat{\mathbf{v}}_t(\mathbf{x}_t \mid \mathbf{x}_1; \theta) = \frac{\hat{\mathbf{x}}_1(\mathbf{x}_t, t;\theta) - \mathbf{x}_t }{1-t}
+\end{equation}
+
+Since both $\hat{\mathbf{x}}_1(\mathbf{x}_t, t;\theta)$ and $p_t(\mathbf{x}_t|\mathbf{x}_1)$ are easy to sample, we use a single neural network with two separate output heads: the first head, $\hat{\mathbf{x}}_1(\mathbf{x}_t, t;\theta)$, to approximate the data samples, and the second, $\hat{\boldsymbol{\epsilon}}(\mathbf{x}_t, t;\theta)$, to approximate the score function. The network generates these outputs simultaneously. The score function \( \nabla_{\mathbf{x}_t} \log p_t(\mathbf{x}_t \mid \mathbf{x}_1) \), using a Gaussian \( p_t(\mathbf{x}_t \mid \mathbf{x}_1) \), can be simplified to \( -\frac{\boldsymbol{\epsilon_0}}{\sigma_t} \), where \( \boldsymbol{\epsilon_0} \sim \mathcal{N}(\boldsymbol{0}, \mathbf{\text{I}}) \). The neural network can be trained using the following loss function:
+\begin{align}
+\label{eq:uncond_iff}
+\mathcal{L}_{\text{IDFF}}(\theta)  =\mathbb{E}_{t,\mathbf{x}_0,\mathbf{x}_1,\mathbf{x}_t}
+\big[\beta(t)^2|\hat{\mathbf{x}}_1(\mathbf{x}_t, t;\theta)- \mathbf{x}_1|^2 + \lambda(t)^2 \left | \hat{\boldsymbol{\epsilon}}(\mathbf{x}_t, t;\theta) - \nabla_x \log p_t(\mathbf{x}_t |  \mathbf{x}_1)\right|^2 \big]
+\end{align}
+Where ${t\sim\mathcal{U}(0,1),\mathbf{x}_0 \sim \mathcal{N}(\boldsymbol{0}, \mathbf{\text{I}}),\mathbf{x}_1\sim p_{\text{data}},\mathbf{x}_t\sim p_t(\mathbf{x}_t|\mathbf{x}_1)}$. Here ${\lambda(\cdot),\beta(\cdot)}$ are two sets of positive weights.
+
+Our proposed loss function comprises two terms:
+The first term optimizes the denoising model $\hat{\mathbf{x}}_1(\mathbf{x}_t, t;\theta)$, with $\mathbf{x}_t$ as the noisy input.
+The second term represents a scoring model that approximates $\nabla_x\log p_t(\mathbf{x}_t|\mathbf{x}_1)$. The first term of the loss incorporates a $\beta(t)$ weighting schedule, which emphasizes the quality of samples as they approach $t=1$. %Alternative design approaches for this objective include choosing different schemes for $\beta(t)$ and assigning different weights to trajectory points during training. 
+ The complete training process is described in Algorithm \ref{alg:iff-tr-st}.
+\paragraph{Sampling}
+After training $\hat{\mathbf{x}}_1(.;\theta)$ and $\boldsymbol{\epsilon}(.;\theta)$, we can generate samples from IDFF by solving an SDE starting from the source samples $\mathbf{x}_0$. Refer to Figure \ref{fig:2d-toy-traj-moment}.C for visualization. This procedure is outlined in Algorithm \ref{alg:iff-te-st}. The SDE is defined as $d\mathbf{x}_t = \mathbf{w}_tdt + \sigma_t d\mathbf{w}$, with initial samples $\mathbf{x}_0$ and target samples $\mathbf{x}_1$ at $t=1$. Therefore, we can draw samples from $p(\mathbf{x}_0)$, run them through the SDE, and obtain the final samples $\mathbf{x}_1$.
+First, we draw $\mathbf{x}_0 \sim \mathcal{N}(0, \mathbf{I})$, then compute $\hat{\mathbf{x}}_1(\mathbf{x}_0, 0, k; \theta)$. Next, we calculate $\hat{\mathbf{v}}_t$ using equation \ref{eq:reparam-denosing-model}, followed by the computation of $\mathbf{w}_t$. After calculating $\mathbf{w}_t$ and using the SDE, we compute the mean for the next time step as $\boldsymbol{\mu}_{t+\Delta t} = (\mathbf{x}_t + \mathbf{w}_t \Delta t)$, and finally draw a sample from a small neighborhood of it: $\mathbf{x}_{t+\Delta t} \sim \mathcal{N}(\mathbf{x}_t + \mathbf{w}_t \Delta t, \sigma_t^2 \Delta t \mathbf{I})$. The \( \Delta t \)  is determined by the NFE as \( \Delta t = \frac{1}{\text{NFE}} \), where smaller NFE results in finer time discretization and tighter neighborhoods.
+ 
+\paragraph{Likelihood calculation.}
+To evaluate the likelihood of data under IDFFs, we can leverage the change in the probability density as the sample \( \rvx_t \) evolves according to the velocity field \( \rvw_t \) as described by the continuity equation \ref{eq:push-forward}, which gives the time evolution of the probability density under the learned flow \cite{lipman2022flow}:
+\begin{equation}
+\label{eq:nll}
+\log p_1(\mathbf{x}_1) = \log p_0(\mathbf{x}_0) - \int_0^1 \nabla \cdot \rvw_t(\mathbf{x}_t) \, dt\end{equation}
+This integral is numerically approximated, often using Monte Carlo methods. 
+
+\subsection{IDFF time-series adaptation}
+To use IDFF for time-series applications, we need to modify the training and sampling algorithms for IDFF as shown in Algorithms \ref{alg:iff-tr-ts} and \ref{alg:iff-te-ts}, respectively. To accomplish that, we define another random variable, $k$, which is a discrete variable and can take values of ${1,..., K}$ with equal probability, where $K$ is the length of a time series. Therefore, $k$ represents the index of the data sample in a time series. We also have $t$ as a continuous time variable interpolated between two subsequent values of $k$ (i.e., $k$ and $k-1$). Therefore we have $\forall k \in {1,...,K} \rightarrow p(t\mid k)\sim \mathcal{U}(0,1)$. This conditioning does not change the original assumption over $t$ since $k$ can take any values up to the time-series length with the same probability. With this in hand, we can directly pass the $k$ as additional inputs to $\hat{\boldsymbol{\epsilon}}_1(\mathbf{x}_t,t,k;\theta)$ and $\hat{\mathbf{x}}_1(\mathbf{x}_t,t,k;\theta)$ and suggest Algorithm \ref{alg:iff-tr-st} for training and Algorithm \ref{alg:iff-te-st} for sampling time-series data with IDFF. Note that for static data, the sequence length ($K$) equals one; otherwise, it equals the time series length.
+\begin{figure}[t]
+\begin{minipage}[t]{0.595\linewidth}
+\begin{algorithm}[H]
+\caption{IDFF training algorithm. }
+\label{alg:iff-tr-st}
+\small
+\begin{algorithmic}
+\State {\bfseries Input:} dataset distribution $p_{1}(\rvx_1)$, initial distribution $p_0(\rvx_0)$, bandwidth $\sigma_0$, a set of positive weights $\lambda(.)$ and $\beta(.)$, initialized networks $\hat{\rvx}_1(.;\theta)$ and $\hat{\boldsymbol{\epsilon}}(.;\theta)$,
+
+\While{Training}
+
+\State  $\rvx_1 \sim p_{1}(\rvx_1)$, $\rvx_0 \sim p_0(\rvx_0)$
+
+\State $\pi \gets \mathrm{OT}(\rvx_1, \rvx_0)$
+\State $(\rvx_0, \rvx_1) \sim \pi$
+\State $t \sim \mathcal{U}(0, 1)$
+\State $\boldsymbol{\mu}_t \gets t \rvx_1 + (1 - t) \rvx_0$
+\State $\sigma_t \gets \sigma_0\sqrt{t(1-t)}$
+\State $\rvx_t \sim \mathcal{N}(\boldsymbol{\mu_t}, \sigma_t^2 \textbf{I})$
+\State $\mathcal{L}_{\text{IDFF}}(\theta) \gets \beta(t)^2 \|\hat{\rvx}_1(\rvx_t, t, k;\theta)- \rvx_1\|^2 +\lambda(t)^2 \left \| \boldsymbol{\epsilon}(\rvx_t, t;\theta) - \nabla_x \log p_t(\rvx_t | \rvx_1)\right\|^2$
+\State $\theta \gets \mathrm{Update}(\theta, \nabla_\theta L(\theta))$
+\EndWhile
+\State \Return $\{\hat{\rvx}_1(.;\theta),\hat{\epsilon}(.;\theta)\}$
+\end{algorithmic}
+\end{algorithm}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.4\linewidth}
+
+\begin{algorithm}[H]
+
+\caption{IDFF Sampling algorithm }
+\label{alg:iff-te-st}
+\small
+\begin{algorithmic}
+\State {\bfseries Input:} $\hat{\rvx}_1(.;\theta)$ and $\hat{\boldsymbol{\epsilon}}(.;\theta)$, bandwidth $\sigma_0$, time step size $\Delta t$, and $\gamma$.
+\State $\rvx^0_0 \sim \mathcal{N}(0, \textbf{I}) $
+
+\For{$t$ in $[0, 1 / \Delta t)$}
+\State $\sigma_t \gets \sigma_0\sqrt{t(1-t)}$
+\State $\rvw_t \gets \sqrt{(1-\sigma^2_t)}\frac{\hat{\rvx}_1(\rvx_t,t;\theta)-\rvx_t}{1-t}+\frac{2\gamma-1}{2}\sigma_t\hat{\epsilon}(\rvx_t, t;\theta)$
+\State $\rvx_{t+\Delta t} \sim \mathcal{N}(\rvx_t + \rvw_t \Delta t,\sigma_t^2\Delta t \textbf{I})$
+\EndFor
+
+\State \Return Samples $\{\rvx_1\}$
+\end{algorithmic}
+\end{algorithm}
+\end{minipage}
+\end{figure}
+
+
+\section{Related Work}
+
+\label{sec:related}
+
+Recent advancements in CFMs include Schrödinger bridge-based methods \citep{richter2023improved} and conjugate/splitting-based integrators \citep{pandey2023efficient}, both aimed at improving sampling efficiency. However, these methods still struggle to significantly reduce the NFEs, which remains a critical factor for computational efficiency.
+
+In diffusion models, denoising diffusion implicit models (DDIMs) \citep{song2020denoising} were introduced to address the issue of large NFEs by offering a more efficient sampling process. DDIMs deterministically generate samples from latent variables, unlike DDPMs, which rely on Langevin dynamics. By employing a variational approach, DDIMs accelerate sampling while preserving output quality. Other approaches to enhance sampling in diffusion-based generative models include distillation frameworks such as Flash \citep{kohler2024imagine}, which generate diverse samples in fewer steps by mitigating training-inference discrepancies.
+
+\begin{wraptable}[18]{r}{0.45\textwidth}
+\centering
+\caption{Comparison of Likelihood (BPD), FID, and NFE between IDFF and various methods on the CIFAR-10 dataset. Additional results are provided in Table \ref{tab:results_cifar10_nfe5}}
+\begin{tabular}{@{} l @{} R{2.5em} R{2.5em} R {2.5em}}
+\hline
+Model & {NLL$\downarrow$} & {FID$\downarrow$} & {NFE$\downarrow$} \\
+\hline
+\;\; DDPM   & 3.12 & 7.48 & 274 \\
+\;\; EDM   & -- & 16.57 & 10 \\
+\;\; DDIM   & -- & 6.84 & 20 \\
+\;\; DDIM   & -- & 13.36 & 10 \\
+\;\; DPM-Solver   & -- &  6.03 & 12 \\
+\;\; Score Matching & 3.16 & 19.94 & 242  \\
+\;\; ScoreFlow  & 3.09 & 20.78 & 428 \\
+
+\;\; OT-CFM  & \textbf{2.99} & 6.35 & 142  \\
+\;\; OT-CFM  & -- & 11.87 & 10  \\
+\;\;  $[SF]^2$M  & -- & 10.13 & 10  \\
+\;\; FM  & -- &  14.36 & 10  \\
+\;\; IC-CFM  & -- & 13.68 & 10  \\
+\;\; IDFF (Ours)  & 3.09 & \textbf{5.87} & \textbf{10} \\
+\bottomrule
+\end{tabular}
+\label{tab:image-result-cifa10}
+\end{wraptable}
+A distinguishing feature of IDFF is its ability to jointly learn an implicit flow from the generated samples alongside the scoring model, in contrast to other HMC-inspired methods within the score-matching framework based on Hamiltonian dynamics, such as Hamiltonian Score Matching (HSM) \citep{holderrieth2024hamiltonian}. This sets IDFF apart from models like HSM and DDIM, which focus exclusively on learning a scoring function. By leveraging OT to couple samples between $t=0$ and $t=1$, IDFF accelerates convergence during training while maintaining a low NFE and improving sample quality.
+
+Our image generation experiments, presented in Tables \ref{tab:image-result-cifa10} and \ref{tab:image-result-celebA}, demonstrate IDFF's superior performance. Compared to $[SF]^2M$ \citep{tong2023simulation}, OT-CFM\citep{pooladian2023multisample}, DDPM \citep{ho2020denoising}, DDIM \citep{song2020denoising}, EDM \citep{karras2022elucidating}, and DPM-Solver \citep{lu2022dpm} (designed to reduce NFEs in diffusion models), IDFF consistently outperforms these models in both efficiency and quality.
+
+ 
+
+
+\section{Experiments}
+
+
+We conducted two general classes of experiments to demonstrate the effectiveness of IDFF in generative modeling on static data, such as images and time-series data, including simulated chaotic systems (e.g., attractors), molecular dynamics, and sea surface temperature forecasting.
+
+\subsection{Image Generation}
+
+\begin{wraptable}[11]{r}{0.5\textwidth}
+\centering
+\caption{Comparison of FID and NFE metrics between IDFF and various methods on the CelebA ($64\times64$) dataset.}
+\begin{tabular}{@{} l @{} R{3.0em} R {3.0em}}
+\hline
+Model  & {FID$\downarrow$} & {NFE$\downarrow$} \\
+\hline
+\;\; DDPM   & 45.20 &  100 \\
+\;\; DDIM   & 13.73  &  20 \\
+\;\; DDIM   & 17.33 &  10 \\
+\;\; FastDPM   &  12.83 &  50 \\
+\;\; IDFF (Ours)  &  \textbf{11.83} & \textbf{10} \\
+\bottomrule
+\end{tabular}
+\label{tab:image-result-celebA}
+\end{wraptable}
+
+\textit{IDFFs exhibit superior performance compared to CFMs in image generation. We utilized a CNN-based UNet \citep{dhariwal2021diffusion} to simultaneously model both $\hat{\rvx}_1(., t;\theta)$ and $\boldsymbol{\epsilon}(., t;\theta)$ from Equation \ref{eq:uncond_iff} for all image data except ImageNet-64. For ImageNet-64, we employed a DiT architecture ('DiT-L/4')\citep{peebles2022scalable}. To implement this, we doubled the input channels of the networks and fed the augmented input, $(\rvx_t, \rvx_t)$, into the network. The outputs were then split into $(\hat{\rvx}_1(., t;\theta), \boldsymbol{\epsilon}(., t;\theta))$.
+To ensure a fair comparison with other models, we used commonly employed metrics to evaluate CFMs' performance, including negative log-likelihood (NLL) using equation \ref{eq:nll} measured in bits per dimension (BPD) \cite{lipman2022flow}, sample quality as measured by the Frechet Inception Distance (FID), and the average NFE required for the reported FID and NLL, averaged over 50k samples, to assess the computational efficiency of our method. We generate 50k  images to calculate the FID against the corresponding reference statistics of each dataset.
+
+6$ achieved the best FID for both datasets, as shown in Table \ref{tab:image-result-cifa10} and Table \ref{tab:image-result-celebA}. IDFF achieves comparable FID scores with ten times fewer NFEs than CFM and DDPM on the CIFAR-10 and CelebA datasets.
+
+Figure \ref{fig:img-fid-sigma-cifar} (A) displays the FID score for the initial 50k generated samples plotted against NFEs for both the CIFAR-10 and CelebA datasets. Sample quality improves rapidly when the NFE exceeds 4, highlighting the significantly lower sampling cost of IDFF compared to traditional CFMs and diffusion-based models.
+\subsection{Time Series Generation}
+\begin{wraptable}[11]{r}
+{0.5\textwidth}
+\small
+\caption{MAE, RMSE, and CC between true and predicted trajectories for the MD simulation.}
+\begin{tabular}{lccc} 
+ \hline
+ Method  & MAE$\downarrow$ & RMSE $\downarrow$ & CC (\%)$\uparrow$ \\ 
+ \hline
+ SRNN & 82.6$_{\pm28}$ & 91.9$_{\pm25}$ & 10.2$_{\pm0.27}$ \\
+ DVAE & 78.1$_{\pm27}$ & 88.1$_{\pm25}$ & 30.4$_{\pm0.35}$ \\
+ NODE & 25.3$_{\pm6.3}$ & 28.8$_{\pm6.2}$ & 10.5$_{\pm0.41}$ \\
+ OT-CFM& & & \\
+ NFE=50 & 13.3$_{\pm1.1}$ & 16.3$_{\pm2.4}$ & 86.1$_{\pm0.1}$ \\
+ NFE=10 & 15.5$_{\pm1.3}$ & 19.2$_{\pm2.7}$ & 82.4$_{\pm0.2}$ \\
+ \hline
+ IDFF & & & \\
+ NFE=5 & {\bf 10.3$_{\pm1.3}$} & {\bf 14.9$_{\pm2.7}$} & {\bf 93.2$_{\pm0.05}$}  \\
+ NFE=12 & {\bf 9.5$_{\pm1.1}$} & {\bf 13.4$_{\pm2.8}$} & {\bf 95.2$_{\pm0.1}$}  \\
+ \hline
+\end{tabular}
+\label{tab:md-simulation}
+\end{wraptable}
+\subsubsection{Molecular Dynamics Simulation}
+\textit{IDFFs can predict dynamics for complex combinatorial structures such as molecules.} Molecular dynamics simulation is a crucial tool in quantum mechanics for understanding the dynamics of molecular behavior at the atomic level \citep{cazorla2017simulation}. Here, we simulated a fully extended polyalanine structure for 400 picoseconds in a vacuum environment at a temperature of $T=300K$.
+This molecular structure consists of 253 atoms with 46 dihedral angles. We trained an IDFF model to accurately generate the dihedral angles for the polyalanine structure from scratch. The distributions of the actual and generated dihedral angles for all 46 angles are presented in Figure \ref{fig:md-sim-iff} (A) and (B), respectively. Figure \ref{fig:md-sim-iff} (C) illustrates the dihedral angles for one of the alanine molecules and its associated dihedral angles. A complete trajectory showcasing a pair of actual and generated dihedral angles is depicted in Figure \ref{fig:md-sim-iff} (D).
+
+To assess the performance of IDFF in the MD simulation, we utilized several evaluation metrics, including root mean squared error (RMSE), mean absolute error (MAE), and correlation coefficients (CC) between the generated and actual trajectories of dihedral angles. We benchmarked IDFF against well-known dynamical models for time series, including dynamical VAE models such as SRNNs \citep{fraccaro2016sequential}, VRNNs \citep{chung2015recurrent}, and Neural ODEs (NODEs) \citep{garnelo2018neural}. As shown in Table \ref{tab:md-simulation}, IDFF outperforms the baselines by a large margin, indicating its potential for simulating molecular dynamics from scratch.
+\subsubsection{Sea Surface Temperature Forecasting}
+
+\begin{wrapfigure}[20]{r}{0.5\textwidth}
+\centering
+\includegraphics[width=1\linewidth]{figures/md_sim.png}
+\caption{(A) True and (B) generated dihedral angles. (C) The dihedral angles for an alanine molecule. (D) True and generated dihedral angle trajectories using IDFF.}
+\label{fig:md-sim-iff}
+\end{wrapfigure}
+\textit{IDFFs can predict spatiotemporal dynamics for sea-surface temperature.} 
+This experiment centers on forecasting sea surface temperature (SST) \citep{rs16183358}. Using the NOAA OISSTv2 dataset, which contains daily high-resolution SST images spanning from 1982 to 2021 \citep{cachay2023dyffusion}, we partitioned the data to predict SST intervals from 1 to 7 days ahead. To achieve this, we strategically subsampled eleven grid tiles of size \(60\times60\) (latitude \(\times\) longitude) from the eastern tropical Pacific region \citep{huang2021improvements}.
+We used a class-conditional UNet for the SST experiment, with the class encoder part encoding the long-range time dependencies (i.e., for encoding the days) to allow continuous forecasting using the UNet. We used the training \ref{alg:iff-tr-ts} and sampling \ref{alg:iff-te-ts} algorithms suggested for time-series data. We evaluated the performance of IDFF using the best validation continuous ranked probability score (CRPS) \citep{matheson1976scoring} and mean squared error (MSE) on forecasts up to 7 days. CRPS is a proper scoring rule and a popular metric in probabilistic forecasting literature \citep{gneiting2014probabilistic}. We calculate the CRPS by generating a 20-member ensemble and the MSE on the ensemble mean predictions in Table \ref{tab:sst-results}.
+
+\begin{wraptable}[12]{r}{0.5\textwidth}
+\small
+\caption{Results for sea surface temperature forecasting of 1 to 7 days ahead, averaged over the evaluation horizon.}
+    \label{tab:sst-results}
+    \centering
+    \begin{tabular}{lcc}
+    \toprule
+   Method & CRPS$\downarrow$ & MSE$\downarrow$  \\
+    \midrule
+    Perturb. & 0.281 $\pm$ 0.004 & 0.180 $\pm$ 0.011\\
+    Dropout & 0.267 $\pm$ 0.003 & 0.164 $\pm$ 0.004 \\
+    DDPM & 0.246 $\pm$ 0.005 & 0.177 $\pm$ 0.005 \\
+    MCVD & 0.216 & 0.161 \\
+    Dyffusion & 0.224 $\pm$ 0.001 & 0.173 $\pm$ 0.001 \\
+    OT-CFM& 0.231 $\pm$ 0.005 & 0.175 $\pm$ 0.006 \\
+    IDFF (Ours) & \textbf{0.180 $\pm$ 0.024} & \textbf{0.105 $\pm$ 0.029} \\
+    \bottomrule
+    \end{tabular}
+\label{table:sst-result}
+\end{wraptable} 
+
+To assess IDFF's performance, we compared it against various baseline approaches, including DDPM, DDPM with enabled dropout (Dropout) \citep{gal2016dropout}, DDPM with random perturbation for the initial values (Perturbation) \citep{pathak2022fourcastnet}, MCVD \citep{voleti2022mcvd}, Dyffusion \citep{cachay2023dyffusion}, and OT-CFM (with $NFE=40$) as shown in Table \ref{tab:sst-results}. The results for all the baselines are with $NFE=1000$. These baselines provide a robust framework for evaluating the IDFF framework in time-series forecasting. The results show that IDFF (with $NFE=5$) outperforms the baselines in SST forecasting across both metrics, demonstrating great potential for weather forecasting applications. See samples of the forecasting results in Figure \ref{fig:sst-samples-sigma02}.
+
+
+\section{Conclusion and Discussion}
+
+\label{sec:discussion}
+
+IDFF models represent a significant advancement in generative modeling, particularly for time series data. By offering superior computational efficiency compared to traditional flow models like CFMs, IDFF achieves a favorable balance between computational cost and sample quality. This makes IDFF a compelling choice for tasks requiring efficient and high-quality sample generation.
+There are myriad future possibilities for the application of IDFF in domains such as music generation \citep{briot2017deep}, speech synthesis \citep{yu2016automatic}, and modeling biological time-series data \citep{anumanchipalli2019speech, golshan2020lfp, rezaei2021real, rezaei2023inferring, gracco2005imaging}. 
+
+\emph{Limitations and Future Work:}
+Computing the OT map for large datasets can be challenging. To address this, we use a minibatch approximation of OT; however, increasing the batch size results in longer training times for larger batches. Second, our experiments primarily utilized a CNN-based UNet structure \citep{dhariwal2021diffusion} as the backbone of the models. We anticipate that some of these limitations may be mitigated by utilizing new neural network structures \citep{peebles2023scalable}. 
+
+
+
+
+\medskip
+\small
+
+
+
+

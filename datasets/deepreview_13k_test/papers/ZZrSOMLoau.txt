@@ -1,0 +1,472 @@
+\title{Unraveling Cross-Modality Knowledge Conflicts in Large Vision-Language Models}
+
+\begin{abstract}
+Large Vision-Language Models (LVLMs) have demonstrated impressive capabilities for capturing and reasoning over multimodal inputs.
+However, these models are prone to parametric knowledge conflicts, which arise from inconsistencies of represented knowledge between their vision and language components.
+In this paper, we formally define the problem of \textbf{cross-modality parametric knowledge conflict} and present a systematic approach to detect, interpret, and mitigate them.
+We introduce a pipeline that identifies conflicts between visual and textual answers, showing a persistently high conflict rate across modalities in recent LVLMs regardless of the model size.
+We further investigate how these conflicts interfere with the inference process and propose a contrastive metric to discern the conflicting samples from the others.
+Building on these insights, we develop a novel dynamic contrastive decoding method that removes undesirable logits inferred from the less confident modality components based on answer confidence. 
+For models that do not provide logits, we also introduce two prompt-based strategies to mitigate the conflicts.
+Our methods achieve promising improvements in accuracy on both the ViQuAE and InfoSeek datasets.
+Specifically, using LLaVA-34B, our proposed dynamic contrastive decoding improves an average accuracy of 2.24\%.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large Vision-Language Models (LVLMs; \citealt{achiam2023gpt,anil2023palm,liu2024visual}) have demonstrated potent capabilities for perceiving and understanding information across different modalities.
+These models typically consist of a visual encoder and a large language model (LLM), aligned by a projection layer \citep{li2022blip,alayrac2022flamingo,liu2024visual}.
+This alignment and collaboration mechanism between language and vision components allows users to input text and images simultaneously, breeding some of the wildest applications, including retrieving information based on a combination of textual and visual queries \citep{karthik2023vision} and accomplishing complex real-world tasks with multimodal agents \citep{zhan2023you,zheng2024gpt}.
+However, 
+the disentangled training processes and distinct learning resources leveraged by the vision and language components of an LVLM, respectively, inherently bring along inconsistencies in their learned representations, captured knowledge, as well as their influence during inference \citep{bartsch2023self,rabinovich2023predicting}.
+Given that the visual encoder and the LLM are separately trained on different datasets with distinct training objectives, their parametric knowledge across language and vision modalities is susceptible to conflicts \citep{wang2024mdpo}, potentially leading to hallucinations \citep{ji2023survey} and inconsistencies in prediction \citep{chang2024language}.
+As illustrated in \Cref{fig:head}, we present a conflict case from an LVLM.
+When asked a question about the same entity presented in two different modalities, the LVLM provides two contradictory answers. 
+Even though the visual encoder is able to recognize the \texttt{Sydney Opera House}
+, the model still fails to integrate this information coherently across modalities.
+This phenomenon reveals a crucial challenge: the disparity between the knowledge captured by the vision and language components of LVLMs.
+However, there has been limited research on parametric knowledge conflicts within these models, especially concerning cross-modality conflicts.
+Thus, in this paper, we systematically investigate the phenomenon of \textbf{\conflict} as defined in \Cref{sec:3_preliminary}.
+We aim to address several principled research questions, as further detailed below:
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figure/head_horizontal.pdf}
+    \caption{A conflict case of different input modalities with the same information. The conflict still happens even when the visual components recognize the Sydney Opera House.}
+    \label{fig:head}
+\end{figure}
+\emph{RQ1: How to detect \conflict s?}
+
+In \Cref{sec:4_detect}, we introduce a pipeline for detecting such conflicts using a multiple-choice question answering format focused on named entities. 
+Specifically, we present each named entity in different modalities and pose the same question about it.
+The resulting answers derived from the knowledge of each modality are then compared to determine if a conflict exists.
+Our findings reveal a persistently high conflict rate across various model scales and architectures, indicating that increasing model size alone does not resolve these conflicts.
+
+\emph{RQ2: How can \text{\conflict}s be interpreted, especially how they intervene the inference process?}
+
+Given the severity of knowledge conflicts in LVLMs, this intriguing question arises.
+One might initially assume that such cross-modal conflicts would reduce the prediction confidence in the original answer due to conflicting parametric knowledge.
+However, our analyses demonstrate that confidence cannot reliably distinguish between correct and incorrect answers, necessitating a more nuanced interpretation of these conflicts.
+To address this issue, we propose a contrastive metric in \Cref{sec:5_interpret} that more effectively identifies conflicting samples.
+This metric suggests that cross-modality knowledge conflicts actually widen the information gap embedded in the tokens.
+\emph{RQ3: What strategies can be introduced to mitigate cross-modality knowledge conflicts at inference?}
+
+Having gained an understanding of how these conflicts affect the inference, we seek to address this question.
+Inspired by the strong discriminatory power of the contrastive metric, we propose a dynamic contrastive decoding method in \Cref{sec:6_mitigate}.
+This method selectively removes undesired logits inferred from the less reliable modality based on answer confidence.
+Additionally, we propose two prompt-based strategies to mitigate cross-modality knowledge conflicts in cases where the model does not provide logits.
+Our dynamic contrastive decoding method provides more consistent improvements.
+
+In summary, the main contributions of this paper are threefold:
+\textbf{1)} To the best of our knowledge, this is the first-of-its-kind work to define and study cross-modality parametric knowledge conflicts in LVLMs.
+\textbf{2)} We propose a practical pipeline for detecting such conflicts, along with a metric that distinguishes conflicting samples from non-conflicting ones.
+\textbf{3)} We introduce a dynamic contrastive decoding method to mitigate these conflicts, as well as two prompt-based strategies for resolving conflicts in closed-source models.
+
+
+\section{Related Work}
+
+\stitle{Knowledge Conflict}
+Knowledge conflict is a critical problem in context-specific tasks, such as machine reading comprehension \citep{longpre-etal-2021-entity,zhou-etal-2023-context,wang-etal-2023-causal} and information extraction \citep{wang-etal-2022-rely,fang-etal-2024-getting,xu-etal-2022-model,wang-etal-2023-extracting,wang2023fragile} 
+In the realm of LLMs, recent studies can be categorized into context-memory conflict, inter-context conflict, and intra-memory conflict \citep{xu2024knowledge}.
+The context-memory conflict and the inter-context conflict %focus on studying the conflicts
+are concerned mainly in the process of Retrieval Augmented Generation (RAG).
+They find that LLMs tend to overly rely on their own parametric memory when facing contradictory evidence \citep{xie2023adaptive,wu2024easily}.
+The intra-memory conflict, on the other hand, is rooted in the pre-training corpus which contains inaccurate and misleading information \citep{bender2021dangers,lin2021truthfulqa,kandpal2023large}.
+The inconsistency of knowledge causes LLMs to generate outputs that are contradictory to each other when given different prompts with the same information \citep{elazar2022measuring,grosse2023studying}, undermining their reliability.
+In this context, prior work has not systematically studied this problem for LVLMs, which is exactly the focus of this work.
+
+\stitle{Robustness Issues of LVLMs}
+Although LVLMs have demonstrated significant potential in understanding and reasoning over multimodal inputs, they also face several robustness challenges, including language bias \citep{niu2021counterfactual,zhang2024debiasing,wang2024mdpo}, hallucinations \citep{huang2024visual,zhu2024ibd}, and the visual perception gap \citep{ghosh2024vdgd}.
+Language bias refers to the tendency of LVLMs to rely on language patterns learned during LLM pretraining \citep{niu2021counterfactual,zhang2024debiasing,wang2024mdpo}.
+Hallucinations, which originate from LLMs, pertain to the discrepancies between generated contents and facts from either real-world or user inputs. \citep{huang2023survey,huang2024visual}.
+The visual perception gap refers to the phenomenon that the LVLMs demonstrate proficient knowledge and visual recognition abilities but fail to link their visual recognition to this knowledge \citep{lee2023visalign,ghosh2024vdgd}. 
+These issues often overlook the potential conflicts between the visual and textual components of the LVLM, which may contribute to the aforementioned challenges.
+
+\stitle{Inference-time Intervention}
+Inference-time intervention encompasses a range of techniques designed to influence the inference or generation process of LLMs \citep{damera2022intervene,li2024inference}.
+These techniques either directly manipulate the logits of the generated tokens or adjust the parameters of the LLM during inference.
+One of the most notable strategies in this context is contrastive decoding \citep{li2022contrastive,leng2024mitigating,zhang2024debiasing}, which mitigates undesired distributions by removing them from the original distribution.
+Another approach involves modifying specific layers of the LLMs.
+For instance, ITI \citep{li2024inference} adjusts model activation during inference by following a set of directions across several attention heads, enhancing the truthfulness of LLMs. 
+These methods provide a means for training-free adjustments to LVLMs, significantly reducing the cost compared to readjusting model parameters.
+
+
+
+\section{Preliminaries}
+
+\label{sec:3_preliminary}
+Before diving into parametric knowledge conflicts in LVLMs, we will first outline key definitions relevant to our analysis and provide an overview of the general experimental setup.
+
+\subsection{Definitions}
+\label{subsec:3_1_definition}
+To ground our analysis, we need to define 1) a typical LVLM architecture, and 2) cross-modality parametric knowledge conflicts.
+
+\stitle{LVLM Architecture}
+We focus on the general architecture that is adopted by a variety of LVLMs, including LLaVA \citep{liu2024visual}, Blip \citep{ li2023blip}, and Qwen-VL \citep{bai2023qwenvl}.
+Typically, these models consist of a visual encoder $V$, a projector $F$, and a language model $\text{LM}$.
+Given a multimodal input $x_m=\{x_v, x_t\}$, where $x_v$ is the visual input and $x_t$ is the textual input, LVLM first processes $x_v$ with $V$, resulting in $p_v=V(x_v)$.
+Then, through the projector $F$, $p_v$ is projected into the textual embedding space: $e_v=F(p_v)$.
+Finally, $x_t$ is embedded into the embedding space by the embedding layer of the $\text{LM}$, resulting in $e_t = \text{embed}(x_t)$.
+The language model then generates the output by the probability $p_{\text{LM}}(y|e_v, e_t)$.
+So, a contemporary LVLM can be defined as $p_{\text{LM}}(y|F(V(x_v)), \text{embed}(x_t))$.
+
+\stitle{Cross-Modality Parametric Knowledge Conflict}
+Since training a large model from scratch is prohibitively costly,
+LVLMs typically align a vision encoder onto an existing language model.
+For example, LLaVA \citep{liu2024visual} aligns the pre-trained CLIP visual encoder ViT-L/14 \citep{radford2021clip} with Vicuna \citep{vicuna2023}, which have been separately trained on different data distributions, leading to potential inconsistent parametric knowledge \citep{grosse2023studying}.
+
+To elicit parametric knowledge, we propose to use answers from different modalities as the indicators of the specific parametric knowledge from each modality.
+Specifically, given a multimodal input $x_m=\{x_v, q\}$, where $q$ is the question regarding the entity in the image $x_v$, the output $y_m$ is generated by $p_\text{LM}(F(V(x_v)), \text{embed}(q_m))$, which we define as the \emph{visual answer}.
+On the contrary, given a textual input $x_t = \{x_e, q\}$, where $x_e$ is the textual description of a named entity and $q$ is the question to the named entity, the output $y_t$ is generated by $p_\text{LM}(\text{embed}(q_t))$, which we define as the \emph{textual answer}.
+If $y_m \neq y_t$, then a parametric knowledge conflict is identified.
+
+\subsection{Experimental Setup}
+\subsubsection{Datasets Construction}
+\stitle{Original Datasets}
+Following prior studies \citep{xie2023adaptive,wu2024easily}, we adopt the multiple-choice question answering (QA) as the form of evaluating \conflict s.
+We choose two tasks of knowledge-based visual question answering
+about named entities:
+
+\begin{itemize}[leftmargin=1.5em]
+\setlength\itemsep{0em}
+    \item ViQuAE \citep{lerner2022viquae} is a semi-automatically constructed dataset comprising 3.7K questions about named entities grounded in a visual context, built upon TriviaQA \citep{joshi2017triviaqa}.
+    The named entity in the original question is replaced with an image depicting it, requiring the model to answer the question based on the visual context provided.
+    \item InfoSeek \citep{chen2023can} is a dataset containing 1.3M questions about over 11K visual entities, designed to evaluate the performance of LVLMs in processing visual content while acquiring relevant knowledge.
+    The dataset is automatically constructed from templates of over 300 relations in Wikidata, ensuring a diverse set of questions.    
+\end{itemize}
+
+\begin{wraptable}[7]{R}{0.45\textwidth}
+\small
+\setlength{\tabcolsep}{3pt}
+    \centering
+    \caption{Statistics of the constructed multiple-choice QA dataset.}
+    \input{table/dataset_stat}
+    \label{tab:dataset_stat}
+\end{wraptable}
+
+\stitle{Multiple Choices Construction}
+Given that the original datasets are free-form question answering, we synthesize distractor choices for each question.
+These distractor choices must be relevant to the questions to some extent but factually incorrect, to effectively evaluate the model's ability to discern the correct answers.
+To this end, we employ LLaMA-3-8B \citep{llama3modelcard} to synthesize relevant but incorrect distractor choices.
+
+We also down-sample the InfoSeek dataset to match the sample size of the ViQuAE dataset.
+The statistics of the datasets are presented in \Cref{tab:dataset_stat}.
+
+\subsubsection{Evaluation Metrics}
+Since we adopt MCQA as the evaluation form, we can directly calculate the accuracy:
+\begin{equation}
+    \text{Acc} = \frac{1}{N}\sum_{i=1}^{N}{\mathbbm{1}(y_i=\hat{y_i})},
+\end{equation}
+where $N$ is the number of samples and $\hat{y_i}$ is the gold answer.
+Moreover, to investigate parametric knowledge conflicts, we define the inconsistency between the generated answers as \textbf{flip rate} (FR):
+\begin{equation}
+    \text{FR} = \frac{1}{N}\sum_{i=1}^{N}{\mathbbm{1}(y_{v_i}\neq y_{t_i})},
+\end{equation}
+where $y_{v_i}$ is the visual answer and $y_{t_i}$ is the textual answer.
+This metric indicates how many samples encounter conflicting answers between textual and visual modalities.
+
+\subsubsection{Models}
+Following prior works regarding LVLMs \citep{zhang2024debiasing,zhu2024ibd}, we choose the LLaVA series \citep{li2024llavanext-strong} for evaluation, as they provide strong performance and a full range of model scales.
+Moreover, to evaluate how the architecture of LVLMs affects the phenomenon of knowledge conflicts, we adopt InstructBlip \citep{dai2023instructblip} and Qwen-VL \citep{bai2023qwenvl}.
+
+
+
+\section{Detecting Parametric Knowledge Conflicts}
+
+\label{sec:4_detect}
+In this section, we discuss the pipeline for detecting parametric knowledge conflicts in LVLMs and evaluate the severity of these conflicts.
+
+\begin{table}
+    \centering
+    \small
+    \caption{Results of detecting \conflict. We report accuracy (Acc), recognized accuracy (R. Acc), flip rate (FR) and conflict rate (CR).}
+    \input{table/main_results}
+    \label{tab:main_results}
+\end{table}
+
+\subsection{Method}
+\stitle{Inputs}
+As defined in \Cref{subsec:3_1_definition}, the visual answer is generated by asking a question about the entity presented in the image, while the textual answer is induced by replacing the image with the textual description of the named entity.
+To ensure that equal information is provided across modalities, we design distinct inputs for each, as illustrated in \Cref{fig:head}.
+Specifically, given a multimodal input $x_m=\{x_v, q\}\in \mathcal{D}$, where $\mathcal{D}$ is the dataset, $x_v$ is the image containing the named entity, and $q$ is the question to the named entity in $x_v$, the visual answer is generated by:
+\begin{equation}
+    y_v \sim p_\text{VLM}(x_v, q) = p_\text{LM}(F(V(x_v)), \text{embed}(q)).
+    \label{eq:textual_prob}
+\end{equation}
+To generate the textual answer, we add an indicator prompt $p$ before the original question, informing the language model about the named entity in the question.
+$p$ is written as \texttt{This is an image of \textit{\$named\_entity}}.
+Thus, the input of the textual answer becomes $x_t=p + q$.
+The textual answer is then generated by:
+\begin{equation}
+    y_t \sim p_\text{VLM}(x_t) = p_\text{LM}(\text{embed}(x_t)).
+    \label{eq:visual_prob}
+\end{equation}
+
+\stitle{Irrelevant Factor Mitigation in Conflict Detection}
+The results generated from the aforementioned inputs can be regarded as the elicited parametric knowledge from LVLMs. 
+However, these answers are influenced by various other factors. 
+For example, the visual perceiver $V$ might fail to recognize the entity in $x_v$, resulting in a random guess.
+These potential issues impede our ability to accurately detect \conflict s.
+To mitigate irrelevant factors, we first instruct the LVLM to identify the entity depicted in $x_v$.
+If the model correctly predicts the named entity, we assume that the knowledge related to the named entity is stored in the parametric memory of $V$ and $F$, implying that any such conflict is not due to a lack of knowledge in $V$ and $F$.
+\begin{wrapfigure}[13]{r}{0.3\textwidth}
+    \centering
+    \includegraphics[width=0.28\textwidth]{figure/CR_metric.pdf}
+    \caption{Relationship of conflicting samples.}
+    \label{fig:cr_metric}
+\end{wrapfigure}
+
+\subsection{Metric}
+Despite efforts to mitigate irrelevant factors in the process of detecting \conflict, certain factors remain difficult to disentangle. 
+For instance, the visual perceiver $V$ might recognize the entity in $x_v$, but be unable to link it to the parametric knowledge within the LVLMs through the projector $F$ \citep{ghosh2024vdgd}.
+Alternatively, the LVLM may be limited in its reasoning ability to relate the recognized named entity to the question.
+We classify these potential limitations as the \emph{performance gap}.
+The relationship between conflict cases and performance gap cases is illustrated in \Cref{fig:cr_metric}.
+The performance gap leads to failures in generating the correct answer, resulting in an overall performance decline, which can be quantified by the accuracy difference $\Delta\text{Acc}=\text{Acc}_\text{textual} - \text{Acc}_\text{visual}$.
+The number of flip samples attributable to the performance gap can be calculated as $N_p = N \times \Delta\text{Acc}$, while the total number of flip samples is $N_f = N \times \text{FR}$, where $N$ represents the total number of samples.
+To assess the severity of the conflicts, we calculate its lower bound as $N_{kc} \geq N_f - N_p$.
+Accordingly, the lower bound of the parametric knowledge conflict rate can be expressed as:
+\begin{equation}
+    \text{CR} = \frac{N_{kc}}{N} \geq \frac{N_f - N_p}{N} = \text{FR} - \Delta\text{Acc}.
+\end{equation}
+\subsection{Analysis}
+We conduct experiments with LVLMs following the aforementioned procedure, and the results are presented in \Cref{tab:main_results}.
+We report the accuracy (Acc) on the complete evaluation set and the recognized accuracy (R. Acc) on the subset of the evaluation set recognized by the LVLM.
+Additionally, we calculate the flip rate (FR) and the conflict rate (CR) based on the recognized evaluation set.
+
+\stitle{Performance}
+For both datasets, the LLaVA-34b model demonstrates the highest accuracy for both textual and visual inputs.
+However, a significant performance gap exists between the textual and visual answers.
+The most pronounced performance gap in the LLaVA family is observed in the LLaVA-7b model, where the accuracy difference exceeds 20\%.
+This performance gap is attributed to the \text{\conflict} and the aforementioned reasons.
+Furthermore, there is a notable improvement in the recognized accuracy (R. Acc) across all models compared to the overall accuracy (Acc).
+This indicates that the models perform better on recognized entities and that the recognition process effectively mitigates potential factors influencing the final performance.
+
+\stitle{Conflict Rate}
+The flip rate (FR) decreases with increasing model size on both datasets, ranging from 55.35\% to 24.90\% on the ViQuAE dataset.
+Concurrently, the $\Delta\text{Acc}$ also declines with larger model sizes, decreasing from 20.32\% to 4.37\% on the ViQuAE dataset.
+This trend likely results from the improved ability of larger models to link visual perception to parametric knowledge and their enhanced reasoning ability, rather than a reduced likelihood of parametric knowledge conflicts in larger models.
+When calculating the lower bound of the parametric knowledge conflict rate $\text{CR}$, a consistent pattern emerges across the datasets: LLaVA-7b/13b/34b exhibits values of 21.36\%, 28.10\%, and 20.53\%, respectively.
+This pattern suggests that regardless of the model's scale and architecture, the likelihood of parametric knowledge conflicts remains relatively constant.
+
+\begin{tcolorbox}[colback=gray!10,colframe=black!50,title=Key Takeaway, fonttitle=\bfseries, boxrule=0.5mm, left=1mm, right=1mm, top=1mm, bottom=1mm]
+There is a clear trend that as the model size increases, both the FR and the $\Delta\text{Acc}$ between textual and visual answers decrease.
+However, the lower bound of the knowledge conflict rate (CR) remains consistently high.
+This suggests that although scaling up models can enhance their overall performance and consistency, it does not resolve cross-modality knowledge conflicts.
+\end{tcolorbox}
+
+
+\section{Interpreting parametric knowledge conflicts}
+
+\label{sec:5_interpret}
+The constantly large conflict rate across datasets highlights the phenomenon caused by cross-modality knowledge conflicts. 
+In this section, we will take a closer look, through the sample-wise perspective, at how parametric knowledge in visual components, \textit{i.e.}, the visual encoder $V$ and the projector $F$, causes \conflict~by intervening the inference process of the LLM.
+In particular, we explore how these conflicts influence answer confidence and propose a metric that can serve as an indicator of the presence of such conflicts.
+
+\subsection{Is probability a reliable indicator of answer correctness?}
+\label{sec:5_1_confidence}
+\stitle{Method}
+Since the answer probability reflects the model's confidence in a given response, it is natural to consider how parametric knowledge conflicts might affect this probability.
+For instance, such conflicts may either reduce confidence in the original answer or introduce a more confident alternative answer. 
+Given that $\text{embed}(x_e)$ and $F(V(x_v))$ might encapsulate different knowledge, this discrepancy can affect the probability distribution over possible answers, resulting in a shift in confidence in the final output.
+To investigate how \conflict~influences answer confidence, we design experiments to determine whether the answer confidence can serve as an indicator of conflict and whether it can suggest the correctness of the answer.
+
+To elicit the answer probability, we calculate the textual answer probability $p_t$ and the visual answer probability $p_v$ using \Cref{eq:textual_prob} and \Cref{eq:visual_prob}.
+Since we adopt MCQA as the task format, we extract the logits of the answer token, i.e. ``A,'' ``B,'' ``C,'' and ``D'' and apply the softmax function to them.
+Thus, the extracted confidence can be presented as $c = \text{softmax}(\log(p[\text{A}]), \log(p[\text{B}]), \log(p[\text{C}]), \log(p[\text{D}]))$, where $p[\text{A}]$ indicates the probability of token ``A,'' and so on.
+Then, we use the following strategies to understand how visual components influence the inference:
+\begin{enumerate}[leftmargin=1.5em]
+\setlength\itemsep{0em}
+    \item \emph{Max confidence}: $\max(c_t[y_t], c_v[y_v]),$ where the most confident answer is considered correct.
+    \item \emph{Max confidence shift}: $\max(c_t[y_t] - c_t[y_v], c_v[y_v] - c_v[y_t]),$ where $y_t$ is the textual answer and $y_v$ is the visual answer, indicating that the modality with the most significant influence on the answer is deemed the dominant modality for the question.
+    \item \emph{Min variance}: $\min(\sigma(c_t[y_t]), \sigma(c_v[y_v])),$ where the answer with the least variance under disturbance is considered the final answer. We introduce disturbance through two methods: writing diverse prompts and applying the Monte Carlo dropout \citep{gal2016dropout}.
+\end{enumerate}
+
+\begin{wraptable}[11]{R}{0.44\textwidth}
+\small
+    \caption{Testing different answer correctness indicators based on answer confidence.}
+    \begin{center}
+        \input{table/confidence}
+    \end{center}
+    \label{tab:confidence}
+\end{wraptable}
+
+\stitle{Results}
+The results of three strategies are listed in \Cref{tab:confidence}, and the complete experimental setup is described in \Cref{sec:B_1_setup}.
+From these results, it is evident that none of the strategies based on token probability reliably selects the correct answer when conflicts arise between the textual and visual answers.
+This suggests that:
+1) \textit{Confidence is not necessarily reduced by conflicts.}
+The presence of a \conflict~does not inherently lower the confidence level of the answer.
+Instead, the conflict often introduces an alternative answer with higher confidence, overshadowing the original, potentially correct answer.
+This observation indicates that high confidence alone is not a reliable indicator of answer correctness in the presence of such conflicts.
+2) \textit{Confidence shifts are not indicative of reliability.}
+The results show that a greater shift in confidence between the textual and visual answers does not necessarily correlate with the reliability of the final answer.
+3) \textit{Cross-modality parametric knowledge conflict is not an uncertainty issue.}
+The table also reveals that methods based on variance do not contribute to the performance.
+Although these methods attempt to select the more stable answer by selecting the answer with minimum variance in token probability, the results show reductions in accuracy.
+This implies that minimizing variance does not effectively address the underlying knowledge conflicts.
+\subsection{Contrastive metric as indicator of conflicts}
+\stitle{Method}
+To effectively understand how conflicting knowledge affects the inference, we utilize the concept of Contrastive Decoding \citep{li2022contrastive}.
+Its objective, which subtracts an undesired distribution from the original distribution, serves as a metric for evaluating the degree of divergence between the two distributions.
+Given that we are using MCQA as the task format, our focus is specifically on the distribution of the answer token, particularly the first token.
+
+Specifically, given a multimodal input $x_m=\{x_v, q\},$ where $x_v$ is the image and $q$ is the question, and a textual input $x_t=\{x_e, q\}$, where $x_e$ is the textual description of the named entity in $x_v$, the predicted first token distribution of answers for each modality can be represented as \Cref{eq:textual_prob,eq:visual_prob}.
+The contrastive objective can then be written as:
+\begin{equation}
+    \log(p_{cd}) = \log(p_v) - \log(p_t)
+    = \log(\frac{p_{\text{VLM}}(y_v|x_v, q)}{p_{\text{VLM}}(y_t|x_e, q)})
+    =\log(\frac{p_{\text{LM}}(y_v|F(V(x_v)),\text{embed}(q))}{p_{\text{LM}}(y_t|\text{embed}(x_e), \text{embed}(q))}). 
+    \label{eq:cd}
+\end{equation}
+Ideally, if $F(V(x_v)$ and $\text{embed}(x_e)$ provide the same information for $q$, \Cref{eq:cd} should be equal to 0.
+However, due to the parametric knowledge conflict between the visual components and the LLM, $V(F(x_v))$ may not embed the same knowledge as $\embed(x_e)$, leading to $log(p_{cd}) \not\approx 0$.
+Thus, $|\log(p_{cd})|$ can be interpreted as the degree of difference between $V(F(x_v))$ and $\embed(x_e)$.
+Additionally, the contrastive decoding objective also allows us to elicit visual memories by eliminating the influence of textual knowledge.
+The analyses of the elicited memories are listed in \Cref{sec:A_interpret}.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figure/scores.pdf}
+    \caption{Distribution of the contrastive metric on all samples, samples with modality-consistent answers, and samples with modality-conflict answers. The dashed lines indicate the medians.}
+    \label{fig:hist_scores}
+\end{figure}
+
+\stitle{Result}
+In \Cref{fig:hist_scores}, we present the distribution of the contrastive metric, specifically separating samples with consistent answers across modalities from those with conflicting answers.
+The figure reveals a significant disparity between the consistent and conflicting samples.
+Most consistent samples fall within the range of 0-0.6, while conflicting samples exhibit greater variability, with an average median of 1.46.
+This similar trend suggests that the extent of conflicts, as measured by the contrastive metric, is relatively consistent across different models, despite variations in model scales and architectures, implying that the \conflict s are not solely dependent on the model's architecture or size but are intrinsic challenges that persist across current training datasets.
+The figure also suggests that the contrastive metric is effective in distinguishing between consistent and conflicting answers.
+From the perspective of the contrastive metric, it quantifies the divergence between the knowledge encoded in the visual components and the LLM.
+Thus, the misaligned knowledge leads to the information gap embedded in the tokens of different modalities, which is ultimately presented by the conflicting answer.
+
+
+
+
+
+
+\begin{tcolorbox}[colback=gray!10,colframe=black!50,title=Key Takeaway, fonttitle=\bfseries, boxrule=0.5mm, left=1mm, right=1mm, top=1mm, bottom=1mm]
+Confidence alone is not a reliable indicator of answer correctness when confronted with conflict samples.
+The proposed contrastive metric effectively distinguishes conflicting samples from consistent ones, suggesting that cross-modality knowledge conflicts tend to exacerbate the information gap between tokens across different modalities, regardless of the model size.
+\end{tcolorbox}
+
+
+\section{Mitigating parametric knowledge conflicts at inference time}
+
+\label{sec:6_mitigate}
+Having established an understanding of \conflict s, we now shift our focus to strategies for mitigating these conflicts.
+Since the contrastive metric has proven effective in distinguishing conflicting samples from consistent ones, we first propose a strategy that leverages the principles of contrastive decoding.
+Moreover, we also design an alternative approach based on prompting for models that do not provide access to logits during inference.
+
+\subsection{Dynamic Contrastive Decoding}
+\stitle{Method}
+In an ideal application of contrastive decoding, we would have an a priori knowledge of the logits, which enables us to define the undesired logits.
+That is to say, to resolve \conflict s, the logits from the incorrect, conflicting modality should be excluded from those of the correct modality.
+However, in real-world scenarios, without external validation, it is impossible to definitively determine the correctness of an answer.
+Therefore, we propose using the model’s answer confidence as a trend for correctness, also treating it as a scaling factor for the original logits.
+We then apply these scaled logits to the contrastive decoding algorithm, formulating the \textbf{dynamic contrastive decoding (DCD)}.
+This approach adjusts the contrastive decoding objective by incorporating confidence as a dynamic factor to more accurately measure the difference in information embedded by the textual and visual components. 
+
+Specifically, given the textual answer $y_t$ with its probabilities $p_t(y_t|x_e, q)$ and the visual answer $y_v$ with its probabilities $p_v(y_v|x_v, q)$, we first calculate the confidence for each answer as follows:
+\begin{gather}
+    c_t = \max(\text{softmax}(\log(p_t[\text{A}]), \log(p_t[\text{B}]), \log(p_t[\text{C}]), \log(p_t[\text{D}]))),\\
+    c_v = \max(\text{softmax}(\log(p_v[\text{A}]), \log(p_v[\text{B}]), \log(p_v[\text{C}]), \log(p_v[\text{D}]))),
+\end{gather}
+where $p[\text{A}]$ indicates the probability for token ``A,'' and similarly for other tokens.
+Next, the scaled logits are computed as $s_t = c_t \times \log(p_t)$ and $s_v = c_v \times \log(p_v)$.
+To assess which modality is more likely to provide the correct answer, we view the confidence as the likelihood, selecting the modality with the higher confidence.
+However, as discussed in \Cref{sec:5_1_confidence}, confidence alone is insufficient to determine correctness.
+Therefore, we subtract the scaled logits of the less confident modality from those of the more confident one. 
+This leads to the application of contrastive decoding on the scaled logits, conditioned by the answer confidence:
+\begin{equation}
+    \log(p_{cd}(y|x)) = 
+    \begin{cases}
+        c_t \times \log(p(y_t|x_e, q)) - c_v \times \log(p(y_v|x_v, q)),& \text{if } c_t > c_v\\
+        c_v \times \log(p(y_v|x_v, q)) - c_t \times \log(p(y_t|x_e, q)),& \text{otherwise.}
+    \end{cases}
+\end{equation}
+
+\begin{table}[t]
+    \centering
+    \small
+    \caption{Results of the dynamic contrastive decoding compared to the baselines. \textbf{Bold} indicates best results and \underline{underline} indicates second bests.} 
+    \input{table/improve_cd}
+    \label{tab:improve_cd}
+\end{table}
+
+\stitle{Results}
+\Cref{tab:improve_cd} presents the accuracy and the recognized accuracy for different methods across the ViQuAE and InfoSeek datasets.
+Across both datasets and all model sizes, DCD consistently outperforms both the textual and visual answers.
+For instance, in the LLaVA-7b model, DCD improves the accuracy from 75.65\% to 76.49\% on the ViQuAE dataset.
+Similarly, on the InfoSeek dataset, accuracy increases from 52.74\% to 54.90\%.
+These improvements are even more pronounced in the larger models.
+For example, in the LLaVA-34b model, DCD increases accuracy by 2.36\% on the ViQuAE dataset and by 2.12\% on InfoSeek, indicating its potential in models with larger scales.
+
+DCD demonstrates particularly significant gains in recognized accuracy (R. Acc).
+For instance, on the InfoSeek dataset, the recognized accuracy for the LLaVA-34b model increases by 3.65\% when using DCD compared to the textual answer.
+This trend is consistent across all model sizes, indicating that DCD is particularly effective in improving the performance on recognized entities.
+The improvement in recognized accuracy is likely due to the fact that the visual answers within the recognized set are expected to contain more relevant information than those in the unrecognized set, as the visual components have some prior knowledge of these entities.
+Consequently, the DCD can more effectively leverage this information to discern which option is correct.
+\subsection{Prompting Strategy}
+\stitle{Method}
+Since not all models provide the logits of the generated contents, we propose two prompt-based improvement strategy for those models.
+To address \conflict, we design two types of prompts and the details of these prompts are provided in \Cref{sec:B_2_prompts}.
+\begin{enumerate}[leftmargin=1.5em]
+\setlength\itemsep{0em}
+    \item \emph{Reminder prompt.}
+    Once a knowledge conflict is detected ,
+    the model is prompted to regenerate the answer, but this time with a reminder that highlights the presence of conflicting knowledge.
+    \item \emph{Answer prompt.}
+    Since both textual and visual answers are already generated during the detection process, this prompt asks the model to determine which one is correct.
+\end{enumerate}
+
+\stitle{Results}
+\Cref{tab:improve_prompt} presents the results of prompt-based improvements using two strategies across two datasets and different model sizes. 
+The effectiveness of these strategies varies depending on the model size.
+For smaller models, both prompts negatively impact performance across both datasets, with accuracy dropping by at least 1.07\% on the ViQuAE dataset and 0.86\% on the InfoSeek dataset.
+This suggests that smaller models may struggle to handle prompts reminding them of potential knowledge conflicts, as they seem unable to discern which answer is correct.
+Furthermore, presenting smaller models with conflicting answers seems to introduce additional confusion, as evidenced by the more substantial accuracy declines.
+In contrast, larger models are more effective at processing the information provided in the prompts, demonstrating an accuracy gain of 4.48\% on the ViQuAE dataset and 8.08\% on the InfoSeek dataset.
+These results indicate that larger models are better equipped to interpret and respond to the information in the prompt, likely due to their more advanced reasoning and understanding capabilities, which enable them to determine which modality is more reliable in resolving the conflict.
+Overall, these findings indicate that the effectiveness of prompt-based conflict resolution strategies improves with model scale, particularly when the prompt provides the model with both conflicting answers, aiding in conflict resolution.
+
+\iffalse
+The takeaway we obtain from the results include the following. First, dynamic contrastive decoding brings universal improvements against the baseline.
+Also, the performance of prompting-based strategies varies depending on the model size.
+Moreover, larger models are better at understanding and processing the information in the designed prompts.
+\fi
+
+\begin{table}[t]
+    \centering
+    \small
+    \caption{Results of the prompt-based strategies compared to the baselines. Since the inputs of this experiment are the same as the one of the visual answer except for the prompt, we compare them to the results of the visual answer. \textbf{Bold} indicates best results and \underline{underline} indicates second bests.}
+    \input{table/improve_prompt}
+    \label{tab:improve_prompt}
+\end{table}
+
+\begin{tcolorbox}[colback=gray!10,colframe=black!50,title=Key Takeaway, fonttitle=\bfseries, boxrule=0.5mm, left=1mm, right=1mm, top=1mm, bottom=1mm]
+Dynamic contrastive decoding (DCD) brings universal improvements against the baselines.
+The performance of prompting-based strategies varies depending on the model size.
+Larger models are better at understanding and processing the information in the designed prompts.
+\end{tcolorbox}
+
+
+
+\section{Conclusions}
+
+In this paper, we introduce the concept of cross-modality parametric knowledge conflicts in LVLMs, a significant issue arising from the misalignment between visual and textual modalities.
+We propose a systematic approach to detect these conflicts, revealing a persistently high conflict rate across all model sizes.
+Our findings indicate that simply scaling up models does not resolve these conflicts, highlighting the need for targeted intervention strategies.
+To address these challenges, we propose the contrastive metric, which effectively identifies conflicting samples by measuring the information gap between modalities.
+Building on this, we introduce the dynamic contrastive decoding (DCD), which selectively removes unreliable logits to improve answer accuracy.
+For models without access to logits, we propose two prompt-based strategies.
+These approaches collectively improve model performance.
+On LLaVA-34B, the dynamic contrastive decoding achieves an accuracy improvement of 2.36\% on the ViQuAE dataset and 2.12\% on the InfoSeek dataset.
+Our contributions advance the understanding of cross-modality parametric knowledge conflicts in LVLMs and provide practical solutions to mitigate these conflicts, leading to more robust and accurate multimodal inference. 
+
+Future work may extend our method to broader multimodal data including multi-images and videos \citep{wang2024muirbench,li2024llava}, or apply our method to enhance multimodal in-context learning \citep{xu2024introspection} and retrieval-augmented generation \citep{chen2022murag}. Additionally, our method may contribute to ensuring trustworthiness of LVLMs in risk-sensitive domains, such as the biomedical field \citep{li2024llavamed,chaves2024training}.
+
+
+

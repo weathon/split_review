@@ -1,0 +1,437 @@
+\title{Learning Long Range Dependencies on Graphs via Random Walks}
+
+\begin{abstract}
+    
+  
+    Message-passing graph neural networks (GNNs) excel at capturing local relationships but struggle with long-range dependencies in graphs. 
+    In contrast, graph transformers (GTs) enable global information exchange but often oversimplify the graph structure by representing graphs as sets of fixed-length vectors. 
+    This work introduces a novel architecture that overcomes the shortcomings of both approaches by combining the long-range information of random walks with local message passing. 
+    By treating random walks as sequences, our architecture leverages recent advances in sequence models to effectively capture long-range dependencies within these walks.  
+    Based on this concept, we propose a framework that offers
+    (1) more expressive graph representations through random walk sequences, 
+    (2) the ability to utilize any sequence model for capturing long-range dependencies, and 
+    (3) the flexibility by integrating various GNN and GT architectures. 
+    Our experimental evaluations demonstrate that our approach achieves significant performance improvements on 19 graph and node benchmark datasets, notably outperforming existing methods by up to 13\% on the PascalVoc-SP and COCO-SP datasets.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Message-passing graph neural networks (GNNs)~\citep{gilmer2017neural} and graph transformers (GTs)~\citep{ying2021transformers}, have emerged as powerful tools for learning on graphs. While GNNs are efficient in identifying local relationships, they often fail to capture distant interactions due to the local nature of message passing, leading to issues such as over-smoothing~\citep{oono2020graph} and over-squashing~\citep{alon2021bottleneck}. In contrast, GTs~\citep{ying2021transformers,mialon2021graphit,chen2022structure,rampavsek2022recipe,shirzad2023exphormer} address these limitations by directly modeling long-range interactions through global attention mechanisms, enabling information exchange between all nodes. However, GTs typically preprocess the complex graph structure into fixed-length vectors for each node, using positional or structural encodings~\citep{rampavsek2022recipe}. This approach essentially treats the graph as a set of nodes enriched with these vectors. Such vector representations of graph topologies inevitably result in a loss of structural information, limiting expressivity even when GTs are combined with local message-passing techniques~\citep{zhu2023structural}. In this work, we address these limitations by introducing a novel architecture that captures long-range dependencies while preserving rich structural information, by leveraging the power of random walks.
+
+Random walks offer a flexible approach to exploring graphs, surpassing the limitations of fixed-length vector representations. %
+By traversing diverse paths across the graph, random walks can capture subgraphs with large diameters, such as cycles, which message passing often struggles to represent, due to its depth-first nature~\citep{grover2016node2vec}. 
+More importantly, \emph{the complexity of sampling random walks is determined by their length and sample size rather than the overall size of the graph}. This characteristic makes random walks a scalable choice for representing large graphs, offering clear computational advantages compared to many computationally expensive encoding methods. 
+
+While several graph learning approaches have employed random walks, their full potential remains largely untapped. Most existing approaches either focus solely on short walks~\citep{chen2020convolutional,nikolentzos2020random} or use walks primarily for structural encoding, neglecting the rich information they contain~\citep{dwivedi2021graph,mialon2021graphit}. A more recent method, CRaWL~\citep{tonshoff2023walking}, takes a novel approach by representing a graph as a set of random walks. While this approach shows promising results, it has two major practical limitations: 1) its reliance on convolutional layers to process random walks, particularly with small kernel sizes, constrains its ability to approximate arbitrary functions on walks and fully capture long-range dependencies within each walk. 2) Due to the depth-first nature of random walks, it struggles to efficiently capture local relationships, such as simple subtrees, as illustrated in Figure~\ref{fig:teaser}.
+
+\begin{wrapfigure}{r}{.42\textwidth}
+    \centering
+    \includegraphics[width=.4\textwidth]{figures/mp_vs_rw.pdf}
+    \caption{Message passing efficiently captures locally sparse subgraphs, like $k$-star subgraphs, while random walks struggle, requiring a length of $2k$.}
+    \label{fig:teaser}
+\end{wrapfigure}
+
+Considering the limitations of existing random-walk-based models, we propose an approach that leverages the strengths of two complementary graph exploration paradigms. 
+Our method combines the local neighborhood information captured by the \emph{breadth-first nature} of message passing with the long-range dependencies obtained through the \emph{depth-first} nature of random walks.
+Unlike GTs~\citep{rampavsek2022recipe,chen2022structure} which encode random walks into fixed-length vectors, our approach preserves their sequential nature, thereby retaining richer structural information. Our proposed architecture, named \emph{NeuralWalker}, achieves this by processing sets of sampled random walks using powerful sequence models. 
+We then employ local (and optionally global) message passing to capture complementary information. Multiple alternations of these two operations are stacked to form our model. A key innovation of our approach is the utilization of long sequence models, such as state space models, to learn from random walk sequences. To the best of our knowledge, this is the first application of such models in this context. 
+
+Our contributions are summarized as follows. i) We propose a novel framework that leverages both random walks and message passing, leading to provably more expressive graph representation. ii) Our model exploits advances in sequence modeling (\eg transformers and state space models) to capture long-range dependencies within the walks. iii) Our message-passing block can seamlessly integrate various GNN and GT architectures, allowing for customization based on specific tasks. iv) We conduct extensive ablation studies to offer practical insights for choosing the optimal sequence layer types and message-passing strategies. Notably, the trade-off between model complexity and expressivity can be flexibly controlled by adjusting walk sampling rate and length, making our model scalable to graphs with up to 1.6M nodes. v) Our model demonstrates remarkable performance improvements over existing methods on a comprehensive set of 19 benchmark datasets.
+
+
+\section{Related Work}
+
+\paragraph{Local and global message passing.}
+Message-passing neural networks (MPNNs) are a cornerstone of graph learning. They propagate information between nodes, categorized as either local or global methods based on the propagation range. Local MPNNs, also known as GNNs (\eg GCN~\citep{kipf2016semi}, GIN~\citep{xu2019powerful}), excel at capturing local relationships but struggle with distant interactions due to limitations like over-smoothing~\citep{oono2020graph} and over-squashing~\citep{alon2021bottleneck}. Global message passing offers a solution by modeling long-range dependencies through information exchange across all nodes. GTs~\citep{ying2021transformers,kreuzer2021rethinking,mialon2021graphit,chen2022structure,rampavsek2022recipe,shirzad2023exphormer}, using global attention mechanisms, are a prominent example. However, GTs achieve this by compressing the graph structure into fixed-length vectors, leading to a loss of rich structural information. Alternative techniques include the virtual node approach~\citep{gilmer2017neural,barcelo2020logical}, which enables information exchange between distant nodes by introducing an intermediary virtual node.
+
+\paragraph{Random walks for graph learning.}
+Random walks have a long history in graph learning, particularly within traditional graph kernels. Due to the computational intractability of subgraph or path kernels~\citep{gartner2003graph}, walk kernels~\citep{gartner2003graph,kashima2003marginalized,borgwardt2005shortest} were introduced to compare common walks or paths in two graphs efficiently. Non-backtracking walks have also been explored~\citep{mahe2005graph} for molecular graphs. In deep graph learning, several approaches utilize walks or paths to enhance GNN expressivity. GCKN~\citep{chen2020convolutional} pioneered short walk and path feature aggregation within graph convolution, further explored in~\citet{michel2023path}. RWGNN~\citep{nikolentzos2020random} leverages differentiable walk kernels for subgraph comparison and parametrized anchor graphs. The closest work to ours is CRaWL~\citep{tonshoff2023did}. However, it lacks message passing and relies on a convolutional layer, particularly with small kernel sizes, limiting its universality. Additionally, random walks have been used as structural encoding in GTs such as RWPE~\citep{dwivedi2021graph} and relative positional encoding in self-attention~\citep{mialon2021graphit}.
+\paragraph{Sequence modeling.}
+Sequence models, particularly transformers~\citep{vaswani2017attention} and state space models (SSMs)~\citep{gu2021efficiently,gu2023mamba}, have become instrumental in natural language processing~(NLP) and audio processing due to their ability to capture long-range dependencies within sequential data. However, directly leveraging these models on graphs remains challenging due to the inherent structural differences. Existing approaches like GTs treat graphs as sets of nodes, hindering the application of transformer architectures to sequences within the graph. Similarly, recent work utilizing SSMs for graph modeling~\citep{wang2024graph,behrouz2024graph} relies on node ordering based on degrees, a suboptimal strategy that may introduce biases or artifacts when creating these artificial sequences that do not reflect the underlying graph topology.
+
+Our work addresses this limitation by explicitly treating random walks on graphs as sequences. This allows us to leverage the power of state-of-the-art~(SOTA) sequence models to capture rich structural information within these walks, ultimately leading to a more universal graph representation. Furthermore, by integrating both message passing and random walks, our model is provably more expressive compared to existing MPNNs and random walk-based models, as discussed in Section~\ref{sec:theory}.
+
+
+
+\section{Neural Walker}
+
+In this section, we present the architecture of our proposed NeuralWalker, which processes sequences obtained from random walks to produce both node and graph representations. 
+Its components consist of a random walk sampler, described in Section~\ref{sec:walk_sampler}, and a stack of neural walker blocks, discussed in Section~\ref{sec:architecture}. 
+A visualization of the architecture can be found in Figure~\ref{fig:overview}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/overview.pdf}
+    \caption{Overview of the NeuralWalker architecture. The random walk sampler samples $m$ random walks independently without replacement; the walk embedder computes walk embeddings given the node/edge embeddings at the current layer; the walk aggregator aggregates walk features into the node features via pooling of the node features encountered in all the walks passing through the node.}
+    \label{fig:overview}
+\end{figure}
+
+\subsection{Notation and Random Walks on Graphs}\label{sec:notation}
+We first introduce the necessary notation. 
+A graph is a tuple $G=(V, E, x, z)$, where $V$ is the set of nodes, $E$ is the set of edges, and $x:V\to \R^{d}$ and $z:E\to\R^{d'}$ denote the functions assigning attributes to node and edges, respectively. 
+We denote by $\Gcal$ and $\Gcal_n$ the space of all graphs and the space of graphs up to size $n$, respectively.
+The neighborhood of a node $v$ is denoted by $\Ncal(v)$ and its degree by $d(v)$. 
+A walk $W$ of length $\ell$ on a graph $G$ is a sequence of nodes connected by edges, i.e. $W=(w_0,\dots,w_{\ell})\in V^{\ell+1}$ such that $w_{i-1} w_{i}\in E$ for all $i \in [\ell]$. We denote by $\Wcal(G)$ and $\Wcal_{\ell}(G)$ the set of all walks and all walks of length $\ell$ on $G$, respectively. 
+$W$ is called non-backtracking if $w_{i-1}\neq w_{i+1}$ for all $i$ and we denote the set of all such walks by $\Wcal_{\ell}^{\mathrm{nb}}(G)$.
+A random walk is a Markov chain that starts with some distribution on nodes $P_0(v)$ and transitions correspond to moving to a neighbor chosen uniformly at random. %
+For non-backtracking random walks, neighbors are chosen uniformly from $\Ncal(w_i)\backslash \{w_{i-1}\}$. 
+We denote by $P(\Wcal(G), P_0)$ the distribution of random walks with initial distribution $P_0$, and by $P(\Wcal(G))$ the case where $P_0=\mathbb{U}(V)$ is the uniform distribution on $V$. 
+
+\subsection{Random Walk Sampler}\label{sec:walk_sampler}
+The random walk sampler independently samples a subset of random walks on each graph through a probability distribution on all possible random walks. 
+For any distribution on random walks $P(\Wcal(G),P_0)$, we denote by $P_m(\Wcal(G)):=\{W_1,\dots,W_m\}$ a realization of $m$ i.i.d.\ samples $W_j\sim P(\Wcal(G), P_0)$. Our model is always operating on such realizations. 
+Motivated by the successful application in \citet{tonshoff2023walking} and the halting issue in general random walks of arbitrary length~\citep{sugiyama2015halting}, we consider non-backtracking walks of fixed length. 
+Specifically, we consider the uniform distribution of length-$\ell$ random walks $P(\Wcal(G), P_0):=P(\Wcal_{\ell}^{\mathrm{nb}}(G), \mathbb{U}(V))$.
+Note that one could also consider a stationary initial distribution $P_0(v)=\nicefrac{d(v)}{2|E|}$ for better theoretical properties~\citep{lovasz1993random}.
+
+In practice, we restrict the number of samples $m\leq n$ where $n=|V|$ for computation efficiency. 
+We define the sampling rate of random walks as the ratio of random walks to nodes ($\gamma:=\nicefrac{m}{n}$). 
+Note that random walks only need to be sampled once for each forward pass and that an efficient CPU implementation can be achieved through iterative neighbor sampling, \emph{with a complexity $O(n\gamma \ell)$, linear in the number and length of random walks}. 
+We remark that during inference, a higher sampling rate than that used during training can be used to enhance performance. Therefore, we always fix it to 1.0 at inference.
+In Section~\ref{sec:ablation_studies}, we empirically study the impact of $\gamma$ and $\ell$ used at training on the performance, showing that once these hyperparameters exceed a certain threshold, their impact on performance saturates.
+\paragraph{Positional encodings for random walks.}
+Similar to \cite{tonshoff2023walking}, we utilize additional encoding features that store connectivity information captured within random walks. 
+In particular, we consider an identity encoding which encodes whether two nodes in a walk are identical within a window and an adjacency encoding which includes information about subgraphs induced by nodes along the walk. 
+Specifically, for a walk $W=(w_0,\dots,w_\ell)\in\Wcal_{\ell}(G)$ and window size $s\in\Nbb_{+}$, the identity encoding $W$, denoted $\mathrm{id}_W^s$, is the binary matrix in $\{0,1\}^{(\ell+1)\times s}$ with
+$\mathrm{id}_{W}^s[i,j]=1$ if $w_i=w_{i-j-1}$ s.t. $i-j\geq 1$, and otherwise $0$ for any $0\leq i\leq \ell$ and $0\leq j\leq s-1$. 
+Similarly, the adjacency encoding $\mathrm{adj}_W^s\in \{0,1\}^{(\ell+1)\times (s-1)}$ satisfies
+$\mathrm{adj}_W^s[i,j]=1$ if $w_i w_{i-j-1}\in E$ s.t. $i-j\geq 1$, and otherwise $0$ for any $0\leq i\leq \ell$ and $0\leq j\leq s-1$. 
+
+Finally, the output of the random walk sampler is the concatenation all encodings into a single matrix $h_{\text{pe}}\in\R^{(\ell+1)\times d_{\text{pe}}}$ together with the sampled random walks. 
+
+\subsection{Model Architecture}\label{sec:architecture}
+In the following, we describe the architecture of NeuralWalker which conists of several walk encoder blocks where each block is comprised of three components: 
+a walk embedder, a sequence layer, and a walk aggregator that are presented in Sections~\ref{sec:walk_embedder}, \ref{sec:sequence_layer}, and \ref{sec:walk_aggregator}, respectively. 
+\subsubsection{Walk Embedder}\label{sec:walk_embedder}
+The walk embedder generates walk embeddings given the sampled walks, and the node and edge embeddings at the current layer. It is defined as a function $f_{\text{emb}}: \Wcal_{\ell}(G)$. Specifically, for any sampled walk $W\in P_m(\Wcal_{\ell}(G))$, the walk embedding $h_W:=f_{\text{emb}}(W)\in \R^{(\ell+1)\times d}$ is defined as
+\begin{equation}\label{eqn:walk_embedding}
+    h_W[i]:=h_V(w_i)+\mathrm{proj}_{\text{edge}} (h_E(w_i w_{i+1}))+ \mathrm{proj}_{\text{pe}}(h_{\text{pe}}[i]),
+\end{equation}
+where $h_V: V\to \R^d$ and $h_E: E\to \R^{d_{\text{edge}}}$ are node and edge embeddings at the current block and $\mathrm{proj}_{\text{edge}}: \R^{d_{\text{edge}}}\to \R^d$ and $\mathrm{proj}_{\text{pe}}: \R^{d_{\text{pe}}}\to\R^d$ are some trainable projection functions. The resulting walk embeddings is then processed with a sequence model as discussed below.
+
+\subsubsection{Sequence Layer on Walk Embeddings}\label{sec:sequence_layer}
+In principle, any sequence model can be used to process the walk embeddings obtained above. 
+A sequence layer transforms a sequence of feature vectors into a new sequence, \ie it is a function $f_{\text{seq}}: \R^{(\ell+1)\times d}\to \R^{(\ell+1)\times d}$. 
+In the following, we discuss several choices for such a function.
+
+1D CNNs are simple and fast models for processing sequences, also used in~\cite{tonshoff2023walking}. 
+They are GPU-friendly and require relatively limited memory. However, the receptive field of a 1D CNN is limited by its kernel size, which might fail to capture distant dependencies on long walks.
+
+Transformers are widely used in modeling sequences and graphs due to their universality and strong performance. However, we found in our experiments (see Table~\ref{tab:ablation}) that they are suboptimal encoders for walk embeddings, even when equipped with the latest techniques like RoPE~\citep{su2024roformer}.
+
+SSMs are a more recent approach for modeling long sequences. In our experiments, we employ two of the latest instances of SSMs, namely S4~\citep{gu2021efficiently} and Mamba~\citep{gu2023mamba}. In addition to the original version, we consider the bidirectional version of Mamba~\citep{zhu2024vision}. We found that bidirectional Mamba consistently outperforms other options (Section~\ref{sec:ablation_studies}). 
+
+\subsubsection{Walk Aggregator}\label{sec:walk_aggregator}
+The walk aggregator aggregates walk features into node features such that the resulting node features encode context information from all walks passing through that node. 
+It is defined as a function $f_{\text{agg}}: (P_m(\Wcal_{\ell}(G)) \to \R^{(\ell+1)\times d}) \to (V \to \R^d)$ and the resulting node feature mapping is given by $h_V^{\text{agg}}:=f_{\text{agg}}(f_{\text{seq}}(f_{\text{emb}}|_{P_m(\Wcal_{\ell}(G)))}))$ where $f|_{.}$ denotes the function restriction. 
+In this work, we consider the average of all the node features encountered in the walks passing through a given node. 
+Specifically, the node feature mapping $h_V^{\text{agg}}$ with an average pooling is defined as
+\begin{equation}\label{eqn:walk_agg}
+    h_V^{\text{agg}}(v):=\frac{1}{N_v(P_m(\Wcal_{\ell}(G)))}\sum_{W\in P_m(\Wcal_{\ell}(G))} \sum_{w_i\in W st.\ w_i=v} f_{\text{seq}}(h_W)[i],
+\end{equation}
+where $N_v(P_m(\Wcal_{\ell}(G)))$
+represents the number of occurrences of $v$ in the union of walks in $P_m(\Wcal_{\ell}(G))$.
+One could also average the edge features in the walks passing through a certain edge to update the edge features: $h_E^{\text{agg}}(e):=\sum_{W\in P_m(\Wcal_{\ell}(G))} \sum_{w_iw_{i+1}\in W st.\ w_iw_{i+1}=e} f_{\text{seq}}(h_W)[i]$ up to a normalization factor. 
+In practice, we also use skip connections to keep track of the node features from previous layers.
+
+\subsubsection{Local and Global Message Passing}\label{sec:message_passing}
+While random walks are efficient at identifying long-range dependencies due of their depth-first nature, they are less suited for capturing local substructure information, which often plays an essential role in many graph learning tasks.
+To address this limitation, we draw inspiration from classic node embedding methods~\citep{perozzi2014deepwalk,grover2016node2vec}.
+We incorporate a message-passing layer into our encoder block, leveraging its breadth-first characteristics to complement the information obtained through random walks.
+Such a (local) message passing step is given by
+\begin{equation}
+    h_V^{\text{mp}}(v):=h_V^{\text{agg}}(v)+\mathrm{MPNN}(G, h_V^{\text{agg}}(v)),
+\end{equation}
+where $\mathrm{MPNN}$ denotes a GNN model, typically with one layer in each encoder block.
+
+Following the local message passing layer, we optionally apply a global message passing, allowing for a global information exchange, as done in GTs~\citep{chen2022structure}. 
+We particularly consider two global message passing techniques, namely virtual node~\citep{gilmer2017neural,tonshoff2023did} and transformer layer~\citep{ying2021transformers,chen2022structure,rampavsek2022recipe}.
+
+
+\section{Theoretical Results}
+
+In this section, we investigate the theoretical properties of NeuralWalker.
+ 
+
+We first define walk feature vectors following \cite{tonshoff2023walking}:
+\begin{definition}[Walk feature vector]\label{def:walk_feature_vector}
+    For any graph $G=(V, E,x,z)$ and $W\in \Wcal_{\ell}(G)$, the walk feature vector $X_W$ of $W$ is defined by concatenating the node and edge feature vectors, along with the positional encodings of $W$ with window size $s=\ell$. Formally,
+    \begin{equation*}
+        X_W=(x(w_i),z(w_i w_{i+1}),h_{\text{pe}}[i])_{i=0,\dots,\ell}\in \R^{(\ell+1)\times d_{\text{walk}}},
+    \end{equation*}
+    where $h_{\text{pe}}$ represents the positional encoding of Section~\ref{sec:walk_sampler}, $z(w_\ell w_{\ell+1})=0$, and $d_{\text{walk}}:=d+d'+d_{\text{pe}}$. For simplicity, we still denote the distribution of walk feature vectors on $G$ by $P(\Wcal(G))$.
+\end{definition}
+For simplicitly, we consider general rather than non-backtracking random walks in this section. 
+Now assume that we apply an average pooling followed by a linear layer to the output of the walk aggregator in Eq.~\eqref{eqn:walk_agg}. By adjusting the normalization factor to a constant $\nicefrac{m\ell}{|V|}$, we can express the function $g_{f,m,\ell}$ on $\Gcal$ as an average over functions of walk feature vectors:
+\begin{equation}
+    g_{f,m,\ell}(G)=\frac{1}{m}\sum_{W\in P_m(\Wcal_{\ell}(G))} f(X_W)
+\end{equation}
+where $f:\R^{d_{\text{walk}}}\to \R$ is some function on walk feature vectors. 
+
+If we sample a sufficiently large number of random walks, the average function $g_{f,m,\ell}(G)$ converges almost surely to $g_{f,\ell}:=\Ebb_{X_W\sim P(\Wcal_{\ell}(G))}[f(X_W)]$, due to the law of large numbers.
+
+Furthermore, we have the following useful properties of this limit:
+\begin{theorem}[Lipschitz continuity]
+    For some functional space $\Fcal$ of functions on walk feature vectors, we define the following distance $d_{\Fcal}:\Gcal\times \Gcal\to\R_{+}$:
+    \begin{equation}
+        d_{\Fcal,\ell}(G,G'):=\sup_{f\in \Fcal} \left|\Ebb_{X_W\sim P(\Wcal_{\ell}(G))}[f(X_W)] - \Ebb_{X_{W'}\sim P(\Wcal_{\ell}(G'))}[f(X_{W'})] \right|.
+    \end{equation}
+    Then $(\Gcal_n,d_{\Fcal,\ell})$ is a metric space if $\Fcal$ is a universal space and $\ell\geq 4n^3$. 
+    
+    If $\Fcal$ contains $f$, then for any $G,G'\in \Gcal_n$, we have
+    \begin{equation}
+        \left|g_{f,\ell}(G) - g_{f,\ell}(G')\right| \leq d_{\Fcal,\ell}(G, G').
+    \end{equation}
+    In particular, if $f\in\Fcal$ is an $L$-Lipschitz function, the difference in outputs is bounded by the earth mover's distance $W_1(\cdot,\cdot)$ between the distributions of walk feature vectors: %
+    \begin{equation}
+        \left|g_{f,\ell}(G) - g_{f,\ell}(G')\right| \leq L\cdot W_1(P(\Wcal_{\ell}(G)), P(\Wcal_{\ell}(G'))).
+    \end{equation}
+\end{theorem}
+{The Lipschitz constant, widely used to assess neural network stability under small perturbations~\citep{virmaux2018lipschitz}, guarantees that NeuralWalker maintains stability when subjected to minor alterations in graph structure. Notably, parameterizing $f$ with several neural network layers yields a Lipschitz constant comparable to that of MPNNs on a pseudometric space defined by the tree mover's distance~\citep{chuang2022tree}. However, a key distinction lies in the input space metrics: while MPNNs operate on tree structures, NeuralWalker focuses on the distribution of walk feature vectors. A more comprehensive comparison of MPNNs' and NeuralWalker's stability and generalization under distribution shift is left for future research.}
+\begin{theorem}[Injectivity]\label{thm:injectivity}
+    Assume that $\Fcal$ is a universal space. If $G$ and $G'$ are non-isomorphic graphs, then there exists an $f \in \Fcal$ such that $g_{f,\ell}(G)\neq g_{f,\ell}(G')$ if $\ell\geq 4\max\{|V|,|V'|\}^3$. 
+\end{theorem}
+The injectivity property ensures that our model with a sufficiently large number of sufficiently long ($\geq 4n^3$) random walks can distinguish between non-isomorphic graphs. {It is worth noting that although our assumptions include specific conditions on the random walk length to establish the space as a metric, removing the length constraint still results in a pseudometric space. In this case, $d_{\mathcal{F},\ell}(G,G')>0$ if $G$ and $G'$ are distinguishable by the $(\lfloor \nicefrac{\ell}{2} \rfloor+1)$-subgraph isomorphism test, where $\lfloor \cdot \rfloor$ is the floor function (\ie they do not have the same set of subgraphs up to size $(\lfloor \nicefrac{\ell}{2} \rfloor+1)$). %
+}
+
+{
+Using the previous result jointly with the message-passing module, we arrive at the following result, which particularly highlights the advantage of combining random walks and message passing. 
+}
+\begin{theorem}\label{thm:main_expressivity}
+	For any $\ell \geq 2$, NeuralWalker equipped with the complete walk set $\Wcal_\ell$ is strictly more expressive than 1-WL and the $(\lfloor \nicefrac{\ell}{2} \rfloor+1)$-subgraph isomorphism test, and thus ordinary MPNNs. 
+\end{theorem}
+
+{
+The injectivity in Thm.~\ref{thm:injectivity} is guaranteed only if $\Fcal$ is a universal functional space. This condition highlights a limitation in approaches like CRaWL~\citep{tonshoff2023walking} which employs CNNs to process walk feature vectors. CNNs can only achieve universality under strict conditions, including periodic boundary conditions and a large number of layers~\citep{yarotsky2022universal}. However, random walks generally do not satisfy periodic boundary conditions, and utilizing an excessive number of layers can exacerbate issues such as over-squashing and over-smoothing. In contrast, the sequence models considered in this work, such as transformers and SSMs, are universal approximators for any sequence-to-sequence functions~\citep{yuntransformers,wang2024state}. 
+Furthermore, the proof of Thm.~\ref{thm:main_expressivity} suggests that random walk-based models without message passing cannot be more expressive than 1-WL. %
+Consequently, our model is provably more expressive than CRaWL. 
+}
+
+{
+Finally, we have the following complexity results:
+\begin{theorem}[Complexity]\label{thm:complexity}
+    The complexity of NeuralWalker, when used with Mamba~\citep{gu2023mamba}, is $O(kdn(\gamma \ell+\beta))$, where $k,d,n,\gamma,\ell,\beta$ denote the number of layers, hidden dimensions, the (maximum) number of nodes, sampling rate, length of random walks and average degree, respectively.
+\end{theorem}
+}
+
+
+\section{Experiments}
+
+In this section, we compare NeuralWalker to several SOTA models on a diverse set of 19 benchmark datasets. 
+{Furthermore, we provide a detailed ablation study on components of our model}. 
+
+\begin{table}[t]
+    \centering
+    \caption{Test performance on benchmarks from~\cite{dwivedi2023benchmarking}. Metrics with mean ± std of 4 runs are reported. The result with $^\star$ is obtained using the pretraining strategy presented in Section~\ref{sec:pretraining}.}
+    \label{tab:gnn_benchmarks}
+    \begin{sc}
+    \resizebox{.9\textwidth}{!}{
+    \begin{tabular}{lccccc}\toprule
+         & \textbf{ZINC} & \textbf{MNIST} & \textbf{CIFAR10} & \textbf{PATTERN} & \textbf{CLUSTER} \\ 
+        \# graphs & 12K & 70K & 60K & 14K & 12K \\
+        Avg. \# nodes & 23.2 & 70.6 & 117.6 & 118.9 & 117.2   \\
+        Avg. \# edges & 24.9 & 564.5 & 941.1 & 3039.3 & 2150.9 \\
+        Metric & MAE $\shortdownarrow$ & ACC $\shortuparrow$ & ACC $\shortuparrow$ & ACC $\shortuparrow$ & ACC $\shortuparrow$ \\ \midrule
+        GCN~\cite{kipf2016semi} & 0.367 ± 0.011 & 90.705 ± 0.218 & 55.710 ± 0.381 & 71.892 ± 0.334 & 68.498 ± 0.976 \\
+        GIN~\cite{xu2019powerful} & 0.526 ± 0.051 & 96.485 ± 0.252 & 55.255 ± 1.527 & 85.387 ± 0.136 & 64.716 ± 1.553 \\
+        GAT~\cite{velivckovic2018graph} & 0.384 ± 0.007 & 95.535 ± 0.205 & 64.223 ± 0.455 & 78.271 ± 0.186 & 70.587 ± 0.447 \\ 
+        GatedGCN~\cite{bresson2017residual} & 0.282 ± 0.015 & 97.340 ± 0.143 & 67.312 ± 0.311 & 85.568 ± 0.088 & 73.840 ± 0.326 \\ \midrule
+        Graphormer~\cite{ying2021transformers} & 0.122 ± 0.006 & -- & -- & -- & -- \\
+        SAT~\cite{chen2022structure} & 0.089 ± 0.002 & -- & -- & 86.848 ± 0.037 & 77.856 ± 0.104 \\
+        GPS~\cite{rampavsek2022recipe} & 0.070 ± 0.004 & 98.051 ± 0.126 & 72.298 ± 0.356 & 86.685 ± 0.059 & 78.016 ± 0.180 \\
+        Exphormer~\cite{shirzad2023exphormer} & -- & 98.55 ± 0.03 & 74.69 ± 0.13 & 86.70 ± 0.03 & 78.07 ± 0.037 \\
+        GRIT~\citep{ma2023graph} & 0.059 ± 0.002 & 98.108 ± 0.111 & 76.468 ± 0.881 & \textbf{87.196 ± 0.076} & \textbf{80.026 ± 0.277} \\ \midrule
+        CRaWL~\cite{tonshoff2023walking} & 0.085 ± 0.004 & 97.944 ± 0.050 & 69.013 ± 0.259 & -- & -- \\ \midrule
+        NeuralWalker & \textbf{0.053 ± 0.002}$^{\star}$ & \textbf{{98.692 ± 0.079}} & \textbf{{76.903 ± 0.457}} & 86.977 ± 0.012 & 78.189 ± 0.188 \\ \bottomrule
+    \end{tabular}
+    }
+    \end{sc}
+\end{table}
+
+\begin{table}[t]
+    \centering
+    \caption{Test performance on LRGB~\cite{dwivedi2022long}. Metrics with mean ± std of 4 runs are reported. NeuralWalker improves the best baseline by 10\% and 13\% on \textbf{PascalVOC-SP} and \textbf{COCO-SP} respectively.}
+    \label{tab:lrgb}
+    \begin{sc}
+    \resizebox{\textwidth}{!}{
+    \begin{tabular}{lccccc}\toprule
+         & \textbf{PascalVOC-SP} & \textbf{COCO-SP} & \textbf{Peptides-func} & \textbf{Peptides-struct} & \textbf{PCQM-Contact} \\ 
+        \# graphs & 11.4K & 123.3K & 15.5K & 15.5K & 529.4K \\
+        Avg. \# nodes & 479.4 & 476.9 &  150.9 &  150.9 & 30.1  \\
+        Avg. \# edges & 2,710.5 &  2,693.7 & 307.3 & 307.3 &  61.0 \\
+        Metric & F1 $\shortuparrow$ & F1 $\shortuparrow$ & AP $\shortuparrow$ & MAE $\shortdownarrow$ & MRR $\shortuparrow$ \\ \midrule
+        GCN~\cite{kipf2016semi,tonshoff2023did} & 0.2078 ± 0.0031 & 0.1338 ± 0.0007 &  0.6860 ± 0.0050 & \textbf{0.2460 ± 0.0007} &  0.4526 ± 0.0006 \\
+        GIN~\cite{xu2019powerful,tonshoff2023did} & 0.2718 ± 0.0054 & 0.2125 ± 0.0009 &  0.6621 ± 0.0067 & 0.2473 ± 0.0017 &  0.4617 ± 0.0005 \\
+        GatedGCN~\cite{bresson2017residual,tonshoff2023did} & 0.3880 ± 0.0040 & 0.2922 ± 0.0018 & 0.6765 ± 0.0047 & 0.2477 ± 0.0009 &  0.4670 ± 0.0004 \\ \midrule
+        GPS~\cite{rampavsek2022recipe} & 0.3748 ± 0.0109 & 0.3412 ± 0.0044 & 0.6535 ± 0.0041 & 0.2500 ± 0.0005 & --  \\
+        GPS~\cite{tonshoff2023did} &  0.4440 ± 0.0065 & 0.3884 ± 0.0055 &  0.6534 ± 0.0091 & 0.2509 ± 0.0014 & 0.4703 ± 0.0014 \\ 
+        Exphormer~\cite{shirzad2023exphormer} & 0.3975 ± 0.0037 & 0.3455 ± 0.0009 & 0.6527 ± 0.0043 & 0.2481 ± 0.0007 & -- \\ 
+        GRIT~\citep{ma2023graph} & -- & -- & 0.6988 ± 0.0082 & 0.2460 ± 0.0012 & -- \\ \midrule
+        CRawL~\cite{tonshoff2023walking} & -- & -- & 0.7074 ± 0.0032 & 0.2506 ± 0.0022 & -- \\ \midrule
+        NeuralWalker & \textbf{0.4912 ± 0.0042} & \textbf{0.4398 ± 0.0033} & \textbf{0.7096 ± 0.0078} & 0.2463 ± 0.0005 &  \textbf{0.4707 ± 0.0007}  \\ \bottomrule
+    \end{tabular}
+    }
+    \end{sc}
+\end{table}
+
+\subsection{Benchmarking NeuralWalker to state-of-the-art methods}\label{sec:benchmarking}
+We compare NeuralWalker against several popular message passing GNNs, GTs, and walk-based models. GNNs include GCN~\citep{kipf2016semi}, GIN~\citep{xu2019powerful}, GAT~\citep{velivckovic2018graph}, GatedGCN~\citep{bresson2017residual}. GTs include GraphTrans~\citep{wu2021representing}, SAT~\citep{chen2022structure}, GPS~\citep{rampavsek2022recipe}, Exphormer~\citep{shirzad2023exphormer}, NAGphormer~\citep{chen2022nagphormer}, GRIT~\citep{ma2023graph}, Polynormer~\citep{deng2024polynormer}. Walk-based models include CRaWL~\citep{tonshoff2023walking}. To ensure diverse benchmarking tasks, we
+use datasets from Benchmarking-GNNs~\citep{dwivedi2023benchmarking}, Long-Range Graph Benchmark~(LRGB)~\citep{dwivedi2022long}, Open Graph Benchmark (OGB)~\citep{hu2020open}, and node classification datasets from~\cite{platonov2022critical,snapnets}.
+
+\paragraph{Benchmarking GNNs.}
+We evaluated NeuralWalker's performance on five tasks from the Benchmarking GNNs suite: ZINC, MNIST, CIFAR10, PATTERN, and CLUSTER (results in Table~\ref{tab:gnn_benchmarks}). Notably, NeuralWalker achieved SOTA results on three out of five datasets and matched the best-performing model on the remaining two. While GRIT exhibited superior performance on the two small synthetic datasets, its scalability to larger datasets, such as those in LRGB, is limited, as demonstrated in the subsequent paragraph. It is worth noting that NeuralWalker significantly outperforms the previous SOTA random walk-based model, CRaWL. This improvement can be attributed to the integration of message passing and the Mamba architecture, as discussed in Sections~\ref{sec:theory}. A more extensive empirical comparison of them is also given in Section~\ref{sec:ablation_studies}. These results underscore NeuralWalker's robust performance across diverse synthetic benchmark tasks.
+
+\paragraph{Long-Range Graph Benchmark.}
+We further evaluated NeuralWalker's ability to capture long-range dependencies on the recently introduced LRGB benchmark, encompassing five datasets designed to test this very capability (details in~\citet{rampavsek2022recipe,dwivedi2022long}). Note that for PCQM-Contact, we used the filtered Mean Reciprocal Rank (MRR), introduced by~\cite{tonshoff2023did}, as the evaluation metric. NeuralWalker consistently outperformed all baseline methods across all but one task (see Table~\ref{tab:lrgb}). Notably, on PascalVOC-SP and COCO-SP, where previous work has shown the importance of long-range dependencies (\eg~\citet{tonshoff2023did}), NeuralWalker significantly surpassed the SOTA models by a substantial margin, \emph{up to a 10\% improvement}.
+
+\paragraph{Open Graph Benchmark.}
+To assess NeuralWalker's scalability on massive quantities of graphs, we evaluated it on the OGB benchmark, which includes datasets exceeding 100K graphs each. For computational efficiency, we employed 1D CNNs as the sequence layers in this experiment. NeuralWalker achieved SOTA performance on two out of the three datasets (Table~\ref{tab:ogb}), demonstrating its ability to handle large-scale graph data. However, the \textsc{ogbg-ppa} dataset presented challenges with overfitting. On this dataset, NeuralWalker with just one block outperformed its multiblock counterpart on this dataset, suggesting potential limitations in regularization needed for specific tasks.
+\paragraph{Node classification on large graphs.}
+We further explored NeuralWalker's ability to handle large graphs in node classification tasks. We integrated NeuralWalker with Polynormer~\citep{deng2024polynormer}, the current SOTA method in this domain. In this experiment, NeuralWalker utilized very long walks (up to 1,000 steps) with a low sampling rate ($\leq 0.01$) to capture long-range dependencies, replacing the transformer layer within Polynormer that still \emph{struggles to scale to large graphs even with linear complexity}. Despite eschewing transformer layers entirely, NeuralWalker achieved performance comparable to Polynormer (Table~\ref{tab:node_classification}), showing its scalability and effectiveness in modeling large graphs. Indeed, the complexity of NeuralWalker can be flexibly controlled by its sampling rate and length, as shown in Section~\ref{sec:theory}. A notable highlight is NeuralWalker's ability to efficiently process the massive pokec dataset (1.6M nodes) using a single H100 GPU with 80GB of RAM.
+
+\subsection{Masked Positional Encoding Pretraining}\label{sec:pretraining}
+{Explicitly utilizing random walks as sequences offers a significant advantage: it allows for the application of advanced language modeling techniques. As a proof-of-concept, we adapt the BERT pretraining strategy~\citep{devlin2019bert} to the positional encodings $h_{\text{pe}}$ of random walks. Our approach involves randomly replacing 15\% of the positions in $h_{\text{pe}}$ with a constant vector of 0.5, with the objective of recovering the original binary encoding vectors for these positions. This method can be further enhanced by combining it with other established pretraining strategies, such as attributes masking~\citep{hu2020strategies}. Our experiments, as shown in Table~\ref{tab:pretraining}, demonstrate that combining these strategies (\ie we first pretrain the model with masked positional encoding prediction and then continue with masked attributes pretraining) significantly enhances performance on the ZINC dataset.}
+
+\begin{table}[t]
+    \centering
+    \begin{minipage}[c]{.6\textwidth}
+        \caption{Test performance on OGB~\citep{hu2020open}. Metrics with mean ± std of 10 runs are reported.}
+        \label{tab:ogb}
+        \begin{sc}
+        \resizebox{.9\textwidth}{!}{
+        \begin{tabular}{lccc}\toprule
+            Dataset & \textbf{ogbg-molpcba} & \textbf{ogbg-ppa} & \textbf{ogbg-code2}\\ 
+             \# graphs & 437.9K & 158.1K & 452.7K \\
+            Avg. \# nodes & 26.0 & 243.4 & 125.2  \\
+            Avg. \# edges &  28.1 & 2,266.1 & 124.2  \\
+            Metric & AP $\shortuparrow$ & ACC $\shortuparrow$ & F1 $\shortuparrow$ \\ \midrule
+            GCN & 0.2424 ± 0.0034 & 0.6857 ± 0.0061 & 0.1595 ± 0.0018 \\ %
+            GIN & 0.2703 ± 0.0023 & 0.7037 ± 0.0107 & 0.1581 ± 0.0026 \\ \midrule %
+            GraphTrans &  0.2761 ± 0.0029 & -- & 0.1830 ± 0.0024 \\ %
+            SAT & -- & 0.7522 ± 0.0056 & 0.1937 ± 0.0028 \\ %
+            GPS & 0.2907 ± 0.0028 & \textbf{0.8015 ± 0.0033} & 0.1894 ± 0.0024 \\ \midrule %
+            CRaWL & 0.2986 ± 0.0025 & -- & -- \\ \midrule %
+            NeuralWalker & \textbf{0.3086 ± 0.0031} & 0.7888 ± 0.0059 &  \textbf{0.1957 ± 0.0025} \\ \bottomrule
+        \end{tabular}
+        }
+        \end{sc}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[c]{.35\textwidth}
+        \caption{Comparison of different pretraining strategies on the ZINC dataset. The pretraining was performed on ZINC \emph{without using any external data}.}\label{tab:pretraining}
+        \begin{sc}
+            \resizebox{.9\textwidth}{!}{
+            \begin{tabular}{lc}\toprule
+                 Strategy & ZINC$\shortdownarrow$  \\ \midrule
+                 w/o pretrain & 0.063 ± 0.001 \\
+                 masked attr.\ & 0.061 ± 0.001 \\
+                 masked PE & 0.055 ± 0.004 \\
+                 masked PE + attr.\ & \textbf{0.053 ± 0.002} \\ \bottomrule
+            \end{tabular}
+            }
+        \end{sc}
+    \end{minipage}
+\end{table}
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/plot_perf_vs_rate_and_length_final_wide.pdf}
+    \caption{Validation performance when varying sampling rate and length of random walks.}
+    \label{fig:rw_sample_rate_and_length}
+\end{figure}
+
+\begin{table}[t]
+    \centering
+    \caption{Test performance on node classification benchmarks from~\cite{platonov2022critical} and \cite{snapnets}. Metrics with mean ± std of 10 runs are reported.}
+    \label{tab:node_classification}
+    \begin{sc}
+    \resizebox{\textwidth}{!}{
+    \begin{tabular}{lcccccc}\toprule
+         Dataset & \textbf{roman-empire} & \textbf{amazon-ratings} & \textbf{minesweeper} & \textbf{tolokers} & \textbf{questions} & \textbf{pokec}\\
+         \# nodes & 22,662 & 24,492 & 10,000 & 11,758 & 48,921 & 1,632,803  \\
+         \# edges &  32,927 & 93,050 & 39,402 & 519,000 & 153,540 & 30,622,564 \\
+         Metric & ACC $\shortuparrow$ & ACC $\shortuparrow$ & ROC AUC $\shortuparrow$ & ROC AUC $\shortuparrow$ & ROC AUC $\shortuparrow$ & ACC $\shortuparrow$ \\ \midrule
+        GCN & 73.69 ± 0.74 & 48.70 ± 0.63 & 89.75 ± 0.52 & 83.64 ± 0.67 & 76.09 ± 1.27 & 75.45 ± 0.17 \\ %
+        GAT(-sep) & 88.75 ± 0.41 & 52.70 ± 0.62 & 93.91 ± 0.35 & 83.78 ± 0.43 & 76.79 ± 0.71 & 72.23 ± 0.18 \\ \midrule %
+        GPS & 82.00 ± 0.61 & 53.10 ± 0.42 & 90.63 ± 0.67 & 83.71 ± 0.48 & 71.73 ± 1.47 & OOM \\ %
+        NAGphormer & 74.34 ± 0.77 & 51.26 ± 0.72 & 84.19 ± 0.66 & 78.32 ± 0.95 & 68.17 ± 1.53 & 76.59 ± 0.25 \\ %
+        Exphormer & 89.03 ± 0.37 & 53.51 ± 0.46 & 90.74 ± 0.53 & 83.77 ± 0.78 & 73.94 ± 1.06 & OOM \\ %
+        Polynormer & 92.55 ± 0.37 & \textbf{54.81 ± 0.49} & 97.46 ± 0.36 & \textbf{85.91 ± 0.74} & \textbf{78.92 ± 0.89} & 86.10 ± 0.05 \\ \midrule %
+        \method & \textbf{92.92 ± 0.36} & 54.58 ± 0.36  & \textbf{97.82 ± 0.40} & 85.56 ± 0.74 & 78.52 ± 1.13 & \textbf{86.46 ± 0.09} \\
+        \bottomrule
+    \end{tabular}
+    }
+    \end{sc}
+\end{table}
+
+\subsection{Ablation studies}\label{sec:ablation_studies}
+Here, we dissect the main components of our model architecture to gauge their contribution to predictive performance and to guide dataset-specific hyperparameter optimization. 
+
+We perform ablation studies on three datasets, from small to large graphs. Our analysis focuses on three key aspects: 1) We demonstrate the crucial role of integrating local and global message passing with random walks. 2) we evaluate various options for the sequence layer to identify the optimal choice. 3) We examine the impact of varying the sampling rate and length of random walks, revealing a trade-off between expressivity and computational complexity. Notably, \emph{these parameters allow explicit control over model complexity}, a unique feature of our approach compared to subgraph MPNNs, which typically exhibit high complexity. All ablation experiments were performed on the \emph{validation set}, with results averaged over four random seeds. The comprehensive findings are summarized in Table~\ref{tab:ablation}.
+\paragraph{Effect of local and global message passing.}
+Motivated by the limitations of the depth-first nature inherent in pure random walk-based encoders, as discussed in Section~\ref{sec:message_passing}, this study investigates the potential complementary benefits of message passing.  We conducted an ablation study (Table~\ref{tab:ablation_mp}) comparing NeuralWalker's variants with and without local or global message passing modules. For local message passing, we employed a GIN with edge features~\citep{xu2019powerful,hu2019strategies}. Global message passing was explored using virtual node layers~\citep{gilmer2017neural} and transformer layers~\citep{vaswani2017attention,chen2022structure}. Keeping the sequence layer fixed to Mamba, we observed that NeuralWalker with GIN consistently outperforms the version without, confirming the complementary strengths of random walks and local message passing.
+The impact of global message passing, however, varies across datasets, a phenomenon also noted by~\citet{rosenbluth2024distinguished}. Interestingly, larger graphs like PascalVOC-SP demonstrate more significant gains from global message passing. This observation suggests promising directions for future research, such as developing methods to automatically identify optimal configurations for specific datasets.
+\paragraph{Comparison of sequence layer architectures.}
+We investigated the impact of various sequence layer architectures on walk embeddings, as shown in Table~\ref{tab:ablation_seq}. The architectures examined include CNN, transformer (with RoPE), and SSMs like S4 and Mamba. Surprisingly, transformers consistently underperformed compared to other architectures, contrasting with their good performance in other domains. This discrepancy may be attributed to the unique sequential nature of walk embeddings, which might not align well with the attention mechanism utilized by transformers.
+
+Mamba emerged as the top performer across all datasets, consistently outperforming its predecessors, S4 and the unidirectional version. However, CNNs present a compelling alternative for large datasets due to their faster computation (typically 2-3x faster than Mamba on A100). This presents a practical trade-off: Mamba offers superior accuracy but requires more computational resources. CNNs might be preferable for very large datasets or real-time applications where speed is critical. In our benchmarking experiments, we employed Mamba as the sequence layer, except for the OGB datasets. Finally, as predicted by Thm.~\ref{thm:main_expressivity}, both our Mamba and CNN variants with message passing significantly outperform CRaWL which relies on CNNs and does not use any message passing.
+
+\paragraph{Impact of random walk sampling strategies.}
+We examined the impact of varying random walk sampling rates and lengths on NeuralWalker's performance, using Mamba as the sequence layer. While we adjusted the sampling rate during training, we fixed it at 1.0 for inference to maximize coverage. As anticipated, a larger number of longer walks led to improved coverage of the graph's structure, resulting in clear performance gains (Figure~\ref{fig:rw_sample_rate_and_length}). However, this improvement plateaus as walks become sufficiently long, indicating diminishing returns beyond a certain threshold. Crucially, these performance gains come at the cost of increased computation time, which scales linearly with both sampling rate and walk length, as predicted by Thm.~\ref{thm:complexity}. This underscores the trade-off between expressivity and complexity, which can be explicitly controlled through these two hyperparameters. In practice, this trade-off between performance and computational cost necessitates careful consideration of resource constraints when selecting sampling rates and walk lengths. Future research could explore more efficient sampling strategies to minimize the necessary sampling rate.
+
+\begin{table}[t]
+    \centering
+    \caption{Ablation studies of NeuralWalker. Average validation performance over 4 runs is reported.}\label{tab:ablation}
+    \begin{subtable}[t]{.49\textwidth}
+        \centering
+        \begin{sc}
+        \resizebox{\textwidth}{!}{
+        \begin{tabular}{lccc}\toprule
+            MP (local + global) & ZINC$\shortdownarrow$ & CIFAR10$\shortuparrow$ & PascalVOC-SP$\shortuparrow$ \\ \midrule
+            GIN + w/o & \textbf{0.085} & \textbf{80.885} & \textbf{0.4611}\\
+            w/o + w/o & 0.090 & 79.035 & 0.4525 \\ \midrule
+            GIN + VN & \textbf{0.078} & 78.610 & 0.4672 \\
+            GIN + Trans.\ & 0.083 & 80.755 & \textbf{0.4877} \\
+            GIN + w/o & 0.085 & \textbf{80.885} & 0.4611 \\ \bottomrule
+        \end{tabular}
+        }
+        \end{sc}
+    \end{subtable}
+    \hfill
+    \begin{subtable}[t]{.47\textwidth}
+        \centering
+        \caption{Comparison of sequence layers. Local and global MP are selected to give the best validation performance except for the highlighted row corresponding to CRaWL, which does not use message passing.}\label{tab:ablation_seq}
+        \begin{sc}
+        \resizebox{\textwidth}{!}{
+        \begin{tabular}{lccc}\toprule
+            Sequence Layer & ZINC$\shortdownarrow$ & CIFAR10$\shortuparrow$ & PascalVOC-SP$\shortuparrow$ \\ \midrule
+            Mamba & \textbf{0.078} & \textbf{80.885} & \textbf{0.4877} \\
+            Mamba (w/o bid) &0.089 & 74.910 & 0.4522 \\
+            S4 & 0.082 & 77.970 & 0.4559 \\
+            CNN & 0.088 & 80.665 & 0.4652 \\
+            Trans.\ & 0.084 & 72.850& 0.4316\\ 
+            \rowcolor{lightgray} CNN (w/o MP) & 0.116 & 78.760 & 0.3954 \\ \bottomrule
+        \end{tabular}
+        }
+        \end{sc}
+    \end{subtable}
+\end{table}
+
+
+\section{Conclusion}
+
+We have introduced NeuralWalker, a powerful and flexible architecture that combines random walks and message passing to address the expressivity limitations of structural encoding in graph learning. By treating random walks as sequences and leveraging advanced sequence modeling techniques, NeuralWalker achieves superior performance compared to existing GNNs and GTs, as demonstrated through extensive experiments on various benchmarks.
+Looking forward, we acknowledge opportunities for further exploration. First, investigating more efficient random walk sampling strategies with improved graph coverage could potentially enhance NeuralWalker's performance. Second, exploring more self-supervised learning techniques for learning on random walks holds promise for extending NeuralWalker's applicability to unlabeled graphs.
+
+\paragraph{Limitations.}
+NeuralWalker demonstrates good scalability to large graphs. However, one potential limitation lies in the trade-off between the sampling efficiency of random walks and graph coverage for very large graphs. In this work, we explored a computationally efficient sampling strategy but probably not with the optimal graph coverage. Investigating more efficient random walk sampling strategies that improve coverage while maintaining computational efficiency could further enhance NeuralWalker's performance.
+
+Additionally, we identify a scarcity of publicly available graph datasets with well-defined long-range dependencies. While datasets like LRGB provide valuable examples, the limited number of such datasets hinders comprehensive evaluation and the potential to push the boundaries of long-range dependency capture in graph learning tasks. Furthermore, based on our experiments and \cite{tonshoff2023did}, only 2 out of the 5 datasets in LRGB seem to present long-range dependencies. 
+
+\paragraph{Broader impacts.}
+While our research primarily focuses on general graph representation learning, we recognize the importance of responsible and ethical application in specialized fields. When utilized in domains such as drug discovery or computational biology, careful attention must be paid to ensuring the trustworthiness and appropriate use of our method to mitigate potential misuse. Our extensive experiments demonstrate the significant potential of our approach in both social network and biological network analysis, highlighting the promising societal benefits our work may offer in these specific areas.
+
+
+

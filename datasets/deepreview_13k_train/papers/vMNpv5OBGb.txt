@@ -1,0 +1,385 @@
+\title{UniAP: Unifying Inter- and Intra-Layer Automatic Parallelism by Mixed Integer Quadratic Programming}
+
+\begin{abstract}
+ Distributed learning is commonly used for training deep learning models, especially large models. In distributed learning, manual parallelism~(MP) methods demand considerable human effort and have limited flexibility. Hence, automatic parallelism~(AP) methods have recently been proposed for automating the parallel strategy optimization process. Existing AP methods suffer from sub-optimal solutions because they do not jointly optimize the two categories of parallel strategies~(i.e., inter-layer parallelism and intra-layer parallelism). In this paper, we propose a novel AP method called UniAP, which unifies inter- and intra-layer automatic parallelism by mixed integer quadratic programming. To the best of our knowledge, UniAP is the first parallel method that can jointly optimize the two categories of parallel strategies to find an optimal solution. Experimental results show that UniAP outperforms state-of-the-art methods by up to 3.80$\times$ in throughput and reduces strategy optimization time by up to 107$\times$ across five Transformer-based models.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+Deep learning models have demonstrated promising performance across many domains. 
+For example, deep learning models such as BERT~\citep{devlin_bert_2019}, GPT-3~\citep{brown_language_2020} and T5~\citep{raffel_exploring_2020} achieve state-of-the-art~(SOTA) performance on many natural language processing~(NLP) tasks. 
+For computer vision~(CV), deep learning models such as ViT~\citep{dosovitskiy_image_2021} and Swin Transformer~\citep{liu_swin_2021} achieve good accuracy on multiple tasks. 
+
+Distributed learning~(also called parallel learning) on clusters with several machines or GPUs is commonly used for training deep learning models, especially for some large models with billions of parameters~\citep{brown_language_2020,touvron_llama_2023,touvron_llama_2023-1}. Several parallel strategies, including pipeline parallelism~(PP), data parallelism~(DP), tensor parallelism~(TP), and fully sharded data parallelism~(FSDP), have been proposed for distributed learning. These parallel strategies can be divided into two main categories: inter-layer parallelism and intra-layer parallelism. Inter-layer parallelism~\citep{huang_gpipe_2019,narayanan_pipedream_2019,narayanan_memory-efficient_2021,fan_dapple_2021,li_chimera_2021,lepikhin_gshard_2021,du_glam_2022,fedus_switch_2022}, which includes PP, partitions the model into disjoint sets without partitioning tensors in each layer. 
+Intra-layer parallelism~\citep{li_pytorch_2020,rasley_deepspeed_2020,narayanan_efficient_2021,fairscale_authors_fairscale_2021}, which includes DP, TP, and FSDP, partitions tensors in a layer along one or more axes.
+
+ 
+The parallel method\footnote{To avoid confusion, we treat `parallel method' and `parallel strategy' as two different terminologies in this paper.} in one specific distributed learning method or system typically adopts one parallel strategy or a combination of several parallel strategies. 
+Existing parallel methods can be divided into two categories: manual parallelism~(MP) methods and automatic parallelism~(AP) methods. %Different combinations of parallel strategies will significantly affect the training efficiency of the    distributed learning process. To enhance the training efficiency, researchers have proposed some manually designed parallel training strategies~\citep{narayanan_efficient_2021,shazeer_mesh-tensorflow_2018,xu_gspmd_2021}. 
+In MP methods ~\citep{shazeer_mesh-tensorflow_2018,narayanan_efficient_2021,xu_gspmd_2021}, one or several parallel strategies are manually optimized by researchers or developers. MP methods require extensive domain knowledge in deep learning models and hardware architectures. With the rapid development of deep learning models and the increasing diversity of modern hardware architectures~\citep{flynn_very_1966,flynn_computer_1972}, MP methods demand considerable human effort and have limited flexibility.
+To address the two limitations of MP methods, AP methods~\citep{narayanan_pipedream_2019,he_pipetransformer_2021,zheng_alpa_2022} have recently been
+proposed for automating the parallel strategy optimization process. Although existing AP methods have achieved promising progress, they optimize the two categories of parallel strategies separately rather than jointly. 
+More specifically, some methods optimize only one category of parallel strategies~\citep{jia_exploring_2018,wang_supporting_2019,jia_beyond_2019,schaarschmidt_automap_2021,zhao_vpipe_2022,cai_tensoropt_2022,liu_colossal-auto_2023}, and the others optimize inter- and intra-layer parallelism hierarchically~\citep{narayanan_pipedream_2019,tarnawski_efficient_2020,tarnawski_piper_2021,fan_dapple_2021,he_pipetransformer_2021,zheng_alpa_2022}. Hence, existing AP methods suffer from sub-optimal solutions.
+In this paper, we propose a novel AP method called UniAP for distributed learning. The contributions of UniAP are outlined as follows: 
+\begin{itemize}
+\item 
+ UniAP unifies inter- and intra-layer automatic parallelism by mixed integer quadratic programming~(MIQP)~\citep{lazimy_mixed_1982}. 
+ \item To the best of our knowledge, UniAP is the first parallel method that can optimize the two categories of parallel strategies jointly rather than separately to find an optimal solution.
+ \item Experimental results show that UniAP outperforms state-of-the-art methods by up to 3.80$\times$ in throughput and reduces strategy optimization time by up to 107$\times$ across five Transformer-based models.
+\end{itemize}
+
+
+
+\section{Background}
+
+\subsection{Parallel strategy}
+\label{subsec:background:parallel-strtegy}
+\textbf{Pipeline parallelism~(PP)}\quad In PP, each worker~(machine or GPU) holds a subset of model layers. Adjacent layers on different workers need to transfer activations in the forward propagation~(FP) step and gradients in the backward propagation~(BP) step. 
+
+\textbf{Data parallelism~(DP)}\quad In DP, each worker holds a replica of the whole model and partitions training samples. In each iteration, each worker computes gradients and synchronizes them with the other workers using all-reduce collective communication~(CC). All workers will have the same model parameters after the synchronization step.
+
+\textbf{Tensor parallelism~(TP)}\quad In TP, each worker holds a replica of training samples and partitions within model layers. In each iteration, each worker computes its local outputs in FP and its local gradients in BP. To synchronize outputs and gradients, all workers will perform all-reduce CC in FP and BP steps according to the partition scheme.
+
+\textbf{Fully sharded data parallelism~(FSDP)}\quad FSDP partitions optimizer states, parameters and gradients of the model into separate workers. During the FP and BP step of each iteration, FSDP performs an all-gather CC to obtain the complete parameters for the relevant layer, respectively. After computing gradients, FSDP conducts a reduce-scatter CC to distribute the global gradients among the workers.
+
+\subsection{Parallel method}
+\textbf{Manual parallelism~(MP)}\quad
+MP refers to the parallel methods in which human experts design and optimize the parallel strategies. Representative MP methods include Megatron-LM~\citep{narayanan_efficient_2021}, Mesh-TensorFlow~\citep{shazeer_mesh-tensorflow_2018}, and GSPMD~\citep{xu_gspmd_2021}. Megatron-LM manually designs TP and PP strategies for training Transformer-based models and exhibits superior efficiency. Mesh-TensorFlow and GSPMD require human effort to designate and tune the intra-layer parallel strategy. These methods rely on expert design and have little flexibility, challenging their automatic application to other models.
+
+\textbf{Inter-layer-only AP or intra-layer-only AP}\quad For inter-layer-only AP, GPipe~\citep{huang_gpipe_2019} and vPipe~\citep{zhao_vpipe_2022} employ a balanced partition algorithm and a dynamic layer partitioning middleware to partition pipelines, respectively. For intra-layer-only AP, OptCNN~\citep{jia_exploring_2018}, TensorOpt~\citep{cai_tensoropt_2022}, and Tofu~\citep{wang_supporting_2019} employ dynamic programming methods to optimize DP and TP strategies together. FlexFlow~\citep{jia_beyond_2019} and Automap~\citep{schaarschmidt_automap_2021} use the Monte Carlo method to find the optimal DP and TP strategy. Colossal-Auto~\citep{liu_colossal-auto_2023} utilizes integer programming~(IP) techniques to generate intra-layer parallelism and activation checkpointing strategies. All these methods optimize only one category of parallel strategies.
+\textbf{Inter- and intra-layer AP}\quad PipeDream~\citep{narayanan_pipedream_2019}, DAPPLE~\citep{fan_dapple_2021}, and PipeTransformer~\citep{he_pipetransformer_2021} use dynamic programming to determine optimal strategies for both DP and PP. DNN-partitioning~\citep{tarnawski_efficient_2020} adopts IP and dynamic programming to explore DP and PP strategies. DT-FM~\citep{yuan_decentralized_2022} combines genetic algorithm and the local search strategy to explore DP and PP strategies in a layer-wise manner. Piper~\citep{tarnawski_piper_2021} and Alpa~\citep{zheng_alpa_2022} adopt a parallel method considering DP, TP, and PP.
+Galvatron~\citep{miao_galvatron_2022} uses dynamic programming to determine DP, TP, and FSDP strategies in a single pipeline stage. As for PP, it partitions stages and determines micro-batch size using naive greedy algorithms. All these methods are hierarchical, which will result in sub-optimal solutions.
+
+
+
+
+\section{Method}
+
+\label{sec:method}
+
+In this section, we introduce our proposed method called UniAP. Apart from current AP methods, UniAP jointly optimizes the two categories of
+parallel strategies, including PP, DP, TP, and FSDP, to find an optimal solution.
+\begin{figure}[t]
+\begin{center}
+\centerline{\includegraphics[width=0.7\linewidth]{overview.pdf}}
+\caption{Flowchart of UniAP.}
+\label{fig:overview}
+\end{center}
+\vskip -0.2in
+\end{figure}
+
+Figure~\ref{fig:overview} illustrates the flowchart of UniAP. UniAP first profiles the runtime information for the user's hardware environment and the deep learning model. After that, UniAP estimates inter- and intra-layer costs given the computation graph and profiling results with its cost models. The estimated costs and the computation graph are then transformed into an MIQP problem. The objective function of the MIQP is to maximize the training throughput, or in other words, to minimize the training time per iteration (TPI). By iteratively applying the cost model and MIQP with different parameters, UniAP determines the minimal TPI and its corresponding parallel strategies. We name this process the Unified Optimization Process~(UOP). Finally, UniAP interprets the parallel strategies into the execution plan for the designated model.
+\subsection{Profiling}\label{subsec:method:profiling}
+UniAP collects runtime information about the hardware environment and deep learning model during profiling. For the hardware environment, UniAP evaluates the efficiency of all-reduce and point-to-point (P2P) communication for different device subsets. For example, when profiling a node with 4 GPUs, UniAP measures the all-reduce efficiency for various DP, TP, and FSDP combinations across these GPUs. Additionally, UniAP ranks these GPUs from 0 to 3 and evaluates the speed of P2P for two pipeline options: ($0\rightarrow 2$ and $1\rightarrow 3$) and ($0\rightarrow 1$, $1\rightarrow 2$ and $2\rightarrow 3$). Furthermore, UniAP estimates the computation-communication overlap coefficient~(CCOC)~\citep{miao_galvatron_2022,rashidi_enabling_2021}.
+
+UniAP acquires two types of information for the deep learning model: computation time and memory usage. On one hand, UniAP distinguishes the forward computation time per sample for different types of hidden layers. On the other hand, UniAP collects memory usage information for each layer, including the memory occupied by parameters and the memory usage of activation per sample in different TP sizes. 
+
+\subsection{Cost model}\label{subsec:method:cost-model}
+UniAP employs two primary cost models, namely the time cost model and the memory cost model. 
+
+\textbf{Time cost model}\quad To estimate computation time, UniAP first calculates the forward computation time by multiplying the batch size with the forward computation time per sample obtained from profiling. Users can obtain a more precise result by profiling the forward time on the specified batch size. For Transformer-based models that mainly consist of the MatMul operator, the computation time in the BP stages is roughly twice that of the FP stages~\citep{narayanan_efficient_2021,li_chimera_2021,miao_galvatron_2022}. Additionally, UniAP estimates the communication time by dividing the size of transmitting tensors by the profiled communication efficiency for different communication primitives. To accommodate overlapping, UniAP multiplies the profiled CCOC by the overlapping interval of computation and communication. To model the communication time between pipeline stages, UniAP calculates the cross-stage cost between consecutive stages by the summation of P2P costs.
+
+\textbf{Memory cost model}\quad UniAP estimates memory consumption for each layer with its memory cost model. This estimation consists of three steps for a given layer. First, it computes the activation memory cost $m_a$ by multiplying the batch size and the profiled activation memory cost per sample of the TP size used by the strategy. Next, UniAP calculates the memory cost of model states $m_{s}$ for each layer based on their parameter size $ps$, TP size $ts$, FSDP size $fs$, and a constant $c_{dtype}$ dependent on the data type. Formally, we have 
+\begin{equation}
+m_s=\frac{c_{dtype}\times ps}{ts\times fs}.
+\end{equation}
+For example, if we choose precision as FP32, then $c_{dtype}=(4+4+4+4)/4=4$ since the learnable parameters, gradients, momentum and variance consume equal size of memory. If we opt for mixed precision with FP16 activated, then $c_{dtype}=(4+4+4+2+2)/2=8$. Finally, UniAP aggregates the activation memory cost $m_a$, memory cost of model states $m_s$, and context memory cost $m_c$ to a constant matrix $\M$, where $\M_{uk}$ denotes the memory cost for the $k$-th intra-layer strategy of layer $u$ on a single device.
+
+\subsection{Mixed integer quadratic programming}\label{subsec:method:miqp}
+The estimated costs and the computation graph are then transformed into an MIQP problem. Its formulation includes an objective function and several constraints.
+
+\subsubsection{Objective function}\label{subsubsec:method:objective-function}
+\begin{figure}[t]
+\begin{minipage}[t]{0.72\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{pipeline.pdf}
+    \caption{Time cost decomposition of a GPipe-style PP.}
+\label{fig:gpipe}
+\end{minipage}
+\begin{minipage}[t]{0.27\linewidth}
+    \centerline{\includegraphics[width=0.58\linewidth]{contiguous-vertical.pdf}}
+    \caption{A contiguous set.}
+    \label{fig:contiguous}
+\end{minipage}
+\vskip -0.1in
+\end{figure}
+The objective function tries to minimize TPI. In this paper, we have chosen GPipe as our PP strategy for illustration.\footnote{UniAP is also compatible with other PP strategies. For example, users need to modify only the memory constraint in Section \ref{subsubsec:method:constraints} to adapt to synchronous 1F1B pipeline~\citep{narayanan_memory-efficient_2021,fan_dapple_2021}.} Figure~\ref{fig:gpipe} depicts the time cost decomposition of a GPipe-style PP with non-negligible communication costs. The time needed to apply gradients at the end of each iteration is not included, as it depends on the optimizer and is insignificant compared to the total time spent on FP and BP.
+
+We denote the cost for computation stages as $\mathbb{P}=\{p_1, p_2, \dots, p_{pp\_size}\}$ and the cost for communication stages as $\mathbb{O}=\{o_1, o_2, \dots, o_{pp\_size-1}\}$. Here, $pp\_size$ represents the number of computation stages, which corresponds to the pipeline parallel size. In Figure~\ref{fig:gpipe}, $fp_i$ and $bp_i$ denote forward and backward computation time for computation stage $i$, respectively. $fo_j$ and $bo_j$ denote forward and backward communication time for communication stage $j$, respectively. Hence, we have $p_i=fp_i+bp_i$ and $o_j=fo_j+bo_j$.
+
+In a GPipe-style pipeline, we use $c$ to denote the number of micro-batches. As illustrated in Figure \ref{fig:gpipe}, a mini-batch is uniformly split into four micro-batches, and the total TPI is determined by the latency of all computation and communication stages and the latency of the slowest stage. We further denote TPI in GPipe as $tpi_{gpipe}$. Given that a stage with a higher FP computation cost leads to a higher BP computation cost with high probability, we can write the objective function of GPipe-style pipeline as follows:
+\begin{equation}
+\min tpi_{gpipe}=\sum_{i=1}^{pp\_size} p_i + \sum_{j=1}^{pp\_size-1} o_{j} + (c - 1)\max\left(\mathbb{P}\cup \mathbb{O}\right). %\tag{MIQP}
+\label{eqn:method:lp-contig}
+\end{equation}
+\subsubsection{Constraint}\label{subsubsec:method:constraints}
+We first introduce additional notations before presenting the constraints. For a given layer $u \in \VB$, $\SB_u$ represents its set of intra-layer parallel strategies, $\A_{uk}$ denotes the $k$-th intra-layer execution cost obtained from our time cost model. Additionally, we use $\S_{uk} \in \{0,1\}$ to indicate whether the $k$-th parallel strategy is selected for the layer $u$, and use $\P_{ui}\in \{0,1\}$ to indicate whether layer $u$ is placed on the $i$-th computation stage. Each edge $\langle u,v\rangle\in \EB$ is assigned a resharding cost denoted by $\R_{uv}$ if the vertices are located within the same pipeline stage. Alternatively, if the vertices are located across consecutive stages, the resharding cost between them is denoted by $\R'_{uv}$. These two resharding costs are constant matrices derived from our time cost model.
+\textbf{Computation-stage constraint}\quad To compute the total cost for a single computation stage $i$, all computation and communication costs associated with that stage must be aggregated and assigned to $p_i$. This constraint can be formulated as follows:
+\begin{equation}
+    \sum_{u\in \VB}\P_{ui}\S_{u}^\mathsf{T}\A_{u}+\sum_{\langle u,v\rangle\in \EB}\P_{ui}\P_{vi}(\S_{u}^\mathsf{T}\R_{uv}\S_{v})=p_i,~\forall i\in\{1,\dots, pp\_size\}.
+\label{eqn:method:intra-stage}
+\end{equation}
+On the left side of Equation~\eqref{eqn:method:intra-stage}, the first polynomial term represents the cost of choosing specific intra-layer strategies for layers placed in stage $i$. The second term represents total resharding costs within stage $i$.
+
+\textbf{Communication-stage constraint}\quad To calculate the total cost for a single communication stage $j$, we should aggregate the P2P costs incurred between consecutive stages and assign them to $o_j$. This constraint can be formulated as follows:
+\begin{equation}
+\begin{aligned}
+    \sum_{\langle u,v\rangle\in \EB}\P_{uj}\P_{v(j+1)}(\S_{u}^\mathsf{T}\R'_{uv}\S_{v})&=o_j,~\forall j\in\{1,\dots,pp\_size-1\}.
+\end{aligned}
+\label{eqn:method:inter-stage}
+\end{equation}
+\textbf{Memory constraint}\quad We need to guarantee that no devices~(GPUs) will encounter out-of-memory~(OOM) exceptions during training process. This constraint can be formulated as follows:
+\begin{equation}
+\sum_{u\in \VB}\P_{ui} \S_u^\mathsf{T} \M_u\leqslant m,~\forall i\in\{1,\dots,pp\_size\}.
+\label{eqn:method:memory-constraint}
+\end{equation}
+Here, $m$ denotes the memory limit for each device. In the case of homogeneous computing devices, the value of $m$ remains constant throughout all stages. But the value of $m$ varies in the case of heterogeneous computing devices.
+\textbf{Order-preserving constraint}\quad PP is not a single-program multiple-data~(SPMD) parallel strategy~\citep{huang_gpipe_2019}. Hence, we need an order-preserving constraint to ensure that the subgraphs of $\mathcal{G}$ are contiguous. We adopt the definition of \emph{contiguous} from previous work~\citep{tarnawski_efficient_2020,tarnawski_piper_2021}. 
+\begin{definition}\label{def:contiguous}
+A set $\WB \subseteq \VB$ is contiguous if there do not exist nodes $u \in \WB$, $v \in \VB \setminus \WB$, and $w \in \WB$ such that $v$ is reachable from $u$ and $w$ is reachable from $v$.
+\end{definition}
+
+Figure~\ref{fig:contiguous} illustrates an example of a contiguous set $\WB$, in which we cannot find any reachable node pairs $\langle u,v\rangle$ and $\langle v,w\rangle$ where $u,w\in \WB$ and $v \in \VB \setminus \WB$. 
+
+In our case, our model will not be assigned to different pipeline stages in a disordered manner if we ensure that all subgraphs on each computation stage are contiguous. After reformulating this constraint in linear form, we have
+\begin{subequations}
+\label{eqn:method:order-preserving}
+\begin{align}
+    \Z_{vi}&\geqslant \P_{vi},~&\forall v\in \VB,~\forall i\in\{1,2,\dots,pp\_size\},\label{eqn:method:order-preserving:1}\\
+    \Z_{vi}&\leqslant \Z_{ui},~&\forall u,v\in \VB,~\forall \langle u,v\rangle\in \EB,~\forall i\in\{1,2,\dots,pp\_size\},\label{eqn:method:order-preserving:2}\\
+    \Z_{vi}&\leqslant \P_{vi}-\P_{ui} +1,~&\forall u,v\in \VB,~\forall \langle u,v\rangle\in \EB,~\forall i\in\{1,2,\dots,pp\_size\}.\label{eqn:method:order-preserving:3}
+\end{align}
+\end{subequations}
+
+\textbf{Layer-placement constraint}\quad All layers should be placed on exactly one pipeline stage and at least one layer should be placed on each pipeline stage. This constraint can be formulated as follows:
+\begin{subequations}
+\label{eqn:method:layer-placement}
+\begin{align}
+    &\sum_{i=1}^{pp\_size} \P_{ui}=1,&\forall u\in \VB,\label{eqn:method:layer-placement:1}\\
+    &\sum_{u\in \VB}\P_{ui}\geqslant 1,&\forall i\in\{1,\dots,pp\_size\},\label{eqn:method:layer-placement:2}\\
+    &\P_{ui}\in\{0,1\},&\forall u\in \VB,~i\in\{1,\dots,pp\_size\}.\label{eqn:method:layer-placement:3}
+\end{align}
+\end{subequations}
+
+\textbf{Strategy-selection constraint}\quad 
+Each layer must and can choose only one strategy. This constraint can be formulated as follows:\begin{subequations}
+\label{eqn:method:strategy-selection}
+\begin{align}
+    &\sum_{k = 1}^{\lvert \SB_u\rvert}\S_{uk}=1,&\forall u\in \VB,\label{eqn:method:strategy-selection:1}\\
+    &\S_{uk}\in\{0,1\},&\forall u\in \VB,~k\in \{1,\dots,|\SB_u|\}.\label{eqn:method:strategy-selection:2}
+\end{align}
+\end{subequations}
+The MIQP formulation for UniAP includes the objective function in Equation~\eqref{eqn:method:lp-contig} and all the constraints from Euqation~\eqref{eqn:method:intra-stage}~-~\eqref{eqn:method:strategy-selection:2}.
+
+\subsection{Unified optimization process}\label{subsec:method:unified-optimization}
+\begin{algorithm}[t]
+    \caption{Unified Optimization Process}
+    \label{alg:unified-opt-proc}
+\begin{algorithmic}
+    \STATE {\bfseries Input:} Profiling results $PR$, strategy dictionary $SD$, mini-batch size $B$, computation graph $\mathcal{G}$, and the number of GPUs $n$.
+    \STATE {\bfseries Output:} Optimal cost $cost^{*}$, pipeline parallel size $pp\_size^{*}$, the number of micro-batches $c^{*}$, layer placement $\P^{*}$, and intra-layer strategy $\S^{*}$
+    \STATE $pp\_size^{*} = 1$;
+    \STATE $c^{*} = B$;
+    \STATE $A$, $R$, \_, $M$ = \verb+CostModeling+($PR$, $SD[1]$, $\mathcal{G}$, $B$);
+    \STATE $cost^{*}$, $P^{*}$, $S^{*}$ = \verb+QIP+($\A$, $\R$, $\M$);
+    \STATE Get all factors for $n$ except 1 and insert them to set $\FB$;
+    \STATE Get all factors for $B$ except 1 and insert them to set $\BB$;
+    \FOR{$pp\_size$ \textbf{in} $\FB$}
+        \FOR{$c$ \textbf{in} $\BB$}
+            \STATE Micro-batch size $b = B/c$;
+            \STATE $\A$, $\R$, $\R'$, $\M$ = \verb+CostModeling+($PR$, $SD[pp\_size]$, $\mathcal{G}$, $b$);
+            \STATE $cost$, $\P$, $\S$ = \verb+MIQP+($\A$, $\R$, $\R'$, $\M$, $pp\_size$, $c$);
+            \IF{$cost < cost^{*}$}
+                \STATE $cost^{*}$, $pp\_size^{*}$, $c^{*}$, $\P^{*}$, $\S^{*}$ = $cost$, $pp\_size$, $c$, $\P$, $\S$;
+            \ENDIF
+        \ENDFOR
+    \ENDFOR
+\end{algorithmic}
+\end{algorithm}
+UOP integrates the cost model and MIQP based on the profiling results and the computation graph to return the optimal parallel strategy and the corresponding TPI. Algorithm \ref{alg:unified-opt-proc} summarizes the whole process. In Algorithm \ref{alg:unified-opt-proc}, we denote intra-layer cost as $\A$, inter-layer cost as $\R$, cross-stage cost as $\R'$, and memory cost as $\M$. The \verb+CostModeling+ process calculates these four costs based on the cost model described in Section~\ref{subsec:method:cost-model}. 
+
+First, UOP optimizes intra-layer-only parallelism for cases in which pipeline parallelism is not adopted. Several works~\citep{zheng_alpa_2022,liu_colossal-auto_2023} have used quadratic integer programming~(QIP) to optimize intra-layer-only parallel strategy and achieved promising results.
+
+Then, UOP enumerates all factors of $n$ except 1 as the pipeline parallel size $pp\_size$. For each $pp\_size$, UOP enumerates all factors of $B$ except 1 as the number of micro-batches $c$. These enumerations aim to achieve load balance on a homogeneous cluster.
+
+For each candidate $pp\_size$ and $c$, UOP formulates the cost for a training iteration to an MIQP expression. It then waits for the MIQP solver to return the optimal cost and parallel strategy under the current configuration. Specifically, our implementation adopts the Gurobi Optimizer~\citep{gurobi_optimization_llc_gurobi_2023} as our QIP and MIQP solver.
+
+Finally, UOP returns the minimum cost $cost^{*}$ and its corresponding pipeline parallel size $pp\_size^{*}$, number of micro-batches $c^{*}$, layer placement $\P^{*}$, and intra-layer strategies $\S^{*}$.
+
+\subsection{Complexity analysis}\label{subsec:method:complexity-analysis}
+Let $\lvert \VB\rvert$, $\lvert \SB\rvert$, and $n$ denote the number of layers, parallel strategies, and GPUs, respectively. As illustrated in Algorithm \ref{alg:unified-opt-proc}, UniAP enumerates all factors of $n$ except 1 as the $pp\_size$ in the outer loop and all factors of $B$ except 1 in the inner loop. Since the time complexity of enumerating factors of any positive integer $a~(a\in\NB_+)$ is $\mathcal{O}(\sqrt{a})$, the time complexity for the two loops in the UniAP algorithm is $\mathcal{O}(\sqrt{Bd})$. Within the inner loop body, UniAP calls \verb+CostModeling+ to model the cost of each stage for each parallel strategy. Furthermore, the optimization time limit of the MIQP solver can be set as a constant hyperparameter when UniAP calls it. Therefore, the overall computational complexity of UniAP is $\mathcal{O}(\lvert \VB \rvert \lvert \SB\rvert \sqrt{Bd})$.
+ 
+
+
+
+\section{Experiment}
+
+\label{sec:experiment}
+We conduct experiments on five different kinds of environments. \textsc{EnvA} refers to a node~(machine) with 1 Xeon 6248 CPU, 8 V100-SXM2 32GB GPUs, and 472GB memory. \textsc{EnvB} refers to 2 nodes interconnected with 10Gbps networks, where each node has 2 Xeon E5-2620 v4 CPUs, 4 TITAN Xp 12GB GPUs, and 125GB memory. \textsc{EnvC} refers to a node with 8 A100 40GB PCIe GPUs. \textsc{EnvD} has 4 nodes, each with the same configuration as that in \textsc{EnvB}. \textsc{EnvE} is a cloud cluster with 8 nodes and each node has 4 DCUs~(a type of non-NVIDIA GPU).
+
+We evaluate UniAP with five Transformer-based models, BERT-Huge~\citep{devlin_bert_2019}, T5-Large~\citep{raffel_exploring_2020}, ViT-Huge~\citep{dosovitskiy_image_2021}, Swin-Huge~\citep{liu_swin_2021}, and Llama~\citep{touvron_llama_2023,touvron_llama_2023-1}. We follow the common practice of training these transformer-based models. To eliminate factors that affect training throughput, we turn off techniques orthogonal to parallel strategies, such as activation checkpointing~\citep{chen_training_2016}. However, we integrate FP16 mixed precision training~\citep{micikevicius_mixed_2018} for the largest model, Llama, to successfully orchestrate the process.
+
+The experimental evaluation concentrates on two primary metrics: training throughput and strategy optimization time. The former is calculated by averaging throughput from the 10th to the 60th iteration of training, while the latter is determined by measuring the time of the UOP.  
+
+\begin{table*}[t]
+    \caption{Training throughput and strategy optimization time on five Transformer-based models.}
+    \label{tab:throughput_and_optimization_time}
+    \begin{center}
+    \begin{small}
+    \begin{threeparttable}
+    \begin{tabular}{cccccccc}
+    \toprule
+     \multirow{2}[0]{*}{Env.} & \multirow{2}[0]{*}{Model} & \multicolumn{3}{c}{Training throughput (samples/s)} & \multirow{2}[0]{*}{\makecell{Minimum\\speedup}} & \multirow{2}[0]{*}{\makecell{Maximum\\speedup}}\\
+     \cmidrule(r){3-5}
+    & & Galvatron & Alpa & UniAP &  \\
+    \midrule
+   \multirow{4}[0]{*}{\textsc{EnvA}} & BERT-Huge &  \textbf{33.46~$\pm$~0.28 } &  31.56~$\pm$~0.04 &  \textbf{33.46~$\pm$~0.28 } & 1.00 &  1.06 \\
+    & T5-Large & \textbf{23.29~$\pm$~0.04} &  \texttt{MEM}$\times$\tnote{2)} &  \textbf{23.29~$\pm$~0.04} & 1.00 &  1.00 \\
+    & ViT-Huge &   \textbf{109.51~$\pm$~0.07 } &  97.66~$\pm$~1.42 &  \textbf{109.51~$\pm$~0.07 } & 1.00 &  1.12 \\
+    & Swin-Huge & \verb+CUDA+$\times$\tnote{3)} & \verb+N/A+\tnote{4)}  &  \textbf{67.96~$\pm$~0.12 } & \verb+N/A+\tnote{4)} & \verb+N/A+\tnote{4)}\\
+    \midrule
+    \multirow{4}[0]{*}{\textsc{EnvB}}
+    & BERT-Huge &  6.27~$\pm$~0.17 &  8.95~$\pm$~0.06 &  \textbf{10.77~$\pm$~0.13} &  1.20 &  1.71 \\
+    & T5-Large\tnote{1)} &  \textbf{8.06~$\pm$~0.06} & \verb+MEM+$\times$\tnote{2)}  &  7.98~$\pm$~0.05 &  0.99  &  0.99\\
+    & ViT-Huge  &  32.20~$\pm$~0.17 &  38.74~$\pm$~0.20 &  \textbf{45.58~$\pm$~0.54} &  1.18 &  1.41 \\
+    & Swin-Huge &  13.90~$\pm$~0.17 & \verb+N/A+\tnote{4)} &  \textbf{19.08~$\pm$~0.10} &  1.37 &  1.37\\
+    \midrule
+    \textsc{EnvC} & Llama-7B & 1.22~$\pm$~0.01 & \verb+N/A+\tnote{4)} & \textbf{4.63~$\pm$~0.007} & 3.80 & 3.80 \\
+    \midrule
+    \midrule
+    \multirow{2}[0]{*}{Env.} & \multirow{2}[0]{*}{Model} & \multicolumn{3}{c}{Strategy optimization time (min.)} & \multirow{2}[0]{*}{\makecell{Minimum\\speedup}} & \multirow{2}[0]{*}{\makecell{Maximum\\ speedup}}\\
+     \cmidrule(r){3-5}
+    & & Galvatron & Alpa & UniAP &  \\
+    \midrule
+    \multirow{4}[0]{*}{\textsc{EnvA}}
+    & BERT-Huge &  6.44~$\pm$~0.588 &  $>$~40 &  \textbf{0.37~$\pm$~0.002} &  17.29 &  $>$~107.41\\
+    & T5-Large &  12.41~$\pm$~0.122 &  \texttt{MEM}$\times$\tnote{2)} &  \textbf{0.89~$\pm$~0.007} &  13.98 &  13.98\\
+    & ViT-Huge &  6.29~$\pm$~0.464 &  $>$~40 &  \textbf{0.57~$\pm$~0.009} &  10.95 &  $>$~69.60 \\
+    & Swin-Huge &  11.88~$\pm$~0.666 & \verb+N/A+\tnote{4)} &  \textbf{2.16~$\pm$~0.004} &  5.49 &  5.49 \\
+    \midrule
+    \multirow{4}[0]{*}{\textsc{EnvB}}
+    & BERT-Huge &  2.04~$\pm$~0.010 &  $>$~40 &  \textbf{1.51~$\pm$~0.005} &  1.34 &  $>$~26.32\\
+    & T5-Large\tnote{1)} &  2.64~$\pm$~0.110 & \verb+MEM+$\times$\tnote{2)} &  \textbf{0.91~$\pm$~0.005} &  2.90 &  2.90\\
+    & ViT-Huge &  2.37~$\pm$~0.180 &  $>$~40 &  \textbf{1.11~$\pm$~0.011} &  2.14 &  $>$~36.01\\
+    & Swin-Huge &  4.29~$\pm$~0.320 & \verb+N/A+\tnote{4)} &  \textbf{2.29~$\pm$~0.010} &  1.87 &  1.87\\
+    \midrule
+    \textsc{EnvC} & Llama-7B & 6.84~$\pm$~0.055 & \verb+N/A+\tnote{4)} & \textbf{0.58~$\pm$~0.006} & 11.83 & 11.83 \\
+    \bottomrule
+    \end{tabular}
+    \begin{tablenotes}
+    \footnotesize
+    \item[1)] T5-Large tested on \textsc{EnvB} is restricted to 16/16 layers to avoid out-of-memory~(OOM) exceptions.
+    \item[2)] \texttt{MEM}$\times$: OOM exceptions during strategy optimization.
+    \item[3)] \texttt{CUDA}$\times$: CUDA OOM exceptions during model training.
+    \item[4)] The official implementation for Swin-Huge and Llama in Alpa is absent. We have endeavored to adopt the code, yet encountered compilation errors. Consequently, experiments related to these models on Alpa are marked as \texttt{N/A}.
+    \end{tablenotes}
+    \end{threeparttable}
+\end{small}
+\end{center}
+\vskip -0.2in
+\end{table*}
+
+\subsection{Training throughput and strategy optimization time}\label{subsec:experiment:optimization-time-and-throughput}
+We compare the training throughput and strategy optimization time of UniAP with those of the baselines on \textsc{EnvA}, \textsc{EnvB}, and \textsc{EnvC}. For experiments conducted on \textsc{EnvA}, we set the mini-batch size to be 32, 16, 128, and 128 for BERT, T5, ViT, and Swin, respectively. For experiments conducted on \textsc{EnvB}, we set the mini-batch size to be 16, 8, 64, and 32 for these four models, respectively. For the Llama model~\citep{touvron_llama_2023,touvron_llama_2023-1} run on \textsc{EnvC}, we set the mini-batch size to be 8.
+
+We choose Galvatron~\citep{miao_galvatron_2022} and Alpa~\citep{zheng_alpa_2022} as baselines because they have achieved SOTA performance.
+Specifically, Galvatron has surpassed other methods, including PyTorch DDP~\citep{li_pytorch_2020}, Megatron-LM~\citep{narayanan_efficient_2021}, FSDP~\citep{rajbhandari_zero_2020,fairscale_authors_fairscale_2021}, GPipe~\citep{huang_gpipe_2019}, and DeepSpeed 3D~\citep{deepspeed-3d} in terms of training throughput, as reported in the original paper~\citep{miao_galvatron_2022}.
+Furthermore, Alpa utilizes the Just-In-Time~(JIT) compilation feature in JAX and outperforms Megatron-LM and DeepSpeed.
+ 
+Table~\ref{tab:throughput_and_optimization_time} shows the training throughput and strategy optimization time on \textsc{EnvA}, \textsc{EnvB}, and \textsc{EnvC}. On \textsc{EnvA}, UniAP and Galvatron get the same optimal strategy for BERT-Huge, T5-Large, and ViT-Huge, outperforming Alpa in terms of training throughput and strategy optimization time. In addition, UniAP finds a solution for Swin-Huge, while Galvatron encounters CUDA OOM problems. In particular, UniAP achieves a maximum optimization speedup that is 17$\times$ faster than Galvatron and hundreds of times faster than Alpa on BERT-Huge. This is mainly due to the ability of the MIQP solver to search for an optimal strategy on multiple threads, while the dynamic programming based methods like Galvatron and Alpa run on a single thread due to their strong data dependency.
+
+On \textsc{EnvB}, UniAP consistently demonstrates competitive or larger training throughput compared to Galvatron and Alpa. We attribute the performance improvement to the larger strategy space in UniAP. A detailed study of the importance of strategy space is provided in Section~\ref{subsec:experiment:ablation-study}. Furthermore, the strategy optimization time of UniAP is also significantly shorter than the two baseline methods.
+
+On \textsc{EnvC}, UniAP shows an optimization speedup of 11.83$\times$ and a training speedup of 3.80$\times$ compared to Galvatron on Llama. We examine the parallel strategy they adopted. The results show that UniAP employs an 8-stage PP with a micro-batch size of 1, whereas Galvatron employs a 4-stage PP with a micro-batch size of 3 (with the final micro-batch containing 2 samples). Within each PP stage, Galvatron utilizes a 2-way TP. For \textsc{EnvC}, which is equipped with 8 A100 40GB PCIe GPUs, minimizing communication volume is critical. Since PP has significantly less inter-device communication volume than TP, the parallel strategy discovered by UniAP is more reasonable than Galvatron in this case.
+
+
+\subsection{Estimation accuracy}\label{subsec:experiment:performance_modeling}
+Some variables in UniAP and other AP methods are estimated values rather than actual running values. The TPI~(inverse of training throughput) is the most important one. Accurate estimation for TPI or training throughput is crucial for evaluating candidate parallel strategies and ensuring the optimality of the solution. We hereby introduce a metric called \emph{relative estimation error~(REE)} $e$ to quantify the accuracy of the estimated training throughput $\hat{T}$ to the actual training throughput $T$:
+\begin{equation}
+    e(T, \hat{T}) = \frac{|T - \hat{T}|}{T} \times 100\%.
+\end{equation}
+We evaluate the optimal parallel strategies obtained from \textsc{EnvA} and \textsc{EnvB}. Results show that UniAP achieves an average REE of 3.59\%, which is lower than 11.17\% for Galvatron.
+
+\subsection{Scalability}\label{subsec:experiment:scalability}
+\begin{figure}[t]
+\begin{center}
+\begin{subfigure}{0.43\linewidth}
+\centering
+\includegraphics[width=\linewidth]{./scalability_proportional.pdf}
+\caption{Training throughput.}
+\label{fig:scalability:throughput}
+\end{subfigure}
+\hskip 0.2in
+\begin{subfigure}{0.43\linewidth}
+\centering
+\includegraphics[width=\linewidth]{./scalability_time_proportional.pdf}
+\caption{Strategy optimization time.}
+\label{fig:scalability:optimization-time}
+\end{subfigure}
+\caption{Scalability on training throughput and strategy optimization time.}
+\label{fig:scalability}
+\vskip -0.2in
+\end{center}
+\end{figure}
+
+We study the scalability of UniAP using BERT, T5, ViT, and Swin on \textsc{EnvD}. We set the mini-batch sizes for each data point as 8, 4, 32, and 16 times the number of nodes~(denoted as `\#nodes'). The experimental results are shown in Figure~\ref{fig:scalability}. In Figure~\ref{fig:scalability:throughput}, the training throughput of the optimal strategy demonstrate near-linearity as the number of nodes and mini-batch size increase. In Figure~\ref{fig:scalability:optimization-time}, the strategy optimization time matches the complexity analysis in Section~\ref{subsec:method:complexity-analysis}.
+
+Additionally, we use \textsc{EnvE} to scale UniAP to larger clusters and larger models including Llama-13B. UniAP also outperforms other baselines in this experiment.
+
+\subsection{Ablation study}\label{subsec:experiment:ablation-study}
+\begin{table}
+\vskip -0.2in
+\caption{Ablation study on the importance of unifying strategy space.}
+\label{tab:ablation}%
+\begin{center}
+\begin{small}
+\begin{threeparttable}
+    \begin{tabular}{cccc}
+    \toprule
+    \multirow{3}[0]{*}{Model} & \multicolumn{3}{c}{Training throughput (samples/s)} \\
+    \cmidrule(r){2-4}
+          & UniAP (Inter-only) & UniAP (Intra-only) & UniAP \\
+    \midrule
+    BERT-Huge &  \texttt{SOL}$\times$\tnote{1)} &  2.48~$\pm$~0.02 &  \textbf{10.77~$\pm$~0.13} \\
+    T5-Large &  \texttt{SOL}$\times$\tnote{1}   &  2.92~$\pm$~0.01 &  \textbf{9.01~$\pm$~0.06} \\
+    ViT-Huge &  \textbf{45.58~$\pm$~0.54} & \verb+CUDA+$\times$\tnote{2}   &  \textbf{45.58~$\pm$~0.54} \\
+    Swin-Huge &  \textbf{19.08~$\pm$~0.10} &  4.66~$\pm$~0.02 &  \textbf{19.08~$\pm$~0.10} \\
+    \bottomrule
+\end{tabular}%
+\begin{tablenotes}
+    \footnotesize
+    \item[1)] \texttt{SOL}$\times$: No solution after strategy optimization.
+    \item[2)] \texttt{CUDA}$\times$: CUDA OOM exceptions during model training.
+\end{tablenotes}
+\end{threeparttable}
+\end{small}
+\end{center}
+\vskip -0.2in
+\end{table}%
+
+We investigate the importance of the strategy space for the optimality of parallel strategies with an ablation study. Specifically, we constrain the strategy space to inter-layer-only and intra-layer-only strategies and evaluate the training throughput of the resulting optimal strategy on \textsc{EnvB}. We set the mini-batch sizes to be 16, 12, 64, and 32, respectively. 
+
+Results are shown in Table~\ref{tab:ablation}. We can find that constraining the strategy space compromises the optimality of parallel strategies or gets strategies that encounter OOM across different models. 
+Hence, unifying inter- and intra-layer AP for joint optimization is essential and necessary. 
+
+
+
+
+\section{Conclusion}
+
+In this paper, we propose a novel AP method called UniAP to unify inter- and intra-layer AP by MIQP.
+To the best of our knowledge, UniAP is the first parallel method that can jointly optimize the two categories of parallel strategies to find an optimal solution.
+Experimental results show that UniAP can outperform other state-of-the-art baselines to achieve the best performance.
+ 
+
+
+
+
+
+
+
+

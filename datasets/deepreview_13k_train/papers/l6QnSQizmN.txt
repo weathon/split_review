@@ -1,0 +1,322 @@
+\title{Online Reinforcement Learning in Non-Stationary Context-Driven Environments}
+
+\begin{abstract}
+
+We study online reinforcement learning (RL) in non-stationary environments, where a time-varying exogenous context process affects the environment dynamics. Online RL is challenging in such environments due to ``catastrophic forgetting'' (CF). The agent tends to forget prior knowledge as it trains on new experiences. Prior approaches to mitigate this issue assume task labels (which are often not available in practice) or use off-policy methods that suffer from instability and poor performance. 
+
+We present \bigsys (\sys), an online RL approach that combats CF by anchoring policy outputs on old experiences while optimizing the return on current experiences. To perform this anchoring, \sys locally constrains policy optimization using samples from experiences that lie outside of the current context distribution. We evaluate \sys in Mujoco, classic control and computer systems environments with a variety of synthetic and real context traces, and find that it outperforms state-of-the-art on-policy and off-policy RL methods in the non-stationary setting, while achieving results on-par with an ``oracle'' agent trained offline across all context traces.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+\noindent
+{\em --- Those who cannot remember the past are condemned to repeat it. (George Santayana, The Life of Reason, 1905)}
+
+\gls{rl} has seen success in many domains~\cite{mao2017neural, haarnoja2018composable, mao2019learning, marcus2019neo, zhu2020ingredients, haydari2022deeprl}, but real-world deployments have been rare. A major hurdle has been the gap between simulation and reality, where the environment simulators do not match the real-world dynamics. Thus, recent work has turned to applying \gls{rl} in an {\em online} fashion, i.e. continuously training and using an agent in a live environment~\cite{zhang2021loki, gu2021knowledge}.
+
+While online \gls{rl} is difficult in and of itself, it is particularly challenging in {\em non-stationary} environments (also known as continual \gls{rl}~\cite{khetarpal2020towards}), where the characteristics of the environment change over time. A key challenge is \gls{cf}~\cite{MCCLOSKEY1989109}. An agent based on function approximators like \glspl{nn} tends to forget its past knowledge when training sequentially on new non-stationary data. On-policy \gls{rl} algorithms~\cite{sutton_intro_rl} are particularly vulnerable to \gls{cf} in non-stationary environments, since these methods cannot retrain on stale data from prior experiences.
+
+In this paper, we consider problems where the source of the non-stationarity is an observed exogenous {\em context} process that varies over time and exposes the agent to different environment dynamics. Such context-driven environments~\cite{sinclair2023hindsight, mao2018learning, zhang2023robust, Dietterich2018Discovering, pan2022isodream} appear in a variety of applications. Examples include computer systems subject to incoming workloads~\cite{mao2018learning}, locomotion in environments with varying terrains and obstacles~\cite{heess2018emergence}, robots subject to external forces~\cite{pinto2017robust}, and more. In contrast to most prior work, we do not restrict the context process to be discrete, piece-wise stationary or Markov.
+
+Broadly speaking, there are two existing approaches to mitigate \gls{cf} in online learning. One class of techniques are {\em task-based}~\cite{rusu2016progressive, kirkpatrick2017overcoming, schwarz2018progress, farajtabar2019orthogonal,zeng2019continual}. They assume explicit task labels that identify the different context distributions which the agent encounters over time. 
+Task labels make it easier to prevent the training for one context from affecting  knowledge learned for other contexts. 
+In settings where task labels (or boundaries) are not available, a few proposals try to infer the task labels via self-supervised~\cite{nagabandi2019deep} or \gls{cpd} approaches~\cite{Padakandla_2020, alegre2021minimum}. These techniques, however, are brittle when the context processes are difficult to separate and task boundaries are not pronounced~\cite{hamadanian2022demistify}. Our experiments show that erroneous task labels lead to poorly performing agents in such environments (\S\ref{sec:eval}).
+A second category of approaches use off-policy learning~\cite{sutton_intro_rl}, which makes it possible to retrain on past data. These techniques (e.g., Experience Replay~\cite{mnih2013playing}) store prior experience data in a buffer and sample from the buffer randomly to train. Not only does this improve sample complexity, it sidesteps the pitfalls of sequential learning and prevents \gls{cf}. However, off-policy methods come at the cost of increased hyper-parameter sensitivity and unstable training~\cite{duan2016benchmarking, gu2016q, haarnoja2018soft}. This brittleness is particularly catastrophic in an online setting, as we also observe in our experiments (\S\ref{sec:eval}). 
+
+We present \sys (\S\ref{sec:motivation}), an on-policy \gls{rl} algorithm that ``anchors'' policy outputs for old contexts while optimizing for the current context. Unlike prior work, \sys does not rely on task labels and only requires an \gls{ood} detector, i.e., a function that recognizes old experiences that occurred in a sufficiently different context than the current one. \sys maintains a bounded buffer of past experiences, similar to off-policy methods~\cite{mnih2013playing}. But as an on-policy approach, \sys does not use stale experiences to optimize the policy. Instead, it uses past data to {\em constrain} the policy optimization on fresh data, such that the agent's behavior does not change in other contexts. 
+
+We evaluate \sys on several environments with real and synthetic contexts (\S\ref{sec:eval}), and show that it outperforms state-of-the-art on-policy, off-policy and model-based baselines in the online learning setting. We also compare against an ``oracle agent'' that is trained offline on the entire context distribution prior to deployment. The oracle agent does not suffer from \gls{cf}. Among all the online methods, \sys is the closest to this idealized baseline. Our ablation results show that \sys is robust to variations in the \gls{ood} detector's thresholds and works well with small experience buffer sizes.
+
+
+\section{Preliminaries}
+
+\label{sec:background}
+
+\label{subsec:notation}
+\paragraph{Notation.}
+We consider online reinforcement learning in a non-stationary context-driven \gls{mdp}, where the context is observed and exogenous. 
+Formally, at time step $t$ the environment has state $s_t \in \mathcal{S}$ and context $z_t \in \mathcal{Z}$. The agent takes action $a_t\in \mathcal{A}$ based on the observed state $s_t$ and context $z_t$, $a_t=\pi(s_t, z_t)$, and receives feedback in the form of a scalar reward $r_t = r(s_t, z_t, a_t)$, where $r(\cdot, \cdot, \cdot): \mathcal{S}\times\mathcal{Z}\times\mathcal{A} \rightarrow \mathbb{R}$ is the reward function. The environment's state, the context, and the agent's action determine the next state, $s_{t+1}$, according to a transition kernel, $T(s_{t+1}|s_t, z_t, a_t)$. The context $z_t$ is an independent stochastic process, unaffected by states $s_t$ or actions $a_t$. Finally, $d_0$ defines the distribution over initial states ($s_0$). This model is fully defined by the tuple $\mathcal{M}=(\mathcal{S}, \mathcal{Z}, \mathcal{A}, \{z_t\}_{t=1}^{\infty}, T, d_0, r)$. The goal of the agent is to optimize the \emph{return}, i.e. a discounted sum of rewards $R_0 = \sum_{t=0}^{\infty} \gamma^t r_t$. 
+This model is similar to the input-driven environment described in~\cite{mao2018variance}.
+
+\label{subsec:nonstat_rl}
+\paragraph{Non-stationary contexts.}
+The context $z_t$ impacts the environment dynamics and thus a non-stationary context process implies a non-stationary environment. We assume the context process can change arbitrarily: e.g., it can follow a predictable pattern, be i.i.d samples from some distribution, be a discrete process or a multi-dimensional continuous process, experience smooth or dramatic shifts, be piece-wise stationary, or include any mixture of the above. We have no prior knowledge of the context process, the environment dynamics, or access to an offline simulator.
+
+While task labels can be considered contexts, contexts in general are not reducible to task labels since there may be no clear boundary between distinct context behaviors. Examples include time-varying market demand in a supply chain system, incoming request workloads in a virtual machine allocation problem, customer distributions in airline revenue management, etc~\cite{sinclair2023hindsight}.
+
+Our framework is compatible with both infinite-horizon and episodic settings, and we consider both types of problems in our evaluation. In episodic settings, each new episode can differs from prior ones because the context has changed. An example is a robotic grasping task where the position and shape of the object changes in each episode. 
+\label{subsec:online_rl}
+\paragraph{Online \gls{rl}.}
+In most \gls{rl} settings, a policy is trained in a separate training phase. During testing, the policy is fixed and does not change. By contrast, online learning starts with the test phase, and the policy must reach and maintain optimality within this test phase. An important constraint in the online setting is that the agent gets to experience each interaction only once. There is no way to revisit past interactions and try a different action in the same context. This is a key distinction with training in a separate offline phase, where the agent can explore the same conditions many times. Naturally this means that the online learner must explore in the test phase, yielding temporarily low returns, and then enter an exploitation phase. This complicates the definition of a successful online learner. In this work, we primarily seek long-term performance, i.e., that the policy eventually attains high returns. For simplicity, we assume a short grace period in each online learning experiment that allows for exploration without penalty, and we rate the agent's performance after the grace period.
+
+
+\section{Related Work}
+
+\label{sec:related_works}
+
+\paragraph{\gls{cf} in \gls{ml} and Deep \gls{rl}.} Outside of \gls{rl}, three general approaches exist for mitigating \gls{cf}; (1)~regularizing the optimization to avoid memory loss during sequential training~\cite{kirkpatrick2017overcoming, kaplanis2018continual, farajtabar2019orthogonal}; (2)~training separate parameters per task, and expanding/shrinking parameters as necessary~\cite{rusu2016progressive}; (3)~utilizing rehearsal mechanisms, i.e. retraining on original data or generative batches~\cite{isele2018selective, rolnick2019experience, Atkinson_2021}; or combinations of these techniques~\cite{schwarz2018progress}. For a detailed discussion of these approaches to \gls{cf}, refer to~\cite{PARISI201954}.
+
+The first two groups require task labels, and often require each individual task to reach convergence before starting the next task. The \gls{rl} answer to rehearsal is off-policy training (e.g., Experience Replay~\cite{mnih2013playing}). However, off-policy \gls{rl} is empirically unstable and sensitive to hyperparameters due to bootstrapping and function apprroximation~\cite{sutton_intro_rl}, and is often outperformed by on-policy algorithms in online settings~\cite{duan2016benchmarking, gu2016q, haarnoja2018soft}. 
+
+\paragraph{Non-stationarity in \gls{rl}.} A long line of work exists on non-stationary \gls{rl} that explore sub-problems in the space, and a general solution has not been yet been proposed~\cite{khetarpal2020towards}. The most notable class of approaches aim to infer task labels, by learning the transition dynamics of the \gls{mdp}, and detecting a new environment when a surprising sample is observed with respect to the learnt model~\cite{doya2002multiple, rlcd, Padakandla_2020, alegre2021minimum, nagabandi2019deep}. These methods are effective when \gls{mdp} transitions are abrupt and have well-defined boundaries, but prior work observes they are brittle and perform poorly in realistic environments with noisy and hard-to-distinguish non-stationarities~\cite{hamadanian2022demistify}. In contrast to these papers, our work does not rely on estimating task labels and does not assume piece-wise stationarity. For further discussion on non-stationary \gls{rl}, refer to~\cite{khetarpal2020towards}. 
+
+\paragraph{Latent Context Non-stationary.}
+\citet{zintgraf2019fast,caccia2020online,he2020task,poiani2021meta,chen2022adaptive,feng2022factored, ren2022hdpcmdp} study learning amidst non-stationarity due to latent contexts or hidden tasks.
+In our setup, on the other hand, the non-stationarity in the environment is caused by \emph{fully-observed} exogenous context.
+\paragraph{Constrained Optimization.} 
+\sys's constrained optimization formulation is structurally similar to \gls{trpo}~\cite{schulman2015trust}, despite our problem being different than \gls{trpo}. 
+
+
+
+\section{Locally-Constrained Policy Optimization}
+
+\label{sec:motivation}
+
+Our goal is to learn a policy $\pi(\cdot, \cdot)$ that takes action $a_t \sim \pi(s_t, z_t)$, in a context-driven \gls{mdp} characterized by an exogenous non-stationary context process. 
+\paragraph{Illustrative Example.} Consider a simple environment with a discrete context. In this grid-world problem depicted in \Cref{fig:grid_vis}, the agent can move in 4 directions in a 2D grid, and incurs a base negative reward of $-1$ per step until it reaches the terminal exit state or fails to within $20$ steps. The grid can be in two modes; 1) `No Trap' mode, where the center cell is empty, and 2) `Trap Active' mode, where walking into the center cell incurs a return of $-10$. This environment mode is our discrete context and the source of non-stationarity in this simple example. The agent observes its current location and the context, i.e. whether the trap is on the grid or not in every episode (beginning from the start square).
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{0.4\linewidth}
+        \includegraphics[page=1, width=\linewidth]{figures/LCPO_figures-crop.pdf}
+        \caption{}
+        \label{fig:grid_vis_no_trap}
+    \end{subfigure}
+    \hspace{0.4in}
+    \begin{subfigure}{0.4\linewidth}
+        \includegraphics[page=2, width=\linewidth]{figures/LCPO_figures-crop.pdf}
+        \caption{}
+        \label{fig:grid_vis_trap}
+    \end{subfigure}
+    \caption{A simple 3x3 grid-world problem with two modes and the optimal path visualized in blue. \textbf{(a)} In the `No Trap' mode, the center square is safe to pass through. \textbf{(b)} In the `Trap` mode, the agent needs to avoid the trap with a longer path.}
+    \label{fig:grid_vis}
+\end{figure}
+
+\paragraph{\gls{a2c}.} We use the \gls{a2c} algorithm to train a policy for this environment, while its context changes every so often. When in `No Trap' mode, the closest path passes through the center cell, and the best episodic return is $-3$. In the `Trap Active' mode, the center cell's penalty is too high, and we must go left at the blue cell instead, to incur an optimal episodic return of $-5$. \Cref{fig:grid_rew} depicts the episodic return across time and \Cref{fig:grid_out} depicts what fraction of the time the policy makes the correct decision to go up in the blue cell when the context is in `No Trap' mode. As observed, the agent initially learns the correct decision for that cell when training in the `No Trap' mode, but once the context (mode) changes at epoch 4K, it immediately forgets it. When the mode changes back to the initial `No Trap' mode at epoch 16K, the agent behaves sub-optimally (epochs 16K-18K) before recovering.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{\linewidth}
+        \centering
+        \includegraphics[width=0.9\linewidth]{figures/grid_reward_time_series-crop.pdf}
+        \caption{}
+        \label{fig:grid_rew}
+    \end{subfigure}
+    \begin{subfigure}{\linewidth}
+        \centering
+        \includegraphics[width=0.9\linewidth]{figures/grid_pol_time_series-crop.pdf}
+        \caption{}
+        \label{fig:grid_out}
+    \end{subfigure}
+    \caption{\textbf{(a)} Episodic return across time in the grid environment. \textbf{(b)} Probability of going up at the blue cell according to the policy, when at `No Trap' mode. Note that in the `Trap Active' period, the shown probability is not used in the episode, and only measures how much the agent has forgotten since epoch $4K$. LCPO remembers the optimal decision for `No Trap' mode, even when it does not interact with that mode for 12K epochs, and instantly attains optimal returns at epoch 16K when the environment enters `No Trap' mode again.}
+\end{figure}
+
+\paragraph{Key Insight.} Since the context $z_t$ is observed, the agent should be able to distinguish between different environment modes (even without an explicit task label). Therefore, if the agent could surgically modify its policy on the current state-context pairs $<s_t, z_t>$ and leave all other state-context pairs unchanged, it would eventually learn a good policy for all contexts. In fact, tabular RL achieves this trivially in this finite discrete state-context space. To illustrate, we apply a tabular version of \gls{a2c}: i.e., the policy and value networks are replaced with tables with separate rows for each state-context pair (18 total rows). As expected, in this case, the policy output, depicted in \Cref{fig:grid_out}, does not forget to go up in the blue cell in the `No Trap' mode after epoch 4K. This is because when an experience is used to update the table, it only updates the row pertaining to its own state and context, and does not change rows belonging to other contexts.
+
+Can we achieve a similar behavior with neural network function approximators? In general, updating a neural network (say, a policy network) for certain state-context pairs will change the output for all state-context pairs, leading to \gls{cf}. But if we could somehow ``anchor'' the output of the neural network on distinct prior state-context pairs (analogous to the cells in the tabular setting) while we update the relevant state-context pairs, then the neural network would not ``forget''.
+
+\paragraph{\sys.} Achieving the aforementioned anchoring does not require task labels. We only need to know if two contexts $z_i$ and $z_j$ are {\em different}. 
+In particular, let the batch of recent environment interactions $<s_t, z_t, a_t, r_t>$ be $B_{r}$ and let all previous interactions (from possibly different contexts) be $B_{a}$. Suppose we have a difference detector $W(B_a, B_r)$ that can be used to sample experiences from $B_a$ that are not from the same distribution as the samples in the recent batch $B_r$, i.e., the difference detector provides out-of-distribution (OOD) samples with respect to $B_r$. Then, when optimizing the policy for the current batch $B_{r}$, we can constrain the policy's output on experiences sampled via $W(B_a, B_r)$ to not change (see \S\ref{sec:method} for details). We name this approach \bigsys (\sys). The result for \sys is presented in \Cref{fig:grid_out}. While it does not retain its policy as perfectly as tabular \gls{a2c} while in the `Trap Active' mode, it does sufficiently well to recover near instantaneously upon the second switch at epoch 16K.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/ood_vs_cpd-crop.pdf}
+    \caption{A sample context process $z_t$, and detected change-points for two thresholds. It is difficult to tease meaningful task boundaries from this process, but defining an \gls{ood} metric is intuitive.}
+    \label{fig:ood_vs_cpd}
+\end{figure}
+
+\paragraph{Change-Point Detection (CPD) vs. OOD Detection.} \gls{cpd} (and task labeling in general) requires stronger assumptions than \gls{ood} detection. The context process has to be piece-wise stationary to infer task labels and context changes must happen infrequently to be detectable. Furthermore, online \gls{cpd} is sensitive to outliers. In contrast, \gls{ood} is akin to defining a distance metric on the context process and can be well-defined on any context process.
+Consider the context process shown in \Cref{fig:ood_vs_cpd}. We run this context process through a \gls{cpd} algorithm~\cite{alegre2021minimum} for two different sensitivity factors $\sigma_{mbcd}$, and represent each detected change-point with a red vertical line. Not only does a slight increase in sensitivity lead to 34 detected change-points, but these change-points are also not reasonable. There is no obvious way to assign task labels for this smooth process and there aren't clearly separated segments that can be defined as tasks. However, an intuitive \gls{ood} detection method is testing if the distance between $z_i$ and $z_j$ is larger than some threshold, i.e., $|z_i-z_j|>\tau$.
+Altogether, \gls{ood} is considerably easier in practice compared to \gls{cpd}. Note that although the grid-world example~--~and discrete context environments in general~--~is a good fit for \gls{cpd}, this environment was purposefully simple to explain the insight behind \sys.
+
+
+\section{Methodology}
+
+\label{sec:method}
+
+Consider a parameterized policy $\pi_\theta$ with parameters $\theta$. Our task is to choose a direction for changing $\theta$ such that it improves the expected return on the most recent batch of experiences $B_r$, while the policy is `anchored' on prior samples with sufficiently distinct context distributions, $W(B_a, B_r)$.
+
+In supervised learning, this anchoring is straightforward to perform, e.g. by adding a regularization loss that directs the neural network to output the ground truth labels for \gls{ood} samples~\cite{caruana1997multitask}. In the case of an RL policy, however, we do not know the ground truth (optimal actions) for anchoring the policy output. Moreover, using the actions we took in prior contexts as the ground truth is not possible, since the policy may have not converged at those times. Anchoring to those actions may cause the policy to relearn suboptimal actions from an earlier period in training. 
+
+To avoid these problems, \sys solves a constrained optimization problem that forces the policy to not change for \gls{ood} samples. Formally, we consider the following optimization problem:
+
+\begin{equation}
+\label{eqn:sys_goal}
+    \centering
+    \begin{aligned}
+        \min_{\theta}~~ \mathcal{L}_{tot}(\theta; B_r) \triangleq \mathcal{L}_{PG}(\theta; B_r)& + \mathcal{L}_{e}(\theta; B_r)  \\
+        s.t.~~ D_{KL}(\theta_0, \theta; W(B_a, B_r&)) \le c_{anchor} \\
+    \end{aligned}
+\end{equation}
+
+We use the standard definition of policy gradient loss, that optimizes a policy to maximize returns~\cite{schulman2018highdimensional, mnih2016asynchronous, sutton_intro_rl}:
+
+\begin{equation}
+    \centering
+    \begin{aligned}
+        \mathcal{L}_{PG}(\theta; B_r)= \mathbb{E}_{r_t \sim B_r}\left[ \sum_{t=0}^{H} -\gamma^t r_t \right]
+    \end{aligned}
+\end{equation}
+
+We use automatic entropy regularization~\cite{haarnoja2018softapps}, to react to and explore in response to novel contexts. The learnable parameter $\theta_{e}$ is adapted such that the entropy coefficient is $e^{\theta_{e}}$, and the entropy remains close to a target entropy $\bar{\mathcal{H}}$. This worked well in our experiments but \sys could use any exploration method designed for non-stationary context-driven environments.
+
+\begin{equation}
+    \centering
+    \begin{aligned}
+        \mathcal{L}_{e}(\theta; B_r)=
+        e^{\theta_{e}}.
+\left(\mathbb{E}_{s_{t},z_{t} \sim B_r, a_{t}\sim\pi} \left[\log\pi(a_t|s_t,z_t)\right] \right) \\
+    \end{aligned}
+\end{equation}
+
+We use KL-divergence as a measure of policy change, and for simplicity we use $D_{KL}(\theta_0, \theta; W(B_a, B_r))$ as a shorthand for $\mathbb{E}_{s, z \sim W(B_a, B_r)}[D_{KL}(\pi_{\theta_0}(s, z) || \pi_\theta(s, z))]$. Here, $\theta_0$ denotes the current policy parameters, and we are solving the optimization over $\theta$ to determine the new policy parameters.
+
+\begin{algorithm}[t]
+\caption{\sys Training}
+\label{algo:train}
+\begin{algorithmic}[1]
+\STATE initialize parameter vectors $\theta_0$, empty buffer $B_a$
+\FOR{each iteration}
+    \STATE $B_r \gets$ Sample a mini-batch of new interactions
+    \STATE $S_c \gets W(B_a, B_r)$
+    \STATE $v \gets \nabla_{\theta}\mathcal{L}_{tot}(\theta; B_r)\vert_{\theta_0}$
+    \IF {$S_c$ is not empty}
+        \STATE $g(x) := \nabla_{\theta}(x^T\nabla_{\theta}\mathcal{D}_{KL}(\theta, \theta_{old}; S_{c})\vert_{\theta_0})\vert_{\theta_0}$
+        \STATE $v_{c} \gets conjgrad(v, g(\cdot))$
+        \WHILE {$\theta_{old} + v_{c}$ violates constraints}
+            \STATE $v_{c} \gets v_{c}/2$
+        \ENDWHILE
+        \STATE $\theta_0 \gets \theta_0 + v_{c}$
+    \ELSE
+        \STATE $\theta_0 \gets \theta_0 + v_{tot}$
+    \ENDIF
+    \STATE $B_a \gets B_a + B_r$
+    
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Buffer Management.} To avoid storing all interactions in $B_a$ we use reservoir sampling~\cite{vitter1985random}, where we randomly replace old interactions with new ones with probability $\frac{n_{b}}{n_{s}}$, where $n_b$ is the buffer size and $n_s$ is the total interactions thus far. Reservoir sampling guarantees that the interactions in the buffer are a uniformly random subset of the full set of interactions.
+
+\paragraph{Difference detector.} To realize $W(B_a, B_r)$, we treat it as an out-of-distribution detection (OOD) task. A variety of methods can be used for this in practice (\S\ref{sec:eval}). For example, we can compute the Mahalanobis distance~\cite{mahalanobis2018generalized}, i.e. the normalized distance of each experience's context, with respect to the average context in $B_r$, and deem any distance above a certain threshold to be \gls{ood}. To avoid a high computational overhead when sampling from $W(B_a, B_r)$, we sample a mini-batch from $B_a$, and keep the state-context pairs that are \gls{ood} with respect to $B_r$. We repeat this step up to five times. If not enough different samples exist, we do not apply the constraint for that update.
+
+\paragraph{Solving the constrained optimization.} To solve this constrained optimization, we approximate the optimization goal and constraint, and calculate a search direction accordingly (pseudocode in \Cref{algo:train}). Our problem is structurally similar to \gls{trpo}~\cite{schulman2015trust}, though the constraint is quite different. Similar to \gls{trpo}, we model the optimization goal with a first-order approximation, i.e. $\mathcal{L}_{tot}(\theta; \cdot) = \mathcal{L}_0 + (\theta-\theta_0)^T\nabla_{\theta}\mathcal{L}_{tot}(\theta; \cdot)\vert_{\theta_0}$, and the constraint with a second order approximation $D_{KL}(\theta, \theta_0; \cdot)=(\theta-\theta_0)^T\nabla^2_{\theta}D_{KL}(\theta, \theta_0; \cdot)\vert_{\theta_0}(\theta-\theta_0)$. The optimization problem can therefore be written as:
+
+\begin{equation}
+    \begin{aligned}
+        \min_{\theta}~~ (\theta-\theta_0)^T &v \\
+        s.t.~~ (\theta-\theta_0)^T A(\theta-&\theta_0) \le c_{anchor} \\
+    \end{aligned}
+\end{equation}
+
+where $A_{ij}=\frac{\partial}{\partial \theta_i}{\frac{\partial}{\partial \theta_j}} D_{KL}(\theta, \theta_0; W(B_a, B_r))$, and $v=\nabla_{\theta}\mathcal{L}_{tot}(\theta; \cdot)\vert_{\theta_0}$. This optimization problem can be solved using the conjugate gradient method followed by a line search as described in TRPO~\cite{schulman2015trust}.
+
+\paragraph{Bounding policy change.} The above formulation does not bound policy change on the current context, which could destabilize learning. We could add a second constraint, i.e. \gls{trpo}'s constraint, $D_{KL}(\theta_0, \theta; B_r) \le c_{recent}$, but having two second order constraints is computationally expensive.
+Instead, we guarantee the \gls{trpo} constraint in the line search phase (lines 9--10 in \Cref{algo:train}), where we repeatedly decrease the gradient update size until both constraints are met. 
+
+
+\section{Evaluation}
+
+\label{sec:eval}
+We evaluate \sys across six environments: four from Gymnasium Mujoco~\cite{towers2023gymnasium}, one from Gymnasium Classic Control~\cite{towers2023gymnasium}, and a straggler mitigation task from computer systems~\cite{hamadanian2022demistify}. These environments are subject to synthetic or real context processes that affect their dynamics. Our experiments aim to answer the following questions: \textbf{(1)} How does \sys compare to state-of-the-art on-policy, off-policy, model-based baselines and pre-trained oracle policies (\S\ref{sec:all_eval})? 
+\textbf{(2)} How does the maximum buffer size $n_b=|B_a|$ affect \sys (\S\ref{sec:ood_size_eval})?
+\textbf{(3)} How does the accuracy of the \gls{ood} sampler $W(\cdot, \cdot)$ affect \sys (\S\ref{sec:ood_agg_eval})?
+\paragraph{Baselines.} We consider the following approaches. 
+\textbf{(1) \gls{mbcd}}~\cite{alegre2021minimum}: This approach is the state-of-the-art technique for handling piece-wise stationary environments without task labels. It trains models to predict environment state transitions, and launches new policies when the current model is inaccurate in predicting the state trajectory. The underlying learning approach is \gls{sac}~\cite{haarnoja2018soft}. 
+\textbf{(2) \gls{mbpo}}~\cite{janner2021trust}: A model-based approach that trains an ensemble of experts to learn the environment model, and generates samples for an \gls{sac}~\cite{haarnoja2018soft} algorithm. If the model is accurate, it can fully replay prior contexts, thereby avoiding catastrophic forgetting. 
+\textbf{(3) Online \gls{ewc}}~\cite{chaudhry2018riemannian, schwarz2018progress}: \gls{ewc} regularizes online learning with a Bayesian approach assuming task indices, and online \gls{ewc} generalizes it to task boundaries. To adapt online \gls{ewc} to our problem, we update the importance vector and average weights using a weighted moving average in every time step. The underlying learning approach is \gls{sac}~\cite{haarnoja2018soft}.
+\textbf{(4) On-policy \gls{rl}}: On-policy \gls{rl} is susceptible to \gls{cf}, but more stable in online learning compared to off-policy \gls{rl} algorithms. We compare with \gls{a2c}~\cite{mnih2016asynchronous} and \gls{trpo} (single-path)~\cite{schulman2015trust}, with \gls{gae}~\cite{schulman2018highdimensional} applied. Note that \gls{trpo} vine is not possible in online learning, as it requires rolling back the environment world.
+\textbf{(5) Off-policy \gls{rl}}: Off-policy \gls{rl} is potentially capable of overcoming \gls{cf} due to replay buffers, at the cost of unstable training. We consider \gls{ddqn}~\cite{doubledqn} and \gls{sac} (with automatic entropy regularization, similar to \sys)~\cite{haarnoja2018soft}.
+\textbf{(6) Oracle \gls{rl}}: To establish an upper-bound on the best performance that an online learner can achieve, we train \emph{oracle policies}. We allow oracle policies to have unlimited access to the contexts and environment dynamics, i.e. they are able to replay any particular environment and context as many times as necessary. Since oracle policies can interact with multiple contexts in parallel during training, they do not suffer from \gls{cf}. In contrast, all other baselines (and \sys) are only allowed to experience contexts sequentially as they occur over time and must adapt the policy on the go. We report results for the best of four oracle policies with the following model-free algorithms: \gls{a2c}~\cite{mnih2016asynchronous}, \gls{trpo} (single-path)~\cite{schulman2015trust}, \gls{ddqn}~\cite{doubledqn} and \gls{sac}~\cite{haarnoja2018soft}.
+
+\paragraph{Experiment Setup.} We use 5 random seeds for gymnasium and 10 random seeds for the straggler mitigation experiments, and use the same hyperparameters for \sys in all environments and contexts. Hyperparameters and neural network structures are noted in Appendices \S\ref{sec:pend_train_params} and \S\ref{sec:lbalance_train_params}. These experiments were conducted on a machine with 2 AMD EPYC 7763 CPUs (256 logical cores) and 512 GiB of RAM. With 32 concurrent processes, the experiments finished in $\sim$364 hours.
+
+\paragraph{Environment and Contexts.} We consider six environments: Modified versions of Pendulum-v1 from the classic control environments, InvertedPendulum-v4, InvertedDoublePendulum-v4, Hopper-v4 and Reacher-v4 from the Mujoco environments~\cite{towers2023gymnasium}, and a straggler mitigation environment~\cite{hamadanian2022demistify}. In the gym environments, the context is an exogenous ``wind'' process that creates external force on joints and affects movements. We append the external wind vectors from the last 3 time-steps to the observation, since the agent cannot observe the external context that is going to be applied in the next step, and a history of prior steps helps with the prediction. We create 4 synthetic context sequences with the Ornstein–Uhlenbeck process~\cite{uhlorn}, piece-wise Gaussian models, or hand-crafted signals with additive noise. These context processes cover smooth, sudden, stochastic, and predictable transitions at short horizons. For the straggler mitigation environments, we use workloads provided by the authors in~\cite{hamadanian2022demistify}, that are from a production web framework cluster at AnonCo, collected from a single day in February 2018.
+
+\paragraph{\gls{ood} detection.} We set the buffer size $n_b$ to 1\% of all samples, which is $n_b\le200K$. To sample \gls{ood} state-context pairs $W(B_a, B_r)$, we use distance metrics and thresholds. For gym environments where the context is a wind process, we use L2 distance, i.e. if $\overline{w_r}=\mathbb{E}_{w \sim B_r}[w]$ is the average wind vector observed in the recent batch $B_r$, we sample a minibatch of states in $B_a$ where $W(B_a, B_r)=\{w_i|\forall w_i \in B_a: \lVert w_i - \overline{w_r} \rVert_2 > \sigma\}$. There exist domain-specific models for workload distributions in the straggler mitigation environment, but we used Mahalanobis distance as it is a well-accepted and general approach for outlier detection in prior work~\cite{lee2018simple, podolskiy2021revisiting}. Concretely, we fit a Gaussian multivariate model to the recent batch $B_r$, and report a minibatch of states in $B_a$ with a Mahalanobis distance further than $\sigma$ from this distribution. 
+
+
+\subsection{Results}
+\label{sec:all_eval}
+
+\paragraph{Results.} To evaluate across gymnasium environments, we score online learning baselines with {\em Normalized Return}, i.e., a scaled score function where 0 and 1 are the minimum and maximum return across all agents. \sys maintains a lead over baselines, is close to the best-performing oracle policy, all while learning online and sequentially. \gls{mbcd} struggles to tease out meaningful task boundaries. In some experiments, it launches anywhere between 3 to 7 policies just by changing the random seed. This observation is in line with \gls{mbcd}'s sensitivity in \S\ref{sec:motivation}.
+
+\gls{mbpo} performed poorly, even though we verified that its learned model of the environment is highly accurate.\footnote{We tried a variant of MBPO that uses the actual environment rather than a learned model to produce counterfactual interactions. It performed similarly to MBPO, with further details in~\S\ref{sec:imbpo_eval}. Thus \gls{mbpo} would not benefit from more complicated online learning algorithms such as online meta-learning~\cite{finn2019online}.}
+The reason is the way that MBPO samples experiences for training. At every iteration, MBPO samples a batch of actual interactions from its experience buffer and generates hypothetical interactions from them. These hypothetical interactions amass in a second buffer, which is used to train an \gls{sac} agent. During the course of training, the second buffer accumulates more interactions generated from samples from the start of the experiment compared to recent samples. This is not an issue when the problem is stationary, but in non-stationary \gls{rl} subject to an context process, this leads to over-emphasis of the context processes encountered earlier in the experiment. As such, \gls{mbpo} fails to even surpass \gls{sac}. Prior work has observed the sensitivity of off-policy approaches to such sampling strategies~\cite{isele2018selective, hamadanian2022demistify}. In our experiments, we also observe that the on-policy \gls{a2c} usually outperforms the off-policy \gls{sac} and \gls{dqn}.
+
+\input{sections/tables/lb_results.tex}
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\linewidth]{figures/windy_return_cdf-crop.pdf}
+    \caption{
+    Normalized episodic returns, where 0 and 1 denote the lowest and highest returns among agents. \sys outperforms all online agents, and remains the closest to oracles.}
+    \label{fig:windy_cdf_returns}
+\end{figure}
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\linewidth]{figures/windy_ewc_bars_vert-crop.pdf}
+    \caption{
+    Pendulum-v1 episodic returns and 95\% confidence bounds of Online EWC with 12 hyperparameter trials. Hyperparameters are labeled as $\{\alpha, \beta^{-1}\}$, where $\alpha$ is the regularization strength and $\beta$ is the averaging weight. The optimal online EWC hyperparameter is sensitive to the context, but \sys is better even if online \gls{ewc} is tuned per context.}
+    \label{fig:windy_pend_ewc_returns}
+\end{figure}
+
+Online \gls{ewc} applies a regularization loss $\mathcal{L}_{ewc}=\alpha\lvert\lvert \theta_t - \theta_{t-1}^* \rvert\rvert^2_{F_{t-1}^*}$ to the training loss, using a running average $F_t^*$ of the diagonal of the Fisher Information Matrix (FIM), and a running average of the parameters $\theta_t^*$. The running average $F_t^*$ is updated with a weighted average $F_t^*=(1-\beta)F_{t-1}^*+\beta F_t$, where $F_t$ is the diagonal of the FIM respective to the recent parameters and samples.\footnote{We deviate from the original notations $\{\lambda, \gamma\}$~\cite{rusu2016progressive}, since they could be confused with the MDP discount factor $\gamma$ and GAE discount factor $\lambda$~\cite{schulman2018highdimensional}.} Similarly, the running average $\theta_t^*$ uses the same parameter $\beta$.
+
+Online \gls{ewc} may constrain the policy output to remain constant on samples in the last $\approx\beta^{-1}$ epochs, but it has to strike a balance between how fast the importance metrics are updated with the newest FIM (larger $\beta$) and how long the policy has to remember its training (smaller $\beta$). This balance will ultimately depend on the context trace and how frequently they evolve. We tuned $\alpha$ and $\beta$ on Pendulum-v1 for all contexts, trying $\alpha \in \{0.05, 0.1, 0.5, 1.0, 10, 100, 1000\}$ and $\beta^{-1} \in \{1M, 3M, 10M\}$. There is no universal $\beta$ that works well across all contexts and online \gls{ewc} would not perform better than \sys even if tuned to each context trace individually. We ultimately chose $\beta^{-1}=3M$ samples to strike a balance across all contexts, but it struggled to even surpass \gls{sac} on other environments. 
+
+For the straggler mitigation environment, \Cref{table:lbalance_simple} presents the latency metric (negative reward) over two workloads. Recall that this environment uses real-world traces from a production cloud network. The overall trends are similar to the gymnasium experiments, with LCPO outperforming all other baselines. This table includes three variants of \sys, that will be discussed further in \S\ref{sec:ood_agg_eval}.   
+
+\subsection{Sensitivity to Buffer Size}
+\label{sec:ood_size_eval}
+
+\sys uses Reservoir sampling~\cite{vitter1985random} to maintain a limited number of samples $n_b$. The full experiment has 8--20M samples. \sys maintains its high performance, even with as little as $n_b=500$ samples, but drops below this point. This is not surprising, as the context traces do not change drastically at short intervals, and even 500 randomly sampled points from the trace should be enough to have a representation over all the trace. However, it is likely that with more complicated and high-dimensional contexts, a higher buffer size would be necessary. 
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\linewidth]{figures/windy_return_buffer-crop.pdf}
+    \caption{
+    Normalized returns of LCPO in gymnasium environments with various buffer sizes. \sys loses performance with $n_b<500$.}
+    \label{fig:windy_buffer_size}
+\end{figure}
+\subsection{Sensitivity to OOD metric}
+\label{sec:ood_agg_eval}
+
+\sys applies a constraint to \gls{ood} state-context pairs, as dictated by the \gls{ood} sampler $W(B_a, B_r)$. We vary the Mahalanobis distance threshold $\sigma$, the threshold that the \gls{ood} method uses in sampling, and monitor the normalized return for the straggler mitigation environment. \sys Agg, \sys Med and \sys Cons use $\sigma=5$, $6$ and $7$, and a higher value for $\sigma$ yields more conservative \gls{ood} samples (i.e., fewer samples are detected as \gls{ood}). The difference between these three is significant: The model in \sys Agg allows for $26.7\times$ more samples to be considered \gls{ood} compared to \sys Cons. \Cref{table:lbalance_simple} provides the normalized return for \sys with varying thresholds, along with baselines. Notably, all variations of \sys achieve similar results.
+
+
+\section{Discussion and Limitations}
+
+\label{sec:limits}
+
+\paragraph{Network Capacity.}
+In general, online learning methods with bounded parameter counts will reach the function approximator's (neural network's) maximum representational capacity. \sys is not immune from this, as we do not add parameters with more context traces. However, neither are oracle agents. To isolate the effect of this capacity and \gls{cf}, we compare against oracle agents, rather than single agents trained on individual tasks or context traces~\cite{he2020task}. This ensures a fair evaluation that does not penalize online learning for reaching the capacity ceiling. 
+
+\paragraph{Exploration.}
+\sys focuses on mitigating catastrophic forgetting in non-stationary \gls{rl}. An orthogonal challenge in this setting is efficient exploration, i.e. to explore when the context distribution has changed but only once per new context. Our experiments used automatic entropy tuning for exploration~\cite{haarnoja2018soft}. While empirically effective, this approach was not designed for non-stationary problems, and \sys may benefit from a better exploration methodology such as curiosity-driven exploration~\cite{pathak2017curiosity}. 
+
+\paragraph{Efficient Buffer Management.}
+We used Reservoir Sampling~\cite{vitter1985random}, which maintains a uniformly random buffer of all observed state-context samples so far. Future work could explore more efficient strategies that selectively store or drop samples based on their context, e.g., to maximize sample diversity.
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+
+We proposed and evaluated \sys, a simple approach for learning policies in non-stationary context-driven environments. Using \sys requires two conditions: (1) the non-stationarity must be induced by an exogenous observed context process; and (2) a similarity metric is required that can inform us if two contexts come from noticeably different distributions (\gls{ood} detection). This is less restrictive than prior approaches that require either explicit or inferred task labels. Our experiments showed that \sys outperforms state-of-the-art baselines on several environments with real and synthetic context processes. 
+
+
+\section{Broader Impact}
+
+
+Our work advances the field of reinforcement learning. Online learning in non-stationary environments is an important hurdle for deploying RL agents in the real world. There are many potential societal consequences, none which we feel must be specifically highlighted here.
+
+
+
+
+

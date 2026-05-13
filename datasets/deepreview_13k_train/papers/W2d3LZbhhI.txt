@@ -1,0 +1,271 @@
+\title{A Unified Sampling Framework for Solver Searching of Diffusion Probabilistic Models}
+
+\begin{abstract}
+Recent years have witnessed the rapid progress and broad application of diffusion probabilistic models (DPMs). Sampling from DPMs can be viewed as solving an ordinary differential equation (ODE). Despite the promising performance, the generation of DPMs usually consumes much time due to the large number of function evaluations (NFE). Though recent works have accelerated the sampling to around 20 steps with high-order solvers, the sample quality with less than 10 NFE can still be improved. In this paper, we propose a unified sampling framework (\frameworkshort{}) to study the optional strategies for solver. Under this framework, we further reveal that taking different solving strategies at different timesteps may help further decrease the truncation error, and a carefully designed \emph{solver schedule} has the potential to improve the sample quality by a large margin. Therefore, we propose a new sampling framework based on the exponential integral formulation that allows free choices of solver strategy at each step and design specific decisions for the framework. Moreover, we propose \nameshort{}, a predictor-based search method that automatically optimizes the solver schedule to get a better time-quality trade-off of sampling. We demonstrate that \nameshort{} can find outstanding solver schedules which outperform the state-of-the-art sampling methods on CIFAR-10, CelebA, ImageNet, and LSUN-Bedroom datasets. Specifically, we achieve 2.69 FID with 10 NFE and 6.86 FID with 5 NFE on CIFAR-10 dataset, outperforming the SOTA method significantly. We further apply \nameshort{} to Stable-Diffusion model and get an acceleration ratio of 2$\times$, showing the feasibility of sampling in very few steps without retraining the neural network.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Diffusion probabilistic models (DPMs) ~\citep{2015diffusion, ddpm, sde} have emerged as a new generative modeling paradigm in recent years. %It surpasses traditional generative models such as Variational Auto-Encoders (VAE)\citep{vae}, Auto-regressive Models\citep{autoregress}, and Generative Adversarial Networks (GAN)~\citep{gan} in terms of data generation quality and likelihood estimation, thus drawing widespread attention. %DPMs have achieved impressive performance on various tasks, including image generation ~\citep{ddpm, diffusionbeatgan, ldm}, speech generation~\citep{wavegrad, diffwave}, and video generation~\citep{videodiff}.
+DPMs model the probability distribution through training a neural network to estimate the score function or other equivalent form along pre-defined forward diffusion stochastic differential equations (SDEs) ~\citep{sde}. Sampling from DPMs can be viewed as solving the corresponding reverse diffusion SDEs~\citep{sde, ddpm} or the diffusion ODEs~\citep{sde, ddim} by discretizing the continuous timesteps.
+
+Despite the high generation ability, the main drawback of DPMs is the slow sampling speed due to the large number of discretized timesteps for the numerical accuracy of the DE solver~\citep{sde, ddpm} with neural inference on each step. Therefore, accelerating the sampling process of DPMs is very meaningful.
+
+Current work focusing on decreasing the DPM sampling steps can be divided into two categories. The first of them needs retraining of the neural network~\citep{distill, pd, on_distill, consistency_model}, which takes significant extra costs, especially for large models like ~\citet{ldm}. The other branch of works attempts to design efficient solvers of differential equations (DEs) to accelerate DPMs without retraining the existing off-the-shelf models~\citep{ddim, dp, analytic-dpm, pndm, dpm-solver, dpm-solver++, deis, gddim,  unipc}. State-of-the-art methods utilize the equivalent exponential integral form of the reverse diffusion ODE, accurately calculating the linear term while estimating the integral term through various high-order numerical methods~\citep{deis, dpm-solver, dpm-solver++, unipc}. These methods can reduce the number of steps to 15$\sim$20 steps, but the performance decreases rapidly with lower than 10 steps.
+
+We notice that many solving strategies of these solvers are empirically set and kept constant along the sampling process except for a few special timesteps, leading to suboptimal performance with inadequate timesteps. In this paper, to systematically study the impact of these strategies, we propose a unified sampling framework based on the exponential integral form of the diffusion ODE, named \frameworkshort{}, which splits the solving process of one step into independent decisions of several components, including the choice of 1. \emph{timestep}, 2. \emph{starting point of the current step}, 3. \emph{prediction type of the neural network}, 4. \emph{order of Taylor expansion}, 5. \emph{derivative estimation method}, and 6. \emph{usage of ODE correctors}. Based on this framework, we reveal that the quality and efficiency of training-free samplers can be further improved by designing appropriate \emph{solver schedules}, motivated by the key observation that the suitable solving strategies vary among different timesteps. Therefore, \emph{solver schedules}, which means the different solving strategies assigned to each timestep, is very important for the sample quality. Our proposed framework can incorporate the existing diffusion solvers by assigning corresponding decisions to those components and allows the ensemble of different solving strategies in the timestep dimension, enabling sufficient potential to outperform existing sampling methods. In addition, we also design new strategies different from existing diffusion solvers for the derivative estimation component, making the proposed sampling framework more promising.
+
+However, designing solver schedules is difficult due to the vast decision space. To address this problem, we propose \nameshort{} to search for optimal solver schedules automatically. We construct a performance predictor to enable the fast evaluation of one solver schedule and use it to guide a multi-stage search process to find well-performing solver schedules under a certain budget of number of function evaluation (NFE).
+Our contributions are summarized as follows:
+\begin{packeditemize}
+\item We propose a new sampling framework for DPMs, called \frameworkshort{}, which unifies existing diffusion ODE solvers based on exponential integral, to systematically and conveniently study the strategies chosen for diffusion samplers. \update{Based on this framework, we design some new solver strategies, including using different solver strategies across timesteps, low-order estimation for derivatives, more types of scaling methods and searchable timesteps.}
+\item We propose a predictor-based multi-stage search algorithm, \nameshort{}, to search for the well-performing solver schedule under a certain NFE budget. Our method can directly utilize off-the-shelf DPMs without any retraining of the diffusion neural network \update{and find outstanding solver schedules with a moderate search cost, demonstrating its practical applicability.}
+\item We experimentally validate our method on plenty of unconditional datasets, including CIFAR-10~\citep{cifar10}, CelebA~\citep{celeba}, ImageNet-64~\citep{imagenet} and LSUN-Bedroom~\citep{lsun}. Our searched solver schedules outperform the SOTA diffusion sampler~\citep{dpm-solver++, unipc} by a large margin with very few NFE, e.g., 6.86 v.s. 23.44 on CIFAR-10 with only 5 NFE. We further apply \nameshort{} to Stable-Diffusion~\citep{ldm} models, achieve 2$\times$ (from 10 NFE to 5 NFE) acceleration without sacrificing the performance on text-to-image generation task on MS-COCO 256$\times$256 dataset~\citep{mscoco}. \update{Based on the experimental results, we summarize some knowledge to guide future schedule design.}
+\end{packeditemize}
+
+
+\section{Related work}
+
+\subsection{Diffusion Probabilistic Model}
+Diffusion Probabilistic Models (DPMs)~\citep{2015diffusion, ddpm, sde} are used to construct the probability distribution $q(x_0)$ of a $D$-dimension random variable $x_0\in\mathbb{R}^D$. DPMs define a forward diffusion process to add noise to the random variable $x_0$~\citep{sde} progressively:
+\begin{equation}\label{forward_sde}
+\mathrm{d}x_t=f(x_t, t)\mathrm{d}t+g(t)\mathrm{d}w_t,
+\end{equation}
+where $x_t$ stands for the marginal distribution at time $t$ for $t\in[0,T]$, and $x_0$ obeys the target distribution $q(x_0)$. $w_t$ is the standard Wiener process. When $f(x_t, t)$ is a affine form of $x_t$, the marginal distribution of $x_t$ given $x_0$ can be written as~\citep{sde}:
+\begin{equation}
+q(x_t|x_0)=\mathcal{N}(x_t|\alpha_tx_0,\sigma^2_t\textit{\textbf{I}}),
+\end{equation}
+where $\alpha_t^2/\sigma_t^2$ is called \emph{signal-to-noise ratio} (SNR), which is a strictly decreasing function of $t$ and approximately equals $0$ when $t=T$. The forward diffusion process \cref{forward_sde} has a reverse probability flow ODE~\citep{sde, ddim}:
+\begin{equation}\label{pf_ode}
+\mathrm{d}x_t=[f(t)x_t-\frac{1}{2}g^2(t)\nabla_x\mathrm{log}q(x_t)]\mathrm{d}t,
+\end{equation}
+where $x_T\sim\mathcal{N}(x_t|0,\textit{\textbf{I}})$. The ODE has two equivalent forms w.r.t. noise prediction network $\epsilon_\theta$ and data prediction network $x_\theta$, which are more commonly used for fast sampling:
+\begin{equation}\label{pf_ode_noise}
+\mathrm{d}x_t=(f(t)x_t+\frac{g^2(t)}{2\sigma_t}\epsilon_\theta(x_t, t))\mathrm{d}t,
+\end{equation}
+\begin{equation}\label{pf_ode_data}
+\mathrm{d}x_t=((f(t)+\frac{g^2(t)}{2\sigma^2_t})x_t-\frac{\alpha_t g^2(t)}{2\sigma^2_t}x_\theta(x_t, t))\mathrm{d}t.
+\end{equation}
+It can be proved that the marginal distribution of $x_t$ in \cref{forward_sde} equals the distribution of $x_t$ in  \cref{pf_ode}~\citep{1982sde}. Thus, sampling from DPMs can be viewed as solving the above ODEs.
+\subsection{Training-Free Samplers}
+One major drawback of DPMs is the large number of discretized timesteps needed for numerical solvers to ensure the sample quality. To handle such an issue, training-free samplers for the ODE \cref{pf_ode} are proposed to achieve quicker convergence~\citep{sde, ddim, pndm, deis, dpm-solver, dpm-solver++, unipc}.
+
+\subsubsection{Low Order Samplers}
+The early samplers can be viewed as low-order solvers of the diffusion ODE~\citep{ddim, pndm}. \textbf{DDIM} \citep{ddim} proposes the following formula for the update of one step: $x_{t}=\sqrt{\alpha_{t}}\frac{x_{s}-\sqrt{1-\alpha_{s}}\epsilon_\theta(x_{s}, s)}{\sqrt{\alpha_{s}}}+\sqrt{1-\alpha_{t}}\epsilon_\theta(x_{s}, s).$ \textbf{PNDM} \citep{pndm} proposes to replace the neural term $\epsilon_\theta(x_s, s)$ in the DDIM formula with a new term $\frac{1}{24}(55\epsilon_s-59\epsilon_{s-\delta}+37\epsilon_{s-2\delta}-9\epsilon_{s-3\delta})$ inspired by Adams method. The DDIM formula is a 1-st order discretization to the diffusion ODE \cref{pf_ode} and thus is not efficient enough due to the inadequate utilization of high-order information. 
+
+\subsubsection{Exponential-Integral-Based Samplers}
+\label{sec:rw_ei_sampler}
+The solution $x_t$ of the diffusion ODE \cref{pf_ode} at timestep $t$ from timestep $s$ can be analytically computed using the following  exponentially weighted integral~\citep{dpm-solver}
+\begin{equation}\label{ei}
+x_t=\frac{\alpha_t}{\alpha_s}x_s-\alpha_t\int^{\lambda_t}_{\lambda_s}e^{-\lambda}\epsilon_{\theta}(x_{\lambda},\lambda)\mathrm{d}\lambda.
+\end{equation}
+The linear term $\frac{\alpha_t}{\alpha_s}x_s$ can be accurately computed and the high order numerical methods can be applied to the integral term $\alpha_t\int^{\lambda_t}_{\lambda_s}e^{-\lambda}\epsilon_{\theta}(x_{\lambda},\lambda)\mathrm{d}\lambda$, improving the sample speed dramatically than low-order formulas. The following methods apply different strategies to estimate the integral term.
+
+\textbf{DEIS} \citep{deis} uses Lagrange outer interpolation to estimate the integrand.
+Then, the exponential integral can be computed approximately since the integral of a polynomial can be easily computed. Additionally, DEIS computes this integral in $t$ domain rather than $\lambda$.
+
+\textbf{DPM-Solver} ~\citep{dpm-solver} utilizes the Taylor expansion of the exponential integral as follows to estimate this term.
+\begin{equation}\label{ei_taylor}
+x_t=\frac{\alpha_t}{\alpha_s}x_s-\alpha_t\sum^{k-1}_{n=0}\epsilon_\theta^{(n)}(x_{\lambda_s},\lambda_s)\int^{\lambda_t}_{\lambda_s}e^{-\lambda}\frac{(\lambda-\lambda_s)^n}{n!}\mathrm{d}\lambda+\mathcal{O}((\lambda_t-\lambda_s)^{k+1}).
+\end{equation}
+Additionally, \citet{dpm-solver} proposes to discretize the timesteps with uniform logSNR, which has empirically better performance. \textbf{DPM-Solver++}~\citep{dpm-solver++} introduces different strategies under the same Taylor expansion framework, e.g., multi-step solver and data prediction neural term.
+
+\textbf{UniPC} ~\citep{unipc} introduces correcting strategy to the Taylor expansion framework. After computing $x_t$ through \cref{ei_taylor}, UniPC uses the newly computed function evaluation $\epsilon_\theta(x_t, \lambda_t)$ to correct the value of $x_t$, which does not consume extra NFE as $\epsilon_\theta(x_t, \lambda_t)$ is calculated only once.
+
+\subsection{AutoML}
+AutoML methods aim to automatically decide the optimal configurations for machine learning systems. The decidable elements in AutoML works include training hyperparameters~\citep{pbt}, model selection~\citep{oboe, omsdpm}, neural architecture~\citep{rlnas}, etc. 
+Predictor-based search methods~\citep{snoek2012practical} are widely used in the AutoML field to accelerate the optimization. In predictor-based search, a predictor is trained with evaluated configuration-objective pairs, and then used to predict the objectives for new configurations.
+
+
+\section{A Unified Sampling Framework}
+
+
+In this section, we propose a unified sampling framework called \frameworkshort{} based on exponential integral in the $\lambda$ domain. We introduce our framework by describing the steps of solving the diffusion ODE \cref{pf_ode} and listing all optional strategies and tunable hyperparameters of the sampling process. 
+
+\subsection{Solving Strategy}
+\label{sec:framework}
+
+To solve the diffusion ODE \cref{pf_ode} without closed-form solutions, one should discretize the continuous time into timesteps and calculate the trajectory values at each timestep. Therefore, the first step of solving the diffusion ODE is to determine a \textbf{discretization scheme} $[t_0, t_1, \cdots, t_N]$, where $\varepsilon =t_0<t_1<\cdots <t_N=T$. Then consider a timestep $t\in[t_0, \cdots, t_{N-1}]$, exponential integral has been validated to be an effective method of computing $x_t$ due to the semi-linear property~\citep{deis, dpm-solver, dpm-solver++, unipc}, especially in the $\lambda$ domain. We follow the Taylor expansion of \cref{ei} in $\lambda$ domain~\citep{dpm-solver} to estimate the integral term, and summarize the strategies that can be applied to numerically compute the expansion as follows.
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.7\linewidth]{figure/framework.png}
+  \caption{The sampling process of \frameworkshort{} and all searchable strategies.} 
+  \label{fig:fw}
+\end{figure}
+
+\textbf{Prediction type of neural network}. Typically, the neural network is trained with denoising objective~\citep{ddpm} and the corresponding diffusion ODE writes as~\cref{pf_ode_noise}. It can be proved that \cref{ei} is the accurate solution of \cref{pf_ode_noise} (see \cref{sec:add_derive}). Denote that $s$ is another timestep before $t$ and $h=\lambda_t-\lambda_s$, the Taylor expansion of \cref{ei} can be written as~\citep{dpm-solver}: 
+\begin{equation}\label{taylor_expansion_noise}
+x_t=\frac{\alpha_t}{\alpha_s}x_s-\sigma_t\sum_{k=0}^nh^{k+1}\varphi^{\epsilon}_{k+1}(h)\epsilon^{(k)}_{\theta}(x_s, s)+\mathcal{O}(h^{n+2}),
+\end{equation}
+where $\varphi^{\epsilon}_k$ satisfies $\varphi^{\epsilon}_{k+1}(h)=\frac{\varphi^{\epsilon}_k(h)-1/k!}{h}$, and $\varphi^{\epsilon}_0(h)=e^h$. Alternatively, the neural network can be a \emph{data prediction model} $x_\theta(x_t, t)$, whose relationship with the noise prediction model $\epsilon_\theta(x_t, t)$ is given by $x_\theta(x_t, t):=\frac{x_t-\sigma_t\epsilon_\theta(x_t, t)}{\alpha_t}$~\citep{variational, dpm-solver++}. The corresponding diffusion ODE w.r.t. data prediction model writes as \cref{pf_ode_data}, whose Taylor expansion is given below:
+\begin{equation}\label{taylor_expansion_data}
+x_t=\frac{\sigma_t}{\sigma_s}x_s+\alpha_t\sum_{k=0}^nh^{k+1}\varphi^{x}_{k+1}(h)x^{(k)}_{\theta}(x_s,s)+\mathcal{O}(h^{n+2}),
+\end{equation}
+where $\varphi^{x}_k$ satisfies $\varphi^{x}_{k+1}(h)=\frac{1/k!-\varphi^{x}_k(h)}{h}$, and $\varphi^{x}_0(h)=e^{-h}$. See \cref{sec:add_derive} for detailed derivations. Since the linear term and the integral to estimate are different between the two prediction types, the numerical solutions of \cref{taylor_expansion_noise} and \cref{taylor_expansion_data} are essentially different except for $n=1$.\\ %, leading to different performance. 
+\textbf{Starting point $s$}. $s$ can be any timestep larger than $t$. Multistep solvers ~\citep{dpm-solver++, unipc} always choose the previous timestep of $t$ while single-step solvers ~\citep{dpm-solver} choose more distant timesteps.
+
+\textbf{Order of the Taylor expansion}. To compute the Taylor expansion \cref{taylor_expansion_noise} or \cref{taylor_expansion_data}, the number of order retained should be decided. Low retained order may result in higher truncation error. However, the estimation of high-order derivatives need extra information from other timesteps other than the starting point $s$, which may not be accurate enough for calculation. Therefore, the choice of Taylor expansion order may have a strong influence on the sample quality.
+
+\textbf{Derivative estimation method}. After determining the prediction type and the retained order $n$, the last thing is to numerically calculate all unknown derivative terms $\epsilon^{(k)}_{\theta}(x_s, s)$ (take noise prediction model as an example), where $k\leq n$, to obtain the final solution $x_t$. The strategies of this component are very flexible since many off-the-shelf numerical differential methods can be used. To simplify the workflow, we utilize the system of linear equations consisting of $m\geq k$ Taylor expansions from the starting point $s$ to other timesteps, the $k$-order derivative can be approximately calculated by eliminating derivatives of other orders~\citep{unipc}, which we call \emph{m-th Taylor-difference method} (see \cref{def:taylor_difference} for its formal definition). Inspired by the 2-nd solver of \citet{dpm-solver, dpm-solver++}, we note that for a derivative estimation result $\widetilde{\epsilon}^{(k)}_{\theta}(x_s, s)$, rescaling the estimated value by multiplying a coefficient $1+R(h)$ has the potential to further correct this numerical estimation. To sum up, we formulate the estimation of $k$-th order derivative as the following two steps: \textbf{(1)}. choose at least $k$ other timesteps $t_i\neq s, i\in[1, \cdots, k]$ with pre-computed function evaluation $\epsilon_\theta(x_{t_i}, t_i)$ to calculate the estimation value through \emph{Taylor-difference method}, and \textbf{(2)}. rescale the estimation value with a coefficient $1+R(h)$. In the search space used in our experiments, we allow low-order Taylor-difference estimation to be taken for the 1-st derivative in high-order Taylor expansions (i.e., $m$ can be smaller than $n$) and design five types of scale coefficients $R_i(h), i=0,\cdots,4$ for the 1-st derivative. See \cref{sec:ss_detail} for details.
+
+After calculating $x_t$, \textbf{correctors} can be used to improve the accuracy of $x_t$ through involving the newly computed $\epsilon_\theta(x_t, t)$ in the re-computation of $x_t$~\citep{2010ode}. Specifically, the Taylor expansion \cref{taylor_expansion_noise} or \cref{taylor_expansion_data} is estimated again with $t$ as one other timestep for derivative estimation. Typically, $\epsilon_\theta(x_t, t)$ also have to be evaluated again after recomputing $x_t$ and the correcting process can be iteratively conducted. However, in practice, re-evaluations and iterative correctors are not used to save NFE budgets. Since our goal is to improve the sample quality with very few NFE, we follow ~\citet{unipc} to use no additional neural inference for correctors. 
+
+In summary, all decidable components in our framework are: \textbf{(1)}. timestep discretization scheme, \textbf{(2)}. prediction type of the neural term, \textbf{(3)}. starting point of the current step, \textbf{(4)}. retained order of Taylor expansion, \textbf{(5)}. derivative estimation methods, and \textbf{(6)}. whether to use corrector. Our sampling framework is summarized in \cref{alg:sample-usf} and demonstrated in \cref{fig:fw}.
+
+\subsection{Solver Schedule: Per-step Solving Strategy Scheme}
+\label{sec:introduce_ss}
+In this section, we demonstrate the phenomenon that the proper solving strategies appropriate for different timesteps are different. We construct a 'ground-truth' trajectory $c=[x_{t_0}, x_{t_1}, \cdots, x_{t_N}]$ using 1000-step DDIM~\citep{ddim} sampler (i.e., $N=1000$). We choose a serials of target timesteps $[t_{tar_0}, \cdots, t_{tar_S}]$ where $t_{tar_i}\in[t_0, \cdots, t_N]$, and estimate the value $\tilde{x}_{t_{tar_i}}$ with $k$ previous timesteps $[t_{s_1},\cdots,t_{s_j},\cdots,t_{s_k}]$, where $s_j\in[1, N]$ and $t_{s_j}>t_{tar_i}$. Then we calculate the distance between the ground-truth trajectory value and the estimated value, given by $L(t_{tar_i})=|\tilde{x}_{t_{tar_i}}-x_{t_{tar_i}}|$. We compare different solving strategies by showing their $L(t_{tar_i})$-$t_{tar_i}$ curve in \cref{fig:intro_ss}. %To demonstrate the relative ranking of different solving strategies at different timesteps more clearly, we normalize the losses of them at each timestep. 
+The key observation is that \textbf{the suitable strategies for most components varies among timesteps}. For example, the loss of the 3-rd solver with noise prediction network is smaller than the 2-nd solver at 400-700 timesteps but larger at the rest timesteps (see the green and red curves of 'Orders and Prediction Types').
+\begin{figure}[t]
+  \begin{center}
+  \includegraphics[width=1.0\linewidth]{figure/intro_ss.pdf}
+  \caption{Losses with ground-truth trajectory using different strategies. \textbf{(i)}. For the losses in 'Orders and Prediction Types', we choose different expansion orders and prediction types for every update. \textbf{(ii)}. For the losses in 'Low Order Derivative Estimation', we use the 3-rd Taylor expansion with both prediction types and choose whether to apply the 1-st Taylor-difference method to estimate the 1-st order derivative rather than the 2-nd Taylor-difference method. \textbf{(iii)}. For the losses in 'Correcting Methods', we choose whether to use correctors after the update under different expansion orders and prediction types. \textbf{(iv)}. For the losses in 'Starting points', we choose different indices of the starting points, including 'Single step' (all additional timesteps are between the starting point and the target point) and 'Multi step' (all additional timesteps are larger than the starting point). \textbf{The ranks of all strategies for all components are not constant at different timesteps.}} 
+  \label{fig:intro_ss}
+  \end{center}
+\end{figure}
+
+This phenomenon reveals the potential of using different solving strategies in different timesteps. We call the decision sequence of solving strategies for every timestep \emph{solver schedule}.
+
+\subsection{Advantages of the Framework}
+The contribution of \frameworkshort{} lies in two ways. First, \frameworkshort{} gives a unified perspective for all sampling methods based on exponential integral. Second, \frameworkshort{} allows different solving strategies in each timestep, making the sampler more flexible. To demonstrate the universality and reliability of \frameworkshort{}, we show in \cref{tab:relationship} that almost all existing SOTA samplers based on exponential integral can be incorporated by it through assigning corresponding strategies (more derivations can be found in \cref{sec:detail_relationship}). Note that since DEIS~\citep{deis} computes the integral in the $t$ domain, it is essentially different from other methods. However, when applying the core numerical method in DEIS to the $\lambda$ domain, we show that it can still be incorporated in \frameworkshort{} (the last row in \cref{tab:relationship}).
+
+
+\section{Search for Solver Schedule through \nameshort{}
+
+\subsection{Problem Definition}
+Denote the $s_i$ as the numerical solver to compute $x_{t_i}$, we formulate the problem of deciding the optimal solver schedule as below:
+\begin{equation}\label{eq:search_definition}
+    \mathop{\arg\min}\limits_{\substack{M\leq L,\\ s_1,s_2,\cdots,s_M,\\ t_1,t_2,\cdots,t_M}} \mathbb{I}_{\mathcal{F}}*\mathcal{F}([(s_1,t_1),(s_2,t_2),\cdots,(s_M,t_M)]),\nonumber\text{s.t.}M\leq C,
+\end{equation}
+where $C$ is the given NFE budget, $[(s_1,t_1),(s_2,t_2),\cdots,(s_M,t_M)]$ is the solver schedule $\mathrm{s}$, and $\mathcal{F}$ is an arbitrary evaluation metric of diffusion models, and $\mathbb{I_{\mathcal{F}}}$ is an indicator coefficient which equals to $1$ when smaller $\mathcal{F}$ indicates better performance and equals to $-1$ otherwise.
+
+As discussed in \cref{sec:introduce_ss}, the best solving strategies for different timesteps are different, which leads to a search space that grows exponentially with the number of steps. Additionally, the decision of one component may be coupled with the decision of other components. For example, as demonstrated in \cref{fig:intro_ss}, low-order estimation of derivatives almost consistently outperforms full-order estimation method with \emph{data prediction} network (see the orange and blue curves of 'Low Order Derivative Estimation') while worse than it with \emph{noise prediction} network at 500-700 timesteps (see the red and green curves). Therefore, well-performing solver schedules are hard to design manually.
+
+Inspired by AutoML works~\citep{evonas, gates, omsdpm}, we attempt to automatically search for solver schedules with good performance under certain NFE budgets. However, the search space is extremely large, and evaluating a solver schedule is also time-consuming since the standard calculation processes of most metrics need to generate a large number of images~\citep{fid}. Thus, random search with a regular metric evaluation method is inefficient in this case.
+
+\begin{table*}[t]
+    \caption{Relationship between \frameworkshort{} and existing SOTA methods. % DEIS, DPM-Solver, DPM-Solve and UniPC. 
+    The value of `starting point' represents the index difference between the target point and the starting point. All methods use Taylor-difference to estimate derivatives or all orders. The formulas in `Scale' are the coefficients for scaling the 1-st derivative. $h^{\prime}$ equals $h$ if prediction type is noise and equals $-h$ if it is data.}
+    \begin{tabular}{c|ccccc}
+      \toprule
+      Method & Prediction & Taylor order & Starting point & Scale & Corrector \bigstrut\\
+      \midrule
+      DPM-Solver-2S & Noise & 1,2 & -1,-2 & $\frac{\frac{h}{2}*(e^{h}-1)}{e^{h}-h-1}$ & None \bigstrut\\
+      \hline
+      DPM-Solver-3S & Noise & 1,2,2 & -1,-2,-3 & None & None \bigstrut\\
+      \hline
+      DPM-Solver++(2M) & Data & 2 & -1 & $\frac{\frac{h}{2}*(1+e^{-h})}{e^{-h}+h-1}$ & None \bigstrut\\
+      \hline
+      UniPC-2-$B_1(h)$ & Noise/Data & 2 & -1 & $\frac{\frac{h^{\prime 2}}{2}}{e^{h^{\prime}}-h^{\prime}-1}$ & UniC-2 \bigstrut\\
+      \hline
+      UniPC-2-$B_2(h)$ & Noise/Data & 2 & -1 & $\frac{\frac{h^{\prime}}{2}(e^{h^{\prime}}-1)}{e^{h^{\prime}}-h^{\prime}-1}$ & UniC-2 \bigstrut\\
+      \hline
+      UniPC-$p$ ($p>2$) & Noise/Data & $p$ & -1 & None & UniC-$p$ \bigstrut\\
+      \hline
+      DEIS-$p$ (in the $\lambda$ domain) & Noise & $p$ & -1 & None & None \bigstrut\\
+      \bottomrule
+    \end{tabular}
+    \label{tab:relationship}
+\end{table*}
+
+\subsection{Predictor-based Multi-stage Search For Solver Schedule}
+\label{sec:multi-stage}
+\update{To surmount the aforementioned challenges and accelerate the search process, we propose \nameshort{}, a predictor-based multi-stage evolutionary method. Specifically, we train a light predictor to predict the performance of a solver schedule and use it to guide an evolutionary search process to sample solver schedules. We can evaluate new solver schedules in the evolutionary search with negligible cost with the help of the predictor. making the search process much more efficient. 
+
+But training the predictor still needs a bunch of evaluated schedules, which is time consuming. To decrease this part of cost, we propose the multi-stage workflow \nameshort{}. In the early stage of the evolutionary search, only the sub-space adjacent to the current population can be explored. Therefore, the predictor is not required to generalize to the whole search space and can be trained with a small amount of data. As the population expands, generalization ability to new sub-spaces is needed, and thus the predictor should be trained with more sampled schedules. Moreover, the training data of the predictor should also be selected carefully and efficiently. 
+
+Based on the above intuition, we propose the multi-stage workflow. Our workflow is summarized in \cref{alg:multi-stage} and demonstrated in \cref{fig:multistage}, which contains three steps in every loop. \textbf{(1)}. A set of solver schedules are sampled from the search space through evolutionary search. The performances needed to guide the evolutionary search are calculated by the predictor except for the first loop in which all performances are truly evaluated. \textbf{(2)}. The true metrics of all sampled solver schedules are calculated. \textbf{(3)}. All evaluated schedule-performance data pairs are used to update the weights of the predictor. Compared to the single-stage method, which evaluates the true performance of all schedules in one go and trains a predictor to search in the whole space, \nameshort{} accelerates the exploration of schedules which have to be truly evaluated.}
+
+
+
+\section{Experiments}
+
+We choose several SOTA diffusion samplers, including DPM-Solver~\citep{dpm-solver}, DPM-Solver++~\citep{dpm-solver++}, and UniPC~\citep{unipc} as baseline methods. We use FID$\downarrow$~\citep{fid} as the evaluation metric. Our method is validated on CIFAR-10, CelebA, ImageNet-64, ImageNet-128 (guided), ImageNet-256 (guided), and LSUN-bedroom datasets and outperforms baseline methods by a large margin on all of them. We further apply \nameshort{} to text-image generation task with Stable Diffusion pre-trained models~\citep{ldm} on MS-COCO2014 validation set. The models we use for all experiments are listed in \cref{sec:models}. 
+
+We evaluate 9 common settings in total of these SOTA methods. We list the \emph{best} (Baseline-B in all tables) and the \emph{worst} (Baseline-W in all tables) results of all baseline methods we evaluate under the same NFE budget. For the worst baseline, we distinguish singlestep methods (S) and multistep methods (M) since the former is usually significantly worse with meager budgets. Detailed settings and full results can be found in \cref{sec:baseline} and \cref{sec:full_results}, correspondingly. 
+
+\subsection{Main Results}
+\begin{table*}[t]
+    \caption{FIDs of the searched solver schedules on unconditional and label-guided generation tasks.}
+    \begin{tabular}{c|c|ccccccc}
+      \toprule
+      \multirow{2}{*}{\textbf{Dataset}} & \multirow{2}{*}{\textbf{Method}} & \multicolumn{7}{c}{\textbf{NFE}}\\
+      \cmidrule(lr){3-9} 
+       & & 4 & 5 & 6 & 7 & 8 & 9 & 10\\
+      \midrule
+      \multirow{4}{*}{\textbf{CIFAR-10}} & Baseline-W(S) & 255.21 & 288.12 & 32.15 & 14.79 & 22.99 & 6.41 & 5.97 \\
+      & Baseline-W(M) & 61.13 & 33.85 & 20.84 & 13.89 & 10.34 & 7.98 & 6.76 \\
+      & Baseline-B & 57.52 & 23.44 & 10.33 & 6.47 & 5.16 & 4.30 & 3.90 \\
+      & Ours & \textbf{11.50} & \textbf{6.86} & \textbf{5.18} & \textbf{3.81} & \textbf{3.41} & \textbf{3.02} & \textbf{2.69} \\
+      \midrule
+      \multirow{4}{*}{\textbf{CelebA}} & Baseline-W(S) & 321.39 & 330.10 & 52.04 & 17.28 & 16.99 & 10.39 & 6.91 \\
+      & Baseline-W(M) & 31.27 & 20.37 & 14.18 & 11.16 & 9.28 & 8.00 & 7.11 \\
+      & Baseline-B & 26.32 & 8.38 & 6.72 & 6.72 & 5.17 & 4.21 & 4.02 \\
+      & Ours & \textbf{12.31} & \textbf{5.17} & \textbf{3.65} & \textbf{3.80} & \textbf{3.62} & \textbf{3.16} & \textbf{2.73} \\
+      \midrule
+      \multirow{4}{*}{\textbf{ImageNet-64}} & Baseline-W(S) & 364.60 & 366.66 & 72.47 & 47.84 & 54.21 & 28.22 & 27.99\\
+      & Baseline-W(M) & 93.98 & 69.08 & 50.35 & 40.99 & 34.80 & 30.56 & 27.96\\
+      & Baseline-B & 76.69 & 61.73 & 42.81 & 31.76 & 26.99 & 23.89 & 24.23\\
+      & Ours & \textbf{33.84} & \textbf{24.95} & \textbf{22.31} & \textbf{19.55} & \textbf{19.19} & \textbf{19.09} & \textbf{16.68} \\
+      \midrule
+      \multirow{3}{*}{\textbf{LSUN-Bedroom}} & Baseline-W(M) & 44.29 & 24.33 & 15.96 & 12.41 & 10.87 & 9.99 & 8.89 \\
+      & Baseline-B & 22.02 & 17.99 & 12.43 & 10.79 & 9.92 & 9.11 & 8.52 \\
+      & Ours & \textbf{16.45} & \textbf{12.98} & \textbf{8.97} & \textbf{6.90} & \textbf{5.55} & \textbf{3.86} & \textbf{3.76} \\
+      \midrule
+      \multirow{3}{*}{\textbf{ImageNet-128}} & Baseline-W(M) & 32.08 & 15.39 & 10.08 & 8.37 & 7.50 & 7.06 & 6.80 \\
+      & Baseline-B & 25.77 & 13.16 & 8.89 & 7.13 & 6.28 & 6.06 & 6.03 \\
+      & Ours & \textbf{18.61} & \textbf{8.93} & \textbf{6.68} & \textbf{5.71} & \textbf{5.28} & \textbf{4.81} & \textbf{4.69} \\
+      \midrule
+      \multirow{3}{*}{\textbf{ImageNet-256}} & Baseline-W(M) & 80.46 & 54.00 & 38.67 & 29.35 & 22.06 & 16.74 & 13.66 \\
+      & Baseline-B & 51.09 & 27.71 & 17.62 & 13.19 & 10.91 & 9.85 & 9.31 \\
+      & Ours & \textbf{33.84} & \textbf{19.06} & \textbf{13.00} & \textbf{10.31} & \textbf{9.72} & \textbf{9.06} & \textbf{9.06} \\
+      \bottomrule
+    \end{tabular}
+  \label{tab:uncond_label}
+\end{table*}
+
+We list the results on unconditional datasets and with classifier-guidance in \cref{tab:uncond_label} and the results with Stable Diffusion models in \cref{tab:coco}. The key takeaways are: (1) \textbf{\nameshort{} can achieve much higher sample quality than baselines, especially with very few steps.} Our searched schedules outperform all baselines across all budgets and datasets by a large margin. On text-to-image generation with Stable Diffusion models, \nameshort{} achieves comparable FIDs with only 5 NFE compared to baselines with 10 NFE, bringing a 2$\times$ acceleration ratio. Remarkably, our method achieves a significant boost under very tight budgets (like 11.50 v.s. 57.52 on CIFAR-10, 33.84 v.s. 76.69 on ImageNet-64), making it feasible to sample with very low NFEs. (2) \textbf{Choosing proper settings for existing methods is important.} We can see that in many cases, the performances of the best baseline and the worst baseline are significantly different from each other, even both of which are under the SOTA frameworks. Additionally, the best baselines on different datasets or even under different NFE budgets are not consistent. It indicates the necessity of a careful selection of solver settings and the significance of our \frameworkshort{} since it is proposed to present all adjustable settings systematically.
+\begin{table*}[t]
+    \centering
+     \caption{FID results on MS-COCO 256$\times$256. Ours-500/Ours-250 stand for using 500/250 images to calculate FID when searching.}
+    \begin{tabular}{c|ccccccc}
+      \toprule
+      \multirow{2}{*}{\textbf{Method}} & \multicolumn{7}{c}{\textbf{NFE}}\\
+      \cmidrule(lr){2-8} 
+        & 4 & 5 & 6 & 7 & 8 & 9 & 10\\
+      \midrule
+      Baseline-W(S) & 161.03 & 156.72 & 106.15 & 75.28 & 58.54 & 39.26 & 29.54 \\
+      Baseline-W(M) & 30.77 & 22.71 & 19.66 & 18.45 & 18.00 & 17.65 & 17.54 \\
+      Baseline-B & 24.95 & 20.59 & 18.80 & 17.83 & 17.54 & 17.42 & 17.22 \\
+      Ours & \textbf{22.76} & \textbf{16.84} & \textbf{15.76} & 14.77 & \textbf{14.23} & \textbf{13.99} & \textbf{14.01} \\
+      Ours-500 & 24.47 & 17.72 & 15.71 & \textbf{14.60} & 14.47 & 14.15 & 14.27 \\
+      Ours-250 & 23.84 & 18.27 & 17.29 & 14.90 & 15.50 & 14.12 & 14.31 \\
+      \bottomrule
+    \end{tabular}
+    \label{tab:coco}
+\end{table*}
+\subsection{Ablation Study: Reduce Search Overhead}
+\label{sec:ablation}
+The main overhead of our method comes from evaluating the true performance of solver schedules since the predictor is much lighter than diffusion U-Nets and has negligible overheads. The time consumed is proportional to the number of generated images used for metric calculation. Fewer evaluation images lead to higher variance and lower generalization ability to other texts and initial noises, thus may cause worse performance. In this section, we ablate this factor to give a relationship between overhead and performance. We choose the text-to-image task because the text condition is far more flexible than label condition or no condition and thus more difficult to generalize from a small number of samples to other samples. We validate \nameshort{} with 250 and 500 generated images rather than the default setting 1000, and our results are shown in the last two rows in \cref{tab:coco}. The performance under almost all NFE budgets becomes worse as the number of generated samples decreases. Moreover, some FIDs under higher budgets are even higher compared to lower budgets due to the high variance caused by lower sample numbers. Remarkably, the search results can still outperform baseline methods, indicating the potential of \nameshort{}.
+
+\subsection{Analysis and Insights}
+We give some empirical insights in this section based on the pattern of our searched schedules. Our general observation is that most components of searched schedules show different patterns on different datasets. We analyze the patterns of different components as follows.
+
+\update{\textbf{Timesteps.} For low resolution datasets, more time points should be placed when $t$ is small. Unlike the default schedule ``logSNR uniform'', we suggest putting more points at $0.2<t<0.5$ rather than putting too much at $t<0.05$. For high resolution datasets, we recommend a slightly smaller step size at $0.35<t<0.75$ on top of the uniform timestep schedule.
+\textbf{Prediction Types.} We find that data prediction can outperform noise prediction by a large margin in the following cases: 1. the NFE budget is very low (i.e., 4 or 5), 2. the Taylor order of predictor or corrector is high and 3. on low resolution datasets. But for the rest cases, their performance has no significant difference. Noise prediction can even outperform data prediction sometimes.
+
+\textbf{Derivative Estimation Methods.} We find that low order derivative estimation is preferred for high Taylor order expansion when step size is very high. Oppositely, full-order estimation is more likely to outperform low-order estimation when step size is not so large. For derivative scaling functions, we find additional scaling is often used in all searched schedules. But the pattern varies among datasets.}
+
+\textbf{Correctors.} Though previous work validates the effectiveness of using correctors~\citet{unipc}, we find that not all timesteps are suitable for correctors. For large guidance scale sampling, corrector is not usually used. But in general, corrector is more likely to bring positive impact on the performance.
+
+
+
+\section{Conclusion and Future Work}
+
+In this paper, we propose a new sampling framework, \frameworkshort{}, for systematical studying of solving strategies of DPMs. We further reveal that suitable strategies at different timesteps are different, and thus propose to search solver schedules with the proposed framework in the predictor-based multi-stage manner. Experiments show that our proposed method can boost the sample quality under a very tight budget by a large margin, making it feasible to generate samples with very few NFE.
+
+Although we propose a general framework for sampling based on exponential integral, we prune the search space empirically to avoid excessive search overheads. Exploring the strategies not used in this work could be a valuable direction for future research. Besides, our method has additional overhead related to the evaluation speed and the number of sampled schedules. Therefore, fast evaluation methods and efficient search methods are worth studying.
+
+

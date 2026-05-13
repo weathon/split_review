@@ -1,0 +1,316 @@
+\title{Moonwalk: Inverse-Forward Differentiation}
+
+\begin{abstract}
+Backpropagation, while effective for gradient computation, falls short in addressing memory consumption, limiting scalability. This work explores forward-mode gradient computation as an alternative in invertible networks, showing its potential to reduce the memory footprint without substantial drawbacks. 
+We introduce a novel technique based on a vector-inverse-Jacobian product that accelerates the computation of forward gradients while retaining the advantages of memory reduction and preserving the fidelity of true gradients. Our method, Moonwalk, has a time complexity linear in the depth of the network, unlike the quadratic time complexity of naïve forward, and empirically reduces computation time by several orders of magnitude without allocating more memory. We further accelerate Moonwalk by combining it with reverse-mode differentiation to achieve time complexity comparable with backpropagation while maintaining a much smaller memory footprint. Finally, we showcase the robustness of our method across several architecture choices. Moonwalk is the first forward-based method to compute true gradients in invertible networks in computation time comparable to backpropagation and using significantly less memory.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+ The most commonly used differentiation algorithm is gradient backpropagation (Backprop), which effectively addresses the challenge of time-efficient gradient computation, but fails to tackle the issue of memory consumption \cite{revnet, approx_activations}. The issue is that, during the construction and reversion of the computation graph, Backprop retains all activations acquired during the forward execution phase. For large networks, the memory footprint scales with the number of activations \cite{reducing_activations} which can result in significant memory overhead limiting the ability to scale neural networks.
+
+An alternative to traditional Backprop is forward-mode gradient computation (Forward), a long-established concept in training neural networks \cite{OldForward} but one that remains less widely adopted in practice due to its very high computation time. The notion of employing forward differentiation has recently gained attention as a promising strategy for alleviating layer activation memory constraints inherent in Backprop \cite{silver2021learning, baydin2022gradients, forwardmatchback}. However, a primary drawback of forward gradient computation lies in its requirement to compute full Jacobian matrices for every layer of the computation graph, proving more computationally expensive than the vector-Jacobian products used in Backprop.
+
+To address this challenge, one potential approach involves projecting true gradients onto a subspace and computing only these projections in forward-mode~\cite{baydin2022gradients}. Some prior works employ projections onto random subspaces, thereby introducing variance in gradient estimation that limits applicability in large networks~\cite{silver2021learning}. Other works predict the gradient direction based on auxiliary networks or past gradients and use it as a preferred projection subspace, showing promise in reducing variance but to-date falling short of the end-to-end training accuracy of Backprop~\cite{forwardmatchback}.
+
+In this work, we identify a mathematical identity in computing gradients of invertible networks that allows significant savings in memory and time when computing true gradients in forward-mode without projection.
+Our method, \mbox{Moonwalk}, relies on the observation that, once we obtain the gradient of the objective with respect to just the input of the first layer, we can efficiently compute the remaining gradients using a vector-inverse-Jacobian product (VIJP) operator in forward-mode.
+
+To our knowledge, Moonwalk is the first forward-mode differentiation method that can outperform Backprop in both time and memory requirements when computing true gradients in invertible networks.
+
+Our approach computes gradients in two phases.
+In the first phase, we compute the gradient of the objective with respect to the input.
+This can be done via forward-mode differentiation by computing the full Jacobian of just the input, which is typically much smaller than the Jacobian of the entire network.
+This version of Moonwalk is significantly faster than full forward differentiation, and potentially fast enough to be worth the immense memory saving over Backprop, particularly when the dimensionality of the input is small.
+When the input is high-dimensional, the first phase can instead compute the input gradient in reverse-mode, which typically still takes much less memory than full backprop.
+
+The second phase then uses the computed gradient vector in a forward pass to obtain the parameter gradients through an operator involving the vector-inverse-Jacobian product with respect to the input of each layer and the Jacobian-vector product with respect to its parameters.
+
+In summary, this work contributes two novel automatic differentiation methods for invertible networks that compute full gradients in forward-mode:
+\begin{itemize}
+\item Moonwalk, an entirely forward-mode method that significantly reduces the time requirements of naïve forward differentiation and is the first forward-mode method to feasibly address the memory challenge of Backprop, being particularly fast when the input dimension is very small; and
+\item Mixed-mode Moonwalk, a variant implementing the first phase of Moonwalk in reverse-mode for further acceleration to achieve time complexity comparable with Backprop, while maintaining a memory footprint much smaller than backprop.
+\end{itemize}
+
+
+
+
+\section{Related Work}
+
+
+\noindent\textbf{Reducing memory.} Previous studies have used checkpointing to alleviate the memory footprint of neural networks~\cite{martens2012training, chen2016training, gruslys2016memory}. This technique reduces the memory consumption in a network with $L$ layers by a factor of  $\sqrt{L}$ through the selective storage of activations at intervals of $\sqrt{L}$ layers and their forward-mode recomputation between checkpoints as they become needed during Backprop. Another approach for reducing memory is to avoid storing activations altogether in reversible networks. When the input to each layer can be computed from its output using the inverse function, several methods recompute activations backwards during Backprop \cite{revnet, mackay2018reversible, mangalam2022reversible}. \citet{bulo2018place} replaced only ReLU and batch normalization layers with invertible variants, reducing memory usage
+up to 50\%. \citet{jaderberg2017decoupled} used synthetic gradients for efficient activation storage using pre-trained gradient estimators.
+
+\textbf{Reversible architectures.} Recently, reversible architectures have gained significant attention owing to their diverse applications in reducing memory \cite{revnet, mackay2018reversible, mangalam2022reversible}, enhancing learned representation \cite{jacobsen2018revnet}, boosting performance~\cite{kingma2018glow}, and generative modeling \cite{dinh2014nice, rezende2015variational}. Numerous studies have proposed invertible versions of well-known deep neural network architectures such as invertible residual networks~\cite{revnet, behrmann2019invertible}, reversible recurrent neural networks \cite{mackay2018reversible}, reversible Vision Transformers \cite{mangalam2022reversible} and $1\times 1$ convolutions \cite{kingma2018glow}.
+
+\noindent\textbf{Forward propagation.} The concept of learning neural network weights in a forward fashion has been originally explored in the real-time recurrent learning (RTRL) algorithm \cite{OldForward}, similar to forward-mode AD. This idea becomes more attractive when directional derivatives (effectively, gradient projection) are employed to eliminate the additional computation time of full forward differentiation. However,
+this introduces noise into the gradients \cite{silver2021learning, baydin2022gradients}, which is coming from the random directions or imperfect gradient predictions used in directional derivatives. To address the variance of the forward gradients, \citet{ren2022scaling} proposed using local greedy loss functions and \citet{forwardmatchback} employed local auxiliary networks as the tangent vectors.
+
+
+\section{Background}
+
+
+\subsection{Notation}
+Consider a neural network $f_\theta: \inputspace \rightarrow \outputspace$ with $L$ layers and parameters $\theta = \{\theta_i\}_{i=1,\ldots,L}$. We will denote the output of layer $i \in \{1, ..., L\}$ by $x_i = f_i(x_{i-1}; \theta_i)$, where $x_0 \in \inputspace$ is the input to the network. Let $J(x_L) = J(f_\theta(x_0))$ be the scalar loss function, whose gradient with respect to $\theta$ we wish to compute. For simplicity, we will assume that the parameters $\theta_i \in \parameterspace$ of all layers have the same dimension $d$ and are layer-wise disjoint and that the outputs $x_i \in \outputspace$ of all layers have the same dimension $k = n$.
+Throughout the paper we refer to the \textit{Jacobian-vector product}, the \textit{vector-Jacobian product}, and the \textit{vector-inverse-Jacobian product} as \textit{jvp}, \textit{vjp}, and \textit{vijp}, respectively, and define these operators as
+\begingroup
+\allowdisplaybreaks
+\begin{align}
+    \text{jvp} (f, \theta, u) &= \left(\nicefrac{\partial f}{\partial \theta}\right) u,\\
+    \text{vjp} (f, \theta, v) &= v \left(\nicefrac{\partial f}{\partial \theta}\right),\text{ and}\\
+    \text{vijp} (f, \theta, v) &= v \left(\nicefrac{\partial f}{\partial \theta}\right)^{-1},
+\end{align}
+\endgroup
+where $u$ is the tangent column vector, $v$ is the cotangent row vector, and the Jacobian, taken here with respect to $f$'s parameters $\theta$, can also be taken with respect to $f$'s input $x$.
+\textit{vjp} and \textit{jvp} are commonly used operators in AD frameworks, and we use their JAX implementation \F{jax.jvp} and \F{jax.
+\subsection{Forward-Mode Gradients}
+Forward-mode differentiation is an alternative to Backprop for computing the gradients\footnote{We use the notation of row-vector gradients, which are more accurately called \emph{total derivatives}.}
+\begin{align}
+    \frac{\partial J}{\partial \theta_i} = \frac{\partial J}{\partial x_L} \left( \prod_{j=L}^{i+1}\frac{\partial x_j}{\partial x_{j-1}} \right) \frac{\partial x_i}{\partial \theta _i}. \label{eq:naive-forward}
+\end{align}
+While Backprop computes the product in (\ref{eq:naive-forward}) from left to right, forward-mode computes it from right to left.
+The suffix of the product can be computed during the forward execution of the function, such that the activations $x_i$ need not be stored, unlike in Backprop. On the other hand, while the prefixes are vectors of dimension $n$ that can be computed using \textit{vjp}, the suffixes are matrices of dimensions $n \times d$. To avoid storing these matrices in memory, they are commonly computed column-by-column using \textit{jvp}, which increases the asymptotic time complexity of forward-mode by a factor of $\min(n, d)L$ compared to Backprop (Table \ref{tab:orders}). 
+
+\subsection{Projected Forward-Mode Gradients}
+
+Projected forward-mode gradients \cite{ silver2021learning,baydin2022gradients} are the directional derivatives computed in a forward fashion. For a unit-length tangent vector $u \in \parameterspace$, the projection of the gradient onto $u$ has length
+
+\begin{align}
+    \text{jvp}(J, \theta_i, u) = \frac{\partial J}{\partial \theta_i} u &= \frac{\partial J}{\partial x_L} \left( \prod_{j=L}^{i+1}\frac{\partial x_j}{\partial x_{j-1}} \right) \frac{\partial x_i}{\partial \theta _i} u, \label{eq:projected-forward}
+\end{align}
+and the projection is $\frac{\partial J}{\partial \theta_i} u u^\T$.
+The vector $u$ is usually picked at random from a normal distribution or predicted based on past gradients \cite{silver2021learning, baydin2022gradients}. Now the suffixes of (\ref{eq:projected-forward}) are vectors and they can be computed in forward-mode using a recursive application of \textit{jvp} with respect to each layer's input.
+Computing projected forward-mode gradients, then, matches the asymptotic time complexity to that of Backprop (Table \ref{tab:orders}) but introduces some variance into the gradient estimator, which now depends on the choice of $u$.
+
+
+\section{Moonwalk}
+
+In order to benefit from the memory advantage of forward-mode gradients, while keeping the time complexity similar to that of Backprop and avoiding the introduction of noisy gradients through projection, we restrict our attention to the class of invertible neural networks, in which each layer $x_i = f_i(x_{i-1}; \theta_i)$ has a unique inverse $x_{i-1} = f_i^{-1}(x_i; \theta_i)$ with respect to its input for any $x_i$ in its image. Because $f_i$ is also assumed to be differentiable, this will constrain the output dimension of each layer to equal its input dimension, thus $k=n$.
+Note that, downstream of all parametrized layers, the network no longer has to be invertible, and in particular the loss $J$ is still scalar.
+\begin{algorithm}[t]
+\caption{Moonwalk}
+\label{alg:invertible-fp}
+\begin{algorithmic}
+    \FOR{\textbf{each} gradient step with input $x_0$}
+        \STATE Compute $h_0 \gets \frac{\partial J}{\partial x_0}$
+        \FOR{$i = 1, \ldots, L$}
+            \STATE $x_i \gets f_i(x_{i-1}; \theta_i)$
+            \STATE $h_{i} \gets \text{vijp} (f_i, x_{i-1}, h_{i-1}) $
+            \STATE $g_i \gets  \text{vjp} (f_i, \theta_i, h_i)$
+            \STATE Apply the gradient $g_i$ to $\theta_i$
+        \ENDFOR
+    \ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+In invertible networks, the Jacobian of each layer with respect to its input is also guaranteed to be invertible with its inverse equal to the inverse-function Jacobian, i.e.
+\eq{
+\frac{\partial f_i^{-1}}{\partial x_i} = \frac{\partial x_{i-1}}{\partial x_i} = \left(\frac{\partial x_i}{\partial x_{i-1}}\right)^{-1}.
+}
+We can rewrite each layer's parameter gradient of the loss as
+\begin{align}
+g_i  \coloneqq{}& \frac{\partial J}{\partial \theta_i} = \frac{\partial J}{\partial x_i}\frac{\partial x_i}{\partial \theta_i} = \frac{\partial J}{\partial x_i} \frac{\partial x_i}{\partial x_0} \left(\frac{\partial x_i}{\partial x_0}\right)^{-1} \frac{\partial x_i}{\partial \theta_i} \\
+={}& \frac{\partial J}{\partial x_0}\left(\prod_{j=i}^1\frac{\partial x_j}{\partial x_{j-1}}\right)^{-1} \frac{\partial x_i}{\partial \theta_i} \\
+={}& \frac{\partial J}{\partial x_0}\left(\prod_{j=1}^i\frac{\partial x_{j-1}}{\partial x_j}\right) \frac{\partial x_i}{\partial \theta_i}. \label{eq:ifp-main}
+\end{align}
+Given the input gradient $\frac{\partial J}{\partial x_0}$, we can use (\ref{eq:ifp-main}) to compute the parameter gradient of each layer in forward-mode. To this end, denote the activation gradient of layer $i$ by
+\begin{align}
+    h_i \coloneqq \frac{\partial J}{\partial x_i} = \frac{\partial J}{\partial x_0} \prod_{j=1}^i
+    \frac{\partial x_{j-1}}{\partial x_j},
+\end{align}
+for $1 \leq  i \leq L$, and the input gradient by $h_0 \coloneqq \frac{\partial J}{\partial x_0}$. Note that $h_i$ satisfies the forward recursion
+\begin{align}
+    h_i = h_{i-1} \frac{\partial x_{i-1}}{\partial x_i} = \text{vijp}(f_i, x_{i-1}, h_{i-1}),  \label{eq:h_i}
+\end{align}
+and from (\ref{eq:ifp-main}) we have
+\begin{align}
+    g_i = h_{i} \frac{\partial x_i}{\partial \theta_i} = \text{vjp}(f_i, \theta_i, h_i). \label{eq:g_i}
+\end{align}
+Assuming that we have the input gradient $h_0$, we can construct the parameter gradient for each layer on the fly by two operators in equations \Cref{eq:h_i,eq:g_i} and store only $h_i \in \outputspace$ for the next layer's computation. The complete procedure is given in Algorithm \ref{alg:invertible-fp} and illustrated in Figure \ref{fig:grads_inv}.
+
+In the next two sections we describe the computation of $h_0$ with either forward-mode or Backprop and discuss the trade-offs of using each variant.
+\subsection{Pure-Forward Moonwalk}\label{sec:pure-forward}
+
+One way to obtain the input gradient $h_0$ is to compute it element-by-element using a projected forward-mode with a standard basis of tangent vectors. Specifically, $h_{0, i}$, the $i$-th component of $h_0$, can be computed as in (\ref{eq:projected-forward}) with the $i$-th standard basis vector $e_i$ as the tangent vector. This method thus uses forward-mode $n$ times to construct $h_0$. 
+
+Figure \ref{fig:h0_fp} shows the computation flow of $h_0$. Note that we only need to store $h_0$ components in the final stage. By computing $h_0$ in forward-mode we avoid storing activations. On the other hand, when the input dimension is large, this method takes infeasible time to compute.
+
+\subsection{Mixed-Mode Moonwalk} \label{sec:mixed-forward}
+
+Alternatively, we can use Backprop to compute $h_0$. While it may seem counterintuitive that a method including this phase could improve on full Backprop, the key insight is that only part of the computation graph is downstream of $x_0$. When using Backprop for $h_0$, we can therefore avoid storing activations computed from parameters $\theta_i$ independent of any $x_i$. Another consideration, more practical than principled, is that many Backprop implementations store all gradients before applying any (even in cases such as ours, in which gradients can be applies immediately and discarded), and here unlike full Backprop parameter gradients need not be stored. In many network architectures of interest, these distinctions lead to significant memory savings in Backprop when only computing the input gradient. Figure \ref{fig:h0_bp} shows the flow of this procedure. 
+\begin{figure}[t!]
+\centering
+\subfigure[]{\label{fig:h0_fp}\includegraphics[width=1\columnwidth]{fig/h0_FP.pdf}} \hfill
+\subfigure[]{\label{fig:h0_bp}\includegraphics[width=0.85\columnwidth]{fig/h0_BP.pdf}} \hfill
+\subfigure[]{\label{fig:grads_inv}\includegraphics[width=0.9\columnwidth]{fig/grads_invfp.pdf}} \hfill
+\subfigure{\includegraphics[width=0.75\columnwidth]{fig/legend.pdf}} 
+\caption{The computation flow diagram of Moonwalk: (a) obtaining $h_0$ with the Forward gradients; (b) alternative method for computing $h_0$ with Backprop; and (c) computing the parameter gradients in forward-mode given $h_0$.\label{fig:diagram}}
+\end{figure}
+
+Computing $h_0$ via Backprop reduces the time complexity by a factor of $n$, compared to forward-mode, but increases the memory footprint, which in the worst case can now be as high as Backprop's. However, depending on the network architecture, as analyzed in Section \ref{sec:exp-reduce-memory}, real-world architectures are often much better than the worst case, leading to significant memory saving over Backprop.
+
+
+
+\section{Complexity Analysis}
+
+While estimating the exact time and memory consumption of different methods for computing the gradients hugely depends on the choice of the network's architecture and the detailed implementation, in this section, we will provide a rough estimate of the time and memory complexity of our methods and compare them with related previous works~(Table \ref{tab:orders}). We simplify the analysis by considering the mini-batch size to be 1 for all methods. We estimate the computational complexity of the following methods:
+\begin{enumerate}
+\item \textbf{Backprop:} Throughout the forward pass, all activations are cached, and subsequently, during a backward pass, gradients for each layer are computed using \textit{vjp}.
+\item \textbf{Forward:} During the forward pass, complete Jacobians for each layer are computed. 
+\item \textbf{ProjForward:} Gradients of the parameters of each layer, projected in a random or predicted direction, are obtained using \textit{jvp} concurrently with the forward pass.
+\item \textbf{RevBackprop:} Initially, a full forward pass is conducted to obtain the loss and the gradient of the last layer. Subsequently, in a backward pass, the input of each layer is computed from its output and used with \textit{vjp} to backpropagate gradients.
+\item \textbf{Moonwalk:} Initially, the input gradient is computed using Forward. Subsequently, gradients are obtained using \textit{vijp} and \textit{vjp} concurrently with a second forward pass. See section \ref{sec:pure-forward}.
+\item \textbf{Mixed:} Similar to Moonwalk, but the input gradient is computed using Backprop. This modification significantly reduces computation time at the expense of some memory impact. See section \ref{sec:mixed-forward}.
+\end{enumerate}
+We evaluate time based on the standard cost of matrix multiplication (product of their two outer dimensions and shared inner dimension) without considering optimization tricks. To evaluate memory, we define $M_{x, i}$ to be the required memory to store the necessary information to compute $\frac{\partial x_i}{\partial x_{i-1}}$, and $M_{\theta, i}$ the added memory to also compute $\frac{\partial x_i}{\partial \theta_i}$. For simplicity, we assume that these values are the same across layers and omit the layer index. We refer to memory consumption as the extra amount of memory needed to compute gradients without reflecting the memory to store the parameters or gradients themselves after computation.
+
+For Backprop, we have to store activations required for both input and parameter gradients for every layer, which results in $O(M_{x}L +M_{\theta}L)$ memory complexity. For Mixed, we only need to store $M_{x}$ for every layer in the first phase, in order to compute the input gradient $h_0$, and then we can reuse $M_\theta$ in the second phase after computing each parameter gradient, for a total memory complexity of $O(M_x L + M_{\theta})$. 
+All other methods can discard activation information after each layer, for a memory complexity of $O(M_x + M_\theta)$.
+
+Backprop computation consists of computing two vector-Jacobian products in each layer, $\text{vjp} (f_i, x_{i-1}, \frac{\partial J}{\partial x_i})$ and $\text{vjp} (f_i, \theta_i, \frac{\partial J}{\partial x_i})$,  which accounts for per-layer time complexity of $O(n^2)$ and $O(nd)$, respectively, and for a total of $O(n^2L+ndL)$. RevBackprop additionally needs to evaluate the inverse function $f_i^{-1}(x)$, which does not impact the overall complexity in the terms we consider.
+
+In Forward, each single parameter $\theta_{j,\ell}$ in layer $j$, of the total $dL$ parameters, generates a pass to compute its gradient, in which we compute $\text{jvp} (f_i, x_{i-1}, \frac{\partial x_{i-1}}{\partial \theta_{j,\ell}})$ in each layer $i > j$, for a total of $O(n^2 d L^2)$.
+
+ProjForward with tangent $u = \{u_i\}_{i=1,\ldots,L}$ is similar to Forward with just a single pass taking $O(n^2 L)$ time, but initialized in each layer from $\text{jvp} (f_i, \theta_i, u_i)$ for a total of $O(n^2 L + ndL)$, which happens to coincide with the time complexity of Backprop.
+The first phase of Moonwalk computes $\text{jvp} (f_i, x_{i-1}, \frac{\partial x_{i-1}}{\partial x_0}e_\ell)$ in each layer for each input element $\ell$ , for a total time complexity of $O(n^3L)$. The second phase computes $\text{vijp} (f_i, x_{i-1}, h_{i-1})$ and $\text{vjp} (f_i, \theta_i, h_i)$ in each layer for $O(n^2 L + ndL)$ more, and a total of $O(n^3 L + ndL)$.
+Mixed replaces the first phase with Backprop for just the input gradient, incurring time complexity $O(n^2L)$, in addition to $O(n^2 L + ndL)$ from the same second phase as Moonwalk, for a total of $O(n^2 L + ndL)$ time complexity.
+The complexity of memory consumption in forward-mode method only depends on the largest layer in the network, while methods involving Backprop require storing all the activations. Thus the memory consumption grows linearly with the number of layers in these methods.
+
+Note that while Table \ref{tab:orders} only shows the order of growth, the actual time and memory consumption of these methods have been empirically studied in the following section.
+\begin{table*}
+  \centering
+  \begin{tabular}{@{}lccccc@{}}
+    \toprule
+    Method & Time & Memory & Stochastic & Numerically Stable & Requires Backprop \\
+    \midrule
+    Backprop & $O(n^2L+ndL)$ & $O\left(M_x L + M_\theta L\right) $ & \greencross & \greentick & \redtick \\
+    Forward & $O(n^2dL^2)$ & $O(M_x + M_\theta)$ & \greencross & \greentick & \greencross\\
+    ProjForward & $O(n^2L+ndL)$ & $O(M_x + M_\theta)$ &  \redtick & \greentick  & \greencross\\ 
+    RevBackprop &  $O(n^2L+ndL)$ & $O(M_x + M_\theta)$ & \greencross & \redcross & \redtick\\ 
+    \midrule
+    Moonwalk & $O(n^3L+ndL)$ & $O(M_x + M_\theta)$ & \greencross & \greentick & \greencross\\ 
+    Mixed &  $O(n^2L+ndL)$ & $O(M_x L + M_\theta)$ & \greencross & \greentick & \redtick\\
+    
+    \bottomrule
+  \end{tabular}
+  \caption{Asymptotic complexity and key characteristics of Moonwalk, its Mixed-mode variant, and four prior methods.}
+  \label{tab:orders}
+\end{table*}
+
+
+
+\section{Experiments}
+
+
+
+\begin{figure}[t]
+    \centering
+          \includegraphics[width=1\columnwidth]{fig/arch1.pdf}%
+    \caption{Maximum allocated memory during training. The input is padded to 32x32x8, which corresponds to allocating memory for 32x32x8 $\cdot$ number of layers $\cdot $ number of blocks parameters.\label{fig:arch1}}
+    
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+          \includegraphics[width=1\columnwidth]{fig/arch2.pdf}%
+   \caption{Maximum allocated memory during training for a larger network. The input is padded to 32x32x18. The total number of parameters is 200k $\cdot$ number of layers per block. \label{fig:arch2}}
+\end{figure}
+\begin{figure}
+    \centering
+          \includegraphics[width=1\columnwidth]{fig/compute_1.pdf}%
+    \caption{Time comparison for computing one batch of 512 with an input size of 32x32x18 across three blocks, each with a varying number of layers per block.
+ \label{fig:computation}}
+\end{figure}
+
+\begin{figure}
+    \centering
+          \includegraphics[width=1\columnwidth]{fig/train_accuracy.pdf}%
+    \caption{
+Train accuracy of three models trained with RevBackprop, Backprop, and Mixed gradient methods for 100 epochs, averaged over 20 runs.
+    \label{fig:accuracy}}
+\end{figure}
+
+\begin{figure}
+    \centering
+          \includegraphics[width=1\columnwidth]{fig/grad_error.pdf}%
+    \caption{L2 gradient error between true gradients computed through Backprop and gradients computed through one of the methods, averaged over 20 runs.
+ \label{fig:grad_error}}
+\end{figure}
+
+\subsection{Experimental Setup}
+\textbf{Model and architecture.}
+We adopt a modified RevNet architecture \cite{revnet} with three blocks. Each block of the network consists of coupling layers that partition the input into two subsets $x_1$ and $x_2$, and output
+\begin{equation}
+  \begin{aligned}
+    y_1 & = x_1\\
+    y_2 & = x_2 + \mathcal{F}(x_1).
+  \end{aligned}
+\end{equation}
+
+The function $\mathcal{F}$ can be any arbitrary function, not necessarily invertible. In our case, it is represented by a series of convolutional layers, each followed by a ReLu activation \cite{relu} and BatchNorm \cite{batch} layers.
+The input to each layer can be reconstructed from it is output, without the need to cache activations, by
+\begin{equation}
+  \begin{aligned}
+    x_1 & = y_1\\
+    x_2 & = y_2 - \mathcal{F}(x_1).
+  \end{aligned}
+  \label{inverse}
+\end{equation}
+
+In our experiments, the network consists of three sequential blocks. The number of layers in each block is set in each experiment to one of \{1, 3, 5, 10\}. Following each block, we apply an invertible down-sampling operator $\psi$, as proposed by \citet{jacobsen2018revnet}. The operator $\psi$ effectively divides the spatial dimensions into the channel dimension, resulting in a fourfold increase in the feature-space dimension for each successive block.
+\textbf{Data and Hyper-parameters.}
+ The experiments are performed on an RTX A4500 GPU with a batch size of 512. Computation time is measured after code compilation is completed. Memory consumption is tracked using the nvidia-smi utility every second, with the maximum value recorded. Data preprocessing involves padding with zeros in the channel dimension, expanding the input dimension from 32x32x3 to to one of \{32x32x18,32x32x8\}. We use the Adam optimizer \cite{adam} with a learning rate of $10^{-3}$, and we use an exponential decay scheduler unless specified otherwise. 
+
+First, we demonstrate that Forward is markedly more memory efficient than Backprop by measuring the memory consumption of the network during the training of each minibatch. Second, we show that Moonwalk is substantially faster than the Forward. By imposing constraints on the network architecture, we substantially reduce the overall gradient computation time. Third, we illustrate that Moonwalk can be combined with Backprop, further reducing the computation time while preserving significant memory savings. Finally, we establish that Mixed exhibits greater robustness compared to RevBackprop. 
+
+\subsection{Implementation}
+
+ Forward involves applying the \F{jax.jvp} operator sequentially at each layer, with the number of applications corresponding to the number of parameters in that layer.  For each layer of the network, we define both forward and inverse functions. To enhance computation speed, we flatten all layer parameters and create an identity matrix used for projection. Utilizing a batched function map accelerates computation, although it comes at the cost of an increased overall memory footprint for forward-based methods. An alternative to mitigate the increased memory footprint is to compute the \F{jax.jvp} product one by one without creating a large identity matrix. While this approach reduces the memory footprint, it also significantly increases compilation time and affects overall computation, prohibiting the use of \F{jax.vmap} in such scenarios. The depicted performance of Mixed in the following subsections is not optimized, though it is already only twice as slow compared to Backprop. Some of the factors, including data transfer between compiled and non-compiled environments, significantly affect its performance. In theory, it might be possible to make it faster than Reversible.
+\subsection{Memory reduction}\label{sec:exp-reduce-memory}
+For our first experiment, we pad the input size to 32x32x8. The results summarized in Figure \ref{fig:arch1} suggest that the memory consumption of Backprop increases linearly with the number of layers per block. Backprop necessitates the most substantial memory allocation among the compared approaches, resulting in a  twofold disparity at ten layers per block for Moonwalk, Mixed, and RevBackprop. For ProjForward, the disparity is even larger at 2.4 times. The disparity growth for Forward is a bit slower due to its initial compilation overhead.
+Additionally, it is noteworthy to observe an initial compilation gap, resulting in increased memory utilization when the architecture comprises only one layer per block. 
+The memory footprint in Backprop scales with layer size, while Forward memory growth is confined solely to the number of layers. This reduction is achieved by discarding activations that are no longer needed for the forward pass. The resulting memory footprint for Forward consists only of the memory allocated for the storage of gradient updates until they are applied to the model parameters. 
+Furthermore, we evaluated methods on another type of network, where we padded the input to the size of 32x32x18. In such cases, memory is mostly dominated by $M_xL$. Our demonstration in Figure \ref{fig:arch2} reveals that such architecture choice results in an expanded disparity between Backprop and forward methods. Notably, Mixed experiences an escalation in memory consumption as its allocation begins to be dominated by the activation preserved for gradient computation of the input. 
+\subsection{Computation Time}
+While Forward showcases a substantial reduction in memory usage, it encounters challenges in terms of computation time (Figure~\ref{fig:computation}). The approach demands a considerable amount of computation, rendering it impractical in many scenarios. In contrast, Moonwalk significantly reduces computation time, achieving efficiency up to several orders of magnitude compared to  Forward. We evaluate all methods using the same architecture, incorporating varying numbers of layers per block.
+
+The results, illustrated in Figure \ref{fig:computation}, accentuate the notable efficiency gains achieved by Moonwalk. In the case of six layers, Forward takes 1839 seconds per batch, whereas Moonwalk completes the task in 67 seconds, representing a substantial 27-fold reduction in computing time. Extending the analysis to a model with 60 layers, Forward demands more than 80000 seconds, while our method accomplishes the same task in 700 seconds, manifesting a remarkable time reduction factor of 110.
+
+These outcomes underscore the significant impact on training duration, revealing that employing Moonwalk for training a full model on the CIFAR-10 dataset requires approximately five days—an appreciable improvement over Forward, which necessitates around 300 days.
+
+\subsection{Time-Memory trade-off}\label{sec:mixed}
+While achieving noteworthy time reduction using Moonwalk, we can further optimize efficiency by precomputing the gradients of the input, denoted as $h_0$, in our method using backpropagation. Although the memory reduction in this approach is constrained by the memory required for activations, it significantly decreases overall memory consumption compared to Backprop. Two pivotal components contribute to this reduction:
+
+\textbf{Elimination of Activations Storage}: We refrain from storing activations utilized in computing the gradients of the weights $M_{\theta}L$. However, it is important to note that in this scenario, we are still bound by the activations necessary for computing $h_0$. In instances where input is padded to 32x32x8 (see Figure \ref{fig:arch1}), we do not incur a memory disadvantage compared to alternative methods. In scenarios featuring larger input size 32x32x18, as depicted in Figure \ref{fig:arch2}, a noticeable increase in memory usage over Forward becomes apparent.
+
+\textbf{Sequential Memory Usage}: There is no longer a need to store gradients and activations simultaneously, as Backprop does. After precomputing $h_0$, we discard all activations, freeing up memory for gradient computations. 
+
+In Figure \ref{fig:computation}, Mixed is only about twice as slow as Backprop. The primary advantage of this method lies in its substantial time reduction compared to Forward.
+\subsection{Numerical Stability}\label{sec:numerical-stability}
+It is worth noting that RevBackprop \cite{mackay2018reversible}, while requiring a bijective network with similar computation time, encounters challenges in terms of numerical stability. As demonstrated by \citet{revnet} and~\citet{jacobsen2018revnet}, invertible architectures with finite precision encounter numerical instability issues, leading to divergence from true gradients and convergence to a different local minimum than Backprop. In this study, we highlight that RevBackprop fails to converge when an activation function is added to the output of the layer. Employing the same network and dataloader for simultaneous training, Fig \ref{fig:accuracy} illustrates that both Backprop and Mixed achieve perfect accuracy, while RevBackprop fails to converge. This divergence is attributed to the error accumulating with each update.
+
+Fig \ref{fig:grad_error} displays the gradient error estimation between the algorithm's gradients and oracle gradients at each step using the same parameters. The experiment reveals the accumulating error causing the network weights to drift away from true gradients. Mixed exhibits more stable convergence due to lower gradient error. Such disparity is a result of different approaches involved in gradient computation. In order to compute the gradients, RevBackprop requires computing the inverse of the function, which might be extremely unstable, as in the case with a tanh activation function. As opposed to RevBackprop, Moonwalk and Mixed methods only require computing inverse-vector Jacobian product and avoid computation of the inverse function itself. In some cases, as we have shown with tanh, this tends to be the more stable approach to computing gradients. 
+The impact of "gradient drifting" in the reversible method becomes noticeable after 30 epochs.
+
+\subsection{Stochasticity of ProjForward}
+ProjForward demonstrates the most conservative memory usage; however, it stands as the sole method not generating true gradients. Instead, it introduces variance in its estimation owing to the adoption of an arbitrary random distribution for projecting the parameter space. However, it has been substantiated to be advantageous in specific scenarios, particularly when a reliable estimate for the gradient direction is available \cite{silver2021learning,baydin2022gradients,forwardmatchback}.
+
+
+\section{Conclusion and Future work}
+
+
+The efficiency of memory utilization in Forward surpasses that of Backprop, thereby alleviating the challenges associated with activation storage constraints. However, this enhanced memory efficiency comes at a considerable computational cost, rendering Forward computationally impractical. To address this limitation, we augmented Forward processing through the incorporation of invertible networks. Our experimental findings reveal that our proposed method, Moonwalk, exhibits a marked acceleration, surpassing Forward by several orders of magnitude. Furthermore, we proposed an approach to mitigate the computational overhead associated with our method. By integrating Backprop for the computation of input gradients, we achieved a substantial acceleration of overall gradient computation. 
+
+In this paper, we restricted our attention to the class of invertible neural networks in order to compute the gradients for the next layer given the previous one. Future work would study the effect of using projected forward-mode gradients instead of the full forward-mode. Also, one could investigate the class of neural networks composed of locally invertible layers to shed light on the applicability of Moonwalk for a larger family of architectures.
+
+\clearpage
+
+
+
+
+
+

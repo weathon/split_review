@@ -1,0 +1,370 @@
+\title{AUGCAL: Improving Sim2Real Adaptation by Uncertainty Calibration on Augmented Synthetic Images}
+
+\begin{abstract}
+Synthetic data (\syn) drawn from simulators have emerged as a popular alternative for training models where acquiring annotated real-world images is difficult. However, transferring models trained on synthetic images to real-world applications can be challenging due to appearance disparities. A commonly employed solution to counter this \sr gap is unsupervised domain adaptation, where models are trained using labeled \syn data and unlabeled \real data. Mispredictions made by such \sr adapted models are often associated with miscalibration -- stemming from overconfident predictions on real data. In this paper, we introduce \augcal, a simple training-time patch for unsupervised adaptation that improves \sr adapted models by -- (1) reducing overall miscalibration, (2) reducing overconfidence in incorrect predictions and (3) improving confidence score reliability by better guiding misclassification detection -- all while retaining or improving \sr performance. Given a base \sr adaptation algorithm, at training time, \augcal involves replacing vanilla \syn images with strongly augmented views (\aug intervention) and additionally optimizing for a training time calibration loss on augmented \syn predictions (\calib intervention). We motivate \augcal using a brief analytical justification of how to reduce miscalibration on unlabeled \real data. Through our experiments, we empirically show the efficacy of \augcal across multiple adaptation methods, backbones, tasks and shifts.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Most effective models for computer vision tasks (classification, segmentation, \etc) need to learn from a large amount of exemplar data~\citep{dosovitskiy2020image,radford2021learning,kirillov2023segment, pinto2008real} that 
+captures
+real-world
+natural variations which may occur at deployment time. However, collecting and annotating such diverse real-world data 
+can be prohibitively expensive -- for instance, densely annotating a frame of Cityscapes~\citep{cordts2016cityscapes} can take upto $\sim1.5$ hours! Machine-labeled synthetic images 
+generated from
+off-the-shelf simulators can substantially reduce this need for manual annotation and physical data collection~\citep{sankaranarayanan2018GTA,ros2016synthia,carlaDataset,savva2019habitat,deitke2020robothor,chattopadhyay2021robustnav}. Nonetheless, models trained on \syn data often exhibit subpar performance on \real data, primarily due to appearance discrepancies, commonly referred to as the \sr 
+gap.
+For instance, on GTAV (\syn) $\to$ Cityscapes (\real), an HRDA \syn-only model~\citep{hoyer2022hrda} achieves an mIoU of only $53.01$, compared to $\sim81$ mIoU attained by an equivalent model trained exclusively on \real data.
+
+While there is significant effort in improving the realism of simulators~\citep{savva2019habitat, richter2022enhancing}, there is an equally large effort seeking to narrow this \sr performance gap by designing algorithms 
+that facilitate \sr transfer.
+These methods encompass both \textit{generalization}~\citep{chattopadhyay2022pasta,huang2021fsdr,zhao2022shade}. -- aiming to ensure strong out-of-the-box \real performance of \syn trained models -- and \textit{adaptation}~\citep{hoyer2022hrda,hoyer2022mic,vu2019advent,rangwani2022closer} -- attempting to adapt models using labeled \syn data and unlabeled \real data. Such generalization and adaptation methods have demonstrated notable success in reducing the \sr performance gap. For instance, \pst~\citep{chattopadhyay2022pasta} (a \textit{generalization} method) improves \sr performance of a \syn-only model from $53.01\to57.21$ mIoU. Furthermore, HRDA + MIC~\citep{hoyer2022mic} (an \textit{adaptation} approach) pushes performance even higher to $75.56$ mIoU.
+
+\begin{figure}%
+\centering
+\includegraphics[width=\linewidth]{figures_iclr/AUGCAL_problem_figure_2.pdf}
+\resizebox{0.98\textwidth}{!}{
+	\begin{tabular}{@{}cccccccccc@{}}
+		\cellcolor{city_color_1}\textcolor{white}{~~road~~} &
+		\cellcolor{city_color_2}~~sidewalk~~&
+		\cellcolor{city_color_3}\textcolor{white}{~~building~~} &
+		\cellcolor{city_color_4}\textcolor{white}{~~wall~~} &
+		\cellcolor{city_color_5}~~fence~~ &
+		\cellcolor{city_color_6}~~pole~~ &
+		\cellcolor{city_color_7}~~traffic lgt~~ &
+		\cellcolor{city_color_8}~~traffic sgn~~ &
+		\cellcolor{city_color_9}~~vegetation~~ & 
+		\cellcolor{city_color_0}\textcolor{white}{~~ignored~~}\\
+		\cellcolor{city_color_10}~~terrain~~ &
+		\cellcolor{city_color_11}~~sky~~ &
+		\cellcolor{city_color_12}\textcolor{white}{~~person~~} &
+		\cellcolor{city_color_13}\textcolor{white}{~~rider~~} &
+		\cellcolor{city_color_14}\textcolor{white}{~~car~~} &
+		\cellcolor{city_color_15}\textcolor{white}{~~truck~~} &
+		\cellcolor{city_color_16}\textcolor{white}{~~bus~~} &
+		\cellcolor{city_color_17}\textcolor{white}{~~train~~} &
+		\cellcolor{city_color_18}\textcolor{white}{~~motorcycle~~} &
+		\cellcolor{city_color_19}\textcolor{white}{~~bike~~}
+	\end{tabular}
+	}
+\caption{\footnotesize\textbf{Overconfident \sr mispredictions}. \textbf{[Left]} We show an example of what we mean by overconfident mispredictions. For \sr adaptation on GTAV$\to$Cityscapes, we choose (DAFormer) HRDA + MIC~\citep{hoyer2022mic} and EntMin + MIC~\citep{vu2019advent} (highly performant \sr methods) and show erroneous predictions on Cityscapes (bottom row). We can see that the model identifies \textit{sidewalk} pixels as \textit{road} (2nd column) and \textit{fence} pixels as \textit{wall} (3rd column) with very high confidence. \textbf{[Right]} We show how pervasive this ``overconfidence'' phenomena is. While better \sr adapted models -- from (DAFormer) Source-Only~\citep{hoyer2022hrda} to (DAFormer) EntMin + MIC~\citep{vu2019advent} to (DAFormer) HRDA + MIC~\citep{hoyer2022mic} -- exhibit improved transfer performance \textbf{[Top, Right]}, they also exhibit increased overconfidence in mispredictions \textbf{[Bottom, Right]}, affecting prediction reliability.
+}
+\label{fig:problem_teaser}
+\end{figure}
+While \sr performance may increase both from generalization or adaptation methods,
+for safety-critical deployment scenarios, task performance is often not the sole factor of interest. It is additionally important to ensure \sr adapted models make \textit{calibrated} and \textit{reliable} predictions on \real data. Optimal calibration on real data ensures that the model's 
+confidence in its predictions aligns with the true likelihood of correctness.  
+Deploying poorly calibrated models can have severe consequences, especially in high-stakes applications
+(such as autonomous driving), where users can place trust in (potentially) unreliable predictions~\citep{theguardianTeslaDriver,michelmore2018evaluating}. We find that mistakes made by \sr adaptation methods are often associated with miscalibration caused by \textit{overconfidence} -- highly confident incorrect predictions (see Fig.~\ref{fig:problem_teaser} Left). More interestingly, we find that as adaptation methods improve in terms \sr performance, the propensity to make overconfident mispredictions also increases (see Fig.~\ref{fig:problem_teaser} Right). Our focus in this paper is to devise training time solutions to mitigate this issue.
+
+Calibrating deep neural networks (for such \sr adaptation methods) is crucial, as they routinely make overconfident predictions~\citep{guo2017calibration,gawlikowski2021survey,minderer2021revisiting}. 
+While various techniques address miscalibration on ``labeled data splits'' for in-distribution scenarios, maintaining calibration in the face of dataset shifts, like \sr, proves challenging due to lack of labeled examples in the target (\real) domain. 
+To address this, we propose \augcal, a training-time patch to ensure existing \sr adaptation
+methods 
+make \textit{accurate}, \textit{calibrated} and \textit{reliable} predictions on real data. When applied to a \sr adaptation framework, \augcal aims to satisfy three key criteria: (1) retain performance of the base \sr method, (2) reduce miscalibration and overconfidence and (3) ensure calibrated confidence scores translate to improved reliability. 
+Additionally, to ensure broad applicability, \augcal aims to do so by making 
+two
+minimally
+invasive changes to a \sr adaptation training pipeline.
+First, by \textsc{Aug}menting~\citep{cubuk2020randaugment,chattopadhyay2022pasta} input \syn images during training using an \aug transform that reduces distributional distance between \syn and \real images. Second, by additionally optimizing for a \textsc{Cal}ibration loss~\citep{hebbalaguppe2022stitch,liang2020neural,liu2022devil} at training time on \textsc{Aug}mented \syn predictions.
+We devise \augcal based on an analytical rationale (see Sec.~\ref{sec:real_miscalib} and~\ref{sec:why_augcal}) illustrating how it helps reduce an upper bound on desired target (\real) calibration error. Through our experiments on GTAV$\to$Cityscapes and VisDA \sr, 
+we demonstrate how \augcal helps reduce miscalibration on \real data.
+To summarize, we make the following contributions:
+\begin{packed_itemize}
+\item We propose \augcal, a training time patch, compatible with existing \sr adaptation methods that ensures \sr adapted models make \textit{accurate} (measured via adaptation performance), \textit{calibrated} (measured via calibration error) and \textit{reliable} (measured via confidence guided misclassification detection) predictions.
+\item We conduct \sr adaptation experiments for object recognition (VisDA~\citep{peng2017visda}) and semantic segmentation (GTAV~\citep{sankaranarayanan2018GTA}$\to$Cityscapes~\citep{cordts2016cityscapes}) with three representative UDA methods (pseudo-label based self-training, entropy minimization and domain adversarial training) and show that applying \augcal -- (1) improves or preserves adaptation performance, (2) reduces miscalibration  and overconfidence and (3) improves the reliability of confidence scores.
+\item We show how \augcal improvements are effective across multiple backbones, \aug and \calib options 
+and highlight choices that are more consistently effective across experimental settings.
+\end{packed_itemize}
+
+
+
+\section{Related work}
+
+\par \noindent
+\textbf{Unsupervised Domain Adaptation (UDA).} 
+We focus on UDA algorithms to address \textit{covariate shifts} in the \sr context~\citep{chattopadhyay2022pasta,choi2021robustnet,zhao2022shade,huang2021fsdr,rangwani2022closer,hoyer2022mic,sankaranarayanan2018GTA,ros2016synthia}. 
+This involves adapting a model to an unseen target (\real) domain using labeled samples from a source (\syn) domain and unlabeled samples from the target domain.
+Here, the source and target datasets share the same label space and labeling functions, but differences exist in the distribution of inputs~\citep{farahani2021brief,zhang2019bridging}.
+\sr UDA methods~\citep{ganin2014unsupervised,hoffman2017cycada,saenko2010adapting,tzeng2014deep} range from \textit{feature distribution matching}~\citep{ganin2014unsupervised,long2018conditional,saito2018adversarial,tzeng2017adversarial,zhang2019bridging}, explicitly addressing \textit{domain discrepancy}~\citep{kang2019contrastive,long2015learning,tzeng2014deep,rangwani2022closer}, \textit{entropy minimization}~\citep{vu2019advent} or \textit{pseudo-label guided self-training}~\citep{hoyer2022hrda,hoyer2022daformer,hoyer2022mic}. We 
+observe that existing \sr UDA methods usually improve performance at the expense of increasingly overconfident mispredictions on (\real) target data~\citep{wang2020transferable}. Our proposed method, \augcal, is designed to retain \sr adaptation performance while reducing miscalibration on real data for existing methods. We conduct experiments on three representative UDA methods -- Entropy Minimization~\citep{vu2019advent}, Self-training~\citep{hoyer2022hrda} and Domain Adversarial Training~\citep{rangwani2022closer}.
+
+\par \noindent
+\textbf{Confidence Calibration for Deep Networks.} 
+For discriminative models, confidence calibration indicates the degree to which confidence scores associated with predictions align with the true likelihood of correctness (usually measured via ECE~\citep{naeini2015obtaining}).
+Deep networks tend to be be very poor at providing calibrated confidence estimates (are overconfident) for their predictions~\citep{guo2017calibration,gawlikowski2021survey,minderer2021revisiting}, which in turn leads to less reliable predictions for decision-making in safety-critical settings. Recent work~\citep{guo2017calibration} has also shown that calibration worsens for larger models and can decrease with increasing performance. Several works~\citep{guo2017calibration,DBLP:conf/nips/Lakshminarayanan17,DBLP:conf/nips/MalininG18} have explored this problem for modern architectures, and several solutions have also been proposed --including temperature scaling (prediction logits being divided by a scalar learned on a held-out set~\citep{platt1999probabilistic,kull2017beta,bohdal2021meta,islam2021class}) and trainable calibration objectives (training time loss functions that factor in calibration ~\citep{liang2020neural,karandikar2021soft}). 
+Improving network calibration is even more challenging in out-of-distribution settings due to the simultaneous lack of ground truth labels and overconfidence on unseen samples~\citep{wang2020transferable}. 
+Specifically, instead of methods that rely on temperature-scaling~\citep{wang2020meta,wang2022calibrating} or maybe require an additional calibration split, \augcal explores the use of training time calibration objectives~\citep{munir2022towards} to reduce micalibration for \sr shifts.
+
+
+
+\section{Method}
+
+\subsection{Background}
+\par \noindent
+\textbf{Notations.} Let 
+$x$
+denote input images
+and $y$ denote 
+corresponding labels (from the label space $\mathcal{Y} = \{1, 2, ..., K\}$) drawn from a joint distribution $P(x, y)$.
+We focus on the classification case, where the goal is to learn a discriminative model $\mathcal{M}_{\theta}$ (with parameters $\theta$) that maps input images to the desired $K$ output labels, $\mathcal{M}_{\theta}: \mathcal{X} \rightarrow \mathcal{Y}$, using a softmax layer on top.
+The predictive probabilities for the given input can be expressed as $p_{\theta}(y|x) = \softmax (\mathcal{M}_{\theta}(x)$).
+We use 
+$\hat{y} = \argmax_{y\in\mathcal{Y}} p_{\theta}(y|x)$ to denote the predicted label for $x$ and $c$ to denote the confidence in prediction.
+
+\par \noindent
+\textbf{Unsupervised \sr Adaptation.} In unsupervised domain adaptation (UDA) for \sr settings, we assume access to a labeled (\syn) source dataset $D_S = \{(x^S_i, y^S_i) \}_{i=1}^{|S|}$ and an unlabeled (\real) target dataset $D_T = \{x^T_i\}_{i=1}^{|T|}$. We assume $D_S$ and $D_T$ splits are drawn from source and target distributions $P^S(x,y)$ and $P^T(x,y)$ respectively. At training, we have access to $D = D_S \cup D_T$. We operate in the setting where source and target share the same label space, and discrepancies exist 
+only in 
+input images. 
+The model $\mathcal{M}_{\theta}$ is trained on labeled source images using cross entropy,
+\begin{equation}
+    \sum_{i=1}^{|S|} \mathcal{L}_{CE} (x_i^S, y_i^S; \theta) = - \sum_{i=1}^{|S|} y_i^S \log p_{\theta}(\hat{y}_i^S | x_i^S) \text{ where }\hat{y}_i^S = \argmax_{y\in\mathcal{Y}} p_{\theta}(y_i^S|x_i^S)
+\end{equation}
+UDA methods additionally optimize for an adaptation objective on labeled source and unlabeled target data ($\mathcal{L}_{UDA}$). The overall learning objective can be expressed as,
+\begin{equation}
+    \min_{\theta} \underbrace{\sum_{i=1}^{|S|} \mathcal{L}_{CE} (x_i^S, y_i^S; \theta)}_{\text{Source Loss}} + \underbrace{\sum_{i=1}^{|T|} \sum_{j=1}^{|S|} \lambda_{UDA} \mathcal{L}_{UDA} (x_i^T, x_j^S, y_j^S; \theta)}_{\text{Source Target Adaptation Loss}}
+    \label{Eqn:sr_adapt}
+\end{equation}
+Different adaptation methods usually differ in terms of specific instantiations of this objective. While \augcal is applicable to any \sr adaptation method in principle, we conduct experiments with three popular methods -- Entropy Minimization~\citep{vu2019advent}, Pseudo-Label driven Self-training~\citep{hoyer2022hrda} (for semantic segmentation) and Domain Adversarial Training~\citep{rangwani2022closer} (for object recognition). We provide more details on these methods in Sec.
+
+\par \noindent
+\textbf{Uncertainty Calibration.} For a perfectly calibrated classifier, the confidence in predictions should match the empirical frequency of correctness.
+Empirically, calibration can be measured using Expected Calibration Error (ECE)~\citep{naeini2015obtaining}.
+To measure ECE on a test set $D = \{(x_i, y_i)\}_{i=1}^{|D|}$, we first partition the test data into $B$ bins, $D_{b} = \{ (x, y) \;|\; r_{b-1} \leq c < r_{b} \}$, using the confidence values $c$ such that $b\in\{1,...,B\}$ and $0 = r_{0} \leq r_{1} \leq r_{2} \leq \dots \leq r_{B} = 1$. Then, ECE measures the absolute differences between accuracy and confidence across instances in every bin,
+\begin{equation}
+    \text{ECE } =  \sum_{j=1}^{B} \frac{B}{|D|} \left \lvert \frac{1}{B} \sum_{i\in D_j}\mathbf{1}_{(y_i = \hat{y}_i)} - \sum_{i\in D_j}c_i \right \rvert
+    \label{eq:ece}
+\end{equation}
+We are interested in models that exhibit high-performance and low calibration error (ECE). Note that Eqn~\ref{eq:ece} alone does not indicate if a model is overconfident. We define overconfidence (OC) as the expected confidence on mispredictions.
+Prior work on improving calibration in out-of-distribution (OOD) settings~\citep{wang2022calibrating} and domain adaptation scenarios~\citep{wang2020transferable} typically rely on techniques like temperature scaling. These methods often necessitate additional steps, such as employing a separate calibration split or domains~\citep{gong2021confidence} or training extra models (e.g., logistic discriminators for source and target features~\citep{wang2020transferable}). In contrast, we consider using training time calibration objectives~\citep{liangimproved,hebbalaguppe2022stitch,liu2022devil} that can be optimized in addition to task-specific objectives for improved calibration.
+
+\subsection{\augcal}
+\subsubsection{Reducing Miscalibration on (Real) Target}
+\label{sec:real_miscalib}
+Recall that
+$P^S(x,y)$ and $P^T(x,y)$ denote the source (\syn) and target (\real) data distributions. We assume $P(x, y)$ factorizes as $P(x, y) = P(x)P(y|x)$. We assume covariate shift conditions between $P^S$ and $P^T$, \ie, $P^T(x)\neq P^S(x)$ while $P^T(y|x) = P^S(y|x)$ -- discrepancies across distributions exist only in input images.
+When training a model, we can only draw ``labeled samples'' $(x, y)$ from $P^S(x,y)$. We do not have access to labels from $P^T(x,y)$. Our goal is to reduce miscalibration on (unlabeled) target data using training time calibration losses. Let $\mathcal{L}_{\calib}(x, y)$ denote such a calibration loss we can minimize (on labeled data).
+Using importance sampling~\citep{cortes10}, we can get an estimate of the desired calibration loss on target data as,
+\begin{align}
+    \E_{x,y\sim P^{T}(x,y)}\left[\mathcal{L}_{\calib}(x,y)\right]
+    &= \int_x\int_y\mathcal{L}_{\calib}(x,y)P^{T}(x,y)\,dx\,dy\nonumber\\
+    &=\int_x\int_y\mathcal{L}_{\calib}(x,y)\frac{P^{T}(x)P^{T}(y|x)}{P^{S}(x)P^{S}(y|x)}P^{S}(x,y)\,dx\,dy\nonumber\\
+    &=\E_{x,y\sim P^{S}(x,y)}\left[\underbrace{w_S(x)}_{\text{Importance Weight}}\underbrace{\mathcal{L}_{\calib}(x,y)}_{\text{Source Loss}}\right]
+    \label{eqn:loss_tgt_imp}
+\end{align} 
+where $w_S(x) = \frac{P^T(x)}{P^S(x)}$ denotes the importance weight. Assuming $\mathcal{L}_{\calib}(x,y) \geq 0$\footnote{We make the reasonable assumption that the calibration loss function is always non-negative.}, we can obtain an upper bound on step~\ref{eqn:loss_tgt_imp}~\citep{pampari20,wang2020transferable} as
+\begin{align}
+    \E_{x,y\sim P^{T}(x,y)}\left[\mathcal{L}_{\calib}(x,y)\right]
+    =&\E_{x,y\sim P^{S}(x,y)}\left[w_S(x)\mathcal{L}_{\calib}(x,y)\right]\\
+    \leq&\sqrt{\E_{P^{S}(x)}\Big[w_S(x)^2\Big]\E_{P^{S}(x,y)}\Big[\mathcal{L}_{\calib}(x,y)^2\Big]}\label{Eq:CS}\\
+    \leq&\frac{1}{2}\Big(\underbrace{\E_{P^{S}(x)}\Big[w_S(x)^2\Big]}_{\text{Shift Dependent}}+\underbrace{\E_{P^{S}(x,y)}\Big[\mathcal{L}_{\calib}(x,y)^2\Big]}_{\text{Source Dependent}}\Big)\label{Eq:AMGM}
+\end{align} 
+
+where steps~\ref{Eq:CS} and~\ref{Eq:AMGM} use the Cauchy-Schwarz and AM-GM inequalities respectively. For a given model, the second RHS term in inequation~\ref{Eq:AMGM} is computed purely on labeled samples from the source distribution and can therefore be optimized to convergence over the course of training. The gap in $\mathcal{L}_{\calib}$ across source and target is dominated by the importance weight (first term). Following~\citep{cortes10}, the first term can also be expressed as,
+\begin{equation}
+    \E_{P^{S}}\big[w_S(x)^2\big]=d_2\big(P^{T}(x)||P^{S}(x)\big)
+    \label{Eq:var}
+\end{equation}
+where $d_{\alpha}(P||Q)=\big[\sum_x\frac{P^{\alpha}(x)}{Q^{\alpha-1}(x)}\big]^{\frac{1}{\alpha-1}}$ with $\alpha>0$ is the exponential in base 2 of the Renyi-divergence~\citep{renyi60} between distributions $P$ and $Q$, i.e., $d_{\alpha}(P||Q) = 2^{D_{\alpha}(P||Q)}$, where $D_{\alpha}(P||Q) = \frac{1}{\alpha - 1} \log_2 \Sigma_x P(x) (\frac{P(x)}{Q(x)})^{\alpha - 1}$. The calibration error gap between source and target distributions is therefore, dominated by the divergence between source and target distributions. Consequently, inequation~\ref{Eq:AMGM} can be expressed as,
+\begin{equation}
+    \underbrace{\E_{x,y\sim P^{T}(x,y)}\left[\mathcal{L}_{\calib}(x,y)\right]}_{\text{Target Calibration Loss}} \leq \underbrace{\frac{1}{2}\textcolor{blue}{d_2\big(P^{T}(x)||P^{S}(x)\big)}}_{\text{Source and Target Divergence}} + \underbrace{\frac{1}{2}\textcolor{red}{\E_{P^{S}(x,y)}\Big[\mathcal{L}_{\calib}(x,y)^2\Big]}}_{\text{Source Calibration Loss}} = \underbrace{U (S, T)}_{\text{Upper Bound}}
+    \label{Eq:calib_gap}
+\end{equation}
+
+where $U (S, T)$ denotes the upper bound on target calibration loss. Therefore, to effectively reduce miscalibration on target data, one needs to reduce the upper bound, $U(S, T)$, which translates to (1) reducing miscalibration on source data (second red term in~\ref{Eq:calib_gap}) and (2) reducing the distributional distance between input distributions across source and target (first blue term in~\ref{Eq:calib_gap}). 
+
+\subsubsection{Why \augcal?}
+\label{sec:why_augcal}
+Based on the previous discussion, to improve calibration on target data, one can always invoke a training time calibration intervention (\calib) on labeled source data to reduce $\textcolor{red}{\E_{P^{S}(x,y)}[\mathcal{L}_{\calib}(x,y)]}$. In practice, after training, we can safely assume that $\textcolor{red}{\E_{P^{S}(x,y)}[\mathcal{L}_{\calib}(x,y)]} = \epsilon \rightarrow 0$ (for some very small $\epsilon$). We note that while this is useful and necessary, it is not sufficient. This is precisely where we make our contribution. To reduce both (red and blue) terms in~\ref{Eq:calib_gap}, we introduce \augcal. To do this, in addition to a training time calibration loss, $\mathcal{L}_{\calib}$, \augcal assumes that access to an additional \aug transformation that satisfies the following properties:
+\begin{enumerate}
+    \item $d_2\big(P^{T}(x)||P^{S}(\aug(x))\big) \leq d_2\big(P^{T}(x)||P^{S}(x)\big)$\label{prop:p1}
+    \item \text{After training, }$\E_{P^{S}(x,y)}\Big[\mathcal{L}_{\calib}(x,y)\Big] \approx \E_{P^{S}(x,y)}\Big[\mathcal{L}_{\calib}(\aug(x),y)\Big] = \epsilon \rightarrow 0$\label{prop:p2}
+    \label{prop:aug_prop}
+\end{enumerate}
+
+Property 1 states that the chosen \aug transformation brings transformed source data closer to target (or reduces \sr distributional distance). Property 2 states that over the course of training, irrespective of the data $\mathcal{L}_{\calib}(x, y)$ is optimized on (\aug transformed or clean source), $\E_{P^{S}(x,y)}\Big[\mathcal{L}_{\calib}(\cdot, \cdot)\Big]$ can achieve a sufficiently small value close to $0$. Given an \aug transformation that satisfies the above stated properties, we can claim,
+\begin{equation}
+    U^{\aug}(S, T) \leq U (S, T)
+\end{equation}
+where
+\begin{equation}
+    U^{\aug} (S, T) = \frac{1}{2}\textcolor{blue}{d_2\big(P^{T}(x)||P^{S}(\aug(x))\big)} + \frac{1}{2}\textcolor{red}{\E_{P^{S}(x,y)}\Big[\mathcal{L}_{\calib}(\aug(x),y)^2\Big]}
+    \label{eqn:aug_valid}
+\end{equation}
+
+\begin{wraptable}{r}{0.5\textwidth}
+\caption{\footnotesize\textbf{Eligible \aug choices.} \aug transformations that reduce \sr distance and satisfy Property-1.}\label{wrap-tab:aug_dist}
+\resizebox{0.5\textwidth}{!}{
+\begin{tabular}{cccc}\\\toprule  
+\textbf{\sr}  & \multicolumn{3}{c}{\textbf{100x (RBF) MMD}} \\
+ & (\syn, \real) & (\pst-\syn, \real) & (R.Aug-\syn, \real) \\\midrule
+VisDA & 4.806 & \textcolor{blue}{\textbf{4.171}} & \textcolor{blue}{\textbf{3.464}}\\
+GTAV$\to$City. & 5.795 & \textcolor{blue}{\textbf{5.214}} & \textcolor{blue}{\textbf{5.213}}\\
+\bottomrule
+\end{tabular}}
+\end{wraptable} 
+That is, an appropriate \aug transform, when coupled with $\mathcal{L}_{\calib}$, helps reduce a tighter upper bound on the target calibration error than \calib. We call this intervention -- coupling \aug and \calib -- \augcal.
+Naturally, the effectiveness of \augcal is directly dependent on the choice of \aug that satisfies the aforementioned properties. While most augmentations can satisfy property 2, to check if an augmentation is valid according to property 1, we compute RBF Kernel based MMD distances for (\syn, \real) and (\textsc{Aug}mented \syn, \real) feature pairs using a trained model.\footnote{Under bounded importance weight assumptions, MMD can be interpreted as an upper bound on $D_{2}(P||Q)$ and $D_{1}(P||Q)$ (KL divergence)~\citep{wang2022practical}. Note that Eqn.~\ref{eqn:aug_valid} presents upper bounds in terms of $d_{2}(P||Q) = 2^{D_{2}(P||Q)}$, and Table~\ref{wrap-tab:aug_dist} provides measured distributions distances as upper bounds on $D_{2}(P||Q)$.} In Table.~\ref{wrap-tab:aug_dist}, we show how \pst~\citep{chattopadhyay2022pasta} and RandAugment~\citep{cubuk2020randaugment}, two augmentations effective for \sr transfer, satisfy these considerations on multiple shifts (read Table.~\ref{wrap-tab:aug_dist} left to right).
+\pst and RandAug are additionally (1) inexpensive when combined with \sr UDA methods, and (2) generally beneficial for \sr shifts (\pst via \sr specific design and RandAug via chained photometric operations).
+
+\begin{figure}[t]
+  \centering
+\includegraphics[width=0.945\textwidth]{figures/AugCal_Method.pdf}
+  \caption{\footnotesize\textbf{\augcal pipeline}. \augcal consists of two key interventions on an existing \sr adaptation method. First source \syn images are augmented via an \aug transform. Supervised losses for \syn images are computed on the augmented image predictions. Additionally, \augcal optimizes for a calibration loss on \textsc{Aug}mented \syn predictions.}
+  \label{fig:augcal}
+\end{figure}
+
+\subsubsection{\augcal Instantiation}
+Given a \sr adaptation method, \augcal additionally optimizes for improved calibration on augmented \syn source images. Since \augcal is applicable to any existing \sr adaptation method, we abstract away the adaptation component associated with the pipeline and denote as $\mathcal{L}_{UDA}$ (see Eqn.~\ref{Eqn:sr_adapt}). The steps involved in \augcal are 
+illustrated in Fig.~\ref{fig:augcal}. Given a mini-batch, we first generate augmented views, $\textsc{Aug}(x^S)$, for \syn images $x^S$. Then, during training, we optimize $\mathcal{L}_{CE}$ on those augmented \syn views and $\mathcal{L}_{UDA}$ for adaptation. To improve calibration under augmentations, we optimize an additional $\mathcal{L}_{\calib}$ loss on augmented \syn images. The overall \augcal optimization problem can be expressed as,
+\begin{multline}
+    \min_{\theta} \underbrace{\sum_{i=1}^{|S|} \mathcal{L}_{\tiny{CE}} (\textcolor{teal}{\aug(x_i^S)}, y_i^S; \theta)}_{\text{Source Task Loss}} + \underbrace{\sum_{i=1}^{|T|} \sum_{j=1}^{|S|} \lambda_{\tiny{UDA}} \mathcal{L}_{\tiny{UDA}} (x_i^T, \textcolor{teal}{\aug(x_j^S)}, y_j^S; \theta)}_{\text{Source Target Adaptation Loss}} \\+ \underbrace{\sum_{i=1}^{|S|}\textcolor{teal}{\lambda_{\calib}\mathcal{L}_{\tiny{\textsc{Cal}}} (\aug(x_i^S), y_i^S; \theta)}}_{\text{Source Calibration Loss}}
+\end{multline}
+
+where $\lambda_{UDA}$ and $\lambda_{\textsc{Cal}}$ denote the respective loss coefficients and the changes to a vanilla \sr adaptation framework are denoted in \textcolor{teal}{teal}. 
+
+\par \noindent
+\textbf{Choice of ``\textsc{Aug}''.} Strongly augmenting \syn images during training has proven useful for \sr transfer~\citep{chattopadhyay2022pasta,huang2021fsdr,zhao2022shade,cubuk2020randaugment}. 
+For \augcal, we are interested in augmentations that satisfy the properties outlined in Sec.~\ref{sec:why_augcal}. As stated earlier, we find that RandAugment~\citep{cubuk2020randaugment} and \pst~\citep{chattopadhyay2022pasta} empirically satisfy this criteria. We use both of them for our experiments and provide details on the operations for these \aug transforms in Sec.
+
+\par \noindent
+\textbf{Choice of ``\textsc{Cal}'' ($\mathcal{L}_{\textsc{cal}}$).} \augcal relies on using training time calibration losses to reduce miscalibration. Prior work in uncertainty calibration has considered several auxiliary objectives to calibrate a model being trained to reduce negative log-likelihood (NLL)~\citep{hebbalaguppe2022stitch,kumar2018trainable,karandikar2021soft,liang2020neural}. For ``\textsc{Cal}'' in \augcal, while we
+consider multiple calibration losses -- DCA~\citep{liangimproved}, MbLS~\citep{liu2022devil} and MDCA~\citep{hebbalaguppe2022stitch} -- and find that DCA, simple "difference between confidence and accuracy (DCA)" loss proposed in~\citep{liang2020neural} is more consistently effective across experimental settings. DCA can be expressed as,
+\begin{equation}
+    \mathcal{L}_{\textsc{cal}} = \frac{1}{|S|}\left \lvert \sum_{i=1}^{|S|}\mathbf{1}_{(y^S_i = \hat{y}^S_i)} - \sum_{i=1}^{|S|}p_{\theta}(\hat{y}^S_i|x^S_i) \right \rvert
+\end{equation}
+where $\mathbf{1}_{(y^S_i = \hat{y}^S_i)} \text{ and } p_{\theta}(\hat{y}^S_i|x^S_i)$ denote the correctness and confidence scores associated with predictions. The DCA loss forces the mean predicted confidence over training samples to match accuracy. In the following sections, we empirically validate \augcal across adaptation methods.
+
+
+
+
+\section{Experimental Details}
+
+\label{sec:experiments}
+We conduct \sr adaptation experiments across two tasks -- Semantic Segmentation (SemSeg) and Object Recognition (ObjRec). For our experiments, we train models using labeled \syn images and unlabeled \real images. We test trained models on \real images.
+
+\par \noindent
+\textbf{\sr Shifts.} For SemSeg, we conduct experiments on the GTAV$\to$Cityscapes shift. GTAV~\citep{sankaranarayanan2018GTA} consists of $\sim25$k densely annotated \syn ground-view images and Cityscapes~\citep{cordts2016cityscapes} consists of $\sim5$k \real ground view images. We report 
+all metrics on the
+Cityscapes validation split.
+For ObjRec, we conduct experiments on the VisDA \sr benchmark. VisDA~\citep{peng2017visda} consists of $\sim152$k \syn images and $\sim55$k \real images across $12$ classes. We report all metrics on the validation split of (\real) target images. 
+
+\par \noindent
+\textbf{Models.} We check \augcal compatibility with both CNN and Transformer based 
+architectures. For SemSeg, we consider DeepLabv2~\citep{chen2017deeplab} (with a ResNet-101~\citep{he2016deep} backbone) and DAFormer~\citep{hoyer2022daformer} (with an MiT-B5~\citep{xie2021segformer} backbone) architectures. For ObjRec, we consider ResNet-101 and ViT-B/16~\citep{dosovitskiy2020image} backbones with bottleneck layers as classifiers.
+We start with backbones pre-trained on ImageNet~\citep{imagenet}.
+\par \noindent
+\textbf{Adaptation Methods.} We consider three 
+representative \sr adaptation methods for our experiments. 
+For SemSeg, we consider entropy minimization (EntMin)~\citep{vu2019advent} and high-resolution domain adaptive semantic segmentation (HRDA)~\citep{hoyer2022hrda}. For ObjRec, we consider smooth domain adversarial training (SDAT)~\citep{rangwani2022closer}.
+For both tasks, we further improve performance with masked image consistency (MIC)~\citep{hoyer2022mic} on target images during training. 
+We use MIC~\citep{hoyer2022mic}'s implementations of the adaptation algorithms and provide more training details in Sec.
+\par \noindent
+\textbf{Calibration Metrics.} We use ECE to report overall confidence calibration on \real images. 
+Since we are interested in reducing overconfident mispredictions, 
+we also report calibration error on incorrect samples (IC-ECE)~\citep{wang2022calibrating} and mean overconfidence for mispredictions (OC).
+
+\textbf{Reliability Metrics.} While reducing overconfidence and improving calibration on real data is desirable, this is a proxy for the true goal of improving model reliability. To assess reliability, following prior work~\citep{de2023reliability,malinin2019ensemble}, we measure whether calibrated confidence scores can better guide misclassification detection. 
+To measure this, we use Prediction Rejection Ratio (PRR)~\citep{malinin2019ensemble}, which if high (positive and close to $100$) indicates that confidence scores can be used as reliable indicators of performance (details in Sec. 
+
+Unless specified otherwise, we use \pst as the choice of \aug and DCA~\citep{liangimproved} as the choice of \calib in \augcal. We use $\lambda_{\calib} = 1$ for DCA. 
+
+
+
+\section{Findings}
+
+\subsection{Improving \sr Adaptation}
+Recall that when applied to a \sr adaptation method, we expect \augcal to -- (1) retain \sr transfer performance, (2) reduce miscalibration and overconfidence and (3) ensure calibrated confidence scores translate to improved model reliability. We first verify these criteria.
+\input{figures_iclr/key_seg_cls_res}
+
+\par \noindent
+\textbf{$\triangleright$ \augcal improves or retains \sr adaptation performance.} Since \augcal intervenes on an existing \sr adaptation algorithm, we first verify that encouraging better calibration does not adversely impact \sr adapation performance. We find that performance is either retained or improved (\eg, for EntMin + MIC in Table.~\ref{table:aug_cal_key_res} (a)) as miscalibration is reduced (Tables.~\ref{table:aug_cal_key_res}(a) and (b), Perf. columns). 
+
+\par \noindent
+\textbf{$\triangleright$ \augcal reduces miscalibration post \sr adaptation.} On both GTAV$\to$Cityscapes and VisDA, we find that \augcal consistently reduces miscalibration of the base method by reducing overconfidence on incorrect predictions. This is evident in how \augcal variants of the base adaptation methods have lower ECE, IC-ECE and OC values (\augcal rows, Calibration columns in Tables.~\ref{table:aug_cal_key_res} (a) and (b)). As an example, 
+to illustrate the effect of improved calibration on real data, in Fig.~\ref{fig:augcal_qual}, we show how applying \augcal can improve the proportion of per-pixel SemSeg predictions that are accurate and have high-confidence ($>0.95$).
+
+\par \noindent
+\textbf{$\triangleright$ \augcal improvements in calibration improve reliability.} As noted earlier, we additionally investigate the extent to which calibration improvements for \sr adaptation translate to reliable confidence scores -- via misclassification detection on \real target data (see Sec.~\ref{sec:experiments}), as measured by PRR. We find that \augcal consistently improves PRR of the base \sr adaptation method (PRR columns for \augcal rows in Tables.~\ref{table:aug_cal_key_res}(a) and (b)) -- ensuring that predictions made \augcal variants of a base model are more trustworthy.
+
+\subsection{Analyzing \augcal}
+We now analyze different aspects of \augcal.
+\input{figures_iclr/aug_cal_augcal}
+
+\par \noindent
+\textbf{$\triangleright$ Applying \augcal is better than applying just \textsc{Aug} or \textsc{Cal}.} In Sec.~\ref{sec:real_miscalib} and~\ref{sec:why_augcal}, we discuss how \augcal can be more effective in reducing target miscalibration than just optimizing for improved calibration on labeled \syn images. We verify this empirically in Tables.~\ref{table:aug_cal_augcal}(a) and (b) for SemSeg and ObjRec. We show that while \aug and \calib, when applied individually, improve over a base \sr method, they fall short of improvements offered by \augcal.
+\par \noindent
+\textbf{$\triangleright$ \augcal is applicable across multiple \aug choices.} In Sec.~\ref{sec:why_augcal} and Table.~\ref{wrap-tab:aug_dist}, we show how both \pst~\citep{chattopadhyay2022pasta} and RandAugment~\citep{cubuk2020randaugment} are eligible for \augcal. In Table.~\ref{table:augcal_ablations}(a), we fix DCA as \calib and find that both \pst and RandAugment are effective in retaining or improving performance, reducing miscalibration and improving reliability.
+
+\input{figures_iclr/augcal_ablations}
+\par \noindent
+\textbf{$\triangleright$ Ablating \calib choices for \augcal.} For completeness, we also conduct experiments by fixing \pst as \aug and ablating the choice of \calib in \augcal. We consider recently proposed training time calibration objectives -- Difference of Confidence and Accuracy (DCA)~\citep{liangimproved}, Multi-class Difference in Confidence and Accuracy (MDCA)~\citep{hebbalaguppe2022stitch} and Margin-based Label Smoothing (MbLS)~\citep{liu2022devil} -- as potential \calib choices (results for SemSeg outlined in Table.~\ref{table:augcal_ablations}(b)). We find that while MDCA and MbLS can be helpful, DCA is more consistently helpful across tasks and settings.
+
+\par \noindent
+\textbf{$\triangleright$ \augcal is applicable across multiple task backbones.} Different architectures -- CNNs and Transformers -- are known to exhibit bias towards different properties in images (shape, texture, \etc)~\citep{naseer2021intriguing}. Since the choice of \aug transform (which can alter such properties) is central to the efficacy of \augcal, we verify if \augcal is effective across both CNN and Transformer backbones. To do this, we conduct our SemSeg, ObjRec experiments with both transformer (DAFormer, ViT-B) and CNN (DeepLabv2-R101, ResNet-101) architectures. We find that \augcal (with \pst as \aug and DCA as \calib) is effective in reducing \sr miscalibration across all settings. We discuss these results in Sec.
+
+\begin{figure}[t]
+  \centering
+\includegraphics[width=0.95\textwidth]{figures_iclr/AUGCAL_qualitative_figure_2.pdf}
+\resizebox{0.98\textwidth}{!}{
+	\begin{tabular}{@{}cccccccccc@{}}
+		\cellcolor{city_color_1}\textcolor{white}{~~road~~} &
+		\cellcolor{city_color_2}~~sidewalk~~&
+		\cellcolor{city_color_3}\textcolor{white}{~~building~~} &
+		\cellcolor{city_color_4}\textcolor{white}{~~wall~~} &
+		\cellcolor{city_color_5}~~fence~~ &
+		\cellcolor{city_color_6}~~pole~~ &
+		\cellcolor{city_color_7}~~traffic lgt~~ &
+		\cellcolor{city_color_8}~~traffic sgn~~ &
+		\cellcolor{city_color_9}~~vegetation~~ & 
+		\cellcolor{city_color_0}\textcolor{white}{~~ignored~~}\\
+		\cellcolor{city_color_10}~~terrain~~ &
+		\cellcolor{city_color_11}~~sky~~ &
+		\cellcolor{city_color_12}\textcolor{white}{~~person~~} &
+		\cellcolor{city_color_13}\textcolor{white}{~~rider~~} &
+		\cellcolor{city_color_14}\textcolor{white}{~~car~~} &
+		\cellcolor{city_color_15}\textcolor{white}{~~truck~~} &
+		\cellcolor{city_color_16}\textcolor{white}{~~bus~~} &
+		\cellcolor{city_color_17}\textcolor{white}{~~train~~} &
+		\cellcolor{city_color_18}\textcolor{white}{~~motorcycle~~} &
+		\cellcolor{city_color_19}\textcolor{white}{~~bike~~}
+	\end{tabular}
+	}
+  \caption{\footnotesize\textbf{\augcal increases the proportion of ``accurate'' and ``certain'' predictions}. For a (DAFormer) HRDA + MIC (row 1) and EntMin + MIC (row 2) on GTAV$\to$Cityscapes, we show how different interventions affect the proportion of ``accurate'' and ``certain'' (confidence $> 0.95$) predictions (indicated in \textcolor{gray}{gray} per column). Regions in black do not satisfy the ``accurate'' and ``certain'' filtering criteria. We see that compared to a base adaptation method, \augcal increases the proportion highly-confident correct predictions (\textcolor{green}{green} boxes). \aug and \calib applied alone can potentially reduce that proportion (\textcolor{yellow}{yellow} boxes). \aug is \pst, \calib is DCA.}
+  \label{fig:augcal_qual}
+\end{figure}
+
+\par \noindent
+\textbf{$\triangleright$ How does \augcal compare with temperature scaling?} While we focus on ``training-time'' patches to improve \sr calibration, we also conduct an experiment to compare \augcal with ``post-hoc'' temperature scaling (TS) on VisDA.
+Specifically, we use 80\% of VisDA \syn images for training models and rest (20\%) for validation and temperature tuning. To ensure a fair comparison, we consider temperature tuning on both "clean" (C) and "\pst augmented" (P) val splits.
+We find that irrespective of tuning on C or P, unlike \augcal, TS is ineffective and increases overconfidence and miscalibration. We present these results in Sec.
+
+\par \noindent
+\textbf{$\triangleright$ \augcal increases the proportion of accurate and certain predictions.} In Fig.~\ref{fig:augcal_qual}, we show qualitatively for GTAV$\to$Cityscapes SemSeg how \augcal increases the proportion of highly-confident correct predictions. In practice, we find that this improvement is much more subtle for stronger \sr adaptation methods, such as HRDA + MIC, compared to weaker ones, such as EntMin + MIC, which have considerable room for improvement.
+
+
+
+\section{Conclusion}
+
+We propose \augcal, a method to reduce the miscalibration of \sr adapted models, often caused due to highly-confident incorrect predictions.
+\augcal modifies a \sr adaptation framework by making two minimally invasive changes -- (1) augmenting \syn images via \aug transformations that reduce \sr distance and (2) optimizing for an additional calibration loss on \textsc{Aug}mented \syn predictions. Applying \augcal to existing adaptation methods for semantic segmentation and object recognition reduces miscalibration, overconfidence and improves reliability of confidence scores, all while retaining or improving performance on \real data. \augcal is meant to be a task-agnostic, general purpose framework to reduce miscalibration for \sr adaptation methods and we hope such simple methods are taken into consideration for experimental settings beyond the ones considered in this paper.
+\par \noindent
+\textbf{Acknowledgements.} This work has been partially sponsored by NASA University Leadership Initiative (ULI) \#80NSSC20M0161, ARL and NSF \#2144194.
+
+
+
+
+\section{Ethics Statement}
+
+Our proposed patch, \augcal, is meant to improve the reliability of \sr adapted models. We assess reliability in terms of confidence calibration (prediction scores aligning with true likelihood of correctness) and the extent to which calibrated confidence scores are useful for assessing prediction quality (measured via mis-classification detection).  \augcal adapted models have promising consequences for downstream applications. A well-calibrated and reliable \sr adapted model can increase
+transparency in \real predictions and facilitate robust decision making in safety-critical scenarios. 
+That said, we would like to note that while \augcal is helpful for our specific measures of reliability, exploration along other domain specific notions of reliability remain.
+
+
+
+
+
+

@@ -1,0 +1,429 @@
+\title{OPTune: Efficient Online Preference Tuning}
+
+\begin{abstract}
+Reinforcement learning with human feedback~(RLHF) is critical for aligning Large Language Models (LLMs) with human preference.
+Compared to the widely studied offline version of RLHF, \emph{e.g.} direct preference optimization (DPO), recent works have shown that the online variants achieve even better alignment. 
+However, online alignment requires on-the-fly generation of new training data, which is costly, hard to parallelize, and suffers from varying quality and utility.
+In this paper, we propose a more efficient data exploration strategy for online preference tuning (\modelnameA{}), which does not rely on human-curated or pre-collected teacher responses but dynamically samples informative responses for on-policy preference alignment. 
+During data generation, \modelnameA{} only selects prompts whose (re)generated responses can potentially provide more informative and higher-quality training signals than the existing responses. 
+In the training objective, \modelnameA{} reweights each generated response (pair) by its utility in improving the alignment so that learning can be focused on the most helpful samples. 
+Throughout our evaluations, \modelnameA{}'d LLMs maintain the instruction-following benefits provided by standard preference tuning whilst enjoying 1.27-1.56x faster training speed due to the efficient data exploration strategy. \looseness-1
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+\par Reinforcement Learning from Human Feedback (RLHF) has emerged as an effective method for training large language models (LLMs) to generate responses that are more aligned with human preferences~\citep{ziegler2019finetuning,instructgpt}, and has underpinned the successes of systems like ChatGPT and the Gemini models.
+Offline preference tuning~(PT) techniques such as DPO~\citep{rafailov2023dpo}, IPO~\citep{azar2024ipo}, and KTO~\citep{ethayarajh2024kto} are also viable solutions for utilizing the human preference dataset to enhance the alignment qualities of
+of LLMs but these techniques require large volumes of annotated response data. 
+Its counterpart, \textit{online} PT, exhibits promising potential but demands continuous sampling of new responses from the LLM policy during iterative training which is an expensive operation in its own right. 
+Considering online DPO training as an example, we can break the overall process down into four steps:
+(1) Reward model~(RM) training. 
+(2) Sampling responses from the trained policy (LLM).
+(3) Evaluate responses by the rewards from RM.
+(4) Preference Tuning~(PT) on the reward-labeled responses. 
+Given the time-consuming and resource-intensive nature of these steps, our goal in this work is to study methods for expediting the entire training cycle without compromising the quality of the trained models, thereby enhancing the practical feasibility and effectiveness of online DPO.\looseness-1
+
+\par Based on our analysis, as reported in \cref{tab: time}, it is evident that generating responses and training the policy model are the most time-consuming steps of online DPO training. 
+Can we na\"ively reduce the number of responses being generated?
+Unfortunately, in preliminary experiments, we find that randomly selecting half of the generated responses for reuse during iterative training results in a significant degradation in instruction-following performance compared to that of policies trained in a fully online setting. 
+This leads to another question:
+\textit{Can we maintain the performance of online PT while adhering to a fixed generation budget?}~\looseness-1
+
+\begin{wraptable}[9]{r}{0.5\textwidth}
+\centering
+\begin{tabular}{c|ccc}
+\toprule[1pt]
+   & Generation & Rewarding & Training \\ \midrule
+Time & 71.8\% & 0.1\% & 28.1\% \\  \bottomrule[1pt]
+\end{tabular}
+\caption{\footnotesize{Time percentage for each procedure in online DPO. The batch size of generation and training have been optimized for GPUs to ensure good parallelism. We set the max response length of both generation and training to 512.}    }
+\label{tab: time}
+\end{wraptable}
+\par First, to reduce the generation cost without compromising instruction-following capabilities or alignment quality, we propose to only re-generate and update the lowest-rewarded responses produced under the latest LLM policy. We posit that the policy's behavior on these specific prompts can likely be improved further than in scenarios where its responses are already high quality potentially leading to greater improvements in overall reward at each step. 
+Thus, we generate new responses for those selected prompts and mix them with the existing high-rewarded responses to constitute the full training set. 
+By implementing the reward-based selection strategy, 
+we address the dual goals of reducing the computational cost of response generation in online DPO while retaining the instruction-following capability, which leads to more data-efficient online RLHF. 
+
+\par Second, we investigate the utility of response pairs in online DPO and propose a weighted DPO~(wDPO) objective that focuses learning on preference pairs that may contribute the most to the online alignment process. This is motivated by the simple observation that in the original DPO loss formulation, the positive-negative labels are a binary quantization of their scalar rewards and thus cannot explicitly reflect their reward gap. The reward gap measures the utility of response pairs in DPO training because comparing the preferred and rejected responses with a larger reward gap reveals more clues for improving the alignment. By directly assigning larger weights to these samples, in each round online wDPO concentrates learning on the high-utility samples yielding improved learning efficiency. 
+
+
+
+\par We conduct comprehensive experiments to evaluate the \modelnameA{}-trained LLM policies, incorporating instruction-following evaluations, multiple benchmarks, and human studies. Specifically, we select LIMA~\citep{lima} and \texttt{AlpacaEval}~\citep{alpaca_eval} test sets as free-form instruction evaluations and conduct pair-wise comparisons by employing GPT-4 as the judge.
+Given the potential for biases from the judge to confound model-based evaluations, human studies and 
+benchmark evaluations such as MMLU~\citep{hendrycks2020mmlu}, GSM8k~\citep{cobbe2021gsm8k}, and TruthfulQA~\citep{lin2021truthfulqa} are also included. Through our experiments we demonstrate that \modelnameA{} trains better LLMs than baselines whilst enjoying $1.27$-$1.56$x training speedup due to its efficient data-exploration strategy.\looseness-1
+
+\par To sum up, \modelnameA{} is the first efficient data generation algorithm for online RLHF. By selectively regenerating only the lowest-rewarded responses and using a weighted DPO objective that emphasizes pairs with larger reward gaps, \modelnameA{} significantly enhances both the generation and training efficiency of the RLHF pipeline,
+thereby paving the way for a promising future in which preference-aligned LLMs can be developed in a resource-efficient manner.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.85\linewidth]{figures/teaser.pdf}
+    \caption{\footnotesize{The pipeline of our \modelnameA{}: it only explores the low-reward examples and reuses the high-quality examples, which improves the generation efficiency of the iterative online PT. We also exploit the weighted DPO to enhance the training efficiency by focusing on the high-utility samples. $\pi_t$: the policy in iter $t$. $R$: the reward model. $\rho$: the prompt selection ratio for re-generations.}}
+    \label{fig:enter-label}
+\end{figure}
+
+
+
+
+\section{Preliminaries}
+
+\label{gen_inst}
+The prevalent RLHF pipeline was proposed by~\citet{ziegler2019fine} and adopted by subsequent works including~\citep{stiennon2020learning,nakano2021webgpt,ouyang2022instructgpt,bai2022training}. The standard method comprises three stages: (1) Supervised Fine-Tuning (SFT) on human-annotated/machine-generated responses; (2) reward model training on preference data; and (3) Reinforcement Learning based on the SFT checkpoint and feedback received from the RM.
+
+\paragraph{Reward Model Training}
+Following~\citep{instructgpt, touvron2023llama}, we utilize the Bradley-Terry model \citep{bradley1952rank} in RM training procedure, 
+which provides a probabilistic framework for predicting preferences based on pairwise comparisons. 
+The goal is to learn a set of parameters $\vtheta$ that best explains the observed preferences between pairs of possible responses.
+Specifically, the loss function is given by:
+\begin{equation}\label{eq:rm_base}
+\Ls(\theta) = -\E_{(x, y_w, y_l) \sim \train} \left[\log \sigma\left(r_\vtheta(x, y_w) - r_\vtheta(x, y_l)\right)\right],
+\end{equation}
+where $\sigma(\cdot)$ is the sigmoid function; $r_\vtheta(x, y)$ is the scalar reward from the RM; $y_w$ and $y_l$ denotes chosen and rejected responses, respectively.
+This loss function represents the negative log-likelihood of the model preferring the chosen response $y_w$ over the rejected response $y_l$ under the Bradley-Terry model. \looseness-1
+
+\paragraph{RL finetuning}
+The reinforcement learning stage~\citep{bai2022training, gao2022scaling} does not require predefined responses. It further fine-tunes the SFT model $\pi_{\sft} (y|x)= p(y|x;\theta^{\sft})$ to maximize the reward $r(x,y)$ under a KL regularization to prevent the model from deviating too far from the SFT model:
+\begin{equation}\label{eq:rl-obj}
+    \underset{\theta}{\text{maximize}}~~\E_{x\sim \gD_{\vp}}\left[\E_{y\sim \pi_\theta(y|x)}\left[r(x,y)\right] -   \alpha \sD_{KL}\left[ \pi_\theta(y|x)| \pi_\sft(y|x) \right]\right],
+\end{equation}
+where $\pi_\theta(y|x)= p(y|x;\theta)$;
+$\alpha>0$ is a constant to control the regularization strength; 
+$\gD_{\vp}$ denotes the prompt set used for sampling the response $y \sim \pi_\theta(y|x)$ from the trained policy and construct pair $(x, y)$ for RL training.
+Note the KL term here is defined on the conditional distribution $p(y|x;\theta)$ as $\sD_{\text{KL}}\left[ \pi_\theta(y|x)|\pi_{\text{sft}}(y|x) \right]=\E_{y\sim p(y|x;\theta)} \left[\log \frac{\pi_\theta(y|x)}{\pi_{\text{sft}}(y|x)}\right]$.
+\paragraph{DPO}
+
+One representative method for preference optimization is DPO~\citep{rafailov2023dpo}. It follows \citet{ziebart2008maximum} and starts with a closed-form solution for \cref{eq:rl-obj}:
+\begin{equation}\label{eq:closed-form}
+    \pi_r(y \mid x) = \frac{1}{Z(x)} \pi_{\text{ref}}(y \mid x) \exp\left(\frac{1}{\beta} r(x, y)\right),
+\end{equation}
+where $Z(x)$ is the partition function: $Z(x) = \sum_y \pi_{\text{ref}}(y \mid x) \exp\left(\frac{1}{\beta} r(x, y)\right)$.
+Then they rearrange the \cref{eq:closed-form} and express the reward as a function of the policy:
+\begin{equation} \label{eq: DPO trick}
+    r(x, y) = \frac{1}{\beta_1} \left( \log(Z(x)) + \log\left(\frac{\pi_{t+1}(y|x)}{\pi_t(y|x)}\right) \right),
+\end{equation}
+where $\pi_{t}$ and $\pi_{t+1}$ are the policies on the iteration $t$ and $t+1$, respectively. 
+It aims to optimize an implicit reward function as a binary classification loss:
+\begin{equation}\label{eq:dpo}
+\gL_{DPO}(\pi_{t+1}; \pi_{t}) = -\E_{(x, y_u, y_l) \sim \gD} \left[ \log \sigma \left( \beta_1 \log \frac{\pi_{t+1}(y_w | x)}{\pi_{t}(y_w | x)} - \beta_1 \log \frac{\pi_{t+1}(y_l | x)}{\pi_{t}(y_l | x)} \right) \right].
+\end{equation}
+
+While in the standard offline DPO setting \citep{rafailov2023dpo} the preference datasets are collected before training begins, \citet{spin, dong2024rlhf} extend DPO to the online setting, by sampling two new responses to each prompt at every iteration.  
+These two responses are passed to the reward model to identify the preferred and dispreferred response, thereby training the policy on continuously updated preference data with each iteration. 
+
+
+
+\section{Method}
+
+In this section, we develop \modelnameA{} to improve both the \textbf{data generation efficiency} and \textbf{training efficiency} of online preference alignment. First, to reduce the cost of iterative data re-generation in the online setting, we propose a simple but effective reward-based prompt selection strategy
+that only updates the responses for prompts with the lowest scoring current responses according the reward model.
+Then, motivated by the observation that the quantization of scalar rewards to binary labels required by the online DPO objective necessarily leads to information loss, we propose a weighted DPO loss variant that prioritizes the learning of response pairs with a larger reward gap, thereby improving online learning efficiency even further. 
+
+\subsection{Data generation efficiency: Reward-based prompt selection}
+
+According to the \cref{eq:rl-obj}, the ultimate goal of RL finetuning is to maximize the expected reward for the generated responses.
+We first investigate whether different prompts contribute differently to the total reward gain at each step.
+For each iteration of online DPO, we generate the response for $x^i \in \gP$ and the reward model returns the reward value $r^i$ of each response.
+We compute the reward gain from prior iteration, and also provide statistics showing how different prompts contribute to the overall reward gain. \looseness-1
+\begin{wrapfigure}[12]{r}{0.6\textwidth}
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/reward_gains.pdf}
+    \caption{\footnotesize{The reward gains brought by two subsets: top-50\% ranked prompts and bottom-50\% ranked prompts. More gains are achieved from the bottom-50\% prompts than the top-50\% prompts.}}
+    \label{fig:reward gains}
+\end{wrapfigure}
+As illustrated in \cref{fig:reward gains}, we divide the prompt set into two subsets based on the reward rankings of their preferred responses: the top-50\% and the bottom-50\%. We then analyze the percentage of reward gains from each subset. 
+For example, in Iter2, when comparing the reward on each prompt to the Iter1, only 31.4\% of the reward gain originates from prompts that generated higher-reward responses in the previous iteration (top-50 subset), while 68.6\% comes from prompts that produced lower-reward responses (bottom-50 subset).  
+That indicates if the response's reward is low in this iteration, the prompt is more likely to produce a high-reward response in the following iteration. Conversely, if the response's reward is high in the current iteration, it is less likely to generate a high-reward response in the next iteration.
+
+
+
+Motivated by this observation, we propose a reward-based prompt selection mechanism that prioritizes prompts such that due to their currently low reward, if their responses were to be re-generated and trained on in the next round, the total reward gain of the policy would likely to be larger.
+Using this  selection criteria our algorithm ensures that each training iteration focuses on the most informative examples, thereby improving overall generation efficiency. 
+\cref{alg:optune} formally defines how \modelnameA's reward-based prompt selection works.
+
+\begin{algorithm}[htp]
+\caption{OPTune for Iterative Online DPO}\label{alg:optune}
+\begin{algorithmic}[1]
+\State Initialize policy parameters $\pi_{0}$; ranked prompt set $\mathcal{P}_t$ and training set $\mathcal{D}_t$ at iteration $t$; Prompt selection ratio $\rho$; generation count $g = 0$;
+
+\For{$t = 0$ to $T-1$}
+    \State Clear temporary response storage $\mathcal{R}_t = \{\}$
+    \State Calculate the number of prompts to regenerate $N = \lceil \rho \times |\mathcal{P}_t| \rceil$
+    \State Set $g = 0$
+    \While{$g < N$}
+        \State Pop the lowest ranking prompt $x^i$ from $\mathcal{P}_t$ 
+        \State Sample two responses $y_1^i$ and $y_2^i$ for $x^i$ using $\pi_t$
+        \State Store responses: $\mathcal{R}_t \leftarrow \mathcal{R}_t \cup \{(x^i, y_1^i), (x^i, y_2^i)\}$
+        \State Increment the generation count $g = g + 1$
+    \EndWhile
+
+    \For{each $x^i \in \mathcal{P}_t$}
+        \If{$(x^i, y_1^i), (x^i, y_2^i) \in \mathcal{R}_t$}
+            \State Use the new responses from $\mathcal{R}_t$ for $x^i$
+        \Else
+            \State Use the previous responses from $\mathcal{D}_t$ for $x^i$
+        \EndIf
+    \EndFor
+    
+    \State Compute rewards $r^i_1$ and $r^i_2$ for each $(x^i, y_1^i), (x^i, y_2^i) \in \mathcal{R}_t$ 
+    \State Construct the training set $\mathcal{D}_t = \{(x^i, y_w^i), (x^i, y_l^i) \mid x^i \in \mathcal{P}_t \}$
+    \State Rank the prompts in $\mathcal{P}_t$ according to rewards to obtain $\mathcal{P}_{t+1}$
+
+    \State Compute the wDPO (or DPO) loss and update the policy parameters $\pi_t$ to obtain $\pi_{t+1}$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Training efficiency: Weighted DPO Loss} 
+
+To improve training efficiency, we more closely examine the iterative online DPO algorithm presented in \cref{alg:online-dpo}. 
+
+\begin{algorithm}[htp]
+\caption{Iterative Online DPO}\label{alg:online-dpo}
+\begin{algorithmic}[1]
+\State Initialize policy parameters $\pi_{0}$ and prompt set $\mathcal{P}$
+\For{$t = 0, 1, \ldots, T-1$}
+    \State Sample two responses $y_1^i$ and $y_2^i$ from $\pi_t$ for each prompt $x^i$ in $\mathcal{P}$
+    \State Compute the rewards $r^i_1$ and $r^i_2$ for $(x^i, y_1^i), (x^i, y_2^i)  \in \mathcal{D}_t$
+    \State For each prompt $x^i$, determine the winning response $y_w^i$ and the losing response $y_l^i$ based on their rewards $r_1$ and $r_2$ and construct the training set $\mathcal{D}_t = \{(x^i, y_w^i), (x^i, y_l^i) \mid x^i \in \mathcal{P} \}$
+    \State Compute the DPO loss and update the policy parameters $\pi_t$ to obtain $\pi_{t+1}$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+In Line 5 of \cref{alg:online-dpo}, the scalar reward values from the reward model (RM) are reduced to binary labels to determine the chosen (positive) and rejected (negative) responses. This quantization fails to leverage the full potential of the reward signals \( r^i_1 \) and \( r^i_2 \) and leads to information loss. For example, a larger reward gap indicates that there are more significant differences between the two responses that can be used to improve alignment. In contrast, DPO loss with binary labels treats all pairs equally and may lead to an inefficient training process.
+We hypothesize that to address these issues, it is crucial to integrate the reward scalars into the learning process more directly, ensuring that the updates to \( \pi_t \) reflect both the direction and magnitude of human preferences, thus enhancing the overall alignment of the policy with desired outcomes.
+
+To this end, we introduce a weighted DPO Loss~(wDPO) that incorporates explicit reward signals directly into the loss function for online DPO training. 
+This modification aims to enhance the training efficiency by making full use of the available reward information and better aligning the policy updates with the underlying human preferences.
+The wDPO Loss is derived by modifying the original DPO loss to include a weighting factor that represents the explicit rewards:
+\begin{equation}
+\begin{aligned}
+&\gL_{\text{wDPO}} = -\E_{(x, y_w, y_l) \sim \gD} \left[ R(x, y_w, y_l) \cdot \log\left(I(x, y_w, y_l)\right) \right], \\
+&\text{where} \quad I(x, y_w, y_l) = \sigma \left( \beta_1 \log \frac{\pi_{t+1}(y_w | x)}{\pi_{t}(y_w | x)} - \beta_1 \log \frac{\pi_{t+1}(y_l | x)}{\pi_{t}(y_l | x)}\right), \\
+&\phantom{\text{where} \quad} R(x, y_w, y_l) = \sigma\left[ \beta_2 \left( r(x, y_w) - r(x, y_l) \right)\right].
+\end{aligned}
+\end{equation}
+where $I(x, y_w, y_l)$ denotes the implicit reward; $R(x, y_w, y_l)$ captures the relative preference between the winning and losing responses based on their explicit reward difference, 
+scaled by $\beta_2$. 
+
+By incorporating these explicit rewards, wDPO improves the efficiency of the training process by prioritizing learning from pairs that show a significant difference in rewards. This approach makes the model more sensitive to examples where the distinction between preferred and less preferred responses is clear, helping it learn the essential features that distinguish highly preferred responses from those less preferred. 
+As a result, wDPO guides policy updates more effectively toward the desired behavior, enhancing the overall training efficiency and effectiveness.
+This structured approach allows wDPO to leverage the full spectrum of reward information, ensuring that each training example contributes optimally to learning based on the strength of its preference signal.
+
+
+
+
+
+
+
+
+\section{Experiment}
+
+
+\label{sec: experiment}
+\subsection{Experiment setup}
+Our experiments are run on 8 NVIDIA A100 80GB GPUs and the implementations are based on Huggingface TRL~\citep{vonwerra2022trl}. 
+Similar to other online RLHF algorithms~\citep{schulman2017ppo, instructgpt}, 
+our \modelnameA{} will distill the human preferences into the reward models first. 
+On the policy training, it begins with a supervised-finetuned~(SFT) model, with the carefully designed \modelnameA{} loss and reward-based sampling strategy for selected generations, \textit{i.e.}, 
+re-generating the low-score samples while reusing high-score samples.
+\paragraph{Dataset.} We use Ultrachat~\citep{cui2023ultrafeedback}, which contains 200k prompts, as the preference dataset and is widely used~\citep{spin, wu2024selfplay}. Considering the budget, 
+we only randomly sample 48k prompts on the original set to construct our prompt set which are fixed in our experiments and used as the inputs of the on-the-fly generations for iterative training of the policy.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.8\linewidth]{figures/win_score_vs_iterations_wdpo.pdf}
+    \caption{\footnotesize{\modelnameA{} (wDPO loss): Y-axis denotes the win score against \texttt{Zephyr-7B-beta} model. 
+    Rdm\_$\rho$: random selection ratio (all striped bars).
+    Under the same selection ratio, \modelnameA{}'d models could perform better than the models tuned with random-selection strategy. The policies in prompt selection $\rho=0.5$ and $\rho=0.7$ could be comparable with the policies in $\rho=1$ while enjoying 30\% to 50\% generation efficiency, which proves the effectiveness of \modelnameA{}.}
+    }
+    \label{fig:wdpo with OPTune}
+\end{figure}
+
+\paragraph{Models \& Training.} 
+\texttt{Zephyr-7b-sft-full}~\citep{tunstall2023zephyr}, which is SFT-ed on UltraChat200k dataset with decent instruction-following capability, is employed as the RL finetuning start point.
+For the reward models, we select the one fine-tuned by \citet{xiong2024iterative},
+which shares the same backbone, \texttt{Mistral-7B}, with the $\pi_{\sft}$ and top-ranked on RewardBench~\citep{Lambert2024RewardBench}.
+Thus, we believe it is a strong reward model that could provide informative reward signals. 
+The prompt and generation length are both set to 512.
+We defer the other hyperparameters, \textit{e.g.}, learning rate, into \cref{sec:hyperparameter}.
+
+\paragraph{Baselines.} We have three baselines: (1). \texttt{Zephyr-7B-beta},
+which conducts offline DPO training on the total 200k (prompt, preferred response, rejected response) triplet in UltraFeedback dataset, in which the responses come from many competitive models, e.g., GPT-3.5-turbo and GPT4. 
+We use it as the offline baseline and expect our models under online settings could be significantly better than this baseline though we employ much less prompts for training.
+(2). Models tuned with selection ratio $\rho=1.0$ and wDPO/DPO'ed for three iterations on the whole prompt set, which is under a fully online setting and has the largest generation cost.
+We expect the \modelnameA{} with smaller ratios could be on par with it.
+(3). Models tuned with random selection ratio. 
+Models with \modelnameA{} should surpass them.
+We also keep the iteration 0 the same for all the \modelnameA{} models for fair comparison, \textit{i.e.}, we will do one online iteration first under $\rho=1$ and save the checkpoint \& responses for further \modelnameA{}.
+\paragraph{Free-form Instruction Evaluation.} 
+We mainly focus on free-form generation. 
+Drawing on recent advancements~\citep{alpaca_eval, zheng2023judging, vicuna2023} we rely on strong LLMs, \textit{i.e.}, GPT-4~\citep{openai2023gpt4} as our judge. 
+The LIMA test set~\citep{lima}, consisting of 300 prompts, is chosen as our test set.
+The same rating prompt as \citet{chen2024alpagasus} is employed to compare the responses generated by the policy with those produced by the baseline, \textit{i.e.}, \texttt{Zephyr-7B-beta}.
+To counteract the positional bias identified in GPT-4's ratings~\citep{wang2023large}, 
+we collect two sets of ratings by swapping the order of test and baseline model responses. A response is deemed winning if it achieves at least one win and no more than one tie.
+We assess performance using the ``win score'', which is defined as:
+\begin{equation}
+    \text{Win Score} = 50 + 100 \times \frac{n_{\text{win}} - n_{\text{lose}}}{n},
+\end{equation}
+where $n_{\text{win}}$ and $n_{\text{lose}}$ are the number of examples rated as better and worse than the baseline, respectively; $n$ is the total number of evaluation examples. A $\text{Win Score} \geq 50 $ indicates that the test model performs at least as well as the baseline. 
+
+\paragraph{Benchmarks.} 
+Following LM-Evaluation-Harness~\citep{eval-harness}, we test the trained policy $\pi$ on TruthfulQA~\citep{lin2021truthfulqa}, MMLU~\citep{hendrycks2020measuring}, GSM8K~\citep{gsm8k}, and Hellaswag~\citep{hellaswag} to evaluate the model's ability on truthfulness, challenging multi-task solving, grade-school-level math, and common-sense reasoning.
+For the few-shot demo setting, we adopt the default settings in the lm-evaluation-harness and we summarize it together with the metrics in \cref{tab:benchmark-metric}.
+We expect the model could also improve its performance on benchmarks since RLHF can also help the reasoning~\citep{llama3modelcard, spin}.
+
+\subsection{Results on Generation Efficiency}
+\paragraph{OPTune on wDPO loss.}
+We first study \modelnameA{} on wDPO loss.
+We sweep $\rho = \{0.3, 0.5, 0.7, 1.0\}$ for both \modelnameA{} and random selection ratio and train three epochs using the same hyperparameters, \textit{e.g.}, $\beta_2$, learning rate, etc. 
+We defer the details of the hyperparameters into \cref{sec:hyperparameter}.
+
+In \cref{fig:wdpo with OPTune} we show that \modelnameA{} significantly outperforms the random-selection baselines and is comparable with models trained under fully online settings~$\rho=1$ while achieving 30-50\% generation efficiency.
+We also observe an expected trend that when the number of online samples is increased, \textit{i.e.}, larger $\rho$, the win score goes up, corroborating observations in \cite{tang2024understanding}.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.8\linewidth]{figures/win_score_vs_iterations_dpo.pdf}
+    \caption{\footnotesize{\modelnameA{} (DPO loss): Even in the special case, \textit{i.e.}, DPO loss is a special case of our proposed wDPO, we could still have the conclusion that \modelnameA{} with $\rho=0.7$ could maintain the performance but save 30\% generation cost. Rdm\_$\rho$: random selection ratio. }}
+    \label{fig:dpo}
+\end{figure}
+
+To elucidate the training efficiency of our \modelnameA{} further, we visualize the win score of different \modelnameA{} ratios with training time in \cref{fig:training-time}. 
+The training time includes generation, rewarding, and wDPO training time and we consider their sum total to provide a clear picture as to the level of efficiency \modelnameA{} achieves. 
+We note that, when calculated in terms of GPU hours, the savings are 8x larger since we run the experiments on 8xA100 GPUs at a time.
+
+
+
+\paragraph{OPTune on DPO loss.}
+
+We also verify the effectiveness of \modelnameA{}'s selection criteria when training with the regular DPO objective~\citep{pi2024strengthening, yuan2024selfrewarding}. 
+We observe similar results on the standard DPO loss and showcase them in \cref{fig:dpo}.
+\modelnameA{} matches or surpasses the performance of vanilla online DPO ($\rho=1$) in iteration $1$ and $3$, though in iteration $2$, it lags slightly behind the vanilla setting. However, it still enjoys 1.27-1.56x training speedup, saving 30\% to 50\% on generation time.
+Moreover, we note that \modelnameA{} consistently outperforms the random selection criteria across different ratios.
+\subsection{Results on Training Efficiency}
+We compare two different losses, \textit{i.e.}, DPO and wDPO losses under different prompt selection ratios and show the results in \cref{fig:dpo_vs_wdpo}.
+We find that wDPO with \modelnameA{} significantly surpasses DPO with \modelnameA{}. 
+We keep the training configs, \textit{e.g.}, the learning rates in each iteration, optimizer, and the max length of the prompt \& generation, exactly the same for the online wDPO and online DPO under the same ratio $\rho$.
+Thus, we believe the training time is almost the same for wDPO and DPO under the same ratio $\rho$. 
+Our wDPO loss could achieve faster convergence than DPO loss, \textit{i.e.}, it reaches the same ``win score'' faster than DPO does., which reflects the superiority of our proposed wDPO loss.
+\subsection{Evaluation Results on AlpacaEval, Benchmarks, Human Study}
+We provide more evaluation results including AlpacaEval~\citep{alpaca_eval}, Benchmarks, and human studies to further test the performance of the policies trained by \modelnameA{} and verify the effectiveness of our method in this subsection.
+\begin{figure}[t]
+    \centering
+        \begin{minipage}{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/training_time_vs_win_score_v2.pdf}
+        \caption{\footnotesize{The win score vs. training time on different prompt selection ratios. By re-generating the responses on only half of the prompts, \modelnameA{} could achieve the win score on par with the vanilla online version ($\rho=1$). }}
+        \label{fig:training-time}
+    \end{minipage}\hfill
+    \begin{minipage}{0.48\linewidth}
+        \centering
+        \includegraphics[width=0.8\linewidth]{figures/online_DPO_vs_online_wDPO.pdf}
+        \caption{\footnotesize {The online DPO vs. online wDPO under different prompt selection ratios. The dashed line denotes the \modelnameA{} ratio $\rho=0.5$.}}
+        \label{fig:dpo_vs_wdpo}
+    \end{minipage}\hfill % Fill the space between the figures if any
+\end{figure}
+\paragraph{AlpacaEval.}
+\begin{table}[ht]
+
+\small
+\centering
+\begin{tabular}{c|c|c|c|c|c|c}
+\toprule[1pt]
+\textbf{Model} & Zephyr-7B-Beta & $\rho$=1.0 & $\rho=0.5$(r) & $\rho$=0.5 & $\rho=0.7$ & $\rho=0.7$(r) \\ \midrule[0.5pt]
+LC\_win\_rate  & 13.2                    & 15.43                      & 15.28                            & 15.63                      & 16.45                    & 15.39                          \\ \bottomrule[1pt]
+\end{tabular}
+\caption{\footnotesize{Alpaca-eval scores on the iteration-3 models trained under different settings. LC\_win\_rate: length-controlled win rate, which is the standard metric in \texttt{AlpacaEval-2.0}. (r): policies trained with a random selection strategy. $\rho=0.7$ performs the best and even better than the $\rho=1.0$. } }
+\label{tab:alpaca-eval}
+\end{table}
+
+To alleviate the concerns of evaluating the open-ended generation only on LIMA test set,
+we also test our trained policies on the AlpacaEval~\citep{alpaca_eval}, which contains 805 prompts and is more diverse. 
+Due to the limited GPT-4 API budget, we only test the models trained with wDPO loss in the final iteration (iter3).
+We show the results in \cref{tab:alpaca-eval}.
+It aligns with the results in \cref{fig:dpo} and \cref{fig:wdpo with OPTune}: \modelnameA{} is better than the random selection strategy and no selection ($\rho=1.0$).
+\paragraph{Benchmark Results.}
+\begin{table}[htp]
+\centering
+\small
+\begin{tabular}{l|c|c|c|c|c}
+\toprule[1pt]
+Models & Hellaswag & MMLU & TruthfulQA & GSM8k & Average \\
+\midrule[0.5pt]
+Zephyr-7B-SFT & 78.54 & 55.67 & 40.37 & 32.75 & 51.83 \\
+Zephyr-7B-Beta & 82.05 & 58.13 & 50.1 & 36.24 & 56.63 \\
+Iter3 ($\rho$=1.0) & 81.44 & 58.49 & 45.04 & 42.3 & 56.82 \\
+Iter3 (rdm=0.5) & \textbf{83.06} & 58.39 & 45.77 & 42.00 & 57.31 \\
+Iter3 (rdm=0.7) & 82.17 & 58.55 & 46.22 & 42.15 & 57.27 \\
+Iter3 ($\rho$=0.5) & 82.48 & \textbf{58.62} & 46.64 & 39.88 & 56.91 \\
+Iter3 ($\rho$=0.7) & 82.78 & 58.46 & \textbf{46.81} & \textbf{42.53} & \textbf{57.65} \\
+\bottomrule[1pt]
+\end{tabular}
+\caption{\footnotesize{Benchmark results for different prompt selection ratios. We use bold font to mark the highest score.} }
+\label{tab:benchmark performance}
+\end{table}
+The benchmark results of the trained policies are shown in \cref{tab:benchmark performance} and higher values indicate better performance.
+The policies trained with the prompt selection ratio $\rho=0.7$ show superiority against the offline policies (\texttt{Zephyr-7B-Beta}) and vanilla online ($\rho=1.0$) policies regarding on the ``Average'' score.
+It also achieves the highest scores on TruthfulQA and GSM8k, showing gains in math problem-solving and factuality.
+\paragraph{Human Study.}
+To further evaluate how OPTune performs against full generation as well as random selection, we randomly select 50 responses generated by OPTune and compare them first to random selection and then to full generation ($\rho=1.0$). On the 100 response pairs, we collect 400 ratings from 8 participants and find that participants prefer OPTune responses 24.07\% of the time against 14.81\% for random selection, and perform similarly to full generation with users ranking its output better 23.44\% of the time, full generation 25.0\% of the time and considering outputs similar 51.56 \% of the time. 
+The details of how we conduct human studies could be referred to \cref{sec: human study}.
+
+
+\section{Related Work}
+
+\paragraph{RLHF algorithms} 
+
+Proximal Policy Optimization(PPO)~~\citep{ouyang2022instructgpt, schulman2017ppo} is the most widely-used online preference tuning framework in the industry, which leads to the success of the ChatGPT~\citep{openai2023gpt4}, Gemini~\citep{team2023gemini}, and LLaMA~\citep{touvron2023llama}.
+It requires training a reward model as a proxy of the human preference and on-the-fly generations in the online training procedure.
+Online DPO/wDPO stays relevant with it but the difference is that the online generation and policy updates are less frequent than PPO, in which the policy will be updated per batch. 
+On the other hand, several offline RLHF methods such as DPO~\citep{rafailov2023dpo}, IPO~\citep{azar2024general}, KTO~\citep{ethayarajh2024kto}, and SLIC-HF~\citep{zhao2023slic} also show promises for learning of human preference. 
+These methods are considered offline because their preference datasets are kept unchanged during RLHF but the performance of the offline RLHF could not be on par with the online version~\citep{tang2024understanding, dong2024rlhf}.
+Thus, in this work, we focus on investigating online iterative RLHF, which demands substantial computational resources for on-the-fly sampling from the policies.
+\modelnameA{} is proposed to reduce the cost in the regeneration process by selecting a subset of prompts to regenerate while keeping the outstanding performance of the trained models.
+\paragraph{Prompt Selection.}
+A powerful LLM usually requires high-quality training data, and the community has focused on creating high-quality instruction finetuning (IF) datasets, either via distilling of the SOTA API LLMs~\citep{taori2023stanford, peng2023instruction, vicuna2023} or requiring experienced human annotators~\citep{DatabricksBlog2023DollyV2, instructgpt}. 
+But there are still low-quality examples in these IF datasets and
+a series of data selection strategies~\citep{chen2023alpagasus, li2023quantity, cao2024instruction} are proposed to further enhance the quality of datasets by filtering out these data,
+which shares the same objective with the \modelnameA{}: optimizing towards the training data quality.
+However, these data selection approaches are not ideal for prompt selection in the iterative RLHF paradigm as they primarily focus on the quality of the responses, not targeting selecting the prompt for efficient data exploration. 
+\paragraph{Inference Speedup of LLMs.} 
+\par One orthogonal direction to our method is the inference speedup of LLMs. 
+Traditionally, batch inference and Key-Value (KV) cache~\citep{ge2023model} are employed to accelerate the decoding process, but they consume substantial GPU memory and hinder the utilization of large batch sizes. 
+Thus, some works~\citep{shazeer2019fast,ainslie2023gqa,xiao2023smoothquant,dettmers2022llmint8} are proposed to reduce the memory used by KV cache through changing model architecture or using quantization techniques. On the other hand, some other approaches ~\citep{leviathan2023fast,chen2023accelerating,cai2024medusa} are proposed to minimize the number of decoding steps to speed up the inference of LLMs. 
+Compared to it, \modelnameA{} achieves efficiency by reusing the generations in the previous step. 
+But all these inference speedup techniques can be used for the selected prompts of \modelnameA{}, providing further faster generation speed.
+
+\paragraph{Evaluation of LLMs.} 
+To evaluate the instruction-following ability of the policies in iterative RLHF procedure, 
+we employ GPT-4~\citep{openai2023gpt4} as our judge and employ LIMA~\citep{zhou2024lima} test set which contains 300 prompts and larger than the MT-bench~\citep{zheng2023judging} (80 prompts), Koala~\citep{koala_blogpost_2023} (180 prompts), and WizardLM test set~\citep{xu2023wizardlm} (218 prompts).
+AlpacaEval~\citep{alpaca_eval} is also employed to evaluate the trained policy on instruction-following ability more comprehensively.
+Moreover, following the previous works~\citep{chen2023alpagasus, chen2024odin}, we also include human study for a side-by-side comparison of the model responses and test the models on four most commonly used benchmarks, TruthfulQA~\citep{lin2021truthfulqa}, MMLU~\citep{hendrycks2020mmlu}, GSM8K~\citep{gsm8k}, and Hellaswag~\citep{hellaswag}.
+
+
+
+
+\section{Discussions \& Conclusion}
+
+\looseness -1 To sum up, we introduced \modelnameA{} in this work, a novel approach to enhance the training and generation efficiency of 
+online RLHF by selectively regenerating only the lowest-reward responses and representing the reward gap explicitly in our wDPO objective.
+This method focuses computational resources on the most informative samples, significantly reducing the need for full-scale data regeneration and achieving up to 2x in generation efficiency and a 1.56x speedup in training efficiency. 
+Our comprehensive experiments show that \modelnameA{} maintains or improves the alignment of LLMs with human preferences. 
+Finally, we believe \modelnameA{} could also be applied to other online RLHF algorithms such as Best-of-N~\citep{stiennon2020learning} and PPO~\citep{schulman2017ppo}, since PPO has a replay buffer which contains ``off-policy'' examples and we could select the prompts using the same strategy to encourage the generations on the low-reward prompts, which we leave for the future work.
+
+
+
+
+
+
+
+
+
+
+
+

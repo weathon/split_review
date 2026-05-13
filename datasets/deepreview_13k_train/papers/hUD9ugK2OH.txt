@@ -1,0 +1,312 @@
+\title{Understanding Synthetic Context Extension via Retrieval Heads}
+
+\begin{abstract}
+Long-context LLMs are increasingly in demand for applications such as retrieval-augmented generation. To defray the cost of pretraining LLMs over long contexts, recent work takes an approach of synthetic context extension: fine-tuning LLMs with synthetically generated long-context data in a post-training stage. However, it remains unclear how and why this synthetic context extension imparts abilities for downstream long-context tasks. In this paper, we investigate fine-tuning on synthetic data for three long-context tasks that require retrieval and reasoning. We vary the realism of ``needle'' concepts to be retrieved and diversity of the surrounding ``haystack'' context, from using LLMs to construct synthetic documents to using templated relations and creating symbolic datasets. We find that models trained on synthetic data fall short of the real data, but surprisingly, the mismatch can be interpreted and even predicted in terms of a special set of attention heads that are responsible for retrieval over long context: \textit{retrieval heads} \citep{wu2024retrieval}. The retrieval heads learned on synthetic data are mostly subsets of the retrieval heads learned on real data, and there is a strong correlation between the recall of heads learned and the downstream performance of a model. Furthermore, with attention knockout and activation patching, we mechanistically show that retrieval heads are necessary and explain model performance, although they are not totally sufficient. %
+Our results shed light on how to interpret synthetic data fine-tuning performance and how to approach creating better data for learning real-world capabilities over long contexts. %
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+The quadratic nature of the Transformer imposes a strong computational constraint on our ability to train and do inference on long-context models. This disrupts the typical pre-training pipeline: pre-training must be done at as large a scale as possible, but pre-training a long context model would necessarily reduce the number of observed tokens. One solution for this is to rely on synthetic data, now common in post-training settings such as SFT \citep{Xu2023WizardLMEL,yue2024mammoth,Xu2024MagpieAD,Chen2024GenQAGM} and RLHF/DPO \citep{Yang2023RLCDRL}. Recent prior work has proposed using synthetic data to extend the long-context abilities of LLMs after pre-training \citep{xiong2024artificial,Zhao2024LongSkyworkAT}.
+
+This use of synthetic data is particularly necessary for long context tasks since they are so laborious for humans to manually label. Synthetic data is also configurable: it can exhibit different reasoning skills and ``teach'' models have to make certain types of inferences \citep{du-etal-2017-learning,wei2018fast,agarwal-etal-2021-knowledge,Tang-Et-Al:2024:MiniCheck,Divekar2024SynthesizRRGD}.
+One way to do this is using templates to express pieces of information that must be reasoned over and to create symbolic tasks that are thought to mirror the reasoning required in the real task \citep{hsieh2024ruler,prakash2023fine,PrOntoQA,li2024needlebenchllmsretrievalreasoning}. However, past work has shown varying results from training on data for this kind of context scaling \citep{fu2024data}; we lack general understanding of what is needed here.
+
+In this paper, we explore several methods of creating synthetic long context data across three tasks. Our goal is to examine what makes synthetic data effective for this kind of context scaling. While more realistic data is often better, it is an unreliable metric by itself--certain types of more synthetic data can exhibit desired long-context patterns even more effectively and with fewer shortcuts than realistic data. However, other types of synthetic data severely underperform on these tasks.
+
+\begin{figure}[t!]
+\centering
+\includegraphics[trim={0 6.9cm 6cm 3cm},clip,width=0.9\textwidth]{images/long_context_fig1_v3.pdf}
+\caption{We explore synthetic context extension with different forms of synthetic data across multiple tasks and examples of different forms of fine-tuning data for a two-hop QA question from MuSiQue \citep{trivedi2021musique} are shown here. A special set of attention heads, \textit{retrieval heads} \citep{wu2024retrieval}, help explain the performance gap between fine-tuning on real data and synthetic data: their presence strongly correlates with the performance of models fine-tuned with different synthetic data. For example, fine-tuning on synthetic data with templated concept expressions with real entities leads to \emph{better} downstream performance and \emph{more} retrieval heads than fine-tuning on synthetic data with synthetic concept expressions with symbolic entities. We later show that when more realistic data falls short, it is reflected in the retrieval head patterns.  On Llama-3-8B-Instruct, the synthetic data is found to induce strict subsets of the retrieval heads identified on the real data.}
+\label{figure:title_figure}
+\end{figure}
+
+How can we understand this divergence? We analyze models trained on long-context data for the presence of a phenomenon called retrieval heads \citep{wu2024retrieval} as a indicator of the subnetworks affected during fine-tuning. %
+Figure~\ref{figure:title_figure} shows two surprising results. First, the retrieval heads learned on poor-performing synthetic data tend to be subsets of those learned on realistic or high-quality synthetic data. Second, we find that the similarity between the retrieval heads learned on synthetic data and realistic data correlates strongly with the downstream performance. Learning a certain set of retrieval heads seems to be a necessary condition for high performance, as we show with intervention experiments. However, it is not sufficient. We show that patching heads at the intersection of a poor-performing model and a high-performing model can improve performance of the former: these heads are where important operations are happening, but realistic data teaches them more strongly than synthetic data.
+
+Our contributions are: (1) analysis of synthetic data across three synthetic tasks for long-context LLM training to determine best practices; (2) experimental validation establishing that retrieval heads are a key component whose appearance during training correlates with effectiveness of the training data for this setting. Taken together, we believe this work indicates a path forward for how to engineer better synthetic data and how to connect the construction process of synthetic data to what it teaches Transformers and how those models perform on downstream tasks.
+
+
+
+\section{Background and Setup}
+
+\subsection{Background: Synthetic Data for Training Language Models} 
+
+Formally, consider a supervised learning setting for a pre-trained transformer language model $\mathcal{M}$. Given a task $\mathcal{T}$, we assume a distribution $p_{\mathcal{T}}$ of real-world task instances. We assume that a small, limited set of input-label pairs $\mathcal{D_{T}} = (x_{\mathcal T},y_{\mathcal T}) \sim p_{\mathcal{T}}$ drawn from the distribution $p_{\mathcal{T}}$ is available as seed data. A synthetic dataset $\tilde{\mathcal{D}}_\mathcal{T}$ is a set of input-label pairs sampled from the outputs of a data generator $\mathcal{G}$ given the seed data or the known properties: $\tilde{\mathcal{D}}_\mathcal{T} \sim p((\tilde{x},\tilde{y}) \mid \mathcal{D_{T}})$. Benchmarking or training $M$ on a synthetic dataset that can be used to represent properties of the real dataset is expected to evaluate or teach $M$ the capabilities that can be \textit{transferred} to the real-world distribution $p_{\mathcal{T}}$. 
+A recent line of work has shown that training short-context LLMs on simple heuristic-based synthetic datasets can achieve surprisingly superior transferability on \textit{context extension}, a post-training scenario where LLMs that have been pre-trained on short-context corpora are further trained on long-context tasks (such as long-context retrieval and reasoning) to extend the effective context window \citep{fu2024data,Zhao2024LongSkyworkAT,xiong2024artificial}. For example, \cite{xiong2024artificial} indicates that fine-tuning short-context LLMs on the synthetic dataset of the simple dictionary key-value retrieval task improves the performance of models on natural language contexts and even outperforms the models fine-tuned on realistic in-domain data. %
+
+We call these approaches \textbf{synthetic context extension}: using synthetic data to extend the context window of LLMs. It remains unclear how and why synthetic data, especially those that have a very different distribution from the real data, can transfer to realistic tasks, despite results that indicate the contrary should be true \citep{Chen2024UnveilingTF,Liu2024BestPA}. There is also a lack of understanding of how to create generalizable synthetic data for training in a principled way beyond dataset-specific constructions in the literature. We start by constructing synthetic datasets varying in systematic ways to unify these variants from the literature.
+
+\subsection{Experimental setup}
+
+Following \cite{xiong2024artificial}, we focus on fine-tuning LLMs for long-context retrieval and reasoning tasks where training on high-quality synthetic data has been shown to outperform real data. We also extend to multi-hop settings. We experiment on three datasets where, given a long context $\mathcal{C}$ and a context-based query $q$, a language model $\mathcal{M}$ needs to retrieve one or more ``needles'' $f_1,\ldots,f_m$ from $\mathcal{C}$ (pieces of relevant information), reason over that information, and then generate a response $\mathbf{\tilde{y}} \sim p( y \mid \mathcal{C},q)$ where $p(y \mid \mathcal{C},q)$ is the conditional distribution that $M$ places over the vocabulary $\Sigma^*$ given the context and the query. We consider extending the context window from 8K to 32K tokens to be representative of synthetic context extension following literature \citep{Chen2023ExtendingCW}. Specifically, we use the following three datasets.
+
+\textbf{MDQA \citep{liu-etal-2024-lost}:} MDQA is a multi-document question answering (QA) dataset where only one paragraph in $C$ contains the gold answer to a single-hop query; that is, there is a single $f$ which directly addresses $q$. We extend the original MDQA dataset in 4K context to 32K context by retrieving additional distractor paragraphs from Natural Questions-Open \citep{kwiatkowski-etal-2019-natural, lee-etal-2019-latent} with Contriever \citep{izacard2021contriever}.
+
+\textbf{MuSiQue \citep{trivedi2021musique}:} MuSiQue is a multi-hop QA dataset where the model must identify a piece of relevant information from a different document for each hop of the question in order to retrieve the final correct answer from the context. We use the linear three-hop subset of MuSiQue and extend the dataset to 32K by adding padding paragraphs to the original context. In this setting, the facts $f_1,f_2,f_3$ are natural language sentences containing knowledge graph relations.\footnote{Note that this is different from the demonstrative two-hop examples in Figure~\ref{figure:title_figure}.}
+
+\textbf{SummHay-Citation \citep{laban2024summary}:} Summary of a Haystack (SummHay) is a long-context retrieval dataset where the model is given a set of documents with controlled ``insights,'' and asked to produce a list of key points. Additionally, the model must cite the correct documents in support of each key point. We isolate the citation component and construct a task where, given a haystack of 10 documents and a key point (``insight"), the model must correctly identify the two documents that support the point and their associated document IDs. The two facts $f_1,f_2$ may span multiple sentences and may be substantially paraphrased versions of the insight. 
+
+\paragraph{Training Configuration} For each task, we fine-tune two short-context LLMs, Llama-3-8B-Instruct \citep{llama3_1} and Mistral-7B-Instruct-v0.1 \citep{Jiang2023Mistral7}. %
+
+Prior work indicates that attention heads are largely responsible for implementing algorithms \citep{Olsson2022IncontextLA} and use information \textit{within the context} \citep{stolfo-etal-2023-mechanistic,Lieberum2023DoesCA} while MLP layers are responsible for parametric knowledge \citep{geva-etal-2021-transformer}, so we fine-tune attention heads only.} %
+
+To extend models from their original 8K pretrained context length to 32K, we follow \cite{gradient-2024-scaling} in calculating new RoPE \citep{rope} theta values, using $6315088$ for Llama-3-8B-Instruct and $59300$ for Mistral-7B-Instruct-v0.1. We scale the sliding window accordingly for Mistral-7B-Instruct-v0.1 to 16k context.  These are the only adjustments we make to the models, following \citet{fu2024data}.
+
+\begin{figure}[t!]
+\centering
+\includegraphics[trim={0 11cm 3cm 3cm},clip,width=\textwidth]{images/long_context_construction_fig_v3.pdf}
+\caption{Examples of elements of synthetic datasets for MuSiQue with varying levels of \textit{concept expression} and \textit{context diversity}. The needle sentences $f_{i}$ in the context and the entities in them are \textbf{bold}. High concept expression means more realistic expression of the needle $f_{i}$, and low expression means more synthetic, including replacing real entities with symbolic entities or transforming $f_{i}$ into templated sentences. High context diversity means more realistic context surrounding the needles, and low means more synthetic contexts such as repeated, irrelevant padding sentences following \cite{hsieh2024ruler} and \cite{mohtashami2023randomaccess}. }
+\label{figure:construction_figure}
+\end{figure}
+
+
+
+\section{Synthetic Datasets}
+
+
+
+\subsection{Principles Under Consideration}
+
+To create a representative range of synthetic data for each task, we characterize the synthetic data construction process of prior work as mainly affecting \textit{concept expression} (how the target information $f_i$ is expressed) and \textit{context diversity} (the naturalness and relevance of the surrounding information $C \backslash \{f_1,\ldots,f_m\}$). We also include \textbf{symbolic tasks} as described below.
+
+\paragraph{Concept Expression} A common procedure for creating synthetic data involves exploiting task asymmetry \citep{josifoski-etal-2023-exploiting, xu-etal-2023-s2ynre, lu-etal-2024-mathgenie, chandradevan-etal-2024-duqgen, chaudhary-etal-2024-relative,Tang-Et-Al:2024:MiniCheck}, where asking an LLM to generate natural language data based off of a label (e.g. a sentence based off of a knowledge triple) is easier than predicting the answer from text of the same complexity and domain. In this scenario, the LLM is asked to create diverse ``needle" target concept expressions $f_i$. In task specific cases, it is beneficial to make this data less realistic while encouraging generalization. Prior synthetic datasets have made use of fictional entities \citep{PrOntoQA} or nonsense phrases \citep{wei2023symbol} in place of real entities and properties, or swapped out nouns to augment the dataset \citep{lu-etal-2024-mathgenie}. In long context benchmarks \citep{hsieh2024ruler, li2024needlebenchllmsretrievalreasoning}, it is common to express the needle concepts in short, templated sentences.
+
+\paragraph{Context Diversity} We can also vary the expression of $C \backslash \{f_1,\ldots,f_m\}$, the ``haystack.'' This ranges from distractor needles which may have the same form (template) as the target concept to padding with repeated sentences. We use the repeated set of sentences ``The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again." as our low-diversity padding to compare with context that is synthetically generated by an LLM, following \cite{hsieh2024ruler} and \cite{mohtashami2023randomaccess}.
+
+\paragraph{Symbolic Tasks} We also experiment with purely symbolic (involving dictionary key-value or list retrieval) versions of our real tasks, since such tasks are believed to recruit similar model abilities as their natural language counterparts. For example, prior work has indicated that pre-training on code helps on Entity Tracking \citep{prakash2023fine} and that fine-tuning on a symbolic dictionary key-value retrieval task can provide greater benefits than even real data \citep{xiong2024artificial}. Additionally, RULER \citep{hsieh2024ruler} introduced a variable assignment task for long-context value tracking. This latter task features expressions like ``\emph{VAR X1 = 12345 ...... VAR Y1 = 54321 ...... Find all variables that are assigned the value 12345.}'' that do not contain meaningful natural language, hence why we differentiate this category from natural language synthetic data.
+
+
+
+\subsection{Synthetic Dataset Construction}
+For each of the long-context tasks, we sample a set of examples $\mathcal{D}_{\mathcal{T}}$ from the training set and use the principles above to construct various synthetic datasets based on $\mathcal{D}_{\mathcal{T}}$.
+
+\paragraph{MDQA} Given a training example of MDQA training data $(C,q,y) \in \mathcal{D}_{\mathcal{T}}$, we combine the query $q$ and answer $y$ into our needle $f$ that will be put into the context and that needs to be retrieved by the model. For $f$, we use two simplification levels of concept expression by (1) keeping the real entities in the query and answer (\textbf{high} expression), and (2) replacing the real entities with 4-character symbolic entities (\textbf{low} expression). We create the context surrounding the needle claim with two levels of context diversity: (1) prompting GPT-4o-mini to paraphrase the original context from MDQA training data (for the real entities), or generate a Wikipedia-style paragraph that elaborates on the claim (\textbf{high} diversity); (2) padding the context paragraph with repeated sentences (\textbf{low} diversity). The \textbf{symbolic} dataset is the simple dictionary key-value retrieval dataset from \cite{xiong2024artificial}.
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+  \begin{center}
+    \includegraphics[trim={22cm 9cm 22cm 8.5cm},clip,width=0.5\textwidth]{images/symbolic_data.pdf}
+  \end{center}
+  \caption{Examples of symbolic data consruction for MuSiQue and SummHay Citation.}
+\label{fig:symbolic_data}
+\end{wrapfigure}
+
+\paragraph{MuSiQue} The $f_i$ here are based on multi-hop knowledge graph relations. Like with MDQA, create two simplification levels of concept expression by (1) keeping the real entities in the query and answer (\textbf{high} expression), and (2) replacing the real entities with 4-character symbolic entities (\textbf{low} expression), and constructing $f_i$ by prompting GPT-4o-mini to write sentences or via template. %
+We create two levels of context diversity by (1) prompting GPT-4 to write a paragraph containing the fact (\textbf{high} diversity), and (2) padding each paragraph with repeated text (\textbf{low} diversity). The \textbf{symbolic} task, as demonstrated in Figure~\ref{fig:symbolic_data}, consists of a list of dictionaries with 4-character identifier, keys and values. Queries are of the form ``What is the \textsc{property\_3} of the \textsc{property\_2} of the \textsc{property\_1} of \textsc{dictionary\_1}?". The answer is found by multi-hop traversal by accessing subsequent dictionary names associated with the specified properties.
+
+\paragraph{SummHay Citation} We derive the $f_i$ from the insights in one of two ways. (1) We prompt GPT-4o-mini to rephrase the insights to create the query, and then prompt again to split rephrased insights into multiple sentences to place into the context (yielding multiple $f_i$ per insight) (\textbf{high} expression); and (2) We prompt GPT-4o-mini to simplify the insights to create the query, and split each simplified insight into multiple sentences to place into the context (\textbf{low} expression). We create two levels of context diversity by (1) padding each document with distractor insights from the same topic, (\textbf{high} diversity) and (2) padding each document with repeated text (\textbf{low} diversity). The \textbf{symbolic} task, as demonstrated in Figure ~\ref{fig:symbolic_data} consists of lists containing 180 random 4-character strings, where the query is a 4-character string that appears in two different lists. 
+
+\subsection{Results}
+\begin{table}[t!]
+\caption{Performance (F1) of fine-tuning LLMs on different synthetic data for the long-context retrieval and reasoning tasks. A large gap exists between the most performant synthetic context extension strategy (\textbf{bold}) and fine-tuning on real data. While careful construction of synthetic data can help close the gap, there does not exist a task-agnostic general way of constructing synthetic datasets for extending LLMs' context window on long-context retrieval and reasoning tasks.}
+\label{table:synth_perf}
+
+\scriptsize
+\centering
+\begin{tabular}{cc|cccc||cc|cc}
+\toprule
+ \multirow{2}{*}{Concept Exp.} & \multirow{2}{*}{Context Div.} & \multicolumn{2}{c}{MDQA}& \multicolumn{2}{c||}{MuSiQue} &  \multirow{2}{*}{Concept Exp.} & \multirow{2}{*}{Context Div.}   & \multicolumn{2}{c}{SummHay Cite} \\
+ &  & \multicolumn{1}{c}{Llama3} & \multicolumn{1}{c}{Mistral} & \multicolumn{1}{c}{Llama3} & \multicolumn{1}{c||}{Mistral} &  &  & \multicolumn{1}{c}{Llama3} & \multicolumn{1}{c}{Mistral} \\
+\midrule
+High & High & 0.31 & 0.20 & 0.37 & 0.22 & High & High & 0.70 & 0.28 \\
+High & Low & 0.41 & 0.23 & \textbf{0.41} & \textbf{0.23} & High & Low & 0.61 & 0.28 \\
+Low & High & \textbf{0.49} & \textbf{0.31} & 0.29 & 0.21 & Simplified & High & \textbf{0.79} & \textbf{0.38} \\
+Low & Low & 0.47 & 0.24 & 0.34 & 0.17 & Simplified & Low & 0.65 & 0.28 \\
+Symbolic & Symbolic & 0.48 & 0.16 & 0.32 & 0.11 & Symbolic & Symbolic & 0.54 & 0.18 \\
+\midrule
+\multicolumn{2}{c|}{Real Data (Full)} &  0.83 & 0.64 & 0.45 & 0.20 & \multicolumn{2}{c|}{\multirow{2}{*}{Real Data (Full)}}  &  \multirow{2}{*}{0.81} &  \multirow{2}{*}{0.40} \\
+\multicolumn{2}{c|}{Real Data (Limited)} &  0.80 & 0.59 & 0.32 & 0.16 & & & \multicolumn{1}{c}{} & \multicolumn{1}{c}{} \\
+\bottomrule
+\end{tabular}
+
+\end{table}
+Table~\ref{table:synth_perf} shows the performance (F1 scores) of fine-tuning LLMs on different synthetic datasets on the given long-context tasks. We first note that across datasets, \textbf{fine-tuning on synthetic datasets still falls short compared with fine-tuning on real data}, indicating the complexity of the evaluated long-context tasks.\footnote{Particularly on MDQA, we note that such observation is very different from the one in \cite{xiong2024artificial} that finds fine-tuning synthetic data to be more effective than real data. We note that the results of \cite{xiong2024artificial} are obtained on 4K context rather than 32K and the models are fine-tuned with fewer training examples.} For instance, on MuSiQue and SummHay there is a 2-4\% gap between the best synthetic data and real data on Llama 3, and on MDQA there is a much larger gap at 33\%.
+
+Careful construction of synthetic data can help close a lot of the gap by varying the level of concept expression and context diversity beyond the symbolic synthetic dataset. \textbf{However, the effective way of constructing synthetic data for training is very task-specific and can even be counter-intuitive}: there does not exist a single construction strategy that achieves the best performance across tasks, and sometimes a more ``realistic'' synthetic dataset can even underperform the more ``synthetic'' counterparts. 
+
+These results show a complex picture of fine-tuning LLMs with synthetic data for long-context tasks: the downstream performance cannot be simply ``predicted'' by how the synthetic training dataset is constructed. To interpret the success and failure of synthetic data for training, a more fine-grained explanation is needed beyond some general, task-agnostic data construction desiderata. %
+
+
+
+\section{Retrieval Heads are Necessary for Context Extension}
+
+\label{sec:retrieval_heads_necessary}
+
+One of the key features of our tasks is the need for retrieving needles $f_i$ embedded in a long context. Work from the mechanistic interpretability literature has shown that some attention heads in pre-trained \citep{Olsson2022IncontextLA,Lieberum2023DoesCA} or fine-tuned \citep{tasklocalization,lofit} transformers specialize in retrieving and synthesizing information from the context in principled ways: for example, \cite{prakash2023fine} identifies a sparse of heads that are responsible for retrieving and transmitting the positional information of objects from the context in the entity tracking task. Notably, recent work \citep{wu2024retrieval} indicates that there exists a special, intrinsic set of attention heads in pre-trained transformers that attend to relevant information $f_i$ in long context $\mathcal{C}$ given a query $q$ and copy it to the output $\mathbf{\tilde{y}}$. \cite{wu2024retrieval} dub them as \textit{retrieval heads}. %
+
+Given the nature of our task, we seek to apply such interpretability techniques to analyze these attention heads as a proxy for the subnetworks being recruited and learned during fine-tuning with synthetic data. Our core hypothesis is that we can attribute the performance of synthetic context extension to how well the models learn to adapt the attention heads relevant to retrieving and using information from long context, as indicated by the \textit{retrieval scores} of attention heads. Building on prior work, we extend identification of retrieval heads to multi-hop settings in MuSiQue and SummHay Citation. %
+
+\subsection{Detecting Retrieval Heads}
+
+Following  \cite{wu2024retrieval}, we detect retrieval heads by computing retrieval scores. Given a fine-tuned model $\mathcal{M}^{'}$, we evaluate it on a dataset $\mathcal{D}^{*} = \{(\mathcal{C}^{*},q^{*},y^{*})\}$ where the answer $y^{*}$ needs to be identified from some needles $f^{*}$ in $\mathcal{C}^{*}$ and copied to the model output $\tilde{y}^{*}$. When $\mathcal{M}^{'}$ generates an output token $w \in \tilde{y}^{*}$, we examine whether or not an attention head places the most attention probability mass on the same token in the answer span $y^{*}$ in the context. If so, we consider the token $w$ to be \textit{retrieved} by the attention head. Given a evaluation example $(\mathcal{C}^{*},q^{*},y^{*})$, let $G_{h} = \{w_{h}\}$ be the set of all tokens $w$ that are \textit{retrieved} by a head $h$ during decoding. We define the retrieval score $S_{h}$ for head $h$ as:
+\begin{equation}
+    S_{h} = \frac{|G_{h} \cap y^{*}|}{|y^{*}|}
+\end{equation}
+
+Note that in the SummHay-citation task, the model is prompted to identify the numerical IDs of the documents (e.g. ``[3]'') that contain the given query insight $q$. In this case, we find it more useful to look at the attention heads that retrieve tokens from the insight needles $f^{*}$ that contain information relevant to $q$ rather than retrieving tokens from the answer $y^{*}$. Note that there are far more tokens in the correct insight needles $f^{*}$ than in the answer $y^{*}$ here. Thus, the \textbf{insight} score for SummHay is defined as: 
+\begin{equation}
+    S_{h} = \mathbbm{1}(|G_{h} \cap f^{*}| > 0)
+\end{equation}
+
+For each head, we average the scores over all evaluation examples from $D^{*}$ as its final retrieval (or insight) score. 
+
+Given a long-context task $\mathcal{T}$, we detect a set of retrieval heads $H_{\mathrm{real}}$ of the models fine-tuned with real data $\mathcal{D}_{\mathcal{T}}$ on an evaluation set of \textit{real} data . For each model $\mathcal{M}^{'}$ fine-tuned with synthetic data $\tilde{\mathcal{D}}_{\mathcal{T}}$, we detect a set of retrieval heads $H_{\mathrm{synth}}$ on an evaluation set of the corresponding \textit{synthetic} data. $H_{\mathrm{synth}}$ reflect how synthetic context extension enables models to learn modules specialized in retrieving information from \textit{synthetic} long-context data, and we will examine how this explains transferability to \textit{real} long-context data.
+
+\paragraph{Results} We start with a case study of training Llama-3-8B-Instruct on synthetic data for MuSiQue, shown in Figure~\ref{figure:title_figure}. Highlights show the retrieval score for each head at each layer. The model trained on the real data achieves an F1 score of 0.45 on the evaluation set, and has 129 attention heads which receive a positive retrieval score. Notably, the models trained on synthetic data (both realistic and symbolic) achieve lower F1 (0.41 and 0.33 respectively) while exhibiting far fewer retrieval-scoring attention heads (112 and 74 heads respectively).
+
+\subsection{Connection with downstream performance}
+
+The presence of retrieval heads does not necessarily offer a concrete connection to downstream performance; we do not know that models are attending to long context using these heads, or whether these heads are correlated with other model capabilities. We conduct two experiments to elaborate on this: an intervention experiment where we mask out retrieval heads to see the impact on performance, and an observational experiment where we correlate the presence of retrieval heads with downstream performance across our different synthetic data variants.
+
+\paragraph{Activation Masking} We show that these attention heads are responsible for model performance on the real tasks by comparing activation masking on the top-$k$ retrieval heads versus $k$ random heads for various $k$ as in \citet{wu2024retrieval}. Specifically, we select the top-$k$ retrieval heads based on retrieval score, and zero out the outputs of those attention modules. Figure \ref{fig:attention_head_masking} shows the results of this experiment. Across tasks, masking even the top-10 retrieval heads causes a sharp drop in performance whereas masking 10 random heads over 3 repeated trials results in a marginal ($<0.05$) or no drop in performance, with one exception (Llama-3-8B-Instruct on MDQA). %
+
+
+\begin{figure}[t!]
+\begin{center}
+\includegraphics[trim={0 0.25cm 0 0.25cm},clip,width=\linewidth]{images/attention_head_masking.png}
+\end{center}
+\caption{Effect of masking activations from attention heads with the top-$k$ highest retrieval (MDQA, MuSiQue) or insight (SummHay Citation) scores. We compare with masking the same number of randomly chosen heads, averaged over 3 samples. Masking top-$k$ attention heads consistently results in a larger drop in performance than masking random attention heads.}
+\label{fig:attention_head_masking}
+\end{figure}
+
+\paragraph{Synthetic Data Performance and Retrieval Heads} %
+
+\begin{wraptable}{r}{0.4\textwidth}
+\caption{Spearman correlation of synthetic data attention head recall with F1 on the real dataset. Results show that when a synthetic dataset induces a larger subset of the attention heads of the real task, performance on the real task generally increases.}
+\label{tab:recall_f1_correlation}
+\small
+\begin{tabular}{l||rr}
+\toprule
+ & \multicolumn{2}{c}{Model} \\
+ & Llama3 & Mistral \\
+\midrule
+MDQA & 0.23 & -0.27 \\
+MuSiQue & 0.81 & 0.41 \\
+SummHay Citation& 1.00 & 0.82 \\
+\bottomrule
+\end{tabular}
+\end{wraptable}
+
+As noted previously, the attention heads induced by synthetic data tend to be subsets of those active on the real data. As shown in Table~\ref{tab:recall_f1_correlation}, we find that this is strongly correlated with F1 on the real task for MuSiQue and SummHay Citation. The relationship holds more strongly for Llama-3-8B-Instruct than for Mistral-7B-Instruct-v0.1. 
+
+To account for score magnitude, Figure~\ref{fig:cosine_similarity} shows the relationship between the similarity of induced attention heads with downstream task performance. For each synthetic task, we measure its connection to real data via cosine similarity of the vector representation of retrieval head scores (that is, treat the map elements in Figure~\ref{figure:title_figure} as a vector). As the figure shows, there is a strong relationship between target task performance and cosine similarity. When synthetic data does not induce retrieval heads matching the real task, performance is low. However, high cosine similarity is not enough--at the same level of similarity, we still observe a wide range of performances.
+
+\begin{figure}[t!]
+\begin{center}
+\includegraphics[trim={2.5cm 1cm 0cm 1cm},clip,width=\textwidth]{images/cosine_similarity_symbol.png}
+\end{center}
+\caption{Cosine similarity between the retrieval scores on real datasets (R, R) vs. their synthetic versions, and Spearman correlation for each setting.}
+\label{fig:cosine_similarity}
+\end{figure}
+
+ 
+
+\subsection{Retrieval Heads Across Tasks}
+
+\begin{table}[t!]
+\caption{Cosine similarity of real dataset retrieval scores (+ SummHay insight scores) across tasks.}
+\label{tab:llama3_task_cosine}
+\begin{center}
+\small
+
+\begin{tabular}{l||cc|cc|cc|cc}
+\toprule
+ & \multicolumn{2}{c}{MDQA} & \multicolumn{2}{c}{MuSiQue} & \multicolumn{2}{c}{SummHay Retrieval} & \multicolumn{2}{c}{SummHay Insight} \\
+ & Llama3 & Mistral & Llama 3 & Mistral & Llama3 & Mistral & Llama3 & Mistral \\
+\midrule
+MDQA & 1.00 & 1.00 & 0.84 & 0.87 & 0.44 & 0.74 & 0.15 & 0.26 \\
+MuSiQue & 0.84 & 0.87 & 1.00 & 1.00 & 0.59 &0.69 & 0.28 & 0.20 \\
+SummHay Retrieval & 0.44 & 0.74 & 0.59 &0.69  & 1.00 & 1.00 & 0.08 & 0.07 \\
+SummHay Insight & 0.15 & 0.26 & 0.28 & 0.20  & 0.08 &0.07  & 1.00 & 1.00\\
+\bottomrule
+\end{tabular}
+
+\end{center}
+\end{table}
+
+
+We ask whether all tasks are leveraging the same set of retrieval heads. Table~\ref{tab:llama3_task_cosine} shows the cosine similarity of linearized retrieval scores between tasks. The single-hop and and multi-hop extractive QA tasks, MDQA and MuSiQue, have the highest cosine similarity at 0.84 on Llama-3-8B-Instruct and 0.87 on Mistral-7B-Instruct-v0.1. However, there is much lower similarity between the QA tasks and the SummHay Citation Retrieval Heads, and the \textit{least} similarity with SummHay Insight Heads.%
+
+Comparing to Figure \ref{fig:cosine_similarity}, we find that our real tasks have relatively high cosine similarity ($> 0.66$) with their synthetic versions, with the exception of the purely symbolic chained-dictionary-lookup and list-citation tasks. This suggests that there are task-specific subsets of retrieval heads, either activated based on reasoning ability or token diversity; we leave this for future investigation.
+
+
+
+\section{Retrieval Head Patching}
+
+
+\begin{table}[t]
+\caption{Results on Llama-3-8B-Instruct after patching heads that comprise the complement and intersection retrieval heads between the real and synthetic data versions, compared to random retrieval heads and original performance. Best patch F1 is \textbf{bolded}, and $\Delta$ is the improvement over the original F1.}
+\label{tab:llama3_patching}
+\begin{center}
+\small
+
+\begin{tabular}{llllrrrrrr}
+\toprule
+\multirow{2}{*}{Task} & \multicolumn{2}{c}{Data Variant} & \multirow{2}{*}{N}  & \multirow{2}{*}{Compl.} & \multirow{2}{*}{Inter.} & \multirow{2}{*}{Rand.} & \multirow{2}{*}{Orig.} & \multirow{2}{*}{$\Delta$} \\
+ & Concept & Context &  &  &  &  &  &  &  \\
+\midrule
+\midrule
+\multirow{6}{*}{MDQA} & Real & Real & - & - & - & - & 0.82 & - \\
+ & Real (Limited) & Real & 68 & 0.82 & \textbf{ 0.83} & 0.82 & 0.80 & 0.03 \\
+ & Low & High & 61 & 0.65 & \textbf{0.66} & 0.54 & 0.49 & 0.17 \\
+ & Symbolic & Symbolic & 71 & 0.43 & \textbf{0.73} & 0.50 & 0.48 & 0.25 \\
+ & Low & Low & 74 & 0.70 & \textbf{0.71} & 0.53 & 0.47 & 0.24 \\
+ & High & Low & 74 & 0.63 & 0.51 & \textbf{0.70} & 0.41 & 0.29 \\
+ & High & High & 60 & 0.52 & \textbf{0.59} & 0.26 & 0.37 & 0.21 \\
+\midrule
+\multirow{6}{*}{MuSiQue} & Real & Real & - & - & - & - & 0.45 & - \\
+ & High & Low & 71 & 0.38 & \textbf{0.41} & 0.33 & 0.41 & 0.00 \\
+ & High & High & 71 & \textbf{0.33} & 0.29 & 0.25 & 0.37 & -0.05 \\
+ & Low & Low & 61 & \textbf{0.41} & 0.33 & 0.33 & 0.34 & 0.08 \\
+ & Real (Limited) & Real & 53 & 0.34 & \textbf{0.34} & 0.31 & 0.32 & 0.02 \\
+ & Symbolic & Symbolic & 55 & 0.33 & \textbf{0.36} & 0.35 & 0.32 & 0.03 \\
+\midrule
+\multirow{6}{*}{SummHay} & Real & Real & - & - & - & - & 0.81 & - \\
+ & Low & Low & 27 & 0.73 & \textbf{0.74} & 0.73 & 0.79 & -0.04 \\
+ & High & High & 19 & 0.72 & 0.75 & \textbf{0.79} & 0.70 & 0.09 \\
+ & Low & Low & 26 & 0.66 & \textbf{0.70} & 0.62 & 0.65 & 0.05 \\
+ & High & Low & 21 & 0.57 & \textbf{0.68} & 0.67 & 0.61 & 0.07 \\
+ & Symbolic & Symbolic & 26 & 0.53 & \textbf{0.60} & 0.48 & 0.54 & 0.07 \\
+\bottomrule
+\end{tabular}
+
+\end{center}
+\end{table}
+
+
+
+Given datasets of the same conceptual reasoning and retrieval task, it is peculiar that fine-tuning on some datasets results in fewer retrieval heads. Do the attention heads common to all datasets better capture the core capability required for the task? For the common attention heads, do models learn a better way of updating them from the real data than the synthetic data? To investigate these, we follow \cite{prakash2023fine} to perform cross-model activation patching of retrieval heads in the \textit{intersection} and \textit{complement} between the real dataset and the synthetic datasets. Specifically, given the set of retrieval scoring attention heads on the real data, $H_\text{real}$, and the set of retrieval scoring heads on a synthetic dataset, $H_\text{synth}$, we take the complement $H_\text{compl} = H_\text{real}\setminus H_\text{synth}$ and the intersection $H_{\text{inter}} = H_\text{real} \cap H_\text{synth}$. For a fair comparison, we sample $n_\mathrm{heads} = \min(|H_\text{compl}|, |H_\text{inter}|)$ without replacement from both sets. Additionally we compare with $n_\text{heads}$ randomly sampled attention heads. For each set, we patch activations from the model trained on the real data to the model trained on the synthetic data.
+
+\paragraph{Synthetic Data Affects Required Model Components Less Effectively} Our results in Tables \ref{tab:llama3_patching} and \ref{tab:mistral_patching} show that patching intersection heads outperforms patching both random and complement heads. The improvement is greatest for synthetic tasks with the lowest performance on the target task, and negligible or negative for the best synthetic tasks. The efficacy of patching $H_\text{inter}$ indicates that while a synthetic dataset may target the necessary retrieval heads for the target task, they are still \textit{insufficient} in learning how to best utilize the required model components. The success of these heads on different tasks likely is caused by upstream changes in the model during fine tuning, which specifically change the representations passed to these retrieval heads. %
+
+\paragraph{Intersection Heads are Core Attention Heads} So what do the ``extra" retrieval heads in the complement do? \cite{wu2024retrieval} finds that Llama-2-7B contains 12 core retrieval heads while the rest are dynamically activated. We confirm this by finding that the average retrieval scores of the intersection heads are much greater than those of the complement heads (see Table~\ref{tab:inter_compl_retrieval_scores}). %
+
+\paragraph{Implications} We established in Section~\ref{sec:retrieval_heads_necessary} that retrieval heads are necessary for synthetic context extension. The fact that ``better'' heads in the intersection can be patched in to improve performance indicates that learning these heads alone is not sufficient. We see our work as contributing a useful analytical tool for understanding the behavior of synthetic context extension. At the same time, this presents a challenge for future work to tackle: can we come up with a more complete mechanistic explanation of synthetic context extension that accounts for these observations as well?
+
+
+
+\section{Related Work}
+
+
+Prior work has shown that benchmarking or training LLMs on synthetic data can reveal or obtain capabilities that can be transferred and generalized to real tasks, especially in settings where human-annotated data is hard to obtain such as long-context tasks. For this purpose, synthetic data are commonly used and  believed to represent a simple reduction of the kinds of abilities employed in linguistically complex settings. The Needle-In-A-Haystack (NIAH) introduced by \cite{kamradt-2023-needle} involves placing a \textit{needle} statement at a random position within a \textit{haystack} consisting of unrelated essay text. Subsequent work \citep{hsieh2024ruler, li2024needlebenchllmsretrievalreasoning} has expanded this task to multi-value retrieval and used simple templated needle sentences to include distractor needles in the context. \cite{hsieh2024ruler} additionally parameterized its test suite by the diversity of the input context (essay text, repeated text, or distractor needles) and the target value type (words, numbers, or UUIDs). 
+
+Leveraging the potential generalizability of synthetic data, a line of work in interpretability literature generates synthetic data to perform controlled experiments to probe the inner workings of LLMs. For example, \cite{kim-schuster-2023-entity} shows that a synthetic version of entity tracking can be used to mechanistically understand how fine-tuning enhances existing capabilities of pre-trained LLMs via mechanistic intervention techniques, and \cite{Kim2024AMI} shows that the transformer circuit responsible for syllogistic reasoning in LLMs can be identified by evaluating on synthetic logical statements. However, there is a lack of understanding of when and how the mechanism discovered from synthetic tasks generalizes to real-world capabilities. 
+
+Our work bridges these directions by providing mechanistic explanations for the transferability of synthetic context extension while motivating the pursuit of better usage of synthetic data to evaluate, enhance, and understand the capabilities of LLMs.
+
+
+
+
+
+
+
+\section{Conclusion}
+
+
+In this paper, we investigated the relationship between the nature of synthetic data for synthetic context extension and performance on downstream tasks. Different synthetic datasets give widely varying performance, partially because of the different numbers of retrieval heads they induce in a model. We showed that these heads are causally connected to the performance, and that these heads are necessary (but not sufficient) for a strong downstream model. We believe this work paves the way for further mechanistic understanding of long context behavior and the ways in which synthetic data induces new capabilities in language models.
+
+
+

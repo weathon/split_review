@@ -1,0 +1,221 @@
+\title{Pruning neural networks using FishLeg estimation}
+
+\begin{abstract}
+In many domains, the most successful AI models tend to be the largest, indeed often too large to be handled by AI players with limited computational resources. To mitigate this, a number of compression methods have been developed, including methods that prune the network down to high sparsity whilst retaining performance. The best-performing pruning techniques are often those that use second-order curvature information (such as an estimate of the Fisher information matrix) to score the importance of each weight and to predict the optimal compensation for weight deletion. However, these methods are difficult to scale to high-dimensional parameter spaces without making heavy approximations. Here, we propose the FishLeg surgeon (FLS), a new second-order pruning method based on the Fisher-Legendre (FishLeg) optimizer. At the heart of FishLeg is a meta-learning approach to amortising the action of the \emph{inverse} FIM, which brings a number of advantages. Firstly, the parameterisation enables the use of flexible tensor factorisation techniques to improve computational and memory efficiency without sacrificing much accuracy, alleviating challenges associated with scalability of most second-order pruning methods. Secondly, directly estimating the inverse FIM leads to less sensitivity to the amplification of stochasticity during inversion, thereby resulting in more precise estimates. Thirdly, our approach also allows for progressive assimilation of the curvature into the parameterization. In the gradual pruning regime, this results in a more efficient estimate refinement as opposed to re-estimation. We revisit the autoencoder optimisation benchmark of the original FishLeg paper and show that FLS yields highly effective one-shot and gradual pruning, better than previous methods. We further extend FishLeg by developing new structured approximations of the inverse Fisher for convolutional layers. We find that FishLeg greatly improves one-shot pruning accuracy over previous second-order methods on ResNet50 (e.g. 62\% accuracy at 75\% sparsity, v.s. 41\% for M-FAC).
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+The current staggering growth of AI models is threatening to sideline small and medium-sized AI contributors with limited access to compute resources who cannot afford to run the largest models. Consequently, there is a growing need for methods that can compress these models down to a fraction of their original size whilst retaining their performance (Liu & Wang, 2023).  
+
+Here, we focus on unstructured network pruning, i.e. the process of zeroing out as many weights as possible without substantially impacting the quality of the model. We build on the Optimal Brain Surgeon (OBS; LeCun et al., 1989; Hassibi & Stork, 1992), a classical approach to pruning that approximates the network’s loss function in quadratic form to determine (i) the importance of each weight and (ii) the optimal way of compensating for their deletion. Several recent studies have shown that second-order importance scores are more accurate than scores derived from weight magnitudes and/or gradients (Gale et al., 2019; Sanh et al., 2020), yielding more effective pruning in convolutional (Theis et al., 2018; Singh & Alistarh, 2020) or transformer (Kuznedelev et al., 2022; Kurtic et al., 2022) architectures. Moreover, second-order methods have shown some promise in pruning benchmarks specifically chosen to “fail current sparse neural networks” (Liu et al., 2023).  
+
+Despite the promise of OBS-derived approaches, they are faced with a severe tradeoff between scalability and accuracy that has proven hard to navigate. Specifically, both the importance scores and the weight updates rely on estimating the action of the inverse Hessian $H^{-1}$ (or, in our case, the inverse Fisher matrix $F^{-1}$ ) on a high-dimensional parameter space $(\pmb{v}\mapsto H^{-1}\pmb{v})$ ), which inevitably calls for approximations. Indeed, all recent applications of the OBS framework to pruning have had to make significant simplifications, such as (i) ignoring correlations between most weights or groups of weights (Kurtic et al., 2022; Kuznedelev et al., 2022), or (ii) making low-rank approximations to the Hessian (Singh & Alistarh, 2020; Frantar et al., 2021) which are as good as the memory they consume. Note that these computational challenges also arise in second-order optimization.  
+
+In this work, we introduce the FishLeg surgeon (FLS) — a novel pruning algorithm that exploits the inverse curvature estimation machinery of the Fisher-Legendre (FishLeg) optimizer (Garcia et al., 2023). FishLeg attacks the scalability-accuracy dilemma by learning to directly amortize $F^{-1}v$ products in an easy-to-evaluate $Q(\lambda)\dot{v}$ form. This is done by minimizing an auxiliary loss $\mathcal{A}(\lambda)$ derived from Legendre duality principles, w.r.t. a set of auxiliary parameters $\lambda$ (details in Section 2). In contrast to low-rank approximations of the Fisher matrix that require hundreds of gradients to be stored, FishLeg allows the progressive distillation of a large number of gradients into the auxiliary parameter set $\lambda$ .1By means of low-parameter tensor factorization techniques, the size of $\lambda$ can be kept within a small multiple of the size of the model itself, enabling pruning of large models with limited memory. Whilst such memory efficiency can also be attained through KFAC-based methods (Martens & Grosse, 2015; Wang et al. Moreover, the form of KFAC’s $F^{-1}$ follows rigidly from approximate mathematical derivations, whereas FishLeg’s $Q(\lambda)$ can be any user-specified positive-definite quadratic form, yielding greater flexibility and accuracy. We use this flexibility to develop a novel variation on the well-known Kronecker-factored curvature approximation for dense layers, as well as new approximations for the convolutional layer.  
+
+We extend FishLeg’s inverse Fisher estimation algorithm in a number of ways: (i) we modify the auxiliary loss $\mathcal{A}(\lambda)$ to facilitate assessment of its convergence and to promote learning of the full $F^{-1}$ as required for pruning (as opposed to learning the action of $F^{-1}$ on the subspace of momentary noisy gradients, as relevant to the optimization setting of Garcia et al., 2023); (ii) we propose a new preconditioner for this (often ill-conditioned) auxiliary loss, and show analytically that it accelerates convergence asymptotically; and (iii) we propose a new initialization scheme for $Q(\lambda)$ that leads to better estimation of $F^{-1}$ especially when it is ill-conditioned. We show that the FishLeg surgeon results in highly effective pruning on a number of benchmarks. We first demonstrate substantial oneshot and gradual pruning improvements over previous second-order methods on a deep autoencoder previously studied in the context of second-order optimization; this network is known to exhibit pathological curvature, and our results, therefore, suggest that FLS’s superior inverse curvature estimator is key to improving pruning performance. Next, we apply FLS to the pruning of ResNet50. We show that in the one-shot and one-shot plus fine-tuning setup we consistently outperform other state-of-the-art second-order pruning methods, such as M-FAC and oBERT. Finally, although we do not explore this here, our method should be readily applicable to network quantization, following the approach traced out by Frantar et al. (2023).  
+
+
+
+\section{2 BACKGROUND AND RELATED WORK  }
+
+
+Unstructured vs. structured pruning Unstructured pruning reduces the number of parameters by scoring, and subsequently perhaps removing, each weight independently. In contrast, structured pruning scores and prunes entire components of the model, such as neurons, filters (Li et al., 2016), channels (He et al., 2017), layers (Fan et al., 2019; Sridhar & Sarah, 2020; Sajjad et al., 2023), or attention heads (Michel et al., 2019; Voita et al., 2019). Structured pruning therefore relies on an implicit structural understanding of the model. Recently, semi-structured pruning methods have gained popularity, where smaller subsets, e.g. blocks, of weights are removed together to allow the targeted hardware to take maximum advantage of sparsity (Lagunas et al., 2021; Gordon et al., 2020; Kurtic et al., 2022). Here, for simplicity, our experiments focus exclusively on unstructured pruning, but our method could easily be applied to the structured pruning case too.  
+
+One-shot pruning vs. gradual pruning One-shot pruning is the challenging task of pruning a model to some target sparsity with a single pruning iteration, and with no opportunity to recover any accuracy lost to pruning by e.g. re-training. In gradual pruning, the weights are instead removed progressively: each pruning step achieves some scheduled increase in sparsity and is followed by a period of fine tuning. This approach often allows higher sparsity to be obtained for a given model accuracy; for example, Gradual Magnitude Pruning (GMP; Gale et al., 2019; Han et al., 2016) often provides a strong baseline. M-FAC (Frantar et al., 2021) and oBERT (Kurtic et al., 2022) are relevant methods providing state-of-the-art results in second-order pruning in both pruning setups.  
+
+Upstream vs. downstream pruning Downstream compression directly prunes while fine-tuning on a specific downstream task, Movement Pruning (Sanh et al., 2020) is an example. Alternatively, it is possible to compress the model upstream on the pre-training task as in Zafrir et al. (2021), significantly reducing the computational requirements because downstream fine-tuning on the pruned model requires training only a fraction of the initial set of weights. Some pruning methods (Kurtic et al., 2022; Frankle & Carbin, 2018) can be used in both upstream and downstream pruning.  
+
+Fisher information matrix Consider a neural network with weights $\mathbf{\nabla}w$ that parameterize a predictive density $p(\pmb{y}|\pmb{x},\pmb{w})$ over labels $\textit{\textbf{y}}$ conditioned on the input $\textbf{\em x}$ . Let $\ell({\pmb w},\{{\pmb x},{\pmb y}\})\triangleq-\log p({\pmb y}|{\pmb x},{\pmb w})$ be the negative log-likelihood associated with data $\mathcal{D}=\{\boldsymbol{x},\boldsymbol{y}\}$ (this will typically be the network’s loss). The Fisher information matrix is defined as  
+
+$$
+F(\pmb{w})\triangleq\mathbb{E}_{\mathcal{D}\sim p(\mathcal{D}|\pmb{w})}[\nabla_{\pmb{w}}\ell(\pmb{w},\mathcal{D})\nabla_{\pmb{w}}\ell(\pmb{w},\mathcal{D})^{\top}]
+$$  
+
+where $p(\mathcal{D}|w)$ is the model distribution (not the data distribution; typically, $p(\mathcal{D}|w)$ ≜ $p({\pmb y}|{\pmb x},{\pmb w})p^{\star}({\pmb x})$ where $p^{\star}(x)$ is the input data distribution)(Rao, 1992). We will denote by $\hat{F}$ any finite-sample approximation of $F$ .  
+
+Second-order pruning: OBS-based methods Most second-order pruning methods are based on the Optimal Brain Surgeon (OBS; Hassibi & Stork, 1992). OBS begins with a quadratic approximation of the loss function around the pre-trained parameter set $\pmb{w}^{\star}$ , typically assumed to be a minimum of the loss,  
+
+$$
+\begin{array}{r l r}{\delta\mathcal{L}(\delta\pmb{w})}&{{}\triangleq}&{\mathcal{L}(\pmb{w}^{\star}+\delta\pmb{w})-\mathcal{L}(\pmb{w}^{\star})\quad\approx\quad\frac{1}{2}\delta\pmb{w}^{\top}H(\pmb{w}^{\star})\delta\pmb{w},}\end{array}
+$$  
+
+where $H(w^{\star})$ is the Hessian of the loss at $w^{\star}$ . Here, we will approximate the Hessian by the Fisher $F(w^{\star})$ ; most other works use the empirical Fisher matrix instead. This quadratic approximation leads to an analytical solution to the problem of optimally compensating for the deletion of a given weight $w_{i}$ :  
+
+$$
+\delta{\pmb w}^{\star}=-\frac{w_{i}^{\star}}{[{\pmb F}^{-1}({\pmb w}^{\star})]_{i i}}F^{-1}({\pmb w}^{\star}){\pmb e}_{i}
+$$  
+
+where $e_{i}$ is the $i^{\mathrm{th}}$ canonical basis vector (Hassibi & Stork, 1992). The corresponding (minimal) increase in loss resulting from the deletion of weight $w_{i}$ is taken as its importance score:  
+
+$$
+\rho_{i}=\frac{w_{i}^{2}}{2[F^{-1}({\pmb w}^{\star})]_{i i}}.
+$$  
+
+These equations have also been extended to handle the semi-structured pruning setting whereby small blocks of weights are treated as single units (Kurtic et al., 2022).  
+
+Existing second-order pruning methods mostly differ in the way they estimate $F^{-1}v$ products to compute Equations 3 and 4. All scalable methods make a block-diagonal approximation for $F$ . WoodFisher (Singh & Alistarh, 2020) and oBERT (Kurtic et al., 2022) partition the parameter space into small blocks assumed to be independent, and use the Woodbury identity to recursively update an estimate of the inverse empirical Fisher $\hat{F}_{B}^{-1}$ for each block $\boldsymbol{\mathrm{\Delta}}\boldsymbol{\mathrm{\Omega}}^{\beta}$ . These approaches have substantial memory requirements $(\mathcal{O}(\left|\boldsymbol{B}\right|n)$ , where $|\beta|$ is the block size and $n$ is the total number of parameters in the model). M-FAC (Frantar et al., 2021) modifies this recursion to operate directly on $\hat{F}_{B}^{-1}\pmb{v}$ products, in a way that obviates the need for storing $\hat{F}_{B}^{-1}$ (some parts of the computation can be cached and reused for any $\pmb{v}$ ). This is typically much slower but requires less memory. In our work, FLS too approximates $\dot{F}^{-1}$ in block-diagonal form, but with much larger blocks corresponding to entire layers, and with blocks structured to guarantee computational and memory efficiency.  
+
+FishLeg FishLeg (Garcia et al., 2023) is a scalable second-order optimizer that approximates the natural gradient $\bar{F}^{-1}\nabla_{\pmb{w}}\ell(\pmb{w},\mathcal{D})$ based on the following insights. Let $\mathbf{\nabla}w$ be a fixed set of model parameters. Consider the regularized cross entropy between $p(\bar{\mathcal{D}}|w)$ and $p(\mathcal{D}|\pmb{w}+\pmb{\delta})$ ,  
+
+$$
+\mathcal{H}_{\gamma}(\pmb{\delta})=\mathbb{E}_{\mathcal{D}\sim p(\mathcal{D}|\pmb{w})}\ell(\pmb{w}+\pmb{\delta},\mathcal{D})+\frac{\gamma}{2}\|\pmb{\delta}\|^{2},
+$$  
+
+where $\gamma>0$ is a small damping parameter. The Legendre-Fenchel conjugate of $\mathcal{H}_{\gamma}(\pmb{\delta})$ is defined as  
+
+$$
+\mathcal{H}_{\gamma}^{\star}(u)\triangleq\operatorname*{min}_{\delta}\mathcal{H}_{\gamma}(\delta)-u^{\top}\delta\quad\mathrm{with~minimizer~denoted~by~}\tilde{\delta}_{\gamma}(u).
+$$  
+
+Garcia et al. were able to prove that, if the negative log-likelihood $\ell(\pmb{w},\mathcal{D})=-\log p(\mathcal{D}|\pmb{w})$ is twice differentiable, then the inverse damped Fisher information matrix exists and is equal to  
+
+$$
+F_{\gamma}^{-1}\triangleq[F+\gamma I]^{-1}=\nabla_{\b u}\tilde{\delta}_{\gamma}(\mathbf{0}).
+$$  
+
+FishLeg meta-learns a parametric approximation $\overline{{\delta}}(\pmb{u},\lambda)$ of $\tilde{\delta}_{\gamma}(u)$ , by minimizing the auxiliary loss $\boldsymbol{\mathcal{A}}(\lambda,\boldsymbol{u})\triangleq\boldsymbol{\mathcal{H}}_{\gamma}(\overline{{\delta}}(\boldsymbol{u},\lambda))-\boldsymbol{u}^{\intercal}\overline{{\delta}}(\boldsymbol{u},\lambda)$ w.r.t. meta-parameters $\lambda$ , as prescribed by Equation 6. Importantly, Equation 7 shows that one only needs to learn the local behaviour of the vector field $\tilde{\delta}_{\gamma}\bar{(}u)$ around small $\textbf{\em u}$ ; thus, Garcia et al. directly parameterized its (symmetric, positive definite) Jacobian $Q(\lambda)$ at ${\bf\nabla}u={\bf0}$ , corresponding to the choice $\overline{{{\delta}}}(u,\lambda)\triangleq Q(\lambda)u$ 
+
+$$
+\boldsymbol{\mathcal{A}}(\lambda)\triangleq\mathbb{E}_{u}\left\{\frac{1}{\|u\|^{2}}\left[\frac{1}{2}u^{\top}Q(\lambda)F_{\gamma}Q(\lambda)u-u^{\top}Q(\lambda)u\right]\right\}
+$$  
+
+which can be estimated and differentiated efficiently in a number of ways (details in Section 3).  
+
+Practical note: as $Q(\lambda)$ converges towards $F_{\gamma}^{-1}$ , the auxiliary loss as defined by Equation 8 converges towards $\left\langle-u^{\top}F_{\gamma}^{-1}u/\|u\|^{2}\right\rangle$ , which is problem-dependent; this makes it hard to assess the quality of our inverse Fisher estimation. We therefore assess convergence by computing a slightly modified auxiliary loss where we drop the $\frac{1}{2}$ factor; this should converge to zero.  
+
+Taking the gradient of Equation 8 w.r.t. $\lambda$ makes is clear that $Q(\lambda)$ will learn to approximate the action of $F_{\gamma}^{-1}$ on the subspace spanned by the $\textbf{\em u}$ ’s. Given their application to natural gradient optimization, Garcia et al. took those $\textbf{\em u}$ ’s to be stochastic gradients of the model’s primary loss function. For our pruning purposes, however, Equation 3 suggests that we must accurately estimate the action of $F$ on the entire parameter space; we will therefore work with a more isotropic distribution of $\textbf{\em u}$ (Section 3).  
+
+Directly estimating the inverse Fisher matrix, and doing so in this way, brings a number of advantages. First, the FishLeg approach is flexible: one can specify any form of $Q(\lambda)$ , and in particular combine structured approximations obtained through mathematical derivations (as in e.g. KFAC; Martens & Grosse, 2015; Grosse & Martens, 2016; George et al., 2018) with a variety of parametric adjustments for greater expressiveness. We give examples of such choices in Section 3.1. Second, the FishLeg approach is less biased than KFAC and related methods. These methods start by assuming that $F$ has a certain structure (e.g. block diagonal), obtain a good approximation of $F$ conforming to this structure, and then invert it. One expects both systematic errors as well as stochasticity in the estimate of $F$ to propagate to $F^{-1}$ . In contrast, FishLeg ‘fits’ a parametric approximation to $F^{-1}$ directly, conveniently avoiding inversion.  
+
+
+
+\section{3 FISHLEG PRUNING  }
+
+
+In this section, we describe the FishLeg surgeon, a novel application of FishLeg for pruning large neural networks within the OBS framework.  
+
+One-shot pruning of a pre-trained model with weights $w^{\star}$ using FishLeg is described in Algorithm 1. We begin by learning to approximate the inverse Fisher $F_{\gamma}^{-1}(w^{\star})$ by a positive definite matrix $Q(\lambda)$  
+
+parameterized in memory-efficient form (Section 3.1). We do so by minimizing FishLeg’s auxiliary loss function (Equation 8) w.r.t. $\lambda$ . Whilst Garcia et al. (2023) estimated the auxiliary loss function and its gradient by sampling $\textbf{\em u}$ as a gradient of the network’s loss on some data minibatch, here we take $\textbf{\em u}$ to be sampled from a standard Gaussian distribution. This promotes learning the full $F_{\gamma}^{-1}$ , as opposed to learning its action on a restricted subspace dominated by the average gradient (when it is not exactly zero perhaps due to incomplete model training).  
+
+Following auxiliary loss minimization, we follow the standard OBS recipe. We score each weight using Equation 4 and select the bottom $f\%$ for deletion, where $f$ is the target sparsity. We then prune each of these weights by applying the OBS update of Equation 3. For this, we make the simplifying assumption that following deletion of weight $w_{i}$ , the new (damped) inverse Fisher $F_{\gamma}^{-1}$ is identical to the old one, except for the removal of its $i^{\mathrm{th}}$ row and column. Operationally, this allows us to prune all the selected weights at once (i.e. update a weight mask), and apply the update of Equation 3 restricted to the remaining weights. We speculate that better pruning could be obtained by proceeding more gradually, periodically updating $F_{\gamma}^{-1}$ (by resuming the minimization of the auxiliary loss) between pruning steps. We have not explored this here, mainly because the methods we compare FLS to do not update their curvature estimates in the one-shot setting either.  
+
+Gradual Pruning involves prune gradually in steps of increasing sparsity, with additional fine-tuning between each step. As opposed to pruning to the desired sparsity level in one shot, methods of gradually pruning a network are typically the best-performing pruning approaches. A so-called sparsity schedule specifies the sparsity level to prune to at each step (see e.g. grey curve in Figure 2, right). Critically, gradual second-order pruning requires re-estimation of the inverse FIM following each intermediate pruning step, to take into account the new masked parameters. Here, we reason that FishLeg’s parametric estimation of the inverse FIM, $Q(\lambda)$ , can be actively updated in a rolling fashion between consecutive pruning steps by simply performing a certain number of auxiliary loss minimization steps. We do this concurrently with the fine-tuning steps (for which we use the FishLeg optimizer, also based on the running estimate $Q(\lambda),$ ), as outlined in Algorithm 2. Hence, unlike previous approaches to gradual second-order pruning, we need not re-estimate and re-invert the Fisher matrix from scratch after each pruning step – we simply refine our current estimate.  
+
+
+
+\section{3.1 MEMORY EFFICIENT PARAMETERIZATION OF THE INVERSE FISHER APPROXIMATION  }
+
+
+For scalability, we approximate $F^{-1}$ in block-diagonal form, with each layer contributing one block. Note that these blocks are orders of magnitude larger than the ones used in previous second-order approaches that implemented direct inversion (e.g. Kurtic et al., 2022 used blocks of size 50). Our choice of structure for $Q(\lambda)$ is slightly more constrained by our pruning objective than it is for the FishLeg optimizer: we require efficient evaluation of not only $Q v$ products but also $\mathrm{diag}(Q)$ (required in Equation 4). For dense layers with $n_{\mathrm{i}}$ inputs and $n_{0}$ outputs, and therefore with $(n_{\mathrm{i}}+1)n_{\mathrm{o}}$ parameters including biases, we parameterize the corresponding inverse Fisher block as  
+
+$$
+Q(\mathbf{\lambda})\triangleq D(L L^{\top}\otimes R R^{\top})D
+$$  
+
+where $D$ is a diagonal matrix with $(n_{\mathrm{i}}+1)n_{\mathrm{o}}$ parameters, $L\,\in\,\mathbb{R}^{n_{0}\times n_{0}}$ and $R\,\in\,\mathbb{R}^{n_{\mathrm{i}}\times n_{\mathrm{i}}}$ are two parameter matrices, and $\otimes$ denotes the Kronecker product. This construction is such that, for $\bar{V}\in\mathbb{R}^{n_{0}\times n_{\mathrm{i}}}$ ,  
+
+$$
+Q(\pmb{\lambda})\mathrm{vec}(V)=D\odot\mathrm{vec}(L L^{\top}(V\odot\bar{D})R R^{\top})
+$$  
+
+with the (unusual) convention that $\operatorname{vec}({\cdot})$ vectorizes row-wise (corresponding to a no-copy reshape in numerical code), and $\odot$ denotes elementwise (Hadamard) product. Here, $\bar{D}\in\mathbb{R}^{n_{0}\times(n_{\mathrm{i}}\bar{+}1)}$ is the unvectorized version of the diagonal of $D$ . Similarly, $\mathrm{diag}(Q)\stackrel{*}{=}\mathrm{diag}(D)^{2}\odot(\mathrm{diag}(L L^{\top})\otimes\mathrm{diag}(R R^{\top}))$ can be evaluated efficiently, with $\operatorname{diag}(L L^{\top})\stackrel{\textstyle\cdot}{=}(L\stackrel{\textstyle\cdot}{\odot}\dot{L})(1,\ldots\dot{,}1)^{\top}$ . Note that the inclusion of $D$ makes it more expressive than the standard KFAC approximation which is limited to the Kronecker product.e. oBERT & MFAC).  
+
+For convolutional layers (conv2D), we follow a similar tensor factorization strategy. Filter parameters are tensors of dimensions $n_{\mathrm{o}}(\mathrm{output\;channels})\times n_{\mathrm{i}}(\mathrm{input\;channels})\times K(\mathrm{kernel\;size})$ . Whilst we could parameterize the inverse Fisher block as a 3-way Kronecker product, Grosse & Martens (2016)’s KFAC derivation for convolutional layers suggests lumping together the input and kernelsize dimensions. We therefore use the same structure as in Equation 9, but with $R$ of size $n_{\mathrm{i}}K$ and $D$ of size $n_{0}n_{\mathrm{i}}K$ .  
+
+![](images/3370f31af488d6c7dfe07e8474ef2d1234df4ca4cc414d7ecd248f4336e33b12.jpg)  
+Figure 1: The initialization of $Q(\lambda)$ matters much. In this toy experiment, the true Fisher matrix $(n=100)$ was chosen so that its $i^{\mathrm{th}}$ eigenvalue is $\xi_{i}\triangleq1/i^{2}$ , and the damping parameter $\gamma$ was set to $10^{-3}$ . Thus, the eigenvalues of $\bar{F_{\gamma}^{-1}}$ lie roughly in the $[1-1000]$ range. The auxiliary loss $\begin{array}{r}{\boldsymbol{A}(\boldsymbol{Q})=\frac{1}{2}\mathrm{Tr}(\boldsymbol{Q}\boldsymbol{F}\boldsymbol{Q})-\mathrm{Tr}(\boldsymbol{Q})}\end{array}$ (left) was minimized by gradient descent w.r.t. the Cholesky factor of $Q(\lambda)$ , initialized such that $Q(\lambda)=I$ (black) or $Q(\lambda)=\gamma^{-1}I=1000\times I$ (red). The learning rate was optimized separately for each case. This simulation shows that it is clearly better to initialize $Q$ to be large rather than small. Indeed, a simple derivation shows that each eigenvalue $\beta_{i}$ of $Q$ approaches its target $1/(\xi_{i}+\gamma)$ at a speed proportional to $(\xi_{i}+\gamma)$ (Equation 11). In other words, the eigenvalues of $Q$ that must end up large are also those that evolve the slowest. It, therefore makes sense to initialize them to be large so they have less to travel; the eigenvalues that must end up small will become small rapidly anyway. The right panels illustrate this behaviour by plotting the eigenvalues of $Q$ against their respective targets, at regular intervals during optimization (color-coded), for both initialization schemes. The auxiliary loss is minimized when $\beta_{i}=1/(\xi_{i}+\gamma)$ , i.e. when the dots lie along the identity line (dashed grey).  
+
+
+
+\section{3.2 INITIALIZATION OF $Q$  }
+
+
+Our experiments with FishLeg have revealed that the minimization of the auxiliary loss is very sensitive to initialization – to the point that getting it wrong can yield useless estimates of $F_{\gamma}^{-1}$ . In the context of neural network optimization, Garcia et al. (2023) advocated an identity initialization $Q_{0}\,=\,\alpha I$ . To choose the value of $\alpha$ , they observed that this identity initialization implied that the FishLeg update $\pmb{w}_{t+1}\gets\pmb{w}_{t}-\eta Q(\lambda)\nabla_{\pmb{w}}\mathcal{L}$ would initially correspond to SGD. Thus, given a learning rate $\eta_{\mathrm{SGD}}$ known to work well for SGD, they set $\alpha\triangleq\eta_{\mathrm{SGD}}/\eta$ . However, in the context of pruning this rationale no longer applies; we therefore revisited the choice of $\alpha$ .  
+
+We found that good pruning results could only be obtained for sufficiently large $\alpha$ . Let $F\;=\;U\Xi U^{\top}$ be the eigendecomposition of the Fisher matrix, with $\Xi\,=\,\mathrm{diag}(\xi_{1},\ldots,\xi_{n})$ . Assuming $\pmb{u}\sim\mathcal{N}(0,I_{n})$ , the auxiliary loss (Equation 8) reduces to $\begin{array}{r}{A(\lambda)=\frac12\mathrm{Tr}(Q F_{\gamma}\overbar{Q})-\mathrm{Tr}(\bar{Q})\big)}\end{array}$ . Expressing $Q$ in the eigenbasis of $F$ as $Q=U\beta U^{\top}$ , the gradient flow for this deterministic loss function takes the form $\dot{\beta}\,=\,-(\Xi+\gamma I)\beta_{.}+I$ with $\beta(0)=\alpha I$ . It is then easy to see that $\beta$ will remain diagonal throughout, and that the $i^{\mathrm{th}}$ eigenvalue of $Q$ has the following dynamics:  
+
+$$
+\underbrace{(\xi_{i}+\gamma)^{-1}}_{\mathrm{time~constant}}\frac{d\beta_{i}}{d t}=-\beta_{i}+\underbrace{(\xi_{i}+\gamma)^{-1}}_{\mathrm{optimal~steady~state}}\quad\mathrm{with}\quad\beta_{i}(0)=\alpha.
+$$  
+
+Thus, the eigenvalues of $Q-\mathrm{all}$ initially equal to $\alpha$ – converge at very different speeds depending on their optimal steady states: eigenvalues that must reach large (resp. small) values evolve slowly (resp. fast). We therefore conclude that a good initialization is to set $\alpha$ to be as large as the largest eigenvalues of $F_{\gamma}^{-1}$ , namely $(\operatorname*{min}\{\xi_{i}\}+\bar{\gamma})^{-1}\approx\gamma^{-1}$ . This way, the eigenvalues of $Q$ that would normally slowly evolve towards $\gamma^{-1}$ are positioned there from the outset, and the eigenvalues that are set to decrease do so rapidly. Figure 1 illustrates this behaviour and shows that large initialization of $Q$ (with $\alpha\approx\gamma^{-1}$ ) results in faster minimization of the auxiliary loss.  
+
+3.3 PRECONDITIONING OF THE AUXILIARY LOSS  
+
+Learning the full $F^{-1}$ is a hard problem when $F$ is ill-conditioned, as the auxiliary loss inherits this ill-conditioning. This preconditioner greatly accelerates asymptotic convergence of the auxiliary loss (Figure 5A), leading to better estimates of the inverse FIM.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+The current state-of-the-art pruning approaches (Frantar et al., 2023; Kurtic et al., 2022; Liu & Wang, 2023) rely on sophisticated recipes, distillation strategies and quantization techniques to achieve a high level of model compression (Li et al., 2016). This work and the experiments below do not enter this level of specialization, focusing instead on (i) how using second-order pruning outperforms the first-order methods, (ii) how having a better approximation of the Fisher information matrix translates to better second-order importance scores and therefore to better pruning, (iii) and how by using FishLeg, we can learn more accurate Fisher matrix approximation for the most commonly used deep learning architectures, without resorting to complex approximations. FishLeg pruning can be combined with any of the methods cited above, as long as they are compatible with second-order pruning, to enhance their pruning capabilities further. Consequently, the experiments below start by revisiting the MLP-based autoencoder benchmark used in the FishLeg paper Garcia et al. (2023). We continue by exploring the pruning of one of the most famous CNN architectures, ResNet50 (He et al., 2015). For both experiments, we study the one-shot pruning and one-shot pruning with fine-tuning performance of our method and compare it with relevant baselines. For the autoencoder setup, we also investigate the gradual pruning performance.  
+
+The following subsections will discuss the experiments described above. All experiments are deployed on one RTX A6000 GPU with 48 Gigabytes GDDR6 RAM. In the interest of reproducibility, each experiment has been run five times with different initialisation seeds; in every figure, we show the mean of the five runs and the error bars corresponding to the standard deviation. If it is not possible to see the error bars, it is because they are too small and the results are therefore very consistent.  
+
+
+
+\section{4.1 MNIST AUTOENCODER  }
+
+
+We first study second-order pruning with FishLeg in the MNIST autoencoder benchmark used in the FishLeg optimization paper to compare this algorithm with other second-order pruning methods. The architecture of the autoencoder is MLP-based and further details of its implementation can be found in (Goldfarb et al., 2020).  
+
+For all MNIST experiments, we prune a dense autoencoder model pre-trained via Adam on the same MNIST task that we use as target for pruning. In each case, the optimal hyperparameters were chosen via a grid search. The batch size is set at 100, and the network is optimized with respect to a negative log Bernoulli likelihood.  
+
+One-shot pruning We compare our algorithm against Global Magnitude Pruning and the SOTA second-order methods, oBERT and M-FAC. Both oBERT and M-FAC are set to collect 1024 gradients for their Fisher approximations, with their Fisher block sizes set to 50 and 2000 respectively (the default values in the SparseML codebase).  
+
+The results in Figure 2 show FLS consistently matching or outperforming the other baselines at all sparsity values. In higher sparsity regimes FLS is more robust than competing methods, with a $30\%$ lower test loss at $90\bar{\%}$ one-shot sparsity when compared with the next best method (oBERT).  
+
+One-shot $^+$ Fine-tuning In this section, we can observe how the FLS and the FishLeg optimizer work in tandem to prune and retrain using the same inverse Fisher approximation. In this experiment, we prune the model to $80\%$ sparsity in one-shot and then fine-tune the sparse model for 20 epochs to recover as much performance as possible. Except where indicated, Adam is used as optimizer for fine-tuning with default PyTorch hyperparameters and weight decay set to $\lambda=10^{-5}$ .  
+
+![](images/8d6d113de8de75c88fa582bd5470612d647fba77437d920334fc57bf21880263.jpg)  
+Figure 2: MNIST autoencoder pruning test loss (as negative log likelihood) for one-shot (left), one-shot $^+$ fine-tune at $80\%$ sparsity (middle) and gradual pruning (right). The fine-tuning and gradual pruning are carried out using Adam optimizer, except for the $\mathrm{FLS+}$ FishLeg where the FishLeg optimizer is used to fine-tune. In all three experiments, FLS consistently outperforms the other baselines, especially at high sparsity values.  
+
+![](images/d7cb7236f8f6faa5dc987bcbe88de14fc04255171b89a500f9a21eea473ab900.jpg)  
+Figure 3: ResNet50 performance on ImageNet after one-shot pruning at different levels of sparsity. The top-1 accuracy metric (left) and the corresponding softmax test loss (right) as a function of sparsity are shown for each method.  
+
+From Figure 2 (middle), FLS fine-tuned with FishLeg optimizer is the only recipe that stands out and outperforms all other baselines. Note that the starting values of test loss shown at epoch 0 are the same values shown for one-shot pruning at $80\%$ sparsity (see Figure 2, left) for each of the methods.  
+
+We can also observe that all second-order methods achieve a final lower loss than the original dense model after approximately 3 epochs. This phenomenon can be partially attributed to improved generalisation of the sparse model justified by Occam’s hill (Blumer et al., 1987; Hoefler et al., 2021), such that the increase in performance can be explained by a reduction in learned noise.  
+
+Gradual pruning Figure 2 (right) shows the test loss as the gradual pruning progresses towards $98\%$ sparsity (refer to the grey line and the right hand axis for sparsity schedule). FishLeg Surgeon consistently outperforms the other methods and shows to be more reliable at higher sparsities. All models seem to collapse above $90\%$ sparsity, but the increase in test loss is significantly more contained for FLS compared to other methods.  
+
+We prune by using the estimate of the inverse Fisher from the FishLeg optimizer used for fine-tuning; this is a significant computational advantage compared to other second-order pruning methods. The Fisher approximation $Q(\lambda)$ is actively updated during the fine-tuning steps. As for other methods, Adam is used as optimizer for fine-tuning.  
+
+
+
+\section{4.2 RESNET50  }
+
+
+Scaling up to larger models and problem setups, we evaluate the FishLeg Surgeon performance on ResNet50 (He et al., 2016) pre-trained on ImageNet (Deng et al., 2009). The batch size is set at 128 and the model is optimized for classification with respect to the standard categorical likelihood.  
+
+Table 1: One-shot pruning $^+$ fine-tuning of ResNet50. Numbers denote test accuracies on ImageNet. ResNet50 is first pruned to $80\%$ sparsity in one-shot, and then fine-tuned for one epoch on the ImageNet dataset.   
+
+![](images/e8db30913abbe47c85113f44225d2337bd532b96c4f6178d5bcc41c6b630a326.jpg)  
+
+One-shot pruning For one-shot, we prune a ResNet50 model to various levels of sparsity up to $90\%$ . These results are summarised in Figure 3 in terms of top-1 accuracy (left) and the resulting negative log-likelihood (right), both evaluated on ImageNet test data.  
+
+We show that the performance of FLS comfortably exceeds that of the baselines across all levels of sparsity, with $62\%$ accuracy at $75\%$ sparsity, compared to $41\%$ for M-FAC and $24\%$ for oBERT. In addition to this, we note that compared to the next best performing pruner (M-FAC, 42GB), FishLeg surgeon has $\times2.4$ lower VRAM (17GB) consumption with our experimental setup.  
+
+One-shot $^+$ Fine-tuning Finally, we provide one-shot $^+$ fine-tuning results for ResNet50 with ImageNet, where the sparse model has been fine-tuned for one full epoch after pruning (Table 1). Whilst fine-tuning reduces the gap between FLS and other methods, FLS still yields the best performance, indicating that some of the one-shot improvements transfer to the fine-tuning regime too.  
+
+
+
+\section{5 DISCUSSION, LIMITATIONS AND FUTURE WORK  }
+
+
+We have shown that FLS is a computationally efficient algorithm achieving SOTA results for secondorder pruning. We speculate that the FishLeg machinery will benefti other applications that require accurate and tractable estimates of inverse curvature.  
+
+While the FishLeg pruning method is effective in many scenarios, it has several limitations. One of the key assumptions in our approach is that the inverse Fisher $F_{\gamma}^{-1}(w^{\star})$ can be well approximated by a specific form of positive definite matrix $Q(\lambda)$ ; however, the structure chosen for $Q$ is largely dictated by scalability requirements, and may not be appropriate under certain conditions. We have proposed memory-efficient factorizations of $Q$ which we have found effective for dense and convolutional layers, and we leave the development of other types of neural network layers to future research.  
+
+Another noteworthy assumption is that following deletion of weight $w_{i}$ , the new (damped) inverse Fisher $F_{\gamma}^{-1}$ is the same as the old one, save for the removal of its $i^{\mathrm{th}}$ row and column. This simplifying assumption is also used by previous approaches to pruning and leads to computational savings, but it potentially limits the accuracy of the pruning process (see the illustrative example given in Wang et al., 2019). To mitigate this, one could take advantage of the fact that FishLeg’s auxiliary loss minimization enables gradual distillation of curvature information into $Q(\lambda)$ . Maintaining an accurate running estimate of $\bar{F}^{\bar{-}1}$ as the model gets pruned is therefore less costly than with previous methods that typically require re-estimating and re-inverting $F$ from scratch following weight deletion. We have found this approach to be effective for gradual pruning of the MNIST autoencoder in Figure 2 (right), but leave further gradual pruning applications to larger networks for future work.  
+
+In conclusion, while the FishLeg pruning method represents a promising step forward in the efficient and effective pruning of large neural networks, the aforementioned limitations highlight directions for future improvements. Further research in these areas will likely extend and refine the capabilities of the proposed method.  
+
+
+
+

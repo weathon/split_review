@@ -1,0 +1,557 @@
+\title{General Preference Modeling with Preference Representations for Aligning Language Models}
+
+\begin{abstract}
+Modeling human preferences is crucial for aligning foundation models with human values. Traditional reward modeling methods, such as the Bradley-Terry (BT) reward model, fall short in expressiveness, particularly in addressing intransitive preferences. Although supervised pair preference models (PairPM) can express general preferences, their implementation is highly ad-hoc and cannot guarantee a consistent preference probability of compared pairs. Additionally, they impose high computational costs due to their quadratic query complexity when comparing multiple responses. In this paper, we introduce \emph{preference representation learning}, an approach that embeds responses into a latent space to capture intricate preference structures efficiently, achieving linear query complexity. Additionally, we propose preference score-based General Preference Optimization (GPO), which generalizes reward-based reinforcement learning from human feedback. Experimental results show that our General Preference representation model (GPM) outperforms the BT reward model on the RewardBench benchmark with a margin of up to 5.6\% and effectively models cyclic preferences where any BT reward model behaves like a random guess. Furthermore, evaluations on downstream tasks such as AlpacaEval2.0 and MT-Bench, following the language model post-training with GPO and our general preference model, reveal substantial performance improvements with margins up to 9.3\%. These findings indicate that our method may enhance the alignment of foundation models with nuanced human values.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Modeling human preferences is a cornerstone in developing foundation models that interact seamlessly with users. In natural language modeling and reinforcement learning, aligning models with human intent and values has led to significant advancements, including improved text generation and enhanced decision-making policies \citep{ouyang2022training, christiano2017deep}. Traditional approaches often rely on reward modeling, wherein a reward function is learned to guide the optimization of policies. 
+While effective in certain contexts, these methods face challenges in expressiveness and computational efficiency, particularly when addressing complex or intransitive human preferences \citep{tversky1969intransitivity, munos2023nash}.
+
+\begin{wrapfigure}[15]{r}{0.2\linewidth}
+    \centering
+    \includegraphics[width=0.18\textwidth]{images/fruits.pdf}
+    \hfill
+    \includegraphics[width=0.18\textwidth]{images/paper-scissor.pdf}
+    \caption{Intransitiveness in real-world preferences.}
+    \label{fig:paper-scissor}
+\end{wrapfigure}
+
+\begin{figure}[!htb]
+\centering
+\subfigure[Bradley-Terry (BT) reward model]{\includegraphics[width=0.5\textwidth]{images/RM.pdf}}
+\quad
+\subfigure[PairPM]{\includegraphics[width=0.4\textwidth]{images/PairPM.pdf}}
+\subfigure[General Preference representation model (GPM)]{\includegraphics[width=0.95\textwidth]{images/GPM.pdf}}
+\vskip 0.2in
+\caption{Illustration of (a) Bradley Terry (BT) reward model, (b) supervised pair preference model (PairPM)~\citep{jiang2023llm, dong2024rlhf}, and (c) our General Preference representation model (GPM).}
+\label{fig:merged_figure}
+\vskip 0.1in
+\end{figure}
+Preference learning algorithms typically employ pairwise comparisons to capture human judgments~\citep{ibarz2018reward, ziegler2019fine}. The Bradley-Terry (BT) model~\citep{bradley1952rank} is popular for modeling such pairwise preferences due to its simplicity and computational efficiency: 
+given $K$ responses, a BT reward model cost $\cO(K)$ inference-time compute to output the reward dictating the preferences. 
+The efficiency of the BT model comes from the implicit assumption that each option can be conveniently represented by a scalar reward, which inevitably limits the model's capacity to capture the richness of human judgments that may be context-dependent or exhibit intransitivity \citep{gardner1970mathematical}.
+
+On the other hand, supervised (sequential-classification) pair preference models (PairPM)~\citep{jiang2023llm, dong2024rlhf} that predict the preference given a concatenation of the two responses can express complex and intransitive (cyclic) structures. But to fully capture the preference relations among $K$ responses, it requires evaluating $\cO(K^2)$ pairwise preferences between all $K$ candidate responses~\citep{munos2023nash,wu2024self}. This quadratic scaling hinders them for applications with larger response sets especially in test-time scaling for reasoning tasks using verifiers and ranking models~\citep{snell2024scaling, wu2024empirical}. 
+
+Aside from computational inefficiency, supervised preference models also exhibit asymmetric preference behaviors related to positions. Also, the model's design choice can be highly ad-hoc, varying among different templates and different linear heads.
+
+Based on the above observations, it is thus natural to raise the following question:
+\begin{center}
+\textit{Is there a principled way to model general preference?}
+\end{center}
+
+In this paper, we answer this question affirmatively by proposing \emph{preference representation learning}, which bridges the gap between expressiveness and efficiency in general preference modeling. Our method embeds responses into a multi-dimensional latent space that captures the complex preference structure beyond transitive relations while allowing for efficient querying of preferences. 
+Notably, our approach achieves a computational complexity of $\cO(K)$, matching the efficiency of the BT model but with enhanced expressiveness.
+
+The main contributions of our work are summarized as follows:
+\begin{itemize}[leftmargin=*,parsep=1pt, itemsep=1pt, topsep=1pt]
+    \item We introduce preference representation learning for general preference modeling, enabling both efficient and expressive representation of human preferences. Our approach generalizes the Bradley-Terry (BT) reward model by embedding responses into a latent space, capturing complex preference structures, including intransitive preferences. Notably, our General Preference representation model (GPM) achieves a query complexity of $\mathcal{O}(K)$ for evaluating preferences among $K$ responses, a significant improvement over the $\mathcal{O}(K^2)$ complexity of traditional supervised preference models that rely on pairwise inputs (see Section~\ref{sec:general_preference_modeling}).
+    \item We demonstrate the effectiveness of GPM across a variety of tasks, including CyclicPreference (ours) and the renowned RewardBench~\citep{RewardBench}. Specifically, GPM models intransitive (e.g., cyclic) preferences with 100\% accuracy, whereas the BT reward model performs like random guessing (see Section~\ref{sec:experiments_cyclic_preference}). Additionally, GPM outperforms the BT model on RewardBench with performance margins of up to 5.6\% (see Section~\ref{sec:experiments_reward_bench}).
+    \item For language model alignment, we propose General Preference Optimization (GPO), which leverages the preference scores provided by GPM. The general preference score can also be integrated as a preference signal into a wide range of RLHF and preference optimization methods, such as (iterative) DPO~\citep{rafailov2024direct}, SPPO~\citep{wu2024self}, and PPO-based methods~\citep{ouyang2022training}. Experimental results on AlpacaEval2.0 and MT-Bench reveal that our approach leads to substantial improvements over reward-based methods for language model alignment (see Section~\ref{sec:GPO-exp}).
+\end{itemize}
+
+
+\section{Related Work}
+
+
+\textbf{Reward-Based Reinforcement Learning from Human Feedback (RLHF).} 
+The earlier approaches to modeling human preference for language model alignment usually learn a~\textit{reward model} from a preference dataset. The human preference is assumed to follow the Bradley-Terry (BT) model~\citep{bradley1952rank} or the Thurstone model \citep{thurstone2017law}. 
+LLM policies then are fine-tuned to maximize these scalar reward signals for better alignment~\citep{christiano2017deep, ziegler2019fine, ouyang2022training}. 
+Later, the direct preference optimization (DPO) methods are proposed by~\citet{rafailov2024direct} to only implicitly learn a reward model represented by an LLM. The human preference is still assumed to follow the Bradley-Terry model. 
+However, the reliance on scalar rewards imposes a total ordering on preferences, which may not reflect the intransitive or stochastic nature of human judgments \citep{tversky1969intransitivity, agranov2017stochastic}. 
+
+\noindent\paragraph{Preference-Based Reinforcement Learning from Human Feedback.} Recently, there emerged a line of works that directly estimates the preference probability without imposing a reward-based preference model or any transitivity assumptions \citep{lou2022active, wu2023borda, wang2023rlhf} either for preference-based RL or in the context of RLHF. Efforts have been made to optimize policies directly from pair-wise preference comparisons, thereby mitigating the limitations of scalar reward functions~\citep{ munos2023nash, swamy2024minimaximalist, rosset2024direct, wu2024self}.
+
+\noindent\paragraph{Intransitivity in Game Theory.} The symmetric zero-sum game and its intransitivity have also been frequently studied in the context of game theory. 
+\citet{balduzzi2018re} was motivated by evaluation among different agents, showing that any symmetric zero-sum game can be decomposed into a ``transitive'' game and a ``cyclic'' game, and proposed Nash averaging for better agent/task evaluation. 
+\citet{balduzzi2019open} generalized the results from matrix games to 
+functional-form games and propose new algorithms to construct diverse populations of effective agents.
+\citet{czarnecki2020real} investigated the geometrical properties of real-world games (e.g., Tic-Tac-Toe, Go, StarCraft II) and proposed that real-world games have a ``spinning top'' geometry, with a strong transitive dimension and gradually diminishing non-transitive cyclic dimensions.
+Very recently, \citet{bertrand2023limitations} examined the limitations of the Elo rating system and proposed an alternative ``disc decomposition'' method that can better handle both transitive and cyclic game dynamics. 
+
+\noindent\paragraph{Representation Learning and Embedding.} Representation learning and embedding techniques have successfully captured relational structures across various domains \citep{mikolov2013distributed, chen2020simple, radford2021learning}, yet their application in preference modeling and RLHF remains limited. Our work introduces preference representation learning, an approach that enhances expressiveness while maintaining computational efficiency, bridging the gap left by traditional approaches.
+
+
+\section{Background}
+
+
+In this section, we present preliminaries on reward modeling, preference modeling, and reinforcement learning from human feedback (RLHF) for language model alignment. We consider an autoregressive language model that generates responses to the given prompts. Let $\mathbf{x} = [x_1, x_2, \ldots]$ denote a prompt, a sequence of tokens. The language model $\pi$ generates a response $\mathbf{y} = [y_1, y_2, \ldots, y_N]$ based on the conditional probability distribution: $\pi(\mathbf{y} \mid \mathbf{x}) = \prod_{i=1}^N \pi\left(y_i \mid \mathbf{x}, \mathbf{y}_{<i}\right)$, where $\mathbf{y}_{<i}$ represents the sequence of tokens generated before position $i$. In this paper, we assume a general-preference oracle. Given two responses $\mathbf{y}$ and $\mathbf{y}'$ to the same prompt $\mathbf{x}$, the oracle provides the feedback indicating which response is preferred. 
+\begin{equation*}
+\mathbb{P}\left(\mathbf{y} \succ \mathbf{y}' \mid \mathbf{x}\right) := \mathbb{E}\left[ o\left(\mathbf{y} \succ \mathbf{y}' \mid \mathbf{x}\right) \right].
+\end{equation*}
+\subsection{Reward-Based Reinforcement Learning from Human Feedback}
+
+The most prevalent approach to aligning language models with human preferences is to consider a scalar reward function $r(\mathbf{y}; \mathbf{x})$ that assigns a numerical score to each response. 
+The preference between two responses is then determined solely by the reward scores for the two responses.  
+For example, the Bradley-Terry (BT) model \citep{bradley1952rank} is a widely used method for modeling pairwise preferences in this context. However, the BT model can not capture intransitive (e.g. cyclic) preferences effectively~\citep{bertrand2023limitations}. Under the BT model, the probability that response $\mathbf{y}$ is preferred over $\mathbf{y}'$ is given by:
+\begin{equation*}
+\mathbb{P}(\mathbf{y} \succ \mathbf{y}' \mid \mathbf{x}) = \sigma\big( r(\mathbf{y}; \mathbf{x}) - r(\mathbf{y}'; \mathbf{x}) \big),
+\end{equation*}
+where $\sigma(z) = 1 / (1 + e^{-z})$ is the logistic (sigmoid) function.
+
+In practice, the reward function $r(\mathbf{y}; \mathbf{x})$ is learned by maximizing the likelihood of the observed preference data. Once the reward function is established, policy optimization techniques, such as Proximal Policy Optimization (PPO) \citep{schulman2017proximal}, can be applied to adjust the language model to generate responses that maximize expected rewards. The optimization problem can be formulated as:
+\begin{equation}
+\max_{\theta} \ \mathbb{E}_{\mathbf{x} \sim \mathcal{X}, \ \mathbf{y} \sim \pi_{\theta}(\cdot \mid \mathbf{x})} \left[ r(\mathbf{y}; \mathbf{x}) \right] - \beta \mathbb{E}_{\mathbf{x} \sim \mathcal{X}} \left[ \mathrm{KL}\left( \pi_{\theta}(\cdot \mid \mathbf{x}) \, \| \, \pi_{\text{ref}}(\cdot \mid \mathbf{x}) \right) \right],
+\end{equation}
+where $\theta$ are the parameters of the policy $\pi_{\theta}$, $\pi_{\text{ref}}$ is a reference policy (often the pre-trained or supervised-fine-tuned language model), $\beta$ is a scaling parameter that controls the strength of regularization, and $\mathrm{KL}$ denotes the Kullback-Leibler divergence.
+
+\subsection{General Preference Modeling}
+
+We consider the scenario where given a prompt $\mathbf{x}$, a set of responses $\{\mathbf{y}_i\}$ is generated, and human preferences over these responses are represented as pairwise probabilities $\mathbb{P}(\mathbf{y}_i \succ \mathbf{y}_j \mid \mathbf{x}) \in (0,1)$, indicating the likelihood that response $\mathbf{y}_i$ is preferred over $\mathbf{y}_j$ given the prompt $\mathbf{x}$.
+
+To model these preferences, we define a (pairwise) preference score function:
+\begin{equation}
+s(\mathbf{y}_i \succ \mathbf{y}_j \mid \mathbf{x}) := \log \frac{\mathbb{P}(\mathbf{y}_i \succ \mathbf{y}_j \mid \mathbf{x})}{1 - \mathbb{P}(\mathbf{y}_i \succ \mathbf{y}_j \mid \mathbf{x})},
+\end{equation}
+which represents the log-odds of $\mathbf{y}_i$ being preferred over $\mathbf{y}_j$. This score function allows us to express the preference probability as:
+\begin{equation}
+\mathbb{P}(\mathbf{y}_i \succ \mathbf{y}_j \mid \mathbf{x}) = \sigma\left( s(\mathbf{y}_i \succ \mathbf{y}_j \mid \mathbf{x}) \right), \label{eqn:general-preference-logistic}
+\end{equation}
+where $\sigma(z) = 1 / (1 + e^{-z})$ is the logistic function. One can see that the BT model is a special case: $s(\mathbf{y}_i \succ \mathbf{y}_j \mid \mathbf{x}) = r(\mathbf{y}_i;\xb) - r(\mathbf{y}_j;\xb)$.
+
+\subsubsection{Supervised Pair Preference Models}
+
+Existing approaches often involve concatenating the prompt and responses with a template and training an LLM-based sequential classifier in a supervised learning manner. 
+For example, \citet{jiang2023llm} simply concatenate the three segments $(\xb, \yb_1, \yb_2)$ sequentially and form a single input sequence with special tokens
+as separators:
+\begin{figure}[H]
+\centering
+\begin{BVerbatim}
+‘<s> <source> x </s> <candidate1> y1 </s> <candidate2> y2 </s>’
+\end{BVerbatim}
+\end{figure}
+Then a sequential classification head on the last token is trained to predict the preference. 
+Another example is \citet{munos2023nash}, which uses the following template for text summarization:
+\begin{figure}[H]
+\centering
+\begin{BVerbatim}
+‘You are an expert summary rater. Given a piece of text and two of 
+its possible summaries, output 1 or 2 to indicate which summary 
+is better.
+Text - ⟨text⟩, Summary 1 - ⟨summary1⟩, Summary 2 - ⟨summary2⟩.
+Preferred Summary -’
+\end{BVerbatim}
+Then use the last logit for an arbitrarily chosen token as $s(\yb_1 \succ \yb_2 | \xb)$ for training.
+
+However, due to the language model's position encoding~\citep{press2021train, su2024roformer} and the causal attention~\citep{radford2018improving, radford2019language} mechanism not being symmetric, the candidate's order in the concatenation will affect the final prediction results. It is mitigated by randomly shuffling the two responses in the training dataset but the output is still highly asymmetric. Another limitation is that how to represent the preference score can be highly ad-hoc. The two examples above already use different templates and different linear heads (sequential classification v.s. language modeling).
+
+
+\section{General Preference Modeling with Preference Representations}
+
+\label{sec:general_preference_modeling}
+
+In this section, we propose a general preference representation learning framework that can model human preferences efficiently and expressively. Each response is embedded as a vector in a latent space, and the preferences are modeled through interactions between these representations (embeddings) using a skew-symmetric operator. We first define preference representations, which serve as the foundation for modeling the relationships between responses. 
+
+\begin{definition}[Preference Representations] 
+Given a prompt $\mathbf{x}$, we assign to each response $\mathbf{y}$ a preference representation vector $\mathbf{v}_{\mathbf{y} | \mathbf{x}} \in \mathbb{R}^{2k}$. These representations are designed to capture the features relevant to human preferences beyond what can be represented by scalar rewards. 
+\end{definition}
+Next, to model the directional nature of preferences, we introduce the skew-symmetric preference operator, which ensures that the model respects the skew-symmetry (anti-symmetry) in preference modeling.
+
+\begin{definition}[Skew-symmetric Preference Operator]
+To capture the directional nature of preferences, we define a skew-symmetric (anti-symmetric) preference operator $\mathbf{R}^\succ \in \mathbb{R}^{2k \times 2k}$
+\begin{equation}
+\mathbf{R}_l = \begin{bmatrix}
+0 & -1 \\
+1 & 0 \\
+\end{bmatrix}, \quad l = 1, \dots, k. 
+\end{equation} 
+An example of $\mathbf{R}^\succ$ for $k = 2$ is:
+\begin{equation*}
+\mathbf{R}^\succ = \begin{bmatrix}
+0 & -1 & 0 & 0 \\
+1 & 0 & 0 & 0 \\
+0 & 0 & 0 & -1 \\
+0 & 0 & 1 & 0 \\
+\end{bmatrix}. \label{eqn:R-k-2}
+\end{equation*}    
+\end{definition}
+
+Finally, we define the preference score, which quantifies the degree to which one response is preferred over another. This score is calculated based on the interaction between the preference representations, mediated by the skew-symmetric operator.
+
+\begin{definition}[Preference Score]
+The preference score between two responses $\mathbf{y}_i$ and $\mathbf{y}_j$ using preference representations is defined as:
+\begin{equation}
+s(\mathbf{y}_i \succ \mathbf{y}_j \mid \mathbf{x}) = \big\langle \mathbf{R}^\succ \mathbf{v}_{\mathbf{y}_i | \mathbf{x}}, \mathbf{v}_{\mathbf{y}_j | \mathbf{x}} \big\rangle,
+\end{equation}
+where $\langle \cdot , \cdot \rangle$ denotes the inner product in $\mathbb{R}^{2k}$. This score captures the anti-symmetric relationship between responses induced by human preferences.    
+\end{definition}
+
+We model the preference probability using the logistic function as defined in Equation~(\ref{eqn:general-preference-logistic}). Our general preference representation model (GPM) exhibits two desirable properties:
+\begin{enumerate}[leftmargin=*,parsep=1pt, itemsep=1pt, topsep=1pt]
+\item \textbf{Skew-symmetry.} The preference score function is skew-symmetric, satisfying:
+\begin{equation*}
+s(\mathbf{y}_i \succ \mathbf{y}_j \mid \mathbf{x}) = - s(\mathbf{y}_j \succ \mathbf{y}_i \mid \mathbf{x}).
+\end{equation*}
+This reflects the fact that the preference relation is naturally skew-symmetric: if $\mathbf{y}_i$ is preferred over $\mathbf{y}_j$ with probability $p_{i,j}$, then $\mathbf{y}_j$ is preferred over $\mathbf{y}_i$ with probability $1 - p_{i,j}$.
+
+Specifically, 
+\begin{equation*}
+s(\mathbf{y} \succ \mathbf{y} \mid \mathbf{x}) = \big\langle \mathbf{R}^\succ \mathbf{v}_{\mathbf{y} | \mathbf{x}}, \mathbf{v}_{\mathbf{y} | \mathbf{x}} \big\rangle = 0.
+\end{equation*}
+This means that a response is neither superior nor inferior to itself.
+
+\item \textbf{Magnitude preserving.} The skew-symmetric preference operator does not change the representation vector's magnitude, which makes this operation stable for training and inference. 
+\begin{equation*}
+\big\langle \mathbf{R}^\succ \mathbf{v}_{\mathbf{y} | \mathbf{x}}, \mathbf{R}^\succ \mathbf{v}_{\mathbf{y} | \mathbf{x}} \big\rangle = \big\langle \mathbf{v}_{\mathbf{y} | \mathbf{x}}, \mathbf{v}_{\mathbf{y} | \mathbf{x}} \big\rangle.     
+\end{equation*}
+\end{enumerate}
+
+\noindent\textbf{Relation to Bradley-Terry Model.}
+ If we set $k = 1$, $\mathbf{v}_{\mathbf{y}} = [r(\mathbf{y} \mid \mathbf{x}), c]^\top$, where $c$ is a constant and $c \neq 0$ (e.g., $c = 1$), and $\mathbf{R}^\succ = \begin{bmatrix} 0 & -1 \\ 1 & 0 \end{bmatrix}$, then the preference score reduces to:
+\begin{equation*}
+s(\mathbf{y}_i \succ \mathbf{y}_j \mid \mathbf{x}) = c \big( r(\mathbf{y}_i \mid \mathbf{x}) - r(\mathbf{y}_j \mid \mathbf{x}) \big),
+\end{equation*}
+and the preference probability becomes:
+\begin{equation*}
+\mathbb{P}(\mathbf{y}_i \succ \mathbf{y}_j \mid \mathbf{x}) = \sigma\big[c\big(r(\mathbf{y}_i \mid \mathbf{x}) - r(\mathbf{y}_j \mid \mathbf{x})\big) \big],
+\end{equation*}
+which is exactly the Bradley-Terry (BT) model as a disk game~\citep{balduzzi2019open}.
+
+\subsection{Expressiveness of the Model}
+
+ Specifically, we establish the following theorem (similar results have been proved in \citet{balduzzi2018re}):
+
+\begin{theorem}[Expressiveness of Preference Representation Model]
+Let $\mathbf{P} \in \mathbb{R}^{k \times k}$ be a real skew-symmetric matrix (i.e., $\mathbf{P} = -\mathbf{P}^\top$). Then there exist vectors $\{\mathbf{v}_i\}_{i=1}^{k} \subset \mathbb{R}^{2k}$ and a block-diagonal skew-symmetric matrix $\mathbf{R}^\succ \in \mathbb{R}^{2k \times 2k}$, with $\mathbf{R}^\succ$ consisting of $k$ blocks of the form:
+\begin{equation*}
+\mathbf{R}_l = \begin{bmatrix}
+0 & -1 \\
+1 & \phantom{-}0 \\
+\end{bmatrix}, \quad l = 1, \dots, k,
+\end{equation*}
+such that:
+\begin{equation*}
+P_{ij} = \mathbf{v}_i^\top \mathbf{R}^\succ \mathbf{v}_j, \quad \forall\, i, j.
+\end{equation*}
+Moreover, the vectors $\{\mathbf{v}_i\}$ can be constructed explicitly from $\mathbf{P}$.
+\label{thm:expressiveness-real}
+\end{theorem}
+
+Theorem~\ref{thm:expressiveness-real} suggests that our preference representation framework can theoretically model arbitrary complex and potentially intransitive (e.g.
+
+
+
+\section{Efficient Preference Optimization with General Preference}
+
+\label{sec:gpo}
+
+To address the potential intransitive human preference, the preference-based LLM alignment algorithms~\citep{munos2023nash,azar2023general,wu2024self,rosset2024direct} have been proposed to directly work on the preference pairs instead of assuming a reward function.
+
+Given a preference oracle $\mathbb{P}\left(\mathbf{y} \succ \mathbf{y}' \mid \mathbf{x}\right)$. The objective is to find a policy $\pi$ that performs well against another competing policy $\pi'$ in terms of these preference probabilities.
+For example, \citet{azar2023general} consider competing with another fixed policy $\mu$ ($\mathcal{X}$ denotes the distribution over prompts):
+\begin{equation}
+\max_{\pi} \ \mathbb{E}_{\mathbf{x} \sim \mathcal{X}} \left[ \mathbb{E}_{\mathbf{y} \sim \pi(\cdot \mid \mathbf{x}), \ \mathbf{y}' \sim \mu(\cdot \mid \mathbf{x})} \left[ \mathbb{P}\left( \mathbf{y} \succ \mathbf{y}' \mid \mathbf{x} \right) \right] 
+- \beta \mathrm{KL}(\pi \| \pi_{\text{ref}})
+\right],
+\end{equation}
+Other works~\citep{munos2023nash,wu2024self,rosset2024direct} consider solving the two-player constant-sum game:
+\begin{equation}
+\max_{\pi} \ \min_{\pi'} \ \mathbb{E}_{\mathbf{x} \sim \mathcal{X}} \left[ \mathbb{E}_{\mathbf{y} \sim \pi(\cdot \mid \mathbf{x}), \ \mathbf{y}' \sim \pi'(\cdot \mid \mathbf{x})} \left[ \mathbb{P}\left( \mathbf{y} \succ \mathbf{y}' \mid \mathbf{x} \right) \right] \right].
+\end{equation}
+To simplify notation, we define the winning probability of a policy $\pi$ over another policy $\pi'$ as:
+\begin{equation}
+\mathbb{P}\left( \pi \succ \pi' \mid \mathbf{x} \right) = \mathbb{E}_{\mathbf{y} \sim \pi(\cdot \mid \mathbf{x}), \ \mathbf{y}' \sim \pi'(\cdot \mid \mathbf{x})} \left[ \mathbb{P}\left( \mathbf{y} \succ \mathbf{y}' \mid \mathbf{x} \right) \right].
+\end{equation}
+The optimization problem then becomes:
+\begin{equation} \label{eqn:game}
+\max_{\pi} \ \min_{\pi'} \ \mathbb{E}_{\mathbf{x} \sim \mathcal{X}} \left[ \mathbb{P}\left( \pi \succ \pi' \mid \mathbf{x} \right) \right].
+\end{equation}
+\textbf{The von Neumann winner} is a concept drawn from social choice theory \citep{sen1986social} and has been studied in preference-based RL~\citep{owen2013game, dudik2015contextual}.
+It is the Nash equilibrium of the two-player symmetric game (Equation~\ref{eqn:game}). It represents a mixed strategy—a probability distribution over possible responses—that performs optimally in the worst-case scenario against any opponent. 
+
+More formally speaking, a distribution $\pi^*$ is called a von Neumann winner if it satisfies:
+\begin{equation*}
+\min_{\pi' \in \Delta} \ \mathbb{E}_{\mathbf{x} \sim \mathcal{X}} \left[ \mathbb{P}\left( \pi^* \succ \pi' \mid \mathbf{x} \right) \right] \geq 1/2.
+\end{equation*}
+This condition ensures that, on average, the von Neumann winner $\pi^*$ is at least as likely to be preferred than any other policy $\pi'$. The von Neumann winner always exists due to the symmetric nature of the two-player game (Equation~\ref{eqn:game}).
+
+\subsection{Efficient Policy Optimization}
+
+To align language models with the general preference, previous works \citep{wu2024self,rosset2024direct,liu2024lipo,swamy2024minimaximalist} have proposed iterative training frameworks that include 1) sampling from the current LLMs multiple responses $\yb_1, \yb_2, \dots, \yb_K$; 2) using a general preference model to label the preference among the $K$ responses; 3) aggregating the preferences into different learning objectives. 
+
+A key advantage of our model is its \textbf{computational efficiency}. 
+The previous general preference models require $\mathcal{O}(K^2)$ inference-time compute to evaluate all pairwise preferences among $K$ responses, as each pair is represented by a different concatenated sequence from $(\xb, \yb_i, \yb_j)$ to predict $\PP(\yb_i \succ \yb_j | \xb)$.
+In contrast, computing the preference representation for $K$ responses requires only $O(K)$ forward passes / inference-time compute: we first calculate the representation $\mathbf{v}_i$ for each $\yb_i$, and then use them to calculate the preference probability between any two responses using formula $s(\yb_i \succ \yb_j) = \langle \mathbf{R}^{\succ}\mathbf{v}_i, \mathbf{v}_j\rangle$. This way, our model is as efficient as a reward model while being way more expressive.
+
+\subsection{General Preference Optimization (GPO)}
+\textbf{Policy Optimization with Preference Score.} Once we have a general preference model that outputs the preference score $s(\yb_i \succ \yb_j | \xb)$ at hand, we aim to find a policy $\pi$ that performs well against an opponent policy $\mu$ in terms of expected preference scores. The optimization problem is formulated as:
+\begin{equation}
+\max_{\btheta} \ \mathbb{E}_{\mathbf{x}} \left[ \mathbb{E}_{\mathbf{y} \sim \pi_{\btheta}(\cdot \mid \mathbf{x}), \ \mathbf{y}' \sim \mu(\cdot \mid \mathbf{x})} \left[ s(\mathbf{y} \succ \mathbf{y}' \mid \mathbf{x}) \right] \right] - \beta \mathbb{E}_{\mathbf{x}} \left[ \mathrm{KL}\left( \pi_{\btheta}(\cdot \mid \mathbf{x}) \| \pi_{\text{ref}}(\cdot \mid \mathbf{x}) \right) \right],
+\label{eq:policy_opt}
+\end{equation}
+where $\pi_{\text{ref}}$ is a reference policy (e.g., the initial language model), $\mu$ is the opponent policy (usually the same as $\pi_{\text{ref}}$), and $\beta > 0$ is a regularization parameter controlling the divergence from the reference policy. We would like to point out that this formulation is different from the many previous works~\citep{wu2024self,swamy2024minimaximalist,rosset2024direct,munos2023nash,azar2023general} as they consider maximizing the win rate $\PP(\yb \succ \yb'|\xb)$, while our formulation is to maximize $s(\yb \succ \yb'|\xb) = \log \frac{\PP(\yb \succ \yb'|\xb)}{\PP(\yb \prec \yb'|\xb)}$. 
+Note that $\PP(\yb \succ \yb'|\xb)$ only varies between $0$ and $1$, while $s(\yb \succ \yb'|\xb)$, similar to the reward $r(\yb;\xb)$ in RLHF or DPO, can take arbitrary values. The flexibility in its value range might benefit fine-tuning.
+
+\noindent\textbf{General Preference Optimization.} We consider the SPPO loss used by \citet{wu2024self} for iterative preference optimization, except that we use preference score instead of preference probability in the loss form. SPPO used $K$ responses for each prompt $\xb$ and calculated the empirical win rate of each response $\yb_k$. Instead, we calculate $\widehat{s}\left(\mathbf{y}_i \succ \mu \mid \mathbf{x}\right)$ to estimate the empirical win rate over the distribution $\mu$ as below:
+\begin{equation}
+\widehat{s}\left(\mathbf{y}_i \succ \mu \mid \mathbf{x}\right)=\frac{1}{K} \sum_{k=1}^K s\left(\mathbf{y}_i \succ \mathbf{y}_k \mid \mathbf{x}\right), \forall i \in[K],  \label{eqn:empirical_preference_score} 
+\end{equation}
+At each iteration $t$, GPO has the following learning objective:
+\begin{equation} \label{eqn:GPO-loss}
+\btheta_{t+1}=\arg \min_{\btheta}  \mathbb{E}_{\mathbf{x} \sim \mathcal{X}, \mathbf{y} \sim \pi_{\btheta_t}(\cdot \mid \mathbf{x})}\Bigg[\left( \log \left(\frac{\pi_{\btheta}(\mathbf{y} \mid \mathbf{x})}{\pi_{\btheta_t}(\mathbf{y} \mid \mathbf{x})}\right)- 
+\frac{1}{\beta} \left( \widehat{s}\left(\mathbf{y} \succ \pi_{\btheta_t} \mid \mathbf{x}\right) 
+-
+\log Z_{\pi_{\btheta_t}}(\xb)
+\right)
+\right)^2 \Bigg],
+\end{equation}
+where the normalizing factor $Z_{\pi_{\btheta_t}}(\xb) : = \sum_{\yb} \pi_{\btheta_t}(\yb|\xb) \exp \left(\widehat{s}\left(\mathbf{y} \succ \pi_{\btheta_t} \mid \mathbf{x}\right)\right)$. 
+
+In practice, we directly replace $\log Z_{\pi_{\btheta_t}}(\xb)$ with $0$\footnote{In late stages of the iterative training, $\pi_{\btheta_t}$ is close to equilibrium so the preference model can not distinguish between policy $\pi_{\btheta}$ and the opponent policy $\pi_{\btheta_t}$( meaning $\widehat{s}\left(\mathbf{y} \succ \pi_{\btheta_t} \mid \mathbf{x}\right) \approx 0$). Therefore, we have $\log Z_{\pi_{\btheta_t}}(\xb) \approx 0$.}.
+Intuitively, if a response $\yb$ receives a high average score, GPO will increase its log probability. We report the empirical performance of GPO in Section~\ref{sec:GPO-exp}. 
+
+\begin{remark}
+
+\end{remark}
+
+\begin{remark}
+    Note that the general preference score given by our GPM in Equation~(\ref{eq:policy_opt}) can also be integrated as preference (reward) signal for any off-the-shelf RLHF and preference optimization methods, including (iterative) DPO~\citep{rafailov2024direct}, IPO~\citep{azar2023general}, NLHF~\citep{munos2023nash}, SPPO~\citep{wu2024self} and REBEL~\citep{gao2024rebel}, as well as PPO-based methods~\citep{ouyang2022training} by directly optimizing Equation~(\ref{eq:policy_opt}).
+\end{remark}
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+\definecolor{darkgreen}{rgb}{0.0, 0.000, 0.0}
+\definecolor{darkred}{rgb}{0.000, 0.0, 0.0}
+
+We conducted extensive experiments to evaluate the effectiveness of the proposed General Preference representation model (GPM) in comparison to traditional reward-based models, particularly focusing on its ability to model cyclic preferences and improve language model alignment. Our experiments are designed to address the following key questions:
+\begin{itemize}[leftmargin=*,parsep=1pt, itemsep=1pt, topsep=0pt]
+    \item \textbf{Q1:} Can the GPM effectively capture and model cyclic and intransitive preferences, where traditional models like the Bradley-Terry (BT) reward model struggle?
+    \item \textbf{Q2:} How does the GPM perform on standard preference modeling benchmarks (RewardBench) compared to the BT model?
+    \item \textbf{Q3:} How does using the GPM for downstream policy optimization impact language model performance on real-world tasks compared to reward-based approaches?
+\end{itemize}
+
+\subsection{Cyclic Preference Modeling}
+\label{sec:experiments_cyclic_preference}
+
+To address \textbf{Q1}, we evaluate the ability of the GPM to capture intransitive, cyclic preferences that traditional transitive models (like the BT model) struggle to represent.
+
+\noindent\textbf{Cyclic Preference Dataset.} We constructed a dataset by inducing cyclic preferences from the Ultrafeedback dataset~\cite{cui2024ultrafeedbackboostinglanguagemodels}. The dataset includes responses evaluated across four key metrics: \textit{instruction following}, \textit{honesty}, \textit{truthfulness}, and \textit{helpfulness}. We created preference cycles such as: \texttt{instruction following} $\succ$ \texttt{honesty} $\succ$ \texttt{truthfulness} $\succ$ \texttt{helpfulness} $\succ$ \texttt{instruction following}, ensuring the presence of intransitive cycles. We further generated four sub-datasets by omitting one metric from each cycle, resulting in datasets of varying complexity with 216 to 363 instances.
+
+\noindent\textbf{Training and Evaluation.} We trained the GPM using the \textbf{Gemma-2B-it} language model as the base and evaluated the models based on their ability to predict the human-provided preferences in these datasets. Since cyclic preferences are inherently intransitive, we measure accuracy as the percentage of correctly predicted human preferences, where higher scores indicate better handling of non-transitive preferences.
+
+\begin{table}[ht]
+\centering
+\small
+\caption{Comparison of Bradley-Terry (BT) reward model and General Preference representation models (GPM) on cyclic preference datasets.}
+\label{table:cyclic_preference}
+\begin{tabular}{lll}
+\toprule
+\textbf{Model} & \textbf{Dataset} & \textbf{Acc. (\%)} \\
+\midrule
+Random Guess & & 50.0 \\
+\midrule
+BT RM & No \texttt{instruction following} & 62.4 \\
+GPM & No \texttt{instruction following} & \textbf{100.0 {\color{darkgreen}(+37.6)}} \\
+\midrule
+BT RM & No \texttt{honesty} & 61.6 \\
+GPM & No \texttt{honesty} & \textbf{100.0 {\color{darkgreen}(+38.4)}} \\
+\midrule
+BT RM & No \texttt{truthfulness} & 50.0 \\
+GPM & No \texttt{truthfulness} & \textbf{100.0 {\color{darkgreen}(+50.0)}} \\
+\midrule
+BT RM & No \texttt{helpfulness} & 62.9 \\
+GPM & No \texttt{helpfulness} & \textbf{100.0 {\color{darkgreen}(+37.1)}} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent\textbf{Results and Analysis.} As shown in Table~\ref{table:cyclic_preference}, the GP representation model achieves 100\% accuracy across all datasets, significantly outperforming the BT model. These results validate the GP representation model's ability to capture complex, cyclic preferences, confirming the theoretical advantages of using a preference representation-based approach over traditional reward models that assume transitivity.
+
+\subsection{Experiments on RewardBench}
+\label{sec:experiments_reward_bench}
+
+To address \textbf{Q2}, we compare the GP representation model and the BT reward model on the RewardBench benchmark~\citep{RewardBench}, which covers diverse preference modeling tasks, including Chat, Chat-Hard, Safety, and Reasoning.
+
+\noindent\textbf{Datasets and Experimental Setup.} We train both the BT and GPMs using the Skywork Reward Data Collection~\citep{skyworkreward2024}, which contains 80,000 pairwise preference examples from tasks in various domains. We evaluate both models on RewardBench, using two different base models: \textbf{Gemma-2B-it}~\citep{gemmateam2024gemma2improvingopen} (2B parameters) and \textbf{Llama-3.1-8B-Instruct}~\citep{dubey2024llama3herdmodels} (8B parameters), which are well-suited for instruction-following tasks (see  Appendices~\ref{sec:implementing_gpm} and \ref{sec:implementation_details} for the implementation details and experimental setup). 
+
+\noindent\textbf{Results and Analysis.} Table~\ref{table:gp_vs_bt} presents the results. The GPM consistently outperforms the BT model for both base models on RewardBench, with notable improvements in tasks involving complex reasoning (e.g., Chat-Hard and Reasoning). These results highlight the superior expressiveness of the GPM in preference modeling.
+\begin{table}[ht]
+\caption{Comparison between the Bradley-Terry (BT) models and the General Preference representation models (GPM) with varying embedding head dimensions on RewardBench. The highest scores are in bold and the second highest are underlined.}
+\label{table:gp_vs_bt}
+\centering
+\small
+\begin{tabular}{lcccccl}
+\toprule
+\textbf{Model} & \textbf{Embed Dim.} & \textbf{Chat} & \textbf{Chat-Hard} & \textbf{Safety} & \textbf{Reasoning} & \textbf{Average} \\
+\midrule
+\multicolumn{7}{c}{\textbf{Base Model: Gemma-2B-it}} \\
+\midrule
+BT RM  & 1 & 58.4 & 62.9 & \textbf{82.9} & 71.5 & 68.9 \\
+GPM   & 2 & \underline{68.4} & 66.7 & 70.7 & \underline{80.3} & 71.5 \\
+ &  4 & 63.1 & \underline{68.4} & 72.4 & \textbf{81.0} & 71.2 \\
+ &  6 & 68.2 & 66.4 & 80.6 & 76.7 & \underline{73.0} \\
+ & 8 & \textbf{71.5} & \textbf{69.7} & \underline{81.3} & 75.6 & \textbf{74.5 ({\color{darkgreen} +5.6})} \\
+\midrule
+\multicolumn{7}{c}{\textbf{Base Model: Llama-3.1-8B-Instruct}} \\
+\midrule
+BT RM & 1 & 89.7 & \underline{87.3} & \textbf{91.0} & \underline{96.2} & 91.1 \\
+GPM  & 2 &  92.7 & \underline{87.3} &  90.5 & 96.1 & 91.7 \\
+ & 4 & \textbf{93.6} & 87.1 & 90.4 & 96.0 & \underline{91.8} \\
+ & 6 & \underline{93.3} & \textbf{88.6} & \underline{90.6} & 96.0 &  \textbf{92.1 ({\color{darkgreen} +1.0})} \\
+ & 8 &  92.7 & 86.4 & 90.4 & \textbf{96.7} & 91.6 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Ablation Studies.} We further conducted ablation studies to assess the impact of varying the representation (embedding) dimension in the GPM. Table~\ref{table:gp_vs_bt} shows that increasing the embedding dimension generally improves performance.
+
+\subsection{Downstream Performance on Aligning Language Models with Human Preferences} 
+\label{sec:GPO-exp}
+
+To address \textbf{Q3}, we investigate the effectiveness of the GPM in language model for alignment using Self-Play Policy Optimization (SPPO)~\citep{wu2024self} and our proposed General Preference Optimization (GPO).
+
+\noindent\textbf{Experimental Setup.} We fine-tuned language models using SPPO and GPO, integrating preference scores provided by our GP representation model (GPM). We evaluated the models on AlpacaEval 2.0~\citep{dubois2024length} and MT-Bench~\citep{zheng2023judging}, two widely used benchmarks for evaluating LLM alignment.
+
+\noindent\textbf{Results and Analysis.}
+The evaluation results on the benchmarks are as follows. For AlpacaEval 2.0, we compared the generated responses of the aligned models with those of GPT-4-turbo. To avoid the preference bias when using GPT-4-turbo as the evaluator, we also used DeepSeek-V2~\citep{deepseekv2} and GPT-4o-mini as the evaluators besides GPT-4-turbo itself. Notice that the Length Controlled (LC) Win Rate results are using a generalized linear model fitted using default evaluator GPT-4-turbo, so it does not apply to other evaluators. The results of the three evaluators are presented in Tables~\ref{tab:result-alpaca-4o-mini},~\ref{tab:result-alpaca-turbo} and~\ref{tab:result-alpaca-deepseek}. 
+
+For MT-Bench, we used the default mode to let GPT-4 grade and give a score to the model's answer, and the MT-Bench scores of aligned models are presented in Table~\ref{tab:result-mt-bench}. These results suggest that integrating the General Preference representation model (GPM) into policy optimization can enhance the downstream performance of language models, supporting alignment with complex human preferences (for additional experimental results on GSM8K, MMLU, etc.
+
+\begin{table}[ht]
+\centering
+\small
+\caption{AlpacaEval 2.0 evaluation results. Base model: LLama3-8B-it, Evaluator: GPT-4o-mini. The results are grouped by the size and type of the RM or PM, and the number of iterations.}
+\label{tab:result-alpaca-4o-mini}
+\begin{tabular}{c@{\hspace{6pt}}c@{\hspace{6pt}}c|lc|lc} 
+\toprule 
+\multirow{2}{*}{\textbf{Size}} & \multirow{2}{*}{\textbf{Type}} & \multirow{2}{*}{\textbf{Iter}} & \multicolumn{2}{c|}{\textbf{SPPO}} & \multicolumn{2}{c}{\textbf{GPO}} \\
+ & & & \textbf{Win Rate} & \textbf{Avg. Len} & \textbf{Win Rate} & \textbf{Avg. Len} \\
+ \midrule && \text{base} & 32.26 & 1959 & 32.26 & 1959 \\
+ \midrule 
+ \textbf{2B} & \textbf{BT RM} & 1 & 44.48 & 1843 & 49.55 & 1837\\
+ & & 2 & 59.89 & 2028 & 57.19 & 2048 \\
+ & & 3 & 71.11 & 2244 & 67.81 & 2245 \\
+ \midrule  
+ & \textbf{GPM} & 1 & \textbf{52.64 {\color{darkgreen}(+8.16)}} & 2102 & \textbf{58.49 {\color{darkgreen}(+8.94)}} & 2145 \\
+ & & 2 & \textbf{66.01 {\color{darkgreen}(+6.12)}} & 2318 & \textbf{72.22 {\color{darkgreen}(+15.03)}} & 2404 \\
+ & & 3 & \textbf{72.97 {\color{darkgreen}(+1.86)}} & 2490 & \textbf{77.11 {\color{darkgreen}(+9.30)}} & 2613\\
+ \midrule 
+ \textbf{8B} & \textbf{BT RM} & 1 & 40.96 & 1802 & 42.56 & 1764\\
+ & & 2 & 52.43 & 1945 & 57.19 & 2080\\
+ & & 3 & 55.30 & 1832 & 62.79 & 3445 \\
+ \midrule 
+ & \textbf{GPM} & 1 & \textbf{45.80 {\color{darkgreen}(+4.84)}} & 1878 & \textbf{49.55 {\color{darkgreen}(+6.99)}} & 1877\\
+ & & 2 & \textbf{56.04 {\color{darkgreen}(+3.61)}} & 2020 & \textbf{57.54 {\color{darkgreen}(+0.35)}} & 2126\\
+ & & 3 & \textbf{60.73 {\color{darkgreen}(+5.43)}} & 1994 & \textbf{66.23 {\color{darkgreen}(+3.44)}} & 2157 \\
+ \bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[ht!]
+\centering
+\small
+\caption{AlpacaEval 2.0 evaluation results. Base model: LLama3-8B-it, Evaluator: GPT-4-turbo. The results are grouped by the size and type of the RM or PM, and the number of iterations.}
+\label{tab:result-alpaca-turbo}
+\begin{tabular}{c@{\hspace{6pt}}c@{\hspace{6pt}}c|ccc|ccc} \toprule \multirow{2}{*}{\textbf{Size}} & \multirow{2}{*}{\textbf{Type}} & \multirow{2}{*}{\textbf{Iter}} & \multicolumn{3}{c|}{\textbf{SPPO}} & \multicolumn{3}{c}{\textbf{GPO}} \\
+ & & &\textbf{LC. WR}& \textbf{WR} & \textbf{Avg. Len} &\textbf{LC. WR} & \textbf{WR} & \textbf{Avg. Len} \\
+ \midrule && \text{base} & 23.07 & 23.34 & 1959 & 23.07 & 23.34 & 1959 \\
+  \midrule \textbf{2B} & \textbf{BT RM} & 1 & {33.71} & 30.88 & 1843 & {36.28} & 33.17 & 1837\\
+ & & 2 & {37.38} & 37.88 & 2028 & {37.87} & 38.89 & 2048 \\
+ & & 3 & {38.86} & 42.98 & 2244 & {38.79} & 42.80 & 2245 \\
+ \midrule  & \textbf{GPM} & 1 & 32.64 & \textbf{35.12} & 2102 & 35.23 & \textbf{38.10} & 2145 \\
+ & & 2 & 35.16 & \textbf{41.40} & 2318 & 36.04 & \textbf{44.47} & 2404 \\
+ & & 3 & 35.30 & \textbf{45.44} & 2490 & 38.51 & \textbf{48.30} & 2613 \\
+  \midrule \textbf{8B} & \textbf{BT RM} & 1 & 33.38 & 29.90 & 1802 & 35.96 & 31.71 & 1764\\
+ & & 2 & {38.83} & {37.82} & 1945 & {41.48} & 41.73 & 2080\\
+ & & 3 & {40.55} & 37.09 & 1832 & {42.16} & 43.33 & 3445 \\
+ \midrule & \textbf{GPM} & 1 & \textbf{33.39} & \textbf{31.49} & 1878 & \textbf{37.45} & \textbf{35.17} & 1877\\
+ & & 2 & 37.35 & 37.60 & 2020 & 39.07 & \textbf{39.94} & 2126 \\
+ & & 3 & 39.72 & \textbf{39.38} & 1994 & 41.19 & \textbf{43.38} & 2157 \\
+ \bottomrule
+\end{tabular}
+\end{table}
+\begin{table}[ht!]
+\centering
+\small
+\caption{AlpacaEval 2.0 evaluation results. Base model: LLama3-8B-it, Evaluator: DeepSeek-V2. The results are grouped by the size and type of the RM or PM, and the number of iterations.}
+\label{tab:result-alpaca-deepseek}
+\begin{tabular}{c@{\hspace{6pt}}c@{\hspace{6pt}}c|cc|cc} 
+\toprule 
+\multirow{2}{*}{\textbf{Size}} & \multirow{2}{*}{\textbf{Type}} & \multirow{2}{*}{\textbf{Iter}} & \multicolumn{2}{c|}{\textbf{SPPO}} & \multicolumn{2}{c}{\textbf{GPO}} \\
+ & & & \textbf{Win Rate} & \textbf{Avg. Len} & \textbf{Win Rate} & \textbf{Avg. Len} \\
+\midrule 
+&& \text{base} & 30.20 & 1959 & 30.20 & 1959\\
+\midrule 
+\textbf{2B} 
+& \textbf{BT} & 1 & 43.00 & 1843 & 43.78 & 1837\\
+& & 2 & 51.78 & 2028 & 52.80 & 2048 \\
+& & 3 & 60.99 & 2244 & 58.21 & 2245 \\
+\midrule 
+& \textbf{GP} & 1 & \textbf{48.41 {\color{darkgreen}(+5.41)}} & 2102 & \textbf{52.57 {\color{darkgreen}(+8.79)}} & 2145 \\
+& & 2 & \textbf{58.12 {\color{darkgreen}(+6.34)}} & 2318 & \textbf{62.52 {\color{darkgreen}(+9.72)}} & 2404 \\
+& & 3 & \textbf{65.26 {\color{darkgreen}(+4.27)}} & 2490 & \textbf{68.28 {\color{darkgreen}(+10.07)}} & 2613 \\
+\midrule 
+\textbf{8B} 
+& \textbf{BT} & 1 & 41.73 & 1802 & 43.36 & 1764\\
+& & 2 & 50.24 & 1945 & 52.90 & 2080\\
+& & 3 & 50.76 & 1832 & 56.59 & 3445 \\
+\midrule 
+& \textbf{GP} & 1 & \textbf{45.42 {\color{darkgreen}(+3.69)}} & 1878 & \textbf{46.89 {\color{darkgreen}(+3.53)}} & 1877\\
+& & 2 & \textbf{52.77 {\color{darkgreen}(+2.53)}} & 2020 & \textbf{53.03 {\color{darkgreen}(+0.13)}} & 2126 \\
+& & 3 & \textbf{54.73 {\color{darkgreen}(+3.97)}} & 1994 & \textbf{59.43 {\color{darkgreen}(+2.84)}} & 2157 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[ht!]
+\centering
+\small
+\caption{MT-Bench evaluation results. Base model: LLama3-8B-it, Evaluator: GPT-4.}
+\label{tab:result-mt-bench}
+\begin{tabular}{c@{\hspace{6pt}}c@{\hspace{6pt}}c|lll|lll} 
+\toprule 
+\multirow{2}{*}{\textbf{Size}} & \multirow{2}{*}{\textbf{Type}} & \multirow{2}{*}{\textbf{Iter}} & \multicolumn{3}{c|}{\textbf{SPPO}} & \multicolumn{3}{c}{\textbf{GPO}} \\
+ & & & \textbf{1st} & \textbf{2nd} & \textbf{Avg.} & \textbf{1st} & \textbf{2nd} & \textbf{Avg.} \\
+\midrule 
+&& \text{base} & 8.27 & 7.38 & 7.82 & 8.27 & 7.38 & 7.82 \\ 
+\midrule 
+\textbf{2B} 
+& \textbf{BT RM} & 1 & 8.11 & 7.44 & 7.77 & 8.15 & 7.37 & 7.77\\
+& & 2 & 8.37 & 7.59 & 7.98 & 8.20 & 7.69 & 7.95\\
+& & 3 & 8.26 & 7.36 & 7.81 & 8.59 & 7.54 & 8.06\\
+\midrule 
+& \textbf{GPM} & 1 & \textbf{8.26 {\color{darkgreen}}} & \textbf{7.66 {\color{darkgreen}}} & \textbf{7.96 {\color{darkgreen}}} & \textbf{8.49 {\color{darkgreen}}} & \textbf{7.50 {\color{darkgreen}}} & \textbf{7.99 {\color{darkgreen}}}\\
+& & 2 & {8.26 } & \textbf{7.66 {\color{darkgreen}}} & \textbf{7.96 {\color{darkgreen}}} & \textbf{8.38 {\color{darkgreen}}} & {7.55 } & \textbf{7.97 {\color{darkgreen}}}\\
+& & 3 & \textbf{8.31 {\color{darkgreen}}} & \textbf{7.53 {\color{darkgreen}}} & \textbf{7.92 {\color{darkgreen}}} & \textbf{8.63 {\color{darkgreen}}} & \textbf{7.89 {\color{darkgreen}}} & \textbf{8.26 {\color{darkgreen}}}\\
+\midrule 
+\textbf{8B} 
+& \textbf{BT RM} & 1 & 8.53 & 7.85 & 8.19 & 8.54 & 8.05 & 8.29\\
+& & 2 & 8.33 & 7.91 & 8.12 & 8.16 & 7.55 & 7.85\\
+& & 3 & 8.05 & 7.66 & 7.86 & 8.12 & 7.76 & 7.94\\
+\midrule 
+& \textbf{GPM} & 1 & {8.27} & {7.60 } & {7.93 } & {8.30 } & {7.70 } & {8.00 }\\
+& & 2 & \textbf{8.46 {\color{darkgreen}}} & {7.71} & {8.08 } & {8.11 } & \textbf{7.65 {\color{darkgreen}}} & \textbf{7.88 {\color{darkgreen}}}\\
+& & 3 & \textbf{8.14 {\color{darkgreen}}} & {7.59 } & \textbf{7.87 {\color{darkgreen}}} & \textbf{8.22 {\color{darkgreen}}} & {7.63 } & {7.93}\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\section{Conclusion}
+
+
+This work introduced preference representation learning, a framework for modeling human preferences that can capture complex, intransitive structures like cyclic preferences. The proposed General Preference representation model (GPM) achieves linear complexity while maintaining the ability to model intricate preference relationships. It consistently outperforms traditional models like Bradley-Terry and supervised preference models across various benchmarks, including cyclic preference datasets and real-world tasks from RewardBench. Additionally, incorporating preference scores from GPM into policy optimization methods, such as SPPO and the newly introduced General Preference Optimization (GPO), led to significant performance improvements in downstream tasks that require alignment with intricate human preferences, as demonstrated in benchmarks like AlpacaEval 2.0 and MT-Bench.
+
+\paragraph{Limitations.}
+Despite the current interesting experimental results, further exploration is still needed. 
+The choice of representation (embedding) dimensions and model architecture can influence the expressiveness and computational efficiency of GPM. An overly expressive model such as a high embedding dimension can impact performance, particularly in tasks prone to overfitting. 
+Future works should examine the expressiveness of preference representations in a wider range of real-world datasets. 
+
+
+
+
+
+
+
+
+
+
+
+

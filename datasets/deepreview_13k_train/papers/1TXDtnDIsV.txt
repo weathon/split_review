@@ -1,0 +1,483 @@
+\title{Learning Mamba as a Continual Learner}
+
+\begin{abstract}
+Continual learning (CL) aims to efficiently learn and accumulate knowledge from a data stream with different distributions. By formulating CL as a sequence prediction task, meta-continual learning (MCL) enables to meta-learn an efficient continual learner based on the recent advanced sequence models, \eg, Transformers. Although attention-free models (\eg, Linear Transformers) can ideally match CL's essential objective and efficiency requirements, they usually perform not well in MCL. Considering that the attention-free Mamba achieves excellent performances matching Transformers' on general sequence modeling tasks, in this paper, we aim to answer a question -- \emph{Can attention-free Mamba perform well on MCL?} By formulating Mamba with a selective state space model (SSM) for MCL tasks, we propose to meta-learn Mamba as a continual learner, referred to as \textbf{MambaCL}. By incorporating a selectivity regularization, we can effectively train MambaCL. Through comprehensive experiments across various CL tasks, we also explore \emph{how Mamba and other models perform in different MCL scenarios}. Our experiments and analyses highlight the promising performance and generalization capabilities of Mamba in MCL.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Continual learning (CL) aims to efficiently learn and accumulate knowledge in a non-stationary data stream \citep{de2021continual,wang2023comprehensive} containing different tasks. Given a sequence of data $\gD_T=( (\rvx_1, y_1), ..., (\rvx_t, y_t), ..., (\rvx_T, y_T) )$ with a series of paired observations $\rvx_i$ (\eg, images) and targets $y_i$ (\eg, class labels) from different tasks, CL is usually produced to learn one model $P_{\phi_t}(y|\rvx)$ parameterized by $\phi_t$ that can perform prediction for any tasks corresponding to the seen data $\gD_t$. For example, in class incremental learning (CIL)~\citep{rebuffi2017icarl,zhou2023deep}, a widely studied CL scenario, $\gD_T$ consists of data with incrementally added classes, and $P_{\phi_t}(y|\rvx )$ is trained to recognize all previously seen classes. To ensure computational and memory efficiency, CL methods are explored for learning from data streams while minimizing the storage of historical data or limiting running memory growth, such as restricting the increase rate to be constant or sub-linear \citep{de2021continual,ostapenko2021continual}. 
+The main challenge in CL is to preserve performance on previously seen tasks while continually updating the model parameters $\phi_t$~\citep{de2021continual,wang2023comprehensive}. 
+
+\par
+CL methods continually train/update the model $P_{\phi_t}(y|\rvx)$ from seen sequence $\gD_t$ at arbitrary step $t$ and perform predictions on any observation $\rvx^\text{test}$ (following seen data distribution) for the corresponding $y^\text{test}$. From this perspective, the whole learning and inference process in CL can be seen as a sequence prediction (SP) problem, \ie, predicting $y_\text{test}$ of a query $\rvx_\text{test}$ conditioning on the seen data sequence and the testing input, \ie,  $(\gD_t^\text{train}, \rvx^\text{test})\equiv(\rvx_1^\text{train}, y_1^\text{train}, ..., \rvx_t^\text{train}, y_t^\text{train}, \rvx^\text{test})$ \citep{lee2023recasting,bornschein2024transformers}. 
+In conventional CL, the model parameter $\phi_t$ is trained to maintain the states on the sequence, \ie, knowledge in the historical data, in a way of $\phi_{t+1}=\texttt{optim-step}(\phi_t, \rvx_t, y_t)$. 
+This connection between sequence prediction and CL training process motivates us to investigate meta-learning a \emph{continual learner} as a sequence prediction model, for computation-and-data-efficient CL. Through meta-continual learning (MCL) framework \citep{lee2023recasting,son2023meta}, a continual learner $f_{\theta}()$ parameterized by $\theta$ is trained via sequence prediction on multiple CL episodes. A meta-learned $f_{\theta}()$ can take a given sequence $(\gD_t, \rvx_{t+1})$ as input and predict the label $y_{t+1}=f_\theta( (\gD_t, \rvx_{t+1}) )$, which is equivalent to a predictive model conditioning on the seen data stream $P_\theta(y|\rvx, \gD_t)$. 
+The data stream can also be seen as a \emph{context} of the tasks for performing prediction for a new query. 
+
+\par
+Transformers \citep{vaswani2017attention,touvron2023llama} have shown strong sequence modeling capabilities and next-token prediction performance in language modeling (LM), relying on self-attention across per-step tokens and emergent in-context learning (ICL) ability \citep{brown2020language, garg2022can}. 
+It is thus straightforward to meta-learn a Transformer as the SP-based continual learner \citep{lee2023recasting,son2023meta}. 
+Given a data stream in CL, a meta-learned Transformer generates a new key-value pair at each step and makes the prediction for each query based on attention over the key-value pairs retained from all preceding training samples. 
+Benefiting from the retrieval-based modeling, Transformers can perform effectively in continual learning (CL) \citep{lee2023recasting,bornschein2024transformers}. However, they require maintaining key-value pairs for all seen training samples in a \emph{key-value cache}, allowing the model to access \emph{all} seen samples during inference. It contradicts the principles and intended purpose of continual learning. 
+Although the key-value cache can be viewed as the hidden state of a recurrent neural network (RNN) \citep{katharopoulos2020transformers,lee2023recasting}, analogous to the parameters of a learner, its size grows linearly with the number of all seen tokens and suffers from increasing memory and computational demands over time. 
+Despite their advanced sequence modeling capabilities as in \citep{lee2023recasting}, Transformers may not be an ideal choice for continual learning due to misalignment with the objectives of CL and efficiency concerns. 
+A series of attention-free models achieve efficiency by approximating the softmax attention with kernel methods and linear operations, leading to \emph{constant} hidden state sizes and \emph{linear} computation complexity, such as Linear Transformer \citep{katharopoulos2020transformers} and Performer \citep{choromanski2020rethinking}. 
+Although these efficient Transformers align better with the purpose of CL, it is seen that they cannot perform well in MCL \citep{lee2023recasting}, due to limitations in approximation and insufficient expressive power~\citep{katharopoulos2020transformers, choromanski2020rethinking, tay2020efficient}.
+
+\par
+Recent advancements of the state space models (SSMs) on sequence modeling lead to a series of attention-free models that are efficient in processing long sequences with nearly linear computation \citep{gu2021efficiently,gu2021combining}. 
+By integrating time-varying modeling into the SSM as a selective SSM, Mamba \citep{gu2023mamba,dao2024transformers} can achieve near state-of-the-art performances on sequence modeling tasks (\eg, LM tasks \citep{gao2020pile}). 
+Given its exceptional performance as an attention-free model with a constant hidden state size, which ideally aligns with the requirements of MCL, rather than relying on Transformers \citep{lee2023recasting}, we pose a concrete question: \emph{Can the attention-free model Mamba perform well in MCL?}
+In this paper, we investigate this question by formulating the selective SSM and Mamba to handle MCL, 
+referred to as \textbf{MambaCL}. We identify that it is not trivial to train the sequence prediction models, including Mamba, for MCL, due to difficulty in convergence. 
+To address the issue, we introduce a selectivity regularizer relying on the connection across SSM/Mamba and Linear Transformers and {Transformers}, which guides the behaviour of the generated time-variant parameters of the selective SSM during training. Relying on the specifically designed regularization and customized designs, we achieve an effective MambaCL model for MCL. 
+{Beyond the scope of the existing work \citep{lee2023recasting} focusing on basic MCL formulation and setting, we expand the formulation and studies to more realistic scenarios and try to answer -- \emph{how can different models (including Transformers and Mamba) perform in different MCL tasks.}} Our experiments and analyses show that Mamba can perform well on most of the MCL scenarios. Mamba performs significantly better than other attention-free methods, \eg, Linear Transformers; Mamba can match or outperform the performances of Transformers with fewer parameters and computations. Specifically, on some challenging with more global structures  across the sequences (\eg, fine-grained data) and many challenging scenarios (\eg, domain shifts and long sequences), Mamba can perform more reliably and effectively than Transformers, 
+demonstrating better generalization and robustness. 
+Additionally, we analyzed the influence of the model design and conducted preliminary studies to explore the potential of model variants of Mamba, \eg, Mamba mixture-of-experts (MoE), in MCL. 
+
+
+\section{Related Work}
+
+\textbf{Continual learning} focuses on mitigating catastrophic forgetting, a significant challenge in model training across sequential tasks~\citep{de2021continual,wang2023comprehensive}. 
+The predominant approaches to continual learning are categorized into three main types: replay-based, regularization-based, and architecture-based methods. 
+Replay-based methods, such as maintaining a memory buffer for old task data, effectively prevent forgetting but are constrained by buffer size and potential privacy issues~\citep{rebuffi2017icarl,lopez2017gradient,chaudhry2019tiny,buzzega2020dark}. 
+Alternatively, generative models can approximate previous data distributions to produce pseudo-samples~\citep{shin2017continual,rostami2019complementary,riemer2019scalable}. 
+Regularization-based strategies~\citep{kirkpatrick2017overcoming,zenke2017continual,nguyen2017variational,li2017learning,aljundi2018memory,zhang2020class} mitigate forgetting by penalizing changes to critical parameters of previous tasks and employing knowledge distillation to retain earlier knowledge. 
+Lastly, architecture-based methods~\citep{yoon2017lifelong,serra2018overcoming,li2019learn,yan2021dynamically,ye2023self} allocate specific subsets of parameters to individual tasks, utilizing techniques like task masking or dynamic architecture adjustment to minimize task interference.
+
+\textbf{Meta-learning} is a learning paradigm where models improve their ability to adapt to new tasks by leveraging limited data and prior experience. 
+The bi-level optimization framework of meta-learning is inherently suited for continual learning, as it focuses on balancing the fit for current tasks while maintaining generalization across all previously encountered tasks~\citep{riemer2018learning,beaulieu2020learning,gupta2020look,wu2024meta}. 
+\textbf{Meta-continual learning} (MCL) deviates from traditional continual learning settings by incorporating multiple continual learning episodes, structured into meta-training and meta-testing sets~\citep{son2023meta}.
+\cite{lee2023recasting} conceptualizes MCL 
+as a sequence modeling problem, aligning the continual learning objectives with autoregressive models typical in language modeling. OML~\citep{javed2019meta} employs a dual-architecture approach, updating a prediction network while keeping the encoder static during training, then optimizing both components in meta-testing for stability. 
+{MetaICL~\citep{min2022metaicl} introduces a meta-training framework for natural language in-context learning. MetaICL sharing a common mathematical formulation with MCL, while the underlying functions to be fitted are distinct. Compared to text sequences, the problems we address are inherently more complex, requiring the learning of more intricate functions and making the learning process more challenging.}
+
+\textbf{Transformer} architecture is esteemed for its superior sequence modeling capabilities, largely attributed to its attention mechanism~\citep{vaswani2017attention}. Decoder-only models like GPT~\citep{brown2020language} and Llama~\citep{touvron2023llama}, which process inputs causally, have significantly propelled the success of modern deep learning. Although Transformers employing softmax-based attention benefit from efficient parallel training, they encounter challenges due to their quadratic computational complexity relative to sequence length. This has prompted a shift towards more RNN-like models capable of linear-time sequence modeling. As a viable alternative, linear attention substitutes the traditional exponential similarity function with a simple dot product across transformed key/query vectors, gaining traction through recent advancements~\citep{katharopoulos2020transformers,choromanski2020rethinking,tay2020efficient}.
+
+\textbf{State Space Models} (SSMs), inspired by traditional state-space models~\citep{kalman1960new}, have recently emerged as a promising architecture for sequence modeling~\citep{gu2021efficiently,gu2021combining}. Mamba incorporates time-varying parameters into the SSM framework through a selective architecture and enhances training and inference efficiency with a hardware-aware algorithm~\citep{gu2023mamba,dao2024transformers}. It is widely applied in fields such as computer vision and natural language processing~\citep{zhu2024vision, zhang2024motion, han2024demystify, lieber2024jamba}. 
+
+
+
+\section{Problem Formulation and Methodology}
+
+
+In \textbf{Continual Learning} (CL), given a non-stationary data stream  $\gD_T^\text{train} = ( (\rvx_1, y_1), \dots, (\rvx_t, y_t), \dots, (\rvx_T, y_T))$ as training data, where $\rvx_t\in \gX_t$ and $y_t\in \gY_t$. A predictive model $g_{\phi_t}(): \gX \rightarrow \gY$ is trained on the stream (at step $t$) as $P_{\phi_t}(y|\rvx)$ for a potential testing set $\gD_T^\text{test}=\{ (\rvx_n, y_n) \}_{n=1}^N$, where $\rvx_t\in \gX_t$ and $y_t\in \gY_t$, with the same distribution as the training set. 
+A conventional continual learner is manually crafted for continual updating/optimizing the model parameter $\phi_t$. 
+The data stream $\gD_T$ usually consists of the data from different tasks or distributions, which is usually piecewise stationary within an interval of a task. In a general online CL setting, each sample point can only be seen once; if the samples belonging to one task can be held and accessed as a batch, it is an offline CL. We mainly consider the online CL setting. 
+
+For achieving efficient CL, \textbf{Meta-Continual Learning} (MCL) \citep{lee2023recasting,son2023meta} is formulated to meta-learn a parameterized continual learner that can efficiently learn/update a predictive model (in $\gX \rightarrow \gY$) from samples in a data stream (in $\gX\times \gY$).  
+Considering that the (continually) learned model from a sequence $\gD_t^{\text{train}}$ is deployed for prediction given a testing sample input $\rvx_{\text{test}}$, \ie, $P_{\theta}(y_\text{test}|\rvx_\text{test}, \gD_t^\text{train})$. Thus MCL is equivalent to learning a functional model of the predictive model functions. And MCL can be treated as the task of learning a \textbf{sequence prediction} model $f_\theta():(\gX\times \gY)\times \gX \rightarrow \gY$ parameterized by $\theta$. $f_\theta()$ can continually take streaming data $\gD_t^\text{train}$ as input and make predictions for any testing samples in a $\gD^\text{test}$ conditioning on $\gD_t^\text{train}$ via $\hat{y}_\text{test} = f_\theta(\rvx_\text{test}, \gD_t^\text{train} )$. The learner updates internal hidden states to reflect the continually taken data samples corresponding to a CL process. By giving multiple episodes with $(\gD^\text{train}, \gD^\text{test})$, the parameter $\theta$ of the learner can be learned in the meta-learning/updating process for optimizing the performance on all $\gD^\text{test}$. Note that the targets $y$ in different episodes are independent, which are only symbolic indicators without general semantic meaning across episodes.
+In this work, we focus on MCL based on a parameterized sequence prediction model for general purpose, 
+despite the existence of other types of meta-learning scheme~\citep{finn2017model,javed2019meta}. 
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{fig/Mamba.pdf}
+    \caption{The overall framework of our proposed methods. We meta-train a Mamba Learner $f_{\theta}()$ to perform meta-continual learning (MCL) by processing an online data stream containing paired $(\rvx, y)$ examples. Meta-learning of this continual learner is conducted across multiple CL episodes. The model produces predictions by relying on the retained hidden state. Here, we demonstrate how the Mamba learner recurrently processes input data at steps $0$, $2$, and $t-1$, respectively.}
+    \label{fig:mambacl}
+\end{figure}
+\subsection{Preliminaries: Transformers, Linear Transformers, and SSMs}
+\textbf{Transformers} produce next-token predictions in sequence relying on a self-attention mechanism \citep{vaswani2017attention}. Given a sequence of $N$ vectors in $M$-dimension denoted as $\rmZ\in \sR^{N\times M}$, the vanilla self-attention is formulate with a \emph{softmax attention} method:
+\begin{equation} \label{eq:softmax_atten}
+\rmQ\!=\rmZ\rmW_Q, ~\rmK\!=\rmZ\rmW_K, ~\rmV\!=\rmZ\rmW_V, ~~ \rvu_t=\sum_{j=1}^{N}\ \frac{\exp\left(\rmQ_t\rmK_j^\top/{\sqrt d}\right)}{\sum_{j=1}^{N}\ \exp\left(\rmQ_t\rmK_j^\top/{\sqrt d}\right)}\rmV_j,
+\end{equation}
+where $\rmW_Q \in \sR^{M\times C},~\rmW_K \in \sR^{M\times C},~\rmW_V \in \sR^{C\times C}$ are the projection weight matrices, $\rvu_t\in \sR^C$ denote the output embedding, and $C$ is the hidden dimension. $\rmQ_t$, $\rmK_j$, and $\rmV_j$ denote the indexed vectors in the corresponding matrices. The notation fonts are slightly abused to be consistent with the literatures. 
+Each input token generates a key-value pair, leading to a linearly increased key-value cache size. 
+Softmax attention measures the similarities between the query-key pairs, leading to $\gO(N^2)$ complexity. 
+\par
+\textbf{Linear Transformer} \citep{katharopoulos2020transformers} reduces the complexity relying a \emph{linear attention} method. By applying a feature representation function $\phi()$ corresponding to a kernel for $\rmQ$ and $\rmK$, the linear attention method replaces the softmax attention with a \emph{linear operation} as:
+\begin{equation} \label{eq:linear_atten}
+ \rvu_t=\sum_{j=1}^{N}\ \frac{\rmQ_t\rmK_j^{\top}}{\sum_{j=1}^{N}\!{\rmQ_t\rmK_j^{\top}}}\rmV_j=\frac{\rmQ_t\!\left(\sum_{j=1}^{N}\!{\rmK_j^{\top}\rmV_j}\right)}{\rmQ_t\!\left(\ \sum_{j=1}^{N}\!{\rmK_j^{\top}}\right)},
+\end{equation}
+
+where $\rmQ\!=\!\phi(\rmZ\rmW_Q),~\rmK\!=\!\phi(\rmZ\rmW_K),~\rmV\!\!=\rmZ\rmW_V$,
+$\phi(\cdot)$ is set as 
+$\phi(\rvx)=\mathrm{elu}(\rvx)+1$ in~\citep{katharopoulos2020transformers}. \textbf{Performer} employs $\phi(\rvx) = \exp\left(\rvx\rmW_{p}  - \| \rvx \|^2 / 2 \right)$, with $\rmW_p$ comprising orthogonal random vectors~\citep{choromanski2020rethinking}. Through rearranging $(\rmQ\rmK^{\top})\rmV$ as $\rmQ(\rmK^{\top}\rmV)$ according to associative property, the computational complexity is reduced to $\gO(N)$. 
+
+\par
+In practice, the attention operations in Eq.~(\ref{eq:softmax_atten}) and~(\ref{eq:linear_atten}) can be implemented in autoregressive models, where calculation of $\rvu_t$ can only see the proceeding tokens with $j\leq t$. Specifically, with the causal masking, the linear attention can be rewritten as:
+\begin{equation}
+    \rvu_t=\frac{\rmQ_t\left(\sum_{j=1}^{t}{\rmK_j^{\top}\rmV_j}\right)}{\rmQ_t\left(\ \sum_{j=1}^{t}{\rmK_j^{\top}}\right)}= \frac{\rmQ_t\rmS_t}{\rmQ_t\rmG_t}, ~~~\rmS_t=\rmS_{t-1}+{\rmK_t^{\top}\rmV_t}, ~\rmG_t=\rmG_{t-1}+{\rmK_t^{\top}},
+    \label{eq:linear_att_causal}
+\end{equation}
+where $\rmS_t=\sum_{j=1}^t{\rmK_j^{\top}\rmV_j}$ and $\rmG_t=\sum_{j=1}^t{\rmK_j^{\top}}$. This enables recurrent computation of causal linear attention by cumulatively updating $\rmS_t$ and $\rmG_t$, which serve as internal hidden states. 
+
+\par
+In the autoregressive process with causal masking, the softmax attention operation Eq.~(\ref{eq:softmax_atten}) in Transformer can be seen as a recurrent process based on an accumulated set of key-value pairs $\{(\rmK_j, \rmV_j)\}_{j=1}^t$ as a hidden state \citep{katharopoulos2020transformers}. 
+\par
+\textbf{Structured state space sequence models (SSM or S4)} \citep{gu2023mamba,gu2021efficiently,dao2024transformers} are sequence models describing a system that maps input $z_t\in\sR$ to output $u_t\in\sR$ through a hidden state $\rvh_t\in \sR^{C\times 1}$ in a \emph{discrete} sequence applied with neural networks. Specifically, SSMs can be formulated with parameters $\rmA\in \sR^{C\times C}$, $\rmB\in\sR^{C\times 1}$, $\rmC\in\sR^{1\times C}$, and $D\in \sR$, as
+\begin{equation}
+\rvh_{t} = \rmA\rvh_{t-1} + \rmB z_t,~~ u_t=\rmC\rvh_t+ D z_t.
+\label{eq:ssm_disc}
+\end{equation}
+We directly formulate a discrete SSM in Eq.~(\ref{eq:ssm_disc}), where the $\rmA$ and $\rmB$ are transformed from a \emph{continuous} version $\rmA'$ and $\rmB'$ relying on a timescale parameter $\Delta\in \sR$, via $\rmA=\exp(\Delta\rmA')$ and $\rmB=\rmA^{-1}({\rmA} -\rmI)\cdot \Delta\rmB'$. $\rmA$ and $\rmB$ perform the selection or gating in hidden state updating. 
+\begin{wrapfigure}{r}{0.3\linewidth}
+    \centering
+    \includegraphics[width=0.95\linewidth]{fig/MambaBlock}
+    \caption{Illustration of the designs of Mamba block.}
+    \label{fig:MambaBlock}
+\end{wrapfigure}
+
+\subsection{SSM and Mamba for Meta-Continual Learning}
+
+\par
+\textbf{Selective SSM \& Mamba in MCL.} The dynamics of the basic SSM or S4 are time-invariant, restricting the model's ability to handle complex sequences. 
+Mamba \citep{gu2023mamba} incorporates a selective SSM into the model by generating the input-dependent SSM parameters to reflect the input/step-sensitive selection process. The selective SSM can be written as: 
+\begin{equation}
+\rvh_{t} = \rmA_t\rvh_{t-1} + \rmB_t z_t,~~ u_t=\rmC_t\rvh_t+ D z_t,
+\label{eq:slec_ssm}
+\end{equation}
+where $\rmA_t$, $\rmB_t$, and $\rmC_t$ are produced in Mamba relying on the input token at step $t$. 
+Different from Transformers maintaining key-value pairs for all input tokens (leading to linearly increasing state size), Mamba compresses the context information in a fixed/constant-size hidden state, matching the efficiency requirements and original objective of CL. 
+
+\par
+In our MCL tasks and other practical scenarios, we need Mamba to handle the input sequence $\rmZ\in \sR^{N\times M}$ with each token as a vector $\rvz_t\in\sR^M$. Mamba applies the selective SSM to each dimension/channel independently:
+\begin{equation}
+\rmH_{t} = [\rmA_{t,i}\rvh_{t-1,i} + \rmB_{t,i} \rvz_{t,i}]_{i=1}^M,~~ \rvu_t=\rmC_t\rmH_t+ \rmD \odot \rvz_t,
+\label{eq:slec_ssm_vec}
+\end{equation}
+where $\rmH_t\in \sR^{C\times M}$ is a concatenation of the hidden state corresponding to all $M$ dimensions of the input embedding, $\rmC_t\in \sR^{1\times C}$, $\rmD\in \sR^{1\times M}$, and $\rvu_t\in \sR^{1\times M}$. 
+As shown in Fig.~\ref{fig:MambaBlock}, the Mamba block used in our work applies a 1-D convolution on the input tokens and then projects the representations to obtain the input-dependent SSM parameters \citep{dao2024transformers}. Multiple Mamba blocks are stacked homogeneously. 
+Relying on the selective mechanism \citep{gu2023mamba}, Mamba's ability to handle complex MCL tasks can be stronger than other attention-free models and competitive or better than Transformers with a key-value cache. 
+
+\subsubsection{MCL with Mamba as a Continual Learner} 
+We will train a Mamba model $f_\theta()$ to perform  CL by processing an online data stream containing paired $(\rvx, y)$; the model can produce predictions relying on the retained hidden state, for all the seen tasks. 
+Meta-learning of such continual learner will be conducted on multiple CL episodes. 
+Each CL episode contains a training data stream $\gD^\text{train}$ and a testing set $\gD^\text{test}$ from the same task distribution, denoted as $P_{(\gX, \gY)}$ with $(\gD^\text{train}, \gD^\text{test})\sim P_{(\gX, \gY)}$.  
+For example, in ICL, all classes used for testing should have been seen in the preceding classes in the data stream.
+The objective of MambaCL is to meta-learn the parameter of Mamba model, \ie, $\theta$, to perform prediction $\hat{y}^\text{test}=f_\theta( (\gD^\text{train}, \rvx^\text{test}) )$ for any $(\rvx^\text{test}_i, \rvy^\text{test}_i )\in \gD^\text{test}$. 
+The CL task can be treated as next token prediction problem in sequence: 
+$(\rvx^\text{train}_{1}, \rvy^\text{train}_{1}, ..., \rvx^\text{train}_{T}, \rvy^\text{train}_{T}, \rvx^\text{test}_{k})\rightarrow y^\text{test}_{k} $. The meta-learning of a Mamba continual learner can be performed by optimizing the sequence prediction task on a series of sampled CL episodes:
+\begin{equation}
+    \min_\theta \E_{ (\gD^\text{train}, \gD^\text{test})\sim P_{(\gX, \gY)} } \sum\nolimits_{ (\rvx^\text{test}, y^\text{test})\in \gD^\text{test} } \ell( f_\theta ( (\gD^\text{train},\rvx^\text{test}) )  , y^\text{test} ),
+    \label{eq:metacl_obj}
+\end{equation}
+where $\ell(\cdot, \cdot)$ denotes the proper loss function for different tasks, \eg, classification or regression. 
+
+\par
+On the data stream, the meta-learned Mamba $f_\theta()$ recognizes the association relationship between $\rvx$ and $y$ through the sequence, and then recurrently updates the hidden state $\rmH_t$, which can used for prediction, as shown in Fig.~\ref{fig:mambacl}. This efficient online CL process selects and compresses the knowledge in the data stream in a time-variant and content-aware selective manner. To further validate the extension ability of Mamba in MCL, we also explore the potential of incorporating mixture-of-expert (MoE) architecture into Mamba model \citep{fedus2022switch,pioro2024moe} for learning and mixing multiple learners.
+
+\textbf{Target token embeddings.} 
+The value of the target $y$ is essentially a symbol with consistent indication meaning for $\rvx$ within each episode, 
+which does not take any global meaning across the episode. The model is thus trained to handle arbitrary CL episodes with the ability to generalize to different domains. Instead of pre-defining a small and fixed feasible set of candidate targets \eg, classes, and a restricted prediction head, we conduct token embeddings for targets based on a universal and large vocabulary \citep{lee2023recasting}, inspired by the tokenization in LMs \citep{sennrich2015neural,devlin2019bert}. 
+For each episode, a subset of unique codes is randomly picked from the vocabulary to indicate different classes; in inference, the sequence model produces the probability of the next step for all possible tokens in the vocabulary. 
+Instead of conducting experiments of meta-training and meta-testing with the same number of classes \citep{lee2023recasting}, we conduct generalization analyses. 
+
+\subsubsection{Regularizing Selectivity of Mamba for Meta-Training}
+\label{sec:regularization}
+It is non-trivial to meta-learn the continual learner for associating the input and target by seeing a data stream, for both Transformers and attention-free models. The meta-training can be slow to converge or hard to find an optimal solution. 
+We thus consider giving additional guidance in meta-training, by enhancing the association between the query tokens (\ie, testing input) with correlated preceding tokens. 
+During training, for an input $\rvx$ (corresponding to a pair $(\rvx,y)$) in the stream at the step $2t+1$ after $2t$ tokens of $t$ samples, its association relationship with preceding tokens can be represented as $\rvp_{2t+1}=[\mathbbm{1}_{y_{2t+1}}(y_1), \mathbbm{1}_{y_{2t+1}}(y_1), ..., \mathbbm{1}_{y_{2t+1}}(y_t), \mathbbm{1}_{y_{2t+1}}(y_t)]$ with $\rvp\in \{0,1\}^{2t}$, where $\mathbbm{1}_y(y')$ is an indicator function with  $\mathbbm{1}_y(y')=1, \text{if}~y=y', ~\text{and}~ \mathbbm{1}_y(y')=0, \text{if}~y\neq y'$. We hope the meta-learned learner can also identify and use this pattern in CL (\ie, meta-testing). 
+
+\par
+Transformers maintain the key-value pairs for all samples as the state. For prediction at a step, attention is applied to all the stored keys through a query, retrieving the learned information. As shown in Eq.~(\ref{eq:softmax_atten}), for the token at step $2t+1$, the attention weights/patterns to previous-step tokens can be denoted as $\rvq_{2t+1}^{\text{Trans}} = [\rmQ_{2t+1}\rmK_j^\top]_{j=1}^{2t}\in \sR^{2t}$. Note that we omit the normalization terms in attention weights to simplify the presentation. The meta-learning guidance can be applied by encouraging the similarity between $\rvq_{2t+1}^{\text{Trans}}$ and $\rvp_{2t+1}$. 
+
+\par
+Mamba and other attention-free methods (\eg, Linear Transformer) compress knowledge in a hidden state at each step, as shown in Eq.~(\ref{eq:linear_att_causal}) and~(\ref{eq:slec_ssm}).
+Specifically, Mamba applies an input-dependent selection and gating at each step. 
+Although there are no explicit attention weights produced in Mamba, we formulate the regularization for the selectivity of Mamba by bridging the selective SSM (in Eq.~(\ref{eq:slec_ssm}) and~(\ref{eq:slec_ssm_vec})) with linear attention (in Eq.~(\ref{eq:linear_att_causal})) and the softmax attention (in Eq.~(\ref{eq:softmax_atten})). As shown in Eq.~(\ref{eq:linear_att_causal}), Linear Transformer updates the state $\rmS$ (and the normalization term $\rmG$) using kernel-based $\rmK$ and $\rmV$, and performs prediction based on $\rmQ$. 
+Considering that the $\rmK$, $\rmV$, and $\rmQ$ in linear attention share the same meaning as in the softmax attention, we still can obtain $\rvq_{2t+1}^{\text{LNTrans}} = [\rmQ_{2t+1}\rmK_j^\top]_{j=1}^{2t}$ by storing the $\rmK_j$ of intermediate tokens only during training for regularization. By examining the duality relationship between the SSM in Eq.~(\ref{eq:slec_ssm}) and the formulation of Linear Transformer in Eq.~(\ref{eq:linear_att_causal})~\citep{dao2024transformers}, we can identify the connections between the selective parameters, \ie, $\rmC_t$ and $\rmB_t$, in SSM and query-key embeddings, \ie,  $\rmQ_t$ and $\rmK_t$, in linear attention. Relying on the linear attention as the bridge, we can obtain the associative indicators of Mamba as $\rvq_{2t+1}^{\text{Mamba}} = [\rmC_{2t+1}\rmB_j^\top]_{j=1}^{2t}$. To regularize the models' attention or selection behavior in meta-training, for a query sample $(\rvx,y)$ in a sequence, we apply a selectivity regularization: 
+\begin{equation}
+    \ell_\text{slct}( (\rvx, y) ) = \text{KL}(\rvp_{\text{idx}((\rvx,y) )}, \rvq^*_{\text{idx}((\rvx,y) )} ),
+\label{eq:atten_loss}
+\end{equation}
+where $\text{idx}()$ indicates the step of the token $\rvx$, $*$ indicates the arbitrary model, and KL divergence is used to minimize the difference between model's association pattern and the ground truth. Note that this regularization and maintained intermediate components are not necessary in inference. 
+We apply this regularization to MambaCL and other sequence prediction models (weighted by a scalar $\lambda$) together with the MCL objective in Eq.~(\ref{eq:metacl_obj}), which improves the meta-training stability and convergence for all models. 
+
+
+
+\section{Experiments and Analyses}
+
+
+
+
+\textbf{Experimental setup.} To evaluate the performance of various architectures across multiple types of tasks, we conducted a series of experiments.
+Firstly, we divided one dataset into multiple tasks, typically with each task representing a distinct class within the dataset. 
+We distributed these tasks into two non-overlapping sets, \ie, meta-training and meta-testing. The construction of CL episodes for both meta-groups follows the same procedure: for each CL episode, we randomly select $K$ distinct tasks. $K$ is set as 20 by default. We also investigated scenarios with different of $K$ values. 
+By default, each task in both the training and testing sequences includes five samples (5-shot). Additionally, involving fewer and more shots were also explored to further assess adaptability and learning efficiency.
+
+\noindent \textbf{Datasets.}
+We conduct experiments across various datasets: \textbf{general image classification tasks} included Cifar-100~\citep{krizhevsky2009learning}, ImageNet-1K~\citep{russakovsky2015imagenet}, ImageNet-R~\citep{russakovsky2015imagenet}, MS-Celeb-1M (Celeb)~\citep{guo2016ms},CASIA Chinese handwriting (Casia)~\citep{liu2011casia}, and Omniglot~\citep{lake2015human}; \textbf{fine-grained recognition tasks} involved CUB-200~\citep{wah2011caltech}, Stanford Dogs~\citep{dataset2011novel}, Stanford Cars~\citep{krause20133d}, and FGVC-Aircraft (Aircraft)~\citep{maji2013fine}; the \textbf{large domain shift tasks} featured~\citep{peng2019moment}; and \textbf{regression tasks} consisted of sine wave reconstruction (sine), image rotation prediction (rotation), and image completion (completion).
+
+\noindent \textbf{Implementation details.}
+We conduct our main experiments on a single NVIDIA A100 GPU. 
+We repeated each experiment five times and reported the mean and standard deviation of these runs. Results are reported upon convergence on the meta-training set.
+{The batch size is set to 16, and the Adam optimizer is applied. We set the initial learning rate to $1\times10^{-4}$, with decays of $0.5$ every $10,000$ steps. For all models, we ensure a consistent setup to enable fair comparisons and make sure all models achieve satisfactory results, with additional details provided in Sec.~\ref{sec:additional_details}. Specifically, for experiments involving training from scratch, we adopt the settings from~\citep{lee2023recasting} to maintain fairness.} 
+For the networks built on pre-trained models, we use the OpenAI/CLIP-ViT-B16~\citep{radford2021learning,ilharco2021openclip} as our image encoder, with its parameters frozen during training and an additional trainable linear projector. 
+
+
+\subsection{{Experimental Results and Analyses}}
+In our experiments, we assess several models including OML~\citep{javed2019meta}, Vanilla Transformer~\citep{vaswani2017attention}, Linear Transformer~\citep{katharopoulos2020transformers}, Performer~\citep{choromanski2020rethinking}, and {our MambaCL}. OML serves as a conventional SGD-based meta-continual learning baseline, featuring a two-layer MLP prediction network on top of a meta-learned encoder. 
+{Transformers exhibit advanced sequence modeling capabilities, but they may not be optimal for (CL) due to computational inefficiencies and the broad objectives associated with CL. 
+To enhance efficiency, Linear Transformer and Performer utilize kernel methods and linear operations to approximate softmax attention, which maintain a constant hidden state size and exhibit linear computational complexity. }
+All transformer models share a similar structure, each with 4 layers and 512 hidden dimensions. 
+Mamba is an attention-free model optimized for efficiently processing long sequences with near-linear computational demands. 
+Our Mamba Learner also utilizes 4 layers and 512 hidden dimensions, facilitating comparison with the transformer models, yet it features significantly fewer parameters.
+\begin{table}[htb]
+\caption{Classification accuracy (\%) across 20-task 5-shot MCL, training from the scratch on general image classification tasks. The \highred{best} and \highblue{second best} performances are indicated in \highred{red} and \highblue{blue}, respectively.}
+\label{tab:scratch}
+\begin{center}
+\small
+\resizebox{0.9\linewidth}{!}
+{
+\begin{tabular}{l@{\hspace{2mm}}r@{\hspace{2mm}}r@{\hspace{2mm}}r@{\hspace{2mm}}r@{\hspace{2mm}}r@{\hspace{2mm}}r@{\hspace{2mm}}r@{\hspace{2mm}}r}
+\toprule
+\multirow{3}{*}{Method} &\multicolumn{2}{c}{Cifar-100} &\multicolumn{2}{c}{Omniglot} &\multicolumn{2}{c}{Casia} &\multicolumn{2}{c}{Celeb}\\
+&Meta- &Meta- &Meta- &Meta- &Meta- &Meta- &Meta- &Meta- \\
+&Train &Test &Train &Test &Train &Test &Train &Test \\
+\midrule
+OML   &$99.4^{\pm0.1}$ &$10.1^{\pm0.4}$ &$99.9^{\pm0.0}$ &$75.2^{\pm2.2}$ &$97.2^{\pm0.1}$ &$96.8^{\pm0.1}$ &$58.2^{\pm0.3}$ &$57.5^{\pm0.2}$\\
+Transformer&$100.0^{\pm0.0}$ &\highblue{$17.2^{\pm0.8}$} &$100.0^{\pm0.0}$ &\highblue{$86.3^{\pm0.6}$} &$99.7^{\pm0.0}$ &\highred{$99.6^{\pm0.0}$} &$70.9^{\pm0.2}$ &\highred{$70.0^{\pm0.2}$}\\
+Linear TF  &$99.9^{\pm0.1}$  &$16.6^{\pm0.5}$ &$100.0^{\pm0.0}$ &$64.0^{\pm1.4}$ &$99.6^{\pm0.0}$ &$99.3^{\pm0.0}$ &$68.9^{\pm0.3}$ &${67.6}^{\pm0.3}$\\
+Performer  &$100.0^{\pm0.0}$ &$17.1^{\pm0.3}$ &$99.9^{\pm0.1}$  &$62.9^{\pm4.6}$ &$99.5^{\pm0.0}$ &$99.3^{\pm0.0}$ &$67.5^{\pm0.5}$ &$66.3^{\pm0.2}$\\
+Mamba &$99.9^{\pm0.1}$ &\highred{$18.3^{\pm0.4}$} &$100.0^{\pm0.0}$ &\highred{$87.7^{\pm0.5}$} &$99.8^{\pm0.1}$ &\highblue{$99.5^{\pm0.1}$} &$69.4^{\pm0.2}$ &\highblue{$68.1^{\pm0.1}$}\\
+\bottomrule
+\end{tabular}
+}
+\end{center}
+\end{table}
+\begin{table}[ht]
+\caption{Classification accuracy (\%) across 20-task 5-shot MCL, training from the pre-trained models on
+general image classification tasks.}
+\label{tab:clip}
+\begin{center}
+\small
+\resizebox{0.87\linewidth}{!}
+{
+\begin{tabular}{lcccccc}
+\toprule
+Method &Cifar-100 &ImageNet-1K &ImageNet-R &Celeb  &Casia &Omniglot\\
+
+\midrule
+OML        &\highblue{$64.4^{\pm0.4}$} &$90.5^{\pm0.3}$ &\highblue{$67.5^{\pm0.3}$} &$72.8^{\pm0.1}$ &$81.5^{\pm0.5}$ &$90.4^{\pm0.2}$ \\
+Transformer&$62.7^{\pm0.7}$ &\highblue{$93.5^{\pm0.1}$} &$63.6^{\pm0.2}$ &\highred{$78.4^{\pm0.1}$} &\highred{$93.8^{\pm0.2}$} &\highblue{$94.4^{\pm0.2}$}\\
+Linear TF  &$54.3^{\pm0.7}$ &$89.1^{\pm0.2}$ &$55.7^{\pm0.3}$ &$76.5^{\pm0.2}$ &$90.9^{\pm0.4}$ &$86.5^{\pm0.5}$ \\
+Performer  &$53.4^{\pm0.3}$ &$90.8^{\pm0.5}$ &$52.8^{\pm0.9}$ &$76.8^{\pm0.1}$ &$93.0^{\pm0.3}$ &$89.3^{\pm0.3}$ \\
+Mamba      &\highred{$67.1^{\pm0.4}$} &\highred{$93.6^{\pm0.2}$} &\highred{$69.7^{\pm0.4}$} &\highblue{$77.0^{\pm0.1}$} &\highblue{$93.1^{\pm0.2}$} &\highred{$95.9^{\pm0.2}$} \\
+\bottomrule
+\end{tabular}
+}
+\end{center}
+\end{table}
+
+\textbf{General image classification tasks.}
+Table~\ref{tab:scratch} and~\ref{tab:clip} present comparative performance analyses of different architectures on several general image classification tasks, initiating training from scratch and extracting image representation based on a pre-trained model, respectively.
+In Table~\ref{tab:scratch}, within the CIFAR-100 datasets, all methods suffer from substantial {meta-overfitting}, as evidenced by the large gap between meta-training and meta-testing scores.
+This may be attributed to the lower task (class) diversity. In Table~\ref{tab:clip}, the results for continual learners built on pre-trained models exhibit similar trends in CIFAR-100 and ImageNet-R. Furthermore, Mamba demonstrates superior performance compared to other methods in these scenarios, underscoring its robustness against overfitting.
+On larger datasets such as ImageNet-1K, Casia, and Celeb, Mamba performs on par with or surpasses transformers. Without losing generality, we use the pre-trained image representations for our experiments by default. 
+
+\begin{table}[ht]
+\caption{Classification accuracy (\%) across 20-task 5-shot MCL on fine-grained recognition tasks.}
+\label{tab:fine}
+\begin{center}
+\small
+\resizebox{0.55\linewidth}{!}
+{
+\begin{tabular}{lcccc}
+\toprule
+Method &CUB-200 & Dogs & Cars &Aircraft  \\
+\midrule
+OML        &$78.7^{\pm0.6}$ &$72.4^{\pm0.5}$ &$83.6^{\pm0.7}$ &$49.5^{\pm0.2}$\\
+Transformer&\highblue{$81.4^{\pm0.4}$} &\highblue{$77.5^{\pm0.6}$} &\highblue{$87.0^{\pm0.3}$} &\highblue{$53.9^{\pm0.7}$}\\
+Linear TF  &$69.7^{\pm0.7}$ &$69.7^{\pm0.7}$ &$76.6^{\pm0.8}$ &$49.0^{\pm0.7}$\\
+Performer  &$69.2^{\pm0.8}$ &$69.4^{\pm0.4}$ &$73.9^{\pm0.8}$ &$48.6^{\pm0.6}$\\
+Mamba      &\highred{$83.0^{\pm0.4}$} &\highred{$79.2^{\pm0.5}$} &\highred{$88.3^{\pm0.4}$} &\highred{$55.3^{\pm0.6}$}\\
+\bottomrule
+\end{tabular}
+}
+\end{center}
+\end{table}
+
+\textbf{Fine-grained recognition tasks.}
+Table~\ref{tab:fine} presents a performance comparison of different architectures on fine-grained recognition datasets. 
+ In fine-grained datasets, where only subtle differences exist between classes (\eg, the CUB-200 dataset, which contains 200 bird subcategories), models need capture global information across the entire training episode to distinguish these fine-grained differences.
+Mamba outperforms  other models across these datasets, potentially due to its robustness to capture subtle inter-class distinctions.
+\subsection{Generalization Analyses}
+\label{sec:generalization}
+We hope a meta-learned learner has the ability to be generalized to unseen scenarios. 
+We conduct generalization analyses for Transformer models and Mamba in scenarios involving generalization to longer untrained sequence lengths, larger domain shifts, and sensitivity to the noise inputs, for meta-testing. {Additionally, to analyze the behaviors of these models, we visualize the attention weights of Transformers and the associative weights of Mamba to demonstrate their attentions and selectivity patterns in Sec.}
+
+\begin{figure}[htb]
+  \centering
+  \begin{minipage}{0.28\textwidth}
+      \centering
+      \subcaption{\small Task}
+      \label{fig:generalization-task}
+      \includegraphics[width=0.9\linewidth]{fig/task.pdf}
+  \end{minipage}
+  \hspace{0.3cm}
+  \begin{minipage}{0.28\textwidth}
+      \centering
+      \subcaption{\small Shot}
+      \label{fig:generalization-shot}
+      \includegraphics[width=0.9\linewidth]{fig/shot.pdf}
+  \end{minipage}
+  \hspace{0.3cm}
+  \begin{minipage}{0.28\textwidth}
+      \centering
+      \subcaption{\small Noise}
+      \label{fig:generalization-noise}
+      \includegraphics[width=0.9\linewidth]{fig/noise.pdf}
+  \end{minipage}
+  \caption{Generalization Analysis on ImageNet-1K, meta-trained on 20-task 5-shot MCL: (a) {meta-testing on} varying number of tasks (5-shot); (b) {meta-testing on} varying number of shots (20-task); (c) {meta-testing on} varying inputs noise intensity level.
+  }
+  \label{fig:generalization}
+\end{figure}
+
+\textbf{Generalization to different stream length.} 
+To effectively address episodes of continual learning of indefinite length, the learning algorithm should demonstrate the capability to generalize beyond the sequence lengths observed during meta-training. 
+We conducted length generalization experiments on ImageNet-1K, training vanilla Transformers, linear Transformers, and Mamba on 20-task 5-shot MCL, each with a vocabulary of 200 tokens. The length of a continual learning episode is calculated as $2\times \text{tasks} \times \text{shots} + 1$. 
+
+\textit{Meta-testing on different numbers of tasks.} 
+Fig.~\ref{fig:generalization-task} shows the performance of the three models {meta-trained on a 20-task, 5-shot setup, evaluated during meta-testing} across varying numbers of tasks while keeping a constant shot number of 5. Both the Transformer and Linear Transformer suffer significant performance degradation when meta-testing at untrained episode lengths, even for simpler tasks such as the 10-task, 5-shot configuration. 
+Mamba's meta-testing performance on the 10-task setup is better relative to the meta-trained 20-task setup, and the performance degradation is relatively mild compared to transformers as the number of tasks gradually increases.
+
+\textit{Meta-testing on different number of shots.} 
+In Fig.~\ref{fig:generalization-shot}, we evaluate the performance of three models {meta-trained on a 20-task, 5-shot setup, evaluated during meta-testing} across varying numbers of shots while maintaining a constant task count of 20. Both the vanilla Transformer and linear Transformer exhibit significant performance degradation, likely due to overfitting the 20-task, 5-shot pattern. However, Mamba experiences only about a 10\% performance degradation when the meta-testing shot number reaches 50, which is ten times the meta-training episode length. Fig.~\ref{fig:generalization-task} and~\ref{fig:generalization-shot} demonstrate Mamba's robustness in length generalization.
+
+
+\textbf{Results and analyses on larger domain shift.}
+We explore a larger domain shift scenario using the DomainNet dataset (containing 6 different domains) to further evaluate model generalization to unseen input distributions, with one domain reserved for meta-testing and the remaining domains for meta-training, {which represents a more realistic setting}. The experimental results are presented in Table~\ref{tab:domain}.
+Overall, these models demonstrate the capability to handle large domain shift scenarios. Mamba performs on par with or surpasses Transformer models across various target domains, benefiting from the potentially better generalization ability from smaller-size model with less over-fitting possibility. Vanilla Transformers perform well when the targets are real images or paintings. Mamba excels particularly in the {Quickdraw domain, which exhibits larger differences compared to other domains.}
+This performance may be attributed to Mamba’s robustness in {processing inputs with larger deviations from the training distribution}.
+\begin{table}[ht]
+\caption{Classification accuracy (\%) across 20-task 5-shot MCL on DomainNet dataset. (\textit{inf,pnt,qdr,rel,skt→clp} denotes meta-testing on Clipart domain, and the remaining domains used for meta-training. \textit{clp: clipart, inf: infograph, pnt: painting, qdr: quickdraw, rel: real, skt: sketch.})}
+\label{tab:domain}
+\begin{center}
+\small
+{
+\begin{tabular}{lcccccc|c}
+\toprule
+\multirow{2}{*}{Method} & \multicolumn{1}{c}{\scriptsize\textit {inf,pnt,qdr,}} & \multicolumn{1}{c}{\scriptsize\textit{clp,pnt,qdr,}}& \multicolumn{1}{c}{\scriptsize\textit{clp,inf,qdr,}}& \multicolumn{1}{c}{\scriptsize\textit{clp,inf,pnt,}}& \multicolumn{1}{c}{\scriptsize\textit{clp,inf,pnt,}}& \multicolumn{1}{c|}{\scriptsize\textit{clp,inf,pnt,}}&\multirow{2}{*}{Avg}   \\
+&\scriptsize\textit{rel,skt→clp}
+&\scriptsize\textit{rel,skt→inf}
+&\scriptsize\textit{rel,skt→pnt}
+&\scriptsize\textit{rel,skt→qdr}  
+&\scriptsize\textit{qdr,skt→rel}
+&\scriptsize\textit{qdr,rel→skt}\\
+\midrule
+Transformer&\highred{$91.8^{\pm0.1}$} &\highblue{$69.4^{\pm0.1}$} &\highred{$82.6^{\pm0.2}$} &\highblue{$50.2^{\pm0.6}$} &\highred{$93.8^{\pm0.1}$} &\highblue{$85.9^{\pm0.3}$} &\highblue{$79.0^{\pm0.3}$} \\
+Linear TF  &$91.0^{\pm0.0}$ &$66.2^{\pm0.8}$ &$80.6^{\pm0.8}$ &$30.7^{\pm1.4}$ &$92.9^{\pm0.1}$ &$85.5^{\pm0.1}$ &$74.5^{\pm0.5}$ \\
+Performer  &$91.3^{\pm0.2}$ &$66.4^{\pm0.6}$ &$81.3^{\pm0.2}$ &$39.4^{\pm1.7}$ &$92.8^{\pm0.1}$ &$84.8^{\pm0.5}$ &$76.0^{\pm0.6}$ \\
+Mamba      &\highblue{$91.7^{\pm0.2}$} &\highred{$70.2^{\pm0.2}$} &\highblue{$81.8^{\pm0.2}$} &\highred{$55.6^{\pm0.8}$} &\highblue{$93.0^{\pm0.1}$} &\highred{$87.2^{\pm0.3}$} &\highred{$79.9^{\pm0.3}$} \\
+\bottomrule
+\end{tabular}
+}
+\end{center}
+\end{table}
+
+\begin{table}[t]
+  \centering
+  \caption{Classification accuracy (\%) and regression errors across 100-task 5-shot MCL. }
+  \label{tab:scratch100}
+  \small
+  \resizebox{0.82\linewidth}{!}
+{
+  \begin{tabular}{lccccc}
+    \toprule
+     Method & Casia & Celeb & Sine & Rotation & Completion\\
+    \midrule
+     OML & $93.2^{\pm0.9}$ & $45.5^{\pm0.2}$ & $0.0498^{\pm0.0004}$ & $0.524^{\pm0.087}$ & $0.1087^{\pm0.0001}$\\
+    Transformer & \highblue{$99.0^{\pm0.0}$} & \highred{${60.5}^{\pm0.1}$} & \highred{${0.0031}^{\pm0.0002}$} & \highblue{${0.031}^{\pm0.001}$ }& \highblue{${0.0989}^{\pm0.0001}$}\\
+    Linear TF & $97.7^{\pm0.1}$ & $54.7^{\pm0.1}$ & ${0.0139}^{\pm0.0003}$ & ${0.047}^{\pm0.002}$ & ${0.1084}^{\pm0.0001}$\\
+    Mamba  &\highred{$99.1^{\pm0.1}$} &\highblue{$59.9^{\pm0.1}$}& \highblue{$0.0054^{\pm0.0001}$} &  \highred{$0.025^{\pm0.001}$ } &  \highred{$0.0895^{\pm0.0001}$}\\
+    \bottomrule
+  \end{tabular}
+  }
+\end{table}
+
+\textbf{Sensitivity to the noisy inputs.}
+To evaluate the sensitivity of different models to noisy inputs, we conduct experiments on meta-trained 20-task, 5-shot MCL models {using the ImageNet-1K dataset}. {Within each meta-testing episode, we apply noise to the input embeddings $\rvx_i$ of \emph{five} randomly selected samples. We add the noise following Gaussian distributions characterized by a mean ($\mu$) of $0$ and a standard deviation ($\sigma$) that ranges from $0$ to $10$.}
+As depicted in Fig.~\ref{fig:generalization-noise}, the vanilla transformer and linear transformer suffer significant performance degradation. In contrast, Mamba demonstrates robust performance when processing inputs with high levels of noise.
+
+\subsection{Traning on Longer Episodes}
+We conducted experiments to meta-train the models on longer episodes across both classification and regression tasks. Table~\ref{tab:scratch100} demonstrates that Mamba continues to perform comparably to Transformer, and significantly outperforms SGD-based approaches (OML). 
+\subsection{Ablation Studies}
+
+\textbf{Hyper-parameter of selectivity regularization loss.}~We conducted an ablation study to assess the influence of training loss hyper-parameter on our Mamba model’s efficacy. Specifically, this study involved adjusting the $\lambda$ values within our selectivity regularization loss, experimenting with hyper-parameters set at $\{0.1, 0.2, 0.5, 1.0, 2.0\}$, as depicted in Fig.~\ref{fig:loss}. The results indicate that these variations have a minor impact on our Mamba model's performance. Consequently, we selected a $\lambda$ value of $0.5$ for our experiments.
+
+\textbf{SSM state size.}~In Fig.~\ref{fig:state}, we evaluate the impact of varying the SSM state size on the performance of our methods. We conducted experiments on ImageNet-1K and Cifar-100, training MambaCL with state sizes of 16, 32, 64, 128, and 256. The results show consistent performance improvement as state size increases. To balance performance and computational cost, we set the state size as 128.
+
+\begin{figure}[htb]
+    \centering
+    
+    \begin{minipage}[t]{0.27\textwidth}
+        \centering
+        \includegraphics[width=0.9\linewidth]{fig/loss.pdf}
+        \caption{Ablation of varying $\lambda$ in training loss.}
+        \label{fig:loss}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.278\textwidth}
+        \centering
+        \includegraphics[width=0.9\linewidth]{fig/state.pdf}
+        \caption{Ablation of varying SSM state size.}
+        \label{fig:state}    
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.35\textwidth}
+        \centering
+        \captionof{table}{Different Mamba architectures on 20-tasks 5-shot MCL.}
+        \label{tab:ab}
+        \resizebox{0.9\linewidth}{!}
+            {
+            \begin{tabular}{lcccc}
+                \toprule
+                Method &Cifar-100 &ImageNet-1K \\
+                \midrule
+                Transformer&{$62.7^{\pm0.7}$} &{$93.5^{\pm0.1}$}  \\
+                Linear TF  &$54.3^{\pm0.7}$ &$89.1^{\pm0.2}$  \\
+                \midrule
+                Mamba-1   &$59.7^{\pm0.5}$ &$90.1^{\pm0.3}$ \\
+                MambaFormer  &$62.4^{\pm0.6}$ &$92.7^{\pm0.1}$ \\
+                Mamba-2      &{$67.1^{\pm0.4}$} &{$93.6^{\pm0.2}$}    \\
+                Mamba+MoE   &{$68.9^{\pm0.2}$} &{$94.0^{\pm0.2}$}\\
+                \bottomrule
+            \end{tabular}
+            }
+        \end{minipage}
+\end{figure}
+\textbf{Different architectures.} In Table~\ref{tab:ab}, we present an ablation study comparing different Mamba architectures in our MambaCL, including Mamba-1, MambaFormer~\citep{park2024can}, and Mamba-2. MambaFormer is a hybrid model that integrates the vanilla attention mechanism of Mamba-1 and replaces the transformer's positional encoding with a Mamba block.
+The results in Table~\ref{tab:ab} demonstrate that MambaFormer also achieved performance comparable to that of the transformer. However, Mamba-2 performed better on Cifar-100 than the other variants.
+
+\begin{wraptable}{r}{0.3\linewidth}
+\caption{Computational cost on 20-task 5-shot MCL.}
+\label{tab:cost}
+\centering
+\resizebox{1\linewidth}{!}
+{
+\begin{tabular}{lcc}
+\toprule
+Methods &Params.${\downarrow}$ & Inf. Speed${\uparrow}$ \\
+\midrule
+TF&$9.2$M &$325$ep/s   \\
+Mamba      &$5.4$M &$858$ep/s   \\
+\bottomrule
+\end{tabular}
+}
+\end{wraptable}
+\noindent\textbf{Mamba+MoE.}
+In Table~\ref{tab:ab}, we present experiments where Mamba was enhanced with Mixture of Experts (MoE), incorporating twelve 2-layer MLP expert networks with a dense-MoE router following each Mamba Block, resulting in improved performance. Additionally, we include performance metrics for vanilla and linear transformers for reference.
+
+\textbf{Computational cost.}
+In Table~\ref{tab:cost}, we detail various aspects of computational cost using our implementation in PyTorch [27], executed on an NVIDIA 4090 GPU and an INTEL I9-14900k CPU. We specifically report the costs associated with meta-testing at a batch size of 1. Notably, Mamba, characterized by fewer parameters and increased processing speed, achieves performance that either matches or surpasses that of the vanilla transformer.
+
+
+
+\section{Conclusion}
+
+In this paper, we tried to answer a question -- Can attention-free Mamba perform well on MCL? We formulate the SSM and Mamba as a sequence prediction-based continual learner and meta-learn it on CL episodes. A selectivity regularization is introduced for meta-learning the models. Comprehensive experiments show that Mamba performs well across diverse MCL scenarios, significantly outperforming attention-free methods and matching or exceeding Transformers' performance with fewer parameters and computations. In challenging scenarios with global structures, domain shifts, and long sequences, Mamba demonstrates obvious reliability, generalization, and robustness. 
+
+\noindent\textbf{Limitations and future work.} This study can be extended to larger-scale datasets and offline CL settings. Beyond the current MCL framework, we aim to explore the online meta-continual learning paradigm to broaden the applicability of our approach to a wider range of scenarios.
+
+
+
+
+
+
+

@@ -1,0 +1,345 @@
+\title{DilateQuant: Accurate and Efficient Diffusion Quantization via Weight Dilation}
+
+\begin{abstract}
+Diffusion models have shown excellent performance on various image generation tasks, but the substantial computational costs and huge memory footprint hinder their low-latency applications in real-world scenarios.
+Quantization is a promising way to compress and accelerate models.
+Nevertheless, due to the wide range and time-varying activations in diffusion models, existing methods cannot maintain both accuracy and efficiency simultaneously for low-bit quantization.
+To tackle this issue, we propose DilateQuant, a novel quantization framework for diffusion models that offers comparable accuracy and high efficiency.
+Specifically, we keenly aware of numerous unsaturated in-channel weights, which can be cleverly exploited to reduce the range of activations without additional computation cost. Based on this insight, we propose Weight Dilation (WD) that maximally dilates the unsaturated in-channel weights to a constrained range through a mathematically equivalent scaling. 
+WD costlessly absorbs the activation quantization errors into weight quantization. The range of activations decreases, which makes activations quantization easy. The range of weights remains constant, which makes model easy to converge in training stage.
+Considering the temporal network leads to time-varying activations, we design a Temporal Parallel Quantizer (TPQ), which sets time-step quantization parameters and supports parallel quantization for different time steps, significantly improving the performance and reducing time cost.
+To further enhance performance while preserving efficiency, we introduce a Block-wise Knowledge Distillation (BKD) to align the quantized models with the full-precision models at a block level. 
+The simultaneous training of time-step quantization parameters and weights minimizes the time required, and the shorter backpropagation paths decreases the memory footprint of the quantization process.
+Extensive experiments demonstrate that DilateQuant significantly outperforms existing methods in terms of accuracy and efficiency.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Recently, diffusion models have shown excellent performance on image generation~\citep{li2022srdiff,zhang2023adding,zhang2023inversion}, but the substantial computational costs and huge memory footprint hinder their low-latency applications in real-world scenarios.
+Numerous methods~\citep{nichol2021improved,song2020denoising,lu2022dpm} have been proposed to find shorter sampling trajectories for the thousand iterations of the denoising process, effectively reducing latency.
+However, complex networks with a large number of parameters used in each denoising step are computational and memory intensive, which slow down inference and consume high memory footprint.
+For instance, the Stable-Diffusion~\citep{rombach2022high} with 16GB of running memory still takes over one second to perform one denoising step, even on the high-performance A6000.
+
+Model quantization is one of the most popular compression methods.
+By quantizing the weights and activations with low-bit integers, we can reduce memory requirements and accelerate computational operations. The effects become more noticeable as the bit-width decreases.
+For example, employing 8-bit models can achieve up to a 4$\times$ memory compression and 2.35$\times$ speedup compared to 32-bit full-precision models on a T4 GPU~\citep{kim2022integer}. Adopting 4-bit models can further deliver an additional 2$\times$ compression and 1.59$\times$ speedup compared to 8-bit models.
+Thus, quantization is a highly promising way to facilitate the low-latency applications of diffusion models on source-constrained hardware.
+
+\begin{wrapfigure}{r}{5.8cm}
+    \centering
+    \includegraphics[width=0.41\textwidth]{image/efficient.pdf}
+    \caption{An overview of the cost-vs-performance trade-off across various approaches. Data is collected from DDIM with 4-bit quantization on CIFAR-10.}
+    \label{fig:efficient}
+\end{wrapfigure}
+
+Typically, existing quantization techniques are implemented through two main approaches: Post-Training Quantization (PTQ) and Quantization-Aware Training (QAT).
+As shown in Figure~\ref{fig:efficient}, PTQ~\citep{liu2024enhanced} calibrates the quantization parameter with a small calibration dataset and does not rely on end-to-end retraining, making it data- and time-efficient.
+However, it brings severe performance degradation at low bit-width.
+In contrast, QAT~\citep{esser2019learned} can maintain performance at lower bit-width, but it requires retraining the whole model, which is time-consuming and resource-intensive.
+For instance, when applying both standard approaches to DDIM~\citep{song2020denoising} on CIFAR-10, QAT~\citep{esser2019learned} results in a 3.3$\times$ increase in GPU memory footprint (9.97 GB vs. 3.01 GB) and an 14.3$\times$ extension of quantization time (13.89 GPU-hours vs. 0.97 GPU-hours) compared to PTQ~\citep{liu2024enhanced}.
+Due to the huge gap in time cost and GPU consumption, PTQ is more preferred despite the fact that QAT outperforms PTQ.
+
+Unfortunately, while previous methods~\citep{xiao2023patch,li2023vit,xiao2023dcifpn,li2023repq} of quantization have achieved remarkable success in single-time networks, the wide range and time-varying activations caused by the unique temporal network of diffusion models make them fail.
+Specifically, since the diffusion models infer in pixel space or latent space, the absence of layer normalization results in a wide range of activations, complicating activation quantization.
+For example, in the same UNet network, the range of activations is almost 2.5$\times$ larger than that of the segmentation models~\citep{ronneberger2015u}, as shown in Figure~\ref{fig:distribution}(a).
+Equivalent scaling techniques address the wide range of activations by shifting the quantization difficulty from activations to weights. 
+Some methods~\citep{xiao2023smoothquant,shao2023omniquant,lin2024awq,zhang2023dual} utilizing equivalent scaling have shown success in large language models (LLMs) by tackling outliers in certain channels, but these methods are not appropriate for diffusion models, where outliers exist in all channels, as shown in Figure~\ref{fig:distribution}(b).
+Unconstrained scaling of all outlier channels significantly alters the weight range, making it difficult for model to converge in training stage.
+In addition, the temporal network induces a highly dynamic distribution of activations that varies across time steps, as shown in Figure~\ref{fig:distribution}(c), further diminishing the performance of quantization.
+Numerous PTQ methods~\citep{li2023q,liu2024enhanced} have been explored to enhance results based on the properties of diffusion models, none of them break through the 6-bit quantization for activations.
+And the QAT methods\citep{esser2019learned} retrain the whole model separately for each time step using the original datasets, which is not practical due to the significant time and resources.
+
+In this paper, we propose DilateQuant, a novel quantization framework that can achieve QAT-like performance with PTQ-like efficiency.
+Specifically, we propose a weight-aware equivalent scaling algorithm, called Weight Dilation (WD), which searches for unsaturated in-channel weights and dilates them to the boundary of the quantized range, using the max-min values of the out-channel weights as constraints.
+WD narrows the range of activations while keeping the weights range unchanged, making activation quantization easier and ensuring model convergence during the training stage. This approach effectively alleviates the wide range activations.
+To address the difficulty of quantization for time-varying activations, previous methods~\citep{he2023efficientdm,wang2024quest} set multiple activation quantizers for one layer and trains them individually using different time-step calibration sets, which is data- and time-inefficient. On the other hand, we design a Temporal Parallel Quantizer (TPQ), which sets time-step quantization parameters and supports parallel quantization for different time steps, significantly improving performance and training efficiency, as evidenced by a 160$\times $ reduction in calibration and a 2$\times $ reduction in training time compared to the SoTA method~\citep{he2023efficientdm} for DDIM on CIFAR-10.
+To further enhance performance while preserving efficiency, we introduce a Block-wise Knowledge Distillation (BKD) to avoids data- and time-consuming retraining of the whole model, distilling the full-precision model to its quantized counterpart at block level using a data-free approach.
+Additionally, it further minimizes the time and memory footprint required by training the time-step quantization parameters simultaneously and using the shorter backpropagation paths, respectively.
+
+The contributions of our works are summarized as follows.
+1) We formulate a novel quantization framework for diffusion models, DilateQuant, which offers comparable accuracy and high efficiency.
+2) The WD and TPQ address the wide range and time-varying activations for diffusion models. And the BKD efficiently enhances performance.
+3) Through extensive experiments, we demonstrate that DilateQuant outperforms existing methods across lower quantization settings (6-bit, 4-bit), various models (DDPM, LDM-4, LDM-8, Stable-Diffusion), and different datasets (CIFAR-10, LSUN-Bedroom, LSUN-Church, ImageNet, MS-COCO).
+The reproduction of DilateQuant is robust and easy as no hyper-parameters are introduced.
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=1.0\textwidth]{image/distribution.pdf}
+    \caption{(a) showcases a wider range of activations in diffusion model (DM) compared to segmentation model (Seg). (b) demonstrates the different outlier challenges for DM and LLM. (c) shows the dynamic distribution activations of DM. The activations of DM and Seg are from the first block output of the upsample stage of UNet network. The activations of LLM come from the output of the penultimate layer.}
+    \label{fig:distribution}
+\end{figure}
+
+
+\section{Related Work}
+
+\subsection{Diffusion model acceleration}
+While diffusion models have generated high-quality images, the substantial computational costs and huge memory footprint hinder their low-latency applications in real-world scenarios.
+To reduce the inference computation, numerous methods have been proposed to find shorter sampling trajectories, efficiently accelerating the denoising process.
+For example, \citep{nichol2021improved} shortens the denoising steps by adjusting variance schedule; \citep{song2020denoising} generalizes diffusion process to a non-Markovian process by modifying denoising equations; \citep{lu2022dpm} uses high-order solvers to approximate diffusion generation.
+These methods have achieved significant success, obtaining comparable performance with nearly 10\% of the denoising steps. 
+However, they involve expensive retraining and complex computations. 
+Conversely, we focus on the complex networks of diffusion models, accelerating them at each denoising step with a quantization method, which not only reduces the computational cost but also compresses the model size. 
+
+\subsection{Model quantization}
+Model quantization, which represents the original floating-point parameters with low-bit values, compresses model size and accelerates inference.
+Depending on whether the model's weights are fine-tuned or not, it generally falls into two categories: Post-Training Quantization (PTQ) and Quantization-Aware Training (QAT).
+PTQ calibrates the quantization parameters with a small dataset and does not require fine-tuning the model's weights, making it data- and time-efficient.
+The reconstruction-based PTQ techniques, such as BRECQ~\citep{li2021brecq}, utilize gradient descent algorithms to optimize quantization parameters, which have yielded remarkable results in conventional models.
+Nevertheless, the unique temporal networks of diffusion models cause them to fail.
+To address the issues, PTQ4DM~\citep{shang2023post} and Q-diffusion~\citep{li2023q} design a specialized calibration dataset, and EDA-DM~\citep{liu2024enhanced} refines the reconstruction loss.
+Although these PTQ methods enhance results based on the properties of diffusion models, none of them break through the 6-bit quantization.
+On the other hand, QAT retrains the whole model after the quantization operation, maintaining performance at lower bit-width. 
+However, the significant training resources (original dataset, training time, and GPU consumption) make it not practical for diffusion models.
+For instance, the recent work TDQ~\citep{so2023temporal} requires 200K training iterations on a 50K original dataset.
+To efficiently quantize diffusion models to lower precision, EfficientDM~\citep{he2023efficientdm} fine-tunes all of the model's weights with an additional LoRA module, while QuEST~\citep{wang2024quest} selectively trains some sensitive layers.
+
+Hence, the standard quantization of low-bit diffusion models with high accuracy and efficiency is still an open question.
+
+
+\section{Preliminaries}
+
+\subsection{Quantization}
+The uniform quantizer is one of the most hardware-friendly choices, and we use it in our work.
+The quantization-dequantization process of it can be defined as:
+\begin{align}
+    Quant&: \bm{x}_{int}=clip \left( \left\lfloor\frac{\bm{x}}{\Delta }\right\rceil+z, 0, 2^b-1 \right) \\
+    DeQuant&: \hat{\bm{x}}=\Delta \cdot  \left( \bm{x}_{int}-z \right) \approx \bm{x}
+\end{align}
+where $\bm{x}$ and $\bm{x}_{int}$ are the floating-point and quantized values, respectively, $\left\lfloor \cdot \right\rceil$ represents the rounding function, and the bit-width $b$ determines the range of clipping function $clip(\cdot)$.
+In the dequantization process, the dequantized value $\hat{\bm{x}}$ approximately recovers x. 
+Notably, the upper and lower bounds of $\bm{x}$ determine the quantization parameters: scale factor $\Delta $ and zero-point $z$, as follows:
+\begin{align}\label{eq:delta}
+    \Delta  = \frac{max(\bm{x}) - min(\bm{x})}{ 2^b-1 }, \quad z = \left\lfloor\frac{-min(\bm{x})}{\Delta }\right\rceil
+\end{align}
+Combining the two processes, we can provide a general definition for the quantization function, $Q(\bm{x})$, as:
+\begin{align}\label{eq:quant}
+    Q(\bm{x}) = \Delta \cdot  \left( clip \left( \left\lfloor\frac{\bm{x}}{\Delta }\right\rceil+z, 0, 2^b-1 \right)-z \right)
+\end{align}
+As can be seen, quantization is the process of introducing errors: $\left\lfloor \cdot \right\rceil$ and $clip(\cdot)$ result in rounding error ($\mathit{E_{round}}$) and clipping error ($\mathit{E_{clip}}$), respectively.
+To set the quantization parameters, we commonly use two calibration methods: Max-Min and MSE.
+For the former, quantization parameters are calibrated by the max-min values of $\bm{x}$, eliminating the $\mathit{E_{clip}}$, but resulting in the largest $\Delta$; for the latter, quantization parameters are calibrated with appropriate values, but introduce the $\mathit{E_{clip}}$.
+
+\subsection{Equivalent scaling}
+Equivalent scaling is a mathematically equivalent per-channel scaling transformation that offline shifts the quantization difficulty from activations to weights.
+For a linear layer in diffusion model, the output $\bm{Y} = \bm{X} \bm{W}$, $\bm{Y} \in \mathbb{R}^{N\times C^o}$, $\bm{X} \in \mathbb{R}^{N\times C^i}$, $\bm{W} \in \mathbb{R}^{C^i\times C^o}$, where $N$ is the batch-size, $C^i$ is the input channel, and $C^o$ is the output channel. 
+The activation $\bm{X}$ divides a per-in-channel scaling factor $\bm{s} \in \mathbb{R}^{C^i}$, and weight $\bm{W}$ scales accordingly in the reverse direction to maintain mathematical equivalence:
+\begin{align}
+    \bm{Y} = (\bm{X} / \bm{s}) (\bm{s} \cdot \bm{W})
+\end{align}
+The formula also suits the conv layer.
+By ensuring that $\bm{s} > \bm{1}$, the range of activations can be made smaller and the range of weights larger, thus in transforming the difficulty of quantization from activations to weights.
+In addition, given that the $\bm{X}$ is usually produced from previous linear operations, we can easily fuse the scaling factor into previous layers’ parameters offline so as not to introduce additional computational overhead in the inference.
+Currently, equivalent scaling is primarily used in the quantization of LLMs to smooth out activation outliers in certain channels.
+
+
+\section{Method}
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=1.0\textwidth]{image/overview.pdf}
+    \caption{An overview of DilateQuant. WD narrows the activations range while maintaining the weights range unchanged. TPQ sets time-step quantization parameters and supports parallel training. BKD aligns the quantized network with the full-precision network at block level.}
+    \label{fig:overview}
+\end{figure}
+
+\subsection{Weight Dilation}
+Inspired by the quantization of LLMs, we propose a novel equivalent scaling algorithm, denotes as Weight Dilation (WD), which decreases the range of activations while maintaining the range of weights unchanged (as shown in Figure~\ref{fig:overview}), thereby efficiently alleviating the wide range activations.
+
+\textbf{Analyzing quantization error.}
+We start by analyzing the error from weight-activation quantization.
+Taking a linear layer with $\bm{X} \in \mathbb{R}^{N\times C^i}$ and $\bm{W} \in \mathbb{R}^{C^i\times C^o}$ as example, 
+considering that we calibrate the quantization parameters of $\bm{X}$ and $\bm{W}$ with a MSE and Max-Min manner, respectively, the quantization function (Eq.~\ref{eq:quant}) for activations and weights can be briefly written as:
+\begin{align}
+    Q(\bm{X}) = \Delta_x \cdot  clip \left( \left\lfloor\frac{\bm{X}}{\Delta_x }\right\rceil \right), \quad Q(\bm{W}) = \Delta_w \cdot  \left\lfloor\frac{\bm{W}}{\Delta_w }\right\rceil
+\end{align}
+where $\Delta_x$ and $\Delta_w$ are scale factors for activations and weights, respectively.
+The quantization error of activations $E_x$ and weights $E_w$ from rounding (denoted as $\mathit{E_{round}}$) and cliping (denoted as $\mathit{E_{clip}}$) function can be represented as:
+\begin{align}
+    E_x = \Delta_x \cdot (\mathit{E_{round}} + \mathit{E_{clip}}), \quad E_w = \Delta_w \cdot \mathit{E_{round}}
+\end{align}
+Since the rounding function maps a floating-point number to an integer, $\mathit{E_{round}}$ does not vary, as demonstrated in AWQ~\citep{lin2024awq}.
+We scale the $\bm{X}$ and $\bm{W}$ using a scaling factor $\bm{s} \in \mathbb{R}^{C^i}$ to obtain the scaled $\bm{X^{'}}$ and $\bm{W^{'}}$.
+The quantization functions and errors after scaling are as follows:
+\begin{align}
+    Q(\bm{X^{'}})& = Q(\bm{X}/\bm{s}) = \Delta_x^{'} \cdot  clip \left( \left\lfloor\frac{\bm{X}/\bm{s}}{\Delta_x^{'} }\right\rceil \right),& \quad Q(\bm{W^{'}})& = Q(\bm{s} \cdot \bm{W}) = \Delta_w^{'} \cdot  \left\lfloor\frac{\bm{s} \cdot \bm{W}}{\Delta_w^{'} }\right\rceil \\
+    E_x^{'}& = \Delta_x^{'} \cdot (\mathit{E_{round}} + \mathit{E_{clip}}^{'}),& \quad E_w^{'}& = \Delta_w^{'} \cdot \mathit{E_{round}}
+\end{align}
+where $\Delta_x^{'}$ and $\Delta_w^{'}$ are new scale factors, and $\mathit{E_{clip}}^{'}$ is the new error of cliping function.
+By ensuring that $\bm{s} > \bm{1}$, the range of activations becomes smaller, resulting in $\mathit{E_{clip}}^{'} / \mathit{E_{clip}} < \bm{1}$ and $\Delta_x^{'} / \Delta_x < \bm{1}$ (according to Eq.~\ref{eq:delta}).
+However, the range of weights becomes larger, resulting in $\Delta_w^{'} / \Delta_w > \bm{1}$.
+Consequently, while the new error of activations quantization $E_x^{'}$ decreases, the new error of weights quantization $E_w^{'}$ increases, leading to unstable model convergence during training.
+Therefore, the perfect scaling we desired is to achieve $\bm{s} > \bm{1}$ while maintaining $\Delta_w^{'} \approx \Delta_w$.
+
+\textbf{Searching channel for scaling.}
+Given that the dimension of weights quantization is per-out-channel and the dimension of scaling is per-in-channel, in order to maintain $\Delta_w^{'} \approx \Delta_w$ we need to ensure the max-min values (denoted as $W_{max} \in \mathbb{R}^{C^o}$, $W_{min} \in \mathbb{R}^{C^o}$) of each out-channel weights unchanged.
+Based on the above demands, we obtain the $W_{max}$ and $W_{min}$, and record their indexes of in-channel to form a set $A$.
+For example, the $A$ in Figure~\ref{fig:2}(a) is \{1,4,6,8\}.
+Iterating through the index of in-channel $k \in \left \{1,\dots ,C^i \right \}$, if $k \in A$, we set $\bm{s}_k=1$, representing no scaling; if $k \notin A$, the $W_k$ denotes as unsaturated in-channel weights, and we set $\bm{s}_k$ by dilating $W_k$ to $W_{max}$ or $W_{min}$:
+\begin{align}
+    \bm{s}_{k1}& = min(W_{max}/W_k.clamp(min=0)) \\
+    \bm{s}_{k2}& = min(W_{min}/W_k.clamp(max=0)) \\
+    \bm{s}_k& = min(\bm{s}_{k1}, \bm{s}_{k2})
+\end{align}
+where $clamp$ function specifies the range of the $k_{th}$ in-channel of weight $W_k$, $\bm{s}_{k1}$ and $\bm{s}_{k2}$ denote the maximum $\bm{s}$ with $W_{max}$ and $W_{min}$ as constraints, respectively.
+Consequently, as shown in Figure~\ref{fig:2}(b), we maximize $\bm{s}>1$ while keeping $W_{max}^{'}=W_{max}$ and $W_{min}^{'}=W_{min}$.
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=0.96\textwidth]{image/alg.pdf}
+    \caption{(a) WD searches for unsaturated in-channel weights and determines scaling factor completely dependent on the max-min values of each out-channel of the weights. (b) WD alleviates the wide range activations by dilating unsaturated channels to a constrained range.}
+    \label{fig:2}
+\end{figure}
+
+\subsection{Temporal Parallel Quantizer}
+Previous methods~\citep{he2023efficientdm,wang2024quest} utilize multiple activation quantizers for a layer to quantize activations at different time steps.
+However, since each quantizer is independent, these methods optimize each quantizer individually using time-step calibration sets, which is data- and time-inefficient.
+For example, EfficientDM uses 819.2K samples for a total of 12.8K iterations for DDIM on CIFAR-10~\citep{krizhevsky2009learning}.
+
+Different from previous methods, as shown in Figure~\ref{fig:overview}, we design a novel quantizer, denotes as Temporal Parallel Quantizer (TPQ), which sets time-step quantization parameters for activations, instead of simply stacking quantizers.
+Specifically, it utilizes an indexing approach to call the corresponding quantization parameters for samples at different time steps. This enables support for parallel training of different quantization parameters, significantly reducing the data and time costs of training.
+For a model with $T$ time steps, the quantization parameters of TPQ are as follows:
+\begin{align}
+    \Delta_x = \left \{ \Delta_x^1, \Delta_x^2, \Delta_x^3, \dots, \Delta_x^{T} \right \}, \quad
+    z_x = \left \{ z_x^1, z_x^2, z_x^3, \dots, z_x^{T} \right \}
+\end{align}
+We detail TPQ design for the different layers of the diffusion models.
+For the conv and linear layers, they take input $\bm{x} \in \mathbb{R}^{|\mathbb{T}| \times C^i}$ and $\bm{x} \in \mathbb{R}^{|\mathbb{T}| \times  C^i \times H \times W}$, respectively, where $\mathbb{T}$ is a set containing different time-step indexes, $\mathbb{T} \subset \left \{ 1, \dots , T \right \}$, $\left | \cdot \right | $ represents the number of set elements.
+The quantization operation of them can be represented as:
+\begin{align}\label{eq:quantizer}
+    Q(\bm{x}) = \Delta_x^{\mathbb{T}} \cdot  \left( clip \left( \left\lfloor\frac{\bm{x}}{\Delta_x^{\mathbb{T}}}\right\rceil+z_x^{\mathbb{T}}, 0, 2^b-1 \right)-z_x^{\mathbb{T}} \right)
+\end{align}
+where $\Delta_x^{\mathbb{T}}$ and $z_x^{\mathbb{T}}$ denote the quantization parameters corresponding to $\mathbb{T}$, respectively.
+For the attention layers, they take input $\bm{x} \in \mathbb{R}^{|\mathbb{T}\ast H| \times C^i \times M}$ due to the $H$ heads, where $``\ast "$ represents cat operation and $M$ is the number of tokens.
+So the quantization parameters in Eq.~\ref{eq:quantizer} are replaced with $\Delta_x^{\mathbb{T}\ast H}$ and $z_x^{\mathbb{T}\ast H}$, respectively.
+
+\subsection{Block-wise Knowledge Distillation}
+QAT significantly alleviates accuracy degradation in low-bit cases, but it has several limitations for diffusion models:
+(1) QAT typically requires original training data, which can sometimes be challenging or even impossible to obtain due to privacy or copyright concerns;
+(2) QAT involves end-to-end retraining of the whole complex networks, which is training-unstable and time-intensive.
+
+To address these limitations, inspired by the reconstruction method in PTQ~\citep{li2021brecq}, we propose a novel distillation strategy called Block-wise Knowledge Distillation (BKD).
+Assume the target model for quantization has K blocks ($B_1, \dots, B_K$), and the input samples of model are $\bm{x}$, which is generated by the full-precision model. BKD trains the quantized network block-by-block and aligns it with full-precision network at block level. More specifically, assume that block $B_k$ is going to be quantized, and its quantized version is $\hat{B_k}$.
+We update the quantization parameters $(\Delta_x^{\mathbb{T}}, z_x^{\mathbb{T}}, \Delta_w)$ and weights ($\bm{w}$) of $\hat{B_k}$ using the mean square loss $\mathcal{L}$:
+\begin{align}
+    \mathcal{L}_{\Delta_x^{\mathbb{T}}, z_x^{\mathbb{T}}, \Delta_w, \bm{w}} = MSE\left ( B_k\cdot B_{k-1}\cdot B_{k-2}\cdot ... \cdot B_1 (\bm{x}) - \hat{B}_k\cdot \hat{B}_{k-1}\cdot \hat{B}_{k-2}\cdot ... \cdot \hat{B}_1 (\bm{x}) \right ) 
+\end{align}
+As can be seen,
+(1) BKD does not rely on original training data;
+(2) BKD shortens the gradient backpropagation path by aligning blocks, which enhances training stability and decreases the memory footprint of the quantization process.
+In addition, BKD trains quantization parameters and weights in parallel, which not only further saves training time but adapts the weights to each time step.
+
+\begin{table}[h]\footnotesize %\scriptsize %\tiny %\small
+    \centering
+    \caption{Quantization results of unconditional image generation. The “Calib.” presents the number of calibration samples and “Prec. (W/A)” indicates the bit-width of quantization. \textsuperscript{$\star$} denotes our implementation according to open-source codes and \textsuperscript{$\dagger$} represents results directly obtained by papers or rerunning open-source codes.}
+    \label{tab:uncon}
+    \setlength{\tabcolsep}{1.5mm}
+    \resizebox{\linewidth}{!}{
+    \input{table/1_unconditional}
+    }
+\end{table}
+\begin{table}[t]\footnotesize %\scriptsize %\tiny %\small
+    \centering
+    \caption{Quantization results of conditional image generation.}
+    \label{tab:con}
+    \setlength{\tabcolsep}{1.4mm}
+    \resizebox{\linewidth}{!}{
+    \input{table/2_conditional}
+    }
+\end{table}
+
+
+\section{Experiment}
+
+\subsection{Experimental Setup}
+\paragraph{Models and metrics.}
+We evaluate DilateQuant for both unconditional and conditional image generation.
+The comprehensive experiments include DDPM~\citep{song2020denoising}, LDM~\citep{rombach2022high} and Stable-Diffusion on 5 datasets.
+The performance of the quantized models is evaluated with Fréchet Inception Distance (FID)~\citep{heusel2017gans}, Sliding FID (sFID)~\citep{salimans2016improved}, and Inception Score (IS)~\citep{salimans2016improved}.
+For text-guided generation, we add CLIP score~\citep{hessel2021clipscore} to evaluate the semantic relevance of the generated images to the text prompts.
+Following the common practice, the Stable-Diffusion generates 10,000 images, while all other models generate 50,000 images. 
+Besides, we also calculate the Bit Operations and Size of models to visualize the effects of model acceleration and compression.
+\paragraph{Quantization and comparison settings.}
+We employ DilateQuant with the standard channel-wise quantization for weights and layer-wise quantization for activations.
+To highlight the efficiency, DilateQuant selects 5120 samples for calibration and trains for 5K iterations with a batch size of 32, aligning with PTQ-based method~\citep{liu2024enhanced}.
+The Adam~\citep{kingma2014adam} optimizer is adopted, and the learning rates for quantization parameters and weights are set as 1e-4 and 1e-2, respectively.
+For the experimental comparison, we compare DilateQuant with PTQ-based method~\citep{liu2024enhanced} and variant QAT-based methods~\citep{he2023efficientdm, wang2024quest}.
+Since these two variant QAT-based methods employ non-standard settings, we modify them to standard settings for a fair comparison.
+
+All experiments are performed on one RTX A6000.
+\subsection{Main Result}
+
+\paragraph{Unconditional generation.}
+We start by comparing the quantization results for unconditional generation, as reported in Table~\ref{tab:uncon}.
+We focus on the performance of low-bit quantization to highlight the advantages of DilateQuant.
+In 4-bit quantization, previous works all suffer from non-trivial performance degradation. For instance, EDA-DM and QuEST become infeasible on LSUN-Bedroom, and EfficientDM remains far from practical usability on LSUN-Church.
+In sharp contrast, DilateQuant achieves a substantial improvement in quantization performance, with encouraging 6.28 and 4.98 FID improvement over EfficientDM on two LSUN datasets, respectively.
+Additionally, in 6-bit quantization, DilateQuant can achieve a fidelity comparable to that of the full-precision baseline.
+
+\paragraph{Conditional generation.}
+The quantization results for conditional generation are reported in Table~\ref{tab:con}.
+For text-guided generation with 6-bit precision, DilateQuant improves the FID to 24.69 with 5.3$\times$ Model size compression and 27.9$\times$ Bit Operations reduction, effectively advancing the low-latency applications of Stable-Diffusion in real-world scenarios.
+Besides, DilateQuant achieves significant improvements at all bit-width settings on class-guided generation.
+\begin{table}[h]\small
+    \centering
+    \caption{The efficacy of different component proposed in this paper.}
+    \label{tab:ablation1}
+    \setlength{\tabcolsep}{1.8mm}
+    \begin{tabular}{ccccccccc}
+        \toprule 
+        \multicolumn{3}{c}{Method} & \multirow{2}{1.0cm}{\centering Prec. (W/A)} & \multirow{2}{1.5cm}{\centering Time Cost (hours)} & \multirow{2}{2.0cm}{\centering GPU Memory (MB)} & \multirow{2}{1.0cm}{\centering FID~$\downarrow$} & \multirow{2}{1.0cm}{\centering sFID~$\downarrow$} & \multirow{2}{1.0cm}{\centering IS~$\uparrow$} \\ 
+        WD & TPQ & BKD & \multirow{2}{*}{} & \multirow{2}{*}{} & \multirow{2}{*}{} & \multirow{2}{*}{} & \multirow{2}{*}{} & \multirow{2}{*}{} \\ 
+        \midrule
+        \xmark & \xmark & \xmark & 4/4 & 0.97 & 3019 & 120.24 & 36.72 & 4.42 \\ 
+        \cmark & \cmark & \xmark & 4/4 & 1.08 & 3439 & 16.27 & 11.83 & 8.09 \\ 
+        \xmark & \cmark & \cmark & 4/4 & 0.98 & 3278 & 9.63 & 7.08 & 8.45 \\ 
+        \cmark & \cmark & \cmark & 4/4 & 1.08 & 3439 & 9.13 & 6.92 & 8.56 \\ 
+        \bottomrule
+    \end{tabular}
+\end{table}
+\subsection{Ablation Study}
+The ablation experiments are conducted over DDIM on CIFAR-10 with 4-bit quantization.
+We start by analysing the efficacy of each proposed component, as reported in Table~\ref{tab:ablation1}.
+We use the SoTA PTQ-based framework, EDA-DM~\citep{liu2024enhanced}, as the baseline, which fails to maintain performance, yielding an exceedingly high FID score of 120.24. This demonstrates that PTQ-based methods are not suitable for the low-bit quantization.
+Since time-varying activations severely degrade performance, we utilize TPQ as the backbone of our approach.
+By incorporating WD, we reduce the FID score to 16.27, demonstrating the effectiveness of TPQ and WD. 
+Introducing BKD further enhances performance while maintaining PTQ-like time costs and GPU memory during the training process.
+
+\begin{table}[h]\small
+    \centering
+    \caption{Efficiency comparisons of various quantization frameworks.}
+    \label{tab:ablation2}
+    \setlength{\tabcolsep}{1.8mm}
+    \begin{tabular}{cccccc}
+        \toprule 
+        Method & Calib. & Training Data & Time Cost (hours) & GPU Memory (MB) & FID~$\downarrow$ \\ 
+        \cmidrule(r){1-6}
+        \multirow{1}{2.0cm}{\centering PTQ} & 5120 & 0 & 0.97 & 3019 & 120.24 \\ 
+        \multirow{1}{2.0cm}{\centering QAT} & - & 50K & 13.89 & 9974 & 7.30 \\ 
+        \multirow{1}{2.0cm}{\centering V-QAT} & 1.6384M & 0 & 2.98 & 9546 & 81.27 \\ 
+        \multirow{1}{2.0cm}{\centering Ours} & 5120 & 0 & 1.08 & 3439 & 9.13\\ 
+        \bottomrule
+    \end{tabular}
+\end{table}
+We conduct the efficiency analysis of DilateQuant by comparing it with PTQ~\citep{liu2024enhanced}, QAT~\citep{esser2019learned}, and variant QAT~\citep{he2023efficientdm} methods.
+As reported in Table~\ref{tab:ablation2}, the PTQ method fails to maintain performance and the QAT method requires significant resources.
+In sharp contrast, DilateQuant does not rely on original data and uses a small calibration to achieve QAT-like accuracy (9.13 vs. 7.30) with PTQ-like time cost (1.08 vs. 0.97) and GPU memory (3439 vs. 3019).
+
+
+
+\section{Conclusion}
+
+In this work, we propose DilateQuant, a novel quantization framework for diffusion models that offers comparable accuracy and high efficiency.
+Specifically, we find the unsaturation property of the in-channel weights and exploit it to alleviate the wide range of activations.
+By dilating the unsaturated channels to a constrained range, our method costlessly absorbs the activation quantization errors into weight quantization.
+Furthermore, we design a flexible quantizer that sets time-step quantization parameters to time-varying activations and supports parallel quantization for training process, significantly improving the performance and reducing time cost. 
+We also introduce a novel knowledge distillation strategy to enhance performance, which aligns the quantized models with the full-precision models at a block level.
+The simultaneous training of parameters and shorter backpropagation paths minimize the time and memory footprint required.
+Exhaustive experiments demonstrate that DilateQuant significantly outperforms existing methods in low-bit quantization.
+
+
+
+
+
+
+

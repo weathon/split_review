@@ -1,0 +1,358 @@
+\title{Interpretable and Convergent Graph Neural Network Layers at Scale}
+
+\begin{abstract}
+Among the many variants of graph neural network (GNN) architectures capable of modeling data with cross-instance relations, an important subclass involves layers designed such that the forward pass iteratively reduces a graph-regularized energy function of interest. In this way, node embeddings produced at the output layer dually serve as both predictive features for solving downstream tasks (e.g., node classification) and energy function minimizers that inherit desirable inductive biases and interpretability. However, scaling GNN architectures constructed in this way remains challenging, in part because the convergence of the forward pass may involve models with considerable depth.  To tackle this limitation, we propose a sampling-based energy function and scalable GNN layers that iteratively reduce it, guided by convergence guarantees in certain settings.  We also instantiate a full GNN architecture based on these designs, and the model achieves competitive accuracy and scalability when applied to the largest publicly-available node classification benchmark exceeding 1TB in size.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\vspace*{-0.2cm}
+\vspace*{-0.2cm}
+
+Graph neural networks (GNNs) are a powerful class of deep learning models designed specifically for graph-structured data. Unlike conventional neural networks that primarily operate on independent samples, GNNs excel in capturing the complex cross-instance relations modeled by graphs \cite{graphsage,DBLP:journals/jcamd/KearnesMBPR16,gcn,gat}. Foundational to GNNs is the notion of message passing~\cite{messagepassing}, whereby nodes iteratively gather information from neighbors to update their representations.  In doing so, information can propagate across the graph in the form of node embeddings, reflecting both local patterns and global network effects, which are required by  downstream tasks such as node classification.% or link prediction.
+
+
+Among many GNN architectures, one promising subclass is based on graph propagation layers derived to be in a one-to-one correspondence with the descent iterations of a graph-regularized energy function ~\cite{ebbs, halo, twirls, ma2021unified, appnp, pan2020unified, zhang2020revisiting, zhu2021interpreting, lazygnn}.  For these models, the layers of the GNN forward pass computes  increasingly-refined approximations to a minimizer of the aforementioned energy.  Importantly, if  such energy minimizers possess interpretable/explainable properties or inductive biases, the corresponding GNN architecture naturally inherits them, unlike traditional GNN constructions that may be less transparent.  More broadly, this association between the GNN forward pass and optimization can be exploited to introduce targeted architectural enhancements (e.g., forming explainable predictions, robustly handling graphs with spurious edges, etc.).  Borrowing from \cite{chen2021graph,yang2021implicit}, we will henceforth refer to models of this genre as \textit{unfolded} GNNs, given that the layers are derived from a so-called unfolded (in time/iteration) energy descent process.
+
+Despite their merits w.r.t.~interpretability, unfolded GNNs face non-trivial scalability challenges.  This is in part because they can be constructed with arbitrary depth (i.e., arbitrary descent iterations) while still avoiding undesirable oversmoothing effects \cite{DBLP:conf/iclr/OonoS20,DBLP:conf/aaai/LiHW18}, and the computational cost and memory requirements of this flexibility are often prohibitively high. 
+Even so, there exists limited prior work explicitly tackling the scalability of unfolded GNNs, or providing any complementary guarantees regarding convergence on large graphs.  Hence most unfolded GNN models are presently evaluated on relatively small benchmarks.
+
+To address these shortcomings, we propose a scalable unfolded GNN model that incorporates efficient subgraph sampling within the fabric of the requisite energy function.  Our design of this model is guided by the following three desiderata: (i) maintain the characteristic interpretable properties and extensible structure of full-graph unfolded GNN models, (ii) using a consistent core architecture, preserve competitive accuracy across datasets of varying size, including the very largest publicly-available benchmarks, and (iii) do not introduce undue computational or memory overheads beyond what is required to train the most common GNN alternatives.  Our proposed model, which we will later demonstrate satisfies each of the above, is termed \textit{MuseGNN} in reference to a GNN architecture produced by the \textit{\uline{m}inimization} of an \textit{\uline{u}nfolded} \textit{\uline{s}ampling}-based \textit{\uline{e}nergy}.  Building on background motivations presented in Section \ref{sec:background}, our \model-related contributions herein are three-fold:
+
+
+
+
+\begin{itemize}
+    \item In Sections \ref{sec:model} and \ref{sec:muse_gnn_framework}, we expand a widely-used unfolded GNN framework to incorporate offline sampling into the architecture-inducing energy function design itself, as opposed to a post hoc application of sampling to existing GNN methods. The resulting model, which we term \model, allows us to retain the attractive interpretability and extensibility properties of unfolded GNNs, with the scalability of canonical GNN architectures.
+    \item We analytically demonstrate in Section \ref{sec:convergence} that \model possesses desirable convergence properties regarding both upper-level (traditional model training) and lower-level (interpretable energy function descent) optimization processes.  In doing so we increase our confidence in reliable performance when moving to new problem domains that may deviate from known benchmarks.
+    \item Finally, in Section \ref{sec:experiments} we provide complementary empirical support that \model performance is stable in practice, preserving competitive accuracy and scalability across task size.  En route, we achieve SOTA performance w.r.t.~homogeneous graph models applied to the largest, publicly-available node classification datasets from OGB and IGB exceeding 1TB. 
+\end{itemize}
+\vspace*{-0.3cm}
+
+
+\section{Background and Motivation}
+
+\label{sec:background}
+\vspace*{-0.2cm}
+This section provides background details regarding existing unfolded GNN architectures.  Later, we discuss why GNNs formed in this way are relevant, followed by their scalability challenges.
+
+\subsection{Interpretable GNN Architectures from Unfolded Optimization}
+\label{sec:gnn}
+
+
+\paragraph{Notation.} Let $\m{G}=\{\m{V}, \m{E}\}$ denote a graph with $n=|\m V|$ nodes and edge set $\m{E}$.  We define $D$ and $A$ as the degree and adjacency matrices of $\m{G}$ such that the corresponding graph Laplacian is $L = D-A$. Furthermore, associated with each node is both a $d$-dimensional feature vector, and a $d'$-dimensional label vector, the respective collections of which are given by $X \in \mathbb{R}^{n\times d}$ and $T \in\R^{n\times d'}$.
+
+\paragraph{GNN Basics.} Given a graph defined as above, canonical GNN architectures are designed to produce a sequence of node-wise embeddings $\{Y^{(k)} \}_{k=1}^K$ that are increasingly refined across $K$ model layers according to the rule $Y^{(k)} = h(Y^{(k-1)};W,A,X) \in \mathbb{R}^{n\times d}$.  Here $h$ represents a function that updates $Y^{(k-1)}$ based on trainable model weights $W$ as well as $A$ (graph structure) and optionally $X$ (input node features). To facilitate downstream tasks such as node classification, $W$ may be trained, along with additional parameters $\theta$ of any application-specific output layer $g : \mathbb{R}^d \rightarrow \mathbb{R}^{d'}$, to minimize a loss of the form
+\begin{equation} \label{eq:meta-loss}
+    \m{L}(W,\theta)=\sum_{i=1}^{n'}\mathcal{D}\bigg(g\left[Y^{(K)}\left(W\right)_i;\theta\right], T_i\bigg).
+\end{equation}
+In this expression, $Y_i^{(K)} \equiv Y^{(K)}\left(W\right)_i$ reflects the explicit dependency of GNN embeddings on $W$ and the subscript $i$ denotes the $i$-th row of a matrix.  Additionally, $n'$ refers to the number of nodes in $\m{G}$ available for training, while $\mathcal{D}$ is a discriminator function such as cross-entropy.  We will sometimes refer to the training loss (\ref{eq:meta-loss}) as an \textit{upper-level} energy function to differentiate its role from the lower-level energy defined next.
+
+\paragraph{Moving to Unfolded GNNs.} An \textit{unfolded} GNN architecture ensues when the functional form of $h$ is explicitly chosen to align with the update rules that minimize a second, \textit{lower-level} energy function denoted as $\ell(Y)$.  In this way, it follows that $\ell\left(Y^{(k)}\right) = \ell\left(h\left[Y^{(k-1)};W,A,X\right]\right) \leq \ell\left(Y^{(k-1)}\right)$, 
+This restriction on $h$ is imposed to introduce desirable inductive biases on the resulting GNN layers that stem from properties of the energy $\ell$ and its corresponding minimizers (see Section \ref{sec:why_ugnn} ).
+
+While there are many possible domain-specific choices for $\ell(Y)$ in the growing literature on unfolded GNNs~\cite{ebbs, halo, twirls, ma2021unified, appnp, pan2020unified, zhang2020revisiting, zhu2021interpreting, lazygnn}., we will focus our attention on a particular form that encompasses many existing works as special cases, and can be easily generalized to cover many others.  Originally inspired by~\citet{orig-energy} and generalized by \citet{twirls} to account for node-wise nonlinearities, we consider
+\begin{equation}
+\label{eq:full-graph-energy}
+    \ell(Y ) :=\|Y-f(X;W)\|_F^2+\lambda \tr(Y^\top L Y)+\sum_{i=1}^n\zeta(Y_i),
+\end{equation}
+where $\lambda>0$ is a trade-off parameter, $f$ represents a trainable base model parameterized by $W$ (e.g., a linear layer or MLP), and the function $\zeta$ denotes a (possibly non-smooth) penalty on individual node embeddings.  The first term in (\ref{eq:full-graph-energy}) favors embeddings that resemble the input features as processed by the base model, while the second encourages smoothness across graph edges. And finally, the last term is included to enforce additional node-wise constraints (e.g., non-negativity).
+We now examine the form of $h$ that can be induced when we optimize (\ref{eq:full-graph-energy}).  Although $\zeta$ may be non-smooth and incompatible with vanilla gradient descent, we can nonetheless apply proximal gradient descent in such circumstances \cite{proximal}, leading to the descent update
+\begin{equation}
+    \label{eq:full-update}
+    Y^{(k)}=h\left(Y^{(k-1)};W,A,X\right) = \operatorname{prox}_\zeta\left(Y^{(k-1)}-\alpha\left[(I+\lambda L)Y^{(k-1)}-f(X;W)\right]\right),
+\end{equation}
+where $\alpha$ controls the learning rate and $\operatorname{prox}_\zeta(u) :=\arg\min_y \frac{1}{2}\|u-y\|_2^2+\zeta(y)$ denotes the proximal operator of $\zeta$.  Analogous to more traditional GNN architectures, (\ref{eq:full-update}) contains a $\zeta$-dependent nonlinear activation applied to the output of an affine, graph-dependent filter. With respect to the former, if $\zeta$ is chosen as an indicator function that assigns an infinite penalty to any embedding less than zero, then $\operatorname{prox}_\zeta$ reduces to standard ReLU activations; we will adopt this choice for \model.
+
+\subsection{Why Unfolded GNNs?} \label{sec:why_ugnn}
+There are a variety of reasons why it can be advantageous to construct $h$ using unfolded optimization steps as in (\ref{eq:full-update}) or related.  Of particular note here, unfolded GNN node embeddings inherit interpretable characteristics of the lower-level energy, especially if $K$ is sufficiently large such that $Y^{(K)}$ approximates a minimum of $\ell(Y)$.  For example, it is well-known that an oversmoothing effect can sometimes cause GNN layers to produce node embeddings that converge towards a non-informative constant \cite{DBLP:conf/iclr/OonoS20,DBLP:conf/aaai/LiHW18}.  However, it is transparent how to design $\ell(Y)$ such that minimizers do not degenerate in this way, and hence the induced $h$ as in (\ref{eq:full-update}) can be iterated indefinitely without risk of oversmoothing, even while spreading information across the graph.  
+
+As another representative scenario, in many customer-facing applications, it is desirable to provide explanations for why a particular prediction was made by a GNN model \cite{ying2019gnnexplainer}.  In these situations, the embeddings of unfolded GNNs contain additional information when contextualized w.r.t.~their role in the lower-level energy.  For example, if for some node $Y_i^{(K)}$ is very far from $f(X_i;W)$ relative to other nodes, it increases our confidence that subsequent predictions may be based on network effects rather than the local feature $X_i$.  More broadly, the interpretability of unfolded GNNs facilitates bespoke modifications of (\ref{eq:full-update}) for addressing heterophily and/or adversarial attacks \cite{twirls}, handling long-range dependencies \cite{lazygnn}, forming connections with the gradient dynamics of physical systems \cite{di2023understanding} and deep equilibrium models \cite{GuC0SG20,yang2021implicit}, and exploiting the robustness of boosting algorithms \cite{sun2019adagcn} among other things.
+
+
+\subsection{Scalability Challenges and Candidate Solutions}
+\label{sec:challenges}
+
+As benchmarks continue to expand in size (see Table \ref{tab:dataset} below), it is no longer feasible to conduct full-graph GNN training using only a single GPU or even single machine, especially so for relatively deep unfolded GNNs.  To address such GNN scalability challenges, there are presently two dominant lines of algorithmic workarounds.  The first adopts various sampling techniques to extract much smaller computational subgraphs upon which GNN models can be trained in mini-batches.  Examples include neighbor sampling~\cite{graphsage, pinsage}, layer-wise sampling~\cite{fastgcn,ladies}, and graph-wise sampling~\cite{clustergcn,shadowgnn}.  For each of these, there exist both online and offline versions, where the former involves randomly sampling new subgraphs during each training epoch, while the latter ~\cite{shadowgnn, ibmb} is predicated on a fixed set of subgraphs for all epochs; \model will ultimately be based on a novel integration and analysis of this approach as will be introduced in Section \ref{sec:model}.
+
+The second line of work exploits the reuse of historical embeddings, meaning the embeddings of nodes computed and saved during the previous training epoch.  In doing so, much of the recursive forward and backward computations required for GNN training, as well as expensive memory access to high-dimensional node features, can be reduced \cite{vrgcn, gas, refresh}.  This technique has recently been applied to training unfolded GNN models \cite{lazygnn}, although available performance results do not cover large-scale graphs, there are no convergence guarantees, and no code is available (at least as of the time of this submission) for enabling further comparisons. Beyond this, we are unaware of prior work devoted to the scaling and coincident analysis of unfolded GNNs.
+
+
+\section{Graph-Regularized Energy Functions Infused with Sampling}
+
+\label{sec:model}
+
+Our goal of this section is to introduce a convenient family of energy functions formed by applying graph-based regularization to a set of subgraphs that have been sampled from a given graph of interest.  For this purpose, we first present the offline sampling strategy which will undergird our approach, followed by details of energy functional form we construct on top of it for use with \model.  Later, we conclude by analyzing special cases of these sampling-based energies, further elucidating relevant properties and connections with full-graph training.
+\subsection{Offline Sampling Foundation}
+
+In the present context, offline sampling refers to the case where we sample a fixed set of subgraphs from $\m{G}$ once and store them, which can ultimately be viewed as a form of preprocessing step.   More formally, we assume an operator $\Omega : \m{G} \rightarrow \{ \m{G}_s \}_{s=1}^m$, where $\m{G}_s =\{\m{V}_s, \m{E}_s\}$ is a subgraph of $\m{G}$ containing $n_s = |\m{V}_s|$ nodes, of which we assume $n_s'$ are target training nodes (indexed from $1$ to $n_s'$), and $\m{E}_s$ represents the edge set.  The corresponding feature and label sets associated with the $s$-th subgraph are denoted  $X_s\in \R^{n_s\times d}$ and $T_s\in\R^{n_s'\times d'}$, respectively.
+
+There are several key reasons we employ offline sampling as the foundation for our scalable unfolded GNN architecture development.  Firstly, conditioned on the availability of such pre-sampled/fixed subgraphs, there is no additional randomness when we use them to replace energy functions dependent on $\m{G}$ and $X$ (e.g., as in (\ref{eq:full-graph-energy})) with surrogates dependent on $\{ \m{G}_s, X_s \}_{s=1}^m$.  Hence we retain a deterministic energy substructure contributing to a more transparent bilevel (upper- and lower-level) optimization process, as well as more interpretable node-wise embeddings that serve as attendant minimizers.  Secondly, offline sampling allows us to conduct formal convergence analysis that is agnostic to the particular sampling operator $\Omega$.  In this way, we need not compromise flexibility in choosing a practically-relevant $\Omega$ in order to maintain desirable convergence guarantees.  For example, as will be detailed later, ShadowKHop~\cite{shadowgnn} sampling pairs well with our approach and directly adheres to our convergence analysis in Section \ref{sec:convergence}. And lastly, offline sampling facilitates an attractive balance between model accuracy and efficiency within the confines of unfolded GNN architectures.  As will be shown in Section \ref{sec:experiments}, we can match the accuracy of full-graph training with an epoch time similar to online sampling methods, e.g., neighbor sampling.  
+\subsection{Energy Function Formulation} \label{sec:energy_function_formulation}
+
+To integrate offline sampling into a suitable graph-regularized energy function, we first introduce two sets of auxiliary variables that will serve as more flexible input arguments.  Firstly, to accommodate multiple different embeddings for the same node appearing in multiple subgraphs, we define $Y_s\in \R^{n_s\times d}$ for each subgraph index $s = 1,\ldots,m$, as well as $\bb{Y} = \{Y_s\}_{s=1}^m \in\R^{(\sum n_s )\times d}$ to describe the concatenated set.  Secondly, we require additional latent variables that, as we will later see, facilitate a form of controllable linkage between the multiple embeddings that may exist for a given node (i.e., when a given node appears in multiple subgraphs).  For this purpose, we define the latent variables as $M\in \R^{n\times d}$, where each row can be viewed as a shared summary embedding associated with each node in the original/full graph. 
+
+We then define our sampling-based extension of (\ref{eq:full-graph-energy}) for \model as
+\begin{equation}
+    \label{eq:subgraph-based-energy}
+ \ell_{\text{muse}}\left(\bb{Y}, M \right) := \sum_{s=1}^m \left[  \|Y_s-f(X_s;W)\|_F^2+\lambda \tr(Y_s^\top L_s Y_s)+\gamma \|Y_s-\mu_s\|_F^2 + \sum_{i=1}^{n_s} \zeta(Y_{s,i}) \right],
+\end{equation}
+where $L_s$ is the graph Laplacian associated with $\m{G}_s$, $\gamma \geq 0$ controls the weight of the additional penalty factor, and each $\mu_s \in \R^{n_s\times d}$ is derived from $M$ as follows.  
+Let $I(s,i)$ denote a function that maps the index of the $i$-th node in subgraph $s$ to the corresponding node index in the full graph.   For each subgraph $s$, we then define $\mu_s$ such that its $i$-th row satisfies $\mu_{s,i} = M_{I(s,i)}$; per this construction, $\mu_{s,i}=\mu_{s',j}$ if $I(s,i)=I(s',j)$.  Consequently, $\{\mu_s\}_{s=1}^m$ and $M$ represent the same overall set of latent embeddings, whereby the former is composed of repeated samples from the latter aligned with each subgraph.
+
+Overall, there are three prominent factors which differentiate (\ref{eq:subgraph-based-energy}) from (\ref{eq:full-graph-energy}):
+\begin{enumerate}
+    \item  $\ell_{\text{muse}}\left(\bb{Y}, M \right)$ involves a deterministic summation over a fixed set of sampled subgraphs, where each $Y_s$ is unique while $W$ (and elements of $M$) are shared across subgraphs.
+    \item Unlike (\ref{eq:full-graph-energy}), the revised energy involves both an expanded set of node-wise embeddings $\bb{Y}$ as well as auxiliary summary embeddings $M$.  When later forming GNN layers designed to minimize $\ell_{\text{muse}}\left(\bb{Y}, M \right)$, we must efficiently optimize over \textit{all} of these quantities, which alters the form of the final architecture.
+    \item The additional $\gamma \|Y_s-\mu_s\|_F^2$ penalty factor acts to enforce dependencies between the embeddings of a given node spread across different subgraphs.
+\end{enumerate}
+With respect to the latter, it is elucidating to consider minimization of $\ell_{\text{muse}}\left(\bb{Y}, M \right)$ over $\bb{Y}$ with $M$ set to some fixed $M'$.  In this case, up to an irrelevant global scaling factor and additive constant, the  energy can be equivalently reexpressed as
+\vspace*{-0.1cm}
+\begin{equation}
+    \ell_{\text{muse}}\left(\bb{Y}, M = M' \right) \equiv \sum_{s=1}^m \left[  \|Y_s-\left[f'(X_s;W)+\gamma' \mu_s\right]\|_F^2+\lambda' \tr(Y_s^\top L_s Y_s) + \sum_{i=1}^{n_s} \zeta'(Y_{s,i}) \right], 
+\end{equation}
+where $f'(X_s;W):=\frac{1}{1+\gamma}f(X_s;W)$, $\gamma' := \frac{\gamma}{1+\gamma}$, $\lambda' := \frac{\lambda}{1+\gamma}$, and $\zeta'(Y_{s,i}) := \frac{1}{1+\gamma}\zeta(Y_{s,i})$.  From this expression, we observe that, beyond inconsequential rescalings (which can be trivially neutralized by simply rescaling the original choices for $\{f,\gamma,\lambda,\zeta \}$), the role of $\mu_s$ is to refine the initial base predictor $f(X_s;W)$ with a corrective factor reflecting embedding summaries from other subgraphs sharing the same nodes.  Conversely, when we minimize $\ell_{\text{muse}}\left(\bb{Y}, M \right)$ over $M$ with $\bb{Y}$ fixed, we find that the optimal $\mu_s$ for every $s$ is equal to the \textit{mean} embedding for each constituent node across all subgraphs.  Hence $M'$ chosen in this way via alternating minimization has a natural interpretation as grounding each $Y_s$ to a shared average representation reflecting the full graph structure.
+
+This reformulation provides additional entry points for interpretability as well.  For example, if optimal solutions are such that $Y_s$ and $\mu_s$ are similar while $f(X_s;W)$ is significantly different, we have a likely indication that, at least within this subgraph, graph structure and network effects are more dominant than node features.  In contrast, if $Y_s$ and $f(X_s;W)$ are similar with $\mu_s$ much less so, feature utility may be selectively strong for a given subgraph; however, if all three quantities are similar the situation is more indicative of strong overall node features.  Beyond these considerations, we now consider two limiting special cases of  $\ell_{\text{muse}}\left(\bb{Y}, M \right)$ that provide complementary contextualization.
+\vspace*{-0.1cm}
+\subsection{Notable Limiting Cases}
+\vspace*{-0.1cm}
+We first consider setting $\gamma = 0$, in which case the resulting energy completely decouples across each subgraph such that we can optimize each
+\vspace*{-0.2cm}
+\begin{equation}
+    \ell^s_{\text{muse}}(Y_s) :=\|Y_s-f(X_s;W)\|_F^2+\lambda \tr(Y_s^\top L_s Y_s) + \sum_{i=1}^{n_s} \zeta(Y_{s,i}) ~~\forall s
+    \label{eq:zero-gamma-subgraph-energy}
+\end{equation}
+independently.  Under such conditions, the only cross-subgraph dependency stems from the shared base model weights $W$ which are jointly trained.  Hence $\ell_{\text{muse}}^s(Y_s)$ is analogous to a full graph energy as in (\ref{eq:full-graph-energy}) with $\m{G}$ replaced by $\m{G}_s$.  In Section \ref{sec:convergence} we will examine convergence conditions for the full bilevel optimization process over all $Y_s$ and $W$ that follows from the $\gamma = 0$ assumption.  We have also found that this simplified setting performs well in practice; see \Cref{sec:gamma-ablation} for ablations.
+
+ 
+
+At the opposite extreme when $\gamma = \infty$, we are effectively enforcing the constraint $Y_s = \mu_s$ for all $s$.  As such, we can directly optimize all $Y_s$ out of the model leading to the reduced $M$-dependent energy
+\begin{equation} \label{eq:inf-gamma-subgraph-energy}
+\ell_{\text{muse}}(M):=\sum_{s=1}^m \left[ \|\mu_s-f(X_s;W)\|_F^2+\lambda \tr(\mu_s^\top L_s\mu_s)+\sum_{i=1}^{n_s}\zeta(\mu_{s,i}) \right].
+\end{equation}
+Per the definition of $\{\mu_s\}_{s=1}^m$ and the correspondence with unique node-wise elements of $M$, this scenario has a much closer resemblance to full graph training with the original $\m{G}$.  In this regard, as long as a node from the original graph appears in at least one subgraph, then it will have a single, unique embedding in (\ref{eq:inf-gamma-subgraph-energy}) aligned with a row of $M$.  
+
+Moreover, we can strengthen the correspondence with full-graph training via the suitable selection of the offline sampling operator $\Omega$.  In fact, there exists a simple uniform sampling procedure such that, at least in expectation, the energy from (\ref{eq:inf-gamma-subgraph-energy}) is equivalent to the original full-graph version from (\ref{eq:full-graph-energy}), with the role of $M$ equating to $Y$.  More concretely, we present the following (all proofs are deferred to \Cref{sec:proofs}):
+
+\begin{proposition}
+\label{prop:connection}
+Suppose we have $m$ subgraphs $(\m{V}_1,\m{E}_1),\ldots,(\m{V}_m,\m{E}_m)$ constructed independently such that $\forall s=1,\ldots,m, \forall u,v\in \m{V}, \Pr[v\in\m{V}_s]=\Pr[v\in\m{V}_s\mid u\in\m{V}_s]=p; (i,j)\in\m{E}_s \iff i\in\m{V}_s,j\in\m{V}_s,(i,j)\in\m{E}$. Then when $\gamma=\infty$, we have $\mathbb{E}[\ell_{\text{muse}}(M)]=mp\ \ell(M)$ with the $\lambda$ in $\ell(M)$ rescaled to $p\lambda$.
+\end{proposition}
+ 
+Strengthened by this result, we can more directly see that (\ref{eq:inf-gamma-subgraph-energy}) provides an intuitive bridge between full-graph models based on (\ref{eq:full-graph-energy}) and subsequent subgraph models we intend to build via (\ref{eq:subgraph-based-energy}).  Even so, we have found that relatively small $\gamma$ values nonetheless work well in practice (although in principle it is actually possible to handle $\gamma=\infty$ using techniques like ADMM~\cite{admm}).
+
+
+
+
+\section{From Sampling-based Energies to the \model Framework}
+
+
+Having defined and motivated a family of sampling-based energy functions vis-a-vis (\ref{eq:subgraph-based-energy}), we now proceed to derive minimization steps that will serve as GNN model layers that define \model forward and backward passes as summarized in \Cref{alg:training}.  Given that there are two input arguments, namely $\bb{Y}$ and $M$, it is natural to adopt an alternating minimization strategy whereby we fix one and optimize over the other, and vice versa.  
+
+With this in mind, we first consider optimization over $\bb{Y}$ with $M$ fixed.  Per the discussion in Section \ref{sec:energy_function_formulation}, when conditioned on a fixed $M$, $\ell_{\text{muse}}\left(\bb{Y}, M \right)$ decouples over subgraphs.  Consequently, optimization can proceed using subgraph-independent proximal gradient descent, leading to the  update rule
+\begin{equation}
+    \label{eq:subgraph-propagation-ext}
+    Y_s^{(k)}= \operatorname{prox}_\zeta \left[ 
+    Y_s^{(k-1)} - \alpha\left(\left[(1+\gamma)I+\lambda L_s\right] Y_s^{(k-1)}\!-\left[f(X_s;W)+\gamma\mu_s\right]\right)  \right], ~~\forall s.
+\end{equation}
+Here the input argument to the proximal operator is given by a gradient step along (\ref{eq:subgraph-based-energy}) w.r.t. $Y_s$.  We also remark that execution of (\ref{eq:subgraph-propagation-ext}) over $K$ iterations represents the primary component of a single forward training pass of our proposed \model framework as depicted on lines 6-8 of \Cref{alg:training}.
+
+
+We next turn to optimization over $M$ which, as mentioned previously, can be minimized by the mean of the subgraph-specific embeddings for each node.  However, directly computing these means is problematic for computational reasons, as for a given node $v$ this would require the infeasible collection of embeddings from all subgraphs containing $v$.  Instead, we adopt an online mean estimator with forgetting factor $\rho$.  For each node $v$ in the full graph, we maintain a mean embedding $M_v$ and a counter $c_v$. When this node appears in the $s$-th subgraph as node $i$ (where $i$ is the index within the subgraph), we update the mean embedding and counter via 
+\begin{equation}
+    \label{eq:online-mean}
+    M_{I(s,i)}\leftarrow \frac{\rho c_{I(s,i)}}{c_{I(s,i)}+1}M_{I(s,i)}+\frac{(1-\rho)c_{I(s,i)}+1}{c_{I(s,i)}+1}Y_{s,i}^{(K)},\qquad c_{I(s,i)}\leftarrow c_{I(s,i)}+1.
+\end{equation}
+Also shown on line 9 of \Cref{alg:training}, we update $M$ and $c$ once per forward pass, which serves to refine the effective energy function observed by the core node embedding updates from (\ref{eq:subgraph-propagation-ext}).
+For the backward pass, we compute gradients of 
+\begin{equation} \label{eq:meta-loss-with-sampling}
+    \m{L}_{\text{muse}}(W,\theta) :=\sum_{s=1}^{m}\sum_{i=1}^{n_s'}\mathcal{D}\left(g\left[Y_s^{(K)}\left(W\right)_i;\theta\right], T_{s,i}\right)
+\end{equation}
+w.r.t.~$W$ and $\theta$ as listed on line 10 of \Cref{alg:training}, where $\m{L}_{\text{muse}}(W,\theta)$ is a sampling-based modification of (\ref{eq:meta-loss}).  For $W$ though, we only pass gradients through the calculation of $Y_s^{(K)}$, not the full online $M$ update; however, provided $\rho$ is chosen to be sufficiently large, $M$ will change slowly relative to $Y_s^{(K)}$ such that this added complexity is not necessary for obtaining reasonable convergence.
+\begin{algorithm}[ht]
+\caption{Training procedure for \model}
+\label{alg:training}
+\begin{algorithmic}[1]
+\Statex {{\bf Input}: $\{\m{G}_s\}_{s=1}^m$: subgraphs, $\{X_s\}_{s=1}^m$: features, $K$: \# unfolded layers, $E$: \# epochs}
+\State Randomly initialize $W$ and $\theta$; initialize $c\in\R^{n}$ and $M\in\R^{n\times d}$ to be zero\label{line:init}
+\For {$e=1, 2, \ldots, E$}
+    \For {$s=1, 2, \ldots, m$}
+        \State $\mu_{s,i}\leftarrow M_{I(s,i)}, i=1, 2, \ldots, n_s$
+        \State $Y_s^{(0)}\leftarrow f(X_s;W)$
+        \For {$k=1, 2, \ldots, K$}
+            \State Update $Y_s^{(k)}$ from $Y_s^{(k-1)}$ by \eqref{eq:subgraph-propagation-ext} using $\mu_s$
+        \EndFor
+        \State Update $M$ and $c$ using \eqref{eq:online-mean} with $Y_{s,i}^{(K)}, i=1, 2, \ldots, n_s$
+        \State Update $W$ and $\theta$ via SGD over $\m{L}_{\text{muse}}$ from \eqref{eq:meta-loss-with-sampling}
+    \EndFor
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+
+
+\section{Convergence Analysis of \model}
+
+\label{sec:convergence}
+\paragraph{Global Convergence with ${\bgamma}$ = 0.}  In the more restrictive setting where $\gamma = 0$, we derive conditions whereby the entire bilevel optimization pipeline converges to a solution that jointly minimizes both lower- and upper-level energy functions in a precise sense to be described shortly.  We remark here that establishing convergence is generally harder for bilevel optimization problems relative to more mainstream, single-level alternatives~\cite{bilevel}.  To describe our main result, we first require the following definition:
+
+\begin{definition}
+    \label{def:loss}
+	Assume $f(X;W)=XW$, $\gamma=0$, $\zeta(y)$=0, $g(y;\theta)=y$, and that $\m{D}$ is a Lipschitz continuous convex function.   Given the above, we then define $\m{L}_{\text{muse}}^{(k)}(W)$ as (\ref{eq:meta-loss-with-sampling}) with $K$ set to $k$.  Analogously, we also define $\m{L}_{\text{muse}}^{*}(W)$ as (\ref{eq:meta-loss-with-sampling}) with $Y_s^{(K)}$ replaced by $Y_s^*:=\arg\min_{Y_s}\ell^s_{\text{muse}}(Y_s)$ for all $s$.
+\end{definition}
+\begin{theorem}
+    \label{thm:convergence-loss}
+    Let $W^*$ be the optimal value of the loss $\m{L}_{\text{muse}}^*(W)$ per \Cref{def:loss}, while $W^{(t)}$ denotes the value of $W$ after $t$ steps of stochastic gradient descent over $\m{L}_{\text{muse}}^{(k)}(W)$ with diminishing step sizes $\eta_t=O(\frac{1}{\sqrt{t}})$.  Then provided we choose $\alpha \in \left(0,\min_s\|I+\lambda L_s\|_2^{-1} \right]$ and $Y_s^{(0)}=f(X_s;W)$, for some constant $C$ we have that
+    \begin{equation*}
+          \mathbb{E}\left[\m{L}_{\text{muse}}^{(k)}(W^{(t)})\right]-\m{L}_{\text{muse}}^*(W^*) \le O\left(\frac{1}{\sqrt{t}}+e^{-Ck}\right).
+    \end{equation*}
+\end{theorem}
+
+Given that $\m{L}_{\text{muse}}^*(W^*)$ is the global minimum of the combined bilevel system, this result guarantees that we can converge arbitrarily close to it with adequate upper- and lower-level iterations, i.e., $t$ and $k$ respectively.  Note also that we have made no assumption on the sampling method. 
+In fact, as long as offline sampling is used, convergence is guaranteed, although the particular offline sampling approach can potentially impact the convergence rate; see \Cref{sec:sample-affect-rate} for further details.
+\paragraph{Lower-Level Convergence with arbitrary ${\bgamma}$.}
+We now address the more general scenario where $\gamma \geq 0$ is arbitrary.  However, because of the added challenge involved in accounting for alternating minimization over both $\bb{Y}$ and $M$, it is only possible to establish conditions whereby the lower-level energy \eqref{eq:subgraph-based-energy} is guaranteed to converge as follows.  
+
+
+\begin{theorem}
+    \label{thm:convergence-energy}
+    Assume $\zeta(y)=0$. Suppose that we have a series of $\bb{Y}^{(k)}$ and $M^{(k)}$, $k=0,1,2,\ldots$ constructed following the updating rules $\bb{Y}^{(k)}:=\arg\min_{Y}\ell_{\text{muse}}(\bb{Y},M^{(k-1)})$ and $M^{(k)}:=\arg\min_M\ell_{\text{muse}}(\bb{Y}^{(k)}, M)$, with $\bb{Y}^{(0)}$ and $M^{(0)}$ initialized arbitrarily. Then
+    \begin{equation}
+    \lim_{k\rightarrow\infty}\ell_{\text{muse}}(\bb{Y}^{(k)}, M^{(k)})=\inf_{\bb{Y},M}\ell_{\text{muse}}(\bb{Y}, M).
+    \end{equation}  
+\end{theorem}
+\vspace*{-0.2cm}
+While technically this result does not account for minimization over the upper-level \model loss, we still empirically find that the entire process outlined by \Cref{alg:training}, including the online mean update, is nonetheless able to converge in practice. See \Cref{sec:loss-converge} for an illustration.
+
+ \vspace*{-0.2cm}
+
+
+\section{Experiments}
+
+ \vspace*{-0.2cm}
+We now seek to empirically show that \model serves as a reliable unfolded GNN model that:
+\vspace*{-0.2cm}
+\begin{enumerate}
+\item Preserves competitive accuracy across datasets of widely varying size, including the very largest publicly-available graph benchmarks, with a single fixed architecture, and
+\item Operates with comparable computational complexity relative to common alternatives that are also capable of scaling to the largest graphs.
+\end{enumerate}
+\vspace*{-0.1cm}
+For context though, we note that graph benchmark leaderboards often include top-performing entries based on complex compositions of existing models and training tricks, at times dependent on additional features or external data not included in the original designated dataset.  Although these approaches have merit, our goal herein is not to compete with them, as they typically vary from dataset to dataset. Additionally, they are more frequently applied to smaller graphs using architectures that have yet to be consistently validated across multiple, truly large-scale benchmarks.  %Although these prior models have merit, their contribution is mostly orthogonal to ours.
+
+ 
+\label{sec:experiments}
+
+\paragraph{Datasets.}
+We evaluate the performance of \model on node classification tasks from the Open Graph Benchmark (OGB)~\cite{ogb, ogb-lsc} and the Illinois Graph Benchmark (IGB)~\cite{igb}.  \Cref{tab:dataset} presents the details of these datasets, which are based on homogeneous graphs spanning a wide range of sizes.  Of particular note is \texttt{IGB-full}, currently the largest publicly-available graph benchmark, along with a much smaller version called \texttt{IGB-tiny} that we include for comparison purposes.  We also point out that while \texttt{MAG240M} is originally a heterogenous graph, we follow the common practice of homogenizing it~\cite{ogb-lsc}; similarly for IGB datasets, we adopt the provided homogeneous versions.
+
+\begin{table}[htbp]
+\centering
+\caption{Dataset details, including node feature dimension (Dim.) and number of classes (\# Class).}
+\label{tab:dataset}
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+\textbf{Dataset} & $|\m{V}|$  & $|\m{E}|$ & \textbf{Dim.} & \textbf{\# Class} & \textbf{Dataset Size}\\
+\midrule
+\texttt{ogbn-arxiv}~\cite{ogb}      & 0.17M  & 1.2M & 128   & 40    & 182MB\\
+\texttt{IGB-tiny}~\cite{igb}    & 0.1M  & 0.5M  & 1024  & 19    & 400MB\\
+\texttt{ogbn-products}~\cite{ogb}   & 2.4M  & 123M  & 100   & 47    & 1.4GB\\
+\texttt{ogbn-papers100M}~\cite{ogb} & 111M  & 1.6B  & 128   & 172   & 57GB\\
+\texttt{MAG240M}~\cite{ogb-lsc}     & 244.2M& 1.7B  & 768   & 153   & 377GB\tablefootnote{The size includes author and institution features.}\\
+\texttt{IGB-full}~\cite{igb}  & 269.3M& 4.0B  & 1024  & 19    & 1.15TB\\
+\bottomrule
+\end{tabular}
+\end{table}
+\paragraph{\model Design.}
+For \textit{all} experiments, we choose the following fixed \model settings:  Both $f(X;W)$ and $g(Y;\theta)$ are 3-layer MLPs, the number of unfolded layers $K$ is 8 (rationale discussed later below), and the embedding dimension $d$ is 512, and the forgetting factor $\rho$ for the online mean estimation is 0.9. For offline subgraph sampling, we choose a variation on neighbor sampling called ShadowKHop~\cite{shadowgnn}, which loosely approximates the conditions of \Cref{prop:connection}.  See \Cref{sec:exp-detail} for further details regarding the \model implementation and hyperparameters.
+
+\paragraph{Baseline Models.} With the stated objectives of this section in mind, we compare \model with GCN~\cite{gcn}, GAT~\cite{gat}, and GraphSAGE~\cite{graphsage}, in each case testing with both neighbor sampling (NS)~\cite{graphsage} and GNNAutoScale (GAS)~\cite{gas} for scaling to large graphs.  As a point of reference, we note that GAT with neighbor sampling is currently the top-performing homogeneous graph model on both the \texttt{MAG240M} and \texttt{IGB-full} leaderboards.  We also compare with an analogous full-graph (FG) unfolded GNN (UGNN) with the same architecture as \model but without scalable sampling.
+
+\paragraph{Accuracy Comparisons.}
+As shown in \Cref{tab:acc}, \model achieves similar accuracy to a comparable full-graph unfolded GNN model on the small datasets (satisfying our first objective from above), while the latter is incapable of scaling to even the mid-sized \texttt{ogbn-products} benchmark.  
+Meanwhile, \model is generally better than the other GNN baselines, particularly so on the largest dataset, \texttt{IGB-full}.  Notably, \model exceeds the performance of GAT with neighbor sampling, the current SOTA for homogeneous graph models on both \texttt{MAG240M} and \texttt{IGB-full}. Please also refer to \Cref{sec:gamma-ablation} for \model accuracy ablations involving $\gamma$, where we show that while even $\gamma = 0$ achieves strong results, increasing $\gamma >0$ can lead to further improvement. Likewise, \Cref{sec:sample-ablation-baseline} contains experiments showing that the improvement of \model is not merely a product of using ShadowKHop sampling instead of more traditional neighbor sampling with baseline models; there we show that when switched to offline ShadowKHop sampling, the baseline GNNs degrade further, possibly because they are not anchored to an integrated energy.
+
+\paragraph{Timing Comparisons.} Turning to model complexity, \Cref{tab:speed} displays the training speed of \model relative to two common baselines.  From these results, we observe that \model executes with a similar epoch time (satisfying our second objective from above).
+
+
+
+\begin{table}[ht]
+\caption{Node classification accuracy (\%) on the test set, except for \texttt{MAG240M} which only has labels for validation set.  Bold numbers denote the highest accuracy, and error bars are missing for some GNN baselines that were too expensive to compute. For the two largest datasets, \model is currently the top-performing homogeneous graph model on the relevant OGB-LSC and IGB leaderboards respectively, even while maintaining the  interpretability attributes of an unfolded GNN. We omit error bars for baseline results in the two largest datasets because of the high cost to run them.}
+\label{tab:acc}
+\centering 
+\small
+\begin{tabular}{l|cc|c|c|cc}
+\toprule
+ &  & \hspace{-2.0cm}Small  & Medium & Large &   &  \hspace{-2.0cm} Largest\\
+\midrule
+\textbf{Model} & \texttt{arxiv} & \texttt{IGB-tiny} & \texttt{products} & \texttt{papers100M} & \texttt{MAG240M} & \texttt{IGB-full} \\
+\midrule
+GCN (NS)  & 69.71$\pm$0.25  & 69.77$\pm$0.11  & 78.49$\pm$0.53  & 65.83$\pm$0.36  & 65.24  & 48.59 \\
+SAGE (NS) & 70.49$\pm$0.20  & 72.42$\pm$0.09  & 78.29$\pm$0.16  & 66.20$\pm$0.13  & 66.79  & 54.95 \\
+GAT (NS)  & 69.94$\pm$0.28  & 69.70$\pm$0.09  & 79.45$\pm$0.59  & 66.28$\pm$0.08  & 67.15  & 55.51 \\
+\midrule 
+GCN (GAS) & 71.68$\pm$0.3  & 67.86$\pm$0.20  & 76.6$\pm$0.3  & 54.2$\pm$0.7  & OOM    & OOM   \\
+SAGE (GAS)& 71.35$\pm$0.4  & 69.35$\pm$0.06  & 77.7$\pm$0.7  & 57.9$\pm$0.4  & OOM    & OOM   \\
+GAT (GAS) & 70.89$\pm$0.1  & 69.23$\pm$0.17  & 76.9$\pm$0.5  & OOM  & OOM    & OOM   \\
+\midrule
+UGNN (FG) & \textbf{72.74$\pm$0.25} & 72.44$\pm$0.09 & OOM  & OOM & OOM & OOM   \\
+MuseGNN  & 72.50$\pm$0.19 & \textbf{72.80$\pm$0.02} & \textbf{80.47$\pm$0.16} & \textbf{66.82$\pm$0.02} & \textbf{67.26$\pm$0.06} & \textbf{60.21$\pm$0.18} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\newfloat{figtab}{htb}{fgtb}
+\makeatletter
+  \newcommand\figcaption{\def\@captype{figure}\caption}
+  \newcommand\tabcaption{\def\@captype{table}\caption}
+\makeatother
+
+\begin{figure}[hbtp]
+\begin{minipage}{0.48\linewidth}
+\captionof{table}{Training speed (epoch time) in seconds; hardware configurations in \Cref{sec:exp-detail}. Even on the largest graph, \texttt{IGB-full}, \model remains comparable to popular baselines that adopt online sampling. }
+\label{tab:speed}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+\textbf{Model}  & \begin{tabular}[c]{@{}c@{}}\texttt{papers-}\\ \texttt{100M}\end{tabular} & \texttt{MAG240M}  & \texttt{IGB-full}\\
+\midrule
+SAGE (NS) & 102.48   & 795.19   & 17279.98 \\
+GAT (NS)  & 164.14  & 1111.30  &  19789.79 \\
+\midrule
+MuseGNN   & 158.85  & 1370.47  &  20413.69 \\
+\bottomrule
+\end{tabular}
+\end{minipage}
+\hfill
+\begin{minipage}{0.46\linewidth}
+\centering
+\centerline{\includegraphics[width=\textwidth]{figures/energy.pdf}}
+    \caption{Convergence of (\ref{eq:subgraph-based-energy}) for \model trained on \texttt{papers100M} with varying $\gamma$.}
+    \label{fig:energy_main_paper}
+\end{minipage}
+\end{figure}
+
+
+
+\paragraph{Convergence Illustration.}  In \Cref{fig:energy_main_paper} we show the empirical convergence of (\ref{eq:subgraph-based-energy}) w.r.t.~$\bb{Y}$ during the forward pass of \model models on \texttt{ogbn-papers100M} for differing values of $\gamma$. In all cases the energy converges within 8 iterations, supporting our choice of $K=8$ for experiments.
+
+\vspace*{-0.2cm}
+
+
+\section{Conclusion}
+
+\vspace*{-0.2cm}
+In this work, we have proposed \model, an unfolded GNN model that scales to large datasets by incorporating offline graph sampling into the design of its lower-level, architecture-inducing energy function.  In so doing, \model readily handles graphs with $\sim 10^8$ or more nodes and high-dimensional node features, exceeding 1TB in total size, all while maintaining interpretable layers with concomitant convergence guarantees.
+
+
+
+
+
+
+

@@ -1,8 +1,8 @@
 # BRIGHT: A Realistic and Challenging Benchmark for Reasoning-Intensive Retrieval
 
 - Decision: Accept
-- Avg Score: 4.50
-- Scores: 6, 8, 6, 6, 1, 0
+- Avg Score: 7.20
+- Scores: 6, 8, 6, 6, 10
 
 ## Abstract
 Existing retrieval benchmarks primarily consist of information-seeking queries (e.g., aggregated questions from search engines) where keyword or semantic-based retrieval is usually sufficient.

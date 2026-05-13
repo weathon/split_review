@@ -1,0 +1,213 @@
+\title{LAMP: Large Model Pruning with Inter-Block Error Compensation}
+
+\begin{abstract}
+The increasing prevalence of large-scale models, both in vision and language domains, presents significant challenges in terms of memory and resource consumption. While model pruning is an effective method for compressing models to alleviate these constraints, existing techniques either require extensive fine-tuning, which is resource-intensive, or perform well only at low sparsity levels (10%-50%), failing at high sparsity levels (50%-90%). To address these issues, this paper introduces LAMP to mitigate the drawbacks associated with traditional pruning methods, namely high resource consumption in methods that require extensive fine-tuning, and poor performance at high sparsity levels in methods that do not. It reduces memory overhead and alleviates performance degradation at high sparsity. Experimental results demonstrate that LAMP achieves slightly better performance than SparseGPT at low sparsity levels and significantly better at high sparsity levels in both language and vision models, without significantly increasing memory consumption when compared to SparseGPT.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Since the seminal works by (Vaswani et al., 2017) on the Transformer architecture and (Dosovitskiy et al., 2020) on the Vision Transformer, there has been substantial progress in both vision and language models leveraging the foundational Transformer structure. In language modeling, model series such as OPT (Zhang et al., 2022) and Llama (Touvron et al., 2023a;b) have harnessed the Transformer architecture to construct large language models that deliver outstanding performance. Similarly, significant vision models like Segment anything model (SAM) (Kirillov et al., 2023) have employed the Vision Transformer to develop robust image representations, demonstrating excellent performances in tasks such as segmentation, classification, and various downstream applications (Ke et al., 2024; Wu et al., 2023).  
+
+These models are remarkably large in scale. For instance, the largest OPT model contains 175 billion parameters, while the latest Llama v3 (Llama Team, 2024) model boasts up to 405 billion parameters. The largest SAM model has 636 million parameters, which, although significantly smaller, still poses deployment challenges in certain scenarios. To facilitate the deployment of these large-scale models, model compression techniques are often employed to reduce their size, enabling them to meet hardware constraints.  
+
+Pruning is a critical model compression technique, often categorized into multi-shot and one-shot methods based on pruning frequency. Traditional iterative pruning methods, based on the Lottery Ticket Hypothesis (Frankle & Carbin, 2018), involve an iterative prune-and-finetune process to gradually identify a sparse subnetwork that performs comparably to the original model, thereby reducing the number of model parameters. Classic methods like magnitude pruning (Han et al., 2015b) and more recent approaches such as LLM-Pruner (Ma et al., 2023), which utilizes block pruning with LoRA (Hu et al., 2021) fine-tuning, adhere to this hypothesis. However, for large models, global fine-tuning is resource-intensive, demanding significant GPU memory. Although LLM-Pruner reduces memory requirements using LoRA, it still requires storage for intermediate results and gradients, while methods like LLM Surgeon (van der Ouderaa et al., 2023), despite avoiding global fine-tuning, also demand substantial memory and time due to the use of second-order derivatives. In contrast, one-shot pruning methods have gained traction by minimizing memory usage during fine-tuning. SparseGPT (Frantar & Alistarh, 2023) avoids global fine-tuning by compensating for precision within each basic layer, thus accelerating the pruning process. Wanda (Sun et al., 2024) further simplifies this by eliminating compensation altogether, using a unique significance score to achieve performance comparable to SparseGPT without the need for fine-tuning.  
+
+However, both SparseGPT and Wanda have notable limitations. (i) While these methods perform well at lower sparsity levels $(10\%{-}50\%)$ when pruning large language models, their effectiveness significantly declines at higher sparsity levels $(50\%-90\%)$ . (ii) SparseGPT and Wanda show poor performance on vision models. Wanda, in particular, relies on priors that are specific to language models, making it even less effective than SparseGPT for vision tasks.  
+
+Regarding these issues, in this paper, we propose LAMP, a large model pruning method that is applicable to both vision and language models. It improves performance at both low and high sparsity levels in pruning large language and vision models, without increasing GPU memory usage and pruning time. Specifically, we design a sliding window-based inter-block error compensation method based on the principle of error propagation. As illustrated in Fig. 1, after pruning each block, the subsequent block compensates for the pruning-induced errors of the previous block before pruning itself. This approach ensures that errors introduced during pruning are compensated for in the next block, preventing error propagation to deeper  
+
+![](images/6305f193ee9b3ceae1ca0609aff345438d63881418a5adf613ba3df2e76b3522.jpg)  
+Figure 1: Comparison between our proposed method LAMP and conventional pruning methods. (a) illustrates a standard pruning approach, where all blocks are pruned simultaneously. (b) demonstrates our method. After pruning one block, the subsequent block adjusts to compensate for the error introduced by the pruning of the previous block.  
+
+layers and avoiding the need for full-model fine-tuning during the pruning process. We highlight our contributions as follows:  
+
+1. We introduce the concept of inter-block error compensation, demonstrating that this approach can enhance the performance of one-shot pruning methods with limited computational resources.  
+
+2. Building on this concept, we further design a sliding window-based inter-block error compensation strategy. After pruning each layer, we use the next unpruned layer to compensate for the errors induced by pruning the current layer. It improves post-pruning model performance in both language and vision models.  
+
+3. Extensive experiments on the OPT series of large language models and the SAM series of vision models show that our method significantly enhances post-pruning model performance without increasing the GPU memory consumption.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+2.1 TRANSFORMER ARCHITECTURE  
+
+Since its introduction (Vaswani et al., 2017), Transformer architecture has become the cornerstone of language models due to its superior performance in language tasks. Following the development of GPT (Radford et al., 2018), researchers have built increasingly large models using Transformer as primary building blocks. The Transformer has also proven effective in vision tasks. For example, SAM (Kirillov et al., 2023), which is based on the Vision Transformer, particularly excels in segmentation and serves as a foundational model for various downstream tasks (Wu et al., 2023; Mazurowski et al., 2023; Quan et al., 2024).  
+
+Both language and vision models utilize a backbone composed of multiple Transformer blocks. The majority of parameters in these models are concentrated within their respective backbones. These Transformer blocks consist of multi-head self-attention and feed-forward neural networks with two linear layers. Multi-head self-attention is generally considered more critical than the feed-forward network.  
+
+2.2 LARGE MODEL PRUNING   
+Prior to the advent of large models, the development of pruning methods primarily aimed to enhance model performance at target sparsity levels, leading to many highly effective techniques. Pruning methods can be categorized by granularity into structured and unstructured pruning. Specifically, unstructured pruning (Han et al., 2015b) modifies individual weights, generally achieving better performance but requiring a sparse engine for inference acceleration on GPUs. In contrast, structured pruning (Liu et al., 2017) operates on regular blocks of weights, allowing direct inference acceleration on GPUs, although it does not match the performance of unstructured pruning. Currently, popular pruning methods are typically iterative (Frankle & Carbin, 2018). These methods iteratively prune a portion of the weights, followed by global fine-tuning to restore performance, repeating this cycle until the target sparsity is achieved. While iterative pruning improves the performance of pruned models, it requires multiple rounds of fine-tuning, resulting in longer pruning times. Some research has also focused on one-shot pruning methods (Han et al., 2015a; Lee et al., 2018). These methods usually offer faster pruning and some do not require fine-tuning the entire model, thus saving significant memory costs. However, one-shot pruning methods typically do not achieve the same performance as iterative pruning methods.   
+With the emergence of large models, the computational and memory costs of global fine-tuning made iterative pruning methods prohibitively expensive. However, some approaches have combined iterative pruning with LoRA to apply this technique to large models (Ma et al., 2023; Zhang et al., 2023). Additionally, the speed and lower computational resource requirements of one-shot pruning methods have led to the development of several such techniques for large models, notably SparseGPT and Wanda. SparseGPT (Frantar & Alistarh, 2023) is a one-shot rapid pruning method belonging to Optimal Brain Surgeon (Hassibi & Stork, 1992) family. It independently analyzes each basic layer of the model, formulates the pruning problem as a constrained optimization problem, and solves the pruned weight values using the Lagrange multiplier method. SparseGPT builds on the OBS foundation by leveraging the property of Cholesky decomposition to efficiently obtain different orders of Hessian matrices, significantly accelerating the pruning process and reducing memory usage. Essentially, SparseGPT consist of two parts: pruning and compensation, which are integrated during the Lagrange multiplier method’s solution process. However, SparseGPT compensates for pruning errors by adjusting unpruned weights within each basic layer, without considering inter-block weight interactions. Wanda (Sun et al., 2024), another pruning method, is faster than SparseGPT. It introduces a strong prior for language models, assuming that weight importance is related to both the absolute value of the weight and the corresponding output. Wanda designs an importance metric that achieves good results without compensating for pruning losses. However, subsequent studies Williams & Aletras (2023) suggest that while Wanda performs well in many cases, it can occasionally fall short compared to SparseGPT, and its performance in vision models is particularly lacking, where its strong priors may lead to suboptimal results.   
+3 METHOD   
+Our primary objective is to develop an efficient pruning method for large models, including both vision and language models. This method should be executable within a reasonable time frame, even under limited computational and memory resources. Additionally, it should sustain robust performance at high sparsity levels. To achieve this, we have carefully balanced the need for high performance with the imperative to minimize memory and time overhead. In this paper, we introduce LAMP, a pruning strategy that effectively mitigates performance degradation at high sparsity levels  
+
+and facilitates rapid pruning in memory-constrained environments. The following sections detail our method through four key aspects: Theoretical Foundations, Progressive Block Pruning, Sparsity Rearrangement, and Chunked Intermediate Storage.  
+
+![](images/6bf81fa04b64fa67985b27be71ba6cd7c6a04ed0604cc33b683f2f270a83b18c.jpg)  
+Figure 2: Overview of the proposed method. (a) progressive block pruning for sequential block pruning and compensation; (b) basic structure of a transformer block (showing only weight-intensive and essential layers); (c) illustration of the chunked intermediate storage.   
+3.1 PROGRESSIVE BLOCK PRUNING  
+
+As discussed in the introduction, traditional pruning methods typically require global fine-tuning to compensate for pruning-induced errors, necessitating the entire model to be loaded into memory. If full-precision fine-tuning is used, additional memory is needed to store full-precision gradients, resulting in a memory demand of at least twice the model’s size, often more. While methods like SparseGPT avoid full-model fine-tuning, significantly reducing memory usage, they only compensate for errors within individual blocks and overlook inter-block interactions. Given that blocks function as nested entities, where earlier blocks influence subsequent ones, ignoring these interactions can lead to error accumulation. This issue may be negligible at low sparsity but becomes critical at high sparsity, leading to rapid performance degradation, as confirmed by our experiments.  
+
+To address this, we propose Progressive Block Pruning, which enhances inter-block error compensation by building upon SparseGPT. As depicted in Fig. 2(a), Progressive Block Pruning leverages the modular structure of large models, processing each block sequentially using a sliding window approach. Initially, the sliding window contains two blocks. Since the operations are consistent after each slide, we explain the method using the first two blocks.  
+
+In Fig. 2(a), the sliding window moves from left to right with a window length encompassing two blocks. Initially, the window contains $B^{1}$ and $B^{2}$ . Pruning is first applied to $B^{1}$ , followed by compensating for the pruning-induced error in $B^{1}$ using $B^{2}$ . The detailed calculation procedure for this compensation is outlined in Algorithm 1, as follows: The input data from the calibration set passes through the position encoding module, producing an intermediate result, $z^{0}$ , which is then duplicated to create $z^{0^{\prime}}$ . At this stage, the feature flow splits into two streams: the “standard stream” and the “error stream.” Before pruning $B^{1}$ , $z^{0^{\prime}}$ passes through $B^{1}$ , producing an unbiased output, $z^{1^{\prime}}$ . SparseGPT is then applied to prune $B^{1}$ , and $z^{0}$ passes through the pruned $B^{1}$ , resulting in a biased output, $z^{2}$ . Subsequently, $z^{1^{\prime}}$ passes through the unpruned $B^{1}$ , yielding an unbiased output, $z^{2^{\prime}}$ . Here, $z^{1}$ serves as both the output of the pruned $B^{1}$ and the input to $B^{2}$ . Since $z^{1}$ is biased, the output from $B^{1}$ will also be biased, whereas the desired output is $z^{2^{\prime}}$ . Therefore, $z^{2^{\prime}}$ serves as the target for $z^{1}$ , forming a labeled feature dataset $(z^{1},\,z^{2^{\prime}})$ . To align output of $B^{1}$ with $z^{2^{\prime}}$ , we adjust $\bar{B}^{1}$ ’s parameters by training it on this feature dataset, reducing the output bias. Finally, the sliding window advances by one block, and the process is repeated: prune the first block and adjust the parameters of the second block using the newly formed feature dataset.  
+
+As above, Progressive Block Pruning progresses sequentially along the model’s backbone, processing one block at a time. It only requires a single block to be loaded into memory at a given moment.  
+
+As each block is loaded into memory and pruned, the previous block is unloaded before the next block is loaded. This approach significantly reduces memory usage during the pruning and compensation process.  
+
+3.2 SPARSITY REARRANGEMENT  
+
+In many pruning methods, the sparsity of different parts of the model can be adaptively determined through specific rules. However, since our method is based on a sliding window approach for progressive pruning, it is difficult to obtain information about the blocks that are outside the current window. If we attempt to acquire global information, we would either incur significant I/O overhead from loading model segments sequentially or face high memory usage from loading the entire model at once. Some methods even evaluate importance based on gradients, which can add further demands on gradient storage.  
+
+To avoid these issues, fast pruning methods like SparseGPT or Wanda typically assign the same sparsity level uniformly across all parts of the model, equivalent to the target sparsity. However, this approach is clearly suboptimal. Certain prior knowledge can be leveraged to adjust the sparsity distribution, thereby avoiding these problems while improving performance.  
+
+![](images/e67c388aec85875a3d230d67cf3e2a4557c8aae896ab3b04d1973bafc56e8e1c.jpg)  
+
+
+
+\section{3.2.1 INTER-BLOCK SPARSITY REARRANGEMENT  }
+
+
+Progressive Block Pruning fine-tunes $B^{i+1}$ to compensate for the pruning-induced errors in $B^{i}$ . However, when pruning the last block, $B^{n}$ , there is no $B^{n+1}$ available to compensate for the errors in $B^{n}$ . Therefore, assigning the same number of pruned weights to each block is not optimal. Instead, the pruning distribution should be adjusted across different blocks. To maintain the global target sparsity, we rearrange the sparsity between blocks as follows:  
+
+$$
+P_{B^{n}}=|\theta^{n}|\times s\times\alpha,
+$$  
+
+$$
+P_{B^{j}}=|\theta^{j}|\times s+\frac{|\theta^{n}|\times s\times(1-\alpha)}{n-1}
+$$  
+
+where $j\,=\,1,\,.\,.\,,n\,-\,1.$ , $\theta^{j}$ denotes the parameters in $B^{j},\,|\theta|$ denotes the number of weights in a single block, and $\alpha$ is a super-parameter that redistributes a portion of the pruned weights from the last block evenly across all preceding blocks.  
+
+3.2.2 INTRA-BLOCK SPARSITY REARRANGEMENT  
+
+As shown in Fig. 2(b), the majority of the parameters within a Transformer block are contributed by the matrices depicted, which are clearly hierarchical. Therefore, a block can essentially be viewed as a nested function: the QKV matrices represent the innermost function, while the second fully connected layer (fc2) represents the outermost function. According to the conclusions drawn in the Theoretical Foundations section, if the same sparsity level is applied uniformly across all layers, the errors introduced by the QKV matrices, which are further from the output of $B^{i}$ , will be more challenging to compensate for in $B^{i+1}$ . On the other hand, fc2 is closer to the output of $B^{i}$ , making its errors easier to compensate for in $B^{i+1}$ . Additionally, inspired by previous works, earlier layers tend to converge first (Chen et al., 2023), and faster convergence often leads to better generalization performance (Hardt et al., 2016). Therefore, the sparsity distribution should be rearranged by reducing the sparsity of the QKV matrices and increasing the sparsity of fc2. To ensure that the global target sparsity remains unchanged, we rearrange the sparsity according to the following rule:  
+
+$$
+P_{t}=s\times|W_{t}^{i}|\times(1-\beta),\quad t\in\{Q,K,V\}.
+$$  
+
+$$
+P_{f c2}=s\times|W_{f c2}^{i}|+s\times|W_{f c2}^{i}|\times\beta.
+$$  
+
+where $P_{t}$ represents the number of pruned weights, $\lvert W\rvert$ denotes the total number of weights in a single layer, and $\beta$ is a super-parameter that needs to be adjusted.  
+
+3.3 CHUNKED INTERMEDIATE STORAGE  
+
+Proposed method requires the intermediate results of each sample after passing through each block. Since the storage space required for these intermediate results is significantly larger than the space occupied by the samples themselves, simply storing them in GPU memory, as done in typical training processes, would consume a considerable amount of memory. Given that GPU memory is a more valuable resource than system memory, this approach would lead to significant memory wastage. To address this issue, we employ Chunked Intermediate Storage to reduce memory usage during the pruning process.  
+
+As in Fig. 2(c), all intermediate results are stored in system memory, and they are only loaded into GPU memory when needed for processing through a block. For instance, While the GPU processes $B^{i}$ and $z_{j}^{i}$ , the CPU simultaneously loads $z_{j+1}^{i}$ into GPU memory and releasing it from system memory. After $z_{j}^{i}$ is processed and get zji+1, it will be transferred from GPU memory back to system memory. This way, only two intermediate results and one block are kept in GPU memory at any given time, minimizing memory usage without affecting the speed of forward pass.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+
+
+\section{4.1 EXPERIMENTAL SETUP  }
+
+
+To evaluate the effectiveness of our method, we focus on models with 7 billion parameters or fewer, as these are the most commonly used in research and resource-constrained scenarios. Pruning these models is also the most feasible on a single consumer-grade GPU. Specifically, we validate our approach using the OPT-125M/1.3B/2.7B/6.7B and Llama 2-7B language models from Hugging Face, as well as the SAM-B/L/H vision models provided by Meta. All experiments were conducted on a single NVIDIA RTX 3090 GPU with 24GB of memory.  
+
+For the hyperparameter settings of LAMP, learning rate is adjusted according to the sparsity level, as different sparsity levels introduce varying amounts of error. $\alpha$ and $\beta$ are tuned based on the training dynamics.  
+
+For calibration data, the language model calibration dataset follows the approach of SparseGPT, using 128 segments of 2048 tokens, randomly sampled from C4 dataset (Raffel et al., 2020). Similarly, the vision model calibration dataset consists of 128 images, randomly sampled from the second compressed file of the SA-1B dataset (Kirillov et al., 2023) provided by Meta.  
+
+To comprehensively evaluate the performance of pruned models, we validate OPT using the Wikitext-v2 (Merity et al., 2016) and PTB datasets (Marcus et al., 1994) from Hugging Face, with perplexity (PPL) as the evaluation metric. We also evaluate the pruned Llama 2-7B model using accuracy on seven Zero-Shot tasks: BoolQ (Clark et al., 2019), RTE (Wang, 2018), HellaSwag (Zellers et al., 2019), WinoGrande (Sakaguchi et al., 2021), ARC Easy and Challenge (Clark et al., 2018), and OpenbookQA (Mihaylov et al., 2018), following the experimental setup introduced by Sun et al. (2024) in their work on Wanda. This allows for a more task-specific evaluation of the pruned model’s generalization capabilities. For SAM, we validate the performance using the fourth compressed file of the SA-1B dataset as well as the COCO dataset (Lin et al., 2014), employing Intersection over Union (IoU) as the primary metric for visual models.  
+
+
+
+\section{4.2 UNSTRUCTURED PRUNING  }
+
+
+Language Models. In Table 1 and Table 2, we report the perplexity performance of the OPT series models on Wikitext and PTB datasets after pruning to various sparsity levels using our method and other baseline approaches. Our method demonstrates superior performance over baselines even at lower sparsity levels, and as sparsity increases, the performance gap widens in favor of our approach. Additionally, as model size decreases, the advantage of our method over the baselines becomes even more pronounced. Table 3 also presents results in comparing the performances of our proposed method against those of baselines on the Llama 2-7B model at $50\%$ and $70\%$ sparsity levels. Our method consistently outperforms all baseline approaches at both sparsity levels, achieving the best results across all tasks. These findings highlight the effectiveness of the inter-block error compensation pruning method introduced in this paper, particularly under high-sparsity conditions, across different model scales, and for various model architectures. Table 1: Perplexity performances of pruned OPT models of different scales at various sparsity levels. The models are calibrated on a subset of the C4 and evaluated on full Wikitext-v2.  
+
+324 325 326 327 328 329 330 331 332 333 334 335 336 337 338 339 340 341 342 343 344 345 346 347 348 349 350 351 352 353 354 355 356 357 358 359 360 361 362 363 364 365 366 367 368 369 370 371 372 373 374 375 376 377   
+
+![](images/ecab136e0bef99dec04bfdc75162ae424316a7bd2e5ef8abfc308ddb254f7fe1.jpg)  
+
+Table 2: Perplexity performancse of pruned OPT models of different scales at various sparsity levels. The models are calibrated on a subset of the C4 and evaluated on PTB.   
+
+![](images/5a5085d722a8700c7fa28c5249aad560df4c0389af5d6b1a6235abd4e250ee90.jpg)  
+
+Vision Models. In Tables 4 and Table 5, we report IoU performance of SAM at varying sparsity levels on SA-1B and COCO datasets with single-point interaction. Following experimental setup, SAMs are pruned with only 128 images random sampled from SA-1B as calibration data. The experiments first verify that SparseGPT indeed achieves strong IoU performance on visual models under low sparsity conditions, outperforming both Magnitude and Wanda. As Wanda is based on strong priors from language models, its underperformance compared to SparseGPT on visual models is within our expectations. Lastly, the method proposed in this paper outperforms all baselines and exhibits a similar trend observed in language model experiments: the higher the sparsity, the greater the advantage of our method over the baseline methods. This demonstrates that the proposed method is not only effective for language models but also remains effective for visual models.  
+
+Table 3: Zero-shot performance (Accuracy, $\%$ ) of Llama 2-7B pruned by different method on various tasks at sparsity of $50\%$ and $70\%$ .  
+
+![](images/15d88ec1023d6d9a7ece183f2029ca68d0a1e1f3d9b0bddc31b2a52834410042.jpg)  
+
+Table 4: Instance segmentation performance of SAM models (IoU, $\%$ ) at various sparsity using single-point interaction on SA-1B. The models are calibrated on a subset of 128 images sampled from SA-1B.   
+
+![](images/a1e1cb43c8c68ea1865bf103e2524247ec4e4b3658e2f3937825ad340dc76bf3.jpg)  
+
+
+
+\section{4.3 SEMI-STRUCTURE PRUNING AND QUANTIZATION  }
+
+
+On certain specialized hardware, such as specific NVIDIA GPUs or other custom-designed computing architectures, the combination of pruning and quantization can further accelerate inference while maintaining an acceptable performance degradation. To explore this, we conduct tests using a joint compression strategy that combines pruning and quantization. Specifically, we focus on the combination of 2:4 and 4:8 semi-structured sparsity with 3-bit and 4-bit quantization. Since Wanda does not support quantization, we exclude it from experiments involving quantization and instead compared our approach against SparseGPT.  
+
+4.4 SPARSITY REARRANGEMENT  
+
+To validate the Sparsity Rearrangement method based on priors, as proposed in the Method section, we conducted experiments on both Inter-Block Sparsity Rearrangement and Intra-Block Sparsity Rearrangement.  
+
+Inter-Block Sparsity Rearrangement. In Fig. 3 and Fig. 4, we present the performance of OPT125M and SAM-B pruned by LAMP with different $\alpha$ . For clarity in visual presentation, we conducted experiments with $70\%$ sparsity on OPT-125M and $90\%$ sparsity on SAM-B. We observed that in the language model, $\alpha$ had the greatest impact on the performance of OPT-125M on the PTB dataset, and adjusting $\alpha$ further improved the model’s performance on non-calibration datasets. On vision models, the influence of $\alpha$ on performance was similar on both datasets, with adjustments to $\alpha$ enhancing the overall performance of the visual model. Overall, appropriate tuning of $\alpha$ can further improve the performance of pruned models. Based on experiments, we conclude that $\alpha$ typically yields optimal results within the range of [0.6, 0.75] for language models, and within [0.8, 0.9] for vision model.  
+
+Table 5: Instance segmentation performance of SAM models (IoU, $\%$ ) at various sparsity using single-point interaction on COCO.  
+
+![](images/f48d49fdb8a2eb9142ba39d82c04697d1de3485cdfd76b4355c4c26c79403072.jpg)  
+
+![](images/e95451499736a817b4b6bce37de905bfbc7e1b5fa555717c888958a950b33674.jpg)  
+Figure 3: Perplexity performance of pruned OPT-125M with different $\alpha$ .  
+
+![](images/0681794b2fa66b847b8fac6842271e580da5bd6cd2cc195b399bd889d66caec3.jpg)  
+Figure 4: Instance segmentation performance (IoU, $\%$ ) of SAM-B with different $\alpha$ .  
+
+Intra-Block Sparsity Rearrangement. In Fig. 5, we illustrate the impact of different $\beta$ on the language model, using the $70\%$ sparsity model of OPT-125M as an example. We observed that in the language model, adjusting $\beta$ can further reduce the model’s perplexity. Unlike $\alpha$ , $\beta$ not only improves the model’s performance on non-calibration datasets but also enhances its performance on calibration datasets. Overall, appropriately adjusting $\beta$ can further improve the performance of the pruned model. The optimal value for $\beta$ typically falls within the range of $[0.6\times(1\!-\!s),0.8\times(1\!-\!s)].$ , where $s$ denotes sparsity. In Fig. 6, we exemplify the effects of varying $\beta$ on the visual model, specifically using the $90\%$ sparsity model of SAM-B. Our findings indicate that the influence of $\beta$ on the visual model is minimal; both on calibration and non-calibration datasets, adjustments to $\beta$ yield only marginal improvements in the model’s performance.  
+
+![](images/b61a0b1f8b415145ce87876347a14978ee11917acf2fe9f08a85a9379752a304.jpg)  
+Figure 5: Perplexity performance of OPT-125M with different $\beta$ .  
+
+![](images/f0c5f9359949e4a25c8ecd92549b1e0f413c465175786213d4334010be5b6034.jpg)  
+Figure 6: Instance segmentation performance (IoU, $\%$ ) of SAM-B with different $\beta$ .  
+
+4.5 CALIBRATION SET SIZE  
+
+Although our experiments follow the settings of SparseGPT and Wanda, using 128 randomly selected samples for pruning both language and vision models, Fig. 7 and Fig. 8 show the impact of calibration set size on our method’s performance. Fig. 1 presents results on the OPT-125M language model at $70\%$ sparsity, while Fig. 2 shows results for the SAM-B vision model at $90\%$ sparsity. In both cases, increasing the sample size beyond 128 offers minimal performance gains while significantly increasing GPU memory usage. Thus, like SparseGPT and Wanda, 128 samples remain the optimal choice.  
+
+![](images/0a84371247beb8478ce6307eb7db07be55fc2bdfa144600fcf20aa026523b144.jpg)  
+
+Figure 7: Perplexity performance of OPT-125M with different calibration set size.  
+
+![](images/baf2b51be3a9272d3dbc5f932cc57389b5cafa2a2820c62624495d2889655001.jpg)  
+Figure 8: Instance segmentation performance (IoU, $\%$ ) of SAM-B with different calibration set size.  
+
+
+
+\section{4.6 GPU MEMORY CONSUMPTION  }
+
+
+In Table 6, we report the GPU memory consumption of SparseGPT, Wanda, and our method when pruning the OPT-6.7B. For large model pruning algorithms, GPU memory consumption directly determines whether the method can be executed on devices with lower memory capacity and with lower cost. Our analysis indicates that the additional GPU memory usage in SparseGPT and Wanda, compared to the proposed method, primarily comes from storing intermediate results. However, the results show that, because of chunked intermediate storage, our method, even though it involves partial model training, has lower GPU memory consumption than both SparseGPT and Wanda. Note that we only use mixed-precision fine-tuning, without employing low-rank adaptation methods. If combined with efficient fine-tuning techniques such as LoRA, the GPU memory consumption could be further reduced. This advantage enables the pruning of larger models on consumer-grade GPUs.  
+
+Table 6: GPU Memory Consumption Comparison   
+
+![](images/b4a386b9a11e73e2c1a9a5def444334edd720a1b42ebcfa38d58c925eafc0a95.jpg)  
+
+
+
+\section{5 CONCLUSION  }
+
+
+In this paper, we propose an efficient pruning method, LAMP, which is effective for both vision and language models while consuming limited GPU memory. The LAMP method fine-tunes each block individually by compensating for the inter-block errors introduced by pruning, then rearranges the sparsity distribution based on the prior knowledge of the Transformer structure and pruning method. Additionally, system memory is utilized to offload the GPU memory burden of storing intermediate results. The proposed method significantly improves the performance of models pruned at high sparsity levels without increasing GPU memory consumption. We validate the LAMP’s effectiveness across vision and language models of varying scales, achieving state-of-the-art performance in both domains.  
+
+
+

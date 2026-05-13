@@ -1,0 +1,367 @@
+\title{Effective pruning of web-scale datasets based on complexity of concept clusters}
+
+\begin{abstract}
+Utilizing massive web-scale datasets has led to unprecedented performance gains in machine learning models, but also imposes outlandish compute requirements for their training.
+In order to improve training and data efficiency, we here push the limits of pruning large-scale multimodal datasets for training CLIP-style models. Today's most effective pruning method on ImageNet clusters data samples into separate concepts according to their embedding and prunes away the most prototypical samples. We scale this approach to LAION and improve it by noting that the pruning rate should be concept-specific and adapted to the complexity of the concept. Using a simple and intuitive complexity measure, we are able to reduce the training cost to a quarter of regular training. By filtering from the LAION dataset, we find that training on a smaller set of high-quality data can lead to higher performance with significantly lower training costs. More specifically, we are able to outperform the LAION-trained OpenCLIP-ViT-B/32 model on ImageNet zero-shot accuracy by 1.1p.p. while only using 27.7\% of the data and training compute. 
+Despite a strong reduction in training cost, we also see improvements on ImageNet dist. shifts, retrieval tasks and VTAB.
+On the DataComp Medium benchmark, we achieve a new state-of-the-art ImageNet zero-shot accuracy and a competitive average zero-shot accuracy on 38 evaluation tasks. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begin{wrapfigure}{r}{0.55\textwidth}
+\begin{center}
+\includegraphics[width=0.55\textwidth]{Figures/main_plot.pdf}
+\caption{With our approach, we outperform training on the full LAION-400M dataset (64.1\% vs 63.0\%) for CLIP-ViT-B/32 models while significantly reducing the training cost to 27.7\%. We filter from the LAION-CAT-440M by first deduplicating it to 277M examples using the SemDeDup method and then applying Density-Based Pruning (DBP) to get datasets of sizes 84M, 112M, and 166M examples. 
+}
+\label{fig:main_result_LAION280M}
+\end{center}
+\end{wrapfigure}
+Scaling the model and the training dataset size has been shown to increase performance across a wide range of tasks \citep{djolonga2021robustness, Zhai_2022_CVPR, big_transfer, taori2020measuring}. Foundation Models \citep{bommasani2021opportunities} such as CLIP \citep{radford2021learning}, DinoV2 \citep{oquab2023dinov2}, LLaMA and LLaMA-2 \citep{touvron2023llama, touvron2023llama_2} or Eva \cite{fang2023eva} have revolutionized the Deep Learning field and sparked interest beyond the academic realm with their unprecedented capabilities in vision and language.
+However, training (foundation) models on larger datasets incurs high computational and environmental costs which are out of reach for most academic labs. 
+In contrast to the highly curated ImageNet dataset \citep{5206848}, web-scale datasets such as LAION \citep{schuhmann2022laionb} are noisy, and filtering out less informative data can strongly improve data efficiency and speed up learning.
+For example, discarding images below a certain CLIP-score, which is the cosine similarity between image and caption embeddings, has been shown to improve data efficiency.
+The original LAION dataset used a CLIP-score value of 0.3 as one of the steps to create LAION-400M \citep{schuhmann2021laion}. In the recently proposed benchmark DataComp \citep{gadre2023datacomp}, which aims to find optimal data for a broad range of downstream tasks, CLIP-score filtering has emerged as a strong baseline \citep{gadre2023datacomp}.
+Apart from CLIP-score filtering, other works assessed the complexity and the action-content of individual captions, and removed images containing (parts of) the caption via text-spotting \citep{radenovic2023filtering}, or used the CLIP-score to gauge the importance of the captions within the image before removing them \citep{maini2023t}.
+
+So far, other works on pruning of large-scale datasets have focussed on assessing the quality of individual data samples.
+We argue that the marginal importance of a data point depends on other data points in its vicinity, such that optimal dataset coverage allows to discard more data points from denser regions, while keeping more data points from sparser regions.
+In order to achieve this, we begin by scaling the simple and theoretically motivated Self-Supervised-Prototypes Pruning method (SSP-Pruning, \citealp{NEURIPS2022_7b75da9b}) to web-scale datasets.
+To recap SSP-Pruning, \citet{NEURIPS2022_7b75da9b} proposed to cluster the embeddings of a pretrained model with k-means, then ranked all samples by their distance to the nearest cluster centroid and pruned the dataset by discarding the most prototypical examples.
+With their approach, \citet{NEURIPS2022_7b75da9b} outperformed all other pruning methods on ImageNet.
+Since SSP Pruning has been shown to scale to large language models \citep{tirumala2023d4}, we take this method as the most promising technique on ImageNet, and investigate which steps are necessary to scale it to CLIP training on LAION; we also modify the pruning criterion by considering the complexity of concepts in the dataset.
+On a high level, we wish to have approximately the same sample density across the whole embedding space, thus, we call our method Density-Based-Pruning (DBP).
+Our contributions are:
+\begin{itemize}
+    \item We scale SSP-Pruning to web-scale datasets which is a non-trivial task involving a deduplication step, investigate how the complexity of different concepts within a dataset can be used for pruning, and report further improvements over regular SSP-Pruning.
+    \item We demonstrate that the pruning criterion we developed on LAION also transfers to the DataComp benchmark \citep{gadre2023datacomp}, and beat the current state of the art reported in the literature in most categories.
+    \item We show empirically that training on smaller high-quality data can result in a better model with significantly lower training cost. 
+\end{itemize}
+
+
+\section{Related Work}
+
+\label{app:related_work}
+
+\subsection{Data curation in supervised learning}
+Our work is related to \emph{coreset selection} which focuses on identifying a highly informative subset of a large dataset to improve training efficiency.
+Usually, samples which are considered to be harder based on some scoring criterion are kept while easier examples are discarded.
+Criteria for ranking the samples are based on (dynamic) model uncertainty \citep{gal2017deep, coleman2019selection, he2023large}, distance of samples to score medians \citep{xia2022moderate}, the average L2 norm of the error vector \citep{paul2021deep}, the degree of forgetting over the course of training \citep{toneva2018empirical}, the degree of memorization \citep{feldman2020neural, feldman2020does}, and many others.
+\citet{NEURIPS2021_793bc52a} propose an iterative bi-level optimization to select the coreset from a large pool of unlabeled data which would result in minimum labeled set loss when trained upon in a semi-supervised manner.
+
+\subsection{Contrastive Image-Language Pretraining}
+Combining caption supervision with training of large models on large-scale datasets has transformed the field of computer vision, and models trained with CLIP \citep{radford2021learning} or ALIGN \citep{jia2021scaling} have shown exceptional performance across a range of down-stream tasks, such as image generation \citep{ramesh2022hierarchical}, image segmentation \citep{xu2023open}, text-to-image synthesis \citep{li2022stylet2i}, video understanding \citep{xu2021videoclip}, and others.
+The open-source projects OpenCLIP \citep{ilharco_gabriel_2021_5143773} and LAION-2B \citep{schuhmann2022laionb} have democratized research on large-scale multimodal models and have been crucial to make such progress possible.
+Still, while training of large-scale models on large-scale datasets is possible in theory, it remains prohibitively expensive for most academic labs in practice: For example, training of the ViT-L/14 model \citep{dosovitskiy2020image} with OpenCLIP took 400 A100 (40 GB) GPUs for around 127 hours.
+
+\iffalse
+\paragraph{Data curation at scale}
+\textcolor{blue}{
+There exist different strategies to make CLIP training more efficient.
+Some directions try to improve the quality of the dataset, for example by diversifying \citep{santurkar2022caption} or denoising the captions \citep{nguyen2023improving} or by using shorter image/ text token sequences for larger image/ text encoders during CLIP training \citep{li2023inverse}.
+Another direction tries to curate the dataset by discarding less informative samples altogether. \citet{xu2023cit} incorporate a data objective into their training pipeline and dynamically select data during training.
+Most other works statically filter the data once prior to training.
+\citet{radenovic2023filtering} propose the Complexity, Action and Text-spotting (CAT) filtering technique to select more informative text-image pairs.
+\citet{abbas2023semdedup} introduce a self-supervised deduplication technique they call SemDeDup and show that roughly 50\% of the LAION training set can be removed with minimal loss in performance with simple deduplication.
+A simple and strong baseline for filtering is the CLIP-score which is the cosine similarity of image and text token embeddings of a pretrained model.
+First, the LAION-400M dataset itself has been filtered using the CLIP-score such that image-caption pairs were discarded if their CLIP-score was below 0.3 \citep{schuhmann2021laion}.
+\citet{maini2023t} introduce T-MARS, a data filtering technique which aims at eliminating examples where part of the caption (or the whole caption) is part of the image. In contrast to \citet{radenovic2023filtering} who filtered all images where the caption was part of the image, the authors of T-MARS proposed to only filter out those images where the CLIP-scores strongly decreased after blurring the text within the image.
+The CLIP-score is also a strong baseline on subsets of all scales in the DataComp benchmark \citep{gadre2023datacomp}.
+While the CLIP-score is a strong baseline, it is only applicable to multimodal datasets where similarity between two modalities (for example images and captions) can be compared.
+Drawing inspiration from research on unimodal datasets, we build upon \citet{NEURIPS2022_7b75da9b} who have recently shown that many pruning methods which were demonstrated to work on small-scale datasets do not scale to ImageNet \citep{5206848}. In contrast, \citet{NEURIPS2022_7b75da9b} proposed a theoretically-motivated and simple method termed Self-Supervised-Prototypes-Pruning (SSP-Pruning) which outperformed all previous pruning methods on ImageNet. SSP-Pruning has been shown to work for pretraining of large language models \cite{tirumala2023d4}.
+In this paper, we take SSP-Pruning as the most promising technique on ImageNet, and investigate which steps are necessary to scale it to CLIP training on LAION; we also modify the pruning criterion by considering the complexity of concepts in the dataset.}
+\fi
+
+\subsection{Data curation at scale}
+
+There exist different strategies to make CLIP training more efficient.
+We split the data curation methods based on the way they filter the data into three categories, although overlaps exist.
+
+\paragraph{Redundancy Reduction}
+This category of methods aims to reduce data redundancy by removing duplicates 
+as in \citet{abbas2023semdedup, snipdedup}. These methods consider the similarity between examples in the data population and remove samples whose similarity falls below a predefined threshold. This results in more balanced data and saves training costs spent on training on semantically similar examples. 
+
+\paragraph{Matching Score Filtering}
+This category of methods ranks the individual examples using an Image-Text matching (ITM) score computed using a pre-trained model like CLIP \citep{radford2021learning} or BLIP \citep{li2022blip}.
+A simple and strong baseline for ITM filtering is the CLIP-score which is the cosine similarity of image and text token embeddings of a pretrained CLIP model.
+The LAION-400M dataset itself has been filtered using the CLIP-score such that image-caption pairs were discarded if their CLIP-score was below 0.3 \citep{schuhmann2021laion}. The CLIP-score is also a strong baseline on subsets of all scales in the DataComp benchmark \citep{gadre2023datacomp}.
+
+\paragraph{Improving the data quality}
+It has been shown that data efficiency can be improved by diversifying \citep{santurkar2022caption} or denoising the captions \citep{nguyen2023improving} or by using shorter image/ text token sequences for larger image/ text encoders during CLIP training \citep{li2023inverse}.
+\citet{xu2023cit} incorporates a data objective into their training pipeline and dynamically selects data during training.
+\citet{radenovic2023filtering} remove examples with short captions and examples with low caption complexity. In addition, they remove examples that contain part of the caption as text in the image to prevent the model from spotting the caption from the image instead of learning visual semantics. %This text-spotting filtering is one example of the conflict between matching methods (CLIP-score) and removing less useful examples. 
+While text-spotting filtering removes images that contain text, their CLIP-score values tend to be high.
+To resolve this problem, 
+\citet{maini2023t} introduce T-MARS, a data filtering technique which aims to compute more accurate CLIP-score values, by simply masking the text (if it exists) from all images before computing the CLIP-score values.
+\citet{wang2023too} propose a multi-step algorithm which clusters the image embeddings, randomly samples from the clusters, and finally refines the captions of the retained samples. In contrast to their approach, we use cluster complexity to determine the number of examples to pick from each clusters; further, we pick the hardest examples from each cluster instead of random ones. In our experiments, we found that both choices improve performance.
+
+
+\section{Methods}
+
+
+\noindent Our filtering pipeline has 3 stages: deduplication, CLIP-score filtering, and Density-Based-Pruning. 
+
+\paragraph{Deduplication.}
+We find that clusters in web-scale datasets are dominated by duplicates, not allowing us to meaningfully interpret the distance to a cluster centroid as sample difficulty.
+ %\citet{abbas2023semdedup} show that large-scale datasets have many duplicates which dominate clusters, thereby not allowing to interpret the distance to a cluster centroid as sample difficulty.
+
+\paragraph{CLIP-score filtering} In CLIP-score filtering, one calculates image and caption embeddings using a strong pretrained CLIP model and removes examples below a certain cosine similarity (0.3 in LAION-400M, \citealp{laion400m}) or picks a portion of the dataset with the highest cosine similarity. CLIP-score filtering removes low quality samples where the images and the captions do not match and is an integral part of many state-of-the-art pruning methods, such as \citet{maini2023t, radenovic2023filtering}.
+\paragraph{Density-Based Pruning (DBP)}
+\citealp{NEURIPS2022_7b75da9b} proposed a self-supervised pruning metric for ImageNet (SSP-Pruning) where more prototypical examples are removed.
+We build our Density-Based Pruning (DBP) method on top of SSP-Pruning. Following  \citealp{NEURIPS2022_7b75da9b}, we embed the data using a pretrained vision model and then cluster the data in the embedding space using \texttt{k-means} clustering into $k$ clusters.
+Then, considering the cluster centroid as a prototype, the method ranks the cluster items by similarity to the centroid (prototype) and removes examples with high similarities (prototypical examples).
+\label{sec:CBP}
+\begin{figure}[tb]
+\begin{center}
+\begin{subfigure}{.55\textwidth}
+\centering
+\includegraphics[width = 1\textwidth]{Figures/overview_fig2.png}
+   \end{subfigure}
+\begin{subfigure}{.35\textwidth}
+\centering
+\includegraphics[width = 1\textwidth]{Figures/dinter_vs_dintra.pdf}
+   \end{subfigure}
+\end{center}
+\caption{
+We determine the complexity of concepts within a dataset by examining the clusters in the embedding space of a pretrained model. We characterize the clusters with their inter-cluster (left) and intra-cluster distance (middle). We find that clusters with small inter-cluster distance 
+tend to show similar concepts and have low variability among each other. Further, we observe that 
+dense clusters show higher similarity among their samples. 
+Thus, to obtain a more diverse dataset with high variability and low redundancy, we need to sample more from clusters with high inter-cluster distance and high intra-cluster distance. The scatter plot (right) shows the distribution of \dintra~over \dinter~on LAION-50M for 500 clusters.
+\label{overview}}
+\end{figure}
+
+The authors of SSP-Pruning observed that naive pruning of easy examples across the whole dataset results in strongly increasing class imbalance and degraded performance. 
+As a solution, they introduced a class balancing score which enforced a minimum number of images per class.
+In the absence of class labels, a fixed cluster balancing score was used.
+Instead of a fixed score, we here propose to gauge the complexity of a cluster based on simple metrics to decide how many samples to keep from each cluster.
+To determine the complexity of clusters, we calculate the average intra-cluster distance \dintra~as the average distance of cluster members to the centroid (Fig.~\ref{overview}, middle) and the inter-cluster distance \dinter~as the distance of a cluster centroid to its neighboring clusters (Fig.~\ref{overview}, left).
+Intuitively, to cover the dataset optimally and to equalize the sample density across the embedding space, we need fewer samples from dense clusters and from clusters which have other clusters close nearby.
+Thus, we define the complexity for the j-th cluster $\mathrm{C_j}$ as
+\begin{equation}
+    \mathrm{C_j}=\mathrm{d_{inter,j}} \cdot \mathrm{d_{intra,j}},
+    \label{eq:C}
+\end{equation}
+where \dinter~ is computed for each cluster $j$ as the average cosine distance between a cluster centroid and its $l$ nearest neighbor centroids, and \dintra~ is computed as the average cosine distance between the items of a cluster and its centroid. 
+We set the value of $l$ for computing \dinter~to 20 in all experiments (see Section~\ref{ap:hparams_cbp} for an ablation over $l$).
+Clusters with high \dinter~and high \dintra~are considered more complex than clusters with either one of the distances being low.
+To enable sampling, 
+we turn Eq.\ref{eq:C} into a probability distribution by applying a softmax function:
+\begin{equation}\mathrm{P_j}=\frac{\mathrm{exp(C_j/\tau)}}{\sum_i^k \mathrm{exp(C_i/\tau)}},
+    \label{eq:softmax}
+\end{equation}
+with the temperature $\tau$ and the number of clusters $k$. We set the value of $\tau$ to 0.1 in all experiments (see Section~\ref{ap:hparams_cbp} for an ablation over $\tau$).
+Multiplying $\mathrm{P_j}$ with the target dataset size $N$, we obtain the number of examples we would like to keep from each cluster.
+However, it can happen that the original number of samples $M_j$ in a cluster is smaller than the desired $\mathrm{P_j}\cdot N$. 
+We wish to sample as close as possible to $\mathrm{P_j}$ while honoring the dataset constraints and solve this optimization problem using a simple quadratic program solver \texttt{qpsolvers} \citep{Caron_qpsolvers_Quadratic_Programming_2023}. 
+
+The pruned cluster sizes vs $\mathrm{P}_j N$ are plotted in Fig.
+
+\iffalse
+Accounting for this bound while minimizing the squared difference from the desired pruned cluster sizes, we obtain a constrained convex quadratic program:
+\begin{align}
+\begin{split}
+   & \displaystyle{\minimize_{x_1, x_2,...,x_k}}\,\,  \sum_j \left( x_j^2 - 2\cdot  \mathrm{P}_j\cdot N \cdot x_j \right) \\
+    &  \mathrm{subject\,\,to} \;\;  \sum_j x_j=N, \; \; 1 \leq x_j \leq M_j \mathrm{\,\, for \,\, all \,\,}j,
+    \label{eq:min_x}
+    \end{split}
+\end{align}
+where $x_j$ is the sampled number of examples in cluster $j$ and the constraints are given by the pruned dataset size $N$ and the actual cluster sizes $M_j$. % $P$ is the identity matrix and $q=\mathrm{P}_j N$. The first constraint $Ax=b$ bounds the sum of $x$ to the maximum dataset size $N$, so A is a vector of ones and $b=N$. The second constraint bounds $x$ from below by 1 and from above by the true number of items per cluster $N_j$.
+We solve the program in Eq.\ref{eq:min_x} with the publicly available quadratic program solver \texttt{qpsolvers} \citep{Caron_qpsolvers_Quadratic_Programming_2023}.
+
+The pruned cluster sizes vs $\mathrm{P}_j N$ are plotted in Fig.
+We restate that the difference to SSP-Pruning is the replacement of the class balancing score with a method to assess the clusters' complexity to decide how many examples to keep from each cluster.
+Following SSP-Pruning, we also keep the least prototypical examples from each cluster.
+
+\fi
+
+
+
+\section{Experiment Design}
+
+\paragraph{Training Datasets.}
+We report results on three different datasets: 
+
+\begin{enumerate}
+    \item LAION-CAT-440M: \citep{radenovic2023filtering} proposed a caption complexity, action, and text spotting filtering (CAT) method and filter the LAION-2B dataset to 440M examples (LAION-CAT-440M).  We use SemDeDup \citep{abbas2023semdedup} to reduce the size of this dataset to 280 million examples, and call it LAION-DeDup-280M. We refer the reader to \citep{radenovic2023filtering} for more details about the LAION-CAT-440M dataset. For safety purposes, we blur all human faces in the  LAION-CAT-440M dataset.
+
+    \item  LAION-50M: a random subset from LAION-DeDup-280M. We use this dataset mainly for development and hyperparameter search.
+
+    \item DataComp Medium dataset \citep{gadre2023datacomp}: Since the LAION-CAT-440M dataset has already been pre-filtered in multiple ways, we complement our results on LAION by using a raw dataset with no filtering applied to it. We choose to use the DataComp Medium dataset which consists of 128 million raw examples. Because of link failures we were able to download 120 million examples from DataComp.
+\end{enumerate}
+
+\paragraph{Pruning the LAION dataset.} For all experiments on LAION, we focus on the training cost we save. Thus, we follow a fixed and simple setting of filtering the dataset to 60\% of its original size after deduplication. Therefore, we prune LAION-DeDup-280M and LAION-50M to 166M and 30M examples, respectively. 
+For LAION-DeDup-280M, we also experiment with pruning to 28\% and 40\% of its original size.
+Unless stated otherwise, we train for 32 epochs.
+For our Density-Based Pruning method, we use image embeddings from a distilled DINOV2-L/14 model \citep{oquab2023dinov2}. 
+We find that using the distilled DINOV2-L/14 embeddings works better than using multimodal embeddings as discussed in Section \ref{sec:result}. We tune the number of clusters for k-means on LAION-DeDup-280M and use $k$=500 (see Section \ref{ap:hparams_cbp}).
+\paragraph{Pruning the DataComp Medium dataset.} For all experiments on DataComp, we follow the protocol set by the benchmark and train for 128 million examples seen. Keeping the number of examples seen fixed means that if the dataset size decreases, the number of epochs increases. Thus, the goal here is not to reduce the training cost but to maximize performance with a fixed cost. Similar to LAION, we embed the images using the distilled DINOV2-L/14 image encoder. We tune the number of clusters on DataComp and use the value of $k$=100 as the best value.
+\paragraph{Pretrained encoders} DBP requires clustering and ranking examples in an embedding space of a pretrained model.
+
+\paragraph{Evaluation} We use zero-shot accuracy for all evaluations and report the top-1 zero-shot accuracy on ImageNet in addition to the DataComp evaluation protocol and evaluate on a suite of 38 image classification and retrieval tasks including the VTAB tasks \citep{zhai2019large}, ImageNet distribution shift tasks, and retrieval tasks. All the evaluation datasets we use are listed in Table \ref{tab:datacomp_38_results}.
+\paragraph{CLIP-score Baselines} We use the standard CLIP-score filtering protocol for each dataset. We use the LAION CLIP-score values from the metadata (computed using OpenAI's CLIP-B/32 model) and OpenAI's CLIP-L/14 score for DataComp.
+\paragraph{Other Hyperparameters}
+We train the CLIP-ViT-B/32 models using the OpenCLIP \citep{ilharco_gabriel_2021_5143773} default hyperparameters for both LAION and DataComp datsets and fix the training seed.
+
+
+
+\section{Results}
+
+Our Results section is organized as follows. We first report our best results, obtained on LAION-CAT-440M (Section~\ref{sec:LAION-CAT-440M}) and DataComp Medium (Section~\ref{sec:datacomp}).
+In Sections~\ref{sec:analysis} and ~\ref{ap:hparams_cbp}, we analyze our results, explain our hyperparameter and design choices, and conduct ablation studies.
+
+\subsection{LAION: Our method outperforms OpenCLIP on ImageNet with 27\% of the training compute.} 
+\label{sec:LAION-CAT-440M}
+We start from LAION-CAT-440M, deduplicate it to LAION-DeDup-277M, and finally, apply the DBP method to obtain four much smaller datasets of sizes 84M, 112M, 166M, and 222M.
+We observe that by training on our smaller curated datasets for fewer number of iterations we can achieve better performance than training on the whole LAION-CAT-440M dataset.
+We show the zero-shot performance on ImageNet, ImageNet distribution shit, Retrieval, and the VATB tasks in Fig.~\ref{fig:laion280m_38_datasets_results} and Table~\ref{tab:datacomp_38_results_2}.
+We observe performance gains despite the massive reduction in training compute: training on the 112M subset outperforms OpenCLIP-B/32 on ImageNet (65.44\% vs 62.92\%) while using only 27\% of the training cost. On ImageNet distribution shit tasks and VTAB tasks, we outperform the OpenCLIP baseline using less than 41\% of the training cost. On retrieval tasks, we show competitive performance despite using 55.4\% of the training cost.
+
+
+\begin{figure}[tb]
+\begin{center}
+\includegraphics[width=0.48\textwidth]{Figures/main_plot_ImageNet_avg_acc.pdf}
+\includegraphics[width=0.48\textwidth]{Figures/main_plot_ImageNet_dist._shifts_avg_acc.pdf}
+\includegraphics[width=0.48\linewidth]{Figures/main_plot_VTAB_avg_acc.pdf}
+\includegraphics[width=0.48\textwidth]{Figures/main_plot_Retrieval_avg_acc.pdf}
+\includegraphics[width=1.0\textwidth]{Figures/main_plot_legend.pdf}
+\caption{CLIP-ViT-B/32 zero-shot evaluation for filtering the LAION-CAT-440M dataset \citep{radenovic2023filtering}. We filter the data by first deduplicating it to 277M examples to get LAION-DeDup-280M  (SemDeDup in the Fig.). Then we apply the DBP method to filter the LAION-DeDup-280M dataset. We see that we outperform training on the whole LAION-CAT-440M dataset on ImageNet, VTAB, and ImageNet distribution shifts datasets while using only 27\%-41\% of the training cost. For the LAION-CAT-440M baseline (green line), we train for 12.7B examples seen during training following the OpenAI CLIP training procedure \citep{clip}. For all other models, we train for 32 epochs regardless of the dataset size. The y-axis shows the training cost and the number of examples seen for each individual model. See Table \ref{tab:datacomp_38_results_2} for performance details on individual datasets.}
+\label{fig:laion280m_38_datasets_results}
+\end{center}
+\end{figure}
+
+\subsection{Our method outperforms the current state of the art on Datacomp Medium with a lower dataset size.} 
+\label{sec:datacomp}
+Our approach outperforms the recently proposed and current state of the art on the DataComp leaderboard (T-MARS; \citealp{maini2023t}) on three (ImageNet, VTAB, and Retrieval) out of four downstream tasks families, as shown in Table~\ref{tab:datacom_result}, while T-MARS performs better on the ImageNet distribution shifts tasks.
+ We compare our detailed results to the best baseline released by DataComp (Image-based $\cap$ CLIP Score (L/14 top 30\%)) and report improved performance in 35 out of 38 distribution shifts. 
+Unfortunately, the authors of T-MARS have not released their models or the performance on the individual test sets, so we cannot compare our detailed results to theirs.
+To achieve this result, we deduplicate the 128M examples of the DataComp dataset and retain 80\% (96M) of the original dataset size, then we perform CLIP-L/14 score filtering to further reduce the dataset size to 40\% (38M) or 50\% (48M) of the deduplicated dataset size,
+and finally, we perform Density-Based Pruning (DBP) and reduce the dataset size down to around 19M examples, see Fig.
+\input{Tables_ICLR/datacomp_results_iclr}
+
+\subsection{Analysis}
+\label{sec:analysis}
+
+\paragraph{A smaller, more balanced dataset can lead to better models (Fig.~\ref{fig:laion280m_38_datasets_results}).} In this work, we reduce the dataset size while maintaining and/or improving the quality of the data by balancing the data clusters and removing easy examples. This increases the marginal information gain the model gets from every training batch. As a result, we observe better performance on a variety of distribution shift tasks with shorter training: The model trained on the SemDeDup+DBP-222M dataset \textit{almost} matches or outperforms training on the full LAION-CAT-440M dataset in all categories in Fig.~\ref{fig:laion280m_38_datasets_results}, despite using only half the compute. This result suggests that, given a source dataset, we can find a smaller, high-quality dataset through careful filtering. Such a dataset not only enhances or maintains performance but also reduces the training cost significantly.
+Another works like \citet{arjovsky2022throwing} also shows theoretically and practically that balancing the data by “removing” examples from the majority groups/classes can result in a better worst group/class performance and a better model even though the dataset size is reduced.
+
+\paragraph{The performance on retrieval and ImageNet distribution shifts is relatively lower compared to ImageNet zero-shot accuracy (Fig.~\ref{fig:laion280m_38_datasets_results} and Table \ref{tab:datacom_result}).}
+This trend is consistent across different baselines for retrieval tasks and we hypothesize that retrieval and ImageNet dist. shift tasks need relatively longer training (in Fig.~\ref{fig:laion280m_38_datasets_results} we reduce the number of training iterations/cost seen to $\le$ 55.4\%). 
+To study this behavior, we measure the performance gains obtained with longer training. We increase the number of iterations for training on the 166M dataset from 41.6\% (Fig.~\ref{fig:laion280m_38_datasets_results}) to 69\% and measure the difference in performance on each of the validation tasks. We observe that among the four tasks (ImageNet, ImageNet dist. shift, VTAB, retrieval), the ImageNet dist. shift and retrieval tasks benefit the most from longer training: They each gain 0.9p.p. and 0.8p.p., respectively. In contrast, ImageNet and VTAB gain 0.4p.p. and 0.7p.p., respectively. Therefore, we conclude that the observed performance drops on ImageNet dist. shifts and retrieval tasks can be, partially, attributed to shorter training.
+
+\iffalse
+\begin{figure}[bt]
+\begin{center}
+\begin{subfigure}{.47\textwidth}
+    \centering
+\includegraphics[width=1.0\textwidth]{Figures/delta_performance.pdf}
+   \end{subfigure}
+\begin{subfigure}{.48\textwidth}
+    \centering
+\includegraphics[width=1.0\textwidth]{Figures/laion50m_qp_all_embs_500clusters_60_5eps.pdf}
+   \end{subfigure}
+\caption{(\textbf{left}) Performance on ImageNet (IN) distribution shift and retrieval tasks grow as we continue training; $\triangle$ in performance is measured as the performance difference between long and short training. %$perf(model\_long\_training) - perf(model\_short\_training)$. 
+(\textbf{right}) The choice of the encoder as well as the data modality are important hyperparameters. %Results are obtained by pruning our LAION-50M dataset down to 30M examples and training on it for 5 epochs.
+}
+\label{fig:using_diferent_emeddings}
+\end{center}
+\end{figure}
+\fi
+
+\paragraph{Our results hold across different model sizes, Table~\ref{tab:model_size_results}}
+We test our best approach on LAION-50M using models with different parameter counts: We train CLIP-S/32, CLIP-B/32 and CLIP-L/14 models for five epochs on 30M examples filtered from the LAION-50M dataset using our DBP method. We find that our approach outperforms CLIP score filtering for all models we tested.
+
+\paragraph{DBP outperforms SSP-Pruning (LAION).} 
+The difference between DBP and SSP-Pruning is the choice of how many examples are taken from each cluster. In SSP-Pruning, a fixed cluster balancing score is defined while in DBP, we assess the complexity of the different clusters.
+We show that DBP outperforms SSP-Pruning on the LAION-CAT-440M dataset (Table \ref{tab:laion280m_ssp_pruning_vs_cbp}).
+We also show in Fig.~\ref{fig:laion50m_ssp_pruning_vs_qp}(right) the benefits of DBP over SSP-Pruning on the LAION-50M dataset for different cluster balancing ratios, and find that (a) DBP outperforms SSP-Pruning across all cluster balancing ratios, and (b) cluster balancing is not necessary for DBP since we obtain the best result at a ratio of zero. 
+
+\input{Tables_ICLR/laion280_cbp_vs_ssp_pruning}
+\begin{figure}[bt]
+\begin{center}
+\begin{subfigure}{.45\textwidth}
+\centering
+\includegraphics[width = 1\textwidth]{Figures/laion50m_5_eps_and_45_eps_main_plot.pdf}
+   \end{subfigure}
+\begin{subfigure}{.4\textwidth}
+    \centering
+\includegraphics[width = 1\textwidth]{Figures/laion50m_ssp_pruning_vs_qp_5eps.pdf}
+\end{subfigure}
+\caption{(\textbf{left})
+Performance grows consistently with continued training and we close the gap to training on the full LAION-50M dataset when training for 45 epochs, despite only using 30M samples. We also outperform the LAION CLIP-B/16 score (CS) filtering.
+(\textbf{right}) Density-based pruning (DBP) helps improve the performance over SSP-Pruning \citep{NEURIPS2022_7b75da9b}. We prune the LAION-50M dataset to 30M examples and train CLIP-B/32 on it for five epochs. 
+}
+\label{fig:laion50m_ssp_pruning_vs_qp}
+\end{center}
+\end{figure}
+
+
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+\centering
+\includegraphics[width=0.45\textwidth]{Figures/laion50m_qp_all_embs_500clusters_60_5eps.pdf}
+\caption{ 
+The choice of the encoder as well as the data modality are important hyperparameters. %Results are obtained by pruning our LAION-50M dataset down to 30M examples and training on it for 5 epochs.
+}
+\label{fig:using_diferent_emeddings}
+\end{wrapfigure}
+\paragraph{Modality of the embeddings and the choice of the encoders are important hyperparameters.}
+When performing k-means clustering in the embedding space, we can decide whether we use the image- and/ or caption embeddings.
+We explore the influence of the encoder in Fig.~\ref{fig:using_diferent_emeddings}(right).
+We experiment with image embeddings extracted from two different pretrained encoders, CLIP ViT-B/16, and a distilled DINOV2-L/14 model \citep{oquab2023dinov2}. We also explore using caption embeddings from two different pretrained encoders CLIP-B/16 text encoder and the Sentence BERT model "all-MiniLM-L6-v2" introduced by \citep{devlin-etal-2019-bert}.
+In addition, we use multimodal embeddings from the
+BLIP ViT-B/16 Image-Text Matching (ITM) head \citep{li2022blip} which offers an elegant way to combine both modalities with a learned shared embedding. Because tuning the parameters for each model is expensive, we fixed the hyperparameters to the ones we tuned on LAION-50M using the DINOV2-L/14 embeddings.
+The results are displayed in Fig.~\ref{fig:using_diferent_emeddings}(right) and we achieve the best results with the distilled DINOV2-L/14.
+
+
+\paragraph{We obtain consistent improvements with longer training, Fig.~\ref{fig:laion50m_ssp_pruning_vs_qp}(left).}
+To show how the performance changes with longer training, we train the same models for five and forty-five epochs on the LAION-50M subset, and on 30M examples filtered from it using our pipeline.
+We consistently outperform CLIP score filtering (CS) throughout training and even close the gap to training on the full LAION-50M dataset when training for forty-five epochs.
+
+\subsection{Hyperparameter ablations for DBP}
+\label{ap:hparams_cbp}
+DBP has a number of hyperparameters such as the number of nearest neighbors to calculate \dinter, the cluster balancing ratio, the temperature $\tau$ in the softmax in Eq.~\ref{eq:softmax}, and the number of clusters for k-means clusters.
+The cluster balancing ratio is implemented as another constraint for the quadratic program.
+We choose all of these hyperparameters on LAION-50M by pruning it to 30M examples and show the results of tuning each of them in Fig.~\ref{fig:hyperparamters_choice}.
+Based on these results, we set the number of nearest neighbors to compute \dinter~to 20, the cluster balancing ratio to 0, the temperature to 0.1, and the number of clusters for k-means to 500.
+
+\begin{figure*}[bt]
+\begin{center}
+\begin{subfigure}{.4\textwidth}
+    \centering
+\includegraphics[width=1.0\textwidth]{Figures/laion50m_qp_num_NNs_for_dintra_60_5eps.pdf}
+    \caption{}
+   \end{subfigure}
+\begin{subfigure}{.4\textwidth}
+    \centering
+\includegraphics[width=1.0\textwidth]{Figures/laion50m_qp_cls_bal_ratio_500clusters_60_5eps.pdf}%{Figures/laion50m_qp_cls_bal_ratio_500clusters_60_5eps.pdf}
+    \caption{}
+   \end{subfigure}
+\begin{subfigure}{.4\textwidth}
+    \centering
+\includegraphics[width=1.0\linewidth]{Figures/laion50m_qp_temp_500clusters_60_5eps.pdf}
+    \caption{}
+   \end{subfigure}
+\begin{subfigure}{.4\textwidth}
+    \centering
+\includegraphics[width=1.0\textwidth]{Figures/laion50m_qp_num_clusters_60_5eps.pdf}
+    \caption{}
+   \end{subfigure}
+
+\caption{Values of different hyperparameters for DBP pruning. \textbf{(a)}: The number of nearest neighbors $N$ to calculate \dinter, \textbf{(b)}: the cluster balancing ratio, \textbf{(c)}: the temperature, and \textbf{(d)}: the number of clusters for k-means. We fixed the number of clusters in all experiments at 500 except for Fig. (d). We set the temperature parameters to 0.1 in all experiments except for Fig. (c). We conduct all experiments by pruning LAION-50M dataset to 30M and training on it for 5 epochs.}
+\label{fig:hyperparamters_choice}
+\end{center}
+\end{figure*}
+
+
+
+\section{Conclusion}
+
+This research accentuates the potential of refining dataset curation techniques to enhance the efficiency of model training.
+By challenging traditional pruning methods and incorporating the influence of proximate samples into the pruning strategy, we achieved remarkable performance improvements. 
+Notably, on the LAION dataset, the approach surpassed the OpenCLIP-ViT-B/32 model’s ImageNet zero-shot accuracy by 1.1 percentage points using merely 27.7\% of the training compute. Furthermore, we report a new state of the art on the DataComp Medium benchmark for ImageNet zero-shot accuracy and impressive results across 38 evaluation tasks. This showcases the profound impact of optimized dataset pruning on the advancement of machine learning models.
+
+
+
+

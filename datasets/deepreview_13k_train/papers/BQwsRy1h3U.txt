@@ -1,0 +1,441 @@
+\title{MatryoshkaKV: Adaptive KV Compression via Trainable Orthogonal Projection}
+
+\begin{abstract}
+KV cache has become a \emph{de facto} technique for the inference of large language models (LLMs), where tensors of shape (layer number, head number, sequence length, feature dimension) are introduced to cache historical information for self-attention. 
+As the size of the model and data grows, the KV cache can quickly become a bottleneck within the system in both storage and memory transfer.
+To address this, prior studies usually focus on the first three axes of the cache tensors for compression.  
+This paper supplements them, focusing on the feature dimension axis,  
+by utilizing low-rank projection matrices to transform the cache features into spaces with reduced dimensions. 
+We begin by investigating the canonical orthogonal projection method for data compression through principal component analysis (PCA). 
+We observe the issue with PCA projection where significant performance degradation is observed at low compression rates.
+To bridge the gap, we propose to directly tune the orthogonal projection matrices with a distillation objective using an elaborate Matryoshka training strategy.
+After training, we adaptively search for the optimal compression rates for various layers and heads given varying compression budgets. 
+Compared to previous works, our method can easily embrace pre-trained LLMs and hold a smooth tradeoff between performance and compression rate. 
+We empirically witness the high data efficiency of our training procedure and find that our method can sustain over 90\% performance with an average KV cache compression rate of 60\% (and up to 75\% in certain extreme scenarios) for popular LLMs like LLaMA2-7B-base and Mistral-7B-v0.3-base.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{section:intro}
+Large language models (LLMs) like GPT-4~\citep{gpt4} and Claude3~\citep{claude3} have shown great promise, finding applications in areas such as text generation~\citep{gpt3,T5}, code completion~\citep{codellm}, and sentiment analysis~\citep{sentimentanalysiseralarge}.
+The Key-Value (KV) cache, which is introduced to cache historical information for self-attention, is essential for maintaining context and accelerating the inference of LLMs. 
+However, as the size of the model and data continues to grow~\citep{longllm1,longllm2,longllm3}, the KV cache can swiftly lead to system bottleneck in terms of storage and memory transfer~\citep{cachesurvey}. 
+
+Considerable efforts have been devoted to addressing such an issue.
+Noting that the KV cache contains tensors of shape (layer number, head number, sequence length, feature dimension), existing works have investigated compressing the KV cache from the axes of layer number~\citep{layerkvcache,layerkvcache2,layerkvcache3}, head number~\citep{gqa,mqa,headskv}, and sequence length~\citep{adaptivekv,h2o,snapkv,streamingllm}.
+Conversely, the exploration of feature dimension for KV cache compression significantly lags behind, partially because of the inherent difficulties of modifying a well-structured feature space. 
+
+This paper aims to tackle this with the help of curated low-rank projection matrices, e.g., both the query and key are projected into the same lower-dimensional space wherein the inner product closely approximates that in the original space.
+We first identify the necessity to guarantee the orthogonality among the rows of such matrices, and hence attempt to take the principal components of the keys or values in each layer to instantiate the projections, given the prevalence of Principal Component Analysis (PCA) for data compression. 
+We observe that such projections can be seamlessly plugged into pre-trained LLMs while retaining reliable generation quality at a moderate compression level.
+Compared to the low-rank architectures of Multi-head Latent Attention (MLA)~\citep{deepseekv2}, the PCA strategy is more approachable due to its training-free nature and also advocated by \citet{eigenattention}.
+Yet, we note that the PCA projections suffer from quickly degraded performance when further increasing the compression level. 
+This is because, while the principal components are optimal for recovering the keys or values in each individual layer, they may be suboptimal for preserving the global outputs due to the non-linearity and compounding effects in LLM.
+
+To bridge the gap, we propose to jointly adjust all orthogonal projection matrices incorporated into the model with a knowledge distillation objective, enforcing the model output based on the projected keys and values to remain close to the original one. 
+The orthogonality constraint upon the projection matrices is consistently enforced by a Cayley parameterization. 
+Besides, we desire a hierarchy over the columns of the projection matrices---as in PCA---so that we can smoothly trade-off between compression level and performance.
+To this end, we introduce a Matryoshka training strategy---compute the model output based on the first $r$ columns of the matrices, where $r$ is randomly sampled from a predefined schedule such as $\{4, 8, 16, ...\}$, and ensure its closeness to the original output. 
+In practice, we sample various $k$ for different layers, heads, and keys/values during training to disentangle the projections in the model. 
+Doing so enables the search for heterogeneous compression rates for different projection matrices during inference and we develop a greedy algorithm for this. 
+Heterogeneous compression rates are displayed in Figure~\ref{fig:Heterogeneous-compression-rates}
+
+\begin{figure}[t]
+\begin{center}
+\label{fig:Heterogeneous-compression-rates}
+\includegraphics[width=12.5cm]{figure/heatmaps.pdf}
+\end{center}
+\caption{
+Visualization of the feasible compression level for the keys and values in our  MatryoshkaKV model distilled from the LLaMA2-7B-base model.
+We individually leverage samples in ARC-challenge (ARC-C), ARC-easy (ARC-E)~\citep{arc}, and Winogrande (WG)~\citep{winogrande:} to determine the compression level. 
+Lighter colors indicate higher compression levels.
+As shown, our approach enables the use of various compression strategies for various tasks. 
+}
+\end{figure}
+
+Experiments on both continual pre-training (CPT) and supervised fine-tuning (SFT) exhibit the efficacy of our MatryoshkaKV approach. 
+For the former, we opt to experiment on LLaMA2-7B-base~\citep{llama2} with the RedPajama dataset~\citep{redpajama}.  
+To demonstrate compatibility with Group Query Attention (GQA)~\citep{gqa}, we also apply our approach to the Mistral-v0.3-7B-base~\citep{mistral7b} model.
+We observe that after rarely processing 2 million training tokens, MatryoshkaKV achieves a 37.5\% compression rate while retaining over 90\% of the original model's accuracy.
+In the SFT experiments, we train both MatryoshkaKV and LoRA~\citep{lora} on downstream tasks including OBQA~\citep{obqa}, GSM8K~\citep{gsm8k}, etc. 
+The results show that our MatryoshkaKV can utilize less than 40\% cache while still achieving over 90\% accuracy derived from full cache utilization. 
+We also perform extensive ablation studies to chase a deep understanding of our approach. 
+
+
+
+\section{Related Work}
+
+\label{section:related_work}
+
+\textbf{KV Cache Eviction and Merging.
+} 
+KVMerger~\citep{adaptivekv} and PyramidKV~\citep{pyramidkvcache} introduce innovative approaches to reduce KV cache memory consumption along sequence length dimension in long-context tasks.
+KVMerger merges KV by Gaussian weights and attention score, while PyramidKV uses a layer-wise approach with recent tokens occupying more weights. CLA~\citep{layerkvcache}, YOCO~\citep{layerkvcache2}, and GoldFinch~\citep{layerkvcache3}, among others, exploit inter-layer KV cache reuse by sharing KV heads across layers. 
+This significantly reduces the KV cache size along the head number dimension without compromising model capacity. 
+GQA~\citep{gqa}, MQA~\citep{mqa}, and HeadKV~\citep{headskv}, especially the last one, have demonstrated the effectiveness of compressing KV cache on the axis of head number due to their low-rank properties.
+
+\textbf{KV cache Compression along the hidden size dimension.} 
+DeepSeekv2~\citep{deepseekv2} employs MLA techniques to reduce the feature dimension of keys and values within the attention mechanism, but this requires costly retraining from scratch. 
+Concurrent advancements, however, have addressed this limitation.
+InfiniGen~\citep{osdi}, Eigen-Attention~\citep{eigenattention} and HeadKV~\citep{headskv} achieve a 40\% reduction in the KV cache sizes using orthogonal projections parameterized by the SVD of the Q, K, and V matrices derived from a subset of samples. 
+To mitigate performance degradation, LoRA~\citep{lora} is employed to fine-tune model parameters.
+However, this compression approach on the axis of feature dimension results in a sharp decline in model performance when using less than 60\% cache budget. 
+Furthermore, fine-tuning the base model with LoRA may lead to catastrophic forgetting. 
+In this paper, our method MatryoshkaKV circumvents these risks and achieves higher compression rate by directly fine-tuning orthogonal projections.
+
+
+
+
+\section{Preliminary}
+
+\label{section:preliminary}
+
+This section provides a review of the KV cache mechanism and elucidates the implementation of PCA projection for KV cache compression.
+
+\subsection{KV Cache}
+\label{subsection::cache-mechanism}
+Consider the inference of an LLM $p(\boldsymbol{\cdot}|\vx)$ with $\vx$ as the prompt. 
+It is a common practice to deploy the KV cache technique to each self-attention head in the model to store the key and value states for the present context, including both the prompt $\vx$ and the tokens that have already been generated. 
+Given the KV cache for the context of length $L-1$ and dimension $d$ in each head, 
+the model generates a subsequent new token $y$ with the attention states $\mathrm{softmax}({Q K^{\top}}/{\sqrt{d}})V$, where $Q \in \mathbb{R}^{1 \times d}$ is the query vector for $y$ and $K, V \in \mathbb{R}^{L \times d}$ denote the concatenation of the KV cache and the KV vectors for $y$. 
+This way, the computational complexity for one decoding step is reduced from $\mathcal{O}(L)$ to $\mathcal{O}(1)$. 
+However, the size of the KV cache can grow quickly w.r.t. that of the model and context, often causing system bottlenecks in terms of both storage and memory transfer during the inference phase. 
+To address this, various KV cache compression techniques have been proposed, e.g., sharing the KV headers across layers inside LLMs~\citep{layerkvcache, layerkvcache2, layerkvcache3}, merging heads that require caching KV~\citep{headskv, gqa}, evicting or merging redundant tokens~\citep{streamingllm, snapkv, pyramidkvcache, h2o}. 
+This work alternatively focuses on compressing the feature dimension $d$ of the KV cache, exploring a novel axis for KV cache compression that is compatible with existing methodologies.
+
+\subsection{Traing-free Dimension Reduction Via PCA}
+\label{subsection::pca-projection}
+A simple way to reduce the dimension of the KV cache is finding some matrices to project $K, V$ as $K',V'\in \mathbb{R}^{L \times r}$, $(r < d)$. 
+Then, we can only cache $K'$ and $V'$, reducing the storage and memory transfer cost from $\mathcal{O}(d)$ to $\mathcal{O}(r)$. 
+The rank $r$ is desired to be adjustable based on the available compression budget: when the budget is sufficient, caching full KV states helps prevent information loss; in cases of limited budget, caching only the most essential information should be feasible. 
+To fulfill this, it is reasonable to introduce full-rank projection matrices $U \in \mathbb{R}^{d \times d}$ and demand a hierarchy over the columns of $U$ so that the optimal $r$-rank cache can result from the first $r$ columns of $U$, denoted as $U_r \in \mathbb{R}^{d \times r}$. 
+In practice, $U$ should be distinct for $K$ and $V$ and vary across attention heads and layers within the model, as these states commonly exhibit diverse distributions.
+During the forward pass of the model, we should be able to recover the original $K$ and $V$ from the reduced $K'$ and $V'$. 
+A natural choice is using $U^\top$, the transposition of the projection matrices, where
+$U_r U_r^\top \approx I$ needs to be satisfied. 
+Given that $r$ can vary from $1$ to $d$, we identify that $U$ should be orthogonal matrices. 
+It is known that the optimal orthogonal projections for compressing a set of high-dimension vectors can be their principal components, so we suggest constructing $U$ based on the PCA results of the key or value states of a long sequence of tokens for each head separately. 
+Table~\ref{tab:cpt-all} displays an empirical study of the efficacy of such training-free projections. 
+As shown, PCA projections exhibit reliable performance at moderate levels of compression budget. 
+This is remarkable because the PCA strategy does not need costly from-scratch training of the projection matrices, in sharp contrast to the projection mechanisms used by MLA~\citep{deepseekv2}. 
+ 
+
+Nevertheless, as the table displays, the PCA projections suffer from quickly degraded performance when further increasing the compression level. 
+This is because despite principal components being optimal for key or value recovery in individual head layers, they may be inadequate for preserving the final output due to the non-linearity and compounding effects of the attention mechanism. 
+
+
+
+\section{Methodology}
+
+\label{section:method}
+To address the aforementioned issue, we propose to jointly tune the orthogonal projection matrices introduced to the LLM under an elaborate objective, to realize a more robust KV cache compression. 
+This section provides the training and inference details of our approach. 
+
+\begin{figure}[t]
+\begin{center}
+\label{fig:pipeline}
+\includegraphics[width=13.8cm]{figure/architecture.pdf}
+\end{center}
+\caption{
+Vanilla KV cache vs. the proposed MatryoshkaKV.   
+In particular, we introduce orthogonal projection matrices to reduce the dimension of stored keys and values. 
+We explicitly enforce a hierarchy over the columns of projection matrices so as to concentrate the principal information on the head dimensions and enable the adjustment of compression level according to resource constraints. 
+}
+\end{figure}
+
+\subsection{Minimize Compression Loss by Knowledge Distillation} 
+\label{subsection:kd}
+Recalling the objective for the compression is that the model outputs based on the compressed states should stay close to the original one. 
+This implies a knowledge distillation objective~\citep{distillingknowledge}, which can be instantiated with the KL divergence: 
+
+\begin{equation}
+\label{eq:KD-loss}
+\mathcal{L}_{K D}
+    = \displaystyle \KL (p \left( \boldsymbol{\cdot}  | \vx \right) \Vert  p' \left( \boldsymbol{\cdot}  | \vx   \right) )
+\end{equation}
+where we abuse $p'$ to refer to the LLM equipped with low-rank projection matrices. 
+As suggested by the literature~\citep{cllm}, we also incorporate a language modeling loss to $p'$ to prevent the generated text from deviating from the context distribution of the dataset, thereby ensuring high-quality generation.
+The tuning process involves only the update of $U$, which ensures that the model performance under the full-rank KV cache is maintained. 
+
+\textbf{Orthogonal constraint.} 
+We initialize the trainable orthogonal projections with the PCA ones due to their effectiveness. 
+To confine the evolution of the projection matrices within the orthogonal matrix family throughout the tuning process, we employ Cayley parameterization to formulate the orthogonal matrix. 
+Specifically, there is $U = \left( I + Q \right) \left( I - Q\right) ^{-1}$ with $Q$ as a skew-symmetric trainable matrix of size $d \times d$. 
+Considering that $d$ is usually small (e.g., $64$ or $128$), the complexity of performing such an orthogonal transformation during training is minimal. 
+\subsection{Acquire Hierarchical KV Cache by MatryoshkaKV Training}
+\label{subsection:matryoshka}
+
+The tuning process can destroy the hierarchical structures present in the orthogonal matrices inherited from the PCA ones because there is no prioritization given to the columns of the matrices $U$ from the training objective. 
+Consequently, we lose the flexibility to achieve a smooth transition between the level of compression and maintenance of the original performance. 
+
+To tackle this challenge, we draw inspiration for Matryoshka representation learning~\citep{kusupati2022matryoshka}, introducing a Matryoshka strategy for training the projection matrices $U$. 
+In particular, for each training iteration, we randomly sample $r$ from a predefined schedule such as $\{4, 8, 16, ..., d/4, d/2, d\}$ and use the first $r$ columns of $U$, i.e., $U_r$, to construct the model $p'$ for training. 
+Note that the keys and values at different heads and layers use separately sampled $r$ to avoid the entanglement of the compression effect. 
+An illustrative explanation of this is given in Figure~\ref{fig:pipeline}, and our approach is then called MatryoshkaKV for short. 
+
+\subsection{Find Heterogeneous Compression Rates for Various Layers \& Heads}
+\label{subsection: search-algorithm}
+
+The Matryoshka training strategy enables the search for heterogeneous compression rates for various layers and heads in the model given a specific compression budget. 
+Basically, we can first propose a compression level for the projection matrix at a particular position, assessing the deviation of the model output from the original on a predefined calibration dataset (measured by KL divergence), and determining whether to accept the proposal based on a predefined tolerance threshold for the deviation. 
+Algorithm~\ref{algorithm:calculate-rate} exhibits a greedy algorithm for accelerating this based on accepting proposals in parallel. 
+Note that this greedy algorithm also applies to the PCA projections. 
+
+\begin{algorithm}[t]
+\label{algorithm:calculate-rate}
+  \caption{Greedy search for adaptive compression levels in our efficient LLM.}
+  \label{alg:rate}
+  \SetKwInOut{KwIn}{Input}
+  \SetKwInOut{KwOut}{Output}
+  
+  \KwIn{An base LLM $ p \left( \boldsymbol{\cdot}\right)$ and an efficient LLM equipped with MatryoshkaKV projections $ p' \left( \boldsymbol{\cdot}\right)$, layer num $L$, attention head num $H$, full KV cache feature dimension $d$, a prompt $\vx$, compression rate interval $\Delta r$, target cache budget $\gamma$.}
+  
+  \KwOut{Two tensors $R^{K}, R^V \in \mathbb{R}^{L \times H}$ specifying the heterogeneous key/value compression rates for each head in each layer.}  
+  
+  $R^K$, $R^V$ $\gets $ $d \cdot \mathbbm{1} ^ {L \times H }$ \\
+  
+\Repeat{\text{Budget} $\left( R^K, R^V \right) < \gamma$}{
+    $R^{K}_{temp}, R^{V}_{temp} \gets R^{K}, R^{V}$ \\
+    \For{$\text{Every Layer-}l$ $\text{in LLM}$  }{
+        \For{$\text{Every Attention Head-}h$  }{
+            $R^{K}_{temp, l, h}, R^{V}_{temp, l, h} \gets R^{K}_{l, h} - \Delta r, R^{V}_{l, h} - \Delta r$ \\
+
+            $\bigvarepsilon^K_{l, h} \gets \displaystyle \KL \left( p \left( \boldsymbol{\cdot}  | \vx \right) \Vert  p' \left( \boldsymbol{\cdot}  | \vx; R^{K}_{temp}, R^{V}  \right) \right)$ \\
+
+            $\bigvarepsilon^V_{l, h} \gets \displaystyle \KL \left( p \left( \boldsymbol{\cdot}  | \vx \right) \Vert  p' \left( \boldsymbol{\cdot}  | \vx; R^{K}, R^{V}_{temp}  \right) \right)$ \\
+            $R^{K}_{temp, l, h}, R^{V}_{temp, l, h} \gets R^{K}_{l, h}, R^{V}_{l, h}$ \\
+        }
+    }
+    
+    Locate the index associated with the minimum value element in the joint error list $ [\bigvarepsilon^K, \bigvarepsilon^V]$. \\
+    
+    Decrement the corresponding compression rate in $ [R^K, R^V]$ by $\Delta r$.
+  }
+\Return{$R^K$, $R^V$}
+\end{algorithm}
+\textbf{Discussion.}
+The recent KV cache compression approach on sequence length aspect~\citep{pyramidkvcache} also observes that compared to uniformly compressed KV cache using the same rate across all layers~\citep{snapkv}, employing a distinct compression rate for each layer results in improved information utilization. 
+Furthermore, as observed in \citep{retrievalheads}, certain retrieval heads within an LLM consistently attend to crucial information, regardless of contextual variations. 
+The indiscriminate compression rates of these heads can lead to significant performance degradation.
+These both support the necessity of the proposed heterogeneous KV cache compression approach. 
+
+
+
+
+
+
+\section{Experiments}
+
+\label{section:exp}
+In this section, we conduct experiments on continual pre-training (CPT) and supervised fine-tuning (SFT) scenarios to demonstrate that our MatryoshkaKV can not only preserve the foundation knowledge of a base model but also be compatible with LoRA~\citep{lora} for downstream tasks.
+Ablation studies in Section~\ref{subsection:abexp} validate the efficacy of our proposed method.
+
+\subsection{Continual Pre-training}
+\label{subsection:cptexp}
+\textbf{Setup.} 
+We select LLaMA2-7B-base~\citep{llama2} and Mistral-v0.3-7B-base~\citep{mistral7b} as our base models.
+We adopt the Matryoshka training strategy detailed in Section~\ref{subsection:matryoshka} and fine-tune MatryoshkaKV projections with knowledge distillation loss in Equation~\ref{eq:KD-loss} and language modeling loss, 
+applying a 1:3 weighting ratio between the two losses.
+The projection rank $r_k$ and $r_v$ are randomly sampled from a predefined schedule set $\{ \frac{i}{8} d \}_{i=1}^{8}$ during training and are chosen dynamically with the greedy search for adaptive compression levels, as detailed in Section~\ref{subsection: search-algorithm} during inference. 
+We use Opencompass~\citep{2023opencompass} to test performance on several widely-used zero-shot benchmarks: PIQA~\citep{piqa}, ARC-challenge (ARC-C)~\citep{arc}, ARC-easy (ARC-E)~\citep{arc}, WinoGrande (WG)~\citep{winogrande:}, HellaSwag (HLSG)~\citep{hellaswag}, and CommonSenseQA (CSQA)~\citep{commonsenseqa}.
+
+\textbf{Results.} 
+Table~\ref{tab:cpt-all} presents the results of our experiments.
+In zero-shot tasks, our MatryoshkaKV cache substantially reduces the cache footprint with minimal impact on performance.
+Specifically, our method retains 93.10\% of LLaMA2-7B-base’s average accuracy and 92.63\% of Mistral-v0.3-7B-base’s average accuracy, while utilizing only 37.5\% of the original cache size.
+For simpler tasks like PIQA, it achieves 88.71\% and 92.00\% of the base model's performance with just a 25\% cache budget.
+On more challenging tasks such as ARC-C, a larger cache budget is required, with 50\% needed to retain 90\% of the base model's performance.
+By contrast, PCA projection shows a sharp performance drop when the cache budget is reduced below 62.5\%, achieving just 70.42\% accuracy of LLaMA2-7B-base and 52.86\% of Mistral-v0.3-7B-base.
+These results underscore the superior efficiency of our approach compared with PCA.
+We attribute PCA’s performance decline to suboptimal projection matrices, whereas our method maintains closer alignment with the base model, thereby mitigating this degradation.
+
+\begin{table}[t]
+\caption{Comparison between our  MatryoshkaKV method (donated as MKV in the table) and PCA projection. 
+We use LLaMA2-7B-base and Mistral-v0.3-7B-base as our source models, and their performance is used as a baseline.
+Accuracy on HellaSwag, ARC-challenge, ARC-easy, PIQA, WinoGrande, and CommonSenseQA is reported, with higher scores indicating superior performance, at seven KV cache budgets.
+At the same budget, the higher average accuracy is underlined.}
+\label{tab:cpt-all}
+\begin{center}
+\footnotesize
+\begin{tabularx}{\textwidth}{cccccccccc}
+\toprule
+\multicolumn{1}{c}{\textbf{Model}} 
+&\multicolumn{1}{c}{\textbf{Budget}}
+&\multicolumn{1}{c}{\textbf{Method}}
+&\multicolumn{1}{c}{\textbf{HLSG}}
+&\multicolumn{1}{c}{\textbf{ARCC}}
+&\multicolumn{1}{c}{\textbf{ARCE}}
+&\multicolumn{1}{c}{\textbf{PIQA}}
+&\multicolumn{1}{c}{\textbf{WG}}
+&\multicolumn{1}{c}{\textbf{CSQA}}
+&\multicolumn{1}{c}{\textbf{Avg.}} \\
+\midrule 
+    \multirow{15}{*}{\makecell{LLaMA2 \\7B-base}}  & \multirow{3}{*}{100.0\%} & Baseline & 74.00 & 35.93 & 50.97 & 78.50 & 61.64 & 65.93 & 61.16 \\  
+    ~ & ~ & PCA & 72.04 & 36.95 & 52.38 & 76.66 & 61.72 & 67.24 & 61.17\\ 
+    ~ & ~ & MKV & 72.05 & 37.29 & 52.38 & 76.66 &  61.72 & 67.32 & \underline{61.24}\\  \cmidrule{2-10} 
+    ~ & \multirow{2}{*}{87.5\%} & PCA & 71.91 & 35.93 & 53.97 & 76.66 & 61.40 & 67.65 & 61.25\\ 
+    ~ & ~ & MKV & 71.58 & 37.97 & 53.26 & 75.95 & 62.12 & 69.57 & \underline{61.74}\\  \cmidrule{2-10} 
+    ~ & \multirow{2}{*}{75.0\%} & PCA & 70.99 & 35.59 & 54.14 & 76.22 & 60.06 & 66.99 & 60.67 \\ 
+    ~ & ~ & MKV & 71.58 & 38.31 & 55.56 & 76.01 & 61.09 & 66.75 & \underline{61.55}\\  \cmidrule{2-10} 
+    ~ & \multirow{2}{*}{62.5\%} & PCA & 67.16 & 34.24 & 54.85 & 74.76 & 57.77 & 61.10 & 58.31\\ 
+    ~ & ~ & MKV & 68.03 & 37.97 & 56.08 & 75.12 & 60.30 & 65.44 & \underline{60.49} \\  \cmidrule{2-10}
+    ~ & \multirow{2}{*}{50.0\%} & PCA & 42.11 & 29.83 & 35.10 & 58.16 & 52.57 & 40.62 & 43.07\\ 
+    ~ & ~ & MKV & 66.78 & 36.61 & 55.91 & 74.32 & 59.12 & 61.92 & \underline{59.11}\\  \cmidrule{2-10} 
+    ~ & \multirow{2}{*}{37.5\%} & PCA & 24.24 & 26.44 & 26.63 & 51.25 & 50.36 & 19.90 & 33.14\\ 
+    ~ & ~ & MKV & 63.97 & 33.90 & 51.68 & 74.97 & 57.92 & 59.21 & \underline{56.94}\\  \cmidrule{2-10} 
+    ~ & \multirow{2}{*}{25.0\%} & PCA & 23.98 & 29.49 & 26.28 & 51.20 & 50.36 & 16.22 & 32.92\\ 
+    ~ & ~ & MKV & 51.91 & 27.46 & 44.44 & 69.64 & 54.54 & 44.39 & \underline{48.73} \\  \midrule 
+    \multirow{15}{*}{\makecell{Mistral-v0.3 \\ 7B-base}}  & \multirow{3}{*}{100.0\%} & Baseline & 75.50 & 42.03 & 63.14 & 80.25 & 65.43 & 70.68 & \underline{66.17}\\  
+    ~ & ~ & PCA & 75.46 & 42.03 & 62.96 & 80.25 & 65.35 & 70.27 & 66.05\\ 
+    ~ & ~ & MKV & 75.44 & 42.03 & 62.96 & 80.25 & 65.51 & 70.27 & 66.08\\   \cmidrule{2-10} 
+    ~ & \multirow{2}{*}{87.5\%}  & PCA & 73.46 & 42.71 & 63.32 & 79.54 & 63.93 & 70.76 & 65.92\\ 
+    ~ & ~ & MKV & 75.63 & 42.03 & 64.37 & 79.71 & 65.51 & 70.35 & \underline{66.27}\\  \cmidrule{2-10} 
+    ~ & \multirow{2}{*}{75.0\%}  & PCA & 70.75 & 37.63 & 61.73 & 78.18 & 62.59 & 68.47 & 63.23\\ 
+    ~ & ~ & MKV & 75.29 & 43.39 & 63.14 & 79.54 & 64.96 & 69.12 & \underline{65.90} \\  \cmidrule{2-10} 
+    ~ & \multirow{2}{*}{62.5\%} & PCA & 63.48 & 34.24 & 55.73 & 75.90 & 60.77 & 62.24 & 58.73\\ 
+    ~ & ~ & MKV & 74.23 & 40.34 & 62.96 & 79.33 & 64.25 & 68.63 & \underline{64.96}\\  \cmidrule{2-10} 
+    ~ & \multirow{2}{*}{50.0\%} & PCA & 28.12 & 22.71 & 28.40 & 58.16 & 49.64 & 22.85 & 34.98\\ 
+    ~ & ~ & MKV & 73.32 & 38.98 & 62.08 & 79.16 & 61.88 & 67.08 & \underline{63.75}\\  \cmidrule{2-10} 
+    ~ & \multirow{2}{*}{37.5\%} & PCA & 25.04 & 22.03 & 28.04 & 53.86 & 49.25 & 21.21 & 33.24\\ 
+    ~ & ~ & MKV & 70.40 & 35.93 & 58.91 & 77.91 & 60.30 & 64.29 & \underline{61.29}\\  \cmidrule{2-10} 
+    ~ & \multirow{2}{*}{25.0\%} & PCA & 24.91 & 26.10 & 25.40 & 52.67 & 48.30 & 19.74 & 32.85\\ 
+    ~ & ~ & MKV & 59.21 & 25.42 & 48.68 & 73.83 & 54.30 & 45.13 & \underline{51.10}\\ 
+\bottomrule 
+\end{tabularx}
+\end{center}
+\end{table}
+
+\subsection{Supervised Fine-tuning}
+\label{subsection:sftexp}
+\textbf{Setup.} 
+We use LLaMA2-7B-base~\citep{llama2} as our base model and verify the efficacy of our method on PIQA~\citep{piqa}, GSM8K~\citep{gsm8k}, HellaSwag~\citep{hellaswag}, and OpenbookQA (OBQA)~\citep{obqa} datasets. 
+We design a two-stage training strategy to make Matryoshka training strategy compatible with LoRA~\citep{lora} fine-tuning.
+Specifically, LoRA is firstly used to adapt the base model to downstream tasks, following standard SFT practices~\citep{llmsurvey1, llmsurvey2}. 
+In the second stage, we jointly fine-tune the MatryoshkaKV projections with the Matryoshka training strategy and the LoRA parameters. 
+\begin{table}[t]
+\caption{Accuracy of our Matryoshka method after SFT based on LLaMA2-7B-base on four downstream tasks: PIQA, GSM8K, HellaSwag, and OpenbookQA, at seven KV cache budgets. 
+Degradation from baseline is shown in brackets.}
+\label{table:sft-results}
+\begin{center}
+\begin{tabular}{ccccccc}
+\toprule
+\multicolumn{1}{c}{\textbf{Model}}
+&\multicolumn{1}{c}{\bf Budget} &\multicolumn{1}{c}{\textbf{PIQA}}
+&\multicolumn{1}{c}{\textbf{GSM8K}}
+&\multicolumn{1}{c}{\textbf{HLSG}}
+&\multicolumn{1}{c}{\textbf{OBQA}}
+&\multicolumn{1}{c}{\textbf{Avg.}} \\
+\midrule
+\multirow{7}{*}{\makecell{LLaMA2 \\7B-base}} & 100.0 \% & 84.22 & 34.95 & 93.94 & 83.2 & 74.08 (-0.00\%)    \\
+~ & 87.5 \% & 83.84  & 35.25 & 93.17 & 81.80 & 73.52 (-0.76\%)   \\
+~ & 75.0 \%  & 83.30 & 32.90 & 91.47 & 81.40 & 72.27 (-2.44\%) \\
+~ & 62.5 \% & 82.75 & 31.46 & 89.86 & 79.60 & 70.92  (-4.27\%)  \\
+~ & 50.0 \% & 79.33 & 31.77 & 86.29 & 76.60 & 68.50 (-7.53\%) \\
+~ & 37.5 \% & 75.35  & 26.91 & 76.10 & 70.80 & 62.29 (-15.9\%)   \\
+~ & 25.0 \%  & 69.04  & 16.38  & 56.10 & 61.40 & 50.73 (-31.5\%) \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+\begin{figure}[t]
+\centering
+  \includegraphics[width=0.45\textwidth]{figure/eval_loss.pdf}
+  \includegraphics[width=0.45\textwidth]{figure/abs_eval_loss.pdf}
+\caption{
+Evaluation loss of four budgets vs. the number of training samples during 1 epoch of SFT on GSM8K  (Left). 
+Evaluation loss of models with and without PCA initialization, using a 50\% cache budget, vs. the number of training samples during 4 epochs of SFT on GSM8K (Right).}
+\label{fig:sft-results-and-ablation}
+\end{figure}
+
+\textbf{Results.} 
+We report accuracy on four zero-shot benchmarks at seven KV cache budgets in Table~\ref{table:sft-results}. 
+As shown, our method demonstrates notable performance in the SFT scenario. 
+It achieves 92.47\% of the baseline's average accuracy while utilizing only 50\% of the KV cache budget.
+On simple tasks like PIQA, our method retains 89.47\% of the full-cache performance with a 37.5\% cache budget.
+However, for more complex tasks such as GSM8K, a 50\% cache budget is necessary to achieve comparable results.
+Furthermore, we report the evaluation loss at four budgets: 100\%, 62.5\%, 50\%, and 37.5\% during the second stage of SFT on GSM8K in Figure~\ref{fig:sft-results-and-ablation} (Left).
+It shows our method simultaneously optimizes models under various KV cache budgets and maintains the hierarchical structures present in the orthogonal matrices.
+These findings highlight the robustness of our approach, delivering consistent performance across both CPT and SFT scenarios.
+
+\subsection{Ablation Studies}
+\label{subsection:abexp}
+We conduct ablation studies on various components of our method to verify their effectiveness.
+
+\begin{figure}[t]
+\centering
+  \includegraphics[width=0.45\textwidth]{figure/cpt_abl_curve.pdf}
+  \includegraphics[width=0.45\textwidth]{figure/sft_abl_curve.pdf}
+\caption{
+Comparison between PCA and distilled MatryoshkaKV Projections after CPT with and without greedy search for adaptive compression levels. 
+We report average accuracy on datasets mentioned in the experimental setup of Section~\ref{subsection:cptexp} (Left). 
+Comparison between with and without Matryoshka training strategy and orthogonal constraint after SFT on GSM8K.
+We report the relative accuracy compared with the LLaMA2-7B-base model fine-tuned with LoRA on GSM8K, utilizing the full KV cache (Right).}
+\label{fig:sft-ablation}
+\end{figure}
+
+\textbf{W/o greedy search for adaptive compression levels.}
+We evaluate our trained models without our greedy search for adaptive compression levels. 
+Figure~\ref{fig:sft-ablation} (Left) represents the average accuracy on four datasets mentioned in Section~\ref{subsection:sftexp} as the cache budget varies. 
+
+To ensure that each head in the LLM plays its due role, we set 25\% as our minimum cache budget for each head.
+At a 37.5\% cache budget, the average accuracy improves by 1.92\%, indicating the significance of our search algorithm for further KV cache compression.
+Furthermore, our MatryoshkaKV demonstrates robustness even when applying a uniform compression rate across all layers and heads, in contrast to PCA projection, which fails to handle this setting effectively.
+
+\textbf{W/o Matryoshka training strategy.}
+As discussed in Section~\ref{subsection:matryoshka}, we point out that the tuning process w/o Matryoshka training strategy can destroy the hierarchical structures present in the orthogonal matrices inherited from the PCA ones.
+To validate this, we train MatryoshkaKV projections with a fixed KV cache budget of 50\%.
+The result is displayed in Figure~\ref{fig:sft-ablation} (Right).
+We observe that fixing the compression rate at 50\% hinders the potential for further compression.
+Moreover, when the budget exceeds 50\%, the model's performance does not improve significantly but even deteriorates, indicating the hierarchical structure of projections is destroyed.
+
+\textbf{W/o orthogonal constraint.} 
+We investigate the necessity of imposing the orthogonal constraint during training, with experimental results presented by Figure~\ref{fig:sft-ablation} (Right).
+After training without orthogonal constraint on GSM8K, we observe that non-orthogonal projections achieve performance comparable to orthogonal projections when the cache budget is less than 50\%. 
+However, when utilizing a full KV cache budget, this model is unable to maintain the performance of the base model. 
+This is due to the non-orthogonality of the projection matrix, which prevents LLM from replicating the attention mechanism of the base model. 
+This phenomenon also validates our discussion in previous Section~\ref{subsection::pca-projection}.
+
+\textbf{W/o PCA initialization.} 
+To demonstrate the necessity of using PCA results to initialize projections, we train an LLM  equipped with randomly initialized orthogonal matrices on GSM8K and impose orthogonal constraints.
+In Figure~\ref{fig:sft-results-and-ablation} (Right), we report the evaluation loss during the second stage of SFT on GSM8K.
+Despite training for four epochs, randomly initialized orthogonal projections consistently fail to converge to an optimal solution, and the text generated by our fine-tuned LLM projection is composed of meaningless symbols.
+This highlights the critical importance of PCA initialization.
+\subsection{Heterogeneous Compression Rates Visualization}
+Figure~\ref{fig:Heterogeneous-compression-rates} shows the heterogeneous compression levels across all attention heads inside our MatryoshkaKV LLM distilled from the LLaMA2-7B-base.
+We acquire these results by leveraging the greedy search for adaptive compression levels on the ARC-C, ARC-E, and WinoGrande datasets.
+We observe that shallower layers require larger KV cache budgets, while in deeper layers, only a minority of specific heads require a relatively high budget.
+PyramidKV~\citep{pyramidkvcache} also observes that the model aggregates information globally from all available content in lower layers, indicating that KV cache inside lower layers can exert a substantial influence over the final output and should be allocated at a relatively high budget.
+Therefore, allocating more cache in lower layers and less in higher ones is superior to maintaining a uniform KV cache size across layers.
+Also, as~\citet{retrievalheads} point out, retrieval heads with high retrieval scores in LLaMA2-7B-base, are much more important than other heads and should be preserved in KV cache compression. %, mainly concentrated in the first $20$ layers.
+These findings are consistent with our observations.
+
+Moreover, we observe that keys can be more compressed than values.
+
+Specifically, according to our greedy search for adaptive compression levels, for a 37.5\% KV cache budget, the optimized key cache budget is allocated 32.28\%, and the value cache budget is allocated 42.72\%.
+
+
+\section{Conclusion}
+
+In this study, we delve into how to compress the KV cache in LLMs by applying low-rank projection matrices to the feature dimension. 
+We first investigate data compression using the canonical orthogonal projection method through PCA. 
+We observe significant performance degradation at a relatively high compression rate, indicating that PCA projection is suboptimal for preserving global outputs due to LLMs' nonlinearity and compounding effects.
+To bridge the gap, we directly optimize orthogonal projection matrices for KV cache compression in LLMs with a distillation objective using an elaborate Matryoshka training strategy.  
+After training, we show that adaptive compression rates for different layers and heads ensure optimal performance compared to uniform compression rates across all layers and heads in LLMs.
+Experimental results demonstrate significant performance gains and flexibility in achieving desired compression rates compared to traditional PCA projection.
+
+
+\section{Future work}
+
+We directly tune orthogonal projections using the Matryoshka training strategy with a distillation objective. 
+Experiments demonstrate that our method efficiently compresses the KV cache along the feature dimension.
+Having established the compatibility of MatryoshkaKV cache with GQA, we intend to enhance its versatility by integrating our feature compression techniques with contemporary token merging and eviction methods, such as $\text{H}_2 \text{O}$~\citep{h2o} and StreamingLLM~\citep{streamingllm}. 
+This integration aims to optimize compression rates, especially for extended sequences, and ensure broader compatibility with existing KV cache methodologies.
+
+
+
+
+
+

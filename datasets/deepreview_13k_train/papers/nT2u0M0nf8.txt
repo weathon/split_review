@@ -1,0 +1,346 @@
+\title{CAMEx: Curvature-aware Merging of Experts}
+
+\begin{abstract}
+Existing methods for merging experts during model training and fine-tuning predominantly rely on Euclidean geometry, which assumes a flat parameter space. This assumption can limit the model's generalization ability, especially during the pre-training phase, where the parameter manifold might exhibit more complex curvature. Curvature-aware merging methods typically require additional information and computational resources to approximate the Fisher Information Matrix, adding memory overhead. In this paper, we introduce CAMEx (Curvature-Aware Merging of Experts), a novel expert merging protocol that incorporates natural gradients to account for the non-Euclidean curvature of the parameter manifold. By leveraging natural gradients, CAMEx adapts more effectively to the structure of the parameter space, improving alignment between model updates and the manifold's geometry. This approach enhances both pre-training and fine-tuning, resulting in better optimization trajectories and improved generalization without the substantial memory overhead typically associated with curvature-aware methods. Our contributions are threefold: (1) CAMEx significantly outperforms traditional Euclidean-based expert merging techniques across various natural language processing tasks, leading to enhanced performance during pre-training and fine-tuning; (2) we introduce a dynamic merging architecture that optimizes resource utilization, achieving high performance while reducing computational costs, facilitating efficient scaling of large language models; and (3) we provide both theoretical and empirical evidence to demonstrate the efficiency of our proposed method.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Sparse Mixture of Experts (SMoE) (Jacobs et al., 1991; Shazeer et al., 2017) is currently a core component for constructing foundation and large language models (LLMs), whose parameters count can rise up to billions and trillions (Devlin et al., 2019; Yang et al., 2019; Liu et al., 2019; Raffel et al., 2020; Fedus et al., 2022; Wei et al., 2022). Nevertheless, Hoffmann et al. (2024); Kaplan et al. (2020), recognized a scaling law that underpins the LLM’s evolution, which is larger models require exponentially more computational resources and data to continue improving, and without sufficient scaling in all dimensions, performance gains may plateau. Thus, identifying and implementing efficient methodologies for the sustainable scaling of LLMs is imperative. SMoE addresses this challenge by sparsely activating parameters of large models, which can boost model performance with only minor losses in computational efficiency. The methodology is integrated chiefly into feedforward layers of transformers, processing tokens by selectively activating a small number of experts and hence trimming down the computing memory and FLOPS (Fedus et al., 2022; Lepikhin et al., 2021).  
+
+Since its debut in Shazeer et al. (2017), SMoE has gone through numerous explorations and advancements in routing mechanism development and expert architecture design. Dai et al. (2022) proposes a two-phase training strategy for stabilizing the gate function so that the expert’s selection of one token does not fluctuate between different inference times. Zhou et al. (2022) changes the perspective of the router to experts with experts choice routing, ensuring a balancing load between experts . Chi et al. (2022) and Chen et al. (2023) address the concern of representation collapse in SMoE by proposing cosine scoring and a fixed random initialized router, respectively. Some other works view the routing mechanism as a reinforcement learning or optimization transport problem. In terms of expert design orientation, Rajbhandari et al. (2022) and Dai et al. (2024) introduce the  
+
+![](images/5f5b4b3007e910dcdac2b1d435ab42db0a5a88ac10e57ba262afbd632e7f1b78.jpg)  
+
+Figure 1: Overview of CAMEx for a causal language modeling SMoE. The experts are merged through the router scores and the curvature-matrix $\mathbf{M}$ . During the merging protocol, we can generate the masks for the domain-vectors, denoted as $\gamma_{i}$ , such as Ties or Dare. We follow the causal segmenting pipeline from (Zhong et al., 2024) to achieve both memory efficiency and causal information constraints. Note that stop gradient operator is applied for the first segment router scores.  
+
+concept of shared experts wherein each token is processed by a fixed expert and another selected through gating, achieving two experts engagement per layer without increasing the communication cost beyond that of top-1 gating. Muqeeth et al. (2024) proposes to merge experts by taking the weighted mean of the expert’s parameters with respect to router scores. This methodology is then extended in He et al. (2023), Zhong et al. (2024), and Li et al. (2024) for causal language modeling pretraining and fine-tuning tasks.  
+
+Among existing rigorous research on SMoE, our work focuses on the experts merging lines of research. Specifically, we systemically integrate natural gradient into task-specific merging protocol for SMoE. To the best of our knowledge, the current merging protocol applied for SMoE still deems the parameter space of the expert’s parameters as Euclidean ones. Nevertheless, it has been shown that the space of neural network parameters brings the characteristic of the Riemannian manifold (Amari, 1998). Therefore, it is natural for us to make an effort in such a direction for merging experts. Although some existing works on merging models have already leveraged the Fisher Information Matrix (Matena & Raffel, 2022; Jin et al., 2023), we find that they require large computational space and complicated steps to perform well. In contrast, our merging protocol is simple and straightforward to implement while still taking into account the curvature of the parameters manifold. We discover the superior performance of curvature-aware merging in our method compared to the regular merging procedure applied to SMoE. Our main contributions are three-fold:  
+
+1. We introduce a novel rapid and efficient merging technique named Curvature- Aware Merging of Experts (CAMEx) for SMoE that includes information about the curvature of the expert’s parameters manifold.   
+2. We propose a new architecture based on CAMEx, which dynamicalizes the merging protocol along with parameters reduction. Our empirical experiments prove the dominant performance of this architecture on pre-training tasks.   
+3. We theoretically prove that our CAMEx obtains better alignment between experts and the training task domain.  
+
+We empirically demonstrate that 1) our proposed merging method can add in rapidness of convergence speed for pre-training and 2) when combined with other merging protocols, it can boost the model’s performance on a variety of practical tasks, including language modeling, text classification, question answering, and image classification.  
+
+
+
+\section{2 CURVATURE-AWARE MERGING OF EXPERTS  }
+
+
+This section aims to give an overview of model merging methods and their integration into SMoE architecture. We then introduce our curvature-aware merging protocol stamping from the natural gradient. Finally, we perform an theoretical analysis to support our proposal.  
+
+Table 1: Notations and Definitions.   
+
+![](images/9aa898c5d42a26f8de2372c78ee41bcc64d0fbcb4f566c8c73a77b1b08ceaa8a.jpg)  
+
+2.1 BACKGROUND: EXPERT MERGING IN SPARSE MIXTURE OF EXPERTS  
+
+It is convenient to recall the concept of SMoE and a few well-known experts merging methods for SMoE. From this point to the rest of our paper, let us use the notations summarized in Table 1.  
+
+Sparse Mixture of Experts. A SMoE layer processes the tokens series as follows:  
+
+$$
+\left\{\begin{array}{l l}{\mathbf{y}_{t}=\sum_{i\in S_{t}}\mathbf{G}(t,i)\cdot\mathbf{E}_{i}\mathbf{h}_{t}}\\ {\mathbf{G}(t,\cdot)=\mathrm{softmax}(\mathbf{W}_{g}\mathbf{h}_{t})}\\ {S_{t}=\mathrm{top}\mathbf{\cdotk}(\mathbf{G}(t,\cdot))}\end{array}\right.
+$$  
+
+SMEAR. Muqeeth et al. (2024) introduces the ensemble of expert parameters through weighted average computation with the factors are the router scores.  
+
+Task-Specific merging in SMoE. Our work will follow the scheme of task-specific merging (Ilharco et al., 2023). In such a setting, we assume the existence of $N$ pre-trained models parameterized by $\theta_{i}$ each was pre-trained on a different task. We then define the task-vector for each pre-trained model through the merged model $\theta_{m}$ as $\tau_{i}\,=\,\theta_{i}\,-\,\theta_{m}$ . The merging protocol will be performed by Eqn. Merg. Under the context of SMoE, each expert learns to handle a particular subset of the input space or specializes in a specific type of feature or pattern (Jacobs et al., 1991; Dai et al., 2024). We believe it is more suitable to reference this technique as domain-specific merging. We, therefore, will rename the tensors $\tau_{i}=\mathbf{E}_{i}-\mathbf{E}_{m}$ as domain-vector. Additionally, to take the router information into account, we will define the formulation for domain-specific merging in a SMoE layer as follows:  
+
+$$
+\hat{\mathbf{E}}_{m}=\mathbf{E}_{m}+\alpha\sum_{i=1}^{N-1}s_{i}\boldsymbol{\tau}_{i}
+$$  
+
+where $s_{i}$ denotes the score of the router for the $i$ th expert. We want to note that with $0\textless\alpha\textless1$ , domain-specific merging aligns with soft merging.  
+
+
+
+\section{2.2 BACKGROUND: OTHER MODEL MERGING METHODS  }
+
+
+In this section, we discuss other recent and widely-adopted model merging methods outside the context of SMoE that we will combine with our curvature-aware merging method in our experiments in Section 3.  
+
+TIES merging. Yadav et al. (2023) improves upon task arithmetic by removing interference between the task vectors. Specifically, TIES zeros out entries in a given task vector with low magnitude and resolves sign conflicts across different task vectors.  
+
+DARE merging. Different form TIES, DARE merging randomly zeros out the neurons like a Dropout layer (Yu et al., 2024).  
+
+Fisher merging. Existing work on Fisher merging suffers from computational complexity since computing and inverting the Fisher Information Matrix, especially for large neural networks, is often intractable. Even when using approximations like diagonal or block-diagonal Fisher matrices, these methods can still be computationally expensive and challenging to apply at scale. Furthermore, the accuracy of Fisher approximations, such as diagonal or block-diagonal, can be problematic (Matena & Raffel, 2022).  
+
+2.3 GRADIENT INTERPRETATION OF MODELS MERGING  
+
+We want to emphasize the alignments between the paradigm of gradient descent and model merging. For this, we denote $\boldsymbol{\theta}\in\mathbb{R}^{N}$ , $\bar{\mathcal{L}}(\theta)$ , and $\eta$ as the model’s parameters, the empirical loss function, and the learning rate, respectively. During the training process of a deep learning model, the parameters are updated following the gradient descent formula:  
+
+$$
+\theta_{n+1}=\theta_{n}+\eta(-\nabla{\mathcal{L}}(\theta_{n}))
+$$  
+
+In the aspect of deep models merging, we also have an update rule in a similar manner, which is  
+
+$$
+\hat{\theta}^{m}=\theta^{m}+\alpha\sum_{i=1}^{n}\underbrace{(\theta^{i}-\theta^{m})}_{\mathrm{gradient-like}}
+$$  
+
+where $\theta^{m}$ denotes the merged model’s parameters, and $\theta^{i}$ denotes the parameters of the ith expert. Here, we interpret $\theta^{i}$ as the optimal parameters of the model for a specific task or domain, and then the update rule gives us a direction toward optimizing for all tasks.  
+
+However, it has been pointed out by Amari (1998) that the parameter space structure of deep learning models has Riemannian characteristics. Therefore, a more natural gradient updating scheme was proposed,  
+
+$$
+\theta_{n+1}=\theta_{n}+\eta\underbrace{G(\theta_{n})(-\nabla\mathcal{L}(\theta_{n}))}_{\mathrm{natural\,gradient}}
+$$  
+
+In this formula, $G(\theta_{n})~\in~\mathbb{R}^{N\times N}$ denotes the Riemannian metric tensor (Amari, 1998; Amari & Douglas, 1998), which characterizes the intrinsic curvature of a particular manifold in $N$ - dimensional space (Martens, 2020) or sometimes, the inversed Fisher Information Matrix. The same ideology was introduced for merging large language models in Fisher merging (Matena & Raffel, 2022) and Regmean (Jin et al., 2023). However, both methods suffer from the bottleneck in the computation cost of approximating the Fisher Information. Moreover, these methods are challenging to apply in sparse layers of SMoE since they would introduce huge latency, FLOPS, and memory for computing and storing matrices whose number of entries is proportional to a number of expert parameters.  
+
+2.4 EXPERTS MERGING WITH CURVATURE-AWARE  
+
+In this section, for the sake of conciseness, we focus on the language modeling task; a similar methodology can be applied to other tasks, such as classification. We introduce an efficient way to merge experts within SMoE layers, based on the causal segmenting approach proposed by (Zhong et al., 2024). The goal of the causal segment routing strategy is to enhance the efficiency of expert merging operations while maintaining the autoregressive nature of language models.1 and Algorithm 1. We then perform the following merging protocols:  
+
+$$
+\hat{\mathbf{E}}_{m}^{l}=\mathbf{E}_{m}^{l}+\alpha\sum_{i=1}^{N-1}\mathbf{M}_{i}\cdot(s_{i}^{l}\ast\boldsymbol{\tau}_{i}^{l})
+$$  
+
+where $\mathbf{M}_{I}\ \in\ \mathbb{R}^{d_{i n}d_{o u t}\times d_{i n}d_{o u t}}$ denote the curvature matrix which performs matrix product with the gradient-like component. The curvature of the parameters manifold will be learned through these tensors while optimizing the empirical loss. This approach has also proven its effectiveness in meta-learning for few-shot classification (Park & Oliva, 2019). We further explore the computing efficiency of merging experts by proposing a novel dynamic merging formula  
+
+$$
+\begin{array}{r}{\left\{\begin{array}{l l}{\displaystyle\mathbf{E}_{m}^{l+1}}&{=\mathbf{E}_{m}^{l}+\frac{\boldsymbol{\alpha}}{N-1}\sum_{i=1}^{N-1}\mathbf{M}_{i}\cdot\boldsymbol{\tau}_{i}^{l}}\\ {\displaystyle\hat{\mathbf{E}}_{m}^{l+1}}&{=\mathbf{E}_{m}^{l+1}+\boldsymbol{\alpha}\sum_{i=1}^{N-1}\mathbf{M}_{i}\cdot(s_{i}^{l+1}*\tau_{i}^{l+1})}\end{array}\right.}\end{array}
+$$  
+
+The architecture corresponding to this recurrent representation can be found in Figure 2. The architecture contains a global expert that traverses through the SMoE layers by the updating rule in  
+
+![](images/172a89916f0299fae30cd4358768d0cbb8f28a4e1eec62207a46e794fb9d97cb.jpg)  
+Figure 2: Overall architecture of different SMoE layers. The figure presents the vanilla SMoE layer on the left, the merging expert layer in the middle, and our proposed dynamic merging SMoE layer on the right. Our architecture reduces the number of parameters compared to the other two, while maintaining the same number of activated neurons per layer. Importantly, despite the dynamic merging mechanism, our architecture preserves the same number of experts at each layer as the other SMoE architectures, ensuring comparable model capacity, i.e., the number of activated parameters per layer.  
+
+Eqn. Dynamic-Merg. Not only will this allow a notable reduction in model size and GFLOPS, but it also ensures the number of experts in each SMoE is the same as in the full-expert setting, where each layer has the same number of experts.  
+
+2.5 EFFICENCY  
+
+Parameter efficient approximation of curvature matrix. Storing and computing a curvature matrix requires a whopping memory and time complexity of $O(n^{4})$ and $O({\bar{n^{4}}})$ , respectively. This is infeasible even for a simple SMoE layer, as one layer can contain many experts. To mitigate this problem, we follow Martens & Grosse (2015) and approximate the curvature matrix using the Kronecker product. It has been proven by Hameed et al. (2022) that we can approximate arbitrary matrix using a finite sum of Kronecker products. For a curvature matrix $\mathbf{M}_{i}\in\hat{\mathbb{R}}^{d_{i n}d_{o u t}\times d_{i n}d_{o u t}}$ , we present the rank-1 approximation as below:  
+
+$$
+\mathbf{M}_{i}\approx\mathbf{M}_{i}^{i n}\otimes\mathbf{M}_{i}^{o u t}
+$$  
+
+with $\mathbf{M}_{i}^{i n}\,\in\,\mathbb{R}^{d_{i n}\times d_{i n}}$ and $\mathbf{M}_{i}^{o u t}\,\in\,\mathbb{R}^{d_{o u t}\times d_{o u t}}$ . Still, this form of approximation is too large to compute and store during training time, so we further decompose $\mathbf{M}_{i}^{i n}$ and $\mathbf{M}_{i}^{o u t}$ using Kronecker product because of the efficient computation using tensor algebra. This form of approximation reduces the number of parameters added and only puts negligible memory and computational overhead to the training process at the cost of additional $O(n)$ memory complexity and $O(\dot{n}^{2.5})$ computational complexity. Although this might limit the representative capacity of the curvature matrix, we empirically find that the performance of our method still surpasses other merging methods.  
+
+Efficient test-time inference with reparameterization. We focus on the case where $\alpha\,=\,1$ . To further optimize the computation of curvature-aware merging, we embed the curvature matrices into the domain-vectors using the following reparameterization trick:  
+
+$$
+\mathbf{E}_{i}^{\prime}\leftarrow\mathbf{E}_{m}+\mathbf{M}_{i}\cdot\boldsymbol{\tau}_{i}
+$$  
+
+In this case, the merging formula at test time becomes:  
+
+$$
+\hat{\mathbf{E}}_{m}=\mathbf{E}_{m}+\sum_{i=1}^{N-1}s_{i}\cdot\left(\mathbf{E}_{i}^{\prime}-\mathbf{E}_{m}\right)=\mathbf{E}_{m}+\sum_{i=1}^{N-1}\mathbf{M}_{i}\cdot\left(s_{i}\cdot\boldsymbol{\tau}_{i}\right)
+$$  
+
+Thus, during inference, we avoid storing the curvature matrices and recomputing their product with domain vectors, reducing the total FLOPs. This explains the computational efficiency seen in Section 3.  
+
+2.6 THEORETICAL ANALYSIS  
+
+In this section, we investigate how optimizing the curvature matrix $\mathbf{M}$ in Eqn. CA-Merg can improve the generalization of the expert merging process for downstream tasks. We first recall the formulation for domain-specific merging  
+
+$$
+\hat{\mathbf{E}}_{m}=\mathbf{E}_{m}+\alpha\sum_{j=1}^{N-1}s_{j}\cdot\boldsymbol{\tau}_{j}
+$$  
+
+We begin by calculating the gradient of the downstream task loss function, denoted by $\mathcal{L}$ , with respect to $\mathbf{M}_{j}$ at a specific lth layer as follows:  
+
+$$
+{\frac{\partial{\mathcal{L}}}{\partial\mathbf{M}_{j}}}={\frac{\partial{\mathcal{L}}}{\partial{\hat{\mathbf{E}}}_{m}}}\cdot{\frac{\partial{\hat{\mathbf{E}}}_{m}}{\partial\mathbf{M}_{j}}}={\frac{\partial{\mathcal{L}}}{\partial{\hat{\mathbf{E}}}_{m}}}\cdot(\alpha s_{j}*\tau_{j})=\alpha s_{j}*{\frac{\partial{\mathcal{L}}}{\partial{\hat{\mathbf{E}}}_{m}}}\cdot(\mathbf{E}_{j}-\mathbf{E}_{m})
+$$  
+
+This is the outer product of the gradients of the task loss and the domain vectors. It is important to note the connection with the Fisher Information Matrix. For a downstream task, if we define the loss function as the negative log-likelihood, such as in a supervised classification task ${\mathcal{L}}(\theta)=$ $\mathbb{E}_{(x,y)\sim p}[-\log_{\theta}p(y|x)]$ , then the empirical Fisher Information Matrix can be defined as  
+
+$$
+\mathbf{F}=\mathbb{E}_{(x,y)\sim p}[\nabla_{\theta}\log_{\theta}p(y|x)\nabla_{\theta}\log_{\theta}p(y|x)^{\top}]
+$$  
+
+Next, we consider how the gradient of the curvature matrix can contribute to better performance. Given a time step $t$ , the standard gradient descent from an initial point ${{\bf{M}}_{j}}$ with learning rate $\beta$ yields the following update:  
+
+$$
+\mathbf{M}_{j}^{t+1}=\mathbf{M}_{j}^{t}-\boldsymbol{\beta}\ast\frac{\partial\mathcal{L}}{\partial M_{j}^{t}}=\mathbf{M}_{j}^{t}-\alpha\boldsymbol{\beta}\ast s_{j}^{t}\ast\frac{\partial\mathcal{L}}{\partial\hat{\mathbf{E}}_{m}^{t}}\cdot\left(\mathbf{E}_{j}^{t}-\mathbf{E}_{m}^{t}\right)
+$$  
+
+We assume standard gradient descent for simplicity, but the argument extends to other advanced gradient algorithms, such as momentum and ADAM. We then apply $\mathbf{M}_{j}$ to the merging process in Eqn. CA-Merg and get  
+
+$$
+\hat{\mathbf{E}}_{m}=\mathbf{\deltaE}_{m}+\alpha\sum_{j=1}^{N-1}s_{j}^{t+1}*\mathbf{M}_{j}^{t}\cdot\boldsymbol{\tau}_{j}^{t+1}\mathbf{\delta}-\alpha^{2}\beta\sum_{j=1}^{N-1}s_{j}^{t}s_{j}^{t+1}*\left(\boldsymbol{\tau}_{j}^{t^{\intercal}}\cdot\boldsymbol{\tau}_{j}^{t+1}\right)\cdot\frac{\partial\boldsymbol{\mathcal{L}}}{\partial\hat{\mathbf{E}}_{m}^{t}}
+$$  
+
+ We can see that the first term in Eqn. 8 is the classic domain-specific merging formula with the guidance of the learned curvature. Furthermore, the second term contains the direction from the task loss gradient and the inner product between domain-vectors from two consecutive gradient steps. If $\bar{\textbf{M}}_{j}\;=\textbf{I}\forall j$ , this term can be seen as an auxiliary signal from task loss of the previous update step guiding the merging direction. The $s_{j}^{t}s_{j}^{t+1}\cdot\left(\tau_{j}^{t^{\top}}\tau_{j}^{t+1}\right)$ modeling the agreement of the merging direction between updating steps: if there are conflicts between current and the previous updating direction, then this signal will be alleviated, thus dampening the harm to the merging direction of the current step; otherwise if they show strong agreement, this amplifies the impact of the updating direction toward minimizing the task loss with respect to the previous step, thus accelerate the training process while implicitly helping current merging direction with additional experience.  
+
+On the other hand, we can rewrite Eqn. 8 as follows:  
+
+$$
+\hat{\mathbf{E}}_{m}=\mathbf{E}_{m}+\alpha\sum_{j=1}^{N-1}s_{j}^{t+1}*\mathbf{M}_{j}^{t}\cdot\boldsymbol{\tau}_{j}^{t+1}-\alpha^{2}\beta\sum_{j=1}^{N-1}s_{j}^{t}s_{j}^{t+1}*\underbrace{\left(\boldsymbol{\tau}_{j}^{t^{\intercal}}\frac{\partial\mathcal{L}}{\partial\hat{\mathbf{E}}_{m}^{t}}\right)}_{\mathrm{~}}\cdot\boldsymbol{\tau}_{j}^{t+1}
+$$  
+
+We now have the inner-product between the gradient of the task loss and the domain-vector. This can be interpreted as the matching between the update from the task loss gradient and the domainspecific direction. We then have the updated domain-specific direction for each expert whose weighting factors are calculated by the inner-product. Therefore, we are performing a soft nearest distance voting to find the experts that agree the most with the task loss and enhance the merged experts with the corresponding domain-vector.  
+
+3 EXPERIMENTAL RESULTS  
+
+Table 2: Performance of T5-base variants on the fine-tuning tasks for GLUE. All SMoE variants have 8 experts per layer. We follow Devlin et al. (2019) in conducting experiments on the GLUE benchmark. Our curvature-aware methods outperform all baselines across tasks, while maintaining the same number of parameters and FLOPs as the SMoE models.  
+
+![](images/6527daf3b2c52c2ab6556a6d681e6ecbf9013a973877780b18a3b268a982d1f7.jpg)  
+
+We perform evaluations on four major tasks, including language modeling, text classification, question answering, and image classification. For language modeling, we use the Wikitext-2 and Wikitext-103 (Merity et al., 2016) benchmarks. For text classification, we employ a subset of the GLUE (Wang et al., 2019) benchmark, a collection of eight diverse tasks designed to test different aspects of language understanding. For question answering, we employ two famous benchmarks: SQuAD (Rajpurkar et al., 2016) and WikiQA (Yang et al., 2015). Finally, the ImageNet-1k (Deng et al., 2009) dataset is chosen for image classification evaluation.  
+
+![](images/10ff5e0e866b8254ebb285f58562fe6c8ad9529a091b2c9ce3bfce86fd3ff95a.jpg)  
+Figure 3: Perplexity of GPT2-small variants starting at the tenth epoch.  
+
+Swin-Transformer small (Liu et al., 2021) as our   
+backbones for language modeling and image classification, respectively. Regarding GLUE and question-answering tasks, T5 base (Raffel et al., 2020) is chosen.   
+Our experimental results confirm that the proposed merging method accelerates pre-training convergence and, when combined with other merging protocols, enhances model performance across tasks and settings. All results are averaged over 5 runs with different random seeds.1, and H.2.  
+
+
+
+\section{3.1 TRAINING AND EVALUATION DETAILS  }
+
+
+We fix the number of epochs for all models on each task. For each text-related task, we first undertake a comprehensive hyper-parameter search. This encompasses batch sizes from $\lbrace8,\,16,\,32$ , 64}, learning rates from $\{3\bar{e}{-}4,\,1e{-}4,\,3e{-}5,\,1e{-}5\}$ , to pinpoint the optimal fine-tuned models. Regarding image classification tasks, a batchsize of 96 for chosen for all models. In addition, we choose AdamW (Loshchilov & Hutter, 2019) as the default optimizer and conduct all experiments on NVIDIA A100 GPUs. We compare our proposal to three merging baselines, including domainspecific, Ties, and Dare merging. There exists prior works on merging methods with the aid of the Fisher Information Matrix, such as Matena & Raffel (2022), which rely on access to a validation set used to compute the Fisher matrix or fine-tune hyperparameters. To eliminate the need for a validation set, Jin et al. (2023) proposes storing and transmitting inner product matrices derived from the training data for each task, which are of the same size as the original model. However, this approach becomes costly for large models, as storage and transmission demands increase linearly with model size and the number of tasks as well as the number of experts. Therefore, we choose baselines that are needless of extra information and computational cost to perform comparisons. We want to note that our merging protocol can be easily integrated into other works such as merge then compress protocol Li et al. (2024).  
+
+
+
+\section{3.2 RESULTS  }
+
+
+In the following tables, the row with our method’s results is highlighted in grey. Results with the best and second best performance are written in bold and underline, respectively. In addition, methods with the postfix ”-CA” denote the curvature-aware version of the corresponding baseline.  
+
+In Table 2, the results demonstrate that CA-augmented models consistently outperform their nonCA counterparts. Ties-CA achieves the highest scores on SST-2 (94.61), MRPC (92.49), CoLA (60.06), and MNLI (86.45), showing considerable improvements over both the vanilla and standard Ties models. Similarly, Dare-CA performs best on RTE (78.70), surpassing Dare (73.64), indicating that CA improves performance on smaller datasets and tasks with higher variability. Furthermore, Domain-specific-CA exceeds the non-CA version on QNLI and MNLI, demonstrating the broader applicability of curvature-aware methods.  
+
+In Table 3, the Domain-specific-CA and Dynamic outperform the Vanilla, SMoE, and Domain-specific baselines, with lower perplexity values. Domain-specific-CA achieves the lowest perplexity score of 21.50, showcasing superior performance in language modeling tasks when compared to all other methods. The Dynamic architecture follows closely with a perplexity of 21.55 while also reducing the $9\%$  
+
+Table 3: Performance of GPT-2 small variants for the pre-training task on Wikitext-103.   
+
+![](images/e1203c6fee870e7705e395d355f302330dad15a6aee76821fcb46616ed4b926e.jpg)  
+
+parameter count by , compared to the other methods. This highlights the Dynamic architecture’s efficiency in maintaining strong performance with fewer parameters, making it ideal for resource-constrained environments. Moreover, the Dynamic architecture is competitive with Domain-specific-CA and outperforms the rest in terms of convergence speed, which is shown in Figure 3.  
+
+In Table 4 the Vanilla model reach a perplexity of 21.84. Despite increasing parameters, SMoE only slightly improves to 21.60. Domain-specific, Ties, and Dare methods show small gains, with Ties reaching 21.45. However, curvature-aware (CA) methods outperform all others. Domain-specific-CA achieves the best perplexity at 21.06, followed by TiesCA (21.11) and Dare-CA (21.42), each significantly improving over their non-CA counterparts. All models beyond Vanilla share the  
+
+Table 4: Performance of GPT-2 small variants for the supervised fine-tuning task on Wikitext-2   
+
+![](images/7e4a4a6cbe0fa022b95ebe2c2fa277f70823cbbc5375efeab870987149ac5cf8.jpg)  
+
+same computational cost, indicating that CA methods enhance performance without added complexity. Domain-specific-CA stands out, demonstrating the clear advantage of curvature-aware optimization.  
+
+In Table 5, the baseline models, including Vanilla, SMoE, and non-CA versions of Ties and Dare, achieve solid results but show diminishing improvements as model complexity increases. In contrast, our curvature-aware methods significantly outperform their counterparts. For instance, on the SQuAD dataset, Dare-CA achieves the highest Exact Match (EM) score of $81.76\%$ and an F1 score of $88.60\%$ , surpassing all other methods. Similarly, on WikiQA, TiesCA attains the highest accuracy of $96.55\%$ , with Dare-CA closely following at $96.23\%$ .  
+
+Table 5: Performance of T5-base variants on question answering tasks.   
+
+![](images/63e01a75a24fd73982da26c2eb49b667dac61ff68fa082459b539f6ff7158505.jpg)  
+
+In Table 6, while Vanilla and SMoE exhibit solid accuracy scores, they are surpassed by the curvature-aware (CA) enhanced versions of the models. Notably, Ties-CA delivers the best top-1 accuracy at $83.38\%$ and the highest top-5 accuracy at $96.96\%$ , slightly edging out Dare-CA, which achieves $83.38\%$ and $96.94\%$ , respectively.  
+
+432   
+433   
+434   
+435   
+436   
+437   
+438   
+439   
+440   
+441   
+442   
+443   
+444   
+445   
+446   
+447   
+448   
+449   
+450   
+451   
+452   
+453   
+454   
+455   
+456   
+457   
+458   
+459   
+460   
+461   
+462   
+463   
+464   
+465   
+466   
+467   
+468   
+469   
+470   
+471   
+472   
+473   
+474   
+475   
+476   
+477   
+478   
+479   
+480   
+481   
+482   
+483   
+484   
+485  
+
+![](images/e3888e2127dd7992ce5404336552896db3a7a05f6550ddf55bb576275e84a849.jpg)  
+Figure 4: Impact of the $\alpha$ parameter on Curvature-Aware method performance across NLP tasks. We observe that the scaling factors that are within the range [0.8, 1] consistently improve model’s performance.  
+
+![](images/947c9cae9742cf7a80a7452a0ea4bf2bd7332d2744be44c247d07a54ffc74244.jpg)  
+
+
+
+\section{4 ABLATION  }
+
+
+Impact of the scaling factor. The plot in Figure 4 illustrates the impact of the $\alpha$ parameter on the performance of three curvature-aware (CA) model variants Domain-specific-CA, Ties-CA, and Dare-CA across three natural language processing tasks: STSB, MRPC, and RTE. The $\alpha$ parameter ranges from 0.5 to 1.0. The overall trend suggests that increasing $\alpha$ leads to better generalization, particularly for complex tasks such as RTE, where sentencelevel entailment and similarity benefit from  
+
+Table 6: Comparison of Accuracy for SwinTransformer small variants on ImageNet-1k.   
+
+![](images/b5377f2016163f0a532f8d920873c07e79b0b42246abfdfb0363caccc893d8dc.jpg)  
+
+stronger curvature-aware representations. Moreover, across all tasks, the model reaches its peak performance when $\alpha$ is inside the range [0.8, 1]. This observation aligns with that indicated by Yadav et al. (2023).4.1 and H.4.2.  
+
+Improved performance with higher Kronecker rank. Across all three tasks (STSB, MRPC, and RTE), the evaluation metrics tend to improve as the rank increases from 1 to 8. This indicates that higher-ranked models generally perform better, suggesting a positive correlation between rank and task performance. Notably, the Domain-specific-CA model consis  
+
+Table 7: Comparison for Swin-Transformer small variants on corrupted ImageNet.   
+
+![](images/366c40981d8649800230564afec4f52c366d89c050273c2ffe89d6a443db40bd.jpg)  
+
+tently achieves high performance across all tasks, especially in STSB, where metrics approach 0.90. Although MRPC and RTE show slightly lower metrics, ranging from 0.50 to 0.75, there is a clear improvement in performance as rank increases, particularly in the lower-to-mid ranks. However, we observed a decline in performance for Ties-CA and Dare-CA as the rank increases. We hypothesize that this is due to the masking mechanism employed by these methods, which may interfere with the learning process of the curvature matrices.  
+
+Robustness against noise. Table 7 demonstrates that curvature-aware models offer superior performance on corrupted ImageNet datasets compared to both Vanilla and SMoE variants. Among the models, our best configuration (Ties-CA) stands out as the best performer, showcasing robustness to corruptions across all datasets. These results suggest that incorporating curvature-awareness can substantially improve model robustness in challenging conditions.  
+
+
+
+\section{5 RELATED WORK  }
+
+
+Sparse Mixture-of-Experts (SMoE). As the demand for model scaling grows increasingly widespread, there is a pressing inquiry into efficient ways to optimize computing costs while minimizing the impact on model performance. To address this need, Sparse Mixture of Experts (SMoE) has emerged and undergone extensive research and exploration (Shazeer et al., 2017; Lepikhin et al., 2021; Fedus et al., 2022). Starting with Shazeer et al. (2017), the integration of SMoE into transformer architectures followed shortly after with the works of Lepikhin et al. (2021) and Fedus et al. (2022). The principle of SMoE is based on a simple concept: scaling the horizontal dimension of models (i.e., the number of feedforward blocks) rather than the vertical dimension (i.e., the number of stacked layers). This allows the model to selectively activate units or parameters based on the input tokens, thereby optimizing resource usage while maintaining performance.  
+
+SMoE Efficiency Bottlenecks and Emerging Solutions. While it remains controversial whether to use Top-1 or Top-K routing, some research has highlighted the potential performance gains from increasing the number of activated experts (Shazeer et al., 2017; Chen et al., 2023). Other studies have found redundancies among experts in MoE layers (Li et al., 2024; Lu et al., 2024a). Additionally, some work has proposed using low-rank experts (Wu et al., 2024b; Liu et al., 2024; Wu et al., 2024a) inspired by LoRA (Hu et al., 2022). Despite the varying research directions, these studies consistently show that training a robust SMoE requires substantial computational and memory resources. This has motivated researchers such as Li et al. (2024), He et al. (2023), and Zhong et al. (2024) to merge experts within each MoE layer, reducing the number of experts to a single one and significantly improving training and inference efficiency.  
+
+Model Merging with curvature-aware. Though numerous methods for merging models have been introduced and developed (Yadav et al., 2023; Cai et al., 2023; Ilharco et al., 2022; Matena & Raffel, 2022; Jin et al., 2022; Don-Yehiya et al., 2022; Rame et al., 2023; Lu et al., 2024b), most of these works consider merging protocols in the Euclidean parameter space. However, it has been noted that the space of deep neural network models is a Riemannian one (Amari, 1998). Matena & Raffel (2022) and Jin et al. (2022) were the first to fuse model weights while accounting for the Fisher Information. Despite their promising results, these methods require massive computation to approximate the inversion of the Fisher matrix. Moreover, the Fisher matrix has a size proportional to the dimension of the model parameters, which significantly increases memory usage. Consequently, these methods are challenging for directly integrating into SMoE layers to fuse expert weights.  
+
+
+
+\section{6 LIMITATION AND CONCLUSION  }
+
+
+In this work, we introduced CAMEx, a curvature-aware approach to expert merging in Mixture of Experts architectures. By leveraging natural gradients to account for the parameter manifold’s curvature, CAMEx enhances model performance and reduces computational costs during both pretraining and fine-tuning, outperforming traditional Euclidean-based methods. Additionally, our dynamic merging architecture optimizes resource usage by incorporating a global expert across layers, thus minimizing model size without sacrificing accuracy. Despite the overall improvements, a minor limitation is that curvature-aware merging demonstrates reduced compatibility with Ties and Dare merging at higher Kronecker ranks. Future work could dive deeper into this phenomenon and extend CAMEx to other expert merging methods and explore curvature-aware approaches in broader neural network models to further enhance our dynamic architecture. This research lays the groundwork for developing more efficient and scalable models in large-scale machine learning.  
+
+Reproducibility Statement: Source codes for our experiments are provided in the supplementary   
+materials of the paper. The details of our experimental settings and computational infrastructure are   
+ All datasets that we used in the paper are published, and   
+they are easy to find in the Internet.   
+Ethics Statement: Given the nature of the work, we do not foresee any negative societal and ethical   
+impacts of our work.   
+
+

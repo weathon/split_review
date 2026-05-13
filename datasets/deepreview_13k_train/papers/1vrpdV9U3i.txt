@@ -1,0 +1,430 @@
+\title{Variational Search Distributions}
+
+\begin{abstract}
+    We develop \gls{vsd}, a method for finding and generating discrete, combinatorial designs of a rare desired class in a batch sequential manner with a fixed experimental budget. We formalize the requirements and desiderata for active generation and formulate a solution via variational inference. In particular, \gls{vsd} uses off-the-shelf gradient based optimization routines, can learn powerful generative models for designs, and can take advantage of scalable predictive models. We derive asymptotic convergence rates for learning the true conditional generative distribution of designs with certain configurations of our method. After illustrating the generative model on images, we empirically demonstrate that \gls{vsd} can outperform existing baseline methods on a set of real sequence-design problems in various biological systems.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+We consider a variant of the \emph{active search} problem \citep{garnett2012bayesian, jiang2017efficient, vanchinathan2015discovering}, where we wish to find members (designs) of a rare desired class in a batch sequential manner with a fixed experimental budget. We call sequential active learning of a \emph{generative} model of these designs \emph{\textbf{active generation}}. Examples of rare designs are compounds that could be useful pharmaceutical drugs, or highly active enzymes for catalyzing chemical reactions. We assume the design space is discrete or partially discrete, high-dimensional, and practically \emph{innumerable}.
+For example, the number possible configurations of a single protein is $20^{\bigo(100)}$ \citep[see, e.g.,][]{sarkisyan2016local}.
+
+We are interested in this active generation objective for a variety of reasons. We may wish to study the properties of the ``fitness landscape'' \citep{papkou2023rugged} to gain a better scientific understanding of a phenomenon such as natural evolution. Or, we may not be able to completely specify the constraints and objectives of a task, but we would like to characterize the space of, and generate new feasible designs. For example, we want enzymes that can degrade plastics in an industrial setting, but we may not yet know the exact conditions (e.g.~temperature, pH), some of which may be anti-correlated with enzyme catalytic activity. Alternatively, if we know these multiple objectives and constraints, we may only want to generate designs from a Pareto set.
+
+Assuming we can take advantage of a prior distribution over designs, we formulate the search problem as inferring the posterior distribution over rare, desirable designs. Importantly, this posterior can be used for \textit{generating new designs}. Specifically, we use (black-box) \gls{vi}~\citep{ranganath2014black}, and so refer to our method as \acrfull{vsd}. Our major contributions are: (1) we formulate the batch active generation objective over a (practically) innumerable discrete design space,  (2)  we present a variational inference algorithm, \gls{vsd}, which solves this objective, (3) we show that \gls{vsd} performs well theoretically and empirically, and (4) we discuss how active generation is related to recent advances in \gls{bbo} of discrete sequences. \gls{vsd} uses off-the-shelf gradient based optimization routines, is able to learn powerful generative models, and can take advantage of scalable predictive models. In our experiments we show that \gls{vsd} can outperform existing baseline methods on a set of real applications.
+Finally, we evaluate our approach on the related sequential \gls{bbo} problem, where we want to find the globally optimal design for a specific objective and show competitive performance when compared with state-of-the-art methods, e.g., based on \gls{lso} \citep{gruver2023protein}.
+
+
+
+\section{Method}
+
+\label{sec:method}
+In this section we formalize our problem and describe its requirements and desiderata. We also develop our proposed  solution, based on variational inference, which we will refer to as \acrfull{vsd}.
+
+\subsection{The Problem of Active Generation}
+\label{sub:formulation}
+
+We are given a design space $\obsspace$, which can be discrete or mixed discrete-continuous and high dimensional, and where for each instance that we choose $\obs \in \obsspace$, we measure some corresponding property of interest (so-called fitness) $\tar \in \real$. For example, in our motivating application of DNA/RNA or protein sequences (henceforth referred to as just sequences), $\obsspace = \acidspace^M$ where $\acidspace$ is the sequence vocabulary (e.g.,~amino acid labels, $\card{\acidspace}=20$) and $M$ is the length of the sequence. However, we do not limit the application of our method to sequences. Using this framing, a real world experiment (for example, measuring the activity of an enzyme) can be modeled as an unknown relationship,
+\begin{align}
+    \tar = \bbf(\obs) + \err,
+    \label{eq:targen}
+\end{align}
+for some black-box function (e.g.~the experiment), $\bbf$, and measurement error $\err \in \real$, distributed according to $\prob{\err}$ with $\expec{\prob{\err}}{\err} = 0$.
+Instead of modeling the whole space, $\obsspace$, we are only interested in a set of events which we choose based on fitness, $\solnspace \subset \obsspace$.
+In particular for active generation we wish to learn a generative model, by efficiently querying the black-box function in \autoref{eq:targen}, that only returns samples $\obs^{(s)} \in \solnspace$.
+For the purposes of this work, we define this solution space as the super level-set, $\solnspace := \{\obs : \tar > \thresh \}$ for $\thresh \in \real$ (e.g., wild-type fitness), and so \emph{our task is to learn the super level-set distribution}, $\probc{\obs}{\tar > \thresh}$, \emph{in an active manner}\footnote{One could consider other definitions of this solution set, $\solnspace$, for example the Pareto set of non-dominated designs in a multi-objective optimization setting. We leave the formulation of \gls{vsd} for other $\solnspace$ as future work.}.
+We contrast this objective to the related objectives of; \gls{bbo} for the fittest design, $\obs^* = \argmax_\obs \bbf(\obs)$, directly estimating the super level-set, $\solnspace$, or the shape of the black-box function for the super level-set, $\peakspace := \{\bbf(\obs) : \obs \in \solnspace\}$.
+We visualize these related objectives in \autoref{fig:islands}.
+We assume that $\solnspace \subset \obsspace$ are rare events in a high dimensional space, and that we have access to a prior belief, $\prob{\obs}$, which helps narrow in on this subset of $\obsspace$.
+We are given a dataset, $\data_N := \{(\tar_n, \obs_n)\}_{n=1}^N$, which may contain only a few instances of $\tar_n > \tau$. Given $\prob{\obs}$ and $\data_N$ we aim to recommend batches of unique candidates, $\{\obs_{bt}\}^B_{b=1}$, for experimental evaluation (\autoref{eq:targen}) in a series of rounds, $\iterIdx \in \{1, \ldots, \niter\}$, where $B = \bigo(1000)$ and we desire $\obs_{bt} \in \solnspace$. Each round, $\data_N$ is augmented with the experimental results of the previous batch, so $N \leftarrow N + B$.
+Estimating this super level-set distribution of $\obs$ is computationally and statistically challenging and, therefore, we cast this as a \emph{variational inference} problem. As we shall see later, our solution allows us to satisfy the following requirements and additional desiderata for our problem.
+\\
+\begin{require*} Problem requirements (R) and other desiderata (D).%
+\small%
+\begin{multicols}{2}%
+\begin{description}%[labelindent=0.5cm, listparindent=0cm]
+    \item[\namedlabel{req:rare}{(R1)} Rare] feasible designs, $\solnspace$, are rare events in $\obsspace$ that need to be identified
+    \item[\namedlabel{req:seq}{(R2)} Sequential] non-myopic candidate generation, $\obs \in \solnspace$, for sequential experimentation
+    \item[\namedlabel{req:disc}{(R3)} Discrete] search over (combinatorially) large design spaces, e.g.~$\obs \in \obsspace = \acidspace^M$
+    \item[\namedlabel{req:batch}{(R4)} Batch] generation of up to $\mathcal{O}(1000)$ \emph{diverse} candidate designs per round
+    \item[\namedlabel{req:gen}{(R5)} Generative] models, $\obs^{(s)} \sim \qrob{\obs}$, that are task-specific for fit designs
+    \item[\namedlabel{desi:guar}{(D1)} Guaranteed]%
+    convergence for certain choices of priors, variational distributions and predictive models
+    \item[\namedlabel{desi:gd}{(D2)} Gradient] based optimization strategies for candidate searching
+    \item[\namedlabel{desi:scale}{(D3)} Scalable] predictive models that enable high-throughput experiments.
+\end{description}
+\end{multicols}
+\label{requirements}
+\end{require*}
+\begin{figure}[tb]%
+    \centering
+    \subcaptionbox{$\argmax_\obs \bbf(\obs)$\label{sfig:argmaxx}}
+        {\includegraphics[width=.19\textwidth]{figs/argmaxx.png}}
+    \subcaptionbox{$\solnspace$\label{sfig:fitset}}
+        {\includegraphics[width=.19\textwidth]{figs/fitset.png}}
+    \subcaptionbox{$\prob{\obs}$\label{sfig:px}}
+        {\includegraphics[width=.19\textwidth]{figs/px.png}}
+    \subcaptionbox{$\probc{\obs}{\tar > \thresh}$\label{sfig:pxgy}}
+        {\includegraphics[width=.19\textwidth]{figs/pxgy.png}}
+    \subcaptionbox{$\peakspace$\label{sfig:fitf}}
+        {\includegraphics[width=.19\textwidth]{figs/fitf.png}}
+    \caption{Fitness landscape tasks. (\subref{sfig:argmaxx}) A noise-less fitness landscape, $\bbf(\obs)$, and white `$\times$' denoting the maximum fitness design, $\obs^*$. (\subref{sfig:fitset}) The super level-set, $\solnspace$, of all fit designs as the white hatched area. (\subref{sfig:px}) Prior belief $\prob{\obs}$. (\subref{sfig:pxgy}) The density/mass function of the super level-set, $\probc{\obs}{\tar > \thresh}$, as blue contours. (\subref{sfig:fitf}) The black box function for the super level-set, $\peakspace$. See the text for definitions of these tasks. Our primary goal is to estimate a generative model for the distribution of the super level-set (\subref{sfig:pxgy}). Since we assume a noisy relationship between $\bbf$ and $\tar$, the super level-set will not have a hard boundary as depicted, and $\probc{\obs}{\tar > \thresh}$ will be non-zero over all $\obsspace$.}
+    \label{fig:islands}
+\end{figure}%
+
+\subsection{Variational Search Distributions}
+
+We cast the estimation of $\probc{\obs}{\tar > \thresh}$ as a sequential optimization problem. A suitable objective for a round, $t$, is to minimize a divergence,
+\begin{align}
+    \qparam_t^* = \argmin_\qparam \diver{\probc{\obs}{\tar > \thresh}}{\qrobc{\obs}{\qparam}}
+    \label{eq:diver}
+\end{align}
+where $\qrobc{\obs}{\qparam}$ is a parameterized  distribution from which we sample experimental candidate designs $\obs_{bt}$, \ref{req:gen}, and which we aim to match to $\probc{\obs}{\tar > \thresh}$.
+The difficulty is that we cannot directly evaluate or empirically sample from $\probc{\obs}{\tar > \thresh}$. However, if we consider the reverse \gls{kl} divergence,
+\begin{align}
+    \argmin_\qparam\, \dkl{\qrobc{\obs}{\qparam}}{\probc{\obs}{\tar > \thresh}}
+    = \argmin_\qparam \expec{\qrobc{\obs}{\qparam}}
+        {\log \frac{\qrobc{\obs}{\qparam}}{\prob{\obs}} - \log \probc{\tar > \thresh}{\obs}},
+    \label{eq:kld}
+\end{align}
+where we have expanded $\probc{\obs}{\tar > \thresh}$ using Bayes rule and dropped the constant term $\prob{\tar > \thresh}$, we note that we no longer require evaluation of $\probc{\obs}{\tar > \thresh}$ directly. We recognize the right-hand side of \autoref{eq:kld} as the well known (negative) variational \gls{elbo},
+\begin{align}
+    \elbo{\qparam} :=
+    \expec{\qrobc{\obs}{\qparam}}{\log \probc{\tar > \thresh}{\obs}} - \dkl{\qrobc{\obs}{\qparam}}{\prob{\obs}}.
+    \label{eq:gen_elbo}
+\end{align}
+For this we assume access to a prior distribution over the space of designs, $\prob{\obs}$, that may be informed from the data at hand (or pre-trained). Henceforth, as we will develop a sequential algorithm, we will denote this prior with $\probc{\obs}{\data_0}$.
+We note the relationship between $\log \probc{\tar > \thresh}{\obs}$ and the \gls{pi} acquisition function from \gls{bo}~\citep{kushner1964new},
+\begin{align}
+    \log \probc{\tar > \thresh}{\obs} \approx \log \probc{\tar > \thresh}{\obs, \data_N}
+    = \log \expec{\probc{\tar}{\obs, \data_N}}{\indic{\tar > \thresh}} = \log \acqfn{\obs, \data_N, \thresh}{PI}.
+    \label{eq:pr2piacq}
+\end{align}
+Here $\mathbbm{1}: \{\textrm{false}, \textrm{true}\} \to \{0, 1\}$ is the indicator function and $\probc{\tar}{\obs, \data_\nobs}$ is typically estimated using the posterior predictive distribution of a \gls{gp} given data, $\data_N$. So $\probc{\tar > \thresh}{\obs, \data_\nobs} = \cdf((\gpmean_\nobs(\obs) - \thresh)/\sigma_\nobs(\obs))$, where $\cdf(\cdot)$ is a cumulative standard normal distribution function, and $\gpmean_\nobs(\obs)$, $\sigma_\nobs^2(\obs)$ are the posterior predictive mean and variance, respectively, of the \gls{gp}. We refer to this estimation strategy as \gls{gp}-\gls{pi}, and rewrite the \gls{elbo} accordingly,
+\begin{align}
+    \elbo{\qparam, \thresh, \data_N} = \expec{\qrobc{\obs}{\qparam}}{\log \acqfn{\obs, \data_N, \thresh}{PI}} - \dkl{\qrobc{\obs}{\qparam}}{\probc{\obs}{\data_0}}.
+    \label{eq:vsd_elbo}
+\end{align}
+The method that maximizes the objective in \autoref{eq:vsd_elbo} we call \acrfull{vsd}, since we are using the variational posterior distribution as a means of searching the space of fit designs, satisfying \ref{req:rare}, \ref{req:seq} and \ref{req:batch}. It is well known that when the true posterior is a member of the variational family indexed by $\qparam$, the above variational inference procedure has the potential to recover the exact posterior distribution. To recommend experimental candidates we sample a set of designs from our search distribution each round,
+\begin{align}
+    \{\obs_{bt}\}^B_{b=1} \sim \prod^B_{b=1} \qrobc{\obs}{\qparam_t^*},
+    \quad \textrm{where} \quad
+    \qparam_t^* = \argmax_\qparam \elbo{\qparam, \thresh, \data_N}.
+\end{align}
+We discuss the relationship between \gls{vsd} and \gls{bo} in \autoref{app:vsdbound}. In general, because of the discrete combinatorial nature of our problem, we cannot use the re-parameterization trick \citep{kingma2014auto} to estimate the gradients of the \gls{elbo}. Instead, we use the score function gradient estimator~\citep{williams1992simple, mohamed2020monte} with standard gradient descent methods \ref{desi:gd},
+\begin{align}
+   \nabla_\qparam \elbo{\qparam, \thresh, \data_N} &= \expec{\qrobc{\obs}{\qparam}}{\left(\log \acqfn{\obs, \data_N, \thresh}{PI}
+        - \log \frac{\qrobc{\obs}{\qparam}}{\probc{\obs}{\data_0}}\right)
+        \nabla_\qparam \log \qrobc{\obs}{\qparam}},
+    \label{eq:vsdderiv}
+\end{align}
+where we use Monte-Carlo sampling to approximate this expectation with a suitable variance reduction scheme, such as using a control variate or baseline \citep{mohamed2020monte}. We find that the exponentially smoothed average of the \gls{elbo} works well in practice, and is the same strategy employed in~\citet{daulton2022bayesian}. Effectively, \gls{vsd} implements black-box variational inference~\citep{ranganath2014black} for parameter estimation, and despite the high-dimensional nature of $\obsspace$, we find we only need $\bigo(1000)$ samples to estimate the required expectations for \gls{elbo} optimization on problems with $M = \mathcal{O}(100)$, satisfying~\ref{req:disc}. Note that \autoref{eq:vsd_elbo} -- \ref{eq:vsdderiv} do not involve any data ($\data_N$) directly, only indirectly through the acquisition function. Hence the scalability of \gls{vsd} is dependent on the complexity of training the underlying estimator of $\probc{\tar}{\obs, \data_N}$.
+\subsection{Class Probability Estimation}
+
+So far our method indirectly computes the \gls{pi} by transforming the predictions of a \gls{gp} surrogate model, $\probc{\tar}{\obs, \data_N}$, as in \autoref{eq:pr2piacq}. Instead we may choose to follow the reasoning used by \gls{bore} in~\citet{tiao2021bore, oliveira2022batch, song2022general}, and directly estimate the quantity we care about, $\probc{\tar > \thresh}{\obs, \data_N}$. We do this with \gls{cpe} on the labels $ \labl := \indic{\tar > \thresh} \in \{0, 1\}$ so
+$\probc{\tar > \thresh}{\obs, \data_N} = \probc{\labl=1}{\obs, \data_N} \approx \cpe{\mparam}{\obs}$, where $\pi_\mparam : \obsspace \to [0, 1]$. We can recover the class probability
+estimates using a proper scoring rule~\citep{gneiting2007strictly} such as
+Brier score or log-loss on training data, $\data_N^\labl = \{(\labl_n, \obs_n)\}^N_{n=1}$, e.g.,
+\begin{align}
+    \lcpe{\mparam, \data_N^\labl} := - \frac{1}{N} \sum_{n=1}^N
+    \labl_n \log \cpe{\mparam}{\obs_n}
+    + (1-\labl_n) \log (1 - \cpe{\mparam}{\obs_n}).
+\end{align}
+The \gls{vsd} objective using \gls{cpe} becomes,
+\begin{align}
+    \elbo{\qparam, \mparam} =
+        \expec{\qrobc{\obs}{\qparam}}{\log \cpe{\mparam}{\obs}}
+        - \dkl{\qrobc{\obs}{\qparam}}{\probc{\obs}{\data_0}},
+    \label{eq:vsdcpe}
+\end{align}
+into which we plug $\mparam_t^* = \argmin_\mparam \lcpe{\mparam, \data_N^\labl}$. Using a \gls{cpe} also opens up the choice of estimators that are more scalable than \gls{gp}-\gls{pi}, satisfying our desideratum \ref{desi:scale}. This may be crucial if we choose to run more than a few rounds of experiments with $B=\bigo(1000)$. Additionally, since \gls{vsd} is a black-box method, we can choose to use \glspl{cpe} that are non-differentiable, such as decision tree ensembles.
+The complete \gls{vsd} algorithm is given in~\autoref{alg:optloop}, in which we have allowed for a threshold function, $\thresh_t = \threshfn{\{\tar : \tar \in \data_N\}, \threshparam_t}$. This function can be used to modify the threshold each round, e.g.~following \cite{tiao2021bore}, an empirical quantile function $\thresh_t = \hat{Q}_\tar(\threshparam_t)$ where $\threshparam_t \in (0, 1)$, or a constant $\thresh$ in the case of estimating the distribution of the super level-set.
+
+\begin{algorithm}
+    \caption{\gls{vsd} optimization loop with \gls{cpe}.}
+    \begin{algorithmic}[1]
+        \Require{
+            Threshold $\threshparam_1$ and $f_\thresh$,
+            dataset $\data_N$,
+            black-box $\bbf$,
+            prior $\probc{\obs}{\data_0}$,
+            \gls{cpe} $\cpe{\mparam}{\obs}$,
+            variational family $\qrobc{\obs}{\qparam}$,
+            budget $T$ and $B$.
+        }
+        \Function{FitModels}{$\data_N, \thresh$}
+            \Let{$\data^\labl_N$}{$\{(\labl_n, \obs_n)\}^N_{n=1}$,~
+                where $\labl_n = \indic{\tar_n > \thresh}$}
+            \Let{$\mparam^*$}{$\argmin_\mparam \mathcal{L}_\text{CPE}(\mparam, \data_N^\labl)$}
+            \Let{$\qparam^*$}{$\argmax_\qparam
+                \mathcal{L}_\text{ELBO}(\qparam, \mparam^*)$}
+            \State \Return{$\qparam^*, \mparam^*$}
+        \EndFunction
+        \For{round $t \in \{1, \ldots, T\}$}
+            \Let{$\thresh_t$}{$\threshfn{\{\tar : \tar \in \data_N\}, \threshparam_t}$}
+            \Let{$\qparam_t^*, \mparam_t^*$}{\Call{FitModels}{$\data_N, \thresh_t$}}
+            \Let{$\{\obs_{bt}\}^B_{b=1}$}{$\qrobc{\obs}{\qparam_t^*}$}
+            \Let{$\{\tar_{bt}\}^B_{b=1}$}{$\{\bbf(\obs_{bt}) + \err_{bt}\}^B_{b=1}$}
+            \Let{$\data_{N+B}$}{$\data_N \cup \{(\obs_{bt}, \tar_{bt})\}^B_{b=1}$}
+        \EndFor
+        \Let{$\thresh_*$}{$\threshfn{\{\tar : \tar \in \data_N\}, \threshparam_*}$}
+        \Let{$\qparam^*, \mparam^*$}{\Call{FitModels}{$\data_N, \thresh_*$}}
+        \State \Return{$\qparam^*, \mparam^*$}
+    \end{algorithmic}
+    \label{alg:optloop}
+\end{algorithm}
+\subsection{Theoretical Analysis}
+In this section we summarize the main theoretical results concerning \gls{vsd} and its estimates. We show that \gls{vsd} sampling distributions converge to a target distribution that characterizes the level set given by $\thresh$, satisfying \ref{desi:guar} in two general settings.
+We first derive results assuming $\bbf$ is drawn from a Gaussian process, i.e., $\bbf\sim\gp(0, \gpkernel)$, with a positive-semidefinite covariance (or kernel) function $\gpkernel: \obsspace \times \obsspace \to \real$ (\autoref{app:theory}) and then using GP-PI as the CPE for \gls{vsd}. These results are then extended to probabilistic classifiers based on wide neural networks (\autoref{app:ntk-theory}) by means of the \gls{ntk} for the given architecture \citep{jacot2018}.
+For simplicity, we set $B=1$ and $N=t$, though sampling with $B>1$ should improve rates by a multiplicative factor.
+\begin{restatable}{theorem}{mainthm}
+	\label{thr:kl-bound}
+	Let assumptions \ref{a:gp} to \ref{a:prior} hold. Then \gls{vsd} equipped with \gls{gp}-\gls{pi} approaches the level-set distribution at the following rate:
+	\begin{equation}
+		\begin{split}
+				\diver{\probc{\obs}{\tar > \thresh_\iterIdx, \data_\iterIdx}}{\probc{\obs}{\tar > \thresh_\iterIdx, \bbf}}
+				\in \bigo_\pMeasure(\iterIdx^{-1/2})
+		\end{split}\,. \nonumber
+	\end{equation}%
+\end{restatable}%
+This result is based on showing that the \gls{gp} posterior variance vanishes at an optimal rate of $\bigo(\iterIdx^{-1})$ in our setting (\autoref{thr:gp-variance-convergence}).
+We also analyze the rate at which \gls{vsd} finds feasible designs, or ``hits'', compared to an oracle with full knowledge of $\bbf$.
+After $\niter$ rounds, the number of hits found by \gls{vsd} is
+$\nhits_\niter = \sum_{t=1}^\niter \indic{\tar_\iterIdx > \thresh_{\iterIdx-1}}$, where $\tar_\iterIdx$ is generated from \autoref{eq:targen} and $\obs_\iterIdx \sim \probc{\obs}{\tar > \thresh_{\iterIdx-1}, \data_{\iterIdx-1}}$. The number of hits, $\nhits_\niter^*$, from an agent that fully knows $\bbf$ is the same but for generating conditioned on $\bbf$ with $\obs_\iterIdx \sim \probc{\obs}{\tar > \thresh_{\iterIdx-1}, \bbf}$.
+Using this definition and \autoref{thr:kl-bound} we show the following.
+\begin{restatable}{corollary}{hitscor}
+    \label{thm:hits}
+    Under the settings in \autoref{thr:kl-bound}, we also have that:
+    \begin{equation}
+        \expectation[ |\nhits_\niter - \nhits_\niter^*| ] \in \bigo(\sqrt{\niter})\,. \nonumber
+    \end{equation}
+\end{restatable}
+$\expectation[\nhits_\niter]$ is related to the empirical recall measure in \autoref{eq:rec} up to the normalization constant, but it does not account for repeated hits, which are treated as false discoveries (false positives) under recall. Lastly, for NN-based \glspl{cpe}, we obtain convergence rates dependent on the spectrum of the \gls{ntk} (\autoref{thr:ntk-kl}), which we instantiate for ReLU networks below. For the full results and proofs, please see \autoref{app:theory} for the GP-based analysis and \autoref{app:ntk-theory} for the \gls{ntk} results.
+\begin{restatable}{corollary}{relukl}
+\label{thr:relu-kl}
+Let $\classifier_\mparam$ be modeled via a fully connected ReLU network. Then, under the assumptions in \autoref{thr:ntk-kl}, \gls{vsd} achieves:
+\begin{equation}
+    \diver{\probc{\obs}{\tar > \thresh_\iterIdx, \data_\iterIdx}}{\probc{\obs}{\tar > \thresh, \bbf}} \in \widetilde{\bigo}_\pMeasure\left(\iterIdx^{-\frac{1}{2(M + 1)}}\right),
+\end{equation}
+which asymptotically vanishes for all finite sequence lengths $M$.
+\end{restatable}
+
+
+\section{Related Work}
+
+\label{sec:related}
+
+We will consider related work first in terms of methods that have similar components to \gls{vsd},
+then second in terms of related problems to our specification of active generation.
+\gls{vsd} can be viewed as one of many methods that makes use of the bound \citep{staines2013optimization},
+\begin{align}
+    \max_\obs \bbf(\obs)
+        \geq \max_\qparam \expec{\qrobc{\obs}{\qparam}}{\bbf(\obs)}.%
+    \label{eq:maxbound}%
+\end{align}%
+The maximum is always greater than or equal to the expected value of a random variable. This bound is useful for \acrfull{bbo} of $\bbf$, and becomes tight if $\qrobc{\obs}{\qparam} \to \delta(\obs^*)$, see \autoref{app:vsdbound} for more detail and \gls{vsd}'s relation to \gls{bo}. Other well known methods that make use of this bound are \gls{es} and \gls{nes}~\citep{wierstra2014natural}, \gls{vo}~\citep{staines2013optimization, bird2018stochastic}, \gls{eda}~\citep{larranaga2001estimation}, and \gls{bopr}~\citep{daulton2022bayesian}. For learning the parameters of the variational distribution, $\qparam$, they variously make use of maximum likelihood estimation or the score function gradient estimator (REINFORCE) \citep{williams1992simple}.
+Algorithms that modify \autoref{eq:maxbound} to stop the collapse of $\qrobc{\obs}{\qparam}$ to a point mass for batch design include \gls{dbas}~\citep{brookes2018design} and \gls{cbas}~\citep{brookes2019conditioning}. They use fixed samples $\obs^{(s)}$ from $\qrobc{\obs}{\qparam^*_{t-1}}$ for approximating the expectation, and then optimize $\qparam$ using a weighted maximum-likelihood or variational style procedure.
+\gls{dbas} and \gls{cbas} were formulated for offline (non-sequential) tasks, they have often been used in a sequential setting.
+We can take a unifying view of many of these algorithms by recognizing the general gradient estimator, where we give each component in \autoref{tab:eda},
+\begin{align}
+    \expec{\qrobc{\obs}{\qparam'}}{w(\obs) \nabla_\qparam \log \qrobc{\obs}{\qparam}}
+    \label{eq:eda_grads}.
+\end{align}
+For our experiments, \Gls{bore} has been adapted to discrete $\obsspace$ by using the score function gradient estimator, which we denote by \Gls{bore}$^*$, while \gls{cbas} and \gls{dbas} have been adapted to use a \gls{cpe} -- their original derivations use the equivalent of a \gls{pi} acquisition function.
+
+\begin{table}[tb]
+    \small
+    \centering
+    \begin{tabular}{r|c|c|c|c|}
+    \textbf{Method} & $w(\obs)$ & $\qparam'$ & Fixed $\obs^{(s)} \sim \qrobc{\obs}{\qparam'}$? \\
+    \hline
+    \gls{vsd} & $\log\cpe{\mparam^*}{\obs} + \log \probc{\obs}{\data_0} - \log \qrobc{\obs}
+        {\qparam}$ & $\qparam$ & No \\
+    \gls{cbas} & $\cpe{\mparam^*}{\obs} \probc{\obs}{\data_0} / \qrobc{\obs}
+        {\qparam^*_{t-1}}$ & $\qparam^*_{t-1}$ & Yes \\
+    \gls{dbas} & $\cpe{\mparam^*}{\obs}$ & $\qparam^*_{t-1}$ & Yes \\
+    \gls{bore}$^*$ & $\cpe{\mparam^*}{\obs}$ & $\qparam$ & No \\
+    \gls{bopr} & $\acqfn{\obs, \data_N}{}$ & $\qparam$ & No \\
+    \end{tabular}
+    \caption{How related methods can be adapted from \autoref{eq:eda_grads}. \gls{vsd}, \gls{cbas} and \gls{dbas} may also use a cumulative distribution representation of $\acqfn{\obs, \data_N, \thresh}{\textrm{PI}}$ in place of $\cpe{\mparam^*}{\obs}$.}
+    \label{tab:eda}
+\end{table}
+
+A number of finite horizon methods have been applied to biological sequence \gls{bbo} tasks, such as Amortized \gls{bo} \citep{swersky2020amortized}, GFlowNets~\citep{jain2022biological}, and the reinforcement learning based DynaPPO~\citep{angermueller2019model}. \Gls{lso}-like methods \citep{gomez2018automatic, tripp2020sample, stanton2022accelerating, gruver2023protein} tackle optimization of sequences by encoding them into a continuous latent space within which candidate optimization or generation takes place.
+Selected candidates are decoded back into sequences before black box evaluation; see \citet{gonzalez2024survey} for a comprehensive survey. \Gls{vsd} does not require a latent space nor an encoder, and as such can be seen as an amortized variant of probabilistic reparameterisation methods \citep{daulton2022bayesian} or continuous relaxations \citep{michael2024continuous}.  Heuristic stochastic search methods such as AdaLead~\citep{sinai2020adalead} and \gls{pex}~\citep{ren2022proximal} have also demonstrated strong empirical performance on these tasks. We compare the properties of the most relevant methods to our problem in \autoref{tab:compare}.
+
+In contrast to finding the maximum using BBO, active generation considers another problem --generating samples from a rare set of feasible solutions. Generation methods that estimate the super level-set distribution, $\probc{\obs}{\tar > \thresh}$, include \gls{cbas}, which optimizes the forward \gls{kl} divergence, $\dkl{\probc{\obs}{\tar > \thresh}}{\qrobc{\obs}{\phi}}$ using importance weighted cross entropy estimation~\citep{rubinstein1999cross}. Batch-\gls{bore}~\citep{oliveira2022batch} also optimizes the reverse \gls{kl} divergence and uses \gls{cpe}, but with Stein variational inference~\citep{liu2016stein} for diverse batch candidates (with a continuous relaxation for discrete variables).
+There is a rich literature on the related task of active learning and \gls{bo} for \gls{lse} \citep{bryan2005active, gotovos2013active, bogunovic2016truncated, zhang2023learning}. However, we focus on learning a generative model of a discrete space.
+
+For active generation \gls{vsd}, \gls{cbas} and \gls{dbas} all use an acquisition function defined in the \emph{original} domain, $\obsspace$, to weight gradients (see \autoref{eq:eda_grads}) for learning a conditional generative model, from which $\obs_{bt}$ are sampled.
+An alternative is to use \emph{guided generation}, that is to train an unconditional generative model, and then have a discriminative model guide (condition) the samples from the unconditional model at test time. This plug-and-play of a discriminative model has shown promise for controlled image and text generation of pre-trained models~\citep{nguyen2017plug, dathathri2020plug, li2022diffusion, zhang2023survey}.
+LaMBO~\citep{stanton2022accelerating} and LaMBO-2~\citep{gruver2023protein} take a guided generation approach to solve the active generation problem. LaMBO uses an (unconditional) masked language model auto-encoder, and then optimizes sampling from its latent space using an acquisition function as a guide. LaMBO-2 takes a similar approach, but uses a diffusion process as the unconditional model, and modifies a Langevin sampling de-noising process with an acquisition function guide.
+
+\begin{table}[tb]
+    \scriptsize
+    \centering
+    \begin{tabular}{r|c|c|c|c|c|c|c|c|c|c|}
+    \textbf{Method} & \rot{Rare $\obs \in \solnspace$ \ref{req:rare}} & \rot{Sequential \ref{req:seq}} & \rot{Discrete $\obsspace$ \ref{req:disc}} &\rot{Batch $\{\obs_{bt}\}^B_{b=1}$ \ref{req:batch}}& \rot{Generative $\qrobc{\obs}{\qparam}$ \ref{req:gen}} & \rot{Guaranteed \ref{desi:guar}} & \rot{Gradient descent \ref{desi:gd}} & \rot{Scalable \ref{desi:scale}} & \rot{General acq./reward fn.} & \rot{Amortization} \\
+    \hline
+    \gls{bopr}~\citep{daulton2022bayesian}& \xmark & \cmark & \cmark & \xmark & -- & \cmark & \cmark & \xmark & \cmark & -- \\
+    \gls{bore}~\citep{tiao2021bore}& \xmark & \cmark & -- & \xmark & -- & \cmark & \cmark & \cmark & \xmark & -- \\
+    Batch \gls{bore}~\citep{oliveira2022batch}& \cmark & \cmark & \xmark & \cmark & \cmark & \cmark & \cmark & \cmark & \xmark & \cmark \\
+    \gls{dbas}~\citep{brookes2018design}& \cmark & \cmark & \cmark & \cmark & \cmark & \xmark & \cmark & \cmark & \xmark & \cmark \\
+    \gls{cbas}~\citep{brookes2019conditioning}& \cmark & \cmark & \cmark & \cmark & \cmark & \xmark & \cmark & \cmark & \xmark & \cmark \\
+    Amortized BO~\citep{swersky2020amortized}& \xmark & \cmark & \cmark & \cmark & \cmark & \xmark & \cmark & \cmark & \cmark & \cmark \\
+    GFlowNets~\citep{jain2022biological}& \xmark & \cmark & \cmark & \cmark & \cmark & \xmark & \cmark & \cmark & \cmark & \cmark \\
+    DynaPPO~\citep{angermueller2019model}& \xmark & \cmark & \cmark & \cmark & \cmark & \xmark & \cmark & -- & \cmark & \cmark \\
+    AdaLead~\citep{sinai2020adalead}& \xmark & \cmark & \cmark & \cmark & \xmark & \xmark & \xmark & -- & \xmark & \xmark \\
+    \gls{pex}~\citep{ren2022proximal}& \xmark & \cmark  & \cmark & \cmark & \xmark & \xmark & \xmark & -- & \xmark & \xmark \\
+    GGS~\citep{kirjner2024improving}& \xmark & \xmark & \cmark & \cmark & \cmark & \xmark & \xmark & \xmark & \xmark & \xmark \\
+    \gls{lso} e.g.~\citep{tripp2020sample}& \xmark & \cmark & \cmark & \xmark & \cmark & \xmark & \cmark & -- & \cmark & -- \\
+    LaMBO~\citep{stanton2022accelerating}& \cmark & \cmark & \cmark & \cmark & \cmark & \xmark & \cmark & -- & \cmark & \cmark \\
+    LaMBO-2~\citep{gruver2023protein}& \cmark & \cmark & \cmark & \cmark & \cmark & \xmark & \cmark & \cmark & \cmark & \cmark \\
+    \gls{vsd} (ours)  & \cmark & \cmark& \cmark & \cmark & \cmark & \cmark & \cmark & \cmark & \xmark & \cmark \\
+    \end{tabular}
+    \hspace{0.9cm}
+    \caption{Feature table of competing methods: \cmark~has feature, \xmark~does not have feature, -- partially has feature, or requires only simple modification. We follow~\citet{swersky2020amortized} in their definition of amortization referring to the ability to use $\qrobc{\obs}{\qparam^*_{t-1}}$ for warm-starting the optimization of $\qparam_t$.}
+    \label{tab:compare}
+\end{table}
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+Firstly we test our method, \gls{vsd}, on its ability to generate complex, structured candidates, $\obs$, in a single round by training it to generate a subset of handwritten digits from flattened MNIST images \citep{lecun1998gradient} in \autoref{sub:cde}.
+We then compare \gls{vsd} on two sequence design tasks against existing baseline methods.
+The first of these tasks (\autoref{sub:fitnesslandscapes}) is to generate as many unique, fit sequences as possible using the datasets DHFR \citep{papkou2023rugged}, TrpB \citep{johnston2024combinatorially} and TFBIND8 \citep{barrera2016survey}. These datasets contain near complete evaluations of $\obsspace$, and to our knowledge DHFR and TrpB are novel in the machine learning literature. The second (\autoref{sub:bbo}) is a more traditional black-box optimization task of finding the maximum of an unknown function; using datasets AAV \citep{bryant2021deep}, GFP \citep{sarkisyan2016local} and the  biologically inspired Ehrlich functions~\citep{stanton2024closed}.
+The corresponding datasets involve $\card{\acidspace} \in \{4,20\}$, $4 \leq M \leq 237$ and $65,000 < \card{\obsspace} < 20^{237}$. We discuss the settings and properties of these datasets in greater detail in \autoref{app:expdet}.
+For the biological sequence experiments we run a predetermined number of experimental rounds, $T=10$ or $T=32$ for the Ehrlich functions. We set the batch size to $B=128$, and use five different seeds for random initialization. We compare against \gls{dbas} \citep{brookes2018design}, \gls{cbas} \citep{brookes2019conditioning}, AdaLead \citep{sinai2020adalead}, and  \gls{pex} \citep{ren2022proximal} -- all of which we have adapted to use a \gls{cpe}, \gls{bore} \citep{tiao2021bore} -- that we have adapted to use the score function gradient estimator, and a na\"ive baseline that uses random samples from the prior, $\probc{\obs}{\data_0}$. To reduce confounding, all methods share the same surrogate model, acquisition functions, priors and variational distributions where possible. We compare against LaMBO-2 \citep{gruver2023protein} on the Ehrlich functions, it uses its own surrogate and generative models.
+
+\subsection{Conditional Generation of Handwritten Digits}
+\label{sub:cde}
+
+Our motivating application for \gls{vsd} is to model the space of fit DNA and protein sequences, which are string-representations of complex 3-dimensional structures. In this experiment we aim to demonstrate, by analogy, that \gls{vsd} can generate sequences that represent 2-dimensional structures.
+For this task, we have chosen to `unroll' (reverse the order of every odd row, and flatten) down-scaled ($14\times14$ pixel, 8-bit) MNIST \citep{lecun1998gradient} images into sequences, $\obs$, where $M$ = 196 and $\card{\acidspace} = 8$. We then train \gls{lstm} \gls{rnn} and decoder-only causal transformer generative models on the entire MNIST training set by \gls{ml}.
+\begin{figure}[bth]
+\centering
+\subcaptionbox{LSTM Prior\label{sfig:cde_lstm_p}}
+    {\includegraphics[width=.24\textwidth]{figs/cde/prior_digit_samples_LSTM.png}}
+\subcaptionbox{Transformer Prior\label{sfig:cde_dtfm_p}}
+    {\includegraphics[width=.24\textwidth]{figs/cde/prior_digit_samples_DTransformer.png}}
+\subcaptionbox{LSTM Posterior\label{sfig:cde_lstm}}
+    {\includegraphics[width=.24\textwidth]{figs/cde/vsd_digit_samples_LSTM.png}}
+\subcaptionbox{Transformer Posterior\label{sfig:cde_dtfm}}
+    {\includegraphics[width=.24\textwidth]{figs/cde/vsd_digit_samples_DTransformer.png}}
+\caption{(\subref{sfig:cde_lstm_p}) and (\subref{sfig:cde_dtfm_p}) are samples from the LSTM and transformer priors, respectively. (\subref{sfig:cde_lstm}) and (\subref{sfig:cde_dtfm}) show samples from the \gls{lstm} and transformer \gls{vsd} variational distributions respectively. We also report the samples mean scores according to the \gls{cpe} probabilities.}
+\label{fig:cde}
+\end{figure}%
+The task is then to use \gls{vsd} in one round to estimate the posterior $\probc{\obs}{\tar \in \{3, 5\}}$ using a \gls{cpe} trained on labels $\labl_n = \indic{\tar_n \in \{3, 5\}}$. We parameterize the variational distributions, $\qrobc{\obs}{\qparam}$, in the same way as the priors, and initialize these distribution parameters from the prior distribution parameters. During training with \gls{elbo} the prior distribution parameters are locked, and we run training for 5000 iterations. This is exactly lines 8 and 9 in \autoref{alg:optloop}. Samples are visualized from the resulting variational distributions with the corresponding priors in \autoref{fig:cde}.
+We see that the prior \gls{lstm} and transformer are able to generate convincing digits once the sampled sequences are `re-rolled', and that \gls{vsd} is able to effectively refine these distributions, even though it does not have access to any data directly -- only scores from the \gls{cpe}. Both the \gls{lstm} and transformer yield qualitatively similar results, and have similar  mean scores from the \gls{cpe}.
+
+\subsection{Fitness Landscapes}
+\label{sub:fitnesslandscapes}
+
+In this setting we wish to find fit sequences $\obs \in \solnspace$, so we fix $\thresh$ over all rounds. We only consider the combinatorially (near) complete datasets to avoid any pathological behavior from relying on machine learning oracles \citep{surana2024overconfident}. Results are presented in \autoref{fig:fl_res}. The primary measures by which we compare methods are precision, recall and performance,
+\begin{align}
+    \precision_t &= \frac{1}{\min\{tB, \card{\solnspace}\}}\sum^t_{r=1} \sum^B_{b=1} \indic{\tar_{br} > \thresh}
+        \cdot \indic{\obs_{br} \notin \seenspace_{b-1,r}},
+    \label{eq:prec} \\
+    \recall_t &= \frac{1}{\min\{TB, \card{\solnspace}\}}\sum^t_{r=1} \sum^B_{b=1} \indic{\tar_{br} > \thresh}
+        \cdot \indic{\obs_{br} \notin \seenspace_{b-1,r}},
+    \label{eq:rec} \\
+    \performance_t &= \sum^t_{r=1} \sum^B_{b=1} \tar_{br}
+        \cdot \indic{\obs_{br} \notin \seenspace_{b-1,r}}.
+    \label{eq:perf}
+\end{align}%
+Here $\seenspace_{br} \subset \obsspace$ is the set of experimentally queried sequences by the $b$th batch member of the $r$th round, including the initial training set.
+These measures are comparable among probabilistic and non probabilistic methods. Precision and recall measure the ability of a method to efficiently explore $\solnspace$, where $\min\{tB, \card{\solnspace}\}$ is the size of the selected set at round $t$ (bounded by the number of good solutions), and $\min\{TB, \card{\solnspace}\}$ is the number of positive elements possible in the experimental budget.
+Performance measures the cumulative fitness of the unique batch members, but unlike \citet{jain2022biological} we do not normalize this measure.
+
+\begin{figure}[htb]
+\centering
+\includegraphics[width=.32\textwidth]{figs/fl/dhfr/Precision.png}
+\includegraphics[width=.32\textwidth]{figs/fl/trpb/Precision.png}
+\includegraphics[width=.32\textwidth]{figs/fl/tfbind8/Precision.png} \\
+\includegraphics[width=.32\textwidth]{figs/fl/dhfr/Recall_budget.png}
+\includegraphics[width=.32\textwidth]{figs/fl/trpb/Recall_budget.png}
+\includegraphics[width=.32\textwidth]{figs/fl/tfbind8/Recall_budget.png} \\
+\subcaptionbox{DHFR\label{sfig:dhfr_fl}}
+    {\includegraphics[width=.32\textwidth]{figs/fl/dhfr/Performance.png}}
+\subcaptionbox{TrpB\label{sfig:trpb_fl}}
+    {\includegraphics[width=.32\textwidth]{figs/fl/trpb/Performance.png}}
+\subcaptionbox{TFBIND8\label{sfig:tfbind8_fl}}
+    {\includegraphics[width=.32\textwidth]{figs/fl/tfbind8/Performance.png}}
+\caption{Fitness landscape results. Precision (\autoref{eq:prec}), recall (\autoref{eq:rec}) and performance (\autoref{eq:perf}) -- higher is better -- for the combinatorially (near) complete datasets, DHFR and TrpB and TFBIND8. The random method is implemented by drawing $B$ samples uniformly.
+}
+\label{fig:fl_res}
+\end{figure}
+
+ We set $\thresh$ to be that of the wild-type sequences in the DHFR and TrpB datasets, and use $\thresh = 0.75$ for TFBIND8. We find that a uniform prior over sequences, and a mean field variational distribution (\autoref{eq:proposal}) are adequate for these experiments, as is a simple MLP for the \gls{cpe}.
+Results are presented in \autoref{fig:fl_res}. \Gls{vsd} is the best performing method by most of the measures. We have found the AdaLead and \gls{pex} evolutionary-search based methods to be effective on lower-dimensional problems (TFBIND8 being the lowest here), however we consistently observe their performance degrading as the dimension of the problem increases. We suspect this is a direct consequence of their random mutation strategies being suited to exploration in low dimensions, but less efficient in higher dimensions compared to the learned generative models employed by \gls{vsd}, \gls{cbas}, and \gls{dbas}. Our modified version of \gls{bore} (which is just the expected log-likelihood component of \autoref{eq:vsdcpe}) performs badly in all cases, and this is a direct consequence of its variational distribution collapsing to a point mass. In a non-batch setting this behavior is not problematic, but shows the importance of the \gls{kl} divergence of \gls{vsd} in this batch setting.
+ In all cases \gls{vsd}'s results remain similar or improve slightly, whereas the other methods results remain similar or degrade.
+
+\subsection{Black-Box Optimization}
+\label{sub:bbo}
+
+In this experiment we use \gls{vsd} on the related task of \gls{bbo}.
+We set $\thresh_t$ adaptively by specifying it as an empirical quantile $\tilde{Q}^t_\tar$ of the observed target values at round $t$,
+\begin{align}
+    \thresh_t = \tilde{Q}^t_\tar(\gamma_t{=}p_{t-1}^\eta)
+    \label{eq:annealedthresh}
+\end{align}
+where $p_{t-1}$ is a percentile from the previous round, and $\eta \in [0, 1]$ is an annealing parameter for $\thresh_t$ that trades off exploration and exploitation like the \gls{ucb} parameter in~\citet{srinivas2010gaussian}.
+Performance is measured by simple regret $\regretsim_t$ which quantifies how close the methods get to finding the globally fittest sequence,
+\begin{align}
+    \regretsim_t = \tar^* - \max_\tar \{\tar_{bi}\}^{B,t}_{b=1, i=1},
+    \label{eq:simregret}
+\end{align}
+where $\tar^*$ is the fitness value of the fittest sequence $\obs^*$.
+We use the higher dimensional AAV ($\tar^*{=}19.54$), GFP ($\tar^*{=}4.12$) and Ehrlich functions ($\tar^*{=}1$) datasets/benchmarks to show that \gls{vsd} can scale to higher dimensional problems. $\obsspace$ of AAV and GFP is completely intractable to fully explore experimentally, and so we use a predictive oracle trained on all the original experimental data as the ground-truth black-box function.
+We use the CNN-based oracles from \cite{kirjner2024improving} for these experiments. However, we note here that some oracles used in these experiments do not predict well out-of-distribution~\citep{surana2024overconfident}, which limits their real-world applicability. The Ehrlich functions \citep{stanton2024closed} are challenging biologically inspired closed-form simulations that cover all $\obsspace$. We compare against a \gls{ga}, \gls{cbas} and LaMBO-2 for sequences of length $M=\{15,32,64\}$ using the \textsc{poli} and \textsc{poli-baselines} benchmarks and baselines software \citep{gonzalez-duque2024poli}.
+
+\begin{figure}[htb]
+\centering
+\rotatebox{90}{\hspace{1.5cm}GFP}
+\includegraphics[width=.32\textwidth]{figs/opt/gfp/Simple_regret_mc.png}
+\includegraphics[width=.32\textwidth]{figs/opt/gfp/Simple_regret_lstm.png}
+\includegraphics[width=.32\textwidth]{figs/opt/gfp/Simple_regret_dtfm.png} \\
+\rotatebox{90}{\hspace{1.5cm}AAV}
+\subcaptionbox{Independent\label{sfig:aav_sr_mc}}
+    {\includegraphics[width=.32\textwidth]{figs/opt/aav/Simple_regret_mc.png}}
+\subcaptionbox{LSTM\label{sfig:aav_sr_lstm}}
+    {\includegraphics[width=.32\textwidth]{figs/opt/aav/Simple_regret_lstm.png}}
+\subcaptionbox{Transformer\label{sfig:aav_sr_dtfm}}
+    {\includegraphics[width=.32\textwidth]{figs/opt/aav/Simple_regret_dtfm.png}}
+\caption{AAV \& GFP \gls{bbo} results. Simple regret (\autoref{eq:simregret}) -- lower is better -- on GFP and AAV with independent and auto-regressive variational distributions. The \gls{pex} and AdaLead results are replicated between the plots, since they are unaffected by choice of variational distribution.
+}
+\label{fig:bbo_res}
+\end{figure}
+
+\begin{figure}[htb]
+    \centering
+    \subcaptionbox{$M=15$\label{sfig:ehrlich-poli-15}}
+    {\includegraphics[width=.329\textwidth]{figs/opt/ehrlich/poli-15-regret.png}}
+    \subcaptionbox{$M=32$\label{sfig:ehrlich-poli-32}}
+    {\includegraphics[width=.329\textwidth]{figs/opt/ehrlich/poli-32-regret.png}}
+    \subcaptionbox{$M=64$\label{sfig:ehrlich-poli-64}}
+    {\includegraphics[width=.329\textwidth]{figs/opt/ehrlich/poli-64-regret.png}}
+    \caption{Ehrlich function (\textsc{poli} implementation) \gls{bbo} results. \Gls{vsd} and \gls{cbas} with different variational distributions; mean field (MF), \gls{lstm} and transformer (TFM), compared against genetic algorithm (GA) and LaMBO-2 baselines.}
+    \label{fig:ehrlich_poli_bbo}
+\end{figure}
+
+The results are summarized in~\autoref{fig:bbo_res} and \ref{fig:ehrlich_poli_bbo}. \gls{vsd} is among the leading methods for all experiments. \Gls{vsd} takes advantage of the more complex variational distributions than \gls{cbas} and \gls{dbas} since it can sample from the adapted variational distribution while learning it. We can see that AdaLead, \gls{pex} and often \gls{bore} all perform worse than random for reasons previously mentioned. Simple regret can drop below zero for AAV \& GFP since an oracle is used as the black box function, but the global maximizer is taken from the experimental data. \gls{vsd} outperforms \gls{cbas} on the Ehrlich function benchmarks, and is competitive with LaMBO-2.
+ %This potentially highlights some of the overconfidence issues when using oracles as outlined in \cite{surana2024overconfident}.
+
+
+\section{Conclusion}
+
+
+We have presented the problem of active generation (sequenatially finding designs of a rare class under some experimental constraints), and a method for efficiently generating samples which we call \acrfull{vsd}. Underpinned by variational inference, \Gls{vsd} satisfies critical requirements and important desiderata, including learning generative models for feasible/fit sequences and batch candidate generation. We show that \gls{vsd} converges asymptotically to the true level-set distribution at the same rate as a Monte-Carlo estimator with full knowledge of the true distribution. We showcased the benefits of our method empirically on a set of combinatorially complete and high dimensional sequential-design biological problems and show that it can effectively learn powerful generative models of fit designs.
+There is a close connection between active generation and black box optimisation, and with the advent of powerful generative models we hope that our explicit framing of generation of fit sequences would lead to further study of this connection.
+Finally, our framework can be generalized to more complex application scenarios, involving learning generative models over Pareto sets for $\solnspace$ in a multi-objective setting, or other challenging combinatorial optimization problems \citep{bengio2021}, such as graph structures \citep{annadani2023bayesdag}, and mixed discrete-continuous variables, which are worth investigating as future work directions.
+
+
+
+
+

@@ -1,0 +1,392 @@
+\title{KBLaM: Knowledge Base augmented Language Model}
+
+\begin{abstract}
+In this paper, we propose\KBLaMFull (\KBLaM), a new method for augmenting Large Language Models (LLMs) with external knowledge. \KBLaM works with a knowledge base (\KB) constructed from a corpus of documents, transforming each piece of knowledge in the \KB into continuous key-value vector pairs via pre-trained sentence encoders with linear adapters and integrating them into pre-trained LLMs via a specialized rectangular attention mechanism.
+Unlike Retrieval-Augmented Generation, \KBLaM eliminates external retrieval modules, and unlike in-context learning, its computational overhead scales linearly with \KB size rather than quadratically. Our approach enables integrating a large \KB of more than 10K triples into an 8B pre-trained LLM of only 8K context window on one single A100 80GB GPU and allows for dynamic updates without model fine-tuning or retraining. 
+Experiments demonstrate \KBLaM's effectiveness in various tasks, including question-answering and open-ended reasoning, while providing interpretable insights into its use of the augmented knowledge. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large language models (LLMs) have demonstrated impressive knowledge and reasoning capabilities. However, in many scenarios, users need to augment LLMs with external knowledge, particularly when concept definitions differ from or extend beyond the information stored in the LLM's parameters. One straightforward approach is to perform supervised fine-tuning on the external corpus~\citep{hu2021lora,liu2024dora} to alter the parameter weights. However, fine-tuning can be inefficient as the weights need to be updated each time knowledge is updated. Additionally, fine-tuning can cause catastrophic forgetting, i.e.\ degrading performance on general tasks.
+As such, alternative methods that do not modify LLM's weights have gained more and more popularity. 
+
+One such alternative approach is Retrieval Augmentation Generation~\citep[RAG,][]{lewis2020retrieval}. RAG assumes external knowledge is stored as unstructured documents, then given an input prompt, RAG first uses a retriever module to extract relevant corpus chunks from the documents. These extractions are then concatenated to the input question as a prompt and fed into the LLM (Fig.~\ref{fig:kblam_overview} top). This approach allows RAG to utilize knowledge from extensive documents while maintaining a small context size, overcoming the context limitations of many early-generation LLMs.
+
+Recently, with the emergence of long-context language models such as GPT4~\citep{achiam2023gpt} and Gemini~\citep{team2023gemini}, it has become possible to directly put the entire external corpus in the context, eliminating the need for the retriever for document selection, simplifying the pipeline. We refer to this approach as \emph{in-context learning} (Fig.~\ref{fig:kblam_overview} middle).
+Several recent works~\citep{lee2024can, li2024retrieval, yu2024defense} have explored whether long-context models can replace RAG in long-context reasoning tasks. In particular, \cite{lee2024can} argues that in-context learning has potential advantages, such as better compatibility with chain-of-thought reasoning and few-shot demonstrations. However, the time and memory complexities of in-context learning are quadratic with the context length. Additionally, the dependencies between tokens in the context introduce difficulties in interpreting the attention matrix and dynamically updating the KV cache.  
+
+
+In this paper, we propose a new regime for augmenting pre-trained LLMs with external knowledge:\KBLaMFull (\KBLaM, Fig.~\ref{fig:kblam_overview} bottom).
+We consider a setting where the \emph{unstructured} external corpus is transformed into a \emph{structured} knowledge base (\KB) through existing tools, which summarizes the critical information in the data and generates knowledge triples (\cref{eq:triple_def}) containing an entity name (\name), a property (\property), and a value (\description).
+Then, \KBLaM's design fully leverages the structure of the \KB, achieving efficient integration of external knowledge into LLMs (Sec.~\ref{sec:kblam_design}).
+
+First, \KBLaM  maps each triple into a \emph{fixed-length} key-value vector pair, referred to as a \emph{knowledge token}, which has sizes identical to the KV cache of a single token and can be seamlessly incorporated into each attention layer of the LLM. In particular, \KBLaM encodes from \name and \property into a key vector, which serves as an identifier, mimicking the key embedding of a token; \description into a value vector, which provides the actual content, similar to the value embedding of a token.
+
+Then, \KBLaM uses the structure between triples to augment knowledge tokens into the LLM's attention in a scalable and dynamic way using a simple rectangular attention structure:
+Triples with different \name and \property can be considered to represent independent pieces of information, therefore knowledge token from each triple can be encoded and injected into pre-trained LLM independently. This allows the \KBLaM's complexity (memory and time) to grow linearly with respect to the number of triples, unlike in-context learning's quadratically growing overhead, giving \KBLaM much better scalability.
+Additionally, the independence allows us to update/remove/add a triple by only modifying its corresponding single knowledge token without any further changes, which is not achievable in, e.g.\ standard KV cache mechanism.
+Perhaps more importantly, the attention matrix under this design is highly interpretable. As we show in Fig.~\ref{fig:attn_viz}, the model's use of the knowledge tokens can be directly inspected through the attention score.
+\begin{figure}[t]
+    \centering
+        \includegraphics[width=\linewidth]{figures/fig1_new.pdf}
+    \caption{\textbf{Overview of the \KBLaM pipeline and comparison with existing approaches.} \KBLaM augments knowledge into a pre-trained LLM in the form of knowledge tokens, a set of continuous key-value vectors, using a modified rectangular attention structure. Unlike RAG, \KBLaM does not rely on separate retriever module at inference time and unlike in-context learning, \KBLaM's computation and memory overhead scales \emph{linearly} rather than quadratically with the size of the \KB.
+    \label{fig:kblam_overview}
+    }
+\end{figure}
+Lastly, we show that the linear adapters can be learned using instruction tuning on purely synthetic data (Sec.~\ref{sec:kb_tuning}) while being able to generalizes to real data. Different from supervised fine-tuning, which aims to memorize knowledge into model weights, the learning process of \KBLaM aims at finding a projection between the pre-trained sentence encoder space and the LLM's embedding space, which motiviates us the train \KBLaM with fully synthetic data since the exact knowledge in the training samples is not of interests.
+
+Compared with RAG, \KBLaM incorporates all external information in the context and answers input prompts in an end-to-end way without utilizing additional external modules, similarly to in-context learning. Indeed, \KBLaM also shows empirical performance comparable to in-context learning but with significantly better scalability to more than 10K triples.
+In addition, through instruction tuning, \KBLaM can learn to refuse to provide an answer if the information required to answer the question is not present in the KB, improving the reliability of the model and reducing hallucinations. 
+
+In summary, \KBLaM is a novel method for augmenting pre-trained LLMs with external knowledge bases (KBs). We demonstrate that \KB triples can be efficiently encoded into "knowledge tokens" - continuous key-value vector pairs equivalent in size to one LLM token - using a pre-trained sentence encoder with a learned linear adapter. These tokens are incorporated into the LLM through a modified attention structure, enabling linear scaling with KB size and allowing dynamic knowledge updates without model fine-tuning. The adapters are trained end-to-end using instruction tuning on synthetic data. Lastly, we release our training and evaluation {\KB}s, which can help future research in augmenting LLM with \KB, as well as in other topics such as long-context language models, hallucination detection/reduction, and structured attention.
+
+
+
+
+
+
+
+
+\section{Related work\protect\footnote{We provide more extensive related work discussion in Appendix~\ref{sec:extended_related_work}
+
+
+\textbf{Retrieval augmented generation (RAG)}~ RAG~\citep{lewis2020retrieval} is one of the most successful approaches for augmenting external knowledge into LLMs, and many approaches have been proposed to perform RAG, such as similarity search and text2Sql~\citep{qin2022survey}. \KBLaM can also be understood as the model doing RAG in an implicit way: given input prompts, the rectangular attention compares the sequence's queries with knowledge tokens' keys, then the weighted average is taken of all knowledge tokens' values based on query-key similarity, similarly to a soft retrieval process. The averaged value embedding is then added to the hidden state, augmenting next-token generation with information from the \KB. However, \KBLaM differs from RAG in that it does not rely on a separate retrieval module. Instead, everything is carried out by attention in an end-to-end fashion. 
+
+\textbf{Multi-modal language model}~ Recent advances in Multi-modal Language Models~\citep[][MLMs]{liu2023visual, gao2023llama, liu2024improved, zhao2023learning, wu2023next}, demonstrate the possibility of incorporating data of other modalities (e.g.\ images, videos) into a pre-trained LLM through learned adapters and instruction tuning. With \KBLaM, we can consider a \KB as another modality in that a \KB is presented to the LLM in the form of continuous vectors via an encoder, and an encoder-adapter is learned also through instruction tuning inspired by MLM literature.
+
+\textbf{Key-value (KV) cache mechanism}~ Given a context string, the KV cache mechanism~\citep{pope2023efficiently} caches the key and value embeddings at each layer, also known as the prefill stage. With KV cache, the complexity of generating new tokens conditioned on the context decreases from quadratic in context length to linear. \KBLaM's encoded knowledge tokens work in a way similar to KV cache, but we have the key and value acquired from an external encoder rather than through self-attention process. Additionally, if the context is modified, the standard KV cache requires re-computing the whole KV cache due to the causal attention mask, whereas in \KBLaM only the corresponding knowledge token need be updated as the knowledge tokens do not attend to each other.
+
+\textbf{Augmenting information into an LLM in a continuous form}~ RAG and in-context learning incorporates external information into LLMs in the form of a \emph{discrete string}, whereas \KBLaM augments information into LLMs as fixed length \emph{continuous} representations. Many works also consider first encoding external documents as continuous vectors, then concatenating the vectors as the input for the decoder model~\citep{izacard2020leveraging, izacard2023atlas, ye2023fid} or using cross-attention to inject these vectors into the decoder~\citep{borgeaud2022improving}.
+However, these works focus on training a new model from scratch, while \KBLaM is applied to augment a \emph{pre-trained} LLM with knowledge. Recent work~\citep{yen2024long} also considers augmenting a \emph{pre-trained} LLM with encoded information, similar to our setting. However, their approach requires training an encoder \emph{from scratch}, whereas \KBLaM's only trains linear adapters after a pre-trained black-box encoder. In addition, they add extra cross-attention layers after each self-attention layer for augmentation, while \KBLaM modifies existing self-attention layers without introducing new components.
+
+
+
+\section{Background}
+
+
+\paragraph{Knowledge base in the form of triples}
+In this paper, we assume that the external knowledge is represented as a structured knowledge base (\KB) obtained from unstructured text using, in particular, a \KB is composed of triples of format
+\begin{equation}\label{eq:triple_def}
+\{(\name_m; \property_m; \description_m)\}_{m=1}^{M}.
+\end{equation}
+In the rest of the paper, we will refer to a set of triples of the format \cref{eq:triple_def} as a \KB and each triple inside it as a \emph{knowledge triple}. Examples of such KB is shown in Table.
+The KB construction process summarizes information from multiple documents and organizes it in a structured way. 
+Importantly, the structured nature of the \KB enables us to augment LLM with information from documents in an efficient way, which we discuss in the next section.
+
+It is also worth noting that \KB construction is \emph{not} the focus of our paper: \KBLaM works on \KB generated from corpus using \emph{existing tools}. In the paper, we mainly focus on two {\KB}s: A synthetic \KB generated via GPT, and a real \KB constructed from the Enron email~\citep{klimt2004enron} dataset.
+Details of the two {\KB}s will be discussed in detail in later sections.
+
+\paragraph{Self-attention layer}
+A decoder-based transformer is mostly composed of multiple self-attention layers~\citep{vaswani2017attention}.
+Consider a transformer of $L$ layers.
+Each layer has three projection heads: $\WQ^l \in \R^{\embdDim \times \embdDim}, \WK^l \in \R^{\embdDim \times \embdDim}, \WV^l \in \R^{\embdDim \times \embdDim}, l \in \{1,\ldots,L\}$,
+where $\embdDim$ denotes \emph{embedding dimension}.
+Given a user prompt (e.g.\ a question) of $N$ tokens, each attention layer takes a sequence of $N$ token embeddings $\bm{x}^l = [\bx_1^l, \ldots, \bx_n^l,\ldots \bx_N^l]^\top \in \R^{N \times \embdDim}$ as input,
+then for the $n$th token embedding, it is first transformed by the projection heads into three vectors
+\begin{align}\label{eq:kvq}
+    \bq_n^l &= \WQ^l \bx_n^l,& \bk_n^l &= \WK^l \bx_n^l,& \bv_n^l &= \WV^l \bx_n^l, &
+\end{align}
+where we refer to $\bq_n^l$, $\bk_n^l$, and $\bv_n^l$ as the $n$th token's query, key, and value embedding at the $l$th layer respectively. Note that in practice, each attention layer often has multiple sets of attention heads but here we assume only a single head for notation simplicity.
+
+The output of the attention layer, $\by^l = [\by_1^l,\ldots,\by_n^l,\ldots,\by_N^l]^\top \in \R^{N \times \embdDim}$, is computed as
+\begin{equation}\label{eq:attn_output}
+\by_n^l = \frac{\sum_{i=1}^{n} \Exp{w_{n, i}} \bv_i^l}{\sum_{i=1}^{n} \Exp{w_{n, i}}}, ~\text{where}~ w_{n, i} = \inner{\bq_n^l}{\bk_i^l} / \sqrt{D}
+\end{equation}
+where $\inner{\cdot}{\cdot}$ denotes the inner product of two vectors. After $\by_n^l$ is acquired, it is often fed into a feedforward network (FFN) with output dimension of $D$ for further transformation. 
+
+A standard implementation of self-attention would have a time complexity of $\mathcal{O}(N^2D)$ and memory complexity of $\mathcal{O}(N^2)$ for computing and storing all $w_{n, i}$. Additionally, the FFN would also introduce a significant computation overhead of magnitude $\mathcal{O}(ND^2)$.
+Due to these factors, as the sequence gets longer, self-attention faces high memory consumption and slow computation.
+
+
+\begin{figure}[t!]
+    \centering
+    \begin{subfigure}{\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/encode_kb.pdf}
+        \caption{\textbf{Step 1. \KB encoding}~ For each triple from a \KB (\cref{eq:triple_def}) of $M$ triples, we first construct a key and value string (left most white boxes). Then both strings are processed by a pre-trained sentence encoder followed by a learned linear adapter (middle two blue boxes). The acquired knowledge tokens (\cref{eq:token_key,eq:token_value}, right-most small boxes) are then stored on disk for later usage. Note that all $\KBk_m^l$s and $\KBk_m^l$s have a fixed dimension of $D$, i.e.\ identical to that of the key and value embeddings of a token, regardless of input length.
+        \label{fig:kblam_encoding}}
+    \end{subfigure}
+    
+    \begin{subfigure}{\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/what_happened_inside_2.pdf}
+        \caption{\textbf{Step 2. Augmenting knowledge tokens into attention}~ 
+        For layer $l$, given an sequence of $N$ $D$-dimensional embeddings from the prompt ($\bx_1^l,\ldots,\bx_N^l$, e.g.\ a question about the \KB), augmented with $M$ knowledge tokens as context ($\{(\Tilde{\bk}_m^l , \Tilde{\bv}_m^l)\}_{m=1}^M)$, \KBLaM's attention outputs $N$ embedding vectors with each element $\Tilde{\by}_n^l \in \R^{D}$ computed via \cref{eq:kblam_attn} (top right panel) under a rectangular attention matrix (bottom right panel): Blue regions show the extra components introduced by \KBLaM whereas the red parts are from standard self-attention. Note that the input sizes of the FFN stay unchanged, the only additional overhead introduced by \KBLaM comes from the blue parts in the equation and the matrix, which scales as $\mathcal{O}(M)$.
+        }
+        \label{fig:kblam_anatomy}
+    \end{subfigure} \\
+    \caption{Overview of \KBLaM's \KB augmentation process}
+    \label{fig:kblam_process}
+\end{figure}
+
+
+\section{Augmenting LLM with the KB}
+
+
+In this section, we discuss how \KBLaM augments an LLM with a \KB. 
+The process has two steps (visualized in Fig.~\ref{fig:kblam_process}): 1. We convert each triple in the \KB from the string form into a continuous key-value vector pair, referred to as a \emph{knowledge token}, through a pre-trained sentence encoder followed by linear adapters; 2. All knowledge tokens are then injected into each attention layer of an LLM through a \emph{rectangular attention} structure.
+
+\paragraph{Knowledge tokens}
+Provided a \KB in the format of \cref{eq:triple_def}, for each triple, we first adopt a \emph{pre-trained} sentence encoder model, denoted as $f(\cdot)$ which converts a string into a $P$-dimension continuous embedding vector.
+Through the encoder, we convert each triple into a base key embedding and a base value embedding.
+In particular, for the $m$th triple, we have:
+\begin{align}
+&\Key_m = f(\mathtt{The } ~\property_m ~\mathtt{of } ~\name_m) \in \R^P, & 
+&\Value_m = f(\description_m) \in \R^P . &
+\end{align}
+Next, we introduce a linear key and a linear value adapter
+\begin{align}\label{eq:base_kv_encoding}
+    &\KBWK \in \R^{L \times \embdDim \times P}, &  \KBWV \in \R^{L \times \embdDim \times P},&
+\end{align}
+where $L$ denotes the number of attention layers in a model.
+With the adapters, we map $\Key_m$ and $\Value_m$ from the sentence encoder's space to LLM's key and value embedding space at each attention layer.
+In particular, for the $m$th knowledge triple, we transform its base key and value embedding into
+\begin{align}
+& \Tilde{\bk}_m = [\Tilde{\bk}_m^1,\ldots, \Tilde{\bk}_m^l,\ldots, \Tilde{\bk}_m^L]^\top = \KBWK \Key_m \in \R^{L \times D}, & \label{eq:token_key}\\
+&\Tilde{\bv}_m = [\Tilde{\bv}_m^1,\ldots, \Tilde{\bv}_m^l,\ldots, \Tilde{\bv}_m^L]^\top = \KBWV \Value_m \in \R^{L \times D}. & \label{eq:token_value}
+\end{align}
+Since each $\Tilde{\bk}_m^l$ and $\Tilde{\bv}_m^l$ share the same size with LLM's key and value embedding (i.e. $\bk_n^l$ and $\bv_n^l$ in \cref{eq:kvq}), they can be directly incorporated into attention's computation. Therefore, the encoding process is equivalent to converting a knowledge triple from a string of multiple tokens into a special token, whose key and value embeddings at each layer are generated through an encoder, rather than through self-attention. As such we refer to $(\Tilde{\bk}_m , \Tilde{\bv}_m)$ pair as a \emph{knowledge token}.
+
+We visualize the process in Fig.~\ref{fig:kblam_encoding}.  
+This encoding process is applied to all triples in the KB, which transforms the information from a KB into a collection of knowledge tokens
+\begin{equation}
+ \{(\name_m, \property_m, \description_m)\}_{m=1}^{M} \xrightarrow[]{\text{Encode}}  \{(\Tilde{\bk}_m , \Tilde{\bv}_m)\}_{m=1}^M.
+\end{equation}
+
+\paragraph{Rectangular Attention: Injecting knowledge token into prompt tokens}
+
+After converting a KB into a collection of knowledge tokens we inject the information of the KB into the each attention layer of a pre-trained LLM through a modified attention structure\footnote{We use symbols with a tilde to denote additional attention components introduced by \KBLaM.}. 
+In particular, consider an input prompt of $N$ tokens, the $l$th attention layer takes in $\bx^l = [\bx_1^l, \ldots,\bx_n^l,\ldots, \bx_N^l]^\top$ and the $l$th dimension of the knowledge tokens $\{(\KBk_m^l, \KBv_m^l)\}_{m=1}^M$, the output of each attention layer, $\Tilde{\by}^l = [\Tilde{\by}_1^l,\ldots, \Tilde{\by}_n^l, \ldots, \Tilde{\by}_N^l]^\top \in \R^{N \times D}$, is given by
+\begin{align}
+\Tilde{\by}_n^l &= \frac{
+    {\sum_{m=1}^{M} \Exp{\KBw_{n,m}^l} \KBv_m^l} + \sum_{i=1}^{n} \Exp{w_{n, i}^l} \bv_i^l
+}{
+    {\sum_{m=1}^{M} \Exp{\KBw_{n,m}^l}} + \sum_{i=1}^{n} \Exp{w_{n, i}^l}
+},\label{eq:kblam_attn} 
+\end{align}
+where
+\begin{align}
+& \KBw_{n,m}^l = \inner{\Tilde{\bq}_n^l}{\KBk_m^l} / \sqrt{D}, ~\Tilde{\bq}_n^l=\KBWQ^l \bx_n, & w_{n, i}^l = \inner{\bq_n^l}{\bk_i^l} /\sqrt{D}, &
+\end{align}
+and $\KBWQ^l \in \R^{\embdDim \times \embdDim}$ is a \emph{learnable} query head initialized from $\bm{W}_Q^l$.
+
+\begin{wrapfigure}[15]{R}{0.4\textwidth}
+\centering
+  \caption{Memory overhead of different methods. Given a \KB of $M$ triples (with each triple $K$-token long on average). In-context learning's memory scales with $(KM)^2$, whereas \KBLaM's memory scales with $M$.
+  \label{fig:memory}
+  }
+\end{wrapfigure}
+
+We name the attention structure of \cref{eq:attn_output} \emph{rectangular attention} as the attention matrix is of rectangular shape (bottom-right panel in Fig.~\ref{fig:kblam_anatomy}).
+The idea is that tokens in the prompt part can attend to, in addition to all previous tokens in the prompt, all knowledge tokens. On the other hand, knowledge tokens cannot attend to each other, i.e. they do not have self-attention nor query embeddings. This design gives an attention matrix of rectangular shape of size $(M + N) \times N$, where $M$ is the number of triples in the \KB. 
+Additionally, if knowledge tokens are not introduced, i.e.\ $M=0$, \cref{eq:kblam_attn} falls back to \cref{eq:attn_output} and we recover the pre-trained LLM.
+The memory and time complexity of the rectangular attention is $\mathcal{O}((M + N)N)$ and $\mathcal{O}((M + N)ND)$ respectively. In real settings, it is likely that $M >> N$, i.e.\ the number of external knowledge items is far larger than the size of the prompt/question, then the overhead would grow only linearly with $M$ (instead of quadratically), which allows \KBLaM to scale up to very large values of $M$, enabling putting a large amount of information in the context.
+Also, note that the output sequence length of rectangular attention does not vary with the number of knowledge tokens, therefore the overhead for the intermediate FFN modules stays unchanged regardless of $M$.
+Lastly, it can be seen from ~\cref{eq:attn_output} that changing the order of the knowledge tokens does not affect the output, therefore \KBLaM does not suffer from the positional bias issue of in-context learning~\citep{liu2024lost}. Additionally, since all knowledge tokens are encoded independently, when the \KB is updated, e.g.\ new knowledge triples are created or a triple is updated, one could simply generate a new knowledge token with the encoder or update the corresponding knowledge tokens value. This highlights the difference between \KBLaM and the standard KV cache mechanism in LLM, which needs re-computation when the cached content is modified in any way.
+
+Note that \KBLaM's rectangular attention \emph{differs} from cross-attention~\citep{vaswani2017attention, chen2021crossvit}, which operates on a source sequence with key and value embeddings and a target sequence with only query embeddings, where tokens within each sequence do not attend to one another. In our setting, if we consider the \KB as the source and the input prompt as the target, cross-attention corresponds to retaining only the summations over $M$ in \cref{eq:kblam_attn}. However, \KBLaM's attention also contains self-attention over the prompt tokens, given by the summations over $n$ in \cref{eq:kblam_attn}.
+
+
+
+\paragraph{KB length generalization through attention score scaling}
+Notice that the part of the attention output corresponding to the \KB would scale with $M$.
+In particular, assume $\KBw_{n,m}^l, m \in \{1,\ldots,M\}$ are all of similar magnitude, then as $M$ grows, eventually the second term (the prompt/questions part) in both denominator and numerator of \cref{eq:kblam_attn} will be overwhelmed by the first term (the \KB part), and the information from the prompt/question will be lost.
+To resolve this, during \emph{inference}, we add a constant shift to the \KB part's unnormalized attention score
+\begin{equation}\label{eq:}
+    \KBw_{n,m}^l =  \log C - \log M + \inner{\Tilde{\bq}_n^l}{\KBk_m^l} / \sqrt{D},
+\end{equation}
+where $C \in \R^{+}$ is a hyperparameter which we fix as $100$ in our experiments. This is equivalent to multiplying the summations over $M$ by $\tfrac{C}{M}$, such that the total contribution of the \KB part stays roughly unchanged as $M$ scales.
+
+
+
+\section{\KB instruction tuning}
+
+The learnable parameters in \KBLaM comprise the weights for the weights for the linear adapters/heads $\theta = \left\{ \KBWK, \KBWV, \{\KBWQ^l\}_{l=1}^{L} \right\}$, 
+Inspired by recent works in multi-modal language models~\citep{liu2023visual}, we use instruction tuning for parameter learning. Specifically, given a \KB, we generate question-answer pairs about the \KB (denoted as $Q$ and $A$ respectively) using formatted strings or GPT, then we optimize $\theta$ using:
+\begin{equation}\label{eq:kb_inst_tuning}
+\max_\theta \log p_{\theta, \phi}(A \mid Q, \KB),
+\end{equation}
+where $\phi$ denotes parameters of the pre-trained LLM, encompassing QKV heads, FFN parameters and embedding/outpu layer weights.
+Notably, \KB instruction tuning preserves the base LLM's reasoning abilities by avoiding fine-tuning the pre-trained LLM itself. Moreover, learning only the linear adapters minimizes the risk of memorizing training data, a known issue in LLM fine-tuning~\citep{zeng2023exploring,mireshghallah2022memorization}.
+To further mitigate this risk, we conducted instruction tuning using a \emph{fully synthetic} \KB generated by GPT. This approach is motivated by the understanding that the instruction tuning process aims \emph{not} to memorize specific information, but to learn a projection from the pre-trained sentence encoder space to the LLM's semantic space. Consequently, the exact content of the \KB is less critical, provided the training data encompasses a diverse range of text.
+
+\paragraph{Generation of synthetic \KB}
+
+To synthesize a \KB, we first use GPT to generate 50 $\name$s based on combinations of 30 object types (e.g.\ restaurant name, software tool) and 30 idea types (e.g.\ natural phenomena, famous landmarks). Then for each name, we prompt GPT to generate the $\description$ of three $\property$s: ``description'', ``objectives'', and ``purpose'' for each name, in the same conversation context. Crucially, we instruct GPT to generate {\description}s \emph{uncorrelated} with names, ensuring the information comes from the \KB rather than the LLM's predictive ability. This yields 45K names and a KB of approximately 135K triples. We provide example triples in Table.~\ref{sec:full_prompt_syn_kb_gen} and release the resulting synthetic KB dataset for research purposes.
+
+\paragraph{Generation of instructions}
+
+The construction of the instruction tuning dataset is crucial, as it reflects our intended use of the \KB and the desired behavior of \KBLaM under various scenarios. We considered the following types of instructions (examples shown in Fig.~\ref{sec:sample_qa}):
+\begin{itemize}[leftmargin=*, topsep=0pt, parsep=0pt, itemsep=1.5pt]
+\item \textbf{Simple Q\&A} about a single $\name$ and $\property$ with $\description$ as the answer.
+\item \textbf{Multi-entities Q\&A} involving multiple $\name$s and $\property$s, with their corresponding $\description$s as answers.
+\item \textbf{Open-ended Q\&A} similar to simple and multi-entities Q\&A, but including an additional open-ended question component that requires open-ended reasoning about $\description$. Reference answers for these questions are generated by GPT.~\ref{sec:open_end_qa_gen}.
+\item \textbf{Unanswerable questions} irrelevant to any $\name$ or $\property$ in the KB. For such cases, the standard response is "Sorry, I cannot find relevant information in the KB."
+\end{itemize}
+For simple, multi-entities, and unanswerable questions, both questions and answers are generated using formatted strings, with templates of various styles such as "Can you inform me..." or "What is the...".~\ref{sec:qa_question_template}.
+
+
+
+\section{Experiments}
+
+
+\begin{figure}[t!]
+    \centering
+    \begin{subfigure}{\linewidth}
+        \centering
+        \includegraphics[width=.98\linewidth]{figures/attn_viz.pdf}
+    \end{subfigure}
+    \\[-2ex]
+    \caption{\textbf{\KBLaM's attention matrix is interpretable.} Consider a toy \KB of 10 triples, the heatmap shows the attention weights under different questions. We select the 15th attention layer and visualize the post-softmax attention score averaged over all attention heads. The x-axis only shows the keys corresponding the \KB part and the y-axis is aligned by the end of each question's query.
+    \label{fig:attn_viz}
+\end{figure}
+
+
+In this section, we perform empirical evaluation for \KBLaM.
+We begin by showing that \KBLaM's attention matrix, after instruction tuning, shows interpretable patterns and works as an accurate retriever.
+We then show that \KBLaM can answer questions with performance comparable to in-context learning, but with much lower memory cost, and can scale to 10K triples with little performance degradation.
+Lastly, we show that for questions with no answer in the \KB, the model can refuse to answer questions, with ``over-refusal'' behavior occurring later than in-context learning.
+Lastly, we conduct ablation studies to understand the design choices of \KBLaM. 
+
+\subsection{Experiment setting}
+\textbf{Model specification}~ For all experiments, we use the instruction fine-tuned version of Llama3 8B~\citep{dubey2024llama} as the backbone LLM, and OpenAI's ada-002 sentence embedding model ($P=1536$) as the pre-trained encoder for computing base key and value embedding (\cref{eq:base_kv_encoding}).
+
+\textbf{Optimization setting}~
+We initialize the key and value adapters: $\KBWK$ and $\KBWV$ randomly, and we initialize additional query heads $\KBWQ^l$ at each layer from the pre-trained weights $\WQ^l$.
+Optimization is conducted using AdamW~\citep{loshchilov2017decoupled} with a step size of $5 \times 10^{-4}$ and a cosine learning rate decay to $5 \times 10^{-6}$ for 20K iterations. Each iteration uses a mini-batch of 400 Q\&A pairs, composed of 20 micro-batches of 20 samples. The instruction tuning is performed on a single 80GB A100 GPU under bfloat16 without any parameter-efficient tuning methods.
+\textbf{Construction of the training batches}~
+We train \KBLaM using instruction tuning, where each training sample consists of a \KB, a question, and an answer (\cref{eq:kb_inst_tuning}). These samples are derived from the first 120K triples of the synthetic KB described in Sec.~\ref{sec:kb_tuning}. To construct each training sample, we perform the following procedure:
+We randomly select a subset of 10 to 100 triples from the synthetic KB to form a sample-specific KB.
+Depending on the instruction type (simple, multi-entities, open-ended, or unanswerable Q\&A), we designate one, multiple, or no triples as the \emph{relevant} triple(s), with the rest serving as \emph{distractors}.
+We generate a question based on the instruction template and the relevant triple(s).
+In each batch of 20 micro-batches, we include 2 micro-batches of unanswerable Q\&A pairs and 6 micro-batches each for the other three Q\&A types.
+During training, we find limiting the \KB size crucial for successful convergence. To further optimize training efficiency, we pre-compute the base key and value vectors (\cref{eq:base_kv_encoding}) offline for all triples in the synthetic KB.
+
+\textbf{Evaluation dataset}~
+For evaluation, we considered the following two \KB datasets\footnote{All {\KB}s used for training and evaluation are released together with the paper.}
+\begin{itemize}[leftmargin=*, topsep=0pt,parsep=0pt,itemsep=1.5pt]
+    \item \textbf{Synthetic data}~ The validation set of the synthetic \KB, i.e.\ the 15000 triples not used for training.
+    \item \textbf{Enron}~ A \KB constructed from the Enron~\citep{klimt2004enron} dataset, an open-sourced corporate email dataset.
+    Following ~\citep{wu2024structured}, we constructed a KB of triples from the Enron emails data by fine-tuning a small language model, which we then cluster to remove duplicates  ~\citep{winn2018alexandria, winn2021enterprise}. 
+\end{itemize}
+For each validation dataset, we consider \property in ``description'', ``purpose'' and ``objectives''.
+
+\textbf{Baseline}~
+We considered the following two methods as baselines
+\begin{itemize}[leftmargin=*, topsep=0pt,parsep=0pt,itemsep=1.5pt]
+    \item \textbf{In-context learning}~ Flatten all triples in a \KB as strings, and attach it in front of the prompt.  In-context learning's memory overhead grows quadratically with the number of triples. Notice that we can only experiment with a maximum of 200 triples due to memory constraints.
+    \item \textbf{Zero-shot learning}~ Directly ask the LLM a particular question and provide no additional context, using the LLM's internal knowledge for answering the questions.
+\end{itemize}
+
+\textbf{Evaluation setting}~ For all evaluations, we repeat the experiments with 5 random seeds, each run containing 100 test samples, i.e.\ we randomly generate 100 {\KB}s of various sizes and query the model with questions about the \KB. The results reported are the averaged values over all 500 questions.
+\subsection{Experiment results}
+
+\paragraph{\KBLaM attention is an accurate retriever}
+\begin{wrapfigure}[22]{R}{0.4\textwidth}
+\centering
+  \caption{\textbf{Through instruction tuning, the attention shows retrieval behavior.} Given simple Q\&A on the validation set of the synthetic data (solid line) and Enron dataset (OOD, dashed line), we use the attention score at the 15th layer, averaged over all attention heads, as a classification score for each triple and measure the top-1 and top-5 accuracy. \KBLaM assigns the highest attention score to the truly relevant triple most of the time (with performance degraded but still reasonable on OOD).}
+  \label{fig:accuracy_vs_kb_len}
+\end{wrapfigure}
+Given a question about the $m$th triple in the KB, we expect certain tokens in the question, particularly those containing the keyword ${\name}_m$, to attend more strongly to the $m$th knowledge token compared to others. This would be reflected in larger values of $\KBw_{n,m}^l = \inner{\Tilde{\bq}_n^l}{\KBk_m^l}$ for these relevant tokens. We observe such patterns in practice, as visualized in Fig.~\ref{fig:attn_viz}. In particular, we consider a \KB of 10 triples and ask \KBLaM questions about a single entity, two entities, or a question without an answer in the \KB. We find the post-softmax attention score at the 15th layer, i.e.\ the middle attention layer of the 32-layer Llama3 8B, averaged over all 32 attention heads, to correlate well with the desired entity.
+This property allows \KBLaM to answer input questions in an interpretable way, as for any query, the top-K triples with the highest attention score form supporting evidence.
+This behavior suggests that \KBLaM's attention mechanism functions implicitly as a retriever. We can quantitatively assess its retrieval performance by treating the attention scores, $\KBw_{n,m}^l, m \in {1,\ldots,M}$, as a classification score. In particular, we again extract the averaged-over-heads attention score at the 15th layer, and we evaluate the top-1 and top-5 accuracy, which represent the percentage of evaluation samples where the true triple received either the highest attention score or was among the top-5 highest scores, respectively.
+Fig.~\ref{fig:accuracy_vs_kb_len} presents these results, demonstrating that \KBLaM's attention remains highly accurate even with a large number of triples, both for in-distribution and out-of-distribution (OOD) data. Notably, this performance is achieved \emph{solely} through instruction tuning using paired data, without any explicit regularization or retrieval objectives. In fact, imposing regularization on the attention structure would be challenging and potentially counterproductive as it is unclear, e.g.\ which tokens, attention heads or attention layers should be regularized.  
+
+
+
+
+
+
+
+
+\paragraph{\KBLaM can reason about knowledge}
+We consider querying the model with three types of questions: Simple, two-entities (multi-entities Q\&A involving two triples), and open-ended Q\&A. For the first two types, we evaluate the output quality using BERT score~\citep{bert-score}.~\ref{sec:gpt_score_prompt}). Results are presented in Fig.~\ref{fig:bert_score_vs_len} and Fig.~\ref{fig:open_ended_results}.
+Broadly, we can see that on the synthetic dataset, \KBLaM shows performance comparable to in-context learning, but with a much smaller memory footprint (Fig.~\ref{fig:memory}) and hence better scalability.
+On Enron, the out-of-distribution (OOD) data, \KBLaM shows degraded performance, but still performs better than zero-shot baseline, indicating that \KBLaM is using the \KB information effectively. 
+~\ref{sec:enron_kb_sample_output}).
+Note that Enron has {\description}s that look entirely different from that of the synthetic data (see Table.~\ref{tab:syn_kb} v.s.~\ref{sec:sample_kb}).
+We therefore believe such performance degradation could be alleviated by using a larger and more diverse synthetic dataset or through a synthetic dataset derived from a real-world dataset.
+    
+    
+\paragraph{\KBLaM knows when it cannot answer a question}
+If the model can refuse to answer a question in case it cannot find relevant information in the context, then the risk of model hallucinations can be largely controlled. 
+We consider a setting where, given a \KB, we ask the model 100 questions in total, out of which 80 questions are answerable, and the other 20 are not.
+We then consider the unanswerable questions as the positive class and answerable questions as negative.
+To evaluate the model, we use standard binary classification metrics: precision and recall.
+We compare the performance of \KBLaM with in-context learning, where we explicitly prompt the LLM with the following instructions: ``if relevant information cannot be found in the text, please respond I am sorry I cannot find relevant information in the KB''. The results are presented in Fig.~\ref{fig:refusal_results}. 
+Broadly, we notice that when the number of triples increases, both \KBLaM and in-context learning show decreased precision, i.e.\ the models start to incorrectly refuse for having not found the information, however, in-context learning shows more drastic degradation. The recall for both methods stays constant, i.e. both methods do not start to hallucinate as we add more triples.
+
+\paragraph{Ablation study} 
+~\ref{sec:ablation_study}:
+We find that \KBLaM also works with open-sourced sentence encoders, with exact performance depending on the encoders' capacity (Fig.~\ref{fig:encoder_ablation});
+The frequency of adding knowledge tokens can be set less than every layer, which further improve efficiency but could cause performance drop (Fig.~\ref{fig:vary_kb_token_frequency}). Lastly, we study the role of knowledge tokens at each layer, where we find that knowledge tokens in earlier layers may serve as ``soft prompt'' for instruction following (Fig.~\ref{fig:layers_ablation}).
+
+
+
+\begin{figure}[t!]
+  \centering
+  \includegraphics[width=0.52\linewidth]{figures/gen_quality_plot_legend.pdf}
+   \\[-1.0ex]
+  \begin{subfigure}{.93\textwidth}
+      \centering
+      \includegraphics[width=\linewidth]{figures/bert_score_vs_kbsize_no_outlier.pdf}
+      \\[-1ex]
+      \caption{\textbf{Simple and two-entity Q\&A}~ Evaluated by BERT score (F1), which measures word-level cosine similarity between model outputs and reference answers by on embedding space.}
+      \label{fig:bert_score_vs_len}
+    \end{subfigure}%
+
+  \begin{subfigure}{.45\textwidth}
+      \centering
+      \includegraphics[width=\linewidth]{figures/gpt_scores_small.pdf}
+      \\[-1ex]
+      \caption{\textbf{Open-ended Q\&A}~ Scored by GPT-4 between 0 and 5, dot and bar shows the mean and standard error over 5 random seeds.}
+      \label{fig:open_ended_results}
+    \end{subfigure}~
+    \begin{subfigure}{.45\textwidth}
+      \centering
+      \includegraphics[width=\linewidth]{figures/refusal_results_small.pdf}
+      \\[-1ex]
+      \caption{\textbf{Unanswerable questions}~ Precision and recall for detecting questions without relevant information in the KB. }
+      \label{fig:refusal_results}
+    \end{subfigure}
+  \caption{\textbf{\KBLaM can reason about the KB.}~
+  (\subref{fig:bert_score_vs_len}) and (\subref{fig:open_ended_results}): Performance on Q\&A tasks evaluated by BERT and GPT-4 scores. KBLaM shows comparable quality to in-context learning on synthetic data while using less memory (Fig.~\ref{fig:memory}). Some degradation occurs with Enron data, which is out-of-distribution. Zero-shot learning fails to provide sensible answers as the questions are not answerable using model's internal knowledge;
+  (\subref{fig:refusal_results}): We consider unanswerable questions with no relevant triples in the \KB as positive class (20 percent of 100 questions) and answerable questions as negative class. We then use precision and recall to measure whether the model knows to say that it ``Cannot find relevant information'' when it is supposed to say so. Both in-context learning and \KBLaM show ``over-refusal'', i.e.\ failing to respond to answerable questions, when the number of triples grows larger (i.e. degradation in precision), however, \KBLaM degrades slower.}
+\end{figure}
+
+
+\section{Conclusion}
+
+
+
+In this paper, we propose \KBLaM, which efficiently augments pre-trained LLMs with external knowledge bases. \KBLaM represents external knowledge as dense continuous vectors and leverages the independence structure between triples, which offers several advantages: avoiding expensive self-attention over large knowledge sources, enabling dynamic knowledge updates without fine-tuning, improving interpretability, and allowing attention to perform retrieval. These benefits could potentially also be applied to settings using raw text as knowledge representation.
+
+
+
+\section{Limitations and future work}
+
+
+\textbf{Higher quality synthetic \KB}~ In the paper, we demonstrate the feasibility of training \KBLaM with fully synthetic data. However, as shown in Fig.~\ref{fig:bert_score_vs_len} and ~\ref{fig:open_ended_results}, \KBLaM generalizes to out-of-distribution dataset (Enron) but the performance degrades. We believe this can be improved through a larger and more diverse synthetic dataset.
+It is also possible to generate the synthetic data seeded from real \KB data, such that the adapters can better capture the distribution of the real text.
+
+
+
+\textbf{Information loss in knowledge token}~ \KBLaM encodes sentences in the triple as a fixed-length vector, therefore \KBLaM may fail to \emph{precisely} generate the text word by word.
+This is acceptable for properties we considered such as ``description'' or ``objectives''. However, this is problematic for cases when we need exact names or numerical values.
+One future direction is to introduce a hyperparameter that adjusts the compression rate, to accommodate various amounts of information in a triple.
+
+
+\textbf{More sophisticated instruction tuning}~ 
+Future work could explore complex instruction tuning examples for \KBLaM, such as multi-hop, multi-step, or chain-of-thought reasoning about the \KB. Since KBLaM incorporates all KB information in the context, similar to in-context learning, we believe it has the potential for more flexible \KB reasoning compared to RAG.
+
+
+
+\newpage
+
+
+
+

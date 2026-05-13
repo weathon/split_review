@@ -1,0 +1,1172 @@
+\title{From Link Prediction to Forecasting: Information Loss in Batch-based Temporal Graph Learning}
+
+\begin{abstract}
+  Dynamic link prediction is an important problem considered by many recent works proposing various approaches for learning temporal edge patterns.
+  To assess their efficacy, models are evaluated on publicly available benchmark datasets involving continuous-time and discrete-time temporal graphs.
+  However, as we show in this work, the suitability of common batch-oriented evaluation depends on the datasets' characteristics, which can cause two issues:
+  First, for continuous-time temporal graphs, fixed-size batches create time windows with different durations, resulting in an inconsistent dynamic link prediction task.
+  Second, for discrete-time temporal graphs, the sequence of batches can additionally introduce temporal dependencies that are not present in the data.
+  In this work, we empirically show that this common evaluation approach leads to skewed model performance and hinders the fair comparison of methods.
+  We mitigate this problem by reformulating dynamic link prediction as a \emph{link forecasting} task that better accounts for temporal information present in the data.
+  We provide implementations of our new evaluation method for commonly used graph learning frameworks.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Many scientific fields study data that can be modeled as graphs, where nodes represent entities that are connected by edges. 
+Examples include social \cite{ComputationalSocialScience2009lazer}, financial \cite{PhysicsFinancialNetworks2021bardoscia}, biological \cite{GenomicRegulatoryNetwork2002davidson} as well as molecular networks \cite{david2020molecular}.
+Apart from the mere topology of interactions, i.e., who is connected to whom, such data increasingly include information on \emph{when} these interactions occur.
+Depending on the temporal resolution, the resulting \emph{temporal graphs} are often categorized as \emph{continuous-time} or \emph{discrete-time} \cite{GraphNeuralNetworks2023longa}:
+State-of-the-art data collection technology provides high-resolution \emph{continuous-time} temporal graphs, which capture the exact (and possibly unique) occurrence time of each interaction. 
+Examples include time-stamped online interactions \cite{PredictingDynamicEmbedding2019kumar} or social networks captured via high-resolution proximity sensing technologies \cite{EstimatingPotentialInfection2013vanhems}.
+In contrast, discrete-time temporal graphs give rise to a temporally ordered sequence of \emph{static} snapshots, where each snapshot contains interactions recorded within a (typically coarse-grained) time interval.
+Examples include scholarly collaboration or citation graphs, which frequently include monthly or yearly snapshots.
+
+Building on the growing importance of temporal data and the success of graph neural networks (GNNs) for static graphs \cite{GeometricDeepLearning2017bronstein,GraphNeuralNetworks2024corso}, deep graph learning has recently been extended to temporal (or dynamic) graphs \cite{feng2024comprehensive}.
+To this end, several temporal graph neural network (TGNN) architectures have been proposed that are able to simultaneously learn temporal and topological patterns.
+These architectures are often evaluated in \emph{dynamic link prediction}, where the task is to predict the existence of edges in a future time window of length $\Delta t$, e.g., to provide recommendations to users \cite{PredictingDynamicEmbedding2019kumar}.
+
+For dynamic link prediction, TGNNs commonly utilize \emph{temporal batches} to speed up training \cite{su2024pres}.
+To construct these temporal batches, the sequence of \emph{temporally} ordered edges is divided into a sequence of equally large chunks that contain the same number of edges.
+Within each batch, edges are typically treated as if they occurred simultaneously, thus discarding temporal information within a batch.
+For continuous-time temporal graphs, such fixed-size batches are also likely to be associated with time windows of varying lengths $\Delta t$.
+Changing the batch size affects the resulting window lengths and could, e.g., change the task from predicting at the minute to the hour level, thus altering its difficulty (\Cref{fig:problem_overview}a).
+In discrete-time temporal graphs, snapshots are typically so large that they comprise multiple batches (\Cref{fig:problem_overview}b).
+This leads to the issue that the ordered sequence of batches does not necessarily correspond to a \emph{temporally ordered} sequence.
+A batch-wise training of TGNNs thus effectively mixes information from the past and the future. 
+This violates the arrow of time and questions the applicability of TGNNs in real-world prediction settings, where models do not have access to future information.
+
+\begin{figure}[t]
+  \centering
+  \begin{overpic}[width=.9\linewidth]{figures/motivation-v10.pdf}
+        \put(0,58){\textbf{(a)}}
+        \put(5,58){$b = 10$, NMI = 0.66}
+        \put(5,44){$b = 12$, NMI = 0.64}
+        \put(5,29){$h = 6$, NMI = 0.71}
+        \put(0,14){\textbf{(b)}}
+        \put(7,14){$b = 9$, NMI = $0.78$}
+        \put(41,14){$b = 10$, NMI = $0.66$}
+        \put(78,14){$h = 1$, NMI = $1$}
+	\end{overpic}
+    \caption{Illustration of the issues with a batch-based evaluation of TGNNs:
+    \textbf{(a)} A continuous-time temporal graph, split into batches with sizes $b=10$ (top), $b=12$ (middle), and time windows with duration $h = 6$ (bottom).
+    \textbf{(b)} A discrete-time temporal graph, split into batches with size $b=9$ (left), $b=10$ (middle), and time windows with duration $h=1$ (right).
+    Splitting temporal graphs with inhomogeneous temporal activities into batches with fixed size $b$ assigns edges in time windows of varying lengths to the same batch and edges with identical timestamps to different batches.
+    We use normalized mutual information (NMI) between the edges' timestamps and their associated batch number (shown by colors) to quantify how much temporal information can be recovered from the sequence of batch numbers alone.
+    In our work, we propose a time-window-oriented approach to evaluate dynamic link prediction that mitigates the information loss of current batch-based evaluation.\label{fig:problem_overview}}    
+\end{figure}
+
+Addressing these important problems in the evaluation of temporal graph learning techniques, our work makes the following contributions:
+\begin{itemize}[itemsep=-1pt,topsep=-1pt]
+    \item We quantify the information loss due to the aggregation of edges into batches on 14 discrete- and continuous-time temporal graphs, thus showing how the dynamic link prediction task depends on the batch size.
+    \item To mitigate this issue, we formulate the task as \emph{link forecasting} using a time window-oriented evaluation that adequately considers the available temporal information.
+    \item We perform an experimental evaluation of state-of-the-art TGNNs for \emph{link forecasting}. Our results highlight substantial differences in model performance compared to a batch-oriented evaluation of \emph{link prediction}, thus demonstrating the real-world impact of our work.
+\end{itemize}
+
+While batch-oriented processing is a technical necessity for efficient model training, our work shows that tuning the batch size essentially tunes the link prediction task, thus fitting the task to the model and undermining a fair comparison of temporal graph learning techniques.
+Proposing a time window-oriented evaluation of dynamic link \emph{forecasting}, our work provides a simple yet effective solution to an important open issue in the evaluation of temporal graph neural networks.
+
+
+\section{Preliminaries and related work\label{sec:preliminaries}
+
+
+\paragraph{Temporal graphs.}
+A temporal (or dynamic) graph $G = \left(V, E\right)$ is a tuple where $V$ is the set of $n = \left|V\right|$ nodes and $E$ is a chronologically ordered sequence of $m = |E|$ time-stamped edges defined as $E = \left((u_0,v_0,t_0), \dots, (u_{m-1},v_{m-1},t_{m-1})\right)$ with $1 \leq t_0 \leq \dots \leq t_{m-1} \leq t_{max}$ \cite{BetterEvaluationDynamic2022poursafaei,InductiveRepresentationLearning2021wang,BetterDynamicGraph2023yu}.
+Each node $v_i$ can have static node features $\mathbf{h_{i}} \in H_V$ and each edge $(u_i,v_j,t)$ can have edge features $\mathbf{e_{ij,t}} \in H_E$ that change over time.
+We assume that interactions occur instantaneously with discrete timestamps $t \in \mathbb{N}$.
+Although timestamps $t \in \mathbb{N}$ are discrete, such temporal graphs are often referred to as continuous-time \cite{RepresentationLearningDynamic2020kazemi,FoundationsModelingDynamic2021skarding}.
+In contrast, discrete-time temporal graphs coarse-grain time-stamped edges into a sequence of static snapshot graphs $\{G_{t_i:t_j}\}$, where $G_{t_i:t_j} = (V, E_{t_i:t_j})$ with $E_{t_i:t_j} = \left\{(u,v)\mid\exists (u,v,t) \in E: t_i \leq t \leq t_j \right\}$ \cite{DynamicNetworkEmbedding2022xue}.
+
+\paragraph{Dynamic link prediction.}
+Given time-stamped edges up to time $t$, the goal of dynamic link prediction is to predict whether an edge $(v,u,t+1)$ exists at future time $t+1$ \cite{BetterDynamicGraph2023yu,BetterEvaluationDynamic2022poursafaei,RepresentationLearningDynamic2020kazemi,InductiveRepresentationLearning2021wang}.
+In practice, it is often computationally infeasible to train and evaluate models on all possible edges one edge at a time.
+Thus, the chronologically ordered sequence of edges $E$ is usually divided into temporal batches $B^+_i$, where each batch has a fixed size of $b$ edges.
+Edges within the same batch are typically processed in parallel \cite{su2024pres,TemporalGraphNetworks2020rossi}, thereby losing the temporal information inside each batch.
+In addition to the existing (positive) edges $(u,v) \in B^+_i$, non-existing (negative) edges $(u^-,v^-) \in B_i^-$ are sampled and used for training and evaluation.
+This is done since real-world graphs are typically sparse and using all possible edges between all node pairs would lead to a large class imbalance and longer runtime.
+With these assumptions, we can formally define the task as follows:
+\begin{definition}[Dynamic link prediction]
+    Let $G=(V,E)$ be a temporal graph with node features $H_V$ and edge features $H_E$. 
+    Let $b$ be the batch size and $B_i^+ := \{(u,v) \mid \exists (u,v,t) \in E \text{ with } t \in \{t_{i\cdot b}, \ldots, t_{i\cdot (b+1)-1}\}\}$ the set of $b$ edges in the $i$-th batch.
+    We further use $B_i^-$ to denote a set of negative edges drawn using negative sampling as described in \Cref{app:negative_sampling}.
+    For a given batch $i$ we use $\hat{E}_i = \left\{(u,v,t)\mid\exists (u,v,t) \in E: t < t_{i\cdot b} \right\}$ to denote the \emph{past edges}.
+    The goal of dynamic link prediction is to find a model $f_{\theta} \bigl(u,v \mid \hat{E}_i, H_V, H_{\hat{E}_i}\bigr)$ with parameters $\theta$ that, for each batch $i$, predicts whether $(u,v) \in B_i^+$ or $(u,v) \in B_i^-$.
+\end{definition}
+\paragraph{State-of-the-art TGNNs.}
+Current state-of-the-art dynamic link prediction methods, such as JODIE~\cite{PredictingDynamicEmbedding2019kumar}, DyRep~\cite{DyRepLearningRepresentations2019trivedi}, TGN~\cite{TemporalGraphNetworks2020rossi}, and TCL~\cite{TCLTransformerbasedDynamic2021wanga}, utilize recurrent neural networks, graph attention, transformers, or a combination thereof to capture the nodes' time-evolving properties.
+Temporal Graph Attention (TGAT) extends graph attention to the temporal domain and replaces positional encodings in GAT with a vector representation of time~\cite{InductiveRepresentationLearning2020xu}.
+CAWN learns temporal motifs based on causal anonymous walks (CAW)~\cite{InductiveRepresentationLearning2021wang}.
+GraphMixer takes an attention-free and transformer-free approach, using an MLP-based link encoder, a mean-pooling-based node encoder, and an MLP-based link classifier for predictions~\cite{WeReallyNeed2023cong}.
+DyGFormer combines nodes' historical co-occurrences as interaction targets of the same source node with a temporal patching approach to capture long-term histories~\cite{BetterDynamicGraph2023yu}.
+Several further approaches for discrete-time dynamic link prediction exist, including DyGEM~\cite{dygem}, DySAT~\cite{dysat}, and EvolveGCN~\cite{evolvegcn}. %, however, we focus on models that consider continuous time in this work.
+For a recent survey of deep-learning-based dynamic link prediction,  we refer to \textcite{feng2024comprehensive}.
+\paragraph{Temporal graph training and evaluation.}
+Recent works \cite{su2024pres,TGLGeneralFramework2022zhou,DistTGLDistributedMemoryBased2023zhou} identified issues in the training setup for memory-based TGNNs with large batch sizes:
+Processing edges that belong to the same batch in parallel ignores their temporal dependencies, resulting in varying performance depending on the chosen batch size.
+This issue has been termed \emph{temporal discontinuity}.
+\textcite{su2024pres} propose PRES which accounts for intra-batch temporal dependencies through a prediction-correction scheme.
+\textcite{DistTGLDistributedMemoryBased2023zhou} propose a distributed framework using smaller batch sizes on multiple trainers.
+However, these works focus on training, not considering temporal discontinuity in evaluation.
+
+Recent progress in terms of TGNN evaluation includes the temporal graph benchmark (TGB) \cite{TemporalGraphBenchmark2023huang} similar to the static open graph benchmark (OGB) \cite{OpenGraphBenchmark2020hu}.
+\textcite{BetterEvaluationDynamic2022poursafaei} identify problems with random negative sampling for dynamic link prediction and propose new negative sampling techniques dependent on time to improve the evaluation of TGNNs.
+\textcite{ComparingApplesOranges2023gastinger} identify issues in the evaluation of temporal knowledge graph forecasting.
+Although none of the models used for this task overlap with regular TGNNs for dynamic link prediction, some of the problems can be related.
+
+
+
+\section{From link prediction to link forecasting}
+
+Learning temporal patterns in a batch-oriented fashion leads to issues in continuous-time and discrete-time graphs.
+Below, we show that batching leads to inconsistent tasks because the time window for prediction varies for temporal batches across different link densities in time.
+Temporal batches further cause information loss by either inducing a non-existing temporal order between links or ignoring the existing order.
+We demonstrate these issues in eight continuous-time and six discrete-time temporal graphs, whose characteristics are summarized in  \Cref{tab:datasets} and \Cref{appx:datasets}.
+To mitigate these issues, we then formulate the \emph{Link Forecasting} task based on fixed-length time windows.
+
+\begin{table}[ht]
+  \caption{Characteristics of continuous and discrete-time temporal graphs \cite{BetterEvaluationDynamic2022poursafaei,BetterDynamicGraph2023yu}. For each data set, we include the type, the number of nodes $n$, the number of edges $m$, the resolution of timestamps, the total duration $T$ of the observation, the average number of edges $\overline{|E_t|}$ with the same timestamp $t$, and the temporal density $\nicefrac{T}{m}$.}
+  \label{tab:datasets}
+  \centering
+  \begin{scriptsize}
+\begin{tabular}{l|ccccccc}
+\toprule
+Dataset & Type & $n$ & $m$ & Resolution & $T$ & $\overline{|E_t|}$ & $\nicefrac{T}{m}$ \\
+\midrule
+Enron & Contin. & 184 & 125 235 & 1 second & 3.6 years & 5.5 ± 16.6 & 908.2 s \\
+UCI & Contin. & 1899 & 59 835 & 1 second & 193.7 days & 1.0 ± 0.3 & 279.7 s \\
+MOOC & Contin. & 7144 & 411 749 & 1 second & 29.8 days & 1.2 ± 0.5 & 6.2 s \\
+Wiki. & Contin. & 9227 & 157 474 & 1 second & 31.0 days & 1.0 ± 0.2 & 17.0 s \\
+LastFM & Contin. & 1980 & 1 293 103 & 1 second & 4.3 years & 1.0 ± 0.1 & 106.0 s \\
+Myket & Contin. & 17 988 & 694 121 & 1 second & 197.0 days & 1.0 ± 0.0 & 24.5 s \\
+Social & Contin. & 74 & 2 099 519 & 1 second & 242.3 days & 3.7 ± 2.5 & 10.0 s \\
+Reddit & Contin. & 10 984 & 672 447 & 1 second & 31.0 days & 1.0 ± 0.1 & 4.0 s \\
+UN V. & Discrete & 201 & 1 035 742 & 1 year & 71.0 years & 14 385.3 ± 7142.1 & 36.1 min \\
+US L. & Discrete & 225 & 60 396 & 1 congress & 11.0 congr. & 5033.0 ± 92.4 & 1.8 $\cdot 10^{-4}$ congr. \\
+UN Tr. & Discrete & 255 & 507 497 & 1 year & 31.0 years & 15 859.3 ± 3830.8 & 32.1 min \\
+Can. P. & Discrete & 734 & 74 478 & 1 year & 13.0 years & 5319.9 ± 1740.5 & 91.8 min \\
+Flights & Discrete & 13 169 & 1 927 145 & 1 day & 121.0 days & 15 796.3 ± 4278.5 & 5.4 s \\
+Cont. & Discrete & 692 & 2 426 279 & 5 minutes & 28.0 days & 300.9 ± 342.4 & 1.0 s \\
+\bottomrule
+\end{tabular}
+\end{scriptsize}
+\end{table}
+
+\paragraph{Different time window durations in fixed-size batches.}\label{sec:changing-durations}
+One issue of batch-oriented temporal graph learning and dynamic link prediction is that activities in real-world temporal graphs are inhomogeneously distributed across time.
+In \Cref{fig:link_densities} we show the temporal activity in terms of the number of time-stamped edges within a given time interval both for continuous-time and discrete-time temporal graphs.
+For continuous-time data, we used binning in six-hour intervals.
+The results show that most real-world temporal graphs have highly inhomogeneous activities across time.
+For batch-oriented evaluation, this introduces the issue that each fixed-size batch $B_i^+$ determines a time window with duration $t_j-t_i$ that is shorter (longer) during periods with higher (lower) activity.
+
+In \Cref{fig:batch-window-size} we evaluate the dependency between batch size and window for empirical temporal graphs.
+We observe that, both in continuous- and discrete-time temporal graphs, a single batch size can create time windows with varying durations even within the same dataset.
+For continuous-time temporal graphs, we typically have much bigger batches than edges per timestamp such that the time window of a batch is long (cf. \Cref{tab:datasets}).
+The number of edges per snapshot in discrete-time temporal graphs is generally larger than the batch size $b$ in any period regardless of the density (\Cref{tab:datasets}).
+This means that edges in a batch often belong to the same snapshot leading to small window durations.
+
+\begin{figure}[ht!]
+    \begin{subfigure}{\textwidth}
+        \centering
+        \includegraphics{figures/cont_timestamp_hist.pdf}
+        \caption{Continuous-time temporal graphs resoluted into seconds and binned into 6-hour time periods.}
+        \label{fig:cont_timestamp_hist}
+    \end{subfigure}
+    \begin{subfigure}{\textwidth}
+        \centering
+        \includegraphics{figures/discrete_timestamp_hist.pdf}
+        \caption{Discrete-time temporal graphs with different time resolution (see \Cref{tab:datasets}).}
+        \label{fig:discr_timestamp_hist}
+    \end{subfigure}
+    \caption{Real-world datasets exhibit diverse edge occurrence patterns that are visualised using the edge density across time, i.e., histograms counting the number of edges per timestamp.
+    Dashed lines divide the datasets into train, validation, and test sets as used in \Cref{sec:experiments}.}\label{fig:link_densities}
+\end{figure}
+
+As an example, consider the Myket dataset \cite{EffectChoosingLoss2023loghmania} which contains users $v$ and Android applications $u$, connected at time $t$ when user $v$ installs application $u$.
+The timestamps are provided in seconds and edges occur roughly every half a minute on average (cf. \Cref{tab:datasets}), making the expected time range for a batch with size $b=2$ approximately 0.5 minutes.
+With $b=2$, the task is to predict which users install what applications during this time window.
+Choosing $b=120$ or $b=2880$ turns the task into a prediction problem for approximately the next hour or day, respectively.
+As we can see, batching not only leads to incomparable prediction tasks between models and datasets due to the varying window duration but also acts as a kind of coarse-graining discarding all temporal information inside each batch.
+We discuss this information loss and resulting issues in the next section.
+
+\begin{figure}[!ht]
+    \begin{subfigure}{\textwidth}
+        \centering
+        \includegraphics{figures/continuous_batch_size.png}
+        \caption{Continuous-time temporal graphs: Batch size $b$ determines the average time window length. However, a single batch size creates time windows with various lengths within and across datasets.}
+        \label{fig:continuous-batch-window-sizes}
+    \end{subfigure}
+    \begin{subfigure}{\textwidth}
+        \centering
+        \includegraphics{figures/discrete_batch_size.png}
+        \caption{Discrete-time temporal graphs: Fixed-size batches fall mostly within snapshots when the batches are much smaller than the snapshots. Depending on the dataset, larger batches can also span across many snapshots.}
+        \label{fig:discrete-batch-window-size}
+    \end{subfigure}
+    \caption{Scatterplots visualising time window durations of all batches of size $b$ for different $b$s.}
+    \label{fig:batch-window-size}
+\end{figure}
+
+\paragraph{Information loss in batch-based temporal graph learning.}\label{sec:information-loss}
+In \Cref{fig:continuous-nmi} we use normalized mutual information (NMI) \cite{cover2006elements} to measure the information loss caused by splitting temporal edges $E$ into batches.
+NMI quantifies how much information observing one random variable conveys about another random variable.
+It takes values between $0$, meaning ``no information'', and $1$, meaning ``full information''.
+By treating the index $i$ of each batch $B_i$ assigned to each edge $(u,v) \in B_i$ as one random variable and the associated edge's timestamp $t$ as the other, we can measure the temporal information that is retained after dividing edges into batches.
+In this case, a value of $1$ means that we can reconstruct the timestamps of edges correctly from their batch number, and a value of $0$ means that batch numbers do not carry any information about timestamps.
+Consequently, small NMI values indicate a large loss of temporal information due to batching.
+
+In \Cref{fig:continuous-nmi} we see that in continuous-time temporal graphs where timestamps have a high resolution, larger batches result in larger information loss because assigning edges that occur at different times to the same batch discards their temporal ordering; 
+the larger the batch size, the more information is lost.
+A batch size of $b=1$ preserves all temporal information -- i.e. maximum NMI -- because we obtain a bijective mapping between timestamps and batch numbers.
+An exception is, e.g., the Enron dataset where emails sent to multiple recipients are recorded as simultaneously occurring edges. 
+This leads to a maximum NMI roughly at a batch size that equals the average number of edges per snapshot.
+
+\begin{figure}[!ht]
+\begin{subfigure}{\textwidth}
+    \centering
+    \includegraphics{figures/continuous_NMI.pdf}
+    \caption{For continuous-time temporal graphs, the temporal ordering of edges within batches is discarded. With increasing batch size, more edges with different timestamps are assigned to the same time window, thus, losing more information.}
+    \label{fig:continuous-nmi}
+\end{subfigure}
+\begin{subfigure}{\textwidth}
+    \centering
+    \includegraphics{figures/discrete_NMI.pdf}
+    \caption{Small batches for discrete-time temporal graphs implicitly define an edge ordering within snapshots that is not present in the data, consequently losing the information that edges of the same snapshot occur at the same time.
+    The NMI has its maximum near the average snapshot size (refer to \Cref{tab:datasets}) after which the values decrease again similar to continuous-time datasets.}
+    \label{fig:discrete-nmi}
+\end{subfigure}
+\caption{Temporal information loss in terms of Normalized Mutual Information (NMI, y-axis) for different batch sizes (x-axis), where smaller NMI scores indicate more information loss.}\label{fig:nmi}
+\end{figure}
+
+\Cref{fig:discrete-nmi} shows the batch-size dependent NMI for discrete-time temporal graphs.
+Similar to the Enron dataset, the ``optimal'' batch size that retains most temporal information depends on the average number of links per snapshot and, thus, on the characteristics of the data. 
+Too small batch sizes impose an ordering on the edges within the snapshots that is not present in the data while too large batches stretch across snapshots and discard the temporal ordering of edges from different batches.
+
+These results show that changing the batch size influences both the prediction time window as well as the temporal information available to TGNNs.
+Effectively, the batch size is a hidden hyperparameter that directly impacts the characteristics (and difficulty) of the prediction task.
+In real-world applications, however, the prediction time window is inherently connected to the problem at hand, necessitating a task formulation that is chosen carefully for each benchmark instead of for each model.
+To address this issue, we propose a new task formulation that utilizes a fixed prediction time window thereby solving the first problem.
+Using a fixed time window rather than a fixed number of links also mitigates the second problem by providing an equal amount of temporal information in each batch, thus facilitating a fair model comparison.
+\paragraph{Link forecasting: task definition.}\label{sec:problem_formulation}
+The study of temporal information is at the center of time series forecasting and, therefore, we relate our task definition to a fixed temporal quantity to solve the identified problems \cite{DeepLearningTime2023benidis}.
+We can interpret the temporal edges $E$ as $n^2$ Boolean time series, each of which takes the value 1 at those times when an edge occurs.
+Standard multivariate models output a value for each timestamp over a forecasting horizon $h$.
+In large-scale temporal graphs, it is computationally infeasible to forecast the existence of all $n^2$ possible links, thus, only a sample of negative edges is considered instead.
+In continuous-time dynamic graphs, observations are available at high resolution, e.g.\ seconds, however, for many practical applications, predicting at lower granularity suffices.
+For example, it is typically enough to predict whether a customer purchases a certain product within the next day or week.
+Therefore, we consider forecasting for all timestamps $[t+1,t+h]$ at once instead of for each of them individually, and define the link forecasting task as follows:
+\begin{definition}[Dynamic link forecasting]
+    Let $G=(V,E)$ be a temporal graph with node features $H_V$ and edge features $H_E$. 
+    Let $h$ be the time horizon and $W_i^+ := \{(u,v) \mid \exists (u,v,t) \in E \text{ with } i\cdot h\leq t <(i+1)\cdot h\}$ the set of edges in the $i$-th time window.
+    We use $W_i^-$ to denote a sample of negative edges that do not occur in time window $[i \cdot h,(i+1) \cdot h)$.
+    We further use $\hat{E}_i = \left\{(u,v,t)\mid\exists (u,v,t) \in E: t < i\cdot h \right\}$ to denote the set of past edges for time window $i$.
+    The goal of dynamic link forecasting is to find a model $f_\theta (u, v| \hat{E}_i, H_V, H_{\hat{E}_i})$ with parameters $\theta$ that, for each time window $i$ forecasts whether $(u,v) \in W_{i}^+$ or $(u,v) \in W_{i}^-$.
+\end{definition}
+Crucially, this definition makes the evaluation \emph{independent of the batch size} $b$ and instead introduces a time horizon $h$ that defines the forecasting time window.
+Note that we define the past edges $\hat{E}$ as a temporal graph to keep temporal information, e.g., to enable sampling of recent neighbors \cite{TemporalGraphNetworks2020rossi}.
+The forecasting time window, on the other hand, is a snapshot that discards temporal information inside each window since we are forecasting if a link exists in \emph{any} of the timestamps $t\in [t+1,t+h]$.
+For parallel processing, batches can be defined either as $E_{t+1:t+h} \cup E^-_{t+1:t+h}$ and can have different sizes, or as a subset $B \subset E_{t+1:t+h} \cup E^-_{t+1:t+h}$ as long other time-dependent parts of the optimization are based on $E_{t+1:t+h}$, e.g., negative sampling or updating a memory. 
+
+\paragraph{Implementation} We provide implementations for our evaluation procedure in commonly used PyTorch \cite{PyTorchImperativeStyle2019paszke} libraries to simplify the adoption of our approach.py}} that replaces the widely used \texttt{TemporalDataLoader} in PyTorch Geometric \cite{FastGraphRepresentation2019fey}.
+We extend DyGLib \cite{BetterDynamicGraph2023yu} with a command line argument \texttt{horizon} that can be used in the evaluation pipeline
+The latter was used for the experiments in this work and can be used to reproduce our results.
+
+
+\section{Link prediction vs. forecasting in state-of-the-art TGNNs\label{sec:experiments}
+
+
+We now experimentally evaluate nine state-of-the-art models \cite{PredictingDynamicEmbedding2019kumar,DyRepLearningRepresentations2019trivedi,InductiveRepresentationLearning2020xu,TemporalGraphNetworks2020rossi,InductiveRepresentationLearning2021wang,BetterEvaluationDynamic2022poursafaei,TCLTransformerbasedDynamic2021wanga,WeReallyNeed2023cong,BetterDynamicGraph2023yu}, evaluating their performance both based for the (usual) dynamic link prediction and the proposed dynamic link forecasting task.
+We use implementation and model configurations provided by DyGLib \cite{BetterDynamicGraph2023yu} (cf. \Cref{app:experiment_details}) and repeat each experiment five times to obtain averages.
+We use historical negative sampling \cite{BetterEvaluationDynamic2022poursafaei} and train each model using batch-based training and validation with batch size $b=200$ which was found ``to be a good trade-off between speed and update granularity'' \cite{TemporalGraphNetworks2020rossi} and adopted in similar works \cite{BetterDynamicGraph2023yu,BetterEvaluationDynamic2022poursafaei}.
+Afterwards, we evaluate each model trained with batch-based training using our proposed time-window-based evaluation method as well as the common batch-based evaluation approach with $b=200$.
+We choose the forecasting horizon $h$ such that we obtain average batch sizes of approximately $200$ for all continuous-time datasets to make the results of our new evaluation method comparable to the results of the batch-oriented approach (\Cref{tab:batch_window_averages}). 
+For discrete-time temporal graphs, we set $h = 1$ to obtain one time window per snapshot, predicting for time intervals ranging from five minutes to a year, depending on the datasets (\Cref{tab:datasets}).
+
+\begin{table}[!t]
+\caption{
+Average links per window $|E_{t_i:t_j}|$ and standard deviation for horizon $h$ used in the evaluation (left). We chose $h$ for each dataset to get $\overline{|E_{t_i:t_j}|} \approx 200$. The average time window duration is in hours and seconds per batch (center). NMI uses the window and batch IDs of the test set as random variables quantifying how much the chosen chunks differ between the approaches (right).
+} \label{tab:batch_window_averages}
+\centering
+\begin{scriptsize}
+\begin{tabular}{l|cc|ccc|c}
+\toprule
+Dataset & $h$ & $\overline{|E_{t_i:t_j|}}$ & $b$ & Avg Duration (h) & Avg Duration (s) & NMI \\
+\midrule
+Enron & 172 800s ($48$h) & 214.1 ± 274.1 & 200 & 50.1 ± 165.38 & 180395.2 ± 595358.23 & 0.80 \\
+UCI & 57 600s ($16$h) & 208.5 ± 335.5 & 200 & 15.4 ± 31.67 & 55542.5 ± 114021.12 & 0.83 \\
+MOOC & 1200s ($\nicefrac{1}{3}$h) & 199.3 ± 167.2 & 200 & 0.3 ± 0.72 & 1242.8 ± 2597.53 & 0.88 \\
+Wikipedia & 3600s ($1$h) & 211.7 ± 56.3 & 200 & 0.9 ± 0.26 & 3382.2 ± 921.97 & 0.89 \\
+LastFM & 21 600s ($6$h) & 204.4 ± 120.2 & 200 & 5.9 ± 5.37 & 21099.5 ± 19331.76 & 0.91 \\
+Myket & 5400s ($\nicefrac{3}{2}$h) & 220.1 ± 133.6 & 200 & 1.4 ± 1.18 & 4879.2 ± 4236.54 & 0.91 \\
+Social Evo. & 1800s ($\nicefrac{1}{2}$h) & 186.1 ± 165.3 & 200 & 0.6 ± 1.26 & 1984.1 ± 4533.72 & 0.91 \\
+Reddit & 900s ($\nicefrac{1}{4}$h) & 226.0 ± 54.5 & 200 & 0.2 ± 0.06 & 792.5 ± 199.35 & 0.92 \\
+\bottomrule
+\end{tabular}
+\end{scriptsize}
+\end{table}
+
+The results are presented in \Cref{tab:performance_diff_cont} for continuous-time and \Cref{tab:performance_diff_disc} discrete-time temporal graphs.
+The tables show AUC-ROC scores for time window-based link forecasting and the relative change compared to the batch-based evaluation commonly used for dynamic link prediction.
+For continuous-time temporal graphs, the change in performance between our window-based and the batch-based approach largely depends on the dataset:
+Datasets with a similar window duration for all fixed-sized batches (quantified with high NMI scores in \Cref{tab:batch_window_averages}), such as Wikipedia, Reddit, or Myket, only exhibit small differences between the performances.
+This is expected since we chose the horizon $h$ to produce batches of the same average size as the fixed-sized batches.
+Nevertheless, the time windows in datasets with inhomogeneously distributed temporal activity such as Enron or UCI do not fit the fixed-sized batches well (lower NMI in \Cref{tab:batch_window_averages}), showing substantial performance changes across models.
+This highlights that the performance scores of batch-based evaluation are skewed and may not reflect the models' performance in a real-world setting on inhomogeneous temporal datasets. 
+
+\begin{table}[!ht]
+  \addtolength{\tabcolsep}{-0.5pt}
+  \caption{
+    Test AUC-ROC scores for link forecasting and the relative change compared to link prediction for continuous-time graphs on the \emph{same trained models} (standard deviations in \Cref{app:additional_results}). We compute the AUC-ROC score per time window and average by weighing each time window equally, regardless of the number of edges (\Cref{app:weighted_res} discusses additional weighting schemes). The last row/column provides mean $\mu$ and standard deviation $\sigma$ of the absolute relative change per column/row.}
+  \label{tab:performance_diff_cont}
+  \centering
+  \begin{tiny}
+\begin{tabular}{l|lllllllll|l}
+\toprule
+Dataset & JODIE & DyRep & TGN & TGAT & CAWN & EdgeBank & TCL & GraphMixer & DyGFormer & $\mu \pm \sigma$ \\
+\midrule
+Enron & 84.0(\color{custom3} $\uparrow$8.6\%\textcolor{black}{)} & 80.3(\color{custom3} $\uparrow$9.2\%\textcolor{black}{)} & 67.9(\color{custom4} $\downarrow$0.2\%\textcolor{black}{)} & 69.0(\color{custom3} $\uparrow$17.6\%\textcolor{black}{)} & 75.7(\color{custom3} $\uparrow$13.9\%\textcolor{black}{)} & 82.7(\color{custom3} $\uparrow$3.6\%\textcolor{black}{)} & 75.1(\color{custom3} $\uparrow$11.1\%\textcolor{black}{)} & 88.6(\color{custom3} $\uparrow$9.0\%\textcolor{black}{)} & 84.5(\color{custom3} $\uparrow$10.6\%\textcolor{black}{)} & 9.3\%±5.1\% \\
+UCI & 86.8(\color{custom3} $\uparrow$4.2\%\textcolor{black}{)} & 60.2(\color{custom3} $\uparrow$17.1\%\textcolor{black}{)} & 62.1(\color{custom4} $\downarrow$1.5\%\textcolor{black}{)} & 55.2(\color{custom4} $\downarrow$7.4\%\textcolor{black}{)} & 56.5(\color{custom4} $\downarrow$3.0\%\textcolor{black}{)} & 72.5(\color{custom3} $\uparrow$4.9\%\textcolor{black}{)} & 56.3(\color{custom4} $\downarrow$6.2\%\textcolor{black}{)} & 80.2(\color{custom4} $\downarrow$0.5\%\textcolor{black}{)} & 75.7(\color{custom4} $\downarrow$0.6\%\textcolor{black}{)} & 5.0\%±5.1\% \\
+MOOC & 83.1(\color{custom4} $\downarrow$2.1\%\textcolor{black}{)} & 79.0(\color{custom4} $\downarrow$2.1\%\textcolor{black}{)} & 87.4(\color{custom4} $\downarrow$1.2\%\textcolor{black}{)} & 79.9(\color{custom4} $\downarrow$2.9\%\textcolor{black}{)} & 68.8(\color{custom4} $\downarrow$2.2\%\textcolor{black}{)} & 59.8(\color{custom4} $\downarrow$3.4\%\textcolor{black}{)} & 68.4(\color{custom4} $\downarrow$5.8\%\textcolor{black}{)} & 70.3(\color{custom4} $\downarrow$5.5\%\textcolor{black}{)} & 80.0(\color{custom4} $\downarrow$1.5\%\textcolor{black}{)} & 3.0\%±1.7\% \\
+Wiki. & 81.5(\color{custom4} $\downarrow$0.4\%\textcolor{black}{)} & 78.3(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 83.7(\color{custom4} $\downarrow$0.6\%\textcolor{black}{)} & 82.9(\color{custom4} $\downarrow$0.7\%\textcolor{black}{)} & 71.3(\color{custom4} $\downarrow$0.4\%\textcolor{black}{)} & 77.2(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 84.6(\color{custom4} $\downarrow$0.6\%\textcolor{black}{)} & 87.3(\color{custom4} $\downarrow$0.6\%\textcolor{black}{)} & 79.8(\color{custom4} $\downarrow$0.3\%\textcolor{black}{)} & 0.4\%±0.2\% \\
+LastFM & 76.3(\color{custom4} $\downarrow$2.2\%\textcolor{black}{)} & 69.0(\color{custom4} $\downarrow$3.7\%\textcolor{black}{)} & 79.2(\color{custom4} $\downarrow$1.9\%\textcolor{black}{)} & 65.2(\color{custom4} $\downarrow$4.7\%\textcolor{black}{)} & 66.3(\color{custom4} $\downarrow$2.6\%\textcolor{black}{)} & 78.0(\color{custom4} $\downarrow$0.2\%\textcolor{black}{)} & 62.5(\color{custom4} $\downarrow$2.7\%\textcolor{black}{)} & 59.9(\color{custom4} $\downarrow$9.2\%\textcolor{black}{)} & 78.2(\color{custom4} $\downarrow$1.0\%\textcolor{black}{)} & 3.1\%±2.6\% \\
+Myket & 64.4(\color{custom3} $\uparrow$0.6\%\textcolor{black}{)} & 64.1(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 61.2(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 57.8(\color{custom3} $\uparrow$0.4\%\textcolor{black}{)} & 33.5(\color{custom3} $\uparrow$3.1\%\textcolor{black}{)} & 52.6(\color{custom3} $\uparrow$1.3\%\textcolor{black}{)} & 58.2(\color{custom4} $\downarrow$0.3\%\textcolor{black}{)} & 59.8(\color{custom3} $\uparrow$0.5\%\textcolor{black}{)} & 33.8(\color{custom3} $\uparrow$3.0\%\textcolor{black}{)} & 1.0\%±1.2\% \\
+Social & 92.1(\color{custom3} $\uparrow$0.8\%\textcolor{black}{)} & 92.2(\color{custom4} $\downarrow$0.5\%\textcolor{black}{)} & 92.2(\color{custom3} $\uparrow$0.5\%\textcolor{black}{)} & 92.5(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 86.5(\color{custom4} $\downarrow$1.4\%\textcolor{black}{)} & 84.9(\color{custom4} $\downarrow$1.1\%\textcolor{black}{)} & 94.7(\color{custom4} $\downarrow$0.6\%\textcolor{black}{)} & 94.6(\color{custom3} $\uparrow$0.6\%\textcolor{black}{)} & 97.3(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 0.6\%±0.4\% \\
+Reddit & 80.6(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 79.5(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 80.4(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 78.6(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 80.2(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 78.6(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 76.2(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 77.1(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 80.2(\color{black} 0.0\%\textcolor{black}{)} & 0.0\%±0.1\% \\
+\midrule
+$\mu \pm \sigma$ & 2.4\%±2.9\% & 4.1\%±6.1\% & 0.8\%±0.7\% & 4.2\%±6.0\% & 3.3\%±4.4\% & 1.8\%±1.9\% & 3.4\%±4.0\% & 3.2\%±4.0\% & 2.1\%±3.6\% & \\
+\bottomrule
+\end{tabular}
+\end{tiny}
+\end{table}
+
+We further observe that, for dynamic link forecasting, the performance of memory-based models on discrete-time temporal graphs tends to decrease more than for other methods.
+This is expected since these models incorporate information about the present snapshot by updating their memory based on prior batches, which means using part of the snapshot's edges to predict its remaining edges.
+Our evaluation method prevents this information leakage, which explains the substantial drop in performance.
+For Contacts, the discrete-time dataset with the highest NMI score, we see the smallest changes in model performance.
+This demonstrates that the models' performance obtained through batch-oriented evaluation reflects the time-window-based performance more closely when a given batch size defines more homogeneous time windows.
+However, this is often not the case in real-world discrete-time temporal graphs with low granularity and large snapshots.
+\begin{table}[!ht]
+  \addtolength{\tabcolsep}{-0.6pt}
+  \caption{
+    Test AUC-ROC scores as in \Cref{tab:performance_diff_cont} but for discrete-time graphs.
+    }
+  \label{tab:performance_diff_disc}
+  \centering
+  \begin{tiny}
+\begin{tabular}{l|lllllllll|l}
+\toprule
+Dataset & JODIE & DyRep & TGN & TGAT & CAWN & EdgeBank & TCL & GraphMixer & DyGFormer & $\mu \pm \sigma$ \\
+\midrule
+UN V. & 54.0(\color{custom4} $\downarrow$26.7\%\textcolor{black}{)} & 52.2(\color{custom4} $\downarrow$28.2\%\textcolor{black}{)} & 51.3(\color{custom4} $\downarrow$27.1\%\textcolor{black}{)} & 54.4(\color{custom3} $\uparrow$3.0\%\textcolor{black}{)} & 53.7(\color{custom3} $\uparrow$7.1\%\textcolor{black}{)} & 89.6(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 53.4(\color{custom3} $\uparrow$0.6\%\textcolor{black}{)} & 56.9(\color{custom3} $\uparrow$1.1\%\textcolor{black}{)} & 65.2(\color{custom3} $\uparrow$3.5\%\textcolor{black}{)} & 10.8\%±12.6\% \\
+US L. & 52.5(\color{custom4} $\downarrow$6.8\%\textcolor{black}{)} & 61.8(\color{custom4} $\downarrow$22.6\%\textcolor{black}{)} & 57.7(\color{custom4} $\downarrow$31.2\%\textcolor{black}{)} & 78.6(\color{custom3} $\uparrow$0.2\%\textcolor{black}{)} & 82.0(\color{custom3} $\uparrow$0.2\%\textcolor{black}{)} & 68.4(\color{custom3} $\uparrow$1.3\%\textcolor{black}{)} & 75.4(\color{custom4} $\downarrow$0.3\%\textcolor{black}{)} & 90.4(\color{custom3} $\uparrow$0.2\%\textcolor{black}{)} & 89.4(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 7.0\%±11.7\% \\
+UN Tr. & 57.7(\color{custom4} $\downarrow$12.8\%\textcolor{black}{)} & 50.3(\color{custom4} $\downarrow$20.4\%\textcolor{black}{)} & 54.3(\color{custom4} $\downarrow$14.0\%\textcolor{black}{)} & 64.1(\color{custom3} $\uparrow$3.9\%\textcolor{black}{)} & 67.6(\color{custom3} $\uparrow$4.5\%\textcolor{black}{)} & 85.6(\color{custom4} $\downarrow$1.0\%\textcolor{black}{)} & 63.7(\color{custom3} $\uparrow$4.5\%\textcolor{black}{)} & 68.6(\color{custom3} $\uparrow$3.4\%\textcolor{black}{)} & 70.7(\color{custom3} $\uparrow$3.4\%\textcolor{black}{)} & 7.5\%±6.6\% \\
+Can. P. & 63.6(\color{custom4} $\downarrow$0.5\%\textcolor{black}{)} & 67.5(\color{custom3} $\uparrow$1.2\%\textcolor{black}{)} & 73.2(\color{custom4} $\downarrow$0.2\%\textcolor{black}{)} & 72.7(\color{custom3} $\uparrow$1.5\%\textcolor{black}{)} & 70.0(\color{custom3} $\uparrow$2.9\%\textcolor{black}{)} & 63.2(\color{custom3} $\uparrow$0.4\%\textcolor{black}{)} & 69.5(\color{custom3} $\uparrow$2.0\%\textcolor{black}{)} & 80.7(\color{custom4} $\downarrow$0.6\%\textcolor{black}{)} & 85.5(\color{custom4} $\downarrow$12.5\%\textcolor{black}{)} & 2.4\%±3.9\% \\
+Flights & 67.4(\color{custom4} $\downarrow$3.1\%\textcolor{black}{)} & 66.0(\color{custom4} $\downarrow$4.3\%\textcolor{black}{)} & 68.1(\color{custom4} $\downarrow$1.0\%\textcolor{black}{)} & 72.6(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 65.2(\color{custom3} $\uparrow$0.3\%\textcolor{black}{)} & 74.6(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 70.6(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 70.7(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 68.6(\color{custom4} $\downarrow$0.5\%\textcolor{black}{)} & 1.0\%±1.6\% \\
+Cont. & 95.6(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 94.9(\color{custom4} $\downarrow$0.5\%\textcolor{black}{)} & 96.6(\color{custom3} $\uparrow$0.5\%\textcolor{black}{)} & 95.9(\color{custom3} $\uparrow$0.6\%\textcolor{black}{)} & 86.7(\color{custom3} $\uparrow$4.1\%\textcolor{black}{)} & 93.0(\color{custom3} $\uparrow$0.9\%\textcolor{black}{)} & 95.7(\color{custom3} $\uparrow$1.7\%\textcolor{black}{)} & 95.2(\color{custom3} $\uparrow$1.1\%\textcolor{black}{)} & 97.7(\color{custom3} $\uparrow$0.6\%\textcolor{black}{)} & 1.1\%±1.2\% \\
+\midrule
+$\mu \pm \sigma$ & 8.3\%±10.2\% & 12.9\%±12.2\% & 12.3\%±14.1\% & 1.5\%±1.6\% & 3.2\%±2.7\% & 0.6\%±0.5\% & 1.5\%±1.7\% & 1.1\%±1.2\% & 3.4\%±4.7\% & \\
+\bottomrule
+\end{tabular}
+\end{tiny}
+\end{table}
+
+
+\section{Conclusion\label{sec:conclusion}
+
+
+In this work, we considered issues associated with current evaluation practices for dynamic link prediction in temporal graphs.
+To address computational limitations, edges in the test set are split into fixed-size batches, causing several issues:
+In continuous-time temporal graphs, fixed-size batches create varying-length time windows depend on the temporal activity patterns. 
+For edges within a batch we further lose information on their temporal ordering.
+In discrete-time temporal graphs where snapshots are typically larger than the batch size, batches impose an ordering of edges which is not present in the data.
+Moreover, state-of-the-art approaches for dynamic link prediction have treated the batch size as a tunable parameter. However, changing the batch size actually changes the prediction task, resulting in incomparable results between different batch sizes.
+
+We solve these issues by formulating the \emph{dynamic link forecasting} task.
+Dynamic link forecasting acknowledges the resolution at which temporal interaction data is recorded and explicitly considers a forecasting horizon corresponding to a prediction time window of a \emph{fixed duration}.
+Depending on the dataset and problem setting, the horizon may span seconds, minutes, hours, or longer, but crucially, time windows always span the same length.
+We evaluated dynamic link forecasting performance of nine state-of-the-art temporal graph learning approaches on 14 real-world datasets, comparing it to the common dynamic link prediction evaluation. 
+We find substantial differences, especially for memory-based TGNNs.
+We provide data loader implementations for commonly used evaluation frameworks to facilitate practical applications of our evaluation approach.
+
+\paragraph{Limitations and Open Issues} Limitations of our work include that our reformulation of the dynamic link prediction task suggests time-window-based approaches for model training, which however goes beyond the scope of our paper.
+After completing our experiments, we became aware of a current work proposing a correction technique that could account for some of the issues addressed by our work during training \cite{su2024pres}.
+Future work could thus evaluate whether this correction approach can mitigate some of the differences observed in our results.
+
+Despite these open issues, we believe that our work is an important and timely contribution that can help to improve evaluation practices in temporal graph learning.
+\begin{ack}
+    Moritz Lampert and Christopher Bl{\"o}cker acknowledge funding from the German Federal Ministry of Education and Research, Grant No. 100582863 (TissueNet). 
+    Ingo Scholtes and Christopher Bl{\"o}cker acknowledge funding through the Swiss National Science Foundation, Grant No. 176938.
+\end{ack}
+\printbibliography
+
+
+
+
+\clearpage
+
+
+\section{Negative sampling approaches}
+
+
+Dynamic link prediction is typically framed as a binary classification problem to predict class 1 for existing links during a certain time window and 0 otherwise.
+Due to the sparsity of most real-world graphs, it usually suffices to train and evaluate using all existing (positive) edges and a sample of non-existing (negative) edges out of all possible edges $V^2$.
+In static link prediction, negative edges are typically sampled randomly from $V^2$ without replacement but \textcite{BetterEvaluationDynamic2022poursafaei} showed that this technique is ill-suited for dynamic link prediction.
+One reason is rooted in the characteristics of temporal graphs where already-seen interactions tend to repeat several times during the observation period.
+To address this issue, \textcite{BetterEvaluationDynamic2022poursafaei} introduced negative sampling which we cover in the following.
+
+Given a training set $E_\text{train}$ and test set $E_\text{test}$, each containing a sequence of edges $E_{t_\text{min}:t_\text{max}}$ in the temporal graph $G$, we can define the following commonly used sampling strategies for drawing negative samples $B_i^-$ for batch $B_i$ with $|B_i|=|B_i^-|$ \cite{BetterEvaluationDynamic2022poursafaei,BetterDynamicGraph2023yu}.
+\begin{itemize}
+  \item Random (rnd): Sample $B_i^-$ from $V^2$ without replacement. The subgraph corresponding to $B_i$ is assumed to be sparse, making it unlikely to sample a positive edge $e \in B_i$ as negative.
+  \item Historic (his): Sample $B_i^-$ without replacement from all training edges $E_\text{hist} = E_\text{train} \setminus\left\{(v_j,u_j) | t_{i\cdot b} \leq t_j \leq t_{(i+1)\cdot b} \right\}$ except the ones appearing at the same time as the edges in $B_i$. If $|E_\text{hist}| < |B_i|$, draw the remaining edges randomly as described above.
+  \item Inductive (ind): Sample $B_i^-$ without replacement from all unseen test edges $E_\text{ind} = E_\text{test} \setminus (E_\text{train} \cup \left\{(v_j,u_j) | t_{i\cdot b} \leq t_j \leq t_{(i+1)\cdot b} \right\})$ except the ones appearing at the same time as the edges in $B_i$. If $|E_\text{ind}| < |B_i|$, draw the remaining edges randomly as described above.
+\end{itemize}
+Note that we leave out the validation set $E_\text{val}$ for simplicity. Negative edges for $E_\text{val}$ can be sampled as for $E_\text{test}$.
+\clearpage
+
+
+\section{Datasets\label{appx:datasets}
+
+In this work, we use eight continuous-time and six discrete-time datasets, listed in \Cref{tab:datasets}.
+Here, we describe what systems were observed to create the datasets and plot the datasets' link count histograms in \Cref{fig:link_count_hist}.
+
+\begin{figure}[ht]
+    \begin{subfigure}{\textwidth}
+        \centering
+        \includegraphics{figures/cont_link_count_hist.pdf}
+        \caption{In the continuous-time temporal graphs, it is most common that at most one edge occurs per timestamp. Depending on the dataset, more than one edge per timestamp is more or less common.}
+        \label{fig:cont_link_count_hist}
+    \end{subfigure}
+    \begin{subfigure}{\textwidth}
+        \centering
+        \includegraphics{figures/discrete_link_count_hist.pdf}
+        \caption{The snapshots in discrete-time temporal graphs contain large numbers of edges, typically much larger than commonly utilized batch sizes. The Contacts dataset has fewer links per snapshot due to its much higher resolution than the remaining discrete-time datasets.}
+        \label{fig:disc_link_count_hist}
+    \end{subfigure}
+    \caption{The link count histograms show how many edges occur per timestamp in continuous-time temporal graphs and per snapshot in discrete-time temporal graphs, respectively.}
+    \label{fig:link_count_hist}
+\end{figure}
+
+\begin{itemize}[itemsep=0pt,topsep=0pt]
+    \item \textbf{Enron} \cite{shetty2004enron} is a bipartite continuous-time graph where nodes are users and the temporal edges represent emails sent between users. Emails with multiple recipients are recorded as separate and simultaneously occurring edges, one per recipient. The temporal edges are resolved at the second level and the dataset spans approximately 3.6 years.
+    \item \textbf{UCI} \cite{uci-dataset} is a unipartite continuous-time social network dataset from an online platform at the University of California at Irvine. The nodes represent students and the timestamped edges represent communication between the students. The dataset spans approximately six and a half months.
+    \item \textbf{MOOC} (massive open online course) \cite{PredictingDynamicEmbedding2019kumar} is a bipartite continuous-time graph where nodes represent users and units in an online course, such as problems or videos. Temporal edges are resolved at the second level and encode when a user interacts with a unit of the online course. The dataset spans approximately one month.
+    \item \textbf{Wikipedia} (Wiki.) \cite{PredictingDynamicEmbedding2019kumar} is a bipartite continuous-time graph where nodes represent editors and Wikipedia articles. The timestamped edges are resolved at the second level and represent when an editor has edited an article. The dataset spans approximately one month.
+    \item \textbf{LastFM} is a bipartite continuous-time graph where nodes represent users and songs. Temporal edges are resolved at the second level and model the users' listening behavior and represent when a user has listened to a song. The dataset was originally published by \textcite{Celma:Springer2010} and later filtered by \textcite{PredictingDynamicEmbedding2019kumar} for use in a temporal graph learning context.
+    \item \textbf{Myket} \cite{EffectChoosingLoss2023loghmania} is a bipartite continuous-time graph where nodes represent user and Android applications. The timestamped edges represent when a user installed an application. The dataset spans approximately six and a half months.
+    \item \textbf{Social Evolution} (Social) \cite{social-evo} is a unipartite continuous-time graph of the proximity between the students in a dormitory, collected between October 2008 and May 2009 using mobile phones. Temporal edges connect students when they are in proximity and are resolved at the second level.
+    \item \textbf{Reddit} \cite{PredictingDynamicEmbedding2019kumar} is a bipartite continuous-time graph where nodes represent Reddit users and their posts. The timestamped edges are resolved at the second level and represent when a user has made a post on Reddit. The dataset spans approximately one month.
+    \item \textbf{UN Vote} (UN V.)\cite{un-voting-dataset,BetterEvaluationDynamic2022poursafaei} is a weighted unipartite discrete-time graph of votes in the United Nations General Assembly between 1946 and 2020. Nodes represent countries and edges connect countries if they both vote ``yes''. The dataset is resolved at the year level and edge weights represent how many times the two connected countries have both voted ``yes'' in the same vote.
+    \item \textbf{US Legislators} (US L.) \cite{10.1145/3394486.3403077,FOWLER2006454,BetterEvaluationDynamic2022poursafaei} is a weighted unipartite discrete-time graph of interactions between legislators in the US Senate. Nodes represent legislators and edges represent co-sponsorship, i.e., edges connect legislators who co-sponsor the same bill. The dataset is resolved at the congress level and edge weights encode the number of co-sponsorships during a congress.
+    \item \textbf{UN Trade} (UN Tr.) \cite{10.1093/biosci/biu225,BetterEvaluationDynamic2022poursafaei} is a directed and weighted unipartite discrete-time graph of food and agricultural trade between countries where nodes represent countries. The dataset spans 30 years and is resolved at the year level. Weighted edges encode the sum of normalized agriculture imports or exports between two countries during a given year.
+    \item \textbf{Canadian Parliament} (Can. P.) \cite{10.1145/3394486.3403077,BetterEvaluationDynamic2022poursafaei} is a weighted unipartite discrete-time political network where nodes represent Members of the Canadian Parliament (MPs) and an edge between two MPs means that they have both voted ``yes'' on a bill. The dataset is resolved at the year level and the edges' weights represent how often the two connected MPs voted ``yes'' on the same bill during a year.
+    \item \textbf{Flights} \cite{flights-dataset,BetterEvaluationDynamic2022poursafaei} is a directed and weighted unipartite discrete-time graph where nodes represent airports and edges represent flights during the COVID-19 pandemic. The edges are resolved at the day level and their weights are given by the number of flights between two airports during the respective day.
+    \item \textbf{Contacts} (Cont.) \cite{Sapiezynski2019,BetterEvaluationDynamic2022poursafaei} is a unipartite discrete-time proximity network between university students. Nodes represent students who are connected by an edge if they were in close proximity during a time window. The dataset is resolved at the 5-minute level and spans one month.
+\end{itemize}
+\clearpage
+
+
+\section{Experimental details}
+
+
+ 
+
+We use the best hyperparameters reported by \textcite{BetterDynamicGraph2023yu} and, for completeness, list these hyperparameters for the 13 datasets used by \textcite{BetterDynamicGraph2023yu} below.
+However, the Myket dataset \cite{EffectChoosingLoss2023loghmania} was not included in the study.
+Therefore, for Myket, we use each method's default parameters as suggested by the respective authors.
+
+We use 9 state-of-the-art dynamic graph learning models and baselines (JODIE \cite{PredictingDynamicEmbedding2019kumar}, DyRep \cite{DyRepLearningRepresentations2019trivedi}, TGAT \cite{InductiveRepresentationLearning2020xu}, TGN \cite{TemporalGraphNetworks2020rossi}, CAWN \cite{InductiveRepresentationLearning2021wang}, EdgeBank \cite{BetterEvaluationDynamic2022poursafaei}, TCL \cite{TCLTransformerbasedDynamic2021wanga}, GraphMixer \cite{WeReallyNeed2023cong} and DyGFormer \cite{BetterDynamicGraph2023yu}).
+The neural-network-based approaches (all except EdgeBank) are trained five times for 100 epochs using the Adam optimizer with a learning rate of $0.0001$.
+An early-stopping strategy with a patience of 5 is employed to avoid overfitting.
+For training and validation, a batch size of 200 is used.
+The training, validation and test sets of each dataset contain 70\%, 15\% and 15\% of the edges, respectively.
+The sets are split based on time, i.e., the training set contains the edges that occurred first while the test set comprises the most recent edges.
+
+The experiments were conducted on a variety of machines with different CPUs and GPUs.
+A list of machine specifications is provided in \Cref{tab:hardware}.
+\begin{table}[htp!]
+    \centering
+    \caption{
+    Hardware details of the machines used for the experiments.
+    }
+    \label{tab:hardware}
+    \begin{subtable}{0.45\textwidth}
+    \caption{CPUs}
+    \begin{tabular}{l}
+    \toprule
+    CPU \\
+    \midrule
+    AMD Ryzen Threadripper PRO 5965WX 24 Cores \\
+    AMD Ryzen 9 7900X 12 Cores \\
+    11th Gen Intel(R) Core(TM) i9-11900K 8 Cores \\
+    AMD Ryzen 9 7950X 16 Cores \\
+    13th Gen Intel(R) Core(TM) i9-13900H 14 Cores \\
+    \bottomrule
+    \end{tabular}
+    \end{subtable}
+    \hfill
+    \begin{subtable}{0.45\textwidth}
+    \caption{GPUs}
+    \begin{tabular}{l}
+    \toprule
+    GPU \\
+    \midrule
+    NVIDIA GeForce RTX 3090 Ti \\
+    NVIDIA GeForce RTX 4080 \\
+    NVIDIA GeForce RTX 3090 \\
+    NVIDIA GeForce RTX 4090 \\
+    NVIDIA GeForce RTX 4060 (Laptop) \\
+    NVIDIA A100 \\
+    NVIDIA GeForce RTX 2080 Ti \\
+    NVIDIA TITAN Xp \\
+    NVIDIA TITAN X \\
+    NVIDIA Quadro RTX 8000 \\
+    \bottomrule
+    \end{tabular}
+    \end{subtable}
+\end{table}
+
+For all model architectures, time-related representations use a size of 100 dimensions while all other non-time-related representations are set to 172.
+An exception is DyGFormer where the neighbor co-occurrence encoding and the aligned encoding each have 50 dimensions. 
+We use eight attention heads for CAWN, and two attention heads for all other attention-based methods.
+The memory-based models either use a vanilla recurrent neural network (JODIE and DyRep), or a gated recurrent unit (GRU) to update their memory.
+Other model-specific parameters are provided in \Cref{tab:hyperparameters}
+\begin{table}[ht]
+    \caption{Specific hyperparameters for different models and datasets.\label{tab:hyperparameters}}
+\begin{subtable}[t]{0.5\textwidth}
+    \centering
+    \caption{Hyperparameters for neighborhood sampling-based models. $n-\text{Neighbors}$ is the number of sampled neighbors using the specified neighbor sampling strategy. $n-\text{Layers}$ is the number of transformer layers (TCL), the number of MLP-Mixer layers (for GraphMixer) or the number of GNN layers otherwise.}
+    \label{tab:neighborhood-sampling-hyperparams}
+    \begin{tiny}
+    \sisetup{round-mode=places, round-precision=1}
+\begin{tabular}{ll|cccS}
+\toprule
+{Dataset} & {Model} & {Neigh.\ Sampling} & {$n_\text{Neighbors}$} & {$n_\text{Layers}$} & {Dropout} \\
+\midrule
+\multirow[c]{5}{*}{Wikipedia} & DyRep & recent & 10 & 1 & 0.100000 \\
+ & TGAT & recent & 20 & 2 & 0.100000 \\
+ & TGN & recent & 10 & 1 & 0.100000 \\
+ & TCL & recent & 20 & 2 & 0.100000 \\
+ & GraphMixer & recent & 30 & 2 & 0.500000 \\
+\cline{1-6}
+\multirow[c]{5}{*}{Reddit} & DyRep & recent & 10 & 1 & 0.100000 \\
+ & TGAT & uniform & 20 & 2 & 0.100000 \\
+ & TGN & recent & 10 & 1 & 0.100000 \\
+ & TCL & uniform & 20 & 2 & 0.100000 \\
+ & GraphMixer & recent & 10 & 2 & 0.500000 \\
+\cline{1-6}
+\multirow[c]{5}{*}{MOOC} & DyRep & recent & 10 & 1 & 0.000000 \\
+ & TGAT & recent & 20 & 2 & 0.100000 \\
+ & TGN & recent & 10 & 1 & 0.200000 \\
+ & TCL & recent & 20 & 2 & 0.100000 \\
+ & GraphMixer & recent & 20 & 2 & 0.400000 \\
+\cline{1-6}
+\multirow[c]{5}{*}{LastFM} & DyRep & recent & 10 & 1 & 0.000000 \\
+ & TGAT & recent & 20 & 2 & 0.100000 \\
+ & TGN & recent & 10 & 1 & 0.300000 \\
+ & TCL & recent & 20 & 2 & 0.100000 \\
+ & GraphMixer & recent & 10 & 2 & 0.000000 \\
+\cline{1-6}
+\multirow[c]{5}{*}{Enron} & DyRep & recent & 10 & 1 & 0.000000 \\
+ & TGAT & recent & 20 & 2 & 0.200000 \\
+ & TGN & recent & 10 & 1 & 0.000000 \\
+ & TCL & recent & 20 & 2 & 0.100000 \\
+ & GraphMixer & recent & 20 & 2 & 0.500000 \\
+\cline{1-6}
+\multirow[c]{5}{*}{Social Evo.} & DyRep & recent & 10 & 1 & 0.100000 \\
+ & TGAT & recent & 20 & 2 & 0.100000 \\
+ & TGN & recent & 10 & 1 & 0.000000 \\
+ & TCL & recent & 20 & 2 & 0.000000 \\
+ & GraphMixer & recent & 20 & 2 & 0.300000 \\
+\cline{1-6}
+\multirow[c]{5}{*}{UCI} & DyRep & recent & 10 & 1 & 0.000000 \\
+ & TGAT & recent & 20 & 2 & 0.100000 \\
+ & TGN & recent & 10 & 1 & 0.100000 \\
+ & TCL & recent & 20 & 2 & 0.000000 \\
+ & GraphMixer & recent & 20 & 2 & 0.400000 \\
+\cline{1-6}
+\multirow[c]{5}{*}{Myket} & DyRep & recent & 10 & 1 & 0.100000 \\
+ & TGAT & recent & 20 & 2 & 0.100000 \\
+ & TGN & recent & 10 & 1 & 0.100000 \\
+ & TCL & recent & 20 & 2 & 0.100000 \\
+ & GraphMixer & recent & 20 & 2 & 0.100000 \\
+\cline{1-6}
+\multirow[c]{5}{*}{Flights} & DyRep & recent & 10 & 1 & 0.100000 \\
+ & TGAT & recent & 20 & 2 & 0.100000 \\
+ & TGN & recent & 10 & 1 & 0.100000 \\
+ & TCL & recent & 20 & 2 & 0.100000 \\
+ & GraphMixer & recent & 20 & 2 & 0.200000 \\
+\cline{1-6}
+\multirow[c]{5}{*}{Can.\ Parl.} & DyRep & uniform & 10 & 1 & 0.000000 \\
+ & TGAT & uniform & 20 & 2 & 0.200000 \\
+ & TGN & uniform & 10 & 1 & 0.300000 \\
+ & TCL & uniform & 20 & 2 & 0.200000 \\
+ & GraphMixer & uniform & 20 & 2 & 0.200000 \\
+\cline{1-6}
+\multirow[c]{5}{*}{US Legis.} & DyRep & recent & 10 & 1 & 0.000000 \\
+ & TGAT & recent & 20 & 2 & 0.100000 \\
+ & TGN & recent & 10 & 1 & 0.100000 \\
+ & TCL & uniform & 20 & 2 & 0.300000 \\
+ & GraphMixer & recent & 20 & 2 & 0.400000 \\
+\cline{1-6}
+\multirow[c]{5}{*}{UN Trade} & DyRep & recent & 10 & 1 & 0.100000 \\
+ & TGAT & uniform & 20 & 2 & 0.100000 \\
+ & TGN & recent & 10 & 1 & 0.200000 \\
+ & TCL & uniform & 20 & 2 & 0.000000 \\
+ & GraphMixer & uniform & 20 & 2 & 0.100000 \\
+\cline{1-6}
+\multirow[c]{5}{*}{UN Vote} & DyRep & recent & 10 & 1 & 0.100000 \\
+ & TGAT & recent & 20 & 2 & 0.200000 \\
+ & TGN & uniform & 10 & 1 & 0.100000 \\
+ & TCL & uniform & 20 & 2 & 0.000000 \\
+ & GraphMixer & uniform & 20 & 2 & 0.000000 \\
+\cline{1-6}
+\multirow[c]{5}{*}{Contacts} & DyRep & recent & 10 & 1 & 0.000000 \\
+ & TGAT & recent & 20 & 2 & 0.100000 \\
+ & TGN & recent & 10 & 1 & 0.100000 \\
+ & TCL & recent & 20 & 2 & 0.000000 \\
+ & GraphMixer & recent & 20 & 2 & 0.100000 \\
+\cline{1-6}
+\bottomrule
+\end{tabular}
+    \end{tiny}
+    \end{subtable}
+    \hfill
+    \begin{subtable}[t]{0.45\textwidth}
+    \begin{subtable}{\textwidth}
+    \centering
+    \caption{Hyperparameters DyGFormer.}
+    \label{tab:DyGFormer-hyperparams}
+    \begin{tiny}
+    \sisetup{round-mode=places, round-precision=1}
+    \begin{tabular}{ll|ccS}
+\toprule
+{Dataset} & {Model} & {Sequence Length} & {Patch Size} & {Dropout} \\
+\midrule
+Wikipedia & DyGFormer & 32 & 1 & 0.100000 \\
+Reddit & DyGFormer & 64 & 2 & 0.200000 \\
+MOOC & DyGFormer & 256 & 8 & 0.100000 \\
+LastFM & DyGFormer & 512 & 16 & 0.100000 \\
+Enron & DyGFormer & 256 & 8 & 0.000000 \\
+Social Evo. & DyGFormer & 32 & 1 & 0.100000 \\
+UCI & DyGFormer & 32 & 1 & 0.100000 \\
+Myket & DyGFormer & 32 & 1 & 0.100000 \\
+Flights & DyGFormer & 256 & 8 & 0.100000 \\
+Can.\ Parl.\ & DyGFormer & 2048 & 64 & 0.100000 \\
+US Legis. & DyGFormer & 256 & 8 & 0.000000 \\
+UN Trade & DyGFormer & 256 & 8 & 0.000000 \\
+UN Vote & DyGFormer & 128 & 4 & 0.200000 \\
+Contacts & DyGFormer & 32 & 1 & 0.000000 \\
+\bottomrule
+\end{tabular}
+    \end{tiny}
+    \end{subtable}
+        \begin{subtable}{\textwidth}
+    \centering
+    \caption{Hyperparameters CAWN.}
+    \label{tab:CAWN-hyperparams}
+    \begin{tiny}
+    \sisetup{round-mode=places, round-precision=1}
+    \begin{tabular}{ll|ccS}
+\toprule
+{Dataset} & {Model} & {Walk Length} & {Time Scale} & {Dropout} \\
+\midrule
+Wikipedia & CAWN & 1 & 0.000001 & 0.100000 \\
+Reddit & CAWN & 1 & 0.000001 & 0.100000 \\
+MOOC & CAWN & 1 & 0.000001 & 0.100000 \\
+LastFM & CAWN & 1 & 0.000001 & 0.100000 \\
+Enron & CAWN & 1 & 0.000001 & 0.100000 \\
+Social Evo. & CAWN & 1 & 0.000001 & 0.100000 \\
+UCI & CAWN & 1 & 0.000001 & 0.100000 \\
+Myket & CAWN & 1 & 0.000001 & 0.100000 \\
+Flights & CAWN & 1 & 0.000001 & 0.100000 \\
+Can.\ Parl. & CAWN & 1 & 0.000001 & 0.000000 \\
+US Legis. & CAWN & 1 & 0.000001 & 0.100000 \\
+UN Trade & CAWN & 1 & 0.000001 & 0.100000 \\
+UN Vote & CAWN & 1 & 0.000001 & 0.100000 \\
+Contacts & CAWN & 1 & 0.000001 & 0.100000 \\
+\cline{1-5}
+\bottomrule
+\end{tabular}
+    \end{tiny}
+    \end{subtable}
+    \begin{subtable}{\textwidth}
+        \centering
+        \caption{Hyperparameters EdgeBank}\label{tab:EdgeBank-hyperparams}
+        \begin{tiny}
+\begin{tabular}{lll|cc}
+\toprule
+{Dataset} & {Model} & {Neg.\ Sampling} & {Memory Mode} & {Time Window} \\
+\midrule
+\multirow[c]{3}{*}{Wikipedia} & \multirow[c]{3}{*}{EdgeBank} & random & unlimited & - \\
+ &  & historical & repeat threshold & - \\
+ &  & inductive & repeat threshold & - \\
+\cline{1-5}
+\multirow[c]{3}{*}{Reddit} & \multirow[c]{3}{*}{EdgeBank} & random & unlimited & - \\
+ &  & historical & repeat threshold & - \\
+ &  & inductive & repeat threshold & - \\
+\cline{1-5}
+\multirow[c]{3}{*}{MOOC} & \multirow[c]{3}{*}{EdgeBank} & random & time window & fixed proportion \\
+ &  & historical & time window & repeat interval \\
+ &  & inductive & repeat threshold & - \\
+\cline{1-5}
+\multirow[c]{3}{*}{LastFM} & \multirow[c]{3}{*}{EdgeBank} & random & time window & fixed proportion \\
+ &  & historical & time window & repeat interval \\
+ &  & inductive & repeat threshold & - \\
+\cline{1-5}
+\multirow[c]{3}{*}{Enron} & \multirow[c]{3}{*}{EdgeBank} & random & time window & fixed proportion \\
+ &  & historical & time window & repeat interval \\
+ &  & inductive & repeat threshold & - \\
+\cline{1-5}
+\multirow[c]{3}{*}{Social Evo.} & \multirow[c]{3}{*}{EdgeBank} & random & repeat threshold & - \\
+ &  & historical & repeat threshold & - \\
+ &  & inductive & repeat threshold & - \\
+\cline{1-5}
+\multirow[c]{3}{*}{UCI} & \multirow[c]{3}{*}{EdgeBank} & random & unlimited & - \\
+ &  & historical & time window & fixed proportion \\
+ &  & inductive & time window & repeat interval\\
+\cline{1-5}
+\multirow[c]{3}{*}{Myket} & \multirow[c]{3}{*}{EdgeBank} & random & unlimited & - \\
+ &  & historical & repeat threshold \\
+ &  & inductive & repeat threshold \\
+\cline{1-5}
+\multirow[c]{3}{*}{Flights} & \multirow[c]{3}{*}{EdgeBank} & random & unlimited & - \\
+ &  & historical & repeat threshold & - \\
+ &  & inductive & repeat threshold & - \\
+\cline{1-5}
+\multirow[c]{3}{*}{Can.\ Parl.} & \multirow[c]{3}{*}{EdgeBank} & random & time window & fixed proportion \\
+ &  & historical & time window & fixed proportion \\
+ &  & inductive & repeat threshold & - \\
+\cline{1-5}
+\multirow[c]{3}{*}{US Legis.} & \multirow[c]{3}{*}{EdgeBank} & random & time window & fixed proportion\\
+ &  & historical & time window & fixed proportion \\
+ &  & inductive & time window & fixed proportion \\
+\cline{1-5}
+\multirow[c]{3}{*}{UN Trade} & \multirow[c]{3}{*}{EdgeBank} & random & time window & repeat interval \\
+ &  & historical & time window & repeat interval \\
+ &  & inductive & repeat threshold & - \\
+\cline{1-5}
+\multirow[c]{3}{*}{UN Vote} & \multirow[c]{3}{*}{EdgeBank} & random & time window & repeat interval \\
+ &  & historical & time window & repeat interval \\
+ &  & inductive & time window & repeat interval \\
+\cline{1-5}
+\multirow[c]{3}{*}{Contacts} & \multirow[c]{3}{*}{EdgeBank} & random & time window & repeat interval \\
+ &  & historical & time window & repeat interval \\
+ &  & inductive & repeat threshold & - \\
+\cline{1-5}
+\bottomrule
+\end{tabular}
+        \end{tiny}
+    \end{subtable}
+    \end{subtable}
+\end{table}
+
+
+\clearpage
+
+
+\section{Detailed AUC-ROC and average precision results}
+
+Here, we provide detailed tabulated results for all models' AUC-ROC and average precision performance across five runs, including standard deviations.
+
+\subsection*{AUC-ROC}
+\begin{table}[h]
+\caption{
+Average AUC-ROC performance over five runs for the test set of the continuous-time datasets from \cite{BetterEvaluationDynamic2022poursafaei,BetterDynamicGraph2023yu}, including standard deviations.}
+\label{tab:cont_auc_std}
+\centering
+\begin{scriptsize}
+\begin{tabular}{ll|lllllllll}
+\toprule
+Eval & Dataset & JODIE & DyRep & TGN & TGAT & CAWN & EdgeBank & TCL & GraphMixer & DyGFormer \\
+\midrule
+\multirow[c]{8}{*}{Forec.} & Enron & 84.0 ± 5.1 & 80.3 ± 1.4 & 67.9 ± 7.1 & 69.0 ± 1.6 & 75.7 ± 0.5 & 82.7 ± 0.0 & 75.1 ± 5.2 & 88.6 ± 0.5 & 84.5 ± 0.6 \\
+ & UCI & 86.8 ± 1.0 & 60.2 ± 2.8 & 62.1 ± 1.3 & 55.2 ± 1.4 & 56.5 ± 0.5 & 72.5 ± 0.0 & 56.3 ± 1.0 & 80.2 ± 1.0 & 75.7 ± 0.5 \\
+ & MOOC & 83.1 ± 4.2 & 79.0 ± 4.5 & 87.4 ± 1.9 & 79.9 ± 0.8 & 68.8 ± 1.6 & 59.8 ± 0.0 & 68.4 ± 1.4 & 70.3 ± 1.2 & 80.0 ± 9.0 \\
+ & Wiki. & 81.5 ± 0.4 & 78.3 ± 0.4 & 83.7 ± 0.6 & 82.9 ± 0.3 & 71.3 ± 0.8 & 77.2 ± 0.0 & 84.6 ± 0.5 & 87.3 ± 0.3 & 79.8 ± 1.6 \\
+ & LastFM & 76.3 ± 0.8 & 69.0 ± 1.4 & 79.2 ± 2.7 & 65.2 ± 0.9 & 66.3 ± 0.3 & 78.0 ± 0.0 & 62.5 ± 6.4 & 59.9 ± 1.4 & 78.2 ± 0.6 \\
+ & Myket & 64.4 ± 2.2 & 64.1 ± 2.9 & 61.2 ± 2.6 & 57.8 ± 0.5 & 33.5 ± 0.4 & 52.6 ± 0.0 & 58.2 ± 2.2 & 59.8 ± 0.4 & 33.8 ± 0.9 \\
+ & Social & 92.1 ± 1.9 & 92.2 ± 0.7 & 92.2 ± 2.6 & 92.5 ± 0.5 & 86.5 ± 0.0 & 84.9 ± 0.0 & 94.7 ± 0.5 & 94.6 ± 0.2 & 97.3 ± 0.1 \\
+ & Reddit & 80.6 ± 0.1 & 79.5 ± 0.8 & 80.4 ± 0.4 & 78.6 ± 0.7 & 80.2 ± 0.3 & 78.6 ± 0.0 & 76.2 ± 0.4 & 77.1 ± 0.4 & 80.2 ± 1.1 \\
+\cline{1-11}
+\multirow[c]{8}{*}{Pred.} & Enron & 77.4 ± 3.6 & 73.5 ± 2.4 & 68.0 ± 2.9 & 58.7 ± 1.2 & 66.4 ± 0.4 & 79.8 ± 0.0 & 67.6 ± 5.5 & 81.3 ± 0.8 & 76.4 ± 0.5 \\
+ & UCI & 83.3 ± 1.4 & 51.4 ± 7.8 & 63.0 ± 1.3 & 59.6 ± 1.5 & 58.2 ± 0.6 & 69.1 ± 0.0 & 60.0 ± 0.9 & 80.6 ± 0.8 & 76.2 ± 0.6 \\
+ & MOOC & 84.8 ± 3.1 & 80.7 ± 3.2 & 88.5 ± 1.6 & 82.3 ± 0.6 & 70.4 ± 1.3 & 61.9 ± 0.0 & 72.6 ± 0.6 & 74.4 ± 1.4 & 81.2 ± 8.9 \\
+ & Wiki. & 81.8 ± 0.4 & 78.4 ± 0.4 & 84.1 ± 0.6 & 83.5 ± 0.2 & 71.6 ± 0.8 & 77.1 ± 0.0 & 85.2 ± 0.5 & 87.8 ± 0.3 & 80.0 ± 1.6 \\
+ & LastFM & 78.0 ± 0.7 & 71.7 ± 1.1 & 80.7 ± 2.4 & 68.4 ± 0.7 & 68.1 ± 0.3 & 78.2 ± 0.0 & 64.3 ± 6.1 & 65.9 ± 1.7 & 78.9 ± 0.6 \\
+ & Myket & 64.0 ± 2.1 & 64.2 ± 2.7 & 61.1 ± 2.6 & 57.6 ± 0.4 & 32.5 ± 0.4 & 51.9 ± 0.0 & 58.4 ± 2.0 & 59.5 ± 0.4 & 32.8 ± 1.0 \\
+ & Social & 91.4 ± 2.1 & 92.7 ± 0.5 & 91.7 ± 3.3 & 92.6 ± 0.5 & 87.7 ± 0.1 & 85.8 ± 0.0 & 95.2 ± 0.2 & 94.1 ± 0.2 & 97.3 ± 0.1 \\
+ & Reddit & 80.6 ± 0.1 & 79.5 ± 0.8 & 80.4 ± 0.4 & 78.7 ± 0.6 & 80.2 ± 0.3 & 78.6 ± 0.0 & 76.2 ± 0.4 & 77.1 ± 0.4 & 80.2 ± 1.1 \\
+\bottomrule
+\end{tabular}
+\end{scriptsize}
+\end{table}
+
+\begin{table}[h]
+\caption{
+Average AUC-ROC performance over five runs for the test set of the discrete-time datasets from \cite{BetterEvaluationDynamic2022poursafaei,BetterDynamicGraph2023yu}, including standard deviation.}
+\label{tab:disc_auc_std}
+\centering
+\begin{scriptsize}
+\begin{tabular}{lllllllllll}
+\toprule
+Eval & Dataset & JODIE & DyRep & TGN & TGAT & CAWN & EdgeBank & TCL & GraphMixer & DyGFormer \\
+\midrule
+\multirow[c]{6}{*}{Forec.} & UN V. & 54.0 ± 1.8 & 52.2 ± 2.0 & 51.3 ± 7.1 & 54.4 ± 3.6 & 53.7 ± 2.1 & 89.6 ± 0.0 & 53.4 ± 1.0 & 56.9 ± 1.6 & 65.2 ± 1.1 \\
+ & US L. & 52.5 ± 1.8 & 61.8 ± 3.5 & 57.7 ± 1.8 & 78.6 ± 7.9 & 82.0 ± 4.0 & 68.4 ± 0.0 & 75.4 ± 5.3 & 90.4 ± 1.5 & 89.4 ± 0.9 \\
+ & UN Tr. & 57.7 ± 3.3 & 50.3 ± 1.4 & 54.3 ± 1.5 & 64.1 ± 1.3 & 67.6 ± 1.2 & 85.6 ± 0.0 & 63.7 ± 1.6 & 68.6 ± 2.6 & 70.7 ± 2.6 \\
+ & Can. P. & 63.6 ± 0.8 & 67.5 ± 8.5 & 73.2 ± 1.1 & 72.7 ± 2.2 & 70.0 ± 1.4 & 63.2 ± 0.0 & 69.5 ± 3.1 & 80.7 ± 0.9 & 85.5 ± 3.5 \\
+ & Flights & 67.4 ± 2.0 & 66.0 ± 1.9 & 68.1 ± 1.7 & 72.6 ± 0.2 & 65.2 ± 1.8 & 74.6 ± 0.0 & 70.6 ± 0.1 & 70.7 ± 0.3 & 68.6 ± 1.3 \\
+ & Cont. & 95.6 ± 0.8 & 94.9 ± 0.3 & 96.6 ± 0.3 & 95.9 ± 0.2 & 86.7 ± 0.1 & 93.0 ± 0.0 & 95.7 ± 0.5 & 95.2 ± 0.2 & 97.7 ± 0.0 \\
+\cline{1-11}
+\multirow[c]{6}{*}{Pred.} & UN V. & 73.7 ± 2.4 & 72.6 ± 1.5 & 70.3 ± 4.3 & 52.8 ± 3.6 & 50.1 ± 1.6 & 89.5 ± 0.0 & 53.0 ± 1.6 & 56.2 ± 2.0 & 63.0 ± 1.1 \\
+ & US L. & 56.3 ± 1.9 & 79.9 ± 1.1 & 84.0 ± 2.2 & 78.5 ± 7.8 & 81.8 ± 4.0 & 67.5 ± 0.0 & 75.6 ± 5.4 & 90.2 ± 1.6 & 89.4 ± 0.9 \\
+ & UN Tr. & 66.1 ± 3.0 & 63.2 ± 2.1 & 63.1 ± 1.2 & 61.7 ± 1.3 & 64.7 ± 1.3 & 86.4 ± 0.0 & 60.9 ± 1.3 & 66.3 ± 2.5 & 68.3 ± 2.3 \\
+ & Can. P. & 63.9 ± 0.7 & 66.6 ± 2.5 & 73.4 ± 3.5 & 71.6 ± 2.6 & 68.0 ± 1.0 & 62.9 ± 0.0 & 68.2 ± 3.6 & 81.2 ± 1.0 & 97.7 ± 0.7 \\
+ & Flights & 69.5 ± 2.2 & 69.0 ± 1.0 & 68.8 ± 1.6 & 72.6 ± 0.2 & 65.0 ± 1.4 & 74.6 ± 0.0 & 70.6 ± 0.1 & 70.7 ± 0.3 & 68.9 ± 1.1 \\
+ & Cont. & 95.5 ± 0.6 & 95.4 ± 0.2 & 96.1 ± 0.8 & 95.4 ± 0.3 & 83.3 ± 0.0 & 92.2 ± 0.0 & 94.1 ± 0.8 & 94.1 ± 0.2 & 97.1 ± 0.0 \\
+\bottomrule
+\end{tabular}
+\end{scriptsize}
+\end{table}
+
+\subsection*{Average precision}
+
+\begin{table}[h]
+    \centering
+    \begin{tiny}
+    \caption{Mean average precision performance for dynamic link forecasting (window-based) over five runs for the continuous-time datasets. Values in parenthesis show the relative change as compared to the average precision performance for dynamic link prediction (batch-based).}
+    \label{tab:my_label2}
+\begin{tabular}{l|lllllllll|l}
+\toprule
+Dataset & JODIE & DyRep & TGN & TGAT & CAWN & EdgeBank & TCL & GraphMixer & DyGFormer & $\mu \pm \sigma$ \\
+\midrule
+Enron & 80.8(\color{custom3} $\uparrow$12.0\%\textcolor{black}{)} & 78.3(\color{custom3} $\uparrow$12.4\%\textcolor{black}{)} & 68.6(\color{custom3} $\uparrow$5.0\%\textcolor{black}{)} & 71.7(\color{custom3} $\uparrow$13.5\%\textcolor{black}{)} & 76.0(\color{custom3} $\uparrow$15.1\%\textcolor{black}{)} & 81.1(\color{custom3} $\uparrow$5.5\%\textcolor{black}{)} & 78.2(\color{custom3} $\uparrow$11.3\%\textcolor{black}{)} & 89.8(\color{custom3} $\uparrow$9.2\%\textcolor{black}{)} & 85.3(\color{custom3} $\uparrow$11.6\%\textcolor{black}{)} & 10.6\%±3.4\% \\
+UCI & 87.0(\color{custom3} $\uparrow$7.2\%\textcolor{black}{)} & 59.5(\color{custom3} $\uparrow$21.4\%\textcolor{black}{)} & 69.2(\color{custom4} $\downarrow$2.8\%\textcolor{black}{)} & 64.4(\color{custom4} $\downarrow$6.2\%\textcolor{black}{)} & 64.0(\color{custom4} $\downarrow$1.6\%\textcolor{black}{)} & 68.6(\color{custom3} $\uparrow$5.4\%\textcolor{black}{)} & 65.2(\color{custom4} $\downarrow$5.5\%\textcolor{black}{)} & 85.3(\color{custom4} $\downarrow$0.6\%\textcolor{black}{)} & 80.5(\color{custom4} $\downarrow$0.2\%\textcolor{black}{)} & 5.7\%±6.4\% \\
+MOOC & 82.4(\color{custom4} $\downarrow$1.1\%\textcolor{black}{)} & 76.9(\color{custom4} $\downarrow$0.3\%\textcolor{black}{)} & 86.3(\color{custom4} $\downarrow$0.8\%\textcolor{black}{)} & 82.7(\color{custom4} $\downarrow$2.1\%\textcolor{black}{)} & 72.3(\color{custom4} $\downarrow$1.7\%\textcolor{black}{)} & 59.1(\color{custom4} $\downarrow$2.7\%\textcolor{black}{)} & 74.9(\color{custom4} $\downarrow$4.6\%\textcolor{black}{)} & 74.4(\color{custom4} $\downarrow$4.5\%\textcolor{black}{)} & 82.1(\color{custom4} $\downarrow$0.4\%\textcolor{black}{)} & 2.0\%±1.6\% \\
+Wiki. & 84.1(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 80.9(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 88.5(\color{custom4} $\downarrow$0.4\%\textcolor{black}{)} & 87.5(\color{custom4} $\downarrow$0.4\%\textcolor{black}{)} & 75.1(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 73.3(\color{custom3} $\uparrow$0.2\%\textcolor{black}{)} & 89.2(\color{custom4} $\downarrow$0.4\%\textcolor{black}{)} & 90.8(\color{custom4} $\downarrow$0.4\%\textcolor{black}{)} & 83.1(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 0.2\%±0.2\% \\
+LastFM & 76.7(\color{custom4} $\downarrow$1.1\%\textcolor{black}{)} & 69.4(\color{custom4} $\downarrow$2.7\%\textcolor{black}{)} & 78.8(\color{custom4} $\downarrow$1.9\%\textcolor{black}{)} & 72.1(\color{custom4} $\downarrow$3.9\%\textcolor{black}{)} & 68.2(\color{custom4} $\downarrow$2.3\%\textcolor{black}{)} & 73.4(\color{custom3} $\uparrow$0.3\%\textcolor{black}{)} & 70.3(\color{custom4} $\downarrow$1.8\%\textcolor{black}{)} & 70.0(\color{custom4} $\downarrow$5.4\%\textcolor{black}{)} & 80.5(\color{custom4} $\downarrow$0.7\%\textcolor{black}{)} & 2.2\%±1.6\% \\
+Myket & 64.5(\color{custom3} $\uparrow$1.6\%\textcolor{black}{)} & 63.1(\color{custom3} $\uparrow$0.9\%\textcolor{black}{)} & 62.8(\color{custom3} $\uparrow$1.2\%\textcolor{black}{)} & 57.9(\color{custom3} $\uparrow$1.4\%\textcolor{black}{)} & 46.6(\color{custom3} $\uparrow$3.3\%\textcolor{black}{)} & 51.9(\color{custom3} $\uparrow$1.3\%\textcolor{black}{)} & 58.9(\color{custom3} $\uparrow$1.1\%\textcolor{black}{)} & 60.0(\color{custom3} $\uparrow$1.5\%\textcolor{black}{)} & 46.1(\color{custom3} $\uparrow$3.3\%\textcolor{black}{)} & 1.7\%±0.9\% \\
+Social & 89.4(\color{custom3} $\uparrow$1.2\%\textcolor{black}{)} & 91.9(\color{custom3} $\uparrow$0.3\%\textcolor{black}{)} & 93.9(\color{custom3} $\uparrow$0.8\%\textcolor{black}{)} & 95.0(\color{custom3} $\uparrow$0.2\%\textcolor{black}{)} & 85.6(\color{custom4} $\downarrow$0.6\%\textcolor{black}{)} & 79.7(\color{custom4} $\downarrow$1.1\%\textcolor{black}{)} & 96.1(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 95.8(\color{custom3} $\uparrow$0.4\%\textcolor{black}{)} & 97.7(\color{custom3} $\uparrow$0.3\%\textcolor{black}{)} & 0.6\%±0.4\% \\
+Reddit & 80.1(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 79.2(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 80.6(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 78.6(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 81.3(\color{custom3} $\uparrow$0.2\%\textcolor{black}{)} & 73.5(\color{custom4} $\downarrow$0.2\%\textcolor{black}{)} & 76.5(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 77.5(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 82.8(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 0.1\%±0.1\% \\
+\midrule
+$\mu \pm \sigma$ & 3.0\%±4.3\% & 4.8\%±7.9\% & 1.6\%±1.6\% & 3.5\%±4.6\% & 3.1\%±5.0\% & 2.1\%±2.2\% & 3.1\%±3.9\% & 2.8\%±3.3\% & 2.1\%±4.0\% & \\
+\bottomrule
+\end{tabular}
+\end{tiny}
+\end{table}
+
+\begin{table}[h]
+    \centering
+    \begin{tiny}
+    \caption{Mean average precision performance for dynamic link forecasting (window-based) over five runs for the discrete-time datasets. Values in parenthesis show the relative change as compared to the average precision performance for dynamic link prediction (batch-based).}
+    \label{tab:my_label3}
+\begin{tabular}{l|lllllllll|l}
+\toprule
+Dataset & JODIE & DyRep & TGN & TGAT & CAWN & EdgeBank & TCL & GraphMixer & DyGFormer & $\mu \pm \sigma$ \\
+\midrule
+UN V. & 52.6(\color{custom4} $\downarrow$22.4\%\textcolor{black}{)} & 49.6(\color{custom4} $\downarrow$26.8\%\textcolor{black}{)} & 49.7(\color{custom4} $\downarrow$24.8\%\textcolor{black}{)} & 52.7(\color{custom3} $\uparrow$0.9\%\textcolor{black}{)} & 52.4(\color{custom3} $\uparrow$3.4\%\textcolor{black}{)} & 84.2(\color{custom4} $\downarrow$0.7\%\textcolor{black}{)} & 52.4(\color{custom4} $\downarrow$1.7\%\textcolor{black}{)} & 54.0(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 62.4(\color{custom3} $\uparrow$4.0\%\textcolor{black}{)} & 9.4\%±11.6\% \\
+US L. & 46.0(\color{custom4} $\downarrow$4.5\%\textcolor{black}{)} & 62.5(\color{custom4} $\downarrow$14.5\%\textcolor{black}{)} & 58.6(\color{custom4} $\downarrow$27.8\%\textcolor{black}{)} & 71.0(\color{custom4} $\downarrow$0.3\%\textcolor{black}{)} & 80.7(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 63.2(\color{custom4} $\downarrow$0.2\%\textcolor{black}{)} & 77.5(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 86.5(\color{custom3} $\uparrow$0.6\%\textcolor{black}{)} & 86.1(\color{custom3} $\uparrow$0.4\%\textcolor{black}{)} & 5.4\%±9.6\% \\
+UN Tr. & 52.7(\color{custom4} $\downarrow$10.6\%\textcolor{black}{)} & 49.4(\color{custom4} $\downarrow$16.6\%\textcolor{black}{)} & 53.2(\color{custom4} $\downarrow$9.7\%\textcolor{black}{)} & 59.1(\color{custom3} $\uparrow$2.0\%\textcolor{black}{)} & 59.2(\color{custom3} $\uparrow$2.4\%\textcolor{black}{)} & 79.0(\color{custom4} $\downarrow$2.6\%\textcolor{black}{)} & 57.5(\color{custom3} $\uparrow$2.3\%\textcolor{black}{)} & 65.8(\color{custom3} $\uparrow$3.3\%\textcolor{black}{)} & 67.1(\color{custom3} $\uparrow$4.4\%\textcolor{black}{)} & 6.0\%±5.1\% \\
+Can. P. & 52.1(\color{custom4} $\downarrow$1.3\%\textcolor{black}{)} & 61.0(\color{custom4} $\downarrow$1.3\%\textcolor{black}{)} & 69.9(\color{custom3} $\uparrow$2.0\%\textcolor{black}{)} & 70.8(\color{custom3} $\uparrow$4.5\%\textcolor{black}{)} & 68.3(\color{custom3} $\uparrow$6.9\%\textcolor{black}{)} & 59.4(\color{custom4} $\downarrow$6.8\%\textcolor{black}{)} & 68.2(\color{custom3} $\uparrow$6.2\%\textcolor{black}{)} & 80.9(\color{custom3} $\uparrow$4.9\%\textcolor{black}{)} & 83.2(\color{custom4} $\downarrow$14.3\%\textcolor{black}{)} & 5.4\%±4.0\% \\
+Flights & 65.2(\color{custom4} $\downarrow$2.2\%\textcolor{black}{)} & 63.9(\color{custom4} $\downarrow$4.3\%\textcolor{black}{)} & 68.3(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 73.5(\color{custom3} $\uparrow$1.1\%\textcolor{black}{)} & 64.7(\color{custom3} $\uparrow$1.3\%\textcolor{black}{)} & 70.4(\color{custom4} $\downarrow$0.2\%\textcolor{black}{)} & 71.0(\color{custom3} $\uparrow$0.4\%\textcolor{black}{)} & 71.9(\color{custom3} $\uparrow$1.0\%\textcolor{black}{)} & 68.9(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 1.2\%±1.4\% \\
+Cont. & 94.0(\color{custom4} $\downarrow$0.2\%\textcolor{black}{)} & 95.8(\color{custom3} $\uparrow$0.4\%\textcolor{black}{)} & 97.0(\color{custom3} $\uparrow$0.8\%\textcolor{black}{)} & 96.8(\color{custom3} $\uparrow$0.8\%\textcolor{black}{)} & 88.2(\color{custom3} $\uparrow$4.4\%\textcolor{black}{)} & 89.4(\color{custom3} $\uparrow$0.6\%\textcolor{black}{)} & 96.6(\color{custom3} $\uparrow$2.1\%\textcolor{black}{)} & 95.7(\color{custom3} $\uparrow$1.6\%\textcolor{black}{)} & 98.3(\color{custom3} $\uparrow$0.6\%\textcolor{black}{)} & 1.3\%±1.3\% \\
+\midrule
+$\mu \pm \sigma$ & 6.9\%±8.5\% & 10.6\%±10.4\% & 10.8\%±12.5\% & 1.6\%±1.5\% & 3.1\%±2.4\% & 1.8\%±2.6\% & 2.1\%±2.2\% & 1.9\%±1.8\% & 4.0\%±5.4\% & \\
+\bottomrule
+\end{tabular}
+\end{tiny}
+\end{table}
+
+\begin{table}[h]
+\caption{
+Mean average precision performance over five runs for the test set of the continuous-time datasets from \cite{BetterEvaluationDynamic2022poursafaei,BetterDynamicGraph2023yu}, including standard deviations.}
+\label{tab:cont_ap_std}
+\centering
+\begin{scriptsize}
+\begin{tabular}{ll|lllllllll}
+\toprule
+Eval & Dataset & JODIE & DyRep & TGN & TGAT & CAWN & EdgeBank & TCL & GraphMixer & DyGFormer \\
+\midrule
+\multirow[c]{8}{*}{Forec.} & Enron & 80.8 ± 5.3 & 78.3 ± 2.3 & 68.6 ± 5.6 & 71.7 ± 1.2 & 76.0 ± 0.7 & 81.1 ± 0.0 & 78.2 ± 2.9 & 89.8 ± 0.4 & 85.3 ± 0.6 \\
+ & UCI & 87.0 ± 1.9 & 59.5 ± 2.3 & 69.2 ± 1.0 & 64.4 ± 1.1 & 64.0 ± 0.7 & 68.6 ± 0.0 & 65.2 ± 0.9 & 85.3 ± 0.6 & 80.5 ± 0.9 \\
+ & MOOC & 82.4 ± 4.9 & 76.9 ± 4.3 & 86.3 ± 2.3 & 82.7 ± 0.7 & 72.3 ± 1.3 & 59.1 ± 0.0 & 74.9 ± 0.7 & 74.4 ± 0.6 & 82.1 ± 8.7 \\
+ & Wiki. & 84.1 ± 0.5 & 80.9 ± 0.4 & 88.5 ± 0.4 & 87.5 ± 0.2 & 75.1 ± 1.0 & 73.3 ± 0.0 & 89.2 ± 0.3 & 90.8 ± 0.2 & 83.1 ± 1.2 \\
+ & LastFM & 76.7 ± 0.6 & 69.4 ± 1.8 & 78.8 ± 3.5 & 72.1 ± 0.8 & 68.2 ± 0.5 & 73.4 ± 0.0 & 70.3 ± 6.5 & 70.0 ± 1.1 & 80.5 ± 0.9 \\
+ & Myket & 64.5 ± 1.8 & 63.1 ± 1.5 & 62.8 ± 2.2 & 57.9 ± 0.4 & 46.6 ± 0.2 & 51.9 ± 0.0 & 58.9 ± 2.6 & 60.0 ± 0.2 & 46.1 ± 1.7 \\
+ & Social & 89.4 ± 4.7 & 91.9 ± 1.0 & 93.9 ± 1.7 & 95.0 ± 0.3 & 85.6 ± 0.1 & 79.7 ± 0.0 & 96.1 ± 0.4 & 95.8 ± 0.2 & 97.7 ± 0.1 \\
+ & Reddit & 80.1 ± 0.3 & 79.2 ± 0.9 & 80.6 ± 0.6 & 78.6 ± 1.0 & 81.3 ± 0.4 & 73.5 ± 0.0 & 76.5 ± 0.6 & 77.5 ± 0.5 & 82.8 ± 0.8 \\
+\cline{1-11}
+\multirow[c]{8}{*}{Pred.} & Enron & 72.1 ± 3.0 & 69.7 ± 3.7 & 65.3 ± 3.2 & 63.2 ± 0.5 & 66.0 ± 0.5 & 76.9 ± 0.0 & 70.2 ± 3.4 & 82.3 ± 0.6 & 76.4 ± 0.4 \\
+ & UCI & 81.1 ± 3.3 & 49.0 ± 4.5 & 71.2 ± 1.1 & 68.6 ± 1.1 & 65.1 ± 0.6 & 65.0 ± 0.0 & 69.0 ± 0.8 & 85.9 ± 0.5 & 80.7 ± 1.1 \\
+ & MOOC & 83.4 ± 4.3 & 77.1 ± 3.8 & 87.0 ± 2.1 & 84.5 ± 0.7 & 73.5 ± 1.0 & 60.7 ± 0.0 & 78.5 ± 0.5 & 77.9 ± 0.8 & 82.4 ± 9.3 \\
+ & Wiki. & 84.1 ± 0.5 & 80.9 ± 0.3 & 88.8 ± 0.3 & 87.9 ± 0.2 & 75.0 ± 1.2 & 73.1 ± 0.0 & 89.5 ± 0.3 & 91.2 ± 0.2 & 83.1 ± 1.1 \\
+ & LastFM & 77.6 ± 0.6 & 71.4 ± 1.7 & 80.3 ± 3.2 & 75.0 ± 0.7 & 69.8 ± 0.5 & 73.2 ± 0.0 & 71.6 ± 6.1 & 74.1 ± 1.3 & 81.1 ± 0.9 \\
+ & Myket & 63.4 ± 1.7 & 62.5 ± 1.4 & 62.1 ± 2.3 & 57.1 ± 0.4 & 45.1 ± 0.2 & 51.3 ± 0.0 & 58.3 ± 2.2 & 59.1 ± 0.2 & 44.7 ± 1.6 \\
+ & Social & 88.3 ± 4.8 & 91.6 ± 0.7 & 93.2 ± 2.4 & 94.8 ± 0.3 & 86.2 ± 0.2 & 80.6 ± 0.0 & 96.2 ± 0.2 & 95.4 ± 0.1 & 97.3 ± 0.1 \\
+ & Reddit & 80.1 ± 0.3 & 79.2 ± 0.9 & 80.5 ± 0.5 & 78.6 ± 1.0 & 81.1 ± 0.4 & 73.7 ± 0.0 & 76.5 ± 0.6 & 77.5 ± 0.5 & 82.7 ± 0.8 \\
+\bottomrule
+\end{tabular}
+
+\end{scriptsize}
+\end{table}
+
+\begin{table}[h]
+\caption{
+Mean average precision performance over five runs for the test set of the discrete-time datasets from \cite{BetterEvaluationDynamic2022poursafaei,BetterDynamicGraph2023yu}, including standard deviations.}
+\label{tab:disc_ap_std}
+\centering
+\begin{scriptsize}
+\begin{tabular}{ll|lllllllll}
+\toprule
+Eval & Dataset & JODIE & DyRep & TGN & TGAT & CAWN & EdgeBank & TCL & GraphMixer & DyGFormer \\
+\midrule
+\multirow[c]{6}{*}{Forec.} & UN V. & 52.6 ± 1.8 & 49.6 ± 1.9 & 49.7 ± 3.9 & 52.7 ± 2.6 & 52.4 ± 2.0 & 84.2 ± 0.0 & 52.4 ± 0.9 & 54.0 ± 1.4 & 62.4 ± 1.7 \\
+ & US L. & 46.0 ± 0.9 & 62.5 ± 3.6 & 58.6 ± 2.4 & 71.0 ± 8.9 & 80.7 ± 3.7 & 63.2 ± 0.0 & 77.5 ± 4.3 & 86.5 ± 1.9 & 86.1 ± 1.0 \\
+ & UN Tr. & 52.7 ± 3.0 & 49.4 ± 0.9 & 53.2 ± 1.5 & 59.1 ± 2.7 & 59.2 ± 1.7 & 79.0 ± 0.0 & 57.5 ± 1.9 & 65.8 ± 1.9 & 67.1 ± 2.7 \\
+ & Can. P. & 52.1 ± 0.5 & 61.0 ± 7.6 & 69.9 ± 0.8 & 70.8 ± 1.6 & 68.3 ± 2.3 & 59.4 ± 0.0 & 68.2 ± 1.6 & 80.9 ± 0.5 & 83.2 ± 2.9 \\
+ & Flights & 65.2 ± 2.7 & 63.9 ± 2.8 & 68.3 ± 2.2 & 73.5 ± 0.3 & 64.7 ± 0.9 & 70.4 ± 0.0 & 71.0 ± 0.4 & 71.9 ± 0.8 & 68.9 ± 2.0 \\
+ & Cont. & 94.0 ± 2.6 & 95.8 ± 0.4 & 97.0 ± 0.5 & 96.8 ± 0.2 & 88.2 ± 0.2 & 89.4 ± 0.0 & 96.6 ± 0.4 & 95.7 ± 0.2 & 98.3 ± 0.0 \\
+\cline{1-11}
+\multirow[c]{6}{*}{Pred.} & UN V. & 67.8 ± 1.9 & 67.8 ± 1.7 & 66.1 ± 3.9 & 52.3 ± 2.5 & 50.7 ± 1.4 & 84.8 ± 0.0 & 53.3 ± 1.3 & 53.9 ± 1.7 & 60.0 ± 1.4 \\
+ & US L. & 48.2 ± 1.0 & 73.1 ± 2.2 & 81.2 ± 2.1 & 71.2 ± 8.2 & 80.8 ± 3.5 & 63.3 ± 0.0 & 77.4 ± 4.5 & 86.0 ± 2.0 & 85.8 ± 1.0 \\
+ & UN Tr. & 58.9 ± 3.1 & 59.3 ± 1.8 & 58.9 ± 1.5 & 57.9 ± 2.4 & 57.9 ± 2.1 & 81.1 ± 0.0 & 56.2 ± 1.5 & 63.8 ± 1.6 & 64.3 ± 2.2 \\
+ & Can. P. & 52.8 ± 0.5 & 61.8 ± 1.1 & 68.5 ± 2.1 & 67.7 ± 1.6 & 63.9 ± 1.3 & 63.8 ± 0.0 & 64.2 ± 2.0 & 77.1 ± 0.4 & 97.1 ± 0.7 \\
+ & Flights & 66.7 ± 3.3 & 66.8 ± 1.6 & 68.3 ± 1.8 & 72.7 ± 0.2 & 63.9 ± 0.9 & 70.5 ± 0.0 & 70.8 ± 0.5 & 71.2 ± 0.7 & 68.9 ± 1.8 \\
+ & Cont. & 94.2 ± 1.3 & 95.5 ± 0.3 & 96.3 ± 1.1 & 96.0 ± 0.3 & 84.5 ± 0.2 & 88.8 ± 0.0 & 94.6 ± 0.8 & 94.2 ± 0.1 & 97.7 ± 0.1 \\
+\bottomrule
+\end{tabular}
+\end{scriptsize}
+\end{table}
+
+\clearpage
+
+
+
+\section{Global performance scores}
+
+
+The results presented in \Cref{tab:performance_diff_cont} and \Cref{tab:performance_diff_disc} assign the individual scores of each time window the same weight and then compute the mean over all scores to get the final score.
+This score measures the model performance across time, i.e.\ it is equally important for a model to perform well in periods that only have a few edge occurrences as well as in periods where many edges occur. 
+In some scenarios, the focus might not be to forecast the existence of edges in all time windows equally well but instead forecast for all edges equally well.
+In the following, we investigate the model performance of link forecasting compared to link prediction using this perspective of model performance.
+
+The results are presented in \Cref{tab:forecasting_cont_weighted} for continuous-time temporal graphs and in \Cref{tab:forecasting_discr_weighted} for discrete-time temporal graphs (corresponding average precision in \Cref{tab:AP_weighted_cont} and \Cref{tab:AP_weighted_discr}).
+In contrast to the results presented in the main part of this work, the scores are computed over all edges instead of per time window and then averaged.
+As we can see, the changes between link forecasting and link prediction are less expressed if every edge is weighted the same instead of every time window.
+Nevertheless, we can still observe the patterns discussed above although not as distinct.
+
+\begin{table}[ht]
+  \caption{
+    Test AUC-ROC scores for link forecasting and the relative change compared to link prediction for continuous-time graphs on the \emph{same trained models} (standard deviations in \Cref{tab:res_weighted_AUC_cont}). We compute the AUC-ROC score over all edges instead of per time window or batch as in \Cref{tab:performance_diff_cont}. The last row/column provides mean $\mu$ and standard deviation $\sigma$ of the absolute relative change per column/row.}
+  \label{tab:forecasting_cont_weighted}
+  \centering
+  \begin{tiny}
+\begin{tabular}{l|lllllllll|l}
+\toprule
+Dataset & JODIE & DyRep & TGN & TGAT & CAWN & EdgeBank & TCL & GraphMixer & DyGFormer & $\mu \pm \sigma$ \\
+\midrule
+Enron & 76.8(\color{custom3} $\uparrow$1.1\%\textcolor{black}{)} & 73.4(\color{custom3} $\uparrow$0.2\%\textcolor{black}{)} & 68.4(\color{custom3} $\uparrow$0.2\%\textcolor{black}{)} & 58.9(\color{custom3} $\uparrow$0.2\%\textcolor{black}{)} & 66.7(\color{custom3} $\uparrow$0.5\%\textcolor{black}{)} & 78.5(\color{custom4} $\downarrow$1.6\%\textcolor{black}{)} & 68.0(\color{custom3} $\uparrow$0.5\%\textcolor{black}{)} & 81.1(\color{custom3} $\uparrow$0.8\%\textcolor{black}{)} & 76.8(\color{custom3} $\uparrow$0.5\%\textcolor{black}{)} & 0.6\%±0.5\% \\
+UCI & 85.4(\color{custom3} $\uparrow$3.5\%\textcolor{black}{)} & 60.7(\color{custom3} $\uparrow$18.1\%\textcolor{black}{)} & 64.0(\color{custom3} $\uparrow$1.5\%\textcolor{black}{)} & 59.5(\color{custom4} $\downarrow$0.2\%\textcolor{black}{)} & 57.9(\color{custom4} $\downarrow$0.5\%\textcolor{black}{)} & 71.3(\color{custom3} $\uparrow$3.1\%\textcolor{black}{)} & 59.9(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 80.5(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 76.4(\color{custom3} $\uparrow$0.2\%\textcolor{black}{)} & 3.0\%±5.8\% \\
+MOOC & 83.9(\color{custom4} $\downarrow$0.9\%\textcolor{black}{)} & 79.5(\color{custom4} $\downarrow$1.3\%\textcolor{black}{)} & 88.1(\color{custom4} $\downarrow$0.5\%\textcolor{black}{)} & 82.2(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 70.5(\color{custom3} $\uparrow$0.2\%\textcolor{black}{)} & 59.9(\color{custom4} $\downarrow$3.2\%\textcolor{black}{)} & 72.3(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 74.2(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 81.0(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 0.7\%±1.0\% \\
+Wiki. & 81.6(\color{custom4} $\downarrow$0.2\%\textcolor{black}{)} & 78.3(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 84.1(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 83.4(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 71.6(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 77.3(\color{custom3} $\uparrow$0.3\%\textcolor{black}{)} & 85.1(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 87.7(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 80.2(\color{custom3} $\uparrow$0.2\%\textcolor{black}{)} & 0.1\%±0.1\% \\
+LastFM & 76.6(\color{custom4} $\downarrow$0.6\%\textcolor{black}{)} & 70.2(\color{custom4} $\downarrow$1.4\%\textcolor{black}{)} & 78.2(\color{custom4} $\downarrow$0.3\%\textcolor{black}{)} & 68.5(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 68.0(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 78.0(\color{custom4} $\downarrow$0.2\%\textcolor{black}{)} & 64.3(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 66.1(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 78.9(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 0.3\%±0.5\% \\
+Myket & 64.0(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 64.0(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 60.7(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 57.4(\color{custom4} $\downarrow$0.3\%\textcolor{black}{)} & 32.6(\color{custom3} $\uparrow$0.3\%\textcolor{black}{)} & 52.0(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 58.4(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 59.4(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 32.9(\color{custom3} $\uparrow$0.3\%\textcolor{black}{)} & 0.1\%±0.1\% \\
+Social & 90.4(\color{custom4} $\downarrow$0.6\%\textcolor{black}{)} & 91.1(\color{custom4} $\downarrow$1.4\%\textcolor{black}{)} & 91.5(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 92.7(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 87.8(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 86.0(\color{custom3} $\uparrow$0.2\%\textcolor{black}{)} & 95.3(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 94.1(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 97.5(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 0.3\%±0.5\% \\
+Reddit & 80.5(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 79.5(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 80.3(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 78.6(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 80.2(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 78.5(\color{custom4} $\downarrow$0.2\%\textcolor{black}{)} & 76.2(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 77.1(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 80.1(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 0.1\%±0.1\% \\
+\midrule
+$\mu \pm \sigma$ & 0.9\%±1.1\% & 2.8\%±6.2\% & 0.4\%±0.5\% & 0.1\%±0.1\% & 0.2\%±0.2\% & 1.1\%±1.4\% & 0.1\%±0.2\% & 0.1\%±0.3\% & 0.1\%±0.2\% & \\
+\bottomrule
+\end{tabular}
+\end{tiny}
+\end{table}
+
+\begin{table}[ht]
+    \centering
+    \caption{Test AUC-ROC scores for discrete-time temporal graphs as in \Cref{tab:forecasting_cont_weighted}. All results with standard deviations are listed in \Cref{tab:res_weighted_AUC_discr}.}\label{tab:forecasting_discr_weighted}
+    \begin{tiny}
+\begin{tabular}{l|lllllllll|l}
+\toprule
+Dataset & JODIE & DyRep & TGN & TGAT & CAWN & EdgeBank & TCL & GraphMixer & DyGFormer & $\mu \pm \sigma$ \\
+\midrule
+UN V. & 56.3(\color{custom4} $\downarrow$25.5\%\textcolor{black}{)} & 53.3(\color{custom4} $\downarrow$28.7\%\textcolor{black}{)} & 52.0(\color{custom4} $\downarrow$25.9\%\textcolor{black}{)} & 54.3(\color{custom3} $\uparrow$2.8\%\textcolor{black}{)} & 53.8(\color{custom3} $\uparrow$7.4\%\textcolor{black}{)} & 89.7(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 53.4(\color{custom3} $\uparrow$0.7\%\textcolor{black}{)} & 57.1(\color{custom3} $\uparrow$1.4\%\textcolor{black}{)} & 63.9(\color{custom3} $\uparrow$3.2\%\textcolor{black}{)} & 10.6\%±12.3\% \\
+US L. & 52.5(\color{custom4} $\downarrow$7.1\%\textcolor{black}{)} & 61.8(\color{custom4} $\downarrow$22.1\%\textcolor{black}{)} & 57.7(\color{custom4} $\downarrow$31.2\%\textcolor{black}{)} & 78.6(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 82.0(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 68.4(\color{custom3} $\uparrow$1.3\%\textcolor{black}{)} & 75.4(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 90.4(\color{custom3} $\uparrow$0.3\%\textcolor{black}{)} & 89.4(\color{custom3} $\uparrow$0.2\%\textcolor{black}{)} & 6.9\%±11.6\% \\
+UN Tr. & 57.6(\color{custom4} $\downarrow$13.1\%\textcolor{black}{)} & 50.4(\color{custom4} $\downarrow$20.3\%\textcolor{black}{)} & 54.4(\color{custom4} $\downarrow$14.0\%\textcolor{black}{)} & 64.1(\color{custom3} $\uparrow$3.9\%\textcolor{black}{)} & 67.6(\color{custom3} $\uparrow$4.6\%\textcolor{black}{)} & 85.6(\color{custom4} $\downarrow$1.0\%\textcolor{black}{)} & 63.7(\color{custom3} $\uparrow$4.5\%\textcolor{black}{)} & 68.6(\color{custom3} $\uparrow$3.4\%\textcolor{black}{)} & 70.7(\color{custom3} $\uparrow$3.5\%\textcolor{black}{)} & 7.6\%±6.5\% \\
+Can. P. & 64.0(\color{custom3} $\uparrow$0.5\%\textcolor{black}{)} & 64.6(\color{custom4} $\downarrow$3.2\%\textcolor{black}{)} & 72.7(\color{custom4} $\downarrow$1.4\%\textcolor{black}{)} & 72.3(\color{custom3} $\uparrow$0.5\%\textcolor{black}{)} & 68.1(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 61.5(\color{custom4} $\downarrow$2.6\%\textcolor{black}{)} & 68.3(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 81.7(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 83.7(\color{custom4} $\downarrow$14.3\%\textcolor{black}{)} & 2.5\%±4.6\% \\
+Flights & 67.3(\color{custom4} $\downarrow$3.0\%\textcolor{black}{)} & 65.6(\color{custom4} $\downarrow$4.7\%\textcolor{black}{)} & 68.1(\color{custom4} $\downarrow$1.0\%\textcolor{black}{)} & 72.6(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 65.2(\color{custom3} $\uparrow$0.3\%\textcolor{black}{)} & 74.6(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 70.5(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 70.6(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 68.5(\color{custom4} $\downarrow$0.5\%\textcolor{black}{)} & 1.1\%±1.7\% \\
+Cont. & 93.3(\color{custom4} $\downarrow$1.0\%\textcolor{black}{)} & 94.1(\color{custom4} $\downarrow$1.4\%\textcolor{black}{)} & 95.6(\color{custom4} $\downarrow$0.5\%\textcolor{black}{)} & 95.3(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 83.4(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 92.2(\color{black} 0.0\%\textcolor{black}{)} & 94.7(\color{custom3} $\uparrow$0.5\%\textcolor{black}{)} & 93.7(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 97.2(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 0.4\%±0.5\% \\
+\midrule
+$\mu \pm \sigma$ & 8.4\%±9.6\% & 13.4\%±11.7\% & 12.3\%±13.6\% & 1.2\%±1.7\% & 2.1\%±3.2\% & 0.8\%±1.0\% & 1.0\%±1.7\% & 0.9\%±1.3\% & 3.6\%±5.5\% & \\
+\bottomrule
+\end{tabular}
+    \end{tiny}
+\end{table}
+
+\begin{table}[ht]
+    \centering
+    \caption{Test AUC-ROC scores for link forecasting and link prediction averaged over 5 runs with standard deviations on continuous-time temporal graphs.}
+    \label{tab:res_weighted_AUC_cont}
+    \begin{scriptsize}
+\begin{tabular}{ll|lllllllll}
+\toprule
+Eval & Dataset & JODIE & DyRep & TGN & TGAT & CAWN & EdgeBank & TCL & GraphMixer & DyGFormer \\
+\midrule
+\multirow[c]{8}{*}{Forec.} & Enron & 76.8 ± 3.9 & 73.4 ± 2.7 & 68.4 ± 3.4 & 58.9 ± 1.3 & 66.7 ± 0.5 & 78.5 ± 0.0 & 68.0 ± 5.7 & 81.1 ± 0.8 & 76.8 ± 0.5 \\
+ & UCI & 85.4 ± 1.0 & 60.7 ± 2.7 & 64.0 ± 1.1 & 59.5 ± 1.5 & 57.9 ± 0.6 & 71.3 ± 0.0 & 59.9 ± 0.8 & 80.5 ± 0.8 & 76.4 ± 0.5 \\
+ & MOOC & 83.9 ± 3.4 & 79.5 ± 4.1 & 88.1 ± 2.0 & 82.2 ± 0.6 & 70.5 ± 1.2 & 59.9 ± 0.0 & 72.3 ± 0.6 & 74.2 ± 1.4 & 81.0 ± 9.0 \\
+ & Wiki. & 81.6 ± 0.4 & 78.3 ± 0.4 & 84.1 ± 0.6 & 83.4 ± 0.2 & 71.6 ± 0.8 & 77.3 ± 0.0 & 85.1 ± 0.5 & 87.7 ± 0.3 & 80.2 ± 1.6 \\
+ & LastFM & 76.6 ± 0.5 & 70.2 ± 1.2 & 78.2 ± 3.0 & 68.5 ± 0.8 & 68.0 ± 0.3 & 78.0 ± 0.0 & 64.3 ± 6.0 & 66.1 ± 1.7 & 78.9 ± 0.6 \\
+ & Myket & 64.0 ± 2.1 & 64.0 ± 2.7 & 60.7 ± 2.3 & 57.4 ± 0.5 & 32.6 ± 0.4 & 52.0 ± 0.0 & 58.4 ± 2.0 & 59.4 ± 0.4 & 32.9 ± 1.0 \\
+ & Social & 90.4 ± 2.6 & 91.1 ± 1.0 & 91.5 ± 3.3 & 92.7 ± 0.5 & 87.8 ± 0.1 & 86.0 ± 0.0 & 95.3 ± 0.2 & 94.1 ± 0.2 & 97.5 ± 0.1 \\
+ & Reddit & 80.5 ± 0.2 & 79.5 ± 0.8 & 80.3 ± 0.4 & 78.6 ± 0.7 & 80.2 ± 0.3 & 78.5 ± 0.0 & 76.2 ± 0.4 & 77.1 ± 0.5 & 80.1 ± 1.1 \\
+\cline{1-11}
+\multirow[c]{8}{*}{Pred.} & Enron & 76.0 ± 3.0 & 73.2 ± 2.3 & 68.3 ± 2.9 & 58.8 ± 1.2 & 66.4 ± 0.4 & 79.8 ± 0.0 & 67.6 ± 5.6 & 80.5 ± 0.8 & 76.4 ± 0.5 \\
+ & UCI & 82.5 ± 1.3 & 51.4 ± 7.7 & 63.0 ± 1.3 & 59.6 ± 1.5 & 58.2 ± 0.6 & 69.1 ± 0.0 & 60.0 ± 0.9 & 80.7 ± 0.8 & 76.2 ± 0.6 \\
+ & MOOC & 84.6 ± 3.1 & 80.5 ± 3.2 & 88.5 ± 1.6 & 82.1 ± 0.6 & 70.3 ± 1.3 & 61.9 ± 0.0 & 72.3 ± 0.6 & 74.1 ± 1.4 & 81.0 ± 9.0 \\
+ & Wiki. & 81.7 ± 0.4 & 78.4 ± 0.4 & 84.1 ± 0.6 & 83.4 ± 0.2 & 71.5 ± 0.8 & 77.1 ± 0.0 & 85.2 ± 0.5 & 87.8 ± 0.3 & 80.0 ± 1.6 \\
+ & LastFM & 77.1 ± 0.7 & 71.2 ± 1.1 & 78.4 ± 2.7 & 68.5 ± 0.7 & 68.1 ± 0.3 & 78.2 ± 0.0 & 64.3 ± 6.0 & 66.1 ± 1.7 & 78.9 ± 0.6 \\
+ & Myket & 63.9 ± 2.1 & 64.0 ± 2.7 & 60.8 ± 2.3 & 57.5 ± 0.4 & 32.5 ± 0.4 & 51.9 ± 0.0 & 58.4 ± 2.0 & 59.5 ± 0.4 & 32.8 ± 1.0 \\
+ & Social & 91.0 ± 2.4 & 92.4 ± 0.4 & 91.5 ± 3.5 & 92.7 ± 0.5 & 87.7 ± 0.1 & 85.8 ± 0.0 & 95.2 ± 0.2 & 94.1 ± 0.2 & 97.4 ± 0.1 \\
+ & Reddit & 80.6 ± 0.1 & 79.5 ± 0.8 & 80.4 ± 0.4 & 78.7 ± 0.6 & 80.2 ± 0.3 & 78.6 ± 0.0 & 76.2 ± 0.4 & 77.1 ± 0.5 & 80.2 ± 1.1 \\
+\bottomrule
+\end{tabular}
+\end{scriptsize}
+\end{table}
+
+\begin{table}[ht]
+    \centering
+    \caption{Test AUC-ROC scores for link forecasting and link prediction averaged over 5 runs with standard deviations on discrete-time temporal graphs.}
+    \label{tab:res_weighted_AUC_discr}
+\begin{scriptsize}
+\begin{tabular}{ll|lllllllll}
+\toprule
+Eval & Dataset & JODIE & DyRep & TGN & TGAT & CAWN & EdgeBank & TCL & GraphMixer & DyGFormer \\
+\midrule
+\multirow[c]{6}{*}{Forec.} & UN V. & 56.3 ± 1.4 & 53.3 ± 0.8 & 52.0 ± 7.2 & 54.3 ± 1.4 & 53.8 ± 2.1 & 89.7 ± 0.0 & 53.4 ± 1.1 & 57.1 ± 1.6 & 63.9 ± 1.7 \\
+ & US L. & 52.5 ± 1.8 & 61.8 ± 3.5 & 57.7 ± 1.8 & 78.6 ± 7.9 & 82.0 ± 4.0 & 68.4 ± 0.0 & 75.4 ± 5.3 & 90.4 ± 1.5 & 89.4 ± 0.9 \\
+ & UN Tr. & 57.6 ± 3.3 & 50.4 ± 1.2 & 54.4 ± 1.5 & 64.1 ± 1.3 & 67.6 ± 1.2 & 85.6 ± 0.0 & 63.7 ± 1.6 & 68.6 ± 2.6 & 70.7 ± 2.6 \\
+ & Can. P. & 64.0 ± 0.8 & 64.6 ± 7.5 & 72.7 ± 2.7 & 72.3 ± 2.6 & 68.1 ± 1.0 & 61.5 ± 0.0 & 68.3 ± 3.6 & 81.7 ± 0.9 & 83.7 ± 3.9 \\
+ & Flights & 67.3 ± 2.0 & 65.6 ± 1.8 & 68.1 ± 1.7 & 72.6 ± 0.2 & 65.2 ± 1.7 & 74.6 ± 0.0 & 70.5 ± 0.1 & 70.6 ± 0.3 & 68.5 ± 1.3 \\
+ & Cont. & 93.3 ± 1.9 & 94.1 ± 0.5 & 95.6 ± 0.5 & 95.3 ± 0.3 & 83.4 ± 0.1 & 92.2 ± 0.0 & 94.7 ± 0.5 & 93.7 ± 0.1 & 97.2 ± 0.0 \\
+\cline{1-11}
+\multirow[c]{6}{*}{Pred.} & UN V. & 75.6 ± 1.9 & 74.8 ± 1.2 & 70.2 ± 5.8 & 52.8 ± 1.6 & 50.1 ± 1.6 & 89.5 ± 0.0 & 53.0 ± 1.6 & 56.3 ± 2.0 & 61.9 ± 1.6 \\
+ & US L. & 56.5 ± 1.9 & 79.3 ± 1.0 & 84.0 ± 2.2 & 78.5 ± 7.8 & 81.9 ± 4.0 & 67.5 ± 0.0 & 75.4 ± 5.5 & 90.2 ± 1.5 & 89.3 ± 0.9 \\
+ & UN Tr. & 66.3 ± 3.0 & 63.2 ± 1.9 & 63.2 ± 1.2 & 61.7 ± 1.3 & 64.7 ± 1.3 & 86.4 ± 0.0 & 60.9 ± 1.3 & 66.3 ± 2.5 & 68.3 ± 2.3 \\
+ & Can. P. & 63.6 ± 0.7 & 66.8 ± 2.4 & 73.7 ± 3.5 & 72.0 ± 2.6 & 68.1 ± 1.0 & 63.1 ± 0.0 & 68.4 ± 3.6 & 81.6 ± 1.0 & 97.7 ± 0.6 \\
+ & Flights & 69.4 ± 2.3 & 68.9 ± 1.0 & 68.7 ± 1.6 & 72.6 ± 0.2 & 65.0 ± 1.4 & 74.6 ± 0.0 & 70.6 ± 0.1 & 70.7 ± 0.3 & 68.9 ± 1.1 \\
+ & Cont. & 94.3 ± 1.2 & 95.4 ± 0.3 & 96.1 ± 0.7 & 95.3 ± 0.3 & 83.3 ± 0.1 & 92.2 ± 0.0 & 94.3 ± 1.0 & 93.7 ± 0.1 & 97.3 ± 0.0 \\
+\cline{1-11}
+\bottomrule
+\end{tabular}
+\end{scriptsize}
+\end{table}
+
+\begin{table}
+    \centering
+    \caption{Average Precision scores computed as in \Cref{tab:forecasting_cont_weighted} for ROC-AUC scores on continuous-time temporal graphs. For a full list of results with standard deviations, see \Cref{tab:all_results_AP_weighted_cont}.}
+    \label{tab:AP_weighted_cont}
+    \begin{tiny}
+\begin{tabular}{l|lllllllll|l}
+\toprule
+Dataset & JODIE & DyRep & TGN & TGAT & CAWN & EdgeBank & TCL & GraphMixer & DyGFormer & $\mu \pm \sigma$ \\
+\midrule
+Enron & 69.8(\color{custom3} $\uparrow$1.1\%\textcolor{black}{)} & 68.2(\color{custom4} $\downarrow$0.4\%\textcolor{black}{)} & 65.3(\color{custom3} $\uparrow$0.5\%\textcolor{black}{)} & 62.7(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 66.8(\color{custom3} $\uparrow$0.4\%\textcolor{black}{)} & 75.7(\color{custom4} $\downarrow$1.2\%\textcolor{black}{)} & 70.7(\color{custom3} $\uparrow$0.9\%\textcolor{black}{)} & 81.5(\color{custom3} $\uparrow$1.2\%\textcolor{black}{)} & 77.1(\color{custom3} $\uparrow$0.8\%\textcolor{black}{)} & 0.7\%±0.4\% \\
+UCI & 85.1(\color{custom3} $\uparrow$6.8\%\textcolor{black}{)} & 56.6(\color{custom3} $\uparrow$18.1\%\textcolor{black}{)} & 71.9(\color{custom3} $\uparrow$0.4\%\textcolor{black}{)} & 69.0(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 65.6(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 66.9(\color{custom3} $\uparrow$3.1\%\textcolor{black}{)} & 69.6(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 85.9(\color{custom4} $\downarrow$0.2\%\textcolor{black}{)} & 81.2(\color{custom3} $\uparrow$0.2\%\textcolor{black}{)} & 3.2\%±6.0\% \\
+MOOC & 82.8(\color{custom4} $\downarrow$0.5\%\textcolor{black}{)} & 76.2(\color{custom4} $\downarrow$0.6\%\textcolor{black}{)} & 86.3(\color{custom4} $\downarrow$0.7\%\textcolor{black}{)} & 84.4(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 73.6(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 58.7(\color{custom4} $\downarrow$3.2\%\textcolor{black}{)} & 78.3(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 77.7(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 82.1(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 0.6\%±1.0\% \\
+Wiki. & 84.1(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 80.8(\color{custom3} $\uparrow$0.2\%\textcolor{black}{)} & 88.8(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 87.9(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 75.2(\color{custom3} $\uparrow$0.3\%\textcolor{black}{)} & 73.4(\color{custom3} $\uparrow$0.5\%\textcolor{black}{)} & 89.5(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 91.1(\color{black} 0.0\%\textcolor{black}{)} & 83.3(\color{custom3} $\uparrow$0.3\%\textcolor{black}{)} & 0.1\%±0.2\% \\
+LastFM & 76.4(\color{custom4} $\downarrow$1.9\%\textcolor{black}{)} & 70.3(\color{custom4} $\downarrow$2.5\%\textcolor{black}{)} & 78.5(\color{custom4} $\downarrow$0.7\%\textcolor{black}{)} & 76.0(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 72.2(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 73.0(\color{custom4} $\downarrow$0.2\%\textcolor{black}{)} & 72.5(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 75.1(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 82.1(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 0.6\%±1.0\% \\
+Myket & 63.1(\color{custom3} $\uparrow$0.4\%\textcolor{black}{)} & 61.7(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 61.3(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 56.4(\color{custom4} $\downarrow$0.3\%\textcolor{black}{)} & 44.8(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 51.1(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 57.6(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 58.7(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 44.4(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 0.1\%±0.2\% \\
+Social & 87.0(\color{custom4} $\downarrow$1.0\%\textcolor{black}{)} & 90.0(\color{custom4} $\downarrow$1.5\%\textcolor{black}{)} & 93.0(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 94.9(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 86.6(\color{custom3} $\uparrow$0.2\%\textcolor{black}{)} & 80.8(\color{custom3} $\uparrow$0.3\%\textcolor{black}{)} & 96.4(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 95.5(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 97.6(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 0.4\%±0.5\% \\
+Reddit & 79.7(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 78.9(\color{black} 0.0\%\textcolor{black}{)} & 80.3(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 78.3(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 81.0(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 73.4(\color{custom4} $\downarrow$0.2\%\textcolor{black}{)} & 76.3(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 77.2(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 82.6(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 0.1\%±0.1\% \\
+\midrule
+$\mu \pm \sigma$ & 1.5\%±2.2\% & 2.9\%±6.2\% & 0.3\%±0.3\% & 0.1\%±0.1\% & 0.1\%±0.2\% & 1.1\%±1.3\% & 0.1\%±0.3\% & 0.2\%±0.4\% & 0.2\%±0.3\% & \\
+\bottomrule
+\end{tabular}
+\end{tiny}
+\end{table}
+
+\begin{table}[ht]
+    \centering
+    \caption{Average Precision scores as in \Cref{tab:AP_weighted_cont} for discrete-time graphs. All results and standard deviations are listed in \Cref{tab:all_results_AP_weighted_discr}.}
+    \label{tab:AP_weighted_discr}
+    \begin{tiny}
+\begin{tabular}{l|lllllllll|l}
+\toprule
+Dataset & JODIE & DyRep & TGN & TGAT & CAWN & EdgeBank & TCL & GraphMixer & DyGFormer & $\mu \pm \sigma$ \\
+\midrule
+UN V. & 53.3(\color{custom4} $\downarrow$23.6\%\textcolor{black}{)} & 50.6(\color{custom4} $\downarrow$28.2\%\textcolor{black}{)} & 49.9(\color{custom4} $\downarrow$22.6\%\textcolor{black}{)} & 52.5(\color{custom3} $\uparrow$1.7\%\textcolor{black}{)} & 52.6(\color{custom3} $\uparrow$4.8\%\textcolor{black}{)} & 84.1(\color{custom4} $\downarrow$0.4\%\textcolor{black}{)} & 52.4(\color{custom4} $\downarrow$0.9\%\textcolor{black}{)} & 54.1(\color{custom3} $\uparrow$1.4\%\textcolor{black}{)} & 60.0(\color{custom3} $\uparrow$3.0\%\textcolor{black}{)} & 9.6\%±11.6\% \\
+US L. & 46.0(\color{custom4} $\downarrow$4.2\%\textcolor{black}{)} & 62.5(\color{custom4} $\downarrow$15.3\%\textcolor{black}{)} & 58.6(\color{custom4} $\downarrow$28.5\%\textcolor{black}{)} & 71.0(\color{custom3} $\uparrow$0.2\%\textcolor{black}{)} & 80.7(\color{custom3} $\uparrow$0.0\%\textcolor{black}{)} & 63.2(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 77.5(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 86.5(\color{custom3} $\uparrow$0.7\%\textcolor{black}{)} & 86.1(\color{custom3} $\uparrow$0.6\%\textcolor{black}{)} & 5.5\%±9.9\% \\
+UN Tr. & 52.8(\color{custom4} $\downarrow$10.0\%\textcolor{black}{)} & 49.6(\color{custom4} $\downarrow$15.7\%\textcolor{black}{)} & 53.3(\color{custom4} $\downarrow$9.6\%\textcolor{black}{)} & 59.1(\color{custom3} $\uparrow$3.0\%\textcolor{black}{)} & 59.2(\color{custom3} $\uparrow$3.3\%\textcolor{black}{)} & 79.0(\color{custom4} $\downarrow$2.5\%\textcolor{black}{)} & 57.5(\color{custom3} $\uparrow$3.5\%\textcolor{black}{)} & 65.8(\color{custom3} $\uparrow$2.7\%\textcolor{black}{)} & 67.1(\color{custom3} $\uparrow$3.3\%\textcolor{black}{)} & 6.0\%±4.7\% \\
+Can. P. & 52.3(\color{custom3} $\uparrow$0.4\%\textcolor{black}{)} & 59.9(\color{custom4} $\downarrow$6.4\%\textcolor{black}{)} & 69.7(\color{custom4} $\downarrow$2.5\%\textcolor{black}{)} & 70.5(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 66.6(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 58.0(\color{custom4} $\downarrow$2.8\%\textcolor{black}{)} & 67.0(\color{custom3} $\uparrow$0.1\%\textcolor{black}{)} & 81.4(\color{custom3} $\uparrow$0.2\%\textcolor{black}{)} & 82.2(\color{custom4} $\downarrow$16.1\%\textcolor{black}{)} & 3.2\%±5.3\% \\
+Flights & 65.2(\color{custom4} $\downarrow$2.3\%\textcolor{black}{)} & 63.4(\color{custom4} $\downarrow$5.3\%\textcolor{black}{)} & 68.3(\color{custom4} $\downarrow$0.8\%\textcolor{black}{)} & 73.5(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 64.7(\color{custom3} $\uparrow$0.7\%\textcolor{black}{)} & 70.3(\color{black} 0.0\%\textcolor{black}{)} & 71.0(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 71.9(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 68.8(\color{custom4} $\downarrow$0.6\%\textcolor{black}{)} & 1.1\%±1.7\% \\
+Cont. & 90.2(\color{custom4} $\downarrow$2.2\%\textcolor{black}{)} & 95.1(\color{custom4} $\downarrow$0.7\%\textcolor{black}{)} & 95.7(\color{custom4} $\downarrow$0.7\%\textcolor{black}{)} & 96.0(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 85.2(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 88.7(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 95.4(\color{custom3} $\uparrow$0.4\%\textcolor{black}{)} & 93.5(\color{custom4} $\downarrow$0.1\%\textcolor{black}{)} & 97.9(\color{custom4} $\downarrow$0.0\%\textcolor{black}{)} & 0.5\%±0.7\% \\
+\midrule
+$\mu \pm \sigma$ & 7.1\%±8.7\% & 11.9\%±9.9\% & 10.8\%±12.0\% & 0.8\%±1.2\% & 1.5\%±2.1\% & 1.0\%±1.3\% & 0.8\%±1.3\% & 0.8\%±1.0\% & 3.9\%±6.1\% & \\
+\bottomrule
+\end{tabular}
+\end{tiny}
+\end{table}
+
+\begin{table}[ht]
+    \centering
+    \caption{Test average precision scores for link forecasting and link prediction averaged over 5 runs with standard deviations on continuous-time temporal graphs.}
+    \label{tab:all_results_AP_weighted_cont}
+    \begin{scriptsize}
+    \begin{tabular}{ll|lllllllll}
+\toprule
+Eval & Dataset & JODIE & DyRep & TGN & TGAT & CAWN & EdgeBank & TCL & GraphMixer & DyGFormer \\
+\midrule
+\multirow[c]{8}{*}{Forec.} & Enron & 69.8 ± 3.6 & 68.2 ± 4.0 & 65.3 ± 2.8 & 62.7 ± 0.8 & 66.8 ± 0.5 & 75.7 ± 0.0 & 70.7 ± 3.7 & 81.5 ± 0.6 & 77.1 ± 0.7 \\
+ & UCI & 85.1 ± 1.8 & 56.6 ± 2.4 & 71.9 ± 0.9 & 69.0 ± 1.0 & 65.6 ± 0.7 & 66.9 ± 0.0 & 69.6 ± 0.8 & 85.9 ± 0.4 & 81.2 ± 0.9 \\
+ & MOOC & 82.8 ± 5.1 & 76.2 ± 4.3 & 86.3 ± 2.7 & 84.4 ± 0.7 & 73.6 ± 0.9 & 58.7 ± 0.0 & 78.3 ± 0.6 & 77.7 ± 0.7 & 82.1 ± 9.8 \\
+ & Wiki. & 84.1 ± 0.5 & 80.8 ± 0.3 & 88.8 ± 0.4 & 87.9 ± 0.2 & 75.2 ± 1.1 & 73.4 ± 0.0 & 89.5 ± 0.3 & 91.1 ± 0.2 & 83.3 ± 1.2 \\
+ & LastFM & 76.4 ± 0.5 & 70.3 ± 2.0 & 78.5 ± 3.9 & 76.0 ± 0.7 & 72.2 ± 0.4 & 73.0 ± 0.0 & 72.5 ± 5.9 & 75.1 ± 1.2 & 82.1 ± 0.8 \\
+ & Myket & 63.1 ± 1.8 & 61.7 ± 1.5 & 61.3 ± 2.1 & 56.4 ± 0.4 & 44.8 ± 0.3 & 51.1 ± 0.0 & 57.6 ± 2.3 & 58.7 ± 0.2 & 44.4 ± 1.7 \\
+ & Social & 87.0 ± 6.1 & 90.0 ± 1.4 & 93.0 ± 2.4 & 94.9 ± 0.3 & 86.6 ± 0.1 & 80.8 ± 0.0 & 96.4 ± 0.2 & 95.5 ± 0.2 & 97.6 ± 0.1 \\
+ & Reddit & 79.7 ± 0.4 & 78.9 ± 0.9 & 80.3 ± 0.6 & 78.3 ± 1.0 & 81.0 ± 0.5 & 73.4 ± 0.0 & 76.3 ± 0.6 & 77.2 ± 0.5 & 82.6 ± 0.8 \\
+\cline{1-11}
+\multirow[c]{8}{*}{Pred.} & Enron & 69.0 ± 2.1 & 68.5 ± 4.3 & 65.0 ± 3.9 & 62.6 ± 0.6 & 66.6 ± 0.5 & 76.7 ± 0.0 & 70.1 ± 3.6 & 80.5 ± 0.6 & 76.5 ± 0.6 \\
+ & UCI & 79.7 ± 3.0 & 48.0 ± 4.3 & 71.7 ± 1.1 & 69.1 ± 1.0 & 65.6 ± 0.7 & 64.9 ± 0.0 & 69.6 ± 0.8 & 86.0 ± 0.5 & 81.0 ± 1.0 \\
+ & MOOC & 83.2 ± 4.5 & 76.6 ± 4.0 & 86.9 ± 2.2 & 84.3 ± 0.7 & 73.5 ± 1.0 & 60.6 ± 0.0 & 78.3 ± 0.5 & 77.7 ± 0.7 & 82.1 ± 9.8 \\
+ & Wiki. & 84.1 ± 0.6 & 80.6 ± 0.3 & 88.8 ± 0.3 & 87.9 ± 0.2 & 75.0 ± 1.1 & 73.0 ± 0.0 & 89.5 ± 0.3 & 91.1 ± 0.2 & 83.1 ± 1.2 \\
+ & LastFM & 77.9 ± 0.7 & 72.1 ± 1.9 & 79.1 ± 3.1 & 76.0 ± 0.6 & 72.2 ± 0.4 & 73.1 ± 0.0 & 72.4 ± 5.9 & 75.1 ± 1.2 & 82.1 ± 0.8 \\
+ & Myket & 62.9 ± 1.8 & 61.7 ± 1.5 & 61.3 ± 2.1 & 56.6 ± 0.4 & 44.8 ± 0.3 & 51.1 ± 0.0 & 57.6 ± 2.2 & 58.7 ± 0.2 & 44.4 ± 1.7 \\
+ & Social & 87.8 ± 5.3 & 91.3 ± 0.8 & 93.0 ± 2.6 & 94.9 ± 0.3 & 86.4 ± 0.1 & 80.5 ± 0.0 & 96.3 ± 0.2 & 95.4 ± 0.1 & 97.6 ± 0.1 \\
+ & Reddit & 79.8 ± 0.4 & 78.9 ± 0.9 & 80.4 ± 0.6 & 78.4 ± 1.0 & 80.9 ± 0.5 & 73.6 ± 0.0 & 76.3 ± 0.6 & 77.2 ± 0.5 & 82.6 ± 0.8 \\
+\bottomrule
+\end{tabular}
+    \end{scriptsize}
+\end{table}
+
+\begin{table}[ht]
+    \centering
+    \caption{Test average precision scores for link forecasting and link prediction averaged over 5 runs with standard deviations on discrete-time temporal graphs.}
+    \label{tab:all_results_AP_weighted_discr}
+    \begin{scriptsize}
+\begin{tabular}{ll|lllllllll}
+\toprule
+Eval & Dataset & JODIE & DyRep & TGN & TGAT & CAWN & EdgeBank & TCL & GraphMixer & DyGFormer \\
+\midrule
+\multirow[c]{6}{*}{Forec.} & UN V. & 53.3 ± 1.2 & 50.6 ± 1.5 & 49.9 ± 4.4 & 52.5 ± 1.4 & 52.6 ± 1.9 & 84.1 ± 0.0 & 52.4 ± 0.9 & 54.1 ± 1.4 & 60.0 ± 2.0 \\
+ & US L. & 46.0 ± 0.9 & 62.5 ± 3.6 & 58.6 ± 2.4 & 71.0 ± 8.9 & 80.7 ± 3.7 & 63.2 ± 0.0 & 77.5 ± 4.3 & 86.5 ± 1.9 & 86.1 ± 1.0 \\
+ & UN Tr. & 52.8 ± 3.1 & 49.6 ± 0.8 & 53.3 ± 1.7 & 59.1 ± 2.7 & 59.2 ± 1.7 & 79.0 ± 0.0 & 57.5 ± 1.9 & 65.8 ± 1.9 & 67.1 ± 2.7 \\
+ & Can. P. & 52.3 ± 0.6 & 59.9 ± 6.5 & 69.7 ± 1.5 & 70.5 ± 1.8 & 66.6 ± 2.1 & 58.0 ± 0.0 & 67.0 ± 1.9 & 81.4 ± 0.5 & 82.2 ± 3.2 \\
+ & Flights & 65.2 ± 2.6 & 63.4 ± 2.6 & 68.3 ± 2.2 & 73.5 ± 0.3 & 64.7 ± 0.8 & 70.3 ± 0.0 & 71.0 ± 0.4 & 71.9 ± 0.8 & 68.8 ± 2.0 \\
+ & Cont. & 90.2 ± 5.2 & 95.1 ± 0.6 & 95.7 ± 1.0 & 96.0 ± 0.4 & 85.2 ± 0.2 & 88.7 ± 0.0 & 95.4 ± 0.6 & 93.5 ± 0.1 & 97.9 ± 0.1 \\
+\cline{1-11}
+\multirow[c]{6}{*}{Pred.} & UN V. & 69.7 ± 1.5 & 70.5 ± 1.1 & 64.4 ± 6.5 & 51.6 ± 1.3 & 50.2 ± 1.4 & 84.5 ± 0.0 & 52.9 ± 1.4 & 53.3 ± 1.7 & 58.2 ± 1.5 \\
+ & US L. & 48.0 ± 1.0 & 73.8 ± 2.4 & 81.9 ± 2.3 & 70.9 ± 8.7 & 80.7 ± 3.6 & 63.2 ± 0.0 & 77.6 ± 4.4 & 85.8 ± 2.0 & 85.6 ± 1.2 \\
+ & UN Tr. & 58.7 ± 3.7 & 58.9 ± 1.7 & 58.9 ± 1.5 & 57.4 ± 2.6 & 57.4 ± 2.3 & 81.0 ± 0.0 & 55.6 ± 1.5 & 64.1 ± 1.7 & 64.9 ± 2.6 \\
+ & Can. P. & 52.1 ± 0.4 & 64.0 ± 1.7 & 71.5 ± 1.8 & 70.4 ± 1.7 & 66.5 ± 2.4 & 59.7 ± 0.0 & 67.0 ± 1.9 & 81.2 ± 0.4 & 98.0 ± 0.5 \\
+ & Flights & 66.7 ± 3.6 & 66.9 ± 1.9 & 68.9 ± 2.0 & 73.5 ± 0.3 & 64.2 ± 1.0 & 70.3 ± 0.0 & 71.0 ± 0.4 & 71.9 ± 0.8 & 69.3 ± 2.0 \\
+ & Cont. & 92.2 ± 2.3 & 95.8 ± 0.4 & 96.4 ± 0.9 & 96.0 ± 0.4 & 85.2 ± 0.2 & 88.7 ± 0.0 & 95.0 ± 1.0 & 93.5 ± 0.1 & 98.0 ± 0.0 \\
+\cline{1-11}
+\bottomrule
+\end{tabular}
+\end{scriptsize}
+\end{table}
+
+\end{document}
+
+
+
+

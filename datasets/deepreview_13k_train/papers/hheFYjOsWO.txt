@@ -1,0 +1,348 @@
+\title{MC-MoE: Mixture Compressor for Mixture-of-Experts LLMs Gains More}
+
+\begin{abstract}
+
+Mixture-of-Experts large language models (MoE-LLMs) marks a significant step forward of language models, however, they encounter two critical challenges in practice: \textbf{1)} expert parameters lead to considerable memory consumption and loading latency; and \textbf{2)} the current activated experts are redundant, as many tokens may only require a single expert.
+Motivated by these issues, we investigate the MoE-LLMs and make two key observations: \textbf{a)} different experts exhibit varying behaviors on activation reconstruction error, routing scores, and activated frequencies, highlighting their differing importance, and \textbf{b)} not all tokens are equally important-- only a small subset is critical.
+Building on these insights, we propose \textbf{MC-MoE}, a training-free \textbf{M}ixture-\textbf{C}ompressor for \textbf{MoE}-LLMs, which leverages the significance of both experts and tokens to achieve an extreme compression.
+First, to mitigate storage and loading overheads, we introduce \emph{Pre-Loading Mixed-Precision Quantization (PMQ)}, which formulates the adaptive bit-width allocation as a Linear Programming (LP) problem, where the objective function balances multi-factors reflecting the importance of each expert. 
+Additionally, we develop \emph{Online Dynamic Pruning (ODP)}, which identifies important tokens to retain and dynamically select activated experts for other tokens during inference to optimize efficiency while maintaining performance.
+Our \textbf{MC-MoE} integrates static quantization and dynamic pruning to collaboratively achieve extreme compression for MoE-LLMs with less accuracy loss, ensuring an optimal trade-off between performance and efficiency.
+Extensive experiments confirm the effectiveness of our approach. For instance, at 2.54 bits, MC-MoE compresses 76.6\% of the model, with only a 3.8\% average accuracy loss. During dynamic inference, we further reduce activated parameters by 15\%, with a performance drop of less than 0.6\%. Remarkably, MC-MoE even surpasses floating-point 13b dense LLMs with significantly smaller parameter sizes, suggesting that mixture compression in MoE-LLMs has the potential to outperform both comparable and larger dense LLMs.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Mixture-of-Experts large language models (MoE-LLMs)~\citep{muennighoff2024olmoe,jiang2024mixtral,dai2024deepseekmoe} provide an efficient model-scaling mechanism by utilizing a sparse architecture, in which only a subset of experts is activated by router. This selective activation boosts computational efficiency and scalability by assigning experts dynamically based on the specific needs of each input. Despite reducing the number of active experts to improve inference efficiency, MoE models still face significant deployment challenges. All experts must be loaded into memory simultaneously, and typically at least two experts are activated during inference, resulting in considerable memory and computational overhead.  Even an NVIDIA A100-80GB GPU cannot accommodate typical MoE models like Mixtral 8$\times$7b~\citep{jiang2024mixtral} (Fig.~\ref{fig:1}(b)). The proposed challenges hinder the deployment of LLM with limited hardware resources which further promotes study on MoE-LLM compression for better deploying  model-scaling paradigm.
+
+
+
+The primary goal of compressing MoE-LLMs is to reduce the size of expert parameters, as they dominate the memory usage~\citep{li2024examining}. For instance, in models like Mixtral $8\times7$b, the number of expert parameters is 33 times greater than that of the attention modules. On the other hand, recent studies ~\citep{chi2022representation,lu2024not} have shown that due to the training strategies of MoE, not all experts are equally important, which indicates that both the static experts during the pre-loading phase and the dynamic experts during online inference need to be compressed. Previous expert compression methods have typically focused on compressing a single phase, such as quantizing expert weights during the pre-loading stage ~\citep{li2024examining} or pruning experts during the inference stage ~\citep{lu2024not,koishekenov2022memory,kim2021scalable}. Furthermore, vanilla uniform bit-width quantization and expert pruning based solely on routing scores struggle to maintain performance at extremely high compression ratios. Therefore, in this work, we are the first to explore extreme training-free mixture compression for MoE-LLMs, efficiently combining static expert quantization with dynamic expert pruning using a combination of expert importance metrics to achieve ultra-lightweight MoE-LLMs without significantly sacrificing performance.
+
+
+\begin{figure*}[!t]
+\centerline{\includegraphics[width=1\textwidth]{imgs/fig_1_5.pdf}}
+\caption{(a) MMLU (5-shot$\uparrow$) accuracy across different open-source LLMs with various activated parameters (dot-lines denote the quantized models, solid-lines are 16-bit models). To align quantized models' parameter size with 16-bit models, we define 16bits as one parameter (e.g. 8$\times$2-bit elements represent one parameter). (b) Comparison of total parameter size and inference activated parameter size on few open-source LLMs and compressed Mixtral 8$\times$7b.}
+\label{fig:1}
+\end{figure*}
+
+To this end, we propose the \textbf{MC-MoE}, \textit{i.e.}, \textbf{M}ixture-\textbf{C}ompressor for \textbf{MoE} LLMs, exploring the combined benefits of expert quantization and pruning. \textbf{MC-MoE} consists of two phases: \emph{Pre-Loading Mixed-Precision Quantization~(PMQ)} and \emph{Online Dynamic Pruning~(ODP)}, as shown in Fig.~\ref{fig:1}(a). In the pre-loading phase, we focus on extreme compression of the stored experts through low-bit quantization. Our empirical study reveals imbalances in activation reconstruction error, routing weights, and frequencies of activated expert (Sec.~\ref{sec:2.2.1} and Fig.~\ref{fig:3}), which inspires the allocation of different bit-widths to each expert. However, relying solely on the routing frequencies or scores is insufficient to accurately determine the optimal bit-width, as the two distributions may not be consistent but rather the opposite~\citep{li2024examining}. Therefore, we developed a weighted evaluation function that considers both the frequency and scores of expert activations, as well as the associated quantization loss at different bit-widths. This function is then minimized within a Linear Programming (LP) model to determine the optimal quantization configuration. Utilizing a training-free Post-training Quantization~(PTQ) approach, GPTQ~\citep{frantar2022gptq}, \emph{PMQ} achieves high-performance compression at extremely low bit-widths (1.5-bit$\sim$2.5-bit), and our mixed-precision strategy is compatible with other advanced quantization techniques~\citep{tseng2024quip,chen2024efficientqat,shao2023omniquant,egiazarian2024extreme,liao2024apiq}.
+As for inference phase, \emph{ODP} dynamically prunes low-confidence experts for each token based on the routing weights. Our pruning strategy follows two key principles: first, experts with significantly lower routing scores are categorized as "low confidence" and can be pruned~\citep{lu2024not}. Second, to prevent attention degradation that solely relies on routing weights, we protect important tokens by considering both attention scores and feature magnitudes. Experiments show that protecting only 2\% of the important tokens effectively mitigates pruning loss while maintaining nearly the same compression ratio.
+
+The proposed mixture compression of low bit-width experts improves performance compared to uniform quantized experts or other mixed-precision strategies, even surpassing float-point (FP) models with the same number of activated parameters. Moreover, when compressing Mixtral $8\times7$b to around 8b (2.54-bit), its activated parameters amounted to only 2b, while even outperforming 16-bit LLaMA2-13b by around 8\% on the MMLU (5-shot), as shown in Fig.~\ref{fig:1}(a). 
+Mixture compression exploits the disparities between MoE experts, for the first time enabling surpassing of smaller FP models of equivalent size under extreme compression without training. This achievement underscores the significant compression potential and practical utility of sparse MoE-LLMs.
+
+
+
+
+\section{Related Works}
+
+\textbf{Mixture-of-Experts LLMs.} LLMs have achieved significant advancements across various natural language processing domains~\citep{chang2024survey,zhao2023survey}. Despite their success, these models rely heavily on dense parameters, which presents significant challenges for deployment\citep{zhou2024survey,zhu2023survey}. Sparse activated MoE models have been identified as an essential strategy to enhance the cost-performance balance in LLMs. In MoE models, each layer is comprised of several experts, with each token activating only a specific subset, thereby significantly improving efficiency compared to dense models, which activate all parameters for every input~\citep{shazeer2017outrageously, yun2024toward}. Recent advancements in decoder-only LLMs~\citep{brown2020language} have further popularized MoE-based architectures~\citep{jiang2024mixtral,muennighoff2024olmoe}. Industry-leading models such as Mixtral $8\times7$b~\citep{jiang2024mixtral}, Deepseek-MoE~\citep{dai2024deepseekmoe}, and GPT-4~\citep{achiam2023gpt} also incorporate this technology. 
+
+\textbf{Quantization for LLMs}. Post-Training Quantization (PTQ) is an efficient method that requires no additional training, making it well-suited for large-scale LLMs~\citep{dettmers2022gpt3,frantar2022gptq,xiao2023smoothquant,shao2023omniquant,lin2024awq}. Previous studies have investigated the diverse salience of weights and proposed mixed-precision methods to improve low-bitwidth performance by allocating different bitwidths accordingly~\citep{dong2020hawq,huang2024slim,dettmers2023spqr,shang2023pb,huang2024billm}. Recent research introduced an expert-guided, block-wise mixed-precision benchmark for MoE-LLMs to address the disparities in expert weights~\citep{li2024examining}; however, developing more effective expert-wise quantization strategies remains a challenge. Codebook-based encoding approaches enable more precise quantization of LLMs and enhance post-quantization performance through fine-tuning~\citep{egiazarian2024extreme,tseng2024quip}. While Quantization Aware Training (QAT) requires significant resources~\citep{chen2024efficientqat, liu2023llm}, QAT-based retraining strategies or PTQ combined with additional fine-tuning~\citep{liao2024apiq, guo2023lq,huang2024good} are more effective in maintaining the performance of quantized lightweight LLMs.
+
+\textbf{Parameter pruning for LLMs}.
+Parameter pruning is another effective method for neural network compression~\citep{kwon2022fast,hubara2021accelerated}, and it has recently become crucial in reducing the size of LLM weights~\citep{frantar2023sparsegpt,sun2023simple}. Traditional pruning approaches focus on two main techniques: structured and unstructured pruning, both of which selectively zero out certain parameters based on their importance~\citep{zhou2024survey}. In MoE-LLMs, less important experts can be pruned based on activation frequencies or the statistical characteristics of gating~\citep{kim2021scalable, koishekenov2022memory, liu2024efficient}. During the model preloading stage, pruning tends to incur greater loss than quantization at the same compression rate. However, dynamically adjusting the quantization bit-width during inference remains a challenge, whereas pruning offers the flexibility to dynamically select activation parameters during inference~\citep{zhu2023survey}. Recent work by~\citep{lu2024not} has explored dynamically activating $top\mbox{-}k$ experts based on gating weights in MoE, significantly improving inference efficiency.
+
+\begin{figure*}[!t]
+\centerline{\includegraphics[width=1\textwidth]{imgs/fig_2.pdf}}
+\caption{The overview of our proposed MC-MoE pipeline with two stages compression for experts. (a) Framework of pre-loading static mixed-precision quantization (PMQ) of MoE-LLMs. PMQ determins the activated feature and loss sensitivity of all experts and plans the optimal precision configuration under ultra-low -bit-width. (b)  Schematic of online dynamic mixture pruning (ODP) of MoE-LLMs. ODP utilizes significant token protection mechanism with weigh-guided experts pruning, which only need to keep 2\% token to successfully safeguard the MoE performance.}
+\label{fig:2}
+\end{figure*}
+
+
+
+\section{Method}
+
+\textbf{Mixture-of-Experts LLM.} In decoder-only MoE-LLMs, conventional feed-forward networks (FFN) are replaced by MoE layer, each having $N$ experts~\citep{gale2023megablocks}. The MoE-LLMs selectively activates the $top\mbox{-}k$ experts for different tokens by a group of routing scores $\mathbf{w}_{top\mbox{-}k} = \{w_0, w_1,...,w_{k-1}\},~ k < N$, generated by a gating layer $\operatorname{G}(\mathbf{t})$. Fig.~\ref{fig:2}(a) illustrates the experts selection mechanism during the inference phase based on routing scores. Specifically, in the Mixtral $8\times7$b model, there are 8 experts and each token $\mathbf{t}$ is routed to the $top\mbox{-}2$ experts~\citep{jiang2024mixtral}. The output $y$ of each token in MoE layer is calculated as:
+\begin{equation}\label{eq:1}
+\mathbf{y} = \sum_{w_i \in Top\mbox{-}2\{\operatorname{G}(\mathbf{t})\}} w_i \operatorname{E}_i(\mathbf{t}),
+\end{equation}
+where $\operatorname{E}_i$ represents the feed-forward operator of the $i\mbox{-}th$ expert and $w_i$ is the routing weights/scores calculated by the gating $\operatorname{G}(\mathbf{t})$. Therefore, according to the definition in Eq~(\ref{eq:1}), the routing mechanism establishes the correspondence between tokens and experts. 
+\textbf{Quantization Technique.} Since the substantial memory overhead of MoE models mainly arises from the weights of its experts (over 96\% weights of the model), quantization is employed for the experts. Specifically, floating-point weights distributed in the interval $[\mathbf{W}_{min}, \mathbf{W}_{max}]$ are mapped to the integer range of $[0,1...,2^B]$, where $B$ represents the target bit-width, and the quantization reconstruction for the weights $\mathbf{W} \in R^{in\times out}$ can be defined as:
+\begin{equation}\label{eq:2}
+    \mathop{\arg\min}_{\ {\mathbf{W}^q}} \ \ \| \mathbf{W}\mathbf{X}-\mathbf{W}^q\mathbf{X} \|_2^2,
+\end{equation}
+where $\mathbf{W}^q$ denotes the quantized weight and $\|\cdot\|_2$ is the mean square error (MSE) loss. The primary objective of this study is to explore the optimal mixture compression strategy for MoE-LLMs. To this end, we employ the efficient PTQ scheme, GPTQ~\citep{frantar2022gptq}, as our foundational tool. By utilizing Hessian-based estimation ($\mathbf{H} = 2\mathbf{X}\mathbf{X}^\top$) and quantization error compensation, GPTQ effectively reduces the group-wise quantization error of weights, enabling the quantization of Mixtral $8\times7$b within 90 minutes.
+
+As outlined in Sec.~\ref{sec:pre}, the primary storage overhead of MoE-LLMs resides in the experts, necessitating compression before loading  onto devices. Mainstream LLM pruning suffers from performance degradation under extreme pruning conditions ($\geq$50\%)~\citep{frantar2023sparsegpt,sun2023simple,lu2024not}, whereas quantization has been demonstrated to achieve high levels of compression with lower performance drop~\citep{huang2024good,zhou2024survey}. Moreover, as shown in~\citep{li2024examining} and our Sec.~\ref{sec:3.1}, uniform bit-width quantization does not meet the extreme compression accuracy requirements for MoE-LLMs. Therefore, the diverse and uneven features of experts inspire us to explore the optimal mixed-precision quantization approaches.
+
+In this section, we introduce our \emph{Pre-Loading Mixed-Precision Quantization~(PMQ)} method, designed to effectively reduce the model size by applying targeted-experts quantization. The core focus of PMQ is optimizing the bit-width allocation strategy for experts. To this end, we begin by conducting a thorough analysis of experts' behavior on the calibration dataset and leverage this information to design an Integer Programming (IP) model that solves the optimal quantization configuration. For other components of the model, such as attention parameters, we apply the same bit-width.
+
+\begin{figure*}[!t]
+\centerline{\includegraphics[width=1\textwidth]{imgs/fig_3.pdf}}
+\caption{Distribution of expert drop F-norm (red), activated weights (green) and frequencies (blue) in the Mixtral $8\times7$b model, encompassing 32
+MoE layers with 8 experts per layer. The top set of the heatmap is calculated through C4 dataset, and the bottom set is calculated through MATH dataset. MoE-LLMs selectively activate top$\mbox{-}$2 experts in each MoE layer, wherein a significant portion of experts remain less important or inactivated all the time.}
+\label{fig:3}
+\end{figure*}
+
+The core principle of our expert quantization strategy is grounded in the significance of each expert, which enables the allocation of bit-widths according to their relative importance within a block. We initially observed the performance of different experts in Mixtral $8\times7$b in terms of expert-drop reconstruction loss (Frobenius norm)~\citep{he2017channel}, and activation features on the dataset C4~\citep{raffel2020exploring} and the specialized domain dataset Math~\citep{hendrycks2021measuring}. 
+As shown in Fig~\ref{fig:3}, the impact of experts on the model varies widely: 1) some experts, such as the one at position $[2,4]$, have minimal influence on the output activation reconstruction loss, while others in layer 2 exhibit significantly higher losses, highlighting the imbalance among MoE-LLMs' experts; 2) the activation scores and frequencies reveal distinct patterns, where experts at positions $[11,3]$ and $[12,7]$ show extremely low activation frequencies and average scores, while the expert at position $[1,3]$ has low scores but comparatively high activation frequencies; and 3) in task-specific contexts like mathematics (MATH), MoE activates fewer experts, resulting in a strong sparser distribution than general text datasets. This variability in routing feature inspires the need to consider multiple factors in determining the optimal bit-width allocation for experts.
+
+We mainly measure the significance of each expert through two critical factors: access frequency and activation weight. 
+Given an $N$-sized calibration dataset C4 (general language understanding dataset), we first perform inference on the original 16-bit MoE-LLMs to compute these factors. For each expert, access frequency refers to the rate at which the expert is activated, defined as the number of activations divided by the dataset size. Thus, $i$-th expert's access frequency is $\phi_i = \frac{n_i}{N}$, where $n_i$ is this expert's total activated number. A higher activation frequency indicates that the expert is triggered more often, suggesting its generality and applicability across a wide range of tokens, thereby signifying higher importance. However, access frequency alone overlooks the potential significance of experts who are rarely activated.
+To account for this, we introduce the activation-weighted metric, which sums the routing weights assigned to each expert during inference. This metric for $i$-th expert can be denoted as $w_i = \frac{\sum_{j=1}^{N}{\sigma_j}}{N}$, where $\sigma_j$ is the expert's routing weight in the $j$-th inference. This provides a finer-grained measure of an expert’s contribution in MoE-LLMs, capturing its relative importance beyond mere frequencies. By combining these two metrics, we achieve a more nuanced assessment of expert significance. The final expert significance is computed as $\phi_i^{\alpha} \cdot w_i^{\beta}$, where $\alpha$ and $\beta$ are hyperparameters used to balance the two factors.
+After obtaining the expert significance, we proceed to explore how to leverage this significance for mixed-precision quantization. The core idea is to assign different bit-widths to each expert based on its importance, preserving the contributions of more significant experts with higher bit-widths while applying more aggressive quantization to less significant experts. In addition to considering expert significance, we evaluate the reconstruction error of output activations in each MoE layer post-quantization, which allows us to quantify the impact of individually quantizing each expert. Specifically, for a given expert, we compute the Frobenius norm (F-norm) between the output of the model when this expert is quantized and the output when no quantization is applied to any experts. 
+\begin{equation}
+\epsilon_{i,j} = \| \mathscr{F}(\theta) - \mathscr{F}(\theta[e_i \rightarrow Q(e_i, j)]) \|_F,
+\end{equation}
+where $\mathscr{F}(\theta)$ is the model output with full parameters $\theta$, and $\mathscr{F}(\theta[e_i \rightarrow Q(e_i, j)])$ represents the output when only expert $e_i$ is quantized to $j$ bits. $Q(\cdot )$ denotes the quantization function.
+
+Our goal is to ensure that the extremely-low average bit-width across all experts in a MoE block equals a targeted value $k$, with bit-width options restricted to $\{1, 2, 3\}$-bit. To achieve this, we formulate the problem as an Integer Programming (IP) optimization, which only takes a second to finish the bit-width allocation computing. The IP model is defined as:
+
+\begin{small}
+\begin{equation}\label{eq:4}
+\begin{aligned}
+\textsc{Minimize} \quad & \sum_{i=1}^{n} \sum_{j=1}^{3} \phi_i^{\alpha} \cdot w_i^{\beta} \cdot (\epsilon_{i,j} \cdot x_{ij})^{\gamma} \\
+\textsc{Subject to} \quad & \sum_{i=1}^{n} \sum_{j=1}^{3} j \cdot x_{ij} = n\cdot k, \quad \sum_{j=1}^{3} x_{ij} = 1, \quad \forall i, \\
+& \sum_{i=1}^{n} x_{i3} \geq 1, \quad \sum_{i=1}^{n} x_{i2} \geq 1, \quad x_{ij} \in \{0, 1\}, \quad \forall i, j.
+\end{aligned}
+\end{equation}
+\end{small}
+
+Here, $x_{ij}$ is a binary variable indicating whether the $i$-th expert is quantized to $j$ bits ($x_{ij} = 1$ if true, $x_{ij} = 0$ otherwise). To preserve the accuracy of key experts, we enforce a constraint that at least one expert must be quantized to $3$ bits and at least one expert to $2$ bits. $\gamma$ is a weighting hyperparameter. After determining the optimal bit-width combination for each MoE Block expert, we apply the GPTQ quantization algorithm to quantize the experts accordingly. For the remaining weights in the attention or gating module, considering their extremely small parameter size, we quantize them to 4-bit, resulting in an introduced average bit-width of no more than 0.05 bits.
+
+
+\begin{figure*}[!t]
+\centerline{\includegraphics[width=1\textwidth]{imgs/fig_4.pdf}}
+\caption{Typical attention map of block 15, head 4 in Mixtral $8\times7$b under different dynamic pruning process. The middle with out pruning shows that attention, in a column-wise manner, highlighted several tokens with high scores, such as token 31 and token 67. However, after undergoing traditional weight-only pruning through block 14 layers, experts pruned at the position of token 67, resulting in a decay in the attention map. Through attention-aware pruning based on token importance, block 14 protected token 67, thereby avoiding attention decay in the subsequent layer.}
+\label{fig:4}
+\end{figure*}
+
+Our \emph{PMQ} strategy compresses the storage memory of experts during the pre-loading phase; however, the selection of the $top\mbox{-}k$ experts during inference still incurs high computational costs. As discussed in~\citet{lu2024not}, not all tokens require $k$ experts for inference. Moreover, quantization, as a static compression strategy, struggles to transform the precision of experts during inference. 
+To optimize efficiency while
+maintaining performance during inference, in this section, we introduce the \emph{Online Dynamic Pruning~(ODP)} technique, which identifies important tokens to retain and dynamically selects
+activated experts for other tokens.
+
+To effectively perform dynamic experts pruning, an intuitive and efficient method involves utilizing the $top\mbox{-}k$ experts' routing scores during inference~\citep{lu2024not,huang2023towards}. This approach directly skips experts with lower routing weights among selected set for each token. For simplicity, when $k = 2$ (as in Mixtral $8\times7$b), the pruning process follows:
+\begin{equation}\label{eq:5}
+\{w_0 = 0, w_1 = 1,  w_0, w_1 \in Top\mbox{-}2\{\operatorname{G}(\mathbf{t})\} \mid \frac{w_1}{w_0} < \mu \}
+\end{equation}
+
+$w_0$ and $w_1$ denote the $top\mbox{-}2$ experts, respectively, with $\mu$ erving as a hyperparameter threshold for each MoE layer. This threshold is set at the median value of \( \frac{w_1}{w_0} \) derived from calibration data \citep{lu2024not}. According to Eq.~(\ref{eq:5}), when a selected expert has a notably low weight, it is feasible to be pruned for the current token, thus retaining only the primary expert for computation. Sec.~\ref{sec:3.2} documents that employing this weight-based dynamic pruning strategy reduces computational demands by 15\%, but also incurs a performance decrease of approximately 10\%. Further examination reveals that this decline is due to an "attention decay" effect, which is evident in Fig.~\ref{fig:4}. Specifically, unpruned conditions show a pronounced vertical pattern in the attention map of block 15, head 4, at token 67 (Fig.~\ref{fig:4}, middle). However, the application of weight-only pruning in block 14 results in the elimination of one expert for token 67, leading to a significant reduction in the attention map score at token 67 in block 15 (Fig.~\ref{fig:4}, left). This effect is herein defined as "attention decay."
+Weight-only pruning considers only the routing weights of experts, but overlooks the intrinsic importance of tokens. However, the output capabilities of LLMs are often influenced by a few critical tokens~\citep{zhang2024h2o,guo2024attention,nrusimha2024mitigating}, and considering weights alone, as illustrated in Fig.~\ref{fig:4}, can lead to the pruning of experts corresponding to salient tokens. To circumvent the issue of attention decay, we introduce a simple but effective method that safeguards the computational experts of the most critical tokens in dynamic inputs from being pruned. Inspired by~\citep{guo2024attention}, we introduce an evaluation metric for token importance:
+\begin{equation}\label{eq:6}
+I_j = \| \mathbf{t}_j \|_1 \cdot \frac{\sum_{ j\leq i \leq L} {\mathbf{A}_{j, i}}}{L-j}
+\end{equation}
+where $I_j$ denotes the importance of the $i\mbox{-}th$ token, $\| \cdot \|_1$ is the ${\ell _1}$ norm, and the total length of input tokens is $L$. $\mathbf{A}$ represents the attention map in an LLM block, calculated from $\mathbf{A} = \operatorname{softmax}(\frac{K^\top Q}{\sqrt{d_k}})$ of this layer. Considering the co-effects of token magnitude and attention socres, Eq.~\ref{eq:6} flexibly combines these two factors to accurately define the importance of each token.
+
+As demonstrated in Fig.~\ref{fig:4}, right, introducing important token protection into weight-only pruning effectively mitigates attention decay issues. Due to the high importance parameter \(I_{67}\) of token 67, all experts are preserved for computing token 67 in block 14, thereby preserving the expected distribution in the attention map of block 15 for token 67. Experiments in Sec.~\ref{sec:3.2} indicate that selectively protecting merely 2\% of important tokens can significantly reduce performance losses in MoE-LLMs, while still maintaining a computational efficiency improvement of approximately 15\%.
+
+
+
+
+\section{Experiment}
+
+In this section, a series of experiments are conducted to evaluate the proposed \textbf{MC-MoE}. We present by describing the models selected, datasets, quantization methods, and experimental parameter settings. In Sec.~\ref{sec:3.1}, we assess the parameter settings for the PMQ method and the performance of mixture quantization. We conduct a detailed evaluation of the performance loss and compression efficiency of ODP stage, shown in Sec.~\ref{sec:3.2}. Finally, we present the combined performance of static quantization and dynamic pruning in MoE-LLMs.
+
+\begin{wraptable}{r}{7cm}
+\caption{Selected MoE-LLMs and model configurations. Size: the total parameter size, Act Size: activated parameter size per-token; B: decoder block number, H: hidden dimension, E: expert number.}
+	\centering
+    \small
+         \setlength{\tabcolsep}{1.7mm}{
+     \begin{tabular}{lrcccc}\\\toprule 
+        \textbf{Model} & \textbf{Size} & \textbf{Act Size} & \textbf{B} & \textbf{H} & \textbf{E}\\
+        \hline%第二道横线 
+        Mixtral $8\times7$b& 49b & 13b & 32 & 4096 & 8\\
+        Mixtral $8\times22$b& 141b & 39b & 56 & 6144 & 8\\
+  
+        \hline%第二道横线 
+        \hline%第一道横线
+        \end{tabular}}
+        \label{tab:model}
+\end{wraptable}
+
+\textbf{Experiment Setup.} 
+The mixed-precision factors of experts are calibrated from C4~\citep{raffel2020exploring} dataset, with 128 sets of random sequences, each 2048 tokens long. After determining the bit-width configuration, the final quantization process follows the GPTQ~\citep{frantar2022gptq} procedure. We select the open-source Mixtral $8\times7$b  and Mixtral $8\times22$b as our target models, shown in Tab.~\ref{tab:model}. Mixtral $8\times7$b can be compressed on two NVIDIA A100-80GB GPUs, while Mixtral $8\times22$b is completed on four NVIDIA A100-80GB GPUs. 
+
+Other None-MoE layers are set to 4-bit. Due to the significant size of expert weights, the 4-bit quantization of other parameters has minimal impact on the average bit-width. In the performance experiments for the proposed \textbf{MC-MoE}, perplexity (PPL$\downarrow$) was chosen as the metric to evaluate token prediction capabilities, primarily deploying the general text dataset WikiText2. To comprehensively assess the language capabilities of the compressed LLMs, we evaluated the models' overall abilities in eight zero-shot benchmarks ($\uparrow$) tested by EleutherAI LM Harness~\citep{gao10256836framework}, which included evaluations on PIQA, ARE/C, BoolQ, HellaSwag, Winogrande, MathQA, and MMLU.
+\subsection{Experiment on Pre-Loading Mixed-Precision Quantization}\label{sec:3.1}
+
+\begin{figure*}
+    \begin{minipage}[b]{.45\linewidth}
+    \centering 
+    \includegraphics[width=.9\columnwidth]{imgs/fig_5_1.png}
+    \caption{Quantized PPL performance of Mixtral $8\times7$b under different mixed-precision strategies (with random  allocation)}
+    \label{fig:5_1}
+    \end{minipage}
+    \hspace{0.07\textwidth}
+    \begin{minipage}[b]{.45\linewidth}
+    \centering 
+    \includegraphics[width=.9\columnwidth]{imgs/fig_5_2.png}
+    \caption{Quantized PPL performance of Mixtral $8\times7$b under different mixed-precision strategies (without random allocation).}
+    \label{fig:5_2}
+    \end{minipage}
+\end{figure*}
+
+\begin{table}[t]
+\caption{Performance of quantized Mixtral $8\times7$b on eight zero-shot benchmarks. We deploy GPTQ as our baseline PTQ method for uniform quantization. "Uni" denotes the uniform quantization of 2-bit with GPTQ. Since the results of some data sets in the block score predictor (BSP)~\citep{li2024examining} method were not reported, we resumed the relevant quantized model from the official code repository and evaluated all the results under the same settings. In BSP, 25\% MoE layers are 4-bit and the left are 2-bit to achieve 2.54-bit. "HellaS." is the short format of "HellaSwag" and "Wino." denotes "Winogrande". $\downarrow$ gives the accuracy loss between quantized results and original 16-bit model.}
+    \begin{center}
+    \small
+    \setlength{\tabcolsep}{.9mm}
+    \renewcommand{\arraystretch}{1.2}
+    {
+    \begin{tabular}{crccccccccl}
+        \toprule
+        \textbf{Method} & 
+        Bits&
+        PIQA& ARC-e& ARC-c& BoolQ& HellaS.& Wino.& MathQA & MMLU& Avg.\% $\uparrow$
+        \\
+        \midrule
+        
+        
+         & 16.00&85.20& 84.01& 57.17& 85.35 & 81.48& 75.93& 39.29& 67.88& 71.29 \\
+         \cline{1-11}
+         Uni&3.00&82.10& 78.58& 55.80& 82.94& 79.28& 74.19& 39.26& 60.58&$69.09_{\textcolor{grey}{2.2\% \downarrow}}$ \\
+         Uni&2.00&61.98& 47.20& 25.71& 62.39& 41.91 &53.22 &22.79& 30.36&$42.67_{\textcolor{grey}{28.6\% \downarrow}}$ \\
+         \cdashline{1-11}
+         \makecell{BSP\\ \citep{li2024examining}}&2.54&68.23&54.97&28.38&68.16&55.61&62.19&24.07&27.74&$49.07_{\textcolor{grey}{22.2\% \downarrow}}$\\
+        \cdashline{1-11}
+        \multirow{3}{*}{\makecell{Hessian \\ \citep{dong2020hawq}}} & 2.54&80.21&76.38&51.20&81.11&78.05&72.97&35.27&56.21&$67.18_{\textcolor{grey}{4.1\% \downarrow}}$ \\
+        &2.05&75.32&67.26&45.01&70.29&71.90&69.11&31.07&40.85&$58.85_{\textcolor{grey}{12.4\% \downarrow}}$\\
+        &1.57&65.26&52.12&21.84&68.21&52.91&50.32&24.99&31.58&$45.91_{\textcolor{grey}{25.4\% \downarrow}}$  \\
+        \cdashline{1-11}
+        \multirow{9}{*}{\textbf{PMQ}} &\cellcolor{lightmauve!40}2.54&\cellcolor{lightmauve!40}\textbf{80.52}&\cellcolor{lightmauve!40}\textbf{77.10}&\cellcolor{lightmauve!40}\textbf{51.28}&\cellcolor{lightmauve!40}\textbf{82.54}&\cellcolor{lightmauve!40}\textbf{79.03}&\cellcolor{lightmauve!40}\textbf{73.95}&\cellcolor{lightmauve!40}\textbf{39.18}&\cellcolor{lightmauve!40}\textbf{56.37}&\cellcolor{lightmauve!40}\textbf{67.50}$_{\textcolor{BrickRed}{3.8\% \downarrow}}$  \\
+         & 2.42&\textbf{80.36}& \textbf{75.76}& \textbf{50.17}& \textbf{80.00}& \textbf{78.13}&\textbf{73.09}& \textbf{34.97}& \textbf{53.22}&\textbf{65.71}$_{\textcolor{grey}{5.6\% \downarrow}}$  \\
+         & 2.30&\textbf{83.11}& \textbf{73.59}& \textbf{47.78}& \textbf{80.83}& \textbf{76.48}& \textbf{73.14}& \textbf{33.84}& \textbf{52.54}&\textbf{64.91}$_{\textcolor{grey}{6.4\% \downarrow}}$ \\
+         & 2.20&\textbf{79.05}& \textbf{73.70}& \textbf{47.87}& \textbf{74.56}& \textbf{76.63}& \textbf{72.77}& \textbf{34.24}& \textbf{47.73}&\textbf{63.29}$_{\textcolor{grey}{8.0\% \downarrow}}$  \\
+         &\cellcolor{lightmauve!40}2.05&\cellcolor{lightmauve!40}\textbf{79.16}&\cellcolor{lightmauve!40}\textbf{73.06}&\cellcolor{lightmauve!40}\textbf{48.38}&\cellcolor{lightmauve!40}\textbf{80.58}&\cellcolor{lightmauve!40}\textbf{74.95}&\cellcolor{lightmauve!40}\textbf{71.27}&\cellcolor{lightmauve!40}\textbf{31.79}&\cellcolor{lightmauve!40}\textbf{46.80}&\cellcolor{lightmauve!40}\textbf{63.25}$_{\textcolor{BrickRed}{8.0\% \downarrow}}$  \\
+         & 1.94&\textbf{76.88}& \textbf{68.48}& \textbf{45.48}&\textbf{75.23}& \textbf{72.05}& \textbf{72.61}& \textbf{31.16}& \textbf{40.93}&\textbf{60.35}$_{\textcolor{grey}{10.9\% \downarrow}}$  \\
+         & 1.81&\textbf{76.93}& \textbf{66.67}& \textbf{43.60}&\textbf{ 75.50}& \textbf{70.50}& \textbf{69.85}& \textbf{28.68}& \textbf{40.71}&\textbf{59.06}$_{\textcolor{grey}{12.2\% \downarrow}}$  \\
+         & 1.69&\textbf{75.41}& \textbf{64.14}& \textbf{40.61}& \textbf{68.96}& \textbf{67.01}&\textbf{ 68.03}& \textbf{28.04}& \textbf{37.14}&\textbf{56.17}$_{\textcolor{grey}{15.1\% \downarrow}}$  \\
+       &\cellcolor{lightmauve!40}1.57&\cellcolor{lightmauve!40}\textbf{72.42}&\cellcolor{lightmauve!40}\textbf{62.46}&\cellcolor{lightmauve!40}\textbf{37.88}&\cellcolor{lightmauve!40}\textbf{73.55}&\cellcolor{lightmauve!40}\textbf{63.17}&\cellcolor{lightmauve!40}\textbf{66.38}&\cellcolor{lightmauve!40}\textbf{26.80}&\cellcolor{lightmauve!40}\textbf{32.25}&\cellcolor{lightmauve!40}\textbf{54.49}$_{\textcolor{BrickRed}{16.8\% \downarrow}}$  \\
+        \cline{1-11}
+        
+          \bottomrule 
+    \end{tabular}
+    }
+\end{center}
+\label{tab:1}
+\end{table}
+
+\textbf{Ablation of Bit-Width Allocating Metrics.}
+Fig.~\ref{fig:5_1} illustrates a significant decline in model performance with random bit-width allocation. And employing only the routing scores of experts from calibration data, the curve in Fig.~\ref{fig:5_2} though better than random allocation, the PPL curve is still high. However, activation frequencies, in comparison to weight, shows a better performance. 
+
+Furthermore, in conventional networks and dense LLMs, Hessian-based quantization loss is a common use for bit-width allocation~\citep{dong2020hawq,huang2024slim}. We also utilized is as a compared metric for expert-wise bit-width allocation. Fig.~\ref{fig:5_2} also contains three metric curves: Hessian, F-norm, and PMQ. F-norm and PMQ are more effective than Hessian for expert-wise bit-width allocation, exhibiting better performance under different bit-widths. When the average bit-width exceeds 2-bit, the F-norm is similar to the PPL curve of PMQ; below 2-bit, the lead of PMQ gradually widens.
+\begin{figure*}
+    \begin{minipage}[b]{.49\linewidth}
+    \centering 
+    \includegraphics[width=.85\columnwidth]{imgs/fig_7.pdf}
+    \caption{Significant tokens protection of 2.05-bit Mixtral $8\times7$b. “CR” denotes the average computation compression ratio (\textcolor{RoyalBlue}{blue}); "PPL" denotes the perplexity(\textcolor{red}{red}); \textcolor{ForestGreen}{Star} represents the weight-only pruning performance.}
+    \label{fig:8}
+    \end{minipage}
+    \hspace{0.03\textwidth}
+    \begin{minipage}[b]{.48\linewidth}
+    \centering 
+    \includegraphics[width=.85\columnwidth]{imgs/fig_8.pdf}
+    \caption{Less significant tokens drop of 2.05-bit Mixtral $8\times7$b. In Mixtral $8\times7$b, we mask all experts of the less significant tokens.
+    “CR” denotes the average computation compression ratio (\textcolor{RoyalBlue}{blue}); "PPL" denotes the perplexity(\textcolor{red}{red}). }
+    \label{fig:9}
+    \end{minipage}
+\end{figure*}
+\textbf{Comparison of Mixed-Precision Quantization.} We present a comprehensive comparison of the performance of \emph{PMQ} within the ultra-low bit-width range. GPTQ was set as the baseline for uniform bit-width quantization, denoted as "Uni" in Tab.~\ref{tab:1}. We also compare it with a recent mixed-precision approach for MoE-LLMs known as the block score predictor (BSP)~\citep{li2024examining}. Following Eq.~\ref{eq:4}, we set the average bit-width of Mixtral $8\times7$b within the range of 1.57-bit to 2.54-bit. As shown in Tab.~\ref{tab:1}, the uncompressed 16-bit model achieves an average accuracy of 71.29\%. With uniform precision quantization, the average loss for the 3-bit model is approximately 2.2\%, while the loss for the 2-bit model increases significantly by 28.6\%, highlighting the challenges in maintaining model accuracy with existing uniform precision quantization methods at ultra-low bit widths. 
+
+\begin{wraptable}{r}{7cm}
+\caption{Comparison of different mixed-precision strategies on few-shot performance (MMLU five-shot $\uparrow$) for Mixtral $8\times7$b.~\ref{a:hessian}.}
+    \centering
+    \small
+         \setlength{\tabcolsep}{1.6mm}{
+     \begin{tabular}{lrl}\\\toprule 
+        Method&Bits  & Accuracy \% $\uparrow$\\
+        \hline%第二道横线 
+         &16.00&70.60\\
+        \cline{0-2}
+        Uni&2.00&$34.05_{\textcolor{grey}{36.6\% \downarrow}}$\\
+        BSP~\citep{li2024examining}&2.54 &$31.57_{\textcolor{grey}{39.0\% \downarrow}}$\\
+        \cdashline{0-2}
+        \multirow{3}{*}{Hessian \citep{dong2020hawq}}&2.54 & $58.22_{\textcolor{grey}{12.4\% \downarrow}}$\\
+        &2.05 & $43.51_{\textcolor{grey}{27.1\% \downarrow}}$\\
+        &1.57 & $31.96_{\textcolor{grey}{38.6\% \downarrow}}$\\
+        \cdashline{0-2}
+        \cellcolor{lightmauve!40}&\cellcolor{lightmauve!40}2.54& $\cellcolor{lightmauve!40}\textbf{61.19}_{\textcolor{BrickRed}{9.4\% \downarrow}}$\\
+        \cellcolor{lightmauve!40}\textbf{PMQ}&\cellcolor{lightmauve!40}2.05& $\cellcolor{lightmauve!40}\textbf{49.84}_{\textcolor{BrickRed}{20.8\% \downarrow}}$\\
+        \cellcolor{lightmauve!40}&\cellcolor{lightmauve!40}1.57& $\cellcolor{lightmauve!40}\textbf{33.44}_{\textcolor{BrickRed}{37.2\% \downarrow}}$\\
+        \hline%第二道横线 
+        \hline%第一道横线
+        \end{tabular}}
+        \label{tab:2}
+\end{wraptable}
+
+BSP achieves an average accuracy of only 49.07\% at 2.54-bit. However, our proposed \emph{PMQ} achieves a performance of 67.50\%, exceeding BSP by 18.4\% and only falling of the 16-bit Mixtral $8\times7$b by 3.8\%. Notably, \emph{PMQ} can maintain a accuracy of 54.49\% at 1.57-bit, even outperforming BSP at 2.54-bit by 5.4\%. The Hessian-based method in Tab.~\ref{tab:1} consistently underperform to \emph{PMQ} across varying bit-width levels. Specifically, Hessian shows a slight underperformance of 0.2\% at 2.54-bit, while \emph{PMQ} demonstrates more substantial advantages below 2-bit, leading by 9.4\% at 1.57-bit. Furthermore, we also evaluated the few-shot capability of \emph{PMQ} in Tab.~\ref{tab:2}, where \emph{PMQ} continues to demonstrate superior accuracy.~\ref{a:hessian}.
+
+\begin{table}[t]
+\caption{Ablation evaluation of \emph{PMQ} and \emph{ODP} for Mixtral $8\times7/22$b, and compared with dense LLaMA models. "Params" denotes the parameter size, and "Act Params" is averaged activated parameters for one token. The parameter calculation of the compressed model includes the compressed weights and quantizer parameters (e.g., scaling factor and zero factor for dequantization). We carry out the average activated parameter size and speedup on C4 dataset. 16-bit Mixtral $8\times7$b uses 2 A100-80GB GPUs and Mixtral $8\times22$b uses 4, quantized models are tested on one A100-80GB GPU.}
+    \begin{center}
+    \small
+    \setlength{\tabcolsep}{1.3mm}
+    \renewcommand{\arraystretch}{1.2}
+    {
+    \begin{tabular}{lrcccrrrr}
+        \toprule
+        \textbf{LLMs} & 
+        Bits&
+        \textbf{PMQ}& \textbf{ODP}& \textbf{Uni} & LM-Eval\% $\uparrow$ & Params.(GB) &Act Params.(GB) & Speedup 
+        \\
+        \midrule
+        LLaMA2-7b  &16.00 & - & - &-& 61.52 & 13.48 & 13.48 &   \\
+        LLaMA2-13b &16.00 & - & - &-& 65.19 & 26.03 & 26.03 &   \\
+         
+        \cline{1-9}
+         \multirow{8}{*}{Mixtral $8\times7$b}  &16.00 & - & - &-& 71.29 & 96.80 & 26.31 & $1.00\times$  \\
+        &2.00 & - & - &\checkmark& 42.67 & 13.61 & 3.70 & $1.72\times$   \\
+         \cline{2-9}
+         
+        & 2.54&\checkmark&-&-& 67.50 &16.24& 4.53 & $1.63\times$\\
+        & \cellcolor{lightmauve!40}\textbf{2.54}&\cellcolor{lightmauve!40}\checkmark&\cellcolor{lightmauve!40}\checkmark&\cellcolor{lightmauve!40}-&\cellcolor{lightmauve!40}\textbf{66.94}&\cellcolor{lightmauve!40}\textbf{16.24}& \cellcolor{lightmauve!40}\textbf{3.96} &\cellcolor{lightmauve!40}\textbf{1.71}$\times$\\
+        \cdashline{2-9}
+        
+        & 2.05&\checkmark&-& -& 63.25& 13.41&3.73& $1.67\times$\\
+        &\cellcolor{lightmauve!40}\textbf{2.05}&\cellcolor{lightmauve!40}\checkmark&\cellcolor{lightmauve!40}\checkmark&\cellcolor{lightmauve!40}-&\cellcolor{lightmauve!40}\textbf{62.68}&\cellcolor{lightmauve!40}\textbf{13.41}&\cellcolor{lightmauve!40} \textbf{3.23}&\cellcolor{lightmauve!40}\textbf{1.80}$\times$\\
+     \cdashline{2-9}
+       & 1.57&\checkmark&-& -&54.49& 10.82&2.94&$1.82\times$\\
+       & \cellcolor{lightmauve!40}\textbf{1.57}&\cellcolor{lightmauve!40}\checkmark&\cellcolor{lightmauve!40}\checkmark&\cellcolor{lightmauve!40}-&\cellcolor{lightmauve!40}\textbf{53.77}&\cellcolor{lightmauve!40}\textbf{10.82}&\cellcolor{lightmauve!40}\textbf{2.55}&\cellcolor{lightmauve!40}\textbf{1.89}$\times$\\
+       
+        \cline{1-9}
+        \multirow{8}{*}{Mixtral $8\times22$b}&16.00 & - & - &-& 76.33 & 281.24 & 76.49 & $1.00\times$  \\
+        &2.00 & - & - &\checkmark&50.44 &38.08&10.35&$1.95\times$\\
+         \cline{2-9}
+         
+        & 2.54&\checkmark&-&-&72.08&46.58& 12.66 & $1.77\times$\\
+         &\cellcolor{lightmauve!40} \textbf{2.54}&\cellcolor{lightmauve!40}\checkmark&\cellcolor{lightmauve!40}\checkmark&\cellcolor{lightmauve!40}-&\cellcolor{lightmauve!40} \textbf{71.21}&\cellcolor{lightmauve!40}\textbf{46.58}&\cellcolor{lightmauve!40}\textbf{10.96} &\cellcolor{lightmauve!40}\textbf{1.82}$\times$\\
+         \cdashline{2-9}
+
+        & 2.05&\checkmark&-&-&67.94&38.35& 10.42&1.80$\times$\\
+        &\cellcolor{lightmauve!40} \textbf{2.05}&\cellcolor{lightmauve!40}\checkmark&\cellcolor{lightmauve!40}\checkmark&\cellcolor{lightmauve!40}-&\cellcolor{lightmauve!40} \textbf{66.50}&\cellcolor{lightmauve!40}\textbf{38.35}&\cellcolor{lightmauve!40} \textbf{9.03}&\cellcolor{lightmauve!40}\textbf{1.87}$\times$\\
+         \cdashline{2-9}
+       & 1.57&\checkmark& -& -&59.29&30.27& 8.23&$1.97\times$\\
+       &\cellcolor{lightmauve!40} 1.57&\cellcolor{lightmauve!40}\checkmark&\cellcolor{lightmauve!40} \checkmark&\cellcolor{lightmauve!40}-&\cellcolor{lightmauve!40} \textbf{58.84}&\cellcolor{lightmauve!40}\textbf{30.27}&\cellcolor{lightmauve!40}\textbf{7.13}&\cellcolor{lightmauve!40}\textbf{2.06}$\times$\\
+        \cline{1-9}
+    \bottomrule 
+    \end{tabular}}
+\end{center}
+\label{tab:3}
+\end{table}
+
+
+
+In pre-loading phase, \emph{PMQ} enables the compression of MoE-LLMs to an exceptionally low bit-width range. Furthermore, during the inference phase, we apply the \emph{ODP} outlined in Sec.~\ref{sec:odr} to the quantized MoE model, further enhancing the efficiency of real-time inference for lightweight models.
+
+\textbf{Ablation of Tokens Protection.}
+As shown Fig.~\ref{fig:8}, when we select 2\% crucial tokens to be protected, the PPL drops from 6.46 to 6.24, with activated experts' parameters decreasing only from 15.1\% to 14.8\%. Moreover, as we gradually increase the ratio, the performance remains relatively stable, while the compression ratio exhibits a nearly linear decline. Thus, we conclude that protecting just 2\% of the important tokens can significantly enhance the compressed performance of MoE-LLMs with almost no impact on efficiency. Furthermore, we try to prune all experts associated with the less important tokens, as illustrated in Fig.~\ref{fig:9}. When removing the experts to the 2\% of tokens, the overall compression ratio reached 15.8\%, while the PPL improved to 6.35, yielding performance enhancements in both efficiency and accuracy compared to weight-only pruning. However, we observed that the performance curves of all experts' masking exhibited exponential growth, indicating that directly skipping experts results in a significant accuracy loss. By employing a protection mechanism for only 2\% of the experts, we can maintain the accuracy of MoE-LLMs without compromising efficiency.
+
+        
+        
+\textbf{Memory Saving and Inference Efficiency.} Tab.~\ref{tab:3} details the memory compression and speed tests of the proposed MC-MoE. The 16-bit Mixtral $8\times7$b model requires two A100-80G GPUs, while the Mixtral $8\times22$b model needs four. We utilize the HQQ~\citep{badri2023hqq} tool to save quantized weights and handle dequantization. After applying PMQ mixed-precision compression, the Mixtral $8\times7$b model can be compressed to a size ranging from 10.82 to 16.65 GB. During dynamic inference, ODP reduces activation parameters by about 15\%, with average accuracy decreasing by less than 1\%. At 2.05-bit, the average activation parameter per token is only 3.23 GB, resulting in a $1.80\times$ increase in inference speed and an evaluation accuracy of 62.68\%. Tab.~\ref{tab:3} also compares the performance of the LLaMA series dense models. The MC-compressed 2.54-bit Mixtral $8\times7$b model outperforms the 26.03 GB 16-bit LLaMA2-13b model, with a total parameter size of 16.65 GB and activation parameters of 3.69 GB. We have also extended the compression experiments to the Mixtral $8\times22$b model. MC-MoE shows higher overall performance compared to mainstream dense models, demonstrating the potential for compressing MoE-LLMs without additional training.
+
+
+
+\section{Conclusion}
+
+MoE represents a promising framework of sparse models for natural language understanding through scaling up the model capacity. However, the memory demands and redundancy among experts pose significant challenges for their practical implementation. In this work, we propose \textbf{MC-MoE}, a mixture compression strategy based on the imbalance of significance among experts. This method co-designs the \emph{Pre-Loading Mixed-Precision Quantization~(PMQ)} and \emph{Online Dynamic Pruning~(ODP)} approach, allowing MoE models to be compressed to an ultra-low bit-width while maintaining exceptional memory and parameter efficiency, as well as knowledgeable performance. And our mixed-precision strategy is orthogonal to various quantization techniques. Comprehensive experiments validate the effectiveness of our mixture compression, revealing that highly compressed MoE-LLMs can even outperform equal-size full-precision dense LLMs, thereby improving the feasibility of MoE compression. Future work will focus on adapting this strategy for multimodal applications and optimizing it for specific hardware platforms.
+
+
+
+
+

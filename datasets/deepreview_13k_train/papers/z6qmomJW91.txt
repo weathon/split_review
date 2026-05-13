@@ -1,0 +1,369 @@
+\title{RotRNN: Modelling Long Sequences with Rotations}
+
+\begin{abstract}
+Linear recurrent neural networks, such as State Space Models (SSMs) and Linear Recurrent Units (LRUs), have recently shown state-of-the-art performance on long sequence modelling benchmarks. Despite their success, their empirical performance is not well understood and they come with a number of drawbacks, most notably their complex initialisation and normalisation schemes. In this work, we address some of these issues by proposing \model{} -- a linear recurrent model which utilises the convenient properties of rotation matrices. We show that \model provides a simple and efficient model with a robust normalisation procedure,
+and a practical implementation that remains faithful to its theoretical derivation. \model also achieves competitive performance to state-of-the-art linear recurrent models on several long sequence modelling datasets.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Long sequence modelling is a notoriously difficult domain in machine learning due to the need to capture long-range dependencies between input data. 
+Typical sequence models, such as Transformers \citep{vaswani2017attention} and Recurrent Neural Networks (RNNs) \citep{rumelhart1986learning, hochreiter1997long, cho2014properties, koutnik2014clockwork}, fail to perform well on these tasks. In the case of Transformers this is due to poor inductive biases and quadratic scaling of computational complexity with sequence length,
+and in the case of non-linear RNNs it is caused by vanishing and exploding gradients.
+Recently, State Space Models (SSMs) \citep{gu2021efficiently, smith2023simplified, gupta2022diagonal} have emerged as the state-of-the-art framework for learning on long-sequences of data.
+The S4 model \citep{gu2021efficiently}, inspired by linear time invariant dynamical systems, utilises a linear recurrent layer with HiPPO initialisation \citep{gu2020hippo} to solve the vanishing and exploding gradient problem of classical RNNs.
+Moreover, the computational complexity of S4 scales linearly in time with sequence length, and thus circumvents the quadratic computational scaling of Transformers.
+Interestingly, the linear recurrence of S4 hidden state can be viewed as both a linear RNN for fast inference and as a Convolutional Neural Network (CNN) for efficient parallel training.
+
+Despite the mathematical elegance of the S4 derivation, the question of whether such careful initialisation is required remains open.
+Indeed, several subsequent works suggested that the specific initialisation and discretisation methods that theoretically motivated S4 may not be necessary for highly performant SSMs \citep{gupta2022diagonal, gupta2022simplifying, gu2022parameterization, smith2023simplified, orvieto2023resurrecting}. 
+These findings led to the development of the Linear Recurrent Unit (LRU) \citep{orvieto2023resurrecting}, which showed that competitive empirical performance on long sequence modelling tasks can be achieved by making some small modifications to a standard linear RNN, without using the theoretical insights from SSMs.
+While the LRU is conceptually simpler than prior works, the theoretical motivation does not necessarily reflect the practical implementation of the algorithm, leading to more unanswered questions as to why SSMs and the LRU are stable and performative on long sequence modelling tasks.
+
+The LRU and other linear recurrent layers have been used as basic building blocks for more complex sequence modelling architectures \citep{gu2023mamba, de2024griffin}.
+Motivated by the wide adoption of such models \citep{zhuvision, ma2024u, xing2024segmamba, patro2024mamba}, we extend the body of work on linear RNNs by proposing a novel recurrent block, deriving a conceptually simple but mathematically principled way of performing linear recurrence by using rotation matrices. By parameterising the recurrent state matrix as a rotation, we are able to provide more stable normalisation than prior works, and allow for a robust implementation that faithfully reflects its theoretical motivation.
+Importantly, our model remains consistent with the theory throughout training, and is not purely used to find a good initialisation of the recurrent matrix \citep{gu2021efficiently, gupta2022diagonal, smith2023simplified}.
+Moreover, we derive a mathematical equivalence between a special case of the LRU and our model, in the hope that it will help shed light on some of the LRU's internal mechanics.
+We summarise our main contributions as follows:
+\begin{itemize}[leftmargin=*,topsep=0pt,itemsep=2pt]
+    \item We propose a novel linear RNN layer where the recurrent state matrix \textbf{$A$ is parameterised as a rotation}, with the resulting algorithm faithfully reflecting the theoretical motivation throughout training.
+    \item We present a method for computing \textbf{efficient matrix powers of parametric rotations} to enable fast linear recurrence with rotation matrices.
+    \item We use this new formulation to derive a principled normalisation procedure which retains a \textbf{constant expected hidden state magnitude} that holds throughout training.
+    \item We show \textbf{competitive performance with the state-of-the-art} on long sequence benchmarks, and show that the improved normalisation of our model holds on practical tasks.
+\end{itemize}
+
+
+
+\section{Background}
+
+
+\subsection{State Space Models} 
+
+SSMs \citep{gu2021efficiently, smith2023simplified, gupta2022diagonal} are derived from time-invariant continuous-time linear ordinary differential equations (ODEs), of the form 
+\begin{align}
+\dot{x}(t) &= A' x(t) + B'u(t) \nonumber \\
+y(t) &= C x(t) + D u(t) \nonumber
+\end{align}
+where $B'\in \mathbb{R}^{\dimx\times \dimu}$ is the input matrix, $A' \in \mathbb{R}^{\dimx\times \dimx}$ is the state matrix, $C \in \mathbb{R}^{\dimy\times \dimx}$ and $D\in\reals^{\dimy\times \dimu}$ are the output matrices and $u(t) \in \mathbb{R}^\dimu$ is the continuous-time input.
+
+Under a constant sampling rate with a given stepsize $\Delta>0$, such systems can be discretised using Zero-Order Hold (ZOH) or Bilinear discritisation. Under the ZOH method, the resulting discrete system can be expressed by the following recursion:
+\begin{align}
+\label{eq:ssm:discrete}
+\begin{aligned}
+x_t &= A x_{t-1} + B u_{t} \\
+y_t &= C x_t + D u_t
+\end{aligned}
+\end{align}
+where $u_t$ are the sampled input signals and $A = \exp(\Delta A')$ and $B=(A-I)A'^{-1}B'$ are discretised versions of the state and input matrices, respectively.
+Importantly, this recurrence relation can also be unrolled and written as a convolution over the inputs,
+\begin{align}
+\label{eq:ssm_recurrence}
+\begin{aligned}
+    x_t &= \sum_{k=1}^t A^{t-k}B u_k.
+\end{aligned}
+\end{align}
+This duality of recurrence and convolution allows for efficient parallel computation of sequence outputs during training, and fast state updating during inference. \Eqref{eq:ssm:discrete} is the foundation of the SSM layer in S4 \citep{gu2021efficiently} and its variants \citep{gupta2022diagonal,smith2023simplified,gu2023mamba}.
+The matrix $A$ is initialised using HiPPO theory \citep{gu2020hippo}, whose derivation follows from the theory of optimal polynomial projections.
+\subsection{Linear Recurrent Units} \label{sec:lru}
+Instead of discretising a continuous-time ODE, the LRU \citep{orvieto2023resurrecting} achieves competetive empirical performance with clever parameterisation and normalisation of linear RNNs.
+The derivation of the LRU is motivated by the observation that the recurrent matrix $A\in\reals^{\dimx\times \dimx}$ can be written (up to arbitrarily small perturbation of the entries \citep{axler2024linear}) as
+\beq \label{eq:eig_decomp}
+A = P\Lambda P^{-1}
+\eeq
+where $\Lambda = \diag(\lambda_1, \dots, \lambda_\dimx) \in \comps^{\dimx\times \dimx}$ is the diagonal matrix of eigenvalues and $P\in \comps^{\dimx\times \dimx}$ is a complex-valued invertible matrix of eigenvectors.
+This diagonalised parameterisation is necessary to allow for fast computation of matrix powers, which is required in linear recurrent models (see \Eqref{eq:ssm_recurrence}).
+Premultiplying both sides of \Eqref{eq:ssm_recurrence} by $P^{-1}$, and plugging in \Eqref{eq:eig_decomp}, we obtain
+\begin{align}
+\begin{aligned}
+\Tilde{x}_t &= \sum_{k=1}^t \Lambda^{t-k} \Tilde{B}u_k \\
+y_t &= \tilde{C} \Tilde{x}_t + D u_t
+\label{eq:lru}
+\end{aligned}
+\end{align}
+where $\Tilde{x}_t = P^{-1}x_t$, $\Tilde{B} = P^{-1} B$, $\Tilde{C} = C P$. The LRU aims to directly learn the matrices $\Tilde{B}$ and $\Tilde{C}$, along with the eigenvalues $\lambda_j = \nu_j e^{i\theta_j}$, for learnable parameters $\nu_j,\theta_j\in\reals$.
+\subsection{Drawbacks of Prior Works}
+These prior methods for tackling long sequence modelling with linear recurrence have several drawbacks. In the case of SSMs, a complicated theoretical derivation based on polynomial projections is required to initialise the recurrent HiPPO matrix. However, this is purely used as an initialisation procedure. The inner workings of SSM models throughout training is not well understood, and more research is needed to uncover why deviation from optimal polynomial projections of functions improves results and remains stable throughout learning.
+Indeed, as shown in the LRU, it is in fact unnecessary to use such theoretical motivation to achieve strong performance on long sequence benchmarks.
+
+What actually goes on under the hood of the LRU, though, is also not entirely clear. The motivation of the LRU stems from constraining classical linear RNNs, but this is not fully reflected in the final proposed algorithm.
+Firstly, eigenvalues of the real matrix $A$ come in conjugate pairs, but this is not enforced in the LRU (as it is in, for example, S5 \citep{smith2023simplified}).
+Moreover, there is no constraint ensuring that $y_t = \Tilde{C}\Tilde{x}_t = C P P^{-1} x_t = C x_t$ is real-valued -- i.e. that the $P$ and $P^{-1}$ components of the learned $\Tilde{C}$ and $\Tilde{x}_t$ are consistent. Instead, the authors simply take the real part of the resulting complex $y_t$. 
+Additionally, the LRU is normalised (at initialisation) by ensuring expected convergence in the limit of infinite sequence length (see \ref{sec:rotssm_lru_mh}), but in practice a learnt normaliser is used, and does not necessarily result in desirable or consistent hidden state magnitudes (\Figref{fig:norms}).
+
+In this work, we aim to overcome this mis-match between theoretical motivation and practical implementation by proposing a novel linear recurrent model using rotation matrices. Our algorithm is conceptually simple to understand, efficient to compute, robust to exploding hidden state norms, and, importantly, faithfully reflects the mathematical principles that underpin its motivation.
+
+
+
+\section{\model}
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1\textwidth]{RotRNN.pdf}
+    \caption{Full neural network architecture of the \model. Here $T$ denotes the length of the input sequence, and $\dimu$ denotes the number of channels in the input data.} 
+    \label{fig:RotRNN-architecture}
+\end{figure}
+
+The key component of our model, which we call the \textbf{Rot}ational \textbf{R}ecurrent \textbf{N}eural \textbf{N}etwork (\model), is the parameterisation of the recurrent state matrix $A$ as a rotation matrix. 
+The reason for this choice is three-fold:
+\begin{enumerate}[i), leftmargin=*,topsep=0pt,itemsep=2pt]
+    \item Rotation matrices can be generated smoothly from any real-valued matrix, making them robust to initialisation and easy to constrain during training (\Secref{sec:rotations}).
+    \item Rotations can be easily decomposed for fast computation of matrix powers, which is needed in linear RNNs (\Secref{sec:fast_powers}).
+    \item The orthogonality of rotation matrices, and the fact that their eigenvalues lie on the unit circle, allows us to derive a simple normalisation scheme that retains a constant expected hidden state norm throughout training (\Secref{sec:RotRNNnormalisation}).
+\end{enumerate}
+
+\subsection{Parameterising Rotation Matrices} \label{sec:rotations}
+We first consider the problem of parameterising $A$ as a rotation matrix in the linear RNN formulation.
+The group comprising all rotation matrices in $\reals^{N\times N}$ is known as the special orthogonal group, $SO(N)$, defined as follows:
+\begin{align}
+SO(N) = \{Q \;|\; Q\in\reals^{N\times N}, Q^\top Q = Q Q^\top =I, \det (Q) = 1\}.
+\end{align}
+To ensure that a learnable matrix $A$ remains in $SO(N)$ throughout training, instead of learning a constrained $A$ directly we can learn a general weight matrix $M\in\reals^{N\times N}$ and smoothly map $M$ onto $SO(N)$. To do this, we make use of the following lemma:\\
+
+\begin{restatable}[]{lemma}{expmlemma}
+    \label{lemma:expm}
+    Let $M\in\reals^{N\times N}$, let $S = M - M^\top$, and define $\exp(S) := \sum_{k=0}^\infty \frac{1}{k!} S^k$ as the matrix exponential. Then
+    $A = \exp{(S)} \in SO(N)$.
+\end{restatable}
+\begin{proof}
+    See \appref{proof:expm}.
+\end{proof}
+The matrix exponential map is surjective from skew-symmetric matrices onto $SO(N)$ \citep{rohan2013some}, so this parameterisation is sufficiently general for learning arbitrary rotation matrices.
+
+\subsection{Efficient Rotational Recurrence}\label{sec:fast_powers}
+Unfortunately, computing the convolutional form of linear recurrent layers (\Eqref{eq:ssm_recurrence}) during training involves taking matrix powers of $A$, which is generally slow for high-dimensional, dense matrices.
+To make this computation more efficient, we utilise the structure of rotation matrices, using the following result to decompose the dense rotation matrix into block-diagonal form.\\
+\begin{restatable}[]{lemma}{rotdecomp}
+    \label{lemma:gen-rot-block-decomp}
+    Let $P\in O(N)$ be an orthogonal matrix and let $\Theta\in SO(N)$ be a block-diagonal rotation matrix. Then $A=P\Theta P\trans \in SO(N)$. Moreover, any rotation matrix can be written in this form \citep{gallier2003computing}.
+\end{restatable}
+\begin{proof}
+    See \appref{proof:rot-block}.
+\end{proof}
+The matrix $\Theta$ has $N/2$ blocks of the form
+$
+        \begin{pmatrix}
+       \cos\theta_i & -\sin\theta_i\\
+       \sin\theta_i & \cos\theta_i
+       \end{pmatrix}
+$
+along the diagonal if $N$ is even, and $\frac{N-1}{2}$ blocks if $N$ is odd with the remaining value on the diagonal being 1, where $\theta_i\in[0,2\pi]$, $i=1, \dots, \lfloor\frac{N}{2}\rfloor$, are axis-aligned rotation angles in the space projected onto by $P$.
+When computing matrix powers, the dense orthogonal matrices $P$ and $P\trans$ cancel out leaving $A^k = P \Theta^k P\trans$, where the blocks of $\Theta^k$ are of the form
+$\begin{pmatrix}
+       \cos k\theta_i & -\sin k\theta_i\\
+       \sin k\theta_i & \cos k\theta_i
+       \end{pmatrix}
+$.
+Therefore, by learning an orthogonal matrix $P$ and set of rotation angles $\vectheta = \{\theta_1, \dots, \theta_{\lfloor \frac{N}{2} \rfloor}\}$ directly, we can easily generate rotation matrices that are amenable to computing fast matrix powers.
+
+It is important to note that, unlike $SO(N)$, there is no smooth surjective map from real square matrices onto $O(N)$,
+the General Orthogonal group: 
+$$O(N) = \{Q \; | \; Q\in \reals^{N\times N}, Q^\top Q = QQ^\top = I, \det(Q) = \pm 1\}.$$
+
+It is therefore hard in practice to parameterise $P$ such that the space of learnable $P$ covers the entire group of orthogonal matrices. Instead, we learn a general weight matrix $M\in \reals^{N\times N}$, and use \lemref{lemma:expm} to obtain $P=\exp(M-M\trans)\in SO(N) \subset O(N)$.  While this means that $A=P\Theta P\trans$ may not be surjective onto $SO(N)$, we find it is sufficiently general to achieve good results in practice (see \Secref{sec:experiments}).
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{RotRNN_Kernel.pdf}
+    \caption{A visualisation of the mulit-headed \model layer outlined in \Secref{sec:mulit-head}. The $\dimu$-dimensional input sequence $u_t$, $t=1,\dots,T$, is projected onto each of the $H$ heads of dimension $\dimh$ by the $B^{(h)}$ matrices. Each head then independently performs a linear recurrence with different rotations and decay scales. The outputs of each head are concatenated and mixed linearly to form the final $\dimu$-dimensional output $y_t$. }
+    \label{fig:RotRNN-kernel-arch}
+\end{figure}
+
+\subsection{Normalisation} \label{sec:RotRNNnormalisation}
+Now that we have a way to parameterise our recurrent state matrix for efficient recurrence, we must turn to the problem of normalising the recurrent state. This is a key ingredient of long-range recurrent networks, as it ensures the hidden state does not vanish or explode across long sequences. In prior works, this is either done implicitly by discretisation, as is the case in S4 \citep{gu2021efficiently}, or explicitly with a normalisation constant, as in the LRU \citep{orvieto2023resurrecting}.
+In this work, we take an explicit approach to normalisation, leveraging the properties of the rotation matrix $A$ to derive a normalisation constant that retains a constant expected norm of the recurrent state at all times throughout training.
+
+We define the hidden state recurrence of the \model as
+\beq
+\label{eq:rec:RotRNN}
+    x_t = \alpha( \gamma A x_{t-1} + Bu_{t})
+\eeq
+where $\alpha\in \reals$ is a normalisation constant and $\gamma \in (0, 1)$ is a learnable scalar decay factor which controls the trade-off in importance between recent and distant-past input values. \\
+
+\begin{restatable}[]{lemma}{RotRNNnorm}
+\label{theorem:RotRNN-norm}
+Following \cite{orvieto2023resurrecting}, let the inputs $u_t$ be sampled i.i.d., with mean 0 and variance I. Then for any constant $c$, if $\av{||x_1||^2} = c$ and $\alpha=\frac{1}{\sqrt{c\gamma^2 + \trace{B \trans B}}}$ we have that $\av{||x_{t}||^2}=c$ for all timesteps $t$.
+\end{restatable}
+\begin{proof}
+    We will prove this by induction. Under the assumption $\av{||x_1||^2} = c$, 
+    we only need to prove that $\av{||x_{t-1}||^2} = c \implies \av{||x_t||^2} = c$ if $\alpha$ is as stated above.
+    Taking the expected square norm of \Eqref{eq:rec:RotRNN}, we have
+    \begin{align}
+        \av{||x_t||^2} &= \alpha^2\br{\gamma^2 \av{||x_{t-1}||^2} + \av{u_t\trans B\trans B u_t} + 2\gamma \av{x_{t-1}\trans A\trans B u_t}} \\
+        &= \alpha^2\br{\gamma^2 c + \trace{B\trans B \,\av{u_t u_t\trans}}} \\
+        &= \alpha^2\br{\gamma^2 c + \trace{B\trans B}}
+    \end{align}
+    Where in the first line we used the orthogonal property of the rotation matrix $A A\trans = A\trans A = I$, and in the second line we used the induction assumption that $\av{||x_{t-1}||^2}=c$ and that for i.i.d inputs $x_{t-1}$ and $u_t$ are uncorrelated. Finally, setting $\alpha = \frac{1}{\sqrt{c\gamma^2 + \trace{B\trans B}}}$ gives $\av{||x_t||^2} = c$ as required.
+\end{proof}
+
+In practice, however, we find that this naïve method of normalisation is not entirely satisfactory. Unrolling \Eqref{eq:rec:RotRNN}  into its convolutional form
+we obtain
+\beq
+x_{t} = \sum_{k=1}^{t} \alpha^{t + 1 - k} \gamma^{t-k} A^{t-k}Bu_{k} \label{eq:RotRNN:unrol-decay}
+\eeq
+where we can see that the normalisation constant $\alpha$ is raised to the power $t+1-k$. When $\alpha<1$ we therefore observe that the weighting of early inputs in the sequence goes to zero exponentially, and the model quickly forgets all but the very recent past. Since we desire that the recurrent decay is controlled only by $\gamma$, we instead enforce $\alpha=1$, shifting all normalisation into the matrix $B$. This requires that $\trace{B\trans B} = 1 - c\gamma^2$, which can be achieved by simply re-scaling $B$ with the coefficient 
+\beq
+\xi:=\sqrt{\frac{1-c\gamma^2}{\trace{B\trans B}}}.
+\eeq
+Our final expression for the recurrent and convolutional forms of the \model hidden state is thus
+\beq
+  x_t = \gamma A x_{t-1} + \xi Bu_{t} \;\;\; \Leftrightarrow \;\;\; x_{t} = 
+  \xi \sum_{k=1}^{t} \gamma^{t-k} A^{t-k}Bu_{k} 
+\eeq
+which avoids the problem of unwanted exponential decay. In practice we find that setting $c=1$ is sufficient to achieve stable and robust normalisation, even in deep, multi-layer networks (\Figref{fig:norms}).
+\subsection{Multi-Head Decay}\label{sec:mulit-head}
+
+The price of having a constant expected hidden state norm in our derivation is that the decay factor $\gamma$ must be scalar.
+We find, however, that this does not generalise well to problems that require retaining information from horizons at different scales.
+We address this by running $H$ independent low-dimensional \model heads in parallel (see \Figref{fig:RotRNN-kernel-arch}), each with a unique set of $A^{(h)}\in\reals^{\dimh\times \dimh}, B^{(h)}\in\reals^{\dimh\times \dimu}, \gamma^{(h)}\in(0, 1)$ parameters, where we set $\dimh=\frac{\dimx}{H}$.
+The output projection, 
+\beq
+y_t = C x_t^{(1:H)} + Du_t,
+\eeq
+where $C \in \reals^{\dimu \times \dimx}, D\in \reals^{\dimu \times \dimu}$, and $x_t^{(1:H)}$ is the concatenation of the $t^{\text{th}}$ hidden state from each head, can be viewed as a linear mixing layer. This enables the model to share information from the different rotation phase and decay horizon recurrences from each head, which is critical in tasks which require learning both long and short range dependencies between inputs. We note that, although we use $\dimh=\frac{\dimx}{H}$ in our experiments and for ease of mathematic notation, this set-up is easily scalable to any desired head dimension $\dimh\geq2$.
+
+
+
+\section{Analysis of \model and Prior Work}
+
+
+\subsection{Linear Recurrent Units} \label{sec:rotssm_lru_mh}
+The \model algorithm proposed in this paper is inspired in part by the LRU \citep{orvieto2023resurrecting}.
+As well as sharing superficial similarities in the structure of the recurrent layer, more formal comparisons can be drawn between the two architectures. In this section, we derive a mathematical equivalence between a special case of the LRU and the \model, and compare the normalisation procedures of the two models.
+
+\begin{figure}[!t]
+    \centering
+    \subcaptionbox{Mean $||x_t||_2$ across different recurrent layers during training in an 8-layer model.}{\includegraphics[width=0.48\linewidth]{depth_norms.pdf}}
+    \hfill
+    \subcaptionbox{Mean $||x_t||_2$ in a single layer network across 5 random seeds of training.}{\includegraphics[width=0.48\linewidth]{seed_norms.pdf}}
+    \caption{Average hidden state norm across training on ListOps for the LRU \citep{orvieto2023resurrecting} and \model. The standard deviation of the means is plotted in the error bars. We note that the error bars for \model are present, but are mostly too small to be visible.}
+    \label{fig:norms}
+\end{figure}
+
+\paragraph{Multihead \model as a special case of the LRU} In practice, ignoring skip connections, the LRU recurrent layer has 3 parameter matrices: $\Lambda$, a diagonal matrix of complex eigenvalues; $\tilde{B}$, a dense, complex input matrix; $\tilde{C}$, a dense, complex linear output projection. Consider the case where the learned eigenvalues of $A$ come in complex-conjugate pairs. In this case, the matrix $\Lambda$ can be written as a block diagonal matrix of $
+        \begin{pmatrix}
+       \nu_j\cos\theta_j & -\nu_j\sin\theta_j\\
+       \nu_j\sin\theta_j & \nu_j\cos\theta_j
+       \end{pmatrix}
+$, with $\tilde{B}$ and $\tilde{C}$ real matrices (see App. E of \cite{orvieto2023resurrecting} for details). If one assumes that $\tilde{B} = P^\top B$ and $\tilde{C} = CP$ for some block-diagonal orthogonal matrix $P$, then, up to normalisation, this is algebraically equivalent to the multi-head \model with $H=\frac{\dimx}{2}$ heads and the dimension of each head is $\dimh = 2$. This is because the parallel headed structure of the \model can be viewed as one big block-diagonal recurrent layer, with corresponding dimensions of $B$ that project onto each head being normalised independently, and the corresponding decay factors $\gamma^{(h)}$ modulating the eigenvalue magnitude as does $\nu_j$ in the LRU.
+
+Note that, despite being algebraically possible in the LRU theoretical framework, this exact special case of the LRU is unlikely to occur naturally in the practical algorithm proposed in \cite{orvieto2023resurrecting} (outlined in \Secref{sec:lru}). This is because the model would be required to learn that $\lambda_{1:\dimx}$ come in conjugate pairs, and the learned $P$ components of the input and output matrices to be the diagonalising matrix of the block-diagonal $A^{(1:H)}\in \reals^{\dimx \times \dimx}$ of the \model. However, we still believe that this view of the LRU as a decayed rotation-based block can help to uncover the mechanics of its linear recurrence.
+
+\paragraph{Normalisation differences}
+To compare the normalisation methods between the two algorithms, we give a brief overview of the derivation for the LRU normalisation constant found in \cite{orvieto2023resurrecting}. Assuming white-noise input, one can calculate the expected norm of the LRU hidden state: 
+\begin{align}
+     \av{||x_t||^2} &= \av {\left ( \sum_{i=1}^t \Lambda^i \Tilde{B} u_{t-i}\right)^{*}
+     \left ( \sum_{j=1}^t \Lambda ^j \Tilde{B}u_{t-j} \right)} \nonumber \\
+     &= \sum_{i=1}^t \sum_{j=1}^t \Tr \left [ \av{u_{t-i}^{*}\Tilde{B}^* {\Lambda^{i}}^*\Lambda^j \Tilde{B}u_{t-j}} \right ] \nonumber\\
+     &= \sum_{i=1}^t \sum_{j=1}^t \Tr[ \Tilde{B} \av{u_{t-j} u_{t-i}^{*}}\Tilde{B}^* {\Lambda^{i}}^*\Lambda^j ]  = \sum_{i=1}^t \Tr[\Tilde{B}\Tilde{B}^* {\Lambda^{i}}^*\Lambda^i] \label{eq:lru-norm-proof}
+\end{align}
+Since $\Lambda$ is diagonal, \Eqref{eq:lru-norm-proof} can be re-written into a summation of terms $b_k |\lambda_k|^2$, where $b_k$ is the squared norm of each row of $\Tilde{B}$, and $\lambda_k\in\comps$ is the $k$'th diagonal entry of $\Lambda$.
+Hence the expected norm becomes:
+\begin{align}
+     \av{||x_t||^2} &= \sum_{i=1}^t \sum_{k=1}^N b_k |\lambda_k|^{2i} = \sum_{k=1}^N b_k \sum_{i=1}^t |\lambda_k|^{2i} \xrightarrow[]{t=\infty} \sum_{k=1}^N b_k \frac{1}{1 - |\lambda_k|^2} \nonumber
+\end{align}
+To ensure a finite expected norm in the limit of $t\rightarrow\infty$, one can normalise the rows of $\Tilde{B}$ element-wise by $\sqrt{1 - |\lambda_k|^2}$.
+This is similar to the \model normalisation outlined in \Secref{sec:RotRNNnormalisation}, as the decay parameters $\gamma^{(h)}$ in each head essentially control the eigenvalue magnitude of the $h^{\text{th}}$ recurrent state matrix.
+Conversely, in \model the added $\trace{B^\top B}$ term applied independently across heads ensures that the expected norm of the recurrent state remains constant throughout the entire sequence, providing stronger guarantees than expected convergence at infinite sequence length.
+We do, however, use the same white-noise input assumption as in \citep{orvieto2023resurrecting}, which we hope to be able to overcome in future work for normalisation guarantees on more general input types.
+\subsection{State Space Models}
+The relationship between \model and other SSMs, namely S4 \citep{gu2021efficiently} and S5 \citep{smith2023simplified}, is perhaps less formally equivalent, but we can still draw comparisons between the structures of the recurrent layers. The S4 recurrence can be viewed as a stack of single-input-single-output (SISO) SSMs, whereby independent recurrent layers operate on each channel of the vector-valued input. The outputs of these independent SSMs are concatenated and passed through a ``mixing layer" to combine information.
+S5, on the other hand, uses a single multi-input-multi-output (MIMO) SSM as its recurrent layer, and as such does not require a separate mixing layer to share information across dimensions.
+The input-output structure of \model sits somewhere in-between S4 and S5. The use of multiple independent \model heads outlined in \Secref{sec:RotRNN} can be viewed as a stack of independent MIMO recurrent layers, in which the user may specify both the number of heads and the dimension of each head separately. Multiplication with the output matrix $C$ can be viewed as a linear mixing layer, combining information from the hidden states of each independent head. For more details on the SISO and MIMO views of S4 and S5, we direct the reader to \cite{smith2023simplified}.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+We evaluate the \model on several long sequence modelling datasets, comparing performance to state-of-the-art linear recurrent sequence models. \model performs competitively throughout, but particularly excels on very discrete input data (such as text). We also empirically analyse our normalisation procedure compared to that of the LRU across both deep and single-layer networks.
+
+\begin{table*}[t]
+\caption{Test accuracy on the LRA benchmark tasks. We follow the standard training procedures from \cite{gu2021efficiently}. Unless otherwise specified, we report the results of baseline methods from their respective citations.
+}
+\label{tab:lra-results}
+\begin{center}
+\begin{small}
+\begin{tabular}{lccccccc}
+\toprule
+Model & ListOps & Text & Retrieval & Image & Pathfinder & Path-X & Avg. \\
+(Input Length) & (2,048) & (4,096) & (4,000) & (1,024) & (1,024) & (16,384) & \\
+\midrule
+S4 \citep{gu2021efficiently} & 59.6 & 86.8 & 90.9 & \textbf{91.1} & 94.2 & 96.4 & 86.5 \\
+S4D \citep{gu2022parameterization} & 60.5 & 86.2 & 89.5 & 88.2 & 93.1 & 92.0 & 84.9 \\
+Liquid-S4 & \textbf{62.8} & 89.0 & 91.2 & 89.5 & 94.8 & 96.7 & 87.3 \\
+\citep{hasaniliquid} & & & & & & & \\
+S5 \citep{smith2023simplified} & 62.2 & 89.3 & \textbf{91.4} & 90.1 & \textbf{95.3} & \textbf{98.6} & \textbf{87.8} \\
+LRU \citep{axler2024linear} & 60.2 & 89.4 & 89.9 & 89.0 & 95.1 & 94.2 & 86.3 \\
+LRU (Our Reprod.) & 57.9 & 89.4 & 89.4 & 85.2 & 90.0 & 92.8 & 84.1 \\ 
+\midrule
+\model (Ours) & 61.1 & \textbf{89.6} & 89.9 & 85.9 & 93.0 & 89.2 & 84.8 \\
+\bottomrule
+\end{tabular}
+\end{small}
+\end{center}
+\label{tab:lra}
+\end{table*}
+
+\subsection{Long Range Arena}
+We evaluate the performance of \model on Long Range Arena (LRA) \citep{tay2020long}, a set of 6 sequence modelling tasks with sequence lengths between 1K and 16K tokens and varying data modalities. \tabref{tab:lra-results} shows the results for \model and other linear recurrent models for comparison, reporting the test accuracy at the highest validation accuracy throughout training. Overall, we find that \model performs competitively with other state-of-the-art linear recurrent models.
+In particular, we find that our model performs best on domains with more discrete input data, such as ListOps, Text and Retrieval, achieving the highest score of all the baselines in the IMDB classification task (Text). However, we also note that \model falls short of some of the baselines on the pixel-level image tasks, such as Path-X and Cifar. 
+
+\paragraph{Hidden State Norms}
+We plot the mean hidden state norm of the recurrent layers of the LRU and \model throughout training on the ListOps dataset in \Figref{fig:norms}. We find that the hidden states of the \model have an almost constant magnitude throughout training, with very little variance across layer depth or random initialisations.
+To contrast this, the LRU hidden state norms vary wildly across layer depth, and take far longer to converge (if ever) to a reasonably constant magnitude throughout training.
+Moreover, we see that the size and variance of the norms are significantly larger that those of the \model across random seeds in a single-layer network.
+\subsection{Raw Speech Classification}
+Since LRA \citep{tay2020long} is partly a synthetic benchmark, we further evaluate \model on a more natural long-sequence classification task: the Speech Commands dataset \citep{warden2018speech}. This dataset contains 1s waveforms of 35 spoken English words, sampled at 16kHz. The task is to classify the word from its given sampled waveform. The results are displayed in \tabref{tab:sc-results}. We find that \model performs identically well to the LRU \citep{orvieto2023resurrecting}, with a similar number of parameters. It also remains very competitive with other, more theoretically complex deep state space models.
+
+\begin{table*}[!h]
+\caption{Test accuracy on the 35-way Speech Commands classification task \citep{warden2018speech}. Unless otherwise specified, we report the results of baseline methods from their respective citations.}
+\label{tab:sc-results}
+\begin{center}
+\begin{small}
+\begin{tabular}{lcc}
+\toprule
+Model & Params. &  16kHz\\
+(Input Length) &  & (16,000) \\
+\midrule
+S4 \citep{gu2021efficiently} & 307K & 96.1  \\
+S4D \citep{gu2022parameterization} & 306K & 95.8  \\
+Liquid-S4 \citep{hasaniliquid} & 224K & \textbf{96.8} \\
+S5 \citep{smith2023simplified} & 280K & \textbf{96.8} \\
+LRU (Our Reprod.) & 283K & 95.2  \\
+\midrule
+\model (Ours) & 284K & 95.2  \\
+\bottomrule
+\end{tabular}
+\end{small}
+\end{center}
+\end{table*}
+
+
+
+\section{Related Work}
+
+\paragraph{Orthogonal Recurrent Networks}
+The use of orthogonal and rotation matrices in recurrent networks has been explored previously in non-linear RNNs. Unitary RNNs (uRNNs) \citep{arjovsky2016unitary, 10.5555/3305381.3305560} prevent blow-up in long sequences by parameterising recurrent matricies with unitary matrices (an extension of orthgonality to the complex field) to ensure an eigenvalue magnitude of 1. This idea has since been applied without the need for complex numbers \citep{helfrich2018orthogonal}, and has inspired works replacing recurrent operators in LSTMs with rotations \citep{dangovski2019rotational, velici2021rotlstm}. These methods, however, still suffer from the drawbacks of classical non-linear RNNs, such as inefficient computation of recurrent states during training when compared to associative-scan based linear models.
+
+\paragraph{Building on Linear Recurrent Models}
+Linear recurrent layers have recently been used as building blocks to construct more complex long sequence models. Two representative examples include Griffin \citep{de2024griffin} built on top of the LRU, and Mamba \citep{gu2023mamba} built on top of S4. The key to the success of both these models is \textit{gating} -- the ability to construct recurrent state matrices based on the current inputs to selectively control information flow. We believe that the \model could be used as a drop-in replacement for the LRU in Griffin, or be used to perform alternative gating strategies with input dependent rotations, but we leave this direction for future work. 
+
+
+
+\section{Conclusions and Future Work}
+
+In this paper we propose \model, a linear recurrent model that utilises the convenient properties of rotation matrices. We show that \model performs competitively with the state-of-the-art on long-range sequence modelling benchmarks, while providing a conceptually simple and efficient algorithm. \model remains faithful to its theoretical derivation throughout training, with a robust normalisation procedure that does not rely on complex initialisation.
+
+
+In addition, we hope that the concrete comparisons between our model and the LRU drawn in \Secref{sec:prior_work} can shed new light on the inner workings of the LRU and similar algorithms as multi-headed rotation-based linear recurrent networks. We point future investigations towards integrating \model into more complex architectures to test its downstream capacity on other domains, and implementing input dependent rotation transitions for gated rotational recurrence.
+
+
+
+
+
+
+

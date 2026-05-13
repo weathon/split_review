@@ -1,0 +1,322 @@
+\title{Unpacking SDXL Turbo: Interpreting Text-to-Image Models with Sparse Autoencoders}
+
+\begin{abstract}
+
+Sparse autoencoders (SAEs) have become a core ingredient in the reverse engineering of large-language models (LLMs). For LLMs, they have been shown to decompose intermediate representations that often are not interpretable directly into sparse sums of interpretable features, facilitating better control and subsequent analysis. However, similar analyses and approaches have been lacking for text-to-image models. We investigated the possibility of using SAEs to learn interpretable features for a few-step text-to-image diffusion models, such as SDXL Turbo. To this end, we train SAEs on the updates performed by transformer blocks within SDXL Turbo's denoising U-net. We find that their learned features are interpretable, causally influence the generation process, and reveal specialization among the blocks. In particular, we find one block that deals mainly with image composition, one that is mainly responsible for adding local details, and one for color, illumination, and style. Therefore, our work is an important first step towards better understanding the internals of generative text-to-image models like SDXL Turbo and showcases the potential of features learned by SAEs for the visual domain. Additionally, the provided demo application that allows to browse pre-trained SAE features and to edit the image generation process by modifying SAE feature coefficients.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Text-to-image generation is a rapidly evolving field. 
+The DALL-E model first captured public interest \citep {ramesh2021zero}, combining learned visual vocabularies with sequence modeling to produce high-quality images based on user input prompts. 
+Today's best text-to-image models are largely based on text-conditioned diffusion models~\citep{rombach2022highresolutionimagesynthesislatent,saharia2022photorealistic,podell2023sdxlimprovinglatentdiffusion,sauer2023adversarialdiffusiondistillation,betker2023improving,pernias2023wurstchen}. This can be partially attributed to the stable training dynamics of diffusion models, which makes them easier to scale than previous approaches such as generative adversarial neural networks~ \citep{dhariwal2021diffusionmodelsbeatgans}. As a result, they can be trained on internet scale image-text datasets like LAION-5B \citep{schuhmann2022laion} and learn to generate photorealistic images from text. 
+
+However, the underlying logic of the neural networks that enable the text-to-image pipelines we have today, due to their black-box nature, is not well understood. Unfortunately, this lack of interpretability is typical in the deep learning field. For example, advances in image recognition~\citep{krizhevsky2012imagenet} and language modeling~\citep{devlin2018bert,brown2020language} come mainly from scaling models~\citep{hoffmann2022training}, rather than from an improved understanding of their internals. Recently, the emerging field of mechanistic interpretability has sought to alleviate this limitation by reverse engineering visual models~\citep{olah2020overview} and transformer-based LLMs~\citep{rai2024practical}. At the same time, diffusion models have remained underexplored. 
+
+This work focuses on \turbo, a recent open-source few-step text-to-image diffusion model. We import methods from a toolbox originally developed for language models, which allows inspection of the intermediate results of the forward pass~\citep{chen2024selfie,ghandeharioun2024patchscope,cunningham2023sparse,bricken2023monosemantic}. Moreover, some of these methods even enable reverse engineering of the entire task-specific subnets~\citep{marks2024sparse}. In particular, \emph{sparse autoencoders (SAEs)}~\citep{yun2021transformer, cunningham2023sparse, bricken2023monosemantic} are considered a breakthrough in interpretability for LLMs. They have been shown to decompose intermediate representations of the LLM forward pass~-- often difficult to interpret due to \textit{polysemanticity}\footnote{A phenomenon where a single neuron or feature encodes multiple, unrelated concepts \citep{elhage2022toy}.}~-- into sparse sums of interpretable and monosemantic features. These features are learned in an unsupervised way, can be automatically annotated using LLMs~\citep{eleuther2023autointerp}, and facilitate subsequent analysis, for example, circuit extraction~\citep{marks2024sparse}.
+
+\mypar{Contributions} In this work, we investigate whether we can use SAEs to draw insights about the computation performed by the one-step generation process of \turbo, which is a recent open-source few-step text-to-image diffusion model. 
+
+To facilitate our analysis, we developed a library called \emph{SDLens} that allows us to cache and manipulate intermediate results of \turbo's forward pass. We use our library to create a dataset of \turbo's intermediate feature maps of several transformer blocks inside \turbo's U-net on 1.5M LAION-COCO prompts~\citep{schuhmann2022laion, schuhmann2022laioncoco}. 
+We then use these feature maps to train multiple SAEs for each transformer block. Finally, we perform a quantitative and qualitative analysis of the SAEs' learned features: 
+\begin{compactenum}
+\item We empirically show the potential of SAEs to learn highly interpretable features that causally affect the generation in \turbo\ (see Fig.~\ref{fig:fig1}).
+\item We develop visualization techniques to analyze the interpretability and causal effects of the learned features.
+\item We perform a case study in which we visualize and interpret the active features in different transformer blocks, 
+finding evidence that certain transformer blocks of \turbo's U-net specialize in \emph{image composition}, \emph{adding details}, and \emph{style}.\footnote{The blocks \texttt{down.2.1} and \texttt{up.0.1} have been already known in the community as ``composition'' and ``style'' blocks~\citep{youtube}. However, in this paper we provide the first thorough and fine-grained investigation of them.}
+\item We follow up our qualitative case study by designing multiple quantitative experiments showing that our hypotheses also hold up on larger sample sizes. 
+\item As part of our quantitative analysis, we create an automatic feature annotation pipeline for the transformer block, which appears responsible for \emph{image compositions}. 
+\end{compactenum}
+
+Thus, we show that SAEs learn interpretable features that causally affect \turbo's image generation process. Importantly, the learned features provide insight into the computational details of \turbo's forward pass, such as the different roles of the investigated transformer blocks. By open-sourcing our library and SAEs, we lay the foundation for further research in this area. 
+
+\mypar{Note on visualizations} Qualitative analysis by inspection of generated images is crucial for this type of research. Thus, we provide additional visualizations in the App. \ref{app:case-study-9} and \ref{app:featurecards}.
+
+
+
+\section{Background}
+
+\subsection{Sparse Autoencoders}\label{sec:sae}
+
+Let $h(x) \in \R^d$ be an intermediate result during a forward pass of a neural network on input $x$. In a fully connected neural network, $h(x)$ could correspond to a vector of neuron activations. In transformers, which are neural network architectures that combine attention with fully connected layers and residual connections, $h(x)$ could either refer to the content of the residual stream after a layer, an update to the residual stream by a layer, or a vector of neuron activations within a fully connected layer. 
+
+It has been shown~\citep{yun2021transformer,cunningham2023sparse,bricken2023monosemantic} that in many neural networks, especially LLMs, intermediate representations can be well approximated by sparse sums of $n_f \in \mathbb{N}$ learned feature vectors, i.e., 
+\begin{equation}\label{eq:decomposition}
+h(x) \approx \sum_{\rho = 1}^{n_f} s_{\rho}(x) \feat_{\rho},
+\end{equation}
+where $s_{\rho}(x)$ are the input-dependent  
+coefficients, most of which are equal to zero and $\feat_{1}, \dots, \feat_{n_f} \in \R^{d}$ is a learned dictionary of feature vectors. Importantly, the features are usually interpretable.
+
+\mypar{Sparse autoencoders} To implement the sparse decomposition from \eqref{eq:decomposition}, the vector $s$ containing the $n_f$ coefficients of the sparse sum, is parameterized by a single linear layer followed by an activation function, called the \emph{encoder},
+\begin{equation}
+    s = \enc(h) = \sigma(W^{\enc} (h - b_{\text{pre}}) + b_{\text{act}}),  
+\end{equation}
+in which $h \in \R^d$ is the latent that we aim to decompose, $\sigma(\cdot)$ is an activation function, $W^{\enc} \in \R^{n_f \times d}$ is a learnable weight matrix and $b_{\text{pre}}$ and $b_{\text{act}}$ are learnable bias terms. We omitted the dependencies $h = h(x)$ and $s = s(h)$, which are clear from the context.
+
+Similarly, the learnable features are parametrized by a single linear layer called \emph{decoder},
+\begin{equation}
+h' = \dec(s) = W^{\dec} s + b_{\text{pre}},
+\end{equation}
+in which $W^{\dec} = (\feat_1 | \cdots | \feat_{n_f}) \in \mathbb{R}^{d \times n_f}$ is a learnable matrix. Its columns take the role of learnable features and $b_{\text{pre}}$ is a learnable bias term. \footnote{An extended version of this section, including training details, is in the App.~\ref{app:sae}.}
+
+\subsection{Few-Step Diffusion Models: SDXL Turbo}
+\label{sec:diffusion}
+
+\turbo~\cite{sauer2023adversarialdiffusiondistillation} is a distilled version of Stable Diffusion XL~\cite{podell2023sdxlimprovinglatentdiffusion}, a powerful latent diffusion model. \turbo\ allows high-quality sampling in as few as 1-4 steps. It employs a denoising network implemented using a U-net similar to \citet{rombach2022highresolutionimagesynthesislatent}. 
+
+The U-net consists of a down-sampling path, a bottleneck, and an up-sampling path, each comprising one or more U-net blocks connected via up- and down-samplers. U-net blocks are built from residual networks, with some blocks incorporating multiple cross-attention transformer blocks while others do not. We refer to these transformer blocks by their short names (e.g., down.2.1, as illustrated in Fig.~\ref{fig:unet}). Each transformer block is composed of several basic transformer layers, each consists of self-attention, cross-attention, and MLP layers. 
+Importantly, the text conditioning is achieved via cross-attention to text embeddings performed by 11 transformer blocks embedded in the down-, up-sampling paths, and the bottleneck. An architecture diagram displaying the relevant blocks along with their names can be found in Fig.~\ref{fig:unet}. 
+
+\begin{figure}
+  \centering
+  \includegraphics[width=0.8\linewidth]{figures/sdxl.drawio.pdf}
+  \caption{Cross-attention transformer blocks in SDXL's U-net.}\label{fig:unet}
+\end{figure}
+
+
+
+\section{Sparse Autoencoders for SDXL Turbo}
+
+With the necessary definitions at hand, in this section we show a way to apply SAEs to \turbo. In the following, we assume that all SDXL Turbo generations are done using a 1-step process.
+
+\mypar{Where to apply the SAEs} We apply SAEs to updates performed within the cross-attention transformer blocks responsible for incorporating the text prompt (for details consider the App.~\ref{app:selecting-layers}). Each of these blocks consists of multiple transformer layers, which attend to all spatial locations (self-attention) and to the text prompt embeddings (cross-attention).
+
+Formally, the $\ell$th cross-attention transformer block updates its inputs in the following way  
+\begin{equation}
+\Doutl_{ij} = \Dinl_{ij} + \fl(\Dinl, c)_{ij},
+\end{equation}
+in which $\Dinl, \Doutl \in \mathbb{R}^{h \times w \times d}$ denote the residual stream before and after application of the $\ell$-th cross-attention transformer block respectively. The transformer block itself calculates the function 
+$\fl: \mathbb{R}^{h \times w \times d} \to \mathbb{R}^{h \times w \times d}$. 
+Note that we omitted the dependence on input noise $\z_t$ and text embedding $c$ for both $\Dinl(\z_t, c)$ and $\Doutl(\z_t, c)$.
+
+We train SAEs on the residual updates $\fl(\Dinl, c)_{ij} \in \mathbb{R}^d$ denoted by 
+\begin{equation}
+    \DDl_{ij} := \fl(\Dinl, c)_{ij} = \Doutl_{ij} - \Dinl_{ij}.
+\end{equation}
+
+That is, we jointly train one encoder $\encl$ and decoder $\decl$ pair per transformer block $\ell$ and share it over all spatial locations $i, j$. For notational convenience we omit block indices from now. We do this for the 4 (out of 11) transformer blocks (Fig.~\ref{fig:unet}) that we found have the highest impact on the generation, namely, \texttt{down.2.1}, \texttt{mid.0}, \texttt{up.0.0} and \texttt{up.0.1}.
+
+\mypar{Feature maps} We refer to $\DD \in \R^{h \times w \times d}$ as dense feature map and applying $\enc$ to all image locations results in the \emph{sparse feature map} $\F \in \R^{h \times w \times n_f}$ with entries
+\begin{equation}
+\F_{ij} = \enc (\DD_{ij}).
+\end{equation}
+We refer to the feature map of the $\rho$th learned feature using $\F^{\rho} \in \mathbb{R}^{h \times w}$. This feature map $\F^{\rho}$ contains the spatial activations of the $\rho$th learned feature. Its associated feature vector $\feat_{\rho} \in \R^{d}$ is a column in the decoder matrix $W^{\dec} = (\feat_{1} | \cdots | \feat_{n_f}) \in \R^{d \times n_f}$. Using this notation, we can represent each element of the dense feature map as a sparse sum 
+\begin{equation}
+    \DD_{ij} \approx \sum_{\rho = 1}^{n_f} \F^{\rho}_{ij} \mathbf{f}_{\rho}, \text{ with $\F^{\rho}_{ij} = 0$ for most $\rho \in \{1, \dots, n_f\}$.}
+\end{equation}
+
+\mypar{Training} In order to train an SAE for a transformer block, we collected dense feature maps $\DD_{ij}$ from \turbo\ one-step generations on 1.5M prompts from the LAION-COCO~\citep{schuhmann2022laioncoco}. Each feature map has dimensions of $16 \times 16$, resulting in a training dataset of 384M dense feature vectors per transformer block. For the SAE training process, we followed the methodology described in \citep{gao2024scaling}, using the TopK activation function and an auxiliary loss to handle dead features. For more details on the SAE training and for training metrics consider the App.~\ref{app:sae}.
+
+
+
+\section{Qualitative Analysis}
+
+
+In this section, we perform a visual qualitative analysis to gain deeper insight into the behavior and characteristics of the learned features across transformer blocks. First, we introduce feature visualization techniques and then use them to conduct a case study.
+For the sake of simplicity in the notation, we omit the transformer block index $\ell$.
+
+\subsection{Feature Visualization Techniques}
+
+We introduce our methods used for feature visualization used in Fig.~\ref{fig:prompt-top5}. Informally, given a feature, \textit{spatial activations} (denoted by \texttt{hmap}) highlight the regions of an image where the feature activates during generation process. \textit{Activation modulation} (A. columns) refers to the intervention process in which the feature activations are enhanced or diminished. This technique is used to demonstrate how the manipulation of a feature's value affects the generated image. Finally, \textit{empty-prompt interventions} (B. column) illustrate the isolated role of the feature by disabling all other features during generation conditioned on an empty prompt. In the remainder of this section, we provide formal definitions and details.
+
+\mypar{Spatial activations} 
+We visualize a sparse feature map $\F^{\rho} \in \R^{h \times w}$ containing activations of a feature $\rho$ across the spatial locations by up-scaling it to the size of the generated images and 
+ overlaying it as a heatmap over the generated images. In the heatmap, red indicates the highest feature activation, and blue represents the lowest non-zero one.
+
+\mypar{Top dataset examples} For a given feature $\rho$, we sort dataset examples according to their average spatial activation 
+\begin{equation}\label{eq:average_activation}
+    a_{\rho} = \frac{1}{w h} \sum_{i=1}^h \sum_{j=1}^w \F^{\rho}_{ij} \in \R.
+\end{equation}
+We use \eqref{eq:average_activation} to define the top dataset examples and to sample from the top 5\% quantile of the activating examples ($a_{\rho} > 0$). We will refer to them as top 5\% images for a feature $\rho$.
+
+Note that $\F^{\rho}_{ij}$ always depends on an embedding of the input prompt $c$ and input noise $\z_1$, via $S_{ij}(c, \z_1) = \enc(\DD_{ij}(c, \z_1))$, which we usually omit for ease of notation. As a result, $a_\rho$ also depends on $c$ and $z_1$.  
+When we refer to the top dataset examples, we mean our $(c, \z_1)$ pairs with the largest values for $a_\rho(c, \z_1)$. 
+
+\mypar{Activation modulation} We design interventions that allow us to modulate the strength of the $\rho$th feature. Specifically, we achieve this by adding or subtracting a multiple of the feature $\rho$ on all of the spatial locations $i,j$ proportional to its original activation $\F^{\rho}_{ij}$
+\begin{equation} \label{eq:act_mod_int}
+\DD_{ij}' = \DD_{ij} + \beta \F^{\rho}_{ij} \feat_{\rho},
+\end{equation}
+in which $\DD_{ij}$ is the update performed by the transformer block before and $\DD_{ij}'$ after the intervention, $\beta \in \R$ is a modulation factor, and $\feat_{\rho}$ is the $\rho$th learned feature vector. In the following, we will refer to this intervention as \emph{activation modulation intervention}.
+
+Note that $\F^{\rho}_{ij}$ can be also freely defined allowing for the application of sparse features to arbitrary images and spatial positions (refer to Fig.~\ref{fig:fig1} for examples).
+
+\mypar{Activation on empty context} Another way of visualizing the causal effect of features is to activate them while doing a forward pass on the empty prompt $c(\text{``''})$. To do so, we turn off all other features at the transformer block $\ell$ of intervention and turn on the target feature $\rho$. Formally, we modify the forward pass by setting
+
+\begin{equation} \label{eq:empty_cont_int}
+\Doutprime_{ij} = \Din_{ij} + \gamma k \mu_{\rho} \feat_{\rho},
+\end{equation}
+in which $\Doutprime_{ij}$ replaces residual stream plus transformer block update, $\Din_{ij}$ is the input to the block, $\feat_{\rho}$ is the $\rho$th learned feature vector, 
+$\gamma \in \R$ is a hyperparameter to adjust the intervention strength, and $\mu_{\rho}$ is a feature-dependent multiplier obtained by taking the average activation across positive activations of $\rho$ (collected over a subset of 50.000 dataset examples). Multiplying it by $k$ aims to recover the coefficients lost by setting the other features to zero. Further in the text, we will refer to this intervention as \emph{empty-prompt intervention}, and the images generated using this method with $\gamma$ set to $1$, as \emph{empty-prompt intervention images}.
+
+Note that we directly added/subtracted feature vectors to the dense vectors for both intervention types instead of encoding, manipulating sparse features, and decoding. This approach helps mitigate side effects caused due to reconstruction loss (see App.~\ref{app:sae-metrics}).
+
+\subsection{Top Features Activated by a Prompt}\label{sec:case-study-5}
+
+\begin{figure*}[ht!]
+    \centering
+    \begin{subfigure}[b]{0.45\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/compact5/down.pdf}
+        \caption{Top 5 features of \texttt{down.2.1}}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.45\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/compact5/up.pdf}
+        \caption{Top 5 features \texttt{up.0.1}}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.45\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/compact5/up0.pdf}
+        \caption{Top 5 features of \texttt{up.0.0}}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.45\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/compact5/mid.pdf}
+        \caption{Top 5 features of \texttt{mid.0}}
+    \end{subfigure}
+    \caption{The top 5 features of \texttt{down.2.1} (a), \texttt{up.0.1} (b),  \texttt{up.0.0} (c) and \texttt{mid.0} (d) for the prompt: ``A cinematic shot of a professor sloth wearing a tuxedo at a BBQ party.'' Each row represents a feature. The first column depicts a feature heatmap (highest activation red and lowest nonzero one blue). The columns with titles containing ``A'' show feature modulation interventions, those containing ``B'' the intervention of turning on the feature on the empty prompt, and the ones containing ``C'' depict top dataset examples. Floating point values in the title denote $\beta$ and $\gamma$ values.}\label{fig:prompt-top5}
+\end{figure*}
+
+Combining the feature visualization techniques in Fig.~\ref{fig:prompt-top5}, we depict the features with the highest average activation when processing the prompt: ``A cinematic shot of a professor sloth wearing a tuxedo at a BBQ party''. We present an analysis of the transformer blocks in order of decreasing interpretability. 
+
+\mypar{Down.2.1} The \texttt{down.2.1} transformer block appears to contribute to the image composition. Several features relate to the prompt: 4539 ``sloth'', 4751 ``a tuxedo'', 2881 ``party''. %(4608 ``BBQ party''?),
+
+Activation modulation interventions with negative $\beta$ (A. -6.0 columns) result in removing or changing scene objects in ways that align with the heatmap (hmap column) and the top examples (C columns): 1674 \emph{removes} the light chains in the back, 4608 the umbrellas/tents, 4539 the 3D animation-like sloth face, and, 4751 \emph{changes} the type of suit. Similarly, enhancing the same features (A. 6.0 column) makes the corresponding elements more visible and distinct. 
+
+Notably, activating the features on the empty prompt often creates meaningful images with related elements (B. column). For reference, with the fixed random seed we use, the empty prompt generation without interventions resembles a painting of a piece of nature with a lot of green and brown tones.
+
+While top dataset examples (C.0, C.1) and empty prompt intervention (B.) mostly agree with the feature activation heatmaps (hmap column), some of them provide additional insights, e.g., 2881, which activates on the suit, seems to correspond to (masqueraded) characters in a (festive) scene. 
+
+\mypar{Up.0.1} Based on our observations, the features of \texttt{up.0.1} appear to contribute to the style.
+
+Interestingly, turning on the \texttt{up.0.1} features on the empty prompt (B. column) results in texture-like images. Furthermore, the contribution of activation modulation interventions (A. columns) is highly localized and most of inactive image area remains unchanged. For the \texttt{up.0.1} we find it remarkable that often the features' ablations and amplifications are counterparts: 500 (light, shadow), 2727 (shadow, light), 3936 (blue, orange).
+
+\mypar{Up.0.0} For the third transformer block, \texttt{up.0.0}, we observe that most top dataset examples and their activations (C columns) are quite interpretable: 3603 corresponds to party decorations, 5005 to the upper part of a tent, 775 to buttons on a suit, 153 to the lower animal jaw, 1550 to collars. All the features exhibit an expected causal effect on the generation when ablated or enhanced (A. columns).
+
+The activation regions of the features often are very concentrated. Similarly to \texttt{up.0.1}, activation modulation interventions leave inactive image regions mostly unaffected. For the empty prompt, activating these features produces abstract-looking images that are hard to relate to the other columns. Thus, we excluded this visualization technique and instead added one more dataset example. In summary, the learned features of this transformer block primarily add local details to the generation and, importantly, they are effective only within a suitable context.
+
+\mypar{Mid.0} The specific role of the fourth block (\texttt{mid.0}) is not well understood. We find it more difficult to interpret because most interventions in the \texttt{mid.0} block have subtle effects. We did not include empty-prompt intervention results because they barely affect the generation. 
+
+Despite these subtle effects, dataset examples (C. columns) and heatmaps (hmap column) mostly agree with each other and are specific enough to be interpretable: 4755 activates on bottom right part of faces, 4235 on left part of (animal) faces, 1388 on people in the background, and, 5102 on outlines the left border of the main object in the scene. We hypothesize that \texttt{mid.0}'s features are more abstract, potentially encoding spatial location
+and relations between objects. 
+
+\mypar{Random feature visualizations} In the App.~\ref{app:featurecards}, we provide additional visualizations of  a sample of features by presenting their top activating examples and the effects of interventions.
+
+
+
+\section{Quantitative Evaluation}
+
+
+In this section, we follow up on qualitative insights by collecting quantitative evidence. 
+
+\subsection{Annotation Pipeline}
+
+Feature annotation with an LLM followed by further evaluation is a common way to assess feature properties such as specificity, sensitivity, and causality \citep{eleuther2023autointerp}.
+We found it applicable to the features learned by the \texttt{down.2.1} transformer block, which have a strong effect on the generation. Thus, they are amendable to automatic annotation using visual language models (VLMs) such as GPT-4o~\citep{openai_gpt4o_2024}. In contrast, for the features of other blocks with more subtle effects, we found VLM-generated captions to be unsatisfactory.
+In order to caption the features of  \texttt{down.2.1}, we prompt GPT-4o with a sequence of 14 images. The first five images are irrelevant to the feature (i.e., the feature was inactive during the generation of the images), followed by a progression of 4 images with increasing average activation values, and finished by five images with the highest average activation values. The last nine images are provided alongside their so-called ``coldmaps'': a version of an image with weakly active and inactive regions being faded and concealed.
+The prompt template and examples of the captions can be found in the App.
+
+\subsection{Experimental Details}
+
+We perform a series of experiments to get statistical insights into the features. We report the majority of the experimental scores in the format $M(S)$. When the score is reported in the context of a \turbo\ transformer block, it means that we computed the score for each feature of the block and set $M$ and $S$ to mean and standard deviation across the feature scores. Note that $S$ does not represent the error margin of $M$, as the actual error margin is much lower.\footnote{Given that $M$ is computed over a sample of $1280$ elements, the confidence interval of $M$ can be estimated as $M \pm S\cdot 0.055$.} Therefore, almost all the differences in the reported means are statistically significant. For the baselines, we calculate the mean and standard deviation across the scores of a 100-element sample.
+
+\begin{table}[h!]
+\centering
+\setlength{\tabcolsep}{3pt}
+\caption{Specificity, texture score, and color activation for different blocks and baselines.}
+\small
+\scriptsize
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Block} & \textbf{Specificity} & \textbf{Texture} & \textbf{Color} \\
+\midrule
+\texttt{Down.2.1}     & 0.71 (0.11) & 0.16 (0.02) & 86.2 (14.9) \\
+\texttt{Mid}          & 0.62 (0.11) & 0.14 (0.01) & 84.7 (16.3) \\
+\texttt{Up.0.0}       & 0.66 (0.12) & 0.18 (0.03) & 86.3 (16.5) \\
+\texttt{Up.0.1}       & 0.65 (0.11) & 0.20 (0.02) & 73.8 (20.6) \\
+\texttt{Random}       & 0.50 (0.10) & 0.13 (0.02) & 90.7 (54.9) \\
+\texttt{Same Prompt}  & 0.89 (0.06) & --          & --          \\
+\texttt{Textures}     & --          & 0.18 (0.02) & --          \\
+\bottomrule
+\end{tabular}
+\label{tab:transposed_metrics_blocks}
+\end{table}
+
+
+
+
+
+ 
+\mypar{Interpretability} Features are usually considered interpretable if they are sufficiently specific, i.e., images exhibiting the feature share some commonality. In order to measure this property, we compute the similarity between images on which the feature is active. High similarity between these images is a proxy for high specificity. For each feature, we collect 10 random images among top 5\% images for this feature and calculate their average pairwise CLIP similarity~\citep{radford2021learning, cherti2023reproducible}. This value reflects how semantically similar the contexts are in which the feature is most active. We display the results in the first column of Table~\ref{tab:transposed_metrics_blocks}, which shows that the CLIP similarity between images with the feature active is significantly higher then the random baseline (CLIP similarity between random images) for all transformer blocks. This suggests that the generated images share similarities when a feature is active.
+
+For \texttt{down.2.1} we compute an additional \emph{interpretability} score by comparing how well the generated annotations align with the top 5\% images. The resulting CLIP similarity score is $0.21\ (0.03)$ and significantly higher then the random baseline (average CLIP similarity with random images) $0.12\ (0.02)$. To obtain an upper bound on this score we also compute the CLIP similarity to an image generated from the feature annotation, which is $0.25\ (0.03)$.
+
+\mypar{Causality} We can use the feature annotations to measure a feature's causal strength by comparing the empty prompt intervention images with the caption.\footnote{We require feature captions for the causality and sensitivity analyses, we only have them for \texttt{down.2.1}.} The CLIP similarity between intervention images and feature caption is $0.19\ (0.04)$ and almost matches the annotation-based interpretability score of $0.21\ (0.03)$. This suggests that feature annotations effectively describe to the corresponding empty-prompt intervention images. Notably, the annotation pipeline did not use empty-prompt intervention images to generate captions. This fact speaks for the high causal strength of the features learned on \texttt{down.2.1}.
+
+\mypar{Sensitivity} A feature is considered sensitive when activated in its relevant context. As a proxy for the context, we have chosen the feature annotations obtained with the auto-annotation pipeline. For each learned feature, we collected the 100 prompts from a 1.5M sample of LAION-COCO with the highest sentence similarity based on sentence transformer embeddings of \texttt{all-MiniLM-L6-v2} \citep{reimers-2019-sentence-bert}. Next, we run \turbo\ on these prompts and count the proportion of generated images in which the feature is active on more than 0\%, 10\%, 30\% of the image area, resulting in $0.60\ (0.32)$, $0.40\ (0.34)$, $0.27\ (0.30)$ respectively, which is much higher than the random baseline, which is at $0.06\ (0.09)$, $0.003\ (0.006)$, $0.001\ (0.003)$. However, the average scores are $<1$ and thus not perfect. This may be caused by incorrect or imprecise annotations for subtle features and, therefore, hard to annotate with a VLM and \turbo\ failing to comply with some prompts. 
+
+\mypar{Relatedness to texture} In Fig.~\ref{fig:prompt-top5} the empty prompt interventions of the \texttt{up.0.1} features resulted in texture-like pictures. To quantify whether this consistently happens, we design a simple texture score by computing CLIP similarity between an image and the word ``texture''. Using this score, we compare empty-prompt interventions of the different transformer blocks with each other and real-world texture images. The results are in the second column of Table~\ref{tab:transposed_metrics_blocks} and suggest that empty-prompt intervention images of \texttt{up.0.1} and \texttt{up.0.0} resemble textures and some of the \texttt{down.2.1} images look like textures as well. For \texttt{up.0.0}, we did not observe any connection of these images to the top activating images. Interestingly, the score of \texttt{up.0.1} is higher than the one of the real-world textures dataset (\citet{cimpoi14describing}).
+
+\textbf{Color sensitivity.} In our qualitative analysis, we suggested that the features learned on \texttt{up.0.1} relate to texture and color. If this holds, the image regions that activate a feature should not differ significantly in color on average. To test that, we calculate the ``average'' color for each feature: this is a weighted average of pixel colors with the feature activation values as weights. To determine the average color of a each feature we compute it over a sample of 10 images of the feature's top 5\% images. Then, we calculate Manhattan distances between the colors of the pixels and the ``average'' color on the same images (the highest possible distance is $3\cdot255=765$). Finally, we take a weighted average of the Manhattan distances using the same weights. We report these distances for different transformer blocks and for the images generated on random prompts from LAION-COCO. We present the results in the third column of Table~\ref{tab:transposed_metrics_blocks}. The average distance for the \texttt{up.0.1} transformer block is, in fact, the lowest. 
+
+\begin{table}[h!]
+\centering
+\setlength{\tabcolsep}{3pt}
+\caption{Manhattan distances between original and intervened images at varying intervention strengths outside/inside of the feature's activation map.}
+\scriptsize
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Block} & \textbf{-10} & \textbf{-5} & \textbf{5} & \textbf{10} \\
+\midrule
+\texttt{Down.2.1} & 148.2 / 116.0 & 124.2 / 94.4  & 101.4 / 78.7  & 128.9 / 105.60 \\
+\texttt{Mid}      & 69.2 / 32.2   & 39.4 / 18.5   & 33.2 / 15.2   & 59.9 / 29.82   \\
+\texttt{Up.0.0}   & 105.3 / 38.4  & 77.7 / 23.7   & 63.6 / 23.3   & 88.6 / 37.08   \\
+\texttt{Up.0.1}   & 125.0 / 26.8  & 73.1 / 16.4   & 68.6 / 21.9   & 98.9 / 34.74   \\
+\bottomrule
+\end{tabular}
+\label{tab:transposed_metrics_blocks2}
+\end{table}
+
+\textbf{Intervention locality.} We suggested that features learned on \texttt{up.0.0} and \texttt{up.0.1} primarily influence local regions of the generation, with minimal effect outside the active areas. To test this, we measure changes in the top 5\% images inside and outside the active regions while performing activation modulation interventions. To exclude weak activation regions from consideration, a pixel is considered inside the active area if the corresponding patch has an activation value larger than 50\% of the image patches, and it is outside the active area if the corresponding patch has zero activation. Table~\ref{tab:transposed_metrics_blocks2} reports Manhattan distances between the original images and the intervened images outside and inside the active areas for activation modulation intervention strengths -10, -5, 5, 10. The features for \texttt{up.0.0} and \texttt{up.0.1} have a stronger effect inside the active area than outside, unlike \texttt{down.2.1} where the difference is smaller.
+
+
+
+\section{Related Work}
+
+
+In this section, we discuss relevant prior research.
+\mypar{Layer specialization in diffusion models} Similar to our findings on the roles of \turbo's transformer blocks, \cite{voynov2023p+, agarwal2023image, zhang2023prospect} observe specializations among the layers and denoising steps of text-to-image diffusion models as well. \citet{voynov2023p+} introduce layer-specific embeddings for the text conditioning and find that different sets of layers are more effective for influencing the generation of specific concepts such as styles or objects. For a selected set of image attributes (e.g., color, object, layout, style),  \citet{agarwal2023image} analyze which attributes are captured in which timestamp and layer. They also find that a subset of these attributes is often captured in the same layer and across the same denoising step. \citet{zhang2023prospect} observe that during the denoising process of diffusion models first the layout forms (in early timestamps), then the content, and finally the material and style.  
+
+In contrast to these prior works, our approach takes a fundamentally different perspective and does not rely on either handcrafted attributes or prompts. Instead, we introduce a new lens for analyzing \turbo's transformer blocks, which reveals specialization among the blocks as well. Interestingly, our findings on \turbo, which is a distilled, few-step diffusion model parallel \cite{zhang2023prospect}'s observations, which identify that composition precede material and style. In \turbo, this progression occurs across the layers instead of the denoising timestamps.
+
+\mypar{Analyzing the latent space of diffusion models}
+\citet{kwon2023diffusionmodelssemanticlatent} show that diffusion models have a semantically meaningful latent space. \citet{NEURIPS2023_4bfcebed} analyze the latent space of diffusion models using Riemannian geometry. \citet{Li_2024_CVPR} and \citet{ Dalva_2024_CVPR} present self-supervised methods for finding semantic directions. Similarly, \citet{gandikota2023conceptslidersloraadaptors} show that the attribute variations lie in a low-rank space by learning LoRA adapters \citep{hu2021loralowrankadaptationlarge} on top of pre-trained diffusion models. \citet{NEURIPS2023_4ff83037} and \citet{NEURIPS2023_6f125214} demonstrate effective semantic vector algebraic operations in the latent space of DMs, as observed by \citet{mikolov2013efficientestimationwordrepresentations}. % (the infamous "king - man + woman = queen"). 
+However, none of those works train SAEs to interpret and control the latent space.
+
+\mypar{Mechanistic interpretability} Sparse autoencoders have recently been popularized by \cite{bricken2023monosemantic}, in which they show that it is possible to learn interpretable features by decomposing neuron activations in MLPs in 2-layer transformer language models. At the same time, a parallel work decomposed the elements of the residual stream \citep{cunningham2023sparse}, which followed up on \citep{sharkey2022taking}. To our knowledge, the first work that applied sparse autoencoders to transformer-based LLM was \citep{yun2021transformer}, which learned a joint dictionary for features of all layers. 
+Recently, sparse autoencoders have gained much traction, and many have been trained even on state-of-the-art LLMs~\citep {gao2024scaling,templeton2024scaling,lieberum2024gemma}. In addition, great tools are available for inspection~\citep{neuronpedia} and automatic interpretation~\citep{eleuther2023autointerp} of learned features. 
+\cite{marks2024sparse} have shown how to use SAE features to facilitate automatic circuit discovery.% to find entire circuits connecting inputs to outputs in an interpretable way for specific language modelling tasks.
+
+ The studies most closely related to our work are \citep{bau2019gan}, \citep{ismail2023concept} and \citep{daujotas2024interpreting}. \citet{ismail2023concept} apply concept bottleneck methods \citep{koh2020concept} that decompose latent concepts into vectors of interpretable concepts to generative image models, including diffusion models. Unlike the SAEs that we train, this method requires labeled concept data. \citet{daujotas2024interpreting} decomposes CLIP~\citep{radford2021learning,cherti2023reproducible} vision embeddings using SAEs and use them for conditional image generation with a diffusion model called Kandinsky~\citep{razzhigaev2023kandinsky}. Importantly, using SAE features, they % show that SAE features allow to manipulate the CLIP embeddings and thereby the image generation process
+are able to manipulate the image generation process in interpretable ways. In contrast, in our work, we train SAEs on intermediate representations of the forward pass of \turbo. Consequently, we can interpret and manipulate \turbo's forward pass on a finer granularity, e.g., by intervening on specific transformer blocks and spatial positions. % at an arbitrary point in \turbo's forward pass.  
+Another closely related work to ours is \citep{bau2019gan}, in which neurons in generative adversarial neural networks are interpreted and manipulated. The interventions in \citep{bau2019gan} are similar to ours, but on neurons instead of sparse features. In order to identify neurons corresponding to a semantic concept, \cite{bau2019gan} require semantic segmentation maps. 
+
+
+
+\section{Conclusion and Discussion}
+
+We trained SAEs on \turbo's opaque intermediate representations. This study is the first in the academic literature to mechanistically interpret the intermediate representations of a modern text-to-image model. Our findings demonstrate that SAEs can extract interpretable features and have a significant causal effect on the generated images. Importantly, the learned features provide insights into \turbo's forward pass, revealing that transformer blocks fulfill specific and varying roles in the generation process. In particular, our results clarify the functions of \texttt{down.2.1}, \texttt{up.0.0}, and \texttt{up.0.1}. However, the role of \texttt{mid.0} remains less defined; it seems to encode more abstract information and interventions are less effective.
+
+We follow up with a discussion of the results and their implications for future research. Based on our observations, we suggest a preliminary hypothesis about \turbo's generation process: \texttt{down.2.1} decides on top-level composition, \texttt{mid.0} encodes low-level semantics, \texttt{up.0.0} adds details based on the two above, and \texttt{up.0.1} fills in color, texture, and style. 
+
+Our work focuses on analyzing \turbo's intermediate representations. As a relatively compact, few-step diffusion model with a small number of naturally partitioned components, \turbo\ turned out to be convenient to analyze with SAEs. However, the application of the proposed techniques to larger and more complex text-to-image diffusion models with alternative architectures represents a promising direction for further research. We provide some motivational results on PixArt LCM~\cite{chen2024pixart} in the App.~\ref{sec:pixart}. Additionally, we observe that SAE features learned on \turbo's one-step generation are applicable to modify few-step (2-4) generation workflow (App.~\ref{app:few-step}). 
+
+Analyzing larger diffusion models with higher number of diffusion steps would benefit from advanced interpretability techniques capable of capturing connections between its components and across denoising steps. For example, such techniques are explored in \cite{marks2024sparse, lindsey2024sparse}. \citet{marks2024sparse} compute circuits showing how different layers and attention heads wire together and \citet{lindsey2024sparse} introduce cross-coders, a variation of SAEs that allows to learn a shared set of features over latents corresponding to different layers. 
+
+Our work highlights the potential of SAEs in revealing the internal structure of diffusion models like \turbo, and it could help future researchers answer more sophisticated questions about image generation.
+
+
+

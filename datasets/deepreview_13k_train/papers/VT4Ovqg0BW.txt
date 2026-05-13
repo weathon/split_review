@@ -1,0 +1,277 @@
+\title{Functional-level Uncertainty Quantification for Calibrated Fine-tuning on LLMs}
+
+\begin{abstract}
+\begin{enumerate}
+From common-sense reasoning to domain-specific tasks, parameter-efficient fine tuning (PEFT) methods for large language models (LLMs) have showcased significant performance improvements on downstream tasks.  However, fine-tuned LLMs often struggle with overconfidence in uncertain predictions, particularly due to sparse training data. This overconfidence reflects poor epistemic uncertainty calibration, which arises from limitations in the model's ability to generalize with limited data. Existing PEFT uncertainty quantification methods for LLMs focus on the post fine-tuning stage and thus have limited capability in calibrating epistemic uncertainty. To address these limitations, we propose Functional-Level Uncertainty Quantification for Calibrated Fine-Tuning (UQ4CT), which captures and calibrates functional-level epistemic uncertainty during the fine-tuning stage via a mixture-of-expert framework. We show that UQ4CT reduces Expected Calibration Error (ECE) by more than $25\%$ while maintaining high accuracy across $5$ benchmarks. Furthermore, UQ4CT maintains superior ECE performance with high accuracy under distribution shift, showcasing improved generalizability.
+
+\end{enumerate}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large Language Models (LLMs) have revolutionized various domains as general task solvers \citep{chang2024survey}. To adapt LLMs for specific downstream tasks or create instruction-following models, fine-tuning have become increasingly important \citep{houlsby2019parameter,hu2021lora,liu2022few,ding2022delta,opendelta}. This involves additional training on pre-trained LLMs using a smaller dataset \citep{zhong2021adapting, ren2022out}. Through fine-tuning, the model parameters are updated to better adapt to the domain-specific knowledge \citep{peng2023instruction}. To reduce the computational cost for fine-tuning, \cite{hu2021lora} proposed Low-Rank Adaptation (LoRA), which effectively reduces the parameters required for fine-tuning by introducing low-rank trainable matrices at each layer of the transformer architecture instead of fine-tuning the full model parameters. \cite{li2024mixlora, wu2024mixture} proposed LoRA Mixture-of-Experts (MoE) models which grants better performance while maintaining parameter efficiency.
+
+However, previous studies have shown that fine-tuned LLMs are often overconfident with their predictions \citep{xiao2022uncertainty,he2023preserving,tian2023just,openai2023gpt4}. This resembles poorly calibrated uncertainty \citep{zhou2022survey} due to the sparsity of fine-tuning data. Overconfidence is a crucial problem in safety-related decision making or in fields where data is very limited, such as experimental design, climate science and medical diagnosis \citep{singhalLargeLanguageModels2022, wuBloombergGPTLargeLanguage2023, lampinenPassiveLearningActive2023, li2022pre}. Thus, methods that enhance uncertainty quantification of fine-tuned LLMs is urgently needed to assure trustworthy predictions for better application.
+Established uncertainty quantification methods have been studied in conjunction with the LoRA structure. Monte-Carlo dropout \citep{gal2016dropout} interprets dropout in neural networks as approximate Bayesian inference in deep Gaussian processes, allowing uncertainty estimates to be obtained from existing LoRA adapters without modifying them. Checkpoint ensemble \citep{chen2017checkpoint} utilizes predictions from multiple LoRA checkpoints saved during a single fine-tuning process to calibrate uncertainty. Deep ensemble \citep{lakshminarayanan2017simple,wang2023lora,zhai2023uncertainty} combines the predictions from multiple LoRA adapters for better uncertainty calibration. Laplace-LoRA \citep{yang2024bayesian} applies Bayesian inference via Laplace approximation to the LoRA parameters after fine-tuning, resulting in improved calibration and uncertainty estimates.
+Although these methods have demonstrated improved uncertainty estimations, they all 
+utilize a fixed set of LoRA parameters fine-tuned over the entire downstream task dataset. The point estimates of parameters have very limited capabilities in capturing epistemic uncertainty, while direct calibration of epistemic uncertainty over the entire LoRA parameter space is an ideal but not practical approach. 
+Therefore, we propose Functional-Level Uncertainty Quantification for Calibrated Fine-Tuning (UQ4CT) to calibrate the functional-level epistemic uncertainty via the LoRA MoE architecture. We propose a functional perspective on LoRA parameters where we treat the LoRA experts as basis functions and consider the more complex, prompt dependent functions as mixtures of those basis functions.
+On top of learning the parameters in the LoRA experts, UQ4CT also trains a prompt-dependent LoRA mixture to form a calibrated distribution over the functional space. The LoRA experts capture different functional relationships in the fine-tuning data throughout training, and the MoE routers dynamically select these functional bases conditioned on the input. The selection process models the functional level epistemic uncertainty, and consequently captures the uncertainty in the output space.  We calibrate functional level epistemic uncertainty to align with predictive correctness during training time. %, which balances the expert exploration and exploitation.
+This significantly improves uncertainty estimations of the model on its predictions without compromising the accuracy. To summarize, our contributions include:
+\begin{itemize}
+    \item A novel epistemic uncertainty quantification approach with Mixture-of-Experts architecture during fine-tuning stage to model functional level epistemic uncertainty and align with predictive correctness, which mitigates overconfidence issue and improves generalizability.
+    \item A novel training calibration loss function incorporating predictive correctness to calibrate the prompt-dependent LoRA mixture for better uncertainty estimation.
+    \item More than $25\%$ Expected Calibration Error reduction on $4$ common-sense reasoning tasks and $1$ domain-specific question answering task, superior ECE performance under distribution shift scenarios on $2$ common-sense reasoning tasks and $4$ domain-specific question answering tasks without compromising accuracy. 
+\end{itemize}
+
+
+
+\section{Preliminaries}
+
+\subsection{Low-rank Adaptation (LoRA)}
+LLMs have numerous large weight matrices to perform matrix multiplication, denoted as $\W_0 \in \mathbb{R}^{\nout\times\nin}$ that maps inputs $\mathbf{x}$ to outputs $\mathbf{h}$. \cite{hu2021lora} proposes LoRA, which fixes $\W_0$ and introduces a low-rank perturbation $\Delta \W$ to the weight matrix:
+
+\begin{align}  \label{eq:lora}
+  \mathbf{h} &= \W_0 \x + \Delta \W \x = \W_0 \x + \B \A \x.
+\end{align}
+
+Here, $\Delta \W$ is calculated as the product of two matrices, $\B \in \mathbb{R}^{\nout\times\nlr}$ and $\A\in\mathbb{R}^{\nlr\times \nin}$ where $\nlr$ is significantly smaller than $\nin$ or $\nout$. For example, we use $\nlr = 32$ while $\nin = \nout = 4096$ for the Llama2-7b model \citep{touvron2023llama2}. Therefore, the total number of LoRA parameters for this $\Delta \W$ is $\nlr (\nin + \nout)$, which is far smaller than the parameter count of the full matrix, $\nin\nout$. One of the key motivations of incorporating LoRA to fine-tune LLMs is the vast amount of memory cost reduction compared with fine-tuning on the full model. For an LLM with $7$ billion parameters, maintaining the average gradient
+and average squared gradients for optimization multiplies the memory required by a factor of $3$ compared to simply loading model weights. LoRA greatly mitigates this memory cost as the tripled memory consumption only applies to LoRA adapters.
+
+\subsection{Mixture of Experts (MoE)}
+
+LoRA Mixture-of-Experts \citep{li2024mixlora, wu2024mixture} is a efficient approach to scale the number of parameters while maintaining the same computational bounds. LoRA MoE utilizes the top-k router to assign each token to the LoRA experts \citep{lepikhingshard}. The router is a linear layer that maps the input hidden state $\mathbf{h}$ to a probability distribution of candidate experts. 
+
+Let $\mathbf{h}^\ell_i \in \mathbb{R}^{1\times d}$ $(1 \leq i \leq s, 1 \leq \ell \leq L)$ denote the output hidden state of the $i$-th token at the $\ell$-th layer of the LLM, where $L$ is the number of LLM layers and $d$ is the hidden dimension. With $\mathbf{W}_r^\ell$ as the trainable router weight at layer $\ell$, the top-k gate router chooses $k$ experts with highest probability given a hidden state $\mathbf{h}_i^\ell$:
+\begin{equation} \label{eq:moe_router}
+    R^\ell(\mathbf{h}^\ell_i) = \text{KeepTop-k}(\text{Softmax}(\mathbf{W}^\ell_r \cdot \mathbf{h}_i^\ell)).
+\end{equation}
+Finally, we obtain the final MixLoRA prediction with:
+\begin{equation} \label{eq:moe_out}
+    \text{MixLoRA}(\mathbf{h}^\ell) = \sum_{k=1}^K R^\ell(\mathbf{h}^\ell)_k E^\ell_k(\mathbf{h}^\ell), \quad E^\ell_k(\mathbf{h}^\ell) = \mathbf{W}^\ell \cdot \mathbf{h}^\ell + \mathbf{B}^\ell_i \mathbf{A}^\ell_i \cdot \mathbf{h}^\ell
+\end{equation}
+where $\mathbf{W}$ is the pretrained weights of the feed-forward network (FFN) layer and $\mathbf{B}^\ell_i \mathbf{A}^\ell_i$ is the i-th LoRA expert.
+
+\subsection{Aleatoric and Epistemic Uncertainties}
+In machine learning models, uncertainty can be categorized into aleatoric (data-wise) and epistemic (model-wise) uncertainty \citep{hora1996aleatory, hullermeier2021aleatoric}. For LLMs, aleatoric uncertainty arises from the inherently ambiguous and context dependent nature of natural languages where a single phrase or sentence can have multiple valid interpretations in different contexts. Epistemic uncertainty is introduced by the model's lack of knowledge due to limited learning capabilities, suboptimal modeling or sparse training data. 
+Epistemic uncertainty is highly related to several well-known limitations of generative models. For example, it has been observed that when an LLM is pretrained on a diverse range of text data, it is generally well-calibrated, i.e. the predicted probability of the next token generally aligns with what is observed in real text. However, after fine-tuning or alignment with human preferences, the calibration error deteriorates \citep{zhao2021calibrate, achiam2023gpt}. A related phenomenon is forgetting, where the performance of a fine-tuned LLM diminishes on tasks outside the scope of the target downstream task \citep{lin2023speciality,luo2023empirical}. 
+
+Motivated by these observations, we explore functional-level epistemic uncertainty in generative models and aim to develop metrics that assess model performance on specific problem instances to fine-tune the parameter mixture. 
+
+
+
+
+\section{Methodology}
+
+The high level goal of UQ4CT is to balance the exploration and exploitation of different LoRA experts during fine-tuning. In particular, we incorporate the functional-level epistemic uncertainty (FEU) to calibrate the prompt-dependent parameter mixture with LoRA MoE. 
+
+Assume that our answer $a$ is generated via a mixture of mechanisms or models $M$, conditioning on the input prompt $x$. Assume that $e(a)$ is an embedding of $a$ so that least squares distance is a natural distance on the space of $e(a)$. For an expressive enough model class $\mathcal{M}$, and a calibrated distribution $P(M|x)$ over the model class, we can measure the deviation of the generated answer to the ``ideal'' one $a_* = f_*(x)$ as:
+\begin{align} \label{eq:uncertainty}
+    & \mathbb{E}_{M\sim P(M|x)} \left[ \mathbb{E}_{a\sim P(a|M,x)} \left[ \|e(a) - e(a_*)\|^2 \right] \right] \nonumber \\
+    & = \mathbb{E}_{P(M|x)} \underbrace{\left[\mathbb{E}_{P(a|M,x)} \left[ \|e(a) - \mathbb{E}_{P(a|M,x)}[e(a)]\|^2 \right]\right]}_{\text{Aleatoric Uncertainty}}  + \underbrace{\mathbb{E}_{P(M|x)} \left[ \|\mathbb{E}_{P(a|M,x)}[e(a)] - e(a_*)\|^2 \right]}_{\text{Epistemic Uncertainty}}.
+\end{align}
+Note that we hereby quantify uncertainty as a function of the input prompt $x$, since the distribution of model $M$ conditions on $x$. 
+We hence name the task ``functional-level uncertainty quatification''.
+
+\subsection{Functional-level Epistemic Uncertainty}
+
+\begin{figure*}[t!]
+  \centering
+  \includegraphics[width=1\linewidth,trim={0, 0, 0, 0}]{figures/Struct.pdf}
+  \caption{Mixture of Experts (MoE) architecture to capture and calibrate functional-level epistemic uncertainty. Experts $B_{1...N}A_{1...N}$ capture functional relationships in the data throughout fine-tuning, the weights $w_{1...N}|h$ quantify the uncertainty in selecting these functional bases conditioned on the input hidden state $h$, which is the semantic representation of the input token $x$. In the UQ4CT workflow, we align this uncertainty with predictive correctness. When the router makes a correct prediction, the loss reinforces this decision, thereby increasing the router confidence in its selection, which aligns with a lower epistemic uncertainty. Conversely, when the router makes an incorrect prediction, the loss penalizes this selection, potentially causing the router to distribute its probabilities more broadly across experts, which is indicative of higher epistemic uncertainty.}
+    \label{fig:Struct}
+\end{figure*}
+
+Motivated by the decomposition in Eq. (\ref{eq:uncertainty}) for least squares loss, we may consider a general distance $d$, and define epistemic uncertainty that characterizes the variation caused by model training procedure. Specifically, we focus on the variation introduced in the model fine-tuning
+stage of LLMs. Mathematically, given prompt $x$, we consider the following definition of epistemic uncertainty:
+\begin{align} \label{eq:epistemic}
+    \text{Epistemic Uncertainty} = \mathbb{E}_{M\sim P(M|x)} \mathbb{E}_{M'\sim P(M'|x)} \left[\|\mathbb{E}_{P(a|M,x)}[e(a)] - \mathbb{E}_{P(a'|M',x)}[e(a')]\|^2) \right].
+\end{align}
+
+\subsection{Quantifying FEU with LoRA MoE Framework}
+We quantify the functional-level epistemic uncertainty (FEU) with the MoE architecture, which is represented by the embedding $e(a)$ in Eq. (\ref{eq:epistemic}). As shown in Figure \ref{fig:Struct}, the LoRA experts $B_{1...N}A_{1...N}$ capture important functional relationships in the data during fine-tuning. 
+We treat these functions represented by the LoRA experts as basis functions. 
+Conditional on the input prompts, the more complex functional relationships that recursively map inputs to outputs are represented as linear combinations (mixture of experts) of the basis functions.
+Uncertainty quantification in this functional space reduces to quantifying the uncertainty of the weights over the basis functions.
+In particular, the weights $w_{1...N}|h$ from the top-k router dynamically selects these basis functions conditioned on the input hidden state $h$. The top-k weights that produce the final output hidden state quantify the functional level epistemic uncertainty in the function selection.
+
+In this mixture of LoRA experts architecture, we follow the routing mechanisms of the MoE layers as in Eq. (\ref{eq:moe_router}) and (\ref{eq:moe_out}). 
+Specifically, we employ top-2 gate routers, which chooses the $2$ experts with highest probability given a hidden state $\mathbf{h}_i^\ell$:
+\begin{equation}
+    R^\ell(\mathbf{h}^\ell_i) = \text{KeepTop-2}(\text{Softmax}(\mathbf{W}^\ell_r \cdot \mathbf{h}_i^\ell)).
+\end{equation}
+
+Given an input prompt $x$ with length $s$, we model functional-level epistemic uncertainty (FEU) by aggregating $R^\ell(\mathbf{h}^\ell_i)$ over both layer dimension and sequence dimension: 
+\begin{equation}
+    \text{FEU}(x) = \frac{1}{s}\sum^s_{i=1}\left[\frac{1}{L}\sum^{L}_{\ell=1}R^\ell(\mathbf{h}^\ell_i)\right]
+\end{equation}
+
+\subsection{Training Calibration Loss}
+
+We then calibrate the FEU model of the epistemic uncertainty against predictive accuracy.
+Specifically for the MoE top-k routers, we design the following calibration loss for training:
+\begin{equation}
+    \mathcal{L}_{\mathrm{cal}} = \left\|\mathbbm{1}{\{\text{MixLoRA}(x) = y^*\}} - \text{FEU}(x) \right\|^2,
+\end{equation}
+where the first term is an indicator function of whether the model prediction matches the ground truth $y^*$ given the prompt $x$.
+As shown in Figure \ref{fig:Struct}, this term effectively promotes expert exploitation for correct predictions and expert exploration for incorrect predictions by directly calibrating the functional level epistemic uncertainty to align with the predictive correctness. Therefore, this calibrated training loss ensures that the router's certainty aligns more closely with the actual confidence the model should have given the available data and its knowledge state. Thus, it effectively calibrates the router’s decisions in line with epistemic uncertainty.
+
+Load balancing is a common technique to ensure even exploitation across experts with the MoE architecture \citep{fedus2022switch}.
+We follow the load balancing loss $\mathcal{L}_b$ proposed by \citep{li2024mixlora} and define our loss function as:
+\begin{equation}
+    \mathcal{L} = \mathbf{CE} + \alpha \cdot \mathcal{L}_b + \beta \cdot \mathcal{L}_{\mathrm{cal}},
+\end{equation}
+where $\mathbf{CE}$ represents cross entropy loss, $\alpha$ and $\beta$ are the hyperparameters of two auxiliary terms.
+
+
+\section{Related Work}
+
+\subsection{Parameter-Efficient Fine Tuning for LLMs}
+Large Language Models \citep{Brown2020LanguageMA, Chowdhery2022PaLMSL, Hoffmann2022TrainingCL, Touvron2023LLaMAOA, Touvron2023Llama2O} have shown impressive abilities in handling various natural language processing tasks. Building on these advances, instruction fine-tuning\citep{Chung2022ScalingIL, Iyer2022OPTIMLSL, zheng2023judging} has enhanced LLMs' capacity to comprehend and follow human instructions, forming the core of modern conversational AI systems\citep{wu2023brief, gpt4}. However, as LLMs increase in size, the fine-tuning process demands much more time and memory.
+
+To address these challenges, several strategies have been proposed, including parameter-efficient fine-tuning (PEFT)\citep{peft}, model distillation\citep{Liu2023LLMQATDQ, Xiao2023OffsiteTuningTL}, quantization\citep{Frantar2022GPTQAP, Xiao2022SmoothQuantAA}, and pruning\citep{Frantar2023SparseGPTML, Ma2023LLMPrunerOT}. Among these, LoRA\citep{Hu2021LoRALA}, which leverages low-rank matrix decomposition of linear layer weights, is a widely adopted PEFT technique that boosts model performance without adding computational costs during inference. For example, VeRA\citep{kopiczko2024vera} introduces learnable scaling vectors to modify shared pairs of frozen random matrices across layers, while FedPara\citep{hyeonwoo2023fedpara} focuses on low-rank Hadamard products for federated learning settings. Tied-Lora\citep{renduchintala2023tiedlora} applies weight tying to further minimize the number of trainable parameters. AdaLoRA\citep{zhang2023adalora} uses Singular Value Decomposition (SVD) to prune less important singular values for efficient updates, and DoRA\citep{liu2024dora} separates pre-trained weights into magnitude and direction components, applying LoRA to update the directional component during fine-tuning, thus reducing the number of parameters to be trained.
+
+\subsection{Mixture of Experts}
+The Mixture-of-Experts concept\citep{Jacobs1991AdaptiveMO}, introduced as early as 1991, presented a novel supervised learning framework where multiple networks (experts) specialize in handling distinct subsets of training data. Modern MoE variants adapt this by modifying the traditional feed-forward sub-layer within transformer blocks, incorporating sparsely activated LoRA experts, which allows for significant expansion in model width without a proportional increase in computational overhead. 
+
+Different MoE architectures have since emerged, distinguished by their expert sampling and routing strategies. For example, LLaVA-MoLE\citep{chen2024llavamole} improves token routing to domain-specific experts within transformer layers, reducing data conflicts and consistently outperforming standard LoRA baselines. Other MoE-based approaches include MoRAL\citep{yang2024moral}, which focuses on efficiently adapting LLMs to new domains and tasks for lifelong learning, and LoRAMoE\citep{dou2024loramoe}, which incorporates LoRAs via a router network to mitigate the issue of world knowledge forgetting. PESC\citep{wu2024parameterefficient} transforms dense models into sparse ones through an MoE structure, lowering computational and GPU memory requirements. MoE-LoRA\citep{luo2024moelora} introduces a new parameter-efficient MoE method using Layer-wise Expert Allocation (MoLA) for transformer models, while MoCLE\citep{gou2024mixture} activates task-specific model parameters based on instruction clusters. MixLoRA \citep{li2024mixlora} implements a high-throughput framework for LoRA MoE training and inference process, constructing LoRAs as stochastic experts to reduce computational overhead while expanding model capacity.
+
+Despite the performance improvements these architecture advancements have brought, the overconfidence problem of fine-tuned models is lacking attention \citep{xiao2022uncertainty,he2023preserving,tian2023just,openai2023gpt4}. Enhancing the uncertainty estimation capabilities of these models is fundamental toward more reliable, interpretable and trustworthy applications of LLMs.
+
+\subsection{Uncertainty Quantification in LLMs}
+Uncertainty quantification has garnered substantial attention in various tasks and domains within neural networks\citep{Gal2015, Gal2016, malinin2018predictive, ovadia2019trust, malinin2021uncertainty, 2022arXiv220514334L, kuhn_semantic_2023, 2023arXiv230519187L}. This focus extends to LLMs, where the precise quantification of prediction uncertainty has become a critical area of research\citep{xiao-etal-2022-uncertainty, 2022arXiv220514334L, mielke-etal-2022-reducing, chen2023quantifying, duan2023shifting, huang_look_2023}. LLMs, particularly in generative tasks, pose unique challenges, especially when it comes to measuring the uncertainty of their outputs\citep{liu2019roberta, malinin_uncertainty_2021, kuhn_semantic_2023, 2023arXiv230519187L}. The distinction between aleatoric and epistemic uncertainty was recently examined in the context of LLMs\citep{hou2023decomposing}, though this was approached by ensembling model inputs rather than model instances and did not address fine-tuning tasks specifically.
+
+Existing works have investigated the application of ensembling in fine-tuning LLMs for uncertainty quantification. \cite{gleave2022uncertainty, sun2022quantifying} focus on uncertainty estimation in full model fine-tuning, while this approach inherently incurs significant memory overhead. \cite{wang2023lora, zhai2023uncertaintypenalized, balabanov2024uncertainty} explore the use of LoRA ensembles for uncertainty estimation in LLMs. \cite{yang2024bayesian} applies a post-hoc Laplace approximation~\cite{MacKay1992} to model LoRA parameters after fine-tuning. BatchEnsemble\citep{wen2020batchensemble}, introduces component-specific rank-1 matrices as multiplicative modifications to a base model. Though this method has been applied to LLMs, it has been used in the pre-training phase rather than fine-tuning\citep{tran2022plex}. None of these methods provide calibrations on epistemic uncertainty, which is crucial to mitigate overconfidence in the fine-tuning stage given the sparse dataset.
+
+ 
+
+
+
+
+\section{Experiments}
+
+\subsection{Datasets}
+
+We include $5$ multiple-choice question answering benchmarks to evaluate UQ4CT: OpenBookQA (OBQA, \cite{OpenBookQA2018}), ARC-Easy (ARC-E) and ARC-Challenge (ARC-C) from AI2 Reasoning Challenge \citep{clark2018think}, BOOLQ \citep{clark2019boolq} and ClimateQA, an expert-annotated domain specific benchmark for climate science. We also use computer science, law, medication and engineering subsets from MMLU dataset\citep{hendrycks2020measuring} to evaluate performance under distribution shift. We fine-tune on the publicly available training split and test on the validation split from these benchmarks to evaluate model performance.
+
+\begin{table*}[t!]
+\small
+\centering
+\caption{Performance comparison of different methods fine-tuned with LlaMA2-7B across $4$ common sense reasoning tasks and a domain-specific task. UQ4CT shows significant ECE improvements while maintaining high accuracy.}
+\label{table:id_train}
+\begin{tabular}{l|| l |l l l l l }
+Metrics & Methods & BoolQ & ARC-E & ARC-C & OBQA & ClimateQA \\
+\hline
+\hline
+\multirow{6}{*}{ACC $\uparrow$} \rule{0pt}{2.25ex}
+& LoRA    & $69.5_{1.93}$ & $74.8_{1.39}$ & $53.8_{0.6}$ & $72.1_{0.87}$ & $59.9_{2.13}$ \\
+& MC Drop & $66.8_{3.66}$ & $76.8_{1.30}$ & $50.9_{2.01}$ & $74.8_{1.34}$ & $58.2_{2.11}$ \\
+& Ensemble   & $66.2_{3.7}$ & $71.2_{1.0}$ & $47.5_{0.57}$ & $75.5_{1.4}$ & $59.6_{6.9}$ \\
+& LA    & $68.7_{1.32}$ & $74.6_{2.11}$ & $51.4_{0.83}$ & $70.8_{1.24}$ & $55.2_{3.29}$ \\
+& MixLoRA   & $71.5_{1.05}$ & $77.7_{2.27}$ & $54.3_{1.07}$ & $75.5_{2.91}$ & $61.6_{1.76}$ \\
+\rule{0pt}{2.25ex}
+& UQ4CT  & $73.5_{0.52}$ & $76.6_{1.30}$ & $52.8_{1.77}$ & $77.3_{1.36}$ & $63.3_{1.74}$\\
+\hline\hline
+\multirow{6}{*}{ECE $\downarrow$} \rule{0pt}{2.25ex}
+& LoRA    & $11.9_{0.78}$ & $11.9_{2.04}$ & $19.4_{4.75}$ & $10.2_{1.07}$ & $14.3_{0.64}$ \\
+& MC Drop    & $12.2_{0.85}$ & $11.9_{1.99}$ & $19.8_{4.85}$ & $10.9_{0.24}$ & $14.3_{0.56}$ \\
+& Ensemble   & $7.28_{2.3}$ & $9.1_{1.49}$ & $10.23_{1.39}$ & $8.83_{2.35}$ & $13.5_{3.29}$ \\
+& LA   & $17.1_{1.72}$ & $16.6_{3.7}$ & $18.1_{0.5}$ & $17.2_{1.2}$ & $12.6_{1.9}$ \\
+& MixLoRA   & $7.88_{2.09}$ & $9.09_{0.81}$ & $10.74_{1.07}$ & $12.9_{1.99}$ & $12.5_{1.32}$ \\
+\rule{0pt}{2.25ex}
+&UQ4CT  & $\mathbf{2.3_{0.82}}$ & $\mathbf{6.0_{0.2}}$ & $\mathbf{6.1_{1.11}}$ & $\mathbf{5.0_{1.15}}$ & $\mathbf{8.1_{0.52}}$ \\
+\end{tabular}
+\end{table*}
+\subsection{Experiment Setup}
+We implement UQ4CT with PyTorch \citep{paszke2019pytorch}, extending the MixLoRA repository in \citep{li2024mixlora} and compare the average performance in three random runs and report the mean and standard deviation with following baselines. We use the publicly available LLaMA-2-7B-hf \citep{touvron2023llama2} as our base model. In particular, we apply MixLoRA to query, key, value and output layers, together with the feed-fowrward networks in LLaMA-2-7B-hf (gate layer, down layer and up layer)
+
+\begin{itemize}
+    \item \textbf{LoRA}\citep{hu2021lora}. We use standard LoRA fine-tuning as lower performance bound.
+    \item \textbf{Monte Carlo (MC) Dropout}\citep{gal2016dropout} keeps dropout on at both training and testing time. By performing multiple forward passes, MC dropout randomly shuts down a portion of model nodes, producing ensemble-alike predictions. To combine LoRA fine-tuning with MC dropout, we apply dropout on the input of the LoRA adapter, following the implementation of \cite{peft}.
+    \item \textbf{Deep Ensemble}\citep{lakshminarayanan2017simple} averages the predictions from each ensemble member which have been trained with varying random initialization. We combine deep ensemble with LoRA by fine-tuning $3$ randomly initialized LoRAs together and ensembling their output as final predictions.
+    \item \textbf{Laplace-LoRA (LA)}\citep{yang2024bayesian} applies a post-hoc Laplace approximation on fine-tuned LoRA parameters for better uncertainty estimation. 
+    \item \textbf{MixLoRA}\citep{li2024mixlora} incorporates LoRAs via a router network to reduce computational overhead while expanding model capacity. We add this as a baseline to resemble plain LoRA MoE model performance.
+\end{itemize}
+
+\paragraph{Evaluation Metrics.} We measure the prediction accuracy on the validation set for all $5$ tasks. For uncertainty calibration, we incorporate expected calibration error (ECE, \cite{guo2017calibration}) with bin size of $15$, which measures the alignment between predicted probabilities and empirical accuracy. We also investigate model performance under distribution shift to ensure the model has predictable behavior when given data from other domains as this is a crucial component for real-world applications. Specifically, we test models fine-tuned on OBQA dataset with $4$ domain-specific MMLU subtask ensembles focusing on different professionalities and ARC-E/C datasets to approximate larger and smaller distribution shifts.
+
+\subsection{Results}
+We assess the prediction accuracy and uncertainty calibration of models under both in-distribution and distribution shift scenarios. The in-distribution scenario examines the alignment of the fine-tuned model on the target downstream task, while the distribution shift scenario evaluates the generalizability of the model on novel tasks beyond the fine-tuned domain. These two scenarios combined provides a comprehensive assessment of model robustness in real-world applications where it is essential for the model to excel on its primary task while maintaining the ability to effectively handle unforeseen or out-of-distribution inputs.
+\begin{table}[t]
+\small
+\centering
+\caption{Performance comparison of different methods fine-tuned on OBQA dataset with LlaMA2-7B across $2$ smaller distribution shift (DS) tasks and $4$ larger distribution shift tasks. UQ4CT shows significant ECE improvements while maintaining high accuracy.}
+\label{table:DS_test}
+\begin{tabular}{l|| l | l | l l | l l l l}
+ & & \multicolumn{1}{c|}{ID} & \multicolumn{2}{c|}{Smaller DS} & \multicolumn{4}{c}{Larger DS} \\
+\rule{0pt}{2.25ex}
+Metrics & Methods & OBQA & ARC-C & ARC-E & CS & Eng & Law & Health \\
+\hline\hline
+\multirow{6}{*}{ACC $\uparrow$}
+\rule{0pt}{2.25ex}
+& LoRA & $72.1_{0.87}$ & $58.6_{1.93}$ & $66.5_{3.38}$ & $35.5_{2.35}$ & $30.8_{1.72}$ & $34.9_{1.41}$ & $39.1_{1.52}$ \\
+& MC Drop & $74.8_{1.34}$ & $58.7_{2.07}$ & $66.6_{3.30}$ & $36.0_{1.69}$ & $30.3_{2.25}$ & $35.1_{0.86}$ & $39.1_{1.35}$ \\
+& Ensemble & $75.5_{1.4}$ & $57.7_{0.78}$  & $69.1_{0.48}$ & $36.7_{2.18}$ & $30.3_{1.13}$ & $35.3_{1.02}$ & $39.9_{1.89}$ \\
+& LA & $70.8_{1.24}$ & $58.7_{0.58}$ & $67.9_{0.41}$ & $33.7_{1.22}$ & $29.6_{1.32}$ & $35.4_{0.75}$ & $38.5_{1.61}$ \\
+& MixLoRA & $75.5_{2.91}$ & $58.5_{1.44}$ & $69.2_{1.02}$ & $35.2_{2.92}$ & $30.3_{0.98}$ & $35.9_{0.43}$ & $40.6_{1.13}$ \\
+\rule{0pt}{2.25ex}
+& UQ4CT & $77.3_{1.36}$ & $58.8_{1.06}$ & $65.8_{1.31}$ & $36.2_{1.24}$ & $34.1_{2.31}$ & $35.8_{1.01}$ & $40.0_{1.24}$ \\
+\hline\hline
+\multirow{6}{*}{ECE $\downarrow$}
+\rule{0pt}{2.25ex}
+& LoRA & $10.2_{1.07}$  & $16.7_{2.28}$ & $13.3_{2.48}$ & $29.7_{2.69}$ & $32.3_{1.85}$ & $29.2_{3.08}$ & $31.0_{2.13}$ \\
+& MC Drop & $10.9_{0.24}$  & $16.7_{2.20}$ & $13.2_{2.21}$ & $23.2_{2.32}$ & $31.6_{1.64}$ & $28.0_{2.93}$ & $25.9_{2.27}$ \\
+& Ensemble & $8.83_{2.35}$ & $15.1_{1.09}$ & $11.1_{0.99}$ & $22.4_{1.32}$ & $28.5_{2.13}$ & $29.0_{1.37}$ & $24.5_{0.39}$ \\
+& LA & $17.2_{1.2}$  & $16.2_{0.5}$ & $24.4_{0.42}$ & $28.6_{2.61}$ & $30.5_{1.43}$ & $29.5_{1.83}$ & $30.7_{1.2}$  \\
+& MixLoRA & $12.9_{1.99}$ & $19.0_{1.88}$ & $14.5_{2.57}$ & $26.4_{3.25}$ & $33.7_{1.87}$ & $30.3_{2.27}$ & $28.3_{1.07}$ \\
+\rule{0pt}{2.25ex}
+& UQ4CT & $\mathbf{5.0_{1.15}}$ & $\mathbf{8.9_{3.46}}$ & $\mathbf{6.5_{1.85}}$ & $\mathbf{19.6_{2.90}}$ & $\mathbf{23.1_{1.17}}$ & $\mathbf{25.9_{3.43}}$ & $\mathbf{21.9_{3.49}}$ \\
+\end{tabular}
+\end{table}
+
+\subsubsection{In-distribution Performance}
+We first evaluate UQ4CT and baseline models fine-tuned on the $4$ common sense reasoning tasks and the climate question answering task under the in-distribution scenario, where models are trained and evaluated on different splits of the same dataset. Note that one of the key advantages of UQ4CT is that uncertainty calibration happens during the fine-tuning stage with little computational overhead, while other UQ methods require repetitive sampling or other post-hoc complexities. 
+
+As shown in Table \ref{table:id_train}, UQ4CT demonstrates notable improvements in uncertainty calibration across a variety of tasks. Across all benchmarks, UQ4CT maintains competitive accuracy (ACC) compared to the baseline methods. For example, on the BoolQ and ClimateQA datasets, UQ4CT achieves accuracy rates of $73.5\%$ and $63.3\%$, respectively. This empirically demonstrates that UQ4CT is capable of maintaining high accuracy with uncertainty calibration, which assures the gain in UQ performance does not compromise accuracy. 
+
+The most significant performance improvement is observed in the reduction of Expected Calibration Error (ECE). UQ4CT consistently outperforms other methods, reducing ECE by more than $25\%$ on average across the evaluated benchmarks. Unlike other methods where the ECE performance is worsened on the more challenging ARC-C benchmark, UQ4CT achieves an ECE score of $6.1$, showcasing the effectiveness of the calibration. This improvement is critical in applications where the model’s confidence must align with its predictive accuracy given limited data, particularly in safety-critical and domain-specific tasks.
+
+\subsubsection{Performance Under Distribution Shift}
+Due to the sparse nature of the fine-tuning data, real world deployment of LLMs often requires the model to be robust to out-of-distribution knowledge \citep{ouyang2022training,touvron2023llama,touvron2023llama2}. Therefore, we evaluate the performance of UQ4CT along with other baseline models fine-tuned on the OBQA dataset under smaller and larger distribution shift scenarios. Similar to the dataset setup in \citep{yang2024bayesian}, we use ARC-C and ARC-E dataset to simulate smaller distribution shift because the ARC dataset has similar domain focus on general science reasoning, but is generally more challenging and covers a broader range of scientific topics than OBQA. For larger distribution shift, we ensemble the domain-specific MMLU subtasks into $4$ benchmarks focusing on different professionalities: Computer Science (CS), Engineering (Eng), Law and Health. These tasks have very broad coverage of the domain task at various knowledge levels ranging from elementary school to professionals. This domain-specificity demonstrates larger distribution shift from OBQA, which is a general common sense reasoning task. \ref{app:OOD}. 
+The distribution shift evaluations are provided in Table \ref{table:DS_test}. UQ4CT provides significant improvements in terms of ECE while maintains similar accuracy for both smaller and larger distribution shift scenarios. For smaller distribution shifts, UQ4CT shows comparable ECE performance as the in-distribution scenario. For the more challenging larger distribution shifts, UQ4CT still achieves the best ECE performance among all baseline models. Note that UQ4CT also achieves competitive prediction accuracy across all domain-specific tasks. This empirically shows that our proposed alignment of the functional epistemic uncertainty with predictive correctness improves generalizability and mitigating the overconfidence problem on the fine-tuned model. 
+
+
+\subsection{Ablation Study}
+\subsubsection{Incremental Weighting on Calibration Term}
+Due to the random initialization of LoRA experts, the predictions during early fine-tuning stage are likely to be incorrect as the model has little knowledge on the functional relationships regarding the data. Thus, it is intuitive to incrementally increase the weight parameter $\beta$ over the calibration term $\mathcal{L}_{\mathrm{cal}}$ in the training loss for the LoRA experts to learn before calibration. We conduct this study by incrementally increase $\beta$ from $0$ to $1$ within $50$ gradient steps during the early stage of fine-tuning:
+\begin{equation}
+    \beta = \min\left\{1, \frac{\mathrm{current\_grad\_step}}{50}\right\}.
+\end{equation}
+We choose $50$ gradient steps from our observation that training loss generally stabilizes after $50$ gradient steps, indicating the LoRA experts have learned some functional relationships from data.
+
+As shown in Table \ref{table:ablation}, the incremental loss has significantly worse ECE performance across all tasks. This demonstrates the advantage of uncertainty calibration even in the early stage. In the beginning, the lack of functional relationships on the training data in LoRA experts lead to high epistemic uncertainty. Thus, UQ4CT encourages exploration over all LoRA experts while UQ4CT\_Incremental lacks it due to the small weighting in the beginning. 
+\begin{table*}[t]
+\small
+\centering
+\caption{Performance comparison of UQ4CT with and without incremental weighting. Incremental weighting has worse ECE performance while maintains similar accuracy.}
+\label{table:ablation}
+\begin{tabular}{l|| l |l l l l l } Metrics & Methods & BoolQ & ARC-E & ARC-C & OBQA & ClimateQA \\ \hline \hline \multirow{1}{*}{ACC $\uparrow$} \rule{0pt}{2.25ex} & UQ4CT & $73.5_{0.52}$ & $76.6_{1.30}$ & $52.8_{1.77}$ & $77.3_{1.36}$ & $63.3_{1.74}$ \\ & UQ4CT\_Incremental & $72.0_{0.19}$ & $75.4_{0.81}$ & $54.6_{0.95}$ & $77.6_{0.43}$ & $60.2_{3.17}$ \\ \hline\hline \multirow{1}{*}{ECE $\downarrow$} \rule{0pt}{2.25ex} & UQ4CT & $\mathbf{2.3_{0.82}}$ & $\mathbf{6.0_{0.2}}$ & $\mathbf{6.1_{1.11}}$ & $\mathbf{5.0_{1.15}}$ & $\mathbf{8.1_{0.52}}$ \\ & UQ4CT\_Incremental & $4.0_{0.16}$ & $9.8_{1.51}$ & $13.8_{2.08}$ & $10.3_{1.73}$ & $12.2_{0.88}$ \\ \end{tabular}
+
+\end{table*}
+
+
+\section{Discussion \& Conclusion}
+
+In this work, we propose Functional-Level Uncertainty Quantification for Calibrated Fine-Tuning (UQ4CT), which addresses the overconfidence issues commonly encountered during fine-tuning of large language models. We present a functional perspective on quantifying epistemic uncertainty in LLMs and utilize it for uncertainty-calibrated fine-tuning. By incorporating functional-level epistemic uncertainty quantification with a mixture-of-experts framework, our proposed uncertainty-calibrated training loss effectively addresses the challenge of overconfidence in fine-tuned LLMs by significantly improving uncertainty calibration while maintaining high accuracy. Our evaluations demonstrate that UQ4CT reduces the Expected Calibration Error by more than 25\% without compromising accuracy across a variety of downstream tasks, including common-sense and domain-specific reasoning, under in-distribution and out-of-distribution scenarios.
+
+The limitation of UQ4CT lies in its dependency on predictive correctness. For general language modeling tasks such as chat completion, there lacks a clear metric on whether the response is correct or not. This limits the application of UQ4CT as naively token matching is a poor indicator of semantic correctness due to the ambiguous nature of language. For future work, we plan to continue exploring ways to adapt UQ4CT on open-ended problems that lacks a definitive metric. 
+
+
+\subsubsection*{Reproducibility Statement}
+
+
+
+

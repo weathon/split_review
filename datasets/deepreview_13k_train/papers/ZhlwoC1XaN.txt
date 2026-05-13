@@ -1,0 +1,384 @@
+\title{From Zero to Turbulence: Generative Modeling for 3D Flow Simulation}
+
+\begin{abstract}
+  \looseness=-1
+  Simulations of turbulent flows in 3D are one of the most expensive simulations in \CFD{}.
+  Many works have been written on surrogate models to replace numerical solvers for fluid flows with faster, learned, autoregressive models.
+  However, the intricacies of turbulence in three dimensions necessitate training these models with very small time steps, while generating realistic flow states requires either long roll-outs with many steps and significant error accumulation or starting from a known, realistic flow state—something we aimed to avoid in the first place.
+  Instead, we propose to approach turbulent flow simulation as a generative task directly learning the manifold of all possible turbulent flow states without relying on any initial flow state.
+  For our experiments, we introduce a challenging 3D turbulence dataset of high-resolution flows and detailed vortex structures caused by various objects and derive two novel sample evaluation metrics for turbulent flows.
+  On this dataset, we show that our generative model captures the distribution of turbulent flows caused by unseen objects and generates high-quality, realistic samples amenable for downstream applications without access to any initial state.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\extrafootertext{Find code and data at \url{https://cs.cit.tum.de/daml/generative-turbulence}.}
+
+\Ac{CFD} is an integral component of engineering today, and significant computing resources are spent on it every day at scales small and large. Engineers simulate fluid flows to maximize the throughput in chemical plants, optimize the energy yield of wind turbines, or improve the efficiency of aircraft engines \citep{reguly2016acceleration}. The widespread use of these simulations makes their acceleration with machine learning highly impactful \citep{raissi2019physicsinformed, rackauckas2021universal, kochkov2021machine, li2021fourier}.
+
+A \CFD{} simulation consists of a discretized geometry represented as a grid or mesh, boundary conditions that specify, for example, the position and behavior of walls and inlets, and initial conditions that provide a known state of the flow. Since the turbulent flow's behavior is unknown, these initial conditions are usually specified as constants or smooth approximations of the expected flow. To produce realistic turbulent states, a numerical solver solves the Navier-Stokes equation
+\begin{equation}\label{eq:navier-stokes}
+  \frac{\partial \vu}{\partial t} = \nu\nabla^2\vu - \frac{1}{\rho}\nabla p - (\vu \cdot \nabla)\vu
+\end{equation}
+forward in time until the flow transitions from the simplified initial conditions to fully developed turbulence. The equation describes the relationship between velocity $\vu$ and pressure $p$ for a viscous fluid with kinematic viscosity $\nu$ and constant density $\rho$. For liquids, \cref{eq:navier-stokes} is often supplemented with the incompressibility assumption $\nabla \cdot u = 0$, and we do so, too.
+
+While numerical solvers can simulate most kinds of flows to high precision, large simulations can be very slow, especially in \threed{}.
+A prominent approach to accelerate these simulations is to emulate the numerical solver with autoregressive models parameterized by neural networks.
+Many works have demonstrated formidable speedups in \twod{} for scenarios of varying complexity and all kinds of models of this class \citep{horie2022physicsembedded, pfaff2021learning, shu2023physicsinformed, yang2023denoising, janny2023eagle, obiols-sales2020cfdnet, zhao2022learning, kochkov2021machine, wang2020physicsinformed, li2021fourier, brandstetter2022message} and several benchmark datasets for the \twod{} Navier-Stokes equation have been published in recent years \citep{bonnet2022airfrans, gupta2022multispatiotemporalscale, takamoto2022pdebench, otness2021extensible}.
+In comparison, \threed{} results are much sparser in terms of models \citep{stachenfeld2022learned} as well as datasets \citep{takamoto2022pdebench, li2008public}, even though \threed{} simulations offer the highest acceleration potential because of their enormous computational costs.
+
+Autoregressive models usually outperform numerical solvers by taking larger time steps without diverging.
+However, in \threed{}, turbulent flows exhibit a stark difference to their \twod{} counterparts hampering this strategy.
+Because short-lived, small-scale vortices drive the chaotic turbulence in 3D to a much higher degree, their behavior needs to be modeled, which limits the size of the time step of an autoregressive model.
+At the same time, the complete replacement of the numerical solver requires the model to evolve the flow from the solver's initial state until a turbulent flow state has fully developed, which can require hundreds of steps and lead to catastrophic error accumulation.
+
+However, in many applications, practitioners use numerical simulations not to explore one specific solution trajectory through time but as a proxy to explore the distribution of possible flow states.
+For example, in design optimization, an engineer might be interested in the possible size, length, and energy of vortices caused by an object, such as an airplane wing, but not in the exact evolution of one particular vortex.
+In other applications, the formation of certain patterns, such as jets, or the location of stagnation points on the boundary of an object, where the flow velocity is zero, might be important.
+We conclude that many use cases can be solved by independent snapshots of possible flow states just as well as with a classical numerical simulation.
+
+In this paper, we take an entirely different direction to autoregressive models and propose a generative approach to turbulent flow simulation by directly learning the manifold of all possible turbulent flow states.
+This way, we overcome the problem of long roll-outs of autoregressive models and skip the initial transition phase as well as all the intermediate states that a numerical solver has to generate to produce a diverse set of flow states.
+
+Our contributions can be summarized as follows:
+\begin{itemize}
+\item We present a novel \threed{} turbulence dataset with challenging geometries and systematically investigate the specific challenges of forecasting \threed{} turbulent flows compared to \twod{}.
+\item We propose to approach \threed{} turbulence simulation as a generative task to overcome the roll-out dilemma of autoregressive models. In doing so, we derive an appropriate generative diffusion model and evaluation metrics.
+\item We verify experimentally that our model captures the distribution of turbulent flows, generalizes to unseen geometries and generates high-quality, realistic samples amenable for downstream application, ultimately eliminating the reliance on numerical solvers.
+\end{itemize}
+
+
+
+\section{Turbulence in Two and Three Dimensions}
+
+
+\begin{wrapfigure}[13]{r}{2.5in}
+  \centering
+  \includegraphics{figures/comparison-2d-3d}
+  \caption{The same simulation exhibits vastly different qualities when the solver operates in three dimensions compared to two.}\label{fig:2v3}
+\end{wrapfigure}
+For a complete introduction to turbulent flows, we refer the reader to \citep{pope2000turbulent} and \citep{mathieu2000introduction}. \citep{ouellette2012turbulence} gives a great overview of the differences between \twod{} and \threed{} turbulence.
+
+In principle, one can solve the incompressible Navier-Stokes-\cref{eq:navier-stokes} in two spatial dimensions just as well as in three.
+However, when we compare the resulting flow fields of two simulations in \cref{fig:2v3} that only differ in that one simulation domain extends into the third dimension, it becomes obvious that some effect must be exclusive to \threed{} fluid flows.
+The \threed{} data exhibits many small-scale features, while the two-dimensional flow field is dominated by relatively smooth and orderly large-scale structures.
+But why is that?
+
+\looseness=-1
+One of the defining features of turbulence in \threed{} is the energy cascade, a process that moves kinetic energy from large-scale vortices to ever smaller scales until it is finally directly converted to thermal energy at the molecular scale.
+The main drivers of this process are two effects called vortex stretching and strain self-amplification \citep{carbone2020vortex}.
+Together, they are responsible for the continued creation of vortex structures at all scales and the high-frequency features characteristic of \threed{} turbulence.
+
+In two dimensions, both of those effects vanish mathematically, ultimately due to the fact that the vorticity \smash{$\vomega = \nabla \times \vu$}, which describes the local rotationality of the flow, is orthogonal to the velocity gradient in \twod{}.
+As a consequence, the energy cascade is only driven by a weaker interaction effect between vorticity and strain, which inverts the energy cascade \citep{johnson2021role}.
+The inverted energy cascade, in contrast to \threed{}, transports energy from the small to the large scales and creates more homogeneous, long-lived structures.
+
+Temporally, the lifetime of vortex structures depends on their size, with smaller structures decaying faster than larger ones \citep{lozano-duran2014Timeresolved}.
+From a machine learning perspective, this means that \emph{forecasting the future trajectory of a fluid simulation in \threed{} requires smaller time steps than for \twod{} data} to resolve the nonlinear behavior of small-scale features under the Navier-Stokes equation.
+
+
+
+\section{Autoregressive Forecasting in 3D}
+
+
+Autoregressive models are popular surrogate models for numerical solvers of time-dependent \PDEs{} and, in particular, the Navier-Stokes equation, as they promise faster runtimes than full simulations.
+They emulate numerical solvers by learning to predict the next state from the current state and, optionally, a set of previous states, which enables approximating fluid dynamics over time via an iterative roll-out.
+While autoregressive models offer advantages, i.e.\ faster evaluation, ease of parallelization, and the ability to use larger time steps, their possible runtime improvement is directly limited by how many solver steps the model can compress into one model evaluation.
+
+\noindent
+\begin{minipage}{.475\textwidth}
+  \centering
+  \includegraphics{figures/regression-mse-1-step}
+  \captionof{figure}{1-step forecast MSE of \( u \) increases at a rate comparable to Gaussian smoothing of states to remove small-scale features.}\label{fig:mse-1-step}
+\end{minipage}\hfill%
+\begin{minipage}{.475\textwidth}
+  \centering
+  \includegraphics{figures/regression-mse-roll-out}
+  \captionof{figure}{Error accumulates quickly for longer roll-outs even when the time step is sufficiently small.}\label{fig:mse-roll-out}
+\end{minipage}
+
+As described in \cref{sec:turbulence}, \threed{} turbulent flows contain many small-scale features that evolve nonlinearly on short timescales.
+In our experiment shown in \cref{fig:mse-1-step}, we have trained a \dilresnet{} on one-step-ahead prediction with varying step size \smash{$\Delta t$}.
+While the model achieves a very small error for the smallest time step, the one-step forecasting error grows as we increase the time step that we train the model for.
+Notably, the error curve aligns closely with the curve resulting from smoothing of the target with a Gaussian kernel of increasing width.
+By smoothing the velocity field with a Gaussian kernel of variance \smash{$\sigma^{2}$}, we remove features of scale approximately $\sigma$ and below.
+The alignment of the curve then indicates that the model trained to predict \smash{$\Delta t$} ahead fails to predict features below a cut-off scale $\sigma$ that scales linearly with \smash{$\Delta t$}.
+In fact, visual inspection of the forecasts reveals that the model makes increasingly smooth predictions as the model's time step increases.
+Conversely, this means that the model needs to be trained and evaluated with a very small time step to even have a chance to forecast fully resolved future states of \threed{} turbulent flows over multiple steps.
+
+Ultimately, modeling \threed{} turbulent flow simulations poses an inescapable dilemma for autoregressive models.
+On the one hand, turbulent flows exhibit significant small-scale behavior that is important to the overall behavior of the flow because of backscattering effects from small to large scales, which requires models to be trained with a small step size.
+On the other hand, these simulations need to be forecast for hundreds of steps into the future to traverse the transition phase from an initial simulation state to a fully developed turbulent flow, which necessitates long roll-outs.
+However, autoregressive models trained with smaller step sizes and, consequently, more roll-out steps suffer from more error accumulation in their forecasts, cf. \cref{fig:mse-roll-out}.
+Conversely, models trained with large time steps accumulate less error but start with large amounts of error from the first step.
+
+
+
+\section{Generative Modeling for 3D Turbulent Flows}
+
+
+We have seen that forecasting \threed{} turbulent flows with their chaotic nature and many small-scale, short-lived features is challenging, in particular for autoregressive models.
+Given their chaotic nature and sensitivity to infinitesimal perturbations, turbulent flows can be understood as stochastic processes \citep{pope2000turbulent}, i.e.\ the solution trajectory $\{(\vu, p)_{t}\}_{t \in \R^{+}}$ given some initial conditions follows the distribution $\p(\{(\vu, p)_{t}\}_{t \in \R^{+}} \mid \vu_{0}, p_{0})$.
+Yet, many applications do not require an exact trajectory but rather a selection of turbulent flow states that represent the set of all possible flows well.
+Thus, we propose to circumvent the roll-out dilemma of autoregressive models by modeling the marginal distribution $\E_{t}[\p((\vu, p)_{t} \mid \vu_{0}, p_{0}, t)] = \p((\vu, p) \mid \vu_{0}, p_{0})$ directly, capturing the distribution of turbulent flows with a generative model.
+
+\subsection{Generative turbulence simulation}
+
+Consider a simulation domain \smash{$\Omega \subset \R^{3}$} with boundary conditions \smash{$\bcs$} and initial conditions \smash{$\vu^{(0)} : \Omega \to \R^{3}$}, \smash{$p^{(0)} : \Omega \to \R$} for velocity and pressure, where $\bcs$ is chosen such that the flow becomes turbulent.
+The fields \smash{$\vu_{\mathrm{sol}} : \R^{+} \times \Omega \to \R^{3}$} and \smash{$p_{\mathrm{sol}} : \R^{+} \times \Omega \to \R$} solving the Navier-Stokes-\cref{eq:navier-stokes} describe the resulting, turbulent flow.
+In the following, we define \smash{$\data = (\vu \parallel p)$} to denote the concatenation of velocity and pressure.
+Now we define the probability distribution over all attained flow states after a time $t$,
+\begin{equation}
+  \p_{\ge t}(\data \mid \data^{(0)}, \bcs) = \lim_{T \to \infty} \E_{t' \in [t, T]} \left[ \delta_{\data_{\mathrm{sol}}(t')} \right].
+\end{equation}
+If the initial state \smash{$\data^{(0)}$} is not turbulent, there is a transition phase of length $t_{\mathrm{turb}}$ depending on the domain geometry and \smash{$\data^{(0)}$} until turbulence is fully developed.
+Beyond this point, the distribution becomes, remarkably, independent of the initial state, i.e. \smash{$\p_{\ge t_{\mathrm{turb}}}(\data \mid \data^{(0)}, \bcs) = \p_{\ge t_{\mathrm{turb}}}(\data \mid \bcs)$}, because of the often assumed ergodicity of turbulence \citep{galanti2004turbulence}, which says that a turbulent flow will visit all possible flow states.
+Based on this insight, we define the task of \emph{generative turbulence simulation} as finding a model $\p_{\vtheta}$ such that
+\begin{equation}
+  \p_{\vtheta}(\data \mid \bcs) \approx \p_{\ge t_{\mathrm{turb}}}(\data \mid \bcs).
+\end{equation}
+Importantly, such a model does not have access to an initial turbulent state \smash{$\data \sim \p_{\ge t_{\mathrm{turb}}}(\data \mid \bcs)$}.
+
+\subsection{Discretization}\label{sec:discretization}
+
+We discretize the simulation domain $\Omega$ into a regular grid of cells $\Omega_{h} = [W] \times [H] \times [D]$ where $[N]$ denotes the set of integers $1$ through $N$.
+In the following, we will denote cell indices $(i, j, k) \in \Omega_{h}$ as $\cellidx$.
+Each cell has one of $K$ types, $\celltype_{\cellidx} \in [K]$, marking a cell as, for example, wall or inlet, which discretizes the location and type of boundary conditions $\bcs$.
+To discretize solution fields $\vu_{\mathrm{sol}}(t)$ and $p_{\mathrm{sol}}(t)$ at time $t$, we define the tensor $\data_{\cellidx} = (\vu_{\mathrm{sol}}(t, \vx_{\cellidx}) \parallel p_{\mathrm{sol}}(t, \vx_{\cellidx})) \in \R^{4}$ where $\vx_{\cellidx}$ is location of the center of cell $\cellidx$.
+
+See \cref{sec:data-preprocessing} for more details on how we construct $\data$ and $\celltype$.
+
+\subsection{Generative model}\label{sec:preliminaries}
+
+We base our model \emph{TurbDiff} on \acp{DDPM} \citep{ho2020denoising,sohl-dickstein2015deep}, which have been adapted to other domains \citep{kollovieh2023predict, ludke2023add}.
+\DDPM{}s are latent-variable models that learn a generative model $\p_{\vtheta}$ to reverse a fixed Markov chain $\q(\vx_{n} | \vx_{n - 1})$, which gradually transforms a data sample $\vx_{0}$ over $N$ steps into Gaussian noise until no information remains, i.e.\ \smash{$\q(\vx_{N} \mid \vx_{0}) \approx \N(\vzero, \mI)$}.
+Training occurs by minimizing the KL-divergence between \smash{$\p_{\vtheta}(\vx_{n - 1} \mid \vx_{n})$} and \smash{$\q(\vx_{n - 1} | \vx_{0}, \vx_{n})$}, so that $\p_{\vtheta}$ approximates the true posterior.
+The reverse process then constitutes a powerful sampling mechanism that transforms sampled noise $\vx_{N} \sim \N(\vzero, \mI)$ into a data sample by iteratively sampling from \smash{$\p_{\vtheta}(\vx_{n - 1} \mid \vx_{n})$} and, at the same time, formally defines our generative model as \smash{$\p_{\vtheta}(\vx_{0}) = \int \p(\vx_{N}) \prod^N_{n=1} \p_{\theta}(\vx_{n-1}\mid \vx_{n}) \mathrm{d} \vx_{1}\dots\vx_{N}$}.
+
+We adapt \DDPM{} and include Dirichlet boundary conditions to guide the diffusion process similar to the inpainting method proposed by \citep{lugmayr2022repaint}.
+Dirichlet conditions fix the value of velocity or pressure at a specific location to a given value, e.g. $\vu = 0$ at the walls or the given inflow velocity at the inlet.
+Therefore, we sample the values at these locations from fixed distributions instead of the learned distribution $\p_{\vtheta}$.
+This ensures that the values at the boundaries converge towards their prescribed values throughout the sampling process, guiding the sample as a whole towards the data distribution.
+
+In particular, we begin by defining a mask $\mask_{\cellidx} = \mathbb{I}_{\celltype_{\cellidx} = \mathrm{free}}$ that selects all cells free cells, i.e. those that have no boundary conditions or any other kind of special role.
+Let \smash{$\data_{0} \sim \p_{\ge t_{\mathrm{turb}}}(\data \mid \bcs)$} and we want to sample from its distribution by transforming a sample \smash{$\data_{N} \sim \p(\vzero, \mI)$}.
+Then, we define our model as
+\begin{equation}
+  \p(\data_{n - 1} \mid \data_{n}, \celltype)_{\cellidx} \sim \begin{cases}
+    \p_{\vtheta}(\data_{n - 1} \mid \data_{n}, \celltype)_{\cellidx} & \textrm{if}~\mask_{\cellidx} = 1,\\
+    \q(\data_{n - 1} \mid \data_{0}, \data_{n})_{\cellidx} & \textrm{otherwise}.
+  \end{cases}
+\end{equation}
+In effect, we denoise the input only in cells that contain actual velocity and pressure data.
+For other cells, we sample their values from the true posterior \smash{$\q(\data_{n - 1} \mid \data_{0}, \data_{n})$}, which is possible because for these cells $\data_{0, \cellidx}$ is predetermined from the boundary conditions and therefore always available.
+Since we also use the same case distinction during training, our model is only trained on actual data cells and not on boundary values.
+
+\subsection{Parametrizing Posterior and Diffusion Process}\label{sec:posterior}
+
+Since we discretize the data domain as a three-dimensional, regular grid, we base our model architecture on a U-Net \citep{ronneberger2015unet} extended to \threed{} \citep{cicek20163d}.
+After 4 levels of downsampling, we apply a transformer \citep{vaswani2017attention} with pre-group normalization \citep{xiong2020layer,wu2020group} to ensure global communication within the model across the whole simulation domain.
+Within the transformer, we use flash attention to reduce the memory requirements of the transformer from \smash{$O(n^{2})$} to \smash{$O(n)$} \citep{dao2022flashattention}.
+
+For the forward diffusion process, we choose $N = 500$ steps and a noise schedule that scales the noise so that the log-signal-to-noise ratio of the noise grows linearly \citep{kingma2021variational}.
+This schedule ensures that several diffusion steps are spent in the high-signal regime to let the model denoise small details, but at the same time, reaches large enough noise levels to ensure that \smash{$\q(\vx_{N} \mid \vx_{0}) \approx \N(\vzero, \mI)$} despite the long tails of velocity and pressure values in turbulent flows.
+
+For more details on the components and hyperparameters, see \cref{sec:model-details}.
+
+
+
+\section{Related Work}
+
+
+The works of \citep{drygala2022generative} and \citep{drygala2023generalization} are most closely related to our research.
+They prove that \GANs{} sample from the correct distribution for ergodic systems such as turbulent flows \citep{galanti2004turbulence} and train a \GAN{} to generate \twod{} slices of high-resolution \threed{} turbulent flow data of the velocity field orthogonal to the slice.
+Compared to their work, we allow arbitrary geometries by encoding all types of boundary conditions via learned cell type embeddings and we propose a metric that measures the quality of samples as a whole, whereas \citeauthor{drygala2022generative} examine particular sections of their samples individually.
+
+Several other works have been published on machine learning for \threed{} fluid flows.
+\citep{xie2017tempogan} super-resolve low-resolution turbulent flows with a \GAN{} in a temporally coherent manner.
+\citep{matsuo2021supervised} learn to reconstruct \threed{} flows from \twod{} slices for channel flows around a cylinder.
+\citep{stachenfeld2022learned} propose a model to forecast non-forced, decaying turbulence at a coarser resolution to achieve speedups over numerical solvers.
+\citep{kim2019deep} predict velocity fields one step ahead for \threed{} flows in computer graphics applications.
+They report that they need to train with a small time step for their latent-space autoregressive model to track small details and generate accurate roll-outs.
+It is important to note that these works refine, expand, or evolve turbulent flow fields given as input to the model.
+In contrast, we sample turbulent flows from scratch based solely on the domain geometry and boundary conditions.
+
+
+
+\section{Experiments}
+
+\subsection{Dataset}
+\begin{wrapfigure}[17]{r}{2in}
+  \centering
+  \includegraphics{figures/shapes-selection}
+  \caption{A subset of the objects in our turbulent flow dataset with isosurfaces of the vorticity magnitude.}\label{fig:shapes-selection}
+\end{wrapfigure}
+To evaluate the viability of generative modeling for \threed{} turbulent flows, we have generated a challenging new dataset.
+The dataset consists of 45 simulations of an incompressible flow through a \SI{0.4}{\meter} \texttimes{} \SI{0.1}{\meter} \texttimes{} \SI{0.1}{\meter} channel at \SI{20}{\meter\per\second}, which results in a Reynold's number of $\mathrm{Re} = 2 \times 10^{5}$, well into the turbulent regime.
+The channel is discretized into 192 \texttimes{} 48 \texttimes{} 48 regular grid cells, which balances the spatial resolution to resolve small-scale behavior adequately with memory and storage requirements.
+
+For each simulation, we place a distinct object into the flow, each of which causes a characteristic flow pattern.
+\cref{fig:shapes-selection} shows a subset of the objects and how the object's shape influences the flow.
+We split the simulations into 27 for training, 9 for validation, and 9 for testing to verify that models can generalize to unseen objects in the flow.
+
+We run all simulations for \SI{0.5}{\second} of physical time with OpenFOAM \citep{weller1998tensorial}, an industrial-grade \CFD{} solver, in \LES{} mode and save a flow state every \SI{0.1}{\milli\second}. The resulting dataset contains \num{5000} flow states for each simulation and requires \SI{2.2}{\tera\byte} of storage after preprocessing.
+
+See \cref{sec:dataset-details} for more details on our datasets and data generation pipeline.
+
+\subsection{Baselines}\label{sec:baselines}
+In our experiments, we compare our generative model against two autoregressive models specifically developed for turbulent flows, \TFNet{} and \dilresnet{}.
+\TFNet{} takes inspiration from hybrid RANS-LES modeling of turbulent flows and learns a spatial and temporal filtering with an architecture of multiple U-Nets \citep{wang2020physicsinformed}.
+\dilresnet{} is a general-purpose architecture that combines stacks of dilated convolutions with residual connections into an expressive convolutional model with a large receptive field \citep{stachenfeld2022learned}.
+Both models take a set of recent observations \smash{$\data^{(t-(h-1):t)}$} and map it to a prediction of the system state \smash{$\data^{(t+1)}$} one step ahead.
+
+For both forecasting models, we compare two different ways to turn them into generative models.
+For the first, we take a sample \smash{$\data^{(t)} \sim \p_{\ge t_{\mathrm{turb}}}(\data \mid \celltype)$} and then apply the model autoregressively 22 times to generate a new sample \smash{$\data^{(t+22)}$}.
+We chose 22 steps because that is the distance between two steps in our dataset at which they become approximately uncorrelated.
+Therefore, we consider the model to have transformed \smash{$\data^{(t)}$} into a new sample \smash{$\data^{(t+22)}$}.
+Obviously, the model could not replace the numerical solver in this way since we need the solver to generate the input to the generative model in the first place, but it serves us as a very strong baseline because it already starts with a sample from the distribution that we want to sample from.
+We denote these models by \dilresnet-22 and \TFNet-22, respectively.
+
+For the second way to turn our baselines into generative models, we add a small amount of noise to the initial state of the numerical solver and then roll out the models for 200 steps.
+We chose 200 steps because that is the minimum number of steps the flow needs to develop turbulence for any simulation in our dataset.
+The small amount of noise leads to independent samples because turbulent flows are chaotic and therefore sensitive to initial conditions, i.e.\ even an infinitesimal change in initial conditions will produce a completely different trajectory.
+Of course, these generative variants need far more roll-out steps, but it completely forgoes the use of a numerical solver, thereby offering the largest speed-up.
+We denote these models by \dilresnet-init and \TFNet-init, respectively.
+
+We list hyperparameters for these baselines in \cref{sec:baseline-details}.
+
+\subsection{Metrics}\label{sec:metrics}
+Comparing the quality of turbulent flow samples is a non-trivial task.
+Unlike in the one-step-ahead prediction of autoregressive models, we do not have a ground truth state but must derive new metrics to quantify the difference between the samples of distributions.
+We quantify the sample quality of TurbDiff and the baselines by their Wasserstein-2 ($W_{2}$) distance to samples from the numerical solver.
+The $W_{2}$ distance between two sets of samples is the minimal average distance achievable for any matching between the two sample sets w.r.t.\ some underlying distance $d$.
+Formally, let $\mu, \nu$ be two empirical distributions over the sample sets we want to compare and $\Gamma$ be the space of all possible joint distributions that have $\mu$ and $\nu$ respectively as marginal distributions.
+Then the $W_{2}$ distance between $\mu$ and $\nu$ is defined as
+\begin{equation}
+  W_{2}(\mu, \nu) = {\left( \min_{\gamma \in \Gamma(\mu, \nu)} \E_{(x, y) \sim \gamma} {d(x, y)}^{2} \right)}^{\frac{1}{2}}.
+\end{equation}
+
+In addition to being the basis of the ubiquitous \FID{} in generative image modeling \citep{heusel2017gans}, $W_{2}$ is also used in video \citep{unterthiner2019accurate} and molecule generation \citep{preuer2018fr}.
+However, these metrics rely on learned embeddings from pre-trained models that are widely accepted to capture the important characteristics of individual samples.
+
+It remains to specify the underlying distance function $d$.
+The Euclidean distance would be an obvious but lousy choice for a curious reason.
+Because of the chaotic nature and strong, small-scale fluctuations of turbulent flows, it is highly unlikely for two independent samples of a turbulent flow to be close under this distance.
+In fact, in our dataset, the smooth mean flow is closer to all samples than any two uncorrelated turbulent flow samples are to each other with respect to the Euclidean distance.
+This, however, would be antithetical to our goal to define a metric that rewards turbulent samples and discourages smoothing and mean flow samples.
+
+\paragraph{\Ac{TKE}}
+Our first choice of distance compares samples by their \TKE{} spectra.
+The \TKE{} in each cell is defined as the quadratic velocity deviation from the mean velocity, \smash{$E_{\cellidx} = \frac{1}{2} \|u_{\cellidx} - \bar{u}_{\cellidx}\|_{2}^{2}$}.
+To get the spectrum, i.e. the spectral intensity as a function of the wavenumber, we take the \threed{} \FFT{} of $E$ over a cuboid subset $C$ of the domain and integrate the squared frequency magnitude spherically over all \threed{} wavenumbers \smash{$\|(k_{x}, k_{y}, k_{z})\| = k$}:
+\begin{equation}
+  E(k) = \int_{\mathbb{S}^{2}} \Big| \int_{C \subset \Omega} E(\vx) e^{-i (k\vv) \cdot \vx}\,\mathrm{d}\vx \,\Big|^{2}\,\mathrm{d}\vv
+\end{equation}
+Then we define the distance between two samples as the $L_{2}$ distance between their log energy spectra,
+\begin{equation}
+  d(\data^{(1)}, \data^{(2)}) = \|\log E_{\data^{(1)}} - \log E_{\data^{(2)}}\|_{2}.
+\end{equation}
+We denote this distance by $W_{2,\mathrm{TKE}}$.
+
+\paragraph{Distributional distance}
+\TKE{} spectra capture global patterns in the flow velocity by measuring the energy contained in the various spatial scales.
+However, the energy spectra neglect the pressure and are invariant to wrong positioning or orientations of flow patterns.
+To remedy this shortcoming, we introduce a second metric that measures if two samples contain similar velocity and pressure values in similar locations.
+
+If we regard a turbulent flow as a stochastic process as is common, the velocities and pressures in each cell follow a marginal distribution $p(\vu_{\cellidx}, p_{\cellidx})$.
+Then, we can call two samples close if their values in each cell follow similar marginal distributions.
+However, comparing cell values pointwise directly would make it highly unlikely for two samples from the same flow to be close, as explained above.
+Instead, we propose to group cells with similar marginal distributions together and interpret the values in each cell group as samples from the same marginal.
+Then we compare these sample sets by their $W_{2}$ distance and average over all cell groups.
+
+In particular, for each simulation, we approximate the marginal velocity distribution $p(\vu_{\cellidx})$ of each cell with an isotropic Gaussian $\N(\vmu_{\cellidx}, \mathrm{diag}(\vsigma_{\cellidx}^{2}))$.
+Then, we cluster the cells into regions $\region$ with similar marginal distributions via k-means with the $W_{2}$ distance between isotropic Gaussians, which has a closed-form solution.
+Finally, we define our distance between two samples \smash{$\data^{(1)}$} and \smash{$\data^{(2)}$} as
+\begin{equation}
+  d(\data^{(1)}, \data^{(2)}) = {\left( \sum_{\region{}} \frac{|\region{}|}{\sum_{\region{}'}|\region{}'|} W_{2}^{2}\left( \vv^{(1)}_{\region{}}, \vv^{(1)}_{\region{}} \right) \right)}^{\frac{1}{2}}
+\end{equation}
+where $\vv^{(j)}_{\region{}} = \left\{ \left( \frac{\vu^{(j)}_{\cellidx}}{\sigma_{\|\vu\|}} \parallel \frac{\vomega^{(j)}_{\cellidx}}{\sigma_{\|\vomega\|}} \parallel \frac{p^{(j)}_{\cellidx}}{\sigma_{p}} \right) \mid \cellidx \in \region{} \right\}$ is the set of normalized velocity, vorticity and pressure at each cell in a homogeneous region.
+This metric includes the generated pressure as well as the estimated vorticity, which means that it also takes into account the velocities in neighboring cells.
+All components are normalized by their standard deviation over the training set to account for their different scales.
+We choose the $W_{2}$ distance with the $2$-norm to compare the sample sets $\smash{\vv^{(j)}_{\region{}}}$ to emphasize modeling the extreme values which are important to represent the characteristic intermittency of turbulent flows, i.e.\ the heavy tails of their velocity and vorticity distributions \citep{jimenez2006intermittency}.
+
+In addition to velocity and pressure, we also include the estimated vorticity $\vomega_{\cellidx}$ because vorticity is a defining aspect of turbulence, as we have seen in \cref{sec:turbulence}.
+Furthermore, since we estimate the vorticity from the velocity via finite differences, including it in the distance makes it more discriminative because it includes distance from the multi-point marginal velocity distribution of cell $\cellidx$ and its neighbors.
+
+In our results, we denote this distance by $W_{2,\region{}}$. See \cref{sec:metrics-details} for more details on how exactly we compute each metric.
+
+\subsection{Sample Quality}
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}[t]{2.5in}
+    \centering
+    \includegraphics{figures/model-sample}
+    \caption{Samples generated with TurbDiff}\label{fig:model-sample}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{2.5in}
+    \centering
+    \includegraphics[width=2.5in,height=1.5in]{figures/data-sample}
+    \caption{Data sample for the same object}\label{fig:data-sample}
+  \end{subfigure}
+  \caption{Example flows for a test object from our dataset showing isosurfaces of the vorticity $\vomega$.}
+\end{figure}
+
+\begin{table}
+  \centering
+  \caption{TurbDiff generates samples from scratch of similar quality in $W_{2,\mathrm{TKE}}$ \& $W_{2,\region{}}$ distance to samples generated by the strongest regression baseline which takes a true data sample as initial state. In addition, our model is much faster to evaluate because it eschews the 10 minutes needed by the numerical solver to generate a realistic initial state for  \dilresnet{}-22. For models marked with (*), we have excluded runs that diverged due to error accumulation.}\label{tab:results}
+  \begin{tabular}{rcccc}
+    \toprule
+    & $W_{2,\mathrm{TKE}}$ & $W_{2,\region{}}$ & RMSE $\vx_{\mathrm{max-TKE}}$ & Runtime [s]\\
+    \midrule
+    \TFNet{}-init* & - & - & - & 1.834 \\
+    \TFNet{}-22* & \num{189} & \num{493} & \num{108} & 602 + 0.23 \\
+    \dilresnet{}-init & \num{60+-47} & \num{4.6e8} & \num{42+-23} & 12.82 \\
+    \dilresnet{}-22 & \num{2.15+-0.06} & \num{1.240+-0.001} & \num{2.5+-1.2} & 602 + 1.58 \\\midrule
+    TurbDiff (ours) & \num{3.9+-0.4} & \num{1.38+-0.04} & \num{5.9+-1.8} & 20.63 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+We train all models on the 27 training simulations in our dataset and then evaluate them on 9 unseen test simulations with unseen geometries.
+For each simulation, we generate 16 samples and evaluate our sample metrics against 16 true samples chosen equidistantly from the second half of the simulation.
+Choosing the data samples from the second half of each simulation ensures that they represent fully-developed turbulence, and picking them equidistantly means that the samples are completely uncorrelated. \cref{fig:model-sample,fig:data-sample} show samples generated by TurbDiff and from the dataset for the same object.
+See \cref{tab:results} for the complete results.
+
+First, we observe that our generative model generates samples very close to the data distribution in terms of $W_{2,\mathrm{TKE}}$ and $W_{2,\region{}}$ distance.
+Only the \dilresnet{}-22 baseline achieves better scores.
+However, this baseline needs a true sample from our target distribution $\p_{\ge t_{\mathrm{turb}}}(\data \mid \celltype)$ generated via a numerical solver as initial state and then evolves it forward in time for 22 steps or \SI{2.2}{\milli\second}.
+As we trained the regression baselines on the smallest timestep in our data to allow them to resolve the dynamics of all scales accurately, see \cref{sec:turbulence}, and 22 roll-out steps still have tolerable error accumulation, the baseline is able to preserve the turbulent characteristics of its input state and achieve slightly better scores.
+If we evaluate the baselines in the more realistic setting denoted by the \emph{-init} suffix without any support from a numerical solver and generate samples by unrolling from the pre-turbulent initial state of the numerical solver, the increased error accumulation of the longer roll-out decreases the sample quality immensely.
+However, this is the only setting that achieves the original goal of surrogate models to replace costly numerical solvers.
+
+These results support our observation from \cref{sec:autoregressive,sec:model} that autoregressive models are severely challenged by the long roll-outs required to fully replace numerical solvers for \threed{} turbulence and that a generative approach sidesteps these difficulties elegantly.
+
+\paragraph{Runtime}
+Regarding runtime, TurbDiff outperforms the numerical solver by a factor of 30, as reported in \cref{tab:results}.
+The solver needs roughly 10 minutes to transition from its initial state to fully-developed turbulence, whereas our model can generate a sample in about 20 seconds.
+While both baselines can be evaluated quicker if we consider just the model itself, the complete pipeline as a surrogate model requires the generation of a realistic initial state for the model, which takes 10 minutes to generate with a numerical solver.
+In the -init setting, the models avoid this additional runtime but suffer from significant error accumulation.
+
+All model times represent the minimum achieved time on an NVIDIA A100, and we measured the solver time with 16-core parallelism on an Intel Xeon E5-2630.
+
+\paragraph{Estimating turbulence properties}
+In applications, samples from a generative turbulence simulator could be used to measure, for example, the effect of an object's shape on the turbulence patterns it causes, e.g.\ their size or energy.
+As an example, we estimate how far behind the object in our flow simulations the mean \TKE{} takes its maximum, i.e.\ where the turbulent vortices caused by the object have built up the most kinetic energy.
+This location depends strongly on the shape of the object and requires accurate samples to evaluate.
+The root-mean-squared-error (RMSE) of the estimate from our samples reported in \cref{tab:results} is \num{5.9} cells or just \num{1.2}{} cm in a channel of \num{40}{} cm in length.
+This is significantly lower than the variability of the true location and provides an actual useable signal to practitioners compared to the baselines in the full-surrogate setting.
+
+
+
+\section{Conclusion}
+
+
+We have shown that generative modeling lets us access the full acceleration potential of neural surrogates for \threed{} turbulent flows by circumventing the need for long roll-outs or initial states from numerical solvers.
+Our dataset is an important building block for further research into surrogate models for engineering applications that challenges models to learn the turbulent dynamics of high-velocity flows and how objects influence the resulting vortex structures.
+Our new metrics for generative turbulence models measure succinctly if a model's samples follow the expected velocity and pressure distributions as well as if the turbulent kinetic energy is distributed correctly across spatial scales.
+
+
+

@@ -1,0 +1,274 @@
+\title{Numerical Pitfalls in Policy Gradient Updates}
+
+\begin{abstract}
+Numerical instability, such as gradient explosion, is a fundamental problem in practical deep reinforcement learning (DRL) algorithms. Beyond anecdotal debugging heuristics, there is a lack of systematic understanding of the causes for numerical sensitivity that leads to exploding gradient failures in practice. In this work, we demonstrate that the issue arises from the ill-conditioned density ratio in the surrogate objective that comes from importance sampling, which can take excessively large values during training. Perhaps surprisingly, while various policy optimization methods such as TRPO and PPO prevent excessively large policy updates, their optimization constraints on KL divergence and probability ratio cannot guarantee numerical stability. This also explains why gradient explosion often occurs during DRL training, even with code-level optimizations. To address this issue, we propose the Vanilla Policy Gradient with Clipping algorithm, which replaces the importance sampling ratio with its logarithm. This approach effectively prevents gradient explosion while achieving performance comparable to PPO.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Deep reinforcement learning (DRL) has demonstrated its effectiveness in various domains (Mnih et al., 2015; Silver et al., 2017; Vinyals et al., 2019; Ouyang et al., 2022). Despite these successes, the reliability and numerical stability of DRL algorithms remain fundamental limitations that hinder their application in real-world environments. In particular, DRL algorithms are often observed to have numerical instability issues, such as exhibiting the major problem of gradient explosion that destroys the learning progress. Existing work on the brittleness of DRL methods attributes this to either the high variance in actions (Fujita & Maeda, 2018), the gradient estimator (Liu et al., 2020), or the sensitivity to hyperparameters (Henderson et al., 2018).  
+
+In this paper, we perform a rigorous analysis of the root cause of numerical instability in policy optimization algorithms such as Trust Region Policy Optimization (TRPO) and Proximal Policy Optimization (PPO) (Schulman et al., 2015a; 2017). Gradient explosion is a consequence of overflows caused by computations involving excessively large numbers that exceed the limits of floating-point arithmetic. We show that the long horizons and large value variance are not the core reason for overflow, especially under action clipping as commonly used in standard DRL implementations (Duan et al., 2016; Raffin et al., 2021; Bou et al., 2024). Another popular explanation is that the covariance matrix of the stochastic policy can become singular during training, leading to gradient explosion. Instead, our analysis indicates that the root cause is the importance sampling steps in TRPO and PPO (Schulman et al., 2015a; 2017), where the probability ratio can take exponentially large values, especially in the case of Gaussian distributions. Specifically, we analyze the condition number of the probability ratio, and demonstrate that the probability ratio is exponential with respect to a line integral in the policy space, which can lead to arithmetic overflows and cause gradient explosion.  
+
+In particular, we demonstrate that optimization constraints proposed in TRPO/PPO, such as limiting the KL-divergence and clipping, do not prevent numerical instability. We show that the probability ratio in importance sampling can grow exponentially fast, ultimately causing arithmetic overflows, even while the KL divergence remains small. This indicates that various policy optimization methods that prevent excessively large policy updates do not prevent numerical problems. Indeed, the probability ratios are not guaranteed to stay small, especially when the policy network’s output is further clipped in the action space, leading to excessively small values in the probability density functions and large condition numbers in the density ratio.  
+
+Given that importance sampling is the root cause of the exploding gradient issue, we propose an algorithm called Vanilla Policy Gradient with Clipping, a modified version of the PPO algorithm in which the importance sampling ratio is replaced with its logarithm. We conduct experiments on continuous-control benchmarks to evaluate its effectiveness. Specifically, we find that this algorithm performs comparably to PPO on small policy networks where no gradient explosion occurs and maintains good performance on large policy networks where PPO encounters numerical issues.  
+
+Overall, our findings suggest that the TRPO/PPO loss is inherently ill-conditioned due to importance sampling and action clipping, which directly contribute to the numerical instability of deep policy gradient methods. This issue should not be viewed merely as a hyperparameter tuning problem but as a fundamental limitation of DRL algorithms that requires more attention.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+Deep policy gradients in practice. It has been reported that implementation details and code-level optimizations fundamentally impact the performance of deep policy gradient algorithms such as TRPO and PPO (Henderson et al., 2018; Engstrom et al., 2020; Andrychowicz et al., 2021). In particular, empirical studies have shown that the most significant discrepancies between theory and implementation arise in gradient estimation, value prediction, and optimization landscapes (Ilyas et al., 2020). These findings were later supported by theoretical studies, which indicated that they stem from the fractal structures present in both value and policy landscapes (Wang et al., 2023). Our work contributes to this line of research by providing an in-depth study on the numerical stability of deep policy gradient methods.  
+
+Exploding gradients in deep learning. Many neural network architectures have been reported to suffer from the gradient explosion issue, including deep multi-layer networks (Bengio et al., 1994; Glorot & Bengio, 2010) and residual neural networks (RNNs) (Pascanu et al., 2013). This problem is closely linked to the depth of the network architecture (Philipp et al., 2017; Schoenholz et al., 2017), which can result in a long chain of Jacobian multiplications. In the context of reinforcement learning (RL), Liu et al. (2018) points out that the product of density ratios over a long horizon can grow exponentially, leading to exploding variance in off-policy estimation. Also, Khorasani et al. (2023) proposes to use second-order information in the form of Hessian vector products to bypass importance sampling weights in policy gradient. In this work, we demonstrate that even a single density ratio can take excessively large values and cause numerical overflow, and propose an algorithm that drops the importance sampling from PPO objective while achieving comparable performance. Wang et al. (2024) investigates gradient explosion in the context of generative adversarial imitation learning (GAIL), suggesting that a large reward function can cause exploding gradients. However, our empirical results in Section B indicate that this does not fully explain gradient explosion in policy gradient algorithms, as scaling down the reward does not completely overcome the issue.  
+
+
+
+\section{3 NUMERICAL INSTABILITY CAUSED BY IMPORTANCE SAMPLING  }
+
+
+TRPO and PPO objective. The original policy gradient estimator has the form  
+
+$$
+\begin{array}{r}{\nabla\mathcal{I}(\theta)=\mathbb{E}_{(s_{t},a_{t})\sim\pi_{\theta}}\Bigl[\nabla_{\theta}\log\pi_{\theta}(a_{t}|s_{t})\;Q^{\pi}(s_{t},a_{t})\Bigr],}\end{array}
+$$  
+
+where $Q^{\pi}$ is the $Q$ -function of the current policy $\pi_{\theta}$ (Sutton et al., 1999). One difficulty of directly optimizing equation 1 is due to the complex dependency of sampled data on $\pi_{\theta}$ (Schulman et al., 2015a). To address it, TRPO proposes a surrogate objective that incorporates importance sampling:  
+
+$$
+\operatorname*{max}_{\theta}\quad\hat{\mathbb{E}}_{(s_{t},a_{t})\sim\pi}\bigg[\frac{\pi_{\theta}(a_{t}|s_{t})}{\pi(a_{t}|s_{t})}\hat{A}^{\pi}(s_{t},a_{t})\bigg],
+$$  
+
+where $\mathbb{\hat{E}}_{(s_{t},a_{t})\sim\pi}[\cdot]$ denotes the estimated expectation over sampled trajectories and $\hat{A}^{\pi}(s_{t},a_{t})$ the estimated advantage function at $(s_{t},a_{t})$ which is usually obtained through Generalized Advantage  
+
+Estimation (GAE, Schulman et al. (2015b)). Let $L(\theta)$ denote the surrogate objective in equation 2. It has been proved that the gradients of equation 1 and equation 2 coincide at $\pi=\pi\theta$ . Additionally, both TRPO and PPO suggest that the current policy $\pi_{\theta}$ should not deviate too much from the old policy $\pi$ , leading to various optimization constraints which will be discussed in Section 5.  
+
+Condition number and numerical stability. We now briefly introduce the concept of the condition number from numerical analysis, which measures how much the output of an algorithm changes in response to a small change in its input:  
+
+Definition 3.1. (Condition number) Given a function $f$ and an input $x$ , let $\delta x$ be the error in $x$ and $\delta f(x)=f(x+\delta x)-f(x)$ be the corresponding error resulted in the output. We define the absolute condition number of $f$ at $x$ as  
+
+$$
+\kappa=\operatorname*{lim}_{\delta\to0}\operatorname*{sup}_{|\delta x|\leq\delta}\frac{|\delta f(x)|}{|\delta x|}.
+$$  
+
+In particular, when the function $f$ is differentiable, it further has  
+
+$$
+\kappa=\|J_{f}(x)\|,
+$$  
+
+where $J_{f}(x)$ is the Jacobian of $f$ at $x$ .  
+
+A detailed study can be found in Trefethen & Bau (1997). The following concept of machine precision defines the threshold of numerical overflows:  
+
+Definition 3.2. (Machine precision) Let $e>0$ denote the machine precision throughout this paper, any quantity with its absolute value smaller than e will be considered zero.  
+
+Importance sampling with clipped actions. Consider the probability ratio $\begin{array}{r}{p_{\theta}(a|s)=\frac{\pi_{\theta}(a|s)}{\pi(a|s)}}\end{array}$ in the loss function. This ratio might become ill-conditioned when $\pi(a|s)$ is very small. However, it is rarely reported in practice that importance sampling itself causes any numerical issues. This is because, when importance sampling is applied to modify a probabilistic distribution, the probability ratio $p_{\theta}(a|s)$ is only evaluated at data points sampled from the distribution $\pi(\cdot|s)$ . This means that the probability of obtaining an action $a$ where $\pi({\bar{a}}|s)\ll1$ is also very small, thereby rarely causing numerical instability. For example, let $a\,\sim\mathcal{N}(\mu_{0}(s),\Sigma_{0})$ be $m$ -dimensional Gaussian random variable with probability density function $\pi(a|s)$ , then we have  
+
+$$
+P(\pi(a|s)<e)\leq2\sqrt{2\pi}m(e\sqrt{\operatorname*{det}\Sigma_{0}})^{\frac{1}{m}},
+$$  
+
+where $e\ll1$ is the machine precision.  
+
+Although it is unlikely for $\pi(a|s)$ to take extremely small values if $a$ is directly sampled from $\pi$ itself, as shown in equation 4, it is important to note that the actual action space usually has a bounded range due to physical or environmental constraints. Therefore, a common practice in DRL is to clip the sampled actions before feeding them into the simulator. Without loss of generality, we assume that the action space is of the box form $A=[-\beta,\beta]^{m}$ for some positive $\beta$ , and write the action-clipping operation as $\phi:\mathbb{R}^{m}\rightarrow[-\beta,\beta]^{m}$ . Namely, for any $a=(a_{1},...,a_{m})\in\mathbb{R}^{m}$ , $\phi(a)=(a_{1}^{\prime},...,a_{m}^{\prime})$ where $a_{i}^{\prime}=\operatorname*{max}(-\beta,\operatorname*{min}(a_{i},\beta))$ .  
+
+Note that the probability ratio is evaluated after action clipping (Raffin et al., 2021).That is, $p_{\theta}(\phi(a)|s)$ is used instead of $p_{\theta}(a|s)$ when computing the objective in equation 2. Consequently, the distance between the mean $\mu(s)$ and the clipped action $\phi(a)$ is no longer guaranteed to be small with high probability as suggested in equation 4, especially when $\mu(s)$ lies outside the action space $\boldsymbol{\mathcal{A}}$ :  
+
+Theorem 3.1. Let $\boldsymbol{a}\sim\mathcal{N}(\boldsymbol{\mu}(\boldsymbol{s}),\boldsymbol{\Sigma})$ be $m$ -dimensional Gaussian random variable with probability density function $\pi(\cdot|s)$ , and $\bar{\boldsymbol{A}}=[-\beta,\beta]^{m}$ with $\beta>0$ . Let $\phi:\mathbb{R}^{m}\rightarrow A$ be the action-clipping transformation, then  
+
+1. Suppose that $\mu(s)\in A,$ , then for any $a\in\mathbb{R}^{m}$ ,  
+
+$$
+P(\pi(\phi(a)|s)<e)\leq2\sqrt{2\pi}m(e\sqrt{\operatorname*{det}\Sigma_{0}})^{\frac{1}{m}},
+$$  
+
+where e is the machine precision;  
+
+2. If $\mu(s)\notin A,$ , then for any $a\in\mathbb{R}^{m}$ it has  
+
+$$
+\pi(\phi(a)|s)\leq\frac{1}{(2\pi)^{\frac{m}{2}}\sqrt{\operatorname*{det}\Sigma}}\exp(-\frac{d^{2}}{2\lambda_{m a x}}),
+$$  
+
+where $d=d i s t(\mu(s),{\mathcal{A}})$ be the distance between $\mu(s)$ and the action space $\boldsymbol{\mathcal{A}}$ , $\lambda_{m a x}$ is the largest eigenvalue of $\Sigma$ .  
+
+Therefore, $\pi(\phi(a)|s)$ may fall below machine precision $e$ when $\mu(s)$ is far from the action space $\boldsymbol{\mathcal{A}}$ or when the standard deviations of $\pi(\cdot|s)$ are sufficiently small. In either case, $\pi(\phi(a)|s)$ becomes equal to 0 on the machine, and dividing by it can cause numerical issues.  
+
+Tanh-Gaussian transformation. It is worth mentioning that we can also bound the action by applying an invertible squashing function, such as tanh, to the Gaussian samples (Haarnoja et al., 2018). However, this approach still suffers from the ill-conditioned nature of importance sampling. For instance, consider the modified probability density function in the one-dimensional case, given by  
+
+$$
+\pi^{\prime}(a|s)=\pi(u|s)(1-\operatorname{tanh}^{2}(u))^{-1}
+$$  
+
+where $u\sim\pi$ is a Gaussian random variable and $a=\operatorname{tanh}(u)$ . Note that when the mean of $\pi$ is too large, it is likely that the random variable $u$ will take on extreme values, resulting in an excessively small value for the term $1-\operatorname{tanh}^{2}(u)$ and causing numerical overflow in subsequent steps.  
+
+Ill-conditioned probability ratios. We have seen that the action-clipping transformation in deep policy gradients can significantly affect the numerical stability of importance sampling. However, one might argue that small values in $\pi(a|s)$ can be counterbalanced by small values in $\pi_{\theta}(a|s)$ assuming that the current policy $\pi_{\theta}$ is constrained to remain within a neighborhood of $\pi$ . This is particularly true in the first optimization step of each epoch, where $\pi_{\theta}$ is reset to $\pi$ and all probability ratios are equal to 1. We will show that when action clipping is applied, the condition number of the probability ratio can become very large, causing $p_{\theta}(\phi(\bar{a})|\bar{s})$ to grow exponentially fast and leading to instability as $\pi_{\theta}$ deviates from $\pi$ . Let us again consider a Gaussian policy $\pi_{\boldsymbol{\theta}}(\cdot|s)=\mathcal{N}(\mu(s;\boldsymbol{\theta}),\bar{\Sigma}(\boldsymbol{\theta}))$ , where $\mu(s)$ is typically parameterized by a neural network and $\Sigma(\theta)$ is positive-definite and state-independent. Let $\mathring{\pi}\big(\cdot|s\big)=\mathbfcal{\bar{N}}(\mu(s;\theta_{0}),\Sigma(\dot{\theta}_{0})))$ ), the probability ratio is calculated as  
+
+$$
+\begin{array}{r l}&{p_{\theta}(\phi(a)|s)=\frac{\pi_{\theta}(\phi(a)|s)}{\pi(\phi(a)|s)}}\\ &{\qquad\qquad=\sqrt{\frac{\operatorname*{det}\Sigma(\theta_{0})}{\operatorname*{det}\Sigma(\theta)}}\frac{\exp\Big(-\frac{1}{2}(\phi(a)-\mu(s;\theta))^{T}\Sigma(\theta)^{-1}(\phi(a)-\mu(s;\theta))\Big)}{\exp\Big(-\frac{1}{2}(\phi(a)-\mu(s;\theta_{0}))^{T}\Sigma(\theta_{0})^{-1}(\phi(a)-\mu(s;\theta_{0})))\Big)}.}\end{array}
+$$  
+
+To better illustrate how the action-clipping transformation $\phi$ affects the condition number of $p_{\theta}$ , we further assume that $\Sigma(\theta)\equiv c o n s t a n t$ . Then, the gradient of the probability ratio is given by  
+
+$$
+\nabla_{\theta}\:p_{\theta}(\phi(a)|s)=p_{\theta}(\phi(a)|s)(\phi(a)-\mu(s;\theta))^{T}\Sigma(\theta)^{-1}\frac{\partial\mu(s;\theta)}{\partial\theta},
+$$  
+
+where $\frac{\partial\mu(s;\theta)}{\partial\theta}$ is the Jacobian of $\mu$ with respect to its parameters. Note that equation 6 is equivalent to  
+
+$$
+\nabla_{\theta}~\log\Big(p_{\theta}(\phi(a)|s)\Big)=(\phi(a)-\mu(s;\theta))^{T}\Sigma(\theta)^{-1}\frac{\partial\mu(s;\theta)}{\partial\theta},\quad p_{\theta_{0}}(\phi(a)|s)=1,
+$$  
+
+which describes the gradient flow of $p_{\theta}$ in the policy space. Let $\mathcal{C}$ be the trajectory of policy parameters generated by PPO in the policy space, starting at $\theta_{0}$ and ending at $\theta_{1}$ . Applying the gradient theorem yields  
+
+$$
+p_{\theta_{1}}(\phi(a)|s)=\exp\Big(\int_{\mathcal{C}}(\phi(a)-\mu(s;\theta))^{T}\Sigma(\theta)^{-1}\frac{\partial\mu(s;\theta)}{\partial\theta}\cdot\mathrm{d}\mathbf{r}\Big)
+$$  
+
+where the term in the exponent is the line integral along $\mathcal{C}$ . Therefore, the condition number $\kappa_{\theta}=\|\nabla_{\theta}\,p_{\theta}(\phi(a)|s)\|$ can be extremely large as illustrated in Figure 1, implying that the probability ratio may overflow when  
+
+• The standard deviations of $\pi$ are small so that the matrix $\Sigma(\theta)^{-1}$ has large eigenvalues; • The action is clipped and the mean $\mu(s)$ lies outside $\boldsymbol{\mathcal{A}}$ so that $|\phi(a)-\mu(s;\theta)|$ is large (illustrated in Figure 1 (c)); • The policy parameterization $\mu(\cdot;\theta)$ is complex (e.g. large policy networks) so that a small change in the parameter can lead to a dramatic difference in the output.  
+
+Some DRL libraries further transform the standard deviations to prevent low variances. However, gradient explosion still occurs with those code-level techniques, indicating that the ill-conditioned probability ratio is the primary cause of the issue.  
+
+![](images/268e4c4f71b604a357232502c1451c0d8bf5caaa524840945b886b127a3f2567.jpg)  
+Figure 1: (a) When $\mu_{0}$ (the mean of $\pi_{0}$ ) is large, the condition number $\kappa_{\theta}$ of the probability ratio $p_{\theta}$ changes exponentially when $\mu$ (the mean of $\pi$ ) deviates from $\mu_{0}$ ; (b) $\kappa_{\theta}$ can become extremely large when the variance $\Sigma$ is small, particularly in cases of large means; (c) The action with the largest norm in each mini-batch grows outside the boundary during PPO training.  
+
+
+
+\section{4 EMPIRICAL ANALYSIS OF GRADIENT EXPLOSION  }
+
+
+In the previous section, we theoretically demonstrated the ill-conditioned nature of importance sampling in TRPO/PPO methods. In this section, we present experimental evidence to support the theory.  
+
+Gradient explosion is always accompanied by excessively large probability ratios. We run the Humanoid-v4 environment on five random seeds, all of which fail due to arithmetic overflow. In Figure 2, we observe that the maximum of probability ratio $\mathrm{max}_{t}$ $\log_{10}\left(p_{\theta}(a_{t}|s_{t})\right)$ takes excessively large values across all five random seeds. A widely accepted explanation for gradient explosion is that the standard deviations of the Gaussian policy can become very small, leading to potential singularity issues in the covariance matrix $\Sigma$ . While this can indeed cause numerical instability, it is not the only reason for gradient explosion. In Figure 6, we observe that the gradient explodes even before the standard deviations become small.  
+
+Large mean causes gradient explosion. We have mentioned that large outputs generated by the policy network are one of the primary causes of gradient explosion. To verify this analysis, we apply an additional transformation $g(\cdot)$ to the mean $\mu(s)$ to prevent it from leaving the action space $\boldsymbol{\mathcal{A}}$ . The new Gaussian policy is defined as $\boldsymbol{a}\sim\mathcal{N}(g(\boldsymbol{\mu}(\boldsymbol{s})),\boldsymbol{\Sigma}(\boldsymbol{s}))$ , where $g(\mu(s))\in A$ . In Table 1, we consider two transformations: the action-clipping function $g\,=\,\phi$ , defined in Section 3, and the hyperbolic tangent activation function $g=\mathrm{tanh}$ . We observe that both transformations effectively prevent the exploding gradient issue across three MuJoCo environments, indicating that having deviated means is indeed one of the main causes of numerical instability. Meanwhile, we also observe that the final returns are significantly lower than the benchmark (Raffin et al., 2021). This may be attributed to the fact that when the mean $\mu\!\left(s_{t}\right)$ goes outside $\boldsymbol{\mathcal{A}}$ for some state $s_{t}$ , the gradient norm  
+
+$$
+\nabla_{\theta}\;g(\mu(s_{t};\theta))=\frac{\mathrm{d}g(\mu)}{\mathrm{d}\mu}\bigg|_{\mu=\mu(s_{t})}\;\frac{\partial\mu(s_{t};\theta)}{\partial\theta},
+$$  
+
+270 271 272 273 274 275 276 277 278 279 280 281 282 283 284 285 286 287 288 289 290 291 292 293 294 295 296 297 298 299 300 301 302 303 304 305 306 307 308 309 310 311 312 313 314 315 316 317 318 319 320 321 322 323   
+
+![](images/69203d44a6da6e574746b9d521d3a3dd90bd9085706df87c27a8b1edcbe46b11.jpg)  
+
+![](images/63d1cc6f2526e9ad9b92536c209251d7d8d85d91a7e88a6c28b1f5601e54c312.jpg)  
+Figure 2: The maximum of probability ratio after clipping takes exponentially large values when the gradient explodes in five individual runs.  
+
+Table 1: Performance of mean transformation via clipping function or tanh function in three MuJoCo environments. For Hopper-v4 and Walker2d-v4, we directly apply tanh as their action input range is between $-1$ and 1. For the Humanoid-v4 task, we rescale the mapping to $g=0.4*\mathrm{tanh}$ , as the action inputs are bounded between $-0.4$ and 0.4.  
+
+becomes exponentially small or even equal to zero, depending on the transformation $g$ . Notably, we may have $|\frac{\mathrm{d}g(\mu)}{\mathrm{d}\mu}|_{2}\simeq\,0$ due to the vanishing gradient property of the transformation $g$ when $\mu(s_{t})\notin A$ . As a result, policy gradient algorithms are more likely to converge towards sub-optimal regions in this case.  
+
+5 OPTIMIZATION CONSTRAINTS CANNOT GUARANTEE NUMERICAL STABILITY  
+
+In previous sections, we demonstrated that importance sampling can be numerically unstable when the probability ratio is evaluated at transformed sample points. This is particularly problematic in deep policy gradient methods like TRPO and PPO, which incorporate the probability ratio into their surrogate objective functions. This integration is the fundamental reason for the numerical instability of these algorithms. However, it should be noted that both TRPO and PPO also apply certain constraints to the original optimization problem, such as KL divergence and probability ratio clipping. In this section, we will explain why these optimization constraints are insufficient to resolve the numerical issues as they are supposed to.  
+
+KL divergence. In TRPO algorithm (Schulman et al., 2015a), it proposes to use the KL divergence between the current and old policy as a constraint to prevent large updates during policy improvement. Specifically, the KL divergence of two continuous probability distributions $P$ and $Q$ is defined as  
+
+$$
+D_{K L}(P\parallel Q)=\int_{\Omega}p(x)\ \log\frac{p(x)}{q(x)}\ \mathrm{d}x,
+$$  
+
+where $p$ and $q$ are the probability density functions of $P$ and $Q$ , respectively. When optimizing the objective equation 2, TRPO applies the following hard constraint to the $\mathrm{KL}$ distance between successive policies  
+
+$$
+\begin{array}{r}{\mathbb{\hat{E}}_{s\sim\pi}\Big[D_{K L}\big(\pi_{\theta}(\cdot|s)\;\|\;\pi(\cdot|s)\big)\Big]\leq\delta,}\end{array}
+$$  
+
+where $\delta\ >\ 0$ is a small quantity called the KL stepsize. Note that for many commonly used distributions, including Gaussian, the KL divergence between $\pi_{\theta}$ and $\pi$ can be analytically calculated via a closed-form formula. For instance, consider two multivariate Gaussian policies $\pi_{\theta}(\cdot|s)\;\sim$ $\mathcal{N}(\mu(s),\Sigma_{0})$ and $\pi(\cdot|s)\sim\mathcal{N}(\mu_{0}(s),\Sigma_{0})$ with identical covariance matrices. The KL divergence is  
+
+$$
+D_{K L}(\pi_{\theta}(\cdot|s)\parallel\pi(\cdot|s))=\frac{1}{2}(\mu(s)-\mu_{0}(s))^{T}\Sigma_{0}^{-1}(\mu(s)-\mu_{0}(s)).
+$$  
+
+While the above constraint can effectively prohibit $\pi_{\theta}$ from making large updates steps in the distribution space, it may not be able to prevent the probability ratio $p_{\theta}(a|s)$ from taking extremely large values at some state-action pair $(s,a)$ for two reasons: First, the KL divergence $D_{K L}(\pi_{\boldsymbol{\theta}}(\cdot|s)\parallel\pi(\cdot|s))$ measures the averaged distance between two distributions over the entire space $\mathbb{R}^{m}$ , while $p_{\theta}(a|s)$ is determined at a specific point $a\in\mathbb{R}^{m}$ , which means that we can find some $a\in\mathbb{R}^{m}$ such that the probability ratio $p_{\theta}(a|s)$ takes a large value even if the KL distance $D_{K L}(\pi_{\theta}(\cdot|s)$ is small. Second, the absolute value of KL divergence $|D_{K L}(\pi_{\theta}(\cdot|s)\parallel\pi(\cdot|s))|$ is quadratic with respect to the policy update $|\mu(s)-\mu_{0}(s)|$ , while the probability ratio $\pi_{\theta}(a|s)$ grows exponentially with $|\mu(s)-\mu_{0}(s)|$ especially for excessively small $\pi(a|s)$ .  
+
+Probability ratio clipping. While TRPO involves second-order computations that are usually expensive in practice, PPO (Schulman et al., 2017) proposes a clipped surrogate objective  
+
+$$
+{\cal L}^{C L I P}(\theta)=\hat{\mathbb{E}}_{(s_{t},a_{t})\sim\pi}\Big[\operatorname*{min}\Big(p_{\theta}\hat{A}^{\pi}(s_{t},a_{t}),\mathrm{clip}(p_{\theta},1-\epsilon,1+\epsilon)\hat{A}^{\pi}(s_{t},a_{t})\big)\Big]
+$$  
+
+where $\epsilon\in(0,1)$ is the clipping parameter. The clipped loss equation 11 is expected to block large updates in the policy that can improve the objective (i.e., $\hat{A}^{\pi}(s_{t},a_{t})>0)$ , and allow them if they make the objective worse $(\hat{A}^{\pi}(s_{t},a_{t})\,<\,0)$ ). This property, however, makes it possible that some ill-conditioned probability ratios are evaluated when computing $L^{C L I P}(\theta)$ .  
+
+In particular, consider a given state-action pair $(s,a)$ and the estimated advantage $\hat{A}^{\pi}(s,a)$ :  
+
+(s, a) ≥0 $\operatorname*{min}\left(p_{\theta}\hat{A}^{\pi}(s,a),\operatorname{clip}(p_{\theta},1-\epsilon,1+\epsilon)\hat{A}^{\pi}(s,a))\right)=(1+\epsilon)\hat{A}^{\pi}(s,a),$ whenever $p_{\theta}\geq1+\epsilon$ . Thus, it automatically blocks extremely large values in $p_{\theta}$ when evaluating $\dot{L}^{C L I P}(\theta)$ ; • If $\hat{A}^{\pi}(s,a)<0$ , it is possible that the machine directly evaluates large probability ratios, since $\begin{array}{r l}&{\mathrm{Integrand~in~equation~}11=\operatorname*{min}\left(p_{\theta}\hat{A}^{\pi}(s,a),\mathrm{clip}(p_{\theta},1-\epsilon,1+\epsilon)\hat{A}^{\pi}(s,a))\right)}\\ &{\hphantom{=\hat{A}^{\pi}(s,a)\cdot\coth\bigl(p_{\theta},1-\epsilon,1+\epsilon)\bigr)}=\hat{A}^{\pi}(s,a)\operatorname*{max}\left(p_{\theta},\mathrm{clip}(p_{\theta},1-\epsilon,1+\epsilon)\right)}\\ &{\hphantom{=\hat{A}^{\pi}(s,a)\cdot\coth\bigl(p_{\theta},1-\epsilon\bigr)}=\hat{A}^{\pi}(s,a)\operatorname*{max}\left(p_{\theta},1-\epsilon\right)}\\ &{\hphantom{=\hat{A}^{\pi}(s,a)\cdot\cfrac{\hat{A}^{\pi}(s,a)}{\hat{A}^{\pi}(s,a)}}=p_{\theta}~\hat{A}^{\pi}(s,a)}\end{array}$ when $p_{\theta}\ge1-\epsilon$ , which then may lead to numerical overflows.  
+
+In practice, the expectation in equation 11 is estimated by the average over sampled trajectories  
+
+$$
+L^{C L I P}(\theta)\simeq\frac{1}{T}\sum_{t=0}^{T-1}\operatorname*{min}\Big(p_{\theta}\hat{A}^{\pi}(s_{t},a_{t}),\mathrm{clip}(p_{\theta},1-\epsilon,1+\epsilon)\hat{A}^{\pi}(s_{t},a_{t}))\Big).
+$$  
+
+Therefore, numerical errors may occur if there exists any pair $\left({{s}_{t}},{{a}_{t}}\right)$ with negative advantage $\hat{A}^{\pi}(s_{t},a_{t})<0$ and large probability ratio $p_{\theta}(a_{t}|s_{t})\gg1$ .  
+
+Empirical results. We perform experiments to validate aforementioned theoretical analysis. In Figure 3 (a), we see that the KL divergence $D_{K L}(\pi_{\boldsymbol{\theta}}(\cdot|\boldsymbol{s})\parallel\pi(\cdot|\boldsymbol{s}))$ remains small even when the probability ratio $p_{\theta}(a|s)$ takes very large values, indicating that $\dot{D}_{K L}(\pi_{\boldsymbol{\theta}}(\cdot|\boldsymbol{s})\parallel\pi(\cdot|\boldsymbol{s}))$ cannot ensure numerical stability. We also test the following KL-penalized objective  
+
+$$
+{\cal L}^{K L P E N}(\theta)=\hat{\mathbb{E}}_{t}\Big[p_{\theta}(a_{t}|s_{t})\hat{A}^{\pi}(s_{t},a_{t})-b D_{K L}(\pi_{\theta}(\cdot|s_{t})\parallel\pi(\cdot|s_{t}))\Big]
+$$  
+
+which is also proposed in Schulman et al. (2017). In Figure 3 (b), we can observe that optimizing equation 12 still fails to prevent the probability ratio growing exponentially. While probability ratio clipping has proven insufficient to overcome numerical instability, it is worth noting that the PPO algorithm becomes even more unstable without clipping, as shown in Figure 3 (c) where the gradient explodes within 4 steps. When plotting $\mathrm{max}_{t}$ $\stackrel{\ \ \ \ }{\log_{10}}\bar{\left(p_{\theta}(a_{t}|s_{t})\right)}$ , it is calculated after clipping. For example, a large $p_{\theta}\big(a_{t}|s_{t}\big)$ with positive advantage $\hat{A}^{\pi}(s_{t},a_{t})$ is clipped and equal to $1+\epsilon$ .  
+
+![](images/22f067e6da1ceb8367a105da746883f2b4709d880640c81fb0a5cf85ce339f0c.jpg)  
+
+Figure 3: The logarithm of KL divergence $\log_{10}\Big(D_{K L}\big(\pi_{\theta}(\cdot|s)\;\|\;\pi(\cdot|s)\big)\Big)$ and the maximum of probability ratio $\mathrm{max}_{t}$ $\log_{10}\left(p_{\theta}(a_{t}|s_{t})\right)$ at each optimization step is plotted with different optimization constraints, where environment is MuJoCo Humanoid-v4. In each plot, we apply (a) probability ratio clipping; (b) KL-penalty; (c) no constraints.  
+
+
+
+\section{6 BYPASSING IMPORTANCE SAMPLING IN PPO  }
+
+
+In previous sections, we demonstrated that the TRPO/PPO objective is potentially ill-conditioned and that the built-in optimization constraints cannot effectively alleviate its numerical instability. In this section, we examine the numerical stability of the vanilla policy gradient algorithm and propose a new algorithm based on it.  
+
+Numerical stability of vanilla policy gradient. We have discussed why importance sampling in TRPO/PPO is the primary cause of gradient explosion. It is also worth stepping back to revisit the vanilla policy gradient, whose objective does not involve any density ratio. In this case, we optimize the following objective  
+
+$$
+\begin{array}{r}{L^{V A N I L L A}(\theta)=\hat{\mathbb{E}}_{(s_{t},a_{t})\sim\pi_{\theta}}\Big[\log\pi_{\theta}(a_{t}|s_{t})\,\hat{A}^{\pi}(s_{t},a_{t})\Big],}\end{array}
+$$  
+
+where we replace $Q^{\pi}\big(s_{t},a_{t}\big)$ with $\hat{A}^{\pi}(s_{t},a_{t})$ to reduce the variance. The logarithm of the Gaussian probability density function is  
+
+![](images/252a7eaf8be5c1b7c8d9ed574ef77acd681b7be7f405fa8f05f3a091d519f098.jpg)  
+
+Table 2: Empirical results of vanilla policy gradient in three MuJoCo environments. Despite its poor performance, vanilla policy gradient does not suffer from the exploding gradient issue.  
+
+$$
+\log\pi_{\theta}(a_{t}|s_{t})=-\frac{1}{2}\sum_{i=1}^{m}\frac{(a_{t}-\mu)_{i}^{2}}{\sigma_{i}^{2}}-\frac{m}{2}\log(2\pi)-\sum_{i=1}^{m}\log\sigma_{i},
+$$  
+
+which is less likely to take extreme values where $(a_{t}-\mu)_{i}$ denotes the $i$ -th element in $(a_{t}-\mu)$ and $\Sigma=\mathrm{diag}(\sigma_{1}^{2},...,\stackrel{\cdot}{\sigma_{m}^{2}})$ . While the only problematic thing is that $\Sigma$ might have small eigenvalues, some DRL libraries employ a lower bound to the standard deviation of the policy to avoid singularity issues as shown in Table 5. Furthermore, the numerical stability of vanilla policy gradient is not very sensitive to the dimension of the action space: in equation 14, the magnitude of $|\log\pi_{\theta}(a_{t}|s_{t})|$ is roughly linear to the dimension $m$ . Similarly, the magnitude of the integrand $\mathcal{L}$ in equation 17 is also approximately linear to the dimension of $\boldsymbol{\mathcal{A}}$ , implying that the probability ratio $p_{\theta}$ is approximately exponential to the dimension of $\boldsymbol{\mathcal{A}}$ and thus much easier to explode as $m$ increases.  
+
+In Table 2, we observe that the vanilla policy gradient does not exhibit any numerical instability when the standard deviations are lower-bounded, further supporting the claim that importance sampling is the primary cause of gradient explosion in deep policy gradient methods. It should be noted that while extremely small standard deviations can still affect numerical stability, this issue can be effectively mitigated by setting a lower bound on the standard deviations, as is done in PPO (though it is not entirely effective).  
+
+Vanilla Policy Gradient with Clipping. Based on the previous analysis, the vanilla policy gradient algorithm is more stable than TRPO/PPO. Motivated by this observation, we propose an objective that combines the strengths of both approaches. This modification results in the following objective:  
+
+$$
+L^{C P G}(\theta)=\hat{\mathbb{E}}_{(s_{t},a_{t})\sim\pi}\left[\operatorname*{min}\left(\log p_{\theta}\,\hat{A}_{t}^{\pi},\mathrm{clip}(\log p_{\theta},\log(1-\epsilon),\log(1+\epsilon))\hat{A}_{t}^{\pi})\right)\right]
+$$  
+
+where $\log p_{\theta}=\log\pi_{\theta}-\log\pi$ . Notably, the new objective can also be interpreted as a logarithmic variant of the PPO loss in equation 11. As shown in Figure 5 and Table 2, this method achieves performance comparable to PPO and outperforms the vanilla policy gradient. Also, when there is no exploding gradient issue, our algorithm can achieve similar performance to PPO. To examine the performance in the general case, we use smaller policy networks with width 64 which are less affected by numerical issues based on our analysis in Section 3, and run both algorithms in three benchmarks. As shown in Figure 4, both achieve similar performance across all three environments, indicating that our algorithm serves as a numerically robust alternative to PPO.  
+
+![](images/c25e0ccef7e9067b2d893abdb5a653f68517f53160e2169118176c88034fb161.jpg)  
+Figure 4: For smaller policy networks that are less affected by gradient explosion, the proposed algorithm achieves performance comparable to PPO on three MuJoCo benchmarks.  
+
+![](images/ad57356632b2362e1a08d2e2d62b52364d51385e465a0eccf63fb8103fabf737.jpg)  
+Figure 5: For larger policy networks, where PPO completely fails due to gradient explosion, our algorithm avoids numerical issues and continues to produce reasonable results.  
+
+7 CONCLUDING REMARKS  
+
+In this work, we demonstrate that ill-conditioned density ratios in importance sampling are the fundamental cause of numerical instability in deep policy gradient methods. While this issue cannot be effectively addressed through optimization constraints alone, code-level techniques are necessary to fully eliminate or mitigate its effects. To address this issue, we find that directly dropping the importance sampling term yields the best performance, and we therefore advocate for further investigation in this direction in future studies.  
+
+According to our analysis, larger neural networks make bigger updates in each optimization step, resulting in larger density ratios in importance sampling and thus increasing the risk of gradient explosion. Therefore, we question whether deep policy gradient methods are numerically stable and robust when optimizing complex policy networks. This is particularly important for the scalability of deep policy gradient methods. Although the experiments in this work focus on MuJoCo continuouscontrol environments, the limitations discussed are inherent to the algorithms and may apply to other scenarios as well. We believe that a better understanding of these issues can undoubtedly enhance the effectiveness of deep reinforcement learning in real-world applications.  
+
+
+
+

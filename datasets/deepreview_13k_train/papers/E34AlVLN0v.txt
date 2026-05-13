@@ -1,0 +1,416 @@
+\title{Parallelizing non-linear sequential models over the sequence length}
+
+\begin{abstract}
+Sequential models, such as Recurrent Neural Networks and Neural Ordinary Differential Equations, have long suffered from slow training due to their inherent sequential nature.
+For many years this bottleneck has persisted, as many thought sequential models could not be parallelized.
+We challenge this long-held belief with our parallel algorithm that accelerates GPU evaluation of sequential models by up to 3 orders of magnitude faster without compromising output accuracy.
+The algorithm does not need any special structure in the sequential models' architecture, making it applicable to a wide range of architectures.
+Using our method, training sequential models can be more than 10 times faster than the common sequential method without any meaningful difference in the training results.
+Leveraging this accelerated training, we discovered the efficacy of the Gated Recurrent Unit in a long time series classification problem with 17k time samples.
+By overcoming the training bottleneck, our work serves as the first step to unlock the potential of non-linear sequential models for long sequence problems.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begin{wrapfigure}{r}{0.45\textwidth}
+    \includegraphics[width=0.95\linewidth]{seq-vs-deer.png}
+    \caption{Evaluating sequential models using (a) sequential method and (b) iterative method that is parallelizable.}
+    \label{fig:methods-illustration}
+\end{wrapfigure}
+
+Parallelization is arguably a main workhorse in driving the rapid progress in deep learning over the past decade.
+Through specialized hardware accelerators such as GPU and TPU, matrix multiplications which are prevalent in deep learning can be evaluated swiftly, enabling rapid trial-and-error in research.
+Despite the widespread use of parallelization in deep learning, sequential models such as Recurrent Neural Networks (RNN) \citep{hochreiter1997lstm, cho2014gru} and Neural Ordinary Differential Equations (NeuralODE) \citep{chen2018neuralode, kidger2020neuralcde} have not fully benefited from it due to their inherent need for serial evaluations over sequence lengths.
+
+Serial evaluations have become the bottleneck in training sequential deep learning models.
+This bottleneck might have diverted research away from sequential models.
+For example, attention mechanism \citep{bahdanau2014attention} and transformers \citep{vaswani2017transformer} have dominated language modelling over RNN in recent years, partly due to their ability to be trained in parallel \citep{hooker2021hardwarelottery}.
+Continuous Normalizing Flows (CNF) \citep{chen2018neuralode, grathwohl2018ffjord}, which used to utilize NeuralODE as their models, has been moving towards the direction where the training does not involve simulating the ODE \citep{lipman2022flowmatching, rozen2021moserflow, ben2022matchingflow}.
+More recent works \citep{orvieto2023resurrecting, huang2022encodingrecurrencetransformer} have attempted to resurrect the sequential RNN, but they focus on linear recurrent layers that can be evaluated in parallel with prefix scan \citep{blelloch1990prefix, martin2018parallelizinglinear, smith2022simplifieds5}, leaving non-linear recurrent layers unparallelizable over their sequence length.
+
+In this paper, we present an algorithm that can parallelize the evaluation and training of non-linear sequential models like RNN and NeuralODE without changing the output of the models beyond reasonable numerical precision.
+We do this by introducing a general framework to solve non-linear differential equations by restating them as fixed-point iteration problems with quadratic convergence, equivalent to Newton's method for root finding.
+The fixed-point iteration involves parallelizable operations and an inverse linear operator that can be evaluated in parallel even for sequential models like RNN and ODE (see Figure \ref{fig:methods-illustration}).
+As the convergence is quadratic, the number of fixed-point iterations can be quite small especially when the initial starting point is close to the converged solution.
+Most importantly, the proposed algorithm does not need a special structure of sequential models, removing the need to change models' architecture to be able to take advantage of the parallelization.
+
+
+
+\section{Related works}
+
+
+There have been some attempts to parallelize the evaluation and training of sequential models, especially for RNN.
+However, most (if not all) of them require special structures of recurrent layers.
+\cite{lei2017simple} changed the matrix multiplication involving the states into element-wise multiplication to enable parallelization.
+\cite{luo2020dual} segments the sequence into several groups to be evaluated by RNN in parallel and their groups interdependency are learned by a higher-level RNN.
+\cite{huang2022encodingrecurrencetransformer}, \cite{orvieto2023resurrecting}, and \cite{martin2018parallelizinglinear} use linear recurrent layer where it can be evaluated in parallel using prefix scan \citep{blelloch1990prefix}.
+
+On the NeuralODE side, the parallelization effort mainly comes from the past works in parallelizing the ODE solver.
+One of the main idea is the multiple shooting method \citep{kiehl1994parallelmultipleshooting, gander2007analysisparareal, chartier1993parallel, bellen1989parallel, lions2001resolutionparareal} where the time sequence is split into several segments then multiple ODE solvers are executed for each segment in parallel.
+The process is repeated iteratively until the solutions from all segments are matched.
+Although multiple ODE solvers can be executed in parallel, each ODE solver itself still requires sequential operation.
+The multiple shooting method has been adapted in training NeuralODE in \cite{massaroli2021differentiablemultipleshooting}.
+The multi-grid idea is also applied to parallelize a special RNN unit and ResNet by converting them to an ODE \citep{gunther2020layer, moon2022parallelmgrit}.
+Another work, neural rough ODE \citep{morrill2021neuralrough} has shown that it is possible to train NeuralODE for very long sequence by computing log-signature of the signals over large steps and enable the ODE solver to take a big step.
+The calculation of the log-signature can be done in parallel.
+However, solving the ODE still requires sequential operation even though the time step is larger than the original.
+Over the past few years, there have been increasing interests in using fixed points finders (e.g., root-finder) in deep learning.
+DEQ \citep{bai2019deepdeq, bai2021neural} employs root-finding in evaluating neural networks with infinite identical layers.
+The concept of infinite layers paired with root-finders has been applied to various problems and has yielded impressive results \citep{bai2020multiscaledeq, liu2022mgnni, huang2021textrmimplicit2}.
+Nonetheless, these works do not talk about parallelizing sequential models.
+
+Several recent works have also looked into parallelizing sequential models using fixed-point iterations or root finders.
+In the context of stochastic generative modelling,
+\cite{shih2023parallelsampling} divides the time span into several regions and then employs Picard iteration that are parallelizable in solving the ODE.
+\cite{wang2021approximate} recast RNN evaluation as a fixed-point iteration and solve it by only doing a small number of iterations without checking the convergence.
+As a result, this approach might produce different results than evaluating RNN sequentially.
+\cite{song2021accelerating} evaluates feedforward computations by solving non-linear equations using Jacobian or Gauss-Seidel iterations.
+Notably, the works mentioned above only use zeroth order fixed-point iterations that converge slower than our method and might not be able to converge at all if the mapping is not contracting.
+
+
+
+\section{DEER framework}
+
+\label{sec:nonlin-to-fpi}
+We will present the DEER framework: ``non-linear Differential Equation as fixed point itERation" with quadratic convergence and show its relation to Newton's method.
+This framework can be applied to 1D differential equations, i.e., ODEs, as well as differential equations in higher dimensions, i.e. Partial Differential Equations (PDEs).
+The same framework can also be adopted to discrete difference equations to achieve the same convergence rate, which can be applied to RNN.
+With the framework, we can devise a parallel algorithm to evaluate RNN and ODE without significant changes to the results.
+
+\subsection{DEER framework}
+
+Consider an output signal of interest $\mathbf{y}(\mathbf{r})\in \mathbb{R}^n$ which consists of $n$ signals on a $d$-dimensional space, where the coordinate is denoted as $\mathbf{r}\in\mathbb{R}^d$.
+The output signal, $\mathbf{y}(\mathbf{r})$, might depend on an input signal, $\mathbf{x}(\mathbf{r})$, via some non-linear delayed differential equation (DE),
+\begin{align}
+    \label{eq:general-delayed-differential-equation}
+    L[\mathbf{y}(\mathbf{r})] = \mathbf{f}\left(\mathbf{y}(\mathbf{r} - \mathbf{s}_1), \mathbf{y}(\mathbf{r} - \mathbf{s}_2), ..., \mathbf{y}(\mathbf{r} - \mathbf{s}_P), \mathbf{x}(\mathbf{r}), \theta \right)
+\end{align}
+where $L[\cdot]: \mathbb{R}^n \rightarrow \mathbb{R}^n$ is the linear operator of the DE, and $\mathbf{f}$ is the non-linear function that depends on values of $\mathbf{y}$ at $P$ different locations, external inputs $\mathbf{x}$, and parameters $\theta$.
+This form is general enough to capture various continuous differential equations such as ODE (with $L[\cdot] = d/dt$ and $\mathbf{r}=t$), partial differential equations (PDEs), or even a discrete difference equations for RNN.
+
+Now let's add $\mathbf{G}_p(\mathbf{r})\mathbf{y}(\mathbf{r} - \mathbf{s}_p)$ terms on the left and right hand side, where $\mathbf{G}_p(\mathbf{r}): \mathbb{R}^{n \times n}$ is an $n$-by-$n$ matrix that depends on the location $\mathbf{r}$. The values of $\mathbf{G}_p$ will be determined later.
+Equation \ref{eq:general-delayed-differential-equation} now becomes
+\begin{align}
+    \label{eq:general-dde-with-gs}
+    L[\mathbf{y}(\mathbf{r})] + \sum_{p=1}^P \mathbf{G}_p(\mathbf{r}) \mathbf{y}(\mathbf{r} - \mathbf{s}_p) = \mathbf{f}\left(\mathbf{y}(\mathbf{r}-\mathbf{s}_1), ..., \mathbf{x}(\mathbf{r}), \theta\right) + \sum_{p=1}^P \mathbf{G}_p(\mathbf{r}) \mathbf{y}(\mathbf{r} - \mathbf{s}_p) \\
+    \label{eq:yr-iterative equation}
+    \mathbf{y}(\mathbf{r}) = L_\mathbf{G}^{-1}\left[\mathbf{f}\left(\mathbf{y}(\mathbf{r}-\mathbf{s}_1), ..., \mathbf{x}(\mathbf{r}), \theta\right) + \sum_{p=1}^P \mathbf{G}_p(\mathbf{r}) \mathbf{y}(\mathbf{r} - \mathbf{s}_p)\right]
+\end{align}
+The left hand side of equation \ref{eq:general-dde-with-gs} is a linear equation with respect to $\mathbf{y}$, which can be solved more easily than solving the non-linear equation in most cases.
+In equation \ref{eq:yr-iterative equation}, we introduce the notation $L_\mathbf{G}^{-1}[\cdot]$ as a linear operator that solves the linear operator on the left-hand side of equation \ref{eq:general-dde-with-gs} with some given boundary conditions.
+
+Equation \ref{eq:yr-iterative equation} can be seen as a fixed-point iteration problem, i.e., given an initial guess $\mathbf{y}^{(0)}(\mathbf{r})$, we can iteratively compute the right hand side of the equation until it converges.
+To analyze the convergence near the true solution, let's denote the value of $\mathbf{y}$ at $i$-th iteration as $\mathbf{y}^{(i)}(\mathbf{r}) = \mathbf{y}^*(\mathbf{r}) + \delta \mathbf{y}^{(i)}(\mathbf{r})$ with $\mathbf{y}^*(\mathbf{r})$ as the true solution that satisfies equation \ref{eq:yr-iterative equation}.
+Putting $\mathbf{y}^{(i)}$ into equation \ref{eq:yr-iterative equation} to get $\mathbf{y}^{(i + 1)}$, and performing Taylor expansion up to the first order, we obtain
+\begin{align}
+    \delta \mathbf{y}^{(i + 1)}(\mathbf{r}) = L_\mathbf{G}^{-1}\left[\sum_{p=1}^P\left[\partial_p\mathbf{f} + \mathbf{G}_p(\mathbf{r})\right]\delta\mathbf{y}^{(i)}(\mathbf{r} - \mathbf{s}_p) + O(\delta \mathbf{y}^2)\right]
+\end{align}
+where $\partial_{p}\mathbf{f}$ is the Jacobian matrix of $\mathbf{f}$ with respect to its $p$-th parameters.
+From the equation above, the first order term of $\delta \mathbf{y}^{(i+1)}$ can be made 0 by choosing 
+\begin{align}
+    \label{eq:gp-equations}
+    \mathbf{G}_p(\mathbf{r}) = -\partial_p{\mathbf{f}}\left(\mathbf{y}(\mathbf{r}-\mathbf{s}_1), ..., \mathbf{y}(\mathbf{r}-\mathbf{s}_P), \mathbf{x}(\mathbf{r}), \theta\right).
+\end{align}
+It shows that the fastest convergence around the solution can be achieved by choosing the matrix $\mathbf{G}_p$ according to the equation above.
+It can also be shown that the iteration in equation \ref{eq:yr-iterative equation} and equation \ref{eq:gp-equations} is equivalent to the realization of Newton's method in Banach space, therefore offering a quadratic convergence.
+Iterative process in equation \ref{eq:yr-iterative equation} involves evaluating the function $\mathbf{f}$, its Jacobian, and matrix multiplications that can be parallelized in modern accelerators (such as GPU and TPU).
+If solving the linear equation can be done in parallel, then the whole iteration process can take advantage of parallel computing.
+Another advantage of solving non-linear differential equations as a fixed point iteration problem in the deep learning context is that the solution from the previous training step can be used as the initial guess for the next training step if it fits in the memory.
+Better initial guess can lower the number of iterations required to find the solution of the non-linear DE.
+
+\subsubsection{Derivatives}
+
+To utilize the framework above in deep learning context, we need to know how to calculate the forward and backward derivatives.
+For the forward derivative, we would like to know how much $\mathbf{y}$ is perturbed (denoted as $\delta \mathbf{y}$) if the parameter $\theta$ is slightly perturbed by $\delta \theta$.
+By applying the Taylor series expansion to the first order to equation \ref{eq:general-delayed-differential-equation} and using $\mathbf{G}_p(\mathbf{r})$ as in equation \ref{eq:gp-equations}, we obtain
+\begin{align}
+\label{eq:yr-forward-derivation}
+    \delta \mathbf{y} =& L_{\mathbf{G}}^{-1}\left[\frac{\partial \mathbf{f}}{\partial \theta}(\mathbf{y}(\mathbf{r}-\mathbf{s}_1), ..., \mathbf{y}(\mathbf{r}-\mathbf{s}_P), \mathbf{x}(\mathbf{r}), \theta) \delta \theta\right].
+\end{align}
+The equation above means that to compute $\delta \mathbf{y}$, one can compute the forward derivative of the outputs of $\mathbf{f}$ from $\delta \theta$ (denoted as $\delta \mathbf{f}$), then execute the inverse linear operator $L_\mathbf{G}^{-1}$ on $\delta \mathbf{f}$.
+
+For the backward derivative, the objective is to obtain the gradient of a loss function $\mathcal{L}$ with respect to the parameter, $\partial \mathcal{L} / \partial \theta$, given the gradient of the loss function to the output signal, $\partial \mathcal{L} / \partial \mathbf{y}$.
+To obtain the backward derivative, we write
+\begin{align}
+\label{eq:yr-backward-derivation}
+    \frac{\partial \mathcal{L}}{\partial \theta} =& \frac{\partial \mathcal{L}}{\partial \mathbf{y}} \frac{\partial \mathbf{y}}{\partial \theta}
+    = \left(\left(\frac{\partial \mathcal{L}}{\partial \mathbf{y}} L_{\mathbf{G}}^{-1}\right) \frac{\partial \mathbf{f}}{\partial \theta}(\mathbf{y}(\mathbf{r}-\mathbf{s}_1), ..., \mathbf{y}(\mathbf{r}-\mathbf{s}_P), \mathbf{x}(\mathbf{r}), \theta)\right).
+\end{align}
+Note that the order of evaluation in computing the backward gradient should follow the brackets in the equation above.
+In contrast to equations \ref{eq:yr-iterative equation} and \ref{eq:yr-forward-derivation}, the linear operator $L_\mathbf{G}^{-1}$ is operated to the left in the innermost bracket in equation \ref{eq:yr-backward-derivation}.
+This is known as the dual operator of $L_\mathbf{G}^{-1}$ and in practice can be evaluated by applying the vector-Jacobian product of the linear operator $L_{\mathbf{G}}^{-1}[\cdot]$.
+The results of the dual operator in the innermost bracket are then the followed by vector-Jacobian product of the function $\mathbf{f}$.
+The forward and backward derivatives for $\mathbf{x}$ are similar to the expressions for $\theta$: just substitute the differential with respect to $\theta$ into the differential with respect to $\mathbf{x}$.
+
+The forward and backward gradient computations involve only one operation of $L_\mathbf{G}^{-1}$, in contrast to the forward evaluation that requires multiple iterations of $L_\mathbf{G}^{-1}$ evaluations.
+This allows the gradient computations to be evaluated more quickly than the forward evaluation.
+Moreover, the trade-off between memory and speed can be made in the gradient computations.
+If one wants to gain the speed, the matrix $\mathbf{G}$ from the forward evaluation can be saved to be used in the gradient computation.
+Otherwise, the matrix $\mathbf{G}$ can be recomputed in the gradient computation to save memory.
+
+The gradient equations above apply even if the forward evaluation does not follow the algorithm in the previous subsection.
+For example, if equation \ref{eq:yr-iterative equation} does not converge and forward evaluation is done differently (e.g., sequentially for RNN), the backward gradient can still be computed in parallel according to equation \ref{eq:yr-backward-derivation}.
+This might still provide some acceleration during the training.
+
+\subsection{Practical implementation}
+
+Equation \ref{eq:general-delayed-differential-equation} has a very general form that can capture ordinary differential equations (ODEs), most partial differential equations (PDEs), and even discrete difference equations.
+To apply DEER framework in equation \ref{eq:yr-iterative equation} to a problem, there are several steps that need to be followed.
+The first step is to recast the problem into equation \ref{eq:general-delayed-differential-equation} to define the variable $\mathbf{y}$, the linear operator $L[\cdot]$, and the non-linear function $\mathbf{f}(\cdot)$.
+The second step is to implement what we call the shifter function.
+The shifter function takes the whole discretized values of $\mathbf{y}(\mathbf{r})$ and returns a list of the values of $\mathbf{y}$ at the shifted positions, i.e. $\mathbf{y}(\mathbf{r}-\mathbf{s}_p)$ for $p=\{1, ..., P\}$.
+The shifter function might need some additional information such as the initial or boundary conditions.
+The output of the shifter function will be the input to the non-linear function.
+The next step, and usually the hardest step, is to implement the inverse operator $L^{-1}_\mathbf{G}[\mathbf{h}]$ given the list of matrices $\mathbf{G}_p$ and the vector values $\mathbf{h}$ discretized at some points.
+The inverse operator $L^{-1}_\mathbf{G}[\mathbf{h}]$ might also need the information on the boundary conditions.
+The Jacobian matrix in equation \ref{eq:gp-equations} can be calculated using automatic differentiation packages \citep{paszke2017pytorch, frostig2018jax}.
+DEER framework can be applied to any differential or difference equations as long as the requirements above can be provided.
+
+To keep focused, we only present the application of DEER in parallelizing ODE and discrete sequential models.
+
+\subsection{Parallelizing ordinary differential equations (ODE)}
+An ODE typically takes the form of $d\mathbf{y} / dt = \mathbf{f}(\mathbf{y}(t), \mathbf{x}(t), \theta)$ where the initial condition $\mathbf{y}(0)$ is given.
+The ODE form above can be represented by equation \ref{eq:general-delayed-differential-equation} with $\mathbf{r} = t$, $L = d/dt$, $P = 1$, and $\mathbf{s}_1 = 0$.
+This means that the operator $L_\mathbf{G}^{-1}$ in ODE is equivalent to solving the linear equation below given the initial condition $\mathbf{y}(0)$,
+\begin{align}
+\label{eq:lginv-ode}
+    \frac{d\mathbf{y}}{dt}(t) + \mathbf{G}(t) \mathbf{y}(t) = \mathbf{z}(t) \iff \mathbf{y}(t) = L_\mathbf{G}^{-1}[\mathbf{z}(t)].
+\end{align}
+
+Assuming that $\mathbf{G}(t)$ and $\mathbf{z}(t)$ are constants between $t=t_i$ and $t=t_{i+1}$ as $\mathbf{G}_i$ and $\mathbf{z}_i$ respectively, we can write the relations between $\mathbf{y}_{i+1} = \mathbf{y}(t_{i+1})$ and $\mathbf{y}_i = \mathbf{y}(t_i)$ as
+\begin{align}
+\label{eq:ode-recursive-equation}
+    \mathbf{y}_{i + 1} = \Bar{\mathbf{G}}_i \mathbf{y}_i + \Bar{\mathbf{z}}_i
+\end{align}
+with $\Bar{\mathbf{G}}_i = \exp\left(-\mathbf{G}_i \Delta_i\right)$, $\Bar{\mathbf{z}}_i = \mathbf{G}_i^{-1}(\mathbf{I} - \Bar{\mathbf{G}}_i)\mathbf{z}_i$, $\Delta_i = t_{i + 1} - t_i$, $\mathbf{I}$ the identity matrix, and $\exp(\cdot)$ the matrix exponential.
+Equation \ref{eq:ode-recursive-equation} can be evaluated using the parallel prefix scan algorithm as described in \cite{blelloch1990prefix} and \cite{smith2022simplifieds5}.
+Specifically, we define a pair of variables $c_{i + 1} = (\Bar{\mathbf{G}}_i | \Bar{\mathbf{z}}_i)$ for every discrete time point $t_i$, the initial values $c_0 = (\mathbf{I} | \mathbf{y}_0)$, and an associative operator,
+\begin{align}
+\label{eq:associative-operator}
+    c_{i + 1} \bullet c_{j + 1} = (\Bar{\mathbf{G}}_j \Bar{\mathbf{G}}_i | \Bar{\mathbf{G}}_j \Bar{\mathbf{z}}_i + \Bar{\mathbf{z}}_j).
+\end{align}
+Given the initial value of $c_0$ and the associative operator above, we can run the associative scan in parallel to get the cumulative value of the operator above.
+The solution $\mathbf{y}_i$ can be taken from the second element of the results of the parallel scan operator.
+
+On the implementation note, we can reduce the computational error by taking the $\mathbf{G}_i$ and $\mathbf{z}_i$ as the mid-point value, i.e. $\mathbf{G}_i = \frac{1}{2}[\mathbf{G}(t_i) + \mathbf{G}(t_{i+1})]$ and $\mathbf{z}_i = \frac{1}{2}[\mathbf{z}(t_i) + \mathbf{z}(t_{i+1})]$.
+By taking the mid-point value, we can obtain the third order local truncation error $O(\Delta_i^3)$ instead of second order error using either the left or the right value, with only a small amount of additional computational expenses.
+The materialization of DEER framework on ODE can be seen as direct multiple shooting method \citep{chartier1993parallel, massaroli2021differentiablemultipleshooting} that splits the time horizon as multiple regions.
+However, in our case each region is infinitesimally small, making the Newton step follows equation \ref{eq:ode-recursive-equation} and parallelizable.
+\subsection{Parallelizing RNN}
+
+Recurrent Neural Network (RNN) can be seen as a discretization of ODE.
+Having the input signal at index $i$ as $\mathbf{x}_i$ and the previous states $\mathbf{y}_{i-1}$, the current states can be written as $\mathbf{y}_i = \mathbf{f}(\mathbf{y}_{i - 1}, \mathbf{x}_i, \theta)$.
+This form can capture the common RNN units, such as LSTM \citep{hochreiter1997lstm} and GRU \citep{cho2014gru}.
+Also, the form can be written as equation \ref{eq:general-delayed-differential-equation} with $\mathbf{r} = i$, $L[\mathbf{y}] = \mathbf{y}$, $P = 1$ and $\mathbf{s}_1 = 1$.
+This means that the inverse linear operator can be calculated by solving the equation below, given the initial states $\mathbf{y}_0$,
+\begin{align}
+\label{eq:rnn-recursive-equation}
+    \mathbf{y}_{i} + \mathbf{G}_i \mathbf{y}_{i - 1} = \mathbf{z}_i \iff \mathbf{y}_{1...T} = L_\mathbf{G}^{-1}[\mathbf{z}_{1...T}].
+\end{align}
+Solving the equation above is equivalent to solving equation \ref{eq:ode-recursive-equation} from the previous subsection.
+It means that it can be parallelized by using the parallel prefix scan with the defined associative operator in equation \ref{eq:associative-operator}.
+
+\subsection{Complexity and limitations}
+The algorithms for solving non-linear ODE and RNN in parallel are simply repeatedly evaluating equation \ref{eq:yr-iterative equation} from an initial guess.
+However, the equation requires the explicit Jacobian matrix for each sequence element for each shift.
+If $\mathbf{y}$ has $n$ elements, $L$ sampling points, and $P$ shifted arguments, storing the Jacobian matrices requires $O(n^2 L P)$ memory.
+Also, the prefix scan for solving the linear differential equation requires matrix multiplication of matrices $\mathbf{G}_p$ at different sampling points.
+This would introduce $O(n^3 L P)$ time complexity.
+As the algorithm has $O(n^2)$ memory complexity and $O(n^3)$ time complexity, this algorithm would offer significant acceleration for small number of $n$.
+
+As the proposed method is a realization of Newton's method in Banach space, it has the same limitations as Newton's method.
+If the starting point is sufficiently far from the solution, the iteration might not converge.
+This problem might be addressed by using modified Newton's method with convergence guarantee such as \cite{nesterov2006cubicnewton} and \cite{doikov2023gradientregnewton}.
+However, we leave the use of globally-converged Newton's method as the future work.
+
+There is only one additional hyperparameter in our method: the tolerance for convergence.
+As our method has quadratic convergence, the tolerance value does not have a big effect on the number of iterations required for convergence, as long as it is not too close to the numerical precision value and not too big.
+In fact, using respectively $10^{-4}$ and $10^{-7}$ for single- and double-precision floating point precisions are enough for our experiments.
+
+Parallelizing ODE and RNN both require parallelizing the evaluation of equations \ref{eq:ode-recursive-equation} and \ref{eq:rnn-recursive-equation}.
+Those equations can be parallelized using parallel prefix scan of a custom associative operation in equation \ref{eq:associative-operator}.
+This is relatively straightforward using JAX's \texttt{jax.lax.associative\_scan} \citep{frostig2018jax} or TensorFlow's \texttt{tfp.math.scan\_associative} \citep{abadi2016tensorflow}.
+However, as of the time of writing this paper, this operation cannot be implemented easily using PyTorch \citep{paszke2017pytorch}.
+For this reason, we used JAX for our experiments in this paper as well as flax and equinox \citep{kidger2021equinox} for the neural networks.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\linewidth]{fwd-speedup.png}
+    \includegraphics[width=0.9\linewidth]{fwd-grad-speedup.png}
+    \caption{The speed up of GRU calculated using DEER method (this paper) vs commonly-used sequential method on a V100 GPU for (top) forward and (bottom) forward + gradient calculations.
+    The missing data for large number of dimensions and sequence lengths is due to insufficient memory in the DEER method.
+    The bar height represents the mean speed up over 5 different random seeds.}
+    \label{fig:fwd-speedup}
+\end{figure}
+
+
+
+\section{Experiments}
+
+
+\subsection{Performance benchmarking}
+
+The first test is to compare the speed on evaluating an RNN using the presented DEER method against the common sequential method.
+Specifically, we're using an untrained Gated Recurrent Unit (GRU) cell from flax.linen (a JAX neural network framework) using 32-bits floating points random inputs with 16 batch size, various number of dimensions (i.e., $n$), and various number of sequence lengths.
+The initial guess for DEER is all zeros for all the benchmark runs.
+The speed up on a V100 GPU obtained by the method presented in this paper is shown in figure \ref{fig:fwd-speedup}.
+
+The figure shows that the largest speed up is achieved on long sequence lengths with small number of dimensions.
+With 1M sequence length, 16 batch size, and $n = 1$, the sequential evaluation required 8.7 s while DEER method only took 15 ms, which translates to a speed up of over 500.
+However, the speed up decreases as the number of dimensions increases, where the speed up is only about 25\% with 64 dimensions (64 hidden elements in GRU).
+This is due to the explicit computation of Jacobian matrix and the matrix multiplication that scales to $O(n^3)$.
+
+The speed up for forward + gradient calculations is even greater than the speed up for forward evaluations only.
+With the same set up, the speed up for 1M sequence length with 1 dimension could be more than 1000 times faster.
+This is because the backward gradient calculations require only one evaluation of $L_\mathbf{G}^{-1}$ in equation \ref{eq:yr-backward-derivation} as opposed to multiple evaluations in forward calculations.
+Generally, the speed up increases with smaller batch size, where speed up of above 2600 can be achieved with batch size 2.
+This means that with more devices, greater speed up can be achieved by having a distributed data parallel, effectively reducing the batch size per device.
+
+Figure \ref{fig:gru-outputs-comparison} shows the comparison between the output of an untrained GRU of 32 hidden elements evaluated using sequential vs DEER method.
+The input to the GRU is a Gaussian-random tensor with 10k sequence length and 32 dimensions.
+From figure \ref{fig:gru-outputs-comparison}, we see that the output of GRU evaluated using DEER method is almost identical to the output obtained using the sequential method.
+The small error in figure \ref{fig:gru-outputs-comparison}(b) is due to numerical precision limits of the single precision floating point.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\linewidth]{gru-outputs.png}
+    \caption{(a) The comparison between the outputs of GRU evaluated with sequential method vs DEER method.
+    The line for sequential method output is almost not visible because overlaid by the output of DEER method.
+    Only the last 200 indices are shown for clarity.
+    (b) The difference between the outputs of sequential and DEER method for the whole 10k sample length.
+    }
+    \label{fig:gru-outputs-comparison}
+\end{figure}
+
+\TODO{Memory benchmarking (QZ)\\}
+\TODO{Benchmarking on NeuralODE (YH)\\}
+\TODO{Benchmarking against Parareal or other multiple shooting methods}
+\subsection{Learning physical systems with NeuralODE}
+
+We test the capability of DEER method in training a deep neural network model using a simple case from physics.
+Given the positions and velocities as a function of time of a two-body system interacting with gravitational force, we trained Hamiltonian Neural Networks (HNN) \citep{greydanus2019hamiltonian} to match the data.
+There are $n=8$ states in this case.
+Note that this set up is different from the original HNN paper where they train the network to match the velocity + acceleration, given position + velocity at every point in time.
+In this case, only positions and velocities as a function of time are given and the network needs to solve the ODE to make a prediction.
+We use 10,000 time points sampled uniformly, whereas other works in this area typically only use less than 1,000 sampling points for the training \citep{matsubara2022finde, chen2019symplecticrnn}.
+The losses during the training using DEER method vs using RK45 \citep{atkinson1991introductionnumericalanalysis} are shown in figure \ref{fig:train-comparison}(a, b).
+We use the RK45 algorithm from JAX's experimental feature.
+From the figure, it can be seen that the training can be 11 times faster when using DEER method presented in this paper than using the ordinary ODE solver without significant difference in the validation losses between the two methods.
+To achieve 55k training steps, DEER method only spent 1 day + 6 hours, while training with RK45 required about 2 weeks of training.
+The small difference of the validation losses between the two methods potentially comes from different methods in solving the ODE as well as from the numerical precision issue as shown in Figure \ref{fig:gru-outputs-comparison}(b).
+
+\TODO{Compare the training vs using multiple-shooting method (see ``Differentiable Multiple Shooting Layers") \\}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{ode_hnn_train_comparison.png}
+    \includegraphics[width=\textwidth]{rnn_train_comparison.png}
+    \caption{(Top) The validation losses of HNN with NeuralODE training using DEER method (shown in blue) vs RK45 method (in orange) as a function of (a) training hours and (b) training steps.
+    (Bottom) The validation accuracy of RNN training using DEER method (blue) vs the sequential method (orange) as a function of (c) training hours and (d) training steps.
+    }
+    \label{fig:train-comparison}
+\end{figure}
+
+\subsection{Time-series classification with recurrent neural network (RNN)}
+
+\begin{wraptable}{r}{8.0cm}
+   \centering
+    \begin{tabular}{l|r}
+        \hline
+        \textbf{Model} & \textbf{Accuracy (\%)} \\
+        \hline
+        ODE-RNN (folded), step: 128 & $47.9 \pm 5.3$ \\
+        NCDE, step: 4 & $66.7 \pm 11.8$ \\
+        NRDE (depth 3), step: 32 & $75.2 \pm 3.0$ \\
+        NRDE (depth 2), step: 128 & $76.1 \pm 5.9$ \\
+        NRDE (depth 2), step: 4 & $\mathbf{83.8 \pm 3.0}$ \\
+        UnICORNN (2 layers) & $\mathbf{90.3 \pm 3.0}$ \\
+        LEM & $\mathbf{92.3 \pm 1.8}$ \\
+        \hline
+        GRU (from this paper) & $\mathbf{88.0 \pm 4.4}$ \\
+        LEM (our reproducibility attempt) & $\mathbf{92.3 \pm 2.1}$
+    \end{tabular}
+    \caption{The classification accuracy of EigenWorms dataset for various methods, including folded ODE-RNN \citep{rubanova2019latentrnnode}, Neural CDE \citep{kidger2020neuralcde}, Neural RDE \citep{morrill2021neuralrough}, UnICORNN \citep{rusch2021unicornn}, LEM \citep{rusch2021longlem}, and GRU. The mean and standard deviations of the accuracy were obtained from 3 times repetition with different seeds.
+    The numbers of non-GRU methods were obtained from \cite{morrill2021neuralrough} and \cite{rusch2021longlem}.}
+    \label{tab:eigenworms-table}
+\end{wraptable}
+
+Faster training enabled by DEER method allows us to use classical RNN architectures, such as Gated Recurrent Unit (GRU, \cite{cho2014gru}), for problems with long time series.
+In this subsection, we trained a neural network that consists of GRUs to classify EigenWorms dataset \citep{brown2013dictionaryeigenworms} from UEA \citep{bagnall2018uea} with 17,984 time samples for each entry.
+Figure \ref{fig:train-comparison}(c)-(d) shows the comparison of validation accuracy during the training of the GRU network using DEER method vs the common sequential method.
+From the figure, we can see that the validation accuracy plot when using DEER is similar to the validation plot obtained with the sequential method.
+The difference in the validation accuracy might be due to numerical precision issue as shown in Figure \ref{fig:gru-outputs-comparison}(b) that is accumulated at long sequence.
+However, the training using DEER is up to 22 times faster than the training using the sequential method.
+What would have taken more than 1 day to train using the common sequential method, only takes 1 hour using DEER.
+
+The classification results of the test dataset from EigenWorms for various methods are shown in Table \ref{tab:eigenworms-table}.
+As we can see from the table, the network with GRUs can be as competitive as more modern methods \citep{morrill2021neuralrough, rusch2021unicornn, rusch2021longlem} for this long time series dataset.
+The long training time of GRUs using the sequential method could be the main factor hindering the trial-and-error process of exploring GRU architectures for this dataset with long sequences.
+However, our DEER method enables much faster training of GRUs, facilitating iterative experimentation to identify optimal GRU architectures and hyperparameters.
+
+To demonstrate the applicability of DEER to other architecture, we performed an experiment to reproduce the results from LEM \citep{rusch2021longlem}.
+The reimplementation of LEM from PyTorch to JAX makes the reproducibility attempt not straightforward.
+Moreover, as the EigenWorms dataset is very small, slight changes could change the results quite significantly.
+With DEER, we can run more experiments than using sequential methods, allowing us to tune hyperparameters faster.
+Our attempt has produced similar results to the original attempt at \cite{rusch2021longlem}.
+With DEER, one epoch can be done in 18 seconds while the sequential method could take about 116 seconds.
+
+\subsection{Sequence classification with multiple heads RNN}
+
+\begin{wraptable}{r}{6.75cm}
+   \centering
+    \begin{tabular}{lr}
+        \hline
+        \textbf{Model} & \textbf{Accuracy} \\
+        \hline
+        \textit{State-space or linear recurrent} & \\
+        LSSL \citep{gu2021combininglssl} & 84.65\% \\
+        S4 \citep{gu2021efficientlys4} & 91.80\% \\
+        Liquid-S4 \citep{hasani2022liquids4} & \underline{92.02\%} \\
+        LRU \citep{orvieto2023resurrecting} & 89.0\% \\
+        \hline
+        \textit{Convolution} & \\
+        TrellisNet \citep{bai2018trellis} & 73.42\% \\
+        FlexConv \citep{romero2021flexconv} & 80.82\% \\
+        MultiresNet \citep{shi2023sequencemultiresnet} & \underline{\textbf{93.15\%}} \\
+        \hline
+        \textit{Non-linear recurrent} & \\
+        r-LSTM \citep{trinh2018learningrlstm} & 72.2\% \\
+        UR-GRU \citep{gu2020improvingurgru} & 74.4\% \\
+        Multi-head GRU (ours) & \underline{90.25\%} \\
+    \end{tabular}
+    \caption{The classification test dataset accuracy of sequential CIFAR-10 dataset for various methods, grouped according to their architecture classes.
+    Underlined scores are the best score for each architecture class.}
+    \label{tab:scifar10-table}
+\end{wraptable}
+
+One way to avoid unfavorable scaling with respect to $n$ in DEER is to use multi-head recurrent unit.
+For example, instead of having a unit with $n=256$ channels, we split the unit into 32 heads with each head has $n=8$ channels.
+Each head can also have different strides with exponentially increasing values, for example, the first head has stride $2^0$, second head has stride $2^1$, and so on.
+The use of multiple heads is inline with the idea from state-spaces \citep{gu2021combininglssl, gu2021efficientlys4, gu2022parameterizations4d, smith2022simplifieds5} where states are grouped and each group has different length scale.
+
+We performed an experiment using the multi-head GRU on a standard sequential CIFAR-10 dataset.
+
+Running an experiment with DEER using multi-head GRU is about 3 times faster than using sequential method.
+The speed up is not as big as in the previous subsections because of shorter effective sequence lengths due to larger strides.
+However, the speed up still allows us to run multiple experiments to find a good configuration.
+
+Table \ref{tab:scifar10-table} shows that multi-head GRU can achieve 89.35\% test accuracy.
+Although the result is not the state-of-the-art, this is the best result on sequential CIFAR-10 using non-linear recurrent units.
+We show that a simple modification of GRU and the capability to run more experiments enabled by DEER has uncover the potential of classical recurrent units such as GRU in competing with more modern architectures.
+Please note that our aim for this paper is not to focus on new architectures, but to focus on a new computational method that enables faster experimentation on non-linear sequential models.
+Finding new non-linear sequential models enabled by DEER is for the future work.
+
+
+\section{Conclusion}
+
+
+We introduced a method to parallelize the evaluation and training of inherently sequential models, such as ODE and RNN.
+Evaluations using our approach can be up to 3 orders of magnitude faster than traditional sequential methods when dealing with long sequences.
+When training sequential models with reasonable settings, our method can achieve over a 10-fold speed increase without significantly altering the results.
+By having a technique to accelerate the training and evaluation of sequential models, we anticipate a hastened pace of research in this domain, potentially catalyzing the emergence of novel and interesting non-linear sequential models in the future.
+
+
+

@@ -1,0 +1,453 @@
+\title{MQuant: Unleashing the Inference Potential of Multimodal Large Language Models via Full Static Quantization}
+
+\begin{abstract}
+Recently, multimodal large language models (MLLMs) have garnered widespread attention due to their ability to perceive and understand multimodal signals. However, their large parameter sizes and substantial computational demands severely hinder their practical deployment and application. While quantization is an effective way to reduce model size and inference latency, its application to MLLMs remains underexplored. In this paper, we conduct an in-depth analysis of MLLMs quantization and identify several challenges: slow inference speed of the visual tokens, distributional differences across modalities, and visual outlier clipping degrades performance.
+To address these challenges, we propose **MQuant**, a quantization framework tailored for MLLMs. Specifically, 1) we design Modality-specific Quantization (MSQ) and Attention-Invariant Flexible Switching (AIFS) to support per-tensor static quantization and facilitate efficient inference. 2) we introduce a unified LayerNorm-to-RMSNorm transformation, achieving seamless integration of the MLLM vision encoder with Hadamard rotation. 3) we propose Rotation Magnitude Suppression (RMS) to mitigate outliers introduced by Hadamard rotation. Experiments conducted on five mainstream MLLMs demonstrate the superior performance and broad applicability of MQuant. For example, it maintains around 98\% of the floating-point accuracy under the W4A8 setting. To the best of our knowledge, **MQuant** is the first quantization solution for MLLMs, paving the way for future advancements in their application.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Recently, large language models (LLMs) such as GPT (Brown et al., 2020) and the LLaMA series (Touvron et al., 2023a;b; Dubey et al., 2024) have shown remarkable success across various domains, but they often struggle when handling non-textual data. Multimodal large language models (MLLMs) (Reid et al., 2024; Achiam et al., 2023b; Wang et al., 2023) overcome this by incorporating various modalities such as images and video, enabling a comprehensive understanding of diverse data types. However, the vast number of parameters and substantial computational demands due to the processing of multimodal inputs, which severely hinders their practical application. This is especially true in resource-constrained and privacy-sensitive environments.  
+
+Quantization is an effective technique for compressing and accelerating neural networks by converting high-precision values (e.g., FP32) to low-precision values (e.g., INT8), significantly reduces memory usage and inference latency. While quantization has been widely applied to LLMs (Yuan et al., 2023a; Shao et al., 2023), its application to MLLMs is essential but remains relatively under-explored.  
+
+When quantizing MLLMs, it is essential to consider the differences in inference efficiency that arise from their multi-modal nature. A typical difference is the Time to First Token (TTFT) in MLLMs increases significantly with the resolution and aspect ratio of input images or videos. As shown in Fig 1(a), in models such as Qwen2-VL (Wang et al., 2024), the number of prefill visual tokens grows as image resolution increases (detailed figure in Fig. 7). This rapid expansion in token count exacerbates the inference latency, particularly in per-token dynamic quantization, which requires separate processing for each token, such as memory access and scale computation. As a result, the TTFT in MLLMs increases drastically, severely impacting overall inference latency. Moreover, in higher-demand scenarios such as video-based tasks and multi-image dialogues, the accumulation of visual tokens becomes even more pronounced, further exacerbating the increase in TTFT.  
+
+![](images/c8dffa480755baec6f98608e4e386a8723c21b752aeb6608ada988da2e0f2f8e.jpg)  
+Figure 1: (a) The number of prefill visual tokens across different MLLMs as the image splits or resolution increases. (b) The activation values of visual tokens range from $-20$ to 10, whereas textual tokens are centered around 0, with only a few having absolute magnitudes exceeding 0.5.  
+
+One intuitive approach to address this issue is to employ per-tensor static quantization for prefill multimodal tokens, which eliminates the need for token-wise scale computation. While this approach achieves up to $66\%$ acceleration across all LLM linear layers (Fig. 4), it still results in a serious accuracy degradation. We investigate the root causes and identify the following key challenges in MLLM quantization: $\pmb{\mathrm{\Sigma}}$ Balancing efficiency and accuracy when adopting per-tensor static quantization for multi-modal tokens. In MLLMs, input multi-modal tokens include visual and textual with distinct value distributions. Unlike per-token dynamic quantization, which can adaptively compute token-wise scales in an online manner, static quantization applies few scale factors across the mixed multi-modal tokens in an offilne manner, leading to a difficult trade-off between efficiency and accuracy. $\pmb{\varphi}$ The data distribution of visual and textual tokens exhibits significant differences. Unlike LLMs, which solely handle textual features, MLLMs face the challenge of processing input with distinct distributions across multiple modalities. As shown in Fig 1 (b), the activation distributions between visual and textual tokens reveal substantial numerical discrepancies. Joint quantization of these tokens may cause the larger values of visual tokens to overshadow the smaller textual values, resulting in a loss of textual information. Therefore, MLLMs require modalityspecific approaches to account for the heterogeneous nature of visual and textual token distributions. $\pmb{\otimes}$ Clipping outliers in visual tokens leads to perfor- T  
+
+mance degradation. As shown in the Tab. 1, applying a stricter clipping range causes a large drop in accuracy for visual tokens, while textual tokens exhibit only a minor decrease. In contrast, using a full clipping range slightly mitigates the performance drop for visual tokens. This indicates that careful handling of outliers in visual tokens is crucial—indiscriminate clipping of outliers leads to severe accuracy loss.  
+
+Table 1: Results of the Qwen-VL on TextVQA using different clipping ranges for visual and textual tokens. Activations are quantized using per-tensor static setting.  
+
+![](images/1d90f2e80547dbd5eda447aaf4c667e039027eaeba2d9a46b49ad50fdb0b7d15.jpg)  
+
+To this end, we propose MQuant, an accurate and efficient post-training quantization (PTQ) solution specifically designed for multimodal large language models (MLLMs). First, to reduce the TTFT while maintaining accuracy, we introduce Modality-Specific Quantization (MSQ), which handles the distinct distribution differences between visual and textual tokens. For further acceleration, we design an Attention-Invariant Flexible Switching (AIFS) scheme. AIFS transforms mixed multimodal tokens into unified, modality-decoupled tokens without the need for dynamic position vectors, maintaining computational equivalence and memory efficiency by avoiding the overhead associated with dynamic processing. Second, based on the computation invariance (Ashkboos et al., 2024a), we further develop a Post-LN $^{+}$ Rotate scheme to extend and accommodate various MLLMs architecture, enabling seamless integration with rotation to smooth outliers. Third, we reveal the weight outliers caused by the online Hadamard rotations through theoretical analysis and propose Rotation Magnitude Suppression (RMS) to mitigate them, further improving quantization accuracy.  
+
+We evaluate MQuant on various datasets and five mainstream MLLMs, including InternVL (Chen et al., 2024a), Qwen-VL (Bai et al., 2023b), MiniCPM-V (Yao et al., 2024), CogVLM2 (Hong et al., 2024) and Qwen2-VL (Wang et al., 2024). The results demonstrate that MQuant achieves less than $1\%$ accuracy loss on all MLLMs under the W4A8 setting, highlighting its superior performance and wide applicability. We publish the code, hoping to provide new insights and advance the deployment and application of MLLMs. Our main contributions are summarized as follows:  
+
+• We present the first comprehensive analysis of quantization issues in MLLMs, unveiling the root causes of performance collapse and identifying inference speed bottlenecks as well as the quantization challenges posed by modality differences.   
+• We design Modality-specific Quantization (MSQ) and Attention-Invariant Flexible Switching (AIFS) to support static quantization. Besides, we propose a Post-LN + Rotate scheme tailored to accommodate various MLLMs.   
+• We analyze the root issues of weight outliers caused by online rotation, and propose Rotation Magnitude Suppression (RMS) to effectively mitigate it.   
+• We propose MQuant, to the best of our knowledge, the first PTQ solution for MLLMs.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+Multimodal Large Language Models. The rapid advancement of LLMs has spurred significant progress in MLLMs. Flamingo (Alayrac et al., 2022) pioneered connecting pre-trained visual encoders to LLMs, demonstrating strong generalization across visual-language tasks. Following the emergence of ChatGPT Achiam et al. (2023a), numerous open-source models based on pre-trained LLMs like LLaMA (Touvron et al., 2023a) and its variants (Touvron et al., 2023b; Zheng et al., 2024) have been proposed (Li et al., 2023; Huang et al., 2024; Zhu et al., 2023; Liu et al., 2024). Subsequent efforts like Qwen-VL (Bai et al., 2023b), InternVL (Chen et al., 2024b), and CogVLMV2 Hong et al. (2024) enhanced MLLMs from perspectives such as high-resolution input and larger-scale training data. However, the substantial parameters of MLLMs lead to high computational costs, limiting broader application. Recently, smaller MLLMs like Mini-Gemini (Li et al., 2024), MobileVLM Chu et al. (2023; 2024), and MiniCPM-V (Yao et al., 2024) have emerged. Despite these developments, dedicated quantization methods for MLLMs to further reduce memory usage and accelerate inference remain under-explored.   
+Post-Training Quantization for LLMs. Existing post-training quantization (PTQ) methods for LLMs are categorized into weight-only and weight-activation quantization (Zhao et al., 2023; Yuan et al., 2024). Weight-only methods like GPTQ (Frantar et al., 2022), QuIP (Chee et al., 2024), and AWQ (Lin et al., 2023) achieve high compression rates but offer limited inference acceleration. In contrast, weight-activation quantization methods (Xiao et al., 2022; Wei et al., 2022; Yuan et al., 2023b; Zhang et al., 2024) quantize both weights and activations, improving memory usage and latency. The main challenge is activation outliers causing quantization errors. Techniques like SmoothQuant (Xiao et al., 2022) shift quantization difficulty from activations to weights, while OmniQuant (Shao et al., 2023) optimizes performance by training quantization parameters. SliceGPT (Ashkboos et al., 2024a) reduces memory demands by designing a Pre-LN $^{+}$ Rotate Scheme for LLMs sparsification based on computational invariance.14). Unlike SliceGPT, we further develop a Post-LN $^{+}$ Rotate scheme to accommodate more vision encoder and extends its applicability to various MLLMs. This enhancement broadens the the LayerNorm $^+$ Rotate approach, making it suitable for both Pre-LN and Post-LN configurations across various MLLMs. Recently, Quarot (Ashkboos et al., 2024b) introduces rotations to eliminate outliers; however, this solution is not applicable to MLLMs due to inherent modality differences. 3 PRILIMINARY   
+3.1 MLLM ARCHITECTURE   
+The existing MLLM framework (Bai et al., 2023b; Chen et al., 2024b) consists of three primary modules: a vision encoder $\mathbf{E}$ for processing visual inputs and feature extraction, a visual-language projector $\mathbf{P}$ that serves as a bridge to align the two modalities and a large language model $(L L M)$ that handles the multi-modal tokens and performs reasoning.   
+Vision Encoder Taking the input image or video $X_{v}$ as input, Existing vision encoders typically adhere to the Vision Transformer (ViT) (Dosovitskiy, 2021) architecture, such as CLIP (Radford et al., 2021), OpenCLIP (Ilharco et al., 2021) and SigLIP (Zhai et al., 2023). the vision encoder compresses the original vision information into more compact patch features ${\bf{\nabla}}F_{v}$ , which can be formulated as:   
+${\pmb F}_{v}=E({\pmb X}_{v})$ (1)  
+
+Vision-Language Projector The task of the vision-language projector $_{P}$ is to map the visual patch features ${\mathbf{}}F_{v}$ into the textual feature space:  
+
+$$
+E_{v}=P(F_{v})
+$$  
+
+Large Language Model The pre-trained large language model serves as the core component of MLLMs, endowing the framework with exceptional capabilities, such as zero-shot generalization, instruction following, and in-context learning.  
+
+Typically, a text tokenizer is integrated with the LLM, mapping text prompts $X_{t}$ to the text tokens $E_{t}$ . The text tokens $E_{t}$ and the visual tokens $E_{v}$ are then concatenated to form the input for LLMs, which outputs the final response sequence $O_{a}$ in an autoregressive manner:  
+
+$$
+L L M(O_{a}|E_{v},E_{t})=\prod_{i=1}^{l}L L M(y_{i}|E_{v},E_{t},y_{<i})
+$$  
+
+where $l$ denotes the length of $O_{a}$ . The parameter sizes of large language models (LLMs) range from 3 billion to tens of billions. Commonly used open-source LLMs include the Llama series (Touvron et al., 2023a;b), Qwen (Bai et al., 2023a), InternLM (Cai et al., 2024), MiniCPM (Hu et al., 2024), ChatGLM (GLM et al., 2024).  
+
+![](images/faec8f95464fa81b12729fd0ad14852cad5dbea43bc7e1d67a348f7a9d53831a.jpg)  
+
+3.2 TRANSFORMER AND QUANTIZATION  
+
+Transformer networks (Vaswani et al., 2017) have proven highly effective across a wide range of tasks, including language modeling and visual perception. A transformer consists of multiple layers, each containing a multi-head selfattention (MHSA) block followed by a feed-forward network (FFN) block, with a pre-normalization or post-normalization layer between them.15.  
+
+Attention Block in MLLMs Given an input prompt, the generation process of LLMs can be broadly categorized into two distinct phases: the prefill phase, which computes and stores the KV cache for input tokens, and the decoding phase, where new tokens are generated through a next-tokenprediction scheme. Given input data $\mathbf{X}$ after LayerNorm (LN), and an attention block with its weight matrices $\mathbf{W}_{q},\mathbf{W}_{k}$ and $\mathbf{W}_{v}$ , attention scores is $\mathbf{A}$ , the prefill phase is formulated as:  
+
+$$
+\begin{array}{c l}{{\bf{Q}}={\bf{X W}}_{q},}&{{\bf{K}}={\bf{X W}}_{k},\quad{\bf{V}}={\bf{X W}}_{v}}\\ {{\bf{A}}=\mathrm{{Softmax}}\left(\frac{{\bf{Q}}{\bf{K}}^{T}}{\sqrt{D}}\right),}&{{\bf{O}}={\bf{A V}}}\end{array}
+$$  
+
+Quantization Quantization maps high-precision value into discrete levels, we adopt uniform quantization (Jacob et al., 2018) in our study. Given a floating-point (FP) tensor $x$ (weights or activations), it can be uniformly quantized to $b$ -bits in signed quantization as follows:  
+
+$$
+\hat{\mathbf{x}}=\mathbf{Q}_{U}(\mathbf{x},b)=(c l a m p(\lfloor\frac{\mathbf{x}}{s}\rfloor+z,q_{m i n},q_{m a x})-z)\cdot s,\quad s=\frac{\operatorname*{max}(|\mathbf{x}|)}{2^{b-1}-1}
+$$  
+
+where $\lfloor\cdot\rceil$ is the rounding-to-nearest operator, and the function $c l a m p(\cdot)$ clips values outside the integer range $[q_{m i n},q_{m a x}]$ . $z$ is zero-point. s denotes the quantization scale factor, which reflects the proportional relationship between FP values and integers. $[q_{m i n},q_{m a x}]$ is the quantization range determined by the bit-width $b$ . Generally, when we quantize the network’s weight with 4-bit and activations with 8-bit, called it as W4A8. We can calculate $s$ offline using the activations from calibration samples, known as static quantization. We can also use the runtime statistics of activations to get $s$ , referred to as dynamic quantization.11.  
+
+4 METHODOLOGY  
+
+In this section, we present MQuant, a post-training quantization solution specifically designed for MLLMs. In Sec. 4.1, we describe modality-specific quantization (MSQ) and attention-invariant flexible switching (AIFS). In Sec. 4.2, we introduce the Post LayerNorm-to-RMSNorm transformation. In Sec. 4.3, we identify the weight outliers caused by the online Hadamard rotations and state Rotation Magnitude Suppression (RMS).5 Algorithm 1.  
+
+4.1 MODALITY-SPECIFIC QUANTIZATION AND ATTENTION-INVARIANT FLEXIBLE SWITCHING  
+
+As discussed in Sec 1, increasing the resolution of input images or videos significantly raises the number of visual tokens (Fig 1 (a)), resulting in a sharp increase in inference latency for traditional per-token dynamic quantization methods. Although static per-tensor quantization is more efficient, it degrades performance compared to per-token dynamic quantization. Given the substantial differences between visual and textual tokens (Fig 1 (b)), we propose modality-specific quantization (MSQ) to address the heterogeneous nature of their distributions. However, the interleaved arrangement of input tokens complicates the efficient implementation of MSQ. To address this, we further introduce the attention-invariant flexible switching (AIFS) scheme, which reorganizes tokens by placing all image tokens before text tokens. This preserves the attention equivalence while eliminating the input-dependent dynamic position overhead, thus improving computational efficiency.  
+
+Modality-Specific Quantization. As shown in Figure 2, our proposed modality-specific quantization (MSQ) apply different static per-tensor scaling factors to visual and textual tokens respectively. For an input sequence $E$ of length $L$ containing mixed text and visual multimodal tokens. Here, without loss of generality, we define $E=\{e_{1}^{t},\stackrel{\cdot}{\dots},e_{m}^{v},...,e_{n}^{v},...,e_{L}^{t}\}\in\{E_{v},E_{t})\}$ , where $m$ and $n$ denote the start and end indices of the visual tokens. Then, we have:  
+
+$$
+E=\overbrace{\big(e_{1}^{t},...,e_{m-1}^{t},\ }^{\omega},\overbrace{e_{m}^{v},...,e_{n}^{v}}^{\omega}\overbrace{e_{n+1}^{t},...,e_{L}^{t}}^{e_{n}^{t}}\big)}^{\omega}
+$$  
+
+MSQ effectively addresses the substantial distributional differences between visual and textual tokens  
+
+by applying distinct per-tensor scales factor for each modality. This separation not only captures the unique distribution of each modality but also prevents the significant time increase associated with token number, which grows as image and video resolutions increase.  
+
+11, highlighting its advantages.  
+
+![](images/f150f0bca6d5d523a8a3337e83087e9ffcd6a173f5e1290a3ba263d660ddccdb.jpg)  
+Figure 2: The depiction of modality-specific quantization (MSQ) and attention-invariant flexible switching (AIFS).  
+
+216   
+217   
+218   
+219   
+220   
+221   
+222   
+223   
+224   
+225   
+226   
+227   
+228   
+229   
+230   
+231   
+232   
+233   
+234   
+235   
+236   
+237   
+238   
+239   
+240   
+241   
+242   
+243   
+244   
+245   
+246   
+247   
+248   
+249   
+250   
+251   
+252   
+253   
+254   
+255   
+256   
+257   
+258   
+259   
+260   
+261   
+262   
+263   
+264   
+265   
+266   
+267   
+268   
+269  
+
+Attention-Invariant Flexible Switching. Due to the interleaved and nonfixed positions of visual and textual to  
+
+kens in the input sequence, directly applying MSQ introduces extra and irregular data process and memory operation (e.g., slice, concat, pad), which reduces the computational efficiency of all the GEMM-based1 layers including QK and FC. To address this issue, we propose the attention-invariant flexible switching (AIFS) scheme. AIFS rearranges the visual tokens to the front of the sequence and places the textual tokens at the end, while simultaneously adjusting the causal mask in the attention mechanism. This rearrangement preserves the computational consistency of both image and text tokens, enhancing computational efficiency. As shown in Figure 2, regardless of the input order of visual and textual tokens, the AIFS scheme consistently reorganizes the tokens in this manner.  
+
+Incorporating the AIFS scheme necessitates an adaptation of the naive causal attention. Causal attention, also known as masked self-attention (Vaswani et al., 2017), is a fundamental structure in LLMs and MLLMs due to its auto-regressive properties. It ensures that each token can only attend to or be influenced by previous tokens, preventing any influence from future tokens. The naive casual mask for token sequence $E$ can be formulated as follows:  
+
+$$
+\mathbf{A}=\mathrm{Softmax}\left({\frac{\mathbf{Q}\mathbf{K}^{T}}{\sqrt{D}}}+M_{i,j}\right),M_{i,j}={\left\{\begin{array}{l l}{0}&{{\mathrm{if~}}j\leq i}\\ {-\infty}&{{\mathrm{if~}}j>i}\end{array}\right.}
+$$  
+
+After reordering token in AIFS, it is essential to maintain the causal relationships for the unified modality-decoupled token sequence $E^{u}=\left\{e_{m}^{v},...,e_{n}^{v},e_{1}^{t},...,e_{m-1}^{t},...,e_{n+1}^{t},...,e_{L}^{t}\in(E_{v},E_{t})\right\}$ . Consequently, the corresponding causal mask is modified, resulting in a unified causal mask:  
+
+$$
+M_{i,j}^{u}=\left\{\begin{array}{l l}{0}&{\mathrm{if~one~of~the~following~conditions~is~met:}}\\ &{\mathrm{~}(i\leq(n-m),j\leq i\mathrm{~or~}(n-m)<j\leq n)}\\ &{\mathrm{or~}((n-m)<i\leq n,(n-m)<j\leq i)}\\ &{\mathrm{or~}(i>n,j\leq i)}\\ {-\infty}&{\mathrm{otherwise}}\end{array}\right.
+$$  
+
+This unified causal mask preserves the inherent causal relationships among tokens, ensuring numerical equivalence during attention computations even after token reordering. Additionally, we apply corresponding changes to the position embeddings to ensure that they align with the new token indices after AIFS. This adjustment is crucial for maintaining the computation equivalence of the attention computations, as it ensures that the position information accurately reflects the revised ordering of the tokens.   
+Furthermore, MSQ can be naturally integrated with AIFS to form a per-modality static quantization approach. Extensive experiments demonstrate three key advantages brought by MSQ and AIFS: (1) Computational Equivalence and Strong Compatibility, which can achieve SOTA quantization performance across 5 MLLMs (Table 2). (2) Reduced Inference Latency, achieving the speed of the per-tensor static quantization (Table 4). (3) Enhanced Memory and Computational Efficiency, achieving up to $24.7\%$ speedup and $152.9\%$ memory savings (Table 10.)  
+
+
+
+\section{4.2 POST LAYERNORM-TO-RMSNORM TRANSFORMATION  }
+
+
+Unlike the common Pre-LN structure in LLMs, MLLMs incorporate both Pre-LN and Post-LN structure in their vision encoder. As discussed in Sec 2, SliceGPT only designed a Pre-LN $^{+}$ Rotate Scheme for LLMs. we further develop a Post-LN $^{+}$ Rotate scheme to accommodate a wider range of vision encoders, enabling our MQuant to be applicable to various MLLMs in both Pre-LN and Post-LN configurations. Here, we present how to transform post-LN into RMSNorm layer while ensuring computational invariance. Due to the recentering operation, LN exhibits invariance to shifts, such that $L N(X_{k}\!-\!a\mathbf{1})=L N(X_{k}),\forall a\in\mathbb{R}$ . Therefore, as shown in Figure 3. we can replace LN as RMSNorm layer through adjusting the weights $A_{2}$ and bias $b_{2}$ of the the linear $\ell_{2}$ as follows:  
+
+![](images/ab10c5345ed41cc9d1407c4be580892ae27b2e8e3da85c116c2f3ef36facd9bf.jpg)  
+Figure 3: Post-LN to RMSNorm.  
+
+270   
+271   
+272   
+273   
+274   
+275   
+276   
+277   
+278   
+279   
+280   
+281   
+282   
+283   
+284   
+285   
+286   
+287   
+288   
+289   
+290   
+291   
+292   
+293   
+294   
+295   
+296   
+297   
+298   
+299   
+300   
+301   
+302   
+303   
+304   
+305   
+306   
+307   
+308   
+309   
+310   
+311   
+312   
+313   
+314   
+315   
+316   
+317   
+318   
+319   
+320   
+321   
+322   
+323  
+
+$$
+\hat{A_{2}}=\underline{{{A_{2}}}}-\frac{1}{D}\mathbf{11}^{T}A_{2},\hat{\underline{{b_{2}}}}=\pmb{b_{2}}-\mu(\pmb{b_{2}})\mathbf{1},
+$$  
+
+$\mathrm{Eq10}$ is the recenter operation in Figure 3 (b). Therefore, based on $\mathrm{Eq10}$ , the Post-LN can be replaced with an RMSNorm with the same arithmetic functionality and $X_{k+1}~=~X_{k}~+~$ RMSNorm $(\ell_{2}(g(\ell_{1}(X_{k}))))$ ). Ultimately, we establish the equivalence of Post-LN and PostRMSNorm Transformers. Now that every LN in MLLMs vision encoder has been converted to RMSNorm, where we can seamlessly integrate any orthogonal matrices for handling weights and activation outliers, while ensuring that the model’s output remains arithmetically equivalent. 4.3 ROTATION MAGNITUDE SUPPRESSION  
+
+Theoretical Analysis of Hadamard Transformation on Weight Quantization. (Chee et al., 2024; Tseng et al., 2024) introduced incoherence (Eq. 11) to measure quantization difficulty. Lower incoherence means easier quantization. They also showed that applying a Hadamard transform to weights and activations effectively reduces incoherence. Quarot (Ashkboos et al., 2024b) employs offline Hadamard transforms on weights and activations, along with partial online Hadamard transforms, as shown in Figure 4(a). While Quarot achieves state-of-the-art quantization results for LLMs, it does not meet expectations for MLLMs, as demonstrated in Table 2.  
+
+$$
+|W_{i j}|=|e_{i}^{\top}W e_{j}|\leq\mu{\frac{\|W\|_{F}}{\sqrt{m n}}}.
+$$  
+
+To address this, we analyze the incoherence of weight input channels before and after transformation, since per-channel quantization isn’t applicable to input channels. For a weight matrix $W_{\ell_{2}}$ , according to (Eq. 11), we can compute an incoherence coefficient µℓ2 satisfying: max(|Wℓ2|) = µℓ2∥W√ℓm2∥nF Since the Hadamard transform preserves the Frobenius norm, $\|H W_{\ell_{2}}\|_{F}\;=\;\|W_{\ell_{2}}\|_{F}.$ . Let the incoherence coefficient of the transformed weight $H W_{\ell_{2}}$ be $\mu_{H\ell_{2}}$ . Then,  
+
+$$
+{\frac{\mu_{H\ell_{2}}}{\mu_{\ell_{2}}}}={\frac{\operatorname*{max}(|H W_{\ell_{2}}|)}{\operatorname*{max}(|W_{\ell_{2}}|)}}.
+$$  
+
+For Hadamard transform matrices, the elements in the first row and first column are all ${\sqrt{\frac{1}{n}}}$ , and the sums of the other rows and columns are zero. For the first input channel after transformation, it always holds that $\begin{array}{r}{H W_{\ell_{2}0j}\,=\,\sum_{r=1}^{n}\frac{1}{\sqrt{n}}w_{r j}\,=\,\sqrt{n}\cdot\mathrm{mean}(w_{:,j})}\end{array}$ . For the other input channels  
+
+after transformation, assuming the weights follow a normal distribution with mean µ and variance σ2, the maximum value before transformation is $\mu+$ $\sigma{\sqrt{2\ln n}},$ , and the maximum value √after transformation is $\sigma{\sqrt{2\ln n}}$ . From the above equations, it is evident that only the first transformed input channel may cause the maximum value to increase. Therefore, when $\sqrt{n}{\cdot}\mathrm{mean}(w_{:,j})>\operatorname*{max}_{i}w_{i j}$  
+
+![](images/9e15b27f55b98f0310dbbd8cc224221d681730a41ba6111dd90fdc9e842fa222.jpg)  
+3) Figure 4: (a) The pipeline of Quarot, (b) transformed weights outliers.  
+
+, the Hadamard transform will degrade the weight quantization performance. In Figure 4 (b), we show a weight from MLLMs identified using Equation 13, and its transformed distribution matches our derivations.  
+
+324   
+325   
+326   
+327   
+328   
+329   
+330   
+331   
+332   
+333   
+334   
+335   
+336   
+337   
+338   
+339   
+340   
+341   
+342   
+343   
+344   
+345   
+346   
+347   
+348   
+349   
+350   
+351   
+352   
+353   
+354   
+355   
+356   
+357   
+358   
+359   
+360   
+361   
+362   
+363   
+364   
+365   
+366   
+367   
+368   
+369   
+370   
+371   
+372   
+373   
+374   
+375   
+376   
+377  
+
+Rotation Magnitude Suppression for Weight Outliers. To address the weight outliers introduced by the Hadamard transformation, we propose rotation magnitude suppression RMS mechanism. As shown in Figure 5, we present the quantization process for W4A8 setting. Since outliers only appear in the first row of the input channel weights, we separate this channel weights and the corresponding activations for the GEMV kernels. For the remaining weights, we perform a GEMM kernels with the original activation values. To ensure computational equivalence, we set the separated positional weights to 0. Finally, we add the results of the separated operations to obtain the  
+
+![](images/a38a9479c026d8fe55aeaa6849f0e8d9b5c03aacab1aad9b8669124374e8fc19.jpg)  
+Figure 5: Schematic of RMS.  
+
+output. RMS is a plug-and-play module with minimal overhead and, when combined with Quarot or other Hadamard-based transformations, significantly enhances quantization performance. Algorithm 2 outlines the specific procedure.  
+
+5 EXPERIMENTS  
+
+Models and Datasets. We evaluate our MQUANT on five MLLMs: InternVL2-8B (Chen et al., 2024a), Qwen-VL-Chat-9.6B (Bai et al., 2023b), MiniCPM-V 2.6-8B (Yao et al., 2024), Qwen2- VL-7B (Wang et al., 2024), and GLM-4V-9B (Hong et al., 2024). Evaluations are conducted on four benchmarks covering OCR and general question answering: TextVQA (Singh et al., 2019), DocVQA (Mathew et al., 2021), OCRBench (Liu et al., 2023), and MME (Fu et al., 2023), which assesses perception and cognition across 14 subtasks.9.  
+
+Baselines and Implementation Details. We test W8A8 and W4A8 quantization settings for both visual encoders and LLMs, comparing RTN, SmoothQuant (Xiao et al., 2022), and Quarot (Ashkboos et al., 2024b). Notably, we apply static per-tensor activation quantization for both components, unlike the dynamic per-token quantization typically used in existing MLLMs. The calibration dataset consists of 256 randomly selected samples from the corresponding benchmark training sets (Singh et al., 2019; Mathew et al., 2021; Liu et al., 2023). The batch size for latency evaluation is 1.  
+
+378 379 380 381 382 383 384 385 386 387 388 389 390 391 392 393 394 395 396 397 398 399 400 401 402 403 404 405 406 407 408 409 410 411 412 413 414 415 416 417 418 419 420 421 422 423 424 425 426 427 428 429 430 431   
+Table 2: Comprehensive quantization results of different MLLMs across various evaluation datasets.   
+
+![](images/17627930b11348e6e04753d53032121c4606edcf80cf8cbf3a58b9dcfb570205.jpg)  
+5.1 OVERALL RESULTS  
+
+Weight-activation quantization results of various MLLMs. MQuant can be applied to the quantization of various MLLMs. As shown in Table 2, our MQuant demonstrates significant improvements over several representative quantization methods. In W8A8 setting, MQuant achieves performance nearly equivalent to that of FP models across all evaluation datasets. Notably, even in the more challenging W4A8 setting, MQuant maintains comparable performance with FP models, while other advanced quantization methods exhibit significant performance degradation. These results indicate that our MQuant provide a more general and effective PTQ solution with strong compatibility for maintaining high accuracy in MLLMs under various quantization settings.  
+
+Speedup and Memory Savings. We fixed the input sequence as ”text-image-text” with 15 textual tokens, varying the image resolution from $280\times280$ to $5600\times5600$ . Notably, the ”text-imagetext” sequence setting is not arbitrarily chosen; instead, it is a common setting in existing evaluation datasets (Duan et al., 2024). We evaluate speedup and memory savings by comparing PyTorch’s BF16, AWQ (W4-only), and our MQuant (W4A8). $\pmb{\mathrm{\Sigma}}$ Speedup: As shown in Table 10, MQuant consistently achieves speedups over both PyTorch and AWQ across all resolutions, with a maximum of $24.76\%$ over PyTorch at $840\times840$ . Notably, MQuant outperforms AWQ, which is slower than PyTorch at most resolutions due to negative speedups. This significant speedup highlights the advantage of our  
+
+432   
+433   
+434   
+435   
+436   
+437   
+438   
+439   
+440   
+441   
+442   
+443   
+444   
+445   
+446   
+447   
+448   
+449   
+450   
+451   
+452   
+453   
+454   
+455   
+456   
+457   
+458   
+459   
+460   
+461   
+462   
+463   
+464   
+465   
+466   
+467   
+468   
+469   
+470   
+471   
+472   
+473   
+474   
+475   
+476   
+477   
+478   
+479   
+480   
+481   
+482   
+483   
+484   
+485  
+
+Table 3: Comparison of latency and memory saving with Pytorch (BF16), AWQ (W4-only) and ours MQuant (W4A8) on Qwen2-VL-7B. Pytorch and AWQ using the Qwen2-VL-7B official implementation. $\downarrow$ means lower values are better, ↑means larger values are better.   
+
+![](images/91040f89ceae27d80c8a8539310375f2d59657b1524a1b6737c1f598f1caf972.jpg)  
+
+per-tensor static quantization, eliminating the overhead of token-wise scale computation. Even at higher resolutions (e.g., $5600^{2}$ ), MQuant maintains a $12.19\%$ latency improvement, demonstrating scalability across various image sizes. $\pmb{\varphi}$ Memory Savings: MQuant offers substantial memory reductions compared to both PyTorch and AWQ. It consistently reduces memory usage by over $100\%$ compared to PyTorch (e.g., $152.92\%$ at $840^{2}$ ) and significantly outperforms AWQ’s memory efficiency, achieving up to $101.07\%$ savings at higher resolutions. These experiments demonstrate MQuant’s strengths in both latency and memory savings, achieving up to $24.76\%$ faster inference and reducing memory consumption by over $100\%$ compared to baselines. This significant gain is attributed to MQuant’s conversion of mixed input tokens into modality-decoupled tokens, eliminating irregular memory operations (e.g., slice, concat, pad) introduced by directly applying MSQ. This transformation reduces memory consumption and mitigates the computational overhead and increased latency caused by the surge in token counts from higher image and video resolutions.  
+
+
+
+\section{5.2 ABLATION STUDY  }
+
+
+In this section, we select Qwen2-VL-7B (Wang et al., 2024), currently one of the most powerful open-source MLLMs, to ablate the effectiveness of our proposed designs.  
+
+Table 4: The accuracy and speedup of our MSQ and AIFS scheme on the linear layer during prefill stage. The input sequence is structured as ”text-image-text-image-text-image-text” with an image resolution of $2240\times2240$ and 50 textual tokens. Latency were tested on an NVIDIA RTX 6000 Ada Generation. $\downarrow$ means lower values are better, ↑means larger values are better.  
+
+![](images/6fcfb80e3e273161aa8aa30ba1487e3d6596ac27adefe394257b9d11e164357c.jpg)  
+
+Accuracy and Speedup Efficiency of the AIFS Scheme. We compare the accuracy and speedup results of our MSQ and AIFS. As previously discussed, the number of visual tokens in MLLMs increases quadratically with image resolution, and existing dynamic per-token quantization introduces additional inference latency due to the computation of token-wise scale factors. $\mathbf{MSQ+AIFS}$ Acceleration Ratio in Qwen2-VL-7B  
+
+Our AIFS transforms mixed visual and textual tokens into a unified multi-modal representation, enabling static per-tensor quantization for activations and addressing the quadratic time complexity. As shown in Table 4, MSQ+AIFS achieves the same speedup efficiency as per-tensor static quantization while maintaining near-lossless accuracy comparable to the original Float model across all lin  
+
+![](images/38c454e7231dac2782077d69c10bc264b36697d7f6418c1135930e2dc985f9de.jpg)  
+Figure 6: The Speedup of AIF $\mathsf{S}\mathrm{+MSQ}$ on Qwen2-VL-7B.  
+
+we evaluate the speedip of AIFS for visual tokens under varying image resolutions, comparing it with per-token setting and FP model. As shown in Figure 6, results indicate that as image resolution increases, AIFS achieves speedups around $20\%$ and $80\%$ . This substantiates the effectiveness and efficiency of our MSQ and AIFS design for MLLM quantization. Moreover, since AIFS requires only a one-time rearrangement of the input data (adjusting the causal mask and token index offilne), it does not alter the overall computation graph.  
+
+Table 5: Ablation study of proposed quantization designs on the OCR and MME benchmarks.   
+
+![](images/928e49dbca0ac441fde60b627020f737872ecca9046e0805d10b79ee90859f47.jpg)  
+
+Ablation Study of Proposed Quantization Methods. We conduct ablation studies on Qwen2-VL7B (Table 5) to evaluate our quantization methods. Starting from the ’Static’ baseline (both LLM and visual components quantized using GPTQ with online Hadamard transformation), we progressively incorporate our designs. Applying AIFS and MDQ to the LLM part, while keeping the visual part quantized with GPTQ, significantly improves performance, demonstrating their effectiveness for the LLM. Adding LN2RN to the visual part allows us to apply offline and online Hadamard rotation to the vision encoder, further enhancing performance. Adding RMS further achieves performance close to the FP model, showing the effectiveness of our proposed designs while maintaining high accuracy.  
+
+Table 6: Comparative quantized results under different quantization settings on the OCR and MME benchmarks. $\dagger$ means re-implementation based on the official weight-only quantization setting with a group size of 128 (Wang et al., 2024).  
+
+![](images/43bcc58e9e5f452b644a1253f4641fbc7075497a1a193caa20216f9f5d41a1e8.jpg)  
+
+Weight-only Quantization. We compare our weight-only quantization results with the official Qwen2-VL-7B, which uses GPTQ (Frantar et al., 2022) and AWQ (Lin et al., 2023) to quantize only the LLM while keeping the visual encoder in BF16. For fairness, we adopt the same group size of 128. As shown in Table 6, our W4 LLM quantization aligns with their settings, achieving nearly lossless accuracy compared to other methods. Extending W4 quantization to the visual encoder enables 4-bit quantization of the entire MLLM; MQuant still performs comparably to the BF16 model and even surpasses other methods. Under the W4A8 weight-activation quantization setting, our results remain consistent, with some metrics surpassing advanced weight-only methods. These experiments confirm MQuant’s effectiveness and robustness across various quantization configurations, whether for weight-only or weight-activation quantization, and for partial or full quantization of MLLMs.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+In this paper, we propose MQuant, the first accurate and efficient post-training quantization solution for multimodal large language models (MLLMs). Addressing their unique challenges, MQuant reduces the time to first token (TTFT) with per-tensor static quantization and introduces modalityspecific quantization (MSQ) to handle distribution discrepancies between visual adn textual tokens. Besides, we propose attention-invariant flexible switching (AIFS) to ensure consistent positioning of multimodal tokens and computational invariance, enhancing quantization efficiency. Furthermore, we propose a unified LayerNorm to RMSNorm transformation, enabling seamless integration of the MLLM vision encoder with Hadamard rotation. Finally, we reveal the weight outliers caused by the online Hadamard rotations and propose Rotation Magnitude Suppression (RMS) to mitigate them. Extensive experiments on five mainstream MLLMs demonstrate that MQuant attains state-of-the-art PTQ performance, with the W4A8 model matching FP model accuracy. These findings highlight MQuant’s potential to advance MLLM quantization and enhance practical applicability.  
+
+
+

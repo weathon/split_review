@@ -1,0 +1,597 @@
+\title{Counterfactual Generative Modeling with Variational Causal Inference}
+
+\begin{abstract}
+  Estimating an individual's potential outcomes under counterfactual treatments is a challenging task for traditional causal inference and supervised learning approaches when the outcome is high-dimensional (e.g. gene expressions, facial images) and covariates are relatively limited. In this case, to predict one's outcomes under counterfactual treatments, it is crucial to leverage individual information contained in its high-dimensional observed outcome in addition to the covariates. Prior works using variational inference in counterfactual generative modeling have been focusing on neural adaptations and model variants within the conditional variational autoencoder formulation, which we argue is fundamentally ill-suited to the notion of counterfactual in causal inference. In this work, we present a novel variational Bayesian causal inference framework and its theoretical backings to properly handle counterfactual generative modeling tasks, through which we are able to conduct counterfactual supervision end-to-end during training without any counterfactual samples, and encourage latent disentanglement that aids the correct identification of causal effect in counterfactual generations. In experiments, we demonstrate the advantage of our framework compared to state-of-the-art models in counterfactual generative modeling on multiple benchmarks.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{introduction}
+
+In traditional causal inference, heterogeneous treatment effect is typically formulated as the intervention model $p(Y | X, \mathrm{do}(T))$ (or $\mathbb E[Y | X, \mathrm{do}(T)]$) with outcome $Y$, covariates $X$, treatment $T$, and estimated by %fitting supervised learning models on 
+the observed covariate-specific efficacy $p(Y | X, T)$ under the ignorability assumption \citep{rosenbaum1983central, pearl1995causal} using various supervised learning and estimation techniques. However, in cases such as the single-cell perturbation datasets \citep{dixit2016perturb, norman2019exploring, schmidt2022crispr} where $Y$ has thousands of dimensions while $X$ has two or three categorical features, such model could hardly be relied on to produce useful individualized results. To construct outcome $Y'$ under a counterfactual treatment $T'$ in such high-dimensional outcome scenario, it is important and necessary to learn the individual-specific efficacy $p(Y' | Y, X, T, T')$ conditioning on the factual outcome $Y$ itself, which leverages the rich information embedded in the factual outcome that cannot be recovered by the handful of covariates. For example, given a cell with type A549 ($X$) that received SAHA drug treatment ($T$), we may want to know what its gene expression profile ($Y'$) would look like if it had received Dex drug treatment ($T'$) instead. In this case, we would want to take the profiles of other cells with type A549 that indeed received Dex as reference, such that the counterfactual construction $Y'$ exhibits the treatment characteristics of Dex on A549, but would also want to extract as much individual information as possible from its own expression profile ($Y$) such that the counterfactual construction could preserve this cell's individuality.
+
+Yet the lack of observability of counterfactual outcome $Y'$ makes this objective intractable and hence presents a major difficulty for supervised learning when $Y$ is taken as an input. In previous works that involve self-supervised counterfactual generation \citep{kocaoglu2017causalgan, louizos2017causal, yoon2018ganite, pawlowski2020deep, yang2021causalvae, kim2021counterfactual, lotfollahi2021learning, sauer2021counterfactual, feng2022principled, shen2022weakly} based on Variational Autoencoders (VAE) \citep{kingma2013auto} and Generative Adversarial Networks (GAN) \citep{goodfellow2014generative}, there is no counterfactual supervision during training, and hence no explicit regulation on the trade-off between treatment characteristics and individuality. When such regulation does not exist, there is a disconnection between training and counterfactual inference. To see this, consider a conditional generative model $g_\theta (y, t)$ that is only supervised on the reconstruction loss with respect to outcome $y$ during training. In this case, the model is free to ignore the extra treatment $t$ and converge to a state such that $g_\theta (y, t) = g_\theta (y, 0)$ \citep{chen2016infogan}, hence preserving maximum individuality yet minimum treatment characteristics in counterfactual construction $g_\theta (y, t')$ during inference. %In \citet{louizos2017causal} and \citet{yoon2018ganite}, there is no such regulation; the trade-off is black-boxed and has to depend on network sizing. In \citet{lotfollahi2021learning}, the trade-off is implicitly encouraged by the balancing between adversarial reward and reconstruction loss.
+This is particularly an issue for high-fidelity counterfactual generation with state-of-the-art Hierarchical Variational Autoencoders (HVAE) \citep{vahdat2020nvae, child2020very}, as the latent representations possess even larger number of bottleneck dimensions compared to the observed outcome $y$. In more recent works on counterfactual generative modeling with HVAEs and diffusion models \citep{sanchez2022diffusion, monteiro2023measuring, ribeiro2023high}, only \citet{ribeiro2023high} touched on the issue of counterfactual supervision, yet its proposed method does not have a theoretical backing in variational inference, nor could it be conducted end-to-end during training. As we will see in the proceeding sections of this work, there is a fundamental incompatibility of the conditional VAE formulation with counterfactual generative modeling, which is the root cause of such issue. In fact, this incompatibility also exhibits itself in another important aspect of counterfactual generative modeling which is latent disentanglement -- the partially abducted exogenous noise (i.e. shallow-level latent representation) in conditional HVAEs and diffusion models is able to encode individuality better than traditional VAEs, but at the same time is still heavily entangled with treatment variables and often result in lingering characteristics of the factual treatment in counterfactual construction \citep{monteiro2023measuring, sanchez2022diffusion}.
+
+Our contributions in this work are summarized as follow: \textbf{1)} we propose a formulation and stochastic optimization scheme for counterfactual generative modeling by specifically formulating counterfactual variables and using variational inference to derive the evidence lower bound (ELBO) for the individual-level likelihood $p(Y' | Y, X, T, T')$ -- a well-motivated and fitting objective for counterfactual generative modeling instead of the marginal-level (interventional) conditional likelihood $p(Y | X, T)$ or even joint likelihood $p(Y, X, T)$ used by VAE-based prior works. \textbf{To emphasize, the contribution here is not to propose another model variant under the conditional VAE formulation such as HVAEs or diffusion models \citep{sanchez2022diffusion, monteiro2023measuring, ribeiro2023high}, but to fundamentally change the VAE formulation.} We call this framework Variational Causal Inference (VCI). \textbf{2)} Our proposed optimization scheme allows us to conduct \textbf{counterfactual supervision end-to-end during training} alongside self-supervision, even without any counterfactual observations, which has not been done in prior works to the best of our knowledge. \textbf{3)} This workflow of constructing and supervising counterfactual outcomes during training presents us the unique opportunity to naturally enforce \textbf{latent disentanglement through distribution alignment} on matching pairs \citep{shu2019weakly, locatello2020weakly, brehmer2022weakly} without having paired data, which has not been done in counterfactual generative modeling, to the best of our knowledge. \textbf{4)} We further propose a robust estimation scheme for high-dimensional marginal causal parameters leveraging this individual-level counterfactual construction framework. No prior work in counterfactual generative modeling conducts such asymptotically efficient marginal estimation upon acquiring individual predictions, to the best of our knowledge. \textbf{5)} In experiments, our proposed method is evaluated on datasets with vector outcomes -- single cell perturbation datasets, as well as datasets with image outcomes -- facial imaging and handwritten digits datasets, and compared to state-of-the-art models in the two domains. The results show that ours outperformed state-of-the-arts in both domains with notable margins.
+
+
+
+\section{Proposed Method}
+
+\label{proposed-method}
+\subsection{Formulations and Intuitions}
+\label{semi-autoencode}
+
+\begin{figure}
+    \centering
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \begin{tikzpicture}
+            \tikzstyle{main}=[circle, minimum size = 8mm, thick, draw =black!80, node distance = 8mm]
+            \tikzstyle{connect}=[-latex, thick]
+            \tikzstyle{box}=[rectangle, draw=black!100]
+              \node[main, fill = white!100] (X) [label=below:$X$] { };
+              \node[main, fill = black!10] (Tp) [right=of X,label=right:$T'$] { };
+              \node[main, fill = white!100] (T) [left=of X,label=below:$T$] { };
+              \node[main, fill = black!50] (Z) [above=of X,label=above:$Z$] {};
+              \node[main, fill = black!50] (Yp) [above=of Tp,label=right:$Y'$] { };
+              \node[main, fill = white!100] (Y) [above=of T,label=above:$Y$] { };
+              \path (X) edge [connect] (Z)
+                    (X) edge [connect] (T)
+                    (X) edge [connect] (Tp)
+            		(Z) edge [connect] (Y)
+            		(Z) edge [connect] (Yp)
+            		(T) edge [connect] (Y)
+            		(Tp) edge [connect] (Yp);
+        \end{tikzpicture}
+        \caption{Bayesian network}
+        \label{causal_diagram-bayesian}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \begin{tikzpicture}
+            \tikzstyle{main}=[circle, minimum size = 8mm, thick, draw =black!80, node distance = 8mm]
+            \tikzstyle{connect}=[-latex, thick]
+            \tikzstyle{box}=[rectangle, draw=black!100]
+              \node[main, fill = white!100] (X) [label=below:$X$] { };
+              \node[main, fill = black!50, minimum size = 4mm] (UX) [left=of X,label=left:{\tiny$U_X$}, xshift=6mm, yshift=4mm] { };
+              \node[main, fill = white!100] (T) [right=of X,label=below:$T$, xshift=6mm] { };
+              \node[main, fill = black!50, minimum size = 2mm] (UT) [left=of T,label=left:{\tiny $U_T$}, xshift=6mm, yshift=4mm] { };
+              \begin{scope}[on background layer]
+                \node[main, fill = black!10] (Tp) [right=of X,label=right:$T'$, xshift=8mm] { };
+              \end{scope}
+              \node[main, fill = black!50] (Z) [above=of X,label=above:$Z$, xshift=10mm] {};
+              \node[main, fill = black!50, minimum size = 4mm] (UY) [left=of Z,label=left:{\tiny$U_Y$}, xshift=6mm, yshift=4mm] { };
+              \node[main, fill = white!100] (Y) [right=of Z,label=above:$Y$, xshift=6mm] { };
+              \begin{scope}[on background layer]
+                \node[main, fill = black!50] (Yp) [right=of Z,label=right:$Y'$, xshift=8mm] { };
+              \end{scope}
+              \path (UX) edge [connect] (X)
+                    (X) edge [connect] (Z)
+                    (UY) edge [connect] (Z)
+                    (X) edge [connect] (T)
+                    (UT) edge [connect] (T)
+                    (Z) edge [connect] (Y)
+                    (T) edge [connect] (Y);
+        \end{tikzpicture}
+        \caption{Counterfactual view of the Bayesian network}
+        \label{causal_diagram-counterfactual}
+    \end{subfigure}
+    \caption{The causal diagram where variables are generated from the following SCM: $X=f_X(U_X)$; $T=f_T(X, U_T)$, $T'=f_T(X, U'_T)$ where $U_T$, $U'_T$ are i.i.d.; $Z=f_Z(X, U_Y)$; $Y=f_Y(Z, T, \epsilon_Y)$, $Y'=f_Y(Z, T', \epsilon'_Y)$ where $\epsilon_Y$, $\epsilon'_Y$ are i.i.d., independent of all $U$s, and are constants w.p. 1 if the consistency assumption is assumed. Endogenous variables follow the Bayesian network on the left under the ignorability assumption, with permissibly one additional edge from either $Z$ or $T$ to $X$ if $U_Y$ or $U_T$ is dependent of $U_X$. We call $O=(X, T, Y)$ observed variables, $B=(X, T, T', Y)$ sample variables ($T'$ are sampled for model training and evaluation), $D=(X, T, T', Y, Y')$ full data variables and $W=(Z, X, T, T', Y, Y')$ all variables. White nodes are observed, light grey nodes are assigned during training and inference, dark grey nodes are unobserved.% Dashed edges exist if treatment assignments do not follow a completely randomized design.
+    }
+    \label{causal_diagram}
+\end{figure}
+
+Let outcome $Y: \Omega \rightarrow (\mathcal{Y}, \Sigma_\mathcal{Y})$ be a random vector, $X: \Omega \rightarrow (\mathcal{X}, \Sigma_\mathcal{X})$ be a mix of categorical and real-valued covariates, $T: \Omega \rightarrow (\mathcal{T}, \Sigma_\mathcal{T})$ be a categorical or real-valued treatment (or multiple treatments) and $Z: \Omega \rightarrow \mathbb{R}^h$ be the latent feature vector. Suppose the causal relations between random variables (and random vectors) follow a structural causal model (SCM) \citep{pearl1995causal} defined in Figure \ref{causal_diagram}, where we adopt twin networks \citep{balke2022probabilistic} to formulate counterfactuals $Y'$ and $T'$ as separate variables apart from $Y$ and $T$ having a conditional distribution $p(Y', T' | Z, X)$ identical to that of its factual counterpart $p(Y, T | Z, X)$. Different from \citet{vlontzos2023estimating}, we introduce latent $Z$ in high-dimensional outcome settings as a feature vector of $Y$ such that random factor $\epsilon_Y$ does not capture any more uncertainty that can be retrieved from its counterfactual counterpart, i.e. $\epsilon_Y \indep Y'$ and similarly $\epsilon_Y' \indep Y$. Under the consistency assumption (Assumption \ref{assumption-consistency} and Remark \ref{remark-consistency}), $\epsilon_Y = 0$ and there is no more uncertainty in $Y$ beyond $Z$, i.e. the shared random factor $U_Y$ fully captures the exogenous noise injected to $Y$ and $Y'$. Hence, $Z$ in this setting can be seen as an unobserved summary random vector of the covariates $X$ and exogenous noise $U_Y$. %When $f_Z$ in the structural equation $Z=f_Z(X, U_Y)$ is an identity function, $f_O=(f_X, f_T, f_Y)$ is equivalent to the traditional SCM with observed triplets $(X, T ,Y)$.
+Note that the consistency assumption is not generally required for our subsequent variational inference, but is required for $Y'_{\mathrm{do}(T')}$ to be formally defined as the counterfactual of $Y$ under the three layer causal hierarchy of \citet{pearl2009causality}. The ignorability assumption (Assumption \ref{assumption-ignorability} and Remark \ref{remark-ignorability}) is generally required, under which $do(T'=t')$ and $T'=t'$ result in the same outcome distribution on $Y'$ conditioned on $X$ or $Z$.
+
+Under this formulation, $Z$ has a posterior distribution $p(Z | Y, T, X)$ given the observed variables; $Y$ and $Y'$ can be constructed by $p(Y | Z, T)$ and $p(Y' | Z, T')$ respectively with latent features $Z$. Similar to prior works in autoencoder \citep{vincent2008extracting, bengio2014deep}, we estimate the latent recognition model (i.e. exogenous noise abduction model) and outcome construction model with deep neural network encoder $q_\phi$ and decoder $p_\theta$.
+Given a sample $b=(x, t, t', y)$, while the reconstruction $y_{\theta, \phi}$ of $y$ is self-supervised, we can only assess the counterfactual construction $y'_{\theta, \phi}$ under $t'$ by looking at its resemblance to similar individuals that indeed received treatment $t'$. Hence, naively, we may conduct counterfactual supervision during training with a semi-autoencoding (SAE) loss function as follow
+\begin{align}
+\label{sae_loss}
+    L_{\theta, \phi}(b) = L_2(y_{\theta,\phi}, y) -\omega\cdot \ell_{\hat{p}(Y' | x, t')}(y'_{\theta,\phi})
+\end{align}
+where $\omega$ is a scaling coefficient and $\hat{p}$ is the traditional covariate-specific outcome model fit on the observed variables $(X, T, Y)$ (notice that $p(Y' | x, T'=t')=p(Y | x, T=t')$). The intuition is that, if $y'_{\theta,\phi}$ is indeed one's outcome under $t'$, then the likelihood of $y'_{\theta,\phi}$ coming from the outcome distribution of individuals with the same attributes $x$ that factually received treatment $t'$ should be high. In practice, %if $\hat{p}(Y | X, T)$ is hard to fit, we can alternatively fit a classifier $\hat{p}(T | Y, X)$ and use classification likelihood $\ell_{\hat{p}(T' | y'_{\theta,\phi}, x)}(t')$ in place of $\ell_{\hat{p}(Y' | x, t')}(y'_{\theta,\phi})$ for counterfactual supervision, or 
+we can fit $\hat{p}(Y | X, T)$ in an end-to-end fashion using a discriminator $\mathcal{D}(X, T, Y)$ on factual triplets $(x, t, y)$ and counterfactual triplets $(x, t', y'_{\theta,\phi})$ with the adversarial approach \citep{goodfellow2014generative}. Specifically, we use discriminator loss $L_\mathcal{D}(b, y'_{\theta,\phi}) = -\log [ \mathcal{D}(x, t, y) ] - \log [ 1 - \mathcal{D}(x, t', y'_{\theta,\phi}) ]$ to train model $\mathcal{D}$, and use generator loss $\ell_{\hat{p}(Y' | x, t')}(y'_{\theta,\phi}) = \log \mathcal{D}(x, t', y'_{\theta,\phi})$ in $L_{\theta, \phi}(b)$ (notice that $p(X, T) = p(X, T')$). This end-to-end approach prevents $(p_\theta, q_\phi)$ from exploiting a pre-trained $\hat{p}$ model. The SAE trained through the adversarial approach motivates the derivation of our main theorem presented in the next section, and serves as a baseline comparison to our main algorithm in the ablation study of the experiments section. In cases where covariates are limited and discrete such as the single-cell perturbation datasets, $\hat{p}(Y | X, T)$ can simply be a smoothed empirical outcome distribution under treatment $T$ stratified by covariates $X$. %In this work, we apply the latter two options since they are either end-to-end or non-parametric, which prevents $(p_\theta, q_\phi)$ from exploiting a pre-trained $\hat{p}$.
+\subsection{Variational Causal Inference}
+\label{variational-causal-inference}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\linewidth]{Figure/model-workflow.png}
+
+    \caption{Model workflow of the Variational Causal Inference (VCI) framework. In a forward pass, the encoding model takes outcome $y$ as well as its treatments $t$ and covariates $x$ (if any) as inputs and attains latent feature $z$; $(z, t)$ and $(z, t')$ where $t'$ is the counterfactual treatments are separately passed into the decoding model to attain reconstruction $y_{\theta, \phi}$ and counterfactual construction $y'_{\theta, \phi}$, for which reconstruction loss and counterfactual supervision loss are evaluated; $y'_{\theta, \phi}$ is then passed back into the encoding model along with $t'$ and $x$ to attain $z$ again, which is encouraged to match the latent feature $z$ previously acquired from encoding the factual outcome $y$ and treatment $t$ through the latent divergence term.}
+    \label{fig:hvci-workflow}
+\end{figure}
+
+Now we present our main result by rigorously formulating the objective, providing a probabilistic theoretical backing, and specifying an optimization scheme that reflects the intuition described in the previous section. Suppose we want to optimize $p(Y' | Y, X, T, T')$ instead of the traditional outcome likelihood $p(Y | X, T)$. The following theorem induces the evidence lower bound (ELBO) and thus provides a roadmap for stochastic optimization:
+
+\begin{theorem}
+    \label{elbo}
+    Suppose a collection of random variables $W$ follows a causal structure defined by the Bayesian network in Figure \ref{causal_diagram}. Then $J(D) = \log [ p (Y' | Y, X, T, T') ]$ has the following variational lower bound:
+    \begin{align}
+        \label{eq-elbo}
+        J(D) &\geq \mathbb E_{p (Z | Y, T, X)} \log \left[ p (Y | Z, T) \right] - D \left[ p (Y | X, T) \parallel p (Y' | X, T') \right] \nonumber \\
+        &\quad - D_\mathrm{KL} \left[ p (Z | Y, T, X) \parallel p (Z | Y', T', X) \right]
+    \end{align}
+    where $D [ p \parallel q ] = \log p - \log q$.
+\end{theorem}
+
+ Theorem \ref{elbo} suggests that, in order to maximize the individual-specific outcome likelihood $p(Y' | Y, X, T, T')$, we can instead maximize the following estimated ELBO parameterized with estimating models $p_\theta$ and $q_\phi$:
+\begin{align}
+    \label{VCI-objective}
+    J_{\theta, \phi}(b) &= \mathbb E_{q_\phi (z | y, t, x)} \log \left[ p_\theta (y | z, t) \right] + \log \left[ \hat{p} (y'_{\theta,\phi} | x, t') \right] \nonumber \\
+    &\quad - D_\mathrm{KL} \left[ q_\phi (Z | y, t, x) \parallel q_\phi (Z | y'_{\theta,\phi}, t', x) \right],
+\end{align}
+where $y'_{\theta,\phi} = \mathbb E_{p_\theta (Y' | \mathbb E_{q_\phi (Z | y, t, x)} Z, t')} Y'$ and $\hat{p}$ can be estimated with the approaches described at the end of Section \ref{semi-autoencode}. Note that $\hat{p}(y | x, t)$ does not impose gradient on $(p_\theta, q_\phi)$ and is thus omitted in $J_{\theta, \phi}(b)$. The stochastic optimization of ELBO is hence conducted on the objective $J_{p_\mathrm{data}} (p_\theta, q_\phi) = \mathbb E_{p_\mathrm{data}} J_{\theta, \phi}(b)$ where $t' \sim p_\mathrm{data}(T | x)$. A figure demonstrating the workflow of this stochastic optimization scheme can be found in Figure \ref{fig:hvci-workflow}.
+
+As can be seen, Equation \ref{VCI-objective} consists of the expected individual-specific reconstruction likelihood $E_{q_\phi (z | y, t, x)} \log [ p_\theta (Y | z, t) ]$ and the covariate-specific counterfactual outcome likelihood $\log [ p (y'_{\theta,\phi} | x, t') ]$, echoing the intuition highlighted by Equation \ref{sae_loss}, with an additional divergence term $-D_\mathrm{KL} [ q_\phi (Z | y, t, x) \parallel q_\phi (Z | y'_{\theta,\phi}, t', x) ]$ that regularizes the similarity across latent distributions under different potential scenarios. Note that this framework is fundamentally different from any VAE based formulation such as CVAE \citep{sohn2015learning} or CEVAE \citep{louizos2017causal}, since the variational lower bound is derived directly from the causal objective and the KL-divergence term serves causal purposes that are entirely different from the prior latent bounding purpose of VAEs. An explanation of this divergence term is given in the paragraph below.
+\paragraph{Divergence Interpretation} The divergence term $-D_\mathrm{KL} [ q_\phi (Z | y, t, x) \parallel q_\phi (Z | y'_{\theta,\phi}, t', x) ]$ is the key of the framework and it serves two purposes. Firstly, it adds robustness to latent encoding by encouraging the encoding model to recognize individual features contained in both factual and counterfactual outcomes. In fact, these common features are well disentangled from the treatment variables, which we will discuss in-depth in the next section. Secondly, it encourages the preservation of individuality in counterfactual outcome constructions. To see this, notice that if the counterfactual outcome construction was only penalized by the covariate-specific likelihood loss $-\log [ \hat{p} (y'_{\theta,\phi} | x, t') ]$, the counterfactual decoding model $p_\theta(Y' | z_\phi, t')$ could learn to completely discard the identity of individual subjects represented in latent features $z_\phi$ once it detects a counterfactual treatment $t' \neq t$ in the inputs. Such behavior is regulated by the divergence term, since otherwise we would not be able to recover a latent distribution $q_\phi (Z | y'_{\theta,\phi}, t', x)$ close to $q_\phi (Z | y, t, x)$.
+
+\paragraph{Robust Marginal Estimation} Similar to the augmented inverse propensity weighted (AIPW) estimator in traditional causal inference, the individual-level model predictions acquired by our framework can also aid the robust estimation of average treatment effect $\Psi(p) = \mathbb E_p [ Y'_{\mathrm{do}(T'=\alpha)} ]$ for a treatment level $\alpha$ of interest if such estimation is desired. Under the formulation in Figure \ref{causal_diagram}, we have the following robust estimator that is asymptotically efficient under some regularity conditions \citep{van2006targeted}:
+\begin{align}
+    \label{ATT-estimator}
+    \hat{\Psi}_n (o) = \frac{1}{n} \sum_{k=1}^n \left\{ \frac{I(t_k = \alpha)}{\hat{e}(t_k | x_k)} \cdot y_k + \left(1-\frac{I(t_k = \alpha)}{\hat{e}(t_k | x_k)}\right) \cdot \mathbb E_{p_\theta} \left[ Y' | z_{k, \phi}, T'=\alpha \right] \right\},
+\end{align}
+where $o_k = (x_k, t_k, y_k) \overset{\mathrm{iid}}{\sim} p(x, t, y)$ is the vector of observed triplet of the $k$-th individual, $z_{k,\phi} \sim q_\phi (y_k, t_k, x_k)$, and $\hat{e}$ is an estimation of the propensity score that satisfies the positivity assumption \citep{robins1986new}.
+
+\subsection{Latent Identifiability and Disentanglement}
+
+In any deep probabilistic model, there is a certain degree of freedom and arbitrarity to the learnt latent distribution, even with latent restrictions. Naturally, one might question the latent identification of our variational causal framework: when identifying counterfactual $Y'$ under $T'$, does the learnt latent $Z$ inevitably carry over some characteristics of the factual treatment in $Y$ and $T$? Ideally, we would like to aid counterfactual construction by attaining a clean disentanglement between the learnt latent and the observed treatment, such that the counterfactual generation does not preserve influence from the factual treatment. Such disentangled exogenous noise abduction fits the semantic of our generating process (Figure \ref{causal_diagram}), where $Z$ and $T$ are not descendant of each other and $Z \indep T | X$, as well as the semantic of causal identification in the traditional formulation, where the identifiability of $Y_{\mathrm{do}(T)}$ relies on the ignorability assumption that exogenous noise does not contain unobserved confounders. In this section, we show that optimizing the VCI framework in fact grants such disentanglement between $Z$ and $T$ under mild assumptions, leading to a more in-depth understanding of the purpose and behavior of the latent divergence term in VCI's optimization scheme.
+
+Similar to \citet{shu2019weakly}, we formally define and measure disentanglement in terms of (encoder) consistence and (encoder) restrictiveness, except that our definitions are generalized to the case of stochastic models and models with auxiliary attributes. For notation simplicity of the oracle operation on functions with auxiliary inputs, we use $\gamma \circo \zeta (a; b)$ to denote $\gamma(c, b)$ where $c = \zeta(a)$ if $\zeta$ is a deterministic function and $c \sim \zeta(a)$ if $\zeta$ is a probability measure.
+
+Consider our model class $\{(p_., q_.) \mid p_.: \mathcal{Z} \times \mathcal{T} \to [0, 1]^{\Sigma_\mathcal{Y}}, \; q_.: \mathcal{Y} \times \mathcal{T} \times \mathcal{X} \to [0, 1]^{\Sigma_\mathcal{Z}}\}$ and let $S := (Z, T)$, $V := (Y, T)$. We regard $T$ as part of the model outputs such that the oracle operations above are well-defined, i.e. let $\mathcal{H} = \{ (\tilde{p}_., \tilde{q}_.) \mid \tilde{p}_.(s) = p_.(Y | z, t) \times \delta_t(T), \; \tilde{q}_.(v, x) = q_.(Z | y, t, x) \times \delta_t(T) \}$ where $\delta_t$ is the Dirac measure ($\delta_t(T)=1$ if $T=t$ else $0$). Then we have the following lemma:
+
+\begin{lemma}
+    \label{lemma:disentanglement}
+    If $q$ minimizes latent divergence in Equation \ref{eq-elbo} over $p_0(D)$, i.e.
+    \begin{align}
+    \label{eq-identifiability-1}
+        \mathbb E_{p_0} D_\mathrm{KL} \left[ q (Z | y, t, x) \parallel q (Z | y', t', x) \right] = 0,
+    \end{align}
+    then $\tilde{q}$ disentangles $Z$ and $T$.
+\end{lemma}
+
+Lemma \ref{lemma:disentanglement} builds a direct connection between the latent divergence term and latent disentanglement. Intuitively, it states that if the encoder encodes the same latent representation for any pair of potential outcomes of the same individual, then the latent representation must have been disentangled from the treatment. However, does optimizing the ELBO necessarily imply that the latent divergence term reaches the minimum? We proceed to show that this is indeed implied under mild assumptions.
+
+\begin{proposition}
+    \label{thm:identifiability-1}
+    With the true distribution $p_0$ satisfying Assumption \ref{assumption-consistency} and Assumption \ref{assumption-uniqueness}, if $(p_*, q_*)$ maximizes the evidence lower bound over $p_0(D)$ and any $\hat{p}$, i.e.
+    \begin{align}
+    \label{eq-identifiability-2}
+        (p_*, q_*) \in \operatorname*{arg\,max}_{p_., q_.} &\mathbb E_{p_0} \left\{\mathbb E_{q_. (z | y, t, x)} \log \left[ p_. (y | z, t) \right] + \log \left[ \hat{p} (y' | x, t') \right] \right. \nonumber \\
+        &\left. - D_\mathrm{KL} \left[ q_. (Z | y, t, x) \parallel q_. (Z | y', t', x) \right] \right\}
+    \end{align}
+    then $\tilde{q}_*$ disentangles $Z$ and $T$.
+\end{proposition}
+
+Intuitively, Proposition \ref{thm:identifiability-1} states that as long as the treatments do not have any unknown side effect and do not completely wipe out different features in different individuals, the solution to maximizing the ELBO disentangles $Z$ and $T$. In practice, we formulate the decoder and encoder class as deterministic functions (i.e. degenerate distributions) plus noise similar to prior work, and formulate encoder noise as standard normal:
+\begin{align}
+    \left\{ p_. \right. & \left. \mid g_.(Y | z, t) := \delta_{\mathbb E_{p_.(Y | z, t)} Y}, \; \epsilon_.(z, t) := p_.(Y - \mathbb E_{p_.(Y | z, t)} Y | z, t) \right\} \label{p_.-practice}\\
+    \left\{q_. \right. & \left. \mid e_.(Z | y, t, x) := \delta_{\mathbb E_{q_.(Z | y, t, x)} Z}, \; q_.(Z - \mathbb E_{q_.(Z | y, t, x)} Z | y, t, x) = \mathcal{N}(0, 1) \right\} \label{q_.-practice}
+\end{align}
+and learn model $e_.$, $g_.$ and $\epsilon_.$ during training. The following proposition states that disentanglement under the estimating model's own oracle can be achieved by optimizing the VCI objective in real-world optimizations, where neither the true generating mechanisms nor the true factual-counterfactual pairs are available.
+\begin{proposition}
+    \label{thm:identifiability-2}
+    Given dataset $\{(x_k, t_k, y_k)\} |_{k=1}^n$, let $p_\mathrm{data}$ be its empirical distribution and the model class in Equation \ref{p_.-practice} and Equation \ref{q_.-practice} satisfy the following uniqueness conditions:
+    \begin{enumerate}%[wide, labelindent=0pt]
+        \item[1)] $\forall \alpha \in \mathcal{T}$, we have $g_.(Y | z, \alpha) \neq g_.(Y | z', \alpha)$ if $z \neq z'$;
+        \item[2)] $\forall x, t, y, t': p_\mathrm{data}(x, t, y) \cdot p_\mathrm{data}(t' | x) > 0$ and $y'_. = \mathbb E_{g_.(Y | z, t') e_. (z | y, t, x)} Y$, we have $p_\mathrm{data}(x, t', y'_.) = 0$ if $(x, t, y) \neq (x, t', y'_.)$.
+    \end{enumerate}
+    If $(p_*, q_*)$ maximizes the VCI objective in Equation \ref{VCI-objective} over $p_\mathrm{data}$ and any $\hat{p}$, i.e.
+    \begin{align}
+    \label{eq-identifiability-3}
+        (p_*, q_*) \in &\operatorname*{arg\,max}_{p_., q_.} J_{p_\mathrm{data}}(p_., q_.)
+    \end{align}
+    then $(\tilde{g}_*, \tilde{q}_*)$ disentangles $Z$ and $T$ under $\int_y e_* p_\mathrm{data}$.
+\end{proposition}
+
+We note that uniqueness condition 2) in Proposition \ref{thm:identifiability-2} is completely reasonable in high-dimensional outcome settings: taking the facial imaging dataset as an example, it wouldn't make any sense for a model's constructed image for a certain individual to be an exact match of the factual outcome of another individual in the dataset% pixel-by-pixel
+, as long as the dataset does not contain multiple images of the same individual under the same setting% with slightly different angles
+.
+
+\begin{corollary}
+    \label{thm:identifiability-2.2}
+    Under the same settings and conditions of Proposition \ref{thm:identifiability-2}, $(\tilde{g}_*, \tilde{e}_*)$ disentangles $Z$ and $T$ under $\int_y e_* p_\mathrm{data}$.
+\end{corollary}
+
+Corollary \ref{thm:identifiability-2.2} states that the optimal model is guaranteed to disentangle $Z$ and $T$ under the constructed latent distribution in inference mode without noise injection. In summary, the disentanglement results in our framework rely on the simple fact that the latent divergence term is established on an individual level, and does not necessarily compete with outcome supervisions under mild assumptions. Prior works in VAEs have proposed bounding latent on conditional marginal prior \citep{sohn2015learning, khemakhem2020variational}, and VCI can be seen as a further relaxed form of latent restriction in the sense that the latent for any given subject need not be restricted to any prior distribution -- we only require the latent distributions of a subject's different potential outcomes to match each other. More insights on how the latent divergence term helps the training of VCI in practice can be found through the ablation study in the experiments section.
+\iffalse
+\subsection{Marginal Effect Estimation}
+
+Upon obtaining individual-level results, we introduce a robust estimator for the average treatment effect of the treated (ATT) $\Psi(p) = \mathbb E_p [ Y'_{\mathrm{do}(T'=\alpha)} ]$ for a treatment level $\alpha$ in the variational causal inference framework. By \citet{van2000asymptotic}, a sequence of estimators $\hat{\Psi}_n$ is asymptotically efficient if $\sqrt{n}(\hat{\Psi}_n - \Psi(p)) = 1 / \sqrt{n} \sum_{k=1}^n \tilde{\psi}_p(W_k) + o_p(1)$ where $\tilde{\psi}_p$ is the efficient influence function of $\Psi(p)$ and $W_k \sim p(W)$. The theorem below gives this efficient influence function and thus provides a construction of an asymptotically efficient regular estimator for $\Psi$:
+
+\begin{theorem}
+\label{variational-ATT}
+Suppose $W: \Omega \rightarrow \mathcal{R}_W$ follows a causal structure defined by the Bayesian network in Figure \ref{causal_diagram}, where the counterfactual conditional distribution $p(Y', T' | Z, X)$ is identical to that of its factual counterpart $p(Y, T | Z, X)$. Then $\Psi(p)$ has the following efficient influence function:
+\begin{align}
+    \tilde{\psi}_p(W) &= \frac{I(T = \alpha)}{p(T | X)} (Y - \mathbb E_p\left[ Y | Z, T \right]) + \mathbb E_p\left[ Y' | Z, T'=\alpha \right] - \Psi.
+\end{align}
+\end{theorem}
+
+We thus have the following estimator that is asymptotically efficient under some regularity conditions \citep{van2006targeted}:
+\begin{align}
+    \label{ATT-estimator}
+    \hat{\Psi}_n (o) = \frac{1}{n} \sum_{k=1}^n \left\{ \frac{I(t_k = \alpha)}{\hat{e}(t_k | x_k)} \cdot y_k + \left(1-\frac{I(t_k = \alpha)}{\hat{e}(t_k | x_k)}\right) \cdot \mathbb E_{p_\theta} \left[ Y' | z_{k, \phi}, T'=\alpha \right] \right\}
+\end{align}
+where $o_k = (x_k, t_k, y_k) \overset{\mathrm{iid}}{\sim} p(x, t, y)$ is the vector of observed triplet of the $k$-th individual, $z_{k,\phi} \sim q_\phi (y_k, t_k, x_k)$, and $\hat{e}$ is an estimation of the propensity score that satisfies the positivity assumption. The asymptotic distribution of $\hat{\Psi}_n$ is thus given by
+\begin{align}
+    \label{ATT-estimator-dist}
+     \sqrt{n}(\hat{\Psi}_n -\Psi(p)) \xrightarrow{d} \mathcal{N}(0, E_p\left[\tilde{\psi}_p(W) \tilde{\psi}_p(W)^T\right])
+\end{align}
+where the variance can be estimated empirically in practice and confidence bounds can be constructed accordingly.
+\fi
+
+
+\section{Experiments}
+
+\label{experiments}
+
+We present experimental results of our framework on two datasets with vector outcomes (sci-Plex dataset from \citet{srivatsan2020massively} (Sciplex) and the CRISPRa dataset from \citet{schmidt2022crispr} (Marson)) and two datasets with image outcomes: Morpho-MNIST \citep{castro2019morpho} and CelebA-HQ \citep{karras2017progressive}. Results from the former are compared to state-of-the-art models in single-cell perturbation prediction and results from the latter are compared to state-of-the-art models in counterfactual image generation. In both cases, our model exhibited superior performance against benchmarks.
+
+\subsection{Single-cell Perturbation Datasets}
+\label{experiment:single-cell-pert}
+
+Same as \citet{lotfollahi2021learning}, we evaluate our model and benchmarks on a widely accepted and biologically meaningful metric --- the $R^2$ (coefficient of determination) of the average prediction against the true average from the out-of-distribution (OOD) set on all genes and differentially-expressed (DE) genes. Results over five independent runs are shown in Table \ref{result-table1}.
+
+\begin{table}[ht!]
+  \caption{$\bar{R^2}$ of OOD predictions on single-cell perturbation datasets.}
+  \label{result-table1}
+  \centering
+  \small % #final-version
+  \begin{tabular}{lcccc}
+        \toprule
+        & \multicolumn{2}{c}{Sciplex} & \multicolumn{2}{c}{Marson} \\
+        \cmidrule(r){2-3} \cmidrule(r){4-5}
+        & all genes & DE genes & all genes & DE genes \\
+        \midrule
+        AE & 0.740 $\pm$ 0.043 & 0.421 $\pm$ 0.021 & 0.804 $\pm$ 0.020 & 0.448 $\pm$ 0.009 \\ 
+        CEVAE \citep{louizos2017causal} & 0.760 $\pm$ 0.019 & 0.436 $\pm$ 0.014 & 0.795 $\pm$ 0.014 & 0.424 $\pm$ 0.015 \\ 
+        GANITE \citep{yoon2018ganite} & 0.751 $\pm$ 0.013 & 0.417 $\pm$ 0.014 & 0.795 $\pm$ 0.017 & 0.443 $\pm$ 0.025 \\ 
+        CPA \citep{lotfollahi2021learning} & \textbf{0.836} $\pm$ 0.002 & 0.474 $\pm$ 0.014 & 0.876 $\pm$ 0.005 & 0.549 $\pm$ 0.019 \\
+        \hdashline
+        VCI & 0.832 $\pm$ 0.008 & \textbf{0.496} $\pm$ 0.011 & \textbf{0.891} $\pm$ 0.007 & \textbf{0.658} $\pm$ 0.040 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+For each perturbation of each covariate level (e.g. each cell type of each donor) in the OOD set, the $R^2$ (coefficient of determination) is computed with the average outcome predictions for all genes and DE genes using samples from the validation set against the true empirical average over samples from the OOD set. The average $R^2$ over all perturbations of all covariate levels is then calculated as the evaluation metric $\bar{R^2}$. In these experiments, our variational Bayesian causal inference framework excelled state-of-the-art models in both experiments, with the largest fractional improvement on DE genes which are most causally affected by the perturbations.}
+\subsection{Morpho-MNIST}
+
+\begingroup
+
+\setlength{\tabcolsep}{5pt} % Default value: 6pt
+
+\begin{table}%[ht!]
+  \caption{The MSE of the counterfactual image and the MAE of its thickness and intensity against the counterfactual truth on Morpho-MNIST. Our model is evaluated against the state-of-the-art model in adversarial formulation DEAR \citep{shen2022weakly} and state-of-the-arts in variational formulation CHVAE \citep{monteiro2023measuring}, MED \citep{ribeiro2023high}. Images are scaled to $[0, 1]$ in evaluations. Note that our test set is constructed to be much harder than that of \citet{ribeiro2023high} -- on top of randomly sampling counterfactual treatment, we also randomly sample the ratio of modification, which could be any value such that the thickness and intensity of the counterfactual truth is in range.}}
+  \label{result-table-morpho}
+  \centering
+  \small % #final-version
+  \begin{tabular}{lcccccccccc}
+    \toprule
+    & & \multicolumn{3}{c}{Image MSE $\downarrow$ ($\cdot 10^{-2}$)} & \multicolumn{3}{c}{Thickness (th) MAE $\downarrow$} & \multicolumn{3}{c}{Intensity (in) MAE $\downarrow$ ($\cdot 10^{-1}$)} \\
+    \cmidrule(r){3-5} \cmidrule(r){6-8} \cmidrule(r){9-11}
+    & $\beta$ & $do($th$)$ & $do($in$)$ & mix & $do($th$)$ & $do($in$)$ & mix & $do($th$)$ & $do($in$)$ & mix \\
+    \midrule
+    DEAR  & & 6.93 & 3.21 & 5.08 & 0.82 & 0.74 & 0.85 & 6.23 & 3.39 & 4.61 \\
+    CHVAE  & 1 & 4.92 & 4.81 & 4.81 & 0.61 & 0.66 & 0.62 & 3.23 & 1.88 & 2.81 \\
+    CHVAE  & 3 & 6.93 & 6.19 & 6.40 & 0.71 & 1.34 & 0.97 & 2.37 & 1.31 & 1.89 \\
+    MED  & 1 & 2.76 & 0.54 & 1.65 & 0.54 & 0.35 & 0.46 & 1.17 & 0.43 & 0.78 \\
+    MED  & 3 & 2.20 & 0.61 & 1.39 & 0.31 & 0.29 & 0.33 & 0.44 & 0.34 & 0.40 \\
+    \hdashline
+    SAE (Section \ref{semi-autoencode})  & & 0.67 & 0.20 & 0.47 & 0.32 & 0.21 & 0.29 & 0.52 & 0.26 & 0.41 \\
+    VCI (Section \ref{variational-causal-inference})  & & \textbf{0.42} & \textbf{0.13} & \textbf{0.36} & \textbf{0.20} & \textbf{0.14} & \textbf{0.22} & \textbf{0.42} & \textbf{0.22} & \textbf{0.33}  \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\endgroup
+
+In an ideal world, we would like to evaluate model performance against benchmarks simply by measuring the mean squared error (MSE) between counterfactual construction and the counterfactual truth for each individual. Morpho-MNIST is such a dataset that, unlike other real-world datasets, the counterfactual ``truth'' can be computed based on the selected counterfactual treatments (modifying thickness or modifying intensity of hand-written digits). Similar to \citet{ribeiro2023high}, we evaluate model constructions under single modifications as well as mix of modifications, and compare them to state-of-the-art models on high-fidelity image counterfactual generation. Contrary to \citet{ribeiro2023high}, the magnitude of modification is randomly sampled, which makes the task significantly harder. The results are shown in Table \ref{result-table-morpho} (standard error in Table \ref{result-table-morpho-std}) which demonstrated that ours beat state-of-the-arts by a wide margin. Note that \citet{ribeiro2023high} only evaluates mean absolute error (MAE) on thickness and intensity of counterfactual constructions, which took treatment characteristics into account but completely left out how much individuality of the original images has been preserved, whereas image MSE is a comprehensive metric that takes both factors into account and should be the primary evaluation metric when the counterfactual truth is available. To investigate the impact of counterfactual supervision and latent divergence terms in optimizations, we present an ablation study below to compare VCI to SAE and hierarchical autoencoder (HAE) with the same neural architecture.
+\begin{figure}[ht!]
+    \centering
+    \includegraphics[width=\linewidth]{Figure/analysis/gt.png}
+
+    \caption{Ablation Study: the MSE of counterfactual construction against the truth across epochs during the training of HAE (VCI without counterfactual supervision and latent divergence), SAE (VCI without latent divergence) and VCI over five independent runs.}
+  \label{fig:morpho-ablation}
+\end{figure}
+
+As can be seen in Figure \ref{fig:morpho-ablation}, incorporating counterfactual supervision alone could greatly accelerate optimization in the initial epochs of training, and achieves an ideal model state in the early stage. %This is the same phenomenon we observed in the optimization on single-cell perturbation dataset with respect to $\bar{R^2}$. 
+However, although both SAE and VCI beat HAE convincingly in terms of best result, SAE is largely unstable in the long-run without the proposed latent divergence restriction, and the full VCI optimization scheme consistently achieves better performance in terms of best result and final result. To further help the readers understand how and why the latent divergence term stabilizes the training of VCI, we include a discussion here along with some illustrations on $do$(intensity) in Figure \ref{fig:morpho-ablation-sample}.
+
+\begin{figure}[ht!]
+    \centering
+    \begin{subfigure}{0.44\linewidth}
+        \centering
+        \begin{subfigure}{0.88\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/rebuttal/sae/epoch-190_sample-2673_label-1.png}
+        \end{subfigure}
+    
+        \begin{subfigure}{0.88\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/rebuttal/sae/epoch-190_sample-5111_label-1.png}
+        \end{subfigure} % 0
+    
+        \begin{subfigure}{0.88\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/rebuttal/sae/epoch--1_sample-554_label-1.png}
+        \end{subfigure} % 0
+    
+        \begin{subfigure}{0.88\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/rebuttal/sae/epoch--1_sample-4335_label-1.png}
+        \end{subfigure} % 0
+    
+        \begin{subfigure}{0.88\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/rebuttal/sae/epoch--1_sample-2150_label-1.png}
+        \end{subfigure} % 0
+    
+    \caption{SAE}
+    \label{fig:morphoMNIST-ablation-sae}
+    \end{subfigure}
+    \begin{subfigure}{0.44\linewidth}
+        \centering
+        \begin{subfigure}{0.88\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/rebuttal/vci/epoch-190_sample-2673_label-1.png}
+        \end{subfigure}
+    
+        \begin{subfigure}{0.88\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/rebuttal/vci/epoch-190_sample-5111_label-1.png}
+        \end{subfigure} % 0
+    
+        \begin{subfigure}{0.88\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/rebuttal/vci/epoch--1_sample-554_label-1.png}
+        \end{subfigure} % 0
+    
+        \begin{subfigure}{0.88\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/rebuttal/vci/epoch--1_sample-4335_label-1.png}
+        \end{subfigure} % 0
+    
+        \begin{subfigure}{0.88\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/rebuttal/vci/epoch--1_sample-2150_label-1.png}
+        \end{subfigure} % 0
+    
+    \caption{VCI}
+    \label{fig:morphoMNIST-ablation-vci}
+    \end{subfigure}
+    
+    \caption{Illustration of the latent divergence term's long-term impact. Samples are drawn from the last epoch of SAE and VCI on $do$(intensity). The left most image of each set is the original image. \textbf{More sampled results from VCI on $do$(thickness) and $do$(intensity) can be found in Figure \ref{fig:morpho-mnist-sample}.}}
+    \label{fig:morpho-ablation-sample}
+\end{figure}
+
+In a GAN training scheme, the discriminator is a neural model that could often struggle with out-of-distribution evaluations. As can be seen from the generated samples by SAE in Figure \ref{fig:morpho-ablation-sample}, when the intervention labels are close to the original label, the counterfactual generations are reasonable. For intervention labels that are significantly different from the original, the images become nonsensical. This is because the combination of an intervention label that is far from the original and an image similar to the original is highly out-of-distribution and rarely present in the observed dataset. In other words, the discriminator has never encountered an image with the same digit and style as the original having such extreme intensity variations, so whatever the generator produces, the discriminator cannot tell if it is real or fake due to the lack of reference. This results in the generator exploiting the neural discriminator in these out-of-distribution scenarios in the long run. However, the latent divergence term prevents the generator from producing these nonsensical images because, otherwise, the encoder would not be able to recover a latent distribution close to that of the original image.
+\subsection{CelebA-HQ}
+
+For any real-world dataset where the counterfactual truth is not available, there is not a definitive metric to evaluate how good the counterfactual constructions really are. For that reason, facial imaging datasets are prevailing benchmarks for examining counterfactual goodness because even in the lack of a quantitative metric, human can still judge the quality of counterfactuals with common sense without the need for any domain knowledge. Same as \citet{monteiro2023measuring}, we use the CelebA-HQ \citep{karras2017progressive} dataset on 64$\times$64 resolution to evaluate the model's capability of counterfactual constructions on two factors -- smiling and glasses. Some sampled results from our model are shown in Figure \ref{fig:celeba-hq}.
+
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}{0.96\linewidth}
+        \centering
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/add_smile/epoch--1_sample-129_label-1.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/add_smile/epoch--1_sample-1566_label-1.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/add_smile/epoch--1_sample-2366_label-1.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/add_smile/epoch--1_sample-1865_label-1.png}
+        \end{subfigure}
+    
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/add_smile/epoch--1_sample-1511_label-1.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/add_smile/a_list/epoch--1_sample-932_label-1.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/add_smile/a_list/epoch--1_sample-908_label-1.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/add_smile/epoch--1_sample-1474_label-1.png}
+        \end{subfigure}
+    
+        \caption{Add smiling. Left: original, middle: not smiling (reconstruction), right: smiling (counterfactual).}
+        \label{fig:add-smiling}
+    \end{subfigure}
+    
+    
+    \begin{subfigure}{0.96\linewidth}
+        \centering
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/remove_smile/epoch--1_sample-1001_label-1.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}[b]{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/remove_smile/a_list/epoch--1_sample-1291_label-1.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}[b]{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/remove_smile/epoch--1_sample-1595_label-1.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/remove_smile/a_list/epoch--1_sample-1969_label-1.png}
+        \end{subfigure}
+    
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/remove_smile/epoch--1_sample-1352_label-1.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}[b]{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/remove_smile/epoch--1_sample-690_label-1.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}[b]{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/remove_smile/a_list/epoch--1_sample-2567_label-1.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}[b]{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/remove_smile/epoch--1_sample-970_label-1.png}
+        \end{subfigure}
+    
+        \caption{Remove smiling. Left: original, middle: not smiling (counterfactual), right: smiling (reconstruction).}
+        \label{fig:remove-smiling}
+    \end{subfigure}
+    
+    
+    \begin{subfigure}{0.96\linewidth}
+        \centering
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/add_glasses/a_list/epoch--1_sample-2197_label-0.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/add_glasses/epoch--1_sample-1990_label-0.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/add_glasses/a_list/epoch--1_sample-2200_label-0.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/add_glasses/epoch--1_sample-923_label-0.png}
+        \end{subfigure}
+    
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/add_glasses/epoch--1_sample-902_label-0.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/add_glasses/epoch--1_sample-741_label-0.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/add_glasses/epoch--1_sample-9_label-0.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/add_glasses/a_list/epoch--1_sample-2024_label-0.png}
+        \end{subfigure}
+    
+        \caption{Add glasses. Left: original, middle: no glasses (reconstruction), right: with glasses (counterfactual).}
+        \label{fig:add-glasses}
+    \end{subfigure}
+    
+    
+    \begin{subfigure}{0.96\linewidth}
+        \centering
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/remove_glasses/epoch--1_sample-428_label-0.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/remove_glasses/epoch--1_sample-1115_label-0.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/remove_glasses/a_list/epoch--1_sample-2753_label-0.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/remove_glasses/epoch--1_sample-1690_label-0.png}
+        \end{subfigure}
+        
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/remove_glasses/epoch--1_sample-1634_label-0.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/remove_glasses/epoch--1_sample-1869_label-0.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/remove_glasses/epoch--1_sample-66_label-0.png}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{.24\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{Figure/remove_glasses/epoch--1_sample-1960_label-0.png}
+        \end{subfigure}
+    
+        \caption{Remove glasses. Left: original, middle: no glasses (counterfactual), right: with glasses (reconstruction).}
+        \label{fig:remove-glasses}
+    \end{subfigure}
+    
+    \caption{Results on the test set of CelebA-HQ.}
+    \label{fig:celeba-hq}
+\end{figure}
+
+While MSE of the counterfactual construction cannot be measured, readers can empirically compare ours to prior work such as CHVAE \citep{monteiro2023measuring} which serves as the backbone for the state-of-the-art model in high fidelity counterfactual image generation MED \citep{ribeiro2023high}. Aside from compiling counterfactual credibility across all generation tasks, ours show a strong capability of disentangling factual treatment from observed images in counterfactual construction, which can be particularly observed in the task of ``removing glasses'' as shown in \Cref{fig:remove-glasses}. %A few notes regarding our results: \textbf{1)} Although our model is designed to generate counterfactuals with high fidelity, it does not guarantee that the transition dynamics are completely truthful. For example, although the first set of comparison in line 2 of \Cref{fig:add-smiling} shows a very natural image of this person smiling, her lips seem to have gotten bigger, which would not be a true consequence of smiling in the real world. \textbf{2)} 
+Note that contrary to prior works, we construct and supervise counterfactual outcomes during training, and the reconstruction and counterfactual construction share the same decoding mechanism. Hence, ``reconstruction'' is really counterfactual construction with the factual label. This can be most clearly observed in the third set of comparison in line 2 of \Cref{fig:add-smiling}, where the original image has a label of ``not smiling'' yet the person is really in-between smiling and not smiling. In this case, the ``reconstruction'' is really a counterfactual construction with treatment abiding to the original given label. %\textbf{3)} 
+Lastly, we include a discussion here regarding counterfactual fairness. Note that adding glasses is a relatively easy engineering task, but relatively hard deep learning task on CelebA-HQ due to the small sample size of images with glasses. 
+As can be seen from \Cref{fig:add-glasses}, our model not only learned to attach glasses at the right position, it also learned to attach glasses suitable to a person's style and context. However, readers may naturally start to think about the counterfactual fairness issue that might come with it, such as attaching certain type of glasses more frequently on certain race. We note that our framework can reduce spurious or unintended relations between given factors, as long as practitioners measure these factors during data collection and include them as observed labels for the composed datasets, since the learnt latent representations of our framework are encouraged to be disentangled from the observed factors. In the case of CelebA, style of glasses is unmeasured, and the model cannot reasonably tell if attaching different types of glasses on different demographics is unintended or not.
+
+
+
+\section{Conclusion}
+
+\label{conclusion}
+
+In this work, we introduced a variational Bayesian causal inference framework for estimating high-dimensional counterfactual outcomes, as well as consequent robust marginal estimators. With this framework, treatment characteristics and individuality in constructed outcomes can be explicitly balanced and optimized, and learnt latent representations are disentangled from the treatments. %In experiments, our framework excelled the state-of-the-art algorithms at out-of-distribution predictions on single-cell perturbation datasets --- a widely accepted and biologically meaningful task; Morpho-MNIST dataset --- a dataset with computable counterfactual ``truth''; and CelebA-HQ --- a popular labeled imaging dataset where counterfactual soundness can be empirically evaluated without domain knowledge. 
+As for limitations, this work requires the common causal assumption that there exists no unobserved confounders, through which causal effects are identifiable. Besides, when multiple treatments are concerned, this work does not explicitly address the situation where a causal relation exists between treatments. Thus, a straightforward extension of this work could be to incorporate explicit modeling of the causal relation among treatment variables and update the descendants of given counterfactual treatment, such as \citet{pawlowski2020deep}, before feeding them into our counterfactual outcome construction framework.% Such update could also be conducted end-to-end within the outcome construction framework, and modeled as a linear causal model in the treatment embedding space.
+
+
+\iffalse
+\subsubsection*{Author Contributions}
+If you'd like to, you may include  a section for author contributions as is done
+in many journals. This is optional and at the discretion of the authors.
+
+\fi
+
+
+

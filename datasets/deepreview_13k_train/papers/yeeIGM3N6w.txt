@@ -1,0 +1,376 @@
+\title{Retraining-Free Merging of Sparse Mixture-of-Experts via Hierarchical Clustering}
+
+\begin{abstract}
+Sparse Mixture-of-Experts (SMoE) models represent a significant breakthrough in large language model development. These models enable performance improvements without a proportional increase in inference costs. By selectively activating a small set of parameters during task execution, SMoEs enhance model capacity. However, their deployment remains challenging due to the substantial memory footprint required to accommodate the growing number of experts. This constraint renders them less feasible in environments with limited hardware resources. To address this challenge, we propose Hierarchical Clustering for Sparsely activated Mixture of Experts (HC-SMoE), a task-agnostic expert merging framework that reduces SMoE model parameters without retraining. Unlike previous methods, HC-SMoE employs hierarchical clustering based on expert outputs. This approach ensures that the merging process remains unaffected by routing decisions. The output-based clustering strategy captures functional similarities between experts, offering an adaptable solution for models with numerous experts. We validate our approach through extensive experiments on eight zero-shot language tasks and demonstrate its effectiveness in large-scale SMoE models such as Qwen and Mixtral. Our comprehensive results demonstrate that HC-SMoE consistently achieves strong performance, which highlights its potential for real-world deployment.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+The exponential growth in model parameters for Transformer-based architectures in natural language processing (NLP) has led to significant performance improvements across various tasks \citep{chowdhery2022palm, gpt4, gemini15}. Nevertheless, this increase in size has resulted in challenges for real-world deployment and accessibility due to heightened inference latency and computational requirements \citep{bommasani2022opportunities} Sparsely activated Mixture of Experts (SMoE) models have emerged as a promising solution to this challenge. SMoE architectures employ a sparse activation mechanism, wherein only a subset of the model's parameters, or `\textit{experts}', are activated for each input token. This design enables extensive parametric capacity without a proportional increase in computational cost during inference, as shown in previous works \citep{shazeer2017outrageously, fedus2022switch}. However, despite improvements in inference latency, the overall size of SMoE architectures poses a significant challenge for memory usage, and the efficient reduction of SMoE model size during inference has become a critical area of concern. Recently, the authors in \cite{liu2023diversifying} have identified high representational similarity among experts and suggested a solution to enhance expert diversity within an SMoE. Such an observation is further substantiated by the empirical results provided in \cite{lu2024notallexpertsareeuqal}. The collective evidence from these previous studies therefore suggests that model parameters in contemporary SMoE architectures may be redundant, which points to avenues for potential optimization and efficiency improvements.
+To address the challenges associated with redundant parameters in SMoE models, researchers have proposed various approaches in the past few years. Early endeavors focused on task-specific expert pruning \citep{chen2022taskspecific}, which progressively eliminates non-essential experts and ultimately results in a single-expert dense model tailored for a specific downstream task. However, such approaches often necessitate extensive fine-tuning to mitigate performance degradation caused by pruning. Inspired by this limitation, several studies~\citep{lu2024notallexpertsareeuqal, he2024demystifying} have explored retraining-free expert pruning methods. For instance, \cite{lu2024notallexpertsareeuqal} proposed directly trimming experts by using the smallest output loss relative to the original model as an indicator of importance, without any fine-tuning. On the other hand, \cite{he2024demystifying} introduced a more scalable pruning process based on routing scores. The other line of studies~\citep{li2024mcsmoe} suggested replacing pruning approaches with a merging method to more effectively leverage shared knowledge among experts and consolidate information from the most significant ones. Nonetheless, according to our experimental investigation in~\ref{experiment}, this method exhibits inferior generalizability in task-agnostic setups.
+
+\input{figures/performance} 
+In light of the aforementioned challenges, this paper proposes a \textit{retraining-free}, \textit{scalable}, and \textit{task-agnostic} framework, termed \textbf{H}ierarchical \textbf{C}lustering for \textbf{S}parsely Activated \textbf{M}ixture \textbf{o}f \textbf{E}xperts (\textbf{HC-SMoE}), that concentrates on reducing the parameters of an SMoE model through hierarchical clustering based on expert outputs and frequency-weighted merging. The hierarchical clustering methodology offers two key advantages. First, instead of using the grouping approach adopted in~\cite{li2024mcsmoe}, which only calculates the similarity among the experts once, hierarchical clustering can better maintain inter-cluster diversity and intra-cluster similarity by iterative comparison. Second, in contrast to the similarity metric used in~\cite{li2024mcsmoe}, HC-SMoE leverages experts' outputs rather than router logits, enhancing generalizability against dataset-specific information. This observation is supported by the experimental results presented in Section~\ref{experiment}. To evaluate our design in a task-agnostic experimental setup, we first perform clustering and merging based on the C4 dataset \citep{raffel2020c4}, and then assess accuracy across eight zero-shot language tasks~\citep{lu2024notallexpertsareeuqal}. As shown in Fig.~\ref{fig:performance-qwen}, our method achieves performance comparable to the original model (i.e., Qwen) and outperforms the best-performing baseline by 6.95\% and 2.14\% under the 8B and 11B parameters setups, respectively. Moreover, our results in Section~\ref{experiment} further demonstrate that HC-SMoE outperforms all baselines with the Mixtral 8x7B setup. Our contributions are fourfold:
+\begin{itemize}
+    \item To the best of our knowledge, this study presents the first retraining-free, task-agnostic SMoE merging strategy that scales efficiently with the number of experts.
+    \item We demonstrate the effectiveness of using expert outputs as the similarity metric for clustering, as compared to router logits or weights employed by prior arts.
+    \item We highlight the importance of clustering quality prior to merging and illustrate that the proposed hierarchical clustering provides robust and reliable results for expert grouping.
+    \item Our experimental results reveal that HC-SMoE consistently exhibits superior performance across various benchmarks and demonstrates its efficacy on large-scale SMoE models.
+\end{itemize}
+
+
+\section{Background and Related Works}
+
+\label{preliminaries}
+
+This section presents the essential background and related works. Section~\ref{preliminaries:MoE} introduces the SMoE architecture, while Section~\ref{preliminaries:prune_and_merge} discusses various pruning and merging methods based on SMoE.
+
+\subsection{Sparsely Activated Mixture-of-Experts (SMoE)}
+\label{preliminaries:MoE}
+
+The SMoE model comprises multiple SMoE layers, each of which contains a set of expert neural networks and a router network. 
+Consider an input token $x$, a set of expert neural networks $\{E_1, E_2, ..., E_n\}$, and a router network $R$. The output $y$ of an SMoE layer is computed as a weighted sum of the expert network outputs, which can be expressed as Eq.~(\ref{eq:1}):
+\begin{minipage}{0.35\textwidth}
+\begin{equation}
+y=\sum_{i=1}^n P_i(x) \cdot E_i(x),
+\label{eq:1}
+\end{equation}
+\end{minipage}
+\hfill
+\begin{minipage}{0.6\textwidth}
+\begin{equation}
+E(x)=(\sigma(xW_{\text{gate}}) \odot (x W_{\text{up}}))W_{\text{down}},
+\label{eq:2}
+\end{equation}
+\end{minipage}
+where $P_i(x)$ represents the routing score from $R$ for the $i^{th}$ expert, and $E_i(x)$ denotes the output of the $i^{th}$ expert network. Building upon this formulation, the experts in both Qwen~\citep{qwen_moe} and Mixtral~\citep{jiang2024mixtral} adopt the structure of LLaMA~\citep{touvron2023llama}. Specifically, the feed-forward network (FFN) within each expert consists of three linear layers that function as Eq.~(\ref{eq:2}), where $\odot$ signifies element-wise multiplication, $W_{\text{up}}, W_{\text{gate}} \in \mathbb{R}^{d_{h} \times d_{m}}$, and $W_{\text{down}} \in \mathbb{R}^{d_m \times d_{h}}$ denote the weight matrices, and $\sigma$ is the activation function, specifically Sigmoid Linear Unit (SiLU, also known as the swish function)~\citep{elfwing2018silu}. In practice, an efficient implementation of the routing function utilizes a top-$k$ routing strategy~\citep{shazeer2017outrageously, fedus2022switch}, which selects only the top $k$ experts based on the highest logits from a linear transformation of the input. The softmax operation is then applied to the $k$ largest logits, which result in a sparse activation of experts. This procedure reduces the computational overhead by activating only a small subset of the available experts. Mathematically, this procedure can be expressed as follows:
+\begin{equation}
+P(x) = \text{softmax}(\text{topK}(R(x))) = \text{softmax}(\text{topK}(xW_R)),
+\label{eq:3}
+\end{equation}
+where $R(x)$ represents the routing-logits and $W_R$ denote a learnable parameter matrix. Such a sparsely activated MoE stucture leverage this mechanism to scale efficiently while maintaining its performance. By focusing computation on the most relevant experts for each input token, the SMoE model is able to achieve a balance between the computational efficiency and the task performance.
+\subsection{Expert Pruning and Merging}
+\label{preliminaries:prune_and_merge}
+
+\begin{table}[t]
+\caption{A Comparison of different approaches for reducing the number of experts in SMoE. Please note that F-prune is detailed in Section~\ref{experiment}.
+} 
+\label{tab:compare}
+\begin{center}
+\begin{tabular}{l c c c c}
+\toprule
+Method~~~~~~~~~~~~~~~~~~~~~~~~~~~~& Retraining-free & Task-agnostic & Scalable & Strategy \\
+\midrule
+\multirow{1}{5em}{\makecell[l]{TSEP~\citep{chen2022taskspecific}}} & \xmark & \xmark & \cmark & Pruning \\
+\multirow{1}{5em}{\makecell[l]{O-prune~\citep{lu2024notallexpertsareeuqal}}} & \cmark & \cmark & \xmark & Pruning \\
+\multirow{1}{5em}{\makecell[l]{S-prune~\citep{he2024demystifying}}} & \cmark & \cmark & \cmark & Pruning \\
+\multirow{1}{5em}{\makecell[l]{F-prune}} & \cmark & \cmark & \cmark & Pruning \\
+\midrule
+\multirow{1}{5em}{\makecell[l]{M-SMoE~\citep{li2024mcsmoe}}} & \xmark & \xmark & \cmark & Merging \\
+\multirow{1}{5em}{\makecell[l]{HC-SMoE (Ours)}} & \cmark & \cmark & \cmark & Merging \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+This section discusses prior methods for reducing the number of experts in an SMoE. Table~\ref{tab:compare} offers a summary of them. We begin with the pruning strategies, and then examines the merging techniques.
+
+Pruning strategies for SMoE models have been the focus of several recent studies. \cite{chen2022taskspecific} introduced \textit{Task-Specific Expert Pruning (TSEP)}, which iteratively fine-tunes the model while pruning experts to gradually reduce the number of active experts for a specific downstream task. Despite its effectiveness, the extensive fine-tuning required renders this process time-consuming and computationally expensive, limiting its practicality for large-scale models. \cite{lu2024notallexpertsareeuqal} proposed a method which we refer to as \textit{O-prune} in this study, which directly prunes experts using a combinatorial search to minimize the \textit{Output} loss in a retraining-free, task-agnostic, zero-shot setting. This approach begins by identifying the number of experts to retain in each layer. It then conducts a layer-wise search across all possible expert combinations, selecting the one that minimizes output loss compared to the original model. Nevertheless, this method directly prunes experts deemed unimportant, forfeiting the opportunity to leverage their knowledge. Furthermore, the exhaustive combinatorial search becomes computationally infeasible for models with a large number of experts. For instance, reducing 50\% of the experts in a model like Qwen, which has 60 experts, necessitates enumerating approximately $C(60,30)\approx 10^{18}$ combinations per layer, rendering it impractical for large-scale applications. \cite{he2024demystifying} introduced an efficient expert trimming technique, denoted as \textit{S-prune}, due to its reliance on the router \textit{Score}.
+In this approach, each expert's router-score $P(x)$ is accumulated globally, and only the top-scoring experts are retained, while others are pruned. This strategy offers more flexibility than that in~\cite{lu2024notallexpertsareeuqal}, as it enables different layers to retain varying numbers of experts.
+
+Model merging techniques have emerged as a promising approach to combine the strengths of multiple models. ZipIt \citep{stoica2024zipit} introduces a model merging technique that allows models with the same architecture but trained on different tasks to be merged without retraining. It utilizes pairwise feature correlation to merge features both within a single model and across different models, offering flexibility in choosing correlated features. Since expert merging can be considered a multi-model merging problem, we extend ZipIt to this context. However, its extensive feature correlation computation makes it time-consuming and less effective for expert merging scenarios.
+M-SMoE~\citep{li2024mcsmoe} proposes a three-step pipeline for expert merging in SMoE models. It first selects dominant experts based on activation frequency to decide which experts to retain in each layer, then uses router logits $R(x)$ to group experts, followed by frequency-based merging. However, in task-agnostic settings without retraining, relying on frequency information for clustering proves ineffective. This approach faces two main issues. Second, high-frequency experts within the same layer are rarely merged, overlooking their functional similarities in the feature space. Additionally, grouping based on router information is problematic, as it depends on dataset-dependent statistics. Together, the limitations can potentially hinder the model’s ability to maintain performance over diverse tasks without access to task data.
+
+
+
+\section{Methodology}
+
+
+In this section, we introduce the proposed HC-SMoE. Section~\ref{method:def} first provides a formal problem definition. Section~\ref{sec:methodology:overview} then outlines the merging pipeline. Sections~\ref{sec:methodology:expert_outputs},~\ref{sec:methodology:hierarchical_clustering}, and~\ref{sec:methodology:expert_merging} further explains the similarity metric, clustering method, and merging criterion of HC-SMoE, respectively.
+\input{figures/main_idea}
+
+\subsection{Problem Definition}
+\label{method:def}
+
+In this study, we address the challenge of reducing the space complexity of an SMoE model through a process we term \textit{expert merging}. This process aims to consolidate the existing experts in an SMoE layer into a smaller set of new experts to reduce the model's overall size while preserving its performance.
+Given an initial set of experts ${E_1,E_2,\ldots,E_n}$, the merging process involves grouping these experts into subsets and combining each subset into a new expert. Mathematically, this can be expressed as: $\{E_{i_1}, E_{i_2}, \ldots, E_{i_m}\} \rightarrow E_1’$, $\{E_{j_1}, E_{j_2}, \ldots, E_{j_k}\} \rightarrow E_2’$, $\cdots$,  $\{E_{l_1}, E_{l_2}, \ldots, E_{l_p}\} \rightarrow E_q'$ where $\{E_{i_1}, E_{i_2}, \ldots, E_{i_m}\}$, $\{E_{j_1}, E_{j_2}, \ldots, E_{j_k}\}$, and so on up to $\{E_{l_1}, E_{l_2}, \ldots, E_{l_p}\}$ are disjoint subsets of the original expert set, and $E_1'$, $E_2'$, ..., $E_q'$ are the new experts resulting from the merging process. This formulation allows for the creation of multiple new experts $\{E_1', E_2', \ldots, E_q'\}$, each derived from a distinct group of the original experts. This approach reduces the overall number of experts while maintaining the data's original dimensionality. In such a formulation, the router network $R$ remains unmodified. If an input token was previously assigned to an expert in a merged group, it will be routed to the corresponding new expert. For example, if a token $x$ was originally routed to any expert in the set ${E_{i_1}, E_{i_2},\ldots,E_{i_m}}$, it is then processed by $E_1'$.
+
+The expert merging problem presents several unique challenges. Unlike conventional model merging methodologies, where the entities to be merged are predetermined, expert merging requires an initial clustering of experts into groups before the merging process can be executed. This additional clustering step substantially increases the complexity of the problem, as it necessitates determining which subsets of experts can be grouped in a manner that minimizes performance loss in the model. 
+Since training an MoE model demands substantial GPU memory, we address this problem without retraining and utilize a non-benchmark dataset to collect information for the expert merging process.
+
+\subsection{Hierarchical Clustering for Sparsely Activated Mixture of Experts}
+\label{sec:methodology:overview}
+In this section, we elaborate on HC-SMoE, a methodology designed with the philosophy of being retraining-free, task-agnostic, and scalable. HC-SMoE employs a two-stage pipeline comprising clustering and merging, which are illustrated in Fig.~\ref{fig:main_idea}~(b) and the right-hand side of Fig.~\ref{fig:main_idea}~(c), respectively. The first clustering stage determines the optimal grouping of experts for subsequent merging. Our approach demonstrates that utilizing averaged expert outputs as the similarity metric for clustering yields superior effectiveness compared to methods relying on averaged router logits or weights. Furthermore, we emphasize the critical importance of clustering quality and illustrate that hierarchical clustering with average linkage 
+produces robust model quality post-merging. The second stage encompasses the merging of experts within each identified cluster. Our experimental findings indicate that given effective clustering, the choice of merging method (e.g., average, frequency, or alternative merging approaches) consistently results in strong performance across all benchmarks. The above components are further explained in Subsections~\ref{sec:methodology:expert_outputs},~\ref{sec:methodology:hierarchical_clustering}, and~\ref{sec:methodology:expert_merging}.
+
+\subsubsection{Averaged Expert Outputs as Similarity Metric}
+\label{sec:methodology:expert_outputs}
+
+Establishing a robust and reliable expert similarity metric is crucial for HC-SMoE prior to performing clustering. HC-SMoE employs an average output strategy, which proves advantageous due to its effectiveness in capturing expert functionality. The method utilizes averaged expert outputs $\frac{1}{T}\sum_{i=1}^{T}E(x_i)$ over a calibration dataset with $T$ tokens to effectively capture each expert's functional behavior. 
+The expert's output feature vectors represent the final transformed data, which encapsulates both the input's contextual information and the expert's learned transformations. This allows for a direct comparison of how two experts process information, serving as a better metric than conventional alternatives such as averaged router logits or expert weights~\citep{li2024mcsmoe}. 
+Router logits reflect assignment preferences influnced by local factors like specific input distributions rather than the actual function similarity between experts. The routing patterns varying significantly across tasks limits their utility as task-agnostic similarity metrics. Although expert weights contain rich parameter information, their processing is computationally expensive. Furthermore, a prior study~\citep{liu2023diversifying} has shown that SMoE experts often exhibit high similarity in the parameter space, which diminishes their effectiveness as a distinct measure of expert functionality. In contrast, averaged expert outputs provide a direct representation of each expert's functional behavior, which therefore enhances the efficacy of identifying functionally similar experts. Prior research~\citep{convergentlearning,stoica2024zipit} indicates that models with similar outputs are likely to perform analogous functions. This correlation highlights the efficacy of clustering based on output similarity for preserving model performance after merging, and provides the foundation for HC-SMoE's output merging strategy.
+\subsubsection{Hierarchical Clustering}
+\label{sec:methodology:hierarchical_clustering}
+
+With a reliable expert similarity metric established, the subsequent step involves selecting an appropriate clustering method. Unlike conventional model merging, which combines predefined element groups, expert merging necessitates a more flexible approach to group experts before merging. Although several potential strategies exist, as discussed in Section \ref{sec:experiment:ablation}, our analysis reveals that hierarchical clustering~\citep{patel2015hcstudy}, as illustrated in Fig.~\ref{fig:main_idea}~(b), is 
+well-suited for this task. This method exhibits optimal characteristics for expert grouping. Hierarchical clustering initiates by considering each expert as an individual entity and progressively merges them based on their cluster distance. This process facilitates adaptive grouping throughout the procedure. The approach continuously recalculates distances between clusters, which ensures the grouping of functionally similar experts. As a result, hierarchical clustering is able to outperform the K-means and one-shot grouping~\citep{li2024mcsmoe}. Section \ref{sec:experiment:ablation} provides an ablation study for different clustering strategies.
+
+Our investigation encompasses three linkage methods in hierarchical clustering: single, complete, and average linkage. In single linkage, the distance between two clusters is defined by the closest pair of elements. Complete linkage employs the maximum distance, which often results in overly compact clusters that fail to capture subtle similarities. Average linkage, which considers the average pairwise distance between all elements in the clusters, achieves an optimal balance. As demonstrated in Table \ref{tab:ab-hc}, while both single and average linkage yield satisfactory results, average linkage consistently delivers superior performance. Therefore, in this study, the average linkage method is adopted in HC-SMoE unless stated otherwise, as it ensures high intra-cluster similarity and low inter-cluster similarity. This balance effectively preserves the characteristics of the experts during merging.
+
+\subsubsection{Expert Merging}
+\label{sec:methodology:expert_merging}
+
+Upon completion of clustering, HC-SMoE proceeds to merge the experts within each cluster, as illustrated in Fig.~\ref{fig:main_idea}~(c). Our empirical evidence indicates that while the choice of merging method does influence the overall performance, its impact is relatively modest compared to the significance of robust clustering results. This study considers three merging strategies: \textit{average merging}, \textit{frequency-weighted merging}, and \textit{fixed-dominant merging}. Average merging computes the element-wise average of the weights of all experts in each cluster. Frequency-weighted merging~\citep{li2024mcsmoe} is performed as $E_{merged}=\frac{\sum_{i=1}^k\alpha_i E_i}{\sum_{i=1}^k\alpha_i}$ for a group of $k$ experts $E_1, ..., E_k$, where $\alpha_i$ denotes the usage frequency of expert $E_i$. Fixed-dominant merging, a method introduced in this study, represents an efficient adaptation of ZipIt specifically designed for merging experts in SMoE models.
+
+In fixed-dominant merging, the expert closest to the cluster center is selected as the dominant expert, which serves as a reference point. The features of the other experts in the cluster are then re-ordered based on their correlation with the dominant expert's features. Subsequently, an averaging operation is performed between the dominant expert and the re-ordered features of the remaining experts. This method is specifically tailored for SMoEs, as it preserves the structural characteristics of the dominant expert while allowing efficient merging. Unlike the original ZipIt algorithm, which requires exhaustive pairwise comparisons, our adaptation is computationally efficient and ensures the preservation of key characteristics of the dominant expert, making it highly suitable for the SMoE framework. An ablation study for different merging approaches is presented in Section \ref{sec:experiment:ablation}.
+
+
+
+\section{Experimental Results}
+
+\label{experiment}
+In the following sections, we first describe the experimental setups in Section~\ref{experiment:setup}. Next, we compare the performance of HC-SMoE against various SMoE model pruning and merging baselines. Finally, we present an ablation study to assess the effectiveness of each component in HC-SMoE's design.
+
+\subsection{Experimental Settings}
+\label{experiment:setup}
+We conduct experiments on two SMoE models: Qwen1.5-MoE-A2.7B (henceforth Qwen)~\citep{qwen_moe} and Mixtral 8x7B~\citep{jiang2024mixtral}. For Qwen, we explore two levels of reduction: merging the number of experts from $60$ to $45$ and further to $30$ per layer. This corresponds to a reduction in parameters from 14.3B to 11.2B (denoted as Qwen 45x2.7B), and subsequently to 8.1B (denoted as Qwen 30x2.7B). Similarly, Mixtral 8x7B undergoes reduction from eight to six experts and then to four experts per layer, decreasing the total parameters from 46.7B to 35.6B (denoted as Mixtral 6x7B) and further to 24.3B (denoted as Mixtral 4x7B). This graduated approach enables the evaluation of expert merging impact at different levels of model reduction. Experiments on Mixtral 8x7B and Qwen are conducted on eight NVIDIA A100 GPUs and four NVIDIA V100 GPUs, respectively.
+
+To evaluate our method in a task-agnostic setting, we utilize eight tasks using the EleutherAI Language Model Evaluation Harness~\citep{eval-harness}. These are designed to cover various aspects of language understanding and reasoning, including both Challenge and Easy sets in AI2 Reasoning Challenge (ARC)~\citep{clark2018arc}, BoolQ~\citep{clark2019boolq}, HellaSwag~\citep{zellers2019hellaswag}, Massive Multitask Language Understanding (MMLU)~\citep{hendrycks2021mmlu}, OpenBookQA~\citep{mihaylov018obqa}, Recognizing Textual Entailment (RTE)~\citep{bentivogli2009rte} and Winograd Schema Challenge~\citep{winogrande}. We report zero-shot accuracy on those benchmarks.
+
+For our comparisons, three pruning baselines are employed: \textit{O-prune}~\citep{lu2024notallexpertsareeuqal}, \textit{S-prune}~\citep{he2024demystifying}, and \textit{F-prune}. \textit{F-prune}, where `\textit{F}’ denotes frequency, adheres to the same methodology as \textit{S-prune}.
+However, it employs frequency as the criterion for pruning experts, in contrast to \textit{S-prune} which utilizes router logits. Due to the high computational complexity of \textit{O-prune} on Qwen, a random sampling of $10,000$ possible expert sets in each layer is performed instead. The set with the smallest output difference from the original model is selected, denoted as \textit{O-prune ($10^5$)} in the Qwen experiments. In addition, M-SMoE is included as the merging baseline and applied in a task-agnostic setting without retraining to ensure a fair comparison. All baselines and HC-SMoE require a calibration dataset to estimate input statistics. This dataset is constructed by sampling from the C4 corpus~\citep{raffel2020c4}, concatenating extracted text into $32$ sequences of $2,048$ tokens each.
+\subsection{Performance Comparisons}
+\label{experiment:performance}
+
+\begin{table}[t]
+\caption{Zero-shot performance evaluation of different expert pruning and merging methods on Qwen with reducing experts to 45 and 30 per layer. \textbf{HC-SMoE (avg)} stands for average linkage method when performing hierarchical clustering. \textbf{HC-SMoE (single)} stands for single linkage.} 
+\label{tab:qwen}
+\begin{center}
+\resizebox*{\textwidth}{!}{
+\begin{tabular}{@{}l l *{9}{c}@{}}
+\toprule
+Model~~~~~~~~~~~~~~ & Method & ARC-c & ARC-e & BoolQ & HellaSwag & MMLU & OBQA & RTE & Winogrande & Average \\
+\midrule
+\multirow{1}{2em}{\makecell[l]{Qwen 60x2.7B}} & None & 0.3951 & 0.7012 & 0.8135 & 0.5932 & 0.6047 & 0.310 & 0.7329 & 0.6559 & 0.6008 \\
+\midrule
+\multirow{7}{2em}{\makecell[l]{Qwen 45x2.7B}}
+& O-prune ($10^5$) & 0.3268 & 0.6111 & 0.7566 & 0.5388 & 0.5150 & 0.268 & 0.6498 & 0.6330 & 0.5374\\
+& F-prune & 0.3490 & 0.5989 & 0.7618 & 0.5441 & 0.4560 & \textbf{0.282} & \textbf{0.7690} & 0.6409 & 0.5502 \\
+& S-prune & 0.3464 & 0.6061 & 0.7128 & 0.5228 & 0.4930 & 0.264 & 0.6534 & 0.5935 & 0.5240 \\
+& M-SMoE & 0.3473 & 0.6157 & 0.7544 & 0.5157 & 0.4182 & 0.262 & 0.7292 & 0.6377 & 0.5350 \\
+\hhline{~*{10}{-}}\rule{0pt}{2.5ex}
+& HC-SMoE (avg) & \textbf{0.3660} & \textbf{0.6578} & \textbf{0.7948} & 0.5520 & 0.5332 & 0.272 & 0.7509 & 0.6464 & \textbf{0.5716} \\
+& HC-SMoE (single) & 0.3592 & \textbf{0.6578} & 0.7942 & \textbf{0.5578} & \textbf{0.5360} & 0.270 & 0.7292 & \textbf{0.6472} & 0.5689 \\
+
+\midrule
+\multirow{7}{2em}{\makecell[l]{Qwen 30x2.7B}}
+& O-prune ($10^5$) & 0.2568 & 0.4449 & 0.6496 & 0.4351 & 0.2907 & 0.202 & 0.6065 & 0.5375 & 0.4279 \\
+& F-prune & 0.2765 & 0.4718 & 0.6587 & 0.4330 & 0.3023 & 0.230 & 0.6570 & 0.5927 & 0.4528 \\
+& S-prune & 0.2500 & 0.4756 & 0.6388 & 0.4041 & 0.3471 & 0.196 & 0.6209 & 0.5146 & 0.4309 \\
+& M-SMoE & 0.1945 & 0.2786 & 0.4462 & 0.2837 & 0.2475 & 0.160 & 0.4477 & 0.5185 & 0.3221 \\
+\hhline{~*{10}{-}}\rule{0pt}{2.5ex}
+& HC-SMoE (avg) & \textbf{0.3532} & \textbf{0.6149} & 0.7535 & \textbf{0.4695} & 0.4534 & \textbf{0.228} & \textbf{0.6606} & \textbf{0.6456} & 0.5223 \\
+& HC-SMoE (single) & 0.3524 & 0.6153 & \textbf{0.7661} & 0.4661 & \textbf{0.4537} & \textbf{0.228} & 0.6534 & 0.6306 & 0.5207 \\
+\bottomrule
+\end{tabular}}
+\end{center}
+\end{table}
+
+\begin{table}[t]
+\caption{Zero-shot performance evaluation of different expert pruning and merging methods on Mixtral 8x7B with reducing experts to six and four per layer.}
+\label{tab:mixtral}
+\begin{center}
+\resizebox*{\textwidth}{!}{
+\begin{tabular}{@{}l l *{9}{c}@{}}
+\toprule
+Model~~~~~~~~~~ & Method & ARC-c & ARC-e & BoolQ & HellaSwag & MMLU & OBQA & RTE & Winogrande & Average \\
+\midrule
+\multirow{1}{2em}{\makecell[l]{Mixtral 8x7B}} & None & 0.5648 & 0.8422 & 0.8505 & 0.6490 & 0.6712 & 0.350 & 0.7112 & 0.7593 & 0.6748 \\
+\midrule
+\multirow{7}{2em}{\makecell[l]{Mixtral 6x7B}}
+& O-prune & \textbf{0.5205} & 0.8009 & 0.8352 & 0.6115 & 0.5741 & 0.316 & 0.6606 & \textbf{0.7719} & 0.6363 \\
+& F-prune & 0.5009 & 0.7904 & 0.7725 & 0.5990 & 0.5099 & 0.326 & 0.5596 & 0.7672 & 0.6032 \\
+& S-prune & 0.4991 & 0.7891 & 0.7801 & 0.5984 & 0.5103 & \textbf{0.340} & 0.5704 & 0.7735 & 0.6076 \\
+& M-SMoE & 0.2619 & 0.5564 & 0.5208 & 0.4320 & 0.2503 & 0.194 & 0.5271 & 0.5848 & 0.4159 \\
+\hhline{~*{10}{-}}\rule{0pt}{2.5ex}
+& HC-SMoE (avg) & 0.5145 & 0.8043 & \textbf{0.8554} & 0.6142 & 0.6043 & 0.324 & \textbf{0.6715} & 0.7514 & \textbf{0.6425} \\
+& HC-SMoE (single) & 0.5154 & \textbf{0.8123} & \textbf{0.8554} & \textbf{0.6163} & \textbf{0.6053} & 0.310 & \textbf{0.6715} & 0.7403 & 0.6408 \\
+
+\midrule
+\multirow{7}{2em}{\makecell[l]{Mixtral 4x7B}}
+& O-prune & 0.4394 & 0.7327 & 0.8046 & 0.5660 & 0.4584 & 0.286 & 0.5668 & \textbf{0.7285} & 0.5728 \\
+& F-prune & 0.4352 & 0.7290 & 0.7520 & 0.5293 & 0.3739 & \textbf{0.290} & 0.5560 & 0.7245 & 0.5487\\
+& S-prune & 0.2235 & 0.4339 & 0.6300 & 0.4250 & 0.2554 & 0.188 & 0.5235 & 0.5699 & 0.4062 \\
+& M-SMoE & 0.2116 & 0.2765 & 0.4954 & 0.2767 & 0.2452 & 0.108 & 0.4910 & 0.4964 & 0.3251 \\
+\hhline{~*{10}{-}}\rule{0pt}{2.5ex}
+& HC-SMoE (avg) & 0.4573 & 0.7454 & 0.8018 & 0.5709 & 0.4571 & 0.270 & 0.5523 & \textbf{0.7285} & 0.5729 \\
+& HC-SMoE (single) & \textbf{0.4642} & \textbf{0.7483} & \textbf{0.8321} & \textbf{0.5781} & \textbf{0.4895} & 0.280 & \textbf{0.5884} & 0.7206 & \textbf{0.5877} \\
+\bottomrule
+\end{tabular}}
+\end{center}
+\end{table}
+This section presents a comprehensive comparison of the performance of the models reduced by the proposed HC-SMoE against the original SMoE models and the baselines. The analysis encompasses various model sizes and tasks, and provides insights into the efficacy and scalability of the proposed HC-SmoE method. As presented in Tables~\ref{tab:qwen} and~\ref{tab:mixtral}, the M-SMoE baseline exhibits the lowest performance across all benchmarks, indicating the ineffectiveness of router-logit-based grouping in a task-agnostic setting. \textit{O-prune} demonstrates suboptimal performance, particularly on Qwen, due to its limitations in evaluating all possible expert combinations. This results in a substantial performance decline compared to Mixtral. In contrast, HC-SMoE demonstrates consistent superiority over these baselines, irrespective of model size, and proves applicable to different number of experts.
+
+It is noteworthy that Qwen 45x2.7B and Mixtral 4x7B achieve comparable scores despite a twofold difference in parameter count. This observation substantiates the scalability of HC-SMoE to SMoE models with a higher number of experts. With a 25\% reduction in experts, our method even surpasses the original model on certain tasks, such as Mixtral 6x7B on BoolQ and Qwen 45x2.7B on RTE. This improvement can be attributed to the reduction of expert redundancy after merging. In this configuration, both Qwen and Mixtral exhibit an average performance gap of less than 3\% compared to their original models. Even with a 50\% reduction, HC-SMoE applied to Qwen maintains a gap of merely 7.43\% and outperforms the best baseline, \textit{F-prune}, which lags behind HC-SMoE by 7.46\%.
+These results validate the robustness and efficacy of HC-SMoE across diverse model sizes and tasks.
+\subsection{Ablation Study}
+\label{sec:experiment:ablation}
+
+\begin{table}[t]
+\caption{Different linkage method comparisons of hierarchical clustering on Qwen 45x2.7B.} 
+\footnotesize
+\label{tab:ab-hc}
+\begin{center}
+\begin{tabular}{l l c c c c | c}
+\toprule
+Linkage~~ & Metric~~~~~~~ & ARC-c & BoolQ & OBQA & RTE & Average \\
+\midrule
+\multirow{1}{2em}{None} & None & 0.3951 & 0.8135 & 0.310 & 0.7329 & 0.5629 \\
+\midrule
+
+\multirow{3}{2em}{Single} & \textit{router-logits} & 0.2398 & 0.3792 & 0.180 & 0.5054 & 0.3261 \\
+& \textit{weight}         & \textbf{0.3695} & 0.7676	& 0.254 & 0.7004 & 0.5229 \\
+& \textit{expert-output} & 0.3592 & 0.7942 & 0.270 & 0.7292 & 0.5382 \\
+\midrule
+
+\multirow{3}{2em}{Complete} & \textit{router-logits} & 0.3677 & 0.7694 & 0.248 & 0.7329 & 0.5295 \\
+& \textit{weight}        & 0.2363 & 0.4446 & 0.178 & 0.6137 & 0.3682 \\
+& \textit{expert-output} & 0.2338 & 0.6037 & 0.210 & 0.5162 & 0.3909 \\
+\midrule
+
+\multirow{3}{2em}{Average} & \textit{router-logits} & 0.2073 & 0.3801 & 0.172 & 0.5018	& 0.3153 \\
+& \textit{weight}        & 0.3788 & 0.7645 & 0.250 & 0.7004 & 0.5234 \\
+& \textit{expert-output} & 0.3660 & \textbf{0.7948} & \textbf{0.272} & \textbf{0.7509} & \textbf{0.5459} \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+\textbf{Ablation on Different Linkage Methods among Different Metrics.} Table~\ref{tab:ab-hc} presents a comparison of different linkage methods in hierarchical clustering according to various metrics: \textit{router-logits}, \textit{weight}, and \textit{expert-output}. Hierarchical clustering exhibits stability due to its deterministic nature. This stability is evidenced by consistent performance across benchmarks and the highest average scores. Unlike K-means, it is not susceptible to initialization randomness, which establishes it as a more reliable clustering method. Among the different linkage methods, single linkage generally performs satisfactorily. However, average linkage emerges as the superior option and achieves the highest scores in most of the evaluated settings.
+The experimental results further reveal an interesting pattern in the performance of complete linkage across different metrics. When applied with the expert-output metric, complete linkage yields suboptimal results, achieving only $0.3909$ on average. The performance further deteriorates with the weight metric, which reaches a mere $0.3682$. On the contrary, the router-logits-based approach excels exclusively with complete linkage, and attains an average score of $0.5295$. This disparity substantiates the distinctive properties of router-logits compared to weights and expert outputs. This observation can be attributed to the inherent characteristics of the similarity metrics. Router-logits align well with complete linkage since they capture the maximal boundaries between clusters. This alignment effectively reflects distinct activation patterns. In contrast, expert outputs and weights benefit from single or average linkage methods. These metrics reveal more subtle, internal similarities that may not manifest through extreme distances. Therefore, they favor linkage methods that consider average or minimal distances between cluster elements.
+\begin{table}[t]
+\caption{Our HC-SMoE compares to K-means clustering. K-means-\textbf{fix} assigns the first $r$ experts as initial center. K-means-\textbf{rnd} randomly choose $r$ experts as initial center. For each task, we highlight the best performance in \colorbox{goldenrod}{yellow}, and mark the best performance within same cluster method \textbf{bold}.} 
+\footnotesize
+\label{tab:ab-kmeans}
+\begin{center}
+\begin{tabular}{l l l c c c c | c}
+\toprule
+Model~~~~~~~~~~~~~~ & Cluster~~~ & Metric~~~~~~~ & ARC-c & BoolQ & OBQA & RTE & Average \\
+\midrule
+\multirow{1}{2em}{\makecell[l]{Qwen 60x2.7B}} & None & None & 0.3951 & 0.8135 & 0.310 & 0.7329 & 0.5629 \\
+\midrule
+
+\multirow{9}{2em}{\makecell[l]{Qwen 45x2.7B}}
+&\multirow{3}{5em}{\makecell[l]{K-means-fix}} 
+& \textit{router-logits} & 0.3669 & 0.7664 & \textbf{0.270} & 0.6679 & 0.5178 \\
+&  & \textit{weight}        & 0.3797 & 0.7294 & 0.268 & 0.6751 & 0.5131 \\
+&  & \textit{expert-output} & \colorbox{goldenrod}{\textbf{0.3925}}  & \textbf{0.7850} & \textbf{0.270} & \textbf{0.7184} & \textbf{0.5415} \\
+
+\hhline{~*{7}{-}}\rule{0pt}{2.5ex}
+
+&\multirow{4}{5em}{\makecell[l]{K-means-rnd}} 
+& \textit{router-logits} & \textbf{0.3797} & \textbf{0.7621} & \colorbox{goldenrod}{\textbf{0.276}} & 0.6029 & 0.5052 \\
+& & \textit{weight}        & 0.2432 & 0.5557 & 0.154 & 0.5812 & 0.3835 \\
+& & \textit{expert-output} & \textbf{0.3797} & 0.7177 & 0.270 & \textbf{0.6968} & \textbf{0.5161} \\
+
+\hhline{~*{7}{-}}\rule{0pt}{2.5ex}
+& \makecell[l]{HC-SMoE} & \textit{expert-output} & \textbf{0.3646} & \colorbox{goldenrod}{\textbf{0.7927}} & \textbf{0.268} & \colorbox{goldenrod}{\textbf{0.7449}} & \colorbox{goldenrod}{\textbf{0.5426}} \\
+
+\midrule
+\multirow{9}{2em}{\makecell[l]{Qwen 30x2.7B}}
+&\multirow{3}{5em}{\makecell[l]{K-means-fix}} & \textit{router-logits} & 0.2031 & 0.4015 & 0.162 & 0.4838 & 0.3126 \\
+&                       & \textit{weight}        & 0.2073 & \textbf{0.4960} & \textbf{0.166} & 0.509 & \textbf{0.3446} \\
+&                       & \textit{expert-output} & \textbf{0.2184} & 0.3786 & 0.148 & \textbf{0.5343} & 0.3198 \\
+\hhline{~*{7}{-}}\rule{0pt}{2.5ex}
+&\multirow{4}{5em}{\makecell[l]{K-means-rnd}} & \textit{router-logits} & 0.2014 & 0.4168 & 0.142 & 0.5018 & 0.3155 \\
+&                          & \textit{weight}        & 0.2108 & 0.533 & 0.174 & 0.5379 & 0.3639 \\
+&                          & \textit{expert-output} & \textbf{0.3370} & \textbf{0.6398} & \textbf{0.224} & \textbf{0.6065} & \textbf{0.4518} \\
+
+\hhline{~*{7}{-}}\rule{0pt}{2.5ex}
+& \makecell[l]{HC-SMoE} & \textit{expert-output} & \colorbox{goldenrod}{\textbf{0.3515}} & \colorbox{goldenrod}{\textbf{0.7544}} & \colorbox{goldenrod}{\textbf{0.228}} & \colorbox{goldenrod}{\textbf{0.6631}} & \colorbox{goldenrod}{\textbf{0.4993}} \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+\textbf{K-means Clustering v.s. Hierarchical Clustering}. We next present a comparative analysis between our hierarchical clustering (HC) method and various K-means clustering strategies, underscoring the superiority of HC. Table~\ref{tab:ab-kmeans} reports the performance of different initialization strategies and similarity metrics in K-means, evaluated across four benchmarks: ARC-c, BoolQ, OBQA, and RTE. These benchmarks were selected for their comprehensive coverage of language abilities, encompassing common sense reasoning, basic knowledge questions, and semantic similarity between sentence pairs. The evaluation results reveal that most post-merged models utilizing K-means experience a substantial decline in their original capabilities. For instance, even the best-performing model employing the expert-output similarity metric achieves a score 4.75\% lower than our HC-SMoE results. This performance gap validates the effectiveness of our proposed HC-based method.
+
+K-means also exhibits significant instability, particularly when juxtaposed with HC. The final performance of K-means demonstrates high sensitivity to the choice of initial cluster centers. In experiments conducted on the Qwen45x2.7B model using the weight similarity metric, we observe a substantial average accuracy reduction of 12.96\% when transitioning from a fixed to a random initialization strategy. This sensitivity illuminates K-means' inherent randomness and lack of robustness. The observed instability and performance degradation in K-means clustering further accentuate the stability and efficacy of our HC-based method. These findings reinforce the superiority of HC in maintaining model performance post-merging and its resilience to initialization variability.
+\begin{table}[t]
+    \caption{Comparisons for different similarity metric to single-shot grouping method and our HC-SMoE on Mixtral 8x7B with reducing experts to average 6 and 4 per layer.} 
+    \footnotesize
+    \label{tab:ab-one-shot-mixtral}
+    \begin{center}
+    \resizebox*{\textwidth}{!}{
+    \begin{tabular}{l l c c c c c c c c | c}
+    \toprule
+    Model~~~~~~~~~~~~~~ & Metric~~~~~~~ & ARC-c & ARC-e & BoolQ & HellaSwag & MMLU & OBQA & RTE & Winogrande & Average \\
+    \midrule
+    \multirow{1}{2em}{\makecell[l]{Mixtral 8x7B}} & None & 0.5648 & 0.8422 & 0.8505 & 0.6490 & 0.6712 & 0.350 & 0.7112 & 0.7593 & 0.6748 \\
+    
+    \midrule
+
+    \multirow{5}{2em}{\makecell[l]{Mixtral 6x7B}}
+    & \textit{router-logits} & 0.2619 & 0.5564 & 0.5208 & 0.432 & 0.2503 & 0.194 & 0.5271 & 0.5848 & 0.4159 \\
+    & \textit{weight}        & 0.4974 & 0.7955 & 0.781 & 0.6131 & 0.5244 & 0.34 & \textbf{0.6715} & \textbf{0.7585} & 0.6227 \\
+    & \textit{expert-output} & 0.506 & \textbf{0.8056} & 0.8373 & 0.613 & 0.5595 & 0.306 & 0.6318 & 0.7474 & 0.6258 \\
+
+    \hhline{~*{10}{-}}\rule{0pt}{2.5ex}
+    & \makecell[l]{HC-SMoE} & \textbf{0.5145} & 0.8043 & \textbf{0.8554} & \textbf{0.6142} & \textbf{0.6043} & \textbf{0.324} & \textbf{0.6715} & 0.7514 & \textbf{0.6425} \\
+    
+    \midrule
+    \multirow{5}{2em}{\makecell[l]{Mixtral 4x7B}}
+    & \textit{router-logits} & 0.2116 & 0.2765 & 0.4954 & 0.2767 & 0.2452 & 0.108 & 0.4910 & 0.4964 & 0.3251 \\
+    & \textit{weight}        & 0.4172 & 0.7382 & 0.7862 & 0.5457 & 0.4223 & 0.256 & 0.5523 & 0.7143 & 0.554 \\
+    & \textit{expert-output} & 0.4326 & 0.7386 & \textbf{0.8021} & 0.5467 & 0.429 & \textbf{0.278} & \textbf{0.5704} & 0.7245 & 0.5652 \\
+    \hhline{~*{10}{-}}\rule{0pt}{2.5ex}
+    & \makecell[l]{HC-SMoE} & \textbf{0.4573} & \textbf{0.7454} & 0.8018 & \textbf{0.5709} & \textbf{0.4571} & 0.270 & 0.5523 & \textbf{0.7285} & \textbf{0.5729} \\
+    
+    \bottomrule
+    \end{tabular}}
+    \end{center}
+\end{table}
+
+\textbf{Single-shot Grouping v.s. Hierarchical Clustering}. In this analysis, we follow the single-shot grouping methods outlined in~\cite{li2024mcsmoe} to compare results on Mixtral 8x7B, and report the results in Table~\ref{tab:ab-one-shot-mixtral}. Among the similarity metrics evaluated, \textit{router-logits} exhibits the poorest performance, indicating its unsuitability for task-agnostic settings due to its reliance on dataset-specific statistics.  In both the 25\% and 50\% parameter reduction scenarios, all one-shot grouping methods underperform compared to \textit{O-prune} presented in Table \ref{tab:mixtral}. This observation suggests that these grouping methods fail to form effective clusters, and can potentially result in lower performance even when attempting to absorb all expert knowledge. The method based on the expert output metric demonstrates superior performance over other similarity metrics. It outperforms router-logits by 24.01\% and weights by 1.12\% when reducing 50\% of the expert parameters. This finding highlights the importance of selecting appropriate similarity metrics for effective expert grouping. HC-SMoE demonstrates a clear advantage over the one-shot grouping approaches. It achieves average improvements of 1.98\% and 1.67\% in the 25\% and 50\% parameter reduction settings, respectively.
+\begin{table}[t]
+\caption{Various merging methods with hierarchical clustering average linkage based on expert outputs. \textbf{Fix-Dom} represents fixed-dominant merging described in Section \ref{sec:methodology:expert_merging}. \textbf{Avg} in the Merge column denotes the average score among all the merging strategy under same model settings.} 
+\label{tab:ab-merge}
+\begin{center}
+\resizebox*{\textwidth}{!}{
+\begin{tabular}{@{}l l *{9}{c}@{}}
+\toprule
+Model~~~~~~~~~~~~~~ & Merge & ARC-c & ARC-e & BoolQ & HellaSwag & MMLU & OBQA & RTE & Winogrande & Average \\
+\midrule
+\multirow{1}{2em}{\makecell[l]{Qwen 60x2.7B}} & None & 0.3951 & 0.7012 & 0.8135 & 0.5932 & 0.6047 & 0.310 & 0.7329 & 0.6559 & 0.6008 \\
+\midrule
+\multirow{5}{2em}{\makecell[l]{Qwen 45x2.7B}}
+& Frequency & 0.3660 & 0.6578 & 0.7948 & 0.5520 & 0.5332 & \textbf{0.272} & \textbf{0.7509} & 0.6464 & \textbf{0.5716} \\
+& Average & 0.3584 & 0.6553 & \textbf{0.7936} & 0.5516 & \textbf{0.5348} & 0.270 & 0.7473 & \textbf{0.6559} & 0.5709 \\
+& Fix-Dom & \textbf{0.3695} & \textbf{0.6692} & 0.7896 & \textbf{0.5555} & 0.5338 & 0.262 & 0.7365 & 0.6535 & 0.5712 \\
+\hhline{~*{10}{-}}\rule{0pt}{2.5ex}
+& Avg & 0.3646 & 0.6608 & 0.7927 & 0.5530 & 0.5339 & 0.268 & 0.7449 & 0.6519 & 0.5712 \\
+\midrule
+\multirow{5}{2em}{\makecell[l]{Qwen 30x2.7B}}
+& Frequency & \textbf{0.3532} & \textbf{0.6149} & 0.7535 & \textbf{0.4695} & \textbf{0.4534} & \textbf{0.228} & 0.6606 & 0.6456 & 0.5223 \\
+& Average & \textbf{0.3575} & 0.6145 & \textbf{0.7554} & 0.4706 & 0.4531 & \textbf{0.228} & \textbf{0.6643} & 0.6488 & \textbf{0.5240} \\
+& Fix-Dom & 0.3439 & 0.6132 & 0.7544 & 0.4679 & 0.4445 & \textbf{0.228} & \textbf{0.6643} & \textbf{0.6504} & 0.5208 \\
+\hhline{~*{10}{-}}\rule{0pt}{2.5ex}
+& Avg & 0.3515 & 0.6142 & 0.7544 & 0.4693 & 0.4503 & \textbf{0.228} & 0.6631 & 0.6483 & 0.5224 \\
+\bottomrule
+\end{tabular}}
+\end{center}
+\end{table}
+\textbf{Ablation on Different Merging Methods.} Table~\ref{tab:ab-merge} presents the results of hierarchical clustering with three merging strategies: \textit{frequency}, \textit{average}, and \textit{fixed-dominant merging}. For Qwen30x2.7B, the average merging method demonstrates superior performance. It exceeds frequency merging by 0.17\% and marginally enhances overall performance. This outcome substantiates our assertion that once a high-quality cluster is identified, the specific merging method becomes modestly influential on the final performance. The rationale behind this phenomenon lies in the functional similarity exhibited by experts within the same group, as evidenced by their similar outputs. Thus, the model maintains robust performance irrespective of the merging strategy employed. It is noteworthy that all three merging methods outperform the four baselines in Table~\ref{tab:qwen}. This observation further substantiates the effectiveness of HC-SMoE in preserving model performance during the merging process.
+
+
+\section{Conclusion}
+
+In this paper, we presented HC-SMoE, a retraining-free, task-agnostic, and scalable expert merging framework that employed hierarchical clustering to reduce the parameters of SMoE models. By employing on expert outputs as the similarity metric and leveraging hierarchical clustering, HC-SMoE effectively captured functional similarities between experts, surpassing previous merging and pruning methods. Our comprehensive evaluation on two representative large-scale models, Qwen and Mixtral, demonstrated that HC-SMoE retained the models' general language abilities even when significantly reducing the number of experts. The experimental results also validated the robustness and scalability of our approach. HC-SMoE achieved notable improvements over existing baselines. This work not only provided a practical solution for optimizing SMoE models but also opened up a broader domain for further research on task-agnostic model compression strategies for SMoE.
+
+
+
+
+
+

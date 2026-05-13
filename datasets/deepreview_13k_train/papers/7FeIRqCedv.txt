@@ -1,0 +1,224 @@
+\title{SLiMe: Segment Like Me}
+
+\begin{abstract}
+Significant advancements have been recently made using Stable Diffusion (SD), for a variety of downstream tasks, e.g., image generation and editing. This motivates us to investigate SD's capability for image segmentation at any desired granularity by using as few as only \textit{one} annotated sample, which has remained largely an open challenge. In this paper, we propose \method{}, a segmentation method, which frames this problem as a one-shot optimization task. Given a single image and its segmentation mask, we propose to first extract our novel \textit{weighted accumulated self-attention map} along with cross-attention map from text-conditioned SD. 
+Then, we optimize text embeddings to highlight areas in these attention maps corresponding to segmentation mask foregrounds. Once optimized, the text embeddings can be used to segment unseen images.
+Moreover, leveraging additional annotated data when available, i.e., few-shot, improves \method{}'s performance. Through broad experiments, we examined various design factors and showed that \method{} outperforms existing one- and few-shot segmentation methods.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{introduction}
+
+Image segmentation is a multifaceted problem, with solutions existing at various levels of granularity. For instance, in applications like expression recognition or facial alignment, segmenting images of faces into basic regions like nose and eyes might suffice. However, in visual effects applications, more detailed segments such as eye bags, forehead, and chin are necessary for tasks like wrinkle removal. 
+Moreover, from the perspective of an end-user, a straightforward and effective approach to guide a segmentation method is determining what to segment and the desired level of detail across a broad set of images by providing only one or a few segmented examples for the method to use for training. Meanwhile, the user should not need to curate a large dataset with segmentation masks, train a large segmentation model, or encode elaborate and specific properties of target objects into the model. 
+As a result, a customizable segmentation method that can adapt to different levels of granularity, using a few annotated samples, and provide users with the ability to intuitively define and refine the target segmentation according to their specific requirements, is of high importance. 
+
+Recent research has tackled the lack of segmentation data by delving into zero-shot, textual description based segmentation, and few-shot learning. DiffSeg \citep{tian2023diffuse} is a zero-shot segmentation method based on SD, which segments everything in the image. However, DiffSeg cannot be used to segment a specific object or part in the test images given a train sample, because its segmentation is not controllable in terms of which object to segment and segmentation granularity. Peekaboo \citep{burgert2022peekaboo} is another work, which uses textual description for segmentation. To this end, given an image and a textual description of the target object to be segmented, they use Stable Diffusion and its loss function to optimize a randomly initialized segmentation mask to reach the desired mask. Nevertheless, it cannot be used to segmentation of test images given train images, because the textual description of the target object in each image is unique and is not transferrable. Another promising method is ReGAN \citep{tritrong2021repurposing}. ReGAN first trains a GAN \citep{goodfellow2014generative} on the data of a specific class they aim to segment. Following this, they generate data by this GAN and the user manually annotates the generated data. Then both the generated data's features from the GAN and the annotations are utilized to train a segmentation model. In contrast, SegDDPM \citep{baranchuk2021label} extracts features from a pre-trained diffusion model (DM) and trains an ensemble of MLPs for segmentation using few labeled data. Both excel in segmentation with 10-50 examples but struggle with extremely limited samples. Furthermore, these models require training on data specific to each category. For instance, to segment horses, it is necessary to collect a large dataset of horse images, a task that can be inherently cumbersome.
+
+Whereas, SegGPT \citep{wang2023seggpt} employs one-shot learning, training on color-randomized segmentation data which includes both instance and part-level masks. During inference, it segments only one region in a target image using a reference image and its binary segmentation mask. While SegGPT is effective, it demands a significant amount of annotated segmentation data for initial training, keeping the challenge of training effectively with a single annotation still unaddressed.
+
+\begin{figure}[t!]
+\centering
+\includegraphics[width=\textwidth]{Images/ca_vs_slime.pdf}
+  \caption{
+  \textbf{Our proposed weighted accumulated self-attention maps' sample results.} Employing cross-attention naïvely without the self-attention for segmentation leads to inaccurate and noisy output (a and c). Using self-attention map along with cross-attention map to create WAS-attention map enhances the segmentation (b and d). \\}
+  \label{fig:ca_vs_slime}
+\end{figure}
+
+In this paper, we propose Segment Like Me (\method{}), which segments any object/part from the same category based on a given image and its segmentation mask with an arbitrary granularity level in a one-shot manner, avoiding the need for extensive annotated segmentation data or training a generative model like GAN for a specific class (see Figure \ref{fig:teaser} and Figure \ref{fig:diff_class_res} for some examples).
+For this purpose, we leverage the rich knowledge of existing large-scale pre-trained vision/language model, Stable Diffusion (SD) \citep{rombach2022high}. 
+Recent studies like \citep{hertz2022prompt} have shown that the cross-attention maps of models like SD highlight different regions of the image when the corresponding text changes. This property has been utilized to modify generated images \citep{hertz2022prompt} and to achieve image correspondence \citep{hedlin2023unsupervised}. Expanding on this idea, we present two key insights. 
+First, the multifaceted segmentation problem can be framed as a one-shot optimization task where we fine-tune the text embeddings of SD to capture semantic details such as segmented regions guided by a reference image and its segmentation mask, where each text embedding corresponds to a distinct segmented region.
+Second, we observed that using standalone cross-attention maps lead to imprecise segmentations, as depicted in Figure \ref{fig:ca_vs_slime}. To rectify this, we propose a novel weighted accumulated self (WAS)-attention map (see Section \ref{method}). This attention map incorporates crucial semantic boundary information and employs higher-resolution self-attention maps, ensuring enhanced segmentation accuracy. 
+
+Based on these insights, \method{} uses a single image and its segmentation mask to fine-tune SD's text embeddings through cross- and WAS-attention maps. These refined embeddings emphasize segmented regions within these attention maps, and are used to segment real-world images during inference, mirroring the granularity of the segmented region from the image used for optimization.
+Through various quantitative and qualitative experiments, we highlight the efficacy of our approach. \method{}, even when reliant on just one or a handful of examples, proves to be better or comparable to supervised counterparts demanding extensive training. 
+Furthermore, despite not being trained on a specific category, \method{} outperforms other few-shot techniques on average and on most parts, across almost all the datasets. For instance, we outperform ReGAN \citep{tritrong2021repurposing} by nearly $10\%$ and SegDDPM \citep{baranchuk2021label} by approximately $2\%$ in a 10-sample setting. Additionally, in a 1-sample context, we exceed SegGPT by around $12\%$ and SegDDPM by nearly $11\%$.
+
+
+
+\section{Related Work}
+
+
+\noindent \textbf{Semantic Part Segmentation.} 
+In computer vision, semantic segmentation, wherein a class label is assigned to each pixel in an image, is an important task with several applications such as  scene parsing, autonomous systems, medical imaging, image editing, environmental monitoring, and video analysis \citep{sohail2022systematic, he2016deep, chen2017deeplab, zhao2017pyramid, he2017mask, chen2017rethinking, sandler2018mobilenetv2, chen2018encoder}. A more fine-grained derivative of semantic segmentation is semantic part segmentation, which endeavors to delineate individual components of objects rather than segmenting the entirety of the objects. Algorithms tailored for semantic part segmentation find applications in subsequent tasks such as pose estimation \citep{zhuang2021semantic}, activity analysis \citep{wang2015semantic}, object re-identification \citep{cheng2016person}, autonomous driving and robot navigation \citep{li2023panopticpartformer++}. Despite notable advancements in this domain \citep{li2023panopticpartformer++, li2022languagedriven}, a predominant challenge faced by these studies remains the substantial need for annotated data, a resource that is often difficult to procure. Hence, to address these challenges, research has pivoted towards exploring alternative inductive biases and supervision forms. However, a limitation of such methodologies is their reliance on manually curated information specific to the object whose parts they aim to segment. 
+For example, authors of \citep{wang2015semantic} integrate inductive biases by harnessing edge, appearance, and semantic part cues for enhanced part segmentation. 
+Compared to these approaches, our method only necessitates a single segmentation mask and doesn't rely on ad-hoc inductive biases, instead leveraging the knowledge embedded in SD.
+
+\noindent \textbf{Few-shot Semantic Part Segmentation.}
+One approach to reduce the need for annotated data is to frame the problem within the few-shot part segmentation framework. There is a large body of work on few-shot semantic segmentation \citep{catalano2023few, xiong2022doubly, johnander2022dense, zhang2022feature, li2022languagedriven}, however, they mostly focus on the object- (not part-) level.
+A recent paper, ReGAN \citep{tritrong2021repurposing}, proposed a few-shot method for part segmentation. To achieve this, the researchers leveraged a large pre-trained GAN, extracting features from it and subsequently training a segmentation model using these features and their associated annotations. While this approach enables the creation of a semantic part segmentation model with limited annotated data, it suffers from a drawback. Specifically, to train a model to segment parts of a particular object category, first a GAN is required to be trained from scratch on data from the same category. For instance, segmenting parts of a human face would necessitate a GAN trained on generating human face images. Thus, even though the method requires minimal annotated data, it demands a substantial amount of images from the relevant category. Following that, a few images, which are generated by the GAN, need to be manually annotated to be used for training the segmentation model. Afterward, a multitude of images should be generated by the GAN and segmented by the trained segmentation model. Finally, all the annotated data and pseudo-segmented data are used for training a segmentation model from scratch. Instead, we leverage pre-trained DMs that are trained on large general datasets, eliminating the need to curate category-specific datasets.
+
+\noindent \textbf{Diffusion models for semantic part segmentation.}
+DMs \citep{sohl2015deep} are a class of generative models that have recently gained significant attention because of their ability to generate high-quality samples. DMs have been used for discriminative tasks such as segmentation, as shown in
+SegDDPM \citep{baranchuk2021label}. Given a few annotated images, they use internal features of DM, to train several MLP modules, for semantic part segmentation. Compared to SegDDPM, we utilize the semantic knowledge of text-conditioned SD, and just optimize the text embeddings. This way, we have to optimize fewer parameters for the segmentation task, which makes it possible to optimize using just one segmentation sample.  
+
+SD \citep{rombach2022high} has been used for several downstream tasks such as generating faithful images \citep{chefer2023attend}, inpainting, outpainting \citep{rombach2022high}, generating 3D shapes using text \citep{stable-dreamfusion}, and editing images guided by a text prompt \citep{brooks2023instructpix2pix}.
+In addition to these, a large body of work fine-tune SD or use its cross-attention modules to perform interesting tasks. For instance, \citep{gal2022image} fine-tunes SD's text embeddings to add a new object or style to its image generation space.
+Another example, \citep{hertz2022prompt} uses SD's cross-attention modules to impose more control over the generation process. Moreover, in a third instance, authors of \citep{mokady2023null} edit a real image using SD's cross-attention modules. SD's cross-attention maps have been used for image correspondence by \citep{hedlin2023unsupervised}. Lastly, a recent paper \citep{patashnik2023localizing}, uses SD's self-attention and cross-attention modules for object level shape variations. 
+Although these papers explore the applicability of SD in different tasks, its utilization in semantic part segmentation is not fully explored. Therefor, in this work, we take advantage of SD's self-attention and cross-attention modules and fine-tune its text embeddings through these attention mechanisms to perform semantic part segmentation even with just one annotated image.
+
+
+\section{Background}
+
+\textbf{Latent Diffusion Model (LDM)}. One category of generative models are LDMs, which model the data distribution by efficiently compressing it into the latent space of an autoencoder and utilizing a DM to model this latent space. 
+An appealing feature of LDMs is that their DM, denoted as $\epsilon(.;\theta)$, can be extended to represent conditional distributions, conditioned on text or category. 
+To train a text-conditioned LDM, a natural language prompt is tokenized to obtain $P$. Then $P$ is passed to a text encoder $\mathcal{G}(.; \theta)$ to get $\mathcal{P} = \mathcal{G}(P; \theta)$. Alternatively, it is possible to obtain $\mathcal{P}$ by randomly initializing a tensor of the same size.
+Afterward, the input image $I$ is encoded to obtain $\mathcal{I}$, and a standard Gaussian noise $\epsilon$ is added to it with respect to time step $t$ to get $\mathcal{I}_t$. Finally, the following objective is used to optimize the parameters of both $\mathcal{G}(.; \theta)$ and $\epsilon(.;\theta)$, with the aim of enabling the model to acquire the capability to predict the added noise $\epsilon$:
+
+\begin{equation}
+    \mathcal{L}_{\text{\textit{LDM}}} = \mathbb{E}_{\mathcal{I}, \epsilon \sim \mathcal{N}(0, 1), t} [\|\epsilon - \epsilon(\mathcal{I}_t, t, \mathcal{P};\theta)\|^2_2].
+\end{equation}
+
+In this work, we use text-conditioned SD \citep{stable_diffusion}, as our LDM, for two reasons. First, SD is conditioned on the text using the cross-attention modules, which have shown to exhibit rich semantic connections between the text and the image embeddings \citep{hertz2022prompt}. 
+Second, the internal features of SD are semantically meaningful and preserve the visual structure of the input image, enhancing the interrelation between text and image.
+
+\textbf{Attention Modules}. SD's DM employs a UNet structure, which has two types of attention modules \citep{vaswani2017attention}: self-attention and cross-attention. The self-attention module calculates attention across the image embedding, capturing relationships between a specific element and other elements within the same image embedding. On the other hand, the cross-attention module computes relationships between the latent representations of two different modalities, like text and image in the case of text-conditioned SD.  
+
+An attention module comprises three components: query, key, and value. It aims to transform the query into an output using the key-value pair. Therefore, given query $Q$, key $K$, and value $V$ vectors with the dimension of $d$, the output $O$ of an attention module is defined as follows:
+
+\begin{align}
+O = \text{Softmax}\left(\frac{QK^\intercal}{\sqrt{d}}\right) \cdot V.
+\end{align}
+
+In the self-attention module, the query, key, and value vectors are derived from the image embedding, while in the cross-attention module, the query vector is derived from the image embedding, and the key and value vectors are derived from the text embedding. In our scenario, we extract the normalized attention map denoted as $S = \text{Softmax}\left(\frac{QK^\intercal}{\sqrt{d}}\right)$, which is applicable to both the self-attention and cross-attention modules, and we note them as $S_{sa} \in \mathbb{R}^{H' \times W' \times H' \times W'}$ and $S_{ca} \in \mathbb{R}^{H' \times W' \times T}$, respectively. In this context, $H'$ and $W'$ represent the height and width of the image embedding and $T$ denotes the total number of text tokens. $S_{sa}$ shows the pairwise similarity of the elements in its input image embedding. Hence, each element $p$ in its input, is associated with an activation map, highlighting the similar elements to $p$ \citep{patashnik2023localizing}. Moreover, the intensity of the similar elements decrease as we move farther away from $p$.
+On the other hand, for each text token, $S_{ca}$ has an activation map, which effectively spotlights elements within the image embedding that align with that token within the model's semantic space. For example, if the model is instructed to generate an image of a bear with the text prompt ``a bear", the activation map associated with ``bear" token within $S_{ca}$, will emphasize on those elements that correspond to the bear object within the generated image.  
+
+
+
+
+\section{Method}
+
+\label{method}
+We introduce \method{}, a method that enables us to perform segmentation at various levels of granularity, needing only one image and its segmentation mask. Prior research has demonstrated that SD's cross-attention maps can be used in detecting coarse semantic objects during the generation process for more control in generation \citep{hertz2022prompt} or finding correspondence between images \citep{hedlin2023unsupervised}. However,  there remains uncertainty regarding the applicability of cross-attention maps for finer-grained segmentation of objects or parts, especially within real-world images. To resolve this, we frame the segmentation problem as a one-shot optimization task where we extract the cross-attention map and our novel WAS-attention map to fine-tune the text embeddings, enabling each text embedding to grasp semantic information from individual segmented regions (Figure \ref{fig:optimization_step}). During the inference phase, we use these optimized embeddings to obtain the segmentation mask for unseen images. In what follows, we will first delve into the details of the text embedding optimization and then the inference process.
+
+\begin{figure*}[t!]
+\begin{center}
+  \includegraphics[width=\textwidth]{Images/optimization_step.pdf}
+  \caption{\textbf{Optimization step.} After extracting image embeddings and adding noise, we pass them, along with a text embedding obtained either by using a text encoder or initialized randomly, through the UNet to obtain cross- and WAS-attention maps. Two losses are then calculated using these maps and the ground truth mask. 
+  Additionally, SD's loss is incorporated from comparing the added noise with the UNet's predicted noise.}
+  \label{fig:optimization_step}
+\end{center}
+\end{figure*}
+
+\subsection{Optimizing Text Embedding}
+Given a pair of an image ($I \in \mathbb{R}^{H \times W \times 3}$) and a segmentation mask ($M \in \{0,1,2,..., K-1\}^{H \times W}$) with $K$ classes,  we optimize the text embeddings using three loss terms. The first loss term is a cross entropy loss between the cross-attention map and the ground truth mask. The second one, is the Mean Squared Error (MSE) loss between the WAS-attention map and the ground truth mask. These loss terms refine the text embeddings and enable them to learn to emphasize segmented regions within both cross- and WAS-attention maps. Additionally, there is a subsequent SD regularization term to ensure that the optimized text embeddings remain within the trained distribution of SD.
+
+To optimize the text embeddings, it is necessary to extract the cross-attention and self-attention maps. These maps are derived from SD's UNet by initially encoding the training image $I$ into the image embedding, $\mathcal{I}$. Subsequently, a standard Gaussian noise is added to this embedding with respect to the time step $t_{\text{opt}}$, resulting in $\mathcal{I}_t$. Next, a text prompt is converted to a sequence of text embeddings denoted as $\mathcal{P}$. We then take the first $K$ text embeddings and optimize them. The corresponding text embedding of each class is denoted by $\mathcal{P}_k$.
+It is essential to note that SD is configured to handle 77 text tokens.
+Consequently, our method can accommodate up to 77 segmentation classes, which is sufficient for most applications.
+Finally, $\mathcal{P}$ and $\mathcal{I}_t$ are fed into the UNet to obtain the denoised image embedding $\mathcal{I}'$ and extract the cross- and self-attention maps.
+
+SD has multiple cross-attention modules distributed across various layers. We denote the normalized cross-attention map of the $l^{th}$ layer as $\{S_{ca}\}_l \in \mathbb{R}^{H'_l \times W'_l \times T}$ and average them over different layers, as we have empirically observed that this averaging improves the results. However, since $H'_l$ and $W'_l$ vary across different layers, we resize all $\{S_{ca}\}_l$ to a consistent size for all the utilized layers.
+Finally, the attention map employed in our loss function is calculated as follows:
+\begin{equation}
+    A_{ca} = Average_l (Resize(\{S_{ca}\}_l)),
+\end{equation}
+where $A_{ca} \in \mathbb{R}^{H'' \times W'' \times T}$, $Average_l$ computes the average across layers, and $Resize$ refers to bilinear interpolation for resizing to dimensions $H'' \times W''$. Figure \ref{extract_attention} visually depicts this procedure. 
+\begin{figure*}[t!]
+\centering
+  \includegraphics[width=\textwidth]{Images/attention_extraction.pdf}
+  \caption{\textbf{Attention-Extraction module.} To extract WAS-attention map of $k^{th}$ text embedding with respect to an image, we follow these three steps: (1) We feed the $k^{th}$ text embedding ($\mathcal{P}_k$) together with the noised embedding of the image ($\mathcal{I}_t$) to the UNet. Then calculate $A_{ca}^k$ by extracting the cross-attention maps of $\mathcal{P}_k$ from several layers, resizing and averaging them. (2) We extract the self-attention maps from several layers and average them ($A_{sa}$). (3) Finally, we flatten $A_{ca}^k$ to get $F_{ca}^k$ and calculate a weighted sum of channels of $A_{sa}$, by weights coming from $F_{ca}^k$, and call it ``Weighted Accumulated Self-attention map'' ($S_{\text{\textit{WAS}}}^k$). The UNet also produces an output that represents the predicted noise, which is used for calculating the loss of the SD.\\}
+  \label{extract_attention}
+\end{figure*}
+Finally, we compute the cross-entropy loss between the resized ground truth mask $M$ to $H'' \times W''$ (referred to as $M'$) and first $K$ channels in the resized cross-attention map $A_{ca}$ for $k=\{0, ..., K-1\}$, as outlined below:
+\begin{equation}
+    \mathcal{L}_{\text{\textit{CE}}}= \text{\textit{CE}}(A_{ca}^{[0:K-1]}, M'),
+\end{equation}
+where \textit{CE} refers to cross-entropy. Using this loss, we optimize $k^{th}$ text embedding such that $A_{ca}^k$ highlights the $k^{th}$ class's region in the segmentation mask, for $k=\{1, ..., K-1\}$. Note that we do not optimize the first text embedding and assign $A_{ca}^0$ to the background class, as empirically we have found that optimizing it yields suboptimal performance.
+
+However, as the resolution of $\{S_{ca}\}_l$ we use are lower than the input image, object edges are vague in them. To enhance segmentation quality, we propose WAS-attention map, which integrates both self-attention and cross-attention maps. Besides possessing pairwise similarity between the image embedding's elements, the self-attention map has two additional features that make it suitable to be used for improving the segmentation results. First, the self-attention maps that we use, have higher resolution of feature maps compared to utilized cross-attention maps. 
+Second, it shows the boundaries in more detail.
+\input{sections/Tables/was_effect}
+Table~\ref{table:ablation_self_attention}, shows the importance of using the WAS-attention map which yields an average improvement of $6.0\%$ in terms of mIoU over simply using the cross-attention map for generating the segmentation mask.
+Like the cross-attention maps, we extract self-attention maps from multiple layers and compute their average as follows:
+\begin{equation} 
+    A_{sa} = \text{\textit{Average}}_l (\{S_{sa}\}_l),
+    \label{eq:self_attention}
+\end{equation}
+where $A_{sa} \in \mathbb{R}^{H'_l \times W'_l \times H'_l \times W'_l}$ and $Average_l$ calculates the average across layers.
+In equation \ref{eq:self_attention}  there is no need for a $Resize$ function as the self-attention maps that we use, all have the same size.
+
+To calculate WAS-attention map, we first resize $A_{ca}^k$ to match the size of $A_{sa}$ using bilinear interpolation and call it $R_{ca}^k$. Consequently, for each element $p$ in $R_{ca}^k$ we have a channel in $A_{sa}$ that highlights relevant elements to $p$. Finally, we calculate the weighted sum of channels of $A_{sa}$ to obtain $S_{\text{\textit{WAS}}}^k$ (WAS-attention map). The weight assigned to each channel is the value of the corresponding element of that channel in $R_{ca}^k$ (Figure \ref{extract_attention}). This process can be outlined as follows:
+\begin{equation}
+    S_{\text{\textit{WAS}}}^k = sum(flatten(R_{ca}^k) \odot A_{sa}).
+\end{equation}
+This refinement enhances the boundaries because $A_{sa}$ possesses rich understanding of the semantic region boundaries (see the cross-attention and WAS-attention maps in Figure \ref{fig:optimization_step}). At the end, we resize $S_{\text{\textit{WAS}}}^k$ to $H'' \times W''$ and calculate the \textit{MSE} loss this way:
+\begin{equation}
+    \mathcal{L}_{\text{\textit{MSE}}} = \sum_{k=0}^{K-1} \|Resize(S_{\text{\textit{WAS}}}^k) - M'_k\|^2_2,
+\end{equation}
+where $M'_k$ is a binary mask coming from the resized ground truth mask $M'$, in which only the pixels of the $k^{th}$ class are 1. 
+
+The last loss we use is the SD's loss function ($\mathcal{L}_{\text{\textit{LDM}}}$), which is the \textit{MSE} loss between the added noise and the predicted noise. We use this loss to prevent the text embeddings from going too far from the understandable space by SD.
+Finally, our objective to optimize the text embeddings is defined as:
+\begin{equation}
+    \mathcal{L} = \mathcal{L}_{\text{\textit{CE}}} + \alpha \mathcal{L}_{\text{\textit{MSE}}} + \beta \mathcal{L}_{\text{\textit{LDM}}},
+\end{equation}
+where $\alpha$ and $\beta$ are the coefficients of the loss functions.
+
+\subsection{Inference}
+During inference, our objective is to segment unseen images at the same level of details as the image used during optimization. To achieve this, we begin with the unseen image and encode it into the latent space of SD. Following this,  a standard Gaussian noise is introduced to the encoded image, with the magnitude determined by the time parameter $t_{\text{test}}$.
+Subsequently, we use the optimized text embeddings along with the encoded image to derive corresponding cross-attention and self-attention maps from the UNet model. These attention maps, as shown in Figure \ref{extract_attention}, enable us to obtain WAS-attention maps for each text embedding.
+Afterward, we select the first $K$ WAS-attention maps that correspond to $K$ classes. These selected maps are then resized using bilinear interpolation to match the dimensions of the input image and are stacked along the channel dimension. Subsequently, we generate a segmentation mask by performing an argmax across the channels. 
+It is important to note that this process can be repeated for multiple unseen images during inference, without requiring a new optimization. 
+
+
+
+\section{Experiments}
+
+\input{sections/Tables/voc_car_results}
+In this section, we demonstrate the superiority of \method{} in semantic part segmentation. We use mIoU to compare our approach against three existing methods: ReGAN \citep{tritrong2021repurposing}, SegDDPM \citep{baranchuk2021label}, and SegGPT \citep{wang2023seggpt} on two datasets: PASCAL-Part \citep{chen2014detect} and CelebAMask-HQ \citep{lee2020maskgan}. ReGAN and SegDDPM utilize pre-trained GAN and DDPM models, respectively, training them on FFHQ and LSUN-Horse datasets for face and horse part segmentation. Additionally, ReGAN employs a pre-trained GAN from the LSUN-Car dataset for car part segmentation. We present the results for both 10-sample and 1-sample settings, utilizing a single validation sample for 10-sample experiments of \method{}. Also, all experiments are conducted three times with different initializations, reporting their mean and standard deviation. We conduct experiments for SegDDPM and SegGPT using the custom version of test sets of the above-mentioned datasets, which are based on ReGAN settings, and report their results accordingly. For the remaining methods, we reference the results reported by ReGAN.
+Note that ReGAN and SegDDPM are not universally applicable to arbitrary classes, unless a large dataset for the given class is collected and a generative model is trained. However, \method{} does not require collecting large category specific data and training an additional generative model, because of the inherent semantic knowledge embedded in SD (Figure \ref{fig:diff_class_res}). Whereas SegGPT requires a large segmentation dataset to be trained initially.
+
+\textbf{PASCAL-Part}. This dataset provides detailed annotations of object parts. 
+Table~\ref{table:voc_car_result} presents results for the car class. As there is no available pre-trained model for the car class in SegDDPM, we couldn't make a comparison with this model for this category. As evident from Table~\ref{table:voc_car_result}, \method{} outperforms ReGAN in the 10-sample setting on average and all the part segments by a significant margin. Moreover, in the 1-sample setting, \method{} either outperforms SegGPT by a large margin or performs comparably. Likewise, Table~\ref{table:voc_horse_result} displays our results for the horse class, where it is evident that our method, \method{}, outperforms ReGAN, SegDDPM, and SegGPT on average and for most of the parts.
+It is worth noting that, even though SegGPT only requires a single segmentation sample for inference, it is a fully supervised method and demands a large segmentation dataset for training. In contrast, \method{} is truly a \emph{one-shot} technique, where only a single sample is needed for optimization.
+\input{sections/Tables/voc_horse}
+\textbf{CelebAMask-HQ}.
+Figure \ref{fig:face_example} and Table \ref{table:celebe_result} showcase our qualitative and quantitative results. In the 1-sample setting, \method{} outperforms other methods on average and for the majority of parts, demonstrating its superiority in 1-sample scenario. On the other hand, in the 10-sample setting, except for three parts, our method either performs better or comparably to other methods. As mentioned earlier, note that SegGPT benefits from training on a large segmentation dataset. Also, the other two methods employ class-specific pre-trained models. In contrast, \method{} utilizes a model pre-trained on general data, equipping it with the ability to work across a wide range of categories rather than being limited to a specific class. 
+
+\input{sections/Tables/celeb_results}
+
+\label{more_qualitative_results}
+\textbf{Additional Results}. We also showcase the versatility of our method, which can be optimized on an occluded object and infer images without the occlusion, or conversely, be optimized on a fully visible object and make predictions on occluded objects. This shows our method's capability to comprehend part and object semantics.
+Figure \ref{fig:occ} illustrates that despite occlusion of the target region caused by the person in the image used for optimization, our method performs well.
+It is also possible to segment occluded objects using a visible reference object (see Figure \ref{fig:occ_bear}).
+Moreover, in Figure~\ref{fig:camouflage}, we compare our method against SegGPT \citep{wang2023seggpt} using two camouflaged animals, namely a crab and a lizard. Remarkably, \method{} achieves precise segmentation of these animals, even in situations where they were challenging to be detected with naked eye. This shows that \method{} learns rich semantic features about the target object that do not fail easily due to the lack of full perception.
+
+\begin{figure}[t!]
+\centering
+  \includegraphics[width=\textwidth]{Images/comp_comouflage_seg.pdf}
+  \caption{\textbf{Segmentation results of camouflaged objects.} The larger images are used for optimizing \method{}, and as the source image for SegGPT. Notably, \method{} outperforms SegGPT.}
+  \label{fig:camouflage}
+\end{figure}
+
+
+\section{Conclusion}
+
+We proposed \method{}, a \emph{one-shot} segmentation method capable of segmenting \emph{various objects/parts} in \emph{various granularity}. 
+Through an extensive set of experiments and by comparing it to state-of-the-art few-shot and supervised image segmentation methods, we showed its superiority. We showed that, although \method{} does not require training on a specific class of objects or a large segmentation dataset, it outperforms other methods.  
+On the other hand, \method{} has some limitations. For example, it may result in noisy segmentations when the target region is tiny. This can be attributed to the fact that the attention maps, which we extract from SD for segmentation mask generation, have a smaller size than the input image. To counter this, we employed bilinear interpolation for upscaling. Nonetheless, due to scaling, some pixels might be overlooked, leading to the undesired noisy outcomes.  Resolving the mentioned limitation, and making it applicable to 3D and videos, would be an interesting future direction. 
+
+
+
+\newpage
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

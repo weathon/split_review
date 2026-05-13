@@ -1,0 +1,243 @@
+\title{Identify Critical KV Cache in LLM Inference from an Output Perturbation Perspective}
+
+\begin{abstract}
+Large language models have driven numerous paradigm shifts in the field of natural language processing, achieving remarkable success in various real-world applications through scaling model size and leveraging long-sequence context reasoning.
+However, the transformer architecture, which relies on self-attention, incurs substantial storage and runtime costs when handling long-sequence inference, particularly due to the generation of extensive Key-Value (KV) cache.
+Recent studies aim to mitigate storage and latency issues while maintaining output quality by reducing the KV cache size, through the elimination of less critical entries, yet they rely on a basic empirical intuition of identifying critical cache entries based solely on top attention weights.
+In this paper, we present the first formal investigation into the problem of identifying critical KV cache entries from the perspective of attention output perturbation.
+By analyzing the output perturbation caused when only critical KV cache entries are used instead of the entire cache, we reveal that, in addition to the commonly used attention weights, the value states within KV entries and the pretrained parameters matrix are also important. Based on this finding, we propose a novel perturbation-constrained selection algorithm to identify critical cache entries by optimizing the worst-case output perturbation.
+Extensive evaluations on 16 datasets from Longbench, along with detailed empirical analysis, have comprehensively confirmed the effectiveness of constraining output perturbation perspective in identifying critical KV cache. When combined with state-of-the-art cache eviction methods, it can achieve up to an additional 34\% cache memory savings while maintaining the same generation quality.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Autoregressive large language models (LLMs) based on the transformer architecture have achieved remarkable success, being widely applied in various downstream tasks such as dialogue systems (Yi et al., 2024), chatbots (Achiam et al., 2023), intelligent agents (Wang et al., 2024), and code generation (Gu, 2023). However, the quadratic computational cost inherent in the transformer’s self-attention mechanism poses significant challenges for practical deployment. To mitigate this, LLMs often use a Key-Value (KV) cache, which stores intermediate results from the self-attention mechanism. Each KV cache entry corresponds to the KV states of a past token, thus allowing for the bypassing of recomputation of these tokens during autoregressive generation. However, as sequence lengths increase, the number of the KV cache entries expands correspondingly. This expansion in KV cache not only leads to considerable GPU memory overhead but also significantly increases IO latency, hindering the deployment in real-world applications (Sun et al., 2024a).  
+
+Recent researches identify that only a subset of KV cache entries substantially contribute to the output of the self-attention mechanism (Zhang et al., 2024b; Liu et al., $2024\mathrm{a}$ ; Tang et al., 2024a). Therefore, many methods known as cache eviction have been developed to reduce the KV cache size to fit within a given GPU memory budget by evicting non-critical entries during long-sequence inference. These budget-constrained methods effectively save GPU memory and improve subsequent decoding speed. Initial findings show that recent KV cache entries are more critical for future token generation, prompting the development of techniques that prioritize retaining KV entries within a recent window (Beltagy et al., 2020; Xiao et al., 2023). However, this approach risks losing essential information from longer sequences. To address this, H2O (Zhang et al., 2024b) and Scissorhands (Liu et al., 2024a) observe the power-law distribution of attention weights: a small fraction of KV cache entries consistently dominates the majority of attention weights, which aligns closely with the concept of cache entry criticality during inference. These methods introduce frameworks that leverage accumulated attention weights to identify and preserve critical cache entries. Following the observation, a series of subsequent works (Adnan et al., 2024; Li et al., 2024; Feng et al., 2024) have further improved performance by refining the attention weight accumulation mechanism or incorporating additional operations like polling to better retain key information. Although the term “critical cache entry” remains an abstract concept without formal definition, current approaches often assume that cache entries with higher attention weights — determined by the similarity between key states in the KV cache and the target query state — indicate the critical cache entries. This assumption raises two key questions:  
+
+1. What criteria determine the critical KV cache?   
+2. Is reliance solely on attention weights sufficient for identifying critical cache entries?  
+
+In this paper, we formally define the problem of critical cache identification from the perspective of output perturbation, introducing a theoretical framework that optimizes the perturbation by bounding it within worst-case scenarios. Specifically, we formalize the problem as minimizing the output perturbation while substituting the entire KV cache with only the critical cache entries. To quantify this perturbation, we employ the $L_{1}$ distance and derive its upper bound, corresponding to the worst-case perturbation. Our analysis shows that this upper bound is influenced by both the attention weights and the value states projected through the parameter matrix. Building on this foundation, we propose a perturbation-constrained selection algorithm that goes beyond mere reliance on attention weights, underscoring the significance of previously overlooked value states and pretrained parameter matrix in identifying critical cache entries.  
+
+Building on our theoretical framework for critical cache identification based on output perturbation, we replace previous strategies that rely solely on attention weights by seamlessly integrating our algorithm into state-of-the-art (SOTA) cache eviction methods. Using 16 datasets from LongBench, we conduct extensive evaluations across various budgets, demonstrating that our algorithm selects critical cache entries more accurately, effectively improving the post-eviction generation quality. We conduct further empirical analysis to evaluate the benefits of our algorithm, leading to two key conclusions: (1) across different methods, contexts, budgets, and models, our algorithm consistently reduces output perturbation in most attention heads, and (2) its advantages accumulate across layers, significantly lowering final-layer output perturbation. These findings show that our algorithm consistently improves post-eviction generation quality and confirms the effectiveness in identifying critical cache entries. Our contributions can be summarized as follows:  
+
+1. We point that current cache eviction methods neglect the crucial problem of KV cache identification. To address this, we propose using output perturbation as criteria to determine critical KV cache entries. Our analysis shows that attention weights alone are insufficient, as the value states projected by the parameter matrix also play a significant role.   
+2. Building on constraining the worst-case output perturbation, we propose a novel critical entry selection algorithm. When integrated into SOTA eviction methods, comprehensive evaluations across 16 datasets demonstrate it consistently improves the generation quality.   
+3. Further empirical analysis examines and confirms the benefits of our perturbationconstrained selection algorithm, which also highlights the significant potential for optimizing critical cache selection from the theoretical perspective of output perturbation.  
+
+
+
+\section{2 RELATED WORKS  }
+
+
+The inference cost of LLMs is primarily determined by the size of model parameters and KV cache. Early strategies like parameter quantization and network pruning successfully reduce model parameters. However, with the rise of applications such as long-text summarization (Laban et al., 2023), multi-turn QA (Yang et al., 2018), and techniques like Chain of Thought (Wei et al., 2022), the increasing sequence length has led to substantial growth in KV cache size. Consequently, recent research has shifted focus toward reducing KV cache size to enable efficient long-sequence inference, primarily through two orthogonal approaches: KV cache quantization and KV cache eviction.  
+
+KV cache quantization refers to the application of quantization techniques to reduce the size of the KV cache by lowering the precision of individual cache entries (Liu et al., 2024b; Hooper et al.,  
+
+2024). For example, this can involve quantizing the original 16-bit KV cache entries to 2-bit or 4-bit precision. However, such approaches typically retain all KV cache entries (Hooper et al., 2024). As a result, in autoregressive inference with long sequences, they cannot effectively compress the KV cache to fit within a specified budget. These methods are fundamentally orthogonal to the cache eviction methods, and could further enhance performance by incorporation.  
+
+KV cache eviction focuses on retaining only critical KV cache entries while evicting non-critical ones to reduce cache size. Early methods (Xiao et al., 2023), which preserved recent entries, risked losing important information in long sequences. Techniques like H2O (Zhang et al., 2024b) and Scissorhands (Liu et al., 2024a) used accumulated attention scores to identify key entries, aiming to retain crucial context. Subsequent works refined these methods (Ge et al., 2024b; Adnan et al., 2024; Ge et al., 2024a; Li et al., 2024), with SnapKV (Li et al., 2024) achieving the SOTA performance through introducing window-based attention weight accumulation and pooling operations. More recent approaches, such as Pyramid (Yang et al., 2024; Zhang et al., 2024a) and AdaKV (Feng et al., 2024), improve post-eviction generation by allocating budgets based on the characteristics of attention heads. However, these methods are largely empirical, relying heavily on attention weights to identify critical entries. Our paper introduces a novel perturbation-constrained selection algorithm based on in-depth analysis from an output perturbation perspective. This algorithm seamlessly integrates into existing cache eviction methods without altering underlying accumulation processes. In our work, we demonstrate its effectiveness by applying it to SnapeKV, Pyramid, and AdaKV, all showing consistent improvements in post-eviction generation quality under varying budgets.  
+
+
+
+\section{3 CRITICAL KV CACHE ENTRY SELECTION  }
+
+
+We commence with a commonly held observation (Zhang et al., 2024b; Li et al., 2024) that a subset of critical KV cache entries can adequately represent the entire KV cache during the computation of self-attention mechanism, producing an output that is a close approximation, if not identical. The preliminaries about the relationship between KV cache and generation output are introduced in Section 3.1. Based on that, we formalize the problem of identifying critical cache entries from the perspective of output perturbation (Definition 1) in Section 3.2. Subsequently, in Section 3.3, we formalize the output perturbation and derive its upper bound. Then, we propose a two-stage greedy algorithm in Section 3.4 that constrains worst-case perturbations for selecting critical entries, with theoretical analysis provided in Section 3.5. Finally, in Section 3.6 we integrate the algorithm into current SOTA cache eviction methods.  
+
+
+
+\section{3.1 PRELIMINARIES  }
+
+
+LLMs utilizing the multi-head self-attention mechanism operate with an autoregressive generation approach. In this setup, each decoding step leverages the most recently generated token to predict the next one. To illustrate this process, we focus on a single attention head as an example. Let $X\,\in\,\mathbb{R}^{n\times d}$ denote the embedding matrix for all tokens in the sequence, with $x=X_{-1,:}\ \in\ \mathbb{R}^{1\times d}$ representing the embedding vector of the most recent token, which serves as input at the current time step. The parameter matrices, denoted by $W^{Q},W^{K}$ , and $W^{V}\in\mathbb{R}^{d\times d_{h}}$ are used to map the token embeddings into their respective Query, Key, and Value states with head dimension $d_{h}$ as follows:  
+
+$$
+q=x W^{Q};K=X W^{K};V=X W^{V}
+$$  
+
+During the decoding phase, the Key and Value states of previously generated tokens (represented by $X$ ) are stored in the KV cache, allowing for the elimination of redundant computation. Accordingly, the query $q$ , derived from the most recent token $x$ , attends to the cached Key $K$ to compute the attention weights $A$ . These weights are then applied to the cached Value $V$ , producing an intermediate output. This intermediate result is subsequently transformed into the final output $o$ of the self-attention mechanism by the output parameter matrix $W^{O}\in\mathbb{R}^{d_{h}\times d}$ :  
+
+$$
+o=A V W^{O},{\mathrm{~where~}}A={\mathrm{softmax}}\left(q K^{T}/{\sqrt{d}}\right)
+$$  
+
+3.2 WHAT CRITERIA DETERMINE THE CRITICAL KV CACHE?  
+
+Recent research has demonstrated only a small portion of critical KV cache entries do substantially contribute to the attention output (Zhang et al., 2024b; Liu et al., 2024a). This insight presents promising opportunities to reduce inference costs by evicting a large number of non-critical KV cache entries Li et al. (2024); Zhang et al. (2024a); Feng et al. (2024); Ge et al. (2024b); Adnan et al. (2024); Ge et al. (2024a).However, the key challenge lies in accurately identifying the critical KV cache entries. Ideally, from a high-level perspective, the set of critical KV cache entries should completely represent the entire cache, ensuring for given query state, the selected entries yield the same attention output as the full set of KV pairs. In practice, the number of selected critical cache entries will be constrained by a predefined budget, which is closely tied to the computational resources available in downstream deployments. Consequently, our goal shifts toward minimizing the output perturbation introduced by the replacement. So, the problem can be reformulated as follows. Definition 1 (Critical KV Cache Identification Problem). Given a critical cache budget $b$ , the task is to select b critical KV cache entries $\langle\hat{K},\hat{V}\rangle$ from a total of n cache entries $\langle K,V\rangle_{}$ , with the goal of minimizing the perturbation in the attention output o. By using the $L_{1}$ distance $\mathcal{L}$ for quantification, the objective is formalized as:  
+
+$$
+\underset{s e l e c t i o n\;o f\;\langle\hat{K},\hat{V}\rangle}{\arg\operatorname*{min}}\;\mathcal{L}=\|o-\hat{o}\|_{1}
+$$  
+
+where oˆ represents the attention output produced by the selected $\langle\hat{K},\hat{V}\rangle$ .  
+
+3.3 ARE ATTENTION WEIGHTS SUFFICIENT FOR IDENTIFYING CRITICAL CACHE ENTRIES?  
+
+According to Definition 1, the goal of identifying critical KV cache entries is to minimize the perturbation $\mathcal{L}=\left\|o-\hat{o}\right\|_{1}$ . To achieve this, we can employ an additive masking $\mathcal{M}$ to simulate the removal of non-critical cache entries’ contributions to the final output $\hat{o}$ , thereby altering $\hat{o}$ .  
+
+$$
+\hat{o}=A^{\prime}V W^{O},\ A^{\prime}=\mathrm{softmax}\left(\mathcal{M}+q K^{T}/\sqrt{d}\right),\mathrm{where~}\mathcal{M}_{i}=\left\{\begin{array}{l l}{-\infty}&{\mathrm{if~}K_{i}\mathrm{~and~}V_{i}\mathrm{~are~non-critical}}\\ {0}&{\mathrm{otherwise}.}\end{array}\right.
+$$  
+
+Thus, the perturbation $\mathcal{L}$ can be further expressed as:  
+
+$$
+\mathcal{L}=\Vert(A-A^{\prime})V W^{O}\Vert_{1}
+$$  
+
+Theorem 1. By introducing a mask $\mathcal{N}\in\mathbb{R}^{n}$ applied through element-wise multiplication denoted by $\odot$ , we can establish the relation between $A^{\prime}$ and $A$ as follows:  
+
+$$
+A^{\prime}={\frac{N\odot A}{\sum_{i=1}^{n}\mathcal{N}_{i}A_{i}}}\quad w h e r e\,\mathcal{N}_{i}=\left\{\!\!\begin{array}{l l}{0}&{i f\,K_{i},V_{i}\;i s\;n o n\!-\!c r i t i c a l\;}\\ {1}&{o t h e r w i s e.}\end{array}\!\!\right.a n d\sum_{i=1}^{n}\mathcal{N}_{i}=b
+$$  
+
+Proof. Let $a=q K^{T}/\sqrt{d}$ , we can express the attention weights $A^{\prime}$ under critical cache entries as:  
+
+$$
+A^{\prime}=\frac{e x p(\mathcal{M}+a)}{\sum_{i=1}^{n}e x p(\mathcal{M}+a)_{i}}=\frac{\mathcal{N}\odot e x p(a)}{\sum_{i=1}^{n}\mathcal{N}_{i}e x p(a)_{i}}=\mathcal{N}\odot\frac{e x p(a)}{\sum_{i=1}^{n}e x p(a)_{i}}\frac{\sum_{i=1}^{n}e x p(a)_{i}}{\sum_{i=1}^{n}\mathcal{N}_{i}e x p(a)_{i}}
+$$  
+
+Theorem 1 utilizes a multiplicative mask $\mathcal{N}$ to quantifies how their selection impacts the attention weights. However, directly minimizing $\mathcal{L}$ for critical cache selection is challenging due to complex matrix operations it requires. Thus we turn to establish an upper bound $\theta$ , as shown in Theorem 2.  
+
+Theorem 2. The output perturbation $\mathcal{L}$ can be bounded by $\theta$ :  
+
+$$
+\mathcal{L}\leq\theta=C-\left(2-\frac{1}{\sum_{i=1}^{n}\mathcal{N}_{i}A_{i}}\right)\sum_{i=1}^{n}\mathcal{N}_{i}A_{i}\|\mathcal{V}_{i,:}\|_{1},
+$$  
+
+where $C$ denotes the $\textstyle\sum_{i=1}^{n}A_{i}\|\pmb{\mathscr{V}}_{i,:}\|_{1}$ and $\pmb{\nu}\in\mathbb{R}^{n\times d}=V W^{\cup}$ denotes all projected values states through parameter matrix $W^{C}$ .  
+
+Algorithm 1 Perturbation-Constrained Selection for Critical Cache Entry Identification   
+Input: Budgets $b$ , Query State $q$ , KV Cache Entries $K,V$ , Parameter Matrix $W^{O}$ , Hyper Parameter $\alpha=0.25$   
+Output: Critical Cache Entries $\hat{K},\hat{V}$   
+1: initialize empty cache $\hat{K},\hat{V}$   
+2: $A=\operatorname{softmax}(q K^{T})$ ; $\pmb{\nu}=V W^{O}$   
+3: $A=A\odot$ ( $L_{1}$ norm of each rows in $\boldsymbol{\nu}$ )   
+4: $b^{\prime}=b\times\alpha$ ; $b^{\prime\prime}=b-b^{\prime}$   
+5: for Ai, Ki, $V_{i}\in A,K,V$ do ▷Start of Stage 1   
+6: if $A_{i}\in\mathrm{Top}_{k}(A,b^{\prime})$ then   
+7: add $K_{i},V_{i}$ to $\hat{K},\hat{V}$   
+8: remove $\pmb{\mathscr{A}}_{i},K_{i},V_{i}$ from $A,K,V$   
+9: end if   
+10: end for ▷End of Stage 1   
+11: for $\pmb{\mathscr{A}}_{i},K_{i},V_{i}\in\pmb{\mathscr{A}},K,V\,.$ do ▷Start of Stage 2   
+12: if $\pmb{\mathcal{A}}_{i}\in\mathrm{Top}_{k}(\pmb{\mathcal{A}},b^{\prime\prime})$ then   
+13: add $K_{i},V_{i}$ to $\hat{K},\hat{V}$   
+14: end if   
+15: end for ▷End of Stage 2   
+16: return Critical Cache Entries $\hat{K},\hat{V}$  
+
+$$
+\begin{array}{r l r}&{}&{\mathcal{L}=\|\left(A-\frac{{\mathcal{N}}\odot A}{\sum_{i=1}^{n}\mathcal{N}_{i}A_{i}}\right)\pmb{\mathcal{V}}\|_{1}=\|\sum_{i=1}^{n}\left(A_{i}-\frac{{\mathcal{N}}_{i}A_{i}}{\sum_{i=1}^{n}\mathcal{N}_{i}A_{i}}\right)\pmb{\mathcal{V}}_{i,:}\|_{1}}\\ &{}&{\le\theta=\sum_{i=1}^{n}\|\left(A_{i}-\frac{{\mathcal{N}}_{i}A_{i}}{\sum_{i=1}^{n}\mathcal{N}_{i}A_{i}}\right)\pmb{\mathcal{V}}_{i,:}\|_{1}=\sum_{i=1}^{n}\lvert A_{i}-\frac{{\mathcal{N}}_{i}A_{i}}{\sum_{i=1}^{n}\mathcal{N}_{i}A_{i}}\rvert\times\|\pmb{\mathcal{V}}_{i,:}\|_{1}}\end{array}
+$$  
+
+Given that the multiplicative mask $\mathcal{N}$ is either 0 or 1, the index set $i\in[1,n]$ can be split into $I_{0}$ and $I_{1}$ , according to its value. Thus:  
+
+$$
+\begin{array}{r}{\mathcal{L}\leq\theta=\sum_{i\in I_{0}}A_{i}\|\pmb{\mathscr{V}}_{i,:}\|_{1}+\sum_{i\in I_{1}}\left(\frac{A_{i}}{\sum_{i=1}^{n}\!\mathcal{N}_{i}A_{i}}-A_{i}\right)\|\pmb{\mathscr{V}}_{i,:}\|_{1}}\end{array}
+$$  
+
+Let $C$ represent $\textstyle\sum_{i=1}^{n}A_{i}\|\pmb{\mathscr{V}}_{i,:}\|_{1}$ , a constant independent of the selection of critical entries. We can express $\textstyle\sum_{i\in I_{0}}A_{i}\|{\bar{\pmb{\mathscr{V}}_{i,:}}}\|_{1}$ as $\begin{array}{r}{\dot{C}-\sum_{i\in I_{1}}A_{i}\|\pmb{\mathscr{V}}_{i,:}\|_{1}}\end{array}$ . Thus:  
+
+$$
+\begin{array}{r l}&{\mathcal{L}\leq\theta=C-\sum_{i\in I_{1}}A_{i}\|\mathcal{V}_{i,:}\|_{1}+\sum_{i\in I_{1}}\left(\frac{A_{i}}{\sum_{i=1}^{n}\mathcal{N}_{i}A_{i}}-A_{i}\right)\|\mathcal{V}_{i,:}\|_{1}}\\ &{\quad=C+\sum_{i\in I_{1}}\left(\frac{A_{i}}{\sum_{i=1}^{n}\mathcal{N}_{i}A_{i}}-2A_{i}\right)\|\mathcal{V}_{i,:}\|_{1}=C-\left(2-\frac{1}{\sum_{i=1}^{n}\mathcal{N}_{i}A_{i}}\right)\sum_{i=1}^{n}\mathcal{N}_{i}A_{i}\|\mathcal{V}_{i,:}\|_{1}}\end{array}
+$$  
+
+We can observe that $\theta$ encompasses not only the attention weights but also the projected value states.   
+This highlights that prior selection methods relying solely on attention weights are suboptimal.  
+
+3.4 IDENTIFY CRITICAL CACHE ENTRIES BY CONSTRAINING WORST-CASE PERTURBATION.  
+
+Drawing on optimization strategies in machine learning, we propose lowering the upper bound of perturbation, effectively constraining the worst-case perturbation and thereby reducing actual perturbations for identifying critical cache entries. However, directly minimizing the upper bound $\theta$ remains non-trivial. To balance both the complexity and selection effectiveness, we introduce a two-stage greedy perturbation-constrained selection Algorithm 1, specifically designed to lower the perturbation upper bound for critical cache entry identification.  
+
+In this algorithm, the total budget $b$ is divided into two portions based on a hyperparameter $\alpha$ . In the first stage, a small fraction of the budget, $b^{\prime}=b\times\alpha$ , is allocated to prioritize KV cache entries with high attention weights. In the second stage, the remaining budget, $b^{\prime\prime}=b-b^{\prime}$ , is used to consider both the norms of the projected value states and the attention weights. This two-stage selection employs a Top-K operation to effectively constrain the worst-case perturbation. To substantiate the effectiveness of our proposed algorithm, we provide a theoretical analysis in the following section.  
+
+3.5 THEORETICAL ANALYSIS OF PERTURBATION-CONSTRAINED SELECTION ALGORITHM  
+
+Our proposed algorithm comprises two stages, referred to as stage 1 and stage 2, with the latter serving as the algorithm’s core component. Under the guarantee provided by Assumption 1, the selection in Stage 1 ensures that Stage 2 adheres to the constraints on perturbations, as formalized in Theorem 3.Let ${\mathcal{N}}^{\prime}$ and ${\mathcal{N}}^{\prime\prime}$ represent the selections from the stage 1 and 2, respectively, satisfying: $\textstyle\sum_{i=1}^{n}{\mathcal{N}}_{i}^{\prime}=b^{\prime}$ and $\textstyle\sum_{i=1}^{n}{\mathcal{N}}_{i}^{\prime\prime}=b^{\prime\prime}$ .Thus, the overall selection is $\mathcal{N}=\mathcal{N}^{\prime}+\mathcal{N}^{\prime\prime}$ . Assumption 1. In the first stage, the small portion of the overall budget $b^{\prime}=b\times\alpha$ is sufficient to collect the cache entries corresponding to the highest attention weights, ensuring their cumulative attention weights $\sigma$ exceed half of the total, $\begin{array}{r}{i.e.,\sigma=\sum_{i=1}^{n}\mathcal{N}_{i}^{\prime}A_{i}=\sum T o p_{k}(A,b^{\prime})>0.5}\end{array}$ .  
+
+We can simply set $\alpha$ to a small fraction, such as 0.25, to ensure that Assumption 1 holds. This is primarily determined by two key factors. Firstly, the inherent power-law distribution of attention weights (Zhang et al., 2024b), where a small subset of cache entries accounts for the majority of the attention weights. Secondly, in practical compression scenarios, the overall budget is generally maintained at a reasonable level to avoid catastrophic degradation in generation quality after eviction. Therefore, Assumption 1 is universally satisfied across most attention heads during actual operations.  
+
+Theorem 3. Given the stage $^{\,l}$ selection $\mathbf{\mathcal{N}}_{i}^{\prime}$ , the objective $\mathbf{\mathcal{N}}_{i}^{\prime\prime}$ of stage 2 is to minimize an upper bound $\hat{\theta}$ of the output perturbation ${\mathcal{L}},$ , using the remaining budget $b^{\prime\prime}=b-b^{\prime}$ .  
+
+$$
+\begin{array}{r l}{\underset{\mathcal{N}_{i}^{\prime\prime}}{\mathrm{arg}\,\mathrm{min}}\,\hat{\theta}}&{w h e r e\ \ \hat{\theta}=\!C^{\prime}-\bigg(2-\frac{1}{\sigma}\bigg)\sum_{i=1}^{n}\!\mathcal{N}_{i}^{\prime\prime}A_{i}\|\mathcal{V}_{i,:}\|_{1}}\\ {s u b j e c t\,t o\,\sum_{i=1}^{n}\!\mathcal{N}_{i}^{\prime\prime}=b^{\prime\prime},}&{C^{\prime}=C-\bigg(2-\frac{1}{\sigma}\bigg)\sum_{i=1}^{n}\!\mathcal{N}_{i}^{\prime}A_{i}\|\mathcal{V}_{i,:}\|_{1}.}\end{array}
+$$  
+
+Proof. From Assumption 1, the first stage selection ensures: $\begin{array}{r}{\sum_{i=1}^{n}\ensuremath{\mathcal{N}}_{i}A_{i}\;>\;\sum_{i=1}^{n}\ensuremath{\mathcal{N}}_{i}^{\prime}A_{i}\;=\;\sigma\;>\;}\end{array}$ 0.5, leading to the inequality: in=11 NiAi > 2 −σ1 > 0.  
+
+$$
+\begin{array}{l}{\displaystyle\theta=C-\left(2-\frac{1}{\sum_{i=1}^{n}\!\mathcal{N}_{i}A_{i}}\right)\sum_{i=1}^{n}\!(\mathcal{N}_{i}^{\prime}+\mathcal{N}_{i}^{\prime\prime})A_{i}\|\pmb{\mathscr{V}}_{i,:}\|_{1}}\\ {\displaystyle<C-\left(2-\frac{1}{\sigma}\right)\sum_{i=1}^{n}\!\mathcal{N}_{i}^{\prime}A_{i}\|\pmb{\mathscr{V}}_{i,:}\|_{1}-\left(2-\frac{1}{\sigma}\right)\sum_{i=1}^{n}\!\mathcal{N}_{i}^{\prime\prime}A_{i}\|\pmb{\mathscr{V}}_{i,:}\|_{1}}\end{array}
+$$  
+
+Let $\begin{array}{r}{C^{\prime}=C-\left(2-\frac{1}{\sigma}\right)\sum_{i=1}^{n}\mathcal{N}_{i}^{\prime}A_{i}\|\pmb{\mathcal{V}}_{i,:}\|_{1}}\end{array}$ , then we can derive a new upper bound $\hat{\theta}$ for $\mathcal{L}$ factoring by second stage selection $\mathcal{N}_{i}^{\prime\prime}$ : $\begin{array}{r}{\theta\,<\,C^{\prime}-\left(2-\frac{1}{\sigma}\right)\sum_{i=1}^{n}\mathcal{N}_{i}^{\prime\prime}A_{i}\|\pmb{\mathcal{V}}_{i,:}\|_{1}\,=\,\hat{\theta}}\end{array}$ Thus, minimizing $\hat{\theta}$ corresponds to selecting the $b^{\prime\prime}$ entries with the highest values of $\pmb{\mathscr{A}}_{i}=\pmb{\mathscr{A}}_{i}\|\pmb{\mathscr{V}}i,:\|_{1}$ , as implemented in the stage 2 selection (Algorithm 1). $\sqsubset$  
+
+Theorem 3 demonstrates that our second stage selection directly minimizes an upper bound of output perturbation for identifying critical cache entries. Unlike traditional strategies that rely solely on high attention weights for entry selection, the second stage of our algorithm jointly leverages both the attention weights and the value states projected through the parameter matrix, to directly constrain the worst-case output perturbation.  
+
+3.6 INTEGRATING INTO SOTA CACHE EVICTION METHODS  
+
+We demonstrate the superiority of our proposed algorithm in application by integrating into the existing cache eviction methods which solely rely on accumulated attention weights for critical entries selection. Current SOTA cache eviction workflow is established by SnapKV, which introducing an observation window mechanism to stably accumulate attention weights and further employ the max pooling operations to prevent the omission of key information. Building on this, subsequent researches note the uneven distribution of critical cache entries across different heads, leading to the development of budget allocation strategies across heads for further optimization. Method, like Pyramid, employs a pyramid-like patterns for budget allocations for heads across different layers, while its pre-fixed encountering adaptability challenges with various LLMs. The latest innovation,  
+
+![](images/b2828be3018268a02395d597a6580b3d3713deace2f6ca43bf7d76c7a9ef3fd5.jpg)  
+
+378 379 380 381 382 383 384 385 386 387 388 389 390 391 392 393 394 395 396 397 398 399 400 401 402 403 404 405 406 407 408 409 410 411 412 413 414 415 416 417 418 419 420 421 422 423 424 425 426 427 428 429 430 431   
+Table 1: Integration into SnapKV   
+
+![](images/554839af677e2be74fd2a1739f06e13b6a526c90f340aab623bd502229b82c4f.jpg)  
+
+Table 2: Integration into Pyramid   
+
+![](images/1563722025bf688195be94668b16ad4fc165d43ecdef4e89c61b73bfe644b387.jpg)  
+
+Table 3: Integration into AdaKV   
+
+![](images/cd8acce03c64ceac1828ec139d1373b5936b6a91b672e33c9989fe1260405cb1.jpg)  
+
+![](images/b8cd92310f6d3e7a2eafbb39920f89dddeea52696f29a77d8013c3f5fe9b19e4.jpg)  
+Figure 1: Overview of Integrations. This demonstrates our algorithm achieves significant budget savings with the same score, providing $21.1.34\%$ additional savings with base budget 512.  
+
+
+
+\section{4.3 RESULTS  }
+
+
+Tables 1, 2, and 3 present the quality scores across various task domains when integrating our algorithm into SnapKV, Pyramid, and AdaKV under different models and cache budgets $b$ . Overall, our algorithm consistently improves post-eviction generation quality across all eviction methods. For instance, in Table 1, using LLaMA-3.1-8B, our algorithm significantly enhances SnapKV’s quality scores across all 6 task domains at a budget size of 256, increasing the average score from 45.09 to 45.66. Similar improvements are observed with larger budgets, such as an increase from 47.00 to 47.41 at a budget of 512, and from 48.08 to 48.25 at a budget of 1024. Pyramid and AdaKV, built upon SnapKV, further optimize generation quality through inter-head budget allocation. However, due to predefined parameters, Pyramid shows diminished generalization performance on the two new LLMs, only slightly improving upon SnapKV at a budget of 128. In contrast, AdaKV, with its adaptive dynamic allocation strategy, maintains a quality advantage over SnapKV across both models. Although the optimizations from these two budget allocation algorithms vary, both show significant improvements across all budget sizes when combined with our algorithm.  
+
+Figure 1 shows the average scores across all 6 task domains. As the budget increases, generation quality improves for all methods, albeit with diminishing marginal returns. Interestingly, under these diminishing returns, our perturbation-constrained algorithm brings increasingly higher gains. For instance, in Figure 1a, when our algorithm is integrated with SnapKV at a budget of 512, the average score rises to 47.41. By interpolation, SnapKV alone would require a significantly larger cache budget (706) to achieve a similar quality score, implying a $27.5\%$ savings with our algorithm. This is higher than the $23.0\%$ savings at a budget of 256 and $18.7\%$ at 128. Similar observations are also observed in Pyramid (Figure 1b) and AdaKV (Figure 1c). Thus, in real-world deployment, these significant savings in cache budgets yield substantial GPU memory savings, as well as improved decoding efficiency.  
+
+
+
+\section{5 EMPIRICAL ANALYSIS OF PRACTICAL OUTPUT PERTURBATION  }
+
+
+In this section, we empirically analyze the quality improvements of our method through practical output perturbation. Using the Qasper dataset, which consists of 200 single-document QA samples averaging 3,619 tokens, we compute the hidden states of the first decoding token on two base LLMs. For each sample, we record the hidden states of the first decoding token during inference and visualize the output perturbation compare to full KV cache case under different cache eviction methods.  
+
+
+
+\section{5.1 HEAD-WISE REDUCTION IN OUTPUT PERTURBATIONS  }
+
+
+Figure 2 visualizes the comparison of output perturbation between cache eviction methods with or without our algorithm across different attention heads. The results show that, in the majority of attention heads, our algorithm consistently yields lower output perturbation, whether applied to SnapKV or AdaKV, under both Llama-3.1-8B and Mistral-7B. For instance when integrating with SnapKV in Figure 2a and Figure 2b, our algorithm achieves lower output perturbation in 819 heads for Llama-3.1-8B and 748 heads for Mistral-7B out of the 1,024 attention heads. Thus, our algorithm could reduce output perturbation across the majority of attention heads, with an average reduction of $74.3\%$ in four cases.  
+
+![](images/7536e7a2c547af6b0361a5c1ea4c32488d5a6ec2e4d9713706f5cbaf071981d0.jpg)  
+Figure 3: Final-layer reduction in output perturbation  
+
+
+
+\section{5.2 FINAL-LAYER REDUCTION IN OUTPUT PERTURBATIONS  }
+
+
+Figure 3 presents the final-layer reduction in output perturbation when incorporating into SnapKV. As shown in Figure 3a, our algorithm gradually decreases perturbation layer by layer, with substantial reductions in the final layer. This gradual improvement is mainly due to the cumulative advantages across layers, leading to significantly lower output perturbation. Additionally, Figure 3b presents a detailed comparison of the final-layer output perturbation for different contexts in varying samples, which is directly related to the post-eviction generation token. These smaller perturbations in final layer output, directly leading to the generation being more aligned with the original context (using the full KV cache), explain the enhanced post-eviction generation quality. Figure 3c further summarizes the reduction in final perturbation across different budget sizes, demonstrating that our algorithm consistently produces smaller output perturbation regardless of budget size. In conclusion, our algorithm consistently reduces final-layer perturbation, underscoring its reliable superiority in identifying critical entries. This consistent advantage also explains its ability to enhance post-eviction output quality as observed in earlier experiments.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+In this paper, we pinpoint a key limitation in current cache eviction methods: the reliance on intuitive heuristics of using attention weights to select critical cache entries for eviction. For the first time, we formalize the problem of critical cache entry selection from the perspective of output perturbation and provide a theoretical analysis. Furthermore, we propose a novel algorithm based on constraining output perturbation in the worst-case for critical cache selection, which is then integrated into existing SOTA cache eviction methods. Comprehensive evaluations using 16 datasets from Longbench demonstrate that our algorithm improves the performance of various cache eviction methods, across different task domains and budget constraints. Further empirical analysis also confirms and explains this benefit from the perspective of practical output perturbation: our algorithm consistently yields lower perturbation compared to previous methods that rely solely on attention weights, in all testings.  
+
+
+

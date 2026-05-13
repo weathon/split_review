@@ -1,0 +1,448 @@
+\title{A Multi-Level Framework for Accelerating Training Transformer Models}
+
+\begin{abstract}
+The fast growing capabilities of large-scale deep learning models, such as Bert, GPT and ViT, are revolutionizing the landscape of NLP, CV and many other domains. Training such models, however, poses an unprecedented demand for computing power, which incurs exponentially increasing energy cost and carbon dioxide emissions. It is thus critical to develop efficient training solutions to reduce the training costs. Motivated by a set of key observations of inter- and intra-layer similarities among feature maps and attentions that can be identified from typical training processes, we propose a multi-level framework for training acceleration. Specifically, the framework is based on three basic operators, Coalescing, De-coalescing and Interpolation, which can be orchestrated to build a multi-level training framework. The framework consists of a V-cycle training process, which progressively down- and up-scales the model size and projects the parameters between adjacent levels of models via coalescing and de-coalescing. The key idea is that a smaller model that can be trained for fast convergence and the trained parameters provides high-qualities intermediate solutions for the next level larger network. The interpolation operator is designed to break the symmetry of neurons incurred by de-coalescing for better convergence performance. Our experiments on transformer-based language models (e.g. Bert, GPT) as well as a vision model (e.g. DeiT) prove that the proposed framework reduces the computational cost by about 20\% on training BERT/GPT-Base models and up to 51.6\% on training the BERT-Large model while preserving the performance
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Recent years have witnessed an unprecedented success of large scale deep learning models in areas such as natural language processing (NLP), computer vision (CV) and graph analysis. BERT \citep{DevlinCLT19}, GPT \citep{radford2018improving, radford2019language, BrownMRSKDNSSAA20, GPT4} and other large language models have revolutionized the landscape of NLP, while the transformer based CV models (e.g. ViT model \citep{DosovitskiyB0WZ21}) and more conventional convolutional neural networks are demonstrating remarkable performance in vision processing applications. The excellent performance of these large models, however, demands an ever rising amount of computing power increasing exponentially with the model size and thus escalating energy cost and carbon emissions. For example, LLaMA-65B was trained with 2048 A100 GPUs in a period of 21 days\citep{Hugo2023} and took an estimated cost of \$4 million \footnote{The estimation is based on an average cost of \$3.93 per A100 GPU per hour on Google Cloud Platform: https://cloud.google.}. Moreover, it has become a growing concern of the increasing monopoly of large models by a few giant companies who can afford  the excessive developing cost. It is thus pressing to seek efficient solutions to accelerating the training process for large models so as to democratize the large AI models to a wider audience.
+
+Increasing the number of parameters in deep learning models proves to be the most effective way to improve the expressiveness of deep neural networks and incur emergent capabilities. However, the training complexity is also largely determined by the number of parameters in the pervasively used gradient-based descent formulation in which the parameters are incrementally adjusted to minimize the difference between the model output and the ground truth result. Therefore, it is appealing to develop a training framework that works on a reduced set of parameters but at the same time reserve expressiveness of the underlying model. We realized that the well-known multigrid algorithm \citep{trottenberg2000}, which is an efficient numerical procedure to solve linear equations and partial differential equations, actually offers such a potential. The central idea is to re-structure the underlying problem into a hierarchy of interrelated grids. Solving the problem on the coarse grid is equivalent to removing low frequency errors. The resultant solution process can be more efficient as only a reduced number of variables have to be tackled. The solution is then mapped back to the fine grid as an initialization for the removal of high frequency errors. In comparison with traditional solvers, multigrid enables remarkable performance in terms of convergence speed and robustness \citep{Stuben2001}. Inspired by the central computing pattern of the multigrid algorithm, we perform a systematic investigation on accelerating the training of large models with a multi-level framework.
+\begin{figure}[t]
+    \begin{minipage}[b]{0.16\textwidth}
+        \centering
+        \includegraphics[width=0.93\textwidth]{fig/attn_maps/bert_base/layer_4/head_8.pdf} \\
+        \includegraphics[width=0.93\textwidth]{fig/attn_maps/bert_base/layer_3/head_7.pdf}
+    \end{minipage}
+    \begin{minipage}[b]{0.16\textwidth}
+        \centering
+        \includegraphics[width=0.93\textwidth]{fig/attn_maps/bert_base/layer_4/head_7.pdf} \\
+        \includegraphics[width=0.93\textwidth]{fig/attn_maps/bert_base/layer_3/head_1.pdf}
+    \end{minipage}
+    \begin{minipage}[b]{0.16\textwidth}
+        \centering
+        \includegraphics[width=0.93\textwidth]{fig/attn_maps/bert_base/layer_4/head_9.pdf} \\
+        \includegraphics[width=0.93\textwidth]{fig/attn_maps/bert_base/layer_3/head_5.pdf}
+    \end{minipage}
+    \begin{minipage}[b]{0.16\textwidth}
+        \centering
+        \includegraphics[width=0.93\textwidth]{fig/attn_maps/bert_base/layer_4/head_10.pdf} \\
+        \includegraphics[width=0.93\textwidth]{fig/attn_maps/bert_base/layer_5/head_2.pdf}
+    \end{minipage}
+    \begin{minipage}[b]{0.16\textwidth}
+        \centering
+        \includegraphics[width=0.93\textwidth]{fig/attn_maps/bert_base/layer_4/head_11.pdf} \\
+        \includegraphics[width=0.93\textwidth]{fig/attn_maps/bert_base/layer_5/head_4.pdf}
+    \end{minipage}
+    \begin{minipage}[b]{0.16\textwidth}
+        \centering
+        \includegraphics[width=0.93\textwidth]{fig/attn_maps/bert_base/layer_4/head_6.pdf} \\
+        \includegraphics[width=0.93\textwidth]{fig/attn_maps/bert_base/layer_5/head_8.pdf}
+    \end{minipage}
+    \captionsetup{belowskip=-10pt}
+    \caption{Visualization of attention patterns in BERT-Base of a randomly chosen sample sentence. The darker the color, the more attention a token pays to another one. The first row shows the attention patterns of various heads on layer 4 and represents the similarity within a layer. The second row shows the attention patterns for adjacent layers of layer 4, i.e., layer 3 and layer 5, and demonstrates the similarity between layers. The similarities inter and intra-layers offer the potential for accelerating training with multi-level framework.}
+    \label{fig: visualization of attention in BERT-Base}
+\end{figure}
+The feasibility of a multi-level training framework is justified by the following three observations. 
+First, in a given family of models, the smaller ones (e.g. BERT-Base and GPT-Base) always converge faster than the bigger ones (e.g. BERT-Large and GPT-Large) but deliver a lower level of expressiveness.
+Second, our experimental results on BERT demonstrates that there are many similar patterns in each layer. Figure \ref{fig: visualization of attention in BERT-Base} visualizes the attention patterns of a randomly selected sentence on BERT-Base. The attention patterns of various attention heads extracted from layer 4 are shown in the first row. It can be seen that many heads, e.g. the 7th head (L4 H7) and 9th head (L4 H9), have almost identical patterns. The similarity within a layer has also been discovered in Convolutional Neural Networks \citep{ZeilerF14}. 
+Third, previous works show that a given model tends to exhibit significant similarities among adjacent layers. In \citep{GongHLQWL19}, the authors indicate that neighboring layers in a transformer model have similar attention patterns. We illustrates some attention patterns from layer 3 and layer 5 at the second row in Figure \ref{fig: visualization of attention in BERT-Base}. The results confirm the observation of \citep{GongHLQWL19}.
+In addition to the above observations, a few recent works \citep{GongHLQWL19, MSLT, ChenGS15, ChenYS0QWWCL022} exploit the fast convergence of a smaller model to train a large scale model by progressively increasing the model size. Such works can be regarded as special cases of our multi-level framework with a single de-coalescing operation that maps the parameters of a small network to a larger one.
+
+In this work, we propose the first overall framework for multi-level training of deep learning models. The framework is built upon three key operators, Coalescing, De-coalescing, and Interpolation. Consisting a V-cycle working flow, our multi-level framework progressively down- and up-scales the model size and project the parameters between a models in adjacent levels. The fast convergence of smaller models provides high-quality intermediate solutions for the next level larger network, which saves computational cost. Figure \ref{fig: algo} demonstrates the V-cycle training process with 2 levels.
+
+The major contributions of this work are as follows.
+(1) We propose an efficient multi-level training framework for transformer based deep learning models.
+(2) We develop a formal formulation for the three basic operators and introduce guidelines to design these operators for numerical robustness and training performance.
+(3) We conduct extensive experiments on two transformer-based language model, BERT and GPT, as well as a vision model, DeiT. The results show that the proposed framework enables considerable speed-up in training large scale models. Compared with the traditional training methods, our multi-level framework reduces the training cost by 20\% on BERT-Base and GPT-Base, 51.6\% on Bert-Large, and 27.1\% on DeiT-B.
+
+\begin{figure}[t]
+    \centering
+    \captionsetup{belowskip=-10pt}
+    \includegraphics[width=0.99\textwidth]{fig/Algo-rebuttal.pdf}
+    \caption{A 2-level V-cycle training process. $M_1$ with parameters of $[\mW^1_1, ..., \mW^{1}_{L_1}]$ is the original model to train. $M_2$ with parameters of $[\mW^2_1, ..., \mW^{2}_{L_2}]$ is a smaller model which is coalesced from $M_1$ by coalescing intra- and inter-layer neighboring nodes. $\mF^{l}_{in}$ and $\mF^{l}_{out}$ are used to decrease the input and output dimension of parameter $\mW^{1}_{l}$ in layer $l$. The depth coalescing matrix is decomposed into an $L_{1} \times L_{2}$ matrix and an identity matrix via Kronecker product. We first train the $M_1$ model for $E_a$ epochs to initialize model parameters. Then we train the coalesced $M_2$ model, which converges faster. After that, we de-coalesce the parameters of $M_2$ to the original size and interpolate them with the parameters of $M_1$ before coalescing. Finally, we continue to train the interpolated $M_1$ model.}
+    \label{fig: algo}
+\end{figure}
+
+
+\section{Related Work}
+
+
+\subsection{Efficient Pre-training}
+
+\label{sec: related_work_efficient}
+
+Various efficient pre-training techniques have been developed. Most of these, e.g., ELECTRA \citep{ClarkLLM20}, large batch optimization \citep{YouLRHKBSDKH20}, layer dropping \citep{ZhangH20}, token dropping \citep{HouPZWSSZ22}, and weight sharing \citep{Shuo2021}, are orthogonal to our work. KI \citep{QinLYZ0ZSLLS022} distills knowledge from small models into larger models for efficient pre-training. A few recent works \citep{Wen0CL20, HaberRHJ18, ChangMHTB18, Lisa2020, Eric2019, GongHLQWL19, MSLT} pre-train a large scale model by progressively stacking layers. Meanwhile, Net2Net \citep{ChenGS15} increases network complexity in the width direction by copying neurons and also expands depth by adding identity layers to preserve the learned features. bert2BERT \citep{ChenYS0QWWCL022} extends Net2Net to the transformer architecture. In Network Expansion \citep{ding2023network}, the authors propose to impose the orthogonality across the expanded filters in CNN and utilize the exponential moving averaged model to expand the ViT along the depth direction. In CompoundGrow \citep{GuLYLCH21}, the authors prove it is beneficial to expand the network in width, depth, and tokens together. In the staged training approach \citep{ShenWKDPB22}, Shen et al. focus on growth operators scheduling to keep the training dynamics. LiGO \citep{Peihao2023} learns a linear mapping matrix between the small and the large model through stochastic gradient descent (SGD). Similar approaches \citep{WuGHFK20, WangYCWYSZ21} are also proposed to accelerate the training of other architectures. Most of the above approaches start from a small model and progressively increase the model size by reusing parameters. Therefore, they should be regarded as special cases of the multi-level framework with only de-coalescing operation.
+\subsection{Multigrid}
+
+Our work is inspired by the multigrid method \citep{trottenberg2000}, which is an efficient numerical procedure to solve linear equations and partial differential equations with multiple levels. The method has received successful applications in many application domains such as finite element method \citep{zhu2006multigrid}, eigenvalue computation \citep{knyazev2003efficient}, and graph partitioning \citep{Abou-RjeiliK06}. Of course, a direct porting of the multigrid method to neural network training, which is under a different set of constraints, is not feasible. Borrowing the spirit of the multigrid solvers, we propose a systematic investigation on accelerating the training of large models with a multi-level framework.
+
+
+\section{Methodology}
+
+
+We aim to accelerate the training of large transformer models by leveraging the fast convergence behaviors of a smaller model derived from the larger ones through a coarsening operation. We propose three operators, Coalescing, De-coalescing, and Interpolation to develop a complete working flow. These operators merge parameters, transform the parameters back to the original model, and correct the parameters of the original model with de-coalescing parameters, respectively. The design of the operators enable the framework to reduce most errors in a small model at a less total training cost. In the following sections, we first introduce the Coalescing, De-coalescing and Interpolation operators and then elaborate the V-cycle training process built upon them.
+
+For simplicity, we assume that all layers are feed forward layers without bias and have the same input and output dimensions. We use $M_k, k = 1,2,..K$ to refer to the model at level $k$.  $M_1$ is the original model and the level number $k$ increases by one when we coarsen the model to a smaller one. We use $\mW_l^{k} \in \R^{d^{k}_{in}, d^{k}_{out}}$ to represent the parameter of layer $l$ in model $M_k$. $d^{k}_{in}$ and $d^{k}_{out}$ refer to the input  and output dimensions. $\mathrm{sum_{\text{row/col}}} (\mA)$ denotes the summation of each row or column of matrix $\mA$, resulting a sum vector. We adopt $\mathrm{diag}(\va)$ to convert a vector $\va$ into a diagonal matrix.
+
+\subsection{Coalescing}
+
+As the first step, we coalesce the model in the width direction, while keeping the layered structure untouched. Then we coalesce the model in the depth direction to get a smaller model coarsened in both width and depth directions.
+
+\paragraph{Width Coalescing}
+\label{sec: width_coalescing}
+
+$\mW_{l}^{k} \in \mathbb{R}^{d^{k}_{in},d^{k}_{out}}$ is the parameter of layer $l$ in the model $M_k$. We transform it into $\mU_{l}^{k+1} \in \mathbb{R}^{d^{k+1}_{in}, d^{k+1}_{out}}$ with width coalescing matrices $\mF^{k+1, l}_{in} \in \mathbb{R}^{d^{k+1}_{in}, d^{k}_{in}}$ and $\mF^{k+1, l}_{out} \in \mathbb{R}^{d^{k}_{out}, d^{k+1}_{out}}$ for in and out dimensions as follows.
+
+\begin{equation}
+    \mU^{k+1}_{l} = \mF^{k+1, l}_{in} \mW^{k}_{l} \mF^{k+1, l}_{out}
+\end{equation}
+
+To ensure the output of layer $l$  is properly received by layer $l+1$ and stabilize the output of each layer, we define $\mF^{k+1, l+1}_{in}$ as:
+
+\begin{equation}
+    \label{eq: width coalescing R_in}
+    \mF^{k+1, l+1}_{in} = {\mF^{k+1, l}_{out}}^T \mathrm{diag} (1 / \mathrm{sum_{col}} ({\mF^{k+1, l}_{out}} {\mF^{k+1, l}_{out}}^T))
+\end{equation}
+
+where $\mathrm{diag} (1 / \mathrm{sum_{col}} (\mF^{k+1, l}_{out} {\mF^{k+1, l}_{out}}^T))$ is used to normalize the product of ${\mF^{k+1, l}_{out}}$ and ${\mF^{k+1, l}_{out}}^T$. The width coalescing matrix ${\mF^{k+1, l}_{out}}$ is arbitrary as long as the matrix has full column rank. The matrix we used is detailed in Section \ref{sec: implementation details}.
+\paragraph{Depth Coalescing}
+
+After width coalescing, we have $\mU^{k+1}_{l}, l=1,2,...,L_{k}$, and need to transpose them into $\mW^{k+1}_{l},l=1,2,...,L_{k+1}$. $L_k$ and $L_{k+1}$ are layer numbers of the model $M_k$ and $M_{k+1}$. $L_{k+1} < L_{k}$ always holds. To reduce the depth, we use a depth coalescing matrix $\mR^{k+1} \in \mathbb{R}^{L_{k}, L_{k+1}, d^{k+1}_{in}, d^{k+1}_{out}} $ to map those parameters as follows.
+
+\begin{equation}
+  	[\mW^{k+1}_1, \mW^{k+1}_2, \dots, \mW^{k+1}_{L_{k+1}}] \\
+	=
+  	[\mU^{k+1}_1, \mU^{k+1}_2, \dots, \mU^{k+1}_{L_k}] 
+        \mR^{k+1} \\
+\end{equation}
+
+As we can see, the dimension of $\mR^{k+1}$ can be large. Therefore, we decompose it into an $L_k \times L_{k+1}$ matrix with elements of $\ell_{i, j}^{k+1}, i=1,...,L_{k}, j=1...,L_{k+1}$ and an identity matrix via Kronecker product as in LiGO\citep{Peihao2023}:
+
+\begin{equation}
+    \mR^{k+1} =
+    \begin{bmatrix}
+        \ell_{1, 1}^{k+1} & \cdots & \ell_{1, L_{k+1}}^{k+1} \\
+        \vdots & \ddots & \vdots \\
+        \ell_{L_{k}, 1}^{k+1} & \cdots & \ell_{L_{k}, L_{k+1}}^{k+1}
+    \end{bmatrix}
+    \otimes 
+    \mI
+\end{equation}
+
+where the $\otimes$ is the Kronecker product that multiplies $\ell^{k+1}_{i, j}$ with the identity matrix respectively.
+In general, we coalesce the parameters of $M_k$ to those of a smaller model $M_{k+1}$ as follows.
+
+\begin{equation}
+    \begin{bmatrix}
+  	\mW^{k+1}_1 \\
+  	\vdots \\
+  	\mW^{k+1}_{L_{k+1}}
+    \end{bmatrix}^T
+    =
+    \begin{bmatrix}
+  	\mF^{k+1, 1}_{in} \mW^{k}_1 \mF^{k+1, 1}_{out}\\
+  	\vdots \\
+  	\mF^{k+1, L_k}_{in} \mW^{k}_{L_k} \mF^{k+1, L_k}_{out}
+    \end{bmatrix}^T
+    \begin{bmatrix}
+        \ell_{1, 1}^{k+1} & \cdots & \ell_{1, L_{k+1}}^{k+1} \\
+        \vdots & \ddots & \vdots \\
+        \ell_{L_{k}, 1}^{k+1} & \cdots & \ell_{L_{k}, L_{k+1}}^{k+1}
+    \end{bmatrix}
+    \otimes 
+    \mI
+\end{equation}
+
+\subsection{De-coalescing}
+\label{sec: de-coalescing}
+
+De-coalescing is the inverse operator of Coalescing. To map the parameters back to the original model, we first do depth de-coalescing on model $M_{k+1}$ to increase the depth, and then perform width de-coalescing to increase the width based on the result of depth de-coalescing.
+
+\paragraph{Depth De-coalescing}
+\label{sec: depth de-coalescing}
+
+Given a model $M_{k+1}$, which has parameters $\mW^{k+1}_{l} \in \mathbb{R}^{d^{k+1}_{in}, d^{k+1}_{out}}, l=1,2,...,L_{k+1}$. We could use the depth de-coalescing matrix $\mG^{k+1} \in \mathbb{R}^{L_{k+1}, L_{k}, d^{k}_{in}, d^{k}_{in}}$ to transform them into $\mU^{k+1}_{l} \in \mathbb{R}^{d^{k+1}_{in}, d^{k+1}_{out}}, l=1,2,...,L_{k}$.
+
+\begin{equation}
+    \label{eq: depth de-coalescing}
+    [\mU^{k+1}_1, \mU^{k+1}_2, \dots, \mU^{k+1}_{L_{k}}] \\
+    =
+    [\mW^{k+1}_1, \mW^{k+1}_2, \dots, \mW^{k+1}_{L_{k+1}}]
+    \mG^{k+1} \\
+\end{equation}
+
+As in the previous section, we decompose the depth de-coalescing matrix $\mG$ into an $L_{k+1} \times L_{k}$ matrix with elements of $\zeta_{i, j}, i=1,...,L_{k+1}, j=1,...,L_{k}$ and an identity matrix $\mI$.
+
+\begin{equation}
+    \mG^{k+1} =
+    \begin{bmatrix}
+        \zeta^{k+1}_{1, 1} & \cdots & \zeta^{k+1}_{1, L_{k}} \\
+        \vdots & \ddots & \vdots \\
+        \zeta^{k+1}_{L_{k+1}, 1} & \cdots & \zeta^{k+1}_{L_{k+1}, L_{k}}
+    \end{bmatrix}
+    \otimes 
+    \mI
+\end{equation}
+
+Consider that we are doing the depth de-coalescing on the result of depth coalescing as follows.
+
+\begin{equation}
+    [\mU^{k+1}_1, \mU^{k+1}_2, \dots, \mU^{k+1}_{L_{k}}]
+    =
+    [\mU^{k+1}_1, \mU^{k+1}_2, \dots, \mU^{k+1}_{L_{k}}]
+    \mR^{k+1}
+    \mG^{k+1}
+\end{equation}
+
+To keep the value of parameters in each layer stable after coalescing and de-coalescing i.e., the column sum of $\mR^{k+1} \mG^{k+1}$ equals to $\mI$, we have the $\mG^{k+1}$ as:
+
+\begin{equation}
+    \label{eq: depth de-coalescing I_d}
+    \mG^{k+1} = {\mR^{k+1}}^T \mathrm{diag} (1 / \mathrm{sum_{col}} ({\mR^{k+1} \mR^{k+1}}^T))
+\end{equation}
+
+where the $\mathrm{diag} (1 / \mathrm{sum_{col}} ({\mR^{k+1} \mR^{k+1}}^T))$ performs a normalization of the parameters.
+\paragraph{Width De-coalescing}
+
+After depth de-coalescing, we have $\mU^{k+1}_{l} \in \mathbb{R}^{d^{k+1}_{in}, d^{k+1}_{out}}$. We use width de-coalescing matrices $\mT^{k+1, l}_{in}$ and $\mT^{k+1, l}_{out}$  to transform them into $\mW^{k}_{l} \in \mathbb{R}^{d^{k}_{in}, d^{k}_{out}}$ for in and out dimensions, respectively.
+
+Recalling the width coalescing, we have the following equation after coalescing and de-coalescing.
+
+\begin{equation}
+    \label{eq: width de-coalescing}
+    \begin{split}
+        \mW^{k}_{l} &= \mT^{k+1, l}_{in} \mU^{k+1}_{l} \mT^{k+1, l}_{out} \\
+	&= \mT^{k+1, l}_{in} \mF^{k+1, l}_{in} \mW^{k}_{l} \mF^{k+1, l}_{out} \mT^{k+1, l}_{out}
+    \end{split}
+\end{equation}
+
+Similar to the definition of depth de-coalescing, we define $\mT^{k+1, l}_{in}$ and $\mT^{k+1, l}_{out}$ as follows.
+
+\begin{equation}
+    \label{eq: width de-coalescing I_in I_out}
+    \begin{aligned}
+        \mT^{k+1, l}_{in} &= \mathrm{diag} (1 / \mathrm{sum_{row}} ({\mF^{k+1, l}_{in}}^T \mF^{k+1, l}_{in})) {\mF^{k+1, l}_{in}}^T \\
+        \mT^{k+1, l}_{out} &= {\mF^{k+1, l}_{out}}^T \mathrm{diag} (1 / \mathrm{sum_{col}} (\mF^{k+1, l}_{out} {\mF^{k+1, l}_{out}}^T))
+    \end{aligned}
+\end{equation}
+In summary, we de-coalesce the model $M_{k+1}$ to a larger model $M_{k}$ as follows.
+
+\begin{equation}
+    \begin{bmatrix}
+  	\mW^{k}_1 \\
+  	\vdots \\
+  	\mW^{k}_{L_{k}}
+    \end{bmatrix}^T
+    =
+    \begin{bmatrix}
+  	\mT^{k+1, 1}_{in} \mW^{k+1}_1 \mT^{k+1, 1}_{out} \\
+  	\vdots \\
+  	\mT^{k+1, L_{k+1}}_{in} \mW^{k+1}_{L_{k+1}} \mT^{k+1, L_{k+1}}_{out}
+    \end{bmatrix}^T
+     \begin{bmatrix}
+        \zeta^{k+1}_{1, 1} & \cdots & \zeta^{k+1}_{1, L_{k}} \\
+        \vdots & \ddots & \vdots \\
+        \zeta^{k+1}_{L_{k+1}, 1} & \cdots & \zeta^{k+1}_{L_{k+1}, L_{k}}
+    \end{bmatrix}
+    \otimes 
+    \mI
+\end{equation}
+
+\subsection{Interpolation}
+\label{sec: interpolation}
+
+Since we define the de-coalescing matrix as the normalized transposition of the coalescing matrix, it's easy to find that the parameter $\mW^{k}_{l}$ obtained after de-coalescing is far from full rank. In the worst case, half of the elements of $\mW^{k}_{l}$ will be identical to the respective ones in the other part \citep{ChenGS15}. Such a value distribution significantly limits the capability of the model. We call it the symmetry of neurons.
+
+Instead of injecting noise \citep{ChenGS15} or parameters from higher layers \citep{ChenYS0QWWCL022} to alleviate this problem, we propose a more general operator, interpolation, which (1) transfers knowledge back to the larger model $M_{k}$ from the de-coalesced smaller model, (2) avoids similar adjacent parameters incurred by de-coalescing, and (3) improves the convergence rate further. We find that the interpolation operation allows the acceleration scales with the times of model enlargement. On the contrary, a higher number of mapping in the previous literature leads to a worsened convergence speed.
+
+Specifically, after training the smaller model $M_{k+1}$ coalesced from $M_{k}$, we first de-coalesce $M_{k+1}$ to the size of $M_{k}$ and get model $M_{k, de-coalesced}$. Then we merge the $M_{k}$ and $M_{k, de-coalesced}$ under the control of a hyperparameter $\alpha \in (0, 1)$.
+
+\begin{equation}
+    M_{k} \Leftarrow (1 - \alpha) M_{k} + \alpha M_{k, de-coalesced}
+\end{equation}
+
+In addition to alleviate the problem of symmetric neurons, $\alpha$ also determines how much updated knowledge is incorporated into a larger model from a smaller one. In most cases, $\alpha=0.25$ suffices to give satisfying results.
+
+\subsection{V-cycle Training Process}
+
+With the Coalescing, De-coalescing, and Interpolation operators, we can build a V-cycle training process as inpired by the V-cycle in multigrid method \citep{trottenberg2000}. We leave other training processes like W-cycle and FMG in multigrid method for future work.
+
+Algorithm \ref{alg:v-cycle} expounds the V-cycle training process. At first, it progressively coalesces the model to reduce the model complexity and then trains the smallest model for $E_{small}$ epochs. The hyper-parameter $E_{small}$ is used to allow early stop of training smaller models at the end of the fast convergence phase. Next, the smaller model is de-coalesced and interpolated to set the parameters of a larger model. Finally, the model size reaches its original size and $M_1$ will be further trained until convergence. In addition, we train the models at each level for $E_a$ epochs before coalescing for parameters initialization. $E_a$ is set to the number of warm-up steps. We always stop the training of smaller models for one half of the number of steps for the large model
+
+\input{tex/algorithm}
+
+
+
+\section{Experiment}
+
+\label{sec: experiment}
+
+\subsection{Experimental Setup}
+
+\paragraph{Architectures and Datasets}
+
+We exercise our multi-level framework on two language models, BERT \citep{DevlinCLT19} and GPT \citep{radford2018improving}, as well as a vision model, DeiT \citep{TouvronCDMSJ21}. We use English Wikipedia and BooksCorpus \citep{ZhuKZSUTF15} as pre-training data for BERT and GPT, while DeiT is trained with ImageNet \citep{DengDSLL009}. For evaluation, we test the pre-trained BERT on the GLUE benchmark \citep{WangSMHLB19}. We evaluate the pre-trained GPT on LAMBADA \citep{PapernoKLPBPBBF16}, PTB, WikiText-2 and WikiText103 under a zero-shot setting without fine-tuning on the training set. CIFAR10 \citep{krizhevsky2009learning}, CIFAR100 \citep{krizhevsky2009learning}, Flowers102 \citep{NilsbackZ08}, and Stanford-Cars \citep{Krause0DF13} are adopted to test the downstream performance of DeiT.
+
+\paragraph{Baselines}
+
+We evaluate our framework by comparing it with five baselines. The first baseline is a the model trained from scratch. The second is StackBERT \citep{GongHLQWL19}, in which the depth is increased by progressively stacking layers. \footnote{We implemented a MSLT\citep{MSLT} based training procedure, which is similar to StackBERT. We find that it's hard for MSLT to reach sufficient performance when trained from scratch as observed by bert2BERT \citep{ChenYS0QWWCL022}. So we only include the results of StackBERT.} The third baseline is bert2BERT \citep{ChenYS0QWWCL022} that extends the width with advanced knowledge initialization. The fourth one is LiGO \citep{Peihao2023} that learns to expand the network both in depth and width. The fifth method is Network Expansion\cite{ding2023network} that expands the model with the exponential moving averaged parameters. We choose KI \citep{QinLYZ0ZSLLS022} that distills knowledge from a small model into a larger model as the fifth baseline. Specifically, bert2BERT, LiGO, and KI all assume that there are well-trained small models and do not consider the training cost of smaller models. To be fair, we take into account the training cost of smaller models for bert2BERT, LiGO and KI when comparing with them.
+\paragraph{Implementation Details}
+\label{sec: implementation details}
+
+During pre-training, we train the BERT-Base with the following settings, 40 training epochs, 10K warm-up steps, a peak learning rate of 1e-4, and a batch size of 512. We remove the next sentence prediction task \citep{Yinhan2019} and use a fixed sequence length of 128. We use the same settings for BERT-Large. In the case of GPT-Base, we use 20 training epochs, 10K warm-up steps, a peak learning rate of 1e-4, and a batch size of 256. We train the DeiT-B with a peak learning rate of 1e-3, 300 training epochs and a batch size of 1024.
+
+For the evaluation of BERT-Base and BERT-Large, we take the tasks from the GLUE benchmark. We choose a batch size of 32, a learning rate from \{5e-6, 1e-5, 2e-5, 3e-5, 5e-5\}, and train the model with 5 epochs on all GLUE fine-tuning tasks. We run each training process for three times with random seeds for GLUE. We evaluate the GPT-Base on LAMBADA \citep{PapernoKLPBPBBF16}, PTB, WikiText-2, and WikiText103 under zero-shot setting, i.e., without fine-tuning. For DeiT-B, we fine-tune the pre-trained model for 1000 epochs with a batch size of 768 and a learning rate of 0.01 under SGD optimizer and the same data augmentation in the training.
+
+In the multi-level training, we coalesce the model to reduce width and depth by half. We define the width coalescing matrix as $\mF^{k+1, l}_{w, out}=[\mI/2, \mI/2]^T$ and elements of depth coalescing matrix as $\ell^{k+1}_{2i-1, i}=\ell^{k+1}_{2i, i}=0.5, i=1,...,L_{k+1}$.
+Intuitively, they coalesce two neighboring neurons and merge two adjacent layers. The de-coalescing matrices can be derived from Eq. \ref{eq: depth de-coalescing I_d} and Eq. \ref{eq: width de-coalescing I_in I_out}. We use $\alpha=0.25$ for GPT and DeiT, $\alpha=0.5$ for BERT. Unless otherwise noted, we train the model with a two-level mapping. The length of initializing stages for BERT/GPT and DeiT are 10K steps and five epochs. We always stop the training of the smaller model halfway through the training. For example, the BERT training steps are 300K and thus $E_{small}$ will be 150K steps.
+
+Our experiments are conducted on NVIDIA A100 GPUs. As the mixed precision training \citep{MicikeviciusNAD18} and DeepSpeed framework \citep{RajbhandariRRH20} are orthogonal to our method, we use both for the pre-training of BERT and GPT.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+		\includegraphics[width=0.99\textwidth]{fig/BERT-Base-FLOPs.pdf}
+		\caption{BERT-Base}
+		\label{fig: bert-base-flops}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.32\textwidth}
+        \includegraphics[width=0.99\textwidth]{fig/GPT-Base-FLOPs.pdf}
+		\caption{GPT-Base}
+		\label{fig: gpt-base-flops}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+		\includegraphics[width=0.99\textwidth]{fig/BERT-Large-FLOPs.pdf}
+		\caption{BERT-Large}
+		\label{fig: bert-large-flops}
+    \end{subfigure}
+    \caption{Results on BERT-Base, GPT-Base and BERT-Large. (a-c) show loss curves of BERT-Base, GPT-Base and BERT-Large pre-training. The dashed lines are the final results of models training from scratch. For BERT-Base and GPT-Base, our approach saving about 20\% computational costs. For BERT-Large, we save 37.4\% training cost with 2-level training process and 51.6\% with 3-level.}
+\end{figure}
+
+\subsection{Experimental Results}
+
+\paragraph{BERT-Base}
+
+\begin{table}[ht]
+    \centering
+    \caption{GLUE benchmark results between our approach and baselines. BERT-Base means the model is trained from scratch. All results on GLUE benchmark are run in three times with different seeds and numbers in parentheses are the standard deviation across the runs.}
+    \label{tab: bert-valid}
+    \resizebox{\textwidth}{!}{
+        \begin{tabular}{l | c c | c c c c c c c | c} 
+            \toprule
+            \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}} \textbf{Method} \end{tabular}} & \textbf{Saving} & \textbf{Saving} & \textbf{SST-2} & \textbf{MNLI} & \textbf{MRPC} & \textbf{CoLA} & \textbf{QNLI} & \textbf{QQP} & \textbf{STS-B} & \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}} \textbf{Avg} \end{tabular}} \\
+            & \textbf{(FLOPs)} & \textbf{(Walltime)} & \textbf{(Acc)} & \textbf{(Acc)} & \textbf{(Acc)} & \textbf{(Mcc)} & \textbf{(Acc)} & \textbf{(Acc)} & \textbf{(Acc)} & \\
+            \hline
+            BERT-Base & 0\% & 0\% & 89.6(0.5) & 77.8(0.2) & 78.7(0.5) & 52.9(0.3) & 85.1(0.5) & 89.4(0.1) & 83.5(0.4) & 79.7(0.2) \\ 
+            StackBERT & 15.2\% & 8.2\% & 89.6(0.4) & 77.5(0.2) & 71.7(0.4) & 52.1(0.5) & 85.8(0.3) & 89.3(0.1) & 82.3(0.4) & 79.3(0.1) \\
+            bert2BERT & 8.9\% & -2.4\% & 89.5(0.5) & 77.7(0.1) & 76.5(0.9) & 49.5(0.4) & 84.8(0.4) & 88.3(0.1) & 81.0(0.4) & 78.2(0.3) \\
+            LiGO & 17.4\% & 7.9\% & 89.2(0.3) & 79.1(0.2) & 77.4(2.1) & 53.7(0.3) & 85.9(0.1) & 89.0(0.1) & 83.6(0.3) & 79.7(0.3) \\
+            Network Expansion & 14.8\% & 8.1\% & 89.6(0.3) & 77.6(0.2) & 76.1(0.6) & 53.4(0.4) & 85.5(0.3) & 89.6(0.1) & 82.7(0.4) & 79.4(0.1) \\
+            KI & -6.9\% & -25.9\% & 89.9(0.2) & 78.3(0.2) & 76.7(0.4) & 55.1(0.6) & 85.6(0.3) & 89.6(0.1) & 84.7(0.3) & 79.9(0.1) \\
+            \hline
+            Ours & 19.0\% & 10.8\% & 90.1(0.1) & 78.1(0.2) & 79.9(0.7) & 52.2(0.3) & 85.1(0.1) & 89.2(0.1) & 84.2(0.4) & 79.8(0.1) \\
+            \bottomrule
+        \end{tabular}
+    }
+\end{table}
+
+\begin{table}[h]
+    \caption{Zero-shot results of GPT-Base. "w/o FT" means that we evaluate the pre-trained model without fine-tuning. Our approach achieve similar and even better perplexities than the GPT-Base.}
+    \label{tab: gpt-valid}
+    \centering
+    \resizebox{\textwidth}{!}{
+        \begin{tabular}{l | c c | c c c c}
+            \toprule
+            \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}} \textbf{Method} \end{tabular}} & \textbf{Saving} & \textbf{Saving} & \textbf{LAMBADA} & \textbf{PTB} & \textbf{WikiText-2} & \textbf{WikiText103} \\
+             & \textbf{(FLOPs)} & \textbf{(Walltime)} & \textbf{(w/o FT)} & \textbf{(w/o FT)} & \textbf{(w/o FT)} & \textbf{(w/o FT)} \\
+            \hline
+            GPT-Base & 0\% & 0\% & 54.5 & 146.3 & 49.8 & 50.2 \\
+            StackBERT & 9.5\% & 8.4\% & 53.3 & 140.6 & 46.5 & 46.9 \\
+            bert2BERT & 11.5\% & 8.3\% & 53.9 & 147.1 & 48.8 & 49.4 \\
+            LiGO & 14.1\% & 6.9\% & 54.0 & 139.7 & 50.1 & 50.5 \\
+            Network Expansion & 15.2\% & 12.2\% & 54.7 & 143.7 & 50.7 & 51.2 \\
+            \hline
+            Ours & 24.1\% & 16.5\% & 53.2 & 142.5 & 47.2 & 47.5 \\
+            \bottomrule
+        \end{tabular}
+    }
+\end{table}
+
+We compare the results of our method and baselines in Figure \ref{fig: bert-base-flops} and Table \ref{tab: bert-valid}. The comparison shows that our multi-level framework can save 19.0\% FLOPs and 10.8\% walltime for BERT-Base pre-training, while achieving similar down-stream tasks performance as training from scratch. In addition, we find that bert2BERT and KI cannot deliver reduced walltime in our settings.
+
+\paragraph{GPT-Base}
+
+Figure \ref{fig: gpt-base-flops} and Table \ref{tab: gpt-valid} show the results of GPT-Base model. The results demonstrate that our multi-level framework saves 24.1\% FLOPs and 16.5\% walltime on GPT-Base pre-training. We observe that our zero-shot results are slightly better than training from scratch.
+
+
+\paragraph{DeiT-B}
+\begin{wraptable}{r}{8.5cm}
+    \caption{The transfer learning of DeiT-B. DeiT-B pre-trained with multi-level approach shows a similar level of performance as DeiT-B pre-trained from scratch.}
+    \label{tab: deit-valid}
+    \centering
+    \resizebox{8.5cm}{!}{
+        \begin{tabular}{l | c c | c | c c c c }
+            \toprule
+            \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}} \textbf{Method} \end{tabular}} & \textbf{Saving} & \textbf{Saving} & \textbf{ImageNet} & \textbf{CIFAR10} & \textbf{CIFAR100} & \textbf{Flowers} & \textbf{Cars} \\
+             & \textbf{(FLOPs)} & \textbf{(Walltime)} & \textbf{(Top 1 Acc)} & \textbf{(Acc)} & \textbf{(Acc)} & \textbf{(Acc)} & \textbf{(Acc)} \\
+            \hline
+
+            DeiT-B & 0\% & 0\% & 81.1\% & 99.1\% & 90.8\% & 97.8\% & 92.1\% \\
+             StackBERT & 23.8\% & 15.1\% & 81.2\% & 99.1\% & 90.8\% & 97.6\% & 92.1\% \\
+             bert2BERT & -0.1\% & -0.13\% & 81.6\% & 99.1\% & 90.7\% & 97.7\% & 92.2\% \\
+             LiGO & 25.4\% & 12.0\% & 81.7\% & 99.1\% & 90.7\% & 97.8\% & 92.1\% \\
+             Network Expansion & 25.0\% & 22.5\% & 81.5\% & 99.1\% & 90.7\% & 97.8\% & 92.1\% \\
+             \hline
+             Ours & 27.1\% & 24.3\% & 81.5\% & 99.1\% & 90.8\% & 97.6\% & 92.1\% \\
+            \bottomrule
+        \end{tabular}
+    }
+    \color{black}
+\end{wraptable}
+
+The results of pre-training DeiT-B are illustrated in Table \ref{tab: deit-valid}. The multi-level framework saves 27.1\% FLOPs and 24.3\% walltime in pre-training DeiT-B on ImageNet. Results on downstream tasks prove that our multi-level framework does not impair the model's generalization capability.
+
+\paragraph{More Levels on BERT-Large}
+In our current setting, the number of parameters is reduced by eight-fold in one coalescing operation. Although our framework supports an arbitrary number of levels, we observe that there is little gain on three or more levels in pre-training BERT-Base because the level 3 model has only 1.72M parameters, which is too small to learn from the large dataset. Therefore, we pre-train BERT-Large with two and three levels to evaluate the effectiveness of the number of levels. Figure \ref{fig: bert-large-flops} and Table \ref{tab: levels} show the results of the multi-level framework with two and three levels on BERT-Large. When compared with BERT-Base, our approach achieves a higher reduction in FLOPs and walltime on BERT-Large with 2 levels. On the other hand, an increased number of levels results in greater computational savings, indicating our method's potential.
+
+\begin{table}[ht]
+    \caption{Downstream tasks performence of BERT-Large with more levels. Results of BERT-Large indicate that more levels does not lead to performance deterioration while saving more training cost.}
+    \label{tab: levels}
+    \centering
+    \resizebox{\textwidth}{!}{
+        \begin{tabular}{l | c c | c c c c c c c | c} 
+            \toprule
+            \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}} \textbf{Level} \end{tabular}} & \textbf{Saving} & \textbf{Saving} & \textbf{SST-2} & \textbf{MNLI} & \textbf{MRPC} & \textbf{CoLA} & \textbf{QNLI} & \textbf{QQP} & \textbf{STS-B} & \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}} \textbf{Avg} \end{tabular}} \\
+            & \textbf{(FLOPs)} & \textbf{(Walltime)} & \textbf{(Acc)} & \textbf{(Acc)} & \textbf{(Acc)} & \textbf{(Mcc)} & \textbf{(Acc)} & \textbf{(Acc)} & \textbf{(Acc)} & \\
+            \hline
+            1 & 0\% & 0\% & 89.6 (0.2) & 79.2 (0.2) & 80.3 (0.8) & 53.0 (1.4) & 86.7 (0.4) & 89.8 (0.1) & 85.0 (0.4) & 80.6 (0.2) \\
+            \hline
+            2 & 37.4\% & 32.9\% & 90.9 (0.3) & 79.8 (0.3) & 78.1 (0.4) & 54.8 (0.1) & 86.9 (0.2) & 89.7 (0.2) & 85.2 (0.4) & 80.8 (0.1) \\
+            \hline
+            3 & 51.6\% & 41.9\% & 90.5 (0.3) & 79.8 (0.4) & 82.6 (0.7) & 56.3 (0.4) & 86.9 (0.1) & 89.9 (0.1) & 84.5 (0.3) & 81.5 (0.1) \\
+            \bottomrule
+        \end{tabular}
+    }
+\end{table}
+
+
+\section{Discussion}
+
+
+The proposed approach does not need to re-compile the setup of parallel computing of LLMs when transiting from a small model to a larger one as the model architecture and the underlying training environment do not change. Compared with the traditional single level training, the only overhead is incurred by resuming training of the larger model. Here we need to load parameters from storage. In our experiment on BERT-Large, resuming can be done within one minute. This overhead has been taken into account in our results of the walltime saving. For LLaMA-65B, the loading process can be finished in less than 5 minutes on SSD. In summary, the overhead of our proposed V-cycle training is negligible.
+
+
+
+\section{Conclusion}
+
+
+This paper proposes an efficient multi-level framework for reducing the training time of transformer-based models. Our framework is built on three basic operators, Coalescing, De-coalescing, and Interpolation, which can be combined to build up a V-cycle training process. The multi-level training offers great potential to deliver a reduced computation time by balancing the fast convergence of smaller models and the high expressiveness of large models. Our experimental results justify the effectiveness of the multi-level training on BERT, GPT, and DeiT models. In addition, our extensive experiments show that our methodology has the potential for saving the computational cost of larger models with more levels. In the future work, we will apply the multi-level framework to the pre-training of large scale models with over 100B parameters.
+
+
+

@@ -1,8 +1,8 @@
 # Objective Soups: Multilingual Multi-Task Acoustic Modeling for Automatic Speech Recognition
 
 - Decision: Reject
-- Avg Score: 3.40
-- Scores: 6, 5, 1, 0, 5
+- Avg Score: 6.50
+- Scores: 6, 5, 10, 5
 
 ## Abstract
 The need for training multilingual multi-task automatic speech recognition (ASR) models is increasingly evident. However, a significant challenge arises from the conflicts among multiple objectives when using a single model. Multi-objective optimization (MOO) can address this challenge by facilitating the optimization of multiple conflicting objectives, aligning the gradient updates in a common descent direction. While MOO helps avoid conflicting gradient update directions, a critical issue is that when there are many objectives such as those in multilingual multi-task ASR, it is often impossible to find such common descent directions. Therefore, an interesting question is: would it be more effective to separate highly conflicting objectives into different optimization levels or keep them in one level? To address this question, this paper investigates three multi-objective ASR training frameworks, which we refer to as objective soup recipes. These frameworks use MOO at different optimization levels to mitigate potential conflicts among all objectives. We conduct an extensive investigation using the LibriSpeech and AISHELL v1 datasets for ASR, along with the CoVoST v2 dataset for both ASR and speech-to-text translation tasks, to determine the highly conflicting objectives and the optimal training recipes among these three MOO training algorithms.

@@ -1,0 +1,312 @@
+\title{Influential Language Data Selection via Gradient Trajectory Pursuit}
+
+\begin{abstract}
+
+Curating a desirable dataset for training has been the core of building highly capable large language models \citep{touvron2023llama, achiam2023gpt, team2024gemma}. Gradient influence scores ~\citep{pruthi2020estimating, xia2024less} are shown to be correlated with model performance and are commonly used as the criterion for data selection. However, existing methods are built upon either individual sample rankings or inefficient matching process, leading to suboptimal performance or scaling up issues. In this paper, we propose \textit{Gradient Trajectory Pursuit (GTP)}, an algorithm that performs pursuit of gradient trajectories via jointly selecting data points under an $L0$-norm regularized objective. The proposed algorithm highlights: (1) \textit{joint selection} instead of independent top-$k$ selection, which automatically de-duplicates samples; (2) higher efficiency with compressive sampling processes, which can be further sped up using a distributed framework. In the experiments, we demonstrate the algorithm in both in-domain and target-domain selection benchmarks and show that it outperforms top-$k$ selection and competitive algorithms consistently, for example, our algorithm chooses as low as 0.5\% data to achieve full performance on the targeted instruction tuning tasks.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large language models encompasses an enormous amount of knowledge acquired through pretraining corpus~\citep{brown2020language,jiang2023mistral, touvron2023llama}. A crucial component that makes language models practically useful is the post-training phase, which empower the model with a variety of extra abilities and skills, such as aligning language models to follow human instructions~\citep{ouyang2022training, taori2023alpaca, wang2023selfinstruct, xu2023wizardlm}, teaching models the tool use~\citep{schick2023toolformer} or exploring environments~\citep{carta2023grounding, lin2023swiftsage}.
+
+Serving as the core of model training, choosing and utilizing desirable datasets are critical for both quickly adapting models given a fixed budget ~\citep{xie2023data} and maximizing the performance for a targeted task ~\citep{wang2023far, xia2024less}. An automatic data selection algorithm that chooses a subset based on certain information is gaining its needs given the massive amount of corpora available online. Gradient information, which reflects the optimization process and has direct correlation with the final model performance, is one of the most common criterion for data selection \citep{mirzasoleiman2020coresets, killamsetty2021grad, killamsetty2022automata, yang2023towards, pan2024g, xia2024less}. However, how to effectively utilize gradient for actual selection process is still a challenging problem.
+Top-$k$ selection is fast and the most straightforward way, where data quality is ranked via the similarity scores of individual gradient vectors and the main gradient trajectory \citep{xia2024less}. Nonetheless, due to its independence assumption, its performance is often suboptimal compared to joint selection \citep{evans2024data}. Orthogonal Matching Pursuit \citep{cai2011orthogonal, killamsetty2021grad} can perform joint selection through interatively removing subspace projections, but is highly time-inefficient and requires solving a non-negative least square for as many iterations as the target subset sample size.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.98\linewidth]{figs/gtp_pull_final.pdf}
+    \caption{
+    Our method selects a subset of training data through pursuit process of gradient trajectories on a target subspace during \textit{warmup} training. The algorithm automatically de-duplicates samples instead of simply selecting the top-$k$ data. Text examples in the figure are drawn from instruction tuning datasets.
+    }
+    \label{fig:pullfig}
+\end{figure}
+In this paper, we introduce \textit{Gradient Trajectory Pursuit (GTP)}, an algorithm that selects data samples through matching the trajectory on a gradient subspace. As discussed in previous works, a model's optimization process can be seen as the Langevin dynamic of an energy-based model ~\citep{welling2011bayesian}, and matching the optimization process can lead to model weights with similar performance \citep{zhao2021dataset, cazenavette2022dataset}. This sets the base rationale for our algorithm. Further drawing inspiration from studies demonstrating that the optimization process happens in a subspace ~\citep{gur2018gradient, frankle2018lottery, singhal2023guess}, we project the gradients onto a small subspace and greatly reduces the memory cost (both on disk and RAM) during selection. This design also follows and is backed up by a recent work \citep{xia2024less}. The core of our algorithm is \textit{joint data selection}, where data weights are solved through compressive sampling matching pursuit process. The pursuit process is equivalent to starting from a top-$k$ intialization, iteratively determines the proper combination of data samples and implicitly performs de-duplication. We also showcase a distributed version of the algorithm which further reduces the selection computation time, indicating its potential for scaling up to larger datasets.
+
+
+\textbf{Our contributions are summarized as follows:}
+\begin{itemize}
+    \item We propose an algorithm that jointly selects influential language data given a subset budget, via matching trajectories in a subspace. The algorithm is both effective on select compact dataset and up to $17$x more efficient compared to a vanilla orthogonal matching pursuit-based algorithms and automatically performs de-duplication compared to top-$k$. Our algorithm also support distributed selection across machines.
+    \item We experimentally show great improvements over the prior methods on two challenging benchmarks for language models, demonstrating our algorithm's usage on both in-domain and target-domain data selection. Specifically, we show that our algorithm can select only 0.5\% of the whole dataset to achieve full performance on targeted instruction tuning.
+    \item We in-depth analyzes our algorithms, including the convergence, the progression of subset quality over iterations, and comparison with top-$k$ selected data on ALFWorld agent dataset, providing understandings on how gradient similarities can lead to duplication and our algorithm's adjustment process for creating a compact subset.
+\end{itemize}
+
+
+\section{Related works}
+
+\textbf{Coreset data selection.} Building an effective training dataset has evolved to the cornerstone of foundation model construction. Due to the heavy cost of human annotation and filtering, a flux of works are developed to perform automated data selections. \textit{Features of data} carry information that discriminates samples and are often used for selecting representative points~\citep{sener2017active, kaushal2019learning, xia2020predicting, wang2020optimizing, xia2022moderate, xie2023data}. N-gram features~\citep{xie2023data} are used for re-weighting and selecting samples for pre-training, demonstrating strong correlations with target domains. Deep learning features~\citep{zhang2018unreasonable, hanawa2020evaluation, xia2024less} are common choices for effective baselines measuring data similarities. Although frequently adopted, feature-based methods are not guaranteed to have correlation with model optimization. \textit{Gradient information} is another natural choice for selecting influential data~\citep{yu2020gradient, mirzasoleiman2020coresets, mindermann2022prioritized, han2023understanding, xia2024less}. Different from features, gradients often reflect more information about the model optimization process~\citep{mirzasoleiman2020coresets, xia2024less}, but often are used for in-domain selection~\citep{mirzasoleiman2020coresets, killamsetty2021grad} and suffer from the curse of dimensionality, given the current model sizes~\citep{brown2020language, jiang2023mistral}. Instead, our work allows for both in-domain selection and target domain transfer, and focuses low-dimensional representations. Besides the choices of representations, selection algorithms also play a crucial role. Various sampling methods or clustering algorithms are explored~\citep{sener2017active, kaushal2019learning, xia2020predicting, wang2020optimizing, mirzasoleiman2020coresets, killamsetty2021grad}. \textit{Data Models}~\citep{ilyas2022datamodels, engstrom2024dsdm}, \textit{LLM-asking}~\citep{sachdeva2024train}, or information optimization~\citep{everaert2023gio} have shown their effectiveness. Note that among these methods, gradient-based ones usually have more theoretical supports due to its connection with model optimization.
+
+\setlength{\parindent}{0pt}\textbf{Data influence.} Computing the data influence for model is another line of work for determining the importance of samples. Influence function for deep neural networks~\citep{koh2017understanding, koh2019accuracy} can approximate the influence of dropping training samples. Trajectory influence~\citep{pruthi2020estimating, han2023understanding, xia2024less} is different definition introduced to measure how each data sample affects the whole model training dynamics. Top-$k$ selection and variants are adopted for selecting data with higher trajectory influences~\citep{han2023understanding, xia2024less}.
+
+\setlength{\parindent}{0pt}\textbf{Model training dynamics and SDEs.} It has been shown that machine learning model trainings are also a diffusion processes~\citep{welling2011bayesian, stephan2017stochastic, wenzel2020good} defined through stochastic differential equations. Commonly known in generative models, diffusion processes converge to desired distributions when following the target score vector (gradient) field~\citep{song2019generative, song2020score, ho2020denoising}. Several works~\citep{de2022convergence, zhu2024boundary, benton2024nearly} also explore the mixing rate and convergence bounds of diffusion models. Similarly, in optimization processes, when following the gradient vector field, trained models can converge to the same parameter distribution ~\citep{zhao2020dataset, cazenavette2022dataset}.
+
+
+
+\section{Our method}
+
+
+In this section, we introduce our algorithm Gradient Trajectory Pursuit (GTP), a framework designed to select influential language data through joint data selection. We start from introducing the problem formulation in section \ref{sec:formulation}, discussing the base rationale behind trajectoy matching, then explain the main algorithm and the distribtued variants in section \ref{sec:gtp}. Finally, we discuss the complexity and computation time of our algorithm in section \ref{sec:complexity}.
+\subsection{Problem statement}
+\label{sec:formulation}
+
+\textbf{Problem definition.} Given a large collection of training samples $\mathcal{D}_{tr}=\{(\bx_i, \by_i)\}_{i=1}^N$, the goal is to select a small subset $\mathcal{D}_{S}=\{(x_{s_i}, y_{s_i})\}_{i=1}^M$ that maximizes the generalization performance of models trained on it when evaluated on a test set $\mathcal{D}_{te}$. This test set may either be drawn from the same distribution as the training data or from a different, task-specific distribution, leading to \textit{in-domain} or \textit{targeted-domain} data selection.
+
+\textbf{Main idea.} We approach the subset selection problem from considering model training dynamics. With a training set, the gradient descent process converges to the posterior distribution $p(\btheta|\mathcal{D}) \propto p(\mathcal{D}|\btheta)$ over the model parameter $\vec{\theta}$. Assuming the existence, if a selected subset $\mathcal{D}_{S}$ has a gradient vector field w.r.t. $p(\btheta|\mathcal{D}_{S})$ that closely matches the gradient vector field of the full dataset, a model trained using the subset can converge to the same distribution over $\btheta$. Considering the intensive computation cost for computing and matching over the whole gradient vector field\footnote{For example, if we store gradient of a full language model over the full training set, the storage is equivalent to saving $N$ copies of language models. Every parameter state we consider will need a set of $N$ copies, leading to $N\times \text{number of states}$ stored on disk or RAM.}, we only focus on a part of parameter states obtained from teacher training and perform matching in a subspace. This draws inspiration from findings that the optimization process actually happens in a subspace \citep{gur2018gradient, frankle2018lottery, singhal2023guess} where a random guess can already perform decently well. We use parameter states from early trajectories, assuming that the early training provides the most diversity and larger gradient subspace since optimization is an information collapse process. To minimize the matching objective, we collectively solve $|\mathcal{D}_{S}|$ samples, and perform joint selection among all data points. This differs from previous works, where ~\cite{killamsetty2021grad} focuses on online settings (ours is offline) and uses OMP to select one sample per iteration (leading to scaling issue in offline cases), while compared to \cite{xia2024less} which uses independent selection, our algorithm performs joint selection to achieve better performance. We do not make specific assumptions on in-domain or target-domain and use $\mathcal{D}_{tar}$ to denote the target dataset, which can come from either in-domain data or target domains. Our full algorithm is summarized in algorithm \ref{alg:gtp}. The detailed algorithm components and derivation are discussed in the following section.
+
+\subsection{Gradient Trajectory Pursuit}
+\label{sec:gtp}
+
+\begin{algorithm}[t]
+\caption{\textsc{GTP} Algorithm}\label{alg:gtp}
+\begin{algorithmic}
+\Require Target dataset $\mathcal{D}_{tar}$; train dataset $\mathcal{D}_{tr}$; model parameter trajectory $\Big(\btheta^{(0)},\ \btheta^{(1)},\ ...,\ \btheta^{(T)}\Big)$; number of selected samples $M$; gradient dimension $d$; subspace dimension $d_s$; selection algorithm \textsc{alg}
+\State // \textcolor{gray}{Subtract gradients}
+
+\State Get gradients of data from both train and target $\mathcal{G}^{tr} = \Big(\vec{g}_0^{tr},\ ... ,\ \vec{g}_T^{tr}\Big)$ and $\mathcal{G}^{tar} = \Big(\vec{g}_0^{tar},\ ...,\ \vec{g}_T^{tar}\Big)$
+
+\State // \textcolor{gray}{Compute target subspace}
+
+\State Obtain subspace of target gradients $\mathcal{G}^{tar}$ across timesteps: $\mathcal{U} = \Big(U^0,\ ...,\ U^T\Big)$
+
+\State // \textcolor{gray}{Project gradients}
+
+\State Project training data gradient to subspace as $\mathcal{G}_{\mathcal{U}}^{tr}=\Big(U^0 \circ \vec{g}_0^{tr},\ ...,\ U^T \circ \vec{g}_T^{tr}\Big)$
+
+\State // \textcolor{gray}{Compute $\vec{A}$ and $\vec{b}$}
+
+\State Concatenate $\mathcal{G}_{\mathcal{U}}^{tr}$ across timesteps and obtain $\vec{A}$ \Comment{$\vec{A}$ matrix has size $|\mathcal{D}_{tr}|\times Td_s$}
+
+\State // \textcolor{gray}{$\mathcal{G}_{\mathcal{U}}^{tar}$ is $\mathcal{G}_{\mathcal{U}}^{tr}$ if in-domain}
+
+\State Mean across the batch axis of $\mathcal{G}_{\mathcal{U}}^{tar}$ and get $\vec{b}$ \Comment{$\vec{b}$ vector has size $Td_s$}
+
+\State // \textcolor{gray}{Select subset $\mathcal{S}$ using matching pursuit algorithm given $\vec{A}$ and $\vec{b}$}
+
+\If{\ \textsc{alg} == \textsc{IterCoSamp}\ }
+\State $\mathcal{S} = \textsc{IterCoSamp}(\vec{A},\ \vec{b},\ M,\ \#\text{iters})$\Comment{Number of iterations: $\#$\text{iters}}
+\ElsIf{\ \textsc{alg} == \textsc{DistCoSamp}\ }
+\State $\mathcal{S} = \textsc{DistCoSamp}(\vec{A},\ \vec{b},\ M,\ $\#$\text{iters},\ \#\text{machines})$\Comment{Number of machines: $\#$\text{machines}}
+\EndIf
+
+\State Output $\mathcal{S}$\Comment{$|\mathcal{S}|=M$}
+\end{algorithmic}
+\end{algorithm}
+
+We denote the parameter states on the optimization trajectory as $\vec{\tau}=\big(\btheta^{(0)}, \btheta^{(1)}, ..., \btheta^{(T-1)}\big)$. $T$ can be manually set. To select the index subset $S$ that matches the gradient of target dataset in a subspace, we define the following objective function:
+\begin{equation}
+\label{eqn:vecdiff}
+    \mathcal{L}_{t}(S)=\big|\big|U^{t} \circ \nabla_{\btheta^{(t)}}\log p(\btheta^{(t)}|\mathcal{D}_{tar}) - U^{t} \circ \nabla_{\btheta^{(t)}}\log p(\btheta^{(t)}|\mathcal{D}_{S})\big|\big|_2
+\end{equation}
+where $\mathcal{L}_{t}$ is the per-step matching loss, $U^t \circ \vec{g}$ denotes the projection of vector on a subspace $U^t$, $\mathcal{D}_{tar}$ is the full dataset for in-domain case and target-domain dataset otherwise. We would like to minimize the summation across steps as the final loss: $\mathcal{L}(S) = \sum_{t}\mathcal{L}_t(S)$. To formulate the selection set $S$ into the objective, we introduce a set of weights $w_i$ for each data point and define the gradient as $\nabla_{\btheta} \log p(\btheta|\mathcal{D}_{S})=\sum_{i=1}^N w_i \nabla_{\btheta} \log p((\bx_i, \by_i);\btheta),\ (\bx_i, \by_i)\sim \mathcal{D}_{tr}$, where $\vec{w}=(w_1,...,w_N)$ is regularized through L0 norm $||\vec{w}||_0$. Due to sparsity enforced in $L0$ norm, the indices of final weights $\vec{w}$ that are non-negative is the final selected set $S$. The objective function with index set incorporated is then:
+\begin{equation}
+\label{eqn:vecdiff2}
+    \mathcal{L}(S)=\sum_{t}\big|\big|U^{t} \circ \nabla_{\btheta^{(t)}}\log p(\btheta^{(t)}|\mathcal{D}_{tar}) - \sum_{i=1}^N w_i U^{t} \circ \nabla_{\btheta^{(t)}}\log p((\bx_i, \by_i);\btheta^{(t)})\big|\big|_2 + \big|\big|\vec{w}\big|\big|_0
+\end{equation}
+Note that directly optimizing the above objective function requires a proper algorithm to minimize the non-differentiable $L0$ norm in equation \ref{eqn:vecdiff2}. We will discuss the core solver variants that jointly minimize equation \ref{eqn:vecdiff2} in later this section.
+
+\textbf{The evolving subspace.} We choose to project the model gradients onto a subspace before matching, both to reduce the storage and computation cost and to rule out potential noise signals \citep{singhal2023guess}. As training progresses, parameter state at each step $t$ can have a different meaningful subspace $U^{t}$. We parallelize the subspace computation across and obtain a series of evolving subspace $\big(U^0,\ \ldots,\ U^{T-1}\big)$. To compute the subspace, we use the full training set $\mathcal{D}_{tr}$ for in-domain and use target dataset $\mathcal{D}_{target}$ for target-domain case. Note that different subspace analysis algorithms are applicable here. We adopts standard PCA for computing the principal components for the subspace.
+
+\begin{minipage}{0.46\textwidth}
+\begin{algorithm}[H]
+    \centering
+    \caption{Iterative Compressive Sampling}\label{alg:cosam}
+    \begin{algorithmic}[1]
+        \State \textsc{IterCoSamp}$(\vec{A},\ \vec{b},\ M,\  K)$
+        \State // \textcolor{gray}{Iteratively apply compressive sampling for minimizing the residual via selecting a subset of data points.}
+        \State // \textcolor{gray}{Initialize residual and empty subset.}
+        \State $\vec{r}^{0} \gets \vec{b}$
+        \State $\mathcal{S}^0 \gets \emptyset$
+        \Repeat
+        \State \text{$\vec{p}$} $\gets \text{dot}\big(\vec{A}$,\  $\vec{b}\big)$\Comment{Similarities}
+        \State $\vec{\Omega} \gets \text{supp}(\vec{p}_{|2M})$\Comment{Top $2M$ largest}
+        \State $\vec{T} \gets \vec{\Omega}\ \cup\  \mathcal{S}^{k-1}$
+        \State // \textcolor{gray}{\small{Nonnegative Least Square with submatrix}}
+        \State $\vec{w} \gets \textsc{NNLS}(\vec{A}_{|T},\  \vec{b})$
+        \State $\mathcal{S}^k \gets \text{supp}(\vec{w}_{|M})$\Comment{Top $M$ largest}
+        \State $\vec{w}' \gets \textsc{NNLS}(\vec{A}_{|\mathcal{S}^{k}},\  \vec{b})$
+        \State $\vec{r}^k \gets \vec{b}\ -\  \text{dot}\big(\vec{w}', \ \vec{A}_{|T}\big)$
+        \Until {$K$ times}
+        \State \textbf{Return} $\mathcal{S}^{K}$
+    \end{algorithmic}
+\end{algorithm}
+\end{minipage}
+\hfill
+\begin{minipage}{0.46\textwidth}
+\begin{algorithm}[H]
+    \centering
+    \caption{Distributed Compressive Sampling}\label{algorithm1}
+    \begin{algorithmic}[1]
+        \State \textsc{DistCoSamp}$(\vec{A},\ \vec{b},\ M,\  K,\  N)$
+        \State $\vec{r}^{0} \gets \vec{b}$
+        \State $\mathcal{S}^0 \gets \emptyset$
+        \State \textcolor{blue}{$\vec{A} \gets \textsc{PartitionColumn}(\vec{A},\ N)$}
+        \State \textcolor{blue}{$\vec{b} \gets \textsc{PartitionColumn}(\vec{b},\ N)$}
+        \State \textcolor{blue}{// Each machine handles a col-separated $\vec{A}, \vec{b}$}
+        \Repeat
+        \State \text{$\vec{p}$} $\gets \text{dot}\big(\vec{A}$,\  $\vec{b}\big)$\Comment{Similarities}
+        \State \textcolor{blue}{$\vec{p} \gets \textsc{GatherSum}(\vec{p})$}
+        \State $\vec{\Omega} \gets \text{supp}(\vec{p}_{|2M})$\Comment{Top $2M$ largest}
+        \State $\vec{T} \gets \vec{\Omega}\ \cup\  \mathcal{S}^{k-1}$
+        \State $\vec{w} \gets \textsc{NNLS}(\vec{A}_{|T},\  \vec{b})$
+        \State \textcolor{blue}{$\vec{w} \gets \textsc{GatherSum}(\vec{w})$}
+        \State $\mathcal{S}^k \gets \text{supp}(\vec{w}_{|M})$\Comment{Top $M$ largest}
+        \State $\vec{w}' \gets \textsc{NNLS}(\vec{A}_{|\mathcal{S}^{k}},\  \vec{b})$
+        \State $\vec{r}^k \gets \vec{b}\ -\  \text{dot}\big(\vec{w}', \ \vec{A}_{|T}\big)$
+        \Until {$K$ times}
+        \State \textbf{Return} $\mathcal{S}^{K}$
+    \end{algorithmic}
+\label{alg:dist_cosam}
+\end{algorithm}
+\end{minipage}
+
+\textbf{The non-negative least square problem.} To simplify the notations of equation \ref{eqn:vecdiff2}, we concatenate the projected gradient vector $U^{t} \circ \nabla_{\btheta^{(t)}}\log  p(\btheta^{(t)}|\mathcal{D}_{tar})$ across steps as $\vec{b}\in \mathbb{R}^{T\times D}$ where $D$ is the subspace size, and build a matrix $\vec{A}$ where each row is the projected gradient vector for a data point. With non-negative weight vector $\vec{w} \in \mathbb{R}^{1\times N}$, we arrive at a simple non-negative least square problem with $L0$ norm as regularization:
+\begin{equation}
+\label{eqn:nnlsq}
+    \min_{\vec{w}}\ ||\vec{w}||_0 \quad 
+    \text{subject to}\ ||\vec{A}\vec{w}-\vec{b}||_2^2 = 0
+\end{equation}
+The above is the equation \ref{eqn:vecdiff2} with simplified notation. To solve the objective function, we discuss two algorithms: Iterative Compressive Sampling Pursuit and Distributed Compressive Sampling Pursuit. The two algorithms are summarized in algorithm \ref{alg:cosam} and \ref{alg:dist_cosam}.
+
+\textbf{Iterative Compressive sampling pursuit.} Equation \ref{eqn:nnlsq} cannot be directly minimized through differentiation. Instead, a greedy selection algorithm that solves this problem is developed in \cite{needell2009cosamp} through iterative greedy selection based on a residual vector. In the selection process, $2M$ top data points are jointly selected all at once, a non-negative least square step is used to adjust the weights (i.e. implicit de-duplication), then the re-ranked top $M$ samples are used to update the residual vector. Compared to orthogonal matching pursuit (OMP) used in ~\cite{killamsetty2021grad}, the algorithm is much faster and scalable.
+
+\textbf{Distributed Compressive sampling pursuit.} Given the potential larger number of time steps in consideration, and the amount of data samples to be selected, compressive sampling matching pursuit can still be not mostly optimal in terms of computation time. We further design an algorithm that can distribute the pursuit process across multiple machines. We use a star model, where one center machine communicates with multiple machines and adopt column partition to build separate $\vec{A}$s that are distributed and parallelized. Details are shown in algorithm \ref{alg:dist_cosam}.
+\subsection{Computation time analysis}
+As pointed out in \cite{xia2024less}, the computation time cost for all steps should be considered. Our algorithm consists of warmup model training, gradient subtraction and storing, subspace computation, and data selection, which follows the design in \cite{xia2024less}. The main difference come from our subspace computation and selection algorithm, where we adopt PCA instead of random projection and use GTP instead of top-$k$ for data selection.
+
+\label{sec:complexity}
+
+
+
+\section{Experiments}
+
+
+\begin{table*}[t]
+    \centering
+    \begin{tabular}{l|cccc|c} %
+    \toprule
+        Method & 5\% & 10\% & 15\% & 20\% & Full data \\ %
+        \hline
+        $\#$Samples & 500 & 1000 & 1500 & 2000 & 10000 \\
+        \hline
+        Random & 42.7 (2.8) & 61.3 (3.5) & 71.7 (3.1) & 80.5 (3.1) & \multirow{10}{*}{85.6 (2.6)} \\
+        LESS$_{\text{SGD}}$ (top-$k$) & 38.9 (1.7) & 41.6 (1.2) & 42.4 (2.2) & 43.2 (0.9) \\
+        G-DIG & 48.8 (4.2) & 58.4 (3.5) & 70.1 (1.9) & 75.6 (2.1) \\
+        RDS (representation-based) & 37.3 (1.8) & 63.0 (2.1) & 74.9 (2.4)  & 80.8 (1.2) \\
+        \cline{1-5}
+        \textbf{GTP - full (ours)} & \textbf{52.7 (3.0)} & \textbf{72.1 (2.8)} & \textbf{77.2 (2.4)} & \textbf{82.1 (2.9)} \\
+        $\Delta$ (improvement) over random & \textcolor{purple}{10.0\%} & \textcolor{purple}{10.8\%} & \textcolor{purple}{5.5\%} &
+        \textcolor{purple}{1.6\%} \\
+        $\Delta$ (improvement) over top-$k$ & \textcolor{purple}{13.8\%} & \textcolor{purple}{30.5\%} & \textcolor{purple}{34.8\%} &
+        \textcolor{purple}{38.9\%} \\
+        \cline{1-5}
+        \textbf{GTP - distributed (5 machines)} & \textbf{50.4 (2.9)} & \textbf{71.6 (2.8)} & \textbf{76.2 (1.9)} & \textbf{81.6 (1.7)} & \\
+        $\Delta$ (improvement) over random & \textcolor{purple}{6.6\%} & \textcolor{purple}{10.3\%} & \textcolor{purple}{4.5\%} &
+        \textcolor{purple}{0.8\%} \\
+        $\Delta$ (improvement) over top-$k$ & \textcolor{purple}{10.4\%} & \textcolor{purple}{30.0\%} & \textcolor{purple}{33.8\%} &
+        \textcolor{purple}{38.1\%} \\
+        \bottomrule
+    \end{tabular}
+    \caption{Comparison across methods on ALFWorld expert demonstration dataset under various budgets. Top-$k$ selection leads to data points that are more similar (duplicate in terms of information). Joint selection using GTP outperforms all baseline methods consistently.}
+    \label{tab:main_acc}
+\end{table*}
+We evaluate our data selection algorithm on standard benchmarks against gradient-based prior arts. In section \ref{sec:alfw}, we perform in-domain data selections on large language model agent tasks. In section \ref{sec:tgt}, we compare algorithms on targeted instruction tuning, a benchmark focusing on empowering language model to adeptly follow human instructions.
+
+\subsection{LLM Agent: ALFWorld}
+\label{sec:alfw}
+
+\textbf{Benchmark setup.} ALFWorld is a suite of text environments built upon interactive Textworld ~\citep{cote2019textworld} that benchmarks agents on solving sequential tasks. Typical tasks include giving agents the current partial observed environment information and require the agents to achieve a goal (e.g., finding objects). 
+
+We focus on offline imitation learning settings. For train and test datasets, we use offline trajectories from the official ALFWorld repository ~\citep{shridhar2021alfworld} which consists of $3,553$ tasks, each with an average of 19 steps. The training set contains $48k$ state-action pairs, and test set totals at $1,861$ state-action pairs. In practice, we find that using $10k$ training data already achieves similar generalization performance compared to full training set, i.e., dataset reduction beyond $10k$ is not very meaningful since the selection can be easily done through random subset picking, and thus choose to use a subset with $10k$ data points as our main subject of study. In model evaluation, for convenience, we directly compare the model's per-step action prediction accuracy. Per-step accuracy is known to be reflective on model's ability and has a strong correlation with final success rates. 
+
+\textbf{Model setup.} For evaluating whether a dataset is effective for training, we use supervised fine-tuning on OPT-125M~\citep{zhang2022opt} with LoRA~\citep{hulora} as the basic training setup. Given a selected subset dataset for training, all models are optimized using Adam ~\citep{kingma2014adam} with a learning rate 5e-4 and batch size 80 for 20 epochs to ensure its convergence. We follow the most recent prior method ~\citep{xia2024less} to generate a warm-up training trajectory for gradient extraction and data selection. The warm-up trajectory is trained using learning rate 1e-4 and batch size 10 for 5 epochs. A model checkpoint is saved every 500 interations, resulting in model states on across timesteps. 
+
+\textbf{Baselines.} The most relevant prior method is \textbf{LESS} ~\cite{xia2024less}, where we build upon most of its pipeline, including warm-up training and gradient computation. LESS uses top-$k$ selection with scores maxing across pre-defined subtasks, which does not exist in ALFWorld. We instead directly compare individual gradient vectors with gradient trajectories.
+\textbf{G-DIG} ~\citep{pan2024g} is a baseline that uses clustering directly on gradients and samples within each cluster. Following ~\citep{xia2024less}, we also compare with \textbf{RDS} (Representation-based Data Selection) ~\cite{zhang2018unreasonable, hanawa2020evaluation}, which uses the mean of last layer hidden states for selection.
+\textbf{Main results.} We summarize the main results in table \ref{tab:main_acc}. As demonstrated in previous works ~\citep{xie2023data, xia2024less, pan2024g}, random sampling is a strong baseline to beat. Gradient-based algorithms tend to pick highly redundant examples when matching gradients. LLM Agent benchmarks contain traces with incremental steps in the training data, and need algorithms to be sensitive to sample duplication. \textit{Why does top-$k$ fail?} We visualize the selected top three examples based on the scores computed from two algorithm in figure \ref{fig:example}, showing that the initial top k selections are highly duplicated, while after our pursuit algorithm the selected samples exhibit more diversity. Representation-based selection (RDS) shows higher performance since it uses the features from pretrained model. Across different data ratios, our algorithm, both standard and distributed versions, consistently outperform the baselines. For the distributed version, we use separate the 10 timesteps into 5 machines.
+
+\begin{figure}
+	\centering
+	\includegraphics[width=\textwidth]{figs/selected_data.pdf}
+	\caption{Three examples with topmost scores from selection algorithms. \textit{Left:} Top-$k$ tends to select redundant samples due to lack of de-duplication mechanisms. \textit{Right:} GTP instead chooses diverse examples.}
+	\label{fig:example}
+\end{figure}
+
+\begin{figure*}
+	\centering
+	\begin{minipage}{.5\textwidth}
+		\centering
+		\includegraphics[width=\textwidth]{figs/GTP_residual.png}
+		\caption{Residual norms across iterations.}
+		\label{fig:exp:res_norm}
+	\end{minipage}%
+	\begin{minipage}{.5\textwidth}
+		\centering
+		\includegraphics[width=\textwidth]{figs/GTP_acc_iters.png}
+		\caption{Subset accuracy across iterations.}
+		\label{fig:exp:iteracc}
+	\end{minipage}
+\end{figure*}
+
+\textbf{Residual norms across iterations.} We rollout 10 steps of compressive sampling matching pursuit iterations and monitor the L2 norm of residual vectors. The residual norm trends are shown in figure \ref{fig:exp:res_norm}. Typically the algorithm converges after 5 steps. 
+\textbf{Correlation between residual norm and model performance over iterations.} The initial step of GTP is equivalent to a top-$k$ selection, and later iterations of GTP algorithm can be seen as a process of de-duplication through adjusting the data weights $\vec{w}$. In figure \ref{fig:exp:iteracc}, we plot the accuracies of subsets of 1000 samples selected after each GTP iteration. Through progressively solving the data weights $\vec{w}$, the performance gradually improves. We only plot 5 steps since the algorithm plateaus (see figure \ref{fig:exp:res_norm}).
+\begin{wrapfigure}{r}{0.43\textwidth}
+  \begin{center}
+    \includegraphics[width=0.43\textwidth]{figs/computation_time.png}
+  \end{center}
+\label{fig:computation}
+\end{wrapfigure}
+
+\textbf{How does the algorithm computation time scale with number of samples?} As another algorithm for joint data selection, orthogonal matching pursuit (OMP) can also collectively solve data weights for de-duplication \citep{killamsetty2021grad}. We compare our algorithm GTP, its distributed version, and OMP across various number of budget samples. OMP selects only one sample per iteration while each requires a separate solving of non-negative least squre problem. This rapidly increases the computation time with more samples. Our algorithms, based on compressive sampling process, can scale well and have a much more mild computation time curve.
+
+
+\subsection{Targeted instruction tuning}
+\label{sec:tgt}
+\textbf{Task setup.} We follow the setup in \cite{xia2024less} and evaluate our algorithm on the \textit{targeted instruction tuning} task. Compared to standard instruction tuning where mixed datasets are used to finetune large language model to follow human instructions, targeted instruction tuning individually selects data samples for different target benchmarks for finetuning language models. The selection algorithm hence plays an important role for improving the final trained model performance. For example, multiple works find that when various data sources are mixed together, it can negatively impact the model performance for different target tasks ~\cite{wang2023far, xia2024less}, while ~\cite{xia2024less} achieves equivalent or better results with only 5\% of the full dataset.
+
+\textbf{Datasets and models.} We follow the settings from \cite{xia2024less} and use a diverse and mixed collection of public instruction tuning datasets as the main training set to select from. The datasets include: Flan V2~\citep{longpre2023flan}, CoT~\citep{wei2022chain}, Dolly~\citep{conover2023free}, and Open Assistant~\citep{kopf2024openassistant}. The four datasets are commonly used in various models and benchmarks. For the language model being tested upon, we use Mistral-7B ~\citep{jiang2023mistral}\footnote{We do not evaluate Llama series due to license issue.}. 
+
+\textbf{Implementation details.} To build the initial parameter states for extracting gradients, we warmup train Mistral-7B (also with LoRA) for 4 epochs using 5\% of the full dataset. Data gradient extractions are performed in parallel across machines. We use the selected data from each benchmark as the target dataset and compute subspace and target gradient $\vec{b}$. These are exactly following the standard setups in \cite{xia2024less}. The GTP iterations are performed 5 times to select the final subset.
+\begin{wraptable}{r}{7.0cm}
+\begin{tabular}{l|cccc} %
+    \toprule
+        & MMLU & BBH & TydiQA \\ %
+        \hline
+        Base & 62.4 & 57.7 & 52.2\\
+        \hline
+        Rand & 60.0 & 54.5 & 56.9 \\
+        LESS & 61.8 & 56.0 & 60.3 \\
+        \hline
+        \textbf{GTP (ours)} & \textbf{62.0} & \textbf{60.0} & \textbf{64.5} \\
+        $\Delta$ \textbf{(improv.)} & \textcolor{purple}{\textbf{+0.2}} & \textcolor{purple}{\textbf{+4.0}} & \textcolor{purple}{\textbf{+4.2}} \\
+        \#Samples & 1353 & 1353 & 1353 \\
+        Runtime (seconds) & 800 & 355 & 65 \\
+        \bottomrule
+    \end{tabular}
+\caption{Comparison of our algorithm with state-of-the-art algorithm \citep{xia2024less}.}\label{tab:eval_acc}
+\end{wraptable} 
+\textbf{Evaluation benchmarks and results.} There are three targeted benchmarks considered in the task: MMLU~\citep{hendrycks2020measuring}, BBH~\citep{srivastava2023beyond}, and TydiQA~\citep{tydiqa}. MMLU is a \textit{de-facto} benchmark for evaluating large language model's capability on 57 subsets across elementary mathematics, humanities, law, social sciences and more. BBH evaluates the reasoning capability of large language models. It is curated as a subset of the BIG-Bench benchmark, focusing on 27 tasks where current models struggle to match human performance. TyDiQA is a multilingual question-answering benchmark covering 11 diverse languages, and features questions from native speakers seekingn answers. \textit{Main result.} The test accuracies of models trained  on MMLU, BBH, and TydiQA benchmarks are summarized in table \ref{tab:eval_acc}. We observe that our algorithm outperforms the prior method \citep{xia2024less} by 0.2\% on MMLU, 4.0\% on BBH, and 4.2\% on TydiQA using only 0.5\% of the full dataset, achieving a $10$x reduction on the selected subset size and achieves better results. 
+
+
+
+
+\section{Discussion and related works}
+
+
+
+
+\section{Conclusions}
+
+
+In this paper, we propose an algorithm (GTP) that can both perform joint data selection and has the scalability towards larger target sample sizes. The algorithm automatically de-duplicates samples and can potentially serve as a standard selection technique other than top-$k$. Both in-domain selection and target-domain selection are applicable for GTP. For potential limitations, gradient-based methods still rely on a few steps of model training, which can be more expensive than pure representation-based methods or influence function methods. It will be worth attempting to connect matching pursuit with representation-based or influence function methods and develop an algorithm that does not require additional model training for data selection. 
+
+
+
+
+
+
+
+
+
+

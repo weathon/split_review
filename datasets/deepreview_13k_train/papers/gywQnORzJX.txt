@@ -1,0 +1,455 @@
+\title{NPEFF: Non-Negative Per-Example Fisher Factorization}
+
+\begin{abstract}
+As deep learning models are deployed in more and more settings, it becomes increasingly important to be able to understand why they produce a given prediction, but interpretation of these models remains a challenge. In this paper, we introduce a novel interpretability method called NPEFF that is readily applicable to any end-to-end differentiable model. It operates on the principle that processing of a characteristic shared across different examples involves a specific subset of model parameters. We perform NPEFF by decomposing each example's Fisher information matrix as a non-negative sum of components. These components take the form of either non-negative vectors or rank-1 positive semi-definite matrices depending on whether we are using diagonal or low-rank Fisher representations, respectively. For the latter form, we introduce a novel and highly scalable algorithm. We demonstrate that components recovered by NPEFF have interpretable tunings through experiments on language and vision models. Using unique properties of NPEFF's parameter-space representations, we ran extensive experiments to verify that the connections between directions in parameters space and examples recovered by NPEFF actually reflect the model’s processing. We further demonstrate NPEFF's ability to uncover the actual processing strategies used by a TRACR-compiled model. We further explore a potential application of NPEFF in uncovering and correcting flawed heuristics used by a model. We release our code to faciliate research using NPEFF
+\end{abstract}
+
+\section{Introduction}
+
+
+Neural networks trained on large datasets have achieved human-level performance on many tasks.
+Unfortunately, these models do not provide any direct method to understand what they have learned or how they have solved the task \citep{smilkov2017smoothgrad, dabkowski2017real, sundararajan2017axiomatic}.
+This lack of interpretability can hamper progress in developing new machine learning models and can act as a hindrance to their adoption by making it hard to trust that the model's predictions are based on sound principles \citep{li2022interpretable}.
+
+In this work, we propose NPEFF (\textbf{N}on-Negative \textbf{P}er-\textbf{E}xample \textbf{F}isher \textbf{F}actorization), an interpretability method that makes use of the model's \textit{parameter space} to produce representations of concepts.
+Our method can be used with any end-to-end differentiable model without requiring any customization to particular architectures.
+NPEFF extracts these concepts unsupervisedly given a set of examples.
+It also provides a theoretically principled way to produce guided changes in a given model's behavior by using these concept representations to directly alter a model's parameters.
+
+NPEFF operates on the hypothesis that a neural network's processing of inputs can be decomposed into a hierarchical set of abstract sub-computations.
+The computation performed by a model therefore makes use of a fixed set of learned sub-computations, and its processing on any particular example involves a sparse subset of them.
+Whether a given sub-computation is used for a given example therefore depends on the abstract concepts that underlie the example.
+Across examples, we assume that each sub-computation will involve a consistent subset of parameters that perform a similar operation.
+Since the Fisher information matrix for each example relates perturbations in model parameters to changes in the model's predictive distribution, the sub-computations applied to an example become imprinted in it.
+
+NPEFF disentangles these sub-computations given a collection of per-example Fishers (PEFs) through a decomposition procedure.
+We provide two versions of NPEFF that operate on different representations of the PEF matrices: a diagonal approximation and an exact low-rank representation.
+When using diagonal PEFs, our decomposition procedure becomes equivalent to non-negative matrix factorization (NMF) \citep{lee1999learning}.
+In the low rank case, we represent each example's PEF matrix as a non-negative sum of rank-1 positive semi-definite matrices.
+To the best of our knowledge, this is a novel decomposition, and we introduce a scalable, multi-GPU algorithm for computing it.
+
+The output of an NEPFF decomposition provides a direct way to quantify the importance of each component to the model's processing of each example.
+Looking at the examples most influenced by a particular component provides a means to infer what concept or heuristic the component represents.
+Furthermore, NPEFF generates a ``pseudo-Fisher'' matrix for each component that can be used to estimate the impact of parameter perturbations on their associated sub-computations.
+By constructing perturbations that selectively impact particular components, we can verify that the components reflect how the model actually processes examples.
+
+Overall, NPEFF provides a way to interpret a model's processing by extracting the computational sub-steps it uses.
+In our experiments on text and vision models, we find that these sub-steps often corresponded to human-recognizable concepts by inspecting component top examples.
+Our parameter perturbation experiments demonstrate that the component pseudo-Fishers indeed reflect parameters important for their particular computational steps.
+We further ran experiments on a TRACR-compiled toy model implementing a known ground-truth algorithm and demonstrate that components align with sub-steps of the computation.
+We also explored a potential application of NPEFF's parameter perturbation to correcting faulty heuristics used by a model.
+Finally, we include experiments demonstrating the robustness of NPEFF to choices of hyperparameters. 
+
+
+
+\section{Non-Negative Per-Example Fisher Factorization (NPEFF)}
+
+\subsection{Fisher Information}
+Consider a classification model $p_\theta(y|\x)$ with parameters $\theta \in \R^m$ that maps inputs $\x\in\mathcal X$ to a softmax distribution over $C$ labels.
+Given any example $\x\in\mathcal X$, we define the per-example Fisher (PEF) matrix as
+\begin{equation}\label{eq:dense_pef_matrix}
+    F(\x) = \mathbb E_{y\sim p_\theta(y|\x)} \nabla_\theta \log p_\theta(y|\x) \nabla_\theta \log p_\theta(y|\x)^T.
+\end{equation}
+The Fisher information matrix has an information geometric interpretation as a metric relating local perturbations in parameters to changes in the model's predictive distribution \citep{amari2016information}
+\begin{equation}\label{eq:fisher_info_geom}
+    D_\mathrm{KL}(p_\theta(y|\x) \| p_{\theta+\delta}(y|\x)) \approx \frac12 \delta^T F(\x) \delta
+\end{equation}
+as $\delta \to \0$, where $D_\mathrm{KL}$ is the KL divergence.
+If we let $\a_j(\x) = \sqrt{p_\theta(y_j|\x)} \nabla_\theta \log p_\theta(y_i|\x)$, then we can express the PEF as $F(\x) = \sum_{j=1}^C \a_j(\x) \a_j(\x)^T$.
+We can thus represent the full PEF matrix using only $Cm$ values, which we call its low-rank representation or LRM-PEF.
+Alternatively, we can use the diagonal of the PEF matrix as its representation, which we call the diagonal PEF or D-PEF \citep{kirkpatrick2017overcoming}.
+In this case we have
+\begin{equation}\label{eq:dense_pef_vector}
+    \f(\x) = \mathbb E_{y\sim p_\theta(y|\x)} \left(\nabla_\theta \log p_\theta(y|\x)\right)^2.
+\end{equation}
+Unlike the LRM-PEF which is an exact representation, the D-PEF corresponds to the approximation $F(\x) \approx \Diag(\f(\x))$.
+Generally, D-PEFs are more tractable to process than LRM-PEFs when the number of classes $C$ is large.
+
+\paragraph{Sparsity}
+Since the number of parameters $m$ can be very large for real world models, storing D-PEFs or LRM-PEFs for a modestly sized data set can become intractable.
+Fortunately, we empirically observe that most of the entries of the PEFs for typical trained neural networks tend to be very small in magnitude.
+This is to be expected from prior works on model pruning \citep{hoefler2021sparsity}, which finds that most parameters are not important for the model's behavior \citep{frankle2018lottery}.
+In our work, we fix some value $K \in \N$ and sparsify each PEF representation by using only the $K$ values with the largest magnitudes.
+This significantly reduces the amount of required storage and compute with relatively little impact on the accuracy of the representations.
+
+\paragraph{Number of Classes}
+For tasks with only a few classes, we can include the term for every class in \eqref{eq:dense_pef_matrix} and \eqref{eq:dense_pef_vector} when computing the PEFs.
+However, this becomes prohibitively expensive as the number of classes increases, requiring roughly the same amount of computation as required for a backwards pass for each class.
+For such tasks, we thus discard terms correspond to classes whose probabilities $p_\theta(y|\x)$ are below some threshold $\epsilon$.
+
+\subsection{Decomposition}
+Let $\mathcal D = \{\x_1,\dotsc,\x_n\}$ be a set of examples.
+Let $F_i$ correspond to our representation of the Fisher matrix for the $i$-th example, i.e.\ $F_i = \sum_{j=1}^C \a_j(\x_i) \a_j(\x_i)^T$ if we are using LRM-PEFs or $F_i = \Diag(\f(\x_i))$ for D-PEFs.
+The decomposition central to NPEFF can be expressed as the non-convex optimization problem
+\begin{equation}\label{eq:npeff_nc_opt}
+\begin{array}{ll@{}ll}
+\text{minimize}  & \sum_{i=1}^n \|F_i - \sum_{j=1}^r W_{ij} H_j \|^2_F \\
+\text{subject to} & W_{ij} \geq 0, \\
+ & H_j \in \mathcal H, \\
+\end{array}
+\end{equation}
+where $\mathcal H$ corresponds to a subset of $m\times m$ matrices and $r$ is a hyperparameter denoting the number of components to learn.
+We choose this decomposition since we can interpret the $H_j$ as a ``pseudo-Fisher'' for the $j$-th component, and the non-negative coefficients $W_{ij}$ allow us to see the contributions of each component to the KL-divergence of a model's predictions following a perturbation of its parameters.
+
+For LRM-NPEFF, $\mathcal H$ is the set of rank-1 $m\times m$-positive semi-definite (PSD) matrices.
+Any element of this $\mathcal H_j$ can be expressed as $H_j = \g_j\g_j^T$ for some vector $\g_j\in\R^m$.
+This decomposition can be described as approximating a set of low-rank PSD matrices as non-negative combinations of a set of shared rank-1 PSD matrices.
+We present a multi-GPU algorithm performing this decomposition in \cref{sec:app_lrm_nmf}.
+Importantly, this algorithm does not explicitly construct any $m\times m$-matrix and instead uses a number of inner products between $m$-dimensional vectors that is independent of $m$ itself.
+
+For D-NPEFF, $\mathcal H$ is the set of diagonal $m\times m$-matrices with non-negative entries.
+Any element of this $\mathcal H$ can be expressed as $H_j = \Diag(\h_j)$ for some non-negative vector $\h_j\in\R^m_{\geq 0}$.
+Solving \eqref{eq:npeff_nc_opt} then reduces to the well-studied problem of non-negative matrix factorization (NMF) \citep{wang2012nonnegative}.
+We used a multi-GPU implementation based on \citet{boureima2022distributed}.
+
+Both variants of NPEFF produce a non-negative matrix $W \in \R^{n\times r}_{\geq 0}$ that we call the coefficient matrix.
+It defines the relationship between individual examples and components.
+Each entry $W_{ij}$ represents the contribution of the $j$-th component to the PEF of the $i$-th example.
+The coefficient matrix allows us to get a qualitative understanding of the sub-computation associated to each component.
+Given a component, we create a list of the examples sorted by the component's coefficient and look at the ones with the highest coefficients.
+Those top examples often display an interpretable pattern from which we can infer what processing the component represents.
+
+Both NPEFF variants also produce a collection of $m$-dimensional vectors that we refer to as the component pseudo-Fishers.
+Deferring to \cref{sec:guided_perturb_meth} for further exposition, each component's pseudo-Fisher vector generates what can be interpreted as an analog of a Fisher information matrix for that component.
+We express these matrices as $H_j = \g_j\g_j^T$ for an LRM-NPEFF pseudo-Fisher vector $\g_j \in \R^m$.
+D-NPEFF generates $H_j = \Diag(\h_j)$ for the non-negative pseudo-Fisher vectors $\h_j \in \R^m_{\geq 0}$.
+\paragraph{Preprocessing}
+During initial experimentation, we found that using raw PEFs led to components tuned to outlier examples.
+We suspect that outlier examples tend to have PEFs with large magnitudes, and thus their contributions dominate the loss during optimization.
+To rectify this, we normalized PEFs to have unit Frobenius norm \textit{before} sparsification.
+This has the effect of de-emphasizing examples for which the sparse approximation is poor; however, we expect any difference in the outcome to be minimal.
+Efficient computation of the Frobenius norm is described in \cref{sec:app_lrm_pef_norm}.
+
+Our decomposition algorithms make use of a dense representation of the pseudo-Fisher vectors, and thus a naive implementation would require the use of $rm$ floats to represent them.
+However, the sparsification of the PEFs leads to many parameters having few non-zero corresponding entries.
+We are able to greatly reduce the memory burden by pruning these entries across the PEFs and using a dimensionality of $m' < m$.
+We suspect these positions do not contain enough effective ``data-points'' to contribute meaningfully to the factorization, so its validity should be minimally impacted. 
+\paragraph{Coefficient Fitting}
+Once we have computed the pseudo-Fisher vectors on a data set $\mathcal D$, we can fit a coefficient matrix to PEFs created from another data set $\mathcal D'$.
+Importantly, this allows us to see if the tunings of NPEFF components generalize to examples not used to generate them.
+Since both of the LRM-NPEFF and D-NPEFF decomposition algorithms operate by alternating between updating the coefficient matrix and updating the pseudo-Fisher vectors, we can fit coefficients to a fixed set of pseudo-Fishers by repeatedly only performing the coefficient matrix update step.
+By caching intermediates that do not depend on the coefficients, coefficient fitting can be performed far more efficiently than a full NPEFF decomposition.
+
+\paragraph{Components Set Expansion}
+Having learned an NPEFF decomposition using a large, general set of examples, we can expand the set of components to create components specialized to another set of examples that are of particular interest.
+The process is similar to that of a regular NPEFF decomposition with the exception that a subset of component pseudo-Fishers are initialized using the existing decomposition.
+These are then frozen throughout the decomposition procedure.
+This leads to the frozen components capturing the general-purpose processing trends leaving the non-frozen components to capture processing specific to that set of examples.
+
+\subsection{Guided Perturbations}\label{sec:guided_perturb_meth}
+Recall from \eqref{eq:fisher_info_geom} how PEF matrices can be used to relate perturbations of model parameters to changes in its predictive distribution for an example.
+Using the NPEFF decomposition, we can approximate a PEF matrix for example $\x_i$ as $F_i \approx \alpha_i \sum_{j=1}^r W_{ij} H_j$, where $\alpha_i$ is the Frobenious norm of $F_i$.
+Plugging this into \eqref{eq:fisher_info_geom} gives us
+\begin{equation}\label{eq:npeff_info_geom}
+    D_\mathrm{KL}(p_\theta(y|\x_i) \| p_{\theta+\delta}(y|\x_i)) \approx \frac{\alpha_i}{2} \sum_{j=1}^r W_{ij} \delta^T H_j \delta
+\end{equation}
+for a parameter perturbation $\delta \in \R^m$.
+From this, our choice of calling $H_j$ the ``pseudo-Fisher matrix'' for the $j$-component should be clear: it can be used to relate the disruption of the model's predictions on examples utilizing the component to perturbations of parameters.
+Furthermore, this justifies our choice of decomposition method since the uncovered factors can be readily interpreted in \eqref{eq:npeff_info_geom}.
+
+The equation \eqref{eq:npeff_info_geom} provides a theoretically principled way to verify relationship between parameters and examples uncovered by NPEFF.
+The goal is to find a perturbation $\delta \in \R^m$ such that $\delta^TH_k\delta$ is large when $k = j$ for a chosen component $j$ and is small otherwise.
+Once one is found, we can compare the KL-divergences between the perturbed and original models' predictions on examples to their coefficients for the $j$-th component.
+
+For LRM-NPEFF, recall that each pseudo-Fisher matrix $H_k$ can be expressed as $\g_k\g_k^T$ for some vector $\g_k\in\R^m$.
+Thus $\delta^T H_k \delta = (\g_k^T\delta)^2$.
+We wish to find a $\delta \in \R^m$ such that $\g_k^T\delta$ has a large magnitude for $k=j$ and small magnitude otherwise.
+We found that simply using $\delta \propto \pm\g_j$ performed well, but the selectivity of the perturbation could be improved by taking the orthogonal rejection of $\pm\g_j$ onto a subset of the other components' pseudo-Fishers.
+Namely, we orthogonally reject $\pm\g_j$ onto $\g_k$ if the magnitude of their cosine-similarities is below some threshold.
+The threshold is used to prevent similar components from interfering in the construction of the perturbation.
+We found a threshold of 0.35 to work well, which is what we used throughout our experiments.
+The construction of the perturbation for D-NPEFF is more involved and is presented in \cref{sec:app_d_npeff_perturb}.
+
+
+
+\section{Experiments}
+
+
+\subsection{Component Tunings and Perturbations}\label{sec:tunings_and_perturbs_exps}
+
+We ran LRM-NPEFF on two NLP models and ran D-NPEFF on a vision model.
+The NLP models were BERT-base fine-tuned on MNLI and QQP, respectively \citep{devlin2018bert}.
+QQP is a binary classification task that aims to determine whether a pair of questions are duplicates of each other \citep{wang2018glue}.
+MNLI is a natural language inference (NLI) task that involves determining whether a given hypothesis is implied by, contradicted by, or neutral with respect to a given hypothesis \citep{mnli}.
+Thus, it has three classes.
+For the vision model, we used a ResNet-50 \citep{he2016deep} trained on the ImageNet classification task \citep{imagenet}.
+ImageNet involves classifying an image as one of 1000 fine-grained classes.
+
+When learning the NPEFF components for QQP, we used 50k examples heldout from the canonical train split to produce PEFs.
+For the NLI model, we used 50k examples from the SNLI data set \citep{bowman2015large}.
+Like the MNLI data set used to train the model, SNLI is also an NLI task with the main difference being that SNLI examples come from a single domain while MNLI has examples from multiple domains.
+We chose to do this to get a better idea of how NPEFF uncovers heuristics when a model generalizes to new data sets.
+We used 20k examples from the train split of ImageNet 2012 to produce PEFs for the vision model.
+We ignored classes with a probability of less than 3e-3 when computing the PEFs for the vision model.
+
+We used 512 components when running NPEFF on the NLI and vision models, and we used 256 components for the QQP model.
+Once the NPEFF pseudo-Fishers were computed, we fit coefficients to PEFs from a heldout set of examples for each model.
+We used 50k SNLI examples for the NLI model, 40,430 examples from the QQP validation set for the QQP model, and 30k examples from the ImageNet validation set for the vision model.
+All of the component tunings and perturbations presented in this section are from these heldout sets.
+More details on the models and data sets used can be found in see \cref{sec:app_models_and_data_details}.
+There, we also go into detail about the hyperparameters used when computing the PEFs and running NPEFF for these experiments.
+
+\subsubsection{Component Tunings}
+\begin{figure*}[ht]
+\centering
+
+\begin{minipage}{.49\textwidth}
+\begin{flushleft}
+\textsc{Component 70:}\\
+
+\begin{tiny}
+\qqpmainex
+{Which is the best dish tv connection in \textbf{hyderabad}?}
+{Which is the best dish tv connection in \textbf{bangalore}?}
+\qqpmainex
+{Which is the best eye hospital in \textbf{kolkata}?}
+{Which is the best eye hospital in \textbf{pune}?}
+\qqpmainex
+{Where can i buy second hand books in \textbf{hyderabad}?}
+{Where can i buy second hand books in \textbf{india}?}
+\qqpmainex
+{What is the best coaching center for gre in \textbf{chennai}?}
+{What is the best coaching center for gre in \textbf{bangalore}?}
+\end{tiny}
+\end{flushleft}
+\end{minipage}
+\begin{minipage}{.49\textwidth}
+\begin{flushleft}
+\textsc{Component 345:}\\
+\begin{tiny}
+\snlimainex
+{Two men in the kitchen with a \textbf{pot} on the stove.}
+{Two men cook a \textbf{pot of soup} in the kitchen.}
+\snlimainex
+{A young girl is \textbf{eating} as she sits at a table full of food.}
+{A young girl is \textbf{eating fruit} at a table.}
+\snlimainex
+{A child is looking at an \textbf{exhibit}.}
+{A child looks at an \textbf{exhibit of a monkey}.}
+\snlimainex
+{3 men are working on a \textbf{boat}.}
+{3 men are working on a \textbf{crab boat in alaska}.}
+\end{tiny}
+\end{flushleft}
+\end{minipage}
+\caption{%
+Top examples for two language components. The examples presented are the ones with the 4 highest coefficients.
+\textbf{(Left)}
+QQP component.
+The model correctly predicts that these questions pairs are not duplicates.
+Despite asking for the same information, they differ in geographic location.
+\textbf{(Right)} 
+The model correctly predicted ``neutral'' for these examples.
+The hypothesis is consistent with the premise but includes additional information that cannot be inferred from the premise.
+}
+\label{fig:nlp_main_interprets}
+\end{figure*}
+
+\begin{figure}[ht]
+\centering
+\begin{minipage}{.49\textwidth}
+\centering
+\textsc{Component 36} \\
+
+\includegraphics[width=0.92\textwidth]{images/comp36_top_ex_main.png}
+\end{minipage}
+\begin{minipage}{.49\textwidth}
+\centering
+\textsc{Component 218}\\
+
+\includegraphics[width=0.92\textwidth]{images/comp218_top_ex_main.png}
+\end{minipage}
+\caption{
+Top examples for two vision components.
+The top two rows for each component are the examples with the 8 highest coefficients.
+The bottom row for each component contains selected examples from the set of top 32 examples.
+\textbf{(Left)} The examples with the highest coefficients are all school buses. In general, examples with high coefficients have a yellow vehicle in them.
+\textbf{(Right)} The examples with the highest coefficients are all zebras. In general, examples with high coefficients have a striped animal in them. The specific type of animal does not seem important with fish, mollusks, lizards, and mammals being included.
+}
+\label{fig:vision_main_interprets}
+\end{figure}
+For all models, we found that most components appeared to have some potential interpretable tuning.
+We present the top examples of some components in \cref{fig:nlp_main_interprets} for the NLP models and \cref{fig:vision_main_interprets} for the vision model.
+More examples of tuned component top examples are provided in \cref{sec:app_additional_tunings}.
+
+Some components for the NLP models appeared to be tuned to strategies of solving their respective tasks for specific types of examples.
+These were typically selective for one of the predictions, and the top examples all contained some common task-specific group of features.
+Other components appeared to be tuned for features not directly related to the task (e.g.\ existence of certain kinds of words).
+It was often the case that a component would use a combination of these two tuning styles.
+
+Many components for the vision model had tunings that included relatively low-level features such as color, shape, and spatial patterns.
+More abstract, high-level features also played in a role in the tunings of many components.
+These range from broad, coarse-grained attributes such as the general category of the image subject (e.g.\ animal, plant, vehicle, architecture, technology, etc.) to more specific, fine-grained attributes such as the fur patterns of dogs.
+Many of the components had tunings that included both low-level and high-level features.
+In those cases, the low-level features were often predictive of the higher level ones.
+\subsubsection{Perturbations}\label{sec:main_perturbs}
+
+For the LRM-NPEFF experiments on the NLI and QQP models, we used the perturbation method discussed in \cref{sec:guided_perturb_meth}.
+Perturbation vectors were scaled to have an L2 norm of 0.1 before applying them to the model parameters.
+We then measured the per-example KL-divergence of the perturbed model's predictions from the original model's predictions.
+To score the selectivity of the perturbation's impact on the top examples of a component, we calculated the ratio of the average of this KL-divergence for the component's top 128 examples to the average KL-divergence for a random subset of 10k examples.
+Since the sign of the perturbation is not determined by the method in \cref{sec:guided_perturb_meth}, we try both adding and subtracting the perturbation to the model parameters.
+The reported scores correspond to whichever has a higher KL-ratio.
+Details of the perturbation experiments for the D-NPEFF decomposition of the vision model can be found in \cref{sec:app_vision_dnpeff_pert_details}.
+Looking at the expression \eqref{eq:npeff_info_geom} relating the KL-divergence of a model's prediction to a perturbation of its parameters, we see that the KL-divergence is directly proportional to norm of the example's PEF.
+In contrast, the coefficients used to rank the top examples for a component are computed using normalized PEFs and thus are independent of their norms.
+To explore the impact of this confounding factor, we computed the ratio of the average PEF Frobenius norm of the top 128 examples for each component to the average norm of a random subset of 10k examples.
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.325\textwidth]{images/main_qqp_perturb_ratios.pdf}
+\includegraphics[width=0.325\textwidth]{images/main_snli_perturb_ratios.pdf}
+\includegraphics[width=0.325\textwidth]{images/main_imagenet_perturb_ratios.pdf}
+\caption{Histograms of the $\log_2$ ratios between top component examples and random examples for KL-divergence and PEF norm.}
+\label{fig:main_kl_ratios}
+\end{figure}
+
+Histograms of the KL-divergence and PEF norm ratios are presented in \cref{fig:main_kl_ratios}.
+For all models, these histograms clearly show that the KL-divergence ratios tended to be significantly higher than the PEF norm ratios.
+This supports our claim that the directions in parameter space uncovered by NPEFF are specifically important for their respective component top examples.
+Furthermore, this helps verify that the concepts and heuristics uncovered by NPEFF correspond to actual processing methods used by the model.
+
+\subsection{Toy Model with Known Ground Truth}
+Since it is difficult to evaluate whether a method uncovers concepts actually used by a real-world model, we ran experiments using a synthetic task and transformer model compiled by TRACR \citep{lindner2023tracr} that implements a RASP program \citep{weiss2021thinking}
+This task simulates an extremely simplified NLI task.
+An example looks like \texttt{[BOS] Q1 S1 O1 Q2 S2 O2}, which is a concatenation of a premise and hypothesis.
+The \texttt{Q1,Q2} tokens correspond to \texttt{All} or \texttt{Some}, and a \texttt{Q S O} segment can be thought of as the sentence \texttt{[All/Some] [subject] [verb] [object]}.
+The verb is assumed fixed and shared between the premise and hypothesis, so it is not explicitly represented.
+Subjects and objects are chosen from the same set of options containing a hierarchical structure so that we can have a \texttt{is\_a\_subtype\_of} relation between options.
+Each example is given a label of \texttt{entails} or \texttt{neutral}.
+\Cref{sec:app_synthetic_task} contains the RASP program solving this task.
+It is compiled by TRACR to an encoder-style Transformer \citep{vaswani2017attention} with 4 attention heads, a model dimension of 25, feedforward hidden dimension of 1320, and 23 layers with 23.5M params.
+Its output at the final sequence position forms the prediction for the example.
+
+We ran LRM-NPEFF on 1616 examples using either 32 or 128 components.
+Since we know how the model processes examples, we can programmatically search for components whose top examples all contain a concept used by the model.
+We found that 30/32 and 92/128 components had 128 top examples all containing at least one concept.
+See \cref{sec:app_synthetic_task} for details on this programmatic search along with a detailed breakdown of component tunings.
+Although caution should be used when extending these results to real-world models since organic processing might differ from TRACR's implementations, these results demonstrate that NPEFF is able to extract concepts actually used by a model in this setting.
+\subsection{Hyperparameter Exploration}\label{sec:hparam_explore}
+We explored the impact of various choices of hyperparameters on the LRM-NPEFF decomposition.
+The NLI model's LRM-NPEFF from \cref{sec:tunings_and_perturbs_exps} was used as the baseline setting.
+To concisely compare component tunings, we used the cosine similarity of component coefficient vectors.
+Components with a high cosine similarity tended to have similar top examples.
+
+\paragraph{Sparsity}
+We ran LRM-NPEFF keeping the top 16384, 65536, and 262144 values per PEF.
+We used 20k examples and 128 components.
+Given a pair of runs, we looked at each component from one of the runs and recorded its max cosine similarity with any component from the other run.
+If this value is high for most components in both directions for a pair of runs, then most of the concepts from one run have an analogous concept in the other.
+This metric had an average value of 0.77 when comparing the components from the 16384-value run against either of the other runs.
+The 65536-value run had an average of value of 0.76 and 0.80 when compared against 16384-value and 262144-value runs.
+The 262144-value run had an average of value of 0.77 and 0.80 when compared against 16384-value and 65536-value runs.
+Hence the sets of learned components tended to be fairly similar with no major qualitative difference being observed between their tunings.
+Information about how well the PEFs were approximated at different levels of sparsity can be found in \cref{sec:app_sparsity_approximation_quality}.
+\paragraph{Number of Components}
+We ran LRM-NPEFF using 32, 128, and 512 components.
+To compare a pair of runs A and B, suppose that run B has more components than run A.
+For each component $i$ of run A, we found the subset of run B's components whose coefficient cosine similarity to that component $i$ was greater than to any other of run A's components.
+For all pairs of runs, we found that every component from the smaller run had at least one corresponding component from the larger run.
+Qualitatively, we found that the groups of components from the larger run corresponding to each component from the smaller run had similar tunings.
+More precisely, these groups tended to be more fine-grained ``splits'' of the component from the smaller run.
+For example, a component tuned to hypotheses containing a word that contradicts a word in the premise might have a split where the relevant words are colors and another split where they are ``cat'' and ``dog''.
+
+\paragraph{Number of Steps}
+To explore the convergence of the coefficient matrix as the NPEFF learning algorithm progresses, we performed the decomposition for 1500 steps and saved the matrix every 50 steps.
+A graph of the average component coefficient cosine similarity with its final value across steps can be found in \cref{fig:npeff_coeff_conv}.
+ Notably, the average similarity exceeded 95\% by 700 steps and 99\% by 1100 steps.
+
+\paragraph{D-NPEFF vs.\ LRM-NPEFF}
+We repeated the experiments of \cref{sec:tunings_and_perturbs_exps} for the NLI and vision model but using D-NPEFF instead of LRM-NPEFF and vice-versa.
+For the NLI model, we found D-NPEFF to generate fewer components with readily interpretable tunings than LRM-NPEFF.
+While most of the LRM-NPEFF components appeared tuned, only about half of the D-NPEFF components appeared tuned.
+Furthermore, the perturbation of D-NPEFF components led to less selective changes in model predictions than for the LRM-NPEFF components with a median KL-ratio of 5.26 compared to 7.64.
+However, this might just be an artifact of the difference between the perturbation methods of the two flavors of NPEFF.
+
+The LRM-NPEFF results on the vision model were far worse than the D-NPEFF results.
+Far fewer components had interpretable tunings, and top examples of tuned components were significantly noisier.
+The selectivity of perturbations of the LRM-NPEFF components was also lower than for the D-NPEFF components with a median KL ratio of 2.45 compared to 4.81.
+We suspect that using a fixed number of non-zero entries led to examples with high rank PEFs having poor sparse approximations.
+Left to future work, possible methods to adapt LRM-NPEFF to tasks with many classes (and thus potentially high rank PEFs) include varying the number of kept entries with PEF rank and using a different low-rank approximation to the PEF instead of just using a subset of classes.
+
+\subsection{Comparison to Existing Interpretability Methods}
+While there are no existing unsupervised concept discovery algorithms directly comparable to NPEFF, we can adapt the methods of \citet{ghorbani2019towards} to be a baseline.
+\citet{ghorbani2019towards} learns concepts through k-means clustering of activation space representations of image segments.
+We compared NPEFF to a more generalized version of this operating directly on examples rather than image segments, which allowed us to run experiments on text tasks.
+We used the distance of an example's activations from its cluster's centroid to rank examples within a cluster.
+
+We ran this baseline for both the NLI and vision models.
+We used the encoder's final representation of the \texttt{CLS} token as the activations for the NLI model.
+For the vision model, we used the output of the global average pooling layer that immediately precedes the classification layer.
+Using the same sets of examples as in \cref{sec:tunings_and_perturbs_exps}, we learned 128 clusters for each model.
+Most of the top examples for the clusters displayed some human-interpretable tuning as ascertained through examination of their top examples.
+Top examples of some clusters are presented in \cref{sec:app_kmeans_top}.
+We used TCAV \citep{kim2018interpretability} to test whether a relationship existed between the top examples for a cluster/component and the prediction of at least one class for the NLI model.
+We found a statistically significant relationship existed for every k-means cluster and every LRM-NPEFF component.
+Details can be found in \cref{sec:app_tcav}.
+
+Qualitatively, we found some similarities in the tunings of NPEFF and baseline components with NPEFF producing a more diverse set of tunings.
+To get a more quantitative comparison, we used the average max cosine-similarity metric from \cref{sec:hparam_explore} to compare tunings.
+Here, we used a vector of 0s and 1s indicating cluster membership as the ``coefficients vector'' for a k-means cluster.
+For the NLI model, we found that k-means clusters had an average max cosine similarity of 0.20 against the NPEFF components and a value of 0.19 in the opposite direction.
+Since NPEFF coefficients and cluster ``coefficients'' represent different types of quantities, we should note that this metric provides a cruder similarity measure than when comparing between NPEFF components.
+
+Nevertheless, we would expect differences in recovered concepts.
+The differences in recovered concepts highlights several advantages of NPEFF.
+The k-means baseline operates on activations from a single layer near the output of the model while NPEFF operates on PEFs containing information from the entire model.
+Hence NPEFF can pinpoint what part of the model performs certain computations.
+In contrast, a full-model decomposition over activations becomes tricky when the total activation space does not have fixed dimension (e.g.\ the variable sequence length of transformers).
+The ability to make informed modifications to parameters to directly test whether the model actually uses a recovered concept is a further advantage unique to NPEFF.
+
+
+
+\subsection{Example Application: Fixing Flawed Heuristics}
+We experimented using NPEFF with the NLI model to see what heuristics it uses when it makes incorrect predictions.
+To do so, we created a filtered set of PEFs corresponding to examples on which the model made an incorrect prediction.
+We then performed the components set expansion procedure to learn 64 components specialized to these examples.
+Finally, we fit coefficients to a non-filtered set of examples using the expanded NPEFFs.
+See \cref{sec:app_expansion_details} for details on this process.
+
+The components in the expansion were more likely to have a high fraction of incorrect predictions in their top examples.
+More precisely, 41\% of the expanded components had incorrect predictions for at least 50\% of their top 16 examples compared to just 4.3\% of the original components.
+Such components could generally be placed into one of three groups: correct heuristics with inconsistent labeling, completely wrong heuristics, or flawed heuristics.
+Since LRM-NPEFF connects components to directions in parameter space through their pseudo-Fishers, we can try to alter the model parameters to selectively fix components tuned to incorrect heuristics.
+We selected the subset of expanded components whose top 16 examples contained at least 8 incorrect predictions.
+The top examples of some these components are provided in \cref{sec:app_snli_inc_heuristic_comps}.
+We then performed perturbations on these components using a similar methodology to \cref{sec:main_perturbs} but with a larger perturbation magnitude of 3e-1.
+Out of the 48 components deemed to correspond to incorrect heuristics, we found four components that increased the model's accuracy by at least 0.5\% after being perturbed.
+While these results are promising, we emphasize that this method of fixing faulty heuristics using NPEFF is mostly a proof of concept.
+We leave improvements to this method such as incorporating loss gradient information to future work.
+
+
+
+\section{Related Work}
+
+
+Methods reliant on ranking or grouping examples are common in the interpretability literature.
+For example, the activation value of a single neuron is a frequently used metric to derive such rankings \citep{sajjad2022neuron, bolukbasi2021interpretability, bau2017network, szegedy2013intriguing}.
+Alternate methods include using agglomerative clustering on token-level BERT representations to find groups of representations corresponding to concepts \Citep{dalvi2022discovering}, using supervised probing task to learn latent interpretable representations \citep{michael2020asking}, and unsupervisedly finding interpretable directions in the latent space of a generative adversarial network \citep{voynov2020unsupervised}.
+\Citet{kim2018interpretability} uses user-defined groups of examples to represent an abstract concept.
+\Citet{ghorbani2019towards} uses clustering of activation space representations of image segments to automatically learn concepts.
+\Citet{yeh2020completeness} learns concepts by projecting activations at a given layer onto a set of learned vectors, setting the dot products below a threshold to zero, and then using a learned mapping back to activation space before being processed by the rest of the network. They add regularizers to encourage concepts to be coherent and unique.
+
+Representing a neural network as a set of sub-computations underlies some vision interpretability work.
+\Citet{zhang2018interpreting} learns an explanatory graph given a convolutional neural network.
+They create nodes corresponding to disentangled convolutional filters and assign edges based on the relative spatial displacement of node activations between neighboring layers.
+For each example, \citet{wang2018interpret} learns a scalar control gate for each channel in each layer of a convolutional network.
+They are fit using a loss that encourages the gates to be as sparse as possible while preserving the model's predictions on the example.
+Clustering of these per-example routing maps produces clusters that reflect input layout patterns.
+
+
+\section{Conclusion}
+
+ 
+NPEFF presents a novel direction in model interpretability research.
+Applicable to any model with differentiable parameters, it automatically discovers concepts and heuristics used by a model.
+NPEFF further grounds these in the model's parameter space and allows for their selective perturbations.
+In addition to being useful in verifying that these concepts and heuristics faithfully represent the model's processing, it opens up the possibility of modifying the model informed by this knowledge.
+In future work, we hope to further develop some of the applications of NPEFF explored in this paper as well as explore its viability in facilitating scientific discovery.
+
+
+
+
+
+
+
+

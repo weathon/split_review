@@ -1,0 +1,215 @@
+\title{SEPAL: Scalable Feature Learning on Huge Knowledge Graphs}
+
+\begin{abstract}
+Knowledge graphs accumulate information about more and more entities of the world. Much research is conducted to improve embedding models that capture this information and give useful node features in many downstream applications. However, most current methods are hard to scale to large knowledge graphs, partly because GPU memory is too small to hold the embeddings of many entities --YAGO4 has 67M entities. To scale existing embedding models on modest hardware, we introduce SEPAL: Scalable Embedding Propagation Algorithm for Large knowledge graphs.
+The key idea of SEPAL to reduce compute is to only optimize embeddings on a core subset of entities, those that come with much more information than others. Then SEPAL propagates these embeddings to the rest of the graph with message passing, but no explicit optimization.
+To enable efficient message passing, we break down large graphs into well-connected subgraphs that fit in GPU memory using a new algorithm called BLOCS: Balanced Local Overlapping Connected Subgraphs.
+We evaluate SEPAL on five different knowledge graphs for four downstream regression tasks. We show that SEPAL outperforms alternative on downstream tasks, while providing a $43\times$ speedup to its base embedding algorithm.
+Moreover, outside the core subgraph, embeddings obtained by message passing are not degraded compared to traditional methods, demonstrating the validity of SEPAL's propagation.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Relational data gathers various information on different objects across multiple tables. Modern general-purpose knowledge graph push the agenda to describe an increasingly large fraction of the entities of the world: Wikidata (Vrandecˇic´ & Kro¨tzsch, 2014) describes as of 2024 109M entities, and YAGO4 gives a curated view on 67M entities (Pellissier Tanon et al., 2020). For machine learning and artificial intelligence, capturing general knowledge opens an old promise of making tasks easier via this knowledge (Lenat & Feigenbaum, 2000). Integrating this information into machine learning does raise the challenge of assembling features from multiple tables. For this purpose, graph-embedding methods provide node features that can improve downstream learning task (Grover & Leskovec, 2016; Cvetkov-Iliev et al., 2023; Robinson et al., 2024). Increasingly sophisticated embeddings models (Bordes et al., 2013; Yang et al., 2014; Balazevic et al., 2019, ...) help produce embeddings that better capture the relational aspect of the data, which is important for downstream tasks (Cvetkov-Iliev et al., 2023).  
+
+The size of large knowledge graphs is exploding: Wikidata gains 20M entities yearly (Wikimedia). This enables the exciting prospect of general feature enrichment: given a downstream table, entities can be automatically linked to the knowledge graph (Mendes et al., 2011; Foppiano & Romary, 2020; Delpeuch, 2019), and node features could be inserted in the table to facilitate machine learning task. The more entities in the knowledge graph, the more this process provides value to the downstream analysis. And yet, there can be a disconnect between the growth of knowledge graphs, and the fact that the increasingly complex embedding models tend to be less tractable, and are typically demonstrated on comparatively small graphs, often subsets of real-world graphs such as FB15k (15k entities from Freebase) or WN18 (40k entities from WordNet), 3 orders of magnitude smaller than modern general knowledge graphs, or industrial knowledge graphs (Sullivan, 2020). One roadblock to scaling knowledge-graph embeddings is that, with many entities, the embeddings no longer fit in the memory of GPUs. The typical answer to this challenge is distributed computation across GPUs, explored by PyTorch-BigGraph (Lerer et al., 2019) and many more (Zheng et al., 2020; Mohoney et al., 2021; Zhu et al., 2019; Dong et al., 2022; Ren et al., 2022, ...). This comes with sizeable engineering and computational cost, as the graph is fit piece by piece. The multi-GPU requirement is a challenge for non-profits such as the Wikimedia foundation, in charge of Wikidata, given that the embeddings should be recomputed regularly to incorporate newly-added entities.  
+
+Here we show how to scale most knowledge-graph embedding methods with little computational resources. Our goal is to bridge the gap between advanced embedding approaches and huge generalpurpose knowledge graphs that strive to gather all human knowledge at once. For this, we leverage fundamental structure in knowledge graphs: a small set of “core” entities come with much more information than the others. Our method, SEPAL (Scalable Embedding Propagation Algorithm for Large knowledge graphs), is ‘pluggable’ to any embedding model that, at triple-level, models the tail embedding as a relation-specific transformation of the head embedding. There are two technical contributions that enable SEPAL to bring scalability. 1) We show that good embeddings on a small core subset of entities can be propagated to give good embeddings for the full graph. The challenge here is to maintain the relational geometry. 2) We devise an algorithm called BLOCS to break down a huge knowledge graph into overlapping subsets that fit in GPU memory. Here, the challenge lies in the scale-free and connectivity properties of a large knowledge graph: some nodes are connected to a significant fraction of the graphs, while others are very hard to reach.  
+
+We start by reviewing related work. Then, section 3 describes our contributions. In section 4 we evaluate SEPAL’s performance on knowledge graphs of increasing size between YAGO3 (Mahdisoltani et al., 2014) and YAGO4 (67M entities, Pellissier Tanon et al., 2020); we study the use of the embeddings for feature-enrichment on four downstream machine learning tasks, showing that SEPAL makes embedding methods much more tractable while generating better embeddings for downstream tasks. Empirical findings show that:  
+
+1. propagating embeddings to outer entities with message passing does not lead to a performance loss and gives orders of magnitude speed-ups compared to full optimization; 2. this approach can be scaled to very large knowledge graphs on modest hardware.  
+
+2 RELATED WORK: EMBEDDING AND SCALABILITY IN KNOWLEDGE GRAPHS  
+
+Knowledge graphs are multi-relational graphs describing knowledge in an entity-relation model. Knowledge graphs store information as triples $(h,r,t)$ , where $h$ is the head entity, $r$ is the relation, and $t$ is the tail entity.  
+
+
+
+\section{2.1 GRAPH-EMBEDDING METHODS  }
+
+
+Graph embedding methods learn low-dimensional (typically $d=100$ or 200) vector representations for the entities and relations. Knowledge-graph embeddings are directly related to the more general graph embedding literate, learning representations for graph nodes but not for the relations. Different embedding methods naturally lead to different structures of the embedding space.  
+
+Global methods Global methods can be formulated at the graph level, typically using the adjacency matrix $A$ . A first family of methods performs explicit matrix factorizations on matrices derived from the adjacency matrix, for instance GraREP (Cao et al., 2015) or NetMF (Qiu et al., 2018). These methods output close embedding vectors for nodes with similar neighborhoods.  
+
+As the adjacency matrix does not represent the edge-type information of multi-relational graphs, it may be preferable to use a $\{0,1\}$ -valued third-order tensor, and correspondingly tensor factorization approaches such as canonical polyadic decomposition (Hitchcock, 1927), Tucker decomposition (Tucker, 1966), or more recently RESCAL (Nickel et al., 2011). Unlike other global methods, these methods compute embeddings for both entities and relations. However, they limit the relational model to multiplicative interactions between entities and relations embeddings.  
+
+To avoid relying on –potentially costly– optimization, another strategy is to compute random projections. Indeed these give very cost-effective approximations of the pairwise distances (Dasgupta & Gupta, 2003). FastRP (Chen et al., 2019) proposes a scalable approach, with a few well-chosen applications of the adjacency matrix on a random projection matrix.  
+
+Local methods Local methods formulate an optimization on triples rather than on the matrices or tensors. They define a scoring function $f(h,r,t)$ to represent the plausibility of a triple given the embeddings $\theta_{h},\theta_{r},\theta_{t}$ of the entities and relation. The embeddings are optimized by stochastic gradient descent to maximize the score of positive triples, and minimize that of negative ones.  
+
+Skip-gram negative sampling (SGNS), behind word2vec (Mikolov et al., 2013), has been shown to perform an implicit factorization (Levy & Goldberg, 2014). It has been adapted to graphs: DeepWalk (Perozzi et al., 2014) and node2vec (Grover & Leskovec, 2016) perform random walks on the graph to generate “sentences” fed to word2vec. Here the scoring function between two nodes $h$ and $t$ is simply $f(h,t)=\theta_{h}\cdot\theta_{t}$ . RDF2vec adapts this framework to multi-relational graphs by adding the relations to the generated sentences (Ristoski & Paulheim, 2016).  
+
+Triple-based methods design scoring functions to model the relations as geometric transformations in the embedding space. A seminal model is TransE (Bordes et al., 2013), modeling relations as translations in the embedding space. Many of these models can be framed as:  
+
+Scoring function  
+
+$$
+f(h,r,t)=-s i m(\phi(\theta_{h},\theta_{r}),\theta_{t})
+$$  
+
+where $\phi$ is a model-specific relational operator, and sim a similarity function. These models strive to align, for positive triples, the tail embedding $\theta_{t}$ with the “relationally” transformed head embedding $\phi({\theta_{h}},{\theta_{r}})$ . The challenge is to design a clever $\phi$ operator to model complex patterns in the data –hierarchies, compositions, symmetries... Indeed some relations are one-to-one (people only have one biological mother), well represented by a translation, while others are many-to-one (for instance many person were BornIn Paris), calling for $\phi$ to be a contractive operation (Wang et al., 2017). Many models explore different parametrizations, among which MuRE (Balazevic et al., 2019), RotatE (Sun et al., 2019) or QuatE (Zhang et al., 2019) have good performance (Ali et al., 2021b). This framework also includes models like DistMult (Yang et al., 2014), ComplEX (Trouillon et al., 2016) or TuckER (Balazˇevic´ et al., 2019), that implicitly perform tensor factorizations.  
+
+Table 1: Expression of $\phi$ in some embedding models. $\odot$ denotes the Hadamard product, $\otimes$ the Hamilton product, and $\times_{i}$ the tensor product along mode $i$ . The models we list here are all compatible with our proposed SEPAL approach.  
+
+![](images/f5b904440379b79acc476fab30b14b897b3f97c9563c45aa56e4821031f57d61.jpg)  
+
+Embedding propagation CompGCN (Vashishth et al., 2019) introduces the idea of propagating knowledge-graph embeddings using the relational operator $\phi$ , but couples it with learnable weights and a non-linearity. REP (Wang et al., 2022) simplifies this framework by removing weight matrices and nonlinearities.  
+
+2.2 SCALING GRAPH ALGORITHMS  
+
+Various tricks help scale graph algorithms to the sizes we are interested in –millions of nodes.  
+
+Graph partitioning Scaling up computation on graph, for graph embedding or more generally, often relies on breaking down graphs in subgraphs. For this, the partitioning, clustering, and community-detection literatures are relevant. METIS (Karypis & Kumar, 1997), is a greedy nodemerging algorithm heavily used to scale all types of graph algorithm. A variety of algorithms have also been developed to detect “communities”, groups of nodes more connected together, often with applications on social networks: the Label Propagation Algorithm (LPA) (Raghavan et al., 2007), spectral clustering (SC) (Shi & Malik, 2000), Louvain method (Blondel et al., 2008), the Leading Eigenvector (LE) method (Newman, 2006), the Infomap method (Rosvall & Bergstrom, 2008), and the Leiden method (Traag et al., 2019) which guarantees connected communities.  
+
+Local subsampling Other forms of data reduction can help to scale graph algorithms (e.g. based on message passing). Algorithms may subsample neighborhoods, as GraphSAGE (Hamilton et al.,  
+
+2017) that selects a fixed number of neighbors for each node on each layer, or MariusGNN (Waleffe et al., 2023) that uses an optimized data structure for neighbor sampling and GNN aggregation. Cluster-GCN (Chiang et al., 2019) restricts the neighborhood search within clusters, obtained by classic clustering algorithms, to improve computational efficiency on graphs with a community structure. GraphSAINT (Zeng et al., 2019) creates overlapping subgraphs through random walks.  
+
+Multi-level techniques. Multi-level approaches, such as HARP (Chen et al., 2018), GraphZoom (Deng et al., 2019) or MILE (Liang et al., 2021), coarsen the graph, compute embeddings on the obtained smaller graph, and project them back to the original graph.  
+
+2.3 SCALING KNOWLEDGE-GRAPH EMBEDDING  
+
+The multi-relational aspect of knowledge graphs, captured e.g. in the $\phi$ detailed above, calls for scaling tailored methods.  
+
+Parallel training. Many approaches speed up triple-level stochastic solvers by distributing training across multiple workers, starting from the seminal PyTorch-BigGraph (PBG) (Lerer et al., 2019). The challenge is then to limit overheads and communication costs, as the embeddings of the relations are global trainable parameters, and thus require moving data between workers. For this, DGL-KE (Zheng et al., 2020) reduces data movement by using sparse relation embeddings and a min-cutbased graph partitioning algorithm (Karypis & Kumar, 1997, METIS) to distribute the triples across workers. HET-KG (Dong et al., 2022) further optimizes distributed training by preserving a copy of the few most frequently used embeddings on each worker, to reduce communication costs. These ‘hot-embeddings’ are periodically synchronized to minimize inconsistency. SMORE (Ren et al., 2022) leverages asynchronous scheduling to overlap CPU-based data sampling, with GPU-based embedding computations. Algorithmically, it contributes a bidirectional rejection sampling strategy to generate the negatives at a very low cost. GraphVite (Zhu et al., 2019) accelerates SGNS for graph embedding by both parallelizing random walk sampling on multiple CPUs, and negative sampling on multiple GPUs. Finally, Marius (Mohoney et al., 2021) optimizes data movement with 1) a data flow architecture that maximizes resource utilization of the entire memory hierarchy, including disk, CPU, and GPU memory, 2) Partition caching and a buffer-aware data ordering to minimize disk IO.  
+
+Bags of entities. Other attempts to scale knowledge graphs include StarSpace (Wu et al., 2018), that models some entities as bags of other entities rather than giving them explicit embeddings, or NodePiece (Galkin et al., 2021) that embeds a subset of entities called anchors, and learns an aggregation function to compute embeddings for all the other entities.  
+
+
+
+\section{3 SEPAL: EXPANDING FROM A CORE SUBGRAPH  }
+
+
+The work on scaling knowledge-graph embedding has mainly focused on efficient parallel computing to speed up stochastic optimization. We introduce a complementary approach, SEPAL, which changes how the embeddings are computed, avoiding much of the optimization cost. To extract rich node features from very large knowledge graphs, SEPAL allocates more computation time to the more frequent entities. To that end, SEPAL proceeds in two steps (Figure 1):  
+
+1. compute connected overlapping subgraphs that cover the full graph;   
+2. propagate the embeddings from the core to the outer subgraphs, with a message-passing strategy preserving the relational geometry.  
+
+SEPAL’s key idea is to propagate embeddings to regions of the graph where they have not been computed yet, departing from embedding propagation methods (Vashishth et al., 2019; Wang et al., 2022) that use propagation as a post-processing to smooth pre-trained knowledge-graph embeddings. SEPAL is compatible with any embedding model whose scoring function has the form given by Equation 1, some examples of which are provided in Table 1.  
+
+![](images/c85c39908642598423f30182f74de524b95c8741dbeb5ac112f5b7c024f83fe8.jpg)  
+Figure 1: SEPAL’s general framework. An input knowledge graph (0.) is first subdivided into BLOCS (1.). The core subgraph is then embedded, and the resulting embeddings are propagated to the outer subgraphs successively (2.).  
+
+3.1 SPLITTING LARGE GRAPHS WITH BLOCS  
+
+Breaking up the graph into subgraphs is key to scaling up our approach memory-wise. Specifically, we seek a set of subgraphs that altogether cover the full graph but are individually small enough to fit on GPUs, to enable the subsequent GPU-based message passing.  
+
+Core subgraph. SEPAL first defines the core of a knowledge graph as the subgraph induced by its most central entities. To build it, SEPAL focuses on entities, selecting the top $\eta\%$ entities by degree and keeping the largest connected component of the induced subgraph. The parameter $\eta$ is chosen large enough to ensure that the core subgraph contains all the relation types present in the graph (typically $\eta$ varies between 2 and $5\%$ ).  
+
+Outer subgraphs. The next class of subgraphs that we generate –the outer subgraphs– aim at covering the rest of the graph. The purpose of these subgraphs demands the following requirements:  
+
+R1: connected the subgraphs must be connected, to propagate the embeddings R2: bounded size the subgraphs must have bounded sizes, to fit their embedding in GPU memory R3: coverage the union of the subgraphs must be the full graph, to embed every entities R4: scalability extraction must run with available computing resources, in particular memory  
+
+Extracting such subgraphs is challenging on large knowledge graphs. These are scale-free graphs with millions of nodes exhibit no well-defined clusters (Leskovec et al., 2009) and pose difficulties to existing partitioning algorithms. For instance, algorithms based on propagation, eigenvalues, or power iterations of the adjacency matrix (Raghavan et al., 2007; Shi & Malik, 2000; Newman, 2006) struggle with the presence of extremely high-degree nodes that make the adjacency matrix ill-conditioned. To satisfy our requirements despite these challenge, we allow subgraphs to overlap.  
+
+We contribute BLOCS, an algorithm designed to break large graphs into Balanced Local Overlapping Connected Subgraphs. The name summarizes the goals: 1) Balanced: BLOCS produces subgraphs of comparable sizes. $m$ , the upper bound for subgraph sizes, is a hyperparameter. 2) Local: the subgraphs have small diameters. The essence of BLOCS minimizes the intrasubgraph mean shortest path length using a diffusion step. This locality property is important for the efficiency of SEPAL’s propagation phase, as it intuitively reduces the number of propagation iterations needed to converge to the global embedding structure. 3) Overlapping: a given node can belong to several subgraphs. This is beneficial to our purpose because it facilitates information transfer between the different subgraphs during the propagation. 4) Connected: all generated subgraphs are connected.  
+
+BLOCS uses three base mechanisms to grow the subgraphs: diffuse (add all neighboring entities to the current subgraph), merge (merge two overlapping subgraphs) and dilate (add all unassigned neighboring entities to the current subgraph). There are two different regimes during the generation of subgraphs. First, few entities are assigned, and the computationally effective diffusion quickly covers a large part of the graph, especially entities that are close to high-degree nodes. However, once these close entities have been assigned, the effectiveness of diffusion drops because it strug  
+
+70 Algorithm 1 BLOCS algorithm   
+7712 12::  IOnuptuptu: t:G rLaipsth $\mathcal{G}=(V,E)$ n gw ictho nnnoedcetse $V$ uabngdr aepdhgses $E$ , hyperparameters $h$ and $m$   
+of overlappi d s   
+73 3: $\mathbb{S}\gets\emptyset$ $\triangleright$ list of subgraphs   
+74 4: $U\leftarrow V$ $\triangleright$ set of unassigned nodes   
+75 5: Step 1: Create subgraphs from high-degree nodes’ neighbors   
+7767 78:: if 6: for each node $d e g(v)>0.2\,m$ $v\in V$ do theSn N I S (v, max size = 0.2 m)   
+S, $U\gets$   
+78 9: end if   
+79 10: end for   
+80 11: Step 2: Assign nodes to subgraphs by diffusion   
+1123:: wh $|U|>(1-h)|V|$   
+81 $k\leftarrow0$ $S_{0}\gets\{\arg\operatorname*{max}_{v\in U}d e g(v)\}$ ▷start with unassigned node $v$ with highest degree   
+82 14: while $|S_{k}|<0.8\,m$ do   
+83 15: $S_{k+1}\gets\mathsf{D I F F U S E}(S_{k})\quad;\quad k\gets k+1$   
+84 16: end while   
+85 17: Append $S_{k-1}$ to $\mathbb{S}$ , and update $U$ ▷ $S_{k-1}$ is the last subgraph smaller than $0.8\,m$   
+86 1189::  eSntedp  w3:h ilMeerge small overlapping subgraphs   
+87 20: S, $U\gets$ MERGESMALLSUBGRAPHS ${\mathbb S},\,\mathrm{min}.\mathrm{size}=m/2)$ )   
+88 21: Step 4: Dilation and diffusion until all entities are assigned   
+89 22: $p\gets0$   
+90 23: while $|U|>0$ do   
+2254:: if 5 rdeivpiedaets $p$ 0  atnidm $p>0$ then▷create new subgraphs by diffusion every 5 rounds, to tackle long chains   
+91   
+1 es   
+92 26: $\begin{array}{r l}&{\mathrm{~}\dot{k}\leftarrow0\quad\mathrm{;~}\quad S_{0}\leftarrow\{\arg\operatorname*{max}_{v\in U}d e g(v)\}}\\ &{\mathrm{~}\mathbf{while}\;\vert S_{k}\vert<0.8\,m\;\mathbf{do}}\\ &{\quad\;S_{k+1}\leftarrow\mathrm{DIFFUSE}(S_{k})\quad\mathrm{;~}\quad k\leftarrow k+1}\end{array}$   
+93 27:   
+94 28:   
+95 29: end while   
+96 30: 31: end Append $S_{k-1}$ to $\mathbb{S}$ , and update $U$ ▷ $S_{k-1}$ is the last subgraph smaller than $0.8\,m$   
+97 32: end if   
+98 33: $\mathbb{S}\gets\mathrm{DILATE}(\mathbb{S})\quad\mathrm{~;~}\quad p\gets p+1$   
+99 34: end while   
+00 35: Step 5: Merge small overlapping subgraphs again   
+3367::  SS,t $U\gets$ SMplEitR sGuEbSgMraApLhLsS lUarBgGeRr AtPhHaSn ${\mathbb S},\,\mathrm{min}.\mathrm{size}=m/2)$   
+01   
+$m$   
+02 38: S, $U\gets\mathbf{S}$ PLITLARGESUBGRAPHS $\mathbb{S},\,\operatorname*{max}.\mathrm{size}=m_{i}$ )   
+03 39: Return: $\mathbb{S}$ , the set of overlapping subgraphs covering the graph $\mathcal{G}$   
+04   
+05   
+06 gles to reach entities farther away. For this reason, BLOCS switches from diffusion to dilation once   
+07 the proportion of assigned entities reaches a certain threshold $h$ (chosen $\approx\,.6.$ , depending on the   
+08 dataset). By adding only unassigned neighbors to subgraphs, dilation drives subgraph growth to  
+
+wards unassigned distant entities. However, the presence of long chains can drastically slow this regime, because they make it add entities one by one. Some knowledge graphs have long chains, for instance YAGO4. To tackle them, BLOCS switches back to diffusion for a few steps, with seeds taken inside the long chains.  
+
+3.2 SEPARATING CORE OPTIMIZATION AND OUTER PROPAGATION  
+
+Embedding the core Once the core subgraph is defined, embeddings for the relations and core entities are trained on GPU using any triple-based embedding model that fits with our framework. We add the inverse relations, ensuring connectedness for the subsequent propagation step.  
+
+(multiplication for DistMult, addition for TransE, ...) and preserves the relational geometry of the embedding space. To do so, SEPAL leverages the entity-relation composition function $\phi$ used by the knowledge-graph embedding model, and the embeddings of the relations $\theta_{r}$ trained on the core subgraph. From Equation 1 one can derive, for a given triple $(h,r,t)$ , the closed-form expression of the tail embedding that maximizes the scoring function arg $\mathop{\operatorname*{max}}_{\theta_{t}}f(h,r,t)\,=\,\phi(\theta_{h},\theta_{r})$ . SEPAL uses this property to compute the embeddings of the outer entities, by propagating from core entities with message passing.  
+
+$\theta_{u}^{(0)}={\binom{\theta_{u}}{\mathbf{0},}}$ , ioft heenrtiwtyi $u$ . belongs the core subgraph, First, the embeddings are initialized with  
+
+Then, each outer subgraph is merged with the core subgraph, and SEPAL loads its embeddings on GPU and performs $K$ steps of propagation, satisfying the following message-passing equations:  
+
+$$
+\begin{array}{r l}&{m_{u,v}^{(t+1)}=\displaystyle\sum_{(u,r,v)\in\mathcal{K}}\phi(\theta_{v}^{(t)},\theta_{r})}\\ &{a_{u}^{(t+1)}=\displaystyle\sum_{v\in\mathcal{N}(u)}m_{u,v}^{(t+1)}}\\ &{\theta_{u}^{(t+1)}=\mathrm{NoRMALIZE}(\theta_{u}^{(t)}+a_{u}^{(t+1)})}\end{array}
+$$  
+
+where $\mathcal N(u)$ denotes the set of neighbors of entity $u$ , and $\kappa$ the set of positive triples of the graph. During updates, $\ell_{2}$ normalization projects embeddings on the unit sphere. This accelerates convergence by canceling the effect of neighbors that still have zero embeddings. Normalizing embeddings is a common practice of knowledge-graph embedding models (Bordes et al., 2013; Yang et al., 2014), and SEPAL acts consistently. During propagation, the core embeddings remain frozen.  
+
+
+
+\section{4 EXPERIMENTAL STUDY  }
+
+
+4.1 KNOWLEDGE GRAPH DATASETS  
+
+To compare large knowledge graphs of different sizes, we use three different generations of YAGO: YAGO3 (Mahdisoltani et al., 2014), YAGO4 (Pellissier Tanon et al., 2020), and YAGO4.5 (Suchanek et al., 2023). We expand YAGO4 and YAGO4.5 into a larger version that also contains the taxonomy, i.e., types and classes –which algorithms will treat as entities– and their relations. To perform an ablation study of SEPAL without BLOCS for which we need smaller datasets, we also introduce Mini YAGO3, a subset of YAGO3 built by extracting the $5\%$ most frequent entities.  
+
+4.2 EVALUATING NODE FEATURES ON DOWNSTREAM REGRESSION TASKS  
+
+We evaluate the embeddings as node features, used to facilitate learning in downstream tasks (Grover & Leskovec, 2016; Cvetkov-Iliev et al., 2023; Robinson et al., 2024). This task enables to compare the value of knowledge graphs of different sizes. Indeed, for a user, a suboptimal embedding of a larger knowledge graph may be more interesting than a high-quality embedding of a smaller knowledge graph because the larger graph brings information on more entities. We benchmark 4 downstream regression tasks (adapted from Cvetkov-Iliev et al.  
+
+Figure 2 gives the prediction performance on the downstream tasks. SEPAL not only scales well to very large graphs (computing times markedly smaller than Pytorch-BigGraph), but also create more valuable node features for downstream tasks. Larger knowledge graphs do bring value, as they cover more entities of the downstream task (Table 8). The good performance of FastRP provides insights on why SEPAL improves on the performance of its base models: as SEPAL’s second step, it is based on iterating graph propagations, which structures the embeddings.  
+
+4.3 EVALUATING BLOCS  
+
+Compared to other partitioning algorithms We first compare BLOCS to other graph partitioning, clustering, and community detection methods. Table 2 reports empirical evaluation on our four knowledge graphs. BLOCS and METIS are the only approaches that scale to the largest knowledge graphs. Others fail due to excessive runtimes –our limit was set to $10^{4}$ seconds. Compared to METIS, BLOCS is more efficient in terms of RAM usage while having similar computation times. Experimental results also show that classic partitioning methods fail to meet the connectedness and size requirements. Indeed, knowledge graphs are prone to yield disconnected partitions due to their scale-free nature: they contain very high degree nodes. Such a node is hard to allocate to a single subgraph, and subgraphs without it often explode in multiple connected components. Our choice of overlapping subgraphs avoids this problem.  
+
+![](images/1d9b5af499515f509a30322c10740ed9a838814f4688097f801e016a57fce3c5.jpg)  
+Figure 2: Performance on downstream tasks: normalized score (ie for an evaluation dataset, 1 corresponds to the best R2 score across all models). SEPAL, PyTorch-BigGraph, DGL-KE, and NodePiece use DistMult as base model.  
+
+BLOCS inside SEPAL: ablation study Here, we study the effect of removing BLOCS from our proposed method. On smaller knowledge graphs, SEPAL can be used with a simple core subgraph extraction and embedding followed by the embedding propagation. This ablation reveals the impact of BLOCS on the model’s performance. Figure 3 shows that adding BLOCS to the pipeline on graphs that would not need it (because they are small enough for all the embeddings to fit in GPU memory) does not alter performance, showing that BLOCS enables efficient embedding propagation through message-passing. Additionally, BLOCS brings scalability. By tuning the maximum subgraph size $m$ hyperparameter, one can move the blue points horizontally on Figure 3 and choose a value within the GPU constraints. There is a trade-off between decreasing GPU RAM usage (i.e. moving the blue points to the left) and increasing execution time, as this requires more data movement between CPU and GPU.  
+
+4.4 OUTER PERFORMANCE  
+
+Table 3 shows the scores of the different methods for the entities of the outer subgraphs. This experiment demonstrates the effectiveness of SEPAL’s propagation step, as all the SEPAL embeddings evaluated here have been computed through propagation. Results show that SEPAL’s propagated embeddings compare favorably to all the baselines on four of the five knowledge graphs.  
+
+![](images/0dfefddebf6bcd409391d081f8ed7e13f2c348963012cf2b3fe51a481064d8f5.jpg)  
+
+Table 3: Normalized mean cross-validation score (R2) in outer graphs. Best in bold, second underlined.   
+
+![](images/f4bb21b0f304e6d9ad1f59d241270d8c2e2064bff8234b6722782e6f28ef3ce9.jpg)  
+
+ated node features when used for data enrichment in external (downstream) tasks, a setting that can strongly benefit from pre-training embeddings on knowledge bases as large as possible.  
+
+Insights brought by our experiments go further than SEPAL. First, the method successfully exploits the asymmetry of information between “central” entities and more peripheral ones. Power-law distributions are indeed present on many types of objects, from words (Piantadosi, 2014) to geographical entities (Giesen & Su¨dekum, 2011) and should probably be exploited for general-knowledge representations such as knowledge-graph embeddings. Second, and related, breaking up large knowledge graphs in communities is surprisingly difficult: some entities just belong in many (all?) communities, and others are really hard to reach. Our BLOCS algorithm can be useful for other knowledgegraph engineering tasks, such as scaling message-passing algorithms or simply generating partitions. Finally, the embedding propagation in SEPAL appears powerful and we conjecture it will benefit further approaches. First, it can be combined with much of the prior art to scale knowledge-based embedding. Second, it seems a natural solution for link prediction semi-inductive settings: link prediction on nodes newly connected to the graph (Ali et al., 2021a; Galkin et al., 2021), that thus could be easily embedded by propagation. Finally, embedding propagation could naturally adapt to continual learning settings (Van de Ven & Tolias, 2019; Hadsell et al., 2020; Biswas et al., 2023)  
+
+
+
+

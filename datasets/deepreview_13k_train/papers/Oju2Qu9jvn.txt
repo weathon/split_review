@@ -1,0 +1,433 @@
+\title{Estimating Conditional Mutual Information for Dynamic Feature Selection}
+
+\begin{abstract}
+Dynamic feature selection, where we sequentially query features to make accurate predictions with a
+minimal budget,
+is a promising paradigm to reduce feature acquisition costs and provide transparency into a model's predictions.
+The problem is challenging, however, as it requires both predicting
+with arbitrary feature sets and learning a policy to identify
+valuable selections. Here, we take an information-theoretic perspective and prioritize features based on their mutual information with the response variable.
+The main challenge is implementing this 
+policy,
+and we design a
+new
+approach that estimates the
+mutual information
+in a discriminative
+rather than generative
+fashion.
+Building on our approach,
+we then introduce several further improvements: allowing variable feature budgets across samples, enabling non-uniform feature costs,
+incorporating prior information, and exploring modern architectures to
+handle partial inputs.
+Our experiments show that
+our method provides consistent gains over recent
+methods across a variety of datasets. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Many machine learning applications rely on high-dimensional datasets with significant data acquisition costs. For example, medical diagnosis can depend on a range of demographic features, lab tests and physical examinations,
+and collecting each piece of information takes time and money \citep{kachuee2018opportunistic, erion2021coai, he2022bsoda}. To improve interpretability and reduce data acquisition costs, a natural approach is to adaptively query features given the current information, so that each prediction relies on only a small number of features.
+This approach is referred to as \textit{dynamic feature selection} (DFS),\footnote{
+Prior works have also referred to the problem as
+as \textit{sequential information maximization} \citep{chen2015sequential}, \textit{active variable selection} \citep{ma2019eddi} and \textit{information pursuit} \citep{chattopadhyay2023variational}.} and it is a promising paradigm
+considered by several works in recent years \citep{kachuee2018opportunistic, janisch2019classification, chattopadhyay2022interpretable, chattopadhyay2023variational, covert2023learning}.
+Among the existing methods that address this problem, two main approaches have emerged. One idea is to formulate DFS as a Markov decision process (MDP) and use reinforcement learning (RL) \citep{dulac2011datum, mnih2014recurrent, kachuee2018opportunistic, janisch2019classification}. This approach
+has the capacity to
+discover the optimal policy, but it faces training difficulties that are common in RL \citep{henderson2018deep}. Alternatively, another line of work focuses on greedy approaches, where features are selected based on their conditional mutual information (CMI) with the response variable \citep{chen2015sequential, ma2019eddi}. While less flexible than RL, the greedy approach is near-optimal under certain assumptions about the data distribution \citep{chen2015sequential} and
+can work better
+in practice \citep{chattopadhyay2023variational, covert2023learning}.
+
+Nevertheless, the greedy
+approach is non-trivial to implement, because calculating the CMI requires detailed knowledge of the data distribution (see \Cref{sec:dfs}). Many recent works have explored approximating the CMI using generative models \citep{ma2019eddi, rangrej2021probabilistic, chattopadhyay2022interpretable, he2022bsoda}, but these
+are difficult to train 
+and lead to a slow CMI estimation process.
+Instead, two recent works introduced a simpler approach, which is to directly estimate the feature index with maximum CMI \citep{chattopadhyay2023variational, covert2023learning}. These methods rely on simpler learning objectives, are faster at inference time, and often provide better predictive accuracy.
+\revision{They can be thought of \textit{discriminative} alternatives to earlier generative methods,
+because they directly output the required value rather than modeling a generative process \citep{ng2001discriminative}.
+Their main downside is that they bypass estimating the CMI, which can be useful for multiple purposes, such as determining when to stop selecting new features.}
+
+Here, our goal is to advance the greedy DFS approach by combining the best aspects of current methods: building on recent work \citep{chattopadhyay2023variational, covert2023learning}, we aim to \textit{estimate the CMI itself} in a discriminative fashion. We aim to do so without requiring additional labels, making strong assumptions about the data distribution, or fitting generative models.
+We find that this is possible by designing a suitable learning objective, which we prove
+recovers the CMI if our model is trained to optimality (\Cref{sec:method}).
+Based on our new learning approach, we then explore a range of capabilities enabled by accurately estimating the CMI: these include \revision{allowing variable per-sample feature budgets}, accounting for non-uniform feature costs, 
+and leveraging modern architectures to train models with partial input information.
+\revision{In real-world settings, acquisition costs are not identical for all features, and we can use multiple low-cost features in lieu of one high-cost feature to get the same diagnostic performance.
+These are therefore important capabilities in practice, and they are not supported by prior discriminative approaches that do not estimate the CMI.}
+
+We find that our proposal
+offers a promising alternative to available methods:
+it enables the capabilities
+of generative methods while retaining the simplicity of discriminative methods, and it shows improved performance in our experiments.
+The contributions of this work are the following:
+
+\begin{enumerate}[leftmargin=0.6cm]
+    \item We develop a learning approach to estimate the CMI in a discriminative fashion. Our method involves training a network to score candidate features based on their predictive utility, and we prove that training with our objective recovers the exact CMI at optimality.
+
+    \item We generalize our approach to incorporate prior information beyond the main features. Here, we again prove that our procedure recovers a modified version of the CMI at optimality.
+
+    \item Taking inspiration from adaptive submodular optimization, we show how to adapt our CMI-based approach to scenarios with non-uniform feature costs.
+
+    \item We analyze the role of variable feature budgets and how they enable an improved cost-accuracy tradeoff. We show that a single instantiation of our method can be evaluated with multiple stopping criteria, and that a policy with
+    a flexible per-prediction budget
+    should perform best.
+
+    \item We investigate the role of modern architectures in improving performance in DFS. In particular, we find that for image data, our method
+    benefits from using
+    ViTs
+    rather than standard CNNs.
+\end{enumerate}
+
+Our experiments demonstrate the effectiveness of our approach across a range of applications, including several tabular and image datasets. We compare our approach to many recent methods,
+and we find that our approach provides
+consistent gains
+across all
+the datasets we tested. 
+
+
+\section{Problem formulation}
+
+Here, we introduce notation used throughout the paper and describe our problem formulation.
+
+\subsection{Notation}
+
+Let $\rvx$ denote a vector of input features and $\rvy$ a response variable for a supervised learning task. The input consists of $d$ separate features $\rvx = (\rvx_1, \ldots, \rvx_d)$, and we use
+$S \subseteq [d] \equiv \{1, \ldots, d\}$ to denote a subset of indices and $\rvx_S = \{\rvx_i : i \in S\}$ a subset of features. Bold symbols $\rvx, \rvy$ represent random variables, the symbols $x, y$ are possible values, and $p(\rvx, \rvy)$ denotes the data distribution.
+
+Our goal is to select features given the currently available information, and do so on a per-instance basis to rapidly arrive at accurate predictions.
+In doing so, we require a predictor $f(\rvx_S)$ that makes predictions given any set of available features; for example, if $\rvy$ is discrete then our predictions lie in the
+simplex, or $f(\rvx_S) \in \Delta^{K - 1}$ for $K$ classes. We also require a selection policy $\pi(\rvx_S) \in [d]$, which takes a set of features as its input and outputs the next feature index to observe.
+We next discuss how to design these models, focusing on an approach
+motivated by information theory.
+
+\subsection{Dynamic feature selection} \label{sec:dfs}
+
+The goal of DFS is to select features separately for each prediction, and achieve both low acquisition cost and high predictive accuracy.
+Previous work has explored several approaches to design a selection policy, including training the policy with RL \citep{kachuee2018opportunistic, janisch2019classification}, imitation learning \citep{he2012cost, he2016active}, and following a greedy policy based on CMI \citep{ma2019eddi, covert2023learning}. We focus here on the latter approach, where the idealized policy selects the feature with maximum CMI at each step, or where we define $\pi^*(x_S) = \argmax_i I(\rvy; \rvx_i \mid x_S)$. Note that the CMI is equal to the following KL divergence \citep{cover2012elements}:
+\begin{equation}
+    I(\rvy; \rvx_i \mid x_S) = \KL\left( p(\rvx_i, \rvy \mid x_S) \; || \; p(\rvx_i \mid x_S) p(\rvy \mid x_S) \right). \label{eq:cmi}
+\end{equation}
+\revision{Intuitively, the CMI represents how much observing $\rvx_i$ improves our ability to predict $\rvy$ when a subset of the features $x_S$ is already observed.} This approach
+is consistent with
+greedy uncertainty minimization \citep{covert2023learning} and is also
+the basis of Bayesian experimental design \citep{lindley1956measure, bernardo1979expected}.
+The idealized selection policy is accompanied by an idealized predictor, which is the Bayes classifier $f^*(x_S) = p(\rvy \mid x_S)$ for classification problems.
+
+Under certain assumptions about the data distribution,
+it is known that selecting
+features with
+$\pi^*(x_S)$ provides performance within a multiplicative factor of the optimal
+policy \citep{chen2015sequential}. However, the CMI policy is difficult to implement because it requires oracle access to the data distribution: computing \cref{eq:cmi} requires
+both the response and feature
+distributions $p(\rvy \mid x_S)$ and $p(\rvx_i \mid x_S)$ for all $(S, i)$, which presents a challenging modeling problem. 
+Some works have approximated $I(\rvy; \rvx_i \mid x_S)$
+using generative
+models \citep{ma2019eddi, rangrej2021probabilistic, he2022bsoda}, while others have directly modeled $\pi^*(x_S)$ \citep{chattopadhyay2023variational, covert2023learning}.
+
+When we follow the greedy CMI policy, another question that arises is
+how many features to select for each prediction. Previous work has focused mainly on the fixed-budget setting, where we stop
+when $|S| = k$ for a specified budget $k < d$ \citep{ma2019eddi, rangrej2021probabilistic, chattopadhyay2023variational, covert2023learning}. We instead consider variable budgets in this work \citep{kachuee2018opportunistic, janisch2019classification},
+where the goal is to achieve high accuracy given a low \textit{average feature cost}.
+Unlike many works, we also consider distinct, or non-uniform costs for each feature. As we discuss in \Cref{sec:method}, these goals are made easier by 
+estimating
+the CMI in a discriminative fashion.
+
+
+\section{Related work}
+
+One of the earliest works on DFS is \citet{geman1996active}, who used the CMI
+as a selection criterion
+but made simplifying assumptions about the data distribution. \citet{chen2015sequential} analyzed the greedy CMI approach theoretically and proved conditions where it achieves near-optimal performance.
+More recent works have focused on practical implementations: among them, several used generative models to approximate the CMI \citep{ma2019eddi, rangrej2021probabilistic, chattopadhyay2022interpretable, he2022bsoda}, and two works proposed predicting the best feature index in a discriminative fashion \citep{chattopadhyay2023variational, covert2023learning}. Our work develops a similar discriminative approach, but to estimate the CMI itself rather than the argmax among candidate features.
+
+Apart from these CMI-based methods, other works have addressed DFS as an RL problem \citep{dulac2011datum, shim2018joint, kachuee2018opportunistic, janisch2019classification, janisch2020classification, li2021active}. For example, \citet{janisch2019classification} formulate DFS as a MDP where the reward is the 0-1 loss minus the feature cost, \revision{while considering both variable budgets and non-uniform feature costs}. RL theoretically has the capacity to discover better policies than a greedy approach, but it has not been found to perform well in practice,  seemingly due to training difficulties that are common in RL \citep{erion2021coai, chattopadhyay2023variational, covert2023learning}. Other works have instead explored imitation learning, where selections are made by mimicking an oracle policy \citep{he2012cost, he2016active}.
+
+Static feature selection has been an important subject in statistics and machine learning for decades; see \citep{guyon2003introduction, li2017feature, cai2018feature} for reviews. CMI is also at the basis of some static methods, see \citet{fleuret2004fast} for example. Greedy methods perform well under certain assumptions about the data distribution \citep{das2011submodular, elenberg2018restricted} and are popular for simple models, but feature selection with neural networks is more challenging. Methods now exist that leverage either group sparse penalties \citep{feng2017sparse, tank2021neural, lemhadri2021lassonet} or differentiable gating mechanisms \citep{chang2017dropout, balin2019concrete, lindenbaum2021differentiable}. Unlike recent DFS methods \citep{chattopadhyay2023variational, covert2023learning}, our work bypasses these techniques by using a simpler regression objective.
+
+\revision{Finally, mutual information estimation with deep learning has been an active topic in recent years \citep{oord2018representation, belghazi2018mutual, poole2019variational, song2019understanding, shalev2022neural}. Unlike prior works, ours focuses on the mutual information between features and a response variable, can condition on arbitrary feature sets, and estimates many CMI terms via a single predictive model rather than training a separate network to estimate each mutual information term. 
+}
+
+
+\section{Proposed method}
+
+\label{sec:method}
+In this section, 
+we introduce our method to dynamically select features by estimating the CMI in a discriminative fashion.
+We then discuss how to incorporate prior information into the selection process, handle non-uniform feature costs, and enable variable budgets across predictions.
+\subsection{Estimating the conditional mutual information} \label{sec:estimation}
+
+We parameterize two networks to implement our selection policy.
+First, we have a predictor network $f(\rvx_S; \theta)$, e.g., a classifier with predictions in $\Delta^{K - 1}$.
+Next, we have a value network $v(\rvx_S; \phi) \in \R^d$ designed to estimate the CMI for each feature, or $v_i(x_S ; \phi) \approx I(\rvy ; \rvx_i \mid x_S)$. These are implemented with zero-masking to represent missing features, and we can also pass the mask as a binary indicator vector.
+Once they are trained, we make selections according to $\argmax_i v_i(\rvx_S; \phi)$, and we can make predictions at any time using $f(\rvx_S; \theta)$. The
+question is how to train the networks, given that prior works required generative models to estimate the CMI \citep{ma2019eddi, chattopadhyay2022interpretable}. 
+
+Our main insight is to train the models jointly but with their own objectives, and to design an objective for the value network that recovers the CMI at optimality. Specifically, we formulate a regression problem whose target is the incremental improvement in the loss when incorporating a single new feature. We train the predictor to make accurate predictions given any feature set, or
+\begin{equation}
+    \min_\theta \; \E_{\rvx\rvy} \E_{\rvs} \left[ \ell\left( f(\rvx_\rvs; \theta), \rvy \right) \right],
+    \label{eq:obj-predictor}
+\end{equation}
+and we simultaneously train the value network with the following regression objective,
+\begin{equation}
+    \min_\phi \; \E_{\rvx\rvy} \E_{\rvs} \E_i \left[ \left( v_i(\rvx_\rvs; \phi) - \Delta(\rvx_\rvs, \rvx_i, \rvy) \right)^2 \right],
+    \label{eq:obj-value}
+\end{equation}
+where we define the loss improvement as $\Delta(x_S, x_i, y) = \ell(f(x_S; \theta), y) - \ell(f(x_{S \cup i}; \theta), y)$. The regression objective in \cref{eq:obj-value} is motivated by the following property, which shows that
+if we assume an accurate predictor $f(\rvx_S ; \theta)$ (i.e., the Bayes classifier), the value network's labels are unbiased
+estimates of the CMI (proofs are in \Cref{app:proofs}).
+
+\begin{lemma} \label{lemma:unbiased}
+    When we use the Bayes classifier $p(\rvy \mid \rvx_S)$ as a predictor and $\ell$ is cross entropy loss, the incremental loss improvement is an unbiased estimator of the CMI for each $(x_S, \rvx_i)$ pair:
+    \begin{equation}
+        \E_{\rvy, \rvx_i \mid x_S} \left[ \Delta(x_S, \rvx_i, \rvy) \right] = I(\rvy ; \rvx_i \mid x_S).
+    \end{equation}
+\end{lemma}
+
+Based on this result and the fact that the optimal predictor does not depend on the selection policy \citep{covert2023learning}, we can make the following claim about jointly training the two models. We assume that both models are infinitely expressive (e.g., very wide networks) so that they can achieve their respective optimizers.
+
+\begin{thm} \label{thm:optimizers}
+    When
+    $\ell$ is cross entropy loss, the objectives \cref{eq:obj-predictor} and \cref{eq:obj-value} are jointly optimized by a
+    predictor $f(x_S ; \theta^*) = p(\rvy \mid x_S)$ and value network where $v_i(x_S; \phi^*) = I(\rvy; \rvx_i \mid x_S)$ for $i \in [d]$.
+\end{thm}
+
+This allows us to train the models in an end-to-end fashion
+using stochastic gradient descent, as depicted in \Cref{fig:concept}.
+In \Cref{app:proofs} we prove a similar result for regression problems:
+that the policy estimates the reduction
+in conditional variance associated with each candidate feature.
+Additional analysis in \Cref{app:suboptimality} shows how suboptimality in the classifier can affect the learned CMI estimates; however, even if the learned estimates $v_i(\rvx_S; \phi)$ are imperfect in practice, we expect good performance because the policy replicates selections that improve the loss
+during training. 
+
+Several other steps are important during training,
+and these are detailed in \Cref{app:pseudocode}.
+First, like several prior methods, we pre-train the predictor with random feature sets before beginning joint training \citep{rangrej2021probabilistic, chattopadhyay2023variational, covert2023learning}.
+Next, we generate training samples $(x_S, x_i, y)$
+by executing the current policy with a random exploration probability $\epsilon \in [0, 1]$, which can be decayed throughout training.
+Finally, we sometimes
+share parameters between the models, particularly when they are large networks; this helps
+in our experiments with image data, which use either CNNs or ViTs \citep{dosovitskiy2020image}.
+\input{inserts/concept}
+
+\subsection{Incorporating prior information} \label{sec:prior}
+
+A further direction
+is utilizing \textit{prior information} obtained before beginning the selection process.
+We view such prior information as a separate random variable $\rvz$, and it can be either an exogenous input, a subset of features that are
+available with no associated cost, or even a noisy or low-resolution version of the main input $\rvx$ \citep{ranzato2014learning, ba2014multiple, ba2015learning}. Situations
+of this form
+arise in multiple applications, e.g., a patient's demographic features
+in a medical diagnosis setting.
+
+Given such prior information, our idealized DFS policy must be modified as follows. First, the selections should be based on $I(\rvy; \rvx_i \mid x_S, z)$, which captures how informative $\rvx_i$ is given knowledge of both $\rvx_S$ and $\rvz$. Next, the predictions made at any time are given by $p(\rvy \mid x_S, z)$, because $\rvz$ provides information that can improve our predictions. As for our proposed CMI estimation procedure from \Cref{sec:estimation}, it is straightforward
+to modify. The two models must take the prior information $\rvz$ as an additional input, and
+we can train them with modified versions of \cref{eq:obj-predictor,eq:obj-value},
+\begin{equation}
+    \min_\theta \; \E_{\rvx\rvy\rvz} \E_{\rvs} \left[ \ell\left( f(\rvx_\rvs, \rvz; \theta), y \right) \right],
+    \quad\quad
+    \min_\phi \; \E_{\rvx\rvy\rvz} \E_{\rvs} \E_i \left[ \left( v_i(\rvx_\rvs, \rvz; \phi) - \Delta(\rvx_\rvs, \rvx_i, \rvz, \rvy) \right)^2 \right], \label{eq:obj-prior}
+\end{equation}
+where
+$\Delta(x_S, x_i, z, y) = \ell(f(x_S, z, ; \theta), y) - \ell(f(x_{S \cup i}, z; \theta), y)$
+is the incremental loss improvement.
+We then have the following result for
+jointly training the two models.
+
+\begin{thm} \label{thm:optimizers-prior}
+    When
+    $\ell$ is cross entropy loss, the objectives in \cref{eq:obj-prior} are jointly optimized by a
+    predictor $f(x_S, z ; \theta^*) = p(\rvy \mid x_S, z)$ and value network where $v_i(x_S, z; \phi^*) = I(\rvy; \rvx_i \mid x_S, z)$ for all $i \in [d]$.
+\end{thm}
+
+The same implementation details discussed in \Cref{sec:estimation} apply here, and as before, we expect strong performance even if the CMI estimates $v_i(\rvx_S, \rvz; \phi)$ do not reach their optimal values
+in practice.
+\subsection{Allowing a variable feature budget} \label{sec:budget}
+
+Given our approach for estimating each feature's CMI,
+a natural question is how to trade off information
+with feature acquisition costs. We now consider two challenges related to
+features costs:
+(1)~how to handle non-uniform costs between features,
+and (2)~when
+to stop collecting new features.
+\textbf{Non-uniform costs.}
+For the first challenge, consider medical diagnosis as a motivating example.
+Diagnoses
+can be
+informed by heterogeneous data, including demographic variables, questionnaires, physical
+examinations,
+and lab tests; each measurement requires
+a different amount of time or money \citep{kachuee2018opportunistic, erion2021coai}, and feature costs must be balanced with the information they provide.
+We consider here that each feature
+has a cost $c_i > 0$ and that costs are
+additive.
+
+There are multiple ways to trade off cost with information, but we take inspiration from
+adaptive submodular optimization, where costs are accounted for via the ratio between the expected improvement and cost. Here, this suggests that our selections should be
+$\argmax_i I(\rvy; \rvx_i \mid x_S) / c_i$.
+For adaptive submodular objectives,
+this criterion guarantees near-optimal performance \citep{golovin2011adaptive}; the DFS problem is known to \textit{not} be adaptive submodular \citep{chen2015sequential}, which means that we cannot offer performance guarantees,
+but we find that this approach works well in practice.
+
+\textbf{Variable budgets.}
+Next, we consider
+when to stop acquiring new features. Many previous works focused on the budget-constrained setting, where we adopt a budget $k$ for all predictions \citep{chen2015sequential, ma2019eddi, rangrej2021probabilistic, covert2023learning}. This can be viewed as a stopping criterion, and it generalizes to non-uniform costs: we can keep collecting new information as long as $\sum_{i \in S} c_i \leq k$. Alternatively, we can adopt
+a confidence-constrained setup \citep{chattopadhyay2023variational}, where selection terminates once the predictions have low uncertainty.
+For classification problems, a natural approach
+is to stop collecting features when $H(\rvy \mid x_S) \leq m$.
+
+In general, it is unclear whether we should follow a budget- or confidence-constrained approach, or whether another option
+offers a better cost-accuracy tradeoff. We resolve this
+by considering the
+optimal
+performance achievable by \textit{non-greedy policies}, and we present the following insight: that policies with per-prediction
+constraints are Pareto-dominated by those that satisfy their constraints \textit{on average}.
+We state this claim here in a simplified form,
+and we defer the formal version to \Cref{app:proofs}.
+\begin{prop} \label{prop:informal}
+    (Informal) For any feature budget $k$, the best policy to achieve this budget on average achieves lower loss than the best policy with a per-prediction budget constraint. Similarly, for any confidence level $m$, the best policy to achieve this confidence on average achieves lower cost than the best policy with a per-prediction confidence constraint.
+\end{prop}
+
+
+Intuitively, when designing a policy to achieve a given average cost or confidence level, it should help to let the policy violate that level for certain predictions. For example, for a patient whose medical condition is inherently uncertain and will not be resolved by any number of tests, it is preferable from a cost-accuracy perspective to stop early rather than run many expensive tests. \Cref{prop:informal} suggests that we should avoid adopting budget or confidence constraints and instead seek the optimal unconstrained policy, but because we assume that we only have CMI estimates (\Cref{sec:estimation}), we opt for a simple alternative: we adopt a penalty parameter $\lambda > 0$, we make selections at each step according to $I(\rvy; \rvx_i \mid x_S)/c_i$, and we terminate the algorithm when $\max_i I(\rvy; \rvx_i \mid x_S) / c_i < \lambda$.
+
+Following this approach, we see that a single instantiation of our model can be run with three different stopping criteria: we can use the budget $k$, the confidence $m$, or the penalty $\lambda$. In contrast, prior methods that penalize feature costs required training separately for each penalty strength
+\citep{janisch2019classification}. Although our penalized
+criterion is not the optimal one alluded to in \Cref{prop:informal}, we find empirically that it consistently improves performance relative to a fixed budget.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+We now present results from applying our method to several datasets
+(\textbf{di}scriminative \textbf{m}utual information \textbf{e}stimation) and explore two data modalities
+to evaluate its performance. Our tabular datasets include two medical diagnosis tasks, which represent natural and valuable use cases for DFS; we also use MNIST, which was considered in prior works \citep{ma2019eddi, chattopadhyay2022interpretable, chattopadhyay2023variational}. As for our image datasets, we include these because they are studied in several earlier works and represent challenging DFS problems \citep{karayev2012timely, mnih2014neural, janisch2019classification, rangrej2021probabilistic}.
+\revision{Our experiments focus mainly on the prediction accuracy at a given feature budget, but for completeness we also design an experiment to test the CMI estimation accuracy in \Cref{app:results}}. 
+In terms of baselines, we compare DIME
+to both static and dynamic feature selection methods. As a static baseline, we compare to a supervised
+Concrete Autoencoder (\textit{CAE}) \citep{balin2019concrete},
+which outperformed several dynamic methods in recent work \citep{covert2023learning}.
+For dynamic baselines, we consider multiple approaches:
+first, we compare to the recent discriminative methods that directly predict the CMI's argmax \citep{chattopadhyay2023variational, covert2023learning}, which we refer to as \textit{Argmax Direct}.
+Next, we consider \textit{EDDI} \citep{ma2019eddi}, a generative approach that uses a partial variational autoencoder (PVAE) to sample unknown features.
+Because EDDI does not scale as well beyond tabular datasets, we compare to probabilistic hard attention (\textit{Hard Attention}) \citep{rangrej2021probabilistic}, a method that adapts EDDI to work with image data.
+\revision{Finally, we also compare the tabular datasets to two RL approaches: classification with costly features (\textit{CwCF}) \citep{janisch2020classification} and opportunistic learning (\textit{OL}) \citep{kachuee2018opportunistic}, which both design rewards based on features' predictive utility. \Cref{app:baselines} provides more information about the baseline methods.
+}
+
+\subsection{Tabular datasets}
+
+Our first medical diagnosis task
+involves predicting whether a patient requires endotracheal intubation for respiratory support
+in an emergency medicine setting ($d = 112$) \citep{covert2023learning}. The second uses cognitive, demographic, and medical history data from two longitudinal aging cohort studies (ROSMAP, \citealt{a2012overview, a2012overview2})
+to predict imminent dementia onset
+($d = 46$). In both scenarios, it is difficult to acquire 
+all features
+due to time constraints,
+making DFS a promising paradigm.
+The third is the standard MNIST
+dataset \citep{lecun1998gradient}, which we formulate as a tabular problem by treating each pixel as a
+feature ($d = 784$).
+Across all methods,
+we use fully connected networks with dropout to reduce overfitting \citep{srivastava2014dropout}, and the classification performance is measured using AUROC for the medical tasks and top-1 accuracy for MNIST.
+\Cref{app:datasets} provides more details about the datasets, and \Cref{app:models} provides more information about the models.
+
+\input{inserts/tabular}
+
+\textbf{Uniform feature costs.} We first consider the scenario with equal costs for all features, and \Cref{fig:tabular} shows results with a range of feature budgets.
+DIME with the penalized stopping criterion achieves the best results among all methods for both medical diagnosis tasks.
+It also performs the best on MNIST, where we
+achieve above $90\%$ accuracy with an average of $\sim\!\!10/784$ features ($1.27\%$).
+Among the baselines, Argmax Direct is the strongest dynamic method,
+CAE is a competitive static method, and EDDI usually does not perform well.
+\revision{The RL approaches (CwCF, OL) are not competitive, as expected from results in prior work \citep{rangrej2021probabilistic, chattopadhyay2023variational, covert2023learning}}. DIME generally shows the greatest advantage for moderate numbers of features, and the gap reduces as the performance saturates. \revision{The variability between trials for the baselines is typically low, as shown by our uncertainty estimates; for DIME, we show results from five independent trials in \Cref{app:results} because it is difficult to ensure identical budgets with separate training runs.
+}
+
+\input{inserts/costs}
+
+\textbf{Non-uniform feature costs.} Our CMI estimation approach lets us incorporate non-uniform feature costs into DIME, and we demonstrate this with the Intubation and ROSMAP datasets. For ROSMAP, we use costs expressed as the time required to acquire each feature, and for Intubation we use relative costs estimated by a board-certified physician (\Cref{app:datasets}).
+\revision{For comparisons, we adapt EDDI and CwCF to use non-uniform feature costs.}
+We also compare to two ablations of our approach: (1)~using uniform costs during training but the true costs during inference
+(Inference Costs), which tests DIME's robustness to changing feature costs after training; and (2)~using uniform costs during both training and inference (Uniform Costs), which demonstrates the importance of using correct costs. All methods are compared here with the budget-constrained stopping criterion.
+
+\Cref{fig:costs} shows the results with non-uniform feature costs.
+DIME outperforms EDDI \revision{and CwCF} by a substantial margin, echoing the earlier results, and reflecting the improved CMI estimation with our discriminative approach. 
+Comparing to the variations of DIME, using the true non-uniform costs during both training and inference
+outperforms both variations, showing that considering costs when making selections is important. The version that uses costs only during inference slightly outperforms ignoring costs on ROSMAP, indicating a degree of robustness to changing feature costs between training and inference, but both versions give similar results on Intubation.
+
+\textbf{Additional results.} Due to space constraints in the main text, we defer several additional results to \Cref{app:results}. These include an evaluation of the CMI estimation accuracy, results with non-uniform costs across multiple trials (similar to \Cref{fig:costs}), an ablation of DIME with other stopping criteria discussed in \Cref{sec:budget}, and plots of its distinct selections across predictions.
+\subsection{Image datasets}
+
+Next, we applied our method to three image classification datasets. The first two are subsets of ImageNet
+\citep{deng2009imagenet}, one with $10$ classes (Imagenette, \citealt{Imagenette}) and the other with $100$ classes (ImageNet-100, \citealt{Imagenet100}). The third is a histopathology dataset (MHIST, \citealt{wei2021petri}), comprising hematoxylin and eosin (H\&E)-stained
+images
+obtained by extracting diagnostically-relevant
+tiles from
+whole-slide images (WSIs). The task is to predict the histological pattern
+as either a benign
+or precancerous
+lesion.
+WSIs have extremely high resolution and are infeasible for direct use
+in any classification task, making them a potential
+use case for DIME to identify important patches.
+The images in all three datasets are $224 \times 224$, and we view them as $d = 196$ patches of size $16 \times 16$.
+We explore different architectures
+for the value and predictor networks, namely ResNets \citep{he2016deep} and Vision Transformers (ViTs) \citep{dosovitskiy2020image}. We use a shared backbone in both cases,
+with each component having its own output head.
+Classification performance is measured using top-1 accuracy for both ImageNet subsets, and with AUROC for the histopathology task.
+
+\input{inserts/architecture}
+
+\input{inserts/images}
+
+\input{inserts/prior}
+
+\textbf{Exploring modern architectures.} As an initial experiment, \Cref{fig:architecture} compares the
+ResNet and ViT
+architectures for the Imagenette and ImageNet-100 datasets.
+We use DIME to conduct this analysis,
+because its discriminative approach lets us seamlessly plug in any network architecture.
+Across both datasets, DIME's penalized version outperforms the budget-constrained version, and we find that ViTs significantly outperform ResNets. This can be attributed to the ViT's self-attention mechanism: this architecture
+is better suited to handle
+information spread across an image,
+a property that has made ViTs useful in other applications with partial inputs \citep{naseer2021intriguing, jain2021missingness, salman2022certified}.
+Given their superior performance, we use ViTs as backbones in subsequent experiments where possible.
+This includes DIME, CAE and Argmax Direct, but Hard Attention lacks this flexibility because it uses 
+a recurrent module to process subsets of image regions.
+
+Next, \Cref{fig:image} compares DIME to the baselines across multiple feature budgets, using the penalized stopping criterion that performed best in \Cref{fig:architecture}.
+DIME
+outperforms the baselines
+for all feature budgets, with the largest gains observed for Imagenette. Notably, we
+achieve nearly $97\%$ accuracy on Imagenette with only $\sim\!\!15/196$ patches (7.7\%). The Argmax Direct baseline is most competitive with DIME,
+but the Hard Attention baseline shows a larger drop in performance.
+
+\textbf{Incorporating prior information.} Next, we explored the possibility of incorporating prior information into DIME's selection process for the histopathology dataset. To simulate informing our selections with a less exact but easily acquirable version of the tissue, we use the Canny edge image as a sketch \citep{canny1986computational}, which can help generate more valuable selections than a blank image.
+We use separate ViT backbones for the original and edge images, and we concatenate the resulting embeddings before estimating the CMI or making class predictions (see \Cref{app:models} for details). \Cref{fig:prior} shows example images, along with the results obtained with DIME for various feature budgets.
+The results show that the prior information is incorporated successfully, leading to improved performance for both the penalized and budget-constrained versions.
+To verify that the improvement
+is not solely due to the predictive signal provided by the edge image, we conduct an ablation where the sketch is integrated into the predictor only for a pre-trained and otherwise frozen version of DIME. This middle ground improves upon no prior information, but it generally performs well below the version that uses prior information both when making selections and predictions.
+
+
+
+\section{Conclusion}
+
+This work presents DIME, a new DFS approach enabled by estimating the CMI in a discriminative fashion. Our approach involves learning value and predictor networks, trained in an end-to-end fashion with a straightforward regression objective.
+From a theoretical perspective, we prove that our training approach recovers the exact CMI at optimality. Empirically, DIME accurately estimates the CMI and enables an improved cost-accuracy tradeoff, exceeding both the generative and discriminative methods it builds upon \citep{chattopadhyay2023variational, covert2023learning}. Our evaluation considers a range of
+tabular and image datasets and demonstrates the potential to implement several additions to the classic greedy CMI selection policy: these include allowing non-uniform features costs, variable budgets, and incorporating prior information. The results also show that DIME is robust to higher image resolutions, scales to more classes, and benefits from modern architectures.
+Future work may focus on promising applications like MRIs and region-of-interest selection within WSIs, using DIME to initialize RL methods, and otherwise accelerating or improving DIME's training.
+
+
+
+
+
+The code to train DIME has been submitted as part of the supplementary material. It includes a README that describes the steps to be taken for training and evaluating models with the different datasets. Pseudocode for DIME's training algorithm along with details about our training implementation are provided in \Cref{app:pseudocode}. Proofs for \Cref{lemma:unbiased} and \Cref{thm:optimizers} are provided in \Cref{app:lemma1}. The proof for \Cref{thm:optimizers-prior} is provided in \Cref{app:theorem2}. The adaptation of DIME for regression problems, along with the corresponding theorem and proof, are provided in \Cref{app:regression}. Descriptions of all datasets used in our experiments, along with ways to access them, are provided in \Cref{app:datasets}. All the datasets are publicly available except for the intubation dataset, which is private due to patient privacy concerns.
+
+
+
+
+
+

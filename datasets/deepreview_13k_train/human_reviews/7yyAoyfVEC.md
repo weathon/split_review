@@ -1,0 +1,195 @@
+# Hypothesis- and Structure-based prompting for medical and business diagnosis
+
+- Decision: Reject
+- Scores: 3, 3, 1, 3
+
+## Abstract
+In real-world scenarios like healthcare and business, tackling many-to-one problems is challenging but crucial. Take medical diagnosis: A patient's chief complaint can be caused by various diseases, yet time and resource constraints make identifying the cause via difficult.
+To tackle these issues, our study introduces Hypothesis-based and Structure-based (HS) prompting, a method designed to enhance the problem-solving capabilities of Large Language Models (LLMs). Our approach starts by efficiently breaking down the problem space using a Mutually Exclusive and Collectively Exhaustive (MECE) framework. Armed with this structure, LLMs generate, prioritize, and validate hypotheses through targeted questioning and data collection. The ability to ask the right questions is crucial for pinpointing the root cause of a problem accurately. We provide an easy-to-follow guide for crafting examples, enabling users to develop tailored HS prompts for specific tasks. We validate our method through diverse case studies in business consulting and medical diagnosis, which are further evaluated by domain experts. Interestingly, adding one sentence ``You can request one data in each response if needed'' initiates human interaction and improves performance.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper introduces a novel method called Hypothesis- and Structure-based Prompting (HS) for enhancing the problem-solving capabilities of Large Language Models (LLMs) in healthcare and business. The approach breaks down the problem space using a Mutually Exclusive and Collectively Exhaustive (MECE) framework, enabling LLMs to generate, prioritize, and validate hypotheses through targeted questioning and data collection. The paper provides an easy-to-follow guide for crafting examples, allowing users to develop tailored HS prompts for specific tasks.
+
+### Strengths
+- The paper found that adding a single sentence about requesting data improved the performance of HS prompting effectively, similar to a previous study. This finding demonstrates the effectiveness of the HS approach and its potential for further improvement.
+- This approach breaks down the problem space using a Mutually Exclusive and Collectively Exhaustive (MECE) framework, which is a unique and effective way of approaching complex problems.
+- The paper provides an easy-to-follow guide for generating examples, allowing users to create appropriate examples tailored to their specific tasks. By aligning the examples with the structure-based and hypothesis-based approach, users can stimulate the LLMs to solve problems more effectively and efficiently.
+
+### Weaknesses
+ - Limited comparison to existing methods: While the paper enlists domain experts to validate the HS method and provide a comparison to existing baseline methods, the comparison is limited to a few specific methods. It would be beneficial to see a more comprehensive comparison to a wider range of existing methods, including those that utilize more sophisticated search strategies or iterative refinement techniques.
+- The paper focuses on the application of the HS method to healthcare and business diagnosis, and it is unclear how generalizable the approach is to other domains or problem types. The current evaluation does not explore the method's performance in areas with different problem structures or data characteristics, such as those found in finance or engineering.
+- The paper's qualitative evaluation is limited to a few cases with a panel of consultants or medical doctors. Performance consistency is a major concern with such limited of observed samples. The lack of a more extensive quantitative analysis, including statistical significance testing, makes it difficult to assess the robustness of the method.
+
+### Questions
+- Can the authors provide more real-world case studies where the HS method was used successfully in healthcare or business? This would help to demonstrate the practical applicability of the approach and provide more evidence of its effectiveness.
+- How generalizable is the HS method to other domains or problem types? Have you considered applying the approach to other areas, such as finance or engineering? If so, what were the results?
+- Can you provide more details on the process of generating examples for the HS method? How do you ensure that the examples are of high quality and representative of the problem space?
+- How does the HS method compare to other approaches that incorporate human-in-the-loop feedback or other forms of human-machine collaboration? Have you considered the potential benefits and drawbacks of these approaches?
+- Can you provide a more comprehensive comparison to a wider range of existing methods? This would help to demonstrate the relative strengths and weaknesses of the HS method compared to other approaches.
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper introduces a novel prompting strategy, HS, which starts by breaking down the problem space using the concept of Mutually Exclusive and Collectively Exhaustive (MECE), and it proceeds to prioritize and validate hypotheses through interaction with the user. The paper also introduces easy-to-follow guidelines for crafting examples for potential users of HS prompts. Experiments on business consulting and medical diagnosis in 'many-to-one' scenarios show that HS prompting outperforms previous prompting strategies, even when modified for these particular tasks, indicating potential applicability for LLMs in challenging, real, domain-specialized scenarios.
+
+### Strengths
+- The motivation of the paper is ambitious and addresses real-world problems using LLMs.
+- The experiments conducted cover both the business and medical domain, which can potentially demonstrate the impact of the paper.
+- The proposed prompting is well-thought-out and convincing when using GPT-4.
+
+### Weaknesses
+ - The method heavily relies on GPT-4's ability, which may limit the applicability of the approach to other LLMs. CoT, ToT, and GoT are general methods that can be used in any other LLMs regardless of how much knowledge is stored in LLMs (they act as an aid to LLM reasoners). However, the assumption of HS is that LLMs are very knowledgeable about defining any problem landscape and are great at generating possible hypotheses, which is not just the role of a reasoner but of an oracle-knowledge base and reasoner at the same time). To show the broad applicability of the approach, the authors should use other LLMs to demonstrate the effectiveness of HS (possibly using a retriever if some LLMs do not hold enough knowledge).
+- The proposed method resembles a human-AI interactive version of ToT or GoT. The idea itself is very practical and useful, but the credibility of this approach depends on the user.
+
+### Questions
+- How is the citation (Zheng et al., 2023) for neural architecture search related to real-world modeling? Also, I think 'general tasks' should be 'general NLP tasks'.
+- How can we guarantee that the options that LLMs offer are MECE if used by a non-expert?
+- Are there citations or backup arguments for the claims below?
+1. 'LLMs need to apply this knowledge in a structured and efficient manner, especially when solving many-to-one problems'
+2. 'While CoT excels in one-to-one mapping problems, it falters when multiple potential root causes must be explored'
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+1
+
+### Rating Number
+1
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+# Summary
+
+## What is the problem? 
+How can we best use LLMs in highly interactive settings with lots of back-and-forth between users to most effectively solicit information and arrive at correct conclusions given that solicited information.
+
+## Why is it impactful?
+There are many problems of this format, including medical diagnosis and business case problem discovery. Better methods to leverage LLMs for these applications would be impactful.
+
+## Why is it technically challenging/interesting (e.g., why do naive approaches not work)?
+There is a breadth of interesting related literature on how to better use LLMs in iterative reasoning problems, much of which is appropriately flagged by the authors. The existence of this prior work illustrates the challenge of this area. These problems are also challenging to evaluate properly, given that whether or not an LLM agent "reasoned correctly" and "most efficiently" is often ill-posed and challenging to formalize.
+
+## Why have existing approaches failed?
+The authors allege that existing approaches fail in certain circumstances that (they implicitly argue) are essential in healthcare or business use cases. However, these challenges are not quantified nor sufficiently justified by their empirical results. Further, they fail to sufficiently comment on related resources, such as https://jamanetwork.com/journals/jama/article-abstract/2806457 this paper which examines medical diagnostic performance in a set of published clinical case report challenges and find generally positive results in that setting.
+
+## What is this paper's contribution?
+This paper proposes a prompting strategy to perform these iterative, chat-based tasks.
+
+## How do these methods compare to prior works?
+They compare to IO (which is never clearly defined), CoT, and two variants therein that rely on adding a "ask for more information once" modifier to the prompts.
+
+## How do they validate their contributions?
+They perform a set of quantitative vignettes of their model's performance on 3 business case studies and 4 medical diagnosis challenges, evaluated by human experts.
+
+### Strengths
+## Key Strengths (reasons I would advocate this paper be accepted)
+  1. This is an important an interesting challenge.
+
+### Weaknesses
+## Key Weaknesses (reasons I would advocate this paper be rejected)
+  1. You assess your method on only 3 business cases for business consulting. This is dramatically too few examples on which to base any generalizable conclusion for the performance of this method. You need to assess this method on a much larger set of business consulting problems in order to argue that your approach has merit over alternative approaches in a reliable manner that should be expected to generalize across a meaningful subset of business consulting problems.
+  2. Similarly for medical cases, you need to experiment with more than 4 cases (I know you started with 5, but one ended up being excluded).
+  3. The quoted justification below for rejecting baselines feels insufficient. Your framework is also repetitive (in that it is recursive) to arrive at a single end point, and the fact that use ChatGPT rather than the API does not invalidate studies that require API use, as you could (and should, for robustness in your experiments) be able to implement your study using a simple program that leverages the API. Quoted justification: "While these methods utilize the GPT-4 API to integrate tree or graph search algorithms, they’re not directly adaptable to our chat interface, where humans interact with the model. Furthermore, these methods best suit tasks that can be broken down into repetitive steps, with a clearly defined endpoint, while business and medical diagnosis tasks are not."
+  4. IO is not clearly defined in your work. CoT is defined as an acronym, but you don't explicitly indicate what exact prompting strategy is used and how it differs from your approach to justify your experiments.
+  5. A key part of the challenge here is one of evaluation; which evaluation metrics should be used, how can they be efficiently assessed at scale, what factors of the input motivate success or failure on different metrics, etc. You do not offer any significant commentary on these challenges nor offer solutions for them, which significantly undercuts your impact here.
+  6. As you are using human evaluators, you need to state that you have appropriate IRB approval to run this study (in order to solicit the survey responses from your human evaluators).
+
+### Questions
+Unfortunately I do not foresee any changes that could motivate me to change my review at this time. You would need to fully re-do your evaluation and experiments at a much greater scale for me to consider a change in score here.
+
+### Soundness
+1 poor
+
+### Presentation
+2 fair
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 4
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes the use of a MECE (Mutually Exclusive, Collectively Exhaustive) structure in the prompts of an LLM (Language Model) to assist in breaking down complex problems into hypotheses. The prompts also address the prioritization of these hypotheses, actively validating each hypothesis by requesting data from a user, and maintaining a holistic view to determine the depth of analysis. The proposed prompts yield improved results when evaluated in business and medical cases by experts.
+
+### Strengths
+S1. The proposed techniques for prompting, based on hypotheses and structure, make sense and have broad applicability.
+
+### Weaknesses
+W1. The proposed HS prompting techniques seem to be an extension of existing methods such as ToT and GoT. Yet, the authors did not include these methods as their baselines, making it hard to evaluate the effectiveness of the HS prompting.
+
+W2. In the experiments, the criteria used to evaluate the models were not clearly defined and justified. For example, the background of the professionals and their scoring standards is not clear. It is also unclear whether the experts who set the criteria participated in the model scoring process (which could lead to potential bias).
+
+W3. The business case study did not show a significant advantage for the proposed prompting techniques. More discussion on the cause is needed.
+
+W4. More objective metrics should be considered in the experiments. For example, runtime, user feedback statistics, and other quantitative metrics.
+
+W5. Presentation issues: Some data charts seem misaligned with the text. The paper requires a major revison.
+
+### Questions
+See the weaknesses.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

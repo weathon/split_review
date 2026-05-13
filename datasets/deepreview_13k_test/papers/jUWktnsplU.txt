@@ -1,0 +1,584 @@
+\title{Hybrid Distillation: Connecting Masked Autoencoders with Contrastive Learners}
+
+\begin{abstract}
+ 
+ Representation learning has been evolving from traditional supervised training to Contrastive Learning (CL) and Masked Image Modeling (MIM). Previous works have demonstrated their pros and cons in specific scenarios, \textit{i.e.}, CL and supervised pre-training excel at capturing longer-range global patterns and enabling better feature discrimination, while MIM can introduce more local and diverse attention across all transformer layers. In this paper, we explore how to obtain a model that combines their strengths. We start by examining previous feature distillation and mask feature reconstruction methods and identify their limitations. We find that their increasing diversity mainly derives from the asymmetric designs, but these designs may in turn compromise the discrimination ability. In order to better obtain both discrimination and diversity, we propose a simple but effective Hybrid Distillation strategy, which utilizes both the supervised/CL teacher and the MIM teacher to jointly guide the student model. Hybrid Distill imitates the token relations of the MIM teacher to alleviate attention collapse, as well as distills the feature maps of the supervised/CL teacher to enable discrimination. Furthermore, a progressive redundant token masking strategy is also utilized to reduce the distilling costs and avoid falling into local optima. Experiment results prove that Hybrid Distill can achieve superior performance on different benchmarks.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+Pre-training followed by fine-tuning has been a common paradigm for computer vision tasks since the advent of deep learning.
+In the past decade, supervised image classification \cite{he2016deep,dosovitskiy2020image, liu2021swin} over the widely used ImageNet \cite{russakovsky2015imagenet} has dominated the pretraining mode. Recently, self-supervised learning has emerged as a promising alternative, particularly with two approaches: Contrastive Learning (CL) and Masked Image Modeling (MIM). The former one, typical representatives are MoCo \cite{he2020momentum} and SimCLR \cite{chen2020simple}, learns invariant representation for positive views, which are usually defined as
+different augmentations of the same image. 
+Furthermore, CLIP \cite{radford2021clip} extends CL to a multi-modal manner, which utilizes the corresponding text description of the given image as positive pairs. While the latter, including MAE \cite{mae} and SimMIM \cite{xie2021simmim}, aims to reconstruct the masked image patches and has become mainstream due to its efficiency brought by mask operations. 
+
+The different pre-training paradigms of CL and MIM facilitate a series of studies \cite{xie2023darkmim,park2023self,wang2023closer} that aim at understanding their respective properties. These studies point out that CL pre-training behaves more similar to supervised pre-training, \textit{i.e.}, it provides models with longer-range global patterns targeting object shape, particularly in the last few layers \cite{park2023self}, and enables feature representation with better \textbf{discrimination}. However, as shown in Fig.~\ref{fig:visattndecoder}(a), CL pre-training causes self-attention in the last few layers to collapse into homogeneity, with attention distances located within a very small distance range. In contrast, MIM pre-training can bring more diverse attention and evenly distributed representations to all layers \cite{xie2023darkmim,park2023self}, and this \textbf{diversity} contributes to its better generalization on downstream fine-tuning. Nevertheless, MIM pre-training is slower to converge and underperforms in linear probing, mainly due to its lack of discrimination ability.
+
+Since discrimination and diversity are both crucial for downstream adaptation, previous methods \cite{wei2022FD,EVA,liu2022exploring,wei2022mvp,beitv2} propose to utilize feature distillation to combine the benefits of CL and MIM. Among them, dBOT \cite{liu2022exploring} replaces the reconstructing objective of MAE with the feature maps of different pre-trained teachers. It finds that feature distillation can bring diverse attention no matter what the teacher model is, and the performance is comparable across different teachers, even with the randomly initialized ones, after multi-stage distillation. Also observing that distillation can yield diversity benefits, FD \cite{wei2022FD} directly distills feature maps from supervised/CL teachers to relieve the attention collapse and achieves considerable downstream performance gains. Although interesting and important, we argue that their findings are incomplete.
+
+This paper re-examines these findings and reconsiders the importance of diversity and discrimination. Our study reveals the following observations:
+(i) \textbf{The increase in diversity derives from the asymmetric architecture designs, rather than feature distillation itself.} (Section~\ref{sec:asydecoder}) 
+After removing the asymmetric attention in \cite{wei2022FD} and encoder-decoder designs in \cite{liu2022exploring} and keeping the same teacher and student structures, we observe a negligible increase (or even a decrease) in attention diversity.
+(ii) \textbf{The asymmetric decoder de facto harm the discrimination over the encoder side, for it migrates the semantic information of the teacher model.} (Section~\ref{sec:asydoseharm}) 
+Due to the decomposition of the encoding and decoding functions, student encoders tend to summarize more general information, thus gradually losing the semantics obtained from teachers and yielding similar results after multi-stage distillation \cite{liu2022exploring}.
+(iii) \textbf{Mask reconstruction of high-level semantics does not help improve diversity.} (Section~\ref{sec:maskrecover}) The phenomenon of reconstructing high-level information \cite{beitv2,EVA,wei2022mvp} is similar to direct feature distillation and lacks the diversity found in MIM, which implies that the attention diversity of MIM mainly comes from low-level reconstruction objectives.
+
+Based on the above observations, we argue that a better distillation strategy is needed to help student models inherit both diversity and discrimination.  
+To this end, we propose a simple but effective feature distillation method, termed as \textbf{Hybrid Distill}, to fully exploit the pre-trained model. Unlike previous works, Hybrid Distill aims to distill knowledge from both the supervised/CL and MIM teacher, allowing the student model to benefit from their respective advantages. To realize this, Hybrid Distill makes careful designs for the distilling target and location. 
+Specifically,  we find that \textbf{the relational modeling ability of MIM is crucial for preserving token diversity, while the feature maps of supervised/CL teachers are beneficial for discrimination}. Accordingly, we set the token relations of the MIM teacher and the feature maps of the supervised/CL teacher as the distilling objectives of Hybrid Distill. The token relations are distilled in layers preceding the final layer where attention collapse tends to occur, while the feature maps are distilled in the final layer to preserve semantics. Additionally, Hybrid Distill proposes a progressive redundant token masking strategy to reduce distilling costs and prevent falling into local optima. Experiment results show that the above distilling strategy works surprisingly well even when using MAE and CLIP teachers,  \textit{i.e.}, MAE pretrained with only 1.28M ImageNet images can also boost the large-scale (400M) pretrained CLIP teacher on different downstream tasks.
+
+In a nutshell, this paper makes the following distribution:
+
+$\bullet$ We re-examine the findings of previous feature distilling methods and point out that their increasing diversity mainly arises from the use of asymmetric designs, while these designs may in turn compromise the discrimination. 
+
+$\bullet$ We further propose a Hybrid Distill framework that utilized both supervised/CL and MIM teacher to provide the student with higher-quality discrimination and diversity. Distilling targets and locations are carefully designed in Hybrid Distill to fully exploit the strengths of both teachers.
+
+$\bullet$ We conduct property analysis to demonstrate that the representations exhibit both discrimination and diversity in our Hybrid Distill. Experiments on various downstream tasks, including classification, detection, and segmentation, also showcase its superiority.
+
+
+
+\section{Model Evaluation: Diversity and Discrimination}
+
+\label{sec:divdis}
+This section re-examines the findings 
+ of previous feature distillation or mask feature reconstruction works illustrated in Sec.~\ref{sec:intro} and highlights their limitations in incorporating diversity and discrimination.
+ 
+
+\subsection{Preliminary}
+We first introduce the definitions of diversity and discrimination and the evaluation strategies we used. \textbf{Discrimination} means that the representations contain more global patterns tailored to object shapes, which is beneficial for recognizing objects and distinguishing images. \textbf{Diversity} is a relative concept, which means that the model pays more attention to local information and can achieve more evenly distributed representations, particularly in the last few layers.
+
+We measure these properties by \textbf{average head distance} \cite{wei2022FD,dosovitskiy2020image} and \textbf{normalized mutual information (NMI)} \cite{strehl2002cluster}. The former calculates the average distance between the query tokens and the key tokens based on their attention weights, providing insight into whether the attention is global or local. The latter measures whether the attention is attending to different tokens or similar ones and is calculated following \cite{park2023self}. Specifically, let a uniform distribution $p(q)=\frac{1}{N}$ represent the distribution of query tokens, where $N$ is the total token number. The joint distribution of query and key is then computed as $p(q, k) = \pi(k \vert q) p(q)$, where $\pi(k \vert q)$ is the normalized self-attention matrix. Thus, NMI can be calculated by $\frac{I (q, k)}{\sqrt{H(q) H(k)}}$ where $I (\cdot, \cdot)$ is the mutual information and $H(\cdot)$ is the marginal entropy. 
+
+\begin{figure*}[t]
+  \centering
+\includegraphics[width=1.0\linewidth]{figures/visattndecoderv2.pdf} 
+  \caption{Average head distance after feature distillation with various decoders. (a) are the baselines. (b) use the supervised DeiT model as the teacher. (c) use the CL-based CLIP model as the teacher. }
+\label{fig:visattndecoder}
+\end{figure*}
+\subsection{The Increase in Diversity Derives from the Asymmetric Designs}
+\label{sec:asydecoder}
+Fig.~\ref{fig:visattndecoder} measures the average head distance after feature distillation with a consistent encoder structure (vanilla Vision Transformer (ViT) \cite{dosovitskiy2020image}) for both the teacher and student models, along with various decoders only for the student. It can be seen that when the encoder is kept the same, using no decoder or linear projection decoder leads to a negligible increase (or even decrease) in attention diversity, reflecting that feature distilling itself cannot bring benefits to diversity. Adding some extra attention layers to the decoder can make the student encoder more diverse, but it hinders discrimination since the last layer no longer captures long-range patterns. Fig.~\ref{fig:visnmi}(a) further compares NMI using the DeiT teacher and the results are in line with the attention visualization, \textit{i.e.}, without asymmetric designs, the student collapses into homogeneity and pays attention to similar tokens in the last few layers. Conversely, the use of asymmetric decoders greatly reduces discrimination.
+
+The above discussions focus on varying decoders, while FD \cite{wei2022FD} introduces asymmetric designs to the encoder by adding additional learnable parameters and relative position bias to the attention layers of the student. 
+
+\begin{figure*}[t]
+  \centering
+\includegraphics[width=0.9\linewidth]{figures/visnmiv2.pdf} 
+  \caption{The normalized mutual information (NMI) of (a) various decoders, (b) encoder and decoder, and (c) mask feature reconstruction.}
+  \label{fig:visnmi}
+\end{figure*}
+
+\begin{figure*}[t]
+  \centering
+\includegraphics[width=0.9\linewidth]{figures/visattnotherv2.pdf} 
+  \caption{Average head distance of (a) encoder and decoder, and (b) mask feature reconstruction.}
+\label{fig:visattnother}
+\end{figure*}
+\subsection{The Asymmetric Decoder Harms the Encoder Discrimination}
+\label{sec:asydoseharm}
+Fig.~\ref{fig:visattnother}(a) and Fig.~\ref{fig:visnmi}(b)  further measure the average head distance and NMI of the asymmetric decoder. Our findings suggest that the decoder has transferred the discrimination of the teacher, as its behavior is similar to that of the last few layers of the teacher model where attention collapse occurs. Since only the student encoder is retained and applied to downstream tasks after distillation, the semantic information that the model maintained is weakened, which explains why in dBOT, different teachers tend to yield similarly-behaving models after multi-stage distilling. Note that dBOT conducts feature distilling in a mask reconstruction way, while we demonstrate in both Sec.
+\subsection{Mask Reconstruction of High-Level Semantics Does not Help Improve Diversity}
+\label{sec:maskrecover}
+Fig.~\ref{fig:visattnother}(b) and Fig.~\ref{fig:visnmi}(c) examine the influence of mask reconstructing high-level information. To eliminate the effect of the asymmetric decoder, we feed both the masks and tokens into the encoder simultaneously and use only linear projection as the decoder. The overall process is thus similar to SimMIM \cite{xie2021simmim}, except that we use the high-level information obtained from the supervised/CL teacher as the distilling objective. Fig.~\ref{fig:visattnother}(b) proves that reconstructing high-level information brings no diversity gains towards directly distilling features, which is consistent with the finding of \cite{xue2022stare}, \textit{i.e.}, reconstruction is unnecessary for MIM with semantic-rich teachers. This phenomenon also implies that the diversity of MIM mainly arises from the low-level reconstructing objective rather than from the reconstruction itself, since diversity is absent in high-level reconstruction.
+
+\begin{figure*}[t]
+  \centering
+\includegraphics[width=0.95\linewidth]{figures/nips_framework_xhx.pdf}
+\caption{Hybrid Distill pipeline and its effectiveness in ensuring discrimination and diversity.}
+\label{fig:framework}
+\end{figure*}
+
+
+\section{Hybrid Distillation}
+
+From the above discussion, we conclude that existing distillation pipelines have limitations in providing discrimination and diversity. Thus, we further propose a novel hybrid distillation framework to ensure these important properties, and this section elaborates on its details.
+
+\subsection{Overview}
+Given a supervised/CL pre-trained model $T_c$, and a MIM pre-trained model $T_m$, Hybrid Distill simultaneously distills knowledge from these two different types of pre-trained teachers, aims at combining their respective advantages to enhance the new representations in a randomly initialized student model $S_\theta$ where $\theta$ is its learnable parameters. ViT \cite{dosovitskiy2020image} is adopted for all the models in Hybrid Distill, and $T_m$ is provided by MAE \cite{mae} while $T_c$ is provided by DeiT \cite{deit} or CLIP \cite{radford2021clip}. 
+
+Specifically, the Hybrid Distill framework is shown in Fig.~\ref{fig:framework} and its overall objective is:
+
+\begin{equation}
+\begin{aligned}
+\max _{\theta} &\underset{x \sim \mathcal{X}}{\mathbb{E}} \mathcal{D}\left\{T_c(x) \odot M, S_\theta(M \odot x)\right\} \\
+& + \alpha \mathcal{D}\left\{T'_m(x) \odot M, S'_\theta(M \odot x)\right\},
+\end{aligned}
+\label{eq:obj}
+\end{equation}
+
+where $\odot$ is an element-wise product operation. $M$ is a mask provided by the teacher model using the strategy described in Sec.~\ref{sec:mask} and $M \odot x$ denotes the unmasked patches. $\mathcal{D}(\cdot, \cdot)$ is the distance measurement, and we use smooth L1 distance in our experiment. $\alpha$ is the hyperparameter that controls the contribution of the two teacher models. Note that we do not distill the final output features $T_m(x)$ for the MIM pre-trained model but instead use the token relations in the previous ViT layers, denote as $T'_m(x)$, as the learning objective. Details are illustrated in Sec.~\ref{sec:dis}.
+
+\subsection{Distilling Strategies}
+\label{sec:dis}
+\paragraph{What to distill?} 
+Different from previous works \cite{wei2022FD,EVA,xue2022stare} that directly distill the features of teacher models, we analyze that the diversity of MIM pre-trained models arises from their superior token-level relationship modeling, while supervised/CL pre-trained models excel at image-level discrimination. Hence, we apply different distilling targets to $T_c$ and $T_m$ to fully utilize their respective advantages. 
+Specifically, taking $T_m$ as an example, we decompose $T_m$ into $T^1_m \circ T^2_m \circ \cdots \circ T^L_m$, where $T^i_m$ is the $i^{th}$ layer of $T_m$ and is composed of a multi-head self-attention (MSA) layer and an MLP layer. Given $x^i_m$ as the input of the $i^{th}$ layer, the calculation in  $T^i_m$ can be represented as:
+\begin{equation}
+\begin{aligned}
+\operatorname{R}^i_m(x^i_m) & = Q^i_m(x^i_m) {K^i_m(x^i_m)}^T,\\
+\operatorname{MSA}^i_m(x^i_m) &= \operatorname{Softmax}\left( \operatorname{R}^i_m(x^i_m) / \sqrt{d}\right) V^i_m(x^i_m), \\
+T^i_m(x^i_m) &= x^i_m + \operatorname{MLP}(x^i_m + \operatorname{MSA}^i_m(x^i_m)),
+\end{aligned}
+\end{equation}
+where $Q^i_m$, $K^i_m$, and $V^i_m$ denotes the linear mappings for $x^i_m$ and $d$ equals to the dimension of $x^i_m$.  Then, for MIM pre-trained model $T_m$, we set the token relation $\operatorname{R}^i_m(x^i_m)$ as the distilling target, while for supervised/CL pretrained model $T_c$, we set the output features $T^i_c(x^i_c)$ as the target.
+
+\paragraph{Where to distill?} As shown in Fig.~\ref{fig:visattndecoder}(a), supervised and CL models tend to collapse into homogeneity in the last few layers, so Hybrid Distill chooses to distill token relations from $T_m$ in these layers to address this collapse and improve diversity. While for the last layer of $S$ which is crucial for discrimination, Hybrid Distill directly distills knowledge from $T_c$ using the output features. 
+Specifically, we distill token relations from $T_m$ at the $L-1$ and $L-2$  layers and distill features from $T_c$ at the $L$ layer of ViT. Accordingly, the learning objective $T_c(x)$ and $T'_m(x)$ in Eq.~\ref{eq:obj} become:
+\begin{equation}
+\begin{aligned}
+T_c(x) & = T^L_c(x),\\
+T'_m(x) &= [R^{L-1}_m(x), R^{L-2}_m(x)].
+\end{aligned}
+\end{equation}
+
+\paragraph{Distillation acceleration via redundant token dropping.} 
+\label{sec:mask}
+Suppose the input is divided into $N$ tokens, \textit{i.e.}, $x \in \mathbb{R}^{N\times d}$, Hybrid Distill can directly distill token relations and features using all the $N$ tokens. However, since some tokens in the image may be redundant, it is promising to mask these tokens for the student model $S$ to reduce memory and time costs. Furthermore, removing redundant tokens can play a regulatory role, helping the model avoid local optima during the distillation process.
+
+Specifically, we use the MIM pre-trained teacher $T_m$ to guide the identification of redundant tokens and provide the token mask. Inspired by \cite{li2023progressively}, we propose a progressive redundant token masking strategy, which generates token masks at different layers of $T_m$ in a progressive manner. Given $x^i_m$ and the mask $M^{i-1}_m$ provided by the previous layer, we define the tokens in $x^i_m \odot M^{i-1}_m$ and are top $K\%$ similar to their average token as redundant tokens in the $i^{th}$ layer and generate a redundant token mask for them. The above process is denoted as $T(x^i_m \odot M^{i-1}_m, K)$. Next, we update $M^{i}_m$ using $T(x^i_m \odot M^{i-1}_m, K)$ and $M^{i-1}_m$ as follows:
+
+\begin{equation}
+M^i_m= \begin{cases}
+M^{i-1}_m - T(x^i_m \odot M^{i-1}_m, K), & \text { if } i \in I,\\
+M^{i-1}_m & \text { if } i \notin I.\\
+\end{cases}
+\end{equation}
+
+where $I$ is the set of layers required to update the token mask.  For $M^0_m$, all elements are set to 1. Finally, we set the mask $M$ for the student model as $M = M^L_m$.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.95\linewidth]{figures/vispropertyv2.pdf}
+  \caption{The (a) average head distance, (b) NMI, and (c) attention visualization of the student model obtained from Hybrid Distill with MAE and CLIP teachers.}
+  \label{fig:visproperty}
+\end{figure*}
+
+\subsection{Property Analysis}
+\textbf{Average head distance.} Fig.~\ref{fig:visproperty}(a) visualizes the average head distance of the student model with CLIP and MAE as teachers, 
+while the visualization of CLIP and MAE teachers themselves are included in Fig.~\ref{fig:visattndecoder}(a). These visualizations demonstrate that Hybrid Distill enhances the discrimination ability of the student model, compensating for the semantic lacking problem of the MAE teacher. Moreover, Hybrid Distill avoids succeeding attention collapse from the CLIP teacher and generates more diverse representations in the last few layers. 
+
+\textbf{Normalized mutual information.}
+Fig.~\ref{fig:visproperty}(b) further inspects the NMI. The results demonstrate that the mutual information between tokens is significantly enhanced in the layers where the MAE token relationships are distilled. Besides, this enhancement does not compromise the discrimination obtained from CLIP, as evidenced by attention in the final layers still attending to similar tokens.
+
+\textbf{Attention visualization.} Fig.~\ref{fig:visproperty}(c) further visualizes the attention between a given query and other keys at different layers to examine behaviors. 
+Compared to MAE, Hybrid Distill exhibits better discrimination ability, \textit{i.e.}, the query tokens of the last layer have global attention towards the main object of the images, regardless of their location. Besides, Hybrid Distill also improves the locality of the model in the $10^{th}$ layer, where attention collapse is known to occur in the CLIP teacher.
+
+\begin{table}[t]
+\caption{Main results on ImageNet-1k classification, COCO detection and instance segmentation, and ADE20K semantic segmentation. $\star$: using MAE+DeiT teachers. $\dagger$: using MAE+CLIP teachers. }
+\centering
+\setlength{\tabcolsep}{3.5mm}
+  \begin{tabular}{l|c|c|c|cc|c}
+\toprule
+  \multirow{2}{*}{Method} & \multirow{2}{*}{Backbone} & \multirow{2}{*}{Distill.} & \multirow{2}{*}{IN-1K} &\multicolumn{2}{c|}{COCO} & \multirow{2}{*}{ADE20K}  \\
+  \cline{5-6}
+   &  &  &  &$\mathrm{AP}^{\mathrm{box}}$  & $\mathrm{AP}^{\mathrm{Mask}}$   &   \\
+  \hline
+  DeiT \cite{deit} &  \multirow{7}{*}{ViT-B} & & 81.8 & 46.9  & 41.5 & 47.0 \\  
+  MoCo v3 \cite{chen2021empirical} &  & &83.2 & 45.5 & 40.5 & 47.1 \\
+  DINO \cite{caron2021emerging} &  & & 83.3 & 46.8 & 41.5 & 47.2\\
+  MAE \cite{mae} &  & & 83.6 & 48.4 & 42.6 &48.1 \\
+  CAE \cite{ContextAutoencoder2022} &  & & 83.3 & 48.0 & 42.3 & 47.7\\
+  SdAE \cite{chen2022sdae} &  & &84.1 & 48.9  & 43.0 & 48.6\\
+  CLIP \cite{radford2021clip} &  & & 83.6& 47.6 &42.3  &49.6 \\  
+  \hline
+  MAE \cite{mae} & \multirow{2}{*}{ViT-L} & &85.9 & 54.0 &47.1  & 53.6\\  
+  CLIP \cite{radford2021clip} &  & & 86.1&52.7  &46.2  & 54.2\\  
+  \hline
+  \hline
+ Distill-DeiT & \multirow{3}{*}{ViT-B} &\multirow{3}{*}{\checkmark} & 82.0 & 47.7 & 42.1 & 47.3 \\
+  Distill-MAE & & & 83.7 &49.1 &43.1 & 47.8 \\
+  Distill-CLIP & & &84.8  &49.5 & 43.5 & 50.3 \\
+  \hline
+  Hybrid Distill$^\star$ & \multirow{2}{*}{ViT-B}  &\multirow{2}{*}{\checkmark} & 83.7 &50.3  & 44.2 &49.1 \\
+  Hybrid Distill$^\dagger$ &  & &\textbf{85.1} & \textbf{50.6} & \textbf{44.4} & \textbf{51.5}\\ 
+  \hline
+  Hybrid Distill$^\dagger$ & ViT-L  &\checkmark &\textbf{88.0} &\textbf{54.6} & \textbf{47.6}  &\textbf{56.3} \\
+\bottomrule
+  \end{tabular}
+  \label{tab:main}
+\end{table}
+
+\begin{table}[t]
+\caption{Classification results on CIFAR100, Cars and INautralist19. $\star$: using MAE+DeiT teachers. $\dagger$: using MAE+CLIP teachers.}
+\centering
+\setlength{\tabcolsep}{4mm}
+  \begin{tabular}{l|c|c|c|c|c}
+\toprule
+  Method & Backbone & CIFAR100 & Cars & INaturalist19& Mean  \\
+  \hline
+  DeiT \cite{deit} & ViT-B&91.4 & 92.0 & 77.3&86.9\\
+  MAE \cite{mae} &ViT-B& 89.6& 89.5& 75.2&84.8\\
+  \hline
+  Distill-DeiT &ViT-B & 91.2 &92.5 & 78.3&87.3\\
+  Distill-MAE &ViT-B & 90.3 & 93.1& 79.0&87.5\\
+  Distill-CLIP & ViT-B &91.6 &94.3&81.6&89.2 \\
+  \hline
+  Hybrid Distill$^\star$ & ViT-B & 91.7& 94.1&80.2&88.7\\  
+  Hybrid Distill$^\dagger$ & ViT-B &\textbf{92.0} & \textbf{94.5}&\textbf{81.9} & \textbf{89.5}\\  
+  \hline
+  Hybrid Distill$^\dagger$ & ViT-L  & \textbf{94.5} & \textbf{95.6}&\textbf{85.3} & \textbf{91.8}\\
+\bottomrule
+  \end{tabular}
+\label{tab:cls}
+\end{table}
+
+\subsection{Discussion with Other Distillation Methods}
+Compared to previous distillation methods \cite{wei2022FD,EVA,liu2022exploring,wei2022mvp,beitv2}, Hybrid Distill stands out by not being restricted to using a single teacher network.
+In addition to addressing the limitations of single-teacher distillation in enriching diversity (as discussed in Sec.~\ref{sec:divdis}), a more direct factor is that single-teacher distillation cannot create new knowledge, \textit{e.g.}, creating additional discrimination for the student model when using the MIM teacher. 
+Therefore, we believe that combining and utilizing existing knowledge from various teachers is more effective and convenient.
+Furthermore, with the growing availability of large-scale pre-trained models within the community, it becomes increasingly valuable to explore new ways to utilize these models and combine their strengths. This further enhances the practical value of our Hybrid Distill, and we hope our work would shed light on new directions.
+
+
+\section{Experiments}
+
+\subsection{Implementation Details}
+Hybrid Distill is conducted on 8 V100 GPUs and is built on the codebase of dBOT \cite{liu2022exploring}, so most of its settings are in line with dBOT. Specifically, the batch size, learning rate, and weight decay are set to 1024 and 6e-4, and 0.05, respectively. AdamW \cite{loshchilov2017decoupled} optimizer and cosine decay \cite{loshchilov2016sgdr} schedule is used. The input size is $224^2$. For ViT-B, the distillation is based on ImageNet-1K and the epoch is 300 for main results and 100 for ablation studies. For ViT-L, the distillation is based on ImageNet-21K and the epoch is 40. The hyperparameter $\alpha$ is set to $1.0$ and the redundant token masking set $I$ is set to $[0, L/3, 2L/3]$ following \cite{li2023progressively}. The performances are tested on different downstream tasks. For classification, we report results on ImageNet-1K, CIFAR100 \cite{krizhevsky2009learning}, Cars \cite{krause20133d}, and iNaturalist19 \cite{van2018inaturalist}. For object detection and instance segmentation, we fine-tune the student model on COCO \cite{lin2014microsoft} using Mask-RCNN \cite{he2017mask} following \cite{ContextAutoencoder2022}. For semantic segmentation, the evaluation is conducted on ADE20K \cite{zhou2018semantic} using the ViT with UperNet \cite{xiao2018unified} following \cite{ContextAutoencoder2022,chen2022sdae}.
+\begin{table}[t]
+    \begin{minipage}
+{0.49\linewidth}
+    \caption{Different combinations of two teacher models. $T_c(x)$: DeiT, $T_m(x)$: MAE. }   
+    \centering
+    \begin{tabular}{c|cc}
+        \toprule
+            Targets & $\mathrm{AP}^{\mathrm{box}}$ & $\mathrm{AP}^{\mathrm{mask}}$ \\
+            \hline
+            $T_c(x)$&47.5 & 41.8 \\
+            $T_m(x)$&48.9 & 43.1 \\
+            $T_c(x) + T'_c(x)$ & 46.8  & 41.5 \\
+            $T_m(x) + T'_m(x)$ &48.9 & 43.2\\ 
+            $T_c(x) + T'_m(x)$ & \textbf{50.0}& \textbf{43.9}\\ 
+        \bottomrule
+    \end{tabular}
+    \label{tab:com}  
+\end{minipage}\hfill
+\begin{minipage}
+{0.49\linewidth}
+     \caption{Different combinations of two teacher models. $T_c(x)$: CLIP, $T_m(x)$: MAE. $\star$: using the ImageNet-100 pretrained weights. }
+    \centering
+    \begin{tabular}{c|cc}
+        \toprule
+            Targets & $\mathrm{AP}^{\mathrm{box}}$ & $\mathrm{AP}^{\mathrm{mask}}$ \\
+            \hline
+            $T_c(x)$ & 49.1  & 43.1  \\
+            $T_m(x)$& 48.9 &  43.1\\
+            $T_c(x) + T'_c(x)$ & 49.1 & 43.2 \\
+            $T_c(x) + T'_m(x)$ & \textbf{50.4} &\textbf{44.1} \\ 
+            $T_c(x) + T'_m(x)^{\star}$ &49.5 & 43.5\\
+        \bottomrule
+    \end{tabular}
+    \label{tab:com2}
+\end{minipage}
+\end{table}
+
+\begin{table}[t]
+    \begin{minipage}{0.49\linewidth}
+    \caption{The distilling targets of $T'_m(x)$. $T_c(x)$: DeiT, $T_m(x)$: MAE. $\star$ means distilling MAE and DeiT features at the last layer.}   
+    \centering
+    \begin{tabular}{c|cc}
+        \toprule
+            Targets & $\mathrm{AP}^{\mathrm{box}}$ & $\mathrm{AP}^{\mathrm{mask}}$ \\
+            \hline
+            ${T^i_m}^{\star}$ &47.7 & 42.1 \\
+            $T^i_m$ & 49.6& 43.5 \\
+            $\operatorname{MSA}^i_m$ & 49.8  & 43.7  \\
+            $\operatorname{R}^i_m$ & \textbf{50.0}  & \textbf{43.9}\\
+        \bottomrule
+    \end{tabular}
+    \label{tab:target}  
+\end{minipage}\hfill
+\begin{minipage}{0.49\linewidth}
+    \centering
+    \begin{tabular}{c|cc}
+        \toprule
+            Targets & $\mathrm{AP}^{\mathrm{box}}$ & $\mathrm{AP}^{\mathrm{mask}}$ \\
+            \hline
+            $T^i_m$ & 49.9 & 44.0\\
+            $\operatorname{MSA}^i_m$ &50.1 & 44.0\\
+            $\operatorname{R}^i_m$ & \textbf{50.4} &\textbf{44.1}\\
+        \bottomrule
+    \end{tabular}
+    \label{tab:target2}
+\end{minipage}
+\end{table}
+\begin{table}[t]
+\begin{minipage}{0.46\linewidth}
+    \caption{The distilling position of $T_m$. }   
+    \centering
+    \begin{tabular}{c|cc}
+        \toprule
+            Distilling layers & $\mathrm{AP}^{\mathrm{box}}$ & $\mathrm{AP}^{\mathrm{mask}}$ \\
+            \hline
+            1-11 & 48.8 & 43.0 \\
+            1,2,3 & 47.4& 41.9\\
+            5,6,7 & 48.3& 42.7\\
+            9,10,11& 49.8 &43.7\\
+            10,11& \textbf{50.0}  &\textbf{43.9}\\
+            11& 49.2 & 43.3\\
+        \bottomrule
+    \end{tabular}
+    \label{tab:layers}
+\end{minipage}
+    \begin{minipage}{0.52\linewidth}
+\caption{The token masking strategy.}   
+    \centering
+    \begin{tabular}{c c|cc}
+        \toprule
+            Strategy & Ratio &$\mathrm{AP}^{\mathrm{box}}$ & $\mathrm{AP}^{\mathrm{mask}}$ \\
+            \hline
+            No& $100\%$& \textbf{50.0} & \textbf{43.9} \\
+            \hline
+            Random& $35\%$ &49.2 &43.3 \\
+            Direct & $35\%$ &49.6  & 43.7 \\ 
+            \hline
+            Progressive& $13\% (50\%^3)$ &48.4 & 42.8\\
+            Progressive& $34\% (70\%^3)$ & 49.9& 43.8\\     
+            Progressive& $73\% (90\%^3)$ & 49.9 & 43.8\\       
+        \bottomrule
+    \end{tabular}
+    \label{tab:mask}
+\end{minipage}  
+\end{table}
+\subsection{Main Results}
+This section presents benchmark results of Hybrid Distill on different downstream. We also list results for supervised and self-supervised pre-trained models, as well as 300-epoch uni-distillation baselines which use the same symmetrical structures as Hybrid Distill, for comparison.  As shown in Tab.~\ref{tab:main}, Hybrid Distill achieves performance gains on all downstream tasks, especially for the dense-level ones. Specifically, although the performance of DeiT is suboptimal, its strength can be complementary to MAE and brings considerable benefits, \textit{i.e.}, when using DeiT and MAE teachers, Hybrid Distill achieves 50.3 $\mathrm{AP}^{\mathrm{box}}$ and 44.2 $\mathrm{AP}^{\mathrm{mask}}$ on COCO, as well as 49.1 mIoU on ADE20K, surpassing Distill-MAE by 1.2, 1.1, and 1.3, respectively. Similarly, Hybrid Distill achieves 50.6 $\mathrm{AP}^{\mathrm{box}}$ and 44.4 $\mathrm{AP}^{\mathrm{mask}}$ on COCO, as well as 51.5 mIoU on ADE20K when using CLIP and MAE teachers, outperforming Distill-CLIP by 1.1, 0.9, and 1.2, respectively. When using the VIT-L backbone, the performance can be further boosted to 54.6 $\mathrm{AP}^{\mathrm{box}}$,  47.6 $\mathrm{AP}^{\mathrm{mask}}$ and 56.3 mIoU on respective tasks. The improvement on ImageNet-1k is not significant, probably because the distillation is performed on the same dataset, thus increasing diversity fails to bring further gains. In Tab.~\ref{tab:cls}, we further evaluate Hybrid Distill on several small-scale classification datasets and observe more significant gains.
+
+\subsection{Ablation Study}
+This section ablates different variants of Hybrid Distill. The results are reported on dense-level COCO detection and segmentation tasks, as diversity has a stronger influence on these dense-level tasks \cite{park2023self}.
+\paragraph{Different combinations of two teachers.}  We first evaluate the benefits of combining two teachers for distillation. 
+As shown in Tab.~\ref{tab:com}, adding additional MAE attention regularization can bring noticeable improvements (2.5 on $\mathrm{AP}^{\mathrm{box}}$ and 2.1 on $\mathrm{AP}^{\mathrm{mask}}$) compared to directly distilling from the DeiT teacher. Moreover, the additional attention regularization cannot bring benefits when only using a single DeiT teacher, which suggests that the benefits come from the introduction of MAE teacher.
+The above conclusions are consistent when using CLIP and MAE teachers, as illustrated in Tab.~\ref{tab:com2}. We also try a much weaker version of MAE teacher which is only pre-trained on ImageNet-100 for 100 epochs in Tab.~\ref{tab:com2}. 
+We lower the weight of this teacher to avoid its impact on discrimination. The results are still positive, which reflects the power of the MIM pre-training in modeling diversity.
+\paragraph{Distilling target of the MIM teacher.} We then examine the distilling target of the MIM teacher. As shown in Tab.~\ref{tab:target}, distilling the relation $\operatorname{R}^i_m$ brings the best detection performance ($50.0 \mathrm{AP}^{\mathrm{box}}$). Distilling $\operatorname{MSA}^i_m$ achieves a close performance ($49.8 \mathrm{AP}^{\mathrm{box}}$) since its essential is also distilling relationships, while directly distilling the feature maps $T^i_m$ brings the worst performance ($49.6 \mathrm{AP}^{\mathrm{box}}$). Nevertheless, all these schemes outperform the DeiT distillation baseline, and the trends are consistent when using CLIP and MAE teachers, as shown in Tab.~\ref{tab:target2}. Besides, we also evaluate a basic setting that directly distills the features of both the MAE and DeiT teachers at the last layer. The result is far from satisfactory, which highlights the effectiveness of the designs in Hybrid Distill.
+\paragraph{Distilling position of the MIM teacher.} Tab.~\ref{tab:layers} inspect the distilling position of the MIM teacher. We first experiment with distilling MAE relations at the front, middle, and back layers. Distilling at the back layers achieves better results, \textit{i.e.}, $1.5 \mathrm{AP}^{\mathrm{box}}$ and $2.4 \mathrm{AP}^{\mathrm{box}}$ gains towards distilling at the front and middle, respectively. The results are consistent with the fact that attention collapse tends to occur in these back layers. We then ablate the number of distilling layers and find that distilling at the two layers preceding the final layer (\textit{i.e.}, 10,11) contributes to the best results. 
+\paragraph{Token masking strategy.} Tab.~\ref{tab:mask} studies different masking strategies for the student model. Since we progressive drop the redundant tokens three times, the actual tokens used in the student model are $(1-K)^3\%$. We observe that when dropping $30\%$ tokens at a time, Hybrid Distill achieves very close performance ($49.9 \mathrm{AP}^{\mathrm{box}}$ and $43.8 \mathrm{AP}^{\mathrm{mask}}$) to the no masking results and outperforms the random masking strategy and the direct masking strategy which only generates token mask at the last layer. In addition, we notice that our token masking strategy also has a regularizing effect, which can prevent the model from falling into a locally optimal when training for longer epochs.
+
+
+
+\section{Related Work}
+
+\textbf{Representation learning.}
+Pre-training on large-scale datasets (e.g., ImageNet \cite{russakovsky2015imagenet}, JFT \cite{sun2017revisiting}, Kinetics \cite{carreira2017quo}, etc.) is typically utilized for downstream initialization. Except for the common supervised pre-training \cite{he2016deep, dosovitskiy2020image, liu2021swin}, contrastive learning (CL) \cite{chen2020simple, he2020momentum,chen2020improved,grill2020bootstrap} and masked image modeling (MIM) \cite{beit, xie2021simmim, mae} dominate the recent research. The former is achieved by pulling close the features of two different augment views of the input image. While the latter, inspired by masked language modeling \cite{kenton2019bert,zhang2019ernie} in NLP, is realized by reconstructing the mask part of the input image. 
+Recently multi-model extensions \cite{radford2021clip,cui2022democratizing,li2022blip}  of the CL pre-training have also been proposed by utilizing the paired text description of the given image. These different types of pre-training frameworks are proven to have different properties \cite{park2023self,xie2023darkmim}, and this paper aims to combine their respective excellent properties to boost a student model.
+
+\textbf{Knowledge distillation.} 
+Knowledge distillation \cite{park2019relational,tian2019contrastive,romero2014fitnets} utilizes a well-trained teacher to guide the feature learning of the student model, thus transferring its ability to the student. Beyond its success in supervised learning, 
+some recent works \cite{wei2022FD,EVA,wang2021explore,wei2022mvp,beitv2} utilize it to extend existing pretrained models or paradigms. Feature distillation (FD) \cite{wei2022FD} finds that distilling the feature map of the supervised/CL pretrained teacher can bring diverse representation to the student and make it more friendly for downstream fine-tuning. dBOT \cite{liu2022exploring}, MVP \cite{wei2022mvp}, and BEiT v2 \cite{beitv2} change the mask reconstruction object of MIM to the knowledge of the teacher model to boost MIM pre-training with semantic information. 
+In this paper, we analyze their properties and propose a new hybrid distillation framework to deal with their deficiencies.
+
+
+
+\section{Conclusion}
+
+This paper proposed a hybrid distillation framework that simultaneously distills knowledge from both the supervised/CL pre-trained teacher and MIM pre-trained teacher to enhance the diversity and discrimination of the student. The framework addresses the limitations of single-teacher distillation, where increasing diversity through the use of asymmetric designs may harm discrimination. Specifically, Hybrid Distill carefully designs the distilling target and location, \textit{i.e.}, distilling relations from MIM in layers where attention collapse tends to occur and distilling features from supervised/CL in the last layer to preserve discrimination. A progressive redundant token masking strategy is also proposed for reducing the distilling costs. Experiments prove that Hybrid Distill can acquire better properties and achieve promising results on various downstream. We hope our research would shed light on a new direction for applying existing large-scale pre-trained models.
+
+
+\begin{table}[t]
+\caption{Compared with more baselines using ViT-B as the backbone. $\star$: using MAE+DeiT teachers. $\dagger$: using MAE+CLIP teachers.}
+\centering
+\setlength{\tabcolsep}{5mm}
+\begin{tabular}{l|cc|c}
+\toprule
+  \multirow{2}{*}{Method} &\multicolumn{2}{c|}{COCO} & \multirow{2}{*}{ADE20K}  \\
+  \cline{2-3}
+   &  $\mathrm{AP}^{\mathrm{box}}$  & $\mathrm{AP}^{\mathrm{Mask}}$  &  \\
+   \hline
+   Distill-DeiT & 47.7 & 42.1 & 47.3 \\
+   Distill-MAE  & 49.1 &43.1 & 47.8\\
+   Distill-CLIP & 49.5 & 43.5 & 50.3 \\
+   \hline
+   FD-DeiT \cite{wei2022FD}&47.0 &41.6&47.9\\
+   FD-MAE \cite{wei2022FD}&48.1 &42.6 &47.0\\
+   FD-CLIP \cite{wei2022FD}&49.2 & 43.3&50.5\\
+   \hline
+    dBOT-DeiT \cite{liu2022exploring}& 47.5& 41.9&47.9\\
+    dBOT-MAE \cite{liu2022exploring}&49.3 &43.5 &48.2\\
+    \hline
+    Hybrid Distill$^\star$ & 50.3  & 44.2 &49.1 \\
+    Hybrid Distill$^\dagger$ & \textbf{50.6} & \textbf{44.4} & \textbf{51.5}\\ 
+\bottomrule
+  \end{tabular}
+  \label{tab:base}
+\end{table}
+
+\begin{table}[t]
+     \caption{Object detection and instance segmentation results with \textit{Cascade Mask-RCNN}. $\star$: using MAE+DeiT teachers. $\dagger$: using MAE+CLIP teachers.}
+    \centering
+    \setlength{\tabcolsep}{5.5mm}
+    \begin{tabular}{l|c|cc}
+        \toprule
+    Method & Epoch & $\mathrm{AP}^{\mathrm{box}}$ & $\mathrm{AP}^{\mathrm{mask}}$\\ 
+    \hline
+    \hline
+    Distill-DeiT & 300&50.4 &43.4 \\
+    Distill-MAE  & 300&51.9 &44.7 \\
+    Distill-CLIP & 300&52.4 & 45.0\\
+    \hline
+    dBOT-DeiT \cite{liu2022exploring}&$2\times800$ &52.5 &-\\
+    dBOT-MAE \cite{liu2022exploring}&$2\times800$ &52.7 &-\\
+    dBOT-CLIP \cite{liu2022exploring}&$1\times1600$ &53.6 &-\\
+    \hline
+    Hybrid Distill$^\star$ & 300 & 53.0&45.6\\
+    Hybrid Distill$^\dagger$ &300 &\textbf{53.4}&\textbf{45.9}\\
+    \bottomrule
+    \end{tabular}
+    \label{tab:cascade}
+\end{table}
+
+
+
+\section{More Experimental Results}
+
+
+\subsection{Compared with More Baselines}
+Tab.~\ref{tab:base} compares Hybrid Distill with two other methods, \emph{i.e.,} dBOT \cite{liu2022exploring} and FD \cite{wei2022FD}, which employ asymmetric designs in distillation. Since FD does not provide codes for downstream verification, we uniformly perform verification under our downstream frameworks.}. We omit the dBOT-CLIP result since dBOT specifically removes the asymmetric designs for CLIP, thus its distillation process is similar to our Distill-CLIP baseline. As shown in Tab.~\ref{tab:base}, their benefits towards symmetrical distillation are not always significant, and the performance is inferior to our Hybrid Distill, which validates the effectiveness of our framework.
+
+\begin{table}[t]
+     \caption{Hybrid Distill uses MAE and DINO as teachers. Object Detection and instance segmentation results are reported with \textit{Mask-RCNN}, following the setting in Tab. 1 of our main paper.}
+    \centering
+    \setlength{\tabcolsep}{5.5mm}
+    \begin{tabular}{l|cc}
+        \toprule
+    Method & $\mathrm{AP}^{\mathrm{box}}$ & $\mathrm{AP}^{\mathrm{mask}}$\\ 
+    \hline
+    MAE &48.4 &42.6\\
+    DINO&46.8 & 41.5\\
+    \hline
+    Distill-DINO &47.5 & 41.9\\
+    Distill-MAE &49.1 & 43.1\\
+    \hline
+    Hybrid Distill & \textbf{49.6}&\textbf{43.5}\\
+    \bottomrule
+    \end{tabular}
+    \label{tab:dino}
+\end{table}
+
+\begin{figure*}[t]
+  \centering
+\includegraphics[width=0.85\linewidth]{figures/visdino.pdf}
+  \caption{Average head distance of different (a) DINO baseline and (b) Hybrid Distill with MAE and DINO as teachers.}
+\label{fig:visdino}
+\end{figure*}
+\subsection{Results with Cascade Mask-RCNN}
+Tab.~\ref{tab:cascade} further presents the object detection and instance segmentation results of Hybrid Distill with Cascade Mask-RCNN, which allows for a direct comparison with dBOT \cite{liu2022exploring}, as they also provide 1600-epoch distillation results under this setting. As shown, 300-epoch Hybrid Distill with MAE and DeiT teachers can achieve 53.0 $\mathrm{AP}^{\mathrm{box}}$, outperforming 1600-epoch dBOT-DeiT (52.5 $\mathrm{AP}^{\mathrm{box}}$) and dBOT-MAE (52.7 $\mathrm{AP}^{\mathrm{box}}$). Additionally, 300-epoch Hybrid Distill with MAE and CLIP teachers achieves 53.4 $\mathrm{AP}^{\mathrm{box}}$, which is also very close to the 1600-epoch dBOT-CLIP result (53.6 $\mathrm{AP}^{\mathrm{box}}$). The above results reflect that due to the better properties obtained, Hybrid Distill can obtain promising results with fewer training epochs.
+
+\begin{table}[t]
+    \caption{Ablation on the hyperparameter $\alpha$ which controls the contribution of two teacher models.}  
+    \subfloat[$T_c(x)$: DeiT, $T_m(x)$: MAE.\label{tab:pam1}]{
+    \begin{minipage}{\linewidth}
+    \centering
+    \begin{tabular}{c|cccccc}
+        \toprule
+            $\alpha$ & 0 & 0.1 & 0.3 &0.5&0.7&1.0 \\
+            \hline
+            $\mathrm{AP}^{\mathrm{box}}$ &47.5 &48.2 &49.3 &49.3 &49.5 & \textbf{50.0}\\
+            \hline
+            $\mathrm{AP}^{\mathrm{mask}}$ & 41.8&42.6 &43.4 &43.4 &43.5 &\textbf{43.9}\\
+        \bottomrule
+    \end{tabular}
+    \end{minipage}}
+    
+    \subfloat[$T_c(x)$: CLIP, $T_m(x)$: MAE. \label{tab:pam2}]{
+   \begin{minipage}{\linewidth}
+    \centering
+    \begin{tabular}{c|cccccc}
+        \toprule
+            $\alpha$ & 0 & 0.1 & 0.3 &0.5&0.7&1.0 \\
+            \hline
+            $\mathrm{AP}^{\mathrm{box}}$ &49.1 &49.9 &49.8 & 50.1&50.2 & \textbf{50.4} \\
+            \hline
+            $\mathrm{AP}^{\mathrm{mask}}$ & 43.1&43.8  &43.8 & 43.9 & 44.1 &\textbf{44.1} \\
+        \bottomrule
+    \end{tabular}
+    \end{minipage}}
+    \label{tab:pam}
+\end{table}
+\subsection{Hybrid Distillation with DINO}
+Tab.~\ref{tab:dino} test the results of our Hybrid Distill using the MAE and DINO teachers. Under this setting, Hybrid Distill achieves 49.6 $\mathrm{AP}^{\mathrm{box}}$ and 43.5 $\mathrm{AP}^{\mathrm{mask}}$. Although still superior to the baselines, results with DINO are not as good as those with CLIP and DeiT. We analyze that this is because the discrimination of DINO is weaker than DeiT and CLIP, which makes its complementarity with MAE also weaker than the latter two. The visualization in Fig.\ref{fig:visdino} provides evidence for this. On the one hand, we notice that the average attention distance of DINO itself is lower than that of DeiT and CLIP in the final layer. On the other, the attention maintenance of the final layer after distillation is weaker compared with that obtained by DeiT and CLIP.
+
+\begin{table}[!t]
+     \caption{The token masking strategy for alleviating over-fitting. $\star$: using MAE+DeiT teachers. $\dagger$: using MAE+CLIP teachers.}
+    \centering
+    \setlength{\tabcolsep}{2mm}
+    \begin{tabular}{l|c|c|cc}
+        \toprule
+    Method & Epoch & Masking & $\mathrm{AP}^{\mathrm{box}}$ & $\mathrm{AP}^{\mathrm{mask}}$\\ 
+    \hline
+    Hybrid Distill$^\star$ & 100/300& &\textbf{50.0}/50.0 &\textbf{43.9}/44.0 \\
+    Hybrid Distill$^\star$ & 100/300 &\checkmark &49.9/\textbf{50.3} &43.8/\textbf{44.2}\\
+    \hline
+    Hybrid Distill$^\dagger$ &100/300& &\textbf{50.4}/50.2 &\textbf{44.1}/44.1 \\   
+    Hybrid Distill$^\dagger$ &100/300 &\checkmark & 50.2/\textbf{50.6} & 43.9/\textbf{44.4} \\
+    \bottomrule
+    \end{tabular}
+    \label{tab:masking}
+\end{table}
+\subsection{More Ablation Studies}
+
+\paragraph{The choice of hyperparmeter $\alpha$.}
+
+Tab.~\ref{tab:pam} ablates different setting of $\alpha$. It can be concluded that adding additional MIM supervision can lead to performance improvement towards not using MIM supervision ($\alpha=0$), regardless of the value of $\alpha$. While setting $\alpha$ to 1.0 can bring the best performance for both MAE+DeiT and MAE+CLIP teachers. Using the CLIP teacher achieves more stable performance since CLIP itself has higher quality compared with DeiT, while DeiT relies more on the help of MAE.
+
+\paragraph{Token masking strategy and local optima.} Tab.~\ref{tab:masking} further reveals that the proposed progressive redundant token masking strategy in Hybrid Distill can prevent the student from falling into local optima. As shown, when the token mask is removed and the distillation epoch is prolonged from 100 to 300, no performance gains are observed.  This phenomenon has also been observed in \cite{EVA}. We analyze that over-fitting is the root cause of this problem and introducing token masks can alleviate it since they can play a regulatory role. The performance gains achieved by the token masks provide clear support for their effectiveness.    
+
+\begin{figure*}[t]
+  \centering
+\includegraphics[width=0.9\linewidth]{figures/visattnencoder.pdf}
+  \caption{Average head distance of (a) DeiT teacher and student models with (b) symmetric encoder and (c) asymmetric encoder.}
+\label{fig:visattnencoder}
+\end{figure*}
+
+\begin{figure*}[!t]
+  \centering
+\includegraphics[width=0.85\linewidth]{figures/visattndbot.pdf}
+  \caption{Average head distance of different dBOT variants that conduct (a) direct feature distillation and (b) mask feature reconstruction, respectively.}
+\label{fig:visattndbot}
+\end{figure*}
+
+\begin{figure*}[!t]
+  \centering
+\includegraphics[width=0.9\linewidth]{figures/visattnlayers.pdf}
+  \caption{Average head distance of using (a) 1, (b) 4, and (c) 8 asymmetric decoder layers, respectively.}
+\label{fig:visattnlayers}
+\end{figure*}
+
+
+
+\section{Further Discussion about Diversity and Discrimination}
+
+\subsection{Asymmetric Encoder Designs}
+Fig.~\ref{fig:visattnencoder} studies the asymmetric encoder designs used in FD, \textit{i.e.}, adding additional learnable parameters and relative position bias to the attention layers of the student. 
+As shown, the asymmetric encoder (Fig.~\ref{fig:visattnencoder}(c)) \emph{de facto} improves diversity compared to using only the symmetric encoder (Fig.~\ref{fig:visattnencoder}(b)). However, compared to the DeiT teacher (Fig.~\ref{fig:visattnencoder}(a)), it does not bring noticeable diversity gains. Therefore, we conclude that the diversity brought by the asymmetric encoder is not always significant. 
+
+\subsection{Mask Feature Reconstruction in dBOT}
+Fig.~\ref{fig:visattndbot} compares two variants of dBOT, \textit{i.e.}, with the same asymmetric decoder design but conducting direct feature distillation and mask feature reconstruction, respectively. It can be seen that the two tasks bring no significant differences, \textit{i.e.}, the diversity is increased and the discrimination is lost regardless of the task. These visualizations further support our claim in Sec. 2.3 and Sec 2.4 of our main paper.
+\subsection{Reducing the Number of the Asymmetric Decoder Layers}
+Fig.~\ref{fig:visattnlayers} investigates the effect of reducing the number of asymmetric decoder layers. We find that even with a reduced number of decoder layers, the discrimination in the last layer of the encoder still cannot be maintained. Therefore, we abandon this asymmetric decoder design in our Hybrid Distill to avoid losing discrimination.
+
+
+
+\section{Implementation Details for Different Downstream Tasks}
+
+
+\paragraph{Classification.} We report the fine-tuning results on ImageNet-1K. Following dBOT \cite{liu2022exploring}, the learning rate is set to 3e-4 and the batch size is set to 256. We also report results on CIFAR100 \cite{krizhevsky2009learning}, Cars \cite{krause20133d}, and iNaturalist19 \cite{van2018inaturalist}. For these datasets, the batch size is 768 and the learning rate is 7.5e-6.
+
+\paragraph{Object detection and instance segmentation.} Following \cite{ContextAutoencoder2022}, we fine-tune the student model on COCO \cite{lin2014microsoft} using the Mask-RCNN \cite{he2017mask} framework. We train the network with the 1x schedule and the learning rate is set to 3e-4 for ViT-B and 2e-4 for ViT-L.
+
+\paragraph{Semantic segmentation.} The semantic segmentation evaluation is conducted on ADE20K \cite{zhou2018semantic}. Following \cite{ContextAutoencoder2022,chen2022sdae}, we use ViT \cite{dosovitskiy2020image} with UperNet \cite{xiao2018unified} framework and fine-tune the model for 160k iterations. The batch size, learning rate, and weight decay are set to 16, 4e-4, and 0.05, respectively.
+
+
+\section{Limitation}
+
+Hybrid Distill jointly utilizes two teacher models to guide the representation learning of the student. Although exhibiting promising properties and results, the additional overhead of introducing two teachers may be a limitation. Fortunately, since the teacher model does not require gradient updates, the training cost of Hybrid Distill does not increase significantly, \textit{i.e.}, the training time of Hybrid Distill with ViT-B backbone is around 1.2 times longer than that of using a single teacher. Besides, Hybrid Distill can achieve better performance with much fewer training epochs, as shown in Tab.~\ref{tab:cascade}. From this perspective, Hybrid Distill in turn reduces the training cost. Another possible limitation is that Hybrid Distill does not improve CLIP as much as DeiT after introducing the MAE teacher, and we analyze that it may be caused by the gap between the pre-training capacities of CLIP and MAE teachers. We look forward to better MIM models that can further facilitate our work.
+
+
+
+\section{Reproducibility}
+
+We will release our source code once this paper is accepted.
+
+
+
+
+

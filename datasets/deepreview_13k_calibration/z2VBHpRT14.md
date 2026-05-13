@@ -1,8 +1,8 @@
 # SpaceSet: A Large-scale Realistic Space-based Image Dataset for Space Situational Awareness
 
 - Decision: Reject
-- Avg Score: 3.40
-- Scores: 6, 5, 5, 1, 0
+- Avg Score: 6.50
+- Scores: 6, 5, 5, 10
 
 ## Abstract
 Space situational awareness (SSA) plays an imperative role in maintaining safe space operations, especially given the increasingly congested space traffic around Earth. Space-based SSA offers a flexible and lightweight solution compared to traditional ground-based SSA. With advanced machine learning approaches, space-based SSA can extract features from high-resolution images in space to detect and track resident space objects (RSOs). However, existing spacecraft image datasets, such as SPARK, fall short of providing realistic camera observations, rendering the derived algorithms unsuitable for real SSA systems. In this research, we introduce SpaceSet, a large-scale realistic space-based image dataset for SSA. We consider accurate space orbit dynamics and a physical camera model with various noise distributions, generating images at the photon level. To extend the available observation window, four overlapping cameras are simulated with a fixed rotation angle. SpaceSet includes images of RSOs observed from $19 km$ to $63,000 km$, captured by a tracker operating in LEO, MEO, and GEO orbits over a period of $5,000$ seconds. Each image has a resolution of $4418 \times 4418$ pixels, providing detailed features for developing advanced SSA approaches. We split the dataset into three subsets: SpaceSet-100, SpaceSet-5000, and SpaceSet-full, catering to various image processing applications. The SpaceSet-full corpus includes a comprehensive data-loader with $781.5GB$ of images and $25.9MB$ of ground truth labels. We also benchmark detection and tracking algorithms on the SpaceSet-100 dataset using a specified splitting method to accelerate the training process.

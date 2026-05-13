@@ -1,0 +1,393 @@
+\title{Split-and-Denoise: Protect large language model inference with local differential privacy}
+
+\begin{abstract}
+Large Language Models (LLMs) excel in natural language understanding by capturing hidden semantics in vector space. This process enriches the value of text embeddings for various downstream tasks, thereby fostering the Embedding-as-a-Service (EaaS) business model. However, the risk of privacy leakage due to direct text transmission to servers remains a critical concern. To address this, we introduce Split-N-Denoise (SnD), an private inference framework that splits the model to execute the token embedding layer on the client side at minimal computational cost. This allows the client to introduce noise prior to transmitting the embeddings to the server, and subsequently receive and denoise the perturbed output embeddings for downstream tasks. Our approach is designed for the inference stage of LLMs and requires no modifications to the model parameters. Extensive experiments demonstrate SnD's effectiveness in optimizing the privacy-utility tradeoff across various LLM architectures and diverse downstream tasks. The results reveal an improvement in performance under the same privacy budget compared to the baselines by over 10\% on average, offering clients a privacy-preserving solution for local privacy protection.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large Language Models (LLMs) have shown powerful capability in natural language understanding by capturing hidden semantics in vector space. Consequently, users can leverage LLMs to obtain embeddings and subsequently apply them to their own downstream tasks, known as "embedding as a service" (EaaS). However, EaaS is typically provided as an online service, giving rise to significant privacy concerns. In particular, users may input sensitive information, such as names, phones, and email addresses, that needs to be kept hidden from the service provider. With the growing concern around the potential leakage of confidential data, certain companies, such as Samsung, have temporally prohibited the usage of online LLM services.
+
+Recent research on privacy-preserving model inference investigates around two directions, cryptographic \cite{liu2023llms, chen2022x} and perturbation \cite{du2023dp}. Cryptography typically employs homomorphic encryption (HE) to compute the inference result of the users' encrypted input. Unfortunately, the application of cryptographic technique is constrained by the significant computation overhead of cryptographic operations, especially on large transformer models. Perturbation provides differential privacy (DP) guarantee by adding calibrated noise to the original data. A key challenge of this approach is how to balance the utility and privacy tradeoff in a local differential privacy (LDP) setting, where users' inputs are privatized before being released to the server. Furthermore, privatization on text data is particularly difficult when the randomized algorithm is required to map text input to text output.
+
+Split learning \cite{gupta2018distributed, vepakomma2018split} has emerged as a solution to privacy-preserving computation between two parties. During inference, the user performs affordable computation locally to obtain intermediate results (IRs), and forwards them to the service provider for subsequent operations. To mitigate privacy leakage, recent research has integrate DP with split learning by injecting noises into the IRs before sharing with the server \cite{yang2022differentially}. In the split inference setting, a crucial problem is to design an algorithm that minimizes the impact on model performance while ensuring LDP.
+
+A notable approach involves the application of denoising techniques to conduct error correction and enhance model utility. Existing studies incorporate denoising layers on the server side, leveraging the post-processing properties of DP \cite{nasr2020improving, wang2019dplssgd, xu2022denoising}.  However, the effectiveness of denoising is hindered by the fact that the server is ignorant of the injected noise levels. Driven by the limitation, a question arises: \textit{can we improve the utility by conducting denoising on the user side, leveraging the knowledge of noise levels and raw IRs?} This is a nontrivial task to uncover the closed-form mapping between denoised embedding and noises as well as raw IRs since the inputs have undergone a series of complex transformations.
+
+In this paper, we answer this question affirmatively by proposing Split-N-Denoise (SnD), a framework that integrates split inference and denoising techniques to enhance utility under LDP bound. To minimize computational overhead of users, we deploy only the token representation layer on the client sides. A denoise model that enhances noisy embeddings using raw inputs and noise levels is pre-trained on the server side and subsequently shared with the user. Once receiving the output from server, users input their private data into the denoise model to improve the utility of embeddings.
+
+Our main contributions involve the following:
+
+\begin{itemize}
+
+\item We propose SnD, a framework that integrates split inference and denoising techniques to protect user's privacy during LLM inference with strong privacy guarantee. Empirical studies demonstrate that our method outperforms existing DP-based baselines by more than 10\% on average and maintains utility even in extremely low privacy budget settings ($\eta\leq 0.01$).
+
+\item We design a innovative denoising method deployed on user side. In this approach, a denoise model is pre-trained on server side using public dataset and synthetic noises. Subsequently, this trained model is deployed on the user side, where it leverages the specific noise levels and raw IRs provided by the user to enhance the embeddings.
+\end{itemize}
+
+
+
+\section{Prior Works}
+
+
+\paragraph{Local Privacy Protection for LLMs} 
+With the advent of LLMs, privacy leakage has emerged as a crucial concern. Existing literature predominantly focuses on privacy protection throughout the entire training process, encompassing pre-training \cite{inproceedings}, fine-tuning~\cite{huang2020texthide,kerrigan2020differentially,yu2021differentially,lukas2023analyzing, shen2023split}, and prompt-tuning phases~\cite{duan2023flocks,li2023privacypreserving}. Yet, there is a notable dearth of research that addresses local privacy during the inference phase with a fully frozen LLM. This scenario, which prohibits alterations to the model's structure and parameters, is particularly complex. Nonetheless, it holds significance in black-box API access contexts, especially for proprietary models like GPT-4. An intuitive approach involves anonymizing sensitive terms prior to LLM input and subsequently restoring them post-output~\cite{kan2023protecting,chen2023hide}. However, this method, while effective for obfuscating specific entities, falls short in concealing other linguistic elements, including verbs and non-named entities. Such a limitation compromises full privacy and is unsuitable for tasks necessitating exact semantic interpretation of the altered entities, such as knowledge retrieval and text continuation~\cite{chen2023hide}. An alternative strategy might entail privatizing the input at token representations or intermediate layer levels. \citet{qu2021natural} investigates the utility and privacy tradeoff for privacy-preserving finetuing, involving text-to-text privatization ~\cite{feyisetan2019privacy,Qu_2021} and token embedding privatizations, while the two techniques could be adapted to private LLM inference. Privacy-Preserving Prompt Tuning (RAPT)~\cite{li2023privacypreserving} employs text-text privatization to conduct prompt tuning and inference with local differential privacy. The authors propose a reconstruction head during prompt tuning to enhance the utility. Another direction employs homomorphic encyption (HE) to conduct private transformer inference such as Privacy-Computing Friendly Transformers (PCFT) and The-x \cite{liu2023llms, chen2022x}, but the significant overhead renders it impractical for implementation in LLM.
+
+\paragraph{Privacy-Preserving Split Learning}
+Split learning is a privacy-preserving approach in distributed learning, where each client trains a segment of a deep network up to a designated "cut layer." The outputs at this layer are then forwarded to the server side, which completes the training without accessing the client's raw data. This approach facilitates forward and backward propagation without sharing raw data, ensuring the client-side local privacy ~\cite{gupta2018distributed,vepakomma2018split}.
+Vepakomma et al shows that split learning surpasses federated learning and large batch synchronous SGD in achieving superior accuracy with significantly reduced client-side computational demands~\cite{gupta2018distributed}. Singh et al further validate its efficacy across broader experimental contexts, demonstrating that an increase in the number of clients or model dimensions gives split learning an edge over federated learning~\cite{singh2019detailed}. The advantage in its computational efficiency renders it suitable for LLM local privacy setting, where the client side executes minimal computational tasks, such as noising and denoising operations at specific segmented layers, to ensure privacy at reduced computational expenses. Meanwhile, the server handles the bulk of the model's layers. Our research serves as an initial endeavor to integrate split learning with LLM privacy concerns.
+\paragraph{Denoising for Differential Privacy (DP)}
+
+While elevated noise levels offer robust privacy protections, privacy-preserving methods inevitably compromise the model's quality~\cite{wang2019dplssgd}. A notable approach involves the application of denoising techniques specifically tailored for Differential Privacy (DP), incorporating a post-processing layer to enhance DP utility. Pioneering research in statistical estimation underscores the efficacy of post-processing denoising in achieving accurate private network degree distribution estimates~\cite{hay2009accurate}, and in reducing linear regression estimation errors when the ground truth is sparse~\cite{Nikolov_2013}. Balle et al. demonstrated that denoising significantly enhances the Gaussian mechanism's accuracy in high-dimensional settings for DP algorithms with output perturbations ~\cite{balle2018improving}. More recently, denoising mechanisms have been extended to the training of Machine Learning (ML) models, particularly Deep Neural Networks (DNNs), by applying denoising techniques to Gaussian noise-injected gradients, thereby improving the utility of privately trained ML models~\cite{wang2019dplssgd}. Nasr, Shokri, and Houmansadr further explored the use of scaling as a denoising strategy to optimize DP utility in Differential Privacy Stochastic Gradient Descent (DP-SGD), scaling the noisy gradients based on their usefulness~\cite{nasr2020improving}. Subsequently, Xu et al. employed scaling and masking as post-processing denoising techniques on top of Gaussian noise-injected intermediate results in split learning, aiming to reduce the noisy neural network output's estimation error without compromising privacy~\cite{xu2022denoising}.
+
+
+\section{Methodology}
+
+\label{methodology}
+\subsection{Preliminaries}
+\subsubsection{LDP}
+Differential privacy (DP) \cite{dwork2006differential, dwork2014algorithmic} is considered the gold standard for data privacy. Its definition is as follows:
+
+\begin{definition}[(\(\epsilon, \delta\))-Differential Privacy]
+A randomized mechanism \(M\) with domain \(D\) and range \(R\) preserves \((\epsilon, \delta)\)-differential privacy if and only if for any two neighboring datasets \(D, D' \in D\) and for any subset \(S \subseteq R\), the following inequality holds:
+\[
+\Pr[M(D) \in S] \leq e^{\epsilon} \Pr[M(D') \in S] + \delta
+\]
+where \(\epsilon\) is the privacy budget and \(\delta\) is the failure probability.
+\end{definition}
+
+Local differential privacy (LDP) is a particular case of DP, where the server is not trusted and data privatization is conducted by the client. For any inputs $x$, $x'$ $\in D$, LDP  requires a randomized mechanism $M$ to satisfy:
+\begin{equation}
+    \Pr[M(x) \in S] \leq e^{\epsilon} \Pr[M(x') \in S] + \delta
+\end{equation}
+for any measurable subset subset $S \subseteq Range(M)$.
+
+\subsubsection{\(d_\chi\)-privacy} 
+In the context of local privacy preservation, we employ \(d_\chi\)-privacy ~\cite{Chatzikokolakis2013}, a specialized variant of local differential privacy tailored for textual data ~\cite{feyisetan2019privacy, Qu_2021}. \(d_\chi\)-privacy allows to impose high probability of observing the same output for inputs with similar semantics. We state the formal definition in the following:
+
+\begin{definition} [\(d_\chi\)-privacy]
+For an input domain \(X\) and an output domain \(Y\), \(d_\chi\) serves as a metric space over \(X\). A stochastic mechanism \(M: X \rightarrow Y\) is said to adhere to \(\eta d_\chi\)-privacy if, for any two elements \(x, x' \in X\), the output distributions \(M(x)\) and \(M(x')\) satisfy the following inequality:
+\[
+\frac{P(M(x) = y)}{P(M(x') = y)} \leq e^{\eta d_\chi(x, x')}, \quad \forall y \in Y,
+\]
+where \(\eta \geq 0\) is a tunable privacy parameter that modulates the level of privacy protection.
+\end{definition}
+
+The privacy guarantee indicates that the log-likelihood ratio of producing the same outcome $y$ is bounded by $\eta d_\chi(x, x')$ for any two possible inputs $x$, $x'$.
+
+\subsection{Architecture}
+\begin{figure*}[htbp]
+	\centering
+	\includegraphics[width=6 in]{architecture.pdf}
+ 	\caption{Overview of our privacy-preserving SnD framework. Users first obtain an initial embedding from a local encoder, followed by a noise addition via the privatization module. This privatized embedding is then transmitted to the server for processing. Upon completion, users receive a noised output, which is subsequently refined using a pre-trained denoising model to achieve an optimal balance between privacy and utility.}
+	\label{framework}
+\end{figure*}
+
+Denote $G: \mathcal{V}^n \rightarrow \mathbb{R}^d$ as the language model that maps $n$-token to embedding. In Split-N-Denoise (SnD), we split the language model $G$ into a local encoder $G_l: \mathcal{V}^n \rightarrow \mathbb{R}^{n\times d}$ at user side and a cloud encoder $G_c: \mathbb{R}^{n\times d} \rightarrow \mathbb{R}^d$ at server side. The local encoder consists of only the token representation layer to minimize the computation cost for user, and the server performs subsequent operations on the IRs uploaded by the clients. The architecture of SnD is depicted in Figure \ref{framework}, containing four main components:
+\begin{itemize}
+    \item \textit{Local encoder module}: the user retrieves the token embeddings of their input locally.
+    \item \textit{Privatization module}: the token representations are privatized by the user before being transmitted to the server to satisfy LDP.
+    \item \textit{Cloud encoder module}: the server performs transformation on the privatized token representations and returns the embedding to user.
+    \item \textit{Denoise module}: user conducts local denoising on the received embedding leveraging their raw inputs and specific noise levels.
+\end{itemize}
+
+\subsection{Noise Mechanism}
+We adopt \(d_\chi\)-privacy to privatize the token representation layers on user side. Given an input sequence \(x = [x_1, \ldots, x_n]\), the token representation layer transforms \(x\) into a vector sequence \(X=[\boldsymbol{x}_1, \ldots, \boldsymbol{x}_n] \in \mathbb{R}^{n\times d}\) via embedding model \(E \in \mathbb{R}^{|\mathcal{V}| \times d}\), where \(|\mathcal{V}|\) denotes the vocabulary size and \(d\) represents the dimensionality of the embeddings. 
+
+Assuming \(L_2\) norm as the distance metric, the application of \(d_X\) privacy, parameterized by \(\eta\), to a given word embedding \(\boldsymbol{x}_t \in \mathbb{R}^d\) is realized by the addition of Laplacian noise \(z \sim c\exp(-\eta ||z||)\), where $c$ is a real-valued constant ~\cite{wu2017bolton}. To sample $z$ from the Laplacian distribution, consider \(z = l\boldsymbol{v}\), where \(l\) is sampled from a Gamma distribution \(\Gamma(d, 1/\eta)\) and \(\boldsymbol{v}\) is uniformly sampled from the unit ball \(B^d\). Consequently, the privatized representation \(M(\boldsymbol{x}_t)\) can be succinctly expressed as:
+\begin{equation}
+\label{eq:noise}
+M(\boldsymbol{x}_t) = \boldsymbol{x}_t + \boldsymbol{z}.
+\end{equation}
+
+The supports for $z$ and thus $M(\boldsymbol{x}_t)$ are unbounded, imposing difficulties on subsequent denoise procedures, especially under low level of $\eta$. To improve the performance of denoise model introduced in Section \ref{sec:denoise}, the client clips the $l_2$ norm of the privatized representation within $C_{x_t}$:
+\begin{equation}
+    M' (\boldsymbol{x}_t) = M (\boldsymbol{x}_t) \cdot \min \left(1, C_{x_t}/\|M(\boldsymbol{x}_t)\|\right)
+\end{equation}
+, where $C_{x_t}=\max_{\boldsymbol{x}_t \in \mathcal{X}_t}\|\boldsymbol{x}_t\|$ is chosen to be the upper bound of $\boldsymbol{x}_t$. The user then updates its noise matrix locally according to the clipped representations for subsequent denoise.
+
+The following theorem states that the noise mechanism $M': \mathbb{R}^d \rightarrow \mathbb{R}^d$ adheres to $\eta d_\chi-$privacy.
+
+\begin{theorem}
+\label{thm:etadp}
+For any $d\geq1$ and any $\eta>0$, the mechanism $M': \mathbb{R}^d \rightarrow \mathbb{R}^d$ achieves $\eta d_\chi-$privacy with respect to $d_\chi(\boldsymbol{x}, \boldsymbol{x}') = \|\boldsymbol{x}-\boldsymbol{x}'\|$.
+\end{theorem}
+\subsection{Denoise Model}
+\label{sec:denoise}
+\textbf{Limitation of server-side denoise:} the denoising ability of a server is limited by its lack of knowledge regarding the noise levels. The server's capacity to remove noise is inherently conflicted with the level of privacy protection. Intuitively, if the server could produce an appropriate denoised output on its own, there is a higher probability that it can also reconstruct the original user input. Proposition \ref{prop:mseserver} below gives the lower bound of mean square error (MSE) for server-side denoise algorithms.
+\begin{proposition}
+\label{prop:mseserver}
+    Let $\boldsymbol{y}\in \mathcal{Y}\subseteq \mathbb{R}^k$ be the original vector without noises added, and let $\hat{\boldsymbol{y}}\in \mathbb{R}^k$ be the noisy vector obtained under $\eta d_{\chi}$-privacy mechanism. Denote $D_s: \mathbb{R}^k \rightarrow \mathbb{R}^k$ as the denoising algorithm run by the server. Suppose $D_s$ is unbiased and the token embeddings are bounded by $B_x$:
+    \begin{equation}
+        \|\boldsymbol{x}'-\boldsymbol{x}\|\leq B_x, \forall \boldsymbol{x}',\ \boldsymbol{x}
+    \end{equation}
+    , then:
+    \begin{equation}
+        \mathbb{E} [\|D_s(\hat{\boldsymbol{y}}) - \boldsymbol{y}\|/k] \geq \frac{\sum_{i=1}^d \rm{diam}_i (\mathcal{Y})^2/4k}{e^{\eta B_x}-1}
+    \end{equation}
+    where $\rm{diam}_i (\mathcal{Y}) = \sup_{\boldsymbol{y}, \boldsymbol{y}'\in \mathcal{Y}: \boldsymbol{y}_j=\boldsymbol{y}_j' \forall j\neq i}|\boldsymbol{y}_i-\boldsymbol{y}_i'|$ is the diameter of $\mathcal{Y}$ in the $i$-th dimension.
+\end{proposition}
+\begin{remark}
+The vector $\boldsymbol{y}$ can be: (i) the token representations uploaded from users, (ii) output embeddings, or (iii) any intermediate results returned by the language model based on the token embeddings. The instantiation of $\boldsymbol{y}$ is determined by the layer at which the server runs denoising algorithm.
+\end{remark}
+
+To address the limitation, we propose a denoise framework where users conduct error correction on the noisy embeddings using their specific noises and raw inputs. Given the black-box nature of neural network transformation on the privatized token representations, we propose to train a transformer-based model for embedding denoise. 
+
+Let $\Tilde{X}=[\boldsymbol{\Tilde{x}}_1, \ldots, \boldsymbol{\Tilde{x}}_n]$, $Z=[\boldsymbol{z}_1, \ldots, \boldsymbol{z}_n]$ $\in$ $\mathbb{R}^{n\times d}$ denote, respectively, the privatized token representations and noise matrix. Noted that the noise vector is updated with the clipped privatized token embeddings $\boldsymbol{z} = M'(\boldsymbol{x}_t) - \boldsymbol{x}_t$. After a series of operations, the server returns a noisy embedding $\boldsymbol{e}_n$ capturing the context of input token to the user. The denoise model is parameterized by a $L$-layer transformer decoder, $D: \mathbb{R}^{(2n+1)\times d}\rightarrow \mathbb{R}^d$:
+\begin{equation}
+    \boldsymbol{e}_d = D(\boldsymbol{e}_n, \Tilde{X}, Z)
+\end{equation}
+
+The input to the denoise model $H_0$ is a concatenation of vectors:
+\begin{equation}
+    H_0 = [\boldsymbol{e}_n; \boldsymbol{\Tilde{x}}_1, \ldots, \boldsymbol{\Tilde{x}}_n; \boldsymbol{z}_1, \ldots, \boldsymbol{z}_n]
+\end{equation}
+
+Let $\boldsymbol{h}_{t}^l$ represents the hidden state for the $t^{th}$ vector at layer $l$. This state is computed using the following recursive relation:
+\begin{equation}
+    \boldsymbol{h}_{t}^l = \boldsymbol{h}_{t}^{l-1} + \boldsymbol{a}_{t}^{l-1} + \boldsymbol{m}_{t}^{l-1} 
+\end{equation}
+where
+\begin{equation}
+\begin{gathered}
+\boldsymbol{a}_{t}^{l-1} = attn^l (\boldsymbol{h}_1^{l-1}, \boldsymbol{h}_2^{l-1}, ..., \boldsymbol{h}_{2n+1}^{l-1}),\\
+    \boldsymbol{m}_{t}^{l-1} = W_{proj}^l \sigma (W_{fc}^l \gamma (\boldsymbol{a}_{t}^{l} + \boldsymbol{h}_{t}^{l-1}))
+\end{gathered}
+\end{equation}
+The denoised embedding is obtained directly from the hidden state representation for $\boldsymbol{e}_n$ at the final layer:
+\begin{equation}
+    \boldsymbol{e}_d = \boldsymbol{h}_0^L
+\end{equation}
+We visualize the architecture of the denoise model in Figure \ref{denoisemod}. Intuitively, the noisy embedding undergoes $L$ steps to transform into the denoised embedding. In each step, the transformation is conditioned on the feature representations of raw IRs as well as specific noises.
+
+To train a denoise model, the server samples a set of noises added to the token representations of public corpus. Subsequently, the clean embedding $\boldsymbol{e}_c$ and noisy embedding $\boldsymbol{e}_n$ are computed from, respectively, the raw and privatized token representations:
+\begin{equation}
+    \boldsymbol{e}_c = G(X),\ \boldsymbol{e}_n = G(\Tilde{X})
+\end{equation}
+
+The denoise model is trained on the above datasets with the objective to minimize the deviation between denoised and clean embeddings:
+\begin{equation}
+    \min_D \mathbb{E} [\|D(\boldsymbol{e}_n, \Tilde{X}, Z) - \boldsymbol{e}_c\|^2]
+\end{equation}
+
+The pretrained model is shared with users to conduct denoising on the received embeddings locally. It is important to note that the denoise model does not expose any information regarding user data. This is primarily due to the fact that the model's training is carried out exclusively on a public dataset, rendering it irrelevant to users' private inputs.
+
+\subsection{Complexity Analysis}
+In this section, we analyze the communication complexity and user computation complexity of our framework.
+
+\textit{Communication complexity}: the communication cost can be broken as: (1) user uploads the token representations to the server ($O(nd)$ messages); (2) server share the embeddings with user ($O(d)$ messages). Hence, the total communication overhead is $O(nd)$.
+
+\textit{User computation complexity}: user's computation cost can be broken as: (1) retrieving token embeddings from input text ($O(n)$ complexity); (2) performing local denoising with the transformer-based model ($O(n^2dL)$ complexity \cite{vaswani2017attention}). Therefore, the user's computation cost adds up to $O(n^2dL)$.
+
+\begin{table*}[!htbp]
+\caption{Accuracies on downstream tasks for BERT.}
+\label{tab:accBERT}
+\centering
+\begin{small}
+\begin{tabularx}{\textwidth}{@{}lXXXXXXXXXX@{}} % 使用 tabularx 环境
+\toprule
+                   & \multicolumn{3}{c}{DistillBert (66m)} & \multicolumn{3}{c}{Bert Base (110m)} & \multicolumn{3}{c}{Bert Large (340m)} \\ \cmidrule(l){2-10} 
+$\eta$                 & 100    & 500 & $\infty$      & 100    & 500  & $\infty$  & 100    & 500   & $\infty$     \\ \midrule
+CoLA  & 0.693 &   0.694  &  0.701   &  0.688 &   0.694  &  0.751 & 0.697  &  0.699   &  0.757 \\
+QQP   &    0.632   &  0.649  & 0.683  & 0.667   & 0.688  &   0.728 &   0.676  &  0.684  &  0.706 \\
+MRPC  &  0.683  &  0.691 &   0.695 &   0.689  &   0.725  &  0.742 &  0.684 &  0.689 &  0.701  \\ 
+RTE &    0.578  &   0.580  &  0.592  &  0.592   &  0.610  &   0.616  &    0.590  &   0.601  & 0.621\\
+\bottomrule
+\end{tabularx}
+\end{small}
+\end{table*}
+\begin{table*}[!htbp]
+\caption{Accuracies on downstream tasks for T5.}
+\label{tab:accT5}
+\centering
+\begin{small}
+\begin{tabularx}{\textwidth}{lXXXXXXXXXXXXX}
+\hline
+     & \multicolumn{4}{c}{T5 Small (60m)} & \multicolumn{4}{c}{T5 Base (220m)} & \multicolumn{4}{c}{T5 Large (770m)} \\ \cline{2-13} 
+$\eta$  & 0.001  & 0.01  & 1      & $\infty$ & 0.001  & 0.01  & 1      & $\infty$ & 0.001  & 0.01   & 1      & $\infty$ \\ \hline
+CoLA &   0.69     &    0.69   & 0.69 & 0.71   &   0.69     &   0.70    & 0.70 &     0.73     &   0.70    & 0.70  & 0.70 &   0.75   \\
+QQP  &    0.68    &   0.69    &    0.68    & 0.71    &   0.66     &    0.67   &    0.69    & 0.72   & 0.66  & 0.67  &   0.70     & 0.71   \\
+MRPC &    0.68    &   0.69    & 0.69 & 0.70   &   0.69     &   0.69    & 0.70 & 0.71   &    0.68    & 0.69  & 0.69 & 0.71   \\
+RTE  &    0.55    &    0.56   & 0.58 & 0.60    &   0.57     &   0.58    & 0.62 &   0.63  &   0.57     &    0.59    & 0.61  &   0.62   \\ \hline
+\end{tabularx}
+\end{small}
+\end{table*}
+\begin{table*}[!htbp]
+\caption{Accuracies on downstream tasks for GPT2.}
+\label{tab:accGPT2}
+\centering
+\begin{small}
+\begin{tabularx}{\textwidth}{@{}lXXXXXXXXXXX@{}}
+\toprule
+   & \multicolumn{3}{c}{GPT2 Small} & \multicolumn{3}{c}{GPT2 Medium} & \multicolumn{3}{c}{GPT2 large} & \multicolumn{2}{c}{GPT2 Xlarge} \\ 
+   & \multicolumn{3}{c}{(120m)} & \multicolumn{3}{c}{(345m)} & \multicolumn{3}{c}{(774m)} & \multicolumn{2}{c}{(1.5b)} \\ 
+   \cmidrule(l){2-12} 
+$\eta$                & 1      & 100 & $\infty$    & 1     & 100  & $\infty$  & 1       & 100   & $\infty$  &   100   & $\infty$  \\ \midrule
+CoLA  &  0.688  &   0.700  &  0.709  &  0.690   &    0.698 &  0.728  &  0.700  &     0.701  &   0.724 & 0.693 & 0.766 \\
+QQP   &   0.645  &      0.657  &   0.716      &   0.647 &   0.652  &  0.711  & 0.637  &  0.650   &  0.721 & 0.650& 0.741 \\
+MRPC  &  0.688  &   0.691  &   0.720   & 0.688 &   0.693  &  0.710  &  0.674 & 0.691 &     0.701 &  0.686 & 0.705 \\ 
+RTE &  0.556  &    0.563  &  0.581 &   0.567  &  0.578  &   0.583  &   0.581   &   0.606  &  0.611 & 0.584 & 0.592 \\
+ \bottomrule
+\end{tabularx}
+\end{small}
+\end{table*}
+
+
+
+\section{Experiment}
+
+\subsection{Experiment Settup}
+We evaluate our framework on three classes of LLMs: Bert \cite{devlin2018bert}, GPT2 \cite{radford2019language}, and T5 \cite{raffel2020exploring}. We benchmark our experiments against three baseline methods: (i) Token embedding privatization (TokEmbPriv) \cite{qu2021natural}, where the token embeddings are perturbed by the user before sending them to the server. (ii) Text-to-text privatization (Text2Text) \cite{feyisetan2019privacy, qu2021natural}, where the plain token sequence is transformed into a privatized token sequence by replacing each word with the perturbed token embeddings. (iii) Privacy-Preserving Prompt Tuning (RAPT) \cite{li2023privacypreserving} that protects prompt tuning and inference with local DP. 
+
+Table \ref{tab:compsota} summarizes the existing privacy-preserving LLM inference approaches along four dimensions: (i) involvement of finetuning, including parameter efficient finetunings, on task specific data, (ii) adoption of server-side denoise technique on privatized values, (iii) adoption of user-side denoise technique on privatized values, (iv) privacy guarantee in terms of the security in multiparty computation (SMPC), or local differential privacy (LDP). Noted that RAPT employs a reconstruction head to improve the robustness of prompt tuning process, where the module reconstructs the random tokens to help the LLM better understand the privatized token at training stage. However, the precise mechanism by which the LLM learns to decode the privatized tokens remains unclear, especially considering that the reconstruction module works solely on random tokens. Furthermore, the reconstruction head is discarded during LLM inference stage, rendering no denoise mechanism for LLM inference.
+
+To assess the performance of our approach, we employ two distinct evaluation metrics: (1) similarity with $\boldsymbol{e}_c$: we compute the mean square error (MSE) and cosine similarity (COS) between $\boldsymbol{e}_c$ and $\boldsymbol{e}_d$, the clean and privatized embeddings, to quantify the extent of data variations induced by the perturbation process; (2) performance on downstream tasks: we utilize accuracy scores (ACC) and area under the roc curve (AUC) to gauge the utility of the embeddings on downstream tasks.
+
+ \begin{table}[htb]
+\caption{Comparison of different privacy-preserving LLM inference approaches. }
+\label{tab:compsota}
+\begin{center}
+\scalebox{0.95}{
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+& Finetuning & \makecell{Server\\denoise} & \makecell{User\\denoise}  & \makecell{Privacy\\guarantee} \\
+\midrule
+PCFT & $\times$ & $\times$ & $\times$ &  SMPC \\
+TokEmbPriv & $\times$  & $\times$ & $\times$ & LDP \\
+Text2Text & $\times$ & $\times$ & $\times$  & LDP \\
+ RAPT& $\surd$ & $\surd$ & $\times$ & LDP\\
+ SnD & $\times$ & $\times$ & $\surd$ & LDP \\
+ \bottomrule
+\end{tabular}}
+\end{center}
+\end{table}
+\subsection{Datasets}
+To train the denoise model, we use the combination of 20 datasets to better mimic the generalized training scenarios, including TweetEval Offensive ~\cite{barbieri2020tweeteval}, Hate Speech 18 ~\cite{gibert2018hate}, Health Fact ~\cite{kotonya-toni-2020-explainable}, Daily Dialogue ~\cite{li2017dailydialog}, etc. 
+
+We test our denoising performance on a collection of downstream tasks: (i) Sentence classification:  CoLA \cite{warstadt2019neural},
+    (ii) Pair similarity: Quora Question Pairs
+(QQP) ~\cite{Chen2018}, MSR Paraphrase Corpus (MRPC) \cite{dolan2005automatically}, 
+(ii) Recognizing Textual Entailment (RTE) ~\cite{Dagan2006, BarHaim2006, Giampiccolo2007, Bentivogli2009}.
+\subsection{Empirical Privacy Evaluation}
+\subsubsection{Mutual Information}
+We leverage mutual information (MI) to evaluate the privacy leakage under each level of $\eta$ among varying models. Mutual information (MI) measures how much knowing one variable reduces uncertainty about the other, i.e., how much information the two variables share. We follow Kozachenko and Leonenko’s method \cite{delattre2017kozachenko} to estimate the mutual information from empirical distribution, where the entropy is estimated from the distance to the k-nearest neighbor. The MI between original and privatized token embedding, $X$ and $\tilde{X}$, is formulated as:
+\begin{equation}
+\label{eq:mi}
+    \hat{I}(X;\tilde{X}) = \frac{d}{N} \sum_{i=1}^{N} \log \epsilon_{\tilde{X}}(i) - \frac{d}{N} \sum_{i=1}^{N} \log \epsilon_{Z}(i)
+\end{equation}
+, where $N$ is the sample size, $d$ is the embedding size, $Z$ denote the noises added to $X$, and $\epsilon(i)$ is the distance of the $i^{th}$ sample to its k-nearest neighbor.
+
+\subsubsection{Attacks}
+We simulate two inference attacks on the privatized token embeddings from SnD to investigate the privacy protection ability under varying $\eta$.
+
+\textbf{Token embedding inversion attack \cite{li2023privacypreserving,qu2021natural}:} a token-level attack that reconstructs the raw text from the privatized token representation. Given a noisy embedding $\hat{\boldsymbol{x}}_t, t\in [1, n]$, the server identify a token $x_t$ closest to $\hat{\boldsymbol{x}}_t$ measured by $L_2$ distance in the embedding space:
+\begin{equation}
+    x_t = \arg\min_k \|\boldsymbol{w}_k-\hat{\boldsymbol{x}}_t\|
+\end{equation}
+, where $\boldsymbol{w}_k$ represents the representation for the $k^{th}$ token in the vocabulary.
+
+\textbf{Attribute inference attack \cite{li2023privacypreserving}:} an attack that infers the sensitive features of records from the privatized token representations. We rely on the twitter text dataset \cite{vashisth2020gender} to predict the gender based on the user's review.
+
+\begin{table*}[!htp]
+\caption{AUC comparisons for BERT models with QQP task.}
+\label{tab:auccompBERT}
+\centering
+\begin{small}
+\begin{tabularx}{\textwidth}{@{}lXXXXXXXXXX@{}}
+\toprule
+                   & \multicolumn{3}{c}{DistillBert} & \multicolumn{3}{c}{Bert Base} & \multicolumn{3}{c}{Bert Large} \\ \cmidrule(l){2-10} 
+$\eta$                & 50    & 100 & 500      & 50    & 100  & 500  & 50    & 100   & 500     \\ \midrule
+TokenEmbPriv  & 0.502 &   0.518  &  0.521   &  0.511 &   0.535  &  0.557 & 0.522  &  0.525   &  0.541 \\
+Text2Text   &    0.541   &  0.541  & 0.541  & 0.512   & 0.513  &   0.513 &   0.507  &  0.537  &  0.540 \\
+RAPT  & 0.517 & 0.515  & 0.545  &   0.513  & 0.528 & 0.551  & 0.515  &  0.539 &  0.565  \\ 
+\textbf{SnD} &    \textbf{0.583}  &   \textbf{0.600}  &  \textbf{0.610}  &  \textbf{0.674}   &  \textbf{0.675}  &   \textbf{0.691}  &    \textbf{0.639}  &   \textbf{0.655}  & \textbf{0.657}\\
+\bottomrule
+\end{tabularx}
+\end{small}
+\end{table*}
+\begin{table*}[!htp]
+\caption{AUC comparison for GPT Models with MRPC task.}
+\label{tab:auccompGPT}
+\centering
+\begin{small}
+\begin{tabularx}{\textwidth}{@{}lXXXXXXXXXX@{}}
+\toprule
+                   & \multicolumn{3}{c}{GPT2 Small} & \multicolumn{3}{c}{GPT2 Medium} & \multicolumn{3}{c}{GPT2 large} \\ \cmidrule(l){2-10} 
+$\eta$                & 1    & 50 & 100      & 1    & 50 & 100   & 1    & 50 & 100     \\ \midrule
+TokenEmbPriv  & 0.514 &   0.525  &  0.532   &  0.526 &   0.523  &  0.530 & 0.512  &  0.513   &  0.518 \\
+Text2Text   &    0.498   &  0.502  & 0.502  & 0.496   & 0.498  &   0.498 &   0.491  &  0.499  &  0.500 \\
+RAPT  & 0.504  &  0.521 &  0.524  &  0.503   & 0.502  &  0.539 & 0.500 & 0.510  &  0.547 \\ 
+\textbf{SnD} &    \textbf{0.542}  &   \textbf{0.552}  &  \textbf{0.579}  &  \textbf{0.553}   &  \textbf{0.578}  &   \textbf{0.573}  &    \textbf{0.547}  &   \textbf{0.556}  & \textbf{0.556}\\
+\bottomrule
+\end{tabularx}
+\end{small}
+\end{table*}
+\begin{table*}[!htp]
+\caption{AUC comparison for T5 Models with RTE task.}
+\label{tab:auccompT5}
+\centering
+\begin{small}
+\begin{tabularx}{\textwidth}{@{}lXXXXXXXXXX@{}}
+\toprule
+                   & \multicolumn{3}{c}{T5 Small} & \multicolumn{3}{c}{T5 Base} & \multicolumn{3}{c}{T5 Large} \\ \cmidrule(l){2-10} 
+$\eta$                & 0.001    & 0.01 &  0.1      & 0.001    & 0.01 &  0.1   & 0.001    & 0.01 &  0.1    \\ \midrule
+TokenEmbPriv  & 0.503 &  0.515  &  0.514   &  0.505 &   0.525  &  0.537 & 0.518  &  0.503   &  0.537 \\
+Text2Text   &    0.512   &  0.533  & 0.537  & 0.504   & 0.527  &   0.537 &   0.501  &  0.507  &  0.516 \\
+RAPT  &  0.510 & 0.548  &  0.547  &  0.506 &  0.532 &  0.533 &  0.514 & 0.519  & 0.516 \\ 
+\textbf{SnD} &    \textbf{0.547}  &   \textbf{0.577}  &  \textbf{0.575}  &  \textbf{0.566}   &  \textbf{0.564}  &   \textbf{0.611}  &    \textbf{0.566}  &   \textbf{0.580}  & \textbf{0.599}\\
+\bottomrule
+\end{tabularx}
+\end{small}
+\end{table*}
+
+\begin{figure*}[!htbp]
+\centering
+\includegraphics[width=0.9\linewidth]{attackmi.png}
+\caption{Estimated mutual information (MI) and embedding inversion attack accuracy under varying $\eta$. MI and attack accuracies approach $0$ under $\eta\leq 0.1$, $\eta\leq 50$, and $\eta\leq  10$ for T5, BERT, and GPT2 models, respectively.}
+\label{fig:attackmi}
+\end{figure*}
+
+\subsubsection{Geometry of the Embedding Space}
+According to expression \ref{eq:mi}, the variaty in MI under a constant $\eta$ comes from $\frac{d}{N} \sum_{i=1}^{N} \log \epsilon_{\tilde{X}}(i)$, the average distance to the k-nearest neighbor could be a reliable proxy for. To understand the variation of $\eta$ across different models, we analyze the embedding space with the following metrics: (i) Euclidean distances with sorrounding tokens: we compute the average distances between each token and its k-nearest neighbors, (ii) Euclidean distances between raw token embeddings and its embeddings perturbed by equation \ref{eq:noise}.
+
+\subsection{Experiment Results}
+\subsubsection{Privacy Experiments}
+\label{sec:inference_attack}
+
+In this section we present the results for mutual information estimation (MI) and token embedding inversion attack. 
+
+Figure \ref{fig:attackmi} the attack accuracy, measured by the percentage of token correctly identified by the attack, for the three series of models at various $\eta$ values. It can be observed that: (1) for Bert models, the attack success rates remain below $1\%$ with $\eta\leq 500$. GPT models exhibit negligible attack accuracy with $\eta$ values up to 100, while GPT Xlarge demonstrates exceptional robustness against inference attacks as $\eta$ increases. T5 models, on the other hand, require much smaller privacy budgets to resist inference attacks effectively. (2) The attack success rate is nearly zero for mutual information less than 0.02. (3) The mutual information is within 0.02 under $\eta\leq 0.1$, $\eta\leq 50$, and $\eta\leq  10$ for T5, BERT, and GPT2 models, respectively.
+\subsubsection{Performance on Downstream Task}
+We record the performance on various downstream task in terms of accuracy (ACC) under varing $\eta$ in Table~\ref{tab:accBERT}, ~\ref{tab:accT5} and~\ref{tab:accGPT2}. The utility is benchmarked against the case without any noise injection and thus no denoise operation, denoted by $\eta=\infty$. One important observation is that our framework maintains acceptable accuracy compared with the non-privatized setting. Across the chosen $\eta$ levels and four downstream tasks, Bert, T5, and GPT models yield average model losses of 4.31\%, 4.48\%, and 5.25\%, respectively. It is observed that under the same class of model, larger models tend to incur greater utility loss, which aligns with the intuitive understanding that transformed noises become increasingly unpredictable—and consequently, more challenging to denoise—after traversing through additional layers. Noted that we perform evaluation on the embeddings from pre-trained model without any fine-tuning, and thus there's a gap between the accuracy in our results for $\eta=\infty$ and the SOTA benchmarks.
+
+\subsubsection{Comparison with Baseline}
+In Table \ref{tab:auccompBERT}, \ref{tab:auccompGPT}, and \ref{tab:auccompT5}, we assess and compare the performance of three model families against three baseline methods using AUC. For the three model families, we selected three distinct $\eta$ levels for experimentation, given the varying noise tolerance of each model. Note that $\eta$ levels do not possess a universal implication across model families, as varying models exhibit distinct robustness against inference attacks, as delineated in Section \ref{sec:inference_attack}.
+
+For each model family, a representative task was selected. For BERT models, SnD outperforms TokenEmbPriv, Text2Text, and RAPT by an average of 22.2\%, 22.1\%, and 20.9\%, respectively. For GPT models, SnD results in AUC higher than the three baselines from 7.3\% to 12.3\% on average. For T5 models, the performance of SnD is higher than the baselines by an average of over 10\%. It can be observed that TokenEmbPriv and Text2Text exhibit poorer performance compared to the other two approaches. This could be attributed to the lack of denoise or reconstruction mechanism within these methods. Furthermore, the unbounded noise support in TokenEmbPriv leads to significant deviations between the privatized token representations and their original values. Both AUC and the similarity metrics suggest our technique's proficiency in restoring the original attributes of the noised embedding.
+
+\subsubsection{Finetuing Budget with Model Update}
+In reality, the server may periodically update its model. To account for this, we evaluate the additional training budget on the denoise model if the server finetune the underlying model with new data. Specifically, we fine-tune the BERT-base model with the Stanford Sentiment Treebank (SST2) dataset, varying the sample size from 1,000 to 60,000 for one epoch.  Table \ref{tab:updateft} presents the AUC under $\eta$ =100 with the MRPC task.  We can observe that: (a) when BERT-base model is finetuned with less than 10000 samples, the loss in utility is within 4.8\% if the denoise model is not adjusted; (b) when BERT-base model is finetuned with less than 60000 samples, finetuning the denoise model within only 1000 samples for one epoch could maintain the utility.
+
+\subsubsection{Other Studies}
+\label{sec:otherstudy}
+
+
+\section{Discussion and Future Work}
+
+\label{sec:futurework}
+\textbf{Scalability to larger language model}: our experiments primarily focused on language models ranging from 100MB to 1GB in size. We also tested our approach on larger language model, such as LLaMa and OPT-6.7B. While we observed substantial improvements in terms of MSE and COS of the embeddings compared to the baseline, we discovered that the accuracy on downstream tasks still requires further enhancement. We suspect that the inputs undergo significantly more intricate transformations in these larger language models, necessitating the use of more sophisticated noise and denoising mechanisms.
+
+\textbf{Reduce user computation cost}: local denoising constitutes a major component of user's computation overhead. We observe that the size of denoise model, and thus the user computation cost, scale with the underlying LLM. For those users with limited computation resource, it's crucial to design a lightweight denoise mechanism with minimal computation cost. 
+
+\textbf{Sequence-to-sequence (S2S) inference}: it's of great interest to extend our EaaS framework to S2S inference model. One important obstacle of the generalization is the noise amplification issue with S2S model. In particular, S2S relies on the auto-regressive mechanism, where the prediction of previous token is taken as an input to the next token. Therefore, the error from the previous prediction would exaggerate the deviation of the following tokens. A universal denoise model might be insufficient to correct the errors in the generated sequence.
+
+
+
+\section{Conclusion}
+
+This paper proposes SnD, a framework that employs split inference and denoising techniques to protect LLM inference with LDP. We split the language model to deploy the token representation layer on user side. User perturbs the token embeddings to guarantee $d_\chi$-privacy before transmitting them to the server. To improve the utility of embeddings, user conducts local denoising with a pre-trained model leveraging the raw token representations and specific noises. The empirical studies show that SnD performs better in maintaining the utility of embeddings compared with baseline methods by over 10\% on average.
+
+
+

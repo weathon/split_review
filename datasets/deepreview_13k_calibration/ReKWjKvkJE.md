@@ -1,8 +1,8 @@
 # Structure-Guided Large Language Models for Text-to-SQL Generation
 
 - Decision: Reject
-- Avg Score: 3.40
-- Scores: 5, 1, 0, 8, 3
+- Avg Score: 6.50
+- Scores: 5, 10, 8, 3
 
 ## Abstract
 Generating accurate Structured Querying Language (SQL) is a long-standing problem, especially in matching users' semantic queries with structured databases and then generating structured SQL. Existing models typically input queries and database schemas into the LLM and rely on the LLM to perform semantic-structure matching and generate structured SQL. However, such solutions overlook the structural information within user queries and databases, which can be utilized to enhance the generation of structured SQL. This oversight can lead to inaccurate or unexecutable SQL generation. To fully exploit the structure, we propose a structure-to-SQL framework, which leverages the inherent structure information to improve the SQL generation of LLMs. Specifically, we introduce our \textbf{\underline{S}tructure \underline{Gu}ided SQL~(SGU-SQL)} generation model. SGU-SQL first links user queries and databases in a structure-enhanced manner. It then decomposes complicated linked structures with grammar trees to guide the LLM to generate the SQL step by step. Extensive experiments on two benchmark datasets illustrate that SGU-SQL can outperform sixteen SQL generation baselines.

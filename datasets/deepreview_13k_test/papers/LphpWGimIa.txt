@@ -1,0 +1,370 @@
+\title{Interpreting Attention Layer Outputs with Sparse Autoencoders}
+
+\begin{abstract}
+
+Decomposing model activations into interpretable components is a key open problem in mechanistic interpretability. Sparse autoencoders (SAEs) are a popular method for decomposing the internal activations of trained transformers into sparse, interpretable features, and have been applied to MLP layers and the residual stream. In this work we train SAEs on attention layer outputs and show that also here SAEs find a sparse, interpretable decomposition. We demonstrate this on transformers from several model families and up to 2B parameters. 
+
+We perform a qualitative study of the features computed by attention layers, and find multiple families: long-range context, short-range context and induction features. We qualitatively study the role of every head in GPT-2 Small, and estimate that at least 90\% of the heads are polysemantic, i.e. have multiple unrelated roles.
+
+Further, we show that Sparse Autoencoders are a useful tool that enable researchers to explain model behavior in greater detail than prior work. For example, we explore the mystery of why models have so many seemingly redundant induction heads, use SAEs to motivate the hypothesis that some are long-prefix whereas others are short-prefix, and confirm this with more rigorous analysis. We use our SAEs to analyze the computation performed by the Indirect Object Identification circuit (\citet{wang2023interpretability}), validating that the SAEs find causally meaningful intermediate variables, and deepening our understanding of the semantics of the circuit. 
+We open-source the trained SAEs and a tool for exploring arbitrary prompts through the lens of Attention Output SAEs.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+Mechanistic interpretability aims to reverse engineer neural network computations into human-understandable algorithms \citep{AnthropicMechanisticEssay, olah2020zoom}. A key sub-problem is to decompose high dimensional activations into meaningful concepts, or features. If successful at scale, this research would enable us to identify and debug model errors \citep{hernandez2022natural, vig2020causal, gandelsman2024interpreting, marks2024sparse}, control and steer model behavior \citep{rimsky2024steering, turner2023activation, repe}, and better predict out-of-distribution behavior \citep{mu_andreas_off_distribution_reference, carter2019activation, goh2021multimodal}. 
+Prior work has successfully analyzed many individual model components, such as neurons and attention heads. However, both neurons \citep{wang2023interpretability} and attention heads \citep{gould2023successor} are often \textit{polysemantic} \citep{olah2017feature}: they appear to represent multiple unrelated concepts or perform different functions depending on the input. Polysemanticity makes it challenging to interpret the role of individual neurons or attention heads in the model's overall computation, suggesting the need for alternative units of analysis.
+Our paper builds on literature using Sparse Autoencoders (SAEs) to extract interpretable feature dictionaries from the residual stream \citep{cunningham2023sparse,yun2023transformer} and MLP activations \citep{bricken2023monosemanticity}. While these approaches have shown promise in disentangling activations into interpretable features, attention layers have remained difficult to interpret. In this work, we apply SAEs to reconstruct attention layer outputs, and develop a novel technique (\textbf{weight-based head attribution}) to associate learned features with specific attention heads. This allows us to sidestep challenges posed by polysemanticity (\Cref{sec:methodology}). 
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=1.0\textwidth]{figures/new_hook_z_diagram_better.drawio.pdf}
+\caption{Overview. We train Sparse Autoencoders (SAEs) on $\textbf{z}_{\text{cat}}$, the attention layer outputs pre-linear, concatenated across all heads. The SAEs extract linear directions that correspond to concepts in the model, giving us insight into what attention layers learn in practice. Further, we uncover what information was used to compute these features with direct feature attribution (DFA, \Cref{sec:methodology}).}
+\label{fig:hook_z_diagram}
+\end{figure}
+
+Since SAEs applied to LLM activations are already widely used in the field, we do not see the application of SAEs to attention outputs as our main contribution. Instead, we hope our main contribution to be making a case for Attention Output SAEs as a valuable research tool that others in the mechanistic interpretability community should adopt. We do this by rigorously showing that Attention Output SAEs find sparse, interpretable reconstructions, that they easily enable qualitative analyses to gain insight into the functioning of attention layers, and that they are a valuable tool for novel research questions such as why models have so many seemingly redundant induction heads \citep{olsson2022context} or better understanding the semantics of the Indirect Object Identification circuit \citep{wang2023interpretability}.
+In more detail, our main contributions are as follows:
+
+\begin{compactenum}
+  \item We demonstrate that Sparse Autoencoders decompose attention layer outputs into sparse, interpretable linear combinations of feature vectors, giving us deeper insight into what concepts attention layers learn up to 2B parameter models (\Cref{sec:attention-saes-work}). We perform a qualitative study of the features computed by attention layers, and find multiple families: long-range context, short-range context and induction features (\Cref{subsec:analyzing-features}).
+  \item We apply SAEs to systematically inspect every attention head in GPT-2 Small (\Cref{subsec:interpreting-all-heads}), and extend this analysis to make progress on the open question of why there are be multiple, seemingly redundant induction heads (\Cref{subsec:long-prefix-induction}). Our method identifies differences between induction heads \citep{olsson2022context} which specialize in "long prefix induction" \citep{nix_path_patching} vs "short prefix induction", demonstrating the utility of these SAEs for interpretability research.
+  \item  We show that Attention Output SAEs are useful for circuit analysis (\Cref{subsec:analyzing-circuits}), by finding and interpreting causally relevant SAE features for the widely-studied Indirect Object Identification circuit \citep{wang2023interpretability}, and resolving a way our prior understanding was incomplete.
+  \item  We introduce Recursive Direct Feature Attribution (RDFA, \Cref{sec:methodology}) - a technique that exploits the linear structure of transformers to discover sparse feature circuits through the attention layers. We release an accompanying tool for finding and visualizing the circuits on arbitrary prompts.\footnote{The RDFA tool is available at: \url{https://robertzk.io/circuit-explorer}}
+\end{compactenum}
+
+
+\section{Methodology}
+
+\label{sec:methodology}
+\paragraph{Reconstructing attention layer outputs:} We closely follow the setup from \citet{bricken2023monosemanticity} to train Sparse Autoencoders that reconstruct the attention layer outputs. Specifically, we train our SAEs on the 
+$\textbf{z}\in\mathbb{R}^{d_{\text{head}}}$ vectors \citep{transformer_lens} concatenated across all heads of some arbitrary layer (i.e. $\textbf{z}_{\text{cat}} \in\mathbb{R}^{d_{\text{model}}}$ where $d_{\text{model}} = n_{\text{\text{heads}}} \cdot d_{\text{head}}$). Note that $\textbf{z}$ is the attention weighted sum of value vectors $\textbf{v}\in\mathbb{R}^{d_{\text{head}}}$ \textit{before} they are converted to the attention output by a linear map (\Cref{fig:hook_z_diagram}), and should not be confused with the final output of the attention layer. We choose to concatenate each $\textbf{z}$ vector in the layer, rather than training an SAE per head, so that our method is robust to features represented as a linear combination of multiple head outputs \citep{anthropic_may_update}.
+
+Given an input activation $\textbf{z}_{\text{cat}} \in\mathbb{R}^{d_{\text{model}}}$, Attention Output SAEs compute a decomposition (using notation similar to \citet{marks2024sparse}):
+
+\begin{equation}\label{sae-decomp-eq}
+\textbf{z}_{\text{cat}} = \hat{\textbf{z}}_{\text{cat}} + \varepsilon(\textbf{z}_{\text{cat}}) = \sum_{i=0}^{d_{\text{sae}}} f_i(\textbf{z}_{\text{cat}})\textbf{d}_i + \textbf{b} + \varepsilon(\textbf{z}_{\text{cat}})
+\end{equation}
+where $\hat{\textbf{z}}_{\text{cat}}$ is an approximate reconstruction and $\varepsilon(\textbf{z}_{\text{cat}})$ is an error term. We define $\textbf{d}_i$ as unit-norm \textit{feature directions} with sparse coefficients $f_i(\textbf{z}_{\text{cat}}) \geq 0$ as the corresponding \textit{feature activations} for $\textbf{z}_{\text{cat}}$. We also include an SAE bias term $\textbf{b}$.
+
+As mentioned, we do not train SAEs on the output of the attention layer $ W_O \textbf{z}_{\text{cat}} \in\mathbb{R}^{d_{\text{model}}}$ (where $W_O$ is the out projection weight matrix of the attention layer (\Cref{fig:hook_z_diagram})). Since $W_O \textbf{z}_{\text{cat}}$ is a linear transformation of $\textbf{z}_{\text{cat}}$, we expect to find the same features. However, we deliberately trained our SAE on $\textbf{z}_{\text{cat}}$ since we find that this allows us to attribute which heads the decoder weights are from for each SAE feature, as described below.
+
+\paragraph{Weight-based head attribution:} We develop a technique specific to this setup: decoder weight attribution by head. For each layer, our attention SAEs are trained to reconstruct $\textbf{z}_{\text{cat}}$, the concatenated outputs of each head. Thus each SAE feature direction $\textbf{d}_i$ is a 1D vector in $\mathbb{R}^{n_{\text{\text{heads}}} \cdot d_{\text{head}}}$.
+
+We can split each feature direction, $\textbf{d}_i$, into a concatenation of $n_{\text{\text{heads}}}$ smaller vectors, each of shape $d_{\text{head}}$: $\textbf{d}_i = [\textbf{d}_{i,1}^\top, \textbf{d}_{i,2}^\top, \dots, \textbf{d}_{i,n_{\text{\text{heads}}}}^\top]^\top$ where $\textbf{d}_{i,j} \in \mathbb{R}^{d_{\text{head}}}$ for $j = 1, 2, \dots, n_{\text{\text{heads}}}$.
+
+We can intuitively think of each $\textbf{d}_{i,j}$ as reconstructing the part of feature direction that comes from head $j$. We then compute the norm of each slice as a proxy for how strongly each head writes this feature. Concretely, for any feature $i$, we can compute the weights based attribution score to head $k$ as
+
+\begin{equation} \label{weight-based-head-eq}
+h_{i,k} = \frac{\left\lVert \textbf{d}_{i,k} \right\rVert_2}{\sum_{j=1}^{n_{\text{\text{heads}}}}\left\lVert \textbf{d}_{i,j} \right\rVert_2}
+\end{equation}
+
+For any head $k$, we can also sort all \textit{features} by their head attribution to get a sense of what features that head is most responsible for outputting (see \Cref{subsec:interpreting-all-heads}).
+
+\paragraph{Direct feature attribution:} We provide an activation based attribution method to complement the weights based attribution above. As attention layer outputs are a linear function of attention head outputs \citep{elhage2021mathematical}, we can rewrite SAE feature activations in terms of the contribution from each head.
+
+\begin{equation} \label{dfa-by-head-eq}
+f_{i}^{\text{pre}}(\textbf{z}_{\text{cat}})  = \mathbf{w}_i^\top \mathbf{z}_{\text{cat}} 
+  = \mathbf{w}_{i,1}^\top \mathbf{z}_1 +
+\mathbf{w}_{i,2}^\top \mathbf{z}_2 +
+\cdots +
+\mathbf{w}_{i,n_{\text{\text{heads}}}}^\top \mathbf{z}_{n_{\text{\text{heads}}}}
+\end{equation}
+where $\mathbf{w}_i \in\mathbb{R}^{d_{\text{model}}}$ is the ith row of the encoder weight matrix, $\mathbf{w}_{i,j}\in\mathbb{R}^{d_{\text{head}}}$ is the jth slice of $\mathbf{w}_i$, and $f_{i}^{\text{pre}}(\textbf{z}_{\text{cat}})$ is the pre-\texttt{ReLU} feature activation for feature $i$ (i.e. $\texttt{ReLU}(f_{i}^{\text{pre}}(\textbf{z}_{\text{cat}})) := f_{i}(\textbf{z}_{\text{cat}}))$. Note that we exclude SAE bias terms for brevity.
+
+We call this “direct feature attribution” (as it’s analogous to direct logit attribution \citep{neel_glossary}), or "DFA" by head. We apply the same idea to perform direct feature attribution on the value vectors at each source position, since the $\textbf{z}$ vectors are a linear function of the value vectors if we freeze attention patterns \citep{elhage2021mathematical,chughtai2024summing}. We call this "DFA by source position". 
+
+\paragraph{Recursive Direct Feature Attribution (RDFA):}
+
+Here we extend the DFA technique described above to introduce a general method to trace models' computation on arbitrary prompts. Given that we have frozen attention patterns and LayerNorm, there is a linear contribution from (1) different token position residual streams, (2) upstream model components, and (3) upstream Attention Output SAE features to downstream Attention Output SAE features. This enables us to perform a fine-grained decomposition of Attention Output SAE features recursively through earlier token position residual streams and upstream components across every layer. We call this technique Recursive DFA (RDFA). In \Cref{app:rdfa-algo}, we provide a full description of the RDFA algorithm, accompanied by equations for key linear decompositions.
+
+We also release a visualization tool that enables performing Recursive DFA on arbitrary prompts for GPT-2 Small. We currently only support this recursive attribution from attention to attention components, as we cannot pass upstream linearly through MLPs due to the non-linear activation function. The tool is available at: \url{https://robertzk.io/circuit-explorer}.
+
+
+
+\section{Attention Output SAEs find Sparse, Interpretable Reconstructions}
+
+\label{sec:attention-saes-work}
+
+In this section, we show that Attention Output SAE reconstructions are sparse, faithful, and interpretable. We first explain the metrics we use to evaluate our SAEs (\Cref{subsec:setup}). We then show that our SAEs find sparse, faithful, interpretable reconstructions (\Cref{subsec:loss-recovered-etc-evaluation}). Finally we demonstrate that our SAEs give us better insights into the concepts that attention layers learn in practice by discovering three attention feature families (\Cref{subsec:analyzing-features}).
+
+\subsection{Setup}
+\label{subsec:setup} 
+
+To evaluate the sparsity and fidelity of our trained SAEs we use two metrics from \citet{bricken2023monosemanticity} (using notation similar to \citet{rajamanoharan2024improving}):
+
+\paragraph{L0.} The average number of features firing on a given input, i.e. $\mathbb{E}_{\textbf{x}\sim \mathscr{D}} \|\textbf{f}(\textbf{x})\|_0$.
+
+\paragraph{Loss recovered.} The average cross entropy loss of the language model recovered with the SAE "spliced in" to the forward pass, relative to a zero ablation baseline. More concretely:
+    
+\begin{equation}
+1 - \frac{\mathrm{CE}(\hat{\textbf{x}} \circ\textbf{f}) - \mathrm{CE}(\mathrm{Id})}{\mathrm{CE}(\zeta) - \mathrm{CE}(\mathrm{Id})},
+\label{eq:ce_recovered}
+\end{equation}
+
+where $\hat{\textbf{x}} \circ\textbf{f}$ is the autoencoder function, $\zeta: \textbf{x} \rightarrow \textbf{0}$ is the zero ablation function and Id: $\textbf{x}\rightarrow\textbf{x}$ is the identity function.  According to this definition, an SAE that reconstructs its inputs perfectly would get a loss recovered of 100\%, whereas an SAE that always outputs the zero vector as its reconstruction would get a loss recovered of 0\%.
+
+\paragraph{Feature Interpretability Methodology.} We use dashboards \citep{bricken2023monosemanticity, sae_vis} showing which dataset examples SAE features maximally activate on to determine whether they are interpretable. These dashboards also show the top Direct Feature Attribution by source position, weight-based head attribution for each head (\Cref{sec:methodology}), approximate direct logit effects \citep{bricken2023monosemanticity} as well as
+ activating examples from randomly sampled activation ranges, giving a holistic picture of the role of the feature. See \Cref{app:interpretability-methodology} for full details about this methodology.
+\subsection{Evaluating Attention Output SAEs}
+\label{subsec:loss-recovered-etc-evaluation}
+
+\begin{wraptable}[23]{r}{8cm}
+  \begin{minipage}{7cm}
+    \begin{threeparttable}
+    \begin{center}
+    \raggedright\caption{Evaluations of sparsity, fidelity, and interpretability for Attention Output SAEs trained across multiple models and layers. Percentage of interpretable features were based on 30 randomly sampled live features inspected per layer.}
+    \label{table:sae_eval_metrics_compact}
+    \begin{tabular}{ c c c c c } 
+     \hline
+    \textbf{Model} & \textbf{Layer} & \textbf{L0} & \textbf{\% CE Rec.}\tnote{$\dagger$} & \textbf{\% Interp.}   \\
+     
+     \hline \\ 
+     Gemma-2B \citep{gemma_2024} & 6 & 90 & 75\% & 66\% \\
+     GPT-2 Small & 0 & 3 & 99\% & 97\% \\ 
+     GPT-2 Small & 1 & 20 & 78\% & 87\% \\ 
+     GPT-2 Small & 2 & 16 & 90\% & 97\% \\
+     GPT-2 Small & 3 & 15 & 84\% & 77\% \\
+     GPT-2 Small & 4 & 15 & 88\% & 97\% \\
+     GPT-2 Small & 5 & 20 & 85\% & 80\% \\
+     GPT-2 Small & 6 & 19 & 82\% & 77\% \\
+     GPT-2 Small & 7 & 19 & 83\% & 70\% \\
+     GPT-2 Small & 8 & 20 & 76\% & 60\% \\
+     GPT-2 Small & 9 & 21 & 83\% & 77\% \\
+     GPT-2 Small & 10 & 16 & 85\% & 80\% \\
+     GPT-2 Small & 11 & 8 & 89\% & 63\% \\
+     GPT-2 Small & \text{All} &  &  & 80\%\tnote{$\ddagger$} \\
+     GELU-2L \citep{gelu1l} & 1 & 12 & 87\% & 83\% \\
+     \hline
+    \end{tabular}
+    \raggedright\begin{tablenotes}
+        \item[$\dagger$] Percentage of cross-entropy loss recovered (Equation \ref{eq:ce_recovered}).
+        \item[$\ddagger$] Average over \% interpretable across all layers.
+    \end{tablenotes}
+    \end{center}
+    \end{threeparttable}
+    \end{minipage}
+    \label{table:feature-evalutions}
+\end{wraptable}
+We train and evaluate Attention Output SAEs across a variety of different models and layers. For GPT-2 Small \citep{gpt2}, we notably evaluate an SAE for every layer. We find that our SAEs are sparse (oftentimes with < 20 average features firing), faithful (oftentimes > 80\% of cross entropy loss recovered relative to zero ablation) and interpretable (oftentimes  > 80\% of live features interpretable). See \Cref{table:sae_eval_metrics_compact} for per model and layer details.\footnote{We release weights for every SAE, corresponding feature dashboards, and an interactive tool for exploring several attention SAEs throughout a model in \Cref{app:feature-dashboards}.} See \Cref{app:sae-eval-discussion} for further discussion of these results.
+
+\subsection{Exploring Feature Families}
+\label{subsec:analyzing-features}
+
+In this section we more qualitatively show that Attention Output SAEs are interpretable by examining different feature families: groups of SAE features that share some common high-level characteristic.  
+
+We first evaluate 30 randomly sampled live features from SAEs across multiple models and layers (as described in \Cref{subsec:setup}) and report the percentage of features that are interpretable in \Cref{table:sae_eval_metrics_compact}. We notice that in all cases, the majority of live features are interpretable, often >80\%. Note that this is a small sample of features, and human judgment may be flawed. We list confidence intervals for percentage of interpretable features in \Cref{app:confidence-intervals-interpretability}.
+
+We now use our understanding of these extracted features to share deeper insights into the concepts attention layers learn. Attention Output SAEs
+enable us to taxonomize a large fraction of what these layers are doing based on feature families, giving us better intuitions about how transformers use attention layers in practice. Throughout our SAEs trained on multiple models, we repeatedly find three common feature families: induction features (e.g. "board" token is next by induction), local context features (e.g. current sentence is a question, \Cref{fig:hook_z_diagram}), and high-level context features (e.g. current text is about pets). All of these features involve moving prior information with the context, consistent with the high-level conceptualization of the attention mechanism from \citet{elhage2021mathematical}. We present these for illustrative purposes and do not expect these to nearly constitute a complete set of feature families. 
+
+While we focus on these three feature families that are present across all of the models we studied, we also find feature families related to predicting names in the context \citep{wang2023interpretability}, succession \citep{gould2023successor}, detecting duplicate tokens \citep{wang2023interpretability}, and copy suppression \citep{copy_suppression} in GPT-2 Small (\Cref{app:gpt2-feature-families}). 
+
+To more rigorously understand these three feature families, we performed a case study for each of these features (similar to \citet{bricken2023monosemanticity}). For brevity, we highlight a case study of an induction feature below and leave the remaining to \Cref{app:which-deep-dive} and \ref{app:pets-deep-dive}.
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/board_induction_specificity_plot_new.pdf}
+    \caption{}
+    \label{fig:board_induction_specificity_plot}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/board_induction_ev_plot_new.pdf}
+    \caption{}
+    \label{fig:board_induction_ev_plot}
+  \end{subfigure}
+  \caption{Specificity plot \citep{bricken2023monosemanticity} (a) which compares the distribution of the board induction feature activations to the activation of our proxy. The expected value plot (b) shows distribution of feature activations weighted by activation level \citep{bricken2023monosemanticity}, compared to the activation of the proxy. Note red is stacked on top of blue, where blue represents examples that our proxy identified as board induction. We notice high specificity above the weakest feature activations.}
+  \label{fig:specificity_and_ev_plots}
+\end{figure}
+\paragraph{Induction features.} Our analysis revealed multiple "induction features" across different models studied. As we are not aware of any induction features extracted by MLP SAEs in prior work, we hypothesize that induction features are unique to attention \citep{bricken2023monosemanticity}. In what follows, we showcase a “‘board’ is next by induction” feature from our L1 GELU-2L \citep{gelu1l} SAE. However, we note that “board induction” is just one example from hundreds of “<token> is next by induction” features discovered by our analysis (see \Cref{app:automated-induction}). We also detail the feature’s upstream computations and downstream effects in \Cref{app:induction-deep-dive-cont}.
+  
+The ‘board’ induction feature activates on the second instance of <token> in prompts of the form “<token> board . . . <token>”. To demonstrate ‘board induction’ is a genuinely \textit{monosemantic} feature, we provide evidence that the feature is both: (i) specific and (ii) sensitive to this context \citep{bricken2023monosemanticity}.
+ 
+Specificity was established through creation of a proxy that checks for cases of ‘board’ induction. Thereafter, we compared the activation of our proxy to the activation of the feature. We found that the upper parts of the activation spectrum clearly responded, with high specificity, to ‘board’ induction (\Cref{fig:specificity_and_ev_plots}). Although some false positives were observed in the lower activation ranges (as in \citet{bricken2023monosemanticity}), we believe there are mundane reasons to expect such results (see \Cref{app:induction_feature_hedging}).
+
+We now move onto sensitivity. Our activation sensitivity analysis found 68 false negatives in a dataset of 1 million tokens, and all false negatives were manually checked. Although these examples satisfy the ‘board’ induction pattern, it is clear that ‘board’ should not be predicted. Often, this was because there were even stronger cases of induction for another token (\Cref{app:induction_false_negatives}).
+
+
+
+\section{Interpretability investigations using Attention Output SAEs}
+
+\label{sec:applications} 
+In this section we demonstrate that Attention SAEs are useful as general purpose interpretability tools, allowing for novel insights about the role of attention layers in language models. We first develop a technique that allows us to systematically interpret every attention head in a model (\Cref{subsec:interpreting-all-heads}), discovering new behaviors and gaining high-level insight into the phenomena of attention head polysemanticity \citep{janiak2024polysemantic, gould2023successor}. We then apply our SAEs to make progress on the open question of why models have many seemingly redundant induction heads \citep{olsson2022context}, finding induction heads with subtly different behaviors: some primarily perform induction where there is a long prefix \citep{nix_path_patching} whereas others generally perform short prefix induction (\Cref{subsec:long-prefix-induction}). Finally, we apply Attention Output SAEs to circuit analysis (\Cref{subsec:analyzing-circuits}), unveiling novel insights about the Indirect Object Identification circuit \citep{wang2023interpretability} that were previously out-of-reach, and find causally relevant SAE features in the process.
+
+\subsection{Interpreting all heads in GPT-2 Small}
+\label{subsec:interpreting-all-heads}
+
+In this section, we use our weight-based head attribution technique (see \Cref{sec:methodology}) to systematically interpret every attention head in GPT-2 Small \citep{gpt2}. As in \Cref{sec:methodology}, we apply Equation \ref{weight-based-head-eq} to compute the weights based
+attribution score $h_{i,k}$ to each head $k$ and identify the top ten features $\{\textbf{d}_{i_r}\}_{r=1}^{10}$ with
+highest attribution score to head $k$. Although Attention Output SAE features are defined relative to an entire attention layer, this identifies the features most salient to a given head with minimal contributions from other heads.
+
+Using the feature interpretability methodology from \Cref{subsec:setup}, we manually inspect these features for all 144 attention heads in GPT-2 Small. Broadly, we observe that features become more abstract in middle-layer heads and then taper off in abstraction at late layers:
+\paragraph{Early heads.} \emph{Layers 0-3} exhibit primarily syntactic features (single-token features, bigram features) and fire secondarily on specific verbs and entity fragments. Some long and short range context tracking features are also present.
+\paragraph{Middle heads.} \emph{Layers 4-9} express increasingly more complex concept feature groups spanning grammatical and semantic constructs. Examples include heads that express primarily families of related active verbs, prescriptive and active assertions, and some entity characterizations. Late-middle heads show feature groups on grammatical compound phrases and specific concepts, such as  reasoning and justification related phrases and time and distance relationships.
+\paragraph{Late heads.} \emph{Layers 10-11} continue to express some complex concepts such as counterfactual and timing/tense assertions, with the last layer primarily exhibiting syntactic features for grammatical adjustments and some bigram completions.
+
+We identify many existing known motifs (including induction heads \citep{olsson2022context, attentionheadwiki}, previous token heads \citep{voita2019analyzing, attentionheadwiki}, successor heads \citep{gould2023successor} and duplicate token heads \citep{wang2023interpretability, attentionheadwiki}) in addition to new motifs (e.g. preposition mover heads). More details on each layer and head are available in \Cref{app:gpt2-small-heads}. We note that there are some limitations to this methodology, as discussed in \Cref{app:gpt2-small-heads-limitations}. 
+
+\subsubsection{Investigating attention head polysemanticity with SAEs}
+\label{subsubsec:example-of-polysemantic-head}
+
+We now apply our analysis above to gain high-level insight into the prevalence of attention head polysemanticity \citep{elhage2022toy, janiak2024polysemantic}. While the technique from \Cref{subsec:interpreting-all-heads} is not sufficient to prove that a head is monosemantic, we believe that having multiple unrelated features attributed to a head is evidence that the head is doing multiple tasks. We also note that there is a possibility we missed some monosemantic heads due to missing patterns at certain levels of abstraction (e.g. some patterns might not be evident from a small sample of SAE features, and in other instances an SAE might have mistakenly learned some red herring features).
+
+During our investigations of each head, we found 14 monosemantic candidates (i.e. all of the top 10 attributed features for these heads were closely related). This suggests that about 90\% of the attention heads in GPT-2 small are performing at least two different tasks.
+
+To validate that the feature lens is telling us something real about the multiple roles of the heads, we confirm that one of these attention heads is polysemantic with experiments that do not require SAEs. \Cref{fig:polysemanticity_example}
+demonstrates two completely different behaviors of 10.2 found in the top SAE features: digit copying and predicting base64 at the end of URLs\footnote{By \emph{digit copying} behavior, we refer to instances of boosting a specific
+digit found earlier in the prompt: for example, as in "Image 2/\textbf{8}... Image 5/\textbf{8}". By \emph{URL completion}, we refer to instances of boosting
+plausible portions of a URL, such as the base64 tokens immediately following "pic.twitter.}. We construct synthetic datasets corresponding to both of these tasks, and observe the mean change in cross entropy loss after ablating every attention head output in layer 10. We find that ablating 10.2 causes the largest impact on the loss in both cases, confirming that this head is involved in both tasks.
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/copy_digits_polysemanticity.pdf}
+\caption{}
+\label{fig:polysemanticity_digits_copying}
+\end{subfigure}
+\hfil
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/url_completion_polysemanticity.pdf}
+\caption{}
+\label{fig:polysemanticity_url_completions}
+\end{subfigure}
+\caption{An indication of polysemanticity for head 10.2: On synthetic datasets for two unrelated tasks, digits copying (a) and URL completion (b), ablating 10.2 causes a large average effect on the loss relative to the other heads in layer 10.}
+\label{fig:polysemanticity_example}
+\end{figure}
+\subsection{Long-prefix induction head}
+\label{subsec:long-prefix-induction} 
+
+In this section we apply Attention Output SAEs to make progress on a long-standing open question: why do models have so many seemingly redundant induction heads \citep{olsson2022context}? We use our weight-based head attribution technique (see \Cref{subsec:interpreting-all-heads}) to inspect the top SAE features attributed to two different induction heads and find one which specializes in “long prefix induction” \citep{nix_path_patching}, while the other primarily does “short prefix induction”. 
+
+As a case study, we focus on GPT-2 Small \citep{gpt2}, which has two induction heads in layer 5 (heads 5.1 and 5.5) \citep{wang2023interpretability}. To distinguish between these two heads, we qualitatively inspect the top ten SAE features attributed to both heads (as in \Cref{subsec:interpreting-all-heads}) and look for patterns. Glancing at the top features attributed to head 5.1 shows “long induction” features, defined as features that activate on examples of induction with at least two repeated prefix matches (e.g. completing ``... ABC ... AB'' with  C). 
+
+We now confirm this hypothesis with independent lines of evidence that don't require SAEs. We first generate synthetic induction datasets with random repeated tokens of varying prefix lengths. For each dataset, we compute the induction score, defined as the average attention to the token which induction would suggest comes next, for both heads. We confirm that while both induction scores rise as we increase prefix length, head 5.1 has a much more dramatic phase change as we transition to long prefixes (i.e. $\geq2$ ) (\Cref{fig:long_induction_synthetic}).
+
+We also find and intervene on real examples of long prefix induction from the training distribution, corrupting them to only be one prefix by replacing the 2nd left repeated token (i.e 'A' in ABC ... AB -> C) with a different, random token. We find that this intervention effectively causes head 5.1 to stop doing induction, as its average induction score falls from 0.55 to 0.05. Head 5.5, meanwhile, maintains an average induction score of 0.43 (\Cref{fig:long_induction_intervention}).
+See \Cref{app:extra_long_induction} for additional lines of evidence.
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/long_induction_synthetic_data_new.pdf}
+\caption{}
+\label{fig:long_induction_synthetic}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.48\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/long_induction_intervention_plot_new.pdf}
+\caption{}
+\label{fig:long_induction_intervention}
+\end{subfigure}
+\caption{Two lines of evidence that 5.1 specializes in long prefix induction, while 5.5 primarily does short prefix induction. In (a) we see that 5.1's induction score \citep{olsson2022context} sharply increases from less than 0.3 to over 0.7 as we transition to long prefix lengths, while 5.5 already starts at 0.7 for short prefixes. In (b) we see that intervening on examples of long prefix induction from the training distribution causes 5.1 to essentially stop attending to that token, while 5.5 continues to show an induction attention pattern.}
+\label{fig:long_induction}
+\end{figure}
+
+\subsection{Analyzing the IOI circuit with Attention Output SAEs}
+\label{subsec:analyzing-circuits}
+
+We now show that Attention Output SAEs are useful tools for circuit analysis. In the process, we also go beyond early work to find evidence that our SAEs find causally relevant intermediate variables. As a case study, we apply our SAEs to the widely studied Indirect Object Identification circuit \citep{wang2023interpretability}, and find that our SAEs improve upon attention head interpretability based techniques from prior work. 
+
+The Indirect Object Identification (IOI) task \citep{wang2023interpretability} is to complete sentences like “After John and Mary went to the store, John gave a bottle of milk to” with “ Mary'' rather than “ John”. We refer to the repeated name (John) as S (the subject) and the non-repeated name (Mary) as IO (the indirect object). For each choice of the IO and S names, there are two prompt templates: one where the IO name comes first (the 'ABBA' template) and one where it comes second (the 'BABA' template).
+
+\citet{wang2023interpretability} analyzed this circuit by localizing and interpreting several classes of attention heads. They argue that the circuit implements the following algorithm:
+
+\begin{compactenum}
+  \item Induction heads and Duplicate token heads identify that S is duplicated. They write information to indicate that this token is duplicated, as well as “positional signal” pointing to the S1 token. 
+  \item S-inhibition heads route this information from S2 to END via V-composition \citep{elhage2021mathematical}. They output both token and positional signals that cause the Name mover heads to attend less to S1 (and thus more to IO) via Q-composition \citep{elhage2021mathematical}.
+  \item Name mover heads attend strongly to the IO position and copy, boosting the logits of the IO token that they attend to.
+\end{compactenum}
+
+Although \citet{wang2023interpretability} find that “positional signal” originating from the induction heads is a key aspect of this circuit, they don’t figure out the specifics of what this signal is, 
+and ultimately leave this mystery as one of the “most interesting future directions” of their work. Attention Output SAEs immediately reveal the positional signal by decomposing these activations into interpretable features. We find that rather than absolute or relative position between S tokens, the positional signal is actually whether the duplicate name comes after the “ and” token that connects “John and Mary”.
+
+\paragraph{Identifying the positional features:} To generate this hypothesis, we localized and interpreted causally relevant SAE features  from the outputs of the attention layers that contain induction heads (Layers 5 and 6) with zero ablations. For now we focus on our Layer 5 SAE, and leave other layers to \Cref{app:more-and-features}. In \Cref{app:ioi-evals} we also evaluate that, for these layers, the SAE reconstructions are faithful on the IOI distribution, and thus viable for circuit analysis. 
+
+\begin{wrapfigure}[23]{r}{0.51\linewidth}
+    \centering 
+    \includegraphics[width=0.47\textwidth, height=0.7\textheight, keepaspectratio]{figures/ioi_logit_diff_bars_new.pdf}
+    \caption{Results from two noising experiments on  induction layers' attention outputs at S2 position. Noising from a distribution that just changes " and" to " alongside" degrades performance, while 3 simultaneous perturbations that maintains whether the duplicate name is after the ‘ and’ token preserve 93\% of average logit difference.}
+    \label{fig:ioi_and_noising}
+\end{wrapfigure}
+
+During each forward pass, we replace the L5 attention layer output activations with a sparse linear combination of SAE feature directions plus an error term, as in (\ref{sae-decomp-eq}). We then zero ablate each feature, one at a time, and record the resulting change in logit difference between the IO and S tokens. This localizes three features that cause a notable decrease in average logit difference. See \Cref{app:ioi_l5_features} for more details.
+\paragraph{Interpreting the “positional” features:} We then interpreted these causally relevant features. Shallow investigations of feature dashboards (see \Cref{subsec:setup}, \Cref{app:feature-dashboards}) suggests that all three of these fire on duplicate tokens, that were previously before or after “ and” tokens (e.g. “I am a duplicate token that previously followed ‘ and’”).
+These feature interpretations motivated the hypothesis that the “positional signal” in IOI is solely determined by the position of the name relative to (i.e. before or after) the ‘ and’ token. 
+
+\paragraph{Confirming the hypothesis:} We now verify this hypothesis without reference to SAEs. We design a noising (defined in \citet{heimersheim2024activation}) experiment that perturbs three properties of IOI prompts
+simultaneously, while preserving whether the duplicate name is before or after the ‘ and’ token. Concretely, our counterfactual distribution makes the following changes:
+
+\begin{compactenum}
+  \item \emph{Replace} each name with another random name (removing "token signal" \citep{wang2023interpretability})
+  \item \emph{Prepend} filler text (e.g. "It was a nice day") (corrupting absolute positions of all names) 
+  \item \emph{Add} filler text between S1 and S2 (corrupting the relative position between S tokens)
+\end{compactenum}
+Despite being almost entirely different prompts, noising the attention layer outputs for both induction layers [5, 6] at the S2 position still recovers ~93\% of average logit diff relative to zero ablating the outputs at this position (\Cref{fig:ioi_and_noising}).
+
+One alternate hypothesis is that the positional signal is a more general emergent positional embedding \citep{emergent_positional_embeddings} (e.g. “I am the second name in the sentence”) that doesn’t actually depend on the “ and” token. We falsify this by noising attention outputs at layers [5,6] S2 position from a corrupted distribution which only changes “ and” to the token “ alongside”. Note that this only corrupts one piece of information (the ‘ and’) compared to the three corruptions above, yet we only recover ~43\% of logit difference relative to zero ablation (\Cref{fig:ioi_and_noising}).
+
+
+\section{Related Work}
+
+\label{sec:related-work}
+
+\paragraph{Mechanistic Interpretability.} Mechanistic interpretability research aims to reverse engineer neural network computations into human-understandable algorithms \citep{AnthropicMechanisticEssay, olah2020zoom}. Prior mechanistic interpretability work has identified computation subgraphs of models that implement tasks \citep{wang2023interpretability, greaterthan,lieberum2023does}, found interpretable, reoccurring model components over models of multiple sizes \citep{olsson2022context,gould2023successor}, and reverse-engineered how toy tasks are carried out in small transformers \citep{nanda2023progress,chughtai2023toy}. Some have successfully interpreted attention heads \citep{copy_suppression, olsson2022context, wang2023interpretability}, though the issue has been raised that heads are often polysemantic \citep{gould2023successor,janiak2024polysemantic}, and may not be the correct unit of analysis \citep{jermyn2023attention}. Our technique goes beyond prior work by decomposing the outputs of the entire attention layer into finer-grained linear features, without assuming that heads are the right unit of analysis. 
+
+Induction heads \citep{elhage2021mathematical} have been studied extensively by \citet{olsson2022context}, who first observed that LLMs had many, seemingly redundant induction heads. \citet{nix_path_patching} investigated two induction heads in a 2-layer attention-only model, and discovered the "long induction" (long-prefix induction) variant in \textit{both} heads. In contrast, we find that two different induction heads \textit{specialize} in long-prefix and short-prefix induction respectively in GPT-2 Small.
+
+\paragraph{Classical Dictionary Learning.} 
+
+\citet{elad2010sparse} explores how both discrete and continuous representations can involve more representations than basis vectors, and surveys various techniques for extracting and reconstructing these representations. Traditional sparse coding algorithms \citep{olshausen, aharon2006k} employ expectation-maximization, while contemporary approaches \citep{gregor2010learning, barellosparse} based on gradient descent and autoencoders have built upon these ideas.
+
+\paragraph{Sparse Autoencoders.}Motivated by the hypothesized phenomenon of supersition \citep{elhage2022toy}, recent work has applied dictionary learning, specifically sparse autoencoders \citep{ng2011sparse}, to LMs in order to interpret their activations \citep{subramanian2017spine,sharkey2022interim, cunningham2023sparse, yun2023transformer,bricken2023monosemanticity,templeton2024scaling}. Our feature interpretability methodology was inspired by \citet{bricken2023monosemanticity}, though we additionally study how features are computed upstream with direct feature attribution \citep{nanda2023emergent,nanda2023factfinding}. Progress is rapid, with the following parallel work occurring within the last few months: \citet{rajamanoharan2024improving} scaled Attention Output SAEs up to 7B models, building on an early draft of this work. \citet{marks2024sparse} also successfully used multiple types of SAEs including attention for finer-grained circuit discovery with gradient based patching techniques. In contrast, we use both causal interventions and DFA, exploiting the linear structure of the attention mechanism. \citet{he2024dictionary} exploit the linear structure of a transformer to investigate composition between SAE features on Othello, similar to our RDFA approach. \citet{ge2024automatically} also find “ and”-related SAE features in the IOI task, and rediscover the induction feature family \citep{attention_saes}. We causally verify the hypotheses of how “ and” features behave in IOI and rule out alternative hypotheses.
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+In this work, we have introduced Attention Output SAEs, and demonstrated their effectiveness in decomposing attention layer outputs into sparse, interpretable features (\Cref{sec:attention-saes-work}). We have also highlighted the promise of Attention Output SAEs as a general purpose interpretability tool (\Cref{sec:applications}). Our analysis identified novel and extant attention head motifs (\Cref{subsec:interpreting-all-heads}), advanced our understanding of apparently `redundant' induction heads (\Cref{subsec:long-prefix-induction}), and improved upon attention head circuit interpretability techniques from prior work (\Cref{subsec:analyzing-circuits}). We have also introduced a more general technique, recursive direct feature attribution, to trace models' computation on arbitrary prompts and released an accompanying visualization tool (\Cref{sec:methodology}).
+
+\subsection{Limitations}
+\label{subsec:limitations}
+
+Our work focuses on understanding attention outputs, which we consider to be a valuable contribution. However, we leave much of the transformer unexplained, such as the QK circuits \citep{elhage2021mathematical} by which attention patterns are computed. Further, though we scale up to a 2B model, our work was mostly performed on the 100M parameter GPT-2 Small model. Exploring Attention Output SAEs on larger models in depth is thus a natural direction of future work.
+
+We also highlight some methodological limitations. While we try to validate our conclusions with multiple independent lines of evidence, our research often relies on qualitative investigations and subjective human judgment. Additionally, like all sparse autoencoder research, our work depends on both the assumptions made by the SAE architecture, and the quality of the trained SAEs. SAEs represent the sparse, linear components of models' computation, and hence may provide an incomplete picture of how to interpret attention layers \citep{rajamanoharan2024improving}. Our SAEs achieve reasonable reconstruction accuracy (Table \ref{table:sae_eval_metrics_compact}), though they are far from perfect.
+
+
+
+\section{Acknowledgements}
+
+\label{sec:acknowledgements}
+
+We would like to thank Rory Švarc for help with writing, formatting tables / figures, and helpful feedback. We would also like to thank Georg Lange, Alex Makelov, Sonia Joseph, Jesse Hoogland, Ben Wu, and Alessandro Stolfo for extremely helpful feedback on earlier drafts of this work. We are grateful to Keith Wynroe, who independently made related observations about the IOI circuit (\Cref{subsec:analyzing-circuits}), for helpful discussion. Finally, we are grateful to Johnny Lin for adding our GPT-2 Small Attention SAEs to Neuronpedia \citep{neuronpedia} which helped us rapidly interpret SAE features in section \ref{subsec:analyzing-circuits} and \Cref{app:rdfa-algo}. Portions of this work were supported by the MATS program as well as the Long Term Future Fund.
+
+
+
+\section{Author contributions}
+
+\label{sec:author-contributions}
+
+Connor and Rob were core contributors on this project. Connor trained and evaluated all of the GPT-2 Small and GELU-2L SAEs from \Cref{subsec:loss-recovered-etc-evaluation}. Connor also performed the interpretability investigations and feature deep dives from \Cref{subsec:analyzing-features}. Rob performed additional feature deep dives and implemented heuristics for detecting families of features such as induction features (\Cref{app:automated-induction}). Rob also inspected all 144 attention heads in GPT-2 Small from \Cref{subsec:interpreting-all-heads}, while Connor performed the long-prefix induction (\Cref{subsec:long-prefix-induction}) and IOI circuit analysis (\Cref{subsec:analyzing-circuits}) case studies. Rob built the circuit discovery tool from \Cref{sec:methodology}. Joseph trained the Attention Output SAE on Gemma-2B (\Cref{table:sae_eval_metrics_compact}). Arthur and Neel both supervised this project, and gave guidance and feedback throughout. The original project idea was suggested by Neel.
+
+
+
+
+

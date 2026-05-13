@@ -1,0 +1,362 @@
+\title{Transformer Fusion with Optimal Transport}
+
+\begin{abstract}
+Fusion is a technique for merging multiple independently-trained neural networks in order to combine their capabilities. Past attempts have been restricted to the case of fully-connected, convolutional, and residual networks. This paper presents a systematic approach for fusing two or more transformer-based networks exploiting Optimal Transport to (soft-)align the various architectural components. We flesh out an abstraction for layer alignment, that can generalize to arbitrary architectures -- in principle -- and we apply this to the key ingredients of Transformers such as multi-head self-attention, layer-normalization, and residual connections, and we discuss how to handle them via various ablation studies. Furthermore, our method allows the fusion of models of different sizes (\textit{heterogeneous fusion}), providing a new and efficient way to compress Transformers. The proposed approach is evaluated on both image classification tasks via Vision Transformer and natural language modeling tasks using BERT. Our approach consistently outperforms vanilla fusion, and, after a surprisingly short finetuning, also outperforms the individual converged parent models.
+In our analysis, we uncover intriguing insights about the significant role of soft alignment in the case of Transformers. Our results showcase the potential of fusing multiple Transformers, thus compounding their expertise, in the budding paradigm of model fusion and recombination.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec_intro}
+Transformers, as introduced by~\citet{vaswani2017attention}, have profoundly impacted machine learning, establishing a prevailing neural network architecture across various domains. Transformers consistently excel in different fields, including natural language processing~\citep{Asurveyo46:online}, time series forecasting~\citep{2202071237:online}, and computer vision~\citep{dosovitskiy2022visualtransformers}. Their success can be attributed to their scaling properties~\citep{kaplan2020scaling} and efficient utilization of contemporary hardware architectures designed for extensive parallel computing. The unification of a single architecture across tasks facilitates immediate, far-reaching applicability of any analysis that handles general properties of the Transformer architecture.
+
+As large Transformer foundation models~\citep{bommasani2021opportunities} continue to grow in size and complexity, the challenges associated with training, i.e., exponential increase in parameters and compute for a fixed incremental improvement in performance~\citep{hoffmann2022training, zhai2022scaling, bachmann2023scaling}, become increasingly more perilous. Consequently, achieving state-of-the-art results is often confined to researchers with access to ample GPU resources. To address these issues and strive for more efficient and sustainable performance improvements, we embark on the following more compelling and alternative inquiry:
+\begin{gather*}
+    \textit{Can we combine the capabilities of pre-trained Transformer models?}
+\end{gather*}
+Merging multiple Transformer models into a single entity while preserving their unique capabilities can yield several advantages; (a) \emph{Enhanced performance} by harnessing the collective capabilities of individual models. (b)~\emph{Reduced inference complexity}, as querying a single model replaces the need to query $n$ models in an ensemble, reducing computational (FLOPs) and storage requirements by a factor of $n$. (c)~\emph{The necessity to train from scratch can be readily eliminated}, 
+leveraging existing public models, already available, and numerous in quantity~\footnote{On \href{https://huggingface.co/models}{huggingface} there are more than 339,000 models available as of the 22\textsuperscript{nd} of September 2023.}.
+
+A straightforward way of fusing, i.e., merging, models of the same architecture, is to average their weight matrices one-to-one, referred to as `Vanilla Fusion' (VF). However, this method overlooks potential misalignments between the parameter matrices, arising due to neurons at the same positions, in different models, encoding different information~\citep{godfrey2022symmetries}. Instead, we propose to use Optimal Transport fusion (OTFusion)~\citep{singh2020model}, which at its core, aligns the weight or parameter matrices before fusing them. %This moreover allows one to fuse models
+
+Thus, by virtue of such an alignment, OTFusion ensures that the fused model effectively integrates the knowledge and capabilities of the individual models to be merged, rather than simply averaging the weight matrices without guaranteeing meaningful information preservation. Additionally, OTFusion accommodates the fusion of models with different widths, and in turn, different sizes, which is fundamentally not possible with VF. This is a crucial feature, as such heterogeneous models are available in plenty, to better unleash the potential of existing pre-trained models.  Consequently, OTFusion has been shown to be an effective method for fusing fully connected~\citep{singh2020model}, convolutional~\citep{nguyen2021model} and recurrent neural networks \citep{akash2022wasserstein} on a variety of tasks, heavily outperforming VF.%, and in general, holds promise as an effective contender in this problem.
+Yet, despite its wide adoption~\citep{nguyen2021model, pmlr-v162-liu22k,ainsworth2022git}, the layerwise procedure proposed by OTFusion does not fit well with contemporary architectural design, that comprises of constant residual streams, normalization layers, and attention operations. It is not equipped in any way to align and fuse models with complex information streams and to fuse transformer-specific components. Hence, the primary aim of our work is to develop techniques that help bridge these gaps and successfully generalize fusion to Transformer-based architectures.
+
+\textbf{Our contributions are: }
+(a) We analyze each of the idiosyncratic architectural components in Transformers in thorough detail, with an ultimate aim to best fuse them across different models. Throughout our discussion, we exposit our approach based on the perspective of \emph{flow of the transportation maps}\footnote{This should be reminiscent of the flow of tensors in the computation graph of neural networks, and thus allows one to see a general strategy that can be potentially be adapted for any architecture type.}, that makes for intuitive visualizations and interpretation. (b) We uncover that, surprisingly, OTFusion based on a \emph{hard-alignment underperforms} in this context, contrary to the case of fully-connected or convolutional architectures; and that, \textit{soft-alignment plays a key role} in successful one-shot fusion. (c)  We showcase the efficacy of our approach by extensive experimentation involving the fusion and finetuning of Vision Transformers (ViTs) across multiple datasets, including \textsc{CIFAR10}, \textsc{CIFAR100}, \textsc{Tiny ImageNet} and \textsc{ImageNet-1k}, as well as BERT~\citep{bert} models for natural language tasks. We \emph{consistently outperform} the original \emph{converged} models across tasks and datasets, by about \textit{$\sim$ 1.0\%}, \textit{while significantly reducing computational and storage costs by a factor of $n$.}
+
+Overall, our research marks an important stride in advancing model fusion techniques, that help deliver enhanced performance and efficiency for modern Transformer based architectures.
+
+
+\section{Related Work}
+
+\label{subsec:related_work}
+\textbf{Model combination and ensembling.}\hspace{0.2cm} The combination of multiple models has been a timeless idea in machine learning, from classical works on bagging and boosting~\citep{breiman1996bagging} to more contemporary approaches~\citep{enseble_learning, garipov2018loss, jolicoeur2023population}. The key idea behind these works is to boost model performance, by capitalizing on the unique strengths of each model while mitigating their individual limitations. Or, more technically, one can think of model combination as a way of reducing the variance of the predictors~\citep{geman1992neural}. However, the main limitation is that such methods require the execution of each (parent) model for the final prediction, with a cost that scales linearly with the number of models.
+
+\textbf{Model Fusion.}\hspace{0.2cm} Model fusion~\citep{singh2020model, wang2020federated, wortsman2022model,matena2022merging, ainsworth2022git, nguyen2023cross} has emerged as a particularly notable direction in recent years, gaining significant traction in the machine-learning community. This line of work focuses on building better model combination approaches that account for the network structure and its inherent symmetries. We elaborate on some of these works, which are more relevant to the focus of our paper, below.
+
+\citet{singh2020model} propose a novel approach based on the OT theory exploiting the Wasserstein distance, where the neuron association allows fusing pre-existing models with the same depth in a \textit{one-shot} fashion, thus without requiring retraining. OTFusion outperforms VF and was successfully used for model compression and fusion of CNNs, residual networks (ResNets), and multilayer perceptrons (MLPs). Since its publication, OTFusion has been extended in various ways. \citet{nguyen2021model}  address the same-depth requirement of OTFusion. \citet{pmlr-v162-liu22k} generalized the work as a graph-matching task, and taking into account the second-order similarity of model weights instead of linear alignment. Recent efforts on the topic have shown theoretical insights on fusion, extensions of previous algorithms to new network topologies, in particular, \citet{akash2022wasserstein} adapted OTFusion for recurrent networks, such as RNNs and LSTMs. Further, \citet{zipit} propose an algorithm, for convolutional and residual architectures, that aims at finding redundant features within the same model and across the different models to be fused, so as to keep only meaningful and unique features in the fused model. 
+
+However, the fully layerwise interpretation of OTFusion \citep{singh2020model} is currently only applicable to simple architectures such as MLPs, CNNs, and instances of ResNet. It is not equipped in any way to align and fuse models with complex information streams and to fuse transformer-specific components such as multi-head attention layers, layer-normalization, embeddings, or the sequential nature of the data. 
+
+\textbf{Fusion with a focus on Transformers.}\hspace{0.2cm} \citet{wortsman2022model}, in their approach of `model soups', consider fusing transformer models that have a common backbone network that is pre-trained on the same dataset, but that are fine-tuned, say, with different hyperparameters. Owing to this, the models remain sufficiently close in the parameter space, which precludes the need to align them, and lets them employ just vanilla fusion (one-to-one averaging of the parameters) while still obtaining a gain in performance. Therefore, despite apparent practical gains, the  `model soup' approach is actually a poor representative of the complexity and intricacies of the general model fusion problem.
+Arguably, the more empowering capability is to \textit{fuse transformer networks that are potentially much more distant in their parameter spaces} and are diverse in nature. For instance, this arises when the networks have different initializations, or see examples in different batch orderings, or when they have different sizes, and more. This specific problem is tackled in this work, which is, to the best of our knowledge, \textit{the first aiming at fusing transformer architectures by aligning their weights}.
+
+\textbf{The conjecture of Linear Mode Connectivity (LMC) modulo permutations.} \hspace{0.2cm} Given the recent interest around this conjecture posed in~\citet{entezari2021role} and its wider demonstrations~\citep{ainsworth2022git}, we would like to make a few clarifications: \textbf{(a)} The LMC barrier approaches zero only at \textbf{very high widths}, even for non-transformer architectures, see for instance Figure 4 of~\citet{ainsworth2022git}, and \textit{importantly, not for any arbitrary width.} Thus, for typically sized residual or convolutional neural networks, the LMC barrier in loss is not zero at all, and the corresponding barrier when measured in accuracy is even more palpable.  \textbf{(b)} Transformers possess \textbf{a more non-convex landscape}, as shown by~\citet{park2022vision} in a comparison of vision transformers with residual networks, which consequently brings about higher LMC barriers. This can also be seen due to the fact that transformers contain components which further proliferate the number of symmetries, such as within- and across-head permutations as well as the translation invariance of softmax, --- all of which serve to interfere the linear interpolation of parameters. Thus, the barriers in~\citep{singh2020model,ainsworth2022git} of non-transformer architectures do not reveal the full nature of the underlying problem being addressed here.
+
+\label{sec:mod_meth}
+
+
+
+\section{Background}
+
+\textbf{Optimal Transport (OT).} OT~\citep{villani2009optimal} has gained prominence in machine learning for its ability to compare probability distributions effectively, with applications in generative modelling~\citep{arjovsky2017wasserstein}, class incremental learning \citep{ot_class_incremental} and model compression \citep{compression_ot}. At its heart, OT aims to find a transport map (TM) $\Tm$ signifying how much of a discrete source distribution should be moved towards a discrete destination distribution to align the two. This alignment can be hard ($\Tm$ is a permutation matrix and the solution to the Earth-Mover's Distance, EMD, \citep{rubner2000earth} problem) or can be relaxed yielding a soft alignment (solved with the Sinkhorn-Knapp algorithm \citep{knight2008sinkhorn}). The softness of the alignment is controlled by a regularization parameter $\lambda_{\text{sinkhorn}}$, where lower values result in harder alignment. 
+
+\textbf{OTFusion.}~\citet{singh2020model} apply this theory to align networks in a layerwise fashion, using either weights or activations as underlying distributions. After the alignment of one or more models to an anchor model, these are then averaged. Formally, for a layer $\ell$ of the model, the transpose of the TM of the previous layer is pre-multiplied with the weight matrix of the current layer: $\widehat{\Wm}^{(\ell,\ell-1)} \leftarrow \Tm^{(\ell-1)^\top}\Wm^{(\ell,\ell-1)} $. The current layer can then be aligned by post-multiplying with the TM of the current layer: $\widetilde{\Wm}^{(\ell,\ell-1)} \leftarrow   \widehat{\Wm}^{(\ell,\ell-1)} \Tm^{(\ell)}$.~\citet{ainsworth2022git} propose a highly similar approach which, in certain cases, effectively boils down to the same linear programming problem that uncovers (provably and practically) same alignments as OTFusion; thus we continue to base our approach on OTFusion henceforth. 
+
+
+
+\section{Methodology and Implementation}
+
+\label{subsec:methodology}
+With a modular architecture like the transformer, it is intuitive to use a divide-and-conquer approach to develop a fusion algorithm. Therefore, we first divide the architecture into its simplest building block --- fully connected layers --- that can be fused by the prevalent OTFusion strategy. The question remains; how to effectively connect these building blocks, especially if heterogeneous? How to hierarchically reconstruct a fully fused transformer ensuring consistency of the single fused blocks? 
+
+As we provide solutions to such open questions, we will guide our discussion in this section with a transport flow perspective, which allows for an intuitive and effective concatenation of blocks of any sort, and that, therefore, in principle can be applied to every architecture. Henceforth, we will use the notation from \citet{vaswani2017attention} for Transformers. We display our methods in the non-masked self-attention case, but our method can generalize to the cross-attention or causal masked attention.
+
+\subsection{Transportation Map Flow Graph}
+\label{subsec:tmf}
+In the typical OTFusion application, the TM of the previous layer is simply passed to the next layer. However, in more complex architectures, the incoming TM of a layer can depend on multiple TMs. To formalize and visualize this flow of TMs, we present the \textbf{\textit{Transportation Map Flow Graph}}. 
+To introduce the concept, we use the flow graph of a residual connection (Fig.~\ref{fig:resnet_flow}). Rectangles represent the neural network layers; red nodes represent any non-learnable computations or permutations inside the network; edges represent the propagation of the TMs. Layers have exactly one incoming and one outgoing edge. Computation nodes always have multiple incoming edges and one outgoing edge, where the outgoing TM must depend on the incoming TMs. A major contribution of this work is to handle the various complex transportation map flows throughout the transformer architecture.
+
+\begin{wrapfigure}{R}{0.45\textwidth}
+    \vskip -0.2in
+	\centering   
+  \includesvg[width=0.45\textwidth]{fig/fusiondrawio-ResNet-graph.svg}
+  \vskip -0.1in
+  \caption{TM flow graph for a residual connection.}
+  \label{fig:resnet_flow}
+  \vskip -0.15in
+\end{wrapfigure}
+\label{subsec:ftf}
+
+\subsection{Transformer Fusion}
+
+\subsubsection{Residual Connections}
+\label{subsubsec:resid}
+In residual connections, the outputs of a current layer and a residual layer are summed up. The TMs coming from these two layers will be different, therefore the ideal TM flow strategy has to be determined. We explored three heuristics to calculate a weighting vector $\boldsymbol{\gamma}^{(\ell)}$, where each entry $\gamma_i^{(\ell)}$ scales the corresponding rows of the TMs. After obtaining $\boldsymbol{\gamma}^{(\ell)}$ we compute the weighted average as shown in Eq.~\ref{eq:avg}. Find the results in Sec.~\ref{sec:ablation_studies}.
+\begin{equation}
+\label{eq:avg}
+\Tm_{\text{out}}^{(\ell)} = \Tm_{\text{current}}^{(\ell)}\,\text{diag}(\mathbf{1}-\boldsymbol{\gamma}^{(\ell)})+\Tm_{\text{residual}}^{(\ell)}\,\text{diag}(\boldsymbol{\gamma}^{(\ell)})
+\end{equation}
+\textbf{Averaging.}\hspace{0.2cm}
+For plain averaging, as proposed by \citet{singh2020model}, we set $\forall \, i, \, \gamma_i = 0.5$. This heuristic does not depend on activations and can therefore be used even in the case of weight-based alignment. However, it introduces the strict assumption that the residual and the current layer TM are of equal importance when aligning the subsequent layer. We therefore extend \citet{singh2020model} with two novel residual policies.
+
+\textbf{Weighted Scalar.}\hspace{0.2cm}
+To alleviate the equal contribution constraint from the averaging method, we compute a weighting factor $\forall \, i, \, \gamma_i^{(\ell)} = \gamma_{\text{scalar}}^{(\ell)}$ (Eq.~\ref{eq:s_gamma}). We use the activations of the anchor model, over a batch of samples $S$, because only those carry information about the importance of the current and the residual branch in the anchor model to which we try to align the other models.
+$\mathbf{f}_{\text{residual}}^{(\ell)}(\mathbf{x})$ are the activations from the residual branch while $\mathbf{f}_{\text{current}}^{(\ell)}(\mathbf{x})$ are the activations from the current layer $\ell$.
+\begin{equation}
+\label{eq:s_gamma}
+\small{\gamma_{\text{scalar}}^{(\ell)} = \cfrac{\sum_{\mathbf{x}\in S}||{\mathbf{f}_{\text{residual}}^{(\ell)}(\mathbf{x})}||_1}{\sum_{\mathbf{x}\in S}||{\mathbf{f}_{\text{current}}^{(\ell)}(\mathbf{x})}||_1  + \sum_{\mathbf{x}\in S}||{\mathbf{f}_{\text{residual}}^{(\ell)}(\mathbf{x})}||_1 }}
+\end{equation}
+
+\textbf{Weighted Matrix.}\hspace{0.2cm}
+As opposed to the Weighted Scalar method, here, we calculate a weight vector $\boldsymbol{\gamma}^{(\ell)}$ where each entry $\gamma_i^{(\ell)}$ weighs one strand of a residual connection. The computation of each $\gamma_i^{(l)}$ is similar to Eq.~\ref{eq:s_gamma} but here we do not compute the $\ell^1$-Norm over the whole activation vectors,
+instead, we take the absolute value of the corresponding $i$-th values of the activation vectors.
+
+We note that \citet{ainsworth2022git} propose to propagate either the identity ($\Tm_{\text{out}} = \mathbf{I}$) or the residual transportation map itself (\textbf{$\forall \, i, \, \gamma_i^{(l)} = 1$}). In the case of hard alignment, these methods perform worse than averaging. \looseness=-1
+\subsubsection{Multi-Head Attention}
+The attention mechanism (Eq.~\ref{eq:attention}) poses multiple challenges when it comes to TM flow (Fig.~\ref{fig:trafo_flow}): what are the incoming TMs for $\Wm^Q$, $\Wm^K$ and $\Wm^V$? Which TM is propagated to $\Wm^O$? How to handle attention with multiple heads?
+\begin{equation}
+\label{eq:attention}
+\text{Self-Attention(}\mathbf{x}\text{)} = \text{softmax(}\cfrac{\mathbf{QK^T}}{\sqrt{d_k}}\text{)}\mathbf{V}\text{,}\quad\text{with}\:\{\mathbf{Q, K, V\}}=\mathbf{W^{\{Q, K, V\}}x}
+\end{equation}
+The first challenge is conveniently solved by the TM flow graph. We can simply use the TM from the previous layer for each $\Wm^Q$, $\Wm^K$ and $\Wm^V$. This even holds true for multiple heads. The incoming TM of $\Wm^O$ is more complex to obtain because it depends on the outgoing TMs of $\Wm^Q$, $\Wm^K$, and $\Wm^V$. However, if we constrain both TMs of $\Wm^K$ and $\Wm^Q$ to be equal permutation matrices (i.e., hard alignment with $\Tm_{Q}=\Tm_{K}=\Tm_{QK}$), we show that the permutation matrices cancel (see Eq.~\ref{eq:qk}) leaving the softmax undisturbed. Therefore, we only propagate the outgoing TM of $\Wm^V$ to $\Wm^O$.
+
+For soft-alignment Eq.~\ref{eq:qk} no longer holds, in that case we  investigated alleviating the constraint of equal TMs for $\Wm^K$ and $\Wm^Q$. Removing this constraint slightly increased one-shot accuracy.
+\begin{equation}
+\widetilde{\Qm} = \Qm\Tm_{QK} \quad \text{and} \quad \widetilde{\Km} = \Km\Tm_{QK} \quad \text{and} \quad  \widetilde{\Qm}\widetilde{\Km}^\top = \Qm\Tm_{QK}\Tm_{QK}^\top\Km^\top = \Qm\Km^\top
+\label{eq:qk}
+\end{equation}
+
+\begin{wrapfigure}{R}{0.6\textwidth}
+    \vskip -0.15in
+	\centering   
+  \includesvg[width=0.6\textwidth]{fig/fusiondrawio-encoder_t_map.svg}
+  \vskip -0.1in
+  \caption{Self-Attention flow graph.}
+  \label{fig:trafo_flow}
+  \vskip -0.15in
+\end{wrapfigure}
+
+For multi-head attention fusion, there is an additional layer of complexity because one must align the weights and the heads. On top of that, there is no guarantee that a hard one-to-one alignment between heads exists. For that reason, we propose cross-head alignment. During cross-head alignment, $\Wm_i^Q$, $\Wm_i^K$ and $\Wm_i^V$ (where $i$ is the head index) are concatenated across the output dimension to form three combined weight matrices ($\Wm^Q$, $\Wm^K$ and $\Wm^V$). OTFusion is then applied to each of the concatenated weight matrices. Finally, $\Tm_V$ is propagated to $\Wm^O$. Find a visualization of our cross-head alignment method in App.
+
+\subsubsection{Layer Normalization, Embeddings and Bias}
+
+
+\begin{wrapfigure}{R}{0.24\textwidth}
+    \vskip -0.55in
+    \centering       
+    \includesvg[width=0.25\textwidth]{fig/fusiondrawio-vit_embeddings.svg}
+    \vskip -0.1in
+	\caption{ViT embeddings flow graph.}
+	\label{fig:vit_embeddings}
+ \vskip -0.30in
+\end{wrapfigure}
+
+\textbf{The ViT embeddings} fusion approach is most effectively conveyed by its TM flow graph, as depicted in Fig.~\ref{fig:vit_embeddings}. For the concatenation, we notice that the class token is only a small fraction of the full sequence, in other words, for the integrity of the sequence, it is far more important to propagate the TM of the patch embeddings than the one for the class token. After concatenation, the positional embeddings are added. We notice that the addition is the same operation as for residual connections, so we can use one of the three TM flow strategies from Sec.~\ref{subsubsec:resid}. 
+\textbf{The bias} is only connected to the output of a neural network layer, so we align it using the outgoing TM of the corresponding layer.
+
+
+\subsection{Alignment Strategies}
+
+\textbf{Soft vs Hard Alignment.}\hspace{0.2cm}
+OTFusion technically allows soft alignment for MLPs, CNNs and ResNets, but \citet{singh2020model} discovered that for these simpler architectures, hard alignment outperforms soft alignment. However, we do not want to limit the search space for optimal alignment to only permutation matrices (possibly too constraining for a complex architecture such Transformers). We, therefore, broaden the perspective on alignment introduced by OTFusion using the Sinkhorn algorithm and tuning the softness of the TM by optimizing over the Sinkhorn regularizer, discovering that soft alignment outperforms hard alignment for Transformers.
+
+\textbf{Weights vs. activations alignment.}\hspace{0.2cm}
+The combined methodology introduced so far, and the novel perspective on the TM flow, allow us to apply OTFusion to the single fully connected layers without further adaptations in the case of weight-based approach, while the activation-based strategy needs a bit more thought. Transformers operate on sequences of tokens as opposed to simpler architectures that only operate one token at a time. In our activations-based algorithm, we treat every token of the sequence as a possible activation.
+
+\textbf{Sequence Filtering.}\hspace{0.2cm} 
+For ViTs, it is obvious that not every token contributes equally to the final image classification. We hypothesize that activations-based alignment performs best if only the most important tokens of a sequence are considered. Therefore, we explored filtering out unimportant tokens. For datasets where images are centered, we propose window filtering, where only the \textit{n} by \textit{n} center patches are considered as activations for activations-based alignment (\texttt{window\_}\textit{n}). Additionally, we explored using only the class token for activation-based alignment (\texttt{only\_cls}).
+
+
+
+\section{Experiments and Results}
+
+\label{sec:exp_res}
+We evaluate the quality of our approach with two prominent transformer-based architectures: the ViT \citep{dosovitskiy2022visualtransformers} and BERT \citep{bert}. Our focus is to assess the performance and robustness of our proposed fusion techniques in both image and NLP domains. These models offer a direct comparison as they share the same encoder-only architecture. We conducted our experiments on multiple well-known image classification datasets: \textsc{CIFAR10}, \textsc{CIFAR100}, \textsc{Tiny ImageNet}, and \textsc{ImageNet-1k}. We used Hugging Face both for the implementation of the ViT and for retrieving the datasets. Besides the image classification tasks, we showcase our fusion strategy on the BERT model for an NLP task. We train from scratch multiple BERT models on the masked language modeling (MLM) task over a subset of the Wikipedia dataset, publicly available on the Hugging Face Hub.\looseness=-1
+
+\textbf{Model Training.}\hspace{0.2cm}
+First, we train individual models from scratch on each dataset until \textit{convergence}. We ensure model diversity by initializing each model with different seed values and different batch randomization. This results in unique models with similar performance but located in diverse parts of the landscape, and whose suitable fusion can improve performance. These diverse models, which are rather distant in the parameter space, need a non-trivial alignment strategy to be successfully fused, and therefore exhibit a dramatic drop in performance when fused with a naive approach such as VF. This approximates a plethora of other scenarios (e.g. models trained on different (sub)datasets).
+
+\textbf{Model Fusion.}\hspace{0.2cm}
+We assessed the proposed fusion strategies, and their combination thereof, on the \textsc{CIFAR10} dataset (refer to the ablation studies in Section~\ref{sec:ablation_studies}). We measure the performance through the so-called \textit{one-shot} capability, namely the performance of the fused model, without any retraining, on the same task and metric of the parents. This capability is the first important proxy of the capacity of the fusion algorithm to align and then fuse the parent models. The optimal fusion strategy identified on the \textsc{CIFAR10} task is then applied to the other tasks and architectures. For each task and alignment strategy (i.e. weights-based and activations-based) we optimize the Sinkhorn regularizer separately (see Fig.~\ref{fig:appx_sink_reg}). The fusion step runs in just seconds on a general-purpose CPU.
+
+\textbf{Finetuning.}\hspace{0.2cm} Besides the \textit{one-shot} performance, similar to \citet{singh2020model, nguyen2021model}, we evaluate the effect of finetuning the fused model. The resulting performance is compared against the single parent models at \emph{convergence} (and thus do not benefit from finetuning), their ensembling, and the VF model that also went through a round of finetuning. Both our fused model and the VF model are optimized separately over a common set of reasonable hyperparameters.
+\textbf{Note.}\hspace{0.2cm} We encode the model dimension as (\textit{hidden-layer dimension}/\textit{intermediate-layer dimension}/\textit{number of encoders}). Additionally, we report the relative computational burden (latency and FLOPs) below each result table entry.
+
+\subsection{One-shot Experiments}
+
+\begin{wrapfigure}{R}{0.36\textwidth}
+    \vskip -0.5in
+    \centering
+        \includegraphics[width=0.4\textwidth]{fig/accuracy_landscape.pdf}
+    \vskip -0.15in
+    \caption{2D slice of the accuracy landscapes of the anchor and one-shot OT and VF fused models.\looseness=-1}
+    \label{fig:acc_landscape}
+    \vskip -0.2in
+\end{wrapfigure}
+
+We optimize the fusion strategy on \textsc{CIFAR10}, searching the configurations previously introduced. In contrast to the observations of \citet{singh2020model} with non-transformer architectures, we observe that a soft-alignment (Sinkhorn) strategy consistently outperforms hard-alignment (EMD). The value of the Sinkhorn regularizer is chosen to maximize the one-shot accuracy (separately for activations- and weights-based alignment). The optimal strategy for handling the residual connections has proven to be the \textit{averaging} policy. Activations-based alignment with the 6x6 window filtering (\textit{window\_6}) approach performs best among other filtering strategies and weights-based alignment.\looseness=-1
+
+In Tab.~\ref{tab:oneshot-cifar10}, we present the \textit{one-shot} performance for the best configuration of fusion with the weights-based alignment and the activations-based alignment, both in the scenario with two models and with five models together. VF dramatically drops at random accuracy, while our fusion methodologies are able to preserve most of the capabilities of the individual models. In particular, we achieve the \textbf{best accuracy with our soft, activations-based fusion}.
+
+Fig.~\ref{fig:acc_landscape} visualizes a two-dimensional slice of the accuracy landscapes of the anchor model and the two fused models, OT and VF. The visualization is based on the procedure outlined in~\citep{garipov2018loss}.
+The plot shows the OT model being in the same basin as the anchor one, while the VF model is separated by a barrier from such basin. This representation effectively underscores the superior performance of our algorithm in comparison to VF, emphasizing its ability to facilitate more dependable knowledge transfer.
+\begin{table}[htbp]
+\begin{center}
+\caption{\textit{One-shot} accuracies on \textsc{CIFAR10} for the individual parent models, VF, weights-based soft-alignment fusion ($\lambda_{\text{sinkhorn}} = 0.06$), activations-based soft alignment ($\lambda_{\text{sinkhorn}} = 0.08$) fusion, and activations-based hard-alignment (EMD) fusion. Activations-based is reported with mean and standard deviations over different random seeds. For the best-performing method, we show the \textcolor{teal}{absolute increase over VF}.}
+\vskip -0.1in
+\begin{small}
+\begin{sc}
+\begin{tabular}{@{}lc|cccc|c@{}}
+\toprule
+Dataset      & Individual           
+& VF   & OT-wts        & OT-acts & OT-acts & Gain over \\
+ & Models& & (ours) & (ours) & EMD (ours) & VF \\[1mm]
+\midrule
+\textsc{CIFAR10}    &    [92.34, 92.31]    
+& 
+7.59  & 57.23 & \textbf{60.87 $\pm$ 0.44}  & 24.50 $\pm$ 5.66  & \textcolor{teal}{+53.28}\\[2mm]
+\midrule
+\textsc{CIFAR10}    &   [92.34, 92.31, 92.28,    
+& 9.47  & 44.46 & \textbf{46.56 $\pm$ 0.71}  & 43.28 $\pm$ 2.81 & \textcolor{teal}{+37.09}\\[1mm]
+    &    92.04, 91.47] &  & & & & \\[1mm]
+\bottomrule
+\end{tabular}
+\end{sc}
+\end{small}
+
+\label{tab:oneshot-cifar10}
+\end{center}
+\vskip -0.2in
+\end{table}
+
+\paragraph{Ablation Studies.}
+\label{sec:ablation_studies}
+
+We study the effect of the different OTFusion hyperparameter choices on the \textit{one-shot} performance on the \textsc{CIFAR10} dataset for two-models fusion.
+We find that soft alignment (Sinkhorn) outperforms hard alignment (EMD) (see Fig.~\ref{fig:os_10_a_w_reg_as}).
+We attribute this observation to the flexibility of soft alignment which better accommodates the highly complex nature of the transformer, as multi-head self-attention. We observe a bell-shaped curve with a maximum for a non-zero regularization, thus demonstrating that the optimal alignment is neither hard nor merely soft. We can therefore optimize this parameter with an inexpensive sweep. Furthermore, as shown in Fig.~\ref{fig:os_10_a_sol_as}, the soft alignment for the activations-based fusion is much more stable than hard alignment (EMD) for different seeds of data, suggesting that hard alignment is much more impacted by the activations.
+
+\begin{figure}[htbp]
+    \vskip -0.1in
+    \centering
+    \subfloat[]{
+        \includegraphics[width=0.43\textwidth]{fig/os_10_a_w_reg_as.pdf}
+        \label{fig:os_10_a_w_reg_as}
+    }
+    \subfloat[]{
+        \includegraphics[width=0.43\textwidth]{fig/os_10_a_sol_as.pdf}
+        \label{fig:os_10_a_sol_as}
+    }
+    \\
+    \subfloat[]{
+        \includegraphics[width=0.43\textwidth]{fig/os_10_a_filt_as.pdf}
+        \label{fig:os_10_a_filt_as}
+    }
+    \subfloat[]{
+        \includegraphics[width=0.43\textwidth]{fig/os_10_a_res_as.pdf}
+        \label{fig:os_10_a_res_as}
+    }
+    \vskip -0.1in
+\caption{(a) Sinkhorn regularizer effect on \textit{one-shot} performance; (b) stability with different seeds for activations-based fusion over a different number of samples; (c) performance with different activations-filtering strategies for a different number of samples; (d) different transport map policies for residual connections over a different number of samples.}
+\end{figure}
+
+Fig.~\ref{fig:os_10_a_filt_as} shows the impact of various filters on the \textit{one-shot} accuracy of the fusion, thereby strengthening our hypothesis that discarding irrelevant activations helps our fusion algorithm converge to a better optimum.
+Finally, in Fig.~\ref{fig:os_10_a_res_as} we present the impact of the various transport map policies for residuals, as presented in Section~\ref{subsubsec:resid}. Both weighted policies perform very similarly, slightly falling behind the best accuracy given by the \textit{averaged} policy.
+\subsection{Finetuned Performance}
+\label{sec:finetuned_results}
+As a last stage of the experimental setup, we finetune the fused models. The performance, as well as the retraining curves, offer an important insight into the quality of the fusion algorithm. While the \textit{one-shot} performance can be heavily impacted by even only a single problematic layer, the capacity of the fused model to effectively, rapidly, and easily recover the performance of the parents allows for a deeper insight into the quality of the fusion across the whole architecture.
+
+\begin{table}[htbp]
+    \vskip -0.05in
+    
+    \begin{center}
+    \caption{Post-finetuning accuracies on the \textsc{CIFAR100} dataset for the individual parent models, their ensemble, VF, weights- and activations-based soft alignment. Model dimension: (384/1536/7).}
+    \vskip -0.1in
+    \begin{small}
+    \begin{sc}
+    \begin{tabular}{@{}lccccc@{}}
+    \toprule
+    Dataset & Ind. Models  & Ens. & Ft. VF &   Ft. OT-wts  & Ft. OT-acts  \\[2mm]
+    \midrule
+    \textsc{CIFAR100}    &    [64.94, 64.66]   & 68.04 & 64.91 \begin{tiny}\textcolor{red}{(-0.03)}\end{tiny} & \textbf{65.80} \begin{tiny}\textcolor{teal}{(+0.86)}\end{tiny} & 65.35 \begin{tiny}\textcolor{teal}{(+0.41)}\end{tiny} \\
+            &  $\times 1$    &  \textcolor{red}{$\times 2$}  & $\times 1$  & $\times 1$ &   $\times 1$\\
+    \midrule
+    \textsc{CIFAR100}    &   [64.94, 64.66, 64.44,   & 70.71   & 63.19 \begin{tiny}\textcolor{red}{(-0.75)}\end{tiny} & \textbf{65.98} \begin{tiny}\textcolor{teal}{(+1.04)}\end{tiny} & 65.25 \begin{tiny}\textcolor{teal}{(+0.31)}\end{tiny}  \\
+        &    64.38, 64.34, 64.07]  & & & &  \\
+        &  $\times 1$  &     \textcolor{red}{$\times 6$}  & $\times 1$  & $\times 1$ &   $\times 1$\\
+    \bottomrule
+    \end{tabular}
+    \end{sc}
+    \end{small}
+    \vskip 0.1in
+
+    \label{tab:finetuned-cifar100-ti}
+    \end{center}
+\vskip -0.2in
+\end{table}
+We first employ our fusion approach on the ViTs trained on the \textsc{CIFAR100} dataset. As mentioned, we separately optimize the fused model on a common set of hyperparameters, in this case a learning rate (LR) in $\{10^{-3}, 10^{-4}, 10^{-5}\}$ and the number of epochs in $ \{10, 20, 100, 200 \}$. In Tab.~\ref{tab:finetuned-cifar100-ti} we observe that \textbf{both our soft-alignment strategies} (i.e. with weights- and activations-based alignment) \textbf{are capable of outperforming the converged parents}, with the gain that increases with the number of parent models. This suggests a successful knowledge transfer of the parents into the fused model. While the obtained accuracy lacks behind the ensembling performance, in our scenario there is no computational overhead, while the cost of the ensembling model grows linearly with the number of models.
+
+\begin{table}[htbp]
+    \vskip -0.1in
+    
+    \begin{center}
+    \caption{Accuracies on the \textsc{ImageNet-1k} dataset after finetuning for the individual parent models, their ensemble, VF, and weights-based soft alignment. Model dimension: (384/1536/12).}
+    \vskip -0.1in
+    \begin{small}
+    \begin{sc}
+    \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    Dataset & Ind. Models & Ens. & Ft. VF &   Ft. OT-wts   \\[2mm]
+    \midrule
+\textsc{ImageNet-1k}    &   [75.33, 74.88]   &  76.56  &  67.83 \begin{tiny}\textcolor{red}{(-7.50)}\end{tiny} &  \textbf{75.80} \begin{tiny}\textcolor{teal}{(+0.47)}\end{tiny}    \\[1mm]
+    &  $\times 1$     &  \textcolor{red}{$\times 2$}  & $\times 1$  & $\times 1$   \\
+    \bottomrule
+    \end{tabular}
+    \end{sc}
+    \end{small}
+    \label{tab:finetuned-i1k}
+    \end{center}
+\vskip -0.2in
+\end{table}
+
+In Tab.~\ref{tab:finetuned-i1k} we present further results on the challenging and widely-adopted \textsc{ImageNet-1k} dataset. The results are consistent with those found in the \textsc{CIFAR100} case, strengthening the \textit{general applicability} of our methods, and its \textit{scalability to larger models and more challenging datasets}. We also stress the fact that, especially with this difficult dataset, even after finetuning, VF fails to recover a comparable accuracy, converging to suboptimal performance.
+
+In this work, we focused on the vision application of the Transformer architecture, but our method is agile to architectural changes, and we demonstrate its wide applicability to the BERT model. In particular, the fused and finetuned model, outperforms both parents and VF on the widely adopted \textit{GLUE} benchmark \citep{GLUE}. The results are presented in Tab.~\ref{tab:GLUE} of the App.
+
+\begin{wraptable}{r}{0.45\textwidth}
+    \vspace {-0.2in}
+    \begin{center}
+    \caption{Results for heterogeneous fusion on \textsc{CIFAR100}. VF cannot be applied here.}
+    \vskip -0.1in
+    \begin{small}
+    \begin{sc}
+    \begin{tabular}{@{}cccc@{}}
+    \toprule
+     Anchor & Larger  &              Ens.  &         Ft. OT-wts  \\
+    \midrule
+    63.18 &              64.94 &               67.66 &   \textbf{64.11} \begin{tiny}\textcolor{teal}{(+0.93)}\end{tiny} \\[1mm]
+    $\times 1$ &         \textcolor{red}{$\times 4$} &          \textcolor{red}{$\times 5$} &       $\times 1$ \\[1mm]
+    \begin{tiny}(192/768/7)\end{tiny} &       \begin{tiny}(384/1536/7)\end{tiny} &            & \begin{tiny}(192/768/7)\end{tiny} \\[0.3mm]
+    \midrule
+64.07 &              64.79 &               67.94 &            \textbf{64.88} \begin{tiny}\textcolor{teal}{(+0.81)}\end{tiny}  \\[1mm]
+  $\times 1$ &       \textcolor{red}{$\times 2.3$} & \textcolor{red}{$\times 3.3$} &       $\times 1$ \\[1mm]
+\begin{tiny}(384/1536/7)\end{tiny} &       \begin{tiny}(576/2304/7)\end{tiny} &                 & \begin{tiny}(384/1536/7)\end{tiny} \\[0.3mm]
+    \bottomrule
+    \end{tabular}
+    \end{sc}
+    \end{small}
+    \label{tab:diff_width}
+    \end{center}
+    \vskip -0.2in
+\end{wraptable}
+
+We want to highlight an insight into the finetuning process. In particular, we have observed that the \textit{best accuracy of our fused models is achieved extremely quickly}, as much as two orders of magnitude fewer steps needed to train the parents from scratch, and, as a comparison, VF requires far higher computation to reach a comparable (but worse) performance. For further exemplification refer to Fig. % In Figure~\ref{fig:bert_5_finetune} we show a similar scenario also for the validation loss of the MLM task for the BERT model.79 $\pm$ 0.01), heavily outperforming VF on a finetuning time of 2 epochs.
+Our methodology, as opposed to VF, works out of the box with models having different widths (heterogeneous fusion). \textit{We find a consistent absolute increase in test accuracy over the performance of the smaller anchor network}, thus implying successful knowledge transfer (Tab.~\ref{tab:diff_width}). These results showcase that our method is an effective and \textit{efficient alternative to knowledge distillation}.
+
+
+
+\section{Discussion}
+
+The fusion methodology for transformer models proposed in this paper is easily adapted to different architectural variants and is readily applicable to models of different widths. However, heterogeneous fusion of networks of different depths is a common limitation of the predominant fusion methods \citep{singh2020model,ainsworth2022git} which are inherently based on a sequential layerwise alignment. Consequently, we too inherit a similar limitation when expanding fusion to the case of Transformers. Overall, this is undoubtedly a fascinating research challenge to extend Transformer fusion (or, broadly speaking, fusion at large) to heterogeneous depth settings which, however, is outside the scope of the current work.
+
+\textbf{In summary}, we showcased how distinct independently trained transformer networks can be combined through the lens of Optimal Transport. 
+Utilizing a novel graph interpretation of the transportation map flow, we developed an algorithm for fusing multiple transformer networks that extends the existing fusion techniques and that specifically caters to the idiosyncrasies of the transformer architecture. We also uncovered an intriguing benefit of using soft alignment when fusing Transformers, which had been under-utilized in the past. Overall, we showed that our technique can retain most of the performance of the converged parent models in \textit{one-shot}, and even outperforms them after finetuning, across multiple vision and NLP tasks proving the scalability and wide applicability of our methods thereby providing a highly efficient and promising alternative to ensembling. Finally, our algorithm successfully applies to the fusion of models of different sizes, too, efficiently transferring knowledge from larger to smaller Transformers, and thus offering an effective alternative to distillation.\looseness=-1
+
+
+
+

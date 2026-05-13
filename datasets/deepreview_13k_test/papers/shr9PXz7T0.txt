@@ -1,0 +1,476 @@
+\title{Large Language Models Are Not Robust Multiple Choice Selectors}
+
+\begin{abstract}
+
+Multiple choice questions (MCQs) serve as a common yet important task format in the evaluation of large language models (LLMs).
+This work shows that modern LLMs are vulnerable to option position changes in MCQs due to their inherent ``selection bias'', namely, they prefer to select specific option IDs as answers (like ``Option A'').
+Through extensive empirical analyses with 20 LLMs on three benchmarks, we pinpoint that this behavioral bias primarily stems from LLMs' token bias, where the model a priori assigns more probabilistic mass to specific option ID tokens (e.g., \texttt{A/B/C/D}) when predicting answers from the option IDs.
+To mitigate selection bias, we propose a label-free, inference-time debiasing method, called \pride{}, which separates the model's prior bias for option IDs from the overall prediction distribution.
+\pride{} first estimates the prior by permutating option contents on a small number of test samples, and then applies the estimated prior to debias the remaining samples.
+We demonstrate that it achieves interpretable and transferable debiasing with high computational efficiency.
+We hope this work can draw broader research attention to the bias and robustness of modern LLMs.
+}
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+\begin{wrapfigure}{R}{5cm}
+\centering
+    \scalebox{0.85}{
+    \begin{tabular}{p{\linewidth}}
+      \toprule
+      \texttt{Question: \textcolor{blue}{In an SR latch built from NOR gates, which condition is not allowed}} \\
+      \texttt{Options:} \\
+      \texttt{A. \textcolor{blue}{S=0, R=0} \ \  B. \textcolor{blue}{S=0, R=1}} \\
+      \texttt{C. \textcolor{blue}{S=1, R=0} \ \  D. \textcolor{blue}{S=1, R=1}} \\
+      \texttt{Answer: \textcolor{red}{ \underline{D}}} \\
+      \bottomrule
+    \end{tabular}
+    }
+\caption{
+A multiple choice question (MCQ) example from MMLU.
+}
+\label{fig:mcq_example}
+\end{wrapfigure}
+
+Multiple choice question (MCQ) is a prevalent input format of large language models (LLMs).
+An MCQ typically encompasses a question accompanied by multiple candidate options, from which the model is tasked to select the most suitable answer, as exemplified in Figure \ref{fig:mcq_example}.
+Current LLM-centric scenarios have widely utilized the task format of MCQ, for instance, within benchmarks targeted at assessing LLMs \citep{mmlu, agieval, ceval} and in LLM-based automatic evaluation frameworks \citep{vicuna, llm-as-a-judge}.
+In any scenario, we always expect LLMs to robustly select reliable answers in MCQs.
+
+Unfortunately, we observe that \textit{modern LLMs are vulnerable to option position changes in MCQs} \citep{robinson2022leveraging}.
+We show in Table \ref{tab:move_attack} that, in the 0-shot MMLU evaluation \citep{mmlu}, a simple ``answer-moving attack'' by always moving the golden answers to a specific position causes LLMs' dramatic performance fluctuations.
+For instance, moving the golden answers to position D degrades the accuracy of \texttt{gpt-3.5-turbo} by 6.3 (from 67.2 to 60.9).
+When moving to A, \texttt{llama-30b} is boosted by 15.2 and surpasses \texttt{gpt-3.5-turbo} (68.2 vs. 65.3), which starkly contrasts with their original performance (53.1 vs. 67.2).
+
+LLMs' poor robustness to option position changes results from their biased behavior: \textit{they prefer to select specific option IDs as answers} (like ``Option A''), which we term as \textbf{selection bias}.
+As a simple verification, we randomly sampled 1,000 MMLU test samples, where we controlled the number of correct answers being A/B/C/D as 250 each.
+Among these samples, \texttt{llama-30B} selects A/B/C/D 34.6\% / 27.3\% / 22.3\% / 15.8\% of the time, while \texttt{gpt-3.5-turbo} for 22.5\% / 25.6\% / 32.3\% / 19.6\%, respectively (averaged over 10 runs).
+These proportions are statistically nonuniform ($\chi^2$ Test, $p$-value $\ll 10^{-4}$) and align well with the performance fluctuations in Table \ref{tab:move_attack}.
+\begin{figure}
+  \centering
+  \begin{minipage}[ht]{0.59\linewidth}
+  \centering
+  \captionof{table}{
+  Simply moving the golden answers of MCQs to a specific option position can cause dramatic performance fluctuations (0-shot MMLU), suggesting LLMs' poor robustness to option position changes in MCQs.
+  }
+  \scalebox{0.85}{
+    \begin{tabular}{lccccc}
+    \toprule
+    \textbf{Move Golden to} & \textbf{Orig} & \textbf{A} & \textbf{B} & \textbf{C} & \textbf{D} \\
+    \midrule
+    \texttt{llama-30B} & 53.1  & \tabincell{c}{68.2 \\ \small \textcolor{red}{(+15.2)}} & \tabincell{c}{54.1 \\ \small \textcolor{red}{(+1.1)}} & \tabincell{c}{50.1 \\ \small \textcolor{blue}{(-2.9)}} & \tabincell{c}{41.2 \\ \small \textcolor{blue}{(-11.9)}} \\
+    \texttt{vicuna-v1.3-33B} & 57.0  & \tabincell{c}{59.5 \\ \small \textcolor{red}{(+2.5)}} & \tabincell{c}{58.6 \\ \small \textcolor{red}{(+1.5)}} & \tabincell{c}{65.8 \\ \small \textcolor{red}{(+8.8)}} & \tabincell{c}{44.8 \\ \small \textcolor{blue}{(-12.3)}} \\
+    \texttt{falcon-40B} & 51.8  & \tabincell{c}{46.3 \\ \small \textcolor{blue}{(-5.5)}} & \tabincell{c}{45.2 \\ \small \textcolor{blue}{(-6.7)}} & \tabincell{c}{64.8 \\ \small \textcolor{red}{(+13.0)}} & \tabincell{c}{47.9 \\ \small \textcolor{blue}{(-3.9)}} \\
+    \texttt{falcon-inst-40B} & 51.5  & \tabincell{c}{38.3 \\ \small \textcolor{blue}{(-13.3)}} & \tabincell{c}{38.9 \\ \small \textcolor{blue}{(-12.7)}} & \tabincell{c}{55.7 \\ \small \textcolor{red}{(+4.1)}} & \tabincell{c}{69.1 \\ \small \textcolor{red}{(+17.6)}} \\
+    \texttt{llama-2-70B} & 64.0  & \tabincell{c}{61.5 \\ \small \textcolor{blue}{(-2.6)}} & \tabincell{c}{68.6 \\ \small \textcolor{red}{(+4.5)}} & \tabincell{c}{64.1 \\ \small \textcolor{red}{(+0.1)}} & \tabincell{c}{62.0 \\ \small \textcolor{blue}{(-2.1)}} \\
+    \texttt{gpt-3.5-turbo} & 67.2  & \tabincell{c}{65.3 \\ \small \textcolor{blue}{(-1.9)}} & \tabincell{c}{68.5 \\ \small \textcolor{red}{(+1.3)}} & \tabincell{c}{74.2 \\ \small \textcolor{red}{(+6.9)}} & \tabincell{c}{60.9 \\ \small \textcolor{blue}{(-6.3)}} \\
+    \bottomrule
+    \end{tabular}%
+    }
+  \label{tab:move_attack}%
+  \end{minipage}
+  \hfill
+  \begin{minipage}[ht]{0.38\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figs/bias_0s_mmlu.pdf}
+    \caption{
+    The performance fluctuation (left) correlates with the balance of different option IDs' recalls in the original inputs, as \textit{the original recall of option ID X is actually calculated on a subset of samples where all the golden answers are moved to X}.
+    }
+    \label{fig:intro_bias}
+  \end{minipage}
+\end{figure}
+
+Through extensive empirical evaluation (\S \ref{subsec:observations}), with 20 LLMs, on three benchmarks, and with varying option numbers (from two to five), we show that selection bias is prevalent across various LLMs and cannot be well mitigated by simple prompting strategies (\S \ref{subsec:prompting}), like Chain-of-Thought prompting \citep{cot, think-step}.
+It varies with models but manifests a cross-domain similarity within the same model (\S \ref{subsec:observations}).
+With careful ablation analyses (\S \ref{subsec:cause}), we find that, contrary to the common view in previous work \citep{wang2023large, pezeshkpour2023large}, selection bias arises less from LLMs' {position bias}, where {they are deemed to favor options presented at specific ordering positions} (like first or last).
+In contrast, we pinpoint one more salient intrinsic cause of selection bias as the model's \textbf{token bias} when predicting answers from the option IDs given the standard MCQ prompt, where \textit{the model a priori assigns more probabilistic mass to specific ID tokens} (e.g., \texttt{A/B/C/D}).
+
+To efficiently mitigate selection bias, we propose a method called \textbf{\pride{}} (\S \ref{sec:methodology}), referring to \textbf{De}biasing with \textbf{Pri}or estimation.
+In \pride{}, we assume the model's prior bias for option IDs can be separated from the overall prediction distribution.
+\pride{} first estimates the prior by permutating option contents on a small number of test samples (e.g., 5\%), and then applies it to debias the remaining samples.
+The whole debiasing procedure needs no sample labels, takes place during the inference time, and requires only negligible extra computational costs, which is especially suitable for modern LLMs.
+We demonstrate that \pride{} achieves superior debiasing effectiveness to strong baselines, especially in the low-cost scenario (\S \ref{subsec:main}).
+Furthermore, the prior estimated by \pride{} provides a good interpretation for selection bias (\S \ref{subsec:main}) and can transfer well across different domains (\S \ref{subsec:transferability}), which highlights its practical potential in broader scenarios.
+
+\paragraph{Summary of Contributions}
+(1) We identify the ubiquitous selection bias in LLMs and provide extensive empirical analyses (with 20 LLMs, on three MCQ benchmarks) and valuable insights on this problem.
+(2) We pinpoint LLMs' token bias as one primary intrinsic cause of selection bias.
+(3) We propose a label-free, inference-time debiasing method \pride{}, which demonstrates notable effectiveness and efficiency, interpretability, and cross-domain transferability.
+We hope this work can inspire future research on the bias and robustness of LLMs.
+
+
+
+\section{Investigation on Selection Bias}
+
+\label{sec:investigation}
+
+\subsection{Experimental Setup}
+\label{subsec:setup}
+
+\paragraph{Models}
+Our study focuses on the causal, decoder-only LLMs since this architecture has become the dominant choice for modern LLMs.
+We experiment with \textit{20 LLMs from popular LLM families across various sizes}: \texttt{llama-7/13/30/65B} \citep{llama}, \texttt{llama-2(-chat)-7/13/70B} \citep{llama2}, \texttt{vicuna-v1.3-7/13/33B}, \texttt{vicuna-v1.5-7/13B} \citep{vicuna}, \texttt{falcon(-inst)-7/40B} \citep{falcon}, and \texttt{gpt-3.5-turbo-0613} \citep{chatgpt}.
+The models except \texttt{gpt-3.5-turbo} are all open source on the HuggingFace website, and we can access their output probabilities.
+\texttt{gpt-3.5-turbo} is the commercial API of ChatGPT.
+It accepts textual prompts and returns generated texts without providing access to output probabilities.
+
+\paragraph{Benchmarks}
+We conduct experiments on MMLU \citep{mmlu}, ARC-Challenge \citep{arc}, and CommonsenseQA (CSQA) \citep{csqa}, which are all MCQ benchmarks widely used for LLM evaluation.
+Our selection of benchmarks takes into account the diversity of tasks and domains.
+Specifically, MMLU and ARC consist of 4-option MCQs, while CSQA consists of 5-option ones, and MMLU covers tests from 4 domain categories spanning 57 subjects.
+The diverse domains facilitate us to derive general observations and enable cross-domain transfer exploration.
+\paragraph{Evaluation}
+
+Specifically, for open-source models, we access the output probabilities of option ID tokens \texttt{A/B/C/D/E} and use the maximal one as the model prediction.
+For \texttt{gpt-3.5-turbo}, we compare the golden answer with the first generated token, with the decoding temperature set to 0.
+Our evaluation mainly considers the 0-shot setting, which excludes biases introduced by in-context examples, but we also conduct 5-shot experiments.
+The in-context examples come from the development sets and are shared across all the test samples within the same task.
+
+\subsection{Measurement of Selection Bias}
+
+In our study, selection bias is defined as \textit{the model's behavioral bias to select specific option IDs as answers}.
+To measure selection bias, one naive way is based on the counting for model predictions, which, however, is susceptible to label imbalance.
+We instead propose to measure selection bias based on the \textbf{balance of recalls} of different option IDs and use \textbf{the standard deviation of recalls (RStd)} as a quantitative metric.
+This measurement is intuitive that greater recall imbalance indicates more pronounced selection bias and is not as susceptible to label imbalance as the counting-based measurement.
+More importantly, recall balance well reflects the model's robustness to option position changes, as illustrated in Figure \ref{fig:intro_bias}.
+Hence, we reasonably expect that \textit{reducing selection bias (measured by recall balance) will improve LLMs' robustness to option position changes in MCQs}.
+
+Note that measuring selection bias with recall balance implies the premise that the golden answers should be randomly placed.
+\subsection{Key Observations}
+\label{subsec:observations}
+
+We first conduct an extensive evaluation of LLMs on various benchmarks to gain a preliminary understanding of selection bias.
+
+We draw the following main observations and insights:
+
+\paragraph{Selection bias is prevalent across various LLMs and varies with model families and sizes.}
+Intuitively, selection bias is likely to originate from LLMs' training data, where some answers (e.g., \texttt{C}) may occur more frequently than others.
+However, we do not observe consistent patterns of selection bias within the same model family where the models are trained with the same training data (e.g., \texttt{llama-7/13/30/65B}, \texttt{llama-2-7/13/70B}).
+We speculate that selection bias arises as a product of complex interactions between training data composition and ordering, model capacity (number of parameters), and other factors like hyperparameters.
+
+\captionsetup[figure]{font=small}
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.97\linewidth]{figs/bias_recall_brief.pdf}
+  \caption{
+  Selection bias of \texttt{llama-30B} and \texttt{gpt-3.
+  Y-axis: the recall score (\%) normalized by \textit{subtracting the overall accuracy}.
+  MMLU is additionally split into four domains (STEM, Social Science, Humanities, Others) based on its subject categories.
+  }
+  \label{fig:bias_recall_brief}
+\end{figure}
+
+\paragraph{Selection bias within the same model displays a moderate similarity across different domains.}
+For instance, under the 0-shot setting, \texttt{llama-30B} consistently prefers A/B on various benchmarks, while \texttt{gpt-3.5-turbo} favors C/B more.
+While the preference ranking may not strictly persist across tasks or domains, there is an overarching tendency for each model to lean towards certain option IDs (e.g., A and B) and away from others (e.g., C and D).
+It suggests that \textit{selection bias is an inherent behavioral bias of LLMs that is less impacted by tasks or domains}.%
+
+\paragraph{In-context examples can reduce but may meanwhile alter selection bias.}
+As exemplified in Figure \ref{fig:bias_recall_brief}, \texttt{llama-30B} disfavors C under the 0-shot setting but becomes biased towards it under the 5-shot setting.
+We find that this alteration still does not display noticeable patterns within the same model family.
+It indicates that in-context examples can introduce new biases that will be intertwined with the inherent selection bias, making the latter complex and less regular.
+
+\subsection{What Causes Selection Bias?}
+\label{subsec:cause}
+
+Given the ubiquity of selection bias in various LLMs, we now seek to figure out the intrinsic causes resulting in this behavioral bias.
+We propose two hypotheses:
+(1) \textbf{Token bias}.
+In the standard MCQ prompt (Figure \ref{fig:mcq_example}), when selecting answers from the option IDs, the model may \textit{a priori assign more probabilistic mass to specific ID tokens} (such as \texttt{A} or \texttt{C}).
+(2) \textbf{Position bias}.
+The model may \textit{favor options presented at specific ordering positions} (such as the first or last one).
+Note that in a recent work, \citet{wang2023large} similarly found that GPT-4 exhibits the bias towards the responses from ``\texttt{Assistant 1}''.
+However, it is still unclear whether it is because the preferred responses are ``selected via the ID token \texttt{1}'' or because they are ``presented first''.
+
+\begin{wraptable}{R}{6.6cm}
+  \centering
+  \captionof{table}{%
+  Preliminary debiasing results (0-shot, \texttt{gpt-3.5-turbo}), measured by the standard deviation of recalls (RStd) and accuracy (Acc). 
+  }
+  \scalebox{0.85}{
+    \begin{tabular}{l|cc|cc}
+    \toprule
+    \multirow{2}[0]{*}{\textbf{Methods}} & \multicolumn{2}{c|}{MMLU} & \multicolumn{2}{c}{ARC} \\
+       & RStd & Acc & RStd & Acc \\
+    \midrule
+    {Default} & 5.5  & 67.2  & 3.3  & 84.3  \\
+    \texttt{a/b/c/d} & 6.8  & 67.0  & 2.1  & 83.1  \\
+    \texttt{1/2/3/4} & 3.8  & 65.8  & 2.1  & 82.3  \\
+    \texttt{(A)/(B)/(C)/(D)} & 8.1  & 66.5  & 4.0  & 82.4  \\
+    \midrule
+    \textbf{Debiasing Instruct} & 6.1  & 66.3  & 3.9  & 84.2  \\
+    \textbf{Chain-of-Thought} & 4.5  & 66.8  & 3.4  & 84.5  \\
+    \midrule
+    \tabincell{l}{\textbf{Shuffling IDs}} & {5.1} & {63.9} & {3.7} & {80.3} \\
+    \textbf{Removing IDs} & \textbf{1.0} & \textbf{66.7} & \textbf{0.6} & \textbf{84.9} \\
+    \bottomrule
+    \end{tabular}%
+    }
+  \label{tab:debias_attempt}%
+\end{wraptable}
+
+One challenge here is that \textit{option IDs are bound with options' ordering positions}, e.g., the ID \texttt{B} is naturally tied with the second-presented option.
+To distinguish the impacts of the two hypothesized causes, we conduct two ablation experiments.
+(1) \textbf{Shuffling option IDs}.
+We randomly shuffle the default ID ordering A/B/C/D, for instance, into B/D/A/C or C/A/D/B, etc.
+In this way, \texttt{B} can denote the option presented at any ordering position, thus eliminating the impact of position bias and leaving only token bias.
+\textit{Note that this ablation will obviously impair the naturalness and quality of the MCQ prompt, and may consequently degrade model performance (as shown in Table \ref{tab:debias_attempt}).}
+(2) \textbf{Removing option IDs} and asking the model to directly select option contents.
+In this way, the change of selection bias would indicate the impact of token bias, while the remaining part corresponds to position bias.
+When evaluating LLMs without option IDs, we require \texttt{gpt-3.5-turbo} to generate the whole selected option, which is then compared with the golden answer.
+For open-source models, we compute the likelihoods of options, normalized by their lengths, and use the maximum one as the model prediction.
+As shown in Figure \ref{fig:bias_recall_brief} and Table \ref{tab:debias_attempt}, the removal of option IDs notably reduces selection bias (RStd decreases), while RStd is little changed by shuffling option IDs.
+
+We also try to replace the default ID symbols \texttt{A/B/C/D} with several reasonable alternatives, including \texttt{a/b/c/d}, \texttt{1/2/3/4}, and \texttt{(A)/(B)/(C)/(D)}, but observe no remarkable reduction in RStd from the default one, as shown in Table \ref{tab:debias_attempt}.
+These results confirm that \textit{the model's token bias is one primary intrinsic cause of selection bias}.
+For instance, the remaining selection bias of \texttt{llama-13B}, \texttt{vicuna-v1.3-7B}, and \texttt{gpt-3.5-turbo} is only marginal, while that of \texttt{llama-30B}, \texttt{vicuna-v1.3-33B}, and \texttt{falcon-40B} is still pronounced (although having been reduced much).
+The selection bias of \texttt{llama-2-13/70B} even slightly increases in MMLU and ARC after option IDs being removed while still decreasing in CSQA, implying the potential counteraction between token bias and position bias.
+These results suggest that \textit{the model's position bias is somewhat present but quite irregular, largely depending on models and tasks}.
+
+
+\subsection{Can We Debias LLMs by Removing Option IDs?}
+This performance degradation results from the way we leverage LLMs to answer MCQs without option IDs, i.e., calculating and comparing the likelihoods of options, which is referred to as the ``cloze prompt'' format in \citet{robinson2022leveraging}.
+Their study demonstrates that asking LLMs to predict option IDs forms a better MCQ prompt than the ``cloze prompt'', which is consistent with our observation.
+Besides, selecting answers by calculating and comparing the likelihoods of options is not as convenient and straightforward to implement as directly predicting option IDs.
+We thus suggest that \textit{removing option IDs is not a practical method to mitigate selection bias}.
+
+\subsection{Can Simple Prompting Strategies Mitigate Selection Bias?}
+\label{subsec:prompting}
+
+As a preliminary debiasing attempt, we apply two simple prompting strategies to \texttt{gpt-3.5-turbo}:
+(1) \textbf{Explicit debiasing instruction}: We append an explicit debiasing instruction in the system message of \texttt{gpt-3.5-turbo} (``Please note that the provided options have been randomly shuffled, so it is essential to consider them fairly and without bias.'').
+(2) \textbf{Chain-of-Thought prompting} \citep{cot, think-step}: \texttt{gpt-3.5-turbo} is first prompted with ``Let's think step by step:'' to generate its thought process and then produces the final answer.
+
+As shown in Table \ref{tab:debias_attempt}, the two prompting strategies cannot mitigate selection bias well.
+It suggests that \textit{selection bias is an inherent behavioral bias of LLMs that cannot be addressed by simple prompt engineering}.
+
+
+
+\section{Methodology}
+
+\label{sec:methodology}
+
+\subsection{Permutation-based Debiasing Baseline and Formulation}
+
+Before proposing our debiasing method, we first introduce a strong permutation-based debiasing baseline that our method builds upon.
+It averages the model's prediction distributions under various option permutations \citep{wang2023large, llm-as-a-judge}, which intuitively cancels out both the model's token bias and position bias.%
+
+Formally, we use $q$ to denote the MCQ question. %
+Suppose the $n$ default-ordered option IDs (e.g., \texttt{A/B/C/D}) are $d_i$ and the default-ordered option contents are $o_i, i \in \{ 1, 2, \dots, n \}$.
+We use $I$ to denote a permutation of $\{ 1, 2, \dots, n \}$, $\mathcal{I}$ to a set of possible $I$s.
+We use $g_I(i)$ to denote the index of $i$ in $I$, and $x^I$ to the concatenation of the default-ordered option IDs and the $I$-permuted option contents, so that $o_i$ is tied with $d_{g_I(i)}$ in $x^I$.
+The permutation-based debiasing baseline can be formulated as:
+\begin{align}
+\label{equ:permutation}
+    \widetilde{P}_\mathrm{debiased} ( o_i | q, x ) = \frac{1}{|\mathcal{I}|} \sum_{I \in \mathcal{I}} P_\mathrm{observed} ( d_{g_I(i)} | q, x^I ), 
+    \ \ i \in \{ 1, 2, \dots, n \},
+\end{align}
+where $x$ is the default input of option IDs and option contents, $P_\mathrm{observed} ( d_{g_I(i)} | q, x^I )$ is the observed prediction probability for the option ID $d_{g_I(i)}$ (meaning $o_i$ being correct) under the option permutation $I$, and $\widetilde{P}_\mathrm{debiased} ( o_i | q, x )$ denotes the debiased prediction probability for the option content $o_i$.
+Since computing full permutations is prohibitively expensive ($\times n!$ costs), we adopt a practical alternative, called \textbf{Cyclic Permutation}, where $\mathcal{I} = \{ (i, i+1, \dots, n, 1, \dots, i-1) \}_{i=1}^{n}$.
+It reduces the computational cost (e.g., LLM forward times) from $\times n!$ to $\times n$ and ensures one pairing between each option ID $d_i$ and option content $o_j$.
+
+However, \textit{the overhead of Cyclic Permutation is still somewhat high ($\times n$ inference costs), which stimulates us to design more efficient debiasing methods}.
+
+\subsection{Prediction Probability Decomposition}
+
+The core idea of our method \pride{} is to obtain a debiased prediction distribution by \textit{separating the model's prior bias for option IDs from the overall prediction distribution}.
+Equivalently, it assumes that the observed prediction distribution $P_\mathrm{observed}$ over $d_i$ can be decomposed as a prior distribution $P_\mathrm{prior}$ over $d_i$ and a debiased distribution $P_\mathrm{debiased}$ over $o_i$:
+\begin{align}
+    P_\mathrm{observed} ( d_i | q, x^I ) = Z_{q, x^I}^{-1} P_\mathrm{prior} ( d_i | q, x^I ) P_\mathrm{debiased} ( o_{f_I(i)} | q, x^I ), 
+    \ \ \forall I \in \mathcal{I}, i \in \{ 1, 2, ..., n \},
+\label{equ:decomposition1}
+\end{align}
+where $f_I(i)$ denotes $i$-th element in $I$.
+Note that we can rewrite the form of $P_\mathrm{observed}$ as a joint probability $P ( d_i, o_j | q, x^I )$ for $d_i$ and $o_j$, which equals to $P_\mathrm{observed} ( d_i | q, x^I )$ if $j = {f_I(i)}$ and 0 otherwise.
+Therefore, \textit{the above prediction probability decomposition can be interpreted as the conditional independent assumption} (ignore the normalization item $Z_{q, x^I}$), where the model holds independent beliefs about $d_i$ and $o_j$.
+Specifically, $P_\mathrm{debiased} ( o_j | q, x^I )$ reflects the model's \textbf{true belief about the option content} $o_j$, which is not influenced by the option ID $d_i$.
+In contrast, $P_\mathrm{prior} ( d_i | q, x^I )$ indicates the model's \textbf{prior bias for the option ID} $d_i$, which actually involves not only the model's token bias but also position bias (\S \ref{subsec:cause}), due to the natural binding between option IDs and options' ordering positions.
+Hence, under this formulation, we do not need to strictly distinguish the two biases laboriously, but can instead address them together by eliminating $P_\mathrm{prior}$.
+For tractable derivation, we reasonably assume that $P_\mathrm{debiased}$ is not affected by how the options are ordered, which implies its invariance to option permutation $I$ so we can replace $x^I$ with the default input $x$.
+We also assume $P_\mathrm{prior}$ to be independent of $x^I$, which means that the prior for option IDs depends on only the question $q$.
+Equation \ref{equ:decomposition1} is then simplified to:
+\begin{align}
+\label{equ:decomposition2}
+    P_\mathrm{observed} ( d_i | q, x^I ) = Z_{q, x^I}^{-1} P_\mathrm{prior} ( d_i | q ) P_\mathrm{debiased} ( o_{f_I(i)} | q, x ), 
+    \ \ \forall I \in \mathcal{I}, i \in \{ 1, 2, ..., n \}.
+\end{align}
+
+\subsection{Debiasing with Prior Estimation}
+\label{subsec:pride}
+
+Taking the logarithm of both sides of Equation \ref{equ:decomposition2} and summing over all $I \in \mathcal{I}$, we can obtain:
+\begin{align}
+    \sum_{I \in \mathcal{I}} \log P_\mathrm{observed} ( d_i | q, x^I ) =&\ |\mathcal{I}| \log P_\mathrm{prior} ( d_i | q ) + \bigg( \sum_{I \in \mathcal{I}} \log P_\mathrm{debiased} ( o_{f_I(i)} | q, x ) \bigg) + C \\
+    =&\ |\mathcal{I}| \log P_\mathrm{prior} ( d_i | q ) + \bigg( \frac{|\mathcal{I}|}{n} \sum_{j=1}^n \log P_\mathrm{debiased} ( o_j | q, x ) \bigg) + C \label{equ:iteration1} \\
+    =&\ |\mathcal{I}| \log P_\mathrm{prior} ( d_i | q ) + C', 
+    \ \ i \in \{ 1, 2, ..., n \}.
+\end{align}
+We derive Equation \ref{equ:iteration1} because $\sum_{I \in \mathcal{I}} \log P_\mathrm{debiased} ( o_{f_I(i)} | q, x )$ actually involves $|\mathcal{I}| / n$ iterations over each $P_\mathrm{debiased} ( o_j | q, x )$ (given $\mathcal{I}$ contains either full or cyclic permutations), whose aggregation over $j \in \{ 1, 2, \dots, n \}$ is a constant.
+Therefore, without any sample labels, we can obtain:
+\begin{align}
+\label{equ:prior}
+    P_\mathrm{prior} ( d_i | q ) = \softmax \bigg( \frac{1}{|\mathcal{I}|} \sum_{I \in \mathcal{I}} \log P_\mathrm{observed} ( d_i | q, x^I ) \bigg), 
+    \ \ i \in \{ 1, 2, ..., n \}.
+\end{align}
+Recall our observation in \S \ref{subsec:observations} that selection bias within the same model displays a moderate cross-domain similarity.
+This implies that \textit{the prior for option IDs is likely to transfer across different samples and domains}, which motivates us to compute the priors of partial test samples and use them as an approximation for the remaining samples.
+It can largely improve debiasing efficiency since no more computational overhead is needed for the remaining samples once the prior is estimated.
+
+Drawing the above inspiration, \pride{} first takes $K$ test samples $\mathcal{D}_\mathrm{e}$ from the test set $\mathcal{D}$, where $K$ can be adjusted based on the estimation budget.
+Each sample in $\mathcal{D}_\mathrm{e}$ undergoes the standard permutation-based debiasing in Equation \ref{equ:permutation}, during which we estimate each sample-specific prior $P_\mathrm{prior} ( d_i | q ) $ using Equation \ref{equ:prior}.
+For the remaining samples $\mathcal{D}_\mathrm{r} = \mathcal{D} \backslash \mathcal{D}_\mathrm{e}$, we compute the ``global prior'' $\widetilde{P}_\mathrm{prior} ( d_i )$ by averaging the previously computed priors as an approximation to the new sample's $P_\mathrm{prior} ( d_i | q )$ in Equation \ref{equ:decomposition2}.
+We can thus compute the approximated $\widetilde{P}_\mathrm{debiased} ( o_i | q, x )$ and obtain the debiased prediction (omit the superscript $I$ as we only use the default input here):
+\begin{align}
+\label{equ:debias}
+    \widetilde{P}_\mathrm{debiased} ( o_i | q, x ) \propto P_\mathrm{observed} ( d_i | q, x ) / \widetilde{P}_\mathrm{prior} ( d_i ), 
+    \ \ i \in \{ 1, 2, ..., n \}.
+\end{align}
+When $K \ll |\mathcal{D}|$, the overhead for prior estimation will become negligible compared to the whole inference cost.
+The overall procedure of \pride{} is summarized as Algorithm \ref{alg:main}.
+
+\begin{algorithm}[t]
+\begin{algorithmic}[1]
+\Require Language model, test samples $\mathcal{D} = \{ (q_i, x_i) \}_i$, option number $n$, estimation budget $K$
+\Ensure Model predictions $\mathcal{Y}$
+\State Initialize the model prediction set $\mathcal{Y} = \emptyset$ and the prior set $\mathcal{P} = \emptyset$
+\algorithmiccomment{Initialization}
+\State Sample the estimation samples $\mathcal{D}_\mathrm{e}$ under $K$ and the remaining samples $\mathcal{D}_\mathrm{r} = \mathcal{D} \backslash \mathcal{D}_\mathrm{e}$
+\For{$ (q, x) \in \mathcal{D}_\mathrm{e} $}
+\State Debias the model prediction using Equation \ref{equ:permutation}, add the predicted answer to $\mathcal{Y}$
+\State Estimate the sample-specific prior $P_\mathrm{prior} ( d_i | q )$ using Equation \ref{equ:prior}, add it into $\mathcal{P}$
+\EndFor
+\State Estimate the global prior $\widetilde{P}_\mathrm{prior} ( d_i )$ by averaging $\mathcal{P}$
+\algorithmiccomment{Prior Estimation}
+\For{$ (q, x) \in \mathcal{D}_\mathrm{r} $}
+\State Debias the model prediction using Equation \ref{equ:debias} \algorithmiccomment{Efficient Debiasing}
+\State Add the predicted answer to $\mathcal{Y}$
+\EndFor
+\State \Return $\mathcal{Y}$
+\end{algorithmic}
+\caption{\pride{}: Debiasing with Prior Estimation}
+\label{alg:main}
+\end{algorithm}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figs/varying_0s.pdf}
+  \caption{
+
+  We control the costs of Cyclic/Full Perm via the ratio $\beta$ of the debiased test samples, where we take $\beta \in \{ 0\%, 10\%, 20\%, 40\%, 60\%, 80\%, 100\% \}$.
+  For \pride{}, we control the costs via the ratio $\alpha$ of test samples for prior estimation (these samples are meanwhile directly debiased via Cyclic Perm), where we take $\alpha \in \{ 2\%, 5\%, 10\%, 20\%, 40\%, 60\%, 80\% \}$.
+  Note that when $\alpha = 100\%$, \pride{} degenerates to Cyclic Perm, so we do not plot them.
+  }
+  \label{fig:varying_0s}
+\end{figure}
+
+
+
+\section{Experiments}
+
+
+\subsection{Main Results}
+\label{subsec:main}
+
+We compare \pride{} with two strong permutation-based debiasing baselines: \textbf{Cyclic Permutation} and \textbf{Full Permutation}.
+The latter is not experimented on the 5-option CSQA benchmark due to the extremely high cost.
+Since \texttt{gpt-3.5-turbo} does not return the output probability, we sample 100 generated answers as an approximation to $P_\mathrm{observed}$.
+For \pride{}, we randomly sample $K=\alpha |\mathcal{D}|$ test samples as $\mathcal{D}_\mathrm{e}$ and report the average results over 5 runs.
+Here, we use $\alpha \in (0, 1)$ as the ratio of test samples for prior estimation to control the estimation overhead.
+\textit{\pride{} achieves superior debiasing effectiveness and performance improvement to Full/Cyclic Perm, especially in the low-cost scenario.}
+
+e., the recalls of different option positions before debiasing).
+It suggests that \textit{\pride{} can provide a good interpretation for the model's selection bias}.
+Furthermore, we observe that the priors are stable when estimated with different sizes of test samples (from 2\% to 20\%).
+It suggests that \textit{we are able to obtain a reliable estimate of prior even with a limited computational budget}.
+It also implies that the model's prior bias for option IDs exhibits a similar pattern across different samples, confirming our design motivation of \pride{} in \S \ref{subsec:pride}.
+
+Note that one may propose to debias with fewer permutations (such as 2 or 3 random permutations, with $\times 2$ or $\times 3$ costs) as a low-cost alternative to Cyclic ($\times n$) or Full ($\times n!$) Perm.
+\subsection{Transferability Analysis}
+\label{subsec:transferability}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figs/transfer_0s.pdf}
+    \caption{
+    Cross-domain debiasing results of \pride{} (0-shot, \textit{averaged over all the 20 LLMs}), with priors estimated using $\alpha = 5\%$ test samples from the source domains.
+    }
+    \label{fig:transfer_0s}
+\end{figure}
+
+In practical scenarios, we may not guarantee that the test samples always come from the same or similar domains. 
+We hope the prior estimated by \pride{} to be transferable: 
+Once the prior is estimated using a small number of samples from domain X, it can be used to debias not only other samples from domain X but also samples from domain Y.
+To this end, we evaluate the cross-domain transfer performance of estimated priors on the four category domains of MMLU and ARC (5 domains in total, all are 4-option MCQs).
+We first use \pride{} to estimate the prior with $\alpha$ test samples from a source domain X, and then apply it to debiasing the test samples from a target domain Y.
+As shown in Figure \ref{fig:transfer_0s}, \textit{the estimated priors exhibit reasonable transferability across different domains}.
+
+However, we find that although the transferability in terms of debiasing is promising, there may be a slight degradation in model performance when the domain gap is large (e.g., from STEM/Humanities to ARC).
+While \pride{} is not designed to improve model performance but rather to mitigate selection bias and thereby improve LLMs' robustness, we suggest \textit{updating the estimated prior using new samples when there are predictable domain shifts in test samples}, whose overhead is still negligible compared to the whole inference cost.
+
+\subsection{How Debiasing Affects Model Predictions?}
+\label{subsec:debias_prediction}
+
+We notice that although it is not our initial intention, the debiasing methods (\pride{} and Cyclic/Full Perm) usually improve the model performance.
+With \pride{} ($\alpha=5\%$) and Cyclic Perm as examples, we seek further insights on how debiasing affects model predictions and consequently improves model performance.
+We are especially interested in how \pride{} works with the estimated prior and how it works differently from Cyclic Perm.
+(1) For both \pride{} and Cyclic Perm, the samples with predictions changing from wrong to correct always surpass those from correct to wrong, which illustrates the improvement in model performance.
+(2) For the samples where the predictions are altered after \pride{} debiasing, the model usually holds low confidence in the original predictions.
+Meanwhile, the debiased predictions typically rank top-2 in the original prediction distribution, which holds especially for the larger models.
+It is because the predictions that the model is uncertain about are more susceptible to the model's prior bias for option IDs, which is exactly what \pride{} aims to alleviate.
+(3) Cyclic Perm even alters high-confidence predictions and brings more drastic prediction changes, e.g., the lowest-ranked option becomes the debiased prediction more frequently than in \pride{}.
+It also remarkably flattens the prediction distribution, i.e., $\widetilde{P}_\mathrm{debiased} (o_i | q, x)$ is smoother than $P_\mathrm{observed} (d_i | q, x)$.
+This is probably because the permutation-based debiasing is essentially a kind of ``mixture of experts'', where each ``expert model'' prepends the LLM with an option permutation operation.
+It leads to more deliberate and moderately confident predictions (corresponding to a flatter distribution), but on the other hand, requires more computational overhead than \pride{}.
+
+
+
+\section{Related Work}
+
+
+\paragraph{Large Language Models (LLMs)}
+The realm of large language models (LLMs) has been undergoing rapid and significant developments since the launch of GPT-3 \citep{gpt3}.
+Prominent examples, such as ChatGPT \citep{chatgpt}, LLaMA \citep{llama, llama2}, Alpaca \citep{alpaca}, and Vicuna \citep{vicuna}, have emerged successively over the past year.
+These models usually boast billions of parameters and are trained to comprehend natural language and follow human instructions \citep{instructgpt, selfinstruct}.
+
+\paragraph{Multiple Choice Questions (MCQs)}
+As a concise task format, MCQs are widely adopted in LLM-centric scenarios.
+For instance, in the automatic evaluation framework of \citet{vicuna, llm-as-a-judge}, GPT-4 \citep{gpt4} is presented with a question and two model answers and is tasked to determine which one is better.
+Numerous standard language model benchmarks also employ the task format of MCQs, such as MMLU \citep{mmlu}, ARC \citep{mmlu}, AGIEval \citep{agieval}, C-Eval \citep{ceval}.
+It thus piques our research interest in the robustness of LLMs in the context of MCQs.
+
+\paragraph{Bias and Robustness of LLMs}
+In our study, we use ``bias'' to refer to the systematic error within LLMs rather than the prejudice in culture or gender studied in the field of LLM safety \citep{click, llm-safeguard}.
+The bias in language models has always been an important research area closely related to model robustness.
+For instance, \citet{zhao2021calibrate} showed that GPT-3 is sensitive to task instructions and in-context examples, which arises from its bias towards certain answers.
+\citet{chen2022relation, si-etal-2023-measuring, pan-etal-2023-context} explored how LLMs' few-shot learning is influenced by the construction of in-context examples.
+\citet{wang2023large, llm-as-a-judge} found that GPT-4 leans towards the first presented answers and may produce unfair evaluation results.
+
+Contemporaneous with our work, \citet{pezeshkpour2023large} similarly observed that LLMs are sensitive to option position changes in MCQs and verified position bias as one cause of sensitivity.
+However, their study does not ablate the impact of option IDs, making their investigation on ``position bias'' less convincing.
+{In fact, our study finds that position bias is less regular and largely depends on models and tasks, while token bias is a more salient intrinsic cause of LLMs' selection bias and, consequently, poor robustness.}
+Their study is also conducted on very limited models (only GPT-4 and InstructGPT without open-source models, somewhat hindering reproducibility) and tasks (only three MMLU subtasks, one Big-Bench subtask \citep{big-bench}, and CSQA).
+In contrast, we draw more general observations through extensive cross-model and cross-task empirical evaluation, %
+which further inspires our proposal of the computation-efficient, interpretable, and transferable debiasing method \pride{}.
+
+
+
+\section{Conclusion}
+
+
+This work studies the inherent selection bias of large language models (LLMs), which makes them vulnerable to option position changes in multiple choice question (MCQ) evaluation.
+Through extensive empirical analyses, we pinpoint that this behavioral bias stems primarily from token bias, where the model a priori assigns more probabilistic mass to specific option ID tokens when predicting answers from the option IDs, and partially from position bias, where the model favors options presented at specific ordering positions.
+In particular, token bias is a more salient intrinsic cause of selection bias, while position bias is less regular and depends on models and tasks.
+Our proposed debiasing method \pride{} estimates the model's prior bias for option IDs and separates it from the overall prediction distribution.
+It remarkably mitigates selection bias, with no need for sample labels and only negligible computational overhead.
+We especially highlight \pride{}'s high efficiency, interpretability, and cross-domain transferability.
+We hope the empirical analyses in this work and our debiasing method can inspire future research on the bias and robustness of LLMs.
+
+
+

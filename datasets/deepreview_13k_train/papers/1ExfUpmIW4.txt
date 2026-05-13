@@ -1,0 +1,268 @@
+\title{Towards Robust and Cost-Efficient Knowledge Unlearning for Large Language Models}
+
+\begin{abstract}
+Large Language Models (LLMs) have demonstrated strong reasoning and memorization capabilities via pretraining on massive textual corpora. However, this poses risk of privacy and copyright violations, highlighting the need for efficient machine unlearning methods that remove sensitive data without retraining from scratch. While Gradient Ascent (GA) is commonly used to unlearn by reducing the likelihood of generating unwanted content, it leads to unstable optimization and catastrophic forgetting of retrained knowledge. We also find that combining GA with low-rank adaptation results in poor trade-offs between computational cost and generative performance. To address these challenges, we propose two novel techniques for robust and efficient unlearning for LLMs. First, we introduce Inverted Hinge loss, which suppresses unwanted tokens while maintaining fluency by boosting the probability of the next most likely token. Second, we develop a data-adaptive initialization for LoRA adapters via low-rank approximation weighted with relative Fisher information, thereby focusing updates on parameters critical for removing targeted knowledge. Experiments on the Training Data Extraction Challenge dataset using GPT-Neo models as well as on the TOFU benchmark with Phi-1.5B and Llama2-7B models demonstrate that our approach effectively removes sensitive information while maintaining reasoning and generative capabilities with minimal impact.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large Language Models (LLMs) exhibit substantial performance gains in downstream tasks with increasing model size and amount of pretraining data~\citep{(llm_survey)zhao2023survey}. 
+This has prompted extensive research on collecting high-quality textual corpora for LLM pretraining and developing larger models to an unprecedented scale~\citep{(gpt3)brown2020language, (palm)chowdhery2023palm,(nlg)smith2022using,(gopher)rae2021scaling,(lamma3)dubey2024llama}. 
+However, this approach has introduced significant privacy concerns due to LLMs' tendency to memorize data indiscriminately~\citep{(memorization)carlini2021extracting, (memorization2)carlini2022quantifying}. 
+For instance, Personally Identifiable Information  (\textit{e.g.}, names, phone numbers, and email addresses) can be easily extracted from LLMs~\citep{(memorization)carlini2021extracting}.
+Additionally, OpenAI is facing multiple copyright infringement lawsuits due to unpermitted use of licensed articles during LLM pretraining~\citep{grynbaum2023times}. 
+In response to such challenges as well as increasing interest in one's right to be forgotten (\textit{e.g.}, the GDPR legislation)~\citep{(gdpr)voigt2017eu, (rightforgotten)rosen2011right, villaronga2018humans}, machine unlearning for LLMs has emerged a critical and rapidly growing research field~\citep{(llm_unlearning_survey1)yao2023large,si2023knowledge}.
+
+One method for LLM unlearning would be to filter out sensitive data from the corpus and retrain the model from scratch, an approach known as \textit{exact} unlearning.
+With unprecedentedly large models and pretraining datasets, this process is highly resource-intensive and can easily become intractable under the possibility of multiple data deletion requests made in a sequential manner.
+This motivates \textit{approximate} unlearning, where the goal is to remove knowledge of specific data instances without retraining the model from scratch (\autoref{fig:unlearning_intro}). 
+In this regard, \cite{jang2023knowledge} proposed a simple method that finetunes LLMs using Gradient Ascent (GA) on data requested for deletion, and also introduced $n$-gram-based metrics to assess its efficacy. 
+However, the proposed GA method suffers significantly not only from unstable optimization due to the objective loss being unbounded, but also from high computational cost of full-finetuning all parameters within the LLM.
+
+\input{figures/unlearning_intro}
+
+Meanwhile, Low-Rank Adaptation (LoRA) has emerged as one of the most prominent techniques for parameter-efficient fine-tuning on downstream tasks~\citep{(lora)hu2021lora}. 
+The core idea of LoRA is to freeze all pretrained weights and instead train low-rank decomposition matrices to model the weight changes in each linear layer, effectively reducing the number of trainable parameters and thus its memory cost.
+In addition to its efficiency, the low-rankness in LoRA also induces a powerful regularization~\citep{biderman2024lora}, which can be beneficial in the realm of LLM unlearning by stabilizing optimization and preventing catastrophic forgetting of other remaining knowledge.
+From this perspective, we conjecture that LoRA would be a valuable approach to consider in practical unlearning scenarios, yet its application to LLM unlearning remains unexplored.
+In this paper, we explore LLM unlearning under the low-rank adaptation paradigm and propose two novel techniques for robust and efficient knowledge unlearning for LLMs.
+First, we analyze the derivatives of GA and highlight its shortcomings: 1) gradients increasing the probability of all other possible tokens cause unnecessary forgetting and 2) maximizing the next-token prediction loss involves unbounded optimization and can easily diverge. 
+To address these issues, we propose the Inverted Hinge Loss (IHL) that aims to replace each token to unlearn with the next most-probable token, and show that IHL enables fast and stable tuning by resolving the issues of GA.
+Second, we find that the low-rank of LoRA imposes regularization too strong for LLM unlearning, and forcing the model to fully unlearn data points through extensive tuning leads to suboptimal cost vs. post-unlearning performance trade-offs. 
+To accelerate unlearning in a controlled manner, we propose Fisher-Initialization of Low-rank Adapters (FILA), which data-adaptively assigns parameters responsible for generating unwanted information to adapters prior to tuning by decomposing the pretrained parameters weighted by the relative Fisher-information matrix.
+Our extensive experiments on unlearning samples in the Training Data Extraction Challenge dataset with GPT-Neo models as well as removing knowledge of fictitious author profiles using the TOFU benchmark with Phi-1.5B and Llama2-7B models consistently demonstrate that our proposed IHL combined with FILA significantly outperforms previous baselines in both efficiency and post-unlearning downstream performance.
+
+
+
+
+\input{figures/125M_intro_results}
+
+\cutsectionup
+
+
+\section{Related Work}
+
+\cutsectiondown
+\noindent{\textbf{Machine Unlearning.}} 
+{The primary objective of machine unlearning~\citep{cao2015} is to adapt a pretrained model to discard information acquired from a specific subset of data previously used for pretraining. Machine unlearning has garnered attention within neural network models dedicated to image classification~\citep{eternal,fastyet,hessian,canbad,cha2024learning}. 
+Recently, its significance has grown notably with Large Language Models (LLMs) due to crucial need for managing unintended memorization of pretraining data intrinsic to LLMs~\citep{si2023knowledge, yao2024machine}.}
+
+Several machine unlearning algorithms have been proposed for LLMs, with most falling under the category of parameter optimization-based methods~\citep{si2023knowledge}. 
+First, \cite{wang2023kga} introduced the Knowledge Gap Alignment loss, which employs knowledge distillation between output predictions from models trained on different datasets.
+\cite{chen2023unlearn} proposed the unlearning layer and applied it to remove specific knowledge while keeping other parameters of the model intact.
+\cite{liu-etal-2024-towards-safer} developed a two-stage framework: the harmful knowledge acquisition stage identifies and captures harmful knowledge within the model, and the knowledge negation stage removes that knowledge.
+While these approaches have demonstrated impressive unlearning results across various datasets, they are limited in applicability either by the need to retain entire training and forget datasets~\citep{wang2023kga, chen2023unlearn} or by the need to infer from a secondary model for knowledge distillation~\citep{wang2023kga, liu-etal-2024-towards-safer}.
+Another category of LLM unlearning methods are tuning-free model-editing methods, an example of which leverages task arithmetic to suppress harmful text~\citep{ilharco2022editing,wu2023depn}.
+While free from cost of tuning, these methods fails to show sufficient level of unlearning~\citep{ilharco2022editing} or incur higher computational costs for detecting privacy neurons~\citep{wu2023depn}.
+
+In contrast, inspired by image classifier unlearning literature~\citep{eternal, cha2024learning}, \cite{jang2023knowledge} adopted Gradient Ascent (GA) to unlearn from LLMs by maximizing the next-token prediction loss for all sequences in the forget set. 
+Unlike in image classification, they demonstrate that LLMs show negligible forgetting of retained knowledge when using GA on the forget data. Consequently, they show that effective unlearning for LLMs is achievable solely using the forget dataset, while preserving general LLM knowledge and maintaining performance on downstream tasks.
+More recently, \cite{yao-etal-2024-machine} demonstrated that incorporating GA with gradient descent on in-distribution data further enhances robustness against hyperparameters.
+
+
+
+\noindent{\textbf{Parameter-Efficient Fine-Tuning.}} 
+Full-finetuning LLMs to adapt towards specific downstream tasks and instructions incurs an intractable computational cost due to the large model size and complexity.
+To alleviate this burden, previous work has developed Parameter-Efficient Fine-Tuning (PEFT) methods that adapt only a small portion of LLM parameters while freezing the other pretrained parameters intact~\citep{(ia3)liu2022few, (oft)qiu2023controlling, (butterflyoft)liu2023parameter}. Inspired by the finding that fine-tuning LLMs exhibit a small intrinsic rank~\citep{li2018measuring, aghajanyan2021intrinsic}, LoRA and many of its derivatives attach low-rank adapters to linear layers within the LLM~\citep{(lora)hu2021lora, (adalora)zhang2023adaptive, (lycoris)yeh2023navigating, (vera)kopiczko2023vera, (dora)liu2024dora}, with which the output from the original layer is linearly combined with that of the adapter. A key benefit of LoRA is that the adapter weights can be merged seamlessly to pretrained parameters after fine-tuning, such that the post-adaptation LLM shares the same inference cost as the base pretrained LLM. While most previous work have used random initialization of LoRA adapters, PiSSA~\citep{(pissa)meng2024pissa} proposed to initialize LoRA weights using the principal singular vectors and values of the linear weights. 
+
+
+\cutsectionup
+
+
+\section{Proposed Method}
+
+\cutsectionup
+
+In this section, we introduce useful notation and provide background information on unlearning with Gradient Ascent (GA) and Low-Rank Adaptation (LoRA). 
+We then analyze derivatives of GA and highlight its inherent issues. 
+Building upon this analysis, we present the Inverted Hinge loss and demonstrate its effectiveness in addressing the problems of GA. Lastly, we illustrate the method of initializing LoRA data-adaptively via Fisher-information, thereby enabling cost-efficient unlearning.
+
+\subsection{Preliminaries}
+
+\noindent\textbf{Problem and notation.} Given a sequence of $T$ tokens $\vx = (x_1, x_2, \dots, x_T)$, a language model (LM) models the likelihood of the sequence via next-token prediction: $p_\theta (\vx) = \prod_{t=1}^T p_\theta(x_t | x_{<t})$. After pretraining, we assume that an end-user has requested to delete a subset of the training set $\mathcal{D}_f \subset \mathcal{D}$, which we refer to as the \textit{forget set}. 
+{The \textit{retain set} $\mathcal{D}_r$ refers to an auxiliary dataset that contains other relevant knowledge that must be retained after unlearning (\textit{e.g.}, Wikitext;~\citealt{(wikitext)merity2016pointer}).}
+\noindent\textbf{Gradient Ascent.} Ideally, the LM must assign low probability to sequences in $\mathcal{D}_f$, leading to a simple yet effective baseline of Gradient Ascent (GA;~\citealt{jang2023knowledge}). GA unlearns a sequence of tokens $\vx = (x_1, \dots, x_T)$ by maximizing the next-token prediction loss:
+\cutsubsectiondown
+\begin{align}
+    \mathcal{L}_{\text{GA}} (\vx) = -\sum_{t=1}^T \log(p_\theta(x_t | x_{<t})).
+\end{align}
+In practice, the log-likelihood is computed using cross-entropy loss and thus we GA essentially minimizes the Negative Cross-Entropy (NCE) loss. 
+Therefore, GA maximizing the next-token prediction loss involves unbounded optimization, leading to an ill-posed process with unstable tuning.
+While Gradient Difference (GD) aims to alleviate this instability by minimizing the next-token prediction loss for $\gD_r$ alongside NCE on $\gD_f$ as regularization, we find that the approach falls short of a fundamental solution, showing performance degradation as unlearning updates are made.
+
+\noindent\textbf{Low-Rank Adaptation.} Based on the assumption that parameter changes due to LLM adaptation exhibits an intrinsic low-rank~\citep{aghajanyan2021intrinsic}, LoRA models the change in parameters $\Delta\mW \in \R^{d \times k}$ of each linear weight $\mW \in \R^{d \times k}$ via a product of two low-rank matrices $\mA \in \R^{r \times k}$ and $\mB \in \R^{d \times r}$ where $r \ll \min(d,k)$ is the rank of the LoRA adapter. In other words, the output of the adapted linear layer given an input $\vx$ becomes:
+\begin{align}
+    (\mW + \Delta\mW)\vx = \mW \vx + \mB\mA \vx \nonumber.
+\end{align}
+During fine-tuning, the original weight $\mW$ is kept frozen and only the low-rank factors $\mA$ and $\mB$ are updated via gradient descent. To ensure that the initial attachment of LoRA adapters does not alter the output of the LLM, LoRA defaults to initializing $\mA$ with a Kaiming-uniform distribution~\citep{he2015delving} and $\mB$ as the zero matrix. After finetuning, LoRA adapters can simply be merged with the original weights $\mW' = \mW + \mB\mA$, thereby avoiding any additional latency during inference. 
+
+\subsection{Preliminary Results}
+
+Despite its wide use in domain adaptation and instruction tuning, LoRA is not yet explored under the task of LLM unlearning to the best of our knowledge. Therefore, we first share empirical results from low-rank adapting LLMs using {GD} as our objective to motivate our approach. 
+{Figure~\ref{fig:125M_intro_results} shows the results. Notably, vanilla LoRA suffers from lack of plasticity and ends up failing to sufficiently unlearn $\gD_f$ within 20 epochs. When running more unlearning epochs or increasing the learning rate for sufficient unlearning, the model loses its previously acquired reasoning and generative capabilities, as shown in the significant decrease in Reasoning and Dialogue performances. In the remainder of this section, we present two techniques towards making LLM unlearning viable while enjoying the efficiency of LoRA.}
+\subsection{Inverted Hinge Loss: A Novel Loss Function for LLM Unlearning}
+\noindent\textbf{Motivation.}
+We analyze the inherent issues of GA from the perspective of its derivative. The output layer of a language model is a softmax layer that outputs probabilities over the vocabulary. Let ${y}_t$ be the logits (pre-softmax activations) produced by the LLM model for the $t$-th token, and let $V$ be the vocabulary size. The probability $ p_\theta(x_t | x_{<t})$ is given by the softmax function: $p_\theta(x_t | x_{<t}) = {\exp(y_t^{(x_t)})}/{\sum_{v=1}^V \exp(y_t^{(v)})}$ where $ y_t^{(x_t)} $is the logit corresponding to the true token $x_t$ and $ y_t^{(v)}$ is the logit corresponding to the $v$-th token in the vocabulary. When we use $\mathcal{L}_{\text{GA}}$ for unlearning for LLMs, the gradient of the log-probability with respect to the logits is
+\begin{align*}
+\frac{\partial \log\left(p_\theta(x_t | x_{<t})\right)}{\partial y_t^{(v)}} =
+\begin{cases}
+1 - p_\theta(x_t | x_{<t}) & \text{if } v = x_t \\
+- p_\theta(v | x_{<t}) & \text{if } v \neq x_t
+\end{cases}
+\end{align*}\label{equeation:log_prob}
+From this derivative of GA, we can interpret its unlearning mechanism: GA decreases the prediction score corresponding to the true token $x_t$, while increasing the prediction score for all other tokens $v \neq x_t$ in the vocabulary. 
+Consequently, we hypothesize that GA suffers from the following problems: 1) the objective is unbounded with the possibility of divergence during optimization, 2) gradient updates are inefficient due to gradients spreading across all other logits with large vocabulary sizes, and 3) there is unnecessary degradation of generative performance due to increasing the logits for all other tokens regardless of textual coherence.
+
+\noindent\textbf{Inverted Hinge Loss.}
+To cope with aforementioned limitations of GA, we aim to design a new loss function that achieves effective unlearning by decreasing the prediction score of the true token, while focusing gradient updates on only a minimal number of viable replacements for the ground-truth token. 
+Inspired by the Hinge loss~\citep{cortes1995support}, we devise Inverted Hinge loss (IHL) as below:
+\begin{align*}
+    \mathcal{L}_{\text{IHL}}(\vx) = \max\left(0, 1 + p_\theta(x_t | x_{<t}) - \max_{v \neq x_t}(p_\theta(v | x_{<t}))\right)
+\end{align*}
+As the probability $p_\theta(x_t | x_{<t})$ is given by the softmax function, the derivative of $\mathcal{L}_{\text{IHL}}(\vx)$ with respect to $y_t^{(v)}$ is:
+\begin{align*}
+\frac{\partial \mathcal{L}_{\text{IHL}}(\vx)}{\partial y_t^{(v)}} =
+\begin{cases}
+p_\theta(x_t | x_{<t}) (p_\theta(v^\star | x_{<t}) - p_\theta(x_t | x_{<t}) +1) & \text{if } v = x_t \\
+p_\theta(v^\star | x_{<t}) (p_\theta(v^\star | x_{<t})  - p_\theta(x_t | x_{<t}) -1) & \text{if } v = v^\star  \\ p_\theta(v | x_{<t})(p_\theta(v^\star | x_{<t}) - p_\theta(x_t | x_{<t})) &\text{if} {\ v \neq x_t \ \text{and} \ v \neq v^\star}.
+\end{cases}
+\end{align*}
+{Here, $ v^\star = \arg\max_{v \neq x_t} p_\theta(v | x_{<t}) $ and the above represents the derivative when $ \mathcal{L}_{\text{IHL}}(\vx) \neq 0 $. Note that $ \frac{\partial \mathcal{L}_{\text{IHL}}(\vx)}{\partial y_t^{(v)}} = 0 $ when $ \mathcal{L}_{\text{IHL}}(\vx) = 0 $.} 
+
+The derivative of $ p_\theta(x_t | x_{<t}) $ and $ p_\theta(v^\star | x_{<t}) $ clearly illustrate how the IHL addresses the shortcomings of GA in knowledge unlearning for LLMs. First, in the case where unlearning has not yet been achieved (\textit{i.e.}, when $ p_\theta(x_t | x_{<t}) $ is greater than $ p_\theta(v^\star | x_{<t}) $), the absolute value of the gradient for the true token $ x_t $ is equal to or greater than that of $ v^\star $ (with opposite sign). This ensures that not only knowledge unlearning for the $ t $-th token is executed rapidly but also prevents spreading out of gradients. 
+During this process, the prediction scores for tokens other than $ x_t $ and $ v^\star $ increase slowly in proportion to the difference between the predictions for $ x_t $ and $ v^\star $.
+Second, once knowledge unlearning is complete (\textit{i.e.}, when $ p_\theta(x_t | x_{<t}) $ becomes less than $ p_\theta(v^\star | x_{<t}) $), the prediction scores for tokens other than $ x_t $ and $ v^\star $ decrease. This not only prevents unnecessary forgetting but also results in a bounded loss function, allowing stable unlearning via stochastic gradient descent.
+
+\cutsubsectiondown
+\subsection{FILA: a Novel LoRA Initialization for LLM Unlearning}
+\cutsubsectiondown
+
+\noindent\textbf{Motivation.} 
+\cite{biderman2024lora} discovered that, while it typically does not surpass full fine-tuning in performance, LoRA also induces less forgetting than full fine-tuning in domain adaptation scenarios.
+While this stability is beneficial to retaining knowledge of $\gD_r$ during unlearning, it also imposes a strong burden under the strict objective to remove knowledge of $\gD_f$ completely. As a result, vanilla LoRA unlearning requires large number of model updates through $\gD_f$ for successful unlearning, which leads to significant deterioration in downstream performance (as shown in \autoref{fig:125M_intro_results}). 
+Drawing inspiration from PiSSA~\citep{(pissa)meng2024pissa}, we conjecture that initializing LoRA adapters to contain parameters that are relatively more important to $\gD_f$ than to $\gD_r$ would reinforce the model's plasticity to forgetting $\gD_f$, thereby accelerating the rate of unlearning and minimizing catastrophic forgetting on $\gD_r$. In order to quantify the importance of parameters to particular data points, we leverage Fisher information matrices.
+
+\noindent\textbf{Parameter Importances via Fisher Information.} 
+{The Fisher information matrix $\mF_\theta$ captures the amount of information a dataset $\gD$ provides on model parameters $\theta$. More concretely, $\mF_\theta$ is computed as the second cross-moments of first partial derivatives of the log-likelihood of $\gD$ (left of Eq.~\ref{eqn:fisher}). 
+However, as marginalizing across the space of $\gD$ is intractable, many works in continual learning~\citep{(ewc)kirkpatrick2017overcoming} and model compression~\citep{(wlra)hsu2022language} literature have thus used the empirical Fisher information $\hat{\mF}_\theta$ instead. In the context of LLMs, this can be computed as:
+\begin{align}
+    \mF_\theta(\gD) = \mathbb{E}_\gD \left[\left(\dfrac{\partial}{\partial\theta} \log p{_\theta}(\gD | \theta)\right)^2\right] \approx
+    \dfrac{1}{|\gD|} \sum_{\vx \in \gD} \left(\dfrac{\partial}{\partial\theta} \mathcal{L}_{\text{LM}}(\vx;\theta)\right)^2 \eqcolon \hat{\mF}_\theta(\gD) \label{eqn:fisher},
+\end{align}
+where $\mathcal{L}_{\text{LM}}$ denotes the next-token prediction loss used to pretrain LMs, $\mathcal{L}_{\text{LM}} (\vx;\theta) = \sum_{t=1}^T \log(p_\theta(x_t | x_{<t}))$. Within our LLM unlearning setup, a high empirical Fisher information measured with $\gD_f$ indicates that $\mathcal{L}_{\text{LM}}$ on $\gD_f$ leads to large absolute gradients on the parameter under concern, and we consider such parameters to be \textit{important} in generating sequences in $\gD_f$.
+}
+
+Let {$\hat{\mF}_\mW^f \coloneqq \hat{\mF}_\mW (\gD_f)$} denote the empirical Fisher information matrix of the target parameter $\mW$ measured using the forget set $\gD_f$ (\textit{resp.} $\hat{\mF}_\mW^r$ using the retain set $\gD_r$). Then, we use the relative Fisher information {$\hat{\mF}_\mW^{\text{rel}} \coloneqq \hat{\mF}_\mW^f / \hat{\mF}_\mW^r\in \R^{d \times r}$} as an importance metric to  identify parameters that are important exclusively for $\gD_f$ and not for $\gD_r$. While generating $\gD_f$ involves extracting memorized information on $\gD_f$ as well as composing linguistically fluent outputs, we only wish to adjust parameters responsible for the former and thus use $\hat{\mF}_\mW^{\text{rel}}$ rather than $\hat{\mF}_\mW^f$.
+
+\noindent{\textbf{Fisher-weighted Initialization of Low-rank Adapters.}}
+Given the relative importance $\hat{\mF}_\mW^{\text{rel}}$ for each target weight $\mW$, we propose to initialize the corresponding LoRA adapter weights with the solution to the following Weighted Low-Rank Approximation (WLRA) problem:
+\begin{align}
+    \min_{\mA\in\R^{r\times k},\mB\in\R^{d \times r}} \sum_{i,j} \left([\hat{\mF}_\mW^{\text{rel}}]_{i,j}  (\mW - \mB\mA)_{i,j}\right)^2.\nonumber
+\end{align}
+Note that when all weights $[\hat{\mF}_\mW^{\text{rel}}]_{i,j}$ equal one, WLRA reduces to standard low-rank matrix approximation, for which the solution can easily be computed via rank-$r$ SVD. For general weights, however, this minimization problem does not have a closed-form solution and requires iterative optimization~\citep{(wlra)srebro2003weighted}. While we may resort to iterative methods to initialize LoRA weights in a fine-grained manner, this would undermine the efficiency gains from deploying low-rank adapters. Therefore, we assume that parameters in each row of $\mW$ share the same importance equal to the square-root of the row-wise sum of $\hat{\mF}_\mW^{\text{rel}}$, and simplify the problem to
+\begin{align}
+    \min_{\mA\in\R^{r\times k},\mB\in\R^{d \times r}} \left\| \texttt{diag}\left((\hat{\mF}_\mW^{\text{rel}} \mathds{1})^{\frac{1}{2}}\right) (\mW - \mB\mA)\right\|_2 \nonumber
+\end{align}
+with $\mathds{1} \in \R^k$ and $\texttt{diag}(\cdot)$ indicating the all-one vector and the vector diagonalization function, respectively.
+Unlike general WLRA, this row-wise WLRA problem has a closed-form solution, which can be obtained by applying rank-$r$ SVD to decompose $\text{diag}(\hat{\mF}_\mW^{\text{rel}} \mathds{1}) \mW = \mU \mS \mV^T$ and computing $\mB^* = (\hat{\mF}_\mW^{\text{rel}} \mathds{1})^{-1} \mU \mS^{\frac{1}{2}}$ and $\mA^* = \mS^{\frac{1}{2}}\mV^T$.
+ 
+Given this solution, we use $\mB^*$ and $\mA^*$ as initial LoRA weights. To ensure that the model behavior remains the same after LoRA initialization, the base layers are also updated with $\mW^* = \mW - \mB^* \mA^*$. Intuitively, our Fisher-weighted Initialization of Low-rank Adapters (FILA) extracts parameters that are important for generating $\gD_f$, but not for generating $\gD_r$, such that LoRA tuning can be focused on erasing knowledge relevant to $\gD_f$ while keeping information regarding $\gD_r$.
+
+
+\cutsubsectiondown
+\subsection{Final Loss Function for LLM Unlearning}
+\cutsubsectiondown
+
+In summary, we perform unlearning on the model $\bm{\Theta} = \bm{\theta} \cup \bm{\theta}_{\text{FILA}}$, consisted of original pretrained weights $\bm{\theta}$ and the FILA-initialized low-rank adapter weights for each linear layer $\bm{\theta}_{\text{FILA}} = \{\mA^{*}_{\ell}, \mB^{*}_{\ell}\}_{\ell=1}^{L}$, where $L$ represents the number of layers tuned via LoRA.
+Additionally, we incorporate GD, which utilizes the auxiliary retain set $\mathcal{D}_r$. The final loss function using both the proposed IHL and FILA is defined as follows:
+\begin{align}
+\minimize_{\theta_{\text{FILA}}}  \sum_{\vx_r \in \gD_f, \vx_f \in \gD_r} \mathcal{L}_{\text{IHL}}(\vx_f) + \mathcal{L}_{\text{LM}} (\vx_r) \label{eqn:ours}
+\end{align}
+In practice, training (unlearning) for the LLM model is conducted by minimizing Eq.\ref{eqn:ours} through stochastic gradient descent.
+
+\cutsectiondown
+
+
+\section{Experiments}
+
+
+In this section, we first perform experiments unlearning samples from the Training Data Extraction Challenge (TDEC; \S\ref{sec:tdec}), followed by ablation and analytical results (\S\ref{sec:analysis}). We also conduct experiments on the Task of Fictitious Unlearning (TOFU; \S\ref{sec:tofu}), a benchmark that well-mimics a real-world scenario for LLM unlearning evaluation. 
+For brevity, we present results from additional experiments such as continual unlearning in \autoref{sec:additional_experiments}.
+\input{tables/main_result}
+
+\cutsubsectionup
+\subsection{Training Data Extraction Challenge}\label{sec:tdec}
+\cutsubsectionup
+
+\noindent\textbf{Experimental Setup.}  \  \
+ For each experiment, we randomly sample 32 sequences with 200 tokens to consist the forget set $\gD_f$. For the retain set $\gD_r$, we use the subset of WikiText~\citep{(wikitext)merity2016pointer} as it contains factual world knowledge that we wish to maintain after unlearning. We consider GPT-Neo 125M, 1.3B, and 2.7B pretrained on the Pile dataset as our base models, and unlearn $\gD_f$ using five different forget sets. For this experiment, we use a fixed learning rate of 2e-4 and use LoRA adapters with rank $r = \{4, 8, 16, 32\}$. 
+For reasons we illustrate later in \S\ref{sec:analysis}, we choose to apply LoRA on query and value layers in the attention module and two linear layers within feed-forward layers.
+Following previous work~\citep{jang2023knowledge}, we measure the unlearning efficacy with two metrics. The \textbf{$\vn$-gram Extraction Likelihood (EL$_\vn$)} measures the $n$-gram overlap between the ground truth sequence in $\gD_f$ and the output generated by the model. The \textbf{Memorization Accuracy (MA)} measures the token-wise accuracy of the LLM on $\gD_f$. 
+More details on these metrics are shared in \autoref{sec:metrics}. 
+After each unlearning epoch, we measure EL$_{10}$ and MA of the model, and we consider the model has successfully unlearned $\gD_f$ if both values measured on $\gD_f$ become smaller than those measured from a held-out validation set that the model has never seen before within 20 unlearning epochs.
+Once unlearning is finished, we evaluate the unlearned model on various downstream benchmarks to measure how well the LLM maintains its previously acquired reasoning and generative capabilities. To assess its reasoning capabilities, we average accuracies across 9 different classification datasets. To measure generative performance, we also average the F1 scores over four dialogue generation datasets.
+Lastly, we measure the perplexity on the validation subset of the Pile~\citep{gao2020pile}.
+
+We consider two LLM unlearning baselines, Gradient Ascent (GA)~\citep{jang2023knowledge} and Gradient Difference (GD)~\citep{liu2022continual,(tofu)maini2024tofu}, both of which only require the original language model and datasets $\gD_f$ and $\gD_r$ representing knowledge we wish to unlearn and retain, respectively.
+We exclude methods that require another auxiliary model~\citep{wang2023kga,liu-etal-2024-towards-safer} or the entire training data~\citep{wang2023kga,chen2023unlearn} from our baselines.
+
+\input{figures/tdec_results}
+
+\noindent\textbf{Results.} \ \
+\autoref{tab:main_result} shows evaluation results using a fixed LoRA rank of 16 and \autoref{fig:tdec_results} shows analogous results using a different LoRA ranks. Our key findings are as follows. 
+First, using GD not only meets the forgetting criteria in fewer epochs across all model sizes but it also preserves previously acquired knowledge (\textit{i.e.}, performance on Reasoning, Dialogue, and Pile) better than GA.
+Mainly for 125M and 1.3B models, GA causes a significant decline in generative performance, whereas GD partially mitigates this decline and improves both Dialogue F1 scores and the Pile perplexity. 
+Second, we find that simply applying GD with LoRA fails to achieve successful unlearning across all model sizes.
+Second, we find that imply running GD with LoRA significantly increases the number of epochs required for successful unlearning.
+While enjoying great parameter-efficiency by tuning only about 0.7\% to 1.6\% of the total parameters when using LoRA, its application to unlearning with GD results in significant loss in overall language capability, especially on generative tasks.
+Lastly, using our proposed IHL in conjunction with FILA achieves the forgetting criteria in fewest epochs while best preserving LLM performance. Although IHL with LoRA alone retains knowledge better than the baseline, it requires more epochs to meet the forgetting criteria. This is resolved when used together with FILA, and the number of required epochs is significantly reduced, reducing catastrophic forggetting of previously acquired knowledge even further.
+
+
+
+\input{figures/module_analysis_results}
+
+\cutsectionup
+\subsection{Analysis}\label{sec:analysis}
+\cutsubsectionup
+\noindent\textbf{What modules do we need to adapt?} \  \
+Figure \ref{fig:module_analysis_results} presents experiments where low-rank adapters are attached to various target parameter groups, including those for Query (Q), Value (V), Key (K), Output (O) in the attention module, and the Feed-Forward Network (FFN). While the original LoRA paper~\citep{(lora)hu2021lora} indicates that applying LoRA to Q and V yields superior performance on downstream tasks, our experiments indicate that using LoRA on Q and V only is insufficient to meet the unlearning criteria within our timeframe of 20 epochs. Notably, when LoRA is applied to FFNs, we observe significant increase in rate of successful unlearning. Furthermore, integrating FILA with IHL achieves the best post-unlearning performance across all LoRA target module combinations.
+
+\noindent\textbf{Cost-efficiency of the proposed method.} \  \ Our compute-cost vs. performance comparisons in \autoref{fig:125M_intro_results} show that, while vanilla LoRA allows significant reduction in unlearning costs (\textit{i.e.}, FLOPs) by freezing the majority of parameters, it incurs substantial performance losses compared to full-parameter unlearning due to excessive stability originating from its low-rankness. In contrast, combining the proposed IHL with FILA not only achieves the best performance but also  leverages the cost advantages of LoRA.
+\cutsectionup
+\subsection{Task of Fictitious Unlearning}\label{sec:tofu}
+\cutsubsectionup
+\noindent\textbf{Experimental Setup.}   \ The Task of Fictitious Unlearning (TOFU) benchmark~\citep{(tofu)maini2024tofu} is a synthetic dataset containing 20 question-answer pairs for each of 200 fictitious author profiles generated by GPT-4. The TOFU evaluation pipeline first finetunes a pretrained LLM on all QA pairs. Given this finetuned LLM that serves as our base model, our task is to unlearn all information regarding 1\%, 5\%, or 10\% of the authors from the model. Note that we can obtain reference models finetuned only on the retain set (QA-pairs on 99\%, 95\%, or 90\% of authors), with which we evaluate the \textbf{Forget Quality} of unlearned models by measuring the \textit{p}-value from a Kolmogorov-Smirnov test. A high $\textit{p}$-value indicates high distributional similarity between the unlearned model and the reference model, thus implying strong forgetting. To evaluate how well the model retains other information outside the forget set, we measure the \textbf{Model Utility} as the aggregated model performance. Further details on the dataset and evaluation pipeline can be found in ~\cite{(tofu)maini2024tofu}.
+
+Following the original paper of TOFU, we prepare two base models by finetuning Phi-1.5B and Llama2-7B on TOFU for 5 epochs with learning rates 2e-5 and 1e-5, respectively. We then unlearn using two baselines (GA and GD) and our two methods (IHL and IHL+FILA) using LoRA adapters of rank 4, 8, 16, or 32. For unlearning, we use a learning rate of 2e-4 if our base model is from Phi-1.5B and 1e-4 for Llama2-7B. All training procedures run 5 epochs with an effective batch size
+of 32 using the AdamW optimizer~\citep{(adamw)loshchilov2019decoupledweightdecayregularization}.
+
+\input{figures/tofu_all_rank_results}
+
+\noindent\textbf{Results.} \autoref{fig:phi_tofu_results} shows the model utility vs. forget quality curves from unlearning three differently-sized TOFU forget sets from Phi-1.5B and Llama2-7B models. Comparing results among different forget set sizes, we first observe that forgetting 1\% of author profiles is fairly straightforward, as all curves quickly approach the reference model with a single epoch, with increasing the LoRA rank leading to incremental improvements in performance. On the other hand, when unlearning a larger set of profiles (\textit{i.e.}, 5\% or 10\%), we see that both GA and GD quickly degrades model utility. 
+
+With regards to our proposed method, we find that replacing the NCE loss in GD with our IHL better retains model utility across all LoRA ranks and forget set sizes, as curves are more aligned straight-up towards the reference point with negligible shift in model utility. This stability comes at the cost of unlearning efficiency, however, as the rate at which the LLM forgets $\gD_f$ is slower with IHL due to IHL decreasing the likelihood of the unwanted token by increasing the likelihood of only one other most-possible token each time in a controlled manner. Nonetheless, initializing LoRA adapters with FILA largely alleviates this issue and enhances unlearning efficiency of IHL by focusing gradient updates on parameters important to generating $\gD_f$. 
+
+Interestingly, we find the prior weight assignment via FILA can lead to excessive unlearning in some cases (\textit{e.g.}, unlearning 10\% forget set with ranks 8 or 16 on Llama2-7B), with model updates reducing the forget quality after reaching the upper bound at zero. This behavior resembles the \textit{Streisand effect} as unlearning gradients beyond a certain point in optimization unintentionally renders $\gD_f$ more noticeable within the model~\citep{eternal}. As reference models are not available for measuring forget quality in real-world scenarios, finding the optimal point at which to stop unlearning to prevent this effect as well as designing a robust evaluation metric that does not depend upon oracle models would be interesting directions, which we leave as future work.
+
+
+
+\cutsectiondown
+
+
+\section{Concluding Remarks}
+
+\cutsectiondown
+
+In this paper, we address limitations of Gradient Ascent (GA), a widely used method for LLM unlearning, and introduce a novel Inverted Hinge loss (IHL) to replace the negative cross-entropy loss in GA and resolve issues with dispersed gradients and unboundedness. We also propose Fisher-weighted initialization for low-rank adaptation (FILA) that pre-assigns weights relatively important to generating unwanted information as means to facilitate efficient LLM unlearning with LoRA.
+Experiments on the Training Data Extraction Challenge dataset with GPT-Neo models along with the TOFU benchmark using Phi-1.5B and Llama2-7B models show that our proposed methods enable faster and more stable LoRA-based LLM unlearning, significantly outperforming existing baselines in computational efficiency as well as post-unlearning performance.
+
+\newpage
+
+
+
+
+
+

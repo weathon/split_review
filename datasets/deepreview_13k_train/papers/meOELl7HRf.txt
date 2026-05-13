@@ -1,0 +1,423 @@
+\title{Long-LRM: Long-sequence Large Reconstruction Model for Wide-coverage Gaussian Splats}
+
+\begin{abstract}
+We propose \methodname{}, a generalizable 3D Gaussian reconstruction model that is capable of reconstructing a large scene from 
+a long sequence of input images. Specifically, our model can process 32 source images at 960$\times$540 resolution within only 1.3 seconds on a single A100 80G GPU. Our architecture features a mixture of the recent Mamba2 blocks and the classical transformer blocks which allowed many more tokens to be processed than prior work, enhanced by efficient token merging and Gaussian pruning steps that balance between quality and efficiency. 
+Unlike previous generalizable 3D GS models that are limited to taking 1$\sim$4 input images and can only reconstruct a small portion of a large scene, \methodname{} reconstructs the entire scene in a single feed-forward step. 
+On large-scale scene datasets such as DL3DV-140 and Tanks and Temples, our method achieves performance comparable to optimization-based approaches while being two orders of magnitude more efficient. Project page: \url{https://arthurhero.io/projects/llrm/}%\kz{Our project page is available at: xxxx}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begin{figure}[h]
+\vskip -0.15in
+    \centering
+    \includegraphics[width=0.99\linewidth]{llrm_iclr2025/fig/fig1_crop.pdf}
+    \caption{We introduce \methodname{}, a novel Gaussian reconstruction model capable of reconstructing a large real scene from a long sequence of up to 32 input images, with a wide viewing coverage at a resolution of $960\times 540$, in just 1.3 seconds. 
+    Notably, as a feed-forward generalizable model, \methodname{} can achieve instant large-scale GS reconstruction with high rendering quality comparable to (and, as shown in the figure, sometimes even surpassing) the 
+    optimization-based 3D Gaussian splatting (3D GS), which requires over 13 minutes for optimization.
+    }
+    \label{fig:teaser}
+\end{figure}
+
+3D reconstruction from multi-view images is a fundamental problem in computer vision, with applications ranging from 3D content creation, VR/AR, to autonomous driving and robotics. 
+Recently, NeRF \citep{nerf} and various radiance field-based methods \citep{instantngp,pointnerf,chen2022tensorf,zipnerf} have shown great potential in reconstructing high-quality 3D scenes from a set of posed images via differentiable rendering. However, these models are slow to reconstruct and not generalizable to unseen scenes, as they require optimization for each scene independently. 
+While 3D Gaussian splatting (GS) \citep{3dgs} has significantly advanced the reconstruction and rendering efficiency, it still typically requires at least 10 minutes to optimize for each scene and can not achieve an instant reconstruction. 
+
+Recently, generalizable 3D GS models \citep{szymanowicz2023splatter,tang2024lgm} have been proposed to enable fast feed-forward GS reconstruction, avoiding per-scene optimization. Several methods \citep{pixelsplat,gslrm,mvsgaussian,mvsplat} have shown promising scene-level reconstruction results on real 3D captures by regressing per-pixel Gaussian primitives.
+In particular, GS-LRM \citep{gslrm}, following the principles of 3D large reconstruction models (LRMs) \citep{hong2024lrm,li2023instant3d,wang2023pflrm} and leveraging a densely self-attention-based transformer \citep{transformer}
+without using 3D inductive biases such as epipolar attention or sweeping volumes, 
+has achieved state-of-the-art novel-view rendering quality on multiple challenging datasets. 
+However, 
+the previous generalizable GS models are designed to handle a small number of input images (typically 1$\sim$4)  with limited viewing coverage, 
+thus are incapable of reconstructing large real-world scenes, which require a wide view span and at least dozens of images. In such cases, per-scene optimization-based methods were still the only viable option.
+
+Our goal is to enable fast and accurate GS reconstruction of large scenes with wide viewing coverage through direct feed-forward network prediction.
+To this end, we propose \methodname{}, a novel GS-based LRM that is able to \emph{handle long-sequence input and achieve high-quality 3D GS reconstruction of large scenes from as many as 32 widely-displaced multi-view images at 960$\times$540 resolution within only 1.3 seconds} on a single A100 80G GPU. As shown in Fig.~\ref{fig:teaser}, the %full-scene GS reconstruction in 1.3 seconds and produce 
+photorealistic novel-view renderings produced by our approach has a quality comparable to or even better than 3D GS \citep{3dgs} that takes over 10 minutes for per-scene optimization.
+
+Specifically, as inspired by GS-LRM, we patchify the multi-view input images into a sequence of patch tokens and consider the task of GS reconstruction as a sequence-to-sequence translation to regress pixel-aligned Gaussian primitives. However, unlike GS-LRM that focuses on 2-4 input images, our input setting with 32 960$\times$540 images corresponds to an extremely long token sequence -- about 250K context length (considering a patch size of $8\!\times\!8$) -- which is highly challenging for dense transformers (as used by GS-LRM) due to their quadratic time complexity. 
+Note that this length is even larger than many modern large language models (LLM), such as LLama3~\citep{llama} with a context length of 128K.
+To address this challenge, we leverage the recent advancements of state space models (SSMs) \citep{mamba}, designed to handle long-context reasoning efficiently with linear complexity. 
+In particular, we propose a novel LRM architecture that combines Mamba2 \citep{mamba2} blocks with transformer blocks, enabling efficient sequential long-context reasoning while preserving critical global context. 
+Additionally, we introduce a token merging module to further reduce the number of tokens in the middle of the network processing, along with a Gaussian pruning step to encourage efficient use of the dense per-pixel Gaussians. 
+These combined designs allow us to train our \methodname{} using similar computational resources to GS-LRM, while successfully scaling up the input sequence length and achieving over $10\times$ faster training on long-sequence inputs, enabling fast, high-quality, wide-coverage reconstruction of large real scenes (see Tab.~\ref{tb:archi}).
+
+We train our \methodname{} on the recent DL3DV dataset \citep{dl3dv}, which comprises approximately 10K diverse indoor and outdoor scenes. We evaluate our model on both the DL3DV test set and the Tanks and Temples dataset \citep{tanks}, using 32 input images for each scene. The results show that our direct feed-forward reconstruction achieves comparable novel view synthesis quality to the per-scene optimization results of 3D GS, while substantially reducing the reconstruction time -- by two orders of magnitude (1.3 seconds vs. 13 minutes). \textbf{Our approach is the first feed-forward GS solution for wide-coverage scene-level reconstruction and the first to enable large-scale GS scene reconstruction in seconds.}
+
+
+
+\section{Related Work}
+
+
+\textbf{3D Reconstruction.} Many traditional and learning-based 3D reconstruction methods have been focusing on pure geometry reconstruction, where surface meshes~\citep{atlas,neuralrecon,transformerfusion,vortx} or depth maps~\citep{cnnstereo,colmap,mvsnet,cheng2020deep,mvsmachine,deepvideomvs,simplerecon} are the target output. These methods usually involve explicit feature matching along the epipolar lines, followed by the prediction of TSDF or depth values performed by the neural networks. In contrast, we adopt the recent 3D GS representation for joint geometry and appearance reconstruction, allowing for photo-realistic novel view synthesis.
+
+\textbf{Neural reconstruction and rendering.} 
+Instead of directly predicting the surface geometry, NeRF~\citep{nerf} proposes to leverage differentiable volume rendering to regress novel-view images, supervised with a rendering loss.
+This implicit way of reconstruction eliminates the need for hard-to-obtain ground-truth 3D supervision while producing visually pleasing reconstruction results. 
+However, NeRF reconstruction requires optimizing its network for each scene independently, taking hours or even days for reconstruction.
+Follow-up works have introduced advanced neural scene representations \citep{zipnerf,instantngp, chen2022tensorf, pointnerf, nerfacto, mip360} and largely improved the time and memory efficiency -- with 3D Gaussian splatting~\citep{3dgs} notably reducing the reconstruction time to  dozens of minutes while keeping high reconstruction quality and enabling real-time rendering, but these methods are still unable to achieve instant prediction. 
+We aim to build a scalable feed-forward reconstruction model, capable of achieving instant 3D GS reconstruction in seconds.
+
+
+\textbf{Generalizable NeRF and 3D GS.} 
+Previous attempts to develop generalizable NeRF models have primarily relied on classical projective geometric structures, such as epipolar lines~\citep{pixelnerf,ibrnet,neuray,gprn} or plane-sweep cost volumes~\citep{mvsnerf,geonerf,enerf,zhang2022nerfusion}, to aggregate multi-view features from nearby views for local NeRF estimation. 
+Recently, similar designs have been adapted to enable feed-forward scene-level 3D GS reconstruction with generalizable models~\citep{pixelsplat,mvsplat,mvsgaussian}. 
+However, since both epipolar geometry and plane-sweep volumes depend on significant overlap between input views, these GS-based methods (as well as most prior NeRF-based methods) are limited to local reconstructions from a small number (1$\sim$4) of narrow-baseline inputs.
+On the other hand, GS-LRM \citep{gslrm} avoids these 3D-specific structural designs and adopts an attention-based transformer, achieving state-of-the-art performance in this domain. 
+However, GS-LRM still focuses on solving the problem of local reconstruction from just 2$\sim$4 views. 
+In contrast, our model supports feed-forward 3D GS reconstruction from 32 input images, enabling complete reconstruction of large scenes.
+
+\textbf{Efficient models for long sequences.} 
+Transformer-based 3D large reconstruction models (LRMs) have emerged \citep{hong2024lrm,li2023instant3d,xu2023dmv3d,wang2023pflrm,wei2024meshlrm,xie2024lrm,gslrm}, enabling high-quality 3D reconstruction and rendering from sparse-view inputs.
+While transformers dominate various AI fields due to their flexibility with input modalities and scalability in model sizes, their quadratic time complexity makes them extremely slow when handling long sequences, often requiring thousands of GPUs for parallel computing \citep{llama}.
+Efficient architectures such as linear attention~\citep{linear} and structured state space model (SSM)~\citep{s4} have been proposed in NLP to deal with large corpus of text.
+Mamba~\citep{mamba}, a variant of SSM, offers significant improvements by computing state parameters from each input in the sequence and has been successfully extended to tackle vision tasks \citep{visionmamba,vmamba,jamba,localmamba}.
+Mamba2~\citep{mamba2} further restricts the state matrix $A$ and expands state dimensions, showing performance comparable to transformers on multiple language tasks.
+However, empirical studies~\citep{empirical} indicate that transformers still outperform Mamba2 in in-context learning and long-context reasoning—both critical for 3D reconstruction.
+Inspired by the findings and hybrid models from \cite{empirical} and Jamba~\citep{jamba}, we propose to apply a hybrid architecture combining transformer and Mamba2 blocks for long-sequence 3D GS reconstruction, achieving a balance between training efficiency and reconstruction quality (see Tab.~\ref{tb:archi}).
+
+
+\section{Method}
+
+\label{sec:method}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.99\linewidth]{llrm_iclr2025/fig/fig2_crop.pdf}
+    \caption{
+    \methodname{} takes up to 32 input images along with their Plücker ray embeddings as model input, which are then patchified, linearly transformed, and concatenated into token sequences. These tokens are processed through an optional token merging module, followed by a sequence comprising Mamba2 blocks (×7) and a Transformer block (×1). This entire processing structure is repeated three times (×3) to ensure effective handling of the long-sequence inputs and comprehensive feature extraction. Fully processed, the tokens are unpatchified and decoded into Gaussian parameters, followed by Gaussian pruning to generate the final 3D GS representation. The bottom section of the figure illustrates the resulting novel view synthesis and wide-coverage Gaussian reconstruction, demonstrating \methodname{}'s capability to handle extensive view coverage and produce high-quality, photorealistic reconstructions.}
+    \label{fig:method}
+\end{figure}
+We present our \methodname{} method in this section.
+We give an overview in Sec.~\ref{sec:method_overall_arch}, the implementation details of the Mamba2 blocks in Sec.~\ref{sec:method_mamba2} and additional designs for memory reduction (e.g., token merging) in Sec.~\ref{sec:method_token_merge}.
+We end with a discussion of the training objectives in Sec.~\ref{sec:method_losses} that help the model to effectively converge.
+
+\subsection{Overall Architecture}
+\label{sec:method_overall_arch}
+As shown in Fig.~\ref{fig:method}, we follow prior work~\citep{xu2023dmv3d, wei2024meshlrm, gslrm} to tokenize the channel-wise concatenated RGB images and Plücker rays. Similar to GS-LRM~\citep{gslrm}, we view the per-pixel GS prediction as a sequence-to-sequence mapping. 
+But crucially, we use a hybrid of Mamba2 blocks and transformer blocks, following the studies in \cite{empirical} and \cite{jamba}, for better scalability to higher resolution and denser views, while GS-LRM solely builds upon transformer blocks. 
+
+
+In our implementation, each hybrid block consists of 7 Mamba blocks and one transformer block, which we empirically observe to be a balanced configuration. 
+For the transformer blocks, we use global self-attention%without sparsity
+, as done in recent LRMs~\citep{wei2024meshlrm,gslrm}.
+We detail our implementation of Mamba2 blocks in Sec.~\ref{sec:method_mamba2}.
+A token merging stage is optionally injected before the hybrid block to further speed up the processing, which is detailed later in Sec.~\ref{sec:method_token_merge}.
+ We decode per-pixel Gaussian parameters from the output tokens in the same way as GS-LRM. But we apply additional training-time and test-time pruning of the extremely dense Gaussians to improve efficiency at high resolution and increased views.
+ 
+\subsection{Mamba2 Block}
+\label{sec:method_mamba2}
+A Mamba block~\citep{mamba}, similar to a transformer block, processes a token sequence of shape $L\!\times\!D$ by mixing the token information, and outputs a token sequence of the same shape.
+For a sequence of length $L$, transformer block has a computational complexity of $O(L^2)$ while Mamba effectively reduces it to $O(L)$.
+Thus, it is suitable for the dense reconstruction task in our \methodname{}.
+
+Being a variant of SSM, Mamba at its core processes each input token $x$ by formula
+\begin{align}
+    h_{t}&=\textbf{A}h_{t-1}+\textbf{B}x_t\\
+    y_t&=\textbf{C}h_{t}
+\end{align}
+where $h$ is the hidden state, $y$ is the output token, $t$ is the sequence index, and $\textbf{A},\textbf{B},\textbf{C}$ are parameters. Different from previous work~\citep{s4}, Mamba computes $\textbf{A},\textbf{B},\textbf{C}$ from the input with a linear layer instead of storing them as model parameters. It's worth noting that similar to transformer block, Mamba block can be highly parallelized in terms of computation for leveraging the massive GPU compute power, which is one core factor driving its increasing popularity. 
+The novel Mamba2~\citep{mamba2} block improves over Mamba by further restricting the state matrix $\mathbf{A}$ to be a scalar times identity structure, allowing the usage of efficient block multiplication and expansion to larger state dimensions, showing performance comparable to transformers on multiple language tasks.
+However, since the Mamba2 block is designed for language tasks, it only scans through the tokens in one direction, which is suboptimal for images. Following Vision Mamba~\citep{visionmamba}, we take bi-directional scans over the concatenated token sequence. Specifically, we first compute the state parameters from the input using one linear layer; then we run the SSM block in both forward and backward directions on the token sequence. Finally, we sum up the output tokens from the two scans before going through another linear layer.
+We also did some preliminary exploration of more complex scan patterns as in VMamba~\citep{vmamba} and LocalMamba~\citep{localmamba}, but we observed a substantial decrease in speed, and hence we decided not to adopt them. 
+\subsection{Token Merging and Gaussian pruning}
+\label{sec:method_token_merge}
+Boosting up input view number and image resolution can drastically increase the token sequence length. With 32 960$\times$540 images and patch size 8, the length can reaches about 260k, highly challenging even for linear-complexity models like Mamba. Empirically, we also find even the all-Mamba2 variant of our model runs out of memory under our highest resolution setting (see Tab.~\ref{tb:archi}). To further reduce memory usage, we propose to merge the tokens in the middle of the model as well as to prune the Gaussians before rendering novel views.
+
+Token merging achieves a fine-to-coarse effect similar to the traditional multi-level CNN encoders and effectively reduces token sequence length down to 1/4. We first reshape the token sequence from $L\!\times\!D$ back to $N\!\times\!\frac{H}{p}\!\times\!\frac{W}{p}\!\times\!D$ where $p$ is the original patch size. Then, we apply a channel-wise $2\!\times\!2$ 2D convolution with stride 2, resulting in output shape $N\!\times\!\frac{H}{2p}\!\times\!\frac{W}{2p}\!\times\!D'$, where $D'$ is the new token dimension that can differ from the original one. Finally, we reshape it back to $\frac{L}{4}\!\times\!D'$ where each token now has an `effective' patch size of $2p$. In our ablation studies (Tab.~\ref{tb:archi}), we find our token merging design does not sacrifice much reconstruction quality, while significantly reducing memory usage and increasing training speed.
+
+Even with token merging, our per-pixel Gaussian prediction still brings us an enormous quantity of Gaussians at the end ($\sim$17 million for 32 images with resolution 960$\times$540), which is likely more than we need for a high-quality reconstruction due to the overlap between the input view frustums. To encourage the model to use a compact set of Gaussians, we apply a punishment on the opacity of all Gaussians (detailed in Sec.~\ref{sec:method_losses}).
+With the effective reduction in the number of visible Gaussians, we can thus simply prune away a certain percentage of Gaussians with low opacity.
+Empirically, we find no difference in rendering quality if we prune away Gaussians with opacity below 0.001.
+Beside pruning during inference, we also apply the Gaussian pruning to the  960$\times$540 resolution training.
+We keep fixed-number Gaussians instead of using opacity threshold to ensure near-constant training memory usage.
+O.w., the training can go out of memory for some scenes.
+\subsection{Training Objectives}
+\label{sec:method_losses}
+
+Lastly, we illustrate the training objectives for \methodname.
+
+\noindent\textbf{Rendering loss.} Following previous work~\citep{gslrm}, we use a combination of Mean Squared Error (MSE) loss and Perceptual loss
+\begin{equation}
+    \mathcal{L}_\text{image}=\frac{1}{M}\sum_{i=1}^M \left( \text{MSE}\left(\mathbf{I}^{\text{gt}}_i, \mathbf{I}^{\text{pred}}_i\right) + \lambda \cdot \text{Perceptual}\left(\mathbf{I}^{\text{gt}}_i, \mathbf{I}^{\text{pred}}_i\right)  \right)
+\end{equation}
+to supervise the quality of the rendered images, where $\lambda$ is set to 0.5. While training solely with rendering loss can achieve competitive visual quality to our final model (see Sec.~\ref{sec:ablation}), we further introduce two regularization terms to improve training stability and inference efficiency.
+
+\noindent\textbf{Depth regularization for training stability.}
+Training instability is a well-known curse for large-scale training.
+In our task, we observe that the instability comes from the difficulty of optimizing the Gaussian positions.
+With rendering loss only, the model will produce ill-posed Gaussians known as ``floaters", which does not lie on the actual 3D surface -- a common issue for novel view synthesis (see the black ``floaters" in Fig.~\ref{fig:teaser}).
+To stabilize training, we add a scale-invariant depth loss
+\begin{equation}
+    \mathcal{L}_\text{depth}=\frac{1}{M}\sum_{i=1}^M \text{Smooth-L1}\left(\mathbf{D}^{\text{da}}_i, \mathbf{D}^{\text{pred}}_i\right) 
+\end{equation}
+where $\mathbf{D}^{\text{da}}_i$ is the disparity map predicted by DepthAnything~\citep{depthanything}, and $\mathbf{D}^{\text{pred}}_i$ is the disparity map obtained from the predicted position of the per-pixel Gaussians. Following \cite{depthanything}, we normalize the disparity maps by subtracting their medians $t(d_i)$ and then dividing by their mean absolution deviation from the medians $\frac{1}{HW}\sum|d_i-t(d_i)|$. This soft depth supervision effectively helps reduce the chance of the training divergence.
+\noindent\textbf{Opacity regularization for inference efficiency.}
+Since our per-pixel prediction strategy renders a dense set of Gaussians, to encourage an efficient use of the Gaussians, we apply a small L1 regularization on the opacity
+\begin{equation}
+     \mathcal{L}_\text{opacity}= \frac{1}{N}\sum_{i=1}^N |o_i|
+\end{equation}
+where the opacity values are between 0 and 1. 
+Intuitively, L1 can encourage the sparsity of the regularized terms~\citep{tibshirani1996regression}.
+We empirically observe that adding this loss can drastically push the percentage of Gaussians with opacity above 0.001 from 99\% down to around 40\% (see Tab.~\ref{tb:opa}).
+With these near-zero opacity Gaussians, we can perform Gaussian pruning as discussed above in Sec.~\ref{sec:method_token_merge} and both reduce the Gaussian splatting loading time and increase the rendering speed for better model serving experience.
+This regularization also enables the extreme $960\!\times\!540$ resolution training where in-training pruning is used.
+
+\noindent\textbf{Overall training loss.} Our total loss is thus the rendering loss and the weighted regularization loss terms discussed above:
+\begin{equation}
+    \mathcal{L} =  \mathcal{L}_\text{image}+ \lambda_\text{opacity}\cdot \mathcal{L}_\text{opacity}+ \lambda_\text{depth}\cdot \mathcal{L}_\text{depth}
+\end{equation}
+where we set $\lambda_\text{opacity}=0.1$ and $\lambda_\text{depth}=0.01$.
+
+
+
+\section{Experiments}
+
+
+\subsection{Datasets}
+
+DL3DV~\citep{dl3dv} is a recently published large-scale, real-world scene dataset for 3D reconstruction and novel view synthesis. It features a diverse variety of scene types, with both indoor and outdoor captures. It consists of two parts: DL3DV-10K is the training split, consisting of 10,510 high-resolution videos\footnote{We trained on the first 7K of the training split as the remaining data had not been released at the time of our experiments.}, each accompanied by 200$\sim$300 keyframes with camera pose annotation (obtained from COLMAP~\citep{colmap}); DL3DV-140 Benchmark is the test split, containing 140 test scenes. We train our model on DL3DV-10K and evaluate on the DL3DV-140 Benchmark. We also perform zero-shot inference on Tanks and Temples~\citep{tanks}, another real-world scene dataset for novel view synthesis. It also contains 200$\sim$300 keyframes with camera pose annotation (obtained from COLMAP) for each scene. Following previous work~\citep{3dgs,mvsgaussian}, we use the \texttt{train} and the \texttt{truck} scene from Tanks and Temples.
+\subsection{Implementation and Experiment Details}
+
+\paragraph{Architecture Details.} 
+Our model consists of 24 blocks in total, with every 7 Mamba2 blocks followed by 1 transformer block, repeating 3 times. We start with patch size 8 and token dimension 256. We perform token merging at the beginning of the 9th block, with patch size expanded to 16 and token dimension expanded to 1024.  For Mamba2 blocks, we use a state dimension 256, an expansion rate 2 and a head dimension 64. For transformer blocks, we use a head dimension 64 and an MLP dimension ratio of 4. We use the FlashAttentionV2~\citep{flashattv2} implementation which optimizes the GPU IO utilization for long sequences.
+
+\paragraph{Training Settings.}
+
+Directly training the model on high-resolution images is extremely inefficient; therefore we opt for an low-to-high-resolution curriculum training schedule, with three training stages, using image resolutions of $256\!\times\!256$, $512\!\times\!512$ and $960\!\times\! 540$.
+
+Specifically, in the 1st stage, training images are resized so the shorter side is 256 and then center-cropped to square. 
+For the training view selection, we first randomly pick a consecutive subsequence ranging from 64 frames to 128 frames, then uniformly sample 32 images as input and sample 8 images as target.
+Input and target are sampled independently and thus they can overlap. We randomly shuffle the input view order with probability 0.5 and reverse the input view order also with probability 0.5.
+We train with a peak learning rate of $4\textsc{e}{-4}$ and the AdamW optimizer~\citep{adamw} with a weight decay of $0.05$. 
+The learning rate is linearly warmed up in the first 2K steps and then cosine decayed.
+We use a batch size of 256, and train for 60K steps.
+
+In the 2nd stage, we resize and crop the images to $512\!\times\! 512$, decrease the peak learning rate to $4\textsc{e}{-5}$, and train the model for 10K steps at batch size 64. 
+The view selection protocol remains the same.
+
+In the last stage, we resize the images to $960\!\times\! 540$ without square cropping, expand the view selection sampling range to the entire sequence (about 200$\sim$300 frames for DL3DV), and keep training the model for another 10K steps at batch size 64. 
+We perform Gaussian pruning in this stage to save GPU memory usage, where we only keep top 40\% of the Gaussians ranked by opacity plus 10\% randomly sampled from the rest.
+We augment the FOV of the images by randomly center-cropping the images to 0.77$\sim$1.0 of the original size and resize back, in order to fit a broader range of camera models.
+We optionally finetune a model with 16 images as input.
+
+\paragraph{Evaluation Settings.}
+
+During evaluation, our goal is to reconstruct the scene captured by the entire video sequence. 
+Following previous work~\citep{mip360,3dgs}, we uniformly pick every 8-th image of the sequence as the test split. 
+From the rest of the sequence, we use $K$-means clustering (based on camera positions and directions) for choosing the input views to ensure the coverage of the scene. 
+The number of clusters is set of the number of input views. 
+We simply choose the cameras closest to the cluster centers as the input split. 
+We use an image resolution of $960\times 540$ during the evaluation. 
+We perform Gaussian pruning during evaluation by only keeping the top 50\% of the Gaussians with highest opacity values, where 50\% is a safe range with negligible quality loss. 
+
+\subsection{Results}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.99\linewidth]{llrm_iclr2025/fig/fig3_1_crop.pdf}
+    \includegraphics[width=0.99\linewidth]{llrm_iclr2025/fig/fig3_2_crop.pdf}
+    \caption{Qualitative comparisons between our \methodname{} and 3D Gaussian splatting (3D GS) across different scenes, reconstructed from 32 input images at $960\times540$ resolution. The left column showcases the wide-coverage Gaussian reconstruction achieved by \methodname{}, while the right column shows results from 3D GS. Our approach maintains high-quality reconstruction with competitive or even superior PSNR values (e.g., 25.71 vs. 24.13, 28.09 vs. 27.92), demonstrating the ability to generate accurate details and fewer artifacts in challenging regions. The red ellipses highlight areas where 3D GS struggles with artifacts or inaccuracies, whereas \methodname{} produces cleaner and more photorealistic outputs, effectively handling the wide range of input views.}
+    \label{fig:qual_comp}
+\end{figure}
+\textbf{We encourage the readers to check our project page (\url{https://arthurhero.io/projects/llrm/}) for video and interactive renderings of our output 3D GS assets.}
+
+Our approach achieves wide-coverage scene-level 3D Gaussian splatting reconstruction from up to 32 high-resolution input images, and 
+to the best of our knowledge, we are the only method capable of this. While several recent works, including pixelSplat~\citep{pixelsplat}, MVSplat~\citep{mvsplat}, MVSGaussian~\citep{mvsgaussian} and GS-LRM~\citep{gslrm}, aim to handle scene-level GS reconstruction, their models are all designed for a limited number (1$\sim$4) of input images, with pixelSplat and MVSplat even showing results only at $256\!\times\!256$ resolution. 
+Moreover, pixelSplat, MVSplat and MVSGaussian incorporate traditional 3D inductive biases, such as epipolar projection and cost volumes, in their model architectures, which typically expect narrow view coverage with large overlaps in input images for correspondence reasoning---making them unsuitable for our setting with many wide-coverage input views. 
+Additionally, naively extending pixelSplat, MVSplat, MVSGaussian and GS-LRM to train with many more input views at higher resolutions quickly lead to out-of-memory issues and cannot be easily achieved without significant modifications and further research.
+
+
+\begin{table}[h]
+\begin{center}
+\begin{scriptsize}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}$c^l^c^c^c@{ }^c@{ }^c^c@{ }^c@{ }^c@{}}
+\toprule
+\rowstyle{\bfseries}
+\multirow{2}{*}{\makecell{Input\\Views}} & \multirow{2}{*}{Method} &\multirow{2}{*}{\makecell{Feed-\\Forward}} &  \multirow{2}{*}{Time$\downarrow$} & \multicolumn{3}{^c}{DL3DV-140} & \multicolumn{3}{^c}{Tanks\&Temples} \\\cmidrule(lr){5-7}\cmidrule(lr){8-10}
+ &  & & & PSNR$\uparrow$ & SSIM$\uparrow$ & LPIPS$\downarrow$ & PSNR$\uparrow$ & SSIM$\uparrow$ & LPIPS$\downarrow$ \\
+\midrule
+\multirow{2}{*}{16} &3D GS$_{30k}$ & \xmark   & 13min & 21.20 & 0.708 & \textbf{0.264} & 16.76 & \textbf{0.598} & \textbf{0.334} \\
+&Ours & \cmark  & \textbf{0.7sec} & \textbf{22.40} & \textbf{0.730} & 0.302 & \textbf{17.17} & 0.541 & 0.426 \\
+\midrule
+\multirow{2}{*}{32} &3D GS$_{30k}$ & \xmark& 13min & 23.60 & \textbf{0.779} & \textbf{0.213} & 18.10 & \textbf{0.688} & \textbf{0.269} \\
+& Ours & \cmark  & \textbf{1.3sec} & \textbf{23.86} & \textbf{0.775} & 0.262 & \textbf{18.20} & 0.590 & 0.375 \\
+\bottomrule
+\end{tabular}
+\end{scriptsize}
+\end{center}
+\caption{\small \textbf{Quantitative comparison to 3D Gaussian splatting optimization.} 
+`Feed-forward' column indicates whether the method performs zero-shot feed-forward prediction. 
+`Time' refers to the total inference/optimization time  for all views in the test split for each scene. 
+The image resolution is $960\times 540$.
+}
+\label{tb:dl3dv}
+\end{table}
+
+
+Therefore, in this section, we focus on comparing with the original optimization-based 3D Gaussian splatting \citep{3dgs}.
+In addition, we also carefully compare with GS-LRM, which can be seen as an ablated version of our model without Mamba2 blocks, in terms of input scalability, quality and efficiency later in Sec.~\ref{sec:ablation}. 
+In Table~\ref{tb:dl3dv}, we show the quantitave comparison results with the optimization-based 3D GS on two real-world large-scene datasets: DL3DV-140 Benchmark~\citep{dl3dv} and Tanks and Temples~\citep{tanks}. 
+We show results under the sparser 16 input-view setting as well as the 32 input-view setting.
+We show that our model is capable of reconstructing an unseen novel scene from long-sequence input in a feed-forward manner within as little time as 1.3 seconds, $600\times$ faster than 3D GS optimization (13 minutes for 30K steps). 
+
+Reconstruction quality-wise, our feed-forward reconstruction results are comparable with 3D GS with 30K optimization steps. Our model takes lead in terms of PSNR (with the gap larger in the sparser 16-view setting: +1.2 for DL3DV-140 and +0.4 for Tanks and Temples), while 3D GS performs better in terms of LPIPS. We speculate this is because 3D GS optimization is much stronger at directly ``copying" the input images into the reconstructed scene with these many optimization steps, and thus can render images with local color distribution extremely similar to the test images; however, without any prior knowledge in 3D geometry, it can easily overfit to the input views when the input is sparse (see the ``floaters" in Fig.~\ref{fig:teaser} and~\ref{fig:qual_comp}).
+
+We also provide a qualitative comparisons between our feed-forward reconstruction and 3D GS optimization results in Fig.~\ref{fig:qual_comp}.
+
+
+
+
+
+\section{Analysis}
+
+\subsection{Ablation Studies of Model Designs}
+\label{sec:ablation}
+
+\begin{table}[h]
+\begin{center}
+\begin{scriptsize}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}$c@{ }^c@{ }^c@{ }^c^l@{ }@{ }^c@{ }^c@{ }^c^c@{ }^c@{ }^c@{ }^c@{}}
+\toprule
+\rowstyle{\bfseries}
+\makecell{Input\\Views} & \makecell{Image\\Size} & \makecell{Batch Size\\ / GPU} & \makecell{Train\\Step} & Block Type & \makecell{Token\\Merge} & \makecell{Patch\\Size} & \makecell{Token\\Dimension} & \#Param & \makecell{Iteration\\ Time (sec)} & \makecell{GPU \\Memory (GB)} & PSNR$\uparrow$\\
+\midrule
+\multirow{4}{*}{4} & \multirow{4}{*}{256} & \multirow{4}{*}{16} & \multirow{4}{*}{100K}& Transformer (GS-LRM) & / & 8 & 1024 & 327M & 2.3 & 44 & 21.13 \\ %32.64 \\
+&& && Mamba2 & / & 8 & 1024 & 190M & 2.8 & 35 & 19.82 \\ %30.58 \\
+&& && \{7M1T\}$\times 3$ & / & 8 & 1024 & 206M & 2.6 & 35 & \textbf{21.58} \\%31.69 \\
+&& && \{7M1T\}$\times 3$ & @9 & 8 $\rightarrow$16 & 256 $\rightarrow$1024 & \textbf{162M} & \textbf{1.9} & \textbf{20} & 21.25 \\
+\midrule
+
+\multirow{4}{*}{32} & \multirow{4}{*}{256} & \multirow{4}{*}{4} &\multirow{4}{*}{60K}& Transformer (GS-LRM) &  / &  8 & 1024 & 327M & 14.5 & 68 &  too slow\\
+&&& & Mamba2 &  / &  8 & 1024 & 190M & 6.0 & 70 & 24.28 \\
+&&& & \{7M1T\}$\times 3$ &  / &  8 & 1024 & 206M & 7.1 & 70 & \textbf{26.82} \\
+&&& & \{7M1T\}$\times 3$ & @9 &  8 $\rightarrow$16 & 256 $\rightarrow$1024 & \textbf{162M} & \textbf{3.5} & \textbf{25} & 25.62 \\
+\midrule
+
+\multirow{4}{*}{32} & \multirow{4}{*}{512} & \multirow{4}{*}{1} & \multirow{4}{*}{10K$^*$} &  Transformer (GS-LRM) & / & 8 & 1024 & 327M & 50.5 & 44 & too slow \\
+&&&& Mamba2 & / & 8 & 1024 & 190M & 7.4 & 62 & 24.83 \\
+&&&& \{7M1T\}$\times 3$ & / & 8 & 1024 & 206M & 11.5 & 64 & \textbf{28.16} \\
+&&& & \{7M1T\}$\times 3$ & @9 &  8 $\rightarrow$16 & 256 $\rightarrow$1024 & \textbf{162M} & \textbf{4.0} & \textbf{23} & 27.46 \\
+\midrule
+\multirow{2}{*}{32} & \multirow{2}{*}{$960\!\times\! 540$} & \multirow{2}{*}{1} & \multirow{2}{*}{10K$^*$} &  \multicolumn{8}{^l}{\textbf{All other variants are out of memory.}}  \\
+&&& & \{7M1T\}$\times 3$ & @9 &  8 $\rightarrow$16 & 256 $\rightarrow$1024 & 162M & 12.6 & 53 & 27.32 \\
+\bottomrule
+\end{tabular}
+\end{scriptsize}
+\end{center}
+\caption{\small \textbf{Ablation studies on model architecture.} We study how the model architecture affects training time and memory efficiency as well as the reconstruction quality. All variants have 24 blocks in total. 
+\textbf{\{7M1T\}$\mathbf{\times 3}$} refers to our ``7 Mamba2 blocks + 1 Transformer block, repeating 3 times" model architecture. 
+\textbf{@9} means the token merging happens at the beginning of the 9th block. 
+Models are trained on DL3DV-10K and evaluated on DL3DV-140 Benchmark. 
+$^*$The 512-resolution models are finetuned from the checkpoints of their 256-resolution counterparts, and the 960-resolution from the 512-resolution checkpoints.
+}
+\label{tb:archi}
+\end{table}
+We study how the model architecture variants scale with long input image sequence for both training efficiency and reconstruction quality.
+As shown in Table~\ref{tb:archi}, we consider 4 experimental setups with different sequence lengths: 1. sparse low-resolution (`Input Views'=4, `Image Size'=256), 2. dense low-resolution (`Input Views'=32, `Image Size'=256), 3. dense high-resolution (`Input Views'=32, `Image Size'=512), 4. dense ultra-resolution (`Input Views'=32, `Image Size'=960$\times$540) ~\footnote{Note that here the terminology of `sparse', `dense', `low', `high', `ultra' are all relative. We use these terminology for simplicity and clarity.}.
+The results of different model architecture under the same setup are presented within a Table block (i.e., every four rows).
+We study four model variants: all transformer blocks (row 1; equivalent to GS-LRM), all Mamba2 blocks (row 2), hybrid blocks but without token merging (row 3), and hybrid blocks with token merging (row 4; our final model). 
+All variants have 24 blocks in total. 
+We illustrate the number of model parameters (`\#Param'), the training iteration time, the GPU memory usage, and PSNR reconstruction metric in the last four columns.
+
+We next highlight the key observations.
+
+\noindent\textbf{Comparisons to Transformer.}
+Transformer's performance is comparable to our model under the 4-view 256-resolution (the 1st block in Tab.~\ref{tb:archi}) setting.
+However, its training speed explodes for larger visual inputs, either with dense view or high resolutions.
+In our 3rd experiment setup (32 views with resolution 512), the per-iteration training time with batch size=1 can go up to 50.5 seconds, which is unaffordable to train.
+This is due to the quadratic time complexity of transformers.
+\noindent\textbf{Comparisons to Mamba2.}
+The Mamba2 variant shows a more manageable increase in time as the input scales up but leads to a noticeable decline in reconstruction quality compared to other variants.
+For instance, in the 256-resolution, 4-view setting (1st block in Tab~\ref{tb:archi}
+), the Mamba2 variant exhibits a 1.8 PSNR drop compared to our hybrid model (row 3). This performance gap widens with longer sequences, reaching 2.5 PSNR for 32 views (2nd block in Tab~\ref{tb:archi}) and 3.3 PSNR at 512 resolution (3rd block in Tab~\ref{tb:archi}). This decrease in quality is possibly due to Mamba's purely state-based design, which struggles to capture long-range dependencies effectively.
+
+\noindent\textbf{Effectiveness of Token Merging.}
+Comparing with transformer and Mamba2, our hybrid variant (third row in each block) gets the best of both worlds -- the reconstruction quality (in terms of `PSNR') comparable to transformer and the speed (in terms of `Iteration Time') comparable to Mamba2. 
+On top of it, with the token merging design (last row in each block), our final model  successfully reduces both time and memory usage down to $1/3$ in the $512\!\times\! 512$ setting, without sacrificing too much reconstruction quality.
+Token merging with Gaussian pruning also further enables scaling up to $960\times 540$ resolution with stable reconstruction, where all other variants are out-of-memory.
+
+
+
+
+\subsection{Ablation Studies of Training Objectives}
+\label{sec:ablation}
+\begin{table}[h]
+\begin{center}
+\begin{scriptsize}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{$c^c^l^c^c}
+\toprule
+\rowstyle{\bfseries}
+\makecell{Input\\Views} & \makecell{Image\\Size} & Loss Type & PSNR$\uparrow$ & \makecell{\% Gaussians w/\\ opacity$>$0.001}\\
+\midrule
+\multirow{3}{*}{4} & \multirow{3}{*}{256} & rendering-only &  20.43 & 99.2\\\
+& & +opacity & 20.96 & 68.3 \\ 
+&& +opacity+depth & 21.25 & 70.1\\ 
+\bottomrule
+\end{tabular}
+\end{scriptsize}
+\end{center}
+\caption{\small \textbf{Ablation studies on training objectives.} We study how the opacity loss and the depth supervision affect the reconstruction quality as well as the Gaussian usage.
+}
+\label{tb:loss}
+\end{table}
+
+\noindent\textbf{Impact of the regularization terms.}
+In Tab.~\ref{tb:loss}, we show the impact of the two regularization terms introduced in Sec.~\ref{sec:method_losses}: the opacity loss and the depth supervision. From the table, we see that adding the opacity loss can significantly reduce the number of visible Gaussians (\% of Gaussians with opacity above 0.001), while having negligible impact on model rendering performance. 
+The depth supervision help improve the rendering quality by guiding the ``floater" Gaussians to the position of the true surfaces.
+We observe it also slightly lifts the number of visible Gaussians, which is reasonable because now the model can drive the ``floater" Gaussians to their correct positions instead of simply deleting them by assigning them low opacity values.
+Also due to this, training with depth supervision significantly reduces the chance of gradient explosions in our experiments.
+
+\begin{table}[h]
+\begin{center}
+\begin{scriptsize}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{$c^c^c^c^c}
+\toprule
+\rowstyle{\bfseries}
+\makecell{Input\\Views} & \makecell{Image\\Size} & \makecell{Input Sampling\\ Range (frame)}  &   w/ opacity loss & \makecell{\% Gaussians w/\\ opacity$>$0.001}\\
+\midrule
+4 & $256\!\times\! 256$ &  16 & \xmark& 99.2 \\
+4 & $256\!\times\! 256$ & 16 & \cmark& 68.3 \\
+\hdashline
+32 & $256\!\times\! 256$ & $64\sim 128$ & \cmark& 41.8 \\ 
+32 & $512\!\times\! 512$  & $64\sim 128$ & \cmark& 34.1 \\
+32 & $960\!\times\! 540$ & \makecell{$200\sim 300$} & \cmark& 33.3 \\
+\bottomrule
+\end{tabular}
+\end{scriptsize}
+\end{center}
+\caption{\small \textbf{Gaussian usage impacted by opacity loss and input size}.
+We observe the opacity loss can effectively reduce the number of visible Gaussians, and our model learns to adapt to a more compact set of Gaussians when the input views get denser.
+}
+\label{tb:opa}
+\end{table}
+\noindent\textbf{Impact of opacity loss on Gaussian Usage.}
+In Tab.~\ref{tb:opa}, we show how the opacity loss and the input size affects the Gaussian usage (percentage of Gaussians with opcacity $>0.001$). 
+Comparing row-1 and row-2, we observe that the opacity regularization loss introduced in Sec.~\ref{sec:method_losses} can effectively reduce the number of `high'-opacity Gaussians shown in the last column.
+Furthermore, our model learns to adaptively use a different number of Gaussians when the input varies (as shown in Tab.~\ref{tb:opa}). 
+As the image resolution increases (hence more per-pixel Gaussians predicted), the chance that multiple pixels can be covered by the same Gaussian increases as well, and thus the percentage of Gaussian usage decreases. 
+However, as the sampling range (i.e., the maximum difference in frame indices of the input views, shown as `Input Sampling Range') increases, the overlap between input views decreases, and thus the model needs to retain more Gaussians to keep reconstruction quality, resulting in negligible drop in Gaussian usage in the last row.
+
+
+
+
+
+
+
+
+
+
+\section{Conclusions}
+
+In this work, we introduce \methodname{}, a novel model for fast and scalable 3D Gaussian splatting reconstruction. By combining Mamba2 and transformer blocks, along with token merging and Gaussian pruning, \methodname{} can instantly reconstruct a wide-coverage 3D GS scene from 32 images at a high resolution of $960\times540$ in just 1.3 seconds, leading to high rendering quality comparable to optimization-based methods such as 3D Gaussian splatting. Our approach is the first feed-forward GS solution for wide-coverage scene-level reconstruction.
+
+
+
+

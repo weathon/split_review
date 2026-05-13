@@ -1,0 +1,223 @@
+\title{MSPipe: Minimal Staleness Pipeline for Efficient Temporal GNN Training}
+
+\begin{abstract}
+Temporal graph neural networks (TGNNs) have demonstrated exceptional performance in modeling interactions on dynamic graphs. However, the adoption of memory modules in state-of-the-art TGNNs introduces significant overhead, leading to performance bottlenecks during training. This paper presents MSPipe, a minimal staleness pipeline design for maximizing training throughput of memory-based TGNNs, tailored to maintain model accuracy and reduce resource contention. Our design addresses the unique challenges associated with fetching and updating memory modules in TGNNs. We propose an online pipeline scheduling algorithm that strategically breaks temporal dependencies between iterations with minimal staleness and delays memory fetching (for obtaining fresher memory vectors) without stalling the GNN training stage or causing resource contention. We further design a staleness mitigation mechanism to improve training convergence and model accuracy. We provide convergence analysis and demonstrate that MSPipe retains the same convergence rate as vanilla sampling-based GNN training. Our experiments show that MSPipe achieves up to 2.45$\times$ speed-up without sacrificing accuracy, making it a promising solution for efficient TGNN training. The implementation (anonymous) for our paper can be found at [https://anonymous.4open.science/r/MSPipe/](https://anonymous.4open.science/r/MSPipe/).
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Many real-world graphs are inherently dynamic with nodes and edges continuously evolving over time. For example, a temporal graph of a social network captures the changing patterns of connections between individuals, while a temporal user-item graph can represent the changing preferences of users in a recommendation system. Previous attempts to model these dynamic systems have relied on static graph representations that fail to account for their temporal nature Zhang et al. (2019; 2020); Nguyen et al. (2018). Recently, temporal graph neural networks (TGNNs) are designed to incorporate time-related information, learn both structural and temporal dependencies and enable more accurate and comprehensive modeling of dynamic graphs Rossi et al. (2021); Wang et al. (2021); Kumar et al. (2019); Trivedi et al. (2019); Xu et al. (2020); Zhang et al. (2023); Cong et al. (2023).  
+
+Among the existing TGNN models, memory-based TGNNs, such as TGN Rossi et al. (2021), APAN Wang et al. (2021), JODIE Kumar et al. (2019), DyRep Trivedi et al. (2019) and TIGER Zhang et al. (2023), have achieved state-of-the-art performance on a variety of tasks Poursafaei et al. (2022), notably link prediction and node classification. Their promising performance can be attributed to the node memory module, which stores time-aware representations, allowing them to capture intricate long-term information of each node. In each training iteration of these models, the memory vectors of nodes within the sampled subgraphs are loaded and fed into GNN training together with node features (Fig. 1); the updated representations are written back to the memory module along with the current batch of the timed events when this iteration of GNN training is done.  
+
+Despite their impressive performance, it remains challenging to train memory-based TGNN at scale, because of the temporal dependency induced by the nature of the memory module. The memory module behaves like a recursive flitering mechanism that iteratively fliters and distills information of historical events into the memory state. Consequently, respecting the temporal dependency incurs a substantial overhead in memory-based TGNN training (up to $36.1\%$ of the execution time of one training iteration) but is important for maintaining model performance. Specifically, the temporal dependency of the memory module is manifested in memory fetch and update operations. First, the latest memory state of a node cannot be fetched until the update of the node memory module in the last iteration has been completed. This dependency is illustrated by the red arrow in Fig. 1, indicating that subsequent iterations fetch the most recently updated node memory from previous iterations. Next, to avoid information leakage, updated memory of a node with a graph event in the current batch cannot be utilized before training the model using the same event Rossi et al. (2021). As a result, the memory update can only be applied at the end of each training iteration. When applying optimizations from previous works Kaler et al. (2022); Zheng et al. (2022), memory fetching in the next training iteration has to wait until the memory update is finished as shown in Fig. 1(b), diminishing the training efficiency. The detailed temporal dependencies originating from the memory module between iterations are depicted in Fig. 2. These temporal dependencies on the memory fetch and update execution orders limit the chances for parallel execution and lower GPU utilization in training TGNNs, posing a significant challenge in effectively scaling TGNN learning to large datasets. In contrast, the remarkable success of recent DNN models relies on efficient parallelism for maximal utilization of distributed hardware resources and datasets Shoeybi et al. (2019); Rasley et al. (2020). Therefore, there is a pressing need for a parallel execution scheme that enables more efficient and scalable distributed TGNN training.  
+
+![](images/b0c028565d1eec139f6d8339eef44ba99a6bce32582f4903eef0113d5f352608.jpg)  
+Figure 1: Memory-based TGNN Training. (a) represents the general training scheme; (b) shows the pre-sampling and pre-fetching optimization; (c) is the case of breaking the dependency.  
+
+There exists a line of research Wan et al. (2022); Peng et al. (2022); Zheng et al. (2022); Kaler et al. (2022); Gandhi & Iyer (2021) on optimizing the training of static GNNs. However, the temporal dependencies discussed above are unique to TGNN because of the memory module. The existing works fail to handle such temporal dependencies and are therefore ineffective for TGNN training. Moreover, prior studies on optimizing TGNN systems are limited Wang & Mendis (2023); Zhou et al. (2022a), which all focus on accelerating inference speed rather than training throughput. While previous works have analyzed the convergence rate of static GNN training Chen et al. (2017); Cong et al. (2020; 2021), the ramifications of violating temporal dependencies have not yet been explored.  
+
+To fill these gaps, we propose a novel framework that leverages a minimal staleness bound to accelerate TGNN training with theoretical guarantees. The main contributions are as follows:  
+
+• We propose a formulation for the TGNN training pipeline, by analyzing the initiation and completion times across training stages. This formulation decomposes TGNN training into different stages, facilitating a comprehensive analysis of training bottlenecks. Using this formulation, we conduct thorough profiling of distributed memory-based TGNN training, illustrating the opportunity to optimize the bottlenecks caused by the memory module and its temporal dependencies.  
+
+• Tackling the temporal dependencies, we propose a TGNN training framework, MSPipe, consisting of two key designs: (1) We break the temporal dependencies by introducing staleness in the memory module. This is achieved through a minimal staleness algorithm that determines a minimal staleness bound and effectively schedules the training pipeline accordingly, to maximize training throughput while maintaining model accuracy. (2) We propose a lightweight staleness mitigation method that leverages the memories of recently updated nodes with the highest similarity, which effectively reduces the staleness error.   
+• We provide a theoretical convergence analysis, demonstrating that MSPipe does not sacrifice convergence speed and the asymptotic convergence rate of our method is the same as vanilla memorybased TGNN training (without staleness).   
+• We comprehensively evaluate the performance of MSPipe through experiments. MSPipe outperforms existing state-of-the-art frameworks (TGL Zhou et al. (2022b) and TGL with optimizations from SALIENT Kaler et al. (2022)), achieving up to $2.45\times$ speed-up and $83.6\%$ scaling efficiency without accuracy loss.  
+
+
+
+\section{2 BACKGROUND AND RELATED WORK  }
+
+
+Temporal Graph Neural Network. Among the variety of TGNNs, memory-based TGNNs achieve state-of-the-art accuracy in modeling temporal dynamics in graph-structured data Rossi et al. (2021); Xu et al. (2020); Trivedi et al. (2019); Kumar et al. (2019); Poursafaei et al. (2022); Sankar et al. (2020); Zhang et al. (2023); Cong et al. (2023). Memory-based TGNNs maintain a node memory vector $S_{v}$ for each node $v$ in the dynamic graph that memorizes long-term dependencies. The memory update and training paradigms can be formulated as:  
+
+$$
+\begin{array}{r l}&{\overline{{m}}_{v}^{i}=a g g(m_{v}^{i},m_{u}^{i}\mid u\in N(v))}\\ &{\:S_{v}^{i}=f(S_{v}^{i-1},\overline{{m}}_{v}^{i})}\\ &{\:h_{v}^{i}=\phi(g(S_{v}^{i},S_{u}^{i}\mid u\in N(v))}\end{array}
+$$  
+
+where $m_{v}^{i}$ represents a message generated by a graph event related to $v$ that occurs at training iteration $i$ , $S_{v}^{i}$ is the memory vector and $\bar{h_{v}^{i}}$ is the embedding of node $v$ in iteration $i$ . The messages of node $v$ ’s 1-hop neighbors $N(v)$ are combined with $m_{v}^{i}$ using an aggregator function agg (e.g., mean aggregation) to form $\overline{{m}}_{v}^{i}$ , which are applied in the memory update function $f(\cdot)$ (e.g., an RNN) to update ${\bar{S}}_{v}^{i}$  
+
+Then the memory aggregator $g(\cdot)$ gathers the memory vector and passes it to the update function $\phi(\cdot)$ , which is a single layer perceptron $\sigma(W_{i})$ where $\sigma(\cdot)$ is a non-linear activation function and $W_{i}$ is a weight matrix. Note that all the above operations are executed in GPU and the updated memory vectors $S_{v}^{i}$ will be written back to the memory storage in CPU main memory. The detailed training workflow is illustrated in Fig. 2. The key design differences of various TGNN models lie in $f(\cdot)$  
+
+![](images/aa53483576bc00d4eee21805741221e404d3da2ef9e8a72eabbdf26f831b4108.jpg)  
+
+and $g(\cdot)$ functions.  
+
+Optimizations for GNNs. There have been recent studies on accelerating the inference speed of TGNN Zhou et al. (2022a); Wang & Mendis (2023). Sampling-based mini-batch training has become the norm for static GNN and TGNN training Gandhi & Iyer (2021); Hamilton et al. (2017); Waleffe et al. (2023); Yang et al. (2022); Ying et al. (2018), which samples a subset of neighbors of target nodes to generate a subgraph, as input to GNN training. The bottlenecks mainly lie in subgraph sampling and feature fetching due to the neighbor explosion problem Chen et al. (2018); Yan et al. (2018). ByteGNN Zheng et al. (2022) and SALIENT Kaler et al. (2022) adopt pre-sampling and pre-fetching to hide sampling and feature fetching overhead in multi-layer static GNN training. These optimizations may not resolve the bottleneck of TGNN training: Maintaining node memories in sequential order presents inevitable overhead in memory-based TGNN training when only lightweight sampling and feature fetching are needed for a single TGNN layer Rossi et al. (2021).  
+
+Asynchronous Distributed Training A number of works advocate asynchronous training of DNN and static GNN models, which introduces staleness in model parameter learning. For distributed DNN training, PipeSGD Li et al. (2018), SAPipe Chen et al. (2022), Hogwild Recht et al. (2011), SSP Ho et al. (2013) and Dai et al. (2018) adopt stale weight gradients on large model parameters to eliminate communication overhead, while GNN models typically have much smaller sizes. For static GNN training, PipeGCN Wan et al. (2022) and Sancus Peng et al. (2022) overlap model computation with communication in full-graph training, and introduce staleness in node embeddings. Although these methods are effective in training multi-layer static GNNs, their effect is limited when applied to memory-based TGNNs, from three aspects: 1) they focus on full graph training and apply staleness between multiple GNN layers to overlap the significant communication overhead with computation. In TGNN training, the communication overhead is relatively small due to subgraph sampling and the presence of only one GNN layer. Therefore, the optimizations for full-graph training are not suitable. 2) all previous GNN training frameworks simply introduce a pre-defined staleness bound without explicitly analyzing the relationship between model quality and training throughput, potentially leading to sub-optimal parallelization solutions; 3) they focus on addressing the logical dependency between feature fetching and model training within each training iteration, while performance bottleneck lies more on temporal dependency caused by memory fetching and updating in TGNN training. To our best knowledge, we present the first comprehensive approach to address the bottlenecks arising from the memory module in TGNNs and determine the minimal staleness bound that enables efficient and scalable training of memory-based TGNNs, with corresponding theoretical convergence proofs.  
+
+![](images/d5241e1e137d60da96d22abdac2006dbdc37ee1f3871b650a3515d91c6e85670.jpg)  
+Table 1: Training time breakdown of TGN model.  
+
+![](images/ec993871f6cefeef14bbb097ae048f56fcddb89102111202a69a2cd72fa8d27b.jpg)  
+Figure 3: Training throughput and model accuracy under different staleness bounds  
+
+
+
+\section{3 MSPIPE FRAMEWORK  }
+
+
+We design a stall-free minimal-staleness scheduling system for TGNN training, MSPipe (Fig. 1(c)). We first identify the bottleneck and temporal dependencies triggered by the memory module. To accelerate training, we pipeline data preprocessing, memory module fetching/updating and GNN training across multiple iterations. The minimal number of staleness iterations without causing pipeline stagnation is optimally decided and an online scheduling algorithm is designed to control memory staleness and avoid resource contention. To further mitigate memory staleness, we propose a lightweight similarity-based memory update module to obtain fresher information.  
+
+
+
+\section{3.1 MSPIPE MECHANISM  }
+
+
+Significant memory operation overhead and temporal dependencies. We consider a common 5-stage abstraction of memory-based TGNN training, i.e., graph sampling, feature fetching, memory fetching, GNN training and memory update. We conduct detailed profiling of the execution time of each stage, with time breakdown shown in Table 1. Memory operations incur substantial overhead (up to $36.1\%$ of the total execution time of one training iteration), while sampling and feature fetching do not (due to the 1-layer TGNN structure). As shown in Fig. 1(a), memory fetching depends on memory vectors updated at the end of the previous iteration, and has to wait for the relatively long TGNN training and memory updating to finish (Fig. 1(b)).  
+
+Pipline mechanism. A natural design to accelerate the training process involves decoupling the temporal dependency between the memory update stage in one training iteration and the memory fetching stage in the subsequent iteration, by leveraging stale memory vectors in the latter. Fig. 1(c) provides a high-level overview of the training pipeline, where computation (e.g., GNN training) is parallelized with fragmented I/O operations encompassing feature fetching, memory fetching, and memory update. The advanced memory fetching stage introduces a certain degree of staleness into the node memory module, causing the TGNN model to receive outdated input. Mathematically, MSPipe’s training can be formulated as follows, which are modified from Eqn. 2 and Eqn. 3:  
+
+$$
+\tilde{S}_{v}^{i}=f(\tilde{S}_{v}^{i-k},\overline{{m}}_{v}^{i}),h_{v}^{i}=\phi(g(\tilde{S}_{v}^{i},\ \tilde{S}_{u}^{i}\mid u\in N(v))
+$$  
+
+where ${\tilde{S}}_{v}^{i}$ represents the memory vector of node $v$ in training iteration $i$ updated based on stale memory vector in iteration $i-k$ , and $h_{v}^{i}$ is the embedding of node $v$ . MSPipe uses the memory vector from $k$ iterations before the current iteration to generate messages and train the model.  
+
+In the example pipeline in Fig. 4, we have staleness bound $k=2,4$ , indicating that memory fetching retrieves memory vectors updated two and four iterations before, respectively. While a larger staleness bound can enhance throughput, it may have detrimental effects on model convergence. Previous static GNN frameworks Wan et al. (2022); Peng et al. (2022) all rely on a intuitively predefined staleness bound. We argue that randomly selecting a staleness bound $k$ , is inadequate and may lead to delayed execution of the GNN training stage or unnecessarily high staleness. To support our argument, we conduct experiments on the LastFM dataset, training TGN models. As depicted in Fig. 3, applying the smallest staleness bound (e.g., $k=2$ ) leads to degradation in training throughput, while employing a larger staleness bound (e.g., $k=5$ ) impacted model accuracy. To address this, we introduce a pipeline scheduling policy that determines the minimal staleness bound that maximizes system throughput without affecting model convergence.  
+
+![](images/10744abbce2590e04d7b1b6aac3e66109835f79d3933d755d45485496becf65a.jpg)  
+Figure 4: Pipeline execution. Dashed arrow represents the bubble Figure 5: Resource requiretime. Red arrow denotes memory fetching to retrieve memory vectors ment of different stages. updated $k$ iterations before.  
+
+
+
+\section{3.2 STALL-FREE MINIMAL-STALENESS PIPELINE SCHEDULE  }
+
+
+To maximize TGNN training throughput, our objective is to enable the GPU to seamlessly perform computation without waiting for data preparation, as depicted in Fig. 4(a). We seek to determine the minimal staleness iteration number $k$ and perform resource-aware online pipeline stage scheduling, which enables maximum speed-up without stalling the GNN training stage, while ensuring model convergence. To accurately model resource contention, we analyze the resource requirements for different stages. Fig. 5 demonstrates that feature fetching and memory fetching contend for the copy engine and PCIe resources during the copy operation from host to device. However, no contension are encountered during the memory update stage, as it involves a copy operation from device to host Choquette & Gandhi (2020). Additionally, we adopt a GPU sampler with restricted GPU resource allocation to avoid competition with the GNN training stage.  
+
+Minimal-staleness bound $\mathbf{k}$ . Let $b_{i}^{(j)}$ and $e_{i}^{(j)}$ denote the start time and end time of stage $j$ in iteration i. $\tau^{(j)}$ is the execution time of stage $j$ . $b_{i}^{(j)}$ and $e_{i}^{(j)}$ can be computed as  
+
+$$
+b_{i}^{(j)}=\left\{\begin{array}{l l}{b_{i-1}^{(j)}+\tau^{(j)}}&{j=1}\\ {\operatorname*{max}(b_{i}^{(j-1)}+\tau^{(j-1)},b_{i-1}^{(j+1)}+\tau^{(j+1)})}&{j=2}\\ {\operatorname*{max}(b_{i}^{(j-1)}+\tau^{(j-1)},b_{i-1}^{(j)}+\tau^{(j)})}&{j\in[3,5]}\end{array}\right.\,,\quad e_{i}^{(j)}=b_{i}^{(j)}+\tau^{(j)},j\in[1,5].
+$$  
+
+where $\tau^{(j)}$ can be collected in a few iterations of profiling. Eqn. 5 ensures sequential execution of the stages in each training iteration, which prohibits simultaneous execution of the same stage from different iterations and resource competition among different stages. Specifically, feature fetching (stage 2) competes for PCIe and copy engine resources with memory fetching (stage 3) in the last iteration. Consequently, in MSPipe, feature fetching cannot commence until the memory fetching from the previous iteration and the sampling stage from the current iteration have both been completed, as illustrated in Fig. 4. Moreover, during synchronous training, different batches cannot be computed simultaneously by the TGNN (stage 4) and memory vectors from different iterations must be updated sequentially (stage 5) to prevent write conflicts.  
+
+To maximize training throughput with the least impact on model accuracy, we seek to fetch the most up-to-date memory vectors that are $k_{i}$ iterations before the current iteration $i$ without causing resource contention or pipeline stalling. To achieve this, we find the minimal $k_{i}$ as in the following linear program:  
+
+$$
+\begin{array}{r l}&{\mathrm{minimize}\quad k_{i}}\\ &{\mathrm{subject~to}\quad e_{i-k_{i}}^{(j_{\mathrm{teal}})}\geq b_{i}^{(j_{\mathrm{feal}})}+\tau^{(j_{\mathrm{feal}})},\;e_{i-k_{i}}^{(j_{\mathrm{teal}})}\leq b_{i}^{(j_{\mathrm{tran}})}-\tau^{(j_{\mathrm{mem}})},\;k_{i}\leq k_{m a x}}\end{array}
+$$  
+
+$$
+1\leq k_{i}<i,i=1,...,E,i-k_{i}\geq0,j_{\mathrm{feat}}=2,j_{\mathrm{mem}}=3,j_{\mathrm{train}}=4,j_{\mathrm{upd}}=5
+$$  
+
+Here $E$ denotes the total number of iterations in a training epoch. There are 3 constraints: 1) The first ensures that the memory update for the $i-k_{i}\mathrm{th}$ iteration is finished before memory fetching in the $i$ th iteration. 2) The second guarantees that delaying the memory fetching stage does not stall the subsequent GNN training stage, which enables incessant execution of GNN training stages on the GPU. 3) The third constraint introduces an upper bound for the number of staled iterations, which is based on an observation: During each iteration, the memory module updates only a small subset of nodes’ memory vectors. Consequently, it is only the memory vectors of these specific nodes that become stale when they are fetched prior to the memory update stage. In Fig. 6, it can be observed that the percentage of stale nodes increases with larger staleness iterations and we choose an upper bound $k_{m a x}$ to ensure that the percentage of stale nodes will not exceed $50\%$ . By iterating through each iteration, the above problem can be solved in $O(E)$ .  
+
+![](images/69a5a076c11083dd12c07a38c68680f1f5b9077e8ef73a23d961c88fc5290328.jpg)  
+Figure 6: Percentage of nodes that Figure 7: Resource-aware online schedule. Red arrow denotes use staled memory vectors under dif-memory fetching to retrieve memory vectors updated $k$ iteraferent numbers of staleness iterations tions before. Green dashed arrow represents the delay time.  
+
+Resource-aware online pipeline schedule. Once we have determined the minimal staleness iteration number $k_{i}$ , we can schedule the training pipeline by deciding the start time $b_{i}^{(j)}$ of each stage. This scheduling problem can be modeled as a variant of the “bounded buffer problem” in producerconsumer systems Mehmood et al. (2011), where the buffer length $k$ represents the number of staled iterations, the memory update stage serves as a slow consumer, and the memory fetching stage acts as a fast producer. To ensure efficient training, the scheduler ensures that the training stages from different iterations do not compete for the same hardware resource and strictly adhere to a sequential execution order, as illustrated in Fig. 7. By leveraging the minimal staleness iteration numbers $k_{i}$ , the scheduler monitors the staleness state of each iteration and defers the memory fetching stage until the minimal staleness condition is satisfied, ensuring that subsequent GNN training stages are not impeded to maximize training throughput.3.  
+
+
+
+\section{3.3 SIMILARITY-BASED STALENESS MITIGATION  }
+
+
+As a node’s memory should be updated upon occurrence of events related to the node, stationary memory state over a certain period of time would result in stale representations Rossi et al. (2021); Kumar et al. (2019). MSPipe may aggravate this problem although minimal staleness is introduced. To improve model convergence and accuracy with MSPipe, we further propose a staleness mitigation strategy by aggregating memories of recently active nodes with the highest similarity, which are considered to have similar and fresher temporal representations, to update the stale memory of a node. Figure 8: Distribution When node $v$ ’s memory has not been updated for time $\Delta t$ , longer than a of $\Delta t$ in WIKI dataset threshold $t_{t h r}$ , we update the stale memory of the node, ${\tilde{S}}_{v}^{i-k}$ , by combining it with the averaged memory of a set $N$ of most similar and active nodes. An active node is defined to be the one whose memory is fresher than that of node $v$ and $\Delta t$ is smaller than $t_{t h r}$ . For similarity between different nodes, we count their common neighbors which are reminiscent of the Jaccard similarity Leskovec et al. (2020). We observe that $\Delta t$ follows a power-law distribution shown in Fig. 8, which means that only a few $\Delta t$ values are much larger than the rest. We accordingly set $t_{t h r}$ to $p$ quantile (e.g., $99\%$ quantile) of the $\Delta t$ distribution to reduce staleness errors. Noted that our $\Delta t$ is the difference between the timestamp of the current event and the last updation time, which is different from observations in previous TGNN inference systems Wang $\&$ Mendis (2023); Zhou et al. (2022a). We apply the following memory staleness mitigation mechanism in the memory fetching stage:  
+
+![](images/17c3955a2102312c9d003fcfce2b46e6f1e785bce041c7f10a79847b89445cc8.jpg)  
+
+$$
+\hat{S}_{v}^{i-k}=\lambda\tilde{S}_{v}^{i-k}+(1-\lambda)\frac{\sum_{n\in N}\tilde{S}_{n}^{i-k}}{|N|}
+$$  
+
+where $\hat{S}_{v}^{i-k}$ is the mitigated memory vector of node $v$ at iteration $i-k$ , and $\lambda$ is a hyperparameter in $[0,1]$ . The mitigated memory vector will then be fed into the memory update function:  
+
+$$
+\hat{S}_{v}^{i}=f(\hat{S}_{v}^{i-k},\overline{{m}}_{v}^{i})
+$$  
+
+
+
+\section{3.4 THEORETICAL ANALYSIS  }
+
+
+We analyze the convergence guarantee and convergence rate of MSPipe with respect to our bounded memory vector staleness. By carefully scheduling the pipeline and utilizing stale memory vectors, we demonstrate that our approach incurs negligible approximation errors that can be bounded. We provide a rigorous analysis of the convergence properties of our approach, which establishes the theoretical foundation for its effectiveness in practice.  
+
+Theorem 1 (Convergent result, informal) With a memory-based TGNN model, suppose that 1) there is a bounded difference between the stale node memory vector ${\tilde{S}}^{i}$ and the exact node memory vector $S^{i}$ with the staleness bound $\epsilon_{s}$ , i.e., $\lVert\tilde{S}^{i}-S^{i}\rVert_{F}\leq\epsilon_{s}$ where $\big\|\big\|_{F}$ is the Frobenius norm; 2) the loss function $\mathcal{L}$ in TGNN training is bounded below and $L$ -smooth; and 3) the gradient of the loss function $\mathcal{L}$ is $\rho$ -Lipschitz continuous. Choose step size $\begin{array}{r}{\eta=\operatorname*{min}\lbrace\frac{2}{L},\frac{1}{\sqrt{t}}\rbrace}\end{array}$ . There exists a constant $D>0$ such that:  
+
+$$
+\operatorname*{min}_{1\leq t\leq T}\|\nabla\mathcal{L}(W_{t})\|_{F}^{2}\leq[2\mathcal{L}(W_{0})-\mathcal{L}(W^{*})+\rho D]\frac{1}{\sqrt{T}},
+$$  
+
+where $W_{0}$ , $W_{t}$ and $W^{*}$ are the initial, step-t and optimal model parameters, respectively.  
+
+ Theorem 1 indicates that the convergence rate of MSPipe is ${\cal O}(T^{-{\frac{1}{2}}})$ , which shows that our approach maintains the same convergence rate as vanilla sampling-based GNN training methods $(O(T^{-{\frac{1}{2}}})$ Chen et al. (2017); Cong et al. (2020; 2021)).  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+Testbed. The main experiments are conducted on a machine equipped with two 64-core AMD EPYC 7H12 CPUs, 512GB DRAM, and four NVIDIA A100 GPUs (40GB), and the scalability experiments are conducted on two of such machines with 100Gbps interconnect bandwidth.  
+
+Datasets and Models. We evaluate MSPipe on five temporal datasets: REDDIT, WIKI, MOOC, LASTFM Kumar et al. (2019) and a large dataset GDELT Zhou et al. (2022b). On each dataset, we use the same $70\%{-15\%-15\%}$ chronological train/validation/test set split as in previous works $\mathrm{Xu}$ et al. (2020); Rossi et al. (2021). We train 3 state-of-the-art memory-based TGNN models, JODIE Kumar et al. (2019), TGN Rossi et al. (2021) and APAN Wang et al. (2021).  
+
+Baselines. We adopt TGL Zhou et al. (2022b), a state-of-the-art TGNN training system, as the synchronous TGNN training baseline.2. We also implement the Presample (with pre-fetching features) mechanism similar to SAILENT Kaler et al. (2022) on TGL as a stricter baseline, which provides a parallel sampling and feature fetching scheme by executing them in advance. We implement MSPipe on PyTorch Paszke et al. (2019) and DGL Wang et al. (2019), supporting both single-machine multi-GPU and multi-machine distributed TGNN training. MSPipe-S is MSPipe with staleness compensation from similar neighbors with $\lambda$ set to 0.95. Noted that MSPipe does not implement the staleness mitigation mechanism by default.  
+
+
+
+\section{4.1 EXPEDITED TRAINING WITH COMPARABLE ACCURACY  }
+
+
+The results in Table 2 show that MSPipe improves the training throughput while maintaining high model accuracy. AP in the table stands for average model precision evaluated on the test set.5.  
+
+Training Throughput. We observe that MSPipe is $1.50\times$ to $2.45\times$ faster than TGL, and achieves up to $104\%$ speed-up as compared to the Presample mechanism. MSPipe obtains the best speed-up on GDELT, which can be attributed to the relatively smaller proportion of execution time devoted to the GNN training stage compared to other datasets (as shown in Table 1). This is mainly because MSPipe effectively addresses the primary bottlenecks in memory-based TGNN training by breaking temporal dependencies between iterations and ensuring uninterrupted progression of the GNN training stage, thereby enabling seamless overlap with other stages. Consequently, the total training time is predominantly determined by the uninterrupted GNN training stage. Notably, a smaller GNN training stage results in a larger speed-up, further contributing to the superior performance of MSPipe.  
+
+Table 2: Training Performance. The best (second-best) results are in bold (underlined). Each data point is average of 3 trials.   
+
+![](images/3fea9f43abd58486342f13fe40480b9154303d335ed6e8ae1b8a98628e72acc0.jpg)  
+
+Model Accuracy. MSPipe without staleness mitigation can already achieve comparable test average precision with TGL on all datasets, with a marginal degradation ranging from 0 to $1.6\%$ . This can be attributed to the minimal staleness mechanism and proper pipeline scheduling in MSPipe.  
+
+Staleness Mitigation. With the proposed staleness mitigation mechanism, MSPipe-S consistently achieves higher average precision than MSPipe across all models and datasets. Notably, MSPipe-S achieves the same test accuracy as TGL on REDDIT and MOOC datasets, while surpassing TGL’s model performance on LastFM and GDELT datasets. MSPipe-S introduces a minimal overhead of only $3.73\%$ on average for the staleness mitigation process. This demonstrates the efficiency of the proposed mechanism in effectively mitigating staleness while maintaining high performance levels.  
+
+Scalability. Fig. 9 presents the training throughput with different numbers of GPUs. MSPipe achieves not only consistent speed-up but also up to $83.6\%$ scaling efficiency on a single machine, which is computed as the ratio of the speed-up achieved by using 4 GPUs to the ideal speed-up, outperforming other baselines. We also scale TGN training on GDELT to two machines with eight GPUs in Fig. 9(d). Without explicit optimization for inter-machine communication, MSPipe still outperforms the baselines and exhibits better scalability.  
+
+
+
+\section{4.2 PRESERVING CONVERGENCE RATE  }
+
+
+To validate that MSPipe can maintain the same convergence rate as vanilla sampling-based GNN training without applying staleness $(O(T^{-\frac{1}{2}}))$ , we compare the training curves of all models on all datasets in Fig.3). We observe that MSPipe’s training curves largely overlap with those of vanilla methods (TGL and Presample), verifying our theoretical results in Sec. 3.4. With staleness mitigation, MSPipe-S can achieve slightly better and more steady convergence (e.g., on WIKI and LastFM) than others.  
+
+
+
+\section{4.3 STALL-FREE MINIMAL STALENESS BOUND  }
+
+
+To further validate that MSPipe can find the minimal staleness bound without delaying the GNN training stage, we conduct a comparative analysis of accuracy and throughput between the converged staleness bound computed by MSPipe and different staleness bounds $k$ . The results, depicted in Fig. 11 and Fig.3.3 (due to space constraints), consistently demonstrate that MSPipe achieves the highest throughput while maintaining the best accuracy compared to other staleness bound options. Additionally, the computed minimal staleness bounds for various datasets range from 2 to 4, providing further evidence for the necessity of accurately determining the minimal staleness bound rather than relying on random selection. Note that $k=1$ represents the baseline method of TGL without applying staleness.  
+
+![](images/500a856859ee133b392dfa24fb0662e999fe924d68032a72632022de2b1450e0.jpg)  
+Figure 10: Convergence of TGN training. x-axis is the wall-clock training time, and y-axis is the test average precision.  
+
+![](images/62f3d731045b91aadd818e4892019af6090e81d01e1465abca69d05f6416b019.jpg)  
+Figure 11: Throughput Figure 12: Staleness Figure 13: Staleness Figure 14: Hyperparaand AP on different stal- error comparison on mitigation with most meter analysis eness bound (MOOC) TGN similar or random nodes  
+
+
+
+\section{4.4 STALENESS MITIGATION MECHANISM  }
+
+
+Error reduction. To better understand the accuracy enhancement and convergence speed-up achieved by MSPipe-S, we conduct a detailed analysis of the intermediate steps involved in our staleness mitigation mechanism. Specifically, we refer to Theorem 1, where we assume the existence of a bounded difference $\epsilon_{s}$ between the stale node memory vector ${\tilde{S}}^{i}$ and the precise node memory vector $S^{i}$ . To assess the effectiveness of our staleness mitigation mechanism, we compare the mitigated staleness error $\|\hat{S}^{i}-S^{i}\|_{F}$ obtained after applying our mechanism with the original staleness error $\|\tilde{S}^{i}-S^{i}\|_{F}$ . As shown in Fig. 12, MSPipe-S consistently reduces the staleness error across all datasets, validating the theoretical guarantee and the effectiveness in enhancing accuracy.  
+
+Benefit of using most-similar neighbors. We further investigate our staleness mitigation mechanism by comparing using the most similar and active nodes for staleness mitigation with utilizing random active nodes, on the LastFM dataset. In Fig. 13, we observe that our proposed most similar mechanism leads to better model performance, while random selection would even degrade model accuracy. This could be because similar nodes have resembling representations that facilitate the stale node to obtain more updated information.3.  
+
+Hyperparameter analysis. We examine the effect of hyperparameter $\lambda$ on test accuracy, as depicted in Fig. 14. We find that mitigating staleness with a larger $\lambda\,(>0.8)$ results in better model performance than TGL’s results, indicating that we should retain more of the original stale memory representations and apply a small portion of mitigation from their similar ones.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+We present MSPipe, an efficient and scalable pipeline scheduling framework for memory-based TGNN training that improves training throughput and maintains model accuracy. MSPipe identifies the minimal number of staleness iterations to adopt in the pipeline without causing pipeline stagnation. Given the minimal staleness, MSPipe utilizes an online scheduler to delay the memory fetching stage and prevent resource contention. MSPipe further adopts a lightweight staleness mitigation strategy to alleviate memory staleness. Extensive experiments validate that MSPipe attains significant speed-up over state-of-the-art TGNN training schemes with minimal accuracy loss.  
+
+
+
+

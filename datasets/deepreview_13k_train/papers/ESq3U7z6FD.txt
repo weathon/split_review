@@ -1,0 +1,571 @@
+\title{EHI: End-to-end learning of Hierarchical Index for Efficient Dense Retrieval}
+
+\begin{abstract}
+
+Dense embedding-based retrieval is widely used for semantic search and ranking. However, conventional two-stage approaches, involving contrastive embedding learning followed by approximate nearest neighbor search (ANNS), can suffer from misalignment between these stages. This mismatch degrades retrieval performance. We propose End-to-end Hierarchical Indexing (\EHI), a novel method that directly addresses this issue by jointly optimizing embedding generation and ANNS structure. \EHI leverages a dual encoder for embedding queries and documents while simultaneously learning an inverted file index (IVF)-style tree structure. To facilitate the effective learning of this discrete structure, \EHI~introduces dense path embeddings that encodes the path traversed by queries and documents within the tree. Extensive evaluations on standard benchmarks, including MS MARCO (Dev set) and TREC DL19, demonstrate \EHI's superiority over traditional ANNS index. Under the same computational constraints, \EHI~outperforms existing state-of-the-art methods by {\textbf{+1.45\%}} in MRR@10 on MS MARCO (Dev) and {\textbf{+8.2\%}} in nDCG@10 on TREC DL19, highlighting the benefits of our end-to-end approach.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+Semantic search~\citep{johnson2019billion} aims to retrieve relevant or {\em semantically similar} documents/items for a given query. In the past few years, semantic search has been applied to numerous real-world applications like web search, product search, and news search ~\citep{NayakUnderstanding,dahiya2021deepxml}. The problem in the simplest form can be abstracted as: for a given query $q$, retrieve the relevant document(s) $d(q)$ from a static set of documents $\{d_1, d_2, \dots, d_N\}$ s.t. $d(q)=\arg\max_{1\leq j\leq N} \texttt{SIM}(\V{q}, \V{d_j})$. Here $\texttt{SIM}$ is a similarity function that has high fidelity to the training data  $\mathcal{B}=\{(q_i, d_j, y_{ij})\}$. Tuple $(q_i, d_j, y_{ij})$ indicates if document $d_j$ is relevant ($y_{ij}=1$) or irrelevant ($y_{ij}=-1$) for a given query $q_i \in \mathcal{Q}$. 
+Dense embedding-based  retrieval~\citep{johnson2019billion,jayaram2019diskann,guo2020accelerating} is the state-of-the-art (SOTA) approach for semantic search and typically follows a two-stage process. 
+ In the first stage, it embeds the documents and the query using a deep network like BERT~\citep{devlin2018bert} (Additional details about the encoder used in \namel~is described in Section~\ref{sec:enc_learning}, and the training methodology expanded in Section~\ref{sec:loss}). That is, it defines  similarity $\texttt{SIM}(q,d):=\langle \mathcal{E}_{\theta}(q), \mathcal{E}_{\theta}(d)\rangle$ as  the inner product between embeddings $\mathcal{E}_{\theta}(q)$ and $\mathcal{E}_{\theta}(d)$ of the query $q$ and the document $d$, respectively. $\mathcal{E}_{\theta}(\cdot)$ is a dense embedding function learned using  contrastive losses~\citep{ni2021large,menon2022defense}. 
+
+In the second stage, approximate nearest neighbor search (ANNS) retrieves relevant documents for a given query. That is, all the documents are indexed offline and are then retrieved online for the input query. ANNS in itself has been extensively studied for decades with techniques like ScaNN~\citep{guo2020accelerating}, IVF~\citep{sivic2003video}, HNSW~\citep{malkov2020efficient}, DiskANN~\citep{jayaram2019diskann} and many others being used heavily in practice. 
+
+
+\subsection{Motivation for \EHI}
+The prevailing two-stage approach to dense retrieval, involving separate training of the embedding encoder and the approximate nearest neighbor search (ANNS) structure, suffers from inherent limitations:
+ \textbf{\textit{Embedding-ANNS Misalignment:}} The lack of joint optimization leads to a potential mismatch between the learned embedding space and the requirements of the ANNS structure. This misalignment can cause suboptimal clustering of data points, hindering the ANNS algorithm's ability to efficiently identify semantically similar examples. For example, the documents might be clustered in six clusters to optimize encoder loss. However, due to computational constraints, ANNS might allow only five branches/clusters, thus splitting or merging clusters unnaturally and inaccurately. Figure~\ref{fig:d} helps illustrate the issue with the disjoint training regime typically used in dense retrieval literature. If the disjoint ANNS tries to cluster these documents into buckets, the resulting model will achieve suboptimal performance since the encoder was never aware of the task of ANNS. Instead, \EHI~proposes the learning of both the encoder and ANNS structure in a single pipeline. This leads to efficient clustering, as the embeddings being learned already share information about how many clusters the ANNS is hashing.
+
+\textbf{\textit{Disregard for Query Distribution:}} Conventional ANNS methods focus on generic retrieval efficiency, potentially neglecting the specific characteristics of the query distribution.  This can result in an indexing structure that is ill-suited to the patterns present in the actual queries encountered during deployment~\citep{jaiswal2022ood}. To provide an illustrative instance, let us consider a scenario in which there exists a corpus of documents denoted by $\mathcal{D}$, with two classes of documents categorized as $[D_1, D_2]$, following a certain probability distribution $[d_1,d_2]$. Suppose, $d_1 \gg d_2$, then under the utilization of the unsupervised off-the-shelf ANNS indexer such as ScaNN algorithm, clustering into two partitions, the algorithm would distribute the two document classes in an approximately uniform manner across the resultant clusters. Concurrently, the documents of class $D_1$ would be allocated to both of these clusters, as guided by the partitioning procedure, regardless of the query distribution. However, supposing a scenario in which an overwhelming majority of the queries target $D_2$, the goal emerges to rigorously isolate the clusters associated with $D_1$ and $D_2$ since we would like to improve latency in the downstream evaluation and visit fewer documents for each query. In this context, the \EHI emerges as a viable solution as it takes the query distribution into consideration, effectively addressing this concern by facilitating a clear delineation between the clusters corresponding to the distinct domains. Figure~\ref{fig:ddd} depicts the query distribution of \EHI~model trained on the MS MARCO dataset. It is important here to highlight that for tail queries, which are barely searched in practice, \EHI~is able to grasp the niche concepts and hash as few documents in these buckets as indicated by the very few average number of documents visited. Moving towards more popular queries, or the torso queries, we note a rise in the average number of documents visited as these queries are more broad in general. Moving even further to the head queries, we again notice a drop in the average number of documents visited, which showcases the efficiency and improved latency of the \EHI~model.
+\begin{figure}[t!]
+\centering
+
+~\subfigure[Misalignment of representations]{%
+\label{fig:d}
+\includegraphics[width=0.45\linewidth]{figures/rebuttal/Misalignment_motivation.png}}
+~\subfigure[Query Distribution MSMARCO]{%
+\label{fig:ddd}
+\includegraphics[width=0.34\linewidth]{figures/rebuttal/msmarco_motivation.png}}
+\vspace*{-5pt}
+\caption{Motivation of EHI.}
+ \label{fig:motivation}
+\end{figure}
+
+\subsection{Overview and Evaluation}
+
+Motivated by the aforementioned issues, we propose \EHI -- \textbf{E}nd-to-end learning of \textbf{H}ierarchical \textbf{I}ndex -- that jointly trains both the encoder and the search data structure; see Figure~\ref{fig:namel}. To the best of our knowledge, \EHI is the \emph{first} end-to-end learning method for dense retrieval. Similar to two-stage approaches, \EHI~employs a tree-structured inverted file-like index, but unlike DE+ANNS (the conventional two-stage approach where a standard Dual Encoder (DE) is trained independently, followed by an Approximate Nearest Neighbor Search (ANNS) using the learned embeddings), \EHI~integrates the training process to simultaneously learn the discrete document assignments within its index and refine the encoder parameters without any warm-starting. We can learn balanced and roughly uniform clusters with just the query, document pairs information which is generally available in the supervised training paradigm of most encoders, and does not require any proxy information through KNN or other clustering algorithms for learning the INF-style tree structure. \EHI's core innovation lies in the introduction of dense path embeddings. These embeddings represent the traversal paths of queries and documents within the tree index, enabling the learning of discrete document assignments. By optimizing the index such that semantically similar (query, document) pairs share similar path embeddings, EHI facilitates efficient retrieval by clustering relevant pairs within the same leaf nodes.
+We conduct an extensive empirical evaluation of our method against SOTA techniques on standard benchmarks. Our experiments on the popular MS MARCO benchmark~\citep{bajaj2016ms} demonstrate that \EHI~shows improvements of 0.6\% in terms of nDCG@10 compared to dense-retrieval with ScaNN baselines when only 10\% of documents are searched. We attribute these improved embeddings to the fact that \EHI enables an additional signal to the encoder from the indexer as well as the integrated hard negative mining as it can retrieve irrelevant or negative documents from indexed leaf nodes of a query. Here, the indexer parameters are always fresh, unlike techniques akin to ANCE \citep{xiong2020approximate}. 
+Similarly, \EHI~provides upto {\textbf{8.2\%}} higher nDCG@$10$ than state-of-the-art (SOTA) baselines on the MS MARCO TREC DL19~\citep{craswell2020overview} benchmarks for the same compute budget. \EHI~also achieves SOTA exact search performance on both MRR@$10$ and nDCG@$10$ metrics with up to {\textbf{80\%}} reduction in latency, indicating the effectiveness of the joint learning objective. Similarly, we outperform SOTA architectures such as NCI on NQ320$k$ by {\textbf{0.6\%}} and {\textbf{1.8\%}} on Recall@10 and Recall@100 metrics. (see Section~\ref{sec:results}).
+
+
+
+\subsection{Contributions}
+
+Our work introduces several key advancements to the field of dense retrieval:
+    \itemsep 0pt
+    \topsep 0pt
+    \parskip 2pt
+    \item \textbf{Novel End-to-End Paradigm.} We propose End-to-end Hierarchical Indexing (\EHI), an end-to-end learning framework that jointly optimizes the embedding encoder and the search index structure. \EHI~addresses the inherent misalignment in conventional two-stage approaches, enabling more efficient and accurate retrieval (Section~\ref{sec:algo}, Figure~\ref{fig:compare_baselines_ehi_idea}). To the best of our knowledge, we are the first to propose this without any warm starting or soft labels.
+    \item \textbf{Rigorous Empirical Validation.} We conduct comprehensive evaluations on the industry-standard MS MARCO benchmark, demonstrating \EHI's superiority over state-of-the-art ANNS techniques such as ScaNN, Faiss. Furthermore, we also showcase that \EHI~is competitive with other SOTA baselines such as ColBERT, SGPT, cpt-text, ANCE, DyNNIBAL.
+    \item \textbf{Framework Flexibility.} EHI is designed to be agnostic to specific encoder architectures, similarity metrics, and hard negative mining strategies. This flexibility underscores its potential for broad applicability within the dense retrieval domain.
+\end{itemize}
+
+
+\section{Related Works}
+
+\label{sec:related_works}
+
+Dense retrieval~\citep{mitra2018introduction} underlies a myriad of web-scale applications like search~\citep{NayakUnderstanding}, recommendations~\citep{eksombatchai2018pixie,jain2019slice}, and is powered by (a) learned representations~\citep{devlin2018bert,kolesnikov2020big,radford2021learning}, (b) ANNS~\citep{johnson2019billion,sivic2003video,guo2020accelerating} and (c) LLMs in retrieval~\citep{tay2022transformer, wang2022neural, guu2020retrieval}. Figure~\ref{fig:compare_baselines_ehi_idea} illustrates the difference between dual encoder trained with an ANNS (DE + ANNS), Generative Retrieval approaches (such as DSI, NCI) and EHI.
+
+\begin{figure*}[hbt!]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/EHI_vs_baselines_idea__2.pdf}
+\caption{Comparison between EHI's end-to-end training paradigm in comparison to other approaches such as Dual encoder + ANNS and Generative Retrieval approaches which require a multi-stage training.We denote stages which are not optimized for the task objective by a grey shade. Note that unlike DE + ANNS, and Generative Retrieval, \EHI~optimizes for recall in both encoder and indexer.}
+\label{fig:compare_baselines_ehi_idea}
+\end{figure*}
+
+\textbf{Representation learning.} Powerful representations are typically learned through supervised and un/self-supervised learning paradigms that use proxy tasks like masked language modeling~\citep{devlin2018bert} and autoregressive training~\citep{radford2018improving}. Recent advances in contrastive learning~\citep{gutmann2010noise} helped power strong dual encoder-based dense retrievers~\citep{ni2021large,izacard2021towards,NayakUnderstanding}. They consist of query and document encoders, often shared, which are trained with contrastive learning using limited positively relevant query and document pairs~\citep{menon2022defense,xiong2020approximate}. While most modern-day systems use these learned representations as is for large-scale ANNS, there is no need for them to be aligned with the distance metrics or topology of the data structures. Recent works have tried to address these concerns by warm-starting the learning with a clustering structure~\citep{gupta2022elias} but fall short of learning jointly optimized representations alongside the search structure. We explicitly state the challenges of directly adapting methods like ELIAS, originally designed for classification, to the dense retrieval task. Other works such as RepCONC~\citep{zhan2022learning}, and SPLADE~\citep{formal2022distillation} also work on the efficiency aspect of retrieval, where they focus on quantization of the representations using regularizers which explicitly work on reducing FLOPS. 
+
+\textbf{Approximate nearest neighbor search (ANNS).}
+The goal of ANNS is to retrieve {\em almost} nearest neighbors without paying exorbitant costs of retrieving true neighbors ~\citep{clarkson1994algorithm,indyk1998approximate,weber1998quantitative}. The ``approximate'' nature comes from pruning-based search data structures~\citep{sivic2003video,malkov2020efficient,beygelzimer2006cover} as well as from the quantization based cheaper distance computation~\citep{jegou2010product,ge2013optimized}. This paper focuses on ANNS data structures and notes that compression is often complementary. Search data structures reduce the number of data points visited during the search. ANNS data structures also carefully handle the systems considerations involved in a deployment like load-balancing, disk I/O, main memory overhead, etc., and often tree-based data structures tend to prove highly performant owing to their simplicity and flexibility~\citep{guo2020accelerating}. For a more comprehensive review of ANNS structures, please refer to~\cite{cai2021a,li2020approximate,wang2021comprehensive}. Works such as CCSA~\citep{lassance2021composite} propose alternate ANN structures for efficient retrieval via constrained clustering. Other works such as TDM~\citep{zhu2018learning} proposes learning a tree-like ANNS but the ANNS is learnt in a disjoint fashion where k-means algorithm is used for learning the clustering without any supervision. Works such as JTM~\citep{zhu2019joint}, and Deep Retrieval~\citep{gao2020deep} also attempt to optimize the learn the indexer with a neural network - but they require pre-computation of optimal paths taken by the query and document for learning. Prior works including PQN~\citep{yu2018product} and GPQ~\citep{jang2020generalized} have explored end-to-end ANNS techniques in the visual domain which primarily rely on hashing-based approaches, and not an hierarchical tree-like structure. \EHI~differentiates itself through its novel tree structure and dense path embeddings, tailored for the unique characteristics of text data and semantic search. Furthermore, \EHI~handles a significantly larger number of buckets (e.g., 7000) compared to the 48-bit hashing used in approaches like GPQ, demonstrating its suitability for the scale of textual datasets with millions of documents. Similarly, the scale of the experiments are also significantly larger as PQN, GPQ showcase their efficacy on $\sim$170K images to be indexed (where the overhead of exact search might not be very large), while we experiment on $\sim$10M documents, where exact search is a significant overhead during inference.
+
+\EHI~works in an end-to-end fashion without any pre-computation of optimal paths, and is the \textit{first end-to-end hierarchical indexer} framework to the best of our knowledge.
+
+\textbf{Generative Retrieval for Semantic Search.}
+Recently, there have been some efforts towards modeling retrieval as a sequence-to-sequence problem. In particular, Differential Search Index (DSI)~\citep{tay2022transformer} and more recent Neural Corpus indexer (NCI)~\citep{wang2022neural} method proposed encoding the query  and then find relevant document by running a learned decoder.  %
+However, both these techniques, at their core, use a {\em separately} computed hierarchical k-means-based clustering of document embeddings for semantically assigning the document-id. That is, they also index the documents using an ad-hoc clustering method which might not be aligned with the end objective of improving retrieval accuracy. In contrast, \EHI jointly learns both representation and a k-ary tree-based search data structure end-to-end. This advantage is reflected on MS MARCO dataset \EHI is upto 7.12\% more accurate (in terms of nDCG@10) compared to DSI. %
+Recently, retrieval has been used to augment LLMs also ~\citep{guu2020retrieval, izacard2020leveraging, izacard2020distilling, izacard2022few}. We would like to stress that the goal with LLMs is language modeling while retrieval's goal is precise document retrieval. However, retrieval techniques like \EHI can be applied to improve retrieval subcomponents in such LLMs. 
+
+
+\section{End-to-end Hieararchical Indexing (\EHI)}
+
+\label{sec:algo}
+
+{\bf Problem definition and Notation.} Consider a problem with a corpus of $N$ documents  $\mathcal{D} = \{d_1, ..., d_N\}$, a set of $Q$ training queries  $\mathcal{Q} = \{q_1, ..., q_Q\}$, and training data $(q_i,d_k, y_{ik})$, where $y_{ik}\in \{-1,1\}$ is the label for a given training (query, document) tuple and $y_{ik}=1$ denotes that $d_k$ is relevant to $q_i$. 
+Given these inputs, the goal is to learn a {\em retriever} that maps a given query to a set of relevant documents while minimizing the computation cost. While wall-clock time is the primary cost metric, comparing different methods against it is challenging due to very different setups (language, architecture, parallelism, etc.). Instead, we rely on recall vs. \% searched curves, widely considered a reasonable proxy for wall-clock time modulo other setup/environment changes \citep{guo2020accelerating}.
+
+\subsection{Overview of \EHI}
+\label{sec:prop_appr}
+\input{figures/teaser}
+At a high level, \EHI has three key components: Encoder $\C{E}_\theta$, Indexer $\C{I}_\phi$ and Retriever. Parameters $\theta$ of the query/document encoder and $\phi$ of the indexer are the trainable parameters of \EHI. Unlike most existing techniques, which train the encoder and indexer in a two-step disjoint process, we train both the encoder and indexer parameters jointly with an appropriate loss function; see Section~\ref{sec:loss}. Learning the indexer -- generally a discontinuous function -- is a combinatorial problem that also requires multiple rounds of indexing the entire corpus. However, by modeling the indexer using a hierarchical tree and its ``internal representation'' as compressed path embedding, we demonstrate that the training and retrieval with encoder$+$indexer can be executed efficiently and effectively. 
+In the following sections, we provide details of the encoder and indexer components. Section~\ref{sec:loss} provides an overview of the training procedure. Finally, Section~\ref{sec:reranking} summarizes how documents are ranked after retrieval.
+
+\subsection{Encoder $\mathcal{E}_{\theta}$: Dense embedding of query/documents}
+\label{sec:enc_learning}
+Our method is agnostic to the architecture used for dual encoder. But for simplicity, we   use standard dual encoder~\citep{ni2021large} to map input queries and documents to a common vector space. That is, encoder \enc parameterized by $\theta$, maps query ($q \in \mathcal{Q}$) and document ($d \in \mathcal{D}$) to a common vector space:
+$   \mathcal{E}_{\theta}(q) \in \mathbb{R}^m \text{, and}~\mathcal{E}_{\theta}(d) \in \mathbb{R}^m$, where $m$ is the embedding size of the model (768 here).
+While such an encoder can also be multi-modal as well as multi-vector, for simplicity, we mainly focus on standard textual data with single embedding per query/document. We use the standard {\em BERT architecture} for  encoder \enc and initialize parameters $\theta$ using a pre-trained Sentence-BERT distilbert model \citep{reimers2019sentence}. Our base model has 6 layers, 768 dimensions, 12 heads with 66 million parameters. We then fine-tune the final layer of the model for the target downstream dataset. 
+\subsection{Indexer $\C{I}_\phi$: Indexing of query/document in the hierarchical data structure}
+\label{sec:ind_learning}
+
+\EHI's indexer ($\C{I}_\phi$) is a tree with height $H$ and branching factor $B$. Each tree node contains a {\em classifier} that provides a distribution over its children. So, given a query/document, we can find out the leaf nodes that the query/document indexes into, as well as the {\em probabilistic} path taken in the tree. 
+
+The final leaf nodes reached by the query are essential for retrieval. But, we also propose to use the path taken by a query/document in the tree as an {\em embedding} of the query/document -- which can be used in training through the loss function. However, the path a query/document takes is an object in an exponentially large (in height $H$) vector space, owing to $B^H$ leaf nodes, making it computationally intractable even for a small $H$ and $B$. For instance, with $B=10$ and $H=5$, a relatively small tree, there would be 100,000 ($10^5$) possible paths.
+
+Instead, below, we provide a significantly more compressed {\em path embedding} -- denoted by $\C{T}(\cdot; \phi)$ and parameterized by $\phi$ -- embeds any given query or document in a relatively low-dimensional ($B\cdot H$) vector space (which would lead to just 50 in the above example). For simplicity, we denote the query and the document path embedding as $\C{T}_{\phi}(q) = \C{T}(\mathcal{E}_{\theta}(q); \phi)$ and $\C{T}_{\phi}(d) = \C{T}(\mathcal{E}_{\theta}(d); \phi)$, respectively. %
+
+We construct path embedding of a query/document as: 
+$$\C{T}(\mathcal{E}_{\theta}(q)) = \C{T}(\mathcal{E}_{\theta}(q); \phi) = [\V{p}^H; \V{p}^{H-1}; \dots; \V{p}^{1}],$$
+Where $\V{p}^{h}\in [0,1]^{B}$ denotes the probability distribution of children nodes for a parent at height $h$. For a given leaf $l$, say path from root node is defined as  $\V{l}=[i^1_l, i^2_l \dots i^H_l]$ where  $i^h_l \in [1\dots B]$ for $h\in [H]$. The probability at a given height in a path is approximated using a height-specific simple feed-forward neural network parameterized by $\V{W}_{h+1} \in \mathbb{R}^{(B\cdot h + m)\times B}$ and $\V{U}_{h+1} \in \mathbb{R}^{(B\cdot h + m)\times (B\cdot h + m)}$ ($m$ is the embedding size). That is,
+\begin{flalign}
+\label{eq:indexer}
+    \V{p}^{h+1}&=\texttt{Softmax}(\V{W}_{h+1}^\top \C{K}_h; \V{U}_{h+1}))\cdot \V{p}^{h}[i^{h}_l]
+\end{flalign}
+where $\C{K}_h = \C{F}([\V{o}(i^{h}_l);\V{o}(i^{h-1}_l);\dots;\V{o}(i^{1}_l);\mathcal{E}_{\theta}(q)]$, and one-hot-vector  $\V{o}(i)$ is the $i$-th canonical basis vector and $\C{F}$ is a non-linear transformation given by $\C{F}(\V{x}; \V{U}_h) = \V{x} + \texttt{ReLU}(\V{U}_h^{\top} \V{x})$.
+
+In summary, the path embedding for height 1 represents a probability distribution over the leaves. During training, we compute path embedding for higher heights for only the most probable path, ensuring that the summation of leaf node logits remains a probability distribution. Also, the indexer and path embedding function $\C{T}(\cdot; \phi)$ has the following collection of trainable parameters:  $\phi = \{\V{W}_H, \dots, \V{W}_1, \V{U}_H, \dots, \V{U}_1\}$, which we learn by optimizing a loss function based on the path embeddings; see Section~\ref{sec:loss}.
+
+\subsection{Retriever: Indexing items for retrieving}
+\label{sec:retrieval}
+Indexing and retrieval form a backbone for any search structure. \EHI efficiently encodes the index path of the query and documents in $(B\cdot H)$-dimensional embedding space. During retrieval for a query q, \EHI explores the tree structure to find the ``most relevant'' leaves and retrieves documents associated with those leaves. For retrieval, it requires encoder and indexer parameters $(\theta, \phi)$ along with Leaf, document hashmap $\C{M}$.   
+
+The relevance of a leaf $l$ for a query $q$ is measured by the probability of a query reaching a leaf at height $H$ ($\C{P}(q, l, H)$). Recall from previous section that path to a leaf $l$ is defined as $\V{l}=[i^1_l, i^2_l \dots i^H_l]$ where  $i^h_l \in [1\dots B]$ for $h\in [H]$. The probability of reaching a leaf $l$ for a given query $q \in \mathcal{Q}$ to an arbitrary leaf $l \in \texttt{Leaves}$ can be computed as $\C{P}(q, l, H) = \V{p}^{H}[i_l^H]$ using equation~\ref{eq:indexer}. But, we only need to compute the most probable leaves for every query during inference, which we obtain by using the standard beam-search procedure summarized below: 
+\begin{enumerate}[leftmargin=*, nolistsep]
+    \item For all parent node at height $h-1$, compute probability of reaching their children $\hat{S} = \cup_{c \in \texttt{child}(p)} \C{P}(q, c, h)~\forall_{p\in P}$
+    \item Keep top $\beta$ children based on score $\hat{S}$ and designate them as the parents for the next height.
+\end{enumerate}
+Repeat steps 1 and 2 until the leaf nodes are reached.
+
+Once we select $\beta$ leaves \EHI retrieves documents associated with each leaf, which is stored in the hashmap $\C{M}$. To compute this hash map, \EHI indexes each document $d\in \C{D}$ (similar to query) with $\beta=1$. Here, $\beta=1$ is a design choice considering memory and space requirements and is kept as a tuneable parameter. It stores document-to-leaf associations, allowing us to strategically focus the search on the most relevant subset of documents. The hashmap $\C{M}$ is used to store the information of which documents reach which leaves in our tree. This is essentially the result of the indexing step. Note that to add new ad-hoc documents after training \namel, one would need to follow the indexing step listed above to store the new documents in the appropriate buckets and update the hashmap $\C{M}$.
+
+During retrieval, we find out which leaves the query goes to, and we only use those documents which have reached similar leaves. This is how we sample a few documents to search over instead of searching over the entire document space. 
+
+\subsection{Training \EHI}
+\label{sec:loss}
+Given the definition of all three \EHI components -- encoder, indexer, and retriever -- we are ready to present the training procedure. As mentioned earlier, the encoder and the indexer parameters ($\theta; \phi$) are optimized simultaneously with our proposed loss function, which is designed to have the following properties: a) Relevant documents and queries should be semantically similar, b) documents and queries should be indexed together iff they are relevant, and c) documents should be indexed together iff they are similar. 
+
+Given the encoder and the indexer, we design one loss term for each of the properties mentioned above and combine them to get the final loss function. %
+To this end, we first define the triplet loss as: 
+\begin{equation}\label{eq:contrastive_loss}
+    L(a,b,c) = [ac - ab + \gamma]_+
+\end{equation}
+where we penalize if similarity between query $q$ and an {\em irrelevant} document $d_-$ ($y(q,d_-)\neq 1$) is within $\gamma$ margin of the corresponding similarity between $q$ and a relevant document  $d_+$ ($y(q,d_+)= 1$).%
+We now define the following three loss terms:
+\begin{enumerate}[leftmargin=*, noitemsep]
+    \item \textbf{Semantic Similarity}: the first term is a standard dual-encoder contrastive loss between a relevant document $d_+$ -- i.e., $y(q,d_+)=+1$ -- and an {\em irrelevant} document with $y(q,d_-)\neq 1$.  %
+        \begin{equation}\label{eq:siamese}
+        L_{\text{siamese}} = L(\mathcal{E}_{\theta}(q), \mathcal{E}_{\theta}(d_{+}), \mathcal{E}_{\theta}(d_{-}); \theta)
+        \end{equation}
+    \item \textbf{Indexing Similarity}: the second term is essentially a similar contrastive loss over the query, relevant-doc, irrelevant-doc triplet, but where the query and documents are represented using the path-embedding $\C{T}_\phi(\cdot)$ given by the indexer $\C{I}_\phi$. %
+        \begin{equation}
+        \label{eq:indexing}
+        L_{\text{indexing}} =  L(\C{T}_{\phi}(q), \C{T}_{\phi}(d_{+}),\C{T}_{\phi}(d_{-}); \theta, \phi)
+        \end{equation}
+    \item \textbf{Intra-leaf Similarity}: to spread out irrelevant docs, third loss applies triplet loss over the sampled relevant and irrelevant documents for a query $q$. Note that we apply the loss only if the two docs are semantically dissimilar according to the latest encoder, i.e.,  $\texttt{SIM}(\V{a}, \V{b}, \tau) = \frac{\C{E}_{\theta}(a)^{T}\C{E}_{\theta}(b)}{|\C{E}_{\theta}(a)||\C{E}_{\theta}(b)|} < \tau$ for a pre-specified threshold $\tau=0.9$.%
+    \begin{flalign}\label{eq:docindexing}
+    L_{\text{intra-leaf}} ={} \texttt{SIM}(d_{+}, d_{-}, \tau)
+    \C{T}_{\phi}(d_{+})^{\top}\C{T}_{\phi}(d_{-})
+    \end{flalign}
+\end{enumerate}
+The final loss function $\mathcal{L}$ is given as the weighted sum of the above three losses: 
+\begin{equation}\label{eq:final_loss}
+    \mathcal{L} = \lambda_1 L_{\text{siamese}} + \lambda_2 L_{\text{indexing}} + \lambda_3 L_{\text{intra-leaf}}
+\end{equation}
+Here $\gamma$ is set to 0.3 for all loss components, and $\lambda_1 , \lambda_2 , \lambda_3$ are tuneable hyper-parameters. Our trainer (see Algorithm~\ref{alg:one}) learns $\theta$ and $\phi$ by optimizing $\C{L}$ using standard techniques; for our implementation we used AdamW \citep{loshchilov2017decoupled}. 
+Note that the loss function only uses in-batch documents' encoder embeddings and path embeddings, i.e., we are not even required to index all the documents in the tree structure, thus allowing efficient joint training of both encoder and indexer. To ensure fast convergence, we use hard negatives mined from the indexed leaves of a given query $q$ for which we require documents to be indexed in the tree. But, this procedure can be done once in every  $r$ step where $r$ is a hyper-parameter set to 5 by default across our experiments. We will like to stress that existing methods like DSI, NCI, or ANCE not only have to use stale indexing of documents, but they also use stale or even fixed indexers -- like DSI, NCI learns a fixed semantic structure over docids using one-time hierarchical clustering. In contrast, \EHI jointly updates the indexer and the encoder in each iteration, thus can better align the embeddings with the tree/indexer. 
+\subsection{Re-ranking and Evaluation}
+\label{sec:reranking}
+
+This section describes the re-ranking step and the test-time evaluation process after retrieval. In Section~\ref{sec:retrieval}, we discussed how each document is indexed, and we now have a learned mapping of $d \times l$, where $d$ is the corpus size, and $l$ is the number of leaves. Given a query at test time, we perform a forward pass similar to the indexing pipeline presented in Section~\ref{sec:retrieval} and find the top-$b$ leaves ($b$ here is the beam size) the given query reaches. We collate all the documents that reached these $b$ leaves (set operation to avoid any repetition of the same documents across multiple leaves) and rank them based on an appropriate similarity metric such as cosine similarity, dot product, manhattan distance, etc. We use the cosine similarity metric for ranking throughout our experiments (see Section~\ref{sec:results}).
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+We conduct a comprehensive empirical evaluation of \EHI~on established dense retrieval benchmarks. Our experiments have two primary objectives:
+
+(a) \textbf{Validate the End-to-end Paradigm:} We seek to demonstrate the superiority of \EHI's joint optimization of the embedding encoder and Indexer compared to the conventional disjoint training approach that utilizes off-the-shelf ANNS methods (e.g., ScaNN, Faiss-IVF) or alternative generative retrieval or sparse retrieval approaches. This comparison provides strong evidence for the benefits of our proposed paradigm shift.
+
+(b) \textbf{Justify Design Decisions:} Through systematic experimentation, we aim to elucidate the rationale behind the design choices within \EHI. These insights will solidify the theoretical foundations of our method and guide future research in this domain.
+
+\begin{figure*}[hbt!]
+\centering
+\subfigure[{MSMARCO: MRR@10}]{%
+\label{fig:msmarco_mrr100}
+\includegraphics[width=0.31\linewidth]{figures/main/msmarco_dot/msmarco_MRR__10.pdf}} \quad
+\subfigure[{TREC DL19: nDCG@10}]{%
+\label{fig:msmarco_trecdl_n100}
+\includegraphics[width=0.31\linewidth]{figures/main/msmarco_trecdl/msmarco_trecdl_nDCG__10.pdf}}
+\subfigure[{NQ320$k$: R@10}]{%
+\label{fig:nq320k_r10}
+\includegraphics[width=0.31\linewidth]{figures/main/nq320k/nq320k_Recall__10.pdf}}
+
+\caption{\EHI is significantly more accurate than DE + ScaNN or Faiss-IVF, especially when restricted to visit a small fraction of documents.}
+\label{fig:msmarco_results}
+\end{figure*}
+
+\subsection{Experimental Setup}
+\label{sec:exp_setup}
+
+\paragraph{Datasets.}
+We evaluate \EHI on four standard but diverse retrieval datasets of increasing size: SciFact~\citep{wadden2020fact}, FIQA~\citep{maia201818}, NQ320$k$~\citep{kwiatkowski2019natural}, and  MS MARCO~\citep{bajaj2016ms}. 
+
+We establish a robust set of baselines to comprehensively evaluate EHI's performance and isolate the impact of our core contributions:
+
+\textbf{State-of-the-Art (SOTA) Comparisons.}
+ These comparisons, while acknowledging architectural differences, demonstrate \EHI's strong performance and its potential within the broader research landscape.  Importantly, \EHI~achieves this competitiveness using a significantly small encoder (66M parameters), highlighting the effectiveness of our end-to-end index learning approach.
+We note that re-ranking and other late interaction methods employed in ColBERT-v2 and SPLADE currently outperform \EHI~in exact search scenarios on the MS MARCO benchmark. This presents a promising future research direction to explore how re-ranking losses and other techniques could be integrated into \EHI. Note that methods like ColBERT-v2, due to their late-interaction similarity computation, are less readily adaptable to ANNS-based retrieval.
+
+\textbf{Controlled Ablation Studies.} To directly assess the value of \EHI's end-to-end indexer, we construct baselines using the same DistilBERT encoder paired with:
+(a) Dual Encoder (DE with ANCE hard-negatives; \citet{menon2022defense}) + Exact Search (for theoretical upper bound), (b) DE + ScaNN (representative of popular ANNS libraries;~\citet{guo2020accelerating}), and (c) DE + Faiss-IVF (for comparison with another IVF-style index;~\citet{johnson2019billion}).
+
+\textbf{Generative Retrieval.} We include baselines like DSI~\citep{tay2022transformer} and NCI~\citep{wang2022neural} to provide context, acknowledging their potential limitations in this setting. We report DSI numbers on MS MARCO using an implementation validated by the authors. However, we note that NCI fails to scale to large datasets like MS MARCO.
+\textbf{Sparse Neural Retrieval.} We include sparse neural IR baselines like CCSA~\citep{lassance2021composite} and SPLADE~\citep{formal2022distillation} for a comprehensive comparison in Table~\ref{tab:msmarco_complete_comparison}.  However, it's important to note their potential differences in our context. Methods like CCSA, with their two-step disjoint training, face inherent challenges similar to those discussed earlier.  While SPLADE offers notable improvements by replacing ANNS with sparse representations and using a FLOP-minimizing regularization term, this approach necessitates training multiple models for different FLOP targets of the practitioner. In contrast, EHI achieves this flexibility and elasticity within a single model.
+Furthermore, as \citet{lassance2023static} observes, SPLADE models can exhibit slower inference speeds compared to dense IR models which could be alleviated with static pruning, but the earlier limitation still holds water. However, the distillation-based improvements achieved by SPLADE are promising, and exploring the integration of distillation techniques with \EHI~represents an exciting direction for future research.
+\subsection{Results}
+\label{sec:results}
+
+ We evaluate \EHI on the MS MARCO passage retrieval task, a {\em widely recognized benchmark} for semantic search. Results are presented for both the standard dev set and the TREC DL-19 set~\citep{craswell2020overview}. We also report our findings on other datasets such as NQ320$k$~\citep{kwiatkowski2019natural}. We compare against the standard Sentence-BERT model~\citep{sentencebert_msmarco}, trained on the MS MARCO dataset, which is further fine-tuned to the various datasets compared in this paper.
+
+\textbf{Efficiency-Accuracy Trade-off:} EHI demonstrates a compelling advantage in the efficiency-accuracy trade-off. For instance, on the standard MS MARCO dev set, \EHI~matches or exceeds the accuracy of Exact Search while visiting {\textbf{80\%}} fewer documents (see Figure~\ref{fig:msmarco_mrr100}). This significantly outperforms DE+ScaNN and DE+Faiss-IVF, which require visiting nearly double the documents for comparable accuracy. Furthermore, on the TREC-DL 19 benchmark, \EHI~is able to match or surpass the nDCG@10 of baseline Exact Search with an {\textbf{78\%}} reduction in latency (see Figure~\ref{fig:msmarco_trecdl_n100}). On the NQ320$k$ dataset, \EHI matches or surpasses the accuracy of baseline Exact Search with a {\textbf{60\%}} reduction in latency (see Figure~\ref{fig:nq320k_r10}).
+
+\textbf{Gains in compute bottlenecks:}  We emphasize the significance of \EHI's {\textbf{3.6\%}} nDCG@10 improvement (with only 1\% documents visited) on the well-optimized MS MARCO benchmark. Such gains underscore the practical value of our approach. Similarly, when restricted to  visiting 1\% of the documents, \EHI achieves {\textbf{8.2\%}} higher  nDCG@10 than DE+ScaNN and DE+Faiss-IVF on the TREC-DL benchmark. 
+
+\textbf{Comparison with Generative Retrieval Methods:}  We note that the DSI base model with 250M parameters is almost \textit{four times} the size of the current \EHI model. After multiple weeks of DSI training with doc2query + atomic id + base model, DSI achieves a MRR@$10$ metric of $26\%$ on the MS MARCO dev set, which is {\textbf{8.58\%}} lower than \EHI with just $\mathbf{1\%}$ visited documents  (see Table~\ref{tab:msmarco_complete_comparison}). Note that despite significant efforts, we could not scale NCI code~\citep{wang2022neural} on MS MARCO due to the dataset size; NCI paper does not provide metrics on MS MARCO dataset. To compare against NCI, we report our findings on the NQ320$k$ dataset. Note that \EHI~is able to significantly outperform DSI and NCI (without query generation) despite NCI utilizing a $10\times$ larger encoder! Furthermore, even with query generation, NCI is $0.6\%$ and $1.8\%$ less accurate than \EHI on Recall@10 and Recall@100 metrics, respectively. (see Table~\ref{tab:nq320kexp})
+
+\subsection{Comparisons to SOTA}
+In this section, we compare \EHI~with SOTA approaches such as ColBERT, SGPT, cpt-text, ANCE, DyNNIBAL, which use different dot-product metrics or hard-negative mining mechanisms, etc. Note that \EHI proposed in this paper is a paradigm shift of training and can be clubbed with any of the above architectures. So the main comparison is not with SOTA architectures, but it is against the existing paradigm of two-stage dense retrieval as highlighted in Section~\ref{sec:results}. Nevertheless, we showcase that \EHI outperforms SOTA approaches on both MS MARCO dev set as well as MS MARCO TREC DL-19 setting as highlighted in Table~\ref{tab:msmarco_complete_comparison} and Table~\ref{tab:msmarco_trec_dl_comparisons} respectively. Table~\ref{tab:nq320kexp} depicts the performance of \namel~in comparison to other SOTA approaches.
+ 
+\begin{table*}[]
+\centering
+\caption{Performance metrics ($\%$) evaluated on the MS MARCO dev dataset. The best value for each metric is indicated in \textbf{bold} font.}
+\vskip 0.15in
+\resizebox{0.9\linewidth}{!}{
+\begin{tabular}{lccc}
+\toprule
+Method &
+  \data{MRR@10 (Dev)} &
+  \data{nDCG@10 (Dev)} & {\#. parameters}\\
+\midrule
+DPR \cite{thakur2021beir} & - & 17.7 & 110M (BERT-base)\\
+BM25 (official) \cite{khattab2020colbert} & {16.7} & 22.8 & -\\
+BM25 (Anserini) \cite{khattab2020colbert} & 18.7 & - & - \\
+\texttt{cpt-text} S  \cite{neelakantan2022text} & 19.9 & - & 300M (cpt-text S) \\
+\texttt{cpt-text} M \cite{neelakantan2022text} & 20.6 & - & 1.2B (cpt-text M)\\
+\texttt{cpt-text} L  \cite{neelakantan2022text}& 21.5 & - & 6B (cpt-text L)\\
+\texttt{cpt-text} XL \cite{neelakantan2022text} & 22.7 & - & 175B (cpt-text XL)\\
+DSI  (Atomic Docid + Doc2Query + Base Model) \cite{tay2022transformer} & 26.0 & 32.28 & 250M (T5-base) \\
+DSI  (Naive String Docid + Doc2Query + XL Model) \cite{tay2022transformer} & 21.0 & - & 3B (T5-XL) \\
+DSI  (Naive String Docid + Doc2Query + XXL Model) \cite{tay2022transformer} & 16.5 & - & 11B (T5-XXL) \\
+DSI  (Semantic String Docid + Doc2Query + XL Model) \cite{tay2022transformer} & 20.3 & 27.86 & 3B (T5-XL) \\
+CCSA \cite{lassance2021composite} & 28.9 & - & 110M (BERT-base) \\
+HNSW \cite{malkov2018efficient} & 28.9 & - & -\\
+RoBERTa-base + In-batch Negatives \cite{monath2023improving} & 24.2 & - & 123M (RoBERTa-base) \\
+RoBERTa-base + Uniform Negatives \cite{monath2023improving} & 30.5 & - & 123M (RoBERTa-base) \\
+RoBERTa-base + DyNNIBAL \cite{monath2023improving} & 33.4 & - & 123M (RoBERTa-base) \\
+RoBERTa-base + Stochastic Negatives \cite{monath2023improving} & 33.1 & - & 123M (RoBERTa-base) \\
+RoBERTa-base +Negative Cache \cite{monath2023improving} & 33.1 & - & 123M (RoBERTa-base) \\
+RoBERTa-base + Exhaustive Negatives \cite{monath2023improving} & 34.5 & - & 123M (RoBERTa-base) \\
+
+SGPT-CE-2.7B \cite{muennighoff2022sgpt} & - & 27.8 & 2.7B (GPT-Neo)\\
+SGPT-CE-6.1B \cite{muennighoff2022sgpt} & - & 29.0 & 6.1B (GPT-J-6B) \\
+SGPT-BE-5.8B \cite{muennighoff2022sgpt} & - & 39.9 & 5.8B (GPT-J)\\
+doc2query \cite{khattab2020colbert} & 21.5 & - & -\\
+DeepCT \cite{thakur2021beir} & 24.3 & 29.6 & 110M (BERT-base) \\
+docTTTTquery \cite{khattab2020colbert} & 27.7 & - & -\\
+SPARTA \cite{thakur2021beir} & - & 35.1 & 110M (BERT-base) \\
+docT5query \cite{thakur2021beir} & - & 33.8 & -\\
+ANCE & 33.0 & 38.8 & -\\
+EHI (distilbert-cos; \textbf{Ours})& \textbf{33.8} &  \textbf{39.4} & \textbf{66M} (distilBERT) \\
+
+RepCONC \cite{zhan2022learning} & 34.0 & - & 123M (RoBERTa-base) \\
+TAS-B \cite{thakur2021beir} & - & 40.8 & 110M (BERT-base) \\
+GenQ \cite{thakur2021beir} & - & 40.8 & -\\
+ColBERT (re-rank) \cite{khattab2020colbert} & 34.8 & - & 110M(BERT-base) \\
+ColBERT (end-to-end) \cite{khattab2020colbert} & 36.0 & 40.1 & 110M (BERT-base) \\
+BM25 + CE \cite{thakur2021beir} & - & 41.3 & -\\
+SPLADE (simple training) \cite{formal2022distillation} & 34.2 & - & 110M (BERT-base) \\
+SPLADE + DistilMSE \cite{formal2022distillation} & 35.8 & - & 66M (distilBERT) \\
+SPLADE + SelfDistil \cite{formal2022distillation} & 36.8 & - & 66M (distilBERT) \\
+SPLADE + EnsembleDistil \cite{formal2022distillation} & 36.9 & - & 66M (distilBERT) \\
+EHI (distilbert-dot; \textbf{Ours})& 37.2 &  \textbf{43.3} & \textbf{66M} (distilBERT) \\
+SPLADE + CoCondenser-SelfDistil \cite{formal2022distillation} & 37.5 & - & 66M (distilBERT) \\
+SPLADE + CoCondenser-EnsembleDistil \cite{formal2022distillation} & 38.0 & - & 66M (distilBERT) \\
+ColBERT-v2 \cite{santhanam2021colbertv2} & \textbf{39.7} & - & 110M (BERT-base) \\
+\bottomrule
+\end{tabular}}
+\label{tab:msmarco_complete_comparison}
+\end{table*}
+
+\begin{table*}[]
+\centering
+\caption{Performance metrics ($\%$) evaluated on the MS MARCO TREC-DL 2019 \cite{craswell2020overview} dataset. The best value for each metric is indicated in \textbf{bold} font.}
+\vskip 0.15in
+\resizebox{0.8\linewidth}{!}{
+\begin{tabular}{lccc}
+\toprule
+Method &
+  \data{MRR@10} &
+  \data{nDCG@10} & {\#. parameters}\\
+\midrule
+BM25 \cite{robertson2009probabilistic} & 68.9 & 50.1 & -\\
+CCSA \cite{lassance2021composite} & - & 58.3 & 110M (BERT-base) \\
+RepCONC \cite{zhan2022learning} & 66.8 & - & 123M (RoBERTa-base) \\
+Cross-attention BERT (12-layer) \cite{menon2022defense} & 82.9 & 74.9 & 110M (BERT-base) \\
+Dual Encoder BERT (6-layer) \cite{menon2022defense} & 83.4 & 67.7 & 66M (distilBERT) \\
+DistilBERT  + MSE \cite{menon2022defense} & 78.1 & 69.3 & 66M (distilBERT) \\
+SPLADE (simple training) \cite{formal2022distillation} & - & 69.9 & 110M (BERT-base) \\
+DistilBERT  + Margin MSE \cite{menon2022defense} & 86.7 & 71.8 & 66M (distilBERT) \\
+DistilBERT  + RankDistil-B \cite{menon2022defense} & 85.2 & 70.8 & 66M (distilBERT) \\
+DistilBERT  + Softmax CE \cite{menon2022defense} & 84.6 & 72.6 & 66M (distilBERT) \\
+DistilBERT  + $M^3$SE \cite{menon2022defense} & 85.2 & 71.4 & 66M (distilBERT) \\
+SPLADE + DistilMSE \cite{formal2022distillation} & - & 72.9 & 66M (distilBERT) \\
+SPLADE + SelfDistil \cite{formal2022distillation} & - & 72.3 & 66M (distilBERT) \\
+SPLADE + EnsembleDistil \cite{formal2022distillation} & - &  72.1 & 66M (distilBERT) \\
+SPLADE + CoCondenser-SelfDistil \cite{formal2022distillation} & - & 73.0 & 66M (distilBERT) \\
+SPLADE + CoCondenser-EnsembleDistil \cite{formal2022distillation} & - & 73.2 & 66M (distilBERT) \\
+EHI (distilbert-cos; \textbf{Ours})& \textbf{97.7} & \textbf{88.4} & \textbf{66M} (distilBERT) \\
+\bottomrule
+\end{tabular}}
+\label{tab:msmarco_trec_dl_comparisons}
+\end{table*}
+
+\begin{table*}[]
+\centering
+\caption{Performance metrics ($\%$) evaluated on the NQ320$k$ dataset \citep{kwiatkowski2019natural}. The best value for each metric is indicated in \textbf{bold} font.}
+\vskip 0.15in
+\resizebox{0.9\linewidth}{!}{
+\begin{tabular}{lccc}
+\toprule
+Method &
+  \data{R@10} &
+  \data{R@100} & {\#. parameters}\\
+\midrule
+BM25 \cite{robertson2009probabilistic} & 32.48 & 50.54 & -\\
+BERT + ANN (Faiss) \cite{johnson2019billion} & 53.63 & 73.01 & 110M (BERT-base) \\
+BERT + BruteForce \cite{wang2022neural} & 53.42 & 73.16 & 110M (BERT-base) \\
+BM25 + DocT5Query \cite{nogueira2019document} & 61.83 & 76.92 & -\\
+ANCE (FirstP) \cite{xiong2020approximate} & 80.33 & 91.78 & -\\
+ANCE (MaxP) \cite{xiong2020approximate} & 80.38 & 91.31 & -\\
+SEAL (Base) \cite{bevilacqua2022autoregressive} & 79.97 & 91.39 & 139M (BART-base) \\
+SEAL (Large) \cite{bevilacqua2022autoregressive} & 81.24 & 91.93 & 406M (BART-large) \\
+RoBERTa-base + In-batch Negatives \cite{monath2023improving} & 69.5 & 84.3 & 123M (RoBERTa-base) \\
+RoBERTa-base + Uniform Negatives \cite{monath2023improving} & 72.3 & 84.8 & 123M (RoBERTa-base) \\
+RoBERTa-base + DyNNIBAL \cite{monath2023improving} & 75.4 & 86.2 & 123M (RoBERTa-base) \\
+RoBERTa-base + Stochastic Negatives \cite{monath2023improving} & 75.8 & 86.2 & 123M (RoBERTa-base) \\
+RoBERTa-base +Negative Cache \cite{monath2023improving} & - & 85.6 & 123M (RoBERTa-base) \\
+RoBERTa-base + Exhaustive Negatives \cite{monath2023improving} & 80.4 & 86.6 & 123M (RoBERTa-base) \\
+
+DSI (Base) \cite{tay2022transformer} & 56.6 & - & 250M (T5-base) \\
+DSI (Large) \cite{tay2022transformer} &62.6 & - & 3B (T5-XL)\\
+DSI (XXL) \cite{tay2022transformer} & 70.3 & - & 11B (T5-XXL)\\
+NCI (Base) \cite{wang2022neural} & 85.2 & 92.42 & 220M (T5-base) \\
+NCI (Large) \cite{wang2022neural} & 85.27 & 92.49 & 770M (T5-L) \\
+NCI \emph{w/ qg-ft} (Base) \cite{wang2022neural} & 88.48 & 94.48& 220M (T5-base) \\
+NCI \emph{w/ qg-ft} (Large) \cite{wang2022neural} & 88.45 & 94.53 & 770M (T5-L) \\
+EHI (distilbert-cos; \textbf{Ours})& \textbf{88.98} & \textbf{96.3} & \textbf{66M} (distilBERT) \\
+\bottomrule
+\end{tabular}}
+\label{tab:nq320kexp}
+\end{table*}
+
+
+
+
+
+
+\begin{figure*}[hbt!]
+\centering
+\subfigure[{Efficacy of EHI Indexer}]{%
+\label{fig:scann_msmarco_n100}
+\includegraphics[width=0.31\linewidth]{figures/only_indexer_train/msmarco/msmarco_nDCG10.pdf}}
+~\subfigure[Effect of Branching factor]{%
+\label{fig:recall100_ablation_branchingfactor}
+\includegraphics[width=0.31\linewidth]{figures/ablations/branching_factor/branching_factor_ablation_Recall__100.pdf}}
+~\subfigure[Effect of Loss components]{%
+\label{fig:loss_component_ablation}
+\includegraphics[width=0.31\linewidth]{figures/ablations/loss_ablations/loss_ablation_Recall__100.pdf}}
+\caption{Ablations studies depicting the various properties of \EHI's training paradigm.}
+\label{fig:ablations}
+\end{figure*}
+
+\subsection{Robustness to initializations}
+In this section, we showcase the robustness of our proposed approach - \EHI~ to various initializations of the model. Note that analysis in this manner is uncommon in efficient retrieval works, as showcased in ScaNN, DSI, and NCI. However, such approaches worked with two disjoint processes for learning embeddings, followed by the ANNS. Since we attempt to solve the problem in an end-to-end framework in a differentiable fashion through neural networks, it is worth understanding the effect of different initializations or seeds on our learning. Overall, we run the same model for the best hyperparameters over five different seeds and report the mean and standard deviation numbers below in Table~\ref{tab:robust_ehi}.
+
+\begin{table*}[hbt!]
+\centering
+\caption{Performance metrics ($\%$) evaluated on the various datasets across various ranges of visited documents. The best value for each metric, corresponding to a specific number of visited documents, is indicated in \textbf{bold} font. Here, $n$ denotes the number of seeds run for the given model. We report the mean and standard deviation of the metrics for \EHI~and showcase a robustness to initialization.}
+\vskip 0.15in
+\resizebox{\linewidth}{!}{
+\begin{tabular}{l|lllllllllll}
+\toprule
+Metric & Method &
+  \data{10\%} &
+  \data{20\%} &
+  \data{30\%} &
+  \data{40\%} &
+  \data{50\%} &
+  \data{60\%} &
+  \data{70\%} &
+  \data{80\%} &
+  \data{90\%} &
+  \data{100\%} \\
+\midrule
+\multirow{4}{*}{Scifact - R@$100$} & Exact Search & \multicolumn{10}{c}{91.77}\\
+& ScaNN & 67.89 & 80.76 & 83.76 & 87.49 & 89.82 & 90.6 & 91.6 & 91.27 & 91.27 & 91.77 \\
+& Faiss-IVF & 71.81 & 79.42 & 83.93 & 86.93 & 89.6 & 91.1 & 91.77 & 91.77 & 91.77 & 91.77 \\
+& EHI ($n=5$) & \textbf{80.68} \std{1.51} & \textbf{87.05} \std{1.92} & \textbf{90.06} \std{0.97} & \textbf{91.75} \std{0.89} & \textbf{93.03} \std{0.77} & \textbf{93.26} \std{0.72} & \textbf{93.34} \std{0.73} & \textbf{93.44} \std{0.62} & \textbf{93.51} \std{0.62} & \textbf{93.51} \std{0.62} \\
+\midrule
+\multirow{4}{*}{Fiqa - R@$100$} & Exact Search & \multicolumn{10}{c}{53.78}\\
+ & ScaNN & 51.0 & 51.9 & 52.33 & 52.69 & 52.63 & 53.39 & 52.49 & 52.97 & 53.64 & 53.78 \\
+ & Faiss-IVF & 52.75 & 53.27 & 53.65 & 53.65 & 53.65 & 53.63 & 53.78 & 53.78 & 53.78 & 53.78 \\
+ & EHI ($n=5$)& \textbf{57.23} \std{0.42} & \textbf{57.74} \std{0.27} & \textbf{57.91} \std{0.27} & \textbf{57.98} \std{0.26} & \textbf{58.07} \std{0.25} & \textbf{58.08} \std{0.24} & \textbf{58.11} \std{0.21} & \textbf{58.11} \std{0.21} & \textbf{58.1} \std{0.22} & \textbf{58.1} \std{0.22} \\
+\midrule
+\multirow{4}{*}{MS Marco - nDCG@$10$} & Exact Search & \multicolumn{9}{c}{39.39}\\
+& ScaNN & 38.61 & 39.1 & 39.25 & 39.3 & 39.37 & 39.36 & 39.38 & 39.38 & 39.39 & 39.39 \\
+& Faiss-IVF & 38.86 & 39.09 & 39.23 & 39.31 & 39.35 & 39.36 & 39.36 & 39.38 & 39.38 & 39.39\\
+& EHI ($n=5$) & \textbf{39.17} \std{0.04} & \textbf{39.34} \std{0.03} & \textbf{39.39} \std{0.02} & \textbf{39.41} \std{0.01} & \textbf{39.41} \std{0.01} & \textbf{39.42} \std{0.01} & \textbf{39.42} \std{0.01} & \textbf{39.42} \std{0.01} & \textbf{39.42} \std{0.01} & \textbf{39.42} \std{0.01} \\
+\midrule
+\multirow{4}{*}{MSMarco - MRR@$10$} & Exact Search & \multicolumn{10}{c}{33.77}\\
+& ScaNN & 33.16 & 33.58 & 33.67 & 33.7 & 33.76 & 33.75 & 33.77 & 33.77 & 33.77 & 33.77 \\
+& Faiss-IVF & 33.34 & 33.54 & 33.66 & 33.72 & 33.75 & 33.75 & 33.74 & 33.76 & 33.76 & 33.77 \\
+& EHI ($n=5$) & \textbf{33.62} \std{0.03} & \textbf{33.74} \std{0.03} & \textbf{33.77} \std{0.02} & \textbf{33.78} \std{0.01} & \textbf{33.78} \std{0.01} & \textbf{33.79} \std{0.01} & \textbf{33.79} \std{0.01} & \textbf{33.79} \std{0.01} & \textbf{33.79} \std{0.01} & \textbf{33.79} \std{0.01}\\
+\bottomrule
+\end{tabular}}
+\label{tab:robust_ehi}
+
+\end{table*}
+
+\subsection{Statistical Significance Tests}
+In this section, we aim to show that the improvements achieved by \EHI~over other baselines as depicted in Section~\ref{sec:results} are statistically significant. We confirm with hypothesis tests that all the results on datasets considered in this work are statistically significant with a p-value less than 0.05.
+
+\begin{table*}[hbt!]
+\centering
+\caption{Statistical Significance p-test.}
+\vskip 0.15in
+\resizebox{0.7\linewidth}{!}{
+\begin{tabular}{lcccc}
+\toprule
+Dataset &
+  \data{Scifact (R@100)} &
+  \data{Fiqa (R@100)} &
+  \data{MSMARCO (nDCG@10)} &
+  \data{MSMARCO (MRR@10)} \\
+\midrule
+p-value & 0.0016 & 7.97E-07	& 0.0036 &	0.0018\\
+\bottomrule
+\end{tabular}}
+\label{tab:statistical_p_tests}
+
+\end{table*}
+
+\subsection{Load balancing}
+Load balancing is a crucial objective that we aim to accomplish in this work. By achieving nearly uniform clusters, we can create clusters with finer granularity, ultimately reducing latency in our model. In Figure~\ref{fig:msmarco_dlb}, we can observe the distribution of documents across different leaf nodes. It is noteworthy that the expected number of documents per leaf, calculated as $\sum_{i=1}^{l= \# \text{Leaf}} p_i c_i$, where $p_i$ represents the probability of a document in bucket index $i$ and $c_i$ denotes the number of documents in bucket $i$, yields an optimal value of approximately $1263.12$. Currently, our approach attains an expected number of documents per leaf of $1404.65$. Despite a slight skewness in the distribution, we view this as advantageous since we can allocate some leaves to store infrequently accessed tail documents from our training dataset. Additionally, our analysis demonstrates that queries are roughly evenly divided, highlighting the successful load balancing achieved, as illustrated in Figure~\ref{fig:load_balancing_msmarco_queries}.
+\begin{figure}
+\centering
+\subfigure[MS MARCO: Document load balancing]{%
+\label{fig:msmarco_dlb}
+\includegraphics[width=0.pdf}}
+\qquad\qquad
+\subfigure[MS MARCO: Query load balancing]{%
+\label{fig:msmarco_qlb}
+\includegraphics[width=0.pdf}}
+\caption{Leaf distribution of documents and queries of MS Marco in our trained \EHI~model. Our model learns splits closer to ideal split (uniform), this suggests that all the leaves are efficiently used, and our model does not learn very lob sided clusters. This roughly uniform spread of both queries (Figure~\ref{fig:msmarco_qlb}), as well as documents (Figure~\ref{fig:msmarco_dlb}) provides a more fine-grained clustering structure which not only takes advantage of all the leaves but also shows state of the art performance compared to baselines as discussed extensively in Section~\ref{sec:results}.}
+\label{fig:load_balancing_msmarco_queries}
+\end{figure}
+
+\subsection{Learning to balance load over epochs}
+
+In the previous section, we showed that our learned clusters are almost uniformly distributed, and help improve latency as shown in Section~\ref{sec:results}. In this section, we study the progression of expected documents per leaf as defined above over training progression on the Scifact dataset. In Figure~\ref{fig:expected_docs_over_time} demonstrates the decline of the expected documents per leaf over the training regime.
+\begin{figure}
+\centering
+\includegraphics[width=0.pdf}
+\caption{Load balancing of documents over the training regime of \EHI. \EHI learning objective encourages well balances leaf nodes as well as state of the art accuracy.}
+\label{fig:expected_docs_over_time}
+\end{figure}
+
+\subsection{Discussions}
+\label{sec:ablations}
+
+In the previous section, we demonstrated the effectiveness of \EHI against multiple baselines on diverse benchmarks. In this section, we report results from multiple ablation studies to better understand the behavior of \EHI. 
+{\bf Fraction of visited documents as a proxy for latency.}  
+Ideally, we would want to compare query throughput against recall/MRR, but obtaining head-to-head latency numbers is challenging as different systems are implemented using different environments and optimizations (for instance, off-the-shelf indexers such as SCANN, FAISS work better with CPU optimization while \EHI~takes advantage of GPUs). Thus, following standard practice in the ANNS community, we use a fraction of documents visited/searched as a proxy for latency  ~\citep{jayaram2019diskann,guo2020accelerating}. 
+
+\textbf{Stand-alone Indexer comparisons.}
+To showcase the alignment between the embeddings and the downstream clusters learned, we conduct an experiment where we initialize the encoders with the encoder trained via \EHI. We find the indexer trained by \EHI~is better aligned with the representations and leads to better performance when visiting fewer fraction of documents (see Figure~\ref{fig:indexer_comparisons}). This underscores the crucial alignment and efficiency gains achieved through \EHI's joint optimization.
+
+To isolate the \EHI~indexer's impact, we fix encoder embeddings (pre-trained \EHI~model) and compare \EHI~indexing against ScaNN, and Faiss-IVF.  Figure~\ref{fig:scann_msmarco_n100}  illustrates that \EHI~outperforms other baselines by up to \textbf{4.6\%} when visiting a limited number of documents, highlighting the EHI indexer's intrinsic efficiency. 
+
+
+{\bf Effect of branching factor.}  
+Figure~\ref{fig:recall100_ablation_branchingfactor} shows recall@$100$ of \EHI on SciFact with varying branching factors. We consider two versions of \EHI, one with exact-search, and another where where we restrict \EHI~to visit about 10\% visited document. Interestingly, for \EHI + Exact Search, the accuracy decreases with a higher branching factor, while it increases for the smaller beam-size of $0.1$. We attribute this to documents in a leaf node being very similar to each other for high branching factors (fewer points per leaf). We hypothesize that \EHI is sampling highly relevant documents for hard negatives leading to a lower exact search accuracy.
+
+{\bf Ablation w.r.t loss components.} Next, on FIQA dataset, we study performance of \EHI when one of the loss components~\eqref{eq:final_loss} is turned off; see Figure~\ref{fig:loss_component_ablation}. First, we observe that \EHI outperforms the other three vanilla variants, implying that each loss term contributes non-trivially to the performance of \EHI. Next, we observe that removing the document-similarity-based loss term ($\lambda_3$), Eq. \eqref{eq:docindexing}, has the least effect on the performance of \EHI, as the other two-loss terms already capture some of its desired consequences. However, turning off the contrastive loss on either encoder embedding ($\lambda_1$), Eq. \eqref{eq:siamese}, or path embedding ($\lambda_2$), Eq. \eqref{eq:indexing}, loss leads to a significant loss in accuracy. This also indicates the importance of jointly and accurately learning encoder and indexer parameters.  
+
+\begin{figure*}[hbt!]
+\centering
+\subfigure[{Scifact: R@100}]{%
+\label{fig:scann_scifact_r100}
+\includegraphics[width=0.23\linewidth]{figures/only_indexer_train/scifact/scifact_Recall100.pdf}}
+\subfigure[{MSMARCO: MRR@10}]{%
+\label{fig:scann_msmarco_mrr100}
+\includegraphics[width=0.23\linewidth]{figures/only_indexer_train/msmarco/msmarco_MRR10.pdf}}
+\subfigure[{TREC DL19: nDCG@10}]{%
+\label{fig:scann_msmarco_trecdl_mrr100}
+\includegraphics[width=0.23\linewidth]{figures/only_indexer_train/trec-dl/msmarco_trecdl_nDCG10.pdf}}
+
+\caption{\EHI indexer is significantly more accurate than \EHI~encoder + off-the-shelf indexers such as ScaNN, Faiss-IVF especially when restricted to visit a small fraction of documents. Note that all the algorithms have been initialized with the same \EHI~encoder for computing embeddings.}
+\label{fig:indexer_comparisons}
+\end{figure*}
+
+\subsection{Scaling to deeper trees}
+
+\begin{figure*}[hbt!]
+\centering
+\includegraphics[width=0.5\linewidth]{figures/scifact_R_100.pdf}
+\caption{\EHI~upon extending to deeper trees.}
+\label{fig:ablations_height}
+\end{figure*}
+
+In this section, we further motivate the need to extend to deep trees and showcase how this extension is critical to be deployed in production. We show that the hierarchical part in \EHI~can be tailored for large-scale tasks (>1B documents or otherwise) and is absolutely necessary for two reasons:
+
+\paragraph{Sub-optimal convergence and blow-up in path embedding:} When working with hundreds of billions of scale datasets as ones generally used in industry, a single height indexer would not work. Having more than a billion logits returned by a single classification layer would be suboptimal and lead to poor results. This is a common trend observed in other domains, such as Extreme Classification, and thus warrants hierarchy in our model design. Furthermore, the path embedding would blow up if we use a single height indexer, and optimization and gradient alignments would become the bottleneck in this scenario.  
+\paragraph{Sub-linear scaling and improved latency:} Furthermore, increasing the height of \EHI~can be shown to scale to very large leaves and documents. Consider a case where our encoder has $P$ parameters, and the indexer is a single height tree that tries to index each document of $D$ dimension into $L$ leaves. The complexity of forward pass in this setting would be $\mathcal{O} (P + DL)$. However, for very large values of $L$, this computation could blow up and lead to suboptimal latency and blow up in memory. Note, however, that by extending the same into multiple leaves ($H$), one can reduce the complexity at each height to a sublinear scale. The complexity of forward pass the hierarchical k-ary tree would be $\mathcal{O} (P + HDL^{1/H})$. Note that since $L \gg H$, the hierarchical k-ary tree can be shown to have a better complexity and latency, which helps in scaling to documents of the scale of billions as observed in general applications in real-world scenarios. For instance, \EHI~trained on Scifact with equal number of leaves, we notice a significant speedup with increasing height; for example at $(B=64,H=1)$, $(B=8,H=2)$, and $(B=4, H=3)$, we notice a per-query latency of $2.48ms$, $2.40ms$, and \textbf{$1.99ms$} respectively at the same computation budget.  
+
+We study the accuracy of \EHI when extending to multiple heights of the tree structure to extend its effectiveness in accurately indexing extensive web-scale document collections. Traditional indexing methods that rely on a single-height approach can be computationally impractical and sub-optimal when dealing with billions or more documents. To address this challenge, \EHI treats height as a hyperparameter and learns the entire tree structure end-to-end. This extension to hierarchical k-ary tree is absolutely necessary for scalability.
+In the above results presented in Figure~\ref{fig:ablations_height}, we showcase that one could increase the depth of the tree to allow multiple linear layers of lower logits - say 1000 clusters at each height instead of doing so at a single level. This is precisely where the hierarchical part of the method is \textbf{absolutely necessary} for scalability. Furthermore, we also extend \EHI model on other datasets such as Scifact to showcase this phenomenon as depicted in Table~\ref{tab:scifact_height}. We do confirm with a p-test with a p-value of 0.05 and confirm that the results across different permutations are nearly identical, and the improvements on R@50 and R@100 over other permutations are not statistically significant (improvements < 0.5\%). Furthermore, improvements of other permutations of (B,H) on the R@10 and R@20 metrics over the H=1 baseline are also statistically insignificant. Our current experiments on Scifact/MSMARCO not only portray that our method does indeed scale to deeper trees but also showcase that \EHI~can extend to deeper trees with little to no loss in performance and improved latency. We also maintain a roughly similar performance and uniform splitting of documents even when extended to deeper trees as depicted in Figure~\ref{fig:ablations_height}. 
+
+\begin{table*}[hbt!]
+\centering
+\caption{Performance metrics ($\%$) evaluated on the Scifact dataset across various permutations of braching factor (B) and height (H). The best value for each metric, corresponding to a specific number of visited documents, is indicated in \textbf{bold} font.}
+\vskip 0.15in
+\resizebox{0.6\linewidth}{!}{
+\begin{tabular}{lcccccccccc}
+\toprule
+Scifact &
+  \data{R@10} &
+  \data{R@20} &
+  \data{R@50} &
+  \data{R@100} \\
+\midrule
+Two-tower model (with Exact Search) & 75.82 & 82.93 & 87.9 & 91.77 \\
+\EHI (B=40, H=1) & 84.73 & 87.57 & 93.87 & 95.27 \\
+\EHI (B=4, H=2) & 86.23 & 88.7 & 93.43 & 94.77 \\
+\EHI (B=6, H=2) & 83.8 & 88.63 & 92.77 & 95.27 \\
+\EHI (B=8, H=2) & 84.46 & 88.47 & 93.27 & 95.27 \\
+\EHI (B=4, H=3) & 84.96 & 88.7 & 93.6 & 94.77 \\
+\EHI (B=6, H=3) & 85.36 & 89.3 & 93.6 & 94.77 \\
+\EHI (B=8, H=3) & 83.86 & 87.47 & 92.27 & 95.27 \\
+\bottomrule
+\end{tabular}}
+\label{tab:scifact_height}
+\end{table*}
+
+
+
+\section{Conclusions, Limitations, and Future Work}
+
+
+
+We presented \EHI, a novel framework that fundamentally shifts the paradigm of dense retrieval by jointly optimizing the query/document encoder and the search indexer. \EHI's core components – the encoder, indexer, and retriever – work in tandem to generate compact path embeddings. These path embeddings, representing the path taken by queries and documents within the index tree, are crucial for EHI's effective joint training. Extensive evaluations on standard benchmarks demonstrate EHI's superior efficiency and accuracy compared to traditional approaches.  While the success of path embeddings highlights their potential, a deeper theoretical understanding and formal guarantees would be valuable. We believe \EHI~lays a strong foundation for future innovations in dense retrieval, promising more efficient and accurate semantic search systems.
+
+
+
+

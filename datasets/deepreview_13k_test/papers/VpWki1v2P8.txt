@@ -1,0 +1,585 @@
+\title{LoRA Done RITE: Robust Invariant Transformation Equilibration for LoRA Optimization}
+
+\begin{abstract}
+Low-rank adaption (LoRA) is a widely used parameter-efficient finetuning method for LLMs that reduces memory requirements. 
+However, current LoRA optimizers lack transformation invariance, which leads to weight updates that depend on how the two LoRA factors are scaled or rotated. This deficiency leads to inefficient learning and sub-optimal solutions in practice. 
+This paper introduces LoRA-RITE, a novel adaptive matrix preconditioning method for LoRA optimization, which achieves transformation invariance while being computationally efficient. 
+We provide theoretical analysis to demonstrate the benefit of our method and conduct experiments on various LLM tasks with different models including Gemma 2B, 7B, and mT5-XXL. The results demonstrate consistent improvements over existing optimizers. 
+For example, replacing Adam with LoRA-RITE during LoRA fine-tuning of Gemma-2B yields 4.6\% accuracy gain on Super-Natural Instructions and 3.5\% accuracy gain across other four LLM benchmarks (HellaSwag, ArcChallenge, GSM8K, OpenBookQA).
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Low-Rank Adaptation (LoRA) \autocite{EH22} is a popular parameter-efficient  method for fine-tuning Large Language Models (LLMs). By freezing the pretrained weights and injecting trainable low-rank matrices into each layer, LoRA significantly reduces memory requirements and mitigates overfitting in limited data settings.
+More formally, letting $\mW \in \mathbb{R}^{m\times n}$ be a weight matrix in an LLM, LoRA freezes $\mW$ and introduces a low-rank matrix $\mZ$ added to $\mW$, where $\mZ$ is represented by the multiplication of two rank-$r$ matrices $\mA$ and $\mB$, i.e.,
+\begin{equation}
+    \mZ=\mA\transpose{\mB}\in \mathbb{R}^{m\times n}, \mA\in \mathbb{R}^{m\times r}, \mB\in\mathbb{R}^{n\times r}, \;\; r \ll \min(m,n). 
+    \label{eq:lora}
+\end{equation}
+The matrices $\mA$ and $\mB$ will be referred to as LoRA factors in this paper. %, have dimensions significantly smaller than the original weights.
+Recent research has explored numerous variations and improvements over the classic LoRA algorithm~\citep{MV23,QZ23,SL24,CY24}.
+Despite being widely used in practice, we find that applying standard optimizers to LoRA leads to updates that are not ``transformation invariant''. 
+By definition of LoRA in~\eqref{eq:lora}, the same update $\mZ$ can be decomposed in multiple ways, i.e.,  $\mZ = \mA_1 \transpose{\mB_1} = \mA_2 \transpose{\mB_2}$. Ideally, an optimizer should yield the same update to $\mZ$ regardless of the specific factorization. However, commonly used optimizers with diagonal preconditioners like Adam \autocite{KD2014}, Adagrad \autocite{JD11}, RMSProp \autocite{TT2012}, and even second-order methods like Shampoo \autocite{VG18} and CASPR~\autocite{CASPR24}, violate this principle when applied to LoRA.
+This violation not only presents a mathematical inconsistency but also leads to significant inefficiencies during training.  In practice, we observe that one LoRA factor often dominates the optimization process, receiving substantial updates while the other remains nearly fixed.  Although this can be partially mitigated by some recent proposed approaches such as employing different learning rates for the two factors~\autocite{SH24}, we ask the question: is there a more principled way to design an optimizer that inherently enforces transformation invariance for LoRA?
+
+To address this challenge, we first prove that any form of diagonal preconditioner cannot achieve transformation invariance, which motivates the use of matrix preconditioners. However, existing matrix preconditioners like Shampoo and CASPR lack transformation invariance and introduce significant computational and memory overhead. To overcome these limitations, we propose LoRA-RITE (Robust Invariant Transformation Equilibration), a novel optimizer designed specifically for LoRA optimization. LoRA-RITE employs a transformation-invariant preconditioner on the low-rank side, achieving transformation invariance without incurring substantial overhead.
+Furthermore, we demonstrate how to maintain this property when incorporating first and second moments, crucial for the practical effectiveness of adaptive optimization methods. Empirical evaluations across various datasets and models confirm the effectiveness of the proposed algorithm. 
+
+The contribution of this paper can be summarized below: 
+\begin{compactitem}
+\item We propose LoRA-RITE, the first adaptive matrix preconditioning optimizer for LoRA that is transformation-invariant, the property that is lacking for most existing optimizers when applying to LoRA. Theoretically, we provide a convergence analysis for our method.
+\item Despite utilizing matrix preconditioners, LoRA-RITE achieves little overhead in both memory and time compared to first-order optimizers, especially when  the LoRA rank ($r$) is significantly smaller than the original matrix dimensions $m$ and $n$. 
+\item The proposed optimizer leads to significantly improved performance across multiple datasets and architectures. For instance, when applied to the GSM8K \autocite{cobbe2021gsm8k} dataset with a Gemma 7B IT model \citep{gemma_2024}, LoRA-RITE achieves a 55.50\% accuracy rate. This surpasses the widely-used Adam optimizer \autocite{KD2014} by a substantial margin (48.37\%) and even outperforms the second-best optimizer on this dataset, Lamb \autocite{lamb} (50.64\%), by approximately 5\%.
+\end{compactitem}
+
+
+
+\section{Transformation Invariance for LoRA Optimization}
+
+\label{sec:trans_invariance}
+
+We now introduce the concept of transformation invariance in LoRA training and demonstrate that most existing optimizers, when applied to LoRA, do not satisfy this property. This deficiency leads to inefficient learning in practice.
+
+\subsection{Definition of Transformation Invariance}
+
+As introduced in formulation~\eqref{eq:lora}, LoRA adds a low-rank matrix $\mZ = \mA\mB^{\top}$ to the original weight matrix $\mW$ and learns the LoRA factors $\mA \in \mathbb{R}^{m\times r}, \mB \in \mathbb{R}^{n\times r}$ to minimize the fine-tuning loss. Observe that many different LoRA factors $(\mA_1, \mB_1), (\mA_2, \mB_2)$ can represent the same finetuned weight,
+\begin{equation}
+    \mZ=\mA_1\transpose{\mB_1}=\mA_2\transpose{\mB_2}.
+    \label{eq:equivalent}
+\end{equation}
+When an optimizer is applied to train LoRA, it will produce different updates, $\delta \mA_1, \delta \mB_1$ or $\delta \mA_2, \delta \mB_2$, based on the specific parameterization used. Even though $(\mA_1, \mB_1)$ and $(\mA_2, \mB_2)$ represent the same finetuned weight $\mZ$, the updates using different parameterizations can produce different updates to $\mZ$. 
+This suggests a serious inconsistency and implies that the update could be suboptimal under some parameterizations.
+
+Based on this observation, we propose that LoRA optimization should ensure {\it transformation invariance}, defined as follows: 
+\begin{definition}[Transformation Invariance]
+Let $(\mA_1, \mB_1)$ and $(\mA_2, \mB_2)$ be any two pairs of LoRA factors that satisfy~\eqref{eq:equivalent}. 
+An optimizer exhibits transformation invariance if its updates,  $(\delta \mA_1, \delta \mB_1)$ and $(\delta \mA_2, \delta \mB_2)$, satisfy
+\begin{equation}
+ (\mA_1 + \delta \mA_1 ) (\mB_1 + \delta \mB_1)^{\top} = (\mA_2 + \delta \mA_2 ) (\mB_2 + \delta \mB_2)^{\top} := \mZ + \delta \mZ.
+ \label{eq:transformation_invariance}
+\end{equation}
+\label{def:transformation_invariance}
+\end{definition}
+This means the optimizer should produce the same update, $\delta\mZ$, to the fine-tuned weights for any equivalent LoRA factorizations. To satisfy the condition~\eqref{eq:transformation_invariance}, the following equality should hold
+\begin{equation}
+\delta \mA_1 \mB_1^{\top} + \mA_1 \delta \mB_1^{\top} + \delta \mA_1 \delta \mB_1^{\top} = \delta \mA_2 \mB_2^{\top} + \mA_2 \delta \mB_2^{\top} + \delta \mA_2 \delta \mB_2^{\top}. 
+\label{eq:expand}
+\end{equation}
+The following condition, which will be used in our later derivations, is sufficient for~\eqref{eq:expand} to hold:
+\begin{equation}
+ \delta \mA_1 \mB_1^{\top}=\delta \mA_2 \mB_2^{\top}, \ \mA_1 \delta \mB_1^{\top}=\mA_2 \delta \mB_2^{\top}, \ \delta \mA_1 \delta \mB_1^{\top}=\delta \mA_2 \delta \mB_2^{\top}.
+ \label{eq:sufficient_condition}
+\end{equation}
+As a special case, scalar scale invariance as introduced in Definition \ref{def:scale_invariance} is a weaker version of transformation invariance, which only requires that updates remain equivalent when the LoRA factors are scaled up or down by a constant factor. Formally, we define it as: 
+\begin{definition}[Scalar Scale Invariance]
+Let $(\mA_1, \mB_1)$ be a pair of LoRA factors and let $\mA_2 = s \mA_1, \mB_2 = (1/s) \mB_1$ for some nonzero constant $s$. An optimizer exhibits scalar scale invariance if its updates, $(\delta \mA_1, \delta \mB_1)$ and $(\delta \mA_2, \delta \mB_2)$, satisfy
+\begin{equation*}
+ (\mA_1 + \delta \mA_1 ) (\mB_1 + \delta \mB_1)^{\top} = (\mA_2 + \delta \mA_2 ) (\mB_2 + \delta \mB_2)^{\top}.
+\end{equation*}
+\label{def:scale_invariance}
+\end{definition}
+Surprisingly, we will show that most commonly used optimizers, when applied to LoRA, do not even satisfy this weaker form of transformation invariance.
+
+\subsection{Existing Optimizers are not Scalar Scale Invariant}
+
+We now show that neither gradient descent nor Adam is scalar scale invariant \eqref{def:scale_invariance}, and in fact, almost all the existing optimizers are not scalar scale invariant when applied to LoRA optimization. 
+
+Let us consider the following example:
+\begin{align}
+\label{eq:scaleinv}
+\mA_2=s\mA_1,\quad\mB_2=(1/s)\mB_1,    
+\end{align}
+ then by using chain rule on $\mZ=\mA_1 \mB_1^{\top} = \mA_2 \mB_2^{\top}$, we have 
+\begin{align}
+\label{eq:nabla_a1}
+    {\nabla} \mA_1 = \nabla \mZ \mB_1,\text{ and }{\nabla} \mA_2 &= \nabla \mZ \mB_2 .
+\end{align}
+We can rewrite $\nabla \mA_2$ as:
+\begin{align}
+    \nabla \mA_2 &= (1/s)\nabla \mZ \mB_1\nonumber \quad (\text{since }\mB_2 = (1/s)\mB_1)\\
+    \label{eq:nabla_a2}
+    &=(1/s)\nabla \mA_1.
+\end{align}
+To analyze gradient descent, we set the following in condition~\eqref{eq:expand}:
+\begin{align*}
+\delta \mA_1 \coloneqq -\nabla \mA_1, \ \delta \mA_2 \coloneqq -\nabla \mA_2,& \  \delta \mB_1 \coloneqq -\nabla \mB_1\text{ and }\delta \mB_2 \coloneqq -\nabla \mB_2
+\end{align*}
+The first term on right hand side of condition~\eqref{eq:expand} can be rewritten as follows:
+\begin{align*}
+    \delta \mA_2 \mB_2^{\top} &= -{\nabla} \mA_2\transpose{\mB_2}\\
+    &= -(1/s)\nabla \mA_1\transpose{\mB_2}, \quad \;\; \text{by}~\eqref{eq:nabla_a2} \\
+    &= -(1/s^2){\nabla} \mA_1\transpose{\mB_1}, \quad (\text{since }\mB_2 = (1/s)\mB_1)\\
+    &= (1/s^2) \delta \mA_1  \mB_1^{\top}.
+\end{align*}
+Thus the first terms on both sides of condition~\eqref{eq:expand} have a scale difference of $1/s^2$. Similarly, we can show that the second terms have a scale difference of $s^2$, while the third terms remain identical. Therefore, gradient descent is not scalar scale invariant, and the gradient can be arbitrary large when $s$ goes to $0$ or infinity.
+
+Can this issue be mitigated by adaptive updates such as Adam? The answer is no. To see this, let
+\begin{equation*}
+    \delta\mA_1:=-\nabla \mA_1 / (\nabla \mA_1\odot \nabla \mA_1)^{1/2}
+\end{equation*}
+be the Adam update for $\mA_1$, and define updates of $\mA_2,\ \mB_1$ and $\mB_2$ similarly. It is worth noting that all the operations above are element-wise and we omit the momentum term for brevity.
+We have
+\begin{equation*}
+    \delta\mA_2 = -\frac{\nabla \mA_2}  {(\nabla \mA_2 \odot \nabla \mA_2)^{1/2}}=-\frac{(1/s)\nabla \mA_1}{(1/s)(\nabla \mA_1\odot \nabla \mA_1)^{1/2}}=\delta\mA_1.
+\end{equation*}
+As a result,
+\begin{equation*}
+    \delta\mA_2\transpose{\mB_2} = \delta\mA_1\transpose{\mB_2}= (1/s){\delta} \mA_1\transpose{\mB_1}.
+\end{equation*}
+Similar to the analysis for gradient descent, we find a discrepancy in scale of the terms in condition~\eqref{eq:expand} for Adam, thus failing to satisfy scalar scale invariance. Actually, one can see that most of the existing optimizers, such as Adagrad \autocite{JD11}, RMSProp \autocite{TT2012}, and Shampoo \autocite{VG18} are not scale or transformation invariant.
+
+\subsection{Benefits of Transformation Invariance}
+
+Why is transformation invariance important?  Beyond the mathematical argument that different parameterizations of the same weight update should be equivalent, we demonstrate that transformation invariance leads to more efficient feature learning. 
+
+The concept of efficient feature learning, introduced in~\citep{SH24}, describes the asymptotic training behavior of LoRA as the network width grows.
+As discussed earlier, for LoRA, the update to the matrix $\mZ=\mA\transpose{\mB}$ can be decomposed into three parts
+\begin{equation*}
+\begin{aligned}
+    \delta \mZ &= (\mA+\delta \mA)(\transpose{\mB}+\transpose{\delta \mB})-\mA\transpose{\mB}\\
+    &=\delta \mA\transpose{\mB} + \mA\delta\transpose{\mB} + \delta \mA\delta \transpose{\mB},
+\end{aligned}
+\end{equation*}
+where the third term is typically negligible as it depends on the square of the learning rate. 
+Efficient feature learning requires that both $\delta \mA\transpose{\mB}\vx$ and $\mA\delta\transpose{\mB}\vx$ are of magnitude $\bigO(n^0)=\bigO(1)$ with respect to the network width $n$, where $\vx$ is the input embedding.
+In other words, let the scale be $\bigO(n^\alpha)$, then it neither explodes ($\alpha>0$) nor diminishes ($\alpha<0$), when the network width $n$ grows.
+
+\textcite{SH24} show that conventional optimizers do not satisfy efficient feature learning. This can be seen from \Cref{fig:imbalance}, where the weight norm for factor $\mB$ changes significantly while the weight norm for factor $\mA$ barely changes.
+
+Under mild assumptions, we can show that a transformation-invariant optimizer guarantees efficient feature learning.
+\begin{theorem}\label{th:efficient_learning}
+Any optimizer that is transformation-invariant and uses the same update rule for both $\mA$ and $\mB$
+will achieve efficient feature learning. 
+\end{theorem}
+Beyond the efficient learning guarantee, in practice when training LoRA with existing optimizers, it is often the case that only one of the LoRA factors is updating properly, while the other remains almost unchanged, as shown in Figure \ref{fig:imbalance}. This is also a consequence of lacking scalar scale invariance, as the initial scale for the two LoRA factors can be very different (one initialized from $0$ while other from Gaussian random). 
+
+\begin{figure}[!h]
+    \centering
+    \hfill
+    \begin{subfigure}[t]{0.43\columnwidth}\centering
+        \includegraphics[width=1\linewidth]{figures/A_norm_log.png}
+        \caption{Weight norm of the $\mA$ factor}
+    \end{subfigure}%
+    \hfill
+    \begin{subfigure}[t]{0.43\columnwidth}\centering
+        \includegraphics[width=1\linewidth]{figures/B_norm_log.png}
+        \caption{Weight norm of the $\mB$ factor}
+    \end{subfigure}%
+    \hfill
+    \\
+\caption{The weight norm of LoRA factors $\mA$ and $\mB$ across different training steps for existing baselines, Adam, ScaledAdam and Shampoo, where only one LoRA factor visibly changes. }
+\label{fig:imbalance}
+\end{figure}
+
+
+\section{Our Proposed Optimizer}
+
+
+We now present our proposed algorithm, which satisfies transformation invariance, and achieves significant improvements over previous LoRA optimizers in many empirical tasks. 
+
+\subsection{Diagonal preconditioning is not enough for transformation invariance}
+\label{sec:no-diagonal}
+
+In this section we show that diagonal preconditioning is not enough to achieve transformation invariance. Recall that the LoRA factors $\mA \in \mathbb{R}^{m\times r}$ and $\mB \in \mathbb{R}^{n\times r}$.
+When updating $\mA$, most existing optimizers utilize the following update:
+\begin{equation}
+    \vectorize(\delta \mA) = -\mP \vectorize(\nabla \mA),
+    \label{eq:PA}
+\end{equation}
+where $\vectorize(\cdot)$ lists the elements of matrix in a vector in column-major order and $\mP\in \mathbb{R}^{mr\times mr}$ is a symmetric positive definite preconditioning matrix. Diagonal preconditioning methods like Adam and Adagrad assume $\mP$ is a diagonal matrix, while matrix preconditioning methods such as Shampoo and CASPR use non-diagonal~$\mP$.
+
+Consider the LoRA pairs $(\mA_1, \mB_1)$ and $(\mA_2, \mB_2)$ such that:
+\begin{align*}
+\mA_2=\mA_1\mR,\quad\mB_2=\mB_1\mR^{-\top},
+\end{align*}
+ where $\mR$ is an invertible matrix. We note that the above is a matrix generalization of example \eqref{eq:scaleinv}. We can now derive the gradient with respect to LoRA factors using \eqref{eq:nabla_a1}:
+\begin{equation*}
+   \nabla \mA_2 = \nabla \mZ \mB_2 = \nabla \mA_1\mR^{-\top}.
+\end{equation*}
+Let us consider the case when $n=m=1$. For $\mA\in \mathbb{R}^{m\times r}$, we can rewrite $\vectorize(\delta \mA)^{\top} = \delta \mA$ and $\vectorize(\nabla \mA)^{\top} = \nabla \mA$ in update \eqref{eq:PA}:
+\begin{align*}
+\delta \mA = -\nabla \mA \mP^{\top}
+\implies \delta\mA\transpose{\mB} = -\nabla\mA\mP^{\top}\transpose{\mB}.
+\end{align*}
+In this case, if we have two equivalent LoRA pairs $(\mA_1, \mB_1), (\mA_2, \mB_2)$ with their corresponding preconditioners $\mP_1, \mP_2$, then
+\begin{equation}
+    \delta\mA_2\transpose{\mB_2} = -\nabla\mA_2\mP_2^{\top}\transpose{\mB_2} = -\nabla\mA_1(\mR^{-\top}\mP_2\mR^{-1})\transpose{\mB_1}.
+    \label{eq:need_matrix}
+\end{equation}
+If transformation invariance holds, then:
+\begin{align*}
+    &\delta \mA_1\mB_1^{\top} = -\nabla\mA_1\mP_1^{\top}\transpose{\mB_1} = -\nabla\mA_1(\mR^{-\top}\mP_2\mR^{-1})\transpose{\mB_1} = \delta\mA_2\transpose{\mB_2}\\
+    &\implies -\nabla\mA_1\mP_1^{\top}\transpose{\mB_1} = -\nabla\mA_1(\mR^{-\top}\mP_2\mR^{-1})\transpose{\mB_1}.
+\end{align*}
+ For any arbitrary $\mR$, $\nabla \mA_1$ and $\mB_1$, there might not exist a pair of diagonal preconditioners $\mP_1,\ \mP_2$ such that the above condition is satisfied, because $\mR$ can be chosen in an adversarial fashion, such that $\mR^{-\top}\mP_2\mR^{-1}$ is non-diagonal and distant from the left hand side. Consequently, we it is necessary to adopt matrix preconditioning to achieve transformation invariance.
+\subsection{Achieving Transformation Invariance}
+
+To achieve transformation invariance, we begin by recognizing that the LoRA factors, $\mA$ and $\mB$, can be decomposed into their respective orthogonal bases and magnitudes:
+\begin{equation*}
+\mA = \mU_\mA \mR_\mA, \quad \mB = \mU_\mB \mR_\mB,
+\end{equation*}
+where $\mU_\mA$ and $\mU_\mB$ can be obtained through polar decomposition. 
+
+Note that the gradients of $\mA$ and $\mB$,
+\begin{equation*}
+\nabla \mA = \nabla \mZ \mB\quad\text{and} \quad \nabla \mB = \transpose{\nabla \mZ} \mA,
+\end{equation*}
+depend on both the basis and the magnitude. To achieve transformation invariance, we introduce the concept of  "unmagnified gradients" distinguished from standard gradients by the symbol $\bar{\nabla}$:
+\begin{equation}
+\bar{\nabla} \mA \coloneqq \nabla \mZ \mU_\mB = \nabla \mA\mR_{\mB}^{-1}, \quad 
+\bar{\nabla} \mB \coloneqq \transpose{\nabla \mZ} \mU_\mA = \nabla \mB\mR_{\mA}^{-1}.
+\label{eq:unmagnified_grad}
+\end{equation}
+These unmagnified gradients, that rely solely on the column spaces of $\mA$ and $\mB$, remain invariant to transformations of the LoRA factors. This invariance forms the cornerstone of our algorithm's ability to achieve transformation invariance.
+
+Adaptive preconditioning methods like Adam have demonstrated superiority over non-adaptive methods like SGD. Furthermore, as established earlier, matrix preconditioning is crucial for achieving transformation invariance. Therefore, we propose utilizing these unmagnified gradients for adaptive matrix preconditioning. Additionally, we only do one-sided preconditioning, on the shorter side that is of size $r$, to ensure low time and memory complexity of the proposed method. 
+Since our update rule is symmetric for $\mA$ and $\mB$, for brevity, from now on we only describe the update rule for $\mA$.
+For simplicity, let's first discuss the case without momentum.
+We propose the update rule for
+\begin{equation}
+    \text{LoRA-RITE:}\quad\delta \mA=-\bar{\nabla}{\mA}(\transpose{\bar{\nabla}{\mA}}\bar{\nabla}{\mA})^{-1/2}(\mR_{\mB}^{-\top}),
+    \label{eq:main_update}
+\end{equation}
+where $\eta$ is the learning rate. This update can be broken down into two parts. 
+The first part
+\begin{equation*}
+    \bar{\nabla}{\mA}(\transpose{\bar{\nabla}{\mA}}\bar{\nabla}{\mA})^{-1/2}
+\end{equation*}
+resembles the adaptive preconditioning mechanism in Adagrad, but employs matrix operations instead of element-wise operations. Crucially, the use of unmagnified gradients ensures this term remains consistent across all equivalent LoRA pairs, up to the choice of the basis.
+
+The second part $\mR_{\mB}^{-\top}$ adjusts the magnitude of the update for different LoRA pairs.
+Since
+$\mR_{\mB}^{-\top}\transpose{\mB} = \transpose{\mU_{\mB}}$, 
+this effectively takes out the magnitude of $\transpose{\mB}$ in
+$\delta \mA\transpose{\mB}$, which is the first term in condition~\eqref{eq:expand}.    
+We thus have
+\begin{equation}\label{eq:invariance_wo_moment}
+\begin{aligned}
+        \delta \mA_1\transpose{\mB_1} &=  -\bar{\nabla} \mA_1(\transpose{\bar{\nabla}{\mA_1}}\bar{\nabla}{\mA_1})^{-1/2} (\mR_{\mB_1}^{-\top}\transpose{\mB_1})
+    = -\bar{\nabla} \mA_1(\transpose{\bar{\nabla}{\mA_1}}\bar{\nabla}{\mA_1})^{-1/2}\transpose{\mU_{\mB_1}}\\
+    &=-\bar{\nabla} \mA_2(\transpose{\bar{\nabla}{\mA_2}}\bar{\nabla}{\mA_2})^{-1/2}\transpose{\mU_{\mB_2}}=\delta \mA_2\transpose{\mB_2}. 
+\end{aligned}
+\end{equation}
+Thus, LoRA-RITE update~\eqref{eq:final_update} satisfies condition~\eqref{eq:expand} demonstrating that our proposed method satisfies transformation invariance. Note that this simplified update rule does not yet incorporate accumulated first and second moments, which will be addressed in the following paragraphs. 
+
+\paragraph{Incorporating second moment.} 
+Adaptive optimizers typically employ accumulated second moments for preconditioning. A naive approach might involve replacing the $\bar{\nabla}\mA^{\top} \bar{\nabla}\mA$ term in \eqref{eq:main_update} with its accumulated sum over training iterations $t\in\{1,2,\ldots,T\}$:
+\begin{equation*}
+    \sum\nolimits_{t=1}^T \transpose{\bar{\nabla}{\mA_t}}\bar{\nabla}{\mA_t}. 
+\end{equation*}
+However, since each $\bar{\nabla}{\mA_t}$ is computed with respect to the basis at a specific step, directly summing them is mathematically incorrect. Instead, we must account for the varying basis at each step.
+To achieve this, we accumulate the second moment as follows:
+\begin{equation}
+    \bar{\mV}_{\mA_t} = {\mP_{\mA_t}}\bar{\mV}_{\mA_{t-1}}\transpose{\mP_{\mA_t}}+\transpose{\bar{\nabla}{\mA_t}}\bar{\nabla}{\mA_t}, 
+       \label{eq:second_moment_acc}
+\end{equation}
+where $\bar{\mV}_{\mA_{t-1}}$ is the accumulated second moment based on the previous basis at step $t-1$, and $\mP_{\mA_t}:= \transpose{(\mU_{\mB_{t}})}\mU_{\mB_{t-1}}$ transforms it to the new basis at step $t$.
+During the adjustment,
+\begin{equation*}
+    \trace({\mP_{\mA_t}}\bar{\mV}_{\mA_{t-1}}\transpose{\mP_{\mA_t}})\le\trace(\bar{\mV}_{\mA_{t-1}}),
+\end{equation*}
+indicating a potential loss of information from the accumulated second moment. To quantify this loss, for symmetric positive definite matrices $\mX_1, \mX_2\in \mathbb{R}^{r\times r}$, we define
+\begin{equation*}
+    d_\lambda(\mX_1, \mX_2)\equiv \max_i |\lambda_i(\mX_1)-\lambda_i(\mX_2)|
+    \le\min_\mU\|\mX_1-\mU\mX_2\transpose{\mU}\|, 
+\end{equation*}
+where $\lambda_i(\mX)$ is the $i$-th eigenvalue of $\mX$, and $\mU\in \mathbb{R}^{r\times r}$ is an orthogonal matrix that reflects our freedom to choose the basis.
+We then define the ``escaped mass'' as
+\begin{equation}\label{eq:escape_mass}
+    \rho_{\mA_t}=\rho_{\mA_{t-1}}+d_\lambda(\bar{\mV}_{\mA_{t-1}}, {\mP_{\mA_t}}\bar{\mV}_{\mA_{t-1}}\transpose{\mP_{\mA_t}}).
+\end{equation}
+To compensate for this, we  add $\rho_{\mA_t}\mI$ to our preconditioner, ensuring that 
+\begin{equation*}
+    \bar{\mV}_{\mA_t}+\rho_{\mA_t}\mI
+\end{equation*}
+monotonically increases under a suitable choice of basis, 
+even though the choice of basis does not influence the actual update.
+
+
+Finally, our unmagnified preconditioned step, when incorporating second moment, can be written as
+\begin{equation}\label{eq:precond_step}
+    \bar{\mS}_{\mA_t}=\bar{\nabla}{\mA_t}(\bar{\mV}_{\mA_t}+\rho_{\mA_t}\mI)^{-1/2}.
+\end{equation}
+
+Note that similar to Adam, we can turn \eqref{eq:second_moment_acc} into the Exponential Moving Average (EMA) form, where we multiple the first term by $1-\beta_2$ and the second term by $\beta_2$, with the hyper-parameter $\beta_2\in (0,1)$ controls the decay rate. 
+\paragraph{Incorporating first moment.} 
+Similar to the second moment, the first moment must also be adjusted for changes in the basis using a projection matrix.  The update rule for maintaining the first moment can then be written as
+\begin{equation*}
+    \bar{\mM}_{\mA_t} = \beta_1 \bar{\mM}_{\mA_{t-1}}\transpose{\mP_{\mA_t}} + (1-\beta_1)\bar{\mS}_{\mA_t}.
+\end{equation*}
+Our final proposed update rule, incorporating both first and second moment, is
+\begin{equation}\label{eq:final_update}
+    \delta \mA_t = -\bar{\mM}_{\mA_t}\mR_{\mB}^{-\top}.
+\end{equation}
+
+\begin{algorithm}
+\caption{{\bf LoRA-RITE}}\label{alg:trim_lora}
+\begin{algorithmic}[1]
+\item Initialize: unmagnified first and second moment $\bar{\mM}_{\mA_0}=\textbf{0}$, $\bar{\mV}_{\mA_0}=\textbf{0}$
+\For{$t=1\ldots T$}
+\State Compute the gradient $\nabla \mA_t$;
+\State Compute QR decomposition of the LoRA factor $\mB_t$: $\mB_t = \mU_{\mB_t} \mR_{\mB_t}$;
+\State Compute the unmagnified gradient $\bar{\nabla} \mA_t=\nabla \mA_t\mR_{\mB_t}^{-1}$ and $\mP_{\mA_t}= \transpose{(\mU_{\mB_{t}})}\mU_{\mB_{t-1}}$;
+\State Update the unmagnified second moment $\bar{\mV}_{\mA_t} = {\mP_{\mA_t}}\bar{\mV}_{\mA_{t-1}}\transpose{\mP_{\mA_t}}+\transpose{(\bar{\nabla}{\mA_t})}\bar{\nabla}{\mA_t}$; 
+\State Update the escaped mass $\rho_{\mA_t}=\rho_{\mA_{t-1}}+d_\lambda(\bar{\mV}_{\mA_{t-1}}, {\mP_{\mA_t}}\bar{\mV}_{\mA_{t-1}}\transpose{\mP_{\mA_t}})$;
+\State Compute the unmagnified precondition step $\bar{\mS}_{\mA_t}=\bar{\nabla}{\mA_t}(\bar{\mV}_{\mA_t}+\rho_{\mA_t}\mI)^{-1/2}$;
+\State Update the unmagnified first moment $\bar{\mM}_{\mA_t} = \beta_1 \bar{\mM}_{\mA_{t-1}}\transpose{\mP_{\mA_t}} + (1-\beta_1)\bar{\mS}_{\mA_t}$;
+\State Update model parameters $\mA_{t+1} = \mA_t - \eta_t \bar{\mM}_{\mA_t}\mR_{\mB}^{-\top}$.
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+Our proposed algorithm, LoRA-RITE ({\bf R}obust {\bf I}nvariant {\bf T}ransformation {\bf E}quilibration for LoRA training), is summarized as \Cref{alg:trim_lora}, where we show the updates for $\mA$, and update for $\mB$ can be derived in the same way.
+\begin{theorem}\label{th:alg_invariant}
+In \Cref{alg:trim_lora}, every unmagnified term is consistent across all equivalent LoRA pairs.
+Consequently, \Cref{alg:trim_lora} is transformation invariant.
+\end{theorem}
+\paragraph{Time and Space Complexity.}
+The time and space complexity of our algorithm is similar to first order methods like Adam when $r\ll m, n$. In each iteration of Algorithm~\ref{alg:trim_lora}, the  dominant computational costs arise from (1)  QR-decomposition for $m$-by-$r$ and $n$-by-$r$ matrices which takes $\bigO(nr^2 + mr^2)$ time,  (2) matrix inverses and roots for $r$-by-$r$ matrices which takes $\bigO(r^3)$ time, and (3) matmuls with time complexity $\bigO(nr^2 + mr^2)$. Thus, the overall complexity per step is  $\bigO(mr^2+nr^2 + r^3)$. It is only $r$ times slower than Adam, and since $r$ is very small, this overhead is negligible when comparing with the back-propagating time. The memory cost of our method is $\bigO(mr + nr)$ which is the same as Adam. 
+ 
+\subsection{Theoretical Analysis}
+\label{sec:convergence}
+
+Following previous work~\citep{VG18, VF23},
+we provide a convergence analysis of the proposed algorithm within the online optimization framework~\citep{hazan2016introduction,shalev2012online}. 
+In online convex optimization setting, a parameter $\vtheta_t\in \mathcal{K}$ is chosen iteratively, where $\mathcal{K}$ is a convex decision set.
+After each decision- $\vtheta_t$, a convex loss function $f_t$ is revealed, potentially chosen adversarially.
+The regret accumulated by the algorithm up to step $T$ is defined as 
+\begin{equation*}
+    \text{Regret}_{T}=\sum\nolimits_{t=1}^T f_t(\vtheta_t)-\min_{\vtheta\in\mathcal{K}}\sum\nolimits_{t=1}^T f_t(\vtheta).
+\end{equation*}
+In the online convex optimization analysis, we bound the first-order term $\transpose{\nabla\vtheta_t}(\vtheta_t-\vtheta^*)$ where  $\vtheta^*$ represents an arbitrary minimizer, and then use convexity of $f_t$ to connect it to the loss function. However, due to the inherent structure of LoRA, loss functions $f_t,\ t\in\{1,\ldots,T\}$ are not convex with respect to $\vtheta$. Therefore, we directly bound the first-order term instead.
+
+We assume for the fine-tuned weight $\mZ$ of each layer, the convex decision set imposes the following constrains: 
+\begin{equation*}
+    \|\mA\|_F \le D_\mA, \|\mB\|_F \le D_\mB,
+\end{equation*}
+where $\|\cdot\|$ denotes the Frobenius norm. Additionally, we assume the gradient satisfies
+    $\|\nabla\mZ\|_F \le G$. 
+Following previous work, we analyze convergence in the simplified scenario where the first moment is omitted and the second moment is a summation, similar to Adagrad.
+For LoRA-Rite proposed method, our theoretical analysis yields the following result: 
+\begin{theorem}  LoRA-RITE satisfies:
+\begin{equation*}
+    \frac{1}{T}\sum\nolimits_{t=1}^T \frac{1}{\eta} \transpose{\nabla\vtheta_t}(\vtheta_t-\vtheta_{t+1}) = \bigO(GT^{-1/2}),
+\end{equation*}
+\label{th:bound_on_second_term}
+where $\eta$ is a fixed constant learning rate.
+\end{theorem}
+This theorem shows that the method either converges to a particular stable solution or  just move around in directions that does not change the function value, suggesting a form of convergence. To further strengthen the guarantee, we introduce an additional assumption: 
+\begin{assumption} Let
+\begin{equation*}
+    \bar{\mX}_{\mA_t}=(\bar{\mV}_{\mA_t}+\rho_{\mA_t}\mI)^{-1/2}
+\end{equation*}
+be the unmagnified preconditioner $\mP_{\mA_t}= \transpose{\mU_{\mB_{t}}}\mU_{\mB_{t-1}}$, and
+$\mQ_{\mA_t}= \mR_{\mB_t}^{-\top}\mR_{\mB_{t-1}}^{\top}$, then
+we have
+\begin{equation*}
+    \|\bar{\mX}_{\mA_t}^{-1}- \mQ_{\mA_t}\bar{\mX}_{\mA_{t-1}}^{-1}\mQ_{\mA_t}^{\top}\|\le  \mu\|\bar{\mX}_{\mA_t}^{-1}- \mP_{\mA_t}\bar{\mX}_{\mA_{t-1}}^{-1}\mP_{\mA_t}^{\top}\|.
+\end{equation*}
+\label{ass:dynamic}
+\end{assumption}
+This assumption essentially constrains the change in $\mR_{\mB_t}$ to be relatively smooth. Under this assumption, we can establish the following stronger convergence result:
+\begin{theorem}\label{th:bound_all} Under Assumption~\ref{ass:dynamic}, our proposed method satisfies:
+\begin{equation*}
+    \frac{1}{T}\sum\nolimits_{t=1}^T \transpose{\nabla\vtheta_t}(\vtheta_t-\vtheta^*) = \bigO(GD_\mA D_\mB T^{-1/2}).
+\end{equation*}
+\label{th:regret_by_full}
+\end{theorem}
+Our  analysis closely resembles that of one-sided matrix Adagrad.
+The key idea is to have a change of variable for both $\mA$ and $\mB$ such that all the quantities get replace by its unmagnified counterparts.
+
+Compared to one-sided matrix Adagrad, which has a regret bound of
+\begin{equation*}
+    \bigO(G(D_\mA^2+D_\mB^2)T^{-1/2})\text{ which is higher than } \bigO(GD_\mA D_\mB T^{-1/2}),
+\end{equation*}
+the regret bound of LoRA-RITE. The above inequality is using $D_{\mA}^2+D_{\mB}^2 \geq 2D_{\mA}D_{\mB}$, where the difference between both sides of inequality is large when the two LoRA factors exhibit imbalance in magnitudes - $D_{\mA}$ and $D_{\mB}$. This advantage is particularly relevant because previous work has shown that LoRA factors often exhibit such imbalances \citep{SH24}, which can also be seen in \Cref{fig:imbalance}, providing an explanation for the strong empirical performance of our method.
+
+
+
+\section{Related Work}
+
+
+
+\paragraph{Related Optimizers.}
+Adaptive first-order optimizers like Adagrad~\citep{JD11} utilize accumulated second moments, essentially diagonal preconditioners, to scale updates for each coordinate. This approach, adopted by optimizers like Adam~\citep{KD2014} and RMSProp~\citep{TT2012}, has become standard for training deep neural networks, including LoRA, and many other similar first-order methods have also been developed in the literature~\autocite{LI17, XC24}. However, as discussed in Section~\ref{sec:no-diagonal}, these methods lack transformation invariance when applied to LoRA.
+
+Several higher-order preconditioners have shown promise in various training scenarios~\citep{shi2023distributed}. For example, Shampoo~\citep{VG18} approximates the full second moment matrix using a Kronecker product, leading to the following preconditioned gradient:  
+\begin{equation}
+\mL^{-1/4} \mG \mR^{-1/4}, \ \ \mL = \mL + \mG\mG^{\top}, \ \mR = \mR+\mG^{\top} \mG
+\label{eq:shampoo}
+\end{equation}
+where $L\in \mathbb{R}^{m\times m}, R\in\mathbb{R}^{n\times n}$ are the left and right preconditioner matrices, and $G\in \mathbb{R}^{m\times n}$ is the gradient. Many other higher-order methods follow this framework~\citep{JM15,morwani2024new,CASPR24}. These methods incur $\bigO(m^2+n^2)$ additional memory overhead and require periodic computation of roots of $L$ and $R$ with $\bigO(m^3 + n^3)$ computational cost. This complexity significantly exceeds that of our proposed method, as demonstrated in~\Cref{tb:complexity_comparison}. Comparing \eqref{eq:shampoo} and \eqref{eq:precond_step} reveals that our method applies preconditioning only to the low-rank side of LoRA, resulting in negligible overhead. Furthermore, unlike our provably transformation-invariant approach, Shampoo-based methods lack this property.
+
+LARS~\autocite{YY17} and Lamb~\autocite{YY20} are layer-wise adaptive optimization methods originally designed for large batch training. They dynamically adjust the update norm for each weight matrix based on its current norm, which ensures scalar scale invariance. Nonetheless, they still lack transformation invariance.
+
+
+
+\paragraph{Variants of LoRA.}
+As large language models (LLMs) grow in size, full fine-tuning on downstream tasks becomes increasingly resource-intensive. Parameter-efficient fine-tuning (PEFT) methods such as \autocite{NH19, SH22, JH22,BL21, XL21} have emerged to address this issue by reducing the number of trainable paramters. As a popular PEFT algorithm, LoRA \autocite{EH22} has been the subject of extensive research, with numerous variations and improvements proposed. One line of research focuses on dynamically adjusting the LoRA rank during training. This includes DyLoRA \autocite{MV23}, IncreLoRA \autocite{FZ23}, and AdaLoRA \autocite{QZ23}.
+Another approach involves enhancing LoRA performance through the addition of extra scaling matrices, which includes DoRA \autocite{SL24} and DeepLoRA \autocite{CY24}.
+These directions are orthogonal to our work.
+Regarding LoRA optimization,
+\textcite{SH24} highlight the limitations of traditional optimizers as they fail to achieve efficient feature learning.
+To address this issue, they propose LoRA+, which uses two different learning rates $\eta_\mA$ and $\eta_\mB$ for LoRA weights.
+However, this leads to an extra hyperparameter to be tuned in practice.
+In contrast, \textcite{FZ24} propose the use of matrix preconditioning methods to achieve efficient feature learning.
+They propose the use of Riemannian gradient descent for LoRA optimization.
+As far as we know, Riemannian gradient descent is the only method in the literature that satisfies transformation invariance.
+However, similar to gradient descent, Riemannian gradient descent does not incorporate momentum and adaptivity, so it performs worse than Adam in their experiments.
+To improve the performance, they propose to combine Riemannian gradient descent with element-wise Adam, which becomes ScaledAdam. However, this combination makes ScaledAdam no longer transformation invariant.
+
+\begin{table}[t]
+\begin{center}
+\caption{Experimental results on the Super-Natural instruction dataset.}
+\label{tb:sni_dataset}
+\resizebox{0.9\textwidth}{!}{
+\begin{tabular}{ cccccccc }
+ \toprule
+ \multirow{2}{*}{Model} & \multirow{2}{*}{Optimizer} & Cause Effect  & Coreference  & Title  & Data to  & \multirow{2}{*}{Global} \\
+ & & Classification & Resolution & Generation & Text & \\
+ \midrule
+ \multirow{6}{*}{Gemma-2B} 
+ & Adam & 58.93 & 77.06 & 51.30 & 55.52 & 50.51/74.54 \\ 
+ & LoRA+ & 58.84 & 76.08 & 51.32 & 55.68 & 49.76/74.20 \\
+ & ScaledAdam & 58.71 & 77.55 & 51.16 & 55.69 & 49.40/74.01 \\
+ & Shampoo & 58.11 & 77.17 & 51.30 & 55.48 & 50.79/74.74 \\
+ & Lamb & 60.97 & 80.69 & 52.26 & 55.85 & 53.53/76.43 \\
+ & LoRA-RITE & \textbf{61.26} & \textbf{82.02} & \textbf{52.26} & \textbf{55.98}
+& \textbf{55.11}/\textbf{77.12} \\
+ \midrule
+ \multirow{6}{*}{Gemma-7B} 
+ & Adam & 67.17 & 86.05 & 51.58 & 55.38 & 58.46/78.17 \\ 
+ & LoRA+ & 65.50 & 86.67 & 51.51 & 55.34 & 58.19/78.29 \\
+ & ScaledAdam & 65.79 & 85.05 & 51.61 & 55.40 & 57.32/77.92 \\
+ & Shampoo & 66.29 & 85.62 & 51.86 & 55.43 & 57.99/78.27 \\
+ & Lamb & 69.62 & 86.57 & 51.87 & 55.5 & 57.79/78.18 \\
+ & LoRA-RITE & \textbf{71.26} & \textbf{88.14} & \textbf{52.17} & \textbf{55.62} & \textbf{59.71}/\textbf{79.05} \\
+ \bottomrule
+\end{tabular}
+}
+\end{center}
+\end{table}
+
+\begin{table}[t]
+\begin{center}
+\caption{Experimental results on LLM benchmarking datasets.}
+\label{tb:llm_benchmark}
+\resizebox{0.9\textwidth}{!}{
+\begin{tabular}{ cccccccc }
+ \toprule
+ {Model} & {Optimizer} & HellaSwag  & ArcChallenge  & GSM8K  & OpenBookQA  &  Avg. \\
+ \midrule
+ \multirow{4}{*}{Gemma-2B} 
+ & Adam &  83.76 & 45.31 & 24.26 & 64.00 & 54.33 \\
+ & LoRA+ & 83.75 & 45.31 & 23.65 & 64.40 & 54.28 \\
+ & ScaledAdam & 83.52 & 45.22 & 23.96 & 64.80 & 54.38 \\
+ & Shampoo & 83.26 & 44.88 & 23.35 & 63.60 & 53.77 \\
+ & Lamb & 86.60 & 47.35 & 26.76 & 68.00 & 57.18 \\
+ & LoRA-RITE & \textbf{87.28} & \textbf{49.06} & \textbf{30.10} & \textbf{68.80} & \textbf{58.81} \\
+ \midrule
+ \multirow{4}{*}{Gemma-7B} 
+ & Adam &  94.07 & 54.78 & 48.37 & 77.60 & 68.71 \\ 
+ & LoRA+ & 93.99 & 54.01 & 48.75 & 77.60 & 68.59 \\
+ & ScaledAdam & 93.31 & 52.90 & 48.07 & 75.80 & 67.52 \\
+ & Shampoo & 94.15 & 52.47 & 49.05 & 76.80 & 68.12 \\
+ & Lamb & 95.11 & 69.80 & 50.64 & 83.20 & 74.69 \\
+ & LoRA-RITE & \textbf{95.59} & \textbf{71.76} & \textbf{55.50} & \textbf{84.80} & \textbf{76.91} \\
+ \bottomrule
+\end{tabular}
+}
+\end{center}
+\end{table}
+
+
+
+\section{Experimental Results}
+
+We evaluated the proposed LoRA optimizer against other optimizers across a range of datasets. This included the Super-Natural Instructions dataset, a comprehensive collection of diverse NLP tasks, as well as four standard LLM benchmarking datasets.
+We compare the following optimizers:
+\begin{compactitem}
+    \item Adam \citep{KD2014}: The most widely used default optimizer for LoRA finetuning.
+    \item LoRA+ \autocite{SH24}: Adam with different learning rates for $\mA$ and $\mB$. We set the learning rate of $\mB$ to be 4 times large than $\mA$, which is the value they used for decoder models. %{\color{red}(is 4x used in the original paper? If so we can mention that. )}
+    \item ScaledAdam \autocite{FZ24}: A variant of Adam designed for LoRA optimization.
+    \item Shampoo \autocite{VG18}: A well-known adaptive matrix preconditioning method. To obtain similar training time as the other methods, the block size is set to 512 and the preconditioners are updated every 100 steps.
+    \item Lamb \autocite{lamb}: A variant of Adam that normalizes the updates for each layer based on the norm of the parameters. 
+    \item LoRA-RITE: Our proposed optimizer that is transformation invariant.
+\end{compactitem}
+
+For each optimizer applied on each data set, we search for the best learning rate from $2*10^{-6}$ to $2*10^{-2}$.
+ For most of the experiments we chose rank $r=16$ for LoRA, based on the ablation study over the rank at the end of experiments. 
+We conduct experiments on Gemma~\citep{gemma_2024} \ 2B, 7B, and mT5-XXL \citep{mt5} using TPUs.
+\paragraph{Results on Super-Natural Instruction Dataset.}
+The Super-Natural instruction dataset \autocite{YW22} contains a  collection of 1600+ NLP tasks, including both classification and generation tasks. We use a 10\% split of the data for validation. Following \autocite{YW22}, we use the exact match accuracy to evaluate classification and ROUGE-L score to evaluate generation tasks.
+
+\Cref{tb:sni_dataset} presents the performance of individual fine-tuning on two classification and two generation tasks for 2,000 steps.  It also includes the performance of fine-tuning on the global training set of over 1,600 tasks for 10,000 steps, reporting both exact match accuracy and ROUGE-L score evaluated on the global validation set.
+As shown in \Cref{tb:sni_dataset}, our proposed method demonstrates superior performance across both classification and generation tasks. Compared to Adam, our method achieves 2.3\% to 4.9\% accuracy improvements on the classification tasks and also shows significant improvements in the global training setting. Furthermore, we found that Lamb performs well on some of the data sets but there's still a significant gap between Lamb and LoRA-RITE. Since Lamb enforces scalar scale invariance but not transformation invariance,
+this result implicitly suggests that transformation invariance is crucial for achieving optimal performance.
+
+\paragraph{Results on other LLM Benchmarking Datasets.}
+
+We also evaluate the performance on common LLM benchmarking datasets, including HellaSwag \autocite{zellers2019hellaswag}, ArcChallenge \autocite{allenai:arc}, GSM8K \autocite{cobbe2021gsm8k}, and OpenBookQA \autocite{OpenBookQA2018}.
+
+The results are presented in \Cref{tb:llm_benchmark}. We can observe that the trend is similar to the SuperNatural instruction results, where LoRA-RITE achieves the best performance on all the data sets, and Lamb is usually the second best optimizer.
+\paragraph{Ablation Study.}
+
+We conduct an ablation study on the choice of different LoRA ranks and model architectures.
+Specifically, we considered rank 4 and 16 on both Gemma 2B (decoder only) and mT5-XXL (encoder-decoder) on the OpenBookQA dataset. As we can see from \Cref{tb:ablation_study}, our proposed method performs consistently well across  different LoRA ranks. Furthermore, our method can be successfully applied to mT5-XXL which has an encoder-decoder architecture, showing the generalizability of the proposed optimizer.
+
+\begin{table}[t]
+\begin{center}
+\caption{Ablation study on different ranks and different model architectures.}
+\label{tb:ablation_study}
+\resizebox{0.9\textwidth}{!}{
+\begin{tabular}{ cccccccc }
+ \toprule
+& Gemma-2B (rank=4) & Gemma-2B (rank=16) & mT5-XXL (rank=4) & mT5-XXL (rank=16)\\
+\midrule
+Adam & 63.00 & 64.0 & 72.00 & 72.20 \\
+ScaledAdam & 63.00 & 64.8 & 70.80 & 74.60 \\
+Lamb & 67.80 & 68.0 & 70.40 & 73.40 \\
+LoRA-RITE & \textbf{70.40} & \textbf{68.8} & \textbf{74.80} & \textbf{75.00} \\
+\bottomrule
+\end{tabular}
+}
+\end{center}
+\end{table}
+
+\begin{table}[t]
+\begin{center}
+\caption{Number of training steps per second for different optimizers. LoRA-RITE has a small overhead compared with first-order methods.}
+\label{tb:train_seed}
+\resizebox{0.8\textwidth}{!}{
+\begin{tabular}{ccccccc}
+\toprule
+& Adam & LoRA+ & ScaledAdam & Shampoo & Lamb & LoRA-RITE \\
+\midrule
+Gemma-2B & 0.948 & 0.930 & 0.917 & 0.837 & 0.929 & 0.878 \\
+Gemma-7B & 0.120 & 0.120 & 0.114 & 0.112 & 0.116 & 0.114 \\
+\bottomrule
+\end{tabular}
+}
+\end{center}
+\end{table}
+
+\paragraph{Training Speed Comparison.}
+
+We compare the training speed of different optimizers.
+\Cref{tb:train_seed} shows the number of training steps per second for different optimizers with LoRA rank 16 on the OpenBookQA dataset using TPUv5e.
+As we can see, LoRA-RITE is only 8\% slower than Adam on Gemma 2B, while the difference decreases to 5\% when model size increases to 7B. Also, Shampoo is slower than LoRA-RITE in this case despite the fact that it recomputes the preconditioner with much lower frequency (once every 100 steps). This is due to our approach of preconditioning only the low-rank side of the LoRA factors. 
+
+
+\section{Conclusions}
+
+Current LoRA optimization techniques lack transformation invariance, which implies that equivalent LoRA parameterizations can yield significantly different updates. This hinders efficient feature learning and often leads to suboptimal solutions in practice. We introduce a novel, transformation-invariant optimization algorithm with comparable time and memory overhead to Adam. Our algorithm consistently achieves higher accuracy than existing LoRA optimizers across diverse datasets and models.
+
+\paragraph{Limitations.}
+Although this work introduces a better optimizer for LoRA, it is important to acknowledge that LoRA itself has limitations. For instance, LoRA has smaller representational power and may result in a small performance decrease compared to full fine-tuning. Also, how to select rank to strike a good trade-off between efficiency and accuracy may be non-trivial in practice.
+
+\clearpage
+
+
+
+

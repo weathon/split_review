@@ -1,0 +1,481 @@
+\title{LoLCATs: On Low-Rank Linearizing of Large Language Models}
+
+\begin{abstract}
+
+\noindent Recent works show we can linearize large language models (LLMs)---swapping the quadratic attentions of popular Transformer-based LLMs with subquadratic analogs, such as linear attention---avoiding the expensive pretraining costs.  
+However, linearizing LLMs
+often significantly degrades model quality, still requires training over billions of tokens, and remains limited to smaller 1.3B to 7B LLMs.
+We thus propose Low-rank Linear Conversion via Attention Transfer (\name{}), a simple two-step method that improves LLM linearizing quality with orders of magnitudes less memory and compute. 
+We base these steps on two findings.
+First, we can replace an LLM's softmax attentions with closely-approximating linear attentions, simply by 
+\textit{training} the linear attentions to match their softmax counterparts with an output MSE loss (``\textit{attention transfer}'').
+Then, this enables adjusting for approximation errors and recovering LLM quality simply with \textit{low-rank} adaptation (LoRA).
+\name{} significantly improves linearizing quality, training efficiency, and scalability. We significantly reduce the linearizing quality gap and produce state-of-the-art subquadratic LLMs from Llama 3 8B and Mistral 7B v0.1, leading to 20+ points of improvement on 5-shot MMLU. Furthermore, \name{} does so with only 0.2\% of past methods' model parameters and 0.4\% of their training tokens.  
+Finally, we apply \name{} to create the first linearized 70B and 405B LLMs (50$\times$ larger than prior work).
+When compared with prior approaches under the same compute budgets, \name{} significantly improves linearizing quality, closing the gap between linearized and original Llama 3.1 70B and 405B LLMs by 77.8\% and 78.1\% on 5-shot MMLU.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+``Linearizing'' large language models (LLMs)---or converting existing Transformer-based LLMs into attention-free or subquadratic alternatives---has shown promise for scaling up efficient architectures. While many such architectures offer complexity-level efficiency gains, like \textit{linear-time} and \textit{constant-memory} generation, they are often limited to smaller models pretrained on academic budgets~\citep{gu2023mamba,peng2023rwkv,yang2023gated,arora2024simple,beck2024xlstm}.  
+In a complementary direction,
+linearizing aims to start with openly available LLMs---\eg{} those with 7B+ parameters trained on trillions of tokens~\citep{AI_2024,jiang2023mistral}---and (i) swap their softmax attentions with subquadratic analogs, before (ii) further finetuning to recover quality. This holds exciting promise for quickly scaling up subquadratic capabilities.
+
+However, to better realize this promise and allow anyone to convert LLMs into subquadratic models, we desire methods that are
+(1) \textbf{quality-preserving}, \eg{} to recover the zero-shot abilities of modern LLMs; (2) \textbf{parameter and token efficient}, to linearize LLMs on widely accessible compute; and (3) \textbf{highly scalable}, to support linearizing the various 70B+ LLMs available today~\citep{touvron2023llama,touvron2023llama2}. 
+
+Existing methods present opportunities to improve all three criteria.
+On quality, despite using motivated subquadratic analogs such
+as RetNet-inspired 
+linear attentions~\citep{sun2023retentive,mercat2024linearizing} 
+or state-space model (SSM)-based 
+Mamba layers~\citep{gu2023mamba,yang2024parallelizing,wang2024mamba},
+prior works significantly reduce performance on popular LM Evaluation Harness tasks (LM Eval)~\citep{eval-harness} (up to 23.4-28.2 pts on 5-shot MMLU~\citep{hendrycks2020measuring}).
+On parameter and token efficiency, to adjust for architectural differences, prior methods update \textit{all} model parameters in at least one stage of training~\citep{mercat2024linearizing,wang2024mamba,yang2024parallelizing}, and use 20~-~100B tokens to linearize 7B LLMs.
+On scalability, these training costs make linearizing larger models on academic compute more difficult; 
+existing works only linearize up to 8B LLMs. This makes it unclear how to support linearizing 70B to 405B LLMs~\citep{dubey2024llama}.
+\input{sections/figures/pull_method}
+
+In this work, we thus propose \textbf{\name{}} 
+(\textbf{\textsc{Lo}}w-rank \textbf{\textsc{L}}inear \textbf{\textsc{C}}onversion with \textbf{\textsc{A}}ttention \textbf{\textsc{T}}ran\textbf{\textsc{s}}fer), a simple approach to improve the quality, efficiency, and scalability of linearizing LLMs. 
+As guiding motivation, we ask if we can linearize LLMs by simply reducing architectural differences,~\ie{}
+\begin{enumerate}[leftmargin=*]
+    \item Starting with simple softmax attention analogs such as linear attention (Eq.~\ref{eq:linear_attention}), and \textit{training} their parameterizations explicitly to approximate softmax attention (``\textbf{attention transfer}'').
+    \item Subsequently only training with low-cost finetuning to adjust for any approximation errors,~\eg{} with low-rank adaptation (LoRA)~\citep{hu2021lora} (``\textbf{low-rank linearizing}'').
+\end{enumerate}
+
+In evaluating this hypothesis, we make several contributions. 
+First, to better understand linearizing feasibility, we empirically study attention transfer and low-rank linearizing with existing linear attentions. While intuitive---by swapping in perfect subquadratic softmax attention approximators, we could get subquadratic LLMs with no additional training---prior works suggest linear attentions struggle to match softmax expressivity~\citep{keles2023computational,qin-etal-2022-devil} 
+or need full-model updates to recover linearizing quality~\citep{kasai-etal-2021-finetuning,mercat2024linearizing}. 
+In contrast, we find that while \textit{either} attention transfer or LoRA alone is insufficient, we can rapidly recover quality by simply doing \textit{both} (Figure~\ref{fig:train_efficiency}, Table~\ref{table:train_efficiency}). 
+At the same time, we do uncover quality issues related to attention-matching architecture and training. With prior linear attentions, the best low-rank linearized LLMs still significantly degrade in quality  
+vs.~original Transformers (up to 42.4 pts on 5-shot MMLU). 
+With prior approaches that train all attentions jointly~\citep{zhang2024the}, we also find that later layers can result in 200$\times$ the MSE of earlier ones (Figure~\ref{fig:mse_analogs}). We later find this issue aggravated by larger LLMs; jointly training all of Llama 3.1 405B's 126 attention layers fails to viably linearize the LLM. 
+
+Next, to resolve these issues and improve upon our original criteria, we detail \name{}' method components. 
+For \textbf{quality}, we generalize prior notions of learnable linear attentions to sliding window + linear attention variants. These remain subquadratic to compute yet consistently yield better attention transfer via lower mean-squared error (MSE) on attention outputs. For \textbf{parameter and token efficiency}, we maintain our simple 2-step framework of (1) training subquadratic attentions to match softmax attentions, 
+before (2) adjusting for any errors via only LoRA. For \textbf{scalability}, we use finer-grained ``block-by-block''
+training. We split LLMs into blocks of $k$ layers before jointly training attentions only within each block to improve layer-wise attention matching. We pick $k$ to balance the speed of training blocks in parallel with the memory of saving hidden state outputs of prior blocks (as inputs for later ones). We provide a simple cost model to navigate these tradeoffs.
+
+Finally, in experiments, we validate that \name{} improves on
+each of our desired criteria.
+\begin{itemize}[leftmargin=*]
+    \item On \textbf{quality}, when linearizing popular LLMs such as Mistral-7B and Llama 3 8B, \name{} significantly improves past linearizing methods (by 
+    1.1$-$8.6 
+    points (pts) on zero-shot LM Eval tasks; 
+    +17.2 pts 
+    on 5-shot MMLU)). With Llama 3 8B, \name{} for the first time closes the zero-shot LM Eval gap between linearized and Transformer models 
+    (73.1 vs 74.2 pts),
+    while supporting 3$\times$ higher throughput and 64$\times$ larger batch sizes vs.~popular FlashAttention-2~\citep{dao2023flashattention} implementations (generating 4096 token samples on an 80GB H100). We further validate \name{} as a high-quality training method, outperforming strong 7B subquadratic LLMs (RWKV-v6~\citep{peng2024eagle}, Mamba~\citep{gu2023mamba}, Griffin~\citep{de2024griffin}) and hybrids (StripedHyena~\citep{poli2023hyena}, Zamba~\citep{glorioso2024zamba}) trained from scratch by 
+    1.2 to 9.9 pts
+    on average over popular LM Eval tasks.
+    
+    \item On \textbf{parameter and token-efficiency}, by only training linear attention feature maps in Stage 1, while only using LoRA on linear attention projections in Stage 2, \name{} enables these gains while updating only $<$0.2\% of past linearizing methods' model parameters (doable on a single 40GB GPU). This also only takes 40M tokens,~\ie{} 0.003\% and 0.04\% of prior pretraining and linearizing methods' token counts.
+
+    \item On \textbf{scalability}, with \name{} we scale up linearizing to support Llama 3.1 70B and 405B LLMs~\citep{dubey2024llama}. \name{} presents the first viable approach to linearizing larger LLMs. We create the first linearized 70B LLM, taking only 18 hours on one 8$\times$80GB H100 node, and the first linearized 405B LLM with  
+    a combination of 5 hours on 14 80GB H100 GPUs (attention transfer) +
+    16 hours on three 8$\times$80GB H100 nodes (LoRA finetuning) for Llama 3.1 405B. 
+    For both models, this amount to under half the total GPU hours than prior methods reported to linearize 8B models (5 days on 8$\times$80GB A100s)~\citep{wang2024mamba}. Furthermore, under these computational constraints, \name{} significantly improves quality versus prior linearizing approaches without attention transfer. With Llama 3.1 70B and 405B, we close 
+    77.8\% and 78.1\% of the 5-shot MMLU gap between Transformers and linearized variants respectively.
+\end{itemize}
+\input{sections/figures/pull_results_v3}
+
+
+
+\section{Preliminaries}
+
+\label{sec:preliminaries}
+To motivate \name{}, we first go over Transformers, attention, and linear attention. We then briefly discuss related works on linearizing Transformers and Transformer-based LLMs.
+
+\paragraph{Transformers and Attention.}
+Popular LLMs such as Llama 3 8B~\citep{llama3modelcard} and Mistral 7B~\citep{jiang2023mistral} are decoder-only Transformers, with repeated blocks of multi-head \textit{softmax attention} followed by MLPs~\citep{vaswani2017attention}.
+For one head, attention computes outputs $\bm{y} \in \mathbb{R}^{l \times d}$ from inputs $\bm{x} \in \mathbb{R}^{l \times d}$ (where 
+$l$ is sequence length, 
+$d$ is head dimension) with query, key, and value weights $\bm{W}_q, \bm{W}_k, \bm{W}_v \in \mathbb{R}^{d \times d}$. In causal language modeling, we compute $\bm{q} = \bm{x}\bm{W}_q$, $ \bm{k} = \bm{x}\bm{W}_k$, $ \bm{v} = \bm{x}\bm{W}_v$, before getting attention weights $\bm{a}$ and outputs $\bm{y}$ via
+\begin{equation}
+    a_{n, i} = \frac{\exp(\bm{q}_n^\top \bm{k}_i / \sqrt{d})}{\sum_{i=1}^n \exp(\bm{q}_n^\top \bm{k}_i / \sqrt{d})},
+    \;\;\;
+    \bm{y}_n = 
+    \sum_{i=1}^n a_{n, i} \bm{v}_i,
+    \;\;\;
+    \text{for $n$ in $[1, \ldots, l]$}
+\label{eq:causal_attention}
+\end{equation}
+Multi-head attention maintains inputs, outputs, and weights for each head, \textit{e.g.,} $\bm{x} \in \mathbb{R}^{h \times l \times d}$ or $ \bm{W}_q \in \mathbb{R}^{h \times d \times d}$ ($h$ being number of heads), and computes Eq.~\ref{eq:causal_attention} for each head. In both cases, we compute final outputs by 
+concatenating $\bm{y}_n$ across heads, before using output weights $\bm{W}_o \in \mathbb{R}^{hd \times hd}$ to compute $\bm{y}_n\bm{W}_o \in \mathbb{R}^{l \times hd}$.
+While expressive, causal softmax attention requires all $\{ \bm{k}_i, \bm{v}_i\}_{i \leq n}$ to compute $\bm{y}_n$. 
+For long context or large batch settings,
+this growing \textit{KV cache} can incur prohibitive memory costs even with state-of-the-art implementations such as FlashAttention~\citep{dao2023flashattention}.
+
+\paragraph{Linear Attention.} To get around this,~\citet{katharopoulos2020transformers} show a similar attention operation, but with \textit{linear} time and \textit{constant} memory over generation length (linear time and space when processing inputs).
+To see how, note that 
+softmax attention's exponential is a kernel function $\mathcal{K}(\bm{q}_n, \bm{k}_i)$, which in general can be expressed as the dot product of feature maps $\phi: \mathbb{R}^{d} \mapsto \mathbb{R}^{d'}$. Swapping $\exp(\bm{q}_n^\top \bm{k}_i/\sqrt{d})$ with $\phi(\bm{q}_n)^\top \phi(\bm{k}_i)$ in Eq.~\ref{eq:causal_attention} gives us \emph{linear attention} weights 
+and outputs:
+\begin{equation}
+    \hat{a}_{n, i} =
+    \frac{ \phi(\bm{q}_n)^\top \phi(\bm{k}_i)}{\sum_{i=1}^n \phi(\bm{q}_n)^\top \phi(\bm{k}_i)},
+    \;\;\;
+    \hat{\bm{y}}_n = \sum_{i=1}^n \hat{a}_{i, n} \bm{v}_i
+\label{eq:linear_attention}
+\end{equation}
+Rearranging terms via matrix product associativity, we get
+\begin{equation}
+    \hat{\bm{y}}_n 
+    =
+    \sum_{i=1}^n \frac{ \phi(\bm{q}_n)^\top \phi(\bm{k}_i)\bm{v}_i}{\sum_{i=1}^n \phi(\bm{q}_n)^\top \phi(\bm{k}_i) } 
+    =    
+    \frac{ \phi(\bm{q}_n)^\top \Big(\sum_{i=1}^n  \phi(\bm{k}_i)\bm{v}_i^\top \Big)}{\phi(\bm{q}_n)^\top \sum_{i=1}^n
+ \phi(\bm{k}_i)}
+\label{eq:linear_attention_2}
+\end{equation}
+This lets us compute both the numerator $\bm{s}_n = \sum_{i=1}^n \phi(\bm{k}_i)\bm{v}_i^\top$ and denominator $\bm{z}_n = \sum_{i=1}^n \phi(\bm{k}_i)$ as recurrent ``KV states''. With $\bm{s}_0 = \bm{0},\bm{z}_0 = \bm{0}$, we recurrently compute linear attention outputs as
+\begin{equation}
+\hat{\bm{y}}_n 
+= \frac{\phi(\bm{q}_n)^\top \bm{s}_n}{\phi(\bm{q}_n)^\top \bm{z}_n}
+\;\;
+\text{for}
+\;\;
+\bm{s}_n = \bm{s}_{n-1} + \phi(\bm{k}_n)\bm{v}_n^\top
+\;\;
+\text{and}
+\;\;
+\bm{z}_n = \bm{z}_{n-1} + \phi(\bm{k}_n)
+\;\;\;
+\label{eq:linear_attention_recurrent}
+\end{equation}
+Eq.~\ref{eq:linear_attention_2} lets us compute attention over an input sequence of length $n$ in $\mathcal{O}(ndd')$ time and space, while Eq.~\ref{eq:linear_attention_recurrent} lets us compute $n$ new tokens in $\mathcal{O}(ndd')$ time and $\mathcal{O}(dd')$ memory.
+Especially during generation, when softmax attention has to compute new tokens sequentially anyway, Eq.~\ref{eq:linear_attention_recurrent} enables time and memory savings if $d' <$ (prompt length + prior generated tokens).
+\paragraph{Linearizing Transformers.} 
+To combine efficiency with quality, various works propose different $\phi$, (\eg{} $\phi(x) = 1 + \text{ELU}(x)$ as in ~\cite{katharopoulos2020transformers}). However, they typically train linear attention Transformers from scratch. 
+We build upon recent works that \textit{swap} the softmax attentions of \textit{existing} Transformers with linear attention before finetuning the modified models with next-token prediction to recover language modeling quality. 
+These include methods proposed for LLMs~\citep{mercat2024linearizing}, and those for smaller Transformers---\textit{e.g.,} 110M BERTs~\citep{devlin2018bert})---reasonably adaptable to modern LLMs~\citep{kasai-etal-2021-finetuning,mao-2022-fine,zhang2024the}.
+
+
+
+
+\section{Method: Linearizing LLMs with \name{}
+
+\label{sec:method}
+We now study how to build a high-quality and highly efficient linearizing method.
+In Section~\ref{sec:method_framework}, we present our motivating framework,
+which aims to (1) learn good softmax attention approximators with linear attentions and (2) enable low-rank adaptation for recovering linearized quality.
+In Section~\ref{sec:method_study}, we find that while this attention transfer works surprisingly well for low-rank linearizing with existing linear attentions, on certain tasks, it still results in sizable quality gaps compared to prior methods. 
+We also find that attention-transfer quality strongly corresponds with the final linearized model's performance. In Section~\ref{sec:method_new_stuff}, we use our learned findings to overcome prior issues, improving attention transfer to subsequently improve low-rank linearizing quality.
+
+\subsection{A Framework for Low-cost Linearizing}
+\label{sec:method_framework}
+
+In this section, we present our initial \name{} framework for linearizing LLMs in an effective yet efficient manner. Our main hypothesis is that by first learning linear attentions that approximate softmax, we can then swap these attentions in as drop-in subquadratic replacements. We would then only need a minimal amount of subsequent training---\eg{} that is supported by low-rank updates---to recover LLM quality in a cost-effective manner effectively. We thus proceed in two steps.
+
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Parameter-Efficient Attention Transfer.} For each softmax attention in an LLM, we aim to learn a closely-approximating linear attention, \ie{} one that computes attention outputs $\hat{\bm{y}} \approx \bm{y}$ for all natural inputs $\bm{x}$. 
+    We treat this as a feature map learning problem, learning $\phi$ to approximate softmax. For each head and layer, let $\phi_q, \phi_k$ be query, key feature maps. Per head, we compute:
+    \begin{equation}
+        \bm{y}_n = \underbrace{
+    \sum_{i=1}^n \frac{ \exp(\bm{q}_n^\top \bm{k}_i / \sqrt{d})}{\sum_{i=1}^n \exp(\bm{q}_n^\top \bm{k}_i  / \sqrt{d} )} \bm{v}_i
+    }_{\text{Softmax Attention}},\;\;\;\;
+    \hat{\bm{y}}_n = 
+    \underbrace{
+    \sum_{i=1}^n \frac{ \phi_q(\bm{q}_n)^\top \phi_k(\bm{k}_i)}{\sum_{i=1}^n \phi_q(\bm{q}_n)^\top \phi_k(\bm{k}_i) } \bm{v}_i
+    }_{\text{Linear Attention}}
+    \end{equation}
+    for all $n \in [l]$ with input $\in \mathbb{R}^{l \times d}$,
+    and train $\phi_q, \phi_k$ to minimize sample mean squared error (MSE)
+    \begin{equation}
+        \ell_\text{MSE} = \frac{1}{MH}\sum_{m = 1}^M \sum_{h=1}^H
+        \ell_\text{MSE}^{h, m}\;\;,\;\;\;\; 
+        \ell_\text{MSE}^{h, m} = \frac{1}{d} \sum_{n=1}^d (\bm{y}_n - \hat{\bm{y}}_n)^2
+        \label{eq:mse_loss}
+    \end{equation}
+    \ie{} jointly for each head $h$ in layer $m$.
+    Similar to past work~\citep{kasai-etal-2021-finetuning,zhang2024the}, rather than manually design $\phi$, we parameterize each $\phi : \mathbb{R}^{d} \mapsto \mathbb{R}^{d'}$ as a \textit{learnable} layer:
+    \[
+    \phi_q(\bm{q}_n) := f(\bm{q}_n\tilde{\bm{W}}_{(q)} + \tilde{\bm{b}}_{(q)})\;\;,\;\;\;
+    \phi_k(\bm{k}_i) := f(\bm{k}_i\tilde{\bm{W}}_{(k)} + \tilde{\bm{b}}_{(k)})
+    \]
+    Here $\tilde{\bm{W}} \in \mathbb{R}^{d \times d'}$ and $\tilde{\bm{b}} \in \mathbb{R}^{d'}$ are trainable weights and optional biases, 
+    $f(\cdot)$ is a nonlinear activation, and $d'$ is an arbitrary feature dimension (set to equal head dimension $d$ in practice).
+\item \textbf{Low-rank Adjusting.} After training the linearizing layers, we replace the full-parameter training of prior work with low-rank adaptation (LoRA)~\citep{hu2021lora}. 
+Like prior work, to adjust for the modifying layers and recover language modeling quality, we now train the modified LLM end-to-end over tokens to minimize a sample next-token prediction loss
+\(
+\ell_\text{xent} = -\sum \log P_\Theta(\bm{u}_{t+1} \mid \bm{u}_{1:t})
+\).
+Here $P_\Theta$ is the modified LLM, $\Theta$ is the set of LLM parameters, and we aim to maximize the probability of true $\bm{u}_{t+1}$ given past tokens $\bm{u}_{1:t}$ (Fig.~\ref{fig:pull_method}~right). 
+However, rather than train all LLM parameters, we only train the swapped linear attention $\bm{W}_q, \bm{W}_k, \bm{W}_v, \bm{W}_o$ with LoRA. 
+Instead of full-rank updates, $\bm{W}' \leftarrow \bm{W} + \Delta \bm{W}$, LoRA decomposes $\Delta \bm{W}$
+as the product of two low-rank matrices $\bm{B}\bm{A}$, $\bm{B} \in \mathbb{R}^{d \times r}$, $\bm{A} \in \mathbb{R}^{r \times d}$. 
+For parameter efficiency, 
+we aim to pick small $r \ll d$. 
+\end{enumerate}
+
+\textbf{Training footprint and efficiency}. Both steps remain parameter-efficient.
+    For Step 1, optimizing Eq.~\ref{eq:mse_loss} is similar to a layer-by-layer cross-architecture distillation. We compute layer-wise ($\bm{x}, \bm{y}$) as pretrained attention inputs and outputs, using an LLM forward pass over natural language samples (Fig.~\ref{fig:pull_method} middle).
+    However, to keep our training footprint low, we freeze the original pretrained attention layer's parameters and 
+    simply \textit{insert} new $\phi_q, \phi_k$ after $\bm{W}_q, \bm{W}_k$ in each softmax attention (Fig.~\ref{fig:pull_method} left). We compute outputs $\bm{y},\hat{\bm{y}}$ with the same attention weights in separate passes (choosing either Eq.~\ref{eq:causal_attention} or Eq.~\ref{eq:linear_attention_2}; Fig.~\ref{fig:pull_method} middle).  
+    For Llama 3 8B or Mistral 7B, training $\phi_q,\phi_k$ with $d' = 64$ then only takes 32 layers $\times$ 32 heads $\times$ 2 feature maps $\times$ (128 $\times$ 64) weights $\approx$ 16.8M trainable weights (0.2\% of LLM sizes). For Step 2, LoRA with $r=8$ on all attention projections suffices for state-of-the-art quality. This updates just $<$0.09\% of 7B parameters.
+
+\subsection{Baseline Study: Attention Transfer and Low-rank Linearizing}
+\label{sec:method_study}
+
+We now aim to understand if attention transfer and low-rank adjusting are sufficient for linearizing LLMs. 
+It is unclear whether these simple steps can lead to high-quality LLMs, given that 
+prior works default to more involved approaches~\citep{mercat2024linearizing,yang2024parallelizing,wang2024mamba}. They use linearizing layers featuring GroupNorms~\citep{wu2018group} and decay factors~\citep{sun2023retentive}, or alternate SSM-based architectures~\citep{gu2023mamba,dao2024transformers}. They also all use full-LLM training after swapping in the subquadratic layers. 
+In contrast, we find that simple linear attentions \textit{can} lead to viable linearizing, with attention transfer + LoRA obtaining competitive quality on 4~/~6 popular LM Eval tasks. 
+
+\input{sections/figures/method_attn_transfer_curves}
+\begin{table}[t]
+\begin{center}
+\resizebox{0.96\linewidth}{!}{
+\begin{tabular}{@{}ccccccccc@{}}
+\toprule
+& \multicolumn{4}{c}{Llama 3 8B}                                  & \multicolumn{4}{c}{Mistral 7B}                                  \\ 
+\cmidrule(lr){2-5} \cmidrule(lr){6-9}
+  \multicolumn{1}{c}{Attention}                       & \multicolumn{2}{c}{T2R}        & \multicolumn{2}{c}{Hedgehog}   & \multicolumn{2}{c}{T2R}        & \multicolumn{2}{c}{Hedgehog}   \\ \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7} \cmidrule(lr){8-9}
+\multicolumn{1}{c}{Transfer?} & \cellcolor[HTML]{ECF4FF} PPL@0      &  PPL@2/4     & \cellcolor[HTML]{ECF4FF} PPL@0      &  PPL@2/4       & \cellcolor[HTML]{FFDECA}  PPL@0      &  PPL@2/4      & \cellcolor[HTML]{FFDECA} PPL@0      &  PPL@2/4     \\ 
+\cmidrule(lr){1-1}
+\cmidrule(lr){2-3}\cmidrule(lr){4-5} \cmidrule(lr){6-7} \cmidrule(lr){8-9}
+No\; \xmark               & \cellcolor[HTML]{ECF4FF} 1539.39        &  16.05         & \cellcolor[HTML]{ECF4FF} 2448.01        &  9.02          & \cellcolor[HTML]{FFDECA} 2497.13        &  8.85          & \cellcolor[HTML]{FFDECA} 561.47         &  4.87          \\
+Yes\; \cmark               & \cellcolor[HTML]{ECF4FF} \textbf{79.33} & \textbf{4.11} & \cellcolor[HTML]{ECF4FF} \textbf{60.86} &  \textbf{3.90} & \cellcolor[HTML]{FFDECA} \textbf{32.78} &  \textbf{3.29} & \cellcolor[HTML]{FFDECA} \textbf{18.94} &  \textbf{3.04} \\ \bottomrule
+\end{tabular}
+}
+\end{center}
+\caption{\small Alpaca validation set perplexity (PPL) of linearized LLMs, comparing attention transfer, no LoRA adjusting (PPL@0) and PPL after training (PPL@2/4; 2 with attention transfer, 4 without, for equal total steps).
+}
+\label{table:train_efficiency}
+\end{table}
+
+\paragraph{Experimental Setup.} We test the \name{} framework by linearizing two popular base LLMs, Llama 3 8B~\citep{AI_2024} and Mistral 7B v0.1~\citep{jiang2023mistral}. For linearizing layers, we study two feature maps used in prior work (T2R~\citep{kasai-etal-2021-finetuning} and Hedgehog~\citep{zhang2024the}, Table~\ref{table:linear_attentions_def}). 
+To support the rotary positional embeddings (RoPE)~\citep{su2024roformer} in these LLMs, we apply the feature maps $\phi$ after RoPE,\footnote{
+Unlike prior works that apply $\phi$ before RoPE~\citep{mercat2024linearizing, su2024roformer}, our choice preserves the linear attention kernel connection, where we can hope to learn $\phi_q, \phi_k$ for $\exp(\bm{q}_n^\top \bm{k}_i/\sqrt{d}) \approx \phi_q(\bm{q}_n)^\top \phi_k(\bm{k}_i)$. 
+}
+\ie{} computing query features $\phi_q(\bm{q}) = f(\text{RoPE}(\bm{q})\tilde{\bm{W}}_q + \tilde{\bm{b}}))$.
+For linearizing data, we wish to see if \name{} with a small amount of data can recover general zero-shot and instruction-following LLM abilities. We use the 50K samples of a cleaned Alpaca dataset\footnote{\url{https://huggingface.co/datasets/yahma/alpaca-cleaned}}, due to its ability to improve general instruction-following in 7B LLMs despite its relatively small size~\citep{alpaca}. Following~\cite{zhang2024the}, we train all feature maps jointly. 
+We include training code and implementation details in App.
+
+\begin{wraptable}{r}{0.5\textwidth}  % 'r' for right, width 40% of text width
+\centering
+\resizebox{1\linewidth}{!}{
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{@{}lcl@{}}
+\toprule
+Feature Map              & $\phi(\bm{q})$ (same for $\bm{k}$) & Weight Shapes     \\ \midrule
+T2R  & $\text{ReLU}(\bm{q}\tilde{\bm{W}} + \tilde{\bm{b}})$ & 
+$\tilde{\bm{W}}$: (128, 128), $\tilde{\bm{b}}$: (128,) \\
+Hedgehog               & $[\text{SM}_d(\bm{q}\tilde{\bm{W})} \oplus \text{SM}_d(-\bm{q}\tilde{\bm{W})} ]$ &
+$\tilde{\bm{W}}: (128, 64)$ 
+\\ \bottomrule
+\end{tabular}
+}
+\caption{\small \textbf{Learnable feature maps}. Transformer to RNN (T2R) from~\cite{kasai-etal-2021-finetuning}, Hedgehog from~\cite{zhang2024the}, both $\oplus$ (concat) and $\text{SM}_d$ (softmax) apply over feature dimension.}
+\label{table:linear_attentions_def}
+\end{wraptable}
+
+To study the effects of attention transfer and low-rank linearizing across LLMs and linear attention architectures, we evaluate their validation set perplexity (Table~\ref{table:train_efficiency}, Fig.~\ref{fig:train_efficiency}) and downstream LM Eval zero-shot quality (Table~\ref{table:prelim_mmlu}).
+We train both stages with the same data, evaluate with early stopping, and use either two epochs for both attention transfer and LoRA adjusting or four epochs with either alone ($\approx$~40M total training tokens). For LoRA, we use $r = 8$ as a popular default~\citep{hu2021lora}, which results in training 0.2\% of LLM parameter counts. 
+
+\paragraph{Attention Transfer + LoRA Enables Fast LLM Linearizing.} In Table~\ref{table:train_efficiency} and Fig.~\ref{fig:train_efficiency}, we report the validation PPL of linearized LLMs, ablating attention transfer and LoRA adjusting. We find that while attention transfer alone is often insufficient (\textit{c.f.,} PPL@0, Table~\ref{table:train_efficiency}), a single low-rank update rapidly recovers performance by 15--75 PPL (Fig.~\ref{fig:train_efficiency}), 
+where training to approximate softmax leads to up to 11.9 lower PPL than no attention transfer.
+Somewhat surprisingly, this translates to performing competitively with prior linearizing methods that train \textit{all} model parameters~\citep{mercat2024linearizing,wang2024mamba} (within 5 accuracy points on 4~/~6 popular LM Eval tasks; Table~\ref{table:prelim_mmlu}), while \textit{only} training with 0.04$\%$ of their token counts and 0.2\% of their parameter counts. The results suggest we can linearize 7B LLMs at orders-of-magnitude less training costs than previously shown.
+
+\input{sections/figures/method_train_efficiency}
+
+\input{sections/figures/method_problems_llama3}
+\paragraph{\textsc{LoL SAD}: Limitations of Low-Rank Linearizing.} At the same time, we note quality limitations with the present framework. 
+While sometimes close, low-rank linearized LLMs perform worse than full-parameter alternatives and original Transformers on 5~/~6 LM Eval tasks (up to 42.4 points on 5-shot MMLU; Table~\ref{table:prelim_mmlu}). 
+To understand the issue, we study whether the attention transfer stage can produce high-fidelity linear approximations of softmax attention. We note four observations:
+\begin{enumerate}[leftmargin=*]
+    \item Attention transfer quality (via output MSE) strongly correlates with the downstream low-rank linearization quality (Fig.~\ref{fig:mse_vs_ppl}). This suggests that MSE is a useful way to measure quality during attention transfer.
+    \item Larger attention output MSEs coincide with lower softmax attention weight entropies (Fig.~\ref{fig:mse_error_llama3_entropy}). However, prior work shows that lower-entropy distributions are difficult to approximate with linear attentions \citep{zhang2024the}.
+    \item Larger MSEs also heavily concentrate in attention input samples from later layers (Fig.~\ref{fig:mse_error_llama3_layer}). Since the MSE metric is scale-sensitive, the later layers could impact our ability to train the earlier layers, using the simple loss summation across layers in \Cref{eq:mse_loss}.
+    \item The variation in MSE magnitudes increases with model scale. In Tables~\ref{table:mse_blocks_70b} and \ref{table:mse_blocks_405b}, we measure the magnitude of the MSE loss by layer depth at the 70B and 405B scales. The magnitudes range between 0.02~--~48.66 at the 405B scale versus 0.0008~--~2.91 at the 70B scale. 
+\end{enumerate}
+We thus hypothesize we can improve quality by reducing MSE in two ways. 
+First, to approximate samples with lower softmax attention weight entropies---\ie{} ``spikier'' distributions more challenging to capture with linear attentions~\citep{zhang2024the}---we may need better attention-matching architectures. 
+Second, to address the difficulty of learning certain attention layers, we may need more fine-grained layer-wise supervision instead of jointly training all layers, especially for larger models. 
+
+
+
+
+
+
+
+
+\subsection{\name{}: Improved Low-rank Linearizing}
+\label{sec:method_new_stuff}
+We now introduce two simple improvements in architecture (\Cref{sec:method_analogs}) and linearizing procedure (\Cref{sec:method_training}) to improve low-rank linearizing quality. 
+
+\subsubsection{Architecture: Generalizing Learnable Linear Attentions}
+\label{sec:method_analogs}
+As described, we can apply our framework with any linear attentions with learnable $\phi$ (\textit{e.g.}, T2R and Hedgehog, Figure~\ref{fig:train_efficiency}). 
+However, to improve attention-matching quality, we introduce a hybrid $\phi$ parameterization combining linear attention and \textit{sliding window} attention. Motivated by prior works that show quality improvements when combining attention layers with linear attentions~\citep{arora2024simple,Munkhdalai2024-kx}, 
+we combine \textcolor{blue}{short sliding windows} of softmax attention~\citep{beltagy2020longformer,zhu2021long} (size 64 in experiments) followed by linear attention in a single layer. This allows attending to all prior tokens for each layer while keeping the entire LLM subquadratic. For window size $w$ and token indices $[1, \ldots, n-w, \ldots, n]$, we apply the softmax attention over the $w$ most recent tokens, 
+and compute attention outputs $\hat{\bm{y}}_n$ as
+\begin{equation}
+    \hat{\bm{y}}_n =  
+    \frac{ \textcolor{blue}{\sum_{i=n-w+1}^n \gamma \exp(\bm{q}_n^\top \bm{k}_i / \sqrt{d} - \bm{c}_n)\bm{v}_i} + \phi_q(\bm{q}_n)^\top \big( \sum_{j=1}^{n-w}\phi_k(\bm{k}_j)\bm{v}_j^\top \big)}{ \textcolor{blue}{\sum_{i = {n-w+1}}^n\gamma \exp(\bm{q}_n^\top \bm{k}_i / \sqrt{d} - \bm{c}_n)}\; +  \phi_q(\bm{q}_n)^\top \big( \sum_{j=1}^{n-w}\phi_k(\bm{k}_j)^\top \big)} 
+\label{eq:hybrid_linear_swa}
+\end{equation}
+$\gamma$ is a learnable mixing term, and $\bm{c}_n$ is a stabilizing constant as in log-sum-exp calculations ($\bm{c}_n = \max_i\big\{\bm{q}_n^\top \bm{k}_i / \sqrt{d} : i \in [n-w+1, \ldots, n]\big\}$).
+Like before, we can pick any learnable $\phi$.
+\input{sections/figures/method_attn_mse}
+
+\paragraph{Subquadratic efficiency.} The hybrid layer retains linear time and constant memory generation. For $n$-token prompts, we initially require $\mathcal{O}(w^2 d)$ and $\mathcal{O}((n-w)dd')$ time and space for window and linear attention respectively, attending over a $w$-sized KV-cache and computing KV and K-states (Eq.~\ref{eq:linear_attention_recurrent}). 
+For generation, we only need $\mathcal{O}(w^2 d + dd')$ time and space for every token. We evict the KV-cache's first $\bm{k}$, $\bm{v}$, compute $\phi_k(\bm{k})$, and add $\phi_k(\bm{k})\bm{v}^\top$ and  $\phi_k(\bm{k})$ to KV and K-states respectively.
+
+\subsubsection{Training: Layer (or Block)-wise Attention Transfer}
+\label{sec:method_training}
+We describe the \name{} training approach and provide a simplified model to show its cost-quality tradeoffs.
+Based on the limitations of low-rank linearizing identified in the prior section, we perform attention transfer at a block-by-block granularity for the large scale models. The MSE loss function is scale-sensitive and our study showed that the later layers consistently result in larger MSEs  (Fig.~\ref{fig:mse_error_llama3_layer}).
+Thus, instead of computing the training loss (Eq.~\ref{eq:mse_loss}) over
+all $m \in [M]$ for a model with $M$ layers, we compute the loss over $k$-layer blocks, and train each block independently:
+\begin{equation}
+        \ell_\text{MSE}^{\text{block}} = \frac{1}{kH}\sum_{m = i}^{i + k} \sum_{h=1}^H
+        \ell_\text{MSE}^{h, m}\;\;\;\; 
+        (\text{for blocks starting at layers } i = 0, k, 2k, \ldots),
+        \label{eq:mse_loss_blocks}
+    \end{equation}
+where the training data for the block starting at layer $i$ is the hidden states outputted by prior block starting at layer $i-k$, for each sequence in the training corpus. After attention transfer, we arrange the blocks back together in their original order. Like before, we then do end-to-end LoRA finetuning to recover quality.
+
+\begin{wraptable}{r}{0.24\textwidth}  % 'r' for right, width 40% of text width
+\centering
+\resizebox{1\linewidth}{!}{
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{@{}lcl@{}}
+\toprule
+Method              &  $k \times c$  &  PPL\\ \midrule
+Joint          &  126$\times$1  & 4.23 \\
+Block-wise      &  9$\times$14  & 3.21
+\\ \bottomrule
+\end{tabular}
+}
+\caption{\small \textbf{Attention transfer} for Llama 3.1 405B using $c$ blocks of $k$ layers.}
+\label{table:block_wise}
+\end{wraptable}
+
+\paragraph{Tradeoffs between quality and efficiency.} We show that the block-wise approach improves linearization quality at large model scales and improves the user's ability to flexibly balance compute and memory efficiency tradeoffs. We compare (1) \textbf{joint ($k=126$)} training, where we load the full model once and compute the loss as the sum of layer-wise MSEs, and (2) \textbf{block-wise ($k=9$)} training, where we break the model into blocks and train each independently.
+
+For quality, we compare the evaluation perplexity of both the attention transfer approaches, after LoRA fine-tuning on the same subset of RedPajama data. The block-wise and joint approaches perform similarly at the 8B and 70B scales, however, as shown in Table~\ref{table:block_wise}, the block-wise approach performs 1.02 points better than joint attention transfer at the 405B scale. These results support our study in Section~\ref{sec:method_study}, which shows the  variation in MSE magnitudes grows large at the 405B scale. 
+
+Next, for efficiency, we compare the compute and memory use for both methods:
+\begin{itemize}[leftmargin=*]
+    \item Compute: 
+    While the joint training of Llama 3.1 405B in 16-bit precision uses \textit{multiple nodes} (e.g., NVIDIA H100 8$ \times$80GB nodes), an individual block of $k=9$ or fewer layers can be trained on a \textit{single GPU} (e.g., H100 80GB GPU), at sequence length 1024. The block-wise approach is also amenable to using a different training duration (and training data) per block.
+    \item Memory: To train block $i$, we need to save the hidden states from the prior block to disk. The total amount of disk space required is 
+\(
+2 \times T \times d \times \frac{L}{k}
+\)
+for total training tokens $T$, model dimension $d$, number of layers $L$ and 2-byte (16-bit) precision. 
+At the Llama 3.1 405B scale, saving states per-layer ($k=1$) for just $50$M tokens would require over 200TB of disk space, while $k=126$ (joint training) requires no additional disk space for the states.
+\end{itemize}
+
+
+
+
+\section{Experiments}
+
+\label{sec:results}
+
+Through experiments, we study: (1) if \name{} linearizes LLMs with higher quality than existing subquadratic alternatives and linearizations, and higher generation efficiency than original Transformers (Section~\ref{sec:main_results});  (2) how ablations on attention transfer loss, subquadratic architecture, and parameter and token counts impact LLM downstream quality (Section~\ref{sec:results_ablations}); (3) how \name{}' quality and efficiency holds up to 70B and 405B LLMs, where we linearize and compare model quality across the complete Llama 3.1 family (Section~\ref{sec:chungus_amongus}).
+
+\subsection{Main Results: \name{} Efficiently Recovers Quality in Linearized LLMs}
+\label{sec:main_results}
+
+In our main evaluation, we linearize the popular base Llama 3 8B~\citep{AI_2024} and Mistral 7B~\citep{jiang2023mistral} LLMs. We first test if \name{} can efficiently create high-quality subquadratic LLMs from strong base Transformers, comparing to existing linearized LLMs from prior methods. We also test if \name{} can create subquadratic LLMs that outperform modern Transformer alternatives pretrained from scratch. For space, we defer linearizing training details to App.
+
+\input{sections/tables/main_results_linearize}
+
+\input{sections/tables/main_results_v2_local}
+
+In Table~\ref{table:main_results}, we report results on six popular LM Evaluation Harness (LM Eval) tasks~\citep{eval-harness}.
+Compared to recent linearizing methods, \name{} significantly improves quality and training efficiency across tasks and LLMs. On quality, \name{} closes 
+79.8\% and 86.6\%
+of the Transformer-linearizing gap for Mistral 7B and Llama 3 8B respectively, notably improving 5-shot MMLU by 
+60.9\% and 40.9\% 
+over next best fully subquadratic models (17.2 and 9.6 points). On efficiency, we achieve these results while only training $<$0.2\% of model parameters via LoRA versus prior full-parameter training. We also only use 40M tokens versus the prior 20~--~100B (a 500~--~2500$\times$ improvement in ``tokens-to-model'' efficiency).
+Among all 7B LLMs, \name{}-linearized LLMs further outperform strong subquadratic Transformer alternatives, representing RNNs or linear attentions (RWKV-v6~\citep{peng2024eagle}, Hawk, Griffin~\citep{de2024griffin}, TransNormer~\citep{qin2023scaling}), state-space models (Mamba~\citep{gu2023mamba}), and hybrid architectures with some full attention (StripedHyena~\citep{stripedhyena}, Zamba~\citep{glorioso2024zamba}). 
+
+\subsection{\name{} Component Properties and Ablations}
+\label{sec:results_ablations}
+We next validate that \name{} linearizing enable subquadratic efficiency, and study how each of \name{}' components contribute to these linearizing quality gains.
+
+\input{sections/figures/benchmark_efficiency}
+
+\paragraph{Subquadratic Generation Throughput and Memory.} We measure the generation throughput and memory of \name{} LLMs, validating that linearizing LLMs can significantly improve their generation efficiency. We use the popular Llama 3 8B HuggingFace checkpoint\footnote{\url{https://huggingface.co/meta-llama/Meta-Llama-3-8B}}, and compare \name{} implemented in HuggingFace Transformers with the supported FlashAttention-2 (FA2) implementation~\citep{dao2023flashattention}. We benchmark on a single 80GB H100 and benchmark two \name{} implementations with the Hedgehog feature map and (linear + sliding window) attention in FP32 and BF16.
+In Fig.~\ref{fig:generation_throughput} and Fig.~\ref{fig:generation_memory}, we report the effect of scaling batch size on throughput and memory. We measure throughput as $($newly generated tokens $\times$ batch size $/$ total time$)$, using 128 token prompts and 4096 token generations. As batch size scales, \name{}-linearized LLMs achieve significantly higher throughput than FA2. We note this is primarily due to lower memory, where FA2 runs out of memory at batch size 64. Meanwhile, \name{} supports up to 3000 tokens / second with batch size 2048 (Fig.~\ref{fig:generation_throughput}), only maintaining a fixed ``KV state'' as opposed to the growing KV cache in all attention implementations (Fig.~\ref{fig:generation_memory}). 
+
+\paragraph{Ablations.}
+We study how adding the attention transfer and linear + sliding window attention in \name{} contribute to downstream linearized LLM performance, linearizing  Llama 3 8B over 1024-token long samples (Table~\ref{table:main_results_ablations}). We start with standard linear attentions (Hedgehog,~\cite{zhang2024the}; T2R,~\cite{kasai-etal-2021-finetuning}), using the prior linearizing procedure of just swapping attentions and finetuning the model to predict next tokens~\citep{mercat2024linearizing}. We then add either (i) attention transfer, (ii) linear + sliding window attentions, or (iii) both, and report the average LM Eval score over the six popular zero-shot tasks in Table~\ref{table:main_results} and 5-shot MMLU accuracy. Across feature maps, we validate the \name{} combination leads to best performance.
+\input{sections/tables/main_results_ablation_v2}
+
+\subsection{Scaling Up Linearizing to 70B and 405B LLMs}
+\label{sec:chungus_amongus}
+We finally use \name{} to scale up linearizing to Llama 3.1 70B and 405B models. 
+In Table~\ref{table:chungus_results}, we find that \name{} provides the first practical solution for linearizing larger LLMs, achieving significant quality improvements over prior linearizing approaches of swapping in attentions and finetuning~\citep{mercat2024linearizing}. Controlling for the same linear + sliding window layer, for Llama 3.1 70B we achieve a 
+39.0
+point improvement in 5-shot MMLU accuracy. For Llama 3.1 405B, \name{} similarly achieves a 38.3 point improvement. These results highlight \name{}' ability to linearize large-scale models with greater efficiency and improved performance, showing for the first time that we can scale up linearizing to 70B+ LLMs.
+
+\begin{table}[t]
+\begin{center}
+\resizebox{0.99\linewidth}{!}{
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+                       & PiQA           & ARC Easy       & ARC Challenge  & HellaSwag      & WinoGrande     & MMLU (5-shot)  \\ 
+                       & acc            & acc            & (acc norm)     & (acc norm)     & acc            & acc            \\ \midrule
+\rowcolor[HTML]{EFEFEF} 
+Llama 3.1 8B          & 79.87          & 81.52          & 53.58          & 79.01          & 73.48          & 66.11          \\
+Linearized, no attn. transfer & 78.67	& 78.11	& 49.83	& 77.83 & 	68.51 & 	51.44          \\
+
+\name{} (Ours)                & \textbf{80.96} & \textbf{82.37} & \textbf{54.44} & \textbf{79.07} & \textbf{69.69} & \textbf{54.88} \\ \midrule
+
+\rowcolor[HTML]{EFEFEF} 
+Llama 3.1 70B          & 83.10          & 87.30          & 60.60          & 85.00          & 79.60          & 78.80          \\
+
+Linearized, no attn. transfer & 81.99 &	80.89 &	54.44 &	82.29 &	71.19 &	28.74 \\
+\name{} (Ours)                & \textbf{82.10} & \textbf{84.98} & \textbf{60.50} & \textbf{84.62} & \textbf{73.72} & \textbf{67.70} \\ \midrule
+\rowcolor[HTML]{EFEFEF} 
+Llama 3.1 405B         & 85.58          & 87.58          & 66.21          & 87.13          & 79.40          & 82.98          \\
+Linearized, no attn. transfer & 84.44          & 86.62          & 64.33          & 86.19          & 79.87          & 33.86          \\
+\name{} (Ours)                & \textbf{85.58} & \textbf{88.80} & \textbf{67.75} & \textbf{87.41} & \textbf{80.35} & \textbf{72.20} \\ \bottomrule
+\end{tabular}
+}
+\end{center}
+\caption{\textbf{Linearizing Llama 3.1 70B and 405B}. Among the first linearized 70B and 405B LLMs (via low-rank linearizing), \name{} significantly improves zero- and few-shot quality.
+}
+\label{table:chungus_results}
+\end{table}
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+We propose \name{}, an efficient LLM linearizing method that (1) trains attention analogs---such as linear attentions and linear attention + sliding window hybrids---to approximate an LLM's self-attentions, before (2) swapping the attentions and only finetuning the replacing attentions with LoRA. 
+We exploit the fidelity between these attention analogs and softmax attention, where we reduce the problem of linearizing LLMs to learning to approximate softmax attention in a subquadratic analog. 
+Furthermore, we demonstrate that via an MSE-based attention output-matching loss, we \emph{are able} to train such attention analogs to approximate the ``ground-truth'' softmax attentions in practice. 
+On popular zero-shot LM Evaluation harness benchmarks and 5-shot MMLU, we find this enables producing high-quality, high-inference efficiency LLMs that outperform prior Transformer alternatives while only updating 0.2\% of model parameters and requiring 0.003\% of the training tokens to achieve similar quality with LLM pretraining. Our findings significantly improve linearizing quality and accessibility, allowing us to create the first linearized 70B and 405B LLMs. 
+
+\subsubsection*{Limitations and Future Work}
+
+While we focus on studying how to enable high quality yet highly efficient LLM linearizing with simple linear attentions, we note several areas for additional evaluation in both subquadratic capabilities and architectures. On subquadratic capabilities,  by replacing each attention layer alternative, we eliminate the need to manage growing key-value (KV) caches and their associated memory overheads. However, it remains to be seen what kinds of capabilities we can enable with this cheaper inference, \eg{} if linearized models can exploit  quality-improving inference scaling laws suggested by recent works~\citep{brown2024large,snell2024scaling}. Under a different motivation, while layers like linear attention achieve greater efficiency gains over softmax attention  when processing longer contexts, we leave studying how low-rank linearizing applies to such long context scenarios as a motivated direction for future work. Finally, while we stick to ``vanilla'' linear + sliding window attentions in \name{}, many more recent subquadratic architectures improve linear attention quality with additional factors such as decay terms~\citep{sun2023retentive} and additional gating~\citep{yang2023gated}. Studying whether attention transfer and low-rank linearizing can help scale up these additional attention analogs is an interesting line of future work.
+
+\subsubsection*{Ethics Statement}
+
+Our work deals with improving the efficiency of open-weight models. While promising for beneficial applications, increasing their accessibility also raises concerns about potential misuse. Bad actors could leverage our technique to develop LLMs capable of generating harmful content, spreading misinformation, or enabling other malicious activities. We focus primarily on base models, but acknowledge that linearizing could also be used on instruction-tuned LLMs; research on whether linearizing preserves guardrails is still an open question. We acknowledge the risks and believe in the responsible development and deployment of efficient and widely accessible models.
+
+\subsubsection*{Reproducibility}
+
+
+\subsection*{Acknowledgements}
+We thank Mayee Chen, Ben Viggiano, Gautam Machiraju, Dan Fu, Sabri Eyuboglu, Tri Dao, and anonymous reviewers for helpful discussions on linear attention and paper feedback. 
+We gratefully acknowledge the support of NIH under No. U54EB020405 (Mobilize), NSF under Nos. CCF2247015 (Hardware-Aware), CCF1763315 (Beyond Sparsity), CCF1563078 (Volume to Velocity), and 1937301 (RTML); US DEVCOM ARL under Nos. W911NF-23-2-0184 (Long-context) and W911NF-21-2-0251 (Interactive Human-AI Teaming); ONR under Nos. N000142312633 (Deep Signal Processing); Stanford HAI under No. 247183; NXP, Xilinx, LETI-CEA, Intel, IBM, Microsoft, NEC, Toshiba, TSMC, ARM, Hitachi, BASF, Accenture, Ericsson, Qualcomm, Analog Devices, Google Cloud, Salesforce, Total, the HAI-GCP Cloud Credits for Research program,  the Stanford Data Science Initiative (SDSI), and members of the Stanford DAWN project: Meta, Google, and VMWare. The U.S. Government is authorized to reproduce and distribute reprints for Governmental purposes notwithstanding any copyright notation thereon. Any opinions, findings, and conclusions or recommendations expressed in this material are those of the authors and do not necessarily reflect the views, policies, or endorsements, either expressed or implied, of NIH, ONR, or the U.S. Government.
+
+
+
+
+

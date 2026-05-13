@@ -1,8 +1,8 @@
 # The Directionality of Optimization Trajectories in Neural Networks
 
 - Decision: Accept
-- Avg Score: 3.60
-- Scores: 1, 0, 6, 8, 3
+- Avg Score: 6.75
+- Scores: 10, 6, 8, 3
 
 ## Abstract
 The regularity or implicit bias in neural network optimization has been typically studied via the parameter norms or the landscape curvature, often overlooking the trajectory leading to these parameters. However, properties of the trajectory --- particularly its directionality --- capture critical aspects of how gradient descent navigates the landscape to converge to a solution. In this work, we introduce the notion of a Trajectory Map and derive natural complexity measures that highlight the directional characteristics of optimization trajectories. Our comprehensive analysis across vision and language modeling tasks reveals that (a) the trajectory's directionality at the macro-level saturates by the initial phase of training, wherein weight decay and momentum play a crucial but understated role; and (b) in subsequent training, trajectory directionality manifests in micro-level behaviors, such as oscillations, for which we also provide a theoretical analysis. This implies that neural optimization trajectories have, overall, a more linear form than zig-zaggy, as evident by high directional similarity, especially towards the end. To further hone this point, we show that when the trajectory direction gathers such an inertia, optimization proceeds largely unaltered even if the network is severely decapacitated (by freezing >99% of the parameters), --- thereby demonstrating the potential for significant computational and resource savings without compromising performance.

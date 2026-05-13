@@ -1,0 +1,588 @@
+\title{SCAN: Bootstrapping Contrastive Pre-training for Data Efficiency}
+
+\begin{abstract}
+While contrastive pre-training is widely employed, its data efficiency problem has remained relatively under-explored thus far.
+Existing methods often rely on static coreset selection algorithms to pre-identify important data for training.
+However, this static nature renders them unable to dynamically track the data usefulness throughout pre-training, leading to subpar pre-trained models.
+To address this challenge, our paper introduces a novel dynamic bootstrapping dataset pruning method.
+It involves pruning data preparation followed by dataset mutation operations, both of which undergo iterative and dynamic updates.
+We apply this method to two prevalent contrastive pre-training frameworks: \textbf{CLIP} and \textbf{MoCo}, representing vision-language and vision-centric domains, respectively.
+In particular, we individually pre-train seven CLIP models on two large-scale image-text pair datasets, and two MoCo models on the ImageNet dataset, resulting in a total of 16 pre-trained models.
+With a data pruning rate of 30-35\% across all 16 models, our method exhibits only marginal performance degradation (less than \textbf{1\%} on average) compared to corresponding models trained on the full dataset counterparts across various downstream datasets, and also surpasses several baselines with a large performance margin.
+Additionally, the byproduct from our method, \ie coresets derived from the original datasets after pre-training, also demonstrates significant superiority in terms of downstream performance over other static coreset selection approaches.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large models are heavily data-driven, particularly in the realm of pre-training~\cite{mocov2, mocov3, clip}.
+This paradigm has been widely underpinned by the scaling law~\cite{scaling2, scaling}, which suggests that more data often lead to reduced generalization errors.
+However, using large quantities of data frequently results in a notable increase in carbon footprints.
+Addressing this pressing issue requires substantial efforts to optimize the data training efficiency.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.75\linewidth]{imgs/teaser.pdf} 
+    \caption{The interplay between training data size and model downstream performance of base model CLIP, our method SCAN, and two SoTA baselines.
+    } \label{fig:teaser}
+\end{figure}
+
+This paper delves into the data efficiency problem for contrastive pre-training.
+Despite the pervasiveness of contrastive pre-training across both vision-centric~\cite{mocov2, mocov3} and vision-language~\cite{align, clip} domains, nevertheless, the data efficiency issue has received scant attention in the existing literature.
+We attribute the reason for this fact to two challenges. 
+\textbf{I}- Absence of reliable labels for self-supervised learning objectives.
+Unlike in supervised learning, where explicit labels aid in class prediction, self-supervised learning in contrastive pre-training operates without such guidance, making it unable to estimate the class probability of data samples such as EL2N~\cite{graNd}.
+\textbf{II}- Extensive data scale due to easy accessibility, \eg the interleaved image-text data from the web~\cite{clip}.
+Current datasets usually comprise millions~\cite{cc12m, cc3m} or even billions of samples~\cite{laion-5b}.
+It is thus intractable in time for methods employing gradients~\cite{graNd} or second derivative (Influence Functions)~\cite{influencefunc} to evaluate data usefulness individually.
+Recent approaches in the vision-language area have resorted to coreset selection algorithms~\cite{coreset} for a reduced pre-training dataset beforehand~\cite{semdedup, message-passing, sieve, tldr, laion2b}.
+The crux of these methods lies in the semantic match/duplication that is quantified by some proxy metrics like CLIP matching score~\cite{clip}. 
+Consequently, a subset, namely a coreset, of the original dataset is filtered for pre-training from scratch.
+
+Our motivation for this work is inspired by the advancement in dynamic sparse training (DST)~\cite{sparse1, sparse2, sparse3}, which dynamically prunes less influential learnable weights from models.
+Compared to its static sparse training counterparts~\cite{static-sparse1, static-sparse2}, DST demonstrates notable strengths in performance, robustness, and model compression without the need for over-parameterization~\cite{over-param, sparse1}.
+Intriguingly, we recognize that recent coreset selection algorithms predominantly adhere to the static approach, akin to the fixed weight masks employed in static sparse networks~\cite{static-sparse1}.
+As a result, we argue that these coreset-based dataset pruning methods are subject to similar limitations as previous static sparse training ones, albeit with a shift in application scope from learnable weights to individual data samples.
+Given this context, approaching the dataset pruning challenge can be easily decomposed into two sub-problems:
+\textbf{1})- \textbf{metric identification} and \textbf{2})- \textbf{pruning strategy design}.
+Specifically, the proxy metric should meet several conditions: dynamic adaptability, quick obtainability (with minimal additional cost), and reflecting the learning status of each sample.
+Regarding the pruning strategy, we introduce a novel data bootstrapping algorithm named \textbf{SCAN}.
+Instead of employing a consistent pruning ratio throughout training, our SCAN approach identifies and eliminates data from less important subsets in a bootstrapping manner.
+These two operations from our SCAN method are performed iteratively for stable pre-training.
+We validate the effectiveness of the proposed method with widely used contrastive pre-training frameworks in both vision-language (\textbf{CLIP}~\cite{openclip, clip}) and vision-centric (\textbf{MoCo}~\cite{mocov2, mocov3}) domains.
+The pre-training datasets for CLIP include CC3M~\cite{cc3m}, MSCOCO~\cite{coco}, SBU-Captions~\cite{sbu}, and CC12M~\cite{cc12m}, forming two groups of datasets with different scales.
+On the other hand, we pre-train MoCo models using the ImageNet Dataset~\cite{imagenet}.
+Moreover, we employ various downstream datasets, including ImageNet~\cite{imagenet}, CIFAR-10, and CIFAR-100~\cite{cifar}, along with out-of-distribution datasets such as ImageNet-R~\cite{imagenet-r} and ImageNet V2~\cite{imagenetv2}. 
+Our evaluation protocols encompass full fine-tuning, linear probing, and zero-shot testing on ImageNet. 
+Within the CLIP framework, we evaluate seven models covering ResNet~\cite{resnet}, ViT~\cite{vit}, and Swin Transformer~\cite{swin}. 
+As for MoCo, due to resource constraints, we use two popular ViT models~\cite{deit} in the experiments.
+Our experimental results, partially depicted in Fig.~\ref{fig:teaser}, exhibit that SCAN achieves a significant trade-off between training data size and downstream model performance as compared to several baselines~\cite{semdedup, info-batch, d-pruning}.
+We include the code in the supplementary material for the reproduction of our results.
+
+To the best of our knowledge, we are the first to comprehensively study the data efficiency problem within the context of contrastive pre-training.
+Our work not only introduces an effective bootstrapping approach but also is able to produce a static coreset (a smaller dataset) that outperforms other static coreset selection methods~\cite{semdedup, d-pruning} by a large performance margin on diverse downstream image classification datasets.
+These contributions enable our work to hold a positive promise for the efficient utilization of data in contrastive pre-training, thereby potentially reducing more computational overhead and carbon footprints.
+
+
+\section{Related Work}
+
+\noindent \textbf{Dataset Pruning and Distillation} represent two common approaches to enhancing dataset efficiency during training.
+The former aims to synthesize a smaller dataset that achieves test performance similar to a full dataset when using the same model~\cite{dist-more-times, sequential-dist, mutual-info, diversity-dataset-prune}.
+Recent advancements in this area have leveraged techniques such as mutual information~\cite{mutual-info}, frequency domain transformation~\cite{frequency-dist}, and multi-stage generation~\cite{dist-more-times} to craft datasets that exhibit enhanced performance.
+Two notable limitations are inherent in these methods:
+I) The generalization capability is significantly constrained due to the reliance on distillation from a specific dataset and model, \eg the use of ResNet~\cite{resnet}.
+II) The dataset sizes utilized for comparison are frequently confined to small-scale datasets such as CIFAR~\cite{cifar} and Tiny-ImageNet~\cite{tinyimage}.
+In contrast, dataset pruning is employed to directly filter a smaller subset from the original dataset~\cite{text-prune, beyond-scaling}.
+Typically, previous methods involve initially learning an indication score, which serves as a basis for identifying and subsequently removing data samples falling below or above a certain threshold.
+For image classification tasks, prevailing methods often utilize gradient~\cite{graNd}, loss value~\cite{info-batch}, and second derivative~\cite{influencefunc} as the indicator.
+More recently, efforts have emerged focusing on pruning vision-language pre-trained datasets~\cite{inverse-clip, up-dp-prune, tldr, cit-prune, demyst-clip, addition-1, addition-2}.
+The key idea is to construct a coreset by identifying the semantic mismatch/duplication, a process facilitated by often using a pre-trained CLIP model~\cite{clip-retrieval, clip}.
+
+\begin{figure*}[t!]
+  \centering
+  \includegraphics[width=0.82\linewidth]{imgs/model.pdf}
+  \caption{Overall pipeline of the proposed SCAN method.
+  We begin by identifying a substantial portion of data samples as \textcolor{cap_blue}{pruning candidates}. 
+  Subsequently, a subset of these candidates is employed for pruning based on varying \textcolor{cap_red}{mutation ratios} that are gradually increased (bootstrapping).
+  After \textcolor{cap_brown}{growing back} to the original full dataset, the above two operations are iterated for another round.
+  }\label{fig:model}
+\end{figure*}
+
+\noindent \textbf{Contrastive Pre-Training} has garnered wide attention as a technique for pre-training versatile models applicable to a range of downstream tasks~\cite{simCSE}.
+Its fundamental principle involves bringing the embeddings of positive pairs closer while simultaneously pushing away negative ones.
+Traditional approaches within the vision-centric domain often build positive samples by leveraging alternative views of the anchor sample, as exemplified by approaches like SimCLR~\cite{simCLR, simCLRv2} and MoCo~\cite{mocov2, mocov3}.
+Benefiting from the advancement of transformer architectures~\cite{vit, transformer}, recent endeavors have shifted towards patch masking followed by subsequent recovery~\cite{beit, dino, maskAE}.
+Contrastive learning has achieved notable success in vision-language per-training as well~\cite{align, clip}.
+The alignment of modalities has propelled significant advancements in downstream multi-modal tasks, including visual question answering~\cite{VQA1, vqa2} and cross-modal retrieval~\cite{retrieval1, coco}. 
+Our study specifically targets the data efficiency challenge within CLIP and MoCo, which serve as prominent representatives of vision-language and vision-centric doamins, respectively.
+
+\noindent \textbf{Dynamic Sparse Training (DST).}
+Unlike earlier static sparse training methodologies~\cite{static-sparse1, static-sparse2}, DST learns a sparse neural network by pruning weights and growing them back throughout the training process.
+The weight importance is typically quantified using metrics such as magnitude~\cite{RigL, SET}, gradients~\cite{sparse2}, or sensitivity~\cite{Sensitivity}.
+The demonstrated superiority of DST over its static counterpart inspires us to design a dynamic approach for dataset pruning, especially considering that recent coreset-based methods predominantly adhere to fixed pruning strategies. 
+Furthermore, the well-developed DST methods provide additional hints for devising our dataset pruning strategy.
+
+
+\section{Method}
+
+\subsection{Background of Contrastive Pre-Training}
+Contrastive pre-training necessitates the utilization of both positive and negative pairs of samples, be it alternative views of an image~\cite{mocov2, mocov3} or combinations of image and text~\cite{align, clip}.
+Its objective is to bring positive pairs closer in the embedding space while pushing negative ones away.
+At its core is the InfoNCE loss~\cite{infoNCE}, defined as,
+\begin{equation} \label{eqn:contrast}
+    \mathcal{L}_{f \rightarrow g} = -\frac{1}{|\mathcal{D}_t|} \sum_{i=1}^{|\mathcal{D}_t|} \log \frac{\exp(f(I_i)^T g(T_i) / \tau)}{\sum_{j=1}^{|\mathcal{D}_t|} \exp (f(I_i)^T g(T_j) / \tau)},
+\end{equation}
+where $\tau$ is a learnable temperature, $I_i$ and $T_j$ respectively denote the sampled image and text from the batched examples $\mathcal{D}_t$; while $f$ and $g$ represent the image and text encoders, respectively.
+Likewise, we can obtain the loss from the other direction $\mathcal{L}_{g \rightarrow f}$ as well.
+The overall training loss is then computed as the mean of $\mathcal{L}_{f \rightarrow g} + \mathcal{L}_{g \rightarrow f}$.
+Without loss of generality, we take the contrastive learning utilized in CLIP as an example~\cite{clip}.
+The application in other approaches such as MoCo~\cite{mocov3} can be straightforwardly extrapolated.
+
+\textbf{Motivation.}
+Contrastive pre-training often demands large-scale data to learn a versatile model.
+For instance, the original CLIP pre-training uses 400M image-text pairs sourced from the web~\cite{clip}, while recent studies push these limits to datasets containing billions of samples~\cite{laion-5b, coca}.
+Accordingly, the introduced footprint and storage cost present significant challenges for researchers.
+To address this issue, we propose a novel boot\textbf{S}trapping \textbf{C}ontr\textbf{A}stive Pre-trai\textbf{N}ing method (\textbf{SCAN}), to dynamically, efficiently, and effectively leverage smaller dataset for pre-training\footnote{The name itself reflects our method's capability to \emph{scan} all data samples, identifying those that should be eliminated from further pre-training.}.
+\subsection{SCAN Overview}
+Our proposed SCAN method involves a two-step operation.
+Specifically, our \textbf{first} step entails identifying a proxy metric that is dynamically adaptable, easily obtainable, and capable of tracing the learning status of each sample.
+We abandon the use of gradients as done in related domains~\cite{graNd}, given the substantially increased compute overhead incurred for individual samples\footnote{The data size in contrastive pre-training is notably larger than in other related domains.}.
+Instead, we opt for the loss value as the reliable indicator as it meets the above conditions.
+Under this context, we disentangle the loss in Eqn.~\ref{eqn:contrast} to obtain a loss set $\bar{\mathcal{L}}_{f \rightarrow g} = \{\bar{\mathcal{L}}_{f \rightarrow g}^{(1)}, \bar{\mathcal{L}}_{f \rightarrow g}^{(2)}, ..., \bar{\mathcal{L}}_{f \rightarrow g}^{(|\mathcal{D}_t|)}\}$, with each element corresponding to the loss value of one data sample. 
+
+The \textbf{second} core step is to determine the pruning strategy.
+Addressing sparsity within the dataset pruning study presents a substantial challenge.
+To approach this, we propose a pruned data preparation and then a dataset mutation approach.
+Specifically, in the pruned data preparation stage, candidate data samples that are potentially less important are selected. 
+Thereafter, in the dataset mutation stage, samples are gradually bootstrapped for pruning across epochs. 
+These two stages iterate through several rounds until the completion of pre-training.
+\subsection{Bootstrapping Dataset Pruning}
+Unlike conventional approaches that use the full dataset for pre-training, we vary the training data size for each epoch. 
+As illustrated in Fig.~\ref{fig:model}, an example case utilizes 1.0, \sfrac{6}{9}, \sfrac{4}{9}, and \sfrac{2}{9} of the full dataset for four consecutive training epochs, resulting in an average dataset pruning ratio of $\sim$40\%.
+We provide more details regarding the algorithm in the supplementary material.
+\subsubsection{Pruning Data Preparation} \label{sec:preparation}
+We opt to utilize the loss values of in-batch samples rather than those from the entire dataset for candidate selection.
+This decision is based on two facts:
+1) Comparing InfoNCE losses across batches holds less significance compared to supervised learning, as the instance loss varies drastically with respect to the randomly selected batched samples.
+2) Saving the losses for the entire dataset incurs more computational storage compared to in-batch ones.
+
+Additionally, existing coreset selection approaches~\cite{clip-score, laion-400M} from the vision-language domain typically focus only on pruning \textit{ill-matched} samples.
+These are characterized by image-text pairs indicating less semantic alignment, where, for example, the text inadequately describes the content of the paired image.
+However, we posit that beyond these ill-matched samples, there also exist samples that are \textit{redundant}. 
+These redundant samples are effectively memorized during the early stages of training and are less likely to be forgotten with further training iterations~\cite{memorize}.
+In view of this, we can safely eliminate these redundant data as training progresses.
+
+To operationalize the above ideas, given a pruning ratio $\rho$, we separately identify the \textit{ill-matched} and \textit{redundant} set of data using:
+\begin{equation} \label{eqn:preparation}
+\begin{cases}
+    \mathcal{D}_{t}^{red} &= \mathcal{D}_{t:i}, \quad i \in {}_{\prec \rho}\bar{\mathcal{L}}_{f \rightarrow g},\\
+    \mathcal{D}_{t}^{ill} &= \mathcal{D}_{t:j}, \quad j \in {}_{\succ \rho}\bar{\mathcal{L}}_{f \rightarrow g},
+\end{cases}
+\end{equation}
+where ${}_{\prec \rho}\bar{\mathcal{L}}_{f \rightarrow g}$ denotes the indices of the $\rho$ smallest values of $\bar{\mathcal{L}}_{f \rightarrow g}$ (the loss set before loss summation and backpropagation).
+We then obtain the \textit{redundant} subset $\mathcal{D}_{t}^{red}$ by selecting data samples according to these indices from the original full in-batch set $\mathcal{D}_t$.
+This approach is driven by the intuition that small losses often denote effective data memorization by the given model.
+On the other hand, we can also identify the \textit{ill-matched} subject $\mathcal{D}_{t}^{ill}$ from the $\rho$ largest loss values using ${}_{\succ \rho}\bar{\mathcal{L}}_{f \rightarrow g}$.
+This is because large losses are usually associated with small cosine similarities~\cite{clip-score}, indicating a \textit{poor match} between image and text pairs.
+The final candidate subset is formed by the union of these two: $\mathcal{D}_{t}^{'} = \mathcal{D}_{t}^{red} \, | \, \mathcal{D}_{t}^{ill}$.
+
+Thereafter, we merge the subset intersection from $\mathcal{L}_{f \rightarrow g}$ and $\mathcal{L}_{g \rightarrow f}$.
+In total, we obtain $2\rho |\mathcal{D}_t|$ candidates for the current batched samples, which amounts to twice the size of the expected pruned data, as will be explained in the next section.
+At last, we iterate through all training data to have the final candidate pruning subset $\mathcal{D}^{'}$.
+
+\noindent \textbf{Preparation Warm-up.}
+It is intuitive that the model's learning capability may exhibit instability during the early training iterations.
+To mitigate this issue, we design a warm-up strategy~\cite{warmup}, wherein the full dataset is utilized for training during the first several epochs.
+We track the average epoch-wise loss to determine the optimal timing for initiating pruning.
+Specifically, we calculate the difference between the loss from the previous epoch $\mathcal{L}_{pre}^{'}$ and the current epoch $\mathcal{L}_{cur}^{'}$, and compare it against a pre-defined threshold value $T_{td}$.
+If the condition $(\mathcal{L}_{pre}^{'} - \mathcal{L}_{cur}^{'})  / (\mathcal{L}_{pre}^{'} + \epsilon) \geq T_{td}$ holds true, where $\epsilon$ is infinitesimal and is introduced to prevent overflow, it indicates relative stability in the pre-training process. 
+Consequently, we can then start the \emph{pruning data preparation} from this pre-training epoch.
+\subsubsection{Dataset Mutation}
+Rather than employing a static pruning ratio consistently throughout training, we advocate for a bootstrapping dataset mutation approach. 
+The benefits of this methodology are shown in Sect.~\ref{sec:overall-exp}. 
+Additionally, we refrain from performing the \textbf{pruning data preparation} solely once, as further training iterations may alter the matching and redundancy characteristics of data samples.
+
+Specifically, we regenerate the candidate pruning data from scratch every $(\tau_{cos} + 1)$ epochs as detailed in Sect.~\ref{sec:preparation}. 
+Subsequently, we adapt the cosine annealing strategy~\cite{cos-anneal} to determine the current pruning ratio $\rho_{cur}$ using:
+\begin{equation} \label{eqn:ratio}
+    \rho_{cur} = \frac{1}{2} (1 + \cos ((\tau_{cos} - (\tau_{cur} \, \text{mod} \, (\tau_{cos} + 1))) \frac{\pi}{\tau_{cos}}).
+\end{equation}
+It can be easily seen that the pruning ratio $\rho_{cur}$ gradually and periodically increases with larger training epoch $\tau_{cur}$.
+We can then randomly select $\rho_{cur} |\mathcal{D}^{'}|$ samples from $\mathcal{D}^{'}$ for pruning -- $\mathcal{D}_{\rho}^{'}$.
+During this training epoch, batched instances $\mathcal{D}_t$ are sampled from the reduced dataset $\mathcal{D} \setminus\mathcal{D}_{\rho}^{'}$, which are then employed for pre-training using contrastive learning  (Eqn.~\ref{eqn:contrast}).
+This bootstrapping process provides us with robust estimates regarding data samples and enables us to refrain from making strict assumptions about the underlying distribution of the data~\cite{bootstrap2, bootstrap1}.
+
+In each iterative round, where $\rho_{cur}$ increases from 0 to $2\rho$ (where 0 corresponds to the pruned data preparation epoch), the average pruning ratio remains fixed at $\rho$ as predefined.
+Finally, we grow back to the original full dataset for another round of pruning data preparation and mutation (Fig.~\ref{fig:model}).
+
+\begin{table*}[t!]
+    \centering
+    \caption{Performance comparison of CLIP models on the \textbf{CC12M+} pre-trained datasets.
+    \grey{CLIP} utilizes \textbf{10.1M} pre-trained data samples, while the remaining models use \textbf{7.1M}.
+    The best results (excluding the original \grey{CLIP} model) are highlighted in \textbf{bold}. 
+    A dash (-) indicates the collapse of pre-training, resulting in impaired evaluation of downstream tasks.
+    } 
+    \scalebox{0.92}{
+    \begin{tabular}{l|l|cc|cc|ccc}
+    \toprule
+    \multirow{2}{*}{Architecture}   & \multirow{2}{*}{Method}   & \multicolumn{2}{c|}{IN Zero-Shot} & \multirow{2}{*}{CIFAR10}  & \multirow{2}{*}{CIFAR100} & \multirow{2}{*}{IN}    & \multirow{2}{*}{IN-V2} &\multirow{2}{*}{IN-R} \\
+    \cmidrule(lr){3-4}
+                                    &                           & Top-1     & Top-5                 &                           &                           &                           &               & \\
+    \midrule
+    \multirow{6}{*}{RN101}          & \grey{CLIP}               & \grey{18.78}  & \grey{41.14}  & \grey{95.96}  & \grey{82.13}  & \grey{75.76}  & \grey{64.31}  & \grey{40.57} \\
+    \cmidrule(lr){2-9}
+                                    & Random                    & 14.05         & 30.60         & 95.02         & 78.34         & 73.99         & 60.27         & 36.13     \\
+                                    & SemDeDup~\cite{semdedup}  & 13.26         & 29.70         & 95.07         & 78.77         & 74.24         & 62.16         & 37.65     \\
+                                    & D-Pruning~\cite{d-pruning}& 12.59         & 28.62         & 94.94         & 78.89         & 74.07         & 61.30         & 37.07     \\
+                                    & Info-Batch~\cite{info-batch}& 21.60       & 41.11         & 96.04         & 81.60         & 75.21         & 63.27         & 39.34      \\
+    \cmidrule(lr){2-9}
+                                    & SCAN                      & \bf{23.10}    & \bf{47.52}    & \bf{96.08}    & \bf{82.28}    & \bf{75.66}    & \bf{63.75}    & \bf{40.10} \\   
+    \midrule
+    \multirow{6}{*}{ViT-B/32}       & \grey{CLIP}               & \grey{24.62}  & \grey{49.10}  & \grey{95.62}  & \grey{82.11}  & \grey{63.40}  & \grey{49.97}  & \grey{31.09}  \\
+    \cmidrule(lr){2-9}
+                                    & Random                    & 09.12         & 21.09         & 90.13         & 69.98         & 51.99         & 41.01         & 20.08       \\
+                                    & SemDeDup~\cite{semdedup}  & 06.47         & 16.71         & 90.83         & 70.03         & 52.21         & 39.75         & 20.99     \\
+                                    & D-Pruning~\cite{d-pruning}& 06.27         & 15.88         & 90.11         & 69.69         & 51.72         & 38.66         & 20.42     \\
+                                    & Info-Batch~\cite{info-batch}& -           & -             & -             & -             & -             & -             & -             \\
+    \cmidrule(lr){2-9}
+                                    & SCAN                      & \bf{26.12}    & \bf{50.67}    & \bf{95.41}    & \bf{81.16}    & \bf{61.55}    & \bf{48.73}    & \bf{29.23} \\ 
+    \midrule
+    \multirow{6}{*}{ViT-B/16}       & \grey{CLIP}               & \grey{23.43}  & \grey{47.71}  & \grey{96.76}  & \grey{84.25}  & \grey{72.30}  & \grey{59.39}  & \grey{33.50}  \\
+    \cmidrule(lr){2-9}
+                                    & Random                    & 14.45         & 32.41         & 94.35         & 76.45         & 67.09         & 54.38         & 27.07      \\
+                                    & SemDeDup~\cite{semdedup}  & 11.58         & 26.01         & 94.18         & 76.71         & 67.22         & 53.78         & 27.19     \\
+                                    & D-Pruning~\cite{d-pruning}& 10.00         & 23.72         & 93.82         & 75.96         & 66.68         & 53.13         & 26.23    \\
+                                    & Info-Batch~\cite{info-batch}& 22.12       & 42.30         & 96.03         & 81.69         & 71.46         & 56.35         & 31.13   \\
+    \cmidrule(lr){2-9}
+                                    & SCAN                      & \bf{24.71}    & \bf{49.12}    & \bf{96.13}    & \bf{83.71}    & \bf{71.78}    & \bf{58.58}    & \bf{32.45}     \\  
+    \bottomrule
+    \end{tabular}
+    }
+    \label{tab:clip-12m}
+\end{table*}
+
+\subsection{Time-Efficiency of SCAN} 
+In fact, our proposed SCAN method introduces negligible additional pre-training time in comparison to each base model.
+The potentially increased time involves three major steps: metric selection, pruned data preparation, and pruned data retrieval.
+Since we directly utilize individual loss values, the metric selection step does not impose an additional time overhead.
+Second, we obtain the candidate pruned data from in-batch samples, typically containing only a few thousand data points, thereby enabling a fast sorting process.
+Last, retrieving from millions of pruned data sets also leads to negligible costs, as evidenced by our empirical observations.
+
+More importantly, we maintain consistency in the number of training epochs for our SCAN model, aligning it with the epochs utilized by each respective base model. 
+This approach ensures time efficiency within our proposed method, as demonstrated in Sect.~\ref{sec:time-efficient}.
+
+\begin{table}[b!]
+    \centering
+    \caption{Performance comparison of MoCo models.
+     \grey{MoCo} utilizes \textbf{1.28M} pre-trained data, while the remaining models use \textbf{0.83M}.
+    The best results (excluding the original \grey{MoCo} model) are highlighted in \textbf{bold}.
+    } 
+    \scalebox{0.88}{
+    \begin{tabular}{l|l|cc|cc}
+    \toprule
+    \multirow{2}{*}{Arc}            & \multirow{2}{*}{Method}   & \multicolumn{2}{c|}{ImageNet}         & \multicolumn{2}{c}{CIFAR-100}     \\
+                                                                \cmidrule(lr){3-4}                      \cmidrule(lr){5-6}
+                                    &                           & Top-1             & Top-5             & Top-1         & Top-5             \\
+    \midrule
+    \multirow{4}{*}{ViT-S/16}       & \grey{MoCo~\cite{mocov3}} & \grey{78.48}      & \grey{94.17}      & \grey{86.02}  & \grey{97.85}      \\
+    \cmidrule(lr){2-6}
+                                    & Random                    & 75.38             & 91.18             & 84.00         & 95.59             \\
+                                    & Info-Batch~\cite{info-batch}& 77.99           & 93.45             & 85.51         & 97.49      \\
+    \cmidrule(lr){2-6}
+                                    & SCAN                      & \bf{78.58}        & \bf{94.19}        & \bf{86.01}    & \bf{97.53}          \\   
+    \midrule
+    \multirow{4}{*}{ViT-B/16}       & \grey{MoCo~\cite{mocov3}} & \grey{79.53}      & \grey{94.49}      & \grey{88.31}  & \grey{98.04}   \\
+    \cmidrule(lr){2-6}
+                                    & Random                    & 75.28             & 91.01             & 85.99         & 97.02      \\
+                                    & Info-Batch~\cite{info-batch}& 78.46           & 94.18             & 87.69         & 97.70                   \\
+    \cmidrule(lr){2-6}
+                                    & SCAN                      & \bf{79.15}        & \bf{94.33}        & \bf{88.11}    & \bf{97.78}         \\ 
+    \bottomrule
+    \end{tabular}
+    }
+    \label{tab:moco}
+\end{table}
+
+
+
+\section{Experiments}
+
+
+\begin{table*}[t!]
+    \centering
+    \caption{Performance comparison of CLIP models on the \textbf{CC3M+} pre-trained datasets. 
+    \grey{CLIP} utilizes \textbf{4.1M} pre-trained data samples, while the remaining models use \textbf{2.9M}.
+    The best results (excluding the original \grey{CLIP} model) are highlighted in \textbf{bold}. 
+    A dash (-) indicates the collapse of pre-training, resulting in impaired evaluation of downstream tasks.
+    } 
+    \scalebox{0.92}{
+    \begin{tabular}{l|l|cc|cc|ccc}
+    \toprule
+    \multirow{2}{*}{Architecture}   & \multirow{2}{*}{Method}   & \multicolumn{2}{c|}{IN Zero-Shot} & \multirow{2}{*}{CIFAR10}  & \multirow{2}{*}{CIFAR100} & \multirow{2}{*}{IN}    & \multirow{2}{*}{IN-V2} &\multirow{2}{*}{IN-R} \\
+    \cmidrule(lr){3-4}
+                                    &                           & Top-1     & Top-5                 &                           &                           &                           &               & \\
+    \midrule
+    \multirow{6}{*}{RN101}          & \grey{CLIP}               & \grey{15.72} & \grey{35.19}       & \grey{96.17}              & \grey{81.78}              & \grey{75.39}  & \grey{63.42} & \grey{39.69} \\
+    \cmidrule(lr){2-9}
+                                    & Random                    & 12.35     & 29.03                 & 95.01                     & 78.99                     & 73.73         & 61.01         & 36.11         \\
+                                    & SemDeDup~\cite{semdedup}  & 12.97     & 28.90                 & 95.16                     & 79.44                     & 74.08         & 61.94         & 36.74         \\
+                                    & D-Pruning~\cite{d-pruning}& 12.77     & 28.03                 & 94.85                     & 78.23                     & 73.55         & 61.56         & 36.48         \\
+                                    & Info-Batch~\cite{info-batch}& \bf{16.79}& 34.38               & 95.49                     & 80.89                     & 74.48         & 62.11         & 38.01     \\
+    \cmidrule(lr){2-9}
+                                    & SCAN                      & 15.59     & \bf{34.77}            & \bf{95.77}                & \bf{81.95}                & \bf{74.61}    & \bf{62.92}    & \bf{38.05}       \\   
+    \midrule
+    \multirow{6}{*}{ViT-B/16}       & \grey{CLIP}               & \grey{18.17}  & \grey{37.62}      & \grey{96.58}              & \grey{82.47}              & \grey{70.78}  & \grey{57.28}  & \grey{30.13}  \\
+    \cmidrule(lr){2-9}
+                                    & Random                    & 13.26         & 31.27             & 91.62                     & 73.53                     & 50.60         & 40.55             & 21.80  \\
+                                    & SemDeDup~\cite{semdedup}  & 11.35         & 25.56             & 94.36                     & 76.53                     & 66.56         & 53.18             & 25.50     \\
+                                    & D-Pruning~\cite{d-pruning}& 10.00         & 23.31             & 93.46                     & 75.37                     & 65.80         & 52.50             & 24.39     \\
+                                    & Info-Batch~\cite{info-batch}& 17.16       & \bf{39.14}        & 95.98                     & 81.43                     & 69.19         & 56.00             & 28.55     \\
+    \cmidrule(lr){2-9}
+                                    & SCAN                      & \bf{18.21}    & 37.20             & \bf{96.00}                & \bf{81.49}                & \bf{69.46}    & \bf{56.04}        & \bf{28.60} \\ 
+    \midrule
+    \multirow{6}{*}{Swin-Base}      & \grey{CLIP}               & \grey{13.98}  & \grey{32.05}      & \grey{95.75}              & \grey{82.19}              & \grey{73.89}  & \grey{61.92}      & \grey{35.38}  \\
+    \cmidrule(lr){2-9}
+                                    & Random                    & 12.56         & 30.12             & 94.10                     & 78.01                     & 72.55         & 60.25             & 31.31 \\
+                                    & SemDeDup~\cite{semdedup}  & -             & -                 & -                         & -                         & -             & -                 & -         \\
+                                    & D-Pruning~\cite{d-pruning}& 12.44         & 28.60             & 94.07                     & 77.86                     & 72.54         & 60.28             & 31.41 \\
+                                    & Info-Batch~\cite{info-batch}& 13.82       & 32.05             & \bf{95.80}                & 81.25                     & 72.69         & 59.47             & 33.13   \\
+    \cmidrule(lr){2-9}
+                                    & SCAN                      & \bf{17.50}    & \bf{37.42}        & 95.37                     & \bf{81.35}                & \bf{73.55}    & \bf{61.60}         & \bf{33.55}     \\  
+    \bottomrule
+    \end{tabular}
+    }
+    \label{tab:clip-3m}
+\end{table*}
+\subsection{Experimental Settings}
+\noindent \textbf{Pre-Training Datasets.}
+For \textbf{CLIP} models, we utilized two versions of pre-training datasets to examine the data-size scaling law as well. 
+We employed the OpenCLIP repository~\cite{openclip} to \emph{conduct pre-training for all models (including CLIP) from scratch}, ensuring a fair comparison between our proposed method and the baselines. 
+Specifically, the smaller dataset, denoted as \textbf{CC3M+}, comprises CC3M~\cite{cc3m}, SBU-Captions~\cite{sbu}, and MSCOCO~\cite{coco}, totaling 4.1 million image-text pairs. 
+The larger dataset, denoted as \textbf{CC12M+}, includes CC12M~\cite{cc12m}, SBU-Captions~\cite{sbu}, and MSCOCO~\cite{coco}, with a total of 10.1 million pairs.
+
+For the pre-training dataset of \textbf{MoCo}~\cite{mocov2, mocov3}, we adhered to the original implementation and utilized the ImageNet dataset~\cite{imagenet}.
+
+\noindent \textbf{Downstream Datasets.}
+We conducted extensive downstream fine-tuning experiments across various datasets. 
+Specifically, we utilized datasets such as ImageNet~\cite{imagenet}, CIFAR-10, CIFAR-100~\cite{cifar}, as well as out-of-distribution datasets including ImageNet V2~\cite{imagenetv2} and ImageNet-R~\cite{imagenet-r} to validate the downstream performance of \textbf{CLIP} pre-trained models. 
+For all these datasets, we explored diverse experimental settings, encompassing zero-shot transfer learning from ImageNet, linear probing, and full fine-tuning. 
+Moreover, we employed both the ImageNet and CIFAR-100 datasets to conduct experiments on \textbf{MoCo} models.
+
+\noindent \textbf{Model Architectures.}
+As OpenCLIP~\cite{openclip} offers a variety of model cards, we utilized model architectures from both ResNet~\cite{resnet} and ViT~\cite{vit}. 
+The model architectures employed for pre-training \textbf{CLIP} include RN50, RN101, ViT-S/32, ViT-S/16, ViT-B/32, ViT-B/16, and Swin-Base~\cite{swin}. 
+Due to resource constraints, we pre-trained \textbf{MoCo} using two model architectures: ViT-S/16 and ViT-B/16~\cite{deit}. 
+\textit{It is important to note that pre-training MoCo consumes approximately seven times more resources than pre-training a CLIP model. 
+Therefore, we primarily conducted experiments on CLIP to assess the effectiveness of the proposed method.}
+
+\noindent \textbf{Compared Baselines.}
+Given the absence of common models for addressing the data efficiency problem in contrastive pre-training, we adapted four different approaches in this study: 
+Random, SemDeDup~\cite{semdedup}, D-Pruning~\cite{d-pruning}, and Info-Batch~\cite{info-batch}. 
+Unless otherwise specified, we utilized a pruning ratio of 30\% for CLIP models and 35\% for MoCo models.
+
+\begin{figure*}[htbp]
+  \centering
+    \includegraphics[width=0.9\textwidth]{imgs/ratio.pdf}
+  \caption{Downstream performance variation of two CLIP models \emph{w.r.t.} different pruning ratios.
+  }\label{fig:ratio}
+\end{figure*}
+
+\begin{table*}[t!]
+  \begin{minipage}{0.68\textwidth}
+    \centering
+    \caption{Coreset selection model results on the ImageNet dataset.
+    The coreset generated by our SCAN (static) method is derived from the intersection of the datasets obtained from the other two models.
+    All models are pre-trained from scratch using each respective coreset.
+    }\label{tab:coreset}
+    \scalebox{0.8}{
+    \begin{tabular}{l|ccc|ccc|ccc}
+    \toprule
+    \multirow{2}{*}{Method}         & \multicolumn{3}{c|}{RN50}                     & \multicolumn{3}{c|}{ViT-S/16}                     & \multicolumn{3}{c}{ViT-B/32}                 \\
+                                    \cmidrule(lr){2-4}                              \cmidrule(lr){5-7}                                  \cmidrule(lr){8-10}
+                                    & ZS@1          & ZS@5          & FT@1          & ZS@1          & ZS@5          & FT@1              & ZS@1          & ZS@5          & FT@1          \\
+    \midrule
+    \grey{SCAN}                     & \grey{16.91}  & \grey{35.79}  & \grey{72.91}  & \grey{17.31}  & \grey{35.51}  & \grey{66.86}      & \grey{16.48}  & \grey{33.60}  & \grey{56.64}  \\
+    \midrule
+    SemDeDup~\cite{semdedup}        & 11.98         & 26.30         & 71.51         & 09.57         & 22.00         & 62.30             & 07.20         & 17.50         & 50.99         \\
+    D-Pruning~\cite{d-pruning}      & 11.72         & 26.65         & 71.11         & 08.60         & 20.35         & 61.70             & 06.51         & 16.13         & 50.01         \\
+    \midrule
+    SCAN (static)                   & 16.99         & 35.20         & 73.11         & 16.68         & 34.31         & 66.22             & 13.16         &28.46          & 55.99         \\
+    \bottomrule
+    \end{tabular}
+    }
+  \end{minipage}
+  \hfill
+  \begin{minipage}{0.30\textwidth}
+    \centering
+    \caption{Coreset overlap ratios.
+    The coreset generated by our SCAN is derived from the intersection of the datasets obtained from the other two/three models.
+    } \label{tab:overlap}
+    \scalebox{0.76}{
+    \begin{tabular}{ccc|c}
+    \toprule
+    \multicolumn{3}{c|}{Model}      & Overlap   \\
+    \cmidrule(lr){1-3} 
+    RN50    & ViT-S/16  & ViT-B/32  & Ratio     \\
+    \midrule
+    \cmark  & \cmark    &           & 56.78\%   \\
+    \cmark  &           & \cmark    & 55.77\%   \\
+            & \cmark    & \cmark    & 61.73\%   \\
+    \cmark  & \cmark    & \cmark    & 47.89\%   \\
+    \bottomrule
+    \end{tabular} 
+    }
+  \end{minipage}
+\end{table*}
+
+\subsection{Overall Experimental Results} \label{sec:overall-exp}
+We present the comprehensive results of CLIP in Tables~\ref{tab:clip-12m} and~\ref{tab:clip-3m}, and the results of MoCo in Table~\ref{tab:moco}. 
+Additional experimental results can be found in the supplementary material. 
+The insights from these tables can be summarized into four key observations:
+\begin{itemize}[leftmargin=0.5em]
+    \item Our proposed SCAN method consistently outperforms the four compared baselines, indicating that our approach achieves a superior trade-off between performance and data efficiency compared to existing data-efficient methods.
+    \item In comparison to the base CLIP models, SCAN achieves comparable performance while utilizing fewer data for pre-training. 
+    Specifically, our method preserves 99\% of the original CLIP model's performance in most cases, while using only 30\% of the original training dataset. 
+    Take the IN result of the RN101 architecture in Table~\ref{tab:clip-3m} as an example: 74.61 (SACN) \emph{v.s.} 75.39 (CLIP) - 99\% of CLIP result.
+    It is also worth noting that some of our methods even outperform the base CLIP models.
+    \item Dynamic approaches such as Info-Batch and SCAN often outperform static coreset selection methods like SemDeDup and D-Pruning.
+    This verifies the superiority of dynamic pruning approaches.
+    \item An apple-to-apple comparison between Table~\ref{tab:clip-12m} and Table~\ref{tab:clip-3m} reveals that models trained with more data (CC12M+) consistently outperform those trained with less data (CC3M+), thereby verifying the dataset scaling law~\cite{scaling2, scaling}.
+\end{itemize}
+
+\subsection{Coreset Results from SCAN}
+Beyond the dynamic data pruning approach, we also investigated the coreset results obtained from our SCAN method.
+To implement this, we first identify the pruned data using two pre-trained models from our method, such as RN50 and ViT-S/16.
+After that, we obtain the intersection of these two sets and ensure that the overall pruning ratio remains the same as $\rho$, thereby generating a coreset from the original full dataset.
+
+\noindent\textbf{Downstream Performance.} We then performed pre-training for another model from scratch, \eg ViT-B/32, employing the exact same process as previous static coreset-based approaches~\cite{semdedup, d-pruning}.
+From the results in Table~\ref{tab:coreset}, we observe the following: 
+I) Our selected coreset significantly outperforms other existing coreset-based baselines utilizing using the exact same settings.
+II) Our static method achieves very competitive results compared to our dynamic variant.
+This observation further underscores the potential of our proposed method for identifying a subset that can be directly and efficiently utilized in future research endeavors, thereby reducing more training overhead.
+
+\noindent\textbf{Coreset Overlaps.}  We then calculated the intersection over union for each pair and trio of coresets. 
+The results are presented in Table~\ref{tab:overlap}. The result reveals that
+I) The coresets obtained are highly related to the specific model architecture used.
+II) The coresets from ViT-B/32 and ViT-S/16 have a higher degree of overlap than the other two, as these two models share the same architecture family.
+
+\subsection{Ablation Study}
+\noindent \textbf{Different Pruning Ratios.}
+The performance change corresponding to different pruning ratios $\rho$ is depicted in Fig.~\ref{fig:ratio}. 
+Generally, we can observe that the performance tends to degrade with increasing pruning ratios.
+Further, selecting the optimal pruning ratio also involves a trade-off.
+
+\noindent \textbf{Different Mutation Epochs.}
+The results for different mutation epochs are summarized in Table~\ref{tab:mutation}. 
+It can be observed that employing a mutation epoch of three generally yields better results compared to other variants.
+
+\noindent \textbf{Different Pruning Modes.}
+Our SCAN method combines samples categorized as both \emph{redundant} and \emph{ill-matched} for pruning purposes. 
+Additionally, we conducted a separate analysis to evaluate the effectiveness of utilizing either \emph{redundant} (\textbf{R.}) or \emph{ill-matched} (\textbf{I.}) samples alone, and the results are presented in Table~\ref{tab:mode}. 
+It is evident from the table that employing \emph{ill-matched} samples for pruning yields superior performance compared to using \emph{redundant} samples alone. 
+Moreover, the combination of these two categories results in further performance improvement.
+
+\begin{table*}[htbp]
+  \begin{minipage}{0.28\textwidth}
+    \centering
+    \caption{Results \emph{w.r.t.} mutation epoch.} \label{tab:mutation}
+    \scalebox{0.74}{
+    \begin{tabular}{c|cc|cc}
+    \toprule
+    Mutation                & \multicolumn{2}{c|}{ViT-S/32}     & \multicolumn{2}{c}{ViT-S/16}          \\
+                                                \cmidrule(lr){2-3}                  \cmidrule(lr){4-5}
+    Epochs                                      & ZS@5          & FT@1              & ZS@5              & FT@1              \\
+    \midrule
+    2                                           & 28.72         & 56.38             & \textbf{36.28}    & 66.81             \\
+    \rowcolor{purple!5}
+    3                                           & \textbf{33.60} & \textbf{56.72}             & 35.51             & \textbf{67.04}    \\
+    4                                           & 28.31         & 56.25             & 33.80             & 66.94             \\
+    \bottomrule
+    \end{tabular} 
+    }
+  \end{minipage}
+  \hfill
+  \begin{minipage}{0.33\textwidth}
+    \centering
+    \caption{Results \emph{w.r.t.} pruning modes.} \label{tab:mode}
+    \scalebox{0.75}{
+    \begin{tabular}{c|c|cc|cc}
+    \toprule
+    \multicolumn{2}{c|}{Pruning Mode}   & \multicolumn{2}{c|}{ViT-S/32} & \multicolumn{2}{c}{ViT-S/16}  \\
+    \cmidrule(lr){1-2}                  \cmidrule(lr){3-4}              \cmidrule(lr){5-6}
+    \emph{w/.} R.   & \emph{w/.} I.     & ZS@5                  & FT@1              & ZS@5      & FT@1              \\
+    \midrule
+    \cmark          & \xmark            & 31.48                 & 56.66             & 33.51     & 66.85             \\
+    \xmark          & \cmark            & \bf{34.12}            & 56.01             & 35.19     & 67.04             \\
+    \rowcolor{purple!5}
+    \cmark          & \cmark            & 33.60                 & \bf{56.72}        & \bf{35.51}& \bf{67.04}            \\
+    \bottomrule
+    \end{tabular} 
+    }
+  \end{minipage}
+  \hfill
+  \begin{minipage}{0.33\textwidth}
+  \centering
+    \caption{Results \emph{w.r.t.} ratio variants.} \label{tab:ratio}
+    \scalebox{0.75}{
+    \begin{tabular}{c|cc|cc}
+    \toprule
+    \multirow{2}{*}{R. \emph{v.s.} I. (\%)}     & \multicolumn{2}{c|}{ViT-S/32}     & \multicolumn{2}{c}{ViT-S/16}          \\
+                                                \cmidrule(lr){2-3}                  \cmidrule(lr){4-5}
+                                                & ZS@5          & FT@1              & ZS@5              & FT@1              \\
+    \midrule
+    (30 : 10)                                   & 31.84         & 56.35             & 34.84             & 66.90             \\
+    \rowcolor{purple!5}
+    (20 : 20)                                   & 33.60         & \bf{56.72}        & \bf{35.51}        & 67.04             \\
+    (10 : 30)                                   & \bf{33.72}    & 56.43             & 35.49             & \bf{67.10}    \\
+    \bottomrule
+    \end{tabular} 
+    }
+  \end{minipage}
+\end{table*}
+
+\noindent \textbf{Different Variants of the Same Pruning Ratio.}
+In our experiments, we employed a pruning ratio $\rho$ of 30\% for CLIP models and divided it equally between redundant (\textbf{R.}) and ill-matched (\textbf{I.}) samples. 
+Furthermore, we investigated other variants, and the outcomes are presented in Table~\ref{tab:ratio}. 
+All the ratios are relative to the full dataset.
+It can be seen from the table that evenly distributing the pruning ratio leads to slightly better results.
+
+\begin{figure}[t!]
+   \centering
+    \includegraphics[width=0.86\linewidth]{imgs/time.pdf}
+  \caption{Comparison of pre-training time between the base CLIP model and our SCAN on the CC12M+ dataset.
+  }\label{fig:time}
+\end{figure}
+
+\begin{figure}[b!]
+\centering
+  \includegraphics[width=1.0\linewidth]{imgs/viz.pdf}
+\caption{Examples of ill-matched samples identified by our SCAN.} \label{fig:example}
+\end{figure}
+
+\subsection{In-depth Analysis} \label{sec:time-efficient}
+
+\noindent \textbf{Pre-Training Time Comparison.}
+The primary outcome of our method is the reduction in training time and, consequently, the decrease in carbon footprint. 
+We illustrate the pre-training time in Fig.~\ref{fig:time}. 
+It can be observed from the figure that our SCAN method contributes to a reduction of approximately 25\% to 30\% in the original pre-training computational cost (The additional negligible time cost can be attributed to the pruned data preparation and retrieval processes.). 
+This advantage proves especially beneficial when training large models such as RN101 and ViT-B-16.
+
+\noindent \textbf{Visualization of Ill-Matched Samples.}
+We also provide visualizations of some ill-matched samples identified by SCAN. 
+Three examples are shown in Fig.~\ref{fig:example}. 
+In the second example, an incorrect annotation is evident, as there is no \emph{city} depicted in the image. 
+Additionally, in the last example, the individual portrayed is identified as a \emph{doctor} rather than a \emph{stockman}.
+
+
+\section{Conclusion}
+
+\noindent \textbf{Limitations.} 
+We acknowledge two potential limitations of this work. 
+First, akin to other dataset pruning methodologies, our method necessitates the storage of the original large-scale dataset. 
+This may pose storage challenges for researchers with limited computing resources. 
+Second, \emph{we are unable to validate the effectiveness of the proposed method on larger-scale datasets, such as those with hundreds of millions or billions of samples, due to limitations in storage capacity.}
+Lastly, our method may not seamlessly transfer to the recent popular large language model pre-training. 
+Apart from differences in pre-training objectives, large language models (LLMs) often require only a few training epochs, typically one to three. 
+In contrast, our iterative bootstrapping strategy requires more epochs to converge, the same as each corresponding contrastive pre-training model.
+
+\noindent \textbf{Summary.}
+This work sets an initial effort to comprehensively address the data efficiency challenge in contrastive pre-training. 
+We propose a novel dataset bootstrapping approach, applying it to a range of contrastive pre-training model architectures and evaluating it using various protocols.
+Our experiments demonstrate that, across all experimental settings, the proposed method achieves a superior balance between downstream model performance and data efficiency compared to both the base models and several existing data efficiency approaches.
+Additionally, it also helps yield an effective coreset dataset that significantly outperforms other coreset-based baselines, thereby further reducing time costs and training overhead.
+
+\noindent \textbf{Future Work.}
+In the future, we plan to validate the effectiveness of our method 1) in more domains such as language-centric contrastive pre-training, 2) with larger pre-training datasets for vision-language like LAION-400M~\cite{laion-400M}.
+Moreover, our method stands orthogonal to other efficiency studies, such as model compression.
+As such, by integrating strategies from these related domains, we aim to build a more efficient training pipeline framework, thus contributing to substantial reductions in carbon footprints.
+
+
+
+
+{\small
+
+
+
+

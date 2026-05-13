@@ -1,0 +1,994 @@
+\title{Residual Stream Analysis with Multi-Layer SAEs}
+
+\begin{abstract}
+	Sparse autoencoders (SAEs) are a promising approach to interpreting the internal representations of transformer language models.
+	However, SAEs are usually trained separately on each transformer layer, making it difficult to use them to study how information flows across layers.
+	To solve this problem, we introduce the multi-layer SAE (MLSAE): a single SAE trained on the residual stream activation vectors from every transformer layer.
+	Given that the residual stream is understood to preserve information across layers, we expected MLSAE latents to `switch on' at a token position and remain active at later layers.
+	Interestingly, we find that individual latents are often active at a single layer for a given token or prompt, but this layer may differ for different tokens or prompts.
+	We quantify these phenomena by defining a distribution over layers and considering its variance.
+	We find that the variance of the distributions of latent activations over layers is about two orders of magnitude greater when aggregating over tokens compared with a single token.
+	For larger underlying models, the degree to which latents are active at multiple layers increases, which is consistent with the fact that the residual stream activation vectors at adjacent layers become more similar.
+	Finally, we relax the assumption that the residual stream basis is the same at every layer by applying pre-trained tuned-lens transformations, but our findings remain qualitatively similar.
+	Our results represent a new approach to understanding how representations change as they flow through transformers.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+
+Sparse autoencoders (SAEs) learn interpretable directions or `features' in the representation spaces of language models \citep{elhage_toy_2022,cunningham_sparse_2023,bricken_towards_2023}.
+Typically, SAEs are trained on the activation vectors from a single model layer \citep{gao_scaling_2024,templeton_scaling_2024,lieberum_gemma_2024}.
+This approach illuminates the representations within a layer.
+However, \citet{olah_next_2024,templeton_scaling_2024} believe that models may encode meaningful concepts by simultaneous activations in multiple layers, which SAEs trained at a single layer do not address.
+Furthermore, it is not straightforward to automatically identify correspondences between features from SAEs trained at different layers, which may complicate circuit analysis \citep[e.g.][]{he_dictionary_2024}.
+
+To solve this problem, we take inspiration from the residual stream perspective, which states that transformers \citep{vaswani_attention_2017} selectively write information to and read information from token positions with self-attention and MLP layers \citep{elhage_mathematical_2021,ferrando_primer_2024}.
+The results of subsequent circuit analyses, like the explanation of the indirect object identification task presented by \citet{wang_interpretability_2022}, support this viewpoint and cause us to expect the activation vectors at adjacent layers in the residual stream to be relatively similar \citep{lad_remarkable_2024}.
+
+To capture the structure shared between layers in the residual stream, we introduce the multi-layer SAE (MLSAE): a single SAE trained on the residual stream activation vectors from every layer of a transformer language model.
+Importantly, the autoencoder itself has a single hidden layer -- it is multi-layer only in the sense that it is trained on activations from multiple layers of the underlying transformer.
+In particular, we consider the activation vectors from each layer as separate training examples, which is equivalent to training a single SAE at each layer individually but with the parameters tied across layers.
+We briefly discuss alternative methods in Section~\ref{sec:discussion}.
+When aggregating over a large sample of tokens, we find that individual latents are likely to be active at multiple layers, and this measure increases with the number of latents.
+However, for a single token, latent activations are more likely to be isolated to a single layer.
+For larger underlying transformers, we show that the residual stream activation vectors at adjacent layers are more similar and that the degree to which latents are active at multiple layers increases.
+
+Finally, we relax the assumption that the residual stream basis is the same at every layer by applying pre-trained tuned-lens transformations to activation vectors before passing them to the encoder.
+Surprisingly, this does not obviously increase the extent of multi-layer latent activations.
+
+\begin{figure}
+	\centering
+\begin{tikzpicture}
+	\pgfplotsset{
+		colormap/viridis high res,
+	}
+	\begin{axis}[
+			scale only axis,
+			width=4.5in,
+			height=1.75in,
+			cycle list={[colors of colormap={1000,850,...,150}]},
+			xlabel={Relative Layer},
+			ylabel={Mean Cosine Similarity},
+			y label style={anchor=south,at={(-0.075,.5)}},
+			xmin=0,
+			xmax=1,
+			ymin=0,
+			ymax=1,
+			enlarge x limits=0.05,
+			xtick align=outside,
+			ytick align=outside,
+			tick pos=left,
+			legend cell align={left},
+			legend columns=2,
+			legend pos=south west,
+			legend style={
+					column sep=0.1in,
+					draw=none,
+					font=\small,
+				},
+		]
+		\addplot+ [mark=*,error bars/.cd,y dir=both, y explicit] table [
+				col sep=comma,
+				x expr=\thisrowno{0}/4,
+				y=mean,
+				y error=sem,
+			]{resid_cos_sim/pythia-70m-deduped.csv};
+		\addplot+ [mark=*,error bars/.cd,y dir=both, y explicit] table [
+				col sep=comma,
+				x expr=\thisrowno{0}/10,
+				y=mean,
+				y error=sem,
+			]{resid_cos_sim/pythia-160m-deduped.csv};
+		\addplot+ [mark=*,error bars/.cd,y dir=both, y explicit] table [
+				col sep=comma,
+				x expr=\thisrowno{0}/22,
+				y=mean,
+				y error=sem,
+			]{resid_cos_sim/pythia-410m-deduped.csv};
+		\addplot+ [mark=*,error bars/.cd,y dir=both, y explicit] table [
+				col sep=comma,
+				x expr=\thisrowno{0}/14,
+				y=mean,
+				y error=sem,
+			]{resid_cos_sim/pythia-1b-deduped.csv};
+		\addplot+ [mark=*,error bars/.cd,y dir=both, y explicit] table [
+				col sep=comma,
+				x expr=\thisrowno{0}/22,
+				y=mean,
+				y error=sem,
+			]{resid_cos_sim/pythia-1.4b-deduped.csv};
+		\addplot+ [mark=*,error bars/.cd,y dir=both, y explicit] table [
+				col sep=comma,
+				x expr=\thisrowno{0}/30,
+				y=mean,
+				y error=sem,
+			]{resid_cos_sim/pythia-2.8b-deduped.csv};
+		\addlegendentry{Pythia-70m}
+		\addlegendentry{Pythia-160m}
+		\addlegendentry{Pythia-410m}
+		\addlegendentry{Pythia-1b}
+		\addlegendentry{Pythia-1.4b}
+		\addlegendentry{Pythia-2.8b}
+	\end{axis}
+\end{tikzpicture}
+
+	\caption{
+		The mean cosine similarities between the residual stream activation vectors at adjacent layers of transformers, over 10 million tokens from the test set.
+		To compare transformers with different numbers of layers, we divide the lower of each pair of adjacent layers by the number of pairs.
+		This `relative layer' is the $x$-axis of the plot.
+		We subtract the dataset mean from the activation vectors at each layer before computing cosine similarities to control for changes in the norm between layers \citep{heimersheim_residual_2023}, which we demonstrate in Figure~\ref{fig:resid_l2_norm}.
+	}
+	\label{fig:resid_cos_sim}
+\end{figure}
+
+\begin{figure}
+	\centering
+\begin{tikzpicture}
+	\begin{groupplot}[
+			width=5.5in,
+			height=1.25in,
+			group style={
+					group size=1 by 4,
+					vertical sep=0.225in,
+					xlabels at=edge bottom,
+				},
+			title style={font=\small},
+			every axis title/.style={at={(0.5,1.125)}},
+			enlargelimits=false,
+			axis on top,
+			xmin=0,
+			xmax=1,
+			xlabel={Latent},
+			ylabel={Layer},
+			y label style={anchor=south,at={(axis description cs:-0.05,.5)}},
+			xtick=\empty,
+			ytick align=outside,
+			tick pos=left,
+		]
+		\nextgroupplot[
+			title={Pythia-70m},
+			ytick={0.5,1.5,...,5.5},
+			yticklabels={$0$,,,,,$5$},
+		]
+		\addplot graphics [
+				xmin=0,
+				xmax=1,
+				ymin=0,
+				ymax=6,
+			] {heatmaps/without_tuned_lens/model_name/aggregate/pythia-70m-deduped-x64-k32.pdf};
+		\nextgroupplot[
+			title={Pythia-160m},
+			ytick={0.5,1.5,...,11.5},
+			yticklabels={$0$,,,,,,,,,,,$11$},
+		]
+		\addplot graphics [
+				xmin=0,
+				xmax=1,
+				ymin=0,
+				ymax=12,
+			] {heatmaps/without_tuned_lens/model_name/aggregate/pythia-160m-deduped-x64-k32.pdf};
+		\nextgroupplot[
+			title={Pythia-410m},
+			ytick={0.5,1.5,...,23.5},
+			yticklabels={$0$,,,,,,,,,,,,,,,,,,,,,,,$23$},
+		]
+		\addplot graphics [
+				xmin=0,
+				xmax=1,
+				ymin=0,
+				ymax=24,
+			] {heatmaps/without_tuned_lens/model_name/aggregate/pythia-410m-deduped-x64-k32.pdf};
+		\nextgroupplot[
+			title={Pythia-1b},
+			ytick={0.5,1.5,...,15.5},
+			yticklabels={$0$,,,,,,,,,,,,,,,$15$},
+		]
+		\addplot graphics [
+				xmin=0,
+				xmax=1,
+				ymin=0,
+				ymax=16,
+			] {heatmaps/without_tuned_lens/model_name/aggregate/pythia-1b-deduped-x64-k32.pdf};
+	\end{groupplot}
+\end{tikzpicture}
+
+	\caption{
+		Heatmaps of the distributions of latent activations over layers when aggregating over 10 million tokens from the test set.
+		Here, we plot the distributions for MLSAEs trained on Pythia models with an expansion factor of $\ExpansionFactor = 64$ and sparsity $k = 32$.
+		The latents are sorted in ascending order of the expected value of the layer (Equation~\ref{eqn:layer_probability}).
+	}
+	\label{fig:heatmaps_without_tuned_lens_model_name_aggregate}
+\end{figure}
+
+\begin{figure}
+	\centering
+\begin{tikzpicture}
+	\begin{groupplot}[
+			width=5.5in,
+			height=1.25in,
+			group style={
+					group size=1 by 4,
+					vertical sep=0.225in,
+					xlabels at=edge bottom,
+				},
+			title style={font=\small},
+			every axis title/.style={at={(0.5,1.125)}},
+			enlargelimits=false,
+			axis on top,
+			xmin=0,
+			xmax=1,
+			xlabel={Latent},
+			ylabel={Layer},
+			y label style={anchor=south,at={(axis description cs:-0.05,.5)}},
+			xtick=\empty,
+			ytick align=outside,
+			tick pos=left,
+		]
+		\nextgroupplot[
+			title={Pythia-70m},
+			ytick={0.5,1.5,...,5.5},
+			yticklabels={$0$,,,,,$5$},
+		]
+		\addplot graphics [
+				xmin=0,
+				xmax=1,
+				ymin=0,
+				ymax=6,
+			] {heatmaps/without_tuned_lens/model_name/prompt/pythia-70m-deduped-x64-k32.pdf};
+		\nextgroupplot[
+			title={Pythia-160m},
+			ytick={0.5,1.5,...,11.5},
+			yticklabels={$0$,,,,,,,,,,,$11$},
+		]
+		\addplot graphics [
+				xmin=0,
+				xmax=1,
+				ymin=0,
+				ymax=12,
+			] {heatmaps/without_tuned_lens/model_name/prompt/pythia-160m-deduped-x64-k32.pdf};
+		\nextgroupplot[
+			title={Pythia-410m},
+			ytick={0.5,1.5,...,23.5},
+			yticklabels={$0$,,,,,,,,,,,,,,,,,,,,,,,$23$},
+		]
+		\addplot graphics [
+				xmin=0,
+				xmax=1,
+				ymin=0,
+				ymax=24,
+			] {heatmaps/without_tuned_lens/model_name/prompt/pythia-410m-deduped-x64-k32.pdf};
+		\nextgroupplot[
+			title={Pythia-1b},
+			ytick={0.5,1.5,...,15.5},
+			yticklabels={$0$,,,,,,,,,,,,,,,$15$},
+		]
+		\addplot graphics [
+				xmin=0,
+				xmax=1,
+				ymin=0,
+				ymax=16,
+			] {heatmaps/without_tuned_lens/model_name/prompt/pythia-1b-deduped-x64-k32.pdf};
+	\end{groupplot}
+\end{tikzpicture}
+
+	\caption{
+		Heatmaps of the distributions of latent activations over layers for a single example prompt.
+		Here, we plot the distributions for MLSAEs trained on Pythia models with an expansion factor of $\ExpansionFactor = 64$ and sparsity $k = 32$.
+		The example prompt is ``When John and Mary went to the store, John gave'' \citep{wang_interpretability_2022}.
+		We exclude latents with maximum activation below \num{1e-3} and sort latents in ascending order of the expected value of the layer (Equation~\ref{eqn:layer_probability}).
+	}
+	\label{fig:heatmaps_without_tuned_lens_model_name_prompt}
+\end{figure}
+
+
+
+\section{Related work}
+
+\label{sec:related_work}
+
+A sparse code represents many signals, such as sensory inputs, by simultaneously activating a relatively small number of elements, such as neurons \citep{bell_information-maximization_1995,olshausen_emergence_1996}.
+Sparse dictionary learning (SDL) approximates each input vector by a linear combination of a relatively small number of learned basis vectors.
+The learned basis is usually overcomplete: it has a greater dimension than the inputs.
+SDL algorithms include Independent Component Analysis \citep{bell_independent_1997,hyvarinen_independent_2000,le_ica_2011} and sparse autoencoders \citep{lee_efficient_2006,ng_sparse_2011,makhzani_k-sparse_2014}.
+
+The activations of language models have been hypothesized to be a dense, compressed version of a sparse, expanded representation space \citep{elhage_mathematical_2021,elhage_toy_2022}.
+Under this view, there are interpretable directions in the dense representation spaces corresponding to distinct semantic concepts, whereas their basis vectors (neurons) are `polysemantic' \citep{park_linear_2023}.
+It has been shown theoretically \citep{wright_high-dimensional_2022} and empirically \citep{elhage_toy_2022,sharkey_taking_2022,whittington_disentanglement_2023} that SDL recovers ground-truth features in toy models, and that learned dictionary elements are more interpretable than the basis vectors of language models \citep{cunningham_sparse_2023,bricken_towards_2023} or dense embeddings \citep{oneill_disentangling_2024}.
+Notably, features are not necessarily linear \citep{wattenberg_relational_2024,engels_not_2024,hernandez_linearity_2024}.
+
+The standard SAE architecture is a single hidden layer with a ReLU activation function and an $L^1$ sparsity penalty in the training loss \citep{bricken_towards_2023}, but various activation functions
+\citep{makhzani_k-sparse_2014,konda_zero-bias_2015,rajamanoharan_jumping_2024,rajamanoharan_improving_2024} and objectives \citep{braun_identifying_2024} have been proposed.
+The prevailing approach is to train an SAE on the activation vectors from a single transformer layer, except for \citet{kissane_interpreting_2024}, who concatenate the outputs of multiple attention heads in a single layer, and \citet{yun_transformer_2021}, who learn an undercomplete basis for the residual stream at multiple layers, albeit by iterative optimization instead of with an autoencoder.
+
+Mechanistic interpretability research often attempts to identify circuits: computational subgraphs of neural networks that implement specific behaviors \citep{olah_zoom_2020,wang_interpretability_2022,conmy_towards_2023,dunefsky_transcoders_2024,garcia-carrasco_how_2024,marks_sparse_2024}.
+Representing networks in terms of SAE latents may help to improve circuit discovery \citep{he_dictionary_2024,oneill_sparse_2024}, and these latents can be used to construct steering vectors \citep{subramani_extracting_2022,templeton_scaling_2024,makelov_sparse_2024}, but it is unclear whether SAEs outperform baselines for causal analysis \citep{chaudhary_evaluating_2024,huang_ravel_2024}.
+Importantly, SAEs can be scaled up to the activations of large language models, where we expect the number of distinct semantic concepts to be extremely large \citep{templeton_scaling_2024,gao_scaling_2024,lieberum_gemma_2024}.
+
+The `logit lens' is a method to interpret directions in the residual stream by projecting them onto the vocabulary space to elicit token predictions, i.e., multiplying them by the unembedding matrix \citep{nostalgebraist_interpreting_2020}.
+However, the residual stream basis is not fixed, so \citet{belrose_eliciting_2023} introduce the `tuned lens' approach, where a linear transformation is learned for each layer in the residual stream.
+The objective is to minimize the KL divergence between the probability distribution over tokens generated by the transformed activations and the `true' distribution of the model.
+This approach draws on the perspective of iterative inference \citep{jastrzebski_residual_2018}.
+
+The key difference between previous work \citep{bricken_towards_2023,cunningham_sparse_2023,templeton_scaling_2024,gao_scaling_2024} and our work is that we introduce the multi-layer SAE, i.e., we train a single SAE at all layers of the residual stream.
+
+
+
+\section{Methods}
+
+\label{sec:methods}
+
+The key idea with a multi-layer SAE is to train a single SAE on the residual stream activation vectors from every layer.
+In particular, we consider the activations at each layer to be different training examples.
+Hence, for residual stream activation vectors of model dimension $\ModelDim$, the inputs to the multi-layer SAE also have dimension $\ModelDim$.
+For $\NumTokens$ tokens and $\NumLayers$ layers, we train the multi-layer SAE on $\NumTokens\NumLayers$ activation vectors.
+We use the terms `SAE feature' and `latent' interchangeably.
+
+\subsection{Setup}
+\label{sec:methods_setup}
+
+We train MLSAEs on GPT-style language models from the Pythia suite \citep{biderman_pythia_2023}.
+We are primarily interested in the computation performed by self-attention and MLP layers on intermediate representations \citep{valeriani_geometry_2023}, so we exclude the input embeddings before the first transformer block and take the last-layer activations before the final layer norm.
+
+We use a $k$-sparse autoencoder \citep{makhzani_k-sparse_2014,gao_scaling_2024}, which directly controls the sparsity of the latent space by introducing a TopK activation function that keeps only the $k$ largest latents.
+The $k$ largest latents are almost always positive for $k \ll \ModelDim$, but we follow \citet{gao_scaling_2024} in applying a ReLU activation function to guarantee non-negativity.
+This setup effectively fixes the sparsity ($L^0$ norm) of the latents at $k$ per activation vector (layer and token) throughout training.
+For input vectors $\InputVector \in \R^\ModelDim$ and latent vectors $\LatentVector \in \R^\NumLatents$, the encoder and decoder are defined by:
+\begin{align}
+	\LatentVector & = \ReLU(\TopK(\EncoderWeight\InputVector - \PreEncoderBias)) \\
+	\OutputVector & = \DecoderWeight\LatentVector + \PreEncoderBias
+\end{align}
+where $\EncoderWeight \in \R^{\ModelDim\times\NumLatents}$, $\DecoderWeight \in \R^{\NumLatents\times\ModelDim}$, and $\PreEncoderBias \in \R^\ModelDim$.
+We constrain the pre-encoder bias $\PreEncoderBias$ to be the negative of the post-decoder bias, following \citet{bricken_towards_2023,gao_scaling_2024}, and standardize activation vectors to zero mean and unit variance before passing them to the encoder.
+
+\subsection{Training}
+\label{sec:methods_training}
+
+We use the fraction of variance unexplained (FVU) as the reconstruction error:
+\begin{align}
+	\FVU(\InputVector, \OutputVector) =
+	\frac{1}{\NumLayers} \sum_{\LayerIndex=0}^{\NumLayers-1}
+	\frac{\Norm{\InputVector_\LayerIndex - \OutputVector_\LayerIndex}_2^2}{\Var(\InputVector_\LayerIndex)}
+\end{align}
+We chose the FVU because the input vectors from different layers may have different magnitudes; choosing the mean squared error (MSE) would encourage the autoencoder to prioritize minimizing the reconstruction errors of the layers with the greatest magnitudes.
+
+A potential issue when training SAEs is the occurrence of `dead' latents, i.e., latent dimensions that are almost always zero.
+With a $k$-sparse autoencoder, this means latent dimensions that almost never appear among the $k$ largest latent activations.
+We follow \citet{bricken_towards_2023,cunningham_sparse_2023} by considering a latent `dead' if it is not activated within the last 10 million tokens during training.
+In the multi-layer setting, a latent may be activated by the input vectors from any layer.
+
+2]{gao_scaling_2024} propose an auxiliary loss term to minimize the occurrence of dead latents.
+This AuxK term models the MSE reconstruction error using the $\KAux$ largest dead latents:
+\begin{align}
+	\AuxK(\InputVector,\OutputVector) = \Norm{\TrueErrorVector-\PredErrorVector}_2^2
+\end{align}
+Here, $\TrueErrorVector = \InputVector - \OutputVector$ is the reconstruction error of the main model, and $\PredErrorVector$ is its reconstruction using the top-$\KAux$ dead latents.
+Let $\Dead$ be an `activation function' that keeps only the dead latents.
+Then:
+\begin{align}
+	\LatentVector_\text{dead} & = \ReLU(\TopK_\text{aux}(\Dead(\EncoderWeight\InputVector-\PreEncoderBias))) \\
+	\PredErrorVector          & = \DecoderWeight\LatentVector_\text{dead} + \PreEncoderBias
+\end{align}
+The full loss is the FVU plus the auxiliary loss term, multiplied by a small coefficient $\alpha$:
+\begin{align}
+	\Loss = \FVU(\InputVector,\OutputVector) + \alpha\cdot\AuxK(\InputVector,\OutputVector)
+\end{align}
+Following \citet{gao_scaling_2024}, we choose $\KAux$ as a power of 2 close to $\nicefrac{\ModelDim}{2}$ and $\alpha = \nicefrac{1}{32}$.
+
+Our hyperparameters are the expansion factor $\ExpansionFactor=\nicefrac{\NumLatents}{\ModelDim}$, the ratio between the model dimension and the number of latents, and the sparsity $k$, the number of largest latents to keep in the TopK activation function.
+We choose expansion factors as powers of 2 between 1 and 256, yielding autoencoders with between 512 and 131072 latents for Pythia-70m, and $k$ as powers of 2 between 16 and 512.
+
+\subsection{Tuned lens}
+\label{sec:methods_tuned_lens}
+
+In the tuned lens method, an affine transformation is learned from the output space of layer $\LayerIndex$ to the output space of the final layer, called the translator for layer $\LayerIndex$ \citep{belrose_eliciting_2023}.
+With our setup, we want to transform the residual stream activation vectors at each layer into more similar bases before passing them to the encoder and invert that transformation after the decoder.
+
+py}} does not match the formula in the paper.
+The implementation uses a residual connection:
+\begin{equation}
+	\label{eq:tuned_lens}
+	\InputVector^\prime_\LayerIndex =
+	\InputVector_\LayerIndex + (\TunedLensWeight \InputVector_\LayerIndex + \TunedLensBias)
+\end{equation}
+Hence, to invert the transformation, we need:
+\begin{equation}
+	\label{eq:tuned_lens_inverse}
+	\OutputVector_\LayerIndex =
+	(\mat{I} + \TunedLensWeight)^{-1} (\OutputVector^\prime_\LayerIndex - \TunedLensBias)
+\end{equation}
+Here, $\TunedLensWeight \in \R^{\ModelDim\times\ModelDim}$ and $\TunedLensBias \in \R^{\ModelDim}$.
+The only modification to our setup is that $\InputVector^\prime$ and $\OutputVector^\prime$ replace the input and output vectors that we pass to the encoder and use to compute the loss.
+Notably, we use the transformed vectors to compute reconstruction errors (Figure~\ref{fig:test_with_tuned_lens}).
+We compute the inverse $(\mat{I} + \TunedLensWeight)^{-1}$ for each layer once at the start of training.
+
+
+
+\section{Results}
+
+\label{sec:results}
+
+\subsection{Representation drift}
+\label{sec:results_representation_drift}
+
+Guided by the residual stream perspective \citep{elhage_mathematical_2021,ferrando_primer_2024}, we expected dense activation vectors to be relatively similar across layers.
+A similarity of one means that the information represented at a token position is unchanged by the intervening residual block, whereas a similarity of zero means the activation vectors on either side of the block are orthogonal.
+We had expected changes in the residual stream to become smaller as the model size increased, and we found the mean cosine similarities increased accordingly (Figure~\ref{fig:resid_cos_sim}).
+
+\begin{figure}
+	\centering
+\begin{tikzpicture}
+	\pgfplotsset{
+		colormap/viridis high res,
+	}
+	\begin{axis}[
+			scale only axis,
+			width=4.5in,
+			height=2in,
+			cycle list={[colors of colormap={1000,850,...,150}]},
+			xlabel={Relative Layer},
+			ylabel={Mean $L^2$ Norm},
+			y label style={anchor=south,at={(-0.075,.5)}},
+			xmin=0,
+			xmax=1,
+			enlarge x limits=0.05,
+			xtick align=outside,
+			ytick align=outside,
+			tick pos=left,
+			legend cell align={left},
+			legend columns=2,
+			legend pos=north west,
+			legend style={
+					column sep=0.1in,
+					draw=none,
+					font=\small,
+				},
+		]
+		\addplot+ [mark=*,error bars/.cd,y dir=both, y explicit] table [
+				col sep=comma,
+				x expr=\thisrowno{0}/5,
+				y=mean,
+				y error=sem,
+			]{resid_l2_norm/pythia-70m-deduped.csv};
+		\addplot+ [mark=*,error bars/.cd,y dir=both, y explicit] table [
+				col sep=comma,
+				x expr=\thisrowno{0}/11,
+				y=mean,
+				y error=sem,
+			]{resid_l2_norm/pythia-160m-deduped.csv};
+		\addplot+ [mark=*,error bars/.cd,y dir=both, y explicit] table [
+				col sep=comma,
+				x expr=\thisrowno{0}/23,
+				y=mean,
+				y error=sem,
+			]{resid_l2_norm/pythia-410m-deduped.csv};
+		\addplot+ [mark=*,error bars/.cd,y dir=both, y explicit] table [
+				col sep=comma,
+				x expr=\thisrowno{0}/15,
+				y=mean,
+				y error=sem,
+			]{resid_l2_norm/pythia-1b-deduped.csv};
+		\addplot+ [mark=*,error bars/.cd,y dir=both, y explicit] table [
+				col sep=comma,
+				x expr=\thisrowno{0}/23,
+				y=mean,
+				y error=sem,
+			]{resid_l2_norm/pythia-1.4b-deduped.csv};
+		\addplot+ [mark=*,error bars/.cd,y dir=both, y explicit] table [
+				col sep=comma,
+				x expr=\thisrowno{0}/31,
+				y=mean,
+				y error=sem,
+			]{resid_l2_norm/pythia-2.8b-deduped.csv};
+		\addlegendentry{Pythia-70m}
+		\addlegendentry{Pythia-160m}
+		\addlegendentry{Pythia-410m}
+		\addlegendentry{Pythia-1b}
+		\addlegendentry{Pythia-1.4b}
+		\addlegendentry{Pythia-2.8b}
+	\end{axis}
+\end{tikzpicture}
+
+	\caption{
+		The mean $L^2$ norm of the residual stream activation vectors at every layer, over 10 million tokens from the test set.
+		To compare transformers with different numbers of layers, we divide the layer index $\LayerIndex$ by the number of layers $\NumLayers$.
+		This `relative layer' is the $x$-axis of the plot.
+	}
+	\label{fig:resid_l2_norm}
+\end{figure}
+
+Given that the residual stream activation vectors are relatively similar between adjacent layers, we expected to find many MLSAE latents active at multiple layers.
+We confirmed this prediction over a large sample of 10 million tokens from the test set (Figure~\ref{fig:heatmaps_without_tuned_lens_model_name_aggregate}).
+Interestingly, we found that for individual prompts, a much greater proportion of latents are active at only a single layer (Figure~\ref{fig:heatmaps_with_tuned_lens_model_name_prompt}).
+
+Following \citet{heimersheim_residual_2023}, we verified that the mean $L^2$ norm of the activation vectors increases across layers, which prompted us to center the vectors at each layer before computing the similarities between them (Figure~\ref{fig:resid_l2_norm}).
+
+\subsection{Latent distributions over layers}
+\label{sec:results_latent_distributions}
+
+Given a dataset and MLSAE, each combination of a token and latent produces a distribution of activations over layers.
+We want to understand the degree to which the variance of that distribution depends on the token versus the latent to quantify the intuition gleaned from Figures~\ref{fig:heatmaps_without_tuned_lens_model_name_aggregate} and \ref{fig:heatmaps_without_tuned_lens_model_name_prompt}.
+
+Consider the layer index $\RandomLayer$, token $\RandomToken$, and latent index $\RandomLatent$ to be random variables.
+We take $P(\RandomLatent)$ to be a uniform discrete distribution, $P(\RandomToken\mid\RandomLatent)$ to be a uniform discrete distribution over tokens for which the latent is active (at any layer), and $\RandomLayer$ to be sampled from a conditional distribution proportional to the total latent activation at that layer, aggregating over tokens:
+\begin{equation}
+	\label{eqn:layer_probability}
+	P(\RandomLayer=\LayerIndex \mid \RandomToken=\TokenIndex,\,\RandomLatent=\LatentIndex) = \frac{
+		h_{\LatentIndex}(\InputVector_{\TokenIndex,\LayerIndex})
+	}{
+		\sum_{\LayerIndex^\prime}
+		h_{\LatentIndex}(\InputVector_{\TokenIndex,\LayerIndex^\prime})
+	}
+\end{equation}
+Here, $\InputVector_{\TokenIndex,\LayerIndex}$ is the dense residual stream activation vector at token $\TokenIndex$ and layer $\LayerIndex$, while $h_{\LatentIndex}(\InputVector_{\TokenIndex,\LayerIndex})$ is the activation of the $\LatentIndex$-th MLSAE latent at that token and layer.
+
+We order latents in all heatmaps using the expected value of the layer for a single latent $\ExpectedValueOver{\RandomToken}{\RandomLayer \mid \RandomLatent=\LatentIndex}$.
+The variance of the distribution over layers measures the degree to which a latent is active at a single layer (in which case, it is zero) versus multiple layers (in which case, it is positive).
+We are interested in the following variances of the distribution over layers:
+\begin{itemize}
+	\item $\Var[\RandomLayer \mid \RandomLatent=\LatentIndex,\,\RandomToken=\TokenIndex]$, for a single latent and token
+	\item $\Var[\RandomLayer \mid \RandomLatent=\LatentIndex]$, for a single latent, aggregating over tokens
+	\item $\Var[\RandomLayer]$, aggregating over both latents and tokens
+\end{itemize}
+
+For the moment, we note that the variance of the distribution over layers naturally depends on the number of layers $\NumLayers$.
+Hence, to compare different models, we look at ratios between these variances:
+\begin{align}
+	\label{eqn:variance_ratio_latent}
+	\begin{array}{c}
+		\text{variance for one latent, aggregating over tokens,} \\
+		\text{as a proportion of the total variance over all latents}
+	\end{array} & =
+	\frac{\ExpectedValueOver{\RandomLatent}{\Var(\RandomLayer\mid\RandomLatent)}}{\Var(\RandomLayer)}
+	\\
+	\label{eqn:variance_ratio_token}
+	\begin{array}{c}
+		\text{variance for one token and latent as a} \\
+		\text{proportion of the total variance for that latent}
+	\end{array}                       & =
+	\frac{\ExpectedValueOver{\RandomLatent,\RandomToken}{\Var(\RandomLayer\mid\RandomLatent,\,\RandomToken)}}{\ExpectedValueOver{\RandomLatent}{\Var(\RandomLayer\mid\RandomLatent)}}
+\end{align}
+The former measures the degree to which latents are active at multiple layers when aggregating over tokens, and the latter compares this to the case for a single token.
+
+\begin{figure}
+	\centering
+\begin{tikzpicture}
+	\begin{groupplot}[
+			scale only axis,
+			width=4.5in,
+			height=0.9in,
+			group style={
+					group size=1 by 2,
+					vertical sep=0.6in,
+				},
+			xbar,
+			y dir=reverse,
+			enlarge y limits=0.2,
+			symbolic y coords={
+					Pythia-70m,
+					Pythia-160m,
+					Pythia-410m,
+					Pythia-1b
+				},
+			yticklabels={
+					,
+					Pythia-70m,
+					Pythia-160m,
+					Pythia-410m,
+					Pythia-1b
+				},
+			xtick align=outside,
+			ytick align=outside,
+			tick pos=left,
+			axis line style=semithick,
+			every tick/.style={black,semithick},
+			legend cell align={left},
+			legend columns=1,
+			legend style={
+					column sep=0.1in,
+					draw=none,
+					font=\small,
+				},
+		]
+		\nextgroupplot[
+			xlabel={Variance for one latent, aggregating over tokens, as a proportion of the total variance over all latents},
+			xmin=0,
+			xmax=1,
+			bar width=0.05in,
+			legend pos=north east,
+		]
+		\addplot+ [Paired-A] table [
+				col sep=comma,
+				y=model_name,
+				x=rel_var_f,
+			]{variances/model_name/without_tuned_lens.csv};
+		\addplot+ [Paired-B] table [
+				col sep=comma,
+				y=model_name,
+				x=rel_var_f,
+			]{variances/model_name/with_tuned_lens.csv};
+		\addlegendentry{Without tuned lens}
+		\addlegendentry{With tuned lens}
+		\nextgroupplot[
+			xlabel={Variance for one token and latent as a proportion of the total variance for that latent},
+			xmin=0,
+			xmax=0.1,
+			bar width=0.05in,
+			scaled x ticks=false,
+			xticklabel style={
+					/pgf/number format/fixed,
+					/pgf/number format/precision=2
+				},
+			legend pos=south east,
+		]
+		\addplot+ [Paired-A] table [
+				col sep=comma,
+				y=model_name,
+				x=rel_var_t,
+			]{variances/model_name/without_tuned_lens.csv};
+		\addplot+ [Paired-B] table [
+				col sep=comma,
+				y=model_name,
+				x=rel_var_t,
+			]{variances/model_name/with_tuned_lens.csv};
+		\addlegendentry{Without tuned lens}
+		\addlegendentry{With tuned lens}
+	\end{groupplot}
+\end{tikzpicture}
+	\caption{
+		The fraction of the total variance explained by individual latents and the fraction of the variance for an individual latent explained by individual tokens (Equations~\ref{eqn:variance_ratio_latent} and \ref{eqn:variance_ratio_token}) for MLSAEs with an expansion factor of $\ExpansionFactor=64$ and sparsity $k=32$, over 10 million tokens from the test set.
+		We note that pre-trained tuned lenses were not available for Pythia-1b.
+	}
+	\label{fig:variances_model_name}
+\end{figure}
+
+The degree to which latents are active at multiple layers when aggregating over tokens is relatively large, between 54 and 86\%, and increases uniformly with the model size for fixed hyperparameters (Figure~\ref{fig:variances_model_name}).
+This measure quantifies the observation that, in the aggregate heatmaps (Figure~\ref{fig:heatmaps_without_tuned_lens_model_name_aggregate}), the distributions of latent activations over layers become more `spread out' as the model size increases.
+Conversely, we find that the fraction of the variance for an individual latent explained by individual tokens is very small, about 1\%.
+This quantifies the observation that, in the single-prompt heatmaps (Figure~\ref{fig:heatmaps_without_tuned_lens_model_name_prompt}), the distributions over layers are much less `spread out' than in the aggregate heatmaps.
+
+\begin{figure}
+	\centering
+\begin{tikzpicture}
+	\begin{groupplot}[
+			scale only axis,
+			width=2in,
+			height=2in,
+			group style={
+					group size=2 by 2,
+					horizontal sep=0.125in,
+					vertical sep=0.125in,
+					x descriptions at=edge bottom,
+					y descriptions at=edge left,
+				},
+			cycle list/Paired,
+			title style={
+					anchor=north,
+					at={(0.5,1.1)},
+					font=\small
+				},
+			y label style={
+					anchor=south,
+					at={(-0.2,.5)},
+					font=\large,
+				},
+			xmode=log,
+			ymode=log,
+			grid=major,
+			legend cell align={left},
+			legend columns=2,
+			legend style={
+					anchor=south,
+					at={(0,-0.45)},
+					column sep=0.1in,
+					draw=none,
+					font=\small,
+				},
+		]
+		\nextgroupplot[
+			title={Sparsity $k=32$},
+			ylabel={\Large $\frac{\ExpectedValueOver{\RandomLatent}{\Var(\RandomLayer\mid\RandomLatent)}}{\Var(\RandomLayer)}$},
+			xmin=0.5,
+			xmax=512,
+			ymin=1e-1,
+			ymax=1,
+		]
+		\addplot+ [mark=*] table [
+				col sep=comma,
+				x=expansion_factor,
+				y=rel_var_f,
+			]{variances/pythia-70m-deduped/expansion_factor.csv};
+		\addplot+ [mark=*] table [
+				col sep=comma,
+				x=expansion_factor,
+				y=rel_var_f,
+			]{variances/pythia-70m-deduped-lens/expansion_factor.csv};
+		\addplot+ [mark=*] table [
+				col sep=comma,
+				x=expansion_factor,
+				y=rel_var_f,
+			]{variances/pythia-160m-deduped/expansion_factor.csv};
+		\draw[dashed,gray] (axis cs:64,1e-1) -- (axis cs:64,1);
+		\nextgroupplot[
+			title={Expansion Factor $\ExpansionFactor=64$},
+			xmin=1e1,
+			xmax=1e3,
+			ymin=1e-1,
+			ymax=1,
+		]
+		\addplot+ [mark=*] table [
+				col sep=comma,
+				x=k,
+				y=rel_var_f,
+			]{variances/pythia-70m-deduped/sparsity_k.csv};
+		\addplot+ [mark=*] table [
+				col sep=comma,
+				x=k,
+				y=rel_var_f,
+			]{variances/pythia-70m-deduped-lens/sparsity_k.csv};
+		\addplot+ [mark=*] table [
+				col sep=comma,
+				x=k,
+				y=rel_var_f,
+			]{variances/pythia-160m-deduped/sparsity_k.csv};
+		\draw[dashed,gray] (axis cs:32,1e-1) -- (axis cs:32,1);
+		\nextgroupplot[
+			xlabel={Expansion Factor $\ExpansionFactor$},
+			ylabel={\Large $\frac{\ExpectedValueOver{\RandomLatent,\RandomToken}{\Var(\RandomLayer\mid\RandomLatent,\,\RandomToken)}}{\ExpectedValueOver{\RandomLatent}{\Var(\RandomLayer\mid\RandomLatent)}}$},
+			yticklabel style={/pgf/number format/fixed},
+			scaled y ticks=false,
+			xmin=0.5,
+			xmax=512,
+			ymin=6e-3,
+			ymax=7e-1,
+		]
+		\addplot+ [mark=*] table [
+				col sep=comma,
+				x=expansion_factor,
+				y=rel_var_t,
+			]{variances/pythia-70m-deduped/expansion_factor.csv};
+		\addplot+ [mark=*] table [
+				col sep=comma,
+				x=expansion_factor,
+				y=rel_var_t,
+			]{variances/pythia-70m-deduped-lens/expansion_factor.csv};
+		\addplot+ [mark=*] table [
+				col sep=comma,
+				x=expansion_factor,
+				y=rel_var_t,
+			]{variances/pythia-160m-deduped/expansion_factor.csv};
+		\draw[dashed,gray] (axis cs:64,6e-3) -- (axis cs:64,7e-1);
+		\nextgroupplot[
+			xlabel={Sparsity $k$},
+			xmin=1e1,
+			xmax=1e3,
+			ymin=6e-3,
+			ymax=7e-1,
+		]
+		\addplot+ [mark=*] table [
+				col sep=comma,
+				x=k,
+				y=rel_var_t,
+			]{variances/pythia-70m-deduped/sparsity_k.csv};
+		\addplot+ [mark=*] table [
+				col sep=comma,
+				x=k,
+				y=rel_var_t,
+			]{variances/pythia-70m-deduped-lens/sparsity_k.csv};
+		\addplot+ [mark=*] table [
+				col sep=comma,
+				x=k,
+				y=rel_var_t,
+			]{variances/pythia-160m-deduped/sparsity_k.csv};
+		\draw[dashed,gray] (axis cs:32,6e-3) -- (axis cs:32,7e-1);
+		\addlegendentry{Pythia-70m without tuned lens}
+		\addlegendentry{Pythia-70m with tuned lens}
+		\addlegendentry{Pythia-160m without tuned lens}
+	\end{groupplot}
+\end{tikzpicture}
+
+	\caption{
+		The fraction of the total variance explained by individual latents and the fraction of the variance for an individual latent explained by individual tokens (Equations~\ref{eqn:variance_ratio_latent} and \ref{eqn:variance_ratio_token}).
+		Here, we plot the variance ratios for standard and tuned-lens MLSAEs trained on Pythia models with an expansion factor of $\ExpansionFactor=64$ and sparsity $k=32$, over 10 million tokens from the test set.
+	}
+	\label{fig:variances}
+\end{figure}
+
+Additionally, as the expansion factor increases, the degree to which latents are active at multiple layers when aggregating over tokens increases (Figure~\ref{fig:variances}).
+In contrast, the fraction of the variance for an individual latent explained by individual tokens decreases.
+\subsection{Tuned lens}
+\label{sec:results_tuned_lens}
+
+Thus far, we have assumed that the residual stream basis is the same at every layer.
+We relaxed this assumption by applying pre-trained tuned-lens transformations to the residual stream activations at each layer before the encoder (Section~\ref{sec:methods_tuned_lens}).
+We had expected that these transformations would increase the degree to which latents were active at multiple layers because they translate the activations at every layer into a basis more similar to the basis of the output layer.
+
+The aggregate and single-prompt heatmaps (Figures~\ref{fig:heatmaps_with_tuned_lens_model_name_aggregate} and \ref{fig:heatmaps_with_tuned_lens_model_name_prompt}) indicate a modest increase in the degree to which latents are active at multiple layers compared with the standard approach.
+The variance ratios in Figure~\ref{fig:variances} clarify that the tuned-lens approach decreases the degree to which latents are active at multiple layers when aggregating over tokens.
+This ratio remains approximately constant as the expansion factor increases (between 37\% and 41\%).
+Conversely, the variances for a single token relative to a single latent are larger, i.e., the single-prompt heatmaps are more `spread out' compared with the standard approach, except for Pythia-410m (Figure~\ref{fig:variances_model_name}).
+
+\begin{figure}
+	\centering
+\begin{tikzpicture}
+	\begin{groupplot}[
+			width=5.5in,
+			height=1.5in,
+			group style={
+					group size=1 by 3,
+					vertical sep=0.25in,
+					xlabels at=edge bottom,
+				},
+			title style={font=\small},
+			every axis title/.style={at={(0.5,1.1)}},
+			enlargelimits=false,
+			axis on top,
+			xmin=0,
+			xmax=1,
+			xlabel={Latent},
+			ylabel={Layer},
+			y label style={anchor=south,at={(axis description cs:-0.05,.5)}},
+			xtick=\empty,
+			ytick align=outside,
+			tick pos=left,
+		]
+		\nextgroupplot[
+			title={Pythia-70m with tuned lens},
+			ytick={0.5,1.5,...,5.5},
+			yticklabels={$0$,,,,,$5$},
+		]
+		\addplot graphics [
+				xmin=0,
+				xmax=1,
+				ymin=0,
+				ymax=6,
+			] {heatmaps/with_tuned_lens/model_name/aggregate/pythia-70m-deduped-x64-k32.pdf};
+		\nextgroupplot[
+			title={Pythia-160m with tuned lens},
+			ytick={0.5,1.5,...,11.5},
+			yticklabels={$0$,,,,,,,,,,,$11$},
+		]
+		\addplot graphics [
+				xmin=0,
+				xmax=1,
+				ymin=0,
+				ymax=12,
+			] {heatmaps/with_tuned_lens/model_name/aggregate/pythia-160m-deduped-x64-k32.pdf};
+		\nextgroupplot[
+			title={Pythia-410m with tuned lens},
+			ytick={0.5,1.5,...,23.5},
+			yticklabels={$0$,,,,,,,,,,,,,,,,,,,,,,,$23$},
+		]
+		\addplot graphics [
+				xmin=0,
+				xmax=1,
+				ymin=0,
+				ymax=24,
+			] {heatmaps/with_tuned_lens/model_name/aggregate/pythia-410m-deduped-x64-k32.pdf};
+	\end{groupplot}
+\end{tikzpicture}
+
+	\caption{
+		Heatmaps of the distributions of latent activations over layers when aggregating over 10 million tokens from the test set.
+		Here, we plot the distributions for tuned-lens MLSAEs trained on Pythia models with an expansion factor of $\ExpansionFactor=64$ and sparsity $k=32$.
+		For standard MLSAEs, see Figure~\ref{fig:heatmaps_without_tuned_lens_model_name_aggregate}.
+		We note that a pre-trained tuned lens was not available for Pythia-1b.
+	}
+	\label{fig:heatmaps_with_tuned_lens_model_name_aggregate}
+\end{figure}
+
+\begin{figure}
+	\centering
+\begin{tikzpicture}
+	\begin{groupplot}[
+			width=5.5in,
+			height=1.5in,
+			group style={
+					group size=1 by 3,
+					vertical sep=0.25in,
+					xlabels at=edge bottom,
+				},
+			title style={font=\small},
+			every axis title/.style={at={(0.5,1.1)}},
+			enlargelimits=false,
+			axis on top,
+			xmin=0,
+			xmax=1,
+			xlabel={Latent},
+			ylabel={Layer},
+			y label style={anchor=south,at={(axis description cs:-0.05,.5)}},
+			xtick=\empty,
+			ytick align=outside,
+			tick pos=left,
+		]
+		\nextgroupplot[
+			title={Pythia-70m with tuned lens},
+			ytick={0.5,1.5,...,5.5},
+			yticklabels={$0$,,,,,$5$},
+		]
+		\addplot graphics [
+				xmin=0,
+				xmax=1,
+				ymin=0,
+				ymax=6,
+			] {heatmaps/with_tuned_lens/model_name/prompt/pythia-70m-deduped-x64-k32.pdf};
+		\nextgroupplot[
+			title={Pythia-160m with tuned lens},
+			ytick={0.5,1.5,...,11.5},
+			yticklabels={$0$,,,,,,,,,,,$11$},
+		]
+		\addplot graphics [
+				xmin=0,
+				xmax=1,
+				ymin=0,
+				ymax=12,
+			] {heatmaps/with_tuned_lens/model_name/prompt/pythia-160m-deduped-x64-k32.pdf};
+		\nextgroupplot[
+			title={Pythia-410m with tuned lens},
+			ytick={0.5,1.5,...,23.5},
+			yticklabels={$0$,,,,,,,,,,,,,,,,,,,,,,,$23$},
+		]
+		\addplot graphics [
+				xmin=0,
+				xmax=1,
+				ymin=0,
+				ymax=24,
+			] {heatmaps/with_tuned_lens/model_name/prompt/pythia-410m-deduped-x64-k32.pdf};
+	\end{groupplot}
+\end{tikzpicture}
+
+	\caption{
+		Heatmaps of the distributions of latent activations over layers for a single example prompt.
+		Here, we plot the distributions for tuned-lens MLSAEs trained on Pythia models with an expansion factor of $\ExpansionFactor=64$ and sparsity $k=32$.
+		The example prompt is ``When John and Mary went to the store, John gave'' \citep{wang_interpretability_2022}.
+		For standard MLSAEs, see Figure~\ref{fig:heatmaps_without_tuned_lens_model_name_prompt}.
+		We note that a pre-trained tuned lens was not available for Pythia-1b.
+	}
+	\label{fig:heatmaps_with_tuned_lens_model_name_prompt}
+\end{figure}
+
+
+
+\section{Discussion}
+
+\label{sec:discussion}
+
+We considered the activation vectors from different layers as different training examples, so we passed $\NumLayers\NumTokens$ vectors of length $\ModelDim$ to the autoencoder, where $\NumTokens$ is the number of tokens, $\NumLayers$ is the number of layers, and $\ModelDim$ is the dimension of the residual stream.
+This approach might be called a `data-stacked' MLSAE.
+An alternative would be a `feature-stacked' MLSAE, i.e., to concatenate the activation vectors from different layers into a single vector of dimension $\NumLayers\ModelDim$.
+This alternative might be better suited to capturing the notion of `cross-layer superposition,' which we take to mean a small number of simultaneously active sparse features at multiple layers encoding a single meaningful concept \citep{olah_next_2024,templeton_scaling_2024}.
+
+We began by pursuing the feature-stacked approach but discarded it.
+The essential issue is that a single set of sparse features describes the residual stream activations at every layer, which makes it difficult to understand how information flows through a transformer.
+For example, it would not be possible to plot the activations of sparse features across layers.
+Moreover, to compute this set of features, one must first compute the activations at every layer, which makes it more difficult to evaluate performance by traditional measures like single-layer reconstruction errors.
+Finally, the information encoded at one token position may differ substantially between layers due to self-attention.
+In the early layers, the representation is likely to primarily encode the input token and position embedding, whereas in the later layers, the representation may encode more complex properties of the surrounding context.
+It is not immediately apparent that jointly encoding this information by a single SAE is sensible.
+Instead, one might wish to separately capture the different information present at a token position across layers, which is allowed with our data-stacked approach.
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+
+We introduced the multi-layer SAE (MLSAE), where we train a single SAE on the activations at every layer of the residual stream.
+This allowed us to study both how information is represented within a single transformer layer and how information flows through the residual stream.
+
+We confirmed that residual stream activations are relatively similar across layers by looking at cosine similarities, before considering the distributions of latent activations over layers.
+When aggregating over a large sample of ten million tokens, we observed that most latents were active at multiple layers, but for a single prompt, most latent activations were isolated to a single layer.
+To quantify these observations, we computed the fraction of the total variance explained by individual latents and the fraction of the variance for an individual latent explained by individual tokens.
+This analysis confirmed that the degree to which latents are active at multiple layers when aggregating over tokens was large, increasing with the model size and expansion factor, and that the fraction of the variance explained by individual tokens was small.
+
+Understanding how representations change as they flow through transformers is critical to identifying meaningful circuits, which is a core task of mechanistic interpretability.
+Despite the utility of the residual stream perspective, our results demonstrate that representation drift, and perhaps the increasing magnitude of changes to the residual stream across layers, is a significant obstacle to identifying meaningful computational variables with SAEs.
+Nevertheless, we argue that an approach such as the MLSAE, which considers the representations at multiple layers in parallel, is necessary for future methods that seek to interpret the internal computations of transformer language models.
+
+
+
+
+

@@ -1,0 +1,296 @@
+\title{DreamFlow: High-quality text-to-3D generation by Approximating Probability Flow}
+
+\begin{abstract}
+Recent progress in text-to-3D generation has been achieved through the utilization of score distillation methods: they make use of the pre-trained text-to-image (T2I) diffusion models by distilling via the diffusion model training objective. 
+However, such an approach inevitably results in the use of random timesteps at each update, which increases the variance of the gradient and ultimately prolongs the optimization process.
+In this paper, we propose to enhance the text-to-3D optimization by leveraging the T2I diffusion prior in the generative sampling process with a predetermined timestep schedule. 
+To this end, we interpret text-to-3D optimization as a multi-view image-to-image translation problem, and propose a solution by approximating the probability flow.
+By leveraging the proposed novel optimization algorithm, we design {\ssname}, a practical three-stage coarse-to-fine text-to-3D optimization framework that enables fast generation of high-quality and high-resolution (i.e., 1024$\times$1024) 3D contents. 
+For example, we demonstrate that {\ssname} is 5 times faster than the existing state-of-the-art text-to-3D method, while producing more photorealistic 3D contents.\footnote{Visit \href{https://kyungmnlee.io/dreamflow.io/}{project page} for visualizations of our method.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+High-quality 3D content generation is crucial for a broad range of applications, including entertainment, gaming, augmented/virtual/mixed reality, and robotics simulation. However, the current 3D generation process entails tedious work with 3D modeling software, which demands a lot of time and expertise. 
+Thereby, 3D generative models~\citep{gao2022get3d, chan2022efficient, zeng2022lion} have brought large attention, yet they are limited by their generalization capability to creative and artistic 3D contents due to the scarcity of high-quality 3D dataset.
+
+Recent works have demonstrated the great promise of text-to-3D generation, which enables creative and diverse 3D content creation with textual descriptions~\citep{jain2022zero, mohammad2022clip, poole2022dreamfusion, lin2023magic3d, wang2023prolificdreamer, tsalicoglou2023textmesh}. 
+Remarkably, those approaches do not exploit any 3D data, while relying on the rich generative prior of text-to-image diffusion models~\citep{nichol2021glide, saharia2022photorealistic, balaji2022ediffi, rombach2022high}. 
+On this line, DreamFusion~\citep{poole2022dreamfusion} first proposed to optimize a 3D representation such that the image rendered from any view is likely to be that of sampled from reside in the high-density region of the pre-trained diffusion model. To this end, they introduced Score Distillation Sampling, which distills the pre-trained knowledge by the diffusion training objective~\citep{hyvarinen2005estimation}. 
+Since DreamFusion demonstrates the great potential of text-to-3D generation, subsequent studies have improved this technology by using different 3D representations and advanced score distillation methods~\citep{lin2023magic3d, wang2023prolificdreamer}.
+
+However, score distillation methods exhibit a high-variance gradient, which requires a lengthy optimization process to optimize a 3D representation. This limits the scalability to the usage of larger diffusion priors to generate high-quality and high-resolution 3D content ~\citep{podell2023sdxl}.
+This is in part due to the formulation of the score distillation method that aims to distill the diffusion prior of all noise level~(i.e., Eq.~\ref{eqn:ensvi}), where the noise timesteps are randomly drawn at each update.
+In contrast, conventional 2D diffusion generative processes implement a predetermined noise schedule that gradually transports the noise to the data distribution. 
+This leads us to the following natural question: How to emulate the diffusion generative process for text-to-3D generation?
+
+In this paper, we propose an efficient text-to-3D optimization scheme that aligns with the diffusion generative process. To be specific, unlike the score distillation sampling that uses the training loss of the diffusion model as an objective, our method makes use of the diffusion prior in the generative (or sampling) process, by approximating the reverse generative probability flow~\citep{song2020score, song2020denoising}.
+In particular, we have framed the text-to-3D optimization as a multi-view image-to-image translation problem, where we use Schrödinger Bridge problem~\citep{schrodinger1932theorie} to derive its solution with probability flow.
+Then, we propose to match the trajectory of the probability flow to that from the pre-trained text-to-image diffusion model to effectively utilize its rich knowledge.
+Lastly, we approximate the probability flow to cater to text-to-3D optimization and conduct amortized sampling to optimize multi-view images of a 3D representation. 
+Here, our approach implements a predetermined noise schedule during text-to-3D optimization, as the generative 2D diffusion model does.
+With our new optimization algorithm, we additionally present a practical text-to-3D generation framework, dubbed \textit{\ssname}, which generates high-quality and high-resolution 3D content~(see Figure~\ref{fig1}). 
+Our approach is conducted in a coarse-to-fine manner, where we generate NeRF, extract and fine-tune the 3D mesh, and refine the mesh with high-resolution diffusion prior~(see Figure~\ref{fig3}).
+
+Through experiments on human preference studies, we demonstrate that {\ssname} provides the most photorealistic 3D content compared to existing methods including DreamFusion~\citep{poole2022dreamfusion}, Magic3D~\citep{lin2023magic3d}, and ProlificDreamer~\citep{wang2023prolificdreamer}.
+We also show that {\ssname} outperforms ProlificDreamer with respect to CLIP~\citep{radford2021learning} R-precision score (in both NeRF generation and 3D mesh fine-tuning), while being 5$\times$ faster in generation.
+
+
+\section{Preliminary}
+
+\figone
+We briefly introduce the score-based generative models~(SGMs) in the general context, which encompasses the diffusion models~(DMs).
+Given the data distribution $\pdata(\xx)$, diffusion process starts off by diffusing $\xx_0\sim\pdata(\xx_0)$ with forward stochastic differential equation~(SDE) and the generative process is followed by reverse SDE for time $t\in[0,T]$, given as follows:
+\newtagform{emptyTag}{}{}
+\begin{equation*}
+\diff\xx = \drift(\xx,t) \diff\odetime + g(t)\diff\brown
+\text{,}\hspace*{5mm}
+\diff\xx = \big[\drift(\xx,t) - g^2(t)\nabla_{\xx}\log p_t(\xx)\big]\diff\odetime + g(t)\diff\brown\text{,}
+\tag{
+{\begin{minipage}[b][0pt][b]{.55em}\usetagform{emptyTag}\begin{equation}\label{eq:forward}\end{equation}\usetagform{default}\end{minipage}},\,%
+{\begin{minipage}[b][0pt][b]{.50em}\usetagform{emptyTag}\begin{equation}\label{eq:backward}\end{equation}\usetagform{default}\end{minipage}}
+}
+\end{equation*}
+where $\drift(\cdot,\cdot)$ and $g(\cdot)$ are the drift and diffusion coefficient, respectively, $\brown$ is a standard Wiener process, and $\nabla_{\xx}\log p_t(\xx)$ is a score function of the marginal density from Eq.~\ref{eq:forward}, where $p_0(\xx)=\pdata(\xx)$.  
+Interestingly, \citet{song2020score} show that there is a deterministic ordinary differential equation~(ODE), referred as \textit{Probability Flow ODE}~(PF ODE), which has same marginal density to $p_t(\xx)$ throughout its trajectory. The probability flow ODE is given as follows:
+\begin{equation}\label{eq:ode}
+    \diff\xx = \bigg[\drift(\xx,t) - \frac{1}{2}\sigma^2(t)\nabla_{\xx}\log p_t(\xx)\bigg]\diff \odetime\text{.}
+\end{equation}
+Here, the forward SDE is designed that $p_T(\xx)$ is sufficiently close to a tractable Gaussian distribution, so that one can sample from data distribution by reverse SDE or PF ODE.
+In particular, we follow the setup of \citep{karras2022elucidating} to formulate the diffusion model, where we let $\drift(\xx,t)=\boldsymbol{0}$, $g(t)=\sqrt{2\dot\sigma(t)\sigma(t)}$ for a decreasing noise schedule $\sigma:[0,T]\rightarrow\mathbb{R}_{+}$. Also, we denote $p(\xx;\sigma)$ be the smoothed distribution by adding i.i.d Gaussian noise of standard deviation $\sigma$. Then the evolution of a sample $x_1\sim p(x_1;\sigma(t_1))$ from time $t_1$ to $t_2$ yields $\xx_2\sim p(\xx_2;\sigma(t_2))$ with following PF ODE: 
+\begin{equation}\label{eq:ode-dm}
+    \diff \xx = -\dot\sigma(t) ~\sigma(t) ~\nablaxx \log p \big( \xx; \sigma(t) \big) \diff\odetime \text{,}
+\end{equation}
+where dot denotes time-derivative. In practice, we solve ODE by taking finite steps over discrete time schedule, where the derivative is evaluated at each timestep~\citep{karras2022elucidating, song2020denoising}. 
+
+\vparagraph{Training diffusion models.}
+The diffusion model trains a neural network that approximates a score function of each $p(x;\sigma)$ by using \textit{Denoising Score Matching}~(DSM)~\citep{hyvarinen2005estimation} objective.
+In specific, let us denote a denoiser $D(\xx;\sigma)$ that minimizes the weighted denoising error for samples drawn from data distribution for all $\sigma$, i.e., 
+\begin{equation}\label{eq:DSM}
+\mathbb{E}_{\xx_0 \sim \pdata}\mathbb{E}_{\noise \sim \mathcal{N}(\boldzero, \sigma^2\boldsymbol{I})} \big[\lambda(\sigma)\, \lVert D(\xx_0 + \noise; \sigma) - \xx_0 \rVert^2_2\big]\text{,}
+\end{equation}
+then we have $\nablaxx \log p(\xx; \sigma) = \big( D(\xx; \sigma) - \xx \big) / \sigma^2$, where $\lambda(\sigma)$ is a weighting function and $\noise$ is a noise. 
+The key property of diffusion models is that the training and sampling are disentangled; one can use different sampling schemes with same denoiser.
+
+\vparagraph{Text-to-image diffusion models.}
+Text-to-image diffusion models~\citep{nichol2021glide, saharia2022photorealistic, rombach2022high} are conditional generative models that are trained with text embeddings. 
+They utilize classifier-free guidance~(CFG)~\citep{ho2022classifier}, which learns both conditional and unconditional models, and guide the sampling by interpolating the predictions with guidance scale $\omega$: $D^{\omega}(\xx;\sigma,\yy) = (1+\omega) D(\xx;\sigma, \yy) - \omega D(\xx; \sigma)$, where $\yy$ is a text prompt.
+Empirically, $\omega>0$ controls the tradeoff between sample fidelity and diversity.
+CFG scale is important in text-to-3D generation, as for the convergence of 3D optimization~\citep{poole2022dreamfusion, wang2023prolificdreamer}.
+
+\subsection{Text-to-3D generation via Score Distillation Sampling}\label{subsec:text-to-3d}
+Text-to-3D synthesis aims to optimize a 3D representation resembling the images generated from text-to-image diffusion models when rendered from any camera pose. 
+This can be viewed as learning a differentiable image generator $g(\theta,c)$ where $\theta$ is a parameter for generator and $c$ is a condition for image rendering (e.g., camera pose). 
+For 3D application, we consider optimizing Neural Radiance Fields~(NeRFs)~\citep{mildenhall2021nerf} and 3D meshes with differentiable rasterizers~\citep{laine2020modular, munkberg2022extracting}.
+Throughout the paper, we omit $c$ and write $\xx=g(\theta)$, unless specified.
+
+\vparagraph{Score Distillation Sampling (SDS)~\citep{poole2022dreamfusion}.} SDS is done by differentiating the diffusion training objective~(Eq.~\ref{eq:DSM}) with respect to the rendered image $\xx=g(\theta)$. 
+Formally, the gradient of SDS loss is given as follows:
+\begin{equation}\label{eq:sds}
+    \nabla_\theta \mathcal{L}_{\textrm{SDS}}\big(\theta;\xx=g(\theta)\big) = \mathbb{E}_{t,\noise}\bigg[\lambda(t)\big(\xx - D_p(\xx+\noise;\sigma(t))\big) \frac{\partial\xx}{\partial\theta} \bigg]\text{.}
+\end{equation}
+Intuitively, the SDS perturbs the image $\xx$ with noise scaled by randomly chosen timestep $t$, and guide the generator so that the rendered image moves to the higher density region. 
+One can interpret the SDS as the gradient of probability density distillation loss~\citep{oord2018parallel}, which is equivalent to a weighted ensemble of variational inference problem with noise scales given as follows:
+\begin{equation}\label{eqn:ensvi}
+    \underset{\theta}{\arg\min}
+    ~\mathbb{E}_{t, \noise} \big[\lambda(t)D_{\textrm{KL}}\big(q(\xx;\sigma(t))\,\|\, p(\xx;\sigma(t))\big)\big]\text{,}~~\text{for}~~\xx=g(\theta)\text{,}
+\end{equation}
+where we denote $q(\xx)$ as an implicit distribution of the rendered image $\xx=g(\theta)$.  
+It has been shown that SDS requires higher CFG scale than conventional diffusion sampling~(e.g., $\omega=100$), which often leads to blurry and over-saturated output. 
+
+\vparagraph{Variatioanl Score Distillation (VSD)~\citep{wang2023prolificdreamer}.}
+To tackle the limitation of SDS, VSD solves Eq.~\ref{eqn:ensvi} with particle-based variational inference~\citep{chen2018unified} method principled by Wasserstein gradient flow~\citep{liu2017stein}.
+To approximate the Wasserstein gradient flow, it involves assessing the score function of rendered images $\nabla_{\xx}\log q(\xx;\sigma)$, thus they propose to train auxiliary diffusion model for approximation. 
+In practice, they use low-rank adapter~\citep{hu2021lora} to fine-tune the diffusion model during the optimization by minimizing Eq.~\ref{eq:DSM} with respect to the rendered images.
+Let us denote the fine-tuned diffusion model $D_q(\cdot\,;\sigma)$, then the gradient of VSD loss is given by 
+\begin{equation}\label{eq:vsd}
+    \nabla_\theta \mathcal{L}_{\textrm{VSD}}\big(\theta;\xx=g(\theta)\big)= \mathbb{E}_{t,\noise}\bigg[ \lambda(t) \big(D_q(\xx+\noise;\sigma(t)) - D_p(\xx+\noise;\sigma(t))\big) \frac{\partial \xx}{\partial \theta}\bigg]\text{.}
+\end{equation}
+Note that Eq.~\ref{eq:vsd} is equivalent to Eq.~\ref{eq:sds} if we consider an ideal denoiser, i.e., $D_q(\xx+\noise;\sigma)=\xx$.
+In contrast to SDS, VSD allows CFG scale as low as conventional diffusion samplers (e.g., $\omega=7.5$), thus resulting in highly-detailed and diverse 3D scene. 
+Despite its promising quality, VSD requires a considerably long time to generate a high-quality 3D content. 
+\subsection{Schrodinger Bridge Problem}\label{subsec:sbp}
+Schrödinger Bridges~(SB) problem ~\citep{schrodinger1932theorie, leonard2013survey}, which generalizes SGM to nonlinear structure~\citep{chen2021likelihood}, aims at finding the most likely evolution of distribution between $\xx_0\sim p_A(\xx_0)$ and $\xx_T\sim p_B(\xx_T)$ with following forward and backward SDEs:
+\begin{equation*}
+\diff\xx = [\drift+g^2\nabla_{\xx} \log \Phi_t(\xx)]\diff t+g(t)\diff\brown
+\text{,}\hspace*{2mm}
+\diff\xx = [\drift-g^2\nabla_{\xx}\log \hat{\Phi}_t(\xx)]\diff t+g(t)\diff\brown\text{,}
+\tag{
+{\begin{minipage}[b][0pt][b]{0.5em}\usetagform{emptyTag}\begin{equation}\label{eq:sbforward}\end{equation}\usetagform{default}\end{minipage}},\,%
+{\begin{minipage}[b][0pt][b]{1.0em}\usetagform{emptyTag}\begin{equation}\label{eq:sbbackward}\end{equation}\usetagform{default}\end{minipage}}
+}
+\end{equation*}
+where $\Phi_t,\hat{\Phi}_t$ are Schrödinger factors satisfying the boundary conditions $\Phi(\xx,0)\hat{\Phi}(\xx,0)=p_A(\xx)$ and $\Phi(\xx,T)\hat{\Phi}(\xx,T)=p_B(\xx)$.
+Eq.~\ref{eq:sbforward} and Eq.~\ref{eq:sbbackward} induce the same marginal density $p_t(\xx)$ almost surely and the solution of evolutionary trajectory satisfies Nelson's duality~\citep{nelson2020dynamical}: $p_t(\xx) = \Phi_t(\xx)\hat{\Phi}_t(\xx)$. 
+Note that SGM is a special case of SB if we set $\Phi_t(\xx)=1$ and $\hat{\Phi}_t(\xx)=p_t(\xx)$ for $t\in[0,T]$.
+SB is used for solving various image-to-image translation problems~\citep{su2022dual, meng2021sdedit,liu20232}. 
+ 
+
+
+
+\section{DreamFlow: Elucidated text-to-3D optimization}
+
+We present \emph{\ssname}, an efficient text-to-3D optimization method by solving probability flow ODE for multi-view 3D scene.
+At high level, we aim at emulating the generative process of diffusion models for text-to-3D optimization, instead of utilizing diffusion training objective as in SDS.
+This is done by approximating the solution trajectory of probability flow ODE to transport the views of a 3D scene into the higher density region of data distribution learned by diffusion model.
+This, in turn, provides faster 3D optimization than SDS, while ensuring high-quality.
+
+\vparagraph{Challenges in solving probability flow ODE in 3D optimization.
+} 
+However, it is not straightforward to utilize PF ODE for text-to-3D optimization as is, because of the inherent differences between 2D sampling and 3D optimization. 
+First, unlike 2D diffusion sampling which starts off from Gaussian noise, the multi-view images of a 3D scene are initialized by the 3D representation.
+As such, it is natural to cast text-to-3D optimization as a multi-view Schrödinger Bridge problem.
+Second, text-to-3D generation requires transporting multi-view images to the data distribution, which precludes the application of well-known image-to-image translation method~(e.g., SDEdit~\citep{meng2021sdedit}). 
+To overcome those challenges, we first derive a PF ODE that solves SB problem~(Section~\ref{subsec:method1}), and present a method that approximates probability flow for text-to-3D optimization~(Section~\ref{subsec:method2}). 
+Finally, we introduce {\ssname}, which leverages proposed optimization algorithm for efficient and high-quality text-to-3D generation~(Section~\ref{subsec:method3}).
+
+\figtwo
+
+\subsection{Probability flow ODE for Schrödinger Bridge problem}\label{subsec:method1}
+We consider the Schrödinger Bridge problem of transporting rendered image to the data distribution, while using the diffusion prior.
+Let $q(\xx)$ be the distribution of rendered image $\xx=g(\theta)$. Our goal is to solve SB problem that transports $\xx\sim q(\xx)$ to $\pdata$ by solving the reverse SDE in Eq.~\ref{eq:sbbackward}. 
+To leverage the rich generative prior of pre-trained diffusion model, our idea is to match the marginal density of the evolution of SB by the density $p_t$, where its score function can be estimated by pre-trained diffusion model $D_p$.
+Then from Nelson's duality, we have $\Phi(\xx,t)\hat{\Phi}(\xx,t)= p_t(\xx)$, where it is equivalent to $\nabla_{\xx}\log \hat{\Phi}_t(\xx) = \nabla_{\xx}\log p_t(\xx) - \nabla_{\xx} \log \Phi_t(\xx)$. 
+By plugging it into Eq.~\ref{eq:sbbackward}, we have our SDE and the corresponding PF ODE given as follows:
+\begin{equation}\label{eq:ourode}
+    \diff \xx = \bigg[\drift(\xx,t) - \frac{1}{2}g^2(t)\left(\nabla_{\xx}\log p_t(\xx) - \nabla_{\xx}\log \Phi_t(\xx)\right)\bigg]\diff\odetime\text{.}
+\end{equation}
+While the score function $\nabla_{\xx}\log p_t(\xx)$ can be estimated by pre-trained diffusion model, $\nabla_{\xx}\log \Phi_t(\xx)$ is intractable in general. 
+One can simply let $\Phi(\xx,t)=1$, which is indeed equivalent to SDEdit~\citep{meng2021sdedit}, but this might results in convergence to a low-density region due to its high variance as similar to SDS.
+Instead, we directly approximate $\nabla_{\xx}\log\Phi_t(\xx)$ by leveraging SGM. \citet{liu20232} showed that $\nabla_{\xx}\log\Phi_t(\xx)$ is indeed a score function of the marginal density of forward SDE~(Eq.~\ref{eq:forward}) for $\xx\sim q(\xx)$.
+Thus, we approximate the score $\nabla_{\xx}\log \Phi_t(\xx)$ by learning a SGM with the sample $\xx\sim q(\xx)$. 
+Following \citep{wang2023prolificdreamer}, this is done by fine-tuning the diffusion model $D_\phi$, initialized from $D_p$, using a low-rank adapter~\citep{hu2021lora}.
+
+\subsection{Approximate Probability Flow ODE (APFO)}\label{subsec:method2}
+Since the forward SDE has a non-linear drift, Eq.~\ref{eq:ourode} is no longer a diffusion process. 
+Thus, we approximate the score functions $\nabla_{\xx}\log p_t(\xx)$ and $\nabla_{\xx}\log \Phi_t(\xx)$ by adding noise $\noise$ to the sample $\xx$, and use diffusion models $D_p$ and $D_\phi$, respectively. 
+Then the Eq.~\ref{eq:ourode} with diffusion models is given by
+\begin{equation}\label{eq:ourode-dm}
+    \diff\xx = \bigg[ \frac{\dot\sigma(t)}{\sigma(t)} \left(D_{\phi}(\xx+\noise;\sigma(t)) - D_p(\xx+\noise;\sigma(t))  \right)\bigg]\diff\odetime\text{,}
+\end{equation}
+where we note that the same noise $\noise$ is passed to diffusion models to lower the variance.
+Also, we use decreasing sequence of noise levels $\sigma(t)$ to ensure convergence to the data distribution. 
+
+\vparagraph{Amortized sampling.}
+The remaining challenge is to update the multi-view images within a 3D scene. 
+To this end, we use a simple amortized sampling~\citep{feng2017learning}.
+Given an image renderer $g(\theta,c)$ with camera pose parameter $c$, we randomly sample multiple camera poses to update a whole scene at each timestep. 
+Formally, given a decreasing noise schedule $\sigma(t)$ with timesteps $\{t_i\}_{i=1}^N$ (i.e., $\sigma(t_1) >\cdots>\sigma(t_N)$), we randomly sample $\ell_i$ different views at each timestep $t_i$, and update $\theta$ using the target obtained by Eq.~\ref{eq:ourode-dm}. For $t=t_1,\ldots,t_N$ and for $\ell=1,\ldots, \ell_i$, we do 
+\begin{align}\label{eq:final}
+\begin{split}
+    &\theta \leftarrow \underset{\theta}{\argmin}~\lVert g(\theta,c) - {\tt{sg}}(\xx +(t_{i+1}-t_i)\boldsymbol{d}_i) \rVert_2^2, ~~\text{where}~~\xx=g(\theta,\cc)\text{, and}~\\
+    &\boldsymbol{d}_i = \frac{\sigma(t_{i+1})-\sigma(t_i)}{\sigma(t_i)}\big(D_\Phi(\xx+\noise;\sigma(t_i)) - D_q(\xx+\noise;\sigma(t_i))\big)\text{.}
+\end{split}
+\end{align}
+Here $\tt{sg}$ is a stop-gradient operator. We refer our optimization method as \textit{approximate probability flow ODE}~(APFO), which we provide visual explanation in Figure~\ref{fig2}, and the algorithm in Algorithm~\ref{alg:1}.
+Remark that we set different timestep schedules for different 3D optimization stages. For example, when optimizing NeRF from scratch, we start from large timestep to fully exploit the generative knowledge of diffusion model. When we fine-tune the 3D mesh, we set smaller initial timestep to add more details without changing original contents. 
+\vparagraph{Comparison with score distillation methods.}
+The key difference of our method and score distillation methods is their objective in leveraging generative diffusion prior. Score distillation methods directly differentiate through diffusion training loss~(i.e., Eq.~\ref{eq:DSM}), while our approach aim at matching the density of sampling trajectory. 
+We remark that Eq.~\ref{eq:ourode-dm} is similar to Eq.~\ref{eq:vsd} as they both contain subtraction of score functions, but the difference occurs in its scaling of gradient flow. 
+Empirically, our approach gradually minimizes the loss, while score distillation methods results in fluctuating loss (and norm of gradients)~(see Figure~\ref{fig_landscape}).
+This often results in content shifting during optimization, resulting in bad geometry as well. 
+\figthree
+
+\subsection{Coarse-to-fine text-to-3D optimization framework}\label{subsec:method3}
+We present our coarse-to-fine text-to-3D optimization framework {\ssname}, which utilizes {\sname} in training 3D representations.
+{\ssname} is consists of three stages; first we train the NeRF from scratch. Second, we extract 3D mesh from the NeRF and fine-tune.
+Finally, we refine 3D mesh with high-resolution diffusion prior to enhance aesthetic quality. Our framework is depicted in Figure~\ref{fig3}.
+
+\vparagraph{Stage 1: NeRF optimization.} 
+We optimize NeRF from scratch by using multi-resolution hash grid encoder from Instant NGP~\citep{muller2022instant} with MLPs attached to predict RGB colors and densities. 
+ 
+We use the latent diffusion model~\citep{rombach2022high} as a diffusion prior. 
+During training, we render 256$\times$256 images and use {\sname} with initial timestep $t_1$ = 1.0 decrease to $t_N$ = 0.2 with $\ell$ = 5 views. 
+We use the total of 800 dense timesteps unless specified.
+
+\vparagraph{Stage 2: 3D Mesh fine-tuning.}
+We convert the neural field into the Signed Distance Field~(SDF) using the hash grid encoder from the first stage. Following \citep{chen2023fantasia3d}, we disentangle the geometry and texture by optimizing the geometry and texture in sequence. 
+During geometry tuning, we do not fine-tune $D_\phi$ and let $D_\phi(\xx;\sigma)=\xx$ as done in ProlificDreamer~\citep{wang2023prolificdreamer}.
+For geometry tuning, we use timesteps from $t_1=0.8$ to $t_N=0.4$, and for texture tuning, we use timesteps from $t_1=0.5$ to $t_N=0.1$. We all use $\ell=5$. 
+
+\vparagraph{Stage 3: Mesh refinement.}
+We refine the 3D mesh using high-resolution diffusion prior, SDXL refiner~\citep{podell2023sdxl}, which is trained to enhance the aesthetic quality of an image. 
+During refinement, we render the image with resolution of 1024$\times$1024, and use $t_1=0.3$ to $t_N=0.0$ with $\ell=10$. Here we use timestep spacing of 10, which suffices to enhance the quality of 3D mesh.
+
+\figfour
+
+
+\section{Experiment}
+
+
+Throughout the experiments, we use the text prompts in the DreamFusion gallery\footnote{\url{https://dreamfusion3d.io/gallery.html}} to compare our method with the baseline methods DreamFusion~\citep{poole2022dreamfusion}, Magic3D~\citep{lin2023magic3d}, and ProlificDreamer~\citep{wang2023prolificdreamer}.
+\vparagraph{Qualitative comparisons.} 
+In Figure~\ref{fig4}, we present qualitative comparisons between the baseline methods. 
+We take baseline results from figures or videos in respective papers or websites.
+Compared to SDS-based approach such as DreamFusion and Magic3D, our approach presents more photorealistic details and shapes. 
+When compared to ProlificDreamer, our approach results in more photorealistic details (e.g., eyes are more clearly represented for chimpanzee, and shadows are more clearly depicted in cactus) by exploiting high-resolution diffusion prior.
+
+\vparagraph{User preference study.}
+We conduct user studies to measure the human preference compared to baseline methods. 
+Then we construct three binary comparison tasks (total 60 comparison) to rank between {\ssname} and each baseline method. Results are in Table~\ref{table:userstudy}. Compared to DreamFusion, Magic3D, and ProlificDreamer, {\ssname} consistently wins on photorealism. 
+While DreamFusion remains better, ours shows on par or better performance against more recent methods, Magic3D and ProlificDreamer, on 3D consistency and prompt fidelity.
+\vparagraph{Quantitative comparison.}
+For quantitative evaluation, we measure the CLIP~\citep{radford2021learning} R-precision following the practice of DreamFusion~\citep{poole2022dreamfusion}. 
+We compare with DreamFusion and ProlificDreamer on NeRF generation, and Magic3D and ProlificDreamer for 3D mesh fine-tuning.
+For NeRF generation comparison, we randomly select 100 text prompts from DreamFusion gallery and reproduce results for ProlificDreamer. For DreamFusion, we simply take videos from their gallery. 
+For 3D mesh fine-tuning comparison, we select 50 NeRF representations from previous experiment, and reproduce Magic3D and ProlificDreamer using open-source implementation
+We do not conduct mesh refinement for fair comparison. 
+For evaluation, we render 120 views with uniform azimuth angle, and compute CLIP R-precision using various CLIP models (ViT-L/14, ViT-B/16, and ViT-B/32).
+Table~\ref{tab:clip_stage1} and Table~\ref{tab:clip_stage2} presents the results, which show that our method achieves better quantitative score compared to prior methods. 
+
+\vparagraph{Optimization efficiency.} 
+We show the efficiency of our method through comparing the generation speed. Note that we use a single A100 GPU for generating each 3D content. For the NeRF optimization, we train for 4000 iterations with resolution of 256, which takes 50 minutes. 
+For mesh fine-tuning, we tune the geometry for 5000 iterations and texture for 2000, taking 40 minutes in total. Lastly, we refine mesh for 300 iterations, which takes 20 minutes. In sum, our method takes about 2 hours for a single 3D content generation. 
+In comparison, DreamFusion takes 1.5 hours using 4 TPU v4 chips in generating NeRF with resolution of 64, and Magic3D takes 40 minutes using 8 A100 GPUs in synthesizing 3D mesh with resolution of 512.
+ProlificDreamer requires 5 hours in generating NeRF, 7 hours in mesh tuning. 
+While Magic3D and DreamFusion could be faster using larger computing power, {\ssname} generates more photorealistic and high-resolution 3D content. 
+
+\tabletwo
+\tablethree
+\figstage
+\vparagraph{Optimization analysis.}
+We compare the optimization processes of {\sname} and VSD by comparing the values of loss and gradient norm per optimization iteration. For VSD, we compute loss as in Eq.~\ref{eq:final}, which is equivalent to Eq.~\ref{eq:vsd} in effective gradient. 
+In Figure~\ref{fig_landscape}, we plot the loss values and gradient norms during NeRF optimization with each {\sname} and VSD. 
+Remark that the loss and gradient norm gradually decrease for {\sname}, while they fluctuates for VSD. 
+This is because of the randomly drawn timestep during optimization, which makes optimization unstable. 
+  
+
+\vparagraph{Effect of each optimization stage.}
+In Figure~\ref{figstage}, we provide qualitative examples on the effect of coasre-to-fine optimization. While {\ssname} generates high-quality NeRF, mesh tuning and refinement enhances the fidelity by increasing the resolution and using larger diffusion prior.
+
+\figseven
+
+
+\section{Related Work}
+
+\vparagraph{Text-to-3D generation.}
+Recent works have demonstrated the promise of generating 3D content using large-scale pre-trained text-to-image generative models without using any 3D dataset. 
+Earlier works used CLIP~\citep{radford2021learning} image-text models for aligning 2D renderings and text prompts~\citep{jain2022zero, mohammad2022clip}. 
+DreamFusion~\citep{poole2022dreamfusion} present text-to-3D generation by distilling score function of text-to-image diffusion model. 
+Concurrently, Score Jacobian Chaining~(SJC)~\citep{wang2023score} established another approach to use 2D diffusion prior for 3D generation. 
+Magic3D~\citep{lin2023magic3d} extends DreamFusion to higher resolution 3D content creation by fine-tuning on 3D meshes. 
+Other works~\citep{chen2023fantasia3d, tsalicoglou2023textmesh} focused on designing better geometry prior for text-to-3D generation.
+ProlificDreamer~\citep{wang2023prolificdreamer} enabled high-quality 3D generation by using advanced score distillation objective.
+All the prior works resort to score distillation methods, while we first demonstrate probability flow ODE based approach to accelerate the 3D optimization. 
+\vparagraph{Transferring 2D diffusion priors.}
+Due to the success of score-based generative models~\citep{song2020score}, especially diffusion models~\citep{ho2020denoising} have led to the success on text-to-image synthesis~\citep{nichol2021glide, saharia2022photorealistic, rombach2022high, balaji2022ediffi}. 
+Many recent studies focus on transferring the rich generative prior of text-to-image diffusion models to generate or manipulate various visual contents such as images, 3D representations, videos, with text prompts~\citep{brooks2023instructpix2pix,haque2023instruct,kim2023collaborative, hertz2023delta}.
+Our approach also shares the objective in exploiting the diffusion models, where utilizing {\sname} to synthesize various visual contents is an interesting future work.
+
+
+
+\section{Conclusion}
+
+We propose {\ssname}, which enables high-quality and fast text-to-3D content creation. Our approach is built upon elucidated optimization strategy which approximates the probability flow ODE of diffusion generative models catered for 3D scene optimization. 
+As a result, it significantly streamlines the 3D scene optimization, making it more scalable with high-resolution diffusion priors. 
+By taking this benefit, we propose three stage 3D scene optimization framework, where we train NeRF from the scratch, fine-tune the mesh extracted from NeRF, and refine the 3D mesh using high-resolution diffusion prior. 
+Through user preference studies and qualitative comparisons, we show that {\ssname} outperforms prior state-of-the-art method, while being 5x faster in its generation. 
+
+\paragraph{Limitation.}
+Since we are using pre-trained diffusion priors that do not have 3D understanding, the results may not be satisfactory in some cases. Also, the unwanted bias of pre-trained diffusion model might be inherited.
+
+
+

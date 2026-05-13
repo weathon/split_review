@@ -1,0 +1,214 @@
+\title{Towards Neural Architecture Search through Hierarchical Generative Modeling}
+
+\begin{abstract}
+Neural Architecture Search (NAS) is gaining popularity in automating designing deep neural networks for various tasks. 
+A typical NAS pipeline begins with a manually designed search space which is methodically explored during the process, aiding the discovery of high-performance models.
+Although NAS has shown impressive results in many cases, the strong performance remains largely dependent on, among other things, the prior knowledge about good designs which is implicitly incorporated into the process by carefully designing search spaces.
+In general, this dependency is undesired, as it limits the applicability of NAS to less-studied tasks and/or results in an explosion of the cost needed to obtain strong results.
+In this work, our aim is to address this limitation by leaning on the recent advances in generative modelling -- we propose a method that can navigate an extremely large, general-purpose search space efficiently, by training a two-level hierarchy of generative models.
+The first level focuses on micro-cell design and leverages Conditional Continuous Normalizing Flow (CCNF) and the subsequent level uses a transformer-based sequence generator to produce macro architectures for a given task and architectural constraints.
+To make the process computationally feasible, we perform task-agnostic pretraining of the generative models using a metric space of graphs and their zero-cost (ZC) similarity.
+We evaluate our method on typical tasks, including CIFAR-10, CIFAR-100 and ImageNet models, where we show state-of-the-art performance compared to other low-cost NAS approaches.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Designing more accurate and efficient deep neural networks (DNNs) has been one of the primary areas of focus in machine learning research in recent years. However, developing a novel architecture is often accompanied by burdensome trial-and-error in an attempt to find an optimal DNN configuration. More recently, this process has been aided by a broad family of algorithms designed to automate optimizing a machine learning (ML) system. Among those, Neural Architecture Search (NAS) (Zoph & Le, 2017) emerged as a subfield of ML focused specifically on finding the best working DNN from a pre-defined discrete set of candidates (often referred to as a search space). While NAS approaches have proven effective in many cases, often noticeably improving upon manual efforts, their usability remains limited by several challenges (White et al., 2023), from search efficiency and robustness to transferability across different datasets and/or tasks. In this paper, we focus on advancing NAS by tackling one of the challenges that remain somewhat overlooked, possibly due to its particular complexity – the challenge of being limited by the initial NAS search space, which is often rigid and hand-crafted. In practice, although carefully designed search spaces can improve NAS performance (Radosavovic et al., 2020), e.g. decreasing search time or improving the chance of finding good-performing architectures, it limits the applicability of NAS approaches to those tasks where strong/sensible search spaces are available. More importantly, by definition, the performance of any NAS approach is strictly associated with the quality of its search space – even the best searching algorithm can only produce results as good as the best candidate model from within the search space.  
+
+The existence of this inherent relationship between the statistical properties of a search space and the cost-performance trade-off in NAS is well-known. It has motivated researchers to explore the problem of designing better search spaces, resulting in several methods attempting to automate this process (Zhou et al., 2021; Hu et al., 2021; 2020). Generally speaking, automated search space design methods can be seen as mappings from one search space to another, $S\rightarrow A$ , where typically $A\subset{S}$ and $|A|\ll|S|$ . In other words, these methods focus on identifying a subset $(A)$ of a larger search space $(S)$ that exhibits desired statistical properties, which is then used by a chosen NAS algorithm to find individual models. Compared to performing NAS directly on $S$ , they are more efficient due to the relaxed objective in the first stage, effectively resulting in hybrid systems combining coarse and fine-grained searching. However, these approaches still need to carefully design the initial search space $S$ (e.g., as a pre-defined super network in Zhou et al. (2021)), limiting the final NAS performance in a way similar to classical methods. On the other hand, although we can make $S$ much larger and still search efficiently via automated search space design, this is not necessarily scalable to the levels that would allow us to avoid design bias in general. For example, existing approaches that focus on pruning or evolving a large initial $S$ often rely on repeating a variation of the NAS process multiple times to provide feedback for updating $S$ . This is also subject to bias, e.g. when assessing the fitness of different subspaces, and will almost certainly result in non-negligible additional cost (Zhou et al., 2021; Ci et al., 2021).  
+
+In contrast, our goal is to scale the initial search space $S$ to sizes unattainable by previous works, in an attempt to provide a more general-purpose mechanism with less dependence on the initial design of $\boldsymbol{S}$ . Simply put, we want to include as many models in $S$ as possible, without worrying too much about the resulting computational cost or human effort of doing so. In order to navigate the resulting large space efficiently and in a context-dependant way, we are inspired by the recent advances in generative ML (Grathwohl et al., 2019) which shows impressive results in modelling highly-dimensional conditional distributions of various modalities such as images, text or speech. To extend this high-level idea to distributions of neural networks, we propose a hierarchical approach which breaks down the generation into several steps: 1) first, we learn a reversible, continuous latent space of micro/cell designs in which “similar” designs cluster together – this is achieved by training a Graph Variational Autoencoder (G-VAE) regularized by the zero-cost (ZC) similarity of different graphs; 2) then, we introduce a Conditional Continuous Normalizing Flow (CCNF) model as a way of finding “synonymous designs” in the G-VAE space efficiently; 3) finally, a decoder-only sequence generator (SG) is trained to design macro architectures – for a user-defined conditioning it outputs a sequence of cells to form a full model, with architectural details of individual cells being abstracted away through the notion of a “cell type” obtained from the previous steps. The full process is schematically depicted in Fig. 1 with Sec. 3 discussing each step in detail. In summary, our work contributes in the following ways:  
+
+• We extend existing ZC proxies into a multidimensional vector form, studying their clustering behaviour on network graphs and their effectiveness. • We employ semi-supervised learning for a G-VAE to achieve a reversible encoding of graphs into a latent space, preserving the property of the ZC space and we further perform clustering. This approach further enables us to quantize the graph design space into multiple “synonyms” sets without compromising graph performance and costs. • We use a CCNF model to efficiently navigate the latent space of the G-VAE, which results in efficiently generated candidate cell (graph) architectures under specific conditions. • We construct a decoder-only transformer to integrate with graph generation, forming a hierarchical network architecture generation mechanism that supports user-defined conditioning.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+Automated NAS Search Space Design. Optimizing NAS search spaces in an automated manner has attracted extensive interest recently, e.g. by progressively constraining the degree of freedom of the network design space (Radosavovic et al., 2020), interchangeably shrinking and expanding the initial search space (Ci et al., 2021), or employing evolutionary algorithms to evolve the initial space to an optimal subspace Zhou et al. (2021). Schrodi et al. (2023) propose a unifying framework to design hierarchical NAS search spaces with context-free grammars and use Bayesian optimization to search efficiently. Despite their differences in how to find the optimized subspaces, most of the existing approaches still need to iteratively evaluate the fitness of subspaces, i.e., assessing the performance of models within them, which often results in significant cost. A large body of work has been developed to speed up model performance evaluation in general NAS context (Pham et al., 2018; Dudziak et al., 2020; Abdelfattah et al., 2021; Mellor et al., 2021; Xiang et al., 2023a), e.g., zero-cost proxies (Abdelfattah et al., 2021; Mellor et al., 2021; Xiang et al., 2023a) have been shown to correlate well with final trained accuracies, with negligible cost to compute.  
+
+Flow-based Models. Compared to other types of generative models (Creswell et al., 2018; Kingma & Welling, 2013), flow-based models are more efficient to sample, while being more stable to train and free of mode collapse and convergence issues, showcasing impressive performance in various generation tasks (Abdal et al., 2021; Yang et al., 2019; Li et al., 2022). Existing works often consider the continuous normalizing flows (CNF) (Grathwohl et al., 2019) based on neural ODEs (Chen et al., 2018), which are able to impose conditions (e.g., attributes) during the sampling process, and thus control certain properties of the generated output, e.g., generating attribute-semantic edits (Abdal et al., 2021) or super-resolution (Lugmayr et al., 2020) of images. Our work is based on the existing work on flow-based models, but to the best of our knowledge, we are the first to show that it is feasible to employ CCNFs to generate optimized neural architectures, balancing performance and efficiency.  
+
+![](images/71f6ad1dccf06a20b2453488282f8e525089e4d5fc47dd40a2127f82f8b89161.jpg)  
+Figure 1: Overview of the proposed approach. $\bullet$ We start from a large micro search space $\Omega$ , and $\pmb{\mathcal{C}}$ train a G-VAE with triplet margin loss and use a GMM to partition the latent space into clusters. $\pmb{\mathcal{\wp}}$ A CCNF model is then trained to generate synonym cells given a reference $r$ . $\pmb{\mathbb{o}}$ We explore the high-level search space Sˆ with ageing evolution and the trained CNF, and $\pmb{\mathcal{G}}$ the set of explored architectures $\{\alpha\}$ is used to train a SG, which is able to generate the desired $\hat{\alpha}$ given a condition token (CT) $y$ . $\pmb{\mathfrak{o}}$ The final architecture is then generated from $\hat{\alpha}$ using the CCNF and G-VAE decoder.  
+
+Neural Architecture Generation. Neural architecture generation (NAG) has recently become a popular topic in the NAS community (Lee et al., 2021; Yu et al., 2023; An et al., 2023). Compared to conventional NAS, NAG methods often resort to some forms of generative models, such as diffusion models (An et al., 2023) or Generative Pre-Trained (GPT) models (Yu et al., 2023), aiming to generate candidate architectures with desired properties. Our work bears some resemblance to these methods, but are fundamentally different: $^{\,l}$ ) instead of direct search/generation, we consider a hierarchical paradigm to efficiently explore the tremendously large initial search space; 2) we consider a synonymous micro design approach leveraging the clustering properties of architectures, to effectively discover high-performing cells from given references; and 3) we use a vector form of zero-cost proxies throughout the micro and macro design, achieving desired trade-off between cost to compute and transferability across different tasks.  
+
+
+
+\section{3 METHOD  }
+
+
+This section outlines the technical details of our method and search space. We begin by discussing clustering of similar micro designs in an invertible fashion in Sec. 3.1, then follow with synonym generation using a CCNF model in Sec. 3.2. Finally, we discuss full model generation with a decoder-only transformer in Sec. 3.3, while the search space details can be found directly below.  
+
+Micro search space. Our micro design space consists of any directed graph with up to 6 operation nodes, 1 input node and 1 output node. Operation nodes can be assigned one of 28 operations from the literature (9 op. types with 3 kernel size each $^+$ skip connection), and the $n^{\mathrm{th}}$ node can have up to $n$ inputs – one for each previous node; values of different inputs are added before executing a selected operation. Each cell design includes the number of channels and stride as hyperparameters – operations within a cell are not allowed to change dimensions of intermediate results (unless internal to an operation), and a relevant projection is performed automatically before executing a cell to adjust input channels and possibly reduce spatial dimensions. Overall, without accounting for isomorphism and cell hyperparameters, the micro design space spans approximately up to $1\bar{0^{17}}$ configurations. Formally, the micro space is a set of pairs $\boldsymbol{\Omega}^{*}{=}\left\{\left(\mathbf{\dot{A}},\mathbf{F}\right)\right\}$ where $\mathbf{A}\in\{\dot{0},1\}^{8\times8}$ is an adjacency matrix and $\mathbf{F}\in\{0,1\}^{8\times13}$ is a feature matrix encoding operation type and kernel size (1-hot over the first 10 and last 3 dimensions). Details about operations can be found in App. B.  
+
+Macro search space. The macro search space is then defined as a sequence of up to 20 different cells $x_{i}~\in~\Omega$ , with each cell being additionally parametrized by the number of channels $c_{i}~\in$ $C\,=\,\{8,16,...,1024\}$ and stride $\bar{s_{i}^{\bar{}}}\in\{1,2\}$ , for $\dot{i}=1,2,...,20$ . If we assume different triples $t_{i}=[x_{i},c_{i},s_{i}]$ to be unique designs, the overall search space is then a set of all sequences of any 20 such triples $S=(\Omega\times C\times\{1,2\})^{20}$ and we can estimate the total number of points to be up to $(|\Omega|*127*2)^{20}\approx10^{390}$ . We will use $\alpha(t_{1},t_{2},...,t_{20})\in S$ to refer to particular design points in the overall search space.  
+
+
+
+\section{3.1 CLUSTERING MICRO DESIGNS  }
+
+
+Training a macro model generator to find high-quality models directly in such a large search space is obviously challenging. In order to simplify this task, we want to abstract away details of individual designs by automatically identifying families of similar cells. Later, the sequence generator only has to decide a family for each cell and the task of finding high-performance designs within each selected family is delegated to a lower-level search in the hierarchy.  
+
+Formally, given a metric space of micro designs $(\Omega,d)$ , where $d(a,b)$ is a distance metric between designs $a$ and $b$ proportional to their relative quality, our goal is twofold: $^{\,l}$ ) to partition $\Omega$ into a finite number of $K$ clusters $\hat{\Omega}_{k=1,...,K}$ based on the metric $d;2,$ ) to be able to sample new designs from each cluster easily.  
+
+The first important choice here is the metric $d$ - naively relying on accuracy is undesired for two reasons: $^{\,l}$ ) computing accuracy for a large number of models can be extremely expensive, a common challenge in NAS, but also 2) it is known that different models can exhibit very different performance on different downstream tasks (Duan et al., 2021; Tu et al., 2022) – since we want to avoid bias towards any particular downstream task, we need something else.1 To address this, we propose to use a generalized form of ZC proxies instead, by computing a vector of $P$ proxies for a semi-fixed point from $S$ . Specifically, for a micro design $x\in\Omega$ , we define its ZC vector $z:\Omega\to\mathbb{R}^{P}$ as:  
+
+$$
+\begin{array}{r l}&{z(x)=\bigl[z_{\alpha_{x}}^{(1)},z_{\alpha_{x}}^{(2)},...,z_{\alpha_{x}}^{(P)}\bigr],\quad\mathrm{where:}\quad\alpha_{x}=\alpha(t_{1},t_{2},...,t_{17})\quad\mathrm{s.t.}}\\ &{\qquad t_{i}=[x,c_{i},s_{i}],\quad c_{i}=16*2^{\lfloor\frac{i}{6}\rfloor},\quad s_{i}=\left\{\!\!\begin{array}{l l}{2}&{\mathrm{if~}i\in\{6,12\}}\\ {1}&{\mathrm{otherwise}}\end{array}\!\!\right.}\end{array}
+$$  
+
+and $z_{\alpha_{x}}^{(i)}$ refers to computing the $i^{\mathrm{th}}$ zero-cost proxy for the model $\alpha_{x}$ obtained by stacking the same cell design into the above predefined macro structure. Note that the ZC vector, while related to the original ZC metrics, serves a fundamentally different purpose – instead of strictly ordering models, which is a challenging task, we only use it to cluster designs that are likely to train to similar performance. Although the difference might seem nuanced, it is crucial for our method. Consider a simple proxy of the number of parameters. For example, sometimes very large models are desired if working with large datasets, and sometimes small ones might be a better option. While there is no universal answer to choosing the right model size, we can reasonably expect if one small model works well, other small models should not be fundamentally wrong choices, and vice versa. This reasoning is the foundation for our design clustering. Given $z$ , the metric $d$ is then defined as $d(a,b)=L1(z(a),z(b))$ . We will refer to this particular form as ZC-similarity2. In our experiments, we use a vector of 4 common proxies: $^{\,l}$ ) NASWOT (Mellor et al., 2021), 2) SNIP-SSNR (Xiang et al., 2023b), 3) number of parameters (Ning et al., 2021), 4) FLOPS.  
+
+Following the choice of the metric $d$ , we employ a Gaussian Mixture Model (GMM) to identify different clusters in the ZC space. Specifically, we fti a mixture of multivariate normal distributions, parameterized with factors $\pi_{i}$ and their means and variances $\mu_{i},\sigma_{i}$ , to the observed values of $z$ :  
+
+$$
+p(z)=\sum_{i=1}^{K}\pi_{i}\mathcal{N}(z|\mu_{i},\sigma_{i}),
+$$  
+
+using the expectation-maximization algorithm. After that, models are assigned to clusters based on which component of the mixture they are most likely to belong to – this means one cluster is modelled by one component of the GMM with $\mu_{i}$ as its center. The number of clusters is decided by plateauing Bayesian and Akaike information criterions.  
+
+The above provides us with a way of identifying families of cells, as shown in Fig. 2(a), but navigating the space $\bar{\Omega}$ is still hard since we do not have a way of quickly providing designs that would belong to a certain family. To address this, we further learn an invertible mapping to a continues latent space $f:\Omega\rightarrow\mathbb{R}^{m}$ in which $L1$ distance approximates $d$ , i.e., $(F,L1)\approx(\bar{\Omega},q)$ , where $\boldsymbol{F}=\{f(\boldsymbol{x})\}_{x\in\Omega}$ is the set of embedded designs in this latent space and $\forall_{a,b\in\Omega}L1(f(a),f(b))\propto d(a,b)$ . This is done by training a G-VAE model (Kipf & Welling, 2016) additionally regularized with a triplet margin loss (Balntas et al., 2016) and an auxiliary ZC predictor $q$ which tries to predict $z(x)$ from $f(x)$ :  
+
+![](images/2fd08961574fe7691c4996a13d10510865276e10221aafb196c5a235b35fed60.jpg)  
+Figure 2: (a) Example of 4 clusters of micro designs identified with a GMM w.r.t. the ZC vectors $z$ . (b) t-SNE visualization of the latent space obtained from a G-VAE trained naively vs. (c) using triplet loss regularization (the same 4 clusters highlighted). Unregularized space does not preserve ZC similarity of the models.  
+
+$$
+\begin{array}{r}{\mathcal{L}_{\mathrm{VAE}}=\overbrace{\mathbb{E}_{p(f|x)}\mathrm{log}\,p(\tilde{x}|f)}^{-\overbrace{\mathrm{KL}[p(f|x)\,|\,|\,p(f)]}^{}}}\\ {+\underbrace{\mathbb{E}_{x,a,b}\operatorname*{max}\left\{d(x,a)^{2}-d(x,b)^{2}+m,0\right\}}_{\mathrm{triplet\,margin}}+\underbrace{\mathbb{E}_{x}(q(f(x))-z(x))^{2}}_{\mathrm{predictor\,(MSE)}},}\end{array}
+$$  
+
+where $p(f|x)$ and $p(\tilde{x}|f)$ are distributions of encoded and reconstructed points, respectively; $m$ is a margin term and triples $x,a,b\in\Omega^{3}$ are chosen s.t. for an anchor $x$ , $a$ and $b$ are positive and negative examples, respectively. In practice, to ensure the decoder of the G-VAE can correctly decode as many points in the latent space as possible, it is important to scale its training set as much as possible. However, computing $z(x)$ and related distances $\bar{d(a,b)}$ might easily become a bottleneck; therefore, we decided not to compute the regularization term in Eq. 5 all the time and only limit it to a relatively small random subset of all training points. After the $\mathrm{G}$ -VAE is trained, we can approximate $f$ and $f^{-1}$ with its encoder and decoder, respectively.  
+
+Given the G-VAE and the GMM, we can efficiently realize all required functionality of identifying clusters, finding a cluster to which a model belongs and sampling from clusters. The resultant latent space and its clustering properties w.r.t. $z$ when trained naively vs. using our proposed regularization is illustrated in Fig. 2(b)-(c) – clearly, the regularized space preserves original clustering much better.  
+
+
+
+\section{3.2 GENERATING SYNONYMOUS MICRO DESIGNS  }
+
+
+At this point, we have identified $K$ different families of cells and have an easy way of sampling from $\Omega$ in a structured way thanks to our latent space. However, recall that we aim to be able to find high-performance designs in each family efficiently – this is still challenging since $K\ll|\Omega|$ , meaning each cluster is still extremely big. To make the problem more approachable, for now, we will relax it to the problem of robustly finding synonyms of different designs – assuming we already know an example high-performance reference design $r$ , we want $p(x|r)$ to be a distribution of designs with their accuracy centred around that of $r$ . This problem is much simpler and should in fact be solvable by directly leveraging the properties of our latent space. In particular, $p(x|r)$ could be realized by sampling a neighborhood of $r$ in the latent space: $f^{\bar{-}1}(f(r)+\epsilon),\epsilon\sim\bar{\mathcal{N}}$ . However, we observe that even in a simple case of CIFAR-10 classification as a downstream task, a naive sampling strategy like this leaves some room for improvement, which we attribute to the sheer amount of possible models and imperfections of the VAE latent space.  
+
+To further improve sampling, let us first denote $p(x|r)$ in the latent space of the G-VAE as $p(f|r)$ . We follow Liu et al. (2019) and utilize a CCNF formulation (Chen et al., 2018; Abdal et al., 2021) to map $\mathcal{N}$ to $p(f|r)$ by running forward in time from $u_{0}^{\rightarrow}=\epsilon$ to $\begin{array}{r}{u_{T}^{\rightarrow}=u_{0}^{\rightarrow}+\int_{t=0}^{T}g(u_{t},t,z(r))d t,}\end{array}$ according to the dynamics parameterized by a neural network $g$ . By repeating the forward process for different samples $\epsilon$ and a given reference $r$ we can obtain a distribution of generated designs:  
+
+![](images/6159126e155be8e45e908bc14afd51f2753a57874530a6951a7c653bcadb4ebb.jpg)  
+
+Figure 3: Training and sampling processes of the proposed G-VAE and CCNF models.   
+
+![](images/e61b604e9655977cb8a48020de918d63167a8a0c2f8e5dbfc78c9a7b09be218c.jpg)  
+
+Table 1: Comparison of different approaches of sampling the G-VAE latent space. Neighbourhood and CCNF are reference-based (see Sec. 3.2) and we test them by giving the best cell from NATSBench-TSS (Dong et al., 2021) as a reference. All macro models constructed using $\alpha_{x}$ from Eq. 1.  
+
+$p(u_{T}^{\to}|r)$ . To ensure $p(u_{T}^{\to}|r)$ approximates $p(f|r)$ , parameters of $g$ are fit to minimize negative log-likelihood of generating $\boldsymbol{f}(\boldsymbol{r})$ from $z(r)$ , following the reverse process:  
+
+$$
+\begin{array}{r l}&{\mathcal{L}_{\mathrm{CCNF}}=\mathbb{E}_{p(r)}-\log p(u_{T}^{\leftarrow}|r)=\mathbb{E}_{p(r)}\Big[-\log p\big(u_{0}^{\leftarrow}\big)+\int_{t=0}^{T}\mathrm{Tr}\Big(\mathbf{J}_{u_{t}}g(u_{t},t,z(r))\Big)d t\Big],}\\ &{\qquad\qquad\qquad\mathrm{where:}\quad u_{T}^{\leftarrow}=f(r),\ u_{0}^{\leftarrow}=u_{T}^{\leftarrow}-\int_{t=0}^{T}g\big(u_{t},t,z(r)\big)d t,}\end{array}
+$$  
+
+and $\ensuremath{\mathbf{J}}_{u_{t}g}$ is Jacobian of $g$ w.r.t. $u_{t}$ . Conditioning on the reference $r$ is done using the same $z(r)$ encoding as in Sec. 3.1 for consistency with the G-VAE. We use Hutchinson’s trace estimator to efficiently estimate the trace in Eq. 6 (Grathwohl et al., 2019) and optimize using gradient descent via the adjoint method (Chen et al., 2018). Furthermore, similar to training the G-VAE, to scale training of the CCNF without evaluating $z(r)$ for the excessive amount of models, we utilize the previously trained predictor $q$ .  
+
+After training finishes, $p(x|r)$ is recovered by simply applying the G-VAE decoder to the samples generated by the CCNF. The overall training and sampling process is summarized in Fig. 3. We validate the quality of designs generated by the CCNF and compare it to naive sampling in the latent space in Tab. 1. We can see that samples from the CCNF are focused closer to the reference compared to naive sampling of the neighbourhood – this results in almost 1 percentage point higher average accuracy of the sampled models and better best- and worst-case performance. Notably, by sampling with a CCNF we are able to find a better design, while neighbourhood sampling fails to achieve this.  
+
+
+
+\section{3.3 MACRO ARCHITECTURE GENERATION  }
+
+
+Clustering the micro design space and being able to generate high-performance architectures from each cluster efficiently enables us to factorize the search space $S$ into a two-level hierarchy by replacing individual points from $\Omega$ with identified clusters: $\hat{S}=(\{\hat{\Omega}_{k}\}_{k=1}^{K}\times C\times\{1,2\})^{20}$ . This in turn reduces the space of macro designs from c. $10^{390}$ to $(K|C||S|)^{20}\approx10^{78}$ . We will refer to $\hat{S}$ as higher-level (HL) search space to distinguish it from the original $S$ . Similarly, we will call elements of $\hat{S}\operatorname{HL}$ designs/sequences and denote them with $\hat{\alpha}(\hat{t}_{1},...,\hat{t}_{20})$ .  
+
+Within the $\mathrm{HL}$ search space, each triple $\hat{t}$ represents a large number of different possible triples $t$ , rdeespoelnvdei tnhgi so, nb uwth iwceh  fdaecsei gtnh $x$ pirs osbelleecmt eodf  fsreolemc tai nclgu as treer $\hat{x}\in\{\hat{\Omega}_{k}\}_{k=1}^{K}$ .–  iWf ew we aanltr etao duys ek noourw  Ca CstNrFo ntgo design point, we can use it and focus our search towards similar designs; this is related to summarizing each cluster with an approximation of $\mathrm{min}_{x\in\hat{x}}\,\mathcal{L}(\alpha_{x})$ . However, knowing good designs in advance is a strong assumption. Therefore, we opt for a simpler but more realistic approach of using the most representative models from each cluster as reference – this is conveniently done by conditioning the  
+
+CCNF on each cluster’s mean $\mu_{i}$ , and is more closely related to considering $\mathbb{E}_{x\in\hat{x}}\mathcal{L}(\alpha_{x})$ . Formally, for the HL design $\hat{\alpha}\in\hat{S}$ , a random design $\alpha(\hat{\alpha})\in S$ can be defined as:  
+
+$$
+\begin{array}{r l}&{\alpha(\hat{\alpha})=\alpha(t_{1},...,t_{20}),\quad\mathrm{where:}\quad t_{i}=[\omega(\hat{x}_{i}),\hat{c}_{i},\hat{s}_{i}],}\\ &{\quad\quad\quad\omega(\hat{x})=f^{-1}\Big(\epsilon+\displaystyle\int_{t=0}^{T}g(u_{t},t,\mu(\hat{x}))\Big),}\end{array}
+$$  
+
+$[\hat{x}_{i},\hat{c}_{i},\hat{s}_{i}]=\hat{t}_{i}$ are elements of $\mathrm{HL}$ design $\hat{\alpha}$ and $\mu({\hat{x}})$ is the mean of cluster $\hat{x}$ .  
+
+Having chosen a strategy to sample from each cluster, we then start considering different HL designs for the purpose of training a macro architecture generator. Our goal is to train a sequence generator (SG) $h$ that would propose different parametrized cells in an autoregressive fashion, given a starting condition $y$ : $\hat{t}_{i}=\bar{h(...,\hat{t}_{i-1},y)}$ . The conditioning token $y$ is similar to the one used for CCNF and guides the generation process towards macro designs with high-level parameters similar to those in $y$ . In particular, in our experiments we use $y$ to constrain FLOPs and parameters. We use decoder-only transformer (Radford et al., 2018) model for $h$ . Specifically, we fine-tune a pretrained GPT-Neo-125M model provided by Black et al. (2021), by minimizing the negative log-likelihood of generating observed macro sequences from their relevant values of $y$ . However, naively training the SG on a random sample of models would result in effectively performing a random search among the models meeting the requested $y$ . To mitigate this, we run an evolutionary search (ES) in the HL space (using a CCNF to construct cells) to find designs that maximize T-CET, a state-of-the-art zero-cost proxy (Xiang et al., 2023b), for various size constraints. We then train the SG on the history of the ES, resulting in a bias towards models navigating the trade-off between T-CET and parameters:  
+
+$$
+\begin{array}{r l}{\mathcal{L}_{\mathrm{SG}}=\mathbb{E}_{\hat{\alpha}\in H}\displaystyle\sum_{i}-\log\,p(\hat{t}_{i}|...,\hat{t}_{i-1},y),\quad\mathrm{where:}}&{\,y=z(\alpha(\hat{\alpha})),}\\ &{\qquad\qquad\qquad H\approx\underset{\hat{\alpha}}{\arg\operatorname*{max}}\,\,\mathrm{T}\mathrm{CET}(\alpha(\hat{\alpha})),}\end{array}
+$$  
+
+$\hat{t}_{i}$ are elements of sequence $\hat{\alpha}$ and Eq. 11 refers to performing the ES (details of the HL-Evo algorithm can be found in App. C). Overall, after the training has finished, the distribution of architectures generated for a given condition $y$ can be summarized as:  
+
+$$
+\begin{array}{r}{p(\alpha|y)=p(\alpha(\hat{\alpha})),\quad\mathrm{where}\quad\hat{\alpha}=[\hat{t}_{1},...,\hat{t}_{20}],\quad\mathrm{s.t.}\quad\hat{t}_{i}=h(...,\hat{t}_{i-1},y),}\end{array}
+$$  
+
+and randomness is introduced through $\epsilon$ in $\alpha(\hat{\alpha})$ (see Eq. 8-9). Note that we employ deterministic sampling at the macro level.  
+
+Final model selection. The above sampling procedure is supposed to produce a small, optimized search space for a given conditioning $y$ . As such, it should be used with a separate searching algorithm on top of the generated models. Although many approaches could be tried, for simplicity and to keep the cost low, we opted for using a simple selection based on T-CET in our experiments. Different searching strategies are compared in App. E.1.  
+
+
+
+\section{4 EVALUATION  }
+
+
+We evaluate our method on the typical datasets: CIFAR-10, CIFAR-100 (Krizhevsky, 2009) and ImageNet-1k (Deng et al., 2009), abbreviated C-10, C-100 and IN-1k, respectively. To test generalizability of our method to less-studied tasks, we also evaluate on the recently-proposed NAS-Bench-360 (NB360, Tu et al. (2022)).  
+
+Pretraining details. Details about pretraining can be found in App. A. The total pretraining cost is around 30 GPU hours on a single V100 GPU, and the most time consuming part is running the ES for training the SG (14 GPU hours). On the other hand, training the G-VAE and the CCNF takes only 5.5 GPU hours in total. Note that the cost is paid once for all reported experiments.  
+
+Hidden cost. Additionally to the NAS-specific cost above, our method relies on having access to a pretrained GPT. Although GPTs have become increasingly available, if a model like that had to be trained from scratch (e.g., due to legal issues) it would incur relatively high additional cost. Specifically, Brown et al. (2020) report total compute to train GPT-3 125M to be $2.\overline{{25}}\times10^{20}$ FLOPs, which translates to approx. 910 GPU hours using a A100 GPU (assuming FP32 with $44\%$ of the peak tensor utilisation, c.f. Tab. 1 by Narayanan et al. (2021)).  
+
+
+
+\section{4.1 SYSTEMATIC COMPARISON ON CIFAR AND IMAGENET  }
+
+
+We begin by comparing our method to other approaches based on zero-cost proxies in a controlled setting where all models are trained using exactly the same protocol, architecture constraints and (max) search budget. We also ablate our method by progressively adding different components and quantifying their effects when performing a search in our search space (which we call GraphNet). The results are presented in Tab. 2.  
+
+![](images/851f7733c3b13951641c9253b1bf075168840ff0942c42473128c15288b32270.jpg)  
+Table 2: Comparison with SOTA ZC NAS. All methods were run using the same protocol: up to “ZC evals.” models were scored using a selected ZC proxy, where model selection was guided with either evolution, HL evolution, or our SG. The top- $\mathcal{N}$ models according to each proxy were trained and the best one is reported – for CIFARs, $N{=}10$ , for IN-1k, $N{=}1$ . Constraints denoted under each dataset’s name, models that violate these were discarded. “Cost” refers to searching cost in GPU hours.  
+
+![](images/c115dfe04e9d693740a788d90cba7b44da09fc207fddbfce92b76cbceb9292fd.jpg)  
+Table 3: Comparison with various NAS approaches on ImageNet-1k for budgets of 450M, 600M and 1000M FLOPs. All numbers other than “Ours” are directly taken from relevant papers. OS – One-Shot, SN – supernet, ZC – zero-cost. Cost in GPU hours.  
+
+We compare to evolution-based ZC NAS approaches: ZenNAS (Lin et al., 2021), ZiCo (Li et al., 2023) and T-CET (Xiang et al., 2023b). We do not compare to supernet-based ZC NAS, such as TE-NAS (Chen et al., 2021) or Zero-Cost-PT (Xiang et al., 2023a), since constructing a supernet for those methods is impossible in our search space. Overall, we can see that models designed in the GraphNet search space using our proposed generative models achieve superior performance – we attribute this simply to the fact that our search space is much larger, i.e., it is a strict superset of ZenNet design space. However, we can also see that simply increasing the search space size is not enough – when naively using existing methods in our large space, the performance is likely to drop even for a fairly large computational budget (e.g., Evo(T-CET), which is the best on ZenNet, drops by 0.8 percentage points on both C-10 and C-100 when run in the GraphNet space). Compared to these methods, by utilizing our G-VAE and CCNF and running evolution in the HL space, we can already improve upon all existing methods while being significantly cheaper (HL-Evo) – this is primarily due to the informative organization of the search space (Sec. 3.1). Finally, we can amortize the cost of running the HL ES each time by training our SG, which then allows us to achieve comparable, if not slightly better, performance in a matter of minutes – this property is desired since it allows us to mitigate the “cold start” problem in NAS, addressed by some recent work (Zhao et al., 2023). More experiments using different algorithms on our GraphNet space can be found in App. E.2.  
+
+
+
+\section{4.2 OPEN-WORLD COMPARISON ON IMAGENET  }
+
+
+Here we compare to other NAS approaches that can be found in the literature without requiring them to run in an aligned setting – the only common trait is the models should be (roughly) smaller than 450M FLOPs. Our focus is on positioning our work w.r.t. the state-of-the-art approaches in the 3 most relevant lines of work: 1) zero-cost and low-cost NAS, 2) automated search space design, and 3) generative NAS. We present detailed comparison in Tab. 3, including our best effort to highlight any differences in search spaces and training schemes. We can see that our method achieves very strong performance while requiring minimal computation resources. The only two methods that achieve better results are OFA (when initialized with weights from the supernet) and GPT NAS. However, the former requires extensive pretraining while the latter is almost $33\times$ larger (the authors do not report FLOPs so we included the model size, but it probably violates the FLOPs constraint as well). Results of our method are averaged from searching 3 times, each time training the resulting network once.  
+
+Table 4: Results on the tasks from NB360. Metrics and baselines follow what is reported by Shen et al. (2022). Lower is better for all tasks. Best in bold, second best underlined. For the ECG task, we consider Ours to be better than DASH due to the lower searching cost.   
+
+![](images/fc33dca6fac759ba61bc3db7e3f6bff9f188ff8dfe1381c5c5a4f550d84ddcc5.jpg)  
+
+
+
+\section{4.3 NAS-BENCH-360  }
+
+
+To run on NB360, we first have to decide on a sensible conditioning for our SG. Unfortunately, unlike the previous benchmarks, NB360 does not have well-established constraints that we could use and compare to other methods with a similar budget — to resolve this, we decided to use #params and #FLOPs of the Wide-ResNet (WRN) as this is the most basic baseline considered by Tu et al. (2022). Similar to the above, we generate 10 architectures, use T-CET to select the best, then train it. We compare to DASH (Shen et al., 2022), which is a recent NAS method designed specifically with NB360 in mind, and expert-designed networks in Tab. 4. We can see our generative approach achieves very competitive performance. Importantly, we are able to improve upon the WRN reference in 5/8 cases. What is more, we improve upon DASH in 4/8 cases, despite DASH performing supernet training and HPO for each task, whereas we do not use any feedback. Note that due to amortised cost of training the SG we are also much faster — generating models for new tasks take minimal time. Still, there is room for improvement, considering our method fails noticeably on DeepSEA and Satellite tasks. We leave investigating those failure cases for future work.  
+
+
+
+\section{5 LIMITATIONS, DISCUSSION AND FUTURE WORK  }
+
+
+Reliance on ZC proxies. Our method heavily relies on ZC proxies – we do that in order to organise a large search space like ours in a meaningful way without incurring a prohibitively large comp. cost; to the best of our knowledge, there is no better alternative at the moment. Having said that, ZC proxies are known to not always produce faithful scoring of networks (White et al., 2021; Ning et al., 2021). Although we try to avoid the most common failure cases by relying on clustering rather than strict ordering, our assumptions might still not hold in general. On the other hand, due to the paradigm shift in our work, we show a new direction for future research on ZC proxies focused on relative performance – our work shows that this approach can be more powerful even in settings where existing proxies are known to work well (e.g., CIFAR). Another possible direction would be to incorporate feedback mechanism to efficiently adjust network generation in an online fashion.  
+
+Conditioning. Currently micro cells are generated based on cluster centers – this is simple and shown to work well in our case, but in the end leaves room for improvement. The method could also be extended to include more explicit conditioning on the target task (currently #FLOPs and #params).  
+
+On-device performance. On-device performance is important for the practical deployment of models, but we did not consider it a direct objective for simplicity, instead relying on device-agnostic metrics such as a number of parameters and FLOPs. Extending our work to be able to design networks optimized for a particular device is a very sensible direction for future work.  
+
+Transformers. Although transformers keep playing increasingly important role, for the time being we do not consider them in our search space. Extending our codebase to support hybrid convolutionattention models is an exciting direction for future work.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+We have presented a novel method to efficiently generate high-performance DNN architectures for user-defined architectural constraints, by using an elaborated hierarchy of generative models, guided by the clustering properties of zero-cost proxies. Our approach achieves state-of-the-art performance on common tasks, including avg. $78.3\%$ , $79.5\%$ and $\bar{80.6\%}$ top-1 accuracy on ImageNet-1k for the budgets of 450M, 600M and 1000M FLOPs. We hope our work serves as a proof of concept that generative methods can be successfully used for NAS without incurring prohibitive cost.  
+
+
+
+

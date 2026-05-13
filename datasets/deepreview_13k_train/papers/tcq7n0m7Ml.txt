@@ -1,0 +1,506 @@
+\title{EMS: Adaptive Evict-then-Merge Strategy for Head-wise KV Cache Compression Based on Global-Local Importance}
+
+\begin{abstract}
+
+As large language models (LLMs) continue to advance, the demand for higher quality and faster processing of long contexts across various applications is growing. 
+KV cache is widely adopted as it stores previously generated key and value tokens, effectively reducing redundant computations during inference. 
+However, as memory overhead becomes a significant concern, efficient compression of KV cache has gained increasing attention. 
+Most existing methods perform compression from two perspectives: identifying important tokens and designing compression strategies. 
+However, these approaches often produce biased distributions of important tokens due to the influence of accumulated attention scores or positional encoding. 
+Furthermore, they overlook the sparsity and redundancy across different heads, which leads to difficulties in preserving the most effective information at the head level. 
+To this end, we propose EMS to overcome these limitations, while achieving better KV cache compression under extreme compression ratios. 
+Specifically, we introduce a Global-Local score that combines accumulated attention scores from both global and local KV tokens to better identify the token importance. 
+For the compression strategy, we design an adaptive and unified Evict-then-Merge framework that accounts for the sparsity and redundancy of KV tokens across different heads. 
+Additionally, we implement the head-wise parallel compression through a zero-class mechanism to enhance efficiency. 
+Extensive experiments demonstrate our SOTA performance even under extreme compression ratios. 
+EMS consistently achieves the lowest perplexity, improves scores by over 1.28 points across four LLMs on LongBench under a 256 cache budget, and preserves 95\% retrieval accuracy with a cache budget less than 2\% of the context length in the Needle-in-a-Haystack task.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{section:intro}
+Large language models (LLMs) \citep{devlin2018bert,GPT3,anil2023palm,llama3,mistral} have demonstrated remarkable capabilities across various domains, such as question answering \citep{jiang2021can,lazaridou2022internet}, retrieval systems \citep{ram2023context,xu2023retrieval}, logical reasoning \citep{chain_of_thought,liu2023evaluating}, and code generation \citep{roziere2023code, liu2024your}, {\it etc.}
+With growing application demands for LLMs, the requirement to manage long sequences \citep{longlora,jin2024llm,chen2023extending} is also increasing. 
+So far, GPT-4 \citep{gpt4} can process approximately 128K tokens, Gemini-Pro-1.5 \citep{gemini} handles about 1M tokens, and Kimi-Chat can process up to 2M tokens.
+These developments pose significant challenges to the inference efficiency of LLMs. 
+One key acceleration technique is the KV cache, where the key-value (KV) states generated during inference are stored in GPU memory to avoid redundant computation and improve processing efficiency. 
+However, the size of the KV cache grows with the length of the input sequence, which severely limiting the applicability of LLMs \citep{yuan2024llm}. 
+Therefore, efficiently compressing the KV cache while preserving essential information has become a critical issue.
+
+Extensive researches have been carried out to address it. 
+Specifically, StreamingLLM \citep{sink} first discovered the sink mechanism and achieved infinite output by retaining the initial and local tokens. 
+Subsequent works mainly approached this issue from two perspectives: ({\it i}) extracting the most important parts of the generated KV tokens, and ({\it ii}) designing compression strategies to preserve more information. 
+For example, H2O \citep{H2O} focuses on globally important tokens, while SnapKV \citep{Snapkv} concentrates on tokens with higher relevance within a local window size. 
+However, due to cumulative effects of attention weights and positional encoding, the selected tokens exhibit a biased tendency: H2O favors earlier information, while SnapKV leans towards later context.
+Building upon lightweight token compression methods \citep{tome,A-vit,PRANCE}, existing approaches are generally categorized into evict-based and merge-based methods.
+However, a unified and effective approach that combines evict and merge for extreme KV cache compression is still largely unexplored.
+Therefore, we pose the following question:
+
+\noindent \textbf{\emph{Can we select important KV tokens in a more balanced manner while retaining as much information as possible at a high compression ratio?}}
+To answer this question, we decouple the compression of KV cache into two stages: selecting important tokens and compressing the KV cache based on those selections.
+Under this workflow, we propose \sysname, a head-wise {\bf E}vict-then-{\bf M}erge {\bf S}trategy based on Global-Local importance, as illustrated in Figure \ref{main framework}.
+Building on the token importance bias, we dynamically integrate the global- and local-aware importance and construct a more balanced Global-Local score, which serves as the fundamental indicator for efficient compression. 
+Specifically, the score is calculated by aligning the accumulated attention scores of all KV tokens and recent KV tokens.
+This approach not only ensures a more balanced selection of important KV tokens, but also mitigates biases caused by attention accumulation and positional encoding.
+
+For the compression strategy, the observed differences in sparsity and redundancy across different heads suggest that applying head-wise eviction and merging can potentially achieve a higher compression ratio.
+Building on this, we propose a unified Evict-then-Merge strategy at the fine-grained head level to improve storage density.
+In particular, the most irrelevant tokens will first be evicted, leaving only the tokens with higher importance scores for further compression.
+A subset of the remaining tokens is then selected as class centers based on their higher importance, with less important tokens being merged into these centers.
+However, as not all tokens are suitable for merging due to low redundancy, those with low similarity to important KV tokens are evicted to minimize output disturbance. 
+To ensure parallel inference during head-wise merging and eviction, we introduce a zero-class center where evicted tokens are merged, treating the eviction process as a special case of merging.
+Additionally, this step allows for a dynamic merge ratio for each head, ensuring a more adaptive and efficient compression.
+\sysname~achieves extreme compression while preserving the capabilities of LLMs, boosting scores by more than 1.28 points on four LLMs in LongBench with a 256 cache budget, and retaining 95\% retrieval accuracy using under 2\% of the context length in the Needle-in-a-Haystack task.
+To summarize, our contribution can be generalized as:
+
+\setlist{topsep=0pt, partopsep=0pt, parsep=0pt, itemsep=0.1pt}
+
+\begin{itemize}
+\item [(1)] \textbf{We design a more balanced Global-Local score for important token selection.}
+Our Global-Local score automatically integrates global and local attention of KV tokens, reducing bias and ensuring more balanced token selection across different tasks.
+\item [(2)] \textbf{We propose a sparsity- and redundancy-driven Evict-then-Merge compression strategy.} 
+Based on the head-wise sparsity and redundancy characteristic of KV tokens, we develop an Evict-then-Merge strategy that maximizes information retention even under low compression ratios.
+\item [(3)] \textbf{We implement an efficient head-wise parallel compression for the KV cache.}
+We propose a zero-class center where KV tokens with low similarity to important KV tokens are merged. 
+In this way, we treat eviction as merging, achieving input-aware parallel evict and merge ratios, while maintaining a constant budget for each head.
+This strategy efficiently leverages the head-wise distribution property in a simple yet effective way.
+\end{itemize}
+
+
+\section{Related Work}
+
+\label{section:related_work}
+
+\subsection{Important KV Selection}
+\label{section:related_work1}
+Recent works on KV cache compression have focused on the selection of the important KV tokens to preserve the performance of uncompressed LLMs.
+StreamingLLM \citep{sink} discovered the sink mechanism, where the attention weights for the initial tokens are significantly high regardless of its meaning. Consequently, it retains the first four tokens along with some local tokens, enabling streaming output with the constrained memory. 
+Following it, ACT \citep{ACT} further demonstrates that certain KV tokens in the middle also exhibit high attention weights.
+H2O \citep{H2O} selects important KV pairs based on accumulated attention score, leading to more concentration in the former part of the context.
+SnapKV \citep{Snapkv} observed that calculating attention within a local window of the prompt can capture specialized attention features. This approach retains more recent tokens, which are effective for local generation.
+However, in most scenarios, valuable information is often spread across the contexts and varies from different tasks. 
+Therefore, the selection of important KV pairs should be tailored to the specific input and avoid former or recent preference caused by importance indicator.
+
+\subsection{KV Compression}
+\label{section:related_work2}
+Inspired by various token compression methods \citep{A-vit,tome,PRANCE}, KV cache compression can also be categorized into eviction and merge strategies.
+Evict-based methods aim to retain only the important KV pairs under different token importance assumption \citep{sink,H2O,Snapkv, Keyformer, cai2024pyramidkv, feng2024adakv}, while maintain the modeling ability.
+DCP \citep{DCP} introduces a lightweight attention block in each layer to dynamically decide which KV pairs to discard based on the input. 
+FastGen \citep{FastGen} extends this by finding that different heads focus on different token types. Through the attention profiling in the prompt prefilling stage, it defines distinct compression strategies for each head, which are applied during inference.
+However, this static approach can be suboptimal in long context scenarios where attention patterns change as decoding proceeds. Besides, compressing each head differently can lead to uneven head budgets, making storage and computation more difficult.
+
+Compared to evict-only methods, merge-based approaches have the potential to retain more information and enhance model performance.
+CAM \citep{CaM} analyzes the attention output error caused by token eviction, only merge the evicted value tokens into the remaining ones to reduce performance loss. 
+DMC \citep{DMC} dynamically decides whether to merge the current token to the tail of the KV cache in a head-wise manner. However, compression only at the tail may not be the most effective approach. 
+LESS \citep{LESS} introduces a low-rank embedding sidekick with sparse policy, which accumulates the information discarded by the eviction strategy into a fixed-size low-rank cache. 
+Besides, DMC and LESS require additional training for performance gains. 
+It is worth noting that KV cache merging is different from token merging, due to the paired processing of keys and values and the autoregressive characteristic of LLMs.
+Improper merging methods can lead to significant error accumulation in the decoding stage, resulting in severe performance degradation. 
+Building on these insights, we propose an efficient Evict-then-Merge compression method that effectively addresses these challenges.
+
+
+
+\section{Hybrid Token Selection Policy based on Global-Local Score}
+
+\label{section: glo-loc score}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[scale=0.9]{figures/Fig1_v2.pdf}
+    \caption{
+    The framework of \sysname. The compression of KV cache is decoupled into two parts. For important KV selection policy, a balanced Global-Local score is designed to grasp token importance. For KV compression strategy, the Evict-then-Merge approach first removes irrelevant tokens, then applies a unified head-wise eviction and merging process.
+    }
+    \label{main framework}
+\end{figure}
+
+\subsection{Preliminaries}
+Due to the autoregressive nature of the LLM inference process, the key and value states calculated in previous timesteps are repeatedly used for attention. To avoid computational redundancy, LLMs can store previously computed key and value states for future generation, which is known as KV cache.
+
+In particular, given $n$ prompt tokens, the model first prefills the prompt information to the key and value states, and KV cache is initialized by $\bm C^0_K = \left( \displaystyle \vk_1, \displaystyle \vk_2, \cdots , \displaystyle \vk_n \right)$ and $\bm C^0_V = \left( \displaystyle \vv_1, \displaystyle \vv_2, \cdots , \displaystyle \vv_n \right)$. 
+During the decoding stage, the newly generated tokens will be fed into the model, the corresponding key and value states will be appended to $\bm C_{K}$ and $\bm C_{V}$.
+Taking timestep $t$ as an example, the model computes $\displaystyle \vq_t$, $\displaystyle \vk_t$ and $\displaystyle \vv_t$, and loads the previous key and value states. 
+The KV cache is updated by $\bm C^t_{K}=[\bm C^{t-1}_{K}, \displaystyle \vk_t]$ and $\bm C^t_{V}=[\bm C^{t-1}_{V}, \displaystyle \vv_t]$, and the attention is calculated by:
+\begin{equation}
+    \text{Attention}({\displaystyle \vq_{t}},{\bm K_{t}},{\bm V_{t}}) = \softmax \left( {\frac{{{\displaystyle \vq_{t}} \left[ {\bm C^{t-1}_K,{\displaystyle \vk_{t}}} \right]^T}}{\sqrt d}} \right) \left[ {\bm C^{t-1}_V,{\displaystyle \vv_{t}}} \right],
+\end{equation}
+where $\softmax$ is the normalized exponential function and $d$ is the feature dimension. Afterwards, $\bm C_K^t$ and $\bm C_V^t$ are stored and will be loaded for subsequent generation.
+However, the memory overhead of KV cache grows linearly as LLMs inference progresses, which greatly limits the inference efficiency.
+Therefore, efficiently compressing the KV cache while preserving essential information is a critical challenge.
+\subsection{Token Importance Bias}
+\label{section: glo-loc score, observation}
+Existing methods for assessing the most essential KV tokens exhibit inherent biases. 
+We categorized them into three types that impact compression: local-only bias, local-aware bias, and global-aware bias, as illustrated in Figure \ref{Fig2}.
+
+\begin{wrapfigure}{r}{0.45\textwidth}
+    \centering
+  \begin{subfigure}[b]{0.45\textwidth}
+    \includegraphics[width=\textwidth]{figures/Fig2a.pdf}
+    \caption{\small{Local-only selection}}
+    \label{Fig2a}
+  \end{subfigure}
+  \begin{subfigure}[b]{0.45\textwidth}
+    \includegraphics[width=\textwidth]{figures/Fig2b.pdf}
+    \caption{\small{Global-aware selection}}
+    \label{Fig2b}
+  \end{subfigure}
+  \begin{subfigure}[b]{0.45\textwidth}
+    \includegraphics[width=\textwidth]{figures/Fig2c.pdf}
+    \caption{\small{Local-aware selection}}
+    \label{Fig2c}
+  \end{subfigure}
+  \begin{subfigure}[b]{0.45\textwidth}
+    \includegraphics[width=\textwidth]{figures/Fig2d.pdf}
+    \caption{\small{Global-Local based selection}}
+    \label{Fig2d}
+  \end{subfigure}
+    \caption{{Token selection patterns.
+    We visualize the selection patterns of previous KV cache methods and our method. The sample is taken from the \textit{gov\_report} \citep{gov_report} dataset, showing Top-128 selected tokens out of a total of 512 tokens. 
+    }}
+    \label{Fig2}
+\end{wrapfigure}
+Building on the attention sink \citep{sink,ACT}, \textbf{local-only methods} primarily focus on a few initial sink tokens and the recent ones within a local window. Although they exhibit strong capabilities in local language modeling, their performance drops significantly in tasks requiring global semantic understanding, such as summarization and full-text comprehension. 
+To select more informative KV tokens, 
+\textbf{global-aware methods} \citep{H2O,Spatten} employ the global accumulated attention score to select important tokens, which can be calculated by ${{\displaystyle \vs}_{Glo}} = \sum\nolimits_{i = 1}^N {{\bm A_{i,:}}}$, where $N$ is the context length, and $\bm A \in {\displaystyle \sR^{N \times N}}$ is the attention weight.
+However, the cumulative effect of causal attention weight skews the importance distribution towards the earlier part, resulting in a biased selection of important KV tokens and leading to suboptimal outcomes.
+In contrast, \textbf{local-aware methods} \cite{Snapkv,Scissorhands} utilize local tokens as anchors to identify and retain tokens across the entire KV cache. The accumulated attention score of local tokens is used to measure the importance, which can be formualted by ${{\displaystyle \vs}_{Loc}} = \sum\nolimits_{i = N-{L_{win}}}^N {\bm A_{i,:}}$, where $L_{win}$ is the window size.
+However, the positional encoding causes nearby tokens to exhibit higher correlations, leading to a bias towards retaining more recent tokens.
+\subsection{Global-Local Score For Non-local Tokens}
+\label{section: glo-loc score, method}
+To eliminate the influence of cumulative effects and positional encoding, we propose a Global-Local score to leverage both global and local information, which is shown in Figure \ref{main framework}.
+Specifically, we convert ${\mathbf{s}}_{Glo}$  and ${\mathbf{s}}_{Loc}$  to similar magnitudes by mean-alignment, followed by the element-wise max to obtain the new score:
+\begin{equation}
+{\displaystyle \vs_{Glo - Loc}} = {\max \left( {{\displaystyle \vs_{Glo}} \times \frac{{\sum {{\displaystyle \vs_{Loc}}} /N}}{{\sum {{\displaystyle \vs_{Glo}}} /N}},{{\displaystyle \vs_{Loc}}}} \right)} ,
+\end{equation}
+where $\max$ is an element-wise function, $N$ is the context length.
+
+During the prefilling stage, we calculate the accumulated attention scores of $\bm A$ from global and local scope to get $\displaystyle \vs_{Glo}$ and $\displaystyle \vs_{Loc}$. 
+These two critical vectors capture the importance distribution of the prompt and are stored for subsequent generation, while the temporary attention weight matrix is deallocated.
+During the decoding stage, $\displaystyle \vs_{Glo}$ is update by accumulating the attention from new tokens.
+And the local tokens in the window will dynamically change. 
+To avoid potential overhead, we set a past score $\displaystyle \vs_{Loc}^{past}$ to record attention information in the last window, and a current score $\displaystyle \vs_{Loc}^{cur}$ to accumulate attention from the new queries in the current window.
+Once the number of tokens in the current window reaches $L_{win}$, $\displaystyle \vs_{Loc}^{cur}$ will be assigned to $\displaystyle \vs_{Loc}^{past}$ and reset to zero.
+The final local score $\displaystyle \vs_{Loc} = \displaystyle \vs_{Loc}^{past} + \displaystyle \vs_{Loc}^{cur}$.
+So in the decoding stage, the window size used to select local-aware tokens is actually $L_{win}\sim 2L_{win}-1$. 
+
+
+Under the Global-Local score, the selection of the important KV tokens becomes more balanced, as shown in Figure \ref{Fig2d}.
+
+
+
+
+
+\section{Head-wise Evict-then-Merge Strategy for KV Cache}
+
+\label{section: evition-then-merge}
+
+\subsection{Head-wise Sparsity and Redundancy}
+\label{section: evition-then-merge, observation}
+
+Previous works \citep{H2O, Scissorhands, FastGen} have uncovered the sparsity of the KV cache. 
+We further observed that the redundancy within the KV cache is also significant. 
+Taking a holistic view of both sparsity and redundancy presents an opportunity to achieve higher compression ratios.
+
+\textbf{Sparsity}. 
+Only a small portion of important tokens contributes to a significant percentage of the $\displaystyle \vs_{Glo-Loc}$ score. 
+The sparsity rate of each attention head is determined by the minimum percentage of important tokens retained per head that can achieve over $\zeta$ of the total score:
+\begin{equation}
+    {\displaystyle \vp_m} = 1 - \frac{1}{N} \cdot \argmin_{N_k \in [1,N]} \left\{ {N_k\;|\;\sum\limits_{i = 1}^{{N_k}} \displaystyle \vs_i  \ge \zeta} \right\}, \;  \text{where} \ \displaystyle \vs = \mathrm{sort}({\displaystyle \vs_{Glo - Loc}}),
+\end{equation}
+where $\displaystyle \vp_m$ is the sparsity rate, $m$ is the head index, $\mathrm{sort}(\cdot)$ reorders the vector in descending way.
+
+\textbf{Redundancy}. 
+Cosine similarity is a reliable metric for cross position token redundancy.  
+Most existing work considers the characteristic of either keys or values individually, applying the same compression strategy to the other, rather than jointly considering KV pairs.
+Considering that the superimposed positional encoding can attenuate the similarity, we analyze the similarity of raw KV tokens. 
+As shown in Figure \ref{Fig3a}, the similarity among key tokens is significantly higher, whereas the similarity among value tokens is relatively lower.
+If we consider only the key’s characteristic, the substantial merging error of value tokens can severely affect generation, ultimately diminishing the compression potential of redundancy.
+Therefore, we jointly consider key similarity and value similarity, and the redundancy is defined as:
+\begin{equation}
+\displaystyle \mR_{i,j} = \cos (\displaystyle \vk_i, \displaystyle \vk_j) \cdot \cos (\displaystyle \vv_i, \displaystyle \vv_j) = \frac{\displaystyle \vk_i \displaystyle \vk_j^T}{\| \displaystyle \vk_i \| \| \displaystyle \vk_j^T \|} \cdot \frac{\displaystyle \vv_i \displaystyle \vv_j^T}{\| \displaystyle \vv_i \| \| \displaystyle \vv_j \|}.
+\end{equation}
+A token is considered redundant if it can find another token in the existing KV cache with redundancy exceeding the predefined threshold $\tau$. The redundancy rate $\displaystyle \vr_m$ of head $m$ is given by:
+\begin{equation}
+\displaystyle \vr_m=
+\frac{1}{N}\cdot\sum_{k=1}^{N} \left [ \max ( \bm R_{k,1:k}) \ge \tau \right ].
+\end{equation}
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}{.33\textwidth}
+    \includegraphics[width=\linewidth]{figures/Fig3a.pdf}
+    \caption{}
+    \label{Fig3a}
+  \end{subfigure}
+  \hfill 
+  \begin{subfigure}{.65\textwidth}
+    \includegraphics[width=\linewidth]{figures/Fig3b.pdf}
+    \caption{}
+    \label{Fig3b}
+  \end{subfigure}
+  \caption{
+    Observations on sparsity and redundancy. The parameters $\zeta$ and $\tau$ are set to 0.95 and 0.6 here. (a) The distribution difference between key and value similarities. The top two figures depict the raw similarity, while the bottom two showcase the masked KV similarities with a threshold of 0.8. Key similarity is much more salient than value similarity. (b) The head-wise sparsity and redundancy. The blue bars represent the sparsity of each head, while the red bars denote the redundancy. Both sparsity and redundancy vary across different heads and layers.
+    }
+  \label{Fig3}
+\end{figure}
+
+The head-level sparsity and redundancy rates for different heads are shown in Figure \ref{Fig3b}.
+\textbf{Head-wise Sparsity and Redundancy}. 
+From an overall perspective, the earlier layers exhibit more redundancy, while the later layers display greater sparsity. 
+Within each layer, different heads also demonstrate varying degrees of sparsity and redundancy.  
+Consequently, dynamically evicting and merging tokens based on the characteristic of each head can lead to a higher compression ratio.
+However, the challenge arises from the fact that all heads within a layer are stored and computed in parallel, making it difficult to manage fine-grained evict and merge decisions for each head. 
+In the following section, we propose an efficient, parallelizable, and head-wise solution.
+
+\subsection{Adaptive Evict-then-Merge Strategy}
+\label{section: method}
+\textbf{Token Partition}.
+The Global-Local score can effectively measure the importance of tokens. 
+To avoid extract fragmented information, we apply a mean pooling function to it.
+Based on the ranking of $\displaystyle \vs_{Glo-Loc}$, KV tokens can be divided into three sets: $N_{irr}$ irrelevant tokens $(\bm K_{irr}, \bm V_{irr})$, $N_{tbm}$ to-be-merged (TBM) tokens $(\bm K_{tbm}, \bm V_{tbm})$, and $N_{imp}$ most important tokens $(\bm K_{imp}, \bm V_{imp})$, except that $L_{win}$ local tokens $(\bm K_{loc}, \bm V_{loc})$ are always kept to preserve the local modeling capability of LLMs, which is crucial for the performance across various tasks.
+The most irrelevant tokens are first evicted to streamline the process and minimize the impact of irrelevant context \citep{irrelevant_context}.
+Then, the most important tokens will serve as class centers based on the cache budget $N_{budget} = N_{imp} + L_{win}$, while $N_{tbm}$ sub-important tokens will be merged into them to preserve as much valuable information as possible. The merge magnification factor $\gamma=(N_{budget}+N_{tbm})/{N_{budget}}$ indicates the extent to which tokens are merged relative to the cache budget.
+
+\textbf{Unified Evict-then-Merge Strategy.} 
+By calculating the redundancy between TBM tokens and class center tokens, the merge destinations for TBM tokens can be identified:
+\begin{equation}
+    \displaystyle \vd_i = \arg \max_d (\bm R_{i, d}), 
+\end{equation}
+where $\displaystyle \vd_i$ is the merge destination for $i$-th TBM token.
+
+To minimize output perturbation, only the tokens with redundancy $\bm{R}_{i,:d_i}$ exceeding a threshold $\tau$ will be merged, while others being evicted.
+Inspired by the virtual neighbor technique \citep{li2023ddpg,li2024td3}, we introduced a zero class center to unify the merge and eviction operations, and the evicted tokens are merged into it.
+Besides, we find that some critical tokens are highly sensitive to merging, preserving these most significant tokens intact yields greater benefits than sharing them through merging. 
+
+Moreover, the varying sparsity and redundancy of each head results in different eviction and merge ratios, as well as varying cache sizes. 
+We choose to allocate an equal budget to each head, using a limited number of entries to store class centers. 
+Based on this, the merged tokens share the same entry in the KV cache, reducing the overall size of the stored KV cache. 
+During the computation of each layer, a smaller cache is loaded and the context length is enlarged through shared entry expanding.
+\textbf{Attention Score Weighted Merge.} 
+To ensure that more relevant tokens dominate the merged result, attention scores are integrated into the merge process.
+Given two tokens $(\displaystyle \vk_i, \displaystyle \vv_i)$ and $(\displaystyle \vk_j, \displaystyle \vv_j)$ to be merged, we apply a weighted merge based on their local importance $\displaystyle \vs_{Loc}$.
+As mentioned in Section \ref{section: glo-loc score, observation}, attention scores are crucial for identifying token importance. 
+Therefore, we preserve the norm of key tokens, a scalar for each token, to maintain the accuracy of the attention weights. 
+The merged tokens are given by:
+\begin{equation}
+    \hat {\displaystyle \vk}_{merged} = \frac{\displaystyle \vw_i \hat {\displaystyle \vk}_i + \displaystyle \vw_j \hat {\displaystyle \vk}_j}{\displaystyle \vw_i + \displaystyle \vw_j}, \
+    {\displaystyle \vv}_{merged} = \frac{\displaystyle \vw_i {\displaystyle \vv}_i + \displaystyle \vw_j {\displaystyle \vv}_j}{\displaystyle \vw_i + \displaystyle \vw_j},
+\end{equation}
+where $\displaystyle \vw_i$ is the local importance of $i$-th token, $\hat {\displaystyle \vk}_i=\frac{{\displaystyle \vk}_i}{\|{\displaystyle \vk}_i\|}$ and $\hat {\displaystyle \vk}_j=\frac{{\displaystyle \vk}_j}{\|{\displaystyle \vk}_j\|}$ are normalized key tokens. $(\|{\displaystyle \vk}_i\|\hat {\displaystyle \vk}_{merged}, {\displaystyle \vv}_{merged})$ and $(\|{\displaystyle \vk}_j\|\hat {\displaystyle \vk}_{merged}, {\displaystyle \vv}_{merged})$ are actually used for computation.
+
+
+
+\section{Experiment}
+
+\label{section: experiment}
+
+\subsection{Settings}
+\label{section: experiment, settings}
+In this paper, we use models from both the Llama family (Llama-2-7B \citep{llama2}, Llama-3-8B \citep{llama3}) and Mistral series \citep{mistral}, including not only original pretrained model, but also instruction-tuned versions such as LongChat-7B-v1.5-32k \citep{longchat} and Mistral-7B-Instruct-v0.2, which can handle up to 32k context length. 
+For comparison, we benchmark our method against StreamingLLM, CAM, H2O, and SnapKV. 
+All these methods compress the KV cache during both the prefilling and decoding stages, except for SnapKV, which compresses only the prompt after the prefilling stage.
+All experiments can be conducted on a single NVIDIA A100 GPU with 40GB of memory, except for the fully cached model.
+For common parameters, both \sysname~and SnapKV use $L_{win}=32$, $\text{kernel\_size}=7$ for perplexity and LongBench, and $L_{win}=16$, $\text{kernel\_size}=7$ for Needle-in-a-Haystack task. 
+
+\subsection{Performance Evaluation on LongBench}
+\label{section: experiment, longbench}
+
+LongBench \citep{longbench} is a comprehensive benchmark designed to assess long context modeling abilities across 6 categories of tasks. 
+To enhance performance on question-answering tasks, we employ instruction-tuned models such as LLaMA-2-7B-Chat, LLaMA-3-8B-Instruct, LongChat-7B-v1.5-32k, and Mistral-7B-Instruct-v0.2.  
+To demonstrate the effectiveness of \sysname~under extreme KV cache compression, we enforce a strict compression budget of 256, with $\tau$ and $\gamma$ set to approximately 0.6 and 4. 
+To adapt the calculation of global attention score on a single GPU for long-context models, we compute scores by retaining half of the tokens from both the start and the end, following observations from “Lost in the Middle” \citep{lost_in_the_middle}, where LLMs tend to have a better grasp of the information at the beginning or end of the input context.
+
+The results are shown in Table \ref{table1}. We present two versions of our method: one without position information to merge more aggressively and capture global information, and one with position information for tasks requiring precise token localization. This distinction is evident in their task performance. 
+As shown in the table, the baseline methods show varying degrees of performance across different tasks, and the optimal compression strategy differs between models. 
+In contrast, our method integrates the strengths of the baselines, achieving the state-of-the-art performance on nearly all tasks, with improvements of 1.28, 1.79, 17.64, and 1.28 across the four different LLMs. 
+Notably, on LongChat-7B-v1.5-32k, while the performance of other compression methods breaks down, our method consistently maintains high performance, demonstrating its robustness under extreme compression ratios and long-context conditions.
+
+\begin{table*}[!t]
+  \centering
+  \caption{{Performance evaluation on LongBench across four LLMs.} All methods are tested under cache budget 256, except for SnapKV, which increases this budget at the decoding stage. The best results are highlighted with {\bf bold}.}
+  \resizebox{\textwidth}{!}{
+    \begin{tabular} %{clccccccccccccccccc}
+    {c@{\hspace{1ex}}|l@{\hspace{0.05ex}}c@{\hspace{0.05ex}}c@{\hspace{0.05ex}}c@{\hspace{0.05ex}}c@{\hspace{0.05ex}}c@{\hspace{0.05ex}}c@{\hspace{0.05ex}}c@{\hspace{0.05ex}}c@{\hspace{0.05ex}}c@{\hspace{0.05ex}}c@{\hspace{0.05ex}}c@{\hspace{0.05ex}}c@{\hspace{0.05ex}}c@{\hspace{0.5ex}}c@{\hspace{0.6ex}}c@{\hspace{0.6ex}}c@{\hspace{0.6ex}}c}
+    \specialrule{1.5pt}{0pt}{2pt}
+    
+      & \multirow{4}{*}{\parbox{2cm}{\centering \textbf{Method}}}  & \multicolumn{3}{c}{\textbf{Multi-Document QA}} & \multicolumn{3}{c}{\textbf{Single-Document QA}}& \multicolumn{3}{c}{\textbf{Summarization}}& \multicolumn{3}{c}{\textbf{Few-shot Learning}}& \multicolumn{2}{c}{\textbf{Synthetic}} & \multicolumn{2}{c}{\textbf{Code}} & \multirow{4}{*}{\textbf{Avg.}} \\
+    \cmidrule(lr){3-5}\cmidrule(lr){6-8}\cmidrule(lr){9-11}\cmidrule(lr){12-14}\cmidrule(lr){15-16}\cmidrule(lr){17-18}
+    & & \rotatebox[origin=c]{30}{HotpotQA} & \rotatebox[origin=c]{30}{2WikiMQA} & \rotatebox[origin=c]{30}{Musique} & \rotatebox[origin=c]{30}{MF-en} & \rotatebox[origin=c]{30}{NrtvQA} & \rotatebox[origin=c]{30}{Qasper} & \rotatebox[origin=c]{30}{GovReport} & \rotatebox[origin=c]{30}{QMSum} & \rotatebox[origin=c]{30}{MultiNews} & \rotatebox[origin=c]{30}{TriviaQA} & \rotatebox[origin=c]{30}{SAMSum} & \rotatebox[origin=c]{30}{TREC} & \rotatebox[origin=c]{30}{PRe} & \rotatebox[origin=c]{30}{PCount} & \rotatebox[origin=c]{30}{Lcc} & \rotatebox[origin=c]{30}{RB-P} & \\
+
+    \midrule
+    \multirow{7}[4]{*}{\rotatebox{90}{\parbox{2.5cm}{\centering \textbf{Llama-2-7B-Chat}}}} & Full Cache & 30.20  & 27.37  & 11.54  & 34.33  & 19.68  & 19.40  & 24.60  & 20.81  & 26.19  & 84.61  & 41.00  & 63.50  & 8.00  & 4.50  & 61.46  & 55.14  & 33.27  \\ \cmidrule{2-19}          
+    & StreamingLLM & 24.41  & 26.90  & 7.70  & 17.44  & 13.69  & 15.07  & 16.73  & 19.21  & 18.25  & 81.67  & 35.03  & 39.50  & 6.00  & 4.00  & 55.22  & 51.00  & 26.99  \\
+    & H2O   & 29.92  & 25.07  & 10.46  & 23.05  & 17.04  & \textbf{18.45 } & 19.96  & 20.07  & \textbf{24.12 } & 82.66  & 38.26  & 59.50  & 3.50  & 4.00  & 56.01  & 51.64  & 30.23  \\
+    & CAM   & 24.68  & 26.80  & 7.57  & 16.79  & 14.11  & 15.98  & 16.57  & 19.09  & 18.35  & 81.09  & 35.17  & 39.50  & 5.50  & 4.00  & 55.34  & 51.15  & 26.98  \\
+    & SnapKV & 28.96  & 26.20  & 11.14 & 28.41  & 15.72  & 17.10  & 17.01  & 20.30  & 21.53  & 84.32  & 38.62  & 57.00  & 8.50  & 4.00  & 57.26  & 53.03  & 30.57  \\
+    & \sysname(w.o. pos) & \textbf{31.39 } & 27.46  & 10.48  & \textbf{30.45 } & \textbf{18.52 } & 17.87  & \textbf{22.18 } & \textbf{20.82 } & 22.30  & 84.86  & \textbf{39.34 } & \textbf{61.00 } & 6.00  & \textbf{5.00 } & 57.86  & \textbf{54.10 } & \textbf{31.85 } \\
+    & \sysname(w. pos) & 30.93  & \textbf{27.58 } & \textbf{11.37 } & 29.85  & 17.49  & 17.17  & 18.59  & 20.57  & 22.05  & \textbf{85.60 } & 38.79  & 60.50  & \textbf{9.50 } & 4.50  & \textbf{58.90 } & 53.55  & 31.68  \\
+    \midrule
+    
+    \multirow{7}[4]{*}{\rotatebox{90}{\parbox{2.5cm}{\centering \textbf{Llama-3-8B-Instruct}}}} 
+    & Full Cache & 44.93  & 37.92  & 24.10  & 41.89  & 22.84  & 39.26  & 28.69  & 23.57  & 26.58  & 90.31  & 42.67  & 74.50  & 67.00  & 6.48  & 57.13  & 51.34  & 42.45  \\
+\cmidrule{2-2}          
+    \cmidrule{2-19}  
+    & StreamingLLM & 37.64  & 25.25  & 16.94  & 22.61  & 16.58  & 18.73  & 18.42  & 20.15  & 19.25  & 78.43  & 39.29  & 53.00  & 65.08  & 7.25  & 56.83  & 53.72  & 34.32  \\
+    & H2O   & 43.74  & 34.06  & 20.65  & 27.71  & 20.34  & 26.67  & 21.27  & 20.58  & 23.98  & 88.52  & 38.50  & 58.50  & 66.50  & \textbf{7.50 } & 57.14  & 52.11  & 37.99  \\
+    & CAM   & 37.64  & 25.19  & 16.94  & 22.64  & 16.58  & 18.58  & 18.49  & 20.10  & 19.24  & 78.43  & 39.34  & 53.00  & 65.08  & 7.25  & 56.83  & 53.56  & 34.31  \\
+    & SnapKV & 41.96  & 31.82  & 20.06  & 34.91  & 20.52  & 26.59  & 19.94  & 21.72  & 21.94  & \textbf{90.47 } & 39.55  & 50.50  & \textbf{67.00 } & 6.84  & 58.23  & 53.81  & 37.87  \\
+    & \sysname(w.o. pos) & \textbf{45.51 } & \textbf{36.86 } & \textbf{22.80 } & \textbf{37.31 } & \textbf{21.33 } & \textbf{27.74 } & \textbf{22.11 } & \textbf{22.28 } & \textbf{24.05 } & 90.44  & \textbf{40.26 } & \textbf{64.50 } & 66.67  & 7.22  & 57.01  & 50.37  & \textbf{39.78 } \\
+    & \sysname(w. pos) & 44.09  & 32.70  & 21.77  & 35.67  & 20.84  & 26.87  & 20.71  & 21.89  & 23.89  & 89.75  & 39.96  & 61.00  & \textbf{67.00 } & 7.24  & \textbf{60.51 } & \textbf{56.46 } & 39.40  \\
+    \midrule
+    
+    \multirow{7}[4]{*}{\rotatebox{90}{\parbox{2.5cm}{\centering \textbf{LongChat-7B-v1.5-32k}}}} 
+     & Full Cache & 31.26  & 22.52  & 12.16  & 43.92  & 18.33  & 28.81  & 31.29  & 22.57  & 26.32  & 82.41  & 40.06  & 66.00  & 31.50  & 0.00  & 53.02  & 55.28  & 35.34  \\
+    \cmidrule{2-19}          
+    & StreamingLLM & 13.06  & 9.62  & 1.97  & 4.48  & 4.02  & 8.64  & 1.00  & 3.18  & 0.92  & 4.72  & 6.96  & 20.50  & 2.96  & 0.50  & 2.16  & 5.93  & 5.66  \\
+    & H2O   & 11.33  & 10.37  & 1.20  & 7.13  & 4.04  & 8.59  & 2.42  & 9.52  & 2.92  & 23.26  & 7.11  & 27.50  & 2.45  & 0.15  & 9.30  & 8.24  & 8.47  \\
+    & CAM & 13.40 &	9.17 &	1.82 &	5.07 &	4.08 &	8.62 &	1.01 &	3.24 &	0.79 &	4.23 &	7.12 &	21.50 &	3.55 &	0.50 &	2.05 &	5.98 & 5.76 \\
+    & SnapKV & 19.60  & 13.45  & 8.39  & 15.06  & 9.07  & 9.19  & 3.76  & 13.15  & 3.42  & 57.43  & 18.26  & 30.50  & 1.00  & 0.44  & 15.60  & 20.08  & 14.90  \\
+    & \sysname(w.o. pos) & \textbf{32.07 } & 23.75  & \textbf{12.34 } & \textbf{39.93 } & 16.07  & 22.96  & \textbf{23.89 } & \textbf{21.22 } & \textbf{23.49 } & \textbf{79.58 } & \textbf{36.89 } & 61.50  & 11.50  & 0.00  & \textbf{55.08 } & 50.78  & 31.94  \\
+    & \sysname(w. pos) & 31.51  & \textbf{23.75 } & \textbf{12.34 } & 37.16  & \textbf{16.39 } & \textbf{23.47 } & 20.33  & 21.18  & 22.83  & 78.70  & 36.76  & \textbf{61.50 } & \textbf{27.75 } & \textbf{0.60 } & 54.02  & \textbf{52.39 } & \textbf{32.54 } \\
+    \midrule
+    
+    \multirow{7}[4]{*}{\rotatebox{90}{\parbox{2.5cm}{\centering \textbf{Mistral-7B-Instruct-v0.2}}}} 
+    & Full Cache & 36.42  & 21.77  & 19.13  & 47.12  & 21.02  & 29.62  & 32.57  & 24.02  & 27.09  & 86.23  & 42.99  & 71.00  & 89.33  & 3.07  & 54.00  & 51.87  & 41.08  \\
+    \cmidrule{2-19}          
+    & StreamingLLM & 21.60  & 13.24  & 10.25  & 26.35  & 13.72  & 11.58  & 17.98  & 19.73  & 18.92  & 80.67  & 40.26  & 50.50  & 24.80  & \textbf{3.82 } & 50.57  & 44.04  & 28.00  \\
+    & H2O   & 23.31  & 14.07  & 10.32  & 33.42  & 14.29  & 16.75  & 23.12  & 21.09  & 23.73  & 83.22  & 38.74  & 63.00  & 31.50  & 3.44  & 49.17  & 44.66  & 30.86  \\
+    & CAM   & 21.15 &	13.25 &	10.25 &	26.41 &	13.72 &	11.6 &	17.88 &	19.72 &	18.94 &	80.7 &	40.19 &	50.5 &	25.05 &	3.82 &	50.6 &	44.04 &	27.99 \\
+    & SnapKV & 26.28  & 14.58  & 12.02  & 40.82  & 16.88  & 18.87  & 21.46  & 21.60  & 22.05  & 84.82  & \textbf{40.79 } & 51.00  & \textbf{70.08 } & 2.72  & 51.01  & 46.75  & 33.86  \\
+    & \sysname(w.o. pos) & 25.83  & 15.36  & 12.38  & 40.99  & \textbf{17.44 } & 18.84  & \textbf{23.13 } & 22.21  & \textbf{24.07 } & 84.94  & 40.28  & \textbf{64.00 } & 60.77  & \textbf{4.13 } & \textbf{51.87 } & \textbf{47.59 } & 34.61  \\
+    & \sysname(w. pos) & \textbf{26.49 } & \textbf{15.91 } & \textbf{12.57 } & \textbf{41.51 } & 17.28  & \textbf{18.90 } & 22.63  & \textbf{22.50 } & 23.82  & \textbf{85.17 } & 40.44  & 63.50  & 69.40  & 3.74  & 51.49  & 46.88  & \textbf{35.14 } \\
+    \specialrule{1.5pt}{1pt}{0pt}
+    \end{tabular}%
+  }
+  \label{table1}%
+\end{table*}
+\subsection{Needle-in-a-Haystack}
+\label{section: experiment, needle}
+\begin{wraptable}{r}{0.29\textwidth}
+    \centering
+    \caption{{The performance of Needle-in-a-Haystack across three budgets.}}
+    \scalebox{0.75}{
+    \begin{tabular}{l c c c}
+     \midrule[1.2pt]
+    $N_{budget}$ &  128 & 256 & 512  \\
+    \midrule
+    H2O      & 0.312 & 0.335 & 0.384 \\
+    SnapKV   & 0.802 & 0.893 & 0.956 \\
+    \sysname & \textbf{0.818} & \textbf{0.896} & \textbf{0.959} \\
+  \midrule[1.2pt]
+    \end{tabular}
+   }
+    \label{tab:needle}
+\end{wraptable}
+
+Needle-in-a-Haystack \citep{needle} is a challenging task to assess the model’s ability to retrieve specific information from a large volume of data.  
+We test our method using Mistral-7B-Instruct-v0.2 with 10 depths, 40 lengths and maximum token limit 32k. The merge threshold $\tau$ and merge magnification factor $\gamma$ are set to 0.55 and 4. 
+As shown in Table \ref{tab:needle}, \sysname~delivers the best retrieval performance across all three compression budgets. 
+It retains 95.9\% retrieval ability of the fully cached model, even surpassing SnapKV, which is specifically designed for retrieval tasks.
+
+\subsection{Efficiency Analysis}
+\label{section: experiment, efficiency}
+
+\textbf{Time analysis}.
+To assess the efficiency of \sysname, we measured the end-to-end latency on two RTX 4090 GPUs. 
+As shown in Table \ref{tab: time}, by compressing the KV cache, \sysname~supports larger batch sizes, whereas the fully cached model encounters out-of-memory (OOM) errors with batch sizes of 2 or 4.
+Moreover, the efficiency gains of our method become more pronounced with larger batch sizes, leading to increased throughput as batch size grows. 
+For example, with 4096 prompt tokens and a generated token length of 8192, our method achieves a 6.74$\times$ improvement in throughput compared to the fully cached model.
+
+\begin{table}[htbp]
+  \centering
+    \captionof{table}{Comparisons of the end-to-end latency (s). The cache budget is set to 256. With constant budget, \sysname~supports larger batch size and generalize to longer context without OOM errors.}
+    \scalebox{0.85}{
+    \begin{tabular}{c c c c c c c c}
+    \midrule[1.2pt]
+        \multirow{2}{*}{$L_{prompt}$ + $L_{gen}$} & \multirow{2}{*}{Method} & \multicolumn{5}{c}{Batch Size} & \multirow{2}{*}{\makecell{Max Throughput\\[1ex](tokens/s)}} \\
+        \cmidrule(lr){3-7}
+        ~ & ~ & 1 & 2 & 4 & 8 & 16 & ~ \\
+        \midrule
+        \multirow{2}{*}{128 + 4096} & Full Cache & 464 & 799 & OOM & OOM & OOM & 10.3 \\ 
+        ~ & \sysname & 435 & 483 & 595 & 925 & 1622 & 40.4 (3.94$\times$) \\
+        \midrule
+        \multirow{2}{*}{128 + 6144} & Full Cache & 955 & 1685 & OOM & OOM & OOM & 7.3 \\
+        ~ & \sysname & 673 & 781 & 963 & 1552 & 2757 & 35.7 (4.89$\times$) \\
+        \midrule
+        \multirow{2}{*}{4096 + 4096} & Full Cache & 463 & 800 & OOM & OOM & OOM & 10.2 \\
+        ~ & \sysname & 441 & 486 & 604 & 943 & 1661 & 39.5 (3.85$\times$) \\
+        \midrule
+        \multirow{2}{*}{4096 + 8192} & Full Cache & 1589 & OOM & OOM & OOM & OOM & 5.2 \\
+        ~ & \sysname & 878 & 1100 & 1265 & 2082 & 3772 & 34.7 (6.74$\times$) \\
+        \midrule[1.2pt]
+    \end{tabular}
+   }
+    \label{tab: time}
+\end{table}
+
+\textbf{Memory analysis}. 
+\sysname~compresses the storage overhead for the full KV cache $dN_{full}$ to a constant $dN_{budget}$ per head.
+The extra static memory overhead is required for $\displaystyle \vs_{Glo}$, $\displaystyle \vs_{Loc}^{past}$, $\displaystyle \vs_{Loc}^{cur}$, $\|\displaystyle \mK\|$ and the mapping look-up-table, all of which are vectors with the maximum length $\gamma N_{budget}$. The extra memory is $5\gamma N_{budget}/(dN_{full})$ compared to full cache baseline. Considering $\gamma=4,N_{budget}=256,N_{full}=4096,d=128$, the metadata overhead  is determined to be a mere 0.97\%. During the computation time of certain layer, only $N_{budget}$ key-value states are loaded and expanded to $\gamma N_{budget}$ as runtime KV cache, providing more contexts.
+\subsection{Ablation Study}
+\label{section: experiment, ablation}
+We ablate the effectiveness of the Global-Local score and the Evict-then-Merge strategy, and evaluate the performance scalability across different cache budgets $N_{budget}$ using the LongBench average score on Llama-2-7B-Chat.
+
+\begin{wraptable}{r}{0.4\textwidth}
+    \centering
+    \caption{{KV cache compression using different token importance scores and compression strategies.}}
+    \scalebox{0.9}{
+    \begin{tabular}{c c}
+     \midrule[1.2pt]
+    Score + Compression & Avg.   \\
+    \midrule
+    $\displaystyle \vs_{Glo}$ + Evict-then-Merge & 28.81 \\
+    $\displaystyle \vs_{Loc}$ + Evict-then-Merge & 31.06 \\
+    $\displaystyle \vs_{Glo-Loc}$ + Evict-only & 30.82 \\
+    $\displaystyle \vs_{Glo-Loc}$ + Evict-then-Merge & 31.34 \\
+  \midrule[1.2pt]
+    \end{tabular}
+   }
+    \label{tab: ablation_method}
+\end{wraptable}
+
+\textbf{Ablation on Token Selection and Compression Strategy.} 
+Table \ref{tab: ablation_method} illustrated the effectiveness of our method. 
+By incorporating the Evict-then-Merge strategy, the average score improves 0.61 points compared to the evict-only approach.
+Furthermore, integrating both global and local scores increases the average score by 0.37 and 2.62 points, respectively, compared to using either the global or local score alone. 
+These results highlight the effectiveness of our method in token selection and compression strategy.
+
+\textbf{Cache Budgets.} 
+In Table \ref{tab: cache budget}, we explore the impact of different cache budgets. 
+The results indicate that even under extreme compression settings, performance remains relatively stable. 
+Additionally, performance scales with cache size, approaching that of the fully cached model as the budget increases. 
+When $N_{budget}=1024$, \sysname~ performs a difference of 0.27 from the full cache model. More results on different LLMs can be seen in Table \ref{cache budgets}.
+
+\begin{table}[h]
+  \centering
+    \captionof{table}{{The impact of different cache budgets for each head. The performance scales with the budgets and reaches the performance of full cache baseline when the budget reaches a certain size.}}
+    \scalebox{0.9}{
+    \begin{tabular}{lcccccccccccccc}
+     \midrule[1.2pt]
+    $N_{budget}$ &  128 & 256 & 512 & 768 & 1024 \\
+    \midrule
+    Avg. &  29.41 & 31.34 & 32.26 & 32.71 & 33.00 \\
+  \midrule[1.2pt]
+    \end{tabular}
+   }
+    \label{tab: cache budget}
+\end{table}
+
+
+
+
+\section{Conclusion}
+
+\label{section: conclusion}
+In this paper, we propose \sysname, an input-aware, head-wise efficient KV cache management framework. 
+By leveraging the proposed Global-Local attention score, \sysname~addresses the biased distribution of important KV tokens caused by accumulated attention scores and positional encoding, leading to a more balanced selection of tokens.
+We further design a unified Evict-then-Merge strategy based on the redundancy and sparsity intrinsic of KV tokens across different heads. 
+In particular, we implement a zero-class mechanism to enable parallel computation for head-wise operation.
+Extensive experiments on language modeling perplexity, LongBench, and Needle-in-a-Haystack tasks demonstrate the SOTA performance, validating the effectiveness of \sysname. 
+
+
+\clearpage
+
+
+

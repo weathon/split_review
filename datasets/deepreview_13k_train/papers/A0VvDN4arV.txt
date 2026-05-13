@@ -1,0 +1,234 @@
+\title{Conveyor: Efficient Tool-aware LLM Serving with Tool Partial Execution}
+
+\begin{abstract}
+The complexity of large language model (LLM) serving workloads has substantially increased due to the integration with external tool invocations, such as ChatGPT plugins.
+In this paper, we identify a new opportunity for efficient LLM serving for requests that trigger tools: tool partial execution alongside LLM decoding.
+To this end, we design \sys, an efficient LLM serving system optimized for handling requests involving external tools. We introduce a novel interface for tool developers to expose partial execution opportunities to the LLM serving system and a request scheduler that facilitates partial tool execution. Our results demonstrate that tool partial execution can improve request completion latency by up to 38.8\%.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\pdfoutput=1
+
+The rapid evolution of large language models (LLMs) has significantly accelerated in recent years, and LLMs have quickly become the state-of-the-art approach in many AI tasks, such as content generation, question answering, and text classification. Consequently, LLM serving systems have emerged as a crucial component in deploying these models in various applications to achieve high performance and resource efficiency. Many LLM serving techniques have been proposed to reduce response latency~\cite{leviathan2023specdecoding, chen2023accelerating, fu2024break, cai2024medusa} and improve system throughput~\cite{rasley2020deepspeed, kwon2023pagedattention, yu2022orca, dao2022flashattention, dao2023flashattention2, chen2023punica}.
+
+Recently, a new use case, \textit{tool-assisted LLM serving}, has emerged to enhance the reasoning capabilities of LLMs and enable them to interact with the external world.  
+In a typical tool-assisted LLM serving workflow, a user first sends a request (\ie, the original prompt) to the system. An LLM will then process this request and generate a set of tool calling commands, or \textit{plans}. Tool executors will invoke various tools to execute these commands and collect outputs, or \textit{observations}. The original prompt, plans, and observations will be concatenated following a template, and then sent back to the LLM. The LLM generates either new plans, indicating a new round of tool execution, or the ultimate response to be sent back to the user. Example tools include but are not limited to calculators, databases, code interpreters, search engines, and ticket-booking travel agency websites. The most notable example is ChatGPT plugins, which have allowed users to book air tickets~\cite{kayak} and to reason about mathematical expressions~\cite{wolfman}.
+
+In this work, we identify a novel opportunity to enhance the efficiency of LLM serving systems that involve external tools. Traditional approaches to LLM serving treat the invocation of external tools as separate, sequential processes, leading to increased request completion times. However, we propose that these processes can be optimized through partial execution of tools concurrently with LLM decoding for a wide range of external tools (e.g., code interpreter, search, validation). We call this \textit{tool partial execution}. \autoref{fig:intro-tworeq} shows a conceptual example of LLM serving to demonstrate the performance benefits of tool partial execution. For instance, when LLM generates Python code for data visualization, one line of code such as ``\texttt{import matplotlib.pyplot as plt}'' can immediately be executed in the Python interpreter before the subsequent Python code is decoded (or generated) by the LLM. With partial execution, the resulting latency can be much shorter, because the tool execution (e.g., loading Matplotlib) and LLM decoding (e.g., generating subsequent Python code) can run in parallel without blocking each other.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=.8\textwidth]{figures/intro-pe.pdf}
+    \caption{An example of tool-assisted LLM serving scenarios with and without tool partial execution optimization. This example includes three rounds of LLM inference (blue and green blocks) and two rounds of tool invocation (gray blocks).}
+    \label{fig:intro-tworeq}
+\end{figure}
+
+To this end, we build \sys, an LLM serving system optimized for requests that trigger external tools. \sys consists of two key design points. First, \textit{we propose an interface for a tool developer to express the partial execution opportunity for an LLM serving system}. For example, a code interpreter can use ``\texttt{$\backslash$n}'' (newline) or ``\texttt{;}'' to serve as indicators of the opportunity for tool partial execution. Second, \textit{we build a token-granularity scheduler to detect such partial execution opportunities and invoke the corresponding tools to minimize unnecessary blocking and improve performance}. During LLM decoding, \sys detects the indication for partial execution opportunities, invokes tools, and collects tool invocation results for future prefilling. \sys is fully compatible with state-of-the-art efficient LLM serving techniques, such as PagedAttention~\cite{kwon2023pagedattention}, FlashAttention~\cite{dao2022flashattention,dao2023flashattention2}, and continuous batching~\cite{yu2022orca}.
+
+We evaluate \sys with six LLM serving workloads that contain external tool invocations. We use Mistral-7B-Instruct-v0.2~\cite{mistral7b} and Functionary-Small-v2.2~\cite{functionary} to invoke tools. Our results show that \sys's performance improvement varies significantly across different tools. Specifically, \sys achieves a latency improvement of up to 38.8\% across workloads including code generation, search, and planning. However, \sys shows negligible improvement in database execution and calculator tools. We also provide mathematical analysis of when tool partial execution can bring performance improvement and show that our empirical evaluation matches the analysis.
+We would like to highlight that the effectiveness of \sys is not affected by the choice of LLM or prompts because the execution flow of LLM decoding instructions and invoking tools remains the same that tool partial execution can happen alongside LLM decoding.
+In summary, this paper makes the following main contributions:
+\begin{itemize}[leftmargin=12pt]
+    \item We are the first to identify the opportunity for tool partial execution during LLM decoding;
+    \item We build \sys, an LLM serving system that enables tool partial execution to significantly reduce the total request completion latency;
+    \item We conduct systematic empirical evaluation and analysis to demonstrate that tool partial execution can provide performance benefits to a wide range of external tools.
+\end{itemize}
+\pdfoutput=1
+
+
+\section{Related Work}
+
+\label{sec:bg}
+
+In this section, we first introduce how modern LLM serving systems work. We next summarize emerging efforts in integrating external tool access into LLM serving.
+
+\subsection{LLM Serving Systems}
+
+Modern LLMs predominantly employ the Transformer architecture~\cite{transformer}, at the core of which lies the \textit{self-attention} module. The self-attention module computes three vectors for each token in the sequence, including query (Q), key (K), and value (V) vectors. It then calculates the attention score for each token by multiplying its Q vector with the K vectors of all preceding tokens, followed by a softmax and weighted average computation. Since the key and value vectors for processed tokens will be reused when generating new tokens, previous keys and values are usually cached in the GPU memory, known as the KV cache. 
+
+To process an LLM serving request, a Transformer-based LLM operates through two phases: \textit{Prefilling} and \textit{Decoding}. During the prefilling phase, the entire user prompt is processed and the LLM generates the first output token. The user prompt can be processed in parallel in a single iteration. Therefore, GPU utilization is typically high during this prefilling phase thanks to the intra-request parallelism. During the decoding phase, the model generates output tokens sequentially, relying on all previously generated tokens, including both user prompts and all tokens produced thus far. This sequential generation inherently results in lower GPU utilization and throughput as only one token can be produced per iteration for a single serving request. This sequential generation process is called \textit{autoregressive} decoding. Therefore, modern LLM serving systems batch multiple serving requests together to improve system throughput and resource utilization. For example, continuous batching~\cite{yu2022orca, kwon2023pagedattention} has become the most widely deployed batching technique in existing LLM serving systems. 
+
+\subsection{LLM Serving with External Tool Invocations}
+\label{sec:inefficiency}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=.6\textwidth]{figures/tool-llm.pdf}
+    \caption{A tool-assisted LLM serving scenario.}
+    \label{fig:tool-llm-workflow}
+\end{figure}
+
+Recently, there has been a rising trend of integrating LLM serving with external tool execution (e.g., ChatGPT plugins~\cite{kayak, wolfman} and Toolformer~\cite{schick2023toolformer}). External tools extend an LLM's capabilities to perform various complex tasks and interact with external environments. For example, many AI agents enable LLMs to access search engines to acquire up-to-date information or access databases that contain private datasets. LLMs can also invoke calculators to reason about complex math equations and execute code interpreters to generate customized data visualization. Moreover, they can trigger other ML models (e.g., computer vision models) to understand image contents.
+
+A typical tool-enabled LLM serving system is depicted in \autoref{fig:tool-llm-workflow}. A user sends a prompt to an intermediate agent. There are typically three components in such systems: an intermediate agent interacting with users, an LLM serving system, and a set of tool executors that interact with external environments. There can be several rounds of tool invocation when serving one user request. For brevity, we demonstrate the workflow assuming the request only needs one round of tool invocation: (a) the user first sends a request to the intermediate agent. (b) The agent feeds the original prompt to the LLM serving system, and (c) the LLM generates a plan, including tools to invoke and corresponding parameters. (d) The agent then invokes tool executors accordingly. (e) The tool executors interact with the external environments (\eg, online search engines or databases) and (f) return the observations (\ie, execution output) to the agent. (g) The agent concatenates the original prompt, plans, and observations together and feeds them back to the LLM. (h) The LLM generates the ultimate response and (i) the agent sends the response back to the user. 
+
+Integrating external tools into an LLM serving system has inspired a new line in machine learning system research: KV cache management. Since multiple rounds of LLM serving are typically needed for a single user request, the resources (\eg, KV cache) for a finished LLM serving are likely to be reused by future LLM inferences~\cite{abhyankar2024apiserve}. Treating these multiple rounds of LLM serving as independent requests results in redundant prefilling of the same token sequences. For example, in \autoref{fig:tool-llm-workflow}, to process the serving request (7), the LLM needs to compute the KV vectors for the original prompt and generated plans, which have already been computed previously as (2) and (3). AttentionStore~\cite{gao2024attentionstore} evicts the KV cache to CPU memory as long as the PCIe bandwidth permits the transfer. When the next round initiates, the KV cache is then loaded back into the GPU memory to eliminate KV cache recomputation. InferCept~\cite{abhyankar2024apiserve} predicts the execution time of external API access and estimates the corresponding GPU resource waste. InferCept then uses the estimation results to make GPU management decisions, such as discarding the key-value states, swapping the states to CPU memory, or retaining the states inside the GPU. Managing the KV cache is only one of the opportunities to accelerate LLM serving with external tools shown in this of works. Next, we will show that there is one additional opportunity to improve LLM serving with external tool invocations.
+
+\pdfoutput=1
+
+
+\section{Design}
+
+
+We first describe the new opportunity of tool partial execution. We then describe our new tool interface design and system implementation in \sys. Finally, we analyze the potential performance gain from tool partial execution.
+
+\subsection{Efficiency Opportunities in Modern Tool-assisted LLM Serving Systems}
+
+Today's tool-assisted LLM serving systems start the plan execution only after the LLM completes the entire decoding procedure. This misses the opportunities for pipelining LLM's decoding and plan execution to achieve reduced serving latency and improved system efficiency. 
+For example, it would be ideal if the Python interpreter could start partially executing the script as soon as the LLM generates the first line of code (\eg, \texttt{import torch}), without waiting for the generation of the entire script. However, in existing designs~\cite{langchain, schick2023toolformer, abhyankar2024apiserve}, since the LLM serving system and the tool execution are not co-optimized, the Python interpreter will only start after the entire script has been generated. This leads to extended serving delay and inefficient resource utilization (\eg, the LLM is idle and GPU cycles are wasted). We name this desired capability of initiating tool execution before complete LLM decoding as \textit{tool partial execution}, which has the potential to significantly reduce the serving latency and improve the overall efficiency and responsiveness of the system. 
+
+\begin{wrapfigure}{r}{0.70\linewidth}
+\includegraphics[width=.7\textwidth]{figures/code.pdf}
+\caption{Python code generated by the LLM.}
+\label{code:eval-sra-python}
+\end{wrapfigure}
+
+Let's consider a concrete example of executing Python code (in \autoref{code:eval-sra-python}). This code is generated by Mistral-7B-Instruct-v0.2~\cite{mistral7b} with the prompt ``Plotting a sine wave in python with torch and matplotlib. ONLY output code without trailing explanation.''. We use the markdown code block syntax \texttt{\textasciigrave\textasciigrave\textasciigrave python} and \texttt{\textasciigrave\textasciigrave\textasciigrave} as the indicators for the start and end of the tool.
+The execution without tool partial execution is that the LLM first generates the entire Python script, executes the script, and returns the image to the user. To understand why \sys provides performance improvement in this case, we plot the execution timeline with and without tool partial execution in \autoref{fig:eval-sra-python}. The green blocks represent the LLM decoding of a line of Python. The numbers represent line numbers. The grey boxes represent the execution of the Python code in a Python interpreter. With partial execution, the execution of lines 1--12 can be completely pipelined with the decoding procedure, and only line 13 needs to be executed after the decoding is finished.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=.8\textwidth]{figures/sra-python.pdf}
+    \caption{Case \#1: Execution timeline for the CodeGen workload with and without partial execution. The numbers in the diagram represent the line number of code in \autoref{code:eval-sra-python}. The length of each block represents the relative execution time but does not correspond to exact duration due to the expressiveness constraints in the diagram.}
+    \label{fig:eval-sra-python}
+\end{figure}
+
+Realizing such partial execution in existing tool-assisted LLM serving systems requires us to address the following two technical challenges. First, the LLM system needs to understand \textit{when a tool partial execution can be started}. This information needs to be passed to the system whenever a tool is registered, and it varies across different tools. For example, it is not possible to establish an HTTP connection without fully decoding the hostname. Therefore, a new set of interfaces should be properly designed for tool developers. Second, we need to carefully avoid unnecessary blocking and maximize resource efficiency when LLM decoding and tool execution are scheduled in parallel. For example, one round of LLM serving may invoke multiple tools sequentially. The system should manage these executions and outputs properly so that tool execution will not affect LLM decoding or vice versa. 
+
+\subsection{Tool Interface Design Tailored for Partial Execution}
+
+Partial execution in \sys requires tool developers' involvement to achieve optimal performance. Tool developers need to inform the LLM system when a tool can be initiated and what data is needed for the tool to execute. One option is to provide a token-level streaming interface to tool developers. This option requires tool developers to manually parse these tokens and extract the required information (e.g., tool invocation indicator and corresponding parameters). However, this option is neither user-friendly nor efficient.
+First, the tool developer has to handle complex parsing logic based on raw tokens, which can be burdensome for complex tools. Furthermore, a user may register many tools for potential usage while an LLM request may invoke none of them. In this scenario, complex parsing can be redundantly executed multiple times because each tool needs to process raw tokens independently, leading to wasted resources.
+
+Instead, \sys takes over the parsing responsibility and provides neat but generic interfaces to tool developers. \sys offers a set of parsers and a base plugin interface for tool developers. Tool developers only need to select a parser, typically depending on the LLM they use, and wrap their tool implementation with the plugin interface. Developers register both the parser and the plugin with the system during registration.
+
+The parser and plugin interface enable the system to determine when a tool is invoked and how data is used by the tool (e.g., data format). For example, a Python interpreter plugin consumes data line by line as it executes a line of data when each end-of-line is decoded. \sys handles token parsing for all tools, avoiding redundant parsing execution by different tools. Additionally, wrapping the tool implementation with our plugin interface is lightweight. For example, our implementation for the Python interpreter plugin shows that only 32 lines of Python code are needed, including necessary logging and error handling.
+
+\subsection{\sys Execution Workflow}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=.7\textwidth]{figures/system-overview.pdf}
+    \caption{\sys workflow overview.}
+    \label{fig:system}
+\end{figure}
+
+After plugins are registered to \sys, the system understands the indicators of different tools for partial execution and the data these tools require. To efficiently and effectively detect these indicators and conduct partial execution during decoding, \sys includes an efficient parser. This parser parses the generated token stream and invokes plugins accordingly. It is designed to support stream processing and emit completed pieces of data immediately for efficiency.
+
+\autoref{fig:system} shows the system architecture and workflow of \sys. Model developers and tool developers first register models and tool plugins to \sys, shown as (a) and (b). Next, when (1) a user sends a request to the system, the scheduler schedules received requests and (2) invokes the LLM for serving.  During each decoding iteration, (3) tokens are sent to the parser. The parser processes generated tokens, assembles them into semantic information (e.g., strings or keys), and (4) identifies tool invocation indicators. When a tool invocation indicator is identified, (6) \sys invokes the corresponding plugins and spawns a new process with an isolated setup to run the tool instance. \sys relies on duplex inter-process communication (IPC) channels to communicate with the new process running the tools to (6) send tool execution commands and (7) receive outputs. If no tool invocation is needed, (5) the parser simply returns the tokens to the scheduler and the next iteration starts. During each iteration, (8) the scheduler periodically polls the plugins' status to receive tool execution outputs. The scheduler determines whether (2) a new round of serving is needed or (9) the response is ready to be returned to the user. 
+
+Currently, LLMs continue to decode the data needed by the tool after the indicator has been decoded. Therefore, when the parser has processed adequate tokens and detects that a piece of data needed by the tool has been decoded, it assembles a message containing the data and sends it through the IPC channel to the tool process. Notably, the parser only needs to wait for the data required by the tool (e.g., parameters) instead of the entire LLM response. The separate process receives the data from the IPC channel and attempts to execute the tools. Depending on the tools, there might be cases where a tool needs multiple pieces of data to execute. The process executing the tools will store data in an internal buffer and wait for the remaining data in such cases. For example, when invoking a Python interpreter, function definitions (e.g., \texttt{def func():}) should be executed when the entire definition block has been decoded.
+
+It is worthwhile to note that we choose to spawn tool execution on a separate dedicated process to avoid unnecessary contention or interference with the LLM decoding procedure. Machine learning serving software usually uses Python as the programming language platform (e.g., PyTorch~\cite{pytorch}), and running a Python-based tool in the same process may cause either the tool execution or LLM decoding to be blocked by the Python Global Interpreter Lock (GIL) mechanism. Such contention can cause extended latency and reduce system performance. Another feature of \sys is that the parser implementation only depends on the syntax of the tool message generated by the model. Therefore, the number of parsers typically only depends on the number of models supported by the system, which is advantageous for tool developers.
+\subsection{Theoretical Analysis}
+\label{sec:analysis}
+
+We conduct a brief analysis of the theoretical performance gain brought by \sys. In \autoref{sec:eval-analysis}, we demonstrate how \sys achieves this performance gain in real workloads.
+
+Consider a general tool-assisted LLM serving request, which may consist of multiple rounds of tool invocations. For each round $i$, we denote the time of token generation as $g_i$, including both the prefilling and decoding time. We denote the time of tool execution for round $i$ as $t_i$. 
+In tool-assisted LLM serving workflows, the next generation (\ie, decoding) phases typically depend on previous tool outputs. Therefore, let us assume that the generation of $g_{i+1}$ depends on the tool invocation of $t_i$.
+Consider $n$ rounds of tool invocations.
+Without tool partial execution, the total execution time is $L_{old} = \sum_{i=1}^{n} (g_i + t_i) + g_{n+1}$. Here $g_{n+1}$ is the LLM decoding to process the output of the last tool invocation, so there is no tool access after this decoding procedure.
+
+When tool partial execution is enabled (\eg, using \sys), the best case is that the token generation and tool execution can be fully parallelized. For example, the tool starts to execute after the first token is generated and returns the output before the last token is decoded. The worst case is that the tool only starts after the entire decoding procedure has finished. Therefore, the theoretical time consumed by each tool-assisted LLM serving round $i$ would be  \begin{equation}
+\max\{g_i, t_i\} \le L_i \le g_i+t_i.
+\end{equation}
+The overall latency to serve a request is therefore bounded by:
+\begin{equation}
+\label{eq:overall}
+\sum_{i=1}^{n} \max\{g_i, t_i\} + g_{n+1} \le L_{new} \le L_{old}
+\end{equation}
+The best-case speedup that can be achieved via enabling tool partial execution is where $g_i$ and $t_i$ are fully overlapped, \ie, $L_{new} = \sum_{i=1}^{n} \max\{g_i, t_i\} + g_{n+1}$, with a corresponding relative latency improvement given by $\frac{\sum_{i=1}^{n} (g_i + t_i) + g_{n+1}}{\sum_{i=1}^{n}\max\{g_i, t_i\}+ g_{n+1}} - 1$. 
+
+
+
+\section{Evaluation}
+
+\pdfoutput=1
+\label{sec:eval}
+We evaluate \sys on various workloads and demonstrate how integrating tool-awareness into modern LLM serving systems enhances system efficiency. First, we briefly introduce our evaluation setup. We then evaluate \sys on various tool-assisted LLM serving tasks from existing literature, showing that partial tool execution significantly reduces response delay and improves overall resource utilization. 
+Second, through two case studies, we systematically break down performance improvements for these workloads in detail, demonstrating that \sys matches the trend of the theoretical best-case latency speedup. Finally, we analyze and demonstrate that \sys's overhead is negligible in modern tool-assisted LLM serving scenarios.
+
+\subsection{Setup}
+We evaluate \sys on our testbed of servers with two Intel 10-core Xeon Gold 5215 CPUs (running at 2.5 GHz base frequency) and two NVIDIA GeForce RTX 3090 GPUs. We implement our system on top of PyTorch~\cite{pytorch} with FlashInfer CUDA kernels~\cite{flashinfer}. Our \sys system is implemented in about 1.9K lines of Python. Our baseline is the same code but with tool partial execution disabled, where tool invocation always happens after decoding to the end-of-sequence (EOS) token.
+
+\paragraph{Workloads.} To the best of our knowledge, there are unfortunately no publicly available realistic datasets of tool-assisted LLM serving scenarios. Instead, we systematically investigate existing literature~\cite{kim_llm_2024, liu_optimizing_2024, jin_adaptive_2024, arora_learning_2023, xu_rewoo_2023, ruan_tptu_2023, kuchnik_validating_nodate} and construct six scenarios for our evaluation.
+\begin{itemize}[leftmargin=12pt]
+    \item \textbf{CodeGen}: We ask the LLM to plot a sine wave in Python with the \texttt{torch} and \texttt{matplotlib} library. Tool partial execution starts when \sys detects a complete line of Python code is decoded.
+    \item \textbf{Search}: We ask the LLM to write a ``Hello World'' program in Python, C++ and Java consecutively, using tools to search online and use results from StackOverflow. Tool partial execution starts when \sys identifies the function name of the tool.
+    \item \textbf{Planning}: We ask the LLM to search the market caps of Microsoft and Apple, and use a calculator to compute their ratio and output using a given formatting tool. The LLM generates a 4-stage plan involving tools: the first and second stages search on the Internet, the third stage is to invoke a calculator, and final stage is to use the format tool. Tool partial execution starts when a complete stage of the plan is generated.
+    \item \textbf{Validation*}: We ask the LLM to generate a function call to get local news. However, the LLM fails to generate the correct location arguments even though it is prompted in the tool description. The local news API requires a city name and a state name. If arguments are not correctly presented in the correct format (e.g., missing the state name or the city name), the API call will fail. The failure is due to the LLM model's reasoning constraint. For this workload, we only measure the latency needed for detecting if this invocation is problematic, not including tool execution time.
+    \item \textbf{Database}: We provide a small SQLite file on disk in advance and ask the LLM to select all the data from the database. Tool partial execution starts when \sys identifies the function name of the tool.
+    \item \textbf{Calculator}: We ask the LLM to compute 200$\times$701 using a calculator tool. Tool partial execution starts when the complete formula is decoded.
+\end{itemize}
+Due to the models' capabilities limited by our testbed (the available GPU memory), we generate these synthetic workloads with our own prompts instead of using the original prompts of those papers. We use Mistral-7B-Instruct-v0.2~\cite{mistral7b} for Python CodeGen and Planning workloads, and use Functionary-Small-v2.2~\cite{functionary} for Search, Validation, Database, and Calculator workloads. We choose these two models because they can generate valid tool invocation instructions for us to run the evaluation except for the Validation workload. We pick Functionary for the Validation workload because we empirically found that it has a higher probability of generating format-correct requests. We set temperature to be 0, so every test for the same workload has the same LLM output. Performance variance across tests for the same workload is due to the performance variance in CPU/GPU processing and the Internet (for the Search and Planning workloads). Note that the effectiveness of \sys is not affected by the choice of LLM or prompts because the execution flow of LLM decoding instructions and invoking tools remains the same, which will be further elaborated in the following case study section. 
+
+\subsection{Main Results}
+\begin{figure}
+    \centering
+    \includegraphics[width=.8\textwidth]{figures/eval-overall.pdf}
+    \caption{Average request completion latency with and without tool partial execution. Error bars represent the standard deviations. Validation*: validation is not a standalone tool; it is a functionality embedded within tools, such as verifying the validity of parameters.}
+    \label{fig:mainresults}
+\end{figure}
+
+\sys's performance improvement is significant, but the extent heavily depends on the performance characteristics of the tools. We run each workload 100 times and collect the average latency and the standard deviations, and the results are shown in  \autoref{fig:mainresults}. For the CodeGen workload, the latency improvement comes from the parallelized execution of LLM decoding and the Python interpreter execution. The average latency improvement is 26.3\%. For the Search workload, the performance gain comes from parallelizing the tool invocation of the search on StackOverflow and the LLM decoding for the next search. The improvement is 35.8\% on average. The latency variance of the Search workload is high because it involves search over the Internet, and the constraints in the search bring more uncertainty at the server side. For the Planning workload, the improvement comes from parallel execution of decoding the plan and executing parts of the partially decoded plan, and the corresponding latency improvement is 38.8\%. 
+Validation workload has shown the best latency improvement of 376.4\%, in which the source of the performance improvement is different from other workloads. The partial execution allows the check for the format of the tool execution to run before the entire sequence is decoded.
+We observe negligible improvement when enabling tool partial execution in the Database and the Calculator workloads. This is due to the fact that the tool access latency is already very small compared to the decoding latency, therefore parallel execution brings only negligible improvement.
+
+\subsection{Case Studies}
+Now, we delve deep into two case studies, CodeGen and Validation, to demonstrate where the performance improvement comes from.
+
+\paragraph{Case \#1: Python code generation.}
+For the CodeGen workload, we let Mistral-7B-Instruct-v0.2~\cite{mistral7b} generates the Python code to plot a sine wave (\autoref{code:eval-sra-python}). \autoref{fig:eval-sra-python} shows the corresponding execution timelines with and without tool partial execution. \sys helps to reduce averagely \textit{725 ms} for the entire end-to-end serving latency, which is 3,918 ms on average without partial execution, leading to \textit{26.3\%} improvement (see \autoref{sec:analysis}) for this user request. It is worthwhile to note that a few import statements (\eg, line 2 and line 5) consume negligible time because \sys invokes the Python interpreter through \texttt{fork}, so the plotting script can reuse the modules already imported by \sys.
+\paragraph{Case \#2: Tool validation.}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=.8\textwidth]{figures/sra-validation.pdf}
+    \caption{Case \#2: Execution timeline for the Validation workload with and without partial execution.}
+    \label{fig:eval-sra-validation}
+\end{figure}
+
+For the Validation workload, we let Functionary-Small-v2.2~\cite{functionary} generate a request for a local news service. The request is in JSON format, and the field ``location'' has to contain a valid city name and a state name. If the ``location'' only contains the city name, the request will be rejected by the service, and there is no point in sending such a request. \autoref{fig:eval-sra-validation} shows the execution timeline. Without partial execution, such a check has to take place after the entire request is decoded. Partial execution allows the check to happen earlier and can abort immediately, saving the resources and the time for decoding subsequent tokens.
+
+\subsection{Comparing Theoretical Analysis with Empirical Results}
+\label{sec:eval-analysis}
+
+\begin{wrapfigure}{r}{0.46\linewidth}
+    \centering
+    \includegraphics[width=0.4\textwidth]{figures/theoretical2.png}
+    \caption{Theoretical and empirical latency improvement from tool partial execution.}
+    \label{fig:gain}
+\end{wrapfigure}
+
+Our system evaluation is limited to the capability of existing open-source models and the existing sets of tools that they support. Even for the tools evaluated in this paper, it is difficult to comprehensively evaluate more workloads due to model restrictions. For example, for the planning workloads, we are only able to evaluate plans that existing models can create, and future LLMs may be able to create more complex plans that our evaluation methodology cannot cover.
+
+To systematically quantify how much benefits {\sys}'s tool partial execution can bring for future tools, we use our mathematical analysis in \autoref{sec:analysis}
+to quantify the maximum theoretical performance gain in terms of latency improvement.
+We plot this latency improvement as a blue curve in \autoref{fig:gain}. The x-axis is the ratio between tool execution time and decoding time, $\frac{t_i}{g_i}$, assuming this ratio is fixed across all $i$ and $g_{n+1}$ is negligible compared to $\sum_{i=1}^{n}\max\{g_i, t_i\}$. We put our empirical evaluation results as red dots in the figure. As expected, the Database and the Calculator workloads achieve a near-zero improvement. This is because the tool execution time is negligible compared to LLM decoding time. They will not be accelerated by tool partial execution. The CodeGen, the Planning, and the Search workloads achieve a more significant performance improvement, because their tool/decoding time ratio is near the peak of the curve. The red dots are below the theoretical limit, because the theoretical limit assumes tool access time is fully masked by decoding or vice versa. The red dots match the overall trend of the theoretical best-case latency speedup. Note that the Search and the Planning workloads performance depend on Internet performance. Their tool time is not stable and thus hard to overlap perfectly with LLM decoding. We did not show the dot for the Validation workload: its source of improvement is from aborting decoding earlier and is thus not captured by our theoretical analysis.
+
+\subsection{Overhead of \sys}
+
+\sys has overheads in parsing output tokens. We measure \sys's CPU overheads when running the CodeGen task with and without tool partial execution. Our result is that \sys incurs 0.6\% extra CPU cycles, which is negligible. This is expected since most CPU cycles are used in the LLM serving (\eg, launching CUDA kernels) and triggering external tools), and parsing itself is much more lightweight compared to these operations.
+
+Another type of overhead is how much additional human effort a tool developer needs in order to use our interface to port tools on top of \sys. For our six workloads, we manually incorporate corresponding tools to \sys using \sys's tool plugin interface. Each tool's incorporation only needs 20--40 lines of code. This demonstrates that porting more tools on top of \sys will be simple.
+
+\pdfoutput=1
+
+
+\section{Limitations}
+
+The performance improvement of \sys depends heavily on the workloads. For lightweight tools (where tool execution time is orders-of-magnitude less than the decoding time), like the Calculator and the Database workloads we have evaluated, \sys has negligible performance improvement. We also don't expect \sys to provide performance when the tool execution time is orders-of-magnitude more than the LLM decoding. \autoref{sec:eval-analysis} has provided a detailed analysis of this limitation.
+
+
+
+\section{Conclusion}
+
+In this paper, we presented \sys, a novel LLM serving system designed to efficiently handle requests that incorporate external tools. The core idea of \sys is to enable tool partial execution alongside LLM decoding to improve request completion latency. \sys's design consists of two components. First, \sys contains a tool interface design for tools to indicate the partial execution opportunity to an LLM serving system. Second, \sys has a request scheduler that facilitates corresponding tool partial execution. Our evaluation based on a set of LLM serving workloads shows that \sys improves request completion time by up to 38.8\%. 
+
+
+
+

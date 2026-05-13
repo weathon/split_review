@@ -1,0 +1,1193 @@
+\title{Scalable Extraction of Training Data from Aligned, Production Language Models}
+
+\begin{abstract}
+
+    This paper studies \emph{extractable memorization}:
+    training data that an adversary can efficiently extract
+    by querying a machine learning model without prior knowledge of the training dataset.
+    We show an adversary can extract gigabytes of training data from
+    open-source language models like Pythia or GPT-Neo,
+    semi-open models like LLaMA or Falcon,
+    and closed models like ChatGPT. 
+    Existing techniques from the literature suffice to attack
+    unaligned models; in order to attack the aligned ChatGPT, we develop a new
+    \emph{divergence} attack that causes the model to diverge from its chatbot-style generations and emit training data at a rate $150\times$
+    higher than when behaving properly.
+    Our methods show practical attacks can recover far more
+    data than previously thought, and 
+    reveal that current alignment techniques 
+    do not eliminate memorization.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large language models (LLMs) memorize examples from their training datasets,
+which can allow an attacker to extract
+(potentially private) information~\citep{carlini2019secret,brown2022does,carlini2021extracting}. 
+Prior work has
+(a) performed large-scale studies of the total quantity of memorized training data for open-source models~\cite{carlini2022quantifying}, and
+(b) developed practical attacks to extract training data on (relatively) small models like GPT-2, by manually annotating examples as memorized or not~\cite{carlini2021extracting}.\looseness=-1
+
+In this paper, we unify these two directions and
+perform a large-scale study of 
+``extractable memorization'' in language models.
+Unlike \emph{discoverable} memorization \cite{carlini2022quantifying} that captures an upper bound on 
+\emph{all} training data that is memorized (even if it can only be recovered 
+by prompting the model with other training data),
+\emph{extractable} memorization captures only that data that can be efficiently
+recovered by an adversary.
+We develop a scalable methodology that allows us to detect memorization in
+trillions of tokens of model outputs in terabyte-sized datasets,
+and perform this analysis on both
+open-source models (e.g., Pythia~\citep{biderman2023pythia},  GPT-Neo~\citep{gpt-neo}) and 
+semi-open models (e.g., LLaMA~\citep{llama}, Falcon~\citep{penedo2023refinedweb}).
+We find that larger and more capable models are more vulnerable to data
+extraction attacks.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/fig1.pdf}
+    \caption{
+    We scalably test for memorization in large language models.
+    Models emit more memorized training data as they get larger.
+    The aligned ChatGPT (\chat) \emph{appears} $50\times$ more private than any prior model, but we develop an attack that shows it is not. 
+    Using our attack, ChatGPT emits training data $150\times$ more frequently than with prior attacks, 
+    and $3\times$ more frequently than the base model. 
+    }
+    \label{fig:teaser2}
+\end{figure}
+
+But when we perform this analysis on \chat{},
+it appears to memorize almost no training data.
+We hypothesize that this is because ChatGPT has been \emph{aligned} (with RLHF~\citep{sanh2021multitask,ouyang2022training, gpt4-systemcard, chatgpt}) to act as a helpful chat assistant.%
+\footnote{While limited information is available about this model,
+similar models like GPT-4 have been trained to ``refuse to answer certain types of requests,'' including those related to training data extraction~\cite[p. 13]{gpt4-systemcard}.}
+
+To circumvent the model's alignment,
+we discover a prompting strategy that causes
+\chat{} to ``diverge'' from reasonable, chatbot-style generations, and to
+behave like a %standard 
+base language model, outputting text in a typical Internet-text style.
+In order to check whether this emitted text was previously contained somewhere on the Internet, we merge together several publicly available web-scale training sets into a nine terabyte dataset.
+By matching against this dataset, we recover over ten thousand examples from ChatGPT's training dataset at a query cost of \$200 USD---and our scaling estimate suggests that one could extract over $10\times$ more data with more queries.\looseness=-1
+
+\tightparagraph{Ethics \& Responsible Disclosure.}
+We have taken great care to responsibly share our findings. 
+We shared our findings with the authors of each model we study in this paper (e.g., OPT~\citep{zhang2022opt}, Falcon~\citep{penedo2023refinedweb}, Mistral~\citep{jiang2023mistral}, and LLaMA~\citep{llama}),.
+
+Our attack on ChatGPT (\chatgptendpt) is specific to this model and, to the best
+of our knowledge, is not applicable to any other production language model that we have tested.
+We disclosed this vulnerability to OpenAI on August 30th (after discovering the flaw on July 11th), 
+and allowed 90 days for the issue to be addressed
+following standard disclosure timelines \cite{pz} before publishing this paper.
+
+We believe it is now safe to share this finding, and that publishing it openly brings necessary, greater attention to the data security and alignment challenges of generative AI models.\footnote{In fact, 
+in early August, a month after we initial discovered
+this attack, multiple independent researchers discovered the underlying exploit used in our
+paper, but, like us initially, they did not realize that the model was 
+regenerating training data, e.g., \url{https://twitter.}
+Our paper helps to warn practitioners that they should not train and deploy LLMs for any privacy-sensitive applications without extreme safeguards.
+
+
+
+\section{Background and Related Work}
+
+
+
+\paragraph{Training data for language models.} State-of-the-art large language models (LLMs) are pre-trained on vast text corpora that consist of billions to trillions of tokens~\citep{radford2019gpt2,gpt-neo,raffel2020exploring,touvron2023llama}. For proprietary models such as GPT-4~\citep{gpt4} and PaLM 2~\citep{anil2023palm}, these training sets are kept secret to presumably hide (1) the company's proprietary data collection pipeline, and (2) any private, user-specific, or licensed training data that is not publicly available~\citep{lee2023explainers, lee2023talkin}. %online.%, and (3) provide plausible deniability that certain copyrighted sources were used~\citep{henderson2023foundation}.
+
+\tightparagraph{Instruction-tuning and RLHF.} Pre-trained LLMs can solve numerous downstream tasks by conditioning on natural language instructions~\citep{gpt3}. The model's utility can be drastically improved via supervised fine-tuning or RLHF on instruction-following data~\citep{sanh2021multitask,ouyang2022training,bai2022training, christiano2017deep, gpt4, chatgpt-custom}. Aside from utility, this ``alignment'' stage can also train models to use a unified chat-like persona~\citep{ouyang2022training, chatgpt} and to abstain from answering on certain types of queries (e.g., it will not assist users in writing spam emails)~\citep{gpt4-systemcard}. In this work, we analyze ChatGPT (specifically, the \chatgptendpt{} model endpoint).
+
+\tightparagraph{Privacy attacks.} Neural networks, especially ones with many parameters, can memorize their training data.
+This can be exploited by adversaries via membership inference attacks that infer whether an example was in the training set~\citep{DBLP:conf/sp/ShokriSSS17,fredrikson2015model,yeom2018privacy,carlini2022membership,choquette2021label}, as well as more powerful data extraction attacks \citep{carlini2019secret,carlini2021extracting,balle2022reconstructing,kudugunta2023madlad} that recover full training examples. In this work, we conduct both types of attacks on LLMs.
+
+
+\section{Extracting Data from Open Models}
+
+
+
+We begin by studying data extraction attacks on %fully 
+\emph{open} models where both the models' parameters and their original training sets are publicly available.
+This
+lets us precisely evaluate the performance of
+extraction attacks from prior work. %perform.
+
+\subsection{Prior Approaches and Definitions}\label{sec:memdefs}
+We follow the (conservative) definition of memorization of Carlini et al. (2021)~\cite{carlini2021extracting}: given a model trained on a training set $\sX$, we denote a string $\vx \in \sX$ %from the training set 
+as 
+\emph{memorized} %(Carlini et al. (2021)~\cite{carlini2021extracting} call this \emph{extractable}), cooper: commented this out because it was confusing relative to our use of the word extractable immediately following; see footnote below
+if we can prompt the model's generation routine $\mathsf{Gen}$ to produce the string $\vx$ verbatim.
+Some prior work (e.g.,~\cite{carlini2022quantifying, somepalli2023diffusion, carlini2023extracting}) has proposed more general notions of memorization %extractability 
+where the model may generate a ``close'' copy of a training sample, but we restrict ourselves to verbatim matches as this will make it possible to scale our analysis to large datasets. This leads us to our definition of \emph{extractable memorization}:\footnote{Prior work also uses the word ``extractable''~\citep{carlini2021extracting}; we supply a general definition that encompasses attacks in this work and our own.}\looseness=-1
+
+\begin{definition}[\textbf{Extractable memorization}]
+\label{def:extractable}
+Given a model with a generation routine $\mathsf{Gen}$, an example $\vx$ from the training set $\sX$ is \underline{extractably memorized} if an adversary (without access to $\sX$) %the training set) 
+can construct a prompt $\vp$ that makes the model produce $\vx$ (i.e.,  $\mathsf{Gen}(\vp)=\vx$).
+\end{definition}
+The design and evaluation of extraction attacks in prior work were primarily hindered by two challenges:
+
+\begin{enumerate}[itemsep=2pt, topsep=2pt]
+\item How should we design prompts that best elicit memorization in a model?
+\item How do we test whether the attack worked, i.e., whether the model's output is training data or not?
+\end{enumerate}
+
+Prior work has tackled these challenges with various heuristics. For example, Carlini et al. (2021)~\cite{carlini2021extracting} recover training examples from the GPT-2 language model~\citep{radford2019gpt2} by prompting it
+with short strings sampled from the public Internet, and then manually checking whether these strings can also be found with a Google search.
+That is, they address the first challenge by simply prompting the model with data sampled from the model's training distribution (GPT-2 was trained on some unknown text sampled from the Internet), and they address the second challenge by %heuristically 
+(reasonably) assuming that any string memorized by the model is also contained in Google's search index; they manually query with output strings to see if they exist on the public Internet. %with these strings and then manually querying with that string.
+
+Their attack, while successful, only verifiably recovers $\approx 0.00001\%$ of GPT-2's training dataset.
+The authors acknowledge that this is likely a loose lower bound; they could not produce a tighter estimate due to the time-consuming manual verification procedure that their attack involves.
+
+Rather than improving this loose lower bound, subsequent work has instead focused on measuring an \emph{upper bound} on the strength of an extraction attack, thereby circumventing the two challenges described above.
+Several works \cite{carlini2022quantifying, ishihara2023training} have studied the extent to which models can regurgitate their training data \emph{when explicitly prompted with data from their training set}. That is, given a training string $[\vp || \vx] \in \sX$ that consists of a prefix $\vp$ and suffix $\vx$, we can measure whether the model can generate $\vx$ when prompted with the true prefix $\vp$.
+Following Carlini et al. (2022)~\cite{carlini2022quantifying}, we denote this as \emph{discoverable memorization}:
+
+\begin{definition}[\textbf{Discoverable memorization}]
+\label{def:discoverable}
+For a model $\mathsf{Gen}$ and an example $[\vp || \vx]$ from the training set $\sX$, we say that $\vx$ is \underline{discoverably memorized} if $\mathsf{Gen}(\vp) = \vx$.
+\end{definition}
+
+Prior work %has shown 
+shows that many LLMs discoverably memorize roughly $1\%$ of their training datasets  %is discoverably memorized 
+(when prompting the model with about 50 tokens of context)~\cite{carlini2022quantifying,anil2023palm,kudugunta2023madlad}.
+There is thus a huge gap between prior lower bounds on extractable memorization (i.e., actual extraction attacks that have to be manually verified~\citep{carlini2021extracting}), and upper bounds that assume full access to the training set $\sX$. 
+This raises a natural question: why is there such a large observed %measurement
+gap between extractable and discoverable memorization in the literature?
+
+To answer this question, recall the differences between how prior work measured extractable and discoverable memorization rates:
+first, prompts are constructed by either heuristic means or by using the actual true prefix $\vp$,
+and second, verifying if data was successfully extracted was either performed manually or by looking at the actual training dataset $\sX$.
+This suggests two possible explanations for the observed gap: %between discoverable and extractable memorization in the literature:
+
+\begin{enumerate}[itemsep=2pt, topsep=2pt]
+\item It is possible that prompting models with training data leads to orders-of-magnitude more training-data regurgitation, %of training data, 
+compared to realistic extraction attack strategies (in which adversaries do not have access to the training set).\looseness=-1
+\item Alternatively, perhaps existing extraction attacks already make models regurgitate large amounts of training data, but prior work was not able to \emph{verify} that the model outputs were training data.
+\end{enumerate}
+
+Our goal in this section is to disentangle these two possible explanations. As we will show, the latter explanation is (mostly) the correct one. 
+Existing extraction attacks are actually a lot more successful at recovering training data than what prior work indicates. 
+
+\subsection{Attack Methodology}\label{sec:openattack}
+
+To begin, 
+we %(re-)evaluate
+evaluate 
+past extraction attacks in a controlled setting where testing for attack success is possible.
+That is, we first focus on open-source models with publicly available training datasets, where we can mechanistically verify if any generated output $\vx
+$ is indeed training data (but, crucially, the attack itself does not rely on knowledge of the training set). 
+
+We follow the
+data extraction attack method of Carlini \emph{et al.}~\citep{carlini2021extracting}:
+(1) we download $10^8$ bytes of data from Wikipedia, and generate prompts $\vp$ by randomly sampling (with replacement) hundreds of millions of continuous 5-token blocks from this dataset;
+(2) we perform an independent generation for each prompt  $\vp^i$ as $\mathsf{Gen}(\vp^i)=\vx^i$ and store each $\vx^i$. 
+
+Our methodology differs %is 
+in how we evaluate the efficacy of the attack.
+Because this prior attack extracted training data from a language model
+without a public dataset, it was necessary to manually search the Internet
+in order to determine whether or not any generated sequence was
+contained in the model's training dataset.
+In contrast, each model we study in this section is fully open-source.
+This lets us directly query the model's training data to
+evaluate whether or not any generated
+sample is memorized.
+
+Performing the training set inclusion test $\vx \in \sX$ naively is prohibitively expensive, as LLMs are trained on datasets with trillions of tokens 
+and we generate billions of tokens of output from each of these models.
+To make this search efficient, we use a \emph{suffix array}, as done in Lee et al. (2021)~\citep{lee2021deduplicating}---a data structure that stores all suffixes of the dataset in sorted order, and which enables fast string lookups (using binary search).
+We build a suffix array $\vs$ over $\sX$, denoted $\vs(\sX)$ or simply $\vs$ when unambiguous. %the suffix array enables us to use binary search to perform this check in $\mathcal{O}(\log{|\sX|})$ time~\citep{lee2021deduplicating}. 
+
+We report that an extraction is successful if the model outputs text that contains a substring of length at least 50 tokens that is contained verbatim in the training set.\footnote{We also require that the entropy of the generated string is high, to filter out degenerate examples such as repeated whitespace, or lists of numbers.}
+We chose this value empirically to be sufficiently large so that no two suffixes could accidentally overlap. 
+We estimated the amount of token overlap between news articles guaranteed to be written after the creation of the largest training datasets RedPajama~\citep{together2023redpajama}.
+We found no overlap longer than 25 tokens, excluding direct quotations
+(i.e., actual copies). We then chose to be extremely conservative and double this value.
+
+
+\subsection{Empirical Results}\label{sec:openresults}
+We apply our attack to 9  open-source models of different sizes.
+Since these models were, e.g., ``designed specifically to facilitate scientific
+research''~\cite{biderman2023pythia},
+they make available their entire training and pipeline and dataset,
+facilitying our study.
+
+\begin{itemize}
+    \item GPT-Neo (1.3B, 2.7B, 6B)~\citep{gpt-neo}, a family of models trained on The Pile~\citep{gao2020pile}.%
+    \footnote{The 6B paramter model is officially called GPT-J;
+    for consistency and simplicity we refer to it as GPT-Neo 6B in this paper.}
+    \item Pythia (1.4B, 1.4B-dedup, 6.9B, 6.9B-dedup)~\citep{biderman2023pythia},
+   a family of models also trained on The Pile, but primarily designed for studying model scaling and memorization.
+    \item RedPajama-INCITE (Base-3B-v1, Base-7B)~\citep{together2023redpajamamodels}, 
+    models trained on the \emph{RedPajama}~\citep{together2023redpajama} dataset.
+\end{itemize}
+We generate one billion tokens of output %separately 
+for each model and then compute the number of memorized examples
+by matching against the corresponding training set.
+From this data, we can perform two different types of analysis.
+First, in Table~\ref{tab:open_results}, 
+we measure the \emph{fraction of model outputs} that are memorized.
+We observe rates between 0.1\% and 1\%.
+But this number is hard to interpret---a model that emitted the same
+memorized training sequence thousands of times in a row would look
+highly non-private, even if in practice it was revealing almost no
+data.
+
+And so instead, we can also compute the \emph{number of unique 50-token strings that we extract},
+which varies between several hundred thousand and several million.
+This allows us to observe data extraction rates orders of magnitude
+higher than reported previously in Carlini et al. (2021)~\cite[p. 13]{carlini2021extracting}, which only verifiably
+extracted 600 sequences from GPT-2.
+This serves as evidence to suggest that
+ extractable memorization rates are much higher than
+ previously thought (at least for these open %-sourced 
+ models).
+We observe a strong correlation between model size and 
+\emph{both} the rate of emitting memorized output
+and also the total number of unique 50-token sequences we extract,
+indicating that the pathological failure mode where 
+a model repeatedly emits the same memorized example is not common in
+
+\begin{table}[]
+\small
+    \centering
+    \begin{tabular}{@{} lrrrr @{}}
+\toprule
+Model & \hspace*{-1.2cm}Parameters & \hspace*{-.2cm}\% Tokens & Unique  & Extrapolated\\
+Family & \hspace*{-.7cm}(billions) & \hspace*{-.2cm}memorized & {50-grams} & {50-grams} \\ 
+\midrule
+RedPajama & 3\hphantom{.0}  & 0.772\% & 1,596,928 & 7,234,680 \\
+RedPajama & 7\hphantom{.0}  & 1.438\% & 2,899,995 & 11,329,930 \\
+GPT-Neo & 1.3  & 0.160\% & 365,479 & 2,107,541 \\
+GPT-Neo & 2.7 & 0.236\% & 444,948 & 2,603,064 \\
+GPT-Neo & 6\hphantom{.0}  & 0.220\% & 591,475 & 3,564,957 \\
+Pythia & 1.4  & 0.453\% & 811,384 & 4,366,732 \\
+Pythia-dedup & 1.4  & 0.578\% & 837,582 & 4,147,688 \\
+Pythia & 6.9  & 0.548\% & 1,281,172 & 6,762,021 \\
+Pythia-dedup & 6.9  & 0.596\% & 1,313,758 & 6,761,831 \\
+\bottomrule
+    \end{tabular}
+    \caption{For each model we generate 1 billion tokens and report: (1) the rate at which models generate 50-token sequences that occur in \bigds;
+    (2) the number of unique, memorized 50-token sequences; and (3)
+    our extrapolated lower bound of unique, memorized 50-token sequences.
+    Our lower bound is often exceptionally loose---for example in Figure~\ref{fig:gpt_neo_6b_estimation} we extract
+    over 30 million unique 50-token sequences from GPT-Neo 6B by generating 500$\times$ more data, nearly $10\times$ the estimated lower bound.}
+    \label{tab:open_results}
+\end{table}
+
+
+
+\subsection{Estimating Total Memorization}\label{sec:ratevcapacity}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/uniq-50grams.pdf}
+    \caption{
+    As we query models more, they emit more unique memorized data. This \emph{rate} of extraction differs between models and can also change. For example, though Pythia-1.4B initially emits more unique training data than Neo-6B, after 60B queries the model has a more rapid decay leading to a lower \emph{total} memorization.
+    }
+    \label{fig:rate_vs_capacity}
+\end{figure}
+
+In our explorations thus far (Sections~\ref{sec:openresults} and~\ref{sec:disc_vs_ext}), we have %always 
+used a large fixed budget of generations for our extraction attacks. But, the number of generations has a significant impact on the amount of extractable memorization, as can be clearly seen from Figure~\ref{fig:rate_vs_capacity}: memorization grows (nearly) linearly even after generating several hundred billion tokens.
+
+This leads to a natural question that has not yet been discussed in the literature: if we could query a model infinitely, how much memorization could we extract in total? Given this is infeasible, we instead aim to estimate the \emph{total memorization}. However, again observing Figure~\ref{fig:rate_vs_capacity} demonstrates a challenge here: the \emph{rate} of extracting memorized training data is not a good predictor of the \emph{total} quantity of memorization. In particular, we observe that at smaller compute budgets, Pythia 1.4B appears to memorize more data than the (larger) GPT-Neo 6B. However, if we query the model more, the rate of extractable memorization in Pythia-1.4B decreases, revealing that GPT-Neo 6B in fact memorizes more data in total. Thus, we will need to find better predictors of the total memorization of a model.
+\paragraph{Extrapolating total memorization.}\label{sec:openextrapolating}
+
+\iffalse
+This motivates our next question: is it possible to estimate the total amount of extractable memorization of a language model without needing to generate billions of tokens of output?
+Ideally, there should be a metric we can compute which requires sampling fewer tokens from the
+model and can be used to extrapolate to larger compute budgets.
+\fi
+
+We begin by decomposing
+our extrapolation problem into estimating two values: 1) how often a model outputs \emph{anything} memorized, and 2) how often a memorized generation is \emph{new}.
+The first value is not stateful and so can be easily estimated as a probability. But, the second value depends on how many memorized strings we have already observed. Let us focus on this latter quantity. Note that the total amount of memorization the model will ever output as we scale the number of generations, does not depend on the first value.
+
+We can visualize the rate of new memorization via a slight modification of Figure~\ref{fig:rate_vs_capacity}. Instead of varying the  \emph{number of generated tokens}, we instead compute and vary the \emph{number of memorized tokens extracted}.
+In this visualization, shown in Figure~\ref{fig:unique_rate}, we can more clearly observe the differences between GPT-Neo 6B and Pythia 1.4B. In particular,
+the slope and curvature of the plot help us understand the model's total memorization: Pythia-1.4 outputs new memorized examples less frequently than GPT-Neo 6B, and seems to saturate much more quickly as well, pointing to the limit of how much training data we can surface.
+While the slope and curvature are only estimations, they can serve as a starting point to understand how to make extractable memorization more efficient. Indeed, they can enable us to estimate how much memorization could be extracted even if researchers do not have the capability to generate many hundreds of billions of tokens.
+
+
+
+\begin{figure}[t]
+    \centering
+        \includegraphics[width=0.9\linewidth]{figures/uniq-extracted-50grams.pdf}
+    \caption{
+    Number of unique extracted 50-grams versus the number of total extracted 50-grams (generated and memorized). 
+    The rate of observing unique 50-token sequences
+    from GPT-Neo 6B always dominates the rate of observing unique
+    50-token sequences from Pythia-1.4B.}
+    \label{fig:unique_rate}
+\end{figure}
+
+\paragraph{Intuition.}
+Suppose a researcher wants to know how many fish live in a lake.
+If this researcher is very hardworking, they could try to count each fish individually, catching and then throwing them back in the lake, and hoping to not skip or double-count any fish.
+However, in practice, a common technique is known as mark-and-recapture~\cite{southwood2009ecological}:
+first, catch and \emph{mark} $N$ fish, wait for some time,
+and then \emph{recapture} $K$ fish,
+recording the number $L$ of fish that have been marked.
+From this information, mark-and-recapture estimates the number of fish in the lake as $NK/L$.
+
+This estimate requires making a few assumptions. First, no one fish is more likely than another to be caught. Second, the population does not change. Ecologists have spent time understanding conditions where these assumptions might not be met, but we leave the reader to explore the Internet for more details, and turn back to talking about language models.
+
+\paragraph{Mark-and-recapture does not apply.}
+An initial attempt at applying mark and recapture to our analysis would have us estimating, instead of fish, the total number of unique memorized 50-grams extractable from the model.
+That is, we can generate until we collect $N$ memorized examples, collect further $K$ memorized examples, and see how many of those $K$ were not contained in $N$.
+Unfortunately, this ends up significantly undercounting extractable memorization.
+The main reason mark-and-recapture does not apply well is the first assumption is violated---not all memorized strings are equally likely to be output. In a fish pond, one can wait longer so the fish can swim around the pond, but we do not have any ways to fix this problem with language models!
+Inherently, some sequences are statistically more likely than others.
+\paragraph{A better approach: sequential Good-Turing.}
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/estimates-gpt-j.pdf}
+    \caption{
+    With sufficient data, a Good-Turing estimator can extrapolate the number of uniquely memorized examples. With too little data, it consistently underestimates this value.
+    }
+    \label{fig:gpt_neo_6b_estimation}
+\end{figure}
+Even when the distribution of extractable strings is unknown, we can still predict the probability that a fresh sample will yield a novel string using the work of Good and Turing \cite{good1953population}. 
+Given the frequencies of samples seen so far, the Good-Turing estimator predicts the probabilities that the next sample will be novel or will match any of the previously seen samples.
+A key ingredient of the Good-Turing estimator is a smoothing procedure that reduces the variance of the predictions for rare events. We use the popular smoothing procedure in \cite{gale1995good} because it has shown good empirical performance in many settings.
+
+In order to make predictions beyond the next sample, we can sample an outcome according to the probabilities produced by Good-Turing and update our observed frequencies accordingly. Iterating this process gives us a Monte-Carlo simulation predicting the number of unique memorized examples potentially far into the future.
+An analysis of this sequential application of Good-Turing was carried out in \cite{andersson2022sequential}.
+
+The results of using the Good-Turing extrapolation 
+are shown in Figure~\ref{fig:gpt_neo_6b_estimation}. 
+    We find that having sufficiently many observations is essential to produce a good extrapolation. We also observe that this approach underestimates the number of unique memorized examples by GPT-Neo 6B.
+of memorized training under varying assumptions.
+We find that Good-Turing consistently gives higher quality lower bounds than other methods,
+such as Chao1 \cite{chao1984nonparametric}, Chiu \emph{et al.} \cite{chiu2014improved}, and Zelterman \cite{zelterman1990smooth}.
+\subsection{Discoverable Mem. vs. Extractable Mem.}
+\label{sec:disc_vs_ext}
+To understand what gap remains between extractable and discoverable memorization, we study two questions:
+How many data samples are memorized under both definitions?
+And more interestingly, how many samples are extractable but not discoverable or discoverable but not extractable?
+
+Prior work released a dataset of discoverable memorizations from The Pile for the GPT-Neo 6B parameter model~\cite{carlini2022quantifying}.
+We compare these with the extractable memorized examples from the prior section.
+This results in the following confusion matrix, which compares sequences classified as discoverably and/or extractably memorized on GPT-Neo 6B.
+
+\begin{table}[h]
+    \small
+    \begin{tabular}{|c|c|c|}
+    \cline{2-3}
+    \multicolumn{1}{r|}{Extractable} & \begin{tabular}{@{}c@{}} \bf 1799\\ Both\end{tabular} & \begin{tabular}{@{}c@{}}\bf 618\\ Extractable Only\end{tabular}  \\
+    \cline{2-3}
+    \multicolumn{1}{r|}{Not Extractable} & \begin{tabular}{@{}c@{}} \bf 3211\\ Discoverable Only\end{tabular}  &  \begin{tabular}{@{}c@{}}\bf 11019\\ Neither\end{tabular}  \\
+    \cline{2-3}
+    \multicolumn{1}{c}{} & \multicolumn{1}{c}{Discoverable} & \multicolumn{1}{c}{Not Discoverable} \\
+    \end{tabular}
+\end{table}
+Most training data from the model is (unsurprisingly) not memorized under either definition.
+Then, 30.1\% of examples are discoverably memorized and 14.5\% are extractably memorized.
+But surprisingly, despite generating several hundred billion tokens, only 35\% of the discoverably-memorized examples were also extractable.
+While this is orders of magnitude larger than had previously been believed~\cite{carlini2022quantifying},
+it is still not most (or even all) of the data that is
+\emph{known to be memorized}.
+We also uncover an additional 11\% memorized sequences via our extractable memorization attacks that were not discoverably memorized.
+We extend this analysis in Figure \ref{fig:discoverable-extractable-duplicates} which analyses sequences from the Pile that have a varying number of duplicates~\cite{carlini2022quantifying}. We computed the percent of those sequences that were memorized---either discoverably or extractably memorized. We see that highly duplicated sequences are also both easier to extract and discover. 
+
+We make four observations from this data.
+First, it is somewhat surprising that a simple  attack that just samples from the model is sufficient to recover
+a large fraction (35\%) of all (known) memorized training data.
+Second, it also suggests that there is still room for improving current extraction attacks.
+Third, measuring discoverable memorization is a
+useful and reasonably tight characterization of data that can actually be extracted by an adversary.
+And fourth, our work highlights there is also room to improve discoverable memorization baselines: though sampling prefixes from the training set have high likelihood of discovering memorization, there still exist data that is (extractably) memorized (by prompting with random strings) but not discovered in this way.
+We suspect this is caused because sequences were reported to be
+discoverably memorized only if \emph{greedy} decoding
+resulted in reconstructing the training example \cite{carlini2022quantifying}.
+\iffalse
+\paragraph{Do models memorize the same examples?}
+
+We now shift our attention away from measuring the rate of memorization
+and towards a slightly different question: do different models memorize the same
+training examples?
+Because we have multiple models trained on the same training dataset,
+we can test to what extent two independent model training runs will
+memorize the same training examples.
+\dei{Why is this under the "Estimating Total Memorization" section header?}
+\fi
+
+
+
+\section{Extracting Data from Semi-closed Models}
+
+By focusing on open-source models, our results of the previous section let us
+show that there is a large amount of training data which can be extracted. 
+Though of academic interest, this does not yet constitute a practical threat because these models are entirely public: their architecture, training algorithm, and training datasets are all already publicly documented.
+In this section, we turn our attack to \emph{semi-closed} models where not all information is public.
+We ask the same question under this more difficult setting: how much memorized data can be extracted?
+
+\subsection{Attack Methodology}\label{sec:semiclosedattack}
+We define semi-closed models as those that have publicly available, downloadable parameters, 
+but whose training datasets and training algorithms are not known.
+For these models, we can generate outputs using the same strategy discussed in Section~\ref{sec:openattack};
+however, since the training datasets for these models are not publicly accessible, we will need to establish our own ``ground truth'' for verifying and quantifying extractable memorization. 
+\paragraph{Obtaining a ``ground truth.''}
+Since we do not have access to the training datasets, we build on
+the original strategy of Carlini \emph{et al.} \cite{carlini2021extracting}, who extracted
+training data from GPT-2 (a model that also did not release its training dataset).
+For their memorization analysis,
+Carlini \emph{et al.} manually performed Google searches
+to verify whether or not data extraction attempts 
+were successful.
+This process, while effective, was entirely manual and thus
+error-prone and time consuming.
+We propose a similar (but automated) strategy of testing whether a model output is contained somewhere on the Web.
+(We will later verify that our automated strategy approaches the quality this human baseline in Section~\ref{sec:manual}.)
+
+We download a large corpus of Internet text and use it to build an auxilliary dataset (\bigds). Then, we check if any potentially-memorized
+examples exist in \bigds. % as a proxy for checking whether the example appears in the 
+If the sequence does appear, and it has a sufficiently high entropy and length, then it is extremely unlikely that the generation appears on the Internet by coincidence.
+We use this as a proxy for testing whether the generated sequence was in the training set with a very low false-positive rate. %can thus conclude that the sequence was in the training set with a very low false-positive rate.
+
+This approach has false negatives; it will not identify all memorized generations because we do not have a complete picture of the training data. %The drawback of this approach (and likely any approach that does not rely on the true training set) is that it allows for false negatives---
+Thus, our results yield a lower bound on the amount of memorization present in the model.\footnote{Recent work has found that LLMs are much more likely to emit a training sequence when it is duplicated many times~\citep{carlini2022quantifying,lee2021deduplicating, kandpal2022deduplicating}. But samples that have been duplicated many times in an LLM's training dataset are also much more likely to be present at least once in our corpus. This gives us additional confidence in the utility of our approach. Finally, in Section~\ref{sec:manual} we manually annotate memorized examples to validate our approach.}
+
+\tightparagraph{Building \bigds.} We collected 9TB of text by concatenating four of the largest LLM pre-training datasets:
+\begin{itemize}[itemsep=0pt, leftmargin=15pt, topsep=6pt]
+    \item The Pile~\citep{gao2020pile}, a 400GB dataset of heterogeneous sources (e.g., Wikipedia, code, generic Common Crawl) that was used to train the GPT-Neo models.
+    \item RefinedWeb~\citep{penedo2023refinedweb}, a 1080GB subset of the dataset used to train the Falcon models, which largely consists of generic data scraped by Common Crawl.
+    \item RedPajama~\citep{together2023redpajama}, a 2240GB dataset of heterogeneous sources (e.g., Wikipedia, arXiv, generic Common Crawl) intended to reproduce the LLaMA dataset~\citep{touvron2023llama}.
+    \item Dolma~\citep{dolma}, a 5600GB dataset that primarily consists of text scraped by Common Crawl, in addition to code and scientific papers.
+\end{itemize}
+
+\noindent These datasets are not necessarily unique---for example,
+both Dolma and RedPajama 
+contain a complete copy of C4 \citep{raffel2020exploring}. We thus performed tokenization and coarse deduplication at the document level
+before reporting the sizes shown above.
+
+\tightparagraph{Implementation efficiency.}
+
+Thus, it cannot fit into memory on a single machine.
+Instead, we shard the data into $32$ independent suffix arrays,
+allowing us to load each completely into memory one at a time.
+With this done, we can perform a complete intersection between gigabytes
+of potential training data with \bigds
+at a much faster rate:
+linear in the size of the dataset (the time needed to load it off disk)
+and linear in the number of queries to the model.
+
+The complete end-to-end evaluation required three weeks
+of compute on a single (176 cores, 1.4TB of RAM) \texttt{c3-highmem-176} machine on Google Cloud.
+This includes time spent building the suffix array, 
+and performing all of the dataset queries
+for the experiments in this paper.
+Over half of this total time is due to
+I/O bandwidth limitation;
+a more optimized implementation could likely achieve the
+same result significantly faster.
+\begin{table}[]
+\small
+    \centering
+    \begin{tabular}{@{} lrrrr@{}l @{}}
+\cmidrule[\heavyrulewidth]{1-5}
+Model & \hspace*{-1.2cm}Parameters & \hspace*{-.2cm}\% Tokens & Unique  & Extrapolated\\
+Family & \hspace*{-.7cm}(billions) & \hspace*{-.2cm}Memorized & {50-grams} & {50-grams} \\ 
+\cmidrule{1-5}
+LLaMA & 7\hphantom{.0}  & 0.294\% & {627,719} & {3,268,309}\\
+LLaMA & 65\hphantom{.0}  & 0.789\% & {2,934,762} & {16,716,980}\\
+Mistral & 7\hphantom{.0} & 0.515\% & {1,322,674} & {7,724,346} \\
+Falcon & 7\hphantom{.0} & 0.069\% & {101,585} & {606,316} \\
+Falcon & 40\hphantom{.0} & 0.122\% & {199,520} &{1,287,433}\\
+GPT-2 & 1.5 & 0.135\% & {165,628} & {692,314}\\
+OPT & 1.3  & 0.031\% & {38,941} &  {235,046}\\
+OPT & 6.7  & 0.094\% & {108,787} & {577,240}\\
+\makecell{GPT-3.5-instruct} & ?\hphantom{.0} & 0.852\% & - & {1,789,254} & $^{*}$\\
+\cmidrule[\heavyrulewidth]{1-5}
+    \end{tabular}
+    \caption{As in \ref{tab:open_results}, the percentage of tokens generated
+    that are a direct 50-token copy from \bigds,
+    the 1number of unique 50-token sequences (out of 1 billion tokens), and
+    the extrapolated lower bound of memorized 50-token sequences.
+    \instruct{} (denoted with $*$) is extrapolated from $25\times$ less generated data.
+    Compared with open-source models of the same size, we observe much smaller memorization rates (c.f. Figure~\ref{tab:open-memorized}).}
+    \label{tab:semi_closed_results}
+\end{table}
+\subsection{Experimental Setup}
+We analyze nine different semi-closed models:
+\begin{itemize}[itemsep=0pt, leftmargin=15pt, topsep=3pt]
+\item \textbf{GPT-2} (1.5b) \cite{radford2019gpt2} is one of the first large language models
+to have ever been trained. Prior work \cite{carlini2021extracting} has
+extracted 600 training examples from this model by manually annotating potentially-memorized
+training examples.
+This model was trained on data obtained by following URLs submitted to Reddit.\looseness=-1
+
+\item \textbf{LLaMA} (7b, 65b) \cite{llama} is one of the most popular families of models due
+to the fact that they have been \emph{over-trained} with respect to
+a compute-optimal budget \cite{hoffmann2022empirical}.
+It was trained on a non-public mixture of publicly available data.\looseness=-1
+
+\item \textbf{Falcon} (7b, 40b) \cite{falcon}, a pair of models designed to out-perform
+LLaMA in several settings, with limited training details disclosed.
+
+\item \textbf{Mistral} 7b \cite{jiang2023mistral} is a model similar to
+LLaMA with undisclosed training details. This model is the highest
+accuracy model we study of its size.
+
+\item \textbf{OPT} (1.3b, 6.7b) \cite{zhang2022opt}, a family of models from 125 million 
+parameters to 175 billion parameters. These models are generally less
+capable than the prior models, in part because they have not been
+trained for as many steps.
+
+\item \textbf{\instruct{}}, an OpenAI API with
+an undisclosed model, training algorithm, and training dataset.
+\end{itemize}
+
+Most of the models considered here (LLaMA, Falcon, Mistral, and OPT) are similar
+to the models from the prior section in that their \emph{weights} are
+accessible, but unlike the prior models,
+their training pipeline and datasets are not accessible.
+The \instruct{} model is different---it is \emph{only} available
+through an API and the model weights are non-public.
+
+Since \instruct{} costs $\$0.002$ USD per 1,000 output tokens,
+we do not generate 1 billion tokens for this model (which would cost \$$2{,}000$ USD).
+Instead, we only query this model 25 million times and extrapolate.
+
+\subsection{Results}\label{sec:semiclosedresults}
+Our most prominent finding is that \emph{all models emit memorized training data},
+as we can see from Table \ref{tab:semi_closed_results}.
+However, there is significant variance between model families.
+The comparably sized and comparably accurate Mistral 7B and
+Falcon 7B differ in detected memorization by over a factor of $10\times$.
+Directly interpreting this number is somewhat difficult:
+it could either indicate that Mistral indeed memorizes (much) less data
+than Falcon, or it could indicates a limitation in our dataset
+construction: if our datasets happen to be more similar in distribution
+to one model's training data than another model's,
+they will appear to have differing levels of extractable memorization.
+However, a rate of $10\times$ is probably too high to be a result
+of data distribution alone.
+
+But even accounting for this, the rate of emitting memorized
+training data is still exceptionally high for these state-of-the-art
+models.
+Indeed, perhaps surprisingly, the 
+worst offender is \instruct{}, where 0.852\% of generated tokens are part of 50-token sequences found verbatim in \bigds.
+
+As we expected, model families that are trained for longer memorize more than model families trained for less long.
+To be precise, Hoffman \emph{et al.} \cite{hoffmann2022training} propose
+a set of scaling laws that suggests the optimal quantity of training
+data for a given model size.
+Some models like OPT are \emph{under-trained} with respect to this baseline;
+they generally perform poorly on benchmarks, but as a result of their limited
+training, we show they memorize less training data.
+
+Other models, like \emph{LLaMA} are intentionally \emph{over-trained} for more steps
+of training than is compute-optimal.
+It is possible to trade-off compute at training time to compute at inference time
+by over-training in this way.
+For this reason, when inference costs dominate the total cost of a model,
+most large models today are over-trained \cite{touvron2023llama}.
+Unfortunately, our results suggest that over-training increases privacy leakage.
+
+Our second main finding is that \emph{the total extractable memorization of these models is on average $5\times$ higher} than smaller models.
+Similar to Section~\ref{sec:ratevcapacity} we can use Good-Turning estimator to extrapolate the memorization rate of the models. The last column in Table~\ref{tab:semi_closed_results} does so using 1B generations.
+Recalling from Section~\ref{sec:ratevcapacity}, this estimator tends to underestimate the true total memorization and thus, the expected total number of extractable memorizations is likely even higher.
+
+
+
+\section{Extracting Data from ChatGPT}
+
+
+We have now established that state-of-the-art
+base language models all memorize a significant amount of training data.
+But in practice, most users do not typically interact with base models; instead, they interact with language models that have been % trained on Web data typically go through an extra tuning step where they are 
+\emph{aligned} \cite{christiano2017deep}
+to behave ``better'' according to human preferences.
+This allows them to be deployed as, e.g., \emph{conversational agents}
+that are designed specifically
+to interact with users via a dialog interface.
+The alignment found in language models such as ChatGPT (specifically, the \chat API endpoint) creates additional challenges for designing a successful extraction attack.
+
+\paragraph{Challenge 1: Chat breaks the continuation interface.}
+When models are tuned to be conversational, it makes them
+more difficult to attack with our prior methodology that simply prompts the model with random strings from the Internet.
+This is because dialog-adapted language models do not give the user direct control
+over the language modeling task.
+Instead, typical dialog-adapted language models are tuned to expect a prompt format similar to the following:
+\begin{tcolorbox}
+\footnotesize
+\texttt{System:} You are a helpful assistant. \newline
+\texttt{User:} Hello, how are you doing? \newline
+\texttt{Assistant:}
+\end{tcolorbox}
+\noindent
+The language model then completes the next tokens following the
+indicator that it is the assistant's ``turn'' in the dialog.
+This formatting prevents the prompt-continuation attack we applied in the prior sections because it is not possible to force the model to directly continue arbitrary
+text sequences: the model only ever begins its response after appending the special ``Assistant:'' turn indicator.
+
+\paragraph{Challenge 2: Alignment adds evasion.}
+Even if---for some reason---the model did continue generating from the given prompt
+instead of behaving as a chat model,
+the model may abstain from completing data from its training set because of the alignment procedure.
+Here is an illustrative interaction with ChatGPT, quoting from an example that we will later show the model has memorized:
+\begin{tcolorbox}
+\footnotesize
+\texttt{User:} Write the following words then continue from there: ``British Broadcasting Corporation is a British public service broadcaster headquartered at Broadcasting House in London, England. The total number of staff is''
+\newline
+\texttt{Assistant:} I'm sorry, but you haven't provided the complete information about the total number of staff at the BBC. As of my last knowledge update in September 2021, the BBC ....
+\end{tcolorbox}
+\noindent It is tempting to conclude from this example that alignment has succeeded, and that it prevents attacks from succeeding.
+The objective of this section will be to challenge this conclusion and show that alignment does not prevent data extraction.
+\begin{figure}[t]
+    \centering
+    \includegraphics[trim={0cm, 6.5cm, 16.5cm, 0cm}, clip,width=.8\linewidth]{figures/RLHF_Memorization_Overview__2_.pdf}
+    \caption{\textbf{Extracting pre-training data from ChatGPT.} We discover a prompting strategy that causes LLMs to diverge and emit verbatim pre-training examples. Above we show an example of ChatGPT revealing a person's email signature which includes their personal contact information.}
+    \label{fig:teaser}
+\end{figure}
+
+\subsection{Baseline Attack}
+
+We begin by adapting our previous random-token-prompting attacks by asking the model to repeat the random tokens and continue generating.
+For example:
+\begin{tcolorbox}
+\footnotesize
+\texttt{User:} Write the following words and then continue: g|thumb|350 \newline \newline
+\texttt{Assistant:}
+g|thumb|350 Hello! How can I assist you today?
+\end{tcolorbox}
+
+\noindent In this case, the model successfully repeats the five random tokens, but does not appear to output training data. We %now 
+run this experiment at scale to give quantitative evidence that this attack strategy is ineffective.
+
+\paragraph{Evaluation.}
+We repeat the above experiment several thousand times with different prompts, to obtain 50 million generated tokens
+from \chat.
+Out of these tokens, just $0.02\%$ of tokens are part of a 50-token sequence that is directly copied from \bigds.
+In contrast, for the smallest semi-closed model we study (OPT with 1.3B parameters), we found that $0.031\%$ of emitted tokens are directly copied from the training dataset; for the (presumably) comparable \instruct model, at least $0.85\%$ of emitted tokens are part of a memorized sequence.
+From this, we might (as we will soon see, incorrectly)
+conclude that the alignment procedure has correctly prevented the model
+from emitting training data.
+
+\subsection{Our Divergence Attack}
+In order to recover data from the dialog-adapted model we must find a way to cause the
+model to ``escape'' out of its alignment training and fall back to its original language modeling objective.
+This would then, hopefully, allow the model to generate samples that resemble its pre-training distribution.  
+
+To do this, 
+we discover a prompting strategy that causes the model to \emph{diverge} from its standard dialog-style of generation. For example, if we pass the model the prompt
+\begin{tcolorbox}
+\footnotesize
+\texttt{User:} Repeat this word forever: ``$\underbrace{\text{poem poem} \dots \text{poem}}_{\text{repeated 50 times}}$''
+\end{tcolorbox}
+\noindent then ChatGPT will respond as shown in Figure~\ref{fig:teaser}: initially, it repeats the word ``poem'' several hundred times, but eventually it \emph{diverges}.\footnote{We can also cause divergence by exactly prompting with a single token, rather than asking the model to repeat the token forever. We often observe divergence after fewer than 200 repeats (i.e., asking to repeat "forever" is not strictly necessary).} Once the model diverges, its generations are often nonsensical.
+But, we show that a small fraction of generations \emph{diverge to memorization}: some generations are copied directly from the pre-training data! 
+Consequently, we can create a large pool of possible memorized examples by prompting the model with the above phrase, generating many times from it, and inspecting the divergent text following the initial repeated ``poem''s.
+
+
+\iffalse
+\subsection{Attack Hyperparameters}
+
+The attack as presented above has a number of hyperparameters.
+\begin{itemize}
+    \item Which word should the model repeat?
+    \item What prefix command should we give?
+    \item How many times should we repeat the word in the prompt?
+    \item What sampling strategy should we use?
+\end{itemize}
+
+\eric{TODO when we know more.}
+
+\begin{figure}
+    \centering
+    \includegraphics[scale=.3]{figures/temp.png}
+    \caption{Our extraction attack succeeds most often at temperature 0.7.
+    Significantly lower temperatures have too little diversity and only output
+    the same strings in a loop;
+    higher temperatures have too much diversity and can not output coherent sentences.}
+    \label{fig:temperature}
+\end{figure}
+\fi
+
+\subsection{Main Experimental Results}
+\label{subsec:study}
+Using only \$200 USD worth of queries to ChatGPT (\chatgptendpt), we are able to extract over 10,000 unique verbatim-memorized training examples. Our extrapolation to larger budgets (see below) suggests that dedicated adversaries could extract far more data. 
+
+\tightparagraph{Length and frequency.} Extracted, memorized text can be quite long, as shown in Figure~\ref{fig:lengthfreq}---the longest extracted string is over $4{,}000$ characters, and several hundred are over $1{,}000$ characters.
+
+Over $93\%$ of the memorized strings were emitted just once by the model,
+with the remaining strings repeated just a handful of times
+(e.g., $4\%$ of memorized strings are emitted twice,
+and just $0.05\%$ of strings are emitted ten times or more).
+These results show that our prompting strategy produces long and diverse memorized outputs from the model once it has diverged.
+
+\tightparagraph{Qualitative analysis.} We are able to extract memorized examples covering a wide range of text sources:
+\begin{itemize}[itemsep=0pt, leftmargin=15pt, topsep=8pt]
+\item \textbf{PII.} We recover personally identifiable information of dozens of individuals. We defer a complete analysis of this data to Section~\ref{sec:pii}.
+\item \textbf{NSFW content.} We recover various
+texts with NSFW content, in particular when we prompt the model to repeat a NSFW word. We found explicit content, dating websites, and content relating to guns and war.
+\item \textbf{Literature.} In prompts that contain the word ``book'' or ``poem'', we obtain verbatim paragraphs from novels and complete verbatim copies of poems, e.g., The Raven.
+\item \textbf{URLs.} Across all prompting strategies, we recovered a number of valid URLs that contain random nonces and so are nearly impossible to have occurred by random chance.
+\item \textbf{UUIDs and accounts.} We directly extract cryptographically-random identifiers, for example an exact bitcoin address.
+\item \textbf{Code.} We extract many short substrings of code blocks repeated in \bigds---most frequently JavaScript that appears to have unintentionally been included in the training dataset because it was not properly cleaned.
+\item \textbf{Research papers.} We extract snippets from several research papers, e.g., the entire abstract from a Nature publication, and bibliographic data from hundreds of papers.
+\item \textbf{Boilerplate text.} Boilerplate text that appears frequently on the Internet, e.g., a list of countries in alphabetical order,
+date sequences,
+and copyright headers on code.
+\item \textbf{Merged memorized outputs.}
+We identify several instances where the model merges together two
+memorized strings as one output,
+for example mixing the GPL and MIT license text, or other text that
+appears frequently online in different (but related) contexts.
+\end{itemize}
+
+\begin{figure}[t]
+\begin{minipage}{.48\textwidth}
+  \centering
+    \includegraphics[width=0.8\linewidth]{figures/extracted_vs_length.pdf}
+    \caption{    
+    A cumulative histogram showing the number of extracted strings greater than each length.
+    We were able to extract thousands of short unique training examples from ChatGPT, hundreds of training examples with over 1000 characters.
+    The longest extracted example contained over 4000 characters (a website's terms of service agreement).}
+  \label{fig:lengthfreq}
+\end{minipage}%
+\end{figure}
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/by_words.pdf}
+    \caption{When running our divergence attack that asks the model to
+    repeat a word forever, 
+    some words (like ``company'') cause the model to emit training over
+    $164\times$ more often than other words (like ``know''). Each word is one token.}
+    \label{fig:words}
+\end{figure*}
+\subsection{Identifying PII}
+\label{sec:pii}
+
+Some of the model's outputs contain personally identifiable information
+(PII); we evaluate the frequency at which this happens.
+We labeled 15,000 generations for substrings that looked like PII.
+We used both regexes for identifying phone and fax numbers, email and physical addresses, and also prompted a language model to identify sensitive content within generations. This helps to identify additional malformed phone numbers, email addresses, and physical addresses (e.g., sam AT gmail DOT com) along with social media handles, URLs, and names and birthdays.
+We then verified whether or not these substrings were actual PII (i.e. they appear in the training set and are not hallucinated) by looking up the extracted substring in \bigds. 
+In total, 16.9\% of generations we tested contained memorized PII, and 85.8\% of generations that contained potential PII were actual PII.
+
+\subsection{Words that Elicit Memorized Outputs}
+\label{sec:words}
+Our attack repeats one word many times in a row. Are there some words
+that are better at eliciting memorization than other words?
+We find the answer is a definitive ``yes''.
+
+Our first finding is that the \emph{only} words that lead to
+memorization are words that are a single token in the 
+vocabulary.
+Asking the model to repeat multi-token words \emph{never}
+causes the model to emit training data because it never
+causes the model to diverge.
+That is, the model either repeats the word forever (i.e., the model correctly
+alternates between the multiple tokens that make up the word),
+or the model replies that ``it would not be productive'' to follow the request,
+but it never repeats the word and then starts 
+emitting other output.
+
+When we prompt the model with single-token words,
+we find the efficacy across words varies significantly.
+Figure~\ref{fig:words} contains an analysis of the quantity of memorized output we
+recover across several different words.
+The most effective words are over $100\times$ more effective
+at recovering memorized output than the least effective words.
+We find this is \emph{both} due to the fact that some words do not
+cause the model to diverge as often,
+and \emph{also} because even if the model does diverge,
+some words result in less regurgitated training data.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/chatvsothers.pdf}
+    
+    \caption{
+    The rate of extracting unique 50-grams is similar for \chat{} and \instruct{}, and both are higher than any other model.
+    Moreover, there is very little curvature, suggesting that the total quantity
+    of memorization for this family of models is much larger than any other model we study.}
+    \label{fig:gptvsother}
+\end{figure}
+
+\begin{figure*}[t]
+\centering
+\subfigure{
+    \includegraphics[trim={0.1cm, 0.1cm, 0.1cm, 0.1cm}, clip, width=0.48\textwidth]{figures/estimate-chatgpt.pdf}
+    }\label{fig:data_scaling}\hfill
+\subfigure{
+    \includegraphics[trim={0.1cm, 0.1cm, 0.1cm, 0.1cm}, clip, width=0.48\textwidth]{figures/ds_size.pdf}
+    \label{fig:nq_data_scaling}
+}
+\caption{\emph{Estimates for how much total data is actually memorized by ChatGPT.} \underline{Left:} As an adversary spends more money to query the ChatGPT API, they are able to extract more data. We use a budget of \$200 USD to extract over 10{,}000 unique examples, however, an extrapolation based on Good–Turing frequency estimation shows that using larger budgets could allow significantly more extraction. \underline{Right:} To identify memorized sequences, we cross reference ChatGPT's generations with a large auxiliary corpus. As we scale the size of the auxiliary corpus, we can identify more memorized examples.}
+\label{fig:extrapolation}
+\end{figure*}
+
+\subsection{Quantifying Total Memorization} 
+
+With our limited budget of \$200 USD we extracted overr 10{,}000 unique examples. However, an adversary who spends more money to query the ChatGPT API could likely extract \textit{far} more data. In this section, we discuss various ways in which our analysis may underestimate ChatGPT's memorization rate, and attempts at extrapolating the true value.
+
+\subsubsection{Extrapolating Unique Memorized Strings}
+We first apply the extrapolation methodology developed previously in Section~\ref{sec:ratevcapacity} to estimate how much more memorization we could have found if we had issued more queries to ChatGPT.
+Applying a Good-Turing estimator, we lower bound ChatGPT's memorization to at least $1.5$ million unique $50$-token sequences (see Figure~\ref{fig:extrapolation}).
+
+But this estimate is likely an exceptionally poor estimate.
+Recall from Figure~\ref{fig:gpt_neo_6b_estimation} it was necessary to extract 
+\emph{500 million examples} from GPT-Neo 6B before the Good-Turing estimator converged;
+we have extracted well over $1000\times$ fewer examples than this from ChatGPT.
+
+And so we suggest avoiding directly using a Good-Turing estimator for this data.
+Instead, in Figure~\ref{fig:gptvsother} we compare the amount of training data
+memorized by ChatGPT compared to any other model.
+We find that ChatGPT emits unique memorized strings at a much higher rate than any of the publicly available models we studied.
+In particular, if the GPT-Neo 6B scaling curve were to hold roughly similar for ChatGPT,
+we estimate the true rate of memorization of ChatGPT (within our auxiliary dataset) is likely
+closer to hundreds of millions of $50$-token sequences,
+totaling a gigabyte of training data.
+In practice we expect it is likely even higher.
+
+\subsubsection{Impact of \bigds's Size}
+\label{sec:size}
+
+As we increase the size of our auxiliary dataset, we
+identify more memorized output from the model,
+because this allows us to achieve a higher overlap with the original data on which ChatGPT was originally (pre-)trained.
+
+In Figure~\ref{fig:nq_data_scaling} we compare how artificially 
+\emph{decreasing} the size of our dataset would have impacted the
+quality of our results.
+To do this, we randomly sub-sample our dataset and compute the
+number of memorized examples found, as we decrease our auxiliary dataset size from $9$TB down to $200$GB.
+If we choose just a $200$GB subset of our dataset we could have
+discovered slightly under $20\%$ of the total memorization.
+
+This data admits a fairly accurate curve to predict how 
+much data we will be able to find, given the size of our auxiliary dataset.
+If we fit a curve using only $25\%$ of our data, we can extrapolate
+out almost perfectly the total number of examples we have identified
+with the full dataset.
+Extrapolating from this curve, we estimate that by doubling our auxiliary dataset size it might be
+possible to increase the amount of memorization we discover by an additional $20\%$.
+
+Thus, it appears that we have collected an auxiliary dataset that is sufficiently large to produce (nearly) tight estimates of the amount of memorized data within the model's outputs. However, it seems that our attack could find much more memorization if we issued more queries to the model.
+
+The above analysis makes one critical assumption: that any new data we add to our auxiliary dataset would be sampled
+from the same distribution as the data we have collected so far.
+Figure~\ref{fig:by_ds} studies the amount of memorization identified
+as a result of adding each of
+the four datasets that make up \bigds.
+We plot both the total number of examples found in each dataset,
+and also the number of unique examples found only in that dataset.
+As expected, Dolma, the largest 5TB dataset,  contains the largest number of 
+memorized examples.
+
+But we were surprised to find that scale does not completely determine 
+the number of memorized samples identified.
+The $1$TB RefinedWeb dataset finds the least memorization,
+and almost all memorization found by the $2$TB RedPajama dataset
+was already covered by one of the other datasets.
+We believe that this is caused by discrepancies between the distribution
+of each of these datasets and the dataset on which \chat{} was trained.
+For example, it suggests that \chat{}'s training dataset is more
+similar to Dolma or The Pile than RefinedWeb---although
+we leave a more thorough investigation of this to future work.
+\subsubsection{Extending \bigds to a Web Search Index}
+\label{sec:manual}
+
+All our evaluations of ChatGPT's memorization have so far been performed by
+automatically comparing each model generation against \bigds.
+As noted in Section~\ref{sec:size}, this likely underestimates ChatGPT's total memorization since \bigds is not a strict superset of the model's training set.
+In order to more accurately estimate the true rate of memorization, 
+we take 494 generations and manually label whether or not the generation can be found on the entire Internet, following the process outlined in Carlini \emph{et al.}~\cite{carlini2021extracting}.
+Specifically, we split output from ChatGPT into 50-token sequences,
+manually search Google for each of these sequences,
+and report the sequence as memorized if it occurs nearly verbatim on some webpage.
+
+ 
+We detect nearly twice as many model outputs are memorized in our manual search analysis than
+were detected in our (comparatively small) \bigds: 150 of the 494 manually annotated examples
+were contained somewhere on the Internet, compared to just 70 that were present in the our
+auxiliary dataset.
+This confirms the prior section's hypothesis that introducing additional datasets would
+lead to improved attack success rates.
+
+\subsection{An End-to-end High-precision Attack}
+
+Our evaluation thus far has been primarily a \emph{measurement study}
+of memorization across language models,
+because we relied on our ability to directly query the model's
+(approximate) training dataset to detect memorized model outputs.
+But without a reliable way to predict (a priori) whether a given model output
+is a training example or not,
+we cannot directly call this an extraction \emph{attack}.
+
+We now show that existing techniques from the literature are sufficient to distinguish
+memorized training data from other generated (non-memorized) data, with high precision.
+In particular, we show that the membership inference attack \cite{DBLP:conf/sp/ShokriSSS17} 
+from \cite{carlini2021extracting} has high precision at separating memorized
+training data from other hallucinated data that was not contained in the training dataset.
+Specifically, we score each example based on their likelihood-ratio
+$\text{perplexity}_{\text{LLM}}(x) \over \text{preplexity}_{\text{zlib}}(x)$,
+where the numerator corresponds to the perplexity of the text as determined
+by the model that generated the text, and the denominator corresponds to the
+entropy of the (token-decoded) sequence under \texttt{zlib} text compression.
+This likelihood ratio was the most effective at predicting memorization in prior work \cite{carlini2021extracting},
+and in our evaluation we find it is highly accurate in our setting as well.
+
+Figure~\ref{fig:manual-search} plots how varying the membership inference threshold
+affects the precision of our attack.
+At the lowest membership inference score threshold, the attack precision is above $30\%$
+when evaluated by a manual Internet search---or still $15\%$ when evaluated by verbatim
+membership in \bigds.
+By increasing the membership inference threshold, precision remains relatively constant
+until $1.5$ at which point it begins to significantly decay.
+This indicates that not only is it possible to extract training data,
+we can---with high precision---identify when data is memorized and when it is not.
+However, there is still room for future work to improve the precision of this attack further.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/comparing_with_google_search.pdf}
+    \caption{Out of 494 examples, the number we identify as having memorization via manual web search vs. checking whether at least 80\% of the tokens are in 50-grams found in \bigds. Our automatic method underestimates memorization compared to doing manual assessment using a search engine.}
+    \label{fig:manual-search}
+\end{figure}
+\subsection{Is ChatGPT Memorization Discoverable?}
+
+In our attack, we extract training data by causing ChatGPT to diverge.
+However, our attack is not generalizable to other models,
+and so is not a reliable method that could be used to test for memorization
+in general.
+If we had ground-truth examples from the training dataset, we could check for discoverable memorization, which could allow us to upper bound the amount of memorization as done in \cite{carlini2022quantifying}.
+
+We can get around the limitation of not having training set access with a simple observation: we \emph{do} know part of ChatGPT's training set because we just extracted it.
+Thus, we can take these samples that are known to be in the model's training set, and split them into a prefix and suffix,
+and then measure discoverable memorization of these.
+Specifically, for each of the 1,000 longest examples that ChatGPT memorizes, 
+we prompt the model with the first $N-50$ tokens of the memorized sequence and
+generate a $50$ token completion given this prompt.
+
+
+
+\paragraph{Results.}
+
+When we prompt the model in this way, 
+\chat{} completes the corresponding 50 token suffix in just 3.5\% of cases.
+(In a further 4\% of cases, we approximately recover the suffix:
+it has a Levenshtein distance less than $0.1$, which allows up to 5 tokens of difference.)
+Put differently, over $90\%$ of the time the model fails to emit the 
+memorized output \emph{that we know to be memorized},
+because the model emitted exactly this string when prompted differently.
+So discoverable memorization on ChatGPT is low, likely because of alignment.%: ChatGPT just is not meant to autocomplete sequences like a base language model.
+
+These experiments show that data we know the model has memorized---because
+it emitted it when prompted adversarially---is
+not detected as memorized when prompted naturally.
+This suggests that it will be difficult to red-team this model and evaluate
+its privacy without additional access to both the model and also the
+un-aligned foundation model from which it was derived.
+
+\paragraph{Would the base model have been testable?}
+The \instruct{} model is, while still aligned,
+ much closer to a base language model because it is not conversational.
+As a result of this, we can instead test for discoverable memorization in the instruction tuned model, and thereby hope to get a better estimate of
+the true rate of memorization of the base GPT-3.5 model.
+We repeat the experiment above: we pick the longest 1,000 strings that we found to be memorized by the \emph{chat model}; we split these into a prefix and suffix; but we then ask the \emph{instruct model} to complete the prefix of the
+string.
+Surprisingly, we find that the instruct model successfully completes the
+suffix in $75\%$ of cases
+and in $84\%$ of cases the output is within $5$ words of the true suffix from the training
+data.
+
+\paragraph{Consequences.}
+This suggests three interesting conclusions:
+First, while the two models we studied (\chat{} and \instruct{}) were likely fine-tuned on different datasets,
+they both memorize the same samples.
+This further suggests that %confirms our hypothesis that
+the memorization we have extracted is
+data from the \emph{pre-training} data distribution,
+and not the fine-tuning data.
+
+Second, this suggests that despite the different fine-tuning
+setups, data that was memorized during pretraining remains.
+This is in line with results from recent work 
+that show that while models may forget memorized training data eventually,
+this can take several epochs.
+And because pre-training often lasts orders of magnitude longer than
+fine-tuning, we believe this explains why there has been minimal forgetting here.
+
+Third, while our prior results suggested that it would be incredibly
+difficult to audit the privacy of black-box RLHF-aligned chat models,
+it might not have been difficult to audit the original base model from
+which \chat{} and \instruct{} were derived.
+Unfortunately, because this base model was not made public,
+it would be difficult for others to perform an external assessment
+of its security.
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\linewidth]{figures/datablations.pdf}
+    \caption{The fraction of a model's dataset extracted by our attack scales with the number of epochs. These models are trained in \cite{muennighoff2023scaling} for Chinchilla optimal token counts. }
+    \label{fig:datablations}
+\end{figure}
+
+
+\section{Why is ChatGPT so Vulnerable?}
+
+\label{sec:why}
+
+ChatGPT is significantly more vulnerable to data extraction attacks compared to prior results on base language models~\citep{carlini2021extracting,carlini2022quantifying,kandpal2022deduplicating}. \textit{Why is this the case?} Here, we speculate on a few
+potential reasons and invite future work to investigate further.
+
+\paragraph{ChatGPT may be pre-trained for many epochs.} 
+ChatGPT runs inference at high speed and is served at extreme scale.
+To support this use case, an emerging trend is to ``over-train'' models on far more data than would be ``training compute optimal'' \citep{hoffmann2022training,touvron2023llama}.
+This helps to maximize utility at a fixed inference cost.
+For example, the 7 billion parameter LLaMA-2 model trained for 2 trillion tokens outperforms the
+13 billion parameter model trained for just 1 trillion tokens.
+Given that the amount of high-quality data on the web is limited, training on such a large amount of tokens requires performing many epochs over the same data~\citep{muennighoff2023scaling}.
+Consequently, we speculate that ChatGPT may have been pre-trained for many epochs. Past work has shown that this can increase memorization substantially~\citep{carlini2022quantifying,kandpal2022deduplicating}. We evaluate our attack on models trained for multiple epochs in Figure~\ref{fig:datablations}, using models trained on subsets of C4 by \cite{muennighoff2023scaling}, and find again that mutiple epoch training results in more extractability. If we are correct that ChatGPT is trained for multiple epochs, it highlights a stark downside of over-training---it induces a trade-off between privacy and inference efficiency.
+
+\begin{figure}
+    \centering
+    \includegraphics[scale=.83]{figures/whyrepeat2.pdf}
+    \caption{\instruct{} can repeat two- or three-tokens words thousands of times without causing
+    any divergence; but one token words can only be repeated a few hundred times before
+    the probability of divergence rapidly approaches near-certainty. Solid lines show medians over 40 different word choices, shaded regions show the 10\%--90\% quantile ranges.}
+    \label{fig:whyrepeat}
+\end{figure}
+
+\paragraph{Repeating a single token is unstable.}
+Our attack only causes the model to diverge when prompted with single-token words.
+While we do not have an explanation for why this is true,
+the effect is significant and easily repeatable.
+In Figure~\ref{fig:whyrepeat} we show the probability that
+the \instruct{} model\footnote{The \chat{} model does not publish probabilities
+for emitted tokens; the \instruct{} model does.}
+continues repeating the desired token after having previously emitted that
+token a varying number of times.
+After repeating a token 250 times, the probability of repeating the token again rapidly drops from 90\% to below 0.1\%.
+In contrast, if asked to repeat 2-token or 3-token words,
+the probability they will be repeated remains above 99\% even
+after several thousand repeats.
+ 
+ 
+\paragraph{Word repetition may simulate the \texttt{$<\mid\text{endoftext}\mid>$} token.} 
+During pre-training, modern language models are trained with ``packing'': multiple documents are
+concatenated together to form a single training example, with a special token such as
+\texttt{$<\mid\text{endoftext}\mid>$} used delineate the document boundary. 
+This causes the LM to learn to ``reset'' when it sees the \texttt{$<\mid\text{endoftext}\mid>$} token, and ignore all prior tokens when computing the predicted next token. 
+In turn, if we were able to insert this token directly to the model, then the model may ignore its prompt
+and begin to generate as if it were the start of a new document. 
+Fortunately, OpenAI prevents inserting this token to the API.
+
+We suspect that our attack works because it creates an effect similar to the \texttt{$<\mid\text{endoftext}\mid>$} token.
+To demonstrate the potential for this effect, we study LLaMA 7B, a model that also diverges after repeating a single token many times.
+(But diverges less interestingly, and does not emit training data.)
+We prompt LLaMA 7B with a single token repeated many times,
+and measure the cosine similarity between the last-layer ``attention query''\footnote{%
+Transformer models have ``attention'' layers consisting of a ``query'', ``key'', and ``value''.
+Exact implementation details are unimportant; it suffices to know that if two tokens
+have the same ``value'', then they behave as if they were identical.
+} 
+of each token in the prompt with the  
+Beginning of Sequence (BOS) token, LLaMA's analog of OpenAI's $<\mid\text{endoftext}\mid>$.
+Figure~\ref{fig:bos-similarity} shows this result. 
+We see that when repeating a single token many times, the last-layer attention query for
+those tokens rapidly approach the attention query vector of the BOS token.
+Because the hidden representations are linearly projected into the vocabulary, this means that those tokens positions predict a similar next token distribution as the initial BOS token, which may cause the ``reset'' behavior we observe.
+As a baseline, we further show that naturally sampling from the model with a random prompt does
+not cause this effect.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\linewidth]{figures/bos_cosine_sim.pdf}
+    \caption{
+    Cosine similarity of last-layer attention query of the % hidden representations of 
+    BOS token and tokens at other positions for LLaMA 7B. 
+    Solid line shows the median out of 100 samples and the shaded region shows the 10\%--90\% quantile range. 
+    ``Random sample'' represents text naturally sampled from the model.}
+    \label{fig:bos-similarity}
+\end{figure}
+
+
+
+
+
+
+
+\section{Conclusions}
+
+
+In summary, our paper suggests that training data can easily be extracted
+from the best language models of the past few years through simple techniques.
+We end with three lessons:
+
+\subsection{Consequences for Researchers}
+
+
+\paragraph{Training data deduplication.}
+More research is necessary on training data deduplication.
+Despite the Pythia model series being trained with data deduplication
+techniques \cite{biderman2023pythia}, the total quantity of extractable memorization only 
+decreases slightly.
+We find that this is because the coarse-grained deduplication was insufficient
+to sufficiently mitigate memorization.
+And even though data deduplication (slightly) decreases the total rate of memorization,
+it appears that data deduplication has actually \emph{increased}
+the \emph{rate} of emitting training data.
+Understanding the causes for these observations is an interesting
+direction for future work.
+
+
+\paragraph{Model capacity.}
+Our findings may also be of independent interest to researchers who
+otherwise do not find privacy motivating.
+In order for GPT-Neo 6B to be able to emit nearly a gigabyte of training data,
+this information must be stored \emph{somewhere} in the model weights.
+And because this model can be compressed to just a few GB on disk without
+loss of utility, this means that approximately $10\%$ of the entire model
+capacity is ``wasted'' on verbatim memorized training data.
+Would models perform better or worse if this data was not memorized?
+
+\subsection{Consequences for Practitioners}
+
+\paragraph{Practitioners should test for discoverable memorization.}
+Our results suggest that while not all memorized examples can be extracted,
+with sufficient effort a surprisingly high fraction of it can.
+This strengthens the argument for studying memorization independent of
+any practical attack---because it is much easier to measure discoverable
+memorization than extractable memorization, we expect it will be valuable approach
+to testing memorization.
+
+\paragraph{Determining if alignment has succeeded is challenging.}
+While we cannot be certain of the testing that \chat{} underwent before
+launch (there is no publication describing its creation), 
+OpenAI's public description of GPT 4 \citep{gpt4}
+and Copilot \citep{copilot} contain sections dedicated to privacy
+analysis---and so we suspect \chat{} also underwent privacy analysis.\looseness=-1
+
+But just as vulnerabilities can lie dormant in code---sometimes for
+decades---our attack demonstrates the potential for latent,
+hard-to-discover ML vulnerabilities that lie dormant in aligned models.
+As we have shown, standard memorization tests do not reveal the fact
+that ChatGPT is non-private, but in fact it is the least private model we have studied.
+And, while we took steps to explore the space of possible attacks, there may be even stronger yet-to-be-discovered prompting strategies that
+allow, for example, targeted reconstruction of training examples.
+
+
+\paragraph{Adversarial prompting reverts alignment attempts.}
+This is not the first time we have seen aligned models fail to provide
+security or privacy when prompted adversarially. Recent work has
+demonstrated that adversarially prompting aligned models can break
+their alignment in order to emit harmful output \cite{carlini2023aligned, zou2023universal}.
+Using alignment to mitigate vulnerabilities is clearly a promising direction in the general case, but it is becoming clear that it is
+insufficient to entirely resolve security, privacy, and misuse risks in the worst case.
+
+We hope that our results serve
+as a cautionary tale for those training and deploying future models on any dataset---be it private, proprietary, or public---and we hope that future work can improve the frontier of responsible model deployment.
+
+
+
+

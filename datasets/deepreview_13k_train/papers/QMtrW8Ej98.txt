@@ -1,0 +1,280 @@
+\title{Microcanonical Langevin Ensembles: Advancing the Sampling of Bayesian Neural Networks}
+
+\begin{abstract}
+Despite recent advances, sampling-based inference for Bayesian Neural Networks (BNNs) remains a significant challenge in probabilistic deep learning. While sampling-based approaches do not require a variational distribution assumption, current state-of-the-art samplers still struggle to navigate the complex and highly multimodal posteriors of BNNs. As a consequence, sampling still requires considerably longer inference times than non-Bayesian methods even for small neural networks, despite recent advances in making software implementations more efficient. Besides the difficulty of finding high-probability regions, the time until samplers provide sufficient exploration of these areas remains unpredictable. To tackle these challenges, we introduce an ensembling approach that leverages strategies from optimization and a recently proposed sampler called Microcanonical Langevin Monte Carlo (MCLMC) for efficient, robust and predictable sampling performance. Compared to approaches based on the state-of-the-art No-U-Turn Sampler, our approach delivers substantial speedups up to an order of magnitude, while maintaining or improving predictive performance and uncertainty quantification across diverse tasks and data modalities. The suggested Microcanonical Langevin Ensembles and modifications to MCLMC additionally enhance the method's predictability in resource requirements, facilitating easier parallelization. All in all, the proposed method offers a promising direction for practical, scalable inference for BNNs.
+\end{abstract}
+
+\section{1 INTRODUCTION AND RELATED LITERATURE  }
+
+
+Sampling-based inference for Bayesian Neural Networks (BNNs) has garnered significant interest as a principled approach to addressing the analytically intractable challenge of probabilistic deep learning (Izmailov et al., 2021; Wiese et al., 2023; Papamarkou et al., 2024). New methods, such as subspace inference (Izmailov et al., 2020; Dold et al., 2024), are being explored alongside emerging applications in diverse domains where effective uncertainty quantification is crucial, including healthcare (Peng et al., 2020) and physics (Cranmer et al., 2021).Papamarkou et al. (2022); Sommer et al. (2024) highlight several shortcomings in current sampling-based approaches, particularly the need for proper initialization of sampling procedures and the challenge of capturing multimodality.  
+
+Samplers and problem setup Hamiltonian Monte Carlo (HMC; Duane et al., 1987) and Underdamped Langevin Monte Carlo (Leimkuhler & Reich, 2009) are the gold standard algorithms for high-dimensional sampling problems. However, their performance is known to be sensitive to their hyperparameters, such as the step size, preconditioning, and the momentum decoherence rate (Neal, 2011). They are therefore combined with an automatic hyperparameter adaptation algorithm. Several ensemble-based schemes have been developed in recent years (Sountsov & Hoffman, 2022; Hoffman & Sountsov, 2022; Riou-Durand et al., 2023), but all of these schemes critically depend on the ensemble variance of the parameters to tune the critical momentum decoherence rate hyperparameter and in some cases also the (preconditioned) step size. As such, they are not applicable to the highly multimodal posteriors of BNNs.  
+
+In the context of gradient-free sampling, a variety of ensembled algorithms have been developed, for example, Preconditioned Monte Carlo (pocoMC; Karamanis et al., 2022a;b) , Nested Sampling (Skilling, 2004) and Elliptical Slice Sampling (Murray et al., 2010). These algorithms address the multimodality problem; however, they scale poorly to high-dimensional settings. For example, Eliptical Slice Sampling is frequently used for BNNs (Izmailov et al., 2020; Dold et al., 2024) for sampling in a small subspace (e.g., 2- or 3-dimensional) of the parameter space, but cannot be scaled to much larger dimensions. While alternative methods for multimodal sampling exist, they are also not well-suited for the high-dimensional and highly multimodal BNN setting. For instance, stochastic localization methods, like those proposed by Grenioux et al. (2024), can handle moderate multimodality but are sensitive to hyperparameters (like the integration initialization $t_{0}$ for stochastic localization) and lack scalability. Similarly, the Liouville Flow Importance Sampler (Tian et al., 2024) offers unbiased sampling but requires the training of a neural flow model, which needs to become increasingly complex as the dimensionality and complexity of the problem grows, limiting its scalability. The same applies to the learned vector field in the path-guided particle-based method of Fan et al.1.3.  
+
+HMC and NUTS It is therefore not surprising that a sequential HMC variant, the No U-turn Sampler (NUTS; Hoffman & Gelman, 2014), is still viewed as “[t]he only MCMC algorithm that theoretically scales to high dimensions across a broad class of models” (Sˇtrumbelj et al., 2024). While the scalability of HMC allows the application to the full parameter space of moderately-sized neural networks and its NUTS variant provides an (almost) tuning-free approach of HMC, it cannot sufficiently explore the many modes present in BNN posteriors(Wiese et al., 2023). The recent HMC variant Symmetric Split HMC (Cobb & Jalaian, 2021) improves HMC’s memory scalability but comes with other drawbacks, including sensitive hyperparameters.1.3. Standard priors, like isotropic Gaussians, can further lead to initialization issues, where samplers start in low-probability regions, resulting in slow convergence or samplers getting stuck. To address these issues, Sommer et al. (2024) propose a Bayesian Deep Ensemble (BDE), an ensemble of many short warmstarted Markov chain Monte Carlo (MCMC) chains. With this, the authors increase the exploration capability and are able to achieve state-of-the-art predictive and uncertainty quantification (UQ) performance on common benchmark tasks. Although much faster than previously employed methods by leveraging parallelization and efficient implementations, Sommer et al. (2024) rely on NUTS. This imposes a significant computational burden and results in a method where the sampling phase still dominates the computational costs by far.  
+
+Our contributions In an effort to improve the scaling and efficiency of sampling-based inference for BNNs, we identified Microcanonical Langevin Monte Carlo (MCLMC; Robnik et al., 2023) as a possible alternative MCMC-based solution. In recent experiments, the authors were able to show that MCLMC can be computationally superior to NUTS while providing the same quality of samples in downstream metrics. While MCLMC demonstrates computational advantages over NUTS in unimodal and sequential sampling tasks, it cannot address the multimodality, numerical instability, and scalability challenges of BNNs without significant modifications (e.g.1.2). We embed adapted MCLMC as the key ingredient in our approach, including deep ensemble initialization for enhanced exploration, adjustments to ensure numerical stability in high-dimensional settings, and optimizations targeting critical bottlenecks. The resulting method, Microcanonical Langevin Ensemble (MILE), comes with automated tuning and works reliably out of the box. Extensive experiments highlight that MILE achieves state-of-the-art performance while being up to an order of magnitude faster than previous sampling-based approaches.  
+
+
+
+\section{2 BACKGROUND  }
+
+
+In this work, we denote neural networks with $f:\mathcal{X}\to\mathcal{Y}$ , $\mathcal{X}\subseteq\mathbb{R}^{p},\mathcal{Y}\subseteq\mathbb{R}^{m}$ . We parameterize the network with $\pmb{\theta}\in\Theta\subseteq\mathbb{R}^{d}$ , denoting the vector of all flattened and concatenated weights and biases. To express the epistemic uncertainty about $\pmb{\theta}$ , we treat $\pmb{\theta}$ as a random variable with prior density $p(\pmb\theta)$ and denote its posterior density as $p(\pmb\theta|\mathcal D)\,=\,p(\mathcal D|\pmb\theta)p(\pmb\theta)/p(\mathcal D)$ , with observed data $D\,\in\,(\mathcal{X}\times\mathcal{Y})^{n}$ . We will assume a standard isotropic unit variance Gaussian prior ${\mathcal{N}}(0,I)$ if not specified otherwise. A more detailed analysis of the prior influence is beyond the scope of this work. The posterior predictive density (PPD) quantifies the uncertainty of predicting unseen labels $\pmb{y}^{\ast}\in\mathcal{V}$ given features $x^{*}\in\mathcal{X}$ by integrating over the posterior distribution of the parameters $\pmb{\theta}$ :  
+
+$$
+p(\pmb{y}^{*}|\pmb{x}^{*},\mathcal{D})=\int_{\Theta}p(\pmb{y}^{*}|\pmb{x}^{*},\pmb{\theta})p(\pmb{\theta}|\mathcal{D})\,\mathrm{d}\pmb{\theta}.
+$$  
+
+2.1 MONTE CARLO SAMPLING  
+
+In the setting of sampling-based inference, we estimate the analytically intractable integral in Eq. (1) using samples from the posterior distribution with density $p(\pmb\theta|\mathcal D)$ . These are obtained by Markov chain Monte Carlo (MCMC) methods, which construct a Markov chain whose stationary distribution is the posterior distribution or close to it. In practice, we gather these samples from $K$ independent chains, each with $S$ samples, yielding the set $\{\pmb{\theta}^{(k,s)}|k\,\in\,[K],s\,\in\,[S]\}$ based on which we can perform prediction and uncertainty quantification (Andrieu et al., 2003; Gelman et al., 2013). The approximation of Eq. (1) then has the form  
+
+$$
+p(\pmb{y}^{\ast}|\pmb{x}^{\ast},\mathcal{D})\approx\frac{1}{K\cdot S}\sum_{k=1}^{K}\sum_{s=1}^{S}p\left(\pmb{y}^{\ast}|\pmb{x}^{\ast},\pmb{\theta}^{(k,s)}\right).
+$$  
+
+Error analysis and Metropolis-Hastings adjustment The error of this approximation is composed of three terms: initialization error, discretization error, and Monte Carlo error. The initialization error is a transient effect caused by the chains’ ensemble distribution having not yet reached the stationary distribution (burn-in phase). The Monte Carlo error is the variance caused by the finite number of samples $S$ and chains $K$ . The discretization error is caused by the finite step size used to numerically simulate the sampler’s dynamics. This causes $p(\pmb\theta|\mathcal D)$ to no longer be the stationary distribution. The Metropolis-Hastings (MH) scheme is typically employed to completely eliminate the discretization error, but this comes at an expense of shorter step size. This is because the acceptance rate depends exponentially on the squared energy error, which grows linearly with dimensionality. Therefore, the step size needs to be decreased as the number of parameters increases in order to maintain a fixed acceptance rate, causing the sampler to move more slowly in higher dimensions. The MH algorithm is further prone to degeneration of the acceptance rate if the chains are initialized from a distribution, which is not already very close to the stationary distribution, causing slow convergence and large initialization error (Durmus & Eberle, 2023). Without the Metropolis adjustment on the other hand, the discretization error depends strongly on the step size. Hence, slightly reducing the step size causes the discretization error to become negligible compared to the initialization and Monte Carlo error. Given these arguments, we choose to omit the MH adjustment in our method, relying instead on careful initialization and step size tuning to manage the error terms.  
+
+
+
+\section{2.2 MICROCANONICAL LANGEVIN MONTE CARLO  }
+
+
+A recently proposed sampling method outside the BNN research field is Microcanonical Langevin Monte Carlo (MCLMC). The time evolution of the MCLMC sampler (Robnik & Seljak, 2024) is governed by the stochastic differential equation  
+
+$$
+\begin{array}{r}{\mathrm{d}\pmb{\theta}=u\,\mathrm{d}t,\qquad\mathrm{d}\pmb{u}=\left(1-\pmb{u}\pmb{u}^{\top}\right)\left((\pmb{d}-1)^{-1}\nabla\log p(\pmb{\theta}|\mathcal{D})\,\mathrm{d}t+\eta\,\mathrm{d}\pmb{W}\right),}\end{array}
+$$  
+
+where $W$ is the Wiener process and $\eta$ is a free parameter equivalent to the typical length traveled in the parameter space before momentum decoherence, often denoted with $L$ . Robnik & Seljak (2024) use the drift-diffusion discretization to numerically solve Eq. (3). The drift part (Eq. (3) without the last, stochastic term) is solved by the minimal norm integrator (Takaishi & de Forcrand, 2006; Omelyan $\&$ Kovalenko, 2013). In the limit of small step size $\epsilon$ , the resulting Markov chain has $p(\pmb\theta|\mathcal D)$ as a stationary distribution (Robnik & Seljak, 2024). Smaller step size results in a smaller discretization error but increases the Monte Carlo and initialization errors because the sampler is moving more slowly. We therefore wish to reduce the step size to the point where the discretization error becomes smaller than the other two sources of error, but not much further. Robnik et al. (2023) propose the energy error variance per dimension (EEVPD) as a measure of the discretization error and show that one can control the discretization error by controlling EEVPD. Analogously to adapting the step size to match some targeted acceptance rate in Metropolis-adjusted algorithms, one can adapt the step size to match some desired EEVPD in the unadjusted algorithms. This inexact but highly efficient approach with bias control is the one we will also take in our work.  
+
+![](images/14c7e2e4ca5e3439d89302972d38c0c699e2231ca97afd2405574d2a6600a484.jpg)  
+Figure 1: Flowchart illustrating our proposed procedure for obtaining a Microcanonical Langevin Ensemble (MILE) for BNNs. The process involves three main stages: optimization, MCLMC warmup and tuning, and MCLMC sampling. These steps are parallelized to generate an ensemble of $K$ members. The number of MCLMC steps for each tuning phase and the final sampling phase are annotated, and carryovers between stages are highlighted in circles.  
+
+Note that the stationary distribution is independent of the free parameter $\eta$ and in particular also holds for the deterministic dynamics, $\eta\:=\:0$ . This is not the case in HMC, where momentum resampling is essential to maintain the desired stationary distribution. Being more deterministic allows MCLMC to converge faster during the exploitation phase.   
+The parameter $\eta$ is still important, as it controls the rate of the momentum decoherence and forces the dynamics to move to the unexplored parts of the parameter space. Robnik et al. (2023) found that a good performance is achieved when $L/\epsilon$ is on the order of the chain’s autocorrelation time. As the autocorrelation time is quite expensive to evaluate, they also propose to set $L$ to the size of the posterior modes, by computing the variance of the parameters.  
+
+Based on these considerations, they propose a three-stage tuning scheme, which we now refer to as the three phases:  
+
+1. Phase I: Adapt the step size to match the desired EEVPD and complete the burn-in.   
+2. Phase II: Estimate parameter variance to obtain an initial estimate for $L$ .   
+3. Phase III: Estimate autocorrelation time to refine the estimate of $L$ .  
+
+
+
+\section{3 MICROCANONICAL LANGEVIN ENSEMBLES  }
+
+
+In order to embed MCLMC in a robust sampling pipeline (cf. Fig. 1) that works effectively for BNNs and exploits the idea of ensembling, we will discuss the combination of optimization techniques and sampling as well as various aspects of required MCLMC modification in the following.1.2).  
+
+3.1 ENSEMBLING FOR REDUCED INITIALIZATION ERROR  
+
+As discussed in Section 2.1, the error in the approximation of the predictive posterior can be decomposed into three parts. While the initialization error is described in Section 2.1 as a “transient effect”, this error should not be mistakenly classified as unimportant, and treating it with special care is particularly important in the application of BNNs. Similar to most other samplers, it is not unlikely for MCLMC to get stuck in low-probability regions of the high-dimensional and highly complex posterior surfaces of BNNs. Our proposed solution is therefore to combine sampling with an optimization step (Fig. 1, blue part). To prevent chains in the sampling step from being initialized in these unfavorable regions, we run $K$ optimization steps to obtain starting values $\theta^{*(\bar{k})},k\in[K]$ for each of the $K$ chains. As a byproduct, we obtain a deep ensemble (DE; Lakshminarayanan et al., 2017) with $K$ members.1 Similar to Sommer et al. (2024), we found that using optimized neural networks as starting values can reduce this error notably and prevents the sampler from getting stuck.  
+
+
+
+\section{3.2 TUNING PHASE ADAPTIONS  }
+
+
+In the previous subsection, we proposed to optimize starting values when using MCLMC by running an ensemble of MCLMC chains.1.2). We therefore discuss three components of MCLMC’s tuning phase requiring further adaptions in applications to BNNs, and propose scaling related modifications to phase III of MCLMC.  
+
+
+
+\section{3.2.1 STEP SIZE  }
+
+
+Robnik et al. (2023) suggest to initialize the step size $\epsilon$ with $\sqrt{d}$ . While this default works well for their applications, this would result in too large values even for rather small neural networks. Too large step sizes, in turn, will result in significant changes of the energy and thereby introduce serious numerical problems. As MILE initializes chains already in a region of high probability, it is reasonable to reduce $\epsilon$ notably. In practice, this means we can set the step size to the optimizer’s learning rate used in the optimization step of MILE. Besides reducing the initial discretization error, this also ensures a more localized exploration early in the burn-in phase and close to the optimized solution while allowing for larger steps as tuning progresses (which can also be confirmed empirically).  
+
+
+
+\section{3.2.2 ENERGY VARIANCE SCHEDULER  }
+
+
+Another tuning parameter in phase I of MILE is the energy variance scheduler allowing control of the trade-off between exploitation and exploration. Having already optimized $K$ starting values, MILE does not require an excessive amount of exploitation but each MCLMC ideally focuses more on exploitation. In contrast to the tuning scheme proposed in Robnik et al. (2023), we do not employ a fixed desired energy variance level but use a linear scheduler starting with a higher desired energy variance and gradually decreasing it. By doing this we foster noisier exploration at the beginning of the warmup phase and increase the exploitation towards the end of it. Doing this in parallel across an ensemble of chains, our idea resembles the popular strategy of using cyclical learning rates in SG-MCMC sampling (Zhang et al., 2020). But rather than going through various exploration and exploitation phases we do one exploration-exploitation cycle per chain and thus parallelize this idea.2  
+
+
+
+\section{3.2.3 EFFECTIVE SAMPLE SIZE  }
+
+
+MCLMC further requires setting a desired effective sample size (ESS) level within the EEVPD estimation phase. While this level is generally a choice of the practitioner and the available computational resources, one option is to set the ESS to $10\%$ of the total number of posterior samples. As previous approaches working with NUTS also report an ESS of around $10\%$ of the total number of samples, this value ensures a sample quality that is as good as the one of NUTS.  
+
+
+
+\section{3.2.4 PHASE III BOTTLENECK  }
+
+
+When scaling the MCLMC tuning algorithm to higher dimensions, a computational bottleneck of phase III is to estimate the empirical ESS, which is done with a Fast Fourier Transform (FFT, Bracewell & Bracewell, 1986). The FFT is computed for each parameter across all samples. Although fast implementations scale with ${\mathcal{O}}(S\log S)$ , this can severely impact the runtime for increased dimensions and amount of samples. We therefore propose to subsample parameters if the dimensionality is $d>2000$ , which linearly decreases the runtime. We also suggest applying thinning to the samples such that the number of samples used for the FFT is bounded by 10e3.  
+
+
+
+\section{3.3 EFFECTIVE COMPUTATIONAL BUDGET ALLOCATION  }
+
+
+The third error caused by the finite number of samples and chains is the Monte Carlo error. Unlike NUTS, which varies the number of leapfrog steps for each proposal and requires one gradient evaluation per leapfrog step, MCLMC employs a deterministic approach that requires two gradient evaluations per sample due to the use of a minimal norm integrator. This structure makes MCLMC’s computational requirements much more predictable, offering a significant practical advantage. In contrast, the number of steps taken by NUTS can exhibit substantial variance both within and across tasks, leading practitioners to set an upper limit on leapfrog steps. With better foreseeable computational requirements, we can optimize the balance between the number of chains and the number of samples in MILE in order to minimize the Monte Carlo error for a given computational budget. As recent literature suggests that MCLMC can be much more efficient than NUTS in obtaining effective samples in simple problems, we propose to collect a relatively small number of samples from each chain and thereby limit computational resources spent on exploring individual local modes by MCLMC but relying on DE for exploration.  
+
+Warmup stage It is not advisable to directly start chains from the DE optimized points, as these modes do not coincide with the so-called typical sets (Betancourt, 2018), we suggest allocating 40k steps, i.e., 80k gradient evaluations for MILE’s warmup phase. Compared to NUTS, which often requires more than 90k leapfrog steps/gradient evaluations for warmup in BNN tasks, this is a conservative lower bound. This is followed by the two shorter phases, II and III, where we allocate 5k steps each to ensure robust estimations of the momentum decoherence scale $L$ .  
+
+Sampling stage As MCLMC samples exhibit significant autocorrelation, we can further reduce memory costs by applying thinning without notable reduction in sample quality while also not increasing inference time as long as the costs of thinning remain negligible compared to the overall sampling time. In our setup, after $50\mathrm{k}$ warmup steps, we propose using 10k steps for the sampling phase. The choice of thinning interval is then based on the memory and inference time constraints, i.e., the posterior sample budget.  
+
+In this work, we explore two scenarios: one with a budget of 1k samples per chain and another with 100 samples, corresponding to thinning intervals of 10 and 100, respectively. Overall, we propose a fixed budget of $60\mathrm{k}$ steps per chain, providing a predictable sampling process. By adjusting thinning appropriately, one can further effectively manage memory and inference time requirements.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+In this section, we evaluate the feasibility of applying MILE to sampling-based inference for BNNs.  
+
+• Datasets and models: We replicate the benchmark by Sommer et al. (2024) but also extend it to other datasets (Ionosphere, Income, IMDB, MNIST, F-MNIST) and models (convolutional and attention-based neural networks).   
+• Methods: As in Sommer et al. (2024), we investigate the improvement of our proposed approach over a DE, but also compare against the current state-of-the-art BDE approach based on the NUTS sampler.   
+• Runtime comparisons: Following this, we conduct a series of ablation studies, carefully examining how MILE scales compared to BDE.   
+• Tuning and hyperparameters: We finally validate the robustness of MILE’s hyperparameters, supporting our claim that MILE is an auto-tuned off-the-shelf procedure like NUTS.  
+
+2. The diagnostics and evaluation metrics employed are detailed in Appendices A.3 and A.4.  
+
+
+
+\section{4.1 BENCHMARKS  }
+
+
+The goal of this section is to demonstrate 1) the feasibility of MILE in BNN settings, 2) highlight its superior predictive performance measured using the root mean squared error (RMSE) or Accuracy, its improved UQ measured using the LPPD, and 3) its improvements in runtime.  
+
+
+
+\section{4.1.1 UCI BENCHMARKS  }
+
+
+Using the six UCI datasets previously analyzed in the context of sampling-based inference in Sommer et al. (2024) we replicate their benchmark using a ReLU network with two hidden layers and  
+
+Table 1: Average hold-out LPPD and RMSE performance as well as wallclock runtime of the DE baseline, BDEs and MILE, respectively, for the six datasets (in different rows) over 3 data splits.1. The wallclock times of the samplers represent the additional sampling time on top of the DE fit which is also reported.  
+
+![](images/b1d175665a4854d77fe13026a281b66ab59472da91ada48d7fbaaf7ed32e0637.jpg)  
+
+2 for further details). We compare the predictive accuracy, UQ, and runtime of state-of-the-art BDE and the DE baselines against MILE, configured as described in Section 3.  
+
+Performance results Table 1 shows the results, indicating that MILE consistently matches or outperforms the other methods in predictive performance and UQ while significantly reducing the computational cost. This is especially evident in larger datasets like bikesharing (B) and protein (P), where MILE achieves sampling speeds nearly ten times faster than BDE. In most cases, the additional MCLMC sampling after DE optimization is as fast as the DE fitting phase itself. It is noteworthy that this is a big step for sampling-based inference, yielding a time complexity comparable to DE $\approx2\times$ runtime), while providing better and more principled uncertainty measures.  
+
+Resource predictability As elaborated before, MILE’s efficiency is driven by its much fewer gradient evaluations and predictable runtime. Unlike BDE, where runtime is highly variable in the leapfrog steps taken by NUTS, MILE’s fixed number of steps allows easy runtime forecasts once the cost of a single gradient evaluation is known. This is especially crucial for expensive sampling task such as the posterior sampling of BNNs. Fig. 2 illustrates the significant variability in BDE’s computational cost for generating 1000 posterior samples, both within  
+
+![](images/fe731f904d339ae8d42bd5b6c90233224544585f3afe0f95914a05f4ec7638da.jpg)  
+BDE MILE  
+
+and across tasks. This variability often Figure 2: Average gradient evaluations per chain for 1000 posexceeds the entire budget for sampling terior samples for the experiments reported in Table 1. in MILE. Moreover, in parallel settings,  
+
+the BDE’s performance is bottlenecked by the most expensive chain, while MILE’s deterministic nature ensures perfect load balancing for concurrent sampling (see Section 3.3).  
+
+Diagnostics For diagnostic purposes and to evaluate the quality of samples drawn by MILE and BDE, we evaluate the effective sample size (ESS, Vehtari et al., 2021) and the chainwise 4-splitc R (Sommer et al., 2024). As can be seen in Figures 6a and 6b, MILE also outperforms BDE in the sampling and local mixing quality, revealing higher average ESS and smallercR values.  
+
+4.1.2 EXTENDED BENCHMARKS  
+
+In addition to existing sampling-based inference benchmarks, we extend our analysis to more complex and larger models, showcasing the successful application of MILE to convolutional neural networks (CNNs), classification tasks, and sequential models across different data modalities (see  
+
+2 for further details). The main reason we are able to advance existing benchmarks is the feasibility of sampling such tasks using MILE. Additionally, we report the average performance of a single DE member and individual MCMC chain, which highlights the additional benefits of ensembling.  
+
+Results The results, presented in Table 2, not only confirm the accuracy and UQ improvements over the DE baseline but also demonstrate performance gains in much larger models and new problem domains, confirming the positive effect of the additional exploration step taken by MILE.  
+
+Table 2: Hold-out test performance of MILE and baselines on various classification tasks using fully-connected (FCN), convolutional (CNN) and attention-based (ATT) networks. ATT (v2, v3) employ pretrained embeddings.  
+
+![](images/9c7aa723ce26cd0f53c2ccb3f7fcc80763d7c80782bdc7d273b0f9316479c681.jpg)  
+
+
+
+\section{4.2 ABLATION MODEL COMPLEXITY & RUNTIME  }
+
+
+The UCI benchmarks have clearly showed the runtime advantage of MILE over BDE. To further investigate the impact of model complexity (number of parameters) and dataset size on these runtimes, we conduct two ablation studies.  
+
+Scaling in model complexity Fig. 3 shows the evolution of the required sampling time and performance metrics for increased model complexity. For the 5,426-dimensional case, MILE completes sampling in under 30 minutes, while BDE takes several hours. More strikingly, MILE not only remains faster but its performance gap to BDE increases with higher model complexity, indicating both significant efficiency gains and superior performance in higher dimensions. To quantify the time complexity, we fit a linearized power-law model to obtain the expected sampling time with growing $d$ : $\mathbb{E}[\log(t_{\mathrm{Sampler}})]\,=\,\beta_{0}+\beta_{1}\log(d)$ . Both fits explain almost all the variance in the data with $R^{2}$ statistics of 0.98 for MILE and 0.96 for BDE, confirming the robustness of the speed advantage. The model fits are illustrated as dashed lines in Fig. 3.  
+
+Scaling in dataset size We analyze the impact of increasing dataset size. Fig. 3 (top right) illustrates how sampling time evolves for a fixed task and neural network across different data subsets. Using the linear model $\mathbb{E}[t_{\mathrm{Sampler}}]=\beta_{0}+\beta_{1}n^{2}$ , we obtain fits that again almost perfectly resemble the given data points, with $R^{2}$ values of 0.99 for MILE and 0.96 for BDE. The ratio of the $\beta_{1}$ coefficients, 6.6, again highlights MILE’s superior scaling in $n^{2}$ . Notably, visual inspection suggests that BDE may scale worse than quadratically, but for consistency with MILE, we apply a conservative quadratic fit. The scaling behavior again closely resembles a power-law and the observed quadratic trend in $n$ likely stems from memory-related hardware slowdowns as dataset sizes increase.  
+
+
+
+\section{4.3 ABLATION HYPERPARAMETER ROBUSTNESS  }
+
+
+To substantiate the claim that our proposed MCLMC configuration in MILE is, in fact, a robust and auto-tuned off-the-shelf method, we conducted a series of ablation studies by changing the default hyperparameters of MILE as suggested in Section 3 and examine the impact of these changes on performance. For each ablation, we systematically evaluate the robustness of the approach by changing a single hyperparameter on an appropriate grid. We report both the impact of hyperparameter variations on hold-out test performance metrics and the corresponding tuned values of the sampler’s key parameters—the momentum decorrelation scale $(L)$ and step size (ϵ). While the effect on the latter ones is interesting the primary focus is to attain estimates of the two parameters that yield robust and good performance. For comparison, we also present the performance of BDE and the DE baseline.  
+
+![](images/b86a662038e3b551be5157fc97695b31fc0d0c0534cfd03fa4c1127eded80047.jpg)  
+Figure 3: Average sampling wallclock times (minutes, y-axis) of BDE (blue) and MILE (orange) for the bikesharing dataset across $4~\mathrm{NN}$ architectures with increasing parameter count ( $\bf\Tilde{x}$ -axis) on the upper left. Average sampling wallclock times (hours, y-axis) for the protein dataset across varying training data sizes ( $\bf\delta X$ -axis) on the upper right. Dashed lines indicate power-law and quadratic model fits respectively. In both cases the sampling time ratio between BDE and MILE is around 7-9, independently of the number of parameters and observations. This is a result of NUTS always being close to its maximum number of iterations per sample, which we set to the default value of 1024 gradient calls. It therefore uses around $1024\,\times\,(100\bar{0}+10\bar{0})\,\approx\,11\,\times\,10_{.}^{5}$ gradient calls, as displayed also in Figure 2. MILE on the other hand always uses $2\times60000=12\times10^{4}$ calls, which gives a ratio of 9.2. The bottom row shows hold-out metric performances across 4 network architectures. DE performance for the LPPD and RMSE metrics is indicated as a grey reference. All charts come with standard errors over 3 data splits.  
+
+Results The results are summarized in Fig. 4. Across all cases, MILE consistently shows robust performance, with minimal sensitivity to changes in the hyperparameters. The changes in the major parameters $L$ and $\epsilon$ are generally small and with such marginal changes -especially to the important ϵ- do not significantly affect the overall performance. An exception is the warmup budget, where slightly improved performance can be observed with a significantly extended warmup phase. However, the improvements are marginal and come at a linear increase in runtime, making the additional computational cost unjustifiable.  
+
+In conclusion, these results support the claim that MILE is effectively tuning-free, as in the considered cases, the method’s performance does not change drastically with different hyperparameters and is close to optimal under the default settings. This robustness ensures that practitioners can confidently apply the method without extensive tuning, further enhancing its practical utility.  
+
+486   
+487   
+488   
+489   
+490   
+491   
+492   
+493   
+494   
+495   
+496   
+497   
+498   
+499   
+500   
+501   
+502   
+503   
+504   
+505   
+506   
+507   
+508   
+509   
+510   
+511   
+512   
+513   
+514   
+515   
+516   
+517   
+518   
+519   
+520   
+521   
+522   
+523   
+524   
+525   
+526   
+527   
+528   
+529   
+530   
+531   
+532   
+533   
+534   
+535   
+536   
+537   
+538   
+539  
+
+![](images/82a5723ff076b54b08cacfe8272ee45d7e9c89ac107befb8514e152172e4d33f.jpg)  
+(c) #Effective samples to estimate EEVPD   
+(d) Trust in the estimate parameter.  
+
+Figure 4: Results of the ablation studies conducted on the bikesharing dataset for the robustness of the MILE algorithm to its tuning parameters $\bf\delta X$ -axes, proposed defaults bold). Both the average hold-out RMSE and LPPD are reported with their standard error for 3 data splits. The same holds for the major parameters of the sampling kernel $L$ and the step size that were tuned by the proposed tuning. “#Effective samples to estimate EEVPD“ and “Trust in the estimate“ are minor parameters of the step size adaptation algorithm which determine the sample weighting during the EEVPD computation.  
+
+
+
+\section{5 DISCUSSION  }
+
+
+In this work, we proposed and evaluated Microcanonical Langevin Ensembles (MILE) for samplingbased inference of Bayesian neural network posteriors. By adapting the recently proposed MCLMC sampler and combining it with starting values obtained via Deep Ensembles, our comparative analysis reveals substantial advancements in performance, sample quality, UQ, and runtime compared to a NUTS-based alternative. Furthermore, the method enhances the predictability of resource requirements due to its deterministic number of gradient evaluations, which also simplifies parallelization. In conclusion, our proposed method can be considered a reliable and efficient off-the-shelf method and thus a big step forward toward making sampling-based inference feasible for generic BNNs.  
+
+Scope of this work and limitations While also yielding significant runtime savings for increased dataset dimensions, the goal of this work was to overcome the most prevalent bottlenecks of NUTSbased ensembling—its unfavorable scaling with respect to the number of parameters and unforeseeable resource allocation due its variable and high number of gradient evaluations. As MCLMC and our modifications seem to have solved these problems, a next step for future work that we did not compare in this study is the transition to Stochastic Gradient sampler variants. This transition is typically not straightforward but would overcome another remaining limitation of sampling-based inference, namely the scaling for large-scale datasets. Another possible enhancement of MILE we did not investigate in this work is the use of alternative priors, e.g., discussed in Fortuin et al. (2022).  
+
+
+

@@ -1,0 +1,310 @@
+\title{RapidDock: Unlocking Proteome-scale Molecular Docking}
+
+\begin{abstract}
+Accelerating \emph{molecular docking} -- the process of predicting how molecules bind to protein targets -- could boost small-molecule drug discovery and revolutionize medicine. Unfortunately, current molecular docking tools are too slow to screen potential drugs against all relevant proteins, which often results in missed drug candidates or unexpected side effects occurring in clinical trials.
+To address this gap, we introduce \method{}, an efficient transformer-based model for blind molecular docking.
+\method{} achieves at least a $100 \times$ speed advantage over existing methods without compromising accuracy.
+On the Posebusters and DockGen benchmarks, our method achieves $52.1\%$ and $44.0\%$ success rates ($\text{RMSD}<$2$ \si{\angstrom}$), respectively. 
+The average inference time is $0.04$ seconds on a single GPU, highlighting \method{}'s potential for large-scale docking studies.
+We examine the key features of \method{} that enable leveraging the transformer architecture for molecular docking, including the use of relative distance embeddings of $3$D structures in attention matrices, pre-training on protein folding, and a custom loss function invariant to molecular symmetries. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+Accelerating the drug discovery process will revolutionize medicine. As most novel drugs are small molecules~\citep{kinch20242023}, various deep learning methods have 
+been proposed to streamline the process of docking such molecules to druggable protein targets \citep{abramson2024accurate,corso2024deep, corso2022diffdock, qiao2024state}. 
+While impressive, none of these methods is both \emph{accurate} and \emph{fast}.
+
+In fact, to obtain a comprehensive view of its effects, a molecule needs to be screened  against thousands of proteins \citep{sjostedt2020atlas}. 
+However, state-of-the-art methods 
+\citep{corso2024deep, corso2022diffdock, abramson2024accurate, qiao2024state}
+report run-times
+on the scale of seconds per protein on a single GPU.
+Consequently, screening a relatively small database of one million molecules \citep{yu2023uni} against the \emph{proteome}, i.e.,
+ all proteins in the human body, would take years, even with hundreds of GPUs.
+Such time-frames are unacceptable in the drug development process.
+
+To address this challenge, we introduce \emph{\method{}}, a transformer-based model that performs molecular docking in a single forward pass, in hundredths of a second on a single GPU.
+\method{} performs blind docking, using unbound, possibly computationally folded proteins, so it can be applied to unexplored protein targets.
+Given the $3$D structure of a protein and a molecule, our method predicts all pairwise distances in the resulting protein-molecule complex, including the molecule's atom-atom distances and atom-amino acid distances.
+
+\method{} achieves success rates, i.e., $\text{RMSD}<2 \si{\angstrom}$, of $52.1\%$ on the Posebusters benchmark \citep{buttenschoen2024posebusters} and $44.0\%$ on the DockGen benchmark 
+\citep{corso2024deep},
+with 0.03 and 0.05 seconds average runtimes, respectively.
+Our method significantly outperforms the recent
+DiffDock-L \citep{corso2024deep} (22.6\% success rate, 35.4 seconds on DockGen) or the
+NeuralPLexer \citep{qiao2024state} (22.6\% success rate, 3.77 seconds on Posebusters).
+Because of its accuracy and speed, \method{} can enable novel use cases and research directions.
+For example, with \method{}, docking ten million molecules to all human proteins on a cluster with $512$ GPUs would take nine days, compared to about 20 years with DiffDock-L or even 200 years required with  a computationally-intensive method like AlphaFold-3 \citep{abramson2024accurate}.
+
+We supplement the analysis of \method{}'s performance with a thorough study of design choices, which include: operating on relative distances, 
+pre-training on a protein folding task, and a special treatment of multiple molecular conformations in the loss function.
+
+In summary, our contributions are as follows:
+\begin{itemize}
+    \item We introduce \method{}, a first-in-class transformer-based model capable of accurate high-throughput molecular docking.
+    \item We run \method{} on the most challenging benchmarks.
+    The model docks $52.1\%$ of examples with $\text{RMSD}<2 \si{\angstrom}$ on Posebusters, and $44.0\%$ on DockGen, which places it among the most accurate methods. 
+    Importantly, inference on a single GPU takes only $0.04$ seconds on average, making \method{} at least $100\times$ faster than comparable methods.
+    \item We provide ablations and describe the design choices that led to \method{}’s success.
+    \end{itemize}
+
+\begin{figure}[htbp!]
+\centering
+\includegraphics[width=\linewidth]{fig/rapiddock_architecture.pdf}
+\caption{\method{} architecture overview. The molecule is represented by a sequence of its atoms and the corresponding matrix of distances.
+The protein is represented by its amino acid sequence and its matrix of distances.
+Learnable embeddings of these distance matrices are added to the attention matrices.
+Additionally, the model uses ESM-2 embeddings 
+\citep{lin2023evolutionary} to improve its protein representation and embeddings of atom charges to improve its molecule representation.
+}
+\label{fig:dot-0}
+\end{figure}
+
+
+
+\section{Method}
+
+\label{sec:method}
+
+\method{}, illustrated in \Cref{fig:dot-0}, is based on the transformer encoder architecture \citep{vaswani2017attention} and returns the positions of atoms in the docked molecule.
+\method{} represents the protein and molecule spatial structures by distance matrices whose embeddings are added to the attention matrices. Because \method{} operates on distances, it is \emph{equivariant}, i.e. invariant to translations or rotations, which we found crucial for accurate docking. Below we present the details.
+\subsection{Molecule and protein representation}
+The input to \method{} consists of a sequence of tokens corresponding to molecule atoms and protein amino acids. The 3D structures of the protein and molecule are represented by learnable embeddings of their respective distance matrices. Additionally, we include the information on the molecule’s atom charges. We also utilize amino acid embeddings obtained from the protein language model ESM-2 \citep{lin2023evolutionary}.
+
+\paragraph{Atom and amino acid dictionary}
+We have $26$ amino acid tokens ($20$ standard amino acids and $6$ tokens for non-standard or unknown residues) and $56$ atom tokens (all atoms likely to be found in drug molecules, i.e., elements lighter than uranium, excluding noble gases or reactive alkali metals).
+
+\paragraph{Ligand atom charges}
+To account for electrostatic interactions, we include information about atom charges in the molecules. For each atom we include its partial charge (Gasteiger charges), which is the distribution of the molecule electron density spread over the ligand atoms. The values of charges are embedded (see below) and added to the atom embeddings.
+
+\paragraph{Protein language embeddings} 
+
+To improve the protein representation, we use embeddings from the 650M ESM-2 model \cite{lin2023evolutionary}, one embedding per amino acid. These embeddings are added to the amino acid embeddings (to match the dimensionality, we use a linear projection layer).
+
+\paragraph{Molecule rigid distance matrix} 
+
+The ligand spatial structure is represented by the distance matrix $\mD^l$ between its heavy atom coordinates $\vx^{l} \in \mathbb{R}^{L \times 3}$, where $L$ is the number of heavy atoms in the ligand. Only the fixed distances across the molecule’s possible conformations are recorded, and others are denoted by a special value of $-1$. This distinguishes the rigid and moving parts of the molecule, which is important for modeling its allowable movements. To obtain the matrix, we generate 96 molecule conformations in total, using two methods: 64 from RDKit’s built-in algorithm based on MMFF optimization and 32 from the torsion-based algorithm described in~\citep{zhou2023deeplearningmethodsreally}. The distances are averaged across all conformations and only elements with a standard deviation below 0.3 \si{\angstrom} are recorded.
+
+\paragraph{Protein distance matrix}
+
+To represent the protein's 3D structure, we extract the positions of alpha-carbon atom for each amino acid $\vx^{p} \in \mathbb{R}^{P \times 3}$, where $P$ is the number of amino acids in the protein, and calculate the distance matrix $\mD^{p} = \left(\|\vx^{p}_{i} - \vx^{p}_{j}\| \right)_{1 \leq i,j \leq P.}$
+\subsection{Model architecture}
+\method{} model is based on standard transformer (in our implementation, we use Mistral \citep{jiang2023mistral7b} architecture), with full attention mask used instead of the causal one due to the non-autoregressive nature of the docking task. Below, we describe the modifications to the model: learnable attention biases based on the distance matrices, attention scalers, and learnable charge embeddings.
+
+\paragraph{Distance biases matrices}
+
+Given the input distance matrices $\mD^l$ for ligand and $\mD^p$ for protein, we construct a block matrix $\mD = \begin{bmatrix} \mD^l & -1 \\ -1 & \mD^p \end{bmatrix}$. Further, following \citep{JMLR:v21:20-074}, we discretize the distances into $257$ buckets with:
+\[ b(x) := \begin{cases} 
+      \left\lfloor 8x \right\rfloor + 1 &\text{if } 0 \leq x \leq 16, \\
+      \min\left( 256, \left \lfloor 128 + 128\frac{\ln\left(\frac{8x}{128}\right)}{\ln\left(6\right)} \right\rfloor \right) + 1 &\text{if } x > 16, \\
+      257 &\text{if } x = -1. 
+   \end{cases}
+   \]
+Intuitively, the discretization is finer for small distances and coarser for larger ones, for which high accuracy is not necessary. The discretized values are used to construct distance bias matrices. For each attention head $l$ we put
+\[ \mB^{l} = \left(\mE_{b\left(\mD_{i,j}\right), l} \right)_{1 \leq i,j \leq L+P,}\]
+where $\mE \in \mathbb{R}^{257 \times H}$ is a learnable embedding matrix and $H$ is the number of attention heads.
+
+\paragraph{\method{} attention} We modify the attention mechanism in two ways (marked in blue in (\ref{eq:attention})). First, we multiply the attention scores corresponding to input pairs with known distances (i.e. ligand-ligand within a rigid part and protein-protein) by a learnable scalar $s_m$, one for each layer $m$.
+Second, we inject distance information by adding $z_m \cdot \mB^l$, where $z_m$ is another learnable scalar for each layer $m$ and $\mB^l$ is the distance bias matrix. The final attention formula for the $l$-th head in the $m$-th layer is defined as follows:
+\begin{equation}\label{eq:attention}
+\text{Attention}(\mQ, \mK, \mV) = \text{softmax}\left(\frac{\mQ \mK^T}{\sqrt{d_k}} \textcolor{blue}{\odot \mS_m + \vz_{m} \cdot \mB^{l}} \right) \mV,    
+\end{equation}
+where $\mQ, \mK, \mV$ are the query, key, and value matrices, $d_k$ is the dimension of the key vectors and \[\mS_m = \left( \begin{cases} 1 &\text{if } \mD_{i,j} = -1 \text{ (unknown distance) } \\ \vs_{m} &\text{otherwise } \\  \end{cases} \right) _{1 \leq i,j \leq L+P.} \]
+
+\paragraph{Charge embeddings}
+We discretize charge values into $22$ buckets using the following formula 
+\[c(x) = \left\lfloor10 \cdot \max(\min(x, 1), -1) + 11.5\right\rfloor, \] 
+with the $0$-th bucket reserved for unknown charges. Our model learns an embedding matrix $\mC \in \mathbb{R}^{22 \times D}$, where $D$ is the dimension of the model's hidden states. 
+
+\paragraph{Molecule and protein input}
+The model input is the concatenation: $\mX = \left[ \mX^l ; \mX^p \right] \in \mathbb{R}^{(L+P) \times D}$. For the $i$-th molecule atom, $\mX^l_i$ is the sum of the learnable atom embedding and the charge embedding. For the $j$-th amino acid, $\mX_j^p$ is the sum of the amino acid embedding and the ESM-2 embedding.
+
+\subsection{Training loss function}
+The model outputs predicted distance matrices, $\hat{\mD}^{l}$ for the ligand, $\hat{\mD}^{p}$ for the protein and $\hat{\mD}^{lp}$ for ligand-protein distances. More precisely, a linear layer is applied to the transformer outputs, resulting in protein and ligand representations $\hat{\vx}^{l} \in \mathbb{R}^{L \times H}$ and $\hat{\vx}^{p} \in \mathbb{R}^{P \times H},$ where $H$ is the output dimension, equal to $16$ in our experiments.
+The distance matrices are then defined as $\hat{\mD}^{l} = \left(\|\hat{\vx}^{l}_{i} - \hat{\vx}^{l}_{j}\|\right)_{1 \leq i,j \leq L}$, $\hat{\mD}^{p} = \left(\\|\hat{\vx}^{p}_{i} - \hat{\vx}^{p}_{j}\|\right)_{1 \leq i,j \leq P}$, $\hat{\mD}^{lp} = \left(\|\hat{\vx}^{l}_{i} - \hat{\vx}^{p}_{j}\|\right)_{1 \leq i \leq L,1\leq j \leq P}.$ We apply the L1 loss to them during training. In order to keep the model focused on close interactions, we ignore the loss on terms that have both the predicted and ground-truth distances above $20$\si{\angstrom}.
+The total loss consists of three parts: ligand loss $\mathcal{L}^{l}$, protein loss $\mathcal{L}^{p}$ and docking loss $\mathcal{L}^{d}$:
+\[ \mathcal{L} = \mathcal{L}^{l} + \mathcal{L}^{p}+ \mathcal{L}^{d} \text{, where }\]
+\[ \mathcal{L}^l = \sum_{i < j} | \hat{\mD}^{l}_{i,j} - \mD^{l}_{i,j}| \cdot \mathds{1}(\min(\hat{\mD}^{l}_{i,j}, \mD^{l}_{i,j}) < 20 ), \] 
+\[ 
+\mathcal{L}^p =  \sum_{i < j} | \hat{\mD}^{p}_{i,j} - \mD^{p}_{i,j}| \cdot \mathds{1}(\min(\hat{\mD}^{p}_{i,j}, \mD^{p}_{i,j}) < 20 ),
+\] 
+\[ \mathcal{L}^d = \sum_{i, j} | \hat{\mD}^{lp}_{i,j} - \mD^{lp}_{i,j}| \cdot \mathds{1}(\min(\hat{\mD}^{lp}_{i,j}, \mD^{lp}_{i,j}) < 20 ), \]
+where $\mD^{lp} = \left(\|\vx^{l}_{i} - \vx^{p}_{j}\|\right)_{1 \leq i \leq L, 1 \leq j \leq P}$ is the distance matrix between true atom and protein coordinates, whereas $\mD^l$ and $\mD^p$ are as defined above. \\
+
+In case of molecules with permutation symmetries, such as benzene, a single docked pose might be represented by several sets of atom positions, and thus different distance matrices. In such a case, the loss function may not assign the smallest value to the correct conformation. To alleviate this issue, we apply the loss function to all of the possible permutations of the molecule and use only the best match (the one with the smallest loss value) in the backward pass. This prevents the model from having to guess the specific atom order used in the docked pose. This procedure is similar to the Permutation Loss introduced in \citep{gao2024fabind+}, with our approach applying permutations to the ground truth (labels) instead of the predictions. 
+
+\subsection{Ligand reconstruction}
+\label{sec:reconstruction}
+The last transformer layer outputs the predicted distance matrices. To reconstruct the 3-dimensional coordinates of the ligand atoms $\tilde{\vx}^l \in \mathbb{R}^{l \times 3},$ \method{} uses L-BFGS \citep{2ca50d4f7af74aaca06511540a81ef8b} algorithm with the following objective function defined on the predicted ligand-ligand and ligand-protein distance matrices:
+\[ \mathcal{L}^r = \sum_{i,j} | \|\tilde{\vx}_i - \vx^p_j\| - \hat{\mD}^{lp}_{i,j} | \cdot \mathds{1}(\hat{\mD}^{lp}_{i,j} < 20 ) + \sum_{i < j} | \|\tilde{\vx}_i - \tilde{\vx}_j\| - \hat{\mD}^l_{i, j} |  \cdot \mathds{1}(\hat{\mD}^{l}_{i,j} < 20 ),\]
+with initial guess for molecule atoms defined as the weighted mean of the four closest amino acids based on the predicted distance matrix $\hat{\mD}^{lp}$. The computational cost of this operation is comparable to the transformer forward pass and is included in our runtime results. For details, see \Cref{app:lbfgs}.
+
+
+\section{Experiments setup}
+
+
+\subsection{Datasets}
+\paragraph{Training and test datasets} Following \citep{corso2024deep}, 
+\method{} is trained on PDBBind \citep{PDBBind} and BindingMOAD \citep{Binding-MOAD} and tested on Posebusters \citep{buttenschoen2024posebusters} and DockGen \citep{corso2024deep} datasets.  In addition, we augment the training dataset by computationally generated apostructures  -- unbound protein structures in the absence of a ligand -- for about 30\% of the training examples using AlphaFold-2 server, so that the model can see both the unbound and ground-truth bound proteins (also called \emph{holostructures}).
+The apostructures are only used for defining the embeddings of the input distance matrices, while the loss is always computed based on the holostructures.
+This way, we allow the model to learn to deform the protein during the docking process.
+
+\paragraph{Ligands preparation}
+The $3$D coordinates of ligands are read from their PDB files and their graph structure is matched with their CCD reference.
+Entries for which such matching fails are filtered out.
+Ligands with more than $128$ heavy atoms are filtered out.
+Whenever calculating the ligand rigid distance matrix is impossible because of a failure in calculating conformations or force fields, such entry is removed.
+\subsection{Training Procedure}
+\method{}'s transformer architecture has $16$ layers,
+each with $4$ attention heads and a hidden size of $512$, resulting in approximately $60$ million parameters. We found that such  "deep and narrow" architecture performed better than shallower-but-wider models with the same number of parameters.
+
+Since similar physico-chemical principles govern both protein folding and ligand binding, we pre-trained the model on a protein folding task with the hope that it would improve the docking performance.
+We used approximately $440\text{k}$ structures generated by AlphaFold-2 on the SwissProt protein database \citep{varadi2024alphafold,gasteiger2001swiss}. More precisely, the model was trained to predict distances between amino acids, with a masking factor of 97\% applied to the input distances, which effectively simulates the protein folding task.
+
+Following pre-training, the model was fine-tuned on the molecular docking task on our training dataset. 
+In total, the training process took about 3 days on a machine with eight A100 GPUs
+
+
+
+\section{Experiments}
+
+
+\looseness=-1 We evaluate \method{} on two recent challenging benchmarks  that were not part of the training dataset:
+the DockGen benchmark \citep{corso2024deep}, and
+the Posebusters dataset \citep{buttenschoen2024posebusters}. These benchmarks cover a wide range of  structures across various protein domains.
+We calculate the heavy-atom Root Mean Square Deviation (RMSD) between the predicted ligand and the crystal (ground-truth) ligand atoms. We report both the median RMSD and the percent of examples with RMSD $<$ $2${\AA} (denoted \% RMSD $<$ $2${\AA}), the latter being a widely-used threshold for considering a molecule to be correctly docked \citep{bell2019dockrmsd}. A more detailed definition of RMSD is described in \ref{sec:rmsd_metric}.
+
+\subsection{Main results}\label{sec:main_result}
+
+\paragraph{Accuracy and speed}
+We compare \method{}, both in terms of accuracy and runtimes, to three recent state-of-the-art blind docking methods: AlphaFold-3 \citep{abramson2024accurate}, NeuralPLexer \citep{qiao2024state}, and DiffDock-L \citep{corso2024deep}, see \Cref{tab:table}.
+\method{} is more accurate than DiffDock-L and about three orders of magnitude faster.
+While the speed advantage over NeuralPLexer is less pronounced (about $100\times$ faster), \method{} has an even larger accuracy advantage over that model.
+Finally, \method{} is a staggering four orders of magnitude faster than AlphaFold-3.
+Although AlphaFold-3 achieves the highest accuracy, it is 
+computationally intensive and therefore less practical for high-throughput screening studies with thousands of compounds.
+
+Overall, the experiments show outstanding performance of \method{}, which offers excellent accuracy at unmatched speeds. The backbone transformer architecture is efficient and allows for performing the docking in a single pass. The model is also well-suited for applications to downstream tasks such as predicting the binding strength, e.g., by direct fine-tuning. 
+
+\begin{table}[htbp!]
+ \caption{\small Comparison of state-of-the-art molecular docking methods.
+
+  }
+ \begin{center}
+ \begin{threeparttable}[b]
+  \begin{tabular}{lccc}
+    \toprule
+    \multicolumn{2}{c}{DockGen Test Set (*)} & \multicolumn{2}{c}{Metrics} \\
+    \cmidrule(r){1-2} \cmidrule(r){3-4}
+    Model & \% RMSD $<$ 2\AA $\uparrow$ & Med. RMSD ({\AA}) $\downarrow$  & Avg. Runtime (s) $\downarrow$ \\
+    \midrule
+    DiffDock-L     & 22.6  & 4.30  & 35.4 \\
+    \bf{\method{}} & \bf{44.0}  & \bf{2.83}  & \bf{0.05} \\
+    \bottomrule
+    \toprule
+    \multicolumn{2}{c}{Posebusters Set} & \multicolumn{2}{c}{Metrics} \\
+    \cmidrule(r){1-2} \cmidrule(r){3-4}
+    Model & \% RMSD $<$ 2\AA $\uparrow$ & Med. RMSD ({\AA}) $\downarrow$ & Avg. Runtime (s) $\downarrow$ \\
+    \midrule
+    NeuralPLexer    & 22.6 & 4.66 & 3.77 \\
+    DiffDock-L      & 40.8 & 2.98 & 25.0 \\
+    AlphaFold 3 (**) & \bf{76.9} & \bf{0.72} & 352 \\
+    \bf{\method{}}   & 52.1  & 1.90 & \bf{0.03} \\
+    \bottomrule
+  \end{tabular}
+  \small{
+   \begin{tablenotes}
+   \item[(*)] The DockGen test set belongs to the training data of both AlphaFold-3 and NeuralPLexer, so it cannot be used as a reliable evaluation benchmark for those models. 
+   \item[(**)] Because docking with AlphFold-3 is not available for public use, the results for AlphaFold-3 are as reported in \cite{abramson2024accurate}. 
+   \end{tablenotes}}
+\end{threeparttable}
+  \end{center}
+  \label{tab:table}
+\end{table}
+
+\paragraph{Unlocking Proteome-wide docking}
+To validate \method{}'s potential for proteome-wide docking studies, we used our model to run inference for twelve well-studied drugs and toxins, and entire human proteome consisting of 19222 proteins from The Human Protein Atlas (\url{https://proteinatlas.org/}) \citep{doi:10.1126/science.1260419}. The whole process took on average 74 seconds per ligand on a machine with eight A100 GPUs.
+
+\subsection{Results on Apostructures}
+The Posebusters and DockGen sets contain bound protein structures (i.e., the holostructures),  which is a potential data leak, because the models might hypothetically use the knowledge of the deformation of the binding pocket to improve their predictions.
+Therefore, to better evaluate \method{}'s practical applicability, we tested its performance on a challenging real-world scenario where the model performs inference given only computationally folded apostructures.
+We generated such apostructures using  AlphaFold-2 for all proteins in the test sets.
+Since our model  
+was trained to predict distances based on both the holostructures and the apostrucutres, we hoped it would be relatively unaffected by any potential information leakage present in holostructures.
+
+We used the apostructures  to obtain the distance matrices embeddings, so there is no information leakage for predicting the distances in the resulting complex. To check whether these predicted distances are still accurate, we perform evaluation in the same way as before, using the holostructures only for reconstructing the molecule's position. We found that this leads to only a slight deterioration of performance metrics..
+The percentage of examples with RMSD $<$ $2$\AA{} is $51.7\%$ on the Posebusters set, and $42.3\%$ on the DockGen test set, a decrease of only $0.4\%$ and $1.7\%$, respectively, compared to using holostructures in the input.
+
+\subsection{Ablation Studies}
+We performed ablation studies to assess the relative importance of \method’s key features as shown in \Cref{tab:ablation}. We found protein language model representations (ESM-2 embeddings) to have the strongest impact, followed by protein folding. We speculate that ESM-2 embeddings provide deep contextual understanding of amino-acid sequences due to the model's large scale training. Protein folding, on the other hand, requires the model to internalize the physico-chemical principles governing that process, which evidently aids in modeling also the protein-ligand interactions. Finally, the scaling part of our attention mechanism is also helpful.
+
+\begin{table}[htbp!]
+\centering
+\caption{\small Ablation study results illustrating the effects of different components on performance in the Posebusters benchmark.}
+\label{tab:ablation}
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Ablation} & \% RMSD $<$ $2$\si{\angstrom}~(\textuparrow) & Median RMSD (\si{\angstrom})~(\textdownarrow) \\
+\midrule
+\method{}                     & 52.1 & 1.90 \\
+\method{} w/o ESM-2 Embeddings    & 42.6 & 3.37 \\
+\method{} w/o Folding Pretraining & 46.4 & 2.61 \\
+\method{} w/o Attention Scalers   & 48.6 & 2.18 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+
+\section{Related Work}
+
+Traditionally, blind docking consisted of two stages: pocket finding and molecule pose search. Pocket-finding involves identifying cavities in the protein \citep{le2009fpocket, krivak2018p2rank, yan2022pointsite} while molecule pose search aims to find the optimal molecule conformation in the pocket based on scoring functions 
+\citep{koes2013lessons, mcnutt2021gnina}.
+While still useful, traditional docking approaches are being gradually replaced by
+deep learning tools \citep{corso2024deep, zhou2024artificial, clyde2023ai}.
+
+First successful deep learning models for blind molecular docking applied geometric graph neural networks 
+\citep{stark2022equibind, lu2022tankbind, zhang2022e3bind}.
+However, their RMSD-minimizing objective has been considered inadequate for modeling the molecule's position. Instead, DiffDock \citep{corso2022diffdock} first formulated molecular docking as generative modeling of the ligand pose distribution, with subsequent approaches adapting that paradigm \citep{lu2024dynamicbind, nakata2023end, corso2024deep}. 
+However, inference involves costly diffusions, making these approaches two-to-three orders of magnitude slower than non-generative methods such as \method{}.
+
+Recently, a different approach to docking has emerged with RoseTTAFold All-Atom~\citep{krishna2024generalized} and AlphaFold-3 \citep{abramson2024accurate}.
+These tools treat the protein-molecule complex as a single structure to be reconstructed from the protein’s amino acid sequence and the molecule. AlphaFold-3 claims state-of-the-art results in terms of accuracy (76.9\% of examples with $\text{RMSD}<2 \si{\angstrom}$ on PoseBusters). However, the docking-while-folding framework is extremely computationally expensive. Consequently, AlphaFold-3’s reported inference runtimes are about four orders of magnitude longer than those of \method{} run on the same hardware. Although incrementally faster docking-while-folding approaches have been published \citep{qiao2024state}, their speed is still orders of magnitude too slow for allowing large-scale studies envisioned in this paper.
+
+To the best of our knowledge, \method{} is the first fully transformer-based model for blind molecular docking. Our approach does share, however, several ideas with existing methods. The equivariance of 3D structures representations is a common feature \citep{stark2022equibind,lu2022tankbind,pei2024fabind}. Obtaining the molecule position based on predicted distances is done similarly in TANKBind \citep{lu2022tankbind} or ArtiDock \citep{voitsitskyi2024artidock}. Finally, \citep{gao2024fabind+} most recently proposed a symmetry-invariant loss function similar to ours.
+
+
+\section{Limitations and Future work}
+
+
+\method{} achieves excellent accuracy and has a significant speed advantage over other methods. There are several aspects, however, that need further work.
+
+First, we plan to develop a confidence score for 
+\method{}'s predictions which is important for decision making. 
+While this can be done by training another external light model, ideally we would like to extend \method{} to so it can return its own confidence score.
+
+Second, we plan to fine-tune \method{} on ligand-protein binding strength prediction, including to identify non-binding ligands. \method{}’s speed would then allow for efficient identification of all potentially toxic interactions of a drug across the human proteome ($\sim$20k proteins), which is not computationally feasible today and  would greatly accelerate the drug discovery process.
+
+Third, we plan to perform more detailed studies of the scaling properties and train larger models on bigger datasets. Among others, we plan to extend pre-training to over 200M protein structures predicted by AlphaFold 2 \cite{varadi2024alphafold}, and use the PLINDER \citep{durairaj2024plinder} protein-ligand datasets for the main training. This will allow us to extend \method{} to tasks such as protein folding or docking without requiring any input protein structure.
+
+
+
+\section{Conclusions}
+
+\label{sec:conclusions}
+\method{} is a truly \emph{fast} and \emph{accurate} molecular docking model that opens new possibilities for \textit{in silico} drug design. Trained on both protein folding and molecular docking, the model demonstrates a strong understanding of the physicochemical principles behind forming biological structures, achieving accurate results in molecular docking both on holo- and apostructures. 
+
+We hope that, in the near future, \method{} will provide drug designers with a comprehensive view of potential drug interactions across the human proteome. This will unlock important research avenues in biology and machine learning.
+
+Finally, the transformer-based architecture makes the model well-suited for extending pre-training to related biological tasks or fine-tuning on downstream tasks such as predicting toxicity or drug interactions at the cell level, which is one of our current research topics.
+
+
+
+

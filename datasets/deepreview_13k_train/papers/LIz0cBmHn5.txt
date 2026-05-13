@@ -1,0 +1,323 @@
+\title{Investigating Mixture Policies in Entropy-Regularized Actor-Critic}
+
+\begin{abstract}
+We study mixture policies in entropy-regularized reinforcement learning. Mixture policies offer greater flexibility than base policies like Gaussians, which we show theoretically provides improved solution quality and robustness to the entropy scale. Despite these potential benefits, they are rarely used for algorithms like Soft Actor-Critic, potentially due to the fact that Gaussians are easily reparameterized to get lower variance gradient updates, but mixtures are not. We fill this gap, introducing reparameterization gradient estimators for the mixture policy. Through extensive experiments on environments from classic control, MuJoCo, the DeepMind Control Suite and a suite of randomly generated bandits, our results show that mixture policies explore more efficiently in tasks with unshaped rewards (across entropy scales), while performing comparably to base policies in tasks with shaped rewards, and are more robust to multimodal critic surfaces.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Policy gradient methods are widely used in online reinforcement learning (RL), particularly for continuous action spaces. However, there are many design decisions in these methods that remain under-explored. One of these is the choice of policy parameterization. Gaussian policies are by far the most common parameterization (Williams, 1992; Degris et al., 2012; Lillicrap et al., 2015; Duan et al., 2016; Schulman et al., 2017; Neumann et al., 2022), or its bounded variants like squashed Gaussian policies (Haarnoja et al., 2018a). There are a handful of works exploring other distributions, including beta policies (Chou et al., 2017) and the family of heavy-tailed policies (Kobayashi, 2019; Bedi et al., 2024). Using mixture policies, such as a conditional Gaussian mixture model for the policy, however, has been largely unexplored.  
+
+Yet there are reasons that this increased flexibility from mixture policies could be beneficial. A more flexible policy class may contain better optimal policies. For example, when the environment is partially observable, the optimal policy could be stochastic and multimodal. Even in fully observable settings, it is now common to use entropy-regularized objectives, which prefer stochastic policies; multimodal rather than unimodal policies may be better in this regime. The increased flexibility may also facilitate exploration. Several works have shown that heavy-tailed policies may improve learning through persistent exploration compared to Gaussian policies (Kobayashi, 2019; Bedi et al., 2024). Mixture policies have the potential to provide mode-directed exploration, by keeping probability high for multiple promising actions.  
+
+Though under-explored, some work has looked at more flexible policy classes. Implicit policies use deep generative models (e.g., energy-based models (Haarnoja et al., 2017; Messaoud et al., 2024); normalizing flows (Tang & Agrawal, 2018; Mazoure et al., 2020); diffusion models (Wang et al., 2023)) for the policy. Compared to these more complex distributions, policies using parametric distributions like mixture models have two benefits: they are simpler to train and the explicit densities are useful in entropy-regularized RL. Otherwise, several unpublished works briefly touch on mixture policies. The first version of the SAC paper (Haarnoja et al., 2018b) did test mixture policies but then did not pursue this further nor provide insights on this choice. We hypothesize the lack of reparameterization estimators for mixture policies might be the reason that later versions of SAC switched to a single Gaussian, as they found the reparameterization gradient estimator works better (see Footnote 3 on Page 67 of Haarnoja, 2018). Later, Hou et al. (2020) tried to avoid reparameterization of the whole mixture policy in SAC by using a separate objective for the weighting policy, but they found little improvement from their approach. Finally, Baram et al. (2021) explore the utility of the upper and lower bounds of the mixture model’s entropy, without considering a learnable weighting policy.  
+
+In this work, we provide a directed study on the potential benefits of mixture policies in the entropyregularized setting. We first prove that mixture models provide improved solution quality: they have comparable or better objective values and are more robust to larger entropy regularization, in that stationary points may not exist for the Gaussian policy but do for the Gaussian mixture. We then derive two reparameterized gradient updates: a partial reparameterization obtained by extending the reparameterization policy gradient theorem (Lan et al., 2022) and a reparameterization combining the Gumbel-softmax reparameterization with the reparameterization on the base policy in the mixture. Though simple, to the best of our knowledge, these reparameterizations have not been proposed for conditional mixture models. We test mixture policies and these two reparameterization updates with Soft-Actor Critic (SAC; Haarnoja et al., 2018a) in seven MuJoCo, twelve DeepMind Control Suite and three classic control environments, and note that differences only arise for environments without shaped rewards. For such uninformative rewards, that do not guide the agent to the goal, we find the mixture policies more consistently find the goal and perform better for a wider range of entropy scales. We find that the critic is less smooth, with more peaks, in the unshaped setting, and that the policy actually uses multiple modes for such a critic. Further, in targeted experiments in multimodal bandits to mimic such a multimodal critic, we find the mixture policy more often finds the maximal peak compared to the base policy.  
+
+
+
+\section{2 PROBLEM FORMULATION  }
+
+
+We consider the standard Markov decision process (MDP) problem setting. An MDP is defined by $\langle S,\mathcal{A},p,d_{0},r,\gamma\rangle$ , where $\boldsymbol{S}$ is the state space, $\boldsymbol{\mathcal{A}}$ is the action space, $p$ is the transition function, $d_{0}$ is the initial state distribution, $r$ is the reward function, and $\gamma$ is the discount factor. In this paper, we consider $\boldsymbol{\mathcal{A}}$ to be continuous, and $r$ is deterministic and bounded by $[-r_{\operatorname*{max}},r_{\operatorname*{max}}]$ . Define $\begin{array}{r}{\mathbb{E}_{\pi}[\sum_{t=0}^{\infty}\cdot]\,\doteq\,\mathbb{E}_{S_{0}\sim d_{0},A_{t}\sim\pi(\cdot|S_{t}),S_{t+1}\sim p(\cdot|S_{t-1},A_{t-1})}[\sum_{t=0}^{\infty}\cdot]}\end{array}$ , the agent’s goal is to find a policy $\pi$ that maximizes the expected return from the start states:  
+
+$$
+\begin{array}{r}{J_{0}(\pi)\doteq\mathbb{E}_{\pi}\bigl[\sum_{t=0}^{\infty}\gamma^{t}r(S_{t},A_{t})\bigr].}\end{array}
+$$  
+
+Oftentimes, the agent optimizes the entropy-regularized objective that promotes stochastic policies:  
+
+$$
+\begin{array}{r}{J(\pi)\!\stackrel{}{=}\!\mathbb{E}_{\pi}\big[\sum_{t=0}^{\infty}\gamma^{t}\big(r(S_{t},A_{t})+\alpha\mathcal{H}(\pi(\cdot|S_{t}))\big)\big]\!=\!\mathbb{E}_{s\sim d_{0},a\sim\pi(\cdot|s)}\left[Q_{\pi}(s,a)-\alpha\log\pi(a|s)\right],}\end{array}
+$$  
+
+where $\alpha$ is the entropy scale, $\textstyle{\mathcal{H}}(q)\doteq-\int q(x)\log q(x)\,d x$ is the differential entropy for distribution $q(x)$ , and $\begin{array}{r}{Q_{\pi}(s,a)\stackrel{.}{=}\mathbb{E}_{\pi}[\sum_{t=0}^{\infty}\gamma^{t}(r(S_{t},A_{t})+\alpha\gamma\mathcal{H}(\pi(\cdot|S_{t+1})))]}\end{array}$ is the soft action-value function. Soft Actor-Critic (SAC; Haarnoja et al., 2018a) learns $\pi$ through maximizing a surrogate of (2):  
+
+$$
+\hat{J}(\pi_{\theta})=\mathbb{E}_{S_{t}\sim\mathcal{B},A_{t}\sim\pi_{\theta}(\cdot|S_{t})}\left[Q_{\mathbf{w}}(S_{t},A_{t})-\alpha\log\pi_{\theta}(A_{t}|S_{t})\right].
+$$  
+
+where $\boldsymbol{\mathrm{\Delta}}\boldsymbol{\mathrm{\Omega}}_{\boldsymbol{B}}$ is a buffer of collected data and $Q_{\mathbf{w}}$ is an estimate of $Q_{\pi\theta}$ . In this work, we focus on the role of policy parameterization; we refer the reader to the original paper for other details on SAC.  
+
+We can obtain an unbiased sample of the gradient of (3) in two ways. One is the likelihood-ratio gradient estimator (Williams, 1992):  
+
+$$
+\hat{\nabla}_{\boldsymbol{\theta}}\hat{J}(\pi_{\boldsymbol{\theta}})=\nabla_{\boldsymbol{\theta}}\log\pi_{\boldsymbol{\theta}}(A_{t}|S_{t})\big(Q_{\mathbf{w}}(S_{t},A_{t})-\alpha\log\pi_{\boldsymbol{\theta}}(A_{t}|S_{t})\big).
+$$  
+
+The likelihood-ratio estimator often suffers from high variance, and a baseline is used to reduce variance. When the action is reparameterizable, for example, $A_{t}\,=\,f_{\theta}\big(\epsilon_{t};S_{t}\big)$ , an alternative is to use the reparameterization gradient estimator:  
+
+$$
+\hat{\nabla}_{\boldsymbol{\theta}}\hat{J}(\pi_{\boldsymbol{\theta}})=\nabla_{\boldsymbol{\theta}}\big(Q_{\mathbf{w}}(S_{t},f_{\boldsymbol{\theta}}(\epsilon_{t};S_{t}))-\alpha\log\pi_{\boldsymbol{\theta}}(f_{\boldsymbol{\theta}}(\epsilon_{t};S_{t})|S_{t})\big),
+$$  
+
+where $\epsilon_{t}$ is a sample from a noise distribution $p(\cdot)$ . Though there is no guarantee that the reparameterization estimator is better than the likelihood-ratio estimator in general (Gal, 2016; Parmas et al., 2018), it is shown to have lower variance under some assumptions ( $\mathrm{\DeltaXu}$ et al., 2019).  
+
+Gaussian policies are a common choice when the action space is continuous:  
+
+$$
+\pi_{\pmb{\theta}}(a|s)=\mathcal{N}(a;\mu_{\pmb{\theta}}(s),\sigma_{\pmb{\theta}}(s)^{2}),
+$$  
+
+where $\mu_{\theta}(s)$ is the mean and $\sigma_{\pmb\theta}(s)$ is the standard deviation. Gaussian policies have infinite support, but the action space is typically bounded in practice. To address the bias of truncating the density, squashed Gaussian policies use tanh to transform the unbounded support to a bounded interval:  
+
+$$
+\pi_{\pmb\theta}(a|s)=\mathcal{N}(\operatorname{tanh}^{-1}(a);\mu_{\pmb\theta}(s),\sigma_{\pmb\theta}(s)^{2}).
+$$  
+
+In this paper, we study mixture policies with $N\in\mathbb{N}^{+}$ components:  
+
+$$
+\begin{array}{r}{\pi_{\pmb{\theta}}^{m}(a|s)=\sum_{k=1}^{N}\pi_{\pmb{\theta}}^{w}(k|s)\pi_{\pmb{\theta}}^{b}(a|s,k),}\end{array}
+$$  
+
+where $\pi_{\pmb{\theta}}^{w}$ is the weighting policy and $\pi_{\theta}^{b}$ with different $k$ are the component policies. When needed, we also explicitly write $\begin{array}{r l r}{\pi_{\pmb{\theta}^{m}}^{m}(a|s)}&{=}&{\sum_{k=1}^{N}\pi_{\pmb{\theta}^{w}}^{w}(k|s)\pi_{\pmb{\theta}_{k}^{b}}^{b}(a|s)}\end{array}$ , where $\pmb{\theta}^{m}\quad=$ $\left[\pmb{\theta}_{1}^{b\,\top},\cdot\cdot\cdot\mathrm{~,~}\pmb{\theta}_{N}^{b\,\top},\pmb{\theta}^{w\,\top}\right]^{\top}$ . The weighting policy is usually parameterized as a softmax policy, while the component policies can be any continuous policy. When the component policies are Gaussian policies (6), we call the resulting policy the Gaussian mixture $(G M)$ policy. In this context, we call the Gaussian policy the base policy. Similarly, when the base policy is the squashed Gaussian policy (7), we call the resulting mixture policy the squashed Gaussian mixture (SGM) policy.  
+
+
+
+\section{3 ROBUSTNESS OF MIXTURE POLICIES TO ENTROPY REGULARIZATION  }
+
+
+The policy parameterization influences the set of stationary points of the entropy-regularized objective in (3), which is non-concave (Agarwal et al., 2019). We first show that mixture policies improve solution quality, in terms of having a higher regularized objective and a higher unregularized objective if an entropy-constrained optimization is used. Then we show that mixtures are robust to higher levels of entropy, both theoretically and empirically.  
+
+3.1 OPTIMALITY OF STATIONARY POINTS  
+
+We first show that the optimal stationary points, namely $\pmb{\theta}^{*}\doteq\arg\operatorname*{max}_{\pmb{\theta}\in\{\pmb{\theta}|\nabla_{\pmb{\theta}}J(\pi_{\pmb{\theta}})=\mathbf{0}\}}J(\pi_{\pmb{\theta}})$ , of the mixture policy is at least as good as or better than the base policy in Proposition 3.1.  
+
+Proposition 3.1. When both $\pi_{\theta^{b,*}}^{b}$ and $\pi_{\pmb{\theta}^{m,*}}^{m}$ exist, then $J(\pi_{\theta^{m,*}}^{m})\ge J(\pi_{\theta^{b,*}}^{b}).$  
+
+The inequality is likely strict when the return landscape is multimodal, as the mixture policy can maintain high returns while increasing its entropy by splitting its density into different modes (see Figure 1 (Left) for intuition).  
+
+The next natural question is how their optimal stationary points compare regarding the unregularized objective (the expected return) ${\cal J}_{0}(\pi_{\theta})$ . In general, it is difficult to guarantee $J_{0}(\pi_{\pmb{\theta}^{m,*}}^{\overline{{m}}})\geq\bar{J}_{0}(\pi_{\pmb{\theta}^{b,*}}^{b})$ . However, when the entropy is imposed as a constraint instead of regularization, the mixture policy is guaranteed to be at least as good as the base policy, as shown in Proposition 3.2.  
+
+Proposition 3.2. Consider entropy-constrained policy optimization $\operatorname*{max}_{\pmb\theta}J_{0}(\pi_{\pmb\theta})$ subject to $\mathcal{H}(\pi_{\theta})\geq H$ for some $H>0$ and define the optimal solution as $\pmb{\theta}^{\prime}$ , then $J_{0}(\pi_{\pmb{\theta}^{m,\,\prime}}^{m})\geq J_{0}(\pi_{\pmb{\theta}^{b,\,\prime}}^{b})$ .  
+
+3.2 NON-EXISTENCE OF STATIONARY POINTS WITH STRONG ENTROPY REGULARIZATION  
+
+This section shows that the mixture policy may have stationary points in scenarios where the base policy does not. We focus on the bandit setting, in which case, the objective degenerates to  
+
+$$
+J(\pi_{\pmb\theta})=\mathbb{E}_{a\sim\pi_{\pmb\theta}}[r(a)-\alpha\ln\pi_{\pmb\theta}(a)].
+$$  
+
+Proposition 3.3 shows that for a sufficiently large entropy regularization, there are no stationary points for the Gaussian policy.  
+
+Proposition 3.3. Assume $r:A\rightarrow\mathbb{R}$ is an integrable function on $A=\mathbb{R}$ . For all $\begin{array}{r}{\alpha\,>\,\frac{3}{2}r_{\mathrm{max}},}\end{array}$ $J(\bar{\pi_{\mu,\sigma}})=\mathbb{E}_{a\sim\mathcal{N}(\mu,\sigma)}[r(a)-\alpha\log\mathcal{N}(a;\mu,\sigma)]$ does not have any stationary point.  
+
+The Gaussian mixture (GM) policy, on the other hand, is less sensitive to entropy regularization. Specifically, we show that for every stationary point of the regularized objective with the base policy, there exists a corresponding set of stationary points for the mixture policy.  
+
+![](images/9102a5a14be213ab344796e727a490b557252e6ccbc54a4c021158c873c5b112.jpg)  
+Figure 1: Numerical study on a bimodal bandit. Left: Reward function of the bandit and optimal policies when $\alpha=0.3$ . Middle: Expected reward of the optimal policies for different $\alpha$ . Right: The percentage of bimodal policies among all stationary GM policies found in 100 trials. The dashed vertical lines in the figure mark different levels of entropy regularization, each having qualitatively distinct effects on the Gaussian and GM policies.  
+
+Proposition 3.4. For any $\tilde{\pmb{\theta}}^{b}$ such that $\nabla_{\theta^{b}}J(\pi_{\tilde{\theta}^{b}}^{b})=0$ and arbitrary $\pmb{\theta}^{w}$ , we have $\nabla_{\theta^{m}}J(\pi_{\tilde{\theta}^{m}}^{m})=0,$ , where $\tilde{\boldsymbol{\theta}}^{m}=\left[\tilde{\boldsymbol{\theta}}^{b_{\top}},\cdot\cdot\cdot,\tilde{\boldsymbol{\theta}}^{b_{\top}},\boldsymbol{\theta}^{w\top}\right]^{\top}$ .  
+
+Following from Proposition 3.4, we have the following remark: the minimum $\alpha$ after which the mixture policy does not have a stationary point is at least as large as the base policy.  
+
+Remark 3.5. Define $\alpha_{\operatorname*{min}}^{\pi}=\operatorname*{inf}\{\alpha\mid\nabla_{\theta}J(\pi_{\theta})\neq\mathbf{0},\forall\theta\}$ for policy $\pi_{\theta}$ , then $\alpha_{\mathrm{min}}^{\pi^{m}}\geq\alpha_{\mathrm{min}}^{\pi^{b}}$  
+
+In fact, it is possible to find examples where the inequality is strict. Figure 1 (Left) shows such an example. In this example with $\alpha\,=\,0.3$ , the optimal GM policy has two separate modes covering two modes of the reward function, while the optimal Gaussian policy has its only mode covering the the middle of the two reward modes. When $\alpha=0.4$ , the Gaussian policy’s standard deviation always diverges to infinity, while the GM policy still has good stationary points.  
+
+
+
+\section{3.3 A NUMERICAL STUDY ON A BIMODAL BANDIT  }
+
+
+In this section, we empirically corroborate that mixtures are more robustness to entropy regularization and better balance entropy and reward maximization. We use a Bimodal Bandit problem, in Figure 1 (Left), with a Gaussian base policy and GM policy with two components. We obtain stationary points $\{\pmb{\theta}\mid\nabla_{\pmb{\theta}}J(\pi_{\pmb{\theta}})=\mathbf{0}\}$ for both by running a local gradient descent optimization on (8) with various $\alpha$ from 100 different random starting points.  
+
+Robustness to entropy regularization. Figure 1 (Middle) shows the expected reward ${\cal J}_{0}(\pi_{\theta^{*}})$ of the optimal stationary points for the two policies. The points with zero expected reward indicate no stationary point found. The GM dominates for $\alpha\in(0.2,0.45]$ . More specifically, for $\alpha\in(0.2,0.3]$ , the optimal Gaussian policy cannot concentrate its mode in any of the reward mode while the GM policy can concentrate on both (see Figure 1 (Left) for $\alpha=0.3$ ). For $\alpha\in(0.3,0.45]$ , the Gaussian policy does not find any stationary points, while the GM policy continues to perform reasonably.  
+
+Preference for multimodality increases with larger entropy regularization. The GM policy can be either unimodal and bimodal. We plot the ratio between these two types found in the 100 trials in Figure 1 (Right). We can see a general trend: as $\alpha$ increases, the frequency of finding bimodal policies also increases. This effect is most pronounced after $\alpha=0.3$ , where all policies found are bimodal. This result suggests that a high entropy scale can help prevent mode collapse in mixture policies, a phenomenon where the policy loses its multimodality and becomes effectively unimodal.  
+
+
+
+\section{4 REPARAMETERIZED GRADIENT ESTIMATORS FOR MIXTURE POLICIES  }
+
+
+In this section, we derive reparameterization gradient estimators for mixture policies. The mixture policy is hard to reparameterize because of the softmax weighting policy, even though the individual Gaussian component policies are easy to reparameterize. We provide two approaches: a partial reparameterization, where we only reparameterize component policies, giving an unbiased gradient, and a full reparameterization using a Gumbel-softmax, which results in a biased reparameterization.  
+
+4.1 REPARAMETERIZATION OF COMPONENT POLICIES  
+
+We extend the reparameterization policy gradient theorem (Lan et al., 2022) to the case of mixture policies where we reparameterize only the components. This half-reparameterization remains unbiased, though we cannot be certain that it has the same variance reduction properties as a typical reparameterization. Intuitively, it should reduce some variance due to the component policies, and we do find it has empirical benefits later. We assume the component policies are reparameterized as $\pi_{\theta}^{b}(a|s,k)=p(\epsilon)$ , where $a=f_{\theta}(\epsilon;s,k)$ and $p(\cdot)$ is the corresponding noise distribution.  
+
+Assumption 4.1. $\boldsymbol{S}$ and $\boldsymbol{\mathcal{A}}$ are compact.  
+
+Assumption 4.2. $p(s^{\prime}|s,a),\,d_{0}(s),\,r(s,a)\,\,f_{\theta}(\epsilon;s,k),\,f_{\theta}^{-1}(a;s,k),\,\pi_{\theta}^{w}(k|s),\,\pi_{\theta}^{b}(a|s,k),\,p(\epsilon)$ , and their derivatives are continuous in variables $s,a,s^{\prime},\theta$ , and $\epsilon$ .  
+
+Theorem 4.3 (Entropy-Regularized Half-Reparameterization Policy Gradient Theorem). Under Assumptions 4.1 and 4.2, we have  
+
+$$
+\begin{array}{r l r}&{}&{\nabla_{\theta}J(\pi_{\theta}^{m})\!=\!\mathbb{E}_{s\sim d_{\pi_{\theta}^{m}},k\sim\pi_{\theta}^{w}(\cdot\vert s),\epsilon\sim p}\Big[\nabla_{\theta}\log\pi_{\theta}^{w}(k\vert s)\big(Q_{\pi_{\theta}^{m}}(s,f_{\theta}(\epsilon;s,k))\!-\!\alpha\log\pi_{\theta}^{m}(f_{\theta}(\epsilon;s,k)\vert s)\big)}\\ &{}&{\qquad\qquad\qquad\qquad\qquad\qquad\qquad\Big.+\nabla_{\theta}f_{\theta}(\epsilon;s,k)\nabla_{a}\big(Q_{\pi_{\theta}^{m}}(s,a)\!-\!\alpha\log\pi_{\theta}^{m}(a\vert s)\big)\big\vert_{a=f_{\theta}(\epsilon;s,k)}\Big],}\end{array}
+$$  
+
+where $\begin{array}{r}{d_{\pi_{\theta}^{m}}(s)\doteq\sum_{t=0}^{\infty}\mathbb{E}_{\pi_{\theta}^{m}}[\gamma^{t}\mathbb{I}(S_{t}=s)]}\end{array}$ is the (discounted) occupancy measure under $\pi_{\pmb{\theta}}^{m}$ .  
+
+Similarly, we can obtain the half-reparameterization gradient of the objective of SAC in (3).  
+
+Assumption 4.4. $Q_{\mathbf{w}}(s,a)$ and its derivatives are continuous in variables $s$ and $a$  
+
+Proposition 4.5. Under Assumptions 4.1, 4.2, and 4.4, we have  
+
+$$
+\begin{array}{r l}&{\nabla_{\theta}\hat{J}(\pi_{\theta}^{m})=\mathbb{E}_{s\sim\mathcal{B},k\sim\pi_{\theta}^{w}(\cdot\vert s),\epsilon\sim p}\Big[\nabla_{\theta}\log\pi_{\theta}^{w}(k\vert s)\big(Q_{\mathbf{w}}(s,f_{\theta}(\epsilon;s,k))-\alpha\log\pi_{\theta}^{m}(f_{\theta}(\epsilon;s,k)\vert s)\big)}\\ &{\qquad\qquad\qquad\qquad\qquad\qquad\qquad+\,\nabla_{\theta}\big(Q_{\mathbf{w}}(s,f_{\theta}(\epsilon;s,k))-\alpha\log\pi_{\theta}^{m}(f_{\theta}(\epsilon;s,k)\vert s)\big)\Big].}\end{array}
+$$  
+
+From Proposition 4.5, we can obtain the half-reparameterization estimator for SAC’s objective:  
+
+$$
+\begin{array}{r l}&{\hat{\nabla}_{\theta}\hat{J}(\pi_{\theta}^{m})=\nabla_{\theta}\log\pi_{\theta}^{w}(K_{t}|S_{t})\big(Q_{\mathbf{w}}(S_{t},f_{\theta}(\epsilon_{t};S_{t},K_{t}))-\alpha\log\pi_{\theta}^{m}(f_{\theta}(\epsilon_{t};S_{t},K_{t})|S_{t})\big)}\\ &{\qquad\qquad\qquad-\,\nabla_{\theta}\big(Q_{\mathbf{w}}(S_{t},f_{\theta}(\epsilon_{t};S_{t},K_{t}))-\alpha\log\pi_{\theta}^{m}(f_{\theta}(\epsilon_{t};S_{t},K_{t})|S_{t})\big).}\end{array}
+$$  
+
+4.2 REPARAMETERIZATION OF WEIGHTING POLICIES WITH GUMBEL-SOFTMAX  
+
+Since the output of the weighting policy $\pi_{\theta}^{w}(\cdot|s)$ for any state $s$ is a categorical distribution, we can not directly reparameterize it. However, there are various approaches to obtain biased reparameterized samples from it (Bengio et al., 2013; Maddison et al., 2016; Jang et al., 2016). Here, we use the straight-through Gumbel-softmax reparameterization (Jang et al., 2016).  
+
+Given a weighting distribution $\pi_{\pmb{\theta}}^{w}(\cdot|s)$ and i.i.d samples from Gumbel $(0,1)$ , $g_{1},\cdot\cdot\cdot,g_{N}$ , we can obtain a sample from the corresponding Gumbel-softmax distribution:  
+
+$$
+y_{\theta}(\mathbf{g};s,k)=\frac{\exp{(\log\pi_{\theta}^{w}(k|s)+g_{k})/\tau}}{\sum_{k^{\prime}=1}^{N}\exp{(\log\pi_{\theta}^{w}(k^{\prime}|s)+g_{k^{\prime}})/\tau}}\quad\mathrm{for}\;k=1,\ldots,N,
+$$  
+
+where we define $\mathbf{g}\,=\,[g_{1},\cdots\,,g_{N}]$ . Using the Gumbel-max trick, we can obtain a sample from $\pi_{\theta}^{w}(\cdot|s)$ using the Gumbel-softmax sample $y_{\theta}(\mathbf{g};s,k)$ :  
+
+$$
+\hat{\mathbf{z}}=\mathrm{one.hot}\left(\arg\operatorname*{max}_{k}\left(y_{\theta}(\mathbf{g};s,k)\right)\right)=\mathrm{one.hot}\left(\arg\operatorname*{max}_{k}\left(\log\pi_{\theta}^{w}(k|s)+g_{k}\right)\right).
+$$  
+
+We can further use the straight-through trick to obtain a differentiable one-hot sample ${\textbf{z}}=$ $[z_{\pmb\theta}(\mathbf{g};s,1),\cdots,z_{\pmb\theta}(\mathbf{g};s,N)]$ , where $z_{\pmb\theta}(\mathbf{g};s,k)$ is defined as follows:  
+
+$$
+\begin{array}{r}{z_{\theta}(\mathbf{g};s,k)=\hat{z}_{k}+y_{\theta}(\mathbf{g};s,k)-y_{\phi}(\mathbf{g};s,k)|_{\phi=\theta}\quad\mathrm{for}\;k=1,\dots,N.}\end{array}
+$$  
+
+Finally, using the differential one-hot sample $\mathbf{z}$ from the weighting policy $\pi_{\pmb{\theta}}^{w}$ and reparameterized samples from the component policies, we can obtain a differentiable action sample $a$ :  
+
+$$
+\begin{array}{r}{a=\sum_{k=1}^{N}z_{\pmb{\theta}}(\mathbf{g};s,k)f_{\pmb{\theta}}(\epsilon;s,k).}\end{array}
+$$  
+
+Plugging (10) back to (5), we can obtain a full reparameterization estimator, which we call the Gumbel-reparameterization estimator:  
+
+$$
+\begin{array}{r}{\hat{\nabla}_{\theta}\hat{J}(\pi_{\theta}^{m})\!=\!\nabla_{\theta}\big(Q_{\mathbf{w}}(S_{t},A_{t})\!-\!\alpha\log\pi_{\theta}^{m}(A_{t}|S_{t})\big)\mathrm{~where~}A_{t}\!=\!\sum_{k=1}^{N}\!z_{\theta}\big(\mathbf{g}_{t};S_{t},k\big)f_{\theta}\big(\epsilon_{t};S_{t},k\big)}\end{array}
+$$  
+
+The temperature parameter $\tau$ controls a bias-variance trade-off. When $\tau$ approaches 0, the soft sample $\mathbf{y}\,=\,[y_{\pmb{\theta}}(\mathbf{g};s,1),\cdots\,,y_{\pmb{\theta}}(\mathbf{g};s,N)]$ will converge to a one-hot vector and recover the categorical sample. However, the variance of the gradients with respect to $\pi_{\theta}^{w}(\cdot|s)$ will increase. On the other hand, when $\tau$ becomes larger, the variance of the gradients will decrease, but the soft sample y will converge to a uniform vector. See Jang et al. (2016) for detailed discussions. In our study, we find that using a fixed temperature $\tau=1$ works well.  
+
+
+
+\section{5 EXPERIMENTS  }
+
+
+In this section, we conduct experiments to investigate the utility of mixture policies in continuous control problems. We use SAC as the base learning algorithm and the squashed Gaussian policy as the base policy. We denote different SAC instances using X-Y, where X represents the policy’s gradient estimator, and Y represents the policy’s parameterization. For the base squashed Gaussian policy , we consider the likelihood (Like-Squashed) and the reparameterization (Rep-Squashed) estimators. For the squashed Gaussian mixture (SGM) policy, we consider the likelihood (Like-SGM), the half-reparameterization (HalfRep-SGM), and the Gumbel-reparameterization (GumbelRep-SGM) estimators.6.  
+
+
+
+\section{5.1 SOLVING CONTINUOUS CONTROL PROBLEMS WITH MIXTURE POLICIES  }
+
+
+We first investigate the performance of mixture policies in 19 environments from two commonly used continuous control benchmarks: 7 MuJoCo environments from OpenAI Gym (Brockman et al., 2016) and 12 environments from the DeepMind Control Suite (Tassa et al., 2018). We use SAC with automatic entropy tuning and the hyperparameters reported in the SAC paper (Haarnoja et al., 2018c), which are tuned based on Rep-Squashed. The likelihood-ratio estimator is relatively less stable in these high-dimensional environments, so we will focus on comparing Rep-Squashed with HalfRep-SGM and GumbelRep-SGM while noting that the used hyperparameters may not be the best for the mixture policies. We use 8 random seeds in these experiments.  
+
+Mixture policies aren’t helpful when the rewards are shaped. Figure 2 shows the learning curves in twelve selected environments. We can see that the performances of the mixture variants are quite similar to the base policy across different environments except in cartpole:swingup sparse, where they have better average performance though with overlapping confidence intervals. Among these environments, only cartpole:balance sparse, ball in cpu:catch, and cartpole:swingup sparse have sparse rewards, while other environments have shaped rewards to guide policy learning. Thus, it is not surprising that the mixture policy is not helping here. While cartpole:balance sparse and ball in cpu:catch are too easy for all policies, it is interesting to see that the mixture policy has a better performance in cartpole:swingup sparse.  
+
+
+
+\section{5.2 MIXTURE POLICIES IMPROVE LEARNING WHEN THE REWARDS ARE UNSHAPED  }
+
+
+Based on the results in Figure 2, we hypothesize that mixture policies improve exploration in environments with unshaped rewards but not in those with shaped rewards. In this section, we design experiments and analysis to verify this hypothesis.  
+
+To perform a more extensive empirical investigation with proper hyperparameter tuning, we use three classic control environments in this section: Pendulum, Acrobot, and MountainCar. Specifically, we use two different variants for each of them: one with shaped rewards (ShapedPendulum, ShapedAcrobot, and ShapedMountainCar) and the other one with unshaped rewards (Pendulum, Acrobot, and MountainCar). In this experiment, we use SAC with a fixed entropy scale as it is reported that SAC with  
+
+![](images/7a4874c994b596e1746f9b2ab96586d00aa60607189dac65a5ae82439790f5a3.jpg)  
+Figure 2: Learning curves in four MuJoCo and eight DeepMind Control Suite environments. The shaded area shows the $95\%$ bootstrap confidence intervals across 8 runs.  
+
+324   
+325   
+326   
+327   
+328   
+329   
+330   
+331   
+332   
+333   
+334   
+335   
+336   
+337   
+338   
+339   
+340   
+341   
+342   
+343   
+344   
+345   
+346   
+347   
+348   
+349   
+350   
+351   
+352   
+353   
+354   
+355   
+356   
+357   
+358   
+359   
+360   
+361   
+362   
+363   
+364   
+365   
+366   
+367   
+368   
+369   
+370   
+371   
+372   
+373   
+374   
+375   
+376   
+377  
+
+automatic entropy performs worse in this domain (Neumann et al., 2022). Specifically, we sweep the entropy scale $\alpha~=~10^{y}$ for $y\ \in\ \{-3,-2,-1,0\}$ . In addition, we sweep the initial critic step size $\eta_{q,0}\,=\,10^{x}$ for $x\,\in\,\{-5,-4,-3,-2\}$ and the initial actor step size $\eta_{p,0}\;=\;\kappa\eta_{q,0}$ for $\kappa\,\in\,\{10^{-2},10^{-1},1,10\}$ . We run each hyperparameter setting for 10 runs and report another 30 reruns of the best setting that has the largest area under the learning curve (AUC).  
+
+Mixture policies improve exploration when the rewards are shaped. The top two rows of Figure 4 show the learning curves of the best hyperparameter setting. By comparing the two rows, we can see that the performances in the environments with shaped rewards are much stabler than those with unshaped rewards. While the mixture policy is performing quite similarly to the base policy in the former case, the learning curve of the mixture policy is consistently above the corresponding variant of the base policy in the latter. Note that it is reasonable to see such large performance variation in these environments because the agent is only rewarded when reaching goal states and receives very few reward signals otherwise. Figure 3 plots the individual runs for Rep-Squashed and HalfRep-SGM in Acrobot, where we can intuitively see the failing seeds will induce wide confidence intervals. In addition, we can also see that HalfRep-SGM has more seeds that find the goal states after the initial training phase, suggesting its more persistent exploration.  
+
+![](images/ebbee9ca5ab164bd968b21407287cbb57e08012d49c65ec46b23e85ae434cb72.jpg)  
+Figure 3: Learning curves for individual runs of Rep-Squashed (blue) and HalfRep-SGM (red) in Acrobot.  
+
+Mixture policies are more robust to the entropy regularization. The bottom row of Figure 4 shows the sensitivity to the entropy scale for Rep-Squashed, HalfRep-SGM, and GumbelRepSGM in environments with unshaped rewards. Despite the bootstrap confidence intervals being again quite large, we can see that the sensitivity curves of HalfRep-SGM and GumbelRep-SGM are mostly above Rep-Squashed, suggesting the mixture policy is relatively robust to the entropy scale compared to the base policy.  
+
+The critic is less smooth when the rewards are unshaped. To shed some light on why mixture policies may behave more differently from the base policy when the rewards are unshaped, we plot the learning curve, action-value estimates, and the policy density at a starting state close to the bottom in both ShapedMountainCar and MountainCar. From Figure 5, we can see that the mixture policy maintains its multimodality more often in the MountainCar, where the rewards are unshaped. Note that the agent at the starting state needs to decide which way to start to accumulate mixture policy explores better in this case. On the other hand, in ShapedMountainCar, the critic and the actor (policy) are guided by the shaped rewards, resulting in much smoother action-value estimates with fewer modes and reducing the need to explore multiple directions. This may also be why mixture policies don’t provide many benefits in terms of exploration in those environments with shaped rewards presented in Figure 2 because there is no or minimum need to explore.  
+
+![](images/bb04cbc66eced6ef9be0da556dd288c5c62cdc75ca828778a37685e6416510c6.jpg)  
+
+![](images/7c6c7cbf301044700675103e9019d9079e1716afce4a6fa5d7418b439005bdec.jpg)  
+Figure 6: Left: Examples of randomly generated multimodal bandits and the corresponding learning curves on them. Right: Performance across different $\alpha$ . Each dot represents the final performance of the best hyperparameter setting under the corresponding $\alpha$ . The error bars show the $95\%$ bootstrap confidence intervals across 100 different bandits. We can see that SGM with unbiased estimators (Like and HalfRep) outperforms squashed Gaussian consistently. In addition, the gap between their performance increases as $\alpha$ increases.  
+
+We have seen in the last section that the critic can sometimes be multimodal, and mixture policies can explore multiple rewarding directions at the same time with a multimodal density in this case. In this section, we demonstrate their another benefit that is not clearly shown: Mixture policies can more easily identify higher peaks in the critic’s value function compared to the base policy. This is not obvious if we examine the critic and the actor during the learning process in an MDP as in Figure 5, as the critic is constantly changing. Thus, to understand this effect, we investigate it in the simpler bandit setting, where the critic (i.e., the reward function) is given to the agent and stationary.  
+
+Specifically, we randomly generate 100 continuous bandits with the reward function proportional to the summation of 30 Gaussian density functions. The means and standard deviations are uniformly sampled from $[-3,3]$ and [0.1, 1.0], respectively. Figure 6 (Left) shows a few examples of the generated bandits and the learning curves corresponding to them. We sweep the initial actor step size $\eta_{p,0}=10^{x}$ for $x\in\{-4,-3,-2,-1\}$ and the entropy scale $\alpha=10^{y}$ for $y\in\{-4,-3,-2,-1\}$ . We run each hyperparameter setting for one run on each bandit. We report results of the best setting that has the highest average reward over the last $10.0\%$ training steps, as we are mostly interested in how well the agent explores.  
+
+Mixture policies explore more efficiently. Figure 6 (Right) shows the aggregated final performance of all five algorithm instances. We can see that the SGM policy is better than the squashed Gaussian policy when using either the likelihood-ratio gradient estimator or the unbiased halfreparameterization gradient estimator across different $\alpha$ . On the other hand, the SGM policy with the Gumbel-reparameterization gradient estimator is worse than the counterpart of the base policy. We hypothesize that the reason is that this gradient estimator is biased and will learn slower in simple environments like this, which allows very large step sizes.  
+
+Mixture policies also improve robustness. Another observation from Figure 6 (Right) is that mixture policies are more robust to the entropy scale, which is consistent with our results presented in Section 3. Specifically, other than the consistent improvement of the SGM policy with unbiased estimators over the base policy, we can see that the gap between them increase as $\alpha$ increases. In addition, the gap between the base policy and the SGM policy with a biased gradient (GumbelRepSGM) appears to shrink as $\alpha$ increases. This result suggests that mixture policies are possibly more robust to larger entropy scales and explore more efficiently with a moderate large entropy scale. This is not the case for the base policy in this experiment.  
+
+
+
+\section{6 CONCLUSIONS  }
+
+
+Mixture policies are a simple way to increase the flexibility of the policy parameterization, but very little has been documented about their efficacy, or lack of efficacy. Our aim was to start to fill this gap, to make this a more accessible tool when using entropy-regularized actor-critic algorithms with continuous actions, like Soft-Actor Critic. The clear outcome from the study is that mixture policies are comparable, and sometimes notably better than, a base unimodal policy. Through a few basic theoretical results and experiments in bandits, we highlighted that mixture policies are more robust to entropy scale, with 1) a preference for multimodality increasing with higher entropy, 2) divergence (lack of stationary points) for the base Gaussian policy, unlike the mixture, 3) better balance between entropy and the expected reward objective, resulting in higher unregularized values in addition to higher regularized values and 4) higher likelihood of finding maxima on a multimodal surface. This behavior seemed to manifest in better exploration in environments with unshaped, or uninformative rewards; in such environments, without shaped rewards, exploration is critical and the mixture policies performed better than the unimodal base policy. In particular, we found the base policy had more failed runs where it was unable to find the goal at all.   
+To leverage the utility of mixture policies, however, we needed a small algorithmic improvement: a reparameterization gradient. We proposed two new reparameterization gradient estimators for mixture policies, filling in a gap in the literature. The first estimator is a half-reparameterization, only reparameterizing the component policies and not the softmax weighting policy. This estimator provides an unbiased estimate but does not fully reparameterize, potentially not obtaining the same variance reduction properties. We provided a full reparameterization by using the Gumbelreparameterization for the softmax, giving up unbiasedness. Despite this bias, this estimator was still effective, though we found it to be more sensitive than the half-reparameterization gradient. There are several limitations of this work. The primary limitation is that we used default hyperparameters for the mixture policies in MuJoCo; such defaults were tuned for SAC with the base policy. Hyperparameter tuning in large domains is extremely expensive, and arguably overtuning can also produce misleading results. Characterizing if there are differences in effective hyperparameters for these different policy parameterization, however, would provide a more complete picture. Otherwise, as with any empirical study, there is always a limitation in scope, though arguably this limitation is necessary to make progress. We dove deeply into SAC, and started with an exploratory study across standard benchmarks. The study highlighted that we should expect to see bigger differences in environments without shaped rewards, and sets up a clear question for a follow-up study. REPRODUCIBILITY STATEMENT   
+ We also enclose relevant details about all empirical investigations with our best effort in Appendices C, D, and F. We will release the source code for all our experiments before publication.   
+
+

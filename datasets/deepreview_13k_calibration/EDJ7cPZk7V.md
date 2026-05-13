@@ -1,8 +1,8 @@
 # Forgetting Order of Continual Learning: What is Learned First is Forgotten Last
 
 - Decision: Reject
-- Avg Score: 3.83
-- Scores: 8, 3, 6, 5, 1, 0
+- Avg Score: 6.40
+- Scores: 8, 3, 6, 5, 10
 
 ## Abstract
 Catastrophic forgetting poses a significant challenge in continual learning, where models often forget previous tasks when trained on new data. Our empirical analysis reveals a strong correlation between catastrophic forgetting and the learning speed of examples: examples learned early are rarely forgotten, while those learned later are more susceptible to forgetting. We demonstrate that replay-based continual learning methods can leverage this phenomenon by focusing on mid-learned examples for rehearsal. We introduce Goldilocks, a novel replay buffer sampling method that filters out examples learned too quickly or too slowly, keeping those learned at an intermediate speed. Goldilocks improves existing continual learning algorithms, leading to state-of-the-art performance across several image classification tasks.

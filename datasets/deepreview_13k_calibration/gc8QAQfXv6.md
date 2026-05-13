@@ -1,8 +1,8 @@
 # Unlocking the Power of Function Vectors for Characterizing and Mitigating Catastrophic Forgetting in Continual Instruction Tuning
 
 - Decision: Accept
-- Avg Score: 3.00
-- Scores: 8, 8, 1, 0, 1, 0
+- Avg Score: 9.00
+- Scores: 8, 8, 10, 10
 
 ## Abstract
 Catastrophic forgetting (CF) poses a significant challenge in machine learning, where a model forgets previously learned information upon learning new tasks. 

@@ -1,0 +1,465 @@
+\title{Octavius: Mitigating Task Interference in MLLMs via LoRA-MoE}
+
+\begin{abstract}
+Recent studies have demonstrated Large Language Models (LLMs) can extend their zero-shot generalization capabilities to multimodal learning through instruction tuning.
+As more modalities and downstream tasks are introduced, negative conflicts and interference may have a worse impact on performance. 
+While this phenomenon has been overlooked in previous work, we propose a novel and extensible framework, called \mname, for comprehensive studies and experimentation on multimodal learning with Multimodal Large Language Models (MLLMs).
+Specifically, we combine the well-known Mixture-of-Experts (MoE) and one of the representative PEFT techniques, \emph{i.e.,} LoRA, designing a novel LLM-based decoder, called {\dec}, for multimodal learning.
+To the best of our knowledge, we are one of the pioneering efforts to introduce MoE into MLLMs to address this problem.
+The experimental results (about 20\% improvement) have shown the effectiveness and versatility of our design in various 2D and 3D downstream tasks.
+Code and datasets are available at \href{https://openlamm.io/paper_list/Octavius}{\texttt{https://openlamm.io/paper\_list/Octavius}}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+Multimodal Large Language Models (MLLMs)~\citep{alayrac2022flamingo, huang2023kosmos1, liu2023llava, li2023otter, zhu2023minigpt} have been considered as promising general-purpose interfaces that can perform various multimodal tasks under few-/zero-shot settings.
+Apart from leveraging the powerful Large Language Models (LLMs)~\citep{openai2023gpt4,touvron2023llama} as the universal interfaces that unify the responses to different types of tasks as task-specified textual sequences, the keys to the success of MLLMs are to reliably perceive more modalities and be efficiently fine-tuned to adapt more downstream tasks.
+
+To achieve this goal, MLLMs rely on the instruction-tuning scheme~\citep{ouyang2022instruction} where the model is fine-tuned based on multimodal instruction-following dialogues orchestrated from various multimodal tasks.
+Moreover, thanks to the Parameter-Efficient Fine-Tuning (PEFT) techniques (\emph{e.g.}, LoRA~\citep{hu2021lora} and Adapter~\citep{houlsby2019adapter}) where only small trainable components are injected in the model and updated during fine-tuning, recent MLLMs~\citep{zhang2023llamaadapter, yin2023lamm, ye2023mplug} can efficiently learn to solve downstream tasks with a small scale of annotated data, while preserve the language proficiency and generalizability to novel situations. 
+Remarkably, these models achieve comparable performance at low costs in comparison to LLaVA~\citep{liu2023llava}, KOSMOS series~\citep{huang2023kosmos1,peng2023kosmos2} and Shikra~\citep{chen2023shikra}, which are learned by full model fine-tuning with a large amount of multimodal data.
+
+\begin{figure}[h]
+    \begin{center}
+        \includegraphics[width=\linewidth]{figures/sec1_intro_teaser.pdf}
+        \caption{
+            \textbf{\mname} is a unified, multimodal large language model with a novel capability to comprehend various tasks across different modalities, including but not limited to 2D captioning, 2D detection, 3D VQA, and 3D dense captioning.
+        }
+        \label{fig:intro_teaser}
+    \end{center}
+\end{figure}
+
+However, PEFT has to address the crucial tug-of-war problem~\citep{hadsell2020embracing}, where simultaneously learning different tasks may cancel each task-specific optimization out, and ultimately compromise the performance of each downstream task.
+This problem is much more severe in MLLMs, especially when more modalities and tasks are involved, but only a few well-annotated data are available.
+First, the features from new modalities are not easy to be aligned with each other, not to mention compatible with the LLM-based language decoders. 
+Second, simultaneously learning to acquire knowledge at distinct granularities, such as the instance-level perception (\emph{e.g.}, object detection) and logical reasoning (\emph{e.g.}, VQA), may lead to significant interference.
+Third, it is more complicated by using an LLM-based decoder to generate textual responses that meet the special requirements of tasks in modalities other than natural language, such as the bounding box coordinates in detection tasks, or action sequences for robotics.
+
+To resolve this issue, we propose \textbf{\dec}, which combines the well-known Mixture-of-Experts (MoE)~\citep{jacobs1991adaptive, jordan1994hierarchical} and one of the representative PEFT techniques, \emph{i.e.}, LoRA~\citep{hu2021lora}.
+Based on {\dec}, an LLM-based decoder can efficiently be involved in more downstream tasks and more modalities by learning more LoRA modules.
+Different from conventional MoE models~\citep{shazeer2017sparsemoe, lepikhin2020gshard, fedus2022switch, du2022glam}, we adopt a simple yet effective instance-based gate routing scheme, sparsely activating independent LoRA experts with instance-level instructions and further acquiring task-specific knowledge for better aligning different tasks.
+Notably, to the best of our knowledge, we are one of the pioneering efforts to introduce MoE into MLLMs to address the tug-of-war problem.
+
+To validate the effectiveness of {\dec}, in this work, we investigate a more complicated scenario, where the MLLMs should simultaneously learn downstreaming tasks from more additional modalities, such as 2D images and 3D point clouds. 
+This scenario is especially useful for embodied agents~\citep{duan2022embodiedaisurvey, mu2023embodiedgpt, driess2023palm}.
+Specifically, in addition to the off-the-shelf image encoder, we design a point cloud encoder called \textbf{\enc}, which provides language-aligned scene-level point cloud representations. 
+This encoder at first gathers language-aligned point cloud features of each instance~\citep{xue2023ulip} in a scene, which are then aggregated into a scene-level feature based on the attention operation guided by the input instructions.
+
+Based on the aforementioned contributions, we introduce a novel and extensive framework called \textbf{{\mname}},
+which learns the MLLMs upon the instruction-following datasets adapted from LAMM~\citep{yin2023lamm} and ScanNet~\citep{dai2017scannet}. As shown in Figure~\ref{fig:intro_teaser}, {\mname} can successfully address various 2D/3D vision and language tasks, including but not limited to 2D detection, 2D captioning, 3D VQA, and 3D dense captioning.
+We conduct various experiments to validate the effectiveness and versatility of our design, improving multiple downstream tasks by about 20\% while increasing only a few trainable parameters.
+
+
+
+\section{Related Works}
+
+\label{sec:related_works}
+
+\textbf{Large Language Models (LLMs) \& PEFT.}
+Recently, Large Language Models (LLMs)~\citep{brown2020language, chowdhery2022palm, chiang2023vicuna, touvron2023llama2} have gained significant attention due to their impressive capabilities in language generation~\citep{zhang2022opt}, in-context learning~\citep{wei2022chain}, and reasoning~\citep{touvron2023llama}.
+For both data- and compute-efficient adaptation on certain downstream tasks, several PEFT (Parameter-Efficient Fine-Tuning)~\citep{li2021prefix,houlsby2019adapter,karimi2021compacter,hu2021lora} are proposed.
+For instance, LoRA~\citep{hu2021lora} represents weight updates using two smaller matrices through low-rank decomposition, where original weights are kept frozen while the new update matrices are trained.
+In this work, we adopt LoRA for efficient MLLMs fine-tuning.
+
+\noindent\textbf{Multimodal Large Language Models (MLLMs).}
+Several recent studies have attempted to extend the capability of LLMs to multimodal tasks.
+\citet{alayrac2022flamingo, li2023blip2, liu2023llava, zhang2023llamaadapter, yin2023lamm, chen2023shikra, peng2023kosmos2} introduce image modality in LLMs for comprehending 2D visual content. 
+\citet{hong20233dllm} combines LLMs with 3D modality by rendering point clouds into 2D images and utilizing them to represent 3D visual features. 
+\citet{driess2023palm, mu2023embodiedgpt, brohan2023rt} establish connections between visual inputs and embodied controls for robotic tasks.
+Despite its wide range of multimodal applications, the performance degradation caused by interference between tasks and modalities during fine-tuning in MLLMs receives inadequate attention.
+
+\noindent\textbf{Mixture-of-Experts (MoE).}
+Deep MoE models are proposed to increase the number of model parameters without adding computational overhead in the field of computer vision~\citep{riquelme2021scaling, mustafa2022multimodal, shen2023scaling} and natural language processing~\citep{shazeer2017sparsemoe, lepikhin2020gshard, fedus2022switch}. 
+Different from these approaches, we aim to address conflicts between tasks with MoE.
+Adamix~\citep{wang2022adamix}, an approach related to but distinct from ours, randomly selects experts during training and uses the average weights of experts in inference, which may be analogous to dropout~\citep{srivastava2014dropout} in certain cases.
+In this paper, we desire for a dynamic gate routing strategy to automatically calculate the weights of each LoRA expert according to the input instructions, adapting MLLMs for broader multimodal applications.
+
+
+
+\section{Methodology}
+
+
+As illustrated in Figure~\ref{fig:overall_arch}, we propose an extensible framework called \textbf{{\mname}} for multimodal instruction tuning.
+In Section~\ref{subsec:decoder}, we first elaborate on the tug-of-war problem and propose a unified {\dec} decoder to break through the bottleneck caused by interference between different tasks and modalities.
+We then verify our design using both image and point cloud modality in this work and describe corresponding encoders in Section~\ref{subsec:encoder}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/sec3_overall_arch.pdf}
+    \caption{
+        \textbf{Overall pipeline of {\mname}}. 
+        We design corresponding encoders for different modalities, with the primary objective of empowering the LLMs to gain a deeper understanding of visual features. 
+        Additionally, we propose a dynamic gating network that selects distinct LoRA experts based on input instructions, thereby proficiently mitigating interference arising from multimodal learning.
+    }
+    \label{fig:overall_arch}
+\end{figure}
+
+\subsection{Multimodal Decoder} 
+\label{subsec:decoder}
+
+\subsubsection{The Tug-of-war Problem}
+\label{subsubsec:pilot_study}
+
+\begin{figure}
+    \begin{minipage}{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/sec3_pilot_study.pdf}
+        \caption{
+            We conduct a simple pilot study on PASCAL VOC and ScienceQA to demonstrate the tug-of-war problem and the effectiveness of our proposed {\dec}. Recall@0.5 denotes recall at an IoU threshold of 0.5, respectively.
+        }
+        \label{fig:pilot_study}
+    \end{minipage}\hspace{0.03\linewidth}
+    \begin{minipage}{0.48\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/sec3_instruction.pdf}
+        \caption{We follow previous works, \emph{e.g.}, LAMM~\citep{yin2023lamm}, LLaVA~\citep{liu2023llava}, to apply an instruction-following training pipeline.}
+        \label{fig:instruction}
+    \end{minipage}
+\end{figure}
+
+Interference among different modalities and tasks is a common and critical issue~\citep{zhao2018modulation, vandenhende2021multi} in multimodal and multitask learning.
+While MLLMs can alleviate this problem by adopting the same learning objective, \emph{i.e.}, next-token prediction loss, for all tasks, there still exists task-specific divergences that limit their potential in various downstream tasks.
+Since previous works have yet to delve into the tug-of-war phenomenon in MLLMs, we conduct a simple pilot study on image modality to reveal this problem.
+
+The pipeline of image encoders in MLLMs are simple and similar in previous works.
+Here, we select LAMM~\citep{yin2023lamm} as our model due to its rich benchmarks on downstream tasks. 
+We fine-tune LoRA and projector in LAMM following~\citep{yin2023lamm} and validate zero-shot performance on PASCAL VOC~\citep{voc} and ScienceQA~\citep{lu2022sqa} datasets.
+We report the recall and precision at an Intersection over Union (IoU) threshold of 0.5 on PASCAL VOC and the accuracy of multiple-choice questions on ScienceQA.
+
+The results are shown in Figure~\ref{fig:pilot_study}.
+Although the original dataset of LAMM, referred to as ``LAMM v1'', contains numerous images from MS-COCO~\citep{lin2014coco}, the lack of sufficient detection instructions results in poor performance on PASCAL VOC. 
+To overcome this problem, we leverage the entire COCO detection annotations and GPT-API~\citep{openai2023gpt4} to generate additional detection instructions as supplementation, constructing a new dataset called ``LAMM v2'' for better generalization of detection tasks.
+After verifying the detection ability of LAMM by using COCO detection instructions alone, we find using a mixed dataset does not lead to a huge improvement in detection performance.
+Also, there is a decline in the VQA tasks.
+Moreover, we can achieve the same results on another dataset used in LLaVA~\citep{liu2023llava}.
+It can be concluded that MLLMs suffer from a severe tug-of-war problem on image modality, not to mention incorporating more modalities for training simultaneously.
+
+\subsubsection{\dec}
+\label{subsubsec:lora_moe}
+
+Some prior works~\citep{kendall2018multi, chen2018gradnorm} have attempted to balance the magnitudes of losses or gradients across different tasks to address the tug-of-war issue.
+However, considering that different objectives are defined for each task in multitask learning, it is challenging to directly extend existing methods to MLLMs that adopt a unified optimization objective for all tasks.
+In this section, we introduce the concept of Mixture-of-Experts~\citep{jacobs1991adaptive, jordan1994hierarchical, shazeer2017sparsemoe}, proposing a unified {\dec} decoder based on a instance-based gate routing strategy.
+
+\noindent\textbf{Revisiting MoE Models.}
+A typical MoE Model injects multiple MoE layers into LLM to accommodate a greater number of parameters.
+The MoE layer consists of a group of $N$ expert networks $E_1, E_2, ..., E_N$ and a gating network $G$, taking the previous tokens as input and producing the probability of the next token:
+\begin{equation}
+    \label{eq:sparse_moe}
+    \texttt{tok}_i = \sum_k^N G(\texttt{tok}_{0\dots i-1})_k E_k(\texttt{tok}_{0\dots i-1}),
+\end{equation}
+where $\texttt{tok}_i$ denotes $i$-th token.
+We refer to this kind of gating network, which based on token-level input, as \textbf{token-based gate}.
+Furthermore, to prevent $G$ from consistently producing imbalanced weights that favor only a few experts, an auxiliary loss $\gL_\text{balance}$~\citep{shazeer2017sparsemoe, zhou2022mixture, wu2022residual} is introduced to balance gating routing.
+For example, \citet{shazeer2017sparsemoe} minimize the coefficient of variation of the gate values for each token, encouraging all experts to have equal importance:
+\begin{equation}
+    \label{eq:load_balance}
+    \gL_\text{balance} = \alpha \;\texttt{CV}\bigg[\sum_i G(\texttt{tok}_{0\dots i-1})\bigg]^2,
+\end{equation}
+where $\alpha$ is a hyper-parameter and $\texttt{CV}(\cdot)$ is the coefficient of variation, which is the ratio of the standard deviation to the mean.
+
+\noindent\textbf{{\dec} and Instance-based Gate Routing.} 
+Different from token-based gate in LLM, we design a simple but effective routing strategy for MLLMs, assigning downstream tasks to independent experts for specific knowledge based on individual instances, called \textbf{instance-based gate}.
+It is motivated that the input questions $\vz^\text{qu}$ applied in multimodal instructions will substantially affect the responses generated by MLLMs, we take the questions as input to predict routing scores for each expert.
+Then, we select sparsely-activated experts based on routing scores for each individual instance to generate the entire sentence. 
+In this work, the LoRA module is treated as an expert in MLLMs, combining instance-based gate with it to alleviate interference arise from multimodal learning, named \textbf{{\dec}}.
+By replacing LoRA in each projection layer of language model $f^\text{LLM}$ with a group of independent LoRA experts $\{E^\text{LoRA}\}_{N}$, we can predict the $i$-th token value as follow:
+\begin{equation}
+    \label{eq:lora_moe_prediction}
+    \texttt{tok}_i = f^\text{LLM}(\texttt{tok}_{0\dots i-1}) + \sum^{N}_k G(\vz^\text{qu})_k E_k^\text{LoRA}(\texttt{tok}_{0\dots i-1}).
+\end{equation}
+Additionally, we find that $\mathcal{L}_\text{balance}$ is incompatible and infeasible with {\dec} in an instance-based gate scenario.
+For example, it is more reasonable to assign detection samples to a LoRA expert proficient in localizing than the other experts for the purpose of balancing.
+Therefore, we can observe some imbalance phenomenon in experiments (see Section~\ref{subsec:ablation} for details), unless the amount of data for each task in the whole dataset is balanced.
+
+Compared with previous MoE models, {\dec} allows for efficient fine-tuning on small datasets and faster convergence with instance-based gate routing.
+During the inference phase, if the downstream tasks and input questions are specified, {\dec} can also merge parameter weights with language model like vanilla LoRA to reduce storage requirements and inference costs.
+
+\noindent\textbf{Instruction Tuning with {\dec}.}
+Given the target modal features $\vz^\text{img}$ or $\vz^\text{pcl}$, we construct image-text conversation pairs in an instruction-following format based on previous works~\citep{zhang2023llamaadapter, yin2023lamm, peng2023kosmos2}, as shown in Figure~\ref{fig:instruction}. 
+The language model with {\dec} is then trained to predict corresponding responses based on the system prompts, target modal features and questions.
+
+\subsection{Modality Encoder}
+\label{subsec:encoder}
+
+\subsubsection{Image Encoder}
+\label{subsubsec:2d_encoder}
+
+Benefit from the pioneer vision-language model~\citep{radford2021clip} that bridges the gap between the image and language modality, \citet{li2023otter, liu2023llava, chen2023shikra, zhang2023llamaadapter, yin2023lamm} achieve impressive results.
+We follow their pipeline to extract features for image modality.
+Specifically, for an image input $\vI\in \sR^{H \times W \times 3}$, we use the pre-trained CLIP visual encoder ViT-L/14 $f^\text{CLIP}$~\citep{radford2021clip} to extract the language-aligned visual feature $\vh^\text{img}$, following by a trainable linear layer $f^\text{proj}$ to match the dimension of $\vh^\text{img}$ with the word embedding space in language model: 
+\begin{equation}
+    \vh^\text{img}=f^\text{CLIP}(\vI);\;\vz^\text{img}=f^\text{proj}(\vh^\text{img}),
+\end{equation}
+where $\vz^\text{img}$ is the output features of image modality for further instruction tuning.
+
+\subsubsection{Point cloud Encoder}
+\label{subsubsec:3d_encoder}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/sec3_3d_encoder.pdf}
+    \caption{
+        \textbf{Structure of {\enc}}. 
+        To acquire scene-level features, we follow a three-step process. 
+        Firstly, we obtain RoIs from a given point cloud using a pre-trained detector. 
+        Next, we pre-train a Point-Bert model following a ULIP-like pipeline and employ it to extract instance-level 3D features.
+        Finally, by aggregating features from visual embedding, we derive the final scene-level feature.
+    } 
+    \label{fig:pcl_encoder}
+\end{figure*}
+
+Conventional 3D methods typically apply 3D CNNs~\citep{yan2018second, shi2020pvrcnn, qi2017pointnet} or Transformers~\citep{zhao2021pointtransformer, fan2022sst} as feature extractors to process sparse point cloud data. 
+However, they still retain numerous background points with low-density information, which may confuse the subsequent language models in MLLMs, ignoring the pivotal elements in the scene.
+Besides, the unavailability of encoders capable of aligning scene-level 3D features with language may pose significant challenges for LLMs in comprehending the semantic information of the entire scene. 
+To address these issues, we propose {\enc} as our point cloud encoder dedicated to language-aligned scene-level 3D representation generation, as illustrated in Figure~\ref{fig:pcl_encoder}.
+
+\noindent\textbf{Step 1: Locating Regional RoIs as Candidates.} 
+An intuitive way to avoid excessive background points is to identify specific regions in the scene that may contain instances or relevant semantic information and encode entire scene with these regions.
+Specifically, given a 3D point cloud scene, we employ a pre-trained object detector, \emph{i.e.}, FCAF3D~\citep{rukhovich2022fcaf3d}, to locate candidate RoIs (Region-of-Interest) $\{\vr\}_{N_\text{RoI}}$.
+Note that $N_\text{RoI}$ denotes the number of RoIs.
+Besides, for tasks such as captioning or classification that primarily focus on instances mentioned in the conversations, we directly use regional features associated with these instances as input. 
+
+\noindent\textbf{Step 2: Extracting RoI Features Aligned with Language and Image.}
+Inspired by a recent work~\citep{xue2023ulip}, we pre-train a Point-Bert~\citep{yu2022pointbert} encoder $f^\text{Point-Bert}$ aligned with both language and image modalities following a ULIP-like pre-training pipeline, allowing us to extract instance-level 3D visual features from points $\vP\in\sR^{N\times 6}$ in candidate RoIs $\{\vr\}_{N_\text{RoI}}$ during instruction tuning:
+\begin{equation}
+    \{\vh^\text{pcl}\}_{N_\text{RoI}}=f^\text{Point-Bert}(\vP,\{\vr\}_{N_\text{RoI}}).
+\end{equation}
+\noindent\textbf{Step 3: Aggregating RoI Features as Scene.}
+Next, we adopt a fusion module with two stacked transformer layers to fuse scene-level features with RoI features.
+Specifically, we utilize multi-head cross-attention mechanism~\citep{vaswani2017attention} (denoted as \texttt{MHCA}) to attend a group of trainable queries $\ve_q$ with RoI features $\{\vh^\text{pcl}\}_{N_\text{RoI}}$:
+\begin{equation}
+    \vh_q^\text{pcl}=\texttt{MHCA}(\vq=\ve_q, \vk\vv=\{\vh^\text{pcl}+f_\text{PE}(\vr)\}_{N_\text{RoI}}).
+\end{equation}
+$f_\text{PE}$ is used to transform 3D bbox coordinates into positional embedding to enrich spatial information. And $\vq,\vk$ and $\vv$ denote query, key, and value in attention.
+As in image encoder (Section~\ref{subsubsec:2d_encoder}), a trainable linear layer is also applied for final 3D features $\vz^\text{pcl}$:
+\begin{equation}
+    \vz^\text{pcl}=f^{\text{proj}'}(\vh_q^\text{pcl})
+\end{equation}
+
+\noindent\textbf{3D Instruction Data.}
+We construct a 3D instruction tuning dataset called \textbf{Scan2Inst} using ScanNet~\citep{dai2017scannet} as our 3D instruction tuning dataset due to its diverse tasks and annotated categories.
+Following \citet{wang2022self}, we use GPT-API to generate a total of 80k data pairs comprising instructions and responses based on original dataset.
+
+
+
+\section{Experiment}
+
+\label{sec:exp}
+
+\subsection{Experiment Setup}
+\label{subsec:setups}
+
+To explore the effectiveness of our framework in multimodal learning, we fine-tune {\mname} in three modality setups: \textbf{i.)} image modality, \textbf{ii.)} point cloud modality and \textbf{iii.)} both image and point cloud modalities.
+We then evaluate the zero-shot performance using these three fine-tuned models on various downstream tasks.
+\noindent\textbf{Instruction Datasets.}
+For image modality, we follow ~\citet{yin2023lamm} to construct ``LAMM v2'', an instruction dataset consisting of MS-COCO~\citep{lin2014coco} and Bamboo~\citep{zhang2022bamboo}, which includes object detection, classification, captioning, and other common 2D tasks.
+For point cloud modality, we utilize ScanNet~\citep{dai2017scannet} to generate an instruction dataset called ``Scan2Inst'' which contains VQA, captioning, and classification tasks. 
+In the multimodal learning (2D\&3D) setup, we merge the image and point cloud instruction dataset to fine-tune the entire framework simultaneously. 
+
+\noindent\textbf{Quantitative Zero-shot Evaluation.}
+We perform zero-shot evaluation on various downstream tasks for both image and point cloud modalities.
+For image modality, we perform Visual Question Answering (VQA) on ScienceQA~\citep{lu2022sqa}, classification on CIFAR-10~\citep{krizhevsky2009cifar10}, captioning on Flickr30K~\citep{young2014flickr30k} and facial attribute recognition on CelebA~\citep{liu2018celeba}.
+Note that we evaluate performance in VQA tasks through multiple-choice selection.
+For point cloud modality, we perform classification on ShapeNet~\citep{chang2015shapenet} (55 classes) and captioning on NR3D~\citep{achlioptas2020referit3d}.
+We also evaluate the performance of classification, captioning, and QA on the test split of ScanNet to verify the proposed {\enc} encoder.
+
+\begin{table*}[t]
+    \centering
+    \caption{
+        \textbf{Comparisons on image modality.} 
+        We investigate the zero-shot performance of our method on multimodal (2D) scenarios. 
+        We use the following abbreviations in this table and subsequent experiments for ease:
+        ``Det.'' for detection tasks, ``Cap.'' for captioning task, and ``Cls.'' for classification tasks.
+    }
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{*{12}{c}}
+    \toprule
+    \multirow{2}{*}[-0.25em]{Models} & \multirow{2}{*}[-0.25em]{MoE} & \multirow{2}{*}[-0.25em]{FT. Dataset} & \multicolumn{2}{c}{Det. (IoU=0.5)} & VQA & Cap. & Cls. & \multicolumn{2}{c}{Facial Attr} & \multirow{2}{*}[-0.25em]{Avg.} \\ %\multicolumn{8}{c}{Zero-Shot results} \\
+    \cmidrule{4-10}
+    & & & Recall & Prec & Acc@1 & CIDEr & Acc@1 & Hair Acc@1 & Smile Acc@1 \\
+    \midrule
+    \multirow{2}{*}{LAMM} & & \multirow{2}{*}{LAMM v2} & 7.61 & 5.95 & 40.31 & 0.21 & \textbf{73.50} & 58.04 & 50.15 & -- \\
+    & \checkmark & & \textbf{39.04} & \textbf{35.21} & \textbf{46.95} & \textbf{5.66} & 65.40 & \textbf{60.93} & \textbf{59.82} & $\textcolor{customred}{20.89\%\uparrow}$ \\ 
+    \midrule
+    \midrule
+    \multirow{2}{*}{LLaVA-LoRA} & & \multirow{2}{*}{LLaVA} & -- & -- & 52.35 & \textbf{30.75} & 2.89 & \textbf{12.50} & 50.23 & -- \\
+    & \checkmark & & -- & -- & \textbf{55.58} & 23.08 & \textbf{41.00} & 3.93 & \textbf{52.17} & $\textcolor{customred}{18.36\%\uparrow}$ \\
+    \toprule
+    \end{tabular}}
+    \label{tab:exp_2d}
+\end{table*}
+
+\begin{table*}[t]
+    \centering
+    \caption{
+        \textbf{Comparisons on point cloud modality.}
+        We report both Fine-Tuning (FT.) Results and Zero-shot (ZS.) Results on the 3D tasks. 
+        We also compare our model with 3D-LLM~\citep{hong20233dllm}. 
+        Here, {$^\dag$} indicates the results of Scan2Cap are evaluated on a custom test set regenerated by 3D-LLM, which is different from ours.
+    }
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{l*{9}{c}}
+    \toprule
+    \multirow{3}{*}[-0.5em]{Models} & \multicolumn{5}{c}{FT. Results} & \multicolumn{4}{c}{ZS. Results}  \\ 
+    \cmidrule(lr){2-6}\cmidrule(lr){7-10}
+    & \multicolumn{2}{c}{Cap. (Scan2Cap)} &  \multicolumn{2}{c}{VQA (ScanQA)} & Cls. (ScanNet) & Cls. (ShapeNet) & \multicolumn{2}{c}{Cap. (Nr3d)} & \multirow{2}{*}{ZS. Avg.} \\
+    \cmidrule(lr){2-6}\cmidrule(lr){7-9}
+    & BLEU-1 & CIDEr & BLEU-1 & CIDEr & Acc@1 & Acc@1 & BLEU-1 & CIDEr & \\
+    \midrule
+    3D-LLM (Flamingo) & 36.10$^\dag$ & -- & 30.30 & 59.20 & -- & -- & -- & -- & -- \\
+    \midrule
+    Ours & 33.58 & 35.11 & 43.21 & \textbf{168.21} & 47.40 & 19.75 & 20.02 & 16.19 & -- \\
+    Ours w/ MoE & \textbf{35.94} & \textbf{39.38} & \textbf{44.24} & 167.31 & \textbf{48.80} & \textbf{24.85} & \textbf{21.16} & \textbf{17.22} & $\textcolor{customred}{17.06\%\uparrow}$ \\
+    \bottomrule
+    \end{tabular}}
+    \label{tab:exp_3d}
+\end{table*}
+
+\begin{table*}[t]
+    \centering
+    \caption{
+        \textbf{Comparison on image \& point cloud modalities.} 
+        While there are some performance gaps compared to the model fine-tuned on a single modality, our model with the inclusion of MoE exhibits a superior performance ($\sim$20\%) compared to its counterpart.
+    }
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{l*{13}{c}}
+    \toprule
+    \multirow{3}{*}[-0.47em]{FT. Dataset} & \multirow{3}{*}[-0.47em]{MoE} & \multicolumn{6}{c}{2D Results (ZS.)} & \multicolumn{3}{c}{3D Results (FT.)} & \multicolumn{2}{c}{3D Results (ZS.)} & \multirow{3}{*}[-0.47em]{Avg.} \\ 
+    \cmidrule(lr){3-8}\cmidrule(lr){9-11}\cmidrule(lr){12-13}
+    & & Det. & VQA & Cap. & Cls. & \multicolumn{2}{c}{Facial} & Cap. & VQA & Cls. & Cls. & Cap. & \\ 
+    \cmidrule(lr){3-8}\cmidrule(lr){9-11}\cmidrule(lr){12-13}
+    & & Rec@0.5 & Acc &  CIDEr & Acc & Hair & Smile & CIDEr & CIDEr & Acc & Acc & CIDEr & \\
+    \midrule
+      \multirow{2}{*}{LAMM v2} & & 7.61 & 40.31 & 13.28 & 73.50 & 58.04 & 50.15 & -- & -- & -- & -- & -- & -- \\
+      & \checkmark & 39.04 & 46.95 & 26.71 & 65.40 & 60.93 & 59.82 & -- & -- & -- & -- & -- & --\\
+      \midrule
+      \multirow{2}{*}{Scan2Inst} & & -- & -- & -- & -- & -- & -- & 39.56 & 162.14 & 47.60 & 19.75 & 16.19 & -- \\
+      & \checkmark & -- & -- & -- & -- & -- & -- & 39.38 & 167.31 & 43.40 & 24.85 & 17.22 & -- \\ 
+    \midrule
+    \midrule
+    \multirow{2}{*}{LAMM v2+Scan2Inst} & & 2.64 & \textbf{39.71} & 0.04 & \textbf{71.66} & 42.47 & 50.66 & 19.76 & \textbf{182.00} & 38.80 & 14.85 & 8.26 & -- \\
+    & \checkmark & \textbf{34.30} & 35.80 & \textbf{10.06} & 56.86 & \textbf{51.52} & \textbf{54.22} & \textbf{33.29} & 181.44 & \textbf{47.20} & \textbf{21.10} & \textbf{17.22} & $\textcolor{customred}{21.40\%\uparrow}$ \\
+    \toprule
+    \end{tabular}}
+    \label{tab:exp_joint}
+\end{table*}
+
+\begin{table*}[t]
+    \centering
+    \caption{
+        \textbf{Ablation studies on MoE architecture on 2D tasks.}
+        ``Sparse Top-2'' gate picks out top-2 ranked experts based on routing scores.
+        ``Weighted Sum'' gate uses the weighted sum of all experts as output. 
+        ``Individual'' gate employs different experts for each 2D tasks individually.
+        ``\#Trainable Param.'' denotes the proportion of trainable parameters to total parameters.
+    }
+    \resizebox{0.8\linewidth}{!}{
+    \begin{tabular}{*{9}{c}}
+    \toprule
+    \multirow{2}{*}[-0.25em]{Gate Type} & \multirow{2}{*}[-0.25em]{LoRA-Rank} & \multicolumn{2}{c}{Det.  (VOC, IoU=0.5)} & VQA & \multirow{2}{*}[-0.25em]{\#Trainable Param.} \\
+    \cmidrule(lr){3-5}
+                 &    & Recall & Prec. & Acc@1 & \\
+    \midrule
+    -- (Baseline)& 32 & 7.61   & 5.95  & 40.31 & 0.4\% \\
+    Sparse Top-2 & 32 & 39.04  & 35.21 & 46.95 & 1.6\% \\
+    \midrule
+    Weighted Sum & 32 & 9.78   & 5.33  & 44.71 & 1.6\% \\
+    Individual   & 32 & 28.38  & 25.64 & 48.54 & 2.4\% \\
+    \midrule
+    Sparse Top-2 & 16 & 32.81  & 24.46 & 39.11 & 0.8\% \\
+    Sparse Top-2 & 8  & 25.44    & 21.87     & 37.65      & 0.4\% \\
+    \bottomrule
+    \end{tabular}}
+    \label{tab:exp_abl_moe}
+\end{table*}
+
+\subsection{Quantitative Results.}
+\label{subsec:Quan}
+
+All results are provided in Table~\ref{tab:exp_2d}, ~\ref{tab:exp_3d}, ~\ref{tab:exp_joint} for different modality setups.
+Severe interference can be found in the experimental results, especially between the localizing tasks and semantic understanding tasks like VQA and captioning.
+After equipping with {\dec}, we can observe a remarkable improvement of approximately 20\% in all setups, demonstrating the effectiveness of our design in resolving the tug-of-war issue.
+Additionally, we compare our proposed point cloud encoder {\enc} with a recent work, 3D-LLM~\citep{hong20233dllm} in Table~\ref{tab:exp_3d}.
+We achieve a comparable performance on Scan2Cap, and outperform 3D-LLM on ScanQA by a significant margin, suggesting a better scene-level understanding capability of {\enc}.
+Besides, as shown in Table~\ref{tab:exp_joint}, as the complexity of interference among tasks increases, especially when tasks of different modalities are introduced, we can observe a huge performance drop when training the model with different modalities like image and point cloud simultaneously compared to separate training.
+Our proposed MoE-based decoder partially alleviates the degradation and even achieves comparable performance with separate training in some tasks.
+
+\subsection{Ablation and Analysis}
+\label{subsec:ablation}
+
+\textbf{LoRA-MoE.}
+The results are shown in Table~\ref{tab:exp_abl_moe}.
+We first ablate on MoE architecture by individually employing dedicated LoRAs for each tasks (denoted as ``Individual'' in the table).
+While the individual gate exhibits performance merits in specific tasks, its primary challenge is the difficulty in assigning suitable experts for tasks that are not encountered in the instruction dataset, thereby compromising the model's generalizability.
+Another observation is the superior efficacy of the sparse gate relative to the dense gate (denoted as ``Weighted Sum'' in the table), which is intuitive when considering that the dense gate can essentially be regarded as a singluar LoRA with additional parameters.
+Furthermore, we compare the performance of the sparse gate against the baseline model (single LoRA) under conditions of parameter-consistency during inference (\emph{i.e.}, sparse top-2 gate only uses half of rank in LoRA compared with baseline model).
+The enhanced performance of sparse gate demonstrate that \textbf{MoE transcends a mere aggregation of parameters}.
+
+\noindent\textbf{Gate Routing in MoE and Load Balancing.} 
+As shown in Figure~\ref{fig:abl_moe_lb}, there is a huge discrepancy in expert selection between detection and VQA tasks, which demonstrates the tug-of-war phenomenon, and explains why using a single LoRA yields poor performance on both tasks simultaneously.
+Additionally, it is found that the routing weights of experts assigned by gate network tend to concentrate on a subset of specific experts.
+In particular, in a 4-expert model, despite the superior performance compared to a 3-expert model, the final converged model ends up utilizing only 3 of 4 available experts.
+To further explore this imbalance issue, we conduct several experiments with load balancing loss (Equation~\ref{eq:load_balance}) in Table~\ref{tab:exp_abl_moe_lb}.
+As a result, no improvements and better routing results are observed, which is intuitive because directly employing load balancing strategies is incompatible and infeasible in an instance-based gate scenario (see Section~\ref{subsubsec:lora_moe}).
+We also attempt to replace the instance-based gate with token-based gate used in conventional MoE methods~\citep{shazeer2017sparsemoe, lepikhin2020gshard}.
+However, since only the LoRA modules are trained in our approach, the number of trainable parameters differs from conventional MoE models where all parameters of the entire foundation model are trained, resulting in poor convergence.
+
+\begin{figure}
+    \begin{minipage}{0.52\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/sec4_load_balance_2d.pdf}
+        \caption{\textbf{Gate routing on different 2D tasks.} We use different color to represent $i$-th LoRA. The proportion represents the score of each expert.}
+        \label{fig:abl_moe_lb}
+    \end{minipage}
+    \hspace{0.02\linewidth}
+    \begin{minipage}{0.46\linewidth}
+        \centering
+        \captionof{table}{
+            \textbf{Ablation studies on load balancing in MoE.} ``LB'' means apply load balance loss. \textbf{Token} means using token-based gate.
+        }
+        \resizebox{\linewidth}{!}{
+        \begin{tabular}{*{6}{c}}
+            \toprule
+            \multirow{2}{*}{\#Experts} & \multirow{2}{*}{LB} & \multirow{2}{*}{Token} & \multicolumn{2}{c}{Det.} & VQA \\
+            \cmidrule{4-6}
+            & & & Recall & Prec. & Acc@1 \\
+            \midrule
+            4 & & & 39.04 & 35.21 & 46.95 \\
+            4 & \checkmark & & 33.21 & 26.80 & 45.26 \\
+            \midrule
+            8 & & & 22.30 & 11.01 & 39.91 \\
+            8 & \checkmark & & 21.52 & 12.10 & 37.53 \\
+            \midrule
+            4 & & \checkmark & \multicolumn{3}{c}{Fail} \\
+            4 & \checkmark & \checkmark & \multicolumn{3}{c}{Fail} \\
+            \bottomrule
+        \end{tabular}}
+        \label{tab:exp_abl_moe_lb}
+    \end{minipage}
+\end{figure}
+
+
+
+\section{Conclusion and Limitations}
+
+\label{sec:conclusion}
+
+In this paper, we propose {\mname}, a unified multimodal framework, to effectively address the critical challenge of task interference in complex learning scenarios. 
+By integrating the Mixture-of-Experts (MoE) with LoRA, we present {\dec} decoder, which delivers specialized learning paths for different tasks and modalities. 
+After the validation across multiple modalities and tasks, {\mname} alleviates the severe tug-of-war issue and achieves a significant performance boost in both 2D and 3D tasks.
+
+\textbf{Limitations.} 
+Compared to separate training on a single modality, introducing simultaneously multiple modalities for joint training may result in performance degradation, posing a challenge for future research.
+The combination of MLLMs and MoE still has great potential in addressing this problem, especially for a more complicated real-world system like embodied AI scenarios that require more modalities as input.
+Besides, we will further explore the token-based gate with load balancing strategies, especially when the number of downstream tasks increases.
+
+
+
+
+
+

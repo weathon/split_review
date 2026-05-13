@@ -1,0 +1,417 @@
+\title{Generative Location Modeling for Spatially Aware Object Insertion}
+
+\begin{abstract}
+Generative models have become a powerful tool for image editing tasks, including object insertion.
+However, these methods often lack spatial awareness, generating objects with unrealistic locations and scales, or unintentionally altering the scene background.
+A key challenge lies in maintaining visual coherence, which requires both a geometrically suitable object location and a high-quality image edit.
+In this paper, we focus on the former, creating a \emph{location model} dedicated to identifying realistic object locations.
+Specifically, we train an autoregressive model that generates bounding box coordinates, conditioned on the background image and the desired object class.
+This formulation allows to effectively handle sparse placement annotations and to incorporate implausible locations into a preference dataset by performing direct preference optimization. 
+Our extensive experiments demonstrate that our generative location model, when paired with an inpainting method, substantially outperforms state-of-the-art instruction-tuned models and location modeling baselines in object insertion tasks, delivering accurate and visually coherent results. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Explicit modeling of object locations has recently proven to be an effective strategy for generating complex scenes.
+Methods that use this strategy often separate the tasks of determining \textit{where} objects should be placed and \textit{what} those objects should look like~\citep{feng2024layoutgpt, phung2024grounded, cho2024visual, lian2023llm}. 
+This two-step approach typically involves generating a spatial layout and then conditioning an image generation model on this layout to create the final image. 
+The success of these approaches has brought renewed attention to location modeling as a key component for achieving realistic and coherent scene generation. 
+
+We explore explicit location modeling for \textit{object insertion}, which involves determining where new objects can be placed in a given scene. 
+This is an important task with applications in generative data augmentation~\citep{xpaste, kupyn2024dataset, fang2024dataaugmentation}, virtual reality \citep{park2005virtualrealityplacement} and robotics~\citep{cheong2020whererelocaterobotics}. 
+Given a scene image and an instruction specifying an object to be added, object insertion aims to place the object in the scene with a realistic appearance and geometry, while preserving the background and other objects.
+Unlike generating a full scene layout~\citep{gupta2021layouttransformer}, object insertion must account for the rich contextual information provided by the image, 
+which imposes strong constraints on where objects can and cannot be placed.
+
+Current state-of-the-art object insertion methods rely on instruction-tuned image editing~\citep{instructpix2pix, diffree, hive, pbi}, which requires models to jointly learn the realism in both appearance (what) and spatial placement (where).
+This is a difficult task that requires large-scale object insertion datasets that are inherently hard to construct. 
+Despite training on such datasets, existing approaches often favor realism in appearance over placement, generating objects in unrealistic locations, replace or destroy existing objects, and create unintended changes in unrelated areas, as seen in \Figref{fig:intro-teaser}~(a). 
+
+In this work, we propose a two-stage object insertion pipeline that first identifies the object location using a dedicated \textit{location model}, then generates the object locally in the location using an inpainting model, as illustrated in \Figref{fig:intro-teaser}~(b).
+Object placement datasets~\citep{opa, pbi} suitable for training such models have recently been released.
+As it is unfeasible to manually label all possible locations, these datasets are inherently sparse, providing annotations for less than 1\% of possible locations.
+Additionally, there may be multiple realistic locations for any given image, making location modeling a one-to-many problem.
+State-of-the-art object placement models handle these issues by either assuming unlabeled areas as implausible locations~\citep{lin2018st, tripathi2019learning, placenet} or crafting custom loss functions~\citep{fopa, topnet}. 
+However, these strategies risk penalizing unlabeled positive locations and are also highly sensitive to annotation sparsity, limiting their scalability across datasets. 
+
+To overcome these challenges, we approach the problem from a generative perspective, as training a generative model only requires \textit{samples} from the target distribution. 
+Specifically, we represent the input image and the object class as a sequence of tokens and use an autoregressive transformer model~\citep{transformers, gpt2} to iteratively decode bounding box coordinates of plausible object locations. 
+Furthermore, we can fully leverage any additional negatively labeled locations by treating pairs of positive and negative labels as a preference dataset, where positive locations are preferred over negative locations. 
+This strategy enables to perform direct preference optimization~\citep{dpo} on the location model, further enhancing its accuracy.
+
+We empirically observe that given a precise location of the object to be generated, off-the-shelf inpainting models outperform state-of-the-art instruction-tuned object insertion models. 
+Moreover, we observe that any inaccuracy in estimating the object location can significantly degrade the image quality, highlighting the role of location modeling as the critical component of the object insertion pipeline. 
+Our location model produces high-quality locations, allowing it to outperform both instruction-finetuned models in object insertion and existing location models in terms of positional accuracy.
+We further validate the effectiveness of our approach in a user study.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.92\linewidth]{figs/intro_teaser.pdf}
+    \caption{Our proposed pipeline for object insertion (b), in contrast to instruction-tuned methods (a). We use a pretrained inpainting model and provide it with plausible locations for object insertion.
+    }
+    \label{fig:intro-teaser}
+\end{figure}
+
+Summarizing, our main contributions are as follows:
+
+\begin{itemize}[leftmargin=7mm]
+\item We propose a two-stage object insertion approach, and overcome the limitations of instruction-tuned editing with an explicit location model. 
+\item We effectively handle sparsity in location annotations with a generative approach: an image-conditioned autoregressive transformer that models bounding box locations. 
+\item We can leverage available negative annotations following our generative formulation using direct preference optimization, further improving the accuracy of our location model. 
+\item Through extensive experiments and a user study, we demonstrate that our approach achieves state-of-the-art performance in location modeling, and significantly outperforms instruction-tuned image editing models in object insertion tasks. 
+\end{itemize}
+
+
+
+\section{Related Work}
+
+
+\noindent\textbf{Instruction-based Image Editing.}
+InstructPix2Pix~\citep{instructpix2pix} introduced an approach that finetunes Stable Diffusion~\citep{ldm} to interpret text instructions, trained with a dataset of paired images before and after specific edits. 
+Subsequently, other methods~\citep{hive, hqedit, magicbrush} have released similar datasets for instruction-tuning, capable of changing the style and content of a given image.
+
+Only recently has there been an emphasis on adding objects using text instructions, supported by datasets that provide paired images where specific objects have been artificially removed by inpainting~\citep{pbi, diffree}. 
+One downside of these datasets is that they contain inpainting artifacts, which can cause models trained on them to replace existing objects or alter backgrounds. 
+Additionally, since these models are typically trained to regenerate the entire image, they often introduce unintended changes to the scene. 
+In contrast, our approach decouples the object insertion process by using a dedicated location model for determining placement and an inpainting model for rendering.
+This factorization allows for more control and precision in object insertion. 
+\noindent\textbf{Object Placement.}
+Traditionally, object placement has relied on copy-pasting an object segment by simply determining its location and scale~\citep{placenet,topnet,graconet,tripathi2019learning,fopa}. 
+However, this approach is not ideal for inserting objects into background images, as it requires the user to prepare an image of the object that fits seamlessly into the scene purely by placement.
+
+To avoid relying on object segments, some approaches predict locations from class labels by querying a classifier~\citep{contextcnn} on random bounding boxes, categorizing them as either plausible or implausible locations for the given class.
+To enable training a discriminative model, unlabeled locations are typically treated as negatives or implausible locations. 
+Such an assumption is not always valid in object placement, as the lack of annotations for specific locations does not necessarily indicate they are implausible.
+Therefore, penalizing them may result in an inaccurate location model.
+To overcome this limitation, we instead propose a generative approach that requires only samples from the target distribution, and does not make any assumption about unlabeled locations and only requires samples of the target distribution (\ie, positive locations). 
+
+\noindent\textbf{Layout Generation.} 
+Another related category of work is focused on scene layout generation, usually via a generative model of bounding box locations~\citep{jyothi2019layoutvae, gupta2021layouttransformer, chai2023layoutdm, inoue2023layoutdm} or segmentation maps \citep{lee2018context}.
+Such layouts are often used as a condition for image generation models such as GLIGEN~\citep{gligen} to generate complex scenes~\citep{feng2024layoutgpt, phung2024grounded, cho2024visual, lian2023llm, ganillm, feng2024ranni}.
+Unlike these full-layout generation approaches, our goal is to insert an object into an existing scene.
+Having access to the background image fundamentally changes the nature of the task. 
+On one hand, the background image provides valuable context for realistic object placement, but on the other hand, it imposes strong constraints on where objects can be placed.
+We therefore design a location model that integrates these contextual cues and avoids placement in unrealistic locations. 
+
+
+
+\section{Method}
+
+
+\subsection{Generative Location Modeling}
+Given the distribution of image $X$, plausible object locations $Y$, and classes $C$, we frame the location modeling problem using a \emph{generative model}, which estimates the conditional probability of the \emph{locations} as
+\begin{equation}
+\label{eq:independence}
+    P(Y\mid X, C) = \prod_{Y_i\in Y} P(Y_i\mid X, C),
+\end{equation}
+where $Y_i$ are different locations for an object of class $C$ to be placed within the image $X$. 
+Note that unlike discriminative models $P(C\mid X, Y)$, which require labels for both positive and negative locations to classify a given location, a generative model only requires samples of positive locations. 
+
+To model this generative process, we train an autoregressive model~\citep{transformers} that sequentially predicts the bounding box coordinates of plausible locations. 
+Specifically, each location $Y_i$ is represented as a bounding box with four components $\left[b_1^i,\,b_2^i,\,b_3^i,\,b_4^i\right] = \left[x_1,\,y_1,\,x_2,\,y_2\right]$, representing the coordinates of the top-left and bottom-right corners.
+Thus, given a dataset $\mathcal{D}$ which provides pairs of images $X$ and plausible locations $Y$ for object category $C$, we train the model using a negative log-likelihood objective:
+\begin{equation}
+\label{eq:main_objective}
+    \Ls_{\text{train}} = -\E_{(X,Y,C)\sim\mathcal{D}}\,\sum_{Y_i\in Y} \left[\,\sum_{k=1}^{4}\,\log P(b^i_k\mid b^i_{<k}, X, C)\,\right].
+\end{equation}
+where each bounding box coordinate $b^i_k$ is sequentially predicted, conditioned on previous coordinates $b^i_{<k}$, the image $X$, and the object class $C$. 
+
+It is important to note that at training time, we model multiple bounding boxes independently (\Eqref{eq:independence}) by predicting a \textit{single bounding box} (\ie, four coordinates) for a given input. 
+In other words, we sample a single location $Y_i$ from $Y$ during training. 
+This choice allows us to avoid issues related to the ordering of multiple plausible bounding boxes and arbitrary sequence lengths due to the sparsity of the annotations. 
+During inference, we are still able to produce multiple locations by independently sampling multiple times. 
+
+The model architecture and the training procedure are illustrated in \Figref{fig:method-main}. 
+We tokenize images and the class embeddings using a pre-trained Vision Transformer (ViT)~\citep{vit} and a CLIP encoder~\citep{clip}. 
+We encode bounding box coordinates by quantizing them to a grid with equally spaced bins of 1 pixel wide, (\ie, $512$ location tokens for $512\times512$ images). 
+The image tokens and the target class token are prepended to the sequence, and our location model is trained to predict the probability of each coordinate in an autoregressive manner.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figs/method_main.pdf}
+    \caption{Training scheme during pretraining (left) and direct preference optimization (right). }
+    \label{fig:method-main}
+\end{figure}
+\subsection{Leveraging Negative Labels via Direct Preference Optimization}
+While the training objective in \Eqref{eq:main_objective} allows training the location model on sparse positive annotations, training solely on positive feedback can lead to predictions in implausible locations.
+Incorporating negative annotations, when available, into the training objective can be beneficial for refining the model, encouraging it to assign lower likelihoods to undesirable locations and thereby improving overall accuracy.
+
+Our generative formulation allows us to use any negative labels in the dataset as well, so that the model can learn to avoid predicting bounding boxes for implausible locations. 
+Specifically, we treat the positive and negative labels as a preference dataset, where positive locations are implicitly preferred over negative ones, even though annotators were not explicitly asked to rank them. 
+Using this preference structure, we fine-tune the model with direct preference optimization (DPO)~\citep{dpo}, penalizing high logits assigned to negative labels. 
+
+Given a target location model $\pi_\theta$, a reference location model $\pi_{\text{ref}}$, and a preference dataset $\mathcal{D}_\text{DPO}$ where locations $Y^+$ are preferred over $Y^-$, we can derive a preference model~\citep{bradelyterry} as follows:
+\begin{equation}
+    P(Y^+\succ Y^-\mid X, C) = \left( 
+    1 + \exp\left(\beta\log\frac{\pi_\theta(Y^-\mid X, C)}{\pi_{\text{ref}}(Y^-\mid X, C)}-\beta\log\frac{\pi_\theta(Y^+\mid X, C)}{\pi_{\text{ref}}(Y^+\mid X, C)}\right)
+    \right) ^ {-1}
+    .
+\end{equation}
+Here, $\pi_\theta$ and $\pi_\text{ref}$ output the logits for the target model and the reference model, respectively, and $\beta$ is a hyperparameter. 
+We can maximize the preference of $Y^+$ locations by initializing the target and reference models from a pre-trained location model (trained using the objective in \eqref{eq:main_objective}), and then optimizing the target model using a negative log-likelihood objective:
+\begin{equation}
+    \Ls_\text{DPO} = -\E_{(Y^\text{+},Y^\text{-},X,C)\sim \mathcal{D}_\text{DPO}}\left[\log\sigma\left(\beta\log\frac{\pi_\theta(Y^+\mid X, C)}{\pi_{\text{ref}}(Y^+\mid X, C)} - \beta\log\frac{\pi_\theta(Y^-\mid X, C)}{\pi_{\text{ref}}(Y^-\mid X, C)}\right)\right].
+\end{equation}
+In this way, we are able to leverage any available negative labels in the object placement dataset, and thereby improve the accuracy of the location model. 
+
+
+
+\section{Experiments}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figs/exp_datasets.pdf}
+    \caption{Annotation format for the PIPE dataset (left) and OPA dataset (right). The PIPE dataset has one groundtruth location per image, whereas OPA provides multiple positive and negative locations.}
+    \label{fig:datasets}
+\end{figure}
+\subsection{Datasets and architecture}
+\label{sec:exp-details}
+\noindent\textbf{PIPE Dataset.}
+The PIPE dataset~\citep{pbi} was created by removing objects from object detection datasets~\citep{coco,openimages,lvis} by inpainting.
+This process results in pairs of images, one including the object and the other without it. 
+To train our location model we need positive bounding box locations, that we derive for the missing object by thresholding the pixel-wise difference between the two images. 
+An example is reported in \Figref{fig:datasets} (left).
+While the dataset offers a large number of 888,000 samples, many images contain inpainting artifacts, potentially introducing noise in the bounding box extraction process. 
+
+\noindent\textbf{OPA Dataset.}
+The OPA dataset~\citep{opa} was created by asking human annotators to judge the plausibility of object placement locations for a subset of COCO images~\citep{coco}.
+This dataset includes on average 41.5 annotations per image, and can be used to encourage diversity in location model predictions (see \Figref{fig:datasets} right for an example). 
+The train set includes 1022 images, and the test set include 130 images. 
+As OPA provides negative labels, we also use OPA as the preference dataset for DPO training.
+Note that instruction-tuned editing models cannot leverage this location dataset, as they require fully rendered images for training. 
+
+\noindent\textbf{Implementation details.}
+We use a small GPT-2~\citep{gpt2} architecture as our autoregressive location model. 
+For tokenizing the image and the object class, we use a ViT~\citep{vit} model pre-trained on ImageNet-21K~\citep{imagenet21k} as our image encoder and the CLIP text encoder~\citep{clip} as our object class encoder. 
+We pre-train on PIPE for 30K iterations and finetune on OPA for 3K iterations. 
+For batch size 64, the model can be trained on a single Nvidia V100 GPU.
+We quantize each box coordinate into one of 512 bins (\ie, one bin per pixel).
+For DPO training, we train using the OPA dataset for 4K iterations. 
+ 
+
+We evaluate the performance of our generative location model in an object insertion pipeline in \Secref{sec:object_insertion}, where we rely on PowerPaint~\citep{powerpaint} as the inpainting approach.
+We remark that our pipeline has the flexibility to incorporate any inpainting method for performing localized edits, and will ablate this choice in~\Secref{sec:ablation}.
+
+\subsection{Object Insertion}
+\label{sec:object_insertion}
+
+\begin{figure}
+   \centering
+   \includegraphics[width=0.9\linewidth]
+   {figs/appx_edited_image_scores.pdf}
+   \caption{Quantitative evaluation on the OPA dataset, higher and to the right is best. For instruction-tuned approaches, each dot represents a different guidance scale ranging from 2 to 10. For other methods, guidance scale has a negligible effect, and we therefore show a single point.}
+   \label{fig:exp-img-curve}
+\end{figure}
+\noindent\textbf{Baselines. }
+We compare our object insertion pipeline against recent instruction-tuned image editing models, which represent some of the most advanced and capable techniques for object insertion to date.  
+Specifically, we evaluate against general-purpose image editing models InstructPix2Pix~\citep{instructpix2pix}, HIVE~\citep{hive}, and MagicBrush~\citep{magicbrush}, as well as object insertion-specific models, Paint-by-Inpaint~\citep{pbi} cand Diffree~\citep{diffree}. 
+
+Moreover, we experiment with three additional explicit location models that we also pair with the PowerPaint inpainter.
+First, we test random locations as a simple baseline.
+Then, we train ContextCNN~\citep{contextcnn}, a classifier designed to assess masked regions of an image, determining their suitability for object placement.
+To be able to use it with the OPA class space, we retrain the model on COCO (whose classes comprehend all the ones in OPA.
+Furthermore, we train a Faster-RCNN object detector~\citep{fasterrcnn} using positive OPA annotations to serve as a high-performing discriminative model.
+
+\noindent\textbf{Evaluation Metrics.}
+Similar to existing image editing benchmarks~\citep{pbi}, we evaluate the success of object insertion by considering both how well the original scene is preserved and how accurately the target object is inserted. 
+Using an object detector~\citep{detr} we separate the background, which ideally should remain untouched, and the foreground, where the newly inserted object appears. 
+
+To measure background preservation, we compute the Structural Similarity Index Measure (SSIM)~\citep{ssim} on the background region. 
+To assess the accuracy of the object, we measure the CLIP similarity~\citep{clip} between the cropped object and the text ``\textit{an \{object class\}}''.
+If no new object is detected, we assign a CLIP score of 0 to reflect the failure to properly insert the object. 
+
+For the PIPE dataset, we also evaluate the diversity of edits by calculating the average LPIPS distance~\citep{lpips} across 10 different edits per background-object pair. 
+High LPIPS indicates that a model can generate diverse results from the same instruction, highlighting approaches that are limited to producing a single edit.
+\noindent\textbf{Results.}
+We compare instruction-finetuned image editing models, location models paired with strong inpainting models, and our approach in \Figref{fig:exp-img-curve}.
+Our approach substantially outperforms all baselines by leveraging a dedicated location model for inpainting, which effectively reduces background distortions while maintaining high-quality object generation. 
+
+By design, localized inpainting is an effective strategy for preserving the background, but it is notable that even a random location model outperforms the best instruction-finetuned method on background SSIM. 
+Since the key difference between our approach and other location modeling baselines lies in the plausibility of the predicted locations, the figure suggests that an accurate placement directly impacts the quality of inpainting results. 
+
+The instruction-tuned models often face a trade-off: they either preserve the background well but fail to generate the object convincingly, or they successfully generate the object but significantly alter the surrounding scene. 
+This inconsistency may stem from the fact that these models address both the placement and generation tasks simultaneously, leading to suboptimal object locations. 
+In contrast, using a dedicated location model allows one model to focus on spatial reasoning, while the inpainting method concentrates on rendering realistic objects. 
+\begin{figure}[t]
+\centering
+\begin{minipage}{.48\textwidth}
+\centering
+\captionof{table}{Evaluation on the PIPE benchmark. }
+\resizebox{\textwidth}{!}{
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}cccx{1.4cm}@{}}
+\toprule
+                 & BG SSIM & FG CLIP & LPIPS \\ \midrule
+InstructPix2Pix  & 0.5679 & 0.2670 & \textbf{0.3865} \\
+MagicBrush       & 0.6118 & 0.2579 & 0.0986 \\
+HIVE             & 0.5635 & 0.2047 & 0.1886 \\
+Diffree          & 0.6170 & 0.2517 & 0.1210 \\
+Paint-by-Inpaint & 0.7281 & 0.2672 & 0.0700 \\ \midrule
+Ours             & \textbf{0.8075} & \textbf{0.2774} & 0.1824 \\ \bottomrule
+\end{tabular}
+}
+\label{tab:exp-pipe}
+\end{minipage}
+\begin{minipage}{.48\textwidth}
+  \centering    
+  \includegraphics[width=0.99\linewidth]{figs/exp_userstudy.pdf}
+    \captionof{figure}{User study results on edited images (OPA). Left, blue: ours preferred. Right, red: baseline preferred. Middle, grey: no preference.}
+    \label{fig:exp-userstudy}
+\end{minipage}
+\end{figure}
+
+We further evaluate our approach on the PIPE test set~\citep{pbi}, which contains images with specific objects removed. 
+Using the same metrics reported in Table~\ref{tab:exp-pipe}, our results are consistent with those observed in the OPA test set. 
+Notably, Paint-by-Inpaint~\citep{pbi} lacks diversity, frequently generating identical outputs, as shown in \Figref{fig:exp-quali-pipe}. 
+This is likely due to training on datasets created by object removal through inpainting.
+Moreover, we appreciate how InstructPix2Pix and HIVE achieve very diverse edits. 
+However, we notice that this result is typically achieved by generating entirely new images, rather than editing the input scene, as also testified by their low background SSIM scores.
+
+\noindent\textbf{User Study. }
+To further validate that our model's insertions are favored by human observers, we perform a user user study comparing our method to the four strongest baselines.
+We show pairs of edited OPA images and ask users to indicate which of the two is the better edit, for 46 participants, each of which ranks 40 image pairs.
+
+Results are shown in \Figref{fig:exp-userstudy}.
+Participants preferred edits generated by our approach over those from baseline approaches, indicating that our metrics agree with human preference, and that better edit quality can be achieved through precise location modeling.
+
+\subsection{Location Modeling}
+\label{sec:exp-location}
+\noindent\textbf{Baselines. }
+We compare our generative location model against two discriminative approaches that classify locations as plausible or implausible, namely ContextCNN~\citep{contextcnn} and our Faster-RCNN~\citep{fasterrcnn} based location model, as described in \Secref{sec:object_insertion}.
+Additionally, we compare to two object placement baselines~\citep{graconet,fopa} that perform placement of specific object segments rather than generic class labels.
+We use the official implementations relying on foreground segments available within the OPA dataset.
+Note that a direct comparison to these two methods is challenging, as our method does not use the object segment, and it is hard to say whether access to one makes the task harder or easier.
+Still, we include these baselines for completeness.
+
+\begin{figure}[t]
+\begin{minipage}{.45\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figs/exp_location_quali.pdf}
+\end{minipage}
+\hspace{0.1cm}
+\begin{minipage}{.52\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figs/exp_tprfpr_curve.pdf}
+\end{minipage}
+\caption{
+(Left) Example evaluation scenario. Predicted boxes are counted only if a positive or negative ground-truth box meets an IoU above the threshold.
+(Right) TPR-FPR curves. Each line is constructed by increasing the number of sampled locations from $\{ 10, 20, \ldots, 100 \}$. Higher and to the left is better.}
+\label{fig:location_modeling_results}
+\end{figure}
+
+\noindent\textbf{Evaluation Metrics.}
+The OPA test set provides plausible (positive) and implausible (negative) locations for objects given an image. 
+However, due to the sparse nature of these annotations, it is impossible to sample locations until every ground-truth bounding box is matched with a prediction. 
+Therefore, we evaluate location models based on a ``hit rate'' metric, which compares the rate of each predicted box being a plausible or implausible location.
+Specifically, we measure the True Positive Rate (TPR) and False Positive Rate (FPR) for a given set of predicted locations. 
+Given $K$ predicted locations, we match them to the ground-truth labels using the Hungarian algorithm~\citep{hungarian}, where the cost function is the inverse of the intersection over union (IoU). 
+
+True positive predictions are defined as predictions assigned to positive labels with an IoU above 0.7, while false positive predictions are those assigned to negative labels under the same IoU threshold. 
+Any positive or negative ground-truth locations that are not matched are counted as false negatives and true negatives. 
+Predictions that do not correspond to any labeled locations are ignored, as their true labels cannot be determined.
+We refer the reader to \Figref{fig:location_modeling_results} (left) for an example of such assignments.
+TPR and FPR are then computed using standard definitions.
+Intuitively, TPR represents the rate of a predicted location being a correct (positive) location, and FPR represents the rate of a predicted location being an incorrect (negative) location.  
+\noindent\textbf{Results.}
+We plot the TPR and FPR for different number of sampled locations $K=10, 20, \dots, 100$ in \Figref{fig:location_modeling_results} (right). 
+Our generative location model consistently achieves a higher TPR at the same FPR, appearing in the top-left region of the plot.
+In contrast, discriminative baselines~\citep{contextcnn, fasterrcnn} fail to reach a high TPR, even after predicting 100 locations, possibly due to the penalization of unlabeled positive locations during training.
+Our generative approach avoids any assumption about unlabeled locations, allowing it to achieve higher accuracy in identifying plausible ones. 
+This finding suggests the effectiveness of generative modeling in scenarios where the sparsity in annotations hinders training a discriminative model.
+\subsection{Ablation Study}
+\label{sec:ablation}
+
+\noindent\textbf{DPO Training.}
+Training a generative location model exclusively on positive locations already demonstrates strong performance, as shown in \Figref{fig:location_modeling_results} (right).
+However, incorporating negative labels further enhances accuracy by explicitly guiding the model on where \textit{not} to predict object locations. 
+Notably, unlike existing location modeling techniques, which assume non-labeled locations as negative even when negative labels are present, our approach leverages only the negative labels provided by annotators. 
+This ensures more precise predictions, as it avoids the potential inaccuracies introduced by assuming non-labeled locations are negative.
+
+\noindent\textbf{Alternative Inpainting Methods. }
+Our location model is not tied to a single inpainting method and can incorporate various inpainting techniques. 
+To illustrate this, we use the same predicted locations to render objects with the inpainting model of GLIGEN~\citep{gligen}. 
+The resulting images rendered achieve a background SSIM of 0.6511 and foreground CLIP of 0.2833, compared to a performance of 0.7184 background SSIM, 0.2849 foreground CLIP, when using PowerPaint. 
+Obtaining similar foreground CLIP score indicates that inpainting is often successful even with the older GLIGEN model.
+We therefore expect that our approach benefits from future advancements in inpainting techniques as well.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figs/exp_quali_opa.pdf}
+    \caption{Comparison between our method + powerpaint, and instruction-guided image editing models on the OPA dataset. Best viewed electronically.}
+    \label{fig:exp-quali-opa}
+\end{figure}
+\begin{figure}[!htb]
+    \includegraphics[width=\linewidth]{figs/exp_quali_pipe_short.pdf}
+    \caption{Comparison between our method + powerpaint, and instruction-guided image editing models on the PIPE dataset. Additional results are available in \Secref{sec:appx-quali}. Best viewed electronically.}
+    \label{fig:exp-quali-pipe}
+\end{figure}
+
+
+
+
+\section{Discussion}
+
+\noindent\textbf{Inference Time.}
+Our location model introduces a minimal overhead to the overall object insertion process. 
+To measure this, we compare the inference time of the location model relative to the time required for rendering the image (\ie, inpainting).
+On an average across 100 runs, our model takes 0.03 seconds to sample a single location on a Nvidia Tesla V100 GPU, a minor addition compared to the 7.10 seconds needed to render an image using a 50-step diffusion reverse process for a StableDiffusion v2.1 checkpoint~\citep{ldm}.
+Paying a small upfront cost for identifying a plausible location leads to a significant improvement in the quality of object insertion.
+
+\noindent\textbf{Controlled Location Sampling.}
+\begin{figure}
+    \centering
+    \includegraphics[width=0.95\linewidth]{figs/disc_top_left.pdf}
+    \caption{Controlled location sampling for positional instructions, achieved by restricting the allowed sampling region. Instruction-tuned models often fail to follow positional instructions.}
+    \label{fig:disc-top-left}
+\end{figure}
+A location model not only automates the process of determining where to insert objects but also allows users to specify locations that meet particular requirements. 
+Current instruction-tuned image editing models struggle with positional instructions, such as ``Add an apple to the top-left of the image.''
+In contrast, our location model can handle these requests by constraining model outputs to specific areas, such as by sampling only the top-left coordinates.
+As illustrated in \Figref{fig:disc-top-left}, by factorizing the object insertion process into a location modeling step and an inpainting step, our approach offers increased control over object placement.
+
+\noindent\textbf{Limitations.}
+Although localized object insertion helps minimize distortions in the background, predicted bounding box locations may sometimes occlude more of the background than necessary. 
+As seen in \Figref{fig:disc-failure}, large bounding boxes may lead to unwanted changes in the scene, such as changes to the background or inadvertently occluding foreground objects. 
+It may also result in unrealistic background effects, such as missing shadows or reflections.
+These issues could potentially be mitigated by predicting fine inpainting masks within the bounding box regions or by developing inpainting techniques tailored specifically for object insertion, which we leave as future work.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.65\linewidth]{figs/disc_failure_cases.pdf}
+    \caption{Example failure case observed when inpainting large areas, for instruction ``add a horse''.}
+    \label{fig:disc-failure}
+\end{figure}
+
+
+
+\section{Conclusion}
+
+In this paper, we present a location model that identifies plausible locations for objects to be inserted within an image. 
+By taking a generative approach, we are able to work with sparsely annotated location datasets.
+We also show that it is beneficial to use negative labels via direct preference optimization.
+Our experiments suggest that in the task of object insertion, separating the problems of \emph{where} to place an object and \emph{what} to place in the given location, is currently much more reliable than instruction-tuned insertion approaches.
+
+More generally, we believe that building spatial awareness is a key factor for building reliable models interacting with the real world.
+This is true whether a model operates in the image editing setting, as in this work, or in more complex domains, such as robotics or virtual reality. 
+Our work shows that a model is able to learn such awareness from example positive and negative annotations.
+Although we focus on locations for 2D bounding boxes conditioned on images, we hope to see similar models scale to handle other scene representations (\eg, depth or semantic layouts) and precise locations (\eg, 3D bounding boxes or object masks) in the future. 
+
+\paragraph{Broader Impact Statement}
+Spatial awareness is crucial for real-world applications where precise and context-aware object placement is necessary. 
+Improving the reliability of object insertion methods can benefit numerous fields, such as augmented reality, robotics, and generative data augmentation, by enabling more realistic and practical scene manipulations.
+However, image editing methods can also be misused, for example, to manipulate images by inserting individuals into scenes to damage their reputation. 
+Our method, which specifies only the desired object class rather compositing a background image and a specific target object, is hopefully less suitable for such malicious use cases.
+Nevertheless, one should consider malicious use cases of image editing methods before deployment, especially if used in real world or safety-critical applications.
+
+\paragraph{Reproducibility Statement}
+We provide comprehensive details of our architecture and data preprocessing steps in \Secref{sec:exp-details} and \Secref{sec:appx-archi}.
+  
+Furthermore, all datasets used in our experiments~\citep{opa, pbi} are publicly available, facilitating the replication of our work by the community. 
+
+
+
+
+
+

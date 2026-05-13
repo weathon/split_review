@@ -1,0 +1,432 @@
+\title{Are Language Model Logits Calibrated?}
+
+\begin{abstract}
+Some information is factual (e.g., ``Paris is in France''), whereas other information is probabilistic (e.g., ``the coin flip will be a $[Heads/Tails]$.'').  We believe that good Language Models (LMs) should understand and reflect this nuance.
+Our work investigates this by testing if LMs' output probabilities are \textit{calibrated} to their textual contexts. We define model ``calibration`` as the degree to which the output probabilities of candidate tokens are aligned with the relative likelihood that should be inferred from the given context. For example, if the context concerns two equally likely options (e.g., heads or tails for a fair coin), the output probabilities should reflect this. Likewise, context that concerns non-uniformly likely events (e.g., rolling a six with a die) should also be appropriately captured with proportionate output probabilities. We find that even in simple settings the best LMs (1) are poorly calibrated, and (2) have systematic biases (e.g., preferred colors and sensitivities to word orderings). For example, \texttt{gpt-4o-mini} often picks the first of two options presented in the prompt regardless of the options' implied likelihood, whereas \texttt{Llama-3.1-8B} picks the second. Our other consistent finding is mode-collapse: Instruction-tuned models often over-allocate probability mass on a single option. These systematic biases introduce non-intuitive model behavior, making models harder for users to understand.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+We investigate the extent to which language model (LM) output probabilities are calibrated to the numeric content of their contexts. Consider the contexts below:
+\begin{exe}
+ \ex \label{intro:example1} {From \textbf{17} \textcolor{blue}{\textit{blue}}  marbles and \textbf{99} \textcolor{red}{\textit{red}} marbles, Tommy reached blindly into a bag and grabbed a marble that was the color $[blue/red]$} 
+ \ex \label{intro:example1b} {From \textbf{98} \textcolor{blue}{\textit{blue}}  marbles and \textbf{99} \textcolor{red}{\textit{red}} marbles, Tommy reached blindly into a bag and grabbed a marble that was the color $[blue/red]$} 
+ \end{exe}
+\begin{figure}[h]
+ \centering
+ \includegraphics[width=\linewidth]{figures-keynote/the-medium-fig.pdf}
+ \caption{\textbf{Models produce  un-calibrated results}. Inputting Examples 1 and 2 to \texttt{gpt-4o} different, uncalibrated behaviors arise in the model probabilities. For {(1)}, \texttt{gpt-4o} over-weights the first option listed in the prompt, predicting \textcolor{blue}{\textit{blue}} with 90.4\% when 15\% is appropriate. For {(2)}, \texttt{gpt-4o} over-weights the option with a higher number beyond the calibrated ratio, predicting \textcolor{red}{\textit{red}} with 99.7\% when 50.2\% is appropriate. We term the first behavior \texttt{Pick First} and the second \texttt{Pick Higher}.
+ }
+ \label{fig:big-fig}
+\end{figure}
+
+We believe the probabilities for the next generated token should be calibrated to the relevant numeric content, capturing some of the nuance of probabilistic information. E.g., in the examples above, the probability of an LM continuing with the \textit{bracketed tokens} should be proportional to the respective \textbf{bolded} values. In Example \ref{intro:example1}, the probability of \textit{blue} should be approximately $\frac{1}{5}$th the probability of  \textit{red}. We also evaluated how models behave when prompted to sample from distributions, like below:
+\begin{exe}
+ \ex \label{intro:example2} {Sampling from a uniform distribution with support from \textbf{2} inclusive to \textbf{5} exclusive, I sampled the number $[\textit{0}/\textit{1}/\textit{2}/\textit{3}\dots\textit{9}]$}
+\end{exe}
+In Example \ref{intro:example2}, the tokens \textit{2, 3, 4} should each have a probability of $\sfrac{1}{3}$, while other digits should have probabilities close to 0. In other words, when the target output is based directly on probabilities discernible from the context, randomness should arise from the model probabilities and the sampling algorithm, rather than from arbitrary factors within the context.
+\begin{dmbox}{What Do We Mean By Calibration?}
+LMs output probabilities are \textit{calibrated} to their contexts if the probabilities of relevant tokens correspond to the numeric content implicitly or explicitly defined by their contexts. If tokens $t_1, t_2, \dots t_n$ are indicated by context $C$ to have probabilities $P = p_1, p_2 \dots p_n$, a calibrated LM $m$ outputs corresponding probabilities $\pi_i = m(t_i | c)$: 
+ \[ p_i \propto	 \pi_i,\quad i\- \in \- 
+ 1, 2 \dots n. \]
+We measure calibration by the distance between $P$ and $\Pi = \pi_1, \pi_2, \dots \pi_n$, \Cref{sec:design:metrics}.
+\end{dmbox}
+
+Stepping back, our motivation is drawn from the fact that while pre-training endows language models with a wide range of capabilities \citep{brown2020language, wei2022emergent}, further training can increase the utility of existing models by encouraging them to follow instructions \citep{wei2021finetuned,sanh2021multitask} or match human preferences \citep{ouyang2022training} rather than human behavior implicit in natural human text. 
+Part of this project is ensuring that a model's overt reasoning process aligns with its internal reasoning process \citep{lanham2023measuring}. This idea is also critical for model explanation methods \citep{chen2023models}: counterfactual simulatability requires that an explanation captures the ``reason`` a model arrived at an answer. Along the same lines, for contexts that call for contextual calibration, e.g., situations where the context suggests probabilities over the next tokens,  the most direct solution is for models to yield exactly those probabilities. \citet{kusner2017counterfactual} also studies probability differences in the setting of counterfactual fairness.
+
+There are large-scale efforts for models to not reproduce endemic online biases \citep{bai2022training,rudinger2018}; we test if models are calibrated to the numeric content in context rather than other patterns. Such biases are common with people, like the first-mentioned bias \citep{van2024random} where the first option listed is favored. LLMs have also been shown to exhibit biases concerning option order in multiple-choice questions \citep{pezeshkpour2023large}.
+\begin{dmbox}{Contributions: Models Are \textit{Not} Calibrated}
+Though different models have different error patterns, no model is well-calibrated. Moreover, there are some shared themes across models and model families:
+\begin{enumerate}[leftmargin=*]
+ \item Mode-collapse: Instruction-tuning tends to improve the allocation of probability mass upon valid options, but instruction-tuning also leads to decreased entropy in model outputs. This can both improve (such as in Example \ref{intro:example1}) or reduce (such as in Example \ref{intro:example2}) calibration.
+ \item Models have systematic tendencies: Many models show preferences for certain tokens (such as numbers or colors), and the word order can also influence which tokens the models favor.
+\end{enumerate}
+\end{dmbox}
+
+
+
+\section{Related Work}
+
+\paragraph{Models struggle to calibrate internal uncertainty with textual outputs.} 
+A related but separate line of work has studied the calibration in neural networks in terms of their ability to match their prediction confidence with prediction accuracy: a network with $0.8$ confidence on each prediction should classify $80\%$ of examples correctly \citep{guo2017calibration, minderer2021revisiting}. \citet{yona2024can,kumar2024confidence} both investigate how well the model outputs align with uncertainty. \citet{yona2024can} report that models struggle to exhibit their internal uncertainty with text, while \citet{kumar2024confidence} measure how well model confidence is aligned internally (model probabilities) and externally (via eliciting model to choose among a Likert scale.) In this work, we look at the calibration from the perspective of agreement between the probability of predicted outputs and the contextually defined likelihood of outputs in the text. We find that models often are \textit{certain} when they should be properly \textit{uncertain}; {mode-collapse} has been found to arise both via supervised fine-tuning and reward-based fine-tuning \citep{oattributing, janus2024modecollapse}.
+
+\paragraph{Recent work investigates if language models can output random results.} \citet{van2024random} shows that single coin flip predictions are biased towards heads and otherwise demonstrate a first-mentioned bias. \citet{silva2024large} shows that large models can 1) correctly describe Matching Pennies, a game popular in game theory, and 2) code optimal behavior. \citet{hopkins2023can}, work closely related to our own, examines whether language models can induce uniform distributions in the 0 to 1 interval. 
+
+
+
+\section{Experimental Design}
+
+We run two experiments that evaluate if model probabilities are calibrated to the numeric values either explicit or implicit in context, \Cref{sec:exp:exp1} (\texttt{Distributions}) and \Cref{sec:exp:exp2} (\texttt{Probabilities}).
+
+\subsection{Problem Setup}\label{sec:design:problem_setup}
+Each problem assumes a context $C$ to be continued by a relevant token among $t_1, t_2, \dots t_n = T \subset V$ where $V$ is the full vocabulary. Each token $t_i$ is associated with a probability $p_i$ forming a distribution, $P = p_1, p_2, \dots p_n$. In Example \ref{intro:example1}, $T$ is $\{\textrm{\textit{red}}, \textrm{\textit{blue}}\}$ with $P = \{\textrm{\textit{red}} : 0.75, \textrm{\textit{blue}} : 0.25\}$. For a model $m$, we define its probabilities over these words as $\Pi = \pi_1, \pi_2, \dots$ where $\pi_i \approx m(t_i | C)$, with one addendum. We sum the probabilities of all tokenizations for a given word, which can include capitalization and spaces: $\pi_i = \sum_{s \in \textrm{Tokenizations}(t_i)} m(s | C)$. E.g., we sum probabilities for ``red'', ``Red'', ``\_red'', and ``\_Red.''
+
+\subsection{Metrics and Evaluation}\label{sec:design:metrics}
+Our primary metrics below help us ask how well a model calibrates to numeric information in context.
+
+\textbf{Probability Mass (PM)}: Calibration, the relative probability mass on tokens in \textit{T}, only matters if the \textbf{PM} that falls upon $T$ is sufficient, 
+$\textrm{PM}(T) \doteq \sum_{t\,:\,T} \Pi_t
+.$
+If $\textrm{PM}(T)$ for a model is low (say, 0.30), this indicates that the model is not capturing the intended relationship between the context and $T$. However, when $\textrm{PM}$ is high (say, 0.75), we can start to meaningfully ask questions about how probability mass is allocated among, say, \textit{red} and \textit{blue}. While our metric for measuring calibration (introduced below) would also capture when the PM is too low, separately measuring this information makes it easier to understand and compare model behavior.
+
+\textbf{Relative Entropy (RE):} To detect mode collapse, we measure \textbf{RE}, the ratio between entropy $\textrm{H}$ of model probabilities and the calibrated probabilities, $\textrm{H}(\Pi)/\textrm{H}(P)$. An {RE} less than one implies the probability mass is overly concentrated.
+ 
+\textbf{Wasserstein Distance (WD)}: To measure  \textbf{calibration}, we use \textbf{WD}. 
+WD \citep{kantorovich1939mathematical}
+ captures the movement between one distribution (or set of values) and another.\footnote{Kullback–Leibler (KL) divergence is also a natural choice. However, a number of the target distributions we have include 0 values where KL would be undefined. We also compute Mean-Squared Error (MSE) but don't find a material difference in the findings so only report the WD.} %
+
+\subsection{Models} We test open-source models that have both base and instruction-tuned versions: \texttt{Mistral-7B-v0.1}, \texttt{Mistral-7B-v0.3}, \texttt{Mixtral-8x7B-v0.1}, \texttt{Yi-1.5-9B}, \texttt{Yi-1.5-34B}, \texttt{Meta-Llama-3.1-8B}, \texttt{gemma-2-9b}, \texttt{gemma-2-27b} \citep{jiang2023mistral,jiang2024mixtral,young2024yi,dubey2024llama,team2024gemma}; and four proprietary models, \texttt{gpt-3.5}, \texttt{gpt-4-turbo}, \texttt{gpt-4o-mini}, and \texttt{gpt-4o} \citep{brown2020gpt,achiam2023gpt,openai2023gpt4o}. We prompt instruction-tuned models to be calibrated. We refer to the base, unprompted version of the models as ``base'' and the instruction-tuned, prompted models as ``chat.
+        
+\subsection{Experiment: \texttt{Distributions}}\label{sec:exp:exp1}
+This experiment tests if models can produce a uniform distribution in their output probabilities. Example \ref{intro:example2}, repeated below, is representative of the instances in this dataset: 
+\begin{exe}    \exr{intro:example2}
+ {Sampling from a uniform distribution with support from \textbf{2} inclusive to \textbf{5} exclusive, I sampled the number $[\textit{0}/\textit{1}/\textit{2}/\textit{3}\dots\textit{9}]$}
+\end{exe}
+We test across different numeric ranges, range inclusivities, and templates. The numbers scale from 10 to 903 and we use five different templates; there are 4500 unique instances. In some of our analyses, we group problem ranges and inclusivities that support the same tokens: For example, [12, 15) and [92, 95) are grouped. There are 615 such groups.
+
+From here, the question is if the distribution of the next token is calibrated to the uniform distribution $\Pi^C = \mathcal{U}(2, 5)$. As noted above, we report WD, which for this example would be: $\textrm{WD}(\Pi^T, \mathcal{U}(2, 5)) = \textrm{WD}(\Pi^T, [0, 0, \sfrac{1}{3}, \sfrac{1}{3}, \sfrac{1}{3}, 0, \dots, 0]$,
+where $T$ includes digits (tokens) 0 to 9 and $\mathcal{U}(2, 5)$ covers all digits (with 0 for unsupported digits). 
+
+\paragraph{Additional Metrics.} We introduce three metrics to understand if there are patterns in the mode.
+
+\textbf{Mode Probability} is the maximum probability of $\Pi$ averaged across all examples in the dataset, $\textrm{AVG}_{\textrm{dataset}} \max \Pi$.
+
+\textbf{Mode Stability} is the rate at which the most likely token is preserved between base and chat versions of a model averaged across all examples in the dataset,
+$\textrm{AVG}_{\textrm{dataset}}(\mathds{1}(\arg\max \Pi_{\textrm{base}} = \arg\max \Pi_{\textrm{chat}}))$.
+
+\textbf{Mode Frequency} examines whether there are biases for particular tokens (numbers). This metric measures the frequency of the mode averaged across distributions. Because different distributions cover different digits, we group the distributions by underlying problem range and inclusivity: E.g., [2, 5) and [132, 135) are grouped. This is equivalent to: (1) setting the temperature to 0 (greedy sampling), (2) averaging over the groups, keeping the digits dimension, (3) taking the maximum for each group, and (4) averaging across all maximums,
+$\textrm{AVG}(\max_\textrm{digits}\textrm{AVG}_{\textrm{distributions}, \textrm{ keepdim}}(\Pi^{\tau = 0}))$.
+
+\subsection{Experiment: \texttt{Probabilities}}\label{sec:exp:exp2}
+This experiment tests whether the models' output probabilities reflect values in their context.\footnote{\texttt{Probabilities} tests the basic rules of probabilities. As models improve, tests that capture a wider range of probabilities rules would be exciting: Bayes theorem, De Morgan's Laws, Event Independence, etc.} The following is a representative example of the dataset:
+
+\begin{exe}
+ \ex \label{experiments:ex2:1} {From \textbf{17} \textit{red} marbles and \textbf{99} \textit{blue} marbles, Billy reached blindly into the bag and grabbed a marble with the color $[\textit{red}/\textit{blue}]$} 
+\end{exe}
+ We use five templates, three numeric scales with 100 configurations each, and 110 pairs of options (e.g., \textcolor{red}{red}/\textcolor{blue}{blue}, or \textcolor{orange}{orange}/\textcolor{C_FIRST}{purple}). The numeric scales are (1) all numbers under ten, (2) ten numbers sampled under 100, and (3) ten numbers sampled under 1000. To identify potential biases, we analyze how model behavior varies with respect to all of the settings listed above. Some factors, such as the numeric context, should influence the model's behavior while others, such as the ordering of the options, should not.
+
+To simplify the analysis of this large number of configurations, we categorize the model behavior into one of six potential reference points based on WD. In practice, we find that models typically follow one of these six behaviors, making this a useful summary of performance.
+
+\paragraph{Baselines and Reference Points}
+First, we create \texttt{Random} baselines to contextualize the metric values. Each $\textrm{Random}_{\tau}$ baseline: For every row in the dataset, the random baseline produces a $\Pi$ by uniformly sampling two random numbers from 0 to 1 which are then transformed into a distribution parameterized by a temperature $\tau$ using the softmax function. Second, we observe several behaviors in the results; we create a baseline for each of these behaviors (listed below). \begin{enumerate}[itemsep=0em]
+ \item [0.] \texttt{Null:} The PM is too low. This can happen for smaller models like \texttt{Mistral-7B-v0.1}.
+ \item [1.] \texttt{Calibrated:} Sets $\Pi = P$. This is the best case.
+ \item [2, 3.] \texttt{Pick Higher:} Sets all probability mass on the $\arg\max \Pi$. This baseline is calibrated directionally: The option with higher probability is correctly preferred but not proportionally. It could alternatively be viewed as mode-collapse. Instead of placing all probability mass on the $\arg\max \Pi$, $\texttt{Pick Higher}_{p = q}$ places $q$ (say, 0.7) on $\arg\max$ and $1 - q$ on  $\arg\min$  (0.3). (\texttt{Pick Lower} analogously places all probability mass on the $\arg\min \Pi$, this rarely occurs.)
+ \item [4, 5.] \texttt{Pick First:} Sets all probability mass on the first option, ignoring numeric information. \texttt{Pick Second:} analogously places all probability mass on the second option.
+\end{enumerate}
+
+
+
+\section{Results}
+
+\subsection{\texttt{Distributions}}\label{sec:results:exp1}
+There are a few patterns across all models. \Cref{tab:exp1} (left) reports the primary metrics. Chat (instruction-tuned) models are less calibrated and have a lower RE than their base counterparts. The base models are more calibrated than the $\textrm{Random}$ baselines. All tested \texttt{gpt-*} models have similar calibration scores to the open-source chat models.
+\begin{table}[ht!]
+\small
+\centering
+\begin{tabular}{llrrrrr|rrr}
+\toprule
+{} & \multicolumn{2}{c}{$\textrm{PM}_\uparrow$} & \multicolumn{2}{c}{$\textrm{RE}_\updownarrow$} &  \multicolumn{2}{c|}{$\textrm{WD}_\downarrow$} & \multicolumn{2}{c}{Mode Prob.} &  \multicolumn{1}{c}{Mode} \\
+&            Base & Chat  &  Base & Chat  &         Base & Chat &  Base & Chat & \multicolumn{1}{c}{Stable}  \\
+\midrule
+Idealized & \multicolumn{2}{c}{1.00} & \multicolumn{2}{c}{1.00} & \multicolumn{2}{c|}{0.00} & 0.23 & 0.23 & -\\
+$\textrm{Random}_{\tau = 0.1}$      &  \multicolumn{2}{c}{1.00} &    \multicolumn{2}{c}{0.30} &     \multicolumn{2}{c|}{0.78}& - & - & - \\
+$\textrm{Random}_{\tau = 1.0}$      &    \multicolumn{2}{c}{1.00} &   \multicolumn{2}{c}{1.60} &   \multicolumn{2}{c|}{0.38} & - & - & - \\
+\midrule
+Meta-Llama-3.1-8B &    0.81 &  0.79 &             1.16 &  0.68 &          0.17 &  0.44  &          0.25 &          0.60 &            0.48\\
+Mistral-7B-v0.1   &    0.91 &  0.94 &             1.12 &  1.04 &          0.13 &  0.21 &          0.26 &          0.33 &            0.58 \\
+Mistral-7B-v0.3   &     0.90 &  1.00 &             1.12 &  0.52 &          0.14 &  0.56 &          0.26 &          0.65 &            0.35\\
+Mixtral-8x7B-v0.1 &    0.96 &  1.00 &             1.02 &  0.26 &          0.16 &  0.72  &          0.32 &          0.82 &            0.52\\
+Yi-1.5-34B        &    0.95 &  0.92 &             1.03 &  0.40 &          0.22 &  0.62 &          0.37 &          0.75 &            0.53 \\
+Yi-1.5-9B         &     0.90 &  0.95 &             1.09 &  0.47 &          0.18 &  0.63 &          0.30 &          0.75 &            0.49\\
+gemma-2-27b       &    0.96 &  1.00 &             1.05 &  0.48 &          0.13 &  0.59 &          0.29 &          0.68 &            0.46 \\
+gemma-2-9b        &    0.87 &  1.00 &             1.16 &  0.47 &          0.14 &  0.60 &          0.22 &          0.66 &            0.40 \\
+\midrule
+$\textrm{AVG}_{\textrm{OpenSource}}$ & 0.91 & 0.96  & 1.09 & 0.57 & 0.16 & 0.58 &  0.28 & 0.66 & 0.48\\
+\midrule
+gpt-3.5           &     \multicolumn{2}{c}{0.99} &              \multicolumn{2}{c}{0.70} &           \multicolumn{2}{c|}{0.42} & - & 0.53 & -\\
+gpt-4-turbo       &     \multicolumn{2}{c}{1.00} &              \multicolumn{2}{c}{0.32} &           \multicolumn{2}{c|}{0.69} & - & 0.79 & - \\
+gpt-4o            &     \multicolumn{2}{c}{0.95} &              \multicolumn{2}{c}{0.59} &           \multicolumn{2}{c|}{0.49} & - & 0.58 & - \\
+gpt-4o-mini       &     \multicolumn{2}{c}{0.73} &              \multicolumn{2}{c}{0.42} &           \multicolumn{2}{c|}{0.58} & - & 0.73 & - \\
+\midrule
+$\textrm{AVG}_{\textrm{Proprietary}}$  &   \multicolumn{2}{c}{0.92} &  \multicolumn{2}{c}{0.51} &   \multicolumn{2}{c|}{0.54} & - & 0.66 & - \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{\texttt{Distributions} Results.} Metrics described in \Cref{sec:design:metrics,sec:exp:exp1}. \textbf{Left:
+(1)} Calibration scores WD are lower (better) for base models than chat models, with the probability mass PM being relatively high for both. \textbf{(2)} The relative entropy decreased significantly with instruction-tuning to $\sim0.5$ of the ideal value, with \textbf{(3)} the entropy of \texttt{gpt-*} models being similarily low.  \textbf{Right: (1)} Averaged, the probability mass on the top-token for chat models is $+43\%$ above the calibrated ideal, explaining how the relative entropy increased. \textbf{(2)} The top-tokens remain the same across base and chat models for 48\% of instances. Together, these results suggest a form of mode-collapse.}
+\label{tab:exp1}
+\end{table}
+
+We find evidence that the reduced performance of chat models results from their tendency to over-allocate probability on a subset of valid tokens. \Cref{tab:exp1} (right) provides additional metrics that suggest mode-collapse. For chat models, the most likely token receives, on average, $66\%$ of the probability mass (up from $28\%$ for base models, beyond the empirical ideal $23\%$, on this dataset). The most likely token remains the same for $48\%$ instances across base and chat models, suggesting that the mode is often preserved.
+
+\begin{figure}[ht!]
+ \centering
+
+\ttfamily
+\begin{tikzpicture}
+    \begin{groupplot}[
+group style={columns=2},
+scale only axis,
+view={0}{90},
+width=4.9cm,
+height=2.5cm,
+ymin=-0.01, ymax=1.00,
+group style={
+        group size=2 by 1,
+        horizontal sep=10pt,
+        vertical sep=2.25cm,
+        x descriptions at=edge bottom,
+        y descriptions at=edge left},
+]
+  \nextgroupplot[
+  ybar,
+      ylabel={Mode Frequency (\%)},
+    ylabel style={at={(-0.15,0.5)}, font=\footnotesize},
+      title=Llama-3.1-8B,
+      bar width=3mm,
+  ymajorgrids,
+xlabel style={font=\footnotesize,align=center},
+xlabel={Distribution Domain Length},
+xtick={2,3,4,5,6,7},
+legend image code/.code={
+        \draw [#1, draw=none] (0cm,-0.1cm) rectangle  (0.2cm,0.365cm); },
+legend style={font=\scriptsize, at={(1.02,1.10)}, anchor=north east}, 
+legend columns=2% Positioning the legend outside to the right
+  ]
+      \addplot[draw=none, style={C_SECOND,fill=C_SECOND,mark=none},      
+] coordinates {(2,0.84) (3,0.87) (4,0.78) (5,0.79) (6,0.78) (7,0.65)};
+
+  \addplot[draw=none, style={C_FIRST,fill=C_FIRST,mark=none},      
+] coordinates {(2,0.81) (3,0.67) (4,0.56) (5,0.55) (6,0.50) (7,0.47)};
+\draw [-, very thick, goldenrod] (axis cs:1.6,1/2) -- (axis cs:2.4,1/2);
+\draw [-, very thick, goldenrod] (axis cs:2.6,1/3) -- (axis cs:3.4,1/3);
+\draw [-, very thick, goldenrod] (axis cs:3.6,1/4) -- (axis cs:4.4,1/4);
+\draw [-, very thick, goldenrod] (axis cs:4.6,1/5) -- (axis cs:5.4,1/5);
+\draw [-, very thick, goldenrod] (axis cs:5.6,1/6) -- (axis cs:6.4,1/6);
+\draw [-, very thick, goldenrod] (axis cs:6.6,1/7) -- (axis cs:7.4,1/7);
+\legend{Base, Chat}
+
+  \nextgroupplot[
+  ybar,
+    ylabel style={at={(-0.15,0.5)}, font=\footnotesize},
+      title=gpt-4o-mini,
+      bar width=6mm,
+  ymajorgrids,
+xlabel style={font=\footnotesize,align=center},
+xlabel={Distribution Domain Length},
+xtick={2,3,4,5,6,7},
+  legend image code/.code={
+        \draw [#1, draw=none] (0cm,-0.1cm) rectangle  (0.2cm,0.365cm); },
+legend style={font=\scriptsize, at={(0.99,0.98)}, anchor=north east}, 
+legend columns=1
+  ]
+  \addplot[draw=none, style={C_FIRST,fill=C_FIRST,mark=none}] coordinates {(2,0.75) (3,0.61) (4,0.55) (5,0.51) (6,0.48) (7,0.47)};
+\draw [-, very thick, goldenrod] (axis cs:1.65,1/2) -- (axis cs:2.35,1/2);
+\draw [-, very thick, goldenrod] (axis cs:2.65,1/3) -- (axis cs:3.35,1/3);
+\draw [-, very thick, goldenrod] (axis cs:3.65,1/4) -- (axis cs:4.35,1/4);
+\draw [-, very thick, goldenrod] (axis cs:4.65,1/5) -- (axis cs:5.35,1/5);
+\draw [-, very thick, goldenrod] (axis cs:5.65,1/6) -- (axis cs:6.35,1/6);
+\draw [-, very thick, goldenrod] (axis cs:6.65,1/7) -- (axis cs:7.35,1/7);
+\legend{Base}
+
+\end{groupplot}
+\end{tikzpicture}
+
+ \caption{\textbf{Models Over-represent Some Numbers}; the modes are heavily over-represented. Each bar is the mode frequency, i.e., how often the top-chosen token is chosen averaged over distributions. The \textcolor{goldenrod}{gold} lines mark the expected rate for a calibrated model.}
+ \label{fig:top-tokens}
+\end{figure}
+
+\Cref{fig:top-tokens} reports the mode frequency for two models. If all probability mass were on valid tokens, the minimum mode frequency would be the same as the rate of the uniform distribution; we see much higher rates, ranging from $+29$ to $+50\%$. The implication is that models are also uncalibrated at an outcome level with systematic biases (preferences) for certain numbers.75, also far beyond expectation.
+
+\begin{dmbox}{\texttt{Distributions}: Systematic Behaviors}
+{(1)} Chat models place a majority of probability mass on a subset of valid tokens; \\{(2)} The mode is often stable between base to chat models at the instance level.\\(3) We see poor calibration at the instance level and disproportionate outcomes.
+\end{dmbox}
+
+\subsection{\texttt{Probabilities}}\label{sec:results:exp2}
+\textbf{High-level results.} All models perform worse than some simple baselines. $\textrm{Random}_{\tau = 1.0}$ performs better than all models. $\textrm{Pick higher}_{p = 0.7}$, which allocates 0.7 probability mass to the option associated with the higher value, further outperforms all models. Still, we see interesting performance differences across models.
+
+There are two key parallels between the results in this set of experiments and those in the last section: \textbf{(1)} Instruction tuning decreases the entropy of model output probabilities. The decrease in entropy is often due to a large increase of probability on the token with the corresponding higher value (replicating \texttt{Pick Higher}). Unlike the previous experiment, this tends to improve the calibration score overall. \Cref{tab:results:probabilities} displays high-level results. \textbf{(2)} Model behavior is systematic (and uncalibrated).  Understanding (2) requires disaggregating the results and examining model behavior across different colors and color orderings.
+
+\begin{table}[ht!]
+\small
+\centering
+\begin{tabular}{lrrrrrr}
+\toprule
+{}  & \multicolumn{2}{c}{$\textrm{PM}_\uparrow$} & \multicolumn{2}{c}{$\textrm{RE}_\updownarrow$} & \multicolumn{2}{c}{$\textrm{WD}_\downarrow$}\\
+ &   Base &  Chat  &    Base &  Chat   &Base &  Chat   \\
+\midrule
+Idealized &  \multicolumn{2}{c}{1.00}  & \multicolumn{2}{c}{1.00}  &  \multicolumn{2}{c}{0.00} \\
+$\textrm{Random}_{\tau = 0.01}$    &     \multicolumn{2}{c}{1.00} &     \multicolumn{2}{c}{0.06} &  \multicolumn{2}{c}{0.69} \\
+$\textrm{Random}_{\tau = 0.1}$     &     \multicolumn{2}{c}{1.00} &     \multicolumn{2}{c}{0.50} &  \multicolumn{2}{c}{0.55} \\
+$\texttt{pick higher}_{p = 0.7}$   &     \multicolumn{2}{c}{1.00} &     \multicolumn{2}{c}{1.07} &  \multicolumn{2}{c}{0.15} \\
+$\texttt{pick higher}_{p = 1.0}$        &     \multicolumn{2}{c}{1.00} &     \multicolumn{2}{c}{0.00} &  \multicolumn{2}{c}{0.47} \\
+\midrule
+Llama-3.1-8B &    0.38 &  0.80 &    1.08 &  0.90 & 0.54 &  0.41 \\
+Mistral-7B-v0.1   &     0.30 &  0.54 &     1.1 &  0.74 & 0.59 &  0.50 \\
+Mistral-7B-v0.3   &    0.33 &  0.76 &    1.09 &  0.57 & 0.57 &  0.51 \\
+Mixtral-8x7B-v0.1 &    0.36 &  0.99 &    1.06 &  0.18 & 0.55 &  0.54 \\
+Yi-1.5-9B &     0.30 &  0.99 &    1.05 &  0.33 & 0.59 &  0.52 \\
+Yi-1.5-34B        &    0.41 &  0.61 &    1.01 &  0.45 & 0.53 &  0.56 \\
+gemma-2-9b        &    0.39 &  0.99 &    1.14 &  0.49 & 0.53 &  0.54 \\
+gemma-2-27b       &    0.54 &  1.00 &    1.06 &  0.22 & 0.46 &  0.43 \\
+\midrule
+$\textrm{AVG}_{\textrm{OpenSource}}$ & 0.38 &     0.84 &  1.07 &      0.49 &       0.55 &      0.50 \\
+\midrule
+gpt-3.5  &  \multicolumn{2}{c}{1.00} &  \multicolumn{2}{c}{0.58} &        \multicolumn{2}{c}{0.32} \\
+gpt-4-turbo       &  \multicolumn{2}{c}{1.00} &  \multicolumn{2}{c}{0.20} &        \multicolumn{2}{c}{0.45} \\
+gpt-4o   &  \multicolumn{2}{c}{1.00} &  \multicolumn{2}{c}{0.25} &        \multicolumn{2}{c}{0.42} \\
+gpt-4o-mini       &  \multicolumn{2}{c}{1.00} &  \multicolumn{2}{c}{0.35} &        \multicolumn{2}{c}{0.42} \\
+\midrule
+$\textrm{AVG}_{\textrm{Proprietary}}$ &   \multicolumn{2}{c}{1.00}& \multicolumn{2}{c}{0.35} &  \multicolumn{2}{c}{0.40} \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{\texttt{Probabilities} Results.} \textbf{Takeaways: (1)} Entropy for base models relative to the entropy of a calibrated response is too high (RE above 1.0), whereas for chat models, the entropy is too low (RE below 1.0). However, \textbf{(2)} the chat models tend to place more of the probability mass (PM) on valid tokens and \textbf{(3)} overall the calibration scores are lower (better).}
+\label{tab:results:probabilities}
+\end{table}
+
+\begin{figure}[ht!]
+ \centering
+ \includegraphics[width=\linewidth]{figures-keynote/the-hard-fig-annotated.pdf}
+ \caption{
+ \textbf{Systematic Patterns in Model Behavior.} The top-left cell of the left heatmap corresponds to instances where black is listed first and \textcolor{red}{red} is listed second across 100 instances. The heatmap color intensity (and numbers) are determined by which behavior the output probabilities most align with as indicated by the legend. For example, 0.97 in the first cell means that 97\% of the probability mass is on the second option across those 100 instances. Both models exhibit uncalibrated, biased behavior. Details are discussed in \Cref{sec:results:exp2}.  Representative examples from cells are in \Cref{fig:model_behavior_bar_plot}.
+ }
+ \label{fig:hard-fig}
+\end{figure}
+
+\begin{figure}
+ \centering
+ \includegraphics[width=\linewidth]{figures-keynote/the-examples-figure.pdf}
+ \caption{\textbf{Representative Examples of Model Behaviors.} These instances are drawn from cells in \Cref{fig:hard-fig}. Left, this is an example of \texttt{Pick Second} from \textcolor{goldenrod}{gold} x \textcolor{C_SECOND}{green} cell for \texttt{Llama-3.1-8B}. Right, this is an example of \texttt{Pick First} from \textcolor{red}{red} x black cell in \texttt{gpt-4o-mini}.}
+ \label{fig:examples-fig}
+\end{figure}
+\textbf{Further Analysis.}  To make headway, we characterize the results of two models (\texttt{Llama-3.1-8B} and \texttt{gpt-4o-mini}) in one setting in \Cref{fig:hard-fig}. The full spread of results is available in \Cref{app:results:probabilities}. Here, our aim is a high-level understanding of which behaviors best characterize these models. The heatmaps in \Cref{fig:hard-fig} are representative examples; the overall signatures differ mildly across templates and numeric scales (10s, 100s, etc.) and more so across models. For \texttt{Llama-3.1-8B} in \Cref{fig:hard-fig}, the model overly favors the second listed color. More broadly, \texttt{Llama-3.1-8B} favors \textcolor{blue}{blue} when it is listed second, and avoids \textcolor{gray}{white}/\textcolor{black}{black}/\textcolor{goldenrod}{gold}. The asymmetry across the diagonal for \texttt{gpt-4o-mini} in \Cref{fig:hard-fig} shows that model behavior can be dependent on word ordering and that there is a hierarchy among the colors.
+
+The asymmetry across the diagonal for \texttt{gpt-4o-mini} in \Cref{fig:hard-fig} shows that the colors are organized hierarchically. This hierarchy occurs in other models/settings, \Cref{app:results:probabilities}. We can read the hierarchy from left to right: (Approximately) each color when listed before a color to its right that first color is \texttt{Pick-ed First}, whereas when the order is flipped then there is \texttt{Pick Higher}. In this particular example, \textcolor{orange}{orange}/\textcolor{magenta}{pink}/\textcolor{C_FIRST}{purple} ``dominate'' most other colors and \textcolor{gray}{white} is ``dominated'' by all other colors. This step-wise behavior was neither required nor expected. 
+
+\begin{figure}[ht!]
+ \centering
+\ttfamily
+\begin{tikzpicture}
+    \begin{axis}[
+ybar stacked,
+ymajorgrids,
+tick align=inside,
+major grid style={draw=white},
+symbolic x coords={0,1,2,3,4,5,6,7,8,9,10,11},
+xtick=data,
+ymin=0, 
+ymax=100,
+height=1.75in,
+width=5in,
+ylabel=Percent (\%),
+bar width=5pt,
+enlarge x limits={abs=5},
+bar width=6mm,
+    enlargelimits=0.05,
+      legend style={at={(1,0)},anchor=south east,},
+xticklabel style={align=center,font=\scriptsize}, % Align labels for multiline
+xticklabels={%
+{Mistral \\7Bv0.1}, {Mistral \\7Bv0.3}, {Mixtral\\8x7B}, 
+{Yi-1.5\\9B}, {Yi-1.5\\34B}, {Llama \\3.1 8B}, 
+{gemma\\2 9B}, {gemma\\2 27B}, {gpt-3.5}, {gpt-4\\turbo}, 
+{gpt-4o\\mini}, {gpt-4o},
+},
+ylabel style={font=\small}, % Positioning the legend outside to the right
+yticklabel style={font=\scriptsize}, % Positioning the legend outside to the right
+legend style={font=\scriptsize, at={(1.01,1)}, anchor=north west}, % Positioning the legend outside to the right
+    legend cell align={left}, % Align text in the legend entries
+    reverse legend,
+legend image code/.code={
+        \draw [#1, draw=none] (0cm,-0.1cm) rectangle  (0.2cm,0.365cm); }
+    ]
+\addplot+[ybar, draw=none, fill=C_NULL] plot coordinates
+    {(0,51.0) (1,20.0) (2,1.0) (3,0.0) (4,35.0) (5,20.0) (6,0.0) (7,0.0) (8,0.0) (9,0.0) (10,0.0) (11,0.0)};
+\addplot+[ybar, draw=none, fill=C_CALIBRATED] plot coordinates {(0,15.0) (1,18.0) (2,1.0) (3,4.0) (4,9.0) (5,33.0) (6,7.0) (7,0.0) (8,8.0) (9,0.0) (10,0.0) (11,0.0)};
+\addplot+[ybar, draw=none, fill=C_HIGHER] plot coordinates {(0,0.0) (1,10.0) (2,40.0) (3,43.0) (4,16.0) (5,11.0) (6,6.0) (7,87.0) (8,75.0) (9,84.0) (10,70.0) (11,84.0)};
+\addplot+[ybar, draw=none, fill=C_FIRST] plot coordinates {(0,34.0) (1,34.0) (2,43.0) (3,41.0) (4,31.0) (5,18.0) (6,86.0) (7,13.0) (8,15.0) (9,0.0) (10,27.0) (11,16.0)};
+\addplot+[ybar, draw=none, fill=C_SECOND] plot coordinates {(0,0.0) (1,19.0) (2,15.0) (3,13.0) (4,9.0) (5,18.0) (6,1.0) (7,1.0) (8,1.0) (9,16.0) (10,3.0) (11,0.0)};
+    \legend{null, calibrated, higher,  first,  second}
+    \end{axis}
+    \end{tikzpicture}
+ \caption{\textbf{Systematic Patterns in Model Behavior.} Each bar shows the rates of the different behaviors models exhibit averaged across templates, color pairs, and numeric scales.
+}
+ \label{fig:model_behavior_bar_plot}
+\end{figure}
+
+\Cref{fig:model_behavior_bar_plot} shows what behaviors characterize each model: \texttt{gpt-*} models (and \texttt{gemma-2-27b}) tend to \texttt{Pick Higher} whereas others also \texttt{Pick First} and \texttt{Second}. Smaller models sometimes under-produce probability mass \texttt{null}, and there is little calibrated behavior. 
+
+\begin{dmbox}{\texttt{Probabilities}: Systematic Behaviors}
+(1) Models often form color hierarchies where the model behavior depends on the word ordering (listed first or second) and the relative rankings of the words in the hierarchy.\\(2) Model behavior closely aligns with heuristic references, often either \texttt{Pick First} or \texttt{Higher}. In many cases, the heuristic depends on the color ordering.
+\end{dmbox}
+
+
+\section{Human Study}
+
+Our experiments so far have demonstrated that these models are generally poorly calibrated. In this section, we try to provide greater context for these results by directly comparing the calibration of proprietary models against humans. We do so using a variation of the storied game, Matching Pennies. The only foolproof approach to winning this game is to behave as randomly as possible. Results are presented in Table \ref{tab:exp4_arena}. The two main takeaways are: 1) Models also produce non-random sequences in this setup, further demonstrating their lack of calibration; 2) When prompted, the model's performance improves and is on par with human performance.
+
+\subsection{Experimental Design}\label{sec:exp:exp4}
+This experiment is based on a simple heads/tails game. Our motivation for including this experiment is to allow a human baseline in a setting where random behavior is optimal. This section makes no distinction between calibrated probabilities and unbiased outputs because we don't have access to this information for humans. However, to ``perform'' well, or appear calibrated, requires either the model/person to (1) produce calibrated probabilities which when sampled from will yield random outputs, (2) use an internal random process to produce uncalibrated probabilities that yield random outputs, or (3) have a systematic process for producing outputs that \textit{appear} random enough. (Previous work would suggest that humans are limited in this regard and will likely not be random (and therefore not calibrated).) This leaves us with a one-sided problem. If the humans/models were proficient at producing random outcomes we would have to adjudicate between the above possibilities. 
+
+We focus on a variation of the game similar to \citet{eliaz2011edgar}. Each round, Player 1 aims to match her chosen coin face with Player 2's choice, getting a +1 reward if their coin faces match, and -1 otherwise. In a single-round game, the Nash Equilibrium is to select a coin face randomly. We set there to be 100 rounds of play. To focus on calibration, we frame the tested model as the ``misleader.'' The misleader is prompted to submit answers, and the  ``guesser'' is set to predict the misleader's answers. The misleader submits $m_1, m_2, \dots m_{100}$ answers, and the guesser bases each of its $g_i$ answers causally based upon all previous misleader's answers, $\{m_j\,|\, 0 < j < i\}$. We use a n-gram\footnote{Motivated by the strategy here: \url{https://www.expunctis.html}.} based strategy as our guesser.
+
+\paragraph{Models} We focus on \texttt{gpt-*} models, sampling temperature $\tau = 1$, and compare them to human behavior. Human behavior is drawn from a sample of 44 games of 100 rounds from $n = 10$ different volunteers with technical backgrounds across up to $t < 10$ different trials.
+
+\paragraph{Additional Metrics} Whereas previous metrics rely on model probabilities, this experiment assumes access only to outputs, meaning  we cannot use the metrics used in previous sections.
+
+\textbf{Player Win Rate (PWR)} is the rate the misleader defeats the guesser, averaging over 100 games each for up to 100 rounds. The higher this rate, the more random the outputs of the misleader, and thus the more calibrated it is at an outcome level. 
+
+\textbf{Randomness Testing (RNG)}. The Wald–Wolfowitz\footnote{Results with Bartel's test perfectly correlate with the runs test so we only report the runs test.} runs test checks if the elements of a sequence are mutually independent, and can often rule out human-generated sentences as non-random. Using this test at a significance level of 0.05, we report the proportion of samples that cannot statistically be rejected as non-random (note this does not guarantee them to be random) and label this value as \textbf{RNG}. For reference, as shown in Table \ref{tab:exp4_arena} when we sampled random sequences using \texttt{python}, $98\%$ of the sequences could not be rejected; only $7\%$ of human-generated samples could not be rejected. 
+
+\subsection{Results}
+When a model is instructed to be random (denoted by ``+instr'') Player Win Rate (PWR) improves. For \texttt{gpt-4o}, PWR increases by $+30\%$. Explicit instruction following ability can thus improve calibration at the outcome level. Notably, when prompted, model performance is similar to human performance. 
+
+\begin{table}[ht!]
+    \centering
+    \begin{tabular}{lrrrr}
+    \toprule
+{} & \multicolumn{2}{c}{$\textrm{PWR}_\uparrow$} & \multicolumn{2}{c}{$\textrm{RNG}_\uparrow$} \\
+& base & +instr.& base & +instr.\\
+    \midrule
+    Random          &                    \multicolumn{2}{c}{0.50} &  \multicolumn{2}{c}{0.98} \\
+    Human           &                    \multicolumn{2}{c}{0.33} &  \multicolumn{2}{c}{0.07} \\
+    \midrule
+    gpt-3.5         &   0.26 &  0.40 & 0.31 &  0.43 \\
+    gpt-4-turbo         &                    0.02 &  0.33 &  0.00 &  0.25 \\
+    gpt-4o          &                    0.06 & 0.36 & 0.08 &  0.19 \\
+    \bottomrule
+    \end{tabular}
+    \caption{\textbf{Human Study Results: Player win rates (PWR) and statistical tests for randomness (RNG).} Higher values for both metrics suggest that models are more able to produce random (and thus more calibrated) outputs.
+    \textbf{Takeaways:} \textbf{(1)} \texttt{gpt-3.5} stands out as the most random model; \textbf{(2)} Models pass a greater number of the statistical tests for randomness than humans, though are still far from random; \textbf{(3)} Model sequences are predictable at rates similar to humans; \textbf{(4)} Adding instructions to be random leads to more random outputs.}
+    \label{tab:exp4_arena}
+\end{table}
+\Cref{tab:exp4_arena} reports the proportion of samples (where each sample is 100 coin flips),  at $p = 0.05$, the result could not be considered non-random: Higher RNG values suggest the model is more random. More model- than human-generated samples were considered random, $7\%$ vs $19-43\%$.
+
+\begin{dmbox}{Humans and Proprietary (OpenAI) Models Are Both Non-Random (\textit{Un}calibrated)}
+ (1) Even top-performing proprietary models are unable to produce random behavior\\ 
+ (2) Human behavior is also non-random. Even if models are currently similar to humans in this regard, we argue that future work endowing models with the ability to produce calibrated outputs would improve human interactions with models.
+\end{dmbox}
+
+
+
+\section{Discussion}
+
+\paragraph{Why Aren't LLMs Already Calibrated?}\label{subsec:whynot}
+Should the negative log-likelihood loss endow a pre-trained language model with calibration? If there were $n  \rightarrow  \infty$ examples of Heads and Tails being flipped in the data and the true distribution was reflective of some $p_{\text{heads}}$, then the lowest loss would be achieved via a perfectly calibrated model. Thus, the answer is empirical: What does the training data look like? Finding the disparate and analogous scenarios that call for randomness may be difficult. Non-calibrated outputs frequently occurring for such scenarios might impact model optimization enough to overcome examples where the loss is explicitly aligned with a calibrated model. For example, patterns derived from people preferring the number 7 (out of 10) or 42 (out of 100) or Heads (compared to Tails) or answering with rounded numbers that end in 0 or 5 might reduce calibration. Beyond impacting the loss, it could be the case that some well-trained models are already capable of producing calibrated results; the models may ``know'' the calibrated output but adjust it to match non-random tendencies, akin to pragmatics. 
+
+\paragraph{Should Models Be Calibrated?} Our work highlights how models that perform remarkably in other types of evaluations fall short in scenarios that call for calibrated outputs. Some may have expected our results given that these models are trained on data generated by people who are also widely biased. Others might have expected that with the range of data seen in training (data in the wild, code outputs, endemic instances of distributions) models would learn to calibrate. However, it seems curious that models are frequently able to correctly generate text describing what the proper calibrated distribution should be for a given scenario, but fail to represent that distribution internally when prompted to simulate the same scenario. 
+
+\paragraph{Can We Calibrate Models with FineTuning?}\label{subsec:ft} We expect that it is possible to fine-tune models to improve calibration. Already we see some improvements with generic alignment procedures, though these improvements often come at a tradeoff of an (overly large) reduction in model entropy. Mitigating this mode collapse behavior is a compelling area for future work.
+
+
+
+\section{Conclusion}
+
+All models we test are not only \textit{not} calibrated, but behave in different systematically uncalibrated ways. A common theme is that top-performing models (e.g., \texttt{gemma-2-27b} and \texttt{gpt-*} models) \texttt{Pick Higher}, allocating most of the probability mass upon single output token. This is an example of mode collapse. Though mode-collapse is commonly studied in computer vision and image generation \citep{thanh2020catastrophic,srivastava2017veegan} \textit{inter alia}, \citet{oattributing} show how RLHF reduces diversity in model outputs, leading to this problem in text generation. Our results are similar: Instruction-tuned models produce valid outputs, but the probability distribution is collapsed to a small portion of the valid answers that are equally correct. While we focus on controlled problem settings, these  issues leave vulnerabilities. For instance, an adversary could leverage that a model is going to behave in a systematically arbitrary manner.
+
+
+
+

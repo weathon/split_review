@@ -1,0 +1,929 @@
+\title{Plan-RAG: Planning-guided Retrieval Augmented Generation}
+
+\begin{abstract}
+We introduce Planning-guided Retrieval Augmented Generation (\ours), a novel framework that augments the \emph{retrieve-then-reason} paradigm of existing RAG frameworks to \emph{plan-then-retrieve}. \ours formulates a reasoning plan as a directed acyclic graph (DAG), decomposing queries into interrelated atomic sub-queries. Answer generation follows the  DAG structure, allowing significant gains in efficiency through parallelized retrieval and generation. While state-of-the-art RAG solutions require extensive data generation and fine-tuning of language models (LMs), \ours incorporates frozen LMs as plug-and-play experts to generate high-quality answers. Compared to existing RAG solutions, \ours demonstrates significant improvements in reducing hallucinations and bolstering attribution due to its structured sub-query decomposition. Overall, \ours offers a new perspective on integrating external knowledge in LMs while ensuring attribution by design, contributing towards more reliable  LM-based systems.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\setlength{\intextsep}{5pt}%
+\begin{wrapfigure}{r}{.4\textwidth}
+  \raggedleft
+  \vspace*{-2em}
+  \resizebox{.4\textwidth}{!}{%
+\begin{tikzpicture}[
+	node distance = .5cm and 0cm,
+	box/.style = {rectangle, draw, text width=4cm, align=center, rounded corners, font=\small},
+	answer/.style = {text width=4cm, align=center, font=\tiny, text=blue},
+	arrow/.style = {-Stealth, thin},
+	every edge quotes/.style = {auto, text=black, font=\tiny}
+	]
+	
+	
+	\node (main)[align=left,text width=25em,font=\large] at (0,0) 
+	{\textbf{Query:} \\ \texttt{In what year was the coach who led the 2007 South Carolina Gamecocks football team in his third season as USC head coach born?}};
+	
+	\node[box, below=of main] (q1) {Q1.1: Who was the coach of the 2007 South Carolina Gamecocks football team?};
+	\node[answer, below=0.1cm of q1] (a1) {Steve Spurrier};
+	
+	\node[box] (q2_1) at ($(q1)+(-2.25,-2.25)$) {Q2.1: In what year did $\langle$A1.1$\rangle$ start his tenure as USC head coach?};
+	\node[answer, below=0.1cm of q2_1] (a2_1) {2005};
+	
+	\node[box] (q2_2) at ($(q1)+(2.25,-2.25)$) {Q2.2: Was $\langle$A1.1$\rangle$ in his third season as USC head coach in 2007?};
+	\node[answer, below=0.1cm of q2_2] (a2_2) {Yes};
+	
+	\node[box] (q3) at ($(q2_1)+(2.25,-2.25)$) {Q3.1: In what year was $\langle$A1.1$\rangle$ born and is $\langle$A2.2$\rangle$ correct considering $\langle$A2.1$\rangle$?};
+	\node[answer, below=0.1cm of q3] (a3) {1945};
+	
+	\draw[arrow] (q1) -- (q2_1);
+	\draw[arrow] (q1) -- (q2_2);
+	\draw[arrow] (q2_1) -- (q3);
+	\draw[arrow] (q2_2) -- (q3);
+	
+	\node[box, fill=green!20, below left=1cm and -2cm of q3] (plan) {\textbf{\ours:} 1945};
+	\node[box, fill=red!20, below right=1cm and -2cm of q3] (self) {\textbf{Self-RAG:} The coach who led the 2007 South Carolina Gamecocks football team was born in 1960.};
+	
+	\node[above=0.1cm of plan, font=\Large, color=green] {\ding{51}};
+	\node[above=0.1cm of self, font=\Large, color=red] {\ding{55}};
+	
+\end{tikzpicture}}\\[-.8em]
+  \caption{\textbf{HotpotQA example:} \ours’s reasoning DAG and final generation compared to Self-RAG’s output, illustrating the benefits of \textit{plan-then-retrieve} approach.}
+  \label{fig:teaser}
+  \vspace*{-6pt}
+\end{wrapfigure}
+
+Despite the remarkable success of Large Language Models (LLMs) across various domains~\citep{torfi2020natural, zhao2023survey, brown2020language}, LLMs face critical challenges that impede their widespread adoption in critical applications such as healthcare and finance \citep{pal2023med, zhao2024revolutionizing}. Among these challenges, hallucination stands out as a particularly pressing concern \citep{ji2023survey, maynez2020faithfulness}. Hallucination in LLMs, as defined by \citet{rawte2023survey},  occurs when model generation deviates from factual information or includes false statements, potentially leading to misinformation and compromised decision-making.
+
+Retrieval Augmented Generation \citep[RAG,][]{petroni2020how, lewis2020retrieval, guu2020retrieval} has emerged as a promising framework to address hallucinations in LLMs by integrating external information. RAG aims to ground the generation in factual information, theoretically reducing the likelihood of generating false content. The standard RAG framework follows the \textit{retrieve-then-reason} paradigm: first, documents are retrieved based on an input query, and then the LLM reasons over them to generate a response. However, a recent study by \citet{shuster2021retrieval} revealed that RAG systems are not immune to hallucination, particularly when the retrieved documents are irrelevant, relevant but insufficient, or exceed the context window, preventing the LLM from effectively reasoning over all of them. Another critical limitation that closely relates to hallucination is lack of attribution \citep{rashkin2023measuring, bohnet2022attributed}. While RAGs can access external information, they often struggle to reliably link their generated content to specific retrieved documents, undermining the system's trustworthiness and interpretability \citep{xia2024ground, qi2024modelinternalsbasedanswerattribution}. This interplay between hallucination and lack of attribution presents a significant challenge in developing reliable LLM systems \citep{ji2023survey, adewumi2024limitations, huang2023survey}.\looseness-1
+
+To overcome these challenges, we propose a novel framework---Planning-guided Retrieval Augmented Generation (\ours). We augment the conventional \emph{retrieve-then-reason} paradigm to \emph{plan-then-retrieve} paradigm, fundamentally altering how LLMs interact with external knowledge.  Unlike traditional query decomposition methods such as  RA-ISF \citep{liu2024ra} and RQ-RAG \citep{chan2024rqrag} that generate isolated or sequential sub-queries. \ours formulates a comprehensive reasoning plan represented as a directed acyclic graph (DAG). This reasoning DAG decomposes the main query into interrelated \textit{atomic} sub-queries, providing a computational structure that enables efficient information sharing between sub-queries (see \cref{fig:teaser}). In addition,  the reasoning DAG %
+characterizes conditional independence relationships between queries, facilitating parallelization, resulting in more efficient generation. Moreover, it provides improved explainability and debuggability, attribution, and efficient backtracking for correcting specific segments of the responses. We cover these in detail in \cref{sec:proposed_dag} and showcase the comparison of the key features between recently proposed RAG frameworks and \ours in \cref{tbl:p_rag_difference}.
+
+In addition, unlike recent proposals for improving RAG~\citep{asai2023self, chan2024rqrag, liu2024ra}, \ours avoids the expensive step of finetuning an LM. It can work with any pretrained LM, by incorporating a set of independent \textit{plug-and-play} experts: critic expert, relevance expert, \etc. The critic expert enables on-demand retrievals, assessing when additional information is needed. The relevance expert refines the retrieval process, ensuring the most relevant documents are selected. Notably, the critic expert enables on-demand retrievals, while the atomic nature of the sub-queries limits retrieval to a single document. These features inherently promote attribution and reduce hallucination. In \cref{sec:proposed_experts}, we discuss the experts and their benefits in detail.\looseness-1
+
+\paragraph{Contributions} {\em (i)}~We propose augmenting the \emph{retrieve-then-reason} paradigm to a \emph{plan-then-retrieve} paradigm, offering a new perspective on integrating external knowledge in LLMs.
+{\em (ii)}~We introduce a reasoning DAG that inherently enhances attribution and debuggability capability. {\em (iii)}~We demonstrate reduced hallucinations attributed to the \textit{plug-and-play} experts and atomic nature of sub-queries. {\em (iv)}~We present a general and practical framework, as \ours uses a frozen LLM without any assumptions.\looseness-1
+
+\begin{figure}[t!]
+    \centering
+    
+    \def\n{8} %
+    \def\radius{3cm} %
+    \def\arrowwidth{1.5cm} %
+    \def\arrowsize{1.2} %
+    \def\arrowhead{10} %
+    \def\firstangle{90} %
+    \def\textradius{2.2cm} %
+    
+    \def\angle{-360/\n}
+        
+    \newcommand{\expert}[2]{\includegraphics[scale=#1]{fig/experts/expert-#2}}
+
+    \resizebox{\textwidth}{!}{%
+    \begin{tikzpicture}[scale=1]
+    
+        \draw[fill=primarycolor!10, draw=white, line width=2pt,rounded corners=3pt] 
+          (135:\radius) arc[start angle=-45, end angle=-90, radius=\radius] --
+          ++(-.5*\arrowwidth,0) --
+          ++(0,-\arrowwidth) -- ++({.5*\arrowwidth},0) 
+          arc[start angle=-90, end angle=-45, radius={\radius+\arrowwidth}] -- cycle;        
+
+        \draw[fill=primarycolor!60, draw=white, line width=2pt,rounded corners=3pt] 
+          (45:\radius) arc[start angle=-135, end angle=-90, radius=\radius] --
+          ++(.5*\arrowwidth,0) --
+          ++(.5,-.5*\arrowwidth) -- ++(-.5,-.5*\arrowwidth) -- ++({-.5*\arrowwidth},0)
+          arc[start angle=-90, end angle=-135, radius={\radius+\arrowwidth}] -- cycle;               
+                
+        \foreach \i/\name [count=\j from 0] in {1/Summary,2/Generator,3/Critic,4/Retriever,5/Relevance,6/Generator,7/{}} {
+            \def\startangle{\firstangle+\angle*\j} %
+            \def\endangle{\firstangle+\angle*\i} %
+            \def\midangle{{(\startangle+\endangle)/2}} %
+            
+            \coordinate (A) at (\startangle:\radius);
+            \coordinate (B) at (\endangle:\radius);
+            \coordinate (C) at ({\endangle-\arrowhead}:{\radius-\arrowwidth/2});
+            \coordinate (D) at (\endangle:{\radius-\arrowwidth});
+            \coordinate (E) at ({\startangle-\arrowhead}:{\radius-\arrowwidth/2});
+
+            \draw[fill=primarycolor!\i0, draw=white, line width=2pt,rounded corners=3pt] 
+                (A) arc[start angle=\startangle, end angle=\endangle, radius=\radius]
+                -- (C) -- (D) arc[start angle=\endangle, end angle=\startangle, radius={\radius-\arrowwidth}] -- (E) -- cycle;
+            
+            \draw[draw=none,postaction={decorate,decoration={text along path,text align=center,text={|\bfseries\scriptsize\color{black!80}|~~~~~~\name}}}] (\startangle:\textradius) arc[start angle=\startangle, end angle=\endangle, radius={\textradius}];
+       
+            \node (e\i) at (\midangle:{\radius+\arrowwidth/2}) {};
+
+       
+        }
+        
+        \draw[fill=primarycolor!05, draw=white, line width=2pt,rounded corners=3pt] 
+          (135:\radius) arc[start angle=-45, end angle=-90, radius=\radius] --
+          ++(-.5*\arrowwidth,0) --
+          ++(0,-\arrowwidth) -- ++({.5*\arrowwidth},0) 
+          arc[start angle=-90, end angle=-45, radius={\radius+\arrowwidth}] 
+          arc[start angle=135, end angle=90, radius={\radius-\arrowwidth}] -- 
+          ({90-\arrowhead}:{\radius-.5*\arrowwidth}) --
+          (90:{\radius}) 
+          arc[start angle=90, end angle=135, radius={\radius}]
+          -- cycle;        
+        
+        
+        \node[text width=6em,align=center,color=black] at (0,0) {\large For each node in DAG};
+        \node[align=left,text width=15em,font=\small] at (-5,2.5) 
+        {\textbf{Query:} \\ \texttt{Were Scott Derrickson and Ed Wood of the same nationality?}}; %
+        
+        
+        \node at (-4,.5) {\dagicon};
+        \node[align=center,font=\scriptsize] at (-2.8,.7) {Directed acyclic \\ graph (DAG)};
+        
+        \tikzstyle{block}=[font=\small~~,draw,rounded corners=2pt,
+          color=primarycolor!60,fill=white,align=left,anchor=west,text width=8em,
+          opacity=.8,scale=.8]	  
+
+        \node[block] (b1) at (-7.25,.5) 
+          {{\bf Reasoning planner:} Plan composed of atomic sub-queries};
+
+        \node[block] (b2) at (120:{\radius+10}) 
+          {{\bf Dynamic query expert:} Dynamically generate the query};
+
+        \node[block] (b3) at (45:{\radius-10}) 
+          {{\bf Generator:} \\ Generates $k$ tokens};
+        
+        \node[block] (b4) at (-20:{\radius-10}) 
+          {{\bf Critic expert:} \\ Assesses whether information is needed};
+        
+        \node[block] (b5) at (-70:{\radius}) 
+          {{\bf Retriever:} \\ On-demand information retrieval};
+
+        \node[block,anchor=east] (b6) at (-110:{\radius}) 
+          {{\bf Relevance expert:} \\ Select most valuable retrieval};
+
+        \node[block] (b8) at (5.5,.5) 
+          {{\bf Aggregator:} Combines answers to respond to original query};
+          
+        \foreach \i in {1,2,3,4,6,8}  
+          \node[anchor=center,inner sep=0] at ($(b\i.north west) + (2pt,-2pt)$) {\expert{.04}{3}};
+        \node[anchor=center,inner sep=0] at ($(b5.north west) + (2pt,-2pt)$) {\expert{.04}{4}};
+          
+\node[draw=blue, thick, rounded corners=3pt, fill=blue!10, text width=10em, align=center] at (-6.25, -1.25) 
+  {Novel Reasoning Planner: $\to$~Directed Acyclic Graph (DAG) $\to$~Structured sub-query decomposition};
+
+\node[draw=red, thick, rounded corners=5pt, fill=red!10, text width=10em, align=center] at (5.25, 2.5) 
+  {Plug-and-Play Experts: Off-the-shelf use without retraining};
+
+\node[draw=red, thick, rounded corners=5pt, fill=red!10, text width=10em, align=center] at (6, -2.25) 
+  {Retrievals linked to DAG nodes: Attribution by design, backtracking};
+
+                  
+  \end{tikzpicture}}\\[-1em]
+  \caption{\textbf{\ours:} \ours's core novelty lies in the generation of a reasoning Directed Acyclic Graph (DAG) plan that decomposes queries into structured sub-queries, enabling efficient, parallelized retrieval and generation. Additionally, \textit{plug-and-play} experts ensure high-quality retrieval and consistency, reducing hallucinations and ensuring attribution by design.}
+  \label{fig:pictorial-alg}
+  \vspace*{-1em}
+\end{figure}
+
+
+
+\section{Related work}
+
+\label{sec:related_work}
+
+Retrieval-augmented generation (RAG) enhances large language models (LLMs) by integrating relevant external documents, leading to notable performance improvements, particularly in knowledge-intensive tasks \citep{lewis2020retrieval, guu2020retrieval}. Retrieval strategies in RAG models can be categorized into three paradigms based on the frequency of retrievals: (1) one-time retrieval, (2) retrieval every $k$ tokens, and (3) adaptive retrieval. Models employing one-time retrieval include DrQA \citep{chen2017reading}, REALM \citep{guu2020retrieval}, and ATLAS \citep{izacard2023atlas}. Retrieval at fixed intervals (every $k$ tokens) is used by RALM \citep{ram2023context}, RETRO \citep{pmlr-v162-borgeaud22a}, and InstructRetro \citep{pmlr-v235-wang24bd}. In contrast, adaptive retrieval approaches—such as Self-RAG \citep{asai2023self}, SPALM \citep{yogatama2021adaptive}, Adaptive kNN \citep{drozdov2022you}, and Active-Retriever \citep{jiang2023active}—dynamically adjust the frequency and nature of document retrieval based on task requirements and input context.
+FLARE \citep{jiang2023active} is a framework that uses token probability distributions to trigger retrievals and predict temporary next sentences, enhancing the quality of subsequent retrievals. SPALM \citep{yogatama2021adaptive} incorporates additional trained components to manage adaptive retrieval at the token level. RETRO \citep{pmlr-v162-borgeaud22a} performs document retrieval at every $k$ tokens, necessitating the training of a specialized architecture. Similarly, kNN-LM \citep{khandelwal2019generalization} uses k-nearest neighbor searches on embeddings to calculate token probabilities, with are then aggregated with model outputs, adding latency.\looseness-1
+
+Recently, \citet{wang2024rat} proposed RAFT, a framework designed to address the challenges of retrieval and hallucination by combining chain-of-thought (CoT) reasoning with RAG. It initializes a set of preliminary thoughts and iteratively loops over them, performing retrievals based on the current thought and generation to incrementally refine the output. \citet{asai2023self} introduced Self-RAG, a framework in which an LLM is trained on an extended vocabulary set for retrieval and evaluation. These new tokens are generated using the GPT-4 model, and a critic LLM is then trained on this supervised dataset to enhance performance. \citet{liu2024ra} propose RA-ISF, an architecture that combines multiple specialized models that are trained on specific datasets.  \citet{chan2024rqrag} proposed RQ-RAG, where an LLM is equipped with capabilities for query rewriting, decomposition, and disambiguation. This helps in handling ambiguous or complex queries more effectively resulting in improved performance. In contrast to these approaches, which often necessitate fine-tuning or specialized training, \ours proposes a formal reasoning DAG and a set of off-the-shelf experts, offering a flexible solution without the need for finetuning.
+\begin{table}[!t]
+	\centering
+	\caption{\textbf{Comparison of key features across various RAG frameworks:} The proposed \ours framework demonstrates advantages in reliable information flow, parallelization, debuggability, attribution, and ease of use without finetuning, compared to two existing advanced RAG frameworks.}\vspace*{-6pt}
+	\setlength{\tabcolsep}{5.5pt}
+\begin{tabular}{l c c c H}
+  \toprule
+  & \textbf{Vanilla RAG} & \textbf{Self-RAG} & \textbf{RQ-RAG} & \textbf{\ours (Ours)} \\ 
+  \midrule
+  {Relevant flow of information} & \xmark & \cmark & \xmark & \cmark \\ 
+  {Parallelization} & \xmark & \xmark & \xmark & \cmark \\ 
+  {Debuggability \& backtracking} & \xmark & \xmark & \xmark & \cmark \\ 
+  {Attribution} & \xmark & \xmark & \xmark & \cmark \\ 
+  {Off-the-shelf use (no finetuning)} & \cmark & \xmark & \xmark & \cmark \\ 
+  \bottomrule
+\end{tabular}
+	\label{tbl:p_rag_difference}
+	\vspace*{-6pt}
+\end{table}
+
+\citet{mishra2024fine} propose an editor model that processes the generator output and corrects hallucinations by incorporating factual information based on retrieved data. The editor is an SLM compared to the generator and is trained on a custom dataset. Similarly, \citet{gou2023critic} introduce the CRITIC framework, which interacts with external web tools to refine LLM outputs and minimize hallucinations. \citet{asai2022task} suggest improving retriever accuracy by embedding task-specific instructions within the query, rather than employing different retrievers for various data types (\eg, code, questions). Recently, \citet{dalal2024matrix} explore using the entropy of the output token distribution to detect when a model is likely hallucinating. Extending these approaches, we propose \ours, which addresses the performance, hallucination, and attribution issues in the RAG framework.\looseness-1
+
+
+
+\section{\ours}
+
+\label{sec:proposed_framework}
+Consider the query from \cref{fig:reasoning_dag_example}: \textit{“What is the distance between the locations that hosted the last two Men's Cricket World Cup finals?"}. Conventional RAG frameworks struggle with such complex, multi-hop queries as they retrieve information only once at the start of the generation process, following a \emph{retrieve-then-reason} approach. Although recently proposed query decomposition methods \citep{chan2024rqrag, liu2024ra} aim to address this issue, they rely on  simple structures such as sequential or independent queries. As a result, they fail to capture the inherent reasoning structure. 
+
+To overcome these limitations, we propose Planning-guided Retrieval-Augmented Generation (\ours), which adopts a  \emph{plan-then-retrieve} paradigm. Given a query, \ours generates a reasoning plan upfront, as illustrated in \cref{fig:reasoning_dag_example}, decomposing the query into \textit{atomic} subqueries. In the reasoning DAG presented, subqueries \textit{Q1.1} and \textit{Q2.1} can be processed independently of \textit{Q1.2} and \textit{Q2.2}, while \textit{Q3.1} depends only on the answers \textit{A2.1} and \textit{A2.2}. Query decomposition methods fail to exploit such structure. The reasoning plan is structured using a Directed Acyclic Graph (DAG), allowing for parallelizable subqueries, providing a way for relevant flow of information, and backtracking. The term  \textit{atomic} refers to subqueries that request a single piece of information and thus can be answered by a single document---breaking them further will not help. By ensuring a single retrieved document per subquery, \ours provides attribution \textit{by design}, as the generated text for each subquery can be solely attributed to the singleton retrieved document.   
+
+Once the DAG is created, the generator LM processes each graph node in topological order. \ours introduces a set of \textit{plug-and-play} experts to control generation at each node (see \cref{fig:pictorial-alg}). These experts generate dynamic subqueries, access the need for retrieval, and identify relevant document(s) for each subquery. The experts are invoked after every $k$-tokens generated by the generator LM or when a stop token (such as end of sentence) is reached. Once an answer is generated for a subquery node, the processing moves to its child nodes, continuing until all leaf nodes are reached. A key advantage of \ours is modularity: it is compatible with any generator LM and any implementation of the experts. The full algorithm for \ours is described in \cref{alg:proposed} and \cref{alg:subalgo}.
+\begin{figure}[!t]
+	\centering
+	\small
+\begin{tikzpicture}[
+	node distance=0.8cm and 0.0cm,
+	base_style/.style={
+		rectangle, 
+		rounded corners, 
+		minimum width=#1, 
+		minimum height=.5cm, 
+		align=center, 
+		draw=black, 
+		line width=.75pt,
+		font=\small,
+		fill=highlight,
+		text width=#1
+	},
+	q_style/.style={ 
+		minimum width=#1, 
+		minimum height=.4cm, 
+		align=left, 
+		font=\small,
+		text width=#1
+	},
+	arrow_style/.style={->, line width=1.0pt, draw=black!70},
+	feature_arrow/.style={->, line width=1.2pt, draw=red!70, dashed}
+	]
+	
+	\node (Q) [q_style=5cm] {};
+	\node (dummy) [q_style=9.5cm] at ($(Q)-(.25,0)$) {\texttt{\textbf{Query:} \\What is the distance between the locations that \\ hosted the last two Men's Cricket World Cup finals?}};
+	\node (Q11) [base_style=3.5cm, below left=of Q] {$Q1.1$: Where was the last Men's Cricket \\ World Cup final held?};
+	\node (Q12) [base_style=3.5cm, below right=of Q] {$Q1.2$: Where was the second last Men's Cricket \\ World Cup final held?};
+	\node (Q21) [base_style=3.5cm, below=of Q11] {$Q2.1$: What are the coordinates of \\ $\langle$A1.1$\rangle$?};
+	\node (Q22) [base_style=3.5cm, below=of Q12] {$Q2.2$: What are the coordinates of \\ $\langle$A1.2$\rangle$?};
+	\node (Q31) [base_style=4cm, below=1.2cm of $(Q21)!0.5!(Q22)$] {$Q3.1$: What is the distance between $\langle$A2.1$\rangle$ and $\langle$A2.2$\rangle$?};
+	
+	\draw[arrow_style] (Q11) -- (Q21);
+	\draw[arrow_style] (Q12) -- (Q22);
+	\draw[arrow_style] (Q21) -- (Q31);
+	\draw[arrow_style] (Q22) -- (Q31);
+	
+	\node [right=2cm of Q] (feat1) {\textbf{Relevant flow of information}};
+	\draw[feature_arrow] (feat1.south) -- ++(0,-4.5cm);
+	
+	\node [right=3cm of Q31] (feat2) {\textbf{Debuggability \& Backtracking}};
+	\draw[feature_arrow] (feat2.north) -- ++(0,4.5cm);
+	
+	\node [right=.8cm of Q11] (feat3) {\textbf{Parallelizable subqueries}};
+	\draw[feature_arrow] (feat3.west) -- ++(-.6cm, 0);
+	\draw[feature_arrow] (feat3.east) -- ++(.6cm, 0);	
+	
+	\node [right=0.5cm of Q21] (feat4) {\textbf{* Attribution for each subquery}};
+	
+\end{tikzpicture}
+
+	\caption{\textbf{Reasoning plan example:} A Reasoning DAG generated by the reasoning plan expert, highlighting key advantages: only relevant information flows to each subquery, subqueries on the same depth can be executed in parallel, attribution is inherent by design, and the DAG structure allows for debugging and backtracking.}
+	\label{fig:reasoning_dag_example}
+    \vspace*{-6pt}
+\end{figure}
+\subsection{Reasoning plan: DAG}
+\label{sec:proposed_dag}
+At the core of \ours is a reasoning plan represented as a Directed Acyclic Graph (DAG), generated by an LLM using a suitable prompt (see \cref{app:reasoning_dag}). The DAG is structured so that the root nodes can be answered independently, while each subsequent node can be answered based on the answers to its parent nodes. Thus, the reasoning plan follows Markov assumption. 
+Formally, the reasoning DAG is represented as $\mathcal{G}(\mathbf{V},\mathbf{E})$ where $\mathbf{V}$ represents the set of generated subqueries for a given query, and $\mathbf{E}$ denotes the edges. The answer to any subquery $q \in \mathbf{V}$ can be computed as,
+\begin{equation}
+	G(q) = f(G(\mathbf{Pa}(v)), q, \mathbf{D}_q) \, ; \quad \mathcal{G} = \freasoning(Q)
+\end{equation}
+where $\mathbf{Pa}(q)$ refers to all parents of $q$ in the DAG and $\mathbf{D}_q$ represents the retrieved documents for $q$, if any, and $Q$ is the main query. The function $f$ (typically the generator LM, $\Egenerator$) generates the response text using the subquery, the responses from its parent subqueries, and the document retrievals. When applied recursively, $f$ provides a mechanism to generate the response to a query by traversing the DAG from the root nodes to the leaves. In practice, $G(v)$ may be computed in an auto-regressive manner with potentially multiple retrievals after each $k$-tokens as described above. 
+
+An example of the reasoning DAG is shown in \cref{fig:reasoning_dag_example}. Each node is numbered as $\langle i.j\rangle$ where $i$ refers to the depth of the node from the root and $j$ refers to its index among the nodes at the same depth. 
+A notable feature of the reasoning DAG is the use of a special tag \textbf{$\langle$AI.J$\rangle$} that enables dynamic subquery generation. In the tag \textbf{$\langle$AI.J$\rangle$}, \textbf{I} and \textbf{J} are the integer values representing the Question IDs that are required to complete the subquery. For example, in \cref{fig:reasoning_dag_example}, subquery \textit{Q2.1} depends on the answer to the subquery \textit{Q1.1}; the special tag $\langle$A1.1$\rangle$ allows filling in of the answer dynamically at run time.\looseness-1
+
+\subsection{Experts}
+\label{sec:proposed_experts}
+\ours incorporates a set of independent, \emph{plug-and-play} experts that enhance its capabilities and helps in addressing key challenges in traditional RAG systems. These experts work in concert to boost the accuracy, reliability, relevance, and interpretability of LLM-generated responses. Below, we detail the role of each expert and how they contribute to the overall framework's performance.
+\begin{enumerate}[leftmargin=*]
+	\item \textbf{Dynamic Query Expert:} The dynamic query expert is responsible for generating subqueries by embedding the answers into the corresponding tags within the subquery. In addition to generating the subquery, it captures the Markovian dependencies between subqueries, ensuring that only the relevant information is passed while irrelevant details are abstracted. Formally, the process is defined as $\tilde{q} \gets \EDynamicQuery(q, \mathbf{T_{q}})$, where $\tilde{q}$ is the dynamically generated subquery, $q$ is the subquery within the DAG containing the special tag \mbox{\textbf{$\langle$AI.J$\rangle$}}, and $\mathbf{T_{q}}$ represents the set of question-answer pairs associated to the special tags in $q$.\looseness-1
+	
+	\item \textbf{Critic Expert:} The critic expert enables on-demand retrievals by assessing when additional information is needed during the generation process. This expert plays a crucial role in identifying knowledge gaps, triggering retrievals, and reducing hallucination. By analyzing the current context and the generation task, the critic determines when the LLM lacks sufficient information to provide an accurate response. Upon identification, the critic initiates the retrieval process, ensuring that the system acquires the necessary information dynamically. Formally, $C \gets \Ecritic(G, \tilde{q})$, where $G$ is the current generation, $q$ is the (sub)query, and $C$ is a boolean representing whether retrieval is required or not. The critic expert can be configured to run after one sentence or $k$-tokens.
+	
+	\item \textbf{Relevance Expert:} The relevance expert refines the retrievals, ensuring the selection of the most relevant document to the subquery at hand. Its key tasks include relevance scoring, ranking and selection. The expert reduces the context window usage by ranking and selecting only the most relevant documents. Formally, ${\mathbf{r^\star} \gets \Eclassifier(G, \tilde{q}, \mathbf{r})}$, where $G$ is the current generation, $\tilde{q}$ is the (sub)query, $\mathbf{r}$ is the set of retrieved document, and $\mathbf{r^\star}$ is the set of relevant documents obtained from the retriever $\Eretriever$. The relevance can be configured to output either a single document or a set of relevant documents, depending on the task requirements.
+	
+	\item \textbf{Aggregator:} The aggregator expert combines multiple answers to a set of subqueries to generate a cohesive and comprehensive response to the original query. It plays a key role in subquery integration and ensuring a balanced, holistic final response. The expert ensures that the final response addresses all aspects of the original query in a balanced and thorough manner. Formally, $G \gets \EAggregator(\textbf{q}, \textbf{G})$, where $G$ is the combined generation, $\textbf{q}$ is the set of queries, and $\textbf{G}$ is the set of their respective generations.
+	 
+\end{enumerate}
+All these experts work in tandem to create a robust and adaptive system, where each component plays a clear role in improving the overall performance of \ours. \ours reduces hallucination by incorporating on-demand retrievals and relevance expert, decreasing the likelihood of generating false or unsupported information. The system improves attribution by more easily tracing generated content back to specific retrievals, enhancing the interpretability and trustworthiness of the outputs. \ours ensures enhanced relevance through expert-guided retrieval and relevance expert, guaranteeing that the most pertinent information is used in the generation process. 
+
+As shown in \cref{alg:proposed} and \cref{alg:subalgo}, in the default setting, \ours involves 1 GPT-4o class to get the \textit{reasoning DAG} and then for each node, the \textit{critic expert} is called after every $k$-tokens (or at end-of-sentence). If it predicts that retrievals are needed, then the \textit{retriever} is invoked and subsequently the \textit{relevance expert} is called. The \textit{dynamic query expert} is only called once per subquery in case it contains a special dependency tag, and the \textit{aggregator expert} is called once for the entire query. Therefore, for a reasoning DAG with n nodes, we expect $O(2ns + n)$ calls where $s$ is the number of sentences/$k$-length phrases in the generation per node.
+
+
+
+
+\begin{figure}[t!]
+\centering
+\vspace*{-6pt}
+\begin{minipage}[t]{.48\textwidth}
+  \begin{algorithm}[H]
+	\caption{\ours framework}
+	\label{alg:proposed}
+	\begin{algorithmic}
+	    \footnotesize
+		\State \textit{Input:} $Q, k$: Query, generation-token size
+		\State \textit{Output:} Generation $G$
+		\State Get a reasoning plan: $\mathbf{q} \gets \freasoning(Q)$ 
+            \State Identify root nodes: $\mathbf{q}_{root}$
+            \State Calculate depth of each node from root: \\ $l_q \gets maxdist(q, \mathbf{q}_{root})$
+            \For {i: 0 to $\max_q (l_q)$}
+                \For {parallel: $q$ in  $\{q: l_q = i \}$}
+			\State Get parent questions and answers: 
+			\State $M_{q} \gets \mathbf{Pa}(q)$ \& $M_{a} \gets G_{M_{q}}$
+			\State Dynamically generate the subquery: 
+			\State $\tilde{q} \gets \EDynamicQuery(q, M_{q}, M_a)$
+            \State Obtain generated answer for query $q$ 
+            \State by calling \cref{alg:subalgo} with inputs $\tilde{q}, k$.
+		\EndFor
+            \EndFor
+		\State $G \gets \EAggregator(\mathbf{q}, {G}_1, {G}_2, \dots, {G}_q)$
+		\\
+		\Return $G\phantom{G_q}$
+	\end{algorithmic}
+  \end{algorithm}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{.48\textwidth}
+  \begin{algorithm}[H]
+  \centering
+	\caption{Generate answer}
+	\label{alg:subalgo}
+	\begin{algorithmic}
+	    \footnotesize
+		\State \textit{Input:} $\tilde{q}$, $k$
+  \State Initialize $G_{q}$ with empty string and $\mathbf{r^\star} \gets \phi$
+		\While{generation not finished}
+				\State Generate $k$ tokens: $\bar{G}_q \gets \Egenerator(G_q, \tilde{q}, \mathbf{r^\star})$
+				\State Check if retrieval is required: 
+				\State $C \gets \Ecritic(\bar{G}_q, \tilde{q}, \mathbf{r^\star})$
+				\If{C}
+					\State Get retrievals: $\mathbf{r} \gets \Eretriever(\bar{G}_q, \tilde{q})$
+					\If{retrieval $\mathbf{r}$ is non trivial}
+						\State Get the relevant retrieval(s): 
+						\State $\mathbf{r^{\star}} \gets \Eclassifier(\bar{G}_q, \tilde{q}, \mathbf{r})$
+					\Else
+						\State Re-write the query \& retry retrievals.
+					\EndIf
+				\EndIf
+			\State $G_{q} \gets G_q \bigoplus \bar{G}_q$ 
+			\EndWhile
+   
+   \State\Return $G_q$
+	\end{algorithmic}
+  \end{algorithm}
+\end{minipage}
+\end{figure}
+
+\subsection{Benefits of \ours}
+The breaking up of a query into a reasoning DAG approach offers several advantages over existing RAG methods (see \cref{tbl:p_rag_difference}). We elaborate on these advantages in detail below. 
+
+\textbf{Attribution by design:} The atomic nature of sub-queries improves attribution by limiting retrieval to a single document per generation. %
+In its default configuration, the relevance is constrained to 
+select only one relevant document per subquery, defined as $\mathbf{r^\star} {=} \Eclassifier(\bar{G}_q, \tilde{q}, \mathbf{r})$, where $|\mathbf{r^\star}| {=} 1$. 
+This ensures that each subquery generation is directly linked to a single retrieved document, establishing a clear, one-to-one mapping between the document and the subquery's response. This setup guarantees attribution by design, allowing easy traceability of each generated response back to its specific source document.
+When the relevance expert is permitted to retrieve multiple documents, this direct attribution feature diminishes. However, empirical results indicate that even in these configurations, the relevance expert typically selects only one document. This is largely due to the atomic nature of the subqueries, where the relevant information for each subquery tends to be contained within a single document. We showcase this with an experiment which we discuss in detail in \cref{app:multi_classifier_exp}.
+
+\textbf{Efficiency:} The reasoning DAG enhances efficiency by leveraging queries that are on the same depth within the DAG, or on the independent paths in the DAG. This significantly reduces latency, and improves context handling through relevant flow of information \ie abstracting unnecessary information such as subqueries, their responses, retrieved data that are not related.
+\ours achieves greater \textbf{efficiency in context utilization} as compared to vanilla RAG models as well as RAG frameworks like RA-ISF and RQ-RAG. By employing a focused approach where typically only one highly relevant retrieval is used, \ours maximizes the use of the limited context window available to SLMs. This targeted use of context allows the system to handle more complex queries and maintain coherence over longer interactions without the need for extensive context management. %
+
+\textbf{Debuggability:} The reasoning DAG provides a robust mechanism for identifying and rectifying erroneous generations by backtracking through the paths from the leaf nodes to the root node. This allows us to analyze the subqueries and their corresponding responses at each step. Upon identifying the error node, we can address the issue by providing additional context or clarifying the subquery, among other strategies. After adjustments, we regenerate the outputs only for the affected path and rerun the aggregator. This iterative debugging process enhances the explainability of the RAG system.%
+More broadly, the reasoning DAG maps how various pieces of information contribute to the final generation.%
+We demonstrate this \textit{debug-and-backtrack} capability in \cref{fig:app_debuggability}, where \ours initially generates an incorrect response. However, by analyzing the DAG and its corresponding subqueries, we are able to identify and rectify the error, ultimately leading to a correct generation.
+
+\begin{table}[t!]
+	\centering
+	\caption{\textbf{Reasoning DAG depth} (percentage/count) for multi-hop query (HotpotQA, StrategyQA, Arc-Processed) and single-hop query (PopQA) data sets. For single-hop queries, the DAG primarily has a depth of 0, which is desirable, while multi-hop queries typically require deeper reasoning paths.\looseness-1}
+	\setlength{\tabcolsep}{6pt}
+	\small	
+\begin{tabular}{lccccc}
+    \toprule
+    \textbf{Dataset} & \textbf{Depth 0} & \textbf{Depth 1} & \textbf{Depth 2} & \textbf{Depth 3} & \textbf{Depth$\geq$4} \\ \midrule
+    \textbf{HotpotQA} {(Multi-hop)}    
+    & \cellcolor{red!01}0.5\% (35)  
+    & \cellcolor{red!13}12.8\% (939)  
+    & \cellcolor{red!80}79.5\% (5848)  
+    & \cellcolor{red!07}6.8\% (501)  
+    & \cellcolor{red!0}0.4\% (29)  \\ 
+    
+    \textbf{StrategyQA} {(Multi-hop)}  
+    & \cellcolor{red!01}0.9\% (22)   
+    & \cellcolor{red!43}42.9\% (960)  
+    & \cellcolor{red!51}51.2\% (1145)  
+    & \cellcolor{red!5}4.5\% (101)  
+    & \cellcolor{red!0}0.3\% (6)   \\ 
+    
+    \textbf{Arc-Processed} {(Multi-hop)} 
+    & \cellcolor{red!0}0.1\% (2)   
+    & \cellcolor{red!72}72.1\% (790)  
+    & \cellcolor{red!26}25.5\% (279)   
+    & \cellcolor{red!02}2.1\% (23)   
+    & \cellcolor{red!0}0.0\% (1)   \\ 
+    
+    \textbf{PopQA} {(Single-hop)}      
+    & \cellcolor{red!78}77.9\% (1090) 
+    & \cellcolor{red!01}0.8\% (11)   
+    & \cellcolor{red!19}18.9\% (264)   
+    & \cellcolor{red!2}2.4\% (34)   
+    & \cellcolor{red!0}0.0\% (0)   \\ 
+    
+    \bottomrule
+\end{tabular}	
+	
+	\label{app:tbl_reasoning_depth}
+\end{table}
+
+
+
+\section{Experiments}
+
+We conduct a comprehensive series of experiments to demonstrate the capabilities and efficiency of the proposed framework, \ours. Our experiments highlight \ours's improved accuracy, attribution, and debuggability. Additionally, we perform ablation studies to analyze the contribution of each expert module and quantify their individual impact on the overall performance of \ours.
+\paragraph{Datasets} We evaluate \ours on four datasets: HotpotQA \citep{yang2018hotpotqa},  StrategyQA \citep{Geva2021DidAU}, and 
+ARC-challenge \citep{clark2018think}
+consisting of multi-hop queries; and PopQA \citep{mallen2023llm_memorization} consisting of single-hop queries. %
+The dataset details are given in \cref{app:dataset_details}.
+
+\paragraph{Baselines and competing methods} We evaluate the performance of \ours method against two recently proposed RAG methods that have achieved state-of-the-art results on the datasets above: Self-RAG \citep{asai2023self} and RQ-RAG \citep{chan2024rqrag}, outperforming SAIL \citep{luo2023search}, Toolformer \citep{schick2024toolformer}, Alpaca models, and proprietary LLMs like Perplexity.ai and ChatGPT. We use the officially released code and associated models for both of these methods. Details are present in \cref{app:competitive_method_details}.
+We also compare with the following baseline methods: (1) Vanilla LLMs (\ie with no retrieval), namely GPT-3.5, Llama2-7b-chat, Llama2-13b-chat, and Llama3-8B-instruct (prompts and other details are in \cref{app:llm_baselines}); (2) standard RAG using the Llama2 family of models (prompts, and other details in \cref{app:rag_baselines}). All RAG baselines use the same set of retrieved documents.\looseness-1
+
+\paragraph{\ours} We use the default configuration of the proposed method, where we use Contriever to retrieve top 10 documents and limit the relevant retrievals to maximum 1 using the relevance expert. We employ the GPT-4o model for generating the query plan (DAG); and the Llama3-instruct\textsubscript{8B} model for all the other experts in our method.
+
+\paragraph{Retriever} We use the official Contriever-MS MARCO \citep{izacard2022unsupervised} retriever. It consists of embeddings based on the 2018 English Wikipedia. The Wikipedia articles are segmented into non-overlapping 100-word segments. For all vanilla LLM and RAG baselines, we retrieve 10 documents. We retrieve 10 documents for \ours as well, but a relevance expert selects the single most relevant document. In the relevance expert $|\mathbf{r}^\star| \geq 1$ setting, it selects all documents deemed relevant.
+
+\paragraph{Evaluation metrics} We employ three evaluation metrics: Accuracy, F1 score, and LLM-Eval. For accuracy, we consider an answer correct if the predicted answer contains the correct answer. This metric provides a relaxed version of exact-match, allowing for some flexibility in answer phrasing. The F1 score is calculated based on the overlap between the prediction and the true answer, balancing precision and recall. In addition, we utilize the recently developed LLM-Eval method \citep{Chen2023llm}, where we employ GPT-3.5-Turbo to compare the answers. This approach leverages the language understanding capabilities of LLMs for evaluation. Due to computational costs, we apply LLM-Eval to a subset of experimental datasets. The details are discussed in \cref{app:llm_eval}.
+
+\subsection{Main results}
+In this section, we present the main results of the experiments in particular we discuss about performance, depth of the reasoning DAG, attribution and evaluation using a large language model.
+
+\begin{table}[t!]
+	\centering\small
+	\caption{\textbf{Experiment results:} We report two metrics: \textit{Acc}, which measures whether the true answer is a subset of the generated answer, and \textit{F1}, which captures the overlap between the true and generated answers. \ours achieves the highest performance on both metrics for all multi-hop datasets and demonstrates competitive results on the single-hop dataset.}\vspace*{-6pt}
+	\label{tbl:exp_qa_datasets}
+	\setlength{\tabcolsep}{6.5pt}
+	\begin{tabularx}{\textwidth}{llcccccc|cc}
+		\toprule
+		& & \multicolumn{6}{c|}{{\em Multi-hop}} & \multicolumn{2}{c}{{\em Single-hop}} \\
+		& \textbf{Model} & \multicolumn{2}{c}{\textbf{HotpotQA}} & \multicolumn{2}{c}{\textbf{StrategyQA}} & \multicolumn{2}{c}{\textbf{Arc-Challenge}} & \multicolumn{2}{c}{\textbf{PopQA}}  \\
+		\cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8} \cmidrule(lr){9-10}
+		& \textbf{} & \textbf{Acc} & \textbf{F1} & \textbf{Acc} & \textbf{F1} & \textbf{Acc} & \textbf{F1} & \textbf{Acc} & \textbf{F1} \\
+		\midrule
+		\multirow{4}{*}{\rotatebox[origin=c]{90}{\scriptsize Vanilla LLM}}
+		& GPT-3.5\textsubscript{turbo} & $27.15$ & $37.97$ & $55.51$ & $31.58$ & $66.43$ & $78.40$ & $27.45$ & $28.28$ \\
+		& Llama2-chat\textsubscript{7B} & $14.50$ & $20.68$ & $40.25$ & $37.65$ & $48.90$ & $60.53$ & $20.70$ & $22.30$ \\
+		& Llama2-chat\textsubscript{13B} & $17.69$ & $25.40$ & $44.46$ & $42.27$ & $57.47$ & $67.79$ & $19.51$ & $21.59$ \\
+		& Llama3-instruct\textsubscript{8B} & $21.35$ & $25.57$ & $48.42$ & $21.24$ & $71.40$ & $79.99$ & $21.23$ & $22.62$ \\
+		\arrayrulecolor{black!30}\hline
+		\multirow{3}{*}{\rotatebox[origin=c]{90}{\scriptsize RAG}}		 
+		& Llama2-chat\textsubscript{7B} & $16.60$ & $24.71$ & $31.21$ & $5.11$ & $40.13$ & $53.03$ & $22.76$ & $19.22$ \\
+		& Llama2-chat\textsubscript{13B} & $18.22$ & $27.10$ & $43.98$ & $29.46$ & $53.33$ & $64.54$ & $29.82$ & $25.71$ \\
+		& Llama3-instruct\textsubscript{8B} & $25.49$ & $31.22$ & $47.35$ & $31.51$ & $73.43$ & $80.40$ & $36.52$ & $\mathbf{35.23}$ \\
+		\arrayrulecolor{black!30}\hline
+		\multirow{3}{*}{\rotatebox[origin=c]{90}{\scriptsize SoTA}}		
+		& RQ-RAG & $23.20$&$20.11$ &$47.46$ & $45.57$&$64.98$ &$64.98$ & $32.66$ & $31.68$ \\
+		& Self-RAG\textsubscript{7B} & $33.18$ & $21.55$ & $60.5$ & $13.55$ & $67.32$&$52.81$ & $44.31$ & $15.63$ \\
+		& Self-RAG\textsubscript{13B} & $33.93$ & $21.83$ & $63.4$ & $21.49$ & $73.12$ &$56.74$ & $\mathbf{44.53}$ & $16.34$ \\
+		\arrayrulecolor{black!30}\hline
+		\rowcolor{highlight}\cellcolor{white}
+		& \ours\textsubscript{8B} & $\mathbf{35.67}$ & $\mathbf{39.68}$ & $\mathbf{69.49}$ & $\mathbf{64.03}$ & $\mathbf{74.12}$ & $\mathbf{81.30}$ & $36.09$ & $35.20$ \\
+		\arrayrulecolor{black}\bottomrule	
+	\end{tabularx}
+    \vspace*{-6pt}
+\end{table}
+
+\paragraph{Performance} \ours consistently outperforms vanilla LLM baselines, RAG baselines, and two state-of-the-art RAG frameworks, Self-RAG \citep{asai2023self} and RQ-RAG \citep{chan2024rqrag}, across three multi-hop datasets: HotpotQA, StrategyQA, and Arc-Challenge. Designed specifically to handle complex, multi-hop queries, \ours excels in these tasks by effectively using a reasoning DAG and \textit{plug-and-play} experts. Although primarily focused on multi-hop reasoning, \ours also performs competitively on the single-hop dataset, PopQA, demonstrating that it does not sacrifice performance on simpler queries. The complete results are provided in \cref{tbl:exp_qa_datasets}. 
+\begin{table}[b!]
+	\centering
+	\small
+	\caption{\textbf{LLM-Eval:} Comparison of Self-RAG and \ours on the PopQA dataset using Accuracy and the LLM-Eval metric. LLM-Eval reveals that the difference in the output is minimal.}
+	\label{tbl:llm_eval}
+	\setlength{\tabcolsep}{8pt} %
+	\begin{tabular}{l c c c c} %
+		\hline
+		\textbf{Metric} & \textbf{Self-RAG\textsubscript{7B}} & \textbf{Self-RAG\textsubscript{13B}} & \textbf{\ours\textsubscript{8B}} & \textbf{Diff} \\ 
+		\hline
+		\textbf{Accuracy}    &  44.31\%  & 44.53\%             & 36.09\%             & 8.22\% / 8.44\%  \\
+		\textbf{LLM-Eval}    & 44.83\% & 46.06\%             & 42.74\%             & 2.09\% / 3.32\%  \\
+		\hline
+	\end{tabular}
+\end{table}
+
+\paragraph{Reasoning DAG depth} \cref{app:tbl_reasoning_depth} shows the reasoning DAG depths for all the datasets. As expected, the multi-hop query datasets exhibit a DAG depth greater than 1, indicating that multiple atomic queries must be answered at different depths to answer the main query. In contrast, the single-hop dataset typically shows a reasoning DAG depth of 0, which is both expected and desired, as these simpler queries do not require further decomposition into subqueries. This showcases that \ours's reasoning DAG effectively adapts its complexity based on the complexity of the query.
+
+\paragraph{Attribution}
+\ours supports attribution by design, ensuring a one-to-one mapping between generation and the retrieved document. For this, we analyze the frequency of \ours generating answers with proper attribution to a retrieved passage. Using PopQA, we sample correctly answered queries and check whether generated answer is a substring of the corresponding retrieved document. This setup is inspired by \citet{asai2023self}. Our experiment reveal that \ours correctly attributes 76\% of its generations to the retrieved passage (\ie, 76\% of the queries have the answer as a substring in the retrieved documents), while 12\% of answers come from its world knowledge (\ie, there is no retrieve document). Consequently, only 12\% of answers fall outside the retrieved passage (\ie, answer not present as a substring in the retrieve document) or require reasoning over the retrieved data. These results demonstrate that \ours provides correct attribution or explicitly uses world knowledge at-least 88\% of the time, highlighting its strong attribution capability.
+We further evaluate \ours using a random sample of 1500 HotpotQA queries and experiment with the configuration employing a relevance expert ($|\mathbf{r}^\star| {\geq} 1$). In this setup, the expert returns a set of relevant documents rather than a single document, potentially compromising accuracy by losing the one-to-one mapping between retrieved documents and generated answers. However, we observe that due to the atomic nature of the subqueries, the relevance expert selects a single retrieved document 88\% of the time. Thus, it maintains a high level of attribution even in this multi-document setting. This finding suggests that \ours's approach of generating atomic subqueries naturally gravitates towards attribution even when given the option to use multiple documents. We detail the results in \cref{tbl:multi_retriever_exp}.
+\begin{table}[t!]
+	\centering
+	\begin{minipage}[t]{0.48\textwidth}  %
+		\centering
+		\small
+		\caption{\textbf{Relevance expert experiment:} Summary of subquery attribution, highlighting the efficiency of the critic expert configuration.}
+		\setlength{\tabcolsep}{16pt}
+		\vspace*{-.5em}
+		\begin{tabular}{lc}
+			\toprule
+			\textbf{Metric} & \textbf{Value} \\
+			\midrule
+			Total Queries       & 1,500 \\
+			Total Sub-Queries   & 3,978 \\
+			Accuracy (\%)       & 39.73 \\
+			Single Doc (\%)     & 88.5 (3,520) \\
+			Multiple Docs (\%)  & 11.5 (458) \\
+			\bottomrule
+		\end{tabular}
+		\label{tbl:multi_retriever_exp}
+	\end{minipage}%
+	\hfill  %
+	\begin{minipage}[t]{0.48\textwidth}
+		\centering
+		\small
+		\caption{\textbf{Ablation studies:} Comparison of configurations using 1500 HotpotQA queries to assess performance in various configs.} 
+		\setlength{\tabcolsep}{1pt}
+		\vspace*{-.5em}
+		\begin{tabular}{lcc}
+			\toprule
+			\textbf{Configuration} & \textbf{Accuracy (\%)} & \textbf{F1 Score} \\
+			\midrule
+			Critic Expert & 36.60 & 40.72 \\
+			Always Retrieve & 37.13 & 41.52 \\ 
+			\midrule
+			Relevance-Expert & 39.33 & 42.01 \\
+			No Relevance-Expert & 31.60 & 36.18 \\
+			\bottomrule
+		\end{tabular}
+		\label{tbl:ablation_critic_retriever}
+	\end{minipage}
+    \vspace*{-6pt}
+\end{table}
+
+\paragraph{LLM evaluation}
+For a more sophisticated evaluation, we employ GPT-3.5-turbo as an external evaluator to compare the answers generated by Self-RAG and \ours on the PopQA dataset. As shown in \cref{tbl:llm_eval}, while the accuracy metrics indicate a performance gap of 8.22\% and 8.44\% between \ours\textsubscript{8B} and Self-RAG\textsubscript{7B} and Self-RAG\textsubscript{13B} respectively, the LLM-based evaluation reveals a significantly smaller difference. The LLM-Eval metric shows only a 2.09\% difference compared to Self-RAG\textsubscript{7B} and a 3.32\% difference compared to Self-RAG\textsubscript{13B}. This suggests that while \ours may not always produce generations for accuracy measurements, its generations are often similar to the true answer, as judged by an LLM.
+\subsection{Ablation Study}
+We conduct a series of ablation studies to evaluate the effectiveness of key components in the \ours framework. Specifically, we focus on two critical elements: the \textit{critic expert} and the \textit{relevance expert}. These studies aim to quantify the impact of each component on the overall system performance, measured in terms of accuracy and F1 score.
+\paragraph{Effectiveness of the Critic Expert} We evaluate the efficacy of the \textit{critic expert} in \ours using 1500 random queries from HotpotQA. We compare two configurations: (1) a critic expert that dynamically decides whether to trigger retrievals, and (2) a baseline that consistently retrieves after generating $k$-tokens. Both setups are constrained to a single retrieval ($|\mathbf{r}^*|{=}1$) per subquery. The critic expert configuration achieved an accuracy of $36.60$ and an F1 score of $40.72$, while the baseline attained an accuracy of $37.13$ and an F1 score of $41.52$. Across the 1500 queries (3926 subqueries), the critic expert triggered 2530 retrievals, compared to 3163 in the always-retrieve setup. This represents a 600 reduction in retrievals. Notably, this significant decrease in retrievals resulted in only a marginal performance drop of $0.5\%$ in accuracy and $0.80$ in F1 score. These results demonstrate that the critic expert can improve retrieval efficiency while maintaining near-equivalent performance.\looseness-1
+
+\paragraph{Effectiveness of the Relevance Expert} We evaluate the \textit{relevance expert} in the \ours framework using 1500 random queries from HotpotQA. Two configurations are compared: (1) with a relevance expert, and (2) a no relevance expert using all retrievals. Both setups initially retrieved 10 documents per subquery. The expert configuration significantly outperformed the no relevance expert, achieving 39.33 accuracy and 42.01 F1 score, compared to 31.6 accuracy and 36.18 F1 score for the no relevance expert configuration. The performance gap, despite the second configuration using more documents, can be attributed to the reasoning limitations of the Llama3-8B model and the negative impact of noisy retrievals on generation. These results highlight the crucial role of the relevance expert in enhancing performance by effectively filtering and providing only relevant retrievals.\looseness-1
+
+
+
+\section{Discussion and conclusion}
+
+In this paper, we present Planning-guided Retrieval Augmented Generation (\ours), a novel framework designed to tackle critical challenges in Retrieval-Augmented Generation (RAG), addressing performance and hallucinations in complex queries, and lack of attribution. Unlike traditional RAG systems that follow a \textit{retrieve-then-reason} approach, \ours shifts to a \textit{plan-then-retrieve} paradigm. This shift facilitates a more structured, efficient, and interpretable methodology for managing complex queries. Key innovations of \ours include a reasoning plan represented as a DAG and a set of \textit{plug-and-play} experts. These advancements yield significant improvements across various critical dimensions like performance, attribution, as evidenced by the experimental results. The \textit{plug-and-play} experts allow for seamless substitution with alternative or emerging language models, ensuring that \ours remains adaptable to evolving technologies. Furthermore, the framework’s design enables easy integration with various language models without necessitating fine-tuning, establishing it as a versatile and practical solution. Future work will focus on incorporating additional experts capable of early exiting from the reasoning DAG, developing specialized experts for mathematical calculations and logical reasoning, and implementing dynamic expert allocation conditioned on the input query.
+
+
+\begin{thebibliography}{44}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Adewumi et~al.(2024)Adewumi, Habib, Alkhaled, and
+  Barney]{adewumi2024limitations}
+Tosin Adewumi, Nudrat Habib, Lama Alkhaled, and Elisa Barney.
+\newblock On the limitations of large language models (llms): False
+  attribution.
+\newblock \emph{arXiv preprint arXiv:2404.04631}, 2024.
+
+\bibitem[Asai et~al.(2022)Asai, Schick, Lewis, Chen, Izacard, Riedel,
+  Hajishirzi, and Yih]{asai2022task}
+Akari Asai, Timo Schick, Patrick Lewis, Xilun Chen, Gautier Izacard, Sebastian
+  Riedel, Hannaneh Hajishirzi, and Wen-tau Yih.
+\newblock Task-aware retrieval with instructions.
+\newblock \emph{arXiv preprint arXiv:2211.09260}, 2022.
+
+\bibitem[Asai et~al.(2023)Asai, Wu, Wang, Sil, and Hajishirzi]{asai2023self}
+Akari Asai, Zeqiu Wu, Yizhong Wang, Avirup Sil, and Hannaneh Hajishirzi.
+\newblock Self-rag: Learning to retrieve, generate, and critique through
+  self-reflection.
+\newblock In \emph{The Twelfth International Conference on Learning
+  Representations}, 2023.
+
+\bibitem[Bohnet et~al.(2022)Bohnet, Tran, Verga, Aharoni, Andor, Soares,
+  Ciaramita, Eisenstein, Ganchev, Herzig, et~al.]{bohnet2022attributed}
+Bernd Bohnet, Vinh~Q Tran, Pat Verga, Roee Aharoni, Daniel Andor, Livio~Baldini
+  Soares, Massimiliano Ciaramita, Jacob Eisenstein, Kuzman Ganchev, Jonathan
+  Herzig, et~al.
+\newblock Attributed question answering: Evaluation and modeling for attributed
+  large language models.
+\newblock \emph{arXiv preprint arXiv:2212.08037}, 2022.
+
+\bibitem[Borgeaud et~al.(2022)Borgeaud, Mensch, Hoffmann, Cai, Rutherford,
+  Millican, Van Den~Driessche, Lespiau, Damoc, Clark, De~Las~Casas, Guy,
+  Menick, Ring, Hennigan, Huang, Maggiore, Jones, Cassirer, Brock, Paganini,
+  Irving, Vinyals, Osindero, Simonyan, Rae, Elsen, and
+  Sifre]{pmlr-v162-borgeaud22a}
+Sebastian Borgeaud, Arthur Mensch, Jordan Hoffmann, Trevor Cai, Eliza
+  Rutherford, Katie Millican, George~Bm Van Den~Driessche, Jean-Baptiste
+  Lespiau, Bogdan Damoc, Aidan Clark, Diego De~Las~Casas, Aurelia Guy, Jacob
+  Menick, Roman Ring, Tom Hennigan, Saffron Huang, Loren Maggiore, Chris Jones,
+  Albin Cassirer, Andy Brock, Michela Paganini, Geoffrey Irving, Oriol Vinyals,
+  Simon Osindero, Karen Simonyan, Jack Rae, Erich Elsen, and Laurent Sifre.
+\newblock Improving language models by retrieving from trillions of tokens.
+\newblock In \emph{Proceedings of the 39th International Conference on Machine
+  Learning}, volume 162 of \emph{Proceedings of Machine Learning Research},
+  pp.\  2206--2240. PMLR, 17--23 Jul 2022.
+
+\bibitem[Brown et~al.(2020)Brown, Mann, Ryder, Subbiah, Kaplan, Dhariwal,
+  Neelakantan, Shyam, Sastry, Askell, et~al.]{brown2020language}
+Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared~D Kaplan, Prafulla
+  Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell,
+  et~al.
+\newblock Language models are few-shot learners.
+\newblock \emph{Advances in neural information processing systems},
+  33:\penalty0 1877--1901, 2020.
+
+\bibitem[Chan et~al.(2024)Chan, Xu, Yuan, Luo, Xue, Guo, and Fu]{chan2024rqrag}
+Chi-Min Chan, Chunpu Xu, Ruibin Yuan, Hongyin Luo, Wei Xue, Yike Guo, and Jie
+  Fu.
+\newblock {RQ}-{RAG}: Learning to refine queries for retrieval augmented
+  generation.
+\newblock In \emph{First Conference on Language Modeling}, 2024.
+
+\bibitem[Chen et~al.(2017)Chen, Fisch, Weston, and Bordes]{chen2017reading}
+Danqi Chen, Adam Fisch, Jason Weston, and Antoine Bordes.
+\newblock Reading {W}ikipedia to answer open-domain questions.
+\newblock In \emph{Proceedings of the 55th Annual Meeting of the Association
+  for Computational Linguistics (Volume 1: Long Papers)}, pp.\  1870--1879.
+  Association for Computational Linguistics, 2017.
+
+\bibitem[Clark et~al.(2018)Clark, Cowhey, Etzioni, Khot, Sabharwal, Schoenick,
+  and Tafjord]{clark2018think}
+Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa
+  Schoenick, and Oyvind Tafjord.
+\newblock Think you have solved question answering? try arc, the ai2 reasoning
+  challenge.
+\newblock \emph{arXiv preprint arXiv:1803.05457}, 2018.
+
+\bibitem[Dalal \& Misra(2024)Dalal and Misra]{dalal2024matrix}
+Siddhartha Dalal and Vishal Misra.
+\newblock The matrix: A {B}ayesian learning model for {LLM}s.
+\newblock \emph{arXiv preprint arXiv:2402.03175}, 2024.
+
+\bibitem[Drozdov et~al.(2022)Drozdov, Wang, Rahimi, Mccallum, Zamani, and
+  Iyyer]{drozdov2022you}
+Andrew Drozdov, Shufan Wang, Razieh Rahimi, Andrew Mccallum, Hamed Zamani, and
+  Mohit Iyyer.
+\newblock You can’t pick your neighbors, or can you? when and how to rely on
+  retrieval in the knn-lm.
+\newblock In \emph{Findings of the Association for Computational Linguistics:
+  EMNLP 2022}, pp.\  2997--3007, 2022.
+
+\bibitem[Geva et~al.(2021)Geva, Khashabi, Segal, Khot, Roth, and
+  Berant]{Geva2021DidAU}
+Mor Geva, Daniel Khashabi, Elad Segal, Tushar Khot, Dan Roth, and Jonathan
+  Berant.
+\newblock Did aristotle use a laptop? a question answering benchmark with
+  implicit reasoning strategies.
+\newblock \emph{Transactions of the Association for Computational Linguistics},
+  9:\penalty0 346--361, 2021.
+
+\bibitem[Gou et~al.(2023)Gou, Shao, Gong, Shen, Yang, Duan, and
+  Chen]{gou2023critic}
+Zhibin Gou, Zhihong Shao, Yeyun Gong, Yelong Shen, Yujiu Yang, Nan Duan, and
+  Weizhu Chen.
+\newblock Critic: Large language models can self-correct with tool-interactive
+  critiquing.
+\newblock \emph{arXiv preprint arXiv:2305.11738}, 2023.
+
+\bibitem[Guu et~al.(2020)Guu, Lee, Tung, Pasupat, and Chang]{guu2020retrieval}
+Kelvin Guu, Kenton Lee, Zora Tung, Panupong Pasupat, and Mingwei Chang.
+\newblock Retrieval augmented language model pre-training.
+\newblock In \emph{International conference on machine learning}, pp.\
+  3929--3938. PMLR, 2020.
+
+\bibitem[Huang et~al.(2023)Huang, Yu, Ma, Zhong, Feng, Wang, Chen, Peng, Feng,
+  Qin, et~al.]{huang2023survey}
+Lei Huang, Weijiang Yu, Weitao Ma, Weihong Zhong, Zhangyin Feng, Haotian Wang,
+  Qianglong Chen, Weihua Peng, Xiaocheng Feng, Bing Qin, et~al.
+\newblock A survey on hallucination in large language models: Principles,
+  taxonomy, challenges, and open questions.
+\newblock \emph{arXiv preprint arXiv:2311.05232}, 2023.
+
+\bibitem[Izacard et~al.(2022)Izacard, Caron, Hosseini, Riedel, Bojanowski,
+  Joulin, and Grave]{izacard2022unsupervised}
+Gautier Izacard, Mathilde Caron, Lucas Hosseini, Sebastian Riedel, Piotr
+  Bojanowski, Armand Joulin, and Edouard Grave.
+\newblock Unsupervised dense information retrieval with contrastive learning.
+\newblock \emph{Transactions on Machine Learning Research}, 2022.
+
+\bibitem[Izacard et~al.(2023)Izacard, Lewis, Lomeli, Hosseini, Petroni, Schick,
+  Dwivedi-Yu, Joulin, Riedel, and Grave]{izacard2023atlas}
+Gautier Izacard, Patrick Lewis, Maria Lomeli, Lucas Hosseini, Fabio Petroni,
+  Timo Schick, Jane Dwivedi-Yu, Armand Joulin, Sebastian Riedel, and Edouard
+  Grave.
+\newblock Atlas: Few-shot learning with retrieval augmented language models.
+\newblock \emph{Journal of Machine Learning Research}, 24\penalty0
+  (251):\penalty0 1--43, 2023.
+
+\bibitem[Ji et~al.(2023)Ji, Lee, Frieske, Yu, Su, Xu, Ishii, Bang, Madotto, and
+  Fung]{ji2023survey}
+Ziwei Ji, Nayeon Lee, Rita Frieske, Tiezheng Yu, Dan Su, Yan Xu, Etsuko Ishii,
+  Ye~Jin Bang, Andrea Madotto, and Pascale Fung.
+\newblock Survey of hallucination in natural language generation.
+\newblock \emph{ACM Computing Surveys}, 55\penalty0 (12):\penalty0 1--38, 2023.
+
+\bibitem[Jiang et~al.(2023)Jiang, Xu, Gao, Sun, Liu, Dwivedi-Yu, Yang, Callan,
+  and Neubig]{jiang2023active}
+Zhengbao Jiang, Frank~F Xu, Luyu Gao, Zhiqing Sun, Qian Liu, Jane Dwivedi-Yu,
+  Yiming Yang, Jamie Callan, and Graham Neubig.
+\newblock Active retrieval augmented generation.
+\newblock In \emph{Proceedings of the 2023 Conference on Empirical Methods in
+  Natural Language Processing}, pp.\  7969--7992, 2023.
+
+\bibitem[Khandelwal et~al.(2019)Khandelwal, Levy, Jurafsky, Zettlemoyer, and
+  Lewis]{khandelwal2019generalization}
+Urvashi Khandelwal, Omer Levy, Dan Jurafsky, Luke Zettlemoyer, and Mike Lewis.
+\newblock Generalization through memorization: Nearest neighbor language
+  models.
+\newblock In \emph{International Conference on Learning Representations}, 2019.
+
+\bibitem[Lewis et~al.(2020)Lewis, Perez, Piktus, Petroni, Karpukhin, Goyal,
+  K{\"u}ttler, Lewis, Yih, Rockt{\"a}schel, et~al.]{lewis2020retrieval}
+Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir
+  Karpukhin, Naman Goyal, Heinrich K{\"u}ttler, Mike Lewis, Wen-tau Yih, Tim
+  Rockt{\"a}schel, et~al.
+\newblock Retrieval-augmented generation for knowledge-intensive nlp tasks.
+\newblock \emph{Advances in Neural Information Processing Systems},
+  33:\penalty0 9459--9474, 2020.
+
+\bibitem[Lin \& Chen(2023)Lin and Chen]{Chen2023llm}
+Yen-Ting Lin and Yun-Nung Chen.
+\newblock {LLM}-eval: Unified multi-dimensional automatic evaluation for
+  open-domain conversations with large language models.
+\newblock In \emph{Proceedings of the 5th Workshop on NLP for Conversational AI
+  (NLP4ConvAI 2023)}, pp.\  47--58. Association for Computational Linguistics,
+  2023.
+
+\bibitem[Liu et~al.(2024)Liu, Peng, Zhang, Liu, Yin, Cao, and Du]{liu2024ra}
+Yanming Liu, Xinyue Peng, Xuhong Zhang, Weihao Liu, Jianwei Yin, Jiannan Cao,
+  and Tianyu Du.
+\newblock Ra-isf: Learning to answer and understand from retrieval augmentation
+  via iterative self-feedback.
+\newblock \emph{arXiv preprint arXiv:2403.06840}, 2024.
+
+\bibitem[Luo et~al.()Luo, Zhang, Chuang, Gong, Kim, Wu, Meng, and
+  Glass]{luo2023search}
+Hongyin Luo, Tianhua Zhang, Yung-Sung Chuang, Yuan Gong, Yoon Kim, Xixin Wu,
+  Helen~M Meng, and James~R Glass.
+\newblock Search augmented instruction learning.
+\newblock In \emph{The 2023 Conference on Empirical Methods in Natural Language
+  Processing}.
+
+\bibitem[Mallen et~al.(2022)Mallen, Asai, Zhong, Das, Hajishirzi, and
+  Khashabi]{mallen2023llm_memorization}
+Alex Mallen, Akari Asai, Victor Zhong, Rajarshi Das, Hannaneh Hajishirzi, and
+  Daniel Khashabi.
+\newblock When not to trust language models: Investigating effectiveness and
+  limitations of parametric and non-parametric memories.
+\newblock \emph{arXiv preprint}, 2022.
+
+\bibitem[Maynez et~al.(2020)Maynez, Narayan, Bohnet, and
+  McDonald]{maynez2020faithfulness}
+Joshua Maynez, Shashi Narayan, Bernd Bohnet, and Ryan McDonald.
+\newblock On faithfulness and factuality in abstractive summarization.
+\newblock In \emph{Proceedings of the 58th Annual Meeting of the Association
+  for Computational Linguistics}. Association for Computational Linguistics,
+  2020.
+
+\bibitem[Mihaylov et~al.(2018)Mihaylov, Clark, Khot, and
+  Sabharwal]{mihaylov2018suit}
+T.~Mihaylov, P.~Clark, T.~Khot, and A.~Sabharwal.
+\newblock Can a suit of armor conduct electricity? a new dataset for open book
+  question answering.
+\newblock \emph{arXiv preprint arXiv:1809.02789}, 2018.
+
+\bibitem[Mishra et~al.(2024)Mishra, Asai, Balachandran, Wang, Neubig, Tsvetkov,
+  and Hajishirzi]{mishra2024fine}
+Abhika Mishra, Akari Asai, Vidhisha Balachandran, Yizhong Wang, Graham Neubig,
+  Yulia Tsvetkov, and Hannaneh Hajishirzi.
+\newblock Fine-grained hallucination detection and editing for language models.
+\newblock \emph{arXiv preprint arXiv:2401.06855}, 2024.
+
+\bibitem[Pal et~al.(2023)Pal, Umapathi, and Sankarasubbu]{pal2023med}
+Ankit Pal, Logesh~Kumar Umapathi, and Malaikannan Sankarasubbu.
+\newblock Med-halt: Medical domain hallucination test for large language
+  models.
+\newblock In \emph{Proceedings of the 27th Conference on Computational Natural
+  Language Learning (CoNLL)}, pp.\  314--334, 2023.
+
+\bibitem[Petroni et~al.(2020)Petroni, Lewis, Piktus, Rockt{\"a}schel, Wu,
+  Miller, and Riedel]{petroni2020how}
+Fabio Petroni, Patrick Lewis, Aleksandra Piktus, Tim Rockt{\"a}schel, Yuxiang
+  Wu, Alexander~H. Miller, and Sebastian Riedel.
+\newblock How context affects language models' factual predictions.
+\newblock In \emph{Automated Knowledge Base Construction}, 2020.
+\newblock URL \url{https://openreview.net/forum?id=025X0zPfn}.
+
+\bibitem[Qi et~al.(2024)Qi, Sarti, Fernández, and
+  Bisazza]{qi2024modelinternalsbasedanswerattribution}
+Jirui Qi, Gabriele Sarti, Raquel Fernández, and Arianna Bisazza.
+\newblock Model internals-based answer attribution for trustworthy
+  retrieval-augmented generation, 2024.
+
+\bibitem[Ram et~al.(2023)Ram, Levine, Dalmedigos, Muhlgay, Shashua,
+  Leyton-Brown, and Shoham]{ram2023context}
+Ori Ram, Yoav Levine, Itay Dalmedigos, Dor Muhlgay, Amnon Shashua, Kevin
+  Leyton-Brown, and Yoav Shoham.
+\newblock In-context retrieval-augmented language models.
+\newblock \emph{Transactions of the Association for Computational Linguistics},
+  11:\penalty0 1316--1331, 2023.
+
+\bibitem[Rashkin et~al.(2023)Rashkin, Nikolaev, Lamm, Aroyo, Collins, Das,
+  Petrov, Tomar, Turc, and Reitter]{rashkin2023measuring}
+Hannah Rashkin, Vitaly Nikolaev, Matthew Lamm, Lora Aroyo, Michael Collins,
+  Dipanjan Das, Slav Petrov, Gaurav~Singh Tomar, Iulia Turc, and David Reitter.
+\newblock Measuring attribution in natural language generation models.
+\newblock \emph{Computational Linguistics}, 49\penalty0 (4):\penalty0 777--840,
+  2023.
+
+\bibitem[Rawte et~al.(2023)Rawte, Sheth, and Das]{rawte2023survey}
+Vipula Rawte, Amit Sheth, and Amitava Das.
+\newblock A survey of hallucination in large foundation models.
+\newblock \emph{arXiv preprint arXiv:2309.05922}, 2023.
+
+\bibitem[Schick et~al.(2024)Schick, Dwivedi-Yu, Dess{\`\i}, Raileanu, Lomeli,
+  Hambro, Zettlemoyer, Cancedda, and Scialom]{schick2024toolformer}
+Timo Schick, Jane Dwivedi-Yu, Roberto Dess{\`\i}, Roberta Raileanu, Maria
+  Lomeli, Eric Hambro, Luke Zettlemoyer, Nicola Cancedda, and Thomas Scialom.
+\newblock Toolformer: Language models can teach themselves to use tools.
+\newblock \emph{Advances in Neural Information Processing Systems}, 36, 2024.
+
+\bibitem[Shuster et~al.(2021)Shuster, Poff, Chen, Kiela, and
+  Weston]{shuster2021retrieval}
+Kurt Shuster, Spencer Poff, Moya Chen, Douwe Kiela, and Jason Weston.
+\newblock Retrieval augmentation reduces hallucination in conversation.
+\newblock \emph{arXiv preprint arXiv:2104.07567}, 2021.
+
+\bibitem[Torfi et~al.(2020)Torfi, Shirvani, Keneshloo, Tavaf, and
+  Fox]{torfi2020natural}
+Amirsina Torfi, Rouzbeh~A Shirvani, Yaser Keneshloo, Nader Tavaf, and Edward~A
+  Fox.
+\newblock Natural language processing advancements by deep learning: A survey.
+\newblock \emph{arXiv preprint arXiv:2003.01200}, 2020.
+
+\bibitem[Wang et~al.(2024{\natexlab{a}})Wang, Ping, Mcafee, Xu, Li, Shoeybi,
+  and Catanzaro]{pmlr-v235-wang24bd}
+Boxin Wang, Wei Ping, Lawrence Mcafee, Peng Xu, Bo~Li, Mohammad Shoeybi, and
+  Bryan Catanzaro.
+\newblock {I}nstruct{R}etro: Instruction tuning post retrieval-augmented
+  pretraining.
+\newblock In \emph{Proceedings of the 41st International Conference on Machine
+  Learning}, volume 235 of \emph{Proceedings of Machine Learning Research},
+  pp.\  51255--51272. PMLR, 21--27 Jul 2024{\natexlab{a}}.
+
+\bibitem[Wang et~al.(2024{\natexlab{b}})Wang, Liu, Lin, Li, Ma, and
+  Liang]{wang2024rat}
+Zihao Wang, Anji Liu, Haowei Lin, Jiaqi Li, Xiaojian Ma, and Yitao Liang.
+\newblock Rat: Retrieval augmented thoughts elicit context-aware reasoning in
+  long-horizon generation.
+\newblock \emph{arXiv preprint arXiv:2403.05313}, 2024{\natexlab{b}}.
+
+\bibitem[Xia et~al.(2024)Xia, Wang, Liang, Zhang, Zhou, Deng, Yu, and
+  Xiao]{xia2024ground}
+Sirui Xia, Xintao Wang, Jiaqing Liang, Yifei Zhang, Weikang Zhou, Jiaji Deng,
+  Fei Yu, and Yanghua Xiao.
+\newblock Ground every sentence: Improving retrieval-augmented llms with
+  interleaved reference-claim generation.
+\newblock \emph{arXiv preprint arXiv:2407.01796}, 2024.
+
+\bibitem[Yang et~al.(2018)Yang, Qi, Zhang, Bengio, Cohen, Salakhutdinov, and
+  Manning]{yang2018hotpotqa}
+Zhilin Yang, Peng Qi, Saizheng Zhang, Yoshua Bengio, William~W. Cohen, Ruslan
+  Salakhutdinov, and Christopher~D. Manning.
+\newblock {HotpotQA}: A dataset for diverse, explainable multi-hop question
+  answering.
+\newblock In \emph{Conference on Empirical Methods in Natural Language
+  Processing ({EMNLP})}, 2018.
+
+\bibitem[Yogatama et~al.(2021)Yogatama, de~Masson~d’Autume, and
+  Kong]{yogatama2021adaptive}
+Dani Yogatama, Cyprien de~Masson~d’Autume, and Lingpeng Kong.
+\newblock Adaptive semiparametric language models.
+\newblock \emph{Transactions of the Association for Computational Linguistics},
+  9:\penalty0 362--373, 2021.
+
+\bibitem[Zhao et~al.(2024)Zhao, Liu, Wu, Li, Yang, Shu, Xu, Dai, Zhao, Mai,
+  et~al.]{zhao2024revolutionizing}
+Huaqin Zhao, Zhengliang Liu, Zihao Wu, Yiwei Li, Tianze Yang, Peng Shu,
+  Shaochen Xu, Haixing Dai, Lin Zhao, Gengchen Mai, et~al.
+\newblock Revolutionizing finance with llms: An overview of applications and
+  insights.
+\newblock \emph{arXiv preprint arXiv:2401.11641}, 2024.
+
+\bibitem[Zhao et~al.(2023)Zhao, Zhou, Li, Tang, Wang, Hou, Min, Zhang, Zhang,
+  Dong, et~al.]{zhao2023survey}
+Wayne~Xin Zhao, Kun Zhou, Junyi Li, Tianyi Tang, Xiaolei Wang, Yupeng Hou,
+  Yingqian Min, Beichen Zhang, Junjie Zhang, Zican Dong, et~al.
+\newblock A survey of large language models.
+\newblock \emph{arXiv preprint arXiv:2303.18223}, 2023.
+
+\end{thebibliography}
+
+
+
+
+

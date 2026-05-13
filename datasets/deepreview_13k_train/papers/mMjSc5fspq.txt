@@ -1,0 +1,372 @@
+\title{Smooth Real-time Rendering via Implicit Nested Neighborhoods}
+
+\begin{abstract}
+Implicit neural representations (INRs) for surfaces have been mostly used as intermediary representations before triangle mesh extraction. Extracting meshes is not a real-time task and introduces unnecessary discretization to rendering, making it difficult to fully use the smoothness of INRs in applications. Smooth INRs are broadly used for approximating surface \textit{signed distance functions} (SDFs) through an implicit regularization (Eikonal equation) using their available high-order derivatives. Such property also makes it easier to integrate those INRs in pipelines that explore differentiable properties of the underlying surface. The current real-time state-of-the-art approach uses grid-based data-structures that introduce discretization, resulting in a non-smooth representation.
+
+We propose an end-to-end smooth ($C^{\infty}$) INR framework to represent and render surfaces in real-time using neural SDFs endowed with smooth attributes such as normals and textures. Our approach leverages from a novel localized SDF training based on nested neighborhoods, a multiscale surface representation, and residual training. The framework does not depend on spatial data-structures, nor surface extraction. We show that our representation renders detailed smooth surfaces in real-time while the previous works can only render coarse non-smooth surfaces. We also present applications of our representation, including integration with a pipeline for dynamic surfaces and a way to improve performance of surface extraction via marching cubes.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Real-time rendering enables interactive applications on 3D scenes. One important choice before rendering is how to represent the scene objects. In this setting, implicit neural representations (INRs) are emerging as a compelling option, which encodes the surface as the zero-level set of a neural network. They are memory efficient, continuous, infinitely differentiable when periodic activations are used, scalable, and naturally adapted to machine learning pipelines.  
+
+Even though those properties are present, INRs for surfaces have been mostly used as intermediary representations in neural pipelines, which usually output triangle meshes. Although that representation excels at localized tasks because it is explicit, it is not memory efficient, nor continuous, nor scalable. One of the reasons behind the use of triangle meshes is the non-triviality of rendering INRs for surfaces in real-time while maintaining the aforementioned properties. The current approach for real-time rendering of INRs resorts to discrete spatial data-structures which, analogously to triangle meshes, cannot maintain smoothness. Easy access to derivatives makes a model ready for integration with differentiable pipelines from the inception, increasing its possibilities for applications.  
+
+We propose a real-time rendering framework using INRs which maintain surface and attribute smoothness. Our approach trains residual SDFs on neighborhoods of the zero-level set, resulting in a multiscale representation. Surface attributes (normals and texture) are also defined and trained in the surface neighborhood. Rendering-wise, we propose a multiscale sphere tracing and a normal computation based on general matrix multiply (GEMM) (Dongarra et al., 1990) to render the surfaces.  
+
+Summarizing, our contributions are: (1) Smooth multiscale INR for surface representation; (2) Efficient neighborhood training for SDF (using a residual scheme), normals, and texture; (3) Multiscale sphere tracing; (4) GEMM-based normal computation. (5) Applications in differentiable pipelines (dynamic surfaces) and in an adaptive sampling for fast mesh extraction via marching cubes.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+Implicit representations are an essential topic in computer graphics (Velho et al., 2007). SDFs are important examples of such functions (Bloomenthal & Wyvill, 1990) and arise from solving the Eikonal problem (Sethian & Vladimirsky, 2000). Recently, multilayer perceptrons (MLPs) have been used to model SDFs (Park et al., 2019; Gropp et al., 2020; Novello et al., 2022). Sinusoidal networks (SIRENs) Sitzmann et al. (2020) are an example of such, being MLPs using sinusoidal activation.  
+
+Marching cubes (Lorensen & Cline, 1987) and sphere tracing (ST) (Hart, 1996) are classical visualization methods for rendering level sets of SDFs. Neural versions of those algorithms were proposed by (Liao et al., 2018; Chen & Zhang, 2021; Liu et al., 2020). While the initial works in neural SDFs use marching cubes to visualize the resulting level sets, recent performance-driven approaches have been using ST, since no intermediary representation is needed for rendering (Davies et al., 2020; Takikawa et al., 2021). Our proposed multiscale ST considers a similar path.  
+
+Surface representations and rendering: Recent works propose INRs for disentangling base geometry and detail. Wang et al. (2022) describe an INR using base and displacement networks to compute a detailed triangle mesh extracted via marching cubes for rendering. This approach is similar to our residual SDF learning, however it relies on function composition instead of addition like ours. A consequence is that the inference of the base and displacement network must be sequential, different from our approach which may be parallelized. Another difference is that our residual training is done only at the neighborhood of the zero-level set, which improves the network ability to represent the function since it is restricted to a small neighborhood instead of the entire domain. Morreale et al. (2022) employ INRs to model surfaces parametrically using parameterizations. Differently from our approach, they do not deal with the rendering problem. Sharp & Jacobson (2022) describe a way to perform geometric queries for neural SDFs using range analysis. (Genova et al., 2020) uses multiple small implicit objects to increase detail of the representation. None of those approaches support textures. Contextualization with triangle meshes is in Section A.1.  
+
+Real-time neural SDFs: Fast inference is needed to sphere trace SDFs in real-time. Davies et al. (2020) show that this is possible using general matrix multiply (GEMM) (Dongarra et al., 1990; Müller, 2021), but the capacity of their networks can not represent geometric detail. Other works in neural SDFs store features in the nodes of octrees (Takikawa et al., 2021; Martel et al., 2021), or limit the frequency band in training as in BACON (Lindell et al., 2021). However, octree-based approaches reintroduce discretization to the pipeline. NGLOD (Takikawa et al., 2021) is the SOTA real-time method for rendering neural SDFs. It uses a sparse voxel octree (SVO) to represent the neural SDF and render its level set using a sparse ST algorithm. The vertices of the voxels store features. Then, for a point $p$ and a level $L$ of the SVO, the features are interpolated inside each voxel containing $p$ up to the level $L$ . The resulting interpolated points are summed and passed to a MLP $f_{L}$ . Thus, besides the SVO structure, NGLOD uses a sequence of $L$ MLPs to represent the LoD. Moreover, the interpolation implies in INRs with non-continuous gradients at the voxels boundaries leading to artifacts (Sec. 4.1). Ours supports smooth normals, by leveraging sinusoidal MLPs to fti each level of the SDFs using (Novello et al., 2022). Finally, NGLOD does not support textures as our method does.  
+
+Attribute mapping: Normal mapping (Cohen et al., 1998; Cignoni et al., 1998) is a classic method to transfer detailed normals between meshes. Besides depending on interpolation, normal mapping also suffers distortions of the parameterization between meshes, which are assumed to have the same topology. Recently, Wang et al. (2022) introduced detail transfer (normals) in the context of INRs. It is based on features computed from a point cloud encoder and a convolutional module to propagate sparse on-surface point features to the off-surface area. Queried features are obtained using bilinear interpolation. Our approach is simpler. Inspired by (Bertalmıo et al., 2001), we use a regularization to make attributes constant along the normals near the zero-level set. That maintains smooth attributes, without the need of any interpolation or parametrization.  
+
+Texture mapping (Catmull, 1974) is a technique for cost-effective rendering that maps images to surfaces using parametrizations. In neural rendering, texture fields (Oechsle et al., 2019) shares similarities with our neural attribute mapping but approaches a different problem. Ours processes a point cloud with colors, while texture fields demand a 3D shape and input images, using view dependent depth maps. We use the surface’s neighborhood to define color along normals. Texture fields is not real-time due to its use of 4-6 ResNet blocks and complex networks for latent code generation. In contrast, ours adopts small MLPs for efficient representation. GET3D (Gao et al., 2022) uses texture fields for the textures in its 3D model generation, sharing an analogous contextualization.  
+
+3 NESTED NEIGHBORHOODS OF NEURAL SDFS  
+
+
+
+\section{3.1 OVERVIEW  }
+
+
+Given the iterative nature of Sphere Tracing (ST), a way to increase its performance is to optimize or avoid iterations. We propose to use small neural SDFs to approximate earlier iterations and mapping the normals and the texture of the desired neural SDF, avoiding later iterations. Both tasks can be accomplished by mapping neural SDFs using nested neighborhoods, without introducing any additional discretization. Fig. 1 shows our pipeline for smooth real-time rendering of 3D objects.  
+
+![](images/d96ad4c361da1cf041e34b2be9e4462e7a208a15869d2757b08774c4d2474870.jpg)  
+Figure 1: Our end-to-end INR framework for smooth real-time rendering. Starting from an oriented point cloud with colors, we combine sampling techniques and loss regularizations ( $\mathcal{B}$ and $\mathcal{N}$ ) to create a base, a medium, and a fine SDF to implicitly represent the surface in multiscale. The base SDF is defined for the entire domain, while the others are residuals, defined in (nested) neighborhoods of the surface. The colors are also trained in a neighborhood, regularized (by $\mathcal{T}$ ) to be constant along normals. The resulting multiscale representation can be rendered using novel sphere tracing and attribute mapping algorithms.  
+
+The basic idea comes from the following fact: if the zero-level set of a neural SDF $f$ is contained in a neighborhood $V$ of the zero-level set of another neural SDF, then we can map $f$ into $V$ . We follow the notation in Fig. 2 to present an overview of our method. Let $S_{1}$ , $S_{2}$ , $S_{3}$ be surfaces pairwise close with SDFs $f_{1}$ , f2, $f_{3}$ sorted by complexity. We use $S_{1}$ and $S_{2}$ to illustrate the multiscale ST and $S_{3}$ to illustrate the attribute mapping.  
+
+Multiscale ST: Suppose that the ray $p_{0}+t v$ , with origin at a point $p_{\mathrm{0}}$ and direction $v$ , intersects $S_{2}$ . To compute its $S_{2}$ point $q_{2}$ , we first use $f_{1}$ to sphere trace the boundary of a neighborhood of $S_{1}$ (gray) containing $S_{2}$ . This results in $q_{1}$ . Then we continue sphere tracing $S_{2}$ using $f_{2}$ , reaching $q_{2}$ In other words, we are mapping the values of $f_{2}$ to the neighborhood of $S_{1}$ .  
+
+Neural Attribute Mapping: For shading, we need a normal at $q_{2}$ , which is given by $N_{2}=\nabla f_{2}(q_{2})$ . Instead, we propose to pull the finer details of $S_{3}$ to $S_{2}$ to increase fidelity. This is done by mapping the normals from $S_{3}$ to $S_{2}$ using $N_{3}=\nabla f_{3}(q_{2})$ . To justify this choice, note that $q_{2}$ belongs to a neighborhood of $S_{3}$ . Thus, $N_{3}$ is the normal of $S_{3}$ at its closest point $q_{3}=q_{2}-\epsilon N_{3}$ , where $\epsilon$ is the distance $f_{3}(q_{2})$ from $q_{2}$ to $S_{3}$ . This transfers the normal $N_{3}$ to $q_{2}$ . Observe that $N_{3}$ is also the normal of the $\epsilon$ -level set of $f_{3}$ at $q_{2}$ (red dotted). Similarly, the texture color is mapped from $q_{3}$ to $q_{2}$ by making it constant along $q_{3}+t N_{3}$ in the neighborhood.  
+
+3.2 DEFINITIONS  
+
+A neural SDF $f:\mathbb{R}^{3}\rightarrow\mathbb{R}$ is a smooth neural network approximating the Eikonal eq., i.e. $\|\nabla f\|\approx1$ . This work deals with the problem of rendering the zero-level set $f^{-1}(0)$ using a sphere tracing approach. Thus, given a point $p_{0}$ and a direction $v$ , we must iterate $p_{i+1}=p_{i}+v f(p_{i})$ . However, evaluating $f(p_{i})$ may be prohibitive for real-time applications since it requires many forward passes through the network, thus we proposed to use coarse (smaller) neural SDFs approximating $f$ for the early iterations.  
+
+Specifically, let $f_{1},f_{2},f_{3}$ be neural SDFs with zero-level sets $S_{1},S_{2},S_{3}$ sorted by complexity (we give the definitions of $f_{i}$ in Sec 3.3), then to sphere trace $S_{3}$ we use $f_{1}$ and $f_{2}$ in the early iterations. For this, we need $S_{3}$ to be nested in a $\delta$ -neighborhood of $S_{2}$ , i.e. $S_{3}\subset\left[|f_{2}|\leq\delta\right]$ (see Fig. 3).  
+
+Thus, we ray trace $f_{2}^{-1}(\delta)$ iterating $p_{i+1}=p_{i}+v\big(f_{2}(p_{i})-\delta\big)$ and continue the iterations in the $\delta$ -neighborhood using the target SDF $f_{3}$ . Therefore, if the ray $p_{0}+t v$ intersects $S_{3}$ , the above procedure converges.  
+
+Moreover, to use $f_{1}$ we need an additional condition. To extend the above procedure to the sequence $f_{i}$ , we should first sphere trace a coarser level set $f_{1}^{-1}\dot{(\delta_{1})}$ , then, $f_{2}^{-1}(\delta_{2})$ , and finally, $S_{3}$ . For such algorithm to converge, we need those neighborhoods to be nested as follows, otherwise, we may miss the hit point (see Fig. 4 (b)).  
+
+![](images/b82fd6e5dc2eb0616abc696390c66df48ed37e1a3afe755d0a73e3b9fcba1aaa.jpg)  
+
+Figure 2: Multiscale $S T$ : to sphere trace $S_{2}$ we first sphere trace the boundary of a neighborhood of $S_{1}$ (gray), resulting in $q_{1}$ . Then we continue to sphere trace $S_{2}$ , reaching $q_{2}$ . Attribute mapping: since $q_{2}$ belongs to a neighborhood of $S_{3}$ , we evaluate the normal $N_{3}$ at $q_{2}$ of a parallel surface of $S_{3}$ (red dotted). These surfaces share the same normals. Color is acquired by making it constant along the line $q_{3}+t N_{3}$ .  
+
+$$
+S_{3}\subset\left[|f_{2}|<\delta_{2}\right]\subset\left[|f_{1}|<\delta_{1}\right]
+$$  
+
+The choice of $\delta_{1}$ and $\delta_{2}$ values plays an important role on rendering. Having different values for them is also necessary to avoid issues as illustrated in Fig. 4. In Section 3.3 we present a definition for $\delta_{i}$ relating it with the network training.  
+
+![](images/13cfcefa0b331380fb6a8d77e924854a44f914ef546396cbbc5a32b0e9a0c257.jpg)  
+
+In practice, we may choose how to use the SDFs $f_{2}$ and $f_{3}$ to adapt to a specific performance budget. We may choose to skip evaluating $f_{2}$ , instead simply mapping the normals from  
+
+Figure 3: Ray intersecting $S_{3}$ nested in a $\delta$ -neighborhood of a coarse SDF $f_{2}$ . Notice that sphere tracing $f_{2}$ directly would lead to a false negative, thus we use $\left[\left|f_{2}\right|<\delta_{2}\right]$ instead.  
+
+$f_{3}$ directly onto $f_{1}$ , thus decreasing the rendering cost. Iterating on $f_{2}$ while mapping normals from $f_{3}$ increases the cost, but its still cheaper than performing the full pipeline. Finally, iterating on all $f$ ’s presents the best silhouette results, although at a greater computational cost. Section 4.2 presents an evaluation of those cases.  
+
+![](images/ed286c9b24d8bd1552fb69f5d562758ed9d718f923181d00a4e984d8f2247203.jpg)  
+Figure 4: Implications of $\delta_{i}$ in ST, when the number of iterations are fixed. (a) Using too large $\delta_{1}\!=\!\delta_{2}$ may result in holes (the ray do not reach the surface). More iterations would be needed using the finer (more complex) SDF to fill those holes, defeating the idea of minimizing iterations. (b) Conversely, reducing the deltas $\delta_{1}\!=\!\delta_{2}$ may miss parts of the silhouette since the target surface may not be inside the previous neighborhood (notice the hand). (c) Using $\delta_{1}$ and $\delta_{2}$ suited for the nesting condition implies in no holes and a better silhouette capture.  
+
+3.3 TRAINING THE SDFS WITH NESTED NEIGHBORHOODS  
+
+This section describes approaches to define sequences of neural SDFs with nested neighborhoods. The objective is to train this sequence sorted by inference time and find small thresholds that ensure the nesting condition (1).  
+
+We define the coarse SDF $f_{1}$ as a small sinusoidal MLP which will be used at the first ST iterations. Then, we define the medium and fine SDFs $f_{2},f_{3}$ simply using a residual scheme as follows  
+
+$$
+f_{i+1}=f_{i}+r_{i},\quad\mathrm{for}\;i=1,2.
+$$  
+
+In other words, to define a fine SDF $f_{i+1}$ we sum the coarser SDF $f_{i}$ with a residual sinusoidal MLP $r_{i}$ with a wider bandlimit. For this, we use the frequency parameter $\omega_{0}$ of SIREN. We refer to this sequence $f_{i}$ as multiscale $S D F s$ .  
+
+We now define the nesting parameters $\delta_{1}$ and $\delta_{2}$ to enforce the SDFs $f_{i}$ to be nested during training, that is, (1) must hold. First, we train the base SDF $f_{1}$ in the whole domain $\Omega$ , then we note that we can train $f_{i+1}$ for $i=1,2$ restricted to $\left[|f_{i}|<\delta_{i}\right]$ since the ST (see Alg. 1) do not evaluate $f_{i+1}$ outside this region.  
+
+Specifically, let $\{x_{j},N_{j}\}_{j=1}^{n}$ be an oriented point cloud (the ground-truth) consisting of points $x_{j}$ and their normals $N_{j}$ sampled from a surface $S$ . To train the INRs $f_{i}$ we follow the common approach of defining loss functions to enforce the Eikonal eq. $\mathcal{E}(f)\!:=\!1\!-\!\|\nabla f\|\!=\!0$ to be satisfied.  
+
+$$
+\mathcal{B}(f_{1})\!=\!\underbrace{\frac{1}{n}\sum_{j}f_{1}(x_{j})^{2}+\big(1\!-\!\big\langle\nabla f_{1},N_{j}\big\rangle\big)}_{\mathcal{G}_{\mathrm{dua}}(f_{1})}+\!\!\int\!\mathcal{E}(f_{1})^{2}d x,\quad\mathcal{N}(f_{i})=\mathcal{L}_{\mathrm{dua}}(f_{i})+\int\!\!\mathcal{E}(f_{i})^{2}d x.
+$$  
+
+$\mathcal{B}$ is used to train the base SDF $f_{1}$ in the whole domain $\Omega$ , while $\mathcal{N}$ only trains $f_{2}$ and $f_{3}$ on a $\delta_{i-1}$ -neighborhood of the previously trained SDFs. This neighborhood training allows representing detailed SDFs $f_{2}$ and $f_{3}$ using small residual networks, see comparisons in Fig. 16. We define appropriate $\delta_{i}$ to enforce the sequence $f_{i}$ to satisfy the nesting condition (1). Precisely, we define $\delta_{i}$ such that $\left[|f_{i}|<\delta_{i}\right]$ contains the point cloud $\{x_{j}\}$ using the following formula.  
+
+$$
+\delta_{i}=(1+\varepsilon)*\operatorname*{max}_{j}|f_{i}(x_{j})|\,.
+$$  
+
+Thus the training would force the zero-level set $f_{i+1}^{-1}(0)$ to approximate $\{x_{j}\}$ inside $\left[|f_{i}|\right.<\left.\delta_{i}\right]$ for $i=1,2$ . In other words, the nesting condition would be satisfied by construction.  
+
+3.3.1 SAMPLING THE GROUND-TRUTH SDF NEAR THE INPUT ORIENTED POINT CLOUD  
+
+In practice, to discretize the term $\int\mathcal{E}(f_{i})^{2}d x$ in $\left[\left|f_{i-1}\right|<\delta_{i-1}\right]$ , we use an average on a dithering sampling around $\{x_{j}\}$ with a radius of $2\delta_{i-1}$ . Then, we remove points outside the region using $f_{i-1}$ . Fig. 5(a) depicts how this samplings works.  
+
+![](images/aee1bd170a260add2d2cebadbe0a5595d6afbaed1af8a53481df187a00f9bbb5.jpg)  
+Figure 5: a) illustrates the dithering sampling for the Eikonal regularization of the SDF $f_{i}$ . Points outside the $\delta_{i-1}$ -neighborhood of $f_{i-1}$ (red) are removed. (b.1, b.2) illustrate the procedure for computing the displacement $t_{j}$ used to sample the ground-truth SDF near $x_{j}$ . Starting with $t_{j}>\delta_{i-1}$ , we iteratively decrease it by $\epsilon$ until the corresponding point falls within the neighborhood (green).  
+
+270   
+271   
+272   
+273   
+274   
+275   
+276   
+277   
+278   
+279   
+280   
+281   
+282   
+283   
+284   
+285   
+286   
+287   
+288   
+289   
+290   
+291   
+292   
+293   
+294   
+295   
+296   
+297   
+298   
+299   
+300   
+301   
+302   
+303   
+304   
+305   
+306   
+307   
+308   
+309   
+310   
+311   
+312   
+313   
+314   
+315   
+316   
+317   
+318   
+319   
+320   
+321   
+322   
+323  
+
+Additionally, we improve $\mathcal{L}_{\mathrm{data}}$ for $i=2,3$ using the tubular neighborhood of $\{x_{j}\}$ , see Fig. 5(b). Specifically, for each point $x_{j}$ we compute a number $t_{j}\leq\delta_{i-1}$ such that the distance of $x_{j}+t N_{j}$ , with $t\in[0,t_{j}]$ , to $\{x_{j}\}$ is exactly $t$ . Observe that with $\{t_{j}\}$ in hands, we have $f_{i}(x_{j}+t N_{j})^{\circ}\!=t$ and $\nabla f_{i}(x_{j}+t\bar{N_{j}})=\bar{N_{j}}$ for each $\bar{t^{\prime}}\in[0,t_{j}]$ . Hence, during sampling we can also supervise the training of $f_{i}$ near the original point cloud.  
+
+We use an iterative approach to compute $\{t_{i}\}$ . We start with $t_{j}\,=\,\delta_{i-1}$ . Then, we compute the distance of $x_{j}+t_{j}N_{j}$ to $\{x_{j}\}$ , if it is different from $t_{j}$ we replace $t_{j}$ by $t_{j}-\epsilon$ ; where $\epsilon>0$ is a small number. The iteration ends when all $t_{j}$ do not need to be updated. Finally, note that the computation of $t_{i}$ can be performed as a preprocessing step and executed in parallel.  
+
+3.4 MULTISCALE SPHERE TRACING  
+
+We propose the multiscale sphere tracing (Alg. 1), a variation of the classic algorithm to render multiscale SDFs $f_{1}$ , $f_{2},f_{3}$ . Let $p$ be a point and $v$ be a direction, it approximates the first intersection (if it exists) between $S_{3}=f_{3}^{-1}\dot{(}0)$ and $\gamma(t)=p+t v$ , with $t>0$ .  
+
+Specifically, we assume $p\notin\left[|f_{1}|\leq\delta_{1}\right]$ . The multiscale ST is based on the fact that to sphere trace $S_{3}$ we can first sphere trace $f_{1}^{-1}(\delta_{1})$ using $f_{1}$ (Fig. 3). Lines 3-6 describe the ST of $f_{j}^{-1}(\delta_{j})$ for $j=1,2,3$ (line 1). If $j=3$ we sphere trace $S_{3}$ instead of its neighborhood (line 4).  
+
+![](images/8903c8b284ceeb47e8386ed096e2dcc71cf53a687d176e70e7b6870eefcdfed6.jpg)  
+
+If $\gamma\cap S_{3}\neq\emptyset$ , the ST approximates the first hit point between $\gamma$ and $S_{3}$ . This is due to the nesting condition, which ensures that if $\gamma\cap S_{3}\not=\emptyset$ implies $\gamma\cap f_{2}^{-1}(\delta_{2})\neq\ \emptyset$ , and then $\gamma\cap f_{1}^{-1}(\delta_{1})\neq\emptyset$ .  
+
+For the inference of a neural SDF, in Line 4 of Alg. 1, we use the GEMM alg. (Dongarra et al., 1990) for each layer. To finish the rendering, we need to compute the normals and the textures.  
+
+3.5 NORMAL AND TEXTURE MAPPING  
+
+![](images/c3cd48dc1ef4aa7a6cbde3b099e26df205ecc0c8462a187e1bcbef2c5020e765.jpg)  
+
+Figure 6: Volumetric texture mapping. The texture $g$ should be constant along the normals $N$ near the coarse surface $S$ (red/green). Having such volumetric representation in the $\delta$ -neighborhood ensures that $g$ can be assigned to any point in the coarse surface $S$ .  
+
+Let $S$ be a surface nested in a $\delta\!\cdot$ -neighborhood of the zero-level set of a neural SDF $f$ , that is, $S\subset[|f|\leq\delta]$ . Assume $f$ to be a finer neural SDF, then the neural normal mapping assigns to each $p\in S$ the attribute $g(p):=\nabla f(p)$ . This is a restriction of $\nabla f$ to $S$ and maps the normal of $f^{-1}(0)$ , along the minimum path connecting it to $p$ . The attribute $g$ is constant along the path since $f$ is a SDF.  
+
+We explore two cases. First, let $S$ be a triangle mesh. We use the neural normal mapping to transfer the detailed normals of the level sets of $f$ to $S$ . This approach is analogous to the classic normal mapping which depends on UV parameterizations. Since our method is volumetric, such parameterizations are not needed (see Fig. 9 - middle). For the second case, let $S$ be the zero-level set of another coarse neural SDF. We can use the neural normal mapping to avoid the overhead of additional ST iterations (see Fig. 9 - left). In this case, we do not need to extract a surface using marching cubes.  
+
+Similarly, we define a neural network $g:\mathbb{R}^{3}\rightarrow{\mathcal{C}}$ to encode a texture on the $\delta$ -neighborhood of $f$ with codomain $\mathcal{C}$ being the RGB space. We denote the attribute mapping associated to the triple $\{S,f,g\}$ a neural texture mapping. To train the parameters $\phi$ of $g$ we use the forces $g$ to fit to the ground-truth texture $\mathcal{J}$ , and the second term asks for $g$ to be constant along the gradient paths, that is, it regularizes the network on the $\delta$ -neighborhood of $f$ . Fig. 6 depicts how the texture mapping works.  
+
+3.6 GEMM-BASED ANALYTICAL NORMAL CALCULATION FOR MLPS  
+
+We propose a GEMM-based analytical computation of normals, which are continuous and do not need auto-differentiation. This results in smooth normals, as shown in Fig. 7c. To compute the normals, we recall that a MLP with $n-1$ hidden layers has the following form:  
+
+$$
+f(x)\!=\!W_{n}\circ h_{n-1}\circ\cdots\circ h_{0}(x)+b_{n},
+$$  
+
+$$
+=W_{n}\cdot{\mathbf J}h_{n-1}(x_{n-1})\cdot\cdot\cdot\cdot{\mathbf J}h_{0}(x),\quad\mathrm{with}\quad{\mathbf J}h_{i}(x_{i})=W_{i}\odot\varphi^{\prime}\big[a_{i}|\cdot\cdot\cdot|a_{i}\big]
+$$  
+
+We now use Eq. 6 to derive a GEMM-based algorithm for computing the normals $(\nabla f)$ in realtime. The gradient $\nabla f$ is given by a sequence of matrix multiplications which is not appropriate for a GEMM setting because $\mathbf{J}h_{0}\dot{(}x\r)\in\dot{\mathbb{R}}^{3\times N_{1}}$ . The GEMM algorithm organizes the input points into a matrix, where its lines correspond to the points and its columns organize them and enable parallelism. We can solve this problem using three GEMMs, one for each normal coordinate. Therefore, each GEMM starts with a column of $\ensuremath{\mathbf{J}}h_{0}(x)$ , eliminating one of the dimensions. The resulting multiplications can be asynchronous since they are completely independent.  
+
+The $j$ -coord of $\nabla f$ is given by $G_{n}{=}W_{n}{\cdot}G_{n-1}$ , where $G_{n-1}$ is given by iterating $G_{i}{=}{\bf J}h_{i}(x_{i}){\cdot}G_{i-1}$ , with the initial condition $G_{0}=W_{0}[j]\odot\varphi^{\prime}(a_{0}).$ . The vector $W_{0}[j]$ denotes the $j$ -column of $W_{0}$ . We use a kernel and a GEMM to compute $G_{0}$ and $G_{n}$ . For $G_{i}$ with $0\!<\!i\!<\!n$ , observe that  
+
+$$
+G_{i}\!=\!(W_{i}\odot\varphi^{\prime}\left[a_{i}\right|\cdot\cdot\cdot\left|a_{i}\right])\cdot G_{i-1}\!=\!(W_{i}\cdot G_{i-1})\odot\varphi^{\prime}(a_{i}).
+$$  
+
+The first equality comes from Eq. 6 and the second from a commutative property of the Hadamard product. The second expression needs fewer computations and is solved using a GEMM followed by a kernel. Please refer to Appx A.2 for a detailed algorithm.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+We compare our framework against SOTA methods, present ablation studies and additional applications. For the sphere tracing related experiments, we fix the number of iterations for better control of parallelism. All experiments are conducted on an NVidia RTX 3090.  
+
+We use a notation to refer to the MLPs: $(N,d)$ means a MLP with $d$ hidden layers of the form $\mathbb{R}^{N}{\rightarrow}\mathbb{R}^{N}$ . Additionally, $(64,1)\!>\!(256,1)$ means a multiscale SDFs with a MLP with two hidden layers $\mathbb{R}^{64}\rightarrow$ $\mathbb{R}^{64}$ , and a MLP with two hidden layers $\mathbb{R}^{256}{\rightarrow}\mathbb{R}^{256}$ .  
+
+
+
+\section{4.1 COMPARISONS  }
+
+
+![](images/337ade44289a91add49995837344e7343c60a3cd712bdc2891f61ed64eade659.jpg)  
+
+Table 1: Although our method is real time for rendering, its training time is comparable to IDF which depends on marching cubes to render, losing the smoothness of INRs. Our training is one order of magnitude faster than NGLOD.  
+
+Surface: First, we compare our neighborhood-nesting approach with SOTA methods for surface representation. The first one is implicit displacement fields (IDF)(Wang et al., 2022), which disentangles shape and detail. The second one is NGLOD(Takikawa et al., 2021), which is the only real-time rendering method that uses neural SDFs. Tab. 1 compares the training times. Even though our rendering is real-time, we have comparable training times against IDF, which rely on mesh extraction for rendering. Our training is one order of magnitude faster than NGLOD.  
+
+Figs. 7 and 15 show rendering comparisons. 7a uses the real-time configuration for NGLOD, recommended by the authors in their code repository. As discussed in Sec. 2, its formulation results in non-continuous normals, causing discretization artifacts. To increase geometric details using NGLOD, we have to consider a non-real-time LOD 5 configuration (7b), which has less discretization artifacts. 7c shows our real-time rendering framework. Since our approach works on the smooth setting, we support smooth normals. 7d shows the surface generated by IDF, after a marching cubes extraction of resolution $512^{3}$ . Note that IDF and NGLOD do not support textures.  
+
+Normals: We compare our GEMM normal calculation with torch.autograd. As shown in Tab. 5, ours performs $2\times$ faster. We tested 6 different INRs trained for Armadillo, Happy Buddha, and Lucy, varying between 2-3 hidden layers.  
+
+![](images/ab120c83b2ed24af4ec1f272fc8645171f59c3629c28368723977d741bfa74a4.jpg)  
+Figure 7: Render comparison.  
+
+Textures: Since our approach is the first to address textures for neural SDFs in real-time, we present a comparison against classical uv-textures on meshes. We present the MSE between the images generated by our method and the texture meshes. We consider the models: Spot, Bob, Bunny, Egg, and Earth. The corresponding MSEs are: 0.0329, 0.0434, 0.0720, 0.0291, and 0.0033. Please refer to Fig. 17 (Appx. A.3) for the images used to compute the MSEs. Fig. 8 shows the neural texture mapping applied to coarse surfaces.  
+
+Since our method defines the textures in a neighborhood of the surface, no parameterization or uv-map is needed. Inference is simple and consists of a single MLP evaluation for a batch of points. The results show that our approach achieves good appearance while uncoupling it from geometry in a compositional manner.  
+
+![](images/edfdf273664c616aaa077bf4a06580652776c53a29c7c3c1f6d5b8ddba98c1be.jpg)  
+(b) NGLOD LOD 5 (not real-time). Less artifacts.  
+
+
+
+\section{4.2 ABLATION STUDIES  }
+
+
+![](images/7e53c065a464ee186a95adf5fcd1e1656c2f0753d2153c80fbbdd071ad8b3ba6.jpg)  
+
+(c) Ours, with configuration (64, 1) $\triangleright$ (128, 1) ▷ (256, 1) (real-time). Note the smooth normals.  
+
+Residuals: First, we evaluate the impact of the residual approach. Fig. 10 shows that residuals eliminate spurious components when applied to neighborhood training. We use this property to accelerate marching cubes in the case mesh extraction is needed.  
+
+![](images/7e764c94456122e437f0c7cc80aec9e97e74424abd0bfe9a04af041579b70c51.jpg)  
+
+To evaluate the efficiency of coarse neural SDFs to represent the ground-truth SDFs, Tab. 2 shows the Hausdorff distances between their zero-level sets and the original point clouds. All distances are within the third decimal digit, which means they are very close to the ground-truth. This fact corroborates our assumption that coarse surfaces in nested neighborhoods can be used to accelerate rendering.  
+
+378   
+379   
+380   
+381   
+382   
+383   
+384   
+385   
+386   
+387   
+388   
+389   
+390   
+391   
+392   
+393   
+394   
+395   
+396   
+397   
+398   
+399   
+400   
+401   
+402   
+403   
+404   
+405   
+406   
+407   
+408   
+409   
+410   
+411   
+412   
+413   
+414   
+415   
+416   
+417   
+418   
+419   
+420   
+421   
+422   
+423   
+424   
+425   
+426   
+427   
+428   
+429   
+430   
+431  
+
+Neural normal mapping and multiscale ST: Regarding image quality and perception, Fig. 9 shows the case where the coarse surface is the zero-level of a neural SDF (left) and when it is a triangle mesh (middle), showing that our representation can also be beneficial for rendering meshes. An overall evaluation of the algorithm with other models is given in Fig. 16 (Appx. A.3). In all cases, normal mapping increases fidelity.  
+
+![](images/a7f0ea63bee3477ee19fc5215267b49f21f9f4ac542a62be80173a0d9437afad.jpg)  
+Figure 8: Neural texture mapping. All networks are (256, 3), except for the the earth, which is (512, 3). The first case on the left is a sphere traced surface. The other cases are marching cubes of (64, 1) SDFs, except for the bunny, which is (128, 2). No parameterization or uv-map is needed.  
+
+The result may be improved using the multiscale ST, as shown in Fig. 9 (right). Adding ST iterations using a neural SDF with a better approximation of the surface improves the silhouette (right).  
+
+![](images/cdfb708bcb59ad6122fa7afc1b07ed303ebe97bffcb148f57e99473560865f61.jpg)  
+
+Real-time renderer: We evaluate a GPU version implemented in a CUDA renderer, using neural normal mapping, multiscale ST, and the GEMM-based analytical normal calculation (implemented using CUTLASS). Tab. 3 shows the results. Notice that the framework achieves real-time performance and that using neural normal mapping and multiscale ST improves performance considerably. An ablation study varying the number of sphere tracing iterations per level of detail is presented in Tab. 6 (Appx.).  
+
+Table 2: Hausdorff distance between the trained models and the ground-truth.  
+
+![](images/45618717d10792e18693c48e6200b26517309dfc03e4acb98fbdfe1a043174bd.jpg)  
+
+neural SDFs, following the training schemes introduced in (Novello et al., 2023). Fig. 11 presents an example of interpolation between the Spot and Bob models using this method. Importantly, the implicit model handles topology changes, demonstrating that our representation can be integrated into differentiable pipelines. The visualization is in real-time (120 FPS) using an extension of our multiscale ST to dynamic SDFs.  
+
+![](images/67b0d93dae4673675182eca3767fbe383a0af3e80162a93f7d268bc4bce0b67d.jpg)  
+Figure 11: A dynamic multiscale SDF is trained using the pipeline from (Novello et al., 2023). Note the change in topology (c-d), which is challenging to handle using meshes. Also, octree/mesh-based approaches require generating a surface for each time, an overhead that our model avoids.  
+
+Residuals remove spurious components. This property is a direct consequence of our residual approach. Fig. 10 shows that residuals eliminate spurious components when applied to neighborhood training. We use this property to accelerate marching cubes in case of mesh extraction.  
+
+Improving Marching Cubes performance. We can use our multiscale SDF to speed up mesh extraction. Experiments show that our representation improves the performance of grid evaluation, by avoiding inference at finer levels for vertices far from the zero-level set. The key idea is to use the coarse version of the neural SDF for grid vertices culling. Only those in the nesting neighborhood of the coarse surface use finer SDF, enabling an adaptive sampling of SDF values. Fig. 12 shows the approach, Fig. 18 (Appx.) shows the surface reconstructions, and Tab. 4 demonstrates a maximum performance improvement of $7\times$ . For Figure 12: Adaptive marching all cases, the baseline SDF is approximated by a single MLP with cubes. For grid vertices outside configuration (256, 3), while the multiscale SDFs have configura- the $\delta_{1}$ neighborhood (blue), only tion of $(64,1)\!\>(128,1)\!\>(256,1)$ . Note that surfaces occupying the coarse SDF $f_{1}$ is evaluated. smaller domain region have a greater speed up since the number For points in the neighborhood of vertices on their nesting neighborhoods decrease. (green) the residual $f_{2}$ is added.  
+
+![](images/647137f891f1320335dcdccbe39f60bf636798c3fdabb1fa8218799ba305c5af.jpg)  
+
+Reconstruction from (noisy) point-clouds. Our method may also be integrated into surface reconstruction pipelines, allowing the use of potentially noisy point-clouds as input. See Fig. 13 in the Appx. for details.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+We propose an end-to-end INR framework to render surfaces in real-time using smooth neural SDFs endowed with smooth attributes such as normals and textures. It leverages on spatial neighborhoods and residual training, achieving real-time performance without the need of spatial data structures. The multiscale ST accelerates the surface evaluation, the neural attribute mapping transfers surface attributes from a neural SDF to another surface, and the GEMM-based analytical normal computation provides smooth normals without the need of auto-differentiation. Moreover, we demonstrate that our multiscale neural SDF can be easily adapted to differentiable, timedependent pipelines for surface evolution. Additionally, we leverage the nesting neighborhood to accelerate mesh extraction using marching cubes  
+
+![](images/42158cdcc1b4d93ccaa6a19112c92aeb81808d5aa27e2a2a85d6011f37bc843a.jpg)  
+
+Table 5: Runtime comparison, in seconds, between Pytorch autograd and our algorithm to calculate the normals. Ours performs $2\times$ faster.  
+
+Limitations and future work. As common for SDF-based representations, our approach is not suitable for representing sharp edges. This is a natural consequence of the function smoothness and may be solved by incorporating local features into the function, a path we would like to explore in future work. The multiscale ST could probably be applied into neural SDF-based 3D reconstruction or inverse rendering tasks to reduce the training time. Nested neighborhoods could be adapted for unsigned distance functions too. Improvements can be done for further performance optimization. For example, using fully fused GEMMs may decrease the overhead of GEMM setup (Müller, 2021).  
+
+
+

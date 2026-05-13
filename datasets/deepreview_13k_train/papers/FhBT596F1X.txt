@@ -1,0 +1,453 @@
+\title{Learning Equivariant Non-Local Electron Density Functionals}
+
+\begin{abstract}
+The accuracy of density functional theory hinges on the approximation of \emph{non-local} contributions to the exchange-correlation (XC) functional.
+To date, machine-learned and human-designed approximations suffer from insufficient accuracy, limited scalability, or dependence on costly reference data.
+To address these issues, we introduce \ourlong{} (\our{}), a novel non-local XC functional based on equivariant graph neural networks.
+\our{} combines semi-local functionals with a non-local feature density parametrized by an equivariant nuclei-centered point cloud representation of the electron density to capture long-range interactions. 
+By differentiating through a self-consistent field solver, we train \our{} requiring only energy targets.
+In our empirical evaluation, we find \our{} to accurately reconstruct `gold-standard' CCSD(T) energies on MD17.
+On out-of-distribution conformations of 3BPA, \our{} reduces the relative MAE by \SI{35}{\percent} to \SI{50}{\percent}.
+Remarkably, \our{} excels in data efficiency and molecular size extrapolation on QM9, matching force fields trained on 5 times more and larger molecules.
+On identical training sets, \our{} yields on average \SI{51}{\percent} lower MAEs.
+
+
+
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Kohn-Sham Density Functional Theory (KS-DFT) is the backbone of computational material and drug discovery~\citep{jonesDensityFunctionalTheory2015}. It is a quantum mechanical method to approximate the ground state energy of an $\Nel$-electron system by finding the electron density $\rho\in\densities=\left\{\rho:\R^3\to\R_+\vert \int_{\R^3}\rho(r)dr=\Nel\right\}$ that minimizes the energy functional $\EFunc: \densities\to\R$.
+This functional maps electron densities to energies and is composed of
+\begin{align}
+    \EFunc[\rho] = \KFunc[\rho] + \ExtFunc[\rho] + \HartreeFunc[\rho] + \XCFunc[\rho] \label{eq:objective}
+\end{align}
+$\KFunc:\densities\to\R$ is the kinetic energy functional, $\ExtFunc:\densities\to\R$ the external potential due to positively charged nuclei, $\HartreeFunc:\densities\to\R_+$ the Coulomb energy between electrons, and, finally, $\XCFunc:\densities\to\R_-$ the \emph{exchange-correlation} (XC) functional~\citep{cramerEssentialsComputationalChemistry2004}.
+While $\KFunc,\ExtFunc$ and $\HartreeFunc$ permit analytical computations, the exact form of $\XCFunc$ remains unknown, and its approximation frequently dominates DFT's error~\citep{kimUnderstandingReducingErrors2013}.
+
+Machine learning has emerged as a promising data-driven approach to approximate $\XCFunc$~\citep{kulikRoadmapMachineLearning2022,zhangArtificialIntelligenceScience2023}.
+Many such ML functionals adopt the classical approach and define $\XCFunc$ as the integral of a learnable XC energy density $\exc:\R^\dmgga\to\R$~\citep{perdewJacobsLadderDensity2001}:
+\begin{align}
+    \XCFunc[\rho] = \int_{\R^3} \rho(r) \epsilon_{\text{XC}}\left(\vg(r)\right) dr \label{eq:mgga}
+\end{align}
+where $\vg:\R^3\to\R^d$ are properties of the electron density $\rho$~\citep{dickHighlyAccurateConstrained2021,nagaiMachinelearningbasedExchangeCorrelation2022}.
+If $\vg$ only depends on density quantities from its infinitesimal neighborhood, e.g., $\rho(r),\nabla\rho(r),\ldots$, the resulting functionals are called \emph{semi-local}.
+While this integrates well into existing quantum chemistry code, long-range interactions exceed the functional class~\citep{kaplanPredictivePowerExact2023}.
+In contrast, existing \emph{non-local} functionals either scale poorly computationally~\citep{zhouExactExchangeCorrelation2019} or require costly reference data~\citep{margrafPureNonlocalMachinelearned2021,bystromCIDERExpressiveNonlocal2022}.
+The critical challenge in \emph{non-local} XC functionals lies in efficiently capturing long-range interactions.
+
+To this end, we present \ourlong{} (\our) transferring the success of equivariant graph neural networks (GNNs)~\citep{batznerE3equivariantGraphNeural2022} to learning the non-local XC functional.
+In \our{}, we compress the electron density to equivariant point embeddings via a convolution of the electron density with an equivariant kernel at the nuclear positions.
+On this point cloud, the equivariant GNN efficiently captures long-range information.
+Given the final embeddings, we define a non-local feature density $\efeat:\R^3\to\R^d$ that we feed into the XC energy density $\exc$ from \Eqref{eq:mgga}.
+Compared to previous approaches, our finite point cloud embeddings are neither dependent on the nuclear charge nor the basis set but purely derived from the density $\rho$.
+To train on energies alone, we differentiate through the minimization of \Eqref{eq:objective}~\citep{liKohnShamEquationsRegularizer2021}.
+In our experimental evaluation, \our{} improves upon the learnable semi-local XC-functional on molecular dynamic trajectories, extrapolation to both out-of-distribution conformations and increasingly larger molecules.
+In particular, we find \our{} to reduce errors of the semi-local functional by a factor of 2 to 3, on par with accurate ML force fields combined with DFT calculations ($\Delta$-ML).
+In extrapolation to unseen structures, we find \our{} to accurately reproduce out-of-distribution potential energy surfaces unlike force fields (incl. $\Delta$-ML) while reducing the MAE by \SI{35}{\percent} to \SI{50}{\percent} compared to the next-best tested method.
+Finally, we find \our{} to have an excellent data efficiency, achieving similar accuracies to the best force fields with 5 times less data.
+To summarize, we demonstrate that GNN-driven functionals push the frontier of non-local XC functionals and provide a promising path towards accurate and scalable DFT calculations.
+
+
+
+\section{Background}
+
+\textbf{Notation.} To denote functionals, i.e., functions mapping from functions to scalars, we write $F[f]$ where $F$ is the functional and $f$ the function.
+We use superscripts in brackets$^{(t)}$ to indicate sequences and regular superscripts of bold vectors, e.g., $\vx^l$, to indicate the $l$-th irreducible representation of the SO(3) group.
+We generally use $\euc{r}\in\R^3$ to denote points in the 3D Euclidean space.
+A notable exception is the finite set of nuclei positions $\{R_1, \ldots, R_\Nnuc\}$ for which we will use capital letters.
+The norm of a vector is given by $\length{\pos}=\Vert\euc{\pos}\Vert_2$.
+For directions, i.e., unit length vectors, we use $\dir{\pos}=\frac{\euc{\pos}}{\length{\pos}}$.
+\textbf{Kohn-Sham density functional theory} is the foundation of our work.
+Here, we provide a very brief introduction.
+ In KS-DFT, the electron density $\rho$ is represented by a set of orthogonal orbitals $\phi_i:\R^3\to\R$, $\phi_i(x)=C_{i}^T\bchi(x)$, that are defined as linear combinations of a basis set of atomic orbitals $\chi_\mu:\R^3\to\R$:
+\begin{align}
+    \rho(r) = \bphi(r)^T\bphi(r) = \bchi(r)^TCC^T\bchi(r) =\bchi(r)^T P \bchi(r)
+\end{align}
+where $P=CC^T\in\R^{\Nbas\times\Nbas}$ is the so-called density matrix.
+Given the representation in a finite basis set, one can compute the kinetic energy $\KFunc$, external potential $\ExtFunc$, and electron-electron repulsion energies $\HartreeFunc$ analytically.
+Unfortunately, such analytical expressions are generally unavailable for $\XCFunc[\rho]$ as in \Eqref{eq:mgga}.
+Thus, one relies on numerical integration~\citep{lehtolaOverviewSelfConsistentField2020}.
+The SCF method is an iterative two-step optimization where one first computes the so-called Fock matrix $F=\frac{\partial \EFunc}{\partial P}$ based on the current coefficients $C$.
+Then, the optimal coefficients $C\in\R^{\Nbas\times\Nel}$ are obtained by solving the generalized eigenvalue problem
+\begin{align}
+    FC = SCE
+\end{align}
+with $S_{\mu\nu}=\int_{\R^3} \chi_\mu(r)\chi_\nu(r) dr$ being the overlap matrix of the atomic orbitals and $E$ being a diagonal matrix.
+The procedure is repeated until convergence of $P$.
+\textbf{Equivariance} allows defining symmetries of functions.
+A function $f:\gX\to\gY$ is equivariant to a group $\gG$ iff $\forall g\in\gG,x\in\gX, f\left(G_g^\gX x\right)=G_g^\gY f(x)$ where $G_g^\gX,G_g^\gY$ are the representations of $g$ in the domain $\gX$ and codomain $\gY$, respectively.
+Invariance is a special case of equivariance where $G^\gY_g=1$, i.e., $f\left(G_g^\mathcal{X}x\right)=f(x)$, for all $g\in\gG,x\in\mathcal{X}$.
+
+The real spherical harmonics $Y^l:\R^3\to\R^{2l+1}, l\in\N_+,$ are a well-known example of SO(3)-equivariant functions as they transform under rotation according to the Wigner D matrices $D^l_R\in\R^{(2l+1)\times(2l+1)}, \forall R\in SO(3)$, with $D^0_R=1$ being the identity and $D^1_R$ being 3D-rotation matrices:
+\begin{align}
+    Y^l(D^1_Rx) = D^l_RY^l(x).
+\end{align}
+Such $2l+1$-dimensional equivariant functions $h_i:\R^3\to\R^{2l+1}$, e.g., $h_i=Y^l$, can be recombined using the tensor product
+\begin{align}
+    (h_1 \otimes h_2)^{l_o}_{m_o}  = \sum_{l_1,l_2} \sum_{m_1,m_2} C^{l_o,l_1,l_2}_{m_o,m_1,m_2} h^{l_1}_{m_1}h^{l_2}_{m_2},
+\end{align}
+where $C\in\R^{(2l_o+1)\times(2l_i+1)\times(2l_j+1)}$ are the Clebsch-Gordan coefficients.
+As the Wigner D-matrices are orthogonal, it follows that the inner product of two $l$-equivariant functions yields an invariant one
+\begin{align}
+    h^l_i\left(D^1_Rr\right)^Th^l_j\left(D^1_Rr\right)=h^l_i(r)^TD^{lT}_RD^l_Rh^l_j(r)=h^l_i(r)^Th^{l}_j(r).
+\end{align}
+While, we are interested in $E(3)$-invariant functions, using such equivariant intermediate representations improves accuracy, expands the function class, and improves data efficiency~\citep{schuttSchNetContinuousfilterConvolutional2017,gasteigerGemNetUniversalDirectional2021,batatiaMACEHigherOrder2022}.
+
+\newcommand{\citeneeded}[1]{\textcolor{orange}{\textbf{cite needed: #1}}}
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{TODO: #1}}}
+\newcommand{\note}[1]{\textcolor{orange}{Note: #1}}
+\newcommand{\ese}[1]{\textcolor{orange}{suggest: #1}}
+
+
+
+\section{Related work}
+
+\textbf{Learnable density functional approximations} (DFAs) of the XC functional have a long history.
+In their seminal paper, \citet{kohnSelfConsistentEquationsIncluding1965} proposed an $\exc$ fitted to a reference calculation.
+In this first parameterization $\exc$ only depends on $\excfeat(r) = \rho(r)$.
+To improve accuracy, the density features $\excfeat$ have been successively refined by including gradients and physical quantities such as the kinetic energy density $\tau(r)=\frac{1}{2}\sum_{i}^{\Nel}\vert\nabla\phi_i(r)\vert^2$.
+The resulting \textit{semi-local} functionals are also known as meta-GGAs with $\excfeat(r) = \mggafeat(r):= \left[\rho(r), |\nabla\rho(r)|, \tau(r)\right]$~\citep{perdewJacobsLadderDensity2001}.
+Many ML functionals use this parameterization with $\exc$ frequently being a product of an MLP with a classical functional~\citep{nagaiMachinelearningbasedExchangeCorrelation2022,kulikRoadmapMachineLearning2022,zhangArtificialIntelligenceScience2023}.
+An appealing aspect of learning semi-local energy densities rather than $\XCFunc[\rho]$ directly is the known implementation of physical constraints \citep{sunStronglyConstrainedAppropriately2015, kaplanPredictivePowerExact2023}, which inspired works by \citet{dickHighlyAccurateConstrained2021,nagaiMachinelearningbasedExchangeCorrelation2022}.
+While augmenting $\mggafeat$ with hand-crafted non-local features improves the accuracy, this comes at the cost of exact constraints \citep{nagaiCompletingDensityFunctional2020,kirkpatrickPushingFrontiersDensity2021}. 
+Similarly, such physical biasses are absent in kernel methods \cite{margrafPureNonlocalMachinelearned2021, bystromCIDERExpressiveNonlocal2022}. 
+Additionally, these methods require reference densities that are rarely available~\citep{szaboModernQuantumChemistry2012}.
+Alternative grid-based CNNs converge slowly in the number of grid points compared to specialized spherical integration grids~\citep{zhouExactExchangeCorrelation2019,treutlerEfficientMolecularNumerical1995}.
+Lastly, machine-learned functionals have been used in other DFT contexts as well, e.g., for energy corrections on SCF-converged energies~\citep{chenDevelopmentMachineLearning2024} or to model the kinetic energy functional in orbital-free DFT~\citep{snyderFindingDensityFunctionals2012,miOrbitalFreeDensityFunctional2023,zhangOvercomingBarrierOrbitalfree2024}.
+Here, we propose to extend semi-local models with expressive fully learnable non-local features obtained from standard integration grids.
+This allows us to leverage the physical biases of meta-GGAs while allowing efficient non-local interactions with fast integration.
+Although this work focuses on the XC functional, the methods we present can be transferred to these applications as well.
+
+
+
+
+
+
+
+\textbf{Machine learning force fields}
+have long functioned as a cheap but inaccurate alternative to quantum mechanical calculations by directly approximating the potential energy surface from data without solving the electronic structure problem~\citep{unkeMachineLearningForce2021}.
+Contemporary force fields generally rely on graph neural networks (GNNs)~\citep{schuttSchNetContinuousfilterConvolutional2017} representing molecules in terms of graphs with atoms as nodes. 
+The advent of SO(3)-equivariant models led to significant improvements in accuracy and data efficiency, closing the gap to full-fidelity quantum mechanical calcualtions~\citep{batznerE3equivariantGraphNeural2022,batatiaMACEHigherOrder2022}.
+While they effectively aim to accomplish the same goal as DFT at a fraction of the cost, their out-of-distribution accuracy is a common problem~\citep{stockerHowRobustAre2022}.
+In \our{}, we transfer the success of equivariant GNNs to DFT, by combining their approximation power with the physical nature of DFT, resulting in an accurate and data-efficient method.
+
+
+
+
+\section{\ourlong{}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/title/title-crop.pdf}
+    \caption{
+        Illustration of \ourlong{} (\our{})'s four components: (1) We first compress the electron density into a finite point cloud representation $\tH^{(0)}$ via a convolution with radial filters $\Gamma_k:\R_+\to\R$ and spherical harmonics $Y^l_m:\R^3\to\R$ evaluated at the nuclear position. (2) The embeddings $\tH^{(0)}$ are updated using equivariant message passing to obtain long-range effects in $\tH^{(\Nlayer)}$. (3) We define a non-local feature density $\efeat:\R^3\to\R^d$ from which we derive the exchange correlation density $\exc:\R^3\to\R$. (4) We add a graph readout of $\tH^{(\Nlayer)}$ to learn additional corrections. To obtain $\XCFunc[\rho]$, we integrate $\exc$ and add it to the global graph readout.
+    }
+    \label{fig:embedding}
+\end{figure}
+With \ourlong{} (\our), we propose an efficient \emph{non-local} approximation to the unknown exchange-correlation functional $\XCFunc$ that maps electron densities (positive integrable functions in $\R^3$) to scalar energies.
+To this end, \our{} consists of four components as illustrated in Figure~\ref{fig:embedding}:
+(1) \emph{Nuclei-centered equivariant embeddings} $\tH^{(0)}$ compress the electron density $\rho$ into a finite point cloud representation by equivariantly integrating the density around the nuclei.
+(2) \emph{Equivariant message passing} on this point cloud includes long-range information in $\tH^{(\Nlayer)}$.
+Based on our final point cloud embeddings $\tH^{(\Nlayer)}$, we define $\XCFunc$ as the sum of two readouts:
+(3) A \emph{non-local reweighted meta-GGA} based on our non-local feature density $\efeat:\R^3\to\R^d$ and
+(4) a \emph{graph readout} of the invariant nuclei-centered features $\tH^{(\Nlayer)0}$: 
+\begin{align}
+    \XCFunc[\rho] = \underbrace{
+        \int_{\R^3}
+        \rho(r)
+        \underbrace{
+            \cnl\left(\efeat(r), \mggafeat(r)\right)
+        }_\text{non-local weights}
+        \underbrace{
+            \emgga\left(\mggafeat(r)\right)
+        }_\text{meta-GGA}
+        dr
+    }_\text{non-local reweighted meta-GGA}
+    + \underbrace{
+        \sum_{i=1}^\Nnuc \enl\left(\mH^{(\Nlayer)0}_i\right)
+    }_\text{graph readout}.
+\end{align}
+
+\textbf{(1) Nuclei-centered equivariant embeddings} $\tH^{(0)}\in\left[\R^{1}\times\ldots\times\R^{2\lmax+1}\right]^{\Nnuc \times d}\coloneqq\gF_\lmax^{\Nnuc\times d}$ reduce the computational scaling by mapping the continuous density to a finite per-nucleus representation.
+Further, these enable using equivariant GNNs to learn long-range interactions efficiently.
+The positions of the nuclei $R_i\in\R^3$ naturally lend themselves as centroids for such embeddings as they represent peaks of the electron density~\citep{katoEigenfunctionsManyparticleSystems1957}. 
+To perform this reduction, we evaluate a convolution of the electron density $\rho$ with equivariant filters $S^l_k:\R^3\to\R^{2l+1}$ at $R_i$:
+\begin{align}
+    H_{ik}^{(0)l} = \left(\rho_i * S^l_{k}\right)(R_i)
+\end{align}
+where $\rho_i:\R^3\to\R_+$ is the soft-partitioned electron density associated with the $i$-th embedding
+\begin{align}
+    \rho_i(r) = \rho(r) \frac{\alpha_i(r)}{\sum_{j=1}^{\Nnuc}\alpha_j(r)}, \\
+    \alpha_i(r) = \exp\left(-\frac{\length{r - R_i}^2}{\lambda^2}\right)\label{eq:partition}
+\end{align}
+with $\lambda\in\R_+$ being a free parameter.
+Such partitioning prevents overcounting if nuclei are close similar to quadrature methods~\citep{beckeMulticenterNumericalIntegration1988}.
+Like equivariant GNNs~\citep{batznerE3equivariantGraphNeural2022}, we define the filters $S^{l}_k$ as a product of spherical harmonics $Y^l:\R^3\to\R^{2l+1}$ and radial filters $\filter_k:\R_+\to\R$:
+\begin{align}
+    S^{l}_{k}(r) = \filter_k(\length{r}) Y^l\left(\dir{r}\right)
+\end{align}
+where $0\leq l \leq \lmax$ indexes the real spherical harmonics.
+The spherical harmonics allow us to capture angular changes in the electron density that would otherwise be lost in a purely radial representation.
+Put together, we compute the nuclei-centered equivariant embeddings
+\begin{align}
+    \begin{split}
+        H_{ik}^{(0)l} &= \int_{\R^3} \rho_i(r) \filter^l_k(\length{r - R_i}) Y^l\left(\dir{r-R_i}\right) dr\\
+        &\approx \sum_{j=1}^\Nquad w_j \rho(r_j) \alpha_i(r_j) \filter_k(\length{r_j  - R_i}) Y^l\left(\dir{r_j-R_i}\right)
+    \end{split}\label{eq:embedding}
+\end{align}
+with a set of $\Nquad$ standard integration points and weights $\{(r_j, w_j)\}_{j=1}^\Nquad\in\left[\R^3\times\R\right]^\Nquad$~\citep{treutlerEfficientMolecularNumerical1995}.
+Importantly, while these embeddings are centered at the nuclei, they do not embed the nuclear charges, as in ML force fields~\citep{schuttSchNetContinuousfilterConvolutional2017}, but the electron density around them.
+
+A nuclear charge embedding's derivative would not exist and, thus, not alter the DFT calculation, effectively yielding a force field. 
+We follow \citet{schuttEquivariantMessagePassing2021} and parametrize the radial filters $\filter_k$ as a combination of $\sin,\cos$ with a fixed polynomial envelope function $u:\R_+\to\R$ from \citet{gasteigerDirectionalMessagePassing2022} for a cutoff $c\in\R_+$:
+\begin{align}
+    \filter_k(r) =
+    \begin{cases}
+        \sin\left(\frac{r\pi k}{2c}\right) u\left(\frac{r}{c}\right)     & \text{if } k \text{ even}, \\
+        \cos\left(\frac{r\pi(k+1)}{2c}\right)  u\left(\frac{r}{c}\right) & \text{if } k  \text{ odd}. \\
+    \end{cases}
+\end{align}
+We found such frequency filters to yield more stable results than Bessel functions as the latter ones are very sensitive close to the centroids~\citep{gasteigerDirectionalMessagePassing2022}.
+This sensitivity might be beneficial in force fields but is implicitly given in DFT due to the higher density close to the nuclei.
+\textbf{(2) Equivariant message passing} allows for the propagation and updating of the equivariant electron density features $\tH^{(0)}$ to capture long-range dependencies within the electron density like van-der-Waals forces~\citep{frankSo3kratesEquivariantAttention2022}.
+The equivariance of these features is important as it allows us to define a non-radial-symmetric feature density $\efeat$ in the next step.
+We use \citet{batznerE3equivariantGraphNeural2022}'s NequIP to perform message passing with the SO(3)-equivariant convolution from \citet{thomasTensorFieldNetworks2018} to iteratively update the embeddings $\tH^{(t)}$ over $\Nlayer$ steps:
+\begin{align}
+    \mH_i^{(t+1)} &= \EMLP\left(
+        \EDense\left(\mH_i^{(t)}\right) + \EConv\left(\tH^{(t)}, \mR\right)_i
+    \right) + \EDense\left(\mH^{(t)}_i\right),
+\end{align}
+where $\EDense:\gF_\lmax^d\to\gF_\lmax^d$ is an equivariant dense layer that mixes features of the same order $l$
+\begin{align}
+    \EDense(\mX)_{k} = \text{Concat}\left(\left[\sum_{k'=1}^d W^l_{k'k}X^{l}_{k'}\right]_{l=0}^{\lmax}\right).
+\end{align}
+with each $\mW^l\in\R^{d\times d}$ being a learnable weight matrix.
+$\EMLP:\gF_\lmax^d\to\gF_\lmax^d$ is the equivariant equivalent of a standard MLP, where we use the invariant embeddings $l=0$ and an activation function $\sigma:\R\to\R$ to gate the equivariant parts $l>0$:
+\begin{align}
+    \EMLP(\mX) &= \EDense(\text{ActEquiLin}(\mX)),\\
+    \text{ActEquiLin}(\mX) &= \text{Concat}\left(\sigma(W^0\mX^0),\left[
+        \EDense(\mX)^l \circ \sigma\left(W^l\mX^0\right)
+    \right]_{l=1}^{\lmax}\right).
+\end{align}
+Lastly, we define the convolution $\EConv:\gF_\lmax^{\Nnuc \times d}\times\R^{\Nnuc\times 3}\to\gF_\lmax^{\Nnuc\times d}$ via the tensor product:
+\begin{align} 
+    \begin{split}
+        \EConv(\mX, \nposs)^{l_o}_t = \sum_{s=1}^\Nnuc \sum_{l_i,l_f=0}^\lmax &\text{MLP}\left(\filter(\length{R_s-R_t})\right)_{l_o,l_i,l_f}\\
+        &\cdot\left(\EMLP(\vx_s)^{l_i} \otimes Y^{l_f}\left(\dir{R_s - R_t}\right)\right)^{l_0}.
+    \end{split}
+\end{align}
+To accelerate the computation of the tensor product, we use \citet{passaroReducingSO3Convolutions2023}'s efficient equivariant convolutions.
+For more details, we refer the reader to \citet{batznerE3equivariantGraphNeural2022}.
+
+\textbf{(3) Non-local reweighted meta-GGA.} As the majority of the XC energy can be captured by semi-local functionals~\citep{goerigkLookDensityFunctional2017}, starting with a machine-learned meta-GGA $\emgga:\R^{d_\text{mGGA}}\to\R$ accounts for most of the XC energy.
+To correct the meta-GGA for non-local effects, we first define a non-local feature density $\efeat:\R^3\to\R^d$ based on the non-local embeddings $\left\{\tH^{(t)}\right\}^\Nlayer_{t=0}$:
+\begin{align}
+    \efeat(r)_k = \sum_{i=1}^\Nnuc \alpha_i(r)\sum_{t=0}^\Nlayer \sum_{l=0}^{\lmax}
+    \underbrace{Y^l\left(\dir{r-R_i}\right)^TH_{ik}^{(t)l}}_\text{angular}
+    \underbrace{\filter(\length{r - R_i})^T\vw^{(t)l}_k\left(\mH^{(t)0}_{i}\right)}_\text{radial}
+\end{align}
+where $\vw_k^{(t)l}:\R^{d}\to\R^d$ are MLPs mapping to radial weights.
+While the inner product between the spherical harmonics $Y^l$ and our equivariant embeddings $\tH^{(t)l}$ expresses angular changes, the inner product of radial basis functions $\filter$ and $\vw_k^{(t)l}$ allows for radial changes.
+From this feature density $\efeat$ and standard meta-GGA inputs $\mggafeat:\R^3\to\R^\dmgga$, we derive the non-local correction $\cnl:\R^{d+\dmgga}\to\R$ to the exchange energy density $\emgga$:
+\begin{align}
+    \exc(r) = \cnl\left(\efeat(r), \mggafeat(r)\right) \cdot \emgga\left(\mggafeat(r)\right).
+\end{align}
+In practice, we implement $\cnl$ as an MLP.
+To obtain the final readout, we integrate the exchange-correlation density over the electron density $\int_{\R^3} \exc(r) \rho(r) dr$.
+Like \Eqref{eq:embedding}, we evaluate the integral with standard integration grids.
+\textbf{(4) Graph readout.} In addition to the meta-GGA-based readout, we add global graph readout of the embeddings $\left\{\tH^{(t)}\right\}^\Nlayer_{t=0}$ to capture the remaining non-local effects.
+We use an MLP $\enl:\R^d\to\R$ on top of the invariant embeddings ($l=0$) to obtain the final exchange-correlation energy:
+\begin{align}
+    \XCFunc[\rho] = \int_{\R^3} \exc(r) \rho(r) dr + \sum_{t=0}^\Nlayer\sum_{i=1}^M \enl\left(\mH^{(t)0}_i\right).
+\end{align} 
+
+\textbf{Limitations.} While \our{} demonstrates significant improvements over a semi-local ML functional, s. Section~\ref{sec:experiments}, it is not free of limitations.
+First, as we rely on the nuclear positions to represent the electronic density, it is not truly universal, i.e., independent of the external potential $\ExtFunc$~\citep{kohnSelfConsistentEquationsIncluding1965}.
+Second, the non-local nature of our functional permits no known way to enforce most physical constraints~\citep{kaplanPredictivePowerExact2023}. 
+These missing constraints enable the correction of basis set errors through the XC functional.
+While this may lead to unphysical matches between densities and energies, our experiments suggest that this does not lead to overfitting energies.
+Third, systems without nuclei, e.g., the homogenous electron gas, cannot be modeled with our approach.
+In such cases, one may want to replace the real-space point cloud with a frequency representation~\citep{kosmalaEwaldbasedLongRangeMessage2023}.
+Lastly, while more data efficient and better in extrapolation, running KS-DFT is more expensive than a surrogate force field.
+
+
+
+\section{Experiments}
+
+In the following, we compare \our{} to various alternative methods of learning potential energy surfaces across several settings.
+In particular, we focus on the following tasks: interpolating accurate energy surfaces, extrapolation to unseen conformations, and extrapolation to larger molecules.
+\textbf{Methods.} To accurately position \our{}, we compare to methods of varying computational costs.
+In particular, we evaluate force fields,  $\Delta$-ML, i.e., combining force fields with KS-DFT calculations, and a learnable XC-functional~\citep{dickHighlyAccurateConstrained2021}.
+While force fields are orders of magnitude cheaper as they bypass quantum mechanical calculations altogether, they lack prior physical knowledge.
+For the $\Delta$-ML methods, we shift all energies by DFT energies with LDA in the STO-6G basis.
+This reduces the learning problem to the difference between the KS-DFT and the target energy~\citep{wengertDataefficientMachineLearning2021}.
+As force fields, we test increasingly expressive models based on their use of SO(3) irreducible representations: SchNet ($l=0$)~\citep{schuttSchNetContinuousfilterConvolutional2017}, PaiNN ($l=1$)~\citep{schuttEquivariantMessagePassing2021}, and NequIP  ($l=2$)~\citep{batznerE3equivariantGraphNeural2022}.
+Finally, we compare with the same learnable semi-local XC-functional \citep{dickHighlyAccurateConstrained2021} used in \our{}.
+As $\Delta$-ML methods and learnable XC-functionals require a DFT computation for each structure, they are at the same computational cost as \our{}.
+
+\textbf{Setup.} To train the XC functionals, we follow \citet{liKohnShamEquationsRegularizer2021} and implement the SCF method differentiably.
+This allows us to match the converged SCF energies directly to the target energies without needing ground truth electron densities.
+
+All methods are trained on energy labels only.
+
+\begin{table}
+    \centering
+    \caption{
+        Test set MAE on the CCSD(T) MD17 dataset in $\SI{}{\milli\hartree}$. (\textbf{best}, \underline{second})
+    }
+    \label{tab:md17}
+    \begin{tabular}{l|ccc|ccc|cc}
+        \toprule
+        & \multicolumn{3}{c|}{Force field} & \multicolumn{3}{c|}{$\Delta$-ML} & \multicolumn{2}{c}{KS-DFT}\\
+        Molecule & SchNet & PaiNN & NequIP & SchNet & PaiNN & NequIP & Dick & \our{}        \\
+        \midrule
+        \midrule
+        Aspirin       & 7.01   & 2.82 &5.52&2.02&1.20&\underline{1.04} & 1.94& \textbf{0.69} \\
+        Benzene       & 0.40   & 0.16 &0.09&0.13&0.11&\textbf{0.02} & 0.39& \underline{0.10} \\
+        Ethanol       & 1.41   & 0.89 &0.95&0.93&0.42&\underline{0.25} & 0.85& \textbf{0.21} \\
+        Malonaldehyde & 2.10   & 1.00 &2.32&0.61&0.44&\underline{0.29} & 0.73& \textbf{0.27} \\
+        Toluene       & 1.80   & 1.10 &1.87&0.44&0.31&\textbf{0.13} & 0.38& \underline{0.20} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+\textbf{Reproducing gold-standard accuracies.}
+The objective behind learning XC-functionals or ML force fields is to facilitate access to accurate potential energy surfaces by distilling highly accurate reference data into a faster method.
+Hence, we compare these methods on the revised MD17 dataset, which contains precise `gold-standard' CCSD(T) (CCSD for aspirin) reference energies for conformations of five molecules along the trajectory of a molecular dynamic (MD) simulation~\citep{chmielaExactMolecularDynamics2018}.
+Each molecule has a training set of 1000 structures, which we split into 950 training and 50 validation structures.
+Each test set contains an additional 500 structures (1000 for ethanol).
+Following \citet{schuttSchNetContinuousfilterConvolutional2017}, a separate model is fitted per molecule.
+Since CCSD(T) calculations inherently account for non-local effects, these datasets are well suited for investigating the ability to accurately interpolate multi-dimensional energy surfaces from a limited number of reference structures.
+Table~\ref{tab:md17} lists the mean absolute error (MAE) for all methods on the MD17 test sets.
+We find that force fields generally struggle to reconstruct the energy surface of the MD17 dataset accurately when trained solely on energies.
+In contrast, $\Delta$-ML methods and learnable XC-functionals generally achieve chemical accuracy at $\SI{1}{\kcal\per\mole}\approx\SI{1.6}{\milli\hartree}$.
+The DFT reference calculations systematically reduce the to-be-learned energy surface delta from \SI{6.2}{\milli\hartree} to \SI{4.9}{\milli\hartree}.
+Compared to the \our{}'s base semi-local \citet{dickHighlyAccurateConstrained2021}, \our{} reduces errors by a factor of 2 to 4.
+Among all methods, \our{} yields the lowest error on 3 of the 5 molecules.
+
+\begin{table}
+    \centering
+    \caption{
+        Structural extrapolation on the 3BPA dataset.
+        All methods were trained on the 300K training set.
+        All numbers are relative MAE in \SI{}{\milli\hartree}.
+        The last three rows refer to the potential energy surfaces.
+    }
+    \label{tab:3bpa}
+    \begin{tabular}{l|ccc|ccc|cc}
+        \toprule
+        & \multicolumn{3}{c|}{Force field} & \multicolumn{3}{c|}{$\Delta$-ML} & \multicolumn{2}{c}{KS-DFT}\\
+        Test set & SchNet & PaiNN & NequIP & SchNet & PaiNN & NequIP & Dick & \our \\
+        \midrule
+        \midrule
+        300K            & 5.15 & 2.91 & 3.81 & 2.38 & 1.14 & \underline{0.81} & 0.96 & \textbf{0.42} \\
+        600K            & 9.06 & 5.81 & 7.55 & 3.96 & 2.13 & 1.56 & \underline{1.36} & \textbf{0.73} \\
+        1200K           & 18.33 & 14.14 & 17.30 & 6.84 & 5.97 & 3.30 & \underline{2.27} & \textbf{1.39} \\
+        \midrule
+        $\beta=\SI{120}{\degree}$   & 3.84 & 1.78 & 2.25 & 2.53 & 1.25 & 1.09 & \underline{0.75} & \textbf{0.35} \\
+        $\beta=\SI{150}{\degree}$   & 4.64 & 1.89 & 2.64 & 2.03 & 0.84 & 0.88 & \underline{0.61} & \textbf{0.23} \\
+        $\beta=\SI{180}{\degree}$   & 4.97 & 1.92 & 3.03 & 1.79 & 1.06 & 0.73 & \underline{0.56} & \textbf{0.20} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/3bpa/3bpa_test_dih_beta120_3d.pdf}
+    \caption{
+        Two-dimensional slice of the potential energy surface of 3BPA with the dihedral $\beta=\SI{120}{\degree}$.
+        Pure force fields like NequIP struggle to recover the shape of this out-of-distribution energy surface.
+        When paired with DFT calculations, one can see that the energy surface moves closer to the target shape but introduces additional extrema.
+        Learnable XC functionals like \citet{dickHighlyAccurateConstrained2021} and \our{} demonstrate significantly better reproduction of the target energy surface.
+    }
+    \label{fig:3bpa_pes}
+\end{figure}
+\textbf{Extrapolating structures.}
+In MD simulations, one often encounters structures far outside the training set, e.g., due to higher temperatures or environmental changes~\citep{stockerHowRobustAre2022}.
+To investigate the extrapolation to unseen structures, we use the 3BPA dataset~\citep{kovacsLinearAtomicCluster2021}.
+3BPA contains various geometric configurations of the molecule 3-(benzyloxy)pyridin-2-amine.
+The training set consists of 500 structures sampled from an MD simulation at room temperature (300K). 
+The test sets consist of MD trajectories at 300K, 600K, and 1200K to test in and out-of-distribution (OOD) performance.
+Additionally, the dataset contains three 2-dimensional potential energy surface slices where two dihedral angles are varied while keeping one fixed.
+The labels have been computed with the hybrid $\omega$B97X XC functional and the 6-31G(d) basis set and, thus, include non-local interactions. 
+
+As constant offsets of the potential energy surface do not affect the system dynamics, we evaluate the relative MAE, i.e., $\E\left[\left\vert E_{\text{pred}} - E_{\text{target}} - \textrm{median}(E_{\text{pred}} - E_{\text{target}})\right\vert\right]$.
+
+Across all test sets, \our{} results in \SI{35}{\percent} to \SI{51}{\percent} lower errors than the next best-tested alternative.
+On the far OOD 1200K samples, \our{} is the only method achieving chemical accuracy $\SI{1.6}{\milli\hartree}$ at an relative MAE of $\SI{1.40}{\milli\hartree}$.
+To illustrate the qualitative improvement of \our{}'s energy surfaces, we plot the most OOD potential energy slice at $\beta=\SI{120}{\degree}$ in Figure~\ref{fig:3bpa_pes} for NequIP, $\Delta$-NequIP, \citet{dickHighlyAccurateConstrained2021}, \our{} and the target.
+
+It is evident that force fields fail to reproduce the target energy surface with no resemblance to the target surface.
+While the reference DFT calculations move $\Delta$-NequIP closer to the target surface, the energy shape includes additional extrema not present in the target surface.
+In contrast, both XC functionals accurately reproduce the energy surface.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/qm9/qm9.pdf}
+    \caption{
+        MAE in \SI{}{\milli\hartree} on QM9 size extrapolation.
+        Each row represents a different method.
+        The four groups indicate the maximum number of heavy atoms in the training set and its size.
+        Each column represents the test subset with the number of heavy atoms listed above.
+    }
+    \label{fig:qm9}
+\end{figure}
+\textbf{Extrapolation to larger molecules.} Gathering reference data for large compounds is costly and expensive with accurate quantum chemical calculations like CCSD(T) scaling $O(\Nel^7)$ in the number of electrons $\Nel$.
+Thus, extrapolation from small or medium-sized molecules to larger ones is critical.
+Here, we simulate this setting by splitting the QM9 dataset~\citep{ramakrishnanQuantumChemistryStructures2014} into subsets of increasing size based on the number of heavy atoms, i.e., QM9($S$) are all QM9 molecules with at most $S$ heavy atoms.
+For each $S\in\{4,5,6,7\}$, we train a separate model and test on the remaining structures, i.e., QM9$\setminus$QM9($S$). 
+For each training set, we split the structures 90\%/10\% into training and validation sets.
+The QM9 dataset comprises 134k stable organic molecules with up to 9 heavy atoms.
+The energies have been computed with the hybrid B3LYP XC functional with the 6-31G(2df,p) basis set and, thus, contain non-local interactions through the exact Hartree exchange.
+As the dataset contains only few molecules with fluorine, force fields (including $\Delta$-ML) could not yield accurate energies if none or few are in the training set. 
+Thus, we omitted all molecules that include fluorine.
+
+We visualize the MAE for each combination of the number of heavy atoms in the test set and the maximum number of heavy atoms in the training set in Figure~\ref{fig:qm9}.
+Across all combinations of training and test sets, we find learnable XC functionals yielding the lowest errors with a preference for \citet{dickHighlyAccurateConstrained2021} on the smallest QM9(4).
+We hypothesize that this is due to the physical constraints enforced by the learnable XC functional, which are not present in the other methods, including \our{}.
+Starting with QM9(5), \our{}'s errors are consistently the lowest.
+Notably, \our{} trained on QM9(6) yields lower MAE on the largest structures than the best alternative on QM9(7) with 5 times more samples and one-atom larger molecules.
+On QM9(7), \our{} is at least \SI{33}{\percent} more accurate than the competing methods on test molecules with 9 heavy atoms. 
+Compared to \citet{dickHighlyAccurateConstrained2021}, \our{} reduces the MAE by at least $2\times$ on QM9(6) and QM9(7).
+
+
+
+\section{Discussion}
+
+We tackled the problem of learning efficient non-local exchange-correlation functionals to enhance the accuracy of density functional theory.
+To this end, we have presented \ourlong{} (\our{}), an equivariant graph neural network approach.
+We have introduced a basis-independent reduction of the electron density into a finite point cloud representation, enabling equivariant graph neural networks to capture long-range information.
+Based on this point cloud embedding, we have parameterized a non-local feature density used for the reweighing of a semi-local exchange-correlation energy density.
+Unlike other learnable non-local functionals, \our{} can be trained by differentiating through the SCF solver such that the training requires only energy targets. 
+
+In our empirical evaluation, \our{} improves upon previous machine learning-based methods of modeling potential energy surfaces.
+On MD17, \our{} accurately reconstructs `gold-standard' potential energy surfaces, namely CCSD(T), within the DFT framework.
+On the 3BPA, \our{} reduces errors by \SI{35}{\percent} to \SI{50}{\percent} compared to the best-performing baseline.
+On QM9, \our{} demonstrates remarkable data efficiency, achieving similar accuracies with 5 times less data or up to \SI{33}{\percent} lower errors at the same amount of data compared to the best baseline.
+Finally, \our{} extrapolates well to unseen conformations and larger molecules on 3BPA and QM9, respectively.
+
+Overall, these results strongly underline the data efficiency of learning exchange-correlation functionals compared to machine-learned force fields.
+We hypothesize that a significant portion of \our{}'s generalization is thanks to including the physically constrained semi-local model that captures most of the exchange-correlation energy and biases \our{} to approximately fulfill the same constraints. 
+On top of these, our non-local contributions transfer the accuracies of graph neural network-based force fields to functionals while maintaining a similar data efficiency. 
+
+
+
+\textbf{Future work.}
+The simple implementation of \our{} through standard deep learning libraries and the integration with the self-consistent field method open the door to a range of future research.
+Thanks to the basis-set independence, \our{} can transfer to non-atom-centered basis sets like plane waves, as they are common in periodic systems, or approximate the kinetic energy functional in orbital-free DFT.
+Further, while we trained \our{} solely on energies, multimodal training with other DFT-computable observables like electron densities or atomic forces could further improve accuracy and generalization.
+Another path to improving generalization may be integrating known physical constraints to the non-local part of \our{}.
+Finally, accurate functionals like \our{} may bridge the gap between sparse, accurate quantum mechanical calculations~\citep{chengHighlyAccurateRealspace2024,gaoNeuralPfaffiansSolving2024} and fast force field~\citep{batznerE3equivariantGraphNeural2022}.
+
+
+\textbf{Acknowledgements.} We are grateful to Leo Schwinn and Jan Schuchardt for their invaluable manuscript feedback, and to Arthur Kosmala and Johannes Margraf for insightful discussions on density functional theory.
+Funded by the Federal Ministry of Education and Research (BMBF) and the Free State of Bavaria under the Excellence Strategy of the Federal Government and the Länder.
+
+
+
+
+
+

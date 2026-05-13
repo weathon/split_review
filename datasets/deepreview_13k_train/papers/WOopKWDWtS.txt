@@ -1,0 +1,462 @@
+\title{Optimizing Learning for Robust Hyperbolic Deep Learning in Computer Vision}
+
+\begin{abstract}
+Hyperbolic deep learning has become a growing research direction in computer vision for the unique properties afforded by the alternate embedding space. The negative curvature and exponentially growing distance metric provide a natural framework for capturing hierarchical relationships between datapoints and allowing for finer separability between their embeddings. However, these methods are still computationally expensive and prone to instability, especially when attempting to learn the negative curvature that best suits the task and the data. Current Riemannian optimizers do not account for changes in the manifold which greatly harms performance and forces lower learning rates to minimize projection errors. Our paper focuses on curvature learning by introducing an improved schema for popular learning algorithms and providing a novel normalization approach to constrain embeddings within the variable representative radius of the manifold. Additionally, we introduce a novel formulation for Riemannian AdamW, and alternative hybrid encoder techniques and foundational formulations for current convolutional hyperbolic operations, greatly reducing the computational penalty of the hyperbolic embedding space. Our approach demonstrates consistent performance improvements across both direct classification and hierarchical metric learning tasks while allowing for larger hyperbolic models. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+With the recent rise in the use of hyperbolic manifolds for deep representation learning, there is a growing need for efficient, flexible components that can fully exploit these spaces without sacrificing stability. This has led researchers to focus on two main derivations of hyperbolic space: the Poincaré manifold and the hyperboloid. The Poincaré ball, equipped with a gyrovector space, supports various well-defined operations, including generalized vector addition and multiplication, but it suffers from significant stability issues. On the other hand, the hyperboloid, or Lorentz space, lacks these operations but offers much better operation stability, as demonstrated in the study by  \citet{mishne-et-al-2022}. 
+
+To address this gap, previous works have sought to provide Lorentzian definitions for common deep learning operations such as the feed-forward layer \citep{chen2022fully, dai2021hyperbolictohyperbolic, ganea-et-al-2018}, convolutional layer \citep{chen2022fully, qu2023hyperbolic, dai2021hyperbolictohyperbolic}, and MLRs \citep{bdeir2024fully}. This increased focus on hyperbolic modeling has led to its gradual integration into computer vision architectures, as detailed in the survey by \citet{mettes2023hyperbolic}.  Specifically, the hyperboloid model has been employed as a sampling space for VAEs \citep{nagano-et-al-2019}, a decoder space for vision tasks in hybrid settings \citep{guo-et-al-2022, liu2020zeroShot, khrulkov2020hyperbolic, qu-zou-2022}, and ultimately for fully hyperbolic Lorentzian vision encoders \citep{bdeir2024fully} simultaneously with its Poincaré counterpart \citep{vanspengler2023poincare}. 
+
+This paper furthers the development of hyperbolic learning for vision tasks, specifically for the Lorentz manifold. Our primary focus is on the challenge of learning the manifold's negative curvature. The driving principle behind this, is that the model embeddings may exhibit varying degrees of hyperbolicity depending on the innate hierarchies in the datapoints themselves, the problem task that is being considered, and the specific locations of hyperbolic operation integrations. %For example, explicit hierarchies at the level of the class labels might benefit from greater curvature, while innate hierarchies or their absence might not. 
+To accomodate for this, we can adjust the embedding space's hyperbolic metric to be less or more Euclidean which accounts for the modeling requirements. We also build on the idea of separate manifolds for separate main blocks in the architecture further increasing representative flexibility.  
+
+We also recognize that despite recent advances, Lorentz models continue to struggle with issues of high computational costs. We attempt to isolate and alleviate the main factors leading to numerical inaccuracies and computational overhead overall, and more particularly when modeling data in higher-dimensional embedding spaces and when learning the curvatures. Our contributions can then be summed up as:
+
+\begin{enumerate}
+  \item We propose a formulation for Riemannian AdamW and an alternative schema for Riemannian optimizers that accounts for manifold curvature learning.
+  \item We propose the use of our maximum distance rescaling function to restrain hyperbolic vectors within the representative radius of accuracy afforded by the number precision, even allowing for fp16 precision.
+  \item We provide a more efficient convolutional layer approach that is able to leverage the highly optimized existing implementations.
+  \item We empirically show the effectiveness of combining these approaches using classical image classification tasks and hierarchical metric learning problems. 
+ \end{enumerate}
+
+
+\section{Related Work}
+
+
+\paragraph{Hyperbolic Embeddings in Computer Vision} 
+With the success of employing hyperbolic manifolds in NLP models \citep{zhu2021hypertext, dhingra2018embedding, tifrea2018poincare} hyperbolic embeddings have extended to the computer vision domain. Initially, many of the works relied on a hybrid architecture, utilizing Euclidean encoders and hyperbolic decoders \citep{mettes2023hyperbolic}. This was mainly due to the high computational cost of hyperbolic operations in the encoder, as well as the lack of well-defined alternatives for Euclidean operations. However, this trend has begun to shift towards the utilization of fully hyperbolic encoders as can be seen in the hyperbolic Resnets by \citet{bdeir2024fully} and \citet{vanspengler2023poincare}. Both works offer hyperbolic definitions for 2D convolutional layer, batch normalization layer, and an MLR for the final classification head. \citet{bdeir2024fully} even attempt to hybridize the encoder by employing the Lorentz manifold in blocks that exhibit higher output hyperbolicity. While this has led to notable performance improvements, both models suffer from upscaling issues. Attempting to replicate these approaches for larger datasets or bigger architectures becomes much less feasible in terms of time and memory requirements. Instead, our approach places higher focus on efficient components to leverage the beneficial hyperbolic properties of the model while minimizing the memory and computational footprint.  
+
+\paragraph{Curvature Learning} 
+Previous work in hyperbolic spaces has explored various approaches to curvature learning. In their studies, \citet{Gu2018LearningMR} and \citet{digiovanni2022heterogeneous} achieve this by using a radial parametrization that implicitly models variable curvature embeddings under an explicitly defined, fixed 1-curve manifold. This method enables them to simulate K-curve hyperbolic and spherical operations under constant curvature for the mixed-curve manifold specifically, a combination of the Euclidean, spherical, and Poincaré manifold. Other approaches, such as the one by \citet{geoopt2020kochurov}, simply set the curvature to a learnable parameter but do not account for the manifold changes in the Riemannian optimizers. This leads to hyperbolic vectors being updated with mismatched curvatures and others being inaccurately reprojected, resulting in instability and accuracy degradation. Additionally, some methods, like the one by \citet{kim2023hier}, store all manifold parameters as Euclidean vectors and project them before use. While this approach partially mitigates the issue of mismatched curvature operations, it remains less accurate and more computationally expensive. In comparison, our proposed optimization schema maintains the parameters on the manifold and optimizes them directly by performing the necessary operations to transition between the variable curvature spaces.
+
+\paragraph{Metric Learning} 
+
+Metric learning relies on the concept of structuring the distribution in the embedding space so that related data points are positioned closer together, while less related points are placed further apart. To facilitate this process, numerous studies have introduced additional loss functions that explicitly encourage this behavior. Contrastive losses, for instance, operate on pairs of data points and propose a penalty that is proportional to the distances between negative pairs and inversely proportional to the distance between positive pairs \citep{Chopra2005}. Triplet loss extends this idea by considering sets of three points: an anchor, a positive sample, and a negative sample \citep{Wang2014}. Instead of changing the distances between points absolutely, it ensures that the distance between the anchor and the positive sample is less than the distance between the anchor and the negative sample, plus a margin, thus enforcing a relational criterion. 
+
+These approaches have also been adapted to hierarchical problem settings under hyperbolic manifolds \citep{yang2022hierarchical, kim2023hier}. Notably, \citet{kim2023hier} developed a method for learning continuous hierarchical representations using a deep learning, data-mining-like approach that relies on the innate relationships of the embeddings rather than their labels. They employ a proxy-based method that models the data on the Poincaré ball, facilitating a more natural extension to hierarchical tasks. Building on this, we extend the approach by modeling the loss function in the Lorentz manifold and incorporating a learnable curvature to better handle data with varying levels of hierarchy.
+
+
+
+\section{Methodology}
+
+Hyperbolic embeddings offer significant advantages for computer vision tasks that benefit from hierarchical structure modeling, but their effectiveness is hindered by practical challenges, including mathematical inconsistencies in curvature learning, the absence of a Riemannian AdamW optimizer, stability issues with float32 precision, and high computational costs from inefficient convolutions.
+
+To address these issues, the following sections introduce four key advancements: a more stable curvature learning method, a Riemannian AdamW optimizer, a normalization scheme for improved float32 precision stability, and efficient hyperbolic convolutions to reduce memory and computational costs. 
+
+\subsection{Background}
+The hyperbolic space is a Riemannian manifold with a constant negative sectional curvature $c < 0$. There are many conformal models of hyperbolic space but we focus our work on the hyperboloid, or Lorentz manifold. The n-dimensional Lorentz model $\mathbb{L}^n_K = (\mathcal{L}^n, \mathfrak{g}_{\vect{x}}^K)$ is defined with $\mathcal{L}^n := \{\vect{x}\in \mathbb{R}^{n+1}~|~\langle \vect{x}, \vect{x}\rangle_{\mathcal{L}}= \frac{-1}{K},~x_t>0\}$ where $\frac{-1}{K} = c$, and with the Riemannian metric $\mathfrak{g}_{\vect{x}}^K = \mathrm{diag}(-1, 1, \dots, 1)$. This models the upper sheet of a two-sheeted hyperboloid centered at $\origin = [\sqrt{K}, 0, \cdots, 0]^T$. We inherit the terminology of special relativity and refer to the first dimension of a Lorentzian vector as the time component $x_t$ and the remainder of the vector, the space dimension $\vect{x_s}$. The Lorentzian inner product then becomes $\langle \vect{x}, \vect{y}\rangle_{\mathbb{L}} := -x_ty_t+\vect{x}_s^T\vect{y}_s = \vect{x}^T\mathrm{diag}(-1,1,\cdots,1)\vect{y}.$
+We now define the common hyperbolic operations in the Lorentz space. 
+\paragraph{Distance} Distance in hyperbolic space is the magnitude of the geodesic forming the shortest path between two points. Let $\vect{x}, \vect{y} \in \mathbb{L}^n_K$, the distance between them is given by $d_{\mathbb{L}}(\vect{x},\vect{y}) = \sqrt{K}\cosh^{-1}(\frac{-\langle \vect{x},\vect{y}\rangle_{\mathbb{L}}}{K})$. We also define the square distance by \citet{law-et-al-2019} as $	d^2_{\mathbb{L}}(\vect{x},\vect{y}) = ||\vect{x}-\vect{y}||_{\mathbb{L}}^2 = -2K-2\lprod{\vect{x}}{\vect{y}}$.
+\paragraph{Exponential and Logarithmic Maps} Seeing as the Lorentz space is a Riemannian manifold, it is locally Euclidean. This can best be described through the tangent space $\mathbb{T}_{\vect{x}}\mathcal{M}$, a first-order approximation of the manifold at a given point $\vect{x}$. The exponential map, $\expmap{\vect{x}}{\vect{z}}: \tangentsp{\vect{x}} \rightarrow \mathbb{L}^n_K$ is then the operation that maps a tangent vector $\tangentsp{\vect{x}}$ onto the manifold through $\exp_{\vect{x}}^K(\vect{z}) = \cosh(\alpha) \vect{x} + \sinh(\alpha)\frac{\vect{z}}{\alpha}, \text{ with  }
+	\alpha = \sqrt{1/K}||\vect{z}||_{\mathbb{L}},~~
+	||\vect{z}||_{\mathbb{L}}=\sqrt{{\langle \vect{z},\vect{z}\rangle}_{\mathbb{L}}}.$
+ The logarithmic map is the inverse of this mapping and can be described as $\log_{\vect{x}}^K(\vect{y}) = \frac{\cosh^{-1}(\beta)}{\sqrt{\beta^2-1}}\cdot (\vect{y}-\beta \vect{x}), \text{ with  }
+	\beta=-\frac{1}{K}\langle \vect{x},\vect{y}\rangle_{\mathbb{L}}.$
+\subsection{Riemannian Optimization}
+\paragraph{On the Stability of Curvature Learning}
+
+In the hyperbolic learning library GeoOpt, \citet{geoopt2020kochurov} introduce the curvature of hyperbolic space as a learnable parameter. However, no subsequent work has fully leveraged this feature, and our empirical testing reveals that this approach often leads to instability and performance decline. We attribute these issues to the simplistic implementation of the curvature updates, which neglects to update the hyperbolic operations after updating the curvature. 
+
+In the current Riemannian optimization approach, Euclidean gradients and their momentums are projected onto the Riemannian manifold and then used to update the hyperbolic parameters. These operations inherently depend on the curvature of the space. However, when the curvature is adjusted during learning, the projections, gradients, and hyperbolic parameters can become inconsistent, as they mix the projection and update operations from the new curvature with vectors defined under the previous curvature.
+
+To illustrate this, Figure \ref{fig:curve_inconsistencies} shows two manifolds with different curvatures. It is evident that points defined on the first manifold do not lie on the second, and the tangent planes of the first manifold are not aligned with those of the second. Thus, using the new curvature operations on points from the old model is not mathematically sound practice. This inconsistency introduces instability, undermining the reliability of curvature learning and often leading to invalid values during the parameter updates. To address this, we propose a method that tracks both the old and new curvature values throughout updates. Specifically, all updates are applied under the old curvature, after which the hyperbolic vectors are mapped from the old manifold to the new one. 
+
+While GeoOpt does not address the optimization challenges involved in learning manifold curvature, it does implement an "N-stabilize step". This step aims to reduce instability by recalculating the time component of the hyperbolic parameters every N-steps to ensure they remain on the manifold. However, this approach fails to prevent invalid parameter values before the update steps and suffers from high inaccuracies due to the mathematically flawed parameter optimization.
+
+Moreover, the time re-calculation projection used in the stabilize step alters the relative magnitudes of the hyperbolic vectors and gradients, and even the directions of the momentums, which can degrade performance and lead to training instability. Instead, we recommend projecting points onto the tangent space at the old origin using the logarithmic map and then projecting back after the curvature update. Gradients and their momentum can be similarly projected or parallel transported to the tangent space. Parallel transport is chosen here because it preserves the vectors' directions which is important for the optimization procedure.
+
+Additionally, when the curvature changes, the tangent space at the origin remains relatively stable, as shown in Figure \ref{fig:curve_inconsistencies}. Moving onto the new manifold is then a simple exponential map and parallel transport back operation. This preserves the vector norms and their hyperbolic distances to the origin since $D(\expmapK{\origin}{\vect{y}}{1}, \origin)^{K_1} = ||y|| = D(\expmapK{\origin}{\vect{y}}{2}, \origin)^{K_2} $ where $\vect{y} \in \mathcal{T}_{\origin}\mathcal{M}$. No changes are needed for the tangent vector during the move between tangent spaces of different curvatures since these spaces are parallel, making the transition a simple translation along the time axis.
+
+\begin{figure}
+\centering
+\begin{subfigure}{.45\textwidth}
+  \centering
+  \includegraphics[width=0.8\linewidth]{tangent_mismatch.png}
+\caption{ At a random point}
+  \label{fig:sub1}
+\end{subfigure}%
+\begin{subfigure}{0.45\textwidth}
+  \centering
+  \includegraphics[width=0.8\linewidth]{tangent_at_origin.png}
+  \caption{At the origin}
+  \label{fig:sub2}
+\end{subfigure}
+\caption{Tangent planes of a hyperboloid with curvature -1 relative to another hyperboloid with curvature -0.7. Tangential properties between manifolds are better respected at the origin where tangents remain parallel.}
+\label{fig:curve_inconsistencies}
+\end{figure}
+
+It is important to emphasize that our proposed optimization scheme is compatible with existing curvature learning and meta-learning methods. Rather than being an alternative, it serves as a guideline for updating manifold parameters during curvature changes, aimed at maintaining learning stability throughout the process.
+
+
+   
+\paragraph{Riemannian AdamW Optimizer}
+Recent works, particularly with transformers, commonly use the AdamW optimizer introduced by \citet{loshchilov2019decoupled}. As of current, there is no established Riemannian variant of this optimizer. We attempt to derive AdamW for the Lorentz manifold and argue a similar approach could be extended to the Poincaré ball. The main difference between AdamW and Adam is the direct weight regularization. This is more difficult to perform in the Lorentz space given the lack of an intuitive subtraction operation on the manifold. To resolve this, we reframe the parameter regularization in the original AdamW as a weighted centroid with the origin $O$
+
+\[
+\vect{\theta_{t-1}} - \gamma\lambda\vect{\theta_{t-1}} = (1-\gamma\lambda)\vect{\theta_{t-1}} + \gamma\lambda O
+\]
+
+where $\gamma$ is the learning rate and $\lambda$ is the weight decay value. The centroid operation is well defined in the Lorentz space which now allows for a direct translation of AdamW. The regularization schema becomes: 
+
+\[
+\vect{\theta_{t}}= 
+\begin{dcases}
+    \mu_{\mathbb{L}}([\vect{\theta_{t-1}}, \origin], \vect{\nu} = [1- \gamma\lambda, \gamma\lambda]) & \quad \textrm{if } \vect{\theta} \in \mathbb{L} \\
+                \vect{\theta_{t-1}} -  \gamma\vect{\theta_{t-1}} \lambda     & \quad \textrm{otherwise}
+\end{dcases}
+\]
+
+where $\mu_{\mathbb{L}}$ is the Lorentz centroid, and $\vect{\nu}$ are the weights. By removing the later gradient decay and introducing this operation, we adapt AdamW for use in the Lorentz space. 
+\begin{wrapfigure}[26]{L}{.45\linewidth}
+  \begin{smashminipage}
+\begin{algorithm}[H]
+\caption{Curvature Learning Aware Optimization}\label{alg:learn}
+\begin{algorithmic}
+\State Given parameters $\vect{\theta} = [\vect{\theta}_{euclid}, \vect{\theta}_{\mathbb{L}}, \vect{\theta}_K]$
+and gradients denoted $\mathcal{G}$
+\Procedure{Optimizer Step}{$\vect{\theta}$}
+    \For{$\vect{p}$ in $\vect{\theta}_{\mathbb{L}}$}
+        \State Vanilla Riemannian Optimizer Step
+    \EndFor
+    \For{$\vect{p}$ in $\vect{\theta}_{euclid} \cup \vect{\theta}_K$}
+        \State Vanilla Eucldiean Optimizer Step
+    \EndFor
+    \State MoveParameters()
+\EndProcedure
+\Procedure{Move Parameters}{}
+    \For{$\vect{p}$ in $\vect{\theta}_{\mathbb{L}}$}
+        \State $\vect{\mathcal{G}}_{temp} = \transpold{\vect{p}}{\vect{\origin}_{t-1}}{\vect{\mathcal{G}}}$
+        \State $\vect{z} = \log_{\vect{\origin}_{t-1}}^{K_{t-1}}(\vect{p})$ 
+        \State $\vect{p} = \exp_{\origin_{t}}^{K_t}(\vect{z})$
+        \State $\vect{\mathcal{G}} =\transpcurr{\vect{\origin}_{t}}{\vect{p}}{\vect{\mathcal{G}}_{temp}}$
+    \EndFor
+\EndProcedure
+\end{algorithmic}
+\end{algorithm}
+  \end{smashminipage}
+\end{wrapfigure}
+
+\paragraph{Maximum Distance Rescaling} Vectors in the hyperboloid models can be defined as $\vect{x}=[x_t, \vect{x_s}]^T\in\mathbb{L}^n_K$ where $x_t = \sqrt{||\vect{x}_s||^2+K}$, $K={-1}/{c}$ and $c$ is the manifold curvature. As such, Lorentzian projections and operations rely on the ability to accurately calculate the corresponding time component $x_t$ for the hyperbolic vectors. Under Float64 precision, \citet{mishne-et-al-2022} derive a maximum value for the time component $x_{t_{max}} = 10^8$. Values above this push vectors off the Lorentz manifold and onto the cone defined by $x_t^2 = \sum{\vect{x}_s^2}$.  
+Based on the above, and given a specific $K$, we can derive a maximum representational radius for the model as 
+\begin{align}
+D^K_{\origin_{max}} = arccosh(\frac{x_{t_{max}}}{\sqrt{K}}) \cdot \sqrt{K}
+\end{align}
+Under Float32 precision, and to account for values of $K<1$ we use a limit value of $x_{t_{max}} = 2\cdot10^3$. When projected onto the tangent space of the origin, and with $K = 1$, this translates to 
+$||\logmapone{\origin}{\vect{x}}|| = D^1_{\origin_{max}} = 9.1$. This value changes considerably as the value of $K$ changes. Vectors outside this radius lead to instability and performance degradation due to inaccurate approximation. This problem is only exacerbated as the dimensionality of the hyperbolic vector increases. Higher dimensional vectors tend to have larger norms which limits hyperbolic models' abilities to scale up. 
+
+To constrain hyperbolic vectors within a specified maximum distance, either a normalization function or a parameter clipping method is required. Parameter clipping can be challenging to train, as it may lead to information loss and introduce non-smooth gradients. On the other hand, common normalization functions like tanh and the sigmoid function tend to saturate quickly, limiting their effectiveness as seen in the sigmoid implementation by \citet{chen2022fully}. To address these issues, we introduce a modified scaling function, designed to provide finer control over both the maximum values and the slope of the curve. A visualization of this function is provided in Figure \ref{fig:scaling_visualizations}, and the formulation is presented below:
+
+\begin{equation}
+\vect{y}_{rescaled} = \frac{\vect{y}}{\norm{\vect{y}}} \cdot m \cdot tanh(\norm{\vect{y}} \cdot \frac{atanh(0.99)}{s \cdot m})
+\label{eq:rescale_distance}
+\end{equation}
+
+where $y \in \mathbb{R}^d$, $m$ is our desired maximum value, and $s$ controls the slope of the curve. We now have a maximum distance value to adhere to and a flexible distance normalizing function. To apply this to the hyperbolic vectors, we suggest performing the scaling on the tangent plane of the origin
+
+\begin{equation}
+{
+\vect{x}_{s_{rescaled}} = \vect{x}_s \times \frac{e^{\frac{D(\vect{x},\origin)_{rescaled}^K}{\sqrt{K}}} - e^{\frac{-D(\vect{x},\origin)_{rescaled}^K}{\sqrt{K}}}}{e^{\frac{D(\vect{x},\origin)^K}{\sqrt{K}}} - e^{\frac{-D(\vect{x},\origin)^K}{\sqrt{K}}}}
+}
+\label{eq:tanhresc}
+\end{equation}
+
+where $D(\vect{x}, \origin)_{rescaled}^k$ is the scaled distances by plugging in $D(\vect{x}, \origin)$ and $D^K_{\origin_{max}}$  in Eq.\ref{eq:rescale_distance}. The time component of the vector is then recalculated based on the norm of its spatial components. This gives us a complete scaling operation for the Lorentz space. 
+We apply this tanh scaling when moving parameters across different manifolds. This includes transitions from the Euclidean space to the Lorentz space, as well as between Lorentz spaces of different curvatures. Additionally, we use this scaling after Lorentz Boosts and direct Lorentz concatenations \citep{qu-zou-2022}. We also incorporate it following the variance-based rescaling in the batch normalization layer, since variance adjustments during this operation can push points outside the radius during the operation and often lead to invalid values.
+
+\subsection{Towards Efficient Architectural Components}
+
+\paragraph{Lorentz Convolutional Layer} In their work, \citet{bdeir2024fully} proposed a fully hyperbolic 2D convolutional layer by breaking down the convolution operation into a window-unfolding step followed by a modified version of the Lorentz Linear Layer from \citet{chen2022fully}. This approach ensured that the convolution outputs remained on the hyperboloid. However, the manual patch creation combined with matrix multiplication made the computation extremely expensive, as it prevented the use of highly optimized CUDA implementations for convolutions.
+
+To address this issue, we adopt an alternative definition of the Lorentz Linear layer from \citet{dai2021hyperbolictohyperbolic}, which decomposes the transformation into a Lorentz boost and a Lorentz rotation. Using this definition, we replace the matrix multiplication employed by \citet{bdeir2024fully} for the spatial dimensions and time component projection with a learned rotation operation and a Lorentz boost. Additionally, we can achieve the rotation operation using a parameterization of the convolution weights while still relying on the CUDA convolution implementations, significantly improving computational efficiency.
+
+A rotation is any operation that modifies the directions of transformed vectors while preserving their magnitudes. This can be achieved using a matrix $\vect{\hat{W}} \in \mathbb{S}$. Where
+\begin{align}
+\mathbb{S}(n',n) = {\vect{M} \in \mathbb{R}^{(n' \cdot n)}:\vect{M}^T\vect{M}=\vect{I}}
+\end{align}
+represents the Stiefel manifold. The condition $n\leq n'$ ensures that the columns of the weight matrix are orthogonal, thereby preserving the norms along the rows of the input matrix, which correspond to the individual embeddings in this context.
+ 
+ To apply this concept to the convolution operation, the convolution weights, after unfolding, must form a rotation matrix. We define the dimensions of this matrix as $n = (channels_{in} \cdot kernel_{width} \cdot kernel_{height}) $ and $n' = channels_{out}$ respectively. However, the condition for orthogonal columns is not always satisfied as there will be instances where $n > n'$. For these cases we use the norm-preserving transformation $\vect{z} = \vect{W^T}\vect{x} \cdot \frac{\norm{\vect{x}}}{\norm{\vect{W^T}\vect{x}}}$ where $\vect{W} \in \mathbb{R}^{(n' \cdot n)}$. This formulation allows us to utilize existing efficient implementations of the convolution operation by directly parameterizing the kernel weights before passing them into the convolutional layer. Finally, we formalize the new Lorentz Convolution as:
+ \begin{align}
+    \vect{out} = \text{LorentzBoost(TanhScaling(RotationConvolution(}\vect{x}\textbf{)))}
+\end{align}
+where  TanhRescaling is the operation described in Eq.\ref{eq:tanhresc} and RotationConvolution is a normal convolution parameterized through the procedure in Algorithm \ref{alg:param}, where Orthogonalize is a Cayley projection similar to \citep{helfrich2018orthogonal} or the norm-preserving transformation above. We specifically use the Cayley projection because it always produces an orthonormal matrix with a positive determinant, ensuring that the rotated point remains on the upper sheet of the hyperboloid and avoids being mapped to the lower sheet.
+
+\begin{wrapfigure}{R}{.6\linewidth}
+  \begin{minipage}[4cm]{1\linewidth}
+\begin{algorithm}[H]
+\caption{Lorentz Convolution Parametarization}\label{alg:cap}
+\begin{algorithmic}
+\State $\vect{W} \in \mathbb{R}^{C_{in}, C_{out}, K_{width}, K_{length}}$
+\Procedure{Adaptweight}{W}
+    \If {$K_{width} \cdot K_{length} \cdot C_{in} > C_{out}$} 
+        \State return $\vect{W}$
+    \Else
+        \State $\vect{W} = \vect{W}.reshape ( K_{width} \cdot K_{length} \cdot C_{in},  C_{out})$
+        \State $\vect{\hat{W}}_{core} =$ Orthogonalize ($\vect{W}$)  
+        \State return $\vect{\hat{W}}.reshape ( C_{in}, C_{out}, K_{width}, K_{length})$
+    \EndIf
+\EndProcedure
+\end{algorithmic}
+\label{alg:param}
+\end{algorithm}
+
+  \end{minipage}
+\end{wrapfigure}
+
+$\vect{\hat{W}}_{core}$ can also be learned directly on the SPD manifold similar to \citet{dai2021hyperbolictohyperbolic}. This definition of the convolution operation allows to use the existing efficient implementations of 2D convolutions, saving both memory and runtime. 
+
+\paragraph{Lorentz-Core Bottleneck Block} 
+
+To build on the concept of hybrid hyperbolic encoders introduced by \citep{bdeir2024fully}, we developed the Lorentz Core Bottleneck blocks for hyperbolic ResNet-based models. These blocks are similar to standard Euclidean bottleneck blocks but replace the internal 3x3 convolutional layer with our efficient convolutional layer as illustrated in figure \ref{fig:coreneck}. This design allows us to incorporate hyperbolic structuring of the embeddings within each block while retaining the flexibility and computational efficiency of Euclidean models. We interpret this integration as a form of hyperbolic bias, enabling ResNets to leverage hyperbolic representations without requiring fully hyperbolic modeling.
+
+\begin{wrapfigure}[14]{R}{4.5cm}
+\definecolor{747aec21-333b-59ee-84e3-ddff893e5ccd}{RGB}{255, 216, 176}
+\definecolor{f3551e38-74df-57e2-b793-83d7fe876c85}{RGB}{0, 0, 0}
+\definecolor{0b71a967-1f15-55a5-9bb9-70efa7b4fc58}{RGB}{51, 51, 51}
+\definecolor{e9850c89-8787-50c8-bbe8-9f4d7e01be1b}{RGB}{179, 191, 255}
+\definecolor{5856d031-3da1-575c-834e-c77e9e438c62}{RGB}{0, 0, 0}
+
+\tikzstyle{f5efb58e-487e-5b85-baf2-451978dd0fe4} = [rectangle, minimum width=4cm, minimum height=0.4cm, text centered, font=\normalsize, color=0b71a967-1f15-55a5-9bb9-70efa7b4fc58, draw=f3551e38-74df-57e2-b793-83d7fe876c85, line width=0.5, fill=747aec21-333b-59ee-84e3-ddff893e5ccd]
+\tikzstyle{69bbb168-da59-5865-902f-94e77902bf95} = [rectangle, minimum width=4cm, minimum height=0.4cm, text centered, font=\normalsize, color=0b71a967-1f15-55a5-9bb9-70efa7b4fc58, draw=f3551e38-74df-57e2-b793-83d7fe876c85, line width=0.5, fill=747aec21-333b-59ee-84e3-ddff893e5ccd]
+\tikzstyle{706a390d-57bc-58cb-8cf0-e7a6f278c255} = [rectangle, minimum width=4cm, minimum height=0.4cm, text centered, font=\normalsize, color=0b71a967-1f15-55a5-9bb9-70efa7b4fc58, draw=f3551e38-74df-57e2-b793-83d7fe876c85, line width=0.5, fill=e9850c89-8787-50c8-bbe8-9f4d7e01be1b]
+\tikzstyle{0eb030f7-318a-5df2-b870-e15b2a0d9818} = [rectangle, minimum width=4cm, minimum height=0.4cm, text centered, font=\normalsize, color=0b71a967-1f15-55a5-9bb9-70efa7b4fc58, draw=f3551e38-74df-57e2-b793-83d7fe876c85, line width=0.5, fill=747aec21-333b-59ee-84e3-ddff893e5ccd]
+\tikzstyle{7be24b85-97d0-5b76-ba9e-d94005dca8f2} = [thick, draw=5856d031-3da1-575c-834e-c77e9e438c62, line width=0.8, ->, >=stealth]
+
+\begin{tikzpicture}[node distance=1cm]
+\node (372b56db-f170-411a-91cb-03a7e9c71299) [f5efb58e-487e-5b85-baf2-451978dd0fe4] {Euclidean 1x1 Conv};
+\node (c584dd7f-dfa3-4a0f-9bea-91bcb93ca390) [69bbb168-da59-5865-902f-94e77902bf95, below of=372b56db-f170-411a-91cb-03a7e9c71299] {Manifold Switcher + Scale};
+\node (0b243e8f-1cd8-4d43-9d13-fba361dba6f5) [706a390d-57bc-58cb-8cf0-e7a6f278c255, below of=c584dd7f-dfa3-4a0f-9bea-91bcb93ca390] {Hyperbolic 3x3 Conv};
+\node (74e09759-9bf4-4185-9d95-6137332d52cf) [69bbb168-da59-5865-902f-94e77902bf95, below of=0b243e8f-1cd8-4d43-9d13-fba361dba6f5] {Manifold Switcher + Scale};
+\node (13240c6f-f77f-4ee5-923f-3a4317480fed) [0eb030f7-318a-5df2-b870-e15b2a0d9818, below of=74e09759-9bf4-4185-9d95-6137332d52cf] {Euclidean 1x1 Conv};
+\draw [7be24b85-97d0-5b76-ba9e-d94005dca8f2] (372b56db-f170-411a-91cb-03a7e9c71299) -- node[anchor=west] {BN + ReLU} (c584dd7f-dfa3-4a0f-9bea-91bcb93ca390);
+\draw [7be24b85-97d0-5b76-ba9e-d94005dca8f2] (c584dd7f-dfa3-4a0f-9bea-91bcb93ca390) --  (0b243e8f-1cd8-4d43-9d13-fba361dba6f5);
+\draw [7be24b85-97d0-5b76-ba9e-d94005dca8f2] (0b243e8f-1cd8-4d43-9d13-fba361dba6f5) -- node[anchor=west] {Hyper BN + ReLU} (74e09759-9bf4-4185-9d95-6137332d52cf);
+\draw [7be24b85-97d0-5b76-ba9e-d94005dca8f2] (74e09759-9bf4-4185-9d95-6137332d52cf) --  (13240c6f-f77f-4ee5-923f-3a4317480fed);
+\end{tikzpicture}
+\caption{
+Lorentz-Core Bottleneck Block}
+\label{fig:coreneck}
+\end{wrapfigure}
+
+
+
+\section{Experiments}
+
+\subsection{Hierarchical Metric Learning Problem}
+
+In their paper \citet{kim2023hier} take on the problem of hierarchical clustering using an unsupervised hyperbolic loss regularizer they name HIER. This method relies on the use of hierarchical proxies as learnable ancestors of the embedded data points in hyperbolic space. Given a triplet of points ${xi, xj, xk}$ where $x_i$ and $x_j$ are determined to be related by a reciprocal nearest neighbor measure, and $x_k$ is an unrelated point, the HIER loss regularizer is then calculated as 
+\begin{equation}
+\begin{split}
+\mathcal{L}_{\textrm{HIER}}(t) &= [D_B(x_i, \rho_{ij}) - D_B(x_i, \rho_{ijk}) + \delta]_+ \\
+&+ [D_B(x_j, \rho_{ij}) - D_B(x_j, \rho_{ijk}) + \delta]_+ \\
+&+ [D_B(x_k, \rho_{ijk}) - D_B(x_k, \rho_{ij}) + \delta]_+,
+\end{split}
+\label{eq:hc_loss}
+\end{equation}
+
+where $D_B$ denotes the hyperbolic distance on the Poincaré ball, and $\rho_{ij}$ is the most likely least common ancestor of points $x_i$ and $x_j$. This encourages a smaller hyperbolic distance between $x_i$, $x_j$, and $ \rho_{ij}$, and a larger distance with $ \rho_{ijk}$. The opposite signal is then applied in the case of $x_k$, the irrelevant data point. \citet{kim2023hier} show substantial performance uplifts for the HIER loss when applied to a variety of network architectures. 
+
+In the following experiment, we extend HIER to the Lorentz model (LHIER) and compare against the results provided by \citet{kim2023hier}. 
+
+\paragraph{Experimental Setup}
+We follow the experimental setup in \citet{kim2023hier} and rely on four main datasets: CUB-200-2011 (CUB)\citep{CUB200}, Cars-196 (Cars)\citep{krause20133d}, Stanford Online Product (SOP)\citep{songCVPR16}, and In-shop Clothes Retrieval (InShop)\citep{Liu2016}. Performance is measured using Recall@k which is the fraction of queries with one or more relevant samples in their k-nearest neighbors. Additionally, all model backbones are pre-trained on Imagenet to ensure fair comparisons with the previous work. 
+
+\paragraph{Moving to Lorentz Space} To adapt the HIER model to the hyperboloid we first replace the Euclidean linear layer with a Lorentzian linear layer in the model neck and implement our max distance scaling operation after. We then set the hierarchical proxies as learnable hyperbolic parameters and optimize them directly on the manifold using our Lorentzian AdamW. Finally, we change the Poincaré distance to the Lorentz distance for the LHIER loss and set the hierarchical proxies to be scaled beforehand. We continue to use FP16 precision during curvature learning to evaluate the stability of the new optimization scheme. Our experiments also include both CNN-based and transformer models to assess whether differences in architecture affect the performance of the hyperbolic heads.
+
+\paragraph{Results}
+
+As shown in table \ref{tab:Hyp_sup_head}, our HIER+ model manages to improve the performance of mainly the CNN-based models with improvements ranging in recall@1 from 1-2.3\%. In contrast, transformer models exhibit marginal gains in most cases and even show slight declines in other scenarios. This indicates that the proposed components do not better fully exploit the advantages of transformer architectures compared to other hyperbolic methods. The reasons may include architectural limitations or insufficient hyperparameter tuning. Notably, \citet{kim2023hier} employed an extensive set of hyperparameters for model training, which we kept at default values to ensure fair comparisons and avoid costly hyperparameter searches.
+\begin{table}[!t]
+
+\caption{
+Performance of metric learning methods on the four datasets as provided by \citep{kim2023hier}. All architecture backbones are pretrained and tested with the new LHIER loss. Superscripts denote their embedding dimensions and $\dagger$ indicates models using larger input images. As in \citep{kim2023hier}, network architectures are abbreviated as, R--ResNet50~\citep{resnet}, B--Inception with BatchNorm~\citep{Batchnorm}, De--DeiT~\citep{DeiT}, DN--DINO~\citep{DINO} and V--ViT~\citep{ViT}}
+\fontsize{8.1}{10.0}\selectfont
+\centering
+\begin{tabularx}{0.95\textwidth}
+    {
+      p{0.26\textwidth}
+      >{\centering\arraybackslash}X
+      >{\centering\arraybackslash}X
+      >{\centering\arraybackslash}X 
+      >{\centering\arraybackslash}X
+      >{\centering\arraybackslash}X
+      >{\centering\arraybackslash}X
+      >{\centering\arraybackslash}X 
+      >{\centering\arraybackslash}X
+      >{\centering\arraybackslash}X
+      >{\centering\arraybackslash}X
+      }
+     \toprule
+    \multicolumn{1}{l}{\multirow{2}{*}[-3.5mm]{Methods}}&
+    \multicolumn{1}{c}{\multirow{2}{*}[-3.5mm]{Arch.}}&
+    \multicolumn{3}{c}{CUB} & \multicolumn{3}{c}{Cars} & \multicolumn{3}{c}{SOP}\\ 
+    \cmidrule(lr){3-5} \cmidrule(lr){6-8} \cmidrule(lr){9-11} 
+    & &R@1 &R@2 &R@4 &R@1 &R@2 &R@4 &R@1 &R@10 &R@100 \\ \midrule
+    \multicolumn{11}{l}{{\footnotesize \textit{Backbone architecture}: \textit{CNN}}} \\ \midrule
+    NSoftmax~\citep{zhai2018classification} &\multicolumn{1}{l}{R$^{128}$} &56.5 &69.6 &79.9  &81.6 &88.7 &93.4  &75.2 &88.7 &95.2 \\
+    MIC~\citep{roth2019mic} &\multicolumn{1}{l}{R$^{128}$} &66.1 &76.8 &85.6&82.6 &89.1 &93.2 &77.2 &89.4 &94.6  \\
+    XBM~\citep{wang2020cross} &\multicolumn{1}{l}{R$^{128}$} &- &- &- &- &- &- &80.6 &91.6 &96.2 \\ 
+    \midrule
+    XBM~\citep{wang2020cross} &\multicolumn{1}{l}{B$^{512}$} &65.8 &75.9 &84.0 &82.0 &88.7 &93.1 &79.5 &90.8 &96.1 \\
+    HTL~\citep{Ge2018DeepML} &\multicolumn{1}{l}{B$^{512}$} &57.1 &68.8 &78.7 &81.4 &88.0 &92.7 &74.8 &88.3 &94.8  \\
+    MS~\citep{wang2019multi} &\multicolumn{1}{l}{B$^{512}$} &65.7 &77.0 &86.3 &84.1 &90.4 &94.0 &78.2 &90.5 &96.0  \\
+    SoftTriple~\citep{Qian_2019_ICCV} &\multicolumn{1}{l}{B$^{512}$} &65.4 &76.4 &84.5 &84.5 &90.7 &94.5 &78.6 &86.6 &91.8\\
+    PA~\citep{kim2020proxy} &\multicolumn{1}{l}{B$^{512}$} &68.4 &79.2& 86.8 &86.1 & 91.7 & 95.0 &79.1 & 90.8 & 96.2\\
+    NSoftmax~\citep{zhai2018classification} &\multicolumn{1}{l}{R$^{512}$} &61.3 &73.9 &83.5 &84.2 &90.4 &94.4 &78.2 &90.6 &96.2 \\
+    $^\dagger$ProxyNCA++~\citep{teh2020proxynca++} &\multicolumn{1}{l}{R$^{512}$} &69.0 &79.8 &87.3 &86.5 &92.5 &95.7 &80.7 &92.0 &96.7\\
+    Hyp~\citep{ermolov2022hyperbolic} &\multicolumn{1}{l}{R$^{512}$} &65.5 &76.2 &84.9 &81.9 &88.8 &93.1 &79.9 &91.5 &96.5 \\
+     HIER~\citep{kim2023hier} & \multicolumn{1}{l}{ R$^{512}$} &  70.1 &  79.4 &  86.9&  88.2& 93.0& 95.6&  80.2&  91.5& 96.6\\ 
+    \rowcolor{lightgray}
+     LHIER (ours) & \multicolumn{1}{l}{ R$^{512}$} &  \textbf{72.4}  &  \textbf{81.5} &  \textbf{88.4} &  \textbf{89.1} & \textbf{93.5} & \textbf{96.1} &  \textbf{81.3} &  \textbf{92.1} & \textbf{96.8} \\ 
+     \midrule
+    
+    \multicolumn{11}{l}{{\footnotesize \textit{Backbone architecture}: \textit{ViT}}} \\ \midrule
+    IRT$_\text{R}$~\citep{el2021training} &\multicolumn{1}{l}{De$^{128}$} &72.6 &81.9 &88.7 &- &- &- &\textbf{83.4} &93.0 &97.0  \\
+    Hyp~\citep{ermolov2022hyperbolic} &\multicolumn{1}{l}{De$^{128}$} &74.7 &84.5 &90.1 &82.1 &89.1 &93.4 &83.0 &93.4 &\textbf{97.5}  \\
+     HIER~\citep{kim2023hier} & \multicolumn{1}{l}{ De$^{128}$} &  75.2 &  84.2 &  90.0&  85.1& 91.1& 95.1&  82.5&  92.7& 97.0\\
+    \rowcolor{lightgray}
+     LHIER (ours) & \multicolumn{1}{l}{De$^{128}$} &  \textbf{75.5} &  \textbf{84.7} &  \textbf{90.6} &  \textbf{85.4} & \textbf{91.7} & \textbf{95.6} & 82.7  &  \textbf{93.5} & 97.4 \\ 
+    Hyp~\citep{ermolov2022hyperbolic} &{DN}$^{128}$ &78.3 &86.0 &91.2 &86.0 &91.9 &95.2 &84.6 &94.1 &97.7 \\
+     HIER~\citep{kim2023hier} &\multicolumn{1}{l}{ DN$^{128}$}   &  78.5& 86.7&   91.5&   88.4&  \textbf{93.3}&  95.9&   84.9&  94.2&  97.5\\ 
+    \rowcolor{lightgray}
+     LHIER (ours) & \multicolumn{1}{l}{ DN$^{128}$} &  \textbf{78.8} &  \textbf{87.0} &  \textbf{91.9} &  \textbf{88.9} & 93.2 & \textbf{96.4} &  \textbf{85.1} &  \textbf{94.9} & \textbf{98.2} \\ 
+    Hyp~\citep{ermolov2022hyperbolic} & \multicolumn{1}{l}{V$^{128}$} &84.0 &90.2 &94.2&82.7 &89.7 &93.9  &85.5 &94.9 &\textbf{98.1}\\
+     HIER ~\citep{kim2023hier} & \multicolumn{1}{l}{ V$^{128}$}  &  84.2&  90.1&  93.7& 86.4&  91.9&  95.1&  85.6&  94.6&
+     97.8\\ 
+    \rowcolor{lightgray}
+     LHIER (ours) & \multicolumn{1}{l}{ V$^{128}$} &  \textbf{84.6} &  \textbf{90.2} &  \textbf{93.9} &  \textbf{86.7} & \textbf{92.0} & \textbf{95.3} &  \textbf{85.9} &  \textbf{95.0} & 98.0\\ \midrule
+    
+    IRT$_\text{R}$~\citep{el2021training}  &\multicolumn{1}{l}{De$^{384}$}  &76.6 &85.0 &91.1 &- &- &- &84.2 &93.7 &97.3 \\
+    DeiT-S~\citep{DeiT} &\multicolumn{1}{l}{ De$^{384}$}  &70.6 &81.3 &88.7 &52.8 &65.1 &76.2 &58.3 &73.9 &85.9 \\
+    Hyp~\citep{ermolov2022hyperbolic} &\multicolumn{1}{l}{ De$^{384}$}  &77.8 &86.6 &91.9 &86.4 &92.2 &95.5 &\textbf{83.3} &\textbf{93.5} &\textbf{97.4} \\
+     HIER~\citep{kim2023hier} &\multicolumn{1}{l}{ De$^{384}$}   &  \textbf{78.7}&  \textbf{86.8}&  \textbf{92.0} &  \textbf{88.9}&  \textbf{93.9}&  \textbf{96.6}&  83.0&  93.1&  97.2\\
+    \rowcolor{lightgray}
+     LHIER (ours) & \multicolumn{1}{l}{ De$^{384}$} &  78.3 &  86.2 &  91.8 &  88.7 & 93.4 &96.4 &  82.8 &  92.9 & 96.9 \\ 
+    DINO~\citep{DINO} &\multicolumn{1}{l}{ DN$^{384}$}  &70.8 &81.1 &88.8 &42.9 &53.9 &64.2 &63.4 &78.1 &88.3 \\
+    Hyp~\citep{ermolov2022hyperbolic} &\multicolumn{1}{l}{ DN$^{384}$}  &80.9 &87.6 &92.4  &89.2 &94.1 &96.7 &85.1 &94.4 &97.8 \\
+     HIER ~\citep{kim2023hier} & \multicolumn{1}{l}{ DN$^{384}$} &  81.1&  88.2&  93.3&  91.3&  \textbf{95.2}&  97.1&  85.7&   94.6&  97.8\\
+    \rowcolor{lightgray}
+     LHIER (ours) & \multicolumn{1}{l}{ DN$^{384}$} &  \textbf{81.3} &  \textbf{88.4} &  \textbf{93.3} &  \textbf{91.5} & 95.1 & \textbf{97.6} &\textbf{85.9} &  \textbf{95.0} & \textbf{98.1} \\ 
+    ViT-S~\citep{ViT} &\multicolumn{1}{l}{V$^{384}$} &83.1 &90.4 &94.4 &47.8 &60.2 &72.2 &62.1 &77.7 &89.0 \\
+    Hyp~\citep{ermolov2022hyperbolic} &\multicolumn{1}{l}{V$^{384}$}  &85.6 &91.4 &94.8 &86.5 &92.1 &95.3 &85.9 &94.9 &98.1 \\
+     HIER ~\citep{kim2023hier} & \multicolumn{1}{l}{  V$^{384}$} &  85.7&  91.3&  94.4&  88.3&  93.2&  96.1&  86.1&  95.0&  98.0\\
+    \rowcolor{lightgray}
+     LHIER (ours) & \multicolumn{1}{l}{ V$^{384}$} &  \textbf{86.2} &  \textbf{92.1} &  \textbf{95.2} &  \textbf{88.6} & \textbf{93.6} & \textbf{96.3} &  \textbf{86.7} &  \textbf{95.3} & \textbf{98.3} \\ 
+    \bottomrule
+\end{tabularx}
+\vspace*{-\baselineskip}
+\label{tab:Hyp_sup_head}
+\vspace*{-\baselineskip}
+\end{table}
+\vspace*{-\baselineskip}
+\subsection{Standard Classification Problem}
+\paragraph{Experimental Setup}
+We follow the experimental setup and hyperparameters of \citet{bdeir2024fully} and rely on three main datasets: CIFAR10, CIFAR100, and Mini-Imagenet. We denote HCNN+ as the fully hyperbolic model from \citet{bdeir2024fully}, updated with efficient convolution implementations and our proposed scaling function. This experiment aims to boost model efficiency and address the performance inconsistencies observed in the original version.
+
+For ResNet-18, we employ HECNN+, following the structure outlined in \citet{bdeir2024fully} with alternating Euclidean and hyperbolic blocks, and integrate our efficient convolution operation. While we do not expect similar efficiency gains to those seen in fully hyperbolic models, our focus here is on enhancing scalability. In the case of ResNet-50, we adapt HECNN+ by replacing all blocks with the Lorentz-Core bottleneck block, where we anticipate the most significant efficiency improvements due to the larger model size. Our goal is to evaluate if the Lorentz-Core block can maintain strong performance under these conditions.
+
+For both ResNet-18 and ResNet-50, we use Riemannian SGD with our improved learning scheme and curvature learning. We also decouple the encoder and decoder manifolds, allowing each to independently learn its own curvature for enhanced model flexibility.
+
+\paragraph{Results}
+For the ResNet-18 experiments, Table \ref{tab:classification} shows that the new architectures achieve comparable or better results across almost all cases. The smallest improvements are observed with the hybrid models, likely due to the reduced impact of the hyperbolic components compared to a fully hyperbolic model. However, we see a significant performance gap between the fully hyperbolic models, where our proposed architecture now matches the performance of the hybrid encoders. We hypothesize that the improved scaling helps mitigate the previous performance inconsistencies, with the whole model being two times more memory efficient.
+\begin{table}[h]
+  \caption{Classification accuracy (\%) of ResNet-18 models. We estimate the mean and standard deviation from five runs. The best performance is highlighted in bold (higher is better).}
+  \label{tab:classification}
+   \begin{adjustbox}{width=0.90\textwidth, center}
+
+  \begin{tabular}{lcccc}
+    \toprule
+       & CIFAR-10 & CIFAR-100 & VRAM/t$_{epoch}$&Tiny-ImageNet  \\
+       & $(\delta_{rel} = 0.26)$ & $(\delta_{rel} = 0.23)$ & For Cifar100 &$(\delta_{rel} = 0.20)$ \\
+    \midrule
+    Euclidean \citep{resnet} & ${95.14_{\pm0.12}}$ & $77.72_{\pm0.15}$& 1.2GB - 12s & $65.19_{ \pm0.12}$   \\
+    \midrule
+    Hybrid Poincaré \citep{guo-et-al-2022} & $95.04_{\pm0.13}$ & $77.19_{\pm0.50}$& - & $64.93_{\pm0.38}$ \\
+    Hybrid Lorentz \citep{bdeir2024fully} & ${94.98_{\pm0.12}}$ & ${78.03_{\pm0.21}}$& - & ${65.63_{\pm0.10}}$ \\
+    \midrule
+    Poincaré ResNet \citep{vanspengler2023poincare} & $94.51_{\pm0.15}$ & $76.60_{\pm0.32}$ & -&$62.01_{\pm0.56}$  \\
+    HECNN Lorentz \citep{bdeir2024fully} & ${95.16_{\pm0.11}}$ & ${78.76_{\pm0.24}}$& 4.3GB - 100s & ${65.96_{\pm0.18}}$ \\
+    \rowcolor{lightgray}
+    HECNN+ (ours) & ${95.15_{\pm0.07}}$ & ${78.80_{\pm0.12}}$& 3GB - 80s & ${65.98_{\pm0.11}}$ \\
+    HCNN Lorentz \citep{bdeir2024fully} & ${95.15_{\pm0.08}}$ & ${78.07_{\pm0.17}}$& 10GB - 175s & ${65.71_{\pm0.13}}$ \\
+    \rowcolor{lightgray}
+    HCNN+ (ours) & ${95.17_{\pm0.09}}$ & $\bm{78.81_{\pm0.19}}$& 5GB - 140s & $\bm{66.12_{\pm0.14}}$ \\
+    \bottomrule
+  \end{tabular}
+  \end{adjustbox}
+\end{table}
+
+In the ResNet-50 experiments in Table \ref{tab:classification_50}, we observe that HECNN+ significantly outperforms the Euclidean model across all datasets, including Tiny-ImageNet, where other models typically begin to show a drop in accuracy. This improvement is likely due to the tighter integration of hyperbolic components and the enhanced scaling, which helps manage the challenges of higher-dimensional embeddings.
+
+We evaluate the impact of our efficient convolution and Lorentz-Core block in Table \ref{tab:classification_50}. We see a $ \sim 48 \%$ reduction in memory usage and $ \sim 66\%$ reduction in runtime. We attribute this improvement to the efficient closed-source convolution operations we can now leverage.  Similar gains are also observed in generation tasks and classification with smaller models. However, there remains significant room for further optimization when compared to the Euclidean baseline.
+A key remaining performance bottleneck identified is the batch normalization step, which contributes approximately $60\%$ of the runtime and around $30\%$ of the memory usage. The next step would be to factorize the extensive parallel transports and tangent mappings involved in this operation, potentially alleviating the associated overhead.
+
+\begin{table}[h]
+  \caption{Classification accuracy (\%) of ResNet-50 models. The best performance is highlighted in bold (higher is better).}
+  \label{tab:classification_50}
+   \begin{adjustbox}{width=0.87\textwidth, center}
+
+  \begin{tabular}{lcccc}
+    \toprule
+       & CIFAR-10 & CIFAR-100& VRAM/t$_{epoch}$ & Tiny-ImageNet \\
+       & $(\delta_{rel} = 0.26)$ & $(\delta_{rel} = 0.23)$& - & $(\delta_{rel} = 0.20)$ \\
+    \midrule
+    Euclidean \citep{resnet} & ${95.14}$ & $78.52$& 4.5GB - 30s & $66.23$   \\
+    Hybrid Lorentz \citep{bdeir2024fully} & ${95.38}$ & ${79.35}$& - & ${66.01}$ \\
+    HECNN \citep{bdeir2024fully} & ${95.42}$ & ${79.83}$& 15.6GB - 300s & $66.30$ \\
+    \rowcolor{lightgray}
+    HCNN+ w Bottleneck Conv. (ours)  & $\bm{95.46}$ & $\bm{80.86}$& 8.1GB - 100s & $\bm{67.18}$ \\
+    \bottomrule
+  \end{tabular}
+  \end{adjustbox}
+\end{table}
+
+\subsection{VAE Image Generation}
+\paragraph{Experimental Setup}
+
+Previous research has highlighted the ability of hyperbolic neural networks to perform better when using lower dimensional embeddings due to the more expressive space \citep{nagano-et-al-2019, mathieu-et-al-2019, ovinnikov-et-al-2019, hsu20203dImg}. A natural extension to this would be implementing the models for VAEs which rely on smaller latent embedding dimensions to encode the inputs. \citet{bdeir2024fully} perform this study on image generation and reconstruction for their fully hyperbolic models. In the following section, we reproduce the experimental setup and re-implement the fully hyperbolic VAE using our new efficient convolution and transpose convolution layers. We also use curvature learning with our adjusted Riemannian SGD learning scheme.
+
+\paragraph{Results}
+
+We see in table \ref{tab:results_gen} that our implementation of the fully hyperbolic VAE achieves better performance on both datasets. It should also be noted that this is achieved with around 2.5x less memory and at 3x greater training speed. This helps demonstrate both the effectiveness of our proposed curvature learning process and our efficient model components.
+\begin{table}[H]
+    \caption{Reconstruction and generation FID of manifold VAEs across five runs (lower is better).}
+    \label{tab:results_gen}
+	\begin{adjustbox}{width=0.88\textwidth,center}
+	\begin{tabular}{lcccc}
+		\toprule
+		&\multicolumn{2}{c}{{CIFAR-100}} & \multicolumn{2}{c}{{CelebA}}\\
+        \cmidrule(r){2-3}\cmidrule(r){4-5}
+		 & {Rec. FID} & {Gen. FID} & {Rec. FID} & {Gen. FID}\\
+    \midrule
+		Euclidean &$63.81_{\pm0.47}$ & $103.54_{\pm0.84}$ & $54.80_{\pm0.29}$ & $79.25_{\pm0.89}$\\ \midrule
+        Hybrid Poincaré \citep{mathieu-et-al-2019}  & $62.64_{\pm0.43}$ & $98.19_{\pm0.57}$ & $54.62_{\pm0.61}$ & $81.30_{\pm0.56}$\\
+		Hybrid Lorentz \citep{nagano-et-al-2019}  & $62.14_{\pm0.35}$ & {$98.34_{\pm0.62}$} & $54.64_{\pm0.34}$ & $82.78_{\pm0.93}$\\
+        \midrule
+		HCNN Lorentz \citep{bdeir2024fully}& $61.44_{\pm 0.64}$ & $100.27_{\pm0.84}$ & $54.17_{\pm0.66}$ & $78.11_{\pm0.95}$\\
+        HCNN+ Lorentz (Ours)& \bm{$57.69_{\pm 0.52}$} & \bm{$98.14_{\pm0.44}$} & \bm{$52.73_{\pm0.27}$} & \bm{$77.98_{\pm0.32}$}\\
+		\bottomrule
+	\end{tabular}%
+    \end{adjustbox}
+\end{table}
+
+
+
+\section{Conclusion}
+
+In our work, we present many new components and schemas for the use of hyperbolic deep learning in hyperbolic vision. We test these components in three vision tasks and prove the potential of these new components even in float16 conditions. 
+
+However, there is still significant room for improvement. Further optimizations to the batch normalization layers could enhance the efficiency of hyperbolic models. Additionally, a key challenge remains with the hyperbolic linear layers when reducing dimensionality. Currently, we match norms to simulate a rotation operation, but we encourage exploring alternative approaches that align more naturally with the mathematical properties of the manifold.
+
+\clearpage 
+
+
+
+
+

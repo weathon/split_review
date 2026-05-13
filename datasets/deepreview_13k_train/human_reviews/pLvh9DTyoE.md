@@ -1,0 +1,164 @@
+# Integrating Visual Cues via Prompting for Low-Resource Multimodal Named Entity Recognition
+
+- Decision: Reject
+- Scores: 5, 1, 3, 1
+
+## Abstract
+In the field of Natural Language Processing (NLP), the task of Named Entity Recognition (NER) is quite established. However, most existing methods predominantly rely on textual data alone, overlooking the information that can be derived from other modalities such as images. This issue is particularly pronounced in low-resource settings, where the absence of extensive labeled data can significantly impede the performance of NER systems. Existing solutions, while attempting to address this limitation, often require comprehensive fine-tuning and are not readily applicable in such low-resource conditions. This research confronts these challenges by proposing a novel approach to Multimodal Named Entity Recognition (MNER) under low-resource constraints. We recast the MNER task as an open-ended question-answering problem, particularly suitable for modern generative language models. Our findings provide novel insights into the complex interplay between model design, prompt crafting, and training data characteristics that determine the efficacy of visual integration. The strengths and limitations elucidated can inform future efforts at the intersection of multimodal representation learning, generative modeling, and prompting.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+In this paper, the author proposes an attempt to convert MNER tasks into "Instruction+QA" to solve the problem of labeled data absence, utilizing the excellent zero-shot learning ability of multimodal LLMs to address the low-resource MNER.  A series of question prompt templates are designed to effectively integrate visual cues in images. Experimentals demonstrate the effectiveness of the approach.
+
+### Strengths
+[1]Transforming multi-class named entity recognition (MNER) into an openended question-answering task is novel and effective in the experiments.
+
+### Weaknesses
+[1]The related works are not comprehensive enough. For example, it lacks some pre-trained models and multimodal NER models in the recent two years (2022-2023). It is unclear with the current presentation compared to previous works. For example, the below reference also considers the multimodal NER.
+-Fei Zhao, Chunhui Li, Zhen Wu, Shangyu Xing, Xinyu Dai. Learning from Different text-image Pairs: A Relation-enhanced Graph Convolutional Network for Multimodal NER. ACM Multimedia 2022: 3983-3992.
+-Lin Sun, Jiquan Wang, Kai Zhang, Yindu Su, Fangsheng Weng. RpBERT: A Text-image Relation Propagation-based BERT Model for Multimodal NER. AAAI 2021: 13860-13868.
+-Lin Sun, Jiquan Wang, Yindu Su, Fangsheng Weng, Yuxuan Sun, Zengwei Zheng, Yuanyi Chen. RIVA: A Pre-trained Tweet Multimodal Model Based on Text-image Relation for Multimodal NER. COLING 2020: 1852-1862
+[2]Based on the statistics on the datasets used, we can find that it is category unbalanced. Therefore, using the micro-f1 as the evaluation only may be not convincible. The authors should consider reporting per-class F1 scores or macro-F1 to provide a more complete picture of the model's performance, especially given the class imbalance. This is crucial for understanding if the model is biased towards majority classes.
+[3]The author(s) need to comprehensively research the related datasets. It is not like the authors claimed that “Notably, these are currently two of the few openly accessible multimodal datasets for named entity recognition.” 
+-Dianbo Sui, Zhengkun Tian, Yubo Chen, Kang Liu, Jun Zhao.A Large-Scale Chinese Multimodal NER Dataset with Speech Clues. ACL/IJCNLP (1) 2021: 2807-2818
+-Xigang Bao, Shouhui Wang, Pengnian Qi, Biao Qin.Wukong-CMNER: A Large-Scale Chinese Multimodal NER Dataset with Images Modality. DASFAA (3) 2023: 582-596
+[4] The low-resource MNER ability of the proposed method mainly comes from the existing zero-shot learning of multimodal LLMs and a series of manually designed prompts, lacking further optimization for MNER. The method does not introduce any novel architecture or training strategy specifically tailored for MNER, which limits its contribution beyond leveraging existing LLM capabilities.
+[5]: Lacking the zero-shot and few-shot experimental results of existing MNER methods (such as a series of BERT based models and LLMs based models )  in evaluation.  Unable to accurately measure the advantages of the proposed method compared to other methods. A direct comparison with existing models in zero-shot and few-shot settings is necessary to validate the effectiveness of the proposed approach.
+[6]All tmplates in the article are manually set, but there was no analysis of the experimental results with different tmplates. The impact of the different tmplates settings on LLMs for MNER should be noted. The lack of ablation studies on prompt design makes it difficult to understand the sensitivity of the method to different prompt formulations.
+
+### Questions
+[1]It is not clear that the author(s) show the Zero-shot F1 in Figure 5 and Figure 6, which is not consistent with the previous claim. And the micro f1 scores by model with images is lower than that without images in Table 5 and Table 6? If there are some clerical errors?
+[2]How to compute the c(A_i) is not clear.
+[3]Table 4 is not referenced.
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+1
+
+### Rating Number
+1
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+The paper introduces a novel approach to Multimodal Named Entity Recognition (MNER) by framing it as an open-ended question-answering task, suitable for modern generative language models. The research offers insights into the complex interplay between model design, prompt construction, and training data characteristics affecting visual integration effectiveness. These findings inform future work in multimodal representation learning, generative modeling, and prompting at the intersection of text and image analysis.
+
+### Strengths
+This paper demonstrated low-resource MNER via prompting, with strong zero-shot performance. Analysis of our results and related work elucidates both progress and challenges for this emerging area.
+
+### Weaknesses
+1. The methodology section of this work primarily focuses on the design of instructions and lacks technical innovation, making it unsuitable for publication in ICLR.
+
+2. I have several concerns regarding the statement "Results against state-of-the-art models for MNER are provided in Table 7" in Section 6: (1) Table 7 presents results from previous baselines in a fully supervised setting, but the experiments conducted earlier in this paper do not compare against these baselines. It is unclear how the conclusion "Results against state-of-the-art models" is derived. (2) The results of the method proposed in this paper are not included in Table 7. (3) To the best of my knowledge, Table 7 lacks citations and comparisons to papers in the MNER field from 2022-2023.
+
+### Questions
+How can we draw the conclusion with the statement "Results against state-of-the-art models for MNER are provided in Table 7"?
+
+### Soundness
+1 poor
+
+### Presentation
+2 fair
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 3
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper uses the QA templates from Liu et. al to prompt FLAN-T5 based multi-modal LLMs to generate NER tags. Experiments have been presented on the Twitter 2015, 2017 datasets which have multi-modal tweets with labels for persons, organizations and locations. Models used to study the QA based prompts include FLAN T5, BLIP2 and Instruct BLIP.  On both the Twitter 2015 and Twitter 2017 datasets, a vanilla FLAN t5 based prompt appears to do better than the use of multi-modal models which perhaps suggests that the hypothesis posed by the paper was found to be untrue. I was also unable to appreciate the aspect of low-resource NER tagging which the authors seem to suggest was one of their focus areas in the work. Perhaps the authors could clarify both points in the rebuttal.
+
+### Strengths
+None
+
+### Weaknesses
+This paper uses the QA templates from Liu et. al to prompt FLAN-T5 based multi-modal LLMs to generate NER tags. Experiments have been presented on the Twitter 2015, 2017 datasets which have multi-modal tweets with labels for persons, organizations and locations. Models used to study the QA based prompts include FLAN T5, BLIP2 and Instruct BLIP.  On both the Twitter 2015 and Twitter 2017 datasets, a vanilla FLAN t5 based prompt appears to do better than the use of multi-modal models which perhaps suggests that the hypothesis posed by the paper was found to be untrue. I was also unable to appreciate the aspect of low-resource NER tagging which the authors seem to suggest was one of their focus areas in the work. Perhaps the authors could clarify both points in the rebuttal.
+
+### Questions
+None
+
+### Soundness
+1 poor
+
+### Presentation
+2 fair
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 4
+
+### Rating
+1
+
+### Rating Number
+1
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+This work focuses on low-resource multimodal named entity recognition (MNER). The authors reformulate MNER as an open-domain question-answering problem in a low-resource setting and provide analysis.
+
+### Strengths
+The topic and approach are interesting.
+
+### Weaknesses
+1. The contribution of this paper is quite limited. The authors use a large number of FLAN-based models (both text-only and multimodal) for multimodal NER tasks.
+2. The method is not new. QA for NER can be traced back to [1] and there are recent works using QA for all multimodal IE tasks in both zero-shot and few-shot settings.
+
+[1] Li et al., A Unified MRC Framework for Named Entity Recognition. ACL 2021.
+[2] Sun et al., Multimodal Question Answering for Unified Information Extraction. Arxiv 2023.
+
+1. The evaluation is very limited. More models, including both instruction-tuned (IlIava, MiniGPT4, etc.) and base multimodal models (Open Flamingo), should be evaluated. Additionally, analysis of more tasks would be more interesting. While multimodal NER is to-some-extend important, it is not representative enough. Evaluations on other multimodal information extraction tasks would be beneficial.
+2. Findings are not striking. With more models evaluated, we may observe more interesting insights and general observations from these models.
+
+### Questions
+No
+
+### Soundness
+1 poor
+
+### Presentation
+2 fair
+
+### Contribution
+1 poor

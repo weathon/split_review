@@ -1,0 +1,629 @@
+\title{JPEG-LM: LLMs as Image Generators with Canonical Codec Representations}
+
+\begin{abstract}
+
+Recent work in image and video generation has been adopting the autoregressive LLM architecture due to its generality and potentially easy integration into multi-modal systems. The crux of applying autoregressive training in language generation to visual generation is discretization---representing continuous data like images and videos as discrete tokens. Common methods of discretizing images and videos include modeling raw pixel values, which are prohibitively lengthy, or vector quantization, which requires convoluted pre-hoc training. 
+In this work, we propose to directly model images and videos as compressed files saved on computers via canonical codecs (e.g., JPEG, AVC/H.264). Using the default Llama architecture without any vision-specific modifications, we pretrain \imagemethodname~ from scratch to generate images (and \videomethodname~ to generate videos as a proof of concept), by directly outputting compressed file bytes in JPEG and AVC formats. Evaluation of image generation shows that this simple and straightforward approach is more effective than pixel-based modeling and sophisticated vector quantization baselines (on which our method yields a 31\% reduction in FID). Our analysis shows that \imagemethodname~ has an especial advantage over vector quantization models in generating long-tail visual elements. Overall, we show that using canonical codec representations can help lower the barriers between language generation and visual generation, facilitating future research on multi-modal language/image/video LLMs. 
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+With large language models (LLMs) the field of NLP has shifted to multi-task processing (e.g., machine translation, code generation, action planning) using a single LLM with little data needed for adaptation \citep{ouyang2022training}. We envision that future research will continue shifting to multi-modal multi-task  processing, where text and visual data are mixed. 
+However, current paradigms of generating images and videos differ substantially from text generation, requiring specialized and complicated training and representations \citep{van2017neural,rombach2022high,peebles2023scalable}. 
+In this work, we simplify the task of image and video generation by using the exact autoregressive transformer architecture as in mainstream LLMs \citep{radford2019language}, over canonical and universal codecs: JPEG for images \citep{wallace1991jpeg}, and AVC/H.264 for videos \citep{wiegand2003overview}. 
+
+The key obstacle to training autoregressive models for image and video generation is \emph{discretization}, as continuous data like images and videos need to be represented as discrete tokens. 
+Current generative vision models that follow autoregressive language modeling objectives \citep{bengio2000neural} often adopt vector quantization (VQ) to encode images or videos to some learned latent codes and then apply language models \citep{van2017neural,ramesh2021zero,yu2021vector,yan2021videogpt,yu2023language}.\footnote{The other major line of generative vision models are diffusion models, a score-based, non-autoregressive method \citep{song2019generative,ho2020denoising,rombach2022high,peebles2023scalable}. Since the diffusion objectives are drastically different from the language modeling objective, it is challenging to integrate them in a multi-modal setup (e.g., with regular language models). While not a main focus of this work, we include comparisons with diffusion models in our later experiments as a secondary evaluation.} 
+However, VQ methods often demand sophisticated tokenizer training that requires a careful hyperparameter selection for vision-specific modules (e.g., downsampling factor in convolutions) and balancing across several losses \citep{van2017neural,esser2021taming}. 
+VQ also involves a two-stage, non-end-to-end learning process (first the neural tokenizer, then the latent code LM). 
+This makes downstream adaptation of the models less flexible (e.g., tuning the VQ tokenizer interferes with the learned latent code LM). 
+Overall, the use of conventional LLM architectures (end-to-end autoregressive sequence modeling) as generative vision models is not yet straightforward. 
+
+The seminal work of ImageGPT \citep{chen2020generative} attempted to bridge this gap by using a regular GPT architecture to model pixels sequentially. 
+They have shown a small-scale success at a very low resolution of 32x32 pixels. 
+More realistic images at a size of 256x256 would require modeling a prohibitive amount of tokens in each sequence (65K or 196K tokens depending on color modes), not to mention videos. This hinders the method's wider adoption by the field. 
+
+In this work, we tackle the problem of training LLM architectures for image and video generation where the essential discretization neither adds significant complications to the pipeline like VQ methods, nor is computationally prohibitively expensive like ImageGPT. 
+Specifically, we use canonical file encodings/codecs---JPEG for images \citep{wallace1991jpeg}, and AVC/H.264 for videos \citep{wiegand2003overview}---as non-neural preprocessors that discretize data. We show that codec-based representations greatly mitigate the sequence length limitation while being simple and effective. 
+This design enables us to train a vanilla transformer with the conventional language modeling objective for image and video generation in a realistic setup. 
+We pretrain two 7B models with a Llama-2 architecture \citep{touvron2023llama}, named \imagemethodname{} and \videomethodname{}, that can generate 256x256 images and 256x144 videos with 15 frames, with an average context length of 5K and 15K, respectively. 
+In our main image modeling/generation evaluations, we show that \imagemethodname{} surpasses strong VQ-based models in generation quality (an average of 31\% FID reduction) and produces surprisingly realistic qualitative examples. 
+Our results also show \videomethodname{} can generate videos with realistic movements. 
+Furthermore, we analyze in which aspects \imagemethodname{} is particularly stronger than VQ models and discover that our non-neural, training-free codec representations are more competent in capturing long-tail elements in images (e.g., human faces/eyes and text characters in small sizes). 
+Overall, this work presents how conventional LLM architectures can be used as generalized models towards visual generation. 
+Our approach using canonical codecs does not incur vision-specific complications in the pipeline or suffer from sequence length infeasibility seen in prior work. 
+Compared to the baselines, our models are much simpler to train and more effective. 
+Following the previous efforts in unifying detached language-based tasks, our method helps pave the way to a unification of multiple modalities, facilitating the exploration of porting LLM techniques (e.g., alignment, scaling, efficiency, security, etc.) to all modalities. 
+
+
+
+
+\section{Background}
+
+
+In this work, we explore autoregressive image generation as a straightforward extension of prominent LLM setups \citep{radford2019language}.\footnote{As a proof of concept, we mainly explore autoregressive modeling in visual generation only (images and videos, without text-conditioning), while future work may explore more diverse multi-modal setups. 
+} 
+Conventional language modeling \citep{bengio2000neural} models the likelihood of sequential data autoregressively. 
+Specifically, given a sequence of discrete tokens $x_1, x_2, \cdots, x_N$ (or $\boldsymbol{x}_{1:N}$), a language model models $p(\boldsymbol{x}_{1:N}) = \prod_{i=1}^{N} p(x_i \mid \boldsymbol{x}_{1:i-1})$, an objective used in most mainstream LLMs. 
+The key of applying language modeling to visual generation is how to discretize continuous data $\boldsymbol{x}$ like images and videos to discrete tokens $\boldsymbol{x}_{1:N}$ like in language. 
+Below we give an overview of two prominent approaches to the discretization of images. 
+\subsection{Pixel values: ImageGPT}
+ImageGPT \citep{chen2020generative} is an image generation model based on a conventional LLM architecture (GPT-2). 
+The images are discretized as a sequence of pixel values (integers 0--255) from the upper-left to the bottom-right pixel (raster scan). 
+Since there are three channels of colors for each pixel, to reduce the number of tokens in each pixel sequence, ImageGPT clusters pixel colors to 512 distinctive clusters (i.e., for each pixel, three values from 0 to 255 are converted to one value from 0 to 511). 
+
+ImageGPT models the probability of pixel sequences autoregressively: $p(\operatorname{pixel-value}(\boldsymbol{x})_i \mid \operatorname{pixel-value}(\boldsymbol{x})_{1:i-1})$.  
+This is an expensive process, and ImageGPT only models and generates 32x32 images. 
+Images with a more realistic resolution like 256x256 would require 65K tokens for each image (or 196K tokens without color clustering), a prohibitive sequence length for LLMs. 
+
+\subsection{Latent codes: Vector-Quantization models}
+Vector-quantization (VQ) operates as a two-stage process, tokenizer training and language model training \citep{esser2021taming,ramesh2021zero}. 
+We take VQ-VAE as our example tokenizer which discretizes continuous images \citep{van2017neural}. 
+The tokenizer first learns an encoder $E$ to project an image $\boldsymbol{x}$ to spatial features $E(\boldsymbol{x})$. 
+Then for each feature $\boldsymbol{e}$ in $E(\boldsymbol{x})$, it is quantized to $\boldsymbol{\hat{z}}$ by looking up the nearest neighbor in a learned codebook $\mathcal{Z}$: $\boldsymbol{\hat{z}} = \operatorname{quantize}(E(\boldsymbol{x})) = [\argmin_{\boldsymbol{z}_k \in \mathcal{Z}} \lVert \boldsymbol{e} - \boldsymbol{z}_k \rVert_2^2]_{\boldsymbol{e} \in E(\boldsymbol{x})}$. 
+The index $k$ of the nearest entry in codebook $\mathcal{Z}$ for each spatial feature forms the sequence of VQ latent codes. A decoder $G$ is then learned to reconstruct the original image from the quantized representations. 
+Overall, VQ-VAE learns an encoder $E$, decoder $G$, and codebook $\mathcal{Z}$, with three distinct losses: reconstruction loss, codebook loss, and commitment loss. 
+$L_{\text{VQ-VAE}} = \lVert \boldsymbol{x} - G(\boldsymbol{\hat{z}}) \rVert_1 + \lVert \operatorname{sg}[E(\boldsymbol{x})] - \boldsymbol{\hat{z}} \rVert_2^2 + \beta \lVert \operatorname{sg}[\boldsymbol{\hat{z}}] - E(\boldsymbol{x}) \rVert_2^2 $. 
+An effective VQ tokenizer needs a large amount of training data, proper hyperparameters for the vision-specific modules (e.g., downsampling factor in convolutional encoder $E(\cdot)$), and a careful balance between the different losses (e.g., in $L_{\text{VQ-VAE}}$), which add significant complications to the pipeline. 
+
+
+A language model architecture can then be trained over the VQ latent codes (a sequence of index $k$ above) as a generative vision model: 
+$p(\operatorname{VQ-code}(\boldsymbol{x})_i \mid \operatorname{VQ-code}(\boldsymbol{x})_{1:i-1})$. 
+Notably, since the training of language model comes after and depends on the VQ tokenizer, a post-hoc update to the VQ tokenizer is challenging since it would lead to a non-trivial retraining or adaptation of the trained language model. 
+Indeed in \Sref{sec:long_tail_analysis} we find that the VQ tokenizer, though trained with a large amount of data, still struggles with long-tail elements in the images and is hard to be optimized once and for all. 
+
+For simplicity and end-to-end adaptability, we propose to discretize continuous image and video data via canonical codecs. 
+\begin{wrapfigure}{R}{0.34\textwidth}
+    \centering
+    \begin{subfigure}{0.34\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/jpeglm_2408_fig.png}
+    \end{subfigure}
+    \caption{
+    \imagemethodname{} and \videomethodname{} are simple autoregressive transformers that directly model and generate canonical file encodings. 
+    }
+    \label{fig:method_fig}
+\end{wrapfigure}
+
+
+
+\section{\imagemethodname{}
+
+Though images and videos are continuous data and naturally have 2D or 3D data structures, they are stored as files on computers efficiently via compression/codecs, which leads to a discrete 1D representation. 
+We aim to explore whether standard 
+LLM architectures can directly learn to model and generate canonical vision file encodings, which can subsequently be read/opened as generated images or videos. 
+Generation in this paradigm would greatly mitigate the sequence length infeasibility in ImageGPT while being simple and end-to-end trainable compared to VQ methods. 
+Moreover, canonical file encodings/codecs are often non-neural and training-free and are robust to distributional shifts (\Sref{sec:long_tail_analysis}). 
+In this work, we choose the most popular and established file encodings/codecs for images and videos, JPEG \citep{wallace1991jpeg} and AVC/H.264 \citep{wiegand2003overview}, respectively.\footnote{For images, PNG is also a common format. However, unlike the lossy JPEG, PNG is a lossless compression method (similar to ZIP) and often results in less effective compression and much longer sequences than JPEG.} 
+
+\subsection{Canonical codecs: JPEG and AVC/H.264} 
+Canonical non-neural codecs like JPEG and AVC have a high-level intuition to compress signals that are less perceptible to human eyes more aggressively. 
+JPEG has three main steps to encode each image: discrete cosine transform (DCT), quantization, and entropy coding. 
+DCT converts each image patch to a weighted combination of a preset of patches containing low- and high-frequency patterns. 
+Quantization zeroes out some high-frequency patterns from the weighted combination, since human eye is not good at perceiving them. 
+Entropy encoding such as Huffman coding is then used to reduce the total numbers/bits representing the patches/images.\footnote{A further intuitive and interactive description can be found at \url{https://parametric.press/issue-01/unraveling-the-jpeg/} \citep{omar_shehata_2019_2655041}.} 
+
+AVC (H.264) operates on patches (macroblocks) of video frames. 
+Each patch can be encoded using blocks of pixels that are
+already encoded within the current frame (intra-frame prediction) or using blocks of pixels encoded in other frames (inter-frame prediction with motion estimation). 
+The prediction is then subtracted from the current patch to form a residual. 
+The residual then goes through a process similar to JPEG, involving DCT, quantization, and bitstream encoding. 
+The encoded content is a crucial part to the subsequent container files like MP4. 
+Both codecs have been used widely for decades and substantially compress the data (and thus sequence length) compared to raw pixel modeling (in our setup 40x in JPEG and 110x in AVC). 
+Our focus is to use these canonical codecs as off-the-shelf tools to convert images and videos to sequences of discrete bytes efficiently.\footnote{Both codecs operate at bits level at the core (due to entropy encoding), but modeling at bytes level is effective according to our experiments.} 
+We wish to fit an LLM to implicitly learn the grammars and semantics of the canonical codecs. 
+\subsection{\imagemethodname{} and \videomethodname{}} 
+JPEG and AVC convert images and videos to bytes. 
+Most of these bytes represent the image and video content after entropy encoding. However, there are also metadata and special patch/macroblock separators that are invariant across images or videos and use up multiple bytes. 
+To address them along with other unknown frequent byte combinations that are compressed suboptimally by entropy encoding (e.g., by JPEG's standard, fixed Huffman tables), 
+we further extend the default byte vocabulary (256 discrete values) \emph{slightly} with byte-pair encoding (BPE), a standard preprocessing scheme in LLMs, which merges bytes appearing together frequently to a new single token.\footnote{More precisely, for the metadata/headers in the byte sequence that are well-known to be redundant across examples (e.g., JPEG quantization and Huffman tables), we remove them in the preprocessing and later add them back to the generated bytes from the model. For more complicated codecs like AVC, we let BPE handle such metadata.} 
+Since JPEG and AVC produce sequences of variable lengths based on the content of images and videos, special beginning-of-sequence and end-of-sequence tokens are also added to the vocabulary. 
+The entries in the vocabularies are considered as our JPEG/AVC tokens. 
+Given an image $\boldsymbol{x}$, we propose \imagemethodname{} to model $p(\operatorname{JPEG-token}(\boldsymbol{x})_i \mid \operatorname{JPEG-token}(\boldsymbol{x})_{1:i-1})$. 
+Given a video $\boldsymbol{x}$, we propose \videomethodname{} to model $p(\operatorname{AVC-token}(\boldsymbol{x})_i \mid \operatorname{AVC-token}(\boldsymbol{x})_{1:i-1})$. 
+We use conventional LLM architectures (autoregressive transformers) without any vision-specific modifications (no convolutions, no 2D positional embeddings) to maximize the models' generality. 
+\begin{figure}[t]
+\centering
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/tmp2_main_show/rainier_partial.jpg}
+\end{subfigure}%
+\hfill
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/tmp2_main_show/rainier_gen2.jpg}
+\end{subfigure}%
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/tmp2_main_show/rainier_gen3.jpg}
+\end{subfigure}%
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/tmp2_main_show/rainier_gen4.jpg}
+\end{subfigure}%
+\hfill
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/tmp2_main_show/rainier_vqgen1.jpg}
+\end{subfigure}%
+\hfill
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/tmp2_main_show/rainier_igptgen1.jpg}
+\end{subfigure}
+
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/tmp2_main_show/table_partial.jpg}
+\end{subfigure}%
+\hfill
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/tmp2_main_show/table_gen1.jpg}
+\end{subfigure}%
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/tmp2_main_show/table_gen3.jpg}
+\end{subfigure}%
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/tmp2_main_show/table_gen4.jpg}
+\end{subfigure}%
+\hfill
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/tmp2_main_show/table_vqgen1.jpg}
+\end{subfigure}%
+\hfill
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/tmp2_main_show/table_igptgen1.jpg}
+\end{subfigure}
+
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/tmp2_main_show/text_partial.jpg}
+    \caption{Prompt}
+\end{subfigure}%
+\hfill
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/tmp2_main_show/text_gen1.jpg}
+    \caption*{}
+\end{subfigure}%
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/tmp2_main_show/text_gen2.jpg}
+    \caption{\imagemethodname{}}
+\end{subfigure}%
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/tmp2_main_show/text_gen3.jpg}
+    \caption*{}
+\end{subfigure}%
+\hfill
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/tmp2_main_show/text_vqgen1.jpg}
+    \caption{VQ}
+\end{subfigure}%
+\hfill
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/tmp2_main_show/text_igptgen1.jpg}
+    \caption{ImageGPT}
+\end{subfigure}
+
+
+\caption{
+Generated images by \imagemethodname{} and baselines with partial images as prompts. We show three random samples from \imagemethodname{} and one from VQ transformer and ImageGPT (with super-resolution). The original images for the prompts are independently sourced outside existing training sets. 
+We observe that \imagemethodname{} can generate realistic facial expressions, landscape, common objects, texts in image forms, etc. 
+Additionally, \imagemethodname{} shows an especial advantage over baselines on meaningful details like human eyes. % (zoom in for the best view). 
+ 
+}
+\label{fig:main_show}
+
+\end{figure}
+
+
+
+
+\section{Experimental Setup}
+
+\label{sec:exp_setup}
+
+\subsection{\imagemethodname{}} 
+We pretrain a 7B Llama-2 model \citep{touvron2023llama} from scratch using 23M 256x256 images. 
+JPEG encodes each image with a quality factor of 25 (qualitative illustration in \Sref{sec:long_tail_analysis}).\footnote{\url{https://pillow.readthedocs.io/}} 
+We first use 10K images to derive 320 BPE tokens as our vocabulary entries. 
+On average, each image in our training data leads to 5K tokens. 
+For batching efficiency, we concatenate all sequences in the dataset and chunk in sequences of length 12K. 
+In total, we have 9.5M sequences and thus 114B JPEG tokens (for each epoch). 
+The model is trained approximately for two epochs with a maximum learning rate of 3e-4. 
+
+\subsection{\videomethodname{}} 
+As a proof of concept that canonical video codecs can be used for video generation as well, 
+similar to \imagemethodname{}, a 7B Llama-2 model is pretrained from scratch as \videomethodname{} using 2M 256x144 videos subsampled from \citet{bain2021frozen}. 
+Due to the scope of experiments, we only keep the first 5 seconds of each video with 3 frame-per-second (thus 15 frames in total). The video is then processed with AVC/H.264 codec with a constant quantization parameter 37.\footnote{\url{https://ffmpeg.org/}} 
+We use 10K videos to derive 1024 BPE tokens as the vocabulary entries. 
+On average, each video in our training data has 15K tokens. 
+We perform data concatenation and chunk in context lengths of 32K for efficient batching. 
+In total, we have 1.3M sequences and thus 42B AVC tokens. 
+
+\subsection{Image generation baselines}
+\paragraph{VQ transformer} 
+We use a pretrained VQ tokenizer from \citet{tang2022improved}, which used 200M images (ITHQ-200M, closed source dataset) to train a VQ-VAE model. 
+This VQ tokenizer processes each image in the 23M image training set for our \imagemethodname{} (vocabulary size 4096, sequence length 1024). 
+We then train a 7B Llama-2 transformer with the same configuration as in \imagemethodname{}. 
+We use this VQ model as a main comparison to our \imagemethodname{} throughout this work. 
+
+\paragraph{ImageGPT + super-resolution}
+ImageGPT uses GPT-2 XL as its underlying architecture. 
+The pretrained model in \citep{chen2020generative} is trained over 14M 32x32 images from ImageNet. 
+For a comparable evaluation, we use a super-resolution model \citep{rombach2022high} over ImageGPT's output.\footnote{The pretrained model provides 4x super-resolution. In our pilot study, we find performing a 4x super-resolution, followed by a 0.5x downsample, then another 4x super-resolution yields the best result for the 32$^2$-to-256$^2$ conversion.} 
+
+\paragraph{Diffusion}
+Though not a focus of this work, we include two variants of diffusion models in the baselines, Stable Diffusion (inpainting optimized) \citep{rombach2022high} and VQ diffusion \citep{gu2022vector,tang2022improved}. Both diffusion models can take partial images (through masking) and generate completed images, a setup we use across models in later evaluations. 
+These baseline diffusion models are smaller in model size (\textasciitilde{}1B) but consume orders of magnitude more training data (200M--5B). 
+They only serve as a secondary reference, and our focus is on comparing autoregressive image generation models under mainstream LLM paradigms. 
+
+\renewcommand*{\arraystretch}{1.0}
+\begin{wraptable}{r}{.74\textwidth}
+    \centering
+    \caption{
+    Zero-shot, partial-image-conditioned, FID evaluation on \textbf{ImageNet-1K} (lower is better). 
+    $r_{\text{prompt}}$ indicates the ratio of the image passed to the model as prompt. 
+    Best results among the autoregressive models are in bold fonts (reference diffusion results are italicized if better). 
+    }
+    \begin{tabular}{@{}p{1.21in}p{0.8in}p{0.75in}p{0.8in}@{}}
+    \toprule
+      & {$r_{\text{prompt}}=0.25$} & {$r_{\text{prompt}}=0.5$} & {$r_{\text{prompt}}=0.75$} \\
+      \midrule
+      Stable Diffusion {\tiny (inpaint)} & 266.71 {\tiny ($\pm$1.67)} & 132.98 {\tiny ($\pm$0.53)} & 58.17 {\tiny ($\pm$0.10)} \\
+      [2pt]
+      VQ Diffusion & \textit{252.42} {\tiny ($\pm$0.20)} & 125.16 {\tiny ($\pm$0.26)} & 57.49 {\tiny ($\pm$0.25)} \\
+      \midrule[0.02pt]
+      ImageGPT {\tiny (super-resolution)} & 289.48 {\tiny ($\pm$0.61)} & 262.76 {\tiny ($\pm$0.48)} & 258.11 {\tiny ($\pm$0.69)} \\
+      [2pt]
+      VQ Transformer & 302.92 {\tiny ($\pm$0.29)} & 172.73 {\tiny ($\pm$0.21)} & 71.88 {\tiny ($\pm$0.19)} \\
+      [2pt]
+      \imagemethodname{} & \textbf{272.12} {\tiny ($\pm$1.24)} & \textbf{123.09} {\tiny ($\pm$0.28)} & \textbf{34.21} {\tiny ($\pm$0.21)} \\
+      \bottomrule
+    \end{tabular}
+    \label{tab:in1k_result}
+
+    \hfill
+
+    \caption{
+    Zero-shot, partial-image-conditioned, FID evaluation on \textbf{FFHQ} (lower is better). $r_{\text{prompt}}$ indicates the ratio of the image passed to the model as prompt. Best results are in bold fonts. 
+    The prompting ratios in FFHQ were chosen differently such that they often lead to image prompts above the human eyes, below the eyes, and below the nose in pilot experiments. 
+    }
+    \begin{tabular}{@{}p{1.21in}p{0.8in}p{0.85in}p{0.7in}@{}}
+    \toprule
+      & {\footnotesize $r_{\text{prompt}}=0.375$} & {\footnotesize $r_{\text{prompt}}=0.4375$} & {\footnotesize $r_{\text{prompt}}=0.5$} \\
+      \midrule
+      Stable Diffusion {\tiny (inpaint)} & 115.30 {\tiny ($\pm$2.14)} & 107.02 {\tiny ($\pm$1.83)} & 89.82 {\tiny ($\pm$4.51)} \\
+      [2pt]
+      VQ Diffusion & 60.88 {\tiny ($\pm$0.38)} & 45.63 {\tiny ($\pm$0.17)} & 40.58 {\tiny ($\pm$0.91)} \\
+      \midrule[0.02pt]
+      ImageGPT {\tiny (super-resolution)} & 61.73 {\tiny ($\pm$0.91)} & 57.80 {\tiny ($\pm$0.73)} & 55.28 {\tiny ($\pm$1.22)} \\
+      [2pt]
+      VQ Transformer & 53.25 {\tiny ($\pm$0.54)} & 45.58 {\tiny ($\pm$0.58)} & 41.15 {\tiny ($\pm$0.35)} \\
+      [2pt]
+      \imagemethodname{} & \textbf{36.15} {\tiny ($\pm$1.11)} & \textbf{31.22} {\tiny ($\pm$0.33)} & \textbf{27.15} {\tiny ($\pm$0.21)} \\
+      \bottomrule
+    \end{tabular}
+    \label{tab:ffhq_result}
+    \hfill
+
+    \caption{
+    Unconditional FID comparison of \imagemethodname{} and VQ transformer. 
+    }
+    \begin{tabular}{@{}p{1.1in}p{0.75in}|p{0.95in}p{0.75in}@{}}
+    \toprule
+    VQ Transformer & 155.51 {\tiny ($\pm$2.41)} & \imagemethodname{} & \textbf{121.35} {\tiny ($\pm$0.51)} \\
+    \bottomrule
+    \end{tabular}
+    \label{tab:uncond_result}
+    
+
+\end{wraptable}
+
+
+\section{Results}
+
+\label{sec:results}
+
+In works of language modeling, a fundamental evaluation is to collect a set of validation data, use the prefixes of data as prompts to the pretrained language model, and sample from the language model for a completion \citep{holtzman2019curious,meister2023locally}. 
+The completions are then evaluated for their quality against the gold validation data through distance metrics like Mauve score \citep{pillutla2021mauve}. 
+
+In this work, since we focus on vision-modality-only models with LLM architectures, we retain partial images (and later partial videos) as prompts to our models and evaluate their completions. 
+Given a prompt ratio $r_\text{prompt}$, the autoregressive image generation models condition on $\operatorname{discretization}(\boldsymbol{x})_{1:(r_\text{prompt} \times N_\text{tokens})}$ for the generation.\footnote{More specifically, the fixed-length VQ transformer and ImageGPT condition on $\operatorname{discretization}(\boldsymbol{x})_{1:(r_\text{prompt} \times N_\text{tokens})}$ and generate $\operatorname{discretization}(\boldsymbol{x})_{(r_\text{prompt} \times N_\text{tokens}):N_\text{tokens}}$. Variable-length \imagemethodname{} conditions on $\operatorname{discretization}(\boldsymbol{x})_{1:\operatorname{patch-position}(r_\text{prompt} \times N_\text{patches})}$ and generates until a EOS token is produced. Throughout the work, sampling from autoregressive transformers is by default with $\text{top-}p=\{0.9, 1.0\}$ and $\text{top-}k=\{40, 80\}$.} 
+Throughout the evaluations, the comparison between \imagemethodname{} and VQ transformer would be the most direct, as they share the same paradigm, model size, and training data (except that VQ transformer uses substantially more data in the tokenizer training stage). 
+
+
+\begin{wrapfigure}{R}{0.48\textwidth}
+\centering
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/landscape_a.png}
+\end{subfigure}%
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/landscape_b.png}
+\end{subfigure}%
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/landscape_c.png}
+\end{subfigure}
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/face4_a.png}
+    \caption{Original}
+\end{subfigure}%
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/face4_b.png}
+    \caption{After VQ}
+\end{subfigure}%
+\begin{subfigure}{.16\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/face4_c.png}
+    \caption{After JPEG}
+\end{subfigure}
+
+
+\caption{Compression effect of VQ and JPEG (zoom in for the best view). 
+JPEG is significantly better in detailed but highly perceptible elements like small human faces and text characters. 
+VQ has a relative advantage in color and sharpness preservation. 
+}
+\label{fig:tokenizer_analysis}
+    \centering
+    \begin{subfigure}{0.48\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/test_check_imagenet_fid_out_annot.png}
+    \end{subfigure}
+    
+    \caption{
+    Correlation between per-class (ImageNet-1K) FID difference and class frequency. 
+    The class frequency is estimated through querying Google image search. 
+    Each class has a corresponding data point while an aggregation is performed for visual clarity. 
+    The correlation is positive and statistically significant ($p$=0.0002). 
+    This indicates \imagemethodname{} has more advantage in long-tail classes. 
+    }
+    \label{fig:class_fiddiff_frequency_rel}
+    
+
+\end{wrapfigure}
+
+\subsection{Qualitative analysis} 
+
+In \autoref{fig:main_show}, we show the generation samples from \imagemethodname{} along with baseline models over independently sourced data outside existing training sets. 
+We observe that by directly outputting JPEG file bytes, \imagemethodname{} can generate surprisingly realistic facial expressions (especially the eyes, compared to the strong VQ transformer), landscape, common objects, texts in image forms, etc. 
+ 
+
+\subsection{Quantitative results} 
+In \autoref{tab:in1k_result}, we show prompting \imagemethodname{}, VQ transformer, and other baselines with different levels of partial images in ImageNet-1K \citep{russakovsky2015imagenet}.  
+The FID evaluation \citep{heusel2017gans} contains 5000 randomly sampled images from ImageNet-1K's validation set. 
+This is \emph{zero-shot} generation (w.r.t. models' training sets) and without class-conditioning. 
+Experiments were done three times with different seeds. 
+\imagemethodname{} consistently outperforms the VQ transformer in all prompting ratios. It mostly surpasses diffusion baselines with inpainting capabilities as well. 
+
+In \autoref{tab:ffhq_result}, we show prompting the models with partial images in FFHQ \citep{karras2019style}. 
+This is also a \emph{zero-shot} setup without training to the FFHQ distribution and is evaluated on 1000 randomly sampled FFHQ images. 
+\imagemethodname{} consistently outperforms the VQ transformer and other baselines. 
+
+In \autoref{tab:uncond_result}, 
+we further validate our findings on fully unconditional generation with \imagemethodname{} and VQ transformer. Since they were trained on the same training data, we can compare their FID of unconditional generation w.r.t. our held-out, i.i.d. evaluation set. 
+We again observe that \imagemethodname{} achieves a better FID. 
+These findings show \imagemethodname{}'s overall competence as a image generation model with a pure LLM architecture modeling canonical file encodings.  
+
+
+\subsection{Why \imagemethodname{}? A case study over long-tail elements in images}
+\label{sec:long_tail_analysis}
+
+To further explore in which aspects our \imagemethodname{} excels compared to the baselines, especially the VQ transformer, we first compare how data is processed/compressed before being trained in transformers in \imagemethodname{} and VQ models. 
+
+\paragraph{JPEG vs. VQ compression}
+
+\imagemethodname{} and VQ transformers can both be interpreted as first performing compression and then autoregressive modeling. 
+The VQ model, unlike the non-neural JPEG compression, trained its VQ-VAE quantizer with a large amount of data (200M images in our case). 
+In \autoref{fig:tokenizer_analysis}, we observe that both compression methods are relatively successful in compressing and decompressing general scenes like nature/landscape backgrounds. 
+However, we find VQ suffers in small but highly perceptible elements in the images, like human faces or eyes. 
+For images that contain small text characters, we observe the image degradation in VQ also happens in a non-predictable way, generating seemingly clear but uninterpretable text characters. 
+On the other hand, the image degradation due to the non-neural, training-free JPEG compression happens in a predictable manner, arguably more preferrable, especially when images contain long-tail elements with important meanings. 
+
+\renewcommand*{\arraystretch}{1.0}
+\begin{wraptable}{R}{0.57\textwidth}
+    \centering
+    \caption{
+    Zero-shot, partial-image-conditioned, FID evaluation on \textbf{downscaled FFHQ} (for both FID and $\Delta$, lower is better). 
+    An increased gap between \imagemethodname{} and the VQ transformer shows \imagemethodname{} is more robust to small but meaningful long-tail elements. 
+    }
+    \begin{tabular}{@{}p{1.21in}p{0.8in}p{0.75in}@{}}
+    \toprule
+      & {\footnotesize $r_{\text{prompt}}=0.375$} & {\footnotesize $r_{\text{prompt}}=0.5$} \\
+      \midrule
+      Stable Diffusion {\tiny (inpaint)} & 136.28 {\tiny ($\pm$2.48)} & 120.54 {\tiny ($\pm$6.46)}  \\
+      $\Delta_{\text{downscaled}-\text{original}}$ & \textcolor{Maroon}{$+$20.98} & \textcolor{Maroon}{$+$30.72} \\
+      [4pt]
+      VQ Diffusion & 83.63 {\tiny ($\pm$1.16)} & 47.90 {\tiny ($\pm$1.12)}  \\
+      $\Delta_{\text{downscaled}-\text{original}}$ & \textcolor{Maroon}{$+$22.75} & \textcolor{Maroon}{$+$7.32} \\
+      [4pt]
+      ImageGPT {\tiny (super-resolution)} & 46.67 {\tiny ($\pm$0.62)} & 40.46 {\tiny ($\pm$0.70)}  \\
+      $\Delta_{\text{downscaled}-\text{original}}$ & \textcolor{ForestGreen}{$-$15.06} & \textcolor{ForestGreen}{$-$14.82} \\
+      \midrule
+      VQ Transformer & 56.33 {\tiny ($\pm$0.86)} & 47.94 {\tiny ($\pm$0.21)}  \\
+      $\Delta_{\text{downscaled}-\text{original}}$ & \textcolor{Maroon}{$+$3.08} & \textcolor{Maroon}{$+$6.79} \\
+      [4pt]
+      \imagemethodname{} & \textbf{35.80} {\tiny ($\pm$0.17)} & \textbf{26.25} {\tiny ($\pm$0.45)}  \\
+      $\Delta_{\text{downscaled}-\text{original}}$ & \textcolor{ForestGreen}{$-$0.35} & \textcolor{ForestGreen}{$-$0.90} \\
+      \bottomrule
+    \end{tabular}
+    \label{tab:ffhq_downsample_result}
+\end{wraptable}
+
+\paragraph{Quantitative analyses on long-tail elements} 
+
+In \autoref{fig:class_fiddiff_frequency_rel}, we first show the per-class FID in our ImageNet-1K generation experiments. 
+For each class of images, we calculate the difference between their FID with \imagemethodname{} generations and FID with the VQ transformer generations. 
+We also estimate the frequency/coverage of each class of images on the internet by querying Google image search and logging the total number of returned results. 
+We observe a statistically significant correlation between the per-class FID difference and the class frequency. 
+The more advantage we observe in \imagemethodname{} over the VQ model, the less frequent the corresponding class is. 
+In other words, \imagemethodname{} excels relatively more in long-tail sub-distributions. 
+
+
+In \autoref{tab:ffhq_downsample_result}, we further intervene on 
+the FFHQ images by downsizing them (to 0.5x, while padding the images with black background to keep the overall size), aiming to test different models' performance on smaller 
+visual concepts (e.g., small human faces). 
+Such concepts, though small in size, can still be highly perceptible by humans and contain important meanings. 
+We thus want the models to be robust on them. 
+We perform similar prompted image generations with \imagemethodname{}, VQ transformer, and other baseline models.\footnote{The FID is measured on the active proportion of the images, excluding the black paddings.} 
+We find that \imagemethodname{} still consistently outperforms the VQ transformer (and other baselines as well). 
+Especially, \imagemethodname{} achieves slightly better performance while VQ transformer becomes worse compared to the experiments with original image size. These deltas in opposite directions highlights the robustness of \imagemethodname{}. 
+
+These findings show that \imagemethodname{} not only has a promising performance overall, but specially strong with long-tail visual elements in the images. 
+
+
+
+\begin{figure}[t]
+\centering
+
+\begin{subfigure}{.2\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/example_vid_gen/vid1.png}
+\end{subfigure}%
+\begin{subfigure}{.2\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/example_vid_gen/vid2.png}
+\end{subfigure}%
+\begin{subfigure}{.2\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/example_vid_gen/vid3.png}
+\end{subfigure}%
+\begin{subfigure}{.2\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/example_vid_gen/vid4.png}
+\end{subfigure}%
+\begin{subfigure}{.2\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/example_vid_gen/vid5.png}
+\end{subfigure}
+\begin{subfigure}{.2\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/example_vid_gen/vid6.png}
+    \caption*{}
+\end{subfigure}%
+\begin{subfigure}{.2\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/example_vid_gen/vid7.png}
+    \caption*{}
+\end{subfigure}%
+\begin{subfigure}{.2\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/example_vid_gen/vid8.png}
+    \caption{Prompt frames}
+\end{subfigure}%
+\begin{subfigure}{.2\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/example_vid_gen/vid9.png}
+    \caption*{}
+\end{subfigure}%
+\begin{subfigure}{.2\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/example_vid_gen/vid10.png}
+    \caption*{}
+\end{subfigure}
+\begin{subfigure}{.2\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/example_vid_gen/vid11.png}
+    \caption*{}
+\end{subfigure}%
+\begin{subfigure}{.2\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/example_vid_gen/vid12.png}
+    \caption*{}
+\end{subfigure}%
+\begin{subfigure}{.2\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/example_vid_gen/vid13.png}
+    \caption{Generated frames}
+\end{subfigure}%
+\begin{subfigure}{.2\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/example_vid_gen/vid14.png}
+    \caption*{}
+\end{subfigure}%
+\begin{subfigure}{.2\textwidth}
+    \centering
+    \includegraphics[width=1.0\textwidth]{resources/example_vid_gen/vid15.png}
+    \caption*{}
+\end{subfigure}
+
+\caption{Generated video frames by \videomethodname{} on held-out test data. The first 10 frames are given to the model as the prompt, and the last 5 frames are generated by the model.}
+\label{fig:video_qualex}
+
+\end{figure}
+
+\subsection{Proof-of-concept video generation}
+
+One advantage of using canonical file encodings in LLM paradigms for vision generation is simplicity. 
+From \imagemethodname{} that generates images, we naturally take one step further and train a video generation model, \videomethodname{}, that models canonical video codecs (AVC/H.264) with autoregressive transformers. 
+
+As a proof of concept, we prompt \videomethodname{} with partial videos (i.e., frames) from a held-out set from our training data and investigate the model completions. 
+ We observe that \videomethodname{} can capture the motion of moving objects reasonably. 
+
+
+
+
+
+\section{Related Work}
+
+
+Current image and video generation models often adopt an autoregressive or diffusion approach. The autoregressive approach can build upon pixel-based representations as explored in \citet{van2016pixel,van2016conditional,chen2020generative}. These methods suffer from prohibitively long sequences and only operate on low-resolution images. The autoregressive approach can also build upon vector quantization, which involves a sophisticated pre-hoc tokenizer training in addition to the autoregressive model \citep{van2017neural,esser2021taming,ramesh2021zero,yu2021vector,yan2021videogpt,yu2023language,mentzer2023finite,lu2023unified,liu2024world}. 
+Diffusion models generate images or videos by an iterative denoising process, and they have specialized objectives and architectures that are challenging to be incorporated to regular LLM paradigms to form multi-modal systems \citep{song2019generative,ho2020denoising,rombach2022high,ho2022video,gu2022vector,tang2022improved,gu2023matryoshka,peebles2023scalable,crowson2024scalable}. 
+For example, performing simple tasks outside visual generation like classification with diffusion architectures is already not straightforward \citep{li2023your}. 
+In this work, we propose to model canonical codecs (JPEG and AVC/H.264) with conventional language model architectures for visual generation. 
+\citet{horton2023bytes} and \citet{wu2024beyond} are independent work that also process file bytes data, but they both focus on visual understanding (instead of generation) and use specialized modules to handle the byte sequences (whereas we use a general Llama-2 model). 
+\citet{Perez2024CompressedLanguageMF} concurrently discover that JPEG formats can be used with language models in file anomaly handling and generation (on low-resolution images). 
+As a universal codec, JPEG is a novel form of data encoding for efficient image understanding \citep{park2023rgb}. 
+\citet{kang2019toward} explore an image generation model that performs generation and JPEG compression in one system with GANs. 
+JPEG artifacts can also be corrected by learning a restoration model \citep{kawar2022jpeg}, which is potentially helpful to the generations from our \imagemethodname{} for improving image quality. 
+Compressive codecs are also a rising topic in language. \citet{jiang2023low} use canonical compressors as feature extractors for texts. \citet{lester2024training} train language models to generate compressed texts. 
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+
+In this work, we propose \imagemethodname{} and \videomethodname{} that generate images and videos using mainstream LLM architectures (autoregressive transformers) with canonical codec representations (JPEG for images, AVC/H.264 for videos). 
+Our approach greatly mitigates the length infeasibility of pixel-based sequence modeling while enabling simple, flexible, and end-to-end training compared to sophisticated vector quantization methods. Our image generation evaluation shows \imagemethodname{} achieves better results than the baselines, with an especial advantage in generating long-tail visual elements. 
+Our work contributes to a unifying paradigm of language generation and visual generation, facilitating future research to port successful LLM techniques (e.g., alignment, efficiency, etc.) to all modalities. 
+Though our focus in this work does not involve visual understanding tasks or analyses of context efficiency, future work may explore these aspects based on our paradigm. 
+
+One notable significance of this work is to show that vanilla autoregressive modeling with canonical codecs is \emph{indeed possible} in visual generation. 
+This is an approach almost void of prior work, likely because there are many potential, assumed challenges with the method. 
+For example, both JPEG and AVC operate at bits level due to the entropy coding.\footnote{One could potentially train models over sequences of bits but it would be substantially more expensive.} 
+The bytes in the files do not have consistent meanings and would depend on their context and the implicit Huffman tables. For generality, our models also do not use any vision-specific modules like convolutions or 2D positional embeddings, potentially making the task more challenging. 
+However, we observe that conventional, vanilla language modeling surprisingly conquers these challenges without special designs as training goes (e.g., \imagemethodname{} generates realistic images barely with any corrupted JPEG patches). 
+Based on the findings of this work, future work may continue to investigate the scaling aspect of this family of models (similar to the LLM literature) or better architectures for canonical codecs without loss of generality for other modalities. 
+An extended discussion can be found in \Sref{sec:discussion}. 
+
+
+
+\paragraph{Acknowledgements}
+The authors would like to thank 
+Yuejun Han, Igor Tsvetkov, Omer Levy, Chunting Zhou, Lili Yu, Luke Zettlemoyer, Jingwei Ma, Zeyu Liu, Lijun Yu, Jianing Yang, Alisa Liu, Jiacheng Liu, Weijia Shi, Sachin Kumar, Orevaoghene Ahia, and members of UW Tsvetshop and Koh-lab for helpful discussions. Insights from \citet{wortsman2023small} are helpful for debugging instabilities during the training of our models. 
+
+
+
+
+
+
+

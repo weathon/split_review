@@ -1,8 +1,8 @@
 # Uncertainty Modeling in Graph Neural Networks via Stochastic Differential Equations
 
 - Decision: Accept
-- Avg Score: 3.25
-- Scores: 1, 0, 6, 6
+- Avg Score: 7.33
+- Scores: 10, 6, 6
 
 ## Abstract
 We address the problem of learning uncertainty-aware representations for graph-structured data. While Graph Neural Ordinary Differential Equations (GNODE) are effective in learning node representations, they fail to quantify uncertainty. To address this, we introduce Latent Graph Neural Stochastic Differential Equations (LGNSDE), which enhance GNODE by embedding randomness through Brownian motion to quantify uncertainty. We provide theoretical guarantees for LGNSDE and empirically show better performance in uncertainty quantification.

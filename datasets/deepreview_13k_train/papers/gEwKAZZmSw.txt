@@ -1,0 +1,390 @@
+\title{Efficient Backpropagation with Variance Controlled Adaptive Sampling}
+
+\begin{abstract}
+Sampling-based algorithms, which eliminate ``unimportant'' computations during forward and/or back propagation (BP), offer potential solutions to accelerate neural network training. However, since sampling introduces approximations to training, such algorithms may not consistently maintain accuracy across various tasks. In this work, we introduce a variance-controlled adaptive sampling (VCAS) method designed to accelerate BP. VCAS computes an unbiased stochastic gradient with fine-grained layerwise importance sampling in data dimension for activation gradient calculation and leverage score sampling in token dimension for weight gradient calculation. To preserve accuracy, we control the additional variance  by  learning the sample ratio jointly with model parameters during training. We assessed VCAS on multiple fine-tuning and pre-training tasks in both vision and natural language domains. On all the tasks, VCAS can preserve the original training loss trajectory and validation accuracy with an up to 73.87\% FLOPs reduction of BP and 49.58\% FLOPs reduction of the whole training process.
+
+
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{wrapfigure}{r}{0.4\textwidth}
+    \centering
+    {\includegraphics[width=\linewidth]{fig/cmp_train_loss.pdf}}
+    \caption{VCAS mirrors the convergence trajectory with exact training with FLOPs redution of 41.56\%. Other methods like SB \citep{jiang2019accelerating} and UB \citep{katharopoulos2018not} fail with a similar FLOPs reduction.}\label{fig:subfig_cmp_train_loss} 
+\end{wrapfigure}
+
+Training neural networks can be computationally intensive. Contemporary networks typically employ stochastic gradient methods~\citep{bottou2018optimization} for training, which iteratively process batches of data to compute stochastic gradients through forward propagation (FP) and back propagation (BP) techniques~\citep{rumelhart1986learning}.  FP+BP are costly, as they need to process every datum in the batch and every connection in the network, resulting in a multiplicative time complexity of batch size and model size. Such a time complexity becomes increasingly problematic in the era of big data and big models. 
+
+Data samples are not equally important. Some might be easy for the network to learn, while others might be extremely hard. 
+Training can be accelerated by utilizing this disparity, focusing the available computational resources on more pivotal samples.  At a high level, this can be achieved by further sampling the batch with higher keep probability of more important samples. The computational overhead is consequently diminished, in proportion to the quantity of retained samples. Various methods are proposed to assess the importance of samples, including meta-learning methods~\citep{fan2017learning,coleman2019selection,mindermann2022prioritized}, loss-based methods~\citep{loshchilov2015online,chang2017active,jiang2019accelerating,ouyang2022efficient}, and gradient norm based methods~\citep{needell2014stochastic,zhao2015stochastic,alain2015variance,johnson2018training,katharopoulos2018not}. 
+
+While such methods seem promising, one core concern of sampling-based methods is their robustness. 
+Misjudging the importance can hamper convergence, potentially leading to degraded accuracy and even longer training time than uniform sampling.  Moreover, the optimal sample ratio is influenced by data distribution, which differs between tasks and is challenging to determine in advance. In general, there is a ``no-free-lunch'' phenomenon~\citep{kaddour2023no}, where aggressive sampling often comes at the cost of reduced robustness.
+
+In this work, we propose a robust variance-controlled adaptive sampling (VCAS) algorithm for deep learning under the stochastic optimization framework. 
+VCAS computes a cost-effective approximated stochastic gradient (ASG) by partially conducting backpropagation for specific data and tokens. This ASG is unbiased, and we have developed an adaptive sampling method to meticulously control the variance of the ASG, aligning it with the original stochastic gradient's variance. Consequently, convergence remains largely unaffected, with our method mirroring the progression of exact algorithms, as delineated in Fig.~\ref{fig:subfig_cmp_train_loss}. %\jianfei{why only approximate backprop?}\ziteng{since forward is indirect with the gradient, mention token dropping random-ltd here?}
+Unlike previous methods, VCAS construct the ASG in a fine-grained manner. Rather than dropping samples one-time  in a whole, VCAS gradually drops more samples when backpropagating from topmost to bottommost network layers, as the gradient getting sparser. Furthermore, VCAS also more aggressively drops data in finer granularity of tokens rather than samples when computing the weight gradients. VCAS can achieve smaller variance under a given computational budget compared to coarse grained sampling on the data dimension.
+
+We evaluate VCAS on multiple finetuning and pre-training tasks of language models and vision transformers. VCAS can preserve the original training loss trajectory and the validation accuracy on all tasks, while adaptively determining the computational saving depending on the difficulty of the task. VCAS can reduce the computational cost of backpropagation by up to 73.87\%, and reduce the overall training computation by up to 49.58\%.
+
+
+
+\section{Related Work}
+
+
+Methods focusing on the difference of data, known as online batch selection~\citep{loshchilov2015online}, can be mainly categorized into three classes: meta learning methods, loss based methods and gradient norm based methods. In this section we will discuss these three ways separately and briefly introduce other orthogonal efficient training methods.
+\textbf{Meta Learning Methods.} Some works formulate data sampling into an optimization problem and train a separate meta predictor to solve it. \citet{fan2017learning} use deep reinforcement learning to train an agent for data selection. \citet{coleman2019selection} and \citet{mindermann2022prioritized} train a separate cheaper model with similar architecture for guidance. However, training a meta predictor will introduce further overhead and it's a non-trivial learning task with more uncertainty introduced for weak theoretical guarantee.
+\textbf{Loss Based Methods.} Loss is a natural indicator of the importance of different data. \citet{loshchilov2015online} maintains a history of losses and develops a sophisticated distribution based on the value or rank of loss. \citet{jiang2019accelerating} and \citet{ouyang2022efficient} simplify it with sampling distribution proportion to the percentile of loss in the history. \citet{chang2017active} broadens the history to every datum and proposes to sample by the variance of prediction probability directly linked with previous losses. \citet{dong2021one} provides another method of minimizing the $L_2$ norm between the sampled loss and the exact counterpart. \citet{shah2020choosing} samples the smallest loss for robustness to outliers. \citet{zhang2023adaselection} ensembles several loss methods with a preset sample ratio and varies the weights assigned to these methods adaptively. Simple and effective as they may be, the loss based methods are heuristic and always need a hyperparameter of sample ratio to tune for different tasks, violating the goal of efficient training.
+
+\textbf{Gradient Norm Based Methods.} Previous works have proved that the optimal data sampling distribution for SGD is proportional to the gradient norm\citep{needell2014stochastic,zhao2015stochastic}. But calculating the gradient norm is prohibitive since it needs a full process of backpropagation. To solve this problem, \citet{alain2015variance} applies distributed training with many workers calculating this importance score in parallel. \citet{johnson2018training} uses a second-order approximation of gradient norm with history maintained. Closely related to our work, \citet{katharopoulos2018not} develops a pure online algorithm by constructing an upper bound of gradient norm to sample with much cheaper computation. These methods are usually more expensive but have relatively strong theoretical guarantees. So we follow this way in our activation sampling.
+\textbf{Orthogonal Efficient Training Methods.} Data pruning \citep{paul2021deep,fayyaz2022bert} focuses on filtering less informative data before the whole training. Architecture pruning like layer dropping \citep{huang2016deep,zhang2020accelerating} and token dropping \citep{hou2022token, yao2022random, li2022deepspeed} modifies the architecture to make models faster to train with modest affect to performance. Mixed precision training and quantization \citep{micikevicius2018mixed,chen2021actnn,liu2022gact} change the training procedure to use low-precision in calculation for acceleration. Sparsity\citep{hoefler2021sparsity} focuses on pruning near-zero values in weights, activations, or gradients to achieve a low FLOPs\citep{raihan2020sparse} and low memory footprint\citep{nikdan2023sparseprop}, yet is usually hard to bring a wall-clock time reduction like us due to the lack of hardware support\citep{nvidia2021accelating}. All these works are orthogonal to our work since we focus on the computation approximation of a certain model architecture on a certain dataset with a certain training procedure to bring real training acceleration.
+
+\newcommand{\data}[1]{X^{(#1)}}
+\newcommand{\act}[1]{Z^{(#1)}}
+\newcommand{\param}[1]{\theta^{(#1)}}
+\newcommand{\tvar}[1]{\mathrm{Var}\left[#1\right]}
+\newcommand{\var}[2]{\mathrm{Var}_{#1}\left[#2\right]}
+\newcommand{\sample}[2]{\mathrm{Sample}_{#1}\left(#2\right)}
+\newcommand{\samplea}[2]{\mathrm{SampleA}_{#1}\left(#2\right)}
+\newcommand{\samplew}[2]{\mathrm{SampleW}_{#1}\left(#2\right)}
+\newcommand{\hn}{\hat\nabla}
+\newcommand{\tn}{\tilde\nabla}
+\newcommand{\Fl}[2]{f^{(#1)}\left(#2\right)}
+\newcommand{\Gl}[2]{g^{(#1)}\left(#2\right)}
+\newcommand{\Hl}[2]{h^{(#1)}\left(#2\right)}
+\newcommand{\abs}[1]{\left|#1\right|}
+\newcommand{\loss}{\mathcal L}
+\newcommand{\mb}{\mathcal B}
+\newcommand{\dataset}{\mathcal D}
+\newcommand{\Bern}{\mathrm{Bern}}
+
+
+\section{Variance-Controlled Sampling as Stochastic Optimization}
+
+
+\begin{figure}[t]
+    \centering    \includegraphics[width=\textwidth]{fig/algorithm.pdf}
+    \caption{The computing diagram of backpropagation with VCAS in every layer. We use light blue 
+squares to represent small gradient entries and orange for large ones. White squares are discarded by sampling. The upper line calculates activation gradient and the lower for weight gradient. Please refer to Sec.~\ref{sec:sampling} for notations.}
+    \label{fig:algorithm}
+\end{figure}
+
+In this section, we present a high-level overview of our sampling algorithm as stochastic optimization. 
+Consider the learning problem of a model $f(X; \theta)$ parameterized by $\theta$ on a dataset $\mathcal{D}=\{(X_i, y_i)\}_{i=1}^{|\mathcal{D}|}$ with a loss function $\ell(\cdot,\cdot)$. Define the learning objective as
+\begin{align}\label{eqn:objective}
+\loss(\theta) = \E_{\mb}\left[\ell(f(X; \theta), y)\right],
+\end{align}\
+where the expectation is taken over all possible batches $\mb=(X, y)$ from $\dataset$. The model parameters can be learned by stochastic optimization algorithms~\citep{bottou2018optimization} with a stochastic gradient (SG) $g(\theta; \mb):=\nabla_{\theta}\ell(f(X; \theta), y)$, which is an unbiased approximation of $\nabla_{\theta}\loss(\theta)$.
+
+However, computing the stochastic gradient can be still too expensive, since it requires the full forward and back propagation, which iterate over all model parameters and all data in the batch. We build a cheap stochastic approximation $g(\theta; \mb, \epsilon)$ of the SG, which we refer as approximated stochastic gradient (ASG). ASG only computes the backpropagation partially, and is therefore cheaper than the SG. The randomness in the computing procedure of ASG is captured by $\epsilon$. 
+We ensure that ASG is unbiased: $\E_{\epsilon}[g(\theta; \mb, \epsilon)]=g(\theta; \mb)$.
+
+With an unbiased SG, stochastic optimization algorithms are guaranteed to converge to a stationary point of Eq.~(\ref{eqn:objective}), while the converge speed depends on the variance (cf.~\citet{bottou2018optimization}). Therefore, if the variance of the ASG can be controlled to the similar variance level of SG, substituting the SG with ASG should have little impact to the convergence behavior. In fact, by the law of total variance~\citep{chung2001course}, the variance of ASG can be decoupled as
+\begin{align*}
+\tvar{g(\theta; \mb, \epsilon)} = \tvar{g(\theta; \mb)} + \E_{\mb}\left[\var{\epsilon}{g(\theta; \mb, \epsilon)}\right],
+\end{align*}
+where the first term is the intrinsic variance of SG caused by subsampling batches from the dataset, and the second term is the additional variance incurred by ASG. In the subsequent sections, we will discuss our constructions of the ASG, which incurs negligible additional variance compared to SG. 
+ 
+
+
+\section{Fine-Grained Sampling}
+
+\label{sec:sampling}
+\begin{figure}[t]
+    \centering
+    \subcaptionbox{100-th iter.}{\includegraphics[width=0.3\linewidth]{fig/norm_100.pdf}}
+    \subcaptionbox{300-th iter.s}{\includegraphics[width=0.3\linewidth]{fig/norm_300.pdf}}
+    \subcaptionbox{3000-th iter.s}{\includegraphics[width=0.38\linewidth]{fig/norm_3000.pdf}}
+    \caption{Gradient distribution over different layer and iterations of BERT-base finetuning on SST2 (6315 iterations in total). The normalized gradient norm of each datum is shown in the heatmaps. Black solid lines are the 95\% percentile. Data above the lines are likely to be dicarded by VCAS.}
+    \label{fig:sparsity}
+\end{figure}
+
+Here we present variance-controlled adaptive sampling (VCAS), a specific construction of the ASG. We compute ASG by approximating the backpropagation in a fine-grained manner, and speed up matrix multiplications with importance sampling on the data dimension. 
+
+Assume a batch $X$ of shape $N\times T\times K$, where $N$ is the batch size, $T$ is the number of tokens of each datum, and $K$ is the dimensionality. For an $L$-layer network, the model $f(X; \theta)$ can be described by the following forward propagation procedure:
+$
+\act{0} = X, \act{l} = \Fl{l}{\act{l-1}; \param{l}}, f(X; \theta)=\act{L},
+$
+where $\act{l}$ and $\param{l}$ are the activation and parameters of the $l$-th layer, and $\theta=(\param{l})_{l=1}^L$. 
+The SG can be computed by back-propagation in the following form:
+$
+\nabla_{\act{l-1}} = \Hl{l}{\nabla_{\act{l}}; \act{l-1}, \param{l}}, 
+\nabla_{\param{l}} = \Gl{l}{\nabla_{\act{l}}; \act{l-1}, \param{l}},
+$
+where $\nabla_{\act{l}}$ and $\nabla_{\param{l}}$ denote the activation / weight gradient, $h^{(l)}$ and $g^{(l)}$ denote the function that calculates input / weight gradient of layer $l$ with the output gradient, layer input and weight. The SG $g(\theta; \mb)=(\nabla_{\param{l}})_{l=1}^L$. 
+
+As illustrated by Fig.~\ref{fig:sparsity}, the activation gradients $\nabla_{\act{l}}$ are sparse: the gradient $(\nabla_{\act{l}})_i$ is close to zero for most sample $i$, except for a few important samples. Such sparsity becomes more prominent as backpropagating to lower layers and as the training progresses. To speed up computation, we add samplers in the backpropagation graph:
+\begin{align}
+	\hn_{\act{l}} &= \samplea{\epsilon, \rho_l}{\nabla_{\act{l}}},~~~~
+	\nabla_{\act{l-1}} = \Hl{l}{\hn_{\act{l}}; \act{l-1}, \param{l}},\nonumber\\
+	\tn_{\act{l}} &= \samplew{\xi_l, \nu_l}{\hn_{\act{l}}, \act{l-1}},~~~~
+	\nabla_{\param{l}} = \Gl{l}{\tn_{\act{l}}; \act{l-1}, \param{l}}.\label{eqn:weight-grad}
+\end{align}
+The sampler $\samplea{\epsilon, \rho_l}{\cdot}$ randomly filter out unimportant data from the activation gradient, the keep ratio is $\rho_l$, with the randomness captured by $\epsilon$. The sampler is applied for each layer, so the activation gradient becomes increasingly sparse when backpropagating from the $L$-th layer to the first layer. 
+The sampler $\samplew{\xi_l, \nu_l}{\cdot}$ filters (data, token) pairs specifically for weight gradient calculation, with a keep ratio $\nu_l$ and the randomness $\xi_l$. 
+With these samplers, we only need to compute backpropagation for the retained data / token, so the computational cost is reduced.
+
+The sampling procedure is illustrated in Fig.~\ref{fig:algorithm}, which constructs an unbiased ASG $g(\theta; \mb, \epsilon, \xi, \rho, \nu)=(\nabla_{\param{l}})_{l=1}^L$, with $\nabla_{\param{l}}$ defined as Eq.~(\ref{eqn:weight-grad}), and $\xi=(\xi_l)_{l=1}^L$, $\rho=(\rho)_{l=1}^L$, $\nu=(\nu_l)_{l=1}^L$. 
+
+\subsection{Activation Gradient}
+We apply unbiased low-variance approximation to the activation gradient to speed up subsequent computation. For an activation gradient tensor $G$  of shape $N\times T\times K$, we sample 
+\begin{align*}
+\hat G = \samplea{\epsilon,\rho}{G} = G \circ (m(\epsilon, \rho)\otimes \vone\otimes \vone),
+\end{align*}
+where $\circ$ is  element-wise product, and $\otimes$ is  tensor outer product. The mask $m\in \R^N$ is a random Bernoulli vector: 
+$
+m(\epsilon, \rho)_i = \Bern(p_i; \epsilon) / p_i$
+, where $\sum_{i=1}^N p_i = N\rho$, and $\Bern(p; \epsilon)$ denotes a Bernoulli random number generator with probability $p$ and randomness $\epsilon$. 
+Since $\E[m(\epsilon, \rho)_i] = 1, \forall i$, the approximation is unbiased: $\E[\hat G] = G$. The sampler zeros out the gradient for all the data whose $m(\epsilon, \rho)_i=0$. The amount of retained data is $N\rho$ in expectation. With the sampler, we only need to compute backpropagation for retained data, so the cost is $\rho$ times lower. 
+
+The variance of the approximation is
+$\tvar{\hat G} = \sum_{i=1}^{N}\frac{1-p_i}{p_i} \norm{G_{i}}_F^2
+$, 
+where we define the variance of a random tensor element-wise as $\tvar{\hat G} = \sum_{ijk}\tvar{\hat G_{ijk}}$, and $G_i$ denotes the $i$-th matrix of $G$ in the $N$ dimension. We compute the keep probability $(p_i)$ to minimize the variance, deriving a distribution proportional to the gradient norm of each datum: 
+$
+    p_i\propto \norm{G_{i}}_F
+$. Minimizing the variance of the activation gradient not necessarily minimize the variance of  ASG, which is the gradient of parameters. Nevertheless, this is a useful heuristic which empirically achieves low variance as is revealed by \cite{katharopoulos2018not}, and the ASG variance will be carefully controlled  by our adaptive algorithm, as we shall see soon in Sec.~\ref{sec:adaptive}.
+\subsection{Weight Gradient}
+We can accelerate the computation of weight gradient for linear layers by sampling in both data and token dimensions. 
+ Consider the approximate back propagation of a linear layer $\act{l} = \act{l-1}{\param{l}}^\top$: 
+\begin{align*}
+\hn_{\act{l}}=\samplea{\epsilon,\rho_l}{\nabla_{\act{l}}},~~~~ 
+\tn_{\act{l}}=\samplew{\xi_l,\nu_l}{\hn_{\act{l}}, \act{l-1}},~~~~ \nabla_{\param{l}}={\tn_{\act{l}}}^\top \act{l-1}
+\end{align*}
+in matrix form, where we reshape the activation/gradients to $NT\times K$, and $\hn_{\act{l}}$ is already a sampled matrix with only $NT\rho_l$ non-zero rows in expectation. 
+However, $\hn_{\act{l}}$ is only sampled in the data dimension. In fact, even $(\hn_{\act{l}})_i$ is retained for some datum $i$, it might still have some rows (i.e., tokens) which are close to zero. We can further sample
+\begin{align*}
+\tn_{\act{l}}=\samplew{\xi_l,\nu_l}{\hn_{\act{l}},\act{l-1}} = \hn_{\act{l}} \circ (m(\xi, \nu)^\top \vone),
+\end{align*}
+where the mask $m\in \R^{NL}$ is a random Bernoulli vector, and $\vone$ is an all-one vector:
+$
+m(\xi, \nu)_{i} = \Bern(q_{i}; \epsilon) / q_{i}$, where $\sum_{i=1}^{NT} q_{i} = NT\rho_l\nu_l$.
+The variance is 
+\begin{align}\label{eqn:lss-variance}
+    \tvar{\tn_{\param{l}}}=\sum_{i=1}^{NT}\frac{1-q_i}{q_i} \norm{\hn_{{\act{l}}_i}}_2^2\norm{\act{l-1}_i}_2^2.
+\end{align}
+The minimal variance solution is
+$
+    q_i\propto\norm{\hn_{{\act{l}}_i}}_2\norm{\act{l-1}_i}_2
+$. This sampling method is also known as leverage score sampling in randomized numerical linear algebra~\citep{drineas2018lectures}.
+
+
+
+\section{Adapting Sample Ratios}
+
+The question remained is how to set the sample ratios $(\rho_l)_{l=1}^L$ and $(\nu_l)_{l=1}^L$. There is a tradeoff: lowering the sample ratio reduces the computational cost, but increases the variance. As discussed in Sec.~\ref{sec:theory}, this ratio should be set to ensure that the additional variance of ASG is marginal compared to the original variance of SG. Adapting the sample ratio is nontrivial since the gradient sparsity pattern vary across layers and vary over time during training. In this section, we present an adaptation algorithm to control the variance during the entire training trajectory. %\jianfei{TODO: tradeoff}
+
+First, we introduce a single hyperparameter $s$ to control the sample ratios $(\rho_l)_{l=1}^L$ for all layers. Intuitively, when the gradient norm $\left(\norm{G_i}_F\right)_{i=1}^N$ becomes sparser, we can more aggressively utilize smaller keep ratio $\rho_l$ to maximize speedup. Therefore, we compute $\rho_l$ based on the sparsity $p_l$ of the gradient norm sequence: 
+\begin{align}
+    p_l(s) = \min\{n/N | \sum_{i=1}^n \norm{G_i}_F\ge s \sum_{i=1}^N \norm{G_i}_F\},~~~~ \rho_l(s)=\max\limits_{j\le l}p_j(s)
+\label{eq:act_update}
+\end{align}
+where $s\in [0, 1]$ is a hyperparameter on how much gradient norm is preserved. It's shown in Fig.~\ref{fig:sparsity} that gradient norm grows sparser with layer, yielding a descending trend of $p_l$ for $l$ from $L$ to $1$. Thus it's reasonable to construct a monotone increasing sequence of $\{\rho_l\}_{l=1}^L$ based on $\{p_l\}_{l=1}^L$.
+
+By law of total variance, we can decompose the variance of ASG as
+\begin{align*}
+\tvar{g(\theta; \mb, \epsilon, \xi, \rho, \nu)}
+=
+\tvar{g(\theta; \mb)} + 
+\E_{\mb}[\var{\epsilon}{g(\theta; \mb, \epsilon, \rho(s))}] + 
+\E_{\mb,\epsilon}[\var{\xi}{g(\theta; \mb, \epsilon, \xi, \rho,\nu}],
+\end{align*}
+where we write $g(\theta; \mb, \epsilon, \rho):=\E_{\xi}[g(\theta; \mb, \epsilon, \xi, \rho, \nu)]$ to be the ASG without the sampler for weight gradient computation. The three variance terms are the SG variance, the variance introduced by approximately computing activation gradient, and the variance introduced by approximately computing weight gradient, respectively. Our algorithm adaptively tunes $s$ and $\nu$ during train to control the last two variance terms to be fractional comparing to the first variance term. 
+
+\paragraph{Controlling $\E_{\mb}[\var{\epsilon}{g(\theta; \mb, \epsilon, \rho(s))}]$:} 
+We adopt a zeroth order method to adapt the hyperparameter $s$ to keep $\E_{\mb}[\var{\epsilon}{g(\theta; \mb, \epsilon, \rho(s))}]=\tau_{act} \tvar{g(\theta; \mb)}$, where $\tau_{act}\ll 1$ is a small constant. That is, the additional variance raised by approximately computing activation gradient is only $\tau_{act}$ times the SG variance itself. Since larger $s$ increases the keep ratio and decreases the variance, we adopt the update:
+\begin{align}\label{eqn:s-update}
+s\leftarrow s + \alpha \sign\left(\E_{\mb}[\var{\epsilon}{g(\theta; \mb, \epsilon, \rho(s))}]-\tau_{act} \tvar{g(\theta; \mb)}\right),
+\end{align}
+where $\sign(x)=+1$ when $x\ge0$ and $\sign(x)=-1$ when $x<0$, and $\alpha$ is a step size. We approximate the expectation and variance with empirical ones with $M$ Monte Carlo repetitions. Therefore, each update requires $O(M^2)$ FP+BPs, and we run the update every $F$ SGD iterations, where $F\gg M^2$.
+
+\paragraph{Controlling $\E_{\mb,\epsilon}[\var{\xi}{g(\theta; \mb, \epsilon, \xi, \rho,\nu}]$: } As the variance sums up for each parameter $\param{l}$, we can further decompose the variance as
+\begin{align}
+    \E_{\mb,\epsilon}[\var{\xi}{g(\theta; \mb, \epsilon, \xi, \rho,\nu}]=\sum_{l=1}^L \E_{\mb,\epsilon}\left[\var{\xi}{g^{(l)}(\theta; \mb, \epsilon, \xi_l, \rho,\nu_l}\right],
+    \label{eq:sum_weight_var}
+\end{align}
+where $g^{(l)}$ is the gradient of the $l$-th layer (i.e., $\nabla_{\param{l}}$). We control the variance of each layer separately to keep $\E_{\mb,\epsilon}\left[\var{\xi}{g^{(l)}(\theta; \mb, \epsilon, \xi_l, \rho,\nu_l)}\right]=\tau_{w}\tvar{g^{(l)}(\theta; \mb)}$. Again, this is achieved by a zeroth-order algorithm:
+\begin{align}
+\nu_l\leftarrow\nu_l\beta^{\sign\left(
+\E_{\mb,\epsilon}\left[\var{\xi}{g^{(l)}(\theta; \mb, \epsilon, \xi_l, \rho,\nu_l)}\right]-\tau_{w}\tvar{g^{(l)}(\theta; \mb)}
+\right)},
+\label{eq:weight_update}
+\end{align}
+where $\var{\xi}{g^{(l)}}$ can be computed analytically by Eq.~\ref{eqn:lss-variance}, and $\beta$ is a multiplier.
+
+Now we are fully prepared to present the whole picture of VCAS in Alg.~\ref{alg:adaptive}.~\ref{sec:app_alg} for more details about the algorithm.
+
+\begin{algorithm}
+    \caption{Variance controlled adaptive sampling(VCAS) for backpropagation}
+    \label{alg:adaptive}
+    \small
+    \begin{algorithmic}
+        \REQUIRE update frequency $F$, Monte-Carlo repetition number $M$, variance tolerant ratio for activation $\tau_{act}$, for weight $\tau_w$, $s$ step size $\alpha$, weight ratio multiplier $\beta$
+        
+        \STATE
+        \STATE $s\leftarrow1$, activation sample ratio schedule $\{\rho_{l}\}_{l=1}^{L}\leftarrow \1$, weight sample ratios $\{\nu_{l}\}_{l=1}^L\leftarrow\1$ 
+        \STATE $t\leftarrow 0$
+        \WHILE{not converge}
+            \IF{$t \mod F=0$}
+                \FOR{$i$ in $1,\dots,M$}
+                    \STATE $(X_i,y_i)\leftarrow$ batch selected randomly
+                    \STATE SGD gradient  $G_{s,i}\leftarrow$ exact backward using $(X_i,y_i)$
+                    \FOR{$j$ in $1,\dots,M$}
+                        \STATE activation gradient $G_{act,i,j}\leftarrow$ backward using $(X_i,y_i)$ with SampleA only
+                        \STATE calculate weight variance $V_{w,i,j}$ analytically with Eq.~\ref{eqn:lss-variance} and Eq.~\ref{eq:sum_weight_var}
+                    \ENDFOR
+                \ENDFOR
+                \STATE SGD variance $V_s\leftarrow\frac{1}{M-1}\sum_{i=1}^M \norm{G_{s,i}-\frac1M\sum_{i=1}^M G_{s,i}}_F^2$
+                \STATE activation variance $V_{act}\leftarrow\frac{1}{M}\sum_{i=1}^M\left(\frac1M \sum_{j=1}^M \norm{G_{act,i,j}-G_{s,i}}_F^2\right)$
+                \STATE weight variance $V_{w}\leftarrow \frac{1}{M}\sum_{i=1}^M\left(\frac1M \sum_{j=1}^M V_{w,i,j}\right)$
+                \STATE update $s$ with $V_{act}$ and $V_s$ according to Eq.~\ref{eqn:s-update}
+                
+                \STATE update $\{\rho_{l}\}_{l=1}^{L}$ with new $s$ according to Eq.~\ref{eq:act_update}
+                \STATE update $\{\nu_{l}\}_{l=1}^{L}$ with $V_{w}$ and $V_s$ according to Eq.~\ref{eq:weight_update}
+            \ENDIF
+            \STATE backward with SampleA and SampleW
+            \STATE $t\leftarrow t+1$
+        \ENDWHILE
+    \end{algorithmic}
+\end{algorithm}
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+\subsection{Training FLOPs reduction}
+
+We assessed VCAS on multiple fine-tuning and pre-training tasks in both vision and natural language domains. We compare our algorithm with the exact training and two previous works in BP sampling: a loss based method SB(selective backprop) in \citet{johnson2018training} and a gradient norm based method UB(upper bound) in \citet{katharopoulos2018not}. We choose these two methods since they are entirely online and need little modification to the original training pipeline like us. The results are shown in Tab.~\ref{tab:main_table}. All results are the average of 3 different seeds except for BERT-base pretraining and ViT finetuning on ImageNet-1k which we use 1.
+
+Note that to avoid falling into the pitfall of unfair comparison with baseline which is not tuned under efficient settings as is pointed out by \citet{dehghani2021efficiency} and \citet{kaddour2023no}, for all these experiments we use the same conservative setting of $\tau_{act}=\tau_w=0.025, \alpha=0.01, \beta=0.95, M=2$. We preset all these values heuristically without any tuning or prior knowledge. The only hyperpamater we modified among different tasks is the variance calculation frequency $F$, which can be defined easily according to the total training steps. 
+
+In fact, all the hyperparameters introduced by VCAS have explicit meanings and are insensitive. We show experimentally that though extra tuning may achieve a slightly better result, overall VCAS is robust to these hyperparameters with reasonable values.~\ref{sec:app_ablation} for details about ablation studies on these insensitive hyperparameters.
+
+For SB and UB, we both adopt a sample ratio of 1/3, since it's the recommended setting in the original papers and it can achieve a FLOPs reduction of $1-(1+2*1/3)/3=44.44\%$ which is close to the results we get in most tasks. An exception is BERT-base pretraining task where we find the FLOPs reduction achievable is low so we manually set the sample ratio of SB and UB to get the same FLOPs reduction as VCAS, so that they can still give a decent result. Nevertheless we are indeed favoring these methods by helping them to define a reasonable sample ratio, which can not be done themselves.
+\begin{table}[h]
+\centering
+\resizebox{\textwidth}{!}{
+\begin{threeparttable}[c]
+\caption{Comparison of VCAS with other methods. Data format is \textit{Final Train Loss / Final Eval Acc.(\%)} for exact, SB and UB, and \textit{Final Train Loss / Final Eval Acc.(\%) / FLOPs reduction ratio(\%)} for VCAS. The FLOPs reduction of SB and UB is 21.58\% for BERT pretraining and 44.44\% for other tasks. VCAS's FLOPs take account of the adaptation overhead. For BERT pretraining, accuracy=average performance on GLUE. Bold indicates the best result of each metric except for exact. Underline means Eval Acc less than 0.1\% off the exact training.}
+\label{tab:main_table}
+\begin{tabular}{p{0.12\linewidth}|c|c|c|c|c}
+\toprule
+Task & Dataset & exact & SB & UB & VCAS \\ \midrule
+BERT-base pretraining & C4 & 2.099 / 78.37 & 2.133 / 77.53 & \textbf{2.106} / 77.96 & 2.134 / \textbf{\underline{78.36}} / \textbf{21.58}  \\ \midrule
+\multirow{4}{\linewidth}
+{BERT-base finetuning} & MNLI-m & 0.2372 / 84.33 & 0.3833 / 83.71 & 0.2957 / 83.82 & \textbf{0.2428} / \textbf{\underline{84.23}} / 41.56 \\ 
+                                         & QQP & 0.1143 / 91.00 & 0.1441 / 90.76 & 0.1964 / 89.53 & \textbf{0.1189} / \textbf{\underline{90.92}} / \textbf{47.10} \\
+                                         & QNLI & 0.1014 / 91.67 & 0.2017 / 90.58 & 0.1441 / 91.23 & \textbf{0.1056} / \textbf{91.29} / \textbf{44.45} \\
+                                         & SST-2 & 0.0559 / 92.59 & 0.0727 / 92.63 & 0.0743 / 92.82 & \textbf{0.0600} / \textbf{\underline{93.04}} / \textbf{48.28}       \\ \midrule
+
+\multirow{4}{\linewidth}{BERT-large \newline finetuning} & MNLI-m & 0.1439 / 86.58 & 0.2492 / 85.18 & 0.2266 / 86.09 & \textbf{0.1619} / \textbf{\underline{86.63}} / 44.17     \\ 
+                                         & QQP                      & 0.0885 / 91.64          & 0.1308 / 91.20       & 0.1751 / 90.51       &  	\textbf{0.0962} / \textbf{\underline{91.57}} / \textbf{49.50}        \\ 
+                                         & QNLI                     & 0.0877 / 92.02          & 0.1436 / 91.50       & 0.1325 / \underline{91.98}       &  	\textbf{0.0640} / \textbf{\underline{92.15}} / \textbf{46.19}        \\ 
+                                         & SST-2                    & 0.0537 / 93.60          & 0.1136 / 91.81       & 0.0838 / 93.40       &   	\textbf{0.0593} / \textbf{\underline{93.67}} / \textbf{49.24}       \\ \midrule
+ \multirow{3}{\linewidth}{ViT-base\newline finetuning}    & CIFAR10                  & 0.1868 / 98.92          & 0.2367 / \underline{98.82}       & 0.1923 / \textbf{\underline{98.94}}       &  	\textbf{0.1873} / \underline{98.90} / \textbf{45.90}        \\ 
+                                         & CIFAR100                 & 0.8760 / 91.19          & 2.248 / 89.60       & 	1.175 / 89.68       &  \textbf{0.8811} / \textbf{91.08} / 29.32        \\ 
+                                         & ImageNet-1k              & 0.6032 / 82.27          & 0.6533 / 82.09       & 0.6109 / \textbf{\underline{82.28}}
+       &   	\textbf{0.6089} / \underline{82.27} / \textbf{45.29}       \\ \midrule
+\multirow{3}{\linewidth}{ViT-large\newline finetuning}    & CIFAR10                  & 0.1359 / 99.24          & 0.1439 / \underline{99.21}       & \textbf{0.1378} / \underline{99.17}       &  	0.1393 / \textbf{\underline{99.28}} / \textbf{48.37}        \\ 
+                                         & CIFAR100                 & 0.4590 / 93.56          & 0.5983 / 93.07       & 	0.5170 / 93.36       &  \multicolumn{1}{c}{\textbf{0.4649} / 
+\textbf{\underline{93.64}} / 38.67}        \\ 
+                                         & ImageNet-1k              & 0.4135 / 82.04          & 0.4637 / \underline{82.21}       & 0.4242 / \underline{82.21}
+       &   	\textbf{0.4228} / \textbf{\underline{82.27}} / \textbf{49.58}       \\ \bottomrule
+\end{tabular}
+\end{threeparttable}
+}
+\end{table}
+From the table we can see that overall VCAS is better than SB and UB with the least impact on final train loss and final evaluation accuracy. With FLOPs reduction of up to 49.58\%, VCAS can still achieve nearly the same results with the exact counterpart.
+
+\subsection{Wall-clock time reduction}
+
+We record the wall-clock time of BERT-large finetuning on MNLI and ViT-large finetuning on ImageNet-1k with NVIDIA 3090Ti, the results are depicted in Tab.~\ref{tab:wct_mnli} and Tab.~\ref{tab:wct_vit}.
+
+From these tables, we can find that VCAS can translate FLOPs reduction into wall-clock time reduction as effectively as simpler online batch sampling methods like UB and SB that drop part of data one-time in a whole, while enjoying mirrored performance with the exact training under theoretical guarantee.
+\begin{table}[!h]
+    \centering
+    \begin{threeparttable}
+    \caption{Wall-clock time of BERT-large finetuning on MNLI.}
+    \label{tab:wct_mnli}
+    \begin{tabular}{c|c|c|c|c|c}
+        \toprule
+        Method & Train Loss & Eval Acc.(\%) & Wall-clock Time(h) & FLOPs$\downarrow$(\%) & Time$\downarrow$(\%)\\ \midrule
+        exact & 0.1439 & 86.58 & 5.478 & - & - \\ 
+        SB & 0.2492 & 85.18 & 4.320 & \textbf{44.44} & 21.14 \\ 
+        UB & 0.2266 & 86.09 & \textbf{4.266} & \textbf{44.44} & \textbf{22.12} \\ 
+        VCAS & \textbf{0.1619} & \textbf{86.63} & 4.437 & 44.17 & 19.00 \\ \bottomrule
+    \end{tabular}
+    \end{threeparttable}
+\end{table}
+
+\begin{table}[!h]
+    \centering
+    \begin{threeparttable}
+    \caption{Wall-clock time of ViT-large finetuning on ImageNet-1k.}
+    \label{tab:wct_vit}
+    \begin{tabular}{c|c|c|c|c|c}
+        \toprule
+        Method & Train Loss & Eval Acc.(\%) & Wall-clock Time(h) & FLOPs$\downarrow$(\%) & Time$\downarrow$(\%)\\ \midrule
+        exact & 0.4135 & 82.04 & 52.29 & - & - \\ 
+        SB & 0.4637 & 82.21 & 42.56 & 44.44 & 18.61 \\ 
+        UB & 0.4242 & 82.21 & 41.92 & 44.44 & 19.83 \\ 
+        VCAS & \textbf{0.4228} & \textbf{82.27} & \textbf{41.28} & \textbf{49.58} & \textbf{21.06} \\ \bottomrule
+    \end{tabular}
+    \end{threeparttable}
+\end{table}
+
+The success of VCAS comes in two ways. One is the fine-grained sampling strategy that samples activation and weight jointly, which enables us to achieve much lower FLOPs given the variance budget. The other is the variance controlled framework combined with the self-adaptation algorithm, with which we are able to learn the proper sample ratios of different training phases. In the following two subsections, we will experimentally show the effectiveness of these two folds. 
+\subsection{Effectiveness of fine-grained sampling}
+
+\begin{figure}[t]
+  \centering    
+  \begin{minipage}{0.38\textwidth}
+  \centering
+  {\includegraphics[width=\linewidth]{fig/sampling_strategy.pdf}}
+  \caption{FLOPs reduction ratio of VCAS vs. sampling activation or weight solely with equal variance.}
+  \label{fig:fine_grained_sampling}
+  \end{minipage}
+  \hfill
+  \begin{minipage}{0.6\textwidth}
+  \centering
+  {\includegraphics[width=\linewidth]{fig/cmp_variance_plot.pdf}}
+  \caption{Gradient variance of different methods.}
+  \label{fig:cmp_variance_plot}
+  \end{minipage}
+
+\end{figure}
+
+We compare VCAS that samples activation and weight jointly with strategies that solely sampling activation or weight. Specifically, we keep an equal extra variance for BERT-base finetuning on MNLI. We set $\tau_{act}=\tau_w=0.025$ for VCAS, $\tau_{act}=0.05$ for activation sampling only and $\tau_w=0.05$ for weight sampling only. We find that under the preliminary that $\tau_{act},\tau_w\ll 1$, the results of these sampling strategies show no significant difference due to controlled variance. While as is shown in Fig.~\ref{fig:fine_grained_sampling}, VCAS can achieve a much greater FLOPs reduction with the same total variance introduced. It's reasonable since we can utilize more sparsity in both data and token dimensions with a fine-grained sampling strategy of VCAS.
+\subsection{Effectiveness of variance control and self-adaptation}
+
+In Fig.~\ref{fig:cmp_variance_plot} we plot the variance of different methods during training process of BERT-base finetuning on MNLI. We can find that VCAS is able to control the extra sampling variance introduced to our preset threshold, while for other variance-unaware algorithms like UB and SB, the extra variance is out of control with a similar FLOPs reduction.
+
+With carefully controlled variance, a similar convergence with exact training is guaranteed as we mentioned in the introduction. As is depicted in Fig.~\ref{fig:subfig_cmp_train_loss} and Fig.~\ref{fig:cmp_metrics} for BERT-base finetuning on MNLI, VCAS shares nearly the same convergence trajectory with the exact training with reduced FLOPs, while UB converges slightly slower due to uncontrolled variance, and SB converges in an entirely different trajectory with variance introduced far larger than exact.
+
+\begin{figure}[!h]
+  \centering
+  \subcaptionbox{Validation  loss\label{fig:subfig_cmp_eval_loss}}{\includegraphics[width=0.3\linewidth]{fig/cmp_eval_loss.pdf}}
+  \subcaptionbox{Validation accuracy\label{fig:subfig_cmp_eval_acc}}{\includegraphics[width=0.3\linewidth]{fig/cmp_eval_acc.pdf}}
+  \subcaptionbox{FLOPs per iteration\label{fig:subfig_cmp_flops_per_it}}{\includegraphics[width=0.3\linewidth]{fig/cmp_flops_per_it.pdf}}
+  \caption{\small Convergence comparison of different sampling methods. FLOPs is normalized by exact training.}
+  \label{fig:cmp_metrics}
+\end{figure}
+
+
+
+\section{Conclusion}
+
+
+We propose VCAS, a robust sampling method for back propagation with controlled variance and self-adaptive sample ratios. 
+VCAS computes an approximate stochastic gradient by applying fine-grained sampling to gradually remove samples and tokens during backpropagation. VCAS enjoys similar variance, convergence trajectory, and final accuracy with exact back propagation, while reduces the training cost by up to 49.58\%.
+
+\iffalse
+
+

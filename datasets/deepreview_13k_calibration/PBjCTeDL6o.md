@@ -1,8 +1,8 @@
 # Unlearning-based Neural Interpretations
 
 - Decision: Accept
-- Avg Score: 4.60
-- Scores: 8, 1, 0, 8, 6
+- Avg Score: 8.00
+- Scores: 8, 10, 8, 6
 
 ## Abstract
 \normalsize Gradient-based interpretations often require an anchor point of comparison to avoid saturation in computing feature importance. We show that current baselines defined using static functions—constant mapping, averaging or blurring—inject harmful colour, texture or frequency assumptions that deviate from model behaviour. This leads to accumulation of irregular gradients, resulting in attribution maps that are biased, fragile and manipulable. Departing from the static approach, we propose \texttt{UNI} to compute an (un)learnable, debiased and adaptive baseline by perturbing the input towards an \emph{unlearning direction} of steepest ascent. Our method discovers reliable baselines and succeeds in erasing salient features, which in turn locally smooths the high-curvature decision boundaries. Our analyses point to unlearning as a promising avenue for generating faithful, efficient and robust interpretations.

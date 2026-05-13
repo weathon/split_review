@@ -1,0 +1,313 @@
+\title{UpFusion: Novel View Diffusion from Unposed Sparse View Observations}
+
+\begin{abstract}
+\vspace{-2mm}
+We propose UpFusion, a system that can perform novel view synthesis and infer 3D representations for an object given a sparse set of reference images \emph{without} corresponding pose information. Current sparse-view 3D inference methods typically rely on camera poses to geometrically aggregate information from input views, but are not robust in-the-wild when such information is unavailable/inaccurate. 
+In contrast, UpFusion sidesteps this requirement by learning to implicitly leverage the available images as context in a conditional generative model for synthesizing novel views. 
+We incorporate two complementary forms of conditioning into diffusion models for leveraging the input views: a) via inferring query-view aligned features using a scene-level transformer, b) via intermediate attentional layers that can directly observe the input image tokens. We show that this mechanism allows generating high-fidelity novel views while improving the synthesis quality given additional (unposed) images. 
+We evaluate our approach on the Co3Dv2 and Google Scanned Objects datasets and demonstrate the benefits of our method over pose-reliant sparse-view methods as well as single-view methods that cannot leverage additional views. Finally, we also show that our learned model can generalize beyond the training categories and even allow reconstruction from self-captured images of generic objects in-the-wild.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+The long-standing problem of recovering 3D objects from 2D images has witnessed remarkable recent progress. In particular, recent neural field-based methods~\citep{mildenhall2020nerf} excel at recovering highly detailed 3D models of objects or scenes given densely sampled multi-view observations. However, in real-world scenarios such as casual capture settings and online marketplaces, obtaining dense multi-view images is often impractical. Instead, only a limited set of observed views may be available, often leaving some aspects of the object unobserved. With the goal of reconstructing similarly high-fidelity 3D objects in these settings, several learning-based methods~\citep{yao2018mvsnet,yu2020fast, zou2023sparse3d} have pursued the task of sparse-view 3D inference. While these methods can yield impressive results, they crucially rely on known accurate camera poses for the input images, which are often only available in synthetic settings or using privileged information in additional views, and are thus not currently applicable for in-the-wild sparse-view reconstruction where camera poses are not available.
+
+In this work, we seek to overcome the limitation of requiring known camera poses and address the task of 3D inference given \emph{unposed} sparse views. Unlike pose-aware sparse-view 3D inference methods which use geometry-based techniques to leverage the available input, we introduce an approach that can implicitly use the available views for novel-view generation. 
+Specifically, we designate one of the input images as an anchor to define a coordinate frame, and adopt a scene-level transformer~\citep{srt22} that implicitly incorporates all available input images as context to compute per-ray features for a desired query viewpoint. Utilizing these query-aligned features, we can train a conditional denoising diffusion model to generate novel-view images. 
+
+However, we observe that relying solely on query-aligned features learned from unposed input views does not fully utilize the available context. 
+To further enhance the instance-specificity in the generations, we propose to also add `shortcuts' via attention mechanism in the diffusion process to allow direct attending to the input view features during the generation.
+Furthermore, to enable generalization to unseen categories, we adopt a pre-trained 2D foundation diffusion model~\citep{rombach2022high, zhang2023adding} as initialization and adapt it to leverage the two forms of context-based conditioning. Finally, the novel view images synthesized from the learned diffusion model, despite high fidelity, may not guarantee 3D consistency. Therefore, we additionally extract 3D-consistent models via score-based distillation~\citep{poole2022dreamfusion, zhou2023sparsefusion}.
+We present results using the challenging real-world dataset, Co3Dv2~\citep{reizenstein2021common}, which comprises multi-view sequences from 51 categories with 6-DoF pose variations. To compare against recent single-view methods, we also train our model using renderings from Objaverse~\citep{deitke2023objaverse} and test on  Google Scanned Objects~\citep{downs2022google}. In both these settings, we find that our approach allows extracting signal from the available unposed views, and that the performance improves with additional images. In particular, we show that our system significantly improves over recent pose-dependent methods when they fed predicted camera poses and can outperform SoTA single-view 3D methods which cannot leverage additional unposed images. We also demonstrate the ability of our method to generalize beyond the training categories by showcasing its performance on unseen object classes as well as on self-captured in-the-wild data.
+
+
+\section{Related Work}
+
+
+\paragraph{3D from Dense Multi-view Captures.} Multi-view observations of a scene naturally provide geometric cues for understanding its 3D structure, and this principle has been leveraged across decades to infer 3D from dense multi-view. 
+Classical Multi-View Stereo (MVS) methods~\citep{furukawa2015multi} leverage techniques such as structure from motion (SfM)~\citep{schoenberger2016sfm} to estimate camera poses for dense matching to 3D points. Recent neural incarnations~\citep{mildenhall2020nerf,wang2021neus, barron2021mip, fridovich2022plenoxels, muller2022instant, yariv2020multiview} of these methods have further enabled breakthroughs in terms of the quality of the obtained dense 3D reconstruction. While these methods rely on classical techniques for camera estimation, subsequent approaches ~\citep{lin2021barf, bian2023nope, fu2022mononerf} have relaxed this requirement and can jointly estimate geometry and recover cameras. However, these methods are unable to predict unseen regions and crucially rely on densely-sampled images as input -- a requirement our work seeks to overcome.
+
+\paragraph{Single-view to 3D.}
+On the other extreme from dense multi-view methods are approaches that aim to reconstruct a 3D representation from just a single view. While easily usable, developing such systems is highly challenging as it requires strong priors to recover unknown information. 
+A common paradigm used to address this program is training models conditioned on encoded image features to directly predict 3D geometry (\eg voxels~\citep{girdhar2016learning}, meshes~\citep{wang2018pixel2mesh,gkioxari2019mesh,ye2021shelf}, point clouds~\citep{fan2017point}, or implicit functions~\citep{mescheder2019occupancy,xu2019disn, cheng2023sdfusion}). However, given the uncertain nature of the task, the regression-based objectives in these methods limits their generation quality. More recently, there has been growing interest in distilling large text-to-image diffusion models~\citep{song2020denoising,saharia2022photorealistic,rombach2022high} to generate 3D representations ~\citep{poole2022dreamfusion,wang2023score,wang2023prolificdreamer,chen2023fantasia3d}. Building upon these advances, several distillation-based~\citep{liu2023zero, qian2023magic123, deng2023nerdi, melas2023realfusion, tang2023make, Xu_2022_neuralLift} and distillation-free~\citep{liu2023one, liu2023syncdreamer} single image to 3D methods were proposed. While these can infer detailed 3D, they cannot benefit from the information provided by additional (posed or unposed) views. Moreover, as they hallucinate details in unobserved regions, the reconstructed object may significantly differ from the one being imaged. If a user aims to faithfully capture a specific object of interest, single-view methods are fundamentally ill-suited for this task.
+
+\paragraph{Sparse-view to 3D.}
+With the goal of reducing the burden in the multi-view capture process while still enabling detailed capture of specific objects of interest, there has been a growing interest in spare-view 3D inference methods. 
+By leveraging the benefits of both multi-view geometry and learning, regression-based methods achieve 3D consistency by using re-projected features obtained from input views~\citep{reizenstein2021common,wang2021ibrnet,yu2021pixelnerf}. However, the results tend to be blurry due to the mean-seeking nature of regression methods under uncertainty. 
+To improve the quality of generations, another stream of work~\citep{chan2023genvs,rombach2021geometry,kulhanek2022viewformer,zhou2023sparsefusion} formulate the problem as a probabilistic generation task. These methods achieve better perceptual quality, yet usually require precise pose information, which is often not practically available. To overcome this issue, one may either consider leveraging recent sparse-view pose estimation methods~\citep{sinha2023sparsepose, zhang2022relpose} in conjunction with state-of-the-art novel-view synthesis methods, or consider methods that optimize poses jointly with the objective of novel-view synthesis~\citep{smith2023flowcam, jiang2022few}. However, the computation of explicit poses may not always be robust, and we empirically show that this leads to poor performance. Closer to our approach, UpSRT~\citep{srt22} and RUST~\citep{sajjadi2023rust} allow novel view synthesis without explicit pose estimation (i.e., directly from unposed sparse views). However, their regression-based pipelines limit the quality of the synthesized outputs. 
+
+
+\section{Approach}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{imgs/fig_2_v4.pdf}
+    \caption{\textbf{UpSRT}~\citep{srt22} performs novel view synthesis from a set of unposed images. UpSRT consists of an encoder, a decoder, and an MLP.
+    The encoder takes encoded image features as inputs and outputs a set-latent representation $\vc_s$. 
+    The decoder takes query rays as inputs and attends to the set-latent representation to get features $\vc_d$, which are then fed into MLP to obtain final novel view RGB images. We make use of both $\vc_s$ and $\vc_d$ to provide conditional context to our model.}
+    \label{fig:upsrt}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{imgs/fig_3_v4.pdf}
+    \caption{\textbf{UpFusion 2D} is the proposed conditional diffusion model performing novel view synthesis conditional on information extracted from a set of unposed images. To reason about the query view, Upfusion takes as additional inputs the view-aligned decoder features $\vc_d$ obtained from UpSRT decoder. To further allow the model to attend to details from input views, UpFusion condition on the set-latent representation $\vc_s$ via attentional layers.
+    }
+    \label{fig:upfusion}
+\end{figure}
+
+Our goal is to infer a 3D representation of an object given a sparse set of images. While prior works \citep{yu2021pixelnerf,zhou2023sparsefusion,chan2023genvs} typically aggregate information from the input views by using geometric projection and unprojection, these crucially rely on the availability of accurate camera poses which are not readily available in-the-wild. We instead aim to tackle the task of 3D inference given \emph{unposed} sparse views.
+
+Towards building a system capable of 3D inference in this unposed setting, we propose a mechanism for implicitly leveraging the available images as context when generating novel views. Specifically, we adapt Unposed Scene Representation Transformer (UpSRT) \citep{srt22}, a prior work that leverages transformers as a mechanism for implicitly aggregating information from input views, and computes query-view-aligned features for view synthesis. However, instead of their mean-seeking regression objective which results in blurry renderings, we enable probabilistic sparse view synthesis by using the internal representations of UpSRT to condition a diffusion model to perform novel view synthesis. While our diffusion model can yield high-fidelity generations, the outputs are not 3D consistent. To  obtain a consistent 3D representation, we then train instance-specific neural representations ~\citep{muller2022instant, torch-ngp} which maximizes the likelihood of the renderings under the learned generative model.  We detail our approach below, but first briefly review UpSRT and denoising diffusion models~\citep{ho2020denoising} that our work builds on.
+
+\subsection{Preliminaries}
+
+\subsubsection{Unposed Scene Representation Transformer}
+
+Given a set of $N$ images $~\bm{\mathcal{I}} = \{I_1, I_2, ..., I_N \}$, UpSRT~\citep{srt22} seeks to generate novel view images by predicting RGB color $r$ for any query ray $q$, where the first input image is used as an anchor to define the coordinate system (see Section~\ref{sec:APP_coord_frame} for details).
+As illustrated in \figref{fig:upsrt}, it first extracts patch-wise features for each image $I_i$ with an image encoder $\mathcal{U}_I$. Then, it uses an encoder transformer $\mathcal{U}_E$ to obtain a set latent representation $\vc_s$. Finally, it uses a decoder transformer $\mathcal{U}_D$ which attends to $v_c$, followed by an MLP, to predict the RGB color. In summary, the UpSRT workflow can be represented by the following equations: 
+
+\begin{equation}
+       \vc_s = \mathcal{U}_E(\{ \mathcal{U}_I(\bm{\mathcal{I}}) \}),
+       C(\bm{r}) = \text{MLP}(\mathcal{U}_D(\bm{r} | \vc_s))
+\end{equation}
+
+We pre-train an UpSRT model using a pixel-level regression loss and leverage it for subsequent generative modeling.
+
+\subsubsection{Denosing Diffusion}
+Denoising diffusion models (\cite{ho2020denoising}) seek to learn a generative model over data samples $\vx$ by learning to reverse a forward process where noise is gradually added to original samples. The learning objective can be reduced to a denoising error, where a diffusion model $\epsilon_\phi$ is trained to estimate the noise added to a current sample $\vx_t$:
+
+\begin{equation}
+    \mathcal{L}_{DM} = \expect_{\vx_0, t, \epsilon \sim \mathcal{N}(0, 1)} [\| \epsilon_t - \epsilon_\phi(\vx_t, t) \|^2_2]
+\label{dm_eqn}
+\end{equation}
+
+While the above objective summarizes an unconditional diffusion model, it can be easily adapted to learn conditional generative models $p(\vx | \vy)$ by adding a condition $\vy$ (such as a set of unposed images) to the input of the denoising model $\epsilon_\phi(\vx_t, t, \vy)$. 
+
+\subsection{Probabilistic View Synthesis using Sparse Unposed Views}
+\label{sec:view_synth}
+We aim to learn a generative model over novel views of an object given a sparse set of unposed images. Given this, our goal is to learn the distribution $p(\mathbf{I} | \bm{\mathcal{I}}, \pi)$, where $\pi$ denotes a query pose, $\bm{\mathcal{I}}$ denotes the set of unposed images and $\mathbf{I}$ denotes the query-view image. Instead of learning the distribution directly in pixel space, we follow a common practice of instead learning this distribution in latent space $p(\vx | \bm{\mathcal{I}}, \pi)$, using pre-trained encoders and decoders corresponding to this latent space~\citep{rombach2022high}: $\vx = \mathcal{E}(\mathbf{I});~\mathbf{I}=\mathcal{D}(\vx)$.
+
+We model this probability distribution by training a conditional diffusion model which leverages the available unposed images as context, and seek to propose an architecture that embraces several desirable design principles. First, we note that such a diffusion model must be able to (implicitly) reason about the query view it is tasked with generating in the context of the available input, and leverage the UpSRT encoder-decoder framework to enable this. While the decoder features from UpSRT can ground the query-view generation, we note that these may abstract away the salient details in the input, and we propose to complement these by allowing the generative model to directly leverage the patch-wise latent features and more easily `copy' content from input views. Lastly, to enable efficient training and generalization beyond training data, we propose to adapt off-the-shelf diffusion models for view-conditioned generation.
+
+\textbf{View-aligned Features for Image Generation.} Given a target view $\pi$, we construct a set of rays $\mathcal{R}$ corresponding to a grid of 2D pixel locations in this view. We query the UpSRT decoder with this set of rays to obtain view-aligned decoder features $\vc_d$ of the same resolution as the image latent $\vx$. As illustrated in \figref{fig:upfusion}, these query-aligned features are concatenated with the (noisy) image latents to serve as inputs to the denoising diffusion model.
+
+\textbf{Incorporating Direct Attention to Input Patches.} To allow the generation model to directly incorporate details visible in the input views, we also leverage the set-latent feature $\vc_s$ representation extracted by the UpSRT encoder. Importantly, this representation comprises of per-patch features aligned with the input images and allows efficiently `borrowing' details visible in these images. Unlike the view-aligned decoder feature which can be spatially concatenated with the noisy diffusion input, we condition on these set-latent features via attentional layers in the generation model. 
+
+\textbf{Adapting Large-scale Diffusion Models for Novel-view Synthesis.} Instead of training our generative model from scratch, we aim to take advantage of the strong priors learned by large diffusion models such as Stable Diffusion (\cite{rombach2022high}). To this end, we use a modified version of the ControlNet architecture \citep{zhang2023adding} to adapt a pre-trained Stable Diffusion model to incorporate additional conditionings $\vc_d, \vc_s$ for view generation.
+
+\textbf{Putting it Together.} In summary, we reduce the task of modeling $p(\vx | \bm{\mathcal{I}}, \pi)$ to learning a denoising diffusion model $p_{\phi}(\vx|\vc_d, \vc_s)$, and leverage the ControlNet architecture to incorporate the two conditioning features and learn a denoising model $\epsilon_{\phi}(\vx_t, t, \vc_d, \vc_s)$. More specifically, ControlNet naturally allows adding the spatial feature $\vc_d$ as via residual connections to the spatial layers of the UNet in a pre-trained Stable Diffusion model. We can train such a model using any multi-view dataset, where we train the denoising diffusion model to generate the underlying image from a query view given a variable number of observed input views.
+
+\subsection{Inferring 3D Consistent Representations}
+\label{sec:infer3d}
+
+While the proposed conditional diffusion model can provide high-fidelity renderings from query views, the generated views are not 3D consistent. To obtain a 3D representation given the inferred distribution over novel views, we subsequently optimize an instance-specific neural representation. Towards this, we follow SparseFusion ~\citep{zhou2023sparsefusion} which seeks neural 3D modes by  optimizing the likelihood of their renderings by adapting a Score Distillation Sampling (SDS)~\citep{poole2022dreamfusion} loss to view-conditioned generative models.
+
+Specifically, we optimize a neural 3D representation $g_{\theta}$ by ensuring its renderings have high likelihood under our learned distribution $p(\mathbf{I}| \bm{\mathcal{I}}, \pi)$. We do so by  minimizing the difference between the  renderings of the instance-specific neural model and the denoised predictions from the learned diffusion model. Denoting by $g_{\theta}(\pi)$ the rendering of the neural 3D representation from viewpoint $\pi$, and by $\hat{\vx}_0$ the denoised prediction inferred from the learned diffusion model $\epsilon_{\phi}(\vx_t; t, \vc_d, \vc_s)$, the training objective can be specified as:
+\begin{equation}
+    \mathcal{L}_{3D} = \expect_{t,\epsilon,\pi} [\|g_{\theta}(\pi) - \mathcal{D}(\hat{\vx}_0)\|^2]
+\end{equation}
+Unlike SparseFusion ~\citep{zhou2023sparsefusion} which additionally uses a rendering loss for the available input views using known cameras, we rely only on the above denoising objective for optimizing the underlying 3D representation given unposed input views.
+
+\subsection{Training Details}
+
+We follow a multi-stage training procedure to optimize our models. We first train the UpSRT model separately using a reconstruction loss on the color predicted for query rays given the set of reference images \bm{\mathcal{I}}. Then, we train the denoising diffusion model while using the conditioning information from the pre-trained UpSRT, which is frozen in this stage.
+
+To enable the usage of classifier-free guidance \citep{ho2021classifier} during inference, we train our diffusion model in the unconditional mode for a small fraction of the time. We do this by following the condition dropout procedure used in \citep{brooks2022instructpix2pix, liu2023zero} that randomly replaces the conditioning information with null tokens (for more details, see \ref{sec:APP_up2d}).
+
+Once the diffusion model is trained, we can extract a 3D representation for an object by optimizing an Instant-NGP \citep{muller2022instant, torch-ngp} using the neural mode seeking objective discussed in section \ref{sec:infer3d}. We use DDIM \citep{song2020denoising} for fast multi-step denoising. Inspired by \cite{wang2023prolificdreamer}, we follow an annealed time schedule for score distillation. We also use some regularization losses while training the NeRF as used in \cite{zhou2023sparsefusion}. For more details, please refer to section \ref{sec:APP_up3d}.
+
+
+
+\section{Experiments}
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{imgs/sparse_view_comparisons_v2.pdf}
+    \caption{\textbf{Qualitative comparison with sparse-view baselines.} 
+    We compare UpFusion with baseline methods using 3 and 6 unposed images as inputs. 
+    SparseFusion fails to capture the correct geometry, due to the imperfect camera poses estimated by RelPose++. 
+    UpSRT generates blurry results due to the nature of regression-based methods. 
+    On the contrary, UpFusion 2D synthesizes sharp outputs with correct object poses. 
+    UpFusion 3D further improves the 3D consistency.
+    }
+    \label{fig:sparse_view}
+\end{figure}
+\subsection{Experimental Setup}
+
+\subsubsection{Dataset}
+
+\label{sec:dataset}
+
+We test our approach in two different experimental setups. First, we use the Co3Dv2 \citep{reizenstein2021common}, a large-scale dataset with real multi-view images of objects from 51 categories. Following  \citep{zhang2022relpose,lin2023relposepp}, we train our model on 41 categories and hold out 10 categories to test the ability of our method to generalize to unseen categories. We use the \textit{fewview-train} split for training and \textit{fewview-dev} split for evaluation. We limit our focus to modelling only objects and not their backgrounds. To this end, we create a white background for our objects by using the masks available in the dataset. As our full method (as well as some baselines) optimize instance-specific neural representations, which can take 1hr per instance, we limit our evaluations to 5 object instances per category. To account for the inherent (scale) ambiguity in the coordinate systems between the predictions and ground-truth, we define \text{aligned} versions of the typical image reconstruction metrics (PSNR-A, SSIM-A, LPIPS-A). See Section \ref{sec:aligned_metrics} for details. 
+
+To compare with popular state-of-the-art single-view baselines that are trained on Objaverse \citep{deitke2023objaverse}, we also fine-tune a version of our model (which are already pre-trained on Co3Dv2) on Objaverse renderings. We denote versions of our model fine-tuned on Objaverse with $\dag$ as a superscript (for example, UpFusion$^\dag$ (3D)) and evaluate this model using the Google Scanned Objects~\citep{downs2022google} dataset. As both, Objaverse and GSO comprise of normalized origin-centered objects (unlike CO3D where the reconstructions are in arbitrary SfM coordinate systems), we use the `normal' image reconstruction metrics for evaluation.
+
+\begin{table}
+  
+  \centering
+  \resizebox{\columnwidth}{!}{%
+  \begin{tabular}{l|l|ccc|ccc|ccc}
+    \toprule
+    \multirow{2}{*}{Type} & \multirow{2}{*}{Method} & \multicolumn{3}{c|}{PSNR-A $(\uparrow)$}  &  \multicolumn{3}{c|}{SSIM-A $(\uparrow)$} & \multicolumn{3}{c}{LPIPS-A $(\downarrow)$} \\
+     & & 1V & 3V & 6V & 1V & 3V & 6V & 1V & 3V & 6V \\
+    \midrule
+    Posed & SparseFusion (GT) & --- &  22.41 & 24.02 & --- &  0.79 & 0.81 & --- &  0.20 & 0.18 \\
+    \midrule
+    \multirow{4}{*}{Unposed} & SparseFusion (RelPose++) & --- &  \nextBestMethod{17.76} & 17.12 & --- & 0.67 & 0.64 & --- &  0.30 & 0.33 \\
+    & UpSRT & \nextBestMethod{16.84} & 17.75 & \nextBestMethod{18.36} & \nextBestMethod{0.73} & \nextBestMethod{0.74} & \nextBestMethod{0.75} & 0.34 & 0.32 & 0.31  \\
+    & UpFusion (2D) & 16.54 & 17.12 & 17.41 & 0.71 & 0.72 & 0.73 & \nextBestMethod{0.23} & \nextBestMethod{0.22} & \nextBestMethod{0.22}  \\
+    & UpFusion (3D) & \bestMethod{18.17} & \bestMethod{18.68} & \bestMethod{18.96} & \bestMethod{0.75} & \bestMethod{0.76} & \bestMethod{0.76} & \bestMethod{0.22} & \bestMethod{0.21} & \bestMethod{0.21}  \\
+    \bottomrule
+  \end{tabular}%
+  }
+  \caption{\textbf{Sparse-view synthesis evaluation on seen categories (41 categories).} We conduct comparisons using  5 samples per category and then and report the average across these.
+  UpFusion performs favorably against baseline methods, and demonstrates the capability to leverage additional unposed images. 
+  Moreover, UpFusion 3D consistently improves the results from UpFusion 2D.
+  }
+  \label{tab:sparse-view-comparison}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.0\textwidth]{imgs/gen_fig.pdf}
+    \caption{\textbf{Generalization beyond training categories.} We show results for UpFusion (3D) across object categories \emph{not} seen in training. For each instance, we present the 1, 3, or 6 unposed input views (left), as well as 4 novel view renderings (right). We observe that despite not being trained on these categories, UpFusion is able to accurately infer the underlying 3D structure and generate detailed novel views.}
+    \label{fig:generalization}
+\end{figure}
+\subsubsection{Baselines}
+We highlight the benefits of our approach by comparing it to prior pose-dependent and unposed novel-view generation techniques. Specifically, we compare our 2D diffusion model (`UpFusion 2D') and obtained 3D representations (`UpFusion 3D') against the following baselines:
+
+\textit{SparseFusion}~\citep{zhou2023sparsefusion} is a current state-of-the-art method for pose-dependent sparse-view inference on Co3Dv2. We compare against its performance when using a recent sparse-view pose estimation system RelPose++~\citep{lin2023relposepp}, and also report its performance using GT camera poses as an upper bound.
+
+\textit{UpSRT.} As a representative approach for view synthesis from unposed images, we compare against the prediction from the UpSRT~\citep{srt22} backbone used in our approach.
+
+\textit{FORGE}~\citep{jiang2022few} is a method that jointly optimizes for poses while being trained on a novel-view synthesis objective. As FORGE uses the GSO dataset~\citep{downs2022google} to demonstrate its generalization capability, we compare it against our Objaverse fine-tuned UpFusion$^\dag$ (3D).
+
+\textit{Single-view methods.} To highlight the benefit of using more input views, we compare UpFusion$^\dag$ (3D) to two representative state-of-the-art single-view baselines: Zero-1-to-3~\citep{liu2023zero} and One-2-3-45~\citep{liu2023one}. For Zero-1-to-3, we include comparisons with two versions -- the original version which uses SJC~\citep{wang2023score} and the highly optimized threestudio implementation~\citep{threestudio2023} (which uses additional tricks to aid 3D distillation). We compare against these baselines on the GSO dataset.
+
+\begin{table}
+  \centering
+  \resizebox{0.8\columnwidth}{!}{%
+  \begin{tabular}{l|ccc|ccc|ccc}
+    \toprule
+    \multirow{2}{*}{Method} & \multicolumn{3}{c|}{PSNR-A $(\uparrow)$}  &  \multicolumn{3}{c|}{SSIM-A $(\uparrow)$} & \multicolumn{3}{c}{LPIPS-A $(\downarrow)$} \\
+     & 1V & 3V & 6V & 1V & 3V & 6V & 1V & 3V & 6V \\
+    \midrule
+    UpSRT & \nextBestMethod{16.75} & \nextBestMethod{17.57} & \nextBestMethod{18.06} & \nextBestMethod{0.73} & \nextBestMethod{0.74} & \nextBestMethod{0.74} & 0.35 & 0.33 & 0.32 \\
+    UpFusion (2D) & 16.33 & 17.04 & 17.38 & 0.70 & 0.71 & 0.72 & \nextBestMethod{0.25} & \nextBestMethod{0.23} & \nextBestMethod{0.23}  \\
+    UpFusion (3D) & \bestMethod{18.27} & \bestMethod{18.83} & \bestMethod{19.11} & \bestMethod{0.75} & \bestMethod{0.76} & \bestMethod{0.76} & \bestMethod{0.23} & \bestMethod{0.22} & \bestMethod{0.22}  \\
+    \bottomrule
+  \end{tabular}%
+  }
+  \caption{\textbf{Sparse-view synthesis evaluation on unseen categories (10 categories).} We conduct comparisons using 5 samples per category and report the average across these. We observe a comparable performance to the results on seen categories. 
+  }
+  \label{tab:unseen-cat-eval}
+\end{table}
+
+\subsection{Results}
+
+\subsubsection{Novel-view synthesis on CO3Dv2}
+
+\paragraph{Comparisons against Sparse-view Methods.}
+We compare UpFusion with baseline methods on the categories seen during training, as shown in Table \ref{tab:sparse-view-comparison}.
+UpFusion performs favorably against both UpSRT and unposed SparseFusion.
+Furthermore, UpFusion consistently improves the prediction when more views are provided. 
+However, there is still room for improvement compared to the methods using ground-truth poses. 
+In \figref{fig:sparse_view}, we qualitatively present the novel view synthesis results. 
+SparseFusion can capture some details visible in the input views but largely sufferrs due to the error in input poses. 
+UpSRT, on the other hand, can robustly generate coarse renderings, but is unable to synthesize high-fidelity outputs from any viewpoints. Our 2D diffusion model, UpFusion 2D, generates   higher fidelity images that improve over the baselines in the perceptual metrics. Finally, the 3D-consistent inferred representation Upfusion3D yields the best results. 
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{imgs/gso_comparisons_v2.pdf}
+    \caption{\textbf{Qualitative comparison on GSO.} 
+    We compare UpFusion$^\dag$ (3D) to two single-view baselines and one sparse-view baseline (FORGE) on the GSO dataset. For each instance, single-view methods use only the image with the black border as input, whereas sparse-view methods use all input images. We can observe that UpFusion$^\dag$ (3D) while using 6 inputs views is able to better understand the 3D structure of the object than the single-view baselines. Moreover, it is able to incorporate information from the 6 inputs views much better than the sparse-view baseline.
+    }
+    \label{fig:gso}
+\end{figure}
+
+\begin{table}[t!]
+  \centering
+  \resizebox{0.7\columnwidth}{!}{%
+  \begin{tabular}{c|l|c|c|c}
+    \toprule
+    \# Input Views & Method & PSNR $(\uparrow)$ & SSIM $(\uparrow)$ & LPIPS $(\downarrow)$ \\
+    \midrule
+    \multirow{4}{*}{1V} & Zero-1-to-3 (SJC) & 18.72 & \nextBestMethod{0.90} & 0.12 \\
+    & Zero-1-to-3 (TS) & \nextBestMethod{21.71} & \bestMethod{0.91} & \nextBestMethod{0.09} \\
+    & One-2-3-45 & 17.77 & 0.87 & 0.15 \\
+    & UpFusion$^\dag$ (3D) & 20.52 & 0.89 & 0.12 \\
+    \midrule
+    \multirow{2}{*}{6V} & FORGE & 17.40 & 0.88 & 0.15 \\
+    & UpFusion$^\dag$ (3D) & \bestMethod{22.51} & \bestMethod{0.91} & \bestMethod{0.08} \\
+    \bottomrule
+  \end{tabular}%
+  }
+  \caption{\textbf{Novel-view synthesis evaluation on GSO.} 
+  We compare UpFusion 3D to single-view baselines as well as a sparse-view pose-optimization baseline on GSO dataset which is out of distribution for all methods.
+  }
+  \label{tab:gso}
+\end{table}
+
+\paragraph{Characterizing Generalization.}
+As UpFusion is trained upon a pre-trained large-scale diffusion model providing strong general priors, the learned novel view synthesis capability is expected to be generalized to categories beyond training. 
+We evaluate UpFusion on 10 unseen categories, as shown in Table \ref{tab:unseen-cat-eval}. 
+Encouragingly, we find that the performance does not degrade compared to the results on seen categories and believe this highlights the potential of our approach to perform in-the-wild sparse-view 3D inference. We also depict some qualitative results on unseen objects in \Figref{fig:generalization}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\textwidth]{imgs/cond_abl.pdf}
+    \caption{\textbf{Ablation of generative model conditioning.} Visualizations from category-specific models trained teddybears using varying conditioning for novel-view generation. We find that the model using only set-latent conditioning is unable to understand the query pose, while the one relying on only decoder features alters the object identity.}
+    \label{fig:ablation}
+\end{figure}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.0\textwidth]{imgs/itw_fig.pdf}
+    \caption{\textbf{3D from self-captured images.} Given 3-6 self-captured input images for a generic object (left), we show 4 novel viewpoints of the 3D asset recovered via UpFusion$^\dag$ (3D) (right).}
+    \label{fig:generalization}
+\end{figure}
+
+\begin{table}[t!]
+  \label{cond-ablation}
+  \centering
+  \resizebox{0.8\columnwidth}{!}{%
+  \begin{tabular}{l|ccc|ccc|ccc}
+    \toprule
+    \multirow{2}{*}{Conditioning} & \multicolumn{3}{c|}{PSNR-A $(\uparrow)$}  &  \multicolumn{3}{c|}{SSIM-A $(\uparrow)$} & \multicolumn{3}{c}{LPIPS-A $(\downarrow)$} \\
+     & 1V & 3V & 6V & 1V & 3V & 6V & 1V & 3V & 6V \\
+    \midrule
+    DF Only & \nextBestMethod{14.65} & \nextBestMethod{15.28} & \nextBestMethod{15.53} & \nextBestMethod{0.63} & \nextBestMethod{0.64} & \nextBestMethod{0.64} & \nextBestMethod{0.32} & \nextBestMethod{0.30} & \nextBestMethod{0.30} \\
+    SLT Only & 13.15 & 13.38 & 13.49 & 0.60 & 0.60 & 0.60 & 0.36 & 0.35 & 0.35 \\
+    DF+SLT & \bestMethod{15.58} & \bestMethod{16.11} & \bestMethod{16.26} & \bestMethod{0.65} & \bestMethod{0.66} & \bestMethod{0.66} & \bestMethod{0.30} & \bestMethod{0.28} & \bestMethod{0.28} \\
+    \bottomrule
+  \end{tabular}%
+  }
+  \caption{\textbf{Ablation of generative model conditioning.} 
+  We ablate our conditional diffusion model with different conditional contexts. 
+  \textbf{DF} stands for decoder features $\vc_d$, and \textbf{SLT} stands for set-latent representations $\vc_s$.
+  We train a category-specific generation model for this ablation on the teddybear category and report performance averaged across all test instances.
+  }
+  \label{tab:ablation}
+\end{table}
+\subsubsection{Novel-view synthesis on GSO}
+
+We compare UpFusion$^\dag$ (3D) to two state-of-the-art single-view baselines (Zero-1-to-3 and One-2-3-45) and a sparse-view baseline (FORGE) on 20 randomly sampled instances from the GSO dataset. For Zero-1-to-3, we compare with both the original SJC implementation and threestudio (TS) implementation. From Table \ref{tab:gso}, we can observe that UpFusion$^\dag$ (3D) while using 6 inputs views is able to outperform all baselines. This demonstrates the ability of our method to effectively incorporate more information when additional views are available, which single-view baselines cannot. Moreover, we can see that our model significantly outperforms FORGE, which also uses 6 input views, and we believe this is because our approach allows bypassing explicit pose prediction which can lead to inaccurate predictions. Qualitative comparisons in \Figref{fig:gso} further demonstrates the effectiveness of our approach in utilizing information from multiple unposed images.
+
+\subsubsection{Ablating Diffusion Conditioning} 
+
+We empirically study the complementary benefits of the two forms of conditioning used. We illustrate the qualitative results in \Figref{fig:ablation} and quantitative results in Table \ref{tab:ablation}. We find that both, the decoder features and the set-latent representations are complementary and instrumental to UpFusion. 
+
+
+\section{Discussion}
+
+We presented UpFusion, an approach for novel-view synthesis and 3D inference given unposed sparse views. While our approach provided a mechanism for effectively leveraging unposed images as context, we believe that several challenges still remain towards the goal of sparse-view 3D inference in-the-wild.
+In particular, although our approach allowed high-fidelity 2D generations, these are not always precisely consistent with the details in the (implicitly used) input views. Moreover, while our approach's performance does improve given additional context views, it does not exhibit a strong scaling similar to pose-aware methods that can geometrically identify relevant aspects of input images.  Finally, while our work provided a possible path for 3D inference from unposed views by sidestepping the task of pose estimation, it remains an open question whether explicit pose inference for 3D estimation might be helpful in the long term.
+
+
+
+
+

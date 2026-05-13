@@ -1,0 +1,293 @@
+\title{ParaSolver: A Hierarchical Parallel Integral Solver for Diffusion Models}
+
+\begin{abstract}
+This paper explores the challenge of accelerating the sequential inference process of Diffusion Probabilistic Models (DPMs). We tackle this critical issue from a dynamic systems perspective, in which the inherent sequential nature is transformed into a parallel sampling process. Specifically, we propose a unified framework that generalizes the sequential sampling process of DPMs as solving a system of banded nonlinear equations. Under this generic framework, we reveal that the Jacobian of the banded nonlinear equations system possesses a unit-diagonal structure, enabling further approximation for acceleration. Moreover, we theoretically propose an effective initialization approach for parallel sampling methods. Finally, we construct ParaSolver, a hierarchical parallel sampling technique that enhances sampling speed without compromising quality. Extensive experiments show that ParaSolver achieves up to 12.1× speedup in terms of wall-clock time. The source code will be publicly available.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Over the past few years, the landscape of generative modeling has been significantly reshaped by the ascent of diffusion probabilistic models (DPMs) (Ho et al., 2020; Song et al., 2020b). These models have emerged as a pivotal methodology for diverse applications (Yang et al., 2024; Liu et al., 2023a; Lu et al., 2024; Chung et al., 2023), spanning from high-quality image/video synthesis (Rombach et al., 2022; Blattmann et al., 2023) to molecular generation (Wu et al., 2024; Nguyen et al., 2023). In essence, diffusion models hinge on a noise reduction process that is represented mathematically as an ordinary or stochastic differential equation (ODE/SDE). The equation systematically removes noise from an initial normal distribution, transforming it into a vivid sample that conforms to the intended real data distribution, thereby facilitating high-quality generative modeling. To produce high-quality samples, nevertheless, DPMs typically necessitate a multitude of sequential noise reduction iterations involving extensive evaluations of large neural networks, leading to a notably slow sampling speed.  
+
+Researchers have put forth a range of methods (Gong et al., 2024; Zheng et al., 2023; Gonzalez et al., 2024; Geng et al., 2024; Liu et al., 2023b; Luo et al., 2023) to improve sampling speed. One strategy involves developing faster SDE/ODE solvers like DDIM (Song et al., 2020a) and DPMSolver (Lu et al., 2022) based on mathematical principles to expedite the sampling process. However, these approaches often require a reduction in the number of denoising steps, which impacts the quality of the samples. Another category is to distill the ODE trajectory of pre-trained diffusion model into another neural network that enables short-step sampling, exemplified by work such as (Salimans & Ho, 2022; Song et al., 2023). An additional enhancement for this kind of method is to straighten the convoluted ODE trajectory of DPMs into a straight line using the Rectified Flow (Lipman et al., 2022; Liu et al., 2022). Nevertheless, it is common for these approaches to result in a decline in both image quality and diversity.  
+
+To circumvent the aforementioned questions and expedite the sampling process, Shih et al. (2024b) introduced a parallelization technique that simultaneously denoises multiple steps through Picard iteration. Subsequently, Tang et al. (2024) further redefined the parallel sampling paradigm of diffusion models, framing it as the solution of a series of triangular nonlinear equations via fixedpoint iteration (FP). These methodologies present a trio of distinct benefits compared to existing approaches: (1) training-free and compatible with existing fast sampling methods; (2) yielding sam  
+
+ples with comparable quality to sequential sampling; (3) resulting in a notable decrease in sampling steps, thereby greatly enhancing sampling efficiency.   
+To further extend the capabilities of the parallel methods and enable new sampling paradigms, we propose ParaSolver, a unified framework that generalizes previous approaches through the lens of nonlinear equations (NEs). Specifically, we formulate the sampling process of DPMs as a system of NEs with a computation-efficient banded structure. This framework leads to parallel sampling in a hierarchical way, thus improving the efficiency of parallel sampling methods in situations with constrained computing resources. Moreover, any current sequential or parallel sampling algorithms for DPMs can be seamlessly integrated into our framework.  
+
+In summary, this paper encompasses the following theoretical and practical contributions:  
+
+• we propose a novel parallel sampling algorithm for diffusion models named ParaSolver, via partitioning the sequential inference process into a system of non-linear equations; • we accelerate and simplify the updating process via the unique structure of the Jacobian matrix of the system, which has a unit-diagonal structure with compute-intensive gradients in the sub-diagonal; • we conduct extensive experiments, showcasing that our ParaSolver can achieve $2\times\sim12\times$ speedup in terms of wall-clock time, establishing a new record in this field.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+Parallel sampling that enables faster sampling without quality degradation opens up a promising avenue for faster sampling of DPMs. It concurrently denoises multiple sample points on the ODE/SDE trajectories of DPMs by iteratively refining them from an array of initial guesses. To the best of our knowledge, the recent studies Shih et al. (2024a) and Tang et al. (2024) are the only research endeavors concentrating on parallel sampling methods for DPMs. ParaDiGMS (Shih et al., 2024a) represents the pioneering parallel sampling approach. It treats the discretized sample points along the ODE trajectories as a sequence of fixed points. These points are progressively enhanced through iterations using the established fixed-point theorem and Picard-Lindelo¨f theorem. ParaTAA (Tang et al., 2024) extends the fixed-point iteration approach by defining the sampling process of DPMs as solving triangular nonlinear equations, with all discretized sample points acting as unknown variables. In contrast to ParaTAA, we frame the sampling procedure of DPMs as a set of banded nonlinear equations. This leads to a hierarchical parallel method, which is totally different from existing methods parallelizing all points in the ODE trajectories. Moreover, this banded structure, characterized by its sparsity, facilitates significantly more efficient computations compared to the compute-intensive triangular structure. Additionally, ParaTAA can be seamlessly incorporated into our framework. We have also identified intriguing research areas dedicated to expediting diffusion models. These include topics like model or sample partitioning (Ma et al., 2024b;a; Wang et al., 2024; Li et al., 2024), trajectory stitching (Pan et al., 2024), nested diffusion (Elata et al., 2024), minimum denoising step prediction (Yu & Barad, 2024), and theoretical assurances (Gupta et al., 2024; Chen et al., 2024). Our strategy revolves around parallelizing the sequential sampling process of DPMs, which is complementary to theirs. While these methods show promising beneftis, several drawbacks constrain their parallel efficiency. First, parallelizing all discretized sample points simultaneously becomes compute-intensive when handling large models, leading to a rapid degradation in parallel efficiency. Second, the final clean sample relies on all samples from previous timesteps. As a result, errors from these prior sample  
+
+
+
+\section{3 PRELIMINARY  }
+
+
+Diffusion Models. Denote by $\mathbf{X}_{t}\in\mathbb{R}^{H W C}$ the noised variable on the diffusion trajectory, $t\in[0,T]$ the scalar indicating the time-stamp, $f(t)$ the drift coefficient function, and $g(t)$ the diffusion coefficient function. Then, the forward diffusion process can be formulated as the following stochastic differential equation (SDE), which projects the clean image $\mathbf{X}_{T}$ to a random noise $\mathbf{X}_{0}$ (we define the clean image at time $T$ and the noise at time 0),  
+
+$$
+d\mathbf{X}_{t}=f(t)\mathbf{X}_{t}d t+g(t)d\mathbf{W},
+$$  
+
+where $d\mathbf{W}$ indicates the standard Wiener process. Then, to generate the corresponding clean latent from the easily sampled random noise, we have to reverse the forward SDE in Eq. (1), resulting in the following reverse SDE formulations  
+
+$$
+d\mathbf{X}_{t}=\underbrace{\left[f(t)\mathbf{X}_{t}-g^{2}(t)\nabla_{\mathbf{X}_{t}}\log p(\mathbf{X}_{t})\right]}_{\varphi(\mathbf{X}_{t},t)}d t+\underbrace{g(t)}_{\sigma_{t}}d\mathbf{W},
+$$  
+
+where $\nabla_{\mathbf{X}_{t}}\log p(\mathbf{X}_{t})$ can be approximated by a score function $\mathbf{S}_{\theta}(\cdot)$ , parameterized by a neural network with learnable weights of $\theta$ ; $\varphi(\mathbf{X}_{t},t)$ denotes the drift function for the reverse diffusion process; $\sigma_{t}$ represents the corresponding coefficient of diffusion counterpart. Let $\Phi(t,s,\mathbf{X}_{s})$ represent an integral result of $\mathbf{X}_{t}$ by Eq. (2) over a time interval from $s$ to $t$ , with an initial value $\mathbf{X}_{s}$ :  
+
+$$
+\Phi(t,s,\mathbf{X}_{s})=\mathbf{X}_{s}+\int_{s}^{t}\varphi(\mathbf{X}_{\tau},\tau)d\tau+\int_{s}^{t}\sigma_{\tau}d\mathbf{W}.
+$$  
+
+Consequently, the analytical solution of Eq. (2) at time $t$ can be expressed as  
+
+$$
+\mathbf{X}_{t}=\Phi(t,0,\mathbf{X}_{0}),\mathbf{X}_{0}\sim\mathcal{N}(\mathbf{0},I),
+$$  
+
+where $\mathcal{N}(\mathbf{0},\boldsymbol{I})$ denotes the standard Gaussian distribution.  
+
+Parallel Sampling Algorithms. For an array of ODE/SDE trajectories for DPMs $\{\mathbf{X}_{t},t=0,\cdot\cdot\cdot,T\}^{\bar{1}}$ , existing parallel sampling algorithms (Shih et al., 2024a; Tang et al., 2024) establish the following system of non-linear equations to reformulate the integral-based formulation of the diffusion model:  
+
+$$
+\begin{array}{r}{\mathbf{X}_{t+1}-\mathcal{H}_{t}^{(i)}(\mathbf{X}_{t},\cdot\cdot\cdot\mathbf{\mu},\mathbf{X}_{t-i})=\mathbf{0},}\end{array}
+$$  
+
+where $i$ is the number of utilizing previous states at timestamp $t$ ; $\mathcal{H}_{t}^{(i)}$ denotes a solver for estimating results in timestamp $t$ with acknowledging previous states, i.e., $\mathbf{X}_{t},\cdot\cdot\cdot\mathbf{\nabla},\mathbf{X}_{t-i}$ .  
+
+The sampling methods utilize an iterative refinement manner to gradually adjust an estimation trajectory $\left\{\hat{\mathbf{X}}_{t},t=0,\cdot\cdot\cdot,T\right\}$ . Each state from the trajectory $\{\mathbf{X}_{t},t=0,\cdot\cdot\cdot,T\}$ is first initialized with coarse, even noise value, denoted as $\left\{\hat{\mathbf{X}}_{t}^{(0)},t=0,\cdots,T\right\}$ . Denote by $\hat{\mathbf X}_{t}$ the vector, $\hat{\mathbf{X}}_{0:T}\:=\:[\hat{\mathbf{X}}_{0}^{\top},\cdot\cdot\cdot\:,\hat{\mathbf{X}}_{T}^{\top},]^{\top}$ . Then, for the $k$ -th parallel iteration $(k\;\in\;[0,K])$ , Newton–Raphson method (Kelley, 2003) updates the variables by the following scheme  
+
+$$
+\begin{array}{r}{\hat{\mathbf{X}}_{0:T}^{(k+1)}=\hat{\mathbf{X}}_{0:T}^{(k)}-\mathcal{G}^{k}\mathcal{Q}_{0:T}^{(k)},}\end{array}
+$$  
+
+where $\boldsymbol{\mathcal{Q}}_{t}^{(k)}=\hat{\mathbf{X}}_{t}^{(k)}-\boldsymbol{\mathcal{H}}_{t}^{(i)}(\hat{\mathbf{X}}_{t}^{(k)},\cdot\cdot\cdot\,,\hat{\mathbf{X}}_{t-i}^{(k)})$ indicates a residual term to be optimized; and $\mathcal{G}^{k}\,=$ $(\mathcal{I}^{(k)})^{-1}$ indicates the inverse of Jacobian matrix $\begin{array}{r}{\mathcal{I}^{(k)}=\frac{\partial\mathcal{Q}_{0:T}^{(k)}}{\partial\hat{\mathbf{X}}_{0:T}}}\end{array}$  
+
+
+
+\section{4 PROPOSED METHOD  }
+
+
+Parallel solvers transform the sequential integral process of the diffusion model, as represented in Eq. (4), into the view of non-linear equations articulated in Eq. (6). However, the typically large number of timestamps complicates the simultaneous solving of all nodes, particularly with a limited number of GPU/CPU cores. To mitigate this issue, we propose a hybrid approach that integrates the fully sequential inference of classical diffusion models with comprehensive parallel methodologies. Specifically, we reformulate the partitioning of non-linear equations using a banded structure, which leverages the strengths of both parallel and sequential techniques, as discussed in Sec. 4.1. Furthermore, based on this formulation, we analyze strategies to simplify and accelerate the solving process with corresponding steps for initialization and stopping criterion in Sec. 4.2.  
+
+4.1 HIERARCHICAL SAMPLING VIA BANDED NON-LINEAR EQUATIONS  
+
+We start with the re-investigation of the integral formulation of diffusion process Eq. (4) in the following partitioned manner,  
+
+$$
+\mathbf{X}_{t_{n+1}}=\Phi(t_{n+1},t_{n},\mathbf{X}_{t_{n}}),n\in\{0,1,\cdots,N-1\},
+$$  
+
+where the whole temporal region of $[0,T]$ is partitioned into $N$ time sub-intervals, with $1\leqslant N\leqslant$ $T$ and $0\;=\;t_{0}\;<\;t_{1}\;<\;\cdot\;\cdot\,t_{N}\;=\;{\bar{T}}^{2}$ . Inspired by current parallel algorithms, e.g., Song et al. (2021), such a sequential problem can be solved in a parallel manner. Specifically, such a series of cascaded functions can be treated as a system of NEs with a banded structure. Denote by $\{\mathbf{X}_{t_{n}},n=$ $0,\cdot\cdot\cdot,N\}$ a set of points exactly on the diffusion trajectory, $\left\{\hat{\mathbf{X}}_{t_{n}},n=0,\cdots\,,N\right\}$ the points to be optimized approaching the trajectory. A cascade of local integral formulations as Eq. (7) can be reformulated as the solutions of following Banded NEs.  
+
+Definition 1 (Banded NEs). We define the system of banded NEs for the sequential sampling process in Eq. (7) as  
+
+$$
+\begin{array}{r}{\left\{\begin{array}{l l}{\hat{\mathbf{X}}_{t_{0}}-\mathbf{X}_{t_{0}}=\mathbf{0},}\\ {\hat{\mathbf{X}}_{t_{n+1}}-\Phi(t_{n+1},t_{n},\hat{\mathbf{X}}_{t_{n}})=\mathbf{0},n\in\{0,1,\cdots\,,N-1\}.}\end{array}\right.}\end{array}
+$$  
+
+Moreover, we also have a theoretical analysis that the solution of Eq. (8) is the unique and unbiased estimation of the sequential sampling results, as shown in Prop. 1.  
+
+Proposition 1 (Unbiased Estimation). The set of banded NEs in Eq. (8) possesses a unique solution, which is also an unbiased estimation of the sequential diffusion results.  
+
+Proof.  
+
+By the aforementioned, we reformulate the sequential sampling process of the diffusion model into two hierarchical phases, i.e., globally solving the banded NEs of Eq. (8) and locally calculating the integral process $\bar{\Phi}(\cdot)$ . Each of them can be solved parallel or sequential by existing methods, which distinguishes the proposed method compared to other sequential or parallel sampling methods. Since solving the global non-linear equations is the primary bottleneck for the acceleration of diffusion sampling, we will mainly discuss the methods to further simplify and accelerate solving Eq. (8).  
+
+Novelty Claim. Due to the aforementioned hierarchical sampling manner, the system of NEs in our proposed method has smaller-scale NEs and variables than the existing parallel sampling algorithms and features a notably sparse banded structure. Consequently, hierarchical sampling can conserve numerous computational resources than the existing methods with a dense triangular structure. Moreover, we want to note that our framework encapsulates the existing parallel and sequential methods. The banded NEs with $N=1$ and $N=T$ are precisely aligned with the sequential sampling method in Eq. (4) and the parallel sampling approach in Eq. (5), respectively.  
+
+4.2 SOLVING THE SYSTEM OF BANDED NES  
+
+We investigate the Newton–Raphson method (Kelley, 2003) to solve the aforementioned NEs as Eq. (8), as  
+
+$$
+\begin{array}{r}{\hat{\mathbf{X}}_{t_{0}:t_{N}}^{(k+1)}=\hat{\mathbf{X}}_{t_{0}:t_{N}}^{(k)}-\left(\mathcal{I}_{t_{0}:t_{N}}^{(k)}\right)^{-1}\mathcal{R}_{t_{0}:t_{N}}^{(k)},}\end{array}
+$$  
+
+where $\mathcal{R}_{t_{n}}^{(k)}=\hat{\mathbf{X}}_{t_{n+1}}^{(k)}-\Phi(t_{n+1},t_{n},\hat{\mathbf{X}}_{t_{n}}^{(k)})$ indicates the residual term based on our previously formulated NEs; $\left(\mathcal{J}_{t_{0}:t_{N}}^{(k)}\right)^{-1}$ represents the inverse of Jacobian matrix as $\hat{\sigma}\mathcal{R}_{t_{0}:t_{N}}^{(k)}/\hat{\sigma}\hat{\mathbf{X}}_{t_{0}:t_{N}}^{(k)}$  
+
+$[0,T]$ less than 1.  
+
+
+
+\section{5 EXPERIMENT  }
+
+
+We evaluate ParaSolver across various high-dimensional image generation models such as latentspace diffusion model StableDiffusion-v2 (Rombach et al., 2022) and pixel-space diffusion model LSUN Church (Yu et al., 2015). The results of these experiments demonstrate that ParaSolver enhances the efficiency of sequential sampling methods by approximately $2\sim12$ times, all while maintaining consistent sample quality as measured by metrics like FID score or CLIP score.  
+
+5.1 EXPERIMENT SETTINGS  
+
+Evaluation Metrics. We explore five widely used metrics for our proposed PararSolver: the number of function evaluations (NFE), the iteration number (iters), wall-clock time, FID score (Heusel et al., 2017), and CLIP score (Hessel et al., 2021).  
+
+Datasets and Models. As per ParaDiGMS Shih et al. (2024a), we analyze our ParaSolver across latent-space and pixel-space models. For latent-space models, we leverage the StableDiffusion-v2 model model and evaluate FID and CLIP scores on a random selection of 5000 samples from the ImageNet-1k dataset . The StableDiffusion-v2 model generates images at a resolution of 768 by 768 pixels, utilizing a diffusion model that operates within a latent space dimension of 4 by 96 by 96. For pixel-space models, we employ models pretrained on the LSUN Church dataset . This LSUN Church pre-trained model operates in the pixel space with a resolution of 256 by 256. We compute the FID score on 5000 random samples of LSUN Church datasets. . We assess the performance of all methods on 8 NVIDIA RTX 3090 GPUs, each equipped with 24268 MB of memory.  
+
+Algorithms. We apply our approach to accelerate the performance of the state-of-the-art sequential sampling methods: DDPM (Ho et al., 2020), DDIM (Song et al., 2020a), and DPMSolver (Lu et al., 2022). We evaluate the parallel efficiency of our ParaSolver against ParaDiGMS in accelerating the aforementioned three sequential methods. ParaDiGMS is implemented based on the the Diffusers library, and the other algorithms are all accessible in the widely-used library Diffusers (von Platen  
+
+Table 1: Quantitative comparisons of different methods on Stable Diffusion-v2 over 5000 random samples from the ImageNet-1k dataset, with classifier guidance $\mathrm{w}=7.5$ . The visual comparisons are shown in Figs. The best results are highlighted in bold. “Ò” (resp. “Ó”) means the larger (resp. smaller), the better.  
+
+![](images/b560eb3d34b7157fd47e55a6bf35e31d87224947c932e3b66f6b3a43329d54c7.jpg)  
+
+Hyperparameter Settings. Following the previous settings in (Shih et al., 2024a; Tang et al., 2024), we apply our ParaSolver and ParaDiGMS to DDPM with 1000 sequential sampling steps. For DDIM and DPMSolver, we consider two settings: 25 and 50 sequential sampling steps, as they are commonly utilized and capable of producing samples of similar quality to DDPM. Besides, We tune the best tolerance for ParaDiGMS via grid search on $\{0.001,0.0{\bar{0}}5,0.{\bar{0}}1,0.5,0.1\}$ . We find for StableDiffusion-v2, ParaDiGMS for DDPM, DDIM, and DPMSolver need to set the tolerance as 0.5, 0.01, and 0.01 to achieve the similar sample quality as the corresponding sequential method, respectively. For LSUN Church model, the tolerance of ParaDiGMS should be 0.5 and 0.001 for DDPM and DDIM. Moreover, for each setting, we sweep all the window size to find the best speedup for ParaDiGMS. For our ParaSolver on StableDiffusion-v2 model, we set the tolerance as 0.55, 0.05, and 0.05 for ParaSolver on DDPM, DDIM, and DPMSolver respectively. For LSUN Church model, the tolerances of ParaSolver are set as 0.55 and 0.005 for DDPM and DDIM, respectively.  
+
+5.2 EXPERIMENTAL RESULTS  
+
+Latent-space diffusion model. Table 1 shows the experimental results on DDPM, DDIM, DPMSolver, and their parallel variants when combined with ParaSolver and ParaDiGMS, respectively. Initially, ParaSolver can expedite the performance of DDPM, DDIM, and DPMSolver without compromising FID and CLIP scores. The FID and CLIP scores are marginally superior to the baseline values, we think the employed tolerances might be relatively tight, thereby enhancing the overall outputs. Futhermore, ParaSolver achieves the best speedup, up to $8.1\times$ in terms of the wall-clock time. This is a new record for existing related parallel methods. Parallelization sacrifices computation for speed, resulting in a higher NFEs compared to the sequential methods. Nevertheless, when contrasted with ParaDiGMS, our ParaSolver notably reduces NFEs, even requiring mere 1065 NFEs for 1000 steps in DDPM. ParaSolver significantly diminishes the iteration count required for sequential methods by a factor ranging from 2.5 times to 31 times.  
+
+Pixel-space diffu  
+sion model. Table 2   
+shows the exper  
+imental outcomes   
+regarding DDPM and   
+DDIM alongside their   
+parallel adaptations   
+with ParaSolver and   
+ParaDiGMS on the   
+pretrained LSUN   
+Church model. Simi  
+lar to the latent space   
+results, ParaSolver   
+consistently surpasses   
+existing techniques,   
+achieving speedups   
+ranging from 2.2   
+to 12.1 times while   
+upholding sample   
+quality comparable to   
+that of the sequential   
+The effect of $M$ . Ta  
+ble 3 investigates the   
+impact of the precon  
+ditioning steps $M$ . It   
+is evident that a trade  
+off exists between $M$   
+and the acceleration   
+achieved, with the op  
+timal $M$ identified at   
+$\smash{\ensuremath{M_{\mathrm{~\rightmoon~}}}=\ensuremath{\mathrm{~\rightmoon~}}}10$ . This is   
+because increasing the   
+number of precondi  
+tioning steps leads to   
+a more accurate ini  
+tialization but also re  
+faster acceleration even with a higher  
+
+Table 2: Quantitative comparisons of different methods on LSUN Church over 5000 samples. DPMSolver is not integrated with the LSUN model in the Diffusers library; thus we exclude it.   
+
+![](images/9f822bc073e5a7b182ed529d2ce149e3c4a879928ba60dec0db3cc8751350742.jpg)  
+
+methods. Producing a sample without any loss in quality within 4.1 seconds instead of 50.0 seconds can notably enhance the interactive experience for various generative scenarios like the human-in-the-loop applications (Bhattacharya et al., 2023).  
+
+Table 3: The effect of preconditioning steps $M$ using LSUN Church over 5000 random samples. Sect.   
+
+![](images/14d67deae2075405c0b97f69eb439ab40794a980f952fdc2b424427cb76958ae.jpg)  
+
+432   
+433   
+434   
+435   
+436   
+437   
+438   
+439   
+440   
+441   
+442   
+443   
+444   
+445   
+446   
+447   
+448   
+449   
+450   
+451   
+452   
+453   
+454   
+455   
+456   
+457   
+458   
+459   
+460   
+461   
+462   
+463   
+464   
+465   
+466   
+467   
+468   
+469   
+470   
+471   
+472   
+473   
+474   
+475   
+476   
+477   
+478   
+479   
+480   
+481   
+482   
+483   
+484   
+485  
+
+quires additional time. As we implement the preconditioning steps through a sequential sampling approach, the efficiency of parallel processes is affected by a large $M$ . We believe that by executing the preconditioning steps in parallel, we can enhance the precision of initialization, facilitating a $M$ .  
+
+The effect of $N$ . Table 4 examines the influence of $N$ . The most favorable wall-clock time is observed at $N\,=\,15$ . At $N\,=\,1$ , ParaSolver reverts to a sequential sampling approach. However, for $N\,=\,5$ and $N\,=\,10$ , the wall-clock time exceeds the sequential sampling because the current implementation for solving the subproblems is through the sequential sampling. With each parallel iteration involving the sequential sampling, the parallel efficiency is significantly compromised. Substituting the sequential sampling with parallel techniques could substantially enhance the efficiency. We believe that by leveraging optimized implementations, the wall-clock times in Table 4 can be further refined. For $N=30$ , ParaSolver aligns with existing parallel methods with our initialization method, necessitating the computation of the entire triangular part as specified in Eq. (5). This demanding computational task results in extended wall-clock times. We note that to tune the window size, the wall-clock time in the Table 4 can be further improved. This occurs because the ultimate clean samples are connected to all samples from earlier time steps, causing their errors dur  
+
+Table 4: The effect of the number of subintervals $N$ using LSUN Church over 5000 random samples. Our ParaSolver is employed to expedite DDIM with 30 sequential steps. We set $M=10$ and fix the window size $p=30$ .  
+
+![](images/08ce8d6b9428dc4d4a7e4f67c9ed005d8c4fb75fa988b2af524005bda3a968e6.jpg)  
+
+Table 5: The effect of the number of GPUs using LSUN Church. Our ParaSolver is employed to expedite DDPM with 1000 sequential steps.   
+
+![](images/603d0484dd7b0bfb55efda8478c87e71f32417edfe042b940ed0c366ce5f91bc.jpg)  
+
+ing updation to all accumulate in the final clean samples. Refining these errors requires additional parallel iterations, which can reduce the parallel efficiency.  
+
+The effect of the number of GPUs. In Table 5, the analysis focuses on how the number of GPUs affects performance. When ample computing resources are available, the parallel efficiency of our method can be greatly released than ParaDiGMS, resulting in a speedup of 12.1 times. Additionally, even in scenarios with limited computing power, such as utilizing only a single RTX 3090 GPU, the speedup can reach 2.5 times, whereas ParaDiGMS shows only modest improvement. This is attributed to our sampling process, which only needs to handle a sparse banded NEs system, in contrast to ParaDiGMS, which requires full computation over the dense triangular NEs system.  
+
+The effect of the tolerance $\delta$ . In Table 6, we demonstrate how tolerance impacts FID under different preconditioning steps $M$ . It is evident that ParaSolver can uphold a similar or better FID to the baseline when $\delta~=~0.005$ and $\delta\;=\;$  
+
+Table 6: The effect of the tolerance $\delta$ on FID using LSUN Church over 5000 random samples. Our ParaSolver is employed to DDIM with 30 sequential steps with FID 15.5.  
+
+![](images/9d4768e89dad0215520629881cab9bffbacbf144756c5eb86393062908971008.jpg)  
+
+0.001, respectively. Furthermore, a higher $M$ leads to a better FID even under a looser tolerance.  
+
+The effect of the window size $p$ . In Figure 1, we examine how the window size $p$ affects the speedup of 1000 DDPM over the LSUN Church Model. The peak speedup is observed at $p=36$ rather than the maximal $p$ . This is because the parallel efficiency is inundated by the significant computational burden associated with larger window sizes. In situations with restricted computational resources, it is crucial to select an appropriate window size for optimal performance.  
+
+![](images/fd123945c69244e107024d57b4a533b47e6e02d410d81d743cd780352c59e8d5.jpg)  
+Figure 1: The effect of $p$  
+
+
+
+\section{6 CONCLUSION  }
+
+
+In this paper, we conceptualized the process of sequential sampling in DPMs as solving a system of banded NEs leading to a general parallel sampling approach . Leveraging the semi-linear structure of the Jacobian matrix within this NEs system, we derived a more precise parallel sampling iteration. Building upon this iteration, we introduced a novel hierarchical parallel sampling technique called ParaSolver. ParaSolver is computationally efficient and seamlessly compatible with existing parallel and sequential methodologies. Extensive experiments demonstrate that our ParaSolver can achieve a speedup of up to $12\times$ in terms of wall-clock time without degrading the sample quality.  
+
+ETHICS & REPRODUCIBILITY STATEMENTS   
+The proposed sampling algorithm is designed to accelerate the pre-trained models. We have read   
+and adhere to the Code of Ethics of ICLR 2025. Thus, no further additional information on human   
+subjects and potentially harmful insights is involved. Moreover, we set a random seed of 1 during   
+the experiment, which ensures reproducibility. We will make the source code publicly available on   
+   
+
+

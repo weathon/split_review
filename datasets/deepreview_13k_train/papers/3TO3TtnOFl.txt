@@ -1,0 +1,345 @@
+\title{BTR: Binary Token Representations for Efficient Retrieval Augmented Language Models}
+
+\begin{abstract}
+Retrieval augmentation addresses many critical problems in large language models such as hallucination, staleness, and privacy leaks.
+However, running retrieval-augmented language models (LMs) is slow and difficult to scale due to processing large amounts of retrieved text. 
+We introduce binary token representations (BTR), which use 1-bit vectors to precompute every token in passages, significantly reducing computation during inference. 
+Despite the potential loss of accuracy, our new calibration techniques and training objectives restore performance. Combined with offline and runtime compression, this only requires 127GB of disk space for encoding 3 billion tokens in Wikipedia.
+Our experiments show that on five knowledge-intensive NLP tasks, BTR accelerates state-of-the-art retrieval-augmented language model inference by up to 4x and reduces storage by over 100x while maintaining over 95\% task performance
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+Large language models (LLMs)~\cite{brownLanguageModelsAre2020,touvronLLaMAOpenEfficient2023}, despite their widespread success, still suffer from issues such as hallucinations~\cite{mallenWhenNotTrust2023,mundlerSelfcontradictoryHallucinationsLarge2023}, staleness, and privacy leaks~\cite{huangAreLargePreTrained2022}. %
+Retrieval-augmented language models (e.g., ~\cite{lewisRetrievalAugmentedGenerationKnowledgeIntensive2020a,izacardAtlasFewshotLearning2022}) %
+alleviate such problems via a retrieve-and-read approach (\cref{fig:fid-arch}), using a retrieval component to find passages relevant to the input query followed by a reader model (e.g., an LLM) that generates output given the query concatenated with retrieved passages.
+However, this approach is slow (e.g., only handles a few queries for a powerful server GPU%
+) at inference time mainly due to the reader model that needs to compute cross-attention between the input query and a large number of passages.
+Existing solutions~\cite{leeLearningDenseRepresentations2021,caoDeFormerDecomposingPretrained2020} improve the inference computation by decomposing query and passage encoding and precomputing passage representations, but they come with large storage costs (terabytes of storage;
+\S\ref{sec:eval}). %
+
+In this work, we improve the inference speed of the reader model in a retrieval-augmented LM with a small storage footprint by introducing \emph{cacheable and calibrated \textbf{B}inary \textbf{T}oken \textbf{R}epresentations} (\textbf{\sys}).
+\sys\ (Figure~\ref{fig:fid-arch}) precomputes token representations for the retrieved passages in the reader model. The binary representations are 1-bit vectors for the tokens in a passage and are created from the hidden states in the reader encoder layers via {\it calibrated binarization} which are effective for downstream tasks such as question answering. %
+\sys reduces the storage footprint and improves the runtime speed since the representations are 1-bit vectors, and the reader uses the cached representations.  
+To avoid degradation of task accuracy caused by binary representations, we introduce two training objectives by adding (i) a \emph{passage representation recovery} objective that makes the binary representations preserve the passage semantics before the binarization; and (ii) a \emph{query-aware passage token distillation} objective that compensates the information loss due to precompuation of passage representations independent of the query. 
+
+Furthermore, we observe significant redundancies in precomputed token representations in retrieved passages since they are relevant to the query and contain similar information. Removing such redundancies only causes minimal task accuracy loss (<0.5\% in our experiments), but shows significant benefits in storage and runtime inference. To address this, we further develop token compression over \sys by merging similar precomputed token vectors after training and merging similar concatenated query-passage representations during inference. %
+
+
+We evaluate \sys on five knowledge-rich NLP tasks, including three open-domain question-answering tasks (NaturalQuestions~\cite{kwiatkowskiNaturalQuestionsBenchmark2019}, TriviaQA~\cite{joshiTriviaQALargeScale2017}, and WebQA\mbox{~\cite{berantSemanticParsingFreebase2013}}), the FEVER~\cite{thorneFEVERLargescaleDataset2018} fact-checking task, and the MMLU~\cite{hendrycksMeasuringMassiveMultitask2020} reasoning benchmark. %
+Compared to baseline systems, \sys reduces disk storage by up to \textbf{101x} and improves inference speed by \textbf{2--4x} for the reader of two state-of-the-art retrieval-augmented language models. \sys also retains 90--95\% of the original models' performance. Our analysis experiments show that binary token representations are effective and contribute most to improving the inference speed and reducing the storage costs of readers. The training regularization objectives help mitigate the task accuracy loss and the offline and runtime token compression techniques further bring down storage footprint and increase inference efficiency. 
+\begin{figure}[t!]
+	\begin{center}
+		\includegraphics[width=0.95\linewidth]{fig/teaser-v3.pdf}
+		\caption{Retrieval-augmented models use a retrieve-and-read pipeline. The reader can be either an encoder or an encoder-decoder model. \sys creates cacheable binary representations for the passages via decomposition and calibrated binarization to speed up reader inference. \sys further reduces storage by offline compression and improves inference speed by runtime compression.}
+  
+		\label{fig:fid-arch}
+	\end{center}
+\end{figure}
+
+
+
+\section{Background and Related work}
+
+\label{sec:related}
+We first describe the architecture of retrieval-augmented language models and then related efficiency techniques designed for them. Next, we summarize relevant methods to improve model efficiency, including quantization and binary representations. 
+\paragraph{Retrieval-Augmented Language Models.} Retrieval-augmented language models have shown strong performance in many tasks, including language modeling~\cite{borgeaudImprovingLanguageModels2022a,minNonparametricMaskedLanguage2023}, open-domain question answering, and fact checking~\cite{izacardAtlasFewshotLearning2022,lewisRetrievalAugmentedGenerationKnowledgeIntensive2020a,guuRetrievalAugmentedLanguage2020,shiREPLUGRetrievalAugmentedBlackBox2023}.
+
+As shown in \cref{fig:fid-arch}, a retrieval-augmented language model works by first using a retriever to retrieve many passages relevant to the input query and then using a reader component to extract or generate the answers.
+While the retriever is often fast enough, the reader causes a speed bottleneck in retrieval augmentation because it requires computing cross-attention between the input query and many passages.
+For example, \cref{fig:fid-arch} illustrates a state-of-the-art encoder-decoder reader~\cite{izacardAtlasFewshotLearning2022} architecture called Fusion-in-Decoder (FiD)~\cite{izacardLeveragingPassageRetrieval2021}. FiD first concatenates each passage with the query and processes them in parallel (independently) in the encoder; then the decoder fuses information across all the concatenated passage-query representations and produces answers. 
+In our experiments, we observe that the passage encoding takes over 60\% of the reader's computation on commodity GPUs, and we save such computations by precomputing the passage representations, leading to significant speedup in the inference with reduced storage costs. %
+
+\paragraph{Efficient methods for reader models.} DensePhrase~\cite{leeLearningDenseRepresentations2021} builds contextualized phrase representations for the passage corpus, completely removes the reader component, and uses phrase retrieval to produce answers for the query. Despite its high inference throughput, the accuracy is much lower than similar size \sys models. FiD-light~\cite{hofstatterFiDLightEfficientEffective2022} and FiDO~\cite{dejongFiDOFusioninDecoderOptimized2022} focus on improving the inference latency for FiD models on customized hardware like TPUs, they compress passage representations into fixed-size vectors to reduce the decoder computation. But on more popular hardware like GPUs, the passage encoder is the computation bottleneck, and their decoder-oriented optimizations are likely to be less effective in improving inference speed. LUMEN~\cite{dejongPrecomputedMemoryOnthefly2023} and DeFormer~\cite{caoDeFormerDecomposingPretrained2020} precompute cacheable continuous passage representations to speed up reader inference, but they take up 100x more storage than \sys. 
+\paragraph{Model quantization and binarization.} Another line of research focuses on model quantization~\cite{dettmersLLMInt88bit2022,xiaoSmoothQuantAccurateEfficient2023,yuanRPTQReorderbasedPosttraining2023,frantarGPTQAccuratePostTraining2022} or binarization~\cite{baiBinaryBERTPushingLimit2021,qinBiBERTAccurateFully2022} for resource-constrained settings. It improves model efficiency by compressing model weights to lower precision to reduce runtime memory usage. However, quantization does not necessarily improve the inference speed of readers as we will empirically show in \S\ref{sec:eval}. This is because quantized models still need to process large amounts of input passage data for readers, which requires huge computation. Meanwhile, quantization methods are orthogonal to our \sys and can help deploy \sys for platforms with low resources.  
+
+\paragraph{Binary representations.} Previous work has used binary representations for text retrieval~\cite{yamadaEfficientPassageRetrieval2021}, semantic matching~\cite{tissierNearlosslessBinarizationWord2019,shenLearningCompressedSentence2019}, or image retrieval~\cite{jainSUBICSupervisedStructured2017,huangAccelerateLearningDeep2019,liuDeepSupervisedHashing2016}.
+Motivated by this line of work, we build binary token-level passage representations to improve reader efficiency which was unexplored before. \revise{The key difference is that existing passage-level (or image-level) binary representations provide coarse-grained semantic signals that work for retrieval or semantic matching. But token-level representations require storing more fine-grained information}, which we effectively address by introducing new calibration techniques and training objectives.
+
+
+
+\section{Method}
+
+\label{sec:method}
+
+We present \sys, a fast and storage-efficient reader for retrieval-augmented language models. \sys creates cacheable calibrated binary representations for the retrieved passages to speed up inference and avoid large storage overhead. We describe \sys for encoder-decoder readers which are most widely used in the state-of-the-art models~\citep{izacardAtlasFewshotLearning2022,izacardLeveragingPassageRetrieval2021}, and later show how to apply \sys for the encoder-only model (\S\ref{sec:eval}). The encoder and encoder-decoder readers both need to process many passages, which is the computation bottleneck. Previous solutions~\citep{caoDeFormerDecomposingPretrained2020,leeLearningDenseRepresentations2021} precompute the passage representations to avoid runtime computation but come with large amounts of storage costs (e.g. terabytes of storage for Wikipedia scale corpus). \sys tackles the challenge by building compact binary token representations for the passages. 
+
+
+
+ \begin{figure*}[t!]
+	\begin{center}
+		\includegraphics[width=0.95\linewidth]{fig/arch-v3.pdf}
+		\caption{\sys reader architecture, where light blue color indicates the model from prior work (based on T5~\citep{raffelExploringLimitsTransfer2020} and FiD~\citep{izacardLeveragingPassageRetrieval2021}, and green indicates our methods.
+  We create cacheable calibrated binary token representations for retrieved passages in the reader encoder to speed up inference. Additionally, we compress the precomputed binary token presentations offline to reduce storage costs. We further reduce inference computation by runtime compression for the encoder and decoder. }
+		\label{fig:arch}
+	\end{center}
+\end{figure*}
+
+\paragraph{Overview.}
+\cref{fig:arch} summarizes the \sys reader architecture and how our techniques are applied to each component.
+The key idea in \sys is to create \textbf{cacheable 
+binary token representations} (\S\ref{sec:binarization}) of the retrieved passages such that the passage encoding can be precomputed offline and stored in a compact format. We build on the previous technique~\citep{caoDeFormerDecomposingPretrained2020} to decompose the passage and query computation in the lower layers of the reader encoder and jointly process the query and passage representations back in the upper layers. %
+However, unlike them, we create calibrated binary passage representations after the decomposition to drastically reduce storage. We further develop \textbf{offline compression} to reduce the storage of these precomputed binary token representations. 
+Such binarization and decomposition incur task performance degradation, which we address by designing two regularization techniques during training (\S\ref{sec:training}).
+For inference, we develop \textbf{runtime compression} techniques (\S\ref{sec:compression}) to further speed up the reader computation. %
+
+\subsection{Binary Token Representations for Retrieved Passages}
+\label{sec:binarization}
+
+Our goal is to produce binary representations for the retrieved passages while maintaining downstream task accuracy. We binarize passage representations at the token level. Specifically, 
+given a continuous passage token vector $\mathbf{h}_k= [ h_1, h_2, \cdots, h_d]$ ($d$ is  dimension) at the $k$th layer of the reader encoder, we hash $\mathbf{h}_k$ via the $\sign$ function to obtain the binary representation vector $\mathbf{b}_k= \sign (\mathbf{h}_k)$, where  ${b}_i$ is $1$ if ${h}_i > 0$ and $-1$ otherwise. We use a differentiable $\tanh$ function to approximate the non-differentiable sign function~\citep{caoHashNetDeepLearning2017}.
+
+Prior work~\citep{yamadaEfficientPassageRetrieval2021} binarized passage representations for retrieval tasks through an annealing process, i.e., $\tilde{\mathbf{b}}= \tanh (\beta \mathbf{h})$,  where $\beta$ is a scaling factor that anneals to infinity to approximate the $\sign$ function.   
+However, we find that directly converting the continuous float values into discrete binary values with annealing decreases the representation quality. The problem is that the float vector values often have large scales (e.g., ranging from -500 to +300) which causes the $\tanh$ function to collapse into -1 and +1 quickly, this is partially due to the pre-layernorm~\cite{xiongLayerNormalizationTransformer2020} nature of the encoder-decoder architectures like T5. Most recent models like GPT-3~\cite{brownLanguageModelsAre2020a}  and LLaMA~\cite{touvronLlamaOpenFoundation2023,touvronLLaMAOpenEfficient2023} also use pre-layernorm. A naive fix is to introduce a normalization layer (e.g. layernorm) before the binarization, but then the scale of normalized values does not match the input passage presentations in the upper encoder layers and we empirically notice a larger drop in performance.
+
+\paragraph{Calibrated binarization.}
+We introduce a calibration technique that makes two modifications to the pre-layernorm architecture.\footnote{Not necessarily needed for models with post-layernorm such as BERT.} First, instead of applying the binarization after the Transformer encoder layer as in the previous work~\citep{shenLearningCompressedSentence2019,yamadaEfficientPassageRetrieval2021}, we insert the binarization after the layernorm layer (but before the multihead attention layer) inside the Transformer encoder layer as shown in \cref{fig:arch}. We also save the variance of all passage token representations which comes with negligible storage costs\footnote{It requires $1/d$ storage of the passage vector. $d$ is usually several hundred or thousand like 768 or 1024.}. Using the saved variance information along with the layernorm weights, we could recover the passage representations to their original scales (by dividing the product of variance and layernorm weights). Second, during training, instead of annealing the $\tanh$ function, we adopt a straight-through estimatior~\citep{bengioEstimatingPropagatingGradients2013} for the binarization, the forward pass of encoding still uses discrete binary values while the backward propagation uses the $\tanh$ function to provide the gradients. These two key changes make the binarization procedure better calibrated and help retain the representation quality after binarization. 
+
+\paragraph{Offline compression.}
+The binary representations for the passage tokens are amenable to further compression due to \emph{context redundancy}. This redundancy originates from the passage corpus, where each token can occur millions of times in different contexts even though many of them have similar semantic information.
+This is especially the case for tokens that form stopwords. We design offline token compression that aims to reduce such redundancy such that we do not need to store its representations every time it appears in a different context (in our case, the context is a retrieved passage).
+For a given token $t$ in the reader model's vocabulary, we find all binary representations $T$ from the corpus. If the token $t$ is a stopword $t_s$, then we compute the mean vector values $\mathbf{b}_s$ for all the tokens in $T$. Otherwise, we merge $r_o$\%\footnote{$r_o$\% is 100\% for stopword token representation since stopwords are less contextual than other tokens.} of the binary token representations $\mathbf{b}_v$ for the token $t_v$ based on their semantic similarity. We use a bipartite merging~\citep{bolyaTokenMergingYour2022a} algorithm and measure the semantic similarity using the Hamming distance. We find this more efficient than a clustering method as they require more iterations and do not easily scale to billions of tokens. Details are provided in \cref{algo:offline} in \cref{sec:algo}. Once we compress the binary token representations, we save them in a key-value data store for fast runtime lookup. 
+\subsection{\sys Training}
+\label{sec:training}
+\begin{itemize}[leftmargin=.8cm]
+\item {\bf Step 1.} We first train a reader model without any decomposition (\revise{precomputation}) or binarization. The training objective is the task loss $\mathcal{L}_{\text{task}}$ using cross entropy between prediction logits and task labels. 
+\item {\bf Step 2.}
+We then train a decomposed (no binarization) model with the reader model from step 1 as the teacher using \emph{query-aware passage token distillation} loss $\mathcal{L}_{\text{distill}}$ and the original task loss $\mathcal{L}_{\text{task}}$ (described below).
+\item {\bf Step 3.} Finally, we train a decomposed reader model by applying \sys binarization in the reader encoder, where the model weights are initialized from the distilled decomposed reader model in the second step.  We add a \emph{passage representation recovery} loss $\mathcal{L}_{recovery}$ to the original task loss $\mathcal{L}_{\text{task}}$ (described below). 
+\end{itemize}
+\paragraph{Query-Aware passage token distillation.}
+\revise{Decomposing passages encoding from the query in the lower layers of the reader encoder often causes task performance degradation. Previous work~\citep{caoDeFormerDecomposingPretrained2020} distilled upper-layer passage representations in the decomposed reader encoder from the original (not decomposed) model to reduce information loss due to decomposition}.  We empirically find that the direct application of this distillation does not \revise{improve the task performance much} for a retrieval-augmented LM. This is likely because \revise{DeFormer-style distillation applies to single passage scenarios where all passage tokens are important to the task}, whereas in our setting the reader retrieves many passages that may contain more redundant passage token information. \revise{Distilling all token representations using~\citet{caoDeFormerDecomposingPretrained2020} from all retrieved passages distracts the reader encoder and makes it fail to pass useful passage token information for the task.} %
+
+To address this issue, we design a query-aware passage token distillation loss to improve the decomposed passage representation quality. We only distill the passage tokens that are semantically relevant (salient) to the query from the original (non-decomposed) model. \revise{This is because query-relevant passage tokens carry more fine-grained query-related information from the original (not decomposed) passage representations.} We obtain top-$r$\footnote{We set $r$ to 50\% of total passage tokens by default.} passage tokens using the query to passage attention scores. %
+$\mathcal{L}_{\text{distill}} = \frac{1}{r}\sum_{i=1}^r (h_i - h_i^{\text{decomposed}})^2$, where $h_i^{\text{decomposed}}$ is the decomposed passage representations. The second step training loss is: $\mathcal{L}_{\text{task}} + \mathcal{L}_{\text{distill}}$.
+
+\paragraph{Passage representation recovery.} The end-to-end training objectives do not explicitly encourage the binary tokens representations to maintain semantic information in the continuous representations before binarization.  We add a representation recovery loss~\citep{shenLearningCompressedSentence2019} to the second-stage training task objective. This objective directly provides supervision signals for the binary representations to retain the semantics of continuous representations. %
+Specifically, we first add a linear projection layer \revise{(parameterized by $\mathbf{W}_{proj}$ and $\mathbf{bias}_{proj}$)} on top of the binary passage representations $\mathbf{b}_k$; then we use the mean square error as the recovery loss between the projected representations and original passage representations $\mathbf{h}_k$ before the binarization ($k$th layer in the reader encoder):   
+\revise{$\mathcal{L}_{recovery} = \frac{1}{d}\sum_{i=1}^d (h_i - b^{proj}_i)^2$, where $\mathbf{b}^{proj}=\mathbf{W}_{proj}\mathbf{b}+\mathbf{bias}_{proj}$}.
+As we will show in \S\ref{sec:ablation}, passage recovery loss helps improve the quality of binary representations and reduce the accuracy gap.
+The third step training loss is $\mathcal{L}_{\text{task}} + \mathcal{L}_{recovery}$.
+
+\subsection{\sys Inference}
+\label{sec:compression}
+
+During inference, given an input query and retrieved passages, \sys reader first computes query representations (continuous float-point vectors) on the fly in the encoder (layer 1 to $k$), then it looks up the precomputed binary token representations (from layer $k$) for the retrieved passages from the data store. Next, \sys reader converts the loaded binary token representations into continuous float-point vectors\footnote{values are -1.0 and 1.0.)} and concatenates them with query representations before layer $k+1$. Then from layer $k+1$ to layer $n$ in the reader encoder, \sys applies \emph{runtime compression} (described below) over the concatenated query-passage representations to reduce the number of tokens and further speed up the encoder inference. Once the encoder finishes computation, the reader flattens and concatenates all the query-passage representations, and then feeds them into the reader decoder. The reader decoder applies similar runtime compression operations to shorten the concatenated text sequence with query and all passage tokens. 
+
+\paragraph{Runtime compression.} Runtime compression is possible because the retrieved passages are relevant to the query and contain similar information for different passages. The runtime token compression consists of intra-passage and cross-passage compression steps. At the upper layers ($k+1$ to $n$) in the reader encoder, the query representations are concatenated with representations of each passage, and the query-passage representations are processed together. We compress the token representations of each query-passage pair and call this process intra-passage token compression since the encoder still computes each query-passage pair representation in parallel. After the encoder computation, all the query-passage representations are flattened and concatenated. In the reader decoder, we further compress the resulting representations across all passages (and the query) for every $g$ layer\footnote {We set $g$ to be 3 as default. We do not merge in every layer as in the upper part of the encoder because the decoder has more layers, skipping compression for a few layers provides a balance between efficiency and accuracy.} and call this cross-passage token compression. We use a similar compression algorithm as in the offline token compression, merging $r_p$\% tokens based on their semantic similarity. The difference here is that the representations are continuous vectors in the upper encoder and the decoder, so we change the similarity metric to cosine distance accordingly. Details are in \cref{algo:runtime} in \cref{sec:algo}. 
+
+
+\section{Evaluation}
+
+\label{sec:eval}
+
+We first describe \sys and baselines, followed by five knowledge-rich NLP tasks to evaluate them. We then report the main results of \sys on task performance and efficiency gains. We also evaluate the proposed techniques in \sys and their impacts on efficiency and performance trade-offs. 
+\subsection{Baselines}
+We apply \sys to Atlas~\cite{izacardAtlasFewshotLearning2022} base and large variants and call them \sys-Atlas base and \sys-Atlas large. Atlas is a recent state-of-the-art retrieval-augmented language model. The Atlas reader uses the T5-based~\cite{raffelExploringLimitsTransfer2020} Fusion-in-Decoder (FiD)~\cite{izacardLeveragingPassageRetrieval2021} architecture.
+We include more implementation details in \cref{sec:impl-details}.
+\paragraph{Baselines.} To compare task performance and efficiency with \sys, we evaluate five representative baselines (implementation details are in \cref{sec:baseline-details}): %
+
+(1) \textbf{Atlas}~\citep{izacardAtlasFewshotLearning2022} is a state-of-the-art retrieval-augmented language model for knowledge-rich NLP tasks. Due to computing budget constraints, we compare the base (with 220M parameters) and large (770M parameters) size variants.  
+
+(2) \textbf{Atlas-Q} is a quantized version of the Atlas base model. We use GTPQ~\citep{frantarGPTQAccuratePostTraining2023} to quantize the fine-tuned Atlas baseline model in 4bit. 
+
+(3) \textbf{DensePhrase}~\citep{leeLearningDenseRepresentations2021} creates dense phrase representations of passages. It retrieves answers from the phrase index without using the retrieve-and-read pipeline and achieves high query processing throughput.
+
+(4) \textbf{DeFormer}~\citep{caoDeFormerDecomposingPretrained2020} speeds up the inference in encoder-only reader models by decomposing the passage and query encoding and caching the continuous passage representations. We apply DeFormer over Atlas-base and fine-tune the decomposed model. 
+
+(5) \textbf{LLaMA2}~\citep{touvronLlamaOpenFoundation2023} consists of open-source large language models that achieve top performance on many NLP benchmarks including the knowledge tasks we study. Since the few-shot versions still lag behind fine-tuned models, we finetune the LLaMA2-7B model using the LoRA~\citep{huLoRALowRankAdaptation2021a} adapter and report its results on the evaluation tasks. 
+
+\subsection{Tasks and Metrics}
+
+We evaluate \sys and baselines on three open-domain QA tasks: NaturalQuestions (NQ, \citet{kwiatkowskiNaturalQuestionsBenchmark2019}, TriviaQA (TQA, \citet{joshiTriviaQALargeScale2017}), WebQuestions (WQ, \citet{berantSemanticParsingFreebase2013}); one fact-checking task: FEVER~\citep{thorneFEVERLargescaleDataset2018}, and one knowledge-intensive reasoning benchmark: the mass-multitask language understanding (MMLU) dataset~\citep{hendrycksMeasuringMassiveMultitask2020}. Dataset details are in \cref{sec:data}. We use the same Wikipedia corpus (dumped from December 2018) for all tasks and compared systems for consistency. The corpus contains 32.1 million passages, roughly over 3.2 billion tokens assuming 100 tokens per passage. 
+
+\paragraph{Evaluation metrics.} We use the exact match score (EM) as the metric for the open-domain QA tasks. We measure the accuracy of the fact checking task and the MMLU benchmark. For all tasks and models, we choose the model checkpoint based on the development set and report the metrics on the test set. All the numbers are average values across 5 different runs (with different random seeds).
+\paragraph{Efficiency measurements.} For each task and model, we randomly sample 100 queries from the test dataset and measure the real inference throughput as the number of queries processed per second (QPS) of the compared models on the A100 GPU hardware. Actual throughput reflects a more realistic comparison of efficiency across different systems. %
+
+\subsection{Main Results}
+
+\begin{table}[t!]
+    \centering
+    \setlength{\tabcolsep}{0.0cm}
+    \footnotesize
+\caption{Task performance and inference efficiency comparison between the baseline models and \sys-Atlas over five evaluation tasks. `Sp' denotes the speed up over the Atlas base model, and the subscript percentage numbers in brackets are relative performance compared to the Atlas base model. The speed up and percentage for \sys-Atlas large is over the Atlas large model. \sys achieves \textbf{2--3x} inference speedup while maintaining \textbf{$>$ 95\%} of the original models' performance.}
+\label{table:main-results}
+    \begin{tabular}{@{}l
+        @{\hskip 0.2in} rl@{\hskip 0.05in}r
+        @{\hskip 0.2in} rl@{\hskip 0.05in}r
+        @{\hskip 0.2in} rl@{\hskip 0.05in}r
+        @{\hskip 0.2in} rl@{\hskip 0.05in}r
+        @{\hskip 0.2in} rl@{\hskip 0.05in}r
+        @{}}
+    \toprule
+          & \multicolumn{3}{c}{NQ}
+          & \multicolumn{3}{c}{TQA}
+          & \multicolumn{3}{c}{WQ}
+          & \multicolumn{3}{c}{FEVER}
+          & \multicolumn{3}{c}{MMLU}
+          \\ 
+          \cmidrule(lr){2-4} \cmidrule(lr){5-7}
+          \cmidrule(lr){8-10} \cmidrule(lr){11-13} \cmidrule(lr){14-16}
+          & EM && Sp & EM && Sp & EM && Sp & Acc && Sp & Acc && Sp \\
+    \midrule
+        Atlas base &        52.1 && 1.0 & 69.3 && 1.0 & 46.4 && 1.0 & 72.9 && 1.0 & 38.6 && 1.0 \\
+        Atlas-Q &      51.8 & $_{(99\%)}$ & 1.2 & 68.5 & $_{(99\%)}$ & 1.3 & 45.1 & $_{(97\%)}$ & 1.1 & 70.4 & $_{(97\%)}$ & 1.1 & 37.8 & $_{(98\%)}$ & 1.2 \\
+        DeFormer &          51.4 & $_{(99\%)}$ & 2.2 & 68.0 & $_{(98\%)}$ & 2.0 & 44.8 & $_{(97\%)}$ & 2.0 & 71.8 & $_{(98\%)}$ & 2.3 & 33.9 & $_{(88\%)}$ & 1.8 \\
+        DensePhrase &       40.9 & $_{(79\%)}$ & 4.9 & 53.6 & $_{(77\%)}$ & 5.8 & 37.5 & $_{(81\%)}$ & 5.1 & - & & - & - && - \\
+        LLAMA2-7B &          47.8 & $_{(92\%)}$ & 0.1 & 74.3 & $_{(108\%)}$ & 0.1 & 51.2 & $_{(110\%)}$ & 0.1 & 76.3 & $_{(105\%)}$ & 0.1 & 51.2 & $_{(133\%)}$ & 0.1 \\
+        \textbf{\sys}-Atlas base &    49.5 & $_{(95\%)}$ & {3.1} & 66.7 & $_{(96\%)}$ & {2.5} & 43.8 & $_{(94\%)}$ & {2.6} & 70.2 & $_{(96\%)}$ & {3.1} & 35.4 & $_{(92\%)}$ & {2.6} \\
+        \midrule
+        Atlas large &       58.3 &  & 1.0 & 73.6 &  & 1.0 & 51.5 &  & 1.0 & 78.2 &  & 1.0 & 41.1 & & 1.0 \\
+        \textbf{\sys}-Atlas large &   56.1 & $_{(96\%)}$ & {4.0} & 70.8 & $_{(96\%)}$ & {3.9} & 49.1 & $_{(95\%)}$ & {3.6} & 75.9 & $_{(97\%)}$ & {4.1} & 39.2 & $_{(95\%)}$ & {2.5} \\
+    \bottomrule
+\end{tabular}
+\end{table}
+\begin{figure}[t!]
+    \centering
+    \begin{subfigure}[b]{0.333\columnwidth}
+        \centering
+        \includegraphics[width=\columnwidth]{fig/baseline-nq.pdf}
+        \caption{NaturalQuestions}
+        \label{fig:nq}
+    \end{subfigure}
+    \hspace*{-1.6em}
+    \begin{subfigure}[b]{0.333\columnwidth}
+        \centering
+        \includegraphics[width=\columnwidth]{fig/baseline-tqa.pdf}
+        \caption{TriviaQA}
+        \label{fig:tqa}
+    \end{subfigure}
+    \hspace*{-1em}
+    \begin{subfigure}[b]{0.333\columnwidth}
+        \centering
+            \includegraphics[width=\columnwidth]{fig/baseline-wq.pdf}
+            \caption{WebQuestions}
+            \label{fig:wq}
+    \end{subfigure}
+    \caption{Task performance and inference efficiency (throughput and storage) visualization across the baselines and \sys fine-tuned models on three open-domain QA  datasets. The area of the circle denotes storage size (we scale the area size of \sys-base and DensePhrase by 10 for clear display). A top-right smaller circle is better. 
+    }
+    \label{fig:baselines}
+\end{figure}
+
+\paragraph{\sys \revise{achieves favorable accuracy and efficiency tradeoffs.}}
+\cref{table:main-results} presents the accuracy, storage versus inference throughput trade-offs for \sys, DeFormer, DensePhrase, Atlas-Q, and LLaMA2-7B models on the evaluation datasets. \revise{We define the better efficiency trade offs under certain a accuracy target (e.g, afford relatively 5\% accuracy drop). A model has a better trade-off if the model is more efficient (less storage and faster speed) when satisfying the accuracy budget.
+}
+Atlas-Q and LLaMA-7B provide high accuracy but with very low inference throughput.
+DensePhrase achieves the highest throughput, but comes with much lower accuracy numbers ($>6$\% gap); DeFormer has similar inference throughput and slightly higher accuracy than \sys but its storage overhead is two orders of magnitude larger. \revise{
+\cref{fig:baselines} visualizes the efficiency versus accuracy trade-offs for the compared models on the three open QA datasets.}
+
+Furthermore, \sys is more scalable than DeFormer and DensePhrase.  We estimate that using a much larger corpus like CCNet~\citep{wenzek-etal-2020-ccnet} with over 350 million passages will take up 1389 GB using similar compression ratios for the Wikipedia corpus. However, for baseline models, the DeFormer will spend over 100TB of storage and the DensePhrase will occupy over 3TB of storage.  
+
+
+\begin{table}[t!]
+    \centering
+    \setlength\tabcolsep{0pt}
+    \small
+\caption{Inference throughput and accuracy for applying binary representations to BERT-base reader model on three open QA datasets.}
+\label{tab:bert}
+    \setlength{\tabcolsep}{0.1cm}
+    \footnotesize
+    \begin{tabular}{@{}l
+        @{\hskip 0.4in} rl@{\hskip 0.05in}r
+        @{\hskip 0.4in} rl@{\hskip 0.05in}r
+        @{\hskip 0.4in} rl@{\hskip 0.05in}r
+        @{}}
+    \toprule
+          & \multicolumn{3}{c}{NQ}
+          & \multicolumn{3}{c}{TQA}
+          & \multicolumn{3}{c}{WQ}
+          \\ 
+          \cmidrule(lr){2-4} \cmidrule(lr){5-7}
+          \cmidrule(lr){8-10}
+          & EM && Sp & EM && Sp & EM && Sp  \\
+    \midrule
+        BERT base &        42.9 && 1.0 & 57.1 && 1.0 & 43.1 && 1.0 \\
+        \textbf{\sys}-BERT base &   39.8 & $_{(93\%)}$ & 3.4 & 54.1 & $_{(95\%)}$ & 3.9 & 39.7 & $_{(92\%)}$ & 3.2  \\
+    \bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{\sys remains effective for encoder-only
+models.} We study binary passage token representations for encoder-based models and validate their effectiveness and inference benefits. Specifically, we apply the token-level binarization technique in \S\ref{sec:binarization} for the BERT-base model with DPR~\citep{karpukhinDensePassageRetrieval2020} as the passage retriever. We do not apply scale-aware modifications since the BERT model is a post-layernorm architecture. Note that encoder models expect the answer predictions to be exact spans from the retrieved passages, therefore, our runtime token compression techniques do not apply since we cannot recover the original exact spans once the tokens are compressed. Offline binary token compression remains applicable and reduces storage footprint. Implementation details are in \cref{sec:impl-details}. \cref{tab:bert} shows the results of the BERT reader model on three open QA datasets, applying binary representations also effectively improves the inference throughput by over \textbf{3x} while maintaining over 92\% accuracy.
+\subsection{Ablation Study}
+\label{sec:ablation}
+
+\makeatletter
+\def\adl@drawiv#1#2#3{%
+        \hskip.3\tabcolsep
+        \xleaders#3{#2.5\@tempdimb #1{1}#2.5\@tempdimb}%
+                #2\z@ plus1fil minus1fil\relax
+        \hskip.3\tabcolsep}
+\newcommand{\cdashlinelr}[1]{%
+  \noalign{\vskip\aboverulesep
+           \global\let\@dashdrawstore\adl@draw
+           \global\let\adl@draw\adl@drawiv}
+  \cdashline{#1}
+  \noalign{\global\let\adl@draw\@dashdrawstore
+           \vskip\belowrulesep}}
+\makeatother
+
+\paragraph{Each component in \sys provides either efficiency or accuracy gains.} We study the effects of each component in \sys on the inference efficiency and accuracy using the NaturalQuestions dataset. \sys consists of four efficiency components that improve either inference throughput or storage footprint and two training components that improve accuracy. The efficiency components include (i) binary passage representations; (ii) offline token merging; (iii) runtime intra-passage token compression; and (iv) runtime cross-passage token compression. The accuracy components are (v) passage representation recovery and (vi) query-aware passage token distillation. %
+\begin{table}[t!]
+    \centering
+    \setlength\tabcolsep{3pt}
+    \small
+    \caption{Ablation analysis for each component in \sys on the NaturalQuestions dataset.}
+    \label{tab:ablation}
+
+\begin{tabular}{@{}rlccr@{}}
+\toprule
+\multicolumn{2}{l}{}                                                   \multirow{2}{*}{}                                                     & Accuracy      & Throughput & Storage  \\ 
+& & (\%) $\uparrow$ & (QPS) $\uparrow$ & (GB) $\downarrow$ \\ \midrule
+& {Atlas base}                                           & 52.1         & 10.2       & 0       \\ \cdashlinelr{1-5} %
+& {\textbf{\sys}-Atlas base}                                              & 49.5         & 31.5       & 127     \\ %
+\multirow{4}{*}{efficiency $\Bigg{\{}$} & \quad w/o binary passage representations         & 50.8  (+1.3) & 32.3       & 12,804   \\
+                            & \quad  w/o offline compression                  & 49.8 (+0.3)  & 31.5       & 159     \\
+                            & \quad  w/o runtime intra-passage compression & 50.0 (+0.5)  & 28.1       & 127     \\
+                            & \quad  w/o runtime cross-passage compression & 49.9 (+0.4)  & 24.6       & 127     \\   %
+\multirow{2}{*}{accuracy $\Big{\{}$}   & \quad w/o passage representation recovery        & 47.4 (-2.1)  & 31.5       & 127     \\
+                            & \quad w/o query-aware passage token distillation             & 48.2 (-1.3)  & 31.5       & 127     \\ \bottomrule
+\end{tabular}
+\end{table}
+
+\cref{tab:ablation} shows the efficiency techniques in \sys come with the price of task accuracy degradation, however the two accuracy components during training effectively mitigate such accuracy drop. Specifically, the binary passage representations dramatically reduce the storage by over 100x, and the offline token compression further reduces the footprint by 20\%. On the other hand, the two online token compression techniques improve the inference throughput by over 30\% without sacrificing too much accuracy drop. Overall, the techniques in \sys collectively provide efficiency gains without compromising task accuracy too much.
+\begin{figure}[t!]
+    \centering
+    \begin{subfigure}[b]{0.495\columnwidth}
+        \centering
+        \includegraphics[width=\columnwidth]{fig/storage-accuracy.pdf}
+        \caption{Offline token compression}
+        \label{fig:storage-accuracy}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.495\columnwidth}
+        \centering
+        \includegraphics[width=\columnwidth]{fig/throughput-accuracy.pdf}
+        \caption{Runtime token compression}
+        \label{fig:throughput-accuracy}
+    \end{subfigure}
+    \caption{Accuracy, storage, and throughput comparisons for different two-stage token compression ratios on the NaturalQuestions dataset. To achieve a good balance between accuracy, storage, and throughput in \sys, we choose a compression ratio of 0.2 for both online and offline token compression. Detailed numbers are in \cref{tab:compression-ratios} in \cref{apdix:ablation}.
+    }
+    \label{fig:compression-ratios}
+\end{figure}
+\paragraph{Effects of token compression ratios in \sys.} \cref{fig:compression-ratios} shows the effects of the two-stage token compression technique in \sys under different compression ratios. We choose the compression ratio from 5\% to 50\%\footnote{Compression ratios bigger than 50\% cause significant accuracy drops. } with a gap of 5\% and report the accuracy and storage or throughput numbers for the NaturalQuestions dataset. For offline token compression, with bigger compression ratios, \sys achieves linear storage cost reduction but the accuracy does not drop significantly until the ratio is bigger than 0.2 (default for \sys).  We also observe that for online token compression, the inference throughput consistently improves with higher compression ratios, while the accuracy degradation is relatively small until the ratio is larger than 0.2. By configuring different compression ratios, \sys allows flexible inference throughput, storage, and accuracy trade-offs during inference without additional training efforts. 
+
+
+
+
+\section{Conclusion and Future Work}
+
+\label{sec:conclusion}
+
+Retrieval-augmented language models present viable solutions to address issues like hallucinations in large language models, but their inference is slow because the reader component needs to process many passages. We introduce \sys, a system that creates cacheable binary token representations to improve the inference and storage efficiency for the reader in retrieval-augmented language models. Together with training regularization techniques and token compression methods, \sys effectively reduces the storage costs by 100x, improves inference throughput by 2$\sim$4x, and maintains performance for a wide range of knowledge-intensive tasks.
+
+
+
+We discuss directions for future work. 1) Extending \sys to decoder-only readers is non-trivia because decoder models compute passage representations together with the query in a sequential manner, making it challenging to break computational dependencies and cache passage representations. Moreover, the KV-Caches in decoder models speed up the inference decoding, but storing their binary representation causes much more storage than encoder models. 2) Improving \sys for extremely long input queries remains challenging and requires other orthogonal efficient methods. \sys can speed up the inference when queries are longer, but the speed-up is relatively smaller than shorter queries. %
+3) Scaling \sys for larger models with bigger representation sizes is another important research topic. Potential solutions might include using autoencoders to compress the dimension of representations. 4) It will also be interesting to apply binary token representations to the retriever and incorporate \sys into model pretraining for building better and faster retrieval-augmented language models. 
+
+
+\clearpage
+
+

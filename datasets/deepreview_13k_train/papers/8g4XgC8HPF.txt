@@ -1,0 +1,1285 @@
+\title{Controllable Generation via Locally Constrained Resampling}
+
+\begin{abstract}
+Autoregressive models have demonstrated an unprecedented ability at modeling the intricacies
+of natural language.
+However, they continue to struggle with generating complex outputs that adhere to
+logical constraints.
+Sampling from a \emph{fully-independent} distribution subject to a constraint is hard.
+Sampling from an \emph{autoregressive distribution} subject to a constraint is doubly
+hard: We have to contend not only with the hardness of the constraint but also the 
+distribution's lack of structure.
+We propose a tractable probabilistic approach that performs Bayesian conditioning to
+draw samples subject to a constraint.
+Our approach considers the entire sequence, leading to a more globally optimal constrained generation than current greedy methods.
+Starting from a model sample, we induce a local, factorized distribution which we can
+tractably condition on the constraint.
+To generate samples that satisfy the constraint, we sample from the conditional distribution,
+correct for biases in the samples and resample. 
+The resulting samples closely approximate the target distribution and are guaranteed to satisfy
+the constraints.
+We evaluate our approach on several tasks, including LLM detoxification and solving Sudoku puzzles.
+We show that by disallowing a list of toxic expressions our approach is able to steer the model's outputs away from toxic generations, outperforming similar approaches to detoxification.
+We conclude by showing that our approach achieves a perfect accuracy on Sudoku compared to $<50\%$ for GPT4-o and Gemini 1.5.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+The advent of large language models (LLMs) has brought about a paradigm shift towards
+generating sequences of tokens that jointly constitute the desired output.
+Such multi-token outputs exhibit an amount of structure to them: in free-form
+generation, the model is expected to generate coherent paragraphs; in question
+answering, it is expected to provide answers to the posed questions;
+and in summarization, it is expected to condense lengthy documents into concise
+summaries.
+And while current LLMs are remarkably apt at generating fluent sentences, there
+is a need for generations that go beyond that, exhibiting more intricate structure~\citep{Liu2024Structured}.
+Such structure includes, \eg API calls and code snippets~\citep{wang2023grammar}, JSON schemas~\citep{openai2023structured}, logical puzzles~\citep{mittal2024puzzlebench, pan2023logiclm}, all of which LLMs struggle with~\citep{sun2023evaluatingLLMs}.
+
+Consequently, several approaches to constraining LLMs were developed, all
+bolstering a similar underlying idea: at every generation step \emph{greedily}
+mask the LLM outputs that could lead to the constraint being violated.
+That is, the ``defacto'' recipe~\citep{deutsch2019general, guidance,outlines,koo2024} for applying constraints to LLMs consists of the following:
+\begin{enumerate}
+    \item Based on the current state of the constraint, build a mask of valid next tokens.
+    \item Mask out logits for invalid tokens, normalize, and sample.
+    \item Based on the sampled token, update the constraint state for the next time step.
+\end{enumerate}
+The above recipe is limited in a number of ways.
+First, the masking process is \emph{myopic}~\citep{shih2023longhorizon}, as the constraint is enforced \emph{greedily}
+per-token rather than jointly across the entire generation.
+This is as opposed to \emph{Bayesian} conditioning,
+where we consider the entire sequence.
+Second, the constraint specification language is typically regular expressions,
+which can be significantly more verbose than their target compilation forms,
+deterministic finite automata (DFAs)~\citep{gruber2009, gruber2014, koo2024}.
+Lastly, there exists classes of constraint functions that can only be described by
+DFAs whose size grows exponentially in the size of their constraint.
+
+In this work we develop an approach that departs from the previously established
+recipe for constraining LLMs, tackling all the aforementioned shortcomings in the
+process.
+Our approach starts with the observation that \emph{an LLM sample induces a local,
+factorized distribution} $\Tilde{\p}$.
+We use a tractable compilation form, \emph{constraint circuits}~\citep{darwiche11},
+that subsume DFAs on bounded-length strings while being more expressive 
+efficient~\citep{choi2020pc}.
+That is, there are classes of functions that we can represent using constraint
+circuits that we could not otherwise as efficiently represent using 
+DFAs~\citep{SDDexpsucc}.
+Such constraint circuits can be specified as Boolean python functions, alleviating the
+need for writing regular expressions or other domain specific languages.%
+We show that we can leverage logical circuits to tractably condition $\Tilde{p}$,
+drawing samples that are biased yet provably satisfy the constraint.
+Sampling from the LLM subject to a constraint $\alpha$ then entails conditioning $\Tilde{p}$
+on $\alpha$, drawing biased samples from $\Tilde{p}(\cdot \mid \alpha)$, which we debias by reweighing
+them proportionally to their probability under the LLM and resampling.
+The returned samples are distributed according to the conditional LLM distribution while also satisfying the constraint. 
+
+We start our evaluation by testing our approach on the toy task of predicting shortest paths
+under an autoregressive model, and observe a significant improvement upon the 
+baseline performance.
+Next, we evaluate our approach on the task of LLM detoxification where we show
+that, by virtue of its probabilistic nature, by simply disallowing a list of toxic expressions, our approach is able to steer the model away from toxic generations, outperforming previous approaches to detoxification.
+Lastly, we show that our approach achieves a perfect accuracy on
+Sudoku puzzles, compared to an almost $26\%$ and $45\%$ accuracy achieved by Gemini 1.5 Flash and GPT4-o models, respectively.
+
+\begin{figure*}[!t]
+ \centering
+\hspace{-35pt}
+\begin{subfigure}[t]{0.30\textwidth}
+ \centering
+ \scalebox{.8}{
+    \begin{tikzpicture}
+    \begin{axis}[
+        const plot,
+        ymode=log,
+        width=1.6\columnwidth,
+        height=6cm,
+        ymax=1,ymin=1e-5,
+        xmin=0,xmax=48.8,
+        every axis y label/.style={at=(current axis.above origin),anchor=south},
+        every axis x label/.style={at=(current axis.right of origin),anchor=west},
+        legend style={
+            at={(0.95, 0.95)},
+            anchor=north east,
+        },
+        legend cell align={left},
+        log origin=infty,
+        ticks=none,
+        xlabel=$y$, 
+        ylabel=$p(y|x)$,
+        axis lines*=left,
+        clip mode=individual,
+    ]
+    \addplot[forget plot,draw,mark=none,name path=zero] {1e-5};
+    \addplot[name path=med,draw=none,mark=none,fill=pastel-red] table [x=x, y=y] from \wrong;
+
+    \addplot[forget plot,name path=pr, draw=none, very thick, fill=palette-blue!20!white] table [x=t,y=prob,palette-blue] from \constraint \closedcycle;
+    \addplot[forget plot,name path=pr, very thick, sanae5] table [x=t,y=prob,palette-blue] from \data;
+
+    \node[palette-green] (canon) at (23, 7e-1) {\small\texttt{[He's, \implws full, \implws of, \implws sh!t]}};
+    \node[palette-green] (llmdist) at (43, 1e-1) {\scriptsize\text{{\fontfamily{cmtt}\selectfont llm dist.}}};
+    \node[palette-green] (datshadow) at (48, 0.35e-1) {};
+    \draw[->,>=latex',thick,black] (49.5, 1e-1) edge[bend left=49] (datshadow);
+    \draw[-stealth,decorate,decoration={snake,amplitude=2pt,pre length=1pt,post length=2pt}, thick] (20.5,0.04) --(20.5, 5e-1);
+    \draw [yshift=-0.3cm, latex-latex, |-|](axis cs:22,1e-5) -- node [fill=white] {$m_{\alpha}$} (axis cs:40,1e-5);
+    \end{axis}
+\end{tikzpicture}
+}
+\end{subfigure}%
+\hspace{12pt}
+\begin{subfigure}[t]{0.30\textwidth}
+\centering
+\scalebox{.80}{
+        \begin{tikzpicture}
+    \begin{axis}[
+        const plot,
+        ymode=log,
+        width=1.6\columnwidth,
+        height=6cm,
+        ymax=1,ymin=1e-5,
+        xmin=0,xmax=48.8,
+        every axis y label/.style={at=(current axis.above origin),anchor=south},
+        every axis x label/.style={at=(current axis.right of origin),anchor=west},
+        legend style={
+            at={(0.95, 0.95)},
+            anchor=north east,
+        },
+        legend cell align={left},
+        log origin=infty,
+        ticks=none,
+        xlabel=$y$, 
+        ylabel=$p(y|x)$,
+        axis lines*=left,
+        clip mode=individual
+    ]
+    \addplot[forget plot,draw,mark=none,name path=zero] {1e-5};
+    \addplot[forget plot,name path=pr, draw=none, very thick, fill=palette-blue!20!white] table [x=t,y=prob,palette-blue] from \constraintclipped \closedcycle;
+    \addplot[forget plot,name path=pr, very thick, sanae5, opacity=0.2] table [x=t,y=prob,palette-blue] from \data;
+    \addplot[name path=med,draw=none,mark=none,fill=pastel-red] table [x=x, y=y] from \wrongtwo;
+    \addplot[forget plot,name path=pseudo-pr, very thick, gray, opacity=1.0] table [x=t,y=prob,palette-blue] from \dat;
+
+    \node[palette-green] (canon) at (23, 7e-1) {\small\texttt{[He's, \implws full, \implws of, \implws sh!t]}};
+    \node[palette-green] (apprxdist) at (36, 1e-1) {\scriptsize\text{{\fontfamily{cmtt}\selectfont approx.\ dist.}}};
+    \node[palette-green] (shadowapprx) at (25, 1e-1) {};
+     \draw[->,>=latex',thick,black] (30, 1.5e-1) edge[bend right=30] (shadowapprx);
+    \draw [yshift=-0.3cm, xshift=-0.1cm, latex-latex, |-|](axis cs:22.5,1e-5) -- node [fill=white] {$m_{\alpha}$} (axis cs:27.5,1e-5);
+    \end{axis}
+\end{tikzpicture}
+}
+\end{subfigure}%
+\hspace{12pt}
+\begin{subfigure}[t]{0.30\textwidth}
+\centering
+\scalebox{.80}{
+\begin{tikzpicture}
+    \begin{axis}[
+        const plot,
+        ymode=log,
+        width=1.6\columnwidth,
+        height=6cm,
+        ymax=1,ymin=1e-5,
+        xmin=0,xmax=48.8,
+        every axis y label/.style={at=(current axis.above origin),anchor=south},
+        every axis x label/.style={at=(current axis.right of origin),anchor=west},
+        legend style={
+            at={(0.95, 0.95)},
+            anchor=north east,
+        },
+        legend cell align={left},
+        log origin=infty,
+        ticks=none,
+        xlabel=$y$, 
+        ylabel=$p(y|x)$,
+        axis lines*=left,
+        clip mode=individual
+    ]
+    \addplot[forget plot,draw,mark=none,name path=zero] {1e-5};
+    \addplot[forget plot,name path=pr, draw=none, very thick, fill=palette-blue!20!white] table [x=t,y=prob,palette-blue] from \constraintclipped \closedcycle;
+    \addplot[forget plot,name path=pr, very thick, sanae5, opacity=0.2] table [x=t,y=prob,palette-blue] from \data;
+    \addplot[name path=med,draw=none,mark=none,fill=spearmint] table [x=x, y=y] from \correct;
+    \addplot[forget plot,name path=pseudo-pr, very thick, gray, opacity=1.0] table [x=t,y=prob,palette-blue, restrict x to domain=22:25] from \dat;
+
+    \draw [yshift=-0.3cm, xshift=-0.1cm, latex-latex, |-|](axis cs:24,1e-5) -- node [fill=white] {$m_{\alpha}$} (axis cs:26,1e-5);
+    \node [fill=white] (condition) at (27.5, 1e-1) {$|\alpha$};
+     \node[palette-green] (canon) at (27, 7e-1) {\small\texttt{[He's, \implws full, time, \implws employed]}};
+     \node[palette-green] (apprxdist) at (22, 2.5e-1) {\scriptsize\rotatebox{90}{\text{{\fontfamily{cmtt}\selectfont I.W.}}}};
+    \draw[-stealth,decorate,decoration={snake,amplitude=2pt,pre length=1pt,post length=2pt}, thick] (23.5,0.15) --(23.5,5e-1);
+    \end{axis}
+\end{tikzpicture}
+}
+\end{subfigure}%
+\caption{
+\textbf{An illustration of our proposed approach.}
+(left) An LLM induces a distribution over all possible sentences.
+Autoregressively sampling from the LLM distribution, we obtain a
+sentence (\protect\tikz[baseline=+0.2ex]{\protect\draw[gray!70!white,fill
+=pastel-red] (0,0) rectangle ++(0.5,0.25);}) $\ytilde =$ 
+\texttt{[He's, \implws full, \implws of, \implws sh!t]}.
+This sentence $\ytilde$ violates a constraint $\alpha$ that disallows
+toxic words, including the word ``\texttt{sh!t}''.
+The subset of sentences that satisfy the constraint $\alpha$
+(\protect\tikz[baseline=+0.2ex]{\protect\draw[gray!70!white,
+fill=palette-blue!20] (0,0) rectangle ++(0.5,0.25);}) are
+denoted by $\vdash m_\alpha\dashv$.
+(center) The sentence $\ytilde$ induces a local, tractable approximation
+of the true distribution centered around $\ytilde$.
+(right) We can efficiently condition this tractable approximation on
+the constraint $\alpha$, trimming away portions of its support that 
+do not satisfy the constraint.
+Sampling from the LLM distribution subject to the constraint $\alpha$ then corresponds
+to sampling from the conditional approximate distribution and adjusting the sample
+weights using importance weighting.
+This yields a sentence (\protect\tikz[baseline=+0.2ex]
+{\protect\draw[gray!70!white, fill=spearmint] (0,0) rectangle ++(0.5,0.25);})
+$\y =$ \texttt{[He's, \implws full, time, \implws employed]} that satisfies
+$\alpha$.
+}
+\label{fig:overview}
+\end{figure*}
+
+
+\section{Background}
+
+
+\subsection{Notation and Preliminaries}\label{sec:Notation}
+We write uppercase letters ($X$, $Y$) for Boolean variables and lowercase letters ($x$, $y$) for their instantiation ($Y=0$ or $Y=1$).
+Sets of variables are written in bold uppercase ($\X$, $\Y$), and their joint instantiation in bold lowercase ($\x$, $\y$).
+A literal is a variable ($Y$) or its negation ($\neg Y$).
+A logical sentence ($\alpha$ or $\beta$) is constructed from variables and logical connectives ($\land$, $\lor$, $\lnot$,$\implies\!\!$), and is also called a (logical) formula or constraint.
+A state or world $\y$ is an instantiation to all variables $\Y$.
+A state $\y$ satisfies a constraint $\alpha$, denoted $\y \models \alpha$, if the sentence evaluates to true in that world. A state $\y$ satisfying a constraint $\alpha$ is said to be a model of $\alpha$.
+We denote by $m(\alpha)$ the set of $\alpha$'s models.
+Throughout this paper, in reference to DFAs, we limit our discussion to those defined on bounded-length inputs, which are equivalent to ordered binary decision diagrams, or OBDDs~\citep{Bryant1992OBDDs}.
+    
+    
+    
+\subsection{A Probability Distribution over Possible Sentences}
+
+Let $\alpha$ be a logical constraint defined over Boolean variables $\Y = \{Y_{11},\dots,Y_{nk}\}$, where $n$ denotes the number of time steps in the
+sentence, and $k$ denotes the size of the vocabulary, \ie the number of possible
+tokens at each time step.
+An autoregressive model induces a probability distribution $\p(\cdot)$ over
+all possible sentences $\y$.
+At every time step~$i$, the autoregressive model ensures that exactly one
+token is predicted; \ie exactly one Boolean variable $\{Y_{i1},\dots,Y_{ik}\}$
+can be set to true for each time step $i$.
+We will write $\y_i$ to denote that variable $Y_{ij}$ is set to true in sentence
+$\y$.
+More precisely, we let $\y_i \in \{0,1\}^{k}$ be the one-hot encoding of $Y_{ij}$
+being set to $1$ among $\{Y_{i1},\dots,Y_{ik}\}$.
+The probability assigned by the autoregressive model to a sentence $\y$ is then defined as
+\begin{equation}\label{eqn:pr_struct}
+     \p(\y) = \prod_{i=1}^{n} \p(\y_{i} \mid \y_{<i}),
+\end{equation}
+where $\y_{<i}$ denotes the sentence prefix, $\y_1, \ldots, \y_{i-1}$.
+\subsection{The State of Conditional Autoregressive Sampling}
+\label{section:current_state}
+
+Sampling from an autoregressive distribution conditioned on a logical constraint
+$\alpha$ constitutes a major challenge: computing the \emph{exact} conditional
+distribution $\p(\y \mid \alpha) = \frac{p(\y, \alpha)}{\p(\alpha)}$ is intractable even for the simplest constraints~\citep{Roth93}, \eg asserting that the word ``dog'' appears at the end of the sentence.
+Intuitively, conditioning on $\alpha$ requires that we compute the marginal probability
+of the constraint $\p(\alpha)$, in turn requiring that we enumerate all sentences ending
+with the word ``dog''.
+
+The defacto approach has therefore been to \emph{greedily} constrain the distribution,
+at every time step masking out logits that lead to generations that violate the constraint,
+followed by re-normalizing the conditional token distribution~\citep{deutsch2019general, guidance,outlines,koo2024}.
+Let the conditioning of the constraint $\alpha$ on the prefix $\yprefix$, which we write as $\conditional{\alpha}{\yprefix}$,
+be a \emph{subconstraint} defined on $\Y_{i:n}$ that results from setting the variables $\Y_{1:i-1}$ to their values in $\yprefix$.
+Semantically, $\conditional{\alpha}{\yprefix}$ denotes the set of $\y_{i:n}$ that, taken together with the prefix $\yprefix$, would satisfy the constraint.
+Moreover, let $\beta_i \coloneqq \exists \y_{>i}\,\conditional{\alpha}{\yprefix}$ denote the set of tokens allowed at the $i$-th position such that there exists some completion $\y_{>i}$ of the sentence that satisfies the constraint $\alpha$, given the current prefix $\yprefix$.
+Then we can define the above greedy, or \emph{myopic}, distribution as
+\begin{align*}
+\p^{\text{myopic}}(\y \mid \alpha) 
+&\coloneqq \prod_{i=1}^{n} \frac{\p(\y_i, \beta_i \mid \y_{<i})}{\sum_j\p(y_{ij}, \beta_i \mid \yprefix)}
+= \prod_{i=1}^{n} \frac{\p(\y_i \mid \yprefix)\liv\y_{i}\models\beta_i\riv}{\sum_j\,\p(y_{ij}\mid \yprefix)\liv y_{ij} \models\beta_i\riv},
+\end{align*}
+Of note here is that since the approximate distribution is modeling
+the joint probability of the sentence and the constraint, in principle, the
+logical reasoning is sound, i.e., the constraint is guaranteed to hold. 
+Rather, the shortcoming is in the way the \emph{probabilistic reasoning} is performed:
+instead of normalizing the joint distribution by the
+marginal probability of the constraint, we are performing it token-wise
+steering us
+towards sampling sequences that are locally likely rather than globally likely.
+The second issue lies with the logical constraint along two different axes.
+First is the lack of conciseness of the constraint specification language.
+The most common language for specifying constraints is regular expressions
+which can be significantly more verbose~\citep{gruber2009, gruber2014, koo2024}
+compared to the equivalent logical form.
+This is due to the inability to reference and reuse sub-expressions without introducing
+additional features such as lookaround operations which can cause an exponential blowup
+in the size of the target representations~\citep{Regexlookaround}, or backreferences that
+allow us to describe non-regular languages at the expense of an exponential runtime due
+to backtracking.
+Second is the lack of succinctness of the target representation.
+All of the current approaches compile the specified regular expressions into DFAs.
+DFAs represent Boolean functions by recursively performing Shannon-decomposition on the function:
+disjointing the value of the sub-function with the value of the current variable chosen to be
+true and false, respectively.
+Consequently, for many constraints of interest, the size of DFA can grow prohibitively.
+It turns out there there exists another class of target representation that subsume DFAs on
+bounded-length strings: at every step in the function decomposition we can branch not only
+on the value of a single variable, rather an \emph{entire sentence}~\citep{darwiche11}.
+This class of target representations, which we henceforth denote as \emph{constraint circuits}
+are not only more succinct than DFAs in practice, but are provably exponentially more succinct:
+there are classes of functions with exponentially-sized DFAs but polynomially-sized constraint circuits~\citep{SDDexpsucc}.
+
+
+
+\section{Locally Constrained Resampling: A Tale of Two Distributions}
+
+
+
+We depart from the established recipe for conditional autoregressive sampling,
+providing a treatment of the problem from first principles that tackles all
+of the shortcomings detailed above.
+The crux of our approach is the idea that we can approximate the intractable
+autoregressive distribution $\p(\y)$ using a local, tractable distribution $\Tilde{p}(\y)$.
+The distribution $\Tilde{\p}(\y)$ is amenable to exact and efficient 
+probabilistic reasoning,
+allowing us to efficiently condition on the constraint $\alpha$ and
+draw samples from the distribution $\Tilde{\p}(\y \mid \alpha)$.
+We can transform the biased samples drawn from $\Tilde{\p}(\y \mid \alpha)$ 
+into samples from $\p(\y \mid \alpha)$ by considering the discrepancy between the
+probability of the sample under the true distribution and the approximate distribution.
+More formally, we wish to draw samples from
+\begin{equation}\label{eqn:pr_conditional}
+     \p(\y \mid \alpha) = \frac{\p(\y, \alpha)}{\p(\alpha)},
+\end{equation}
+which is intractable. %
+Instead, we design a tractable proposal distribution $\q$ such that
+$\q(\y) > 0$ whenever $\p(\y \mid \alpha) > 0$.
+We associate with a \emph{constrained sample} $\y$ an \emph{unconstrained sample} $\ytilde$,\ where $\y$ can be understood as  a \emph{projection} of $\ytilde$ onto $\alpha$ \st $\y \models \alpha$.
+We define our proposal as
+\begin{equation}
+    \q(\y) = \sum_{\ytilde} \p(\Tilde{\y}) \cdot \p_{\Tilde{\y}}(\y \mid \alpha),
+\end{equation}
+where $\p(\ytilde)$ is the autoregressive distribution, and $\p_{\ytilde}(\y \mid \alpha)$
+is a distribution over projections $\y$ of the unconstrained $\ytilde$ given the constraint
+$\alpha$.
+The above definition outlines a two-step procedure for sampling a sentence 
+$\y$ that satisfies a given constraint $\alpha$.
+We sample a sentence $\ytilde$ autoregressively from $\p(\ytilde)$, followed by sampling $\y$
+from the distribution conditioned on $\ytilde$ and the constraint $\alpha$, $\p_{\ytilde}(\y \mid \alpha)$.
+By incorporating the autoregressive distribution $\p(\ytilde)$, we ensure that we can potentially generate any sentence.
+$\p_{\ytilde}(\y \mid \alpha)$ then refines $\ytilde$ by \emph{projecting} it to satisfy the constraint $\alpha$.
+It is straightforward to sample from $\p(\ytilde)$, but what exactly is $\p_{\ytilde}(\y)$, and how do we condition it on $\alpha$?
+Moreover, a proposal distribution typically implies biased samples;
+how do we correct for this bias?
+
+\subsection{A Sample Induces a Local, Tractable distribution}\label{sec:pseudolikelihood}
+Our goal is to design a probability distribution $\p_{\ytilde}(\y \mid \alpha)$
+that is first, tractable for conditioning on the constraint $\alpha$ and likelihood evaluation,
+and second, assigns high probability mass to sentences that are close to the model sample $y$
+and low probability mass to sentences that are far away, thereby providing a sample-efficient
+approximation of the true distribution~\citep{koller2009probabilistic}.
+As noted earlier, the hardness of computing the conditional probability
+distribution in~\cref{eqn:pr_conditional} is in large part due to the autoregressive
+nature of the LLM distribution.
+A logical constraint might have exponentially-many solutions, yet lend itself
+to reusing of solutions to sub-problems, and therefore a tractable computation of the
+normalizing constant, the denominator in~\cref{eqn:pr_conditional}.
+An example being the $n$ choose $k$ constraint~\citep{AhmedICLR23}, where the
+conditional distribution can be computed in quadratic time under
+the fully-factorized distribution, despite having combinatorially many solutions.
+Moving away from fully-factorized distribution and towards autoregressive distributions, however, requires that we enumerate all sentences, even for very simple constraints.
+
+To sidestep the hardness of the autoregressive distribution, we attempt to move towards
+the tractability of fully-factorized distributions, while retaining as much of the contextual
+information.
+To that end, we consider the \emph{pseudolikelihood} $\Tilde{\p}(\cdot)$ of a sentence $\ytilde$~\citep{Besag1975, ahmed2023pseudosl}, \ie %
+\begin{equation}\label{eq:pseudo_likelihood}
+    \p(\ytilde) \approx \Tilde{\p}(\ytilde) \coloneqq \prod_{i}\p(\ytilde_i \mid \ytilde_{-i}),
+\end{equation}
+where $\ytilde_{-i}$ denotes $\ytilde_1, \ldots, \ytilde_{i-1}, \ytilde_{i+1}, \ldots, \ytilde_n$.
+Unfortunately, \cref{eq:pseudo_likelihood} above would still not ensure the tractability of~\cref{eqn:pr_conditional}
+since different solutions depend on different sets of conditionals.
+Instead, we define the pseudolikelihood of a sentence $\y$ \emph{in the neighborhood 
+of a sentence}~$\ytilde$
+\begin{equation}
+    \Tilde{\p}_{\ytilde}(\y) \coloneqq \prod_{i}\p(\y_i \mid \ytilde_{-i}) \label{eq:local_psl}
+\end{equation}
+which can be understood as the \emph{contextualized probability} of a sentence $\y$ given the context $\ytilde$.
+We will next show how, given the structure of the contextualized pseudolikelihood distribution,
+we are able to efficiently condition it on a constraint $\alpha$.
+Furthermore, \cite{ahmed2023pseudosl} have shown the contextualized pseudolikelihood distribution to be a local, high-fidelity approximation of the LLM distribution.
+That is, the distribution has low entropy, considering only assignments centered around the model sample, while at the same
+time having low KL-divergence meaning that
+our approximation is faithful to the true distribution in the neighborhood of the model sample.
+
+
+
+\subsection{Constraint Compilation and Tractable Operations}\label{sec:tractable_computation}
+We appeal to knowledge compilation, a class of methods that transform, or \emph{compile}, a
+logical constraint into a tractable target form which represents functions as parameterized
+computational graphs, or \emph{circuits}.
+Knowledge compilers allow us to programmatically specify constraints as Python~\citep{pysdd}
+or PyTorch functions~\citep{Ahmed22pylon} from which they construct circuits.
+By enforcing certain structural properties on the compiled circuits we can enable the tractable
+computation of corresponding classes of probabilistic queries over the encoded functions.
+As such, circuits provide a language for both constructing and reasoning about tractable 
+representations.
+An example of a logical constraint specified as a PyTorch function which gets compiled
+into a constraint circuit is shown in the bottom left of ~\cref{fig:pipeline} with the corresponding
+circuit in ~\cref{fig:pipeline}, right.
+
+Formally, a \emph{logical circuit} is a directed, acyclic computational 
+graph representing a logical formula over variables $\X$.
+Each node $n$ in the DAG encodes a logical sub-formula, denoted $[n]$.
+Each inner node in the graph is an AND or an OR gate, and each leaf 
+node encodes a Boolean literal ($Y$ or $\lnot Y$). 
+We denote by $\ch(n)$ the set of a node $n$'s children.
+We associate with every node $n$ a \emph{scope} function $\phi(\cdot)$ such that
+$\phi(n) \subseteq X$ evaluates to the subset of variables the subfunction at $n$
+is defined over.
+
+A circuit is \emph{decomposable} if the inputs of every AND gate depend on 
+disjoint sets of variables i.e.\ for $\alpha = \beta \land \gamma$, $\vars
+(\beta) \cap \vars(\gamma) = \varnothing$.
+A circuit is said to be \emph{structured-decomposable} if every AND
+gate is decomposable, and any pair of AND gates sharing the same scope decompose
+in the same way.
+Intuitively, decomposable AND gates encode local factorizations over
+variables of the function.
+We assume that decomposable AND gates always have two inputs, a condition
+enforceable on any circuit in exchange for a polynomial size increase~\citep{vergari2015simplifying,peharz2020einsum}.
+
+A second useful property is \emph{smoothness}.
+A circuit is said to be \emph{smooth} if the children
+of every OR gate depend on the same set of variables i.e. for 
+$\alpha = \bigvee_i \beta_i$, we have that $\vars(\beta_i) = 
+\vars(\beta_j)\ \forall i,j$. Decomposability and smoothness 
+are sufficient and necessary for tractable integration
+over arbitrary sets of variables in a single pass, as they allow 
+larger integrals to decompose into smaller~ones.
+
+Further, a circuit is said to be \emph{deterministic} if, 
+for any input, at most one child of every OR node has a non-zero
+output i.e. for $\alpha = \bigvee_i \beta_i$, we have that $ \beta_i 
+\land \beta_j = \bot$ for all $i \neq j$.
+Similar to decomposability, determinism induces a recursive 
+partitioning of the function, but over the support of the
+function.
+We consider a stronger form of determinism, \emph{strong determinism},
+A circuit is said to be \emph{strongly deterministic} if,
+for every OR node, $\alpha = \bigvee_i (\beta_i \land \gamma_i)$, the
+$\beta_i$'s are mutually exclusive \ie $\beta_i \land \beta_j = \bot$ for
+any $i \neq j$.
+Ensuring they are also exhaustive \ie $\bigvee_i \beta_i =\top$,
+along with structured-decomposability, we recover sentential decision diagrams
+\citep{darwiche11}, or \emph{constraint circuits}. 
+
+Given a constraint circuit $c_\alpha$ that encodes a logical constraint
+$\alpha$\ we can compute the pseudolikelihood $\Tilde{\q}(\alpha)$ by feeding
+the probability of each literal at the corresponding leaf node and evaluating
+the circuit upwards, taking sums at OR gates and products at AND gates.
+This defines a distribution $\p_{\y}(\Tilde{y} \mid \alpha)$.
+To sample from the distribution, starting from the root node, we trace the
+circuit top-down, sampling a child at every OR-gate encountered.
+\cref{fig:pipeline} (center) shows an example of computing such a distribution,
+and~\cref{fig:pipeline} (right) demonstrates the process of sampling from it.
+
+ \begin{minipage}[t]{\dimexpr.53\textwidth-.5\columnsep}
+\begin{algorithm}[H]
+\begin{algorithmic}[1]
+    \STATE \textbf{Input}: Constraint $\alpha$, LLM distribution~$\p(\cdot)$
+    \hspace{-11pt}\textcolor{spearmint}{$\triangleright$ Expand the batch to contain all perturbations}
+    \\\hspace{-11pt}\textcolor{spearmint}{$\triangleright$ of $\y$ that are a Hamming distance of 1 away}
+    \STATE $\ytilde = \ytilde .\mathtt{expand}(\text{n}, \text{vocab})$
+    \hspace{-11pt}\textcolor{spearmint}{$\triangleright$ Evaluate expanded samples through model}
+    \hspace{-11pt}\textcolor{spearmint}{$\triangleright$ Compute $\log \Tilde{\p}_{\btheta}[i][j] = \log \p_{\btheta}(\y_{j}|\y_{-j})$}
+    \hspace{-11pt}\textcolor{spearmint}{$\triangleright$ A vector of conditional marginals $\Tilde{p}_{\ytilde}(y_{ij} \mid \alpha)$} 
+    \STATE $\mathtt{return}$ $\Tilde{p}_{\ytilde}(\cdot \mid \alpha)$ 
+    
+\end{algorithmic}
+\caption{Compute $\Tilde{p}_{\y}(\Tilde{\y} \mid \alpha)$}
+\label{algo:psl}
+\end{algorithm}
+ \end{minipage}
+ \begin{minipage}[t]{\dimexpr.53\textwidth-.5\columnsep}
+ \begin{algorithm}[H]
+\begin{algorithmic}[1]
+    \STATE \textbf{Input}: Constraint $\alpha$, LLM distribution~$\p(\cdot)$
+\end{algorithmic}
+\label{algo:conditional}
+\end{algorithm}
+\end{minipage}
+
+\subsection{Intermezzo: Constraint Circuits and DFAs}
+Constraint circuits can implement decisions of the form 
+\begin{equation}\label{eq:sent-dec-intro}
+\bigvee_{i=1}^m \beta_i(X) \wedge \gamma_i(Y),
+\end{equation}
+
+at OR gates, where $\X$ and $\Y$ are disjoint \emph{sets} of variables, as opposed
+to DFAs that are restricted to Binary (or Shannon) decisions and therefore boil
+down to very special decisions of the form
+$$(\neg x \wedge \gamma_1(\Y)) \vee (x \wedge \gamma_2(\Y))$$
+where the variable $X$ is not in the variable set $\Y$.
+Therefore, constraint circuits are exponentially more succinct than DFAs, i.e., there
+are families of functions can only be represented by a exponentially-sized DFAs, but 
+have a polynomially-sized constraint circuit~\citep{SDDexpsucc}.
+Barring such families of functions, constraint circuits are also empirically more succinct than DFAs~\citep{Xue2012SDDs}.
+In practice, this allows us to construct shallower  (\ie less layers) and wider (\ie units per layer) constraint circuits that are more amenable to GPU parallelization~\citep{pyjuice}, exhibiting a lower vectorized computational complexity~\citep{AhmedICLR23}.
+\subsection{Correcting Sample Bias: Importance Sampling\ldots\,Resampling}\label{subsec:algorithm}
+
+We have now sampled $\y$ from our proposal distribution $\q(\y)$, where $\y$ is a projection of some latent unconstrained sample $\ytilde$, and satisfies the constraint $\alpha$.
+However, our proposal distribution $\q(\y)$ might not align perfectly with our target distribution $\p(\y \mid \alpha)$.
+We therefore need to account for the mismatch between the two distributions, which we can do by
+defining importance weights that are a function of the original $\y$, and its projection $\Tilde{\y}$.
+We start by defining the true augmented distribution
+\begin{equation}
+    \p(\y \mid \alpha) \propto \sum_{\ytilde} \p(\y, \alpha) \cdot \p_{\y}(\ytilde).
+\end{equation}
+This factorization reflects the process of first generating a constrained sentence $\y$, and marginalizing over all the unconstrained sentences $\ytilde$ that could have given rise to $\y$, and can be therefore be thought of as reversing the proposal distribution.
+We calculate the self-normalized importance weights
+\begin{equation}
+w = \frac{\p(\y, \alpha) \cdot \p_{\y}(\ytilde)}{\p(\ytilde) \cdot \p_{\ytilde}(\y \mid \alpha)}
+\end{equation} 
+These weights quantify the discrepancy between the proposal and target distributions, allowing us to correct for the biased sampling.
+Note, however, that the importance sampling does not generate samples from the target distribution $\p(\y\mid\alpha)$, only a set of 
+weighted particles.
+Rather, to transform our weighted particles into samples drawn from $\p(\y\mid\alpha)$ we need to apply a resampling step according to
+the importance weights.
+That is, given particles $\s_i$ with their corresponding importance weights $w_i$, if we resample
+$\s_i$ with replacement from $\{\s_1, \ldots, \s_n\}$ with probabilities proportional to the 
+importance weights \ie 
+\begin{align*}
+    \p^*(\s_i) &= \frac{w_i}{\sum_{j=1}^n w_j}
+\end{align*}
+then $\s_i$ is drawn from the true the distribution in the limit of a large sample size $n$. 
+Our full algorithm is shown in~\cref{algo:conditional}, and follows PyTorch syntax~\citep{pazske2019}.
+One thing to note is the use of the $\mathtt{retokenize}$ function on line~\ref{line:retokenize} in~\cref{algo:conditional},
+where $\mathtt{canonize}$ returns the \emph{canonical} tokenization of an expression~\citep{tokenization}.
+This ensures that, \eg in the case of language detoxification, we are banning all the possible ways of generating a given expression
+We can now prove that \cref{algo:conditional} is guaranteed to return samples that satisfy the
+constraint $\alpha$.
+Our algorithm is implemented in log-space to preserve numerical stability while handling very small probabilities.
+
+\begin{restatable}{thm}{mainthm}
+\label{thm:mainthm}
+    \textsc{Locally Constrained Resampling} in \cref{algo:conditional} returns a sample $\y$ \st $\y \models \alpha$.
+\end{restatable}
+
+
+
+
+
+
+    
+
+
+\begin{figure*}[t!]
+\begin{minipage}{0.39\textwidth}
+\scalebox{.73}{
+\hspace{-0.5cm}
+\begin{subfigure}[b]{1.0\textwidth}
+\centering
+\begin{align*}
+\begin{array}{l>{\columncolor{pastel-red!20}}r:>{\columncolor{spearmint!20}}r:>{\columncolor{palette-blue!20!white}}r} 
+\p(\y) \sim &\texttt{I: 0.5} & \texttt{hate: 0.3} & \texttt{dogs: 0.4}\\ %
+                  &\texttt{He: 0.25}& \texttt{love: 0.5} & \texttt{cats: 0.4}\\
+                  &\texttt{She: 0.25}& \texttt{adore: 0.2} & \texttt{rats: 0.2}\\
+\end{array}\\
+\begin{array}{l>{\columncolor{pastel-red!20}}r:>{\columncolor{spearmint!20}}r:>{\columncolor{palette-blue!20!white}}r} 
+&\Tilde{\p}(\texttt{I): 0.6} & \Tilde{\p}(\texttt{hate): 0.4} & \Tilde{\p}(\texttt{dogs): 0.3}\\ %
+                  &\Tilde{\p}(\texttt{He): 0.2}& \Tilde{\p}(\texttt{love): 0.5} & \Tilde{\p}(\texttt{cats): 0.3}\\
+                  &\Tilde{\p}(\texttt{She): 0.2}&\Tilde{\p}(\texttt{adore): 0.1} & \Tilde{\p}(\texttt{rats): 0.2}\\
+\end{array}\\
+\end{align*}
+\end{subfigure}
+}
+
+\begin{minted}[fontsize=\scriptsize, escapeinside=||,mathescape=true]{python}
+idx = Tokenizer.tokenize(" hate")
+|$\alpha$| = True
+for i in range(seq_len):
+    |$\alpha$| = |$\alpha$| and not tokens(i, idx)
+return |$\alpha$|
+\end{minted}
+\end{minipage}
+\hfill
+\begin{minipage}{0.25\textwidth}
+\begin{subfigure}[b]{1.0\textwidth}
+\centering
+\scalebox{.80}{
+\begin{tikzpicture}[circuit logic US]
+\node (or1) [or gate, inputs=nn, rotate=90, scale=0.5] at (4.25,4.4) {};
+\node (output) at (4.25, 5.0) {};
+\draw (or1) -- (output) node[pos=0.2, above right, color=sanae5] {\scriptsize$0.60$};
+\node (and1) [and gate, inputs=nn, rotate=90, scale=0.5] at (3,3.5) {};
+\draw (or1.input 1) -- ++ (down: 0.25) -| (and1) node[pos=0.2, above left, color=sanae5] {\scriptsize$0.36$};
+\node (and2) [and gate, inputs=nn, rotate=90, scale=0.5] at (5.75,3.5) {};
+\draw (or1.input 2) -- ++ (down: 0.25) -| (and2) node[pos=0.2, above right, color=sanae5] {\scriptsize$0.12$};
+\node (and3) [and gate, inputs=nn, rotate=90, scale=0.5] at (4.25,3.5) {};
+\draw (4.25,3.7) -- (4.25,4.25)node[pos=0.1, right, color=sanae5] {\scriptsize$0.12$};
+
+\node (or2) [or gate, inputs=nn, rotate=90, scale=0.5] at (4.25,2) {};
+\node (and4) [and gate, inputs=nn, rotate=90, scale=0.5] at (3.5,1.5) {};
+\node (and5) [and gate, inputs=nn, rotate=90, scale=0.5] at (5,1.5) {};
+
+\node (or3) [or gate, inputs=nn, rotate=90, scale=0.5] at (4.25,0.5) {};
+
+\node (i) at (2.46, 2.8) {I};
+\node (itext) at (2.46, 2.5) {\scriptsize$0.6$};
+\node (he) at (3.8, 2.8) {He};
+\node (hetext) at (3.8, 2.5) {\scriptsize$0.2$};
+\node (she) at (6.3, 2.8) {She};
+\node (itext) at (6.3, 2.5) {\scriptsize$0.2$};
+
+\node (loves) at (2.5, 0.8) {loves};
+\node (lovestext) at (2.5, 0.5) {\scriptsize$0.5$};
+\node (adores) at (6.1, 0.8) {adores};
+\node (adorestext) at (6.1, 0.5) {\scriptsize$0.1$};
+
+\node (dogs) at (2.5, -0.4) {dogs};
+\node (cats) at (6.1, -0.4) {cats};
+\node (rats) at (4.3, -0.4) {rats};
+\node (dogstext) at (2.5, -0.7) {\scriptsize$0.3$};
+\node (catstext) at (6.1, -0.7) {\scriptsize$0.3$};
+\node (ratstext) at (4.3, -0.7) {\scriptsize$0.2$};
+\draw (or3.input 1) -- ++ (down: 0.25) -- ++ (left: 0.20) -| (dogs);
+\draw (or3.input 2) -- ++ (down: 0.25) -- ++ (right: 0.20) -| (cats);
+\draw (4.25,-0.20) -- (4.25,0.38);
+
+\draw (or2.input 1) -- ++ (down: 0.10) -- ++ (left: 0.20) -| (and4)node[pos=-0.4, above right, color=sanae5] {\scriptsize$0.1$};
+\draw (or2.input 2) -- ++ (down: 0.10) -- ++ (right: 0.20) -| (and5)node[pos=-0.4, above left, color=sanae5] {\scriptsize$0.5$};
+
+\draw (and4.input 1) -- ++ (down: 0.10) -- ++ (left: 0.20) -| (loves);
+\draw (and4.input 2) -- ++ (down: 0.10) -- ++ (right: 0.20) -| (or3);
+\draw (and5.input 1) -- ++ (down: 0.10) -- ++ (left: 0.20) -| (or3) node[pos=0.5, above, color=sanae5] {\scriptsize$1$};
+\draw (and5.input 2) -- ++ (down: 0.10) -- ++ (right: 0.20) -| (adores);
+
+\draw (and1.input 1) -- ++ (down: 0.10) -- ++ (left: 0.20) -| (i);
+\draw (and1.input 2) -- ++ (down: 0.80) -- ++ (right: 0.20) -| (or2);
+\draw (and2.input 1) -- ++ (down: 0.80) -- ++ (left: 0.20) -| (or2);
+\draw (and2.input 2) -- ++ (down: 0.10) -- ++ (right: 0.20) -| (she);
+\draw (and3.input 1) -- ++ (down: 0.10) -- ++ (left: 0.20) -| (he);
+\draw (and3.input 2) -- ++ (down: 0.10) -| (or2)node[pos=-0.1, below right, color=sanae5] {\scriptsize$0.6$};
+\end{tikzpicture}
+}
+\end{subfigure}
+\end{minipage}
+\begin{minipage}{0.28\textwidth}
+\begin{subfigure}[b]{1.0\textwidth}
+\centering
+\scalebox{.80}{
+\begin{tikzpicture}[circuit logic US]
+\node (i) at (4.0, 4.8) {$\downarrow$};
+\node (or1) [or gate, inputs=nn, rotate=90, scale=0.5] at (4.25,4.4) {};
+\node (output) at (4.25, 5.0) {};
+\draw (or1) -- (output) node[pos=0.2, above right, color=sanae5] {\scriptsize$0.60$};
+\node (and1) [and gate, inputs=nn, rotate=90, scale=0.5] at (3,3.5) {};
+\draw (or1.input 1) -- ++ (down: 0.25) -| (and1) node[pos=0.2, above left, color=sanae5] {\scriptsize$0.36$};
+\node (and2) [and gate, inputs=nn, rotate=90, scale=0.5] at (5.75,3.5) {};
+\draw (or1.input 2) -- ++ (down: 0.25) -| (and2) node[pos=0.2, above right, color=sanae5] {\scriptsize$0.12$};
+\node (and3) [and gate, inputs=nn, rotate=90, scale=0.5, fill=palette-blue!20!white] at (4.25,3.5) {};
+\draw (4.25,3.7) -- (4.25,4.25)node[pos=0.1, right, color=sanae5] {\scriptsize$0.12$};
+
+\node (or2) [or gate, inputs=nn, rotate=90, scale=0.5] at (4.25,2) {};
+\node (and4) [and gate, inputs=nn, rotate=90, scale=0.5, fill=palette-blue!20!white] at (3.5,1.5) {};
+\node (and5) [and gate, inputs=nn, rotate=90, scale=0.5] at (5,1.5) {};
+
+\node (or3) [or gate, inputs=nn, rotate=90, scale=0.5] at (4.25,0.5) {};
+
+\node (i) at (2.46, 2.8) {I};
+\node (itext) at (2.46, 2.5) {\scriptsize$0.6$};
+\node (he) at (3.8, 2.8) {\colorbox{palette-blue!20!white}{He}};
+\node (hetext) at (3.8, 2.5) {\scriptsize$0.2$};
+\node (she) at (6.3, 2.8) {She};
+\node (itext) at (6.3, 2.5) {\scriptsize$0.2$};
+
+\node (loves) at (2.5, 0.8) {\colorbox{palette-blue!20!white}{loves}};
+\node (lovestext) at (2.5, 0.5) {\scriptsize$0.5$};
+\node (adores) at (6.1, 0.8) {adores};
+\node (adorestext) at (6.1, 0.5) {\scriptsize$0.1$};
+
+\node (dogs) at (2.5, -0.4) {\colorbox{palette-blue!20!white}{dogs}};
+\node (cats) at (6.1, -0.4) {cats};
+\node (rats) at (4.3, -0.4) {rats};
+\node (dogstext) at (2.5, -0.7) {\scriptsize$0.3$};
+\node (catstext) at (6.1, -0.7) {\scriptsize$0.3$};
+\node (ratstext) at (4.3, -0.7) {\scriptsize$0.2$};
+\draw (or3.input 1) -- ++ (down: 0.25) -- ++ (left: 0.20) -| (dogs);
+\draw (or3.input 2) -- ++ (down: 0.25) -- ++ (right: 0.20) -| (cats);
+\draw (4.25,-0.20) -- (4.25,0.38);
+
+\draw (or2.input 1) -- ++ (down: 0.10) -- ++ (left: 0.20) -| (and4)node[pos=-0.4, above right, color=sanae5] {\scriptsize$0.1$};
+\draw (or2.input 2) -- ++ (down: 0.10) -- ++ (right: 0.20) -| (and5)node[pos=-0.4, above left, color=sanae5] {\scriptsize$0.5$};
+
+\draw (and4.input 1) -- ++ (down: 0.10) -- ++ (left: 0.20) -| (loves);
+\draw (and4.input 2) -- ++ (down: 0.10) -- ++ (right: 0.20) -| (or3);
+\draw (and5.input 1) -- ++ (down: 0.10) -- ++ (left: 0.20) -| (or3) node[pos=0.5, above, color=sanae5] {\scriptsize$1$};
+\draw (and5.input 2) -- ++ (down: 0.10) -- ++ (right: 0.20) -| (adores);
+
+\draw (and1.input 1) -- ++ (down: 0.10) -- ++ (left: 0.20) -| (i);
+\draw (and1.input 2) -- ++ (down: 0.80) -- ++ (right: 0.20) -| (or2);
+\draw (and2.input 1) -- ++ (down: 0.80) -- ++ (left: 0.20) -| (or2);
+\draw (and2.input 2) -- ++ (down: 0.10) -- ++ (right: 0.20) -| (she);
+\draw (and3.input 1) -- ++ (down: 0.10) -- ++ (left: 0.20) -| (he);
+\draw (and3.input 2) -- ++ (down: 0.10) -| (or2)node[pos=-0.1, below right, color=sanae5] {\scriptsize$0.6$};
+\end{tikzpicture}
+}
+\end{subfigure}
+\end{minipage}
+\caption{%
+\textbf{Constructing and sampling the proposal distribution.}
+(Top left) We start by sampling a sentence $\ytilde$ from the model $\p$.
+Our goal is to compute the full conditional probability of every word in the vocab \ie $\Tilde{\p}(\Tilde{y}_{ij}) \coloneqq \p(\Tilde{y}_{ij} \mid \ytilde_{-i})$.
+We start by expanding the sampled sentence $\ytilde$, including all sentences that are a Hamming distance of $1$ away from the sample $\y$.
+We proceed by (batch) evaluating the samples through the model, obtaining the joint probability of each sample.
+We then normalize along each column, obtaining the conditionals $\p(\Tilde{y}_{ij})$.
+(Bottom left) We can easily specify a logical constraint that prevents the word `` hate'' from appearing as a simple python function
+that gets compiled in the constraint circuit on the right.
+(Center) A logical circuit encoding constraint $\lnot\text{hates}$, with a simplified vocab is shown in the figure.
+To construct the distribution $\p_{\ytilde}(\y\mid\alpha)$, we feed the computed contextual probabilities at the corresponding literals.
+We push the probabilities upwards, taking products at AND nodes and sums at OR nodes.
+This induces a distribution $\p_{\ytilde}(\y\mid\alpha)$.
+(Right) To sample a from this distribution, we start at the root of the circuit, sampling a child of every OR gate according to the logits of the distribution, and concatenating at every AND gate.
+In this case, we sample the sentence ``He loves dogs'' satisfying the constraint.
+}
+\label{fig:pipeline}
+\end{figure*}
+
+
+
+\section{Related work}
+
+\label{sec:related-work}
+There has been a long line of work tackling constrained generation with LLMs.
+One of the earlier approaches was to use search-based decoding algorithms, such as NeuroLogic Decoding~\citep{lu2021neurologic, lu2022neurologic}.
+While these methods explicitly search for high-probability sequences that satisfy the constraint,
+they face scalability issues due to the exponential growth of the search space as the sequence 
+length increases.
+Another set of techniques that include GeDi~\citep{krause2021gedi}, FUDGE~\citep{yang2021fudge}, and NADO~\citep{meng2022nado} employ auxiliary neural classifiers to approximate the intractable conditional
+distribution, but do not guarantee that the constraint is satisfied and require that a classifier be trained
+for every new constraint type.
+Approximate inference methods attempt to approximate the intractable conditional distributions~\citep{qin2022cold, hu2023amortizing, lew2023sequential} but suffer from high variance and do not guarantee constraint satisfaction.
+
+Recently Outlines~\citep{outlines} and Guidance~\citep{guidance}, and along similar lines SGLang \citep{zheng2024sglang}, were proposed, also guaranteeing that the constraint is satisfied. Outlines employs a precompilation step where constraints specified in regular expressions are compiled into DFAs that are ``indexed'' to create a token-based overlay. This overlay guides the decoding process, ensuring adherence to the constraints. \citet{koo2024} recently recast the entire process in an automata-theoretic framework. Similar to Outlines, Guidance utilizes a trie to efficiently store and search through valid token continuations based on the grammar. This allows for dynamic vocabulary matching at each decoding step, offering flexibility potentially at the cost of impacting efficiency.
+These approaches are considered the ``defacto'' approaches for constrained generation.
+
+More recently, GeLaTo~\citep{GeLaTo} and subsequently CTRL-G~\citep{CtrlG} have utilized Hidden Markov Models (HMMs) to guide the generation from LLMs towards constraint satisfaction, but requires training a new HMM for every target model.
+The very recently proposed ASAp~\citep{grammaraligneddecoding} aims to debias the greedy approach through repeated sampling and discovery of mass assigned to non-grammatical completions, reducing each overapproximation to make it more accurate.
+While similar in intention, our approach relies on a closed-form tractable approximation of the target distribution to correct for the bias, avoiding the need to oversample the LLM.
+
+Finally, some other approaches no longer predictively mask logits, but instead sample unconstrained continuations and reject invalid ones post-hoc.
+For example, PICARD \citep{picard} converts the top-$k$ tokens to text and performs various levels of validation.
+While such approaches are very simple in principle, and in fact perform exact Bayesian conditioning, the number of samples required can be prohibitive, especially when the constraint requires selecting low probability tokens.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\begin{table}[t]
+\parbox{.46\textwidth}{
+\centering
+{
+\begin{tabular}{@{}l l l @{}}
+Test accuracy \%  & Exact & Consistent\\
+\midrule \midrule
+CNN-LSTM &   $62.00$ & $76.60$\\
+\midrule
++ oversampling &   $69.10\%$ & $84.50\%$\\
++ \ours (Ours) &   $\mathbf{78.13\%}$ & $\mathbf{100\%}$\\
+\end{tabular}
+}
+\caption{Experimental results on Warcraft.}
+\label{tab:warcraft_results}
+}
+\parbox{.45\textwidth}{
+\centering
+{
+\begin{tabular}{@{}l l l @{}}
+Test accuracy \%  &  Exact & Consistent\\
+\midrule \midrule
+Gemini 1.5 Flash&    $26.20\%$  & $26.20\%$\\
+GPT-4o mini&    $44.90\%$  & $44.90\%$\\
+\midrule
+Llama3-8B + \ours (Ours) &    $\mathbf{100\%}$&  $\mathbf{100\%}$
+\end{tabular}
+}
+\caption{Experimental results on Sudoku.}
+\label{tab:sudoku_results}
+}
+\end{table}
+
+
+\section{Experimental Evaluation}
+
+We evaluate our approach \ours on several tasks spanning a number
+of domains.
+We start by evaluating on Warcraft shortest-path finding, where we are given
+an image of a Warcraft tilemap, and are tasked with \emph{\autoregressively}
+generating one of the potentially many minimum-cost paths between two end points
+conditioned on the map, where the cost is determined by the \emph{underlying}
+cost of the tiles spanned by the path.
+We move on to evaluating on the classic, yet challenging, task of solving a $9 \times 9$
+Sudoku puzzle where an LLM is presented with an incomplete Sudoku puzzle and asked to
+provide the solved puzzle without extraneous text.
+We also evaluate on the task of LLM detoxification.
+In this task, we are interested in the generations produced by an LLM when presented
+with a prompt input by the user.
+More specifically, we are interested not only in how good these models are at the modeling
+aspect, but also how \emph{toxic} their outputs might be, a measure which includes sexual
+explicitness, identity attacks, and profanity, among others.
+Our goal in this task is then to shift the model's distribution away from toxic generations,
+and toward nontoxic ones, all while maintaining its original ability to model text.
+We believe this to be a timely and important problem due to the prevalence and widespread usage
+of LLMs coupled with the fact that previous work~\citep{Gehman2020RealToxicityPromptsEN}
+has found non-negligible amounts of toxic, harmful, and abusive text in the corpora used to train LLMs.
+
+
+\paragraph{Warcraft Shortest Path} 
+For this task, we follow the experimental setting set forth by 
+\cite{Pogancic2020}, where our training set consists of $10,000$
+terrain maps curated using Warcraft II tileset.
+Each map encodes a $12 \times 12$ grid superimposed on a Warcraft terrain map,
+where each vertex is weighted according to the cost of the tile, which in turn 
+depends on type of terrain it represents \eg earth has lower cost than water.
+These costs are \emph{not} presented to the network.
+The task is then to generate a minimum-cost path from the upper left to the lower
+right vertices, where the cost of a path is defined as the sum of costs of the vertices
+visted by the edges along the path, and the minimum-cost path is not unique, \ie there
+are many correct paths with the minimum cost.
+The minimum cost path from the top left and bottom right vertices is encoded as
+an indicator matrix.%
+
+We use a CNN-LSTM model, where, presented with an image of a terrain map, we use a ResNet18
+~\citep{He2016} to obtain a $128$ image embedding, which is then passed on to an LSTM with a
+single layer, a hidden dim of size $512$, and at every time step predicts the next edge in 
+the path conditioned on the image embedding and previous edges.
+The constraint used in this task is that the predicted
+edges form a valid simple path from the upper left vertex to the lower right vertex.
+
+As has been established in previous work~\citep{xu2018semantic, Ahmed2022, Ahmed22nesyentropy},
+the accuracy of predicting individual labels is often
+a poor indicator of the performance of the neural network
+in neuro-symbolic settings, where we are rather more interested in the accuracy of 
+our predicted structured object \emph{exactly} matching the groundtruth label 
+, e.g., \emph{is the prediction a shortest path?}, a metric which we denote ``Exact'' in our
+experiments, as well as the accuracy of predicting objects that are \emph{consistent} 
+with the constraint, e.g., \emph{is the prediction a valid path?}, a metric 
+denoted ``Consistent''. Our results are shown in~\cref{tab:warcraft_results}.
+We compare against two different baselines: the baseline model trained on the task, and
+\emph{oversampling}, whereby we draw many samples conditioned on the input image,
+and then resample this distribution, a variant of our approach where the proposal
+distribution is the autoregressive model itself.
+We find that our approach improves the exact match from $62.00\%$ and $69.10\%$ to $78.13\%$ while
+guaranteeing the sampled sequences of edges constitute valid paths.%
+
+
+
+
+
+
+\paragraph{Sudoku}
+Next, we consider the task of predicting a solution to a given Sudoku puzzle.
+Here the task is, given a $9 \times 9$ partially-filled grid of numbers
+to fill in the remaining cells such that the entries each row, column, 
+and $3 \times 3$ square are unique \ie each number from $1$ to $9$
+appears exactly once. We use the dataset provided by \citet{Wang19}, consisting of 10K Sudoku puzzles,
+split into 9K training examples, and 1K test samples, all puzzles having 10 missing entries.
+
+Each LLM is prompted with the string ``Give me the solution of the following Sudoku without any extra text or quotes''
+followed by the Sudoku Puzzle.
+As baselines, we used Gemini 1.5 Flash and GPT-4o mini, and post-process the responses to remove
+any extraneous text returned by the LLM.
+We compare the baselines against Llama3-8B constrained using our approach \ours,
+with the constraint that the elements of every row, column and $3 \times 3$ square are unique.
+Our results are shown in \cref{tab:sudoku_results}.
+We see that where as Gemini and GPT4o are able solve only $26\%$ and $45\%$ of the Sudoku
+puzzles, our approach consistently manages to recover the correct Sudoku Puzzle solution.
+
+
+\begin{table*}[t!]
+    \centering
+    \caption{
+Evaluation of LLM toxicity and quality across different detoxification methods on Llama3-8b.
+Model toxicity is evaluated on the \textsc{RealToxicityPrompts} benchmark through Perspective API. 
+\textbf{Full}, \textbf{Toxic} and \textbf{Nontoxic} refer to the full, toxic and nontoxic subsets of the prompts, respectively.
+\textbf{PPL} refers to the perplexity of Llama3-70B on the model generations using 5 different seeds.
+In line with~\citet{Gehman2020RealToxicityPromptsEN, wang2022exploring}, we characterize
+toxicity using two metrics: the \textbf{Expected Maximum Toxicity} over $5$ generations, and the 
+\textbf{Toxicity Probability} of a completion at least once over 5 generations.
+}
+\label{tab:detoxify}
+    {\hspace{-2mm}
+\begin{tabular}{l|llc|clc|c}
+    \toprule
+\multicolumn{1}{c|}{\multirow{2}{*}{\textbf{Models}}}  &  \multicolumn{3}{c|}{\textbf{Exp. Max. Toxicity} ~($\downarrow$)} & 
+\multicolumn{3}{c|}{\textbf{Toxicity Prob.} ~($\downarrow$)} & \multirow{2}{*}{\textbf{PPL} ~($\downarrow$)} \\
+& \textbf{Full} & \textbf{Toxic} & \textbf{Nontoxic}& \textbf{Full} & \textbf{Toxic} & \textbf{Nontoxic}\\
+\midrule
+ \textsc{Llama3-8B} & $0.25$ & $0.43 $ & $0.20$ & $14.26\%$ & $38.30\%$ & $~~7.60\%$ &  $14.45$\\
+\midrule %
+ + Word Banning & $0.24$ & $0.40$ & $\mathbf{0.19}$ & $12.47\%$ & $32.43\%$ & $~~6.93\%$ & $\mathbf{14.50}$\\
+ + \ours \emph{(ours)} & $\mathbf{0.23}$  & $\mathbf{0.37}$& $\mathbf{0.19}$  & $\mathbf{11.04\%}$ & $\mathbf{28.00\%}$ & $\mathbf{~~6.35\%}$ & $\mathbf{14.50}$\\
+\bottomrule
+\end{tabular}}
+\end{table*}
+
+
+\paragraph{LLM detoxification} Lastly, we consider the task of LLM detoxification.
+That is, we investigate the effectiveness of logical constraints, enforced using
+\ours, at steering the model away from toxic prompted-generations.
+We choose a \emph{very} simple constraint to be enforced by \ours
+throughout this task, namely we ban any of a list of ``bad words'', including profanity,
+}
+from appearing as part of the model's generations.
+Similar to previous work~\citep{Gehman2020RealToxicityPromptsEN, wang2022exploring},
+we evaluate on the \textsc{RealToxicityPrompts}, a dataset of almost 100k prompts
+ranging from nontoxic, assigned a toxicity score of $0$, to very toxic, assigned
+a toxicity score of $1$.
+We focus on \textsc{Llama3-8B}~\citep{Radford2019} as a base model for detoxification.
+As is customary, ~\citep{Gehman2020RealToxicityPromptsEN, wang2022exploring}, we use
+Perspective API, an online automated model for toxic language and hate speech detection,
+to score the toxicity of our predictions.
+It returns scores in the range $0$ to $1.0$, corresponding to nontoxic on the one end,
+and extremely toxic on the other.
+The toxicity score can be interpreted as the likelihood of given person perceiving the text as being toxic or offensive. 
+Though not without limitations, studies~\citep{wang2022exploring,Welbl2021ChallengesID}
+have shown that the toxicity scores reported by Perspective API are very strongly correlated with human~evaluations.
+
+We compare \textsc{Llama3-8B} against \textsc{Word Banning}, which for this simple constraint
+functions very similarly to Outlines~\citep{outlines} and Guidance~\citep{guidance}.
+It keeps track of the words generated so far, and prevents the banned expression from
+appearing by setting its probability to $0$. 
+Word Banning could therefore be seen of as a greedy approximation of what we might hope to achieve
+using \ours: intuitively, it might not be able to recover from generating a sentence
+associated with a toxic intent as a result of making greedy decision at every step of the generaton.
+We report the \emph{Expected Maximum Toxicity} and the \emph{Toxicity Probability}. 
+The \emph{Expected Maximum Toxicity} measures the worst-case toxicity by
+calculating the maximum toxicity over $25$ generations under the same prompt
+with different random seeds, and averaging the maximum toxicity over all prompts.
+This metric can be seen as a measure of how intensely offensive a generation is.
+\emph{Toxicity Probability} estimates the empirical probability of generating
+toxic language by evaluating the fraction of times a toxic continuation
+is generated at least once over $25$ generations with different random seeds
+for all prompts.
+This metric can be seen as a measure of how likely the LLM is to be offensive.
+Both of the above metrics are computed for the full set of prompts, only the toxic
+subset of the prompts, and only the nontoxic subset of the prompts.
+To understand the impact of detoxification, we evaluate the quality of the LLM
+generations by measuring the perplexity of the generations according to \textsc{Llama3-70B}
+averaged across $5$ different runs.
+Our results are seen in~\cref{tab:detoxify}.
+
+We can see that word banning lowers the toxicity of the generations produced by
+\textsc{Llama3-8B} at a negligible decrease in perplexity.
+More specifically, we observe that it reduces the average worst-case toxicity as
+well as the probability of producing a toxic generation when prompted with nontoxic prompts
+by a modest $1\%$, but when prompted with nontoxic prompts the reduction in toxicity is much
+higher at $3\%$ and almost $6\%$ for the expected maximum toxicity and toxicity probability,
+respectively.
+Moving on to constraining our \textsc{Llama3-8B} with our approach \ours attains
+the same perplexity as using word banning, but greatly reduces the toxicity of \textsc{Llama3-8B},
+especially on toxic prompts where it results in almost twice as much the reduction in toxicity affected
+by word banning, both in terms of the expected maximum toxcity as well as the toxicity probability.
+
+
+\section{Conclusion and Future Work}
+
+We proposed a new approach for constraining LLMs which we called \ours.
+Given a logical constraint, \ours guarantees that an autoregressive model's
+generations satisfy the constraint.
+\ours is probabilistically sound, while providing a concise constraint
+specification language as well as an exponentially more succinct compilation form
+compared to current defacto approaches to controlled generation.
+We have showed that \ours can be applied to autoregressive models such
+as LSTMs as well as large scale LLMs, outperforming the baselines on
+the tasks of minimum-cost paths prediction, language as well as solving
+Sudoku puzzles, where we achieved a perfect accuracy, beating both GPT-4o
+and Gemini 1.5 by a large margin.
+We have also shown that by virtue of its probabilistic nature, \ours is
+able to outperform current approaches for constrained generation on LLM detoxification using only a list of toxic expressions as a constraint, relying on
+probabilistic inference.
+
+
+Moving forward, we envision extending and building upon \ours in a multitude of ways.
+First, on the systems side since \ours extensively uses the language of tractable circuits,
+we plan on a tight integration with circuits libraries, such as pyjuice~\citep{pyjuice} to
+greatly improve the efficiency of our approach, as well as open the door for many potentially
+interesting probabilistic queries.
+Second, we hope to explore more applications of constrained generation, with one alluring possibility
+being the use of constraints to improve the factual accuracy of current LLMs.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

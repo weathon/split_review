@@ -1,0 +1,237 @@
+\title{DynamicKV: Task-Aware Adaptive KV Cache Compression for Long Context LLMs}
+
+\begin{abstract}
+Efficiently managing the KV cache in Large Language Models (LLMs) is a critical challenge for long-context processing tasks such as retrieval-augmented generation (RAG), long text summarization, and multi-document analysis. Extending the context length substantially increases the KV cache size, leading to excessive memory consumption. Existing KV cache compression methods enforce a fixed pattern, neglecting task-specific characteristics, which hampers the effective retention of essential information while discarding less important tokens. In this paper, we introduce a novel Task-Aware KV cache mechanism that dynamically adjusts the KV cache size across different layers based on the characteristics of the tasks. Our approach builds on the significant observation of distinct activation patterns across layers in various tasks, which highlights the need for adaptive strategies tailored to each task's unique demands. Based on this insight, we propose DynamicKV, a method that dynamically optimizes token retention by adjusting the number of tokens retained at each layer, adapting to the specific task. DynamicKV establishes global and per-layer maximum KV cache budgets, temporarily retaining the maximum budget for the current layer, and periodically updating the KV cache sizes of all preceding layers during inference. Our method demonstrates exceptional performance on the LongBench dataset, retaining only 1.7\% of the KV cache while preserving 90\%, 87\%, 78\%, and 83\% of the original accuracy for LlaMA-3-8B-Instruct, Mistral-7B-Instruct-v0.2, Qwen2-7B-Instruct, and InternLM-2.5-7B-Chat-1M, respectively. When the retained KV cache size is increased to 6.9\%, the performance becomes nearly indistinguishable from that without any KV cache compression. Notably, even under extreme compression (0.9\%), DynamicKV surpasses state-of-the-art (SOTA) methods by 11\% in the Needle-in-a-Haystack test using Mistral-7B-Instruct-v0.2. The code will be released to the public.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large Language Models (LLMs) (Achiam et al., 2023; Radford, 2018; Radford et al., 2019) are exerting a considerable influence in the field of natural language processing (NLP), driving advancements in document summarization, content creation, code generation, and dialogue systems (Chiang et al., 2023). Recent developments in LLMs (Liu et al., 2024b) have been scaled up to handle long contexts, with LlaMA3 (Dubey et al., 2024) processing up to 32K tokens and InternLM (Cai et al., 2024) handling 1M tokens. However, scaling LLMs to handle extended contexts inherently incurs a substantial delay due to the quadratic complexity of attention mechanisms with increasing context length. A widely adopted solution to alleviate these delays is caching the key and value (KV) states of previous tokens (Waddington et al., 2013). Despite this optimization, handling long sequences still demands substantial memory (e.g., maintaining a KV cache for 100K tokens in LlaMA2-7B (Touvron et al., 2023) consumes over 50GB of memory).  
+
+To address this issue, recent studies have explored the optimization of KV caching, including KV cache quantization (Kang et al., 2024; Hooper et al., 2024), token dropping (Zhang et al., 2024b; Xiao et al., 2023), architectural improvements to Transformers (Sun et al., 2024), KV cache fusion (Nawrot et al., 2024), and hierarchical sharing and constraints(Liu et al., 2024a; Brandon et al., 2024). Existing KV cache compression methods enforce a fixed pattern (as shown in Figure 1), such as a hierarchical pyramid structure (Zhang et al., 2024a) or a structure similar to FastGen’s fixed internal pattern (Ge et al., 2023), or they fix the length of the KV cache to selectively retain tokens across different layers (Zhang et al., 2024b; Li et al., 2024). However, LLMs require different numbers of layers when handling different types of tasks. For example, for knowledge-based question answering tasks, only the first few layers are needed to achieve high accuracy, while for complex reasoning tasks (e.g., mathematics and code generation), more layers are often required to achieve higher accuracy (Elhoushi et al., 2024). Thus, we raise a question: Do different types of tasks all follow a fixed pattern?  
+
+![](images/300e4b56210b26e961f859473d18893d603a70719df1f801d6a1e2347b6e3190.jpg)  
+Figure 1: Comparison of DynamicKV with traditional methods in maintaining KV cache size across layers. Left: the structure difference: (a) Retain all KV cache. (b) Fixed KV cache for each layer (e.g., StreamingLLM, H2O, SnapKV). (c) Hierarchically decreasing pyramid KV cache retention. (d) Ours DynamicKV: layer-aware adaptive KV cache retention. Right: average accuracy on different KV cache rentention.  
+
+To examine this question, we aim to systematically investigate the design principles of the KV cache compression across different tasks. Inspired by Zhang et al. (2024a), we first investigate how information flow is aggregated through attention mechanisms across different layers in four types of tasks, including single- and multi-document QA, summarization, synthetic tasks and code completion. We find that the attention distribution varies for different types of tasks. For example, in summarization tasks, the upper layers require a small KV cache sizes, while code completion tasks need larger KV cache sizes in the upper layers. This implies that for code completion tasks, upper layers require maintaining a larger KV cache size, in contrast to PyramidKV (Zhang et al., 2024a), where the KV cache size decreases as the layer depth increases.  
+
+Building on this insight, we propose a task-aware adaptive KV cache compression method, named DynamicKV. Specifically, we first calculate an attention score for the most recent few tokens and all other tokens, which in RAG (Lewis et al., 2020) can be viewed as calculating the relevance of the most recent query to the retrieved text. Then, we preset a temporary storage to hold the temporary KV cache states, and gradually calculate the size of the final retained temporary storage at each k layer by calculating the size of the correlation mean. It should be noted that at each update, the value is gradually normalized, and the retained temporary storage at each layer is always smaller than the previous one. This temporary storage is determined by the number of tokens that need to be retained, and its size is much smaller than the original cache, thus imposing minimal memory overhead.  
+
+We validate our DynamicKV on 16 datasets from LongBench (Bai et al., 2023), demonstrating robust performance across multiple models, including LlaMA-3-8B-instruct (Dubey et al., 2024), qwen-2-7B-instruct (Yang et al., 2024), mistral-7b-chat-v0.2 (Jiang et al., 2023), internlm-2.5-7bchat-1M (Cai et al., 2024). Our DynamicKV exhibit superior overall effectiveness compared to conventional fixed-pattern methods (Zhang et al., 2024b; Li et al., 2024; Nawrot et al., 2024). Notably, DynamicKV is able to retain full performance while utilizing only $6.9\%$ of the tokens, and in extreme scenarios, it preserve $90\%$ of the performance with just $1.7\%$ of the tokens. Furthermore, experiments on the Needle in a Haystack benchmark revealed that DynamicKV significantly outperforms state-of-the-art (SOTA) methods.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+Potential patterns of attention. The Transformer architecture (Vaswani, 2017) becomes a cornerstone in NLP by stacking multiple layers to progressively refine input data. BERT (Devlin, 2018), a model based on this architecture, (Jawahar et al., 2019)demonstrates that intermediate layers encode  
+
+a rich hierarchy of linguistic information: from surface-level features at the bottom, through syntactic features in the middle, to semantic features at the top. This indicates that models are capable not only of understanding lexical information but also of grasping more complex linguistic structures. For decoder-only LLMs, (Fan et al., 2024) observes that not all layers are necessary for simple tasks, as intermediate layers can often achieve comparable performance to the final layer. Techniques like (Elhoushi et al., 2024), which involve increasing dropout in lower layers during training, allow the model to exit computation early, reducing resource consumption. To optimize model inference efficiency, especially in terms of KV cache compression, (Brandon et al., 2024) proposes cross layer attention(CLA), which can reduce the KV cache size by at least half by sharing cross-layer attention, significantly lowering memory usage. Ada-KV (Feng et al., 2024b) visualizes attention distributions across all layers have also shown that attention patterns dynamically evolve as the layers progress. Inspired by these findings, we aims to dynamically select and adjust the number of tokens to retain per layer, combining inter-layer redundancy identification with efficient KV cache management. This approach aims to maintain high-quality output while improving inference efficiency. Token drop. Token drop is a strategy designed to reduce memory usage by selectively retaining the most influential tokens in the KV cache during the inference phase of LLMs. Due to its plugand-play nature, the token drop method can often be applied to different models without incurring any additional costs. FastGen (Ge et al., 2023) evicts unnecessary contexts and discards non-special tokens based on the recognized structure of attention modules by effectively analyzing the token information within attention patterns. Scissorhands (Liu et al., 2024c) exploits the hypothesis of the persistence of importance, suggesting that tokens with significant influence at one point will continue to impact future generations. By using attention scores as a metric and applying a Least Recently Used (LRU) cache eviction strategy, it discards non-critical tokens to optimize memory usage. StreamingLLM (Xiao et al., 2023) leverages the characteristics of attention sinks in LLMs to focus on streaming processing with dynamic adjustment of the KV cache. H2O (Zhang et al., 2024b) proposes a scoring function based on accumulated attention scores for greedily evicting KV pairs during generation. SnapKV (Li et al., 2024) primarily achieves compression by selectively targeting key positions for each attention head. PyramidKV (Zhang et al., 2024a) identified the phenomenon of massive activation and adopted a hierarchical structure to optimize the number of KV cache entries retained at each layer. Although the PyramidKV approach considers the varying information density across different layers, its pyramidal pattern does not generalize across multiple models or tasks. LazyLLM (Fu et al., 2024) utilizes dynamic token pruning and an Aux Cache mechanism, allowing the model to select different subsets of tokens from the context at various generation steps, even reviving tokens pruned in previous steps. Ada-KV (Feng et al., 2024a) breaks from the conventional approach of uniform budget allocation across attention heads within layers, optimizes the eviction loss upper bound, leading to improved performance under various memory constraints when integrated with SnapKV and PyramidKV.   
+3 OBSERVATION   
+To systematically investigate the attention mechanism across layers in LLMs for long-context inputs, we conduct a fine-grained analysis of four tasks: single- and multi-document question answering (QA), summarization, synthetic tasks, and code completion. The main target is to investigate the distribution of attention in these various tasks, thereby enhancing our understanding of how the model aggregates dispread information within long-context inputs to generate accurate responses. In particular, we focus our analysis on LlaMA (Dubey et al., 2024), visualizing the distribution and behavior of attention across layers to gain deeper insights into its internal mechanisms. Inspired by Zhang et al. (2024a), we calculate the average attention scores between the most recent tokens and all other tokens. Based on these scores, we then identify the top- $\cdot\mathbf{k}$ (128 multiplied by the number of layers) tokens with the highest attention across all layers, resulting in a layer distribution map denoted as Figure 2.   
+We observe a significant drop in the KV cache size requirement at the lower layers across the four tasks, indicating that only a small KV cache is needed in these layers. In contrast, the upper layers show a clear upward trend, suggesting that larger KV cache sizes are necessary, particularly in the code completion task, where complex reasoning is required. This phenomenon underscores that tasks involving complex reasoning demand larger KV cache sizes in the upper layers.  
+
+![](images/9ee7e807310841c539230b95cc2d07b61b716607825c4b77b9ebd2a20ad7bd85.jpg)  
+Figure 2: Average token retention across layers in LlaMA for different tasks, including (a) Single/Multi-Document $Q A$ , (b) Summarization, (c) Synthetic Task, and (d) Code Completion. There is a sharp decrease in token retention after the first layer, followed by varying patterns of fluctuation. Peaks are observed around Layer 15 and towards the final layers.  
+
+
+
+\section{4 DYNAMICKV  }
+
+
+During inference, the quadratic complexity of attention calculation results in a significant computational and memory burden, especially when processing long contexts. DynamicKV addresses this issue by focusing on inter-layer attention in large language models (LLMs), determining the appropriate size of KV cache to retain per layer through efficient awareness of inter-layer attention.  
+
+Rather than relying on a fixed retention pattern, such as pyramid-shape or average retention all layers, DynamicKV employs a progressive algorithm that dynamically adjusts token retention during the prefill phase. This dynamic retention strategy accelerates the decoding stage while maintaining minimal impact on overall memory usage.  
+
+Specifically, we first define layer $l\;\in\;\mathbb{R}^{L}$ and head $\textit{h}\in\mathbb{R}^{H}$ in LLMs. For the calculation of attention scores, we use weights $W_{Q}\in\mathbb{R}^{N\times N}$ , $W_{K}\in\mathbb{R}^{N\times N}$ , and $W_{V}\,\in\,\mathbb{R}^{N\times N}$ , with the input query embedding denoted as $X\,\in\,\mathbb{R}^{N\times M}$ , $N$ is the dimension of the hidden size, and $M$ is the length of input tokens. Traditional token drop methods often consider the most recent tokens as the important ones for producing output information, as they retain relevant information needed for generating answers. We refer to these tokens collectively as the current window, with the window size denoted as $w s$ . In the prefill phase, we adopt the method from Li et al. (2024), Zhang et al. (2024a), where the attention score is calculated by averaging over the current window and previous tokens, followed by pooling. The formula is as follows:  
+
+$$
+A_{l,h}=\mathrm{pooling}(\frac{1}{w s}\sum_{i=1}^{w s}\mathrm{Attention}(X_{i},W_{Q},W_{K})),
+$$  
+
+here, pooling helps in understanding the context better and $A_{l,h}$ denotes the attention score for the lth layer and h-th head. This approach allows us to effectively pool the attention scores, ensuring that key tokens are retained based on their relevance to both the current window and previous context.  
+
+Next, we set a fixed retention budget. Specifically, to ensure a fair comparison with other methods, we introduce the average retention length per layer, denoted as $w t$ , and a scaling ratio, $r_{m a x}$ . The calculation formula is as follows:  
+
+$$
+b s=(w t-w s)\times r_{m a x},
+$$  
+
+here, bs represents the size of retained KV cache across all layers. Next, we design a layer-aware progressive dynamic KV cache compression method. The prefill phase of LLMs involves a hierarchical forward process, where for each layer, we retain a KV cache of length $b s$ when computing  
+
+![](images/64873f7beb195538b6173ce6d23a209ec8ac548064300de796b07fcc4c34d1f3.jpg)  
+Figure 3: Overview of our DynamicKV structure and KV cache compression comparison. Left: input prompt, consisting of three parts: Instruct, Question, and Answer. Middle: DynamicKV structure, which progressively and dynamically updates the KV cache in stages to ensure that the total KV cache size remains within the maximum budget. Right: a comparison between DynamicKV and FullKV, highlighting the efficiency and resource savings achieved by our dynamic updating strategy.  
+
+A. Additionally, every $m$ layers, we perform an update across the current and all previous layers. Specifically, for each layer, we use a top- ${\cdot k}$ strategy to retain the largest $b s$ values from $A_{l}$ , where $A_{l}$ represents the attention scores of layer $l$ . The formula for this process is as follows:  
+
+$$
+A_{l}^{\prime}=\mathrm{TopK}(A_{l},b s)
+$$  
+
+Next, we extract the indices in the original $A_{l}$ that correspond to the values in $A_{l}^{\prime}$ . The KV cache at these indices is retained as the compressed KV cache. Specifically, the retained KV cache is defined as:  
+
+$$
+\mathbf{KV}_{l}^{\prime}=\mathbf{KV}_{l}[A_{l}^{\prime}.\mathrm{indices}]
+$$  
+
+where $A_{l}^{\prime}$ .indices represents the indices of the top- ${\cdot k}$ values in $A_{l}$ . This ensures that the KV cache is compressed efficiently, retaining only the most important tokens for each layer while minimizing memory usage. To ensure that the memory required for hierarchical transmission remains small, the KV cache of each layer is initially compressed as described above. Every $m$ layers, we extract $A$ and perform a unified normalization across the completed layers, updating them layer by layer to ensure consistency across the entire hierarchy.  
+
+First, we fix the final size of KV cache to be retained, which is calculated as $(w t-w s)\times H\times l,$ , where $H$ is the number of heads and $l$ is the number of layers. Then, for each layer, the attention score $A$ is used to compute the length to retain for each layer $C_{l}$ via a top- $k$ strategy. The retention lengths for the first $m$ layers are then normalized to obtain a budget length $Z$ , ensuring that the retention is distributed effectively across layers. The specific formula is as follows:  
+
+$$
+C_{l}={\mathrm{Normlize}}({\mathrm{Count.Elements}}\left({\frac{\mathrm{TopK}(A,(w t-w s)\times H\times l).{\mathrm{indices}}}{(L\times M\times l)}}\right))
+$$  
+
+$$
+Z=\left[{\frac{b s\times t}{\operatorname*{max}(C_{l})}}\;\mathrm{for}\;t\;\in\;C_{l}\right]
+$$  
+
+$$
+r={\frac{\sum Z}{(w t-w s)\times L}},Z=\left[{\frac{k}{r}}\;\mathrm{for}\;k\;\in\;Z\right]
+$$  
+
+The KV cache is further updated layer by layer based on this normalized budget, progressively refining the retained information to align with the overall compression strategy. The above process can be expressed as Algorithm 1.  
+
+270   
+271   
+272   
+273   
+274   
+275   
+276   
+277   
+278   
+279   
+280   
+281   
+282   
+283   
+284   
+285   
+286   
+287   
+288   
+289   
+290   
+291   
+292   
+293   
+294   
+295   
+296   
+297   
+298   
+299   
+300   
+301   
+302   
+303   
+304   
+305   
+306   
+307   
+308   
+309   
+310   
+311   
+312   
+313   
+314   
+315   
+316   
+317   
+318   
+319   
+320   
+321   
+322   
+323   
+Algorithm 1 DynamicKV in Prefill Phase   
+1: Input: initial budget K/V cache list $K^{b}$ , $V^{b}$ , radio max $r_{m a x}$ , update interval $m$ , mean token   
+length $w t$ , window size $w s$ , sequence length $S$ , head dimention $h d$ , input embedding of window   
+size $X^{w s}\in\mathbb{R}^{w s*d}$ , initial budget Attention list computed by window token and others $A^{b}$ ,   
+2: Output: Compressed $\mathrm{K}/\mathrm{V}$ cache $K^{c}$ , $V^{c}$   
+3: $b s=(w t-w s)\times r_{m a x}$   
+4: def Update Buffer Length $\iota(A,l)$ :   
+5: $\bar{A^{g a t h e r}}\gets\mathrm{cat}($ (( $[A$ for $l$ in $(1,l)]$ ), 0).view(-1)   
+6: $c n t s\gets\mathbf{C}$ ount Elemnets( $\operatorname{topk}(A^{g a t h e r}$ , $\mathbf{k}{=}(w t-w s)*H*l)$ .indices / (L ∗S)) / l   
+7: Compute the norm of cnts, range in $(0,1)$   
+8: $B L\gets\lceil\operatorname*{lint}((b s*t\,/\,\operatorname*{max}(n o r m)))$ for $t$ in norm]   
+9: $r\gets\mathrm{sum}(B L)\,/\,((w t-w s){*L})$   
+10: $B L\gets\lbrack\mathrm{int}(k/r)$ for $k$ in $B L]$   
+11: Return $B L$   
+12: for $l\gets1$ to $L$ do   
+13: Compute full KV states $K^{s}$ , $V^{s}$   
+14: for $h\leftarrow1$ to $H$ do   
+15: /\* compute the Attention between window size token and other all token \*/   
+16: $A_{l,h}\gets\mathrm{softmax}((X^{w s}W_{h}^{Q})\cdot K_{h}^{T})$ .mean(dim=-2).pooling(dim=-1)   
+17: end for   
+18: Append $A_{l}$ to $A^{b}\,/{*}$ current $A_{l}$ shape is $l H,$ , S] \*/   
+19: /\* calculate current layer buffer KV cache \*/   
+20: indices $\gets A_{l}$ .topk(bs, dim=-1).indices.unsqueeze(-1).expand(-1, -1, hd)   
+21: $K_{l}^{b}\gets\mathrm{cat}((K^{s}[:,:-w s,:$ ].gather(dim $=-2$ , indices),Ks[:,−ws:,:]), dim=-2)   
+22: $V_{l}^{b}\gets\mathrm{cat}((V^{s}[:,:-w s,:]$ ].gather(dim=-2, indices),V s[:,−ws:,:]), dim $=-2$ )   
+23: /\* gradually compress\*/   
+24: if $l\%$ $\mathbf{\omega}_{0}^{\prime}\mathbf{\omega}m==0$ then   
+25: $B l\gets$ Update Buffer Length(Al, l)   
+26: /\* update the buffer K/V Cache\*/   
+27: for $i\gets1$ to l do   
+28: $K_{i}^{b}\gets\mathrm{cat}((K_{l}^{b}[:,:B l_{i},:],K_{l}^{b}[:,-w s:,:]),\mathrm{din}$ =-2)   
+29: $V_{i}^{b}\gets\mathbf{cat}((V_{l}^{b}[:,:\!B l_{i},:],V_{l}^{b}[:,-w s\!:,:]),\dim\!=\!-2)$   
+30: end for   
+31: end if   
+32: end for   
+33: Update the K/V Cache Kc, V c from $K^{b}$ , V b  
+
+
+
+\section{5 EXPERIMENTS  }
+
+
+We conduct comprehensive comparative and ablation experiments to verify the effectiveness of our DynamicKV. In Section 5.1, we introduce the models, datasets and baselines used in our experiments. Section 5.2 provides a performance comparison between DynamicKV and baseline approaches. Next, in Section 5.3, we present the results of DynamicKV on the Needle in Haystack Task. Finally, in Section 5.4, we conduct an ablation study on the parameters of our method to validate its feasibility.  
+
+5.1 IMPLEMENTATION DETAILS  
+
+Table 1: Performance comparison on the LongBench dataset for full KV cache, previous methods (StreamingLLM, H2O, SnapKV, PyramidKV), and our DynamicKV method, with KV cache sizes of 128 and 512, using models including LLaMA3-8B-Instruct, Mistral-7B-Instruct-v0.2, QWen2- 7B-Instruct, and InternLM. Bold indicates the best performance.  
+
+324 325 326 327 328 329 330 331 332 333 334 335 336 337 338 339 340 341 342 343 344 345 346 347 348 349 350 351 352 353 354 355 356 357 358 359 360 361 362 363 364 365 366 367 368 369 370 371 372 373 374 375 376 377   
+
+![](images/d57d21f74665377bf67e64c5200ec2dc9746ed5eb2c6d25ea242e4adaed96cf5.jpg)  
+
+2022), GovReport (Huang et al., 2021), QMSum (Zhong et al., 2021), MultiNews (Fabbri et al., 2019), TREC (Li & Roth, 2002), TriviaQA (Joshi et al., 2017), SAMSum (Gliwa et al., 2019), PassageCount, PassageRetrieval-en, LCC (Guo et al., 2023), and RepoBench-P (Liu et al., 2023). These cover key long context application scenarios such as Single-Document QA, Multi-Document $Q A$ , Summarization, Few-shot Learning, Synthetic Tasks, and Code Completion. Additionally, for the experiment on Needle in Haystack task, we test the models across their maximum length ranges [8k, 32k, 1M] using the PaulGrahamEssays dataset.  
+
+Baselines. We evaluate recent fixed-pattern token dropping methods, including: (1) StreamingLLM, which utilizes attention sinks and rolling KV caches to retain the most recent tokens. (2) H2O, which employs a Heavy Hitter Oracle for KV cache eviction. (3) SnapKV, which selects important tokens for each attention head through clustering. (4) PyramidKV, which introduces a pyramid pattern where layers select important tokens in a monotonically decreasing manner.  
+
+5.2 COMPARATIVE EXPERIMENTS ON LONGBENCH  
+
+With the total KV cache size fixed at 128 and 512, we compare the performance retention of StreamingLLM, H2O, SnapKV, PyramidKV, and our proposed method, DynamicKV, relative to FullKV. As shown in Table 1, DynamicKV demonstrates stable improvements even while maintaining an extremely low KV cache size relative to the total context (128: $1.7\%$ ; 512: $6.9\%$ ). Specifically, with the cache size of 128, DynamicKV outperforms the best alternative by $0.3\%$ , $0.97\%$ , $1.68\%$ , and $0.79\%$ on LLama, Mistral, Qwen, and InternLM, respectively, retaining $90\%$ , $87\%$ , $78\%$ , and  
+
+$83\%$ of the overall performance. Moreover, with a cache size of 512, DynamicKV surpasses the highest-performing method by $0.43\%$ , $0.19\%$ , $0.69\%$ , and $0.53\%$ on the same models, retaining $97\%$ , $96\%$ , $96\%$ , and $89\%$ of FullKV’s performance. The data in the table clearly demonstrate DynamicKV’s effectiveness under extreme compression, achieving nearly FullKV-level performance with just $6.9\%$ of the cache size. The experimental results show that DynamicKV can improve the effect of complex tasks such as code completion more obviously on the basis of maintaining PyramidKV performance, and greatly improve the performance upper limit of lower KV cache size.  
+
+![](images/a8f68123a50123ba74c2a2285beb3766337caa2624278bf45d3823c9ee692039.jpg)  
+5.3 VISUALIZATION ON NEEDLE-IN-HAYSTACK TASK   
+Figure 4: Performance Comparison on the Needle in a Haystack Task Using Mistral-7B-Instructv0.2.  
+
+The needle-in-a-haystack test involves inserting key information at random positions within a long context and setting answers to evaluate whether LLMs can accurately detect critical information in extensive contexts. To further illustrate the effectiveness of our approach in compressing the KV cache, we conduct additional experiments using Mistral on the needle-in-a-haystack task, focusing on maintaining an optimal size for the KV cache. As shown in Figure 4, we insert information at various positions in the Paul Graham Essays dataset and extract answers by prompting the model to generate responses. The green blocks indicate that the response matches the contents of the needle, but the color change from yellow to red indicates that the response is more irrelevant to the needle. We test a fixed KV cache size of 64 using FullKV, StreamingLLM, H2O, SnapKV, PyramidKV, and the DynamicKV method. The results indicate that DynamicKV maintains $90\%$ of the model’s performance even under extreme compression, improving accuracy by $57\%$ , $37\%$ , $41\%$ , and $11\%$ compare to the other methods, respectively. Additionally, the figure shows that with a context length of up to 7000, the extreme compression of DynamicKV nearly achieves full scores, and even beyond 7000, it shows significant improvements compared to other approaches. This finding illustrates that DynamicKV has a distinct advantage in hierarchical token selection and confirms that the number of critical tokens contained at different layers is always dynamic.  
+
+
+
+\section{5.4 ABLATION STUDY  }
+
+
+Table 2: Performance of DynamicKV with different KV cache size.   
+
+![](images/fb97855c1d74d669978767f18002c3a0452d5960feb6112ebf0c8af1b8867692.jpg)  
+
+In this study, we investigate the performance of the DynamicKV mechanism across varying keyvalue cache sizes. The results, as shown in Table 2, reveal a consistent improvement in performance with an increase in the cache size for all evaluated models. For the Llama-3-8B-Instruct, the performance metric improved from 34.93 to 41.22 as the key-value cache size was increased from 64 to 1024. This improvement is also applicable to other models. These findings underscore the effectiveness of the DynamicKV cache in leveraging KV cache compression to maintain the capabilities of long context. Notably, a larger cache capacity is generally associated with superior performance. Nonetheless, it is essential to strike a balance when selecting the cache size, taking into account the practical constraints related to storage and computational resources.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+In this study, we analyze the intrinsic patterns exhibited by large language models (LLMs) when processing long-context inputs across different task types. Our empirical findings reveal significant variations in the distribution of attention across these task types. Based on this observation, we introduce DynamicKV, a novel layer-aware KV cache compression approach that dynamically adjusts the KV cache size across layers. We evaluate the effectiveness and generalizability of DynamicKV through experiments on 16 datasets from the LongBench benchmark, demonstrating its broad applicability and performance benefits. From the results, we mainly conclude that: (1) a wave-like pattern is followed in complex reasoning tasks (e.g., code completion tasks); (2) a pyramid-like pattern is followed in Synthetic and Summarization tasks; (3) The dynamic hierarchical adaptive DynamicKV approach is capable of formulating a relatively appropriate KV cache retention strategy in accordance with diverse tasks. Particularly, in the circumstance of maintaining an extremely small KV cache size, the effect is significantly enhanced.; In the future, we hope that there is a more suitable method to perform KV cache compression without increasing the computation.  
+
+
+

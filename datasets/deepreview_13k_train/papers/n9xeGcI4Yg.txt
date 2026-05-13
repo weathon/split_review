@@ -1,0 +1,244 @@
+\title{The Consensus Game: Language Model Generation via Equilibrium Search}
+
+\begin{abstract}
+    When applied to question answering and other text generation tasks, language models (LMs) may be queried \emph{generatively} (by sampling answers from their output distribution) or \emph{discriminatively} (by using them to score or rank a set of candidate outputs). These procedures sometimes yield very different predictions. How do we reconcile mutually incompatible scoring procedures to obtain coherent LM predictions?
+    We introduce a new, a training-free, game-theoretic procedure for language model decoding. Our approach casts language model decoding as a regularized imperfect-information sequential signaling game---which we term the \gamename---in which a \generator seeks to communicate an abstract \truthobj using natural language sentences to a \discriminator. We develop computational procedures for finding approximate equilibria of this game, resulting in a decoding algorithm we call \algo.
+    Applied to a large number of tasks (including reading comprehension, commonsense reasoning, mathematical problem-solving, and dialog), \algo consistently, and sometimes substantially, improves performance over existing LM decoding procedures---on multiple benchmarks, we observe that applying \algo to \llamas outperforms the much larger LLaMA-65B and PaLM-540B models.
+    These results highlight the promise of game-theoretic tools for addressing fundamental challenges of truthfulness and consistency in LMs.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Current language models (LMs) perform quite well on some tasks involving generation or verification of factual assertions---including question answering, fact-checking, and even unconditional text generation.
+But they are far from perfectly reliable, and there is increasing evidence that LMs actually grow more prone to generating false but frequently repeated statements with increasing scale \citep{mckenzie2023inverse}.
+Further complicating matters,
+LMs offer multiple affordances for solving factual generation tasks. They may be used both \emph{generatively} (e.g.\ by asking for the most probable answer to a question) or \emph{discriminatively} (e.g.\ by presenting a (question, answer) pair and asking whether the answer is acceptable) and, these two procedures do not always produce consistent results: generative procedures may fail when probability mass is spread across multiple contradicting answers~\citep{wang2023selfconsistency,mitchell2022enhancing}, while discriminative procedures may fail due to miscalibration~\citep{han2022prototypical,chen2022close} or subtle dependence on question wording~\citep{jiang2020can}. Given these noisy and often-conflicting signals, how should we distill out an LM's best guess at the truth?
+
+This paper presents an approach for reconciling generative and discriminative LM decoding procedures by formulating decoding as a signaling game \citep{lewis2008convention} that we call the \gamename. At a high level, this game features a \generator agent that must communicate an abstract \vtrue or \vfalse value to a \discriminator agent, but may only do so using a set of candidate natural language strings (\cref{fig:teaser}). Intuitively, an effective \emph{strategy} for this game (i.e.\ a joint policy) is one in which the \generator and \discriminator agree on the assignment of strings to correctness values. Given such a strategy, we may inspect it to identify candidates agreed by consensus to be \vtrue{}.
+
+Doing so requires solving a multi-step game with a complex (string-valued) action space. In recent years,
+\emph{no-regret learning} algorithms have emerged as the preferred technique to compute effective strategies for such games, and have been successfully deployed in Poker \citep{brown2018superhuman,brown2019superhuman}, Stratego \citep{perolat2022mastering}, and Diplomacy \citep{bakhtin2022mastering,meta2022human,Jacob22:Modeling}. Here, we show that they can also be applied to free-form language generation tasks.
+We call this game-theoretic approach to LM decoding \algo. Applied in 6 question answering benchmarks: MMLU \citep{hendrycks2020measuring}, ARC \citep{clark2018think}, RACE \citep{lai2017race}, HHH \citep{askell2021general}, TruthfulQA \citep{lin2021truthfulqa} and, GSM8K~\citep{cobbe2021training}, \algo offers substantial improvements over existing generative, discriminative, and mixed decoding procedures.
+More generally, our results highlight the usefulness of the game-theoretic toolkit for formalizing and improving coherence in LMs. Improved coherence in turn leads to improved accuracy on factual tasks.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth, trim=0.5cm 6cm 1.1cm 5.6cm,clip,scale=0.22]{prag_gen_main_v4.pdf}
+    \caption{(Left) Overview of our approach. Differing LM queries fail to exhibit consensus about the answer to a factual question. By reconciling predictions between generative and discriminative LM queries using the \gamename, we obtain an accurate prediction. (Right) Structure of the \gamename, a two-player sequential signaling game with imperfect information. First, the environment (N) uniformly samples a correctness parameter. A \generator (G) conditioned on this parameter produces a natural language string from a set of candidates. The \discriminator (D) only observes this string and must predict the correctness parameter sampled by environment. If the \discriminator correctly identifies this parameter, then both players receive a reward of 1. The dashed line connects nodes that are indistinguishable by the \discriminator, since the \discriminator does not observe the \truthobj. By computing \emph{regularized equilibrium strategies} for this game, we obtain predictions that reflect a consensus between the \generator and \discriminator.}
+    \label{fig:teaser}
+\end{figure}
+
+
+
+\section{Language Model Consensus as Equilibrium Search}
+
+\label{sec:formulation}
+
+We study the problem of obtaining correct output from a \textbf{language model}, which maps input strings $x$ to output strings $y$ according to some distribution $\lm(y \mid x)$. While the techniques we present here are general, we focus in this paper on \textbf{question answering} problems consisting of a query $\query$ (\emph{In which of the following cities was Barack Obama born?}) and a set of candidate answers $\sequences$ (\emph{Honolulu, Chicago, \ldots}) which may themselves have been sampled from the complete $\lm(\cdot \mid \query)$. Given a set of candidates, we may them with an LM in (at least) two ways:
+
+\begin{itemize}[left=5mm]
+    \item \emph{Generatively}, by supplying as input (i)
+          the query $\query$, (ii) the set of candidates $\sequences$, and (iii) a natural language prompt indicating that a correct answer is desired. In this case, the LM may be thought of as modeling a distribution $\lm(y \mid \query, \vtrue)$, where the token $\vtrue$ denotes the fact that the model was prompted to generate a correct answer.
+    \item \emph{Discriminatively}, by supplying as input (i) the query $\query$ and (ii) a possible candidate answer $y \in \sequences$, together with (iii) a prompt indicating that a correctness assessment $v \in \{\vtrue,\vfalse\}$ is sought. In this case, the language model acts as a
+          model of as modeling a distribution
+          $\lm(v \mid \query, y)$ where $v \in \{\vtrue, \vfalse\}$.
+\end{itemize}
+
+These two approaches are conceptually equivalent. But as noted in the introduction, current LMs may give very different answers when queried in these different ways:
+answers produced generatively might be assessed \incorrect with high probability or vice-versa. %
+Research on LMs has proposed two broad solutions to this problem. \textbf{Ensembling methods} \citep{ouyang2022training, li2016mutual, glaese2022improving} simply combine discriminative and generative scores directly. While moderately effective, such approaches suffer from the fact that LM predictions are often poorly calibrated both within and across contexts, meaning that scores may not combine in meaningful or consistent ways. \textbf{Deliberation methods} \citep{wei2022chain,yao2023tree,du2023improving} perform this reconciliation within the LM itself, e.g.\ by re-prompting with competing inputs and an instruction to generate a textual justification for the best one. Such methods incur significant computational overhead.\footnote{As shown in \cref{sec:gsm}, they are also orthogonal to, and composable with, the approach we propose here.}
+
+How might we design a principled and computationally efficient procedure for obtaining a ``consensus'' between competing LM predictions? Informally, a consensus prediction would satisfy two key properties: \textbf{coherence} (generative and discriminative scoring procedures should agree about which candidate answers are correct) and \textbf{reasonableness} (predictions should not be arbitrary, but instead as close as possible to original generator / discriminator behavior).
+The key idea in this paper is to
+operationalize these high-level desiderata in language of game theory, using \textbf{regularized equilibrium} concepts as formal framework for defining both coherence and reasonableness. Below, we introduce and explain this framework in detail,
+describing how to instantiate decoding as a signaling game, then compute equilibrium strategies of this game to obtain consensus LM predictions.
+
+
+
+\subsection{The \gamename}
+
+Our approach to language generation begins by formulating language generation as a signaling game \citep{lewis2008convention} that we call the \gamename.
+The \gamename is played on a game tree, as depicted in Figure~\ref{fig:teaser}.
+At the start of the game (that is, at the root of the game tree), a \emph{\truthobj} $v \in \{\correct,\incorrect\}$ is selected uniformly at random by the environment. The \truthobj is observed only by the \generator, and controls whether the \generator should aim to generate \emph{\correct} or \emph{\incorrect} answers. Upon observing this parameter, the \generator produces a natural language string from a fixed set of candidates. Finally, this string is observed by the \discriminator, who tries to guess the value of the \truthobj by selecting one of $\{\vtrue, \vfalse\}$ as an answer.
+Both players obtain a \textbf{payoff} of 1 if the \discriminator correctly identifies the value of the \truthobj, 0 otherwise.
+
+With this definition, it may be observed that players' expected \textbf{utilities} (the payoffs they may expect to receive) are as follows:
+\begin{align*}
+    u_\gen(\pi_\gen, \pi_\dis) & \defeq \frac{1}{2}\sum_{v \in \{\vtrue, \vfalse\}}\sum_{y\in \sequences} \pi_\gen(y \mid v) \cdot \pi_\dis(v \mid y) , \\
+    u_\dis(\pi_\gen, \pi_\dis) & \defeq \frac{1}{2}\sum_{v \in \{\vtrue, \vfalse\}}\sum_{y\in \sequences} \pi_\gen(y \mid v) \cdot \pi_\dis(v \mid y).
+\end{align*}
+What is an effective strategy for maximizing these utilities?
+A standard answer to this question in the game theory literature is that a \textbf{Nash equilibrium} of the game should be sought. A Nash equilibrium is a pair of policies---one for the \generator and one for the \discriminator---such that each policy is optimal. That is, each player's strategy maximizes their expected given the other player's strategy.
+At a Nash equilibrium, no player has an incentive to unilaterally behave in any other way. In signaling games, Nash equilibria offer a natural way of formalizing the \textbf{coherence} criterion above: at equilibrium, both the \generator and \discriminator must agree about which messages correspond to \vtrue and \vfalse respectively in order to obtain a nonzero payoff.
+
+However, Nash equilbria of the \gamename are not guaranteed to provide the second criterion of \textbf{reasonableness}. This is because  the \gamename admits a multitude of Nash equilibria that are incompatible with the common-sense notion of truthfulness. For example, the strategy in which the \generator deterministically maps \correct $\mapsto$ ``Nairobi'', \incorrect $\mapsto$ ``Honolulu'', and the \discriminator maps ``Nairobi'' $\mapsto$ \correct, ``Honolulu'' $\mapsto$ \incorrect forms a Nash equilibrium.
+
+In order to sidestep the inappropriate equilibria and ensure reasonableness, we introduce a \textbf{regularization term} in the utility of the players, so that both the \generator and the \discriminator are penalized for settling on strategies that are far from some pair of \emph{initial policies}: $\smash{\pi^{(1)}_\gen}$ and $\smash{\pi^{(1)}_\dis}$. By parameterizing these policies using a pre-trained LM, we may use knowledge about what answers are likely to be correct \emph{a priori} to guide selection of an equilibrium.
+As in \citet{Jacob22:Modeling}, we incorporate this regularization term directly into the utility function (payoff) that the \generator and \discriminator attempt to optimize. Rather than the simple 0--1 payoff determined by agreement on the correctness parameter, they now attempt to optimize:
+\begin{align*}
+    u_\gen(\pi_\gen, \pi_\dis) & \defeq -\lambda_\gen \cdot \mathrm{D}_\mathrm{KL}[\pi_\gen(\cdot \mid v), \pi^{(1)}_\gen(\cdot \mid x, v)] + \frac{1}{2}\sum_{v}\sum_{y\in \sequences} \pi_\gen(y \mid \query, v) \cdot \pi_\dis(v \mid \query, y) , \\
+    u_\dis(\pi_\gen, \pi_\dis) & \defeq -\lambda_\dis \cdot \mathrm{D}_\mathrm{KL}[\pi_\dis(\cdot \mid y), \pi^{(1)}_\dis(\cdot \mid x, y)] + \frac{1}{2}\sum_{v}\sum_{y\in \sequences} \pi_\gen(y \mid \query, v) \cdot \pi_\dis(v \mid \query, y).
+\end{align*}
+Note that the initial policies $\smash{\pi^{(1)}_\gen}(y \mid x, v)$
+and $\smash{\pi^{(1)}_L(v \mid x, y)}$ may be derived from an LM \emph{prompted} with some initial string $x$, in order to obtain context-predictions (e.g.\ answers to a question).
+With these utilities, Nash equilibria for the game are pulled by the initial \generator and \discriminator policies in the direction of increased consensus.
+
+\citet{bakhtin2022mastering} and \citet{meta2022human} employed a similar regularization method for choosing actions, rather than messages, in versions of the board game Diplomacy. \citet{franke2013game, franke2017game} have explored signaling games in the context of linguistic pragmatics to explain human language use. To the best of our knowledge, however, this is the first proposal for using regularized equilibrium concepts in signaling games to define target behavior in a language generation task. 
+\subsection{\algo: LM Ranking via equilibrium search}
+With this formulation, text generation requires finding a Nash equilibrium of the game with the utilities given above. How should we compute such an equilibrium?
+No-regret learning algorithms have emerged in recent years as the preferred technique to approximate equilibria in large games, and have been successfully
+employed to solve games at human or even superhuman level.
+At a high level, these algorithms find equilibrium by repeatedly interacting in the game and refining their policies after each iteration $t$.
+so as to minimize \textbf{regret} (the gap between the chosen action and the best action in hindsight). %
+
+In this section, we describe in detail how to perform no-regret learning in the \gamename in order to obtain consensus policies.
+Importantly, this approach modifies only signalling policies, and not the base policies $\smash{\pi^{(1)}_\gen}$ and $\smash{\pi^{(1)}_\dis}$ (i.e.\ the LM).
+In this sense, generating text by performing no-regret learning in the \gamename might be described as a \emph{training-free consensus-planning method}. We call this method \algo.
+\paragraph{Initial policies}
+\label{subsec:speaker}
+At time $t=1$, that is, before any equilibrium computation has happened, \algo defines the initial policies $\pi^{(1)}_\gen$ and $\pi^{(1)}_\dis$ of the \generator and \discriminator, respectively, as follows. $\pi^{(1)}_\gen$ normalizes $\lm$\footnote{In ARC, RACE, HHH, TruthfulQA, and GSM8K, based on prior work \citep{touvron2023llama, brown2020language}, we additionally normalize $\lm(u|\query)$ by the likelihood of the completion given “Answer:” as context: $\lm(u \mid \text{"Answer:"})$.} across $v$ and $y$:
+\begin{align*}
+    \pi^{(1)}_\gen (y \mid \query, v) \propto \frac{\lm(y \mid \query, v)}{\sum_{v'} \lm(y \mid \query, v')}.
+\end{align*}
+
+Similarly for the \discriminator, the initial policy normalizes across $y$ and $v$:
+\begin{align*}
+    \pi^{(1)}_\dis (v \mid \query,y) \propto \frac{\lm(v \mid \query,y)}{\sum_{y'} \lm(v \mid \query,y')}.
+\end{align*}
+This crucial step enables us to extract a well calibrated \generator and \discriminator from $\lm$. The specific form of the \generator incorporates $v = \vfalse$, and this resembles contrastive decoding \citep{li2022contrastive}, where they rely on a weaker LM as opposed to an LM conditioned on $\vfalse$ (See, \cref{sec:results} for details). This \discriminator resembles approaches that query the LM itself to produce critiques \citep{ganguli2023capacity, chen2023teaching, yao2023tree}. However, to the best of our knowledge, this specific instantiation has not been explored in the past.
+
+\paragraph{Evolution of policies}
+A classic observation in the theory of imperfect-information sequential games is that minimization of regret (viewed as a function of their overall policy on the game tree) can be achieved by solving separate, \emph{local}, regret minimization problems at each information set (\textit{i.e.}, decision point) of the game. This observation underpins the CFR framework \citep{Zinkevich07:Regret}, as well as its generalization to more general convex losses, known as laminar regret decomposition \citep{Farina19:Online}. In our case, these techniques enable us to decompose the policy update of the players into separate updates for each \truthobj $v$ (for the \generator) and for each sequence $y$ (for the \discriminator).
+
+In our setting, after operating the regret decomposition step, we find that the local regret minimization problems are composed of a bilinear term, plus a strongly convex KL-regularization term. Such composite utilities can be handled by the piKL algorithm \citep{Jacob22:Modeling}, which is specifically designed to perform regret minimization on KL-regularized objectives.
+In our setting, piKL prescribes that each player keep track of their average values:
+\begin{align*}
+    Q^{(t)}_\gen(y \mid \query, v) \defeq \frac{1}{2t}\sum_{\tau = 1}^t \pi^{(\tau)}_\dis(v \mid \query, y), \qquad
+    Q^{(t)}_\dis(v \mid \query, y) \defeq \frac{1}{2t}\sum_{\tau = 1}^t \pi^{(\tau)}_\gen(y \mid \query, v).
+\end{align*}
+Each player then updates their policy according to:
+\begin{align}
+    \pi_\gen^{(t+1)}(y \mid \query, v) & \propto \exp\left\{\frac{Q^{(t)}_\gen(y \mid \query, v) + \lambda_\gen \log \pi_\gen^{(1)}(y \mid \query, v)}{1/(\eta_\gen t) + \lambda_\gen} \right\}, \label{eq:update G} \\
+    \pi_\dis^{(t+1)}(v \mid \query, y) & \propto \exp\left\{\frac{Q^{(t)}_\dis(v \mid \query, y) + \lambda_\dis \log \pi_\dis^{(1)}(v \mid \query, y)}{1/(\eta_\dis t) + \lambda_\dis} \right\}, \label{eq:update D}
+\end{align}
+where $\eta_\gen,\eta_\dis > 0$ are \emph{learning rate} hyperparameters
+\begin{itemize}[nosep,left=5mm]
+    \item \textbf{Convergence to an equilibrium point}. The average correlated distribution of play of \generator and \discriminator converges to the set of (regularized) coarse-correlated equilibria of the game.
+    \item \textbf{Regularization toward reasonableness}. The average policy of any player remains within a radius of size roughly $1/\lambda_i$ from the initial policy $\pi_i^{(1)}$, where $\lambda_i$ is the amount of regularization applied to any player $i\in\{\generator,\discriminator\}$ (see \cref{prop:radius}).
+    \item \textbf{Avoidance of regret}. The cumulative regret incurred by each of the players grows only logarithmic in the number of training steps (see \cref{prop:regret}).
+\end{itemize}
+At convergence, \algo returns $\pi_\gen^{*}$ and $\pi_\dis^{*}$, which are the refined \generator and \discriminator. We also remark that a recent result by \citet{Anagnostides22:Last-Iterate} showed that as long as the regularization function has Lipschitz-continuous gradients (a condition that can be easily achieved by introducing a small perturbation in the KL regularization term), decentralized learning dynamics similar to piKL converge in iterates to a regularized Nash equilibrium of the \gamename, since it is a potential game~\citep{Monderer96:Potential}. In practice, we do not investigate introducing a small perturbation, as we witness good convergence properties in practice even without any perturbation. As mentioned earlier, convergence to a regularized Nash equilibrium is important to guarantee both coherence and reasonableness. Extensive empirical validation presented in the next section demonstrates the benefits of this approach in practice. \gabri{Explicitly mention that we leave the question of proving last-iterate convergence in our setting open?}
+
+\paragraph{Computational cost of our method.} At each iteration, our method needs to update the policies $Q^{(t)}_\gen, Q^{(t)}_\dis$ according to~(\ref{eq:update G}) and ~(\ref{eq:update D}). The number of operations at each iteration of the method is therefore linear in the number $|\sequences|$ of sequences available to the \generator.
+
+
+
+
+\section{Experiments}
+
+\label{sec:results}
+As discussed in the previous section, \algo focuses on improving the \emph{correctness} of language models in question-answering (QA) tasks. However, correctness manifests in various forms across different domains, including truthfulness, factuality, valid reasoning, value alignment, among others. Therefore, we will evaluate its performance on a diverse set of QA tasks: MMLU \citep{hendrycks2020measuring}, ARC \citep{clark2018think}, RACE \citep{lai2017race}, HHH \citep{askell2021general}, and TruthfulQA \citep{lin2021truthfulqa}. It's important to note that \algo is a sampling strategy and not a delibration method like chain-of-thought (CoT) \citep{wei2022chain} and self-consistency \citep{wang2023selfconsistency}. Nevertheless, we will demonstrate in GSM8K \citep{cobbe2021training} that we can achieve some additional gains when combining \algo with self-consistency and CoT.
+\setlength{\tabcolsep}{1.2mm}
+\paragraph{Hyperparameters} \algo has four parameters, $\eta_\dis,\lambda_\dis$ and $\eta_\gen,\lambda_\gen$. Although tuning these parameters will lead to better performance, in all our experiments we set $\eta_\dis = \lambda_\dis = \eta_\gen = \lambda_\gen = 0.1$. We run \algo for 5000 iterations \footnote{ As remarked at the end of the previous section, each iteration of the learning process requires a number of floating-point operations that is linear in the number $|\sequences|$ available to the \generator. In most of our settings, $|\sequences| = 4$, making the overhead from  the learning dynamics on the \gamename negligible compared to the cost of inference for the language model. As such, even with an unoptimized implementation of the dynamics (\ref{eq:update G},\ref{eq:update D}), we observe that the computational cost associated with each iteration of the learning process takes about 40 microseconds on average.} %
+\paragraph{Actions in the \gamename} As mentioned in Section~\ref{sec:formulation}, in order to make our approach amenable to current computational techniques, we make the modeling assumption that the \generator picks distribution over a finite set of candidates $\sequences$. In multiple-choices tasks, these are the multiple choice options. In generative tasks, a common approach to generate the finite set of candidates is via sampling with nucleus \citep{nucleus} and top-$k$ \citep{topk} from the distribution $\lm(y \mid q, \correct)$ where $y \in \sequences$. This is exactly the approach we use in our experiments, with $p=0.9$ for nucleus sampling and $k=50$.
+\paragraph{Models} We use the 7B and 13B parameter models from the LLaMA family \citep{touvron2023llama} and perform 16-bit inference for all our experiments.
+\paragraph{Prompting for \correct and \incorrect answers}
+In our work, unless otherwise specified, conditioning on $(\query,\vtrue)$ for the $\lm$ corresponds to the standard zero-shot prompt. Similarly, conditioning on $(\query, \vfalse)$ is similar to $(\query, \vtrue)$ with the only difference that \textit{"Answer:"} is replaced with \textit{"Incorrect Answer:"} in the prompt.
+\paragraph{Baselines}
+In the multiple-choice based datasets (ARC, RACE, HHH, MMLU), we consider the following approaches:
+\begin{itemize}[left=5mm]
+    \item \textbf{Generative Ranking (G):} This baseline \citep{brown2020language,touvron2023llama} ranks every candidate $y$ by $P_{\text{LM}}(y \mid \query, \vtrue)$ and picks the top candidate. This is the standard approach used in past work. Due to implementational differences, when available, we include both official scores and our version.
+    \item \textbf{Mutual Information Ranking (MI):} This mutual-information based \citep{li2016mutual} baseline is an ensemble-based approach that reweights every candidate $y$ by $P_{\text{LM}}(y \mid \query, \vtrue)\cdot P_{\text{LM}}(\vtrue \mid \query, y)$.
+    \item \textbf{Self-Contrastive Ranking (SC):} This approach utilizes the normalized generator $\pi^{(1)}_\gen$ to reweight every candidate $y$ by $\smash{\pi^{(1)}_\gen (\vtrue \mid \query, y)}$. As discussed in \cref{sec:formulation}, this shares similarities with contrastive decoding~\citep{li2022contrastive}.
+    \item \textbf{Discriminative Ranking (D):} This approach reweights every query-candidate pair $(\query, y)$ by $\pi^{(1)}_\dis (\vtrue \mid \query, y)$.
+    \item \textbf{Equilibrium Ranking Generator (ER-G):} Similar to \textbf{SC}, this approach utilizes the final \algo-based generator $\pi^*_\gen$ to reweight every candidate $y$ by $\pi^*_\gen (y \mid \query, \vtrue)$.
+    \item \textbf{Equilibrium Ranking Discriminator (ER-D):} Similar to \textbf{D}, this approach utilizes the final \algo-based discriminator $\pi^*_\dis$. This approach reweights every query-candidate pair $(\query, y)$ by $\pi^*_\dis (\vtrue \mid \query, y)$.
+\end{itemize}
+
+In free-form text generation tasks (TruthfulQA, GSM8K), we additionally consider \textbf{greedy decoding}. In the mathematical reasoning task (GSM8K), we also consider \textbf{self-consistency} \citep{wang2023selfconsistency}.
+
+\begin{table*}[h]
+    \input{text/combined_table}
+    \caption{Results of the different approaches across multiple tasks. We compute the accuracies on the test set of these benchmarks. \algo outperforms other approaches on most tasks. \algo performs well, even in cases where one of \generator or \discriminator is far worse than the other. \textbf{G}: Generative Ranking, \textbf{MI}: Mutual Information Ranking, \textbf{SC}: Self-Contrastive Ranking, \textbf{D}: Discriminative Ranking, \textbf{ER-G}: Equilibrium Ranking Generator, \textbf{ER-D}: Equilibrium Ranking Discriminator. * indicates the results from \cite{touvron2023llama}. Colors in the table entries are assigned relative to the G baseline, according to the colorbar \!\raisebox{-3.5mm}{\includegraphics[scale=.7]{data/colorbar-crop.pdf}}\! (differences exceeding $\pm 10$ are clipped to $\pm 10$ when calculating the colors).\\[-4mm]}
+    \label{tab:combined}
+\end{table*}
+
+\paragraph{MMLU}
+The massive multi-task language understanding benchmark (MMLU) \citep{hendrycks2020measuring} is used to measure language model's multitask accuracy. It consists of questions in the multiple choice format across a wide variety of subdomains in social sciences, humanities and STEM. We evaluate our models in the zero-shot setting following the format described in \cite{hendrycks2020measuring, touvron2023llama} and the results are presented in the first row of \cref{tab:combined}. For both LLaMA-7B and LLaMA-13B, the \algo-based approaches matches or outperforms all other baselines. In fact, zero-shot LLaMA-7B with ER-D (39.9) outperforms 5-shot LLaMA-7B (35.1), while zero-shot LLaMA-13B with ER-D (45.1) is competitive with 5-shot LLaMA-13B (46.9). LLaMA-7B with ER-D (39.9) even outperforms zero-shot GPT3-175B (37.7) \citep{hendrycks2020measuring}, while zero-shot LLaMA-13B with ER-D (45.1) outperforms 5-shot GPT3-175B (43.9) \citep{hendrycks2020measuring}.
+\paragraph{ARC}
+The AI2 Reasoning Challenge (ARC) \citep{clark2018think} is an advanced question answering dataset used to study a model's knowledge and reasoning abilities based on grade school science questions. It is split in to two subcategories: easy (ARC-Easy) and challenge (ARC-Challenge). The challenge set was constructed as the set of questions that were answered incorrectly by retrieval and word co-occurence based algorithms. The results are presented in second and third rows of \cref{tab:combined}. On ARC-Easy, ER-D outperforms our implementation of generative ranking. We also note that \llamab with ER-D (76.4) outperform all the baseline approaches and is even competitive with the much larger PaLM-540B model (76.6) \citep{chowdhery2022palm}. On ARC-Challenge, ER-D significantly outperforms all the baseline approaches. We also note that \llamas with ER-D (58.3) and \llamab with ER-D (61.4) outperforms even the much larger models: LLaMA-65B (56.0) \citep{touvron2023llama} and PaLM-540B (53.0) \citep{chowdhery2022palm} by up to 8\%.
+
+
+\paragraph{RACE}
+RACE is a reading comprehension benchmark introduced in \cite{lai2017race} collected from English examinations of middle and high school students. The dataset is correspondingly split into RACE-middle and Race-high. The dataset consists of a passage followed by questions. The passages were constructed for evaluating student's English reasoning and understanding ability. The results on this benchmark is presented in rows 4 and 5 of \cref{tab:combined}. On RACE-middle, like before, ER-D based models outperforms all the baselines. We note that \llamab with ER-D (68.6) even outperforms much larger models: LLaMA-65B (67.9) \citep{touvron2023llama} and PaLM-540B (68.1) \citep{chowdhery2022palm}. On RACE-high, we have a similar story as with ARC-C. ER-D outperforms all baselines. \llamas with ER-D (56.4) is able to significantly outperform much larger models: LLaMA-65B (51.6) \citep{touvron2023llama} and PaLM-540B (49.1) \citep{chowdhery2022palm}.
+
+\paragraph{HHH}
+HHH (Helpful, Honest and Harmless) \citep{srivastava2023beyond, askell2021general} is a dataset of 200 multiple-choice designed to measure LM alignment with high-level quality guidelines. Here we use a different set of prompts for the \generator (see \cref{sec:hhh}). Results are presented in the last row of \cref{tab:combined}. \llamas with ER-D outperforms baselines; although \llamab with ER-D with the default parameter performs worse than discriminative ranking (D) (69.2), ER-D with $\lambda_\gen=0.01$ and $\lambda_\dis=1.0$ achieves an accuracy of 70.6\%.
+
+
+\paragraph{TruthfulQA}
+TruthfulQA \citep{lin2021truthfulqa} is a benchmark consisting of over 800 questions across a multitude of domains that were crafted to encourage humans to answer them incorrectly due to misconceptions. The dataset evaluates a model's ability to not generate false answers learnt from imitation learning on text. On this task, we consider \textbf{greedy decoding} in addition to our other ranking-based approaches. In this setting, 10 candidate sequences are sampled using nucleus and top-k sampling. These candidates are then ranked based on the approaches we described earlier. The results on the test set are presented in \cref{tab:truthfulqa}. Based on past work \citep{lin2021truthfulqa}, we measure BLEU accuracy (BLEU-Acc). For a sequence $a$, the BLEU-Acc over reference correct candidates $b_{\text{correct}}$ and reference incorrect candidates $b_{\text{correct}}$ is computed as follows:
+\begin{align}
+    \text{BLEU-Acc}(a) \coloneqq \mathbb{I}(\text{BLEU}(a, b_\text{correct}) > \text{BLEU}(a, b_\text{incorrect}))
+\end{align}
+Where $\text{BLEU}(a, b)$ computes the BLEU score \citep{papineni2002bleu} of a candidate string $a$ over a set of reference candidates $b$. With \llamas, we observe only modest improvements for ER-G and ER-D over the greedy baseline. However, with \llamab, we note increased scores for both methods. This benchmark is known to exhibit negative scaling \citep{lin2021truthfulqa} (performance drop as the model size increases). The performance difference with ER-G between \llamas and \llamab shows that \algo is in fact capable of mitigating this behavior.
+
+\begin{table}[t]
+    \def\cboxwgt{11mm}
+    \def\rowheight{8.2mm}
+
+    \centering
+    \input{text/truthful_qa}
+    \caption{Results on TruthfulQA (Generative). Average BLEU-Acc results on the held-out set across 5 runs. \llamab with ER-G outperforms or is on par with all baselines. \textbf{MI}: Mutual Information Ranking, \textbf{SC}: Self-Contrastive Ranking, \textbf{D}: Discriminative Ranking, \textbf{ER-G}: Equilibrium Ranking Generator, \textbf{ER-D}: Equilibrium Ranking Discriminator. $\pm$ indicates 1 standard deviation computed across 5 runs. Colors are as in \cref{tab:combined}, relative to the Greedy baseline.}
+    \label{tab:truthfulqa}
+\end{table}
+
+\paragraph{GSM8K}
+\label{sec:gsm}
+In our last set of experiments, we consider grade-school math (GSM8K) \citep{cobbe2021training}, a popular benchmark used to study model's mathematical reasoning ability. We use this benchmark to study whether we can combine our approach with chain-of-thought \citep{wei2022chain}. As we described earlier, we generate 20 candidate reasoning paths sampled using nucleus and top-k using the 8-shot setup proposed in \citet{wei2022chain}. We employ self-consistency \citep{wang2023selfconsistency} over the candidate sequences, where we score each reasoning path with our baselines. Finally, we aggregate the scores for each answer corresponding to the reasoning paths and pick the answer with the highest score. In \cref{tab:gsm8k}, we present the results. We note that \algo-based approaches performs on par or slightly better compared to self-consistency (majority vote).
+
+\begin{table}[t]
+    \def\cboxwgt{9.6mm}
+    \def\rowheight{8.2mm}
+    
+    \centering
+    \input{text/gsm8k}
+    \caption{Average accuracy of methods on the test set of GSM8K acroos 5 runs. In all cases, except greedy, 20 candidates were sampled.  \algo-based approaches performs on par or slightly better compared to the majority vote baseline. \textbf{MV}: Majority Vote, \textbf{MI}: Mutual Information Ranking, \textbf{SC}: Self-Contrastive Ranking, \textbf{D}: Discriminative Ranking, \textbf{ER-G}: Equilibrium Ranking Generator, \textbf{ER-D}: Equilibrium Ranking Discriminator. $\pm$ indicates 1 standard deviation. Colors are as in \cref{tab:combined}, relative to the Greedy basline.}
+    \label{tab:gsm8k}
+\end{table}
+\paragraph{Discussion}
+The application of \algo-based approaches consistently yields improved results, surpassing or at least matching the performance of all baseline approaches across various tasks. This robustness is particularly interesting, as it demonstrates that \algo is adept at handling diverse scenarios, even in situations when the initial \generator or \discriminator are not effective. As \algo is a sampling strategy, it can even be combined with deliberation methods like self-consistency \citep{wang2023selfconsistency} or tree-of-thought \citep{yao2023tree}. Finally, we note that \algo demonstrates computational efficiency by eliminating the need for repetitive queries to language models.
+
+
+\section{Other Related Work}
+
+Many decoding strategies have been proposed for language models, such as top-k sampling~\citep{fan-etal-2018-hierarchical}, nucleus sampling~\citep{Holtzman2020The}, and typical sampling~\citep{meister2023locally}. These methods primarily focus on producing diverse, high-quality text from a language model. However, they decode from the LM without any emphasis on the correctness of the generated sequences. As we show in \cref{sec:results}, \algo is naturally complementary and be combined with any of these sampling strategies.
+
+Re-ranking is a common approach for selecting the correct answer from a set of candidates sampled from LM. \cite{cobbe2021training} train a verifier to re-ranked the sampled outputs. \cite{shen-etal-2021-generate-rank} jointly train a ranking model with the generation model to improve the model accuracy. \cite{thoppilan2022lamda} collect additional human annotations to train the ranking model for response filtering. As we discuss in \cref{sec:formulation}, our work focuses on leveraging an existing LM and using them in a training-free manner as a discriminator. However, we note that we do not make any specific assumption on the specific form of a the \generator or \discriminator. As such, \algo can be combined with these approaches.
+
+As previously mentioned, \algo differs from recent deliberation methods, as highlighted in various recent work \citep{wei2022chain, madaan2023selfrefine, shinn2023reflexion, yao2023tree, dohan2022language}. In \cref{sec:results}, we demonstrate how \algo can be integrated with these approaches. In another line of work, \cite{du2023improving} and \citet{chen2023reconcile} employ multiple instances of language models suggest and "debate" individual responses and reasoning processes across multiple iterations, ultimately converging on a shared final answer. In contrast, \algo can be viewed as a variant of this multi-agent debate, wherein the "debate" occurs within the regret-minimization framework rather than in the context of language models.
+
+
+
+
+
+
+
+
+
+
+\section{Conclusion}
+
+We have presented \algo, a training-free, game theoretic approach for generating from language models (LMs).
+\algo reconciles scores from generative and discriminative LM decoding procedures by formulating decoding as an imperfect-information signaling game between a \generator and a \discriminator, %
+and leveraging computational game solving techniques to compute approximate equilibria of this game. When applied to 6 diverse question answering benchmarks: MMLU, ARC, RACE, HHH, TruthfulQA and, GSM8K, \algo offers substantial improvements over existing generative, discriminative, and mixed decoding procedures: applying \algo to \llamas sometimes outperforms much larger LLaMA-65B and PaLM-540B models. These results highlight the usefulness of game-theoretic tools in formalizing desiderata like truthfulness and stability in language modeling. Beyond the applications studied here (which focus mainly on question answer), future work might apply this toolkit to more general tasks like long-form text generation.
+
+
+
+
+
+

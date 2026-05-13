@@ -1,0 +1,608 @@
+\title{Overcoming the Pitfalls of Vision-Language Model Finetuning for OOD Generalization}
+
+\begin{abstract}
+Existing vision-language models exhibit strong generalization on a variety of visual domains and tasks. However, such models mainly perform zero-shot recognition in a closed-set manner, and thus struggle to handle open-domain visual concepts by design. There are recent finetuning methods, such as prompt learning, that not only study the discrimination between in-distribution (ID) and out-of-distribution (OOD) samples, but also show some improvements in both ID and OOD accuracies. In this paper, we first demonstrate that vision-language models, after long enough finetuning but without proper regularization, tend to overfit the known classes in the given dataset, with degraded performance on unknown classes. Then we propose a novel approach OGEN to address this pitfall, with the main focus on improving the OOD GENeralization of finetuned models. Specifically, a class-conditional feature generator is introduced to synthesize OOD features using just the class name of any unknown class. Such synthesized features will provide useful knowledge about unknowns and help regularize the decision boundary between ID and OOD data when optimized jointly. Equally important is our adaptive self-distillation mechanism to regularize our feature generation model during joint optimization, \ie, adaptively transferring knowledge between model states to further prevent overfitting. Experiments validate that our method yields convincing gains in OOD generalization performance in different settings.
+\blfootnote{$^{*}$Work done while interning at Apple.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large-scale pre-trained vision-language models like CLIP~\citep{radford2021learning} demonstrate promising generalizability on various visual domains and tasks in the real world. However, their zero-shot in-distribution (ID) performance can be limited for some downstream datasets. Also due to their zero-shot evaluation in a closed-set manner (\ie, to match input image to a predefined set of classes), vision-language models often struggle to handle the out-of-distribution (OOD) samples from novel classes. Such shortcomings create major safety risks in the open domain that often require capabilities of OOD detection and/or accurate identification of both novel and seen classes.
+
+Some recent works attempt to improve the \textit{zero-shot} OOD detection performance of existing vision-language models, either by simple softmax scaling~\citep{ming2022delving} or training an extra text generator~\citep{esmaeilpour2022zero}. Alternatively,~\citet{Fort2021ExploringTL} first show the promise of CLIP models \textit{finetuned} on an ID dataset. Encouragingly both ID and OOD accuracies are improved after finetuning. Parameter-efficient finetuning methods, such as prompt learning~\citep{zhou2021coop,zhou2022cocoop} or adaptor tuning~\citep{Zhang2022TipAdapterTA}, illustrate similar benefits without heavy training.
+
+Despite the success of prior finetuning methods, we found from our extensive benchmarking that finetuning on ID datasets is prone to overfitting (Fig.~\ref{fig:observation}(b)). More specifically, we observed that models after long enough finetuning but without proper regularization, tend to overfit the known classes in the given dataset, with inferior generalization on unknown classes. Unfortunately, an explicit regularization mechanism has not been explored in literature to address this pitfall, and simple regularization strategies like early stopping seem insufficient. E.g. in Fig.~\ref{fig:observation}(b), it is difficult to find an early model checkpoint with good trade-off between the known and unknown class performance.
+
+\begin{figure}[!t]
+\begin{center}
+\centerline{\includegraphics[width=0.9\linewidth]{figs/observation}}
+\vskip -0.1in
+\caption{\textbf{(a)} We study OOD generalization when finetuning the vision-language model CLIP on various downstream tasks. We consider both within-dataset generalization where one dataset has \textbf{ID} vs. \textbf{OOD} (or \textbf{known} vs. \textbf{unknown}) class splits for finetuning and evaluation respectively, and the more challenging cross-dataset generalization setting. Apparently, CoOp overfits the known classes of each dataset with notable accuracy drop on the unknowns. Our proposed method OGEN largely reduces such overfitting through effective regularization.}
+\label{fig:observation}
+\end{center}
+\vskip -0.25in
+\end{figure}
+
+One main challenge of effective model regularization is the missing knowledge about unknowns. Such knowledge could actually offer useful supervision signals to avoid overconfident predictions on OOD data. In this paper, we propose a novel method that features 1) image feature synthesis for unknown classes and 2) an unknown-aware finetuning algorithm with effective model regularization. The goal is to improve OOD generalization without hurting the ID performance of finetuned models. To synthesize unknown features, we introduce a class-conditional feature generator: \ie,~generating image features just given the name of an unknown class. This is made possible by CLIP's well-aligned image-text feature spaces. Our feature generator is implemented by a lightweight attention module, with an ``extrapolating bias'' on the unknown classes. It generalizes well to ``unknown unknowns'' and hence can model the complex distributions of visual classes in the open domain. Then we use both the ID and synthesized OOD data for joint optimization, leading to a better regularized decision boundary. Another contribution is an adaptive self-distillation mechanism that regularizes our feature generator to further reduce overfitting during joint optimization. The idea is to find an adaptive teacher model of the feature generator from historical training epochs (with less overfitting) to guide optimization at the current epoch (student model, often with more overfitting).
+
+Our overall approach OGEN is applicable to different finetuning methods~\eg,~\citep{zhou2021coop,zhou2022cocoop,jia2022visual} for CLIP-like models. OGEN is shown to consistently improve their OOD generalization performance (by up to absolute 18.77\%) under two settings: within-dataset (base-to-new class) generalization and cross-dataset generalization. Summarizing, our \textbf{main contributions} are:
+\begin{itemize} \setlength{\itemsep}{0pt}
+\item Provide the first \textit{comprehensive} study on OOD generalization that unveils the pitfalls of finetuning methods (based on prompt learning) for vision-language models.
+\item A class-conditional feature generator to synthesize OOD data for effective regularization.
+\item Adaptive self-distillation on our feature generator to further reduce overfitting.
+\end{itemize}
+
+
+\section{Related Work}
+
+
+\noindent \textbf{Vision-Language Models.}
+Recent large-scale vision-language models like ViLT~\citep{Kim2021ViLTVT} and PaLI~\citep{PaLI} simply consume image-and-text features for multimodal downstream tasks with remarkable performance. Another popular paradigm used in CLIP~\citep{radford2021learning} and ALIGN~\citep{jia2021scaling} contrastively aligns image and text encoders. These contrastive models are trained on massive web-scale image-text pairs, also showing strong adaptability to a range of downstream tasks, such as semantic segmentation~\citep{zang2022open,ghiasi2021open} and video classification~\citep{qian2022multimodal}. Numerous follow-up works~\citep{li2022supervision,zhou2021coop} aim to improve CLIP-like models in data efficiency or generalization. However, the zero-shot performance on some tasks can still be limited for existing vision-language models. \citet{abs-2302-11154} found that they make different kinds of errors,~\eg,~PaLI is erroneous at tail visual concepts while CLIP may fail for common ones. This paper mainly studies and improves the generalization of finetuned CLIP models, but our approach is model-agnostic and thus applicable to other vision-language models as well.
+
+\noindent \textbf{Finetuning methods} have been studied to improve the downstream performance of vision-language models over their zero-shot counterparts. \citet{Fort2021ExploringTL} showed that after finetuning the CLIP model on datasets of interest, both the ID and OOD generalization performance will be improved. More parameter-efficient finetuning methods are popularized in recent years. In particular, prompt learning focuses on learning visual~\citep{jia2022visual}, textual~\citep{zhou2021coop,zhou2022cocoop,yao2023visual,wang2023improving,shu2023clipood,khattak2023self} or multi-modal~\cite{zang2022unified,khattak2023maple} prompts, while adaptor tuning~\citep{Zhang2022TipAdapterTA} optimizes feature representations with the model backbone kept frozen. In this paper, we first unveil the overfitting issue of recent finetuning methods, and then propose a new regularization method to prevent overfitting. Our approach is orthogonal to the finetuning research, and shows consistent gains over various finetuning baselines.
+
+\noindent \textbf{Outlier synthesis} proves effective for model regularization in the absence of OOD data. Previous methods rely on GANs~\citep{lee2018training} to synthesize outlier images. More recent methods like VOS~\citep{du2022vos} directly synthesize virtual features which allows greater flexibility.~\citet{tao2023nonparametric} propose non-parametric outlier synthesis, without the restrictive Gaussian assumption on feature distributions in VOS. Here we present a new feature synthesis method that has the same format as the CLIP framework and hence facilitates multimodal regularization. Specifically, given the name of an unknown class, we synthesize its example features in a generalizable way.
+
+\noindent \textbf{Model distillation} techniques transfer knowledge from a teacher model to student models,~\eg,~from a large model to its efficient counterparts~\citep{hinton2015distilling} or from a weakly augmented model to the strongly augmented~\citep{sohn2020fixmatch}. Here we aim to reduce overfitting for unseen classes and propose to distill knowledge from early to current epochs (\ie,~self-distillation). Specifically, we extend Mean teacher~\citep{tarvainen2017mean} to an adaptive localized one with suitable teacher curriculum. In the vision-language domain, our approach differs from distillation into smaller models~\citep{li2023distilling} or towards various downstream tasks~\citep{gu2021open,DaiHSJLF22,9878533}. Our approach is also orthogonal (and applicable) to recent distillation frameworks for improved multimodal \textit{pretraining}~\citep{dong2023maskclip,li2021align,zhong2022regionclip}.
+
+
+
+\section{Methodology}
+
+
+
+\subsection{Preliminaries} \label{sub:preliminaries}
+
+\noindent \textbf{CLIP}~\citep{radford2021learning} is the vision-language model that we mainly study in this paper, although our study is applicable to other popular models. CLIP consists of an image encoder $\phi$ and a text encoder $\psi$, which map the image and text inputs into a joint feature space.
+The CLIP training aims at aligning the image and text modalities by maximizing their feature similarity.
+Given an input image $\vx$ that belongs to one of the classes $\mY=\{\vy_1, \vy_2, ..., \vy_C\}$, the image encoder $\phi$ first extracts image features $\vz = f_\phi(\vx) \in \mathbb{R}^{d}$. To obtain the corresponding text features $\vw_{c\in \{1,...,C\}}$, all the given class names can be fed into a fixed prompt template \texttt{\{a photo of a [CLASS]\}}, leading to text descriptions $\mA$ which are further encoded by $\psi$ into the text embeddings $\mW = f_\psi(\mA) \in \mathbb{R}^{d \times C}$ (hence $\vw_c=\mW_{:,c}$). The image-text alignment is optimized based on the cosine feature similarity:
+\begin{equation}
+    p(y=c \mid \vx)=\frac{\exp \left(\cos \left(\vw_{c}, \vz\right) / \tau\right)}{\sum_{i=1}^C \exp \left(\cos \left(\vw_{i}, \vz\right) / \tau\right)},
+\label{eq1}
+\end{equation}
+where $\tau$ is the temperature. A larger cosine score often indicates stronger image-text alignment in their underlying semantics.
+
+\noindent \textbf{Prompt Learning.} For efficient model finetuning on downstream tasks, recent prompt learning approaches like CoOp~\citep{zhou2021coop} replace the aforementioned fixed prompts with learnable ones $\mV = [\vv_1, \vv_2, \ldots, \vv_L] \in \mathbb{R}^{d \times L}$ where $L$ is the prompt length.
+Then the text encoder $\psi$ of CLIP will be able to convert the learned prompts $\mV$ (together with $\mY$) into adapted text embeddings $\hat{\mW} = f_\psi([\mV, \mY]) \in \mathbb{R}^{d \times C}$. Note $\mV$ is learned on each downstream task using the task-specific loss. The image encoder $\phi$ and text encoder $\psi$ of CLIP are kept frozen during prompt learning.
+
+\subsection{Class-Conditional Feature Generator} \label{sub:cfa}
+\begin{figure}[!t]
+\vskip -0.3in
+\begin{center}
+\centerline{\includegraphics[width=1.0\linewidth]{figs/cfg}}
+\caption{\textbf{(a)} To improve OOD generalization, we propose to gain knowledge of unknown classes by directly synthesizing their image features. This helps to learn a more reliable decision boundary between known and unknown classes in the feature space. \textbf{(b)} Prompt learning based on discriminating both the known and synthesized unknown features (from our class-conditional feature generator $\theta$, see details in text). \textbf{(c)} Implementation of $\theta$ using a lightweight attention module.}
+\label{fig:pipeline}
+\end{center}
+\vskip -0.3in
+\end{figure}
+
+As shown in Fig.~\ref{fig:observation}(b), the ``prompt-tuned'' CLIP model tends to overfit the known classes (\textit{aka} base classes $\mY^b=\{\vy_1, \vy_2, ..., \vy_{C_b}\}$) from the downstream task, while OOD generalization on unknown classes (\textit{aka} new classes $\mY^n$ with $|\mY^n|=C_n$) will deteriorate. To reduce overfitting, one might choose model regularization strategies, which will inevitably suffer from the missing knowledge about unknowns. Moreover, the potential number of unknown classes $C_n$ is huge and $C_n \gg C_b$. Hence it is very challenging to model their complex distributions for effective regularization.
+
+Here we make one step towards gaining knowledge of unknowns in a class-conditional manner, in order to provide supervision signals for the vast space of unknown data. Given a textual description or simply the class name of \textit{any} unknown class, we aim to synthesize the class example \textit{features} without seeing labeled instances (Fig.~\ref{fig:pipeline}(a)), leveraging the well-aligned image-text feature spaces of CLIP. Such synthesized image features will then facilitate learning a regularized decision boundary between known and unknown classes, leading to improved OOD generalization capabilities.
+
+In early experiments, we found that directly generating OOD image features out of class names is hard due to the highly non-linear and high-dimensional nature of the former. This is similarly observed in those strong cases of OOD generalization in~\citep{generalization-on-the-unseen}, where the manifold embeddings are typically nonlinear and, more critically, part of the distribution domain is entirely unseen at training. It is proved that successful learning under such extreme distribution shift leads to extrapolating solutions since memorization is voided on the unseen domain. Following the ``extrapolating bias'' on the unknown, we reframe our feature synthesis problem as an easier one --- extrapolating from the most similar classes of the seen data,~\eg,~to generate features of the unknown class \textit{raccoon} by extrapolating features of the similar training classes like \textit{cat} and \textit{bear}.
+
+More specifically, for prompt learning, given the learned prompts and one unknown \texttt{[CLASS]} from the open set $\mY^n$, we first obtain the corresponding text features $\hat{\vw}^n \in \mathbb{R}^{d}$ through the text encoder $\psi$ of CLIP. Then we find for $\hat{\vw}^n$ its kNN classes from the entire set of text features of known classes $\hat{\mW}^b \in \mathbb{R}^{d \times C_b}$, resulting in $\hat{\mW}^b_R \in \mathbb{R}^{d \times K}$ where $R$ is the neighbor set with $|R|=K$. From each of the kNN classes, we randomly sample only one class example and obtain its text-aligned image features from the image encoder $\phi$, leading to the same number of $K$ image feature vectors $\mZ^b_{R} \in \mathbb{R}^{d \times K}$. Our goal is to train a class-conditional feature generator $f_{\theta}(\hat{\vw}^n,\hat{\mW}^b_{R},\mZ^b_{R})$ that can synthesize unknown image features conditioned on the text features $\hat{\vw}^n$ of an unknown class and auxiliary text/image features $(\hat{\mW}^b_{R},\mZ^b_{R})$ of kNN known classes, see Fig.~\ref{fig:pipeline} (b).
+
+\textbf{Remarks.} To retrieve semantically similar kNN classes $\hat{\mW}^b_R$ from $\hat{\mW}^b$, we choose to use the cosine similarity score between the text features (not image features) of class pairs. Then the kNN retrieval process can be formally defined as:
+\begin{equation}
+\argmax_{R \subset \{1,\ldots, C_b\}: |R| = K } \;\;\, \sum_{i \in R} \cos \left(\hat{\vw}^n, \hat{\vw}^b_i \right), \; where \;\; \hat{\vw}^b_i=\hat{\mW}^b_{:,i}.
+\end{equation}
+
+On another note, our empirical study shows that the one random example sampled from each kNN class is enough for assisting new feature generation. Such randomness encourages the diversity of the synthesized features for new classes.
+
+\textbf{Extrapolating per class.} Recall the tuple $(\hat{\mW}^b_{R},\mZ^b_{R})$ consists of $K$ text and image feature vectors respectively (one for each similar known class). One straightforward feature synthesis method for an unknown class (with text features $\hat{\vw}^n$) is to extrapolate each image feature vector in $\mZ^b_{R}$ based on some notion of similarity with $\hat{\vw}^n$, leading to a total of $K$ extrapolated image features from $K$ known classes (\eg,~\textit{cat}$\rightarrow$\textit{raccoon}, \textit{bear}$\rightarrow$\textit{raccoon},...). The similarity notion can be well learned by Multi-Head Cross-Attention (MHCA) that operates on the triplets of queries, keys and values $(\hat{\vw}^n,\hat{\mW}^b_{R},\mZ^b_{R})$. This way, we can effectively take into account the similarity between the unknown class and each known class in $R$ as well as all other between-class similarities. Summarizing, the matrix form of our ``extrapolating-per-class'' scheme is given as:
+\begin{equation}
+\mZ^n = \texttt{LN} (\mZ^b_{R}+\hat{\mZ}^n)\in \mathbb{R}^{d \times K},   \;\; \hat{\mZ}^n = \texttt{MHCA}(\hat{\vw}^n \cdot \mathbf{1}_K^{\top},\hat{\mW}^b_{R},\mZ^b_{R}) \in \mathbb{R}^{d \times K},
+\label{eq3}
+\end{equation}
+where $\hat{\mZ}^n$ are the learned feature residuals when extrapolating each of the $K$ known classes. $\texttt{LN}$ denotes layer normalization. Obviously, our feature generator $\theta$ is lightweight with only one \texttt{MHCA} layer and one \texttt{LN} layer. The simplicity benefits from the ``extrapolating bias'' in our generator design.% which already shows strong feature synthesis quality according to experiments.
+
+Finally, we use the synthesized features $\mZ^n$ to regularize prompt learning and perform joint discrimination of $C_b$ known and $C_n$ unknown class features. The objective of maximizing the image-text alignment in Eq.~(\ref{eq1}) now becomes:
+\begin{equation}
+    p(y=c \mid \mZ^n)=\frac{1}{K} \sum_{k=1}^K \frac{\exp \left(\cos \left(\hat{\vw}_{c}, \vz^n_k\right) / \tau\right)}{\sum_{i=1}^{C_b+C_n} \exp \left(\cos \left(\hat{\vw}_{i}, \vz^n_k\right) / \tau\right)}, \forall c \in \{1,\dots,C_b+C_n\},
+\label{eq4}
+\end{equation}
+where $\hat{\vw}_{c}=[\hat{\mW}^b,\hat{\mW}^n]_{:,c}$ and $\vz^n_k=\mZ^n_{:,k}$. Note under the ``extrapolating-per-class'' scheme, we have synthesized $K$ image features for the same unknown class. We simply aggregate them at the score level when computing the cosine feature similarity score in Eq.~(\ref{eq4}).
+\textbf{Extrapolating jointly} is a more collaborative approach for new feature synthesis. As the name hints, we extrapolate a \textit{single} image feature vector $\vz^n$ from all the kNN known class features $(\hat{\mW}^b_{R},\mZ^b_{R})$, based on the cross attention against $\hat{\vw}^n$:
+\begin{equation}
+\vz^n = \texttt{LN} (\texttt{FFN}(\hat{\vw}^n)+\hat{\vz}^n)\in \mathbb{R}^{d},   \;\; \hat{\vz}^n = \texttt{MHCA}(\hat{\vw}^n ,\hat{\mW}^b_{R},\mZ^b_{R}) \in \mathbb{R}^{d},
+\label{eq5}
+\end{equation}
+where $\hat{\vz}^n$ is the residual image feature vector, while text features $\hat{\vw}^n$ are projected into the image feature space via a two-layer fully connected feed-forward network \texttt{FFN}. Note $\texttt{FFN}(\hat{\vw}^n)$ could be replaced by some anchor point directly searched in the image feature space,~\eg,~a weighted average of kNN image features from $\mZ^b_{R}$. However, searching is a hard problem itself and learning an explicit text-to-image feature mapping works consistently better in our experiments. Fig.~\ref{fig:pipeline}~(c) summarizes the overall network architecture, and the objective function in Eq.~(\ref{eq4}) could be updated as:
+\begin{equation}
+    p(y=c \mid \vz^n)= \frac{\exp \left(\cos \left(\hat{\vw}_{c}, \vz^n\right) / \tau\right)}{\sum_{i=1}^{C_b+C_n} \exp \left(\cos \left(\hat{\vw}_{i}, \vz^n\right) / \tau\right)}, \forall c \in \{1,\dots,C_b+C_n\}.
+\label{eq6}
+\end{equation}
+
+\textbf{Remarks.} Our ablation study (Table~\ref{tab:ablation_cfg_design}) shows that ``extrapolating jointly'' (\textbf{our default approach}) is better than ``extrapolating per class'' at synthesizing useful unknown features for joint optimization. We train our class-conditional feature generator using the ``known'' and ``unknown'' class splits from the training set of downstream tasks. Fig.~\ref{fig:tsne} demonstrates the ability of our feature generator to generalize to ``unknown unknowns'' during testing, with faithful image feature synthesis.
+
+\begin{figure}[!t]
+\vskip -0.15in
+\begin{center}
+\centerline{\includegraphics[width=0.9\linewidth]{figs/tsne}}
+\caption{Visualizing image feature synthesis based on the \textbf{joint extrapolation} scheme (Eq.~(\ref{eq5})) on Flowers102 dataset. Note our feature generator is not trained on the unknown classes, but can still synthesize faithful image features (red triangle) lying close to the real ones (gray cross). This is achieved by extrapolating an unseen instance from the kNN class examples (only a random one per kNN class is used), effectively combining their related patterns like the shape and texture of flowers.}
+\label{fig:tsne}
+\end{center}
+\vskip -0.3in
+\end{figure}
+
+\subsection{Adaptive Self-Distillation} \label{sub:self-distillation}
+Optimizing both known and synthesized unknown features generally improves OOD generalization and oftentimes the ID performance too. However, that does not take into account the optimization dynamics that could also impact the ID-OOD performance tradeoff, especially with long finetuning runs. Take Fig.~\ref{fig:observation}(b) for example. Without proper regularization, the CoOp baseline achieves either suboptimal ID performance at early epochs, or saturated ID performance but decreasing OOD performance (\ie,~overfitting) later on. To address this issue, we introduce an adaptive self-distillation method that regularizes optimization dynamics to further reduce overfitting.
+
+More specifically, we use the model checkpoints from earlier epochs (\ie,~teacher model often with less overfitting) to guide optimization at the current epoch (\ie,~student model often with more overfitting). Since the CLIP model is frozen during prompt learning, the ``model'' we consider here is our feature generator $\theta$ whose synthesized OOD features will impact the joint ID-OOD optimization. Hence we enforce the consistency between the final prediction probabilities (Eq.~(\ref{eq4}) or (\ref{eq6})) induced by the teacher model $p^T$ and student model $p^S$ using the mean squared error $\textup{MSE}(p^{T}, p^{S})$. Ideally, this will help us to avoid OOD performance drop while preserving the ID performance.
+
+The key to our self-distillation method is the choice of teacher model $\theta^T$. Obviously, selecting $\theta^T$ as one single model checkpoint at a historical epoch time is unlikely to strike a good trade-off between the ID and OOD performance. Mean Teacher (MT)~\citep{tarvainen2017mean} is a better alternative, which calculates an Exponential Moving Average (EMA) over the past checkpoints up until the current time $t$ (Eq.~(7)). Here we propose Adaptive Local Mean Teacher (ALMT) that extends MT in two ways: 1) calculating EMA only within a local time window $[t-m_t,t]$ using the last $m_t$ checkpoints. This avoids the negative impact on the teacher's ID performance from those underfit early checkpoints. 2) the window size $m_t$ is time-adaptive such that $m_t$ is small in the early stage of finetuning (for the same purpose of ruling out underfit checkpoints), and then $m_t$ gradually increases in order to cover older checkpoints with improved ID performance but less overfitting. Such curriculum is summarized in Eq.~(\ref{eq8}) as below:
+\begin{eqnarray}
+    \textbf{MT}_{[1,t]}: \!\!\!\!\!\!\!\! && \theta^T_{i} = \alpha \theta^T_{i-1} + (1 - \alpha)\theta_{i}, \;\;\;for \;\;\; i=\{1,\dots,t\},\\
+    \textbf{ALMT}_t: \!\!\!\!\!\!\!\! && \textbf{MT}_{[t-m_t,t]}, \;\; m_t=\left \lfloor \left( 1+\cos \left( \frac{t_{\max}+t}{t_{\max}}\pi\right) \right) \cdot \frac{1}{2}(m_{\max}-m_{\min})+m_{\min} \right\rfloor,
+\label{eq8}
+\end{eqnarray}
+where $m_{\max}=9, m_{\min}=2$, $t_{\max}$ is the maximum number of finetuning epochs, and the window size $m_t$ is increased following a cosine schedule. Note our ALMT method requires maintaining a queue of past $m_t$ checkpoints and re-calculating EMA for each time $t$, both of which are cheap thanks to our compact model size of $\theta_i$ and the small window size $m_t \in \{2,\dots,9\}$.
+
+
+\section{Experiments}
+
+
+\begin{table*}[t!]
+\centering
+\caption{\small{\textbf{Base-to-new class generalization}. Our OGEN approach consistently improves the new class generalization for all prompt learning baselines on average (across 11 datasets). OGEN also maintains or improves the average performance on base classes. H: Harmonic mean of base and new accuracies (\%).}}
+\label{tab:base2new_generalization}
+\tablestyle{+1pt}{0.9}
+\addtolength{\tabcolsep}{+3pt}
+\resizebox{\columnwidth}{!}{
+\begin{tabular}{lc |cc |cc |cc |cc |cc |cc |cc }
+
+\toprule
+ &  & \multicolumn{2}{c}{CoOp} & \multicolumn{2}{c}{CoCoOp} & 
+\multicolumn{2}{c}{VPT} & \multicolumn{2}{c}{SHIP} & \multicolumn{2}{c}{KgCoOp} & \multicolumn{2}{c}{MaPLe} & \multicolumn{2}{c}{PromptSRC} \\
+~ & +OGEN & \xmark & \cmark & \xmark & \cmark & \xmark & \cmark & \xmark & \cmark & \xmark & \cmark & \xmark & \cmark & \xmark & \cmark \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{Avg across\\ 11 datasets}} & Base & 82.69 & \textbf{83.47} & \textbf{80.47} & 79.86 & 82.51 & \textbf{82.52} & 80.03 & \textbf{80.79} & 80.73 & \textbf{81.34} & 82.28 & \textbf{82.40} & \textbf{84.26} & 84.17 \\
+& New & 63.22 & \textbf{69.54} & 71.69 & \textbf{73.35} & 69.01 & \textbf{70.61} & 73.69 & \textbf{76.14}& 73.60 & \textbf{75.68} & 75.14 & \textbf{76.37} & 76.10 & \textbf{76.86} \\
+& $\Delta$ & & \hgreen{+6.32} & & \hgreen{+1.66} & & \hgreen{+1.60} & & \hgreen{+2.45} & & \hgreen{+2.08} & & \hgreen{+1.23} & & \hgreen{+0.76} \\
+& H & 71.66 & \textbf{75.87} & 75.83 & \textbf{76.47} & 75.16 & \textbf{76.10} & 76.73 & \textbf{78.40} & 77.00 & \textbf{78.40} & 78.55 & \textbf{79.27} & 79.97 & \textbf{80.34} \\
+\midrule
+\multirow{3}{*}{ImageNet} & Base & 76.47 & 76.40 & 75.98 & 76.50 & 75.96 & 75.09 & 75.87 & 76.14& 75.83 & 75.88 & 76.66 & 77.02 & 77.60 & 77.50 \\
+& New & 67.88 & 68.80 & 70.43 & 70.23 & 67.32 & 67.66 & 69.95 & 71.18& 69.96 & 70.93 & 70.54 & 70.73 & 70.73 & 70.97 \\
+& H & 71.92 & 72.40 & 73.10 & 73.23 & 71.38 & 71.18 & 72.79 & 73.58& 72.78 & 73.32 & 73.47 & 73.74 & 74.01 & 74.09 \\
+\midrule
+\multirow{3}{*}{Caltech101} & Base & 98.00 & 96.67 & 97.96 & 96.67 & 97.50 & 96.33 & 97.55 & 98.09& 97.72 & 98.52 & 97.74 & 98.37 & 98.10 & 98.32 \\
+& New & 89.81 & 92.61 & 93.81 & 94.79 & 94.10 & 92.36 & 95.20 & 95.26& 94.39 & 94.12 & 94.36 & 94.54 & 94.03 & 94.76 \\
+& H & 93.73 & 94.59 & 95.84 & 95.72 & 95.77 & 94.30 & 96.36 & 96.65& 96.03 & 96.27 & 96.02 & 96.42 & 96.02 & 96.50 \\
+\midrule
+\multirow{3}{*}{OxfordPets} & Base & 93.67 & 95.18 & 95.20 & 96.49 & 96.05 & 96.05 & 95.37 & 96.95& 94.65 & 95.91 & 95.43 & 95.11 & 95.33 & 95.96 \\
+& New & 95.29 & 96.45 & 97.69 & 97.86 & 95.84 & 96.84 & 97.87 & 97.33& 97.76 & 97.65 & 97.76 & 97.89 & 97.30 & 97.48 \\
+& H & 94.47 & 95.81 & 96.43 & 97.17 & 95.94 & 96.45 & 96.61 & 97.14& 96.18 & 96.77 & 96.58 & 96.47 & 96.30 & 96.71 \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{Stanford \\ Cars}} & Base & 78.12 & 78.65 & 70.49 & 68.96 & 75.00 & 74.23 & 68.57 & 68.63& 71.76 & 71.86 & 72.94 & 73.63 & 78.27 & 77.59 \\
+& New & 60.40 & 65.28 & 73.59 & 74.23 & 63.45 & 67.97 & 73.90 & 75.45& 75.04 & 75.95 & 74.00 & 74.30 & 74.97 & 75.17 \\
+& H & 68.13 & 71.35 & 72.01 & 71.50 & 68.74 & 70.96 & 71.14 & 71.88& 73.36 & 73.84 & 73.47 & 73.96 & 76.58 & 76.38 \\
+\midrule
+\multirow{3}{*}{Flowers102} & Base & 97.60 & 97.38 & 94.87 & 93.95 & 96.89 & 98.03 & 94.02 & 94.67& 95.00 & 95.83 & 95.92 & 96.52 & 98.07 & 97.34 \\
+& New & 59.67 & 67.70 & 71.75 & 72.08 & 70.02 & 69.15 & 74.40 & 76.49& 74.73 & 74.75 & 72.46 & 74.46 & 76.50 & 77.67 \\
+& H & 74.06 & 79.87 & 81.71 & 81.57 & 81.29 & 81.09 & 83.06 & 84.61 & 83.65 & 83.98 & 82.56 & 84.06 & 85.95 & 86.39 \\
+\midrule
+\multirow{3}{*}{Food101} & Base & 88.33 & 89.21 & 90.70 & 91.17 & 88.88 & 91.50 & 90.54 & 91.07& 90.50 & 90.80 & 90.71 & 91.02 & 90.67 & 90.69 \\
+& New & 82.26 & 87.22 & 91.29 & 91.67 & 88.95 & 88.53 & 91.03 & 92.79& 91.70 & 92.01 & 92.05 & 92.02 & 91.53 & 91.68 \\
+& H & 85.19 & 88.21 & 90.99 & 91.42 & 88.91 & 89.99 & 90.78 & 91.92& 91.09 & 91.40 & 91.38 & 91.52 & 91.10 & 91.19 \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{FGVC \\ Aircraft}} & Base & 40.44 & 41.67 & 33.41 & 35.33 & 38.33 & 39.33 & 34.27 & 35.47& 36.21 & 37.08 & 37.44 & 37.07 & 42.73 & 41.26 \\
+& New & 22.30 & 29.14 & 23.71 & 34.41 & 25.27 & 26.55 & 32.33 & 34.32& 33.55 & 37.19 & 35.61 & 37.41 & 37.87 & 40.26 \\
+& H & 28.75 & 34.29 & 27.74 & 34.86 & 30.46 & 31.70 & 33.28 & 34.89& 34.83 & 37.14 & 36.50 & 37.24 & 40.15 & 40.75 \\
+\midrule
+\multirow{3}{*}{SUN397} & Base & 80.60 & 80.86 & 79.74 & 80.27 & 80.27 & 79.06 & 79.54 & 81.14& 80.29 & 81.91 & 80.82 & 81.06 & 82.67 & 82.57 \\
+& New & 65.89 & 67.49 & 76.86 & 75.69 & 74.36 & 74.49 & 75.27 & 75.94& 76.53 & 78.83 & 78.70 & 81.07 & 78.47 & 78.83 \\
+& H & 72.51 & 73.57 & 78.27 & 77.91 & 77.20 & 76.71 & 77.35 & 78.45& 78.36 & 80.34 & 79.75 & 81.06 & 80.52 & 80.65 \\
+\midrule
+\multirow{3}{*}{DTD} & Base & 79.44 & 79.16 & 77.01 & 75.00 & 77.08 & 77.43 & 74.88 &76.02 & 77.55 & 78.01 & 80.36 & 79.73 & 83.37 & 83.75 \\
+& New & 41.18 & 50.96 & 56.00 & 56.44 & 53.62 & 55.79 & 56.88 & 64.62& 54.99 & 62.56 & 59.18 & 62.68 & 62.97 & 62.54 \\
+& H & 54.24 & 62.01 & 64.85 & 64.41 & 63.24 & 64.85 & 64.65 & 69.86& 64.35 & 69.43 & 68.16 & 70.18 & 71.75 & 71.60 \\
+\midrule
+\multirow{3}{*}{EuroSAT} & Base & 92.19 & 91.67 & 87.49 & 78.33 & 91.67 & 90.00 & 88.62 & 89.17& 85.64 & 86.05 & 94.07 & 93.83 & 92.90 & 93.40 \\
+& New & 54.74 & 73.51 & 60.04 & 64.69 & 58.31 & 66.75 & 66.87 & 74.28& 64.34 & 70.18 & 73.23 & 74.30 & 73.90 & 76.74 \\
+& H & 68.69 & 81.59 & 71.21 & 70.86 & 71.28 & 76.65 & 76.22 & 81.05& 73.48 & 77.30 & 82.35 & 82.93 & 82.32 & 84.25 \\
+\midrule
+\multirow{3}{*}{UCF101} & Base & 84.69 & 91.33 & 82.33 & 85.78 & 80.07 & 90.68 & 81.08 & 81.33& 82.89 & 82.84 & 83.00 & 82.99 & 87.10 & 87.44 \\
+& New & 56.05 & 65.81 & 73.45 & 74.78 & 74.50 & 70.54 & 76.85 & 79.83& 76.67 & 78.28 & 78.66 & 80.68 & 78.80 & 79.28 \\
+& H & 67.46 & 76.50 & 77.64 & 79.90 & 77.18 & 79.35 & 78.91 & 80.57 & 79.65 & 80.49 & 80.77 & 81.82 & 82.74 & 83.16 \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+\if 0
+\begin{table*}[t]
+    \tabstyle{2.5pt}
+    \caption{\small{\textbf{Base-to-new class generalization}. Our approach OGEN consistently improves the new class generalization in an average sense for all prompt learning baselines. On the other hand, OGEN maintains or improves the average performance on base classes. H: Harmonic mean of base and new accuracies (\%).
+    }}
+    \label{tab:base2new_generalization}
+    \begin{subtable}[t]{.3\textwidth}
+    \centering
+    \caption{\small{\textbf{Average over 11 datasets}.}}
+    \begin{tabular}{l cc|c}
+    \toprule
+    & Base & New & H \\
+    \midrule
+    CoOp & 82.69 & 63.22 & 71.66 \\
+    \rowcolor{LavenderBlush} + OGEN & \textbf{83.47} & \textbf{69.54} & \textbf{75.88} \\
+    \midrule
+    CoCoOp & \textbf{80.47} & 71.69 &  75.83 \\
+    \rowcolor{LavenderBlush} + OGEN & 79.86 & \textbf{73.35} & \textbf{76.47} \\
+    \midrule
+    VPT-deep & 82.51 & 69.01 & 75.16 \\
+    \rowcolor{LavenderBlush} + OGEN & \textbf{82.52} & \textbf{70.61} & \textbf{76.10} \\
+    \bottomrule
+    \end{tabular}
+    \end{subtable}
+    \begin{subtable}[t]{.3\textwidth}
+    \centering
+    \caption{\small{ImageNet.}}
+    \begin{tabular}{l cc|c}
+    \toprule
+    & Base & New & H \\
+    \midrule
+    CoOp & 76.47 & 67.88 & 71.92\\
+    \rowcolor{LavenderBlush} + OGEN & 76.40 & 68.80 & 72.40 \\
+    \midrule
+    CoCoOp & 75.98 & 70.43 & 73.10 \\
+    \rowcolor{LavenderBlush} + OGEN & 76.50 & 70.23 & 73.23 \\
+    \midrule
+    VPT-deep & 75.96 & 67.32 & 71.38 \\
+    \rowcolor{LavenderBlush} + OGEN & 75.09 & 67.66 & 71.18 \\
+    \bottomrule
+    \end{tabular}
+    \end{subtable}
+    ~
+    \begin{subtable}[t]{.3\textwidth}
+    \centering
+    \caption{\small{Caltech101.}}
+    \begin{tabular}{l cc|c}
+    \toprule
+    & Base & New & H \\
+    \midrule
+    CoOp &  98.00 & 89.81 & 93.73 \\
+    \rowcolor{LavenderBlush} + OGEN & 96.67 & 92.61 & 94.59 \\
+    \midrule
+    CoCoOp & 97.96 & 93.81 & 95.84 \\
+    \rowcolor{LavenderBlush} + OGEN & 96.67 & 94.79 & 95.72 \\
+    \midrule
+    VPT-deep & 96.50 &  92.36 & 94.30 \\
+    \rowcolor{LavenderBlush} + OGEN & 96.33 & 92.36 & 94.30 \\
+    \bottomrule
+    \end{tabular}
+    \end{subtable}
+    ~
+    \begin{subtable}[t]{.3\textwidth}
+    \centering
+    \caption{\small{OxfordPets.}}
+    \begin{tabular}{l cc|c}
+    \toprule
+    & Base & New & H \\
+    \midrule
+    CoOp & 93.67 & 95.29 & 94.47 \\
+    \rowcolor{LavenderBlush} + OGEN & 95.18 & 96.45 & 95.81 \\
+    \midrule
+    CoCoOp &  95.20 & 97.69 & 96.43 \\
+    \rowcolor{LavenderBlush} + OGEN & 96.49 & 97.86 & 97.17 \\
+    \midrule
+    VPT-deep & 96.05 & 95.84 & 95.94 \\
+    \rowcolor{LavenderBlush} + OGEN & 96.05 & 96.84 & 96.45 \\
+    \bottomrule
+    \end{tabular}
+    \end{subtable}
+    \begin{subtable}[t]{.3\textwidth}
+    \centering
+    \caption{\small{StanfordCars.}}
+    \begin{tabular}{l cc|c}
+    \toprule
+    & Base & New & H \\
+    \midrule
+    CoOp &  78.12 & 60.40 & 68.13 \\
+    \rowcolor{LavenderBlush} + OGEN & 78.65 & 65.28 & 71.35 \\
+    \midrule
+    CoCoOp & 70.49 & 73.59 & 72.01 \\
+    \rowcolor{LavenderBlush} + OGEN & 68.96 & 74.23 & 71.50 \\
+    \midrule
+    VPT-deep & 75.00 & 63.45 & 68.74 \\
+    \rowcolor{LavenderBlush} + OGEN & 74.23 & 67.97 & 70.96 \\
+    \bottomrule
+    \end{tabular}
+    \end{subtable}
+    ~
+    \begin{subtable}[t]{.3\textwidth}
+    \centering
+    \caption{\small{Flowers102.}}
+    \begin{tabular}{l cc|c}
+    \toprule
+    & Base & New & H \\
+    \midrule
+    CoOp & 97.60 & 59.67 & 74.06 \\
+    \rowcolor{LavenderBlush} + OGEN & 97.38 & 67.70 & 79.87 \\
+    \midrule
+    CoCoOp & 94.87 & 71.75 & 81.71 \\
+    \rowcolor{LavenderBlush} + OGEN & 93.95 & 72.08 & 81.57 \\
+    \midrule
+    VPT-deep & 96.89 & 70.02 & 81.29 \\
+    \rowcolor{LavenderBlush} + OGEN & 98.03 & 69.15 & 81.09 \\
+    \bottomrule
+    \end{tabular}
+    \end{subtable}
+    ~
+    \begin{subtable}[t]{.3\textwidth}
+    \centering
+    \caption{\small{Food101.}}
+    \begin{tabular}{l cc|c}
+    \toprule
+    & Base & New & H \\
+    \midrule
+    CoOp & 88.33 & 82.26 & 85.19 \\
+    \rowcolor{LavenderBlush} + OGEN & 89.21 & 87.22 & 88.21 \\
+    \midrule
+    CoCoOp & 90.70 & 91.29 &  90.99 \\
+    \rowcolor{LavenderBlush} + OGEN & 91.17 & 91.67 & 91.42 \\
+    \midrule
+    VPT-deep & 88.88 & 88.95 & 88.91 \\
+    + OGEN & 91.50 & 88.53 & 89.99 \\
+    \bottomrule
+    \end{tabular}
+    \end{subtable}
+    \begin{subtable}[t]{.3\textwidth}
+    \centering
+    \caption{\small{FGVCAircraft.}}
+    \begin{tabular}{l cc|c}
+    \toprule
+    & Base & New & H \\
+    \midrule
+    CoOp & 40.44 & 22.30 & 28.75 \\
+    \rowcolor{LavenderBlush} + OGEN & 41.67 & 29.14 & 34.29 \\
+    \midrule
+    CoCoOp &  33.41 & 23.71 & 27.74 \\
+    \rowcolor{LavenderBlush} + OGEN & 35.33 & 34.41 & 34.86 \\
+    \midrule
+    VPT-deep & 38.33 & 25.27 & 30.46 \\
+    \rowcolor{LavenderBlush} + OGEN & 39.33 & 26.55 & 31.70 \\
+    \bottomrule
+    \end{tabular}
+    \end{subtable}
+    ~
+    \begin{subtable}[t]{.3\textwidth}
+    \centering
+    \caption{\small{SUN397.}}
+    \begin{tabular}{l cc|c}
+    \toprule
+    & Base & New & H \\
+    \midrule
+    CoOp &  80.60 & 65.89 & 72.51 \\
+    \rowcolor{LavenderBlush} + OGEN & 80.86 & 67.49 & 73.57 \\
+    \midrule
+    CoCoOp &  79.74 & 76.86 &  78.27 \\
+    \rowcolor{LavenderBlush} + OGEN & 80.27 & 75.69 & 77.91 \\
+    \midrule
+    VPT-deep & 80.27 & 74.36 & 77.20 \\
+    \rowcolor{LavenderBlush} + OGEN & 79.06 & 74.49 & 76.71 \\
+    \bottomrule
+    \end{tabular}
+    \end{subtable}
+    ~
+    \begin{subtable}[t]{.3\textwidth}
+    \centering
+    \caption{\small{DTD.}}
+    \begin{tabular}{l cc|c}
+    \toprule
+    & Base & New & H \\
+    \midrule
+    CoOp & 79.44 & 41.18 & 54.24 \\
+    \rowcolor{LavenderBlush} + OGEN & 79.16 & 50.96 & 62.01 \\
+    \midrule
+    CoCoOp & 77.01 & 56.00 & 64.85 \\
+    \rowcolor{LavenderBlush} + OGEN & 75.00 & 56.44 & 64.41 \\
+    \midrule
+    VPT-deep & 77.08 & 53.62 & 63.24 \\
+    \rowcolor{LavenderBlush} + OGEN & 77.43 & 55.79 & 64.85 \\
+    \bottomrule
+    \end{tabular}
+    \end{subtable}
+    ~
+    \begin{subtable}[t]{.3\textwidth}
+    \centering
+    \caption{\small{EuroSAT.}}
+    \begin{tabular}{l cc|c}
+    \toprule
+    & Base & New & H \\
+    \midrule
+    CoOp &  92.19 & 54.74 & 68.69 \\
+    \rowcolor{LavenderBlush} + OGEN & 91.67 & 73.51 & 81.59 \\
+    \midrule
+    CoCoOp & 87.49 & 60.04 & 71.21 \\
+    \rowcolor{LavenderBlush} + OGEN & 78.33 & 64.69 & 70.86 \\
+    \midrule
+    VPT-deep & 91.67 & 58.31 & 71.28 \\
+    \rowcolor{LavenderBlush} + OGEN & 90.00 & 66.75 & 76.65 \\
+    \bottomrule
+    \end{tabular}
+    \end{subtable}
+    ~
+    \begin{subtable}[t]{.3\textwidth}
+    \centering
+    \caption{\small{UCF101.}}
+    \begin{tabular}{l cc|c}
+    \toprule
+    & Base & New & H \\
+    \midrule
+    CoOp & 84.69 & 56.05 & 67.46 \\
+    \rowcolor{LavenderBlush} + OGEN & 91.33 & 65.81 & 76.50 \\
+    \midrule
+    CoCoOp &  82.33 & 73.45 & 77.64 \\
+    \rowcolor{LavenderBlush} + OGEN & 85.78 & 74.78 & 79.90 \\
+    \midrule
+    VPT-deep & 80.07 & 74.50 & 77.18 \\
+    \rowcolor{LavenderBlush} + OGEN & 90.68 & 70.54 & 79.35 \\
+    \bottomrule
+    \end{tabular}
+    \end{subtable}
+\end{table*}
+\fi
+
+ The base and new class splits are used for finetuning and evaluation respectively. 2) cross-dataset generalization with one ID dataset for finetuning and other datasets for OOD evaluation. The cross-dataset setting is more challenging since there will be both domain- and class-incremental distribution shift,~\eg,~from generic object classification on ImageNet~\citep{deng2009imagenet} to satellite imagery recognition on EuroSAT~\citep{helber2019eurosat}.
+
+\noindent \textbf{Datasets.}
+For both settings we use 11 datasets: ImageNet~\citep{deng2009imagenet}, Caltech101~\citep{fei2004learning}, OxfordPets~\citep{parkhi2012cats}, StanfordCars~\citep{krause20133d}, Flowers102~\citep{nilsback2008automated}, Food101~\citep{bossard2014food}, FGVC-Aircraft~\citep{maji2013fine}, SUN397~\citep{xiao2010sun}, UCF101~\citep{soomro2012ucf101}, DTD~\citep{cimpoi2014describing} and EuroSAT~\citep{helber2019eurosat}.
+
+\noindent \textbf{Baselines.} For finetuning, we consider prompt learning approaches CoOp~\citep{zhou2021coop}, CoCoOp~\citep{zhou2022cocoop}, VPT~\citep{jia2022visual}, and the state-of-the-art methods SHIP~\citep{wang2023improving}, KgCoOp~\citep{yao2023visual}, MaPLe~\citep{khattak2023maple} and PromptSRC~\citep{khattak2023self}. For each baseline, we apply our method (dubbed OGEN) to obtain an OOD GENeralization improved version. For fairness, we use the same implementation details of each baseline, including the prompt length, vision backbone in CLIP~\citep{radford2021learning} (\ie,~ViT-B/16) and train/test data splitting. The reported results are an average over three random seeds.
+\subsection{Generalization from Base to New Classes} \label{sec:base2new}
+The base-to-new generalization setting creates a strictly class-incremental distribution shift since the base and new class splits in one dataset are disjoint. All prompt learners are trained on the base classes, and tested on the base and new classes separately to evaluate the trade-off between ID and OOD performance. Here we follow~\citep{xian2017zero} to report the harmonic mean of base and new class accuracies to quantify such trade-off. %For the new class accuracy particularly, a good performance depends on how one can successfully perform zero-shot classification on new classes since no training data are available for them.
+
+Table~\ref{tab:base2new_generalization} summarizes the results on 11 datasets. On average, our OGEN method consistently improves the new class accuracy for all the prompt learning baselines. CoOp is particularly interesting since its default learning schedule (200 epochs) is much longer than that of CoCoOp and VPT (10 epochs). Without proper regularization, CoOp inevitably shows more serious overfitting to the base classes (82.69\% on average) with low performance on new classes (63.22\%) after long training runs. Our OGEN is especially useful in this case, significantly improving the average new class accuracy of CoOp from 63.22\% to 69.54\%.~\ref{fig:ogen_gains}(a), the new class generalization sees notable gains on 3 datasets --- DTD for texture classification, EuroSAT for satellite image recognition and UCF101 for action recognition, which all demonstrate large inter-class variations. This validates the superior generalizability of OGEN, thanks to its capability of OOD feature synthesis and regularization. OGEN also improves the average base class accuracy of CoOp from 82.69\% to 83.47\%. Specifically, OGEN improves on 6 datasets with negligible performance drop on other 5, see Fig.~\ref{fig:ogen_gains}(b). The gains on base classes can be attributed to 1) the joint discrimination of known and unknown classes and 2) our adaptive self-distillation method that strikes a good ID-OOD performance tradeoff.
+
+For CoCoOp and VPT with a significantly shorter training schedule, they suffer from much less overfitting with higher new but lower base accuracies than CoOp. This makes our OGEN unable to unleash its full potential to address overfitting. That said, we find both OGEN-CoCoOp and OGEN-VPT can still improve the average new class accuracy while achieving a similar base class accuracy. We are likely to further improve the base accuracy when given a longer optimization schedule that allows more ID-OOD performance balancing.
+
+Among the state-of-the-art methods, SHIP (+CoOp) and PromptSRC are related to our OGEN approach in the use of similar techniques of feature synthesis and self-regularization respectively. Table~\ref{tab:base2new_generalization} shows that OGEN can improve the new class generalization of both SHIP and PromptSRC by exploring the synergy between regularization and OOD feature synthesis. OGEN also consistently improves the average base and new class accuracies for KgCoOp and MaPLe. Fig.~\ref{fig:kgcoop_observation} uses KgCoOp to exemplify how these methods still suffer from overfitting (although reduced to some extent by various techniques), and how our OGEN improves the learning curves of both base and new classes. It is worth noting that different methods are trained for different numbers of epochs, thus again, they have different levels of overfitting. OGEN improves generalization more over SHIP (200 epochs) and KgCoOp (100 epochs) with long learning schedules (more serious overfitting). Our gains are smaller over MaPLe (5 epochs) and PromptSRC (20 epochs) with short training runs, but larger gains are expected when trained for longer runs.
+
+\subsection{Cross-Dataset Generalization}
+\begin{table*}[t]
+\vskip -0.37in
+    \tabstyle{5pt}
+    \caption{ \small{\textbf{Cross-dataset generalization}: CLIP finetuning (prompt learning) on the source dataset ImageNet, followed by testing on 10 target datasets. Our method OGEN improves the generalization performance of both CoOp and CoCoOp on all the target datasets.}
+    }
+    \label{tab:cross_transfer}
+    \scalebox{0.83}{\begin{tabular}{l c ccccccccccc}
+    \toprule
+    & Source & \multicolumn{11}{c}{Target} \\ \cmidrule(lr){2-2} \cmidrule(lr){3-13}
+    & \rotbox{ImageNet} & \rotbox{Caltech101} & \rotbox{OxfordPets} & \rotbox{StanfordCars} & \rotbox{Flowers102} & \rotbox{Food101} & \rotbox{FGVCAir} & \rotbox{SUN397} & \rotbox{DTD} & \rotbox{EuroSAT} & \rotbox{UCF101} & \rotbox{\emph{Average}} \\
+    \midrule
+    CoOp &     {71.51} &   93.70 & 89.14 & 64.51 & 68.71 & 85.30 & 18.47 & 64.15 & 41.92 &   46.39 & 66.55 & 63.88 \\
+    \rowcolor{LavenderBlush} OGEN-CoOp & \textbf{71.52} & 94.60 & 90.73 & 65.07 & 70.55 & 87.26 & 19.84 & 65.77 & 44.90 & 49.53 & 69.36 & \textbf{65.76} \\
+    \midrule
+    CoCoOp &   71.02 & {94.43} & 90.14 & 65.32 & 71.88 &   86.06 & 22.94 &   67.36 &  45.73 & 45.37 &   68.21 &   65.74 \\
+    \rowcolor{LavenderBlush} OGEN-CoCoOp & \textbf{71.28} & 95.12 & 91.37 & 66.04 & 72.90 & 86.54 & 22.95 & 68.42 & 46.38 & 45.82 &  69.74 & \textbf{66.53} \\
+    \bottomrule
+    \end{tabular}}
+\end{table*}
+
+Table~\ref{tab:cross_transfer} shows the generalization performance from ImageNet to 10 target datasets. We consider the representative CoOp and CoCoOp baselines with long and short training runs respectively. As shown in the table, our OGEN uniformly improves the generalization performance (across baselines and target datasets) with competitive source dataset performance. The improvements are especially large on those low performing datasets DTD, EuroSAT, UCF101 with large distribution shift from ImageNet. This highlights the benefits of our OOD feature generation module. OGEN also obtains reasonable gains on the high performing datasets like OxfordPets that contains similar classes (\eg,~different dog breeds) with ImageNet, demonstrating the universality of our approach.
+
+\if 0
+\subsection{Domain Generalization}
+\begin{table*}[t]
+\centering
+\caption{\small{\textbf{Main results under the domain generalization setting.} We report the average accuracy (\%) of 16 shots over three runs.}}
+\tabstyle{5.5pt}
+\scalebox{0.85}{
+\begin{tabular}{l c cccc cc}
+\toprule
+\multirow{2}{4em}{Method} & Source & \multicolumn{4}{c}{Target} & \multirow{2}{4em}{\emph{Overall} Average} & \multirow{2}{4em}{\emph{OOD} Average} \\
+\cmidrule(lr){2-2} \cmidrule(lr){3-6}
+& ImageNet & -V2 & -S & -A & -R & ~ \\
+\midrule
+CoOp &   71.51 &   64.20 & 47.99 & 49.71 & 75.21 & 61.72 & 59.28 \\
+\rowcolor{LavenderBlush} + OGEN & 70.52 & 63.65 & 48.36 & 49.79 & 76.57 & 61.78 & 59.59 \\
+\midrule
+CoCoOp & 71.02 & 64.07 & 48.75 &   50.63 &   76.18 &   62.13 &   59.91 \\
+\rowcolor{LavenderBlush} + OGEN & 71.28 & 63.13 & 48.66 & 50.50 & 77.00 & 62.12 & 59.82 \\
+\bottomrule
+\end{tabular}}
+\label{tab:domain_generalization}
+\end{table*}
+\fi
+
+\subsection{Ablation Studies}~\label{sec:ablation}
+
+\begin{table*}[t]
+\centering
+\hspace{1mm}
+\begin{minipage}[t]{0.45\textwidth}
+\centering
+\caption{\small{Ablating our \textbf{class-conditional feature generator} $\theta$ (Eq.~(\ref{eq5})) and \textbf{self-distillation} method ALMT (Eq.~(\ref{eq8})). H: Harmonic mean of the base and new class accuracies averaged on 11 datasets.}}
+\scalebox{0.83}{\tablestyle{4pt}{1.0}
+\begin{tabular}{cc| ccc}
+    \toprule
+    $\theta$ & ALMT & Base & New & H \\
+    \midrule
+    \xmark & \xmark & 82.69$\pm$1.08 & 63.22$\pm$0.51 & 71.66$\pm$0.54 \\
+    \cmark & \xmark & 82.49$\pm$0.95 & {69.02}$\pm$0.64 & {75.15}$\pm$1.12 \\
+    \rowcolor{LavenderBlush} \cmark & \cmark & \textbf{83.47}$\pm$0.30 & \textbf{69.54}$\pm$0.34 & \textbf{75.88}$\pm$0.11 \\
+    \bottomrule
+    \end{tabular}
+}
+\label{tab:ablation_components}
+\end{minipage}
+\hspace{6mm}
+\begin{minipage}[t]{0.45\textwidth}
+\centering
+\caption{\small{\textbf{Class-conditional feature generator}: different design choices of no extrapolation from kNN classes, extrapolating per class (Eq.~(\ref{eq3})) and extrapolating jointly (Eq.~(\ref{eq5})).}}
+\scalebox{0.83}{\tablestyle{4pt}{1.0}
+\begin{tabular}{c| ccc}
+    \toprule
+    & Base & New & H \\
+    \midrule
+    No Extrap & \textbf{83.34}$\pm$0.26 & 64.08$\pm$0.95 & 72.46$\pm$0.68 \\
+    Extrap per class & 82.90$\pm$0.35 & 66.04$\pm$0.89 & 73.52$\pm$0.63 \\
+    \rowcolor{LavenderBlush} Extrap jointly & 82.49$\pm$0.95 & \textbf{69.02}$\pm$1.25 & \textbf{75.15}$\pm$1.12 \\
+    \bottomrule
+    \end{tabular}
+}
+\label{tab:ablation_cfg_design}
+\end{minipage}
+\end{table*}
+
+\begin{table*}[t]
+\centering
+\hspace{1mm}
+\begin{minipage}[t]{0.45\textwidth}
+\centering
+\caption{\small{\textbf{Class-conditional feature generator}: kNN retrieval vs. Random sampling of known classes with varying $K$.}}
+\scalebox{0.83}{\tablestyle{4pt}{1.0}
+\begin{tabular}{c|c| ccc}
+    \toprule
+    & $K$ & Base & New & H \\
+    \midrule
+    \multirow{4}{*}{kNN} &1 & \textbf{82.76}$\pm$0.49 & 67.01$\pm$1.35 & 74.06$\pm$0.63 \\
+    & 2 & 82.35$\pm$0.76 & 67.79$\pm$2.37 & 74.36$\pm$1.19 \\
+    & 3 & 82.49$\pm$0.95 & \textbf{69.02}$\pm$1.25 & \textbf{75.15}$\pm$1.12 \\
+    & 4 & 82.37$\pm$0.46 & 68.85$\pm$0.52 & 75.00$\pm$0.13 \\
+    \midrule
+    Rand & 3 & 81.69$\pm0.35$ & 68.30$\pm0.38$ & 74.40$\pm$0.36 \\
+    \bottomrule
+    \end{tabular}
+}
+\label{tab:ablation_cfg_knn}
+\end{minipage}
+\hspace{6mm}
+\begin{minipage}[t]{0.45\textwidth}
+\centering
+\caption{\small{\textbf{Self-distillation}: Mean Teacher (MT) vs. Adaptive Local Mean Teacher (ALMT) with fixed window size $m$ or adaptive $m_t$ (default).}}
+\scalebox{0.83}{\tablestyle{4pt}{1.0}
+ \begin{tabular}{l| ccc}
+    \toprule
+    & Base & New & H \\
+    \midrule
+    No distillation &82.49$\pm$0.65 & 69.02$\pm$0.64 & 75.15$\pm$1.12 \\
+     MT & 83.34$\pm$0.15 & 68.30$\pm$0.77 & 75.08$\pm$0.47 \\
+     ALMT ($m=2$) &81.70$\pm$0.59 &68.47$\pm$0.59 &74.50$\pm$0.55 \\
+     ALMT ($m=9$) &82.21$\pm$0.80 &68.57$\pm$0.85 &74.77$\pm$0.29 \\
+    \rowcolor{LavenderBlush} ALMT ($m_t$) & \textbf{83.47}$\pm$0.30 & \textbf{69.54}$\pm$0.34 & \textbf{75.88}$\pm$0.11 \\
+    \bottomrule
+    \end{tabular}
+}
+\label{tab:ablation_almt}
+\end{minipage}
+\end{table*}
+Our ablation studies are conducted using OGEN-CoOp with a meaningfully long learning schedule. We start with ablating the two main components of OGEN: class-conditional feature generator $\theta$ and adaptive self-distillation method ALMT. We see the feature generator improves the new class accuracy by a large margin without hurting the base class accuracy. This suggests the high quality of its generated OOD features and the need of joint ID-OOD feature optimization. ALMT is shown to further improve on both base and new classes, leading to a higher Harmonic mean and a much lower performance variance. This highlights the need of regularizing joint optimization for a good performance tradeoff.
+
+Table~\ref{tab:ablation_cfg_design} compares different design choices of our class-conditional feature generator. Recall that we adopt an extrapolation scheme that extrapolates new image features from the kNN base class features. What if we use no extrapolation at all, and directly learn a mapping from the new class name to new image features? As shown in the table, this only slightly helps the new class generalization probably because the generated features are not faithful enough from an unconstrained text-to-image mapping. Then between the ``Extrapolating per class'' and ``Extrapolating jointly'' schemes, the latter improves on new classes much more significantly, showing the benefits of collaborative class relation modeling for extrapolation. Table~\ref{tab:ablation_cfg_knn} further ablates on the number of kNN base classes needed for extrapolation, arriving at the best $K=3$. By comparison, randomly selecting 3 base classes does not perform as well.
+
+Table~\ref{tab:ablation_almt} compares various self-distillation baselines applied on top of our feature generator. Notably, the simple Mean Teacher (MT) is not helping, which inspires us to use a local version to completely rule out the early-stage underfit model checkpoints. We further propose Adaptive Local Mean Teacher (ALMT) that calculates EMA within a local time window of increasing size $m_t$ (from $m_{\min}=2$ to $m_{\max}=9$). As shown in the table, ALMT achieves the best performance due to the adaptiveness of $m_t$, which effectively avoids both the underfitting (from early epochs) and overfitting (from recent epochs) effects in the teacher model. Apparently, this is not possible with a fixed window size ($m=m_{\min}$ or $m_{\max}$) which hurts performance.
+
+
+\section{Conclusions and Future Work}
+
+In this paper, we study the OOD generalization of recent CLIP finetuners and propose an effective approach to reduce their overfitting to seen classes. For that, a class-conditional feature generator is used to synthesize OOD features for joint optimization, and the optimization dynamics are further regularized by an adaptive distillation scheme. The superior generalization capability of our approach is demonstrated under different OOD settings.
+In the future, we plan to go beyond prompt learning and evaluate how much our benefits hold for other finetuning methods like adaptor tuning. Moreover, it would be interesting to figure out how well our ``unknown-aware'' approach can model uncertainties on unseen data, which can be evaluated on existing OOD detection benchmarks.
+
+
+
+
+

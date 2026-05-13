@@ -1,0 +1,243 @@
+\title{Faster, More Efficient RLHF through Off-Policy Asynchronous Learning}
+
+\begin{abstract}
+The dominant paradigm for RLHF is *online* and *on-policy* RL: synchronously generating from the large language model (LLM) policy, labelling with a reward model, and learning using feedback on the LLM's own outputs. While performant, it is computationally inefficient. Inspired by classical deep RL literature, we propose separating generation and learning in RLHF. This enables asynchronous generation of new samples while simultaneously training  on old samples, leading to faster training and more compute-optimal scaling. However, asynchronous training relies on an underexplored regime, online but *off-policy* RLHF: learning on samples from previous iterations of our model. To understand the challenges in this regime, we investigate a fundamental question: how much off-policyness can we tolerate for asynchronous training to speed up learning but maintain performance? Among several RLHF algorithms we tested, we find that online DPO is most robust to off-policy data, and robustness increases with the scale of the policy model. We show even further compute optimizations but demonstrate that they come at a performance cost, giving rise to a trade-off. Finally, we verify our design choices by training LLaMA 3.1 8B with RLHF on instruction following tasks 40\% faster than a synchronous run while matching final performance measured with GPT-4o.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Reinforcement learning (RL) is critical for training AI assistants based on large language models (LLMs) to ensure they follow instructions (OpenAI, 2022), are helpful and harmless (Bai et al., 2022a), and are factually accurate (Roit et al., 2023). As LLMs have increased in size and capability, the scale and complexity of RL finetuning for LLMs has also substantially increased. State-of-theart LLMs are often finetuned for weeks (Llama Team, 2024; Google Deepmind, 2024), presumably with large amounts of compute resources.  
+
+Yet the dominant paradigm for RL finetuning of LLMs, online on-policy RL (Ouyang et al., 2022), is computationally inefficient. Online RL methods generate a batch of responses from the model, get feedback on this batch (e.g. from a reward model), and update on-policy with feedback on exactly this model’s responses, before generating the next batch. Recent offline methods efficiently learn directly from a fixed dataset of responses and feedback (Rafailov et al., 2023) but they underperform online methods (Xu et al., 2024). Since feedback on a model’s own generations is crucial to good performance (Tang et al., 2024a), we propose generating responses online but learning off-policy on previous iterations’ feedback. By running both processes asynchronously and leveraging new efficient generation libraries (Kwon et al., 2023), we can greatly reduce compute time.  
+
+This work focuses on RL finetuning with human feedback (RLHF) and makes a first step into efficient, asynchronous RLHF. We demonstrate strong results and find insights on the widely-used RLHF benchmark, TLDR summarization (Stiennon et al., 2020)  
+
+1. We propose asynchronous RLHF and demonstrate that it requires off-policy learning, an underexplored direction for RLHF research. Moreover, we show that RLHF performance generally degrades with more off-policyness. 2. We evaluate many popular RLHF losses and find that Online DPO is most robust to offpolicy data and robustness improves with the size of the policy model.  
+
+![](images/35528b1b4295600fa73ccd64041c71addcd37fbacc9897f89a0befe901ed172c.jpg)  
+Figure 1: Asynchronous off-policy RLHF is more computationally efficient, and matches the win-rate of synchronous on-policy RLHF on TLDR across model scales. On $4\!\times\!\mathrm{Al00}$ GPUs, it results in training a 2.8B Pythia model $25\%$ faster and improvements in speed increase with scale.  
+
+3. We scale model sizes and show that asynchronous RLHF training speed scales better than synchronous RLHF. We achieve the same performance as synchronous state-of-the-art methods $\sim25\%$ faster with 2.8B models (Figure 1).  
+
+4. We demonstrate ways to further optimize compute efficiency in generation-constrained and training-constrained scenarios. In our setup, we improve further and achieve nearly the same performance $\sim250\%$ faster with 2.8B models.  
+
+We then scale up and train a general purpose chatbot by finetuning LLaMA 3.1 8B on a high-quality dataset of human-written demonstrations, No Robots (Rajani et al., 2023)  
+
+5. At scale, asynchronous RLHF trains $\sim~40\%$ faster than a synchronous approach and achieves equal performance as measured by GPT-4.  
+
+
+
+\section{2 BACKGROUND  }
+
+
+2.1 REINFORCEMENT LEARNING FROM HUMAN FEEDBACK  
+
+RLHF is a method to align models with hard-to-quantify human preferences using human or synthetic feedback (Christiano et al., 2017; Bai et al., 2022b). In the standard setup for LLMs (Ziegler et al., 2019; Stiennon et al., 2020; Ouyang et al., 2022), we first gather a dataset of prompts $x$ and two responses $y,y^{\prime}$ (e.g. from our model) and have humans judge which response is better and which is worse. Next, we learn a reward model $r_{\phi}(x,y)$ on the dataset to approximate human judgement of responses. Finally, we train our model by learning online: iteratively generating responses to prompts, labelling responses with the reward model, and using RL to optimize the reward. As LLMs are initialized from pretrained weights, RLHF seeks to optimize the reward while maintaining pretrained model abilities. We add a Kullback-Lieber divergence (KL) loss to the objective to keep the model $\pi_{\theta}$ close to the initial model $\pi_{\mathrm{init}}$ in order to reduce reward model overoptimization (Gao et al., 2022) and alignment tax (Askell et al., 2021).  
+
+$$
+\operatorname*{max}_{\pi_{\theta}}\mathbb{E}_{y\sim\pi_{\theta}(x)}\left[r(x,y)-\beta\mathrm{KL}[\pi_{\theta}(y|x)\|\pi_{\mathrm{init}}(y|x)]\right]
+$$  
+
+The standard method for this approach is Proximal Policy Optimization (PPO; Schulman et al., 2015) which uses an actor-critic framework to optimize the objective. REINFORCE Leave-OneOut (RLOO; Ahmadian et al., 2024) simplifies PPO by reducing to the REINFORCE estimator (Williams, 1992) and empirically estimating a baseline using multiple samples instead of using a value network. Recently Guo et al. (2024); Calandriello et al. (2024) find competitive performance with Online DPO on the RLHF objective. They sample two online continuations, rank them as  
+
+![](images/ea5ffb8dde3c1988eacf038b90ce3c0f671373491d6d5ea5e616611974311f73.jpg)  
+
+Figure 2: Synchronous vs Asynchronous RLHF. Top: The current RLHF paradigm synchronously generates and then trains, leveraging the same GPUs for both. This means using slow training libraries for LLM generation. Bottom: We propose Cleanba-style (Huang et al., 2023) asynchronous RLHF, separating generation and training to different GPUs. This allows leveraging LLM inference libraries e.g. vllm (Kwon et al., 2023), to greatly reduce generation time. Training time increases because we are learning on only one GPU but the overall runtime for three updates is lower. The caveat is that asynchronous learning requires off-policy training: learning on data created by our model at a previous timestep e.g. $\theta_{t+1}$ is updated using data generated by $\theta_{t}$  
+
+better $(y_{+})$ and worse $(y_{-})$ with the reward model, and optimize the objective of direct preference optimization (DPO; Rafailov et al., 2023).  
+
+$$
+\operatorname*{max}_{\pi_{\theta}}\mathbb{E}_{y_{+},y_{-}\sim\pi_{\theta}(x)}\left[\log\sigma\left(\beta\log\frac{\pi_{\theta}(y_{+}|x)}{\pi_{\mathrm{init}}(y_{+}|x)}-\beta\log\frac{\pi_{\theta}(y_{-}|x)}{\pi_{\mathrm{init}}(y_{-}|x)}\right)\right]
+$$  
+
+
+
+\section{2.2 ASYNCHRONOUS DEEP RL  }
+
+
+Prior work in deep reinforcement learning (DRL) has focused mostly on multi-step environments that run on CPU (Bellemare et al., 2013; Tassa et al., 2018; Lillicrap et al., 2019). These algorithms are typically on-policy, meaning the training data comes from rolling out the latest policy. This makes the training synchronous: the learner updates can only occur after policy rollouts, which is slow and can under-utilize hardware resources such as GPUs. To improve throughput and scalability, methods were proposed to parallelize the actor’s and learner’s computation (Mnih et al., 2016; Espeholt et al., 2018; Berner et al., 2019). Learners and actors can run faster independently but this introduces off-policy data, that is, the rollout data comes from slightly outdated policies. Despite the benefits of asynchronous DRL, to our knowledge, published RLHF works are always synchronous and asynchronous RLHF is severely under-explored.  
+
+2.3 EFFICIENT LLM TRAINING AND GENERATION  
+
+As LLMs have become a more mature technology, a significant effort has focused on improving the efficiency and speed of LLM training and inference. Although some techniques can be leveraged for both (e.g. FlashAttention (Dao et al., 2022)), the problem of efficient training and generation are quite separate and require different methods (Liu et al., 2024). Efficient LLM training involves sharding large models, reducing optimizer states, pipeline batching, and speeding up backpropogation (Rasley et al., 2020; Rajbhandari et al., 2020). Efficient LLM generation focuses custom kernels, effective management of the KV cache, continuous batching (Kwon et al., 2023), and speculative decoding (Cai et al., 2024). As methods have advanced, the backends have diverged and current state-of-the-art libraries for LLM training are separate from LLM inference.  
+
+
+
+\section{3 ASYNCHRONOUS OFF-POLICY RLHF  }
+
+
+On-policy RLHF is Computationally Inefficient The dominant paradigm for RLHF is fully online, on-policy RL: synchronously generate samples then train on these samples using a reward  
+
+signal (Figure 2, top). To do so, we either (1) use the training library models for both training and inefficient generation, or (2) have generation and training GPUs alternate with some GPUs being idle while the others are working.1 The second option is clearly inefficient. However, the first option does not take into account the divergence between efficient LLM training and generation strategies, as discussed in $\S2.3$ . Although training libraries can be used for inference, they are woefully outmatched. For example, let’s compare the most popular library for training, Hugging Face transformers (Wolf et al., 2020), with a popular library for inference, vllm (Kwon et al., 2023). We find that vllm is $12\times$ faster than transformers at generating 1024 batches of a modest 128 tokens with a 7B model. Empirically, this gap increases superlinearly with model size. Overall, neither option for synchronous on-policy training is attractive.   
+3.1 OFF-POLICY RLHF   
+To optimize compute efficiency, it is crucial to separate generation and training on separate GPUs, so each may take full advantage of their optimizations. The clear solution is to use both generation and training GPUs simultaneously and asynchronously. As shown in Figure 2, this requires training on samples that were already generated by our model at a previous iteration, also known as offpolicy RL. First, we investigate how off-policy learning affects RLHF methods and then we apply our learnings to optimize compute efficiency for asynchronous RLHF.   
+Empirical Setup We experiment on the widely-used RLHF benchmark, TLDR Summarization (Stiennon et al., 2020), which provides an SFT dataset of Reddit posts with summaries (Vo¨lske et al., 2017) and a feedback dataset of paired summaries where one is rated higher by humans. We follow Gao et al. (2022); Tang et al. (2024a) to create a controlled TLDR setup where we can accurately measure improvements on preferences as well as reward model overoptimization. We relabel the feedback dataset using a well-trained 6.7B “gold” reward model from Huang et al. (2024) so that it acts as a ground truth labeller for our task. Following Huang et al. (2024), we finetune Pythia $410\mathrm{m}$ (Biderman et al., 2023) on the SFT dataset to produce SFT policies and, from the SFT checkpoint, train a reward model on the relabelled dataset. Finally, we train an RLHF policy from the SFT checkpoint using the fixed reward model. We run all methods with a mini-batch size of 512 for 256 steps, so approximately 130,000 samples or “episodes” are seen over the course of training. Evaluation At inference time, we evaluate success by the win rate, according to our gold model, of generated summaries over the human-written summaries in the SFT dataset. To evaluate alignment tax, we measure how far our RLHF policy has drifted from its SFT initialization using an approximation of the Kullback-Lieber divergance (KL), we measure the SFT model’s perplexity on the RLHF policy’s summaries.   
+3.2 OFF-POLICY WIN-RATE AND KL   
+To evaluate robustness to off-policy data, we modify the on-policy RLHF setup to incorporate varying levels of off-policyness. Whereas the on-policy setup generates one mini-batch, labels with reward model, and updates, we propose to generate $N$ mini-batches. Each iteration therefore consists of $N$ mini-batch updates. The first update is fully on-policy as the model has not changed from generation time. But after each mini-batch update and gradient step, the model moves further away from the policy that generated the data. By increasing $N$ , we can increase the level of off-policyness of the updates. This setting can correspond to iterative RLHF approaches that generate and label batches of data, e.g. LLaMA 3.1 (Llama Team, 2024).   
+First, we show the performance of the standard online baseline, PPO, as learning becomes more offpolicy. We vary $N$ from 1 (on-policy) to 64 (very off-policy) and plot the gold win-rate and KL over  
+
+![](images/d419fd90eb1d1b2f78affac9b434773aab7bead4a4348ea0d34c96738fc64aad.jpg)  
+
+216   
+217   
+218   
+219   
+220   
+221   
+222   
+223   
+224   
+225   
+226   
+227   
+228   
+229   
+230   
+231   
+232   
+233   
+234   
+235   
+236   
+237   
+238   
+239   
+240   
+241   
+242   
+243   
+244   
+245   
+246   
+247   
+248   
+249   
+250   
+251   
+252   
+253   
+254   
+255   
+256   
+257   
+258   
+259   
+260   
+261   
+262   
+263   
+264   
+265   
+266   
+267   
+268   
+269  
+
+Figure 4: Robustness of RLHF Losses to Off-Policyness. Online DPO is more robust to offpolicyness than PPO, RLOO (Left) or Best-of-2 SFT (Right). Performance is shown across levels of off-policyness as mediated by number of mini-batches $N\ \in\ \{1,2,4,8,16\}$ . With higher $N$ increasing off-policyness, Online DPO retains much more performance than other methods, as evidenced by off-policy points still being clustered close to optimal performance.  
+
+training in Figure 3 (left and middle). We corroborate prior work (Tang et al., 2024a; Tajwar et al., 2024) and find that very off-policy data (and therefore offline data) is worse than on-policy. We extend those results and also find that on-policyness is proportional to learning success for RLHF, with a logarithmic dropoff such that $N=1$ and $N=2$ are quite similar.  
+
+To accurately compare methods, we plot win-rate and $\mathrm{KL}$ against each other in a pareto curve (Noukhovitch et al., 2023) in Figure 3 (right). We find all values of $N$ conform to the same general curve. For PPO, off-policyness did not change the pareto frontier, the fundamental tradeoff of winrate vs KL of our method. However, off-policyness seems to slow down how training progresses along the frontier. This is in line with previous results from deep RL where data staleness reduces training speed (OpenAI et al., 2019).  
+
+3.3 ROBUSTNESS OF RLHF LOSSES TO OFF-POLICYNESS  
+
+Next, we investigate which RLHF loss is most robust to off-policyness, potentially allowing more asynchronous training. We compare current popular methods, namely PPO, $\mathrm{RL}\dot{\mathrm{OO}}^{2}$ , and Online DPO across a range of off-policyness $(N=1,2,4,8,16)$ ) in Figure 4 (left). Although PPO is best at on-policy RL $[N=1]$ ), its performance is greatly reduced when moving to off-policy learning, as is RLOO’s. Online DPO is clearly the most robust to off-policyness. It is able to achieve a higher win-rate at lower KL for slightly off-policy learning $N=4$ ) and is the only method to achieve any reasonably amount of learning in highly off-policy scenarios $N=64$ ).  
+
+![](images/051e3bdcbdefcd7415f7fdd7042b0d3cf63339f2e7924e344553bb6a17eba23a.jpg)  
+Figure 5: Scaling Model Size with Off-Policy RLHF. Plotting the final win-rate vs KL for $N=$ $1\rightarrow64$ mini-batches, covering a spectrum of on-policy to off-policy RL. Scaling policy size (left) improves off-policy robustness as seen by tighter clustering of points. But scaling reward model size (right) does not, even though it reduces overoptimization, achieving reward with smaller KL.  
+
+Both PPO and RLOO only sample 1 completion per prompt whereas Online DPO samples 2. To disentangle this effect, we also run a simple Best-of-2 baseline (Gao et al., 2022) that samples 2 completions and does supervised finetuning on the completion with the higher reward. We find that Best-of-2 also does not retain performance (Figure 4, right), implying that Online DPO’s robustness may be due to the contrastive nature of the loss.  
+
+3.4 SCALING MODEL SIZE WITH OFF-POLICY RLHF  
+
+We scale our setup to Pythia model sizes $410\mathrm{m}$ , 1b, and $2.8\mathfrak{b}$ to investigate how scaling affect offpolicy RLHF with Online DPO. For clarity, we now plot the off-policy pareto curve by taking the final win-rate and KL at each of $N\,\in\,\{1,2,4,8,16,32,64\}$ . We compare separately scaling the policy and the reward model.  
+
+Scaling Policy. First, we scale the policy size with a $410\mathrm{m}$ , 1B and 2.8B model while keeping a $410\mathrm{m}$ reward model and show results in Figure 5 (left). As policy size increases, more points on the off-policy pareto frontier are clustered towards the best-performing point. For example, $410\mathrm{m}$ has two points $\langle N=16,32\rangle$ ) far from the optimal area and a wide spread, whereas $2.8\mathfrak{b}$ ’s worst point $\lvert N=64\rangle$ ) is still quite close to optimal. This means scaling policy size increases robustness: more off-policy runs can approach the best possible win-rate and KL tradeoff.  
+
+Scaling Reward Model. Next, we scale the reward model across $410\mathrm{m}$ , 1b, and $2.8\mathfrak{b}$ while keeping a $410\mathrm{m}$ policy and show results in Figure 5 (right). Following Gao et al. (2022), increasing reward model size allows achieving the same win-rate at a lower KL, reducing overoptimization. Though points are clustering in terms of KL, they are not clustering in terms of gold win-rate. More offpolicy points do not achieve relatively better performance, as evidenced by the $410\mathrm{m}$ reward model achieving the highest win-rate for the most off-policy point ( $N=64$ ). Therefore, we observe that it is only policy scale, not reward model scale, that increases robustness to off-policy learning.  
+
+3.5 SCALING ASYNCHRONOUS OFF-POLICY RLHF  
+
+We apply our learnings to an actual asynchronous RLHF setup. Our results suggest we should aim to be as on-policy as possible so we adapt the simplest, most on-policy asynchronous RL framework, Cleanba (Huang et al., 2023). At time step $t$ , we generate completions for prompts with our current model, $y_{t}~\gets~\theta_{t}(x)$ , and train on completions generated by our model one timestep back, maxθ $r(x,y_{t-1})+\beta\mathrm{KL}$ , as shown in Figure 2. We run both methods on 4 A100 GPUs. For synchronous RLHF, we use all 4 GPUs for both generation and training with Hugging Face transformers. For asynchronous RLHF, we reserve one GPU for generation using the vllm library, and more updates per batch increases the win-rate achieved at any given episode, making training more data efficient. Right: Across scales, more updates change the pareto frontier and cause models to achieve the same win-rate at a higher KL.  
+
+![](images/769dea8b8cac5bc9c3414c2003e57dc2bf7c28cf948df1ddbcc2ed9ad86a7d9d.jpg)  
+
+the rest for Online DPO training using Hugging Face transformers. We train the same three scales of model $410\mathrm{m}$ , 1B, and 2.8B and set the policy and reward size to be the same.  
+
+Across scales, we find that our one-step off-policy, asynchronous RLHF matches the final win-rate vs KL performance of fully on-policy, synchronous RLHF. In terms of compute, we plot the final gold win-rate against the clock time necessary to reach it in Figure 1. Our method is more efficient at every model size and due to vllm, improvements scale such that at 2.8B, our run is $25\%$ faster.  
+
+
+
+\section{4 OPTIMIZING ASYNCHRONOUS RLHF  }
+
+
+Although we have found a significant speedup, the naive asynchronous method is under-utilizing compute. Our model of asynchronous learning requires training and generation to take approximately similar amounts of time, which is not always a reasonable assumption. If the speed of training or generation is mismatched, some of our GPU time will be spent idling, as shown in Figure 6. We propose a solution to take advantage of idling time in each scenario.  
+
+4.1 GENERATION-BOUND RLHF  
+
+Generation and obtaining reward signal can be fundamentally slower than inference. In the classic RLHF setup, generation is autoregressive and scales linearly with the length of the response to generate, whereas reward model inference can be constant. Recent work shows that reward may require human labelling (Llama Team, 2024), output chain-of-thought reasoning (Zhang et al., 2024; Ankner et al., 2024), or executing external tools such as Learn verifiers (Google Deepmind, 2024). In this scenario, we have extra training compute cycles and ask the question, “is it useful to train more on existing data?”. Following previous work with PPO (Ouyang et al., 2022), we experiment with taking multiple updates on the same batch of generated data i.e. “ppo epochs” (Schulman et al., 2015). In our asynchronous TLDR setup, we generate $N=1$ mini-batches and perform $T=1,2,3$ updates per mini-batch.  
+
+![](images/761a58b18ccf6044688308bbda59a5560c6737fb301174ee363bdc143b707dc3.jpg)  
+Figure 8: Optimizing Training-Bound RLHF. We can leverage extra generation GPU cycles to sample $K$ completions per prompt instead of 2. Left: Sampling $K=4$ improves the gradient such that we can train for half the number of steps and, across scales, achieve the same final win-rate at a fraction of the compute time. Right: The trade-off is that increasing $K$ causes models to drift more in terms of KL in order to achieve the same win-rate.  
+
+We plot results across different scales in Figure 7 (left). At $410\mathrm{m}$ and 1B scales, models achieve a higher win-rate for the same number of generated samples, showing that multiple updates make training more sample efficient. This means that extra training time can be used to increase winrate. But measuring the final points on the pareto frontier in Figure 7 (right), we find that increasing updates per mini-batch also increases drift in terms of KL. Therefore, in generation-bound scenarios, multiple updates may increase the win-rate with the same compute-time but incurs higher KL.  
+
+
+
+\section{4.2 TRAINING-BOUND RLHF  }
+
+
+The other option is if training is slower than generation. In our 2.8B experiments above, training on 3 GPUs takes twice the time of generating on 1 GPU, so our generation GPU is idling for half the time. We believe that we can sample more continuations to improve Online DPO training. Inspired by the findings of Pace et al. (2024) for reward model training, we propose to generate $K$ samples instead of 2 at each timestep and apply the DPO objective on only on the highest and lowest rewarded completions. In this way, our generation and reward model inference takes $K/2$ times longer while our training remains the same. For TLDR, we experiment with $K=4$ and find the margin of reward between our highest and lowest samples is approximately $2\times$ larger than our standard $K=2$ setup. We believe this can provide a more clear gradient for our training and, indeed, find that training proceeds much faster. We therefore reduce the learning rate $2\times$ and also train for half the number of steps.  
+
+We plot the win-rate against compute time across our three scales in Figure 8 (left). We find that we can achieve the same gold win-rate in just over half the time. As we were training-bound, increasing the number of generations, while keeping training samples fixed, did not significantly increase our per-step training time. And $K=4$ asynchronous training allows us to reduce training steps by half, training $2.5\times$ faster than synchronous. The caveat is that achieving this win-rate comes at a cost of higher KL as shown in Figure 8 (right). Though difference in KL decreases with scale, we still find a visible difference at 2.8B. Similar to generation-bound, optimizing training-bound RLHF can improve speed but at the cost of KL.  
+
+
+
+\section{5 SCALING ASYNCHRONOUS RLHF  }
+
+
+
+
+\section{5.1 GENERAL-PURPOSE CHATBOT  }
+
+
+Finally, we verify our findings at a larger scale by training an helpful instruction-following chatbot with RLHF. First, we create and label a preference dataset. We finetune LLaMA 3.1 (Llama Team, 2024) on a dataset of 10,000 human-written demonstrations for instructions, No Robots (Rajani et al., 2023) to create our SFT checkpoint. Then, we generate another 3 demonstrations per prompt from our model, totaling 4 generations per prompt when counting the reference completion in the  
+
+![](images/b3bf3c425c4eb17ecc21d3abd24c4c1f517bbd5082e0c367b101b6d8f51ea6ce.jpg)  
+Figure 9: Asynchronous RLHF Works at Scale. Comparing synchronous and asynchronous online DPO for training an 8B general-purpose chatbot. Asynchronous learning achieves the same reward model score at a lower KL and $38\%$ faster.  
+
+dataset. We create 6 pairs (4 choose 2) of completions per prompt and use GPT-4o as a judge (Zheng et al., 2023) to create a synthetic preference dataset. We train a reward model on this dataset from the LLaMA 3.1 SFT checkpoint.   
+We train Online DPO on $8\,\mathrm{\Hl00s}$ synchronously on-policy and asynchronously off-policy for 100,000 episodes. For each sample, we generate a completion of up to 1024 tokens per prompt, an appropriate length for the task. Since our model is larger and we generate more tokens, generation using the huggingface transformers library is $>\,20\times$ slower than vllm, and infeasible. So for both sync and async, we reserve one GPU for generation with vllm and the remaining seven for training. Synchronous on-policy learning idles the generation GPU while training and vice versa, whereas asynchronous trains off-policy as previously.   
+We plot the reward and KL over training in Figure 9 and find that async achieves the same reward as sync while being $38\%$ faster. Asynchronous learning also drifts less in terms of KL, potentially highlighting benefits to slightly off-policy data. We run a final evaluation of our models’ abilities by generating completions for the prompts in the No Robots test set. Using GPT-4o as a judge (Zheng et al., 2023), we compare our model’s completions to the human-written responses in the dataset. Asynchronous off-policy achieves the exact same win-rate as synchronous on-policy, $57.2\%$ , up from $31.8\%$ by the SFT model. While both sync and async demonstrate improved generation skills, asynchronous RLHF is faster. Overall, we confirm that asynchronous RLHF is faster while being equally performant at large scale.  
+
+5.2 PRACTICAL CONSIDERATIONS AND FUTURE DIRECTIONS  
+
+Interestingly, our asynchronous speedup could be even faster. For the synchronous experiments, vllm generation takes 21 seconds and training takes 33 seconds. We have 233 steps of training, so it takes roughly $(21+33)$ seconds $*\;233\approx209$ minutes. In an ideal setup, we expect asynchronous RLHF to train at the speed of the slower process, training i.e. 33 seconds $*\;233\,\approx\,128$ minutes, roughly $63\%$ faster than the synchronous training time. In practice, though, we find asynchronous training to take 151 minutes: 26 seconds for generation and 39 seconds for training. We note two possible reasons for the slowdown:  
+
+1. Global interpreter lock (GIL): With Python, only one thread can execute at any given time and we run a threads for each of generation and training. This issue is mitigated when we call torch operations, which can run in parallel internally. However, GIL does occur additional blocking for our generation and learning.  
+
+2. Communication between training and generation: The generation process must pass generated completions to training and the training process must pass updated model parameters to generation. The latter can be expensive and passing policy parameters is a synchronous GPU call which can slow down training.  
+
+Although these issues are outweighed by our improvements, solving them may be important motivation for future work. For example, the latter issue can be mitigated by reducing the frequency of synchronization between generation and learning. One potential solution is generating more minibatches of data and learning more off-policy as in $\S3.2$ .  
+
+
+
+\section{6 RELATED WORK  }
+
+
+The most popular attempts at making RLHF more efficient comes in the form of recent offline methods i.e. direct preference optimization (Rafailov et al., 2023, DPO) and followups (Tang et al., 2024b; Rafailov et al., 2024). By directly optimizing a policy using the feedback dataset, their method avoids costly online generation and is much more compute-efficient. But recent works have shown that it is worse than online methods at achieving high reward (Xu et al., 2024) exactly because it eschews online generations (Tang et al., 2024a). Online and, specifically, on-policy data generated by the the model being trained is key to achieving high reward while maintain pretrained model capabilities (Tajwar et al., 2024; Tang et al., 2024b; Agarwal et al., 2023).  
+
+Our investigation therefore focuses on optimizing online RLHF methods but not exactly on-policy data. RLHF with off-policy data, generated from previous versions of our model, has been scarcely attempted as no previous methods have focused on asynchronous learning. Munos et al. (2023) provides theoretical arguments for learning from generations by an exponential moving average of the model, however, in practice, Calandriello et al. (2024) finds this to be equal or worse than learning on-policy. Though Tang et al. Their results imply that more off-policy data decreases performance for online RLHF methods. We greatly extend this direction and investigate which methods perform best off-policy as well as how off-policy learning is affected by model scale.  
+
+This work demonstrates a novel approach to efficiency for RLHF and proposes practical ways to tackle it. Complementary to our work, Mei et al. (2024); Shen et al. (2024) focus on the engineering challenges of efficient, synchronous RLHF and propose clever distributed training techniques to account for generation, reward model inference, and training. Hu et al. (2024) provide another engineering solution that leverages vllm to improve generation speed. Our proposed asynchronous RLHF may remove some of the engineering challenges of synchronous RLHF (e.g. by separating generation and learning), which can make future engineering approaches even more efficient.  
+
+
+
+\section{7 CONCLUSION  }
+
+
+This work makes a first step towards asynchronous RLHF and demonstrates the viability of asynchronous learning to be efficient while performant. We demonstrate that an off-policy regime does not have to impact performance and the possibility of further performance/speed tradeoffs. While synchronous RLHF libraries are currently well-optimized and likely outperform our setup, we believe we have proven the viability of asynchronous learning and encourage the community to investigate and optimize this new paradigm. Previously in deep RL, as environments became more complex and model sizes increased, asynchronous learning became the dominant paradigm (Mnih et al., 2016; Berner et al., 2019). In RLHF, model sizes are increasing and recent works have proposed more complex multi-turn environment setups (Shani et al., 2024; Kumar et al., 2024). As such, it seems likely that asynchronous RLHF will become a computational necessity and we believe it important to change RLHF research towards this new paradigm along with the research and engineering challenges it presents.  
+
+
+

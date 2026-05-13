@@ -1,0 +1,408 @@
+\title{Energy-Based Diffusion Language Models for Text Generation}
+
+\begin{abstract}
+    \looseness=-1
+    Despite remarkable progress in autoregressive language models, alternative generative paradigms beyond left-to-right generation are still being actively explored. Discrete diffusion models, with the capacity for parallel generation, have recently emerged as a promising alternative. Unfortunately, these models still underperform the autoregressive counterparts, with the performance gap increasing when reducing the number of sampling steps. Our analysis reveals that this degradation is a consequence of an imperfect approximation used by diffusion models. In this work, we propose Energy-based Diffusion Language Model (\method), an energy-based model operating at the full sequence level for each diffusion step, introduced to improve the underlying approximation used by diffusion models. More specifically, we introduce an EBM in a residual form, and show that its parameters can be obtained by leveraging a pretrained autoregressive model or by finetuning a bidirectional transformer via noise contrastive estimation. We also propose an efficient generation algorithm via parallel important sampling. Comprehensive experiments on language modeling benchmarks show that our model can consistently outperform state-of-the-art diffusion models by a significant margin, and approaches autoregressive models' perplexity. We further show that, without any generation performance drop, our framework offers a 1.3$\times$ sampling speedup over existing diffusion models.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+In recent years, autoregressive (AR) models have achieved remarkable advances in modern large language modeling~\citep{Vaswani2017Attention, wolf-etal-2020-transformers,Brown2020Language,chowdhery2023palm,touvron2023llama}, showing impressive results in tasks such as expert-level coding~\citep{roziere2023code} and reasoning~\citep{wei2022chain,trinh2024solving}. Despite the considerable progress achieved, the left-to-right generative paradigm exhibits several long-standing drawbacks. For example, training and sampling of autoregressive models require a fixed ordering of the sequence, constraining their generation flexibility~\citep{hoogeboom2021autoregressive,shih2022training}. Furthermore, at test time, the generation is heavily conditioned on previous generations, which leads to accumulated error \textit{a.k.a} exposure bias~\citep{bengio2015scheduled}. As a result, alternative generative paradigms beyond left-to-right generation are actively being explored.
+Discrete diffusion models (DMs) have recently emerged as a promising competitor for discrete sequence generation~\citep{austin2021structured,Dieleman2022Continuous,gat2024discrete}. Unlike AR models, discrete DMs conduct generation by progressively decoding the full sequence in parallel starting from a fully masked sequence, offering great potential in bidirectional controllable generation and sampling acceleration. Most recently, great efforts have been invested in improving their performance by extending discrete diffusions to operate in continuous time~\citep{Campbell2022ACT,campbell2024generative,sahoo2024simple,shi2024simplified}.
+Unfortunately, despite their promise, these models still underperform AR models by a large margin, resulting in limited practical usage. 
+Developing principled and powerful discrete DMs remains an open problem.
+
+In this work, we take a closer look at the existing discrete diffusion models and reveal a vital mismatch issue between the training and sampling distribution in its current form. Specifically, the existing discrete diffusion models aim to predict all missing tokens in parallel at each intermediate diffusion step, but the denoising joint distribution is simply parameterized as a product of token-wise independent distributions. As a result, intermediate denoising steps ignore sequence-level correlations, which results in serious accumulated decoding errors and prevents users from efficient parallel decoding with fewer timesteps. To this end, in this paper, we propose Energy-based Diffusion Language Model (\method), an unnormalized energy-based model (EBM) that learns to jointly denoise the full sequence at each diffusion step. Our key innovation is to learn an EBM for each denoising distribution $p(\rvx_{t-1}|\rvx_t)$, where the energy directly operates on the sequence level and captures the correlation between tokens. The fundamental challenge of our framework is to develop efficient training and sampling methods for the unnormalized model. To overcome these challenges, we design the EBM in a novel residual form
+\begin{equation}
+    p_\textnormal{\method} (\rvx_{t-1}|\rvx_t) = p_\textnormal{diffusion}(\rvx_{t-1}|\rvx_t) \exp (-E(\rvx_{t-1},\rvx_t)),
+\end{equation}
+applied over pretrained diffusion models $p_\textnormal{diffusion}$. Such formulation enjoys several distinct advantages. First, we analytically show that the EBM parameters can be easily obtained by leveraging pretrained autoregressive models or finetuning from bidirectional transformers via noise contrastive estimation, bypassing expensive maximum likelihood training. Furthermore, the framework corrects the decoding error and enables fast generation by conducting efficient important sampling in parallel over samples from the diffusion proposal distribution. Importantly, we highlight that, when leveraging pretraiend AR as the energy function, our approach can be interpreted as parallel sampling from pretrained language models using diffusion models as the proposal distribution.
+
+\method can be viewed as a new family of discrete generative models that marries energy-based and diffusion-based models. The novel combination addresses the training and sampling distribution mismatch problem, enjoys better generation quality with less accumulated error, and improves sampling efficiency by reducing the number of sampling steps. We further provide a formal estimator to calculate the perplexity of \method, allowing our model to be compared against other models in a standard way. We conduct comprehensive experiments on two common language modeling benchmarks to evaluate the performance of our proposed method. Results show that on the perplexity metric, \method can consistently achieve state-of-the-art performance among diffusion-based counterparts, and approaches or matches AR models. On the generation quality metric, compared over the most competitive diffusion baseline, \method shows up to $49\%$ generative perplexity gain with the same number of sampling timesteps, and can achieve up to 1.3$\times$ sampling speedup when keeping the same sampling performance.
+
+
+
+\section{Related Work}
+
+
+Diffusion models are powerful models with surprising results in generating high-quality images~\citep{SohlDickstein2015Deep,Song2019Generative,Ho2020Denoising,Dhariwal2021Diffusion}. These models were originally designed for continuous data, with both forward and backward reverse processes parameterized as Gaussian Markov chains. In recent years, several methods have been developed to extend the diffusion framework to generate discrete data~\citep{austin2021structured,hoogeboom2021autoregressive}, with \citet{Campbell2022ACT,zhao2024improving} further extending the framework to model discrete data in continuous time. Most recently, several concurrent works~\citep{lou2024discrete,sahoo2024simple,shi2024simplified} archived impressive progress in large-scale language modeling by scaling the model and simplifying the training and sampling processes. Additionally, \cite{campbell2024generative,gat2024discrete} developed flow matching methods for discrete data, which rely on a formulation similar to that of diffusion models. Despite the considerable progress in the area, we observe that all these approaches are subject to the training and sampling distribution mismatch issue, where the learned joint denoising distribution is simplified as independent distributions for each token. This problem results in a significant accumulated decoding error during the parallel sampling process and prevents users from conducting fast sampling with a small number of denoising timesteps. Notably, \cite{lezama2023discrete} notices a similar issue (focusing on diffusion models in the image generation domain) and proposes to learn a corrector network to correct the independent decoding error. However, this work concentrates on the image generation domain, and the correction process needs to be run sequentially, which takes additional inference time. In contrast, we propose an energy-based denoising process that directly captures the correlation at each denoising step and enables efficient parallel decoding via an importance sampling scheme. 
+
+
+
+\section{Discrete Diffusion Models}
+
+\label{sec:background}
+\textbf{General Discrete Diffusion}. Assume our data $\rvx$ lives in a finite discrete space of size $m-1$. In this paper, we augment the categorical space with an additional mask state with index $m$. In a general discrete diffusion framework~\citep{austin2021structured}, the diffusion process is defined as a Markov chain $q(\rvx_t | \rvx_{t-1}) = \text{Cat}( \rvx_t ; Q_t \rvx_{t-1})$, which repeatedly multiplies $\rvx$ with matrices $Q_t$ over $T$ discrete time steps.
+Given these transitions, the marginal distributions at each timestep can be written in closed-form as $q(\rvx_t | \rvx) = \text{Cat}(\rvx_t ; \bar Q_t \rvx)  = \text{Cat}(\rvx_t ; Q_t \cdots Q_1 \rvx) $. Such forward process can also be viewed as an interpolation between a clean data sample $\rvx$ and a reference distribution $\text{Cat}(\cdot; \pi)$ induced by $\bar{Q}_T$:
+\begin{align}
+\label{eq:interpolating_forward}
+    q(\rvx_t | \rvx) = \text{Cat}(\rvx_t; \alpha_t \rvx_0 + (1 - \alpha_t) \pi),
+\end{align}
+where $\alpha_t \in [0, 1]$ is a strictly decreasing function \textit{w.r.t} $t$, with $\alpha_{0} \approx 1$ and $\alpha_{1} \approx 0$. 
+
+In the continuous time limit, for two arbitrary times $0 \leq s \leq t \leq 1$, the transition distributions can be written as $q(\rvx_t | \rvx_s) = \text{Cat}(\rvx_t ; \alpha_{t|s} \rvx_s + (1 - \alpha_{t|s}) \pi)$, where $\alpha_{t|s} = \alpha_t/\alpha_s$~\citep{zhao2024improving,shi2024simplified}. This implies that during each diffusion step $s \to t$ the token will jump to a sample from the prior distribution $\pi$ with a probability of $(1 - \alpha_{t|s})$.
+The forward process allows us to compute many distributions in closed form. One particular distribution of interest is the reversal of the forward process given $\rvx_0$, that is, the posterior distribution given by
+\begin{align}
+\label{eq:true_posterior_unsimplified}
+    q(\rvx_s | \rvx_t, \rvx_0) =
+        \text{Cat} \left(\rvx_s;
+            \frac{[\alpha_{t|s} \rvx_t + (1 - \alpha_{t|s})\vone \pi^\top \rvx_t]  \odot [\alpha_s \rvx_0 + (1 - \alpha_s) \pi ]}{
+             \alpha_t \rvx_t^\top \rvx_0  + (1 - \alpha_t)\rvx_t^\top\pi} \right).
+\end{align}
+
+\textbf{Masked Diffusion}. In this paper, we focus on masked (\textit{i.e.}, absorbing state) diffusion models, where the target distribution is set as $\pi = \rvm$. At each diffusion step $t$ each token transitions to the `masked' state $\rvm$ with some probability. Under such masking framework, the forward marginals (\cref{eq:interpolating_forward}) are given by
+$q(\rvx_t| \rvx_0) = \alpha_t \rvx_0 + (1 - \alpha_t) \rvm$, and the posterior (\cref{eq:true_posterior_unsimplified}) can be simplified as
+\begin{align}
+\label{eq:true_posterior}
+    q(\rvx_s | \rvx_t, \rvx_0) =
+    \begin{cases}
+        \text{Cat} (\rvx_s; \rvx_t) & \rvx_t \neq \rvm, \\
+        \text{Cat} \left( \rvx_s; \frac{
+        (1 - \alpha_s)\rvm + (\alpha_s - \alpha_t)\rvx_0}{1 - \alpha_t}\right) & \rvx_t=\rvm. 
+    \end{cases}
+\end{align}
+Diffusion models aim to learn a backward model $p_\theta(x_s|x_t)$ to approximate the reversal of the forward process. 
+Leveraging \Cref{eq:true_posterior} we can parameterize the model $p_\theta(\rvx_s | \rvx_t)$
+as
+\begin{align}
+\label{eq:approx_posterior}
+    p_\theta (\rvx_s | \rvx_t) =
+    q(\rvx_s | \rvx_t, \rvx_0 = \vmu_\theta(\rvx_t, t)) =
+    \begin{cases}
+        \text{Cat} (\rvx_s; \rvx_t), & \rvx_t \neq \rvm, \\
+        \text{Cat} \left( \rvx_s; \frac{
+        (1 - \alpha_s)\rvm + (\alpha_s - \alpha_t) \vmu_\theta(\rvx_t, t)}{1 - \alpha_t}\right), & \rvx_t=\rvm,
+    \end{cases}
+\end{align}
+where $\vmu_\theta=p_\theta(\rvx_0|\rvx_t)$ is known as $\rvx_0$ predictor, since it predicts the mean of the distribution over $\rvx_0$ given $\rvx_t$. However, as explained next, the practical implementation of this $\rvx_0$ predictor results in a mismatch between training and sampling distributions.
+
+\textbf{Problem Statement}. Existing discrete DMs learn a denoising distribution $\vmu_\theta=p_\theta(\rvx_0|\rvx_t)$ to match the true reversal $q(\rvx_0|\rvx_t)$.
+Let $\rvx$ denote the tokens of a full sequence in this section.
+In practice, the model is parameterized as a factorized denoising model:
+\begin{equation}
+\label{eq:independent-denoising}
+    {p}_\theta(\rvx_0|\rvx_t) = \Pi_i {p}_\theta(\rvx_0^i|\rvx_t)= \Pi_i \vmu_\theta^i(\rvx_t,t), \text{ where }  \vmu_\theta(\rvx_t, t) = \begin{cases} 
+    \operatorname{softmax}(f_\theta(\rvx_t, t)) & \rvx_t = \rvm, \\
+    \rvx_t & \rvx_t \neq \rvm,
+    \end{cases}
+\end{equation}
+and the predictor $\vmu_\theta$ predicts each token in $\rvx_0$ independently. 
+This factorization enables us to conduct an efficient denoising step $p_\theta(\rvx_{s}|\rvx_t)$ by first sampling all $\rvx_{0|t}$ tokens from $p_\theta(\rvx_0|\rvx_t)$ in parallel and then masking certain tokens according to the forward $q(\rvx_{s}|\rvx_t, \rvx_{0|t})$.
+However, this parameterization ignores dependencies between tokens in the sequence, a fundamental limitation which implies that  ${p}_\theta(\rvx_0|\rvx_t)$ can never match the exact backward $q(\rvx_0|\rvx_t)$. As a result, this parallel sampling introduces accumulated errors, as the factorized denoising step ${p}_\theta$ does not match the original generative model $p_\theta$ for the joint distribution of the elements of $\rvx_0$.
+
+
+
+\section{Method}
+
+
+In this section, we formally introduce Energy-based Diffusion Language Model (\method). Our work aims to design a new family of energy-based discrete generative models that address the fundamental mismatch problem between ${p}_\theta(\rvx_0|\rvx_t)$ and $q(\rvx_0|\rvx_t)$ in existing models. We first describe the general EBM formulation in \Cref{subsec:method-framework}, and then elaborate on how to obtain the energy function by either leveraging pretrained AR models or finetuning via noise contrastive estimation in \Cref{subsec:method-ebm}. Then we discuss how to estimate the likelihood (perplexity) of \method in \Cref{subsec:method-eval}, and finally introduce the efficient parallel sampling algorithm in \Cref{subsec:method-sampling}
+
+\subsection{Residual Energy-based Models}
+\label{subsec:method-framework}
+
+Discrete DMs can be viewed as learning a conditional $\rvx_0$ predictor for each denoising step $t$. For example, original discrete DMs learn $\vmu(\rvx_t,t)$ to directly predict independent distributions for each token in $\rvx_0$. 
+In our framework, given diffused data $\rvx_t$ at timestep $t$, we introduce the generative denoising kernel as an unnormalized density:
+\begin{equation}
+\begin{aligned}
+\label{eq:residual-ebm}
+    p_{\theta,\phi} (\rvx_0|\rvx_t) = 
+    {\vmu}_{\theta} (\rvx_0|\rvx_t) \frac{\exp(-\mE_\phi(\rvx_0, \rvx_t, t))}{Z_\phi(\rvx_t)}
+\end{aligned}
+\end{equation}
+where $\vmu_{\theta}$ is the pretrained diffusion model, $\mE_\phi$ is the energy introduced to capture the correlation in the $\rvx_0$ sequence, and $Z_\phi(\rvx_t)$ is a normalizing factor known as the partition function. 
+In the following text, we use $p_{\theta,\phi}$ to denote the joint model, $\mE_\phi$ the (residual) energy function, and keep the pretrained $\vmu_{\theta}$ fixed.
+Computing the partition function is intractable since it requires summing over the whole $\rvx$ space, which is exponential in the sequence length. In our language modeling experiments, the vocabulary size is around $50$k and the generation length is $1024$ tokens, resulting in a space of size around $50,000^{1024}$.
+We aim to design solutions to efficiently train the parameters of the energy function so that the joint model distribution gets close to the true reversal $q(\rvx_0|\rvx_t)$, while avoiding computing the partition function.
+
+\subsection{Implementation of Energy Function}
+\label{subsec:method-ebm}
+
+Training energy-based models with the intractable partition function is a long-standing challenge in machine learning~\citep{hinton2002training,carreira2005contrastive,lecun2006tutorial}. Typical maximum likelihood estimation training requires approximation of the participation function using Markov chain Monte Carlo (MCMC) sampling, which is computationally infeasible for high-dimensional data. 
+We aim to find efficient ways to train the energy function's parameters for the $\rvx_0$ predictor $p_{\theta,\phi} (\rvx_0|\rvx_t)$.
+In the following, we describe two methods to do this. One involves taking pretrained autoregressive language models as energy functions without any training, and efficiently running sampling by taking all tokens as inputs in parallel. The second solution involves fine-tuning the pretrained diffusion model via noise contrastive estimation, where the model is parameterized with bidirectional transformers and potentially captures richer correlations.
+
+\subsubsection{Leverage Pre-trained Autoregressive Models}
+\label{subsubsec:method-ebm-ar}
+Let $p_\textnormal{AR}(\rvx_0)$ be an autoregressive model trained over clean samples $\rvx_0$, \textit{i.e.}, $p_\textnormal{AR}(\rvx_0) = \Pi_i p_\textnormal{AR}(\rvx^i_0|\rvx^{<i}_0)$. Since AR models are only defined over clean samples $\rvx_0$, it is not directly clear how to leverage them in denoising tasks, since the models are never trained on diffused data $\rvx_t$. Our key insight is that, in absorbing discrete diffusion, the diffused $\rvx_t$ is the same as $\rvx_0$ with certain tokens masked according to the forward process. More specifically, letting $\bar{\rvx}_0 = \rvx_0[\rvx_{t} \neq \rvm]$ and $\rvx_0 / \bar{\rvx}_0$ denote the set of $\rvx_0$ tokens corresponding to unmasked and masked components in $\rvx_t$, we observe that we can induce the denoising transitions using
+\begin{equation}
+\label{eq:ar-posterior}
+    p_\textnormal{AR}(\rvx_0 \,\vert\, \rvx_t) = p_\textnormal{AR}(\rvx_0 \,\vert\, \bar{\rvx}_0) = \frac{p_\textnormal{AR}(\rvx_0 / \bar{\rvx}_0, \bar{\rvx}_0)}{p_\textnormal{AR}(\bar{\rvx}_0)} = \frac{p_\textnormal{AR}(\rvx_0)}{p_\textnormal{AR}(\bar{\rvx}_0)},
+\end{equation}
+where the normalizing constant is given by $p_\textnormal{AR}(\bar{\rvx}_0) = \sum_{\rvx_0 / \bar{\rvx}_0} p_\textnormal{AR}(\rvx_0 / \bar{\rvx}_0, \bar{\rvx}_0)$. This partition function also involves a sum over the $\rvx_0$ space and is intractable to compute. However, noting that in the reversal of masked diffusion (\Cref{eq:approx_posterior}) unmasked tokens $\bar{\rvx}_0$ are fixed, we have that $p_\textnormal{AR}(\rvx_0 \,\vert\, \rvx_t) \propto p_\textnormal{AR}(\rvx_0)$,\footnote{This property does not require the autoregressive structure of $p_\textnormal{AR}$, but only relies on the fact that during the diffusion reversal process unmasked tokens do not change.} which can be computed efficienctly.
+
+Unlike the original diffusion models (\Cref{eq:independent-denoising}) that decode each token independently, AR models factorize the sequence distribution and take into account dependencies between tokens. Therefore, it is reasonable to assume AR models can provide a better approximation of the diffusion posterior than the factorized approximation used by diffusoin models, \textit{i.e.}, $p_\textnormal{AR}(\rvx_0 \,\vert\, \rvx_t) \approx q(\rvx_0\,\vert\,\rvx_t)$. The key challenge is that \textit{sampling} the autoregressive model $p_\textnormal{AR}(\rvx_0 \,\vert\, \rvx_t)$ at each denoising step is computationally expensive. However, it is efficient to \textit{evaluate} $p_\textnormal{AR}(\rvx_0)$, which is proportional to the posterior $p_\textnormal{AR}(\rvx_0 \,\vert\, \rvx_t)$, and thus can be used in our residual energy-based formulation.
+
+Recall that our residual energy model (\cref{eq:residual-ebm}) uses $p_\theta(\rvx_0\,\vert\,\rvx_t) \frac{\exp{(-\mE_\phi(\rvx_0, \rvx_t))}}{Z_\phi(\rvx_t)}$ to approximate $q(\rvx_0\,\vert\,\rvx_t)$. By taking $p_\textnormal{AR}(\rvx_0 \,\vert\, \rvx_t)$ as the proxy of $q(\rvx_0\,\vert\,\rvx_t)$, we approximate the optimal residual energy as 
+\begin{equation}
+\begin{aligned}
+    \mE_\phi(\rvx_0, \rvx_t)& = - \log{q(\rvx_0}|\rvx_t) + \log{p_\theta (\rvx_0 \,\vert\, \rvx_t)} -\log Z \\
+    & \approx - \log{p_\textnormal{AR}(\rvx_0|\rvx_t}) + \log{p_\theta (\rvx_0 \,\vert\, \rvx_t)} -\log Z & q(\rvx_0\,\vert\,\rvx_t) \approx p_\textnormal{AR}(\rvx_0|\rvx_t) \\
+    & = - \log{p_\textnormal{AR}(\rvx_0}) + \log{p_\theta (\rvx_0 \,\vert\, \rvx_t)} + \underbrace{\log p_\textnormal{AR}(\bar{\rvx}_0)-\log Z}_{\text{New Partition Function}} & \text{See \Cref{eq:ar-posterior}.}
+\end{aligned}
+\end{equation} 
+For common EBM model inference, such as MCMC, we only require energies up to a constant. Therefore, as shown in the equation above, with a pretrained AR model we can simply define the energy function as $- \log{p_\textnormal{AR}(\rvx_0}) + \log{p_\theta (\rvx_0 \,\vert\, \rvx_t)}$. The fact that AR language models can evaluate likelihoods in parallel enables the development of efficient sampling algorithms. We leverage this fact to develop a sampling method based on self-normalized importance sampling using $p_\theta(\rvx_0\,\vert\,\rvx_t)$ as the proposal distribution (see \Cref{subsec:method-sampling}). Importantly, we highlight that this energy formulation translates to sampling from the AR language model as the target distribution using the denoising distribution as the proposal distribution, providing a novel way to conduct parallel sampling from pretrained AR language models via importance sampling.
+\textbf{Carry-Over (CO) Parameterization}. Note that in diffusion reversal (\cref{eq:true_posterior}), unmasked tokens are always directly carried over from $\rvx_t$ to $\rvx_0$, \textit{i.e.}, $q(\rvx_0|\rvx_t) = \text{Cat} (\cdot ; \rvx_t)$ for $\rvx_t \neq \rvm$. Recent progress in discrete diffusion models show that directly parameterizing this property into denoising model may improve the generation performance. In practice this is implemented by substituting the output of the $\vmu_\theta$ network to simply copy the unmasked tokens of $\rvx_t$. Similarly, in our AR EBM model, we can also carry over the unmasked tokens in each denoising step, by directly setting $p_\textnormal{AR}(\rvx_0^i|\rvx_0^{<i})=\rvx_t^i$ for $\rvx_t \neq \rvm$. This ``carry-over autoregressive" (coAR) EBM implementation allows simply computing $p_\textnormal{coAR}(\rvx_0 \,\vert\, \rvx_t) = \frac{p_\textnormal{coAR}(\rvx_0)}{p_\textnormal{coAR}(\bar{\rvx}_0)}$ by just $p_\textnormal{coAR}(\rvx_0)$, as we always carry over those tokens from $\rvx_t$ and therefore $p_\textnormal{coAR}(\bar{\rvx}_0) = 1$. Such practice enables us to evaluate the exact denoising likelihood without estimating the partition function. We will introduce how to calculate the data likelihood based on denoising distribution in \Cref{subsec:method-eval}.
+\subsubsection{Training with Noise Contrastive Estimation}
+\label{subsubsec:method-ebm-nce}
+
+We can also train the parameters of the residual energy function using Noise Contrastive Estimation (NCE)~\citep{gutmann2010noise}, specifically its conditional version~\citep{ma2018noise}. First, NCE training relies on contrastive samples from the data distribution and a noise distribution, where the noise distribution needs to be close to the data distribution. Second, it involves computing the likelihoods of these samples by model distribution and noise distribution. In our approach, given a pair of clean data ${\rvx}_0$ and diffused data $\rvx_t$, we set true posterior $q(\hat{\rvx}_0|\rvx_t, {\rvx}_0)$\footnote{In this subsection, we use notation $\hat{\rvx}_0$ instead ${\rvx}_0$ to distinguish the generated data and clean data $\rvx_0$.} as positive distribution and the denoising distribution $p_\theta(\hat{\rvx}_0|\rvx_t)$ as the negative distribution. Thanks to the residual energy formulation from \cref{eq:residual-ebm}, the log-odds reduce to $\log p_{\theta,\phi} - \log p_\theta = - \mE_\phi$, and the objective is simplified into the binary classification objective
+\begin{equation}
+\begin{aligned}
+    \gL_\text{NCE} & (\phi; \theta) = - \mathbb{E}_{{\rvx}_0 \sim p_\text{data},\rvx_t \sim q(\rvx_t|{\rvx}_0)} \Big[ \\
+    &\mathbb{E}_{\rvx_+ \sim q(\hat{\rvx}_0|\rvx_t, {\rvx}_0)} \log \frac{1}{1+\exp(\mE_\phi(\rvx_+, \rvx_t, t))}  +  \mathbb{E}_{\rvx_- \sim {p}_\theta(\hat{\rvx}_0|\rvx_t)} \log \frac{1}{1+\exp(-\mE_\phi(\rvx_-, \rvx_t, t))} \Big], \label{eq:nce}
+\end{aligned}
+\end{equation}
+where $\rvx_+$ is positive data from the true posterior and $\rvx_-$ is negative data from diffusion model, given the diffused sequence $\rvx_t$. Here, the true posterior $q(\hat{\rvx}_0|\rvx_t, {\rvx}_0) := {\rvx}_0$ is defined as simply recovering the true data. Training the energy function can be viewed as training a conditional classifier to discriminate the real text and text generated by the denoiser used by the diffusion model. Intuitively, the training objective attempts to capture the correlation in $\rvx_0$ generations, assigning negative energy to real data and positive energy to data produced by the denoiser network. As a result, the joint model $p_{\theta,\phi}$ acts as a corrected denoising distribution able to take into account correlations between tokens. A detailed pseudo code for the NCE training process is provided in \Cref{alg:nce}.
+
+\subsection{Evaluation with Rao-Blackwellized Likelihood Bounds}
+\label{subsec:method-eval}
+
+A common protocol for evaluating discrete generative models on language modeling is perplexity (PPL), which relies on computing log-likelihoods for a hold-out test dataset. In this section, we explain how to estimate the log-likelihood with \method.
+First, with the energy-based $x_0$ predictor $p_{\theta,\phi} (\rvx_0 | \rvx_t)$, the step denoising model $p_{\theta,\phi}(\rvx_s | \rvx_t)$ is given by
+\begin{align}
+    p_{\theta,\phi} (\rvx_s | \rvx_t) & =
+    q(\rvx_s | \rvx_t, \rvx = p_{\theta,\phi}(\rvx_0| \rvx_t))  =
+    \begin{cases}
+        \text{Cat} (\rvx_s; \rvx_t), & \rvx_t \neq \rvm, \\
+        \text{Cat} \left( \rvx_s; \frac{
+        (1 - \alpha_s)\rvm + (\alpha_s - \alpha_t) p_{\theta,\phi}(\rvx_0| \rvx_t)}{1 - \alpha_t}\right), & \rvx_t=\rvm.
+    \end{cases}
+\end{align}
+For the simplified reverse process in \Cref{eq:approx_posterior}, the log-likelihood can be simply computed as a form of Rao-Blackwellization. The Rao-Blackwellized likelihood bound can be estimated by the discrete-time diffusion loss of finite $T$: $\gL_\text{diffusion} = \sum_{i=1}^T  \mathbb{E}_q[ \KL(q(\rvx_{s_i} | \rvx_{t_i}, \rvx) \| p_{\theta,\phi} (\rvx_{s_i} | \rvx_{t_i}))]$. Under \method, the loss can be written as:
+\begin{equation}
+\begin{aligned} 
+\label{eq:simplified_diffusion_loss}
+    \gL_\text{diffusion} & = \sum_{i=1}^T \mathbb{E}_q 
+    \left[\frac{\alpha_{t_i} - \alpha_{s_i}}{1 - \alpha_{t_i}} \left( \log p_\theta (\rvx_0 | \rvx_{t_i}) - \mE_\phi(\rvx_0, \rvx_{t_i}, {t_i}) - \log Z_\phi (\rvx_{t_i}) \right) \right],
+\end{aligned}
+\end{equation}
+where $p_\theta (\rvx_0 | \rvx_{t_i}) = \langle \vmu_\theta (\rvx_{t_i}), \rvx \rangle$ is a simple cross-entropy between $\vmu_\theta$ predicted logits and the clean data.
+We can extend the objective \Cref{eq:simplified_diffusion_loss} to the continuous limit by taking $T \to \infty$, which induces the following negative evidence lower bound (NELBO) $\gL_\infty$:
+\begin{align}\label{eq:dif_loss_cont_subs}
+    \gL_\infty
+    = \mathbb{E}_{q}\int_{t=0}^{t=1} \frac{\alpha_t'}{1 - \alpha_t} \left( \log p_\theta (\rvx_0 | \rvx_{t}) - \mE_\phi(\rvx_0, \rvx_t, t) - \log Z_\phi (\rvx_t) \right) \rd t.
+\end{align}
+where $\alpha_t'$ denotes the derivative of $\alpha_t$ \textit{w.r.t} $t$. Such ELBO is tighter than the discrete-time version, and is invariant to the noise schedule. However, this bound requires the partition function $\log Z_\phi (\rvx_t) = \log \sum_{\rvx_0} p_\theta(\rvx_0|\rvx_t) \exp (-\mE_\phi(\rvx_0, \rvx_t))= \log \mathbb{E}_{\rvx_0 \sim p_\theta}\exp (-\mE_\phi(\rvx_0, \rvx_t))$ and  thus is intractable to compute. We use two estimators based on the work \citep{nowozin2018debiasing,Deng2020Residual} to estimate the partition function $\log Z_\phi$.
+\begin{theorem}
+\label{theorem:partition-estimation}
+    Given diffused data $\rvx_t$ at timestep $t$, let $\log \gZ_n$ denote the empirical estimation of $\log Z_\phi(\rvx_t) = \log \mathbb{E}_{\rvx_0 \sim p_\theta} \exp(-\mE_\phi(\rvx_0,\rvx_t))$ with $n$ samples $\rvx_0^{(i)}\sim p_\theta (i=1,\cdots, n|\rvx_t)$: $\log \gZ_n = \log \frac{1}{n}\sum_{i=1}^n\exp(-\mE(\rvx_0^{(i)}, \rvx_t)) $. Then $\forall \epsilon > 0$, $\exists N>0$ such that $\forall n > N$ we have
+\begin{equation}
+\label{eq:nce-bounds}
+       \log Z_\phi -\epsilon < \mathbb{E}[\log \gZ_n] <  \log Z_\phi  < \mathbb{E}[(2n-1) \log \gZ_n - 2(n-1) \gZ_{n-1}] < \log Z_\phi +\epsilon.
+\end{equation}
+\end{theorem}
+This can be used to estimate lower and upper bounds of the partition function. We note, however, that the bounds only hold asymptotically when $n$ is sufficiently large. In practice, we follow \citet{nowozin2018debiasing} to use the leave-one-out strategy to estimate $\gZ_{n-1}$, which is proven to yield an estimator with lower variance. In addition, we want to recall that in our autoregressive energy function instance (\cref{subsubsec:method-ebm-ar}), we introduce the carry-over parameterization, where the joint energy model is self-normalized, which enables us to exactly compute the ELBO without estimating $ Z_\phi$.
+
+\subsection{Efficient Generation via Importance Sampling}
+\label{subsec:method-sampling}
+
+Sampling from \method with each denoising step operated by the joint model is non-trivial. Naive approaches relying on Gibbs sampling~\citep{gelfand2000gibbs,hinton2002training} were originally applied to binary inputs and are not scalable to large dictionaries with energy functions parameterized as large transformer models. In this paper, we resort to self-normalizing importance sampling~\citep{Owen2013Monte,hammersley2013monte}. With our joint model as the product of the diffusion model $p_\theta$ and residual energy function $\mE_\phi$, and given intermediate diffusion data $\rvx_t$ at timestep $t$, we can conduct efficient parallel sampling by: 1) sampling multiple ${\rvx_0}$ predictions $\{\rvx^i_0\}_{i=1}^k$ from the diffusion denoiser $p_\theta(\rvx_0|\rvx_t)$; 2) feeding samples into energy function in parallel to compute energies; and 3) resampling a single $\rvx_0$ from the pool $\{\rvx^i_0\}_{i=1}^k$ according to the energy values. The sampled $\rvx_0$ is then fed into the posterior formulation $q(\rvx_s|\rvx_t, \rvx_0)$ to perform one reverse step (\textit{i.e.}~one-step denoising). 
+
+\begin{wrapfigure}{R}{0.5\textwidth}
+\begin{minipage}{0.5\textwidth}
+\begin{algorithm}[H]
+    \caption{Denoising via Importance Sampling}
+    \label{alg:sampling}
+ \begin{algorithmic}[1]
+    \STATE {\bfseries Input:} discrete diffusion model $\theta$, energy-based model $\phi$, sequence of timesteps $\tau_1 > \tau_2 > \cdots > \tau_{N-1}$, number of sampling size $k$, importance sampling window $\rw$
+    \STATE ${\rvx}_{\tau_1} \gets \rvm$
+    \FOR{$n=1$ {\bfseries to} $N-1$}
+        \STATE $p_\theta(\rvx_0|{\rvx}_{\tau_n}) \gets \vmu_\theta(\hat{\rvx}_{\tau_n})$
+        \IF{$\tau_n \geq 1-\rw$}
+        \STATE $\{\rvx_0^1, \cdots, \rvx_0^k\} \sim p_\theta(\rvx_0|{\rvx}_{\tau_n})$
+        \STATE Compute energies $\rve^i = \mE_\phi(\rvx_0^i, {\rvx}_{\tau_n})$ \\
+         \quad \quad \quad \quad \quad \quad for $\rvx_0^i \sim \{\rvx_0^1, \cdots, \rvx_0^k\}$
+        \STATE Sample $\rvx_0 \sim \{\rvx_0^1, \cdots, \rvx_0^k\}$ \\
+         \quad \quad \quad with probability $\frac{\exp(-\rve^i)}{\sum_{j=1}^k \exp(-\rve^j)}$
+        \ELSE
+        \STATE Sample $\rvx_0 \sim p_\theta(\rvx_0|{\rvx}_{\tau_n})$
+        \ENDIF
+        \STATE $\rvx_{\tau_{n+1}} \sim q(\rvx_{\tau_{n+1}}|\rvx_{\tau_{n+1}},\rvx_0)$
+    \ENDFOR
+    \STATE {\bfseries Output:} $\rvx=\rvx_{\tau_{N}}$
+ \end{algorithmic}
+\end{algorithm}
+\end{minipage}
+\end{wrapfigure}
+
+\textbf{Importance Sampling Window}. While importance sampling introduces additional computation, it yields a significant reduction in the parallel decoding error. Therefore, the method allows us to conduct diffusion sampling with fewer denoising steps, reducing the overall sampling wall-clock time. To further accelerate the sampling speed, we introduce the concept of importance sampling window length $\rw \in  [0, 1]$, which sets the timestep for stopping importance sampling, \textit{i.e.}, we only conduct importance sampling in the time window $t \in [1-\rw, 1]$. Interestingly, in our experiment, we notice that the energy-based importance sampling during the early stage of denoising sampling contributes more to the generation quality improvement. We conclude that this phenomenon is due to the fact that during the early stage of sampling the diffusion model is prone to make more errors in independent $\rvx_0$ prediction, since there is little information on the full sequence. This encourages us to explore sampling with a short time window $\rw$ for higher efficiency, which we discuss in detail in \cref{subsec:exp-ablation}.
+Detailed pseudo code for the sampling procedure is provided in \Cref{alg:sampling}. In practice, we observe that a relatively small importance sampling size can already yield significant performance gain, though theoretically we would only recover exact samples from the joint model distribution asymptotically when the number of importance samples goes to infinity.
+
+
+
+
+
+\section{Experiments}
+
+
+This section presents the results achieved by our method on different language modeling tasks. We compare our \method against existing diffusion models, reporting the widely adopted metrics perplexity and generative perplexity. We provide the experimental setup in \cref{subsec:exp-setup}, describe our results in \cref{subsec:exp-results}, and provide additional ablation studies in \cref{subsec:exp-ablation}.
+
+\subsection{Experimental Setup}
+\label{subsec:exp-setup}
+\textbf{Datasets}. We use two text datasets: 1) Text8~\citep{mahoney2006large}, a relatively small-scale, character-level text modeling benchmark extracted from English Wikipedia, and 2) OpenWebText, an open-source replica of the unreleased WebText~\citep{Gokaslan2019OpenWeb} dataset used to train GPT-2.
+
+\textbf{Baselines}. We compare \method against state-of-the-art discrete diffusion models and a transformer AR model~\citep{Vaswani2017Attention}. Discrete diffusion baselines include Discrete Diffusion Model (D3PM)~\citep{austin2021structured}, Score Entropy Discrete Diffusion model (SEDD)~\citep{lou2024discrete}, Masked Diffusion Language Model (MDLM)~\citep{sahoo2024simple}. We notice other recent works such as discrete flow matching~\citep{campbell2024generative,gat2024discrete} and continuous-time masked diffusion~\citep{shi2024simplified}, but they are either not open-sourced or focus on non-language settings. Therefore, we take their concurrent work with similar formulation MDLM~\citep{sahoo2024simple} as the representative for comparison. On the small-scale Text8 benchmark, we additionally evaluate other discrete generative models including Plaid~\citep{gulrajani2024likelihood}, Bayesian Flow Network~\citep{graves2023bayesian}, Any-order Autoregressive Models ARDM \citep{hoogeboom2021autoregressive} and MAC~\citep{shih2022training}, and flow-based methods IAF/SCF~\citep{ziegler2019latent}, AR Argmax Flow~\citep{hoogeboom2021argmax}, Discrete Flow~\citep{tran2019discrete}, and Multinomial Diffusion~\citep{hoogeboom2021argmax}. Note that, these methods are not scaled up yet to the large dictionary and long sequence length, and thus we only involve them in the small-scale benchmark.
+
+\begin{wraptable}{r}{0.36\linewidth}
+\small
+    \centering
+    \caption{Bits Per Character (BPC) on Text8 test set.}
+    \label{tab:text8}
+    \resizebox{\linewidth}{!}{%
+    \begin{tabular}{lr}
+        \toprule
+        Method &  BPC ($\downarrow$) \\ 
+        \midrule
+        \textit{Autoregressive} & \\
+        Transformer AR & \textbf{1.23}\\
+        IAF/SCF  & 1.88\\
+        AR Argmax Flow & 1.39\\
+        AR Discrete Flow & \textbf{1.23}\\
+        \midrule
+        \textit{Any-order Autoregressive} \\
+        ARDM & $\le$ 1.43 \\
+        MAC & $\le$ 1.40\\
+        \midrule
+        \textit{Continuous Diffusion} & \\
+        Plaid & $\le$ 1.48 \\
+        BFN & $\le$ 1.41\\
+        \midrule
+        \textit{Discrete Diffusion} & \\
+        Mult. Diffusion & $\le$ 1.72\\
+        D3PM Uniform & $\le$ 1.61\\
+        D3PM Absorb & $\le$ 1.45\\ 
+        SEDD Absorb & $\le$ 1.41 \\ 
+        MDLM & $\le$ 1.40 \\ 
+        \rowcolor{gray!30}
+        \method (Ours) & $\le$ \textbf{1.24} \\
+        \bottomrule
+    \end{tabular}
+    }
+\end{wraptable}
+
+\textbf{Metrics}. We follow the convention~\citep{shi2024simplified} to use the common protocols Bits Per Character (BPC), Perplexity (PPL), and Generative Perplexity (Gen PPL) to evaluate generative sequence models. For a sequence of length $L$, BPC metric is given by ${- \frac{1}{L} \sum_{i=1}^L \log_2 p(\rvx_i)}$ and PPL is given by  $\exp{(- \frac{1}{L} \sum_{i=1}^L \log p(\rvx_i))}$, which can be viewed as the average number of tokens the model is uncertain of. BPC and PPL are calculated based on model likelihoods on true data from the test set. Gen PPL instead consists of likelihoods calculated by another large oracle model on data generated by the evaluated models. Intuitively, PPL and BPC similarly evaluate the likelihood modeling capacity, while Gen PPL evaluates generation quality and consistency. To compute Gen PPL we generate $2048$ samples of $1024$.
+
+\textbf{Implementation Details}. For all models including our methods and baselines, we follow the common practice of using standard 12-layer transformers similar to GPT2-small scale~\citep{radford2019language,shi2024simplified}. Our proposed \method combines two models, the diffusion model $p_\theta$ and the energy function $\mE_\phi$. For all experiments, we use pretrained MDLM~\citep{sahoo2024simple} as the diffusion model $p_\theta$. For AR-based EBM (see \cref{subsubsec:method-ebm-ar}, named \textbf{\method-AR} or \textbf{\method-coAR} when using carry-over), we directly leverage the pretrained AR model as the energy function. For NCE fine-tuned EBM (see \cref{subsubsec:method-ebm-nce}, named \textbf{\method-NCE}), we finetune the pretrained MDLM, with the energy function computed by projecting the mean-pooled last token embeddings down to a single scalar value. Note that, MDLM relies on transformers with bidirectional attention while AR only imposes casual attention. Therefore, we expect that \method-NCE can capture more sequence information than \method-AR.
+
+\subsection{Results}
+\label{subsec:exp-results}
+
+\textbf{Text8.} Following the previous common practice~\citep{austin2021structured,lou2024discrete}, we evaluated all models on short text chunks of length $256$. 
+We follow the same dataset splits and transformers model size to parameterize the denoising models. 
+Results are summarized in \Cref{tab:text8}, where we report the standard bits-per-character metric for the Text8 test set. 
+In this small-scale experiment, we did not notice significant differences between \method-AR and \method-NCE, and therefore only report one result as representative.
+As shown in the table, \method outperforms all previous diffusion models, whether in discrete or continuous diffusion formulation. We also outperform the any-order autoregressive models, which also generate sequences with flexible decoding order and therefore have a strong connection to discrete diffusion models. 
+Importantly, for the first time, our diffusion model even approaches the performance of transformer AR and AR Discrete Flow, both relying on autoregressive modeling. For this experiment, due to the limited dictionary and length size, we did not observe meaningful signals in generation quality metrics (Gen PPL). We leave detailed generation quality and diversity evaluation to the large-scale OpenWebText experiments next.
+
+\begin{table*}[!t]
+\caption{Test perplexities ($\downarrow$). Left part: results evaluated on the OpenWebText test set; Right part: zero-shot results on unseen datasets.
+All perplexities for diffusion models are upper bounds.
+}
+\label{tab:owt-ppl}
+\centering
+\begin{threeparttable}
+    \resizebox{\columnwidth}{!}{%
+    \begin{tabular}{l|c|ccccccc}
+    \toprule
+    & OpenWebText & PTB & Wikitext & LM1B & Lambada  & AG News & Pubmed & Arxiv\\
+    \midrule
+    AR & 17.56 & {82.05} &  {25.75} & {51.25} & 51.28 & {52.09} & 49.01 & 41.73\\
+    \midrule
+    SEDD & 24.56 & 100.09 & 34.28 & 68.20& 49.86 & 62.09 & 44.53 & 38.48\\
+    MLDM & 23.83 & 95.26 & 32.83 & 67.01& {47.52} & 61.15 & {41.89} & {37.37}\\
+    \rowcolor{gray!30}
+    \method-NCE (Ours) & 21.52 & 93.21 & 30.77 & 63.19 & \textbf{46.92} & 60.02 & \textbf{41.80} & \textbf{36.63} \\
+    \rowcolor{gray!30}
+    \method-AR (Ours) & 20.49 & \bf{89.67} & 29.24 & {60.80} & 49.70 & \bf{57.27} & 45.90 & 38.38 \\
+    \rowcolor{gray!30}
+    \method-coAR (Ours) & \bf{17.58} & 89.73 & \bf{28.31} & \bf{60.23} & 50.04 & 57.94 & 46.31 & 39.02  \\
+    \bottomrule
+    \end{tabular}
+    }
+    \begin{tablenotes}
+        \item[*] Results of baseline methods on unseen datasets are borrowed from \citep{sahoo2024simple}.
+    \end{tablenotes}
+\end{threeparttable}
+\end{table*}
+
+\begin{table}[!t]
+  \caption{Generative perplexities on unconditional text generation. \textsc{Llama2},  \textsc{Llama3}, and \textsc{GPT2} ($\downarrow$) correspond to Generative perplexities evaluated by different oracle models.}
+  \label{tab:owt-genppl}
+  \begin{threeparttable}
+  \resizebox{\columnwidth}{!}{%
+  \begin{tabular}{l|c|ccc|c}
+  \toprule
+    \text{Method}     
+    & \text{Timesteps}  & \textsc{Llama2}$\downarrow$ & \textsc{Llama3}$\downarrow$ & \textsc{GPT2}$\downarrow$ & \text{Entropy} \\
+    \toprule
+    Data & - & 7.0 & 9.4 & 14.7 &7.7 \\
+    \midrule
+    Autoregressive & 1024 & 22.9 & 40.3 & 35.7 & 8.1  \\
+    SUNDAE &200& 29.5&45.1&34.7&5.2\\
+    Ssd-LM &$>$10000 & 73.3 & 203.1 & 99.2 & 4.8 \\
+    \midrule
+    D3PM Absorb & 1024 & 692.3 & 754.9 & 842.3 & 7.6 \\
+    SEDD & 256 / {512} / {1024} / 2048 & 36.1 / 32.5 / 27.3 / 23.1 & 65.0 / 54.3 / 43.7 / 36.2 & 64.8 / 52.2 / 41.5 / 33.7 & {7.8} / {7.7} / {7.6} / 7.5 \\
+    MDLM & 256 / {512} / {1024} / 2048 & 37.2 / 30.6 / 27.6 / 23.9  & 66.8 / 52.6 / 44.6 / 37.6  & 66.8 / 52.4 / 42.6 / 34.9 & {7.9} / {7.8} / {7.6} / 7.5 \\
+    \rowcolor{gray!30}
+    \method-AR (Ours) & 256 / {512} / {1024} / 2048 & \textbf{34.7} / 26.8 / {19.6} / \textbf{14.6} & \textbf{62.2} / 44.4 / \textbf{28.8} / \textbf{20.8} & 62.1 / \textbf{42.0} / \textbf{25.5} / 17.9 & 7.9 / 7.6 / 7.2 / 6.9 \\
+    \rowcolor{gray!30}
+    \method-NCE (Ours) & 256 / {512} / {1024} / 2048 & 35.7 / \textbf{26.3} / \textbf{19.0} / \textbf{14.6} &  62.9 / \textbf{44.1 / 28.8 / 20.7} & \textbf{61.7} / 42.5 / \textbf{25.5} / \textbf{17.7} & 7.9 / 7.6 / 7.3 / 6.9 \\
+    \bottomrule
+  \end{tabular}}
+  \begin{tablenotes}
+      \item[*] Results of SUNDAE and Ssd-LM are borrowed from \citep{gat2024discrete}.
+  \end{tablenotes}
+  \end{threeparttable}
+\end{table}
+
+\textbf{OpenWebText}. We report the perplexity results of all models trained on the large-scale OpenWebText dataset in \Cref{tab:owt-ppl}. We evaluate the model capacity for both the OpenWebText test set and seven out-of-domain unseen datasets, used to validate the models' ability in zero-shot generalization. These unseen datasets include Our Penn Tree Bank (PTB)~\citep{marcus1993building}), Wikitext~\citep{merity2016pointer}, LM1B, Lambada~\citep{paperno2016lambada}, AG News~\citep{zhang2015character}, and Scientific Papers (Pubmed and Arxiv)~\citep{cohan2018discourse}.
+As shown in the results, we again observe that \method outperforms existing diffusion methods by a significant margin, and also approaches the AR baseline. 
+For \method-NCE and \method-AR, since the energy function is unnormalized, we use the upper bound estimator in \Cref{theorem:partition-estimation} to estimate the upper bound for negative log-likelihood, which induces the upper bounds of perplexities shown in the table. For \method-coAR, as discussed in \Cref{subsubsec:method-ebm-ar}, we overcome the estimation of the partition function when combined with carry-over and thus compute the exact ELBO for likelihoods.
+
+We also compare our method against prior non-autoregressive generative models for generation quality. All models are trained on OpenWebText, and results are presented in \Cref{tab:owt-genppl}. We additionally incorporate Step-unrolled Denoising Autoencoder (SUNDAE)~\citep{savinov2022stepunrolled} and Ssd-LM~\citep{han2022ssd} into the comparison. These two methods are also highly related diffusion methods for text generation which cannot be assessed by log-likelihood. In this experiment, we set the importance sampling window $\rw=1$, \textit{i.e.} use importance sampling at every denoising step, to evaluate the full generation ability of \method. Additionally, \method-AR shows similar results either with or without the carry-over trick, therefore we only report one method for simplicity.  As shown in \Cref{tab:owt-genppl}, our method again consistently outperforms all baselines on generative perplexity for all numbers of denoising timesteps, while keeping reasonable diversity based on the entropy metric. We highlight that our method does not hurt the entropy (diversity), since it achieves similar entropy as MDLM when keeping similar Gen PPL. For example, by comparing \method with 512 timesteps and MDLM with 1024 steps, we can see they show roughly the same Gen PPL and entropy score, but \method requires significantly fewer sampling steps to reach that level of performance.
+
+\begin{figure}[!t]
+    \centering
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/genppl_time.pdf}
+        \caption{Generative Perplexity vs. Time.}
+        \label{subfig:genppl_time}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/entropy_time.pdf}
+        \caption{Entropy vs. Time.}
+        \label{subfig:entropy_time}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.34\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figs/ablation.pdf}
+        \caption{Importance Sampling Ablation.}
+        \label{subfig:is-ablation}
+    \end{subfigure}
+    \caption{Analysis and ablation study for \method. \Cref{subfig:genppl_time,subfig:entropy_time}: we run AR baseline and diffusion-based models with $[512, 768, 1024]$ denoising steps, and plot the curve of corresponding metric vs. wall-clock time. For generative perplexity, the metric is evaluated by GPT-2, and a curve on the bottom-left indicates a better sampling quality vs time trade-off. \Cref{subfig:is-ablation}: ablation study of \method under different importance sampling size and window length.}
+    \label{fig:three_subfigs}
+\end{figure}
+
+\subsection{Analysis and Ablation Study}
+\label{subsec:exp-ablation}
+
+\textbf{Improved Sampling Efficiency}. In previous experiments, we show that with the same number of timesteps sampling, \method can achieve significantly better generation results with less accumulated error. In this part, we highlight that \method can also enable better sampling efficiency when keeping the same generative quality, by using reduced denoising steps. As introduced in \cref{subsec:method-sampling}, our key observation is that the energy-based importance sampling correction during the early stage of denoising sampling contributes more to the generative perplexity improvement. Therefore, to accelerate the sampling speed, in this experiment, we set the importance sampling window as $\rw=0.2$, which empirically yields the best generation quality with the same wall-clock sampling time budget. $\rw=0.2$ means we use importance sampling for $t\in[0.8, 1]$, and just use the original diffusion model $\vmu_\theta$ for denoising for $t\in[0, 0.8)$. We provide additional results with other window size in \Cref{app:exp:results}. We test AR baseline and diffusion-based models with $[512, 768, 1024]$ denoising steps, and plot the curve of corresponding metric vs. wall-clock time for generating a single $1024$-length sentence in \Cref{subfig:genppl_time,subfig:entropy_time}. As shown in the figure, \method achieves a better sampling quality vs time trade-off compared against MDLM. Specifically, when achieving a similar generative perplexity as the AR baseline (35.7), we can see from the figure that \method only takes $\sim$13 seconds while the MDLM baseline takes $\sim$17 seconds, indicating a $\sim$1.3$\times$ acceleration without any performance drop. This speedup further highlights the advantage of our energy-based denoising formulation and importance sampling scheme, where we can conduct sampling with reduced denoising steps and correct the decoding errors by parallel importance sampling.
+
+\textbf{Effect of Importance Sampling}. We further study the effect of importance sampling hyperparameters in this section. We fix the number of denoising timesteps as $1024$, and investigate the generation performance with varying importance sampling size and window length. We refer readers to \Cref{subsec:method-sampling} and \Cref{alg:sampling} for details of these two hyperparameters. Again, we found that \method-NCE and \method-AR exhibit similar trends in the study, and therefore show one study result here. The ablation study results are summarized in \Cref{subfig:is-ablation}, from which we highlight two key observations: 1) Row-wise comparison indicates that the sampling quality is not sensitive to the importance sampling size. However, we emphasize that the conclusion is based on sizes smaller than 16, as a larger size will lead to out-of-memory issues on the GPU. 2) Column-wise study show that a longer importance sampling window can consistently improve the sampling quality. However, we note here that when setting the window as $0$, the sampling decays to the original MDLM sampling, and the $1024$ steps GPT-2 Gen PPL is $42.6$ (see \Cref{tab:owt-genppl}). Therefore, a $0.2$ window already significantly reduces the Gen PPL to $\sim 30$ while a longer window only marginally further improves the results. This phenomenon suggests that major decoding error happens during early-stage denoising sampling, and a short window can greatly overcome the errors while maintaining high sampling efficiency, as shown in our efficiency study above.
+
+
+\section{Conclusion}
+
+
+In this paper, we introduced Energy-based Diffusion Language Model (EDLM), which integrates energy-based models with discrete diffusion models to address the limitations of parallel text generation. By leveraging a residual energy-based approach, EDLM effectively reduces the mismatch between training and sampling distributions in discrete diffusion models, resulting in improved generation quality and efficiency. Through experiments on both small and large language modeling benchmarks, EDLM demonstrates state-of-the-art performance among diffusion models and approaches the quality of autoregressive models, while offering significant sampling speedup. These results highlight the potential of energy-based approaches in advancing discrete generative modeling, setting the stage for further exploration of parallel generation techniques.
+
+
+

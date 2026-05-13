@@ -1,0 +1,428 @@
+\title{ReAttention: Training-Free Infinite Context with Finite Attention Scope}
+
+\begin{abstract}
+
+The long-context capability of the Large Language Models (LLM) has made significant breakthroughs, but the maximum supported context length remains a critical bottleneck limiting their practical applications. The constraint of context length in LLMs arises from the self-attention mechanism, which cannot effectively and efficiently capture the semantic relationships within infinitely long contexts via the limited pre-trained positional information and attention scope. In this work, we propose \textbf{ReAttention}, a training-free approach enabling LLM based on the self-attention mechanism to support an infinite context with a finite attention scope under sufficient memory resources. ReAttention performs the position-agnostic top-$k$ attention before the ordinary position-aware self-attention, freeing LLMs from the length extrapolation issue. We validate the performance of ReAttention on the LongBench, L-Eval, and InfiniteBench and demonstrate that it is on par with traditional methods. Furthermore, we also apply ReAttention on mainstream LLMs, including LLaMA3.1-8B and Mistral-v0.3-7B, enabling them to support context lengths of at least 1M and even expanding the context length of LLaMA3.2-3B-chat by 128$\times$ to 4M without any further training in Needle-In-A-Haystack tests. We also improve the efficiency of ReAttention with Triton and achieve an efficient extrapolation without additional overhead. 
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large Language Models (LLM) based on Transformer\citep{vaswani2017attention,gpt4,reid2024gemini,Sun2024MOSS} has made great progress in the applications of Natural Language Processing (NLP). Particularly, in long context modeling, a considerable amount of research has been dedicated to extending the context length of LLMs\citep{chen2023extending,peng2023yarn,liu2023scaling,xiong2023effective}, increasing the maximum supported context length from the initial 2K\citep{touvron2023llama} to 2M\citep{ding2024longrope} in open-source LLMs. However, the maximum context length still remains a bottleneck that limits the practical applications of LLMs\citep{press2021train,chen2023extending}. To achieve infinite context length under sufficient memory for Transformer-based LLMs, the following three conditions must be satisfied:
+\begin{enumerate}
+    \itemsep0.3mm
+    \item[a] \textit{The position information in the inference phase should not be out-of-distribution (OOD) compared to the training phase;}\citep{han2023lm,liu2023scaling}
+    \item[b] \textit{The self-attention entropy in the inference phase should not increase with the length of the input;}\citep{han2023lm,xiao2023efficient}
+    \item[c] \textit{LLM should keep effectively aware of critical contextual information at each inference step.}\citep{dong2024get,zhang2024soaring}
+\end{enumerate}
+
+Early works in extrapolation focus on the first point, primarily by interpolating the position embedding\citep{chen2023extending,fixedNTK,dynamicNTK,xiong2023effective} or limiting the relative position within the pre-training context length\citep{rerope,jin2024llm,an2024training}. However, later studies have shown that even if positional information is not OOD, the attention entropy tends to increase logarithmically with the length of the self-attention window\citep{han2023lm}. Specifically, the self-attention distribution becomes increasingly diffuse as inference length expands, making it difficult to effectively gather information from the context, which leads to unstable model outputs\citep{peng2023yarn,han2023lm}. In response, methods like LM-Infinite\citep{han2023lm} and StreamingLLM\citep{xiao2023efficient} have been proposed, which retain the starting and ending parts of the input, allowing LLMs to maintain stable outputs as input length increases. However, these approaches compromise the global awareness of contextual information, significantly affecting the performance on downstream tasks.
+
+For human beings, although we have long-term memory, we only need a small amount of information to think and act in real-time. Similarly, while an LLM requires the full context to complete the inference process, it only needs limited contextual information at each inference step. This fact has inspired research like InfLLM\citep{xiao2024infllm} and LongHeads\citep{lu2024longheads} to perceive and extract critical information from the context before performing self-attention. However, LongHeads still face upper limits on positional information due to the use of NTK or PI for prefill\citep{lu2024longheads}, while InfLLM suffers from bias in representing contextual information, raised from the chunk-wise representation and  ReRoPE-style position embedding when extracting key information.
+
+In this work, we introduce \textbf{ReAttention}, a training-free method that extends LLMs with finite context lengths to process infinite contexts. ReAttention regards extracting critical contextual information as an additional attention process preceding traditional self-attention, akin to "thinking before you act." At each reasoning step, ReAttention selects the most critical finite segments from the KV cache without position information, concatenates them, applies positional embedding, and performs self-attention. By controlling the length of the selected KV cache segments, ReAttention can achieve infinite context length with a finite attention scope, while ensuring the position information and attention entropy are not out-of-distribution\citep{han2023lm}. Furthermore, inspired by the optimization techniques used in self-attention, particularly FlashAttention \citep{dao2022flashattention,dao2023flashattention}, we use Triton \citep{10.1145/3315508.3329973}, a GPU programming language, to minimize read and write overheads in top-$k$ attention. With our custom Triton kernel, ReAttention avoids extra computational overhead and reduces memory usage for long contexts compared to traditional methods. Our contributions can be summarized as follows:
+
+\begin{itemize}
+    \itemsep0.4mm
+    \item We outline three fundamental conditions for infinite context extension in Transformer-based LLMs, position embedding not OOD, stable attention entropy, and effective awareness of critical contextual information. We also find that the third condition can be satisfied through the attention score without positional embedding.
+    \item Based on this observation, we propose a training-free method, ReAttention, satisfying the aforementioned three conditions, thus extrapolating the context length of LLMs to infinity with a finite attention scope, and making LLMs free from the issue of length extrapolation. 
+    \item We validate that ReAttention matches the performance of self-attention in long-context scenarios with no computational overhead and less memory usage. Specifically, ReAttention extends the context length of leading LLMs, such as LLaMA3.1-8B \citep{dubey2024llama}, to at least 1M tokens. For smaller models like LLaMA3.2-3B-chat \citep{meta2024llama}, the context length can be increased by 128$\times$, reaching up to 4M tokens, without additional training.
+\end{itemize}
+
+
+
+\section{Method}
+
+
+The overall structure of ReAttention is illustrated in Figure~\ref{reattention}, which consists of a position-agnostic top-$k$ attention responsible for full-context cache selection and a traditional self-attention transform with position embedding. ReAttention achieves a training-free integration between the two components.
+
+\subsection{Full-Context Cache Selection}\label{algorithm}
+
+While LLMs require a complete long context to perform the entire inference process, only a limited context segment is needed at each inference step~\citep{xiao2023efficient,xiao2024infllm,lu2024longheads}. Considering the beginning and end of the input context correspond to globally important prompts and local information for inference~\citep{xiao2023efficient}, ReAttention retains both the global and local segments of the KV cache  for inclusion in the self-attention process.
+\begin{equation}\begin{gathered}
+\bm{\mathcal{K}}_\text{cache}=\left[\bm{\mathcal{K}}_\text{global},\bm{\mathcal{K}}_\text{middle},\bm{\mathcal{K}}_\text{local}\right]\text{,\qquad} 
+\bm{\mathcal{V}}_\text{cache}=\left[\bm{\mathcal{V}}_\text{global},\bm{\mathcal{V}}_\text{middle},\bm{\mathcal{V}}_\text{local}\right]\text{.}
+\end{gathered}\label{kv_cache}\end{equation}
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \centering
+    \includegraphics[width=0.5\textwidth]{figures/ReAttention1.pdf}
+    \caption{Overview of ReAttention. }
+    \label{reattention}
+\end{wrapfigure}
+
+Then, ReAttention uses the query vector of the current step to perform a top-$k$ selection on the middle part of the KV cache~\citep{ribar2023sparq}, to identify the most important cache segments for the current step as shown in Figure~\ref{reattention}.
+\begin{equation}\begin{gathered}
+\text{Indices}=\text{top-$k$}\left({\bm{q}_t\bm{\mathcal{K}}_\text{middle}^T}\right)\text{,} \\
+\bm{\mathcal{K}}_\text{select}=\bm{\mathcal{K}}_\text{middle}[\text{Indices}]\text{,} \\[0.2ex] \bm{\mathcal{V}}_\text{select}=\bm{\mathcal{V}}_\text{middle}[\text{Indices}]\text{.}    
+\end{gathered}\label{kv_select}\end{equation}
+
+ReAttention performs a full-context selection on the KV cache in each layer, allowing different layers to choose different KV caches for the calculation. Furthermore, since each attention layer has multiple attention heads and ReAttention adopts chunked streaming input during the prefilling stage, multiple query vectors may exist simultaneously. In this case, ReAttention votes based on the top-$k$ selections from different heads and query vectors to identify the top-$k'$ KV caches. Additionally, to ensure semantic coherence, ReAttention not only retains the top-$k'$ elements themselves but also extracts $m$ neighboring entries as a whole. Overlapping parts are deduplicated. 
+
+Unlike chunk-based selection in previous works \citep{lu2024longheads,xiao2024infllm}, ReAttention extracts critical contextual information with the dot-product between $\bm{q}_t$ and $\bm{\mathcal{K}}_\text{cache}$, rather than a chunk-wise representation of $\bm{\mathcal{K}}_\text{cache}$. This method offers strong adaptability and avoids the semantic fragmentation caused by fixed chunking \citep{luo2024bge}. Moreover, since the intermediate result of $\bm{q}_t\bm{\mathcal{K}}_\text{middle}^T$ is too large for long-context scenarios, and would incur huge read and write overhead, we follow the approach  of FlashAttention\citep{dao2022flashattention,dao2023flashattention}, fusing the whole process into one kernel using Triton\citep{10.1145/3315508.3329973}, as detailed in Section~\ref{efficiency}.
+
+\subsection{Training-Free Integration}
+
+ReAttention concatenates the selected KV cache segments between the global and local parts, applies positional embedding sequentially, and preserves the relative order while ignoring the absolute distance between the selected segments, as shown in Figure~\ref{reattention}. Self-attention can then be applied to the concatenated KV cache. 
+\begin{equation}\begin{gathered}
+\bm{\mathcal{K}}_\text{cache'}=\left[\bm{\mathcal{K}}_\text{global},\bm{\mathcal{K}}_\text{select},\bm{\mathcal{K}}_\text{local}\right]\text{,\qquad} \bm{\mathcal{V}}_\text{cache'}=\left[\bm{\mathcal{V}}_\text{global},\bm{\mathcal{V}}_\text{select},\bm{V}_\text{local}\right]\text{,} \\
+\tilde{\bm{q}}_t,\tilde{\bm{\mathcal{K}}}_\text{cache'}=\text{PE}\left(\bm{q}_t,\bm{\mathcal{K}}_\text{cache'}\right)\text{,\qquad}\bm{o}_t=\text{SelfAttn}\left(\tilde{\bm{q}}_t,\tilde{\bm{\mathcal{K}}}_\text{cache'},\bm{\mathcal{V}}_\text{cache'}\right)\text{.}
+\end{gathered}\label{kv_concat}\end{equation}
+
+It's important to note that, unlike the conventional implementation in Huggingface Transformers\citep{wolf-etal-2020-transformers}, where the position embedding is applied before KV caching, in ReAttention, the position embedding is separated from the KV cache and performed after the KV cache selection. That is to say, the cached KV does not include the positional information. This design offers several advantages. On the one hand, as mentioned in Section~\ref{discussion}, the attention score without positional embedding is more conducive to locating the key information in the context. On the other hand, since the concatenated cache length remains within the pre-training context length or the extrapolation upper bound, the position embedding will never be OOD \citep{han2023lm}. 
+
+Furthermore, the unselected KV cache segments are unimportant in the current inference step, as their self-attention scores are minimal \citep{zhang2024h2o}. Therefore, this modification does not harm the self-attention output and can eliminates interference from irrelevant information\citep{zhang2024h2o,ge2023model}. Compared with InfLLM\citep{xiao2024infllm}, ReAttention’s position embedding and attention transform within the pre-training window do not introduce the untrained attention pattern, thereby preventing bias accumulation in the KV cache during the prefilling stage. Thus, ReAttention can disregard position information, achieve an unlimited attention context with a limited attention scope without any training, and remain compatible with the existing attention acceleration methods\citep{dao2022flashattention,dao2023flashattention}.
+
+
+
+\section{Experiment}
+
+
+\subsection{Setup}
+
+We conduct experiments on LLaMA3-8B-8K\citep{meta2024introducing}, LLaMA3.1-8B-128K\citep{dubey2024llama}, LLaMA3.1-70B-128K\citep{dubey2024llama}, LLaMA3.2-3B-128K\citep{dubey2024llama}, Mistral-v0.3-7B-32K\citep{mistral3}, InternLM2.5-7B-1M\citep{InternLM25}, Qwen2-7B-128K\citep{qwen2}, Qwen2-72B-128K\citep{qwen2}, Qwen2-1B-32K\citep{qwen2}. For all models, we set the length of $\bm{\mathcal{K}}_\text{global}$ to 32, the length of $\bm{\mathcal{K}}_\text{local}$ to 4096, and selected span size to 32. Moreover, we set $k=4, k'=127$ in top-$k$ attention. Importantly, the attention scope in each step remains within the maximum attention window. For example, for the LLaMA3-8B-8K with ReAttention, the maximum attention scope size is 32 + 4096 + 127$\times$32, which exactly matches the maximum supported attention window of 8192. We use OpenCompass\citep{2023opencompass} for validation. All experiments are performed with FP16 precision and accelerated with FlashAttention2\citep{dao2023flashattention}.
+
+\subsection{Long-Context Benchmark Evaluation}
+
+\begin{figure}[!tb]
+\begin{minipage}{0.98\textwidth}
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/longbench_leval/En_.pdf}
+        \caption{LongBench En. tasks}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/longbench_leval/Zh_.pdf}
+        \caption{LongBench Zh. tasks}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/longbench_leval/Avg_LongBench_.pdf}
+        \caption{LongBench Average score}
+    \end{subfigure}
+    \vskip\baselineskip
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/longbench_leval/Close_Ended_LEval_.pdf}
+        \caption{L-Eval Close-ended tasks}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/longbench_leval/Open_Ended_LEval_.pdf}
+        \caption{L-Eval Open-ended tasks}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/longbench_leval/Avg_LEval_.pdf}
+        \caption{L-Eval Average score}
+    \end{subfigure}
+    \caption{\label{longbench_leval} Results of existing mainstream LLMs, including LLaMA Series\citep{meta2024introducing,dubey2024llama,meta2024llama} and Mistral\citep{mistral3} on LongBench\citep{bai2023longbench} and L-Eval\citep{an2023eval}. ReAttention achieves a consistent superiority over StreamingLLM\citep{xiao2023efficient} and shows comparable performance with LLMs with full attention.}
+\end{minipage}
+\end{figure}
+\begin{table*}[!tb]
+\tabcolsep=0.1cm
+\centering\small
+  \begin{tabular}{lcccccccccc}
+\toprule
+ & \multicolumn{3}{c}{\textbf{32K}} & \multicolumn{3}{c}{\textbf{64K}} & \multicolumn{3}{c}{\textbf{128K}} & \multirow{2}{*}{\textbf{Avg.}} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10}
+ & \textbf{MC} & \textbf{QA} & \textbf{Sum} &  \textbf{MC} & \textbf{QA} & \textbf{Sum} &  \textbf{MC} & \textbf{QA} & \textbf{Sum} & \\
+\midrule
+\textit{LLaMA3-8B-Instruct-8K} & - & - & - & - & - & - & - & - & - & - \\
++ DynamicNTK & 50.66 & 7.44 & 21.76 & - & - & - & - & - & - & - \\
++ InfLLM & 40.61 & 4.15 & 20.30 & 35.37 & 5.12 & 18.26 & 33.19 & 5.78 & 19.70 & 20.28 \\
++ ReAttention & 46.29 & 5.33 & 21.76 & 44.54 & 5.25 & 20.15 & 49.78 & 5.98 & 20.36 & \textbf{24.38} \\
+\midrule
+\textit{LLaMA3.1-8B-Instruct-128K} & 37.12 & 18.85 & 1.60 & 31.88 & 23.32 & 1.39 & 21.83 & 25.43 & 1.40 & 18.09  \\
++ InfLLM & 32.31 & 5.48 & 21.00 & 34.50 & 7.56 & 19.82 & 39.30 & 8.92 & 19.27 & 20.91 \\ 
++ ReAttention & 36.68 & 12.71 & 19.68 & 35.37 & 12.14 & 18.84 & 40.61 & 12.63 & 18.14 & \textbf{22.98} \\ 
+\midrule
+\textit{LLaMA3.2-3B-Instruct-128K} & 14.41 & 15.65 & 1.38 & 11.79 & 18.16 & 1.27 & 13.10 & 17.63 & 1.30 & 10.52 \\
++ InfLLM & 20.09 & 4.35 & 13.66 & 23.14 & 9.38 & 12.52 & 22.27 & 12.08 & 14.25 & 14.64 \\
++ ReAttention & 19.21 & 11.80 & 16.75 & 17.47 & 11.82 & 15.06 & 20.09 & 11.91 & 14.13 & \textbf{15.36} \\
+\bottomrule
+  \end{tabular}
+  \caption[Caption for LOF]{\label{infinitebench} Results of existing mainstream LLMs, namely LLaMA Series\citep{meta2024introducing,dubey2024llama,meta2024llama} on InfiniteBench\citep{zhang2024bench} in different context lengths. "-" means LLM could not provide a stable output in a certain context length. ReAttention achieves superiority over InfLLM\citep{xiao2024infllm} and full attention.}
+\end{table*}
+
+We first evaluate all 9 LLMs on the commonly used long-context benchmark LongBench\citep{bai2023longbench} and L-Eval\citep{an2023eval}, with a default context length of 32K and a middle truncation. For LLaMA3-8B-8K, which has a context length of less than 32K, we report its performance at its pre-trained context lengths of 8K and the results with Dynamic NTK\citep{dynamicNTK}, uesd to extrapolate to the 32K context length. For the Dynamic NTK implementation, we use the default settings from the Huggingface Transformers\citep{wolf-etal-2020-transformers}, setting the scaling factor to 4. Additionally, we compare the performance of all 9 LLMs with StreamingLLM\citep{xiao2023efficient} as an ablation study, using the same global and local segment lengths as the ReAttention settings.
+
+As shown in Figure~\ref{longbench_leval} and detailed in Table~\ref{tab:detailed_longbench_leval}, ReAttention outperforms StreamingLLM across all 9 models, indicating that the full-context selection acquires useful information for long-context inference. Furthermore, ReAttention performs on par with full attention and even surpasses it in some cases, such as LLaMA3.1-70B-128K\citep{meta2024introducing} and Qwen2-1B-32K\citep{qwen2}. This demonstrates that ReAttention can be applied to LLMs of various sizes and achieve performance close to full attention on downstream tasks\citep{jiang2024minference}. 
+
+To further demonstrate the superiority and extrapolation capability of ReAttention, we validate our method on InfiniteBench\citep{zhang2024infty}, a more challenging benchmark with a longer context length. We choose 3 commonly tested subtasks, En.MC, En.QA and En.Sum, evaluate models with varying context lengths, and compare ReAttention with DynamicNTK\citep{dynamicNTK} and InfLLM\citep{xiao2024infllm} with the same selection config. The results\footnote{Due to the extensive evaluation for all 9 models, and considering that InfLLM has limited support for larger models such as LLaMA3.1-70B-chat and other series like InternLM2.5 and Qwen2, we only report results of the LLaMA series models at the 8B and 3B scales.} are shown in Table~\ref{infinitebench}. Remarkably, ReAttention consistently outperforms full-attention and InfLLM at the 128K context length and in the average score. While DynamicNTK performs well at 32k, it encounters a clear upper bound on extrapolation, beyond which the model fails to produce stable outputs. Moreover, while InfLLM can extend context length indefinitely \citep{xiao2024infllm}, it still lags behind ReAttention in downstream tasks due to inaccurate extraction of critical information and differences in position embedding format compared to the pre-training phase.
+
+\begin{figure}[!tb]
+\begin{minipage}{0.98\textwidth}
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/llama3_1_8B-32.1x32.4096.512-clip127-qk.pdf}
+        \caption{LLaMA3.1-8B-128K}
+        \label{400K_niah_llama3_8B}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/llama3_2_3B_chat-32.4x32.4096.512-clip127-qk.pdf}
+        \caption{LLaMA3.2-3B-128K}
+        \label{300K_niah_mistral3_7B}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/mistral3_7B-32.1x32.4096.1024-clip127-qk.pdf}
+        \caption{Mistral-v0.3-7B-32K}
+        \label{400K_niah_internlm2_7B}
+    \end{subfigure}
+    \vskip\baselineskip
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/internlm2.5_7B-32.1x32.4096.1024-clip127-qk.pdf}
+        \caption{InternLM2.5-7B-1M}
+        \label{400K_niah_internlm25_7B}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/qwen2_7B-32.1x32.8192.1024-clip127-qk.pdf}
+        \caption{Qwen2-7B-128K}
+        \label{400K_niah_qwen2_7B}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/qwen2_1B_chat-32.1x32.8192.1024-hu-clip512.pdf}
+        \caption{Qwen2-1B-32K}
+        \label{300K_niah_qwen2_1B}
+    \end{subfigure}
+    \caption{Results of ReAttention-enhanced existing mainstream LLMs, including LLaMA3-8B-8K and Mistral-v0.3-7B-32K, on Needle-In-A-Haystack\citep{needle_in_a_haystack} implemented in OpenCompass\citep{2023opencompass}.\label{single_niah}}
+\end{minipage}
+\end{figure}
+
+\begin{figure}[!tb]
+\begin{minipage}{0.98\textwidth}
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/llama3_1_8B_chat-32.4x32.8192.2048-tl-clip256.pdf}
+        \caption{Multi NIAH of LLaMA3.1-8B-Instruct-128K}
+        \label{mniah_llama3_1_8b}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/llama3_2_3B_chat-32.4x32.4096.1024-clip127-qk.pdf}
+        \caption{Single NIAH of LLaMA3.2-3B-Instruct-128K in 2M Context}
+        \label{llama3_2_3b_2M}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/qwen2_1B-32.1x32.8192.2048-clip127-qk.pdf}
+        \caption{Single NIAH of Qwen2-1B-Instruct-32K in 4M Context}
+        \label{qwen2_1b_4M}
+    \end{subfigure}
+    \caption{Results of Multi-Needle-In-A-Haystack\citep{reid2024gemini} and Single NIAH in a longer context length implemented in OpenCompass\citep{2023opencompass}.\label{parallel_niah}}
+\end{minipage}
+\end{figure}
+
+\subsection{Needle-In-A-Haystack Evaluation}
+
+Building upon the long-context benchmark evaluation, we use models with strong retrieval capabilities within their training context lengths and conduct the Needle-In-A-Haystack (NIAH) evaluation \citep{needle_in_a_haystack,2023opencompass}. We perform experiments on 8 A100 GPUs and extend the context lengths of LLMs with ReAttention to at least 1M tokens. As shown in Figure~\ref{single_niah}, LLMs with ReAttention maintain remarkably high retrieval accuracy across the entire range of context lengths they could support, regardless of their original attention windows. Importantly, we also extend the context of mainstream LLMs like LLaMA3-8B-8K\citep{meta2024introducing} and Mistral-v0.3-7B-32K\citep{mistral3} to at least 1M, providing the community with an effective solution for deploying long-context LLMs.
+
+Building on this, we increase the difficulty of the evaluation by conducting experiments on multi-NIAH and single-NIAH in longer contexts, with results shown in Figure~\ref{parallel_niah}. Given the increased difficulty, we employ the corresponding instruct versions of the models. On the mainstream LLaMA3.1-8B-Instruct-128K\citep{dubey2024llama}, we achieve a context length of 1M in the multi-NIAH task. For smaller models, such as LLaMA3.2-3B-chat-128K\citep{meta2024llama}, we extend the context length to at least 2M. Notably, for Qwen2-1B-Instruct-32k\citep{qwen2}, we extend the context length to 4M on 4 A100 GPUs, achieving a training-free context expansion of 128$\times$. To the best of our knowledge, it is the largest amplification of context length for LLMs achieved without additional training. This demonstrates that ReAttention can extend the context length while disregarding the position information, using a finite attention window to achieve an infinite attention context.
+\begin{wrapfigure}{r}{0.35\textwidth}
+    \centering
+    \includegraphics[width=0.35\textwidth]{figures/kernel.pdf}
+    \caption{Overview of the kernel fusion in our customized top-$k$ attention kernel. The performance measurements reflect the execution time of the corresponding kernel functions, with the input length 8K for Llama3.1-8B inference tasks. }
+    \label{fig:kernel_fuse}
+\end{wrapfigure}
+
+\subsection{Efficiency Analysis}\label{efficiency}
+
+In the PyTorch framework, operators execute independently, requiring frequent I/O to the GPU memory, which introduces unnecessary overhead and latency. Inspired by FlashAttention\citep{dao2022flashattention,dao2023flashattention}, we develop a GPU kernel function for the top-$k$ attention described in Section~\ref{algorithm} using Triton. As shown in Figure~\ref{fig:kernel_fuse}, our kernel fuses operators for attention score computation and top-$k$ calculation, enabling the entire process to run within the GPU cache. Thus GPU memory I/O is significantly reduced, improving both GPU memory usage and runtime. We added top-$k$ attention that reduces the time for the self-attention, and our kernel keeps top-$k$ attention's overhead minimal, leaving overall latency unchanged.
+
+We analyze our kernel's efficiency in terms of GPU execution time and memory usage, showing that using Triton rather than PyTorch for the top-$k$ attention greatly enhances GPU performance while reducing GPU memory consumption. Additionally, we compare ReAttention with the standard implementation in the HuggingFace Transformers\citep{dai2019transformer}, measuring time to first token (TTFT) and memory cost in context lengths 32k to 256k. All experiments were conducted on a system with a 48-core CPU, 256GB RAM, and an A800-80GB GPU.
+
+\begin{figure}[!htb]
+\begin{minipage}{\textwidth}
+\begin{subfigure}[b]{0.48\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/triton_torch_kernel_mem-qko_include.pdf}
+    \caption{GPU memory cost across different context lengths. }
+    \label{fig:kernel_mem}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.48\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/triton_torch_kernel_time.pdf}
+    \caption{Latency across different context lengths. }
+    \label{fig:kernel_time}
+\end{subfigure}
+\caption{The efficiency cooperation between our Triton kernel and its PyTorch version. Our fused top-$k$ attention kernel performs better than PyTorch implementation across all context lengths. }
+\end{minipage}
+\end{figure}
+
+\paragraph{Triton Operator Efficiency} We tested our Triton operator using real inference inputs (e.g., $\mathcal{Q}$ and $\mathcal{K}$ matrices extracted from real-world inference tasks) to measure execution time and device memory usage. As shown in Figure~\ref{fig:kernel_mem}, the standard PyTorch implementation exceeds 80GB of memory for sequences over 64k, while our Triton operator minimizes memory usage, limited to input and output matrices. It also achieves hundreds of times faster performance at 64k sequence lengths and scales efficiently as length increases (Figure~\ref{fig:kernel_time}).
+
+\begin{figure}[h]
+\begin{minipage}{\textwidth}
+ \begin{subfigure}[b]{0.495\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/ttt_time.pdf}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.495\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/ttt_mem.pdf}
+\end{subfigure}
+\caption{First token latency(FTL) and GPU memory consumption in the prefilling stage. FullAttn refers to the official HuggingFace Transformers implementation of Llama3.1-8B-Base, which runs out of memory after 192k.}
+\label{fig:prefill_mem}
+\end{minipage}
+\end{figure}
+
+\begin{wraptable}{r}{7.2cm}
+\centering\small
+  \begin{tabular}{lcccc}
+\toprule
+ & \textbf{En.} & \textbf{Zh.} & \textbf{Code} & \textbf{Avg.} \\
+\midrule
+StreamingLLM & 29.48 & 13.22 & 70.27 & 32.49 \\
+ReAttention & 33.42 & 18.74 & 70.38 & \textbf{35.03} \\
+\midrule
++ chunk size = 1024 & 25.50 & 18.07 & 70.32 & 34.75 \\
++ chunk size = 2048 & 25.39 & 18.07 & 70.30 & 34.72 \\
+\midrule
++ span size = 8 & 13.02 & 8.74 & 58.54 & 22.96 \\
++ span size = 16 & 14.13 & 9.43 & 60.92 & 24.29 \\
++ span size = 64 & 25.27 & 17.98 & 70.83 & 34.69 \\
++ span size = 128 & 25.23 & 16.97 & 70.54 & 34.57 \\
+\midrule
++ top-$k$ = 1 & 25.04 & 16.57 & 70.75 & 34.45 \\
++ top-$k$ = 8 & 25.40 & 17.51 & 70.64 & 34.70 \\
+\midrule
++ local size = 2048 & 24.51 & 16.77 & 70.39 & 34.08 \\
++ local size = 1024 & 22.31 & 13.64 & 69.48 & 32.23 \\
+\bottomrule
+  \end{tabular}
+  \caption{\label{hyper} Analysis of ReAttention hyper-parameters on LLaMA3-8B-8K and LongBench, by default chunk size 512, span size 32 as well as global size, local size 4096, and top-$k$ Selection.}
+\end{wraptable}
+
+\paragraph{Memory Usage in Prefilling Stage} Memory overhead limits the prefilling for longer sequences. Figure~\ref{fig:prefill_mem} shows that our method surpasses the standard implementation in HuggingFace Transformers as context length grows, continuing to work when the standard implementation runs out of memory. We also recorded first-token latency, which remains comparable to the standard implementation.
+
+
+
+\section{Discussion}
+
+
+\subsection{Analysis on Hyper-parameter}
+
+We first discuss the selection of hyper-parameters. We evaluate the performance of the LLaMA3-8B-8K\citep{meta2024introducing} on the LongBench benchmark\citep{bai2023longbench}, comparing hyper-parameters including chunk size, span size, local size, and top-$k$ values. Since the prefilling chunk is always contained within the local part in self-attention, the chunk size must be smaller than the local size. Additionally, to ensure fairness in our comparisons, we maintain a consistent maximum attention window size across different settings, specifically keeping the summation of global size, span size times $k’$, and local size equal to 8192. To achieve this, we set global size equal to span size, retaining the earliest portion as the first selection segment. As span size increased, we correspondingly reduced the $k’$ to limit the upper bound of cache selection. Additionally, when local size decreases, $k’$ is increased. The final results are shown in Table~\ref{hyper}.
+
+We find that as the chunk size decreases from 2048 to 512, the performance gradually improves. The prefilling stage becomes more precise in extracting critical information during each top-$k$ attention step. However, since prefilling takes more time as chunk size decreases, we select 512 as our default value without further reduction. Next, we examined the impact of different span sizes. Among these hyper-parameters, span size has the most significant effect on downstream performance. When span size is relatively small, fragmented segments weaken coherence and may mislead the LLM’s predictions, resulting in poorer performance compared to StreamingLLM. When the span size reaches 32, the performance on LongBench peaks. Beyond this point, due to the constraint of pre-trained position embedding, the number of extracted segments decreases, hindering the effective capture of critical contextual information. We also compare the influence of the top-$k$ number and find that top-4 yields the best results. A smaller top-$k$ number makes it difficult for LLM to identify critical information, while a larger top-$k$ number may introduce irrelevant content that interferes with judgment. Finally, we analyze the effect of local size. Smaller local size compromises LLM's ability to maintain semantic coherence, and excessive selection beyond the local context may skew the KV cache during the prefilling stage. Therefore, we set the local size to half of the pre-training context length for LLaMA3-8B-8K and apply this hyper-parameter configuration to other LLMs.
+
+\subsection{Postion-Agnostic Cache Selection}
+
+\begin{figure}[!tb]
+\begin{minipage}{0.99\textwidth}
+    \begin{subfigure}[b]{0.24\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/6_w_pe_softmax_pool_16.pdf}
+        \caption{Attention distribution of a correct case with position embedding.}
+        \label{attn_score_case4}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.24\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/6_wo_pe_softmax_pool_16.pdf}
+        \caption{Attention distribution of a correct case without position embedding.}
+        \label{attn_score_case3}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.24\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/3_w_pe_softmax_pool_16.pdf}
+        \caption{Attention distribution of a wrong case with position embedding.}
+        \label{attn_score_case2}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.24\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/3_wo_pe_softmax_pool_16.pdf}
+        \caption{Attention distribution of a wrong case without position embedding.}
+        \label{attn_score_case1}
+    \end{subfigure}
+    \caption{Visualization of the attention distributions for InternLM2-7B-200K\citep{cai2024internlm2} evaluated on Needle-In-A-Haystack\citep{needle_in_a_haystack,2023opencompass} in 32K context length. In each sub-figure, each heatmap represents the attention distribution of a single layer, with the y-axis corresponding to the 32 attention heads and the x-axis corresponding to the 32K context length. The first 32 tokens, the instruction part, and the last 6 tokens, the generated part, are not excluded. The values represent the cumulative self-attention distributions for each token generation. The brighter the color, the higher the cumulative attention. A pooling operation with a kernel size of 100 is applied sequentially to show the pattern more clearly. The red box represents the position of the "needle" in the context. \label{attn_score}}
+\end{minipage}
+\end{figure}
+
+In ReAttention, the full-context cache selection is based on the dot product between the query and key vectors without position embedding. This may create a gap between the selection of the KV cache and the self-attention distribution. Therefore, here raises the question of whether using semantic vectors without position information can effectively locate the critical information in the context. To analyze this, we select a correct case and a wrong case from the results of Needle-In-A-Haystack evaluation\citep{needle_in_a_haystack,2023opencompass} on InternLM2-7B-200K\citep{cai2024internlm2} with full attention in 32K context length. For each case, we calculate both the attention distribution with position embedding, i.e., the real self-attention distribution, and the attention distribution without position embedding. 
+
+The result is shown in Figure~\ref{attn_score}. For the correct case, the attention distributions, both with and without position embedding, can locate the position of the "needle" in the "haystack". However, the attention distribution with position embedding appears more dispersed, and this effect becomes more pronounced in the higher layers of the model. For the wrong case, the attention distribution with position embedding is also very dispersed and highly influenced by a particular attention head misled by irrelevant information from the lower layers. This ultimately results in the model's failure. 
+
+Interestingly, when observing the attention distribution without position embedding, we find that the model can identify the position of the "needle" using the inner product of semantic vectors and effectively filter out a large amount of irrelevant noise. Practically, the ReAttention-enhanced InternLM2-7B-200K can successfully locate the "needle" in this case. Therefore, the inner product of semantic vectors in the cache selection is reasonable, and it proves to be more effective in finding the relevant context compared with position-aware inner products. Additionally, due to the absence of position embedding in the KV cache, ReAttention can achieve an effective context extension.
+
+\subsection{Observations on Synthetic Tasks}
+
+\begin{figure}[!b]
+    \centering
+    \begin{minipage}{0.44\textwidth}
+\setlength{\aboverulesep}{0.1pt}
+\setlength{\belowrulesep}{0.1pt}
+\tabcolsep=0.18cm
+  \begin{tabular}{lccc}
+\toprule
+ & \textbf{S3} & \textbf{MK3} & \textbf{All} \\
+\midrule
+\rowcolor{gray!40}\multicolumn{4}{l}{\textit{8K Context Length}} \\[0.5mm]
+DynamicNTK & 100.00 & 98.00 & 91.47 \\[0.5mm]
+InfLLM & 45.00 & 38.00 & 44.91 \\[0.5mm]
+ReAttention & 95.00 & 78.00 & 90.10 \\[0.5mm]
+\midrule
+\rowcolor{gray!40}\multicolumn{4}{l}{\textit{16K Context Length}} \\[0.5mm]
+DynamicNTK & 91.00 & 95.00 & 88.13 \\[0.5mm]
+InfLLM & 18.00 & 17.00 & 29.61 \\[0.5mm]
+ReAttention & 94.00 & 15.00 & 66.57 \\[0.5mm]
+\bottomrule
+  \end{tabular}
+        \captionof{table}{The performance of Dynamic NTK, InfLLM, and ReAttention on RULER benchmark in 8K and 16K context length. S3 and MK3 are the short forms of NIAH-Single3 and NIAH-Multikey3 respectively.\label{tab:ruler}}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}{0.54\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/tsne/mixed.jpg}
+        \captionof{figure}{Visualization of the K Cache from the final layer of LLaMA3-8B-8K with Dynamic NTK extrapolation after inputs randomly sampled from the Single3 and MultiKey3 subsets in RULER. The visualization uses a 2D t-SNE projection, with each token represented as a point in the image and the input index shown via the color changing.\label{kcache}}
+    \end{minipage}
+\end{figure} 
+
+The above analysis has demonstrated ReAttention's good performance in various long-context scenarios, suggesting that it can extrapolate to infinite context lengths. However, these evaluations primarily focus on common natural contexts and lack currently widely-discussed benchmarks\citep{kuratov2024babilong,li2024long}, such as RULER\citep{hsieh2024ruler}. Unfortunately, ReAttention performs poorly on the RULER benchmark. In fact, the extrapolation methods not based on full attention, including ReAttention and InfLLM, fail to pass the RULER benchmark. For instance, using the LLaMA3-8B-8K\citep{meta2024introducing}, we compare Dynamic NTK extrapolation with InfLLM\citep{xiao2024infllm} and ReAttention at 8K and 16K context lengths. The results are shown in Table~\ref{tab:ruler}. Only Dynamic NTK achieves effective extrapolation, while both ReAttention and InfLLM exhibit more pronounced performance degradation as the context length increases. Specifically, We focus on reporting the results of two subtasks from RULER: NIAH-Single3 and NIAH-MultiKey3\citep{hsieh2024ruler}. Both tasks involve extracting key information from a context that contains misleading items. The difference is that the context for Single3 consists of natural text, where the key information is a string of random alphanumeric characters, whereas MultiKey3 features a stack of key-value pairs composed of those strings. We find that while all three methods can succeed in the Single3 test, only full-attention-based Dynamic NTK can effectively handle MultiKey3. 
+
+To uncover the mechanisms behind the observation, we perform a t-SNE visualization\citep{van2008visualizing} of the K cache in LLaMA3-8B-8K using Dynamic NTK for both Single3 and MultiKey3, using the K cache in the last layer as an example. The results are shown in Figure~\ref{kcache}. For Single3, which primarily consists of natural text, the reduced K cache exhibits a single manifold with a local cluster and an overall coherent feature as the input length increases. In contrast, for MultiKey3, which is dominated by chaotic text\citep{lv2024longwanjuan}, the reduced K cache reveals multiple overlapping manifolds rather than an extension along a single curve. This results in the fact that during the K cache selection in MultiKey3, regardless of whether we use the same index encoding or direct sequential encoding for the selected segments, the subsequent self-attention fails to identify which manifold branch the segments belong to. Only by encoding all K caches according to their original position indices can LLM implicitly recognize\citep{chi2023latent,kazemnejad2024impact} which manifold branch it resides on. This is why only full attention can effectively handle such tasks.
+
+Nevertheless, the synthetic chaotic long texts are quite rare in practical scenarios\citep{lv2024longwanjuan}. In the common natural long text benchmarks we have tested, ReAttention consistently demonstrates strong performance. Therefore, ReAttention still remains competitive for application in extending the context length of LLMs to infinity.
+
+
+
+\section{Related Work}
+
+
+Length extrapolation is an important issue for LLMs\citep{press2021train}, namely training in a short context, and maintaining good performance in a longer context. The mainstream extrapolation research mainly focuses on adjusting the Rotary Position Embedding (RoPE)\citep{su2021roformer}. For example, Linear PI\citep{chen2023extending} first achieves the length extrapolation in LLMs by scaling the position indices to the pre-training range with little fine-tuning. The NTK method\citep{fixedNTK,dynamicNTK,peng2023yarn} then adjusts the rotary base in RoPE\citep{su2021roformer} to achieve plug-and-play length extrapolation. Subsequently, amplifying the rotary base and training on longer lengths has become the dominant approach for length extrapolation\citep{roziere2023code,xiong2023effective,liu2023scaling,ding2024longrope}, but these methods all have an explicit extrapolation upper bound. In addition, ReRoPE\citep{rerope}, Self-Extend\citep{jin2024llm}, and ChunkLLaMA\citep{an2024training} also achieve plug-and-play extrapolation by limiting the relative position. However, all of the above methods are based on full attention, facing the problem of attention entropy soaring with input length, and thus fail to achieve infinite context length\citep{han2023lm,wang2024length}.
+
+In contrast, another line of research has tried to extend the context length of models through sparse attention. Considering the self-attention distribution tends to focus on the global and local context, StreamingLLM and LM-Infinite proposed the $\Lambda$-shaped attention window to achieve almost unlimited input length\citep{xiao2023efficient,han2023lm}. However, since the input is accompanied by discarding the previous context, it still fails to extend the context length\citep{dong2024get}. Based on StreamingLLM, InfLLM\citep{xiao2024infllm} and LongHeads\citep{lu2024longheads} attempt to extend context through chunkwise retrieval from the middle cache, but the semantic fragmentation and block representation issues also affect downstream task performance\citep{luo2024bge}. Recently, MInference\citep{jiang2024minference} and RetrievalAttention\cite{liu2024retrievalattention} utilize a dynamic cache selection to achieve significant speedup, but not attempt context extrapolation. In contrast, we propose ReAttention, which regards the cache selection as the preceding attention before the ordinary self-attention and achieves an infinite context with a finite attention scope, making LLMs free from the challenge of length extrapolation. We also minimize the top-$k$ attention kernel-wise like FlashAttention in self-attention\citep{dao2022flashattention,dao2023flashattention}.
+
+
+
+\section{Conclusion}
+
+
+In this paper, we introduce ReAttention, using a finite attention window to realize an infinite context length in each inference step. We evaluate ReAttention is on par with full attention in performance with LongBench, L-Eval, and InfiniteBench. Furthermore, ReAttention has been shown to successfully extend the context of mainstream LLMs, including the LLaMA series and Mistral, to up to 1M tokens and even expand the context length of LLaMA3.2-3B-chat by 128$\times$ to 4M without any further training in Needle-In-A-Haystack tests. We also improve the efficiency of ReAttention with Triton and achieve an efficient extrapolation without additional overhead.
+
+
+
+
+

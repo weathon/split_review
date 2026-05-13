@@ -1,0 +1,266 @@
+\title{Leveraging Skills from Unlabeled Prior Data for Efficient Online Exploration}
+
+\begin{abstract}
+Unsupervised pretraining has been transformative in many supervised domains. However, applying such ideas to reinforcement learning (RL) presents a unique challenge in that fine-tuning does not involve mimicking task-specific data, but rather \textit{exploring} and locating the solution through iterative self-improvement. In this work, we study how unlabeled prior trajectory data can be leveraged to learn efficient exploration strategies. While prior data can be used to pretrain a set of low-level skills, or as additional off-policy data for online RL, it has been unclear how to combine these ideas effectively for online exploration. Our method \ours{} (\textbf{S}kills from \textbf{U}nlabeled \textbf{P}rior data for \textbf{E}xploration) demonstrates that a careful combination of these ideas compounds their benefits. Our method first extracts low-level skills using a variational autoencoder (VAE), and then \textit{pseudo-relabels} unlabeled trajectories using an optimistic reward model, transforming prior data into high-level, task-relevant examples. Finally, \ours{} uses these transformed examples as additional off-policy data for online RL to learn a high-level policy that composes pretrained low-level skills to explore efficiently.
+We empirically show that \ours{} reliably outperforms prior strategies, successfully solving a suite of long-horizon, sparse-reward tasks.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\newcommand{\network}[1]{{\color[HTML]{4b7f95}{\textbf{#1}}}}
+
+\begin{figure*}[ht]
+    \centering\includegraphics[clip, width=\textwidth, trim=23.0cm 8.0cm 0cm 0cm]{figures/Banner.pdf}
+    \caption{\footnotesize\textbf{\ours{} utilizes unlabeled trajectory data \textit{twice}}, both for \emph{offline} unsupervised skill pretraining and for \emph{online} high-level policy learning using RL. \textbf{Left:} in the {\emph{offline}} pretraining phase \emph{(Stage 1)}, we unsupervisedly learn both a \network{trajectory segment encoder (a)} and a \network{low-level latent conditioned skill policy (b)} via a behavior cloning objective where the policy is optimized to reconstruct the action in the trajectory segment. \textbf{Right:} in the \emph{online} exploration phase \emph{(Stage 2)}, the pretrained \network{trajectory segment encoder (a)} and an \network{optimistic reward module (d)} are used to pseudo-label the prior data and transform it into high-level trajectories \textbf{(f)} that can be readily consumed by a high-level off-policy RL agent. Leveraging these offline trajectories and the online replay buffer \textbf{(e)}, we learn a \network{high-level policy (c)} that picks the pretrained low-level skills online to explore in the environment. Finally, the observed transitions and reward values are used to update the optimistic reward module and the online replay buffer.}
+    \label{fig:main}
+\end{figure*}
+
+\label{sec:intro}
+
+Unsupervised pretraining has been transformative in many supervised domains, such as language~\citep{devlin2018bert} and vision~\citep{he2022masked}. Pretrained models can adapt with small numbers of examples, and with better generality~\citep{gpt2_radford2019language, gpt3_brown2020}. However, in contrast to supervised learning, reinforcement learning (RL) presents a unique challenge in that fine-tuning does not involve further mimicking task-specific data, but rather \textit{exploring} and locating the solution through iterative self-improvement. Thus, the key challenge to address in pretraining for RL is not simply to learn good representations, but to learn an effective \textit{exploration strategy} for solving downstream tasks.
+
+Pretraining benefits greatly from the breadth of the data. Unlabeled trajectories (i.e., those collected from previous policies whose objectives are unknown) are the most abundantly available, but using them to solve specific tasks can be difficult. It is not enough to simply copy behaviors, which can differ greatly from the current task. There is an \textit{entanglement} problem -- general knowledge of the environment is mixed in with task-specific behaviors. A concrete example is learning from unlabeled locomotion behavior: we wish to learn how to move around the world, but not necessarily to the locations present in the pretraining data. We will revisit this setting in the experimental section.
+         
+The entanglement problem can be alleviated through hierarchical decomposition. Specifically, trajectories can be broken into segments of task-agnostic skills, which are composed in various ways to solve various objectives. We posit that unlabeled trajectories thus present a twofold benefit, (1) as a way to learn a diverse set of skills, and (2) as off-policy examples of composing such skills. Notably, prior online RL methods that leverage pretrained skills largely ignore the second benefit, and discard the prior trajectories after the skills are learned~\citep{ajay2020opal, pertsch2021accelerating, hu2023unsupervised, chen2024self}. We instead argue that such trajectories are critical, and can greatly speed up learning. We make use of a simple strategy of learning an optimistic reward model from online samples, and \textit{pseudo-relabeling} past trajectories with an optimistic reward estimate. The past trajectories can thus be readily utilized as off-policy data, allowing for quick learning even with a very small number of online interactions. 
+
+We formalize these insights as \ours{} (\textbf{S}kills from \textbf{U}nlabeled \textbf{P}rior data for \textbf{E}xploration), a recipe for maximally leveraging unlabeled prior data in the context of exploration. The prior data is utilized in two capacities, the offline and online phases. In the offline pretraining phase, we extract short segments of trajectories and use them to learn a set of low-level skills. In the online phase, we learn a high-level exploration policy, and again utilize the prior data by labelling each trajectory segment with an optimistic reward estimate. By ``double-dipping'' in this way, we can utilize both the low-level and high-level structure of prior trajectories to enable efficient exploration online. 
+
+Our main contribution is a simple method that leverages unlabeled prior trajectory data to both pretrain skills offline and compose these skills efficiently online for exploration. We instantiate \ours{} with a variational autoencoder (VAE) to extract low-level skills, and an off-the-shelf off-policy RL algorithm~\citep{ball2023efficient} to learn a high-level policy from both online and offline data (Figure \ref{fig:main}). Our empirical evaluations on a set of challenging sparse reward tasks show that leveraging the unlabeled prior data during both offline and online learning is crucial for efficient exploration, enabling \ours{} to find the sparse reward signal more quickly and achieve more efficient learning over all prior methods (none of which are able to utilize the data both online and offline). 
+
+
+
+\section{Related Work}
+
+\label{sec:related}
+
+\textbf{Unsupervised skill discovery.}
+Unsupervised skill discovery methods first began in the online setting, where RL agents were tasked with learning structured behaviors in the absence of reward signal~\citep{gregor2016variational, bacon2017option, florensa2017stochastic, achiam2018variational, eysenbach2018diversity, sharma2019dynamics, hansen2019fast, park2023metra}. These insights naturally transferred to the offline setting as a method of dealing with unlabeled trajectory data. Offline skill discovery methods largely comprise of two categories, those who extract skills based on optimizing unsupervised reward signals (in either the form of policies~\citep{touati2022does, hu2023unsupervised, frans2024unsupervised, park2024foundation} or Q-functions~\citep{chen2024self}), and those who utilize conditional behavior-cloning over subsets of trajectories~\citep{paraschos2013probabilistic,merel2018neural,shankar2020learning, ajay2020opal, singh2020parrot, pertsch2021accelerating, nasiriany2022learning}. Closest to our method in implementation are \citet{ajay2020opal} and \citet{pertsch2021accelerating}, who utilize a trajectory-segment VAE to learn low-level skills, and learn a high-level policy online. In contrast to prior methods which all utilize offline data purely for skill-learning and do not keep it around during online training, we show that utilizing the data via \textit{relabeling} is critical for fast exploration. 
+
+\textbf{Offline to online reinforcement learning.} The offline-to-online reinforcement learning methods~\citep{xie2021policy, song2022hybrid, lee2022offline, NEURIPS2022_ba1c5356, zhang2023policy, zheng2023adaptive, ball2023efficient, nakamoto2024cal} focus on efficient online learning with the presence of  offline data (often labeled with the reward value). Many offline RL approaches can be applied to this setting -- simply run offline RL first on the offline data to convergence as an initialization and then continue training for online learning (using the combined dataset that consists of both offline and online data)~\citep{kumar2020conservative, kostrikov2021offline,tarasov2024revisiting}. However, such approaches often result in slow online improvements as offline RL objectives tend to overly constrain the policy behaviors to be close to the prior data, limiting the exploration capability. On the other hand, off-policy online RL methods can also be directly applied in this setting by directly treating the offline data as additional off-policy data in the replay buffer and learning the policy from scratch~\citep{lee2022offline, song2022hybrid, ball2023efficient}. While related in spirit, these methods cannot be directly used in our setting as they require offline data to have reward labels. 
+
+\textbf{Data-driven exploration.} A common approach for online exploration is to augment reward bonuses to the perceived rewards and optimize the RL agent with respect to the augmented rewards~\citep{stadie2015incentivizing, bellemare2016unifying, houthooft2016vime, pathak2017curiosity, tang2017exploration, ostrovski2017count, achiam2017surprise, merel2018neural, burda2018exploration, ermolov2020latent, guo2022byol, lobel2023flipping}. While most exploration methods operate in the purely online setting and focus on adding bonuses to the online replay buffer, recent works also start to explore a more data-driven approach that makes use of an unlabeled prior data to guide online exploration.  \citet{li2024accelerating} explore adding bonuses to the offline data, allowing them to optimize the RL agent to be optimistic about states in the data, encouraging exploration around the offline data distribution. Our method explores a similar idea of adding bonuses to the offline data but for training a high-level policy, allowing us to compose pretrained skills effectively for exploration. \citet{hu2023unsupervised} explore a slightly different strategy of learning a number of policies using offline RL that each optimizes for a random reward function. Then, it samples actions from these policies online to form an action pool from which the online agent can choose to select for exploration. This approach does not utilize offline data during the online phase and require all the policies (for every random reward function) to be represented separately. In contrast, our method makes use of the offline data as off-policy data for updating the high-level policy and our skills are represented using a single network (with the skill latent being the input to our network). As we will show in our experiments, being able to use offline data is crucial for learning to explore in the environment efficiently. 
+
+\textbf{Hierarchical reinforcement learning.} The ability of RL agents to explore and behave effectively over a long horizon is an important research goal in the field of hierarchical RL (HRL)~\citep{dayan1992feudal, dietterich2000hierarchical, vezhnevets2016strategic, daniel2016hierarchical, kulkarni2016hierarchical, vezhnevets2017feudal, peng2017deeploco, riedmiller2018learning, nachum2018data, ajay2020opal, shankar2020learning, pertsch2021accelerating, gehring2021hierarchical, xie2021latent}. HRL methods typically learn a high-level policy to leverage a space of low-level primitive policies online. These primitives can be either manually specified~\citep{dalal2021accelerating} or pre-trained using unsupervised skill discovery methods as discussed above. While many existing works learn or fine-tune the primitives online along with the high-level policy~\citep{dietterich2000hierarchical, kulkarni2016hierarchical, vezhnevets2016strategic, vezhnevets2017feudal, nachum2018data, shankar2020learning}, others opt for a less flexible but simpler formulation where the primitives are kept fixed after an initial pre-training phase and only the high-level policy is being learned online~\citep{peng2017deeploco, riedmiller2018learning, ajay2020opal, pertsch2021accelerating, gehring2021hierarchical}. 
+Our work adopts the later strategy where we offline pre-train skills using a static, unlabeled dataset. None of prior HRL methods simultaneously leverage offline data for skill pre-training and as additional off-policy data for high-level policy learning online. As we show in our experiments, both of them are crucial in achieving sample efficient learning on challenging sparse-reward tasks.
+
+\textbf{Options framework.}  Many existing works on building hierarchical agents also adopt the options framework~\citep{sutton1999between, menache2002q, chentanez2004intrinsically, mannor2004dynamic, csimcsek2004using, csimcsek2007betweenness, konidaris2011autonomous, daniel2016hierarchical, srinivas2016option, daniel2016probabilistic, fox2017multi, bacon2017option, kim2019variational, bagaria2019option, bagaria2024effectively}. Different from the approach we take that learns latent skills with a fixed time horizon ($H=4$ in all our experiments), the options framework provides a more flexible way to learn skills with varying time horizon, often defined by learnable initiation and/or termination conditions~\citep{sutton1999between}. We opt for the simplified skill definition because it allows us to bypass the need to learn initiation or termination conditions, and frame the skill pretraining phase as a simple supervised learning task.
+
+
+
+\section{Problem Formulation}
+
+\label{sec:formulation}
+We consider a Markov decision process (MDP) $\mc M = \{\mc S, \mc A, \mb P, \gamma, r, \rho\}$ where $\mc S$ is the set of all possible states, $\mc A$ is the set of all possible actions that a policy $\pi(a|s): \mc S \mapsto \mc P(\mc A)$ may take, $\mb P(s' | s, a): \mc S \times \mc A \mapsto \mc P(\mc S)$ is the transition function that describes the probability distribution over the next state $s'$ given the current state and the action taken at the state, $\gamma$ is the discount factor, $r(s, a) : \mc S \times \mc A \mapsto \bb R$ is the reward function, and $\rho: \mc P(\mc S)$ is the initial state distribution. We have access to a dataset of transitions that are collected from the same MDP with no reward labels: $\mc D = \{(s_i, a_i, s'_i)\}$. During online learning, the agent may interact with the environment by taking actions and observes the next state and the reward specified by transition function $\mc P$ and the reward function $r$. We aim to develop a method that can leverage the dataset $\mc D$ to efficiently explore in the MDP to collect reward information, and outputs a well-performing policy $\pi(a|s)$ that achieves good cumulative return in the environment $\eta(\pi) = \bb E_{\{s_0 \sim \rho, a_t \sim \pi(a_t | s_t), s_{t+1} \sim \mb P(\cdot | s_t, a_t)\}}\sum_{t=0}^{\infty}\left[\gamma^t r(s_t, a_t)\right]$. Note that this is different from the zero-shot RL setting~\citep{touati2022does} where the reward function is specified for the online evaluation (only unknown during the unspervised pretraining phase). In our setting, 
+the agent has zero knowledge of the reward function and must actively explore in the environment to identify the task it needs to solve by receiving the reward through environment interactions. 
+
+
+
+\section{\textbf{S}
+
+\label{sec:method}
+In this section, we describe in detail how we utilize the unlabeled trajectory dataset to accelerate online exploration. Our method, \ours{}, can be roughly divided into two parts. The first part is an offline pretraining phase where we extract skills from the unlabeled prior data with an trajectory-segment VAE. The second part is the online learning phase where we train a high-level off-policy agent to compose the pretrained skills leveraging examples from both prior data and online replay buffer. Algorithm \ref{algo:main} describes our method.
+
+\begin{algorithm*}[ht]
+  \caption{\ours{}}\label{algo:main}
+  \begin{algorithmic}[1]
+    \State \textbf{Input:} Unlabeled dataset of trajectories $\mathcal{D}$, trajectory segment length $H$ and batch size $B$.
+    \For {each pretraining step}
+        \State Sample a batch of trajectory segments of length $H$, $\{\tau_1, \cdots, \tau_B\}$ from $\mc D$ % $\tau_i = \{s^i_1, a^i_1, \cdots, s^i_H, a^i_H\}$
+        \State Optimize the skill policy $\pi_\theta(a|s, z)$, the trajectory encoder $f_\theta(z|\tau)$, along with the state-dependent prior $p_\theta(z|s)$ with the VAE loss $\frac{1}{B} \sum_{i=1}^{B}\mc L_\theta(\tau_i)$ (Equation \ref{eq:vae})
+    \EndFor
+    \State $\mc D_{\mathrm{replay}} \leftarrow \emptyset$
+    \State Initialize the optimistic reward module $r_{\mathrm{UCB}}(s, z)$ (following \citep{li2024accelerating})
+    \For {every $H$ online environment steps}
+        \State Sample the trajectory latent $z \sim \pi_\psi(z|s)$
+        \State Run the skill policy $\pi_\theta(a | s, z)$ for $H$ steps in the environment: $\{s_0, a_0, r_0, \cdots, s_H\}$ 
+        \State Add the high-level transition to buffer $\mc D_{\mathrm{replay}} \leftarrow \mc D_{\mathrm{replay}} \cup \{(s_0, z, s_H, \sum_{i=0}^{H-1} [\gamma^i r_i])\}$.
+        \State Sample a batch of trajectory segments of length $H$, $\{\tau_1, \cdots, \tau_B\}$ from $\mc D$
+        \State Encode each trajectory segment using the trajectory encoder: $\hat{z}^i \sim f_\theta(z | \tau_i)$
+        \State Use $f_\theta$ and $r_{\mathrm{UCB}}$ to transform each unlabeled trajectory segment into a high-level transition with pseudo-labels (Equation \ref{eq:pseudo-label}): $\mb B_{\mathrm{offline}} = \{(s^i_0, \hat{z}^i, \hat{r}^i, s^i_{H})\}_{i=1}^{B}$
+        \State Sample batch $\mb B_{\mathrm{online}}$ from $\mc D_{\mathrm{replay}}$
+        \State Run off-policy RL update on $\mb B_{\mathrm{online}} \cup \mb B_{\mathrm{offline}}$ to train $\pi_\psi(z | s)$.
+    \EndFor
+    \State \textbf{Output:} A hierarchical policy consisting of a high-level $\pi_\psi(z | s)$ and low-level $\pi_\theta(a|s, z)$.
+  \end{algorithmic}
+\end{algorithm*}
+
+\textbf{Pretraining with trajectory VAE.}
+Since we only have access to an unlabeled dataset of trajectories, we must capture all the behaviors in the data as accurately as possible. At the same time, we aim to make the dataset directly usable for training a high-level skill-setting policy in hope that this high-level policy can be trained in a more sample-efficient way (compared to only having access to the online samples). We achieve this by adopting a trajectory VAE design from prior methods~\citep{ajay2020opal, pertsch2021accelerating} where a short segment of trajectory $\tau = \{s_0, a_0, s_1, \cdots, s_{H-1}, a_{H-1}\}$ is first fed into a trajectory encoder $f_\theta(z | \tau)$ that outputs a distribution over the latent skill $z$, then a skill policy $\pi_\theta(a | s, z)$ is used to reconstruct the actions in the trajectory segment. Such a design helps us directly map trajectory segments to their corresponding skill policies, effectively allowing us to transform the segment into a high-level transition in the form of $(\textit{current state: } s_0, \textit{action: } z, \textit{next state: } s_H)$. As result, such transition can be directly consumed by any off-policy RL algorithm in the online phase to update the high-level policy $\pi_\psi(z | s)$ (as we will explain in the next section in more details). We also learn a state-dependent prior $p_\theta(z | s)$, following the prior works~\citep{pertsch2021accelerating}, to help accommodate the difference in behavior diversity of different states.
+Putting them all together, the loss is shown in Equation \ref{eq:vae}. 
+\begin{equation}
+\begin{aligned}
+\label{eq:vae}
+    \mc L_\theta(\tau) &= \beta D_{\mathrm{KL}}(f_\theta(z|\tau) || p_\theta(z | s_0)) - \bb E_{z \sim f_\theta(z|\tau)} \left[\sum_{h=0}^{H-1} \log \pi_\theta(a_h | s_h, z)\right].
+\end{aligned}
+\end{equation}
+
+\textbf{Online exploration with trajectory skills.} Our main goal in the online phase is to learn a high-level off-policy agent that decides which skill to use at a regular interval of $H$ time steps to learn the task quickly. The agent consumes high-level transitions where the state and the next state are separated by $H$ time steps and the action corresponds to the trajectory latent $z$ that is used to retrieve the low-level actions from the skill policy $\pi(a | s, z)$. To make use of the prior data and generate high-level transitions from it, we need both the action and the reward label for each pair of states (that are separated by $H$ steps) in the trajectory. For the action, we can simply sample from the trajectory encoding of the trajectory segment enclosed by the state pair. For the reward, we maintain an upper-confidence bound (UCB) estimate of the reward value for each state and skill pair $(s, z)$ inspired by the prior work~\citep{li2024accelerating} (where it does so directly in the state-action space $(s, a)$), and pseudo-label the transition with such an optimistic reward estimate. The optimistic reward estimate is recomputed before updating the high level agent, since the estimate changes over time, while the trajectory encoding is computed before starting online learning, since this label does not change. The relabeling is summarized below:
+\begin{align}
+    (\underbracket{s_0}_{\text{state}}, \underbracket{\hat{z} \sim f_\theta(z | \tau)}_{\text{labeled action}}, \underbracket{\hat{r} = r_\mathrm{UCB}(s_0, \hat{z})}_{\text{labeled reward }}, \underbracket{s_H}_{\text{next state}}).
+    \label{eq:pseudo-label}
+\end{align}
+
+\textbf{Practical implementation details.} 
+Following prior work on trajectory-segment VAEs~\citep{ajay2020opal, pertsch2021accelerating}, we use a Gaussian distribution (with both mean and diagonal covariance learnable) for the trajectory encoder, the skill policy, as well as the state-dependent prior. 
+
+To achieve this, we adapt the policy parameterization from~\citep{haarnoja2018soft}, where the action value is enforced to be between $-1$ and $1$ using a $\mathrm{tanh}$ transformation, and entropy regularization is applied on the squashed space. We use this policy parameterization for the high-level policy $\pi(z|s)$ to predict the skill action in the squashed space $z_{\mathrm{sqaushed}}$. We then recover the actual skill action vector by unsquashing it according to $z = \mathrm{arctanh}(z_{\mathrm{sqaushed}})$, so that it can be used by our skill policy $\pi_\theta(a|s, z)$.
+ For the off-policy high-level agent, we follow \citet{li2024accelerating} to use RLPD~\citep{ball2023efficient} that takes a balanced number of samples from the prior data and the online replay buffer for agent optimization. In addition to using the optimistic offline reward label, we also find that adding the RND reward bonus to the online batch is also helpful to encourage online exploration, so we use it in all our experiments.
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}{\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/antmaze-viz.pdf}
+        \caption{\footnotesize a) \textbf{AntMaze}: three maze layouts (\texttt{medium}, \texttt{large} and \texttt{ultra}), and four goals for each layout.}
+        \label{fig:antmaze-viz}
+    \end{subfigure}
+    \begin{minipage}{0.6\textwidth}
+        \begin{subfigure}{\textwidth}
+        \centering
+        \includegraphics[width=0.26\linewidth]{figures/humanoid-maze-medium.jpeg}
+        \includegraphics[width=0.36\linewidth]{figures/humanoid-maze-large.jpeg}
+        \includegraphics[width=0.36\linewidth]{figures/humanoid-maze-giant.jpeg}
+        \caption{\footnotesize b) \textbf{HumanoidMaze}: \texttt{medium}, \texttt{large}, and \texttt{giant}.}
+        \label{fig:humanoid-viz}
+        \end{subfigure}
+    \end{minipage}\hfill
+    \begin{minipage}{0.4\textwidth}
+        \begin{subfigure}{\textwidth}
+        \centering
+        \includegraphics[width=0.49\linewidth]{figures/antsoccer-maze-arena.jpeg}
+        \includegraphics[width=0.49\linewidth]{figures/antsoccer-maze-medium.jpeg}
+        \caption{\footnotesize c) \textbf{AntSoccer}: \texttt{arena} and \texttt{medium}}
+        \label{fig:antsoccer-viz}
+        \end{subfigure}
+    \end{minipage}
+    
+    \begin{minipage}{0.215\textwidth}
+        \begin{subfigure}{\textwidth}
+            \centering
+            \includegraphics[width=0.98\textwidth]{figures/kitchen.png}
+            \caption{\footnotesize d) \textbf{Kitchen}}
+            \label{fig:kitchen-viz}
+        \end{subfigure}
+    \end{minipage}\hfill    
+    \begin{minipage}{0.168\textwidth}
+        \begin{subfigure}{\textwidth}
+            \centering
+            \includegraphics[width=0.98\textwidth]{figures/cube-single-task1.jpeg}
+            \includegraphics[width=0.98\textwidth]{figures/cube-double-task5.jpeg}
+            \caption{\footnotesize e) \textbf{Cube}}
+            \label{fig:cube-viz}
+        \end{subfigure}
+    \end{minipage}\hfill
+    \begin{minipage}{0.215\textwidth}
+        \begin{subfigure}{\textwidth}
+            \centering
+            \includegraphics[width=0.98\linewidth]{figures/scene-task3.jpeg}
+            \caption{\footnotesize f) \textbf{Scene}}
+            \label{fig:scene-viz}
+        \end{subfigure}
+    \end{minipage}\hfill
+    \begin{minipage}{0.375\textwidth}
+        \begin{subfigure}{\textwidth}
+        \centering
+        \begin{minipage}{0.8\textwidth}
+                \centering
+                \adjustbox{valign=t}{\includegraphics[width=0.95\textwidth]{figures/visual-antmaze.pdf}}
+         \end{minipage}\hfill
+        \begin{minipage}{0.1868\textwidth}
+                \adjustbox{valign=t}{\includegraphics[width=\textwidth]{figures/viz_image_2.png}}\\
+                \adjustbox{valign=t}{\includegraphics[width=\textwidth]{figures/viz_image_3.png}}\\
+                \adjustbox{valign=t}{\includegraphics[width=\textwidth]{figures/viz_image_4.png}}
+        \end{minipage}
+        \caption{\footnotesize g) \textbf{Visual AntMaze}}
+        \label{fig:vam-viz}
+        \end{subfigure}
+    \end{minipage}
+
+    \caption{\footnotesize \textbf{We experiment on 7 challenging, sparse-reward domains.} \emph{a)}: AntMaze with three different layouts and the corresponding four goal locations (denoted as {\color{red}the red dots}); \emph{b):} HumanoidMaze with three layouts; \emph{c)}: AntSoccer with two layouts \emph{d)}: Kitchen; \emph{e)}: Cube; \emph{f)}: Scene; \emph{g)}: Visual AntMaze with colored floor and local $64 \times 64$ image observations.
+    }
+    \label{fig:env_renders}
+\end{figure*}
+
+
+\section{Experimental Results}
+
+We present a series of experiments to evaluate the effectiveness of our method to discover fast exploration strategies. We specifically focus on long-horizon, sparse-reward settings, where online exploration is especially important. 
+In particular, we aim to answer the following questions:
+\begin{enumerate}[topsep=5pt,itemsep=-0.5ex,partopsep=1ex,parsep=1ex]
+    \item Can we leverage unsupervised trajectory skills to accelerate online learning?
+    \item Is our method able to find goals faster than prior methods?
+    \item How sensitive is the performance of our method is to its hyperparameters?
+\end{enumerate}
+\subsection{Experimental setup}
+We conduct our experiments on 7 challenging sparse-reward domains (Figure \ref{fig:env_renders}, (a) - (g)).
+
+\textbf{State-based locomotion domains: AntMaze (a), HumanoidMaze (b), AntSoccer (c).} The first set of domains involve controlling and navigating a robotic agent in a complex environment. AntMaze is a standard benchmark for offline-to-online RL from D4RL~\citep{fu2020d4rl}. HumanoidMaze and AntSoccer are locomotion domains from OGBench, a offline goal-conditioned RL benchmark~\citep{ogbench_park2024}. The goal of agent (either ant or humanoid) is to navigate to a goal location in a fixed maze layout. Each of the AntMaze and HumanoidMaze domains has three different maze layouts. For AntMaze, we test on four different goal locations for each maze layout. For HumanoidMaze and AntSoccer we test on one goal, and for HumanoidMaze we use both the \texttt{navigate} and \texttt{stitch} datasets. In the AntSoccer task, the agent also needs to dribble a soccer ball to the goal location. 
+\textbf{State-based manipulation domains: Kitchen (d), Cube (e), Scene (f).} Next, we consider a set of manipulation domains that require a wide range of manipulation skills. Kitchen is a standard benchmark from D4RL where a robotic arm needs to complete a set of manipulation tasks (e.g., turn on the microwave, move the kettle) in sequence in a kitchen scene. Cube and Scene are two offline goal-conditioned RL benchmark domains from OGBench~\citep{ogbench_park2024}. For Cube, the robotic arm must arrange one or more cube objects to desired goal locations (e.g., stacking on top of each other) that mainly involves pick and place motions. For Scene, the robotic arm can interact with a more diverse set of objects: a window, a drawer, a cube and two locks that control the window and the drawer. The tasks in Scene are also longer, and require the composition of multiple atomic behaviors (e.g., locking and unlocking, opening the drawer/window, moving the cube).
+
+In addition to the six state-based domains, we also experiment with a challenging visual-domain introduced by \citet{park2023hiql}, \textbf{Visual AntMaze (g)}, where the agent has all of the proprioceptive information from the state-based AntMaze environment except for the agent's $(x, y)$ position, which the agent must obtain from a $64 \times 64$ image observation of its surroundings.
+
+To evaluate our method on these domains, we simply take the datasets in these benchmarks and remove the reward label. We also remove any information in the transition that may reveal the information about the termination of an episode. For all of these tasks, we use a $-1$/$0$ sparse reward function where the agent receives $-1$ when it has not found the goal and it receives $0$ when it reaches the goal location. For all of the domains above, we use the normalized return, a standard metric for D4RL~\citep{fu2020d4rl} environments, as the main evaluation metric. For the Kitchen domain, the normalized return represents the average percentage of the tasks that are solved. For tasks in other domains, the normalized return represents the average task success rate. For all our figures in the main body, the shaded area indicates the 95\% stratified bootstrap confidence interval and the solid line indicates the interquartile mean.  
+\subsection{Comparisons}
+\label{sec:comparisons}
+While there is no existing method in our setting that utilizes unlabeled prior data in both the pretraining phase and the online learning phase, there are methods that use the prior data in either phase. We first consider two baselines that do not use pretraining and directly perform online learning.
+
+\textbf{Online.} This baseline discards the offline data and the exploration is done with online reward bonus implemented by random network distillation (RND)~\citep{burda2018exploration}. For all the baselines below (including our method), we add online RND bonus to the replay buffer to encourage exploration. 
+
+\textbf{ExPLORe~\citep{li2024accelerating}.} This baseline is similar to our method in the sense that it also uses exploration bonus and offline data to encourage exploration. The one crucial difference is that it does not perform unsupervised skill pretraining and learns a 1-step policy directly online. As we will show, pretraining is crucial for our method to find goals faster and lead to more efficient online learning. It is worth noting that the original ExPLORe method does not make use of online RND. To make the comparison fair, we additionally add online RND bonus to this baseline to help it explore better online. For completeness, we include the performance of the original ExPLORe in Figure \ref{fig:explore-rnd}. 
+
+We then consider additional baselines that use the prior data during a pretraining phase but do not use the data during online learning.
+
+\textbf{Diffusion BC + JSRL.} This baseline is an upgraded version of the \textbf{BC + JSRL} baseline used in ExPLORe~\citep{li2024accelerating}. Instead of using a Gaussian policy (as used by \citet{li2024accelerating}), we use an expressive diffusion model to behavior clone the unlabeled prior data. At the beginning of each online episode, we roll out the policy for a random number of steps from the initial state before using switching to the online RL agent~\citep{uchendu2023jump, li2023understanding}. One might expect that an expressive enough policy class can model the behavior of the prior good enough such that it can form a good prior for exploration online.
+
+\textbf{Online with Skills.} We also consider two skill-based baselines where the prior data is discarded in the online phase and the high-level policy is trained from scratch online with exploration bonus. We experiment with two types of pretraining skills. The first one, is the trajectory VAE skill used in our method. The second one is from a recently proposed unsupervised offline skill discovery method where skills are pretrained to be able to traverse a learned Hilbert representation space~\citep{park2024foundation} (HILP). We use the exact same high-level RL agent as our method except that the agent no longer makes use of the prior data online. It is worth noting that the baseline that uses the trajectory VAE skill is very similar to SPiRL~\citep{pertsch2021accelerating}, a prior skill-based online RL method that also pretrains skills with a trajectory VAE. The only difference is that we make two additional improvements on top of SPiRL. The first improvement is replacing the KL constraint with entropy regularization (same as our method as described in Section \ref{sec:method}, practical implementation details). The second improvement is the online RND bonus that is also added to all other methods.
+
+Finally, we introduce a novel baseline that also uses prior data during pretraining and online exploration, but uses HILP skills rather than trajectory-based skills. 
+
+\textbf{HILP w/ Offline Data.} We observe that HILP skills can also utilize the offline data via relabeling. Recall that HILP learns a latent space of the observations (via an encoder $\phi_{\mathrm{HILP}}$) and learns skills that move agent in a certain direction $z$ (skill) in the latent space. For any high-level transition $(s_0, s_H)$, we simply take $\hat{z} \leftarrow \frac{\phi_{\mathrm{HILP}}(s_H) - \phi_{\mathrm{HILP}}(s_0)}{\|\phi_{\mathrm{HILP}}(s_H) - \phi_{\mathrm{HILP}}(s_0)\|_2}$, the normalized difference vector that points from $s_0$ to $s_H$ in the latent space. We use the normalized difference vector because the pretrained HILP skill policy takes in normalized skill vectors. We use the exact same high-level RL agent as our method except that the skill relabeling is done by computing the latent difference rather than using the trajectory encoder ($f_\theta(z|\tau)$).
+
+For the visual antmaze environment, we use the same image encoder used in RLPD~\citep{ball2023efficient}. We also follow one of our baselines, ExPLORe~\citep{li2024accelerating}, to use ICVF~\citep{ghosh2023reinforcement}, a method that uses task-agnostic value functions to learn image/state representations from passive data. ICVF takes in an offline unlabeled trajectory dataset with image observations and pretrain an image encoder in an unsupervised manner. Following ExPLORe, we take the weights of the image encoder from ICVF pretraining to initialize the image encoder’s weights in the RND network. 
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/main.pdf}
+    \caption{\footnotesize \textbf{Aggregated normalized return across seven different domains (Single-Cube and Double-Cube are two sub-domains of Cube).}  \textbf{Ours} achieves the best performance on all domains except on Scene where \textbf{HILP w/ Offline Data} achieves better performance. \textbf{HILP w/ Offline Data} is a novel baseline that we introduce which also uses the offline data both during offline skill pre-training and  online learning. Section \ref{sec:comparisons} contains details on the baselines we compare with. We omit the \textbf{Online} baseline on the harder domains (\texttt{Cube}, \texttt{Scene}, \texttt{HumanoidMaze}, and \texttt{AntSoccer}) as it is consistently worst than other methods. For \texttt{Kitchen}, we use 16 seeds. For all other domains, we use 8 seeds. All of the aggregated plots use the interquartile mean (IQM) metric following \citet{agarwal2021deep} with 95\% stratified bootstrap confidence intervals. 
+    }
+    \label{fig:main-results}
+\end{figure*}
+
+\subsection{Can we leverage unsupervised trajectory skills to accelerate online learning?}
+Figure \ref{fig:main-results} shows the aggregated performance of our approach on all seven domains. Our method outperforms all prior methods on all domains except Scene, where our novel baseline \textbf{HILP with Offline Data} performs slightly better. It is worth noting that \textbf{HILP with Offline Data} also leverages offline data twice (one of the key ideas behind our method), both during offline and online learning. Both HILP-based methods (\textbf{Online with HILP Skills} and \textbf{HILP with Offline Data}) perform well on Scene, Single Cube, and AntSoccer, but struggle to learn on other tasks. The \textbf{Online with Trajectory Skills} baseline also consistently performs worse than our method across all seven domains, which demonstrates the importance of using prior data for online learning of the high-level policy, since that is only difference between this baseline and \textbf{Ours}. \textbf{ExPLORe} uses offline data during online learning, but does not pretrain skills, leading to slower learning on all seven environments and difficulty achieving any significant return on any domains other than the easier AntMaze and Single Cube tasks. We also report the performance on individual AntMaze mazes and Kitchen tasks in Figure \ref{fig:antmaze-and-kitchen-return}, and observe that our method outperforms the baselines more on harder environments. This trend continues with HumanoidMaze, where individual results in Figure \ref{fig:humanoid-maze-full} show that \textbf{Ours} is the only method to achieve nonzero final return on the more difficult large and giant mazes.
+These experiments suggest that pretraining skills and the ability to leverage the prior data are both crucial for achieving efficient online learning, especially in more challenging environments.
+ While ICVF combines synergistically with our method to further accelerate learning and exploration, initializing RND image encoder weights using ICVF is not critical to its success. 
+\subsection{Is our method able to find goals faster than prior methods?}
+Even though we have demonstrated that our method is able to achieve a higher success rate faster than prior works, it is still not clear if our method actually leads to better exploration (instead of simply learning the high-level policy better). In this section, we study the exploration aspect in isolation in the AntMaze domain. Figure \ref{fig:goal-time} reports the number of online environment interaction steps for the agent to reach the goal for the first time. Such a metric allows us to assess how efficiently the agent explores in the maze whereas the success rate metric only measures how good the agent is at reaching the desired goal. It is possible for an agent to be good at exploration, but bad at reaching goals consistently and vice-versa. Figure \ref{fig:goal-time} shows that our method reaches goals faster than every baseline on all three maze layouts, which confirms that our method not only learns faster, but does so by exploring more efficiently.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/antmaze-goal-time.pdf}
+    \caption{\footnotesize \textbf{Interquartile mean (IQM) of the number of environment steps taken to reach the goal (smaller the better).} The first goal time is considered to be $300\times10^3$ steps if the agent never finds the goal. Our method is the most consistent, achieving performance better than all other baselines on all layouts (4 tasks/goals for each layout and 8 seeds for each task). The plot is generated using the \emph{rliable} library with 95\% stratified bootstrap confidence intervals~\citep{agarwal2021deep}. }
+    \label{fig:goal-time}
+\end{figure}
+
+\subsection{How sensitive is the performance of our method is to its hyperparameters?} In this section, we study the sensitivity of two hyperparameters, 1) $\alpha$: the amount of optimism (RND coefficient) used when labeling offline data with UCB rewards (Equation \ref{eq:pseudo-label}), and 2) $H$: the length of the skill. We select one representative task from each domain and study the how different $\alpha$ and $H$ values affect our performance on these tasks (Figure \ref{fig:sensitivity}). For the RND coefficient, we test a wide range of values. When the RND bonus is removed ($\alpha = 0$), our method performs significantly worse, highlighting the importance of optimistic labeling on efficient online exploration. The aggregated performance is similar for $\alpha \in \{2, 8, 16\}$. Another key hyperparmeter in our method is the skill horizon length (see Figure \ref{fig:sensitivity}, right). We use $H = 4$ for all experiments in the paper. 
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/sensitivity.pdf}
+    \caption{\footnotesize \textbf{Sensitivity analysis on the RND coefficient ($\alpha$) and the skill horizon length ($H$) on a subset of tasks.} We report the interquartile mean (IQM) of the normalized return across seven domains (we select one representative task per domain) for different hyperparameter values. The performance of our method is not very sensitive to the magnitude of $\alpha$ as long as it is within a reasonable range $(2, 16)$. Without the bonus ($\alpha=0$), our method performs significantly worse. A skill horizon length of 4 performs significantly better than a horizon length of 2 or 8. We use a skill length of 4 and $\alpha=8$ for all experiments with skill-based methods.
+    }
+    \label{fig:sensitivity}
+\end{figure*}
+
+
+
+\section{Discussion and Limitations}
+
+In this work, we propose a novel method, \ours{}, that leverages unlabeled prior trajectory data to accelerate online exploration and learning. The key insight is to use unlabeled trajectories \emph{twice}, to 1) extract a set of low-level skills offline, and 2) serve as additional data for a high-level off-policy RL agent to compose these skills to explore in the environment. This allows us to effectively combine the strengths from unsupservised skill pretraining and sample-efficient online RL methods to solve a series of challenging long-horizon sparse reward tasks significantly more efficiently than existing methods. Our work opens up avenues in making full use of prior data for scalable, online RL algorithms. First, our pre-trained skills remain frozen during online learning, which may hinder online learning when the skills are not learned well or need to be updated as the learning progresses. Such problems could be alleviated by utilizing a better skill pretraning method, or allowing the low-level skills to be fine-tuned online. 
+A second limitation of our approach is the reliance on RND to maintain an upper confidence bound on the optimistic reward estimate. Although we find that RND works without ICVF on high-dimensional image observations in Visual AntMaze, the use of RND in other high dimensional environments may require more careful consideration. Possible future directions include examining alternative methods of maintaining this bound.
+
+
+
+

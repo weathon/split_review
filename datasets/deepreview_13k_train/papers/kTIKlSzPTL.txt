@@ -1,0 +1,507 @@
+\title{FutureFill: Fast Generation from Convolutional Sequence Models}
+
+\begin{abstract}
+We address the challenge of efficient auto-regressive generation in sequence prediction models by introducing FutureFill—a method for fast generation that applies to any sequence prediction algorithm based on convolutional operators. Our approach reduces the generation time requirement from quadratic to quasilinear relative to the context length. Additionally, FutureFill requires a prefill cache sized only by the number of tokens generated, which is smaller than the cache requirements for standard convolutional and attention-based models. We validate our theoretical findings with experimental evidence demonstrating correctness and efficiency gains in a synthetic generation task.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Large Transformer models \cite{vaswani2017attention} have become the method of choice for sequence prediction tasks such as language modeling and machine translation. Despite their success, they face a key computational limitation: the attention mechanism, their core innovation, incurs a quadratic computational cost during training and inference. This inefficiency has spurred interest in alternative architectures that can handle long sequences more efficiently.
+
+Convolution-based sequence prediction models \cite{li2022makes, poli2023hyena, agarwal2023spectral, fu2024monarch}
+have emerged as strong contenders, primarily due to their ability to leverage the Fast Fourier Transform (FFT) for near-linear scaling with sequence length during training. These models build upon the advancements in State Space Models (SSMs), which have shown promise in modeling long sequences across diverse modalities \cite{gu2021efficiently,dao2022hungry, gupta2022diagonal, orvieto2023resurrecting, poli2023hyena, gu2023mamba}.
+Convolutional models offer a more general framework than SSMs because they can represent any linear dynamical system (LDS)  without being constrained by the dimensionality of hidden states \cite{agarwal2023spectral}. This flexibility has led to recent developments that theoretically and empirically handle longer contexts more effectively. Notable among these are Spectral State Space Models or Spectral Transform Units (STUs) \cite{agarwal2023spectral}, which use spectral filtering algorithms \cite{hazan2017learning,hazan2018spectral}
+to transform inputs into better-conditioned bases for long-term memory. Another approach is Hyena \cite{poli2023hyena}, which learns implicitly parameterized Markov operators. Both methods exploit the duality between time-domain convolution and frequency-domain multiplication to accelerate prediction via the FFT.
+
+While SSMs and recurrent models benefit from fast inference times independent of sequence length, making them attractive for large-scale language modeling, convolutional models have been hindered by slower token generation during inference. The best-known result for generating tokens with convolutional models is quadratic in sequence length—comparable to attention-based models (see \cite{massaroli2024laughing} Lemma 2.1). This limitation has prompted research into distilling state-space models from convolutional models \cite{massaroli2024laughing}, but such approximations lack comprehensive understanding regarding their approximation gaps due to the broader representational capacity of convolutional models.
+
+
+
+In this paper, we address the problem of exact auto-regressive generation from given convolutional models, significantly improving both the generation time and cache size requirements. We present our main results in two settings:
+\begin{enumerate}
+    \item {\bf Generation from Scratch:} When generating $L$ tokens from scratch, we demonstrate that long convolutional sequence predictors can generate these tokens in total time  $O(L \log^2 L) $. This improves upon previous methods that require 
+$O(L^2)$ time for generation. We further provide a memory-efficient version wherein the total runtime increases to $O(L^{3/2} \sqrt{\log(L)})$ but the memory requirement is bounded by $O(\sqrt{L \log L})$.
+    
+
+    \item {\bf Generation with Prompt:} When generating $K$ tokens starting from a prompt of length $L$, we show that the total generation time is $O(L \log L + K \log^2 K)$ 
+ with a cache size requirement of 
+$O(K)$. Previously, the best-known requirements for convolutional models were a total generation time bounded by 
+$O(L \log L + LK + K^2)$ and a cache size bounded by 
+$O(L)$ \citep{massaroli2024laughing}. 
+    
+    
+\end{enumerate}
+
+Importantly, our results pertain to provably exact generation from convolutional models without relying on any approximations. Moreover, our methods are applicable to any convolutional model, regardless of how it was trained. The following table compares our algorithm with a standard exact implementation of convolution. We also provide a comparison of the time and cache size requirements for exact computation in attention-based models.
+
+
+\begin{table}[h]
+    \centering
+\subfloat[Comparison for generating $L$ tokens from scratch. Runtime is in asymptotic notation, i.e. $O (\cdot)$ is omitted for brevity. ]{    
+\begin{tabular}{|c|c|c|}
+        \hline
+        Method & Runtime & Memory\\
+        \hline
+        Standard Conv & $L^2$ & $L$\\ 
+                \hline
+        Standard Attn. & $L^2$ & $L$ \\  
+                \hline    
+        EpochedFutureFill (ours) & $L^{3/2} \sqrt{\log L}$ & $\sqrt{L \log L}$ \\
+        \hline
+        ContinuousFutureFill (ours) & $L \log^2 L$ & $L$\\
+        \hline
+\end{tabular}}
+\quad
+\subfloat[Comparison for generating $K$ tokens starting from a prompt of length $L$, runtime and cache-size are in asymptotic notation, i.e. $O (\cdot)$ is omitted for brevity.]{
+\begin{tabular}{|c|c|c|}
+        \hline
+        Method & Runtime & Cache-size \\
+        \hline
+        Standard Conv & $LK + L \log L + K^2$ & $L$ \\  
+                \hline 
+        Standard Attn. & $L^2 + KL$ & $L$ \\    
+            \hline  
+        ContinuousFutureFill (ours) & $L \log L + K \log^2 K$ & $K$ \\
+        \hline
+    \end{tabular}}
+    \label{tab:my_label}
+\end{table}
+
+Our results for generation from convolutional models are based on building efficient algorithms for an online version of the problem of computing convolutions. In this problem, the algorithm is tasked to compute the convolution of two sequences $u*\phi$, however the challenge is to release iteratively at time $t$ the value of $[u*\phi]_t$, where the sequence $\phi$ is fully available to the algorithm but the sequence $u$ streams in one-coordinate at a time.
+
+While the FFT algorithm allows for an $O(L\log L)$-time \textit{offline} algorithm for the convolution of two $L$-length sequences, whether a similar result exists for the online model was not known. Naively, since $[u*\phi]_t = \langle u_{1:t}, \phi_{t:1} \rangle$, the total output can be computed in time $O(L^2)$. In this paper we demonstrate using repeated calls to appropriately constructed FFT-subroutines to compute the \textit{future} effect of past tokens (a routine we call FutureFill), one can compute the convolution in the online model with a total computational complexity of $O(L\log^2(L))$, nearly matching its offline counterpart and significantly improving over the naive algorithm which was the best known \citep{massaroli2024laughing}. 
+
+It is worth noting that the naive algorithm for computing online convolution does not require any additional memory other than the memory used for storing the sequences $v,w$. Such memory is often a bottleneck in practical sequence generation settings and is referred to as the size of the generation cache. For context the size of the generation cache for attention models is $O(L)$, i.e. proportional to the length of the prefill-context and the generation length. We further show that when generating from convolutional models, one can construct a trade-off for the computational complexity (i.e. flops) and memory (i.e. generation cache size) using the FutureFill sub-routine. We highlight two points on this trade-off spectrum via two algorithmic setups both employing FutureFill. We detail this trade-off in Table \ref{tab:trade_off_table}.
+
+\begin{table}[h]
+    \centering
+    \begin{tabular}{|c|c|c|}
+    \hline
+        Algorithm & Computational Complexity (Flops) & Memory (Generation Cache-Size) \\
+        \hline
+        Naive & $O(L^2)$ & O(1) \\
+        Epoched-FutureFill (ours) & $O(L^{3/2} \log L )$ & $O(\sqrt{L})$ \\
+        Continuous-FutureFill (ours) & $O(L\log^2 L)$ & $O(L)$ \\
+        \hline
+    \end{tabular}
+    \caption{Comparison of results for Online convolution.}
+    \label{tab:trade_off_table}
+\end{table}
+\subsection{Related Work}
+
+\paragraph{State space models and convolutional sequence prediction.} 
+Recurrent neural networks have been revisited in the recent deep learning literature for sequential prediction in the form of state space models (SSM), many of whom can be parameterized as convolutional models.
+\cite{NEURIPS2020hippo} propose the HiPPO framework for continuous-time memorization, and shows that with a special class of system matrices $A$ (HiPPO matrices), SSMs have the capacity for long-range memory. Later work \cite{gu2021combining,gu2021efficiently,gupta2022diagonal,smith2023simplified} focus on removing nonlinearities and devising computationally efficient methods that are also numerically stable. To improve the performance of SSMs on language modeling tasks \cite{dao2022hungry} propose architectural changes as well as faster FFT algorithms with better hardware utilization, to close the speed gap between SSMs and Transformers. 
+Further investigation in \cite{orvieto2023resurrecting} shows that training SSM is brittle in terms of various hyperparameters. Various convolutional models have been proposed for sequence modelling, see e.g. \cite{fu2023simple,li2022makes,pmlr-v202-shi23f}.
+These papers parameterize the convolution kernels with specific structures. 
+
+The Hyena architecture was proposed in \cite{poli2023hyena}  and distilling it into a SSM was studied in \cite{massaroli2024laughing}. Other studies in convolutional models include LongConv \cite{fu2023simple} and SGConv \cite{li2022makes} architectures, as well as multi-resolution convolutional models \cite{shi2023sequencemodelingmultiresolutionconvolutional}. 
+
+\paragraph{Spectral filtering.} A promising technique for learning in linear dynamical systems with long memory is called  spectral filtering  put forth in \cite{hazan2017learning}. This work studies online prediction of the sequence of observations $y_t$,  and the goal is to predict as well as the best symmetric LDS using past inputs and observations. Directly learning the dynamics is a non-convex optimization problem, and spectral filtering is developed as an improper learning technique with an efficient, polynomial-time algorithm and near-optimal regret guarantees. Different from regression-based methods that aim to identify the system dynamics, spectral filtering's guarantee does not depend on the stability of the underlying system, and is the first method to obtain condition number-free regret guarantees for the MIMO setting. Extension to asymmetric dynamical systems was further studied in \cite{hazan2018spectral}.  
+
+Spectral filtering is particularly relevant to this study since it is a convolutional model with fixed filters. Thus, our results immidiately apply to this technique and imply provable regret bounds with guaranteed running time bounds in the online learning model which improve upon state of the art. 
+\paragraph{Online learning and regret minimization in sequence prediction.}
+The methodology of online convex optimization, see e.g. \cite{hazan2016introduction}, applies to sequences prediction naturally. In this setting, a learner iteratively predicts, and suffers a loss according to an adversarially chosen loss function. Since nature is assumed to be adversarial, statistical guarantees are not applicable, and performance is measured in terms of regret, or the difference between the total loss and that of the best algorithm in hindsight from a class of predictors. This is a particulary useful setting for sequential prediction since no assumption about the sequence is made, and it leads to robust methods.  
+
+Sequential prediction methods that apply to dynamical systems are more complex as they incorporate the notion of a state. Recently the theory of online convex optimization has been applied to learning in dynamical systems, and in this context, the spectral filtering methodology was devised. See \cite{hazan2022introduction} for an introduction to this area.  
+
+
+
+\section{Setting}
+
+
+\subsection{Online Convolutions}
+
+\paragraph{Convolution:} 
+The convolution operator between two vectors $u, \phi \in \mathbb{R}^{t}$ outputs a sequence of length $t$ whose element at any position $s \in [t]$ \footnote{This definition corresponds to the \textit{valid} mode of convolution in typical implementations of convolution e.g. scipy.} is defined as
+\begin{equation}
+[u*\phi](s) = \sum_{i=1}^{s} u_i \phi_{s+1-i} = \langle u_{1:s}, \phi_{s:1} \rangle. \label{eqn:convdef}
+\end{equation}
+A classical result states in the theory of algorithms is that given two vectors $u, \phi \in \mathbb{R}^{t}$, their convolution can be computed in time $O(t \log t)$, using the FFT algorithm. 
+\paragraph{Online Convolution:} We consider the problem of performing the convolution $u*\phi$ when one of the sequences $\phi$ is fully available to the model, however the other sequence $u$ \textit{streams} in, i.e. the element $u_t$ is made available to the model at the start of round $t$, at which point it is expected to release the output $[u*\phi]_t$. This model of online convolution is immediately relevant to the online auto-regressive generation of tokens from a convolutional sequence model as the output token at time $t$ becomes the input for the next round and hence is only available post generation. In this setting, the sequence $u$ corresponds to generated tokens and the sequence $\phi$ corresponds to the convolutional filter which the model has full access to. We further detail the setup of sequence generation in the next subsection.
+
+\subsection{Sequence Prediction:}
+
+In {\bf sequence prediction}, the input is a sequence of tokens denoted $u_1,...,u_t,... $, where $u_t \in \reals^{d_{in}}$. The predictor's task is to generates a sequence $\hat{y}_1,...,\hat{y}_t,...$, where $\hat{y}_t \in \reals^{d_{out}}$ is generated after observing $ u_1,...,u_{t-1}$. The output $y_t$ is observed after the predictor generates $\hat{y}_t$. The quality of the prediction is measured by the distance between the predicted and observed outputs according to a loss function $\ell_t(\hat{y}_t,y_t)$, for example the mean square error $\|\hat{y}_t-y_t\|^2$. 
+
+For an input sequence $\{u_t\}$ we denote by $u_{1:t}$ the sequence of inputs $u_1,...,u_t$. For any $i \leq j$ let $u_{i:j}$ denote the sub-sequence $u_i, u_{i+1}, \ldots u_j$. When $i > j$, $u_{i:j}$ denotes the subsequence $u_{j:i}$ in reverse order. Thus $u_{t:1}$ represents the sequence in reverse order. We also denote $[k] = \{1,2,...,k\}$ as a set of $k$ natural numbers.
+
+Given a multi-dimensional sequence $u_1 \ldots u_t$ where each $u_i \in \reals^d$ and given a vector $v \in \reals^t$, for brevity of notation we overload the definition of inner products by defining $y = \langle v, u_{1:t} \rangle$ with $y \in \reals^d$ as $y_j = \sum_{i=1}^t u_i \cdot [u_i]_j$. That is the inner-product along the time dimension is applied on each input dimension separately. Further when we have a sequence of matrices $u_{1:t} = \{u_1 \ldots u_t\}$ with each $u_i \in \reals^{d \times d}$, we define $\langle u_{1:t}, u_{1:t} \rangle = \sum_{i=1}^{t} u_i u_i$. With these definitions the notion of convolution between such sequences can be defined via the natural extension.
+
+\subsection{Online sequence prediction}
+
+In the {\bf online sequence prediction} setting, an online learner iteratively sees an input $u_t$ and has to predict output $\hat{y}_t$, after which the true output $y_t$ is revealed. The goal is to minimize error according to a given Lipschitz loss function $\ell_t(y_t, \hat{y}_t)$. 
+In online learning it is uncommon to assume that the true sequence was generated by the same family of models as those learned by the learner. For this reason the metric of performance is taken to be regret. 
+Given a class of possible predictors, the goal is to minimize regret w.r.t. these predictors. For example, a linear predictor predicts according to the rule 
+$$ \pi_{M_{1:k},N_{1:l}} (u_{1:t},y_{1:t-1}) = \sum_{i=1}^k M_i u_{t-i} + \sum_{j=1}^l N_j y_{t-j}.$$
+The performance of a prediction algorithm $\mA$ is measured by regret, or difference in total loss, vs. a class of predictors $\prod$, such as that of linear predictors, e.g. 
+$$ \regret_T(\mA) = \sum_{t=1}^T \ell_t( y_t , \hat{y}_t^\mA ) - \min_{\pi \in \prod} \sum_{t=1}^T \ell_t( y_t , \hat{y}_t^\pi ). $$
+
+This formulation is valid for online sequence prediction of any signal. 
+We are particularly interested in signal that are generated by dynamical systems. 
+A time-invariant linear dynamical system is given by the dynamics equations 
+$$ x_{t+1} = A x_t + B u_t + w_t \  \ , \ \ y_{t} = C x_t + D u_t + \zeta_t , $$
+where $x_t$ is the (hidden) state, $u_t$ is the input or control to the system, and $y_t$ is the observation. The terms $w_t, \zeta_t$ are noise terms, and the matrices $A,B,C,D$ are called the system matrices. 
+A linear dynamical predictor with parameters $A,B,C,D$ predicts according to 
+$$ \pi_{ABCD} (u_{1:t},y_{1:t-1}) = \sum_{i=1}^{t-1} C A^{i-1} B u_{t-i} + D u_t . $$
+The best such predictor for a given sequence is also called the optimal open loop predictor, and it is accurate if the signal is generated by a LDS without noise. 
+
+\subsection{Auto-regressive Sequence Generation from a Prompt}
+
+Another mode of sequence prediction with large language models being its core use-case is that of auto-regressive sequence generation starting from a prompt. Herein the sequence model has to generate a specified number of tokens given a certain context. This is depicted in Figure \ref{fig:precache1}. 
+
+The setting of auto-regressive generation from a prompt consists of two stages, the prefill stage and the decode stage. During the prefill stage, the model ingests the context vector and generates a cache that stores information required in the decode stage. 
+
+In the decode stage, the model takes the cache and the most recently generated token as input and generates the next output token. Then the cache updated with the most recent input token. We denote the generation length at the decode stage with $K$. In contrast to pre-training, where the model takes in a training sequence and predicts the next token, in the prefill generation setting the model only has access to the cache and the most recent token when making a prediction. 
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.4\linewidth]{figures/precache.pdf}
+    \caption{Auto-regressive sequence generation from a prompt.}
+    \label{fig:precache1}
+\end{figure}
+
+\subsection{Abstracting Convolutional Sequence Prediction}
+
+We define a convolutional sequence prediction model to be given by a {\it filter}, which is a vector denoted by $\phi \in \reals^L$ where $L$ is considered the \textit{context length} of the model. It takes as an input a sequence $u$, and outputs a prediction sequence. The above definition can be extended to multiple filter \textit{channels} and nonlinearities can be added, as we elaborate below with different examples. Formally, a single output in the predicted sequence using a convolutional sequence model is given by
+\begin{equation}
+\hat{y}_t =  \langle \phi , u_{t:t-L} \rangle .  \label{eqn:convdotproduct}
+\end{equation}
+This paradigm captures several prominent convolutional sequence models considered in the literature. We highlight some of them below. 
+The online convolution technique proposed by us can be used with all the models below in straightforward manner leading to generation time improvement from $O(L^2)$ to $O(L \log^2 L)$.
+
+\paragraph{State Space Models} Discrete state space models such as those considered in \cite{gu2021efficiently} have shown considerable success/adoption for long range sequence modelling. A typical state space model can be defined via the following definition of a Linear Dynamical System (LDS)
+\begin{align}
+ x_{t} &= A x_{t-1} + B u_t \nonumber\\
+ y_{t} &= C x_{t} + D u_t  \label{eqn:LDS}
+\end{align}
+where $u, y$ are the input and output sequences and $A,B,C,D$ are the learned parameters. Various papers deal with specifications of this model including prescriptions for initialization \cite{NEURIPS2020hippo}, diagonal versions \cite{gupta2022diagonal}, gating \cite{mehta2023long} and other effective simplifications \cite{smith2023simplified}. All these models can be captured via a convolutional model by noticing that the output sequence $y$ in \eqref{eqn:LDS} can be written as
+\[ y = \phi * u + Du \]
+where the filter $\phi$ takes the form $\phi_{i} = C A^{i-1} B$. Thus a convolutional sequential model with learnable filters $\phi$ generalizes these state space models. However, SSM are more efficient for generation and require only constant time for generating a token, where the constant depends on the size of the SSM representation. 
+
+\paragraph{LongConv/SGConv. } The LongConv \cite{fu2023simple} and SGConv \cite{li2022makes} architectures, exploit the above connection and propose direct regularizations of the kernel to bias them towards kernels representing a state space model. 
+\paragraph{Spectral Transform Units. }  The STU architecture was proposed in \cite{agarwal2023spectral} based on the technique of spectral filtering for linear dynamical systems \cite{hazan2017learning,hazan2018spectral}. These are basically convolutional sequence models based on carefully constructed filters that are {\bf not data dependent}. Rather, let $\phi_1,...,\phi_k$ be the first $k$ eigenvectors of the Hankel matrix $H_L$ given by 
+$$ H_L = \int_{0}^1 \mu_\alpha \mu_\alpha^\top d\alpha \ \in \reals^{L \times L }, \ \mu_\alpha = (\alpha-1)[1 , \alpha, \alpha^2 ,.., \alpha^{L-1}] .$$
+Then the STU outputs a prediction according to the following rule \footnote{more precisely, there are additional linear and constant terms depending on the exact filters used, such as $ \hat{y}_t =   \hat{y}_{t-2} +  \sum_{i=1}^{3} M^{u}_{i} u_{t+1-i} + \sum_{i=1}^k M_i \langle \phi_i , u_{t:t-L} \rangle $, see \cite{agarwal2023spectral} for more details.} 
+$$ \hat{y}_t =  \sum_{i=1}^k M_i \langle \phi_i , u_{t:t-L} \rangle  , $$
+where $\phi_i$ are the eigenvectors as above and $M_{1:k}$ are learned projection matrices. 
+The STU architecture is particularly appealing for learning in dynamical systems with long context, as it has theoretical guarantees for this setting, as spelled out in \cite{agarwal2023spectral}.
+\paragraph{Hyena.} The Hyena architecture proposed in \cite{poli2023hyena}, sequentially applies convolutions and element-wise products alternately. Formally, the given an input $u_{1:T}$, $N+1$ linear projections $v, x_1, \ldots x_N$ of the input are constructed (similar to the $q,k,v$ sequence in self-attention). The hyena operator as a sequence of convolution with learnable filters $h_1 \ldots h_N$ is then given by 
+\[ y = x^N \cdot \left( h^N * \left( x^{N-1} \cdot \left( h^{N-1} * (\ldots) \right)\right)\right).\]
+
+
+
+
+
+
+
+
+
+\section{Efficient Online Convolutions using FutureFill}
+
+ 
+We begin by introducing a simple convenient primitive which we call FutureFill, which forms the crucial building block of our algorithms. Intuitively FutureFill corresponds to computing the \textit{contribution} of the current and prevoiusly generated tokens on the future tokens yet to be generated. For a convolutional model (and unlike attention) this contribution can be efficiently determined without even having generated the future tokens. Here onwards, for brevity of notation for any $v \in \reals^t$, we assume $v_j = 0$ for any $j \leq 0$ or any $j > t$. Formally, given two sequences $v \in \reals^{t_1}$, $w \in \mathbb{R}^{t_2}$ we define $\mathrm{FutureFill}(v, w) \in \reals^{t_2-1}$ as \footnote{recall that we denote $[x] = \{1 \ldots x\}$.}
+\[ \forall s \in [t_2 - 1] \;\;[\mathrm{FutureFill}(v, w)]_s = \sum_{i=1}^{t_2 - s} v_{t_1-i+1} \cdot w_{s + i}.\]
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.6\linewidth]{figures/FutureFillPicture.png}
+    \caption{FutureFill operation between an input sequence and a convolutional filter.}
+    \label{fig:ffillschematic}
+\end{figure}
+
+Figure \ref{fig:ffillschematic} depicts the future fill operation between an input sequence and a convolutional filter. The FFT algorithm for convolutions can easily be extended to compute the FutureFill as well in time at most $O((t_1 + t_2)\log(t_1 + t_2))$. For example the \textit{full} mode of a standard conv implementation (e.g. scipy) can be used to compute FutureFill in the following way
+
+\begin{verbatim} FutureFill(v, w) = scipy.linalg.conv(v, w, mode=full)[t_1:t_1+t_2-1] \end{verbatim}
+
+
+To leverage $FutureFill$ into an efficient way to generate tokens from a convolutional model, consider the following simple proposition  that follows from the definition of convolution. 
+
+\begin{proposition}
+\label{prop:future_fill}
+Given two vectors $a,b \in \reals^{t}$, we have that 
+\[ \forall t_1,s \in [t] \qquad [a*b]_{s} = \begin{cases}
+[a_{1:t_1}*b_{1:t_1}]_{s} \qquad \qquad\qquad \qquad\qquad \qquad\qquad\qquad\;\;  \text{ if } s \leq t_1\\
+[a_{t_1+1:t}*b_{1:t-t_1}]_{s-t_1} + [\mathrm{FutureFill}(a_{1:t_1}, b)]_{s-t_1} \quad\;\;\; \text{ otherwise }
+\end{cases}\]
+\end{proposition}
+
+ We use the above proposition to design efficient algorithms for online convolution.
+
+\subsection{Epoched-FutureFill: Efficient Online Convolutional Prediction}
+
+When computing online convolutions, the FutureFill routine allows for the efficient pre-computation for the effect of past tokens on future tokens. We leverage this property towards online convolution via the Epoched-FutureFill procedure outlined in Algorithm \ref{alg:epoch_ff}. 
+\begin{algorithm}[h]
+\caption{Epoched-FutureFill: Efficient Online Convolutional Prediction} \label{alg:epoch_ff}
+\begin{algorithmic}[1]
+\STATE {\bf Input:} Convolutional filter $\phi \in \reals^{L}$. Input sequence $u \in \reals^L$, streaming one coordinate every round. $K$, the epoch length.
+\STATE Set $\tau = 1$. Set FutureFill cache $C \in \reals^K$ to 0.
+\FOR {$t = 1,2,...,L$}
+\STATE Receive $u_t$.
+
+\STATE \label{alg_line:fast_pred_epoch_ff} Compute and output  
+$$ \hat{y}_t =   \sum_{j=1}^\tau u_{t+1-j} \cdot \phi_j + C_{\tau} $$
+
+\IF { $\tau = K$ } 
+\STATE \label{alg_line:ff_comp_epoch_ff} Compute and cache FutureFill $C \in \reals^{K}$ with each entry set as $C_j = [\mathrm{FutureFill}(u_{1:t}, \phi_{1:t+K})]_j$.
+\STATE $\tau \leftarrow 1$
+\ELSE
+\STATE $ \tau \leftarrow \tau + 1$ 
+\ENDIF
+\ENDFOR 
+\end{algorithmic}
+\end{algorithm}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.8\linewidth]{figures/EpochedFutureFill.png}
+    \caption{Illustration for Algorithm \ref{alg:epoch_ff}}
+    \label{fig:epoch_ff}
+\end{figure}
+
+In the following lemma we state and prove the properties that Epoched-FutureFill enjoys. The theorem provides a trade-off between the additional memory overhead and total runtime incurred by the algorithm. In particular, the runtime in this tradeoff is optimized when the total memory is $O(\sqrt{L \log L})$ leading to a total runtime of $O(L^{3/2}\sqrt{\log L})$.
+
+\begin{theorem} \label{thm:epoch_ff}
+Algorithm \ref{alg:epoch_ff} computes the online convolution of sequences with length $L$ and runs in total time $O\left(\frac{L^2 \log L}{K} + KL \right)$ with a total additional memory requirement of $O(K)$. In particular setting $K = \sqrt{L \log L}$, we get that Algorithm \ref{alg:epoch_ff} computes online convolution in $O(L^{3/2}\sqrt{\log L})$ total time and $O(\sqrt{L \log L})$ memory.
+\end{theorem}
+\begin{proof}
+ We prove the running time bounds below. The running time consists of two components as follows:
+\begin{enumerate}
+    \item Every iteration, line \ref{alg_line:fast_pred_epoch_ff} is executed. One term, $C_\tau$, has already been computed and saved in line \ref{alg_line:ff_comp_epoch_ff}. We can retrieve it in time $O(1)$. The other term is a sum of $\tau$ products, which can be computed in time $\tau$. 
+
+    \item 
+    Every $K$ iterations, we execute line \ref{alg_line:ff_comp_epoch_ff} and update the terms in the cache. The FutureFill operation can be computed the FFT taking at most $O(L \log L)$ time. 
+\end{enumerate}
+
+The overall running time is computed by summing over the $L$ iterations. In each block of $K$ iterations, we apply FFT exactly once, and hence the total computational complexity is
+\begin{align*}
+    \frac{L}{K}\left(L\log L + \sum_{\tau=1}^{K} \tau\right)
+    = O\left(\frac{L^2\log L}{K} + KL\right)
+    = O\left(L^{3/2}\sqrt{\log L}\right),
+\end{align*}
+where the last equality holds when the cache size $K$ is chosen to minimize the sum, i.e. $K = \sqrt{L\log L}$.
+\end{proof}
+\subsection{Continuous-FutureFill: Quasilinear Online Convolutional Prediction}
+
+In this section we provide a procedure that significantly improves upon the runtime of Epoched-FutureFill. Our starting point is Proposition \ref{prop:future_fill}, which implies that, in order to compute the convolution between two sequences we can break the sequences at any point, compute the convolution between the corresponding parts and \textit{stitch} them together via a FutureFill computation. This motivates the following Divide and Conquer algorithm to compute the convolution of two given sequences $a, b \in \reals^L$
+\begin{itemize}
+    \item Recursively compute $a_{1:L/2}*b_{1:L/2}$, $a_{L/2+1:t}*b_{1:L/2}$.
+    \item Output the concatenation of $a_{1:L/2}*b_{1:L/2}$ and $(a_{L/2+1:t}*b_{1:L/2}) + \mathrm{FutureFill}(a_{1:L/2}, b)$.
+\end{itemize}
+
+Since FutureFill for $L$ length sequences can be computed in time $O(L\log L)$ via the FFT, it can be seen via the standard complexity calculation for a divide and conquer algorithm that the computational complexity of the above algorithm in total is $O(L \log^2 L)$. As an offline algorithm, this is naturally worse than the computational complexity of FFT itself, however as we show in the following, the advantage of the above algorithm is that it can be executed in an \textit{online} fashion, i.e. the tokens can be generated as the input streams in, with the same computational complexity. We provide a formal description of the algorithm in Algorithm \ref{alg:cont_ff}. We note that the formal description of the above algorithm essentially serializes the sequence of operations involved in the above divide and conquer procedure by their chronological order. For high-level intuition we encourage the reader to maintain the divide and conquer structure when understanding the algorithm. In Figure \ref{fig:qlinearschematic}, we provide an execution flow for the algorithm for convolving two sequences of length $8$ highlighting each FutureFill operation that is computed.
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/FFillQLinearSchematic.png}
+    \caption{Quasilinear Online Convolution using FutureFill: Figure shows the execution flow for Algorithm \ref{alg:cont_ff} for convolving $8$-length sequences. The input sequence $u$ streams in an online fashion and the filter $\phi$ is fully available to the algorithm. The colors are representative of the size of the FutureFill operations performed and the time $t$ (also appropriately color-coded) highlights when the FutureFill operations were performed.}
+    \label{fig:qlinearschematic}
+\end{figure}
+
+In the following theorem we prove a running time bound for Algorithm \ref{alg:cont_ff}.  
+
+\begin{theorem}
+\label{thm:cont_ff}
+Algorithm \ref{alg:cont_ff} computes the online convolution of sequences with length $L$ and runs in total time $O(L \log^2(L))$ with a total additional memory requirement of $O(L)$.
+\end{theorem}
+
+\begin{proof}
+    As can be seen from the algorithm for every generated token the most expensive operation is the FutureFill computed in Line \ref{alg_line:ff_comp_cont_ff} so we bound the total runtime of that operation. Note that at any time $t$, the cost of FutureFill operation is $O(k(t) \cdot 2^{k(t)})$. Summing this over every time step $t$ we get, 
+    \[ \sum_{t=1}^{L} k(t) \cdot 2^{k(t)} \leq \sum_{k=1}^{\lceil \log L \rceil} | \{t: k(t) = k\} | \cdot k*2^{k} = \sum_{k=1}^{\lceil \log L \rceil} 2^{\lceil \log L \rceil - k} \cdot k*2^{k} \leq 2 L \sum_{k=1}^{\lceil \log L \rceil} k = 8 L \log^{2} L.\]
+    Thus the total runtime of the algorithm is bounded by $O(L \log^2 L)$.
+    
+\end{proof}
+
+ \begin{algorithm}[h]
+\caption{Continuous-FutureFill: Quasilinear Generation From Convolutional Models} \label{alg:cont_ff}
+\begin{algorithmic}[1]
+\STATE {\bf Input:} Convolutional filter $\phi \in \reals^{L}$. Input sequence $u \in \reals^L$, streaming one coordinate every round.
+\STATE Set $b = \lceil \log L \rceil$. Set FutureFill cache $C \in \reals^L$ to 0.
+\FOR{$t = 1 \ldots L$}
+\STATE Receive $u_t$.
+\STATE Output $\hat{y_t} = C_t + u_t \cdot \phi_1$.
+
+\STATE Let $k(t)$ be the highest power of 2 that perfectly divides $t$, i.e. $k = \max_{i \in [b]} \;t\mod 2^{i} = 0$.
+\STATE \label{alg_line:ff_comp_cont_ff} Compute $\mathrm{FF} = \mathrm{FutureFill}(u_{t-2^{k(t)}+1:t}, \phi_{1:2^{k(t)+1}})$
+\STATE Set $C_{i} = C_{i}  + \mathrm{FF}_{i-t}$ $\;\;\;$ $\forall\;\; i \in [t+1, t+2^{k(t)}]$
+\ENDFOR
+\STATE 
+
+\end{algorithmic}
+\end{algorithm}
+
+
+
+\section{Fast Online Convolutional Prediction}
+
+
+The techniques for online convolution can naturally be applied to online prediction using a convolutional model. We demonstrate this use case via its application to the STU architecture proposed in \cite{agarwal2023spectral} based on the spectral filtering algorithm \citep{hazan2017learning}.
+
+
+
+
+
+
+\subsection{Case Study: Fast Online Spectral Filtering}
+
+We illustrate in more detail how the method works for the STU model in  Algorithm \ref{alg:efficient_sf}. It improves the total running time from $O(L^2)$ of the original spectral filtering algorithm from \cite{hazan2017learning} to $O(L \log^2 L)$ while maintaining the same regret bound. 
+
+\begin{algorithm}[h]
+\caption{Efficient Spectral Filtering via FutureFill} \label{alg:efficient_sf}
+\begin{algorithmic}[1]
+\STATE {\bf Input:} $K > 0, L >0$. 
+\STATE Set variables $\{M_{1}^1 \ldots M_{K}^1 \leftarrow 0 \}$ and set $\{\phi_1 \ldots \phi_K\}$ as the largest eigenvectors of $H_L$. 
+\STATE Initialize $K$ OnlineConvolution modules, one for each filter $\{\A_k(\phi_k)\}_{k=1}^K$. 
+\FOR {$t = 1,2,...,L$}
+\STATE Receive input token $u_t$. 
+\FOR {$k=1, 2, \ldots K$}
+    \STATE $F_{k} \leftarrow \A_k(\phi_k)(u_t)$.
+\ENDFOR
+
+\STATE \label{alg_line:shalom} Compute and predict  
+
+$$ \hat{y}_t = \sum_{k=1}^K M_{k}^t F_K.$$
+
+\STATE Observe $y_t$, suffer loss $\ell_t(M_{1:k}^t) = \|y_t - \hat{y}_t\|^2$, and update 
+$$ M^{t+1}_{1:k} \leftarrow \nabla \ell_t( M^t_{1:k} ) .$$
+
+\ENDFOR 
+\end{algorithmic}
+\end{algorithm}
+\ignore{
+\subsection{Spectral Policies and their Regret}
+\xc{Should we not include this section?}
+To understand the theoretical guarantee of Algorithm \ref{alg:efficient_sf}, we first recall the original spectral filtering algorithm for linear dynamical system, and generalize it to use smaller context lengths. 
+\begin{algorithm}[h]
+\caption{Spectral Filtering with Context Window} \label{alg:window_sf}
+\begin{algorithmic}[1]
+\STATE {\bf Input:} $k > 0, L >0$. Set $M_{1:k} \leftarrow 0$, $\Phi_{1:k}$ be the largest eigenvectors of $H_L$. 
+\FOR {$t = 1,2,...,T$}
+
+\STATE \label{alg_line:shalom-window} Compute and predict  
+$$ \hat{y}_t = \sum_{i=1}^k M_{i}  \cdot \left \langle \Phi_{i}  , u_{t:t-L} \right \rangle 
+ $$
+\STATE Observe $y_t$, and update 
+$$ M^{t+1}_{1:k} \leftarrow \nabla_{M} \ell_t( M^t_{1:k} ) .$$
+\ENDFOR 
+\end{algorithmic}
+\end{algorithm}
+
+The main theorem in \cite{hazan2017learning} was that for $L=T$, 
+$$ \regret_T(\mA) = \sum_{t=1}^T \ell_t( y_t , \hat{y}_t^\mA ) - \min_{\pi_{ABCD} \in \prod_{LDS}} \sum_{t=1}^T \ell_t( y_t , \hat{y}_t^\pi ) = \tilde{O}(\sqrt{T} + T e^{-\frac{k}{\log T}}). $$
+However, the same is not true for $L < T$, as the policy class of using spectral filters with limited context window is more restrictive. 
+Define the class of policies that use spectral filtering over a context length of size $L$ as follows
+$$ \prod_L = \left\{ \pi_{M_{1:K}} | \pi_{M_{1:L}}(u_{t:t-L}) = \sum_{i=1}^L M_i \langle \Phi_i , u_{t:t-L} \rangle  \right\} . $$
+Using the properties of OGD, we can show that the regret of Algorithm \ref{alg_line:shalom-window} vs the class of all context-bounded policies is bounded as follows 
+$$ \sum_{t=1}^T \ell_t( y_t , \hat{y}_t^\mA ) - \min_{\pi_{M} \in \prod_{L}} \sum_{t=1}^T \ell_t( y_t , \hat{y}_t^\pi ) = \tilde{O}(D G \sqrt{T} + T e^{-\frac{k}{\log L}} ), $$
+where $G,D$ are constants that depend on the norm of the matrices $M$ and the Lipschitz constant of the loss functions $\ell_t$. 
+However, for $L < T$ the policy class of all $L$-spectral filtered predictors is more limited than general online spectral filtering. 
+}
+The main claim regarding the performance of Algorithm \ref{alg:efficient_sf} follows directly from Theorems \ref{thm:epoch_ff} and \ref{thm:cont_ff} and is as follows. 
+
+\begin{corollary}
+\label{thm:main}
+Algorithm \ref{alg:efficient_sf} with sequence length $L$ guarantees the same regret bound as spectral filtering \citep{hazan2017learning} with context length $L$. Furthermore its computational complexity based on the online convolution module used are as follows:
+\begin{itemize}
+    \item If using EpochedFutureFill(Algorithm \ref{alg:epoch_ff}): Runtime - $O(L^{3/2}\sqrt{\log L})$, Memory - $O(\sqrt{L \log L})$.
+    \item If using ContinuousFutureFill(Algorithm \ref{alg:cont_ff}): Runtime - $O(L \log^2 L)$, Memory - $O(L)$.
+\end{itemize}
+\end{corollary}
+    
+\ignore{
+\begin{proof}
+The performance guarantee is immediate since line \ref{alg_line:shalom} is equivalent to  the standard spectral filtering algorithm, namely
+$$ \hat{y}_t = \sum_{i=1}^k M_i \langle \phi_i , u_{t:t-L} \rangle .  $$
+
+It remains to calculate the amortized computational complexity per iteration. 
+The complexity is composed of two components as follows
+\begin{enumerate}
+    \item Every iteration line \ref{alg_line:shalom} is implemented. It is composed of one term, which we already computed and saved in line \ref{alg_line:shalom2}, which we can retreive in time $O(1)$. The other term is a sum of $\tau$ products, for total compute of $\tau$. 
+
+    \item 
+    Every $\sqrt{L}$ iterations, we have to compute and store $\sqrt{L}$ terms, in line \ref{alg_line:shalom2}. Using the FFT this takes $O(L \log L)$ time. 
+\end{enumerate}
+
+The overall amortized complexity is computing by summing over $\sqrt{L}$ consecutive iterations and averaging. In each such block we compute the FFT exactly once, and hence 
+$$ \frac{  L \log L +  \sum_{\tau=1}^{\sqrt{L}} \tau } {\sqrt{L}} \sim \frac{ L \log L + L }{\sqrt{L}} \sim \sqrt{L} \log L. $$
+\end{proof}
+}
+
+
+
+
+\section{Fast Auto-regressive Sequence Generation from a Prompt}
+
+
+In this section we consider the problem setting of auto-regressively generating $K$ tokens starting from a given prompt of length $L$. For convolutional models specifically we define an abstract version of the  problem as follows, given a prompt vector $p \in \reals^L$ and a convolutional filter $\phi \in \reals^{L+K}$ \footnote{the assumption of the filter being larger than $L+K$ is without loss of generality as it can be padded with 0s}, the aim is to iteratively generate the following sequence of tokens
+\[ \hat{y}_t = \langle \hat{y}_{1:t-1}, \phi_{t:1} \rangle + \langle p_{1:L}, \phi_{t+L:t+1} \rangle = \sum_{j=1}^{t-1} \hat{y}_{t+1-j} \cdot \phi_j + \sum_{j=t}^{t+L} p_{t+L-j} \phi_j.\]
+As can be seen from the above definition the expected output is an online convolution where the input sequence $u$ has a prefix of the prompt $p$ and the input sequence is appended by the most recently generated output by the model (i.e. auto-regressive generation). We note that we only consider the \textit{convolution} part of a convolutional model (eg. STU) above for brevity and other parts like further projection of the tokens etc can be appropriately added. 
+
+As mentioned the above model naturally fits into online convolution and the following algorithm delineates the method to use ContinuousFutureFill (Algorithm \ref{alg:cont_ff}) for the above problem. 
+
+\begin{algorithm}[h]
+\caption{Fast auto-regressive sequence generation from a prompt using FutureFill} \label{alg:efficient_sf_pf}
+\begin{algorithmic}[1]
+\STATE {\bf Input:} $K > 0, L >0$,  prompt $p_{1:L}$, convolutional filter $\phi \in \reals^{L+K}$.
+
+\STATE \label{alg_line:fft_compute} Set up a FutureFill cache $C \in \reals^K$ as  $$C \leftarrow \mathrm{FutureFill}(p, \phi).$$
+\STATE Set up the online convolution algorithm (Algorithm \ref{alg_line:ff_comp_cont_ff}) with filter $\phi$, i.e. $$\A \leftarrow \mathrm{ContinuousFutureFill}(\phi, K).$$
+\STATE Running candidate token $y \leftarrow 0$.
+\FOR{ $t = 1,..., K$}
+\STATE Output $\hat{y}_t \leftarrow C_t + y$.
+\STATE Generate next token candidate $y \leftarrow \A(\hat{y}_t)$.
+\ENDFOR 
+\end{algorithmic}
+\end{algorithm}
+
+The correctness of the above algorithm can be verified easily via the properties of FutureFill and ContinousFutureFill. The following corollary bounding the running time also follows easily from Theorem \ref{thm:cont_ff}.
+\begin{corollary} 
+Algorithm \ref{alg:efficient_sf_pf} when supplied with a prompt of sequence length $L$, generates $K$ tokens in total time $O(L \log L + K \log^2{(L+K)})$ using a total cache of size $O(K)$. 
+\end{corollary}
+
+
+\section{Experiments}
+
+In this section, we use a convolutional model that generates tokens in an online fashion to verify our results. 
+We experimentally evaluate Epoched-FutureFill (Algorithm \ref{alg:epoch_ff}) which has a runtime of $O(L^{3/2} \sqrt{\log L})$ and Continuous-FutureFill (Algorithm \ref{alg:cont_ff}) which has a runtime of $O(L \log^2 L)$ against the naive implementation which has a runtime of $O(L^2)$ when generating $L$ tokens from scratch. 
+
+For increasing values of $L$, we measure the time $S(L)$ it takes for a single layer
+to generate $L$ tokens. In Figures \ref{fig:amortizedtimings} and \ref{fig:totaltimings} we plot the amortized step time $S(L) / L$ and total generation time $S(L)$, respectively, as functions of $L$. We see the behavior that is expected: the naive decoder runs in amortized $O(L)$ per step, while our methods achieve sublinear and logarithmic decoding complexities respectively. 
+\begin{figure}[H]
+
+\begin{minipage}{0.45\linewidth}
+        \centering
+\includegraphics[width=\linewidth]{figures/amortized.png}
+\caption{Average number of seconds per step when generating $L$ tokens, as a function of $L$. 
+}
+    \label{fig:amortizedtimings}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.45\textwidth}
+        \centering  \includegraphics[width=\textwidth]{figures/total.png}
+        \caption{Total number of seconds to generate $L$ tokens, as a function of $L$. }
+        \label{fig:totaltimings}
+    \end{minipage}
+    
+\end{figure}
+Due to differences in hardware acceleration, inference pipeline implementation, and other engineering details, it would be difficult to present timing results with a properly-optimized setup. On large decoding platforms involving prefill caching, these variations only become more complicated. We opted to time things for one layer on CPU in a simple online decoding loop with a large number of tokens to make the asymptotic gains clear. In practice, we have seen that inference gains do materialize for large models with standard inputs on accelerated hardware (with or without just-in-time compilation).
+
+
+\section{Conclusion}
+
+
+In this paper, we considered the problem of online sequence prediction/generation in convolutional models. We presented a method that achieves a quasilinear complexity of generating $L$ tokens as opposed to best known naive method with quadratic complexity. We presented a simple sub-routine FutureFill which can be used to generate a runtime/memory trade-off in online sequence prediction allowing for flexible use in different practical regimes. We verified our method in a simple setup and leave its usage to practical decoding pipelines in sequence models as future work.  
+
+
+
+\section{Acknowledgements}
+
+
+The authors thank Annie Marsden for useful discussions though the development of the project. 
+
+
+
+

@@ -1,0 +1,533 @@
+\title{Client2Vec: Improving Federated Learning by Distribution Shifts Aware Client Indexing}
+
+\begin{abstract}
+    Federated Learning (FL) is a privacy-preserving distributed machine learning paradigm. Nonetheless, the substantial distribution shifts among clients pose a considerable challenge to the performance of current FL algorithms. To mitigate this challenge, various methods have been proposed to enhance the FL training process.
+
+This paper endeavors to tackle the issue of data heterogeneity from another perspective---by improving FL algorithms prior to the actual training stage. Specifically, we introduce the Client2Vec mechanism, which generates a unique client index for each client before the commencement of FL training. Subsequently, we leverage the generated client index to enhance the subsequent FL training process. To demonstrate the effectiveness of the proposed Client2Vec method, we conduct three case studies that assess the impact of the client index on the FL training process. These case studies encompass enhanced client sampling, model aggregation, and local training. Extensive experiments conducted on diverse datasets and model architectures show the efficacy of Client2Vec across all three case studies.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Federated Learning (FL) is an emerging machine learning paradigm that preserves clients' privacy by only exchanging model parameters between clients and server, and maintains the local data not exchanged.
+As the de facto algorithm in FL, FedAvg~\citep{mcmahan2016communication} proposes to use local SGD to improve the communication efficiency of FL.
+However, the non-\iid nature of local distributions significantly reduces the performance of FL algorithms~\citep{lin2020dont,karimireddy2020scaffold,li2018federated}.
+Despite the great success of existing methods in addressing the non-\iid problem in FL~\citep{li2021model,acar2020federated}, most existing studies center on the training process of FL by improving the key stages of the FL training, such as client sampling~\citep{fraboni2021clustered,luo2022tackling,wang2023delta}, model aggregation~\citep{wang2019federated,lin2020ensemble,chen2023elastic}, and local training~\citep{li2018federated,li2021model}.
+An additional line of research in FL aims to find efficient methods to improve the performance before the training stage.
+Yet only a limited number of works exist, either utilizing dataset distillation before the FL training~\citep{yang2023fedfed}, or generating global shared synthetic pseudo-data~\citep{guo2023fedbr,tang2022virtual}.
+Despite promising, these approaches incur additional computation costs on local devices with a limited number of applicable scenarios and are incompatible with other FL training stages like client sampling and model aggregation.
+Taking inspiration from the Word2Vec technique in Natural Language Processing (NLP) tasks~\citep{mikolov2013efficient} and domain indexing in Domain Generalization tasks~\citep{xu2022domain}, we introduce a novel mechanism below, namely \algfed.
+\algfed generates an index vector for each client, serving as their identity by incorporating information about the client's local data distribution.
+These vectors are used to measure label and feature distribution shifts among clients, seamlessly integrate into the FL training pipeline, and allows efficiently (1) operating independently of the FL training process, (2) combining with existing FL methods, while imposing a minimal additional computational load on local devices, 
+and (3) enhancing 
+FL training performance throughout all stages.
+
+
+Our contributions can be summarized as follows:
+\begin{itemize}[leftmargin=12pt,nosep]
+    \item We explore a novel mechanism 
+    in FL called \algfed, which involves creating an index vector for each client before the FL training phase. These vectors incorporate information about the local distribution of clients and subsequently enhance the FL training process.
+
+    \item We present the Distribution Shifts Aware Index Generation Network (\algnet), a network specifically designed to generate the client index prior to FL training. Our visualization results demonstrate the effectiveness of the client index in measuring the similarities in clients' local distributions. 
+
+    \item We conduct three case studies, including client sampling, model aggregation, and local training, to illustrate the potential and effectiveness of the generated client index. Our experiments, conducted on various datasets and model architectures, consistently demonstrate significant performance improvements with the use of \algfed.
+\end{itemize}
+
+
+\section{Related Works}
+
+
+\paragraph{Information sharing in FL.}
+Federated Learning (FL) is a distributed training methodology where local data is retained and not exchanged between the central server and clients~\citep{li2018federated,karimireddy2020scaffold,karimireddy2020mime,guo2023fedbr,jiang2023test}. FedAvg~\citep{mcmahan2016communication,lin2020dont}, a foundational algorithm, uses local Stochastic Gradient Descent (local SGD) to reduce communication.  Nevertheless, the performance of FL algorithms is substantially impeded by distribution shifts among clients. 
+To address distribution shift in FL, existing works share local distribution statistics~\citep{shin2020xor,zhou2022fedfa}, data representations~\citep{hao2021towards,tan2022fedproto}, and prediction logits~\citep{chang2019cronus,luo2021no}. FedMix~\citep{yoon2020fedmix} and FedBR~\citep{guo2023fedbr} enhance local training with privacy-protected augmentation data. VHL~\citep{tang2022virtual} employs randomly initialized generative models to produce virtual data, regularizing local features to closely align with those of same-class virtual data. FedFed~\citep{yang2023fedfed} proposes a dataset distillation method, amalgamating distilled datasets into all clients' local datasets to mitigate distribution shifts. Compared to existing methods, \algfed has the following advantages: (1) decouples index generation from FL training, reducing FL training load; (2) generates one client index per client, improving efficiency; (3) contributes to the entire FL training process, including client sampling, model aggregation, and local training.
+
+\paragraph{Domain indexing.}
+Domain Generalization (DG) tackles cross-domain generalization by generating domain-invariant features. While conventional DG methods strive to make a data point's latent representation independent of its domain identity using a one-hot vector~\citep{ganin2016domain, tzeng2017adversarial, zhao2017learning}, recent studies propose using real-value scalars or vectors as domain indices to improve performance~\citep{wang2020continuously, xu2021graph}. However, obtaining domain indices may be impractical. To address this, \citet{xu2022domain} introduced variational domain indexing (VDI) to infer domain indices without prior knowledge.
+Yet, challenges arise when applying VDI to FL due to communication costs, privacy concerns, and neglect of label shifts.
+\begin{figure*}[!t]
+    \centering
+    \includegraphics[width=.85\textwidth]{./figures/index-network-overview.pdf}
+    \caption{\textbf{Illustration of the \algnet Workflow:} The local data from clients, denoted as $(\xx_{i,j}, y_{i,j})$, undergo encoding by the CLIP encoders, resulting in the transformation to $(\mD_{i,j}, \mL_{i,j})$ before the index generation process. The CLIP image embedding $\mD_{i,j}$ is then split into a data encoding $\zz_{i,j}$ and a sample feature index $\uu_{i,j}^{f}$. The $\zz_{i,j}$ and $\uu_{i,j}^{f}$ are then concatenated and projected to $\tilde{\mD}_{i,j}$ to reconstruct $\mD_{i,j}$.  Lastly, client label index $\mbeta_i^{l}$ and client feature index $\mbeta_i^{f}$ are obtained by averaging $\mL_{i,j}$ and $\uu_{i,j}$, respectively.}
+    \label{fig:index-network-overview}
+\end{figure*}
+
+
+\section{\algfed: Distribution Shifts Aware Client Indexing}
+
+In this section, we introduce \algfed, a mechanism that generates an index vector for each client, representing their identity and incorporating information about their local distribution. The client index, which considers both label 
+and feature distribution shifts, is defined in Section~\ref{sec:client-index-definition}. We present the Distribution Shifts Aware Index Generation Network (\algnet) in Section~\ref{sec:index-generation-network}, which generates the client index based on the specified criteria. Visualization examples of the generated client index are provided in Section~\ref{sec:visualization-client-index}.
+\subsection{Client Index}
+\label{sec:client-index-definition}
+We consider the FL setting with $M$ clients, where each client $i$ possesses $N_i$ data samples. The $j$-th data sample of client $i$ is represented as $(\xx_{i,j}, y_{i,j})$.
+
+\paragraph{Sample index and Client index.}
+To ensure that the client index conveys information about all data samples within the client, we first generate the sample index $\uu_{i,j}$ as the index vector for the data sample $(\xx_{i,j}, y_{i,j})$.
+The client index $\mbeta_i$ is then computed as the average of all data samples for client $i$: $\mbeta_i = \frac{1}{N_i} \sum_{j=1}^{N_i} \uu_{i,j}$.
+
+For FL scenarios where feature and label shifts occur simultaneously, the sample index $\uu_{i,j}$ consists of two parts: sample feature index $\uu_{i,j}^{f} \in \R^{d_i}$ and sample label index $\uu_{i,j}^{l} \in \R^{d_i}$, encoding the feature and label information of the data sample $(\xx_{i,j}, y_{i,j})$, respectively.
+Similarly, the client index $\mbeta_i$ is represented as $\mbeta_i = [\mbeta_i^{f}; \mbeta_i^{l}] \in \R^{2d_i}$, where $\mbeta_i^{f} \in \R^{d_i}$ is the client feature index, and $\mbeta_i^{l} \in \R^{d_i}$ is the client label index.
+
+However, obtaining client and sample indices may not always be trivial in practice.
+To address this, we extend the domain index idea in~\citet{xu2022domain} and define the expected properties of sample index $\uu_{i,j}$ and client index $\mbeta_i$ below.
+
+
+\begin{definition}[Sample Index]
+    \label{def:client-index}
+    Given the data sample $(\xx_{i,j}, y_{i,j})$ and its corresponding encoding $\zz_{i,j}$, which encode information that can be used to predict $y_{i,j}$, the sample index $\uu_{i,j}$ of data sample $(\xx_{i,j}, y_{i,j})$ is expected to satisfy the following properties:
+    \begin{itemize}[leftmargin=12pt,nosep]
+        \item \textbf{Independence between $\uu_{i,j}^{f}$ and $\zz_{i,j}$.}
+              Sample feature index $\uu_{i,j}^{f}$ is independent of client-invariant data encoding $\zz_{i,j}$.
+              This aims to encourage the sample feature index $\uu_{i,j}^{f}$ to encode the client-dependent information---specifically, the distinct information about the client's local distribution, and unrelated to label prediction.
+        \item \textbf{Maximizing information in $\uu_{i,j}^{l}$ and $\zz_{i,j}$ for label prediction.}
+              The data encoding $\zz_{i,j}$ and sample label index $\uu_{i,j}^{l}$ should contain as much information as possible to predict label $y$.
+        \item \textbf{Information Preservation of $\uu_{i,j}^{f}$ and $\zz_{i,j}$.}
+              Data encoding $\zz_{i,j}$ and sample feature index $\uu_{i,j}^{f}$ preserves as much information as possible to recover data $\xx_{i,j}$.
+    \end{itemize}
+\end{definition}
+
+\begin{remark}
+    Different from the definitions of domain index outlined in \citet{xu2022domain} (refer to Definition~\ref{def:domain-idex}), Definition~\ref{def:client-index} encompasses both label and feature distribution shifts by introducing the sample label index $\uu_{i,j}^{l}$.
+    Additionally, generating domain-level index in Definition~\ref{def:domain-idex} requires to gather all sample indices $\uu_{i,j}$ from various data sources.
+    We simplify this procedure and calculate the client index as $\mbeta_i \!=\! \frac{1}{N_i} \sum_{j=1}^{N_i} \uu_{i,j}$.
+\end{remark}
+
+
+\subsection{Generating Client Index}
+\label{sec:index-generation-network}
+In this section, we describe the generation of $\mbeta_i$ and $\uu_{i,j}$ based on Definition~\ref{def:client-index}, as depicted in Figure~\ref{fig:index-network-overview}.
+
+
+\paragraph{Encoding data using CLIP.}
+Since the client index, denoted as $\beta_i$, is computed as an average across sample indices $\uu_{i,j}$, the primary challenge in generating the client index lies in generating these sample indices $\uu_{i,j}$.
+According to Definition~\ref{def:client-index}, we can observe that the sample label index $\uu_{i,j}^{l}$ solely encodes label information, while the sample feature index encodes image feature information independently of label information.
+Consequently, to generate the sample index, we must devise a method that maps label information and image information into the same space, facilitating the extraction of label-dependent sample label index $\uu_{i,j}^{l}$ and label-independent sample feature index $\uu_{i,j}^{f}$.
+We propose to leverage CLIP~\citep{radford2021learning} to ease the index generation process.
+CLIP is a pre-trained cross-modality model that contains an image encoder and a text encoder, aligning image and text embedding.
+As shown in Figure~\ref{fig:index-network-overview}, for a given input image-label pairs $(\xx_{i,j}, y_{i,j})$, we utilize a CLIP image encoder to produce image embedding $\mD_{i,j}$ and a text encoder to generate label embedding $\mL_{i,j}$:
+\begin{itemize}[leftmargin=12pt,nosep]
+    \item \textit{Label Embedding $\mL_{i,j}$:}
+          The $\mL_{i,j}$ only encodes label descriptions such as ``A photo of a/an \{object\}''.
+          Therefore, we use $\mL_{i,j}$ as the embedding that only contains label information, which is naturally invariant among clients.
+          
+    \item \textit{Image embedding $\mD_{i,j}$:}
+          The $\mD_{i,j}$ is extracted from the whole image, serving as a compact feature containing both client-independent (label information) and client-specific (background, style, etc.) features.
+\end{itemize}
+Consequently, the original local dataset $\cD_i = \{ (\xx_{i,j}, y_{i,j})\}$ is transformed into the CLIP embedding set $\cE_i = \{ (\mD_{i,j}, \mL_{i,j})\}$.
+The $\cE_i$ is then utilized to generate the index.
+Note that other cross-modality models, such as BLIP~\citep{li2022blip} and BLIP2~\citep{li2023blip}, can also align vision and language like CLIP.
+Exploring the effectiveness of these models could be a valuable future research direction.
+
+\paragraph{Generating sample indices using CLIP embedding and \algnet.}
+Given that $\mL_{i,j}$ only encodes label information, we directly set $\uu_{i,j}^{l} = \mL_{i,j}$.
+On the contrary, by Definition~\ref{def:client-index}, the sample feature index $\uu_{i,j}^{f}$ needs to encode label-invariant client-specific information.
+Thus, we decompose $\mD_{i,j}$---which contains both label and client-specific information---to generate $\uu_{i,j}^{f}$ while isolating the client-specific information from $\mD_{i,j}$.
+
+
+The entire process of generating the sample feature index is achieved by training the Distribution Shifts Aware Generation Network (\algnet).
+The training process of \algnet includes three components, corresponding to the three rules in Definition~\ref{def:client-index}:
+\begin{itemize}[leftmargin=12pt,nosep]
+    \item \textit{Decompose CLIP image embedding $\mD_{i,j}$}.
+          We decompose $\mD_{i,j}$ to sample feature index $\uu_{i,j}^{f}$ and data encoding $\zz_{i,j}$. Regularization is applied to ensure orthogonality between $\uu_{i,j}^{f}$ and $\zz_{i,j}$, ensuring their independence.
+          The decomposition block can be any non-linear neural network architecture, and we use a three-layer transformer encoder as the decomposition block for the sake of simplicity\footnote{
+              Each transformer encoder layer will have 8 attention heads and the dimension of the model is 32.
+
+          }.
+          
+    \item \textit{Aligning the data encoding $\zz_{i,j}$ and $\mL_{i,j}$ to ensure label sensitivity of $\zz_{i,j}$}.
+          We force $\zz_{i,j}$ to have a large cosine similarity with the label embedding $\mL_{i,j}$, ensuring that $\zz_{i,j}$ encodes as much information as possible to predict the label $y_{i,j}$.
+    \item \textit{Reconstruct CLIP image embedding $\mD_{i,j}$.}
+          To ensure that $\uu_{i,j}^{f}$ and $\zz_{i,j}$ retain all the information from the CLIP image embedding $\mD_{i,j}$, we utilize $\uu_{i,j}^{f}$ and $\zz_{i,j}$ for the purpose of reconstructing $\mD_{i,j}$.
+          In detail, we begin by concatenating $\uu_{i,j}^{f}$ and $\zz_{i,j}$, followed by projecting the resultant vector onto $\tilde{\mD}{i,j}$, and subsequently minimizing the distance between the reconstructed embedding $\tilde{\mD}{i,j}$ and the original CLIP image embedding $\mD_{i,j}$.
+          Experiments on various projection layer architectures
+
+          
+\end{itemize}
+
+
+\paragraph{Objective functions of \algnet.}
+We define the following objective function:
+
+\begin{small}
+    \begin{align*}
+         & \cL(\uu_{i,j}^{f}, \zz_{i,j}, \mD_{i,j}, \mL_{i,j})
+        =\underbrace{\cL_{\text{div}} (\uu_{i,j}^{f})}_{\text{Stable Training}}
+         + \underbrace{\cL_{\text{sim}}(\zz_{i,j}, \mL_{i,j}) + \cL_{\text{orth}} (\uu_{i,j}^{f}, \zz_{i,j}) \nonumber + \cL_{\text{recon}} (\uu_{i,j}^{f}, \zz_{i,j}, \mD_{i,j})}_{\text{Following three components}}  \,,
+    \end{align*}
+\end{small}%
+where we use $\cL_{\text{sim}}$, $\cL_{\text{orth}}$, and $\cL_{\text{recon}}$, corresponding to three components, to generate sample feature indexes as defined in Definition~\ref{def:client-index}.
+Additionally, we introduce $\cL_{\text{div}}$ to improve training stability.
+In detail,
+\begin{itemize}[leftmargin=12pt,nosep]
+    \item \textit{$\cL_{\text{sim}}$ ensures label sensitivity for $\zz_{i,j}$.}
+          It is defined as $\cL_{sim}(\zz_{i,j}, \mL_{i,j}) = 1 - \text{cosine similarity} (\zz_{i,j}, \mL_{i,j})$, promoting a high cosine similarity between $\zz_{i,j}$ and $\mL_{i,j}$.
+    \item \textit{$\cL_{\text{orth}}$ guarantees independence between $\uu_{i,j}^{f}$ and $\zz_{i,j}$.} It is defined as $\cL_{\text{orth}} = \norm{\mZ \mU^{T}}1$, where $\mZ = [\zz_{i,j}]^{T}$ and $\mU = [\uu_{i,j}^{f}]^{T}$.
+    \item \textit{$\cL_{\text{recon}}$ for information preservation.}
+          It is defined as the mean squared distance between the reconstructed embedding $\tilde{\mD}_{i,j}$ and the original CLIP image embedding $\mD_{i,j}$.
+    \item $\cL_{\text{div}}$ is introduced to ensure stable training outcomes by promoting diversity in $\uu_{ij}^{f}$ across different samples within the same batch. This is important because insufficient training epochs can result in identical $\uu_{ij}^{f}$ values across all data samples. $\cL_{\text{div}} = \frac{1}{B} \sum_{j=1}^{B} \log (\sum_{k \neq j} \exp(\text{cos-sim} (\uu_{i,j}^{f}, \uu_{i,k}^{f}) ))$ is designed to promise diversity between $\uu_{i,j}^{f}$, and it is similar in concept to SimCLR~\citep{chen2020simple}, focusing on negative pairs. $B$ is the batch-size here.
+\end{itemize}
+
+\begin{wrapfigure}{r}{.45\textwidth}
+    \centering
+    \includegraphics[width=.45\textwidth]{./figures/index-visualization.pdf}
+    \caption{\textbf{Illustration of feature index similarities between different domains.} We present an analysis of cos-similarities across various domains. The results are acquired employing the \textsc{Global} training strategy. \looseness=-1}
+    \label{fig:index-visualization}
+\end{wrapfigure}
+
+\paragraph{Optimizing \algfed.}
+We consider two training strategies, namely \textsc{Global} and \textsc{Federated} explained below: 
+\begin{itemize}[leftmargin=12pt,nosep]
+    \item \textsc{Global}: Each client uploads one batch (128 samples) of $(\mD_{i,j}, \mL_{i,j})$ pairs to the server.
+          The server trains the \algnet using the collected pairs from all clients and then sends the trained \algnet to clients for generating client index.
+    \item \textsc{Federated}: The \algnet is trained using all clients' local data through FedAvg.
+          In each communication round, the server randomly selects 10\% of clients, and the local epoch number is set to 10.
+\end{itemize}
+\subsection{Visualization Examples of Client Index}
+\label{sec:visualization-client-index}
+In this section, we visualize some examples of the generated client index on the DomainNet dataset~\citep{peng2019moment}.
+DomainNet contains data from 6 different domains, where data belonging to different domains have significant feature shifts.
+We chose 50 out of 345 available classes, with each domain randomly divided into 10 clients.
+Then the 6 domains will result in a total of 60 clients.
+Clients 0 to 9 correspond to the first feature domain, clients 10 to 19 to the second, and so forth, with clients 51 to 59 representing the last feature domain.
+Clients from various domains experience feature shifts and possess varying sample sizes due to differences in the number of samples within each domain.
+
+\begin{figure}[!t]
+    \centering
+    \subfigure[ Client Index $_\textsc{Global}$]{
+        \includegraphics[width=.225\textwidth]{./figures/global-heat-map.pdf}
+    }
+    \subfigure[Client Index $_\textsc{Federated}$]{
+        \includegraphics[width=.225\textwidth]{./figures/federated-heat-map.pdf}
+    }
+    \subfigure[ Feature Index$_\textsc{Global}$]{
+        \includegraphics[width=.225\textwidth]{./figures/global-heat-map-feature.pdf}
+    }
+    \subfigure[ Feature Index $_\textsc{Federated}$]{
+        \includegraphics[width=.225\textwidth]{./figures/federated-heat-map-feature.pdf}
+    }
+    \caption{\textbf{Visualization of index similarities between clients.} We illustrate the similarities of client index $\mbeta_i$ and client feature index $\mbeta_{i}^{f}$ between clients. Results including both \textsc{Global} and \textsc{Federated} training strategies are reported. Ideally, clients in the same domain should share a similar client index, resulting in dark diagonal blocks.}
+    \label{fig:index-similarity-heatmap}
+\end{figure}
+
+\paragraph{Similarity of client indices among different clients.}
+As the distribution shifts among clients mainly come from the feature shifts among domains, in Figure~\ref{fig:index-similarity-heatmap} we depict the similarities of the client index $\mbeta_i$ and the client feature index $\mbeta_i^{f}$ across clients, employing both \textsc{Global} and \textsc{Federated} training strategies.
+We have the following observations:
+\begin{itemize}[leftmargin=12pt,nosep]
+    \item \textit{Clients sharing the same feature domain show similar client indices.}
+          We observe the similarities between client index $\mbeta_i$ and client feature index $\mbeta_i^{f}$ approach $1.0$ for clients within the same feature domain.
+          Conversely, clients belonging to different feature domains have large distances regarding the client feature index $\mbeta_i^{f}$.
+          This highlights the effectiveness of our method in learning meaningful information about clients' local distribution.
+    \item \textit{Both the \textsc{Global} and \textsc{Federated} training strategies produce client indices that encode meaningful information about client distribution.}
+          We note that both the \textsc{Global} and \textsc{Federated} training strategies can generate similar client indices for clients with the same feature domain.
+          Moreover, the indices generated by the \textsc{Global} strategy exhibit a more clear boundary among domains. 
+\end{itemize}
+\paragraph{Inter-Domain Similarity Assessment.}
+Utilizing the feature index $\mbeta_i^{f}$ for clients, we quantify similarity across different domains.
+Figure~\ref{fig:index-visualization} illustrates the average cosine similarities of client feature index $\mbeta_i^{f}$ between clients belonging to different domains.
+The results align with human intuitions, with the ``Real'' domain showing greater proximity to ``Clipart'', ``Painting'', and ``Sketch'', while exhibiting significant differences from ``Infograph'' and ``Quickdraw''. 
+These findings validate the effectiveness of our generated client index.
+
+
+
+\section{Improving FL via \algfed}
+
+\label{sec:case-studies}
+
+In this section, we showcase improving the FL training process by leveraging the trained client index $\mbeta_i$. Specifically, we explore three case studies aimed at refining crucial aspects of the FL training pipeline: client sampling, model aggregation, and local training.
+
+\paragraph{Case study 1: improved client sampling.}
+The client index, $\mbeta_i$, is a natural metric for measuring distance between clients.
+Motivated by the theoretical findings in CyCP~\citep{cho2023convergence} and empirical observations in class incremental learning~\citep{he2022rethinking}---where a smaller distance among client groups sampled in adjacent rounds improves performance---we propose a greedy sampling approach.
+In round $t$, let $\cC^{t-1}$ be the set of clients selected in round $t - 1$. Clients with greater similarity to those in $\cC^{t-1}$ will have a higher probability of being selected.
+Specifically, the sampling probability for client $i$ is calculated as:
+\begin{small}
+    \begin{align}
+        p_i^{t} = \frac{\exp(\text{S} (\mbeta_i, \cC^{t-1}) / \tau)}{\sum_{j=1}^{N} \exp(\text{S} (\mbeta_j, \cC^{t-1}) / \tau)} \,.
+        \label{equ:sample-weights}
+    \end{align}
+\end{small}%
+Here, $\tau$ is the hyper-parameter controlling the sampling distribution shape, and the similarity function $S$ is defined as:
+\begin{small}
+    \begin{align*}
+        \text{S} (\mbeta_i, \cC^{t-1}) = \frac{1}{2 N^{t-1}} \sum_{j=1}^{|\cC^{t-1}|} N_{j} \left(
+        \text{sim} (\mbeta_{i}^{f}, \mbeta_{j}^{f}) + \text{sim} (\mbeta_{i}^{l}, \mbeta_{j}^{l})
+        \right) \, ,
+    \end{align*}
+\end{small}%
+where $N^{t-1} = \sum_{j \in \cC^{t-1}} N_j$, and $N_j$ is the number of samples of client $j$.
+The ``$\text{sim}$'' refers to cosine similarity.
+In practical implementation, to avoid resampling identical clients, those already sampled within $\frac{M}{2 |\cC^{t-1}|}$ rounds will have $p_i^{t}$ set to $0$, where $M$ is the total number of clients.
+\paragraph{Case study 2: improved model aggregation.}
+The enhanced model aggregation strategy follows the same idea as client sampling.
+In detail, we assign higher aggregation weights to clients with greater similarity to those in previous rounds.
+To achieve this, motivated by the Multiplicative Weight Update algorithm (MWU)~\cite{arora2012multiplicative}, we define the following optimization problem for deriving the aggregation weights $p_{i,g}^{t}$.
+\begin{small}
+    \begin{align}
+        \label{eq:case2_opt_problem}
+        \begin{split}
+            \textstyle
+            & \max_{p_{i,g}^{t}} \cL_{agg} =  \underbrace{\sum_{i \in \cC^{t}} p_{i,g}^{t} \left( \sum_{\tau=1}^{t} \gamma^{t - \tau} \text{S} (\beta_i, \cC^{\tau}) \right)}_{A_1 \text{:= profit function term}} 
+            + \underbrace{\lambda_1 \sum_{i \in \cC^{t}} p_{i,g}^{t} \log \frac{q_i^{t}}{p_{i,g}^{t}}}_{A_2 \text{:= entropy term}}
+            + \underbrace{\lambda_0 (\sum_{i \in \cC^{t}} p_{i,g}^{t} - 1)}_{A_3 \text{:= regularization term}} \,,
+        \end{split}
+    \end{align}
+\end{small}%
+where $\gamma$ is a hyper-parameter controlling the weights of historical information.
+$A_1$ denotes the profit function in the MWU algorithm, encouraging higher aggregation probability for clients with greater similarity.
+$A_2$ represents the entropy term, where $q_i^{t} = \nicefrac{N_i}{N^{t}}$ denotes the prior distribution of aggregation probability~\citep{li2018federated,balakrishnan2021diverse}.
+$A_2$ evaluates the risk associated with the aggregation process. $A_3$ serves as a regularization term, ensuring the total aggregation weights sum to 1.
+\begin{small}
+    \begin{align}
+        p_{i,g}^{t} = \frac{q_i^{t} \exp \left( \frac{1}{\lambda_1} \sum_{\tau=1}^{t} \gamma^{t - \tau} \text{S} (\beta_i, \cC^{\tau})
+        \right)}{\sum_{j \in \cC^{t}} q_j^{t} \exp \left( \frac{1}{\lambda_1} \sum_{\tau=1}^{t} \gamma^{t - \tau} \text{S} (\beta_j, \cC^{\tau}) \right)}  \,,
+        \label{equ:agg-weights}
+    \end{align}
+\end{small}%
+where $\lambda_1$ denotes the heat parameter, controlling the entropy term's strength.
+A higher $\lambda_1$ value emphasizes entropy, resulting in a more evenly distributed set of aggregation weights $p_{i,g}^{t}$.
+
+\paragraph{Case study 3: improved local training.}
+According to Definition~\ref{def:client-index}, the generated client feature index $\mbeta_{i}^{f}$ contains client-specific information unrelated to label information.
+Thus, to promote label sensitivity in local features, the local features should be independent of the client feature index $\mbeta_i^{f}$.
+To ensure this, we design the subsequent local objective function to enforce orthogonality between the trained local features $\zz_{i,j}$ and the client feature index $\mbeta_{i}^{f}$ for any client $i$.
+\begin{small}
+    \begin{align}
+        \textstyle
+         & \cL(\xx, y) = \cL_{\text{cls}} (\xx, y)
+        + \cL_{\text{orth}} (\zz_P, \mB^{f}) + \cL_{\text{dist}} (\zz, \zz_P) \,,
+        \label{equ:local-reg}
+    \end{align}
+\end{small}%
+where $\mB^{f} = [\mbeta_{1}^{f}, \cdots, \mbeta_{N}^{f}]$, $\zz$ represents local features, and $\zz_P \in \R^{d_{i}}$ is the projected feature.
+To handle dimension mismatches between local features $\zz_{i,j}$ and client feature indices $\mbeta_{i}^{f}$, we initially project $\zz \in \R^{d}$ to $\zz_P \in \R^{d_{i}}$ using a \textit{trainable} matrix $\mP \in \R^{d \times d_{i}}$ (see Figure~\ref{fig:local-reg-workflow}).
+An orthogonal loss term $\cL_{\text{orth}} = \norm{\zz_P \mB^{f}}_1$ further encourages orthogonality between $\zz_P$ and $\mB^{f}$.
+To preserve maximum information from the original feature $\zz$ in $\zz_P$, we introduce an additional distillation loss term, denoted as $\cL_{dist}$.
+This term regulates the Kullback-Leibler divergence between the prediction logits of $\zz$ and that of $\zz_P$.
+\begin{wrapfigure}{r}{.45\textwidth}
+    \centering
+    \includegraphics[width=.45\textwidth]{./figures/local-reg-workflow.pdf}
+    \caption{\small
+        \textbf{Workflow of the improved local training (case study 3).}
+        The projection layer is to project client features to the same dimension with client feature index $\mbeta_{i}^{f}$, and the projection classifier is to ensure the projected features and the original client features contain similar information. 
+    }
+    \label{fig:local-reg-workflow}
+\end{wrapfigure}
+
+
+
+\section{Experiments}
+
+
+In this section, we investigate if the \algfed and the proposed three case studies can improve the FL algorithm performance.
+
+\subsection{Experiment Settings}
+
+\paragraph{Datasets and models.}
+In this paper, we utilize three datasets: Shakespeare, CIFAR10, and DomainNet. Shakespeare's partition uses LEAF benchmark's method~\citep{caldas2018leaf}. CIFAR10 is partitioned into 100 clients using Latent Dirichlet Allocation (LDA)~\citep{yurochkin2019bayesian,hsu2019measuring} with $\alpha = 0.1$ for label distribution shifts. DomainNet randomly selects 50 classes from the total 345 and divides sub-datasets into 10 clients per domain, resulting in a total of 60 clients.
+We randomly select 10\% of clients in each of the 100 communication rounds, with a fixed number of 5 local epochs.
+\paragraph{Baseline Algorithms.} We have selected widely recognized FL baselines for our study, encompassing established methods such as FedAvg~\citep{mcmahan2016communication}, FedAvgM~\citep{hsu2019measuring}, FedDyn~\citep{acar2021federated}, and Moon~\citep{li2021model}. Additionally, we have incorporated more recently introduced baselines, namely FedLC~\citep{zhang2022federated} and FedIIR~\citep{guo2023out}. It is important to note that FedIIR is specifically tailored for addressing feature shift tasks and, as a result, its evaluation is limited to the DomainNet dataset.
+\begin{table*}[!t]
+    \centering
+    \caption{\small
+        \textbf{Performance improvement of \algfed.} We assess the performance improvement achieved by employing our proposed three case studies across diverse datasets, neural architectures, and baseline algorithms. Each experiment comprises 100 communication rounds, with the number of local epochs set to 5. We measure the average test accuracy of all clients in each communication round and report the best performance attained across all rounds. The results are then averaged over three seeds. The \rmnum{1}~indicates improved client sampling, \rmnum{2}~indicates the improved model aggregation, and \rmnum{3}~indicates the improved local training. The MI indicates the maximum improvement of \algfed over baselines. The weight of the local regularization term in \rmnum{3}~is set to $1.0$ for \textsc{Federated} strategy, and $5.0$ for \textsc{Global} strategy.
+    }
+    \resizebox{1.\textwidth}{!}{
+        \begin{tabular}{c c c c c c c c c c c c c c c}
+            \toprule
+            \multirow{2}{*}{Datasets}   &
+            \multirow{2}{*}{Algorithms} & Original & \multicolumn{3}{c}{\algfed (\textsc{Federated})} & \multicolumn{3}{c}{\algfed (\textsc{Global})} & MI                                                                                                                                                                                                                                                                            \\
+            \cmidrule(lr){3-3} \cmidrule(lr){4-6} \cmidrule(lr){7-9}  \cmidrule(lr){10-10}
+                                        &          & -                                                & + \rmnum{1}                                   & + \rmnum{1} + \rmnum{2}                      & + \rmnum{1} + \rmnum{2} + \rmnum{3}                   & + \rmnum{1}                                           & + \rmnum{1} + \rmnum{2}                      & + \rmnum{1} + \rmnum{2} + \rmnum{3}                   & -       \\
+            \midrule
+            \multirow{5}{*}{\makecell{Shakespeare                                                                                                                                                                                                                                                                                                                                                                                     \\ (LSTM)}}
+                                        & FedAvg   & $49.93$ \small{\transparent{0.5} $\pm 0.12$}     & $50.33$ \small{\transparent{0.5} $\pm 0.03$}  & $50.28$ \small{\transparent{0.5} $\pm 0.04$} & $\mathbf{50.51}$ \small{\transparent{0.5} $\pm 0.10$} & $50.30$ \small{\transparent{0.5} $\pm 0.08$}          & $50.38$ \small{\transparent{0.5} $\pm 0.07$} & $50.40$ \small{\transparent{0.5} $\pm 0.08$}          & 0.58    \\
+                                        & FedAvgM  & $49.97$ \small{\transparent{0.5} $\pm 0.09$}     & $50.29$ \small{\transparent{0.5} $\pm 0.01$}  & $50.24$ \small{\transparent{0.5} $\pm 0.01$} & $50.43$ \small{\transparent{0.5} $\pm 0.01$}          & $50.29$ \small{\transparent{0.5} $\pm 0.19$}          & $50.24$ \small{\transparent{0.5} $\pm 0.03$} & $\mathbf{50.60}$ \small{\transparent{0.5} $\pm 0.22$} & 0.63    \\
+                                        & FedDyn   & $50.23$ \small{\transparent{0.5} $\pm 0.08$}     & $50.47$ \small{\transparent{0.5} $\pm 0.17$}  & $50.43$ \small{\transparent{0.5} $\pm 0.14$} & $50.55$ \small{\transparent{0.5} $\pm 0.02$}          & $50.64$ \small{\transparent{0.5} $\pm 0.13$}          & $50.49$ \small{\transparent{0.5} $\pm 0.19$} & $\mathbf{50.71}$ \small{\transparent{0.5} $\pm 0.11$} & 0.48    \\
+                                        & Moon     & $50.09$ \small{\transparent{0.5} $\pm 0.08$}     & $50.35$ \small{\transparent{0.5} $\pm 0.02$}  & $50.35$ \small{\transparent{0.5} $\pm 0.16$} & $\mathbf{50.54}$ \small{\transparent{0.5} $\pm 0.03$} & $50.36$ \small{\transparent{0.5} $\pm 0.01$}          & $50.38$ \small{\transparent{0.5} $\pm 0.11$} & $50.52$ \small{\transparent{0.5} $\pm 0.22$}          & 0.45    \\
+                                        & FedLC    & $49.89$ \small{\transparent{0.5} $\pm 0.19$}     & $50.43$ \small{\transparent{0.5} $\pm 0.08$}  & $50.37$ \small{\transparent{0.5} $\pm 0.09$} & $50.46$ \small{\transparent{0.5} $\pm 0.05$}          & $50.34$ \small{\transparent{0.5} $\pm 0.05$}          & $50.29$ \small{\transparent{0.5} $\pm 0.07$} & $\mathbf{50.50}$ \small{\transparent{0.5} $\pm 0.05$} & 0.61    \\
+            \midrule
+            \multirow{5}{*}{\makecell{CIFAR10                                                                                                                                                                                                                                                                                                                                                                                         \\ (ResNet18)}}
+                                        & FedAvg   & $42.24$ \small{\transparent{0.5} $\pm 2.18$}     & $44.60$ \small{\transparent{0.5} $\pm 0.74$}  & $44.10$ \small{\transparent{0.5} $\pm 0.20$} & $\mathbf{59.29}$ \small{\transparent{0.5} $\pm 2.58$} & $45.56$ \small{\transparent{0.5} $\pm 0.18$}          & $46.49$ \small{\transparent{0.5} $\pm 0.08$} & $58.28$ \small{\transparent{0.5} $\pm 4.95$}          & 17.05   \\
+                                        & FedAvgM  & $42.56$ \small{\transparent{0.5} $\pm 2.23$}     & $45.81$ \small{\transparent{0.5} $\pm 1.36$}  & $45.05$ \small{\transparent{0.5} $\pm 1.24$} & $63.48$ \small{\transparent{0.5} $\pm 2.16$}          & $46.55$ \small{\transparent{0.5} $\pm 0.83$}          & $46.24$ \small{\transparent{0.5} $\pm 1.36$} & $\mathbf{69.37}$ \small{\transparent{0.5} $\pm 4.49$} & 26.81   \\
+                                        & FedDyn   & $37.22$ \small{\transparent{0.5} $\pm 3.26$}     & $39.49$ \small{\transparent{0.5} $\pm 0.01$}  & $39.45$ \small{\transparent{0.5} $\pm 0.20$} & $69.10$ \small{\transparent{0.5} $\pm 1.17$}          & $39.42$ \small{\transparent{0.5} $\pm 0.08$}          & $39.84$ \small{\transparent{0.5} $\pm 0.16$} & $\mathbf{70.59}$ \small{\transparent{0.5} $\pm 3.86$} & 33.37   \\
+                                        & Moon     & $41.12$ \small{\transparent{0.5} $\pm 1.23$}     & $44.28$ \small{\transparent{0.5} $\pm 0.45$}  & $43.79$ \small{\transparent{0.5} $\pm 0.43$} & $60.26$ \small{\transparent{0.5} $\pm 3.29$}          & $45.20$ \small{\transparent{0.5} $\pm 0.36$}          & $44.85$ \small{\transparent{0.5} $\pm 1.22$} & $\mathbf{65.55}$ \small{\transparent{0.5} $\pm 0.27$} & 24.43   \\
+                                        & FedLC    & $29.31$ \small{\transparent{0.5} $\pm 0.01$}     & $29.62$ \small{\transparent{0.5} $\pm 0.13$}  & $30.65$ \small{\transparent{0.5} $\pm 0.29$} & $\mathbf{42.20}$ \small{\transparent{0.5} $\pm 2.14$} & $31.04$ \small{\transparent{0.5} $\pm 0.98$}          & $30.37$ \small{\transparent{0.5} $\pm 0.82$} & $40.27$ \small{\transparent{0.5} $\pm 1.00$}          & 12.89   \\
+            \midrule
+            \multirow{6}{*}{\makecell{DomainNet                                                                                                                                                                                                                                                                                                                                                                                       \\ (MobileNet V2)}}
+                                        & FedAvg   & $46.31$ \small{\transparent{0.5} $\pm 1.36$}     & $50.78$ \small{\transparent{0.5} $\pm 1.42$}  & $53.83$ \small{\transparent{0.5} $\pm 0.37$} & $56.43$ \small{\transparent{0.5} $\pm 3.08$}          & $52.37$ \small{\transparent{0.5} $\pm 0.59$}          & $54.67$ \small{\transparent{0.5} $\pm 0.77$} & $\mathbf{57.43}$ \small{\transparent{0.5} $\pm 0.13$} & $11.12$ \\
+                                        & FedAvgM  & $45.50$ \small{\transparent{0.5} $\pm 1.21$}     & $50.61$ \small{\transparent{0.5} $\pm 1.73$}  & $55.70$ \small{\transparent{0.5} $\pm 0.69$} & $\mathbf{58.34}$ \small{\transparent{0.5} $\pm 0.01$} & $53.50$ \small{\transparent{0.5} $\pm 2.33$}          & $53.56$ \small{\transparent{0.5} $\pm 0.81$} & $57.44$ \small{\transparent{0.5} $\pm 1.04$}          & $12.84$ \\
+                                        & FedDyn   & $45.41$ \small{\transparent{0.5} $\pm 0.89$}     & $47.24$ \small{\transparent{0.5} $\pm 0.29$}  & $49.90$ \small{\transparent{0.5} $\pm 0.34$} & $\mathbf{55.53}$ \small{\transparent{0.5} $\pm 1.49$} & $52.42$ \small{\transparent{0.5} $\pm 0.23$}          & $50.68$ \small{\transparent{0.5} $\pm 0.26$} & $53.33$ \small{\transparent{0.5} $\pm 0.26$}          & $10.12$ \\
+                                        & Moon     & $50.56$ \small{\transparent{0.5} $\pm 0.89$}     & $59.39$ \small{\transparent{0.5} $\pm 0.47$}  & $59.54$ \small{\transparent{0.5} $\pm 0.44$} & $57.03$ \small{\transparent{0.5} $\pm 0.60$}          & $\mathbf{60.48}$ \small{\transparent{0.5} $\pm 0.10$} & $59.93$ \small{\transparent{0.5} $\pm 0.41$} & $57.50$ \small{\transparent{0.5} $\pm 0.52$}          & $9.92$  \\
+                                        & FedLC    & $45.48$ \small{\transparent{0.5} $\pm 3.59$}     & $50.40$ \small{\transparent{0.5} $\pm 0.43$}  & $51.27$ \small{\transparent{0.5} $\pm 0.66$} & $\mathbf{57.92}$ \small{\transparent{0.5} $\pm 0.67$} & $54.60$ \small{\transparent{0.5} $\pm 1.45$}          & $56.34$ \small{\transparent{0.5} $\pm 2.78$} & $57.41$ \small{\transparent{0.5} $\pm 0.06$}          & $12.44$ \\
+                                        & FedIIR   & $49.32$ \small{\transparent{0.5} $\pm 0.84$}     & $48.11$ \small{\transparent{0.5} $\pm 0.18$}  & $50.28$ \small{\transparent{0.5} $\pm 1.10$} & $52.74$ \small{\transparent{0.5} $\pm 1.07$}          & $\mathbf{57.05}$ \small{\transparent{0.5} $\pm 1.84$} & $53.74$ \small{\transparent{0.5} $\pm 0.27$} & $51.86$ \small{\transparent{0.5} $\pm 1.08$}          & $7.73$  \\
+            \bottomrule
+        \end{tabular}
+    }
+    \label{tab:main-results}
+\end{table*}
+
+\begin{figure}[!t]
+    \centering
+    \subfigure[ \algfed $_\textsc{Federated}$]{
+        \includegraphics[width=.225\textwidth]{./figures/ablation-epochs-federated.pdf}
+        \label{fig:ablation-epochs-federated}
+    }
+    \subfigure[ \algfed$ _\textsc{Global}$]{
+        \includegraphics[width=.225\textwidth]{./figures/ablation-epochs-global.pdf}
+        \label{fig:ablation-epochs-global}
+    }
+    \subfigure[CIFAR10]{
+        \includegraphics[width=.225\textwidth]{./figures/ablation-aggregation-CIFAR10.pdf} \label{fig:ablation-aggregation-cifar}
+    }
+    \subfigure[DomainNet]{
+        \includegraphics[width=.225\textwidth]{./figures/ablation-aggregation-DomainNet.pdf} \label{fig:ablation-aggregation-domain}
+    }
+    \caption{\textbf{Ablation studies on the number of training epochs and improved model aggregation for \algfed.} 'Original' represents the algorithms in their original form, without enhancements, while other results consider all three case studies with varying epoch numbers. The Figures~\ref{fig:ablation-aggregation-cifar} and~\ref{fig:ablation-aggregation-domain} utilize client indices generated by the \textsc{Global} strategies. }
+\end{figure}
+
+\subsection{Numerical Results}
+
+\paragraph{Superior performance of \algfed on all three case studies.}In Table~\ref{tab:main-results}, we evaluate \algfed's performance in three case studies: enhanced client sampling, improved model aggregation, and refined local training. The results reveal the following insights:
+(1) \textit{Each case study shows performance improvements across all baselines}, highlighting the potential of generated client indices to enhance FL algorithms.
+(2) \textit{Enhanced local training provides the most significant performance boost}, emphasizing the importance of refining local features for addressing distribution shifts. 
+(3) \textit{The \textsc{Federated} strategy consistently matches the \textsc{Global} strategy in performance}, except for improved client sampling, where the \textsc{Global} strategy surpasses, showcasing its superior capability in assessing client similarities (see Figure~\ref{fig:index-similarity-heatmap}).
+(4) The performance gain from improved model aggregation seems somewhat random compared to other case studies. This might be due to the shared intuition between improved client sampling and model aggregation, limiting further improvements when combining these approaches. However, \textit{solely using improved model aggregation consistently outperforms the original algorithms}, as seen in Figure~\ref{fig:ablation-aggregation-cifar} and~\ref{fig:ablation-aggregation-domain}.
+
+\textit{In summary, utilizing the client indices significantly boost the model performance. In practice, we can select which case studies to use, and we recommend combining all three case studies as this approach provides a stable and significant performance gain compared to the baseline algorithms.}
+\begin{table*}[!t]
+    \centering
+    \caption{\small
+        \textbf{Ablation studies on \algfed.} We present naive baselines for \algfed. Feature Average: We compute the average of CLIP image features for all data samples within each client as the client index. Class Prototypes: We form each client's index by averaging CLIP image features for each class and concatenating the resulting class prototypes. Local Model Weights: We use the classifier model weights at the end of each training epoch as the client index for each client. Notably, unlike other methods, these local model weights change with each epoch, posing challenges for direct integration into our sampling and aggregation mechanisms.
+    }
+    \resizebox{1.\textwidth}{!}{
+        \begin{tabular}{l c c c c c c c c c}
+            \toprule
+            CIFAR10 & Sampling & Sampling + Aggregation & Sampling + Aggregation + Local Training \\
+            \midrule
+            \textit{Ablation Study on Types of Client Index} \\
+            Feature Average & 52.95 & 31.99 & 11.40\\
+            Class Prototypes & 44.89 & 49.88 & 15.41\\
+            Local Model Weights & - & - & 32.85\\
+            \midrule
+            \textit{Ablation Study on Generating Client Index} \\
+            Omit Orthogonal Loss & 38.58 & 44.39 & 15.32\\
+            Omit Text Align Loss & 44.91 & 43.18 & 54.35\\
+            Omit Reconstruction Loss & 43.19 & 30.86 & 31.65\\
+            \midrule
+            \textit{Ablation Study on Label and Feature Index} \\
+            Utilize Only Feature Index & 42.34 & 23.57 & 44.99 \\
+            Utilize Only Label Index & 45.99 & 46.48\\
+            \midrule
+            \textit{Ablation Study on Local Training} \\
+            Omit Orthogonal Regularization in Improved Local Training & - & - & 43.71\\
+            \midrule
+            \algfed & 45.56 & 46.49 & 58.28\\
+            \bottomrule
+        \end{tabular}%
+    }
+    \label{tab:ablation}
+\end{table*}
+            
+
+\begin{figure}[!t]
+    \centering
+    \subfigure[\textsc{Federated}]{
+        \includegraphics[width=.225\textwidth]{./figures/ablation-local-federated.pdf}
+        \label{fig:ablation-local-federated}
+    }
+    \subfigure[\textsc{Global}]{
+        \includegraphics[width=.225\textwidth]{./figures/ablation-local-global.pdf}
+        \label{fig:ablation-local-global}
+    }
+    \subfigure[\textsc{Federated}]{
+        \includegraphics[width=.225\textwidth]{./figures/ablation-sampling-federated.pdf}
+        \label{fig:ablation-sampling-federated}
+    }
+    \subfigure[\textsc{Global}]{
+        \includegraphics[width=.225\textwidth]{./figures/ablation-sampling-global.pdf}
+        \label{fig:ablation-sampling-global}
+    }
+    \caption{\textbf{Ablation studies on improved local training and improved client sampling.} We use the CIFAR10 dataset and client indices from both \textsc{Federated} and \textsc{Global} strategies.  Figure~\ref{fig:ablation-local-federated} and~\ref{fig:ablation-local-global} different weights for Eq~\eqref{equ:local-reg}; Figure~\ref{fig:ablation-sampling-federated} and~\ref{fig:ablation-sampling-global} vary hyperparameter $\tau$ in Eq~\eqref{equ:sample-weights}. }
+    \label{fig:ablation-local}
+\end{figure}
+
+\begin{table}[!t]
+    \centering
+    \caption{\textbf{Simulation time comparison.} We compare the simulation time of \algfed and FedAvg on DomainNet dataset.}
+    \resizebox{1.\textwidth}{!}{
+    \begin{tabular}{c c c c c}
+        \toprule
+         & Generate Client Index & Training Total & Training achieve FedAvg best performance & Total achieve FedAvg best performance \\
+        \midrule
+        \algfed & 632s & 24583s & 10817s & 11449s\\
+        FedAvg & 0s & 26224s & 26224s & 26224s\\
+        \bottomrule
+    \end{tabular}
+    }
+    \label{tab:simulation-time}
+\end{table}
+\paragraph{All the components of \algfed are necessary.} 
+In Table~\ref{tab:ablation}, we conduct ablation studies on \algfed. The results indicate that:
+(1) \textit{The original \algfed achieves the highest final performance among different client vector candidates.} Although feature average and class prototypes show potential for aiding in sampling, they cannot be readily employed in our local training phase, which significantly contributes to the effectiveness of the \algfed algorithm.
+(2) \textit{All three losses are essential for \algfed's effectiveness.} The orthogonal loss notably enhances the local training phase, while removing the text align loss and reconstruction loss significantly diminishes model performance.
+(3) \textit{Both feature and label indices are vital for optimizing \algfed's performance.} The absence of the feature index hinders improved local training. Additionally, since the CIFAR10 dataset is partitioned using the Dirichlet method, introducing label shifts instead of feature shifts, the label index is crucial for enhancing sampling and model aggregation performance in this context.
+(4) \textit{Orthogonal loss is crucial for achieving optimal performance in local training.} Without it, local training fails to surpass the performance of the original FedAvg.
+
+\paragraph{Ablation studies on the number of training epochs for \algfed.}We conduct ablation studies on the \algfed algorithm, varying the number of training epochs as shown in Figure~\ref{fig:ablation-epochs-federated} and~\ref{fig:ablation-epochs-global}. The results indicate that: (1) Client indices generated with 100 or 500 training epochs notably enhance FL algorithm performance. (2) Increasing the number of training epochs for \algfed does not consistently lead to better results, as 100 epochs achieve similar performance to 500 epochs in most cases.
+
+\paragraph{Ablation studies on hyper-parameters of improved client sampling.} In Figure~\ref{fig:ablation-sampling-federated} and~\ref{fig:ablation-sampling-global}, we perform ablation studies on the heat parameter $\tau$ in Eq~\eqref{equ:sample-weights}. The results indicate that (1) algorithms with improved client sampling consistently outperform the original algorithms across various $\tau$ values; (2) the optimal $\tau$ value is smaller for client indices trained using the \textsc{Federated} strategy compared to the \textsc{Global} strategy. This observation aligns with our previous findings that \textsc{Global} strategy-trained client indices exhibit larger inter-client distances.
+
+\paragraph{Ablation studies on hyper-parameters of improved local training.}
+In Figure~\ref{fig:ablation-local}, ablation studies on the weight of the local regularization term (Eq~\eqref{equ:local-reg}) were conducted. The findings suggest that: (1) Using weights of $1.0$ for the \textsc{Federated} strategy and $5.0$ for the \textsc{Global} strategy yields favorable results for all algorithms. (2) FedDyn exhibits higher resilience to changes in the weights of the local regularization terms.
+
+\paragraph{Computation time comparison.} In Table~\ref{tab:simulation-time}, we show the simulation time of \algfed and FedAvg. Results show that (1) The additional computational overhead for generating the client index is relatively insignificant compared to the subsequent training stage; (2) From the ‘Total achieve FedAvg best performance’ column, Client2Vec requires less computational time to achieve comparable performance to FedAvg, particularly noticeable on larger-scale datasets such as DomainNet. 
+
+\subsection{Ablation Studies on Various Model Architectures.}
+In Table~\ref{tab:ablation-on-network-architecture}, we show how \algfed improves performance with different model architectures. Our results reveal that: (1) \algfed significantly boosts the performance of original algorithms in all settings, and (2) pre-trained models like MobileNet V2 and ResNet18 produce better results, while \algfed also enhances the performance of VIT models trained from scratch.\looseness=-1
+\begin{table*}[!t]
+    \centering
+    \caption{\small
+        \textbf{Performance of \algfed on various network architectures.} We evaluate the performance of \algfed on the DomainNet dataset using diverse network architectures. 
+        The term 'Original' refers to the initial form of the algorithms, while \algfed(\textsc{Federated}) and \algfed(\textsc{Global}) applied all three case studies.
+        Each experiment involves 100 communication rounds, with the number of local epochs set to 5. We gauge the average test accuracy of all clients in each communication round and report the highest performance achieved across all rounds. The results are averaged over three seeds. For the VIT experiments, we use the CCT-7/3x1 models~\citep{hassani2021escaping}.\looseness=-1
+    }
+    \resizebox{1.\textwidth}{!}{
+        \begin{tabular}{c c c c c c c c c c}
+            \toprule
+            \multirow{3}{*}{DomainNet} & \multicolumn{3}{c}{MobileNet V2 (Pre-Trained)} & \multicolumn{3}{c}{ResNet18 (Pre-Trained)}   & \multicolumn{3}{c}{VIT (From Scratch)}                                                                                                                                                                                                                                                                                                 \\
+            \cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10} 
+
+            & \multirow{2}{*}{Original} & \multicolumn{2}{c}{\algfed} & \multirow{2}{*}{Original} & \multicolumn{2}{c}{\algfed} & \multirow{2}{*}{Original} & \multicolumn{2}{c}{\algfed} \\
+             \cmidrule(lr){3-4}  \cmidrule(lr){6-7}  \cmidrule(lr){9-10} & 
+            
+                                                                              & \textsc{Federated}                           & \textsc{Global}  &                                                       & \textsc{Federated}                           & \textsc{Global}   &                                                                 & \textsc{Federated}                           & \textsc{Global}                              \\
+            \midrule
+            FedAvg                     & $46.31$ \small{\transparent{0.5} $\pm 1.36$}   & $56.43$ \small{\transparent{0.5} $\pm 3.08$} & $57.43$ \small{\transparent{0.5} $\pm 0.13$} & $56.66$ \small{\transparent{0.5} $\pm 0.50$} & $61.27$ \small{\transparent{0.5} $\pm 0.05$} & $60.95$ \small{\transparent{0.5} $\pm 0.09$} & $33.09$ \small{\transparent{0.5} $\pm 0.01$} & $33.50$ \small{\transparent{0.5} $\pm 0.20$} & $33.86$ \small{\transparent{0.5} $\pm 0.02$} \\
+            FedAvgM                    & $45.50$ \small{\transparent{0.5} $\pm 1.21$}   & $58.34$ \small{\transparent{0.5} $\pm 0.01$} & $57.44$ \small{\transparent{0.5} $\pm 1.04$} & $57.44$ \small{\transparent{0.5} $\pm 0.42$} & $61.22$ \small{\transparent{0.5} $\pm 0.11$} & $60.81$ \small{\transparent{0.5} $\pm 0.18$} & $33.67$ \small{\transparent{0.5} $\pm 0.56$} & $34.47$ \small{\transparent{0.5} $\pm 0.20$} & $34.21$ \small{\transparent{0.5} $\pm 0.11$} \\
+            FedDyn                     & $45.41$ \small{\transparent{0.5} $\pm 0.89$}   & $51.49$ \small{\transparent{0.5} $\pm 0.17$} & $53.33$ \small{\transparent{0.5} $\pm 0.26$} & $58.17$ \small{\transparent{0.5} $\pm 0.61$} & $61.67$ \small{\transparent{0.5} $\pm 0.42$} & $59.88$ \small{\transparent{0.5} $\pm 0.42$} & $29.57$ \small{\transparent{0.5} $\pm 0.40$} & $31.64$ \small{\transparent{0.5} $\pm 0.13$} & $31.36$ \small{\transparent{0.5} $\pm 0.12$} \\
+            MOON                       & $50.56$ \small{\transparent{0.5} $\pm 0.89$}   & $57.03$ \small{\transparent{0.5} $\pm 0.60$} & $57.50$ \small{\transparent{0.5} $\pm 0.52$} & $53.80$ \small{\transparent{0.5} $\pm 0.46$} & $60.76$ \small{\transparent{0.5} $\pm 0.25$} & $59.90$ \small{\transparent{0.5} $\pm 0.17$} & $32.29$ \small{\transparent{0.5} $\pm 0.52$} & $33.58$ \small{\transparent{0.5} $\pm 0.12$} & $33.73$ \small{\transparent{0.5} $\pm 0.03$} \\
+            \bottomrule
+        \end{tabular}
+    }
+    \label{tab:ablation-on-network-architecture}
+\end{table*}
+
+
+
+\section{Conclusion and Future Works}
+
+\label{sec:conclusion}
+In this paper, we explore the potential of enhancing FL algorithm performance through client index vectors. Our three case studies clearly demonstrate the significant improvement in FL algorithm performance achieved through client indices, highlighting client indexing as a valuable avenue for FL algorithm enhancement. It's important to note that these case studies may not cover all FL training scenarios. Investigating the impact of client indices on other aspects, such as personalization and clustering, would be valuable. 
+
+
+\newpage
+
+
+
+\clearpage
+
+
+
+
+

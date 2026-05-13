@@ -1,0 +1,414 @@
+\title{TPO: Aligning Large Language Models with Multi-branch & Multi-step Preference Trees}
+
+\begin{abstract}
+In the domain of complex reasoning tasks, such as mathematical reasoning, recent advancements have proposed the use of Direct Preference Optimization (DPO) to suppress output of dispreferred responses, thereby enhancing the long-chain reasoning capabilities of large language models (LLMs). 
+To this end, these studies employed LLMs to generate preference trees via Tree-of-thoughts (ToT) and sample the paired preference responses required by the DPO algorithm.
+However, the DPO algorithm based on binary preference optimization was unable to learn multiple responses with varying degrees of preference/dispreference that provided by the preference trees, resulting in incomplete preference learning.
+In this work, we introduce \textbf{T}ree \textbf{P}reference \textbf{O}ptimization (\TheName{}), which does not sample paired preference responses from the preference tree; instead, it directly learns from the entire preference tree during the fine-tuning.
+Specifically, \TheName{} formulates the language model alignment as a \textit{Preference List Ranking} problem, where the policy can potentially learn more effectively from a ranked preference list of responses given the prompt. 
+In addition, to further assist LLMs in identifying discriminative steps within long-chain reasoning and increase the relative reward margin in the preference list, \TheName{} utilizes \textit{Adaptive Step Reward} to adjust the reward values of each step in the trajectory for performing fine-grained preference optimization.
+We carry out extensive experiments on mathematical reasoning tasks to evaluate \TheName{}. The experimental results indicate that \TheName{} consistently outperforms DPO across three publicly large language models on four datasets.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Long-chain reasoning task~\citep{wei2022chain,xiong2024converging}, such as commonsense reasoning and math reasoning, is one of the critical capabilities in large language models (LLMs)~\citep{lai2024step}. This task is particularly challenging as it often involves numerous reasoning steps. Any mistake in these steps can lead to an incorrect final answer.
+Initially, some studies utilized various data augmentation techniques during the supervised fine-tuning (SFT) phase to enhance the reasoning capabilities of LLMs~\citep{shao2024deepseekmath,tangmathscale,xin2024deepseek}. However, a phenomenon of pessimism suggests that the positive feedback provided by SFT alone cannot prevent LLMs from generating erroneous reasoning pathways. 
+\cite{hong2024orpo} indicated that, during the SFT phase, as the probability of preferred outputs increases, the probability of dispreferred outputs also rises. This phenomenon makes the models more prone to errors in long-chain reasoning. Consequently, it is necessary to develop methods to mitigate the likelihood of dispreferred outputs.
+Recently, Direct Preference Optimization (DPO)~\citep{rafailov2024direct} has been proposed for aligning LLMs using paired preference data. Compared to the traditional Reinforcement Learning from Human Feedback (RLHF)~\citep{christiano2017deep} framework, DPO has gained popularity due to its simplicity and reduced memory requirements. 
+Recent studies have utilized DPO to suppress dispreferred responses in LLM outputs~\citep{lai2024step,xie2024monte}. For this purpose, they have employed LLMs to generate preference trees via Tree-of-thoughts (ToT)~\citep{yao2024tree}, and based on the inherent characteristics of the preference trees, they have collected the paired preference data required for DPO training.
+In general, existing works employ heuristic methods to sample paired preference data, typically manifesting as the \textbf{random selection} of reasoning trajectories that can/cannot correctly answer the question as preferred/dispreferred responses~\citep{jiao2024learning}. Alternatively, reasoning trajectories may be \textbf{manually selected} (particularly evident in the choice of dispreferred responses) to ensure the quality of the data~\citep{lai2024step}; 
+however, this approach further introduces costly manual annotation efforts.
+Although sampling-based strategies have been proven effective, we consider them to be a \textbf{inferior solution} that is constrained by the fact that DPO supports only binary preference data input.
+We still seek a preference learning algorithm tailored specifically for preference trees.
+This is demonstrated by the following points: 
+\begin{enumerate}
+[leftmargin=*,itemsep=0pt,parsep=0.5em,topsep=0.3em,partopsep=0.3em]
+    \item Preference trees typically yield unbalanced preference responses, with a large number of dispreferred responses being randomly filtered out and not incorporated into the DPO, resulting in a \textbf{low data utilization efficiency} for the model. Additionally, due to the inherent nature of the tree structure, these dispreferred responses encompass varying degrees of reward. For instance, although neither response $y_1$ nor $y_2$ leads to the correct outcome, $y_2$ may contain more correct reasoning steps than $y_1$, resulting in an inequality among dispreferred responses. We contend that \textit{DPO based on binary rewards is unable to explore the critical information within failure trajectories, we propose to introduce preferences with varying reward values to facilitate more robust preference optimization. }
+    \item The responses in the preference tree may share a portion of sub-trajectories, which leads to a \textbf{lower reward margin} between preferences, especially when a large number of shared sub-trajectories are present. This issue has not been considered in the existing DPO algorithm. We contend that \textit{the lower reward margin may prevent the model from discerning the differences between preference pairs. Consequently, we need to adaptively adjust the step rewards to enable fine-grained optimization.}
+\end{enumerate}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\linewidth]{framework.pdf}
+    \caption{The framework of \TheName{}: \TheName{} regards preference modeling as a more general \textit{Preference List Ranking} (PLR) problem and employs an \textit{Adaptive Step Reward} for achieving finer-grained preference optimization.}
+    \label{fig:framework}
+\end{figure}
+
+Motivated by the aforementioned points, in this work, we introduce \textbf{T}ree \textbf{P}reference \textbf{O}ptimization (\TheName{}), which does not sample paired preference responses from the preference tree; instead, it directly learns from the entire preference tree.
+Specifically, \TheName{} decouples the preference tree into multi-branch \& multi-step responses and performs preference optimization. 
+To align LLMs from multi-branch preferences, \TheName{} formulates LM alignment as a more general \textit{Preference List Ranking} problem and establishes a connection between LM alignment and Learn-to-Rank~\citep{liu2009learning}, enabling the LLMs to learn alignment more effectively from preference lists.
+To align LLMs from multi-step preferences, \TheName{} proposes the \textit{Adaptive Step Reward} that adjusts the reward value of each step based on the correlation scores between pairs of steps. This mechanism aids LLMs in conducting preference optimization from more discriminative steps.
+Although \TheName{} is a preference learning algorithm that introduces the reward value, unlike traditional reinforcement learning algorithms, the reward used in \TheName{} is not obtained through a learning-based algorithm, implying a lower learning variance.
+Our contributions are summarized as follows:
+\begin{enumerate}
+[leftmargin=*,itemsep=0pt,parsep=0.5em,topsep=0.3em,partopsep=0.3em]
+    \item In the context of long-chain reasoning tasks, we consider issues related to current DPO algorithms, specifically its low data utilization efficiency when aligning large language models on preference trees, as well as the inability of DPO based on binary rewards to explore critical information in failure trajectories. To tackle these challenges, we propose \TheName{}, the first preference optimization algorithm designed specifically for tree-structured preference data. 
+    \item We propose the \textit{Preference List Ranking} optimization objective that connects LM alignment and Learn-to-Rank, establishing a framework that enables preference modeling from responses with varying reward values. In addition, we propose the \textit{Adaptive Step Reward} mechanism, which addresses the issue of reduced reward margin between responses generated from preference trees due to shared sub-trajectories.
+    \item We conduct extensive experiments to validate the effectiveness of \TheName{} and discuss its generalization to out-of-distribution datasets.
+\end{enumerate}
+
+
+
+\section{Preliminaries}
+
+
+\subsection{Direct Preference Optimization}
+
+Reinforcement Learning from Human Feedback (RLHF)~\citep{christiano2017deep} is an effective method for enhancing the robustness, authenticity, and safety of LLMs~\citep{ouyang2022training}, which directly optimizes LLMs according to human preferences by maximizing the reward value of the model’s responses. 
+The reward function is defined based on the Bradley-Terry (BT) model~\citep{bradley1952rank} of preferences. Specifically, for preferred response $y_{w}$ and dispreferred response $y_{l}$ under the same prompt $x$ and data distribution $\mathcal{D}$, the BT model stipulates that the human preference distribution $p^{*}$ can be expressed as:
+
+\begin{equation}
+\label{eq:rlhf-objective}
+    p^{*}_{\mathcal{D}}\left(y_{w} \succ y_{l} \mid x\right)=\sigma\left(r^{*}\left(x, y_{w}\right)-r^{*}\left(x, y_{l}\right)\right)
+\end{equation}
+
+where $p^{*}_{\mathcal{D}}\left(y_{w} \succ y_{l} \right)$ denotes the probability that $y_w$ is preferred against $y_l$, $\sigma(x)=\frac1{1+\exp(-x)}$ denotes the sigmoid function, and $r^{*}$ denotes some latent reward model, which we do not have access to.
+The alignment of language models is commonly regarded as an optimization problem with a Kullback-Leibler (KL) constraint on reward values, formalized as follows:
+
+\begin{equation}
+    \begin{aligned}&max\mathbb{E}_{x\sim\mathcal{D},y\sim\pi_{\theta}(y\mid x)}\left[r^{*}(x, y)\right]\\
+    &s.t. \mathbb{E}_{x\sim\mathcal{D}}\mathbb{D}_{KL}\left[\pi_{\theta}(y\mid x)\|\pi_{ref}(y\mid x)\right]\leq\sigma\end{aligned}
+\end{equation}
+
+where $\pi_{\theta}$ denotes the aligned policy model, $\pi_{ref}$ denotes the reference policy model. To prevent reward hacking and ensure that $\pi_{\theta}$ does not deviate too much from the $\pi_{ref}$~\citep{amodei2016concrete}, a regularization term is typically added to the objective function~\citep{stiennon2020learning}, the problem is transformed into:
+
+\begin{equation}
+    max\mathbb{E}_{x\sim\mathcal{D},y\sim\pi(y\mid x)}\left[r^{*}(x,y)\right] - \beta\mathbb{D}_{KL}\left[\pi_\theta(y\mid x)\|\pi_{ref}(y\mid x)\right]
+\end{equation}
+
+where the hyperparameter $\beta$ controls the KL divergence between $\pi_{\theta}$ and $\pi_{ref}$. 
+In general, RLHF encompasses two training phases, including reward model training, and policy model training. However, the ultimate performance of RLHF is highly sensitive to various hyperparameters across these two phases, requiring careful tuning. 
+To circumvent this complex training process, \cite{rafailov2024direct} introduced Direct Preference Optimization (DPO), which directly utilizes paired preference data to optimize the policy model, bypassing the reward modeling stage by directly substituting this closed-form solution in Eq.~\ref{eq:rlhf-objective}. Specifically, given an input prompt $x$ and a pair of preference data ($y_w$, $y_l$), the goal of DPO is to maximize the probability of the preferred response $y_w$ and minimize the probability of the dispreferred response $y_l$, yielding the following DPO objective:
+
+\begin{equation}\label{eq:DPO-loss}
+    \mathcal{L}_{\mathrm{DPO}}(\pi_\theta;\pi_{\mathrm{ref}})=-\mathbb{E}_{(x,y_w,y_l)\sim\mathcal{D}}\left[\log\sigma\left(\beta\log\frac{\pi_\theta(y_w\mid x)}{\pi_{\mathrm{ref}}(y_w\mid x)}-\beta\log\frac{\pi_\theta(y_l\mid x)}{\pi_{\mathrm{ref}}(y_l\mid x)}\right)\right]
+\end{equation}
+
+where the $\beta\log\frac{\pi_\theta(y\mid x)}{\pi_{\mathrm{ref}}(y\mid x)}$  can be regarded as an “implicit reward”~\citep{rafailov2024direct}, and the objective of DPO is to align the ``implicit reward'' directly with human preference data.
+
+\subsection{Tree-structured Reasoning Policy for LLM}
+
+\paragraph{Multi-step Reasoning}\label{par:multi-step-reasoning}
+
+Following the standard reasoning setup of LLMs, given a policy $\pi$ instantiated by LLM and an input prompt $x$, $\pi$ can step-by-step generate a trajectory of reasoning steps $y = (s_{1}, \cdots, s_{K}) \sim\pi(\cdot|x)$ by autoregressively predicting the next token. 
+The standard reasoning setup assumes that $y$ encompasses the complete list of reasoning steps, with each step $s_k$ comprising multiple tokens. The step-by-step long-chain reasoning process is most famously used in Chain-of-Thought (CoT)~\citep{wei2022chain}.
+
+\paragraph{Multi-branch Reasoning} Self-Consistency~\citep{wang2023self} was the first to introduce multi-branch reasoning. Given an input prompt $x$, the policy $\pi$ generates $N$ trajectories of reasoning steps $\mathbf{y} = (y_1, \cdots, y_N) \sim\pi(\cdot|x)$, where $y_i = (s^{i}_1, \cdots, s^{i}_K)$. Ultimately, Self-Consistency selects the most probable final answer by marginalizing over the reasoning trajectories.
+
+\paragraph{Tree: Multi-branch \& Multi-step Reasoning}
+
+Recent works have further extended CoT and Self-Consistency to a tree-like structure, referred to as the Tree-of-Thoughts (ToT)~\citep{yao2024tree}. Specifically, ToT no longer confines its application to the initial prompt but extends to engaging in branching reasoning at any intermediate state subsequent to given steps.
+Given the state $\textbf{S} = [x, s_{1, \cdots, k-1}]$ of an LLM in the reasoning trajectory, ToT employs a Thought Generator $\textit{G}(\pi, \textbf{S}, N)$ to propose $N$ next planning steps $[s^{(1)}_k, \cdots, s^{(N)}_k]$. 
+Compared to CoT, ToT possesses a broader space for cognitive exploration and can circumvent the generation of repetitive responses within the same context.
+
+
+
+\section{Methodology}
+
+
+We propose \textbf{T}ree \textbf{P}reference \textbf{O}ptimization (\TheName{}), a preference learning algorithm tailored for preference trees generated by LLMs via Tree-of-Thoughts. 
+\TheName{} learns a preference list with varying reward values using a \textit{Preference List Ranking} objective, and utilizes \textit{Adaptive Step Reward} to achieve fine-grained alignment of step rewards.
+\subsection{Aligning LLMs from Multi-branch Preferences}
+
+\hspace*{2em}\textit{Preference modeling can be regarded as a more general \textbf{Preference List Ranking} problem: the policy $\pi$ is capable of learning from non-binary data with varying degrees of preference, facilitating more effective alignment for language models.
+}
+
+\paragraph{Problem Definition}
+\TheName{} defines the dataset $\mathcal{D} = {(x^{(i)}, \mathbf{y}^{(i)}, \mathbf{v}^{(i)})}^{M}_{i=1}$ with $M$ samples: given a prompt $x$, there is a response list $\mathbf{y} = (y_1, \cdots, y_N)$ of size $N$, and each response $y$ is associated with a reward value $v$. 
+The responses $\mathbf{y}$ are generated by the policy $\pi$, while the reward values $\mathbf{v}$ are derived from human raters or an inaccessible reward model. Typically, $\mathbf{v} = (v_1, \cdots, v_N) \in [0, 1]^N$, with higher reward values indicating better responses.
+
+\paragraph{Connection Between LM Alignment and Learn-to-Rank}
+\TheName{} follows the definition of the classic Learning-to-Rank (LTR)~\citep{liu2009learning} problem: the optimization objective is to learn a ranking model that outputs the relevance \textit{scores} for all \textit{documents} given a \textit{query}. 
+In the context of LM alignment, \TheName{} treats prompt $x$ as the \textit{query} and responses $\mathbf{y}$ as \textit{documents}. 
+Inspired by \cite{rafailov2024direct}, \TheName{} further regards the normalized ``implicit reward'' (denoted as $\mathbf{r} = (r_1, \cdots, r_N) = (\beta\log\frac{\pi_\theta(y_1\mid x)}{\pi_{\mathrm{ref}}(y_1\mid x)}, \cdots, \beta\log\frac{\pi_\theta(y_N\mid x)}{\pi_{\mathrm{ref}}(y_N\mid x)}) \in [0, 1]^N$) as an evaluation of the model’s relevance \textit{scores} for $x$ and $\mathbf{y}$. Overall, \TheName{} establishes the following connection between LM alignment and Learn-to-Rank.
+
+\begin{equation}
+    \begin{aligned}
+        \text{LM Alignment} &\leftarrow \text{Learn-to-Rank} \\
+        \texttt{prompt}, x &:= \texttt{query}\\
+        \texttt{responses}, \textbf{y} &:= \texttt{documents}\\
+        \texttt{implicit rewards}, \textbf{r} &:= \texttt{scores}
+    \end{aligned}
+\end{equation}
+
+\paragraph{Preference List Ranking}
+The LTR algorithm defines the ranking loss function based on rewards $\mathbf{v}$ of responses $\mathbf{y}$ and predicted scores $\mathbf{r}$, to train the model $\pi$:
+
+\begin{equation}
+\mathcal{L}_{LTR}=\mathbb{E}_{(x,\mathbf{y},\mathbf{v})\sim\mathcal{D}}\left[l(\mathbf{v},\mathbf{r})\right].
+\end{equation}
+
+where $l$ is the loss function. 
+\TheName{} proposes the \textit{Preference Ranking Loss} $\mathcal{L}_{PLR}$ to instantiate $l$. Specifically, \TheName{} utilizes the relative reward margin between each pair of preferences in the preference list to train the policy $\pi$.
+To further consider the absolute position of preferences within the list, inspired by \cite{burges2006learning}, \TheName{} introduces the Lambda Weight~\citep{burges2006learning} to optimize $\mathcal{L}_{PRL}$, in order to perceive the impact brought about by the change in the positions of two preferences. Ultimately, $\mathcal{L}_{PRL}$ is mathematically represented as follows:
+
+\begin{align}
+    \mathcal{L}_{PRL} & =-\mathbb{E}_{x,\mathbf{y},\mathbf{v}\sim\mathcal{D}}\left[\lambda_{i,j}\sum_{v_i>v_j}\log\sigma(r_i-r_j)\right] \label{eq:lambda-rank} \\
+    \lambda_{i,j} & = |2^{v_i}-2^{v_j}| \cdot |\frac1{log(1+\tau(i))}-\frac1{log(1+\tau(j))}| \label{eq:lambda-weight}
+\end{align}
+
+where $\tau(i)$ is the ranking position of $y_i$ in the ranking permutation induced by $\mathbf{r}$. For more detailed information on Lambda Weight, please refer to \cite{burges2006learning}.
+It is worth noting that when the length of the preference list $N=2$ and the Lambda Weight is not introduced, $\mathcal{L}_{PRL}$ degenerates into the naive DPO loss.
+
+\subsection{Aligning LLMs from Multi-step Preferences}
+
+\hspace*{2em}\textit{The reward margin for each step of the preference pair is not equivalent. By adaptively modifying step rewards, the policy $\pi$ can learn discriminative information between preference pairs using non-shared trajectories.}
+
+\paragraph{Problem Definition}
+\TheName{} follows the definition of multi-step reasoning as described in Sec.~\ref{par:multi-step-reasoning}, introducing $y = (s_{1},s_{2},\cdots,s_{K})$ consisting of $K$ steps. 
+Due to the characteristics inherent in tree-structured reasoning, for any two reasoning trajectories $y_i=(s^{i}_{1},\cdots,s^{i}_{K})$ and $y_j=(s^{j}_{1},\cdots,s^{j}_{K})$, (To simplify, \TheName{} assumes that $y_i$ and $y_j$ possess steps of equal length.) there exist sub-trajectories which are \textit{content sharing} or \textit{action sharing}. 
+\begin{itemize}
+[leftmargin=*,itemsep=0pt,parsep=0.5em,topsep=0.3em,partopsep=0.3em]
+    \item \textit{Steps of content sharing}: $y_i$ and $y_j$ have traversed the same sub-trajectory $(s_1, \cdots, s_{k-1})$ and branched off at state $\mathbf{S}_k$. Due to the $(s^{i}_k \neq s^{j}_k)\sim\pi(\cdot|x)$, which resulting in $\mathbf{S}^{i}_k \neq \mathbf{S}^{j}_k$.
+    \item \textit{Steps of action sharing}: Expanding on \textit{content sharing}, even though the $(s^{i}_k \neq s^{j}_k)$, the high degree of semantic similarity or the execution of identical actions results in $\mathbf{S}^{i}_k = \mathbf{S}^{j}_k$.
+\end{itemize}
+
+\paragraph{Adaptive Step Reward}
+
+In the naive DPO algorithm, the ``implicit reward'' margin is step-independent, that is, for responses $y_i$ and $y_j$, the ``implicit reward'' margin is mathematically defined as follows:
+\begin{equation}
+\label{eq:reward-margin}
+    \mathcal{RM} = \beta\log\frac{\pi_\theta(y_i\mid x)}{\pi_{\mathrm{ref}}(y_i\mid x)}-\beta\log\frac{\pi_\theta(y_j\mid x)}{\pi_{\mathrm{ref}}(y_j\mid x)}=\sum_{k=1}^K(\beta\log\frac{\pi_\theta(s^{i}_k\mid x)}{\pi_{\mathrm{ref}}(s^{i}_k\mid x)}-\beta\log\frac{\pi_\theta(s^{j}_k\mid x)}{\pi_{\mathrm{ref}}(s^{j}_k\mid x)})
+\end{equation}
+
+To mitigate the reduced reward margin resulting from shared steps, \TheName{} introduces the \textit{Adaptive Step Reward} mechanism to discriminatively assign rewards for each step.
+Specifically, \TheName{} employs adaptive weight $w$ to adjust reward margin between step pairs, and instantiates $w$ as cosine similarity in the semantic space. The adaptive $\mathcal{RM}$ can be mathematically expressed as follows:
+
+\begin{equation}
+\label{eq:adaptive-reward-margin}
+    \mathcal{RM} = \sum_{k=1}^K( (1+\frac{emb(s^i_k)\cdot emb(s^j_k)}{\|emb(s^i_k)\|\|emb(s^j_k)\|}) \cdot \beta\log\frac{\pi_\theta(s^{i}_k\mid x)}{\pi_{\mathrm{ref}}(s^{i}_k\mid x)}-\beta\log\frac{\pi_\theta(s^{j}_k\mid x)}{\pi_{\mathrm{ref}}(s^{j}_k\mid x)}) \\
+\end{equation}
+
+where $emb(\cdot)$ is the operation for semantic vectors generation.
+It is worth noting that when $s^i_{k}$ and $s^j_{k}$ manifest as steps of content sharing, the current step pairs yields a provided $\mathcal{RM}=0$. 
+
+Ultimately, the overall algorithm of \TheName{} is detailed in Alg.~\ref{alg:TPO_Algorithm_training}. 
+
+\begin{algorithm}[!t]
+\small
+\caption{\TheName{} Training Algorithm}
+\label{alg:TPO_Algorithm_training} 
+\SetKwInOut{Input}{Input}\SetKwInOut{Output}{Output}
+\Input{Dataset $\mathcal{D}=(x^{(i)}, \mathbf{y}^{(i)}, \mathbf{v}^{(i)})^{M}_{i=1}$, Policy Model $\pi$} 
+\Output{Aligned Policy Model $\pi_{\mathbf{\theta}}$}
+\BlankLine 
+\emph{Initialize $\pi_\theta$ and $\pi_{ref}$ with $\pi$} \; 
+\For{$(x, \mathbf{y}, \mathbf{v}) \in \mathcal{D}$}{
+    \tcp{\textcolor[rgb]{0.5,0.6,0.7}{Preference List Ranking}}
+    \For{$y_i, y_j \in \mathbf{y} \mid v_i > v_j$}{
+        \tcp{\textcolor[rgb]{0.5,0.6,0.7}{Calculate the Lambda weight}}
+        $\lambda_{i, j} \leftarrow$ Eq.~\ref{eq:lambda-weight} \;
+        \tcp{\textcolor[rgb]{0.5,0.6,0.7}{Adaptive Step Reward}}
+        \For{$s^{(i)}_k \in y_i, s^{(j)}_k \in y_j$}{
+            \tcp{\textcolor[rgb]{0.5,0.6,0.7}{Adjust reward margin based on semantic similarity between paired steps}}
+            $\mathcal{RM}_{(i, j)} \leftarrow$ Eq.~\ref{eq:adaptive-reward-margin} \;
+        }
+        \tcp{\textcolor[rgb]{0.5,0.6,0.7}{Calculate the preference list ranking loss}}
+        $\mathcal{L}_{PRL} \leftarrow$ Eq.~\ref{eq:lambda-rank} $\leftarrow \mathcal{RM}_{(i, j)}=r_i-r_j$ \;
+    }
+    Update Policy Model: $\pi_{\mathbf{\theta}} \leftarrow \pi_{\theta} + \nabla \mathcal{L}_{PRL}$ \;
+}
+Return $\pi_\theta$.
+\end{algorithm}
+
+
+\section{Experiments}
+
+
+\subsection{Experimental setup}
+
+\paragraph{Network Architecture.} 
+Our experiments were based on various base models, including Qwen2 models~\citep{bai2023qwen} of various sizes (Qwen2-1.5B-Instruct and Qwen2-7B-Instruct), and the DeepSeekMath-7B-Instruct~\citep{shao2024deepseekmath} that has been specifically fine-tuned for mathematical tasks. We also introduced DeepSeekMath-7B-RL~\citep{shao2024deepseekmath}, which underwent reinforcement learning by \cite{shao2024deepseekmath}, as the baseline model.
+
+\paragraph{Training Datasets}
+
+Typically, when faced with complex mathematical problems, LLMs struggle to arrive at the correct final answer even when employing ToT methods. 
+To ensure that the preference tree can generate trajectories capable of reasoning to the correct answer, we have expanded upon the existing dataset. 
+\cite{lai2024step} proposed a dataset that provides 10,795 paired preference data, completely composed of mathematical problems, with complete correct and incorrect reasoning trajectories provided for each problem. 
+As shown in Fig.~\ref{fig:data-pipeline}(a), starting from any intermediate step in the correct reasoning trajectory, we utilized Qwen2-7B-Instrcut~\citep{bai2023qwen} for further step-by-step reasoning resulting in trajectories with varying degrees of preference. 
+Ultimately, we collected 10 trajectories for each problem, including at least one correct trajectory and one incorrect trajectory from original data~\citep{lai2024step}, with the remaining eight were generated by Qwen2-7B-Instrcut. 
+We utilized ChatGPT to assign scores ranging from -100 to 100 for each trajectory in order to obtain the rewards for these trajectories.
+To avoid incorrect judgments by ChatGPT, we provided the correct trajectory as a reference and employed ReACT as shown in Fig.~\ref{fig:data-pipeline}(b).~\ref{ssec:prompts}. Fig.~\ref{fig:data-pipeline}(c) illustrates the distribution of reward values for this dataset. 
+The statistical findings reveal that we ultimately gathered preference data corresponding to a reward value distribution of $53.74 \pm 69.27$.
+It is noteworthy that \cite{bai2023qwen} shows that the dataset was derived from the MetaMath~\citep{yu2023metamath}, MMIQC~\citep{liu2024augmenting}, and AQuA~\citep{ling2017program} datasets. We have ensured that these datasets do not overlap with the subsequent evaluation data.
+
+\paragraph{Evaluation Datasets}
+
+We introduced two types of tasks, \textbf{Math} (in-distribution) and \textbf{Coding} (out-of-distribution), to assess the effectiveness of \TheName{}. For the \textbf{Math} tasks, we considered the following datasets: MATH~\citep{hendrycks2021measuring}, SVAMP~\citep{patel2021nlp}, ASDiv~\citep{miao2021diverse} and GSM-Plus~\citep{li2024gsm}. For the \textbf{Coding} tasks, we considered the HumanEval~\citep{chen2021evaluating} and MBPP~\citep{austin2021program} datasets.~\ref{ssec:prompts}.
+We evaluated these datasets with pass@1 accuracy.
+
+\paragraph{Implement Details}
+
+We performed the \TheName{} and DPO on the models mentioned above. 
+We used the PyTorch library to implement all the algorithms based on the open-source HuggingFace transformers~\citep{wolf2019huggingface} and Transformer Reinforcement Learning (TRL)~\citep{vonwerra2022trl}. The experiments were conducted on 8 NVIDIA-RTX3090-24GB GPUs. For each experimental setup, we trained the model for 1 epoch, using a batch size of 1 for each GPU. The learning rate was set to 5e-7. The hyperparameter $\beta$ used in Eq.~\ref{eq:DPO-loss} for DPO was set to 0.5. We utilized the AdamW optimizer and a cosine learning rate scheduler, with a warm-up ratio set to 0.1.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{data-pipeline.pdf}
+    \caption{(a) illustrates the data generation pipeline we used, where we start from the intermediate steps of the original correct reasoning trajectories and generate new reasoning trajectories step by step. The \textcolor{preferredcolor}{$\bullet$} steps represent preferred reasoning steps, the \textcolor{dispreferredcolor}{$\bullet$} steps denote dispreferred reasoning steps, and the \textcolor{unknowpreferredcolor}{$\bullet$} steps indicate reasoning steps with unknown preference. (b) shows how we introduced ChatGPT to score each reasoning trajectory, with scores ranging from $\in \left[-100, 100\right]$. We provided ChatGPT with correct reasoning trajectories as a reference and employed ReACT to improve score credibility. (c) presents the distribution of reasoning trajectories across various score intervals.}
+    \label{fig:data-pipeline}
+\end{figure}
+
+\subsection{Experiment Results}\label{ssec:experiment-result}
+
+\paragraph{Results on Math Task}
+We conducted evaluations on four mathematics reasoning datasets to verify the performance of \TheName{} on in-distribution datasets. We employed the CoT~\citep{wei2022chain} strategy for reasoning without using any demonstrations.
+Results are shown in Table.~\ref{tab:main-result-id}. We summarize the key takeaways as follows:
+
+\TheName{} comprehensively outperformed the DPO algorithm across all datasets, across various LLM size settings (Qwen2-1.5B-Instruct and Qwen2-7B-Instruct) and whether the LLMs were fine-tuned in the domain of mathematics (Qwen2-7B-Instruct and DeepSeekMath-7B-Instruct). In many cases, \TheName{} also surpassed existing specialized reinforcement learning methods (DeepSeekMath-7B-RL \textit{vs.} DeepSeekMath-7B-Instruct+\TheName{}), with only a slight disadvantage on the ASDiv dataset. We further discovered that \TheName{} can help LLMs exceed baseline models that are 5$\times$ larger. For instance, on the SVAMP dataset, the performance of Qwen2-1.5B-Instruct was significantly inferior to that of Qwen2-7B-Instruct. However, after fine-tuning with \TheName{}, Qwen2-1.5B-Instruct+\TheName{} outperformed Qwen2-7B-Instruct by 1.7\% in accuracy. DeepSeekMath-7B-Instruct, fine-tuned with TPO, has significantly surpassed GPT-3.5 Turbo.
+\begin{table}[t]
+\caption{
+Experimental results on \textbf{Math} task (In-Distribution) using the DPO and \TheName{} algorithm. The best results for each large language model setting are indicated in \textbf{bold}. The best results across all settings are highlighted with a \colorbox{firstcolor}{background}, while the second-best results are indicated with a \colorbox{secondcolor}{background}. We report results using pass@1 accuracy. The results indicate that \TheName{} consistently outperforms DPO.
+}
+\label{tab:main-result-id}
+\begin{center}
+\resizebox{1.0\columnwidth}{!}{
+\begin{tabular}{l|c|c|c|c|c|c|c|c}
+\toprule
+\textbf{LLMs} & \textbf{size} & \textbf{open} & \textbf{general} & \textbf{MATH} & \textbf{SVAMP} & \textbf{ASDiv} & \textbf{GSM-Plus} & \textbf{Avg.} \\
+\midrule
+Qwen2-1.5B-Instruct & 1.5B & \Checkmark & \Checkmark & 19.52 & 23.90 & 35.76 & 20.05 & 24.81 \\
+Qwen2-1.5B-Instruct+DPO & 1.5B & \Checkmark & \Checkmark & 20.98 & 29.30 & 40.13 & 21.52 & 27.98 \\
+Qwen2-1.5B-Instruct+\TheName{} & 1.5B & \Checkmark & \Checkmark & \textbf{22.88} & \textbf{35.60} & \textbf{46.28} & \textbf{24.12} & \textbf{32.22} \\
+\midrule
+Qwen2-7B-Instruct & 7B & \Checkmark & \Checkmark & 53.92 & 33.90 & 48.38 & 44.72 & 45.23 \\
+Qwen2-7B-Instruct+DPO & 7B & \Checkmark & \Checkmark &  54.26 & 44.69 & 54.32 & 50.28 & 50.89 \\
+Qwen2-7B-Instruct+\TheName{} & 7B & \Checkmark & \Checkmark & \cellcolor{secondcolor} \textbf{55.46} & \textbf{48.20} & \textbf{59.22} & \textbf{54.82} & \textbf{54.43} \\
+\midrule
+DeepSeekMath-7B-Instruct & 7B & \Checkmark & \XSolidBrush & 43.92 & 84.10 & 90.10 & 59.78 & 69.48 \\
+DeepSeekMath-7B-RL & 7B & \Checkmark & \XSolidBrush & 50.70 &  86.70 & \cellcolor{secondcolor} \textbf{90.94} &  64.07 &  73.10 \\
+DeepSeekMath-7B-Instruct+DPO & 7B & \Checkmark & \XSolidBrush & 48.66 & 85.98 & 90.16 & 62.86 & 71.92 \\
+DeepSeekMath-7B-Instruct+\TheName{} & 7B & \Checkmark & \XSolidBrush & \textbf{51.30} & \cellcolor{secondcolor} \textbf{86.80} & 90.61 & \cellcolor{secondcolor} \textbf{64.73} & \cellcolor{secondcolor} \textbf{73.36} \\
+\midrule
+GPT-3.5 Turbo & - & \XSolidBrush & \Checkmark & 37.80 & 83.00 & 90.60 & 61.20 & 68.15 \\
+GPT-4 & - & \XSolidBrush & \Checkmark & \cellcolor{firstcolor} \textbf{69.70} & \cellcolor{firstcolor} \textbf{94.80} & \cellcolor{firstcolor} \textbf{92.60} & \cellcolor{firstcolor} \textbf{85.60} & \cellcolor{firstcolor} \textbf{85.68} \\
+\bottomrule
+\end{tabular}
+}
+\end{center}
+\end{table}
+\begin{table}[t]
+\caption{Experimental results on \textbf{Coding} task (Out-of-Distribution) using the DPO and \TheName{} algorithm. The best results for each large language model setting are indicated in \textbf{bold}. We report results using pass@1 accuracy.}
+\label{tab:main-result-ood}
+\begin{center}
+\begin{tabular}{l|c|c|c|c|c}
+\toprule
+\textbf{LLMs} & \textbf{size} & \textbf{open} & \textbf{general} & \textbf{MBPP} & \textbf{HumanEval} \\
+\midrule
+Qwen2-1.5B-Instruct & 1.5B & \Checkmark & \Checkmark & 45.11 & \textbf{46.34}  \\
+Qwen2-1.5B-Instruct+DPO & 1.5B & \Checkmark & \Checkmark & 45.11 & 44.51  \\
+Qwen2-1.5B-Instruct+\TheName{} & 1.5B & \Checkmark & \Checkmark & \textbf{46.62} & 43.90  \\
+\midrule
+Qwen2-7B-Instruct & 7B & \Checkmark & \Checkmark & 58.90 & \textbf{75.00}  \\
+Qwen2-7B-Instruct+DPO & 7B & \Checkmark & \Checkmark & 59.11 & 68.32  \\
+Qwen2-7B-Instruct+\TheName{} & 7B & \Checkmark & \Checkmark & \textbf{61.65} & 65.85 \\
+\midrule
+DeepSeekMath-7B-Instruct & 7B & \Checkmark & \XSolidBrush & 60.90 & 56.10  \\
+DeepSeekMath-7B-RL & 7B & \Checkmark & \XSolidBrush & 65.91 & 56.10  \\
+DeepSeekMath-7B-Instruct+DPO & 7B & \Checkmark & \XSolidBrush & 63.26 & 57.25  \\
+DeepSeekMath-7B-Instruct+\TheName{} & 7B & \Checkmark & \XSolidBrush & \textbf{66.42} & \textbf{59.15} \\
+\midrule
+GPT-3.5 Turbo & - & \XSolidBrush & \Checkmark & 82.50 & 76.80  \\
+GPT-4 & - & \XSolidBrush & \Checkmark & \textbf{83.50} & \textbf{85.40}  \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+\paragraph{Results on Coding Task}
+We further conducted evaluations on two coding datasets to verify the performance of \TheName{} on out-of-distribution datasets. 
+Results are shown in Table.~\ref{tab:main-result-ood}. We summarize the key takeaways as follows:
+
+In the vast majority of cases, \TheName{} aided in improving the performance of LLMs on out-of-distribution datasets, surpassing the DPO algorithm. However, on the HumanEval dataset, Qwen2-1.5B-Instruct and Qwen2-7B-Instruct exhibited a decline in performance after undergoing \TheName{}, a phenomenon similarly observed with the DPO approach. 
+Notably, DeepSeekMath-7B-Instruct experienced an improvement in performance on the HumanEval dataset after the preference alignment, regardless of whether the DPO or \TheName{} algorithm was used. 
+We \textbf{speculate}
+that the cause of this phenomenon is that the Qwen2 series models have already been fine-tuned on the HumanEval dataset, leading to ``catastrophic forgetting''~\citep{xuhong2018explicit,liao2022muscle,liao2024mtpret} in the Qwen2 models after the preference alignment, where they forgot the coding knowledge originally learned on the HumanEval dataset. In contrast, DeepSeekMath-7B-Instruct is a model specifically designed for mathematical reasoning and did not acquire coding knowledge during its previous training phases. 
+\begin{table}[t]
+\caption{Ablation Studies of \TheName{} on \textbf{Math} tasks. The \textcolor{mygreen}{\scriptsize green} font indicates the performance loss incurred after the removal of the respective module. Results show that the absence of any module leads to a degradation in performance.}
+\label{tab:ablation-study}
+\begin{center}
+\resizebox{1.0\columnwidth}{!}{
+\begin{tabular}{l|l|l|l|l|l}
+\toprule
+\textbf{Methods} & \multicolumn{1}{c}{\textbf{MATH}} & \multicolumn{1}{c}{\textbf{SVAMP}}  & \multicolumn{1}{c}{\textbf{ASDiv}} & \multicolumn{1}{c}{\textbf{GSM-Plus}} & \multicolumn{1}{c}{\textbf{Avg.}} \\
+\midrule
+\multicolumn{6}{c}{Qwen2-7B-Instruct} \\
+\midrule
+\TheName{} & 55.46 & 48.20 & 59.22 & 54.82 & 54.43 \\
+\hspace{10pt} w/o \textit{Adaptive Step Reward} & 55.08\textcolor{mygreen}{\scriptsize (-0.38)} & 47.84\textcolor{mygreen}{\scriptsize (-0.36)} & 58.72\textcolor{mygreen}{\scriptsize (-0.50)} & 54.36\textcolor{mygreen}{\scriptsize (-0.46)} & 54.00\textcolor{mygreen}{\scriptsize (-0.43)} \\
+\hspace{10pt} w/o \textit{Preference List Ranking} & 54.36\textcolor{mygreen}{\scriptsize (-1.10)} & 45.67\textcolor{mygreen}{\scriptsize (-2.53)} & 56.84\textcolor{mygreen}{\scriptsize (-2.38)} & 51.10\textcolor{mygreen}{\scriptsize (-3.72)} & 51.99\textcolor{mygreen}{\scriptsize (-2.44)} \\
+\midrule
+\multicolumn{6}{c}{DeepSeekMath-7B-Instruct} \\
+\midrule
+\TheName{} & 51.30 & 86.80  & 90.61 & 64.73 & 73.36 \\
+\hspace{10pt} w/o \textit{Adaptive Step Reward} & 50.92\textcolor{mygreen}{\scriptsize (-0.38)} & 86.68\textcolor{mygreen}{\scriptsize (-0.12)} & 90.53\textcolor{mygreen}{\scriptsize (-0.08)} & 64.32\textcolor{mygreen}{\scriptsize (-0.41)} & 73.11\textcolor{mygreen}{\scriptsize (-0.25)} \\
+\hspace{10pt} w/o \textit{Preference List Ranking} & 49.11\textcolor{mygreen}{\scriptsize (-2.19)} & 86.29\textcolor{mygreen}{\scriptsize (-0.51)} & 90.20\textcolor{mygreen}{\scriptsize (-0.41)} & 63.02\textcolor{mygreen}{\scriptsize (-1.71)} & 72.16\textcolor{mygreen}{\scriptsize (-1.20)} \\
+\bottomrule
+\end{tabular}
+}
+\end{center}
+\end{table}
+
+\paragraph{Ablation Studies}
+We verified the effectiveness of each module by removing some modules from \TheName{} and evaluated the modified models using the Qwen2-7B-Instruct and DeepSeekMath-7B-Instruct across four mathematical reasoning datasets. The experimental results were presented in Table.~\ref{tab:ablation-study}. The results indicated that the absence of both the \textit{Adaptive Step Reward} and the \textit{Preference List Ranking} modules leads to a degradation in performance of \TheName{}, with the \textit{Preference List Ranking} module’s removal resulting in an average performance of 2.44\%$\downarrow$ and 1.40\%$\downarrow$. These results suggest that the \textit{Preference List Ranking} module aids LLMs in learning from a wider variety of preference lists with different reward values, thereby facilitating more robust preference alignment.
+\subsection{Analysis of Dispreferred Responses}
+
+\paragraph{Comparison of DPO with Varying Reward Values}
+
+We performed DPO using preference pairs with different reward values and evaluated the results using Qwen2-7B-Instruct on the ASDiv and GSM-Plus datasets. 
+Specifically, we employed correct reasoning trajectories as preferred responses and sampled dispreferred responses with different reward distributions sampled from incorrect trajectories. 
+The mean reward values with corresponding standard deviations were $[7.4\pm67.7, 56.3\pm50.9, 75.4\pm35.5, 86.4\pm19.5]$.
+Our experimental results are presented in Fig.~\ref{fig:analysis}(a). The results indicate that dispreferred responses with different reward values have varying degrees of impact on the model’s performance. Fig.~\ref{fig:analysis}(a) shows that when dispreferred responses with lower mean rewards (strong dispreference) or higher mean rewards (weak dispreference) are used, the performance of DPO is inferior. 
+However, the best performance of DPO is observed when dispreferred responses with a moderate mean reward are used. 
+We argue that some dispreferred responses with lower rewards are less valuable for learning due to their significant discrepancy from preferred responses.
+Conversely, dispreferred responses with higher rewards pose challenges for the DPO algorithm to learn because of their smaller difference from preferred responses. 
+Therefore, it is necessary to select dispreferred responses with moderate rewards to facilitate more effective DPO learning. 
+Nonetheless, \TheName{} still outperforms all DPO baselines, suggesting that introducing more dispreferred responses and aligning language models from preference lists with different reward values concurrently contributes to stronger preference learning.
+\paragraph{Analysis on Size of Preference List}
+
+To better understand the effect of \textit{Preference List Ranking}, we conduct analysis on multiple choices of list sizes of \TheName{}, and evaluate \TheName{} on the ASDiv and GSM-Plus datasets using Qwen2-7B-Instruct.
+As illustrated in Fig.~\ref{fig:analysis}(b), as the size of the \textit{Preference List Ranking} increases, the performance of \TheName{} shows a steady growth, which is observed across both datasets. We argue that it is beneficial to model preferences using preference lists with varying reward values, and further increasing the size of \textit{Preference List Ranking} can enhance the performance of preference learning.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.85\linewidth]{acc-scores-listsize.pdf}
+    \caption{(a) illustrates a comparison between \TheName{} and DPO using various reward value distributions for dispreferred responses on the ASDiv and GSM-Plus datasets. The numbers in the legend following each group of DPO algorithms represent the mean and standard deviation of the reward values for dispreferred responses. The results indicate that \TheName{} consistently outperforms DPO.
+    (b) shows performance of \TheName{} with different list sizes on the ASDiv and GSM-Plus datasets. \TheName{} benefits more and monotonically as the list size increases.}
+    \label{fig:analysis}
+\end{figure}
+
+
+\section{Limitations and Future Works}
+
+
+Despite the promising results obtained in our work, it is important to acknowledge the limitations.
+The first limitation is that \TheName{} may introduce a stronger form of ``catastrophic forgetting''. The results in Sec.~\ref{ssec:experiment-result} indicate that while \TheName{} exhibits excellent performance on in-distribution datasets, it may suffer from performance degradation on out-of-distribution datasets. 
+We provide a more in-depth discussion in Sec.~\ref{ssec:experiment-result} and attribute this issue to ``catastrophic forgetting''~\citep{xuhong2018explicit,liao2022muscle,liao2024mtpret}. Existing strategies to mitigate ``catastrophic forgetting'' include memory replay~\citep{miao2024unified,babakniya2024data}, regularization constraints~\citep{liao2022muscle,liao2024mtpret}, and meta-learning~\citep{gupta2020look,son2024meta}, among others. 
+Incorporating these techniques into the \TheName{} training procedure could potentially improve the generalization of \TheName{} on out-of-distribution datasets.
+
+The second limitation is due to the imbalanced distribution of the preference tree reward values, as shown in Fig.~\ref{fig:data-pipeline}(c). 
+We analyze the reasons for this as follows: (1) Autoregressive LLMs, including ChatGPT, tend to assign either high or low values~\citep{xiong2023can}. Although we employ the ReACT strategy to prompt ChatGPT to provide a more reasonable evaluation, this issue remains to be addressed.
+(2) Our data generation pipeline, as depicted in Fig.~\ref{fig:data-pipeline}(a), adopts a strategy of generating additional responses starting from correct trajectories. 
+This strategy ensures that the preference tree contains at least one preferred response and that the reasoning generated from intermediate nodes includes some correct reasoning paths to diversify the reward values. 
+However, once the preceding trajectory in the generated path already includes the key steps to solve the problem, the subsequent steps become easily inferable, leading to a higher distribution of reward values in the preference tree.
+In future work, we aim to introduce more effective ToT strategies, such as MCTS~\citep{xie2024monte}, to ensure the generation of higher-quality data. Additionally, we will employ techniques such as prompt optimization~\citep{shin2020autoprompt}, multi-model collaborative scoring~\citep{talebirad2023multi}, and self-consistency~\citep{wang2023self} to enhance the reliability of the scoring procedure.
+
+
+
+\section{Conclusions}
+
+
+In this work, we propose \TheName{}, a preference learning algorithm designed specifically for preference trees as input. \TheName{} enhances DPO by addressing two critical issues: (1) DPO only supports binary preference input and cannot model preferences from preference lists with varying reward values. (2) DPO exhibits a lower reward margin when dealing with reasoning involving long chains of trajectories with shared sub-trajectories. 
+We evaluate the effectiveness of \TheName{} on extensive experiments, and the experimental results indicate that \TheName{} consistently outperforms DPO on in-distribution data and shows promise for its generalization to out-of-distribution data.
+
+
+
+\clearpage
+
+
+
+
+

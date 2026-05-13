@@ -1,0 +1,466 @@
+\title{Controlling Vision-Language Models for Multi-Task Image Restoration}
+
+\begin{abstract}
+
+Vision-language models such as CLIP have shown great impact on diverse downstream tasks for zero-shot or label-free predictions. However, when it comes to low-level vision such as image restoration their performance deteriorates dramatically due to corrupted inputs. In this paper, we present a degradation-aware vision-language model (DA-CLIP) to better transfer pretrained vision-language models to low-level vision tasks as a multi-task framework for image restoration. More specifically, DA-CLIP trains an additional controller that adapts the fixed CLIP image encoder to predict high-quality feature embeddings. By integrating the embedding into an image restoration network via cross-attention, we are able to pilot the model to learn a high-fidelity image reconstruction. The controller itself will also output a degradation feature that matches the real corruptions of the input, yielding a natural classifier for different degradation types. In addition, we construct a mixed degradation dataset with synthetic captions for DA-CLIP training. Our approach advances state-of-the-art performance on both \emph{degradation-specific} and \emph{unified} image restoration tasks, showing a promising direction of prompting image restoration with large-scale pretrained vision-language models.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=.93\linewidth]{figs/teaser.pdf}
+    \caption{This paper leverages large-scale pretrained vision-language models for multi-task image restoration. Compared to CLIP~\citep{radford2021learning}, our approach precisely predicts the degradation embeddings for corrupted inputs and also outputs high-quality features for better image restoration performance. For all examples above, the right results are produced by our single \emph{unified} model.}
+    \label{fig:teaser}
+\end{figure}
+
+Large-scale pretrained vision-language models (VLMs) such as CLIP~\citep{radford2021learning} have recently garnered significant attention, in part because of their wide-reaching usefulness on many fundamental computer vision tasks~\citep{gu2021open,zhang2022tip,zhang2023vision}.  
+However, existing VLMs have so far had limited impact on low-level vision tasks such as image restoration (IR), presumably because they do not capture the fine-grained difference between image degradation types such as ``blurry'' and ``noisy''~\citep{ni2023nuwa}. Consequently, the existing VLMs often misalign image features to degradation texts. This is not surprising, considering that VLMs are generally trained on diverse, web-scale datasets, in contrast to most image restoration models which are trained on comparatively small datasets that are curated for a specific task without corresponding image-text pairs \citep{li2019single,zhang2017beyond,zamir2022restormer}. 
+
+Image restoration methods often simply learn to generate images pixel-by-pixel without leveraging task knowledge, which usually requires repeated training of the same model for specific degradation types. A recent line of work has, however, focused on \emph{unified} image restoration, where a single model is trained on a mixed degradation dataset and implicitly classify the type of degradation in the restoration process~\citep{li2022all,potlapalli2023promptir}. While the results are impressive, they are still limited to a small number of degradation types and the specific datasets that go with them. In particular, they do not make use of the vast amount of information embedded in VLMs. 
+
+In this paper, we combine the large-scale pretrained vision-language model CLIP with image restoration networks and present a multi-task framework that can be applied to both \emph{degradation-specific} and \emph{unified} image restoration problems.
+Specifically, aiming at addressing feature mismatching between corrupted inputs and clean captions, we propose an \emph{Image Controller} that adapts the VLM's image encoder to output high-quality (HQ) content embeddings aligned with clean captions. Meanwhile, the controller itself also predicts a degradation embedding to match the real degradation types. This novel framework, which we call degradation-aware CLIP (DA-CLIP), incorporates the human-level knowledge from VLMs into general networks that improve image restoration performance and enable unified image restoration. 
+In addition, to learn high-quality features and degradation types from low-quality (LQ) inputs, we construct a large mixed-degradation dataset for ten different image restoration tasks based on BLIP~\citep{li2022blip}. As shown in \Figref{fig:teaser}, our DA-CLIP accurately classifies the ten different degradation types and can readily be integrated into existing restoration models, helping produce visually appealing results across the different degradations.
+Our main contributions are summarised as follows: 
+\textbf{(1)} We present DA-CLIP to leverage large-scale pretrained vision-language models as a universal framework for image restoration. The key component is an image controller that predicts the degradation and adapts the fixed CLIP image encoder to output high-quality content embeddings from corrupted inputs. 
+\textbf{(2)} We use cross-attention to integrate the content embedding into restoration networks to improve their performance. Moreover, we introduce a prompt learning module to better utilize the degradation context for unified image restoration.
+\textbf{(3)} We construct a mixed degradation dataset containing ten different degradation types with high-quality synthetic captions. This dataset can be used to train either DA-CLIP or a unified image restoration model.
+\textbf{(4)} We demonstrate the effectiveness of DA-CLIP by applying it to image restoration models for both degradation-specific and unified image restoration. Our approach achieves highly competitive performance across all ten degradation types.
+
+
+
+\section{Background and Related Work}
+
+\label{sec:background}
+
+\textbf{Image restoration}
+Image restoration aims to recover a high-quality image from its corrupted counterpart, which is a fundamental and long-standing problem in computer vision and contains various tasks such as image denoising~\citep{zhang2017beyond}, deraining~\citep{ren2019progressive}, dehazing~\citep{song2023vision}, deblurring~\citep{kupyn2018deblurgan}, etc. 
+Most existing works focus on the \emph{degradation-specific} task which trains multiple models for different tasks separately by directly learning the target with common pixel-based losses (e.g., $\ell_1$ or $\ell_2$). Recently, however, increasing attention has been paid to  \emph{unified} image restoration where multiple image restoration tasks are handled with a single model~\citep{li2022all,potlapalli2023promptir}. These works achieve impressive results by using an additional encoder~\citep{li2022all,zhou2022learning} or a visual prompt module~\citep{potlapalli2023promptir} to implicitly cluster inputs according to the degradation type. However, they are still limited to a few image restoration tasks and do not consider auxiliary information about the degradation type.\looseness=-1
+
+\textbf{Blind image restoration (BIR)} To deal with unknown degradation levels, BIR comes into view and has shown promising results for photos captured in the real-world~\citep{zhang2021designing,wang2021real,xie2021finding}. In particular, BSRGAN~\citep{zhang2021designing} and Real-ESRGAN~\citep{wang2021real} utilize GANs with practical degradation settings. Inspired by recent advanced diffusion models, StableSR~\citep{wang2023exploiting} and DiffBIR~\citep{lin2023diffbir} propose to exploit diffusion priors to generate realistic outputs. 
+Although pretrained diffusion weights are well utilized in these methods, they do not make use of the semantic information embedded in vision-language models.
+
+\textbf{Vision-language models (VLMs)} Recent works have demonstrated the great potential of applying pretrained VLMs to improve downstream tasks with generic visual and text representations~\citep{radford2021learning,jia2021scaling,li2022blip}. A classic VLM usually consists of a text encoder and an image encoder and tries to learn aligned multimodal features from noisy image-text pairs with contrastive learning~\citep{radford2021learning}. BLIP~\citep{li2022blip} further proposes to remove noisy web data by bootstrapping synthetic captions. Although VLMs provide a strong capability of zero-shot and label-free classification for downstream tasks, they have so far had limited effect on image restoration due to the need for specialized and accurate terminology. % domain-specific knowledge and corrupted inputs. 
+A noteworthy approach for fine-tuning vision-language models is so-called \emph{prompt learning}~\citep{zhou2022learning}, where the prompt's context words are represented by learnable vectors that are then optimized for the downstream task.%-specific fine-tuning process.
+\looseness=-1
+
+\textbf{Text-to-image generation}
+Text-to-image models such as stable diffusion~\citep{rombach2022high} have gained extraordinary attention from both researchers and the general public. ControlNet~\citep{zhang2023adding} builds upon this work and proposes to add  controls to the diffusion network to make it adapt to task-specific conditions. InstructPix2Pix~\citep{brooks2023instructpix2pix} further combines GPT-3~\citep{brown2020language} with stable diffusion to perform an instruction-based image-to-image translation. Although it can generate highly realistic images, it can not be directly applied to image restoration tasks since the latter requires highly accurate reconstruction abilities.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=.99\linewidth]{figs/overview3.pdf}
+    \caption{Overview of our method. DA-CLIP freezes both the text and image encoders of a pre-trained CLIP but learns an additional image controller with contrastive learning. This controller predicts degradation features to match real corruptions and then controls the image encoder to output high-quality content features. Once trained, DA-CLIP can be integrated into other image restoration models by simply adding a cross-attention module and a degradation feature prompting module.}
+    \label{fig:overview}
+\end{figure}
+
+
+
+\section{Degradation-Aware CLIP}
+
+\label{sec:da-clip}
+At the core of our approach is the idea of controlling a pre-trained CLIP model to output the high-quality image feature from a corrupted image while simultaneously predicting the degradation type. As summarised in \Figref{fig:overview}, the image content embedding ${\ve}_c^I$ matches the clean caption embedding ${\ve}_c^T$. Moreover, the image degradation embedding ${\ve}_d^I$ predicted by the controller specifies the corruption type of the input, i.e. the corresponding degradation embedding ${\ve}_d^T$ from text encoder. These features can then be integrated into other image restoration models to improve their performance.
+\begin{figure}[t]
+    \centering    
+    \includegraphics[width=.9\linewidth]{figs/controller-prompt.pdf}
+    \caption{(a) Controlling the ViT-based image encoder with a trainable controller. (b) Learning the prompt with degradation embeddings predicted from the controller.}
+    \label{fig:controller-prompt}
+\end{figure}
+
+\subsection{Image Controller} 
+
+The image controller is a copy of the CLIP image encoder but wrapped with a few zero-initialised connections to add controls to the encoder. It manipulates the outputs of all encoder blocks to control the prediction of the image encoder. In this paper, we use ViT~\citep{dosovitskiy2020image} as the default backbone for both the encoder and the controller. \Figref{fig:controller-prompt}(a) illustrates the controlling procedure, where the output of the controller consists of two parts: an image degradation embedding $\ve_d^I$ and hidden controls $\vh_c$. Note that the latter contains all outputs from the transformer blocks, which are subsequently added to the corresponding encoder blocks to control their predictions. The connections between the transformer blocks are simple dense neural networks with all parameters initialized to zero, which gradually influence the image encoder during training~\citep{zhang2023adding}. Since our training dataset is tiny compared to the web-scale datasets used in VLMs, this controlling strategy alleviates overfitting while preserving the capability of the original image encoder. 
+
+\textbf{Optimising the image controller} 
+We freeze all weights of the pretrained CLIP model and only fine-tune the image controller. To make the degradation-embedding spaces discriminative and well-separated, we use a contrastive objective~\citep{tian2020contrastive} to learn the embedding matching process. 
+Let $N$ denote the number of paired embeddings (from text encoder and image encoder/controller) in a training batch. 
+The contrastive loss is defined as:
+\begin{equation}
+    \centering
+    \mathcal{L}_\text{con}(\vx, \vy) = -\frac{1}{N} \sum_{i=1}^N \log \left(\frac{\exp\left(\vx_i^\intercal \vy_i / \tau\right)}{\sum_{j=1}^N\exp(\vx_i^\intercal \vy_j / \tau)}\right),
+    \label{eq:constrast}
+\end{equation}
+where $\vx$ and $\vy$ are normalised vectors, and $\tau$ is a learnable temperature parameter that controls the contrastive strength. Minimising \Eqref{eq:constrast} amounts to optimising the cosine similarity between correctly paired embeddings while enlarging the difference with other embeddings, similar to the cross-entropy loss~\citep{radford2021learning}. To optimise both content and degradation embeddings, we use the following joint objective:
+\begin{equation}
+    \centering
+    \mathcal{L}_{c}(\omega)
+    = \mathcal{L}_\text{con}(\ve_c^I, \ve_c^T; \omega) + \mathcal{L}_\text{con}(\ve_d^I, \ve_d^T; \omega),
+    \label{eq:joint_constrast}
+\end{equation}
+where $\omega$ represents the learnable parameters of the controller. Note that all image-based embeddings (i.e., $\ve_c^I$ and $\ve_d^I$) are obtained from the LQ image and all text-based embeddings (i.e., $\ve_c^T$ and $\ve_d^T$) are from the clean caption and real degradation. Learning to align these embeddings enables DA-CLIP to predict real degradation types and HQ content features for corrupted image inputs. 
+
+\subsection{Image Restoration with DA-CLIP}
+We use IR-SDE~\citep{luo2023image} as the base framework for image restoration. It adapts a U-Net architecture similar to DDPM~\citep{ho2020denoising} but removes all self-attention layers. To inject clean content embeddings into the diffusion process, we introduce a cross-attention~\citep{rombach2022high} mechanism to learn semantic guidance from pre-trained VLMs. Considering the varying input sizes in image restoration tasks and the increasing cost of applying attention to high-resolution features, we only use cross-attention in the bottom blocks of the U-Net for sample efficiency. 
+
+On the other hand, the predicted degradation embeddings are useful for unified image restoration, where the aim is to process low-quality images of multiple degradation types with a single model~\citep{li2022all}. As illustrated in \Figref{fig:teaser}, our DA-CLIP accurately classifies the degradation across different datasets and various degradation types, which is crucial for unified image restoration~\citep{li2022all}. Moreover, to make use of these degradation embeddings, we combine them with a prompt learning~\citep{zhou2022learning} module to further improve the results, as shown in \Figref{fig:controller-prompt}(b). Given state $x_t$ and low-quality image $\mu$, our final diffusion network is conditioned on the time $t$ and additional embeddings $\ve_c^I$ and $\ve_d^I$, as $\epsilon_{\theta}({x}_{t}, \mu, t, \ve_c^I, \ve_d^I)$, which can be trained with either noise-matching loss~\citep{ho2020denoising} or maximum likelihood loss~\citep{luo2023image,luo2023refusion}.
+
+Generally, we can use cross-attention to integrate content embedding into networks to improve their performance on an image restoration task. In contrast, the prompt module combined with degradation embedding specifically aims to improve the classification of the degradation type in the context of unified image restoration.\looseness=-1
+\begin{figure}[ht]
+    \centering
+    \caption{An example of generating the image-text-degradation tuple with BLIP. The clean caption generated from the HQ image is accurate and does not convey the degradation information.}
+    \label{fig:data_generating}
+\end{figure}
+
+
+\section{Dataset construction}
+
+\label{sec:dataset}
+
+A crucial point of this paper is to leverage powerful vision-language models to learn multiple image degradations and extract degradation-free features for image restoration. For this purpose, we collect a large dataset with ten different image degradation types: \emph{blurry}, \emph{hazy}, \emph{JPEG-compression}, \emph{low-light}, \emph{noisy}, \emph{raindrop}, \emph{rainy}, \emph{shadowed}, \emph{snowy}, and \emph{inpainting}. Example low-quality images for the ten degradations are also shown in \Figref{fig:teaser}.
+
+\textbf{Generating image-text-degradation pairs} 
+In order to train DA-CLIP on the mixed-degradation dataset, we use the bootstrapped vision-language framework BLIP~\citep{li2022blip} to generate synthetic captions for all HQ images. Since the inputs are clean, the generated captions are assumed to be accurate and of high-quality. As illustrated in \Figref{fig:data_generating}, we are then able to construct image-text-degradation pairs by directly combining these clean captions, LQ images, and the corresponding degradation types. This dataset allows us to train either vision-language models (based on image-text-degradation pairs) or a unified image restoration framework (based on LQ-HQ image pairs).
+\begin{table}[ht]
+\label{table:dataset}
+\centering
+\resizebox{1.\linewidth}{!}{
+\begin{tabular}{lcccccccccc}
+\toprule
+Dataset & \makecell[c]{Blurry}   & \makecell[c]{Hazy}   & \makecell[c]{JPEG}    & \makecell[c]{Low-light}  & \makecell[c]{Noisy}   & \makecell[c]{Raindrop}   & \makecell[c]{Rainy}    & \makecell[c]{Shadowed}  & \makecell[c]{Snowy}   & \makecell[c]{Inpainting}    \\ \midrule
+\#Train & 2\thinspace103 & 6\thinspace000 & 3\thinspace550 & 485 & 3\thinspace550 & 861 & 1\thinspace800 & 2\thinspace680 & 1\thinspace872 & 29\thinspace900 \\
+\#Test & 1\thinspace111 & 1\thinspace000 & 29 & 15 & 68 & 58 & 100 & 408 & 601 & 100 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+
+\section{Experiments}
+
+
+We experimentally evaluate our method on two types of tasks: \emph{degradation-specific} image restoration and \emph{unified} image restoration. In the degradation-specific setting (Section~\ref{sec:experiments:degradation-specific}), restoration models are separately trained for each of the considered degradation types. In unified image restoration (Section~\ref{sec:experiments:unified}), a single model is instead jointly trained on all degradation types.
+
+\textbf{Model Evaluation}
+\label{sec:experiments:setup}
+Our DA-CLIP is mainly evaluated in terms of how it affects the performance of the downstream image restoration model, which we evaluate both on multiple degradation-specific tasks and on unified image restoration. IR-SDE~\citep{luo2023image} is used as our primary baseline model. We use the Learned Perceptual Image Patch Similarity (LPIPS)~\citep{zhang2018unreasonable} and Fr\'{e}chet inception distance (FID)~\citep{heusel2017gans} as our main metrics for perceptual evaluation, but also report PSNR and SSIM~\citep{wang2004image} for reference. Additionally, we evaluate DA-CLIP in terms of how well it can classify the ten different degradation types on the mixed dataset.
+\subsection{Degradation-specific Image Restoration}
+\label{sec:experiments:degradation-specific}
+We integrate our DA-CLIP into the baseline diffusion model IR-SDE and evaluate them on four degradation-specific tasks: image deraining on the Rain100H dataset~\citep{yang2017deep}, low-light image enhancement on LOL~\citep{wei2018deep}, image deblurring on the GoPro dataset~\citep{nah2017deep}, and image dehazing on RESIDE-6k~\citep{qin2020ffa}. All training and testing datasets are taken from the mixed degradation dataset described in~\Secref{sec:dataset}.
+
+\textbf{Comparison approaches} 
+For all tasks, we compare our method to the prevailing approaches in their respective fields such as 1) JORDER~\citep{yang2019joint}, PReNet~\citep{ren2019progressive}, and MPRNet~\citep{zamir2021multi} for deraining; 2) EnlightenGAN~\citep{jiang2021enlightengan}, MIRNet~\citep{zamir2020learning}, and URetinex-Net~\citep{wu2022uretinex} for low-light enhancement; 3) DeepDeblur~\citep{nah2017deep}, DeblurGAN~\citep{kupyn2018deblurgan}, and DeblurGAN-v2~\citep{kupyn2019deblurgan} for GoPro deblurring; 4) GCANet~\citep{chen2019gated}, GridDehazeNet~\citep{liu2019griddehazenet}, and DehazeFormer~\citep{song2023vision} for image dehazing. We also compare with MAXIM~\citep{tu2022maxim}, an advanced network architecture that achieves state-of-the-art performance on multiple degradation-specific tasks.
+
+\textbf{Results} 
+The quantitative results on different datasets are summarised in Table~\ref{table:single-tresults}. Our method achieves the best perceptual results across all tasks, and even sets a new state-of-the-art performance for all metrics on the image deraining task. Compared to the baseline method IR-SDE, our approach consistently improves its results for all datasets and metrics, demonstrating that the HQ content embedding from DA-CLIP leads to better performance for downstream image restoration models. A visual comparison of our method with other approaches is also illustrated in~\Figref{fig:single-vresults}. Our method produces mostly clear and visually appealing results that are close to the HQ images.
+
+\begin{figure}[t]
+
+\begin{minipage}{1.\linewidth}
+    \centering
+    \captionof{table}{Quantitative comparison between our method with other state-of-the-art approaches on four different \emph{degradation-specific} datasets. The best results are marked in boldface.}
+    \label{table:single-tresults}
+    \begin{subtable}{0.47\linewidth}
+    \centering
+    \vskip -0.05in
+    \resizebox{.95\linewidth}{!}{
+    \begin{tabular}{lcccc}
+    \toprule
+    \multirow{2}{*}{Method} &  \multicolumn{2}{c}{Distortion} & \multicolumn{2}{c}{Perceptual}  \\ \cmidrule(lr){2-3} \cmidrule(lr){4-5}
+    &  PSNR$\uparrow$ & SSIM$\uparrow$ & LPIPS$\downarrow$ & FID$\downarrow$    \\
+    \midrule
+    JORDER  & 26.25 & 0.835 & 0.197 & 94.58   \\
+    PReNet  & 29.46 & 0.899 & 0.128 & 52.67   \\
+    MPRNet  & 30.41 & 0.891 & 0.158 & 61.59   \\
+    MAXIM  & 30.81 & 0.903 & 0.133 & 58.72  \\
+    IR-SDE  & 31.65 & 0.904 & 0.047 & 18.64 \\
+    Ours  & \textbf{33.91} & \textbf{0.926} & \textbf{0.031} & \textbf{11.79} \\
+    \bottomrule
+    \end{tabular}}
+    \caption{Deraining results on the Rain100H dataset.}
+    \label{table:rain100h}
+    \end{subtable}
+    \hfill
+    \begin{subtable}{0.495\linewidth}
+    \centering
+    \vskip -0.05in
+    \resizebox{1.\linewidth}{!}{
+    \begin{tabular}{lcccc}
+    \toprule
+    \multirow{2}{*}{Method} &  \multicolumn{2}{c}{Distortion} & \multicolumn{2}{c}{Perceptual}  \\ \cmidrule(lr){2-3} \cmidrule(lr){4-5}
+    &  PSNR$\uparrow$ & SSIM$\uparrow$ & LPIPS$\downarrow$ & FID$\downarrow$    \\
+    \midrule
+    EnlightenGAN  & 17.61 & 0.653 & 0.372 & 94.71   \\
+    MIRNet  & \textbf{24.14} & 0.830 & 0.250 & 69.18   \\
+    URetinex-Net  & 19.84 & 0.824 & 0.237 & 52.38   \\
+    MAXIM  & 23.43 & \textbf{0.863} & 0.098 & 48.59  \\
+    IR-SDE  & 20.45 & 0.787 & 0.129 & 47.28 \\
+    Ours  & 23.77 & 0.830 & \textbf{0.083} & \textbf{34.03} \\
+    \bottomrule
+    \end{tabular}}
+    \caption{Low-light enhancement on the LOL dataset.}
+    \label{table:low-light}
+    \end{subtable}
+    \vskip 0.05in
+    \begin{subtable}{0.48\linewidth}
+    \centering
+    \vskip -0.05in
+    \resizebox{.98\linewidth}{!}{
+    \begin{tabular}{lcccc}
+    \toprule
+    \multirow{2}{*}{Method} &  \multicolumn{2}{c}{Distortion} & \multicolumn{2}{c}{Perceptual}  \\ \cmidrule(lr){2-3} \cmidrule(lr){4-5}
+    &  PSNR$\uparrow$ & SSIM$\uparrow$ & LPIPS$\downarrow$ & FID$\downarrow$    \\
+    \midrule
+    DeepDeblur  & 29.08 & 0.913 & 0.135 & 15.14   \\
+    DeblurGAN  & 28.70 & 0.858 & 0.178 & 27.02   \\
+    DeblurGANv2  & 29.55 & 0.934 & 0.117 & 13.40   \\
+    MAXIM   & \textbf{32.86} & \textbf{0.940} & 0.089 & 11.57   \\
+    IR-SDE  & 30.70 & 0.901 & 0.064 & 6.32  \\
+    Ours  & 30.88 & 0.903 & \textbf{0.058} & \textbf{6.15} \\
+    \bottomrule
+    \end{tabular}}
+    \caption{Deblurring results on the GoPro dataset.}
+    \label{table:gopro}
+    \end{subtable}
+    \hfill
+    \begin{subtable}{0.48\linewidth}
+    \centering
+    \vskip -0.05in
+    \resizebox{1.\linewidth}{!}{
+    \begin{tabular}{lcccc}
+    \toprule
+    \multirow{2}{*}{Method} &  \multicolumn{2}{c}{Distortion} & \multicolumn{2}{c}{Perceptual}  \\ \cmidrule(lr){2-3} \cmidrule(lr){4-5}
+    &  PSNR$\uparrow$ & SSIM$\uparrow$ & LPIPS$\downarrow$ & FID$\downarrow$    \\
+    \midrule
+     GCANet  & 26.59 & 0.935 & 0.052 & 11.52   \\
+    GridDehazeNet  & 25.86 & 0.944 & 0.048 & 10.62   \\
+    DehazeFormer  & \textbf{30.29} & \textbf{0.964} & 0.045 & 7.58   \\
+    MAXIM  & 29.12 & 0.932 & 0.043 & 8.12  \\
+    IR-SDE  & 25.25 & 0.906 & 0.060 & 8.33 \\
+    Ours  & 30.16 & 0.936 & \textbf{0.030} & \textbf{5.52} \\
+    \bottomrule
+    \end{tabular}}
+    \caption{Dehazing results on the RESIDE-6k dataset.}
+    \label{table:hazy}
+    \end{subtable}
+\end{minipage}
+
+\hspace{0.02in}
+
+\begin{minipage}{1.\linewidth}
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/results_single.pdf}
+    \captionof{figure}{Comparison of our method with other approaches on 4 different \emph{degradation-specific} tasks.}
+    \label{fig:single-vresults}
+\end{minipage}
+
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.\linewidth]{figs/UIR_results_radar3.pdf}
+    \caption{Comparison of our method with AirNet, PromptIR and IR-SDE for \emph{unified} image restoration. Each radar plot reports results for the ten different degradation types, for one particular metric. For the perceptual metrics LPIPS and FID (the two rightmost plots), a lower value is better.}
+    \label{fig:uir-tresults}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.6\linewidth}
+        \centering
+        \captionof{table}{Comparison of the average results over ten different datasets on the \emph{unified} image restoration task.}
+        \label{table:uir-tresults}
+        \centering
+        \resizebox{.9\linewidth}{!}{
+        \begin{tabular}{lcccc}
+        \toprule
+        \multirow{2}{*}{Method} &  \multicolumn{2}{c}{Distortion} & \multicolumn{2}{c}{Perceptual}  \\ \cmidrule(lr){2-3} \cmidrule(lr){4-5}
+        &  PSNR$\uparrow$ & SSIM$\uparrow$ & LPIPS$\downarrow$ & FID$\downarrow$    \\
+        \midrule
+        NAFNet  & 26.34 & 0.847 & 0.159 & 55.68   \\
+        \update{NAFNet + Degradation}  & \update{27.02} & \update{0.856} & \update{0.146} & \update{48.27}   \\
+        NAFNet + DA-CLIP  & \textbf{27.22} & \textbf{0.861} & 0.145 & 47.94   \\ \midrule
+        \update{Restormer}  & \update{26.43} & \update{0.850} & \update{0.157} & \update{54.03}   \\
+        AirNet  & 25.62 & 0.844 & 0.182 & 64.86   \\
+        PromptIR  & 27.14 & 0.859 & 0.147 & 48.26   \\
+        IR-SDE  & 23.64 & 0.754 & 0.167 & 49.18 \\
+        Ours  & 27.01 & 0.794 & \textbf{0.127} & \textbf{34.89} \\
+        \bottomrule
+        \end{tabular}}
+    \end{minipage}
+    \hspace{0.1in}
+    \begin{minipage}{0.34\linewidth}
+        \centering
+        \includegraphics[width=.96\linewidth]{figs/radar_nafnet.pdf}
+        \caption{NAFNet with DA-CLIP for \emph{unified} image restoration.}
+        \label{fig:nafnet-radar}
+    \end{minipage}
+\end{figure}
+
+
+\subsection{Unified Image Restoration}
+\label{sec:experiments:unified}
+We evaluate our method for unified image restoration on the mixed degradation dataset which contains ten different degradation types (see \Secref{sec:dataset} for details).
+
+\textbf{Comparison approaches} 
+We compare our method with three approaches: \update{Restormer~\citep{zamir2022restormer},} AirNet~\citep{li2022all}, and PromptIR~\citep{potlapalli2023promptir}. \update{Restormer is an advanced transformer-based network.} AirNet trains an extra encoder to differentiate degradation types using contrastive learning, whereas PromptIR employs a visual prompt module to guide the restoration. 
+The latter two methods are designed specifically for unified image restoration. 
+
+\textbf{Results}
+We illustrate the comprehensive comparisons in~\Figref{fig:uir-tresults} and also provide the average results across all ten degradation types in Table~\ref{table:uir-tresults}. The results show that our method achieves the best perceptual results (especially in terms of FID) across the ten degradations, while still having a good distortion performance. More importantly, by simply integrating DA-CLIP into the network, we significantly outperform the IR-SDE baseline in terms of all four metrics. A visual comparison is shown in \Figref{fig:uir-vresults}. On JPEG and noise removal, our method produces realistic-looking but somewhat noisy images, giving lower distortion metrics for those particular tasks.
+
+Moreover, \update{we further integrate\footnote{We add the prompt module to all blocks and use cross-attention in the bottom layers.} DA-CLIP into an MSE-based network NAFNet~\citep{chen2022simple} as a variant of our method.} The results are illustrated in Table~\ref{table:uir-tresults} and \Figref{fig:nafnet-radar}. \update{We observe that adding our degradation context significantly improves the results, and the final performance of NAFNet with DA-CLIP even surpasses PromptIR across all metrics.} This demonstrates that DA-CLIP can be integrated with both diffusion-based and direct restoration models, further improving their performance for unified image restoration.
+
+ The original CLIP model achieves less than 2\% accuracy in recognizing noisy and raindrop images, and even 0\% accuracy for inpainting, which would confuse a downstream unified image restoration model. By training the controller on the mixed degradation dataset, DA-CLIP perfectly predicts all degradations except blurry, for which it achieves 91.6\% accuracy.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=.95\linewidth]{figs/results-UIR2.pdf}
+    \caption{Comparison of our method with other approaches on the \emph{unified} image restoration. All results in each row are produced by sending images with different degradations to the same model.}
+    \label{fig:uir-vresults}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}{0.246\linewidth}
+    \centering
+    \setlength{\abovecaptionskip}{0.02in}
+    \includegraphics[width=1.\linewidth]{figs/training_curve1.pdf}
+    \caption{}
+    \label{fig:uir_curve1}
+\end{subfigure}
+\begin{subfigure}{0.245\linewidth}
+    \centering
+    \setlength{\abovecaptionskip}{0.02in}
+    \includegraphics[width=1.\linewidth]{figs/training_curve12.pdf}
+    \caption{}
+    \label{fig:uir_curve2}
+\end{subfigure}
+\begin{subfigure}{0.245\linewidth}
+    \centering
+    \setlength{\abovecaptionskip}{0.02in}
+    \includegraphics[width=1.\linewidth]{figs/training_curve2.pdf}
+    \caption{}
+    \label{fig:uir_curve3}
+\end{subfigure}
+\begin{subfigure}{0.245\linewidth}
+    \centering
+    \setlength{\abovecaptionskip}{0.02in}
+    \includegraphics[width=1.\linewidth]{figs/training_curve51.pdf}
+    \caption{}
+    \label{fig:uir_curve4}
+\end{subfigure}
+
+\begin{subfigure}{0.246\linewidth}
+    \centering
+    \setlength{\abovecaptionskip}{0.02in}
+    \includegraphics[width=1.\linewidth]{figs/training_curve3.pdf}
+    \caption{}
+    \label{fig:uir_curve5}
+\end{subfigure}
+\begin{subfigure}{0.245\linewidth}
+    \centering
+    \setlength{\abovecaptionskip}{0.02in}
+    \includegraphics[width=1.\linewidth]{figs/training_curve11.pdf}
+    \caption{}
+    \label{fig:uir_curve6}
+\end{subfigure}
+\begin{subfigure}{0.245\linewidth}
+    \centering
+    \setlength{\abovecaptionskip}{0.02in}
+    \includegraphics[width=1.\linewidth]{figs/training_curve9.pdf}
+    \caption{}
+    \label{fig:uir_curve7}
+\end{subfigure}
+\begin{subfigure}{0.245\linewidth}
+    \centering
+    \setlength{\abovecaptionskip}{0.02in}
+    \includegraphics[width=1.\linewidth]{figs/training_curve10.pdf}
+    \caption{}
+    \label{fig:uir_curve8}
+\end{subfigure}
+\caption{\update{Training curves of model variations, demonstrating the effectiveness of our DA-CLIP.}}
+\label{fig:cmp_uir_curve}
+\end{figure}
+
+\subsection{Discussion and Analysis}
+
+We have two different embeddings from the DA-CLIP: an \emph{HQ content} embedding and a \emph{degradation} embedding, which are both predicted from the LQ image. The former can be used for improving general image restoration performance, whereas the latter is predicted to classify degradation types for unified image restoration models.
+As can be observed in~\Figref{fig:uir_curve1}, separately applying either the degradation embedding or the HQ content embedding improves the unified restoration performance, and the performance is further improved by applying both embeddings as in our DA-CLIP. Moreover, directly embedding the ground truth HQ image and the real degradation type leads to an upper-bound performance of our method, as illustrated in Figure~\ref{fig:uir_curve2}. 
+
+\update{We also compare using the HQ content image embedding from our DA-CLIP with the original image content embedding obtained from the OpenAI CLIP~\citep{radford2021learning}.} For the unified image restoration task, we observe in \Figref{fig:uir_curve3} that using the original CLIP content embedding fails to substantially improve the performance. \update{For the degradation-specific setting as shown in \Figref{fig:uir_curve4}, we also observe that our DA-CLIP clearly outperforms the baseline of using the original CLIP.} 
+
+As an alternative to using the HQ content and degradation embeddings of DA-CLIP (from the LQ image), the degradation type and HQ caption could be encoded directly using the CLIP text encoder. This alternative approach thus requires access to the ground truth degradation label and caption text for each LQ image. Surprisingly, we observe in \Figref{fig:uir_curve5} that the two degradation embeddings give very similar performance. \Figref{fig:uir_curve6} further shows that caption embeddings are also helpful for image restoration. Moreover, while using the ground truth text embeddings improves the baseline performance, it is slightly inferior compared to using our DA-CLIP image embeddings (\Figref{fig:uir_curve7}), meaning that DA-CLIP has learned to accurately predict the degradation type and HQ content embeddings. Finally, an analysis of the degradation prompt module is provided in \Figref{fig:uir_curve8}, demonstrating that prompt learning also facilitates unified image restoration.
+While we have demonstrated the effectiveness of our proposed DA-CLIP in various settings, it is worth acknowledging one potential limitation: increased model complexity and computational cost. The test-time computational cost (FLOPs and runtime) is however virtually unaffected.}
+
+
+
+
+
+
+
+
+
+
+
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}{0.245\linewidth}
+    \includegraphics[width=1.\linewidth]{figs/training_curve11.pdf}
+    \caption{}
+    \label{fig:uir_curve1}
+\end{subfigure}
+\begin{subfigure}{0.245\linewidth}
+    \centering
+    \includegraphics[width=1.\linewidth]{figs/training_curve2.pdf}
+    \caption{}
+    \label{fig:uir_curve2}
+\end{subfigure}
+\begin{subfigure}{0.245\linewidth}
+    \centering
+    \includegraphics[width=1.\linewidth]{figs/training_curve3.pdf}
+    \caption{}
+    \label{fig:uir_curve3}
+\end{subfigure}
+\begin{subfigure}{0.245\linewidth}
+    \centering
+    \includegraphics[width=1.\linewidth]{figs/training_curve4.pdf}
+    \caption{}
+    \label{fig:uir_curve4}
+\end{subfigure}
+\caption{Training curves of different settings on the \emph{unified} image restoration task.}
+\label{fig:cmp_uir_curve}
+\end{figure}
+
+
+
+\section{Discussion and Analysis}
+
+In this section, we explore the effectiveness of integrating different embeddings from DA-CLIP into image restoration models and also analyze the influence of training patch sizes. 
+
+We have two types of embeddings from the DA-CLIP: HQ content embedding and degradation embedding. The former is obtained from the image encoder and used for improving general image restoration performance, whereas the latter is predicted by the controller and leveraged to classify the image degradation type for unified image restoration. To verify their effectiveness, we train the baseline model with different embedding settings. As can be observed in~\Figref{fig:uir_curve1}, separately applying either the degradation embedding or the HQ content embedding improves the performance. Moreover, the performance is further improved by applying both embeddings in combination.
+
+\begin{wrapfigure}{R}{0.3\textwidth}
+\setlength{\belowcaptionskip}{-0.2in}
+    \centering
+    \includegraphics[width=.95\linewidth]{figs/training_curve51.pdf}
+    \caption{Training curves of baseline models with DA-CLIP and OpenAI CLIP on the \emph{degradation-specific} task.}
+    \label{fig:training_curve_rainy}
+\end{wrapfigure}
+
+We also compare with the model that integrates image embeddings from OpenAI CLIP~\citep{radford2021learning} into the baseline for both degradation-specific (e.g., image deraining) and unified image restoration tasks, as shown in \Figref{fig:training_curve_rainy} and \Figref{fig:uir_curve2}. We observe that both embeddings lead to better performance for the image deraining task while the model with our DA-CLIP achieves significantly higher performance overall training process. Moreover, only using content embedding from OpenAI CLIP can't make obvious improvements for unified image restoration, demonstrating the importance of controller and the corresponding degradation embeddings.
+
+Moreover, we notice that the text encoder can also be involved in unified image restoration by giving true text degradation labels and then performing as a non-blind approach. We verify this idea and compare it with our blind approach (using predicted image degradation embedding) in~\Figref{fig:uir_curve3}. Surprisingly, we found that our blind model achieves similar performance to that with true degradation labels. That means our controller predicts highly accurate degradation types for all images.
+
+Intuitively, large patch sizes always contain more semantic information that might be important for guiding image restoration. We explore this property by training our model with two different patch sizes on the unified image restoration task. As shown in~\Figref{fig:uir_curve4}, increasing the patch size from $128 \times 128$ to $256 \times 256$ improves the training process, which is consistent with our conjecture.
+
+
+
+
+\section{Related Work}
+
+
+Text text text... \hl{TODO!}
+
+\hl{Combine this with a Background section, put after the Introduction?}
+
+
+\section{Conclusion}
+
+
+This paper presents DA-CLIP to leverage large-scale pretrained vision-language models as a universal framework for image restoration. At the core of our approach is a controller that accurately predicts the degradation embeddings from LQ images and also controls the CLIP image encoder to output clean content embeddings. To train DA-CLIP, we construct a mixed degradation dataset containing synthetic captions from HQ images. DA-CLIP is then integrated into downstream image restoration models using a prompt learning module and a cross-attention mechanism. Experimental evaluation on both degradation-specific and unified image restoration tasks demonstrates that DA-CLIP consistently improves the restoration performance, across a variety of degradation types. On the other hand, we notice that the current dataset makes it hard to restore multiple degradations in the same scene. In future work, we are interested in creating practical models that are more robust to real-world captured photos and are able to fully restore images with mixed degradation types.
+
+
+

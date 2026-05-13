@@ -1,0 +1,340 @@
+\title{LeanQuant: Accurate and Scalable Large Language Model Quantization with Loss-error-aware Grid}
+
+\begin{abstract}
+
+Large language models (LLMs) have shown immense potential across various domains, but their high memory requirements and inference costs remain critical challenges for deployment. Post-training quantization (PTQ) has emerged as a promising technique to reduce memory requirements and decoding latency. However, recent accurate quantization methods often depend on specialized computations or custom data formats to achieve better model quality, which limits their compatibility with popular frameworks, as they require dedicated inference kernels tailored to specific hardware and software platforms, hindering wider adoption. Furthermore, many competitive methods have high resource requirements and computational overhead, making it challenging to scale them to hundreds of billions of parameters. In response to these challenges, we propose LeanQuant (Loss-error-aware Network Quantization), a novel quantization method that is accurate, versatile, and scalable. In the existing popular iterative loss-error-based quantization framework, we identify a critical limitation in prior methods: the min-max affine quantization grid fails to preserve model quality due to outliers in inverse Hessian diagonals. To overcome this fundamental issue, we propose learning loss-error-aware grids, instead of using non-adaptive min-max affine grids. Our approach not only produces quantized models that are more accurate but also generalizes to a wider range of quantization types, including affine and non-uniform quantization, enhancing compatibility with more frameworks. Extensive empirical evaluations on recent LLMs demonstrate that LeanQuant is highly \textit{accurate}, comparing favorably against recent competitive baselines in model quality, and \textit{scalable}, achieving very accurate quantization of Llama-3.1 405B, one of the largest open-source LLMs to date, using two Quadro RTX 8000-48GB GPUs in 21 hours.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large language models (LLMs) have demonstrated impressive reasoning \citep{reasoning} and problem solving abilities \citep{zero_shot}, and have shown the potential to bring transformative changes to various fields such as law \citep{app_llm}, education \citep{llm_education}, and medicine \citep{llm_medicine}. However, deploying LLMs in a cost-effective manner presents significant challenges due to their substantial memory and computational demands \citep{frugalgpt}, which hinders the accessibility and democratization of artificial intelligence (AI) \citep{app_llm}.
+
+Post-training quantization (PTQ) \citep{uniform_quant} is a technique for reducing the memory requirement for model inference by reducing the precision of floating-point weights of a pre-trained model and storing them in a compact low-bit-width format. PTQ offers the additional benefit of reducing the decoding latency of LLMs by reducing memory reads, since LLM inference is often bottlenecked by memory bandwidth \citep{sqllm}. Although quantization causes a certain amount of precision loss in the parameters, the model quality can be reasonably preserved even in lower bit widths \citep{gptq, quip}. For many tasks, a quantized model is preferred over a full model due to its better size-accuracy trade-off \citep{scaling_law_4bit}. As open-source foundational models continue to scale up in size \citep{llama3}, accurate and efficient quantization becomes essential for making AI accessible to a wider audience. For instance, serving Llama-3.1 405B \citep{llama3} using its original 16-bit weights requires a cluster of 2 nodes, each with 8$\times$80GB GPUs, while the 4-bit quantized version can be deployed on a single nodes of 8$\times$48GB GPUs, eliminating the overhead of inter-node communication.
+
+\textbf{Challenges of Deploying Quantized Models} One of the biggest challenges of successful deployment of quantized models is implementing optimized kernels for quantized GEMM (general matrix multiply) that are tailored to various hardware platforms and software frameworks. In order to accelerate inference of quantized models, fused kernels, which fuse dequantization and matrix multiplication in the same subroutine, have to be implemented and tuned for the specific hardware accelerator. These kernels require specialized designs and tunings for different hardware accelerators to be fully optimized \citep{lut_gemm}.
+
+Recent quantization algorithms have chosen to employ specialized computations or custom data formats to reduce the impact of quantization on model quality, but they require more sophisticated kernel designs for efficient inference. For example, AQLM \citep{aqlm} and QUIP\# \citep{quipsharp} perform dequantization through look-ups from multi-dimensional or multi-bit codebooks, and \citet{student_t} proposed new data types such as Student Float to reduce quantization errors. While these approaches demonstrate promising results, their reliance on specialized operations and data formats can hinder their widespread adoption due to the need for optimized inference kernels for each hardware platform and software framework. For example, llama.cpp \citep{llamacpp}, a popular LLM inference engine that supports mobile devices, only supports affine and non-uniform quantization formats. Consequently, instead of focusing on developing better quantization methods with specialized operations, it may be more worthwhile to investigate improving the accuracy of existing widely adopted quantization formats, such as affine integer quantization and non-uniform quantization, which are supported by popular deep learning libraries \citep{pytorch} and deployment frameworks \citep{vllm}.
+
+\textbf{Scalability Challenges of Accurate Quantization} To improve the quality of quantized models, existing approaches often incur higher computational overhead and require more hardware resources. As foundational models scale up in size \citep{scaling_law}, these quantization approaches may struggle to scale to very large models such as Llama-3.1 405B (405 billion parameters) \citep{llama3}. For instance, LLM-QAT \citep{llm_qat} uses 100K samples of training data and hundreds of GPU-hours to recover the performance of a quantized LLaMA-13B model \citep{llama}. For AQLM \citep{aqlm}, the time needed for quantizing a 7B to 70B LLM ranges from 1 to 14 days of an A100-80GB GPU. For SqueezeLLM \citep{sqllm}, due to its use of the gradients of model parameters, quantizing a 70B LLM requires at least 240GB of total GPU memory, or 8$\times$32GB GPUs. As these accurate quantization approaches demand significant hardware resources and long optimization time, it is crucial to develop accurate methods that are efficient in terms of resource usage and time cost, to ensure the accessibility of increasingly large foundational models.
+
+\textbf{Our Proposal} In this work, we propose LeanQuant, an accurate, versatile, and scalable quantization approach. We build upon the iterative loss-error-based quantization framework \citep{obq, gptq} and identify one of the biggest limitations of such methods: the min-max affine quantization grid introduces high loss errors due to the existence of outliers in the inverse Hessian diagonals. We introduce techniques for learning loss-error-aware quantization grids, which mitigate this issue and greatly improve the accuracy and quality of quantized models. We empirically demonstrate that LeanQuant compares favorably against competitive baselines in the 4/3/2-bit regions. Our approach is versatile, able to generalize to multiple commonly used quantization formats, such as affine and non-uniform quantization, allowing our quantized models to be directly compatible with existing highly optimized inference kernels \citep{marlin, lut_gemm} for maximum accessibility. Furthermore, our method is scalable and efficient. By designing and implementing a fused GPU kernel for LeanQuant grid learning, we achieve the accurate quantization of LLMs up to 123B in size using a single L40s-48GB GPU in 4 hours, and Llama-3.1 405B using 2 Quadro RTX 8000-48GB GPUs in 21 hours.
+
+
+
+\section{Background}
+
+
+In this section, we introduce the relevant background for our proposal including quantization grids and iterative loss-error-based quantization.
+
+\subsection{Quantization Grid}
+
+Quantization achieves model compression by representing the full-precision floating-point parameters with a limited set of grid points on the quantization grid. The number of points on the grid depends on the bit width: a $b$-bit code represents $2^b$ distinct values, so 2-bit quantization yields 4 grid points. The placement of these points significantly affects the precision of the original parameters, and imprecise placement can degrade model quality. To address this, different types of quantization grids, such as affine, non-uniform, and normal, have been introduced, which we survey as follows.
+
+\textbf{Affine Grid} In an affine quantization grid \citep{uniform_quant}, the grid points are evenly spaced over the dynamic range of a group of weights. The weights of the network are divided into groups of fixed size, e.g. every 128 contiguous parameters as a group. For min-max asymmetric affine quantization, the scaling factor $S$ and the zero-point $Z$ are recorded for each group of weights (the zero-point is omitted in the symmetric affine case). Then, the $i$-th weight $w_i$ in a group $\mathbf w$ is quantized to $b$-bit as follows,
+\begin{equation*}
+    w_i^\mathbf{int}=\mathrm{clip}(\lfloor \frac{w_i}{S}\rceil + Z, 0, 2^b - 1), \textrm{where } S = \frac{\max(\mathbf w)-\min(\mathbf w)}{2^b -1} \textrm{ and } Z = - \lfloor \frac{\min(\mathbf w)}{S} \rceil
+\end{equation*}
+\begin{equation*}
+    \mathrm{quant}_\textit{aff}(w_i, S, Z) = (w_i^\mathbf{int} - Z)S
+\end{equation*}
+where $\lfloor \cdot \rceil$ is the rounding operator, $\mathrm{clip}(\cdot)$ constrains the weight value within the range of $b$-bit integer, $w_i^\mathbf{int}$ is the compact integer representation of $w_i$, and $\mathrm{quant}_\textit{aff}(w_i, S, Z)$ is the value of $w_i$ after being quantized to the nearest grid point.
+
+\textbf{Non-uniform Grid} The grid points on a non-uniform grid are placed in a non-equidistant manner \citep{nonuniform}. The motivation behind non-uniform quantization is to allow for finer precision in regions where model parameters are more concentrated or sensitive. Each row in a weight matrix has a distinct set of grid points $\mathcal G$, where $\lvert \mathcal G\rvert = 2^b$ for $b$-bit non-uniform quantization. The weight $w_i$ is quantized to the nearest grid point in $\mathcal G$ as follows,
+\begin{equation*}
+    \mathrm{quant}_\textit{nu}(w_i, \mathcal G) = \argmin_{g \in \mathcal G}\lvert g - w_i\rvert
+\end{equation*}
+
+\textbf{Other Grid Types} Previous works have observed that LLM parameters tend to be distributed similarly as Normal or Student T's Distribution, hence they propose new grid types, such as NormalFloat \citep{qlora} and Student Float \citep{student_t}, which place grid lines at the quantiles of these distributions. Our proposed method can also be extended to work with these quantization formats.
+
+\subsection{Iterative Loss-error-based Quantization}
+
+Iterative loss-error-based quantization \citep{obq} is a promising framework for quantizing deep neural networks to low bit widths while maintaining strong performance on downstream tasks. In particular, Optimal Brain Quantization (OBQ) \citep{obq}, which is based on the seminal works by \citet{obd} and \citet{obs}, aims to minimize the impact of weight perturbations introduced by parameter quantization on the network's task loss. 
+
+Let $\mathcal L(\mathbf w_{\mathcal N})$ be the task loss of a network $\mathcal N$ evaluated at the weights $\mathbf w_{\mathcal N}$ (flattened to a vector). Then, the OBQ objective is to minimize the loss error $\epsilon$, which is defined as
+\begin{equation*}
+\begin{split}
+    \epsilon &= \mathcal L(\mathbf w_{\mathcal N} + \boldsymbol \delta_{\mathcal N}) - \mathcal L(\mathbf w_{\mathcal N})
+\end{split}
+\end{equation*}
+where $\boldsymbol{\delta}_\mathcal N$ is the weight perturbation introduced by quantization. The loss error $\epsilon$ can be approximated with a Taylor series \citep{obd} as
+\begin{equation*}
+    \epsilon = \underbrace{\big(\frac{\partial {\mathcal L}}{\partial {\mathbf w_{\mathcal N}}}\big)^\top \boldsymbol{\delta}_{\mathcal N}}_{\text{negligible}} + \frac 12 \boldsymbol{\delta}_{\mathcal N}^\top \frac{\partial^2 {\mathcal L}}{\partial {\mathbf w^2_{\mathcal N}}}\boldsymbol{\delta}_{\mathcal N} + \underbrace{O\big(\lVert \boldsymbol{\delta}_{\mathcal N}\rVert^3\big)}_{\text{negligible}}
+\end{equation*}
+where the first term is omitted due to $\frac{\partial {\mathcal L}}{\partial {\mathbf w_{\mathcal N}}} \approx \mathbf 0$ in a converged network, and the third and higher terms can be ignored due to small norms. Computing the exact Hessian $\mathbf H=\frac{\partial^2 {\mathcal L}}{\partial {\mathbf w^2_{\mathcal N}}}$ in a deep network is difficult, hence OBQ leverages an approximation of loss error proposed by \citet{adaround},
+\begin{equation*}
+    \mathbb E(\epsilon) \approx \sum_{\mathbf W \in \mathcal N}\big\lVert \mathbf W\mathbf X - \hat{\mathbf W}\mathbf X\big\rVert_F^2
+\end{equation*}
+where $\mathbf W, \hat{\mathbf W}, \mathbf X$ are the weight matrix, quantized weight matrix, and the input matrix to a linear layer in the network $\mathcal N$. As a result, the OBQ objective can be decomposed into layer-wise independent convex problems,
+\begin{equation}
+\label{eq:error_min}
+    \argmin_{\hat{\mathbf W}} \lVert \mathbf W\mathbf X - \hat{\mathbf W}\mathbf X\rVert_F^2
+\end{equation}
+which can be further decomposed into row-wise independent problems, since Equation \ref{eq:error_min} can be written as a sum of squares over the rows of $\mathbf W$.
+
+OBQ employs an iterative quantization approach, in which a single weight in a row $\mathbf w$ is quantized in each step, and then the remaining not-yet-quantized weights in the same row are updated to compensate for the introduced error. Given the constraint that the parameter $w_i$, indexed by $i$ in row $\mathbf w$, is being quantized, the optimal weight perturbation $\boldsymbol{\delta}$ to the remaining weights can be solved with the following Lagrangian,
+\begin{equation}
+\label{eq:lagrangian}
+    L(\boldsymbol{\delta}, \lambda) = \frac 12\boldsymbol{\delta}^\top \mathbf H\boldsymbol{\delta} + \lambda\Big(\mathbf e_i^\top \boldsymbol{\delta} - \big(\mathrm{quant}(w_i) - w_i\big)\Big)
+\end{equation}
+where the Hessian $\mathbf H=2\mathbf X\mathbf X^\top$ (from Equation \ref{eq:error_min}) is computed on a small sample of input data and $e_i$ is the $i$-th standard basis vector. Solving Equation \ref{eq:lagrangian} yields the optimal weight perturbation $\boldsymbol \delta_i$ and the resulting loss error $\epsilon_i$ after quantizing $w_i$,
+\begin{equation}
+    \label{eq:delta_epsilon}
+    \boldsymbol{\delta}_i = \frac{\mathrm{quant}(w_i) - w_i}{\mathbf H^{-1}_{i,i}}\mathbf H^{-1}_{:,i}, \;\;
+    \epsilon_i = \frac 12 \frac{\big(\mathrm{quant}(w_i) - w_i\big)^2}{\mathbf H^{-1}_{i,i}}
+\end{equation}
+where $\mathbf H^{-1}_{i,i}$ and $\mathbf H^{-1}_{:,i}$ denotes the $i$-th diagonal entry and the $i$-th column of the inverse Hessian, respectively.
+
+The loss error $\epsilon_i$ reflects the negative impact of quantizing parameter $w_i$ on the model quality, and it is always a non-negative value. OBQ utilizes the loss error $\epsilon_i$ as a heuristic for greedy optimization. Specifically, in each iteration, OBQ computes $\epsilon$ for all weights in a row and greedily selects the $i$-th parameter with the minimum $\epsilon_i$ to quantize. Then, $w_i$ is round to the nearest value on the quantization grid, and the remaining weights are updated via $\mathbf w \leftarrow \mathbf w - \boldsymbol \delta_i$, and the updated inverse Hessian for the remaining weights, with the $i$-th row and column removed from $\mathbf H$, is computed as 
+\begin{equation}
+\label{eq:hessian_update}
+{
+    \mathbf H^{-1}_{-i,-i} = \big(\mathbf H^{-1} - \frac{\mathbf H^{-1}_{:,i}\mathbf H^{-1}_{i,:}}{\mathbf H^{-1}_{i,i}}\big)_{-i,-i}
+}
+\end{equation}
+This iterative process continues until all weights are quantized.
+
+\textbf{Scaling to Billion-Parameter LLMs Using Cholesky and Dampening} OBQ produces accurate post-training quantized models for million-parameter networks, but fails to scale to billion-parameter LLMs due to two primary reasons: the inefficient time complexity and the accumulation of numerical inaccuracies during updates. To improve its computational efficiency, \citet{gptq} propose to quantize the weights in a fixed non-greedy order for all rows, and keep the weight updates within a block of $B$ columns at a time. To prevent model quality collapse resulted from the accumulation of numerical inaccuracies by repeated weight updates, \citet{gptq} propose to apply a mild dampening (1\% of the average diagonals) to the diagonal entries of the Hessian $\mathbf H$ and leverage a Cholesky decomposition
+of the inverse Hessian $\mathbf H^{-1}$ in place of the update in Equation \ref{eq:hessian_update}. The resulting algorithm is GPTQ, which is able to efficiently quantizes billion-parameter LLMs.
+
+
+
+\section{Methodology}
+
+
+\begin{figure}[h]
+\begin{center}
+\includegraphics[width=\textwidth]{figures/LeanQuant_grids.pdf}
+\end{center}
+\caption{(Left) The empirical distributions of inverse Hessian diagonals, computed on 262K tokens from the C4 dataset for the Llama-3-8B model, contain outliers that can cause high loss errors. (Right) Our proposed loss-error-aware non-uniform and affine grids better preserves the quantized precision of outliers, leading to more accurate quantized models.}
+\label{fig:leanquant}
+\end{figure}
+
+In this section, we introduce our proposed approach \underline{L}oss-\underline{e}rror-\underline{a}ware \underline{n}etwork \underline{Quant}ization (LeanQuant), for accurately and efficiently quantizing LLMs.
+
+\subsection{Revisiting the Loss Error}
+
+To motivate our proposed approach, we first revisit the loss error $\epsilon_i$ in Equation \ref{eq:delta_epsilon}, which approximates the (detrimental) increase in the network's task loss, introduced by quantizing weight $w_i$. This error $\epsilon_i$ has been used as a heuristic in multiple previous works \citep{obd,obs,woodfisher,obq} for choosing the next best weight $i$ to prune or quantize. It has been shown to be a highly informative metric for measuring the impact of quantization.
+
+By examining Equation \ref{eq:delta_epsilon}, one finds that the loss error $\epsilon_i$ is proportional to the square of weight quantization error and inversely proportional to the diagonal entry of the inverse Hessian, i.e.,
+\begin{equation}
+\label{eq:res_error_propto}
+    \epsilon_i \propto \big(\mathrm{quant}(w_i) - w_i\big)^2 \;\text{ and }\; \epsilon_i \propto \frac{1}{\mathbf H^{-1}_{i,i}}
+\end{equation}
+Hence, we further examine the empirical distribution of $\frac 1{\mathrm{diag}(\mathbf H^{-1})}$, to which the loss error row vector $\boldsymbol{\epsilon}$ is proportional. We obtain the empirical distributions on layers of Llama-3-8B \citep{llama3} with 128 sequences of length 2048 tokens from the C4 dataset \citep{c4}, and compute the inverse Hessian as $\mathbf H^{-1}=(2\mathbf X\mathbf X^\top)^{-1}$ where $\mathbf X$ is the layer input matrix. As shown in Figure \ref{fig:leanquant}, The majority of the inverse diagonals are concentrated in low-magnitude regions, with a few outliers having high magnitudes. Quantizing the weights corresponding to these outliers can lead to high loss errors if these weights are not well-aligned with the quantization grid points. Preserving the quantized precision of the weights corresponding to these inverse-diagonal outliers is especially important because the loss error increases quadratically with their quantization error (Equation \ref{eq:res_error_propto}). Iterative loss-error-based quantization approaches (OBQ, GPTQ, etc.) employ min-max affine quantization grid, which is suboptimal for preserving the quantized precision of the inverse-diagonal outliers, leading to high loss errors and model quality degradation. Our idea is to learn quantization grids that minimize the loss error $\epsilon$.
+
+\subsection{Loss-Error-Aware Network Quantization}
+
+The min-max affine grid employed by previous iterative loss-error-based quantization methods do not account for the existence of inverse-diagonal outliers, which may cause significant model quality degradation. We propose loss-error-aware quantization grids, which preserve the quantized precision of weights corresponding to the inverse diagonal outliers, to produce more accurate models. We propose techniques to learn loss-error-aware grids for different quantization formats, including non-uniform and affine, and design fused GPU kernels to achieve efficient and scalable quantization.
+
+\subsubsection{Non-Uniform Loss-Error-Aware Grid}
+
+For non-uniform quantization, we perform clustering with the model parameters, weighted by their corresponding exponentiated inverse Hessian diagonals, to obtain a set of grid points that are loss-error-aware. Concretely, we learn the set of grid points $\mathcal G$ for $b$-bit quantization through the following objective,
+\begin{equation}
+\label{eq:learning_obj}
+    \argmin_{\mathcal{G}:\left|\mathcal G\right|=2^b}\sum_i (\mathbf H^{-1}_{i,i})^{-p} \left|\mathrm{quant}_\textit{nu}(w_i, \mathcal G) - w_i\right|^2
+\end{equation}
+where $p$ is a hyperparameter that indicates the strength of preserving the quantized precision of outliers. We leverage k-means \citep{kmeans} to optimize the objective. After the quantization grid $\mathcal G$ has been established, the weights are iteratively quantized to the nearest grid point in $\mathcal G$.
+
+\textbf{Grid Initialization} The quality of clustering results is highly dependent on initialization \citep{kmeanspp}, since Lloyd's Algorithm \citep{kmeans} converges to a locally optimal solution. Hence in lower bit width regions, the initialization of grid points for clustering can greatly influence the quantized model quality. K-means++ \citep{kmeanspp} leverages iterative sampling to select initial centers that are likely far from each other to obtain more optimal results. However, we found that it still tends to produce sub-optimal results in lower bit width regions (3 and 2-bit). We propose a lightweight and robust grid point initialization method: uniformly spaced grid initialization, which uses uniformly spaced points $\mathcal G_\textrm{init}$ over the dynamic range of the weights as initial centers, where
+\begin{equation*}
+    \mathcal G_\textrm{init} = \Big\{\min(\mathbf w) + \frac{\max(\mathbf w) - \min(\mathbf w)}{2^b - 1}t \,\Big\vert\, t \in \{0, \dots, 2^b - 1\}\Big\}
+\end{equation*}
+\subsubsection{Loss-error-aware Affine Grid}
+
+We propose a different strategy for learning affine loss-error-aware grid than non-uniform grid. The challenge with learning affine grid is that the grid points are uniformly placed over an interval, so the clustering strategy does not apply. Searching for the optimal scaling factor $S$ and zero-point $Z$ over the real numbers can be done using gradient descent, but it is potentially time and memory consuming and prone to finding local minimas. Hence, we adopt the strategy of searching for the optimal $S$ and $Z$ in a constrained space $\mathbb S$, and formulate the problem of learning affine loss-error-aware grid as 
+\begin{multline}
+    \label{eq:grid_search}
+    \argmin_{(S, Z) \in \mathbb S}\sum_i (\mathbf H^{-1}_{i,i})^{-p} \Big\lvert\mathrm{quant}_\textit{aff}(w_i, S, Z) - w_i\Big\rvert^2, \textrm{where } \\
+    \resizebox{.93\hsize}{!}{$
+    \mathbb S = \Bigg\{\bigg(\underbrace{\frac{\big(\max(\mathbf w) - t_\mathrm{max} \frac{R}{T}\big) - \big(\min(\mathbf w) + t_\mathrm{min} \frac{R}{T}\big)}{2^b -1}}_{\textrm{scaling factor } S}, \underbrace{- \big\lfloor \frac{\min(\mathbf w) + t_\mathrm{min} \frac{R}{T}}{S} \big\rceil}_{\textrm{zero-point } Z}\bigg) \bigg\vert t_\mathrm{min}, t_\mathrm{max} \in \{0, \dots, \frac T2-1\}\Bigg\}
+    $}
+\end{multline}
+where $R=\max(\mathbf w) - \min(\mathbf w)$ is the dynamic range of the weights, and $T$ is the number of partitions over $R$. To obtain the $S$ and $Z$ that minimize the loss errors, we enumerate candidates for $S$ and $Z$ by shrinking the min-max range of the weights in discrete steps. The value of $T$ determines the granularity of the search, which we set to 2048.
+
+\textbf{Efficient Fused GPU Kernel for Grid Learning} The learning process in Equation \ref{eq:grid_search} is costly due to the enumeration of $(\frac T2)^2$ pairs of scaling factor and zero-point. Simply looping over all enumerations is time-consuming. Hence, we design and implement a fused kernel that leverages the parallel processing power of GPUs for efficient grid searching. We designate each thread block to be responsible for processing a single group of weights, and each thread in the thread block to be responsible for enumerating all combinations of a single $t_\mathrm{min}$ and all $t_\mathrm{max}$. The minimum loss for each $t_\mathrm{min}$ is accumulated by each thread, and they are aggregated at the end on the thread block level to determine the optimal scaling factor and zero-point for the current weight group. This mode of processing enables the parallel computation of the optimal scaling factor and zero-point for all weight groups, accelerating the end-to-end quantization process by more than 50$\times$. An efficiency analysis of our fused kernel is presented in Section \ref{sec:ablation}.
+
+\subsubsection{LeanQuant}
+
+Our proposed loss-error-aware quantization grid can integrate with any iterative loss-error-based quantization approaches to improve quantized model quality. A comparison between min-max affine quantization grid with loss-error-aware non-uniform and affine grid learned for a layer of Llama-3-8B \citep{llama3} is presented in Figure \ref{fig:leanquant}. We propose LeanQuant, which integrates loss-error-aware grid with GPTQ \citep{gptq}, and present it in Algorithm \ref{alg:leanquant}. We further denote the underlying grid type used by LeanQuant with subscripts, such as LeanQuant\textsubscript{\textit{aff}} and LeanQuant\textsubscript{\textit{nu}} for affine and non-uniform grid, respectively.
+
+The parameter $p$ balances the strength of precision preservation between inverse-diagonal outliers and non-outliers. Higher values of $p$ prioritizes the precision preservation of outliers more, while $p=0$ prioritizes the preservation of all weights equally. We found the quantized model quality to be not very sensitive to values of $p$, and use $p=4$ for all models. A sensitivity analysis for $p$ is given in Section \ref{sec:ablation}.
+
+{
+\begin{algorithm}[t]
+\caption{LeanQuant for LLM quantization}
+\label{alg:leanquant}
+\begin{algorithmic}[1]
+\small
+   \Statex {\bfseries Input:} weight matrix $\mathbf W \in \mathbb R^{r\times c}$, input matrix $\mathbf X$, bit width $b$, block size $B$, dampening factor $df$, outlier preservation strength $p$
+   \Statex {\bfseries Output:} Quantized matrix $\hat{\mathbf W}$
+   \State $\hat{\mathbf W} \gets \mathbf 0_{r \times c}$
+   \State $\mathbf E \gets \mathbf 0_{r \times B}$
+   \State $\mathbf H \gets 2\mathbf{X}\mathbf{X}^\top$
+   \State $\mathbf H^{-1} \gets \mathrm{Cholesky}\Big(\big[\mathbf H+df \cdot \mathrm{avg}\big(\mathrm{diag}(\mathbf H)\big)\cdot\mathbf I\big]^{-1}\Big)$ \Comment{\scriptsize apply dampening, inversion, and Cholesky decomposition \small}
+   \State {\bfseries if} using non-uniform grid {\bfseries then}
+   \State \hskip 1em $\mathcal G_k \gets \argmin\limits_{\mathcal G:\left|\mathcal G\right|=2^b} \big(\mathrm{diag}(\mathbf H^{-1})^{-p}\big)^\top\big|\mathrm{quant}_\textit{nu}(\mathbf W_{k,:}, \mathcal G) - \mathbf W_{k,:}\big|^2$ {\bfseries forall} $k \in \{0,\dots,r-1\}$ \Comment{E.\ref{eq:learning_obj}}
+   \State {\bfseries else if} using affine grid {\bfseries then}
+   \State \hskip 1em $S_k, Z_k \gets \argmin\limits_{(S, Z) \in \mathbb S} \big(\mathrm{diag}(\mathbf H^{-1})^{-p}\big)^\top\big|\mathrm{quant}_\textit{aff}(\mathbf W_{k,:}, \mathcal S, Z) - \mathbf W_{k,:}\big|^2$ {\bfseries forall} $k \in \{0,\dots,r-1\}$ \Comment{\scriptsize E.\ref{eq:grid_search}\small}
+   \State {\bfseries end if}
+   \State {\bfseries for} $i \gets 0, B, 2B, \dots$ {\bfseries do} \Comment{apply block-wise quantization}
+   \State \hskip 1em {\bfseries for} $j \gets i, \dots, i+B-1$ {\bfseries do}
+   \State \hskip 2em {\bfseries if} using non-uniform grid {\bfseries then}
+   \State \hskip 3em $\hat{\mathbf W}_{k,j}\gets \mathrm{quant}_\textit{nu}(\mathbf W_{k,j}, \mathcal G_k)$ {\bfseries forall} $k \in \{0,\dots,r-1\}$ \Comment{quantize to non-uniform grid}
+   \State \hskip 2em {\bfseries else if} using affine grid {\bfseries then}
+   \State \hskip 3em $\hat{\mathbf W}_{k,j}\gets \mathrm{quant}_\textit{aff}(\mathbf W_{k,j}, S_k, Z_k)$ {\bfseries forall} $k \in \{0,\dots,r-1\}$ \Comment{quantize to affine grid}
+   \State \hskip 2em {\bfseries end if}
+   \State \hskip 2em $\mathbf E_{:,j-1} \gets \frac{\mathbf W_{:,j}-\hat{\mathbf W}_{:,j}}{\mathbf H^{-1}_{j,j}}$
+   \State \hskip 2em $\mathbf W_{:,j:(i+B)} \gets \mathbf W_{:,j:(i+B)} - \mathbf E_{:,j-i} \cdot \mathbf H^{-1}_{j,j:(i+B)}$
+   \State \hskip 1em {\bfseries end for}
+   \State \hskip 1em $\mathbf W_{:,(i+B):} \gets \mathbf W_{:,(i+B):} - \mathbf E\cdot \mathbf H^{-1}_{i:(i+B),(i+B):}$
+   \State {\bfseries end for}
+   \State {\bfseries return} $\hat{\mathbf{W}}$
+\end{algorithmic}
+\end{algorithm}
+}
+
+
+
+\section{Experiments}
+
+
+\input{tables/accu}
+
+In this section, we perform extensive experiments to validate the effectiveness and scalability of our proposed LeanQuant for quantizing LLMs against competitive baselines. We first introduce the baselines, models, evaluation metrics and datasets, and hardware used for the experiments. We then describe the experimental results and findings, and analyze the efficiency and scalability of our proposal. Finally, we perform ablative experiments to validate each component of proposed approach.
+
+\textbf{Baselines} We compare LeanQuant\textsubscript{\textit{aff}} against competitive affine quantization approaches AWQ \citep{awq}, GPTQ \citep{gptq}, and OmniQuant \citep{omniquant}, and LeanQuant\textsubscript{\textit{nu}} against the existing state-of-the-art non-uniform method SqueezeLLM \citep{sqllm}. For the baselines, we use the quantized models provided by their official repository where possible, and quantize the unavailable models using their official codebase and recommended hyperparameters. For all LeanQuant models, we use a small calibration set of 128 sequences of 2048 tokens from the C4 dataset \citep{c4} for computing the Hessian $\mathbf H$, and set $p=4$.
+
+\textbf{Models} We consider the following recent, popular LLMs for quantization: Llama 1/2/3 series models \citep{llama, llama2, llama3}, Mistral-7B-v0.1 \citep{mistral7b}, Mistral-Large-Instruct-2407 (123B) \citep{mistral_large}, and Llama-3.1-405B-Instruct \citep{llama3}.
+
+\textbf{Evaluation Metrics and Datasets} We evaluate quantized LLMs using the perplexity metric on the datasets WikiText2 \citep{wikitext2} and C4 \citep{c4}, and zero-shot accuracy on the benchmarks ARC \citep{arc}, LAMBADA \citep{lambada}, MMLU \citep{mmlu}, HellaSwag \citep{zellers2019hellaswag}, PIQA \citep{piqa}, and WinoGrande \citep{winogrande}.
+
+\textbf{Testbed Hardware} LeanQuant models are quantized using a machine quipped with an L40s-48GB GPU, an AMD EPYC 7R13 48-Core CPU, and 370GB of RAM. To fit Llama-3.1-405B-Instruct in RAM, which is around 800GB in size, we use a machine equipped with 2 Quadro RTX 8000 GPUs, an AMD EPYC 7742 64-Core CPU, and 1.48TB of RAM.
+\begin{table}[t]
+\aboverulesep=0.2ex % Solution part 1 of 3
+\belowrulesep=0.2ex % Solution part 1 of 3
+\caption{Zero-shot accuracy comparison of the quantized 123B Mistral-Large-Instruct-2407 model.}
+\label{tbl:mistral_large}
+\setlength\tabcolsep{3.2pt}
+\begin{center}
+\scriptsize
+\begin{tabular}{@{\extracolsep{3pt}}lll|cccccccc|c@{}}
+\toprule
+\multirow{2}{*}{Model}                       & \multirow{2}{*}{Method} & \multirow{2}{*}{Bits} & \multicolumn{2}{c}{Arc}         & \multicolumn{2}{c}{LAMBADA}     & \multicolumn{4}{c|}{MMLU}                                          & \multirow{2}{*}{Avg.} \\
+                                              \arrayrulecolor{black!50}\cline{4-5}\cline{6-7}\cline{8-11}\arrayrulecolor{black} &                         &                       & Easy           & Chg.            & Std.            & OpenAI         & STEM           & Human.     & Social         & Other          &                      \\
+                                              \midrule
+\multirow{2}{*}{Mistral-Large-Instruct-2407} & GPTQ                    & 4.00                  & 84.60          & \textbf{63.99} & 74.38          & 80.52          & 76.31          & 77.23          & \textbf{89.31} & 85.23          & 78.95                \\
+                                             &  \cellcolor{gray!16}LeanQuant\textsubscript{\textit{aff}}  & 4.00                  & \textbf{85.14} & \textbf{63.99} & \textbf{74.99} & \textbf{81.14} & \textbf{76.56} & \textbf{77.32} & 89.21          & \textbf{85.87} &  \cellcolor{gray!16}\textbf{79.28} \\
+                                             \bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+\begin{table}[t]
+\aboverulesep=0.2ex % Solution part 1 of 3
+\belowrulesep=0.2ex % Solution part 1 of 3
+\caption{Zero-shot accuracy comparison of the quantized Llama-3.1-405B-Instruct model.}
+\label{tbl:llama_405b}
+\setlength\tabcolsep{3pt}
+\begin{center}
+\small
+\begin{tabular}{llcr|cccc|c}
+\toprule
+Model & Method & Group Size & Bits & Arc-E  & Arc-C & LAMBADA-Std & PIQA  & Avg     \\
+\midrule
+\multirow{2}{*}{Llama-3.1-405B-Instruct} & GPTQ      & 128        & 4.25 & 88.21 & 65.10 & 76.96   & 82.75 & 78.26  \\
+& \cellcolor{gray!16}LeanQuant\textsubscript{\textit{aff}} & 128        & 4.25 & \textbf{88.34} & \textbf{65.70} & \textbf{77.86}   & \textbf{83.03} & \cellcolor{gray!16}\textbf{78.73} \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+\subsection{Main Results}
+
+ At the same bit width, LeanQuant achieves significantly better (lower) perplexity than GPTQ and AWQ, and performs on par with OmniQuant and SqueezeLLM. However, perplexity may not be a representative metric for evaluating the accuracy of quantized models. In terms of zero-shot accuracy on various benchmarks, LeanQuant\textsubscript{\textit{aff}} mostly outperforms GPTQ and OmniQuant, and LeanQuant\textsubscript{\textit{nu}} similarly performs better than SqueezeLLM in most cases. We highlight that LeanQuant\textsubscript{\textit{aff}} improves the average zero-shot accuracy on 11 tasks over OmniQuant by 17.18\% for 3-bit Llama-3-8B, and by 14.14\% for 3-bit Mistral-7B. Compared to GPTQ, LeanQuant\textsubscript{\textit{aff}} improves the average zero-shot accuracy by 18.38\% for 3-bit Llama-3-8B, and by 9.16\% for 3-bit Mistral-7B.
+
+\textbf{Effectiveness on Very Large LLMs} We quantize the 123B Mistral-Large-Instruct-2407 and the 405B Llama-3.1 model using LeanQuant\textsubscript{\textit{aff}} and GPTQ, and present their zero-shot accuracy in Table \ref{tbl:mistral_large} and \ref{tbl:llama_405b}, respectively. OmniQuant and SqueezeLLM fail to quantize to these models due to GPU out-of-memory errors. For Llama-3.1 405B, we use a smaller set of evaluation tasks due to the high inference costs. LeanQuant\textsubscript{\textit{aff}} models mostly outperforms GPTQ in zero-shot accuracy. We employ row-wise quantization for Mistral-Large and group-wise quantization (with size 128) for Llama-3.1. This showcases that our method is effective for both row-wise affine quantization and group-wise affine quantization.
+
+\subsection{Memory and Time Efficiency}
+
+We report the maximum GPU memory consumption of LeanQuant and the baselines during quantization on models of different sizes in Table \ref{tbl:ram}. LeanQuant is significantly more memory efficient than OmniQuant and SqueezeLLM: it successfully scales to 123B Mistral-Large using a single 48GB GPU, and to 405B Llama-3.1 models using two 48GB GPUs, while OmniQuant fails to quantize Llama-3-70B and SqueezeLLM fails to quantize Llama-3-8B on a single 48GB GPU. LeanQuant can quantize 7B/8B models in less than an hour, the 123B model in 4.2 hours, and the 405B model in 20.7 hours.
+
+\subsection{Ablation Study}
+\label{sec:ablation}
+
+ The sum of loss errors are computed as Equation \ref{eq:delta_epsilon}. Moreover, non-uniform LeanQuant generally achieves lower loss errors than affine LeanQuant, due to more degrees of freedom in the grid point placements, which also explains why LeanQuant\textsubscript{\textit{nu}} achieves higher accuracy than LeanQuant\textsubscript{\textit{aff}} on benchmarks in Table \ref{tbl:accu}.
+
+\textbf{Q2: Is LeanQuant sensitive to the hyperparameter $p$?} No, we found LeanQuant to be not very sensitive to $p$. LeanQuant works well with $p$ values of 3 or 4.
+
+ 
+
+\textbf{Q4: Does the fused GPU kernel for LeanQuant\textsubscript{\textit{aff}} accelerate quantization?} Yes, our fused kernel for learning affine grids accelerate the end-to-end quantization process by more than 50$\times$, as shown in Table \ref{tbl:kernel}, which enables LeanQuant to be scaled to very large models.
+
+\begin{figure}[t]
+\begin{center}
+\includegraphics[width=\textwidth]{figures/res_err_iclr.pdf}
+\end{center}
+\caption{Comparison of loss errors $\epsilon$, summed over each layer, for GPTQ and LeanQuant (affine and non-uniform) during iterative quantization.}
+\label{fig:loss_err}
+\end{figure}
+
+\begin{table}[!htb]
+    \setlength\tabcolsep{2pt}
+    \begin{minipage}{.48\linewidth}
+    \centering
+      \caption{Peak GPU memory consumption of different algorithms during 4-bit quantization. ``OOM'' indicates out of memory on a single 48GB GPU, except for Llama-3.1-405B where we use 2 48GB GPUs.}
+      \label{tbl:ram}
+      \scriptsize
+      \begin{tabular}{l|ccc}
+        \toprule
+        Model                & OmniQuant & SqueezeLLM & LeanQuant \\
+        \midrule
+        Llama-3-8B           & 25.3 GB   & OOM        & 7.9 GB    \\
+        Llama-3-70B          & OOM       & OOM        & 17.2 GB   \\
+        Mistral-Large (123B) & OOM       & OOM        & 33.0 GB   \\
+        Llama-3.1-405B       & OOM       & OOM        & 65.4 GB   \\
+        \bottomrule
+      \end{tabular}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{.48\linewidth}
+    \centering
+      \caption{Comparison of total time needed for quantizing Llama-3-8B with and without our fused kernel for loss-error-aware affine grid learning.}
+      \label{tbl:kernel}
+        \scriptsize
+        \begin{tabular}{ccc|c}
+        \toprule
+        Fused Kernel & Group Size & Bits & Quant. Time \\
+        \midrule
+        \xmark & - & 4.00 & 15.1 hrs \\
+        \cmark & - & 4.00 & 0.27 hrs \\
+        \midrule
+        \xmark & 128 & 4.25 & \textgreater 100 hrs \\
+        \cmark & 128 & 4.25 & 0.40 hrs \\
+        \bottomrule
+        \end{tabular}
+    \end{minipage}
+\end{table}
+
+
+
+\section{Related Works}
+
+
+\textbf{Iterative Loss-error-based Compression} Optimal Brain Damage \citep{obd} introduced a saliency-score-based iterative pruning algorithm for neural networks, and Optimal Brain Surgeon \citep{second_obs,obs} extended it to apply a weight update to compensate for the error introduced in each iteration. These methods inspired a number of works on model pruning \citep{dynamic_surgery,woodfisher,cbs} and weight quantization \citep{brecq,obq,gptq}.
+
+\textbf{Efficient LLM Inference} LLM inference is computationally and memory demanding, and existing works accelerate inference and reduce memory requirements through post-training weight quantization \citep{llmint8,awq,gptq,quip,sqllm,omniquant,aqlm,quipsharp}, pruning \citep{sparsegpt,slicegpt}, weight-activation quantization \citep{smoothquant}, offloading \cite{flexgen}, etc.
+
+
+\section{Conclusion}
+
+
+In this work, we propose LeanQuant, an accurate, versatile, and scalable quantization method for LLMs. Motivated by the finding that the min-max affine grid causes large errors in the network's task loss in iterative loss-error-based methods, we propose to learn loss-error-aware grids to enable more accurate quantized models, and design fused kernels for efficient and scalable quantization. Our method generalizes to multiple quantization formats to enable greater accessibility. Extensive empirical evaluations reveal that our quantized models compares favorably against competitive baselines in accuracy, and can scale to Llama-3.1 405B, one of the largest open-source LLM to date.
+
+
+
+
+
+
+

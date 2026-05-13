@@ -1,0 +1,300 @@
+\title{cryoSPHERE: Single-Particle HEterogeneous REconstruction from cryo EM}
+
+\begin{abstract}
+The three-dimensional structure of a protein plays a key role in determining its function. Methods like AlphaFold have revolutionized protein structure prediction based only on the amino-acid sequence. However, proteins often appear in multiple different conformations, and it is highly relevant to resolve the full conformational distribution.
+Single-particle cryo-electron microscopy (cryo EM) is a powerful tool for capturing a large number of images of a given protein, frequently in different conformations (referred to as \textit{particles}). The images are, however, very noisy projections of the protein, %and recovering the full distribution over conformations is extremely challenging. 
+and traditional methods for cryo EM reconstruction are limited to recovering a single, or a few, conformations.
+In this paper, we introduce cryoSPHERE, a deep learning method that takes as input a nominal protein structure, e.g. from AlphaFold, learns how to divide it into segments, and how to move these as approximately rigid bodies to fit the different conformations present in the cryo EM dataset. This formulation is shown to provide enough constraints to recover meaningful reconstructions of single protein structures. This is illustrated in three examples where we show consistent improvements over the current state-of-the-art for heterogeneous reconstruction.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Single-particle cryo-electron microscopy (cryo EM) is a powerful technique for determining the three-dimensional structure of biological macromolecules, including proteins. In a cryo EM experiment, millions of copies of the same protein are first frozen in a thin layer of vitreous ice and then imaged using an electron microscope. This yields a micrograph: a noisy image containing 2D projections of individual proteins. The  protein projections are then located on this micrograph and cut out so that  an experiment typically yields $10^4$ to $10^7$  images of size $\Npix\times \Npix$ of individual proteins, referred to as \textit{particles}. Our goal is to reconstruct the possible structures of the proteins given these images.
+
+Frequently, proteins are conformationally heterogeneous and each copy represents a different structure. Conventionally, this information has been discarded, and all of the sampled structures were assumed to be in only one or a few conformations (\emph{homogeneous} reconstruction). Here, we would like to recover all of the structures in a   \emph{heterogeneous} reconstruction. 
+
+Structure reconstruction from cryo EM presents a number of  challenges. Firstly, each image shows a particle in a different, unknown orientation. Secondly, because of the way the electrons interact with the protein, the spectrum of the images is flipped and reduced. Mathematically, this corresponds to a convolution of each individual image with the Point Spread Function (PSF). Thirdly, the images typically have a very low signal-to-noise ratio (SNR), usually around $0.1$, see e.g. \citet{baxter_determination_2009}.
+
+For all these reasons, it is very challenging to perform \textit{de novo} cryo EM reconstruction. Standard methods, produce electron densities averaged over many, if not all conformations \cite{scheres_relion_2012,punjani_cryosparc_2017}, performing discrete heterogeneous reconstruction. More recent methods attempt to extract continuous conformational heterogeneity, e.g. by imposing constraints on the problem through an underlying structure deformed to fit the different conformations present in the dataset, see e.g \citet{rosenbaum_inferring_2021, zhong_exploring_2021, li_cryostar_2023}. AlphaFold \citep{jumper_highly_2021} and RosettaFold \citep{baek_accurate_2021} can provide such a structure based on the primary sequence of the protein only. In spite of this strong prior, it is still difficult to recover meaningful conformations. The amount of noise and the fact that we observe only 2D projections creates local minima that are difficult to escape \citep{zhong_exploring_2021, rosenbaum_inferring_2021}, leading to unrealistic conformations.
+To remedy this, we root our method in the observation that different conformations can often be explained by large scale movements of domains of the protein \citep{mardt_deep_2022}. Specifically, we develop a variational auto-encoder (VAE) \citep{kingma_auto-encoding_2014} that, from a nominal structure and a set of cryo EM images:
+\begin{itemize}
+    \color{black}{\item Learns how to divide the amino-acid chain into segments, given a user defined maximum number of segments; see Figure~\ref{fig:150k_mask}.
+    The nominal structure can for instance be obtained by AlphaFold \citep{jumper_highly_2021}.}
+    \color{black}{\item For each image, learns approximately rigid transformations of the identified segments of the nominal structure, which effectively allows us to recover different conformations on an image-by-image (single particle) basis.}
+\end{itemize}
+These two steps happen concurrently, and the model is end-to-end differentiable.
+The model is illustrated in Figure~\ref{fig:network}.
+
+\textcolor{black}{Note that what we call a segment is conceptually different from a domain in the structural biology sense. The domains of a protein play a pivotal role in diverse functions, engaging in interactions with other proteins, DNA/RNA, or ligand, while also serving as catalytic sites that contribute significantly to the overall functionality of the protein, see e.g. \citet{schulz_principles_1979, nelson_lehninger_2017}.  By comparison, the segments we learn do not necessarily have a biological function. However, while not strictly necessary for the function of the method, experiments in Section~\ref{sec:experiments} show that our VAE often recovered the actual domains corresponding to different conformations.}
+
+\begin{figure*}[ht]
+    \centering
+    \includegraphics[width=0.8\linewidth]{figures/VAEFlow2.pdf}
+    \caption{Flow chart of our network. The learnable parts of the model are the encoder, the decoder and the Gaussian mixture. Note that even though the transformations predicted by the decoder are on a per image basis, that is not the case of the Gaussian mixture, which is shared across all particles.}
+    \label{fig:network}
+\end{figure*}
+
+
+
+\section{Background}
+
+
+\subsection{Notations and problem formulation}
+In what follows, $S = \{r_{i}\}_{i=1,\dots, \Nres}$ denotes a protein made of a number $\Nres\in \N^\star$ of residues $r_i$. Each residue is itself a set of atoms: $r_i =\{a_k\}_{k=1,\dots, A_i}$ where $A_i\in \N^\star$ is the number of atoms present in residue $i$. We can equivalently define the structure $S = \{a_{k}\}_{k=1,\dots, A_{\mathrm{total}}}$ in terms of its atoms, where $A_{\mathrm{total}}\in\N^\star$ is the total number of atoms in the structure. We denote by $a_{k}=(x_k, y_k, z_k, \eta_k)^T\in\R^3\times\{C_\alpha, C_\beta, N\}$ the coordinates and atom type of $a_k$ for $k\in\{1, \dots, A_{\mathrm{total}}\}$.
+This means that in this paper, we limit ourselves to the backbone of the protein: we consider only the $C_{\alpha},C_{\beta}$ and $N$ atoms. 
+
+The electron density map of a structure $S$, also called a volume, is a function $V_{S}:\R^{3}\rightarrow \R$, where $V_{S}(x)$ represents the probability density function of an electron of $S$ being present, evaluated at $x\in\R^{3}$. That is, if $B\subseteq\R^3$, the probability that the structure $S$ has an electron in $B$ is given by $\int_B V_{S}(x) \mathrm{d}x$.
+
+Assume we have a set of 2D images $\{I_i\}_{i=1}^{N}$ of size $\Npix \times\Npix$, representing 2D projections of different copies of the same protein in different conformations. Traditionally, the goal of cryo EM heterogeneous reconstruction has been to recover, for each image $i$, the electron density map $V_{i}$ corresponding to the underlying conformation present in image $i$. See Subsection \ref{subsec:related_works} for a review these methods.
+However, following recent works, e.g., \citet{rosenbaum_inferring_2021, zhong_exploring_2021}, we aim at recovering, for each image $i$, the underlying structure $S_{i}$ explaining the image. That is, we try to recover the precise position in $\R^3$ of each residue.
+
+\textcolor{black}{Since the different conformations of large proteins can often be explained by large scale movements of its domains \citep{mardt_deep_2022}, our method learns to decompose the amino-acid chain of the protein into segments and, for each image $I_{i}$,  to rigidly move the learnt segments of a base structure $S_0$ to match the conformation present in that image, as explained in Section \ref{sec:intro}.}
+
+AlphaFold \cite{jumper_highly_2021} and RosettaFold
+ \cite{baek_accurate_2021} can provide such a structure $S_0$, based on the amino-acid sequence of the protein at hand. In Section \ref{sec:experiments}, we further fit the AlphaFold predicted structure into a volume recovered by a custom backprojection algorithm provided by \citet{zhong_reconstructing_2020}.
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.4\columnwidth]{figures/experiments/phy_10k/mask_10k.png}%
+    \includegraphics[width=0.6\columnwidth]{mask/mixture.png}
+    \caption{Example of segments recovered with a Gaussian mixture of 6 components.}
+    \label{fig:150k_mask}
+\end{figure}
+
+\subsection{Related work}\label{subsec:related_works}
+Two of the most popular methods for cryo EM reconstruction, which are \textit{not} based on deep learning, are
+RELION \citep{scheres_relion_2012} and cryoSPARC \cite{punjani_cryosparc_2017}. Both methods perform volume reconstruction, hypothesize that $k$ conformations are present in the dataset and perform maximum a posteriori estimation over the $k$ density maps, thus performing discrete heterogeneous reconstruction. Both of these algorithms operate in Fourier space using an expectation-maximization algorithm \cite{dempster_maximum_1977} and are non-amortized: the poses are learnt for each image, and adding new images to the dataset would require a new run of the algorithm. Other approaches perform continuous heterogeneous reconstruction. For example, 3DVA \citep{punjani_3d_2021-1} uses a probabilistic principal component analysis model to learn a latent space while E2GMM \citep{chen_deep_2021} parameterizes the volume as a mixture of $N$ Gaussian p.d.f and learns their mean conditionally on an input image.%The authors take a Bayesian stance and treat the poses and the assignment of the images to one of the $k$ conformations as latent variables. They perform maximum a posteriori estimation over the $k$ density maps of the $k$ conformations as well as the noise variance and prior variance using an EM algorithm.
+
+Another class of methods involve deep learning and typically performs continuous heterogeneous reconstruction using a VAE architecture. Some of them attempt to reconstruct a density map, while others target the atomic structures -- or a backbone -- directly. For example, cryoDRGN \citep{zhong_reconstructing_2020, zhong_cryodrgn2_2021} and CryoAI \citep{levy_cryoai_2022} use a VAE acting on Fourier space to learn a latent space and a mapping that associates a 3D density map with each latent variable. They perform non-amortized and amortized inference over the poses, respectively. Other methods are defined in the image space, e.g. 3DFlex \citep{punjani_3d_2021} and cryoPoseNet \citep{nashed_cryoposenet_2021}. They both perform non-amortized inference over the poses. These methods either learn, for a given image $I_i$, $\{ V_{i}(x_k)\}$ the values at a set of $\Npix^3$ fixed 3D coordinates $\{x_k\}$, representing the volume on a grid (\emph{explicit} parameterization), or %they learn 
+an actual function $\hat{V}_i:\R^3\rightarrow\R$ in the form of a neural network that can be queried at chosen coordinates (\emph{implicit} parameterization). The implicit parameterization requires smaller networks but needs an expensive $\Npix^2$ and $\Npix^3$ evaluation for image and volume generation, respectively.
+
+\begin{figure*}[t]
+\centering
+    \includegraphics[scale=0.3]{figures/experiments/toy_data_set/distribution_distance.png}%
+    \includegraphics[scale=0.3]{figures/experiments/toy_data_set/true_vs_recovered_distances.png}%
+    \includegraphics[scale=0.25]{figures/experiments/toy_data_set/big_phy.png}%
+    \hspace{0.3cm}
+    \includegraphics[scale=0.25]{figures/experiments/toy_data_set/one_mode.png}%
+    \hspace{0.3cm} \includegraphics[scale=0.25]{figures/experiments/toy_data_set/second_mode.png}
+\caption{Toy dataset. Leftmost: Histograms of the predicted and true angles of rotation in radians. The true angles are in green. The recovered distances are in blue. Left: Predicted against true angles in Ångström. The black line represent $x=y$. Middle: Base structure with the two domains, also used to generate the images. The domain in blue is rotated according to the axis $(0, 1, 0)$ with angles of rotations sampled from the green distribution on the leftmost figure. Note that the segments predicted by cryoSPHERE exactly match the two domains. The fourth segment is in blue and corresponds to the last 157 residues of chain B, matching exactly the ground truth domain. Right: First mode structure. Rightmost: Second mode structure.}
+\label{fig:toy_histo}
+\end{figure*}
+
+Other deep learning methods attempt to directly reconstruct structures instead of volumes and share a common process: starting from a plausible base structure, obtained with e.g. AlphaFold \citep{jumper_highly_2021}, for each image, they move each residue of the base structure to fit the conformation present in that specific image. These methods differ on how they parameterize the structure and in the prior they impose on the deformed structure or the motion of the residues. For example AtomVAE \citep{rosenbaum_inferring_2021} considers only residues and penalizes the distances between two subsequent residues that deviate too much from an expected value. CryoFold \citep{zhong_exploring_2021} considers the residue centers and their side-chain and also imposes a loss on the distances between subsequent residues and the distances between the residue centers and their side-chain. Unfortunately, due to the high level of noise and the fact that we observe only projections of the structures, these "per-residue transformation" methods tend to be stuck in local minima, \textcolor{black}{ yielding unrealistic conformations unless the base structure is taken from the distribution of conformations present in the images \cite{zhong_exploring_2021}, limiting their applicability to real datasets. Even though AtomVAE \citep{rosenbaum_inferring_2021} could roughly approximate the distribution of states of the protein, it was not able to recover the conformation given a specific image. In addition, to our knowledge, the code for these two methods is not available and non-trivial to reimplement. This prevents a comparison of our results with AtomVAE and CryoFold.}\textcolor{black}{ To reduce the bias that the base structure brings, \cite{schwab_dynamight_2023} recently proposed to fit pseudo-atoms in a consensus map with a neural network directly. Similar to our work, several other methods constrain the atomic model to rigid body motions. For example \cite{chen_integrating_2023}, starting from a base structure $S_{\mathrm{big}}$ fitted in the consensus map (called the big GMM), learn a representation structure $S_{\mathrm{small}}$ of this consensus map using a smaller number using the method described in \cite{schwab_dynamight_2023}. They subsequently learn a translation on each residue $S_{\mathrm{small}}$, that contribute to translate the residues of $S_{\mathrm{big}}$ weighted by how close they are from the residues of $S_{\mathrm{small}}$. This can be thought of as our segmentation GMM, except that it takes places in the 3D space and only the centers of the Gausian modes can be learnt, while ours is fitted on the residue indexes and all of the GMM parameters are learnable. In addition, they do not use this segmentation to perform rigid body motions. Instead, in a subsequent step, the user is in charge of identifying the rigidly moving segments of the protein by applying one or several masks to the protein. This is in contrast to our method where the segmentation used to perform rigid body motion is learnt by the network trying to move the domains to fit the images. Finally, this method involves a sequence of optimization problem, with potentially different architecture, while ours is end-to-end differentiable. Using the method in \cite{schwab_dynamight_2023}, \citet{chen_improving_2024} develop a focused refinement on patches of the GMM representation of the protein. These patches are learnt using k-means on the location of residues and do not depend on the different conformations of the data set. This in contrast to cryoSPHERE which learns the segments of the protein are tightly linked to the change of conformation.} Concurrently to our work, \citet{li_cryostar_2023} developed CryoSTAR which acts on each residue and enforces local rigidity of the motion of the protein by imposing a similarity loss between the base structure and the deformed structure. 
+The interested reader can see \citet{donnat_deep_2022} for an in-depth review of deep learning methods for cryo EM reconstruction.
+
+\textcolor{black}{The reconstruction methods relying on an atomic model, such as e.g cryoSTAR, DynaMight or cryoSPHERE offer the possibility to the user to provide prior information via this atomic model. They also offer the possibility of deforming the protein according to chemical force fields. This is not the case of the methods performing volume reconstruction without such an atomic model.}
+
+
+
+\section{Method -- cryoSPHERE}
+
+In this section, we present our method for single-particle heterogeneous reconstruction, denoted cryoSPHERE. The method focuses on structure instead of volume reconstruction. It differs from the previous works along this line in the way the movements of the residues are constrained: instead of deforming the base structure on a residue level and then imposing a loss on the reconstructed structure, it moves parts of the protein approximately rigidly by construction.
+
+
+We use a typical VAE architecture, see Figure \ref{fig:network} for a depiction of how the information flows in our network. We map each image to a latent variable by a stochastic encoder. The latent variable is then passed to a decoder which outputs a transformation (rotation and translation) per segment. %This mapping is called the decoder. 
+Based on these transformations and segment decomposition, the underlying structure $S_0$ is deformed and then turned into a volume. Finally, the volume is projected into a 2D image, according to its pose that can be estimated using existing software, e.g. \cite{scheres_relion_2012, punjani_cryosparc_2017}. Finally, this image is %CTF corrupted 
+convolved with the PSF
+to give the reconstructed image that is compared to the input image. This completes the forward pass.
+In the backward pass, the parameters of the encoder, decoder and Gaussian mixture are updated with a gradient descent based on the
+evidence lower bound (see Section~\ref{subsec:vae}). 
+In the following, we describe  details of our network: the encoder and decoder, the segment decomposition, how to turn a structure into a 2D projection of its electron density, and an efficient way to compare the true and predicted images.
+\subsection{Image formation model}
+To compute the 2D projection of the protein structure $S$, we first estimate its 3D electron density map $V$:
+\begin{equation}\label{eq:structToMap}
+V_S(r) \eqdef \sum_{a\in S} \dfrac{1}{\sqrt{2\pi}\sigma}\exp\left({-\dfrac{||r - a||^2}{2\sigma^{2}}}\right)
+\end{equation}
+where $r\in\R^{3}$ and $\sigma$ is a positive real number. In this definition the protein's electron density is approximated as the sum of a Gaussian p.d.f centered on each atom. We use a fixed value of $\sigma=1$, following \citet{rosenbaum_inferring_2021}.
+
+From these density maps, we then compute an image projection $I\in\R^{\Npix\times \Npix}$ as:
+\begin{equation}\label{eq:imageFormationStructure}
+I (R, t, S)(r_x,r_y) = g * \int_{\R} V_{R S + t}(r)dr_z,
+\end{equation}
+where %$\eta\sim\mathcal{N}(0, \sigma_\mathrm{noise}^2)$ is a Gaussian noise term, 
+$(r_x, r_y)\in\R^{2}$ are the coordinates of a pixel, $r_z\in\R$ is the coordinate along the $z$ axis, $R\in SO(3)$ is a rotation matrix and $t\in\R^{3}$ is a translation vector. The abuse of notation $R S + t$ means that every atom of $S$ is rotated according to $R$ and then translated according to $t$. The image is finally convolved with the point spread function (PSF) $g$, which in Fourier space is the contrast transfer function (CTF), see \citet{vulovic_image_2013}.
+
+In practice, we avoid approximating the integral in Equation~\eqref{eq:imageFormationStructure}. The density map, being a sum of Gaussian p.d.f, allows for an exact calculation by integrating over the last marginal. This significantly reduces the computing time.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[scale=0.25]{figures/experiments/spike/spike_distrib.png}
+    \includegraphics[scale=0.25]{figures/experiments/spike/fsc_curves.png}
+    \includegraphics[scale=0.2]{figures/experiments/spike/close.png}
+    \includegraphics[scale=0.2]{figures/experiments/spike/open.png}
+    \includegraphics[scale=0.2]{figures/experiments/spike/angles_measured.png}
+    \caption{Spike dataset. Left: Predicted angles. Middle left: FSC curves for the open and close conformations. Middle: Close conformation. Middle right: Open conformation. Right: Definition of the angles.}
+    \label{fig:spike}
+\end{figure*}
+
+\subsection{Maximum likelihood with variational inference}\label{subsec:vae}
+To learn a distribution of the different conformations, we hypothesize that the conformation seen in image $I_i$ depends on a latent variable $z_i\in\R^{L}$, with prior $p(z_i)$.  
+Let $f_{\theta}(S_0,z)$ be a function which, for a given base structure $S_0$ and latent variable $z$, outputs a new transformed structure $S$. This function depends on a set of learnable parameters $\theta$. 
+Then, the conditional likelihood of an image $I^{\star}\in\R^{\Npix\times\Npix}$ with a pose given by a rotation matrix $R$ and a translation vector $t$ is modeled as $p_{\theta}(I^{\star} | R, t, S_0, z) = \mathcal{N}( I^{\star}|I(R, t, f_{\theta}(S_{0}, z)), \sigma_\mathrm{noise}^{2})$, where 
+$\sigma_\mathrm{noise}^{2}$ is the variance of the observation noise.
+The marginal likelihood is thus given by
+\begin{equation}
+\label{eq:marginalLikelihood}
+p_{\theta}(I^{\star} | R, t, S_0) = \int p_{\theta}(I^{\star} | R, t, S_0, z) p(z)dz.
+\end{equation}
+\textcolor{black}{In practice, the pose $(R,t)$ of a given image is unknown. However, following similar works \cite{zhong_exploring_2021, li_cryostar_2023}, we suppose that we can estimate $R$ and $t$ to sufficient accuracy using off-the-shelf methods \cite{scheres_relion_2012, punjani_cryosparc_2017}.
+}
+
+Directly maximizing the likelihood (\ref{eq:marginalLikelihood}) is infeasible because one needs to marginalize over the latent variable. For this reason, we adopt the VAE framework, conducting variational inference on $p_{\theta}(z | I^\star)\propto p_{\theta}(I^\star | z) p(z)$, and simultaneously performing maximum likelihood estimation on the parameters $\theta$.
+
+Let $q_{\psi}(z|I^{\star})$ denote an approximate posterior distribution over the latent variables. We can then maximize the evidence lower-bound (ELBO):
+\begin{align}\label{eq:lowerbound}
+\mathcal{L}(\theta, \psi) = %;I^{\star}) = 
+\E_{q_{\psi}}[\log p_{\theta}(I^{\star} | z)]  - \DKL(q_{\psi}(z|I^{\star}) || p(z))
+\end{align}
+which lower bounds the log-likelihood $\log p_{\theta}(I^{\star})$. Here $\DKL$ denotes the Kullback-Leibler (KL) divergence. In this framework $f_{\theta}$ is called the decoder and $q_{\psi}(z|I^\star)$ the encoder.
+\subsection{Segment decomposition}
+We fix a maximum number of segments $\Ndomains\in\{1, \dots, \Nres\}$ and we represent the decomposition of the protein by a stochastic matrix $G\in\R^{\Nres\times \Ndomains}$. The rows of $G$ represent "how much of each residue belongs to each segment", and our objective is to ensure that each residue mostly belongs to one segment, that is:
+\begin{equation}\label{eq:conditionMask}
+\begin{split}
+\forall i \in\{1,\dots, \Nres\}, & \;\exists m^\star \in\{1,\dots, \Ndomains\} \\
+\mathrm{s.t} & \sum_{m\neq m^\star} G_{im} \ll 1
+\end{split}
+\end{equation}
+We also aim for the segments to respect the sequential structure of the amino acid chain, and the model to be end-to-end differentiable. \textcolor{black}{Without end-to-end differentiability, we could not apply the reparameterization trick and we would have to resort on Monte-Carlo estimation of the gradient of the segments, which has a higher variance, see e.g \cite{mohamed_monte_2019}}.
+
+To meet these criteria, we fit a Gaussian mixture model (GMM) %\citep{hastie_elements_2009} 
+with $\Ndomains$ components on the real line supporting the residue indices, \textcolor{black}{that is, on} $\R$. Each component $m$ has a mean $\mu_m$, standard deviation $\sigma_m$ and a softmax weight $\alpha_m$. The $\{\alpha_m\}$ are passed into a softmax to obtain the weights $\{\pi_m \}$ of the GMM, ensuring they are positive and summing to one.  
+We define the probability that a residue $i$ belongs to segment $m$ as the probability that the index $i$ belongs to mode $m$, annealed by a temperature $\tau\in\R^{+\star}$:
+\begin{equation}
+G_{im} \eqdef \dfrac{\{\phi(i|\mu_m, \sigma^{2}_m)\pi_m)\}^{\tau}}{\sum_{k=1}^{\Ndomains}\{\phi(i|\mu_k, \sigma^{2}_k)\pi_k\}^{\tau}}
+\end{equation}
+where $\phi(x|\mu, \sigma^{2})$ is the \textcolor{black}{unidimensional} Gaussian probability density function with mean $\mu$ and variance $\sigma^{2}$ and $\tau$ is a fixed hyperparameter. If $\tau$ is sufficiently large, we can expect condition (\ref{eq:conditionMask}) to be verified. See Figure~\ref{fig:150k_mask} for an example of a segment decomposition using a Gaussian mixture.
+
+In this "soft" decomposition of the protein, each residue can belong to more than one segment, allowing for smooth deformations. In addition, the differentiable  architecture is amenable to gradient descent methods, and a well chosen $\tau$ can approximate a "hard" decomposition of the protein. We set $\tau=20$ in the experiment section. \textcolor{black}{In our experience, this segmentation procedure is very robust to different initialization and converge in only a few epochs.}
+
+\subsection{Decoder architecture}
+The decoder describes the distribution of the images given the latent variables. The latent variables include:
+\begin{enumerate}
+\item One latent variable $z_i\in\R^L$ per image, parameterizing the conformation.
+\item The global parameters $\{\mu_m , \sigma_m , \alpha_m\}_{m=1,\dots , \Ndomains}$ of the GMM describing the segment decomposition.
+\end{enumerate}
+
+Given these latent variables and a base structure $S_0$, we parameterize the decoder $f_{\theta}$ in three steps. 
+
+First, a neural network with parameters $\theta$ maps $z_{i}\in\R^L$ to one 3D translation per segment $\{\vec{t}_m\}_{m=1, \dots, \Ndomains}$ and one rotation per segment. The rotation is represented by a unit quaternion $\{\vec{q}_m\}_{m=1, \dots, \Ndomains}$ \cite{vicci_quaternions_2001}, which can be equivalently described as a set of axes of rotation $\{\vec{\phi}_m\}_{m=1, \dots, \Ndomains}$ and corresponding angles of rotations $\{\delta_m \}_{m=1, \dots, \Ndomains}$.
+
+Second, given the parameters of the GMM, we can compute the matrix $G$. 
+Finally, for each residue $i$ of $S_0$, we update the coordinates of all its atoms $\{a_{ik}\}_{k=1,\dots,A_i}$:
+\begin{enumerate}
+\item First, $a_{ik}$ is successively rotated around the axis $\vec{\phi}_m$ with an angle $G_{im}\delta_m$ for $m\in\{1,\dots, \Ndomains\}$ to obtain updated coordinates $a_{ik}^{\prime}$.
+\item Second, it is translated according to: \begin{equation}    
+a_{ik}^{\prime\prime} = a_{ik}^{\prime} + \sum_{j=m}^{N} G_{im} \vec{t}_{m}.
+\end{equation}
+\end{enumerate}
+This way, the rotation angles and translations for a residue incorporate contributions from all segments, proportionally on how much they belong to the segments. 
+If condition (\ref{eq:conditionMask}) is met, a roughly rigid motion for each segment can be expected.
+\subsection{Encoder and priors}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.5\columnwidth]{figures/experiments/phy_flexible_20/distribution_distance.png}%
+    \includegraphics[width=0.5\columnwidth]{figures/experiments/phy_flexible_20/true_vs_recovered_distances.png}
+    \caption{MD dataset. Left: Histograms of the distances of the two upper domains. The true distances are in green. The recovered distances are in blue. Right: Predicted against true distances in Ångström. The black line represent $x=y$.}
+    \label{fig:150k_histo}
+\end{figure}
+
+We follow the classical variational-autoencoder framework. The distribution $q_{\psi}(y|I^\star)$ is given by a normal distribution $\mathcal{N}(\mu(I^\star), \mathrm{diag}(\sigma^{2}(I^\star)))$ where $\mu\in\R^L$ and $\sigma\in\R_{+}^L$ are generated by a neural network with parameters $\psi$, taking an image $I^\star$ as input.
+Additionaly, the approximate posterior distribution on the parameters of the GMM is chosen to be Gaussian and independent of the input image:
+\begin{align*}
+\mu_m &\sim \mathcal{N}(\nu_{\mu_m}, \beta^{2}_{\mu_m}) \\
+\sigma_m &\sim \mathcal{N}(\nu_{\sigma_m}, \beta^{2}_{\sigma_m}) \\
+\alpha_m &\sim \mathcal{N}(\nu_{\alpha_m}, \beta^{2}_{\alpha_m})
+\end{align*}
+where $\{\nu_{\mu_m}, \beta_{\mu_m}, \nu_{\sigma_m}, \beta_{\sigma_m}, \nu_{\alpha_m}, \beta_{\alpha_m}\}_{m=1,\dots, \Ndomains}$ are parameters that are directly optimized and in practice we feed $\sigma_m$ to an ELU+1 layer in order to avoid a negative or null standard deviation.
+
+Finally, we assign standard Gaussian priors to both the local latent variable $z_i$
+\(
+z_i \sim \mathcal{N}(0, I_{L}),
+\)
+and the global GMM parameters $\{\mu_m, \sigma_m, \alpha_m, \}_{m=1,\dots, \Ndomains}$.
+
+Note that applying the reparameterization trick \citep{kingma_auto-encoding_2014} is straightforward for a Gaussian distribution. Calculating the KL-divergence between two Gaussian distributions as in Equation~\eqref{eq:lowerbound}, is also straightforward.
+
+
+
+\section{Experiments}
+
+\textcolor{black}{In this section, we test cryoSPHERE on different datasets and compare the results to cryoDRGN \cite{zhong_reconstructing_2020}. CryoDRGN is a state-of-the-art method for continuous heterogeneous reconstruction, in which the refinement occurs at the level of electron densities.} To synthesize data for all experiments, we applied CTF corruption to the images and add Gaussian noise to achieve $\mathrm{SNR}\approx 0.1$. Furthermore, we make the assumption that we know the exact poses. However, since we use a structure $S_0$, which is different from the structures used to generate the datasets, these poses can only be an approximation. This will not be the case of cryoDRGN, for which these poses will indeed be exact, as this method does not use a base structure. Consequently, in this context, the comparison may introduce a bias %against our method. 
+in favour of cryoDRGN.
+
+\subsection{Toy dataset: a continuous motion.}\label{toy_dataset}
+For an initial assessment of cryoSPHERE, we examine a simulated dataset based on 
+a bacterial phytochrome with UniProt \cite{the_uniprot_consortium_uniprot_2021} entry Q9RZA4. This protein is a dimer, with 755 residues per chain. To simulate a continuous heterogeneous set of images, we predicted the structure with AlphaFold multimer \cite{evans_protein_2021} and divided the protein into two domains. The first one consists of the full chain A and 598 residues of chain B, 1353 residues in total. The second domain comprises the last 157 residues of the chain B, see Figure \ref{fig:toy_histo}. We then sample $10^4$ rotation angles from a two-components Gaussian mixture. Each conformation is generated by rotating the second domain according to the axis $(0, 1, 0)$ and one of the sampled rotation angles. This yields $10^4$ different conformations. Finally, we uniformly sample $15$ different poses for each structure, yielding a total of   $150$k images.
+
+Testing the segment decomposition, we then run cryoSPHERE by requesting division into $\Ndomains=4$. The program learnt a first and third segment with $0$ residues, a second segment with $1353$ residues and a fourth segment with $157$ residues (Figure \ref{fig:toy_histo}). Thus, cryoSPHERE learnt segments according to the ground truth.
+
+Moreover, Figure \ref{fig:toy_histo} shows that most of the predicted angles of rotation for the fourth segment are in excellent agreement with the ground truth structural changes. However,  approximately $12$ \% of the dataset is predicted as belonging to the wrong mode. The same figure shows that we recover the right axis of rotation. We observe that cryoSPHERE has recovered the circular motion: the greater the latent mean, the lower the predicted angle, with a quick transition from one mode to the other. This indicates that cryoSPHERE is able to recover the structure of single-particles from cryo EM data. 
+\subsection{A discrete conformation dataset: the SARS-CoV-2 spike protein}\label{append:spike}
+We now test cryoSPHERE on a dataset comprising two discrete conformations of the SARS-CoV-2 spike protein: a close conformation with PDB entry 6ZP5 and an open conformation with PDB entry 6ZP7, see \citet{melero_continuous_2020}. We generate $150$k images of size $\Npix=300$ with uniformly sampled poses and neglected translations, with seventy percent corresponding to the close conformation and thirty percent to the open one. 
+
+Prior to running cryoSPHERE, we obtain a base structure by first running the multimer version of AlphaFold \cite{evans_protein_2021} on the amino acid sequence of the spike protein, selecting the best (according to AlphaFold) structures. Second, we utilize a custom backprojection algorithm provided by \cite{zhong_reconstructing_2020} to get a homogeneous reconstruction. This yields a volume with low resolution in the mobile parts but decent resolution in the less mobile ones. To reduce a potential bias introduced by using an AlphaFold structure, we subsequently fit this structure into the volume, initially performing rigid-body fitting in ChimeraX \cite{meng_ucsf_2023} and then using ISOLDE \cite{croll_isolde_2018}.
+Subsequently, we run cryoSPHERE with this fitted structure as the base structure for 48 hours on a single GPU, totalling 174 epochs.
+
+We define the two conformations in terms of the angle between two domains, see Figure \ref{fig:spike}. The same figure demonstrates that we recover the angles within roughly $1$ degree. After clustering the structures predicted by cryoSPHERE based on their angle defined in Figure \ref{fig:spike}, only $4$ of them get predicted to be in the wrong conformation. Additionally, by turning the structures predicted by cryoSPHERE into volumes using our operator (\ref{eq:structToMap}), we observe excellent agreement with the ground truth volumes, as shown by the Fourier shell correlation (FSC) curves \cite{klaholz_structure_2015}. This illustrates that cryoSPHERE can effectively recover discrete conformational disorder. 
+
+\subsection{Molecular dynamics dataset: bacterial phytochrome.}\label{subsec:MD}
+We now test cryoSPHERE with a more difficult dataset. This time, we simulate a continuous motion of a bacterial phytochrome, with PDB entry 4Q0J \cite{burgie_crystallographic_2014}. This dimer has 503 residues per chain. We define two upper domains corresponding to the residues 321-502 from both chain A and B. We take $10^4$ structures along the trajectory and sample $15$ poses uniformly for each structure.
+\begin{figure*}[t]
+    \centering
+    \includegraphics[scale=0.14]{figures/experiments/phy_flexible_20/mask_20_flexible.png}
+    \hspace{0.3cm}
+    \includegraphics[scale=0.15]{figures/experiments/phy_flexible_20/10.png}
+    \hspace{0.3cm}
+    \includegraphics[scale=0.15]{figures/experiments/phy_flexible_20/6000.png}
+    \hspace{0.3cm}
+    \includegraphics[scale=0.15]{figures/experiments/phy_flexible_20/10000.png}
+    \hspace{0.3cm}
+    \includegraphics[scale=0.25]{figures/experiments/phy_flexible_20/fsc_curves.png}
+    \caption{MD dataset. Left: Recovered segments on the fitted AlphaFold structure. The colors denotes different contiguous domains: if two segments share the same color, it does not mean their residues belong to each others. Middle left to middle right: cryoSPHERE predicted structures in green, corresponding ground truth in blue. Right: Fourier shell correlation curves. The mean across structures for cryoSPHERE is in plain blue. Dotted blue represents the mean $\pm$ one standard deviation. The red, plain line represents the mean for cryoDRGN across volumes, with the dotted red line representing the mean $\pm$ one standard deviation.}
+    \label{fig:phy_20_fitted_mask}
+\end{figure*}
+Analogously to Section \ref{append:spike}, we obtain an AlphaFold structure that we fit into a volume reconstructed by backprojection. Finally, we run our method with the fitted AlphaFold structure as our base structure and $\Ndomains = 20$.
+
+Since cryoSPHERE outputs structures, we can compute the predicted distances between the above-mentioned domains. We plot the true and recovered histograms of the distances between the two domains in Figure \ref{fig:150k_histo}. Additionally, we plot the predicted distances against the true distances in the same figure. These two plots show that the predicted structures are in excellent agreement with the ground truth structures. This is even true for the most dissociated structures, even though the majority of the structures are in a closed conformation. Figure \ref{fig:phy_20_fitted_mask} shows the recovered segments as well as a selection of predicted structures and the corresponding ground truths. Our model has learnt to separate the two mobile top domains from the fix bottom one.
+
+For comparison, we train cryoDRGN for the same duration  using the same single GPU.
+We plot the mean of the FSC curves between the predicted volumes and the corresponding ground truth volumes in Figure \ref{fig:phy_20_fitted_mask}, for both cryoSPHERE and cryoDRGN. This plot shows that we perform better than cryoDRGN at both the $0.5$ and $0.143$ cutoffs. There are two reasons behind this.
+
+First, we fit our base structure into a volume reconstructed from a homogeneous reconstruction method. This aligns the non-moving parts of the protein with the right places, as provided by the dataset. Without this step, it is likely that some medium-scale part of the protein would have been misplaced, potentially reducing the performance of our algorithm at the $0. It is important to note, that this step significantly improves our results, and it comes at almost no extra cost since it relies on the backprojection algorithm.
+
+Secondly, deforming a good AlphaFold structure offers finer details than cryoDRGN. This accounts for the better performance of cryoSPHERE over cryoDRGN at the $0.143$ cutoff.
+
+Moreover, our method demonstrates robustness to a limited number of images. Even with only one pose per structure (totalling $10^{4}$ images), cryoSPHERE maintains similar performance, while cryoDRGN suffers a significant drop in the FSC curves.
+
+
+
+\section{Discussion}
+
+CryoSPHERE presents several advantages compared to other methods for volume and structure reconstruction:
+\paragraph{Efficiency in Deformation:} Deforming a base structure into a density map avoids the computationally expensive $\Npix^2$ evaluation required by a decoder neural network in methods implicitly parameterising the grid, such as \citet{zhong_cryodrgn2_2021, levy_cryoai_2022}. The neural network size is vastly reduced compared to state of the art methods, which explicitly parameterise the density grid of size $\Npix^3$, see e.g. \citet{punjani_3dflex_2023}. Furthermore, direct deformation of a structure directly avoids the need for subsequent fitting into the recovered density map.
+
+\paragraph{Reduced Dimensionality and Noise Resilience:} Learning one rigid transformation per segment, where the number of segments is much smaller than the number of residues reduces the dimensionality of the problem. This results in a smaller neural network size compared to approaches acting on each residues, such as \citet{rosenbaum_inferring_2021}. Rigidly moving large portions of the protein corresponds to low-frequency movements, less prone to noise pollution than the high-frequency movements associated with moving each residue independently. 
+In addition, since our goal is to learn one rotation and one translation per segment, a latent variable of dimension $6\times\Ndomains$ is, in principle, a sufficiently flexible choice to model any transformation of the base structure. Choosing the latent dimension is more difficult for volume reconstruction methods such as \citep{zhong_cryodrgn2_2021}.
+
+\paragraph{Interpretability:} CryoSPHERE outputs segments along with one rotation and one translation per segment, providing valuable and interpretable information. Practitioners can easily interpret how different parts are moving based on the transformations the network outputs. This interpretability is often challenging for deep learning models such as \citet{zhong_cryodrgn2_2021, rosenbaum_inferring_2021}.  
+
+Section \ref{sec:experiments} demonstrates cryoSPHERE's capability to recover continuous and discrete heterogeneity while performing structure reconstruction. It also demonstrate that even though the choice of $\Ndomains$ impact the FSC to the ground truth, cryoSPHERE is able to recover the correct motion for the entire range of $\Ndomains$ values. It is also able to keep the minimum necessary number of domains when the user sets an unnecessarily high $\Ndomains$, as seen in Section \ref{toy_dataset}.
+
+While using a base structure $S_0$ provides detailed information missed by cryoDRGN, especially evidenced by our better $0.143$ cutoffs, it can introduce bias on medium scale elements, especially if $\Ndomains$ is too small. We alleviate this problem by fitting $S_0$ into a volume reconstructed using a simple backprojection algorithm. This, combined with cryoSPHERE, achieves better $0.5$ cutoffs than cryoDRGN, showcasing its effectiveness in debiasing the results. If such a volume is unavailable, simply increasing $\Ndomains$ can reduce the bias.
+
+Our study opens up for significant advancements in predicting protein ensembles and dynamics, critically important for unraveling the complexity of biological systems. By predicting all-atom structures from cryo EM datasets through more realistic deformations, our work lays the foundation for extracting direct insights into thermodynamic and kinetic properties. In the future, we anticipate the ability to predict rare and high-energy intermediate states, along with their kinetics, a feat beyond the reach of conventional methods such as molecular dynamics simulations. 
+
+\textcolor{black}{It would be interesting to assess how much our segmentation correlates with bottom-up segmentation into domains conducted on the “omics” scale, see e.g \cite{lau_merizo_2023}. To achieve this quantitatively, we would need many examples of moving segments from cryo EM investigations to match the millions of segments from the “omics” studies. Therefore, we leave this investigation to later work.}
+
+
+\textcolor{black}{Finally, this work is an important milestone in showing that one can learn a segmentation of the protein that is intimately linked to the change of conformation of the underlying protein, in an end-to-end fashion. This is in contrast to other works that perform the segmentation based on residue distances of the underlying atomic model only, usually not in an end-to-end way. The application of cryoSPHERE to real dataset requires a number of careful choices that we leave to future work.}
+
+
+
+
+
+

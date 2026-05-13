@@ -1,0 +1,365 @@
+\title{Action abstractions for amortized sampling}
+
+\begin{abstract}
+As trajectories sampled by policies used by reinforcement learning (RL) and generative flow networks (GFlowNets) grow longer, credit assignment and exploration become more challenging, and the long planning horizon hinders mode discovery and generalization.
+The challenge is particularly pronounced in entropy-seeking RL methods, such as generative flow networks, where the agent must learn to sample from a structured distribution and discover multiple high-reward states, each of which take many steps to reach.
+To tackle this challenge, we propose an approach to incorporate the discovery of action abstractions, or high-level actions, into the policy optimization process.
+Our approach involves iteratively extracting action subsequences commonly used across many high-reward trajectories and `chunking' them into a single action that is added to the action space.
+In empirical evaluation on synthetic and real-world environments, our approach demonstrates improved sample efficiency performance in discovering diverse high-reward objects, especially on harder exploration problems.
+We also observe that the abstracted high-order actions are interpretable, capturing the latent structure of the reward landscape of the action space.
+This work provides a cognitively motivated approach to action abstraction in RL and is the first demonstration of hierarchical planning in amortized sequential sampling.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{introduction}
+Reinforcement learning (RL) relies on a stochastic policy $\pi_\theta$ to generate potentially long trajectories $\tau$ of actions $\alpha$ to obtain a reward $r$. Standard RL methods take learning steps on the policy parameters $\theta$ using a loss function that reinforces actions which maximize reward \citep{sutton2018reinforcement}. In the case of diversity-seeking RL methods, such as generative flow networks \citep[GFlowNets;][]{bengio2021flow, bengio2023gflownet} -- a special case of entropy-regularized RL (\citet{ziebart2008maximum}; see \citet{tiapkin2023generative,deleu2024discrete}) -- the loss function may instead encourage the policy to sample terminal states with probability proportional to their reward. In both cases, longer trajectories make training more difficult due to the problem of \textit{credit assignment}, \ie, the propagation of a learning signal over long time horizons~\citep{sutton2018reinforcement}. 
+
+The difficulty of credit assignment grows with trajectory length: it has been shown that temporal difference learning methods require an exponential (in the trajectory length) number of updates to correct learning bias, while Monte Carlo methods see the number of states affected by delayed rewards grow exponentially with the number of delay steps \citep{arjona2019rudder}. Previous work addressed the challenge of credit assignment through long trajectories by propagating a learning signal to specific moments in the trajectory, skipping over intermediate actions and effectively reducing the trajectory length \citep{ke2018sparse,liu2019sequence,hung2019optimizing,sun2023conspec}.
+
+Recent work has shown that trajectory compression improves credit assignment in RL. For instance, \citet{ramesh2024sequence} show that it is beneficial to explicitly shorten trajectories by dropping the intermediate states which are highly predictable given their predecessors, related to the principle of history compression \citep{schmidhuber1992learning}. Other recent work used a similar compressibility criterion directly as a reward term: by encouraging the policy to implicitly learn trajectories that could be easily compressed or predicted (\eg, that contain repeating elements), the RL agents achieve better sample efficiency \citep{saanum2024reinforcement}. These works suggest that the lower description length of action sequences confers some benefit in terms of the credit assignment challenge. 
+
+Analogies exist between compression in artificial and natural learning systems. A long line of research in psychology investigates ``chunking", a phenomenon whereby humans tend to record smaller units of information as part of larger high-order units. Chunking is believed to reduce the load on working memory when reasoning about complex problems which would take too many bits to encode using only lower-level units \citep{thalmann2019does, gobet2001chunking, miller1956magical, johnson1970role}.
+
+In RL, \textit{options and macro-actions} generalize primitive actions and allow for temporally extended sequences of actions, or temporal abstractions, that facilitate more efficient exploration and enable hierarchical learning. Macro-actions have inconsistently been found to speed-up learning in RL and enhance credit assignment \citep{randlov1998macro,sutton1999between}. 
+
+Drawing on the above work, we propose to abstract high-order ``chunks" \emph{online} from the trajectories sampled by a GFlowNet or RL policy, producing an action space that grows during training. In contrast to \citep{saanum2024reinforcement}, compressibility is not enforced through objectives -- rather, we harness the virtuous cycle of emergent compressibility of the policy's trajectories and the accelerated learning that results from shorter action sequences. In addition, we find that these high-order actions accurately recover the latent structure of the underlying distribution.
+
+Our contributions can be summarized as follows:
+\begin{itemize}[itemsep=1mm, parsep=1mm,left=0pt]
+    \item We present \textsc{ActionPiece}, a method for extracting high-order actions, or "chunks," from sampled trajectories using tokenization techniques. \textsc{ActionPiece} includes two variants: \textsc{ActionPiece-Increment} and \textsc{ActionPiece-Replace}. Both approaches are compatible with any sampler at no significant cost.
+    \item We introduce \textit{ShortParse}, a new backward policy for the GFlowNet aimed at sampling short trajectories. 
+    \item We evaluate our approach on multiple environments and determine that it accelerates mode discovery, improves density estimation, and reduces description length of the samples. 
+    \item We demonstrate that learned chunks represent the latent structure of the target distribution and are transferable to different algorithms and new tasks.
+\end{itemize}
+
+\begin{figure}[t]
+    \centering
+    \includestandalone[width=0.9\linewidth]{figures/figure1}
+    \caption{\textbf{Chunking procedure}. Starting with a policy, we generate trajectories consisting of action sequences. The trajectories are then filtered to retain only the high-reward samples, which are passed to a tokenizer. The tokenizer identifies frequently occurring ``chunks" which are added to the action space. The process is repeated till convergence.}
+    \label{fig:figure1}
+\end{figure}
+
+
+
+\section{Related work}
+
+\label{related_work}
+
+\textbf{Macro-actions} are a sequence of actions assembled from an atomic action set \citep{randlov1998macro}, a form of temporal abstraction, and have been the focus of a long line of work. The idea stems from early proposals of automatic induction of \textit{macros} for programs using various rules or heuristics \citep{iba1989macro, laird1986chunking}; see \citet{sutton1999between} on the related framework of {\em options} and a review of macro-actions. In our context, a macro-action is a policy representing a series of atomic actions to be executed at once, which in some cases has been shown to reduce the time required to discover the optimal policy and action-value function in the RL context \citep{mcgovern1998macro,laird1986chunking}. Previous work has proposed composing macro-actions from n-grams to speed up search during planning \citep{dulac2013learning} and employing them to construct form of a hierarchy of policies with different temporal resolutions \citep{precup1997multi,dayan1992feudal}. Such methods have produced mixed results, either helping or hindering performance depending on the appropriateness of the macro-actions to the task \citep{mcgovern1997roles,jong2008utility}. 
+In cases where macro-actions were helpful, their utility was explained by improved credit assignment and exploration. Previous work has also used evolutionary algorithms for discovering macro-actions, which was an effective approach on common Atari games \citep{chang2022reusability}. Others proposed to learn macro-actions as either actions that are repeated a number of times, or commonly-occurring sub-sequences of a fixed length \citep{durugkar2016deep} while training a deep RL policy. In this work, speed of convergence is the most reliable improvement from the introduction of macro-actions, but variance of returns is also decreased, and in some specific settings returns improved. 
+The settings where macro-actions are useful appear to contain more shared structure between the learned macros and the latent structure of the environment and reward landscape.
+
+Work on \textbf{library learning} in program induction (\eg, \citet{ec2,nye2020learning,chaudhuri2021neurosymbolic}) has often sought to incrementally modify the domain-specific language of interest so as to reduce the complexity of useful programs, following the minimum description length principle \citep{rissanen1978modeling}. DreamCoder and related approaches \citep{ellis2021dreamcoder,claire2023open,ec2,stitch} accomplish this by introducing new subroutines during a distinct abstraction phase during training. These algorithms leverage a \textit{library} of solutions to given problems which serve as a prior (see also \cite{tian2020learning,liang2010learning}). Many other works in this space only \textit{implicitly} learn a library in the form of a policy which emits a program when conditioned on a program (\eg, \cite{ellis2019write,devlin2017neural}). Similar works exist in the related domain of proof synthesis \citep[\eg,][]{vyskocil,zhou2024refactor}.
+
+\textbf{Credit assignment} is a fundamental problem in sequential decision-making, known to arise from a few properties of the Markov decision process (MDP) in which the learner acts: its depth (the typical number of steps between the initiation of a trajectory and a reward); its density (the number of nonzero rewards in the typical trajectory) and its breadth (the number of possible routes from the initial state to a reward; for a review, see \citet{pignatelli2023survey}. In RL, Hindsight Credit Assignment \citep[HCA;][]{hca} introduces a new family of algorithms where credit is assigned to past decisions based on the likelihood of them having led to the observed outcome. In GFlowNets, the trajectory balance objectives \citep{malkin2022trajectory,madan2022learning}, which consist of a loss depending on a whole action sequence rather than a single transition, and the forward-looking flow parametrization \citep{pan2023better}, which is effective when the energy can be decomposed additively into per-time-step components, are both motivated by the credit assignment challenge. 
+
+
+
+\section{Preliminaries}
+
+\label{prelim}
+
+We summarize the learning problem solved by GFlowNets and the objective used, then introduce the two RL algorithms on which we also evaluate our action abstraction approach.
+
+Let $G=(S,A)$ be a directed acyclic graph. Nodes $s\in S$ are called \emph{states} and edges $(s\rightarrow s')\in A$ are \emph{actions}, which define the relations ``$s$ is a parent of $s'$" and ``$s'$ is a child of $s$''. We assume that there is a unique state $s_0\in S$ with no parents (\emph{initial state}) and denote the set of states with no children (\emph{terminal states}) by $X$. One interprets $X$ as the set of complete ``objects'' that one can sample and the actions as constructive steps that incrementally build an object.
+
+A key assumption needed to formulate action abstraction is that there is a correspondence between the actions available at different states. This is a common assumption in RL -- in MDPs, the action space is typically the same at all states, but some actions may be ``masked'' or ``invalid'' at some states -- but is not a typical GFlowNet assumption. Here, we assume that there is a global set of actions $\gA$ and that at each nonterminal state $s$ a subset $\gA_s\subseteq \gA$ of these actions is available. We fix a bijection between $\gA_s$ and the set of children of $s$; thus, applying action $a\in \gA_s$ at state $s$ transitions to the child state corresponding to $a$, denoted $s+a$. (For example, when constructing sequences over some alphabet by adding one symbol at a time to the end, $\gA$ may be the alphabet, with $\gA_s=\gA$ for all $s$.)
+
+A \emph{(forward) policy} $P_F$ is a collection of distributions over $\gA_s$ (identified by the aforementioned bijection with the set of children of $s$) for every non-terminal state $s$. A forward policy induces a distribution over \emph{complete trajectories}, or paths in the directed graph from $s_0$ to a terminal state $s_n\in X$:
+\begin{equation}\label{eq:pf_trajectory}
+    P_F(\tau=(s_0\xrightarrow{a_0}s_1\xrightarrow{a_1}\dots\xrightarrow{a_{n-1}} s_n)) = \prod_{i=0}^{n-1} P_F(a_{i}\mid s_i),
+\end{equation}
+where $s_i\xrightarrow{a_{i}}s_{i+1}$ indicates that $s_i+a_{i}=s_{i+1}$. The marginal likelihood of sampling a terminal state $x\in X$ is then
+\[
+    P_F^\top(x) = \sum_{\tau\rightsquigarrow x} P_F(\tau),
+\]
+where the sum is over all complete trajectories ending in $x$. (Note that this sum may be intractable to compute exactly if the number of trajectories leading to $x$ is large.)
+
+\paragraph{Trajectory balance.} GFlowNet training aims to approximate $P_F$ (for example, parameterized as a neural network $P_F^\theta(\cdot\mid\cdot)$) so as to make $P_F^\top$ proportional to a given reward function $R:X\to\R^+$. Various objectives for achieving this exist; here, we use the \emph{trajectory balance} (TB) objective \citep{malkin2022trajectory}. TB requires introducing two auxiliary objects: a learned scalar $Z_\theta$ (which estimates the normalizing constant $Z=\sum_{x\in X}R(x)$) and a (fixed or learned) \emph{backward policy} $P_B$, which is a collection of distributions $P_B(\cdot\mid s)$ over the parents of every non-initial state $s$. Similarly to \eqref{eq:pf_trajectory}, $P_B$ induces a distribution over complete trajectories ending in $x$:
+\[
+    P_B(\tau=(s_0\rightarrow\dots\rightarrow s_n=x)\mid x) = \prod_{i=0}^{n-1} P_B(s_i\mid s_{i+1}).
+\]
+The TB objective aims to make $P_F(\tau)$ proportional to $P_B(\tau\mid x)R(x)$ for every trajectory $\tau$ ending in $x$, a constraint that implies that $P_F^\top(x)\propto R(x)$. The training loss for a trajectory $\tau$ enforces this proportionality:
+\begin{equation}\label{eq:tb}
+    \gL(\tau;\theta)=\left(\log[Z_\theta\cdot P_F^\theta(\tau)] - \log[P_B^\theta(\tau\mid x)\cdot R(x)]\right)^2.
+\end{equation}
+If $\gL(\tau;\theta)=0$ for all $\tau$, then the desired proportionality is satisfied and $P_F^\top(x)\propto R(x)$. The training procedure takes gradient steps with respect to $\theta$ to minimize $\gL(\tau;\theta)$ over trajectories sampled from some behaviour policy $\pi(\tau)$. As we aim to simultaneously minimize \eqref{eq:tb} to 0 for all trajectories, the behaviour policy can be any full-support distribution, such as $P_F$ itself (\emph{on-policy} training) or a distribution chosen to promote exploration (\emph{off-policy} training).
+
+
+
+\paragraph{RL algorithms.} The above setting can be translated to RL terminology in a straightfoward manner: one defines an MDP with states $S$, action space $\gA$, deterministic transition function $T(s,a)=s+a$, and reward $r(s\rightarrow s')=\log R(s')$ if $s'\in X$ and 0 otherwise. (The log is necessary for the equivalence of GFlowNet and RL algorithms in certain cases to hold; see \citet{tiapkin2023generative,deleu2024discrete}.) We now recall two RL objectives, restricting to this sparse-reward setting with discount factor 1.
+
+The \textbf{Advantage Actor-Critic (A2C)} algorithm \citep{degris2012model} combines policy-based and value-based methods to improve training stability and efficiency. Two networks are learned jointly: a policy network $P_F^\theta$, which plays the role of the actor, and a state-action value (or critic) network $Q_{w}^\theta$ to measure the `goodness' of actions taken by the actor. The two objects are learned using the following update:
+\begin{align*}
+    &\theta \leftarrow \theta - \lambda_{\theta} Q_{w}^\theta(s_t,a_t) \nabla_{\theta} \log P_F^\theta(a_t\mid s_t) \\
+    & w \leftarrow w - \lambda_{w} (r(s_t,a_t) + Q_{w}(s_{t+1}, a_{t+1}) - Q_{w}(s_t, a_t)  ) \nabla_w Q_w(s_t, a_t)
+\end{align*}
+where $\lambda_{\theta}$ and $\lambda_{w}$ are learning rates. To further stabilize training, a \emph{baseline} is usually used, and $Q(s_t, a_t)$ is replaced with $Q(s_t, a_t) - \mathbb{E}_{a_t \sim P_{F}^\theta} \left[Q(s_t, a_t)\right]$, reducing the variance of the gradient with respect to $w$ while keeping it unbiased.
+
+The \textbf{Soft Actor-Critic (SAC)} algorithm \citep{haarnoja2018softactorcritic} is an off-policy algorithm that is trained to maximize a trade-off between the expected return and the entropy of the policy $P_F$, the latter encouraging more exploration. Using the notation introduced above, SAC's objective is:
+\begin{equation}
+    \argmax_{P_F} \mathbb{E}_{\tau \sim P_F}\left[\sum_{t=0}^{|\tau| - 1}  (r(s_t, a_t) + \alpha H(P_F(\cdot\mid s_t))\right],
+\end{equation}
+where $\alpha$ is an entropy regularization parameter.
+To satisfy this objective, we train a state-value function $Q_w$ and a policy network $P_{F}^\theta$ to satisfy : 
+\begin{align*}
+    &Q_w(s_t, a_t) =   r(s_t, a_t) +   \mathbb{E}_{(s_{t+1}, a_{t+1}) \sim P_F^{\theta}} \left(Q_w(s_{t+1}, a_{t+1}) - \alpha \log P_{F}^\theta(.|s_{t+1}) \right) \quad \text{(Bellman equation)}\\
+    & \theta = \argmin_{\theta} \mathbb{E}_{s_t \sim q}\mathrm{D}_{\mathrm{KL}} \left(P_F^\theta(\cdot \mid s_t) \,\|\, \frac{\exp(Q_w(s_t,\cdot))}{Z_w(s_t)}\right) \quad \text{($q$ can be any off-policy distribution)}.
+\end{align*} 
+
+
+
+\section{Discovering action abstractions for amortized samplers}
+
+\label{method}
+
+Training amortized samplers in discrete compositional spaces becomes increasingly difficult as the number of steps in trajectories grows. Consider sampling a graph one node at a time while connecting them to previous nodes. For example, a graph with $n$ takes $O(n^2)$ sampling steps. Sampling long strings autoregressively presents a similar challenge: sampling one character at a time makes the process difficult due to the vast search space of full sequences, which are predominantly low-likelihood samples. In the case of large language models, sampling subsequences (tokens) which commonly occur in the text corpora instead of individual characters reduces the trajectory length required to encode high-likelihood sentences. This has generally been found to decrease both training and inference costs~\citep{wu2016google,kudo2018sentencepiece}, and can be viewed a strategy for trading off reducing the depth of the MDP in exchange for increased breadth, which potentially makes the task easier to learn \citep{pignatelli2023survey}. 
+
+Drawing inspiration from this observation, we propose a general approach for sampling discrete objects that infers actions that effectively shorten the trajectory length while producing samples from the target distribution. In particular, our approach consists of augmenting existing samplers with an action abstraction discovery step, a form of ``chunking'' as originally described by cognitive psychologists \citep{miller1956magical}, which is applicable to any sampler, and consists of three major steps (see Algorithm \ref{algo:chunking} for the overall approach):
+
+\begin{enumerate}[leftmargin=1.5em,nosep]
+    \item \textbf{Generating an \textit{action corpus}}: We first generate a set of $N$ action sequences from the sampler, optionally also drawing a portion $p$ of these from a replay buffer of previously-drawn high-reward trajectories.
+    \item \textbf{Chunking}: We apply a tokenization algorithm common in NLP, byte pair encoding~\citep[BPE;][]{bpe}, to the $N$ action sequences to obtain new tokens (``chunks'') to be added to the action space.    
+    \item \textbf{Augmenting the action space}: Finally, we add the new abstracted actions to the action space. Whenever the abstracted action is chosen, its constituent actions are executed in order\footnote{This differs from the options framework where the agent is allowed to only partially execute the option. If an abstracted action representing a sequence of actions is not possible to execute (\ie, would lead to the application at some $s$ of an action not in $\gA_s$), the abstracted action is masked by the policy.}.
+\end{enumerate}
+
+\begin{algorithm}
+\caption{Training policies with chunking}
+\begin{algorithmic}[1]
+\State \textbf{Initialize} $\mathcal{A}$ (action space), $\mathcal{B}$ (replay buffer), $M$ (maximum number of iterations), $p$ (proportion to sample from the replay buffer if it exists) and $N$ (number of trajectories), and $k$, (chunking frequency).
+\For{$n = \{1, 2, \dots, M\}$}
+    \State $\text{loss} = \text{train}(\mathcal{A}, \mathcal{B}, n)$ \Comment{Train the amortized sampler}
+    \If{$n \% k == 0$}
+        \State Sample $\lfloor pN\rfloor$ from $\mathcal{B}$ to get action sequences $\{a_\mathcal{B}^i\}_{i=1}^{\lfloor pN\rfloor}$.
+        \State Sample $N-\lfloor pN\rfloor$ from the sampler to get action sequences $\{a^i\}_{i=1}^{N-\lfloor pN\rfloor}$.
+        \State $\mathcal{S} = \{a^i\}_{i=1}^{N-\lfloor pN\rfloor} \cup \{a_\mathcal{B}^i\}_{i=1}^{\lfloor pN\rfloor}$
+        \State $\mathcal{C} = \text{chunking}(\mathcal{S})$ \Comment{Generate novel chunks}
+        \State $\mathcal{A} \gets \mathcal{A} \cup \mathcal{C}$ \Comment{Update the action space}
+    \EndIf
+\EndFor
+\end{algorithmic}
+\label{algo:chunking}
+\end{algorithm}
+\paragraph{Chunking mechanisms.} We consider the following two approaches, comparing them to the \textsc{Atomic} sampler (without action space compression): 
+\begin{itemize}[left=0pt,nosep]
+    \item \textsc{ActionPiece-Increment}: We apply the tokenizer on the action corpus and add the most frequent token found to the action space, which grows by one element each time this is performed. This approach gradually builds up the action space but is susceptible to repetitions in chunks or low quality set of action sequences used for checking. %Another potential issue that may arise in some samplers, is that the discovered chunks can ``trap'' the sampler into a particular subspace, hindering exploration.
+    \item \textsc{ActionPiece-Replace}: This method instead takes the $M$ most frequent tokens found by the tokenizer from the action corpus (to be appended to the initial action space). Each time abstraction is performed, the entire action space might be replaced by a new one (aside from the atomic tokens). This effectively reduces the chance of storing redundant chunks and allows us to potentially discover many useful chunks in one step. %It can also alleviate exploration issues since the new action space is not build incrementally but given at once.
+\end{itemize}
+
+\paragraph{Chunking frequency.} \textsc{ActionPiece} require choosing ``\emph{when to chunk}'' during training. A simple approach (used in most experiments) is to simply chunk every $k$ iterations. The alternative is to chunk based on some criterion being satisfied. In the case of GFlowNets, the TB loss can be used as a proxy for the ``fit'' of the sampler (see \autoref{app:exp_details}) to the current action space, and we therefore considered the case of waiting for the loss to drop below a certain threshold before a round of chunking. %But this method has its drawbacks. If the loss doesn't decrease with the training, then the frequency of adding chunks decreases as well. It also implies for \textit{Chunking Basic} mechanism that the action space could potentially be smaller, thus not achieving chunking's full potential. We nevertheless use this whenever it's possible and better to use it.
+
+
+\section{Experimental setup}
+
+\label{exp_setup}
+
+We benchmark SAC, A2C and GFlowNet along with a random sampler baseline that samples uniformly at random a valid action at each step. For the GFlowNet, we use trajectory balance \citep{malkin2022trajectory} and include three different choices for the backward policy:
+
+\begin{itemize}[left=0pt,nosep]
+    \item \textbf{Uniform $P_B$}: This backward policy chooses backward \textit{parents} uniformly at random. %\kolya{I would say "parents", not actions, since backward actions are tricky}
+    \item \textbf{MaxEnt $P_B$}: This backward policy chooses backward \textit{trajectories} uniformly at random. Note that MaxEnt $P_B$ and Uniform $P_B$ are equivalent for Tree MDPs since there is only a single backward action at each step \citep{tiapkin2023generative,mohammadpour2023maximum}. %\kolya{need citation for this one}
+    \item \textbf{ShortParse $P_B$}: We introduce a new fixed backward policy aimed at sampling the most compact backward trajectory in terms of the number of trajectory steps (see \autoref{sec:shortparse}). %\kolya{this is not a parametrisation, it's a fixed policy}
+\end{itemize}
+
+\paragraph{A policy parametrization for nonstationary action spaces.} Dealing with a varying action space as a result of  chunking requires a compatible parameterization of the policy to handle the evolving action space. Instead of a final layer that outputs logits for a fixed number of actions, the policy instead takes as input the current state and outputs an \textit{action embedding} $\mathbf{q_t}\in\mathbb{R}^d$ where $d$ is the action embedding dimension \citep[similar to][]{action_representation}. Now let ${\cal A}=\{a_i\}_{i=1}^{|{\cal A}|}$ where $|{\cal A}|$ is the number of actions in the action space ${\cal A}$. We use an action encoder $f_\theta(a_i)\in\mathbb{R}^d$ that computes an embedding for the actions $a_i$. We parametrize $f_\theta$ as an LSTM~\citep{lstm} that takes the sequence of atomic actions making up a chunk as input (possibly of length 1 if the chunk is a single atomic action). Let $f_\theta(\mathcal{A})\in\R^{|\gA|\times d}$ denote the matrix of embeddings of all actions in the action space. The logits given by the policy network are:
+\begin{equation}
+    \mathbf{\ell}_t = \frac{f_\theta(\mathcal{A})\mathbf{q_t}}{\sqrt{d}}\in\mathbb{R}^{|\mathcal{A}|}
+\end{equation}
+
+\paragraph{Tasks.}
+To understand the impact of chunking, we consider a diverse set of environments consisting of three synthetic tasks and a practical task: bit sequence generation~\citep{malkin2022trajectory}, FractalGrid \citep[adapted from the standard hypergrid;][]{bengio2021flow}, a graph generation environment, and the practical task of RNA sequence generation~\citep[\texttt{L14\_RNA1};][]{sinai2020adalead}. We provide further details about each environment in \autoref{app:exp_details}.
+
+ 
+
+
+\section{Results}
+
+
+\subsection{Does chunking improve generative modeling?}
+\label{sec:gen_modeling}
+\paragraph{Does chunking accelerate mode discovery?}
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/chunking_gen_modeling/mode_discovery/fractalgrid_257_modes.pdf} 
+        \caption{FractalGrid}
+        \label{fig:fractalgrid}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/chunking_gen_modeling/mode_discovery/L14_RNA1_modes.pdf}  
+        \caption{RNA Binding}
+        \label{fig:rna_binding}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/chunking_gen_modeling/mode_discovery/bit_sequence_128_modes.pdf}  
+        \caption{Bit sequence}
+        \label{fig:bit_sequence}
+    \end{subfigure}
+    
+    \caption{\textbf{Cumulative number of modes discovered during training}. Chunking helps across all environments, especially in FractalGrid where all samplers get stuck in the first mode but chunking unlocks exploratory abilities to fetch faraway modes.}
+    \label{fig:three_subfigures}
+\end{figure}
+
+\autoref{fig:three_subfigures} shows the the number of modes discovered throughout training as a function of the number of visited states. Note that we report the cumulative number of modes, \ie, counting all modes sampled for a given number of visited states, and the difficulty of the task (in terms of the size of the MDP) increases from left to right. Across all tasks, \textsc{ActionPiece} outperforms the \textsc{Atomic} counterpart for the GFlowNet sampler in terms of the speed of mode discovery. Results for other algorithms are mixed. \textsc{ActionPiece} helps A2C and SAC in FractalGrid, but hurts performance for RNA binding. Moreover \textsc{ActionPiece-Replace} helps A2C in BitSequence, while \textsc{ActionPiece-Increment} hurts performance. The greedy behavior of both SAC and A2C provides a possible explanation: when a mode is discovered, it gets sampled more often resulting in the addition of a large chunk (\eg, \autoref{fig:bitsequence_library_rl_basic},\ref{fig:bitsequence_library_rl_replace}). This chunk will result in high-reward samples and consequently chunks added beyond this will contain parts of this chunk hurting exploration. This issue is mitigated in GFlowNets due to the exploratory behavior imparted by the learning objective. The random sampler with \textsc{ActionPiece} achieves strong performance only on simple tasks, with a degradation in performance for harder problems, suggesting random sampling with action abstraction produces meaningful chunks only in cases where the problem is sufficiently simple. %This strategy does not carry work for higher-dimensional problems, where the compositional space is too large and therefore a more intelligent sampling algorithm is needed.
+\paragraph{Does chunking improve density estimation?}
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}{\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chunking_gen_modeling/density_estimation/tb_loss.pdf}
+        \caption{TB loss for all chunking mechanisms in FractalGrid for a grid size of $257^2$. All the losses are clipped to a maximum value of 10 for ease of visualization.}
+        \label{subfig:tb_loss}
+    \end{subfigure}
+    \begin{subfigure}{\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chunking_gen_modeling/density_estimation/fractalgrid_density.pdf}
+        \caption{The evolution of sampling metrics for all chunking mechanisms during training. The top row is for FractalGrid of size $65^2$ whereas the bottom row corresponds to that of size $129^2$. On the right, we plot the reward landscape for a grid of size $65^2$ for ease of visualization.}
+        \label{subfig:sampling_metrics}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chunking_gen_modeling/density_estimation/correlation_l14_rna1.pdf}
+        \caption{Spearman correlation between the logreward and the learned log-likelihood for the \texttt{L14\_RNA1} task. }
+        \label{subfig:correlation_rna}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/chunking_gen_modeling/density_estimation/correlation_bit_sequence_128.pdf}
+        \caption{Spearman correlation between the logreward and the learned log-likelihood for the bit sequence task.}
+        \label{subfig:correlation_bs}
+    \end{subfigure}
+    \caption{\textbf{Effect of chunking on density estimation.} Analysis of the effect of different chunking mechanisms on density estimation in the FractalGrid, bit sequence, and RNA binding tasks.}
+    \label{fig:fractalgrid_analysis}
+\end{figure}
+
+\begin{wraptable}{R}{0.5\textwidth}
+    \vspace*{-1em}
+    \caption{\label{tab:graph_density_metrics}
+        Comparison of chunking mechanisms based on various metrics for the graph environment with 7 nodes. We use three seeds with the standard deviation indicated in parentheses. We sample 10,000 graphs for computing the ELBO Gap and draw 40 backward trajectories for each graph to compute the JSD and L1 distance.
+    }
+    \vspace*{-1em}
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{@{}lccc}
+        \toprule
+        \textbf{Mechanism} & \textbf{ELBO Gap} & \textbf{JSD} & \textbf{L1 Distance} \\
+        \midrule
+        \textsc{Atomic} & 0.72\std{0.39} & 0.38 & $1.44$ \\
+        \textsc{ActionPiece-Increment} & \textbf{0.25\std{0.14}} & \textbf{0.36} & $\mathbf{1.39}$\\
+        \textsc{ActionPiece-Replace} & 0.35\std{0.11} & 0.40 & $1.47$ \\
+        \bottomrule
+    \end{tabular}
+    }
+\end{wraptable}
+
+Next, we study the impact of chunking on density estimation in the context of GFlowNets, which learn a policy to sample from a target distribution. \autoref{subfig:tb_loss} shows the trajectory balance loss for all chunking mechanisms over the 2D grid in the FractalGrid environment. This serves as a visualization for how well each state is correctly learned by the GFlowNet. Chunking, and particularly \textsc{ActionPiece-Increment}, positively reinforces the inherent exploration of GFlowNets (as seen in the previous section), helping enable the sampler to model the entire state space and sample accurately from the target distribution. This is further supported by the L1 distance, JSD, and ELBO Gap (see \autoref{sec:sampling_metrics}) during training illustrated in \autoref{subfig:sampling_metrics} for both grid size $65^2$ and $129^2$ and all chunking mechanisms. Across all sizes of the task, chunking accelerates the training of the sampler. \autoref{subfig:correlation_rna} and \ref{subfig:correlation_bs} show Spearman's rank correlation coefficient between the target and the learned distribution for the \texttt{L14\_RNA1} and Bit Sequence tasks respectively. The correlation is computed for a range of reward thresholds spanning all samples to only those with a reward larger than $0.93$ to evaluate how well the sampler captures the high reward regions. For \texttt{L14\_RNA1}, \textsc{ActionPiece-Increment} performs on par with \textsc{Atomic}, and even slightly better for high-reward objects, whereas \textsc{ActionPiece-Replace} lags behind. In the bit sequence task, however, chunking results in marginally worse performance. Finally, \autoref{tab:graph_density_metrics}, shows that \textsc{ActionPiece-Increment} improves density estimation in the graph environment, while \textsc{ActionPiece-Replace} is also competitive. With some exceptions, these results  point towards chunking improving density estimation.
+
+\subsection{Do chunks capture the structure in the underlying distribution?} In this section, we analyze the discovered chunks and study whether they capture some structure in the underlying distribution. For instance, RNA molecules are typically composed of building blocks (or chunks in our terminology) called codons that consist of sequences of three nucleotides. We use the RNA Binding (\texttt{L14\_RNA1}) task for all the analyses in this section as we have access to a dataset of high-reward objects. %The aim of this section is to see if learned chunks have any relationship to the underlying distribution and more specially to high reward samples that are near the modes of the target distribution.
+
+\paragraph{Do chunks represent latent structure of the distribution?} Here, we dive into the structural relationship between chunks and the objects generated using the chunks. % We focus on the RNA binding environment and the \texttt{L14\_RNA1} task since it's easy and straightforward to compute relevant metrics, and we have access to a dataset of high-reward objects. 
+The metrics we consider are as follows:
+\begin{itemize}[left=0pt,nosep]
+    \item \textbf{Chunk occurrence}: For each chunk, we compute the average number of times it occurs in objects in the dataset.
+    \item \textbf{Chunk coverage}: For each chunk, we compute the number of objects in the dataset that contain that chunk, normalized over the total number of objects. %in the dataset to get a number between 0 and 1. 
+\end{itemize}
+
+\begin{table}[t]
+\centering
+\caption{Chunk Occurrence and Coverage for different samplers and chunking mechanisms for the \texttt{L14\_RNA1} environment.}
+\vspace*{-1em}
+\resizebox{0.9\textwidth}{!}{\begin{tabular}{@{}llllllll}
+\toprule
+\multirow{2}{*}{\textbf{Sampler}} & \multirow{2}{*}{\textbf{Mechanism}} & \multicolumn{3}{c}{\textbf{Chunk Occurrence}}& \multicolumn{3}{c}{\textbf{Chunk Coverage}} \\
+\cmidrule(lr){3-5}\cmidrule(lr){6-8}
+                 &                             & Mean & Median & SD & Mean & Median & SD \\
+\midrule
+\multirow{2}{*}{GFlowNet} & \textsc{ActionPiece-Increment}            & \textbf{1.11}          & \textbf{1.00}            & 0.98                       & \textbf{0.69}          & \textbf{0.73}            & 0.25 \\
+                     & \textsc{ActionPiece-Replace} & 0.28          & 0.00            & 0.55                       & 0.24          & 0.10            & 0.28 \\
+\cmidrule(lr){2-8}
+\multirow{2}{*}{MaxEnt-GFlowNet} & \textsc{ActionPiece-Increment}            & \textbf{1.11}         & \textbf{1.00}            & 0.98                       & \textbf{0.69}          & \textbf{0.73}            & 0.25 \\
+                     & \textsc{ActionPiece-Replace} & 0.26          & 0.00            & 0.47                       & 0.24          & 0.18            & 0.23 \\
+\cmidrule(lr){2-8}
+\multirow{2}{*}{ShortParse-GFlowNet} & \textsc{ActionPiece-Increment}            & \textbf{1.10}          & \textbf{1.00}            & 0.98                       & \textbf{0.68}         & \textbf{0.73}            & 0.26 \\
+                     & \textsc{ActionPiece-Replace} & 0.34          & 0.00            & 0.63                       & 0.27          & 0.17            & 0.27 \\
+\midrule
+\multirow{2}{*}{A2C} & \textsc{ActionPiece-Increment}            & 0.36          & 0.00            & 0.76                       & 0.23          & 0.00            & 0.35 \\
+                     & \textsc{ActionPiece-Replace} & 0.11          & 0.00            & 0.35                       & 0.10          & 0.00            & 0.24 \\
+\midrule
+\multirow{2}{*}{SAC} & \textsc{ActionPiece-Increment}            & 0.43          & 0.00            & 0.78                       & 0.29          & 0.02            & 0.36 \\
+                     & \textsc{ActionPiece-Replace} & 0.15          & 0.00            & 0.51                       & 0.10          & 0.00            & 0.22 \\
+\midrule
+\multirow{2}{*}{Random Sampler} & \textsc{ActionPiece-Increment}   & 0.46          & 0.00            & 0.79                       & 0.31          & 0.12            & 0.36 \\
+                     & \textsc{ActionPiece-Replace} & 0.36          & 0.00            & 0.70                       & 0.27          & 0.04            & 0.34 \\
+\bottomrule
+\end{tabular}}
+
+\label{tab:chunk_metrics}
+\end{table}
+
+The dataset we consider includes all RNA sequences with a reward of $0.85$ or higher. From \autoref{tab:chunk_metrics}, it is clear that \textsc{ActionPiece-Increment} consistently results in higher chunk occurrence values for GFlowNet-based samplers (GFlowNet, MaxEnt-GFlowNet, and ShortParse-GFlowNet). In contrast, A2C, SAC, and the random sampler exhibit moderate to low chunk occurrences under \textsc{ActionPiece-Increment}, while \textsc{ActionPiece-Replace} yields near-zero median values across all samplers. A similar trend is observed when analyzing chunk coverage, where GFlowNet-based samplers again dominate in terms of learned chunk representation within the high-reward landscape. Moreover, \textsc{ActionPiece-Increment} also outperforms \textsc{ActionPiece-Replace}, we speculate because the \textsc{ActionPiece-Replace} strategy updates the library too rapidly, making it hard for the policy to model it accurately. These findings suggest that GFlowNet-based samplers augmented with the \textsc{ActionPiece-Increment} effectively capture latent structure of the distribution, particularly around the modes.
+
+\paragraph{Do chunks reduce description length/complexity of samples?}
+\begin{figure}[t]
+    \centering
+
+    \begin{subfigure}[b]{0.95\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/chunks_latent_structure/l14_rna1_on_l14_rna1_shortparse.pdf} 
+        \caption{Shortest parse of modes from \texttt{L14\_RNA1} reward distribution using \texttt{L14\_RNA1} learned chunks.}
+        \label{fig:rna1}
+    \end{subfigure}
+    \hfill
+
+    \begin{subfigure}[b]{0.95\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/chunks_latent_structure/l14_rna1_on_l14_rna2_shortparse.pdf}  
+        \caption{Shortest parse of modes from \texttt{L14\_RNA2} reward distribution using \texttt{L14\_RNA1} learned chunks.}%\kolya{why is it written "BPE on the high reward samples"?}}
+        \label{fig:rna2}
+    \end{subfigure}
+    \hfill
+    
+    \caption{\textbf{Shortest parse of modes using learned library}. These plots show the average length of the shortest parses for high-reward samples across different models (ShortParse-GFlowNet, MaxEnt-GFlowNet, GFlowNet, SAC, A2C, and Random Sampler) when employing different chunking strategies. The dashed lines indicate the Byte Pair Encoding (BPE) baseline on high-reward strings. Subfigure (a) shows the shortest parse of the \texttt{L14\_RNA1} modes using learned chunks from the \texttt{L14\_RNA1} distribution whereas the second subfigure (b) shows how far do the learned chunk generalize to parsing modes from the \texttt{L14\_RNA2} reward distribution.}
+    \label{fig:short_parse}
+\end{figure}
+
+To evaluate the compressive ability of the chunks, we compute the shortest parse of the (known) modes of the distribution with the learned library of chunks. This is defined as the average length of a trajectory required to sample a mode. Note that the the longest parse of modes would be a trajectory using only atomic actions (letters in string-based environments). We also compute a minimum attainable shortest parse of the modes by performing BPE on the modes directly, which serves as a lower bound.
+
+\autoref{fig:short_parse} shows that GFlowNet-based approaches tend to have the lowest short parses of the modes, indicating greater diversity in the learned chunks. In contrast, RL-based methods tend to have higher average parse lengths, as their learned chunks focus on a smaller region of the state space, suggesting that limited exploration can negatively impact the quality of the learned chunks. The chunking mechanism also affects different samplers in opposite ways. For RL-based methods, \textsc{ActionPiece-Replace} learns a library that doesn't compress samples very well as evident by the average length of the shortest-parse as opposed to GFN-based methods that do indeed find libraries that capture the latent structure of the distribution and result in a shorter average length compared to \textsc{ActionPiece-Increment}.
+
+\paragraph{Are chunks transferable to new models and new tasks?}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/chunks_latent_structure/downstream.pdf} 
+    \caption{\textbf{Donwstream evaluation of discovered chunks}. Each column represents a different environment (\texttt{L14\_RNA1}, \texttt{L14\_RNA2}, \texttt{L14\_RNA3}) and each row presents a chunking mechanism (\textsc{ActionPiece-Increment} and \textsc{ActionPiece-Replace}). In each heatmap, we show the number of modes discovered by samplers on the y-axis trained on chunks found by samplers on the x-axis. The color intensity represents the number of modes, with darker shades indicating higher numbers. The number of modes shown is an average of three different seeds.}
+    \label{fig:downstream_rna}
+\end{figure}
+
+In this section, we study the downstream impact of discovered chunks. We evaluate the downstream performance along two axes: generalization across different but related target distributions, and across different samplers. The aim of this experiment is to identify whether the chunks themselves generalize and which samplers provide the best chunks in terms of downstream performance.
+
+\autoref{fig:downstream_rna} shows that initializing samplers with a learned library of chunks already improves the number of modes found compared to not performing any chunking. We see this specifically when samplers use learned library of chunks from \texttt{L14\_RNA1} to sample from \texttt{L14\_RNA2} and \texttt{L14\_RNA3} showing that the chunks do generalize to structurally similar reward distributions. Zooming in on the performances of each sampler, we see that GFlowNet-induced libraries provide \textit{on-average} better results in terms of mode-discovery than the libraries coming from other samplers. This can be explained by the fact that RL-based methods tend to get stuck in and learn chunks specific to a subspace of the state-space, which fail as a result to generalize to the entire space. While these remarks are true for libraries learned using \textsc{ActionPiece-Increment}, the conclusions do not transfer well to the \textsc{ActionPiece-Replace} mechanism which achieves poor performance. We speculate that this mechanism is too abrupt when updating the library, since it updates all chunks at once, whereas \textsc{ActionPiece-Increment} adopts a more curriculum-like strategy of adding only one chunk at a time, allowing the samplers enough time to adapt to the newly added chunk.
+
+
+
+\section{Conclusion}
+
+
+Abstraction and dynamic concept learning are critical in human cognition and should be modeled in artificial learning systems. In this paper, we investigated dynamic action space learning in the context of amortized samplers. 
+We proposed \textsc{ActionPiece}, an extensible approach which leverages tokenizers to chunk action sequences, which can be viewed as a strategy for trading reduced depth of the MDP in exchange for increased breadth \citep{pignatelli2023survey}. We demonstrated its effectiveness in improving the performance of samplers on a variety of domains with respect to mode discovery and capturing the latent structure of the environment. Our empirical results also indicate that the selected chunks for samplers like GFlowNets capture underlying structure in the target distribution and can generalize to other target distributions. 
+
+\paragraph{Limitations and future work.} In this work, we perform chunking with the BPE tokenizer for a fixed target distribution. Future work can study learning task-conditioned libraries, as well as formulating the problem of learning abstractions as modelling the joint distribution $p(\mathcal{X}, \mathcal{L})$, where $\mathcal{L}$ denotes a library of abstractions -- that is, modeling a \emph{distribution} over possible concept libraries. Future work can also explore the application of the ideas of abstractions discussed in the paper in the context of code generation, where the right abstractions can naturally make complex tasks easier~\citep{ellis2021dreamcoder,stengeleskin2024regal}.
+
+\clearpage
+
+
+

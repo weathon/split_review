@@ -1,0 +1,436 @@
+\title{Representation Shattering in Transformers: A Synthetic Study with Knowledge Editing}
+
+\begin{abstract}
+\vspace{-5pt}
+Knowledge Editing (KE) algorithms alter models' weights to perform targeted updates to incorrect, outdated, or otherwise unwanted factual associations.
+To better identify the possibilities and limitations of these approaches, recent work has shown that applying KE can adversely affect models' factual recall accuracy and diminish their general reasoning abilities.
+While these studies give broad insights into the potential harms of KE algorithms, e.g., via performance evaluations on benchmarks, we argue little is understood as to \textit{why} such destructive failures occur. 
+Is it possible KE methods distort representations of concepts beyond the targeted fact, hence hampering abilities at broad? If so, what is the extent of this distortion?
+Motivated by such questions, we define a novel synthetic task wherein a Transformer is trained from scratch to internalize a ``structured'' knowledge graph.
+The structure enforces relationships between entities of the graph, such that editing a factual association has ``trickling effects'' on other entities in the graph (e.g., altering \texttt{X}'s parent is \texttt{Y} to \texttt{Z} affects who \texttt{X}'s siblings' parent is). 
+Through evaluations of edited models and analysis of extracted representations, we show that KE inadvertently affects representations of entities beyond the targeted one, distorting relevant structures that allow a model to infer unseen knowledge about an entity.
+We call this phenomenon \textit{representation shattering} and demonstrate that it results in degradation of factual recall and reasoning performance more broadly.
+To corroborate our findings in a more naturalistic setup, we perform preliminary experiments with pretrained GPT-2-XL and Mamba models, reproducing the representation shattering effect therein as well.
+Overall, our work yields a precise mechanistic hypothesis to explain why KE has adverse effects on model abilities. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+
+
+Large language models (LLMs) have led to unprecedented advances in several domains~\citep{team2023gemini, bubeck2023sparks, touvron2023llama, thoppilan2022lamda, chowdhery2022palm, qin2023toolllm, chen2021evaluating, ahn2022can, driess2023palm}.
+However, the static nature of their training pipelines implies that as our world evolves, models' internalized knowledge can become incorrect or outdated.
+To address this, recent work has proposed several protocols for knowledge editing (KE), wherein the goal is to minimally and precisely alter model weights such that only the targeted information (and its relevant associations) are updated, but all unrelated information remains (ideally) unaffected~\citep{mitchell2022fast, meng2022locating, meng2023mass, dai2021knowledge, cheng2023editing, decao2021editing, sinitsin2020editable}.
+Despite significant work on the topic, it still remains unclear precisely what effects KE should have on a model.
+For example, assume you edit the fact that ``\textit{Michael Jordan} won the 1998 NBA MVP'' to ``\textit{Reggie Miller} won the 1998 NBA MVP'', then what should the impact of such an edit be?
+Should the model now believe Michael Jordan and the Chicago Bulls never reached the NBA finals in 1998? 
+Should it perhaps believe Reggie Miller was on the Chicago Bulls?
+Should the pop quote ``Be like Mike''~\citep{belikemike} now become ``Be like Reggie''?
+As \citet{hofweber2024language, hase2024fundamental} argue, it is difficult to design clear, well-defined answers for such questions.
+Motivated by this, recent work has started investigating precisely what effects KE actually has on the model~\citep{hoelscherobermaier2023detecting, li2023unveilingpitfalls, lynch2024eight}.
+For example, \citet{cohen2023evaluating} demonstrate that knowledge beyond the edited fact can often be impacted in a detrimental manner, such that the model begins to have an incoherent understanding of the world; \citet{gupta2024model} demonstrate unrelated facts are often forgotten by the model post-editing; and \citet{gu2024modelharm} show that KE can harm broader reasoning capabilities beyond mere factual recall.
+While these works clearly demonstrate the detrimental impacts of editing on a model, they still leave open the question precisely \textit{why} such harms occur---at a mechanistic level, how are model representations impacted such that a broad set of knowledge and capabilities in a model are heavily distorted once an edit occurs?
+\textbf{This work.} To address the questions above, we aim to develop a mechanistic understanding of the impact of KE on a model's internals.
+For this purpose, we argue we must solve two problems: (i) identify how a model expresses knowledge about some predefined set of entities in its representations, and (ii) investigate how this mechanism is affected as we apply KE to alter a fact corresponding to a subset of the entities.
+Instead of attacking a complicated system that may be difficult to interpret (e.g., an off-the-shelf LLM), we take inspiration from a multitude of recent papers that establish synthetic abstractions of the target system and develop precise hypotheses as to why the phenomenon-in-question occurs~\citep{allen2023physics, allen2023knowledge, allen2023manipulation, okawa2023compositional, chan2022data, liEmergentWorldRepresentations2023, lubana2024percolation}.
+Specifically, we define a data-generating process that yields entities arranged in a \textit{structured} knowledge graph.
+This structure is defined via use of a predefined set of relations that \textit{locally} constrain how entities relate to each other (similar to parent-child relations).
+Given enough entities and relations, such local constraints manifest a broader \textit{global} structure in the knowledge graph.
+Performing traversal over the nodes of this knowledge graph, we get sequences that can be used as ``strings'' to train a Transformer on.
+As we show, this protocol leads to the model precisely encoding the structure of the graph in its latent representations.
+However, when KE is applied to edit either incorrectly learned facts or insert counterfactual knowledge (using the method proposed by \citet{meng2022locating}), we find latent representations are heavily distorted and the graph structure completely destroyed---we call this phenomenon \textbf{representation shattering}.
+Interestingly, this phenomenon manifests in proportion to how far the proposed edit moves a given node from its current location to a new location in the graph (defined via edge distance).
+We thus hypothesize representation shattering underlies the detrimental effects of KE on a pretrained model's factual and reasoning capabilities at broad.
+Overall, we make the following contributions in this work.
+
+\begin{figure}
+    \includegraphics[width=\linewidth]{figures/fig1-cropped.pdf}
+    \caption{\textbf{\emph{Representation shattering} explains why knowledge editing can sometimes degrade models' general capabilities.}
+    \emph{(a)} Prior works finds that editing facts, e.g., the president of the US, can sometimes harm general abilities of LLMs (figure reproduced from \citet{gu2024modelharm}).
+    \emph{(b)} We introduce a synthetic data generation process defined by a knowledge graph containing ring-shaped geometries. When we train a model on our synthetic data, we observe that the model's internal representations mirror the ring structure of the underlying data generation process. We then explain the post-edit degradation of the model's capabilities by uncovering the ``shattering'' of latent representations. \edit{In the example provided, while the edit successfully changes the fact (Entity \#124 is to the right of Entity \#123), the model's performance metrics drop after the knowledge edit.}
+    }
+\label{fig:fig1}
+\end{figure}
+
+\begin{itemize}[leftmargin=10pt, itemsep=2pt, topsep=2pt, parsep=2pt, partopsep=1pt]
+
+\item \textbf{Structured Knowledge Graphs as a Toy Setting for Investigating Impact of KE.} We propose use of a structured knowledge graph wherein entities (nodes) are connected to each other via predefined local constraints (relations) that manifest into a broader, global structure in the graph (see Sec.~\ref{sec:dgp}).
+Training Transformers on strings (path traversals) from the graph, we find model representations precisely encode the global structure of the graph.
+This allows us to assess the impact of KE at a more mechanistic level, since distorting a fact now has global effects that can be precisely (and, in fact, visually) delineated by analyzing the model representations.
+\item \textbf{Representation Shattering as a Mechanistic Hypothesis to Explain Detrimental Effects of KE.} We find KE distorts latent representations for entities in the graph such that the global geometry learned during pretraining is, at times, completely destroyed---we call this phenomenon \textbf{representation shattering} and hypothesize it underlies the detrimental effects of KE on model capabilities observed in prior work (see Sec.~\ref{sec:manifolds}). 
+As we show, the extent of harm on latent representations turns out to be correlated to the amount an edit alters the graph from its original organization into the new, desired one.
+
+\item \textbf{Investigations with Off-the-Shelf LLMs.} Using pre-trained GPT2-XL and Mamba models, we provide evidence for our claims about representation shattering in more naturalistic settings. 
+For one, we find real-world analogues to our synthetic knowledge graph structures (i.e., days of the week) and reproduce similar shattering phenomena in GPT2-XL and Mamba to what we observe in our toy setup (see Sec.~\ref{sec:llms}). Additionally, we further reinforce the generality of our findings with preliminary replications of representation shattering under more complex knowledge graph geometries, such as trees (i.e. countries and their cities). 
+
+\end{itemize}
+
+
+
+
+
+
+
+
+
+\section{Related Work}
+
+\label{sec:related}
+
+\textbf{Knowledge Editing.}
+Several protocols for knowledge editing (KE) have been proposed in recent work.
+Early work defined meta-learning based approaches~\citep{sinitsin2020editable, decao2021editing, mitchell2022fast} and established the broader desiderata for what properties a KE protocol should satisfy; e.g., ensuring facts unrelated to the target one are not hampered via the editing protocol.
+Building on work aimed at understanding how Transformers encode knowledge in their internals~\citep{geva2020transformer}, modern KE protocols focus on defining closed-form operations that involve (i) localizing knowledge to specific components in a model (e.g., MLP layers) and (ii) defining operations to alter a factual association by assuming the fact is represented in a localized manner~\citep{meng2022locating, meng2023mass}.
+
+
+\textbf{Evaluations of Knowledge Editing Methods.}
+As argued by \citet{hase2024fundamental, hofweber2024language}, the problem of KE is relatively ill-defined.
+Consequently, it is unclear that when we edit knowledge within a model, what effects said edits \textit{should have} on other facts it may have internalized during training.
+Prior work has hence taken an alternative approach, primarily focusing on developing an empirical understanding of what the phenomenology of KE protocols is: e.g., if an edit is performed, how are counterfactual statements or unrelated facts affected.
+These works generally show that KE in fact has extreme detrimental effects on a model, e.g., hampering both its broader internalized knowledge and its reasoning abilities~\citep{hase2023doeslocalization, cohen2023evaluating, hoelscherobermaier2023detecting, gupta2024model, gu2024modelharm}.
+While the primary methodology used in such papers is to perform empirical benchmarking of a model that has undergone editing, we instead focus on a mechanistic analysis of how editing alters a model's representations (albeit primarily in a toy synthetic task) to yield the undesirable effects on model abilities.
+
+\textbf{Explaining Models via Synthetic Tasks.}
+To disentangle the failures of KE methods from the failures of the models themselves, we argue for use of a more controllable and interpretable setup.
+Such a setup can help identify a concrete hypothesis for why KE has undesirable effects on the model, which we can then analyze in naturalistic settings by designing more precisely defined experiments.
+This methodology of designing toy, control tasks to investigate hypotheses for phenomenology of a neural network has yielded promising results in recent years, providing, e.g., a concrete hypothesis for how chain-of-thought reasoning aids model capabilities~\citep{prystawski2024why, feng2023towards}, models for emergent capabilities~\citep{okawa2023compositional, lubana2024percolation}, existence of nonlinear representations~\citep{engels2024not}, and failure modes for compositional generalization~\citep{zhou2023algorithms}.
+
+
+
+
+
+
+
+\section{Formalzing knowledge editing}
+
+\label{sec:dgp}
+
+Epistemology has grappled with the nature of knowledge for centuries~\citep{chappell2005plato}. 
+In this work we adopt a humble, yet precise definition of knowledge based on structured knowledge graphs.
+A knowledge graph is used to represent how facts, entities, and relations are interlinked, giving rise to notions of consistency, coherency, and reasoning across different pieces of information.
+Using these definitions, we will define a synthetic data generation process on knowledge graphs, in order to systematically study knowledge editing in Transformers.
+\subsection{Knowledge Graphs}
+
+A knowledge graph consists of a collection of entities $X = \{x_i\}_{i=1}^n$, and a collection facts $F$ that relate different entities.
+For example, a graph defined on entities $X = \{\text{``Alice", ``Bob", ``Carol"}\}$ can encode the fact ``Alice is the advisor of Bob" using the relation ``advisor", represented as $(\text{``Alice"}, \text{``advisor"}, \text{``Bob"})$. 
+
+\begin{definition}[\textbf{Knowledge graph}]
+    Formally, a knowledge graph $G=(X, R, F)$ consists of nodes $X$, relations $R$, and facts $F$, where each fact $f = (x_i, r, x_j) \in R$ is defined by a relation $r \in R$ between two entities $x_i, x_j \in X$.
+\end{definition}
+    
+A \textbf{relation sub-graph} corresponds to a sub-graph constructed by only considering facts that use relation $r$. For example $G_{\text{advisor}}$ is a sub-graph that specifies all facts for the relation ``advisor". Every knowledge graph contains  a collection of facts that can be inferred from the graph.
+Related pieces of information such as “Alice’s advisor was Bob” and “Bob’s advisor was Carol” can be composed to form cohesive statements such as “Alice’s advisor’s advisor was Carol. To capture such statements, we define  compositions of relations below.
+The composition of relations are essential to capture ripple effects that occur in the knowledge graph after an edit~\citep{cohen2023evaluating} to a relation in $R$.
+
+\begin{definition}[\textbf{Composition of relations}]
+    A composition of relations $\vec r = (r_1, r_2, \cdots, r_k) \in R^k$ with respect to knowledge graph $G$ is defined such that for every fact $f = (x_i, \vec r,  x_j)$, there exists a collection of facts $\{(x_i, r_{i}, x_{i+1})\}_{i=1}^k$ for which $x_1=x_i$ and $x_{k+1}=x_j$. In other words, any fact defined on the composition of relations has a corresponding set of facts defined on relations from $R$. Furthermore, the set of facts form a path in the knowledge graph such that the sequence of relations in the path are $r_1, r_2, \cdots r_k$.
+\end{definition}
+
+\subsection{Cyclic graphs: a description of the entities and relations}
+
+\begin{wrapfigure}[15]{r}{0.4\textwidth}
+  \centering
+  \includegraphics[width=0.48\linewidth]{figures/month_layer_3_11_isomap.pdf}
+  \includegraphics[width=0.48\linewidth]{figures/day_layer_1_14_isomap.pdf}
+  \caption{
+    \textbf{Isomap projections of representations in Llama-3.1-405B~\citep{fiotto2024nnsight}.}
+    The geometry of the data---for example, the cyclic nature of months or days---is often reflected in the representations learnt by language models. Similar representations can also be found in other models like GPT-2-Small and Mistral 7B \citep{engels2024not}.
+  }
+  \label{fig:ring_llm}
+\end{wrapfigure}
+
+We study knowledge graphs where every relation sub-graph is a set of disjoint cyclic graphs, i.e., for every entity $x_i$ and relation $r$, there exists exactly one entity $x_j$ such that $(x_i, r, x_j) \in F$.
+We specifically choose a cyclic geometry as a global constraint on the graph structure since cycles are a common pattern that relate entities in natural language domains; e.g., see~\Fref{fig:ring_llm}, where we show a 2D projection of representations from Llama-3.1-405B corresponding to months of a year and days of the week naturally organize in a cyclic fashion.
+
+Knowledge editing methods, e.g., ROME~\citep{meng2022locating, meng2023mass}, target a set of entities for which predefined facts are to be edited, while using another retain set of facts about said entities to help ensure relations beyond the targeted ones are not altered. A test set of facts are then used to evaluate how well the method worked.
+\edit{Motivated by this, we define a knowledge graph with 2048 entities (denoted by 1-2048) over which we define 3 cyclic orders (order \RNum{1}, \RNum{2} and \RNum{3}).
+The cyclic orders are generated using random permutations of the entities.
+We create 8 relations for each cyclic order totaling to 24 relations.
+The 8 relations correspond to the 1-hop, 2-hop, 3-hop and 4-hop neighbors in the clockwise and anti-clockwise directions in the cycle.
+The relations are named after a combination of the cyclic order (\RNum{1}, \RNum{2}, \RNum{3}), the neighbor's distance (between 1-4) and the neighbor's direction (\texttt{C}lockwise, \texttt{A}nti-clockwise).
+For instance, the relation ``\texttt{\RNum{1}\_C2}'' denotes the 2-hop neighbor in the clockwise direction, with respect to cyclic order \RNum{1}.''
+}%
+The 1-hop neighbor relation graphs (both clockwise and anti-clockwise) contain a single cycle, 2-hop relation graphs consist of 2 cycles, the 3-hop relation graph contains 1 cycle, while the 4-hop relation graph contains 4 cycles.
+The k-hop neighbor relations are related to each other by design, so any edit to one k-hop relation should be consistent with all other k-hop relations.
+An edit corresponds to changing a fact in the knowledge graph and can also be interpreted as changing an edge in the relation graph. 
+For an illustrative example, see~\Fref{fig:grammar}.
+
+Depending on the fact being edited, the 3 cyclic orders are used to define the  edit sub-graph, the retain sub-graph, and the test sub-graph.
+Why do we create 3 cyclic orders? 
+The knowledge editing method targets \textbf{edit sub-graph relations}.
+The facts based on edit relations are then tested to check if a knowledge edit was successful.
+The \textbf{retain sub-graph relations} are used by the knowledge editing algorithm to minimize changes to unrelated relations, but no edits are made to facts that use these relations. 
+The \textbf{test sub-graph relations} are used to define facts that are neither directly edited, nor used by the knowledge editing algorithm. The relations are used to evaluate whether unrelated facts remain unchanged after a knowledge edit.
+\edit{We note that relations for all 3 sub-graphs are seen during pre-training and this distinction between the cyclic orders is made only during model editing.}
+
+The \textbf{distance} of an edit (shown in \Fref{fig:grammar}) is defined as the shortest distance between the original and edited entity in the cyclic order.
+
+\subsection{Experimental Setup}
+
+\setlength\intextsep{1pt}
+\begin{wrapfigure}[31]{r}{0.5\textwidth}
+\centering
+\includegraphics[width=1.0\linewidth]{figures/dgp-cropped.pdf}
+\caption{\textbf{Synthetic data generation process with a cyclic knowledge graph.} 
+The entities (nodes) are arranged according to 3 different cyclic orders.  Each entity (node) has relations (directed edges) pointing to $8$ other entities in each cyclic order which totals to 24 relations across all 3 orders. The relations correspond to 1-4 hop neighbors in the clockwise and anti-clockwise directions. We select a random path on the knowledge graph using all 24 relations to generate a prompt, which is shown above. \edit{The relations follow the naming convention of $\langle\text{cyclic-order}\rangle\_\langle\text{direction}\rangle\langle\text{hops}\rangle$, i.e. \texttt{\RNum{2}\_A3} is the relation corresponding to the three-hop anti-clockwise neighbor in the second cyclic order.
+In cyclic order \RNum{1}, the above figure denotes an edit for a relation between Entity 1 to Entity 3 ({\textcolor{red!70!black}{red}}) to a relation between Entity 1 to Entity 2 ({\textcolor{green!50!black}{green}}). The distance of the edit is 1, as defined with respect to cyclic order \RNum{1}.}
+}
+\label{fig:grammar}
+\end{wrapfigure}
+
+\textbf{Data-generating process.} We generate a sequence of alternating entities and relations resembling  $x_1 \vec r_1 x_2 \vec r_2 x_3 \vec r_3 \dots$, where any consecutive triplet of entity, relation, and entity $x_i r_i x_{i+1}$ from the sequence is a fact $(x_i, \vec r_i, x_{i+1})$ in the knowledge graph. 
+The composition of relations $\vec r_i = r_{i1} r_{i2} r_{i3} \dots $ is a sequence of 1 or more relation tokens, while $x_i$ is a single entity token.
+Every token is sampled using a uniform probability over all the permissible choices (see Alg.~\ref{alg:sample}).
+\edit{
+For example, a plausible sequence for the example in \Fref{fig:grammar} is ``\texttt{1 I\_C4 4 \RNum{3}\_A2 8 \RNum{3}\_A3 3 \RNum{2}\_C2 7}'', which is an alternating sequence of entities and k-hop relations.
+As previously noted, relations belonging to all three cyclic orders are included in the data generation process; the distinction between edit, retain, and test relations is only relevant to knowledge editing on a trained model. }
+Furthermore, we remark that this sampling process is identical to traversing random walks on the knowledge graph, similar to previous works~\citep{prystawski2024why, khona2024towards}.
+
+\textbf{Training setup.} We train a Transformer model using next-token prediction on the synthetic data generated from the above data generation process. For all experiments (unless stated otherwise), we use a 2-layer nanoGPT Transformer~\citep{karpathy}.
+
+\textbf{Evaluation (seen facts).} We assess the model's ability to remember facts seen during training, both before and after an edit. Specifically, to analyze whether the model has learned the fact $(x_i, \vec r, x_j)$, we prompt it with an entity $x_i$ and a relation $\vec r$, expecting it to produce $x_j$ as the next token.
+\edit{In practice, the model outputs can vary across prompts: we account for this by averaging the softmax probabilities across $5$ randomly sampled sequences of the form $\dots x_i\vec r$ and using the output token with the highest probability.}
+
+\textbf{Evaluation (unseen facts).} We also evaluate the model on two other criteria.
+    (1) \textbf{Compositional inference.} In addition to facts seen in the training data, we evaluate the model on compositions of relations. The model must preserve geometric structures of the data in order to compositionally generalize after a knowledge edit.
+    (2) \textbf{Logical inference.} A key feature of reasoning in natural language is logical inference. For example, if Alice is said to be the advisor of Bob, then Bob is an advisee of Alice (even if it is not explicitly stated). Our data generation process has similar relations, such as clockwise and anti-clockwise 1-hop neighbors. By ``holding out'' one direction for some such pairs of relations from being observed verbatim in the training dataset, i.e., the relation may only appear compositionally, we can assess the degree to which the model internalizes properties among related relations. We can also evaluate if editing a fact for a relation changes the fact for other related relations, i.e., we check if the model's knowledge is logically self-consistent after an edit.
+    
+
+\subsection{Representation shattering} 
+
+\edit{In this work, we explore the hypothesis that knowledge editing methods distort the geometry of the representations of entities in the knowledge graph. We believe this distortion can give us insight into why knowledge editing degrades the general capabilities of the model. In the following sections, we investigate the following hypothesis.
+}
+
+\begin{hypothesis}[\textbf{Representation shattering}]
+    \textit{Language models embed related entities on a manifold in their internal representations. KE methods distort this manifold in order to insert new facts or alter old ones, i.e., they shatter model representations. The extent of representation shattering increases with the distance between the old fact and the desired new fact on the manifold.}
+\end{hypothesis}
+
+\edit{%
+To quantify the extent of representation shattering, we define a precise metric to capture the amount of distortion of the representations: 
+\begin{equation}
+R(D_*) = \frac{||D_{*} - D_\varnothing||_F}{||D_\varnothing||_F},
+    \label{eq:rep-expr}
+\end{equation}
+ where $||D||_F$ is the Frobenius norm of $D$, $D_\varnothing$ the pairwise distance matrix of the entities computed using the unedited model, and $D_*$ is the pairwise distance matrix computed using the edited model. The distance between entities is computed by measuring the euclidean distance between the representation vector of each entity.
+ }
+
+ 
+
+
+
+\section{Uncovering Representation Shattering}
+
+\label{sec:manifolds}
+
+\begin{table}[t]
+    \centering
+    \makebox[\linewidth][c]{
+        \tablescale{
+            \begin{tabular}{l||lc||lc|cccc}
+                \toprule
+                \multirow{2}{*}{\textbf{Test type}} & \multicolumn{2}{c||}{\textbf{(a) Unedited model}} & \multicolumn{2}{c|}{\textbf{(b) Corrective edits}} & \multicolumn{4}{c}{\textbf{(c) $\langle \Delta \text{Acc.} \rangle$ for Counterfactual edits}}  \\
+                & {Cyclic Order} & \multicolumn{1}{c||}{Acc.} & {Sub-Graph} & \multicolumn{1}{c|}{$\langle \Delta \text{Acc.} \rangle$} & $d=1$ & $d=2$ & $d=3$ & $d=4$ \\
+                \midrule
+                \multirowcell{3}[0pt][l]{Direct recall} & \RNum{1} & 98.34 & Edit & -21.95 & -01.49 & -67.01 & -77.07 & -77.94 \\
+                & \RNum{2} & 93.71 & Retain & -22.64 &-01.91 & -66.70 & -75.49 & -75.42 \\
+                & \RNum{3} & 99.37 & Test & -21.83 &  -01.75 & -67.00 & -76.12 & -77.90 \\\midrule
+                
+                \multirowcell{3}[0pt][l]{Logical\\inference} & \RNum{1} & 98.16 & Edit & -22.24 & -01.44 & -67.22 & -77.14 & -78.02 \\
+                & \RNum{2} & 93.95 & Retain & -22.50 & -01.83 & -66.88 & -75.67 & -75.67 \\
+                & \RNum{3} & 99.40 & Test & -22.03 & -01.80 & -67.31 & -76.27 & -78.23\\ \midrule
+        
+                \multirowcell{3}[0pt][l]{Compositional\\inference} & \RNum{1} & 88.15 & Edit & -29.60 & -05.32& -73.15 & -80.35 & -80.63 \\
+                & \RNum{2} & 79.31 & Retain & -31.92 & -05.32 & -71.21 & -78.70 & -78.87 \\
+                & \RNum{3} & 93.50 & Test & -31.70 & -06.69 & -74.88 & -81.38 & -80.62 \\
+                \bottomrule
+            \end{tabular}
+        }
+    }
+        \caption{
+            \textbf{The direct recall, logical inference, and compositional inference accuracies before and after KE.} \edit{Results are for ROME; see \Aref{app:alternate_editing1} for other methods.} \emph{(a)}~The performance of our model (before editing) across the three cyclic orders (\RNum{1}, \RNum{2}, and \RNum{3}). Not only does our model perform well on direct recall, but it also generalizes to both logical and compositional inference tasks. This suggests that the model's internal representations extend beyond simple memorization and capture the underlying global structure that relates entities.
+            \emph{(b)}~Changes in model accuracy after applying corrective knowledge edits. Each $\langle \Delta \text{Acc.} \rangle$ result is averaged across multiple edits, and each row labeled edit/retain/test is averaged across each of the cyclic orders \textit{taking turns}, i.e., playing the roles of the edit, retain, and test sub-graphs. We find that corrective knowledge edits negatively affect the model's accuracy both on related and unrelated facts. These results align with the findings on LLMs~\citep{gu2024modelharm, gupta2024model}.
+            \emph{(c)} $\langle \Delta \text{Acc.} \rangle$ for edit, retain, and test sub-graphs after applying counterfactual edits. Intentionally introducing inconsistencies into the model's knowledge via counterfactual KE can significantly degrade model capabilities. Furthermore, the greater the induced inconsistency (scaling the counterfactual edit distance $d$ from 1-4), the more severe the resulting performance degradation. 
+        }
+        \label{tab:model-stats}
+\end{table}
+
+\edit{We study knowledge editing methods like ROME~\citep{meng2022locating}, MEMIT~\citep{meng2022mass}, PMET~\citep{li2024pmet}, and AlphaEdit~\citep{fang2024alphaedit} in this work.}
+We perform two different types of edits: corrective edits and counterfactual edits. \textbf{Corrective edits} are applied to facts which the model recalls \textit{incorrectly} after training.
+A \textbf{counterfactual edit} introduces a new fact, i.e., it changes fact $(x_i, r, x_j)$ to fact $(x_i, r, x_k)$ where $x_j \neq x_k$. Such an edit introduces inconsistencies in the knowledge graph.
+
+Overall, we show the following.
+\begin{enumerate*}[label=(\arabic*)]
+    \item Transformers trained on knowledge graphs recall facts, perform logical inferences, and compositional inferences.
+    However, \textit{both corrective and counterfactual edits degrade the model on all three fronts}.
+    \item Transformers learn a representation that reflects the underlying geometry of the data. \textit{Knowledge edits ``shatter'' this representation, which serves as an explanation for the degradation in accuracy after KE.}
+    \item Counterfactual edits with larger distance display a larger degree of shattering.
+    \item \textit{These phenomena occur in pretrained language models}, indicating representation shattering can explain degradation in model abilities after KE.
+\end{enumerate*}
+\subsection{Evaluating the effects of knowledge editing}
+
+\label{sec:eval-ke}
+
+We evaluate the effects of counterfactual and corrective edits on three fronts. 
+\textbf{Direct recall accuracy} calculates the accuracy of facts seen during training.
+\textbf{Logical inference accuracy} measures the accuracy on a subset of held out relations that can be inferred from other relations, i.e., the k-hop anti-clockwise neighbors can be inferred directly from the k-hop clockwise neighbors.
+\textbf{Compositional inference accuracy} measures the accuracy on a held out subset of compositions of two relations.
+Both logical inference and compositional inference measure the accuracy on samples that would be considered \textit{out-of-distribution}.
+
+We report scores for all three metrics in \Tref{tab:model-stats}. 
+The model's logical and compositional inference accuracies are close to the direct recall accuracy, which implies that the model generalizes outside of the training data before KE. \textbf{However, after KE, all accuracies decrease, with a more severe decrease for counterfactual edits} (they introduce inconsistencies between facts).
+
+\begin{figure}[t]%[t!]
+    \centering
+    \begin{minipage}[b]{0.8\textwidth}
+    \includegraphics[width=1\textwidth]{figures/emergence_ring.pdf}
+    \subcaption*{(a)}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}[b]{0.2\textwidth}
+    \includegraphics[width=1\textwidth]{figures/guided-isomap.png}
+    \subcaption*{(b)}
+    \end{minipage}%
+  \caption{\textbf{Transformers learn representations that mirror the geometry of the underlying data.} \emph{(a)}~The representations---or output of the second attention layer---for the input $x \vec r$ for different entities $x$ and fixed relation $\vec r$ are visualized using Isomap. {The model learns the cyclic ordering to represent all the facts. \emph{(b)}~To improve the visual fidelity of the projected representations when comparing representations of post-edit models to the unedited model, we construct Isomap neighborhood graphs using the outputs of the Transformer.
+}
+\label{fig:isomap}
+\end{figure}
+\subsection{Transformer representations capture the geometry of the data}
+\label{ss:rep_geom}
+
+The model achieves high compositional and logical inference accuracies before knowledge editing, indicating that it captures the global structure of the data and does not merely memorize all the facts seen during training.
+We see this reflected in the internal representation of the model (output of the second attention layer), which we visualize using Isomap~\citep{tenenbaum2000global}---a non-linear dimensionality reduction method that uses multi-dimensional scaling with distances computed using a local neighborhood graph.
+In \Fref[a]{fig:isomap}, we plot the evolution of the Isomap embedding---of the internal representation for the input with one entity and relation ($x \vec r$)---over the course of training. The different data points correspond to different values of the entity $x$, for a fixed relation $\vec r$ and the points in the plot are colored by the cyclic ordering.
+\textbf{We see that the representation manifold resembles the cyclic ordering of the entities, particularly towards the end of training.}
+
+
+
+\subsection{Corrective knowledge edits shatter the representation geometry}
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[b]{0.22\textwidth}
+        \includegraphics[width=\textwidth]{figures/fig4_left_3d_plot.pdf}
+        \subcaption*{(a)}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}[b]{0.57\textwidth}
+        \includegraphics[width=\textwidth]{figures/fig4_right_visualizations_constrained.pdf}
+        \subcaption*{(b)} % Label right plot as (c)
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.20\textwidth}
+        \includegraphics[width=\textwidth]{figures/fig4_2d_plot_all_points_constrained.pdf}
+        \subcaption*{(c)} % Label bottom-left plot as (b)
+    \end{minipage}%
+    \caption{\textbf{Representation shattering strongly correlates with a degradation in accuracy.} 
+    \emph{(a)} We plot the change in direct recall, logical inference, and compositional inference accuracies for different edits models, edited on different facts. We find all 3 accuracies to be strongly correlated. We select 3 edited models that span the range of accuracies, which is denoted by \redx,~\orangetriangle and \greenstar~in the plot.
+  We observe a clear trend where larger drop in accuracy directly correlates with a greater degree of representation shattering, i.e., the geometric structure of the data is destroyed after the edit.
+     \emph{(c)} We plot the mean drop in accuracy against the representation shattering metric $R(D_*)$ as defined in \Eref{eq:rep-expr}. Greater representation shattering is strongly correlated with more severe accuracy degradation ($r^2 = 0.905$). 
+     }
+    \label{fig:deg}
+\end{figure}
+We assess how the representation changes after applying a corrective knowledge edit---i.e., applying KE to a fact that the model learned incorrectly during training.
+While one would expect the performance of the model to increase after a corrective edit, we find the opposite: \textit{a corrective edit results in a drop in all accuracies} (see \Tref{tab:model-stats}).
+These results align with previous empirical findings showing that reasoning capabilities degrade after corrective edits~\citep{gu2024modelharm, cohen2023evaluating}.
+
+We visualize the representations of 3 different models using the techniques described in \ref{ss:rep_geom}.
+The 3 models are obtained after applying 3 different edits and are selected to have high (\greenstar), intermediate (\orangetriangle), and low (\redx) direct recall accuracies.
+In \Fref{fig:deg}, we observe that the model with the highest accuracy (\greenstar) has a representation that preserves the geometry of the data after the edit.
+However, as the model accuracy decreases, the representations also display a greater degree of distortion, no longer capturing the geometry of the data; in other words, the model is affected by representation shattering. 
+\edit{Beyond visual inspection, this trend is also quantified in \Fref[c]{fig:deg}, which shows a strong negative relationship between the distortion metric $R(D_*)$ (\Eref{eq:rep-expr}) and model accuracy ($r^2 = 0.905$).}
+\subsection{How do different counterfactual edits change the extent of shattering?}
+\label{sec:counterfactual}
+
+\begin{wraptable}[11]{r}{0.5\textwidth}
+\centering
+    \centering
+    \makebox[\linewidth][c]{
+        \tablescale{
+            \begin{tabular}{l||cccc}
+                \toprule
+                \textbf{Sub-Graph} & $d=1$ & $d=2$ & $d=3$ & $d=4$ \\
+                \midrule
+                Edit & $01.80$ & $21.93$ & $26.22$ & $27.90$ \\ 
+                Retain & $01.80$ & $20.84$ & $25.32$ & $27.28$ \\ 
+                Test & $01.84$ & $21.89$ & $26.52$ & $28.68$ \\
+                \bottomrule
+            \end{tabular}
+        }
+    }
+
+        \caption{
+        Mean $R(D_*)$ for counterfactual edits, averaged across each sub-graph type. We observe higher degrees of representation shattering for greater counterfactual edit distances ($d$). Results are for ROME; other methods also reproduce this relationship (\Aref{app:alternate_editing2}).
+        }
+        \label{tab:shattering-counterfactual}
+\end{wraptable}
+
+\begin{figure}[!t]%[t!]
+  \begin{center}
+    \includegraphics[width=0.95\columnwidth]{figures/Figure_5_constrained.pdf}
+  \end{center}
+  \caption{
+    \textbf{Counterfactual edits with larger edit distance result in larger drop in accuracy and greater degree of representation shattering.} We apply counterfactual knowledge edits to overwrite a correctly learned fact (\texttt{1154.\RNum{1}\_C1=567}) with inconsistent counterfactual associations. 
+
+    \edit{The numerical quantity in the upper right of each manifold visualization is the $R(D_*)$ value measuring the degree of representation shattering with respect to the manifold of the unedited model.}
+    Both visually and numerically, we find that a counterfactual edit with larger edit distance requires a significant distortion to the representation geometry to learn the new fact.
+}
+\label{fig:shatter}
+\end{figure}
+
+Counterfactual editing, wherein ones adds new facts that were unseen during training, is commonly used for evaluating KE protocols~\citep{meng2022locating, meng2023mass,gupta2024model,hoelscherobermaier2023detecting}.
+We consider 25 different counterfactual edits corresponding to every single counterfactual edit distance, where the counterfactual edit distance (or CE distance) is the distance between the entity in the old fact and new fact as measured in the cyclic order. \Fref{fig:grammar} illustrates an example where the counterfactual edit has an edit distance of 1. 
+In \Fref{fig:shatter}, \textbf{we see that increasing the distance of the counterfactual edit results in a drop in accuracy and an increasing in the extent of shattering}.
+\edit{This relationship is numerically supported by $R(D_*)$ as shown in \Tref{tab:shattering-counterfactual}: shattering increases as counterfactual edit distance increases.}
+In other words, when a new fact changes one entity to another, the extent of shattering increases as the distance between the old and new entity increases. 
+As a naturalistic parallel, if the entities are different months, accuracy is higher when we edit ``December" to ``November" as opposed to ``July".
+
+
+\subsection{Representation shattering in LLMs}
+\label{sec:llms}
+\begin{wrapfigure}{r}{0.5\textwidth}
+\centering
+\includegraphics[width=0.58\linewidth]{figures/llm_result/gpt2_reasoning_accuracy.pdf}
+    \caption{\textbf{Inducing representation shattering via KE degrades model performance in a real LLM (GPT-2). } We evaluate GPT-2's ability to perform a reasoning task from \cite{gu2024modelharm} before and after editing. As the edit distance grows, accuracy gradually decreases, with a notable drop at distance 4, coinciding with the point of representation shattering. 
+    }\label{fig:llm_accuracy}
+\end{wrapfigure}
+
+Finally, we investigate whether our findings generalize to large Transformers trained on naturalistic data.
+We consider concepts with a cyclic order, in particular months of the year, and apply a counterfactual edit to GPT-2~\citep{radford2019language} and \edit{Mamba S4~\citep{mamba} (see \Aref{sec:rome-with-mamba})} using ROME to change the order of months.
+\edit{We additionally explore non-cyclic geometries, specifically tree-structured concepts, and their representation shattering in \Aref{appx:naturalistic-trees}.}
+We generated prompts following the template described in \cite{engels2024not}, which include prompts such as ``\texttt{Let's do some calendar math. One months from January is February...}". For a distance-1 edit, we modified the answer to ``\texttt{March}"; for a distance-2 edit, we changed it to ``\texttt{April}", and so on.
+We then updated the parameters of GPT-2 with these new prompt-answer pairs using ROME.
+\Fref{fig:llm_ring} shows the latent representations for the 12 months extracted from the GPT-2 model before and after the edit.
+\textit{We find that as we vary the edit distance from 1 to 5, the observed representation shattering increases.}
+In \Fref{fig:llm_accuracy}, we examine the impact of representation shattering on model performance. We evaluated the GPT-2 model on the reasoning task from \cite{gu2024modelharm} both before and after editing.
+As the edit distance increases, we observe a gradual decline in accuracy, with a drop at distance of 4, which corresponds to the point of representation shattering. This result demonstrates that our findings from synthetic data can generalize to larger models trained on naturalistic data. 
+
+\begin{figure}[t]%[t!]
+  \begin{center}
+    \includegraphics[width=0.8\columnwidth]{figures/isomap_gpt2-xl_2d.pdf}
+  \end{center}
+  \caption{\textbf{Representation shattering also occurs in real LLMs (GPT-2) for months of year.} We applied KE (ROME) with counterfactual prompts for the order of months to GPT-2. The ring structure holds for edit distances up to 3 but becomes untied for distances 4 and 5. \edit{See \Aref{sec:rome-with-mamba} for similar results with Mamba S4~\citep{mamba}, and \Aref{appx:naturalistic-trees} for experiments with concepts organized in a non-circular geometry.}
+}
+\label{fig:llm_ring}
+\end{figure}
+
+
+
+
+
+\section{Conclusion}
+
+\label{sec:discussion}
+
+In this work, we introduced a synthetic framework to analyze the side effects of knowledge editing in transformers, identifying ``representation shattering'' as a key factor behind performance degradation. 
+Specifically, we show preserving representational structures underlying a model’s knowledge is crucial to avoiding negative consequences of knowledge editing: distortion of such structures impacts a model’s broader capabilities. 
+To arrive at this hypothesis, we design a controlled framework that allows investigations into models modified by knowledge editing protocols, offering clear representation-level explanations for why knowledge editing can harms models' broader capabilities that generalize to real-world models like GPT-2.
+\edit{While the use of simplified tasks and models can limit the scope of our conclusions, since larger, more complex real-world models may exhibit additional dynamics that our framework does not capture, we do believe that testing knowledge editing protocols on setups similar to our synthetic, knowledge graph one will significantly aid design of better editing protocols. 
+We claim failing even such simple, albeit systematically defined settings, likely implies the editing protocol should not be readily trusted or applied at scale.}
+
+
+
+
+

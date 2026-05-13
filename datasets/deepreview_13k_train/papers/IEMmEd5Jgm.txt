@@ -1,0 +1,422 @@
+\title{X-Drive: Cross-modality Consistent Multi-Sensor Data Synthesis for Driving Scenarios}
+
+\begin{abstract}
+Recent advancements have exploited diffusion models for the synthesis of either LiDAR point clouds or camera image data in driving scenarios.
+Despite their success in modeling single-modality data marginal distribution, there is an under-exploration in the mutual reliance between different modalities to describe complex driving scenes. %a specific street view.
+To fill in this gap, we propose a novel framework, \ourmethod{}, to model the joint distribution of point clouds and multi-view images via a dual-branch latent diffusion model architecture.
+Considering the distinct geometrical spaces of the two modalities, \ourmethod{} conditions the synthesis of each modality on the corresponding local regions from the other modality, ensuring better alignment and realism.
+To further handle the spatial ambiguity during denoising, we design the cross-modality condition module based on epipolar lines to adaptively learn the cross-modality local correspondence.
+Besides, \ourmethod{} allows for controllable generation through multi-level input conditions, including text, bounding box, image, and point clouds. Extensive results demonstrate the high-fidelity synthetic results of \ourmethod{} for both point clouds and multi-view images, adhering to input conditions while ensuring reliable cross-modality consistency.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Autonomous driving vehicles perceive the world with multiple sensors of different kinds, where LiDAR and cameras play crucial roles by capturing point clouds and multi-view images. 
+They provide complementary geometric measurements and semantic information about the surrounding environment, significantly benefiting tasks such as object detection~\citep{liu2023bevfusion,xie2023sparsefusion}, motion planning~\citep{sobh2018end}, scene reconstruction~\citep{huang2024textits3gaussianselfsupervisedstreetgaussians,zhou2024drivinggaussian}, and self-supervised representation learning~\citep{yang2024unipad,xie2024cohere3d}.
+However, these advancements hinge on access to \textit{large amounts of aligned multi-modality data}, specifically well-calibrated LiDAR and multi-view camera inputs that describe the same scene.
+
+Scaling up the collection of such high-quality multi-modality data is costly and a non-trivial effort.
+The high-quality sensors are expensive, and the calibration process demands intensive human efforts.
+Additionally, real-world driving data suffers from the severe long-tailed distribution problem, making it an obstacle for corner case collection such as in extreme weather conditions.
+This raises a natural question: \textit{Can we use a controllable way to synthesize aligned multi-modality data?}
+Given the success in other fields~\citep{rombach2022high,blattmann2023align,liu2023zero}, generative models offer a promising solution. 
+Current research focuses either on synthesizing point clouds~\citep{zyrianov2022learning,hu2024rangeldm,ran2024towards} or multi-view images~\citep{gao2023magicdrive,wang2023drivedreamer,wen2024panacea}, with limited attention paid to generating multi-modality data.
+A simple combination of these single-modality algorithms results in serious cross-modality mismatches in the synthetic scenes (Fig.~\ref{fig:teaser-previous}).
+Such inconsistencies create ambiguities and even contradictory inputs or supervision signals, thus hindering the performance of downstream tasks.
+
+\textit{Cross-modality consistency} serves as the key desiderata of multi-modality data generation. However, there are several challenges in the  generation of consistent LiDAR and camera data.
+Firstly, synthetic point clouds and multi-view images must be spatially aligned in all the local regions since they describe the same driving scene, \textit{i.e.} the shapes and layouts of both foregrounds and backgrounds must be matched. 
+Secondly, unlike those 2D pixel-level tasks~\citep{zhang2023adding}, point clouds and multi-view images have distinct geometrical spaces and data formats. Multi-view images are represented by RGB values in camera perspective views, while point clouds are XYZ coordinates in the 3D space. 
+Thirdly, the 3D spatial information is ambiguous during generation for both point clouds and multi-view images without reliable point location or pixel depth in the denoising process.
+
+In this paper, we fill in this gap by proposing \ourmethod{}, a novel framework for the joint generation of LiDAR and camera data, as demonstrated in Fig.~\ref{fig:teaser-ours}.
+We design a dual-branch architecture with two latent diffusion models separately dedicated to the synthesis of point clouds and multi-view images, while a key cross-modality condition module enhances \textit{cross-modality consistency} between them.
+To model the joint distribution and ensure local spatial alignment, we perform the cross-modality conditions locally with only corresponding regions from the other modality considered.
+An explicit transform bridges the two different geometrical spaces, converting the cross-modality condition to match each other's noisy latent space.
+To handle the positional ambiguity, we resort to a 3D-aware design based on epipolar lines on range images and multi-view images, allowing the cross-attention module to adaptively determine the cross-modality correspondence without explicit 3D positions.
+In consequence, \ourmethod{} is able to exploit existing single-modality data as conditions to seamlessly generate data in the other modality.
+Additionally, \ourmethod{} enhances controllability by introducing 3D bounding boxes for geometrical layout control and text prompts for attribute control (\textit{e.g.} weather and lighting), enabling more flexible, fine-grained, and precise control over both modalities.
+
+Extensive experiments demonstrate the great ability of \ourmethod{} in generating realistic multi-modality sensor data. It notably outperforms previous specialized single-modality algorithms in the quality of both synthetic point clouds and multi-view images.
+More importantly, for the first time, it demonstrates reliable cross-modality consistency in synthetic scenes with comprehensive and flexible conditions.
+Our contributions are summarized as follows.
+\begin{itemize}[leftmargin=*]
+    \item We introduce \ourmethod{}, a dual-branch multi-modality latent diffusion framework that, for the first time, enables controllable and reliable synthesis of aligned LiDAR and multi-view camera data.
+    \item 
+    Our cross-modality epipolar condition module bridges the geometrical gap under spatial ambiguity between point clouds and multi-view images, significantly enhancing modality consistency.
+    \item Extensive experimental results demonstrate the effectiveness of \ourmethod{}, with notable MMD (for point cloud generation) and FID (for multi-view generation) improvements, establishing a new state-of-the-art for remarkable cross-modality consistency.
+\end{itemize}
+
+
+\section{Related Works}
+
+\noindent \textbf{Conditional generation with diffusion models.} Diffusion models~\citep{ho2020denoising,dhariwal2021diffusion,podell2023sdxl,peebles2023scalable} exhibit remarkable ability in generating diverse images by learning a progressive denoising process. They yield state-of-the-art results in various tasks such as text-to-image generation~\citep{rombach2022high,nichol2021glide}, text-to-video generation~\citep{singermake,yugenerating}, and instructional image editing~\citep{brooks2023instructpix2pix,mengsdedit}. Beyond text condition, several works emerges with the competence in managing additional forms of control signals. \cite{zhang2023adding} integrates spatial conditions to a pretrained text-to-image diffusion model via efficient finetuning. \cite{li2023gligen,zheng2023layoutdiffusion} condition the image synthesis on the fine-grained geometrical annotations to facilitate downstream tasks like 2D object detection. \cite{liu2023zero,sargent2024zeronvs} introduce 3D-aware diffusion models for novel view synthesis based on single-view image inputs. Unlike these prior work for image domain, our framework simultaneously generates point clouds and multi-view images conditioned on text prompts and 3D bounding boxes.
+
+\noindent \textbf{Cross-modality data generation.} Beyond image domain, generative models are extended to the synthesis of multi-modality data. \cite{hu2024depthcrafter,shao2024learning} leverage video diffusion model to estimate sequential depths. \cite{bai2024sequential} formulates various vision tasks as next token prediction by extracting diverse visual information as unified visual tokens. The cross-modality synthesis between videos and audios also draws great attention. Efforts are devoted to the video-to-audio~\citep{zhudiscrete}, audio-to-video~\citep{chatterjee2020sound2sight}, bi-directional~\citep{chen2017deep,hao2018cmcgan}, and joint multi-modality~\citep{ruan2023mm} generation. However, in all the above cases, there exists clear cross-modality alignments, such as the pixel-to-pixel spatial correspondence for depth estimation and frame-to-frame temporal alignment between audios and videos. In contrast,  point clouds and multi-view images are in different geometrical spaces without clear one-to-one local correlation between noisy multi-modality samples.
+
+\noindent \textbf{Generation of vehicle sensor data.} Panoramic driving environment is usually perceived by the multi-view cameras and LiDARs on the ego-vehicle. Alternative to the laborious collection and annotation process, many works resort to the fast-growing generative models for the synthesis of either camera~\citep{swerdlow2024street,yang2023bevcontrol,gao2023magicdrive} or LiDAR~\citep{zyrianov2022learning,hu2024rangeldm,zyrianov2024lidardm} sensor data. For multi-view images~\citep{yang2023bevcontrol,wang2023drivedreamer,gao2023magicdrive} or videos~\citep{wen2024panacea,lu2023wovogen}, previous work leverages pretrained image diffusion models~\citep{rombach2022high} by incorporating extra inter-view modules to ensure the multi-view consistency. For point clouds, \cite{zyrianov2022learning,ran2024towards,hu2024rangeldm} adapt latent diffusion models for the generation of range images~\citep{fan2021rangedet,li2016vehicle} since this range-view representation shares a similar format with RGB images. However, all above methods concentrate on the single-modality data, either LiDAR or camera sensor. Despite various control signals, there exists no guarantee for the cross-modality consistency between point clouds and multi-view images generated by independent single-modality models. To this end, we propose to synthesize consistent multi-modality data in a joint manner. 
+
+
+
+\section{Preliminary}
+
+\label{sec:preliminary}
+\noindent \textbf{Latent Diffusion Models.} Diffusion models~\citep{ho2020denoising,sohl2015deep} learn to approximate a data distribution $p(\mathbf{x}_0)$ by iteratively denoising a random Gaussian noise for $T$ steps. Typically, diffusion models construct a diffused input $\mathbf{x}_t$ through a forward process, which gradually adds Gaussian noise to the data according to a variance schedule $\beta_1,\dots,\beta_T$.
+\begin{equation}
+\small
+q(\mathbf{x}_{1:T}|\mathbf{x}_0)=\prod_{t=1}^Tq(\mathbf{x}_t|\mathbf{x}_{t-1}),\quad q(\mathbf{x}_t|\mathbf{x}_{t-1})=\mathcal{N}(\mathbf{x}_t;\sqrt{1-\beta_t}\mathbf{x}_{t-1},\beta_t\mathbf{I}).
+    \label{eq:forward}
+\end{equation}
+Then, the reverse process learns to recover the original inputs by fitting $p_{\theta}(\mathbf{x}_{t-1}|\mathbf{x}_t)$.
+\begin{equation}
+\small
+    p_{\theta}(\mathbf{x}_{0:T})=p(\mathbf{x}_T)\prod_{t=1}^Tp_{\theta}(\mathbf{x}_{t-1}|\mathbf{x}_t),\quad p_{\theta}(\mathbf{x}_{t-1}|\mathbf{x}_t)=\mathcal{N}(\mathbf{x}_{t-1};\mu_{\theta}(\mathbf{x}_t,t),\Sigma_{\theta}(\mathbf{x}_t,t)).
+    \label{eq:reverse}
+\end{equation}
+
+Latent diffusion models~\citep{rombach2022high} perform the diffusion process on the latent space instead of the input space to handle the high dimensional data. Specifically, it maps input $\mathbf{x}$ with an encoder $\mathcal{E}$ into the latent space as $\mathbf{z}=\mathcal{E}(\mathbf{x})$. The latent code $\mathbf{z}$ can be reconstructed to the input as $\mathbf{\hat{x}}=\mathcal{D}(\mathbf{z})$ through a decoder $\mathcal{D}$. The forward and reverse processes of latent diffusion models are similar with the original diffusion models by substituting $\mathbf{x}$ with latent $\mathbf{z}$ in Eq.~\ref{eq:forward} and Eq.~\ref{eq:reverse}.
+
+\noindent \textbf{Range Image Representation.} Compatible with the sampling process of LiDAR sensor, range image $\mathcal{R}\in\mathbb{R}^{H_r\times W_r\times 2}$ is a dense rectangular representation for LiDAR point clouds, where $H_r$ and $W_r$ are the numbers of rows and columns with one channel representing the range and the other representing intensity. The rows reflect the laser beams while the columns indicate the yaw angles. For each point with Cartesian coordinate $(x,y,z)$, it can be transformed to the spherical coordinates $(r,\theta,\phi)$ through the following projection.
+\begin{equation}
+\small
+    r=\sqrt{x^2+y^2+z^2},\quad \theta=\arctan(y,x),\quad \phi=\arctan(z, \sqrt{x^2+y^2})
+    \label{eq:range_proj}
+\end{equation}
+where $r$ is the range, $\theta$ is the inclination, and $\phi$ is the azimuth. The range image is produced by quantizing the $\theta$ and $\phi$ with factors $s_{\theta}$ and $s_{\phi}$. For each point with spherical coordinate $(r_i, \theta_i, \phi_i)$, we have $\mathcal{R}(\lfloor\theta_i/s_{\theta}\rfloor,\lfloor\phi_i/s_{\phi}\rfloor)=(r_i, i_i)$. The range $r_i$ and intensity $i_i$ are normalized to $(0,1)$. 
+
+\begin{figure}[tb!]
+    \centering
+    \includegraphics[width=0.99\linewidth]{figures/overview-1.pdf}
+    \caption{Overview of our proposed \ourmethod{} framework. We design a dual-branch diffusion model architecture to generate multi-modality data. Cross-modality epipolar condition modules (Fig.~\ref{fig:cross-modality-condition}) are inserted between branches to enhance the cross-modality consistency.}
+    \label{fig:overview}
+\end{figure}
+
+
+
+\section{Methodology}
+
+In this section, we present our novel framework, \ourmethod{}, for joint generation of point clouds and multi-view images. The overall architecture is depicted in Fig.~\ref{fig:overview}. We extend the vanilla diffusion models to modeling the joint distribution of multi-modality data in Sec.~\ref{sec:formulation}. Practically, it is achieved by our proposed framework with dual-branch diffusion models in Sec.~\ref{sec:architecture}. For the cross-modality consistency, we propose a cross-modality epipolar condition module in Sec.~\ref{sec:condition} . Our method can also be tailored for cross-modality conditional generation in a zero-shot manner as in Sec.~\ref{sec:cross}.
+\subsection{Joint Multi-modality Generation}
+\label{sec:formulation}
+Beyond single-modality diffusion models in Sec.~\ref{sec:preliminary}, we give a formulation to our proposed \ourmethod{} for multi-modality data generation. It aims to approximate a joint distribution for paired data $(\mathbf{r}_0, \mathcal{C}_0)$ that describes a specific driving scene, where $\mathbf{r}_0$ is the range image representation of point clouds and $\mathcal{C}_0=\{\mathbf{x}_0^v\}_{v=1}^V$ denotes multi-view images from $V$ cameras at different perspective views.
+
+Given their similar rectangular latent formats, we set a shared noise schedule $\beta_1,\dots,\beta_T$ for range images and multi-view images. The forward processes of either range image or multi-view images only depend on its own modality, equivalent with independent forward processes for each modality.
+\begin{equation}
+\small
+\resizebox{0.9\linewidth}{!}{
+    $q(\mathbf{r}_t|\mathbf{r}_{t-1})=\mathcal{N}\left(\mathbf{r}_t;\sqrt{1-\beta_t}\mathbf{r}_{t-1},\beta_t\mathbf{I}\right),
+    \quad 
+    q(\mathcal{C}_t|\mathcal{C}_{t-1})=\mathcal{N}\left(\{\mathbf{x}_t^v\}_v;\{\sqrt{1-\beta_t}\mathbf{x}^v_{t-1}\}_v,\left\{\beta_t\mathbf{I}\right\}_v\right)$.
+}
+\end{equation}
+
+In contrast, the reverse process exploits models $\epsilon_{\theta_r},\epsilon_{\theta_c}$ to predict the noise $\bm{\epsilon}_r$ and $\bm{\epsilon}_c$ added to the range image and multi-view images separately. Given the requirements for cross-modality consistency, the noise prediction for each modality should take each other into consideration, so the reverse process for either range image or multi-view images would depend on both modalities.
+\begin{equation}
+\small
+\begin{aligned}
+    &p_{\theta_r}(\mathbf{r}_{t-1}|\mathbf{r}_t,\mathcal{C}_t)=\mathcal{N}(\mathbf{r}_{t-1};\mu_{\theta_r}(\mathbf{r}_t,\mathcal{C}_t,t),\Sigma_{\theta_r}(\mathbf{r}_t,\mathcal{C}_t,t)),\\
+    &p_{\theta_c}(\mathcal{C}_{t-1}|\mathcal{C}_t,\mathbf{r}_{t})=\mathcal{N}(\mathcal{C}_{t-1};\mu_{\theta_c}(\mathcal{C}_t,\mathbf{r}_t,t),\Sigma_{\theta_c}(\mathcal{C}_t,\mathbf{r}_t,t)).\\ 
+\end{aligned}
+\end{equation}
+Intuitively, we can implement two diffusion models as $\epsilon_{\theta_r}$ and $\epsilon_{\theta_c}$ separately for range images and multi-view images, equipped with encoders $c_{CR}$ and $c_{RC}$ for the other modality as extra conditions.
+\begin{equation}
+\small
+    \hat{\bm{\epsilon}}_r=\epsilon_{\theta_r}(\mathbf{r}_t,c_{CR}(\mathcal{C}_t,t),t), \quad 
+    \hat{\bm{\epsilon}}_c=\epsilon_{\theta_c}(\mathcal{C}_t,c_{RC}(\mathbf{r}_t,t),t).
+    \label{eq:multi-raw}
+\end{equation}
+Instead of training separate condition encoders, we can directly treat diffusion models themselves as strong encoders for each modality. Thus, $\epsilon_{\theta_c}$ and $\epsilon_{\theta_r}$ are adapted as the condition encoder $\epsilon'_{\theta_c}(\mathcal{C}_t,t)$ and $\epsilon'_{\theta_r}(\mathbf{r}_t,t)$ in each block. Compared to text-to-image condition, a notable characteristic of LiDAR-camera mutual condition lies in the local spatial correspondence. For example, a car captured by LiDAR should share the consistent shape and location with the same car captured by cameras but has little direct relationship with other parts in the images. Due to their different geometrical spaces, we should rely on a spatial transformation $\mathcal{T}(\cdot)$ to explicitly align the geometrical space for cross-modality correspondence. Concretely, $\mathcal{T}_{CR}$ transforms the multi-view image conditions to the range image space, while $\mathcal{T}_{RC}$ transforms the range image conditions to the multi-view image space. As a result, the condition encoders $c_{CR},c_{RC}$ can be formulated as follows.
+\begin{equation}
+\small
+    c_{CR}(\mathcal{C}_t,t)=\mathcal{T}_{CR}(\epsilon'_{\theta_c}(\mathcal{C}_t,t)),\quad c_{RC}(\mathbf{r}_t,t)=\mathcal{T}_{RC}(\epsilon'_{\theta_r}(\mathbf{r}_t,t)).
+    \label{eq:modality-condition}
+\end{equation}
+In this case, we rewrite the denoising models in Eq.~\ref{eq:multi-raw} as follows.
+\begin{equation}
+\small
+    \hat{\bm{\epsilon}}_r=\epsilon_{\theta_r}(\mathbf{r}_t,\mathcal{T}_{CR}(\epsilon'_{\theta_c}(\mathcal{C}_t,t)),t), \quad 
+    \hat{\bm{\epsilon}}_c=\epsilon_{\theta_c}(\mathcal{C}_t,\mathcal{T}_{RC}(\epsilon'_{\theta_r}(\mathbf{r}_t,t)),t).
+    \label{eq:multi-denoising}
+\end{equation}
+They can be trained with a joint multi-modality objective function $\mathcal{L}_{DM-M}$.
+\begin{equation}
+\small
+\resizebox{0.9\linewidth}{!}{
+    $\mathcal{L}_{DM-M}=\mathcal{L}_{DM-R}+\mathcal{L}_{DM-C},\quad
+    \mathcal{L}_{DM-R}=\mathbb{E}_{r,t,\epsilon_r}||\epsilon_r-\hat{\epsilon}_r||_2^2, \quad 
+    \mathcal{L}_{DM-C}=\mathbb{E}_{\mathcal{C},t,\epsilon_c}||\epsilon_c-\hat{\epsilon}_c||_2^2$.
+}
+    \label{eq:multi-loss}
+\end{equation}
+\subsection{Dual-Branch Joint Generation Framework}
+\label{sec:architecture}
+Our framework is developed following Eq.~\ref{eq:multi-denoising}, which consists of two denoising models, \textit{i.e.}, $\epsilon_{\theta_r}(\cdot)$ and $\epsilon_{\theta_c}(\cdot)$ respectively tailored for range images (Sec.~\ref{sec:model_range}) and multi-view images (Sec.~\ref{sec:model_image}).
+
+\subsubsection{Diffusion Model for Range Images}
+\label{sec:model_range}
+\noindent \textbf{Architecture.}
+We adapt existing latent diffusion model (LDM)~\citep{rombach2022high} to learning the distribution of range image $\mathbf{r_0}\in\mathbb{R}^{H_r\times W_r\times 2}$ given its similar representation format with RGB images. In the first stage, the range image is compressed into latent feature $\mathbf{z}_0^r\in\mathbb{R}^{h_r\times w_r\times c_r}$ by a downsampling factor $f_r=H_r/h_r=W_r/w_r$. In the second stage, we train an LDM for range images from scratch to learn the latent distribution of $\mathbf{z}_0^r$. Range image reflects the panoramic view of the ego-vehicle, so its left-most and right-most sides are connected. Considering this constraint, we follow LiDARGen~\citep{zyrianov2022learning} and RangeLDM~\citep{hu2024rangeldm} to replace all the convolutions in both VAE and LDM with horizontally circular convolutions~\citep{schubert2019circular} where the left and right sides of the range image are treated as neighbors.
+
+In the first stage, we follow the standard protocol to train the VAE including both encoder $\mathcal{E}_r$ and decoder $\mathcal{D}_r$ by maximizing the ELBO~\citep{rezende2014stochastic}. In addition, we attach an adversarial discriminator~\citep{isola2017image,rombach2022high} to mitigate the blurriness brought by the reconstruction loss. In the second stage, the LDM conditions the synthesis of range images on the cross-modality information from the multi-view image branch (elaborated in Sec.~\ref{sec:condition}) as well as the text prompt and 3D boxes. The model is trained with loss function in Eq.~\ref{eq:multi-loss}.
+
+\noindent\textbf{Range-view bounding box condition.}
+Given a 3D bounding box $(\mathbf{b}_i, c_i)$, $\mathbf{b}_i=\{(x_j,y_j,z_j)\}_{j=1}^8\in \mathbb{R}^{8\times 3}$ represents the 3D coordinates of box corners and $c_i$ denotes its semantic category. We project each box corner to the range view using Eq.~\ref{eq:range_proj} as $\mathbf{b}_i^r=\{(r_j,\theta_j,\phi_j)\}_{j=1}^8$. These range-view corner coordinates are passed through a Fourier embedder. Then, the concatenated position embeddings of eight corners are encoded by $\text{MLP}_p^r$ as $\mathbf{h}_{p,i}^r$. For category label $c_i$, we follow \citep{isola2017image,gao2023magicdrive} to pool the CLIP embedding~\citep{radford2021learning} of the category name as $\mathbf{h}_{l,i}^r$. The box and label embeddings are combined and encoded by another $\text{MLP}_{b}^r$ as a hidden vector $\mathbf{h}^r_{b,i}$.
+\begin{equation}
+\small
+\mathbf{h}^r_{b,i}=\text{MLP}_b^r([\mathbf{h}^r_{l,i},\mathbf{h}_{p,i}^r]),\quad \mathbf{h}^r_{l,i}=\text{Avg}(\text{CLIP}(c_i)),\quad \mathbf{h}_{p,i}^r=\text{MLP}_{p}^r(\text{Concat}(\text{Foruier}(\mathbf{b}_i^r)))
+\label{eq:range-box-condition}
+\end{equation}
+We concatenate box hidden vectors $\{\mathbf{h}^r_{b,i}\}_i$ from this range-view box encoder with text prompt hidden vectors, which guide the synthesis the latent diffusion model via a cross-attention module.
+\subsubsection{Diffusion Model for Multi-view Images}
+\label{sec:model_image}
+\noindent \textbf{Architecture.} To model the distribution of multi-view images $\mathcal{C}_0=\{\mathbf{x}_0^v\}_{v=1}^V,\mathbf{x}_0^v\in\mathbb{R}^{H_c\times W_c\times 3}$, we tailor the latent diffusion model by introducing extra bounding box and inter-view conditions apart from the cross-modality signals from range images (details in Sec.~\ref{sec:condition}). Following standard LDM~\citep{rombach2022high}, each image $\mathbf{x}_0^v$ is first compressed by a pretrained VAE to the latent space as $\mathbf{z}_0^{c,v}$. In the training process, we sample the Gaussian noise for each view independently and the denoising model is trained with the objective function in Eq.~\ref{eq:multi-loss}.
+
+\noindent \textbf{Multi-view bounding box condition.} The 3D box condition module is similar with Sec.~\ref{sec:model_range}, but the box positions are transformed to the perspective view of each camera. For each 3D bounding box $(\mathbf{b}_i, c_i)$, we project its 3D corner coordinates $\mathbf{b}_i=\{(x_j,y_j,z_j)\}_{j=1}^8$ to corresponding camera perspective view as $\mathbf{b}_i^c=\{(u_j,v_j,d_j)\}_{j=1}^8$, where $u_j,v_j$ are the corner location in the pixel coordinate and $d_j$ is the depth. For each camera view $v$, its synthesis is only conditioned on the 3D bounding boxes with at least one corner projected into the range of its perspective view image. Then, we formulate this perspective-view box encoder similar with Eq.~\ref{eq:range-box-condition}.
+\begin{equation}
+\small
+\resizebox{0.92\linewidth}{!}{
+$\mathbf{h}^c_{b,i}=\text{MLP}_b^c([\mathbf{h}^c_{l,i},\mathbf{h}_{p,i}^c]),\quad \mathbf{h}^c_{l,i}=\text{Avg}(\text{CLIP}(c_i)),\quad \mathbf{h}_{p,i}^c=\text{MLP}_{p}^c(\text{Concat}(\text{Fourier}(\mathbf{b}_i^c)))$
+}
+\end{equation} 
+For each camera view, the box embeddings $\{\mathbf{h}^c_{b,i}\}_i$ are concatenated with the text prompt hidden vectors, which together guide the image generation through a cross-attention module. 
+
+\noindent \textbf{Inter-view condition.} It is critical to enhance the consistency across different views in the generation of multi-view images $\mathcal{C}_0=\{\mathbf{x}_0^v\}_{v=1}^V$, so we inject inter-view cross-attention module to condition the generation of each camera view $v$ on its left and right adjacent views $vl$ and $vr$. Given the small overlapping between field-of-views of adjacent cameras, we split each image latent $\mathbf{z}_{in}^{c,v}$ into two halves horizontally. For each view $v$, its left half $ \mathbf{z}_{in,l}^{c,v}$ attends to the right half $\mathbf{z}_{in,r}^{c,vl}$ of its left neighbor view $vl$, while its right half $\mathbf{z}_{in,r}^{c,v}$ depends on the left half $\mathbf{z}_{in,l}^{c,vr}$ of its right neighbor $vr$.
+\begin{equation}
+\small
+    \mathbf{z}_{out}^{c,v}=\mathbf{z}_{in}^{c,v} + \tanh{(\alpha_v)}\cdot \text{Concat}_{width}\left(\left[\text{CrossAttn}(\mathbf{z}_{in,l}^{c,v},\mathbf{z}_{in,r}^{c,vl});\text{CrossAttn}(\mathbf{z}_{in,r}^{c,v},\mathbf{z}_{in,l}^{c,vr})\right]\right)
+    \label{eq:cross-view}
+\end{equation}
+where $\alpha_v$ is a zero-initialization gate~\citep{zhang2023adding} for stable optimization. Compared to full cross-attention in MagicDrive~\citep{gao2023magicdrive}, our split strategy significantly reduces the per-scene GPU memory cost of inter-view condition from 11GB to 3GB with better multi-view consistency.
+
+\begin{figure}[tb!]
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/cross-modality.pdf}
+    \caption{Cross-modality epipolar condition module. We perform mutual conditions locally between LiDAR and camera modalities based on epipolar lines on multi-view image and range image latents.}
+    \label{fig:cross-modality-condition}
+\end{figure}
+
+\subsection{Cross-Modality Epipolar Condition Module}
+\label{sec:condition}
+The key to multi-modality data synthesis is to boost the cross-modality consistency, which potentially relies on cross-modality conditions. Ideally, there is an explicit point-to-pixel correspondence between point clouds and multi-view images through camera projection. However, in the denoising process, we are not aware of either the range values of range images or the depths of the multi-view images. Instead, we propose to warp the local features from range images and multi-view images based on epipolar lines through spatial transforms $\mathcal{T}_{RC}$ and $\mathcal{T}_{CR}$ (Eq.~\ref{eq:modality-condition}) to provide control signals for the synthesis of the other modality, illustrated in Fig.~\ref{fig:cross-modality-condition}.
+
+\noindent \textbf{Camera-to-LiDAR condition.} 
+For each position $(\phi,\theta)$ on the range image latent $\mathbf{z}_{in}^{r}$, we sample $R$ points along the range axis following
+the linear-increasing discretization (LID)~\citep{reading2021categorical,liu2022petr} with range value $r_k,k=1,2,\dots,R$. We transform these points $\left\{(\phi,\theta,r_k)\right\}_{k=1}^{R}$ to their 3D coordinates $\{(x_k,y_k,z_k)\}_{k=1}^{R}$.
+\begin{equation}
+\small
+    x_k=r_k\cdot \cos(\phi)\cdot\sin(\theta),\quad y_k=r_k\cdot \cos(\phi)\cdot\cos(\theta),\quad z_k=r_k\cdot\sin(\phi).
+\end{equation}
+They can be projected to the camera perspective view $v$ with the camera parameters $(\mathbf{R}_v,\mathbf{t}_v, \mathbf{K}_v)$ as
+\begin{equation}
+\small
+    d_k\begin{bmatrix}
+        u_k& 
+        v_k&
+        1&
+    \end{bmatrix}^T=\mathbf{K}_v\left(\mathbf{R}_v\begin{bmatrix}
+        x_k& y_k& z_k
+    \end{bmatrix}^T+\mathbf{t}_v\right),\quad k=1,2,\dots, R
+\end{equation}
+where $(u_k,v_k),k=1,2,\dots, R$ are the pixel coordinates for the $R$ points along the LiDAR ray. They form the epipolar line on the camera image $\mathbf{x}^v$ corresponding to position $(\phi,\theta)$ of the LiDAR range image. We bilinearly sample the corresponding local features from the image latent $\mathbf{z}_{in}^{c,v}$ of view $v$ at location $(u_k,v_k)$. If a 3D point $(x_k,y_k,z_k)$ is projected into more than one camera view, we would simply adopt the average local features. Extra Fourier embedding of $r_k$ is added to each sampled feature as an indicator for the range value along the ray. As a result, the entire spatial transform $\mathcal{T}_{CR}$ makes the camera image features spatially aligned to the range image features.
+\begin{equation}
+\small
+    \mathcal{T}_{CR}(\mathbf{z}_{in}^{c,v})_{(\phi,\theta)}=\left\{\text{Bilinear-Sample}(\mathbf{z}_{in}^{c,v};(u_k,v_k))+\text{MLP}_r\left(\text{Fourier}(r_k)\right)\right\}_{k=1}^R.
+\end{equation}
+We apply a cross-attention module to condition the range image feature $\mathbf{z}_{in,(\phi,\theta)}^{r}$ at coordinate $(\phi,\theta)$ on the corresponding transformed local image features $\mathcal{T}_{CR}(\mathbf{z}_{in}^{c})_{(\phi,\theta)}$ on the epipolar line.
+\begin{equation}
+\small
+    \mathbf{z}_{out,(\phi,\theta)}^{r}=\mathbf{z}_{in,(\phi,\theta)}^{r}+\tanh(\alpha_{cr})\cdot \text{CrossAttn}\left(\mathbf{z}_{in,(\phi,\theta)}^{r},\mathcal{T}_{CR}(\mathbf{z}_{in}^{c,v})_{(\phi,\theta)}\right)
+    \label{eq:c2l}
+\end{equation}
+where $\alpha_{cr}$ is a zero-initialization gate for the camera-to-LiDAR condition. The model learns the adaptive local correspondence between range image and multi-view images under range ambiguity. 
+
+\noindent \textbf{LiDAR-to-camera condition.} Inversely, we condition the synthesis of multi-view images on the LiDAR range images using a similar module. For each position $(u,v)$ on the camera image latent $\mathbf{z}_{in}^{c,v}$ from view $v$, $D$ points are sampled at different depths following the linear-increasing discretization with depth value $d_k,k=1,2,\dots,D$. Each point $(u,v,d_k)$ in the pixel coordinate is transformed to 3D coordinate $(x_k,y_k,z_k)$ via the corresponding camera parameters $(\mathbf{R}_v,\mathbf{t}_v,\mathbf{K}_v)$.
+\begin{equation}
+\small
+    \begin{bmatrix}
+        x_k & y_k & z_k
+    \end{bmatrix}^T=\mathbf{R}_v^{T}\left(\mathbf{K}_v^{-1}\begin{bmatrix}
+        u_k\cdot d_k & v_k\cdot d_k & d_k
+    \end{bmatrix}^T-\mathbf{t}_v\right),\quad k=1,2,\dots,D
+\end{equation}
+The 3D point coordinate is then projected to the LiDAR range view using Eq.~\ref{eq:range_proj} as $(\phi_k,\theta_k, r_k)$. The $D$ points $(\phi_k,\theta_k), k=1,2,\dots,D$ form the epipolar line on the LiDAR range image corresponding to the pixel coordinate $(u,v)$ of camera view $v$. The local range image features are extracted at each coordinate $(\phi_k,\theta_k)$ from range image latent $\mathbf{z}_{in}^r$ through bilinear sampling with additional Fourier embedding for the depth value $d_k,k=1,2,\dots,D$ attached. We can write the spatial transform $\mathcal{T}_{RC}$ aligning the range view features to multi-view image features as follows.
+\begin{equation}
+\small
+    \mathcal{T}_{RC}(\mathbf{z}_{in}^{r})_{(u,v)}=\left\{\text{Bilinear-Sample}(\mathbf{z}_{in}^{r};(\theta_k,\phi_k))+\text{MLP}_d\left(\text{Fourier}(d_k)\right)\right\}_{k=1}^D.
+\end{equation}
+Similar with camera-to-LiDAR condition, a cross-attention module conditions the local camera image feature $\mathbf{z}_{out,(u,v)}^{c,v}$ at coordinate $(u,v)$ on spatially aligned range image features $\mathcal{T}_{RC}(\mathbf{z}_{in}^{c,v})_{(u,v)}$.
+\begin{equation}
+\small
+    \mathbf{z}_{out,(u,v)}^{c,v}=\mathbf{z}_{in,(u,v)}^{c,v}+\tanh(\alpha_{rc})\cdot \text{CrossAttn}\left(\mathbf{z}_{in,(u,v)}^{c,v},\mathcal{T}_{RC}(\mathbf{z}_{in}^{r})_{(u,v)}\right)
+    \label{eq:l2c}
+\end{equation}
+where $\alpha_{rc}$ is a zero-initialization gate. The cross-attention module adaptively learns the local reliance of camera multi-view images on LiDAR range images without explicit depth cues.
+
+\subsection{Cross-Modality Conditional Generation}
+\label{sec:cross}
+Besides multi-modality joint generation, \ourmethod{} can work as a camera-to-LiDAR or LiDAR-to-camera conditional generation model in a zero-shot manner without targeted training. Given either one of ground-truth LiDAR range image $\textbf{r}_0$ or multi-view images $\mathcal{C}_0$, we change Eq.~\ref{eq:multi-denoising} separately for camera-to-LiDAR or LiDAR-to-camera generation to synthesize the other modality data.
+\begin{equation}
+\small
+    \hat{\bm{\epsilon}}_r=\epsilon_{\theta_r}(\mathbf{r}_t,\mathcal{T}_{CR}(\epsilon'_{\theta_c}(\mathcal{C}_0,0)),t), \quad 
+    \hat{\bm{\epsilon}}_c=\epsilon_{\theta_c}(\mathcal{C}_t,\mathcal{T}_{RC}(\epsilon'_{\theta_r}(\mathbf{r}_0,0)),t).
+    \label{eq:cross-denoising}
+\end{equation}
+In this case, the trained diffusion model for the input modality serves as a strong encoder for the condition to enhance the adherence of generation to the input LiDAR or camera conditions.
+
+
+\section{Experiments}
+
+\subsection{Experimental Setups}
+\label{sec:setup}
+\noindent \textbf{Dataset.} We evaluate our method using nuScenes dataset~\citep{caesar2020nuscenes}. It provides point clouds from a 32-beam LiDAR and multi-view images from 6 cameras. We follow the official setting to employ 700 driving scenes for training and 150 scenes for validation. The generation of \ourmethod{} is conditioned on bounding boxes from 10 semantic classes as well as scene descriptions.
+
+\noindent \textbf{Evaluation Metrics.} For joint multi-modality data synthesis, we evaluate both single-modality data realism and cross-modality consistency. For image modality, we report Fr\'{e}chet Inception Distance (FID) for image synthesis realism.  We also utilize View Consistency Score (VSC)~\citep{swerdlow2024street} to evaluate multi-view consistency, which reflects the keypoints correspondence on overlapping regions between adjacent camera views (Fig.~\ref{fig:multiview_consistency}), and we normalize the VSC of real images to $1.0$ for clarity. For point clouds modality, we measure the distribution gap between synthetic and real point clouds with Maximum Mean Discrepancy (MMD) and Jensen-Shannon divergence (JSD) following RangeLDM~\citep{hu2024rangeldm}. For cross-modality consistency, we propose a novel metric called Depth Alignment Score (DAS). We project the synthetic point clouds to multi-view images as sparse depth values and also estimate the image depth using DepthAnythingV2~\citep{depth_anything_v2}. The mean absolute error between the projected and estimated disparities is used as DAS metric.
+
+\noindent \textbf{Baselines.} To our best knowledge, we are the first to work on the joint generation of point clouds and multi-view images. For single-modality generation, we compare with state-of-the-art generation algorithms for point clouds, \textit{i.e.} LiDAR VAE~\citep{caccia2019deep}, LiDARGen~\citep{zyrianov2022learning}, RangeLDM~\citep{hu2024rangeldm}, and multi-view images, \textit{i.e.} BEVGen~\citep{swerdlow2024street}, BEVControl~\citep{yang2023bevcontrol}, MagicDrive~\citep{gao2023magicdrive}, with released code or quantitative results on nuScenes dataset. Furthermore, we combine MagicDrive~\citep{gao2023magicdrive} and RangeLDM~\citep{hu2024rangeldm} respectively for images and point clouds as a multi-modality baseline. 
+
+\noindent \textbf{Training Setup.} Our \ourmethod{} has a dual-branch architecture. We utilize the Stable-Diffusion V1.5 pretrained weight to initialize the multi-view image branch with other newly added parameters randomly initialized. We follow a three-stage pipeline for the training. In the first stage, the VAE is trained from scratch for range images. In the second stage, we train the latent diffusion model in point clouds branch without cross-modality conditions using the frozen VAE. Finally, in the last stage, the entire multi-modality model is trained in an end-to-end manner with only the  Stable-Diffusion V1.5 parts frozen.  We follow MagicDrive~\citep{gao2023magicdrive} and RangeLDM~\citep{hu2024rangeldm} to synthesize $224\times 400$ multi-view camera images and $32\times 1024$ point cloud range images.
+
+\begin{table}[tb!]
+    \centering
+    \small
+    \caption{Quantitative comparison with driving data generation algorithms. For each column, the best value is highlighted by \textbf{bold}, and the second best one is denoted by \underline{underline}.}
+    \label{tab:results}
+    \setlength{\tabcolsep}{10pt}
+    \resizebox{\textwidth}{!}{%
+    \begin{tabular}{ccccccc}
+      \toprule
+      \multirow{2}{*}{Modality} & \multirow{2}{*}{Method} & \multicolumn{2}{c}{Image quality} & \multicolumn{2}{c}{Point clouds quality} & \multicolumn{1}{c}{Cross-modality}\\
+      \cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-7}
+      & & FID $\downarrow$ & VSC $\uparrow$ & MMD $\downarrow$ & JSD $\downarrow$ & DAS $\downarrow$\\
+      \midrule
+        \multirow{3}{*}{C} & BEVControl & 25.54 & - & - & - & - \\
+         & BEVGen & 24.85 & 0.439 & - & - & - \\
+         & MagicDrive & \underline{16.20} & 0.633  & - & - & - \\
+         \midrule
+         L$\rightarrow$C& \ourmethod{} (ours) &\textbf{16.01}& \textbf{0.721} & - & - & -\\
+         
+        \midrule
+        \multirow{3}{*}{L} & LiDAR VAE & - & - & $1.1\times 10^{-3}$ & - & - \\
+         & LiDARGen & - & - & $1.9\times 10^{-3}$ & 0.160 & - \\
+         & RangeLDM & - & - & $1.9\times 10^{-4}$ & 0.054 & - \\
+         \midrule
+         C$\rightarrow$L & \ourmethod{} (ours) & - & - & $\mathbf{1.0\times 10^{-4}}$ & \textbf{0.052} & -\\
+        \midrule
+       \multirow{2}{*}{C+L} & MagicDrive + RangeLDM & - & - & - & - &  2.32  \\
+         & \ourmethod{} (ours) & 17.37 & \underline{0.675} & $\underline{1.2\times 10^{-4}}$ & \textbf{0.052} & \textbf{1.69} \\
+        \bottomrule
+    \end{tabular}
+    }
+\end{table}
+
+\subsection{Quantitative Results}
+\label{sec:results}
+We report the quantitative results for both joint generation of aligned point clouds and multi-view images as well as conditional LiDAR-to-camera or camera-to-LiDAR cross-modality generation. 
+
+\noindent \textbf{Joint multi-modality generation.} As shown in Tab.~\ref{tab:results}, in comparison to specialized single-modality generation methods, \ourmethod{}, as a multi-modality algorithm, achieves comparable or even better quality in both synthetic point clouds and multi-view images. Our FID metric is outoerformed by MagicDrive~\citep{gao2023magicdrive}, since we do not have map condition which offers strong control signals. Unlike simple combination of single-modality methods, we can generate point clouds and images with cross-modality alignment, reflected by our superior DAS metric, thanks to our proposed cross-modality epipolar condition module.
+
+\noindent \textbf{Conditional cross-modality generation.} As mentioned in Sec.~\ref{sec:cross}, \ourmethod{} can also work as a LiDAR-to-camera or camera-to-LiDAR conditional generation model. In Tab.~\ref{tab:results}, for single-modality data generation, \ourmethod{} can outperform previous baselines for both point clouds and multi-view images, demonstrating the flexibility of our proposed algorithm for cross-modality data synthesis.
+
+\begin{wraptable}{r}{0.4\linewidth}
+\centering
+\small
+\caption{Object-level control.}
+\label{tab:object}
+\begin{tabular}{ccc}
+   \toprule
+   Methods  & mAP & NDS \\
+   \midrule
+    \textcolor{gray}{Oracle} &  \textcolor{gray}{70.5} & \textcolor{gray}{72.8}\\
+    MagicDrive & 65.2 & 69.2 \\
+    \ourmethod{} (ours) & \textbf{65.4} & \textbf{69.6}\\
+    \bottomrule
+\end{tabular}
+\end{wraptable}
+
+\noindent \textbf{Object-level controllable generation.} \ourmethod{} can adhere to the 3D bounding box conditions in the generative process. Since previous LiDAR generation methods do not show this ability~\citep{hu2024rangeldm,ran2024towards}, we only compare our methods with multi-view image generation algorithm~\cite{gao2023magicdrive}. For fair comparison with single-modality method, we employ synthetic multi-view images and real point clouds from nuScenes validation set to run a pretrained SparseFusion~\citep{xie2023sparsefusion} model, which is an advanced multi-sensor object detection algorithm. Tab.~\ref{tab:object} shows \ourmethod{} outperforms MagicDrive~\cite{gao2023magicdrive} \textit{w.r.t.} the object-level fidelity.
+
+\begin{figure}[tb!]
+    \centering
+    \includegraphics[width=0.91\linewidth]{figures/project.pdf}
+    \caption{Cross-modality consistency qualitative results for multi-modality generation and conditional cross-modality generation. Colors of point clouds refer to different depths. Well-matched regions between point clouds and multi-view images are highlighted with \textcolor{red}{red} circles.}
+    \label{fig:project}
+\end{figure}
+
+\subsection{Qualitative Analysis}
+\label{sec:analysis}
+\noindent \textbf{Cross-modality consistency.}
+We show some multi-modality generation examples to exhibit the cross-modality consistency qualitatively. As in Fig.~\ref{fig:project}, the projected point clouds overlap with multi-view image contents properly for both foregrounds and backgrounds. We also show the results of conditional camera-to-LiDAR and LiDAR-to-camera generation in Fig.~\ref{fig:project}, where the synthetic data adheres to the cross-modality LiDAR or camera conditions well.
+
+\begin{figure}[tb!]
+    \centering
+    \includegraphics[width=0.92\linewidth]{figures/correspondence.png}
+    \caption{Key points correspondence between adjacent synthetic camera images. Our proposed method (bottom) can bring higher multi-view consistency than the baseline (top).}
+    \label{fig:multiview_consistency}
+\end{figure}
+\noindent \textbf{Multi-view consistency.}
+In our multi-modality generation, point clouds provide a natural 3D-aware geometrical guidance for the multi-view images, benefiting the multi-view consistency. In Fig.~\ref{fig:multiview_consistency}, we visualize the keypoints matching results~\citep{sun2021loftr} between adjacent synthetic camera images, where better correspondence is witnessed for \ourmethod{} than MagicDrive~\citep{gao2023magicdrive}.  
+
+\noindent \textbf{Scene-level and object-level control.}
+Given the text and bounding box conditions, \ourmethod{} generate diverse results using different control signals, as illustrated in Fig.~\ref{fig:control}. For scene-level control, we can target for various lighting and weathers through the text prompts, while synthetic images still remain realistic and adhere to the object layouts. For object-level control, we can edit the scene by deleting objects or inserting objects at desired locations with specific sizes and semantic categories.
+
+\begin{figure}[tb!]
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/control.pdf}
+    \caption{Scene-level and object-level controllable generation by changing the input conditions.}
+    \label{fig:control}
+\end{figure}
+\begin{figure}[tb!]
+\centering
+    \begin{minipage}{0.42\linewidth}
+        \centering
+        \includegraphics[width=0.99\linewidth]{figures/CFG_scale.pdf}
+        \captionof{figure}{Effect of CFG scales.}
+        \label{fig:cfg}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.56\linewidth}
+        \centering
+        \small
+        \setlength{\tabcolsep}{11pt}
+        \captionof{table}{Ablation studies of \ourmethod{} modules.}
+        \label{tab:ablation}
+        \resizebox{0.9\linewidth}{!}{
+        \begin{tabular}{cccc}
+            \toprule
+            Methods & FID$\downarrow$  & JSD$\downarrow$ & DAS$\downarrow$ \\
+            \midrule
+            \textit{w/o} 3D box condition & 29.60 & 0.091 & 1.76 \\
+            \textit{w/o} text prompt condition & 25.76 & 0.070 & 1.73 \\
+            \textit{w/o} cross-modality & 24.41 & 0.081 & 1.95 \\
+            average epipolar condition & 20.70 & 0.098 & 2.23   \\
+            \midrule
+            full model &\textbf{20.17}& \textbf{0.070} & \textbf{1.67} \\
+            \bottomrule
+        \end{tabular}}
+    \end{minipage}
+\end{figure}
+
+\subsection{Ablation Studies}
+\label{sec:ablations}
+Due to limited computational resources, we employ shorter training schedule for ablation studies.
+
+\noindent \textbf{Cross-modality condition.} The cross-modality condition is critical for cross-modality consistency. As shown in Tab.~\ref{tab:ablation}, removing this module significantly hurts the cross-modality alignment although the shared bounding boxes and text prompts still provide some constraints. Given the spatial ambiguity, we resort to cross-attention along epipolar lines to adaptively learn the local correspondence in Eq.~\ref{eq:c2l} and Eq.~\ref{eq:l2c}. Instead, simple averaging along epipolar lines instead of cross-attention is quite noisy and poses severe damage to the point clouds quality and cross-modality consistency. 
+
+\noindent \textbf{Bounding box and text prompt input conditions.} Although \ourmethod{} also supports unconditional generation, these input conditions provide multi-level control signals to generate diverse outputs. Tab.~\ref{tab:ablation} shows that text and box conditions improve the quality of synthetic point clouds and images.
+
+\noindent \textbf{Classifier-free guidance.} We employ classifier-free guidance (CFG) during inference for box and text conditions. Illustrated in Fig.~\ref{fig:cfg}, it improves the realism of synthetic data. However, higher CFG scale would hurt the image and point cloud quality by increasing the contrast and sharpness.
+
+
+\section{Conclusions}
+
+We present \ourmethod{}, a novel framework for the multi-modality generation of aligned LiDAR point clouds and multi-view camera images. By leveraging a dual-branch diffusion model, \ourmethod{} captures the joint distribution of multi-modality data, ensuring mutual dependence between modalities. A key feature is the cross-modality condition module, which uses epipolar lines on LiDAR range images and camera views to address spatial ambiguity during the denoising process. Additionally, \ourmethod{} supports multi-level control, enabling synthesis based on text prompts and object bounding boxes. Extensive experiments show that \ourmethod{} generates high-quality, geometrically and semantically aligned point clouds and images, maintaining fidelity to the input conditions while accurately describing the same driving scene together.
+
+\paragraph{Acknowledegement} This work was supported in part by Berkeley DeepDrive and NSF Grant. 2235013.
+
+
+
+
+

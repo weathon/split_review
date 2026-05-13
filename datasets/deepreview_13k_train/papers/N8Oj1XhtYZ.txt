@@ -1,0 +1,213 @@
+\title{SANA: Efficient High-Resolution Text-to-Image Synthesis with Linear Diffusion Transformers}
+
+\begin{abstract}
+We introduce Sana, a text-to-image framework that can efficiently generate images up to 4096$\times$4096 resolution. Sana can synthesize high-resolution, high-quality images with strong text-image alignment at a remarkably fast speed, deployable on laptop GPU. Core designs include: (1) Deep compression autoencoder: unlike traditional AEs, which compress images only 8$\times$, we trained an AE that can compress images 32$\times$, effectively reducing the number of latent tokens. (2) Linear DiT: we replace all vanilla attention in DiT with linear attention, which is more efficient at high resolutions without sacrificing quality. (3) Decoder-only text encoder: we replaced T5 with modern decoder-only small LLM as the text encoder and designed complex human instruction with in-context learning to enhance the image-text alignment. (4)  Efficient training and sampling: we propose Flow-DPM-Solver to reduce sampling steps, with efficient caption labeling and selection to accelerate convergence. As a result, Sana-0.6B is very competitive with modern giant diffusion model (e.g. Flux-12B), being 20 times smaller and 100+ times faster in measured throughput. Moreover, Sana-0.6B can be deployed on a 16GB laptop GPU, taking less than 1 second to generate a 1024$\times$1024 resolution image. Sana enables content creation at low cost. Code and model will be publicly released upon publication.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+In the past year, latent diffusion models have made significant progress in text-to-image research and have generated substantial commercial value. On one hand, there is a growing consensus among researchers regarding several key points: (1) Replace U-Net with Transformer architectures (Chen et al., 2024b;a; Esser et al., 2024; Labs, 2024), (2) Using Vision Language Models (VLM) for auto-labelling images (Chen et al., 2024b; OpenAI, 2023; Zhuo et al., 2024; Liu et al., 2024a) (3) Improving Variational Autoencoders (VAEs) and Text encoder (Podell et al., 2023; Esser et al., 2024; Dai et al., 2023) (4) Achieving ultra High-resolution image generation (Chen et al., 2024a), etc. On the other hand, industry models are becoming increasingly large, with parameter counts escalating from PixArt’s 0.6B parameters to SD3 at 8B, LiDiT at 10B, Flux at 12B, and Playground v3 at 24B. This trend results in extremely high training and inference costs, creating challenges for most consumers who find these models difficult and expensive to use. Given these challenges, a pivotal question arises: Can we develop a high-quality and high-resolution image generator that is computationally efficient and runs very fast on both cloud and edge devices?  
+
+![](images/9073538ff13a0a122f1df4af56614a2cd9c261ba70216314a56d2808c69a1c31.jpg)  
+
+Figure 2: Algorithm and system co-optimize reduce the inference latency of $4096\!\times\!4096$ image generation, from 469 seconds to 9.6 seconds, and achieve $106\times$ faster than the current SOTA model, FLUX. The numbers are measured with batch size 1 on an A100 GPU.  
+
+This paper proposes Sana, a pipeline designed to efficiently and cost-effectively train and synthesize images at resolutions ranging from $1024\!\times\!1024$ to $4096\!\times\!4096$ with high quality. To our knowledge, no published works have directly explored 4K resolution image generation, except for PixArt$\Sigma$ (Chen et al., 2024a). However, PixArt- $\Sigma$ is limited to generating images close to 4K resolution $(3840\!\times\!2160)$ and is relatively slow when producing such high-resolution images. To achieve this ambitious goal, we propose several core designs:  
+
+Deep Compression Autoencoder: We introduce a new Autoencoder (AE) in Section 2.1 that aggressively increases the scaling factor to 32. In the past, mainstream AEs only compressed the image’s length and width with a factor of 8 (AE-F8). Compared with AE-F8, our AE-F32 outputs $16~\times$ fewer latent tokens, which is crucial for efficient training and generating ultra-high-resolution images, such as 4K resolution.  
+
+Efficient Linear DiT: We introduce a new linear DiT to replace vanilla quadratic attention modules (Section 2.2). The computational complexity of the original DiT’s self-attention is $\mathrm{O(N^{2})}$ , which increases quadratically when processing high-resolution images. We replace all vanilla attention with linear attention, reducing the computational complexity from $\mathrm{O}(\bar{\mathbf{N}}^{2})$ to O(N). At the same time, we propose Mix-FFN, which integrates $3\!\times\!3$ depth-wise convolution into MLP to aggregate the local information of tokens. We argue that linear attention can achieve results comparable to vanilla attention with proper design and is more efficient for high-resolution image generation (e.g., accelerating by $1.7\times$ at 4K). Additionally, the indirect benefit of Mix-FFN is that we do not need position encoding (NoPE). For the first time, we removed the positional embedding in DiT and find no quality loss.  
+
+Decoder-only Small LLM as Text Encoder: In Section 2.3, we utilize the latest Large Language Model (LLM), Gemma, as our text encoder to enhance the understanding and reasoning capabilities regarding user prompts. Although text-to-image generation models have advanced significantly over the years, most existing models still rely on CLIP or T5 for text encoding, which often lack robust text comprehension and instruction-following abilities. Decoder-only LLMs, such as Gemma, exhibit strong text understanding and reasoning capabilities, demonstrating an ability to follow human instructions effectively. In this work, we first address the training instability issues that arise from directly adopting an LLM as a text encoder. Secondly, we design complex human instructions (CHI) to leverage the LLM’s powerful instruction-following, in-context learning, and reasoning capabilities to improve image-text alignment.  
+
+Efficient Training and Inference Strategy: In Section 3.1, we propose a set of automatic labelling and training strategies to improve the consistency between text and images. First, for each image, we  
+
+utilize multiple VLMs to generate re-captions. Although the capabilities of these VLMs vary, their complementary strengths improve the diversity of the captions. In addition, we propose a clipscorebased training strategy (Section 3.2), where we dynamically select captions with high clip scores for the multiple captions corresponding to an image based on probability. Experiments show that this approach improve training convergence and text-image alignment. Furthermore, We propose a Flow-DPM-Solver that reduces the inference sampling steps from 28-50 to 14-20 steps compared to the widely used Flow-Euler-Solver, while achieving better results.   
+In conclusion, our Sana-0.6B achieves a throughput that is over $100\times$ faster than the current state-ofthe-art method (FLUX) for 4K image generation (Figure 2), and $40\times$ faster for 1K resolution (Figure 4), while delivering competitive results across many benchmarks. In addition, we quantize Sana-0.6B and deploy it on an edge device, as detailed in Section 4. It takes only $0.37\mathrm{s}$ to generate a $1024\!\times\!1024$ resolution image on a customer-grade 4090 GPU, providing a powerful foundation model for real-time image generation. We hope that our model can be efficiently utilized by all industry professionals and everyday users, offering them significant business value.   
+2 METHODS   
+2.1 DEEP COMPRESSION AUTOENCODER   
+2.1.1 PRELIMINARY   
+To mitigate the excessive training and inference costs associated with directly running diffusion models in pixel space, Rombach et al. (2022) proposed latent diffusion models that operate in a compressed latent space produced by pre-trained autoencoders. The most commonly used autoencoders in previous latent diffusion works (Peebles & Xie, 2023; Bao et al., 2022; Cai et al., 2024; Esser et al., 2024; Dai et al., 2023; Chen et al., 2024b;a) feature a down-sampling factor of $F=8$ , mapping images from pixel space $\mathbb{R}^{H\times W\times3}$ to latent space $\mathbb{R}^{\frac{H}{8}\times\frac{W}{8}\times C}$ , where $C$ represents the number of latent channels. In DiT-based methods (Peebles & Xie, 2023), the number of tokens processed by the diffusion models is also influenced by another hyper-parameter, $P$ , known as patch size. The latent features are grouped into patches of size $P\times P$ , resulting in $\frac{H}{P F}\,\times\,\frac{W}{P F}$ tokens. A typical patch size in previous works is 2.   
+In summary, previous latent diffusion models (LDM), e.g. PixArt (Chen et al., 2024b), SD3 (Esser et al., 2024) and Flux (Labs, 2024), usually employ AE-F8C4P2 or AE-F8C16P2, where the AE compresses images by $8\times$ and DiT compresses by $2\times$ . In our Sana, we aggressively scale the compression factor to $32\times$ and propose several techniques to maintain the quality.   
+2.1.2 AUTOENCODER DESIGN PHILOSOPHY   
+Unlike the previous AE-F8, we aim to increase the compression ratio more aggressively. The motivation is that high-resolution images naturally contain more redundant information. Moreover, efficient training and inference of high-resolution images (e.g., 4K) necessitate a high compression ratio for the autoencoder. Table 1 illustrates that on MJHQ-30K, although previous methods (e.g., SDv1.5) have attempted to use AE-F32C64, the quality remains significantly inferior to that of AEF8C4. Our AE-F32C32 effectively bridges this quality gap, achieving reconstruction capabilities comparable to SDXL’s AE-F8C4. We believe that the minor difference in AE will not become a bottleneck for DiT’s capability.   
+Moreover, instead of increasing the patch size $P$ , we argue that the autoencoders should take full responsibility for compression, allowing the latent diffusion models to focus solely on denoising. Therefore, we develop an AE with a down-sampling factor of $F=32$ , Channel $C=32$ , and run diffusion models in its latent space with a patch size of 1 (AE-F32C32P1). This design reduces the number of tokens by $4\times$ , significantly improving training and inference speed while lowering GPU memory requirements.   
+2.1.3 ABLATION OF AUTOENCODER DESIGNS   
+From the perspective of model structure, we implement several adjustments to accelerate conver  
+
+gence. Specifically, We replace the vanilla self attention mechanism with linear attention blocks to improve the efficiency of high-resolution generation. Additionally, from a training standpoint, we propose a multi-stage training strategy to improve training stability, which involving finetune our AE-F32C32 on $1024\times1024$ images to achieve better reconstruction results on high-resolution data.  
+
+Can we compress tokens in DiT using a larger patch size? We compare AE-F8C16P4, AE-F16C32P2 and AE-F32C32P1. These three settings compress a $1024\!\times\!1024$ image into the same number of token numbers $32\times32$ . As shown in Figure 3(a), although AE-F8C16 exhibits the best reconstruction ability (rFID: $\mathtt{F8C l6<F16C32<F32C32}$ , we empirically  
+
+Table 1: Reconstruction capability of different Autoencoders.   
+
+![](images/2e07dd1c4cdd60078f2e94ce1ddc29848ac5f12d224535ed5154b3be836d4da4.jpg)  
+
+find that the generation results of F32C32 are superior (FID: F32C32P1 $<$ <F16C32P2 $<$ F8C16P4). This indicates that allowing the autoencoder to focus solely on high-ratio compression and the diffusion model to concentrate on denoising is the optimal choice.  
+
+![](images/9a4fa9172a87b1a25c5a4cf2c434eabe77b16a70c95b4f15740d0c57cb9a62eb.jpg)  
+Figure 3: Ablation study on our deep compression autoencoder (AE).  
+
+Different Channels in AE-F32: We explore various channel configurations and finally choose $C{=}32$ as our optimal setting. As shown in Figure 3(b), fewer channels converge more quickly, but the reconstruction quality is worse. We observe that after 35K training steps, the convergence speeds of ${\mathrm{C}}{=}16$ and $C{=}32$ are similar; however, $C{=}32$ yields better reconstruction metrics, resulting in better FID and CLIP scores. Although $C{=}64$ offers superior reconstruction, its following DiT’s training convergence speed is significantly slower than that of $C{=}32$ .  
+
+
+
+\section{2.2 EFFICIENT LINEAR DIT DESIGN  }
+
+
+The self-attention used by DiT has a computational complexity of $\mathrm{\dot{O}(N^{2})}$ , resulting in low computational efficiency when processing high-resolution images and incurring significant overhead. To address this issue, we first proposed linear DiT, which completely replaces the original self-attention with linear attention, achieving higher computational efficiency in high-resolution generation without compromising performance. In addition, we employ MixFFN to replace the original MLP-FFN, incorporating $3\!\times\!3$ depth-wise convolution to better aggregate token information. These micro designs are inspired by Cai et al. (2023); Xie et al. (2021), but we keep DiT’s macro architecture design to maintain simplicity and scalability.  
+
+![](images/bbcd3a18102f8226bcb1122e90855d83126732126fc7a0eb77f671f11a46b4fa.jpg)  
+Figure 4: Comparison between Sana and state-ofthe-art diffusion models under $1024\!\times\!1024$ resolution. All models are tested on an A100 GPU. Sana provides 0.64 GenEval overall performance with only 590M model parameters.  
+
+Linear Attention block. An illustration of our utilized linear attention module is provided in Figure 5. To reduce computational complexity, we replace the traditional softmax attention with ReLU linear attention (Katharopoulos et al., 2020). While ReLU linear attention and other variants (Cai  
+
+![](images/f90a38e68fed4054dda8a929e525ae408da591175b0bce699fb6c8aab809da58.jpg)  
+(a). Architecture overview of our Sana.  
+
+![](images/936b86aa48a7e0a2f6db61eea64218dcd722388c6d7c377b594e8f3b1fae4190.jpg)  
+(b). Linear DiT Module.  
+
+Figure 5: Overview of Sana: Fig. (a) describes the high-level training pipeline, containing our $32\times$ deep compression Autoencoder, Linear DiT, and complex human instruction. Note that Positional embedding is not required in our framework. Fig. (b) describes the detailed design of the Linear Attention and Mix-FFN in Linear DiT.  
+
+et al., 2023; Wang et al., 2020; Shen et al., 2021; Bolya et al., 2022) have primarily been explored in high-resolution dense prediction tasks, our work represents an early exploration to demonstrate the effectiveness of linear attention in image generation.  
+
+The computational benefits of our approach are evident in the implementation. As shown in Eq. 1, instead of computing attention for each query, we compute shared terms $\begin{array}{r}{\left(\sum_{j=1}^{N}\mathrm{ReLU}(K_{j})^{T}V_{j}\right)\in\mathbb{R}^{d\times d}}\end{array}$ and $\begin{array}{r}{\left(\sum_{j=1}^{N}\mathrm{ReLU}(K_{j})^{T}\right)\in\mathbb{R}^{d\times1}}\end{array}$ only once. These shared terms can then be reused for each query, leading to a linear computational complexity of $O(N)$ in both memory and computation.  
+
+$$
+\begin{array}{r}{O_{i}=\sum_{j=1}^{N}\frac{\mathrm{ReLU}(Q_{i})\mathrm{ReLU}(K_{j})^{T}V_{j}}{\sum_{j=1}^{N}\mathrm{ReLU}(Q_{i})\mathrm{ReLU}(K_{j})^{T}}=\frac{\mathrm{ReLU}(Q_{i})\left(\sum_{j=1}^{N}\mathrm{ReLU}(K_{j})^{T}V_{j}\right)}{\mathrm{ReLU}(Q_{i})\left(\sum_{j=1}^{N}\mathrm{ReLU}(K_{j})^{T}\right)}}\end{array}
+$$  
+
+Mix-FFN block. As discussed in EfficientViT (Cai et al., 2023), linear attention models benefit from reduced computational complexity and lower latency compared to softmax attention. However, the absence of a non-linear similarity function may lead to sub-optimal performance. We observe a similar conclusion in image generation, where linear attention models suffer from much slower convergence despite eventually achieving comparable performance. To further improve training efficiency, we replace the original MLP-FFN with Mix-FFN. The Mix-FFN consists of an inverted residual block, a $3\!\times\!3$ depth-wise convolution, and a Gated Linear Unit (GLU) (Dauphin et al., 2017). The depth-wise convolution enhances the model’s ability to capture local information, compensating for the weaker local information-capturing ability of ReLU linear attention. Performance ablations for the model design space are shown in Table 8.  
+
+DiT without Positional Encoding (NoPE). We are surprised that we can remove Positional Embedding without any loss in performance. Some earlier theoretical and practical works have mentioned that introducing $3\!\times\!3$ convolution with zero padding can implicitly incorporate the position information (Islam et al., 2020; Xie et al., 2021). In contrast to previous DiT-based methods that mostly use absolute PE, learnable PE, and RoPE, we propose NoPE, the first design that entirely omits positional embedding in DiT. Recent cutting-edge research in the LLM field (Kazemnejad et al., 2024; Haviv et al., 2022) has also indicated that NoPE may offer better length generalization ability.  
+
+Triton Acceleration Training/Inference. To further accelerate linear attention, we use Triton (Tillet et al., 2019) to fuse kernels for both the forward and backward passes of the linear attention blocks to speed up training and inference. By fusing all element-wise operations—including activation functions, precision conversions, padding operations, and divisions—into matrix multiplications, we reduce the overhead associated with data transfer.  
+
+2.3 TEXT ENCODER DESIGN  
+
+Why Replace T5 to Decoder-only LLM as Text Encoder? The most advanced LLMs nowadays are decoder-only GPT architectures that are trained on a larger scale of data. Compared to T5 (a method proposed in 2019), decoder-only LLMs possess powerful reasoning capabilities. They can follow complex human instructions by using Chain-of-Thought (CoT) (Wei et al., 2022) and Incontext-learning (ICL) (Brown, 2020). In addition, some small LLMs, such as Gemma-2 (Team et al., 2024a), can rival the performance of large LLMs while being very efficient. Therefore, we choose to adopt Gemma-2 as our text encoder.  
+
+As shown in Table. 9, Compared to T5-XXL, Gemma-2-2B has an inference speed that is $6\times$ faster, while the performance of Gemma-2B is comparable to T5-XXL in terms of Clip Score, FID, GenEval, and HPSv2 (Wu et al., 2023).  
+
+Stabilize Training using LLM as Text encoder: We extract the last layer of features of the Gemma2 decoder as text embedding. We empirically find that directly following the approach of using T5 text embedding as key, value, and image tokens (as the query) for cross-attention training results in extreme instability, with training loss frequently becoming NaN.  
+
+We find that the variance of T5’s text embedding is several orders of magnitude smaller than that of the decoder-only LLMs (Gemma-1-2B, Gemma-2-2B, Qwen-2-0.5B), indicating that there are many large absolute values in the text embedding output. To address this issue, we add a normalization layer (i.e., RMSNorm) after the decoder-only text encoder, which normalizes the variance of the text embeddings to 1.0. In addition, we discover a useful trick that further accelerates model convergence by initializing a small learnable scale factor (e.g., 0.01) and multiplying it by the text embedding. The results are shown in Figure 6.  
+
+Table 2: Ablation study of whether using Complex Human Instruction (CHI).   
+
+![](images/40589c6d471cd8e2be3e3301c9345a915a6b87f28c984a33fe1b63d97d77cdf1.jpg)  
+
+![](images/40b230a08c769a5fa1d8b9fcced710c010ba2a66e229b4b4d478ad222750b9d9.jpg)  
+Figure 6: Ablation study of whether using text embedding normalization and small scale factor.  
+
+Complex Human Instruction Improves TextImage Alignment: As mentioned above, Gemma has better instruction-following capabilities than T5. We can further leverage this capability to strengthen text embedding. Gemma is a chat model, and although it possesses strong capabilities, it can be somehow unpredictable, thus we need to add instructions to help it focus on extracting and enhancing the prompt itself. LiDiT (Ma et al., 2024) is the first to combine simple human instruction with user prompts. Here, we further expand it by using in-context learning of LLM to design a complex human instruction (CHI). As shown in Table 2, incorporating CHI during train—whether from scratch or through fine-tuning—can further improve the image-text alignment capability.  
+
+Additionally, as shown in Figure 7, we find that when given a short prompt such as ”a cat”, CHI helps the model generate more stable content. This is evident in the fact that models without CHI often output content unrelated to the prompt  
+
+User prompt: A cat w/o Complex Human Instruction w/ Complex Human Instruction  
+
+![](images/e577361611c3ff8b0c0367c16ed6c9a039b2e3d291c00fe64a95fbc8e8499dab.jpg)  
+Figure 7: Generations w/ or w/o ComplexHuman-Instruction (CHI). Without CHI, a simple prompt may lead to inferior generations, including artifacts and less-detailed results.  
+
+3 EFFICIENT TRAINING/INFERENCE  
+
+3.1 DATA CURATION AND BLENDING  
+
+Multi-Caption Auto-labelling Pipeline: For each image, whether or not it contains an original prompt, we will use four VLMs to label it: VILA-3B/13B (Lin et al., 2024), InternVL2- 8B/26B (Chen et al., 2024d). Multiple VLMs can make the caption more accurate and more diverse.  
+
+CLIP-Score-based Caption Sampler: One problem multi-captioning presents is selecting the corresponding one for an image during training. The naive approach randomly selects a caption, which may select low-quality text and affect model performance.  
+
+We propose a clip score-based sampler, the motivation is to sample high-quality text with greater probability. We first calculate the clip score $c_{i}$ for all captions corresponding to an image, and then, when sampling, we sample according to the probability based on the clip score. Here, we introduce an additional hyper-parameter, temperature τ, into the probability formulation P(ci) = jNe=x1 pe(xcip/(cτj)/τ). The temperature can be used to adjust the sampling intensity. If the temperature is near 0, only the text with the highest clip score is sampled. The results in Table 4 show that variations in captions have minimal impact on image quality (FID) while improving semantic alignment during training.  
+
+Cascade Resolution Training: Benefiting from using AE-F32C32P1, we skip the 256px pretraining and start pre-training directly at a resolution of $512{\bf p}\mathrm{x}$ , gradually fine-tuning the model to $1024{\mathrm{px}}$ , 2K and 4K resolution. We believe that the traditional practice of pre-training at 256px is too cost-effective, as images at 256 resolution lose too much detailed information, resulting in slower learning for the model in terms of image-text alignment.  
+
+![](images/bf8bca3fa223da73af5d03a18c3c930858dc3caa125da5f1c6c83d882c654c35.jpg)  
+Figure 8: Impact of sampling steps on FID and CLIP-Score: A Comparison between FlowDPM-Solver and Flow-Euler.  
+
+Table 3: Comparison of different training schedules on $256\!\times\!256$ resolution.   
+
+![](images/fafcc7f70f9c5244c5de607c36dc7024bfd4502f4e6d4c69aeb70b4fc1017d25.jpg)  
+
+Table 4: Comparison of image-text pair sampling strategies during training.  
+
+![](images/1980f8fbf1062b55fd1e132a38556fff4e35dc889bde1d124535f391b55a7279.jpg)  
+
+
+
+\section{3.2 FLOW-BASED TRAINING / INFERENCE  }
+
+
+Flow-based Training: We analyze the superior performance of Rectified Flow from SD3 (Esser et al., 2024) and find that, unlike DDPM (Ho et al., 2020), which rely on noise prediction, both 1-Rectified Flow (RF) (Lipman et al., 2022) and EDM (Karras et al., 2022) use data or velocity prediction, resulting in faster convergence and improved performance. Specifically, all these methods follow a common diffusion formulation: $\mathbf{x}_{t}={\boldsymbol{\alpha}}_{t}\cdot\mathbf{x}_{0}+{\boldsymbol{\sigma}}_{t}\cdot{\boldsymbol{\epsilon}}.$ , where $\mathbf{x}_{\mathrm{0}}$ represents the image data, $\epsilon$ denotes random noise, and $\alpha_{t}$ and $\sigma_{t}$ are hyper-parameters of the diffusion process. In DDPM training, the objective is noise prediction, defined as $\epsilon_{\theta}(\mathbf{x}_{t},t)=\epsilon_{t}$ . However, both EDM and RF follow a different approach: EDM aims for data prediction with the objective $x_{\theta}(\mathbf{x}_{t},t)\,=\,\mathbf{x}_{0}$ , while RF uses velocity prediction with the objective $v_{\theta}(\mathbf{x}_{t},t)=\epsilon-\mathbf{x}_{0}$ . This transition from noise prediction to data or velocity prediction is critical near $t=T$ , where noise prediction can lead to instability, while data or velocity prediction provides more precise and stable estimates. As noted by Balaji et al. (2022), attention activation near $t\,=\,T$ is stronger, further emphasizing the importance of accurate predictions at this critical point. This shift effectively reduces cumulative errors during sampling, resulting in faster convergence and improved performance.  
+
+Flow-based Inference: In our work, we modify the original DPM-Solver $^{-+}$ (Lu et al., 2022b) adapting the Rectified Flow formulation, named Flow-DPM-Solver. The key adjustments involve substituting the scaling factor $\alpha_{t}$ with $1-\sigma_{t}$ , where $\sigma_{t}$ remains unchanged but time-steps are redefined over the range $[0,1]$ instead of [1, 1000], with a time-step shift applied to achieve a lower signal-noise ratio, following SD3 (Esser et al., 2024). Additionally, our model predicts the velocity field, which differs from the data prediction in the original DPM-Solver $^{++}$ . Specifically, data is derived from the relation: data $\leftarrow x_{0}=x_{T}-\sigma_{T}\cdot v_{\theta}(x_{T},t_{T})$ , where $v_{\theta}(\cdot)$ is the velocity predicted by the model.  
+
+As a result, in Figure 8, our Flow-DPM-Solver converges at $14{\sim}20$ steps with better performance, while the Flow-Euler sampler needs $28{\sim}50$ steps for convergence with a worse result.  
+
+
+
+\section{4 ON-DEVICE DEPLOYMENT  }
+
+
+To enhance edge deployment, we quantize our model with 8-bit integers. Specifically, we adopt pertoken symmetric INT8 quantization for activation and per-channel symmetric INT8 quantization for weights. Moreover, to preserve a high semantic similarity to the 16-bit variant while incurring minimal runtime overhead, we retain normalization layers, linear attention, and key-value projection layers within the cross-attention block at full precision.  
+
+Table 5: On-device Deployment: our inference engine with W8A8 quantization realized a $2.4\times$ speedup when generating $1024{\mathrm{px}}$ images on the laptop GPU. The performance of Sana is assessed with the CLIP-Score on MJHQ-30K (Li et al., 2024a) and the Image-Reward (Xu et al., 2024) on its first 1K images.  
+
+![](images/acb3728faa0bac519f2463d7b9befea0cece3a8ed9f101c01924fbafabb51424.jpg)  
+
+We implement our W8A8 GEMM kernel in CUDA $C++$ and employ kernel fusion techniques to mitigate the overhead associated with unnecessary activation loads and stores, thereby enhancing overall performance. Specifically, we integrate the $\mathrm{ReLU}(K)^{T}V$ product of linear attention (Equation 1) with the $Q K V$ -projection layer; we also fuse the Gated Linear Unit (GLU) with the quantization kernel in Mix-FFN, and combine other element-wise operations. Additionally, we adjust the activation layout to avoid any transpose operations in GEMM and Conv kernels.  
+
+Table 5 shows the speed comparison before and after our deployment optimization on a laptop GPU. For generating a $1024{\mathrm{px}}$ image, our optimized implementation achieves $2.4\times$ speedup, taking only 0.37 seconds, while maintaining almost lossless image quality.  
+
+
+
+\section{5 EXPERIMENTS  }
+
+
+Model Details. Table 6 describes the details of the network architecture. Our Sana-0.6B only contains 590M parameters, and the number of layers and channels is almost identical to those of the original DiT-XL and PixArt- $\Sigma$ . Our Sana-1.6B increases the parameters to 1.6B, with 20 layers and 2240 channels per layer, and increases the channels to 5600 in FFN. We believe that keeping the model layers between 20 and 30 strikes a good balance between efficiency and quality.  
+
+Evaluation Details. We use five mainstream evaluation metrics to evaluate the performance of our Sana, namely FID, Clip Score, GenEval (Ghosh et al., 2024), DPG-Bench (Hu et al., 2024), and ImageReward (Xu et al., 2024), comparing it with SOTA methods. FID and Clip Score are evaluated on the MJHQ-30K (Li et al., 2024a) dataset, which contains 30K images from Midjourney. GenEval and DPG-Bench both focus on measuring text-image alignment, with 533 and 1,065 test prompts, respectively. ImageReward assesses human preference performance and includes 100 prompts.  
+
+Table 6: Architecture details of the proposed Sana.   
+
+![](images/d8a147407189b9f8de3de6bce0db8f97291bab9178b52d369963fc6ca0496376.jpg)  
+
+Table 7: Comprehensive comparison of our method with SOTA approaches in efficiency and performance. The speed is tested on one $\mathrm{Al00\,GPU}$ with FP16 Precision. Throughput: Measured with batch $_{=16}$ . Latency: Measured with batch $^{=1}$ and sampling step $\scriptstyle=20$ . We highlight the best, second best, and third best entries.   
+
+![](images/d5fda6cb3e754bae9eeae771c841d4bf21bc53b633ce9dc8a225f515fb7aca4a.jpg)  
+
+Table 8: Performance of Sana block design space. The speed is tested on one A100 GPU with FP16 Precision with 1024 image size. MACs: Multi-accumulate operations for a single forward pass. TP (Throughput): Measured with batch $\scriptstyle1=16$ . Latency: Measured with batch $^{=1}$ .   
+
+![](images/08fb39c76c09cb76d007523fe4b8cae52cb841b5ecfdb58ec34ef59049e45d36.jpg)  
+
+5.1 PERFORMANCE COMPARISON AND ANALYSIS  
+
+We compare Sana with the most advanced text-to-image diffusion models in Table 7. For $512\times512$ resolution, Sana-0.6 demonstrates a throughput that is $5\times$ faster than PixArt- $.\Sigma$ , which has a similar model size, and significantly outperforms it in FID, Clip Score, GenEval, and DPG-Bench. For $1024\times1024$ resolution, Sana is considerably stronger than most models with ${<}3\mathrm{B}$ parameters and excels in inference latency. Our models achieve competitive performance even when compared to the most advanced large model FLUX-dev. For instance, while the accuracy on DPG-Bench is equivalent and slightly lower on GenEval, Sana-0.6B’s throughput is $39\times$ faster, and Sana-1.6B is $23\times$ faster.   
+In Table 8, we analyze the efficiency of replacing the original DiT’s modules with the corresponding linear DiT’s modules under the $1024\times1024$ resolution setting. We observe that using AE-F8C4P2, replacing the original full attention with linear attention can reduce latency from 2250ms to $1931\mathrm{ms}.$ , but the generation results are worse. Replacing the original FFN with our Mix-FFN compensates for the performance loss, although it sacrifices some efficiency. With Triton kernel fusion, our linear DiT can ultimately be slightly faster than the original DiT at the 1024px scale and faster at higher resolution. Moreover, when upgrading from AE-F8C4P2 to AE-F32C32P1, the MACs can be further reduced by $4\times$ , and throughput can also be improved by $4\times$ . Triton kernel fusion can bring ${\sim}10\%$ speed acceleration.  
+
+The left side of Figure 9 compares the generation results of Sana, Flux-dev, SD3, and PixArt- $\Sigma$ . In the first row of text rendering, PixArt- $\Sigma$ lacks text rendering capability, while Sana can render text accurately. In the second row, the quality of the images generated by our Sana and FLUX is comparable, while SD3’s text understanding is inaccurate. The right side of Figure 9 shows that Sana can be successfully deployed on a laptop locally.  
+
+Table 9: Comparison of different Text-Encoders. All models are tested with an A100 GPU with FP16 precision after 50K training steps. Gemma-2B models achieve better performance than T5- large at a similar speed and comparable performance to the larger, much slower T5-XXL.  
+
+![](images/80483f950f094353564f3dd7ae2939bcae0d34dbe3c538af2c35edb442bdeaa7.jpg)  
+Figure 9: Left: Visualization comparison of Sana-1.6B vs FLUX-dev, SD3 and PixArt- $\Sigma$ . The speed is tested on an A100 GPU with FP16 precision. Right: Quantize Sana-1.6B is deployable on a GPU laptop generating an $1\mathrm{K}{\times}1\mathrm{K}$ image within 1 seconds.  
+
+
+
+\section{6 RELATED WORK  }
+
+
+We put a relatively brief overview of related work in the main text, with a more comprehensive version available in the supplementary material. In terms of generative model architecture, Diffusion Transformer (Peebles & Xie, 2022) and DiT-based Text-to-image extensions (Chen et al., 2024b; Esser et al., 2024; Labs, 2024) have made significant progress over the past year. Regarding text encoder, the earliest work (Rombach et al., 2022) uses CLIP, while subsequent works (Saharia et al., 2022; Chen et al., 2024b;a) adopt T5-XXL. There are also efforts that combine T5 and CLIP (Balaji et al., 2022; Esser et al., 2024). For high-resolution generation, PixArt- $\Sigma$ (Chen et al., 2024a) is the first model capable of directly generating images at 4K resolution. Additionally, GigaGAN (Kang et al., 2023) can generate 4K images using a super-resolution model. In the context of on-device deployment, Zhao et al. (2023); Li et al. (2024b) have explored the deployment of diffusion models on mobile devices.  
+
+
+
+\section{7 CONCLUSION  }
+
+
+This paper builds a new efficient text-to-image pipeline named Sana. We have made improvements in the following dimensions: we propose a deep compression autoencoder, widely use linear attention to replace self-attention in DiT, utilize decoder-only LLM as text encoder with complex human instruction, establish an automatic image caption pipeline, and propose flow-based DPM-Solver to accelerate sampling. Sana can generate images at a maximum resolution of $4096\!\times\!4096$ , delivering throughput more than $100\times$ higher than the SOTA methods while maintaining competitive generation results.  
+
+In the future, we will consider building an efficient video generation pipeline based on Sana. A potential limitation of this work is that it cannot fully guarantee the safety and controllability of the generated image content. Additionally, challenges remain in certain complex cases, such as text rendering and the generation of faces and hands.  
+
+
+

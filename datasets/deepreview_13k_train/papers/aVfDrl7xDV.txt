@@ -1,0 +1,252 @@
+\title{Searching for Optimal Solutions with LLMs via Bayesian Optimization}
+
+\begin{abstract}
+Scaling test-time compute to search for optimal solutions is an important step towards building generally-capable language models that can reason. Recent work, however, shows that tasks of varying complexity require distinct search strategies to solve optimally, thus making it challenging to design a one-size-fits-all approach. Prior solutions either attempt to predict task difficulty to select the optimal search strategy, often infeasible in practice, or use a static, pre-defined strategy, e.g., repeated parallel sampling or greedy sequential search, which is sub-optimal. In this work, we argue for an alternative view using the probabilistic framework of Bayesian optimization (BO), where the search strategy is adapted dynamically based on the evolving uncertainty estimates of solutions as search progresses. To this end, we introduce Bayesian-OPRO (BOPRO)—a generalization of a recent method for in-context optimization, which iteratively samples from new proposal distributions by modifying the prompt to the LLM with a subset of its previous generations selected to explore or exploit different parts of the search space. We evaluate our method on word search, molecule optimization, and a joint hypothesis+program search task using a 1-D version of the challenging Abstraction and Reasoning Corpus (1D-ARC). Our results show that BOPRO outperforms all baselines in word search (≥10 points) and molecule optimization (higher quality and 17% fewer invalid molecules), but trails a best-k prompting strategy on program search. Our analysis of this failure case reveals that despite the ability to sufficiently balance exploration and exploitation using BOPRO, failure is likely due to the inability of code representation models in distinguishing sequences with low edit-distances.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Decision-making under uncertainty is a hallmark of intelligent behavior (Kochenderfer, 2015; Peterson, 2017), with uncertainty arising from incomplete task information (e.g., unknown constraints and preferences) (Bazerman, 2012), limited or inaccessible data due to challenging or costly collection processes (e.g., efficacy of a drug design, feedback from human users) (Benary et al., 2023), or vast solution spaces that are difficult to model comprehensively (e.g., scientific hypotheses) (Schneider, 2018). Such settings, thus, require searching for optimal solutions—iteratively estimating the quality of plausible solutions conditioned on limited available evidence and prior beliefs to propose a candidate that is either similar to a previous observation known to be high-performing or provide new information for future decision-making, commonly referred to as the exploration-exploitation tradeoff (Cohen et al., 2007). Specifically, we are interested in answering whether a search method with large language models (LLMs) can be designed to handle this trade-off automatically.1  
+
+Recent work (Krishnamurthy et al., 2024) suggests that models are good at exploiting known solutions (finding local optima) but struggle to sufficiently explore the search space (finding global optima) and, thus, may curtail their application in real-world search tasks. Recent attempts to address this issue often involve constructing static meta-heuristics to encourage exploratory behavior, such as with evolutionary algorithms (Lehman et al., 2023; Meyerson et al., 2023; Romera-Paredes et al., 2024), repeated sampling (Brown et al., 2024; Yang et al., 2024), or tuning parallel-to-sequential sampling ratios based on task difficulty (Snell et al., 2024). Despite moderate success, these solutions are either too expensive, not performant enough, or require fixing a search strategy through offline evaluations. In this work, we explore an alternative direction and ask:  
+
+![](images/61e6f1da1ee297493eb08424893772c3bb03aaf6cf3500e7d409bab291a32062.jpg)  
+Figure 1: Overview of Bayesian-OPRO. In every iteration $t$ , BOPRO starts by optimizing an acquisition function $\alpha$ to propose a latent vector $z_{t}^{\prime}\in\mathcal{Z}$ , the embedding space of solution sequences. $z_{t}^{\prime}$ represents a region in the search space considered promising to observe by the surrogate model. To sample one or more solutions from $z_{t}$ , BOPRO constructs a search prompt for an LLM by retrieving $k$ previous observations most similar to the BO proposal in the latent space, using them as in-context examples. The sampled solutions $x_{t}$ are then scored using the black-box function $f(\cdot)$ and mapped to $\mathcal{Z}$ using embedding function $\phi(\cdot)$ , which are then together used to update the surrogate posterior.  
+
+Can we enable LLM-based search to automatically adapt its strategy as search progresses?  
+
+We answer in the affirmative and propose the use of Bayesian optimization (BO) (Kushner, 1964; Frazier, 2018), a framework that builds a surrogate of an objective function using a probabilistic model initialized with a set of priors and initial samples, then generates a posterior predictive distribution over candidate solutions by iteratively integrating new evidence. While there has been preliminary work in trying to combine LLMs with BO, prior works have either viewed the task as a selection problem from an existing pool of candidates (Kristiadi et al., 2024; Opsahl-Ong et al., 2024) or relied on heuristics over samples from the LLM itself to build unprincipled uncertainty estimates (Liu et al., 2024).  
+
+We, therefore, propose Bayesian-OPRO (BOPRO)—a novel method for integrating BO with LLMs that leverages the evolving uncertainty in estimates of the solution space to generate promising solutions in each round of search to find the global optima. In each iteration, BOPRO uses latent-space BO to propose a latent target for the LLM, which is used to sample solutions via a prompting strategy that builds upon a recent in-context optimization method called OPRO (Yang et al., 2024). Specifically, we prompt the LLM with previously generated solutions that are most similar to the BO proposal vector in order to bias its generation towards the BO-proposed region in the search space. We empirically validate our approach on three challenging language-based search tasks— word search, molecule optimization, and hypothesis+program search—and find that BOPRO outperforms the baselines on all tasks except program search. Notably on Semantle, while baselines plateau, likely getting stuck in local optima, BOPRO shows steady gains, pointing to its ability to adaptively explore and exploit the search space. We analyze the search behaviors of each method and demonstrate that BOPRO indeed shows a good capacity to balance exploration-exploitation of the search space, which is important for complex reasoning tasks. Despite this ability, we find evidence to suggest that failure on program search likely occurs due to an unavailability of fine-grained code representations that can distinguish between sequences with low edit-distances.  
+
+In summary, our contributions are: (1) we propose BOPRO (§5), a novel method for integrating BO with LLMs that adapts to the problem difficulty and evolving uncertainties as search progresses. (2) We conduct a thorough empirical evaluation (§6) on three search tasks, validating the efficacy of BOPRO in finding optimized solutions compared to several strong baselines (§7). (3) We highlight program synthesis as a failure case for BOPRO and present detailed analyses that (a) clearly demonstrate a strong exploration capability in BOPRO (§8.1), and (b) reveal that poor representations are likely the root cause of optimization failure (§8.2).  
+
+
+
+\section{2 SEARCH TASKS  }
+
+
+We first describe three language-based search tasks that we experiment with in this work in order to provide grounding for subsequent sections.  
+
+2.1 SEMANTLE: WORD SEARCH  
+
+Semantle2 is a synthetic word-search task, where the goal is to find a held-out English word (e.g., “polyethylene”), within a fixed number of iterations using only scalar feedback scores that describe the similarity of a guessed word to the hidden word. In particular, we use representations from the SimCSE (Gao et al., 2021) embedding model as the black-box scoring function. Each hidden word is also paired with an initial warm-start set of words and scores (e.g., “hope” (score: 0.29), “golfing” (score: 0.35), “serum” (score: 0.51)), which altogether define one problem instance.  
+
+
+
+\section{2.2 DOCKSTRING: MOLECULE OPTIMIZATION  }
+
+
+Dockstring (Garc´ıa-Ortego´n et al., 2022) provides a benchmark of challenging molecule optimization tasks that are closely related to real problems in drug discovery. In this work, we focus on the multi-objective task of synthesizing a drug molecule (using SMILES strings (Weininger, 1988)) that jointly optimizes for both druglikeness, as measured by QED scores (Bickerton et al., 2012), and binding (or docking) affinity to a target protein site, measured by Vina scores (Trott & Olson, 2010). Following Yuksekgonul et al. (2024), we synthesize new molecules for each protein target starting from 3 basic chemical fragments—benzene (c1ccccc1), pentane (CCCCC), and acetamide (CC( $\mathbf{\bar{\rho}=}\bigcirc_{\mathbf{\rho}}$ )N).  
+
+
+
+\section{2.3 1D-ARC: HYPOTHESIS $^+$ PROGRAM SEARCH  }
+
+
+The Abstraction and Reasoning Corpus (Chollet, 2019) is a set of analogy puzzles in which a solver must infer the common abstract rule underlying a small set of 3-5 “train” grid transformations, and apply that rule to a new “test” grid. In this work, we use a 1-dimensional version of the dataset,  
+
+1D-ARC, introduced by $\mathrm{Xu}$ et al. (2024).3 We take a joint hypothesis+program search view (Wang et al., 2024), wherein search is performed over the space of natural-language algorithms, followed by generating a python program. The goal for each problem instance is, therefore, to find an algorithm and its python implementation that can solve all the train examples, followed by a single evaluation of the best found program on a test example to receive a score.  
+
+
+
+\section{3 BACKGROUND: BAYESIAN OPTIMIZATION  }
+
+
+Bayesian optimization (BO) is a framework for derivative-free, global optimization to find  
+
+$$
+x^{*}:=\arg\operatorname*{max}_{x\in A}f(x),
+$$  
+
+where $f:\mathbb{R}^{d}\rightarrow\mathbb{R}^{o}$ is the black-box function to optimize, $A$ is a feasible set within the input space (often defined by box constraints) to constrain search, $d$ is the number of input dimensions to tune, $o$ is typically the number of scalar objectives used to evaluate $f$ (we set $o=1$ throughout this work), and we are allowed a limited budget $T$ of evaluations that can be made using the black-box function $f$ to get an observation of the objective at some point in the input space. The goal for BO is then to iteratively select a point for evaluation that is most likely to be $x^{*}$ based on the available evidence.  
+
+In a typical BO implementation, we first initialize a Bayesian statistical model, called a surrogate, to model $f$ with either user-defined priors about the objective function or with uninformed priors. Typical choices for the surrogate model include Gaussian processes (GPs) (Rasmussen & Williams, 2006) and Bayesian neural networks (BNNs) (Springenberg et al., 2016), which encode distributions over plausible realizations of the true black-box function. Once initialized, a set of warm-start experiments are then conducted by taking random samples from the input space and observing their black-box values. These samples are used to compute the initial posterior predictive distribution $f(x)\mid f(x_{1:t-1})$ , which, in the case of a GP, is a normal distribution with mean $\mu_{t}(x)$ and variance $\sigma_{t}^{2}(x)$ at each input $x$ at time-step $t$ . The final component is an acquisition function $\alpha:\ensuremath{\mathbb{R}^{d}}\to\ensuremath{\mathbb{R}}$ , which is a function that balances exploration and exploitation by assigning a scalar value to each point in the input space denoting the utility of sampling that point based on the posterior predictive at a given time-step. At each step $t$ , the next point is then sampled as  
+
+$$
+x_{t}:=\arg\operatorname*{max}_{x\in A}\alpha(x,f(x)\mid f(x_{1:t-1})),
+$$  
+
+which can be optimized using standard gradient-based methods. We then evaluate the black-box function at this new point to get $f(x_{t})$ and update the posterior predictive. This loop is repeated until either the search budget is exhausted or a solution with sufficient quality is found, following which the best solution thus far is returned.  
+
+
+
+\section{4 RELATED WORK  }
+
+
+Test-time compute with LLMs. Snell et al. (2024) provide a useful framework for categorizing different methods for scaling test-time compute into refining the proposal distribution and using verifiers to guide decoding, e.g. during beam search. Brown et al. (2024) present an analysis of the ability of repeated sampling to scale test-time compute and derive scaling laws for the same. Several other test-time search and optimization methods (Yang et al., 2024; Lehman et al., 2023; Meyerson et al., 2023; Romera-Paredes et al., 2024; Wang et al., 2024) approach the problem assuming the availability of a known verifier, similar to our setting.  
+
+Bayesian optimization and LLMs. Some methods use the LLM itself to simulate each step of BO via repeated prompting to compute uncertainties over candidate solutions (Liu et al., 2024; Ramos et al., 2023). Other methods have used BO with LLMs to perform efficient selection over a discrete solution set (Kristiadi et al., 2024; Opsahl-Ong et al., 2024). Chen et al. (2024) propose an approach to learn soft-prompts with BO starting with a set of random vectors and show promising results on instruction induction. Finally, our work is also related to earlier works performing LSBO with autoencoders instead of LLMs (Go´mez-Bombarelli et al., 2018).  
+
+
+
+\section{5 BAYESIAN-OPRO (BOPRO)  }
+
+
+We now introduce BOPRO (Fig. 1)—a method for LLM-based search that can automatically adapt its strategy based on the evolving uncertainties about the search space using latent-space BO over textual embeddings of plausible solutions for a given task. In each iteration with BOPRO, a surrogate model builds a probabilistic estimate of task performance for unobserved regions of the search space using previous observations and proposes a vector representing a promising region to sample solutions from next. The proposal vector is used to build a search prompt that is input to an LLM to sample new solution sequences. The generated solutions are then scored using the black-box function for the task and added to the pool of observations to improve surrogate estimates in subsequent iterations. This process is repeated until either the optimal solution is found or the search budget is exhausted, following which the best solution found thus far is returned.4  
+
+We next describe each component of BOPRO categorized broadly into: (1) generating the latentspace proposal using BO, and (2) decoding the solution text from the latent proposal via prompting.  
+
+
+
+\section{5.1 LATENT-SPACE BO  }
+
+
+
+
+\section{5.1.1 WARM-STARTING  }
+
+
+6.1). We then compute the latent-space embedding for each generated solution using a representation function $\phi(\cdot)$ , e.g., a text embedding model, to get $z:=\overline{{\phi}}(x)\,\in\,\mathbb{R}^{d}$ . We then derive the initial posterior predictive distribution conditioned on $\{(z_{w}^{(i)},f(x_{w}^{(i)}))\}_{i=1:W}$ . Note that the goal at this stage is only to provide wide coverage of the solution space, and not to maximize $f$ .  
+
+5.1.2 GENERATING REPRESENTATIONS  
+
+Representation prompt. To generate useful representations for solution candidates, we convert the raw text of a solution into a task-dependent prompt before passing it through $\phi(\cdot)$ . E.g.6.2).  
+
+Representation function. BOPRO relies on the availability of an embedding function $\phi(\cdot)$ that is capable of generating good representations of plausible solutions for the task. For example, in program search, embeddings must be able to distinguish between distinct algorithmic constructs. Additionally, since it is widely reported that GPs struggle with large input dimensions (Snoek et al., 2012; Wang et al., 2013), we, optionally, include a dimensionality reduction function $\psi(\cdot)$ to get $z:=$ $\psi(\phi(x))\,\in\,\mathbb{R}^{d^{\prime}}$ , where $d^{\prime}\ll d$ . Several choices exist for $\psi$ , including PCA, low-rank projection (Li et al., 2018; Aghajanyan et al., 2021), and random projection (Wang et al., 2013). When no dimensionality reduction is used, $\psi$ is simply set as the identity function.  
+
+
+
+\section{5.1.3 GENERATING LATENT-SPACE PROPOSALS  }
+
+
+Surrogate model. BOPRO uses a probabilistic surrogate model to estimate the uncertainty in the search space and efficiently update its beliefs about the goodness of different regions as new solutions are observed. Throughout this work, we use a Gaussian process surrogate model with a Mat´ern kernel (Genton, 2001) and priors manually-tuned by visually assessing the fit of the posterior distribution on a known set of solution-score pairs for each task on a randomly sampled problem instance (see Fig. 7).  
+
+Acquisition function. As described in $\S3$ , given a posterior predictive distribution over the feasible search space, BO uses an acquisition function to estimate the value of observing each point. We optimize this acquisition function using multi-start projected gradient ascent to get a new proposal vector that represents a promising region of the search space to sample solutions from. We experiment with three common choices: log expected improvement (LogEI) (Ament et al., 2023), upper-confidence bound (UCB) (Auer, 2002), and Thompson sampling (TS) Thompson (1933).  
+
+4.2 for additional details on our BO setup.  
+
+5.2 LATENT-TO-TEXT DECODING  
+
+With a latent BO proposal that represents a promising region of the search space, we now require a mechanism to sample textual sequences from the proposed region.  
+
+
+
+\section{5.2.1 GENERATING SOLUTIONS VIA SEARCH PROMPTS  }
+
+
+Given a BO proposal vector $z_{t}^{\prime}$ , we first compute the cosine similarity $s_{z_{t}^{\prime},z}$ between $z_{t}^{\prime}$ and each previously observed solution vector (including the warm-start set) $z\in Z:=\{z_{w}^{(i)}\}_{i=1:W}\cup\{z_{j}\}_{j=1:t-1}$ .6.3). In practice, we sample a batch of candidates for each $z_{t}^{\prime}$ , which we found improved performance for all methods we evaluated.6  
+
+Generalizing OPRO. Our method is a Bayesian generalization of a recent in-context optimizaton method, OPRO (Yang et al., 2024), which instead constructs a search prompt by selecting the top- $k$ observed solutions according to the black-box function itself, thereby using a greedy strategy. As an example, consider a Semantle problem with the hidden word being “wordsmith” and the following previous guesses: “word” (score: 0.7), “sentence” (score: 0.65), “lock” (score: 0.5), and “metal” (score: 0.49). Using OPRO, we would greedily select “word” and “sentence” to include in the prompt, whereas BOPRO could sample “lock” and “metal” based on the evolving uncertainties in the BO process, thus possibly generating “locksmith”, which can further generate “wordsmith”. Different from OPRO, we also find that removing numerical scores from the prompt results in a modest improvement across methods, so we use this as the default setting.  
+
+Alternative decoding strategies. Note that our generalization of OPRO can similarly be extended to other in-context optimization methods, e.g., LMX (Meyerson et al., 2023) and FunSearch (Romera-Paredes et al., 2024), which are LLM-based evolutionary algorithms. To demonstrate this generalization, we also show experimental results with one such extension (Bayesian-LMX), but find that it consistently underperforms BOPRO.  
+
+Handling sampling errors. There are two types of errors that can occur when repeatedly generating solutions from an LLM. First, a generated solution may have already been sampled in a previous iteration, and second, a generated solution might be invalid with respect to the black-box function, e.g., a generated code may have syntax errors. To address both problems, we follow prior works and leverage straightforward retry loops.4 for additional details.  
+
+
+
+\section{6 EXPERIMENTS  }
+
+
+To validate the search performance of BOPRO, we run a comprehensive set of experiments on three challenging language-based tasks as introduced in $\S2$ —Semantle (word search), Dockstring (molecule optimization), and 1D-ARC (hypothesis $^+$ program search).  
+
+
+
+\section{6.1 BASELINES  }
+
+
+We evaluate three variants of BOPRO characterized by the acquisition function used: BOPROlogEI, BOPRO-UCB, and BOPRO-TS. Our main baseline is OPRO (Greedy) (Yang et al., 2024), which replaces the Bayesian prompting in our method with a greedy best- $k$ strategy. We also compare with a repeated sampling (RS) baseline7, which relies on the stochasticity from ancestral sampling to generate new solutions from a fixed initial prompt. Lastly, we include a random baseline that samples $k$ previously observed solution-score pairs in each iteration to include in the prompt.  
+
+Additional baselines $(\S7.4)$ . We also evaluate InstructZero (Chen et al., 2024), an approach that replaces the hard-prompting in BOPRO with a soft-prompt that is iteratively optimized using BO. Additionally, as described in $\S5$ , it is straightforward to generalize our Bayesian view to other incontext optimization methods, including evolutionary algorithms, and we present an experiment with one such method, LMX (Meyerson et al., 2023).  
+
+
+
+\section{6.2 MODELS  }
+
+
+Our main results use Mistral-Large-2407 (Jiang et al., 2023) as the representative LLM to generate solutions for each search method. We present additional experiments with additional model families such as LLaMA-3.1-8b-Instruct (Dubey et al., 2024), Gemma-2-2b-It (Team et al., 2024), and  
+
+![](images/35722ad65b24aaa92c132cb8ecb67998f19e0f8ac3dda4d95e33372e896a4cb3.jpg)  
+Figure 2: Best-so-far search performance (using Mistral-Large). (a) On Semantle, all BOPRO variants outperform greedy OPRO in finding the hidden word by ${\ge}10$ percentage points. (b) In molecule optimization, BOPRO shows slightly better performance than OPRO on average. Importantly, OPRO is only able to finish optimization for 12 of 58 protein targets in the same wall-clock time as BOPRO due to consistently proposing invalid sequences (causing high latency in black-box evaluation). (c) In program search, BOPRO trails OPRO due to code embeddings that are unable to distinguish between sequences with low edit-distances (see $\S8.2)$ . Takeaway: BOPRO generates higher-quality solutions than all baselines on the tasks of word search and molecule optimization, but shows a failure scenario with hypothesis+program search.  
+
+GPT-4o (Achiam et al., 2023). For the embedding model, on the tasks of Semantle and 1D-ARC, we use GTE-Qwen-2-1.5b-Instruct (Li et al., 2023), an instruction-tuned embedding model, due to being pre-trained on both general-purpose English data as well as code, both of which are relevant to the tasks in question. For molecule optimization (Dockstring), we use the Molformer (Ross et al., 2022) embedding model, which was jointly pre-trained on text and SMILES strings.  
+
+4 for additional details of our experimental setting.  
+
+
+
+\section{7 MAIN RESULTS  }
+
+
+
+
+\section{7.1 SEMANTLE: WORD SEARCH  }
+
+
+In Fig. 2(a), we show the main results on Semantle, describing the percentage of problems where the hidden word was found over 50 problem instances (using 10 hidden words and 5 warm-start sets) with a maximum budget in each run set to 1000 guesses and averaged over 3 repeat runs.  
+
+Results. First, we observe that both repeated sampling and the random baseline fail to find the hidden word in most runs, thus validating that Semantle is a useful test bed for search that requires a substantial shift in the sampling distribution over timesteps. Next, we find that all BOPRO variants outperform the baselines by ${\bf\geq}10$ percentage points. Notably, while OPRO shows rapid initial gains, it is followed by a long plateau, likely indicating that it gets stuck in local optima. On the other hand, BOPRO shows steady gains, pointing to its capability to adaptively explore and exploit the search space.  
+
+7.2 DOCKSTRING: MOLECULE OPTIMIZATION  
+
+Fig. 2(b) shows our results for molecule optimization to synthesize optimized drug molecules for 58 clinically relevant proteins targets from the Dockstring (Garc´ıa-Ortego´n et al., 2022) benchmark.4.1). For each protein target, we start optimization with a warm-start set of benzene (c1ccccc1), pentane (CCCCC), and acetamide (CC $\mathbf{\omega}^{\prime}=0$ )N) and generate a maximum of 200 new molecule SMILES strings.  
+
+Results. Our results show that BOPRO marginally outperforms greedy OPRO on average. More notably, however, we find that OPRO is unable to even finish optimization for all 58 targets (completing only 12) over a 2-day period, which is the same wall-clock time allocated to BOPRO. Analyzing the generations, we find that the greedy approach in OPRO consistently proposes SMILES strings that are $40\%$ longer than those proposed by BOPRO. This increases evaluation time with the black-box function and, in fact, results in $17\%$ more invalid molecules being proposed than with BOPRO. In Fig. 3, we also visualize the distribution of druglikeness and affinity scores of  
+
+![](images/b1980565c25e5b5d86c33db107d440ee04d6b93cd8aa3aab91680d9f372730b3.jpg)  
+Figure 3: SMILES distributions for PTPN1  
+
+molecules generated by each method for one protein target, tyrosine-protein phosphatase nonreceptor type 1 (PTPN1). We see that OPRO is unable to jointly optimize both objectives but all BOPRO variants show an ability to explore the complex manifold and propose molecules that have high druglikeness and better binding affinity (lower Vina score).  
+
+7.3 1D-ARC: HYPOTHESIS $^+$ PROGRAM SEARCH  
+
+Constructing 1D-ARC-Hard. Following Wang et al. (2024), we first run evaluation on a subset of 108 problem instances. However, our preliminary evaluation found that with only simple repeated sampling (RS) for 100 iterations using Mistral-Large, we are able to achieve a test set accuracy of $81.48\%$ , 8 points higher than the method in Wang et al. (2024) that uses GPT-4. We, therefore, construct 1D-ARC-Hard, a challenging subset suitable for evaluating search performance by first running RS for 100 generations for each of the 901 problems in the dataset, followed by sampling 130 instances from only the unsolved subset of 175 problems.  
+
+Results. Our results are shown in Fig. 2(c) and Fig. 4. Unlike previously, we find that all BOPRO variants now trail the greedy OPRO baseline, with BOPRO even underperforming repeated sampling, noted as being a strong method for code generation in prior work (Brown et al., 2024). We analyze this failure scenario and present our hypothesis for the root cause in $\S8$ .  
+
+7.4 ADDITIONAL EXPERIMENTS  
+
+Below, we present experiments with two additional baselines that represent two distinct LLM-based iterative optimization methodologies.  
+
+![](images/9d4fc73d272143b9cedcee12b08a23e52108a6d50e49396fb32eb644cfe88eeb.jpg)  
+Figure 4: 1D-ARC test accuracy  
+
+![](images/192db2471198cff88dda6eeffe5100863641e8fcd616834beae3034f77c695e1.jpg)  
+
+InstructZero. InstructZero is a method that replaces hard-prompts, as in BOPRO, with soft-prompts that are also optimized using BO to steer LLM generations towards higher utility. We evaluate this method on all 50 problem instances in Semantle using Llama-3.1-8bInstruct and compare it with BOPRO in Table 1. We use both the original formulation of InstructZero as well as a version that performs sampling instead of greedy decoding. Our results show that InstructZero is unable outperform even repeated sampling, indicating that the method might not be performing any meaningful optimization.  
+
+LMX. Next, we evaluate the LMX evolutionary algorithm and also present its Bayesian generalization, BLMX, as described in $\S5$ . Our results on 1D-ARC show that both LMX and BLMX are viable alternatives to OPRO and BOPRO, respectively, but often trail in performance.5.2 for more details.  
+
+![](images/fc56d629df2c860f63788ccda46a85136a51eaef6e41d64126964b7251a356e4.jpg)  
+(a) Solved tasks vs. warm-start scores  
+
+![](images/c8b02e17ffb7ac861c62517ce9ccf83b0f428d23e39ca259db53fbf5221f0b1f.jpg)  
+(b) Performance with low warm-start scores  
+
+![](images/b7b77f395aa1989814fa0bd3e625384afce706ded89e51ae419b3a728de5dfd7.jpg)  
+
+![](images/ea698571c8d45eac5afc7b3c36a5c106b8b5271b029b299263254cdfedc2cd7a.jpg)  
+Figure 5: Exploration-exploitation trade-off with BOPRO. (a) We show the distribution of tasks exclusively solved by each method versus the average warm-start scores for those tasks. OPRO is able to solve tasks with high-scores showing an exploitation strategy, random sampling solves tasks with low scores due to no dependence on prior generations (thus, using an exploration-only strategy), and BO shows a bimodal distribution solving both low- and high-scoring tasks, indicating adaptability to task difficulty. (b) On tasks with low warm-start scores, BOPRO and other baselines outperform greedy. (c, d) Search trajectories for 1 problem instance of 1D-ARC; OPRO gets stuck in a local optima, while BOPRO-TS is able to explore different regions and find the correct solution.  
+
+Generalization to other LLMs. Finally, we also validate our method with other LLMs (of varied sizes) by running experiments on Semantle with both GPT-4o and Gemma-2-2b-It.5.1 and demonstrate similar trends to our main results.  
+
+
+
+\section{8 WHY IS BOPRO UNDERPERFORMING ON PROGRAM SEARCH?  }
+
+
+To determine the root cause of failure of BOPRO on program search, we next present a detailed analysis of our 1D-ARC results.  
+
+8.1 IS BOPRO UNABLE TO BALANCE EXPLORATION-EXPLOITATION?  
+
+To answer this question, we design an experiment starting search with different amounts of information available in the warm-start set. Arguably, tasks with low warm-start scores are more challenging and require more exploration, whereas tasks with high warm-start scores can more easily be solved by greedily exploiting the best observed solution. In Figure 5(a), we plot the probability density of problem instances solved by each method as a function of the average scores observed in the warmstart set. We find that OPRO performs better on tasks with higher warm-start scores, suggesting an exploitation strategy. With BOPRO, on the other hand, we observe a bimodal distribution that covers both low- and high-scores, indicating the ability to balance exploration and exploitation.  
+
+![](images/60943f79f4354e989f418e0e5e1fbc83bf028643e306171d8df99cfb4419894b.jpg)  
+Figure 6: Diagnostic for representation quality. The scatter plot shows the distance between candidate solutions of 10 problems in 1D-ARC in the representation space and the corresponding difference in terms of their black-box scores. Useful representations for BO should result in no points in the top-left quadrant of these plots.  
+
+We verify these observations by plotting performance on a subset of 1D-ARC-Hard tasks that have low warm-start scores (below the first quartile). As shown in Fig. 5(b), OPRO shows a sharp drop in performance whereas BOPRO, RS, and even random sampling show improvements, with BOPROTS and RS showing the best performance. We also provide visual evidence in Fig.5.3 for more details). Takeaway: BOPRO does show the ability to balance exploration-exploitation and is, thus, not the cause of failure in program search.  
+
+8.2 ARE OFF-THE-SHELF CODE EMBEDDINGS ILL-SUITED FOR PROGRAM SEARCH?  
+
+Since BOPRO relies on good representations of the solution space in order to perform meaningful optimization, a likely cause of failure is poor representation quality from off-the-shelf code embedders, which may not provide fine-grained signal for optimizing code sequences. To verify this hypothesis for 1D-ARC and the GTE-Qwen embeddings, we present a diagnostic scatter plot (Korovina et al., 2020) in Fig. 6 that shows pairwise L2 distances between solution candidates as well as their corresponding differences in black-box scores8. Ideally, when L2 distance is low, the score difference should also be low in order to provide useful signal to the nonparametric GP surrogate. From our plot, however, we clearly see that this is not the case, i.e., solutions deemed similar in the embedding space vary dramatically in terms of task scores. This is intuitive as well—consider two python code sequences that only differ in one inequality operator. Off-the-shelf embeddings do not capture this nuanced difference, but such a change is likely to have an impact on program output. Takeaway: low edit-distances between candidate solutions and the unavailability of fine-grained code embedding models are the likely cause of failure for BOPRO on program search, indicating an important direction for future work.9  
+
+
+
+\section{9 CONCLUSION  }
+
+
+We propose a novel methodology, Bayesian-OPRO (BOPRO) for LLM-based search using Bayesian optimization, which uses the evolving uncertainty in estimates of the search space to propose promising new solutions in each iteration to find the global optima. Our experiments on word search and molecule optimization show that BOPRO outperforms strong baselines. Notably, BOPRO outperforms OPRO by $\ge\!10$ percentage points on Semantle and produces $17\%$ fewer invalid molecules on Dockstring. On the challenging hypothesis $^+$ program search task of 1D-ARC, however, BOPRO trails OPRO. We investigate the root cause of this failure and find that despite BOPRO showing the ability to balance exploration and exploitation, the problem lies in the inadequacy of off-the-shelf code embedding models in providing distinct representations for sequences with low-edit distances.  
+
+
+

@@ -1,0 +1,378 @@
+\title{MambaTS: Improved Selective State Space Models for Long-term Time Series Forecasting}
+
+\begin{abstract}
+ In recent years, Transformers have become the de-facto architecture for long-term sequence forecasting (LTSF), but faces challenges such as quadratic complexity and permutation invariant bias. A recent model, Mamba, based on selective state space models (SSMs), has emerged as a competitive alternative to Transformer, offering comparable performance with higher throughput and linear complexity related to sequence length. In this study, we analyze the limitations of current Mamba in LTSF and propose four targeted improvements, leading to MambaTS. We first introduce variable scan along time to arrange the historical information of all the variables together. We suggest that causal convolution in Mamba is not necessary for LTSF and propose the Temporal Mamba Block (TMB). We further incorporate a dropout mechanism for selective parameters of TMB to mitigate model overfitting. Moreover, we tackle the issue of variable scan order sensitivity by introducing variable permutation training. We further propose variable-aware scan along time to dynamically discover variable relationships during training and decode the optimal variable scan order by solving the shortest path visiting all nodes problem during inference. Extensive experiments conducted on eight public datasets demonstrate that MambaTS achieves new state-of-the-art performance. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Long-term time series forecasting (LTSF) has a wide range of applications in various fields, including weather, finance, healthcare, energy and transportation~\cite{lim2021time, wen2022transformers, qiu2024tfb}. With the rapid advancement of deep learning, the current methods for time series prediction have shifted from traditional statistical learning approaches to deep learning-based methods, such as recurrent neural networks (RNNs) and temporal convolutional neural networks (TCNs;~\cite{bai2018empirical, NEURIPS2019_3a0844ce}). Since the introduction of Transformer~\cite{vaswani2017attention}, Transformer-based methods have emerged as the mainstream LTSF approach~\cite{zhou2021informer, nie2023a}, leveraging their self-attention mechanism to effectively capture long-term dependencies in time series data. 
+
+However, recent studies have highlighted challenges faced by Transformers in LTSF. Firstly, these methods suffer from the curse of quadratic complexity, where the computational cost rapidly increases with the length of the context~\cite{wu2021autoformer, zhou2022fedformer, li2019enhancing}. Additionally, some studies have observed that the performance of Transformer-based LTSF methods does not necessarily improve with the increasing look-back window~\cite{nie2023a, liu2023itransformer}. Notably, a recent study called DLinear~\cite{Zeng2023Dlinear} has questioned the effectiveness of Transformers for permutation invariant bias in LTSF, achieving surprising results and surpassing most state-of-the-art (SOTA) Transformer-based methods using a single-layer feed-forward network.
+\begin{figure*}[!ht]
+	\begin{minipage}[c]{.5\linewidth}
+		\centering
+			\fontsize{10pt}{12pt}\selectfont
+			\centering
+			\renewcommand{\arraystretch}{1.1}
+			\scalebox{0.72}{
+				\begin{tabular}{lrcccccc}
+					\cline{1-8}
+					\multicolumn{2}{c|}{\multirow{3}{*}{\diagbox[width=8em, height=3.9em]{Models}{Metrics}}} & \multicolumn{6}{c}{Datasets} \\
+					\cline{3-8}
+					\multicolumn{2}{c|}{} & \multicolumn{2}{c|}{ETTm2} & \multicolumn{2}{c|}{Traffic} & \multicolumn{2}{c}{Electricity} \\
+					\cline{3-8}
+					\multicolumn{2}{c|}{} & MSE & MAE & MSE & MAE & MSE & MAE \\
+					\cline{1-8}
+					& PatchTST  & \bf 0.262 & \bf 0.324 & \bf 0.391 & \bf 0.264 & \bf 0.159 & \bf 0.253 \\
+					& +~Mamba & 0.310 & 0.356 & 0.399 & 0.273 & 0.167 & 0.260 \\
+					\cline{1-8}
+					& iTransformer & \bf 0.275 & \bf 0.337 & \bf 0.376 & 0.270 & \bf 0.162 & \bf 0.258 \\
+					& +~Mamba & 0.318 & 0.358 & 0.384 & \bf 0.269 & 0.163 & 0.261 \\
+					
+					\cline{1-8}
+				\end{tabular}
+			}
+			\captionof{table}{Case study: Mamba for LTSF tasks.}
+			\label{table:case_study}
+		
+	\end{minipage}
+	\begin{minipage}[c]{.5\linewidth}
+		\centering
+		\includegraphics[width=0.86\linewidth]{figs/bar_v3.pdf}
+		\captionof{figure}{Training speed and GPU comparisons.}
+		\label{fig:case_study}
+	\end{minipage}%
+	
+\end{figure*}
+
+The recent popularity of state space models (SSMs;~\cite{fu2022h3, gu2021efficiently, zhang2023spacetime}) has caught our attention. SSMs are principled sequential models that describe the evolution of states over time using ordinary differential equations, making them naturally suitable for time series modeling. Recently, Mamba~\cite{gu2023mamba} enhances traditional SSMs by introducing selection mechanisms to filter out irrelevant information and reset states along. It also incorporates hardware-aware design for efficient parallel training. Mamba has demonstrated competitive performance compared to Transformers across various domains~\cite{gu2023mamba, zhu2024vision, wang2024state}, offering rapid inference and scalability with sequence length.
+The inherent sequential and selective nature of Mamba has driven us to validate its performance in LTSF and compare it to Transformer. Initially, we replaced the Transformer Block in two SOTA Transformer-based methods, PatchTST~\cite{nie2023a} and iTransformer~\cite{liu2023itransformer}, with Mamba Block, resulting in corresponding Mamba versions\footnote{Following the practice of Mamba, we removed positional encoding as the nature of sequence modeling does not necessitate it.}. Subsequently, we compared them with PatchTST and iTransformer, with the results presented in Table~\ref{table:case_study} and Figure~\ref{fig:case_study}. Our findings indicate that, compared to PatchTST and iTransformer, the Mamba versions exhibited a 1.3x faster training speed, with memory consumption reduced by 5.3x and 7.0x, respectively. However, despite these improvements, we did not observe a performance advantage of Mamba over Transformer on these LTSF datasets.
+
+This seems to contradict the intuition that Mamba is naturally more suitable for time series modeling. We made four improvements to Mamba and introduced MambaTS, a framework specifically designed for LTSF based on improved selective SSMs. Firstly, we introduce variable scan along time (VST). Similar to PatchTST~\cite{nie2023a}, we initially segment every variable into patches and linearly map them to tokens. However, unlike PatchTST, we adopt a variable mixing manner by alternately organizing the tokens of different variables at the same timestep, thus expanding them along time to form a global historical look-back window. \emph{However, the lack of identified causality among variables results in the locally non-sequential spanning outcomes after VST.} In the case, causal convolution in the original Mamba Block may impact on model performance. In addition, some studies have argued that causal convolution for the look-back window is unnecessary and may restrict temporal feature extraction~\cite{liu2022scinet, wang2023micn}. To address these issues, we introduce the Temporal Mamba Block (TMB) by removing local convolution before SSM. Additionally, to mitigate overfitting, we incorporated a dropout mechanism~\cite{hinton2012improving} into selective parameters of TMB, building on findings that excessive information integration can lead to overfitting~\cite{nie2023a}, as observed in our experiments with Mamba.
+
+While TMB is tailored for temporal modeling, it remains sensitive to scan order, highlighting the significance of variable organization. To address this, we introduce variable permutation training (VPT). By shuffling the variable order in each iteration, we mitigate the impact of undefined variable order and boost the model's local interaction capacity. \emph{An ensuing question is how do we determine the optimal channel scan order?} Inspired by topological sorting~\cite{tarjan1976edge, prabhumoye2020topological} in graph theory, we further propose a novel Variable-Aware Scan along Time (VAST). In VAST, we consider the position of nodes in a linear sequence, such as $a\to c, b\to c$, where a reasonable topological order might be $a\to b\to c$. Specifically, during training, we update a distance matrix that captures variable relationships based on forward propagation results following each permutation. This formulation transforms the optimal scan order problem into an instance of the asymmetric traveling salesman problem (ATSP) in a dense graph. To address this, we utilize a simulated annealing-based ATSP solver to derive the final channel scan order. To our knowledge, we are the first to investigate variable scan order in the context of SSMs for time series modeling.
+
+Through the aforementioned four designs, MambaTS achieves efficient modeling of global dependencies across time and variables with linear complexity. Extensive experiments on eight popular public datasets demonstrate that MambaTS achieve SOTA performance in most LSTF tasks and settings.
+
+In summary, our contributions are as follows:
+\begin{itemize}
+	\item We introduce MambaTS, a novel time series forecasting model that builds upon improved selective SSMs. By incorporating VST, we effectively organize historical information of all variables to create a global retrospective sequence.
+	\item We present TMB, which addresses the dispensability of causal convolutions in vanilla Mamba for LTSF. Furthermore, we incorporate a dropout mechanism for the selective parameters of TMB to mitigate model overfitting.
+	\item We implement VPT strategy to eliminate the influence of undefined variable order and further enhance the model's local context interaction capabilities.
+	\item We propose VAST, which discover relationships between different variables during training and leverages an ATSP solver to determine the optimal variable scan order during inference.
+\end{itemize}
+
+
+
+
+\section{Related Work}
+
+\label{related_work}
+
+\paragraph{Long-term time series forecasting} 
+
+Traditional LTSF methods leverage the statistical properties and patterns of time series data for prediction~\cite{box1970distribution}. In recent years, LTSF has shifted towards deep learning approaches, where various neural networks are utilized to capture complex patterns and dependencies, elevating LTSF performance. These methods can be broadly classified into two categories: variable-mixing and variable-independent. Variable-mixing methods employ diverse architectures to model dependencies across time and variables. RNNs~\cite{salinas2020deepar, NIPS2015_07563a3f, lai2018modeling} were initially introduced to LTSF due to the nature of sequence modeling. TCNs, known for their local bias, are effective in capturing local patterns in time series data and have shown promising results in LTSF~\cite{bai2018empirical, wang2023micn, wu2023timesnet}. Transformers are subsequently introduced to accomplish long-range dependency modeling through self-attention and have become a mainstream method in LSTF~\cite{wen2022transformers}. However, due to the quadratic complexity, Transformer-based methods have struggled with optimization efficiency~\cite{zhou2021informer, liu2021pyraformer, wu2021autoformer, zhou2022fedformer, li2019enhancing}. Recently, significant improvements have been made in these methods with patch-based techniques~\cite{zhang2023crossformer, nie2023a}. MLPs are also commonly used for LTSF and have achieved impressive results with their simple and direct architectures~\cite{ekambaram2023tsmixer}. Graph neural networks have been utilized to model relationships between variables~\cite{wu2020mtgnn}. FourierGNN~\cite{yi2024fouriergnn} represents the entire time series information as a hypervariate graph and employs Fourier Graph Neural Network for global dependency modeling. On the other hand, variable-independent methods focus solely on modeling temporal dependencies under the assumption of variable independence~\cite{Zeng2023Dlinear, nie2023a, zhou2023one}. These approaches are known for their simplicity and efficiency, often capable of mitigating model overfitting and achieving remarkable outcomes~\cite{Zeng2023Dlinear, nie2023a}. Nevertheless, this assumption may oversimplify the problem and potentially lead to ill-posed scenarios~\cite{zhang2023crossformer}.
+
+
+\paragraph{State Space Models}
+
+Recently, some works~\cite{box1970distribution} have combined SSMs~\cite{kalman1960new} with deep learning and demonstrated significant potential in addressing the long-range dependencies problem. However, the prohibitive computation and memory requirements of state representations often hinder their practical applications~\cite{gu2021efficiently}. Several efficient variants of SSMs, such as S4~\cite{gu2021efficiently}, H3~\cite{fu2022h3}, Gated State Space~\cite{mehta2022long}, and RWKV~\cite{peng2023rwkv}, have been proposed to enhance model performance and efficiency in practical tasks. Mamba~\cite{gu2023mamba} addresses a key limitation of traditional SSMs methods by introducing a data-dependent selection mechanism based on S4 to efficiently filter specific inputs and capture long-range context that scales with sequence length. Mamba demonstrates linear-time efficiency in modeling long sequences and surpasses Transformer models in benchmark evaluations~\cite{gu2023mamba}.
+
+Mamba has also been successfully extended to non-sequential data such as image~\cite{liu2024vmamba, zhu2024vision, wang2024state}, point cloud~\cite{liang2024pointmamba}, table~\cite{ahamed2024mambatab} and graphs~\cite{wang2024graph, behrouz2024graph} to enhance its capability in capturing long-range dependencies. To address the scan order sensitivity of Mamba, some studies have introduced bidirectional scanning~\cite{zhu2024vision}, multi-directional scanning~\cite{li2024mamba, liu2024vmamba}, and even automatic direction scanning~\cite{huang2024localmamba}. However, there is currently limited work considering the issue of variable scan order in temporal problems. To tackle this challenge, we introduce the VAST strategy to further enhance the expressive power of MambaTS. Similar to our approach, Graph-Mamba~\cite{wang2024graph} also proposes a similar permutation strategy to extend context-aware reasoning on graphs. However, it is based on node prioritization, introducing a biased strategy specifically designed for graphs.
+
+
+\section{Preliminaries}
+
+\label{preliminaries}
+
+\paragraph{State Space Models} SSMs are typically regarded as linear time-invariant (LTI) systems that map continuous input signals $x(t)$ to corresponding outputs $y(t)$ through a state representation $h(t)$. This state space describes the evolution of the state over time and can be represented using ordinary differential equations as follows:
+\begin{equation}
+	\begin{aligned}
+		h^\prime(t) & =\boldsymbol{A}h(t)+\boldsymbol{B}x(t) \\
+		y(t) & =\boldsymbol{C}h(t)+\boldsymbol{D}x(t)
+	\end{aligned}
+\end{equation}
+Here, $h^\prime(t)=\frac{dh(t)}{dt}$, and $\boldsymbol{A}, \boldsymbol{B}, \boldsymbol{C}$, and $\boldsymbol{D}$ are parameters of the time-independent SSMs.
+
+\paragraph{Discretization} Finding analytical solutions for SSMs is highly challenging due to their continuous nature. Discretization is typically employed to facilitate analysis and solution in the discrete domain, which involves approximating the continuous-time state space model into a discrete-time representation. This is done by sampling the input signals at fixed time intervals to obtain their discrete-time counterparts. The resulting discrete-time state space model can be represented as:
+\begin{equation}
+	\begin{aligned}
+		h_k & =\overline{\boldsymbol{A}} h_{k-1}+\overline{\boldsymbol{B}} x_k \\
+		y_k & =\overline{\boldsymbol{C}} h_k+\overline{\boldsymbol{D}} x_k
+	\end{aligned}
+\end{equation}
+Here, $h_k$ represents the state vector at time instant $k$, and $x_k$ represents the input vector at time instant $k$. The matrices $\overline{A}$ and $\overline{B}$ are derived from the continuous-time matrices $A$ and $B$ using appropriate discretization techniques such as the Euler or ZOH (Zero-Order Hold) method. In this case, $\overline{\boldsymbol{A}}=\exp (\Delta \boldsymbol{A}), \overline{\boldsymbol{B}}=(\Delta \boldsymbol{A})^{-1}(\exp (\Delta \boldsymbol{A})-\boldsymbol{I}) \cdot \Delta \boldsymbol{B}$.
+
+\paragraph{Selective Scan Mechanism}
+Mamba further introduces selective SSMs by allowing the parameters to influence the interactions along the sequence in a context-dependent manner. This selective mechanism enables Mamba to filter out irrelevant noise in time series tasks, while selectively propagating or forgetting information relevant to the current input. This differs from previous SSMs methods with static parameters, but it does break the LTI characteristics. Therefore, Mamba takes a hardware optimization approach and implements parallel scan training to address this challenge.
+
+
+
+\section{Model architecture}
+
+\label{model_architecture}
+
+For the multivariate time series prediction problem, given an $L$-length look-back window time series data with $K$ variables $(\mathbf{x}_1, \mathbf{x}_2, \cdots, \mathbf{x}_L)$, where $\mathbf{x}_i \in \mathbb{R}^K$ represents the values of $K$ variables at time step $i$. Our objective is to forecast the values of the future $T$ time steps, denoted as $(\mathbf{x}_{L+1}, \cdots, \mathbf{x}_{L+2}, \cdots, \mathbf{x}_{L+T})$.
+
+\subsection{Overall Architecture}
+
+\begin{figure}
+	\centering
+	\includegraphics[width=1\linewidth]{figs/main_arch_v5.pdf}
+	\caption{The overall architecture of MambaTS.}
+	\label{fig:arch}
+\end{figure}
+
+The architecture of MambaTS is illustrated in Figure~\ref{fig:arch}. It primarily consists of an embedding layer, an instance normalization layer, $N\times$ Temporal Mamba blocks, and a prediction head.
+
+\paragraph{Patching and Tokenization} Semantic information at a single time point tends to be sparse. Following PatchTST~\cite{nie2023a}, we segment each variable into about $M=L/s$ patches every $s$ time steps, aggregate information from neighboring points, and then map them to a $D$-dimensional token through linear mapping. This process efficiently reduces memory usage and eliminates redundant information.
+
+\paragraph{Variable Scan along Time} By embedding $K$ variables, we derive $K\times M$ tokens. To fully leverage the linear complexity and selective advantages of Mamba while establishing a comprehensive representation of the look-back window, we introduce the variable scan along time mechanism. VST arranges tokens of variables at each time step in an alternating fashion temporally. This structured organization enables the model to more accurately capture long-term dependencies and dynamic changes in time series data. Subsequently, we feed the results of VST into the encoder.
+
+\paragraph{Encoder} The encoder consists of $N$ stacked TMBs, each comprising two branches. The right SSM branch focuses on sequence modeling, while the left branch contains a gated non-linear layer. The computation process of the original Mamba block is as follows:
+\begin{equation}
+h_t = \text{SSM}(\text{Conv}(\text{Linear}(\mathbf{x_t}))) + \sigma(\text{Linear}(\mathbf{x_t})).
+\end{equation}
+Here, causal convolution, acting as a shift-SSM, is inserted before the SSM module to enhance connections between adjacent tokens, as depicted in Figure~\ref{fig:arch}~(b). However, the results generated by VST may not be causal locally. Therefore, TMB (see Figure~\ref{fig:arch}~(c)) removes this component. Additionally, to prevent overfitting, we introduce a dropout mechanism~\cite{hinton2012improving} for the selective parameters, as follows:
+\begin{equation}
+h_t = \text{SSM}(\text{Dropout}(\text{Linear}(\mathbf{x_t}))) + \sigma(\text{Linear}(\mathbf{x_t})).
+\end{equation}
+
+\paragraph{Prediction Head} Since the encoder is capable of capturing global dependencies, for efficiency reasons, similar to PatchTST~\cite{nie2023a}, we adopt a channel-independent decoding approach in the decoding phase. Each channel is decoded individually using a simple linear head.
+
+\paragraph{Instance Normalization} To mitigate distribution shift between training and test data, following RevIN~\cite{kim2021reversible}, we standardize each input channel to zero mean and unit standard deviation, and keep track of these statistics for de-normalization of the model prediction.
+
+\paragraph{Loss Function} We choose mean squared error (MSE) loss as the primary loss function, given by:
+\begin{equation}
+	\mathcal{L}=\mathbb{E}_{\mathbf{x}} \frac{1}{M} \sum_{i=1}^M\left\|\hat{\mathbf{x}}_{L+1: L+T}^{(i)}-\mathbf{x}_{L+1: L+T}^{(i)}\right\|_2^2 .
+	\label{eq:loss}
+\end{equation}
+
+\subsection{Variable Permutation Training}
+
+To mitigate the impact of undefined channel orders and augment local context interactions, we introduce the variable permutation training (VPT) strategy. Specifically, for the encoder input consisting of $K\times M$ tokens, VPT shuffle the $K$ tokens at each time step in a consistent order, and revert the shuffle state after decoding to ensure the correct output of the sequence. 
+
+\subsection{ Variable-Aware Scan along Time}
+
+To determine the optimal variable scan order, it is essential to consider the relationships between variables. However, since these relationships are unknown, we propose VAST, a simple yet effective method to estimate variable relationships, guiding the scan order during inference stage.
+
+\paragraph{Training} For any $K$ variables, we maintain a directed graph adjacency matrix $\boldsymbol{P}\in\mathbb{R}^{K\times K}$, where $p_{i,j}$ represents the cost from node $i$ to node $j$. Notably, with the introduction of variable permutation during training, we can explore various combinations of scan orders and evaluate their effectiveness using Eq.~\eqref{eq:loss}. Following a permutation, a node index sequence $\mathbf{V}=\{v_1,v_2,\cdots,v_K\}$ is obtained, where $v_k$ denotes the new index in the shuffled sequence. Subsequently, $K-1$ transition tuples $\{(v_1,v_2), (v_2, v_3),\cdots(v_{K-1},v_{K}) \}$ are derived. For each sample, a training loss ${l}^{(t)}$ is computed during the $t$-th iteration of the network. Therefore, we update $\boldsymbol{P}$ with exponential moving average:
+\begin{equation}
+p^{(t)}_{v_k,v_{k+1}}=\beta p^{(t-1)}_{v_k,v_{k+1}}+(1-\beta)l^{(t)},
+\label{eq:ema}
+\end{equation}
+where $\beta$ is a hyperparameter that controls the rate of the moving average, determining the impact of new estimates on the variable relationships. To facilitate efficient training, we extend Eq.~\eqref{eq:ema} to a batch version. By a simple centralization operation to eliminate the influence of different sample batches, i.e., $\bar{l}^{(t)}={l}^{(t)}-\mu({l}^{(t)})$, where $\mu$ is the mean function, the equation is modified to:
+\begin{equation}
+p^{(t)}_{v_k,v_{k+1}}=\beta p^{(t-1)}_{v_k,v_{k+1}}+(1-\beta)\bar{l}^{(t)}.
+\end{equation}
+
+\paragraph{Inference} Throughout training, $\boldsymbol{P}$ are leveraged to determine the optimal variable scan order. This involves solving the asymmetric traveling salesman problem, which seeks the shortest path visiting all nodes. Given the dense connectivity represented by $\boldsymbol{P}$, finding the optimal traversal path is NP-hard. Hence, we introduce a heuristic-based simulated annealing~\cite{dreo2006metaheuristics} algorithm for path decoding.
+
+
+\section{Experiments}
+
+\label{experiments}
+
+\begin{table}[htb]
+	\centering
+	\caption{Summary of Dataset Characteristics}
+	\label{tab:datesets}
+	\begin{adjustbox}{max width=0.78\linewidth}
+		\begin{tabular}{@{}ccccccccc@{}}
+			\toprule
+			Datasets  & ETTh2  & ETTm2  & Weather  & Electricity  & Traffic & Solar   & Covid-19 & PEMS \\ \midrule
+			Features & 7      & 7      & 21      & 321      & 862         & 137     & 948     & 358      \\
+			Time steps    & 17,420  & 17,420  & 52,696  & 26,304  & 17,544       & 52,179   & 1,392   & 21,351   \\ 
+			Frequency & 1 hour & 15 mins & 10 mins & 1 hour & 1 hour      & 10 mins & 1 day  & 5 mins  \\
+			\bottomrule
+		\end{tabular}
+	\end{adjustbox}
+\end{table}
+\paragraph{Dataset} We conducted extensive experiments on eight public datasets, as shown in Table~\ref{tab:datesets}, including two ETT datasets~\cite{zhou2021informer}, Weather, Electricity, Traffic~\cite{wu2021autoformer}, Solar~\cite{lai2018modeling}, Covid-19~\cite{panagopoulos2021transfer}, and PEMS~\cite{liu2022scinet}, covering domains such as electricity, energy, transportation, weather, and health.
+
+\paragraph{Baselines and metrics} To demonstrate the effectiveness of MambaTS, we compared it against SOTA models of LTSF, including five popular Transformer-based methods: PatchTST~\cite{nie2023a}, iTransformer~\cite{liu2023itransformer}, FEDformer~\cite{zhou2022fedformer}, Autoformer~\cite{wu2021autoformer}, and three competitive non-Transformer-based methods: DLinear~\cite{Zeng2023Dlinear}, MICN~\cite{wang2023micn}, and FourierGNN~\cite{yi2024fouriergnn}. Following PatchTST~\cite{nie2023a}, we primarily evaluate the models using Mean Squared Error (MSE) and Mean Absolute Error (MAE).
+
+\paragraph{Implementation Details} Experiments were performed on an NVIDIA RTX 3090 Ti 24 GB GPU using the Adam optimizer~\cite{kingma2014adam} with betas of (0.9, 0.999). Training ran for 10 epochs with early stopping implemented using a patience of 3 to avoid overfitting. The best parameter selection for all comparison models was carefully tuned on the validation set. 
+
+\begin{table}[!ht]
+	\caption{Multivariate long-term series forecasting results. All models employ a look-back window length of \(L=96\) for the Covid-19 dataset and \(L=720\) for the remaining datasets. 
+	}
+	\label{tab:main}
+	\begin{adjustbox}{max width=\linewidth}
+		\begin{tabular}{@{}cccccccccccccccccc@{}}
+			\toprule
+			\multicolumn{2}{c}{Models}                                                   & \multicolumn{2}{c}{\begin{tabular}[c]{@{}c@{}}MambaTS\\ (ours)\end{tabular}} & \multicolumn{2}{c}{\begin{tabular}[c]{@{}c@{}}PatchTST\\ (2023)\end{tabular}} & \multicolumn{2}{c}{\begin{tabular}[c]{@{}c@{}}iTransformer\\ (2023)\end{tabular}} & \multicolumn{2}{c}{\begin{tabular}[c]{@{}c@{}}DLinear\\ (2023)\end{tabular}} & \multicolumn{2}{c}{\begin{tabular}[c]{@{}c@{}}MICN\\ (2023)\end{tabular}} & \multicolumn{2}{c}{\begin{tabular}[c]{@{}c@{}}FourierGNN\\ (2023)\end{tabular}} & \multicolumn{2}{c}{\begin{tabular}[c]{@{}c@{}}FEDformer\\ (2022)\end{tabular}} & \multicolumn{2}{c}{\begin{tabular}[c]{@{}c@{}}Autoformer\\ (2021)\end{tabular}} \\ \midrule
+			\multicolumn{2}{c}{Metric}                                                   & MSE                                    & MAE                                    & MSE                                   & MAE                                   & MSE                                   & MAE                                  & MSE                                    & MAE                              & MSE                                         & MAE                                & MSE                                       & MAE                                & MSE                                    & MAE                                    & MSE                                   & MAE                                   \\ 
+			\midrule
+			\multicolumn{1}{c|}{\multirow{4}{*}{ETTh2}} & \multicolumn{1}{c|}{96} & \textcolor{red}{\textbf{0.283}} & \textcolor{blue}{\ul 0.349} & \textcolor{red}{\textbf{0.283}} & \textcolor{red}{\textbf{0.347}} & 0.312 & 0.363 & 0.306 & 0.370 & \textcolor{blue}{\ul 0.289} & 0.354 & 0.454 & 0.481 & 0.332 & 0.374 & 0.332 & 0.368 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{192} & \textcolor{blue}{\ul 0.356} & \textcolor{blue}{\ul 0.397} & \textcolor{red}{\textbf{0.354}} & \textcolor{red}{\textbf{0.391}} & 0.384 & 0.408 & 0.411 & 0.437 & 0.408 & 0.444 & 0.560 & 0.541 & 0.407 & 0.446 & 0.426 & 0.434 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{336} & \textcolor{red}{\textbf{0.370}} & \textcolor{blue}{\ul 0.416} & \textcolor{blue}{\ul 0.376} & \textcolor{red}{\textbf{0.411}} & 0.431 & 0.444 & 0.542 & 0.514 & 0.547 & 0.516 & 0.608 & 0.568 & 0.400 & 0.447 & 0.477 & 0.479 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{720} & \textcolor{blue}{\ul 0.407} & \textcolor{blue}{\ul 0.446} & \textcolor{red}{\textbf{0.402}} & \textcolor{red}{\textbf{0.440}} & 0.432 & 0.463 & 0.900 & 0.671 & 0.834 & 0.688 & 0.820 & 0.648 & 0.412 & 0.469 & 0.453 & 0.490 \\
+			\midrule
+			\multicolumn{1}{c|}{\multirow{4}{*}{ETTm2}} & \multicolumn{1}{c|}{96} & 0.174 & 0.269 & \textcolor{blue}{\ul 0.168} & \textcolor{blue}{\ul 0.259} & 0.181 & 0.275 & \textcolor{red}{\textbf{0.163}} & \textcolor{red}{\textbf{0.258}} & 0.177 & 0.274 & 0.229 & 0.327 & 0.180 & 0.271 & 0.205 & 0.293 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{192} & \textcolor{blue}{\ul 0.235} & \textcolor{blue}{\ul 0.309} & 0.237 & \textcolor{blue}{\ul 0.309} & 0.243 & 0.315 & \textcolor{red}{\textbf{0.222}} & \textcolor{red}{\textbf{0.304}} & 0.236 & 0.310 & 0.308 & 0.384 & 0.252 & 0.318 & 0.278 & 0.336 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{336} & 0.288 & \textcolor{blue}{\ul 0.346} & \textcolor{blue}{\ul 0.279} & \textcolor{red}{\textbf{0.336}} & 0.297 & 0.352 & \textcolor{red}{\textbf{0.274}} & \textcolor{red}{\textbf{0.336}} & 0.299 & 0.350 & 0.362 & 0.413 & 0.324 & 0.364 & 0.343 & 0.379 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{720} & \textcolor{red}{\textbf{0.360}} & \textcolor{blue}{\ul 0.393} & \textcolor{blue}{\ul 0.363} & \textcolor{red}{\textbf{0.390}} & 0.381 & 0.404 & 0.407 & 0.432 & 0.421 & 0.434 & 0.482 & 0.487 & 0.410 & 0.420 & 0.414 & 0.419 \\
+			\midrule
+			\multicolumn{1}{c|}{\multirow{4}{*}{Weather}} & \multicolumn{1}{c|}{96} & \textcolor{red}{\textbf{0.145}} & \textcolor{red}{\textbf{0.196}} & \textcolor{blue}{\ul 0.149} & \textcolor{blue}{\ul 0.198} & 0.180 & 0.232 & 0.168 & 0.227 & 0.167 & 0.231 & 0.162 & 0.232 & 0.238 & 0.314 & 0.249 & 0.329 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{192} & \textcolor{red}{\textbf{0.193}} & \textcolor{red}{\textbf{0.241}} & \textcolor{blue}{\ul 0.194} & \textcolor{red}{\textbf{0.241}} & 0.228 & 0.270 & 0.212 & \textcolor{blue}{\ul 0.267} & 0.212 & 0.271 & 0.207 & 0.276 & 0.275 & 0.329 & 0.325 & 0.370 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{336} & \textcolor{blue}{\ul 0.246} & \textcolor{blue}{\ul 0.283} & \textcolor{red}{\textbf{0.245}} & \textcolor{red}{\textbf{0.282}} & 0.291 & 0.316 & 0.256 & 0.305 & 0.275 & 0.337 & 0.261 & 0.318 & 0.339 & 0.377 & 0.351 & 0.391 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{720} & \textcolor{blue}{\ul 0.314} & \textcolor{red}{\textbf{0.331}} & \textcolor{blue}{\ul 0.314} & \textcolor{blue}{\ul 0.334} & 0.354 & 0.359 & 0.315 & 0.355 & \textcolor{red}{\textbf{0.312}} & 0.349 & 0.336 & 0.366 & 0.389 & 0.409 & 0.415 & 0.426 \\
+			\midrule
+			\multicolumn{1}{c|}{\multirow{4}{*}{Electricity}} & \multicolumn{1}{c|}{96} & \textcolor{red}{\textbf{0.128}} & \textcolor{red}{\textbf{0.223}} & \textcolor{blue}{\ul 0.130} & \textcolor{red}{\textbf{0.223}} & 0.133 & \textcolor{blue}{\ul 0.229} & 0.133 & 0.230 & 0.151 & 0.260 & 0.166 & 0.274 & 0.186 & 0.302 & 0.196 & 0.313 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{192} & \textcolor{red}{\textbf{0.146}} & \textcolor{red}{\textbf{0.239}} & \textcolor{blue}{\ul 0.147} & \textcolor{blue}{\ul 0.240} & 0.155 & 0.251 & \textcolor{blue}{\ul 0.147} & 0.244 & 0.165 & 0.276 & 0.182 & 0.289 & 0.197 & 0.311 & 0.211 & 0.324 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{336} & \textcolor{red}{\textbf{0.161}} & \textcolor{blue}{\ul 0.258} & 0.164 & \textcolor{red}{\textbf{0.257}} & 0.167 & 0.264 & \textcolor{blue}{\ul 0.162} & 0.261 & 0.183 & 0.291 & 0.201 & 0.308 & 0.213 & 0.328 & 0.214 & 0.327 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{720} & \textcolor{red}{\textbf{0.187}} & \textcolor{red}{\textbf{0.283}} & 0.203 & 0.292 & \textcolor{blue}{\ul 0.194} & \textcolor{blue}{\ul 0.288} & 0.196 & 0.294 & 0.201 & 0.312 & 0.235 & 0.339 & 0.233 & 0.344 & 0.236 & 0.342 \\
+			\midrule
+			\multicolumn{1}{c|}{\multirow{4}{*}{Traffic}} & \multicolumn{1}{c|}{96} & \textcolor{red}{\textbf{0.347}} & \textcolor{red}{\textbf{0.247}} & 0.367 & \textcolor{blue}{\ul 0.253} & \textcolor{blue}{\ul 0.349} & 0.255 & 0.385 & 0.269 & 0.445 & 0.295 & 0.494 & 0.303 & 0.576 & 0.359 & 0.597 & 0.371 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{192} & \textcolor{red}{\textbf{0.357}} & \textcolor{red}{\textbf{0.255}} & 0.382 & \textcolor{blue}{\ul 0.259} & \textcolor{blue}{\ul 0.359} & 0.263 & 0.395 & 0.273 & 0.461 & 0.302 & 0.513 & 0.310 & 0.610 & 0.380 & 0.607 & 0.382 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{336} & \textcolor{red}{\textbf{0.372}} & \textcolor{red}{\textbf{0.262}} & 0.396 & \textcolor{blue}{\ul 0.267} & \textcolor{blue}{\ul 0.379} & 0.272 & 0.409 & 0.281 & 0.483 & 0.307 & 0.534 & 0.320 & 0.608 & 0.375 & 0.623 & 0.387 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{720} & \textcolor{red}{\textbf{0.416}} & \textcolor{red}{\textbf{0.284}} & 0.433 & \textcolor{blue}{\ul 0.287} & \textcolor{blue}{\ul 0.417} & 0.291 & 0.449 & 0.305 & 0.527 & 0.310 & 0.597 & 0.346 & 0.621 & 0.375 & 0.639 & 0.395 \\
+			\midrule
+			\multicolumn{1}{c|}{\multirow{4}{*}{Solar}} & \multicolumn{1}{c|}{96} & \textcolor{red}{\textbf{0.165}} & \textcolor{red}{\textbf{0.232}} & 0.185 & 0.246 & \textcolor{blue}{\ul 0.170} & 0.246 & 0.191 & 0.257 & 0.190 & \textcolor{blue}{\ul 0.243} & 0.183 & \textcolor{red}{\textbf{0.232}} & 0.214 & 0.311 & 0.316 & 0.369 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{192} & \textcolor{red}{\textbf{0.179}} & \textcolor{red}{\textbf{0.242}} & 0.201 & 0.262 & \textcolor{blue}{\ul 0.195} & 0.263 & 0.211 & 0.273 & 0.205 & \textcolor{blue}{\ul 0.247} & 0.198 & 0.256 & 0.281 & 0.364 & 0.418 & 0.437 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{336} & \textcolor{red}{\textbf{0.191}} & \textcolor{blue}{\ul 0.253} & 0.209 & 0.266 & 0.217 & 0.282 & 0.228 & 0.285 & 0.219 & \textcolor{red}{\textbf{0.250}} & \textcolor{blue}{\ul 0.205} & 0.261 & 0.294 & 0.378 & 0.438 & 0.467 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{720} & \textcolor{red}{\textbf{0.200}} & \textcolor{red}{\textbf{0.261}} & 0.226 & 0.283 & 0.208 & 0.276 & 0.236 & 0.294 & 0.227 & \textcolor{blue}{\ul 0.263} & \textcolor{blue}{\ul 0.202} & 0.265 & 0.315 & 0.406 & 0.618 & 0.550 \\
+			\midrule
+			\multicolumn{1}{c|}{\multirow{4}{*}{Covid-19}} & \multicolumn{1}{c|}{12} & \textcolor{red}{\textbf{0.774}} & \textcolor{red}{\textbf{0.036}} & 1.236 & 0.054 & \textcolor{blue}{\ul 0.998} & \textcolor{blue}{\ul 0.046} & 2.643 & 0.087 & 6.505 & 0.110 & 3.584 & 0.075 & 7.607 & 0.316 & 7.695 & 0.406 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{24} & \textcolor{red}{\textbf{1.151}} & \textcolor{red}{\textbf{0.048}} & 1.584 & 0.064 & \textcolor{blue}{\ul 1.488} & \textcolor{blue}{\ul 0.060} & 3.678 & 0.100 & 23.587 & 0.155 & 2.532 & 0.079 & 8.162 & 0.312 & 8.253 & 0.410 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{48} & \textcolor{red}{\textbf{1.964}} & \textcolor{red}{\textbf{0.068}} & 2.639 & 0.089 & \textcolor{blue}{\ul 2.505} & \textcolor{blue}{\ul 0.082} & 5.836 & 0.131 & 33.467 & 0.206 & 12.922 & 0.140 & 9.458 & 0.328 & 9.563 & 0.440 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{96} & \textcolor{red}{\textbf{4.108}} & \textcolor{red}{\textbf{0.106}} & 11.811 & 0.176 & \textcolor{blue}{\ul 6.435} & \textcolor{blue}{\ul 0.146} & 10.092 & 0.185 & 24.247 & 0.261 & 7.991 & 0.164 & 12.694 & 0.550 & 12.592 & 0.456 \\
+			\midrule
+			\multicolumn{1}{c|}{\multirow{4}{*}{PEMS}} & \multicolumn{1}{c|}{12} & \textcolor{red}{\textbf{0.060}} & \textcolor{red}{\textbf{0.162}} & \textcolor{blue}{\ul 0.063} & \textcolor{blue}{\ul 0.166} & 0.064 & 0.167 & 0.078 & 0.187 & 0.094 & 0.204 & 0.091 & 0.202 & 0.283 & 0.394 & 0.584 & 0.607 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{24} & \textcolor{red}{\textbf{0.076}} & \textcolor{red}{\textbf{0.180}} & \textcolor{blue}{\ul 0.080} & \textcolor{blue}{\ul 0.185} & 0.081 & 0.187 & 0.113 & 0.224 & 0.116 & 0.229 & 0.116 & 0.232 & 0.300 & 0.431 & 0.672 & 0.664 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{48} & \textcolor{red}{\textbf{0.102}} & \textcolor{red}{\textbf{0.207}} & \textcolor{blue}{\ul 0.109} & \textcolor{blue}{\ul 0.213} & 0.111 & 0.215 & 0.167 & 0.274 & 0.147 & 0.255 & 0.165 & 0.271 & 0.396 & 0.476 & 0.879 & 0.781 \\
+			\multicolumn{1}{c|}{} & \multicolumn{1}{c|}{96} & \textcolor{red}{\textbf{0.134}} & \textcolor{red}{\textbf{0.232}} & 0.145 & 0.243 & \textcolor{blue}{\ul 0.142} & \textcolor{blue}{\ul 0.240} & 0.212 & 0.313 & 0.256 & 0.362 & 0.196 & 0.300 & 0.477 & 0.537 & 1.100 & 0.895 \\
+			\bottomrule
+		\end{tabular}
+	\end{adjustbox}
+\end{table}
+\begin{table}[!h]
+	\caption{Ablations on components. VST: Variable Scan along Time. TMB: Temporal Mamba Block. VAST: Variable-Aware Scan along Time. The average results of all predicted lengths are listed here.}
+	\label{tab:ablation_main}
+	\centering
+	\begin{small}
+		\fontsize{10pt}{12pt}\selectfont
+		\centering
+		\renewcommand{\arraystretch}{1.1}
+		\scalebox{0.78}{
+			\begin{tabular}{ccc||cc|cc|cc|cc}	
+				\toprule
+				\multirow{2}{*}{VST} &\multirow{2}{*}{TMB} & \multirow{2}{*}{VAST} & \multicolumn{2}{c|}{ETTm2} & \multicolumn{2}{c|}{Traffic} & \multicolumn{2}{c|}{Electricity} & \multicolumn{2}{c}{Solar}\\
+				\cline{4-11}
+				& & & MSE & MAE & MSE & MAE  & MSE & MAE & MSE & MAE \\
+				\cline{1-11}
+				$\Circle$ & $\Circle$ & $\Circle$ & 0.285 & 0.342 & 0.400 & 0.273 & 0.167 & 0.260 & 0.192 & 0.261 \\
+				$\CIRCLE$ & $\Circle$ & $\Circle$ & 0.284 & 0.341 & 0.383 & 0.268 & 0.164 & 0.260 & 0.197 & 0.266 \\
+				$\Circle$ & $\CIRCLE$ & $\Circle$ & 0.264 & 0.329 & 0.389 & 0.268 & 0.160 & 0.255 & 0.191 & 0.253 \\
+				$\CIRCLE$ & $\CIRCLE$ & $\Circle$ & 0.263 & 0.327 & 0.376 & 0.267 & 0.161 & 0.257 & 0.193 & 0.261 \\
+				\cline{1-11}
+				$\CIRCLE$ & $\CIRCLE$ & $\CIRCLE$ & \bf 0.262 & \bf 0.325 & \bf 0.373 & \bf 0.262 & \bf 0.155 & \bf 0.251 & \bf 0.184 & \bf 0.247 \\
+				\bottomrule
+		\end{tabular}}
+	\end{small}
+\end{table}
+\subsection{Main results}
+Table~\ref{tab:main} displays the results of multivariate long-term forecasting. Overall, MambaTS achieved new SOTA results (highlighted in red bold) across various prediction horizons on most datasets. While DLinear and PatchTST assume variable independence and perform well on datasets with a small number of variables like ETTh2/m2 ($K=7$) and Weather ($K=21$), their performance diminishes on complex datasets with a larger number of variables such as Traffic ($K=862$) and Covid-19 ($K=948$), highlighting the limitations of the variable-independent assumption. Conversely, iTransformer exhibited contrasting performance, excelling on intricate datasets but underperforming on datasets with fewer variables. Other baselines demonstrated competitive results on specific datasets under certain prediction scenarios. 
+\subsection{Ablation studies and analyses}
+
+To validate the rationality and effectiveness of the proposed components, we conducted extensive ablation experiments as shown in Table~\ref{tab:ablation_main}, Table~\ref{tab:vast}, Figure~\ref{fig:dropout} and Figure~\ref{fig:vast}.
+
+\paragraph{Component Ablation} Table~\ref{tab:ablation_main} presents the ablation on components. Initially, integrating VST with the baseline Mamba-based PatchTST led to performance improvements across most datasets, showcasing the benefits of considering all variables. Substituting solely with TMB resulted in a notable performance boost, underscoring the efficacy of TMB for temporal modeling. Combining VST and TMB yielded performance superior to VST alone but slightly below the original TMB, attributed to VST including all variables while TMB removes local bias causal convolutions, making it more sensitive to variable order. However, this issue is addressed by introducing VAST (see Table~\ref{tab:ablation_main}, row 4). Through these components, MambaTS achieves optimal performance.
+
+\begin{figure}[!h]
+	\centering
+	\includegraphics[width=1\linewidth]{figs/dropout.pdf}
+	\caption{Dropout ablations of TMB. Left: TMB with varying dropout rates on Weather dataset. Right: Loss curves over training.}
+	\label{fig:dropout}
+\end{figure}
+
+\paragraph{Dropout Ablation} We further analyzed the role of the dropout in TMB. Figure~\ref{fig:dropout} (left) shows the results of MambaTS with different dropout rates (0.1-0.5) on the Weather dataset. Compared to no dropout, the reduction in MSE of MambaTS increased with the dropout rate, achieving the best performance at 0.2 and 0.3, and performance degradation beyond 0.4. Figure~\ref{fig:dropout} (right) illustrates corresponding loss curves during training, indicating that the dropout in TMB helps prevent premature convergence and overfitting. Additionally, we observed that dropout facilitated lower validation loss.
+\paragraph{VAST Ablation} In Table~\ref{tab:vast}, we conducted extensive ablation studies on the VAST strategy, focusing on the design and selection of path decoding strategies. "W/o VPT" in Table~\ref{tab:vast} indicates that MambaTS was trained without VPT as the baseline. "Random (100x)" represents sampling 100 test runs after training with VPT and averaging the results. It can be observed that "Random (100x)" significantly outperformed "W/o VPT", which underscores the effectiveness of VPT. Further visual comparisons in Figure~\ref{fig:vast} show that even random variable scanning outperforms "W/o VPT" in most cases. We then explored different heuristic decoding strategies, including Greedy Strategy (GD), Local Search (LS), Lin and Lernighan (LK), and Simulated Annealing (SA). We defaulted to adopting SA as our solver. As a trade-off between efficiency and performance, we did not employ an exact ATSP solver due to its exponential complexity. As shown in Table~\ref{tab:vast} and Figure~\ref{fig:vast}, SA consistently outperformed other solvers in terms of relative performance consistency.
+\begin{figure*}[h]
+	\begin{minipage}[c]{.45\linewidth}
+		\centering
+			\fontsize{10pt}{12pt}\selectfont
+			\centering
+			\renewcommand{\arraystretch}{1.1}
+			\scalebox{0.65}{
+				\begin{tabular}{c|cc|cc|cc}	
+					\toprule
+					\multirow{2}{*}{\makecell{Scanning}} & \multicolumn{2}{c|}{ETTm2} & \multicolumn{2}{c|}{Traffic} & \multicolumn{2}{c}{Electricity} \\
+					\cline{2-7}
+					& MSE & MAE & MSE & MAE  & MSE & MAE \\
+					\cline{1-7}
+					W/o VPT & 0.263 & 0.327 & 0.376 & 0.267 & 0.161 & 0.257 \\
+					Random (100x) & 0.262 & 0.326 & 0.374 & 0.265 & 0.158 & 0.256 \\
+					VAST ($\text{GD.}$) & 0.260 & 0.322 & 0.376 & 0.267 & 0.161 & 0.257 \\
+					VAST ($\text{LS.}$) & 0.261 & 0.325 & 0.375 & 0.265 & 0.157 & 0.254 \\
+					VAST ($\text{LK.}$) & 0.262 & 0.325 & 0.374 & 0.264 & 0.156 & 0.252 \\
+					\cline{1-7}
+					VAST ($\text{SA.}$) & \bf 0.259 & \bf 0.321 & \bf 0.373 & \bf 0.262 & \bf 0.156 & \bf 0.251 \\
+					\bottomrule
+				\end{tabular}
+			}
+			\captionof{table}{Ablations on VAST.}
+			\label{tab:vast}
+	\end{minipage}
+	\begin{minipage}[c]{.55\linewidth}
+		\centering
+		\includegraphics[width=0.93\linewidth]{figs/vast.pdf}
+		\captionof{figure}{Sampling results of VAST. Employing swarm plot to prevent overlapping points (better in color).}
+		\label{fig:vast}
+	\end{minipage}%
+	
+\end{figure*}
+
+\begin{figure}
+	\centering
+	\includegraphics[width=0.91\linewidth]{figs/vary_windows.pdf}
+	\caption{Performance of MambaTS in different datasets with varying length look-back windows.}
+	\label{fig:lookback}
+\end{figure}
+\begin{wraptable}{R}{0.5\textwidth}
+	\centering
+	\caption{Computational complexity analysis. SA: Self-attention. Conv: Convolution.}
+	\label{tab:analysis_complexity}
+	\begin{adjustbox}{max width=0.9\linewidth}
+		\begin{tabular}{@{}lccc@{}}
+			\toprule
+			Method        & \makecell{Temporal\\mixing} & \makecell{Variable\\mixing} & \makecell{Computational\\complexity} \\ 
+			\midrule
+			Autoformer & SA & MLP  & $\mathcal{O}(L\log L)$  \\ 
+			FEDformer  & SA & MLP  & $\mathcal{O}(L)$  \\ 
+			MICN  & Conv & Conv & $\mathcal{O}(K^2L)$  \\
+			FourierGNN  & GNN & GNN & $\mathcal{O}(KL)$  \\ 
+			DLinear  & MLP & -- & $\mathcal{O}(L)$  \\ 
+			PatchTST & SA & -- & $\mathcal{O}\left(\left(\frac{L}{P}\right)^2\right)$  \\
+			iTransformer & MLP & SA & $\mathcal{O}(K^2)$  \\ 
+			MambaTS  & TMB & TMB & $\mathcal{O}\left(\frac{KL}{P}\right)$ \\ 
+			\bottomrule
+		\end{tabular}
+	\end{adjustbox}
+\end{wraptable}
+
+\subsection{Model Analysis}
+
+\paragraph{Increasing Lookback Window} Previous studies have shown that Transformer-based methods may not necessarily benefit from a growing lookback window~\cite{Zeng2023Dlinear, nie2023a}, possibly due to distracted attention over the long input. In Figure~\ref{fig:lookback}, we assess MambaTS's performance in this context and compare it with several baselines. It can be observed that MambaTS consistently demonstrates the ability to benefit from the growing input sequence. iTransformer, PatchTST, and DLinear also show this benefit, but MambaTS's overall curve is lower than PatchTST and DLinear. Compared to iTransformer, MambaTS benefits more from a longer lookback window. Additionally, we notice that iTransformer seems to exhibit discontinuous gains on individual dataset tasks.
+
+\paragraph{Efficiency Analysis} MambaTS integrates historical information from all variables using VST and conducts global dependency modeling through TMB. The computational complexity of MambaTS is $\mathcal{O}(\frac{KL}{P})$, where $K$ represents the number of variables, $L$ denotes the length of the lookback window, and $P$ signifies the patch stride. Table~\ref{tab:analysis_complexity} outlines the computational complexity of other models. 
+
+Among them, Autoformer and FEDformer employ traditional point-wise tokenization, with computational complexity dependent on $L$. MICN and FourierGNN, focusing on modeling dependencies between variables, entail higher complexity. DLinear achieves $\mathcal{O}(L)$ complexity but lacks variable mixing. PatchTST and iTransformer have complexities of $\mathcal{O}(\left(\frac{L}{P}\right)^2)$ and $\mathcal{O}(K^2)$, respectively. In contrast, MambaTS's complexity of $\mathcal{O}(K\cdot \frac{L}{P})$ strikes a balance between these approaches, as illustrated in Table~\ref{tab:main}, highlighting the meaningful and efficient equilibrium.
+
+
+\section{Conclusion}
+
+\label{conclusion}
+
+In this work, we present MambaTS, a novel multivariate time series forecasting model built upon improved selective SSMs. We first introduce VST to organize the historical information of all variables, forming a global retrospective sequence. Recognizing the dispensability of causal convolution in Mamba for LTSF, we propose the Temporal Mamba Block. Furthermore, we enhance Mamba's selective parameters with dropout regularization to prevent overfitting and enhance model performance. To mitigate the scan order sensitivity problem, we implement variable permutation training to counter the impact of undefined variables order. Lastly, we propose VAST to dynamically discover relationships between variables during training and solve the shortest path visiting problem using an ATSP solver to determine the optimal variable scann order. Through these designs, MambaTS achieves global dependency modeling with linear complexity and establishes new state-of-the-art results across multiple datasets and prediction settings.
+
+
+
+
+
+

@@ -1,8 +1,8 @@
 # NeuralPlane: Structured 3D Reconstruction in Planar Primitives with Neural Fields
 
 - Decision: Accept
-- Avg Score: 4.60
-- Scores: 8, 6, 1, 0, 8
+- Avg Score: 8.00
+- Scores: 8, 6, 10, 8
 
 ## Abstract
 3D maps assembled from planar primitives are compact and expressive in representing man-made environments, making them suitable for a spectrum of applications. In this paper, we present **NeuralPlane**, a novel approach that explores **neural** fields for multi-view 3D **plane** reconstruction. Our method is centered upon the core idea of distilling geometric and semantic cues from inconsistent 2D plane observations into a unified 3D neural representation, which unlocks the full leverage of plane attributes. This idea is accomplished by NeuralPlane via several key designs, including: 1) a monocular module that generates geometrically smooth and semantically meaningful segments as 2D plane observations, 2) a plane-guided training procedure that implicitly learns accurate plane locations from multi-view plane observations, and 3) a self-supervised feature field termed *Neural Coplanarity Field* that enables the modeling of scene semantics alongside the geometry. Without relying on plane annotations, our method achieves high-fidelity reconstruction comprising planar primitives that are not only crisp but also well-aligned with the semantic content. Comprehensive experiments on ScanNetv2 and ScanNet++ demonstrate the superiority of our results in both geometry and semantics.

@@ -1,0 +1,366 @@
+\title{Long-Term 3D Point Tracking By Cost Volume Fusion}
+
+\begin{abstract}
+Long-term point tracking is essential to understand  non-rigid motion in the physical world better. Deep learning approaches have recently been incorporated into long-term point tracking, but most prior work predominantly functions in 2D. Although these methods benefit from the well-established backbones and matching frameworks, the motions they produce do not always make sense in the 3D physical world. In this paper, we propose the first deep learning framework for long-term point tracking in 3D that generalizes to new points and videos without requiring test-time fine-tuning. Our model contains a cost volume fusion module that effectively integrates multiple past appearances and motion information via a transformer architecture, significantly enhancing overall tracking performance. In terms of 3D tracking performance, our model significantly outperforms simple scene flow chaining and previous 2D point tracking methods, even if one uses ground truth depth and camera pose to backproject 2D point tracks in a synthetic scenario.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+Motion estimation is a task that has existed since the beginning of computer vision. Short-term dense motion estimation problems,
+such as optical flow in 2D and scene flow in 3D, have been extensively studied. 
+However, the utility of these tasks is limited because  many points are featureless, making their motion estimation within two frames fundamentally ambiguous.
+Besides,  chaining 2-frame motions to derive point trajectories is susceptible to significant cumulative errors and ineffective for handling long occlusions.
+
+However, spatial-temporal tracking of keypoints have always been interesting~\cite{laptev2005space} because it offers the capability to track long-term non-rigid object motions. Such knowledge would be greatly helpful for augmented reality and robotics applications, as well as providing supervision for generative models that generate dynamic videos with arbitrary non-rigid motions. 
+Recently, the authors of~\cite{harley2022particle} reinvigorated the long-term pixel tracking problem and proposed a framework inspired by previous state-of-the-art optical flow and object tracking work. \cite{doersch2022tap} released datasets specifically designed to address point tracking. These datasets, including 2D and 3D data, have boosted research on this task. 
+
+Most existing methods predominantly address the problem of  2D long-term point tracking. But in the 3D world we live in,  such 2D tracking, however accurate it might be, might still miss the 3D motion of the points. 
+Even the state-of-the-art video generator SORA has significant trouble understanding long-term 3D point  motion~\cite{bupe2024wrong}, which may  limit its usage for downstream tasks such as augmented reality and robot manipulation. As we will show in the experiments, backprojecting 2D long-term point tracks into 3D, even with known camera poses and pixel depths, is still prone to errors due to the sparsity of the depth maps, occlusion, and the accumulation of numerical errors.
+
+The ability to track any point long-term in 3D would significantly enhance  our understanding of the scene dynamics. %However, prior work on this has mostly only addressed the 2-frame case as in the scene flow problem. 
+Recently, 
+\cite{luiten2023dynamic} proposed a test-time optimization method to model dynamic scenes using a set of Gaussians, thereby enabling long-term point tracking. While surpassing the performance of prior 2D methods, this approach relies on test-time optimization for each scene and 
+struggles to track new points entering the scene. Test-time optimization is quite computationally expensive, especially for longer videos, making it unsuitable for online tracking.
+
+Recognizing the potential of tracking directly in 3D space, we propose a simple yet efficient method for long-term \textbf{online} tracking of keypoints in a dynamic 3D point cloud. To our knowledge our approach is the first deep learning framework that directly attacks long-term 3D point tracking in a generalizable manner that can work on new points and videos \textbf{without} test-time fine-tuning. 
+Our online tracking framework takes as input a sequence of point clouds representing the dynamic scene. The model predicts a position for each query point by combining multiple past appearance information with motion information from the past point trajectory with a transformer-based framework. Occlusions are predicted explicitly to filter out noisy appearance features.
+We propose an adaptive decoding module that selectively decodes around the query point, enabling the network to process denser point clouds and generate more precise motion for each point. Experiment results show that our approach significantly outperforms baselines such as linking scene flow results or 3D tracks backprojected from 2D point tracks obtained by prior work.
+
+In summary, our contributions include:
+\begin{itemize}
+    \item We propose the first online deep learning-based tracking framework that can track any point in 3D  \textbf{without} test-time optimization.
+    \item We propose an adaptive decoding module that significantly reduces memory consumption when training on denser point clouds, allowing the model to produce better motion predictions.
+\end{itemize}
+
+
+
+\section{Related Work}
+
+\label{related_work}
+\subsection{Point tracking}
+Tracking any pixel or point in 2D long-term has recently gained significant attention. MFT~\cite{schmidt2023tracking} presents an extension for optical flow by constructing optical flows not only between consecutive frames but also between distant frames. These flows are chained together guided by the predicted occlusion and uncertainty scores obtained from pre-trained networks, to derive the most reliable sequence of flows for each tracked pixel.
+PIPs~\cite{harley2022particle} presents a novel framework designed for multi-frame point tracking 
+which simultaneously estimates the target point positions in multiple frames. Therefore, it can handle short occlusion events.
+To improve tracking performance, Cotracker~\cite{karaev2023cotracker} utilizes self-attention layers to track target points and their local and global contextual points together. The self-attention layers enable information exchange among these points, leading to better tracking quality.
+Tap-Vid~\cite{doersch2022tap} 
+offers valuable datasets along with a straightforward baseline method. It achieves this by predicting the position of a point in each frame based on the cost volume derived from the query feature and the corresponding feature map. Meanwhile, TAPIR~\cite{doersch2023tapir} introduces a two-stage network comprising a matching stage and a refinement stage. This framework also incorporates the prediction of uncertainty to suppress ambiguous or unreliable predictions, enhancing point tracking accuracy.
+\cite{bozic2020neural} introduces a differentiable non-rigid approach that achieves superior performance in reconstructing non-rigidly moving objects. However, this approach can only focus on a single object in the video. In contrast, we focus on modeling entire dynamic scenes by tracking any point within them.
+
+A different line of work utilizes test-time optimization techniques to model the scene, resulting in superior tracking performance. Additionally, these methods directly track points in 3D. Therefore, they can utilize useful 3D priors for tracking purposes. 
+Specifically, OmniMotion~\cite{wang2023omnimotion} represents video content by employing a canonical 3D volume. It learns a set of bijections to map points between any frame and the canonical one, thereby enabling tracking capability.
+Similarly, \cite{luiten2023dynamic} represents the scene with a set of Gaussians. While the number of Gaussians, their colors, and opacity remain fixed throughout the video, these Gaussians can move and rotate freely to model the dynamic scene. Therefore, the tracking capability emerges from persistently modeling the dynamic scene under these constraints.
+
+To achieve superior tracking performance, \cite{wang2023omnimotion, luiten2023dynamic} require significant time to reconstruct the 3D model of the scene using test-time optimization. Consequently, these methods cannot be used for online tracking. In contrast, our method tracks points online without test-time optimization. 
+
+\subsection{Scene flow estimation}
+Scene flow estimation predicts the 3D motion field of points, with the input being either 2D images or 3D point clouds. We focus on the approaches that has 3D point clouds as input as they are more relevant to our work. Approaches can usually be categorized into two types: supervised and self-supervised. However, many supervised methods can utilize self-supervised losses to adapt a pre-trained model to a new dataset without ground truth.
+
+FlowNet3D~\cite{liu2019flownet3d} is among the first to use PointNet++~\cite{qi2017pointnet++}, a deep network for point clouds, to predict scene flow from point clouds directly and proposes important basic modules such as flow embedding, set conv, and set upconv layers that are commonly used in subsequent works. FLOT~\cite{puy2020flot} reformalizes scene flow estimation as an optimal transport problem to initially compute scene flow and subsequently refine it using a deep network. PointPWC~\cite{wu2020pointpwc} introduces novel cost volumes, upsampling, and warping layers and utilizes a point convolution network~\cite{wu2019pointconv} to handle 3D point cloud data. Scene flow is then constructed in a coarse-to-fine fashion. The authors also propose a novel self-supervised loss that has been adopted in subsequent works~\cite{zhang2024seflow,wang2021unsupervised, fang2024self, shen2023self}. PV-Raft~\cite{wei2021pv} introduces a point-voxel correlation field to handle both long-range and local interactions between point pairs. 
+NSFP~\cite{li2021neural} represents scene flow implicitly with a neural network trained directly on test scenes with self-supervised losses. Fast neural scene flow~\cite{Li_2023_ICCV} improves upon NSFP by utilizing the distance transform~\cite{breu1995linear, danielsson1980euclidean} and a correspondence-free loss, significantly reducing processing time.
+Finally, with the rise of diffusion models,~\cite{zhang2024diffsf, liu2024difflow3d} incorporate diffusion processes into the scene flow estimation pipeline, achieving millimeter-level end-point error.
+
+
+
+\section{Method}
+
+\subsection{Overview}
+\begin{figure*}[t]
+  \centering
+   \includegraphics[width=1.\linewidth]{figs/main.pdf}
+
+   \caption{\textbf{Long-term Tracking Framework}. Given a sequence of point clouds as input, 
+ we use a U-Net based backbone to extract the point cloud's features hierarchically. For simplicity, only the decoder branch is shown. At each level, we refine the sparse motion from the previous level of the backbone  for the query point  by jointly considering multiple past appearances and the past motion of the query. The motion predicted at level $1$ is used as the final motion of the query point from frame t to t+1.}
+ \vskip -0.15in
+   \label{fig:overall_framework}
+\end{figure*}
+We aim to track any point in a video of a dynamic 3D scene. We assume camera poses and depth information have been obtained (e.g. from a SLAM system~\cite{mur2017orb}). With these, the video is converted to a sequence of point clouds $V=\{p_0, \hdots , p_T\}$ where $p_t=\{p_{t,i}\}$, and $p_{t,i} \in R^{3}$ denotes the 3D coordinates of each point $i$ in the point cloud at time step $t$. Let $q_{t,j} \in R^3$ be the $j^{th}$ query point at $t$. For each query point $q_{t,j}$, the model predicts the 3D motion $v_{t+1,j} = q_{t+1,j}-q_{t,j}$ and the occlusion status $\sigma_{t+1,j}\in \{0,1\}$ in the next frame. %The predicted query point's location $q_{t+1,j}$ is then fed into the model, and %
+The same process is then repeated autoregressively for long-term point tracking.
+
+The multi-level features for each scene point are obtained using a point-based U-Net backbone \cite{wu2020pointpwc}, comprising an encoder and a decoder. Let $p_t(l)$, $f_t^{p,E}(l)$, and $f_t^{p,D}(l)$ represent the point cloud used at level $l$ and its corresponding encoder/decoder features extracted at level $l$ from our backbone where $l=1$ represents the densest level and $l=L$ the sparsest level. Here, $p_t(l)$ is derived by applying grid-subsampling on $p_t(l-1)$ with $p_t(1) = p_t$. For simplicity, unless explicitly stated, we illustrate the algorithm on a single level and hence refer to the point cloud and their features as $p_t$ and $f_t^{p}$. Unless specified, the features $f_t^p$ represent the decoder features $f_t^{p,D}$. We use $f_{t,i}^p$ to denote the decoder feature at a specific point location $p_{t,i}$. 
+
+\subsection{Background - PointPWC}
+PointPWC~\cite{wu2020pointpwc} is a deep  network that can be trained in either a supervised or unsupervised fashion to predict the scene flow between two point clouds. In PointPWC, a patch-to-patch strategy is used to obtain a robust cost volume and increase the receptive field.
+\begin{multline}
+     C(p_{t,i}) = \sum_{p_{t,u}\in N_t(p_{t,i})} W_t(p_{t,i}, p_{t,u}) \\
+     \sum_{p_{t+1,j}\in N_{t+1}(p_{t,u})} W_{t+1}(p_{t,u}, p_{t+1,j}) cost(p_{t,u}, p_{t+1,j})
+     \label{eq:ppwc_cost}
+\end{multline}
+\begin{equation}
+    W_t(p_{t,i}, p_{t,u}) = MLP(p_{t,i}-p_{t,u}) \nonumber
+\end{equation}
+where $N_t(p)$ represents a neighborhood around $p$ at time $t$, and $cost(p_{t,u}, p_{t+1,j})$ refers to the matching cost between two points. The cost is computed via MLP using the concatenation of color features at $p_{t,u}$ and $p_{t+1,j}$ and the relative position between the points as input~\cite{wu2020pointpwc}:
+\begin{equation}
+    cost(p_{t,u}, p_{t+1,j})=MLP([f^{p}_{t,u}, f^{p}_{t+1,j}, p_{t+1,j}-p_{t,u}]). \nonumber
+\end{equation}
+The idea of the cost volume is to incorporate matching between points in the neighborhood $N_{t}(p_{t,i})$ and the neighbors of each point in the frame $t+1$, which is similar to a small 2D window that is commonly used to derive 2D cost volumes~\cite{sun2018pwc} -- it  increases the range that points $p_{t,i}$ can match to as well as the robustness of the matching.
+
+Given the cost volume $C(p_{t,i})$ of a point $p_{t,i}$ at level $l$, the PointPWC framework estimates the flow for each point in a coarse to fine manner. Specifically, given the predictor features from level $l+1$, the framework first upsamples them to points on level $l$, then concatenates them with the cost volume $C(p_{t,i})$, as well as the decoder feature $f_{t,i}^p$ at level $l$. These are used together by the flow predictor to generate the predictor features and the residual scene flow at level $l$. The latter is then summed with the upsampled scene flow from level $l+1$ as the predicted flow at level $l$.
+
+\subsection{Cost Volume for Long-Term Point Appearance}
+
+One difference between our long-term point tracking framework and scene flow is the existence of query points that are not necessarily within the given point cloud. Given the hierarchical decoder features of the point cloud, $f^{p}_{t}$, the feature of the query point $q_{t,i}$ can be extracted by applying a PointConv layer as follows:
+\begin{equation}
+    f^{q}_{t,i} = MLP\left(\sum_{p_{t,j}\in N(q_{t,i})} W(q_{t,i}, p_{t,j}) f^{p}_{t,j}\right). \label{eq:interpolation}
+\end{equation}
+Since a single point does not contain enough appearance information, when talking about the appearance of each query point $q_i$, it should be understood as the appearance of the local region containing that point, which could deform from time to time. By jointly considering multiple  appearances,  tracking performance can be improved. Specifically, given a set of appearances of a query point $q_i$ up to the time step $t$, $F^q_{t,i} = \{f^{q}_{t_1,i}, f^{q}_{t_2,i}, \hdots, f^{q}_{t_n,i}\}$, where $t_1,t_2,...,t_n$ represent the frames storing the query's appearances ($t_n \leq t$. Refer to Sec. \ref{sec: long-term tracking module}), we can obtain a set of cost volumes $C^q_{t,i} = \{C_{t_1}(q_{t,i}), \hdots, C_{t_n}(q_{t,i})\}$ as follows:
+
+\begin{equation}
+    C_{t_k}(q_{t,i}) =\sum_{p_{t+1,j}\in N(q_{t,i})}W(q_{t,i},p_{t+1,j}) cost_{t_k}(q_{t,i}, p_{t+1,j})
+    \label{eq: cost volume}
+\end{equation}
+\begin{equation*}
+    cost_{t_k}(q_{t,i}, p_{t+1,j}) = MLP([f^{q}_{t_k, i}, f^p_{t+1,j}, p_{t+1,j}-q_{t,i}])
+\end{equation*}
+where we use the feature at timestep $t_k$ to account for the query's multiple appearances.
+
+Note that here we used a simpler cost volume construction without the patch-to-patch formulation as in Eq. (\ref{eq:ppwc_cost}). This is because for long-term tracking, it is difficult to define neighbors at frame $t+1$ from a past frame $t_k$ that could be very far apart temporally. Results in Table \ref{tab:scece_flow_est} show that our cost volume formulation is only slightly less effective than the patch-to-patch formulation. %, it reduces memory consumption significantly as well. %With the larger point clouds we can now fit in memory, our model can still rival other scene flow methods and outperform the original PointPWC in Sec.~\ref{sec: scene-flow exp}.
+
+Another important aspect of the query point features is that based on Eq. (\ref{eq:interpolation}), they are only affected by scene points surrounding the query point at the same level. Therefore, we propose to \textbf{selectively decode} only the points surrounding the query points and prune other points to reduce total computation and memory consumption, especially during training time. We only use this selective decoding strategy for $l \in \{1, 2\}$, which are the two densest levels and thus have the highest decoder memory requirements. By utilizing selective decoding, we increased the number of points per frame that fit into GPU memory from $8,192$ to $60,000$ (with 16 frames used for each mini-batch during training), significantly improving the algorithm's performance, particularly its capability of making predictions with sub-pixel accuracy. For scene flow, this recovered the lost ground we had with the simpler cost volume formulation (Table~\ref{tab:scece_flow_est}), and ablations for long-term point tracking can be found in the supplementary materials.
+\subsection{Fusion of Appearance and Motion Cues}
+\label{sec: long-term tracking module}
+\begin{figure*}
+  \centering
+   \includegraphics[width=1.\linewidth]{figs/motion_reasoning.pdf}
+
+   \caption{\textbf{Cost Volume Fusion Module}. We propose a novel Cost Volume Fusion Module to predict the query point motion by jointly considering multiple appearances and the past motion trajectory of the query. These appearances are used to compute a set of cost volumes, which are combined with the motion prior via cross-attention in the transformer layer, followed by an MLP. The output features from the MLP are subsequently used to predict the refined motion and the occlusion status of the query point.}
+   \label{fig:motion_reasoning}
+   \vskip -0.15in
+\end{figure*}
+A major benefit of long-term point tracking over simply chaining 2-frame scene flows is the capability to incorporate motion cues. Motion cues can help produce motion estimates during occlusion or a blurry frame. However, due to our goal of  non-rigid point tracking, points can move in surprising and different ways that cannot be easily captured by a motion prior. In those cases, a good appearance tracking module should take over and predict more precise locations. 
+
+To properly consider multi-frame appearance and motion jointly, we devise a novel data-driven Cost Volume Fusion module that softly combines motion-based and appearance-matching-based features. The output of this combination is then used to predict the actual motion and occlusion status for each point in the target frame. Below, we detail the specific components of the module.
+
+
+\subsubsection{Cost Volume Fusion Module} 
+To provide the motion prior for the network, the last $M$ predicted motions of the query point, $v_{(M,t), i}=[v_{t-(M-1),i}, \hdots, v_{t,i}]$, are concatenated and encoded with an MLP 
+followed by a group normalization layer~\cite{GroupNorm2018} to obtain a motion prior vector $\phi_{t,i}=MLP(v_{(M,t), i})$.
+Note that, in the beginning of the video, the list of past motions $v_{(M,t), i}$ is initialized with zeros. Additionally, each level $l$ utilizes a separate MLP to encode the motion prior while using the same list of past motions as input.
+For each appearance feature of the query extracted at $t_k$, we calculate the corresponding cost volume $C_{t_k,i}$ (a simplified notation for $C_{t_k}(q_{t,i})$) using Eq. (\ref{eq: cost volume}). Each of these cost volumes contains appearance-matching-based motion information. In the experiment, to estimate the motion of a query point from $T$ to $T+1$, we extract the query appearance from the following frames, $\{0, T-6, T-2, T\}$ to reduce the appearance redundancy from consecutive frames.
+
+The cost volume module is shown in Fig.~\ref{fig:motion_reasoning}.
+To predict the motion of the $i^{th}$ query in the current frame at the sparse level $l$, our network jointly uses the motion and appearance information extracted from multiple time steps in the past. Specifically, unlike approaches for short-term point correspondence or scene flow, we maintain a list of potential appearance vectors for each query point as mentioned above and calculate its corresponding cost volume with Eq. (\ref{eq: cost volume}).
+
+Besides, we also consider pure motion-based information from our motion prior $\phi_{t,i}$. This information is especially beneficial when the query point is not visible, as well as other cases where the appearance is ambiguous. %and cannot be matched well. %, resulting in noisy appearance-matching-based motion information. 
+
+Each cost volume $C_{t_k,i}$ is concatenated with the corresponding point appearance $f^q_{t_k,i}$ to obtain $C^f_{t_k,i}$. It contains information about the matching between  points from frame $t+1$ and past query point appearances. The motion prior $\phi_{t,i}$ is concatenated with a learnable feature token. We propose to use the motion prior as the query and to cross-attend to all the $\{C^f_{t_k,i}\}_{k=1}^n$. The intuition is to select the points that match some past query point appearance while are also plausible w.r.t. the motion trajectory. Besides, we also use a learnable token $E$ to allow the module to rely on the motion prior when no appearance-matching information is available due to occlusion.
+This module can be implemented by stacking multiple transformer decoder~\cite{vaswani2017attention} layers together.
+\begin{align}
+    O_{t,i} &= \text{Cross-Attn}(\{C^f_{t_1,i},\hdots, C^f_{t_n,i}, E\}, \phi_{t,i}) \nonumber \\
+    \hat{C}_{t,i} &= MLP(O_{t,i}+\phi_{t,i}) \nonumber
+\end{align}
+
+Finally, to predict the motion at the current level $l$, $v_{t,i}$, we use the flow predictor head from \cite{wu2020pointpwc} which takes the transformer features $\hat{C}_{t,i}$ and the predictor features from level $l+1$ as input. %The predictor then produces the residual motion and adds it to the predicted motion at level $l+1$ to obtain $v_{t,i}$.
+
+Besides, the transformer features $\hat{C}_{t,i}$ are fed to an MLP to predict the occlusion status at each level $l$. By training this, we encourage the model to store the occlusion information within the cost volumes.
+However, during inference, we only use the predicted occlusion at level $1$ as the final occlusion prediction for each query point.
+
+\subsection{Model Training}
+Our model relies on the estimated frame-to-frame motion of each point to construct the long-term point trajectory. Therefore, instead of directly training the model on the long-term tracking data, we split the training process into two stages:
+\begin{itemize}
+    \item  \textbf{Scene flow pretraining}. The whole model is pre-trained with the scene flow datasets. Each training sample includes two consecutive frames randomly sampled from a video. After the training, the model can achieve competitive performance in the scene flow estimation task. 
+    \item \textbf{Long-term tracking}. In this stage, the Cost Volume Fusion Module is added  to handle multiple appearances of the query point and its past trajectory. The network is trained with randomly sampled longer videos.
+\end{itemize}
+By following this two-stage training pipeline, we can utilize synthetic scene flow datasets to improve the overall tracking performance and stabilize the training process.
+
+We supervise the model by the GT point position and the GT scene flow as follow:
+\begin{equation}
+    L^{track} = \frac{1}{Tn_q}\sum_{l=1}^L \sum_{t=1}^T \sum_{i=1}^{n_q} \alpha^{l-1}  |q_{t,i}-\hat{q}_{t,i}|_1 \nonumber
+\end{equation}
+\begin{equation}
+    L^{sf} = \frac{1}{T}\sum_{l=1}^L \sum_{t=1}^T \sum_{i=1}^{|p_t|}  \gamma^{l-1} |\Delta p_{t,i}-\Delta\hat{p}_{t,i}|_1 \nonumber
+\end{equation}
+where $q_{t,i}$ and $\hat{q}_{t,i}$ are the predicted and the ground truth positions, and $\Delta p_{t,i}$ and $\Delta\hat{p}_{t,i}$ are the predicted  and the ground truth flow of the scene point $p_{t,i}$. %\redtext{REMOVE THIS LATER: Do not change $\Delta p_{t,i}$ to $v_{t+1,i}$. }
+
+Motion in the 3D world is usually smooth in terms of both direction and magnitude unless the target is affected by external force from a collision. To encourage such smoothness property, we introduce a smoothness loss that minimizes the difference between the predicted motions in consecutive frames of each query point.
+The motion smoothness can be defined over all query points as follow:
+\begin{equation}
+    L^{smooth}=\frac{1}{LTn_q}\sum_{l=0}^L\sum_{i=1}^{n_q}\sum_{t=0}^{T-1}||v_{t,i}-v_{t+1,i}||_1
+\end{equation}
+
+We also attempted to use $L^{rigid}$ and $L^{iso}$, the rigidity and isometry losses from ~\cite{luiten2023dynamic}. 
+Altogether, we train the model using the weighted sum of the above losses:
+\begin{equation}
+    L = \lambda_1 \cdot L^{sf} + \lambda_2 \cdot L^{track} + \lambda_3 \cdot L^{smooth} + \lambda_4 \cdot L^{rigid} + \lambda_5 \cdot L^{iso} \nonumber
+\end{equation}
+We use grid-search to find the optimal values for these hyper parameters. During the scene flow pretraining stage, we only use $L^{sf}$ and $L^{track}$. $\lambda_1$ and $\lambda_2$ are set to 2 and 1 respectively. During the second stage, we set $\lambda_1=2$, $\lambda_2=1$, $\lambda_3=0.3$, and $\lambda_4=\lambda_5=0.2$. 
+
+
+
+\section{Experiments}
+
+\subsection{Dataset and Training Details}
+We use the FlyingThings~\cite{mayer2016large} dataset to pre-train the scene flow model, and then train and test on two separate datasets, TapVid-Kubric~\cite{doersch2022tap} and PointOdyssey~\cite{zheng2023pointodyssey}. \\
+\noindent \textbf{TapVid-Kubric} is a synthetic dataset with $9,760$ training videos and 250 testing videos. Each video has 24 frames with resolution $256\times256$. In each validation video, 256 query points are randomly sampled from all the frames. The model is required to track these points in the rest of the video. In the training set, we can generate an arbitrary number of query points for training. Because the dataset is synthetic, we can generate ground truth depth for all points.
+
+We first build a scene flow task based on the point tracking ground truth on TapVid-Kubric's training split and fine-tune the pretrained model on this task. %fine-tune the pretrained model on the TapVid-Kubric-based \footnote{We build the scene flow dataset based on the point tracking ground truth of TapVid-Kubric's training split.} scene flow datasets. 
+Then, with the encoder and decoder backbone frozen to save GPU memory, the full model is fine-tuned on 16-frame videos from the point tracking dataset constructed from TapVid-Kubric~\cite{doersch2022tap}. For data augmentation, we use random horizontal flipping, random scaling the point cloud coordinates, and random temporal flipping. We use a batch size of 16 during the scene flow pre-training stages and a batch size of 8 during the training of the full model.
+
+\noindent \textbf{PointOdyssey} %In addition to TapVid-Kubric, Point Odyssey dataset 
+provides much longer synthetic videos (over 1,000 frames and up to 4,000 frames) for training and testing. The dataset includes 131/15/13 videos in the training/validation/testing split.
+Because Point Odyssey does not provide scene flow ground truth, we augment a single frame with random translations and rotations to simulate scene flow data. The model is first fine-tuned on this simulated scene flow data before being trained on the entire training set.
+We observe that the model supervised with the simulated scene flow data tends to converge faster in the second phase than the one trained with self-supervised loss.
+
+\noindent \textbf{Backbone} We utilized a U-Net-based PointConvFormer~\cite{wu2023pointconvformer} backbone. This is similar to PCFPWC in Table \ref{tab:scece_flow_est} but with our simplied cost volume (Eq.~(\ref{eq: cost volume})) instead of theirs (Eq.~(\ref{eq:ppwc_cost})).
+
+\noindent \textbf{Inference}. During the inference stage, we have query points that can appear in any place in the video. Hence, we run the model twice (forward and backward) for each video to track the query points in both directions.
+\subsection{Metrics}
+We extend previous 2D point tracking metrics to 3D:
+\begin{itemize}
+    \item Occlusion accuracy (OA) is the accuracy of the occlusion prediction for each query point on each frame.
+    \item $\delta^x$ measures the position accuracy of the predicted point on each frame where the point is visible. A predicted point is considered correct if it is within $x$ centimeters (\textit{cm}) from the ground truth position. %To normalize the distance from the prediction to the ground truth, each frame is resized to $256\times256$.
+    \item $\delta^{avg}$ is the average of $\delta^x$ with $x\in[1, 2, 4, 8, 16]$  (\textit{cm}).
+\end{itemize}
+For PointOdyssey where the videos are  longer, we also adopt the survival rate metric~\cite{luiten2023dynamic} (SR) which is the average number of frames before each tracked point drifts $T$ $cm$ away from the ground truth position, divided by the number of frames in the video, with $T =50$.
+
+We also report results with 2D metrics in order to compare with other 2D methods, but those are secondary results because the primary goal of this paper is 3D tracking.%, we project the predicted 3D points back to the image space.
+
+
+\subsection{Scene Flow Pre-Training Results}
+\label{sec: scene-flow exp}
+In Table~\ref{tab:scece_flow_est}, we show the scene flow pretraining results on the FlyingThings dataset. Our framework outperforms PointPWCNet and other 2-frame baselines. Our scene flow performance was significantly improved when we used an input point cloud size of $60,000$ points over the conventional $8,000$ points used in \cite{wu2020pointpwc} despite our simpler cost volume computation than PointPWCNet and PCF-PWCNet. 
+\begin{table}
+    \centering
+    \begin{tabular}{|c|c|}
+        \hline
+        \textbf{Methods} & \textbf{EPE3D(m)}$\downarrow$ \\ \hline
+        PointPWC~\cite{wu2020pointpwc} & 0.0588\\ \hline
+        PCFPWC~\cite{wu2023pointconvformer} & \bluetext{\textbf{0.0416}}\\ \hline
+        PV-RAFT~\cite{wei2021pv} & 0.0461\\ \hline
+        FLOT~\cite{puy2020flot} & 0.0520\\ \hline
+        HCRF-Flow~\cite{li2021hcrf} &0.0488 \\ \hline
+        HPLFlowNet~\cite{gu2019hplflownet} & 0.0804\\ \hline
+        FlowNet3D~\cite{liu2019flownet3d} & 0.1136 \\ \hline
+        \textbf{Ours - 8k points} & 0.0509\\ \hline
+        \textbf{Ours - 60k points}  & \redtext{\textbf{0.0399}}\\  \hline
+    \end{tabular}
+    \vskip -0.05in
+    \caption{Scene flow estimation on the FlyingThing dataset}
+    \label{tab:scece_flow_est}
+ \vskip -0.2in    
+\end{table}
+
+\begin{figure*}[htb]
+  \centering
+   \includegraphics[width=.8\linewidth]{figs/qualitative_res.pdf}
+   \caption{\textbf{Qualitative Results}. We reproject the results of CoTracker into 3D and back-project that into a different view point. One can see that because of small errors in 2D leading the CoTracker result on the red circled point off the blue object at time $T$, it incurs significant 3D error which can be seen as a sudden jump in the trajectory if rendered from a novel viewpoint. (Best viewed in color)}
+   \label{fig:qualitative-long-trajs}
+   \vskip -0.05in
+\end{figure*}
+
+\subsection{ 3D \& 2D Evaluations}
+To the best of our knowledge, no prior deep learning-based work tackled the problem of generalizable 3D point tracking. Hence, we mainly compare with 2D baselines and simple scene flow chaining. Since the dataset is synthetic, we can lift 2D tracking results to 3D using the ground truth camera pose and depth map.
+Due to the subpixel-level predictions from the 2D point trackers, the depth of each point is obtained by interpolation on the provided depth map. For the occluded points, the depth is linearly interpolated using the depth of that point before and after the occlusion. Results with alternative nearest neighbor interpolation are similar and are shown in the supplementary material.
+\begin{table}[b]
+\centering
+\scalebox{0.9}{
+\begin{tabular}{|c|c|c|c|}
+\hline
+\
+\textbf{}                 & \textbf{OA} &   \textbf{3D - $\delta^{avg}$} & \textbf{3D -} $\delta^{avg}_{occluded}$ \\ \hline
+TAPIR                      & \redtext{\textbf{96.5}} &  46.9 (\textbf{-26.2}) & 3.8 \\ \hline
+CoTracker                  & 92.5  &  \bluetext{\textbf{57.8}} (\textbf{-15.3}) &  \bluetext{\textbf{8.7}}\\ \hline
+Scene Flow Chaining & - & 45.6 & 5.6 \\ \hline
+\textbf{Ours}                       & \bluetext{\textbf{93.4}}  &  \redtext{\textbf{73.8}} & \redtext{\textbf{44.4}}\\ \hline
+\end{tabular}}
+\vskip -0.05in
+\caption{Results on 3D Kubric. Best results are shown in red and second best in blue. (Best viewed with color)}
+\label{tab:3d_results}
+\vskip -0.15in
+\end{table}
+\begin{table}[b]
+\begin{tabular}{|c|c|c|c|c|c|c|}
+\hline
+       & \multicolumn{2}{c|}{\textbf{128 Frames}}             & \multicolumn{2}{c|}{\textbf{512 Frames}}             & \multicolumn{2}{c|}{\textbf{Full Seq}}            \\ \hline
+       & SR   & $\delta^{avg}$ & SR   & $\delta^{avg}$ & SR   & $\delta^{avg}$ \\ \hline
+PIPS++~\cite{zheng2023pointodyssey} & 64.4 & 35.0         & 39.7 & 26.4         & 16.0 & 14.0         \\ \hline
+\textbf{Ours}   & \redtext{\textbf{91.0}} & \redtext{\textbf{65.1}}         & \redtext{\textbf{82.6}} & \redtext{\textbf{52.0}}         & \redtext{\textbf{68.5}} & \redtext{\textbf{35.0}}         \\ \hline
+\end{tabular}
+\vskip -0.05in
+\caption{Results on 3D Point Odyssey.}%*SR: survival rate with the threshold at 50 cm. }
+\label{tab:3d_pod}
+\end{table}
+
+\begin{table}[b]
+\centering
+\scalebox{0.8}{
+\begin{tabular}{|c|c|c|c|c|}
+\hline
+\
+\textbf{}                 & \textbf{OA} & \textbf{2D - $\delta^{avg}$} & \textbf{2D - AJ} & \textbf{2D -} $\delta^{avg}_{occluded}$ \\ \hline
+COTR~\cite{jiang2021cotr}                       & 78.55 & 60.7 & 40.1 &  -\\ \hline
+RAFT~\cite{teed2020raft}                       & 86.4 & 58.2 & 41.2 & -\\ \hline
+PIPs~\cite{harley2022particle}                       & 88.6 & 74.8 & 59.1 & -\\ \hline
+Tap-Net~\cite{doersch2022tap}                     & 93.0 & 77.7 & 65.4 & -\\ \hline
+TAPIR* (1 iter)~\cite{doersch2023tapir}                      & 94.6 & 88.8  & 81.0 & 27.5 \\ \hline
+CoTracker* (1 iter)~\cite{karaev2023cotracker}                  & - & 90.0  & - & 56.9 \\ \hline
+Scene Flow Chaining &- & 77.0  & - & 25.8 \\ \hline
+\textbf{Ours }                      & \bluetext{\textbf{93.4}} & 87.8 & 75.4 & \bluetext{\textbf{61.2}}\\ 
+\hline
+\midrule
+TAPIR*~\cite{doersch2023tapir}                      & \redtext{\textbf{96.5}} & \bluetext{\textbf{92.9} }  & \redtext{\textbf{86.1}} & 36.8 \\ \hline
+CoTracker*~\cite{karaev2023cotracker}                  & 92.5 & \redtext{\textbf{93.9}}  & \bluetext{\textbf{84.5}} & \redtext{\textbf{66.0}} \\ \hline
+
+\end{tabular}}
+\vskip -0.05in
+\caption{Results on 2D Kubric. *: reproduced results. Best results are shown in red and second best in blue. TAPIR and CoTracker used an hourglass network that re-runs the encoder and decoder several times, whereas our method does not use hourglass and is comparable with their results with a single iteration}
+\label{tab: 2d-results}
+\end{table}
+\begin{table*}[ht]
+\centering
+\begin{tabular}{|c|c|c|c|c|c|}
+\hline
+\textbf{}                 & \textbf{OA} & \textbf{2D - $\delta^{avg}$} & \textbf{2D - $\delta^{avg}_{occluded}$} & \textbf{3D - $\delta^{avg}$} & \textbf{3D - $\delta^{avg}_{occluded}$} \\ \hline
+Multi-App + Motion Prior  & \redtext{\textbf{93.4}} & \redtext{\textbf{87.0}}  & \redtext{\textbf{60.8}}  & \redtext{\textbf{73.1}}  & \redtext{\textbf{44.0}}  \\ \hline
+Multi-Appearance                 & 92.9 & 86.0 & 57.9  & 71.6  & 40.5  \\ \hline
+Single-Appearance               & 91.3 & 83.5 & 52.7 & 61.6 & 29.8 \\ \hline
+\end{tabular}
+\vskip -0.05in
+\caption{Ablation on Appearance and Motion Priors}
+\label{tab: ablation-motion-app}
+\vskip -0.05in
+\end{table*}
+\begin{table*}[ht]
+\centering
+\begin{tabular}{|c|c|c|c|c|c|}
+\hline
+\
+\textbf{}                 & \textbf{OA} & \textbf{2d} - $\delta^{avg}$ & \textbf{2d} - $\delta^{avg}_{occluded}$ & \textbf{3d - $\delta^{avg}$} & \textbf{3d} - $\delta^{avg}_{occluded}$ \\ \hline
+Ours & 93.4  & 87.0 & 60.8 & 73.1 & 44.0\\ \hline
+Rigid \& Isometry & 93.4 & 86.8 & 60.9 & 73.1 & 44.4 \\ \hline
+Smoothness & 92.4 & 83.0 & 55.3 & 55.3 & 30.0 \\ \hline
+                            
+\end{tabular}
+\vskip -0.05in
+\caption{Ablation on Regularizations}
+\label{tab:ablation-regularization}
+\vskip -0.2in
+\end{table*}
+Table \ref{tab:3d_results} shows 3D point tracking results comparing our proposed approach with state-of-the-art 2D approaches TAPIR~\cite{doersch2023tapir} and CoTracker~\cite{karaev2023cotracker}, as well as simply chaining the pretrained scene flow. We significantly outperform both approaches by $15.3\%$ and $26.2\%$ points on the $3D- \delta^{avg}$ metric. The performance difference is more significant in the occluded areas, where we record a $44.0\%$ accuracy whereas TAPIR and CoTracker obtain accuracies lower than $10\%$ due to not having a good 3D motion prior to maintain a good track during occlusion. Note that baseline results were already generated by interpolating tracks using the \textbf{ground truth} depth. Better nonlinear interpolation may improve their performance by a bit, but it is unlikely that their performance would catch up to our approach. 
+
+Such significant performance differences support our arguments that even accurate 2D tracking can have significant issues locating accurate tracks in 3D, even with fully known camera pose and ground truth depth. A qualitative illustration in Fig.~\ref{fig:qualitative-long-trajs} indicates the issue with 2D trackers. At frame $T$, although the original view does not indicate a significant error on the red circled point that is being tracked, the tracking actually drifted slightly off the blue object. In consequence, if we render it from a novel viewpoint outside of the original 2D image plane, we can see a significant jump in the trajectory. At time $T+1$, the tracked point went back to the blue object and from the novel view we again see a significant jump in the trajectory. This indicates significant errors in 3D tracking despite low 2D tracking errors. Our approach, on the other hand, works naturally in 3D. Hence it does not suffer from such drifting issues and produces much more consistent 3D tracking results.
+
+Results on the test split of PointOdyssey in Table~\ref{tab:3d_pod} show a similar trend. We measure the Survival Rate and $\delta^{avg}$ on the first 128 frames and 512 frames of each video or the full sequences. Our framework also outperforms the baselines by a large margin across all the metrics. 
+
+In Table \ref{tab: 2d-results}, we show results on the 2D evaluation on Kubric. We projected our 3D results to 2D using the known camera parameters for our approach. Our approach outperformed many baselines and are generally comparable or slightly worse than TAPIR and CoTracker in 2D when only a single iteration is used for them. Note that for our 3D tracking results in Table \ref{tab:3d_results}, we only compared against the full version of TAPIR and CoTracker (i.e., with multiple iterations) and still outperformed them. We did not include the OA and 2D-AJ (Average Jaccard) numbers for CoTracker (1 iter) because CoTracker produces the occlusion status only at the last iteration. TAPIR and CoTracker additionally utilize an hourglass network that decodes, re-encodes and decodes several times to obtain more precise predictions, but that is against the spirit of online algorithms and we did not pursue that path. We did outperform TAPIR significantly in the prediction of occluded points, showing the benefits of interpolation of the motion from 3D.  
+\subsection{Ablation Experiments}
+
+We analyze the contribution of using multiple appearance features and the motion prior. Results are  presented in Table~\ref{tab: ablation-motion-app}. We demonstrate that by employing multiple appearances and the motion prior, the performance across all 2D and 3D metrics consistently improves over using a single appearance.
+Additionally, the performance improvement under occlusion surpasses that in normal conditions, showing that utilizing multiple appearances of the query point makes the model more resilient to occlusion. By integrating  appearances from the past, the model can recover from a few bad appearances during or right before/after occlusion and achieve better results. %detect the query point's surrounding area, aiding in locating it indirectly through neighboring points.
+
+We also conduct ablation on the regularization terms. Results in Table~\ref{tab:ablation-regularization} show that our smoothness term is very useful in terms of improving the 3D point tracking results. The rigidity and isometry loss from ~\cite{luiten2023dynamic} provide marginal improvements in the 2D results.
+
+
+\section{Conclusion}
+
+In this paper, we proposed a 3D long-term point tracking approach based on fusing multiple cost volumes and motion information with a transformer model, which, to the best of our knowledge, is the first generalizable online long-term 3D point tracking approach using deep learning. By selective decoding, we significantly increased the size of the input point cloud that fits into GPU memory, which improves the performance of scene flow and 3D long-term point tracking. In terms of 3D point tracking performance, our approach significantly outperforms scene flow chaining and 2D long-term point tracking approaches even if they are backprojected to 3D with ground truth depths and camera poses, showing the benefits of tracking in 3D. We hope this paper could increase the interest of the community in 3D long-term point tracking. In future work, we plan to utilize our 3D point tracking framework in downstream tasks.
+
+
+{\small
+
+
+
+

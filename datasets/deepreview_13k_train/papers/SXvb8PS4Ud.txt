@@ -1,0 +1,461 @@
+\title{ParallelSpec: Parallel Drafter for Efficient Speculative Decoding}
+
+\begin{abstract}
+Speculative decoding has proven to be an efficient solution to large language model (LLM) inference, where the small drafter predicts future tokens at a low cost, and the target model is leveraged to verify them in parallel. 
+However, most existing works still draft tokens auto-regressively to maintain sequential dependency in language modeling, which we consider a huge computational burden in speculative decoding.
+We present \MODEL, an alternative to auto-regressive drafting strategies in state-of-the-art speculative decoding approaches. 
+In contrast to auto-regressive drafting in the speculative stage, we train a parallel drafter to serve as an efficient speculative model.
+\MODEL learns to efficiently predict multiple future tokens in parallel using a single model, and it can be integrated into any speculative decoding framework that requires aligning the output distributions of the drafter and the target model with minimal training cost. % mention the training cost somewhere later
+Experimental results show that \MODEL accelerates baseline methods in latency up to 62\% on text generation benchmarks from different domains, and it achieves 2.84$\times$ overall speedup on the Llama-2-13B model using third-party evaluation criteria. 
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large language models (LLMs) such as GPT-4~\citep{gpt4} and Llama~\citep{llama} have shown dominant abilities across various domains, such as question answering~\citep{llm_qa}, code synthesis~\citep{rozière2023code}, machine translation~\citep{llm_mt} and beyond.
+However, their auto-regressive nature requires multiple forward passes on models with billions or trillions of parameters, bringing substantial inference latency, thus prohibiting real-time applications.  
+In the pursuit of accelerating LLM inference, various strategies have been explored, including utilizing model sparsity~\citep{liu2023llm, model_quatilization, layerskip1, lococo}, exploiting redundancy in KV Cache~\citep{cai.2024pyramidkv, h2o, li2024snapkv}, and distilling model capabilities to smaller models~\citep{minillm, distill2}. While these approaches can lead to faster inference, they often come at the cost of reduced generation quality and do not preserve the generation distributions of the original models. 
+Speculative decoding (SD)~\citep{conventional_spd, specsampling} has been proposed as one of the compelling alternatives to auto-regressive generation in a lossless manner. The key motivation behind SD is to utilize a low-cost small model to generate draft tokens efficiently and then use the target model to verify them in parallel to ensure sampling integrity, known as \textit{draft-then-verify} framework.
+While promising, we observe that draft models in most \textit{draft-then-verify} frameworks still generate token by token, resulting in a low arithmetic intensity during the drafting stage. 
+Moreover, the forward latency of the drafting stage still grows linearly with respect to the draft length, \ie, the number of tokens each draft step generates. As empirically profiled in the right part of Figure~\ref{fig:teaser}, the draft latency still accounts for a significant proportion of the overall SD latency.
+
+\begin{figure}[h]
+\begin{center}
+\includegraphics[width=\textwidth]{figs/parallel_spec_figure_draw_page1.pdf}
+\end{center}
+\caption{Illustration of \MODEL. \textbf{Left:} comparison between auto-regressive drafting and our proposed parallel drafting. Blocks in green indicate normal draft tokens. Blocks in yellow denote the mask tokens used to prompt the draft model to generate multiple future tokens in a single forward pass. \textbf{Right:} wall time trace diagrams for two drafting styles integrated with EAGLE~\citep{eagle} in two rounds of speculative sampling.}
+\label{fig:teaser}
+\end{figure}
+
+Researchers have spotted the draft latency issue and proposed several solutions to alleviate it by dynamically determining the draft length either through learnable policy~\citep{specdecpp}, confidence-guided heuristics~\citep{eagle2}, or optimized draft tree structures~\citep{opttree}.
+Nevertheless, these solutions do not tackle the underlying issue of drafting latency scaling linearly with the draft length, but operate only for maximumly reducing the compute wasted in drafting tokens that are unlikely to be accepted.
+
+To fundamentally solve the draft latency issue, we propose building a parallel-decoding drafter as the replacement for auto-regressive drafters in popular SD frameworks. 
+Unlike Medusa-style frameworks~\citep{medusa, hydra} that rely on separate language model heads to decode future tokens, we propose to use a single lightweight model to decode the next $k$ tokens simultaneously. 
+We argue that using a single model for multi-token prediction can effectively leverage parameter sharing to achieve efficient drafter alignment rather than learning several independent language model heads. 
+The latter design would struggle even more with memory and computation in the large vocabulary size (128,000+) of recently introduced language models such as Llama-3~\citep{llama3}. 
+For efficient multi-token alignment training, we introduce a group-wise parallel training strategy that mitigates possible training-inference mismatches by dynamically adjusting the attention mask, positional indexes, and token layout. 
+
+Our method still adheres to the \textit{draft-and-verify} framework at inference time: At each draft step, the drafter generates $k$ tokens with a single forward pass, and then they are sent to the target model for parallel verification.
+Since our method incorporates token-level parallelization in the drafting stage, both stages in the SD pipeline now benefit from this parallelization. Therefore, we name our approach \MODEL. 
+\MODEL works as an individual module, ready to replace any drafter in existing SD frameworks that require distilling drafters from their target models. 
+We experiment with the popular speculative decoding framework Medusa~\citep{medusa} and state-of-the-art solution EAGLE~\citep{eagle} by replacing their drafters. 
+Experimental results show that \MODEL is able to bring consistent acceleration improvement in all task domains and different combinations of models. 
+For instance, incorporating \MODEL into Vicuna-7B Medusa increases the average speedup ratio from 1.42$\times$ to 2.31$\times$, leading to a 62.7\% relative improvement. This empirically validates the superiority of parallel drafter design. 
+\MODEL integration with EAGLE also achieves extra speedups across all target model settings, ranging from 2.55$\times$ to 2.84$\times$. In summary, our key contributions are as follows:
+
+\begin{itemize}[leftmargin=1em]
+    \item We propose \MODEL as a parallel multi-token drafter to replace the auto-regressive drafter design in existing SD frameworks that require aligning drafters with their target models.
+    \item We design a group-wise training strategy that allows efficient and accurate parallel drafter training.
+    \item We integrate the proposed method into two popular SD frameworks. Extensive experiments demonstrate the compatibility and performance superiority of \MODEL. 
+\end{itemize}
+
+
+
+\section{Related Works}
+
+\custompara{Accelerating Large Language Model (LLM) Inference} has attracted considerable research attention from both machine learning system and the natural language processing community and even led the trend of hardware-software co-design. 
+These research efforts include model compression~\citep{model_quatilization, model_quatilization_2, llm_pruning}, novel architecture design~\citep{mamba, rwkv} and hardware optimization~\citep{flashattention, flashdecoding}.
+However, some of these methods could lead to generation discrepancies compared to the target model, representing a trade-off between model performance and inference speed.
+We consider those methods that cannot generate with the target model's original distribution as lossy acceleration methods.
+
+\custompara{Speculative Decoding (SD)}~\citep{conventional_spd, specsampling} arises as one of the lossless acceleration methods for LLM inference. It is based on the observation that the latency bottleneck of LLM inference is brought by memory bandwidth instead of arithmetic computation. 
+SD alleviates the bandwidth bottleneck by utilizing a small model to draft multiple tokens and verifying them in parallel with the \textit{target} model, thereby reducing the frequency of language model calls and decreasing the memory access density during decoding.
+The community has witnessed many improvements in efficiently and accurately drafting tokens.
+Self-speculative decoding methods~\citep{hooper2023speed, elhoushi2024layerskip, self_spec, bhendawade2024speculative} do not explicitly rely on draft models but use some of the intermediate layers of the target model to draft. 
+Medusa-style methods add independent~\citep{medusa} or sequential~\citep{hydra} decoding heads on the target model to draft tokens.
+Lookahead decoding and its variants~\citep{lookahead, ouroboros} use n-gram trajectory as drafts. 
+DistillSpec~\citep{distillspec} leverages knowledge distillation to closely align distributions between the draft and target models.
+PEARL~\citep{liu2024parallel} proposes two-stage verification to alleviate the mutual waiting problem. 
+Apart from efficient draft methods, token tree verification~\citep{specinfer} has been widely adopted for verifying top candidate sequences that share common prefixes in parallel. 
+Specialized SD frameworks for long-context generation~\citep{magicdec, sequoia, sun2024triforce}, retrieval-augmented generation~\citep{rest, speculative_rag, retreive_spec} and beyond~\citep{cascadespd} have been proposed to better fit individual use cases.
+
+\custompara{Parallel Decoding} was first known for its efficiency in machine translation system~\citep{parallel_dec_1} and code generation~\citep{meta_multitoken} as an alternative to auto-regressive generation. However, its usage in SD frameworks remains under-explored. 
+\cite{parallel_dec_2} proposed to use fixed-point iterations to replace auto-regressive decoding.
+\cite{monea2023pass, yi-etal-2024-generation} pioneered the use of parallel decoding in SD, but it is limited to a self-speculative framework and results in different generation sampling. BiTA~\citep{bita} proposed using prompt tuning to train a small number of prompt parameters on a frozen target LM for semi-autoregressive generation. 
+\cite{wu2024parallel} suggested using trainable linear projection to regress intermediate hidden states of target models, thereby enabling multi-token prediction. 
+However, these methods either fail to effectively learn the draft distribution due to the limited number of learnable parameters or cannot achieve lossless acceleration due to the method design.
+
+
+
+\section{Background: Speculative Decoding}
+
+\custompara{Notation.} Speculative decoding (SD) frameworks maintain two models: the \textit{target} model, denoted as $\mathcal{M}_\text{T}$, is the one which we want the SD frameworks to sample from; the \textit{draft} model, denoted as $\mathcal{M}_\text{D}$, is the one that proposes candidate tokens which are later being verified by the \textit{target} model. 
+Let $x_{< t}$ be the prompt sequence we are running the SD framework on, $p\left(x_t \mid x_{<t}\right)$, $q\left(x_t \mid x_{<t}\right)$ be the inference distribution of $\mathcal{M}_\text{T}$ and $\mathcal{M}_\text{D}$ given the prompt $x_{< t}$, respectively. We use the denotations of $p\left(y_t\right)$ and $q\left(y_t\right)$ to indicate $p\left(y_t \mid x, y_{<t}\right)$ and $q\left(y_t \mid x, y_{<t}\right)$ whenever they do not lead to confusion. 
+
+\custompara{Speculative Decoding Procedures.} One round of speculative decoding can be divided into the drafting and verification stages, each governed by the corresponding model. The drafting stage auto-regressively calls $\mathcal{M}_\text{D}$ to sample $\gamma$ candidate token distributions $q\left(y_t\right), \ldots, q\left(y_{t+\gamma-1}\right)$. The verification stage calls $\mathcal{M}_\text{T}$ once to sample $\gamma$ distributions from the target model, $p\left(y_t\right), \ldots, p\left(y_{t+\gamma-1}\right)$, given $y_{t+i}$ is the concatenation of $y_{<t}$ and drafted token sequence $x_1, \ldots, x_i$, where $x_{t+i} \sim q\left(y_{t+i}\right)$. The verification stage determines whether the token $y_{t+i}$ is accepted via speculative sampling, where its acceptance rate $\alpha_i$ is defined as: 
+
+\begin{equation}
+    \alpha_i= \begin{cases}1 & p\left(y_{t+i}\right) \geq q\left(y_{t+i}\right) \\ \frac{p\left(y_{t+i}\right)}{q\left(y_{t+i}\right)} & p\left(y_{t+i}\right)< q\left(y_{t+i}\right) \end{cases}
+\end{equation}
+If the token $y_{t+i}$ is rejected before $\gamma$ candidate tokens are all accepted, the remaining draft tokens will be discarded, and $y_{t+i}$ will be resampled from $\max \left(0, p\left(y_{t+i}\right)-q\left(y_{t+i}\right)\right)$. Otherwise, drafted tokens are all accepted and SD samples an extra token from $y_{t+\gamma}$ and appends it to the end of the sequence. 
+Each round of speculative decoding generates at least $1$ and at most $\gamma + 1$ tokens, and \cite{conventional_spd} theoretically proves that the sequence from SD and the sequence from the target model follow the same distribution. 
+
+\custompara{Average Acceptance Length. }
+One important efficiency metric to measure an SD system is the acceptance rate of drafted tokens in each round of speculative decoding. 
+Since each drafting step takes a constant amount of time and each round of conventional SD takes the same drafting steps, the overall efficiency of an SD system will be determined by the average acceptance length $\tau$ measured on some prompt sequences. 
+
+\custompara{Token Tree Verification. }
+Prior studies~\citep{specinfer, conventional_spd} suggest that verifying multiple candidate sequences within the same verification step could greatly improve the expected acceptance length. 
+This is achieved by the tree attention mechanism. By properly arranging the top predicted tokens at different token positions and manipulating the attention mask based on a tree structure, we enable the processing of multiple candidate sequences with only one verification step.
+
+
+
+\section{Methodology}
+
+
+In this section, we describe our parallel drafting method (\S\ref{sec:parallel_drafting}), the algorithm that preserves the output distribution of the target model with parallel drafter (\S\ref{sec:parallel_sps}) and its integration into popular speculative sampling methods (\S\ref{sec:parallel_integration}). 
+
+\subsection{Parallel Drafting}
+\label{sec:parallel_drafting}
+\begin{figure}[t]
+\begin{center}
+\includegraphics[width=\textwidth]{figs/parallel_spec_figure_draw_page2.pdf}
+\end{center}
+
+\caption{Illustration of parallel drafter inference, training, and the difference between training auto-regressive drafter and parallel one. 
+\textbf{Left: } Parallel drafter proposes multiple candidate tokens with a single forward pass.
+\textbf{Middle: } Training the parallel drafter to align with the target model is a process of knowledge distillation (KD).
+\textbf{Right: } The input, labels, and position indices for training a parallel drafter need special treatment.
+$\dag$ refers to Figure~\ref{fig:attention_mask} for the special attention mask design of training. }
+\label{fig:main_fig}
+\end{figure}
+
+\textbf{Inference.} Let $\mathcal{M}_\text{D}^{\theta}$ be the parallel drafter parameterized by $\theta$, and $q^{\theta}\left(x_t, x_{t+1}, \ldots, x_{t+k} \mid x_{< t}\right)$ be the multi-token output distribution of the parallel drafter.
+Naive draft models do not support predicting multiple tokens in a single forward pass. In order to equip a drafter with such abilities, we propose to use customized \texttt{[MASK]} tokens as prompt tokens to produce contextualized token-level representations that are used to enforce multi-token training.  
+The parallel drafter introduces $k$ special tokens in its vocabulary, $\texttt{[MASK]}_1, \ldots, \texttt{[MASK]}_{k}$. 
+At each drafting step where the drafter is invoked, $k$ special tokens are concatenated after the original input sequence $x_{< t}$. 
+Apart from the last token representation that is used to decode the next token $x_t$, the last-layer representations corresponding to \texttt{[MASK]} tokens are leveraged to sample future tokens $x_{t+1}, \ldots, x_{t+k}$. 
+The left part of Figure~\ref{fig:main_fig} demonstrates how the parallel draft model proposes 3 future tokens with 2 \texttt{[MASK]} prompt tokens.
+
+\definecolor{bgyellow}{RGB}{253,243,208}
+
+\begin{wrapfigure}{l}{7cm}
+    \centering
+    \includegraphics[width=0.47\textwidth]{figs/parallel_spec_figure_draw_page3.pdf}
+    \caption{Attention mask illustration of parallel drafter training. 
+    \mycheckmark denotes activated attention. 
+    \myredcrossmark denotes attention suppressed to prevent access across parallel groups. 
+    -100 denotes ignored tokens in the target sequence that do not contribute to training loss.
+    Blocks with \colorbox{bgyellow}{yellow} and the legend illustrate one of the next-next token prediction training objectives.
+    }
+    \label{fig:attention_mask}
+\end{wrapfigure}
+
+\textbf{Group-wise Parallel Training.} 
+Given the access to either the ground truth future tokens $y_t, y_{t+1}, \ldots, y_{t+k}$ or their output distributions of the \textit{target} model $p(y_t), p(y_{t+1}), \ldots, p(y_{t+k})$, training a parallel drafter is a process of knowledge distillation (KD) in either online or offline setting~\citep{distillspec}, which we defer to \S\ref{sec:parallel_integration} for detailed discussion.
+This process is not as trivial as training an auto-regressive drafter, where teacher-forcing supervision is enforced via \textit{shift-one-token} in labels as depicted in the upper right of Figure~\ref{fig:main_fig}.
+Simply shifting the label position by $k$ tokens would result in discrepancies between training and inference.
+Therefore, We carefully design a group-wise training paradigm that eliminates training-inference mismatch by manipulating the token layout, attention masks, and position indices, illustrated in the lower right of Figure~\ref{fig:main_fig}.
+Specifically, we introduce the concept of \textit{parallel group}, illustrated in Figure~\ref{fig:attention_mask}, where each \textit{parallel group} in the source sequence consists of an input token and several \texttt{[MASK]} tokens. 
+At each training step, a customized causal attention mask guarantees that all training token pairs ignore \texttt{[MASK]} tokens from previous \textit{parallel group}s to ensure the model behaves the same in training and evaluation. 
+
+\subsection{Speculative Sampling with Parallel Drafting}
+\label{sec:parallel_sps}
+In order to preserve the output distribution of the target model as standard speculative sampling does, following~\cite{monea2023pass}, we present a modified version of speculative sampling~\citep{specsampling} that drafts with a parallel decoder and verifies with the target model 
+using token tree verification method~\citep{specinfer}, detailed in Algorithm~\ref{alg:parallel_sps}. 
+
+\definecolor{desc}{RGB}{99, 178, 255}
+\definecolor{acc}{RGB}{30, 177, 0}
+\definecolor{rej}{RGB}{255, 149, 136}
+
+\begin{algorithm}[t]
+\small
+    \caption{Speculative Sampling with Parallel Draft Models and Token Tree Verification} \label{alg:parallel_sps}
+    \begin{algorithmic}
+        \STATE  Given $k$ special tokens $\texttt{[MASK]}_1, \dots, \texttt{[MASK]}_k$ and minimum target sequence length $T$. 
+        \STATE  Given the target model distribution $p(\cdot|\cdot)$, the parallel draft model distribution $q(\cdot|\cdot)$ and initial prefix sequence $x_{<n}$.  % position 0 to n?
+        \STATE Return the generated sequence $y$. 
+        \STATE  Initialise $n \gets t$, $y \gets x_{<n}$.
+        \WHILE{$n < T$}
+            \STATE Draft future token tree $\mathcal{N}$ by sampling from the parallel draft model with a single forward pass:
+            \STATE{}
+            \STATE{} \begin{center} \(
+               \mathcal{N} \sim \left( q(x | x_{<n}), q(x | x_{<n}, \texttt{[MASK]}_{1}) , \dots, \textit{ } q(x | x_{<n}, \texttt{[MASK]}_{1}, \dots, \texttt{[MASK]}_{k}) \right) \)
+            \end{center}
+            \STATE{}
+            \STATE In parallel, compute a set of logits $\mathcal{O}$ with the target model using $\mathcal{N}$ and tree attention.
+            \STATE{}
+            \STATE \begin{center} \( \mathcal{O} = \operatorname{TreeParallelDecode}(\mathcal{N}, p) \) \end{center}
+            \STATE{}
+            \STATE $\mathcal{V}=\emptyset, u$ \quad \textcolor{desc}{$\triangleright \ u$ is the root node of $\mathcal{N}$}
+            \WHILE{$u$ is not a leaf node}
+                \STATE $\mathcal{H} = \operatorname{Child}(u)$ \quad \textcolor{desc}{$\triangleright \ \operatorname{Child}(u)$ returns the child nodes of $u$}
+                \WHILE{$\mathcal{H}$ is not empty}
+                    \STATE Sample $r \sim U[0, 1]$; $s = \operatorname{Select}(\mathcal{H})$; $\tilde{x}_{s} = \mathcal{H}(s)$; $t=\operatorname{TreeDepth}(s)$
+                    \IF{$\displaystyle{r < \min\left(1, \frac{p(\tilde{x}_s | x_{<n}, \mathcal{V})}{q(\tilde{x}_s | x_{<n}, \dots, \texttt{[MASK]}_{t-1})}\right)}$}
+                        \STATE \textcolor{acc}{$\checkmark$ accept the draft token $x_s$ at depth $t$}
+                        \STATE $\mathcal{V}$.append($x_s$); $u = s$; $n \gets n+1$
+                        \STATE \textbf{break}
+                    \ELSE
+                        \STATE \textcolor{rej}{$\times$ reject the draft token $x_s$. Normalize the residual. }
+                        \STATE{} $ p(x | x_{<n}, \dots, \mathcal{V}) := (p(x | x_{<n}, \dots, \mathcal{V}) - q(x | x_{<n}, \dots, \texttt{[MASK]}_{t-1}))_+ $
+                        \STATE $\mathcal{H}$.pop($s$)
+                    \ENDIF
+ 
+                \ENDWHILE
+                
+                \IF{$\mathcal{H}$ is empty}
+                    \STATE \textbf{break}
+                \ENDIF
+            \ENDWHILE
+            \STATE $x_{\text{next}} \sim p(x | x_{<n}, \dots, \mathcal{V})$; $n \gets n+1$; $\mathcal{V}$.append($x_\text{next}$)
+            \STATE $y \gets y + \mathcal{V}$
+            
+        \ENDWHILE
+    \end{algorithmic}
+    
+\end{algorithm}
+
+\subsection{Integration with Popular Speculative Decoding Frameworks}
+\label{sec:parallel_integration}
+
+\MODEL can be inserted into any speculative decoding (SD) framework that requires aligning output distributions of the drafter and the target model. 
+We choose two popular SD frameworks as testbeds, Medusa~\citep{medusa} and EAGLE~\citep{eagle}.
+
+\custompara{Medusa} leverages an \textit{offline} knowledge distillation method, where cross-entropy loss between Medusa heads and ground truth tokens is used for alignment. Specifically, $K$ extra decoding heads are added to decode the last hidden states of the target model, and the $k$-th head is used to predict the $(t+k+1)$-th token given a prefix sequence of length $t$. The final training objective of Medusa is expressed as:
+\begin{equation}
+\label{eq:medusa}
+\mathcal{L}_{\text {MEDUSA}}=\sum_{k=1}^K-\lambda_k \log p_t^{(k)}\left(y_{t+k+1}\right), 
+\end{equation}
+where $\lambda_k$ is a coefficient to balance learning difficulties, $p_t^{(k)}$ is the output distribution of the $k$-th head and $y_{t+k+1}$ is the oracle token.
+
+To integrate \MODEL into Medusa, we introduce a Transformer model specialized in multi-token prediction to replace $K$ Medusa heads as the new draft model. 
+The draft model shares the embedding layer and the language model head with the target model to minimize memory overhead, and they remain frozen to preserve the target model's output distribution.
+$K$ trainable \texttt{[MASK]} tokens are added to the embedding layer of the draft model to facilitate parallel training. 
+During the training, each \textit{parallel group} is trained with a similar objective denoted in Equation~\ref{eq:medusa}, except that the log term now denotes the output distribution of the parallel drafter at position $k$, and we need to consider the non-mask token at the beginning of each \textit{parallel group}: 
+
+\begin{equation}
+\setlength\abovedisplayskip{6pt}
+\label{eq:medusa_parallel}
+\mathcal{L}_{\text {MEDUSA-Parallel}}=-\log q\left(y_{t+1} | x_{<t}\right) - \sum_{k=1}^K \lambda_k \log q\left(y_{t+k+1} | x_{<t}, \texttt{[MASK]}_{1}, \dots, \texttt{[MASK]}_{k}\right).
+\end{equation}
+
+\custompara{EAGLE} utilizes an \textit{online} knowledge distillation method that directly regresses the last-layer hidden states at the feature level. 
+Specifically, we denote the last-layer hidden states of the target model at $t$-th position as $f_t$, the embedding of $t$-th token as $e_t$, and the oracle token as $y_t$. EAGLE proposed to use a fully connected layer and an auto-regression head $\pi\left(\tilde{f_t} | f_{<t}, e_{<t} \right)$ as the draft model to predict the next feature that is used to decode draft tokens.
+The training objective of EAGLE on each token position is a linear combination of the regression loss $\mathcal{L}_{\text{reg}}$ and the cross-entropy loss $\mathcal{L}_{\text{cls}}$ between draft tokens and oracle tokens:
+
+\begin{equation}
+\label{eq:eagle_loss}
+\begin{aligned}
+\mathcal{L}_{\text{reg}} & = \operatorname{SmoothL1}\left(f_{t+1}, \pi\left(\tilde{f_t} | f_{<t}, e_{<t} \right)\right), \\
+\mathcal{L}_{\text{cls}} & = - \log\mu\left(y_{t+1}\right), 
+\end{aligned}
+\end{equation}
+where $\mu$ denotes the language model head distribution conditioned on drafted feature $\tilde{f_t}$.
+
+Integrating \MODEL into EAGLE is more intuitive, as it only requires minor modifications to turn the auto-regression head into a parallel head with the method outlined in \S\ref{sec:parallel_drafting}, without extra adaptation. 
+For a parallel group of size $K$ starting at token position $t$, the training loss of EAGLE-Parallel is the sum of EAGLE losses (defined in Equation~\ref{eq:eagle_loss}) over $K$ tokens within the same group. 
+
+
+\section{Experiments}
+
+This section describes the experimental settings (\S\ref{sec:exp_settings}), including training and evaluation datasets, metrics, and involved baselines. 
+\S\ref{sec:main_results} reports the main results for \MODEL compared with baselines. Finally, we discuss the impact of different experiment settings in \S\ref{sec:ablations}.
+
+\begin{table}[t]
+\small 
+\centering
+\resizebox{\linewidth}{!}{
+\begin{tabular}{@{}cl|cccccc|cc@{}}
+\toprule
+{\bf Model} & {\bf Method}
+&\begin{tabular}[c]{@{}c@{}}\bf Multi-turn\\\bf Conversation\end{tabular} &\bf Translation & \bf Summarization & \begin{tabular}[c]{@{}c@{}}\bf Question\\\bf Answering\end{tabular} & \begin{tabular}[c]{@{}c@{}}\bf Mathematical\\\bf Reasoning\end{tabular} & \begin{tabular}[c]{@{}c@{}}\bf Retrieval-aug.\\\bf Generation\end{tabular} & \bf Avg. & \bf $\tau$ (tokens) \\
+\midrule
+\multicolumn{10}{c}{Temperature = 0.0} \\
+\midrule
+
+\multirow{8}{*}{\texttt{V 7B}}
+& SpS &1.67$\times$\cpm{0.04} &1.13$\times$\cpm{0.02} &1.71$\times$\cpm{0.01} &1.49$\times$\cpm{0.04} &1.50$\times$\cpm{0.03} &1.67$\times$\cpm{0.02} &1.53$\times$\cpm{0.03} & 2.27 \\ 
+
+& PLD &1.61$\times$\cpm{0.02} &1.02$\times$\cpm{0.01} &2.57$\times$\cpm{0.02} &1.14$\times$\cpm{0.02} &1.61$\times$\cpm{0.01} &1.82$\times$\cpm{0.06} &1.62$\times$\cpm{0.01} & 1.75 \\ 
+
+& Hydra &2.50$\times$\cpm{0.02} &1.94$\times$\cpm{0.03} &1.89$\times$\cpm{0.04} &2.02$\times$\cpm{0.04} &2.53$\times$\cpm{0.02} &1.86$\times$\cpm{0.07} &2.13$\times$\cpm{0.04} & 3.26 \\ 
+
+& Lookahead &1.48$\times$\cpm{0.02} &1.15$\times$\cpm{0.02} &1.36$\times$\cpm{0.02} &1.27$\times$\cpm{0.02} &1.59$\times$\cpm{0.03} &1.23$\times$\cpm{0.03} &1.35$\times$\cpm{0.02} & 1.64 \\ 
+
+& Medusa &1.60$\times$\cpm{0.01} &1.39$\times$\cpm{0.01} &1.22$\times$\cpm{0.03} &1.37$\times$\cpm{0.00} &1.68$\times$\cpm{0.01} &1.20$\times$\cpm{0.06} &1.42$\times$\cpm{0.01} & 2.39 \\ 
+& \quad\dab{+\MODEL} &2.63$\times$\cpm{0.02} &1.97$\times$\cpm{0.03} &2.32$\times$\cpm{0.04} &2.20$\times$\cpm{0.02} & 2.78$\times$\cpm{0.03} &1.98$\times$\cpm{0.03} &2.31$\times$\cpm{0.02} & 3.31\\ 
+
+& EAGLE &2.57$\times$\cpm{0.02} &1.85$\times$\cpm{0.04} &2.17$\times$\cpm{0.05} &2.03$\times$\cpm{0.04} &2.57$\times$\cpm{0.05} &1.92$\times$\cpm{0.04} &2.18$\times$\cpm{0.04} & \bf 3.58 \\ 
+& \quad\dab{+\MODEL} & \bf 3.01$\times$\cpm{0.04} &\bf 
+ 2.09$\times$\cpm{0.01} & \bf 2.62$\times$\cpm{0.06} &\bf 
+ 2.40$\times$\cpm{0.03} & \bf 2.84$\times$\cpm{0.05} &\bf 
+ 2.36$\times$\cpm{0.02} & \bf 2.55$\times$\cpm{0.03} & 3.52 \\ 
+
+\midrule
+
+\multirow{5}{*}{\texttt{L2 7B}}
+
+& SpS &1.33$\times$\cpm{0.03} &1.25$\times$\cpm{0.03} &1.21$\times$\cpm{0.02} &1.30$\times$\cpm{0.01} &1.34$\times$\cpm{0.02} &1.43$\times$\cpm{0.03} &1.31$\times$\cpm{0.02} & 1.67 \\ 
+
+& PLD &1.42$\times$\cpm{0.01} &1.17$\times$\cpm{0.02} &1.44$\times$\cpm{0.02} &1.07$\times$\cpm{0.02} &1.31$\times$\cpm{0.02} &1.57$\times$\cpm{0.01} &1.33$\times$\cpm{0.01} & 1.42 \\ 
+
+& Lookahead &1.46$\times$\cpm{0.05} &1.36$\times$\cpm{0.04} &1.34$\times$\cpm{0.04} &1.32$\times$\cpm{0.03} &1.47$\times$\cpm{0.04} &1.37$\times$\cpm{0.03} &1.39$\times$\cpm{0.04} & 1.60 \\ 
+
+& EAGLE &2.61$\times$\cpm{0.02} &2.38$\times$\cpm{0.02} &2.25$\times$\cpm{0.02} &2.30$\times$\cpm{0.05} &2.66$\times$\cpm{0.06} &2.23$\times$\cpm{0.01} &2.40$\times$\cpm{0.02} & \bf 3.55 \\ 
+& \quad\dab{+\MODEL} & \bf 2.95$\times$\cpm{0.03} &\bf 2.67$\times$\cpm{0.01} &\bf 2.64$\times$\cpm{0.03} &\bf 2.76$\times$\cpm{0.04} &\bf 2.88$\times$\cpm{0.02} &\bf 2.52$\times$\cpm{0.03} &\bf 2.74$\times$\cpm{0.03} & 3.49 \\ 
+
+\midrule
+
+\multirow{5}{*}{\texttt{V 13B}}
+
+& SpS &1.69$\times$\cpm{0.01} &1.16$\times$\cpm{0.01} &1.78$\times$\cpm{0.00} &1.45$\times$\cpm{0.01} &1.60$\times$\cpm{0.01} &1.76$\times$\cpm{0.04} &1.57$\times$\cpm{0.01} & 2.18 \\ 
+
+& Medusa &2.06$\times$\cpm{0.01} &1.77$\times$\cpm{0.02} &1.66$\times$\cpm{0.04} &1.74$\times$\cpm{0.01} &2.12$\times$\cpm{0.01} &1.62$\times$\cpm{0.05} &1.84$\times$\cpm{0.02} & 2.39 \\ 
+& \quad\dab{+\MODEL} &2.76$\times$\cpm{0.04} &2.37$\times$\cpm{0.05} &2.16$\times$\cpm{0.02} &2.33$\times$\cpm{0.03} &2.62$\times$\cpm{0.03} &2.27$\times$\cpm{0.04} &2.52$\times$\cpm{0.05} & 3.34\\ 
+
+& EAGLE &2.78$\times$\cpm{0.02} &2.03$\times$\cpm{0.03} &2.41$\times$\cpm{0.02} &2.11$\times$\cpm{0.03} &2.78$\times$\cpm{0.04} &2.20$\times$\cpm{0.03} &2.39$\times$\cpm{0.02} & \bf 3.64\\ 
+& \quad\dab{+\MODEL} & \bf 3.03$\times$\cpm{0.04} &\bf 2.30$\times$\cpm{0.03} &\bf 2.65$\times$\cpm{0.02} &\bf 2.36$\times$\cpm{0.03} &\bf 3.04$\times$\cpm{0.05} &\bf 2.46$\times$\cpm{0.04} &\bf 2.64$\times$\cpm{0.02} & 3.56\\ 
+
+\midrule
+
+\multirow{3}{*}{\texttt{L2 13B}}
+& SpS &1.38$\times$\cpm{0.03} &1.30$\times$\cpm{0.03} &1.26$\times$\cpm{0.04} &1.36$\times$\cpm{0.03} &1.41$\times$\cpm{0.02} &1.47$\times$\cpm{0.06} &1.36$\times$\cpm{0.03} & 1.66 \\ 
+
+& EAGLE &2.80$\times$\cpm{0.01} &2.60$\times$\cpm{0.02} &2.53$\times$\cpm{0.06} &2.42$\times$\cpm{0.03} &2.85$\times$\cpm{0.03} &2.39$\times$\cpm{0.12} &2.60$\times$\cpm{0.03} & 3.66 \\ 
+
+& \quad\dab{+\MODEL} & \bf 3.02$\times$\cpm{0.02} & \bf 2.81$\times$\cpm{0.03} & \bf 2.77$\times$\cpm{0.07} & \bf 2.68$\times$\cpm{0.03} & \bf 3.00$\times$\cpm{0.02} & \bf 2.74$\times$\cpm{0.04} & \bf 2.84$\times$\cpm{0.04} & 3.60 \\ 
+
+\midrule
+\multicolumn{10}{c}{Temperature = 1.0} \\
+\midrule
+
+\multirow{3}{*}{\texttt{V 7B}}
+& SpS &1.35$\times$\cpm{0.00} &1.01$\times$\cpm{0.00} &1.39$\times$\cpm{0.02} &1.25$\times$\cpm{0.01} &1.29$\times$\cpm{0.02} &1.38$\times$\cpm{0.05} &1.28$\times$\cpm{0.01} & 1.82\\ 
+
+& EAGLE &2.10$\times$\cpm{0.01} &1.59$\times$\cpm{0.02} &1.83$\times$\cpm{0.05} &1.70$\times$\cpm{0.02} &2.04$\times$\cpm{0.02} &1.78$\times$\cpm{0.06} &1.84$\times$\cpm{0.01} & \bf 3.18 \\ 
+
+& \quad\dab{+\MODEL} & \bf 2.32$\times$\cpm{0.02} & \bf 1.78$\times$\cpm{0.03} & \bf 2.06$\times$\cpm{0.04} & \bf 1.89$\times$\cpm{0.02} & \bf 2.10$\times$\cpm{0.01} & \bf 1.96$\times$\cpm{0.02} & \bf 2.02$\times$\cpm{0.03} & 3.09 \\ 
+
+\midrule
+
+\multirow{3}{*}{\texttt{L2 7B}}
+& SpS &1.11$\times$\cpm{0.00} &1.07$\times$\cpm{0.01} &1.04$\times$\cpm{0.02} &1.09$\times$\cpm{0.01} &1.13$\times$\cpm{0.01} &1.15$\times$\cpm{0.01} &1.10$\times$\cpm{0.01} & 1.47 \\ 
+
+& EAGLE &2.19$\times$\cpm{0.02} &1.92$\times$\cpm{0.05} &1.91$\times$\cpm{0.03} &1.93$\times$\cpm{0.05} &2.31$\times$\cpm{0.05} &1.87$\times$\cpm{0.07} &2.02$\times$\cpm{0.04} & \bf 3.30 \\
+
+& \quad\dab{+\MODEL} & \bf 2.47$\times$\cpm{0.03} & \bf 2.15$\times$\cpm{0.02} & \bf 2.08$\times$\cpm{0.04} & \bf 2.11$\times$\cpm{0.03} & \bf 2.42$\times$\cpm{0.01} & \bf 2.06$\times$\cpm{0.03} & \bf 2.22$\times$\cpm{0.02} & 3.25\\ 
+
+\bottomrule
+\end{tabular}}
+\caption{Speedup ratios and average acceptance lengths $\tau$ of different methods tested on an A100-PCIE-40GB GPU using third-party benchmark toolkit SpecBench~\citep{xia-etal-2024-unlocking}. \texttt{V}: Vicuna-v1.3. \texttt{L2}: LLaMA2-Chat. We report the mean and standard deviation of speedup ratios on 3 different runs. Best metrics for each model are marked in {\bf boldface}. }
+\label{tab:main_table}
+\end{table}
+
+\subsection{Settings}
+\label{sec:exp_settings}
+\custompara{Datasets, Tasks, and Training.}
+Following the setup of SpecBench~\citep{xia-etal-2024-unlocking}, we conduct evaluations on six types of text generation tasks, including MT-bench~\citep{mtbench} for multi-turn conversation, CNN/Daily Mail~\citep{cnndaily} for text summarization, Natural Questions~\citep{natrualquestions} for retrieval-augmented generation and question answering, WMT14 DE-EN~\citep{wmt} for machine translation, GSM8K~\citep{gsm8k} for mathematical reasoning. 
+As \MODEL falls into the category of speculative decoding methods that require an extra alignment stage, supervised fine-tuning (i.e., SFT) data are needed for aligning distributional similarity between the drafter and the target model. To ensure a fair comparison with baselines in this category, we follow \cite{eagle} to use 68,000 ShareGPT~\citep{sharegpt} conversations as training data without self-distillation. 
+For the self-distillation setting where multi-turn conversations are distilled from the target model given the prompts from the dataset, we refer to \S\ref{sec:ablations}. 
+Training \MODEL on 7B models takes 13 hours on 8 A100-PCIE-40GB GPUs for 40 epochs. 
+The size of \textit{parallel group} is set to 5, \ie, the number of \texttt{[MASK]} tokens $k=4$ unless stated otherwise. 
+\custompara{Baselines and Metrics. }
+We select seven competitive speculative decoding methods as baselines. Some of them work as plugin modules like Speculative Sampling (SpS)~\citep{specsampling}, Prompt Lookup Decoding (PLD)~\citep{pld, llma} and Lookahead Decoding~\citep{lookahead}, which do not need additional training. 
+For SpS methods, we use \texttt{vicuna-68m}\footnote{\url{https://huggingface.co/double7/vicuna-68m}} and \texttt{llama-68m\footnote{\url{https://huggingface.co/JackFram/llama-68m}}} as the drafter for Vicuna and Llama target models, respectively. 
+For PLD, we follow the default settings of n-gram size~$=3$ and number of lookup tokens~$=10$. 
+For Lookahead Decoding, we use the official recommended configuration of level~$=5$, window size~$=7$, and n-gram size~$=7$.
+The remaining methods, including Medusa~\citep{medusa}, Hydra~\citep{hydra}, and EAGLE~\citep{eagle}, that require extra training while preserving the output distributions, are the main peer works for comparison. We use their official drafter checkpoints to report results. 
+We primarily focus on the end-to-end wall-time speedup ratio compared to naive auto-regressive decoding. 
+We also report the average acceptance length $\tau$ in each round of speculative decoding. 
+
+\custompara{Models. }
+We conduct experiments on the Vicuna series (7B, 13B)~\citep{mtbench} and the Llama-2-Chat series (7B, 13B)~\citep{llama}. We chose these models as they are highly representative, and most prior methods built their drafters upon these models, allowing a fair comparison. We provide results for more recent target models in \S\ref{sec:ablations}. 
+All parallel drafters are constructed with a single Transformer layer, with hyper-parameters identical to those of layers in their target models.
+This results in a 202M drafter for 7B models and a 317M one for 13B models.
+We keep the same draft token tree structure with the selected two baseline methods in \MODEL.
+
+\subsection{Main Results}
+\label{sec:main_results}
+
+Table~\ref{tab:main_table} gives a performance overview of \MODEL and established prior approaches on different types of text generation benchmarks. 
+
+In general, \MODEL integration brings a consistent acceleration improvement in all domains, two selected methods, and different decoding temperatures. 
+Based on the results, we have the following key observations:
+
+\custompara{\MODEL significantly accelerates Medusa frameworks by a large margin.}
+For example, integrating \MODEL into Vicuna-7B Medusa boosts the average speedup ratio from 1.42$\times$ to 2.31$\times$, resulting in a 62.7\% relative improvement. 
+This even outperforms EAGLE, which can be attributed to the parallel drafter design. It not only increases the average acceptance tokens from 2.39 to 3.31 but also significantly reduces drafter runtime overhead. 
+Similar improvements are also observed on Vicuna-13B Medusa, showing \MODEL is not sensitive to the target model size.
+
+\custompara{Equipping EAGLE with \MODEL also achieves considerable speedups. }
+For instance, the average speedup ratio on Vicuna-7B increased from 2.18$\times$ to 2.55$\times$; on Llama2-7B-Chat, it rose from 2.40$\times$ to 2.74$\times$; and on LLaMA-13B-Chat, it went from 2.60$\times$ to 2.84$\times$.
+It is worth noting that incorporating \MODEL into EAGLE causes a slight drop in average acceptance length. 
+This is fully expected, as we no longer preserve the sequence dependency during the draft stage, and the parallel decoding leads to a small decline in drafting accuracy. 
+In addition, we also conduct experiments on EAGLE-\MODEL with temperature decoding settings and observe substantial overall speedup up to 2.22$\times$. 
+Still, the speculative decoding efficiency at high temperature degrades compared with greedy decoding, echoing conclusions in previous studies~\citep{xia-etal-2024-unlocking, temperature}. 
+
+\subsection{Ablation Studies}
+\label{sec:ablations}
+
+\begin{figure}[t]
+\begin{center}
+\includegraphics[width=\textwidth]{figs/parallelspec_four_figures_crop.pdf}
+\end{center}
+
+\caption{Ablations on speedup ratio and average acceptance length $\tau$ with respect to the number of \texttt{[MASK]} tokens $K$ on all three test datasets. }
+\label{fig:size_of_parallel_group}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\resizebox{\linewidth}{!}{
+\begin{tabular}{@{}l|cccccc|cc@{}}
+\toprule
+{\bf Model} \& {\bf Method}
+&\begin{tabular}[c]{@{}c@{}}\bf Multi-turn\\\bf Conversation\end{tabular} &\bf Translation & \bf Summarization & \begin{tabular}[c]{@{}c@{}}\bf Question\\\bf Answering\end{tabular} & \begin{tabular}[c]{@{}c@{}}\bf Mathematical\\\bf Reasoning\end{tabular} & \begin{tabular}[c]{@{}c@{}}\bf Retrieval-aug.\\\bf Generation\end{tabular} & \bf Avg. & \bf $\tau$ (tokens) \\
+
+\midrule
+
+LLaMA 2 7B w/ EAGLE & 2.61$\times$ &2.38$\times$ &2.25$\times$ &2.30$\times$ &2.66$\times$ &2.23$\times$ &2.40$\times$ & 3.55 \\  
+
+\quad\dab{+\MODEL} & 2.95$\times$\gain{+13.0\%} & 2.67$\times$\gain{+12.2\%} & 2.64$\times$\gain{+17.3\%} & 2.76$\times$\gain{+20.0\%} & 2.88$\times$\gain{+8.3\%} & 2.52$\times$\gain{+13.0\%} & 2.74$\times$\gain{+14.2\%} & 3.49 \\
+
+\quad\dab{+\MODEL} \dab{+self-distillation}
+ & \bf 3.02$\times$\gain{+15.7\%} &\bf 2.77$\times$\gain{+17.3\%} &\bf 2.71$\times$\gain{+20.4\%} &\bf 2.87$\times$\gain{+24.8\%} & \bf 2.98$\times$\gain{+12.0\%} &\bf 2.56$\times$\gain{+14.8\%} &\bf 2.82$\times$\gain{+17.5\%} & \bf 3.78 \\ 
+
+\midrule
+
+LLaMA 3 8B w/ EAGLE & 2.66$\times$ & 2.42$\times$ & 2.33$\times$ & 2.32$\times$ & 2.75$\times$ & 2.32$\times$ & 2.47$\times$ & \bf 3.42 \\ 
+
+\quad\dab{+\MODEL} & \bf 3.03$\times$\gain{+13.9\%} &\bf 2.63$\times$\gain{+8.7\%} &\bf 2.61$\times$\gain{+12.0\%} &\bf 2.83$\times$\gain{+22.0\%} &\bf 2.92$\times$\gain{+6.2\%} &\bf 2.45$\times$\gain{+5.6\%} &\bf 2.75$\times$\gain{+11.3\%} & 3.36\\
+
+\bottomrule
+\end{tabular}}
+\caption{Ablations on training data and recent advanced target models.}
+\label{tab:ablation_table}
+\end{table}
+
+\custompara{Training Data. }
+Prior works often assume the availability of training data that aligns with the output distribution of target models, which is not usually the case. Thus, directly using ShareGPT conversations as SFT data for drafter training may suffer from the domain shift. 
+In order to bypass this, we follow \cite{medusa} to employ the self-distillation technique to build the training dataset that matches the target model. 
+Specifically, we employ vLLM~\citep{vllm} to obtain distilled multi-turn conversations by feeding the prompts from ShareGPT in a greedy decoding setting. 
+The upper part of Table~\ref{tab:ablation_table} demonstrates that the self-distillation technique can further improve the speedup ratio, with the average acceptance tokens greatly increased to 3.78.
+
+\custompara{Size of Parallel Group. }
+The size of the \textit{parallel group} is an important hyper-parameter of our method, and it determines how many tokens the parallel drafter will predict at each step. It equals the number of \texttt{[MASK]} tokens $K$ plus one.
+To investigate its impact on the speedup performance, we conduct ablation studies to re-train parallel drafter with different $K$ and report the speedup ratio and average acceptance length in Figure~\ref{fig:size_of_parallel_group}. 
+We notice the increase in the average acceptance length $\tau$ resulting from larger \textit{parallel group} size is steady for small $K$ but saturates after $K=4$, leading the speedup ratio to no longer improve beyond that point. 
+We believe this could be attributed to the difficulty of predicting distant future tokens using parallel decoding. 
+The benefit of increasing the \textit{parallel group} size cannot counterbalance the overhead of predicting distant tokens, resulting in a speedup ratio sweet spot around $K=4$.
+
+\custompara{Advanced Target Model. }
+The lower part of Table~\ref{tab:ablation_table} reflects that more advanced models like LLaMA3-8B-Instruct~\citep{llama3} can still benefit from the design of \MODEL. However, the relative improvements on LLaMA3-Instruct series are slightly lower than those on LLaMA2-Chat and Vicuna, possibly because of the larger misalignment between ShareGPT SFT data and LLaMA3-Instruct. 
+
+
+
+\section{Conclusion}
+
+In this paper, we introduce \MODEL, a powerful speculative decoding solution that could be inserted into popular speculative decoding frameworks. 
+It proposes to use a single lightweight model and several trainable \texttt{[MASK]} tokens to facilitate fast multi-token prediction as drafters, thereby mitigating the issue of drafting latency scaling linearly with the draft length. 
+Compared with the Medusa-style multi-head multi-token draft strategy, \MODEL demonstrates significant advantages in drafting accuracy, latency, and parameter efficiency. 
+Extensive experiments on various benchmarks and different target models demonstrate the compatibility and performance superiority of \MODEL. 
+
+
+
+
+

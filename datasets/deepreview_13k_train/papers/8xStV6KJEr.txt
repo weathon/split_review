@@ -1,0 +1,436 @@
+\title{Constrained Diffusion Implicit Models}
+
+\begin{abstract}
+This paper describes an efficient algorithm for solving noisy linear inverse problems using pretrained diffusion models. Extending the paradigm of denoising diffusion implicit models (DDIM), we propose constrained diffusion implicit models (CDIM) that modify the diffusion updates to enforce a constraint upon the final output.
+For noiseless inverse problems, CDIM exactly satisfies the constraints; in the noisy case, we generalize CDIM to satisfy an exact constraint on the residual distribution of the noise. Experiments across a variety of tasks and metrics show strong performance of CDIM, with analogous inference acceleration to unconstrained DDIM: $10$ to $50$ times faster than previous conditional diffusion methods.  We demonstrate the versatility of our approach on many problems including super-resolution, denoising, inpainting, deblurring, and 3D point cloud reconstruction.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Denoising diffusion probabilistic models (DDPMs) have recently emerged as powerful generative models capable of capturing complex data distributions \citep{ho2020denoising}. Their success has spurred interest in applying them to solve inverse problems, which are fundamental in fields such as computer vision, medical imaging, and signal processing \citep{linearinversebackground, hansen2010discrete}. Inverse problems require recovering unknown signals from (possibly noisy) observations. Linear inverse problems, where the observations consist of linear measurements of a signal, encompass tasks like super-resolution, inpainting, and deblurring.
+
+Existing methods that apply diffusion models to linear inverse problems face several limitations. First, many previous works require task specific training or fine-tuning \citep{li2022srdiff, xie2023smartbrush}. Second, methods that use pretrained diffusion models often introduce many additional network evaluations during inference \citep{fps, dpmc}. Finally, popular diffusion inverse methods such as diffusion posterior sampling \citep{dps} fail to exactly recover the input observations.%, and are limited to Gaussian measurement noise.
+
+In this work, we propose constrained diffusion implicit models (CDIM), extending the inference acceleration of denoising diffusion implicit models  \citep{song2020denoising} to efficiently solve noisy linear inverse problems using a single pretrained diffusion model. Our method modifies the diffusion updates to enforce constraints on the final output, integrating measurement constraints directly into the diffusion process. In the noiseless case, this approach achieves exact recovery of the observations. For noisy observations, we generalize our method by optimizing the Kullback-Leibler (KL) divergence between the empirical residual distribution and a known noise distribution, effectively handling general noise models beyond the Gaussian assumption. Code can be found at our website\footnote{\url{https://grail.cs.washington.edu/projects/cdim/}}.
+
+Our contributions are as follows:
+\begin{itemize}
+\setlength\itemsep{0em}
+    \item Accelerated inference: we accelerate inference, reducing the number of model evaluations and wall-clock time by an order of magnitude—10 to 50 times faster than previous conditional diffusion methods—while maintaining comparable quality.
+
+    \item Exact recovery of noiseless observations: we can find solutions that exactly match the noiseless observation.
+
+    \item General noise models: we extend the CDIM framework to accommodate arbitrary observational noise distributions through distributional divergence minimization, demonstrating effectiveness given non-Gaussian noise, such as Poisson noise.
+\end{itemize}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\textwidth]{images/Teaser.pdf}
+    \caption{We show several applications of our method including image colorization, denoising, inpainting, and sparse recovery. We highlight the fact that we can handle general noise distributions, such as Poisson noise, and that our method runs in as little as 3 seconds.}
+    \label{fig:teaser}
+\end{figure}
+
+
+
+
+\newpage
+
+
+
+
+
+\section{Related Work}
+
+
+\begin{wrapfigure}{R}{0.5\textwidth}
+    \centering
+    \includegraphics[width=0.5\textwidth]{images/performance_graph2.png}
+    \caption{The inference speed and average LPIPS image quality score (inverted) averaged across multiple inverse tasks on the FFHQ dataset. The family of CDIM methods (top left corner) simultaneously achieves strong generation strong quality and fast inference, compared to other inverse solvers.}
+    \label{fig:runtimes}
+\end{wrapfigure}
+
+Diffusion methods have revolutionized generative modeling, building upon early work in nonequilibrium thermodynamics \citep{sohl2015deep} and implicit models \citep{mohamed2016learning}. Diffusion models were first proposed in DDPM \citep{ho2020denoising}, which shared a framework analogous to score-based models using Langevin dynamics \cite{song2019generative}. Subsequent innovations focused on improving sampling efficiency, with denoising diffusion implicit models (DDIMs) \citep{song2020denoising} introducing a method to speed up inference with implicit modeling. Further advancements in accelerating the sampling process emerged through the application of stochastic differential equations \citep{song2020score} and the development of numerical ODE solvers, exemplified by approaches like PNDM \citep{liu2021pseudo}, significantly enhancing the practical utility of diffusion models in various generative tasks.
+
+Applying diffusion models to inverse problems has been an active research area. DPS uses alternating projection steps to guide the diffusion process \citep{dps}. Methods like DDNM \citep{wang2022zero}, DDRM \citep{kawar2022denoising}, SNIPS \citep{kawar2021snips}, and PiGDM \citep{Song2023PseudoinverseGuidedDM} use linear algebraic approaches and singular value decompositions. Techniques such as DMPS \citep{meng2022diffusion}, FPS \citep{fps}, LGD \citep{pmlr-v202-song23k}, DPMC \citep{dpmc}, and MCG \citep{cardoso2023montecarloguideddiffusion} focus on likelihood approximation for improved sampling. Guidance mechanisms were incorporated through classifier gradients \citep{dhariwal2021diffusion},  data consistency enforcement \citep{chung2022comecloserdiffusefaster}, and low-frequency feature matching \cite{choi2021ilvr}. Other approaches use projection \citep{boys2023tweedie, chung2024improving} or optimization \citep{chan2016plugandplayadmmimagerestoration, wahlberg2012admmalgorithmclasstotal}.
+
+
+\section{background}
+
+
+We work in the context of DDPM \citep{ho2020denoising}, which models a data distribution $q(\rvx_0)$ by modeling a sequence $t=1,\dots,T$ of smoothed distributions defined by
+\begin{equation}
+q(\rvx_t|\rvx_0) = \mathcal{N}(\rvx_t;\sqrt{\alpha_t}\rvx_0, (1-\alpha_t)\rmI).
+\end{equation}
+The degree of smoothing is controlled by a monotone decreasing noise schedule $\alpha_t$ with $\alpha_0 = 1$ (no noise) and $\alpha_T = 0$ (pure Gaussian noise).\footnote{We define $\alpha_t$ using the DDIM convention \citep{song2020denoising}; our $\alpha_t$ corresponds to $\bar\alpha_t$ in \citet{ho2020denoising}.} The idea is to model a \emph{reverse process} $p_\theta(\rvx_{t-1}|\rvx_t)$ that that incrementally removes the noise in $\rvx_t$ such that $p_\theta(\rvx_T) = \mathcal{N}(\rvx_T;0,\rmI)$ and $p(\rvx_0)$ approximates the data distribution, where $p(\rvx_0)$ is the marginal distribution of outputs from the reverse process:
+\begin{equation}
+p_\theta(\rvx_0) = \int p_\theta(\rvx_T)\prod_{t=1}^T p_\theta(\rvx_{t-1}|\rvx_t)\,d\rvx_{1:T}.
+\end{equation}
+Given noisy samples $\rvx_t = \sqrt{\alpha_t}\rvx_0 + \sqrt{1-\alpha_t}\bm\epsilon$, where $\rvx_0$ is a sample from the data distribution and $\bm\epsilon \sim \mathcal{N}(0,\rmI)$, a diffusion model $\bm\epsilon_\theta(\rvx_t,t)$ is trained to predict $\bm\epsilon$:
+\begin{equation}
+\min_\theta \mathop{\mathbb{E}}_{\rvx_t,\bm\epsilon}\left[\|\bm\epsilon - \bm\epsilon_\theta\left(\rvx_t,t\right)\|^2\right].
+\end{equation}
+
+To parameterize the reverse process $p_\theta(\rvx_{t-1}|\rvx_t)$, DDIM \citep{song2020denoising} exploits the Tweedie formula \citep{efron2011tweedie} for the posterior mean of a noisy observation:
+\begin{equation}\label{eqn:tweedie}
+\mathbb{E}\left[\rvx_0|\rvx_t\right] = \frac{1}{\sqrt{\alpha_t}}\left(\rvx_t - \sqrt{1-\alpha_t}\nabla_{\rvx_t}\log q(\rvx_t)\right).
+\end{equation}
+Using the denoising model $\bm\epsilon(\rvx_t,t)$ as a plug-in estimate of the score function $\nabla_{\rvx_t}\log q(\rvx_t)$ \citep{vincent2011connection} we define the Tweedie estimate of the posterior mean:
+\begin{equation}\label{eqn:plugin-tweedie}
+\hat\rvx_0 \equiv \frac{1}{\sqrt{\alpha_t}}\left(\rvx_t - \sqrt{1-\alpha_t}\bm\epsilon_\theta(\rvx_t,t)\right) \approx \mathbb{E}\left[\rvx_0|\rvx_t\right].
+\end{equation}
+And we use this estimator to define a DDIM forward process $\rvx_{t-1} = f_\theta(\rvx_t)$ defined by
+\begin{equation}\label{eqn:ddim}
+f_\theta(\rvx_t) = \sqrt{\alpha_{t-1}}\hat\rvx_0 + \sqrt{1-\alpha_{t-1}}\left(\frac{\rvx_t - \sqrt{\alpha_t}\hat\rvx_0}{\sqrt{1-\alpha_t}}\right).
+\end{equation}
+Unlike DDPM, the forward process defined by \eqref{eqn:ddim} is deterministic; the value $p_\theta(\rvx_0)$ is entirely determined by $\rvx_T \sim \mathcal{N}(0,\rmI)$ thus making DDIM an implicit model.
+
+With a slight modification of the DDIM update, we are able to take larger denoising steps and accelerate inference. Given $\delta \geq 1$, we define an accelerated denoising process
+\begin{equation}\label{eqn:accelerate}
+f^\delta_\theta(\rvx_t) = \sqrt{\alpha_{t-\delta}}\hat\rvx_0 + \sqrt{1-\alpha_{t-\delta}}\left(\frac{\rvx_t - \sqrt{\alpha_t}\hat\rvx_0}{\sqrt{1-\alpha_t}}\right).
+\end{equation}
+Using this process, inference is completed in just $T' \equiv T/\delta$ steps, albeit with degraded quality of the resulting sample $\rvx_0$ as $\delta$ becomes large.
+
+
+\section{methods}
+
+
+We are interested in solving linear inverse problems of the form $\rvy = \rmA\rvx$, where $\rvy \in \mathbb{R}^d$ is a linear measurement of $\rvx \in \mathbb{R}^n$ and $\rmA \in \mathbb{R}^{d\times n}$ describes the form of our measurements. For example, if $\rmA \in \{0,1\}^{n\times n}$ is a binary mask (which is the case for, e.g., in-painting or sparse recovery problems) then $\rvy$ describes a partial observation of $\rvx$. We seek an estimate $\hat \rvx$ that is consistent with our observations: in the noiseless case, $\rmA \hat\rvx = \rvy$. More generally, we seek to recover a robust estimate of $\hat\rvx$ when the observations $\rvy$ have been corrupted by noise. Given a noise distribution $r$, we seek to minimize $\infdiv{\hat r}{r}$, where $\hat r$ is the empirical distribution of  $d$ residuals, e.g., $\rvy - \rmA\hat\rvx \in \mathbb{R}^d$, between noisy observations $\rvy$ and our estimates $\rmA\hat\rvx$.
+We rely on a diffusion model $p_\theta(\rvx)$ to identify an estimate $\hat\rvx$ that is both consistent with the observed measurements $\rvy$ and likely according to the model. In Section~\ref{sec:tweedie}, we propose a modification of the DDIM inference procedure to efficiently optimize the Tweedie estimates of $\hat\rvx_0$ to satisfy $\rmA\hat\rvx_0 = \rvy$ during the diffusion process, resulting in a consistent and likely final result $\rvx_0$. In Section~\ref{sec:residuals} we extend this optimization-based inference procedure to account for noise in the observations $\rvy$. In Section~\ref{sec:earlystop} we describe an early-stopping heuristic to avoid overfitting to noisy observations, which further reduces the cost of inference. Finally, in Section~\ref{sec:gradients} we show how to set the step sizes for these optimization-based methods.
+
+\subsection{Optimizing $\hat{\mathbf{x}}_{0}$ to match the observations}\label{sec:tweedie}
+
+For linear measurements $\rmA$, the Tweedie formula for $\hat\rvx_0$ (and the corresponding plugin-estimate \eqref{eqn:plugin-tweedie}) extends to a formula for the expected observations:
+\begin{equation}\label{eqn:tweedy-obs}
+\mathbb{E}\left[\rvy|\rvx_t\right] = \rmA\mathbb{E}\left[\rvx_0|\rvx_t\right] \approx \rmA\hat\rvx_0.
+\end{equation}
+For noiseless observations $\rvy$, we propose a modification of the DDIM updates \eqref{eqn:ddim} to find $\rvx_{t-1}$ that satisfies the constraint $\rmA\hat\rvx_0 = \rvy$. I.e., at each time step $t$, we force the Tweedie estimate of the posterior mean of $q(\rvy|\rvx_t)$ to match the observed measurements $\rvy$:
+\begin{align}\label{eqn:projection}
+    \begin{aligned}
+    \argmin_{\rvx_{t-1}} \quad & \|\rvx_{t-1} - f_\theta(\rvx_t)\|^2 \\
+    \text{subject to} \quad & \rmA\hat\rvx_0 = \rvy.
+    \end{aligned}
+\end{align}
+
+We can interpret \eqref{eqn:projection} as a projection of the DDIM update $f_\theta(\rvx_t)$ onto the set of values $\rvx_{t-1}$ that satisfy the constraint $\rmA\hat\rvx_0 = \rvy$. The full inference procedure is analogous to projected gradient descent, whereby we alternately take a step $f_\theta(\rvx_t)$ determined by the diffusion model, and then project back onto the constraint $\rmA\hat\rvx_0 = \rvy$. We implement the projection step itself via gradient descent, initialized from $\rvx_{t-1}^{(0)} = f_\theta(\rvx_t)$ and computing
+\begin{equation}
+\rvx_{t-1}^{(k)} = \rvx_{t-1}^{(k-1)} + \eta\nabla_{\rvx_{t-1}} \|\rvy - \rmA\hat\rvx_0\|^2.
+\end{equation}
+
+As $t$ approaches $0$, $\hat\rvx_0$ converges to $\rvx_0$ and $\|\rvy - \rmA\hat\rvx_0\|^2$ becomes a simple convex quadratic, which can be minimized to arbitrary accuracy by taking sufficiently many gradient steps. This allows us to guarantee exact recovery of the observations $\rvy = \rmA\rvx_0$ in the recovered inverse $\rvx_0$.
+
+For $t$ close to $T$, we face two conceptual challenges in optimizing \eqref{eqn:projection}. First, for large $t$, no value $\rvx_t$ will satisfy $\rmA\hat\rvx_0 = \rvy$ and therefore the optimization is infeasible. Second, the estimate of the score function $\nabla_{\rvx_t}\log q(\rvx_t)$ using $\bm\epsilon_\theta(\rvx_t,t)$ may be inaccurate; we risk overfitting to a bad plug-in estimate $\hat\rvx_0$. We illustrate both these claims by considering the Tweedie estimator \eqref{eqn:plugin-tweedie} in the case $t=T$. In this case, $\rvx_t \sim \mathcal{N}(0,I)$ is independent of $\rvx_0$ and therefore $\mathbb{E}[\rvx_0|\rvx_t] = \mathbb{E}[\rvx_0]$, the mean of the data distribution $q(\rvx_0)$. Unless $\rmA\mathbb{E}[\rvx_0] = \rvy$, the optimization is infeasible when $t=T$. Furthermore, we observe that when $t=T$, the plug-in estimator $\hat\rvx_0$ is not independent of $\rvx_t$ and $\hat\rvx_0 \neq \mathbb{E}[\rvx_0]$. This is indicative of error in the plug-in estimator, especially at high noise levels.
+
+In light of these observations, we replace \eqref{eqn:projection} with a Lagrangian
+\begin{equation}\label{eqn:optimize}
+\argmin_{\rvx_{t-1}} \|\rvx_{t-1} - f_\theta(\rvx_t)\|^2 + \lambda\|\rvy - \rmA\hat\rvx_0\|^2.
+\end{equation}
+We can interpret \eqref{eqn:optimize} as a relaxation of \eqref{eqn:projection}; the regularization by $\lambda\|\rvy - \rmA\hat\rvx_0\|^2$ is achieved implicitly by early stopping after $k=K$ steps of gradient descent. In contrast to projection, this Lagrangian objective is robust to both (1) the possible infeasibility of $\hat\rvy_0(\rvx_t) = \rvy$ and (2) overfitting the measurements based on an inaccurate Tweedie plug-in estimator.
+
+\subsection{Optimizing the KL Divergence of Residuals}\label{sec:residuals}
+
+For noisy inverse problems, imposing a hard constraint $\rmA\hat{\rvx}_0 = \rvy$ will overfit to the noise $\bm\sigma$ in the observations, as illustrated by Figure~\ref{fig:correction_comparison}.
+Previous work accounts for noise using implicit regularization, by incompletely optimizing the objective $\rmA\hat\rvx_0 = \rvy$ \citep{dps}. In contrast, we propose to exactly optimize the Kullback-Leibler (KL) divergence between the empirical distribution of residuals $R(\rmA\hat\rvx_0,\rvy)$ and a known, i.i.d. noise distribution $r$:
+\begin{align}\label{eqn:kl-projection}
+    \begin{aligned}
+    \argmin_{\rvx} \quad & \|\rvx - \rvx_t\|^2 \\
+    \text{subject to} \quad & \infdiv{R(\rmA\hat\rvx_0,\rvy)}{r} = 0.
+    \end{aligned}
+\end{align}
+In Algorithm~\ref{alg:ours_kl}, we show how to optimize a constraint on categorical KL divergences to match arbitrary distributions of discretized residuals. We also provide a convenient objective for optimizing the empirical distribution of continuous residuals to match common noise patterns, including Gaussian and Poisson noise.
+
+
+
+\begin{algorithm}[H]
+\caption{Constrained Diffusion Implicit Models with KL Constraints}
+\begin{algorithmic}[1]
+\State $\mathbf{x}_T \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$
+\For{$t = T,T-\delta,\ldots,1$}
+    \State $\mathbf{x}_{t-\delta} \gets \sqrt{\bar{\alpha}_{t-\delta}}\left(\frac{\mathbf{x}_t - \sqrt{1-\bar{\alpha}_t}\mathbf{\epsilon}_\theta(\mathbf{x}_t, t)}{\sqrt{\bar{\alpha}_t}}\right) + \sqrt{1-\bar{\alpha}_{t-\delta}}\mathbf{\epsilon}_\theta(\mathbf{x}_t, t)$ \Comment{Unconditional DDIM Step}
+    \For{$k=0,\ldots,K$}
+        \State $\hat{\mathbf{x}}_0 \gets \frac{1}{\sqrt{\bar{\alpha}_{t-\delta}}} \left(\mathbf{x}_{t-\delta} - \sqrt{1 - \bar{\alpha}_{t-\delta}} \cdot \mathbf{\epsilon}_\theta(\mathbf{x}_{t-\delta}, t-\delta) \right)$
+        \State $\mathbf{x}_{t-\delta} \gets \mathbf{x}_{t-\delta} + \eta \cdot \nabla_{\mathbf{x}_{t-\delta}} \infdiv{R(\rmA\hat\rvx_0,\rvy)}{r}$ \Comment{Projection}
+    \EndFor
+\EndFor
+\State \Return $\hat{\mathbf{x}}_0$
+\end{algorithmic}
+\label{alg:ours_kl}
+\end{algorithm}
+
+\textbf{Additive Noise.} The general additive noise model is defined by $\rvy = \rmA\rvx + \bm\sigma \in \mathbb{R}^d$, where $\bm\sigma \sim r^{\otimes d}$. By discretizing the distribution of residuals into $B$ buckets, we can compute a categorical KL divergence between observed residuals and the discrete approximation of $r_B$ of $r$:
+\begin{equation}
+\infdiv{R(\rmA\hat\rvx_0,\rvy)}{r_L} = \sum_{b = 1}^B r_B(b)\log\left(\frac{r_B(b)}{\floor{R(\rmA\hat\rvx_0,\rvy)}_B}\right).
+\end{equation}
+
+\begin{figure}[]
+    \centering
+    \begin{subfigure}[t]{0.2\textwidth}
+        \includegraphics[width=\textwidth]{images/weird_noise_input.png}
+        \caption*{Input: Box inpainting with bimodal noise}
+    \end{subfigure}
+    \hspace{0.05\textwidth}
+    \begin{subfigure}[t]{0.2\textwidth}
+        \includegraphics[width=\textwidth]{images/weird_noise_gt.png}
+        \caption*{Ground Truth}
+    \end{subfigure}
+    \hspace{0.05\textwidth}
+        \begin{subfigure}[t]{0.2\textwidth}
+        \includegraphics[width=\textwidth]{images/weird_noise_dps_2.png}
+        \caption*{DPS}
+    \end{subfigure}
+    \hspace{0.05\textwidth}
+    \begin{subfigure}[t]{0.2\textwidth}
+        \includegraphics[width=\textwidth]{images/weird_noise_output_2.png}
+        \caption*{Ours - Discrete KL}
+    \end{subfigure}
+    \caption{Results on the box inpainting task with a bimodal noise distribution. By optimizing the discrete KL divergence, we can reconstruct the face with much higher fidelity than existing methods like DPS.}
+    \label{fig:weird_noise}
+\end{figure}
+
+In Figure \ref{fig:weird_noise} we show results on the box inpainting task when the observation has been corrupted with bimodal noise: $p(\bm\sigma_i = -0.75) = p(\bm\sigma_i = 0.75) = 0.5$ for $i=1,\dots,n$, where image pixels are normalized values $\rvx_i \in [-1,1]$. We optimize the residuals using the discrete KL divergence and show that our result faithfully reconstructs the ground truth with high fidelity while filling in the missing section.
+
+\textbf{Gaussian Noise.} 
+Additive Gaussian noise is defined by $\bm\sigma \sim \mathcal{N}(0,\sigma^2\rmI)$, in which case the residuals $R(\rmA\rvx, \rvy) \equiv \rvy - \rmA\rvx \sim \mathcal{N}(0,\sigma^2\rmI)$ are i.i.d. with distribution $r \sim \mathcal{N}(0,\sigma^2$). The empirical mean and variance of the residuals are 
+\begin{equation}
+\hat{\mu} = \frac{1}{d}\sum_{i=1}^d R(\rmA\hat\rvx,\rvy)_i, \quad \hat{\sigma}^2 = \frac{1}{d}\sum_{i=1}^kd\left(R(\rmA\hat\rvx,\rvy)_i - \hat\mu\right)^2.
+\end{equation}
+
+Using the analytical formula for KL divergence between two Gaussians \citep{Kingma2014}, we can match the empirical mean and variance of the residuals to $r$ by enforcing
+\begin{equation}\label{eqn:gaussian-kl}
+\infdiv{R(\rmA\hat\rvx_0,\rvy)}{r} = \log\left(\frac{\sigma^2}{\hat\sigma^2}\right) + \frac{\hat\sigma^2 + \hat\mu^2}{2\sigma^2} - \frac{1}{2} = 0.
+\end{equation}
+\textbf{Poisson Noise.}
+Possion noise is non-additive noise defined by $s\rvy \sim \textrm{Poisson}(s\rmA\rvx)$, where $\rvy$ is interpreted as discrete integer pixel values. The scaling factor $s \leq 1$ controls the degree of Poisson noise. Poisson noise is not identically distributed across $\rvy$; the variance increases with the scale of each observation. To remedy this, we consider the Pearson residuals \citep{Pregibon1981LogisticRD}:
+\begin{equation}
+R(\rmA\hat\rvx_0, \rvy) = \frac{\lambda(\rvy - \rmA\hat\rvx_0)}{\sqrt{\lambda \hat\rvx_0}}.
+\end{equation}
+
+These residuals are identically distributed; moreover, they are approximately normal $r \sim \mathcal{N}(0,1)$ \citep{PearsonGaussian}. We can therefore optimize the KL divergence between Pearson residuals and a standard normal using \eqref{eqn:gaussian-kl} to solve inverse problems with Poisson noise. Although the Pearson residuals closely follow the standard normal distribution for positive values of $\hat{\mathbf{x}}_0$, this breaks down for values of $\hat{\mathbf{x}}_0$ close to zero, and extreme noise levels $s$. In practice we find the Gaussian assumption to be valid for natural images corrupted by as much noise as $s \approx 0.025$. In Figure \ref{fig:teaser} we show an example of denoising an image corrupted by Poisson noise with $s = 0.05$.
+
+
+\subsection{Noise-Agnostic Constraints}\label{sec:earlystop}
+
+In many practical situations, we will not know the precise distribution of noise $r$ in the observations. For these cases, we propose a noise-agnostic version of CDIM, assuming only that the noise is zero-mean with variance $\Var(r)$. The idea is to directly minimize the squared error of the residuals, with early stopping to avoid overfitting to the noise once $\Var(r)$ exceeds the empirical variance of the residuals. In experiments, we find that this noise-agnostic algorithm performs similarly to the noise-aware versions described in Section~\ref{sec:residuals}. Moreover, the noise-agnostic algorithm is more efficient: by stopping early with enforcement of the constraint, it avoids excess evaluations of the model during the final steps of the diffusion process. The complete process is shown in Algorithm~\ref{alg:ours_l2}.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.20\textwidth}
+        \includegraphics[width=\textwidth]{images/noisy_input.png}
+        \caption{}
+        \label{fig:noisy_input}
+    \end{subfigure}
+    \hspace{0.05\textwidth}
+        \begin{subfigure}[b]{0.20\textwidth}
+        \includegraphics[width=\textwidth]{images/noisy_result_alg3.png}
+        \caption{}
+        \label{fig:noisy_result_alg3}
+    \end{subfigure}
+        \hspace{0.05\textwidth}
+    \begin{subfigure}[b]{0.20\textwidth}
+        \includegraphics[width=\textwidth]{images/noisy_result.png}
+        \caption{}
+        \label{fig:noisy_result}
+    \end{subfigure}
+    \caption{Results on a 50\% noisy inpainting task. (a) is the noisy partial observation. (b) is generated by algorithm \ref{alg:ours_l2} without early stopping, showing that we can exactly match the observation even when the observation is out of distribution. (c) is generated by algorithm \ref{alg:ours_l2} with early stopping.}
+    \label{fig:correction_comparison}
+\end{figure}
+
+\begin{algorithm}[H]
+\caption{Constrained Diffusion Implicit Models with $L^2$ Constraints and Early Stopping}
+\begin{algorithmic}[1]
+\State $\mathbf{x}_T \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$
+\For{$t = T,T-\delta..,1$}
+    \State $\mathbf{x}_{t-\delta} \gets \sqrt{\bar{\alpha}_{t-\delta}}\left(\frac{\mathbf{x}_t - \sqrt{1-\bar{\alpha}_t}\mathbf{\epsilon}_\theta(\mathbf{x}_t, t)}{\sqrt{\bar{\alpha}_t}}\right) + \sqrt{1-\bar{\alpha}_{t-\delta}}\mathbf{\epsilon}_\theta(\mathbf{x}_t, t)$ \Comment{Unconditional DDIM Step}
+    \For{$k=0,..,K$}
+        \State $\hat{\mathbf{x}}_0 \gets \frac{1}{\sqrt{\bar{\alpha}_{t-\delta}}} \left(\mathbf{x}_{t-\delta} - \sqrt{1 - \bar{\alpha}_{t-\delta}} \cdot \mathbf{\epsilon}_\theta(\mathbf{x}_{t-\delta}, t-\delta) \right)$
+        \If{$\hat\sigma^2 < \Var(r)$} \Comment{Early Stopping}
+            \State \textbf{break}
+        \EndIf
+        \State $\mathbf{x}_{t-\delta} \gets \mathbf{x}_{t-\delta} + \eta \cdot \nabla_{\mathbf{x}_{t-\delta}} \frac{1}{d} \| R(\rmA\hat\rvx, \rvy) \|_2^2$ \Comment{Projection}
+    \EndFor
+\EndFor
+\end{algorithmic}
+\label{alg:ours_l2}
+\end{algorithm}
+
+\subsection{Choice of Step Size $\eta$}\label{sec:gradients}
+An important hyperparameter of these algorithms is the step size $\eta$. DPS sets $\eta$ proportional to $1 / \|\rvy - \rmA\hat{\rvx}_0\|$ \cite{dps}. We find that this fails to converge for KL optimization, and also produces unstable results for $L^2$ optimization when $T'$ is small. One option is to set $\eta$ inversely proportional to the magnitude of the gradient $\|\nabla \rvx_{t-\delta}\|$ at every single optimization step. Although this is the easiest solution, it can result in unstable oscillations and slower convergence. Instead, we propose to set $\eta$ inversely proportional to  $\mathbb{E}_{\mathbf{x} \sim \mathcal{X}_{\text{train}}}\left\|\nabla_{\mathbf{x}_{t-\delta}}\right\|$, a common optimization heuristic \citep{amarigrad,pascanu2014revisitingnaturalgradientdeep}. In Figure~\ref{fig:eta_comparison} we show qualitatively what happens with different $\eta$ schedules.
+
+\begin{figure}[]
+    \centering
+    \begin{subfigure}[b]{0.2\textwidth}
+        \includegraphics[width=\textwidth]{images/eta_input.png}
+        \caption*{Input, 50\% inpainting}
+    \end{subfigure}
+    \hspace{0.05\textwidth}
+    \begin{subfigure}[b]{0.2\textwidth}
+        \includegraphics[width=\textwidth]{images/eta_dpsnorm.png}
+        \caption*{$\eta \propto 1 / \left\|\rvy - \rmA \hat{\rvx}_0\right\|$}
+    \end{subfigure}
+    \hspace{0.05\textwidth}
+        \begin{subfigure}[b]{0.2\textwidth}
+        \includegraphics[width=\textwidth]{images/eta_gradnorm.png}
+        \caption*{$\eta \propto 1 / \left\|\nabla_{\mathbf{x}_{t-\delta}}\right\|$}
+    \end{subfigure}
+    \hspace{0.05\textwidth}
+    \begin{subfigure}[b]{0.2\textwidth}
+        \includegraphics[width=\textwidth]{images/eta_expectedgradnorm.png}
+        \caption*{$\eta \propto 1 / \mathbb{E}\left\|\nabla_{\mathbf{x}_{t-\delta}}\right\|$}
+    \end{subfigure}
+    \caption{Comparison of different step size schedules on a $50\%$ inpainting task. We choose a challenging task with $T'=10$, $K=10$, $\sigma^2_y = 0.15$ and use algorithm \ref{alg:ours_l2}. With enough steps, all three can produce reasonable results on $L^2$ optimization, but $\eta \propto 1 / \mathbb{E}\left\|\nabla_{\mathbf{x}_{t-\delta}}\right\|$ is the most stable and converges the fastest.}
+    \label{fig:eta_comparison}
+\end{figure}
+
+We find that for a specific optimization objective and task, the magnitude of the gradient  $\|\nabla \rvx_{t-\delta}\|$ is highly similar across data points, datasets, and model architectures. This suggests that a learned step size based on $\mathbb{E}_{\mathbf{x} \sim \mathcal{X}_{\text{train}}}\left\|\nabla_{\mathbf{x}_{t-\delta}}\right\|$ generalizes as a good learning rate for unseen data. For all experiments, we estimate these magnitudes from FFHQ training data.
+
+
+
+
+\section{Results and Experiments}
+
+
+We conduct experiments to understand the efficiency and quality of CDIM across various tasks and datasets. In Section~\ref{sec:numerical-results}, we present quantitative comparisons to state-of-the-art approaches, followed by ablation studies in Section~\ref{sec:ablation} examining inference speed and hyperparameters. In Section~\ref{sec:additional_applications} we explore two novel applications of diffusion models for inverse problems.
+
+\subsection{Numerical Results on FFHQ and ImageNet}\label{sec:numerical-results}
+We evaluate CDIM on the FFHQ-1k \citep{ffhq} and ImageNet-1k \citep{imagenet} validation sets, both widely used benchmarks for assessing diffusion methods for inverse problems. Each dataset contains 256 × 256 RGB images scaled to the range [0, 1]. The tasks include 4x super-resolution, box inpainting, Gaussian deblur, and random inpainting. For all tasks, we apply zero-centered Gaussian observational noise with $\sigma = 0.05$. To ensure fair comparisons, we use identical pre-trained diffusion models used in the baseline methods: for FFHQ we use the network from \cite{dps} and for ImageNet we use the network from \cite{dhariwal2021diffusion}. We use multiple metrics to measure the quality of the generated outputs: Frechet Inception Distance (FID) \citep{fid} and  Learned Perceptual Image Patch Similarity (LPIPS) \citep{lpips}.
+All experiments are carried out on a single Nvidia A100 GPU.
+In Table \ref{tab:results1} we compare CDIM with several other inverse solvers using the FID and LPIPS metrics on the FFHQ dataset. We present results using both our KL divergence optimization method (Algorithm~\ref{alg:ours_kl}) and our $L^2$ optimization method (Algorithm~\ref{alg:ours_l2}) with early stopping. For these experiments, we present results with $T'=50$ and $K=3$ as well as $T'=25$ and $K=1$ labeled as "fast".
+
+\renewcommand{\arraystretch}{1.1} % Adjust the factor (1.2) as needed
+\begin{table}
+\centering
+\small
+\caption{Quantitative results (FID, LPIPS) of our model and existing models on various linear inverse problems on FFHQ 256 × 256-1k validation dataset. (Lower is better). The best result is in \textbf{bold} and the second best is \underline{underlined}.}
+\label{tab:results1}
+\begin{tabular}{|c|cc|cc|cc|cc|c|}
+\hline
+\multirow{2}{*}{\textbf{FFHQ}} & \multicolumn{2}{c|}{\textbf{Super}} & \multicolumn{2}{c|}{\textbf{Inpainting}} & \multicolumn{2}{c|}{\textbf{Gaussian}} & \multicolumn{2}{c|}{\textbf{Inpainting}} & {\textbf{Runtime}} \\
+ & \multicolumn{2}{c|}{\textbf{Res}} & \multicolumn{2}{c|}{\textbf{(box)}} & \multicolumn{2}{c|}{\textbf{Deblur}} & \multicolumn{2}{c|}{\textbf{(random)}} & {\textbf{(seconds)}} \\
+ \hline
+ Methods & FID & LPIPS & FID & LPIPS & FID & LPIPS & FID & LPIPS &  \\
+\hline
+Ours - KL fast & 36.76  & 0.283  & 35.15 & 0.2239 & 37.44 & 0.308  & 35.73 & 0.259 & 2.57 \\
+\cline{1-1}
+Ours - $L^2$ fast & 33.87  & 0.276  & 27.51 & 0.1872 & 34.18  & 0.276  & 29.67 & 0.243 & 2.4 \\
+\cline{1-1}
+Ours - KL & 34.71  & 0.269  & 30.88  & 0.1934 & 35.93  & 0.296 & 31.09 & 0.249 & 10.2 \\
+\cline{1-1}
+Ours - $L^2$ & \underline{31.54}  & 0.269 & \textbf{26.09} & 0.196  & \textbf{29.68} & \textbf{0.252} & \underline{28.52} & \underline{0.240} & 9.0 \\
+\cline{1-1}
+FPS-SMC & \textbf{26.62} & \textbf{0.210} & \underline{26.51} & \textbf{0.150} & \underline{29.97} & \underline{0.253} & 33.10 & 0.275 & 116.90 \\
+\cline{1-1}
+DPS & 39.35 & \underline{0.214} & 33.12 & \underline{0.168} & 44.05 & 0.257 & \textbf{21.19} & \textbf{0.212} & 70.42 \\
+\cline{1-1}
+DDRM & 62.15 & 0.294 & 42.93 & 0.204 & 74.92 & 0.332 & 69.71 & 0.587 & 2.0\\
+\cline{1-1}
+MCG & 87.64 & 0.520 & 40.11 & 0.309 & 101.2 & 0.340 & 29.26 & 0.286 & 73.2 \\
+\cline{1-1}
+PnP-ADMM & 66.52 & 0.353 & 151.9 & 0.406 & 90.42 & 0.441 & 123.6 & 0.692 & 3.595\\
+\cline{1-1}
+Score-SDE & 96.72 & 0.563 & 60.06 & 0.331 & 109.0 & 0.403 & 76.54 & 0.612 & 32.39 \\
+\cline{1-1}
+ADMM-TV & 110.6 & 0.428 & 68.94 & 0.322 & 186.7 & 0.507 & 181.5 & 0.463 & - \\
+\hline
+\end{tabular}
+\end{table}
+
+
+\subsection{Ablation Studies}\label{sec:ablation}
+\textbf{Number of Inference Steps.} CDIM offers the flexibility to trade off quality for faster inference time on demand. We investigate how  generation quality changes as we vary the total computational budget during inference. Recall that the total number of network passes during inference is $T'(K+1)$, where $T'$ is the number of denoising steps and $K$ is the number of optimization steps per denoising step. We use the random inpainting task on the FFHQ dataset with the setup described in the previous section. For this experiment we use KL optimization (Algorithm~\ref{alg:ours_kl}). The total network forward passes are varied from $200$ to $20$, and we show qualitative results. Notably, CDIM yields high quality samples with as few as $50$ total inference steps, with quality degradations after that.
+
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}[t]{0.18\textwidth}
+        \centering % Centers image and caption
+        \includegraphics[width=\textwidth]{images/ablation_2_input.png}
+        \caption*{Input\\Random Inpainting}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.18\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/ablation_2_t5_k1.png}
+        \caption*{10 Steps\\$T'=5$ $K=1$}
+
+    \end{subfigure}
+    \begin{subfigure}[t]{0.18\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/ablation_2_t10_k1.png}
+        \caption*{20 Steps\\$T'=10$ $K=1$}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.18\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/ablation_2_t25_k1.png}
+        \caption*{50 Steps\\$T'=25$ $K=1$}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.18\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{images/ablation_2_t50_k3.png}
+        \caption*{200 Steps\\$T'=50$ $K=3$}
+    \end{subfigure}
+    \caption{We reduce the total number of inference steps $T'(K+1)$ and visualize the results. There is almost no visible degradation until less than 50 total steps.}
+    \label{fig:total_steps}
+\end{figure}
+
+\textbf{$\mathbf{T'}$ vs $\mathbf{K}$ trade-off}. We consider the optimal balance between $T'$ and $K$ when the total number of inference steps $T'(K+1)$ is fixed. Using the random inpainting task on the FFHQ dataset with the previously described setup, we set $T'(K+1) = 200$ and analyze how PSNR, FID, and LPIPS change based on the chosen $T'$ and $K$ values. Results are plotted in Figure \ref{fig:tk_tradeoff}. FID results consistently favor the maximum number of denoising steps $T'$ with minimal optimization steps $K$. This is because FID evaluates overall distribution similarity rather than per-sample fidelity, and thus is not penalized by lower reconstruction-observation fidelity. In contrast, PSNR and LPIPS, which measure per-sample fidelity with respect to a reference image, achieve optimal results with a balanced mix of denoising and optimization steps.
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}[b]{0.26\textwidth}
+        \includegraphics[width=\textwidth]{images/tk_fid.png}
+        \caption*{}
+        \label{fig:image1}
+    \end{subfigure}
+    \hspace{0.05\textwidth}
+    \begin{subfigure}[b]{0.26\textwidth}
+        \includegraphics[width=\textwidth]{images/tk_lpips.png}
+        \caption*{}
+        \label{fig:image2}
+    \end{subfigure}
+    \hspace{0.05\textwidth}
+    \begin{subfigure}[b]{0.26\textwidth}
+        \includegraphics[width=\textwidth]{images/tk_psnr.png}
+        \caption*{}
+        \label{fig:image3}
+    \end{subfigure}
+    \caption{We fix the total number of inference steps at 200 and evaluate different combinations of T' and K. FID always prefers more denoising steps T', while LPIPS and PSNR are best at a mix of T' and K steps.}
+    \label{fig:tk_tradeoff}
+\end{figure}
+
+\subsection{Additional Applications}\label{sec:additional_applications}
+\textbf{Time-Travel Rephotography} In Figure~\ref{fig:teaser} we showcase an application of time-travel rephotography \cite{Luo_2021}. Antique cameras lack red light sensitivity, exaggerating wrinkles by filtering
+out skin subsurface scatter which occurs mostly in the red channel. To address this, we input the observed image into the blue color channel and use the pretrained FFHQ model with Algorithm~\ref{alg:ours_l2} to project the face into the space of modern images. We further emphasize the power of our approach; \cite{Luo_2021} trained a specialized model for this task while we are able to use a pretrained model without modification.
+
+\textbf{Sparse Point Cloud Reconstruction} For this task, 20 different images from a scene in The Grand Budapest Hotel scene were entered into Colmap \citep{colmap} to generate a sparse 3D point cloud. Note that the sparse nature of the Colmap point cloud means that projections of the point cloud will have roughly $90\%$ of the pixels missing. Furthermore, the observations often contain significant amounts of non-Gaussian noise due to false correspondences. We can formulate this as a noisy inpainting problem and use our method to fill in the missing pixels for a desired viewpoint. To address the errors in the point cloud, we use Algorithm~\ref{alg:ours_l2} along with a variance threshold that adequately captures the imprecise nature of the point cloud. We showcase the results in Figure \ref{fig:3d_recon}. 
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}[b]{0.3\textwidth}
+        \includegraphics[width=\textwidth]{images/3d_recon_input.png}
+        \caption{}
+        \label{fig:3d_recon_input}
+    \end{subfigure}
+    \hspace{0.1\textwidth}
+    \begin{subfigure}[b]{0.3\textwidth}
+        \includegraphics[width=\textwidth]{images/3d_recon_output.png}
+        \caption{}
+        \label{fig:3d_recon_output}
+    \end{subfigure}
+    \caption{Using noisy inpainting to tackle sparse point cloud reconstruction. (a) Shows a sparse point cloud projected to a desired camera angle. (b) Shows the result after our method is used for noisy inpainting.}
+    \label{fig:3d_recon}
+\end{figure}
+
+
+\section{conclusion}
+
+In this paper we introduced CDIM, a new approach for solving noisy linear inverse problems with pretrained diffusion models. This is achieved by exploiting the structure of the DDIM inference procedure. By projecting the DDIM updates, such that Tweedie estimates of the denoised image $\hat\rvx_0$ match the linear constraints, we are able to enforce  constraints without making out-of-distribution edits to the noised iterates $\rvx_t$. We note that our method cannot handle non-linear constraints, including latent diffusion, because for a non-linear function $h$, $\mathbb{E}\left[h(\rvx_0)\right] \neq h(\mathbb{E}\left[\rvx_0\right]$. Therefore, unlike the linear case of \eqref{eqn:tweedy-obs}, we cannot extend Tweedie's estimate of the posterior mean of $\rvx_0$ to an estimate of the posterior mean of non-linear observations $h(\rvx_0)$. However, for linear constraints, our method generates high quality images with faster inference than previous methods, creating a new point on the Pareto-frontier of quality vs. efficiency for linear inverse problems.% The generality and practicality of our method was demonstrated on a variety of tasks such as denoising, inpainting, sparse recovery, super-resolution, and sparse point cloud reconstruction.
+
+
+
+\section{Acknowledgements}
+
+
+This work was supported by the UW Reality Lab, Lenovo, Meta,
+Google, OPPO, and Amazon.
+
+
+
+
+
+

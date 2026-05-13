@@ -1,0 +1,817 @@
+\title{Unlocking the Power of Representations in Long-term Novelty-based Exploration}
+
+\begin{abstract}
+We introduce \textit{Robust Exploration via Clustering-based Online Density Estimation} (\DETOCS), a non-parametric method for novelty-based exploration that estimates visitation counts for clusters of states based on their similarity in a chosen embedding space.
+By adapting classical clustering to the nonstationary setting of Deep RL, \DETOCS can efficiently track state visitation counts over thousands of episodes. We further propose a novel generalization of the inverse dynamics loss, which leverages masked transformer architectures for multi-step prediction; which in conjunction with \DETOCS achieves a new state-of-the-art in a suite of challenging 3D-exploration tasks in \DMH. 
+\DETOCS also sets new state-of-the-art in hard exploration Atari games, and is the first agent to reach the end screen in \textit{Pitfall!}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Exploration mechanisms are a key component of reinforcement learning (RL,~\citealp{sutton2018reinforcement}) agents, especially in sparse-reward tasks where long sequences of actions need to be executed before collecting a reward.
+The exploration problem has been studied theoretically~\citep{kearns2002near,azar2017minimax,brafman2003r-max,auer2002finite, agrawal2012analysis,audibert2010best,jin2020reward} in the context of bandits~\citep{lattimore2020bandit} and Markov Decision Processes (MDPs,~\citealp{puterman1990markov,jaksch2010near}).
+One simple yet theoretically-sound approach for efficient exploration in MDPs is to use a decreasing function of the visitation counts as an exploration bonus~\citep{strehl2008analysis,azar2017minimax}.
+However, this approach becomes intractable for large or continuous state spaces, where the agent is unlikely to visit the exact same state multiple times, and some form of meaningful generalization over states is necessary.
+Several approximations and proxies for visitation counts and densities have been proposed to make this form of exploration applicable to complex environments.
+Two partially successful approaches in deep RL are: the parametric approach, which uses neural networks to estimate visitation densities directly, and the non-parametric approach, which leverages a memory of visited states to guide exploration.
+\begin{figure}[t!]
+    \centering
+    \begin{subfigure}{.5\textwidth}
+        \centering
+        \includegraphics[width=0.9\textwidth]{pictures/mean_capped_hard8.png}
+    \end{subfigure}  
+
+    \caption{
+    A key result of \DETOCS is that it allows us to leverage more powerful state representations for long-term novelty estimation; enabling to achieve a new state-of-the-art in the challenging 3D task suite \DMH.
+    }
+\end{figure}
+Parametric methods either explicitly estimate the visitation counts using density models~\citep{bellemare2016unifying,ostrovski2017count} or use proxies for visitation such as the prediction error of a dynamics model~\citep{pathak2017curiosity,guo2022byol}, or from predicting features of the current observation, e.g., features given by a fixed randomly initialized neural network as in 
+\RND~\citep{burda2019exploration}. While this family of methods provides strong baselines for exploration in many settings~\citep{burda2018large}, they are prone to common problems of deep learning in continual learning scenarios, especially slow adaptation and catastrophic forgetting.
+Parametric models trained via gradient descent are unsuitable for rapid adaptation (e.g., within a single episode) because it requires updates to the state representation before the exploration bonus can catch up.
+Additionally, catastrophic forgetting makes parametric methods susceptible to the so-called `detachment' problem in which the algorithm loses track of promising areas to explore \citep{ostrovski2017count}.
+Non-parametric methods rely on a memory to store encountered states~\citep{savinov2018episodic,badia2020never}.
+This facilitates responsiveness to the most recent experience as well as preserving memories without interference.
+However, due to computational constraints, it is necessary to limit the memory size which, in turn, requires a selection or aggregation mechanism for states.
+To obtain the best of both worlds, Never Give Up (\NGU, \citealp{badia2020never}) combines a short-term novelty signal based on an episodic memory and a long-term novelty signal based on \RND into a single intrinsic reward.
+However, the need to estimate two different novelty signals simultaneously adds complexity and requires careful tuning.
+Moreover, as pointed out by~\citet{pathak2017curiosity}, the final efficacy of any exploration algorithm strongly depends on the chosen state representation.
+If the state encoding is susceptible to noise or uncontrollable features in the observations, it can lead to irrelevant novelty signals and prevent meaningful generalization over states.
+As \NGU relies on \RND for representation, it also inherits its encoding deficiencies in the presence of noisy observations which limits the applicability of the method in stochastic or complex environments.
+In this paper, we tackle these issues by decomposing the exploration problem into two disentangled sub-problems.
+First, (i) \textbf{Representation Learning} with an embedding function that encodes a meaningful notion of state similarity while being robust to uncontrollable factors in the observations.
+Second, (ii) \textbf{Count Estimation} that is able to provide a long term visitation-based exploration bonus while retaining responsiveness to the most recent experience.
+Addressing (i), we extend the inverse dynamic model proposed by~\citet{pathak2017curiosity} by leveraging the power of masked sequence transformers~\citep{devlin2018bert} to build an encoder which can produce rich representations over longer trajectories while suppressing the encoding of uncontrollable features.
+We refer to our representation as \CASM, for \textit{Coupled Action-State Masking}.
+In order to deliver on (ii) we introduce a novel, non-parametric method called Robust Exploration via Clustering-based Online Density Estimation (\DETOCS).
+In particular, \DETOCS estimates soft visitation counts in the embedding space by adapting density estimation and clustering techniques to an online RL setting.
+Our approach tracks histories of interactions spanning thousands of episodes, significantly increasing memory capacity over prior art in non-parametric exploration methods which typically only store the most recent history like the current episode.
+In the presence of noise, we show that it strictly improves over state-of-the-art exploration bonuses such as \NGU or \RND.
+\DETOCS matches or exceeds state-of-the-art exploration results on Atari and is the first agent to reach the end-screen in \textit{Pitfall!}.
+Beyond 2D, our method also performs well in 3D domains and in conjunction with \CASM, sets new state-of-the-art results in the challenging \DMH suite (Fig.~\ref{fig:teaser}).
+
+
+
+
+\section{Background}
+
+\label{sec:background}
+We consider a discrete-time interaction~\citep{mccallum1995instance, hutter2004universal, hutter2009feature, daswani2013q} between an agent and its environment. 
+At each time step $t\in\mathbb{N}$ the agent receives an observation $o_t\in\mathcal{O}$, that partially captures the underlying state $s\in \mathcal{S}$ of the environment and generates an action $a_t\in\mathcal{A}$. 
+We consider policies $\pi: \mathcal{O}\rightarrow \Delta_\mathcal{A}$, that map an observation to a probability distribution over actions.
+Finally, an extrinsic reward function $r_e: \mathcal{S}\times\mathcal{A}\rightarrow \mathbb{R}$ maps an observation to a scalar feedback. 
+This function can be combined with an intrinsic reward function $r_i$ to encourage the exploratory behavior which might not be induced from $r_e$ alone.
+
+The observations provided to the agent at each time step $t$ are used to build a representation of the state via an embedding function $f_\theta : \mathcal{O} \rightarrow \mathcal{E}$, associating $o_t$ with a vector $e_t=f_\theta(o_t)$.
+Typically, the embedding space $\mathcal{E}$ is the vector space $\mathbb{R}^D$ where $D\in\mathbb{N}^*$ is the embedding size. 
+Common approaches to learn $f_\theta$ include using an auto-encoding loss on the observation $o_t$~\citep{burda2018large}, an inverse dynamics loss~\citep{pathak2017curiosity}, a multi-step prediction loss at the latent level~\citep{guo2020bootstrap,guo2022byol}, or other similar representation learning methods.
+In particular,~\citet{pathak2017curiosity} and \citet{badia2020never} highlight the utility of the inverse-dynamics loss to filter out noisy or uncontrollable features, e.g., an on-screen death timer as in \textit{Pitfall!}.
+
+A popular and principled approach to exploration in discrete settings is to provide an intrinsic reward inversely proportional to the visitation count~\citep{strehl2008analysis,azar2017minimax}.
+However, in large or continuous spaces the same state may be rarely encountered twice. \citet{badia2020never} remedy this issue by introducing a slot-based memory $M$, which stores all past embeddings in the current episode, and replaces discrete counts with a sum of similarities between a queried embedding $e_t=f_\theta(o_t)$ and its k-nearest-neighbors $\text{Neigh}_k(e_t)$ under the kernel $\mathcal{K}$:
+\begin{equation}
+\label{eq:reward}
+r_{t} \propto \frac{1}{\sqrt{N(f_\theta(o_t))}}
+\approx \frac{1}{\sqrt{\sum_{m \in \text{Neigh}_k(e_t)}{\mathcal{K}(e_t, m)}}}.
+\end{equation}
+Since storing the full history of embeddings throughout training would require a prohibitive amount of space, this slot-based memory is typically relegated to short-term horizons only, and in \NGU it is reset at the end of every episode. As a consequence, slot-based memory must be combined with a separate mechanism capable of estimating long-term novelty; resulting in additional method complexity and trade-offs.
+In the following, we present a simple and efficient slot-based memory which can effectively track novelty over thousands of episodes.
+
+
+
+
+
+
+
+
+\section{\DETOCS}
+
+\label{sec:DETOCS}
+In this section we present our method, Robust Exploration via Clustering-based Online Density Estimation (\DETOCS), to compute intrinsic rewards for exploration.
+\DETOCS takes inspiration from the reward of \NGU~\citep{badia2020never}, but while \NGU stores individual embedded observations in $M$ and uses periodic resets to limit space complexity, \DETOCS controls its space complexity by aggregating similar observations in memory. 
+This requires storing a separate counter associated with each element in the memory and new observations need not be directly added to the memory, but will typically be assigned to the nearest existing element whose counter is then incremented.
+Since the counters are never reset and the merged observations have a better coverage of the embedding space, \DETOCS's memory is much longer-term than a simple slot-based approach yielding state-of-the-art performance in many hard-exploration environments.
+It also simplifies the estimation of novelty to only one mechanism vs.~two as in \NGU.
+Moreover, the \DETOCS architecture is highly flexible, allowing it to be easily combined with a variety of RL agents and most importantly different representation learning methods.
+As we show in the experiments, methods that can better leverage priors from learned representations, such as \DETOCS, outperform those that need to estimate novelty directly on raw observations, like \RND (and in turn \NGU).
+We now present our detailed implementation and an overview of our techniques in Algorithm~\ref{alg:recode}.
+
+\begin{algorithm}[tb]
+\caption{\DETOCS}
+\label{alg:recode}
+\scriptsize
+\setstretch{1.2}
+
+\begin{algorithmic}[1]
+\STATE {\bfseries Input: }Embedding $e$, Memory $M=\{m_l\}_{l=1}^{|M|}$, atom visitation counts $\{c_l\}_{i=l}^{|M|}$, number of neighbors $k$, relative tolerance to decide if a candidate new atom is far $\kappa$, squared distance estimate $\dm^2$, $\dm^2$'s decay rate $\tau$, discount $\gamma$, insertion probability $\eta$, kernel function $\mathcal{K}$, intrinsic reward constant $\irc$
+\STATE {\bfseries Output: }Updated memory $M=\{m_l\}_{l=1}^{|M|}$, updated atom visitation counts $\{c_l\}_{i=l}^{|M|}$, updated squared distance $\dm^2$, intrinsic reward $r$
+\STATE Compute $N_{\mathcal{K}}(M, e) = \sum_{l=1}^{|M|} (1 + c_l)\,\mathcal{K}(m_l, e)$;
+\STATE Compute intrinsic reward $r=\left(\sqrt{N_{\mathcal{K}}(M, e)} + \irc\right)^{-1}$\;
+\STATE Find nearest $k$ atoms to the embedding $e$: $\text{Neigh}_k(e)=\{m_j\}_{j=1}^k$\;
+\STATE Update $\dm$ estimate: $\dm^2\gets (1-\tau)\,\dm^2 + \frac{\tau}{k}\sum_{m\in \text{Neigh}_k(e)} \|m-e\|^2_2$\;
+\STATE Discount all atom counts $c_l \gets \gamma\, c_l\, \quad \forall l\in\{1,\cdots, |M|\}$\;
+\STATE Find nearest atom $m_{\star} =  \argmin_{m \in M, m \neq m_j} \|m - e \|_2$\;
+\STATE Sample uniformly a real number in $[0,1]$: $u\sim U[0, 1]$\;
+\IF{$\| m_\star - e \|_2^2 > \kappa\, \dm^2$ {\rm and} $u < \eta$}
+\STATE Sample atom to remove $m_j$ with probability $P(j) \propto 1 / c_j^2$ \comment{// Remove under-populated cluster}
+\STATE Find atom $m_{\dag}$ nearest to $m_j$: $m_\dag = \argmin_{m \in M, m \neq m_j} \|m - m_j \|_2$
+\STATE Redistribute the count of removed atom: $c_\dag \gets c_j + c_\dag$
+\STATE Insert $e$ at index $j$ with count $1$: $m_j\gets {e}\, , c_j \gets 1$ \comment{// Create a new cluster}
+\ELSE
+\STATE Update nearest atom position $m_\star \gets \frac{c_\star}{c_\star+1}m_\star + \frac{1}{c_\star+1}e $
+\STATE Update nearest atom count $c_\star \gets c_\star + 1$
+\ENDIF
+\end{algorithmic}
+\end{algorithm}
+
+
+\paragraph{Approximating visitation counts.}
+Our estimator is based on a finite slot-based container $M=\{m_j\}_{j=1}^{|M|}$, where $|M|$ is the memory size. We refer to $m_j\in\mathcal{E}$ as atoms since they need not correspond to a single embedding as in \citet{badia2020never,badia2020agent57}
+We also store a separate count vector $c$ such that $c_i$ is an estimate of the visitation count of $m_i$.
+In particular, $c_i$ does not only reflect the number of visits to $m_i$ but also captures any previous visit sufficiently close to it.
+
+Given a new embedding $e$, we estimate its \emph{soft-visitation count} (Alg.~\ref{alg:recode}:L3-4)  as the weighted sum of all atoms close to $e$ in the memory, according to a similarity kernel:
+\begin{equation}
+    N_\mathcal{K}(M, e) = \sum\nolimits_l (1+c_l) \mathcal{K}(m_l,e;\dm). 
+\end{equation}
+In particular, we choose our kernel function as:
+\begin{equation}
+\label{eq:our-kernels}
+    \mathcal{K}(m_l, e) = \frac{1}{1 + \frac{\| e- m_l  \|_2^2}{\epsilon \dm^2}} \, \mathds{1}_{\left\{\| e- m_l  \|_2^2 < \dm^2\right\}}\, ,
+\end{equation}
+where $\epsilon\in\mathbb{R}_+$ is a fixed parameter. 
+This definition is similar to \citet{badia2020never}, but we replace their sum over $e$'s top-$k$ neighbors with a sum over all atoms within a $\dm$ distance from $e$.
+This choice prevents a counter-intuitive behaviour that can occur when using the $k$-NN approach with counts. In particular, it is desirable that the soft-visitation count of a given embedding should increase after adding it to the memory. However, adding atoms to the memory can change the $k$-NN list. If an atom displaced from this list has a large count, this might actually \emph{reduce} nearby soft-visitation count estimates instead of increasing them. 
+Conversely, our approach is not affected by this issue. 
+Finally, we return the intrinsic reward $r$ as in~\eqref{eq:reward}, but add a small constant $\irc$ to the denominator for numerical stability and normalize $r$ by a running estimate of its standard-deviation as in~\citealp{burda2019exploration}.
+\paragraph{Building the memory.}
+To construct our memory we rely on the same aggregation principle we leveraged to estimate soft-visitation counts. 
+In particular, we will draw a parallel between our atoms $m_i$ and the centroids of a clustering of observations.
+We take inspiration from classical clustering and density estimation approaches such as $k$-means or DP-means \cite{kulis2011revisiting}; and adapt them
+to deal with the challenges posed by our large scale RL setting:  memory size is limited and cannot store all past data, observations arrive sequentially, their distribution is non-stationary, and even the representation used to embed them changes over time.
+We now describe how \DETOCS tackles these problems. 
+At every step we must update the memory $M$ to reflect the impact of seeing $e$ on the soft-visitation counts, while keeping the size $|M|$ fixed. 
+Intuitively, two possible ways come to mind: either replace an existing atom with the new embedding, or update the position and count of an existing atom to be closer to $e$.
+Let $m_\star$ be the closest atom to $e$ in $M$.
+We adopt the following rules (Alg.~\ref{alg:recode}:L8-18) to integrate new embeddings into the memory, which are closely related to the DP-means clustering algorithm~\cite{kulis2011revisiting}:
+\begin{itemize}
+    \item  If $e$ satisfies $||m_\star-e||^2<
+    \kappa \dm^2$, where  $\dm$ is an adaptive threshold and $\kappa>0$ a fixed parameter, it is ``assigned'' to the cluster encoded by $m_\star$ and we update $m_\star$'s value according to the convex combination of the counts of the existing embedding and the new one:
+\begin{equation}
+    \label{eq:cluster-update}
+    m_\star \longleftarrow \frac{c_\star}{c_\star+1} m_\star + \frac{1}{c_\star+1} e
+\end{equation}
+    Its weight $c_\star$ is also incremented by $1$;
+    \item If there is no close-by atom, we randomly decide whether to create a new one by flipping a coin with probability $\eta$. 
+    If the coin-flip succeeds, we introduce the new embedding as a new atom, and we also remove an existing atom using a procedure described in the next paragraph.
+    If the coin-flip fails, we instead update $m_\star$ as in \eqref{eq:cluster-update}.
+\end{itemize}
+
+The random coin-flip is introduced to increase the stability of the clustering algorithm to noise. In particular, an embedding far away from the memory will be inserted only after it is seen on average $1/\eta$ times, making one-off outliers less of a problem.
+At the same time, once a far away embedding is observed multiple times and becomes relevant for the soft-visitation counts, there is a high chance that it will be added to improve the coverage of the memory. 
+But to keep memory size finite, an existing atom must be removed. 
+We investigate three different strategies to select an atom $m_i$ for removal based on its cluster count $c_i$: 
+(a) removing with probability $\propto \frac{1}{c_i^2}$; 
+(b) removing with probability $\propto \frac{1}{c_i}$; 
+(c) removing the atom with the smallest $c_i$.
+An ablation study over removal strategies in App.~\ref{app:non-stationary} (\cref{fig:removal_strategy,fig:removal_rule}),  empirically shows that strategy (a) works best for the settings we consider, but also that results are generally quite robust to the specific choice.
+Whenever an atom $i$ is removed, its count $c_i$ is redistributed to the count of its nearest neighbor in order to preserves the total count of the memory.
+The update rule of \DETOCS can be also interpreted from the theoretical point of view as an approximate inference scheme in a latent probabilistic clustering model. 
+We provide a more detailed connection of our update rule with the DP-means algorithm in App. 
+
+\begin{figure*}[ht]
+\centerline{
+\includegraphics[width=.65\textwidth, trim={0 1cm 0 1.5cm}, clip]{pictures/transformer.png}
+\hfill
+\includegraphics[width=.3\textwidth, trim={0 1cm 0 1.5cm}, clip]{pictures/predictor.png}
+}
+\caption{Coupled Action-State Masking (\CASM) architecture used for learning representations in partially observable environments. 
+The transformer takes masked sequences of length $k$ consisting of actions $a_i$ and embedded observations $e_i=f_\theta(o_i)$ as inputs and tries to reconstruct the missing embeddings in the output.
+The reconstructed embeddings at time $t-1$ and $t$ are then used to build a 1-step action-prediction classifier.
+The embedding function used as a representation for \DETOCS is $f_\theta$.
+Masked inputs are shaded in pink, $N=4$ masked sequences are sampled during training (indicated by the stacks of $a$, $e$ and $z$ in the diagram). }\label{fig:architecture_representation_learning}
+\end{figure*}
+
+\paragraph{Dealing with non-stationary distributions.}
+The distance scale between embedded observations can vary considerably between environments and throughout the course of training, as a result of non-stationarity in both the policy and embedding function $f_\theta$.
+To deal with this issue, we include an adaptive bandwidth mechanism as in \NGU \cite{badia2020never}.
+In particular, we update the kernel parameter $\dm^2$ whenever a new embedding $e$ is received,  based on the mean squared distance of the new embedding to the $k$-nearest existing atoms (Alg.~\ref{alg:recode}:L5-6). 
+To allow for more rapid adaptation of $\dm$, we replace the running average used in \NGU with an exponential moving average with parameter $\tau$.
+
+We note, however, that this mechanism is insufficient to cope with non-stationarity in $f_\theta$ over long timescales.
+The original \NGU memory is not strongly impacted by this issue since it is reset after every episode, leaving little time for the representation to change significantly. 
+However, in \DETOCS, these changing representations can end up corrupting the long-term memory if old clusters are not updated frequently.
+In particular, an atom might achieve a high count under a representation, but become unreachable (and thus useless) under a different representation while still being unlikely to be removed. 
+To counteract this we add a decay constant $\gamma$ which discounts the counts of all atoms in memory at each step as $c_i 
+\longleftarrow \gamma c_i$, with $\gamma<1$ (Alg.~\ref{alg:recode}:L7).
+This effectively decreases the counts of stale atoms over time and increases the likelihood of their removal during future insertions: clusters that do not get new observations `assigned' to them for a long time are eventually replaced.
+At the same time, relevant clusters are kept alive much longer than previous methods.
+Fig.~\ref{fig:pitfall_cluster_age_main} reports the histogram of cluster ages for clusters contained in the memory of an agent that has learned how to reach \textit{Pitfall!}'s end screen.
+The red line in Fig.~\ref{fig:pitfall_cluster_age_main} denotes the maximum possible number of steps in an single episode, which is enforced by \textit{Pitfall!}'s in-game death timer, and would represent the maximum memory horizon for methods that reset their memory every episode.
+As we can see, most of the clusters are much older than one episode, with earliest memories reaching back thousands of episodes.
+We consider the effect of discounting in more detail in App.~\ref{app:non-stationary} (\cref{fig:devo_density_estimation_toy,fig:devo_cluster_ages,fig:pretrained_montezuma,fig:no_discount_atari}).
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\columnwidth]{pictures/cluter_age_pitfall.png}
+    \caption{Content of an agent memory when it learns to reach \textit{Pitfall!}'s end screen.}
+    \label{fig:pitfall_cluster_age_main}
+\end{figure}
+
+Importantly, we note that unlike \NGU where each actor maintains its own copy of the memory, \DETOCS shares the memory across all actors in a distributed agent, which greatly increases the frequency of updates to each atom resulting in less representation drift between memory updates.
+
+
+ \begin{figure*}[ht]
+    \centering
+    \includegraphics[width=\textwidth]{pictures/atari_main_ablation.png}
+    \caption{
+    Comparison of \DETOCS against other exploration bonuses on Atari's hard exploration games.
+    All agents are based on \MEME and use the same representation learning mechanism (\AP).
+    Note that the high variance in \textit{Q*bert} is due to a bug in the game that, when exploited, allows to obtain significantly higher scores~\citep{chrabaszcz2018back}.}
+    \label{fig:detocs_atari}
+\end{figure*}
+
+
+\section{Representation Learning Methods}
+
+\label{subsec:representation_learning_methods}
+
+As discussed in Section \ref{sec:background}, the choice of the embedding function $f_\theta: \mathcal{O} \rightarrow \mathcal{E}$ can have a significant impact on the quality of exploration; with many different representation learning techniques being studied in this context \citep{burda2018large,guo2020bootstrap,guo2022byol,guo2021geometric,erraqabi2021exploration}.
+In the following, we focus on action prediction embeddings, introducing first the standard $1$-step prediction formulation~\citep{pathak2017curiosity,badia2020never,badia2020agent57}. 
+The embedding function $f_\theta$ is parameterized as a feed-forward neural network taking $o_t$, the observation at time $t$, as input. 
+We define a classifier $g_\phi$ that, given the embeddings of two consecutive observations $f_\theta(o_t), f_\theta(o_{t+1})$, outputs an estimate $p_{\theta, \phi}(a_t| o_t, o_{t+1}) = g_{\phi}\left( f_{\theta}(o_t), f_\theta(o_{t+1})\right)$ of the probability of taking an action given two consecutive observations $(o_t, o_{t+1})$. 
+Both $f_\theta$ and $g_\phi$ are then jointly trained by minimizing an expectation of the negative log likelihood:
+\begin{equation}
+    \min_{\theta, \phi} \mathcal{L}(\theta, \phi)(a_t)=-\ln(p_{\theta, \phi}(a_t|o_{t}, o_{t+1}))\, ,
+\end{equation}
+where $a_t$ is the true action taken between $o_t$ and $o_{t+1}$. 
+These embeddings proved to be helpful in environments with many uncontrollable features in the observation~\citep{badia2020never}, such as in Atari's \emph{Pitfall!}, where the observations contain many spurious sources of novelty even when the agent is standing still.
+
+While \DETOCS can be used with an arbitrary embedding function, e.g. one tailored for the domain of interest, the choice of a meaningful representation is also a key factor for the final performance.
+A major downside of the standard, $1$-step action-prediction method is the  simplicity of the prediction task, which can often be solved by learning highly localized and low-level features (e.g. how a single object shifts under a transition), which need not be informative of the global environment structure. In contrast, an ideal embedding should capture higher-level information about the environment, such as the agent's position or relative location of previously observed landmarks; which might not be simultaneously present in the individual observations $o_t$ and $o_{t+1}$. In order to achieve this, a wider context of time-steps may be needed.
+
+However, the prediction task would become even easier if we simply provided the full trajectory to the predictor.
+In order to address this limitation, we propose to use a \emph{stochastic} context, $h_t$, where at each timestep $k\leq t$, either $f_\theta(o_k)$ or $a_{k-1}$ is provided.\footnote{We avoid masking both $f_\theta(o_k)$ and $a_{k-1}$ simultaneously as this would increase the likelihood that the prediction task is indeterminable.}
+The main intuition being that the model can still predict $a_t$ by learning to infer the missing information from $f_\theta(o_t)$ given $(h_{t-1}, a_{t-1})$. 
+In this way, the action predictor would not solely rely on the information provided by $f_\theta(o_t)$, but it would also construct redundant representations within $h_t$.
+
+From an implementation standpoint, we first build a sequence of observation embeddings and actions, $(f_\theta(o_0), a_0, f_\theta(o_1), \dots, a_{t-1}, f_\theta(o_t))$. Then, inspired by masked language models~\citep{devlin2018bert}, at each timestep $t$, we randomly substitute either $f_\theta(o_t)$ or $a_t$ with a special token indicating missing information. 
+These masked sequences are then fed to a causally-masked transformer, whose output is then projected down to the size of the embedding ($\dim z_t = \dim f_{\theta}(o_t)$), and the difference between the two is input into a final MLP classifier $ g_{\phi}$.
+As with $1$-step action prediction, we train the representation using maximum likelihood. We refer to this approach as Coupled Action-State Masking (\CASM) in the following.
+During training, we randomly sample multiple masked sequences per trajectory ($N=4$) to help reduce gradient variance. 
+Note that the final embedding that we provide to \DETOCS is $e_t=f_{\theta}(o_t)$, i.e. the transformer \textit{inputs}, to avoid leaking information about the agent's trajectory.
+Figure~\ref{fig:architecture_representation_learning} shows a diagram of the architecture.
+ \begin{figure*}[ht]
+    \centering
+    \includegraphics[width=0.99\textwidth]{pictures/dmh8_single_task_recode_casm_mod.png}
+    \caption{
+    Performance of \DETOCS compared to \NGU and \BYOLE on the single-task version of \DMH.
+    The BYOL-Explore results correspond to the final performance reported in~\citet{guo2022byol} after \texttt{1e10} environment frames.
+    All results have been averaged over 3 seeds. \label{fig:dmh8_single_task}
+    }
+\end{figure*}
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+In this section, we experimentally validate the efficacy of our approach on two established benchmarks for exploration in 2D and 3D respectively: a subset of the Atari Learning Environment (ALE, \citealp{bellemare2013arcade}) containing eight games such as \texttt{Pitfall} and \texttt{Montezuma's Revenge} which are considered hard exploration problems~\citep{bellemare2016unifying}; and \DMH~\citep{gulcehre2019making}, a suite of partially observable 3D games.
+All games pose significant exploration challenges such as very long horizons ($\mathcal{O}$(10K) steps), the necessity to backtrack, sparse rewards, object interaction and procedural environment generation.
+Our method achieves state-of-the-art results across both benchmarks and even solves two previously unsolved games: in Atari's \textit{Pitfall!} our method is the first to reach the end screen and on \DMH's \textit{Push Block} we are the first to achieve super-human performance.
+We also perform a set of ablations to shed more light on the influence of the representation learning mechanism and the robustness w.r.t. noisy observations.
+
+All candidate architectures evaluated in the following experiments (and in App
+(1) a base agent, responsible for core RL tasks such as collecting observations and updating the policy,
+(2) an algorithm responsible for generating the exploration bonus, and
+(3) an embedding mechanism responsible for learning meaningful representations of observations.
+Our nomenclature reflects the choice of modules as \texttt{AGENT-EXPLORATION-EMBEDDING}.
+For example, the \MEME agent described in~\citet{kapturowski2022human} is denoted as \MEME-\NGU-\AP.
+We use the \MEME agent across all experiments, but vary the exploration and representation mechanisms.
+For exploration we consider \EMM (pure episodic memory), \NGU and \DETOCS whereas for representation we experiment with \AP and \CASM.
+We provide a full list of hyper-parameters for all agents and baselines in App.
+\subsection{Atari}
+\label{subsec:atari_experiments}
+
+The hard-exploration subset of Atari as identified by~\citet{bellemare2016unifying} poses a considerable challenge in terms of optimization horizon with episodes lasting up to $27,000$ steps using the standard action-repeat of four.
+Additionally, rewards vary considerably in both scale and density.
+Across all our experiments in the Atari domain, we set the memory size of our agent to $5\cdot 10^4$ atoms.
+We evaluate all agents following the regime established in prior work~\citep{mnih2015human,van2016deep} using $30$ random no-ops, no `sticky actions'~\citep{machado2018revisiting} and average performance over six seeds.
+
+We compare the game scores obtained using our exploration bonus, \DETOCS, against other methods while keeping agent architecture and representation mechanism fixed.
+The results presented in Fig.~\ref{fig:detocs_atari} show that our method achieves state-of-the-art, super-human performance across all eight
+games while using a conceptually simpler exploration bonus compared to \MEME-\NGU-\AP.
+The \MEME-\EMM-\AP and \MEME-\RND ablations in Fig.~\ref{fig:detocs_atari} reveal the respective shortcomings of short-term and long-term novelty when used in standalone fashion.
+\EMM on its own cannot solve \textit{Montezuma's Revenge} because it requires long-term memory.
+Conversely, \RND on its own cannot solve \textit{Pitfall!} because of the presence of many uncontrollable features in the observations and its inability to leverage the \AP embeddings.
+In contrast, \DETOCS is able to leverage the \AP representation for short-term and long-term novelty due to the clustering-based memory integrating over a long horizon which enables solving both games with a single intrinsic reward.
+\subsection{\DMH}
+\DMH~\citep{gulcehre2019making} consist of eight exploration tasks, designed to challenge an RL agent in procedurally-generated 3D worlds with partial observability, continuous control, sparse rewards, and highly variable initial conditions.
+Each task requires the agent to interact with specific objects in its environment in order to reach a large apple that provides reward (cf. Fig.
+The procedural generation randomizes object shapes, colors, and positions at every episode.
+Across all our experiments in the \DMH domain, we set the memory size of our agent to $2\cdot 10^5$ atoms.
+We also use the more powerful \CASM representation over \AP as the default in these experiments but present an ablation on the influence of the representation in Sec.~\ref{sec:ablations}.
+All performances reported for evaluation are averaged across three seeds.
+We compare \DETOCS with \NGU and the recently proposed \BYOLE~\citep{guo2022byol} in this domain.
+The results presented in Fig.~\ref{fig:dmh8_single_task} show that our method is able to solve six out of eight tasks with super-human performance which sets a new state-of-the-art on this benchmark and marks the first time that the human baseline has been beaten on \textit{Push Blocks}.
+To control for the contribution of the representation, we also run a version of \NGU which uses the more powerful \CASM representation instead of its default \AP one.
+Switching \AP with \CASM improves \NGU's performance significantly and stresses the importance of incorporating information over longer trajectories in the representation mechanism for this domain to combat the challenge of partial observability.
+However, only \DETOCS is able to take full advantage of the representational power afforded by \CASM as it is able to leverage it for both short-term and long-term novelty bonuses.
+
+
+
+\subsection{Ablations}
+\label{sec:ablations}
+Concluding our experiments, we perform two ablation studies to gauge the sensitivity of our approach to the presence of noisy observations and the choice of the underlying representation mechanism.
+
+\begin{figure}[t!]
+\centering
+\begin{subfigure}{.5\textwidth}
+    \centering
+    \includegraphics[width=0.75\textwidth]{pictures/noisy_montezuma_performance.png}
+\end{subfigure}  
+\begin{subfigure}{.2\textwidth}
+    \centering
+    \includegraphics[width=0.9\textwidth]{pictures/MTZ_image.png}
+\end{subfigure}
+\begin{subfigure}{.2\textwidth}
+    \centering
+    \includegraphics[width=0.9\textwidth]{pictures/MTZ_noise.png}
+\end{subfigure}  
+\caption{Robustness to observation noise.
+Top: Performance of \DETOCS compared to \NGU on Noisy Montezuma.
+Bottom: A frame of Noisy Montezuma where the noise is concatenated to the original frame.
+\label{fig:detocs_noisy_montezuma_performance}}
+\end{figure}
+
+\paragraph{Robustness to observation noise.}
+Noise in the observation space is one of the most significant adversarial conditions exploration methods must to overcome to deliver utility for any practical scenario which always features imperfect sensors.
+The `noisy TV problem'~\citep{schmidhuber2010formal,pathak2017curiosity} is a common metaphor which describes a failure mode of exploration methods getting stuck on the prediction of noise as a meaningless signal of novelty.
+In order to assess our method's robustness w.r.t. observation noise, we construct a noisy version of \textit{Montezuma's Revenge} by concatenating a frame containing white noise in the range $[0, 255]$ to the game's original $210\times 160$ greyscale observations along the image height dimension.
+We compare \DETOCS to \NGU in this setting using the same \AP backbone to suppress uncontrollable noise on the representation level and assess the sensitivity of the exploration bonus to it.
+The results of this experiment are presented in Fig.~\ref{fig:detocs_noisy_montezuma_performance}.
+We find that the performance of \MEME-\NGU-\AP deteriorates significantly in the presence of noise.
+This can be attributed to the fact that \NGU relies on \RND to compute the long-term exploration bonus, which degenerates to random exploration in the presence of uncontrollable noise~\citep{kapturowski2018recurrent}.
+This effectively restricts the baseline to short-term exploration within one episode.
+In contrast, \DETOCS's mean performance is not degraded significantly and achieves a similar score as in Fig.~\ref{fig:detocs_atari}, albeit with a higher variance.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.42\textwidth]{pictures/dmh8_representation_ablation.png}
+    \caption{
+    Comparing \DETOCS and \NGU leveraging \AP and \CASM representations across all \DMH tasks using capped human-normalized scores. 
+    \label{fig:dmh8_representation_ablation}
+    }
+\end{figure}
+
+\paragraph{Leveraging different representation mechanisms.}
+The experiments on \DMH demonstrate the importance of employing more powerful representation learning techniques in more complex, partially observable environments.
+However, while a richer representation often provides a flat boost to downstream task learning, it cannot solve the exploration problem in itself.
+In Fig.~\ref{fig:dmh8_representation_ablation}, we compare the contribution of \AP and \CASM to the aggregated performance of \NGU and \DETOCS on \DMH.
+The results consistently demonstrate that \CASM is a superior representation to \AP in this domain, leading to significant performance gains with both exploration methods.
+However, \DETOCS outperforms \NGU for both representations, indicating that leveraging the representational power for both short-term and long-term novelty signals is a key benefit of our proposed method.
+
+
+\section{Conclusion}
+
+In this paper, we introduce Robust Exploration via Clustering-based Online Density Estimation (\DETOCS), a principled yet conceptually simple exploration bonus for deep RL agents that allows to perform robust exploration by estimating visitation counts from a slot-based memory.
+\DETOCS improves over prior non-parametric exploration methods by increasing the effective memory span by several orders of magnitude using an online clustering mechanism.
+Our method sets a new state-of-the-art in task performance on two established exploration benchmarks, Atari's hard exploration subset and \DMH.
+It is also the first agent to reach the end screen in \textit{Pitfall!} within the time limit which exemplifies \DETOCS's efficiency of leveraging both long-term (i.e. previous experience) and short-term (i.e. within an episode) novelty signals.
+Beyond the benchmarks, \DETOCS's performance also remains unaffected by noisy observations -- an adversarial condition which significantly degrades prior approaches such as \RND and \NGU.
+Additionally, we show that our method is agnostic to the concrete representation technique chosen for embedding the observations and scales well with increasingly powerful representations, e.g. using multi-step sequence prediction transformers like our proposed \CASM architecture.
+We conclude that \DETOCS can serve as a simple yet robust drop-in exploration method compatible with any RL agent and representation learning method which directly translates improvements in representation learning to improvements in exploration performance.
+
+
+
+
+
+ 
+\begin{thebibliography}{61}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Agrawal \& Goyal(2012)Agrawal and Goyal]{agrawal2012analysis}
+Agrawal, S. and Goyal, N.
+\newblock Analysis of thompson sampling for the multi-armed bandit problem.
+\newblock In \emph{Conference on learning theory}, pp.\  39--1. JMLR Workshop
+  and Conference Proceedings, 2012.
+
+\bibitem[Audibert et~al.(2010)Audibert, Bubeck, and Munos]{audibert2010best}
+Audibert, J.-Y., Bubeck, S., and Munos, R.
+\newblock Best arm identification in multi-armed bandits.
+\newblock In \emph{COLT}, pp.\  41--53. Citeseer, 2010.
+
+\bibitem[Auer et~al.(2002)Auer, Cesa-Bianchi, and Fischer]{auer2002finite}
+Auer, P., Cesa-Bianchi, N., and Fischer, P.
+\newblock Finite-time analysis of the multiarmed bandit problem.
+\newblock \emph{Machine learning}, 47\penalty0 (2):\penalty0 235--256, 2002.
+
+\bibitem[Azar et~al.(2017)Azar, Osband, and Munos]{azar2017minimax}
+Azar, M.~G., Osband, I., and Munos, R.
+\newblock Minimax regret bounds for reinforcement learning.
+\newblock In \emph{Proceedings of the 34th International Conference on Machine
+  Learning-Volume 70}, pp.\  263--272. JMLR. org, 2017.
+
+\bibitem[Badia et~al.(2020{\natexlab{a}})Badia, Piot, Kapturowski, Sprechmann,
+  Vitvitskyi, Guo, and Blundell]{badia2020agent57}
+Badia, A.~P., Piot, B., Kapturowski, S., Sprechmann, P., Vitvitskyi, A., Guo,
+  Z.~D., and Blundell, C.
+\newblock Agent57: Outperforming the atari human benchmark.
+\newblock In \emph{International Conference on Machine Learning}, pp.\
+  507--517. PMLR, 2020{\natexlab{a}}.
+
+\bibitem[Badia et~al.(2020{\natexlab{b}})Badia, Sprechmann, Vitvitskyi, Guo,
+  Piot, Kapturowski, Tieleman, Arjovsky, Pritzel, Bolt, and
+  Blundell]{badia2020never}
+Badia, A.~P., Sprechmann, P., Vitvitskyi, A., Guo, D., Piot, B., Kapturowski,
+  S., Tieleman, O., Arjovsky, M., Pritzel, A., Bolt, A., and Blundell, C.
+\newblock Never give up: Learning directed exploration strategies.
+\newblock In \emph{International Conference on Learning Representations},
+  2020{\natexlab{b}}.
+
+\bibitem[Barreto et~al.(2016)Barreto, Precup, and Pineau]{barreto2016practical}
+Barreto, A.~M., Precup, D., and Pineau, J.
+\newblock Practical kernel-based reinforcement learning.
+\newblock \emph{The Journal of Machine Learning Research}, 17\penalty0
+  (1):\penalty0 2372--2441, 2016.
+
+\bibitem[Bellemare et~al.(2014)Bellemare, Veness, and
+  Talvitie]{bellemare2014skip}
+Bellemare, M., Veness, J., and Talvitie, E.
+\newblock Skip context tree switching.
+\newblock In \emph{International conference on machine learning}, pp.\
+  1458--1466. PMLR, 2014.
+
+\bibitem[Bellemare et~al.(2016)Bellemare, Srinivasan, Ostrovski, Schaul,
+  Saxton, and Munos]{bellemare2016unifying}
+Bellemare, M., Srinivasan, S., Ostrovski, G., Schaul, T., Saxton, D., and
+  Munos, R.
+\newblock Unifying count-based exploration and intrinsic motivation.
+\newblock In \emph{Advances in neural information processing systems}, pp.\
+  1471--1479, 2016.
+
+\bibitem[Bellemare et~al.(2013)Bellemare, Naddaf, Veness, and
+  Bowling]{bellemare2013arcade}
+Bellemare, M.~G., Naddaf, Y., Veness, J., and Bowling, M.
+\newblock The arcade learning environment: An evaluation platform for general
+  agents.
+\newblock \emph{Journal of Artificial Intelligence Research}, 47:\penalty0
+  253--279, 2013.
+
+\bibitem[Brafman \& Tennenholtz(2003)Brafman and Tennenholtz]{brafman2003r-max}
+Brafman, R. and Tennenholtz, M.
+\newblock R-max -- a general polynomial time algorithm for near-optimal
+  reinforcement learning.
+\newblock \emph{Journal of Machine Learning Research}, 3:\penalty0 213--231,
+  2003.
+
+\bibitem[Burda et~al.(2018)Burda, Edwards, Pathak, Storkey, Darrell, and
+  Efros]{burda2018large}
+Burda, Y., Edwards, H., Pathak, D., Storkey, A., Darrell, T., and Efros, A.~A.
+\newblock Large-scale study of curiosity-driven learning.
+\newblock \emph{arXiv preprint arXiv:1808.04355}, 2018.
+
+\bibitem[Burda et~al.(2019)Burda, Edwards, Storkey, and
+  Klimov]{burda2019exploration}
+Burda, Y., Edwards, H., Storkey, A., and Klimov, O.
+\newblock Exploration by random network distillation.
+\newblock In \emph{Seventh International Conference on Learning
+  Representations}, pp.\  1--17, 2019.
+
+\bibitem[Chrabaszcz et~al.(2018)Chrabaszcz, Loshchilov, and
+  Hutter]{chrabaszcz2018back}
+Chrabaszcz, P., Loshchilov, I., and Hutter, F.
+\newblock Back to basics: Benchmarking canonical evolution strategies for
+  playing atari.
+\newblock \emph{arXiv preprint arXiv:1802.08842}, 2018.
+
+\bibitem[Daswani et~al.(2013)Daswani, Sunehag, and Hutter]{daswani2013q}
+Daswani, M., Sunehag, P., and Hutter, M.
+\newblock Q-learning for history-based reinforcement learning.
+\newblock In \emph{Asian Conference on Machine Learning}, pp.\  213--228. PMLR,
+  2013.
+
+\bibitem[Devlin et~al.(2018)Devlin, Chang, Lee, and Toutanova]{devlin2018bert}
+Devlin, J., Chang, M.-W., Lee, K., and Toutanova, K.
+\newblock Bert: Pre-training of deep bidirectional transformers for language
+  understanding.
+\newblock \emph{arXiv preprint arXiv:1810.04805}, 2018.
+
+\bibitem[Domingues et~al.(2021{\natexlab{a}})Domingues, Menard, Pirotta,
+  Kaufmann, and Valko]{domingues2020regret}
+Domingues, O.~D., Menard, P., Pirotta, M., Kaufmann, E., and Valko, M.
+\newblock Kernel-based reinforcement learning: A finite-time analysis.
+\newblock In \emph{Proceedings of the 38th International Conference on Machine
+  Learning}, volume 139 of \emph{Proceedings of Machine Learning Research},
+  pp.\  2783--2792. PMLR, 2021{\natexlab{a}}.
+
+\bibitem[Domingues et~al.(2021{\natexlab{b}})Domingues, Tallec, Munos, and
+  Valko]{domingues2021density-based}
+Domingues, O.~D., Tallec, C., Munos, R., and Valko, M.
+\newblock Density-based bonuses on learned representations for reward-free
+  exploration in deep reinforcement learning.
+\newblock In \emph{ICML 2021 Workshop}, 2021{\natexlab{b}}.
+
+\bibitem[Erraqabi et~al.(2021)Erraqabi, Zhao, Machado, Bengio, Sukhbaatar,
+  Denoyer, and Lazaric]{erraqabi2021exploration}
+Erraqabi, A., Zhao, M., Machado, M.~C., Bengio, Y., Sukhbaatar, S., Denoyer,
+  L., and Lazaric, A.
+\newblock Exploration-driven representation learning in reinforcement learning.
+\newblock In \emph{ICML 2021 Workshop on Unsupervised Reinforcement Learning},
+  2021.
+
+\bibitem[Espeholt et~al.(2018)Espeholt, Soyer, Munos, Simonyan, Mnih, Ward,
+  Doron, Firoiu, Harley, Dunning, et~al.]{espeholt2018impala}
+Espeholt, L., Soyer, H., Munos, R., Simonyan, K., Mnih, V., Ward, T., Doron,
+  Y., Firoiu, V., Harley, T., Dunning, I., et~al.
+\newblock Impala: Scalable distributed deep-rl with importance weighted
+  actor-learner architectures.
+\newblock In \emph{International conference on machine learning}, pp.\
+  1407--1416. PMLR, 2018.
+
+\bibitem[Gulcehre et~al.(2019)Gulcehre, Le~Paine, Shahriari, Denil, Hoffman,
+  Soyer, Tanburn, Kapturowski, Rabinowitz, Williams,
+  et~al.]{gulcehre2019making}
+Gulcehre, C., Le~Paine, T., Shahriari, B., Denil, M., Hoffman, M., Soyer, H.,
+  Tanburn, R., Kapturowski, S., Rabinowitz, N., Williams, D., et~al.
+\newblock Making efficient use of demonstrations to solve hard exploration
+  problems.
+\newblock In \emph{International conference on learning representations}, 2019.
+
+\bibitem[Guo et~al.(2020)Guo, Pires, Piot, Grill, Altch{\'e}, Munos, and
+  Azar]{guo2020bootstrap}
+Guo, Z.~D., Pires, B.~A., Piot, B., Grill, J.-B., Altch{\'e}, F., Munos, R.,
+  and Azar, M.~G.
+\newblock Bootstrap latent-predictive representations for multitask
+  reinforcement learning.
+\newblock In \emph{International Conference on Machine Learning}, pp.\
+  3875--3886. PMLR, 2020.
+
+\bibitem[Guo et~al.(2021)Guo, Azar, Saade, Thakoor, Piot, Pires, Valko,
+  Mesnard, Lattimore, and Munos]{guo2021geometric}
+Guo, Z.~D., Azar, M.~G., Saade, A., Thakoor, S., Piot, B., Pires, B.~A., Valko,
+  M., Mesnard, T., Lattimore, T., and Munos, R.
+\newblock Geometric entropic exploration.
+\newblock \emph{arXiv preprint arXiv:2101.02055}, 2021.
+
+\bibitem[Guo et~al.(2022)Guo, Thakoor, P{\^\i}slar, Pires, Altch{\'e}, Tallec,
+  Saade, Calandriello, Grill, Tang, et~al.]{guo2022byol}
+Guo, Z.~D., Thakoor, S., P{\^\i}slar, M., Pires, B.~A., Altch{\'e}, F., Tallec,
+  C., Saade, A., Calandriello, D., Grill, J.-B., Tang, Y., et~al.
+\newblock Byol-explore: Exploration by bootstrapped prediction.
+\newblock \emph{arXiv preprint arXiv:2206.08332}, 2022.
+
+\bibitem[Hazan et~al.(2019)Hazan, Kakade, Singh, and
+  Van~Soest]{hazan2019provably}
+Hazan, E., Kakade, S., Singh, K., and Van~Soest, A.
+\newblock Provably efficient maximum entropy exploration.
+\newblock In \emph{International Conference on Machine Learning}, pp.\
+  2681--2691, 2019.
+
+\bibitem[Hutter(2004)]{hutter2004universal}
+Hutter, M.
+\newblock \emph{Universal artificial intelligence: Sequential decisions based
+  on algorithmic probability}.
+\newblock Springer Science \& Business Media, 2004.
+
+\bibitem[Hutter et~al.(2009)]{hutter2009feature}
+Hutter, M. et~al.
+\newblock \emph{Feature reinforcement learning: Part I. unstructured MDPs}.
+\newblock De Gruyter Open, 2009.
+
+\bibitem[Jaksch et~al.(2010)Jaksch, Ortner, and Auer]{jaksch2010near}
+Jaksch, T., Ortner, R., and Auer, P.
+\newblock Near-optimal regret bounds for reinforcement learning.
+\newblock \emph{Journal of Machine Learning Research}, 11\penalty0
+  (Apr):\penalty0 1563--1600, 2010.
+
+\bibitem[Jin et~al.(2020)Jin, Krishnamurthy, Simchowitz, and Yu]{jin2020reward}
+Jin, C., Krishnamurthy, A., Simchowitz, M., and Yu, T.
+\newblock Reward-free exploration for reinforcement learning.
+\newblock In \emph{International Conference on Machine Learning}, pp.\
+  4870--4879. PMLR, 2020.
+
+\bibitem[Kaelbling et~al.(1998)Kaelbling, Littman, and
+  Cassandra]{kaelbling1998planning}
+Kaelbling, L.~P., Littman, M.~L., and Cassandra, A.~R.
+\newblock Planning and acting in partially observable stochastic domains.
+\newblock \emph{Artificial Intelligence}, 101:\penalty0 99--134, 5 1998.
+\newblock ISSN 00043702.
+\newblock \doi{10.1016/s0004-3702(98)00023-x}.
+
+\bibitem[Kapturowski et~al.(2018)Kapturowski, Ostrovski, Quan, Munos, and
+  Dabney]{kapturowski2018recurrent}
+Kapturowski, S., Ostrovski, G., Quan, J., Munos, R., and Dabney, W.
+\newblock Recurrent experience replay in distributed reinforcement learning.
+\newblock In \emph{International conference on learning representations}, 2018.
+
+\bibitem[Kapturowski et~al.(2022)Kapturowski, Campos, Jiang, Raki{\'c}evi{\'c},
+  van Hasselt, Blundell, and Badia]{kapturowski2022human}
+Kapturowski, S., Campos, V., Jiang, R., Raki{\'c}evi{\'c}, N., van Hasselt, H.,
+  Blundell, C., and Badia, A.~P.
+\newblock Human-level atari 200x faster.
+\newblock \emph{arXiv preprint arXiv:2209.07550}, 2022.
+
+\bibitem[Kearns \& Singh(2002)Kearns and Singh]{kearns2002near}
+Kearns, M. and Singh, S.
+\newblock Near-optimal reinforcement learning in polynomial time.
+\newblock \emph{Machine learning}, 49\penalty0 (2-3):\penalty0 209--232, 2002.
+
+\bibitem[Kulis \& Jordan(2011)Kulis and Jordan]{kulis2011revisiting}
+Kulis, B. and Jordan, M.~I.
+\newblock Revisiting k-means: New algorithms via bayesian nonparametrics.
+\newblock \emph{arXiv preprint arXiv:1111.0352}, 2011.
+
+\bibitem[Kveton \& Theocharous(2012)Kveton and Theocharous]{kveton2012kernel}
+Kveton, B. and Theocharous, G.
+\newblock Kernel-based reinforcement learning on representative states.
+\newblock In \emph{Twenty-Sixth AAAI Conference on Artificial Intelligence},
+  2012.
+
+\bibitem[Lattimore \& Szepesv{\'a}ri(2020)Lattimore and
+  Szepesv{\'a}ri]{lattimore2020bandit}
+Lattimore, T. and Szepesv{\'a}ri, C.
+\newblock \emph{Bandit algorithms}.
+\newblock Cambridge University Press, 2020.
+
+\bibitem[Lee et~al.(2019)Lee, Eysenbach, Parisotto, Xing, Levine, and
+  Salakhutdinov]{lee2019efficient}
+Lee, L., Eysenbach, B., Parisotto, E., Xing, E., Levine, S., and Salakhutdinov,
+  R.
+\newblock Efficient exploration via state marginal matching.
+\newblock \emph{arXiv preprint arXiv:1906.05274}, 2019.
+
+\bibitem[Liu \& Abbeel(2021)Liu and Abbeel]{liu2021behavior}
+Liu, H. and Abbeel, P.
+\newblock Behavior from the void: Unsupervised active pre-training.
+\newblock \emph{Advances in Neural Information Processing Systems},
+  34:\penalty0 18459--18473, 2021.
+
+\bibitem[Machado et~al.(2018)Machado, Bellemare, Talvitie, Veness, Hausknecht,
+  and Bowling]{machado2018revisiting}
+Machado, M.~C., Bellemare, M.~G., Talvitie, E., Veness, J., Hausknecht, M., and
+  Bowling, M.
+\newblock Revisiting the arcade learning environment: Evaluation protocols and
+  open problems for general agents.
+\newblock \emph{Journal of Artificial Intelligence Research}, 61:\penalty0
+  523--562, 2018.
+
+\bibitem[McCallum(1995)]{mccallum1995instance}
+McCallum, R.~A.
+\newblock Instance-based utile distinctions for reinforcement learning with
+  hidden state.
+\newblock In \emph{Machine Learning Proceedings 1995}, pp.\  387--395.
+  Elsevier, 1995.
+
+\bibitem[Mnih et~al.(2015)Mnih, Kavukcuoglu, Silver, Rusu, Veness, Bellemare,
+  Graves, Riedmiller, Fidjeland, Ostrovski, et~al.]{mnih2015human}
+Mnih, V., Kavukcuoglu, K., Silver, D., Rusu, A.~A., Veness, J., Bellemare,
+  M.~G., Graves, A., Riedmiller, M., Fidjeland, A.~K., Ostrovski, G., et~al.
+\newblock Human-level control through deep reinforcement learning.
+\newblock \emph{Nature}, 2015.
+
+\bibitem[Ormoneit \& Sen(2002)Ormoneit and Sen]{ormoneit2002kernel}
+Ormoneit, D. and Sen, {\'{S}}.
+\newblock Kernel-based reinforcement learning.
+\newblock \emph{Machine Learning}, 2002.
+
+\bibitem[Ostrovski et~al.(2017)Ostrovski, Bellemare, van~den Oord, and
+  Munos]{ostrovski2017count}
+Ostrovski, G., Bellemare, M.~G., van~den Oord, A., and Munos, R.
+\newblock Count-based exploration with neural density models.
+\newblock In \emph{Proceedings of the 34th International Conference on Machine
+  Learning-Volume 70}, pp.\  2721--2730. JMLR. org, 2017.
+
+\bibitem[Parzen(1962)]{Parzen1962}
+Parzen, E.
+\newblock On estimation of a probability density function and mode.
+\newblock \emph{The Annals of Mathematical Statistics}, 33, 1962.
+\newblock ISSN 0003-4851.
+\newblock \doi{10.1214/aoms/1177704472}.
+
+\bibitem[Pathak et~al.(2017)Pathak, Agrawal, Efros, and
+  Darrell]{pathak2017curiosity}
+Pathak, D., Agrawal, P., Efros, A.~A., and Darrell, T.
+\newblock Curiosity-driven exploration by self-supervised prediction.
+\newblock In \emph{Proceedings of the IEEE Conference on Computer Vision and
+  Pattern Recognition Workshops}, pp.\  16--17, 2017.
+
+\bibitem[Pazis \& Parr(2013)Pazis and Parr]{pazis2013pac}
+Pazis, J. and Parr, R.
+\newblock Pac optimal exploration in continuous space markov decision
+  processes.
+\newblock In \emph{Twenty-Seventh AAAI Conference on Artificial Intelligence},
+  2013.
+
+\bibitem[Pong et~al.(2019)Pong, Dalal, Lin, Nair, Bahl, and
+  Levine]{pong2019skew}
+Pong, V.~H., Dalal, M., Lin, S., Nair, A., Bahl, S., and Levine, S.
+\newblock Skew-fit: State-covering self-supervised reinforcement learning.
+\newblock \emph{arXiv preprint arXiv:1903.03698}, 2019.
+
+\bibitem[Pritzel et~al.(2017)Pritzel, Uria, Srinivasan, Puigdom{\`e}nech,
+  Vinyals, Hassabis, Wierstra, and Blundell]{pritzel2017neural}
+Pritzel, A., Uria, B., Srinivasan, S., Puigdom{\`e}nech, A., Vinyals, O.,
+  Hassabis, D., Wierstra, D., and Blundell, C.
+\newblock Neural episodic control.
+\newblock \emph{ICML}, 2017.
+
+\bibitem[Puterman(1990)]{puterman1990markov}
+Puterman, M.~L.
+\newblock Markov decision processes.
+\newblock \emph{Handbooks in operations research and management science},
+  2:\penalty0 331--434, 1990.
+
+\bibitem[Rosenblatt(1956)]{Rosenblatt1956}
+Rosenblatt, M.
+\newblock Remarks on some nonparametric estimates of a density function.
+\newblock \emph{The Annals of Mathematical Statistics}, 27, 1956.
+\newblock ISSN 0003-4851.
+\newblock \doi{10.1214/aoms/1177728190}.
+
+\bibitem[Savinov et~al.(2018)Savinov, Raichuk, Vincent, Marinier, Pollefeys,
+  Lillicrap, and Gelly]{savinov2018episodic}
+Savinov, N., Raichuk, A., Vincent, D., Marinier, R., Pollefeys, M., Lillicrap,
+  T., and Gelly, S.
+\newblock Episodic curiosity through reachability.
+\newblock In \emph{International Conference on Learning Representations}, 2018.
+
+\bibitem[Schaul et~al.(2015)Schaul, Quan, Antonoglou, and
+  Silver]{PrioritizedReplay}
+Schaul, T., Quan, J., Antonoglou, I., and Silver, D.
+\newblock Prioritized experience replay.
+\newblock \emph{CoRR}, abs/1511.05952, 2015.
+
+\bibitem[Schmidhuber(2010)]{schmidhuber2010formal}
+Schmidhuber, J.
+\newblock Formal theory of creativity, fun, and intrinsic motivation
+  (1990--2010).
+\newblock \emph{IEEE Transactions on Autonomous Mental Development}, 2\penalty0
+  (3):\penalty0 230--247, 2010.
+
+\bibitem[Seo et~al.(2021)Seo, Chen, Shin, Lee, Abbeel, and Lee]{seo2021state}
+Seo, Y., Chen, L., Shin, J., Lee, H., Abbeel, P., and Lee, K.
+\newblock State entropy maximization with random encoders for efficient
+  exploration.
+\newblock In \emph{International Conference on Machine Learning}, pp.\
+  9443--9454. PMLR, 2021.
+
+\bibitem[Strehl \& Littman(2008)Strehl and Littman]{strehl2008analysis}
+Strehl, A.~L. and Littman, M.~L.
+\newblock An analysis of model-based interval estimation for markov decision
+  processes.
+\newblock \emph{Journal of Computer and System Sciences}, 74\penalty0
+  (8):\penalty0 1309--1331, 2008.
+
+\bibitem[Sutton(1988)]{sutton1988}
+Sutton, R.~S.
+\newblock Learning to predict by the methods of temporal differences.
+\newblock \emph{Machine learning}, 3\penalty0 (1):\penalty0 9--44, 1988.
+
+\bibitem[Sutton \& Barto(2018)Sutton and Barto]{sutton2018reinforcement}
+Sutton, R.~S. and Barto, A.~G.
+\newblock \emph{Reinforcement learning: An introduction}.
+\newblock MIT press, 2018.
+
+\bibitem[Tang et~al.(2017)Tang, Houthooft, Foote, Stooke, Xi~Chen, Duan,
+  Schulman, DeTurck, and Abbeel]{tang2017count}
+Tang, H., Houthooft, R., Foote, D., Stooke, A., Xi~Chen, O., Duan, Y.,
+  Schulman, J., DeTurck, F., and Abbeel, P.
+\newblock \#{E}xploration: A study of count-based exploration for deep
+  reinforcement learning.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2017.
+\newblock URL
+  \url{https://proceedings.neurips.cc/paper/2017/file/3a20f62a0af1aa152670bab3c602feed-Paper.pdf}.
+
+\bibitem[Tao et~al.(2020)Tao, Fran{\c{c}}ois-Lavet, and Pineau]{tao2020novelty}
+Tao, R.~Y., Fran{\c{c}}ois-Lavet, V., and Pineau, J.
+\newblock Novelty search in representational space for sample efficient
+  exploration.
+\newblock \emph{Advances in Neural Information Processing Systems},
+  33:\penalty0 8114--8126, 2020.
+
+\bibitem[Van~den Oord et~al.(2016)Van~den Oord, Kalchbrenner, Espeholt,
+  Vinyals, Graves, et~al.]{van2016conditional}
+Van~den Oord, A., Kalchbrenner, N., Espeholt, L., Vinyals, O., Graves, A.,
+  et~al.
+\newblock Conditional image generation with pixelcnn decoders.
+\newblock \emph{Advances in neural information processing systems}, 29, 2016.
+
+\bibitem[Van~Hasselt et~al.(2016)Van~Hasselt, Guez, and Silver]{van2016deep}
+Van~Hasselt, H., Guez, A., and Silver, D.
+\newblock Deep reinforcement learning with double q-learning.
+\newblock In \emph{Proceedings of the AAAI conference on artificial
+  intelligence}, volume~30, 2016.
+
+\end{thebibliography}
+ 
+
+
+
+

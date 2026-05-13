@@ -1,0 +1,487 @@
+\title{Pretrained Hybrids with MAD Skills}
+
+\begin{abstract}
+  While Transformers underpin modern large language models (LMs), there is a growing list of alternative architectures with new capabilities, promises, and tradeoffs.
+  This makes choosing the right LM architecture challenging. 
+  Recently-proposed  \emph{hybrid architectures} seek a best-of-all-worlds approach that reaps the benefits of all  architectures. 
+  Hybrid design is difficult for two reasons: it requires manual expert-driven search, and new hybrids must be trained from scratch. 
+  We propose \textbf{Manticore},\footnote{The Manticore is a fearsome human/lion/scorpion hybrid from Persian mythology.} 
+  a framework that addresses these challenges. 
+  Manticore \textit{automates the design of hybrid architectures} while reusing pretrained models to create \textit{pretrained} hybrids. 
+  Our approach augments ideas from differentiable Neural Architecture Search (NAS) by incorporating simple projectors that translate features between pretrained blocks from different architectures. 
+  We then fine-tune hybrids that combine pretrained models from different architecture families---such as the GPT series and Mamba---end-to-end. 
+  With Manticore, we enable LM selection without training multiple models, the construction of pretrained hybrids from existing pretrained models, and the ability to \emph{program} pretrained hybrids to have certain capabilities. 
+  Manticore hybrids outperform existing manually-designed hybrids, achieve strong performance on Long Range Arena (LRA) tasks, and can improve on pretrained transformers and state space models. 
+
+  
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Transformers are the workhorse architecture for large language models and beyond, powering a vast collection of foundation models.  
+While for years it appeared that the Transformers family would remain the undisputed standard, a recent \emph{Cambrian explosion} of proposed architectures has taken place.
+Many of the new architectures achieve subquadratic complexity---in contrast to the quadratic complexity of self-attention in Transformers---by using local or linear attention \cite{de2024griffin, botev2024recurrentgemma, arora2024simple, zhang2024hedgehog}, or resurrecting and scaling recurrent networks \cite{botev2024recurrentgemma, de2024griffin, peng-etal-2023-rwkv}, or by building on state-space modeling principles \cite{mamba, stripedhyena, hyena, fu2023hungry, gu2022efficiently}. 
+These approaches potentially promise to overturn the dominance of Transformers through more efficient training and inference.
+
+However, no single new model is a clear overall winner when varying data modalities, tasks, and model sizes. 
+Comparing architectures on a fixed task is fraught with difficulties \cite{amos2024never}.
+Even if these issues are overcome, practitioners would have to experiment with and evaluate every architecture for each new task---an expensive proposition.
+Instead, seeking a best-of-all-worlds approach, researchers have proposed the use of \emph{hybrid models} that mix multiple architectures.
+These hybrids, such as the MambaFormer \cite{park2024mamba}---a mix of the popular Mamba with a Transformer---have shown potential in maintaining the desirable properties of multiple model classes. 
+
+While promising, hybrids suffer from two main obstacles that stymie their adoption:
+\begin{itemize}%[topsep=0pt]
+\item {\bf Manual Design.} Hybrid architectures are hand-crafted, either by manually exploring the large search space of hybrids or by relying on often unreliable intuition and heuristics. 
+\item {\bf Failure to Use Pretrained Models.} It is unclear how to integrate \emph{pretrained} model components from models with different architectures. Pretrained models are a key advantage of foundation models. However, due to compatibility issues, hybrids are often trained from scratch, leading practitioners to resort to small hybrids in limited settings or incur high costs.
+\end{itemize}
+A potential solution to the latter challenge is the use of \emph{model merging} techniques \cite{yadav2023tiesmerging, LMs_are_supermario, Wortsman2022ModelSA, ilharco2023editing, Davari2023ModelBS, Jang2024ModelSA}, some of which can operate cross-architecture \cite{akiba2024evolutionary, goddard2024arcees}. 
+Unfortunately, such tools are embryonic--they are expensive and it is unclear how well they work with the diverse types of architectures a user may seek to build a hybrid from.
+
+We propose a framework for \textbf{\emph{automatically designing hybrid architectures}} that overcomes these obstacles.
+Our approach is inspired by principles from neural architecture search (NAS), but applies these at the level of \emph{LM blocks} rather than convolutional cells \cite{liu2019darts, li2021geometryaware} or operations \cite{shen2022efficient, roberts2021rethinking}.
+The resulting framework is simple and tractable.
+It sidesteps merging different architectures by using simple linear projectors to translate between the ``languages'' spoken by various architectures.
+This enables us to include blocks from many different architectures with little to no changes required. 
+In addition, inspired by the mechanistic architecture design (MAD)  framework \cite{poli2024mechanistic}, we show how our framework can learn hybrid architectures via MAD that transfer to new tasks. 
+
+Concretely, our proposed system, Manticore:
+\begin{enumerate}%[topsep=0pt]
+    \itemsep0em
+    \item \textbf{Automatically selects} language models, without training several models from scratch, 
+    \item \textbf{Automatically constructs} pretrained hybrids without evaluating the entire search space, 
+    \item Provides a technique for \textbf{programming hybrids} to have certain skills without full training.  
+\end{enumerate}
+Experimentally, our automatically designed hybrids compete with existing hybrids and models on the MAD tasks \cite{poli2024mechanistic} and Long Range Arena (LRA) \cite{tay2021long}, 
+we produce pretrained hybrids that can improve downstream fine-tuning performance, 
+and we can program hybrids using the MAD tasks. 
+
+
+
+
+\section{Related work}
+
+
+\textbf{Language Model Architectures: Transfomers and Beyond.} Transformers are currently the dominant LM architecture. The success of the ``vanilla'' architecture introduced by Vaswani et. al. \cite{vaswani2017attention} has led to many proposed variations. 
+The quadratic complexity of the base self-attention operation has inspired the search for alternative architectures that offer comparable performance with subquadratic complexity. 
+One line of work builds off \emph{state-space models}, with variations made to enable language modeling \cite{hyena, stripedhyena, mamba, arora2024simple}. 
+Another line of work involves linear attention by formulating transformers as RNNs and expressing self-attention as a kernel dot-product \cite{katharopoulos2020transformers}. 
+Other new approaches increase the expressivity of this formulation with data-dependent gating \cite{yang2024gated}.
+
+Our work does not propose a new architecture. Instead, we focus on the idea \emph{that practitioners should be able to take advantage of new architectures in a transparent way}.
+
+\textbf{Neural Architecture Search \& Mechanistic Search.}
+Neural architecture search (NAS) techniques are used to automatically search for optimal architectures.
+These techniques have produced state-of-the-art models in several domains.
+Much of the challenge in NAS is the complexity of search; in the most standard form, NAS involves a difficult bilevel optimization over a large search space.
+Much effort has been aimed at reducing costs, often via continuous relaxations of search spaces, with techniques like DARTS \cite{liu2019darts} and DASH \cite{shen2022efficient}. 
+
+Using NAS to discover architectures for language modeling---and especially those that may rival Transformers---has thus far been hard.
+A promising approach is the MAD framework \cite{poli2024mechanistic}
+, which uses 
+``\emph{mechanistic} tasks'' 
+(synthetic tasks organized around simple principles)
+ to search for high-quality architectures.
+While we do not seek to discover \textit{new} architectures, we are inspired by this approach in our effort to search for \textit{hybrid} architectures. 
+
+\textbf{Hybrid Architectures.}
+Perhaps unsurprisingly, there is no single dominant architecture among either standards, like Transformers, or emerging subquadratic architectures.
+While there are some insights that can be converted into heuristics for model selection, generally, to take advantage of new models, practitioners must exhaustively evaluate all of them on each of their tasks.
+The cost of doing so has inspired the idea of crafting hybrid architectures that mix components from different approaches, with the goal being to obtain best-of-all-worlds behavior.
+
+Unfortunately, the space of hybrid architectures is already large and only grows with each new proposed approach.
+Manually crafting hybrids is costly; users must either brute-force the enormous search space or alternatively hand-craft a small candidate set of hybrids in the hope that it includes a reasonably performant choice.
+Our work provides an efficient alternative to this process.
+
+\textbf{Model Merging.}
+A final prospective approach to using multiple models is \emph{merging}.
+Merging pretrained models (of the same architecture) has shown promising results \cite{yadav2023tiesmerging, LMs_are_supermario, Wortsman2022ModelSA, ilharco2023editing, Davari2023ModelBS, Jang2024ModelSA}, creating powerful large-scale merges such as SOLAR-10.7B \cite{kim2023solar} and Goliath-120B\footnote{\url{https://huggingface.co/alpindale/goliath-120b}}  from two fine-tuned Llama2-70B \cite{Touvron2023Llama2O} models.
+The former two were produced using a trial-and-error-based technique called `frankenmerging,' introduced in MergeKit \cite{goddard2024arcees}. 
+Frankenmerging involves stitching together different fine-tuned versions of the same model or, hypothetically, different models. 
+This has inspired efforts to merge models of different architectures using large-scale evolutionary search \cite{akiba2024evolutionary}. 
+However, such efforts are still embryonic, with substantial computational drawbacks, requiring many training runs. 
+\textit{Manticore, on the other hand, does not require training a large number of models.} 
+
+
+
+\section{Methods}
+
+We now describe Manticore, our framework for automatically designing hybrid architectures by mixing components of pretrained models. Manticore relies on projectors to align features across architectures, then applies a convex combination to the aligned features, as summarized in Figure~\ref{fig:manticore_banner}. 
+In Section~\ref{sec:manticore_def}, we discuss and formally define the structure of Manticore hybrids, including the projectors and convex combination mixture weights, as well as how both of these components are used within Manticore. 
+In Section~\ref{sec:usecases}, we detail the search procedures (inspired by NAS) and training routines involved in pretraining, fine-tuning, and programming hybrids. 
+\begin{figure}
+  \centering
+  \includegraphics[width=1.0\textwidth]{figures/banner-cropped.pdf} %\rule[0cm]{0cm}{0cm}
+  \caption{Our proposed Manticore framework, which enables: (1) cross-architecture LM selection, (2) the construction of pretrained hybrids, and (3) the ability to program hybrids to have certain skills. }
+  \label{fig:manticore_banner}
+\end{figure}
+
+\subsection{The Structure of Manticore Hybrids}\label{sec:manticore_def}
+Our framework comprises three main parts: the individual LMs that we  combine to produce our overall hybrid, projectors that translate feature representations between LMs of different architectures, and convex combination mixture weights that specify how much the hybrid will use the features of each component architecture. We detail each of these in the following. 
+
+\subsubsection{Component Models}\label{sec:component_models}
+We refer to a model that is used in Manticore as a \textit{component model}. 
+Any modern LM can be used as a component model in our framework. In this section, we will formally define the general high-level structure of the component models that we support. 
+For an LM $M$ with model embedding dimension $d_M$ on a sequence of $t$ tokens from a set $\mathcal{V}$, denoted $x = (x_1, ..., x_t) \in \mathcal{V}^t$, a forward pass $M(x)$ is typically computed using the following recipe:
+\begin{enumerate}%[leftmargin=*]
+    \item Apply an embedding function, $M_\text{embed}: \mathcal{V}^t \to \mathbb{R}^{t \times d_M}$ to the tokens, resulting in a sequence of embeddings denoted $x_\text{embed} = M_\text{embed}(x)$.
+    \item Take forward passes through $L_M$ `blocks'--we denote the $\ell^{\text{th}}$ block as $M_\text{Block}^{(\ell)}: \mathbb{R}^{t \times d_M} \to \mathbb{R}^{t \times d_M}$. 
+    Specifically, for all $\ell \in [L_M]$, we obtain $x_{\ell+1} = M_\text{Block}^{(\ell)}(x_{\ell})$, where $x_{1} := x_\text{embed}$. 
+    \item Finally, we pass $x_{L_M + 1}$ into a language modeling head, $M_\text{head}: \mathbb{R}^{t \times d_M} \to (\Delta^{|\mathcal{V}|-1})^t$, where $\Delta^{|\mathcal{V}|-1}$ is the probability simplex of dimension $|\mathcal{V}|$. 
+\end{enumerate}
+This recipe applies to virtually all modern transformer-based LMs, recurrent models, and state-space models. 
+Our framework supports all of these, and any other architecture that follows this recipe. 
+\subsubsection{Projectors}
+Suppose we have two pretrained component models, $M$ and $M'$. 
+In general, even if the model dimensions are the same for both models ($d_M = d_{M'}$), blocks from $M$ and $M'$ may not be directly compatible, as their input and output features are likely to be very different. 
+It is also possible that $d_M \neq d_{M'}$, in which case composing blocks from $M$ and $M'$ is not even well-defined.
+
+\begin{wrapfigure}{r}{0.4\textwidth}
+  \centering
+  \includegraphics[width=0.3\textwidth]{figures/component_models.pdf} %\rule[0cm]{0cm}{0cm}
+  \caption{Examples of component models used in Manticore. Transformer and Mamba component models are shown.}
+  \label{fig:component_models}
+  \includegraphics[width=0.4\textwidth]{figures/projectors.pdf} %\rule[0cm]{0cm}{0cm}
+  \caption{The projectors with residual connections used in Manticore, used for translating features between pretrained blocks of different component models.}
+  \label{fig:projectors}
+\end{wrapfigure}
+
+To overcome this issue, we apply projectors to both the inputs and the outputs of a block (or a sequence of blocks, discussed in Section~\ref{sec:sec:sec:manticore}) that we wish to combine in Manticore hybrids. 
+Overall, our goal in  designing projectors is to enable the blocks of $M$ and $M'$ to \emph{speak a common language}, such that their features are compatible and can be reused in the resulting  hybrid model. 
+This is conceivably challenging---the mapping between feature spaces could be highly nonlinear and might require a lot of task-specific data to adequately learn the mapping. 
+So do projectors need to be heavyweight, data-hungry, highly nonlinear objects?  
+Fortunately, the answer is no---we find that a simple linear transformation with a gated residual, pretrained on general language data, is sufficient. 
+
+
+Suppose that we want to create a Manticore hybrid from $K$ different pretrained component models, denoted $M_{(1)}, ..., M_{(K)}$ with model dimensions $d_{M_{(1)}}, ..., d_{M_{(K)}}$. 
+We define $d_{\max} := \max_{k \in [K]} d_{M_{(k)}}$, then want \textit{input} and \textit{output} projectors for the blocks of each model that convert their features to a common feature space of dimension $d_{\max}$.
+For any sequence of blocks of length $(n+1) < L_{d_{M_{(k)}}}$ from model $M_{(k)}$ and length-$t$ input, 
+\[\left(M_{(k)\text{Block}}^{(\ell + n)} \circ ... \circ M_{(k)\text{Block}}^{(\ell)}\right): \mathbb{R}^{t \times d_{M_{(k)}}} \to \mathbb{R}^{t \times d_{M_{(k)}}},\] 
+we want functions $\text{Proj-in}^{(\ell)}_{(k)} : \mathbb{R}^{t \times d_{\max}} \to \mathbb{R}^{t \times d_{M_{(k)}}}$ and $\text{Proj-out}^{(\ell + n)}_{(k)} : \mathbb{R}^{t \times d_{M_{(k)}}} \to \mathbb{R}^{t \times d_{\max}}$, so
+\begin{align*}
+	\bigg(&\text{Proj-out}^{(\ell + n)}_{(k)} \circ  M_{(k)\text{Block}}^{(\ell + n)} \circ ... \\
+	&\circ M_{(k)\text{Block}}^{(\ell)} \circ \text{Proj-in}^{(\ell)}_{(k)} \bigg): \mathbb{R}^{t \times d_{\text{max}}} \to \mathbb{R}^{t \times d_{\text{max} }}. 
+\end{align*}
+
+For input $x \in \mathbb{R}^{t \times d_{M_{(k)}}}$ we parameterize each projector as a linear transformation with gated residual:
+\[ \text{Proj-in}^{(\ell)}_{(k)}(x; \alpha) := (1 - \alpha) \cdot \text{Linear}_{d_{\text{max}} \to d_{M_{(k)}}}(x) + \alpha \cdot \text{Trunc}(x; d_{M_{(k)}}) \]
+\[ \text{Proj-out}^{(\ell)}_{(k)}(x; \alpha) := (1 - \alpha) \cdot \text{Linear}_{d_{M_{(k)}} \to d_{\text{max}} }(x) + \alpha \cdot \text{Pad}(x; d_{\text{max}}). \]
+Respectively, $\text{Trunc}(\cdot; d)$ and $\text{Pad}(\cdot; d)$ truncate and zero-pad input to dimension $d$, and $\text{Linear}_{d \to d'}: \mathbb{R}^{d} \to \mathbb{R}^{d'}$ is a learnable linear transformation. Gating weights are parameterized as $\alpha \in [0, 1]$. 
+
+In total, where $\alpha \in \Delta^{K-1}$ and $I_k$ is a length-$n_k$ vector of block indices from component model $k$, we define the output of the block sequence defined by $I_k$ as 
+\[h_k (x ; \alpha_k, I_k) = \left(\text{Proj-out}^{(I_{k, n_k})}_{(k)} \circ  M_{(k)\text{Block}}^{(I_{k, n_k})} \circ ... \circ M_{(k)\text{Block}}^{(I_{k, 1})} \circ \text{Proj-in}^{(I_{k, 1})}_{(k)} \right) (x; \alpha_k).\]
+\subsubsection{Mixture Weights}
+Next, we would like to mix the activations of different component models' block sequences, in a way that allows us to learn how much \emph{influence} the blocks from each component model will have on the overall hybrid model. 
+Learning the amount of influence that each block sequence should have on the overall hybrid is critical---if certain blocks produce less helpful features, we need a way to down-weight them. 
+Conversely, we want to use the best blocks in our hybrid as much as possible---we want to up-weight these helpful blocks. 
+Overall, a parameterization that allows us to learn these weights should lead to better hybrids. 
+
+We do this by taking a convex combination of the projectors' outputs: given the projected features $h_k(x; \alpha_k, I_k)$ for each component model $k\in[K]$, we output a convex combination of projected features 
+\[\text{Mix}_{\alpha}(x; I_1, ..., I_K) = \sum_{k \in [K]} \alpha_k h_k(x ; \alpha_k, I_k).\]
+\begin{wrapfigure}{r}{0.35\textwidth}
+  \centering
+  \includegraphics[width=0.35\textwidth]{figures/mixtureweights.pdf} %\rule[0cm]{0cm}{0cm}
+  \caption{Mixture weights used in Manticore, which learn how much influence component model blocks should have.}
+  \label{fig:mixtureweights}
+\end{wrapfigure}
+
+We reuse the convex combination weights as the gating weights in the projectors. 
+This choice yields the convenient property that when the mixture weights $\alpha$ are set to one in index $k$ and zero everywhere else, the $\text{Mix}$ function exactly computes a sequence of blocks from component model $k$ while ignoring the projectors and the blocks from other component models. 
+We adopt a popular parameterization for mixture weights from the NAS literature \cite{liu2019darts}: we parameterize $\alpha$ using a softmax of scalars. 
+That is, we define $\alpha_k := \frac{\exp(a_k)}{\sum_{j \in [K]} \exp(a_j)}$ for all $k \in [K]$. 
+
+\subsubsection{Manticore}\label{sec:sec:sec:manticore}
+We are now ready to define our overall hybrid architecture. 
+We seek to create a hybrid from $K$ component models, $M_{(1)}, ..., M_{(K)}$, each with a potentially different number of blocks, denoted $L_{M_{(k)}}$ for component model $k$. 
+We fix $L$ to be the number of \textit{Manticore blocks}, where $L$ is a common factor of each of the depths $L_{M_{(k)}}$, for all $k \in [K]$---we treat this choice of factor as a hyperparameter. 
+For each of the $L$ Manticore blocks, we want to mix a sequence of blocks from each of the $K$ component models. 
+We also want the number of blocks from each model $k \in [K]$ that are allocated to a single Manticore block to be evenly spread out throughout the $L$ Manticore blocks---this is why we require $L$ to be a factor of $L_{M_{(k)}}$. 
+For each component model $k \in [K]$, divide the indices of the blocks $[L_{M_{(k)}}]$ evenly into $L$ contiguous parts, denoted as $[L_{M_{(k)}}] = (I_{k, 1}, ..., I_{k, L})$. 
+Then, adopting the notation from our component models, a Manticore block is defined as 
+\[ \text{Manticore}_{\text{Block}}^{(\ell)}(\cdot) := \text{Mix}_{\alpha^{(\ell)}}(\cdot; I_{1, \ell}, ..., I_{K, \ell})\]
+with $\text{Manticore}_{\text{Block}}^{(\ell)}: \mathbb{R}^{t \times d_\text{max}} \to \mathbb{R}^{t \times d_\text{max}}$, for each $\ell \in [L]$, and $\alpha^{(\ell)}$ being the mixture weights at $\ell$. 
+Next, we initialize a new set of embedding weights and a new task specific (or language modeling) head, and we can finally illustrate a forward pass with a Manticore hybrid model, denoted using the shorthand notation $\text{Manticore}(\cdot) := \text{Manticore}[M_{(1)}, ..., M_{(K)}](\cdot)$. 
+Let $x = (x_1, ..., x_t) \in \mathcal{V}^t$ be a sequence of $t$ tokens from a set $\mathcal{V}$. 
+The forward pass is computed as follows: 
+\begin{enumerate}%[leftmargin=*]
+    \item Apply the new embedding function $\text{Manticore}_\text{embed}: \mathcal{V}^t \to \mathbb{R}^{t \times d_\text{max}}$ to the tokens, resulting in a sequence of embeddings denoted $x_\text{embed} = \text{Manticore}_\text{embed}(x)$.
+    \item Take forward passes through $L$ Manticore blocks, each with dimension $d_\text{max}$, concretely, we compute $x_{\ell+1} := \text{Manticore}_{\text{Block}}^{(\ell)}(x_{\ell})$, where $x_{1} := x_\text{embed}$. 
+    \item Pass $x_{L_M + 1}$ into a new task-specific or language modeling head, $\text{Manticore}_\text{head}: \mathbb{R}^{t \times d_M} \to \mathbb{T}$, where $\mathbb{T}$ is the appropriate output space for the learning task. 
+\end{enumerate}
+
+In NAS terms, our search space is over the set of $L \ni \ell$ mixture weights $\alpha^{(\ell)} \in \Delta^{K-1}$. 
+However, \textbf{\emph{our search space differs from typical gradient-based NAS techniques}} in the sense that we do not require \textit{discretization} to derive a final architecture after we obtain our mixture weights. 
+Typically, NAS would involve selecting a single sequence of component architecture blocks at each of the Manticore blocks, usually by taking the $\argmax$ of the mixture weights. 
+Instead, the mixtures themselves are what characterize Manticore hybrids. 
+Nonetheless, if we were to replace the mixture weights $\alpha^{(\ell)}$ with discrete one-hot vectors, we could derive any of the following: the component model architectures themselves, existing hybrid architectures, and `frankenmerged' models \cite{goddard2024arcees}. 
+
+\subsection{How To Use Manticore}\label{sec:usecases}
+With Manticore, we can automatically select language models without training every model in the search space, automatically construct pretrained hybrid architectures without significant trial-and-error, and also program pretrained hybrids without full training. 
+In this section, we will discuss the details of how Manticore can be used in each of these three usage scenarios. 
+\textbf{Training hybrids from scratch.}
+\textit{Manticore can be used to automatically select LMs without training all of the LMs in the search space.}
+Our selection technique is simple: inspired by gradient-based NAS techniques \cite{liu2019darts} and treating the mixture weights as our `architecture parameters,' we proceed in two steps:
+1. train mixture weights along with all other parameters, and 2. freeze the mixture weights and retrain the rest of the parameters from scratch. 
+\textbf{Unlike NAS, we found that in many pretraining settings, it was sufficient to stop at 1. and forgo retraining.} 
+In our pretraining experiments, we primarily use randomly-initialized GPT-Neo \cite{gpt-neo} and Mamba \cite{mamba} as component models without projectors, and separately experiment with a subset of the blocks from MAD \cite{poli2024mechanistic}. 
+
+\textbf{Fine-tuning pretrained hybrids.}
+\textit{Manticore can be used to create and fine-tune pretrained hybrids.} 
+We create pretrained hybrids as follows: begin with a set of pretrained models, replace their LM heads and embeddings with a single randomly initialized LM head and embedding layer, and pretrain the projectors on a small amount of general language data such as FineWeb \cite{penedo2024fineweb} while keeping the original component model weights frozen.\footnote{
+We found one billion tokens to be sufficient for projector pretraining.} 
+To fine-tune the pretrained hybrids on downstream task data, we first search for mixture weights by training all of the parameters simultaneously, we freeze the mixture weights, rewind the component models and projectors to their pretrained state, and fine-tune. 
+\textbf{This procedure completely sidesteps large-scale pretraining of new hybrids.}
+In our synthetic experiments, we create pretrained Manticore hybrids from pretrained GPT-Neo-125M \cite{gpt-neo} and Mamba-130M \cite{mamba} models, while for our experiments on real natural language data, we opt for pretrained Pythia-410M \cite{biderman2023pythia} and Mamba-370M \cite{mamba} as component models. 
+
+\textbf{Programming hybrids.}
+\textit{Excitingly, we can program Manticore mixture weights by using external information to predict them. }
+We consider two scenarios. 
+If we know that a component model has blocks that are somehow incompatible with the target task---e.g. resulting from sequence length constraints---\textbf{we can omit these blocks by setting their mixture weights to 0.} 
+Otherwise, we can predict good mixture weights by searching on a fixed set of proxy tasks---for this, we use the MAD tasks \cite{poli2024mechanistic}. 
+The MAD tasks are synthetic unit tests that are predictive of hybrid LM scaling laws, but within our framework, \textbf{we find that they are also useful for finding general-purpose pretrained hybrids.} 
+We use the following procedure for programming mixture weights using the MAD tasks. 
+First, run search on the MAD tasks using a smaller, randomly initialized version of our pretrained hybrid.  
+For each MAD task, our search procedure returns a set of mixture weights---we simply average the resulting mixture weights, freeze them, and fine-tune on the downstream task data. 
+
+
+
+
+\section{Experimental Results}
+
+
+We provide experimental evidence that validates the following claims about Manticore: 
+\begin{itemize}%[leftmargin=*,noitemsep]
+    \item \textbf{C1. } Pretrained hybrids can outperform their component models on fine-tuning tasks,  
+    \item \textbf{C2. } Trained from scratch, Manticore hybrids are competitive with existing hybrids and LMs, and
+    \item \textbf{C3. } We can program mixture weights using external sources without search on the task data. 
+\end{itemize}
+
+\subsection{Fine-Tuning Pretrained Hybrids}
+We evaluate \textbf{C1}, first on a synthetic fine-tuning task, and then on natural language fine-tuning tasks. 
+\textbf{Setup.}
+We consider a synthetic LM dataset comprising GPT-Neo and Mamba generated completions of text from Penn Treebank \cite{ptb}. 
+Naturally, we also use pretrained GPT-Neo-125M and Mamba-130M models as component models, creating a single Manticore block with projectors that were pretrained on one billion tokens from FineWeb \cite{penedo2024fineweb}. 
+We perform search using DARTS and perform post-search retraining with the model weights and projectors rewound to their pretrained state. 
+
+\textbf{Results.}
+Our results are shown in Figure~\ref{fig:completions_synthetic} (left). 
+We compare our search results to a sweep over a range of possible mixture weights, and find that our search procedure returns the optimal mixture weights, outperforming both Mamba and GPT-Neo. 
+\textbf{This confirms our claim that Manticore hybrids can outperform their component models on \textit{synthetic} fine-tuning tasks.} 
+Given that this task comprises two slices that each of our component models should be good at---GPT-Neo should be good at predicting GPT-Neo outputs, and vice versa---we hypothesize that Manticore hybrids are well suited to situations in which the component models have complementary `skills' \cite{chen2023skillit}. 
+
+\begin{figure}
+  \centering
+  \centering
+  \includegraphics[width=0.9\textwidth]{figures/ptb_completions_all.pdf}
+  \caption{
+  Mixture weight sweeps on Penn Treebank completions using pretrained GPT-Neo-125M and Mamba-130M as our component models. 
+  \textbf{(Left)} When we create one Manticore block, there is a region of the search space where we improve over Mamba. \textbf{(Right)} The same holds for two Manticore blocks, and our technique for hybrid programming using MAD discovers this region. 
+  }
+  \label{fig:completions_synthetic}
+\end{figure}
+
+\textbf{Setup.}
+We evaluate on three natural language fine-tuning datasets: Penn Treebank \cite{ptb}, the Alpaca instructions dataset \cite{alpaca}, and ELI5 \cite{fan-etal-2019-eli5}. 
+We use Pythia-410M and Mamba-370M as component models, and create a single Manticore block from their blocks with projectors that were pretrained on one billion tokens from FineWeb \cite{penedo2024fineweb}. 
+As before, we first search for mixture weights, and then we retrain with the fixed mixture weights found by search. 
+
+\textbf{Results.}
+Our results are shown in Table~\ref{table:finetune}. 
+Manticore outperforms its component models on Alpaca and ELI5, while it achieves performance between its two component models on Penn Treebank. 
+\textbf{This confirms our claim that Manticore can outperform component models on \textit{real} natural language tasks.}
+The fact that Mamba-370M outperforms Manticore in this setting is not a failure of our framework, as Mamba-370M is included as part of our search space.
+We speculate that the use of more powerful search procedures from the NAS literature, such as GAEA \cite{li2021geometryaware}, could improve our search performance and help to recover or outperform Mamba-370M. 
+
+\begin{table}[h]
+\caption{
+Manticore on natural language tasks using Pythia-410m and Mamba-370m as component models.
+The best test losses are \textbf{bolded} and the second-best are \underline{underlined}. 
+}
+\label{table:finetune}
+\centering
+\begin{tabular}{@{}r|ccc@{}}
+\toprule
+    \textbf{Task} & \textbf{Pythia-410M (A)} & \textbf{Mamba-370M (B)} & \textbf{Manticore [A, B]} \\
+\midrule
+Penn Treebank& 0.9099   & \textbf{0.8397} & \underline{0.8600}          \\ 
+Alpaca       & 2.5011   & \underline{2.2999}          & \textbf{2.1779} \\ 
+ELI5         & 4.1260   & \underline{3.9414}          & \textbf{3.9331} \\ 
+\bottomrule
+\end{tabular}
+\end{table}
+\subsection{Training Hybrids from Scratch}\label{sec:4.1}
+For \textbf{C2}, we compare to prior hybrids on MAD and non-hybrid component models on LRA and MAD. 
+
+\textbf{Setup.}
+We compare training Manticore from scratch to training existing hybrid architectures on the MAD tasks.
+We begin with two hybrid architectures from the literature: Mambaformer \cite{park2024mamba}, which combines Mamba and attention blocks, and the striped multi-head Hyena + Mixture-of-Experts (MoE) MLP architecture that was shown to perform well on the MAD tasks \cite{poli2024mechanistic}. 
+We compare these two baselines to a Manticore hybrid combining three component models: striped multi-head Hyena + MoE-MLP, a transformer, and Mamba. 
+We use two blocks for each of these architectures, creating two Manticore blocks. 
+Again, we search for mixture weights and then retrain. 
+\textbf{Results.}
+The results of this experiment are shown in Table~\ref{table:mad_hybrids}. 
+We outperform the striped multi-head Hyena + MoE model from the MAD paper, and we approach the performance of Mambaformer on all but one task. 
+\textbf{This validates the claim that Manticore hybrids, trained from scratch, compete with \textit{existing hybrids}.}
+Despite Mambaformer not being a component model, it is in our search space, and
+we again speculate that improvements in search would lead to its recovery. 
+\begin{table}[h]
+\caption{
+Trained from scratch on MAD tasks, Manticore beats or matches the performance of existing hybrids on all but one task. 
+The best test losses are \textbf{bolded} and the second best are \underline{underlined}. 
+}
+\label{table:mad_hybrids}
+\centering
+\begin{tabular}{@{}r|ccc@{}}
+\toprule
+\multirow{2}{*}{\textbf{Task}}           & \textbf{Striped MH Hyena} & \multirow{2}{*}{\textbf{Mambaformer}} & \multirow{2}{*}{\textbf{Manticore}} \\ 
+& \textbf{ + MoE-MLP}  &  &  \\
+\midrule
+In-context Recall       & 3.7153           & \textbf{0.0020}         & \underline{0.0048}   \\ 
+Fuzzy In-context Recall & \textbf{4.1714}          & \textbf{4.1712}         & \underline{4.1750} \\ 
+Noisy In-context Recall & \underline{4.1643}         & 4.1646        & \textbf{4.1607}   \\ 
+Selective Copying       & 1.8021         & \textbf{0.0005}        & \underline{0.0171}   \\ 
+Memorization            & \underline{8.8353}          & \textbf{5.2179 }        & 8.9254  \\ 
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Setup.}
+We compare Manticore hybrids to their component models on LRA,  when trained from scratch. 
+We create GPT-Neo and Mamba component models of similar sizes to those in \citet{tay2021long} and create a Manticore hybrid. 
+As a simplified pipeline, we do not retrain model weights after search. 
+
+\textbf{Results.}
+Our results are shown in Table~\ref{table:lra}. 
+We outperform the component models on all tasks except for IMDb, in which case Manticore was between GPT-Neo and Mamba. 
+\textbf{This validates the claim that Manticore hybrids, trained from scratch, compete with \textit{existing LMs}.}
+\begin{table}[h] 
+\caption
+{
+Manticore hybrids trained from scratch on LRA using GPT-Neo and Mamba component models. 
+The best test accuracies are \textbf{bolded}. 
+$^*$GPT-Neo does not support the Pathfinder-X sequence length requirement, so we set its mixture weight to 0 and Manticore reduces to Mamba.
+}
+\label{table:lra}
+\centering
+\begin{tabular}{@{}r|ccc@{}}
+\toprule
+    \textbf{Task} & \textbf{GPT-Neo (A)} & \textbf{Mamba (B)} & \textbf{Manticore [A, B]} \\
+\midrule
+ListOps                 & 37.90            & 20.65          & \textbf{38.70}     \\ 
+IMDb                    & 59.62            & \textbf{87.74} & 72.44              \\ 
+CIFAR10                 & 39.37            & 20.81          & \textbf{43.15}     \\ 
+Pathfinder32    & 89.41   & 85.76          & \textbf{91.45}     \\ 
+\midrule
+Pathfinder-X & N/A$^*$ & $\textbf{75.50}^*$ & $\textbf{75.50}^*$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+\textbf{Setup.}
+Next, we compare Manticore to non-hybrid architectures trained from scratch on the MAD tasks. 
+We compare two-block GPT-Neo and Mamba models to a Manticore hybrid using a single Manticore block. 
+Again, we report the performance of the search procedure itself without retraining. 
+
+\textbf{Results.}
+Our results are shown in Table~\ref{table:mad_nonhybrids}. 
+Manticore outperforms GPT-Neo and Mamba on all of the MAD tasks in this setting. 
+\textbf{This provides further evidence for our claim that Manticore hybrids compete with \textit{existing LMs} when trained from scratch.}
+It is conceivable that our larger Manticore hybrids simply perform better than component models due to their size---however, we find that post-search discretization and retraining tends to result in similar performance, but reduces the model size by roughly half. 
+ 
+\begin{table}[h]
+\caption{
+Trained from scratch on the MAD tasks, Manticore improves over small two-block component models combined into a single Manticore block. 
+The best test losses are shown in \textbf{bold}. 
+}
+\label{table:mad_nonhybrids}
+\centering
+\begin{tabular}{@{}r|ccc@{}}
+\toprule
+    \textbf{Task} & \textbf{GPT-Neo (A)} & \textbf{Mamba (B)} & \textbf{Manticore [A, B]} \\
+\midrule
+In-context Recall       & 4.0771           & 4.1858         & \textbf{4.0768}    \\ 
+Fuzzy In-context Recall & 4.4384           & 4.8097         & \textbf{4.2797}    \\ 
+Noisy In-context Recall & 4.1843           & 4.2605         & \textbf{4.1823}    \\ 
+Selective Copying       & 1.0470           & 3.7765         & \textbf{0.9478}    \\ 
+Memorization            & 4.6110           & 5.2281         & \textbf{4.1367}    \\ 
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Programming Hybrids}
+We evaluate \textbf{C3} with two types of external data: access to task metadata such as sequence length requirements, and the use of the MAD tasks as a proxy for search on downstream task data. 
+
+\textbf{Setup.}
+As in many of our previous experiments, we used the GPT-Neo and Mamba architectures as component models to our Manticore hybrid. 
+However, this time, we set out to train from scratch on the extremely long-range Pathfinder-X task from LRA, which requires sequence length support greater than that of GPT-Neo. 
+Using this external information about the task, we set the mixture weights for GPT-Neo to 0, which in this case, means that Manticore reduces to Mamba.} 
+
+\textbf{Results.}
+The results of this experiment are shown in the last row of Table~\ref{table:lra}. 
+\textbf{In the simple case of having access to task metadata, this validates the claim that we can program mixture weights to exclude incompatible blocks.}
+At the time of writing, we are not aware of prior published Mamba results on LRA despite community interest, which would make our evaluation in Table~\ref{table:lra} the first such result. 
+Note that we did not thoroughly tune hyperparameters, so we view this result as a starting point for the community, rather than a final answer. 
+
+\textbf{Setup.}
+Finally, in the case in which we can run all of our component models on our learning task, we program the mixture weights using the MAD tasks as a search proxy. 
+We set out to fine-tune a pretrained hybrid comprising GPT-Neo-125M and Mamba-130M with two Manticore blocks on our Penn Treebank completions synthetic. 
+We train a scaled-down version of this Manticore hybrid with randomly initialized weights and two blocks per component model on the MAD tasks. 
+This yields mixture weights for each of the MAD tasks---we average them and then fine-tune our pretrained hybrid on Penn Treebank completions using the predicted mixture weights. 
+
+\textbf{Results.}
+Our results are shown in Figure~\ref{fig:completions_synthetic} (right). 
+We superimpose the predicted mixture weights and mean search trajectory from MAD onto the architecture loss landscape computed on Penn Treebank completions. 
+We find that this procedure recovers a hybrid that outperforms the component models (Mamba, lower right; GPT-Neo, upper left) and substantially outperforms the naive frankenmerges in our search space (upper right and lower left) \cite{goddard2024arcees}. 
+\textbf{This validates the claim that we can program mixture weights using external sources without performing search on the task data.}
+Intriguingly, search on the MAD tasks appears to follow the architecture gradient on the \textit{different} downstream fine-tuning task, even though the architecture is scaled-down and trained from scratch on MAD. 
+We suspect that the mixture weights and architecture loss landscapes for pretrained hybrids are fairly universal across fine-tuning tasks, and that the same procedure is likely to work on a wide range of scenarios. 
+Furthermore, we hypothesize that this technique could outperform other gradient-based NAS methods directly applied to the downstream task. 
+
+
+
+
+
+
+
+
+    
+
+
+
+
+
+
+
+
+
+
+\section{Suggestions for the community}
+
+
+TODO 
+\begin{enumerate}
+    \item Remove tokenizers from LMs or at least use standardized tokenizers across as many LMs as possible
+    \item Ability to search for pretrained models by size 
+    \item Standardized object-oriented implementations of LMs organized in block structures, with clean ways of accessing intermediate activations 
+\end{enumerate}
+
+
+
+\section{Conclusions and Recommendations for the Community}
+
+
+We present Manticore, a framework that automates the design of hybrid architectures by using projectors and convex combinations to align and combine features from multiple different component models, as well as NAS-inspired search procedures. Manticore is efficient and flexible in its usage; hybrids can be trained from scratch, fine-tuned from pretrained component models, and even programmed with external information and/or proxy tasks. In our experiments with several real/synthetic language modeling datasets and existing component/hybrid models, we find that Manticore hybrids can match or outperform existing handcrafted hybrid models in these settings. Any requisite training and evaluation is performed with a single, large Manticore model rather than with multiple different models, which greatly reduces computational cost. 
+
+To better facilitate future work in LM selection, hybridization, and merging, we recommend that the ML community aim to do the following when developing and publishing their pretrained models:  
+
+\begin{enumerate}
+    \item Remove tokenizers from LMs or at least use standardized tokenizers across as many LMs as possible
+    \item Include the ability to search for pretrained models by size on the hubs where they are published
+    \item Create standardized implementations of LMs organized in block structures, with clean ways of accessing intermediate activations 
+\end{enumerate}
+
+
+
+
+
+

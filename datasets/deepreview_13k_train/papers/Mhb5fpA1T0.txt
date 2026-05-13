@@ -1,0 +1,508 @@
+\title{Learning to Act from Actionless Videos through Dense Correspondences}
+
+\begin{abstract}
+\vspace{-0.5em}
+In this work, we present an approach to construct a video-based robot policy capable of reliably executing diverse tasks across different robots and environments from few video demonstrations without using any action annotations. Our method leverages images as a task-agnostic representation, encoding both the state and action information, \newtext{and text as a general representation for specifying robot goals}. By synthesizing videos that ``hallucinate'' robot executing actions and in combination with dense correspondences between frames, our approach can infer the closed-formed action to execute to an environment without the need of {\it any} explicit action labels. This unique capability allows us to train the policy solely based on RGB videos and deploy learned policies to various robotic tasks. We demonstrate the efficacy of our approach in learning policies on table-top manipulation and navigation tasks. Additionally, we contribute an open-source framework for efficient video modeling, enabling the training of high-fidelity policy models with four GPUs within a single day.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+A goal of robot learning is to construct a policy that can successfully and robustly execute diverse tasks across various robots and environments. A  major obstacle is the diversity present in different robotic tasks. The state representation necessary to fold a cloth differs substantially from the one needed for pouring water, picking and placing objects, or navigating, requiring a policy that can process each state representation that arises. Furthermore, the action representation to execute each task varies significantly subject to differences in motor actuation, gripper shape, and task goals, requiring a policy that can correctly deduce an action to execute across different robots and tasks. 
+One approach to solve this issue is to use images as a task-agnostic method for encoding both the states and the actions to execute. In this setting, policy prediction involves synthesizing a video that depicts the actions a robot should execute~\citep{finn2017deep,kurutach2018learning,du2023learning}, enabling different states and actions to be encoded in a modality-agnostic manner. However, directly predicting an image representation a robot should execute does not explicitly encode the required robot actions to execute. To address this, past works either learn an action-specific video prediction model~\citep{finn2017deep} or a task-specific inverse-dynamics model to predict actions from videos~\citep{du2023learning}. Both approaches rely on task-specific action labels which can be expensive to collect in practice, preventing general policy prediction across different robot tasks.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figs/teaser.pdf}
+    \caption[]{\textbf{Diverse Task Execution without Action Labels.} Our approach can execute policies given only synthesized video, without any action labels, across various manipulation, navigation, and real-world tasks.}
+    \label{fig:teaser}
+\end{figure*}
+This work presents a method that first synthesizes a video
+rendering the desired task execution; then, it
+directly regresses actions from the synthesized video without requiring {\it any} action labels or task-specific inverse-dynamics model, enabling us to directly formulate policy learning as a video generation problem. Our key insight is that action inference from video in many robotics tasks can be formulated as solving for a rigid 3D transform of objects or points in the generated video. Such a transform can be robustly inferred using off-the-shelf optical flow and segmentation networks, and actions can then be executed from these transforms using off-the-shelf inverse kinematics and motion planners.  We illustrate the efficacy of 
+our method
+across various robotics tasks ranging from table-top assembly, ego-centric object navigation, and real-world robot manipulation in~\fig{fig:teaser}.
+
+Another limitation of existing approaches that formulate policy prediction as a video prediction problem is that they suffer from high computational costs during training, requiring the use of over 256 TPU pods~\citep{du2023learning}, with limited availability of the underlying source code. As a contribution, we provide an open-source codebase for training video policy models. Through a series of architectural optimizations, our framework enables the generation of high-fidelity videos for policy execution, with training accomplished on just 4 GPUs in a single day.
+
+Concretely, this work contributes the following: \textbf{(1)} We propose a method to infer actions from video prediction without the need of {\it any action labels} by leveraging dense correspondences in a video. \textbf{(2)} We illustrate how this approach enables us to learn policies that can solve diverse tasks across both table-top manipulation and navigation. \textbf{(3)} We present an open-source framework which enables efficient video modeling that enables us to learn policies efficiently on 4 GPUs in a single day. 
+
+
+\section{Related Work}
+
+
+\xhdr{Robot Learning from Videos.} A large body of work has explored how to leverage videos for robot learning~\citep{sun2018neural,pari2021surprising, nair2022r3m,shao2021concept2robot,chen2021learning,bahl2022human,sharma2019third,lee2017learning,du2023learning}. One approach relies upon using existing video datasets to construct effective visual representations ~\citep{pari2021surprising,nair2022r3m}. Alternatively, goal or subtask information for robotic execution may be extracted for videos~\citep{shao2021concept2robot,chen2021learning,bahl2022human,sharma2019third,lee2017learning,sivakumar2022robotic} or used as a dynamics model for planning~\citep{finn2017deep,kurutach2018learning}. Most similar to our work, in UniPi~\citep{du2023learning}, policy prediction may directly be formulated as a text-conditioned video generation problem. Our approach extends UniPi and illustrates how dense correspondences enable action inference without any explicit action labels.
+
+\looseness=-1
+\xhdr{Leveraging Dense Correspondences.} Dense correspondences have emerged as an effective implicit parameterization of actions and poses  ~\citep{florence2018dense,manuelli2022kpam,yen2022nerf,simeonov2022neural,simeonov2023se,chun2023local,sundaresan2020learning,ryu2022equivariant}. Given dense correspondences in 2D ~\citep{florence2018dense,manuelli2022kpam,sundaresan2020learning,yen2022nerf} of 3D ~\citep{simeonov2022neural,simeonov2023se,chun2023local,ryu2022equivariant} both object and manipulator poses may be inferred by solving for rigid transforms given correspondences. Our approach uses dense correspondences between adjacent frames of synthesized videos to calculate object of scene transformations and then infer robot actions. 
+
+\xhdr{Learning from Observation.}
+In contrast to imitation learning (\ie learning from demonstration)~\cite{osa2018algorithmic, kipf2019compile, ding2019goal, fang2019survey, wang2023diffusion}, which assumes access to expert actions, learning from observation methods~\citep{torabi2019recent, torabi2018behavioral, torabi2018generative, lee2021gpil, karnan2022adversarial} learn from expert state sequences (\eg video frames).
+Action-free pre-training methods~\citep{baker2022video, escontrela2023video} extract knowledge from unlabeled videos and learn target tasks through RL.
+Despite encouraging results, these methods require interacting with environments, 
+which may be expensive or even impossible.
+In contrast, our proposed method does not require environmental interactions and therefore is more applicable. %
+
+
+\section{Actions from Video Dense Correspondences}
+
+
+
+\begin{figure}
+    \centering \small
+    \includegraphics[width=\textwidth]{figs/framework.pdf}
+    \caption{\textbf{Overall framework of \model.} (a) Our model takes the RGBD observation of the current environmental state and a textual goal description as its input. (b) It first synthesizes a video of {\it imagined} execution of the task using a diffusion model. (c) Next, it estimates the optical flow between adjacent frames in the video. (d) Finally, it leverages the optical flow as dense correspondences between frames and the depth of the first frame to compute $\textit{SE}(3)$ transformations of the target object, and subsequently, robot arm commands.}
+    \label{fig:framework}
+\end{figure} 
+The architecture of our proposed framework, \modelfull (\model), is depicted in \fig{fig:framework}. \model consists of three modules. 
+Given the initial observation (\ie an RGBD image of the scene and a textual task description), we first employ a video synthesis model to generate a video that implicitly captures the sequence of required actions (\sect{sec:videogen}). 
+Then, we use a flow prediction model to estimate the optical flow of the scene and objects from the synthesized video (\sect{sec:flowest}). 
+Finally, leveraging the initial depth map and predicted optical flows, we reconstruct the movements of 
+objects for manipulation or robots for navigation, described in~\sect{sec:control}.
+\subsection{Text-Conditioned Video Generation}\label{sec:videogen}
+Our text-conditioned video generation model is a conditional diffusion model. The diffusion model takes the initial frame and a text description as its condition and learns to model the distribution of possible future frames. Throughout this paper, our video generation model predicts a fixed number of future frames ($T=8$ in our experiments).
+
+The diffusion model aims to approximate the distribution $p(\textit{img}_{1:T} | \textit{img}_0, \textit{txt})$, where $\textit{img}_{1:T}$ represents the video frames from time step $1$ to $T$, $\textit{img}_0$ denotes the initial frame, and $\textit{txt}$ represents the task description.
+We train a denoising function $\eps_\theta$ that predicts the noise applied to $\textit{img}_{1:T}$ given the perturbed frames. Given the Gaussian noise scheduling $\beta_t$, our overall objective is,
+
+\begin{equation*}\mathcal{L}_{\text{MSE}}=\left\|\mathbf{\epsilon} - \epsilon_\theta\left(\sqrt{1 - \beta_t} \textit{img}_{1:T} +  \sqrt{\beta_t} \mathbf{\epsilon}, t ~|~ \textit{txt})\right)\right\|^2,
+\end{equation*}
+where $\eps$ is sampled from a multivariate standard Gaussian distribution, and $t$ is a randomly sampled diffusion step $t$. A main practical challenge with training such video diffusion models is that they are usually computationally expensive. For example, the closest work to us, Unipi (\citet{du2023learning}), requires over 256 TPU pods to train. In this paper, we build a high-fidelity video generation model that can be trained on 4 GPUs in a single day through a series of architectural optimizations. 
+\sect{sec:app_complexity} presents complexity analyses and how the process can be significantly accelerated.
+Our model is a modified version of the image diffusion model proposed by \citet{dhariwal2021diffusion}, built upon U-Net~\citep{ronneberger2015u}, as illustrated in \fig{fig:unet}. The U-Net consists of the same number of downsample blocks and upsample blocks. To enhance consistency with the initial frame, we concatenate the input condition frame $\textit{img}_0$ to all future frames $\textit{img}_{1:T}$. To encode the text, we use a CLIP-Text~\citep{radford2021learning} encoder to obtain a vector embedding and combine it into the video generative model as additional inputs to individual downsampling and upsampling blocks.
+
+Importantly, we use a factorized spatial-temporal convolution~similar to the model from \citet{ho2022video}, within each ResNet block~\citep{he2016deep}. As shown in~\fig{fig:fst}, in our approach, the 5D input feature map with shape $(B, H, W, T, C)$, where $B$ is the batch size, $H$ and $W$ represent the spatial dimensions, $T$ is the number of time frames, and $C$ denotes the number of channels, undergoes two consecutive convolution operations. First, we apply a spatial convolution identically and independently to each time step $t = 1, 2, \cdots, T$. Then, we employ a temporal convolution layer identically and independently at each spatial location. This factorized spatial-temporal convolution replaces conventional 3D convolution methods, leading to significant improvements in training and inference efficiency without sacrificing generation quality. 
+More details on the model architecture and training can be found in~\sect{sec:app_model&training}.
+
+\subsection{Flow Prediction}
+\label{sec:flowest}
+To regress actions from predicted videos, we leverage flow prediction as an intermediate representation. We employ off-the-shelf GMFlow, a transformer architecture specifically designed for optical flow prediction~\citep{xu2022gmflow}. Given two consecutive frames $\textit{img}_i$ and $\textit{img}_{i+1}$ predicted by the video diffusion model, GMFlow predicts the optical flow between two images as a vector field on the image, which is essentially a pixel-level {\it dense correspondence map} between two frames. This allows us to track the movement of each input pixel with a simple integration of this vector field over time.
+
+Alternatively, one could train diffusion models to directly predict the flow by first preprocessing training videos with the flow prediction model. However, in our experiments, we encountered challenges in optimizing such models and observed that they failed to match the performance achieved by the two-stage inference pipeline. We conjecture that this difficulty arises from the lack of spatial and temporal smoothness in flow fields. For instance, the flow field is sparse when only a single object moves. Consequently, the Gaussian diffusion model may not be the optimal model for flow distributions. We empirically compare two alternatives in subsequent experiments.
+
+\begin{figure}[t]
+    \centering
+    \centering
+    \begin{subfigure}[h]{0.58\textwidth}
+    \centering
+    \includegraphics[height=4.05cm, trim={{0.2cm} 0 {0cm} 0},clip]{figs/unet.pdf}
+    \caption{U-Net architecture for our base diffusion model}
+    \label{fig:unet}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[h]{0.4\textwidth}
+    \centering
+    \includegraphics[height=3.6cm]{figs/fst.pdf}
+    \caption{Factorized spatial-temporal ResNet block}
+    \label{fig:fst}    
+    \end{subfigure}    
+    \caption{\textbf{Network architecture of our video diffusion model.} (a) We use an U-Net architecture following~\citet{dhariwal2021diffusion} but extending it to videos. (b) We use a factorized spatial-temporal convolution kernel~\cite{sun2015human} as the basic building block. Dashed lines in both figures represent residual connections~\citep{he2016deep}.}
+    \label{fig:network}
+\end{figure}
+
+ 
+
+\subsection{Action Regression from Flows and Depths}
+
+\label{sec:control}
+
+Based on the predicted flow, which essentially gives us a dense prediction of pixel movements, we can reconstruct object movements and robot movements in the video. 
+Our key insight is to, given the 3D information (depth) of the input frame and dense pixel tracking, reconstruct a sequence of 3D rigid transformations for each object. 
+In this work, we explore two different settings: predicting object transformations assuming a fixed camera (fixed-camera object manipulation) and predicting camera (robot) movement assuming a static scene (visual navigation).
+
+\paragraph{Predict object-centric motion} We first consider predicting 3D object motions in videos assuming a fixed camera. We represent each object as a set of 3D points $\{x_i\}$.
+The points corresponding to the object of interest will be extracted by external segmentation methods, such as a pretrained image segmentation model, or simply specified by the human.
+Given the camera intrinsic matrix and the input RGBD image, we can compute the initial 3D positions of these points. Let $T_t$ denote the rigid body transformation of the object at time step $t$ relative to the initial frame. We can express the projection of a 3D point onto the image plane at time step $t$ as $KT_tx = (u_t, v_t, d_t)$, where $K$ is the camera intrinsic matrix. Furthermore, the projected 2D point on frame $t$ is thus $(u_t/d_t, v_t/d_t)$.
+
+The optical flow tracking provides us with the projection of the same point in frame $t$, specifically $u_t/d_t$ and $v_t/d_t$. By tracking all points in $\{x_i\}$, we can find the optimal transformation $T_t$ that minimizes the following L2 loss:
+\begin{equation*}
+\resizebox{0.6\hsize}{!}{$
+    \gL_{\text{Trans}} = \sum_{i} \left\| u_t^{i} - \frac{\left(K T_t x_i\right)_1}{\left(K T_t x_i\right)_3} \right\|_2^2 + \left\| v_t^{i} - \frac{\left(K T_t x_i\right)_2}{\left(K T_t x_i\right)_3} \right\|_2^2$}, 
+\end{equation*}
+where $(u_t^i, v_t^i)$ is the corresponding pixel of point $x_i$ in frame $t$, and $\left( K T_t x_i \right)_i$ denotes the $i$-th entry of the vector. It's worth noting that even if we do not directly observe $d_t$, this loss function remains well-formed based on the assumption that $T_t$ represents a rigid body transformation.
+
+During execution, we first extract the mask of the object to manipulate and use the dense correspondences in predicted videos to compute the sequence of rigid body transformations for the object. Next, \newtext{given inferred object transformations, we can use existing off-the-shelf robotics primitives to generalizably infer actions in the environment}. In particular, if the object is graspable, we randomly sample a grasp on the object and then compute the target robot end-effector pose based on the target object pose and the grasping pose. When the object is not directly graspable (\eg a door), we similarly sample a contact point and use a push action to achieve the target object transformation.
+
+We treat the grasp/contact point as the first subgoal. Then, we iteratively apply the computed transformation on the current subgoal to compute the next subgoal until all subgoals are computed. 
+Next, we use a position controller to control the robot to reach the subgoals one by one.
+More details on inferring robot manipulation actions can be found in~\sect{sec:app_mw}. In contrast to our approach, directly learning explicitly regress actions using a learned inverse dynamics requires a substantial number of action labels so that a neural network can learn existing knowledge such as inverse dynamics, grasping and motion-planning.
+
+\xhdr{Inferring Robot Motion.} The similar algorithm can also be applied to predict robot (\ie the camera) motion assuming all objects are static. Due to the duality of camera motion and object motion, we can use exactly the same optimization algorithm to find $T_t$ (object-centric motion), and the camera motion $C_t = (T_t)^{-1}$. 
+Concretely, we make the following modifications to adapt \model{} to navigation tasks. 
+(1) The video diffusion model is trained to duplicate the last frame once the object is found.
+(2) Instead of tracking objects, we utilize the optical flow of the whole frame to estimate the rigid transformations between frames.
+(3) Based on the calculated rigid transformations, we simply map the transformations to the closest actions, detailed in~\sect{sec:app_ithor}. 
+
+\xhdr{Depth Estimation.} We can reconstruct 3D object or robot trajectories solely from the depth map of the initial frame (\ie the subsequent depth maps is not required).
+By leveraging dense correspondences between frames and assuming rigid object motion, we can reconstruct accurate 3D trajectories. This holds significant advantages as it enables us to train video prediction models exclusively using RGB videos, allowing for learning from online sources like YouTube, and only requires an RGB-D camera (or monocular depth estimator) at execution time. By eliminating the dependence on depth maps from subsequent frames, our system is significantly more adaptable to various data sources.
+
+\xhdr{Replanning Strategy.}
+After inferring the object or robot trajectories, we can execute the trajectory using a position controller in an open-loop manner. 
+Yet, it can suffer from accumulated errors. 
+As the planning horizon increases, the accuracy of predicted object locations diminishes due to combined errors in video synthesis and flow prediction. To mitigate this issue, we propose a replanning strategy. If the robot movement is smaller than 1mm over $15$ consecutive time steps while the task has not been fulfilled, 
+we re-run our video generation and action prediction pipeline from the current observation.
+
+
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+We describe the baselines and the variants of our proposed method \model{} in~\sect{sec:baseline}.
+Then, we compare \model{} to its variants and the baselines on simulated robot arm manipulation tasks in \mw{} (\fig{fig:env_mw}) in~\sect{sec:exp_mw} and simulated navigation tasks in \ithor{} (\fig{fig:env_ithor}) in~\sect{sec:exp_ithor}. 
+Note that although it is possible to obtain ground-truth actions from demonstrations in these two domains, our method does not use these actions; instead, these actions are only used by the baselines to provide an understanding of the task difficulty.
+Then, \sect{sec:cross_domain} evaluate the ability of \model{} to control robots by learning from out-of-domain human videos without actions, as illustrated in~\fig{fig:env_state_pusher}.
+In~\sect{sec:exp_bridge}, we leverage the Bridge dataset (\fig{fig:env_bridge}) and evaluate \model{} on real-world manipulation tasks with a Franka Emika Panda robot arm (\fig{fig:env_real_robot}).
+Extended qualitative results can be found in~\sect{sec:app_result} and
+additional experimental details can be found in~\sect{sec:app_exp}.
+
+\subsection{Baselines and Variants of \ \model{}}
+\label{sec:baseline}
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}[b]{0.190\textwidth}
+    \centering
+    \includegraphics[width=\textwidth, height=\textwidth]{figs/env/env.001.png}
+    \caption{\mw}
+    \label{fig:env_mw}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.190\textwidth}
+    \centering
+    \includegraphics[width=\textwidth, height=\textwidth]{figs/env/env.002.png}
+    \caption{\ithor}
+    \label{fig:env_ithor}    
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.190\textwidth}
+    \centering
+    \includegraphics[width=\textwidth, height=\textwidth]{figs/env/env.003.png}
+    \caption{Visual Pusher}
+    \label{fig:env_state_pusher}    
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.190\textwidth}
+    \centering
+    \includegraphics[width=\textwidth, height=\textwidth]{figs/env/env.004.png}
+    \caption{\bridge{}}
+    \label{fig:env_bridge}
+    \end{subfigure}    
+    \hfill
+    \begin{subfigure}[b]{0.190\textwidth}
+    \centering
+    \includegraphics[width=\textwidth, height=\textwidth]{figs/env/env.005.png}
+    \caption{Panda Arm}
+    \label{fig:env_real_robot}
+    \end{subfigure}        
+    \caption[]{ 
+    \textbf{Environments \& Tasks.}
+    \textbf{(a) \mw{}}
+    is a simulated benchmark featuring various tasks with a Sawyer robot arm.
+    \textbf{(b) \ithor{}}
+    is a simulated benchmark for embodied common sense reasoning.
+    We adopt its object navigation task,
+    requiring navigating to target objects located in different rooms.
+    \textbf{(c) Visual Pusher} is a real-world video dataset with $195$ human pushing videos.
+    \textbf{(d) \bridge{}} is a real-world video dataset 
+    comprised of $33,078$ 
+    robot demonstrations conducting various kitchen tasks.
+    \textbf{(e) Panda Arm} is a real-world pick-and-place tabletop environment with a Franka Emika Panda robot arm.
+    }
+    \label{fig:environment}
+\end{figure*} 
+\xhdr{Baselines.}
+We compare \model{} to a multi-task behavioral cloning (BC) baseline given access to a set of expert actions from all videos ($15,216$ labeled frame-action pairs in \mw{} and $5,757$ in \ithor{}), which are unavailable to our method.
+This baseline encodes the RGB observation to a feature vector with a ResNet-18~\citep{he2016deep}.
+Then, the feature vector is concatenated with a one-hot encoded camera ID and a task representation encoded by the CLIP-Text model~\citep{radford2021learning}.
+The concatenated representation is then fed to a 3-layer MLP, which produces an action.
+We explore initializing the weights of ResNet-18 from scratch (BC-Scratch) or from the pre-trained parameters of R3M~\citep{nair2022r3m} (BC-R3M). 
+
+We also implement UniPi~\citep{du2023learning}, a learning-from-video method that learns an inverse dynamics model to generate actions from videos, as a baseline.
+Specifically, UniPi infers actions from the videos synthesized by \model{}.
+Since the exact number of steps between two generated frames in our model may vary across different episodes,
+we modify the inverse dynamics model to output an additional binary label indicating whether to switch to the next frame of synthesized video plans. 
+This predictor can be trained with the demonstrations (with actions) used to train the BC baselines.
+\xhdr{\model{} and its Variants.}
+We compare \model{} to its variant that also predict dense correspondence.
+\begin{itemize}[leftmargin=2.5em]
+    \item \textbf{\model{} (Flow)} learns to directly predict the optical flow between frames as described in~\sect{sec:flowest}.
+    We include this variant to justify our 2-stage design, which synthesizes a video and then infers optical flows between each pair of frames.
+    
+    \item \textbf{\model{} (No Replan)} is the opened-loop variant of our proposed method, which synthesizes a video, infers flows, produces a plan, executes it, and finishes, regardless of if it fails or succeeds.
+    We include this variant to investigate whether our replanning strategy is effective.
+    
+    \item \textbf{\model{} (Full)} is our proposed method in full, employing the 2-stage design and can replan.
+    
+\end{itemize}
+
+\xhdr{Additional Ablation Studies and Experiments.} We also include additional ablation studies on the effect of first-frame conditioning in video generation and different text encoders (\eg CLIP and T5) in~\sect{sec:app_more_ablations},
+and a study of extracting object mask with existing segmentation model in ~\sect{sec:app_object_mask}.
+
+\subsection{\mw{}}
+\label{sec:exp_mw}
+
+\xhdr{Setup.}
+\mw{}~\citep{yu2019meta} is a simulated benchmark featuring various manipulation tasks with a Sawyer robot arm.
+We include $11$ tasks, and for each task, we render videos from $3$ different camera poses.
+We collect $5$ demonstrations per task per camera position, resulting in total $165$ videos. To isolate the problem of learning object manipulation skills, for our methods and all its variants, we provide the ground-truth segmentation mask for the target object.
+
+\begin{table*}
+\centering
+\small
+
+\setlength{\tabcolsep}{4.8pt}
+\scalebox{0.9}{\begin{tabular}{lcccccc}\toprule
+& door-open & door-close & basketball & shelf-place & btn-press & btn-press-top\\
+\midrule
+BC-Scratch & 21.3\% & 36.0\% & 0.0\% & 0.0\% & 34.7\% & 12.0\% \\
+BC-R3M & 1.3\% & 58.7\% & 0.0\% & 0.0\% & 36.0\% & 4.0\% \\
+UniPi (With Replan) & 0.0\% & 36.0\% & 0.0\% & 0.0\% & 6.7\% & 0.0\% \\
+\midrule
+\model (ID) & 0.0\% & 36.0\% & 0.0\% & 0.0\% & 0.0\% & 0.0\% \\
+\model (Flow) & 0.0\% & 0.0\% & 0.0\% & 0.0\% & 1.3\% & \textbf{40.0}\% \\
+\model (No Replan) & 30.7\% & 28.0\% & 21.3\% & 8.0\% & 34.7\% & 17.3\% \\
+\model (Full) & \textbf{72.0}\% & \textbf{89.3}\% & \textbf{37.3}\% & \textbf{18.7}\% & \textbf{60.0}\% & 24.0\% \\
+\midrule
+\midrule
+& faucet-close & faucet-open & handle-press & hammer & assembly & \cellcolor{lightblue}\textbf{Overall} \\
+\midrule
+BC-Scratch & 18.7\% & 17.3\% & 37.3\% & 0.0\% & 1.3\% & \cellcolor{lightblue} 16.2\% \\
+BC-R3M & 18.7\% & 22.7\% & 28.0\% & 0.0\% & 0.0\% & \cellcolor{lightblue} 15.4\% \\
+UniPi (With Replan)  & 4.0\% & 9.3\% & 13.3\% & 4.0\% & 0.0\% & \cellcolor{lightblue} 6.1\% \\
+\midrule
+\model (ID) & 4.0\% & 9.3\% & 13.3\% & 4.0\% & 0.0\% & \cellcolor{lightblue} 6.1\% \\
+\model (Flow) & 42.7\% & 0.0\% & 66.7\% & 0.0\% & 0.0\% & \cellcolor{lightblue} 13.7\% \\
+\model (No Replan) & 12.0\% & 17.3\% & 41.3\% & 0.0\% & 5.3\% & \cellcolor{lightblue} 19.6\% \\
+\model (Full) & \textbf{53.3}\% & \textbf{24.0}\% & \textbf{81.3}\% & \textbf{8.0}\% & \textbf{6.7}\% & \cellcolor{lightblue} \textbf{43.1}\% \\
+\bottomrule
+\end{tabular}}
+
+\caption[]{\textbf{\mw{} Result.}
+We report the mean success rate across tasks. Each entry of the table shows the average success rate aggregated from $3$ camera poses with $25$ seeds for each camera pose.}
+\label{table:mw_main}
+\end{table*}
+
+\iffalse
+{\begin{tabular}{@{}ccccccc@{}}\toprule
+\multirow{2}{*}{\textbf{Task}} & 
+\multicolumn{2}{c}{\textbf{BC}} &
+\multicolumn{3}{c}{\textbf{\model{}}} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-6}
+& BC-Scratch & BC-R3M & \flow{} & \rgbol{} & \rgbcl{} (ours-full)\\
+\midrule
+door-open               & 21.3\% &  1.3\% &  0.0\% & 30.7\% & \textbf{72.0}\% \\ 
+door-close              & 36.0\% & 58.7\% &  0.0\% & 28.0\% & \textbf{89.3}\% \\ 
+basketball              &  0.0\% &  0.0\% &  0.0\% & 21.3\% & \textbf{37.3}\% \\ 
+shelf-place             &  0.0\% &  0.0\% &  0.0\% &  8.0\% & \textbf{18.7}\% \\
+button-press            & 34.7\% & 36.0\% &  1.3\% & 34.7\% & \textbf{60.0}\% \\
+button-press-topdown    & 12.0\% &  4.0\% & \textbf{40.0}\% & 17.3\% & 24.0\%  \\
+faucet-close            & 18.7\% & 18.7\% & 42.7\% & 12.0\% & \textbf{53.3}\% \\
+faucet-open             & 17.3\% & 22.7\% &  0.0\% & 17.3\% & \textbf{24.0}\% \\
+handle-press            & 37.3\% & 28.0\% & 66.7\% & 41.3\% & \textbf{81.3}\% \\
+hammer                  &  0.0\% &  0.0\% &  0.0\% &  0.0\% &  \textbf{8.0}\%  \\
+assembly                &  1.3\% &  0.0\% &  0.0\% &  5.3\% &  \textbf{6.7}\% \\
+\midrule
+Overall                 & 16.2\% & 15.4\% & 13.7\% & 19.6\% & \textbf{43.1}\% \\
+\bottomrule
+\end{tabular}}
+\fi %
+\begin{figure}[t]
+    \begin{minipage}{0.61\textwidth}
+    \centering
+    \includegraphics[width=\linewidth, height=5cm]{./figs/mw_qual.pdf}
+    \caption{\textbf{Qualitative Results on \mw{}.}
+    \model{} can reliably synthesize a video, predict optical flow between frames, and infer and execute actions to fulfill the assembly task. 
+    Current subgoals ($\color{blue}\bigcdot$) 
+    and next subgoals ($\color{red}\bigcdot$) 
+    are rendered in inferred action visualizations.
+    }
+    \label{fig:mw_qual}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.35\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{./figs/replan_SR.pdf}
+    \caption{\textbf{Number of Replanning Steps vs. Success Rate.}
+    Our method \model{} achieves higher success rates across all viewing angles with more replanning trials, justifying the effectiveness of our replanning strategy.
+    }
+    \label{fig:mw_replan}
+    \end{minipage}
+\end{figure} 
+
+Each policy is evaluated on each task with $3$ camera poses, each with $25$ trials.
+A policy succeeds if it reaches the goal state within the maximum environment step and fails otherwise.
+The positions of the robot arm and objects are randomized when each episode begins. 
+The result is reported in~\tbl{table:mw_main}.
+\xhdr{Comparison to Baselines.}
+Our method \model{} (Full) consistently outperforms the two BC baselines (BC-Scratch and BC-R3M) and UniPi on all the tasks by a large margin.
+This indicates that the tasks are still very challenging, even with access to expert actions.
+
+\xhdr{Comparing \model{} Variants.}
+\model{} (Flow) performs the best on button-press-topdown and achieves reasonable performance on faucet-close and handle-press, while performing very poorly on the rest of the tasks.
+As described in~\sect{sec:flowest}, 
+the diffusion model employed in this work may not be optimal for flow prediction.
+Also, \model{} (Full) consistently outperforms
+\model{} (No Replan), justifying the effectiveness of our closed-loop design, enabling replanning when the policy fails.
+
+\xhdr{Intermediate Outputs.}
+To provide insights into the pipeline of \model{},
+we visualized the synthesized video, predicted optical flow, and inferred actions (\ie motion planning) in~\fig{fig:mw_qual}.
+Our diffusion model synthesizes a reasonable video showing the robot arm picking up the nut and placing it onto the peg.
+The optical flow predicted from video frames accurately captures the robot arm's motions.
+Then, based on the predicted flow, the inferred actions can reliably guide the arm to fulfill the task.
+\xhdr{Effect of Replanning Trials.}
+We investigate how varying the maximum number of planning affects the performance of \model{}.
+As presented in~\fig{fig:mw_replan}, the success rate consistently increases with more replanning trials, demonstrating the effectiveness of our proposed replanning strategy.
+
+\xhdr{Failure Modes.} \newtext{The primary failure mode we observed is the errors made by the optical flow tracking model, partially because these models are not trained on any in-domain data. Since the prediction resolution is not very high in our experiments, small pixel-level errors in tracking small objects would result in large errors in the 3D space. We believe that by directly increasing the resolution of video synthesis or by training an in-domain optical flow model, we can improve the performance.}
+\subsection{{\normalfont i}THOR}
+\label{sec:exp_ithor}
+
+\xhdr{Setup.}
+\ithor{}~\citep{ai2thor} is a simulated benchmark for embodied common sense reasoning. 
+We consider the object navigation tasks for evaluation, where an agent randomly initialized into a scene learns to navigate to an object of a given type (\eg toaster, television).
+At each time step, the agent observes a 2D scene and takes 
+one of the four actions: \texttt{MoveForward}, \texttt{RotateLeft}, \texttt{RotateRight}, and \texttt{Done}.
+We chose $12$ different objects to be placed at $4$ type of rooms (\eg kitchen, living room). No object segmentation is required in this navigation task.
+
+\begin{figure}[t]
+    \begin{minipage}{0.61\textwidth}
+    \centering
+    \includegraphics[width=\linewidth, height=5cm]{./figs/ithor_qual.pdf}
+    \caption{\textbf{Qualitative Results on \ithor{}.}
+    \model{} can reliably synthesize a video, predict optical flow between frames, and infer and execute actions to navigate to the television.}
+    \label{fig:ithor_qual}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.35\textwidth}
+    \centering
+    \scalebox{0.7}{
+    \begin{tabular}{@{}ccccc@{}}\toprule
+    \small
+    \textbf{Room} & BC-Scratch & BC-R3M & \model{} \\ 
+    \midrule
+    Kitchen     & 1.7\% & 0.0\% & \textbf{26.7}\% \\ 
+    Living Room & 3.3\% & 0.0\% & \textbf{23.3}\% \\ 
+    Bedroom     & 1.7\% & 1.7\% & \textbf{38.3}\% \\ 
+    Bathroom    & 1.7\% & 0.0\% & \textbf{36.7}\% \\ 
+    \midrule
+    Overall     & 2.1\% & 0.4\% & \textbf{31.3}\% \\ 
+    \bottomrule
+    \end{tabular}}
+    \captionof{table}{\textbf{\ithor{} Result.}
+    We report the mean success rate, aggregated from $3$ types of objects per room with $20$ episodes per object.
+    Both the two BC baselines fail to achieve meaningful performance on the \ithor{} object navigation tasks.
+    On the other hand, \model{} performs reasonably with a $31.3\%$ average success rate.
+    }
+    \label{table:ithor}
+
+    \end{minipage}
+\end{figure} 
+
+Each policy is evaluated on $12$ object navigation tasks distributed in $4$ different types of rooms ($3$ tasks for each room).
+A policy succeeds if the target object is in the agent's sight and within a 1.5m distance within the maximum environment step or when \texttt{Done} is predicted and fails otherwise.
+The position of the agent is randomized at the beginning of each episode. 
+The result is reported in~\tbl{table:ithor}.
+\xhdr{Comparison to Baselines.}
+Our proposed method \model{} can find target objects in different types of rooms fairly often ($31.3\%$),
+while the two BC baselines fail entirely.
+BC-R3M with a pre-trained ResNet-18 performs worse than BC-Scratch, which can be attributed to the fact that
+R3M is pre-trained on robot manipulation tasks and might not be suitable for visual navigation tasks.
+
+\xhdr{Intermediate Outputs.}
+The intermediate outputs produced by \model{} are presented in~\fig{fig:ithor_qual}.
+The diffusion model can synthesize video showing an agent navigating to the target object.
+Then, desired agent movements can be easily inferred from the predicted optical flow, resulting in the ease of mapping the flow to \texttt{MoveForward}, \texttt{RotateLeft}, or \texttt{RotateRight}.
+When no flow is predicted, it indicates the agent has found the object and selects \texttt{Done} as the predicted action.
+
+\subsection{Cross-Embodiment Learning: From Human Videos to Robot Execution}
+\label{sec:cross_domain}
+
+We aim to examine if \model{} can 
+achieve cross-embodiment learning,
+\eg leverage \textit{human} demonstration videos to control \textit{robots} to solve tasks.
+
+\begin{wrapfigure}[13]{r}{0.47\textwidth}
+  \begin{center}
+    \includegraphics[width=0.45\textwidth]{figs/cross_domain_qual.pdf}
+  \end{center}
+  \caption{\textbf{Qualitative Results on Visual Pusher.} AVDC can \textbf{(a) synthesize video plans} by watching \textit{human} demonstrations and \textbf{(b) infer actions} to control the \textit{robot} without any fine-tuning.
+  \label{fig:cross_domain}
+  }
+\end{wrapfigure}
+
+\xhdr{Setup.}
+We evaluate our method with Visual Pusher tasks~\citep{schmeckpeper2020reinforcement,zakka2022xirl}. Specifically, we learn a video diffusion model from only actionless human pushing data ($198$ videos), with the same U-net architecture used in \mw{} experiments and trained the model for $10$k steps. %
+Then, we evaluate \model{} on simulated robot pushing tasks {\it without any fine-tuning}. 
+
+\xhdr{Results.}
+\model{} exhibits strong zero-shot transfer capability, achieving a $90\%$ zero-shot success rate out of $40$ runs. 
+This indicates that \model{} can perform cross-embodiment learning --- utilizing out-of-domain human videos to achieve reliable robot execution.
+A synthesized video and the corresponding robot execution are illustrated in~\fig{fig:cross_domain}.
+
+\subsection{Real-World Franka Emika Panda Arm with Bridge Dataset}
+\label{sec:exp_bridge}
+
+\begin{figure}[t]
+    \begin{minipage}{0.35\textwidth}
+    \includegraphics[width=\linewidth, height=5cm]{./figs/bridge_qual.pdf}
+    \caption{\textbf{Qualitative Results on \bridge{}.}
+    \model{} can reliably infer current subgoals ($\color{blue}\bigcdot$) 
+    and next subgoals ($\color{red}\bigcdot$)
+    for real-world robot manipulation tasks.
+    }
+    \label{fig:bridge_qual}    
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.61\textwidth}
+    \includegraphics[width=\linewidth, height=5cm]{./figs/franka_qual.pdf}
+    \caption{\textbf{Qualitative Results on Franka Emika Panda.}
+    \model{} can reliably synthesize a video, predict optical flow between frames, and infer and execute actions to fulfill the assembly task.
+    Current subgoals ($\color{blue}\bigcdot$) 
+    and next subgoals ($\color{red}\bigcdot$) 
+    are rendered in the bottom row. %
+    }
+    \label{fig:franka_qual}
+    \end{minipage}
+\end{figure} 
+We aim to investigate if our proposed framework \model{} can 
+tackle real-world robotics tasks.
+To this end, we train our video generation model on the Bridge dataset~\citep{ebert2021bridge}, and perform evaluation on a real-world Franka Emika Panda tabletop manipulation environment.
+\xhdr{Setup.}
+The Bridge dataset~\citep{ebert2021bridge} provides $33,078$ teleoperated WidowX 250 robot demonstrations of various kitchen tasks captured by a web camera without depth information. 
+Our real-world setup comprises a Franka Emika Panda robot arm and an Intel Realsense D435 RGBD camera mounted at a fixed frame relative to the table. 
+Due to the differences in camera FOVs and the environmental setup, directly applying the video generative model trained on Bridge to our setup does not generalize well. 
+We thus fine-tuned the diffusion model with $20$ human demonstrations collected with our setup.
+In our real-world evaluation, we assume that the target object can be grasped using a top-grasp so that no reorientation of the target object is needed.
+\newtext{Note that both the Bridge dataset and our human demonstration datasets do not contain any action label relevant to our robot: Bridge is based on a different robot model and our tabletop videos are human hand manipulation videos.}
+
+\xhdr{Zero-Shot Generalization of Bridge Model.}
+We found that the video diffusion model trained on Bridge videos can reasonably generalize to real scenes without fine-tuning, as discussed in~\sect{sec:bridge_zero_shot}.
+
+\xhdr{Results.}
+The predicted object motion qualitative results on the Bridge dataset are presented in~\fig{fig:bridge_qual}. 
+\model{} can reliably synthesize videos, predict optical flow, identify target objects, and infer actions.
+\fig{fig:franka_qual} presents the screenshots of robot trajectories, showcasing the successful deployment of our system. More qualitative results can be found in~\sect{sec:app_result}.
+We also quantitatively evaluated the entire pipeline. To this end, we set up $10$ scenes with different initial object configurations and tasks. Each task requires a pick-and-place of an object of a specified category (\eg apple) to a container (\eg plate). The results are detailed in~\sect{sec:app_real}.
+
+
+
+
+\section{Discussion}
+
+\label{sec:conclusion}
+
+\xhdr{Limitations.} Although our \model demonstrates success in diverse simulated and real-world domains, it has several limitations. First, when the majority of an object is occluded by the robot arm, our algorithm may lose track of the object. Moreover, the model can struggle in optical flow prediction under rapidly changing lighting conditions or large object movements in object poses. Additionally, real-world object manipulation requires predicting grasps or contact surfaces for pushing on objects. However, this information isn't directly transferable from real videos due to the disparity between various robot hands and between humans and robots. Therefore, integration of other manipulation algorithms, such as grasp prediction modules~\citep{sundermeyer2021contact}, is important. Finally, force information, crucial for manipulation, is unobtainable from RGB videos. Future work may consider learning or fine-tuning with real-world interactions to address this.
+
+\xhdr{Conclusion.} This work presents an approach to learning to act directly in environments given only RGB video demonstrations. To regress actions, our approach exploits dense correspondences between synthesized video frames to infer a transform on objects or surrounding to enact to reach the next synthesized state. We illustrate the general applicability of this approach in both simulated and real-world manipulation and navigation tasks.
+We further present an open-source implementation for efficient and cheap robot video modeling, enabling effective video policy training in both academic and industry settings. We hope our work inspires further work on learning from videos, which can be readily found on the internet and readily captured across robots.
+
+
+ 
+\renewcommand\bibname{References}
+
+
+
+

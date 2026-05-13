@@ -1,0 +1,986 @@
+\title{Image and Video Tokenization with Binary Spherical Quantization}
+
+\begin{abstract}
+  We propose a new transformer-based image and video tokenizer with Binary Spherical Quantization (BSQ).
+  BSQ projects the high-dimensional visual embedding to a lower-dimensional hypersphere and then applies binary quantization. 
+  BSQ is (1) parameter-efficient without an explicit codebook, (2) scalable to arbitrary token dimensions, and (3) compact: compressing visual data by up to 100$\times$ with minimal distortion.
+  Our tokenizer uses a transformer encoder and decoder with simple block-wise causal masking to support variable-length videos as input.
+  The resulting BSQ-ViT achieves state-of-the-art visual reconstruction quality on image and video reconstruction benchmarks with 2.4$\times$ throughput compared to the best prior methods.
+  Furthermore, by learning an autoregressive prior for adaptive arithmetic coding, BSQ-ViT achieves comparable results on video compression with state-of-the-art video compression standards.
+  BSQ-ViT also enables masked language models to achieve competitive image synthesis quality to GAN- and diffusion-based methods.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+Learned discrete image and video tokenization allows for state-of-the-art visual compression~\cite{daede2016daala,agustsson2017soft,el2023pqmim}, recognition~\cite{yu2022vitvqgan,bao2022beit,zhou2022ibot,wang2022bevt} and generation~\cite{van2017vqvae,esser2021vqgan,chang2022maskgit}.
+These models follow a proven recipe from large language modeling~\cite{brown2020gpt3,achiam2023gpt4,touvron2023llama2}: Tokenize input and outputs into discrete units and learn an auto-regressive model to predict this tokenized stream one token at a time.
+The most widely used approach for image encoding is Vector-Quantized
+Variational Auto-Encoder (VQ-VAE)~\cite{van2017vqvae}.
+They encode inputs in continuous latent embeddings and map them to a learned codebook through nearest-neighbor lookup.
+However, VQ-VAE style approaches have two drawbacks: 
+First, most image encoders are built upon convolutional networks (CNN)~\cite{esser2021vqgan,podell2023sdxl}.
+Adapting spatial convolution for images to spatial-temporal convolution for videos requires non-trivial architectural changes~\cite{ge2022tats,yu2023magvit,yu2024magvit2} with increased computational cost.
+Treating videos as a sequence of images leads to a suboptimal quantization~\cite{yu2023magvit}.
+Second, vector quantization (VQ) scales poorly with the codebook size.
+The runtime scales linearly with the codebook size, and the codebook easily overfits on smaller datasets~\cite{yu2024magvit2}.
+This is especially troubling for video inputs, as they rely on larger codebooks to represent both static visual patterns and dynamic motion patterns.
+This paper proposes a unified visual tokenizer based on a Vision Transformer and Binary Spherical Quantization (BSQ).
+The Transformer-based encoder-decoder leverages a block-wise causal mask and uses only visual tokens from the current or past timestamps for reconstruction (Figure~\ref{fig:causal_mask}).
+BSQ first projects the high-dimensional visual embedding of the transformer encoder to a lower-dimensional hypersphere and then applies binary quantization. 
+The transformer encoder, decoder, and BSQ are seamlessly integrated into the VQ-GAN~\cite{esser2021vqgan} framework and trained end-to-end.
+Our proposed visual tokenizer features several advantages.
+First, the Transformer-based encoder-decoder shows a Pareto improvement in visual reconstruction quality and computational efficiency compared to standard CNNs.
+Second, the block-wise causal design unifies images and videos as input at training and supports variable-length videos at inference. 
+BSQ constructs an implicit codebook whose effective vocabulary grows exponentially with the spherical dimension with no learned parameters.
+The increasing codebook size consistently yields better reconstruction results. 
+Compared to Lookup-free Quantization (LFQ)~\cite{yu2024magvit2}, a recent technique that also builds an implicit codebook based on scalar quantization (SQ), BSQ has a bounded quantization error and is easier to train.
+Furthermore, we show that the soft quantization probability in BSQ reduces to a simple product of multiple channel-independent Bernoulli distributions, leading to efficient entropy regularization during training.
+Specifically, we show how a factorized approximation to the entropy for soft quantization of $L$ bits reduces the theoretical computation complexity from $O(2^L\times L)$ to $O(L)$ with minimal approximation error, and negligible performance degradation in practice.
+We validate the effectiveness of BSQ-ViT on visual reconstruction and compression benchmarks.
+On image reconstruction, our model archives a state-of-the-art visual reconstruction quality by both pixel-level and semantic metrics.
+In particular, our best-performing BSQ-ViT achieves a reconstruction FID of 0.41 on ImageNet-1k val, a 43\% reduction compared to the runner-up (SDXL-VAE~\cite{podell2023sdxl}), while being 2.4$\times$ faster.
+On video reconstruction, our best model reduces FVD on UCF-101 by more than half (8.62 $\rightarrow$ 4.10).
+By further learning an autoregressive prior for adaptive arithmetic coding, BSQ-ViT achieves comparable results on video compression with state-of-the-art video compression standards,~\eg H.264 and HEVC.
+By learning a masked language model, BSQ-ViT enables image generation with similar quality to BigGAN~\cite{brock2018biggan} and ADM~\cite{dhariwal2021adm}.
+
+
+\section{Related Work}
+
+\label{sec:related}
+
+\myparagraph{Visual Tokenization.}
+VQ-VAE~\cite{van2017vqvae} introduced the concept of discrete tokenized bottlenecks in auto-encoder architectures.
+Recent improvements include better training objectives~\cite{ramesh2021dalle,esser2021vqgan}, increasing VQ codebook usage~\cite{yu2022vitvqgan,zheng2023online}, replacing VQ with product quantization (PQ)~\cite{el2023pqmim} or scalar quantization (SQ)~\cite{mentzer2024fsq}, and employing stronger generative models~\cite{esser2021vqgan,chang2022maskgit}.
+Image tokenizers are trivially extended to video by tokenizing individual frames~\cite{villegas2022phenaki,blattmann2023svd}.
+However, this ignores dynamic motions and leads to suboptimal tokenization: The same visual information is compressed repeatedly across frames.
+
+\myparagraph{Video Tokenization.}
+Dedicated video tokenizers make better use of temporal correlations in the input signal.
+VideoGPT~\cite{yan2021videogpt} proposes 3D (de-)convolutions in VQ-VAE for video generation.
+TATS~\cite{ge2022tats} replaces zero padding with replicate padding to mitigate the temporal corruption when video length varies.
+Yu~\etal introduce central inflation of pretrained 2D convolutional filters to 3D ~\cite{yu2023magvit} and further make them causal~\cite{yu2024magvit2}.
+Phenaki~\cite{villegas2022phenaki} adopts a factorized causal video vision Transformer~\cite{arnab2021vivit} (C-ViViT), which improves efficiency but sacrifices modeling complex motion across time.
+
+\myparagraph{Neural Compression.}
+Since Shannon established the fundamental source coding theorem~\cite{shannon1948mathematical} it has formed the basis of lossless compression~\cite{huffman1952method,pasco1976source,rissanen1979arithmetic,duda2009ans} with probabilistic models including RNN~\cite{mikolov2012statistical,goyal2019deepzip}, CNN~\cite{van2016pixelcnn,van2017vqvae}, VAE~\cite{townsend2019bitback,townsend2020hilloc}, and Transformers~\cite{bellard2019lossless,deletang2024lmic}.
+L3C~\cite{mentzer2019l3c} presents a fast hierarchical probabilistic model for lossless image compression.
+LMIC~\cite{deletang2024lmic} shows that LLMs trained primarily on text,~\eg Llama 2~\cite{touvron2023llama2} and Chinchilla~\cite{hoffmann2022Chinchilla}, are general-purpose compressors for text, images, and audio.
+However, these LLMs are too big and slow to make this compression practical.
+Our tokenizer presents a lighter-weight alternative: Tokenization performs initial local lossy compression, while a lightweight and thus computationally efficient sequence model ($\sim$300M) compresses the global video structure.
+
+\myparagraph{Video compression.}
+Most high-performing modern video compression methods rely on hybrid coders that combine transform coding~\cite{goyal2001theoretical,balle2020nonlinear} and motion compensation~\cite{wiegand2003h264,sullivan2012h265}.
+Such belief continues in most of the recently popularized learning-based solutions~\cite{lu2019dvc,rippel2019lvc,agustsson2020ssf,li2021dcvc}.
+VCT~\cite{mentzer2022vct} proposes a Transformer-based temporal entropy model to learn motion implicitly.
+However, VCT requires a heavily-engineered image compression model~\cite{he2022elic} and has a short temporal context window.
+In this work, we show that a learned video tokenizer combined with an arithmetic coder modeled by a sequence model achieves competitive compression results without explicitly modeling motion.
+
+
+
+\section{Preliminaries}
+
+
+A tokenization-based compression algorithm has three basic steps:
+A visual tokenizer, i.e.  VQ-VAE~\cite{van2017vqvae} or LFQ~\cite{yu2024magvit2}, translates raw visual inputs to a discrete set of tokens and back.
+A sequence model then predicts an auto-regressive probability distribution over these discrete tokens.
+Finally, arithmetic coding translates this distribution into a compressed representation.
+
+\myparagraph{Visual Tokenization.}
+VQ-VAE~\cite{van2017vqvae} introduced the concept of learning discrete visual representation with an auto-encoder architecture and a bottleneck module in between with vector quantization (VQ).
+Given a video $\mX\in\mathbb{R}^{T\times H\times W\times 3}$, an encoder $\cE$ produces a set of $d$-dimensional latent embeddings $\mZ=\cE(\mX)\in\mathbb{R}^{\left(\frac{T}{q}\times \frac{H}{p} \times \frac{W}{p}\right) \times d}$ with a spatial-temporal downsample factor of $q\times p \times p$.
+The bottleneck module $q$ then transforms the real-valued latent embeddings into some discrete tokens $\hat{\vz}=q(\vz)$.
+
+In Vector Quantization (VQ) the quantizer $q_{VQ}$ assigns each $\vz\in\mZ$ to the closet entry in a learnable code in a codebook $\mC=[\vc_1\cdots\vc_K]\in\mathbb{R}^{K\times d}$
+\begin{align}
+\hat{\vz}=q_{VQ}(\vz) = \vc_{\sk} =  \argmin_{\vc_{\hat k} \in \mC} \| \vz - \vc_{\hat k} \|_2.
+\end{align}
+Here, $K$ is the vocabulary size of the codebook and the integer $\sk$ is the discretized token representation of $\vz$ which can be stored in $\lceil \log(K) \rceil$ bits.
+A decoder $\cG$ maps the discretized tokens back into a visual representation $\hat{\mX} = \cG(\hat{\mZ})$.
+The entire network ($\cE$, $\cG$, and $q$) is end-to-end trainable and minimizes an MSE loss $ \cL_\mathrm{MSE}=\| \hat{\mX} - \mX \|_2$ using straight-through estimator~\cite{bengio2013ste} to propagate gradients through the quantization bottleneck.
+More recent quantizers rely on a perceptual $\cL_\mathrm{LPIPS}$ and adversarial $\cL_\mathrm{GAN}$ loss for better visual quality~\cite{esser2021vqgan}
+\begin{align}
+\minimize_{\cE, \cG, q} \mathbb{E}_{\mX} \left[ \cL_\mathrm{VQ}(\cE, \cG, q) + \eta \cL_\mathrm{LPIPS}(\cE, \cG, q) + \lambda \cL_\mathrm{GAN}(
+\cE, \cG, q) \right],
+\end{align}
+where the quantization loss term $\cL_\mathrm{VQ}$ emulates online clustering to learn $\vc_k$.
+The main issue with VQ-VAE is that Vector Quantization scales poorly with increasing vocabulary size $K$~\cite{yu2024magvit2}.
+Remedies include using a smaller code dimension~\cite{yu2022vitvqgan}, introducing stochasticity~\cite{takida2022sq}, reviving ``dead'' codevectors~\cite{zheng2023online}, and regularizing with a commitment loss~\cite{van2017vqvae}:
+\begin{align}
+    \cL_\mathrm{commit}(\hat{\vz}, \vz)=\|\sg(\hat{\vz}) - \vz \|,
+\end{align}
+where $\sg(\cdot)$ denotes the stop-gradient operation.
+
+\myparagraph{Lookup-Free Quantization} (LFQ)~\cite{yu2024magvit2} uses a fixed implicit codebook $\mC_{LFQ} = \left\{-1, 1\right\}^L$ as corners of a hypercube in $L$ dimensional space.
+The best vector quantizer for this implicit codebook is the binary quantization $q_{LFQ}(\vz)=\sign(\vz)$.
+To optimize for an effective latent code and encourage usage of the implicit codebook, Yu~\etal~\cite{yu2024magvit2} use an additional entropy objective~\cite{jansen2020coincidence}:
+\begin{align}
+\cL_\mathrm{entropy} = \mathbb{E}\left[ H(q(\vz)) \right] - \gamma H\left[ \mathbb{E} \left[ q(\vz) \right] \right],
+\end{align}
+where both entropy terms rely on a soft quantization~\cite{agustsson2017soft} 
+\begin{align}
+\hat q(\vc | \vz) = \frac{\exp(-\tau (\vc-\vz)^2)}{\sum_{\vc \in \mC_{LFQ}} \exp(-\tau (\vc-\vz)^2)}
+\end{align}
+to guarantee the loss is differentiable.
+The final loss $\cL_{LFQ}$ is a combination of $\cL_\mathrm{MSE}$, $\cL_\mathrm{commit}$, $\cL_\mathrm{LPIPS}$, $\cL_\mathrm{GAN}$, and $\cL_\mathrm{entropy}$.
+The main computational bottleneck in LFQ is the entropy optimization of a higher-dimensional codebook, as it involves summation over $2^L$ implicit codebook entries.
+
+Both VQ-VAE and LFQ lossily compress visual inputs $\mX$ into $N$ discrete tokens $[\sk_1, \ldots, \sk_N]$, where $\sk_i \in \{1, \ldots K\}$, in $N\lceil \log{K} \rceil$ bits.
+Neither tokenization strategy exploits the global image or video structure well.
+A sequence model with lossless arithmetic coding better fits this global structure.
+
+\myparagraph{Arithmetic Coding}~(AC)~\cite{pasco1976source,rissanen1979arithmetic,witten1987arithmetic} offers a way of constructing a bitstream with near-optimal length by leveraging the statistical property of the coding distribution.
+Given a distribution over token streams $P_t: \{1, \cdots, K\}^n \mapsto (0, 1]$, arithmetic coding looks to encode the token stream in $(-\lceil \log P_t(\sk_1, \ldots, \sk_{N}) \rceil + 1)$ bits.
+The most common token distribution is an auto-regressive model
+\begin{align}
+P_t(\sk_1, \ldots, \sk_{N}) = P_t(\sk_1)P_t(\sk_2|\sk_1)\ldots P_t(\sk_{N}|\sk_1, \ldots, \sk_{N-1})
+\end{align}
+for which efficient incremental encoding and decoding algorithms exist~\cite{mentzer2022vct}.
+
+\begin{figure}[!tb]
+    \centering
+    \subfloat[
+	\small{BSQ-VAE (Ours).}
+	\label{fig:bsq_vit}
+	]
+    {
+        \resizebox{\linewidth}{!}{
+            \includegraphics[width=\linewidth]{figures/bsq_vit.pdf}
+        }
+    }
+    
+    \subfloat[
+	\small{VQ-VAE.}
+	\label{fig:vq_vit}
+	]
+    {
+        \resizebox{0.4\linewidth}{!}{
+            \includegraphics[width=\linewidth]{figures/vq_vit.pdf}
+        }
+    }
+    \subfloat[
+	\small{LFQ-VAE.}
+	\label{fig:lfq_vit}
+	]
+    {
+        \resizebox{0.566\linewidth}{!}{
+            \includegraphics[width=\linewidth]{figures/lfq_vit.pdf}
+        }
+    }
+    \caption{
+    \small{
+    \textbf{Variational Auto-Encoders (VAE) with different bottlenecks (BSQ, VQ, and LFQ).}
+    }}
+    \label{fig:vq_lfq_bsq}
+\end{figure}
+
+
+\section{Transformer-based Visual Tokenizer with Binary Spherical Quantization}
+
+
+Our video tokenizer follows an encoder-decoder architecture with a discretization bottleneck as illustrated in Figure~\ref{fig:bsq_vit}.
+It combines a transformer-based encoder, a transformer-based decoder, and a Binary Spherical Quantization (BSQ) layer.
+BSQ projects the latent code into a lower-dimensional spherical space, applies binary quantization, and then projects the result back up into the decoder's latent space.
+This projection onto a low-dimensional spherical space has several theoretical advantages: The approximation error of the quantizer is bounded and much of the entropy computation factorizes along individual dimensions.
+These advantages result in experimental improvements as well.
+BSQ converges quicker and to a better tokenizer than other quantization schemes.
+
+\subsection{Binary Spherical Quantization}
+\label{sec:method:bsq}
+
+Binary Spherical Quantization (BSQ) optimizes over an implicit codebook $\mC_{BSQ} = \{-\frac{1}{\sqrt{L}}, \frac{1}{\sqrt{L}}\}^L$, a hypercube projected onto a unit sphere.
+Each corner $\vc_{\sk} \in \mC_{BSQ}$ of a hypercube corresponds to a unique token $\sk$.
+The quantizer works as follows: it projects some high-dimensional latent embedding $\vz$ to a lower-dimensional unit hypersphere $\vu$, applies binary quantization per axis ${\hat\vu=\sign(\vu)}$, and back-projects to the quantized vector in the original latent space $\hat \vx$, as shown in Figure~\ref{fig:bsq_vit}.
+Specifically, we start with an encoded visual input $\vz=\cE(\vx)\in\mathbb{R}^d$.
+We first linearly project the latent embedding to $L$ dimensions $\vv=\mathrm{Linear}(\vz)\in\mathbb{R}^L$, where $L\ll d$.
+Next, we obtain project $\vv$ onto the unit sphere $\vu = \frac{\vv}{|\vv|}$, and perform binary quantization to each dimension of $\vu$ independently $\hat{\vu} = \frac{1}{\sqrt{L}}\sign(\vu)$, where $\sign(x)$ is the sign function.
+To keep outputs on the unit sphere, we map $\sign(0) \to 1$.
+We use a Straight-Through Estimator (STE)~\cite{bengio2013ste} to make the operator differentiable, $\sign_\mathrm{STE}(x)=\sg(\sign(x)-x) + x$, where $\sg(\cdot)$ denotes the stop-gradient operation.
+Finally, we back-project the quantized $\hat{\vu}$ to the $d$-dimensional space $\hat{\vz}=\mathrm{Linear}(\hat\vu)\in\mathbb{R}^d$.
+
+BSQ has a few appealing properties:
+As with LFQ, the implicit codebook entry is parameter-free and easy to compute.
+Unlike LFQ, a soft quantization of BSQ has a simple probabilistic interpretation, which leads to efficient entropy computation in an entropy loss $\cL_\mathrm{entropy}$.
+Finally, BSQ's quantization error is bounded, which empirically leads to much faster and better convergence than LFQ.
+
+
+\myparagraph{Efficient implicit code assignment.}
+At inference time, we map a projected embedding $\vv$ to a token through simply binarization $\sk = \sum_{i=1}^L 1_{[v_i > 0]} 2^{i-1}$, where $1_{[\cdot]}$ is the indicator function.
+The inverse mapping uses the bitshift and the bitwise AND operations.
+\myparagraph{Soft BSQ and entropy.}
+To best use the entire range of the implicit codebook $\mC_{BSQ}$, we use the entropy loss $\cL_\mathrm{entropy} = \mathbb{E}_\vu\left[ H(q(\vu)) \right] - \gamma H\left[ \mathbb{E}_\vu \left[ q(\vu) \right] \right]$~\cite{jansen2020coincidence}.
+To compute this entropy loss we first derive a soft quantization scheme~\cite{agustsson2017soft}.
+Since both codebook entries and inputs to the quantizer are unit vectors, the soft quantization is a distribution
+\begin{align}
+\hat q(\vc | \vu) = \frac{\exp(\tau \vc^\top \vu)}{\sum_{\vc \in \mC_{BSQ}} \exp(\tau \vc^\top \vu)} = \prod_{d=1}^L \sigma\left(2\tau c_d u_d\right)\label{eqn:soft_assign:element},
+\end{align}
+where $\sigma$ is a sigmoid function, and the overall soft quantizer is independent along each dimension.
+
+This form allows for an efficient computation of the first entropy term
+\begin{equation}
+  \mathbb{E}_\vu\left[ H(\hat q(\vc | \vu)) \right] = \mathbb{E}_\vu\left[ \sum_{d=1}^L H(\hat q(c_d | u_d)) \right]\label{eqn:entropy:factorize}.
+\end{equation}
+
+Instead of reasoning over distributions over the entire codebook, which is exponentially large, we instead treat each dimension independently.
+The resulting entropy computation is linear to the dimension $L$ of the bottleneck.
+
+Unfortunately, the second entropy term cannot directly use the same independence assumption, as dimensions in the expected value $\mathbb{E}_\vu[\hat q(\vc|\vu)]$ are correlated through the distribution of $\vu$.
+We find the closest factorized distribution $\tilde q(\vc) =\prod_{d=1}^K \tilde q(c_d)$ to $\mathbb{E}_\vu[\hat q(\vc|\vu)]$, and instead minimize the entropy of the approximate distribution.
+
+The final approximate entropy term to maximize is 
+\begin{equation}
+  H(\mathbb{E}_\vu\left[\hat q(\vc | \vu) \right]) \approx H(\tilde q(\vc)) = \sum_{d=1}^{L} H(\mathbb{E}_{\vu_d}[\hat q(\vc_d|\vu_d)]) \label{eqn:entropy_2:factorize}.
+\end{equation}
+
+This entropy term is again efficient for evaluation.
+
+\myparagraph{Quantization error in BSQ.}
+Most quantizers use pass-through gradient estimates during training~\cite{yu2024magvit2,van2017vqvae,esser2021vqgan}.
+Though simple to implement, it assumes that the gradients for an unquantized $\vu$ and quantized $\hat{\vu}$ bottleneck are almost the same, which only holds if the quantization error $d(\vu, \hat{\vu})=\|\vu-\hat{\vu}\|$ is small.
+
+this is true for BSQ
+\begin{equation}
+    \mathbb{E}_\vu\left[ d(\vu, \hat{\vu}) \right]< \sqrt{2 - \frac{2}{\sqrt{L}}} < \sqrt{2} \label{eqn:quantization:error}.
+\end{equation}
+\begin{figure}[!tb]
+    \centering
+    \subfloat[
+	\small{BSQ}
+	\label{fig:BSQ}
+	]
+    {
+        \resizebox{0.3\linewidth}{!}{
+        \includegraphics[width=\linewidth]{figures/bsq.pdf}
+        }
+    }
+    \subfloat[
+	\small{FSQ}
+	\label{fig:FSQ}
+	]
+    {
+        \resizebox{0.3\linewidth}{!}{
+        \includegraphics[width=\linewidth]{figures/fsq.pdf}
+        }
+    }
+    \subfloat[
+	\small{LFQ}
+	\label{fig:LFQ}
+	]
+    {
+        \resizebox{0.3\linewidth}{!}{
+        \includegraphics[width=\linewidth]{figures/lfq.pdf}
+        }
+    }
+    \caption{
+    \small{
+    \textbf{Illustration of BSQ compared to LFQ and FSQ in the simplest case of $L=2$.}
+    In FSQ, we further consider each channel has 3 possible values $\{-1, 0, 1\}$.
+    The Voronoi diagram for both FSQ and LFQ looks like hypercubes that partition the entire space while BSQ's looks like a hypersphere evenly divided by $2^L$ centroids.
+    }}
+    \label{fig:bsq_vs_fsq}
+\end{figure}
+
+\myparagraph{Relation to other quantization methods.}
+BSQ is closely connected to many concepts introduced in information and coding theories. 
+LFQ~\cite{yu2024magvit2} uses the same binarization technique as BSQ but does not normalize its output.
+This leads to an unbounded quantization error and does not allow for as simple of a soft quantization for entropy computation.
+A pictural comparison between LFQ and BSQ is shown in Figure~\ref{fig:bsq_vs_fsq} and a summary is provided in Table~\ref{tab:bsq_vs_lfq}.
+Spherical Vector Quantization (SVQ)~\cite{hamkins2002svq} also ensures all code vectors have a pre-defined radius.
+However, SVQ assumes a variety of radii, which have to be encoded by an additional gain quantizer.
+In our case, the source code is the output of a learned encoder $\cE$.
+Therefore, the unit radius assumption is sound, and the gain quantizer can be avoided.
+Pyramid Vector Quantization (PVQ)~\cite{fischer1986pvq} assumes all code vectors have a constant $\ell_1$ norm, but the $\ell_1$ normalized centroids partition the hypersphere less uniformly than $\ell_2$.
+
+\subsection{Tokenization Network with Causal Video Transformer}
+\label{sec:method:vit}
+
+We propose to use Vision Transformer (ViT)~\cite{dosovitskiy2021vit} to model both the encoder and decoder due to its better computational efficiency and higher reconstruction quality.
+
+\myparagraph{Video Transformer.}
+We start from ViT-VQGAN~\cite{yu2022vitvqgan} and extend it to take videos as input.
+We divide an input video $\mX \in \mathbb{R}^{T\times H\times W \times 3}$ into non-overlapping patches of size $1\times p \times p$, $\vx_i\in\mathbb{R}^{1\times p \times p \times 3}$.
+The visual tokens are flattened into a 1D sequence, linearly projected, and passed through a stack of $N$ Transformer Encoder layers to yield the latent representation, $(\vz_1, \cdots, \vz_N)$.
+The decoder takes the same architecture, maps the latent embeddings $\hat{\vz}$ back to the pixel space, and regroups them into the original shape.
+$(\hat{\vx}_1, \cdots, \hat{\vx}_N) = \mathrm{MLP}(\mathrm{TransformerDecoder}(\hat{\vz}_1, \cdots, \hat{\vz}_N))$, where $\mathrm{MLP}$ is a decoding head with a two-layer MLP,~\ie $\mathrm{Linear}\circ\mathrm{Tanh}\circ\mathrm{Linear}$.
+
+\myparagraph{Blockwise Causal Attention.}
+During training, we always assume the input video has $T$ frames, which might not hold at inference.
+Padding shorter video segments to $T$ frames works but wastes a lot of bits, especially in the context of compression.
+To handle variable-length videos, we propose a simple blockwise causal masked attention analogous to causal attention in language modeling~\cite{vaswani2017attention}.
+It specifies that only those tokens at time $t$ or earlier can be used for reconstructing the visual tokens at time $t\in\{1,\cdots, T\}$.
+\begin{align}
+    (\vz_{(t-1)\times\frac{H}{p}\times\frac{W}{p}+1}, \cdots, \vz_{t\times\frac{H}{p}\times\frac{W}{p}} ) &= \mathrm{TransformerEncoder}\left(\vx_1, \cdots, \vx_{t\times\frac{H}{p}\times\frac{W}{p}}\right), \\
+    (\hat{\vz}_{(t-1)\times\frac{H}{p}\times\frac{W}{p}+1}, \cdots, \hat{\vz}_{t\times\frac{H}{p}\times\frac{W}{p}} ) &= q_{LFQ}\left(\vz_{(t-1)\times\frac{H}{p}\times\frac{W}{p}+1}, \cdots, \vz_{t\times\frac{H}{p}\times\frac{W}{p}}\right), \\
+    (\hat{\vx}_{(t-1)\times\frac{H}{p}\times\frac{W}{p}+1}, \cdots, \hat{\vx}_{t\times\frac{H}{p}\times\frac{W}{p}}) &= \mathrm{MLP}\left(\mathrm{TransformerDecoder}\left(\hat{\vz}_1, \cdots, \hat{\vz}_{t\times\frac{H}{p}\times\frac{W}{p}} \right) \right).
+\end{align}
+This can be efficiently implemented with a blockwise causal attention mask written in a blockwise lower triangle matrix in Figure~\ref{fig:causal_mask}.
+When $T=1$, the proposed encoder-decoder reduces to a ViT with a full attention mask.
+Therefore, we can easily train it using a mixture of images and videos.
+
+We use factorized spatial-temporal position embedding to encode the temporal position information.
+Specifically, we add a set of zero-initialized temporal position embeddings $\mathrm{PE}_t \in \mathbb{R}^{T\times d}$ and add it to the original spatial position embedding $\mathrm{PE}_s \in \mathbb{R}^{N\times d}$ in the image tokenizer,~\ie
+$\mathrm{PE}[i, :, :] = \mathrm{PE}_t[i, \texttt{None}, :] + \mathrm{PE}_s[\texttt{None}, :, :]$.
+
+\begin{wrapfigure}{R}{0.4\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/causal_attention}
+  \caption{Given an input video, block-wise causal masked attention enables the Transformer encoder to only use the flattened patches from current or past timestamps to encode each visual patch and later translate it into a BSQ code.}
+  \label{fig:causal_mask}
+\end{wrapfigure}
+
+\myparagraph{Training the Video Tokenizer from an Image Tokenizer.}
+Due to the lack of diversity in existing video datasets, we first train an image tokenizer on image data and then fine-tune it to be a video tokenizer.
+Though previous works~\cite{wang2022bevt,blattmann2023svd} argue that a pre-trained image tokenizer can be used for videos as is, we observe that the video tokenizer after fine-tuning demonstrates much higher reconstruction quality on video benchmarks, see \S~\ref{sec:exp:main:video_recon}.
+The gain is further magnified when the effective vocabulary size becomes larger.
+We hypothesize that such increased vocabulary size, enabled by the proposed BSQ, is handy for learning video-specific motion and blur.
+In contrast, vanilla VQ methods fail to maintain high codebook usage when the codebook size exceeds 16K.
+
+\myparagraph{Optimizing the Visual Tokenizer.}
+Following VQGAN~\cite{esser2021vqgan}, we use a perceptual loss~\cite{zhang2018lpips} and an adversarial loss~\cite{goodfellow2014gan}.
+We use StyleGAN~\cite{karras2019stylegan} as the discriminator since ViT-VQGAN~\cite{yu2022vitvqgan} reports it is much easier to train than PatchGAN~\cite{isola2017pix2pix}.
+When we fine-tuned the tokenizer on videos, unlike MAGVIT or TATS, we did not inflate StyleGAN to be a 3D discriminator.
+Instead, we pass all reconstructed frames individually to the vanilla StyleGAN and sum up the losses.
+
+
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+We train the image tokenization model on the training set of ImageNet ILSVRC2012~\cite{russakovsky2015imagenet} and evaluate the image reconstruction result on the validation set of MS-COCO~\cite{lin2014coco} and ImageNet, denoted by \textbf{COCO 2017val}  and \textbf{ImageNet-1k} respectively.
+We fine-tune the video tokenization model on \textbf{UCF-101}~\cite{soomro2012ucf101} and conduct video compression experiments on two standard benchmarks,~\ie MCL-JCV and UVG.
+\myparagraph{Evaluation metrics.}
+For image/video tokenization, we report perceptual metric (LPIPS-AlexNet)~\cite{zhang2018lpips}, PSNR, SSIM~\cite{wang2004ssim}, and Fr\'echet Inception/Video Distance (FID/FVD)~\cite{heusel2017fid,unterthiner2019fvd}.
+To distinguish it from generation, we denote it as rFID/rFVD.
+For generation, we report FID, Inception Score  (IS)~\cite{salimans2016is}, and improved precision and recall (IPR, Prec, and Rec)~\cite{kynkaanniemi2019ipr}.
+For compression, we report PSNR and MS-SSIM~\cite{wang2003msssim} under different levels of bits per pixel (bpp).
+\subsection{Main Results}
+\label{sec:exp:main}
+
+\begin{table}[!tb]
+  \centering
+  \caption{
+  \small{
+  \textbf{Image reconstruction results on COCO2017 and ImageNet-1K ($256\times 256$).}
+  The ``data'' column refers to the training data: CC for CC3M, YF for YFCC100M, OImg for OpenImages, LAION for LAION-5B, IN for ImageNet, and ``?'' for unknown source.
+  The ``arch.'' column shows the encoder/decoder architecture: C for ConvNets with Self-Attention, and T-B for ViT-Base.
+  The ``\# bits'' column refers to the effective number of bits per token defined in \S~\ref{sec:exp:main:image_recon}.
+  $^\#$ is obtained by multiplying the latent dimension with the precision.
+  The ``TP'' column means the inference throughput (images/second) per GPU.
+  $^\dagger$The number is taken from the paper.
+  Note that STDs of PSNR, SSIM, and LPIPS are computed across samples instead of multiple runs.
+  }}
+  \label{tab:image_reconstruction}
+  \tablestyle{2pt}{1.05}
+  \resizebox{\linewidth}{!}{
+  \begin{tabular}{lccccrrrrrrrrrr}
+    \toprule
+    \multicolumn{6}{c}{} & \multicolumn{4}{c}{COCO2017 val} & \multicolumn{4}{c}{ImageNet-1k val} \\
+    \cmidrule(r){8-11} \cmidrule(r){12-15}
+    Method & Data & Arch. & Quant. & Param. & \# bits & TP\higherbetter & PSNR\higherbetter & SSIM\higherbetter & LPIPS\lowerbetter & rFID\lowerbetter & PSNR\higherbetter & SSIM\higherbetter & LPIPS\lowerbetter & rFID\lowerbetter \\
+    \midrule
+    {\scriptsize{DALL-E dVAE}~\cite{ramesh2021dalle}} & CC+YF & C & VQ & 98M & 13 & 34.0 & 25.15 & .7497 & .3014 & 55.07 & 25.46 & .7385 & .3127 & 36.84 \\
+                                                      &       &   &    &     &    & & \std{3.49} & \std{.1124} & \std{.1221} & & \std{3.93} & \std{.1343} & \std{.1480} \\
+    MaskGIT~\cite{chang2022maskgit} & IN-1k & C & VQ & 54M & 10 & 37.6 & 17.52 & .4194 & .2057 & 8.90 & 17.93 & .4223 & .2018 & 2.23 \\
+                                    &       &   &    &     &    &      & \std{2.75} & \std{.1619} & \std{.0473} & & \std{2.93} & \std{.1827} & \std{.0543} & \\
+    ViT-VQGAN~\cite{yu2022vitvqgan} & IN-1k & T-B & VQ & 182M & 13 & $^\dagger$7.5 & - & - & - & - & - & - & - & $^\dagger$1.55 \\
+    {SD-VAE 1.x~\cite{rombach2022ldm}} & OImg & C & VQ & 68M & 10 & 22.4 & 21.78 & .6139 & .1042 & 6.79 & 22.12 & .6046 & .1039 & 1.52 \\
+                                       &      &   &    &     &   &      & \std{3.41} & \std{.1430} & \std{.0345} & & \std{3.79}  & \std{.1663} & \std{.0409} \\
+    {SD-VAE 1.x~\cite{rombach2022ldm}} & OImg & C & VQ & 68M & 14 & 22.4 & 22.54 & .6470 & .0905 & 6.07 & 22.82 & .6354 & .0912 & 1.23 \\
+                                       &      &   &    &     &    &      & \std{3.55} & \std{.1409} & \std{.0323} & & \std{3.97} & \std{.1644} & \std{.0390} & \\
+    SD-VAE 1.x~\cite{rombach2022ldm} & OImg & C & KL & 68M & $^\#$64 & 22.4  & 21.68 & .6375 & .0985 & 5.94 & 21.99 & .6275 & .0980 & 1.35 \\
+                                     &      &   &    &     &             &       & \std{3.32} & \std{.1375} & \std{.0309} & & \std{3.74} & \std{.1600} & \std{.0371} & \\ 
+    SD-VAE 2.x~\cite{podell2023sdxl} & OImg+ & C & KL & 84M & $^\#$64 & 18.9 & 24.82 & .7202 & .0694 & 4.63 & 25.08 & .7054 & .0731 & 0.78 \\
+                                     & LAION &   &    &     &             &      & \std{3.64} & \std{.1241} & \std{.0344} & & \std{4.11} & \std{.1469} & \std{.0448} & \\
+    SDXL-VAE~\cite{podell2023sdxl} & OImg+ & C & KL & 84M & $^\#$64 & 18.9 & 25.11 & .7433 & .0623 & 4.23 & 25.38 & .7276 & .0666 & 0.72 \\
+                                   & LAION+?  &   &    &     &             &      & \std{3.91} & \std{.1240} & \std{.0289} & & \std{4.41} & \std{.1469} & \std{.0373} & \\
+    Ours & IN-1k & T-B & BSQ & 174M & 18 & {\bf 45.1} & 25.08 & .7662 & .0744 & 5.81 & 25.36 & .7578 & .0761 & 1.14 \\
+         &       &     &     &      &    &            & \std{3.57} & \std{.0993} & \std{.0295} &  & \std{4.02} & \std{.1163} & \std{.0358} & \\  
+    Ours & IN-1k & T-B & BSQ & 174M & 36 & {\bf45.1} & 27.64 & .8485 & .0412 & 3.42 & 27.88 & .8410 & .0432 & {\bf0.41} \\
+         &       &     &     &      &    &           & \std{3.74} & \std{.0704} & \std{.0199} & & \std{4.26} & \std{.0821} & \std{.0253} & \\
+    Ours (w/. EMA) & IN-1k & T-B & BSQ & 174M & 36 & {\bf45.1} & {\bf27.92} & {\bf.8526} & {\bf.0380} & {\bf3.34} & {\bf28.14} & {\bf.0814} & {\bf.0400} & 0.45 \\
+                   &       &     &     &      &    &           & \std{3.78} & \std{.0698} & \std{.0187} &  & \std{4.32} & \std{.0814} & \std{.0237} & \\
+    \bottomrule
+  \end{tabular}
+  }
+\end{table}
+\myparagraph{Image Reconstruction.}
+\label{sec:exp:main:image_recon}
+We first compare the image reconstruction result of BSQ on COCO and ImageNet ($256\times 256$) with state-of-the-art image tokenizers, including
+DALL-E dVAE~\cite{ramesh2021dalle}, SD-VAE 1.x~\cite{rombach2022ldm}, SD-VAE 2.x, SDXL-VAE~\cite{podell2023sdxl}, MaskGIT~\cite{chang2022maskgit}, and ViT-VQGAN~\cite{yu2022vitvqgan}.
+We observe that reconstruction metrics vary with many factors, especially preprocessing (\eg interpolation), input resolution, and downsample scales (\S D.2 in~\cite{rombach2022ldm}).
+ In short, the conclusion is that varying interpolation changes the values but unalts the order of all methods.}, take the center crop $(H\times W) = (256\times 256)$, and ensure all models have the same spatial downsample ratio of $p=8$ (except for MaskGIT, $p=16$). 
+We rerun all models on COCO 2017val and ImageNet-1k val except the undisclosed ViT-VQGAN.
+From Table~\ref{tab:image_reconstruction}, we can see that our model outperforms prior works on all metrics (PSNR, SSIM, LPIPS, and rFID), often by a big margin.
+
+To compare the compression capability of different bottleneck modules, We study the {\bf effective number of bits per token} ({\bf\# bits}).
+For VQ-based models, \# bits equals to $\log_2(K)$, where $K$ is the codebook size;
+For KL-regularized models (SD-VAE 2.x and XL), since the latent is continuous, we count \# bits as the latent dimension multiplied by the numeric precision (here we use 16 since the checkpoint is stored in FP16). 
+For our BSQ, \# bits is $L$ because each latent channel is binary.
+We summarize the key observations as follows.
+(1) BSQ efficiently compresses image patches into a small amount of bits.
+It reconstructs images better in all metrics using fewer bits per token than the second-best method (SDXL-VAE).
+(2) BSQ is also computationally efficient.
+Although the ViT-based backbone doubles the parameters, our method yields a 2.4$\times$ higher throughput than SDXL-VAE.
+MaskGIT runs at a comparable speed but reconstructs significantly worse because of a small codebook size (1024) and more spatial downsampling ($16\times$).
+(3) BSQ is generalizable across different domains of images. ImageNet is relatively object-centric while COCO is more scene-centric. 
+Though trained on ImageNet only, our method does well on the scene-centric COCO too.
+It even works better than SD-VAE 1.x/2.x trained on the similarly scene-centric OpenImages dataset~\cite{kuznetsova2020openimages}.
+
+\begin{table}[!tb]
+  \centering
+  \caption{
+  \small{
+  \textbf{Video reconstruction results on UCF-101 (split 1).}
+  }}
+  \label{tab:video_reconstruction}
+  \tablestyle{2pt}{1.05}
+  \resizebox{\linewidth}{!}{
+  \begin{tabular}{lccccrrrrrrrr}
+    \toprule
+    \multicolumn{5}{c}{} & \multicolumn{4}{c}{UCF-101 train} & \multicolumn{4}{c}{UCF-101 val} \\
+    \cmidrule(r){6-9} \cmidrule(r){10-13}
+    Method & Backbone & Quantizer & Param. & \# bits & PSNR\higherbetter & SSIM\higherbetter & LPIPS\lowerbetter & rFVD\lowerbetter & PSNR\higherbetter & SSIM\higherbetter & LPIPS\lowerbetter & rFVD\lowerbetter \\
+    \midrule
+    \multicolumn{9}{l}{\textsc{(Image Tokenizer, w/o adapting to videos)}} \\
+    Ours & ViT & VQ & 174M & 14 & 25.64 & .8142 & .1120 & 357 & 25.58 & .8120 & .1146 & 382 \\
+    Ours & ViT & BSQ & 174M & 18 & 25.86 & .8273 & .1089 & 326 & 25.83 & 0.8259 & 0.1108 &  342  \\    
+    \midrule
+    \multicolumn{9}{l}{\textsc{(Image Tokenizer $\rightarrow$ Video Tokenizer)}} \\
+    MaskGIT~\cite{chang2022maskgit} & 2D CNN & VQ & 53M & 10 & 21.5 & .685 & 0.114 & 216 & - & - & - & - \\
+    TATS~\cite{ge2022tats} & 3D CNN & VQ & 32M & 14 & - & - & - & 162 \\
+    MAGVIT-L~\cite{yu2023magvit} & 3D CNN & VQ & 158M & 10 & 22.0 & .701 & .0990 & 25 & - & - & - & - \\
+    MAGVIT-v2~\cite{yu2024magvit2} & C.-3D CNN & LFQ & 158M & 18 & - & - & .0694 & 16.12 & - & - & - & - \\
+    MAGVIT-v2~\cite{yu2024magvit2} & C.-3D CNN & LFQ & N/A (>158M) & 18  & - & - & .0537 & 8.62 & - & - & - & - \\
+    Ours & non-BC ViT & VQ & 174M & 14 & {33.06} & {.9518}& {.0223} & {9.16} & {32.92} & {.9506} & {.0228} & 12.79 \\
+    Ours & BC ViT & VQ & 174M & 14 & 32.81 & .9496 & .0236 & 10.76 & 32.68 & .9484 & .0241 & 14.17 \\
+    Ours & BC ViT & BSQ & 174M & 18 & 32.08 & .9421 & .0244 & {8.08} & 31.49 & .9357 & .0276 & {11.62} \\
+    Ours & BC ViT & BSQ & 174M & 36 & {\bf 33.80} & {\bf .9606} & {\bf .0159}  & {\bf 4.10}  & {\bf 33.55} & {\bf.9588} & {\bf.0167}  & {\bf 6.21} \\
+    \bottomrule
+  \end{tabular}
+  }
+\end{table}
+
+\myparagraph{Video Reconstruction.}
+\label{sec:exp:main:video_recon}
+We present the video reconstruction on both UCF-101 training and validation subsets in Table~\ref{tab:video_reconstruction}. 
+First, we use the image tokenizer to reconstruct the video frame by frame.
+BSQ works slightly better than VQ but neither is comparable to the specialized video tokenizers fine-tuned on video data shown in the lower half of Table~\ref{tab:video_reconstruction}.
+Second, we finetune the image tokenizer on videos and see significant improvements.
+For example, our 18-bit BSQ with causal ViT reduces rFVD from 342 to 11.62 and improves PSNR from 25.83 to 31.49 dB. 
+The compared prior methods include: (1) MaskGIT~\cite{chang2022maskgit} which is a fine-tuned 2D-CNN based tokenizer, (2) TATS~\cite{ge2022tats} which uses a 3D CNN with replicated padding, (3) MAGVIT~\cite{yu2022vitvqgan} whose 3D CNN is initialized by zero-inflating a 2D filter, and (4) MAGVIT-v2~\cite{yu2024magvit2} which makes 3D CNN causal.
+Since most methods do not release checkpoints, we take their reported numbers directly.
+Our models with all configurations outperform MAGVIT-v2 with a comparable number of parameters (174M \vs 158M) by a large margin. 
+The best-performing MAGVIT-v2 uses a larger backbone and achieves a rFVD of 8.62.
+Our causal BSQ-ViT with $L=18$ achieves an 8.08 rFVD and halves the LPIPS.
+For BSQ with $L=36$, our method further improves the reconstruction metrics.
+
+We also show the effect of using block-wise causal masks.
+The non-causal variant (non-BC) works slightly better on all metrics because now the model can look at all visual patches within the temporal context window.
+This result resembles the observations in video compression that using bidirectional predicted pictures (B-frames) benefits compression quality given the same group of pictures (GoP).
+\begin{wraptable}{r}{0.6\linewidth}
+  \centering
+  \caption{
+  \small{
+  \textbf{Image generation results on ImageNet-1K ($128\times 128$).}
+  $^\dagger$The number is taken from the paper.
+  }}
+  \label{tab:image_generation_imagenet}
+  \tablestyle{3pt}{1.05}
+  \begin{tabular}{llrrHrrr}
+    \toprule
+    Category & Method & \# steps & FID\lowerbetter & sFID\lowerbetter & IS\higherbetter & Prec\higherbetter & Rec\higherbetter \\
+    \midrule
+    \multirow{1}{*}{GAN} & BigGAN~\cite{brock2018biggan} & 1 & 6.02 & 7.18 & {\bf145.8} & {\bf0.86} & 0.35 \\ 
+    \midrule
+    \multirow{1}{*}{Diffusion} & ADM~\cite{dhariwal2021adm} & 1,000 & 5.91 & {\bf 5.09} & 93.3 & 0.70 & {\bf 0.65} \\
+    \midrule
+    \multirow{3}{*}{Masked LM} & VQ & 12 & $^\dagger$9.4~~ & - & - & - & - \\
+    & FSQ~\cite{mentzer2024fsq} & 12 & $^\dagger$8.5~~ & - & - & - & - \\
+    & BSQ (Ours) & 32 & {\bf 5.44} & 9.89 & 139.6 & 0.80 & 0.50 \\
+    \bottomrule
+  \end{tabular}
+\end{wraptable}
+
+\myparagraph{Image Generation.}
+\label{sec:exp:main:image_gen}
+Our BSQ-ViT tokenizer can be seamlessly integrated into existing generative models for visual generation. 
+We follow MaskGIT~\cite{chang2022maskgit}, a masked language modeling approach.
+At training time, the underlying masked language model (masked LM) learns to predict the masked tokens given a random proportion of unmasked tokens like BERT~\cite{devlin2019bert}.
+At inference time, the model repeats decoding in a non-autoregressive way~\cite{gu2018nat} for several steps and progressively decodes from an all-masked canvas to visually plausible contents following a pre-defined unmasking schedule. 
+Unlike MaskGIT with a VQ-VAE with $K=1024$, BSQ-ViT has an effective vocabulary size of $2^L$ and $L=18$, resulting in a slow embedding lookup.
+We fix it by dividing each token into groups and treating sub-tokens independently with a similar rationale in Sec.~\ref{sec:method:bsq}.
+We increase the number of decoding steps accordingly.
+Table~\ref{tab:image_generation_imagenet} shows that the masked LM with BSQ outperforms those with VQ and FSQ reported in~\cite{mentzer2024fsq}.
+Our method achieves comparable results with other generation paradigms such as GAN-based~\cite{brock2018biggan} and diffusion-based~\cite{dhariwal2021adm} approaches.
+We leave qualitative results in Sec.
+\begin{wraptable}{r}{0.6\linewidth}
+  \centering
+  \caption{
+  \small{
+  \textbf{Comparisons of encoding/decoding speed.}
+  $^\dagger$The number did not include the image encoder according to~\cite{mentzer2022vct}.
+  }}
+  \label{tab:speed}
+  \tablestyle{4.5pt}{1.05}
+  \begin{tabular}{lcrrrr}
+    \toprule
+    Method & Resolution & Encode & EC & Decode & FPS \\
+    \midrule
+    VCT~\cite{mentzer2022vct} & 1920$\times$1080 & $^\dagger$494 ms & 30.5 ms & 168 ms & 1.4 \\
+    H.264                     & 1920$\times$1080 & - & - & - & 2.6 \\
+    Ours & 1920$\times$1080 & 55.8 ms & 42.2 ms &  64.8 ms & 6.1 \\
+    \midrule
+    VCT~\cite{mentzer2022vct} & 640$\times$360 & $^\dagger$22.2 ms & 4.24 ms & 10.1 ms & 27.3 \\    
+    H.264                     & 640$\times$360 & - & - & - & 22.4 \\
+    Ours & 640$\times$360 & 6.2 ms & 4.69 ms & 7.2 ms & 55.2 \\
+    \bottomrule
+  \end{tabular}
+\end{wraptable}
+
+\myparagraph{Video Compression.}
+We compare the compression result on MCL-JCV and UVG in Figure~\ref{fig:compression}.
+Simply flattening the video token sequence to a bitstream achieves an MS-SSIM of 0.9818 at 0.2333 bpp.
+Although this is not great, we use an auto-regressive model to predict the conditional probability such that the bpp is reduced by 41\%.
+This leads to a better tradeoff than standard video codecs including both H.264 and HEVC.
+
+\begin{figure}[!tb]
+
+    \centering
+    \subfloat[
+	\small{PSNR on MCL-JCV.}
+	\label{fig:mcljcv_psnr}
+	]
+    {
+        \resizebox{0.24\linewidth}{!}{
+\begin{tikzpicture}
+	\begin{axis} [
+        grid = major,
+        grid style = {
+            dash pattern = on 0.025mm off 0.95mm on 0.025mm off 0mm, %
+            line cap = round,
+            black,
+            line width = 0.5pt
+          },
+        axis x line*=bottom,
+		axis y line*=left,
+        ymin=23, ymax=39,
+		xmin=0, xmax=0.4,
+		xticklabel={\pgfmathparse{\tick}\pgfmathprintnumber{\pgfmathresult}},
+        xticklabel style={
+          /pgf/number format/precision=3,
+          /pgf/number format/fixed},
+        scaled x ticks=false,
+		xtick={0.00, 0.10, 0.20, 0.30, 0.40},
+		ytick={23.0, 27.0, 31.0, 35.0, 39.0},
+        ylabel={PSNR (dB)},
+        xlabel={bpp},
+        ylabel style={align=center, font=\normalsize, at={(0.02, 0.5)}},
+        xlabel style={font=\normalsize},
+        width=0.6\linewidth,
+		height=0.6\linewidth,
+  		tick label style={font=\normalsize},
+        legend columns=1,
+        legend style={font=\normalsize, at={(0.45,0.05)}, anchor=south west},
+        legend cell align={left},
+    ]
+		\addplot[mark=o,style={ultra thick},gray, dashed] plot coordinates {
+            (0.0208, 28.2509)
+            (0.0333, 30.1030)
+            (0.0556, 32.0512)
+            (0.0968, 34.1513)
+            (0.1692, 36.4105)
+            (0.2968, 38.7828)
+            (0.3939, 40.0033)
+		};
+		\addplot[mark=o,style={ultra thick},gray] plot coordinates {
+            (0.0212, 28.8844)
+            (0.0389, 30.9637)
+            (0.0697, 33.0855)
+            (0.1234, 35.3145)
+            (0.2135, 37.6226)
+            (0.3626, 39.9966)
+		};
+		\addplot[mark=square,blue,style={ultra thick}] plot coordinates {
+            (0.2333, 33.6977)
+        };
+		\addplot[mark=triangle,blue,style={ultra thick}] plot coordinates {
+            (0.1373, 33.6977)
+        };
+        \addplot[mark=square,red,style={ultra thick}] plot coordinates {
+            (0.0390625, 23.70)
+        };
+        \addplot[mark=triangle,green,style={ultra thick}] plot coordinates {
+            (0.05078125, 27.83)
+        };
+		\addlegendentry{H.264 (medium)}
+		\addlegendentry{HEVC (medium)}
+		\addlegendentry{Ours (w/o. AC)}
+		\addlegendentry{Ours}
+		\addlegendentry{MAGVIT~\cite{yu2023magvit}}
+		\addlegendentry{MAGVIT-v2~\cite{yu2024magvit2}}
+	\end{axis}
+\end{tikzpicture}
+
+        }
+    }
+    \subfloat[
+	\small{MS-SSIM on MCL-JCV.}
+	\label{fig:mcljcv_msssim}
+	]
+    {
+        \resizebox{0.24\linewidth}{!}{
+\begin{tikzpicture}
+	\begin{axis} [
+        grid = major,
+        grid style = {
+            dash pattern = on 0.025mm off 0.95mm on 0.025mm off 0mm, %
+            line cap = round,
+            black,
+            line width = 0.5pt
+          },
+        axis x line*=bottom,
+		axis y line*=left,
+        ymin=0.84, ymax=1.0,
+		xmin=0, xmax=0.4,
+		xticklabel={\pgfmathparse{\tick}\pgfmathprintnumber{\pgfmathresult}},
+        xticklabel style={
+          /pgf/number format/precision=3,
+          /pgf/number format/fixed},
+        scaled x ticks=false,
+		xtick={0.0, 0.10, 0.20, 0.30, 0.40},
+		ytick={0.84, 0.88, 0.92, 0.96, 1.},
+        ylabel={MS-SSIM},
+        xlabel={bpp},
+        ylabel style={align=center, font=\normalsize, at={(0.02, 0.5)}},
+        xlabel style={font=\normalsize},
+        width=0.6\linewidth,
+		height=0.6\linewidth,
+  		tick label style={font=\normalsize},
+        legend columns=1,
+        legend style={font=\normalsize, at={(0.45,0.05)}, anchor=south west},
+        legend cell align={left},
+    ]
+		\addplot[mark=o,style={ultra thick},gray, dashed] plot coordinates {
+            (0.0208, 0.9049)
+            (0.0333, 0.9387)
+            (0.0556, 0.9611)
+            (0.0968, 0.9756)
+            (0.1692, 0.9848)
+            (0.2968, 0.9904)
+            (0.3939, 0.9924)
+		};
+        \addplot[mark=o,style={ultra thick},gray] plot coordinates {
+            (0.0212, 0.9154)
+            (0.0389, 0.9456)
+            (0.0697, 0.9653)
+            (0.1234, 0.9782)
+            (0.2135, 0.9874)
+            (0.3626, 0.9915)
+		};
+        \addplot[mark=square,blue,style={ultra thick}] plot coordinates {
+            (0.2333, 0.9818)
+        };
+		\addplot[mark=triangle,blue,style={ultra thick}] plot coordinates {
+            (0.1373, 0.9818)
+        };
+        \addplot[mark=square,red,style={ultra thick}] plot coordinates {
+            (0.0390625, 0.846)
+        };
+        \addplot[mark=triangle,green,style={ultra thick}] plot coordinates {
+            (0.05078125, 0.92)
+        };
+		\addlegendentry{H.264 (medium)}
+		\addlegendentry{HEVC (medium)}
+		\addlegendentry{Ours (w/o. AC)}
+		\addlegendentry{Ours}
+		\addlegendentry{MAGVIT~\cite{yu2023magvit}}
+		\addlegendentry{MAGVIT-v2~\cite{yu2024magvit2}}
+	\end{axis}
+\end{tikzpicture}
+
+        }
+    }
+    \subfloat[
+	\small{PSNR on UVG.}
+	\label{fig:uvg_psnr}
+	]
+    {
+        \resizebox{0.24\linewidth}{!}{
+\begin{tikzpicture}
+	\begin{axis} [
+        grid = major,
+        grid style = {
+            dash pattern = on 0.025mm off 0.95mm on 0.025mm off 0mm, %
+            line cap = round,
+            black,
+            line width = 0.5pt
+          },
+        axis x line*=bottom,
+		axis y line*=left,
+        ymin=34, ymax=42,
+		xmin=0, xmax=0.4,
+		xticklabel={\pgfmathparse{\tick}\pgfmathprintnumber{\pgfmathresult}},
+        xticklabel style={
+          /pgf/number format/precision=3,
+          /pgf/number format/fixed},
+        scaled x ticks=false,
+		xtick={0.0, 0.10, 0.20, 0.30, 0.40},
+		ytick={34,36,38,40,42},
+		ylabel={PSNR},
+        xlabel={bpp},
+        ylabel style={align=center, font=\normalsize, at={(0.02, 0.5)}},
+        xlabel style={font=\normalsize},
+        width=0.6\linewidth,
+		height=0.6\linewidth,
+  		tick label style={font=\normalsize},
+        legend columns=1,
+        legend style={font=\normalsize, at={(0.45,0.05)}, anchor=south west},
+        legend cell align={left},
+    ]
+        \addplot[mark=o,style={ultra thick}, red] plot coordinates {
+            (0.0224, 33.93)
+            (0.0350, 35.27)
+            (0.0549, 36.44)
+            (0.0885, 37.52)
+            (0.1512, 38.50)
+            (0.2679, 39.38)
+        };
+        \addplot[mark=o,style={ultra thick},gray, dashed] plot coordinates {
+            (0.0244, 34.20)
+            (0.0498, 36.10)
+            (0.1192, 38.00)
+            (0.1930, 38.79)
+            (0.4049, 40.15)
+		};		
+        \addplot[mark=o,style={ultra thick},gray] plot coordinates {
+            (0.0245, 34.81)
+            (0.0520, 36.82)
+            (0.1326, 38.73)
+            (0.2098, 39.50)
+            (0.4223, 40.76)
+		};
+		\addplot[mark=square,blue,style={ultra thick}] plot coordinates {
+            (0.2333, 37.34)
+        };
+		\addplot[mark=triangle,blue,style={ultra thick}] plot coordinates {
+            (0.1533, 37.34)
+        };
+		\addlegendentry{VCT~\cite{mentzer2022vct}}
+		\addlegendentry{H.264 (medium)}
+		\addlegendentry{HEVC (medium)}
+		\addlegendentry{Ours (w/o. AC)}
+		\addlegendentry{Ours}
+	\end{axis}
+\end{tikzpicture}
+
+        }
+    }
+    \subfloat[
+	\small{MS-SSIM on UVG.}
+	\label{fig:uvg_msssim}
+	]
+    {
+        \resizebox{0.24\linewidth}{!}{
+\begin{tikzpicture}
+	\begin{axis} [
+        grid = major,
+        grid style = {
+            dash pattern = on 0.025mm off 0.95mm on 0.025mm off 0mm, %
+            line cap = round,
+            black,
+            line width = 0.5pt
+          },
+        axis x line*=bottom,
+		axis y line*=left,
+        ymin=0.95, ymax=.99,
+		xmin=0, xmax=0.4,
+		xticklabel={\pgfmathparse{\tick}\pgfmathprintnumber{\pgfmathresult}},
+        xticklabel style={
+          /pgf/number format/precision=3,
+          /pgf/number format/fixed},
+        scaled x ticks=false,
+		xtick={0.0, 0.10, 0.20, 0.30, 0.40},
+		ytick={0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99},
+        ylabel={MS-SSIM},
+        xlabel={bpp},
+        ylabel style={align=center, font=\normalsize, at={(0.02, 0.5)}},
+        xlabel style={font=\normalsize},
+        width=0.6\linewidth,
+		height=0.6\linewidth,
+  		tick label style={font=\normalsize},
+        legend columns=1,
+        legend style={font=\normalsize, at={(0.45,0.05)}, anchor=south west},
+        legend cell align={left},
+    ]
+        \addplot[mark=o,style={ultra thick}, red] plot coordinates {
+            (0.0130,0.9304)
+            (0.0230,0.9507)
+            (0.0410,0.9638)
+            (0.0789,0.9738)
+            (0.1464,0.9805)
+            (0.2637,0.9857)
+        };
+        \addplot[mark=o,style={ultra thick},gray, dashed] plot coordinates {
+            (0.0121, 0.9220)
+            (0.0237, 0.9477)
+            (0.0483, 0.9630)
+            (0.1108, 0.9737)
+            (0.1728, 0.9777)
+            (0.3803, 0.9846)
+		};		
+        \addplot[mark=o,style={ultra thick},gray] plot coordinates {
+            (0.0113, 0.9277)
+            (0.0245, 0.9509)
+            (0.0521, 0.9656)
+            (0.1326, 0.9763)
+            (0.2098, 0.9803)
+		};
+		\addplot[mark=square,blue,style={ultra thick}] plot coordinates {
+            (0.2333, 0.9756)
+        };
+		\addplot[mark=triangle,blue,style={ultra thick}] plot coordinates {
+            (0.1533, 0.9756)
+        };
+		\addlegendentry{VCT~\cite{mentzer2022vct}}
+		\addlegendentry{H.264 (medium)}
+		\addlegendentry{HEVC (medium)}
+		\addlegendentry{Ours (w/o. AC)}
+		\addlegendentry{Ours}
+	\end{axis}
+\end{tikzpicture}
+
+        }
+    }
+    \caption{
+    \small{
+    \textbf{Video compression results on MCL-JCV 640$\times$360 and UVG 1920$\times$1080.}
+    }}
+    \label{fig:compression}
+\end{figure}
+
+On UVG 1080P, our model is comparable to H.264 while being worse than HEVC and VCT~\cite{mentzer2022vct}.
+Note that our model trains on UCF-101 which only has 9K 320$\times$240 video clips encoded in MPEG-4 while VCT has been trained on a million high-resolution Internet video clips. 
+We hypothesize that the gap will be mitigated by adding more diverse videos and removing compression artifacts from the training videos.
+Nevertheless, we show the potential advantage of our method in encoding and decoding speed in Table~\ref{tab:speed}.
+Due to the simplicity of the Transformer-based encoder and decoder, our method runs faster than VCT.
+
+\subsection{Ablation Studies}
+\label{sec:exp:ablation}
+For ablation studies, we train an ImageNet image tokenizer with resolution 128$\times$128 with $p=8$, although
+our conclusions generally hold for higher resolution,~\eg 256$\times$256 in \S\ref{sec:exp:main}.
+\myparagraph{BSQ vs VQ.}
+Table~\ref{tab:ablation:bsq_vs_vq} shows that BSQ and VQ follow a similar trend: better reconstruction for increased $L$.
+Since $K=2^{18}$ results in an out-of-memory issue, we try a smaller $K=2^{16}=65536$ for VQ.
+The gain for VQ already diminishes even though the small bottleneck dimension of $8$ still guarantees full code usage.
+In contrast, BSQ consistently works better on all metrics when $L=18$.
+
+\begin{table}[t]
+  \centering
+  \caption{
+  \small{
+  \textbf{Abalation studies on ImageNet-1k val 128$\times$128.} 
+  }}
+  \tablestyle{3pt}{1.05}
+  \begin{tabular}{lllrrrrr}
+  \toprule
+  Method   & $\ell_2$-norm &  \# bits ($K\times d$ or $L$)  & PSNR\higherbetter & SSIM\higherbetter & LPIPS\lowerbetter & rFID\lowerbetter & Code usage  \\
+  \midrule
+  \multirow{3}{*}{VQ}  & \cmark & 10 (1024$\times$32) & 23.61\std{3.21} & .6873\std{.1211} & .1214\std{.0434} & 7.05 & 57.5\% \\
+    & \cmark & 14 (16384$\times$8) & 25.76\std{3.46} & .7834\std{.0988} & .0669\std{.0282} & 4.27 & 100.0\% \\
+    & \cmark & 16 (65536$\times$8) & 25.67\std{3.36} &.7851\std{.0962} & .0706\std{.0283} & 6.61 & 100.0\% \\
+  \midrule
+  \multirow{3}{*}{BSQ} & \cmark & 10  & 24.11\std{3.25} & .7250\std{.1121} & .0919\std{.0338} & 4.51 & 100.0\% \\
+   & \cmark & 14 & 25.26\std{3.31} & .7710\std{.0992} & .0784\std{.0293} & 4.60 & 99.8\% \\
+   & \cmark & 18 & 25.97\std{3.37} & .7990\std{.0906} & .0629\std{.0261} & 2.66 & 93.8\% \\
+  LFQ & \xmark & 18 & 18.58\std{2.10} & .4828\std{.1340} & .2951\std{.0806} & 30.7 & 0.6\%\\
+  \bottomrule
+  \end{tabular}
+  \label{tab:ablation:bsq_vs_vq}
+\end{table}
+
+\myparagraph{Importance of $\ell_2$ normalization in BSQ.}
+We remove the $\ell_2$ normalization in BSQ, which is equivalent to LFQ, and show results in the last rows of Table~\ref{tab:ablation:bsq_vs_vq}.
+We see much lower code usage and worse rFID, indicating that LFQ does not work well with a ViT-based tokenization encoder.
+
+\myparagraph{Contribution of losses.}
+We study the effect of each loss in Table~\ref{tab:ablation:loss}.
+Although it is computationally prohibitive to enumerate all combinations of loss terms and their associative weights, we conduct a simple ``leave-one-out'' setting where one of the losses is removed at a time.
+BSQ works slightly better after removing $\cL_\mathrm{commit}$ and $H(p(\vc|\vu))$.
+However, the code usage varies greatly.
+The best configuration is to keep the minimal entropy term while dropping the commitment loss.
+The commit loss may be unnecessary because the quantization error in BSQ is already strictly bounded.
+On the contrary, the dataset entropy maximization term and perceptual term do matter.
+Without $-H(\mathbb{E}_\vu[p(\vc|\vu)])$, rFID increases to 13.8 while the code usage in the validation set significantly drops to 13.3\%.
+We also observe that the perceptual loss is important for low FID and high code usage.
+However, a deeper look into its role is beyond the scope of this paper.
+
+\myparagraph{Approximating the dataset entropy term.}
+We now show the efficacy of approximating the dataset entropy term using Eq~\eqref{eqn:entropy_2:factorize}.
+We compare with the approximation method in~\cite{yu2024magvit2} that computes entropy in sub-groups of dimensions with varying group size $g\in\{9, 6, 3\}$.
+Our approximation method can also be interpreted as a group size of $g=1$.
+From Table~\ref{tab:ablation:group}, we conclude that our approximation achieves a similar level of rFID and code usage compared to other setups while running the fastest.
+
+\begin{table}[tb]
+  \centering
+  \caption{
+  \small{
+  \textbf{Ablation studies of the loss design.}
+  }}
+  \subfloat[Leave-one-out ablations for training losses.]{
+  \tablestyle{2pt}{1.05}
+  \begin{tabular}{cccccH|cr}
+     \toprule
+     & $\cL_\mathrm{commit}$ & \multicolumn{2}{c}{$\cL_\mathrm{entropy}$}        & $\cL_\mathrm{LPIPS}$ & $\cL_\mathrm{GAN}$ & rFID & Code \\
+     &                       & $H(p(\vc|\vu))$ & $-H(\mathbb{E}[p(\vc|\vu)])$ &                      &     \lowerbetter     &   &  usage    \\
+     \midrule
+     & \cmark                &  \cmark           &   \cmark                      &  \cmark              &  \cmark            &  2.95 & 45.6\% \\
+     & \xmark                &  \cmark           &   \cmark                      &  \cmark              &  \cmark            &  2.83 & 93.8\%\\
+     & \cmark                &  \xmark           &   \cmark                      &  \cmark              &  \cmark            &  2.44 & 78.3\% \\
+     & \cmark                &  \cmark           &   \xmark                      &  \cmark              &  \cmark            &  13.8 & 13.3\% \\
+     & \cmark                &  \cmark           &   \cmark                      &  \xmark              &  \cmark            &  19.2 & 6.9\% \\
+     \bottomrule
+  \end{tabular}
+  \label{tab:ablation:loss}
+  }
+  \quad
+  \subfloat[Group size. ($L=18$)]{
+  \tablestyle{2pt}{1.05}
+  \begin{tabular}{l|c@{\quad}c@{\ \ \ }r}
+     \toprule
+     group & rFID & Code  & Speed \\
+     size  & \lowerbetter & usage  &  (ms) \\
+     \midrule
+     $g=18$   & \multicolumn{2}{c}{(OOM)} & 70.0~~~~ \\
+     $g=9$   &    2.83  & 93.8\% & 0.335 \\
+     $g=6$   &    2.76  & 95.2\% & 0.232 \\
+     $g=3$   &    3.32  & 96.0\% & 0.233 \\
+     Ours    &    2.86  & 95.1\% & 0.212 \\
+     \bottomrule
+  \end{tabular}
+  \label{tab:ablation:group}
+  }
+  \label{tab:ablation}
+\end{table}
+
+
+
+\section{Conclusions}
+
+We present a new transformer-based image and video tokenizer with Binary Spherical Quantization (BSQ).
+The transformer-based architecture effortlessly integrates image and video tokenization over an arbitrary time horizon.
+The Binary Spherical Quantization allows for efficient and effective training of the quantized bottleneck.
+Our results indicate that the proposed tokenizer runs at a faster speed, reconstructs with higher fidelity, and in combination with a sequence model offers a strong baseline for lossy video compression and image synthesis.
+
+
+
+
+
+
+
+

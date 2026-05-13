@@ -1,0 +1,475 @@
+\title{Adapters for Altering LLM Vocabularies: What Languages Benefit the Most?}
+
+\begin{abstract}
+Vocabulary adaptation, which integrates new vocabulary into pre-trained language models (LMs), enables expansion to new languages and mitigates token over-fragmentation.
+However, existing approaches are limited by their reliance on heuristic or external embeddings.
+We propose \adt{}, a novel method for vocabulary adaptation using adapter modules that are trained to learn the optimal linear combination of existing embeddings while keeping the model's weights fixed. \adt{} offers a flexible and scalable solution without requiring external resources or language constraints. 
+Across 11 languages---with various scripts, resource availability, and fragmentation---we demonstrate that \adt{} outperforms the original Mistral model \citep{mistral7b} and other baselines across various multilingual tasks.
+We find that Latin-script languages and highly fragmented languages benefit the most from vocabulary adaptation.
+We further fine-tune the adapted model on the generative task of machine translation and find that vocabulary adaptation is still beneficial after fine-tuning and that \adt{} is the most effective method. Models at \href{https://huggingface.co/collections/h-j-han/vocadt-67084ac852855267504fd0c6}{\texttt{Huggingface Hub}}
+}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+Vocabulary adaptation (or transfer)---a process of modifying a pre-trained language model (LM) to use a new vocabulary---offers several key advantages. 
+First, it enables the introduction of new languages into a model, allowing for greater flexibility in handling linguistic diversity and improving downstream performance in target languages \citep{wang-etal-2020-extending, gogoulou-etal-2022-cross, downey-etal-2023-embedding}.  %
+Second, it addresses the problem of over-fragmentation, where tokens are excessively split, potentially slowing down generation and impairing performance in certain languages \citep{do-all-lang-cost-same23, token-unfairness23, yamaguchi2024empirical}. 
+These benefits have led to the development of numerous vocabulary adaptation approaches
+that initialize the new embeddings of new vocabulary with various methods based on heuristics \citep{vipi22, fvt22, downey-etal-2023-embedding}, external resources \citep{ramen20, focus23, ofa24}, or a separate hypernetwork that generates it \citep{zett24}, optionally followed by continued training to finalize the adaptation \citep{wechsel22, clp23, focus23, ofa24}.
+
+However, existing vocabulary adaptation approaches face several limitations. 
+Those that rely on heuristics \citep{fvt22, downey-etal-2023-embedding},  often lack adaptability and require an additional training phase of full-weight updates to fully adapt to the new vocabulary.
+Those that depend on external embeddings or networks \citep{ramen20, focus23, ofa24}, increase complexity and limit scalability. 
+Furthermore, some approaches focus solely on language-specific cases or may have restrictions on the number of languages in the implementation when configuring the vocabulary \citep{focus23, zett24}.
+
+Additionally, we still know little about the impact of vocabulary adaptation across diverse linguistic and task settings.
+Most prior work investigates a small number of languages, which is insufficient for identifying which languages benefit most from adaptation
+\citep{ramen20, clp23,tiktotok23, yamaguchi2024empirical}, while studies that consider a broader range of languages only report averaged results without detailed analysis
+\citep{ofa24, cw2v24}.
+Furthermore, the impact of vocabulary adaptation on cross-lingual and generative tasks like machine translation (MT) is understudied, even though they represent crucial application areas for porting models to new languages. Many adaptation methods \citep{chung-etal-2020-improving,fvt22, ofa24} have been evaluated instead on non-cross-lingual and discriminative tasks such as commonsense reasoning, natural language inference (NLI), or question answering (QA)---which are typically classification tasks. 
+
+We propose \adt{}, a novel solution for vocabulary adaptation using adapters, designed to address key challenges in existing approaches. 
+We introduce a vocabulary adapter module between the new vocabulary and the original embeddings of a language model.
+The module gradually adapts to new vocabularies through training while keeping all weights of the original model fixed, allowing the module to learn the best combination of the original embeddings.
+This learned adaptation approach makes it more adaptable to new languages and more flexible in the number of languages while removing the necessity of external pre-trained resources.
+
+In addition to our novel method, we empirically address the following key questions to understand the effectiveness and behavior of vocabulary adaptation: 
+(1) Which languages benefit most from vocabulary adaptation?
+(2) What are the best strategies for creating new vocabularies;
+is script consistency necessary? 
+(3) How does vocabulary adaptation impact machine translation?
+We emphasize this task as it is a critical task for multilingual models that involves cross-lingual and generative capabilities, which are often more complex than classification or monolingual tasks.
+
+We demonstrate the effectiveness of our adaptation method on various NLP tasks spanning Natural Language Understanding and MT.
+Results show that our approach consistently surpasses the original Mistral model in most cases, both after the adaptation phase and following phase of full-weight training.
+Additionally, our method outperforms or matches other strong vocabulary adaptation baselines. %
+Our findings indicate that Latin-script languages and those with severe fragmentation benefit the most from vocabulary adaptation, while preserving embeddings of overlapped tokens proves useful for non-Latin languages, but not for Latin languages.
+Finally, while all vocabulary adaptation methods continue to be effective for machine translation after fine-tuning, \adt{} shows the best results among them.
+Our main contributions are summarized as follows:
+\begin{itemize}
+    \item We propose \adt{}, a simple and effective solution for vocabulary adaptation using adapters, that addresses key challenges such as reliance on external embedding or language constraints.    
+    \item We design experiments that cover a wide range of languages and scripts, finding that languages with Latin scripts or severe fragmentation benefit the most and that having a consistent grouping of scripts for multilingual vocabulary is helpful.
+    \item  Our approach consistently outperforms the original language model and is more effective than, or at least on par with, strong vocabulary adaptation baselines after the adaptation phase across various tasks and after the following full-weight fine-tuning on MT.
+\end{itemize}
+
+\begin{figure}[h!]
+\begin{center}
+    \centering
+    \subcaptionbox{Overview of the vocabulary adaptation and training. %
+    \label{fig:train}}
+    [.54\linewidth]{\includegraphics[scale=0.99]{figures/train3.pdf}}
+    \subcaptionbox{Initialization of vocabulary adapter.
+    \label{fig:initialization}}
+    [.45\linewidth]{\includegraphics[scale=0.65]{figures/initialization.pdf}}
+    \label{fig:overview}
+\end{center}
+\caption{
+Overview of our vocabulary adaptation with adapter (\adt{}) and the initialization of adapter. 
+The vocabulary adapter modules are trained to adapt new vocabulary with existing embeddings while keeping the original model fixed. 
+We initialize entries of the adapter for overlapping tokens and tokens whose partitions are in the original vocabulary. 
+Once trained, the adapters and original embeddings are combined to form the new embeddings.
+}
+\end{figure}
+
+
+\section{Background}
+
+\label{sec:background}
+\paragraph{Approaches} Many vocabulary adaptation methods focus on initialization strategies for the new vocabulary embeddings, before continuing training with unlabeled target language text using the original self-supervised pretraining objective. For instance, FOCUS~\citep{focus23} initializes embeddings as a weighted combination of overlapping tokens using external embeddings for non-overlapping ones, while copying the embeddings of overlapping tokens. OFA~\citep{ofa24} also relies on external word vectors to initialize embeddings for non-shared new tokens, using a weighted average of original tokens based on semantic similarity. This strategy often requires external resources such as auxiliary embeddings \citep{focus23, ofa24, clp23} or bilingual dictionaries \citep{cw2v24, wechsel22}.
+
+After initialization, language adaptive pretraining \citep[LAPT;][]{chau-etal-2020-parsing} typically updates all model weights \citep{ramen20, ofa24, focus23, clp23}, except \citet{yamaguchi2024empirical} which use LoRA \citep{hu2022lora}. \citet{downey-etal-2023-embedding} show that full-weight updates outperform embedding-only training, which is insufficient for multilingual model transfer. 
+
+Other vocabulary adaptation strategies introduce architecture-specific changes to the model, such as MAD-X~\citep{madx20}, which incorporates various adapters into Transformer models, and thus additional computation costs. There are few alternatives to these resource-intensive approaches. A notable exception is ZeTT~\citep{zett24}, which trains a hypernetwork that generates embeddings for the new vocabulary, allowing immediate zero-shot use by only replacing embeddings without further model training. It can be extended to multilingual hypernetworks by appending a learnable language-specific embedding.
+
+\paragraph{Empirical Evaluations} Many language adaptation experiments have been conducted using new language-specific monolingual vocabularies \citep{zett24, focus23, madx20, wechsel22, yamaguchi2024empirical}, as well as English-only but domain-specific vocabularies \citep{fvt22, vipi22}. 
+In contrast, \citet{ofa24} and \citet{cw2v24} use a single unified multilingual vocabulary covering at least 369 languages and four languages, respectively. 
+
+\citet{downey-etal-2023-embedding} conducted experiments with both monolingual and multilingual vocabularies across eight languages and additional vocabulary from the Uralic family. While their findings indicated that multilingual adaptation in the Uralic family followed overall trends,  it remains unclear whether vocabulary adaptation benefits languages in different script groups. Overall, empirical evidence is still lacking to guide practical decisions for grouping languages in multilingual models. 
+
+Furthermore, most studies exclusively evaluate models on non-cross-lingual and non-generative tasks, such as binary or multi-class classification, sequence labeling (e.g., part-of-speech tagging), or answer span prediction. \citet{cw2v24} and \citet{yamaguchi2024empirical} include monolingual generative tasks like summarization. As a result, the impact of vocabulary adaption on cross-lingual generation tasks such as MT remains understudied, even though this is a crucial application area. \footnote{\citet{cw2v24} report MT results, but do not release model, code, and number of individual languages to enable comparisons.} 
+
+To address these gaps, this work introduces a lightweight strategy to adapt LLM to new vocabularies, and experiments designed to measure its impact across diverse linguistic and task settings. We compare empirically against FOCUS and OFA, representing more resource-intensive initialization approaches, and ZeTT, representing a more parsimonious approach that has only been tested on limited tasks so far.
+
+
+
+\section{\adt{}
+
+\label{sec:method_adt}
+In this section, we outline our approach to multilingual vocabulary adaptation using adapter modules (\adt{}). 
+We detail the architecture of the adapter module (\textsection \ref{sec:method_adt_arch}) and the initialization process (\textsection \ref{sec:method_adt_init}). 
+Additionally, we introduce an additional loss for handling overlapping tokens between the new and original vocabularies (\textsection \ref{sec:method_adt_auxloss}).
+Finally, we further fine-tune the vocabulary adapted model for downstream task (\textsection \ref{sec:method_alma}).
+
+\subsection{Vocabulary Adapter Module}
+\label{sec:method_adt_arch}
+We introduce the vocabulary adapter modules to find parameters of new embeddings that can replace the original embedding without changing the non-embedding part of the original model (Figure~\ref{fig:train}).
+For simplicity, we refer to both input and output embeddings (or the LM head) collectively as embeddings.
+Let $V^o$ and $V^n$ be the $\bm{o}$riginal and $\bm{n}$ew vocabulary, respectively, and let $\mathcal{T}^x: w \rightarrow (t_1, t_2, \dots, t_k)$ be a tokenizer associated with a vocabulary $V^x$ where $t_j \in V^x, \forall j = 1, \dots, k$.
+We put vocabulary adapter modules $ \mA \in \R^{|V^n|\times |V^o|}$ between the new vocabulary $V^n$ and the original embedding $\mE^o \in \R^{|V^o|\times h}$ where $h$ is an embedding dimension, in a manner similar to bottleneck adapters \citep{pmlr-v97-houlsby19a}.
+We train the adapters with the standard language modeling loss $\mathcal{L}^{lm}$, where we freeze the original weights and only update the adapters.
+This may be analogous to finding the new embedding vector for a token with the weighted combination of original embedding vectors \citep{downey-etal-2023-embedding,focus23,ofa24}. Unlike similar works, our approach learns the combination with adapter training.
+After training the adapters, we get new embeddings $\mE^n \in \R^{|V^n|\times h}$ by merging the original embeddings and adapters to $\mE^n = \mA\mE^o$, which result in a language model with the same architecture as the original one but with a different vocabulary size. 
+
+\subsection{Initializing Adapter}
+\label{sec:method_adt_init}
+Effective initialization of the new embedding is crucial in adapting to a new vocabulary, as fully random initialization is widely recognized for leading to poor performance \citep{wechsel22, yamaguchi2024empirical}. 
+In our case, random initialization of the adapter $\mA^{0}$ is equivalent to random initialization of $\mE^n$, making proper initialization of \(\mA^{0}\) equally important.
+We suggest a simple initialization scheme for the vocabulary adapter, illustrated in Figure~\ref{fig:initialization}.
+
+First, we follow the common methods of copying the original embeddings of overlapping tokens by setting a one-hot vector in the adapter. Let $\mathcal{I}^x: V^x \rightarrow \mathbb{Z}$ be the mapping function of a token to an index in a vocabulary $V^x$ and let $i = \mathcal{I}^n(w)$ be the index of a token $w$ in $V^n$. The row of the adapter $\mA^{0}_{i}$ corresponding to the overlapping tokens %
+$w \in V^o \cap V^n$ is set as follows:
+\begin{equation}
+\mA^{0}_{i, \mathcal{I}^o(w)} = 1, \quad \mA_{i, j} = 0 \quad \forall j \neq \mathcal{I}^o(w), \quad \text{where} \ w \in V^o \cap V^n.
+\label{eq:init_ovl_whole}
+\end{equation}
+Inspired by \citet{fvt22}, we then initialize the row of a token $w$ in $\mA^0$, whose partitioned tokens by the original tokenizer $\mathcal{T}^o$ are subset of the original vocabulary, $\mathcal{T}^o(w) = \{t_1, \dots, t_m\} \subset V^o, m > 1$, with normalized multi-hot vector as below. This corresponds to directly initializing new embedding %
+with the average of the original embeddings associated with the tokens produced by $\mathcal{T}^o$.
+\begin{equation}
+\mA^{0}_{i, j} = \begin{cases}
+\frac{1}{m} & \text{if } j \in \{\mathcal{I}^o(t_1), \dots, \mathcal{I}^o(t_m)\} \\
+0 & \text{otherwise}
+\end{cases}  \text{where} 
+\begin{array}{l}
+w \in V^n \backslash (V^o \cap V^n) \quad \text{and}\\ w \in S=\{ w \mid \mathcal{T}^o(w) = \{t_{1:m}\} \subset V^o\}.
+\end{array}
+\label{eq:init_ovl_sub}
+\end{equation}
+
+For a token that does not fall into the first two cases above (i.e. a non-overlapping token and its partitions by $\mathcal{T}^o$ are not in $V^o$), we randomly initialize a row vector of the adapter with the uniform distribution whose sum of each element is one as follows:
+\begin{equation}
+\mA^{0}_{i} = \frac{\mathbf{u}}{\sum_{j=1}^{|V^o|} u_j}, \quad u_j \sim \text{Uniform}(0, 1), \ j= 1, \dots, |V^o|\quad  \text{where} \ w \in V^n \backslash (V^o \cap V^n) \backslash S. %
+\label{eq:init_non_ovl}
+\end{equation}
+\subsection{Auxiliary Loss}
+\label{sec:method_adt_auxloss}
+As training progresses, the adapter entries of overlapped tokens tend to diverge from their initial states. 
+This divergence can be undesirable because the original embeddings are already well-integrated into the language model, and our goal is more focused on adjusting the embeddings of the newly introduced vocabulary items. 
+Following \citet{zett24}, we experiment with an additional loss term that encourages the adapter entries for overlapping words to remain close to their initial values, formulated as follows:
+\begin{equation}
+\mathcal{L}^{aux} = \frac{1}{|V^o \cap V^n|} \sum_{w \in |V^o \cap V^n|} || \mA_{\mathcal{I}^n(w)}  - \mA^{0}_{\mathcal{I}^n(w)} ||_2 .
+\label{eq:loss_ovl}
+\end{equation}
+
+The final loss for the adapter training is the combination of the standard language loss and additional loss with the weighing factor of $\alpha$, $\mathcal{L}^{tot} = \mathcal{L}^{lm} + \alpha\mathcal{L}^{aux}$.
+
+\subsection{Further Fine-tuning For Downstream Task}
+\label{sec:method_alma}
+
+Does the impact of vocabulary adaptation persist after fine-tuning the vocabulary adapted language model for strong performance in a target task?
+We address this question for the cross-lingual generation task of machine translation, following the training recipe of ALMA~\citep{alma24} after the vocabulary adaptation process.
+ALMA training begins with fine-tuning on monolingual data, followed by further weight optimization on small high-quality parallel data.
+This two-step fine-tuning process ensures strong translation performance.
+During the \adt{} adaptation phase, we only update the new embeddings. Subsequently, and then update all model parameters in the task-oriented fine-tuning phases. %
+
+
+
+
+\section{Which Languages Benefit the Most from Vocabulary Adaptation?}
+
+\label{sec:method_vocab}
+We aim to understand ``When and how should we perform vocabulary adaptation?''.
+More specifically, we seek insight into which languages might benefit the most from vocabulary adaptation in terms of improving overall performance or mitigating over-fragmentation.\footnote{
+All non-English that we cover tend to be highly fragmented by a vocabulary of popular large language models such as Mistral (Figure~\ref{fig:incre_rate}), resulting in similar effects of mitigating over-fragmentation. Consequently, we emphasize the analysis of the performance aspect.} 
+To this end, we design experiments to cover 10 non-English languages along with English, listed in Table~\ref{table:langs}, with a variety of scripts and language families.
+These languages are broadly categorized into three groups.
+The first one is the \textit{Latin} group of Swahili, Indonesian, Estonian, and Haitian, which are low- to mid-resource languages and all use Latin script.
+The second is a \textit{Mixed} group including Korean, Greek, Russian, and Bulgarian, which utilize a mixture of scripts.
+We also experiment with grouping the Cyrillic script (\textit{Cyrillic} group) languages. 
+
+We test individual language adaptation with language-specific vocabularies. 
+We also adapt several multilingual vocabularies that include English and four non-English languages in a single shared vocabulary, with each group corresponding to one of the previously mentioned groups.
+This is to identify a language grouping strategy---whether to mix languages with different scripts or grouping languages with consistent scripts.
+
+
+\begin{table}[h]
+\centering
+\fontsize{8}{10}\selectfont
+\caption{
+Covered Languages and its availability in multilingual benchmarks. We mainly categorize non-English languages by scripts---\textit{Latin} group (2-5) and the \textit{Mixed} group (6-7).
+We additionally experiment with \textit{Cyrillic} group (8-11).
+We follow the resource-level of languages from \citet{joshi-etal-2020-state} and \citet{ustun-etal-2024-aya}
+}
+\label{table:langs}
+\begin{tabular}{llllllllll}
+\toprule
+idx & Full Name      & Short & Script   & Resource & FLORES        & XNLI      & XCOPA     & Belebele  & MMMLU     \\
+\midrule
+1 & English        & \texttt{en}    & Latin    & High     & \ding{51} & \ding{51} &           & \ding{51} & \ding{51} \\
+\hline 
+2 & Swahili        & \texttt{sw}    & Latin    & Low      & \ding{51} & \ding{51} & \ding{51} & \ding{51} &           \\
+3 & Indonesian     & \texttt{id}    & Latin    & Mid      & \ding{51} &           & \ding{51} & \ding{51} & \ding{51} \\
+4 & Estonian       & \texttt{et}    & Latin    & Mid      & \ding{51} &           & \ding{51} & \ding{51} &           \\
+5 & Haitian Creole & \texttt{ht}    & Latin    & Low      & \ding{51} &           & \ding{51} & \ding{51} &           \\
+\hline 
+6 & Korean         & \texttt{ko}    & Hangul   & High     & \ding{51} &           &           & \ding{51} &           \\
+7 & Greek          & \texttt{el}    & Greek    & Mid      & \ding{51} & \ding{51} &           & \ding{51} &           \\
+8 & Russian        & \texttt{ru}    & Cyrillic & High     & \ding{51} & \ding{51} &           & \ding{51} & \ding{51} \\
+9 & Bulgarian      & \texttt{bg}    & Cyrillic & Mid      & \ding{51} & \ding{51} &           & \ding{51} &           \\
+\hline
+10 & Ukrainian      &\texttt{uk}    & Cyrillic & Mid      & \ding{51} &           &           & \ding{51} & \ding{51} \\
+11 & Kazakh         &\texttt{kk}    & Cyrillic & Mid      & \ding{51} &           &           & \ding{51} &           \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+
+
+\section{Experiment Design}
+
+\label{sec:exp}
+
+\subsection{Baselines and Modeling}
+\label{sec:exp_model}
+
+We use Mistral-7B~\citep{mistral7b} as our language model, along with its original vocabulary, which consists of 32k tokens ($|V^o|=32k$).
+As baselines, we evaluate three state-of-the-art methods for vocabulary adaptation, ZeTT~\citep{zett24}, FOCUS~\citep{focus23}, and OFA~\citep{ofa24}. %
+For ZeTT and FOCUS, we experiment with language-specific vocabularies (ZeTT-mono, FOCUS-mono) as their implementations require specifying the language to adapt the vocabulary.
+This results in separate adaptations per language, which could be hard to scale with larger language coverage.\footnote{
+ZeTT does not support Ukrainian and Kazakh, therefore we primarily compare and average the results for 9  languages covered by both methods. 
+}
+For \adt{} and OFA methods (\adt{}-multi, OFA-multi), we experiment with multilingual vocabularies of five languages including English and four non-English languages, where we define three distinct language groups such as $\{$\texttt{en}, \texttt{sw}, \texttt{id}, \texttt{et}, \texttt{ht}$\}$ ( \textit{Latin} group), $\{$\texttt{en}, \texttt{ko}, \texttt{el}, \texttt{ru}, \texttt{bg}$\}$ (\textit{Mixed} group), and $\{$\texttt{en}, \texttt{ru}, \texttt{bg}, \texttt{uk}, \texttt{kk}$\}$ (\textit{Cyrillic} group).
+
+\subsection{Training}
+\label{sec:exp_train}
+
+\paragraph{Vocabulary.} 
+We train SentencePiece~\citep{sentencepiece18} tokenizers on either language-specific corpora or a combined corpus, with a maximum of 2 million tokens per language, and create new vocabularies with a size of 50k for all cases including mono/multilingual vocabularies ($|V^n|=50k$). 
+Newly created vocabularies for each language group are shared across baselines. %
+
+\paragraph{Adapter Training.} 
+In the adapter training phase, we train only the adapters, while fixing all parameters of the original model. %
+The input and output adapters are separate modules, as preliminary results showed that sharing an adapter for the input and output sides performs worse.
+We train 3.5B monolingual tokens mixed by 5 languages (English + 4 non-English from each corresponding group) and report test numbers from it.
+We use ``clean'' documents from the corpus of MADLAD-400~\citep{madlad23}. %
+We set the weighing factor of auxiliary loss $\alpha$ with 0.1 for non-Latin groups %
+and 0 for the \textit{Latin} group unless otherwise specified.
+This is based on the empirical results in Figure~\ref{fig:ovl} that maintaining the embeddings of overlapping tokens close to the original status during the adaptation is effective only for non-Latin script languages and counter-effective for Latin languages.
+\paragraph{Full-Weight Fine-tuning.}
+After the adaptation phase, we follow the fine-tuning recipe of ALMA~\citep{alma24} that consists of full-weight training with monolingual corpus and a small amount of high-quality parallel corpus to enhance MT performance (\textsection\ref{sec:method_alma}).
+We also include Mistral in this phase of training.
+1) In monolingual fine-tuning, we use MADLAD-400. %
+For adapted ZeTT and FOCUS models, we fine-tune each separate model with non-English language-specific vocabulary except for \texttt{uk} and \texttt{kk} for ZeTT (again, due to unsupported languages in ZeTT) using a total of 2B tokens combining English and the corresponding non-English. %
+For Mistral and the adapted \adt{} and OFA, we fine-tune separate models for all three non-English groups (\textit{Latin}, \textit{Mixed}, \textit{Cyrillic}) plus English using a corpus of 5B monolingual tokens containing 5 languages.
+2) In the next parallel training, we sample 15k bitext from NLLB dataset\footnote{\url{https://huggingface.co/datasets/allenai/nllb}} for each English and non-English training pairs with top LASER3 scores \citep{laser19, schwenk-etal-2021-ccmatrix, heffernan-etal-2022-bitext, flores22}.
+The parallel training is done for one epoch, and we report test set numbers with the best model of the validation set.
+All the models are fine-tuned and tested with both directions of \texttt{en-xx} and \texttt{xx-en} within a single model, meaning there are no separate models for opposite translation directions.
+We follow the prompting strategy of \citet{alma24}. %
+
+\subsection{Evaluation}
+\label{sec:exp_eval}
+We evaluate adaptation methods with multilingual benchmarks of various tasks including MT, natural language inference (NLI), common sense reasoning, and multiple choice question answering (QA).
+For MT of English to non-English (\texttt{en-xx}) and non-English to English (\texttt{xx-en}), we use FLORES~\citep{flores101,flores22} as it supports all the languages that we experiment with. 
+We use five-shot MT prompting for the model from the adaptation phase, and zero-shot prompting for the model after the ALMA training phase.
+We assess the translation quality with xCOMET-XL~\citep{xcomet23}, which produces a score of increasing quality ranging from 0 to 1.
+For NLI and reasoning, we use XNLI~\citep{xnli} and XCOPA~\citep{xcopa20} with zero-shot prompting. %
+For multiple choice QA, we use Belebele~\citep{belebele23} and Multilingual MMLU~\citep[MMMLU]{mmlu21,okapi23} with five shot prompting. %
+All the tasks except for MT are classification tasks, where 
+we use the \texttt{lm-evaluation-harness}~\citep{lmeval24} evaluation tool and report accuracy.
+\begin{figure}[t]
+\begin{center}
+    \includegraphics[width=1\linewidth]{figures/avgtasks_hor4.pdf} 
+\end{center}
+\caption{
+Average scores of original Mistral and its adaptation with new vocabulary, only replacing embeddings and fixing the body of transformer modules. 
+``-multi'' indicates models with a multilingual vocabulary, which includes five languages covering all languages with two separate models, while ``-mono'' refers to models with monolingual vocabulary. 
+Our \adt{} adaptation outperforms the original Mistral and matches or exceeds ZeTT.
+\texttt{xx-en} and \texttt{en-xx} indicate MT tasks.
+}
+\label{fig:avgtasks}
+\end{figure}
+
+
+
+\section{Vocabulary Adaptation Results and Analyses}
+
+\label{sec:result_adt}
+\subsection{Overall Task Performance}
+\label{sec:result_adt_avg}
+
+We first present the controlled comparison on diverse tasks of the original Mistral with new vocabulary variants obtained by our vocabulary adaptation approach (\adt{}) and the ZeTT and OFA baselines.
+Figure~\ref{fig:avgtasks} presents the average performance across multiple multilingual MT, NLI, reasoning, and QA tasks. 
+
+Overall, adapting the vocabulary using \adt{} generally leads to better performance compared to the original Mistral model, and either surpasses or performs on par with ZeTT. 
+MMMLU is the only task where Mistral still holds the top spot; however, the performance gap between the new and original embeddings is smaller with \adt{} approach than with ZeTT. Remarkably, \adt{}-multi achieves these results with only two models for the eight languages tested, whereas ZeTT requires a separate model for each language.
+\subsection{Which Languages Benefit the Most from Vocabulary Adaptation?}
+\label{sec:result_adt_incre}
+
+Instead of ``averaging out'' the languages, we get closer look on the impact of vocabulary adaptation in a language-wise manner.
+Figure~\ref{fig:incre_rate} shows the increased rate of task performance and tokenization statistics for various languages after applying different vocabulary adaptation methods.
+The results are shown for \textit{Latin} group languages (Swahili, Indonesian, Estonian, and Haitian Creole) and \textit{Mixed} group (Korean, Greek, Russian, and Bulgarian). 
+We compare \adt{} and ZeTT against the original Mistral model.
+
+We use the FLORES development set for counting the tokens by various tokenizers where the semantic contents of every language are the same.
+
+\paragraph{Languages with Latin Scripts or Severe Fragmentation Benefit the Most}
+In Figures~\ref{fig:incre_rate_swidetht}, we observe that Latin script languages consistently benefit from vocabulary adaptation, regardless of the task, adaptation method employed. %
+However, even non-Latin languages show improvements when they suffer from severe over-fragmentation, as seen in the case of Greek in Figures~\ref{fig:incre_rate_koelrubg}. 
+Among the eight languages, Greek is the most fragmented by the Mistral tokenizer, and it demonstrates significant improvement after the adaptation to less fragmented vocabulary, particularly in MT tasks, while other non-Latin languages in \textit{Mixed} group show zero or modest gains.
+\begin{figure}[]
+\begin{center}
+    \centering
+    \begin{subfigure}{\textwidth}
+        \centering
+        \begin{subfigure}[b]{0.619\textwidth}
+            \includegraphics[width=\textwidth]{figures/incre_rate_swidetht.pdf}
+        \end{subfigure}
+        \begin{subfigure}[b]{0.375\textwidth}
+            \includegraphics[width=\textwidth]{figures/incre_rate_swidetht_cmt.pdf}
+        \end{subfigure}
+        \caption{Increase rate of task performance and number of token count of \textit{Latin} group languages. %
+        }
+        \label{fig:incre_rate_swidetht}
+    \end{subfigure}
+    \begin{subfigure}{\textwidth}
+        \centering
+        \begin{subfigure}[b]{0.619\textwidth}
+            \includegraphics[width=\textwidth]{figures/incre_rate_koelrubg.pdf}
+        \end{subfigure}
+        \begin{subfigure}[b]{0.375\textwidth}
+            \includegraphics[width=\textwidth]{figures/incre_rate_koelrubg_cmt.pdf}
+        \end{subfigure}
+        \caption{Increase rate of task performance and number of token count of \textit{Mixed} group languages. %
+        }
+        \label{fig:incre_rate_koelrubg}
+    \end{subfigure}
+\end{center}
+\caption{
+Effect of vocabulary adaption on mitigating over-fragmentation and task performance. The $y$-axis for the increase rate on the left side is limited to the positive range.
+Languages with Latin scripts or those experiencing severe fragmentation benefit the most.
+\texttt{xx-en} and \texttt{en-xx} are machine translation tasks.
+}
+    \label{fig:incre_rate}
+\end{figure}
+\begin{figure}[]
+\centering
+\begin{subfigure}[b]{0.57\textwidth}
+    \includegraphics[width=\textwidth]{figures/cyrilic3.pdf}
+\end{subfigure}
+\begin{subfigure}[b]{0.42\textwidth}
+    \includegraphics[width=\textwidth]{figures/cyrilic3_tok.pdf}
+\end{subfigure}
+\caption{Comparison of task performance between two grouping strategies of \textit{Mixed}-script and \textit{Cyrillic}-script on two shared languages. Consistent script within a group provides minor benefits.}
+    \label{fig:cyrilic}
+\end{figure}
+
+\subsection{Does Script Matter for Language grouping?}
+\label{sec:result_adt_cryllic}
+Multilingual vocabularies for language groups can strike a balance between the extensive coverage of the original Mistral and the limited scope of language-specific monolingual models.
+We investigate strategies for grouping, in particular the effect of script. 
+
+
+Figure~\ref{fig:cyrilic} compares the performance and token count reduction between two non-English grouping strategies: \textit{Mixed}-script (\texttt{ko}, \texttt{el}, \texttt{ru}, \texttt{bg}) and \textit{Cyrillic}-script (\texttt{ru}, \texttt{bg}, \texttt{uk}, \texttt{kk}) languages. 
+The results are shown for the common languages of Russian and Bulgarian across several tasks.
+For Russian, the consistent script language group performs better, especially in the MT task, though the improvement rate is not substantial.
+For Bulgarian, both grouping strategies deliver nearly identical results.
+In summary, the results suggest that maintaining a consistent script within a group enhances performance, though overall outcomes seem to be influenced more by the language type itself than by the grouping strategy.
+
+
+\subsection{Is the Auxiliary Loss Helpful?}
+\label{sec:result_adt_ovl}
+
+We examine the effects of the auxiliary loss that aims to mitigate the divergence of original status for overlapping words as described in Section~\ref{sec:method_adt_auxloss}.
+Figure~\ref{fig:ovl} illustrates the impact on task performance of vocabulary adaptation with and without auxiliary loss on \textit{Latin} and \textit{Mixed} group vocabulary.
+We report one language in each group along with English.
+
+For the \textit{Mixed} group plus English vocabulary (right plot of Figure~\ref{fig:ovl}), maintaining the embedding values of overlapping words shows slight effectiveness. 
+However, for \textit{Latin} languages (left plot of Figure~\ref{fig:ovl}), applying auxiliary loss ($\alpha=0.1$) leads to a significant decline in overall task performance.
+We hypothesize that non-Latin languages are less prone to have word collisions with the original vocabulary compared to the \textit{Latin} group, as the Mistral model is largely English (Latin) centric.
+As a result, retaining the established embeddings for overlapped words in \textit{Latin} group vocabulary and Mistral vocabulary may disrupt effective learning due to the possible similarity in scripts with English.
+On the other hand, keeping the original embeddings during the adaptation for overlapping tokens in \textit{Mixed} may be helpful to maintain the already established embeddings for overlapped tokens while adjusting the embeddings for new non-Latin script tokens.
+\begin{figure}[h]
+\centering
+\begin{subfigure}[b]{0.49\textwidth}
+    \includegraphics[width=\textwidth]{figures/ovl_et.pdf}
+\end{subfigure}
+\begin{subfigure}[b]{0.49\textwidth}
+    \includegraphics[width=\textwidth]{figures/ovl_el.pdf}
+\end{subfigure}
+\caption{
+Effects of the auxiliary loss on various settings. 
+Keeping the embedding of overlapping words close to the original is ineffective for \textit{Latin} groups but is effective in \textit{Mixed} vocabulary.
+}
+\label{fig:ovl}
+\end{figure}
+
+
+\begin{table}[h]
+\centering
+\fontsize{6.9}{10}\selectfont
+\caption{
+MT performance after full-weight fine-tuning the new vocabulary-adapted model.
+The symbol ``\#''  indicates the number of separate models for this experiment table. %
+All vocabulary adaptation approaches after fine-tuning are effective compared to Mistral except for \texttt{en-sw}.
+\adt{}-multi shows the best average performance in both directions while matching the score of ZeTT in \texttt{xx-en}. %
+}
+\label{table:mt}
+\begin{tabular}{l|lllll|lllll}
+\toprule
+FLORES       & \multicolumn{5}{c|}{\texttt{xx-en}}                & \multicolumn{5}{c}{\texttt{en-xx}}                \\
+\texttt{Lang} (\textit{group}) $\downarrow$   & \adt{} & Mistral & ZeTT  & OFA   & FOCUS & \adt{} & Mistral & ZeTT  & OFA   & FOCUS \\
+\midrule
+\texttt{sw} (\textit{Latin})       & 0.893  & 0.891   & \textbf{0.897} & 0.889 & 0.893 & 0.753  & \textbf{0.770}   & 0.762 & 0.763 & 0.762 \\
+\texttt{id} (\textit{Latin})       & 0.951  & 0.950   & \textbf{0.953} & 0.951 & 0.945 & 0.874  & 0.874   & \textbf{0.879} & 0.871 & 0.876 \\
+\texttt{et} (\textit{Latin})       & 0.939  & 0.925   & \textbf{0.941} & 0.937 & 0.939 & 0.852  & 0.868   & 0.856 & 0.845 & \textbf{0.870} \\
+\texttt{ht} (\textit{Latin})       & \textbf{0.706}  & 0.696   & 0.699 & 0.699 & 0.685 & 0.336  & 0.336   & 0.334 & 0.332 & \textbf{0.339} \\
+\hline
+\texttt{ko} (\textit{Mixed})       & 0.886  & 0.892   & 0.898 & 0.897 & \textbf{0.906} & 0.755  & 0.715   & \textbf{0.772} & 0.742 & 0.754 \\
+\texttt{el} (\textit{Mixed})       & \textbf{0.922}  & 0.845   & 0.910 & 0.894 & 0.902 & \textbf{0.876}  & 0.817   & 0.857 & 0.862 & 0.861 \\
+\texttt{ru} (\textit{Mixed})       & 0.945  & 0.894   & 0.944 & \textbf{0.946} & 0.945 & \textbf{0.889}  & 0.828   & 0.872 & 0.882 & 0.868 \\
+\texttt{bg} (\textit{Mixed})       & \textbf{0.953}  & 0.904   & 0.952 & 0.950 & 0.949 & 0.895  & 0.844   & 0.895 & \textbf{0.899} & 0.895 \\
+\hline
+Avg (8 pairs)  & \textbf{0.899}  & 0.875   & \textbf{0.899} & 0.895 & 0.895 & \textbf{0.779}  & 0.757   & 0.778 & 0.774 & 0.778 \\
+\hline
+\texttt{uk} (\textit{Cyrillic})       & \textbf{0.941}  & \textbf{0.941}   & \_     & 0.936 & 0.928 & \textbf{0.878}  & 0.876   & \_     & 0.868 & 0.840 \\
+\texttt{kk} (\textit{Cyrillic})       & \textbf{0.881}  & 0.875   & \_     & 0.875 & 0.880 & \textbf{0.807}  & 0.790   & \_     & 0.785 & 0.796 \\
+\hline
+Avg (10 pairs) & \textbf{0.902}  & 0.881   & \_     & 0.897 & 0.897 & \textbf{0.792}  & 0.772   & \_     & 0.785 & 0.786 \\
+\hline
+\# of Models $\rightarrow$     &   \textbf{3}    &    \textbf{3}    &   8   & \textbf{3}     &  10   & \textbf{3}    &    \textbf{3}    &   8   & \textbf{3}     &  10 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\section{Impact of Vocabulary Adaptation on Downstream Fine-tuning}
+
+\label{sec:result_alma}
+
+Do the effects of vocabulary adaptation hold up after fine-tuning the adapted language model?  After completing the \adt{} process, which keeps non-embedding model weights fixed, we update the full weights of the adapted model to enhance MT performance following ALMA \citep{alma24}. 
+
+As can be seen in Table~\ref{table:mt}, all vocabulary adaptation approaches are effective compared to Mistral except for \texttt{en-sw}, and among those, our approach (\adt{}) achieves the highest average score in both \texttt{en-xx} and \texttt{xx-en} directions.
+In the \texttt{xx-en} direction, the performance of \adt{} matches that of ZeTT, despite using a smaller number of individual models of the same size (2 \adt{} vs 8 ZeTT).
+Interestingly, language-specific models (ZeTT, FOCUS) tend to excel in Latin languages, whereas multilingual models (Mistral, \adt{}, OFA) generally outperform language-specific models in non-Latin cases.
+
+In sum, with full parameter fine-tuning after the vocabulary adaptation, our \adt{} model offers a competitive edge across both \texttt{xx-en} and \texttt{en-xx} tasks, further validating the effectiveness of our approach.
+\adt{} demonstrates that a multilingual model can achieve or surpass language-specific models like ZeTT, offering a more flexible and scalable solution for handling multiple languages.
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+We propose a simple and effective vocabulary adaptation method using a vocabulary adapter that addresses key challenges in existing approaches. 
+Our approach consistently outperforms the original Mistral model after the adaptation phase across various tasks and after the following full-weight finetuning on machine translation. 
+Furthermore, our methods prove more effective than, or at least on par with, strong vocabulary adaptation baselines, without relying on external embeddings or language constraints, %
+offering a flexible and scalable solution for handling multiple languages.
+Our experiments cover a wide range of languages and scripts, revealing that languages with Latin scripts or severe fragmentation benefit the most, and that maintaining the embedding of overlapping words proves helpful for non-Latin languages but is less effective for \textit{Latin} groups. 
+We also explored different grouping strategies, finding that while maintaining consistent scripts within a group offers some benefits, the impact is relatively minor.
+Lastly, with a focus on machine translation, we confirm that vocabulary adaptation remains effective even after fine-tuning, with \adt{} emerging as the most effective approach.
+
+
+ 
+
+
+
+
+
+
+
+

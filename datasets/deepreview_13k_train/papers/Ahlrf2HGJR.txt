@@ -1,0 +1,251 @@
+\title{Repetition Improves Language Model Embeddings}
+
+\begin{abstract}
+Recent approaches to improving the extraction of text embeddings from autoregressive large language models (LLMs) have largely focused on improvements to data, backbone pretrained language models, or improving task-differentiation via instructions. In this work, we address an architectural limitation of autoregressive models: token embeddings cannot contain information from tokens that appear later in the input. To address this limitation, we propose a simple approach, ``echo embeddings,'' in which we repeat the input twice in context and extract embeddings from the second occurrence. We show that echo embeddings of early tokens can encode information about later tokens, allowing us to maximally leverage high-quality LLMs for embeddings. On the MTEB leaderboard, echo embeddings improve over classical embeddings by over $9\%$ zero-shot and by around $0.7\%$ when fine-tuned. Echo embeddings with a Mistral-7B model achieve state-of-the-art compared to prior open source models that do not leverage synthetic fine-tuning data.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+
+Neural text embeddings have a crucial role in modern approaches to information retrieval (IR), semantic similarity estimation, classification, and clustering \citep{ni2021large,muennighoff2022mteb}. For example, document retrieval often leverages low-dimensional embeddings for efficient lookup: when queries and documents are encoded as vectors where semantic relationships are described by similarity in some metric space, a query lookup can be reduced to an approximate nearest-neighbor search in embedding space \citep{johnson2019billion, vanderkam2013nearest}. 
+
+In the recent past, the dominant pretrained language model paradigm for neural embeddings have been masked language models with bidirectional attention \citep{ni2021sentence,raffel2020exploring,izacard2021unsupervised,wang2022text,jiang2022promptbert,su2022one,xiao2023c,li2023towards}. However, more recent literature~\citep{ma2023fine,wang2023improving} has begun to scale these algorithms to modern autoregressive language models such as LLaMA-2 and Mistral \citep{touvron2023llama2,jiang2023mistral}. Developing approaches to construct embeddings from autoregressive language models is promising: for many tasks, these models are the highest quality models available \citep{srivastava2022beyond}. 
+
+\input{figures/conceptual_overview.tex}
+
+In this paper, we address a striking failure mode of autoregressive language models. This failure arises from the fact that for autoregressive language models, contextualized token embeddings---the vector of last-hidden-layer activations at the position of a particular input token---do not contain information from tokens that appear later in the sentence due to the causal attention mask. We demonstrate that such embeddings can fail to appropriately determine similarity when the early tokens are superficially similar but become dissimilar in important ways when using key information from end of the input.   
+
+We propose a strategy to overcome this limitation in autoregressive models through ``echo embeddings.'' With this approach, we repeat the inputs so that it appears \emph{twice} in the context passed to the language model, and extract embeddings from the second occurrence. Repeating the input enables the contextualized token embeddings of the second occurrence of the passage to encode information from tokens that appear later in the passage by attending to their first occurrence in the passage. We show that echo embeddings do in fact allow embeddings of the early tokens to capture information about the later tokens. 
+
+We then evaluate echo embeddings on the standard Massive Text Embedding Benchmark (MTEB) leaderboard\footnote{The MTEB leaderboard can be found at \url{https://huggingface.co/spaces/mteb/leaderboard}}. In the zero-shot setting, echo embeddings improve on classical embeddings by over $9\%$ and provide consistent gains across all the different tasks for a variety of language models and scale. We then perform an apples-to-apples comparison when fine-tuning embeddings from Mistral-7B and continue to see consistent gains of echo over classical across the various tasks (by $0.7\%$ on average). Strikingly, echo embeddings with the strong Mistral-7B language model allows us to achieve state-of-the-art embedding quality, enabling autoregressive language models to match prior open-source top performing models that otherwise leveraged MLMs with bidirectional attention.\footnote{The contemporaneous work by \citet{wang2023improving} achieves state-of-the-art accuracy on MTEB using classical embeddings from autoregressive language models, but through finetuning on high quality synthetic data, which we believe is largely orthogonal to our contribution.}
+
+The approach of echo embeddings is conceptually well-motivated, extremely simple, and generally compatible with other innovations in extracting embeddings from autoregressive language models. As language models are likely to continue to improve over the coming years, echo embeddings can be a simple but powerful twist to classical embeddings that allow us to maximally leverage autoregressive language models.
+
+
+
+\section{Preliminaries}
+
+\label{sec:setup}
+
+Our goal is to extract text embeddings that map a sentence $x$ to a vector $\phi(x) \in \mathbb{R}^d$  such that the semantic similarity between sentences is captured as similarity between their embeddings. 
+\paragraph{Embeddings from language models.}
+
+We are primarily interested in the embeddings extracted from \textit{autoregressive} language models, which typically have causal attention masking and are trained on a next-token objective. For brevity, we drop the term ``autoregressive'' in the following. 
+
+As is standard,  we extract embeddings from the activations of the final hidden layer. Each input token $x_j$ at position $j$ is associated with a \emph{contextualized token embedding} which is the hidden layer representation $\embed_j(x)$. 
+
+We can pool the embeddings across all the tokens in different ways. In this work, we focus on two common strategies which have been considered by prior work \citep{reimers2019sentence,muennighoff2022sgpt,zhang2023language,wang2023improving}.
+
+A \textbf{mean token embedding} over a set of indices $A$, refers to the mean contextualized token embeddings at indices in $A: \embed_A(x) \coloneqq \frac{1}{\left|A\right|} \sum_{t \in A} \embed_t(x)$.
+
+A \textbf{last-token embedding} refers to the contextualized token embedding of the last token in the input sequence, written $\phi_{-1}(x)$.
+
+\paragraph{Classical embeddings.} Traditionally, embeddings are computed by simply passing the sentence to the model and extracting some pooling (e.g. mean or last-token) of the contextualized embeddings corresponding to the input sentence.
+We will refer to embeddings created in this way as ``\textit{classical embeddings}''.
+Additionally, one might first prompt the language model with an explanation of the task of interest followed by the sentence, and then pool the contextualized embeddings of the sentence tokens like before \citep{su2022one}.
+
+
+\section{Echo Embeddings}
+
+\label{sec:toy}
+In this section, we first demonstrate a failure mode of classical embeddings, and motivate a new method that we call echo embeddings that addresses this failure. 
+
+\begin{align*}
+    q&\colon{\textcolor{bluepigment}{\text{[She loves summer]}}} {\textcolor{cadmiumred}{\text{ [but dislikes the heat]}}} \\
+    \sminus&\colon\textcolor{bluepigment}{\text{[She loves summer]}} \textcolor{cadmiumred}{\text{ [for the warm evenings]}} \\
+    \splus&\colon\textcolor{bluepigment}{\text{[Summer is her favorite]}} \textcolor{cadmiumred}{\text{ [but not the temp.]}}
+\end{align*}
+\subsection{Echo Embeddings}
+\label{sec:echo_description}
+
+\begin{tcolorbox}
+
+\textbf{Echo embeddings:} 
+Feed a prompt such as ``Rewrite the sentence: $x$, rewritten sentence: $x$'' to the language model and pool the contextualized embeddings of the \emph{second} occurence of $x$.
+\end{tcolorbox}
+Key to our method is passing the sentence twice to the model and pool embeddings exclusively from the second occurrence.\footnote{We find that minor variations of the echo embeddings prompt (e.g.
+\input{figures/toy.tex}
+\subsection{Repetition Captures Bidirectional Info}
+\label{sec:bidirection}
+
+In the previous section, we argued that classical embeddings suffer from the issue that contextualized embeddings of early tokens can miss out on information from the later tokens. But can simply repetition via echo embeddings solve this issue? We aim to test this by extracting embeddings from Mistral-7B on a simple controlled synthetic setting. 
+
+Given a query $q\colon [A, B]$ we construct sentence pairs $\splus, \sminus$ as follows. We make the first parts of each sentence identical to the query, but differ only in their second parts, 
+\begin{center}$q\colon [A, B]$; $\splus\colon [A, \simB]$; $\sminus\colon [A, \notB]$, \end{center} where $\simB$ is $B$ but paraphrased and $\notB$ is semantically dissimilar to $B$. We query GPT-4 to generate examples of this structure. 
+
+With classical embeddings, the contextualized embeddings of $A$ parts of $\splus, \sminus, q$ are identical by construction. To test whether echo embeddings can meaningfully distinguish $\splus$ and $\sminus$ despite having identical initial tokens, we take the mean over just the $A$-portion of the echo embeddings and plot the cosine similarities $\Sim(q, \splus)$ and $\Sim(q, \sminus)$ in Figure~\ref{fig:toy} (left). We find that $\Sim(q, \splus)$ is typically larger than $\Sim(q, \sminus)$. Since we are only pooling the echo embeddings of the A-portion, any distinction between $\splus, \sminus$ must come from the echo embeddings of $A$ capturing information from the later parts of the sentence. This showcases that current autoregressive language models can in fact allow early tokens to capture information from later tokens via echo embeddings. 
+
+\subsection{Classical vs. Echo on Synthetic Data}
+
+In Section~\ref{sec:bidirection} we demonstrated that echo embeddings encode bidirectional information. However, is this sufficient to recover from the failure mode of classical embeddings? Further, where will we expect echo embeddings to improve over classical embeddings? Here, we compare echo and classical embeddings on synthetic data to answer both of these questions.
+
+\paragraph{Datasets.} We sample datasets according to two structures depending on whether the discriminating information between $\splus$ and $\sminus$ is in the first half (structure S1) or second half (structure S2) of the sentence
+\begin{center}(S1) \ \ {$q\colon [A, B]$, $\splus\colon [\simA, \simB]$, $\sminus\colon [\simA, \notB]$} \end{center}
+\begin{center}(S2) \ \ {$q\colon [A, B]$, $\splus\colon [\simA, \simB]$, $\sminus\colon [\notA, \simB]$}. \end{center}
+
+We measure the accuracy of identifying which of two sentences $\splus$ and $\sminus$ is closer to the query as measured by the cosine similarity in the embeddings. We compare classical vs echo embeddings when using mean pooling to aggregate embeddings extracted from Mistral-7B model. We use mean token embedding rather than last token because last token embeddings can be quite fragile in a zero-shot setting (Section~\ref{sec:eval_zero_shot}). 
+
+\paragraph{Results.} We present results on the two different structures in Figure~\ref{fig:toy} (right). We see that classical embeddings struggle on Structure 1---when the distinguishing information is at the beginning, the embeddings corresponding to these early tokens exaggerate similarity between $q$ and $\sminus$ because they do not encode the information provided by $\notB$. In contrast, echo embeddings are able to successfully determine the more similar sentence, presumably because embeddings of the $A$-portion now also encode information about the later parts (demonstrated in Section~\ref{sec:bidirection}). As a control for other reasons echo embeddings outperform classical embeddings, we also compare these embeddings on structure two, where early tokens provide discriminative signal without needing the later context. As expected, both classical and echo embeddings achieve good performance in this setting. All in all, this analysis on synthetic data demonstrates that zero-shot classical embeddings do not encode information about later context in early token embeddings, but echo embeddings can do so. 
+
+\paragraph{Does last-token pooling resolve the failure of classical embeddings?} The embedding of the last token $\embed_{-1}(x)$ is, in principle, can encode information from the entire input. However, we posit that the last-token pooling strategy is highly brittle and can depend too strongly on the tokens near the end of the input. To verify this, we compare the accuracy of mean token pooling and last-token pooling for classical and echo embeddings in two settings. First, we evaluate on the original synthetic data of Structure 1 (Figure~\ref{fig:toy_last_token}, left). Second, we evaluate on the same data, but where we append a uniformly randomly selected token to the end of each example (Figure~\ref{fig:toy_last_token}, right). While last-token pooling has high accuracy on the original toy data (though still lower accuracy than echo embeddings), it fails to perform well on the noisy examples. Echo embeddings with mean token pooling, however, are robust to the noise. 
+
+While this particular distribution of noise is artificial, it highlight that last-token pooling can be sensitive to noise in the last token. We verify in Section~\ref{sec:eval_zero_shot} that last-token embeddings perform poorly on real data. Thus, even if last-token embeddings address the inability of mean token classical embeddings to encode information from tokens that appear later in the sequence, they are not practical due to their sensitivity to noise.
+
+\paragraph{Does last-token pooling resolve the failure after finetuning?} In practice, it is common to finetune embeddings on a sentence similarity objective. It is hard to delineate the degree to which this failure mode remains after finetuning. Nonetheless, we demonstrate in Section~\ref{sec:finetuning} that our method improves in the finetuning setting, even when using last-token pooling.
+
+\input{figures/toy_last_token.tex}
+
+
+\section{Methodology}
+
+\label{sec:methodology}
+
+In Section~\ref{sec:toy}, we explored how echo embeddings can improve over classical embeddings by addressing a fundamental failure mode. In this section, we describe the methodology by which we evaluate echo embeddings on large scale real datasets in both the zero-shot and finetuning settings. While finetuning is currently necessary to achieve state-of-the-art performance, zero-shot embeddings have the advantage that they do not require expensive finetuning on top of a pretrained language model. Zero-shot results can also more clearly show how different embedding strategies work on real datasets.
+
+\subsection{Constructing Zero-shot Embeddings.}
+
+We extract zero-shot embeddings via different strategies from three language models: Mistral-7B, LLaMA-2-7B, and LLaMA-2-13B. We select the instruction-finetuned model for each of them. Recent literature suggests that the performance of language models on zero-shot tasks can be highly variable depending on the exact wording and template of the prompts \citep{sclar2023quantifying}. Thus, for each of the embedding strategies we consider, we perform \textit{prompt randomization} where we sample prompts by randomizing the exact wording, punctuation, and capitalization of the prompt.
+
+\paragraph{Baselines.}
+We compare our proposed echo embeddings (Section~\ref{sec:echo_description}) to classical embeddings and two additional baselines:
+\begin{itemize}
+    \item Last-token embeddings: We mentioned in the Section~\ref{sec:toy} that last-token embeddings tend to underperform in comparsion to mean token embeddings, and thus we compare on real data.
+    \item Summarization: We also compare zero-shot embeddings obtained via the strategy proposed by \citet{jiang2023scaling}. Here, they instruct the model to summarize the input in a single word and then take the last token embedding $\embed_{-1}(x)$ as the pooled embedding of the sentence.
+\end{itemize}
+
+\subsection{Constructing Finetuned Embeddings.}
+\label{sec:exp-finetune}
+We adopt the conventional sentence embedding training setup \citep{reimers2019sentence} where we train with a contrastive learning objective to encourage the embeddings of similar text to be close. We extract embeddings in a slightly different fashion compared to the zero-shot setting above in order to keep the finetuning methodology as similar as possible to the existing literature. 
+\noindent\begin{tabularx}{\columnwidth}{>{\centering\arraybackslash}X>{\centering\arraybackslash}X}
+    \begin{flalign*}
+        &\text{Instruct: {\textbraceleft}instruction\textbraceright\newline} \\
+        &\text{Query: } S
+    \end{flalign*}
+    \end{minipage}} & 
+    \begin{flalign*}
+    \text{Document: } S && \\
+    &&
+    \end{flalign*}
+    \end{minipage}} \\
+\end{tabularx}
+\noindent\begin{tabularx}{\columnwidth}{>{\centering\arraybackslash}X>{\centering\arraybackslash}X}
+        \begin{flalign*}
+            &\text{Instruct: {\textbraceleft}instruction\textbraceright\newline} \\
+            &\text{Query: } S \\
+            &\text{Query again: } S'
+        \end{flalign*}
+    \end{minipage}} & 
+        \begin{flalign*}
+            &\text{Document: } S \\
+            &\text{Document again: } S' \\ 
+            &
+        \end{flalign*}
+    \end{minipage}} \\
+
+In this case, {\textbraceleft}instruction{\textbraceright} refers to the task instruction, which specifies a description of the task that the embedding will be used for. We append an end-of-sentence token to the end of each input, and we allow the input embedding of this token to be trainable.
+\paragraph{Datasets.}
+We train on a collection of publicly available datasets that encompass both symmetric and asymmetric data that are standard training datasets in the embedding literature. 
+
+\paragraph{Optimization.} 
+To finetune the model, we optimize the SimCSE loss with in-batch and mined hard negatives. Each batch is constructed by sampling a dataset from our set of training dataset, and then collecting examples from only this dataset. We use GradCache to train with a large batch size (2048) with limited GPU memory \citep{gao2021scaling}. We train with LoRA instead of full finetuning, with $r=16$ and $\alpha=16$. We choose $\tau=1/50$ and a learning rate of $8 \times 10^{-4}$. We use the Mistral-7B instruction-tuned model as a backbone \citep{jiang2023mistral}. Our choices aim to be consistent with prior literature \citep{wang2023improving,su2022one,zhang2023language}.
+
+\subsection{Massive Text Embedding Benchmark}
+\label{sec:mteb}
+For evaluation, we use the Massive Text Embedding Benchmark (MTEB) \citep{muennighoff2022mteb}. For this paper, we focus on the English-language subset of the benchmark. MTEB is composed of a collection of 56 datasets that are grouped into different embedding tasks: classification, clustering, pair classification, reranking, retrieval, sentence similarity (STS), and summarization. The goal is to construct general purpose embeddings that are useful for solving each of the tasks.
+
+For the fine-tuning setting, we evaluate on the entire English-language subset. In the zero-shot setting, for convenience, we only evaluate on a subset of MTEB.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+\input{figures/zero_shot_tuned_score.tex}
+
+\subsection{Evaluation of Zero-shot Embeddings}
+\label{sec:eval_zero_shot}
+We compare the performance of classical, echo, and summarization embeddings on MTEB tasks (Table~\ref{fig:zero_shot_tuned_score}). We validate using a retrieval dataset from MTEB  (FiQA2018) as a validation set as described in Section~\ref{sec:mteb}.
+
+\paragraph{Echo embeddings outperform classical embeddings zero-shot.} We see that echo embeddings outperform classical embeddings by a large margin: on average, by nearly 10 points for Mistral-7B. Further, this performance increase is consistent across every MTEB category, across models (LLaMA-2 vs Mistral), and across scale (7B vs 13B). This demonstrates that echo embeddings can significantly improve the performance of embeddings on real data, suggesting that the failure mode of classical embeddings that we describe in Section~\ref{sec:toy} can affect performance on real data. 
+
+\paragraph{Qualitative comparison of classical and echo embeddings.} In Section~\ref{sec:toy}, we demonstrate that classical embeddings overestimate the similarity between examples which are superficially similar based on tokens that appear early in the sequence. To build intuition that this applies to realistic data, we present the sentence pair from STSBenchmark, a sentence similarity task from MTEB, in which echo embeddings reduce error the most:
+\begin{align*}
+    x_1 & \colon\begin{array}{l}
+        \text{The best thing you can do is to know your} \\
+        \text{stuff.} \end{array} \\
+    x_2 & \colon\begin{array}{l}
+        \text{The best thing to do is to overcome the fus-} \\
+        \text{siness.} \end{array}
+\end{align*}
+which has a ground-truth score of $0$ (out of $5$) similarity. The sentence pair for which echo embeddings reduces error the least is:
+\begin{align*}
+    y_1 & \colon\begin{array}{l}
+        \text{Sometime if you really want it you might ne-} \\
+        \text{ed to pay an agency to get the place for you.} \end{array} \\
+    y_2 & \colon\begin{array}{l}
+        \text{You could probably get a tour agency to do } \\
+        \text{it for you but it would cost you.} \end{array}
+\end{align*}
+which has a ground-truth similarity of $2$ (out of $5$).
+
+For this example, notice, that the sentence pair $(x_1, x_2)$ on which echo embeddings improve error the most has exactly the property we identify as a failure mode for classical embeddings: the sentence is superficially similar for the first few tokens. On the other hand $(y_1, y_2)$ does not have this property. 
+
+\paragraph{Quantitative evaluation of the failure mode.} The above example builds intuition that, even on real data, classical embeddings fail to properly estimate similarity on examples which are superficially similar in the early tokens. We quantitatively measure the degree to which classical and echo embeddings fail on sentences which are similar for early tokens, and for sentences which are not. We find that classical embeddings systematically fail on examples which exhibit this structure, while echo embeddings do not.
+
+\paragraph{Last-token vs mean token pooling.} We find that last-token embeddings are substantially worse than mean token embeddings in the zero-shot setting, despite the fact that in principle, the last token in the sequence can encode information from all other tokens. In practice, it is clear that the last token does not encode sufficient information to achieve strong performance on MTEB in the zero shot setting.
+
+\paragraph{Echo embeddings vs summarization. } We find that the average performance across the tested MTEB datasets is similar between echo and classical embeddings. Summarization does encourage the last token in the sequence to encode information about the entire sentence. We suspect that echo embeddings are more robust as a result of more directly trying to encode bidirectional information into the embeddings. 
+
+\subsection{Evaluation of Finetuned Embeddings}
+\label{sec:finetuning}
+
+\input{figures/finetuning_scores.tex}
+
+Different embeddings on the MTEB leaderboard are often fine-tuned on different datasets. In order to perform an apples-to-apples comparison between embedding strategies, we fine-tune both echo and classical embeddings on the exact same datasets (described in Section~\ref{sec:exp-finetune}). We report the results in Table~\ref{fig:finetuning_score}. This table also includes a comparison to prior state-of-the-art methods using masked language models (MLM) and autoregressive language models. Further, we evaluate a number of ablations to determine the role of pooling strategy and architecture.
+
+\paragraph{Echo embeddings outperform classical embeddings after finetuning.} We observe that echo embeddings consistently outperform classical embeddings on each category even after finetuning. Hence, the fundamental gap we find between classical and echo embeddings in Section~\ref{sec:toy} and in our zero-shot experiments persist after fine-tuning. 
+
+\paragraph{Comparison to prior state-of-the-art models.} We present comparisons to both prior MLM-based embeddings and prior autoregressive-language-model embeddings, listing the open-source models from the MTEB leaderboard. It is striking that MLMs vastly outperformed autoregressive models until recently. Our classical embeddings outperform the previous-best autoregressive language model. This is a result of using the strongest public 7B parameter language model (Mistral) and more fine-tuning data. However, despite these choices, classical embeddings do \emph{not} outperform prior MLM-based approaches, perhaps because MLMs encode bidirectional context unlike classical embeddings from autoregressive models. Interestingly, echo embeddings allow us to close the gap to achieve state-of-the-art (on average) with an autoregressive model compared to prior open-sourced models on the leaderboard that used MLMs. A recent exception is the concurrent work by~\citet{wang2023improving} that use synthetic data to improve classical embeddings extracted from Mistral-7B. Their synthetic data is not publicly available, but the apples-to-apples comparison between classical and echo embeddings we performed suggests that echo embeddings could provide gains further gains over the numbers reported in~\citep{wang2023improving} when fine-tuning with synthetic data. 
+
+\footnotetext{e5-mistral-7b was recently released and leverages high quality synthetic data to achieve strong performance which is not publicly released. We report their performance, but we do not explicitly compare to them \citep{wang2023improving}.}
+
+\paragraph{Why doesn't last-token pooling close the gap?} Since classical last-token embeddings can attend to every other token, they do not necessarily suffer from the failure mode that we highlighted in Section~\ref{sec:toy}. Last token does not reliably capture relevant information in a zero-shot setting, but this could have been bridged via fine-tuning. It is thus surprising that, even after finetuning last-token embeddings that could (in principle) encode any embedding function, echo embeddings outperform classical embeddings. We identify two hypotheses that may explain this performance gap: (1) While last-token embeddings can attend to every token, the intermediate representations of earlier tokens cannot. If last-token pooling derives information from the internal representations of earlier tokens, by attending to these representations, last-token classical embeddings may still suffer from the failure mode of the earlier tokens. (2) If the post-finetuning performance benefits from the model initialization point, last-token classical embeddings may suffer: in Section~\ref{sec:eval_zero_shot} we show that last-token embeddings achieve poor zero-shot performance. We leave it to future work to explore these hypotheses. We do, however, observe that the gap between last- and mean token echo embeddings is smaller than the gap between last- and mean token classical embeddings, suggesting that echo embeddings can especially improve the quality of mean token embeddings.
+
+\paragraph{Can we relax autoregressive language models to a bidirectional architecture and fine-tune?} To test the role of architecture, we finetune Mistral-7B on the same setup described in Section~\ref{sec:exp-finetune} but modified the architecture so as to remove the causal attention mask. While the initial weights are identical to Mistral-7B, this new model has bidirectional attention. We observe that the performance of bidirectional classical embeddings are better than our standard (causal) classical embeddings, but worse than echo embeddings. This suggests that the architecture alone is not sufficient to improve performance. 
+
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+
+\paragraph{Sentence embeddings.} Dense low-dimensional vectors representing textual semantics has been widely studied and applied. Early approaches involved computing embeddings for individual words \citep{hinton1984distributed,rumelhart1986learning,elman1990finding,mikolov2013efficient,pennington2014glove}. Later work aims to compute dense vectors representing the semantics of entire sequences by combining or composing word vectors \citep{le2014distributed,iyyer2015deep,kiros2015skip,socher2011dynamic,tai2015improved,wang2016cse,wieting2015towards}.
+\citet{khattab2020colbert} propose to use late interaction between document and query vectors to improve retrieval performance. \citet{reimers2019sentence} propose S-BERT which takes a pretrained BERT \citep{devlin2018bert} and trains with a triplet loss on anchor sentences, semantically similar positive examples, and semantically dissimilar negative examples.  More recent approaches typically adopt this approach with different pretrained models and a contrastive objective such as InfoNCE \citep{oord2018representation} or SimCSE \citep{gao2021simcse}. \citet{ni2021sentence} with \citet{ni2021large} extend this approach to the T5 architecture \citep{raffel2020exploring}. Multiple papers use an additional unsupervised contrastive objective \citep{izacard2021unsupervised,wang2022text}. Other papers propose including prompts to improve task-specific embedding performance \citep{jiang2022promptbert, su2022one}. Some work combines multiple of these training objectives and approaches \citep{xiao2023c, li2023towards}. Notably, except for the most recent approaches, nearly all embeddings were based upon bidirectional architectures that were often pretrained with a masked-language modeling objective.
+
+\paragraph{Next-token language modeling for embeddings.} A series of papers aim to construct high quality embeddings from autoregressive large language models. Multiple papers apply the fine-tuning approach of S-BERT to language models but using a trained GPT \citep{radford2018improving} as the backbone architecture \citep{muennighoff2022sgpt, zhang2023language}. \citet{ma2023fine} adopts this approach but for LLaMA-2 \citep{touvron2023llama2}. \citet{jiang2023scaling} extracts embeddings by asking a language model to summarize the input sentence. \citet{wang2023improving} is concurrent to our work and improves embeddings by adding synthetic training data and trains on Mistral \citep{jiang2023mistral}.
+
+\paragraph{Zero-shot embeddings.} Most recent sentence embeddings research has focused on improving finetuning. \citet{reimers2019sentence} demonstrates that without finetuning, BERT has low-quality embeddings. To our knowledge, \citet{jiang2023scaling} is the only paper that constructs zero-shot embeddings for autoregressive language models.
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+
+We have compared classical and echo embeddings in a toy example, on real data in the zero-shot setting, and after finetuning. With the toy data, we identified a failure mode of autoregressive classical embeddings, which we have shown can be recovered with echo embeddings. Our result motivates the development of higher quality embeddings which are important in retrieval applications. 
+
+In addition, until recently, masked language models largely dominated the MTEB leaderboard, despite often having an order of magnitude fewer parameters, having been trained on substantially less data, and performing worse on other benchmarks of interest to the natural language processing community. While our results do not explicitly explain the surprising success of masked language models, they do suggest that next-token language models suffer from an inherent drawback that may have stifled their performance until they became performant enough to compensate for this shortcoming. We believe that our embedding strategy achieves the best of both worlds: we gain the capability of next-token language models while recovering from the failure mode that next-token language models do not encode information about future tokens in their contextualized token embeddings.
+
+
+
+\section{Limitations}
+
+\label{sec:limitations}
+
+Despite the success of echo embeddings, the method has limitations. First, while echo embeddings achieve superior performance to classical embeddings, they require double the inference cost to pass two copies of the input sequence to the model. Second, we do not fully explain why echo embeddings are improved in comparison to classical embeddings after finetuning even though there is no representational limitation. We leave it to future work to understand the exact underlying mechanisms for this improvement.
+
+

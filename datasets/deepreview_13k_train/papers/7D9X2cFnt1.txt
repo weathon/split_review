@@ -1,0 +1,391 @@
+\title{Elastic Feature Consolidation For Cold Start Exemplar-Free Incremental Learning}
+
+\begin{abstract}
+Exemplar-Free Class Incremental Learning (EFCIL) aims to learn from a sequence of tasks without having access to previous task data. In this paper, we consider the challenging Cold Start scenario in which insufficient data is available in the first task to learn a high-quality backbone. This is especially challenging for EFCIL since it requires high plasticity, which results in feature drift which is difficult to compensate for in the exemplar-free setting.  To address this problem, we propose a simple and effective approach that consolidates feature representations by regularizing drift in directions highly relevant to previous tasks and employs prototypes to reduce task-recency bias. Our method, called Elastic Feature Consolidation (EFC), exploits a tractable second-order approximation of feature drift based on an Empirical Feature Matrix (EFM). The EFM induces a pseudo-metric in feature space which we use to regularize feature drift in important directions and to update Gaussian prototypes used in a novel asymmetric cross entropy loss which effectively balances prototype rehearsal with data from new tasks. Experimental results on CIFAR-100, Tiny-ImageNet, ImageNet-Subset and ImageNet-1K demonstrate that Elastic Feature Consolidation is better able to learn new tasks by maintaining model plasticity and significantly outperform the state-of-the-art
+\end{abstract}
+
+\section{Introduction}
+
+
+Deep neural networks achieve state-of-the-art performance on a broad range of visual recognition problems. However, the traditional supervised learning paradigm is limited in that it presumes all training data for all tasks is available in a single training session. The goal of Class-Incremental Learning (CIL) is to enable incremental integration of new classification tasks into already-trained models as they become available~\citep{facil}. Class-incremental learning entails balancing model \emph{plasticity} (to allow learning of new tasks) against model \emph{stability} (to avoid catastrophic forgetting of previous tasks)~\citep{mccloskey1989catastrophic}. \textit{Exemplar-based} approaches retain a small set of samples from previous tasks which are replayed to avoid forgetting, while \emph{exemplar-free} methods retain no samples from previous tasks. This latter category is of particular interest when retaining exemplars is problematic due to storage or privacy requirements.
+
+Exemplar-free Class Incremental Learning (EFCIL) must mitigate catastrophic forgetting without recourse to stored samples from previous tasks. Approaches can be loosely grouped into those based on weight regularization and those based on functional regularization. Elastic Weight Consolidation (EWC) is an elegant approach based on a Laplace approximation of the previous-task posterior~\citep{ewc}. When training on a new task, an approximate Fisher Information Matrix is used to regularize parameter drift in directions of significant importance to previous tasks. This mitigates forgetting while maintaining more plasticity for learning the new task. EWC is a second-order approach, and as such needs aggressive Fisher Information Matrix approximations~\citep{rotate_net}.
+
+Functional regularization, especially through feature distillation, is a central component in recent state-of-the-art EFCIL approaches~\citep{pass, ssre, sdc, evanescent}. Instead of regularizing weight drift, feature distillation regularizes drift in feature space to mitigate forgetting. Feature distillation is often combined with class prototypes, either learned~\citep{evanescent} or based on class means~\citep{pass}, to perform pseudo-rehearsal of features from previous tasks which reduces the task-recency bias common in EFCIL~\citep{facil}. Prototypes -- differently than exemplars -- offer a privacy-preserving way to mitigate forgetting. Feature distillation and prototype rehearsal reduce feature drift across tasks, but at the cost of plasticity. 
+
+Existing EFCIL methods are predominantly evaluated in \emph{Warm Start} scenarios in which the first task contains a larger number of classes than the rest, typically 50\% or 40\% of the entire dataset. For Warm Start scenarios\footnote{We define Warm Start, differently than~\cite{ash2020warm}, as continual learning with a large initial task, and Cold Start, consistent with~\cite{hu2021one}, for continual learning beginning with a random network initialization.} stability is more important than plasticity, since a good backbone can be already learned on the large first task. Current state-of-the-art approaches use strong backbone regularization~\citep{pass} or indeed even \emph{freeze} backbone after the large first task and focus on incrementally training the classifier~\citep{fetril}.
+
+In this paper we consider EFCIL in the more challenging \emph{Cold Start} scenario in which the first task is insufficiently large to learn a high-quality backbone and methods must be plastic and adapt their backbone to new tasks. EFCIL with Cold Starts faces two main challenges: an alternative to feature distillation is required, since the backbone must adapt to new data, and an exemplar-free mechanism is needed to adapt previous-task classifiers to the changing backbone.
+
+We propose a novel EFCIL approach, which we call Elastic Feature Consolidation (EFC), that regularizes changes in directions in \textit{feature space} most relevant for previously-learned tasks and allows more plasticity in other directions. A main contribution of this work is the derivation of a pseudo-metric in feature space that is induced by a matrix we call the Empirical Feature Matrix (EFM). In contrast to the Fisher Information Matrix, the EFM can be easily stored and calculated since it does not depend on the number of model parameters, but only on feature space dimensionality. To address drift of the more plastic backbone, we additionally propose an Asymmetric Prototype Replay loss (PR-ACE) that balances between new-task data and Gaussian prototypes during EFCIL. Finally, we propose an improved method to update the class prototypes which exploits the already-computed EFM. A visual overview of EFC and its components is given in Figure~\ref{fig:EfC}.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.99\textwidth]{Images/EFC_overview_split.pdf}% overview.pdf
+    \caption{Elastic Feature Consolidation. (a) Architecture overview; (b) The Empirical Feature Matrix (EFM) measures how outputs vary with features and identifies important directions to mitigate forgetting (Section~\ref{sec:empirical_feat}); (c) The EFM induces a pseudo-metric in feature space used to estimate prototype drift (Section~\ref{sec:drift-compensation}); and (d) The Asymmetric Prototype Replay loss adapts previous task classifiers to the changing backbone by balancing new-task data and Gaussian prototypes (Section~\ref{sec:asym_loss}).} 
+    \label{fig:EfC}
+\end{figure}
+
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+We focus on \emph{\textbf{offline, class-incremental}} learning problems. Class-incremental problems are distinguished from task-incremental problems in that \emph{\textbf{no task information is available at test time}.} Offline incremental learning allows multiple passes on task datasets during training~\citep{icarl, wu2019large, facil}, while online incremental learning considers continuous data streams in which each sample is accessed just once during training~\citep{lopez2017gradient, mai2022online, soutifcormerais2023comprehensive}.
+
+Exemplar-based approaches rely on a memory of previous class samples that are replayed while learning new tasks. \citet{ucir, podnet, adaptive_feature_consolidation} combine cosine normalization and distillation losses with exemplars to mitigate forgetting. Another category of exemplar-based approaches focuses on expanding sub-network structures across the incremental steps. \cite{aanet} adds two residual blocks to mask layers and balance stability and plasticity. \cite{der} train a single backbone for each incremental task, and more recently \cite{memo} share generalized residual blocks and extend specialized blocks for new tasks to improve performance and efficiency. The main drawbacks of exemplar-based approaches are the lack of privacy preservation and high computational and storage costs, particularly when a growing memory buffer is used.
+
+Exemplar-free approaches are less common in class-incremental learning. Early works computed importance scores for all weights and used them to perform weight regularization \citep{ewc, rotate_net, kronecker_fisher}. Other works like \citet{lwf, lfl} use functional regularization, such as knowledge or feature distillation, constraining network activations to match those of a previously-trained network. Most functional regularization approaches use feature distillation \citep{il2a, sdc}, or even freeze the feature extractor after the first task \citep{fetril, deesil, panos2023session}, greatly reducing the plasticity of the network. For this reason, they consider Warm Start scenarios in which the first task is much larger that the others, so that reducing plasticity after the first task has less impact on the performance.
+
+On top of this decrease in plasticity, only using functional regularization is not enough to learn new boundaries between classes from previous tasks and classes from new ones. For this reason regularization is often combined with \textit{prototype rehearsal} \cite{pass, ssre, smith2021always}. Prototypes are feature space statistics (typically class means) used to reinforce the boundaries of previous-task classes without the need to preserve exemplars. \citet{pass, il2a} use prototype augmentation and self-supervised learning to learn transferable features for future tasks. \cite{evanescent} learns and updates prototype representations during incremental learning. \cite{ssre} combine prototypes with a strategy to re-organize network structure to transfer invariant knowledge across the tasks. \cite{fetril} fixes the feature extractor after the training the large first task and generates pseudo-samples to train a linear model discriminating all seen classes.
+
+We propose an EFCIL approach that uses functional regularization and prototype rehearsal, but in contrast with most state-of-the-art methods, we also report results in \emph{Cold Start} incremental learning scenarios that do not start with a large first task. 
+
+
+\section{EFCIL Regularization via the Empirical Feature Matrix}
+
+In this section we introduce the general EFCIL framework and then derive a novel pseudo-metric in feature space, induced by a positive semi-definite matrix we call the \textit{Empirical Feature Matrix} (EFM), used as a regularizer to control feature drift during class-incremental learning (see Figure~\ref{fig:EfC}b).
+
+\subsection{Exemplar-free Class-Incremental Learning (EFCIL)}
+During class-incremental learning a model $\mathcal{M}$ is sequentially trained on $K$ tasks, each characterized by a disjoint set of classes  $\{\mathcal{C}_t\}_{t=1}^K$, where each $\mathcal{C}_t$ is the set of labels associated to the task $t$. We denote the incremental dataset as $\mathcal{D} = \{\mathcal{X}_t, \mathcal{Y}_t\}_{t=1}^K$, where $\mathcal{X}_t$ and $\mathcal{Y}_t$ are, respectively, the set of samples and the set of labels for task $t$. The incremental model $\mathcal{M}_t$ at task $t$ consists of a feature extraction backbone $f_t(\cdot; \theta_t)$ shared across all tasks and whose parameters $\theta_t$ are updated during training, and a classifier $W_t \in \mathbb{R}^{n \times  \sum_{j=1}^t \vert  \mathcal{C}_j \vert }$ which grows with each new task. The model output at task $t$ is the composition of feature extractor and classifier:
+\begin{equation}
+    \mathcal{M}_t(x; \theta_t, W_t) \equiv p(y | x; \theta_t, W_t) = \text{softmax} (W_t^{\top} f_t(x; \theta_t)).
+\end{equation}
+Directly training $\mathcal{M}_t$ (i.e. fine-tuning) with a cross-entropy loss at each task $t$ results in backbone drift because at task $t$ we see no examples from previous-task classes. This progressively invalidates the previous-task classifiers and results in forgetting. In addition to the cross-entropy loss, many state-of-the-art EFCIL approaches use a regularization loss $\mathcal{L}_t^{\text{reg}}$ to reduce backbone drift, and a prototype loss $\mathcal{L}_t^{\text{pr}}$ to adapt previous-task classifiers to new features.
+ 
+\subsection{Weight Regularization and Feature Distillation}
+\label{ewc_fd}
+ \citet{ewc} showed that using $\ell_2$ regularization to constrain weight drift reduces forgetting but does not leave enough plasticity for learning of new tasks. Hence, they proposed Elastic Weight Consolidation (EWC), which relaxes the $\ell_2$ constraint with a quadratic constraint based on a diagonal approximation of the Empirical Fisher Information Matrix (E-FIM):
+\begin{equation}
+   F_{t} =\mathbb{E}_{x\sim \mathcal{X}_{t}}  \biggr[\mathbb{E}_{y\sim p(y|x;\theta^{*}_{t})}\biggl\{ \biggl( \frac{ \partial \log p } {\partial \theta^{*}_{t}} \biggl)  \biggl( \frac{\partial \log p  } {\partial \theta^{*}_{t}} \biggl) ^T\biggl\} \biggr],
+ \end{equation}
+where $\theta_t^*$ is the model trained after task $t$. The E-FIM induces a pseudo-metric in parameter space~\citep{amari} encouraging parameters to stay in a low-error region for previous-task models: 
+\begin{equation}
+\begin{gathered}
+\mathcal{L}_{t}^{\text{E-FIM}} =  \lambda_{\text{E-FIM}} (\theta_t - \theta^{*}_{t-1})^T  F_{t-1} (\theta_t - \theta^{*}_{t-1}).
+\end{gathered}
+\end{equation}
+The main limitation of approaches of this type is need for approximations of the E-FIM (e.g. a diagonal assumption). This makes the computation of the E-FIM tractable, but in practice is unrealistic since it does not consider off-diagonal entries that represent influences of interactions between weights on the log-likelihood. To overcome these limitations, more recent EFCIL approaches \citep{pass, ssre} rely on feature distillation (FD), which scale better in the number of parameters:  
+\begin{equation}
+\mathcal{L}_{t}^{\text{FD}}  =  \sum_{x \in \mathcal{X}_t} || f_{t}(x) - f_{t-1}(x) ||_2.
+\end{equation}
+The isotropic regularizer using the $\ell_2$ distance is too harsh a constraint for learning new tasks. We propose to use a pseudo-metric in \textit{feature space}, induced by a matrix which we call the \textit{Empirical Feature Matrix} (EFM), constraining directions in \textit{feature space} most important for previous tasks, while allowing more plasticity in other directions when learning new tasks. 
+
+\subsection{The Empirical Feature Matrix}
+\label{sec:empirical_feat}
+Our goal is to regularize feature drift, but we do not want to do so isotropically as in feature distillation. Instead, we draw inspiration from how the E-FIM identifies important directions in parameter space and take a similar approach in feature space.
+
+\minisection{The local and empirical feature matrices.}
+Let $f_t(x)$ be the feature vector extracted from input $x \in \mathcal{X}_t$ from task $t$ and $p(y)=p(y|f_t(x); W_t)$ the discrete probability distribution over all the classes seen so far. We define the \textit{local feature matrix} as:
+\begin{equation}
+\label{eq:localfm}
+   E_{f_t(x)} = \mathbb{E}_{y\sim p(y)}\biggl[ \biggl( \frac{ \partial \log p(y) } {\partial f_t(x)} \biggl)  \biggl( \frac{\partial \log p(y)  } {\partial f_t(x)} \biggl) ^\top \biggl].
+\end{equation}
+The Empirical Feature Matrix (EFM) associated with task $t$ is obtained by taking the expected value of Eq.~\ref{eq:localfm} over the entire dataset at task $t$:
+\begin{equation}
+\label{efm}
+   E_{t} = \mathbb{E}_{x\sim \mathcal{X}_{t}}  [E_{f_t(x)}].
+ \end{equation}
+Both $E_{f_t(x)}$ and $E_t$ are symmetric, as they are weighted sums of symmetric matrices, and positive semi-definite. Naively computing  $E_{f_t(x)}$ requires a complete forward pass and a backward pass up to the feature embedding, however we exploit an analytic formulation that avoids computing gradients:
+\begin{equation}
+\label{eq:closed_form_efm}
+E_{f_t(x)} = \mathbb{E}_{y\sim p(y)}[W_t(I_m-P)_y (W_t(I_m-P)_y)^{\top}],
+\end{equation}
+To gain additional insight into what this matrix measures, we highlight some (information) geometrical aspects of $E_t$. The Empirical Fisher Information Matrix provides information about the information geometry of parameter space. In particular, it can be obtained as the second derivative of the KL-divergence for small weight perturbations~\citep{naturalgradient, datamatrix}. Similarly, the Empirical Feature Matrix provides information about the information geometry of \textit{feature} space. Since $E_{f_t(x)}$ is positive semi-definite, we can interpret it as a pseudo-metric in feature space and use it to understand which perturbations of features most affect the predicted probability:
+\begin{equation}
+\label{kl_features}
+    \text{KL}(p(y \mid f_t(x; \theta_t) + \delta; W_t) \,\, || \,\, p(y \mid f_t(x; \theta_t); W_t)) = \delta^T E_{f_t(x)} \delta + \mathcal{O}(||\delta||^{3}).
+\end{equation}
+
+\minisection{The Empirical Feature Matrix loss.}
+We now have all the ingredients for our regularization loss:
+\begin{equation}
+\label{eq:training_loss}
+\mathcal{L}_{t}^{\text{EFM}} \!\! = \!\!\!\!
+\mathop{\mathbb{E}}\limits_{x \in \mathcal{X}_t} \!\!\! \left[
+(f_t(x) - f_{t\text{-}1}(x))^T
+(\lambda_{\text{EFM}} E_{t\text{-}1} +\eta I) (f_t(x) - f_{t \text{-}1}(x)) \right],
+\end{equation}
+where $f_{t}(x)$ and $f_{t-1}(x) \in \mathbb{R}^{n}$ are the features of sample $x$ extracted from the current model $\mathcal{M}_t$ and the model $\mathcal{M}_{t-1}$ trained on the previous task, respectively. In Eq.~\ref{eq:training_loss} we employ a damping term $\eta \in \mathbb{R}$ to constrain features to stay in a region where the quadratic second-order approximation of the KL-divergence of the log-likelihood in Eq.~\ref{kl_features} remains valid~\citep{Martens2012TrainingDA}. However, to ensure that our regularizer does not degenerate into feature distillation, we must ensure that $\lambda_{\text{EFM}} \mu_i > \eta$, where $\mu_i$ are the non-zero eigenvalues of the EFM. In the next section we give empirical evidence of the effect of this elastic regularization.
+
+\minisection{Regularizing effect of the EFM.}
+By definition, the directions of the eigenvectors of the EFM associated with strictly positive eigenvalues are those in which perturbations of the features have the most significant impact on predictions. To empirically verify this behavior, we perturb features in these \textit{principal} directions and measure the resulting variation in probability outputs. Let $f_t=f_t(x) \in \mathbb{R}^n$ denote feature vector extracted from $x$ and $E_t$ the EFM computed after training on task $t$. We define the perturbation vector $\varepsilon_{1:k} \in \mathbb{R}^n$ such that each of the first $k$ entries is sampled from a Gaussian distribution $\mathcal{N}(0, \sigma)$, where $k$ is the number of strictly positive eigenvalues of the spectral decomposition of $E_t$. The remaining $n\text{-}k$ entries are set to zero. Then, letting $U$ be the matrix whose columns are the eigenvectors of $E_t$, we compute the perturbed features vector $\tilde{f_t}$ as follows:
+\begin{equation}
+    \tilde{f_t} = f + U_t^{\top} \varepsilon_{1:k}.
+\end{equation}
+In Figure~\ref{fig:experimental-evidence} (left) we show that perturbing the feature space along the principal directions in this way, after training on the first task, results in a substantial variation in the probabilities for each class. Conversely, applying the complementary perturbation $\varepsilon_{k:n}$, i.e., setting zero on the first $k$ directions and applying Gaussian noise on the remaining $n\text{-}k$ directions, has no impact on the output. In Figure~\ref{fig:experimental-evidence} (right) we see that, after training three tasks, perturbing in the principal directions of $E_3$ degrades performance across all tasks, while perturbations in non-principal directions continue to have no affect on the accuracy. This shows that $E_3$ captures the important feature directions for all previous tasks and that regularizing drift in these directions should mitigate forgetting.  
+ 
+
+\begin{figure*}
+\begin{center}
+\begin{tabular}{c}
+\includegraphics[width=0.80\textwidth]{Images/CS_all_h_cut.pdf}
+\end{tabular}
+\end{center}
+\caption{The regularizing effects of $E_t$ on Cold Start CIFAR-100 - 10 step (see Section \ref{sec:dataset} for more details on the dataset settings). \textbf{Left}: Perturbing features in principal directions of $E_1$ results in significant changes in classifier outputs (in \color{blue}blue\color{black}), while perturbations in non-principal directions leave the outputs unchanged (in \color{red}red\color{black}).
+\textbf{Right}: If we continue incremental learning up through task 3 and perturb features from all three tasks in the principal (solid lines) and non-principal (dashed lines) directions of $E_3$, we see that $E_3$ captures \emph{all} important directions in feature space up through task 3.}
+\label{fig:experimental-evidence}
+\end{figure*}
+
+
+\section{Prototype Rehearsal for Elastic Feature Consolidation}
+
+In this section we first describe prototype rehearsal and then describe our proposed Asymmetric Prototype Rehearsal strategy (see Figure \ref{fig:EfC}d). We also show how the Empirical Feature Matrix $E_t$ defined above can be used to guide classifier drift compensation (see Figure \ref{fig:EfC}c). 
+
+\subsection{Prototype Rehearsal for Exemplar-free Class-Incremental Learning}
+\label{sec:proto-replay}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.82\textwidth]{Images/remove_space.pdf}  
+    \caption{Accuracy after each incremental step on the Cold Start CIFAR-100 10-step scenario. Feature distillation with symmetric prototype loss (left) reduces forgetting at the cost of plasticity and new tasks are not learned. EFM regularization with symmetric loss (middle) increases plasticity at the cost of stability and previous tasks are forgotten. EFM regularization with asymmetric PR-ACE loss (right), balances current task data with prototypes and achieves better plasticity/stability trade-off.} 
+    \label{fig:efc-sym}
+\end{figure}
+EFCIL suffers from the fact that the final classifier is never jointly trained on the all seen classes. At each task $t$, the classifier $W_{t-1}$ is extended to include $|\mathcal{C}_t|$ new outputs. Thus, if classifier $W_{t}$ is only trained on samples from the current classes $\mathcal{C}_t$, it becomes incapable of discriminating classes from previous tasks, leading to inter-task confusion. Additionally, the classifier is biased towards the newest classes, resulting in task-recency bias~\citep{facil}.
+
+A common \textit{exemplar-free} solution is to replay only \textit{prototypes} of previous classes \citep{ssre, pass, il2a, fetril, evanescent}. At the end of task $t-1$, the prototypes $p^c_{t-1}$ are computed as the class means of deep features and the set of prototypes $\mathcal{P}_{1:t-1}$ is  stored.
+
+During training of the next task the prototypes are perturbed and fed to the classification heads. Let $(\tilde{p}$, $y_{\tilde{p}}) \sim \mathcal{P}_{1:t-1}$ be a batch of perturbed prototypes  and  $(x_t, y_t) \sim (\mathcal{X}_t, \mathcal{Y}_t)$ a batch of current task data. The final classification loss, which we call the \textit{symmetric} loss to distinguish it from the \emph{asymmetric} loss we propose below, consists of two cross entropy losses evaluated on the all classification heads:
+\begin{equation}
+      \mathcal{L}_t^{\text{sym}}  =  \restr{\mathcal{L}^{\text{ce}}_t(x_t, y_t)} {\mathcal{C}_{1:t}}+\lambda_{\text{pr}}\,\restr{\mathcal{L}^{\text{ce}}_t(\tilde{p}, y_{\tilde{p}})}{\mathcal{C}_{1:t}},
+      \label{eqn:sym_loss}
+\end{equation}
+where $\restr{\mathcal{L}^{\text{ce}}_t(x_t, y_t)} {C_{1:t}}$ represents the cross-entropy loss computed over all encountered classes $C_{1:t}$. 
+In our work, we use Gaussian prototypes to enhance the feature class means, as suggested by~\cite{il2a}.  To be more specific, we create augmented prototypes by sampling from a Gaussian distribution $\mathcal{N}(p_{t-1}^c, \Sigma^c)$. Here, $\Sigma^c$ represents the class covariance matrix of feature representations. 
+\subsection{Asymmetric Prototype Rehearsal}
+\label{sec:asym_loss}
+$\mathcal{L}_t^{\text{sym}}$ from Eq.~\ref{eqn:sym_loss} above is able to balance old task classifiers with new ones only when feature space drift is small, for instance when using feature distillation (see Figure~\ref{fig:efc-sym} (left)). But with the greater plasticity introduced by the EFM, the symmetric loss fails to effectively adapt old task classifiers to the changing backbone (see Figure~\ref{fig:efc-sym} (middle)). To address this, we propose an \textit{Asymmetric Prototype Replay loss} (PR-ACE) to balance current task data and prototypes:
+\begin{equation}
+\label{eqn:pr-ace}
+     \mathcal{L}_t^{\text{PR-ACE}} =\restr{\mathcal{L}^{\text{ce}}_t(x_t, y_t)} {\mathcal{C}_{t}}+ \restr{\mathcal{L}^{\text{ce}}_t((\tilde{p}, y_{\tilde{p}}) \cup (\hat{x}_t, \hat{y}_t))}{\mathcal{C}_{1:t}},
+\end{equation} 
+where $(x_t, y_t), (\hat{x}_t, \hat{y}_t)  \sim (\mathcal{X}_t, \mathcal{Y}_t)$ and $\tilde{p} \sim \mathcal{P}_{1:t-1}$ with $y_{\tilde{p}}$ the associated label. $\restr{\mathcal{L}^{\text{ce}}_t(x, y)}{\mathcal{C}^t}$ is the cross entropy loss restricted to classes in $\mathcal{C}^t$. The first term relies on the current task data, processed through the backbone and the current task classification head. It aligns the initially random head with the feature representation learned during previous tasks and aids learning of task-specific features. The second term calibrates the classification heads. It combines a batch of current task data with a batch of prototypes. Prototypes and current task data are uniformly sampled from all classes and used to train all task classifiers; consequently a larger proportion of prototypes is used compared to the current task data. In Figure~\ref{fig:efc-sym} (right) we see that the addition of the PR-ACE loss achieves just this balance between stability and plasticity.
+ 
+PR-ACE takes inspiration from the asymmetric loss proposed by~\cite{er-ace} for \textit{online, exemplar-based} class incremental learning. In their work, the goal was to learn inter-task features with a loss term based on both exemplars and current task data passed through the current backbone. In contrast, for prototype rehearsal only \textit{current task data} may be passed through the backbone.   
+ 
+\subsection{Prototype Drift Compensation via EFM}
+\label{sec:drift-compensation}
+ 
+Fixed prototypes can become inaccurate over time due to drift from previous class representations.\cite{sdc} showed that the drift in \textit{embedding networks} can be estimated using current task data. They suggest estimating the drift of class means from previous-tasks by looking at feature drift in closely related classes of current task. After each task, they update the prior normalized class means via a weighted average of the current task feature representation drift. These updated class means are then used for nearest class-mean classification at test time.
+Our aim is to update prototypes $p^c_{t-1}$ used in for rehearsal in PR-ACE (Eq. \ref{eqn:pr-ace}) across the entire training phase. As proposed by SDC, after each task we update the prototypes as follows:
+\begin{equation}
+\label{eq:sdc_formula}
+      \hat{p}_{t-1}^{c} = p_{t-1}^{c} + \frac{\sum_{x_i \sim \mathcal{X}_t}  w_i \delta_i^{t-1}}{\sum_{x_i \sim \mathcal{X}_t} w_i},  \,\,\,\, 
+      \delta_i^{t-1}=f_t(x_i) - f_{t-1}(x_i), 
+\end{equation}
+where $\delta_i^{t-1}$ is the feature drift of samples $x_i$ between task $t-1$ and $t$.
+
+We define the weights $w_i$ using the EFM (Figure~\ref{fig:EfC}c). In Section~\ref{sec:empirical_feat} we showed that the EFM induces a pseudo-metric in feature space, providing a second-order approximation of the KL-divergence due to feature drift. We extend the idea of feature drift estimation to softmax-based classifiers by weighting the overall drift of our class prototypes. Writing $p^c = p^c_{\text{t}-1}$ and $f^i_{t\text{-}1} = f_{t-1}(x_i)$ to simplify notation, our weights are defined as:
+\begin{equation}
+\label{our_weight}
+w_i = \exp \left( -\dfrac{(f^i_{t\text{-}1} \!\!\! - p^c) E_{t\text{-}1} (f^i_{t\text{-}1} \!\!\! - p^c)^\top}{2 \sigma^2}\right) \approx \exp \left( -\dfrac{ \text{KL}(p(y|f^i_{t\text{-}1}; W_{t\text{-}1}) \, || \, p(y|p^c; W_{t\text{-}1}))}{2 \sigma^2}\right),
+\end{equation}
+where $E_{t\text{-}1}$ is the EFM after training task $t-1$. Eq.~\ref{our_weight} assigns higher weights to the samples more closely aligned to prototypes in terms of probability distribution. Specifically, higher weights are assigned to samples whose softmax prediction matches that of the prototypes, indicating a strong similarity for the classifier.
+
+\subsection{Elastic Feature Consolidation with Asymmetric Prototype Rehearsal}
+\label{sec:EfC-loss}
+Figure~\ref{fig:EfC} summarizes our approach, which is a combination of the EFM and PR-ACE losses:
+\begin{equation}
+    \mathcal{L}^{\text{EFC}}_t = \mathcal{L}_t^{\text{EFM}} + \mathcal{L}_t^{\text{PR-ACE}} ,
+\end{equation}
+where $\mathcal{L}_t^{\text{PR-ACE}}$ is the asymmetric cross entropy loss (\eqref{eqn:pr-ace}) and $\mathcal{L}_t^{\text{EFM}}$ is the Empirical Feature Matrix loss from (\eqref{eq:training_loss}). After each task, our prototypes are updated using (\eqref{eq:sdc_formula}) equipped with the EFM (\eqref{our_weight}) and new prototypes with the corresponding class covariances are computed. Finally, we compute the EFM $E_t$ using the current task data for use when learning subsequent incremental tasks.
+
+Note that it is essential to combine $\mathcal{L}^{\text{EFC}}$ with $\mathcal{L}_t^{\text{PR-ACE}}$. $E_{t-1}$ \emph{selectively} inhibits drift in important feature directions, in contrast to Feature Distillation which inhibits drift in \emph{all} directions (Figure~\ref{fig:efc-sym} (left)). The resulting plasticity increases the risk of prototype drift, which in turn adapts previous-task classifiers to drifted prototypes (Figure~\ref{fig:efc-sym} (middle)). Our use of $\mathcal{L}_t^{\text{PR-ACE}}$ to balance prototypes and new task samples, and our prototype drift compensation, counters this effect (Figure~\ref{fig:efc-sym} (right)).
+
+
+
+\section{Experimental results}
+
+
+In this section we compare Elastic Feature Consolidation with the state-of-the-art in EFCIL.
+
+\label{sec:experimental_results}
+\subsection{Datasets, Metrics, and Hyperparameters}
+\label{sec:dataset}
+We consider three standard datasets: \textbf{CIFAR-100}~\citep{CIFAR100},\textbf{Tiny-ImageNet}~\citep{TinyImageNet} and \textbf{ImageNet-Subset}~\citep{ImageNet}. Each is evaluated in two settings. The first is the \textbf{Warm Start (WS)} scenario commonly considered in EFCIL~\cite{pass, ssre,fetril, evanescent} which uses a larger first task consisting of 50 classes for CIFAR-100 and ImageNet-Subset in the 10-step scenario, and 40 classes in the 20-step scenario. For Tiny-ImageNet, both the 10-step and 20-step scenarios use a large first task consisting of 100 classes. Regardless of 10-step or 20-step, the remaining classes after the first task are uniformly distributed among the subsequent tasks. The second setting, referred to as \textbf{Cold Start (CS)}, uniformly distributes all classes among all tasks. We are mostly interested in the Cold Start scenario since it requires backbone plasticity and is very challenging for EFCIL. We use as metrics the \textbf{per-step incremental accuracy} $A_{\text{step}}^K$ and \textbf{average incremental accuracy} $A_{\text{inc}}^K$:
+\begin{equation}
+\label{eq:metrics}
+    A_{\text{step}}^K = \frac{\sum_{i=1}^K \vert \mathcal{C}_i \vert  a^K_i}{\sum_{i=1}^K \vert \mathcal{C}_i \vert},  \,\,\,\, A_{\text{inc}}^K = \frac{1}{K} \sum_{i=1}^K  A_{\text{step}}^i,
+\end{equation}
+where $a^K_i$ represents the accuracy of task $i$ after training task $K$. 
+
+\begin{table}[t]
+\centering
+\caption{Comparison with the state-of-the-art on CIFAR-100, Tiny-ImageNet, and ImageNet-Subset. Fusion results are those reported in \citep{evanescent} as no code is provided to reproduce them.}
+
+\setlength{\tabcolsep}{4pt}
+\resizebox{0.92\textwidth}{!}{%
+\begin{tabular}{cl c cc c|c cc cc }
+ 
+\toprule
+ & & \multicolumn{4}{c}{\textbf{Warm Start}} &  \multicolumn{4}{c}{\textbf{Cold Start}} \\
+ 
+\multicolumn{2}{l}{} & \multicolumn{2}{c}{  $\boldsymbol{A_{\mathbf{step}}^K}$ } & \multicolumn{2}{c}{$\boldsymbol{A_{\mathbf{inc}}^K}$} & \multicolumn{2}{c}{$\boldsymbol{A_{\mathbf{step}}^K}$ } & \multicolumn{2}{c}{$\boldsymbol{A_{\mathbf{inc}}^K}$} \\
+
+  & \textbf{Method}    & \textbf{10 Step}  & \textbf{20 Step}  & \textbf{10 Step}  & \textbf{20 Step}  & \textbf{10 Step}  & \textbf{20 Step}   & \textbf{10 Step}  & \textbf{20 Step}   \\
+\cmidrule(lr){2-2}
+\cmidrule(lr){3-4}
+\cmidrule(lr){5-6}
+\cmidrule(lr){7-8}
+\cmidrule(lr){9-10}
+\multirow{7}{*}{\rotatebox[origin=c]{90}{CIFAR-100}} 
+      & EWC   & $21.08 \pm 1.09$ & $13.53 \pm 1.11$ & $41.00 \pm 1.11$ & $31.79 \pm 2.77$ & $31.17 \pm 2.94$  &$17.37 \pm 2.43$  & $49.14 \pm 1.28$ & $31.02 \pm 1.15$   \\
+      & LwF   & $20.73 \pm 1.47$ & $11.78 \pm 0.60$ & $41.95 \pm 1.30$ & $28.93 \pm 1.62$ & $32.80 \pm 3.08$& $17.44 \pm 0.73$ & $\underline{53.91} \pm 1.67$  & $38.39\pm 1.05$ &    \\
+      & PASS  & $53.42 \pm 0.48$ & $47.51 \pm 0.37$ & $63.42 \pm 0.69$ & $59.55 \pm 0.97$ & $30.45 \pm 1.01$& $17.44 \pm 0.69$ & $47.86\pm 1.93$ & $32.86 \pm 1.03$ & \\
+      
+      & Fusion & $56.86$ & $51.75$ & $65.10$   & $61.60$  & $-$ & $-$ & $-$   & $-$ &     \\
+      
+      & FeTrIL  & $56.79 \pm 0.40$ & $52.61 \pm 0.81$  & $65.03 \pm 0.66$   & $62.50 \pm 1.03$  &$\underline{34.94} \pm 0.46$ & $\underline{23.28} \pm 1.24$  & $51.20 \pm 1.13$   & $\underline{38.48} \pm 1.07$  &  \\
+      & SSRE     & $\underline{57.48} \pm 0.55$ & $\underline{52.98} \pm 0.63$  & $\underline{65.78} \pm 0.59$   & $\underline{63.11} \pm 0.84$  &  $30.40	\pm 0.74$  & $17.52 \pm 0.80$  & $47.26 \pm 1.91 $  &$32.45	\pm 1.07$  &  \\
+\cmidrule(lr){2-2}
+\cmidrule(lr){3-4}
+\cmidrule(lr){5-6}
+\cmidrule(lr){7-8}
+\cmidrule(lr){9-10}
+        & \textbf{EFC}    & $\textbf{60.87} \pm 0.39 $& $\textbf{55.78} \pm 0.42$  & $\textbf{68.23} \pm 0.68$   & $\textbf{65.90} \pm 0.97$ &  $\textbf{43.62} \pm 0.70$  & $\textbf{32.15} \pm 1.33$  & $\textbf{58.58} \pm 0.91$   &$\textbf{47.36} \pm 1.37$  &  \\
+\cmidrule[1pt]{1-10}
+
+\multirow{7}{*}{\rotatebox[origin=c]{90}{Tiny-ImageNet}}    
+    & EWC       & $\phantom{0}6.73 \pm 0.44$ & $\phantom{0}5.96 \pm 1.17$  & $18.48 \pm 0.60$ & $13.74 \pm 0.52$ & $\phantom{0}8.00 \pm 0.27$ & $\phantom{0}5.16 \pm  0.54$ & $24.01 \pm 0.51$ & $15.70 \pm 0.35$  \\
+    & LwF       & $24.00 \pm 1.44$ & $\phantom{0}7.58 \pm 0.37$ & $43.15 \pm 1.02$ & $22.89 \pm 0.64$ & $ 26.09 \pm 1.29$ & $15.02\pm 0.67$ & $45.14 \pm 0.88$ &  $32.94 \pm 0.54$   \\
+    & PASS      & $41.67 \pm 0.64$ & $35.01 \pm 0.39$ & $51.18 \pm 0.31$  &$46.65 \pm 0.47$ & $ 24.11 \pm 0.48$ & $18.73\pm1.43$ & $39.25\pm 0.90$ &               $32.01 \pm 1.68$
+                  \\
+    & Fusion &$\underline{46.92}$ & $44.61$ & $-$ & $-$ &  $-$  & $-$ & $-$   & $-$ \\
+    & FeTrIL     & $45.71 \pm 0.39$ & $44.63 \pm 0.49$ & $\underline{53.95} \pm 0.42$ & $\underline{52.96} \pm 0.45$ & $\underline{30.97} \pm 0.90$ & $\underline{25.70} \pm 0.61$  & $\underline{45.60} \pm 1.67$   & $\underline{39.54} \pm 1.19$  &  \\
+    & SSRE       & $44.66 \pm 0.45$ & $\underline{44.68} \pm 0.36$ & $53.27 \pm 0.43$ & $52.94 \pm 0.42$ & $22.93 \pm 0.95 $  & $17.34 \pm 1.06$   &$38.82 \pm 1.99$  & $30.62 \pm 1.96$  \\
+\cmidrule(lr){2-2}
+\cmidrule(lr){3-4}
+\cmidrule(lr){5-6}
+\cmidrule(lr){7-8}
+\cmidrule(lr){9-10}
+    &\textbf{EFC}   & \textbf{50.40} $\pm 0.25$  & $\textbf{48.68} \pm 0.65$  & $\textbf{57.52} \pm 0.43$   & $\textbf{56.52} \pm 0.53$  &  $ \textbf{34.10} \pm 0.77 $  & $\textbf{28.69} \pm 0.40$  & $\textbf{47.95} \pm 0.61$   &$\textbf{42.07} \pm 0.96$  &  \\
+
+ 
+\cmidrule[1pt]{1-10}
+
+\multirow{7}{*}{\rotatebox[origin=c]{90}{ImageNet-Subset}} 
+      & EWC      & $16.19 \pm 2.48$ & $10.66 \pm 1.74$ & $23.58 \pm 2.01$ & $18.05 \pm 1.10$ & $24.59 \pm 4.13 $ & $12.78 \pm 1.95 $ &$39.40\pm 3.05 $  & $26.95 \pm 1.02$ &   \\
+      & LwF      & $21.89 \pm 0.52$ & $13.24 \pm 1.61$ & $37.15 \pm 2.47$ & $25.96 \pm 0.95$ & $\underline{37.71} \pm 2.53   $& $18.64 \pm 1.67   $ & $\underline{56.41} \pm 1.03 $  & $40.23\pm 0.43   $ &    \\
+      & PASS     & $52.04 \pm 1.06$ & $44.03 \pm 2.19$ & $65.14 \pm 0.36$  &$58.88 \pm 2.15$ & $26.40 \pm 1.33$& $ 14.38\pm 1.22$ & $ 45.74\pm 0.18$ & $31.65 \pm 0.42$ &
+          \\
+      & Fusion  &$60.20$ & $51.60$ & $70.00$   & $63.70$  &  $-$  & $-$ & $-$   & $-$  &   \\
+      & FeTrIL   & $\underline{63.56} \pm 0.59$ & $\underline{57.62} \pm 1.13$  & $\underline{71.87} \pm 1.46$   & $\underline{68.01} \pm 1.60$  &  $36.17 \pm  1.18$ & $\underline{26.63} \pm  1.45$  & $ 52.63 \pm 0.56$   & $ \underline{42.43}\pm 2.05$  &  \\
+      & SSRE     & $61.84 \pm 0.93$ & $55.19 \pm 0.97$  & $70.68 \pm 1.37$   & $66.73 \pm 1.61$  &  $25.42 \pm 1.17$  & $ 16.25 \pm 1.05  $  & $43.76 \pm 1.07$   &$31.15 \pm 1.53$  &  \\
+\cmidrule(lr){2-2}
+\cmidrule(lr){3-4}
+\cmidrule(lr){5-6}
+\cmidrule(lr){7-8}
+\cmidrule(lr){9-10}
+      & \textbf{EFC}    & $\textbf{68.85} \pm 0.58$  & $\textbf{62.17} \pm 0.69$  & $\textbf{75.40} \pm 0.92$   & $\textbf{71.63} \pm 1.13$  &  $\textbf{47.38} \pm 1.43$  & $\textbf{35.75} \pm 1.74$  & $ \textbf{59.94} \pm   1.38$   &$ \textbf{49.92} \pm 2.05$  &  \\
+\bottomrule
+\end{tabular}}
+ 
+\label{tab:sota}
+\end{table}
+
+\minisection{Hyperparameter settings.}
+We use the standard ResNet-18~\citep{resnet} trained from scratch for all experiments.  We train the first task of each state-of-the-art method using the same optimizer, number of epochs and  data augmentation. In particular, we train all the first task using self-rotation as performed by \citet{pass, evanescent} to align all the performance. 
+
+For the incremental steps of EFC we used Adam with weight decay of $2e^{\text{-}4}$ and fixed learning rate of $1e^{\text{-}4}$ for Tiny-ImageNet and CIFAR-100, while for ImageNet-Subset we use a learning rate of $1e^{\text{-}5}$ for the backbone and $1e^{\text{-}4}$ for the heads. We fixed the total number of epochs to 100 and use a batch size of 64. We set  $\lambda_{\text{EFM}}=10$ and $\eta=0.1$ in Eq.~\ref{eq:training_loss} for all the experiments.  
+We ran all approaches using five random seeds and shuffling the classes in order to reduce the bias induced by the choice of class ordering~\citep{icarl, facil}.
+\subsection{Comparison with the state-of-the-art}
+\label{sec:comp_sota}
+In Table~\ref{tab:sota} we compare EFC with baselines and state-of-the-art EFCIL approaches. Specifically we consider EWC~\citep{ewc}, LwF~\citep{lwf}, PASS~\citep{pass}, Fusion~\citep{evanescent}, FeTrIL~\citep{fetril} and SSRE~\citep{ssre}. Our evaluation considers two key scenarios: Warm Start, commonly found in the EFCIL literature, and the more difficult Cold Start scenario. EFC significantly outperforms the previous state-of-the-art in both metrics across all scenarios of the considered datasets. 
+ 
+Notably, on the ImageNet-Subset Warm Start scenario EFC exhibits a substantial improvement of about 5\% over FeTrIL in both per-step and average incremental accuracy. For SSRE, our incremental accuracy results are significantly higher compared to the results reported in the original paper. This is attributable to the self-rotation we used as an initial task to align all results with PASS and Fusion (which both use self-rotation). This alignment is crucial when dealing with Warm Start scenarios, as performance on the large first task heavily biases the metrics (Eq. \ref{eq:metrics}) as discussed by \cite{pycl, endtoend}.
+
+In Cold Start scenarios we see that methods relying on feature distillation, such as FeTrIL, SSRE and PASS, experience a significant decrease in accuracy compared to EFC. This drop in accuracy can be attributed to the fact that the first task does not provide a sufficiently strong starting point for the entire class-incremental process. Moreover, most of these approaches exhibit weaker performance even when compared to LwF, which does not use prototypes to balance the classifiers. On the contrary, the plasticity offered by the EFM allows Elastic Feature Consolidation to achieve excellent performance even in this setting, surpassing all other approaches by a significant margin.
+
+\subsection{Ablation Study and Storage Costs}
+In this section we report the ablation study and the storage costs of EFC on CIFAR-100. A more detailed analysis on other dataset is reported in Appendices \ref{sec:additional-ablation} and \ref{sec:storage-costs}.
+
+\label{sec:ablation}
+\minisection{Ablation on PR-ACE and Feature Distillation.} We evaluated the performance of our regularizer in two settings: when combined with the proposed PR-ACE \eqref{eqn:pr-ace} and when combined with the standard \textit{symmetric loss} \eqref{eqn:sym_loss}. Figure~\ref{fig:ablations}a clearly demonstrates that the symmetric loss works well in conjunction with feature distillation. However, when used alongside the EFM, it fails to effectively control the adaptation of the old task classifier, resulting in an overall drop in performance. Additionally, it is evident from the results that feature distillation essentially degenerates into a method similar to FeTrIL, which freezes the backbone after the first task. These findings suggest that using feature distillation as a regularizer is equivalent to freezing the backbone after the first task and employing a suitable prototype rehearsal approach to balance the task classifier, pseudo-samples for FeTrIL, and Gaussian prototypes in our specific scenario.
+
+\begin{wrapfigure}[22]{r}{0.4\textwidth}
+\centering
+
+\begin{subfigure}{\textwidth}
+\centering
+
+\includegraphics[width=0.86\linewidth]{Images/ablation_plot_main.pdf} 
+\caption{Ablation on regularization and prototype losses.}
+\label{fig:examplenf}
+\end{subfigure}
+\hfill
+
+\begin{subfigure}{\textwidth}
+\centering
+\resizebox{0.95\textwidth}{!}{%
+\begin{tabular}{lcc@{\hskip 30pt}cc}
+  \toprule
+  \multirow{2}{*}{\textbf{Step}} 
+  & \multicolumn{2}{l}{\textbf{Update Proto (WS)}} &  \multicolumn{2}{l}{\textbf{Update Proto (CS)}} \\
+  
+  & \xmark & \cmark &  \xmark & \cmark   \\
+  \midrule
+  10  & 58.24 & \textbf{60.87}  & 39.28 & \textbf{43.62} \\
+  \cmidrule(lr){1-5}
+  20 & 52.60 & \textbf{55.78} & 27.28 & \textbf{32.15}  \\
+  \bottomrule
+\end{tabular}
+}
+\caption{Ablation on prototype update.}
+\label{tab:examplenf}
+\end{subfigure}
+\caption{Ablations on (a) losses and (b) prototype update for CIFAR-100.}
+\label{fig:ablations}
+\end{wrapfigure}
+\minisection{Ablation on prototype update.}
+In Figure~\ref{fig:ablations}b we evaluate the effect of prototype updates (\eqref{eq:sdc_formula} and \eqref{our_weight}).
+These results indicate that prototype updates enhance performance in both the Warm and the Cold Start experiments. The performance boost is more pronounced in the Cold Start scenario, where we achieve 4 and 5 points of improvement for the 10 and 20 steps respectively. 
+
+\minisection{Storage costs}.
+Storing class covariance matrices results in a linear increase in storage as the number of classes grows. This storage cost is easily mitigated, however, without sacrificing state-of-the-art accuracy. In Table~\ref{tab:memory_impact} we consider the use of a task-specific covariance matrix which comes with a linear memory increase in the number of \textit{tasks}, and using a single covariance from the most recent task  for prototype generation which results in \emph{constant} memory overhead.
+ 
+\begin{table}[t]
+\centering
+\caption{Mitigating storage costs (on Tiny-ImageNet).}
+\setlength{\tabcolsep}{2.5pt}
+\resizebox{0.92\textwidth}{!}{%
+\begin{tabular}{cl c cc c|c cc cc }
+\toprule
+ & & \multicolumn{4}{c}{\textbf{Warm Start}} &  \multicolumn{4}{c}{\textbf{Cold Start}} \\
+ 
+\multicolumn{2}{l}{} & \multicolumn{2}{c}{$\boldsymbol{A_{\mathbf{step}}^K}$ } & \multicolumn{2}{c}{$\boldsymbol{A_{\mathbf{inc}}^K}$} & \multicolumn{2}{c}{$\boldsymbol{A_{\mathbf{step}}^K}$ } & \multicolumn{2}{c}{$\boldsymbol{A_{\mathbf{inc}}^K}$} \\
+
+  & \textbf{Variant}    & \textbf{10 Step}  & \textbf{20 Step}  & \textbf{10 Step}  & \textbf{20 Step}  & \textbf{10 Step}  & \textbf{20 Step}   & \textbf{10 Step}  & \textbf{20 Step}   \\
+\cmidrule(lr){2-2}
+\cmidrule(lr){3-4}
+\cmidrule(lr){5-6}
+\cmidrule(lr){7-8}
+\cmidrule(lr){9-10}
+
+\multirow{3}{*}{\rotatebox[origin=c]{90}{~}}    
+    & Each Task   & 49.00 $\pm 0.48$  & 47.26 $\pm 0.18$  & 56.31 $\pm 0.51$ & 55.06 $\pm 0.39$ & \textbf{34.81} $\pm 0.56$  & \textbf{29.39} $\pm0.52$  & 47.84 $\pm 0.39$ & \textbf{42.53} $ \pm 0.17$   \\
+    & Last Task  & 48.00 $ \pm 0.43$ & 45.64 $\pm 0.51$  & 55.85 $\pm 0.54 $  & 54.12 $\pm 0.37$ & 34.36 $\pm 0.14$  & 28.57 $\pm  0.32$  & 47.50 $\pm 0.24$ & 42.11 $ \pm 0.11$  \\
+\cmidrule(lr){2-2}
+\cmidrule(lr){3-4}
+\cmidrule(lr){5-6}
+\cmidrule(lr){7-8}
+\cmidrule(lr){9-10}
+    &\textbf{EFC}   & \textbf{50.40} $\pm 0.25$  & \textbf{48.68} $\pm 0.65$  & $\textbf{57.52} \pm 0.43$   & \textbf{56.52} $\pm 0.53$  &   34.10 $\pm 0.77 $  & 28.69 $ \pm 0.40$  & \textbf{47.95} $ \pm 0.61$   & 42.07 $\pm 0.96$  &  \\
+
+           
+ 
+ 
+\bottomrule
+\end{tabular}
+}
+ 
+\label{tab:memory_impact}
+\end{table}
+
+
+\section{Conclusions and Limitations}
+
+\label{sec:conclusion_and_limitation}
+Cold Start EFCIL requires careful balance between model stability and plasticity. In this paper we proposed Elastic Feature Consolidation which regularizes feature drift in directions in feature space important to previous-task classifiers. We derive an Empirical Feature Matrix that induces a pseudo-metric used to control feature drift and improves plasticity with respect to feature distillation. We further use this Empirical Feature Matrix to constrain prototype updates in an Asymmetric Prototype Replay loss. Our results show that EFC significantly outperforms the state-of-the-art on both Cold Start and Warm Start EFCIL. EFC updates class means based on current class sample drift, but stored means could be distant from real class means, potentially leading to forgetting in long task streams. Estimating covariance drift is still an open question. EFC needs storage that grows linearly with classes number.
+
+
+
+

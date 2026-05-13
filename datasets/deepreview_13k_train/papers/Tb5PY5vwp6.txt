@@ -1,0 +1,249 @@
+\title{HShare: Fast LLM Decoding by Hierarchical Key-Value Sharing}
+
+\begin{abstract}
+The frequent retrieval of Key-Value (KV) cache data has emerged as a significant factor contributing to the inefficiency of the inference process in large language models. Previous research has demonstrated that a small subset of critical KV cache tokens largely influences attention outcomes, leading to methods that either employ fixed sparsity patterns or dynamically select critical tokens based on the query. While dynamic sparse patterns have proven to be more effective, they introduce significant computational overhead, as critical tokens must be reselected for each self-attention computation. In this paper, we reveal substantial similarities in KV cache token criticality across neighboring queries, layers, and heads. Motivated by this insight, we propose HShare, a hierarchical KV sharing framework. HShare facilitates the sharing of critical KV cache token indices across layers, heads, and queries, which significantly reduces the computational overhead associated with query-aware dynamic token sparsity. In addition, we introduce a greedy algorithm that dynamically determines the optimal layer-level and head-level sharing configuration for the decoding phase. We evaluate the effectiveness and efficiency of HShare across various tasks using three models: LLaMA2-7b, LLaMA3-70b, and Mistral-7b. Experimental results demonstrate that HShare maintains accuracy with an additional sharing ratio of $1/8$, while delivering up to an $8.6\times$ speedup in self-attention operations and a $2.7\times$ improvement in end-to-end throughput. The source code will be made publicly available upon publication.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+The development of Large Language Models (LLMs), like the GPT and LLaMA series (OpenAI, 2024; Touvron et al., 2023), has marked a major breakthrough in artificial intelligence, dramatically improving performance in natural language processing tasks such as translation (Zhu et al., 2023; Pal et al., 2024) and summarization (Zhang et al., 2023; Liu et al., 2023b). However, in long-context scenarios, such as multi-turn dialogues (Yi et al., 2024; Teng et al., 2024), document-based question answering (Abdel-Nabi et al., 2023; Rasool et al., 2024), and code completion (Yang et al., 2023; Eghbali & Pradel, 2024), LLMs face significant speed challenges with token-by-token decoding. A key factor contributing to this slowdown is the handling of the Key-Value (KV) memory cache since as the context length expands, the size of this KV cache grows correspondingly, resulting in longer access times and increased memory overhead.  
+
+Existing works have introduced several approaches to address this issue. Since it has been demonstrated that a small portion of the tokens can dominate the accuracy of token generation, many works choose to only load these critical tokens into the KV cache to reduce the inference latency while maintaining accuracy. Among them, StreamingLLM (Xiao et al., 2023) treats the initial tokens (also referred to sink tokens) and the recent tokens as critical tokens and performs sparsity in a fixed pattern. H2O (Zhang et al., 2024b) introduces a greedy policy that dynamically retains a balance of recent and heavy tokens. These two methods alleviate both storage and retrieval pressures through KV cache eviction. However, they tend to lose a significant amount of historical information, leading to a substantial decline in performance as their sparsity increases.  
+
+On the other hand, Quest (Tang et al., 2024) points out the criticality of tokens can change with different query tokens. To this end, Quest introduces a query-aware token sparsity algorithm, which uses the maximum and minimum values of each hidden dimension at page granularity to measure the query-aware criticality. Similarly, DoubleSparse (DS) (Yang et al., 2024) proposes to select critical tokens dynamically by calculating and sorting approximate attention weights with important channels only. Although these two methods only load critical tokens, they retain all the KV cache, allowing them to enhance speed while effectively maintaining accuracy. However, for Quest and DS, the requirement evaluation for each dynamic selection introduces computational overhead, which results in a significant drawback of these approaches. Take DS as an example, with a sequence length of $2\mathrm{k}$ and a batch size of 8, the process of selecting important tokens consumes nearly $50\%$ of the total runtime in their token sparse attention. The comparison of different methods is shown in Tab. 1.  
+
+Table 1: Comparison of the selection of critical tokens in different token sparsity methods.   
+
+![](images/eeb11096d12b1e941122d5065a513dabbc04da4e4ce92697b9ae75316c9758f5.jpg)  
+
+In this work, we further observe that the criticality of KV cache tokens demonstrates significant similarity across different layers, heads within the same layer, and between adjacent queries. Building on this observation and to mitigate the computational overhead associated with the dynamic selection of critical tokens mentioned above, we propose HShare, a hierarchical key-value sharing framework that operates at three levels: layers, heads, and queries. Specifically, we introduce an algorithm to design a sharing configuration for the layer and head levels based on the similarity of critical KV cache token indices. To ensure the sharing accuracy, we compute the corresponding configuration online for each batch of samples after the prefilling phase, the configuration is then applied to the entire decoding phase. This online calculation introduces only a minor increase in the preflil phase’s time without incurring any additional overhead during the decode phase. At the query level, we simply share critical token indices between adjacent queries, as their proximity results in higher similarity. By retaining the full KV cache, selectively loading only the critical portions, and implementing hierarchical multi-level sharing, HShare maintains accuracy while reducing the time spent selecting critical KV tokens, significantly improving decoding latency compared to existing methods.  
+
+We use LLaMA2-7b-chat (Touvron et al., 2023), LLaMA3-70b (Dubey et al., 2024), and Mistral7b (Jiang et al., 2023a) to evaluate the accuracy of HShare across three benchmarks: GSM8K (Cobbe et al., 2021), COQA (Reddy et al., 2019), and LongBench (Bai et al., 2023). Experimental results demonstrate that, under the same token sparsity, HShare can maintain accuracy with an additional sharing ratio of 1/8, offering competitive performance to state-of-the-art (SOTA) methods. Furthermore, we evaluate the efficiency of HShare and the results show that HShare can achieve up to $8.6\times$ self-attention latency reduction compared with FlashAttention-2 (Dao, 2023) and $2.7\times$ throughput improvement in end-to-end inference compared with GPT-fast (PyTorch, 2023). In summary, the contributions of this paper are:  
+
+• We systematically analyze the criticality of KV cache tokens across all the levels: different layers, different heads within the same layer, and adjacent queries. Our empirical findings on LLaMA2-7b-chat show that all three levels exhibit substantial similarity. • We propose a hierarchical critical KV token indices sharing framework with a greedy algorithm to dynamically determine the sharing configuration. To the best of our knowledge, this is the first work to introduce the concept of sharing critical KV cache token indices. • We evaluate HShare in terms of accuracy and efficiency, with results showing that it maintains model performance with a sharing ratio $1/8$ while achieving up to $8.6\times$ reduction in selfattention latency and $2.7\times$ improvement in inference throughput.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+
+
+\section{2.1 LONG-CONTEXT MODEL  }
+
+
+Recently, significant efforts have been made to extend the context windows of LLM, both in academia (e.g., LongChat (Li et al., 2023), Yarn-LLaMA-2 (Peng et al., 2023)) and industry (e.g., GPT-4  
+
+Turbo, which supports up to 128K tokens (OpenAI, 2024)). These extended-context LLMs excel in tasks such as multi-turn conversation comprehension and meeting summarization by providing enhanced in-context learning and improved performance on complex reasoning tasks. However, this advancement comes with notable trade-offs, including increased computational demands, higher memory usage, and greater bandwidth requirements, leading to elevated costs and longer per-token latencies (Aminabadi et al., 2022; Pan et al., 2024; Chen et al., 2024b). For example, (Pan et al., 2024) utilizes host SSD memory to alleviate the long sequence KV cache memory requirements at the expense of long latency whereas (Chen et al., 2024b) offloads the attention computation on low-cost GPU devices to support economical long-sequence LLM inference. These solutions try to tackle the Long-context model from the computing system level, however, it could be better solved from the algorithm advancements such as LLM quantization (Liu et al., 2024) and sparsification (Tang et al., 2024).  
+
+2.2 EFFICIENT INFERENCE OF LLMS   
+Several techniques, such as speculative decoding (Leviathan et al., 2023; Miao et al., 2024), parameter sharing (Chen et al., 2024a), and quantization (Lin et al., 2024b;a), have been proposed to improve inference efficiency. Here we focus on accelerating the attention mechanism, which poses significant time costs due to its quadratic complexity with respect to sequence length, particularly in long-context scenarios. Decoder-only transformers, trained with masked self-attention where each token depends only on preceding tokens, enable the use of key-value activation caching (KV cache) to bypass redundant computations (Pope et al., 2023). However, the KV cache can grow significantly in size. For instance, during inference with the OPT-175B model (Zhang et al., 2022) using a batch size of 512, a prompt length of 512, and an output length of 32, the KV cache demands $1.2\mathrm{TB}$ of memory for storage and communication just to generate a single token (Liu et al., 2024), which poses a grand challenge for system memory and bandwidth. To tackle the challenge, one path is to reduce the KV cache storage by quantization to 2-bit or even 1-bit. Existing works (Liu et al., 2024) report to achieve 2-bit quantization without accuracy loss and (Zhang et al., 2024a) quantizes the KV cache to 1-bit with minor accuracy loss. Another orthogonal path is to focus only on the critical tokens in the KV caches, also known as token sparsity, which we will review in Sec 2.3.   
+2.3 SPARSE ATTENTION   
+Early works such as sparse transformer (Child et al., 2019), reformer (Kitaev et al., 2020), and longformer (Beltagy et al., 2020) made efforts to reduce attention complexity through training. Recently, Jiang et al. (2023b) trained a language model to compress prompts into smaller sets of gist to reduce memory pressure during caching. However, such a compression strategy requires retraining the large language model and also increases the overhead during inference.   
+On the other hand, many works (Ribar et al., 2023; Zhang et al., 2024b; Tang et al., 2024) propose post-training sparse attention, primarily leveraging the observation of sparse attention scores, which allows focusing on important tokens without compromising performance. StreamingLLM (Xiao et al., 2023) identifies the initial and most recent tokens as critical, while Zhang et al. (2024b;a) propose to adopt the accumulated attention score as the indicator to identify the critical tokens in the KV cache. MInference (Jiang et al., 2024) introduces a dynamic sparse pattern identification algorithm for prefliling acceleration. Additionally, Quest (Tang et al., 2024) uses min and max values to assess the importance of each KV cache page, computing only the most relevant pages, while DS (Yang et al., 2024) focuses on selecting critical KV tokens by utilizing only important channels. However, these methods incur additional computational overhead for determining importance. In contrast, our work aims to minimize the need for such additional computations by sharing critical KV cache token indices across multiple levels.  
+
+
+
+\section{3 PROBLEM FORMULATION  }
+
+
+We begin by defining the decoding self-attention process with selected critical key-value cache tokens, which we refer to as token sparsity attention. In the decoding stage, let the query matrix be denoted as $Q\in\mathbb{R}^{1\times d}$ , the key matrix as $\dot{K}\in\mathbb{R}^{n\times d}$ and the value matrix as $V\in\mathbb{R}^{n\times d}$ , where $n$ denotes the  
+
+sequence length. Here $K_{i,*}$ represents the $i$ -th row of key matrix, corresponding to the $i$ -th token in the current sequence. With these notations, we define the token sparsity attention.  
+
+Definition 3.1 (Token sparse attention, informal). Token sparsity attention only calculates the attention weights between the query matrix and the selected critical key tokens. Let $N_{c}$ represent the number of KV critical tokens to be selected, and suppose we have the indices:  
+
+$$
+C T=\{x_{1},x_{2},...\,,x_{N_{c}}\mid x_{i}\in[0,n]\;a n d\;i=1,2,..\,.\,,N_{c}\}
+$$  
+
+We then select the rows $\{K_{i,*}|i\in S\}$ corresponding to these indices from the key matrix to form $a$ new key matrix $K_{C T}\in\mathbb{R}^{N_{c}\times d},$ , also apply the same operation to the value matrix to form a new ivsa lcuoem mpuattreidx $V_{C T}\in\mathbb{R}^{N_{c}\times d}$ .m Tulhae  tsohkoewn ns bpealrosiwty: ratio is defined as $\frac{N_{c}}{n}$ and the token sparse attention  
+
+$$
+y=\mathrm{softmax}\left({\frac{Q\cdot K_{C T}^{T}}{\sqrt{d_{h}}}}\right)\cdot V_{C T}
+$$  
+
+Normally, each attention block independently evaluates and selects its critical KV cache tokens, resulting in a corresponding set of indices, denoted as $C T$ . We use the number of overlapping elements between two different sets to evaluate the similarity between them. Then the similarity between two critical KV cache token indices $C T_{A}$ and $C T_{B}$ can be formally written as:  
+
+$$
+s i m(C T_{A},C T_{B})=\frac{|C T_{A}\cap C T_{B}|}{m a x(|C T_{A}|,|C T_{B}|)},
+$$  
+
+here $|\cdot|$ represents the cardinality of a set and normally $|C T_{A}|=|C T_{B}|=N_{c}$ . Next, we define Key-Value sharing.  
+
+Definition 3.2 (Key-Value sharing). Assuming that the critical KV cache token indices for attention block $A$ are denoted as $C T_{A}$ , if another attention block $B$ directly reuses the indices from block $A$ , represented as $C T_{B}\leftarrow C T_{A}$ , we refer this to as key-value sharing between blocks $B$ and $A$ . In this case, $C T_{A}$ is utilized by attention block $B$ to construct $K_{C T}$ and $V_{C T}$ .  
+
+
+
+\section{4 METHOD  }
+
+
+In this section, we first present the motivation of HShare, and then we introduce HShare in details.  
+
+
+
+\section{4.1 MOTIVATION  }
+
+
+Previous works have pointed out not all KV tokens hold equal significance, with a limited subset, known as critical tokens, contributing most to the attention output, and these critical tokens are found to be query-aware. In this paper, we further present three observations, with insights shown in Fig. 1.  
+
+Similar critical tokens between adjacent queries: From Fig. 1(a)-(d), we observe that within individual attention heads, the distribution of critical KV cache tokens (those associated with larger values in the attention matrix) gradually shifts with changes in the queries. However, the critical tokens across adjacent queries remain largely consistent. This observation aligns with intuition, as minor variations in query length do not significantly alter the overall sequence length, suggesting that the attention distribution remains stable. The similarity between adjacent queries presents an opportunity to reduce computational overhead by reusing the same critical KV cache tokens for every $k$ consecutive query.  
+
+Similar sparse-patterns across different heads and layers: The distribution of critical tokens results in different sparse patterns for attention heads. However, as illustrated in Fig. 1(a)-(d), we can also see that some sparse patterns are consistently observed across various attention heads. For example, the sparse pattern of head 12 in layer 8 is very similar to that of head 22 in the same layer. Additionally, head 9 and head 16 in layer 9 also share a similar sparse pattern, indicating that the similarity between heads exists not only within the same layer but also across different layers. This uniformity suggests that a sparse pattern derived from one head can be effectively applied to others, enabling a shared strategy for selecting critical KV cache tokens. This approach can further improve the speed and efficiency of the attention mechanism.  
+
+![](images/d43f65304435751a0f015bb94a3e8b3b75eb6567495094aee4af346b310563fc.jpg)  
+
+![](images/d94537bea7fcf46ec0a5dbe428a3f96ad6974e442d560837161c2b5ea8d25d30.jpg)  
+Figure 2: Share the same critical token indices between layers and heads.  
+
+![](images/c054cca976b5464853f1beebd4758d95e30b63d3c90e94b5795500472c86606e.jpg)  
+Consistency relationships between prefill and decoding phases: Fig. 1(e) and Fig. 1(f) present the head similarity matrices of layer 8 in terms of prefill stage and decoding stage, respectively. Fig. 1(g) and Fig. 1(h) present the layer similarity matrices of the whole network in terms of the prefill stage and decoding stage, respectively. We observe that the similarity matrix between prefill and decoding phases exhibits a remarkable consistency for both head-level and layer-level. This continuity underscores the potential that applying the hierarchical sharing strategy computed from the prefill phase to the decoding phase.   
+indices between adjacent queries.  
+
+Motivated by the above observations, we propose HShare, a hierarchical sharing framework that shares the same critical KV cache tokens across queries, heads, and layers. HShare not only takes advantage of dynamic sparsity but also significantly reduces the computational overhead associated with critical tokens through an effective sharing mechanism.  
+
+4.2 HIERARCHICAL KEY-VALUE SHARING FRAMEWORK  
+
+Inspired by recent works (Zhang et al., 2024b; Xiao et al., 2023; Yang et al., 2024), in this paper, we select critical tokens from three perspectives: initial tokens (also referred to as sink tokens), the most recent window, and significant tokens in the middle. The dark blue positions in Fig.2 and Fig.3 represent the indices of these critical tokens. Given that the decoding stage is autoregressive, each decoding step requires passing through all $L$ layers of the attention blocks. In the case of multi-head attention and group query attention, each attention block involves multiple parallel attention head $H$ computations. Consequently, to generate $n$ tokens, a total of $L\times H\times n$ attention computations are necessary, resulting in $L\times H\times n$ re-selections of critical tokens.  
+
+To reduce the overall time spent on evaluating and selecting critical tokens and further accelerate the decoding, we introduce a hierarchical key-value sharing framework. This framework is designed to facilitate key-value sharing from three perspectives: across layers, heads, and queries. Specifically, denote the attention computation of head $h$ in layer $l$ of the query $q$ as $A_{l,h,q}$ , then the key-value sharing between layers l1 and l2 can be expressed as: CTAl2,h,q ←CTAl1,h,q.  
+
+Similarly, the key-value sharing between heads $h_{1},h_{2}$ and queries $q_{1},q_{2}$ can be expressed as: $C T_{A_{l,h_{1},q}}\leftarrow C T_{A_{l,h_{2},q}}$ , $C T_{A_{l,h,q_{1}}}\leftarrow C T_{A_{l,h,q_{2}}}$ .  
+
+It should be noted that since there is a temporal dependency between the attention computations of layers and queries, it is necessary to satisfy $l_{1}<l_{2}$ and $q_{1}<q_{2}$ here.  
+
+Similar to the token sparsity ratio, we define the sharing ratio as a value less than or equal to 1, where a smaller value indicates a higher degree of sharing and greater computational savings. Let the total number of layers and heads be denoted as $n_{l}$ and $n_{h}$ , respectively. Suppose $k_{l}$ layers and $k_{h}$ heads share critical KV token indices with other layers or heads. The sharing ratios for layers and heads are then defined as $\begin{array}{r}{r a t i o_{l}=1-\frac{k_{l}}{n_{l}}}\end{array}$ and $\begin{array}{r}{r a t i o_{h}=1-\frac{k_{h}}{n_{h}}}\end{array}$ , respectively. For query-level sharing, let the total number of decoding tokens (queries) be $n_{q}$ , and suppose $k_{q}$ queries bypass the selection of critical token indices by sharing key-value indices with other queries. The query-level sharing ratio is defined as $\begin{array}{r}{r a t i o_{q}=1-\frac{k_{q}}{n_{q}}}\end{array}$ . Since the sharing across layers, heads, and queries is mutually independent, the total sharing ratio is given by:  
+
+$$
+s h a r i n g\ r a t i o=(1-\frac{k_{l}}{n_{l}})\times(1-\frac{k_{h}}{n_{h}})\times(1-\frac{k_{q}}{n_{q}})
+$$  
+
+4.3 ALGORITHM FOR SHARING CONFIGURATION DESIGN  
+
+Algorithm 1 Layer(Head) Sharing Algorithm   
+1: Input: layer(head) number $n_{l}(n_{h})$ , critical token   
+indices matrix List ${\cal L}\,=\,\{M_{1},M_{2},...M_{n_{l}(n_{h})}\}$ ,   
+share number $k_{l}(k_{h})$   
+2: Initialize similarity matrix $S\gets z e r o s(n,n)$   
+3: for $i=1$ to $n_{l}(n_{h})$ do   
+4: $s e t_{i}\gets\mathrm{set}(M_{i}.\mathrm{flatten}())$   
+5: for $j=1$ to $i-1$ do   
+6: $s e t_{j}\gets\mathrm{set}(M_{j}.\mathrm{flatten}())$   
+7: overlap $\leftarrow\vert s e t_{i}\cap s e t_{j}\vert$   
+8: $S_{i j}\gets\mathrm{overlap}\,/\,M_{i}.\mathrm{numel}()$   
+9: end for   
+10: end for   
+11: for $i=1$ to $n_{l}(n_{h})$ do   
+12: Initialize sharing config $C[i]\leftarrow i$   
+13: end for   
+14: for $i=1$ to $k_{l}(k_{h})$ do   
+15: row index, column index $\leftarrow$ argmax(S)   
+16: $S$ [row index, : $;]\leftarrow0$   
+17: S[:, row index] $\gets0$   
+18: C[row index] $\leftarrow$ column index   
+19: end for   
+20: Output: Sharing config $C$ of layer(head).  
+
+For layer-level and head-level sharing, as demonstrated in Sec. 4.1, the similarity of the critical KV cache token indices shows consistency across the different queries. Therefore, we can design a sharing configuration by calculating the similarity of the critical token indices between layers and heads after prefilling, and then apply this configuration to the entire decoding phase.  
+
+Here, we use the layer-level as an example for a detailed explanation. After each prefill step, we first obtain the critical KV cache token indices matrix list for all layers $L=M_{1},M_{2},\ldots,M_{n_{l}}$ , where $n_{l}$ represents the number of layers. Next, we compute the pairwise similarities between the critical KV cache token indices of all layers, producing a similarity matrix $S_{l}$ . Based on the desired sharing ratio, we then perform key-value sharing between the most similar layers. Specifically, if the layer-level sharing ratio is $\beta$ , meaning that $k_{l}=(1-\beta)\times\bar{n_{l}}$ layers should share critical KV token indices, we iteratively select the pair $(i,j)$ with the highest similarity  
+
+(where $j<i,$ ), allowing the $i$ -th layer to reuse the indices of the $j$ -th layer. Since layer $i$ now reuses the critical token indices of another layer and does not compute its own, we remove the $i$ -th row and $i$ -th column from the similarity matrix.  
+
+Similarly, for all heads within each layer, we apply the same method to determine the sharing configuration. Note that each layer has its own head-level sharing configuration. Algo. 1 outlines the process of calculating the similarity matrix and designing the layer (or head) sharing configuration. Formally, the output sharing configuration $C$ represents:  
+
+j, if the i-th layer (or the $i$ -th head) shares with the $j$ -th layer (or the $j$ -th head), ci = i, if the i-th layer needs to compute critical tokens separately.  
+
+Since the sharing configuration can differ across samples, we compute it dynamically for each batch of samples.  
+
+Query-level. As discussed in Sec. 4.1, we observe that attention weights between adjacent query tokens tend to exhibit significantly higher similarity compared to those between distant query tokens. Specifically, for query $i$ and query $i+1$ , the importance rankings of the tokens from token 0 to token $i-1$ are largely similar. Based on this observation, we group every $a$ adjacent query to share a single critical token set, resulting in a sharing ratio of $\frac{1}{a}$ between queries. Fig.3 illustrates the sharing mechanism between two adjacent queries.  
+
+
+
+\section{5 EXPERIMENT  }
+
+
+5.1 ACCURACY EVALUATION  
+
+5.1.1 SETUP  
+
+We evaluate HShare on GSM8K (Cobbe et al., 2021), COQA (Reddy et al., 2019), and six datasets in LongBench (Bai et al., 2023): LCC (Guo et al., 2023), RepoBench-P (Liu et al., 2023a), TriviaQA (Joshi et al., 2017), Qasper (Dasigi et al., 2021), 2WikiMultihopQA(2WikiMQA) (Ho et al., 2020) and GovReport (Huang et al., 2021). For our evaluation, we select three widely-used models: LLaMA2-7b-chat (Touvron et al., 2023), LLaMA3-70b (Gliwa et al., 2019), and Mistral-7b (Jiang et al., 2023a), representing a range of architectures from multi-head attention (MHA) to group query attention (GQA), and from dense to mixture of experts (MoE). As baselines, we include four state-of-the-art methods: two KV cache eviction algorithms StreamingLLM (Xiao et al., 2023), H2O (Zhang et al., 2024b) and two query-aware token sparsity algorithms Quest (Tang et al., 2024),  
+
+DS (Yang et al., 2024). It should be noted that some baselines skip sparsity in certain layers or during the prefill stage. To ensure a fair comparison, we apply token-sparse attention to all layers across both the decode and prefill stages. Here, we also include the vanilla attention as Original, which serves as the baseline representing lossless results, without applying any sparsity in either the preflil stage or the decoding stage.  
+
+5.1.2 RESULTS ON GSM8K, COQA  
+
+Datasets and Metrics. We use the LM-Eval framework to conduct zero-shot inference on two generation tasks: GSM8K and COQA. GSM8K consists of around 8,000 elementary school math problems and COQA is designed for evaluating dialogue-based question-answering systems. The average context length for these two datasets is approximately 500 and $2\mathbf{k}$ respectively. Here we report the GSM8K with flexible exact-match accuracy and strict exact-match accuracy, while COQA with em score.  
+
+Inference Details. For a fair comparison, all methods select $N_{c}=128$ critical KV cache tokens and do token sparse attention, with a token sparsity ratio of approximately $1/4$ and $1/16$ for the two datasets respectively (since GSM8K consists of math problems, we select a higher sparsity level, whereas COQA involves story-based question-answering, so we choose a lower sparsity level.) For HShare, we select critical tokens from three aspects, with $x\,=\,8$ sink tokens, $y=32$ recent tokens, and $z=88$ critical tokens in the middle. Following the approach in Yang et al. (2024), we load the heavy channel of the KV cache in 4-bit precision to compute the approximate attention weights, then sort them to select the top- $\cdot z$ tokens in the middle. We evaluate the effectiveness of our proposed HShare using LLaMA2-7b-chat, LLaMA3-70b, and Mistral-7b, selecting two sharing ratios 3/4-3/4-1/2 and 1/2-1/2-1/2 of HShare for comparison against other methods. Here a-b-c means HShare with layer-sharing ratio $a$ , head-sharing ratio $b$ , and query-sharing ratio $c$ .  
+
+Table 2: Evaluation of different methods on GSM8K and COQA and the best result (exclude origin) in each column is highlighted in bold. Complexity\* refers to the theoretical time complexity for each method to select critical KV cache tokens, where $\mathcal{O}(1)$ denotes constant time complexity, and $T$ represents the theoretical computation time for a dense attention mechanism.  
+
+![](images/5df98a2a3583f87e56aaa9a5d623035370f5a887d1e56797cc01fc1e0a6370db.jpg)  
+
+Table 3: Evaluation of different methods on six datasets of Longbench and the best result in each column is highlighted in bold.   
+
+![](images/6f381b71b74906139f1fe31c06e2947b43c561d2b6fcd5d22f9778538515b2fd.jpg)  
+
+Results The results on GSM8K and COQA, shown in Tab. 2, indicate that HShare significantly outperforms other KV cache eviction methods (StreamingLLM and H2O). In addition, when compared to dynamic critical token selection approaches (Quest and DS), HShare incurs only minimal accuracy loss and even achieves higher accuracy on LLaMA3-70b. Overall, HShare provides the optimal balance between efficiency and accuracy.  
+
+5.1.3 RESULTS ON LONGBENCH  
+
+Datasets and Metrics. We use LongBench to evaluate the performance of the proposed HShare across multiple long context benchmarks, we choose six datasets as representatives, including code completion: LCC and RepoBench-P; few-shot learning: TriviaQA; single-document QA: Qasper; multi-document QA: 2WikiMQA; summarization: GovReport. Here we report LCC and RepoBenchP with similarity score, TriviaQA, Qasper and 2WikiMQA with F1 score, as well as GovReport with rouge score.  
+
+Inference Details. All methods select $N_{c}=512$ critical KV cache tokens, with a token sparsity ratio of approximately $1/8$ . Similarly, we select critical tokens from three aspects: $x\,=\,16$ sink tokens, $y=64$ recent tokens, and $z=432$ critical tokens in the middle. Using LLaMA2-7b-chat, we evaluate three sharing ratios of HShare: 7/8-3/4-1/2, 3/4-3/4-1/2 and 1/2-1/2-1/2.  
+
+![](images/77bbeae6e60d9565e639b79300b4fd1a525739f610c0b7a4c6ea34c3cc065caa.jpg)  
+Figure 4: Latency(↓) of different methods across various batch sizes and sequence lengths.  
+
+![](images/82a513ab8e23805ab10f970f20a769b539f7ea3432e6798c6fa32d15da74ba39.jpg)  
+Figure 5: Throughput (↑) of different methods across various batch sizes and sequence lengths.  
+
+Results. Here, we only present the experimental results on six representative datasets in Tab. 3. We can learn that HShare outperforms StreamingLLM, H2O, and Quest by a notable margin, which demonstrates that HShare has the ability to maintain accuracy in long-context scenarios. Additionally, we can also find that HShare could achieve a competitive performance compared with DS under different sharing ratios. It is important to note that the sharing ratio of HShare serves as a hyperparameter that can influence the balance between effectiveness and efficiency.2.  
+
+5.2 EFFICIENCY EVALUATION  
+
+5.2.1 SETUP  
+
+All experiments are conducted on a machine with Xeon(R) Platinum 8336C CPU, one A100 GPU, and 128G RAM.  
+
+Inference Details. Following Yang et al. (2024), we utilized PyTorch to approximate attention, selecting the top- $z$ tokens from the middle and further incorporating $x$ initial indices and $y$ recent indices to form the complete set of critical token indices. The kernel for head-level sharing and the attention over critical KV tokens are designed using OpenAI Triton. Meanwhile, since HShare designs key value sharing between different layers and queries, we require an additional cache to store the critical token indices that need to be shared. Then for attention modules where the computation of critical token indices is bypassed due to sharing, we directly load the corresponding part from the cache. It is important to note that the additional storage required here is minimal, as we only need to store integers with a complexity of $\mathcal{O}(N_{c})$ . As for end-to-end testing, our implementation is based on GPT-fast (PyTorch, 2023), with the full attention module being replaced by our token sparsity self-attention module.  
+
+Baseline. To evaluate self-attention operator speedup, we use FlashAttention2 (Dao, 2023) as our baseline, which is an optimized attention mechanism designed to improve the speed and efficiency of attention computation and ranks among the fastest attention mechanisms. For the evaluation of endto-end inference speedup, we take GPT-fast (PyTorch, 2023) as our baseline, which is acknowledged as the SOTA implementation for LLaMA models on the A100 GPU.3.  
+
+![](images/0dfa6391cd7195753278aaf0e4f43831c91f9b7916641d4b2dbbca985838ddfa.jpg)  
+Figure 6: Results of HShare with different sharing ratios on eight datasets.  
+
+
+
+\section{5.2.2 SELF-ATTENTION OPERATOR SPEEDUP  }
+
+
+We conduct the self-attention latency evaluation on a single A100 GPU with batch sizes ranging from 4 to 16 and sequence lengths from 1k to 4k, with a token sparsity ratio of $1/8$ . We simulate the hierarchical sharing framework and average the latency over 1000 times self-attention computations. The results are shown in Fig. 4, which demonstrate that our method can significantly improve the average latency of self-attention compared with FlashAttention-2. Especially when the batch size is 16 and the sequence length is $2\mathbf{k}$ , HShare can achieve up to an $8.6\times$ reduction in self-attention latency. However, we observe that in the case when batch size is 4 and the sequence length is 1k, our token-sparsity self-attention module performs slightly worse than the baseline. This may be because, in smaller workloads, GPU underutilization prevents token sparsity from improving speed and selecting critical token indices adds overhead instead.  
+
+
+
+\section{5.2.3 END-TO-END INFERENCE SPEEDUP  }
+
+
+Similarly, we conduct end-to-end inference evaluation with the same batch sizes and sequence lengths, and Fig. 5 reports the corresponding results. We find that HShare consistently outperforms GPT-fast and achieves up to $2.7\times$ throughput acceleration, especially with larger batch sizes and longer sequence lengths.  
+
+
+
+\section{5.3 ABLATION STUDY  }
+
+
+HShare with different sharing ratios. We conduct ablation studies under different sharing ratios on eight datasets and the results are shown in Fig. 6. Specifically, for layer-level and head-level sharing, we selected sharing ratios of $3/4,1/2$ , and $1/4$ . For query-level sharing, we group queries in sets of 2 and 4, corresponding to sharing ratios of $1/2$ and $1/4$ , respectively. The results indicate that for all three levels, a smaller sharing ratio tends to result in greater accuracy loss on average. However, on certain datasets like TriviaQA and GSM8K, sharing a subset of heads leads to improved performance. Additionally, compared to head-level sharing, we observe that layer-level and query-level sharing have a greater negative impact on accuracy. Overall, the sharing ratios 3/4-3/4-1/2 and 1/2-1/2-1/2 emerge as more reasonable options.4.  
+
+
+
+\section{6 CONCLUSION AND DISCUSSION  }
+
+
+In this paper, we first systematically analyze and reveal the similarity of critical KV cache tokens across layers, heads, and query levels. Then we introduce HShare, a hierarchical framework for sharing critical KV cache token indices at all three levels to reduce the overhead associated with selecting critical KV tokens. Additionally, we propose a greedy selection algorithm for efficient sharing at the layer and head levels. Extensive evaluations show that HShare preserves model  
+
+accuracy with an additional sharing ratio of , while achieving up to speedup in self-attention   
+operations and a $2.7\times$ increase in end-to-end throughput.   
+
+

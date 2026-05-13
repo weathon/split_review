@@ -1,0 +1,255 @@
+\title{HMoRA: Making LLMs More Effective with Hierarchical Mixture of LoRA Experts}
+
+\begin{abstract}
+Recent studies have combined Mixture of Experts (MoE) and Parameter-Efficient Fine-tuning (PEFT) to fine-tune large language models (LLMs), holding excellent performance in multi-task scenarios while remaining resource-efficient. Yet, existing MoE methods still  exhibit  three major limitations: (1) Current multi-granular routing methods overlook that different LLM layers capture features at varying granularities, resulting in inefficient routing. (2) Task-level routing methods are confined to tasks encountered during training, failing to generalize to unseen tasks. (3) The lack of certainty in existing MoE routing methods hinders the specialization of the experts. To address these challenges, we propose HMoRA, aHierarchical fine-tuning method that combines MoE and LoRA, employing hybrid routing that integrates token-level and task-level routing in a hierarchical manner. This hierarchical hybrid routing allows the model to more efficiently capture both fine-grained token information and broader task contexts. To improve the certainty of expert selection, a novel routing auxiliary loss is introduced. This auxiliary function also enhances the task router's ability to differentiate tasks and its generalization to unseen tasks. Additionally, several optional lightweight designs have been proposed to significantly reduce both the number of trainable parameters and computational costs. Experimental results demonstrate that HMoRA outperforms full fine-tuning across multiple NLP benchmarks, while fine-tuning only 3.9\% of the parameters. The code is  available on: https://anonymous.4open.science/r/HMoRA-2648.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large language models (LLMs) have made significant strides and achieved impressive capabilities in various natural language processing (NLP) (Liu et al., 2023; Touvron et al., 2023; Team et al., 2024) tasks, such as machine translation, text generation, and question answering. However, with models reaching tens or hundreds of billions of parameters, the computational and memory costs for training have increased substantially (Kaplan et al., 2020). Therefore, reducing these costs while maintaining performance has become a critical challenge.  
+
+Parameter-Efficient Fine-tuning (PEFT) reduces the number of trainable parameters in LLMs, decreasing resource requirements while maintaining or improving task-specific performance (Han et al., 2024). PEFT typically freezes most model parameters and fine-tunes a small subset tailored to the target task. For example, LoRA (Hu et al., 2021), a widely used PEFT method, employs low-rank decomposition to significantly reduce the number of fine-tuning parameters, achieving competitive results across various tasks. However, these PEFT methods are better suited for fine-tuning on simpler tasks, and often underperform when applied to more complex or multi-task scenarios.  
+
+Recent years, Mixture of Experts (MoE) (Jacobs et al., 1991; Cai et al., 2024) has emerged as a promising solution for complex tasks and multi-task scenarios. MoE is a neural network architecture that activates only a subset of expert modules for each input. Each expert specializes in specific aspects of the data or tasks, with a routing mechanism deciding which experts are activated for each input. Recent studies have successfully integrated MoE into LLMs, significantly improving scalability and efficiency (Du et al., 2022; Lepikhin et al., 2020), enhancing generalization in multi-task learning (Fedus et al., 2022). Furthermore, Shen et al. (2023) demonstrates additional performance gains in LLMs by combining MoE with instruction fine-tuning. However, due to the presence of multiple expert modules, standard MoE models suffer an extremely large number of parameters, which poses challenges for storage, deployment, and practical application. Recent efforts have integrated LoRA and MoE for LLM fine-tuning, combining the parameter efficiency of LoRA with enhanced model performance in complex and multi-task scenarios (Zadouri et al., 2023; Li et al., 2024; Tian et al., 2025).  
+
+Table 1: Comparison of HMoRA with other representative MoE approaches.   
+
+![](images/63864815ae3601ac1d6dc118c957a5637cdee0f86373e9a829da3141b631f440.jpg)  
+
+However, existing MoE models still face several challenges.: (1) Combining MoE routing at different granularities can enable the model to better capture information at varying levels of detail. However, existing approaches that integrate task-level and token-level routing overlook the fact that different layers of LLMs capture features at different granularities (Geva et al., 2021). As a result, the efficiency of capturing multi-granular information remains suboptimal. (2) Most current task routers rely on task labels, limiting their ability to generalize to unseen tasks (Ren et al., 2023; Feng et al., 2024; Liu et al., 2024). While Kudugunta et al. (2021a) uses sentence representations for routing, thereby eliminating the dependency on task labels, our experiments reveal that directly using sentence representations for routing struggles to effectively differentiate unseen tasks. (3) Additionally, the routing in existing MoE methods lacks certainty, leading to unstable routing and undermining the specialization of experts. Although StableMoE (Dai et al., 2022) mitigates this issue through a two-stage training and distillation process, the training remains overly complex.  
+
+To address these challenges, we propose a hierarchical hybrid MoE routing method and an auxiliary loss, built upon a PEFT architecture that integrates MoE and LoRA. We refer to this method as HMoRA. A comparison of HMoRA with other representative MoE approaches is shown in Table 1. Specifically, HMoRA employs a hybrid routing method that combines task-level and token-level routing in a hierarchical manner, allowing shallow layers of LLMs capture fine-grained token-level nuances, while deeper layers focus on broader task-level understanding. To tackle the issue of uncertainty in existing routing methods, a novel auxiliary function is proposed to enhance the certainty of expert selection and maintain balanced experts selection, improving expert specialization. Moreover, applying the auxiliary loss to the task routers enhances their ability to differentiate tasks in an unsupervised manner, including those tasks unseen during training. Additionally, some lightweight designs are offered to reduce both the trainable parameters and computational costs without significantly compromising performance. Our contributions can be summarized as follows:  
+
+• We propose a hierarchical hybrid routing mechanism that more efficiently captures information at different granularities across various layers of LLMs.   
+• We introduce a novel auxiliary function that enhances the certainty of routing methods while maintaining balance in the experts selection, thereby improving expert specialization.   
+• By incorporating our auxiliary loss, the task router can learn to differentiate tasks in an unsupervised manner and generalize to unseen tasks.   
+• We provide several optional lightweight designs that further reduce both trainable parameters and computational costs.   
+• We train on a multi-task dataset and evaluate performance across various NLP benchmarks. With only $3.9\%$ of the parameters compared to full fine-tuning, our method outperforms full fine-tuning on multiple benchmarks.  
+
+
+
+\section{2 PREILIMINARY  }
+
+
+Our work builds on widely adopted causal decoder LLMs (Radford et al., 2019; Touvron et al., 2023; Yang et al., 2024), functioning as a plugin integrated into the dense layers of these models. Below, we will briefly introduce the dense layers in causal decoder LLMs and the mutil-task fine-tuning.  
+
+Dense layers in Causal Decoder LLMs. Causal decoder-based LLMs are built on the Transformer decoder architecture. Each layer contains a self-attention mechanism and a feed-forward network (FFN). The self-attention mechanism can vary across different LLMs, such as the multi-head attention or the multi-query attention (Ainslie et al., 2023). In general, it involves three dense layers $W_{\mathrm{q}},\,W_{\mathrm{k}},\,W_{\mathrm{v}})$ computing the query, key, and value, and a fourth dense layer $(W_{0})$ aggregating the attention heads. FFN typically consists of two dense layers with a non-linear activation function, as described by the following equation:  
+
+$$
+\mathrm{FFN}(X)=\phi(X W_{\mathrm{up}})W_{\mathrm{down}}.
+$$  
+
+Here, $X$ is the input to the FFN. While some LLMs may include bias terms in these dense layers, they are omitted here for simplicity. If the activation function $\phi$ is a gated activation function like SwiGLU (Shazeer, 2020), it introduces an additional dense layer, $W_{\mathrm{gate}}$ . Our work focus on these dense layers $(W_{\mathrm{q}},W_{\mathrm{k}},W_{\mathrm{v}},W_{\mathrm{o}},W_{\mathrm{up}},W_{\mathrm{down}}$ , and $W_{\mathrm{gate}},$ ) where HMoRA will be integrated.  
+
+Multi-Task Fine-tuning. Fine-tuning is a method specifically tailored to adapt LLMs to generate outputs that align with given instructions or prompts. Multi-task fine-tuning trains the model on a variety of tasks and input formats, enabling it to acquire general problem-solving skills rather than being specialized to a single dataset (Wei et al., 2021; Chung et al., 2024). During fine-tuning, each training sample consists of an input token sequence $\mathcal{T}^{\mathrm{in}}$ and a corresponding target token sequence $T^{\mathrm{tg}}$ . The loss function for fine-tuning is defined as:  
+
+$$
+\mathcal{L}_{\mathrm{LM}}=-\sum_{i=1}^{n}\log(P_{\mathrm{LM}}(\mathcal{T}_{i}^{\mathrm{tg}}\mid\mathcal{T}^{\mathrm{in}}:\mathcal{T}_{<i}^{\mathrm{tg}})).
+$$  
+
+Here, $n$ is the length of the target sequence $T^{\mathrm{tg}}$ , $P_{\mathrm{LM}}(\cdot)$ represents the predicted probability of the $i$ -th target token $T_{i}^{\mathrm{tg}}$ , conditioned on the input sequence $\mathcal{T}^{\mathrm{in}}$ and all predicted tokens in the target sequence. The model is optimized to maximize the likelihood of generating the correct target sequence.  
+
+
+
+\section{3 THE HMORA METHOD  }
+
+
+In this section, we will elaborate on HMoRA as illustrated in Figure 1. We first introduce how to combine LoRA and MoE, leveraging the strengths of both approaches (Section 3.1). Then, we present the hybrid routing mechanism which combines both token-level and task-level routing in a hierarchical manner to capture fine-grained and broader contextual information (Section 3.2). Next, we introduce a novel auxiliary loss aimed at enhancing routing certainty while maintaining a balanced selection of experts, thereby improving expert specialization. The combination of our auxiliary loss with hybrid routing enhances the task router’s ability to distinguish between tasks and even generalize to unseen tasks, improving overall performance in multi-task scenarios (Section 3.3).  
+
+3.1 MIXTURE OF LORA EXPERTS  
+
+We insert MoRA blocks (mixture of LoRA expert blocks), which consist of a set of LoRA experts and a router $R$ , as plugins into the dense layers of LLMs. This combination of LoRA and MoE leverages the parameter efficiency of LoRA while benefiting from the strong multi-task performance of MoE. The forward pass for each expert is defined as:  
+
+$$
+E_{i}=X W_{{\mathrm{A}}_{i}}W_{{\mathrm{B}}_{i}},
+$$  
+
+where $W_{\mathrm{A}_{i}}\in\mathbb{R}^{d_{\mathrm{in}}\times r}$ and $W_{\mathrm{B}_{i}}\in\mathbb{R}^{r\times d_{\mathrm{out}}}$ are low-rank matrices, with $r\ll d_{\mathrm{in}},d_{\mathrm{out.}}\;V$ $W_{\mathrm{A}_{i}}$ is randomly initialized, while $W_{{\bf{B}}_{i}}$ is set to zero, ensuring consistency with the pre-trained state at the start of fine-tuning. $X$ is the input to the dense layer, with a dimension of $d_{\mathrm{in}}$ , and is processed in batches. The forward pass of the dense layer, with the MoRA block inserted, is defined as:  
+
+$$
+Y=\sum_{i=1}^{e}g_{i}E_{i},
+$$  
+
+$$
+Z=X W+Y,
+$$  
+
+where $E_{i}$ is the output of the $i$ -th expert, $g_{i}$ represents the gate value computed by the router for the $i$ -th expert, $e$ is the number of experts, and $W$ is the original dense layer. The final output $Z$ denotes the combination of the expert outputs $Y$ with the output of original dense layer. During training and inference of LLMs, we replace the original dense layer output with $Z$ . Here, we freeze $W$ and only update the parameters of experts and router, significantly reducing the parameter count compared to full fine-tuning and standard MoE approaches.  
+
+![](images/468b345e3f3dc65eee6cc057bbefb41050fabcd269f9a2876e112db807cb6db6.jpg)  
+Figure 1: The HMoRA architecture combines token-level and task-level routing, utilizing a task encoder and task embedding to obtain task representations. MoRA blocks are integrated into the dense layers of LLMs.  
+
+The router $R$ can be viewed as a function $f_{R}(\cdot):\mathbb{R}^{d_{\mathrm{in}}}\rightarrow\mathbb{R}^{e}$ that maps the input $X$ to a distribution $g\in\mathbb{R}^{e}$ , where $g$ represents the gate values used to select experts. In this paper, we investigate soft routing and top- $k$ routing, combined with different auxiliary losses, as the routing methods for the routers.  
+
+
+
+\section{3.2 HIERARCHICAL HYBRID ROUTING  }
+
+
+Most previous MoE methods use token-level routing, which helps experts learn token-level features but fails to capture task-level information. Methods like MoELoRA (Liu et al., 2024) and MoA (Feng et al., 2024) use task-level routing but overlook fine-grained token-level details, crucial for capturing data subtleties. Although Ren et al. (2023) and Kudugunta et al. (2021a) incorporate both token-level and task-level routing, they overlook the fact that shallow layers in LLMs primarily capture token-level information, while deeper layers focus more on semantic-level information (Geva et al., 2021), leading to suboptimal performance. To address this, we propose a hierarchical hybrid approach that more efficiently leverages multi-granular information for routing.  
+
+To perform task-level routing, we first need to derive a task representation from the input. We define a task embedding $e_{\mathrm{task}}$ , which is concatenated with the embeddings of the input tokens $\mathcal{T}^{\mathrm{in}}$ and processed by a task encoder, TaskEncoder $(\cdot)$ . This process is formalized as  
+
+$$
+H_{\mathrm{task}}=\mathrm{TaskEncoder}(\mathrm{Embed}(\mathcal{T}^{\mathrm{in}}):e_{\mathrm{task}}),
+$$  
+
+where TaskEncoder $(\cdot)$ can be a single or multi-layer Transformer encoder. The output of the task encoder corresponding to $e_{\mathrm{task}}$ serves as the task representation. Embed $(\cdot)$ is the LLM’s embedding layer, with $e_{\mathrm{task}}$ being trainable while the rest of the embeddings remain frozen. We initialize $e_{\mathrm{task}}$ using the question mark symbol’s embedding, providing a meaningful starting point for task differentiation.  
+
+To combine token-level and task-level routing, we merge a task router $R_{s}$ and a token router $R_{t}$ into a unified router. The task router computes the task-level routing results, denoted as $g_{\mathrm{task}}=f_{R_{s}}(H_{\mathrm{task}})$ , which is calculated once for each input $\mathcal{T}^{\mathrm{in}}$ . The token router computes the token-level routing results, denoted as $g_{\mathrm{token}}=f_{R_{t}}(X)$ , which is calculated for each token in both $\mathcal{T}^{\mathrm{in}}$ and $T^{\mathrm{tg}}$ . We then  
+
+![](images/2bfe1bf887a0f52afd689962018baba2ba06bd84283588b9071e1efb4ce7727c.jpg)  
+
+Figure 2: (a) More hierarchical LLMs by applying hierarchical hybrid routing, where shallow layers focus on fine-grained token-level distinctions and deeper layers shift towards broader task-level understanding. (b) A more lightweight architecture by router sharing, applying single LoRA to $W_{0}$ , $W_{\mathrm{down}}$ and using hydra LoRA. (c) A comparison of the time required for 1k steps of training and the proportion of trainable parameters across models with different lightweight designs.  
+
+combine the task-level and token-level routing results to form the final gate values for each token,  
+
+$$
+g=\alpha^{(l)}g_{\mathrm{task}}+(1-\alpha^{(l)})g_{\mathrm{token}},
+$$  
+
+where $\alpha^{(l)}$ represents the proportion of the two types of routing results and $l$ indicates that the router is at Layer $l$ of the LLM. We define $\alpha^{(l)}$ as follows:  
+
+$$
+\alpha^{(l)}=\sigma\left(-\epsilon+2\times\epsilon\times\frac{l}{L}+\mu\right)
+$$  
+
+Here, $\sigma(\cdot)$ represents the sigmoid function, and $L$ is the total number of layers in the LLM. $\epsilon$ and $\mu$ are hyperparameters that flexibly control the variation of $\alpha^{(l)}$ as $l$ changes. This allows different layers to capture information at varying granularities, rather than uniformly combining both types of information across all layers.5 demonstrate that increasing $\alpha^{(l)}$ with $l$ improves model performance. Under this setup, shallow layers focus more on token-level information, while deeper layers emphasize task-level information, as shown in Figure 2(a).  
+
+ Figure 2(b) provides a brief overview of these designs. A comparison of their training time and parameter efficiency is shown in Figure 2(c).  
+
+3.3 ENHANCE CERTAINTY AND MAINTAIN BALANCE OF ROUTING RESULTS  
+
+ Moreover, we find that combining the auxiliary loss with the task router enhances its ability to differentiate between tasks and allows it to generalize to unseen tasks.  
+
+We begin by introducing the concept of entropy (Shannon, 1948), which measures the certainty of a probability distribution. Given the gate values $g$ produced by a router, the entropy of $g$ is calculated as:  
+
+$$
+H(g)=-\sum_{j=1}^{e}g_{j}\log(g_{j}),
+$$  
+
+where $e$ is the number of experts. The maximum entropy $\log e$ indicates maximum routing uncertainty (uniform distribution), while the minimum entropy of 0 represents complete certainty in expert selection (point distribution). Consider a router performing $N$ routing operations in a batch, resulting in a set of distributions $G=\{g^{(1)},\ldots,g^{(N)}\}$ . The average distribution $\begin{array}{r}{\frac{1}{N}\sum_{i=1}^{N}g^{(i)}}\end{array}$ reflects the balance in routing decisions. The closer this average is to a uniform distribution, the more balanced the selection of experts, with the entropy approaching $\log e$ .  
+
+We conduct experiments to assess the certainty and balance of top- $k$ and soft routing (see Section 4.1). In soft routing, the shallow layers of LLMs exhibit near-uniform gate values, with entropy approaching $\log e$ , indicating random expert selection and a lack of specialization. In deeper layers, while certain experts are more clearly preferred, the selection becomes imbalanced, with a small subset of experts overused, leading to underutilization of others and reduced model performance. A similar issue is observed in top- $k$ routing (Figure 3(b)). Although the load balancing loss helps mitigate imbalance, it comes at the cost of reduced routing certainty.  
+
+To address these issues, we propose a novel auxiliary loss function that not only ensures balanced expert selection but also promotes greater certainty in routing results, thereby encouraging more effective specialization of experts across all layers.  
+
+To introduce our auxiliary loss, we first present the Generalized Jensen-Shannon (GJS) divergence (Nielsen & Nock, 2009), an extension of the JS divergence (Lin, 1991), which measures the similarity across multiple probability distributions. In GJS, each distribution is assigned a weight, with the sum of these weights equal to 1. We assign a weight of $\textstyle{\frac{1}{N}}$ to each gate values. The GJS divergence for $N$ gate values is computed as:  
+
+$$
+\mathrm{{GJS}}(G)=H\left(\frac{1}{N}\sum_{i=1}^{N}g^{(i)}\right)-\frac{1}{N}\sum_{i=1}^{N}H(g^{(i)}),
+$$  
+
+where $H(\cdot)$ denotes entropy. Maximizing $\begin{array}{r}{H\left(\frac{1}{N}\sum_{i=1}^{N}g^{(i)}\right)}\end{array}$ encourages the average distribution to approximate a uniform distribution, promoting the balancing of experts selection. Minimizing $H(\bar{g^{(i)}})$ increases certainty by driving each individual distribution toward a point distribution. Thus, the GJS divergence, used as an auxiliary loss, promotes both load balancing and more decisive routing decisions. However, our experiments show that directly optimizing this auxiliary loss can reduce model performance by overly constraining model’s flexibility. To mitigate this, we propose the Constrained GJS (CGJS) divergence:  
+
+$$
+\mathrm{CGJS}(G)=\operatorname*{min}\left(H\left(\frac{1}{N}\sum_{i=1}^{N}g^{(i)}\right),\gamma_{b}\log e\right)-\operatorname*{max}\left(\frac{1}{N}\sum_{i=1}^{N}H(g^{(i)}),\gamma_{c}\log e\right).
+$$  
+
+Here, $\gamma_{b}$ and $\gamma_{c}$ are hyperparameters in $[0,1]$ . $\gamma_{b}$ controls routing balance, with values closer to 1 promoting more balanced experts selection. $\gamma_{c}$ regulates routing certainty, with values closer to 0 increasing certainty. Fine-tuning $\gamma_{b}$ and $\gamma_{c}$ preserves model flexibility, mitigating performance degradation while maintaining expert specialization and balanced experts selection. The definition of the auxiliary loss is as follows:  
+
+$$
+\mathcal{L}_{\mathrm{aux}}=\frac{\operatorname*{max}\left((\gamma_{b}-\gamma_{c})\log e-\mathbf{CGJS}(G),0\right)}{\log e}.
+$$  
+
+The loss is normalized by dividing by $\log e$ , ensuring consistency as the number of experts $e$ changes. We apply the auxiliary loss separately to the gate values generated by each task or token router within each batch. The auxiliary function essentially performs a clustering-like effect. When applied to task routers, the routing results for similar tasks are brought closer together in the latent space, while dissimilar tasks are driven further apart. This clustering-like approach enhances the task router’s ability to differentiate tasks in an unsupervised manner and generalizes well to unseen tasks.  
+
+Finally, we only optimize the parameters associated with the experts, router, task encoder, and task embedding to minimize the combined language model loss and auxiliary loss. The loss function is defined as:  
+
+$$
+\mathcal{L}=\mathcal{L}_{\mathrm{LM}}+\lambda\sum_{R\in\mathcal{S}}\mathcal{L}_{\mathrm{aux}}^{(R)},
+$$  
+
+where $\lambda$ is a hyperparameter that adjusts the weight of the auxiliary loss in the overall optimization process. $\boldsymbol{S}$ represents the set of task routers and token routers, and $\mathcal{L}_{\mathrm{aux}}^{(R)}$ denotes the auxiliary loss computed for each individual task or token router .  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+We fine-tune our model on Flan v2 (Chung et al., 2024; Longpre et al., 2023), a dataset designed for instruction fine-tuning across 1,836 tasks such as natural language inference, question answering, translation, and sentiment analysis, among others. Fine-tuning on this diverse multi-task dataset enables the model to acquire general problem-solving capabilities rather than simply fitting to a specific dataset.  
+
+Benchmarks and Metrics. To evaluate multitask performance, we test on several NLP benchmarks, including MMLU (Hendrycks et al., 2020), MMLU-Pro (Wang et al., 2024), ARC-Easy, ARC-Challenge (Clark et al., 2018), OpenBookQA (Mihaylov et al., 2018), SWAG (Zellers et al., 2018), and CommonsenseQA (Talmor et al., 2018). These benchmarks consist of multiple-choice questions, assessing various aspects of the model’s natural language understanding. For MMLU and MMLU-Pro, we use macro accuracy, which averages accuracy across all tasks, while for the other benchmarks, we use accuracy as the evaluation metric.1.  
+
+Base Model and Baseline. We utilize Qwen2 1.5B (Yang et al., 2024) as our base models. For baseline comparisons, we compare HMoRA with full fine-tuning (Full FT), LoRA ( $r\,=\,8$ and $r=64$ ) and methods incorporating mixtures of LoRA experts. These methods include MoLoRA (Zadouri et al., 2023), MixLoRA (Li et al., 2024) and HydraLoRA (Gao et al., 2024). These models were selected due to their similarity in training setup to HMoRA. In contrast, other methods may require predefined task-specific datasets or pretrained LoRA modules, which differ significantly in setup and assumptions.2.  
+
+Training and Evaluation Setup. We limit the maximum number of training steps to 10,000, conducting evaluations every 200 steps on the validation sets of all benchmarks. If there is no improvement on the validation set for 10 consecutive evaluations, we will terminate the training early. The best checkpoint, determined by the highest averaged accuracy across all benchmarks, is selected for evaluation on the test set. Each experiment is repeated 5 times with different random seed, and we report the mean of the evaluation metrics.  
+
+
+
+\section{4.1 ROUTING METHODS COMPARISON  }
+
+
+   
+
+![](images/bb1d7f3129c4069bde7f45bc08bd819040365d83a991eae3cc224f853f287e76.jpg)  
+
+Table 2: Performance comparison for different routing methods (RM). We calculate the average accuracy (Avg) across seven benchmarks as a measure of the model’s capability in multi-task scenarios. The best result for soft or top- ${\cdot k}$ routing on each dataset is highlighted in bold.  
+
+Implementation Details. For the MoRA block, we set $r\,=\,8$ and $e\,=\,8$ , applying MoRA to all dense layers of Qwen2, including $W_{\mathrm{q}},W_{\mathrm{k}},W_{\mathrm{v}},W_{\mathrm{o}},W_{\mathrm{gate}},W_{\mathrm{up}}$ , and $W_{\mathrm{down}}$ . We only use token-level routing in this section. For ${\mathcal{L}}_{\mathrm{blc}}$ , we used the recommended $\dot{\lambda}=0.01$ . For ${\mathcal{L}}_{\mathrm{aux}}$ , we set $\lambda=0.003$ , $\gamma_{c}=0.4$ , and $\gamma_{b}=1$ . For top- $k$ routing, we set $k=2$ .3.  
+
+Main Results. As shown in Table 2, incorporating $\mathcal{L}_{\mathrm{aux}}$ consistently enhances performance, with both soft routing and top- ${\cdot k}$ routing achieving significant accuracy improvements. To further analyze routing certainty and balance, we visualize the entropy of the gate values across different layers in Figure 3. Figure 3 demonstrates that our auxiliary function enhances routing certainty while maintaining relative balance. Although ${\mathcal{L}}_{\mathrm{blc}}$ improves routing balance, it reduces routing certainty and does not achieve the same performance gains as $\mathcal{L}_{\mathrm{aux}}$ . Notably, top- $k$ routing with ${\mathcal{L}}_{\mathrm{aux}}$ achieves  
+
+![](images/badea323b050b3938661c8b48dcfcd1011fe82050f8c667e12bfc8f0826f0780.jpg)  
+
+Figure 3: Visualizing the entropy of the gate values produced by routers across different layers. The base model has 28 layers, but for clarity, we start at layer 4 and sample every 4 layers, resulting in 7 layers. Each layer contains 7 routers (corresponding to $W_{\mathrm{q}}$ , $W_{\mathrm{k}}$ , $W_{\mathrm{v}}$ , $W_{0}$ , $W_{\mathrm{gate}}$ , $W_{\mathrm{up}}$ , and $W_{\mathrm{down}})$ , totaling 49 routers. The dotted lines represent $\begin{array}{r}{H\left(\frac{1}{N}\sum_{i=1}^{N}g^{(i)}\right)}\end{array}$ , indicating the balance of expert selection — higher values suggest more balanced routing. The solid lines show $\begin{array}{r}{\frac{1}{N}\sum_{i=1}^{N}H(g^{(i)}).}\end{array}$ , reflecting the certainty of routing decisions — lower values indicate greater certainty.  
+
+![](images/e554463f6a21fbb0762288d27bebb3cd8e80cf66cdea11f10ad229965f28326b.jpg)  
+
+Table 3: Results of baseline comparison experiments across multiple NLP benchmarks. TP refers to the percentage of trainable parameters relative to full fine-tuning. The best result for each benchmark is highlighted in bold. “ $\because w$ LW” and “ $w/o$ LW” refer to using and not using lightweight designs, respectively.  
+
+the best average accuracy.4.  
+
+4.2 BASELINE COMPARISON  
+
+Implementation Details. The hyperparameters for hierarchical hybrid routing are set as follows: $\epsilon\,=\,4$ , $\mu=-2$ , $\beta_{\mathrm{low}}=0.2$ , and $\beta_{\mathrm{high}}=0.8$ . All other hyperparameters are consistent with those outlined in Section 4.1. For LoRA, we conducted experiments with both $r\,=\,8$ and $r\,=\,64$ . For other mixtures of LoRA experts models, we fixed $e\mathrm{~=~}8$ and $r\,=\,8$ . Additionally, we performed a hyperparameter search for these baselines and report the best results.  
+
+Main Results. As shown in Table 3, HMoRA $w$ LW designs outperforms full fine-tuning on 5 out of 7 benchmarks, while requiring only $3.9\%$ of the trainable parameters. Even on the two benchmarks where HMoRA $w$ LW slightly lags behind, the performance gap is minimal. HMoRA $w/o$ LW surpasses full fine-tuning across all benchmarks. Moreover, HMoRA $w/o$ LW significantly outperforms LoRA and other mixture of LoRA experts methods, demonstrating superior performance across all benchmarks. HMoRA $w/o$ LW also achieves higher average accuracy. These results demonstrate the effectiveness of HMoRA in efficiently fine-tuning LLMs in a multi-task setting.  
+
+We also conducted baseline comparison experiments on LLaMA 3.7.  
+
+4.3 ABLATION STUDY  
+
+Ablation Study on the Hyperparameters of the Auxiliary Function.4, we conduct ablation experiments primarily on the hyperparameter $\gamma_{c}$ , finding that setting $\gamma_{c}$ around 0.4 yields better model performance.  
+
+Ablation Study on the Hyperparameters $\epsilon$ and $\mu$ for Hierarchical Hybrid Routing.5, we perform ablation experiments on the hyperparameters $\epsilon$ and $\mu$ . We find that setting $\epsilon>0$ , i.e., increasing $\alpha^{(l)}$ , generally leads to better performance and the model’s performance is not sensitive to $\mu$ .  
+
+Ablation Study on Lightweight Designs.6, we examine the impact of each lightweight design on model performance.  
+
+Quantitative Study on the Ability of Task Routers to Differentiate Unseen Tasks.8. The experimental results show that the task router using ${\mathcal{L}}_{\mathrm{aux}}$ is able to effectively differentiate 42 out of 57 sub-tasks $(73.68\%)$ in MMLU. Without any auxiliary function, none of these tasks can be distinguished, while using ${\mathcal{L}}_{\mathrm{blc}}$ can differentiate just 7 tasks $(12.28\%)$ .  
+
+![](images/07cedf576cf752691bc049cb90efd260d5c8214666ded22bb70d240f0540e0d8.jpg)  
+(a) Visualization of gate values from task router with auxiliary loss.  
+
+![](images/33ae16e1cd18ea8fa52207ddd5eca2a6185542509cc562bc2eb7690ae3d8f5bd.jpg)  
+(b) Visualization of gate values from task router without auxiliary loss.  
+
+Figure 4: t-SNE visualization of the gate values computed by the final task router in LLMs for different tasks in the MMLU dataset.  
+
+Qualitative Study on the Ability of Task Routers to Differentiate Unseen Tasks. To more intuitively reveal the impact of the auxiliary loss on the task router, we selected 3 pairs of tasks from MMLU, with each pair containing 2 similar tasks and 100 samples per task. We routed the questions of these tasks and visualized the routing results from the task router in the last laye of LLM with t-SNE (Van der Maaten & Hinton, 2008). As shown in Figure 4(a), when the task router uses $\mathcal{L}_{\mathrm{aux}}$ , each task forms a distinct cluster, with similar tasks (represented by the same shape) positioned closer together, while dissimilar tasks are clearly separated. In contrast, the visualization of the routing results from task router without $\mathcal{L}_{\mathrm{aux}}$ is shown in Figure 4(b). The routing results for these tasks, although forming some clusters, are noticeably less distinguishable compared to those using $\mathcal{L}_{\mathrm{aux}}$ . This demonstrates that using $\mathcal{L}_{\mathrm{aux}}$ enhances the task router’s ability to differentiate tasks, leading to more accurate and distinct routing decisions. Notably, no explicit task labels were provided during training, and the tasks from MMLU were unseen during training. This suggests that the task router learned to differentiate tasks in an unsupervised manner and can generalize to unseen tasks.  
+
+![](images/d045469386422fb7ece262fc44bed9ee64e5ecbc7cb15b29842ae0f75bbae3a5.jpg)  
+
+Table 4: Ablation study results on the impact of the auxiliary loss for the task router.  
+
+As shown in Table 4, when the auxiliary loss is not applied to the task router, the model’s performance significantly declines on all benchmarks. This indicates that the auxiliary loss plays a crucial role in the task router’s performance.  
+
+
+
+\section{5 RELATED WORK  }
+
+
+Mixture of Experts (MoE). MoE was introduced by Jacobs et al. (1991) as a framework that divides complex problems into simpler tasks, each handled by a specialized expert. Shazeer et al. (2017) improved the efficiency of this approach by activating only a subset of experts for each input using the Sparsely-Gated MoE layer. Building on this, Lepikhin et al. (2020) scaled MoEs to a 600-billionparameter multilingual Transformer, enhancing scalability. Du et al. (2022) further scaled this to 1.2 trillion parameters with GLaM, activating a small fraction of the model for each input, resulting in significant computational savings while outperforming GPT-3 on 29 NLP benchmarks. Fedus et al. (2022) simplified the MoE routing algorithm, allowing each token to select one expert, speeding up training without sacrificing quality. Shen et al. (2023) demonstrated that combining MoEs with instruction fine-tuning in LLMs improves performance on task-specific benchmarks while maintaining computational efficiency.  
+
+Combining MoE with LoRA. Combining MoE with LoRA enhances LLMs for multi-task learning while significantly reducing the number of trainable parameters. MoLoRA (Zadouri et al., 2023) integrates LoRA with MoEs, achieving performance comparable to full fine-tuning. Luo et al. (2024) employs contrastive learning to promote expert diversity, while Dou et al. (2024) introduces an auxiliary function to specialize experts in either world knowledge or downstream tasks, enhancing overall effectiveness. Xu et al. (2024), Feng et al. (2024), and Zhao et al. (2024) dynamically compose independently trained LoRA experts for different tasks, albeit at the cost of labor-intensive training. Architecturally, MixLoRA (Li et al., 2024) applies MoE to the feed-forward network and LoRA to self-attention, whereas HydraLoRA (Tian et al., 2025) uses an asymmetric design of LoRA experts to reduce parameters. Gao et al. (2024) demonstrates that assigning more experts to deeper layers improves performance. Task-level routing, as used by Liu et al. (2024) and Feng et al. (2024), assigns tokens based on tasks, improving expert specialization in multi-task scenarios.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+This paper introduces HMoRA, an approach that enhances LLMs by integrating a mixture of LoRA experts with hierarchically combined token-level and task-level routing. This design enables the model to capture both fine-grained and global information across different layers of the LLM. We propose a novel auxiliary loss that enhances routing certainty while maintaining a balanced selection of experts, thereby improving expert specialization. It also strengthens task differentiation and enhances generalization to unseen tasks. Additionally, our lightweight designs reduce the parameter size and computational cost, increasing the model’s practicality. Experimental results demonstrate that HMoRA outperforms both full-parameter fine-tuning and other LoRA-based approaches across multiple NLP tasks. Our auxiliary loss and hybrid routing suggest promising directions for future work, with the potential to improve the balance and efficiency of expert utilization in standard MoE architectures, which may benefit a variety of NLP applications.  
+
+
+

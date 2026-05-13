@@ -1,0 +1,328 @@
+\title{Resolving Lexical Bias in Edit Scoping with Projector Editor Networks}
+
+\begin{abstract}
+Weight-preserving large language model editing techniques rely heavily on scoping mechanisms that determine when to apply edits to the base model. These mechanisms typically use distance functions in the representation space. However, we demonstrate that distance-based scoping functions struggle with strong lexical biases, leading to issues such as applying edits to irrelevant prompts with overlapping words. This paper presents Projector Editor Networks for Model Editing (PENME), a principled approach that learns the optimal representation space for scoping using contrastive learning. Specifically, PENME forms a disentangled representation space that facilitates precise localization of edits by maintaining substantial distance between irrelevant prompts while preserving proximity among paraphrases. In our empirical study, we show PENME achieves state-of-the-art model editing results while being more computationally efficient during inference and adaptable across different architectures.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large Language Models (LLMs) have demonstrated tremendous success in solving a diverse range of natural language processing tasks \citep{devlin2018bert,liu2019roberta,touvron2023llama,radford2019language}. Despite their successes, LLMs are fallible. One reason for this discrepancy is the noisy and imperfect nature of the data used for training \citep{zhu2020modifying}. As the world evolves, new information requires updates to the models e.g. the prime minister of a country may change over time. Models trained on outdated data are prone to making factual errors.
+
+Periodically retraining LLMs  is one potential solution, but risks degrading performance, often requiring training from scratch to maintain previous capabilities \citep{luo2023empirical, wang2023knowledge}. Retraining requires significant computational resources, investment of time, data, and skilled labor. 
+
+To alleviate this, model editing was proposed to perform sample and compute efficient knowledge updates. There are two primary model editing design paradigms: \textbf{\textit{weight-modifying}} and \textbf{\textit{weight-preserving}}. \textbf{\textit{Weight-modifying}} approaches directly update the model's parameters to integrate new information \citep{meng2022locating,meng2022mass}. Although these approaches are sample efficient, they demand substantial compute resources for training \citep{yu2024melo} and result in catastrophic forgetting \citep{gupta2024model} the full impact of which is difficult to fully determine \citep{rosati-etal-2024-long}.
+
+In contrast, \textbf{\textit{weight preserving }} approaches maintain the original model parameters while employing additional components to reflect updated knowledge, thereby avoiding catastrophic forgetting \citep{hartvigsen2024aging,yu2024melo}. These methods either utilize user inputs and memory storage before a forward pass of the model (\textbf{\textit{pre-input}}) or during a forward pass (\textit{\textbf{post-input}}). \textbf{Pre-input} approaches ~\citep{mitchell2022memory,zheng2023can}  rely on retrieving relevant contexts for model editing, this process requires additional components such as retrievers and counterfactual models which make them computationally intensive. \textbf{Post-input} mechanisms~\citep{hartvigsen2024aging,yu2024melo} involve adapter-based editing techniques that incorporate components within the model's computational pathway, modifying its output to reflect edited information.
+A core component of adapter-based techniques is a vector similarity scoping mechanism that utilizes model representations and memory codebooks containing vector representations to determine when to utilize computational paths associated with a given edit. However, we observe that adapter-based techniques struggle with handling paraphrases and often misfire on irrelevant prompts with similar lexical content. This is in line with the findings of 
+\citet{dumpala2024sugarcrepe++} who examine the impact of lexical diversity on model representations for semantically equivalent texts and showed 
+that their representations often exhibit divergence despite semantic equivalence. For example, the representation for "The twin city of Pittsburgh is" may exhibit greater similarity to "The twin city of Portsmouth is" than to its paraphrase "Pittsburgh is a twin city of". 
+
+Our work uniquely characterizes this problem (\S\ref{sec:lexical-dominance}) leading to our novel finding that for model editing, lexical factors predominantly shape model representations. Figure~\ref{fig:lexical_dominance_complete} shows that 58\% of edits from the Counterfact dataset \citep{meng2022locating} were closer to unrelated neighbours than the edit paraphrases using representational similarity measures.  This result is misfiring of the scoping mechanism i.e. inappropriately applying an edit. This phenomenon creates a trade-off between effectively executing the correct editing mechanism on paraphrases and preventing misfires on irrelevant prompts. A low distance threshold, which controls the scoping mechanism, reduces misfires but impedes paraphrase execution, while a higher threshold enhances paraphrase performance but increases misfire risk as illustrated in Figure \ref{fig:similarity_issue}.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=1\textwidth]{lexical_domince_visual_figure1.png} % Change "paper_image1.png" to the filename of your image
+    \caption{An illustration of lexical dominance in embeddings: a) shows setting the similarity threshold low (illustrated with the circle) which results in failing to edit paraphrases. b) shows setting the similarity threshold high resulting in misfires with irrelevant prompts. c) illustrates the representation space that our projector network learns.
+    }
+    \label{fig:similarity_issue}
+\end{figure*}
+
+In this work, we introduce Projector Editor Networks for Model Editing (PENME), an advancement over previous adapter-based weight preserving model editing by explicitly targeting the lexical bias problem \textcolor{blue}{in these scoping mechanisms}. PENME comprises of two key components: a projector network and a similarity-based retrieval system. The projector network is a compact, two-layer neural network trained independently using contrastive learning to disentangle projection space such that paraphrases of edits demonstrate proximity, while irrelevant prompts, both with and without similar lexical overlaps, are farther away. Based on the outputs of the projector network, a memory-based retrieval system facilitates efficient edit retrieval. 
+This approach effectively addresses the aforementioned challenges, while maintaining computational efficiency and ensuring compatibility with both encoder- and decoder-based architectures.
+
+Our contributions are as follows: \textbf{(1)} We demonstrate that representations extracted across layers from various LLMs exhibit lexical dominance, showing a bias towards token overlap which introduces significant challenges for adapter-based model editing techniques. \textbf{(2)} We propose a projection network that maps the model's representation space to a new representation space where lexical dominance is minimized. \textbf{(3)} We integrate our projection network in an adapter and memory-based retrieval scheme for model editing, demonstrating high efficacy for 
+paraphrase execution (generalization), preventing misfires on irrelevant prompts (locality) and 
+it's generalization to unseen edits, paraphrases, and neighbours.
+The proposed projection network is a novel solution to the problem in hand. Moreover, It has broader impact to other application areas relying on representation similarities such as retrieval augmented generation, however, it is out of the scope of this paper.
+
+
+
+\section{Related Work}
+
+
+\textbf{\textit{Weight-modifiying}} approaches typically rely on the localization hypothesis (\citealp{miller2016key,geva2020transformer}) in the transformer architecture which conjectures pointwise feed-forward components function similar to a key-value memory for information retention within a LLM (a hypothesis which has recently been criticised w.r.t model editing in \citealp{hase2023}). \citet{meng2022locating} identifies salient neurons within the feed-forward layers, facilitating targeted updates to effect the desired edits using causal analysis. Similarly, \citet{li2024pmet} investigates the role of multi-headed attention, in conjunction with feed-forward layers, for model editing. \citet{mitchell2021fast} uses a hypernetwork to predict new weights for the model by using a low-rank decomposition of the weight matrices of different layers. The goal is to edit information in the model parameters without impacting unrelated information.
+\textbf{Weight Preserving: pre-input} approaches depend on extracting and processing relevant edit information before the input is processed by the main model. For example, SERAC \citep{mitchell2022memory} employs a memory-based model editing strategy augmenting a primary LLM with two additional models and memory storage. The supplementary models determine scope-of-edit and perform counterfactual reasoning. Retrieval-augmented (RAG) techniques like IKE \citep{zheng2023can} leverage similarity-based retrieval to extract and rank edit demonstrations from memory and use in-context reasoning to perform edits.
+
+\textbf{Weight preserving: post-input} rely on the model's internal representations to implement scoping mechanisms (mechanisms which determine whether a specific edit applies for the current input) and employ a playback mechanism that triggers the model to generate modified outputs. For example, GRACE \citep{hartvigsen2024aging,yu2024melo} operate an in-model adapter approach. These approaches employ a codebook or memory storage system to maintain model representations of edits as clusters. They utilize a vector similarity-based retrieval mechanism to generalize edit paraphrases and constrain irrelevant or neighbouring prompts. Initial cluster sizes are deliberately restricted to mitigate interference from neighbouring prompts and ensure that only paraphrases of the edit prompt are mapped within the cluster. However, this design necessitates continuous cluster resizing, as new edits with similar semantic and lexical properties may fall within an existing edit cluster. Furthermore, the initially small cluster radius necessitates the storage of multiple edit paraphrases in the memory codebook to achieve effective generalization, potentially leading to increased memory consumption. The major difference in the approaches is that \citet{hartvigsen2024aging} uses memory playback vectors while \citet{yu2024melo} uses LoRA blocks \citep{liu2024visual} for the generation process. 
+An alternative editing method involves enhancing the feedforward layer (FFN) within a transformer block by incorporating additional neurons to facilitate the desired modifications. \citet{huang2023transformer} introduce a single neuron per output token for edited information of single edit. In this framework, each neuron, or a group of neurons, is specifically trained to activate solely for a particular edit, thus adjusting the model's output to produce the altered information.
+
+\textcolor{blue}{Cluster-based similarity systems like GRACE and MELO \citet{hartvigsen2024aging} and \citet{yu2024melo} rely on concept separability within the representation space to manually maintain keys in their codebooks. However, our analysis reveals that lexically similar prompts cluster closer to edits than their paraphrases, heightening the risk of system failure as can be seen from figure \ref{fig:similarity_issue} and \ref{fig:lexical_dominance}. Moreover, their cluster based design necessitates storing edit paraphrases as codebook entries for effective generalization which increases retrieval latency. PENME overcomes this limitation by learning a projection space that enhances representation structure, enabling more effective organization of keys for faster and more accurate retrieval. Furthermore, PENME consistently outperforms both weight-preserving and weight-modifying methods across various architectures, underscoring its adaptability and efficacy.}
+
+
+
+\section{Problem Setting: Model Editing}
+
+\label{sec:prob_dataset}
+The objective of model editing is to alleviate the need for complete retraining by updating the model under the following conditions (1) sample efficiency: update the model with the fewest number of samples possible, (2) compute efficiency: train a small portion of the model only, (3) minimal impact:  make as small of an impact on unrelated behaviour as possible (for adapter-based approaches this means preventing misfires on irrelevant prompts) and (4) ensure generalization: maintain accurate paraphrase behaviour (for adapter-based approaches this means retrieval of the correct edits).
+
+The aim is to modify the behaviour of a  model $M$ on a dataset $D=[d_1,d_2,d_3...d_n]$ where the sample $d_i$ is the tuple $(x_i ,y_i,[p_{i1},p_{i2}...],[nb_{i2},nb_{i2},..])$. In this tuple, $x_i$ is the edit prompt, $y_i$ is the new output tokens, $p_{1..n}$ are the edit paraphrase prompts, $nb_{1..n}$ are \textit{neighbours} or \textit{neighbourhood prompts} these are lexically and semantically similar prompts but ones where the underlying model generation should not change. To be successful in the model editing task, the edited model, $M_{edited}$,  should generate new target tokens $y_i$ for a specific input $x_i$  (Edit Success) and its related paraphrases $p_{1..n}$  (Generalization), while maintaining the model's behaviour on semantically unrelated prompts $nb_{1..n}$ (Locality). 
+The following metrics illustrate how these factors are typically operationalized (see for example \citealp{yao2023editing,yu2024melo,hartvigsen2024aging,gupta2024unified}).
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{penme_overview.png} % Change "example-image" to the filename of your image
+    \caption{\textbf{PENME} uses a projection network that interfaces with the pointwise feed-forward layer output in a selected transformer block. This projection network, coupled with key-value codebook storage, acts as a scoping mechanism by comparing projection outputs with codebook entries. This mechanism determines whether the current input relates to a specific edit or should pass through the model unmodified.
+    }
+    \label{fig:PENME}
+\end{figure*}
+
+\paragraph{Edit Success (ES):} The proportions of edits that the model is able to recall or generate correctly. This metric has also been called efficacy, reliability, and edit score and is denoted as:
+    \begin{equation}
+    M_{edited}(x_i) = y_i, \, \forall (x_i, y_i) \in d_{1:n}
+    \end{equation}
+    
+    \paragraph{Locality:} The proportion of prompts concerning neighbouring entities unrelated to the edit for which the model generates the same outputs prior to editing, this is also described as specificity, neighbourhood success, retain rate and neighbourhood score. Denoted as:  
+    \begin{equation}
+    \begin{aligned}
+    M_{edited}(nb_{ij}) = M(nb_{ij}), \, \forall nb_{ij} \in nb_i ,\forall nb_i \in d_{1:n}.
+    \end{aligned}
+    \end{equation}
+    
+    \paragraph{Generalization:} The proportion of paraphrases for which the model is able to recall or generate the correct edited information, also described as paraphrase success, paraphrase score:
+    \begin{equation}
+    M_{edited}(p_{ij}) = y_i, \, \forall p_j \in p_i, \forall (p_i, y_i) \in d_{1:n}.
+    \end{equation}
+    
+    \paragraph{Score:} The general score is the mean of the above three metrics used for benchmarking.
+    
+
+
+
+\section{Projector Editor Networks for Model Editing (PENME) }
+
+
+PENME is a retrieval-based editor that leverages an adapter module which is integrated alongside pointwise feed-forward layers within an attention block of a pre-trained Large Language Model (LLM). By introducing this additional component rather than altering the original model weights, PENME enables the integration of new information while preserving the LLM's initial capabilities.
+
+PENME illustrated in Figure \ref{fig:PENME} consists of two components, (1) \textbf{Projection Network ($M_{proj}$)}: this component projects model activations at a specific layer $M_l(x)$ into a distinct representation space.  
+(2) \textbf{Key-Value Codebook} that stores model activations at layer $M_{proj}(M_l(x))$ as keys and corresponding values containing a learned similarity threshold ($\delta$) and the new associated output information $y_i$.
+It should be noted that instead of output information, vectors can also be stored as values which facilitate playback approaches such as vector playback \citep{hartvigsen2024aging} and LoRA blocks based playback \citep{yu2024melo}. Output retrieval and playback are compatible with all transformer-based model architectures.
+\subsection{Projection Network}
+The projection network $M_{proj}$ is a small feed-forward neural network trained via contrastive learning \citep{hadsell2006dimensionality} with additional constraints, defined by the following loss function:
+\begin{equation}
+\begin{aligned}
+\label{eq:example}
+\mathcal{L}(\vec{x_i},\vec{z}) &=  (1-t) \frac{1}{2} ||\vec{x_i} -\vec{z}||^2_2 
+ + t \frac{1}{2} [\max(0, m - ||\vec{x_i} - \vec{z}||_2)^2]\\
+ t &=
+ \begin{cases}
+1 \text{ if } \vec{z} \gets \vec{p_{ij}},\\
+0 \text{ if } \vec{z} \gets \vec{n_{ij}} \lor \vec{x_l} \\
+\end{cases}  
+\end{aligned}
+\end{equation}
+
+where $t$ is the target $\{0,1\}$ which is 0 when the training pair is $\{x_i,p_{ij}$ (edit,paraphrase) and 1 when $\{x_i,nb_{ij}\}$ (edit,neighbour) or the inter-edit (or edit-to-edit) pair $\{x_i,x_l\}$ , $m$ is the margin which pushes $\vec{n_{ij}}$ at least $m$ distance away from $\vec{x_{i}}$. The projection network is trained such that for all samples in a dataset, edits $x_i$ and edit paraphrases $p_{ij}$ are close together while edits $x_i$ and neighbours $nb_{ij}$ are distanced in the projection space i.e. $||\vec{M_{proj}}\vec{(M_l}(x_i)) - \vec{M_{proj}}\vec{(M_l}(p_{ij})||_2 \ll ||\vec{M_{proj}}\vec{(M_l}(x_i)) - \vec{M_{proj}}\vec{(M_l}(nb_{ij})||_2$. Training is performed by sampling pairs at random and $\vec{z}$ in the loss function above is assigned based on the pair category we discussed earlier. The conventional contrastive training for the projection network results in a suboptimal solution. The inherent lexical and semantic similarities among edits increase the probability of certain edit paraphrases exhibiting greater proximity to other edits. This phenomenon can lead to erroneous paraphrase-edit associations during execution, potentially triggering inappropriate edit operations. To mitigate this issue, we propose an enhanced approach that incorporates an additional constraint to maximize $||\vec{M_{proj}}\vec{(M_l}(x_i)) - \vec{M_{proj}}\vec{(M_l}(x_{l})||_2$ where $x_{l}$ is sampled from other edits in the dataset. This results in increasing the inter-edit distances $||\vec{M_{proj}}\vec{(M_l}(x_i)) - \vec{M_{proj}}\vec{(M_l}(p_{ij})||_2 \ll ||\vec{M_{proj}}\vec{(M_l}(x_i)) - \vec{M_{proj}}\vec{(M_l}(x_{l})||_2$. This novel modification serves to expand the overall projection space, thereby reducing the likelihood of misclassification. \textcolor{blue}{The number of edit-to-edit pairings is determined by the similarity between edits, which is controlled by a hyperparameter $\Phi$.}
+
+The compact architecture of the projection network enables it to be trained on GPUs with limited memory capacity, irrespective of the underlying model's scale. 
+
+
+\subsection{Key-Value Memory}
+The key-value memory is designed to store edits and their corresponding outputs. For each edit, representations are generated by passing the input $x_i$ through the model and the projection network. This is denoted $act_{x_i}=M_{proj}(M_l(x_i))$. These representations are then stored as keys $k_i \in K$ in the memory and are utilized during runtime in a similarity-based retrieval system to access the relevant edit. The memory value $v_i \in V$ consists of the edited information along with a similarity threshold. The threshold serves as a scoping mechanism. For a given input prompt denoted $pt$, euclidean distance $||\cdot||_2$ is computed with all keys in the memory. From the computed distances, we determine if the input prompt $pt$ is relevant to the edited memory value $v^{\mu}_i$ and its corresponding threshold $v^{\delta}_i$. This is expressed as:
+\begin{equation}
+\label{eq:distance_threshold}
+\begin{alignedat}{2}
+&\underset{k_i, v_i}{argmin}\:\: ||act_{pt} - k_i||_2 \\
+& s.t. ||act_{pt} - k_i||_2 < v^i_{\delta}
+\end{alignedat}
+\end{equation}
+
+If the prompt $pt$ is deemed relevant based on the equation \ref{eq:distance_threshold}, the output information of the edit is retrieved from memory $v^{\mu}_i$. Otherwise, the typical model output $M(pt)$ is employed.
+Initial experimental findings regarding the threshold reveal that unseen test paraphrases typically demonstrate greater distance than the average seen training paraphrases, while the inter-paraphrase distances within the training set exhibit variation across edits.  
+To determine an appropriate threshold that defines the scope of an edit, we investigate various data-driven thresholding schemes based on the training data.
+
+
+
+
+\begin{enumerate}
+    \item $Max(||\vec{x} - \vec{p_{ij}}||_2) + \tau$, setting $\tau$ distance away from max paraphrase distance
+    \item $Min(||\vec{x} - \vec{nb_{ij}}||_2) - \tau$, setting $\tau$ distance below min neighbour value
+    \label{eq:thresholding}
+\end{enumerate}
+
+The selection between the two alternatives is contingent upon the specific aspect of adjustment that is prioritized. Option 2 maintains locality by preserving all training neighbours, while Option 1 assures that all training paraphrases will be operational regardless of the $\tau$ value selected.  \textcolor{blue}{In Option 2, the final threshold, after adjustment with $\tau$ for certain edits, is set closer to the farthest paraphrase}. We opt for Option 1 in our experiments, as it guarantees a full edit success rate.
+
+\textbf{Edit Removal and Scalability}: The scoping mechanism employed by \citet{hartvigsen2024aging,yu2024melo} requires multiple paraphrases added to the codebook to improve generalization. To enhance efficiency, merging operations are performed on nearby edits that produce identical outputs. However, the efficacy of this consolidation is dataset-dependent; for example, zsRE demonstrates a high frequency of similar edit outputs, enabling a significant reduction in codebook entries. For example, 1000 edits on zsRE requires 658 entries in total but for Counterfact 1682 entries are needed just for 300 edits. The combination of this consolidation process and the potential for edits to be closely related in vector space leads to overlapping cluster radii, necessitating cluster size reduction. This inadvertently results in the removal of certain edits. Thus edits can be forgotten.
+ This characteristic allows for more rapid edit retrieval compared to the aforementioned approach. Furthermore, our method facilitates straightforward edit removal or updates, offering enhanced flexibility in edit management.
+
+
+
+
+
+
+
+
+\section{Experimental Setup}
+
+We assess the performance of PENME across a spectrum of transformer-based LLMs including %These models include 
+Text-to-Text Transfer Transformer (specifically T5-small) \citep{raffel2020exploring}, Llama-2-7b~\citep{llama} and GPT2-XL \citep{radford2019language}. We compare PENME with 
+\textcolor{blue}{We compare PENME with GRACE and MELO, as these are weight-preserving approaches that closely align with our methodology. Additionally, we include MEMIT and SERAC in the evaluation, as they high performing techniques in model editing alongn with a baseline that uses PENME's thresholding system. The baseline is refered to as Defer.}
+. To select the optimal layer to introduce the PENME adapter, we utilize the methodology outlined in section \S \ref{sec:lexical-dominance} and incorporate PENME in the second layer for all LLMs. To determine the optimal threshold for each edit, we systematically vary the $\tau$ parameter in Equation \eqref{eq:thresholding} across a range of 0.05 to 0.20. 
+\label{para:dataset}
+\paragraph{Dataset}
+The zsRE dataset \citep{levy2017zero} and the Counterfact dataset \citep{meng2022locating} are the commonly used 
+ model editing datasets for evaluation. The zsRE dataset consists of an edit prompt along with several paraphrased versions of that prompt. To evaluate the impact of edits on unrelated knowledge, neighbourhood prompts are sourced from the NQ dataset \citep{kwiatkowski2019natural}, which offers a wide range of user query questions.
+In contrast, Counterfact has similar edit and paraphrase prompts but employs a more nuanced approach to neighbouring prompts. It includes prompts that are similar to the edit prompt in both semantic nature and lexical structure. This differs significantly from zsRE, where the neighbouring prompts are neither semantically nor lexically related to the edit prompt. Moreover, zsRE has a lower spectrum of subjects, relationships, and linguistic variations.
+This structural difference between the datasets has important implications for evaluation. In zsRE, the lack of semantic or lexical relationships between the edit prompt and its neighbours allows weight-preserving approaches to achieve high locality scores with relative ease. The enhanced complexity of Counterfact renders it a more robust benchmark for evaluating editing mechanisms.
+
+
+
+
+\section{Evaluation}
+
+
+In this section, we present evidence of lexical dominance, the results of PENME in achieving separability of unrelated neighbours and paraphrases, and comparison with other methods.
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{lexical_dominance_models.pdf}
+        \caption{Percentage of samples \textit{where edits are closer} to unrelated neighbours as compared to paraphrases in the representations space of different models across various select layers. T5-small, GPT2-XL and Llama-2-7b have 6, 32, 48 layers respectively
+        \label{fig:lexical_dominance}
+    \end{minipage}\hfill
+    \begin{minipage}[t]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{lexical_dominance_projector.pdf}
+        \caption{Percentage of samples \textit{where edits are closer} to unrelated neighbours as compared to paraphrases in the representation space of different models and projector networks. Lower percentages indicate better performance.}
+        \label{fig:lexical_dominance_projector}
+    \end{minipage}
+\end{figure}
+\subsection{Lexical Dominance}
+\label{sec:lexical-dominance}
+
+To examine the lexical dominance of representations, 
+we randomly sampled 500 entries from the Counterfact dataset (see \S \ref{para:dataset}). For each entry, we created triplets consisting of an edit prompt, a randomly sampled paraphrase prompt and a neighbouring prompt with high lexical overlap (\(x_i,p_i,n_i\)). These triplets are fed into various models, and representation vectors ($\vec{x_{i}},\vec{p_{i}},\vec{n_{i}}$) from the feed-forward block of each layer $l$ are extracted for all samples. 
+We select either averaged token representations or dedicated sentence representation, based on whether a given model offers a specific token for sentence-level representation. Following extraction, we calculate two sets of pairwise Euclidean distances: (1) Between edit representations and paraphrase representations: $||\vec{x_{i}} -\vec{p_{i}}||_2$ (2) Between edit representations and neighbour representations: $||\vec{x_{i}} -\vec{nb_{i}}||_2$. We then compare these distances to determine if neighbours are closer to the edits than the paraphrases $||\vec{x_{i}} -\vec{p_{i}}||_2 > ||\vec{x_{i}} -\vec{nb_{i}}||_2$. Figure \ref{fig:lexical_dominance} displays the percentage of samples where neighbours \textit{were closer} to the edits. 
+
+The findings reveal an intriguing pattern: except for the first layer in most models, the early layers demonstrate a reduced percentage of samples where neighbours are closer to edits than paraphrases. However, the trend shifts as we progress through the model's depth. In the mid-layers, this percentage begins to ascend once more, only to descend slightly towards the final layers, albeit with subtle fluctuations among them. We hypothesize that in the initial layers, token-specific information remains largely isolated. However, as the input traverses deeper into the model, guided by repeated attention mechanisms, this information becomes amalgamated across tokens. Moreover, repeated normalization as demonstrated by \citet{takase2022layer} results in smaller changes in weights of an LLM leading to embedding vectors in the final layers being similar thus only subtle fluctuations are seen in the percentages. 
+These results indicate why there is a significant chance of misfire in \textbf{post-input} methods. This also provides a systematic approach for identifying the optimal layer to introduce PENME integration, by elucidating the regions within the model's architecture where lexical dominance exhibits minimal influence.
+
+\subsection{Disentangled Projection Space}
+
+In this section, we validate our proposed projection network in its ability to learn a generalized disentangled representation space where paraphrases are closer to edits as compared to neighbours. We sample 1500 tuples of edits ($e_i$), paraphrases $p_i$, and their unrelated neighbours $nb_i$ (\(e_i,p_i,nb_i\)) from the Counterfact dataset with accompanying input prompts $x_i$ and split them into train and test sets of 1000 and 500 samples respectively. We use the training set to train the projector network using model representations from layer 2 of each model.
+To evaluate the network's performance, we compare two types of test representations: the original model representations $M_l(x_i)$ where $x_i$ is the input prompt and the projected representations $M_{proj}(M_l(x_i))$. This comparison uses the experimental method described earlier, allowing us to determine whether the projection network successfully learns to create a representation space with the desired properties.
+
+The results presented in Figure \ref{fig:lexical_dominance_projector} demonstrate that the projector network, despite not being exposed to these specific samples during training, effectively learns to distance lexically similar but unrelated neighbours in comparison to paraphrases.
+For data pairs where neighbours are closer to edits than paraphrases, T5-small exhibits a significant decrease from $46\%$ percent to $6.4\%$. Similarly, GPT2-XL shows a reduction of over  $7\%$, and Llama-2-7b drops to $0\%$, indicating perfect separability of neighbours and paraphrases.
+
+
+
+        
+        
+        
+
+        
+
+        
+      
+     
+        
+
+\begin{table*}
+    \centering
+    \begin{tabularx}{\textwidth}{Xccccc|cccc
+    }
+        \toprule
+        & & \multicolumn{4}{c}{CounterFact} & \multicolumn{4}{c}{zsRE} \\
+        \textbf{Method}  & \textbf{Model} & \textbf{ES} & \textbf{Loc} & \textbf{Para} & \textbf{Score} & \textbf{ES} & \textbf{Loc} & \textbf{Para} & \textbf{Score} \\
+        \midrule
+        PENME 
+        &   T5-small & \textbf{1.000} & 0.787 & \textbf{0.808} & \textbf{0.865} 
+        & \textbf{1.000} & \textbf{0.941} & 0.913  &  \textbf{0.951}  \\
+        &   Llama-2-7b  & \textbf{1.000} & 0.869 & \textbf{0.906}  & \textbf{0.925}  
+        & \textbf{1.000}  & \textbf{0.987} & \textbf{0.966} & \textbf{0.984}  \\
+        &   GPT2-XL & \textbf{1.000} & 0.847 & \textbf{0.875} & \textbf{0.907}
+        &\textbf{ 1.000}  & \textbf{0.957} & 0.940 & \textbf{0.966} \\
+
+        
+        
+        \midrule
+        MELO 
+        & T5-small & 0.850 & 0.800  & 0.037 & 0.562 &  0.990 & 0.640 & \textbf{0.986} &  0.872\\
+        & GPT2-XL & \textbf{1.000} & \textbf{1.000}  & 0.020 & 0.673 & \textbf{1.000} & 0.004 & \textbf{1.000} & 0.668 \\
+        
+       \midrule
+
+        GRACE  
+        & T5-small & \textbf{1.000} & \textbf{0.860} & 0.140 & 0.667 & \textbf{1.000} & 0.730 & \textbf{0.993} & 0.907  \\
+        &  Llama-2-7b & \textbf{1.000} & \textbf{0.997} & 0.002 & 0.666 & 0.120* & 0.00* & 0.579* &  0.233* \\
+        &  GPT2-XL& \textbf{1.000} & 0.996 &  0.003 & 0.666 & 0.993* & 0.019* & 0.017*  & 0.343*\\
+
+        
+        \midrule
+        SERAC 
+        & T5-small & 0.017 & 0.526 & 0.010 & 0.184 & 0.017 & 0.526 & 0.010 & 0.184 \\
+        & Llama-2-7b & 0.992 & 0.372 & 0.651 & 0.672 & \textbf{1.000} & 0.114 & 0.357  & 0.490 \\
+        & GPT2-XL & 0.947 & 0.669 & 0.408 & 0.675 & 0.474 & 0.003 & 0.811 & 0.429\\
+      
+     
+        \midrule
+        MEMIT 
+        & Llama-2-7b  & 0.147 & 0.149 & \textbf{1.000} & 0.432 & 0.402 & 0.002 & \textbf{1.000}  & 0.468\\
+        & GPT2-XL  & 0.785 & 0.788 & 0.502 & 0.692 & 0.214 & 0.000 & \textbf{1.000}  & 0.405\\
+        
+        \midrule
+        FT
+        & T5-small & 0.955 & 0.000 & 0.450 & 0.468 & 0.017 & 0.526 & 0.010 & 0.184 \\ 
+        & Llama-2-7b & 0.404 & 0.393 & 0.417 & 0.405 & 0.569 & 0.020 & 0.746 & 0.445\\
+        & GPT2-XL & 0.968 & 0.851 & 0.395 & 0.738  & 0.608 & 0.005 & 0.889  & 0.501 \\
+        \bottomrule
+    \end{tabularx}
+    \caption{A comparative analysis of PENME and recent model editing methods on 2000 edits from the Counterfactual dataset and 1000 edits on zsRE. The metrics are Edit Sucess (ES), Locality (Loc) and Paraphrase Generalization (Para). *indicates only a subset of 100 is computed.}
+    \label{tab:model_editing_experiments}
+\end{table*}
+\subsection{Model Editing Results}
+
+Table \ref{tab:model_editing_experiments} presents the comparative results of PENME and recent model editing methods for 2000 edits on the Counterfact dataset and 1000\footnote{*Due to system implementation issues with GRACE on EasyEdit \citep{wang2023easyedit}, we were only able to compute a 100 sample subset for results with a *.} edits on zsRE. 
+PENME demonstrates a highly stable performance across editing metrics as compared to other model editing approaches. In particular, PENME shows high efficacy on locality and generalization compared to other model editing approaches and has more stable performance across the different models.
+
+GRACE, similar to PENME, demonstrates high edit success rates due to its inherent design. However, its generalization scores compared to PENME were markedly low, suggesting poor performance on edit paraphrases post-editing. GRACE achieved the highest locality scores, with T5-small at 0.92 and Llama-2-7b nearly perfect at 0.997. The substantial difference between locality and generalization scores can be attributed to GRACE's use of a very low distance threshold, resulting in poor performance on paraphrases but successfully avoiding neighbouring prompt spillover into edits.
+
+SERAC 
+also 
+achieves
+a high edit success but shows a low and mixed performance for generalization and locality across models. For T5-small, the approach does not work well as SERAC uses logically entailed facts "prompt: TRUE or FALSE" to determine the scope, the original work uses a T5-large which is significantly better at reasoning.
+
+For GPT2-XL, MEMIT demonstrates moderate effectiveness, achieving an edit success rate of 0.785 and a locality score of 0.788. In contrast, when applied to Llama-2-7b, both the edit success and paraphrase success rates are relatively low, although the locality score remains high. This discrepancy is likely attributed to challenges arising from MEMIT's training on the Llama-2-7b model.
+
+
+\section{Ablations}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=1\textwidth]{generalization_vs_locality_threshold_main.pdf} % Change "example-image" to the filename of your image
+    \caption{\textcolor{blue}{Shows the trade-off between generalization and locality performance across different hyperparameter settings. The distance threshold $\tau$ varies from $0.01$ to $0.2$ ($0.01$ increments and $\tau$ is normalized by 100), while the edit-pairing similarity threshold $\phi$ ranges from $0.5$ to $0.9$ ($0.1$ increments). Higher $\phi$ values enforce stricter edit similarity requirements. The results showcase the effect of hyperparameter tuning on the projector network's learning capacity and overall performance.}}
+    \label{fig:generalization_vs_locality}
+\end{figure*}
+
+\subsection{Generalization and Locality}
+To demonstrate the trade-off between generalization and locality, we conducted an ablation study by varying the alpha parameter, which modulates the similarity threshold defining an edit's scope. Figure~\ref{fig:generalization_vs_locality} presents \textcolor{blue}{the results for GPT2-XL and T5-small. The trends observed for GPT2-XL and Llama-2-7b are similar. Setting a low $\tau$ value achieves near-perfect locality but poor generalization. As we incrementally increase the threshold, generalization improves while locality declines gradually. Generalization values either plateau for larger models (Llama-2-7b, GPT2-XL) or continue to increase for smaller models (T5-small). Each model exhibits an optimal threshold where generalization and locality are balanced;  these thresholds can be adjusted to suit specific use cases e.g. high locality to ensure no degradation in the original model.
+Figure \ref{fig:generalization_vs_locality} also illustrates the impact of varying the similarity threshold for edit-to-edit pairings in the training dataset on the projector network's learning. Edit-to-edit pairings $\phi$ which move edits farther away from each other are central to training a robust projector network. For T5-small, training remains largely stable across all thresholds, with optimal performance at the midpoint (0.70); deviations from this threshold result in decreased overall performance balance between generalization and locality. In larger models, threshold selection proves critical, as inappropriate values can lead to training instability, causing early plateauing of generalization and rapid decline in locality. The threshold value for edit-to-edit pairings $\phi$ significantly impacts training stability and performance. Higher thresholds, such as 0.75, result in fewer pairings and lead to unstable training for both Llama-2-7b and GPT2-XL models, ultimately resulting in poor performance. Conversely, lower thresholds, exemplified by 0.6, increase the number of pairings and enhance training stability. 
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.6\textwidth]{penme_ablation_samples.pdf} % Change "example-image" to the filename of your image
+    \caption{PENME's performance in terms of Locality (dotted line) and Generalization (continuous line) across varying numbers of total edits performed.}
+    \label{fig:scaling_edits}
+\end{figure}
+\subsection{Scaling Edits}
+We evaluate the projection network's stability under varying numbers of edits using incrementally larger training sets ranging from 1000 to 5000 edits, with 1000-edit increments per training session. The results of the experiment are shown in Figure~\ref{fig:scaling_edits}. 
+Projector network trained on representations from T5-small demonstrates lower overall performance in generalization and locality compared to other models. We hypothesize that this under-performance may be attributed to either the model's smaller size, resulting in less robust learned representations, or the fact that it was trained on a more limited dataset relative to larger, more recent models. Projection networks trained on Llama-2-7b and GPT2-XL representations exhibit comparable performance levels. Both models show a slight decrease in generalization and locality performance as the number of edits increases from 1000 to 2000, with minimal decline after that. For T5-small the performance is relatively stable up to 3000 edits after which a more pronounced decline is observed. 
+
+Examination of projection network behaviour reveals interesting patterns in generalization and locality failures based on the varying distances between training edits and their respective paraphrases and neighbours after the training of the projector network. The varying distances result in different thresholds for each edit, which can cause errors when the closest edit to a neighbouring example has a high threshold. To quantify these observations, we employed ROUGE scores in a comparative study of generalization outcomes.
+
+
+
+\section{Conclusion}
+
+In this paper, we proposed PENME an adapter-based model editing approach that utilizes a projection network trained via contrastive learning. PENME explicitly targets the lexical bias present in representations that causes misfiring of editing scope.
+Moreover, it used a memory-based storage system alongside the scoping mechanism for efficient edit retrieval. 
+Empirical evaluations demonstrated PENME's superior performance across varying levels of task complexity. On the zsRE dataset, It achieved impressive generalization and locality scores exceeding 0.90. Notably, when assessed on the more challenging Counterfact benchmark, the system maintained robust performance, attaining scores above 0.80 for both generalization and locality metrics. This performance on Counterfact is particularly significant given the benchmark's increased difficulty, underscoring PENME's efficacy.
+In the future, we plan to assess whether a projector, pretrained on a large dataset to maximize semantic information, could be used as a plug-and-play solution without requiring additional training. Moreover, we intend to expand PENME to encompass more scenarios, including long-form generation.
+
+
+
+

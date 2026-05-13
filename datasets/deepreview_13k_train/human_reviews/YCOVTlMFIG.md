@@ -1,0 +1,272 @@
+# $\text{Slerp}^{+}$: Spherical Linear Interpolation for Unified Compositional Retrieval
+
+- Decision: Reject
+- Scores: 6, 5, 8, 5, 3, 3
+
+## Abstract
+Zero-shot composed image/video retrieval is a challenging task that involves using a combination of a reference visual input and a relative caption as a query to search for target visual data. Earlier studies have treated composed image retrieval and composed video retrieval methods separately, potentially neglecting the benefits of integrating image-video-text representation learning.  In this paper, we consolidate these tasks into a single Composed \emph{Visual} Retrieval (CVR) task, which requires the composition of image and video samples with textual modifications using a unified retrieval model. Our principal insight is that the video modality can be effectively added to existing vision-language pretrained models. When integrated with the Spherical Linear Interpolation (Slerp) method previously proposed for Composed Image Retrieval (CoIR), we found that it results in an effective approach for solving the CVR task, which we called $\text{Slerp}^{+}$. Extensive experiments demonstrate $\text{Slerp}^{+}$'s superiority across various composed image and video retrieval benchmarks, including our newly proposed video benchmark. Notably, $\text{Slerp}^{+}$ mutually enhances image and video retrieval performance over single-modality models, underscoring its potential to transform the field of compositional visual retrieval.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4
+
+### Summary
+The paper presents a unified model for zero-shot composed image and video retrieval named Slerp+, aiming to simplify compositional retrieval without relying on supervised triplet annotations. The paper extends Slerp to generate joint embeddings that integrate visual and textual inputs effectively, aiming to enhance retrieval across image and video modalities. Slerp+ achieves improved performance across existing composed image and video retrieval tasks. The author also introduce a new video benchmark.
+
+### Strengths
+1. Unified Framework: This work  provides a simple yet effective solution that integrates image and video representations with text, improving both image and video composed retrieval performances. 
+2. Efficient Training Design: Slerp+ utilizes existing vision-language pre-trained models, with efficient adaptation via low-rank adaptation (LoRA) to avoid high computational costs.
+3. Experimental validation: The authors conduct extensive experiments on multiple benchmarks, offering robust evidence of Slerp+’s effectiveness.
+
+### Weaknesses
+The paper contribution builds on existing interpolation methods, and the paper’s novelty lies primarily in applying Slerp in a unified framework. It would be beneficial to see additional model adjustments that directly address the unique challenges of video-text retrieval. 
+
+While Slerp+ performs well across modalities, there may be challenges in scenarios where one modality (e.g., video-caption pairs) is limited or unbalanced in the dataset, potentially impacting the performance.
+
+The current ablation study covers frame selection, but it would be helpful to explore how different interpolation parameters in Slerp influence performance, particularly for more varied or longer video content. It would be good to see other fusion strategies beyond average and cross -attention.
+
+### Questions
+Please see the points under Weaknesses above.
+
+### Soundness
+3
+
+### Presentation
+3
+
+### Contribution
+3
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+5
+
+### Summary
+In this paper, the authors propose to consolidate the composed image retrieval and composed video retrieval into a single composed visual retrieval task, which develops a unified retrieval model for the image-video-text composition.
+Based on the existing Slerp method for composed image retrieval task, the authors further design a Slerp+ method for the unified task.
+The experimental results on existing and the newly proposed benchmarks demonstrate the superiority of the Slerp+.
+
+### Strengths
+1)	The idea of building a unified composed retrieval framework that integrates image, video, and text modalities is reasonable and interesting. The authors develop an extension of the Slerp method for this unified image-video-text composed visual retrieval task.
+2)	The authors introduce a new video evaluation benchmark based on Activitynet-captions dataset by incorporating more complex textual modifications, which is beneficial for fostering the development of compositional video retrieval task.
+3)	Experimental results on existing benchmarks and the proposed benchmarks demonstrate the effectiveness of the proposed method.
+
+### Weaknesses
+1)	About the unified task definition, the query is composed of either an image or video accompanied by modification text, how about composing a query simultaneously with a video, an image and a modification text? It seems the current task definition is only used for the unified training, the final test task is still composed image retrieval or composed video retrieval.
+2)	The training of the unified representation seems to be directly dependent on BLIP, including the network structure and loss functions. Except for simultaneously inputting image, video, and text as input, there is no significant difference. I am not sure if this paper provides enough novelty or insight for the current research filed.
+3)	Will the code and the developed video benchmark be made publicly available?
+
+### Questions
+Please try to address the weaknesses.
+
+### Soundness
+4
+
+### Presentation
+4
+
+### Contribution
+2
+
+---
+
+## Human Reviewer 3
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4
+
+### Summary
+This paper proposes Slerp+, a method for zero-shot Composed Visual Retrieval (CVR). CVR unifies composed image retrieval and composed video retrieval into a single framework. The proposed method uses a vision-language model (based on BLIP) trained on both image-caption and video-caption pairs concurrently. It then utilizes the Spherical Linear Interpolation (i.e. Slerp) to compose visual and textual embeddings during inference. The methods is evaluated on popular composed image retrieval and composed video retrieval  datasets and introduce a new, more benchmark called Activitynet-CoVR for the video retrieval part. Results show that the proposed method outperforms existing methods in both image and video retrieval tasks.
+
+### Strengths
+- the proposal to build a unified composed retrieval system with both image video and text is novel.
+
+- the paper is well written, well structured and experiments are well carried out. 
+
+- the use of Slerp makes the proposed approach simple and effective, achieving state of the art results on both composed image retrieval and composed video retrieval datasets.
+
+### Weaknesses
+- The extension to video is straightforward since the method does not propose any particular strategy that goes beyond taking frames from the videos (e.g. for instance no temporal aspect is explicitly considered in the model).
+
+- the use of Slerp seems to be the most important aspect of the resulting performance. The ablation regarding the use of this component is limited.
+
+- Limited discussion of limitations or weaknesses of the proposed method.
+
+Typos:
+- Check the use of CoVR vs CVR terminology
+
+### Questions
+- the Slerp fusion seems to be the most important reason of the resulting performance. Comparison with the application of this component to other methods is limited to that of Slerp + TAT. It would be interesting to see other ablation studies with Slerp.
+
+- are the method and Activitynet-CoVR going to be released?
+
+### Soundness
+3
+
+### Presentation
+4
+
+### Contribution
+3
+
+---
+
+## Human Reviewer 4
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4
+
+### Summary
+In this work, the authors propose a new task Composed Visual Retrieval that utilize image-video-text pairs to train a unified model in image and video retrieval. It further combines visual and language modality in a late-fusion manner using Spherical Linear Interpolation(Slerp). The method in this paper shows competitive results on existing composed image and video as well as their newly introduced video benchmarks.
+
+### Strengths
++ The structure of the article is clear and logical. Especially in the experimental part, the authors clearly show the results of the ablation experiments and the corresponding analysis.
+
++ The proposed method shows excellent performance in several datasets. For example, it outperforms the baseline method by 4.69% and 7.88% on the WebVid-CoVR-Test set and Activitynet-CoVR set, respectively.
+
+### Weaknesses
+- The author is advised to clarify the differences between the new task Composed Visual Retrieval and existing composed retrieval task. In related work, the authors focus on the current state of research and challenges in CoIR, while the research on CoVR is only one. We are curious about the detailed analysis of the differences between CoIR and CoVR, as well as why this new task is needed. Alternatively, can authors intuitively explain what new issues need to be considered when retrieving videos compared to images? What are the characteristics of video and image modalities that inspire authors to combine them for training? Otherwise, this would not justify the author's statement “it is important to note that the CoIR and CoVR tasks have so far been isolated from each other, potentially overlooking the overall effectiveness that a unified retrieval system could offer”.
+
+- The authors are advised to elaborate on the unified training of image-video-text, including how to fine-tune the text encoder to enhance composed embeddings, and how the complementarity of images and videos is reflected in the training process. The authors mention in the contribution that the approach in this paper utilizes Spherical Linear Interpolation(Slerp) to produce aligned embeddings for composed retrieval, but this is not clearly reflected in the methods section.
+
+- The authors' key rationale for introducing image-video-text into zero-shot composed retrieval is that image and video modalities can complement each other, but there is no analysis of the rationale. In addition, I can't see the changes in the features of the method trained based on image-video-text when it is used in CoIR and CoVR. In other words, how can the authors prove that the introduced unified training of image-video-text can complement each other rather than augment the data view. I think the authors should introduce attention map or other forms to prove that the method in this paper in order to make the point of this paper convincing.
+
+### Questions
+All the doubts are mentioned in the weaknesses. It should be emphasized that the authors should focus on explaining the necessity of the new task Composed Visual Retrieval. In addition, authors should prove in more forms that image and video joint learning indeed allows both modalities to complement each other, as this is the core point of the paper.
+
+### Soundness
+2
+
+### Presentation
+3
+
+### Contribution
+2
+
+---
+
+## Human Reviewer 5
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4
+
+### Summary
+The paper presents a model for zero-shot composed image and video retrieval that leverages Spherical Linear Interpolation (Slerp). Slerp is aimed  to combine image and text representations to obtain an intermediate embedding, to serve as text and image composition. The authors also propose pre-training the base multimodal model jointly on image-text and vide-text datasets to enhance performance. Additionally, they introduce a new benchmark designed for CoVR.
+
+### Strengths
+The performance results presented in the paper are high, surpassing those in some recent publications.
+
+### Weaknesses
+*Soundness:*
+
+1.	Why a linear interpolation between the text and image yields the composition? This is a fundamental claim that neither explained nor justified in the paper.
+2.	The main idea is that SLERP will act as a composing model, therefore no training is needed, while previous approaches train a model for that. As I see it, in CoIR the text acts as a *shift* encoder that takes the input image to the target image. 
+3.	I believe that Training with two types of datasets is equivalent to adding more data to the training and that is the major cause for a better pre-trained model and higher results.
+4.	The results in Table 1 are inconsistent with the major claim of the paper. A model that has not been trained on composing (Zero-shot from text-image/video matching), succeeds better that a composing finetuned one. The same goes for Table 2, ZS is better than FT.  This means that there is a bias in the data (see "modality redundancy" in [1]).  Table 1 also lacks results for the same model using zero-shot with Avg. versus Slerp (note: Avg. is for BLIP and Slerp is for X-CLIP, which are not directly comparable).
+5.	For CoVR results, they further use WebVid dataset for training. Although they don’t use CoIR/CoVR triplets, yet it is from the same domain, which somewhat reduces the impact of zero-shot setting experiment. In zero-shot, the aim is often to evaluate the model on other domains. I suggest to at least clarify this point in the paper.
+6.	In terms of testing CoVR I suggest the authors to consider using random sampling of frames, as there is often a strong bias in video datasets, as studied in [2].
+7.	With respect to the new dataset, how do the authors ensure the target's uniqueness, addressing the well-known issue of “false-negatives” in the benchmark? I believe, there should be some analysis to estimate this issue to allow a reliable benchmark.
+
+*Presentation*:
+
+The introduction and Related work are missing important details:
+1.	I believe that there should be a description of Slerp in the introduction, and explain how is it used in the paper (in general), for what purpose and why is it better than other zero-shot approaches.
+2.	The related work section lacks important studies, such as other zero-shot methods, like iSEARLE: Improving Textual Inversion for Zero-Shot Composed Image Retrieval (ICCV 2023) and Prompting Vision-Language Fusion for Zero-Shot Composed Image Retrieval (ACML 2024) — though the latter was published recently. It should also cover methods that automatically generate triplets, such as Data Roaming and Quality Assessment for Composed Image Retrieval (AAAI 2024) and CoVR-2: Automatic Data Construction for Composed Video Retrieval (TPAMI 2024). The paper should discuss these works for a more comprehensive survey, as they are somewhat related.
+
+*Weaknesses*:
+
+Unfortunately, there are several issues with the rationale of this paper, reflected in the inconsistent results that do not fully support its claims. The main performance gains appear to come from training on video and image captions in a BLIP-style approach, while other aspects closely resemble the work by Y. Kyun Jang et al., Spherical Linear Interpolation and Text-Anchoring for Zero-Shot Composed Image Retrieval (arXiv, 2024), making this contribution largely incremental. Additional concerns are noted above.
+
+[1] Matan Levy etal . Data roaming and early fusion for composed image retrieval, AAAI 2024.
+
+[2] Jie Lei etal , Revealing Single Frame Bias for Video-and-Language Learning, https://arxiv.org/abs/2206.03428
+
+### Questions
+1.	There are no details provided about the FashionIQ benchmark utilized, apart from indicating that it is the validation set. Why isn't the test set being used instead?
+2.	How the description of Fig. 2 is different from BLIP, other than adding video (average encoding of several frames)?
+3.	How the Slerp value t was set? Can you provide an intuition about it?
+4.	In the method: What was the exact cross-attention used? I am afraid this is not described in the paper.
+
+### Soundness
+1
+
+### Presentation
+2
+
+### Contribution
+1
+
+---
+
+## Human Reviewer 6
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+5
+
+### Summary
+This paper presents a unified zero-shot Composed Visual Retrieval approach, introducing a simple yet effective method for achieving composed video retrieval and composed image retrieval. The proposed method's effectiveness is validated across various benchmarks for composed image and video retrieval.
+
+### Strengths
+1. The idea of unifying zero-shot composed retrieval for video and images in this paper is both interesting and meaningful. 
+2. The writing in this paper is clear and easy to understand, making it accessible for readers.
+
+### Weaknesses
+1. This paper is incremental in two aspects. First, regarding the task setup, the authors do not clearly articulate the task differences between composed video retrieval and composed image retrieval, which obscures the importance of unifying these two tasks. Second, at the methodological level, what is the unique incremental contribution of the proposed method compared to Slerp? 
+
+2. The authors introduce Spherical Linear Interpolation into the CVR task; however, they lack an analysis of the rationale for this method's introduction, as well as mathematical proof, which makes the motivation for the proposed method unclear.
+
+3. The experiments in this paper are insufficient. The comparison methods in Tables 1 and 2 do not represent strong baselines. Is it possible to conduct a simple adaptation of the latest zero-shot composed image retrieval methods (such as testing performance by sampling just one frame)?
+
+### Questions
+Please refer to the Weaknesses section and address my questions regarding the motivation for the task and method, as well as the experiments. It is important to note that the introduction of Spherical Linear Interpolation, a concept commonly used in graphics, is interesting; however, the authors need to provide justification for its relevance.
+
+### Soundness
+3
+
+### Presentation
+2
+
+### Contribution
+2

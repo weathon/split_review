@@ -1,0 +1,502 @@
+\title{Mixture of Attentions For Speculative Decoding}
+
+\begin{abstract}
+The growth in the number of parameters of Large Language Models (LLMs) has led to a significant surge in computational requirements, making them challenging and costly to deploy.
+Speculative decoding (SD) leverages smaller models to efficiently propose future tokens, which are then verified by the LLM in parallel.
+Small models that utilise activations from the LLM currently achieve the fastest decoding speeds.
+However, we identify several limitations of SD models including the lack of on-policyness during training and partial observability. 
+To address these shortcomings, we propose a more grounded architecture for small models by introducing a Mixture of Attentions for SD.
+Our novel architecture can be applied in two scenarios: a conventional single device deployment and a novel client-server deployment where the small model is hosted on a consumer device and the LLM on a server.
+In a single-device scenario, we demonstrate state-of-the-art speedups improving EAGLE-2 by 9.5\% and its acceptance length by 25\%.
+In a client-server setting, our experiments demonstrate: 1) state-of-the-art latencies with minimal calls to the server for different network conditions, and 2) in the event of a complete disconnection, our approach can maintain higher accuracy compared to other SD methods and demonstrates advantages over API calls to LLMs, which would otherwise be unable to continue the generation process.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Auto-regressive inference with LLMs has become quite cost-prohibitive due to the increasing parameter count of recent transformer-based LLMs \citep{vaswani2017attention}. Different types of (usually orthogonal) solutions have been proposed to address this challenge, e.g. Mixture of Experts \citep{jacobs1991adaptive}, Flash Attention \citep{dao2022flashattention}, Model Quantization and Distillation \citep{polino2018model}, Linear/Sparse Self-Attention \citep{zhang2021sparse}, Tensor Parallelism \citep{shoeybi2019megatron} and others. In this work, we focus on a recent LLM acceleration technique called Speculative Decoding, which leverages efficient models (smaller but less capable) to draft future tokens, which are verified by the LLM (more capable but much less efficient) in parallel \citep{leviathan2023fast}. 
+
+The most recent state-of-the-art SD methods, like EAGLE \citep{li2024eagle} and MEDUSA \citep{cai2024medusa}, leverage activations from the LLM.
+However, those methods have some architectural limitations including partial observability and the lack of on-policyness.
+Partial observability occurs when the small (draft) model lacks complete information about the state of the LLM, leading to suboptimal predictions.
+The lack of on-policyness during training arises because the small model is often trained under ideal conditions, assuming perfect inputs. This does not reflect the real-world scenario where the small model generates some inputs.
+The longer we draft new tokens using only the small model, the bigger the distribution shift from the training setting.
+These limitations can degrade the performance and reliability of speculative decoding.
+
+To address these challenges, we propose a novel architecture for speculative decoding that enhances the small model's ability to accurately predict future tokens and aligns its training more closely with the inference process. Our architecture introduces several key improvements, including Layer Self-Attention (LSA) to mitigate partial observability, Cross-Attention (CA) to improve on-policyness and training efficiency, and a flexible Target Layer Inference (TLI) mechanism to balance computational efficiency and prediction accuracy. 
+We evaluate our approach in the standard single-device setting where we demonstrate state-of-the-art speedups.
+
+Furthermore, the SD paradigm is also ideal in the following scenario a) the model size is limited by some external factor e.g. the computational capabilities of a client device, and b) we can assume access to a larger model e.g. an LLM hosted on a server. Under this paradigm, the goal is to minimise server-side inference as well as to maintain high accuracy in the event of a total disconnection.
+This is an important consideration because it could pave a way for serving LLMs on edge devices, enabling them to generate responses offline while leveraging the capabilities of the large model.
+To this end, we extend our methodology to a client-server scenario.
+In this setting, we demonstrate state-of-the-art latency and minimal server calls under various network conditions (4G, 5G). Our method maintains a higher accuracy in the event of a disconnection, making it a preferred choice over independent small models or API calls that would be unable to continue generation.
+
+\paragraph{Contributions}
+We introduce a Mixture of Attentions architecture for Speculative Decoding that addresses current limitations such as partial observability as well as enabling efficient (more on-policy) training while being auto-regressive.
+We reuse additional activations from the LLM in the small model, enabling a trade-off between drafting speed and response quality. 
+We conduct extensive experiments to demonstrate the effectiveness of our approach. 
+Compared to EAGLE-2, we show a 9.5\% decoding speedup with a 25\% higher acceptance rate in a single-device scenario and a 84\% speedup with a 53\% higher acceptance rate in a client-server scenario.
+Finally, we propose a new framework for LLM serving in speculative client-server settings and show its effectiveness.
+
+
+
+\section{Background}
+
+We first present the background knowledge required for the remainder of the paper, i.e. the decoding mechanisms of LLMs as well as the drafting + verification techniques that ensure correct generation. 
+
+\subsection{LLM Decoding}
+Decoding refers to the process by which LLMs generate tokens in response to input queries. This generation is typically done auto-regressively, where each new token $y_t$ is sampled from the LLM's distribution, conditioned on both the query and the preceding tokens $y_{<t}$. We explore decoding from the perspective of dynamic systems, providing a foundation for developing new decoding mechanisms that combine large and small models \citep{kong2024aligninglargelanguagemodels}. The internal workings of LLMs can be best understood from a dynamic system perspective, which evolves as tokens are generated. Given a large model \bigLM, we can describe the state transition model of vanilla decoding as: 
+\begin{equation} \label{eq:dynadeco}
+    \bm{h}_{\leq t+1}, \bm{o}_{t+1} = f_\text{Large}(\bm{h}_{\leq t}, \textit{token\_embed}(y_t)),\hspace{0.5cm} 
+         y_{t+1} \sim \text{Softmax}(\textit{LM\_head(}\bm{o}_{t+1})),
+\end{equation}
+
+where $\bm{h}_{\leq t}$ represents the key and value tensors of every layer until the current time-step $t$, $y_t$ is the most recent token and $y_{t+1}$ is the next token, which is sampled from a softmax distribution. Furthermore, \textit{token\_embed} is a lookup table, it assigns an embedding to a particular token of the vocabulary $\mathcal{V}$.
+\textit{LM\_head} is a projection from the embedding size to the vocabulary size $|\mathcal{V}|$. Finally, $f_\text{Large}(\cdot)$ is the function aggregating all decoder layers of \bigLM and $\bm{o}_{t+1}$ is the activation of the final decoder layer. 
+With this, the state of the dynamic system is composed of $(\bm{h}_{\leq t}, {y}_t)$, the minimal information needed to sample the next token from \bigLM.
+
+\subsection{Speculative Decoding}
+
+Some of the earliest work on speculative decoding was introduced by \citet{stern2018blockwise}, later extended to non-greedy sampling \citep{leviathan2023fast}. These methods are motivated by the prohibitive cost of auto-regressive generation with \bigLM that could be alleviated by using a draft model \smallLM that can more efficiently generate tokens that do not require the full capability of \bigLM. These hypotheses, commonly referred to as drafts, can then be verified in parallel with \bigLM using rejection sampling \citep{leviathan2023fast}, i.e. discard all tokens after the first mismatch. We follow the standard draft and verification cycle that iterates over the following two steps until the "end-of-sequence" token or the maximum sequence length has been reached. 
+
+\begin{enumerate}
+    \item \smallLM generates new tokens $y_{t + 1}, \cdots, y_{t + K}$ where $K$ is the length of the draft sequence, auto-regressively \citep{xia2023speculative,li2024eagle} or in parallel \citep{ankner2024hydra}. The number of tokens $K$ is typically fixed, which was the standard approach until recently when dynamic $K$ was proposed \citep{nair2024tandem,mamou2024accelerating,huang2024specdec++}. 
+    \item Verify $K$ drafted tokens in a single forward pass with \bigLM. Verification uses either greedy (exact) matching \citep{xia2023speculative}, speculative sampling \citep{zhou2023distillspec,leviathan2023fast} or 'approximate' verification \citep{stern2018blockwise} which relaxes the acceptance criteria but does not guarantee \bigLM's output distribution. In all cases, after the first rejection, all subsequent/future tokens are typically discarded. 
+\end{enumerate}
+
+When the drafting of $y_{t + 1}, \cdots, y_{t + K}$ is done auto-regressively, token by token, we refer to this strategy as \textit{chain drafting}.
+Several works \citep{cai2024medusasimplellminference,li2024eagle} extended this method to \textit{tree drafting} for additional optimisation. 
+In this case, multiple tokens $y_{t+i}$ can be proposed for every future position $i$. Verification is performed with Tree Attention \citep{miao2024specinfer} to efficiently handle multiple branching paths proposed by tree drafting.
+Consequently, this leads to an increase in acceptance lengths and reduces the number of calls to \bigLM compared to chain drafting.
+
+In this paper, we employ tree drafting from EAGLE-2 \citep{li2024eagle} to construct trees with a variable structure.
+Starting from the root node, we expand the $B$ most probable tokens from the model \smallLM$(y_{t+1}|\cdot)$.
+Then, for a fixed depth $D$, we recursively perform the following steps: for each existing branch, we compute the joint probability $\prod_{t \in D}\ \mathcal{M}_\text{Small}(y_{t}| y_{t-1}, \cdots)$ of their $B$ child tokens, leading to $B^2$ expansions as we have $B$ branches, each with $B$ children. From the $B^2$ expansions, we select the top $B$ branches based on their joint probabilities for the next tree layer expansion.
+Upon reaching the maximum depth, we retain up to $m$ tokens from the total $B + (D - 1) B^2$ nodes, selecting those with the highest joint probability for verification.
+
+\subsection{Architecture of \smallLM}
+
+Speculative decoding architectures broadly fall into two categories, \textit{independent} and \textit{self-drafting}. Independent drafters are typically smaller versions of \bigLM from the same model family \citep{li2024nearest,zhao2024ouroboros,he2023rest} while self-drafting methods leverage either a subset of \bigLM and/or newly initialised parameters \citep{ankner2024hydra,cai2024medusa}.
+
+Our contribution is built on EAGLE \citep{li2024eagle}, a \textit{self-drafting} architecture which has shown the best results on the Spec-Bench \citep{xia2024unlocking} leaderboard so far. The drafter reuses the \textit{token\_embed} and \textit{LM\_head} parameters of \bigLM (\ref{eq:dynadeco}).
+It takes as input the ground-truth activations of the last decoder layer of \bigLM, $\bm o_1, \cdots, \bm o_{t}$ and the tokens of the sequence $y_1, \cdots, y_{t}$ to predict the next activations $\bm{\hat{o}}_{t+1}$, which is passed to the \textit{LM\_head} to predict the next token distribution:
+\begin{equation*}
+    \bm{\hat{o}}_{t+1} = \mathcal{M}^{\text{EAGLE}}_\text{Small}((\bm o_1, \cdots, \bm o_{t}),\ \textit{token\_embed}(y_1, \cdots, y_{t})), \ 
+         \hat{y}_{t+1} \sim \text{Softmax}(\textit{LM\_head(}\bm{ \hat{o}}_{t+1}))
+\end{equation*}
+The process is repeated by appending $\bm{\hat{o}}_{t+1}, \hat{y}_{t+1}$ to the inputs to auto-regressively draft tokens $\hat{y}_{t+2}$.
+
+
+\section{Methodology}
+
+
+\subsection{Mixture of Attentions}
+
+We begin by defining important properties of \smallLM followed by detailed architectural choices.
+
+\subsubsection{Partial Observability}
+
+In Markov Decision Processes \citep{Kaelbling1998POMDP}, partial observability is a common challenge where the agent does not have enough information about the true underlying state to take optimal decisions.
+This limitation can significantly degrade the agent's performance. Several approaches have been proposed to mitigate this, e.g., adding additional previous observations \citep{mnih2015human}. In drafting, it is important not to suffer from partial observability to draft future tokens more accurately. We extend this notion in our context with the following:
+
+\begin{property}[Partial observability]\label{prop:partial}
+Given a ground truth function $F: \mathcal{X} \to \mathcal{Z}$, a drafter function $f : \mathcal{Y} \to \mathcal{Z}$ and an observation function $g : \mathcal{X} \to \mathcal{Y}$, such that for any $x \in \mathcal{X}$, f(g(x)) models F(x), $f$ suffers from partial observability if $g$ is non-injective: $\exists (x, x') \in \mathcal{X}^2, x \neq x', g(x) = g(x')$.
+\end{property}
+
+We can observe that the EAGLE drafter suffers from partial observability when $F$ is $f_\text{Large}$, $f$ is $\mathcal{M}^{\text{EAGLE}}_\text{Small}$ and $\bm{o}_1, \cdots, \bm{o}_t = g(\bm{h}_{\leq t}, (y_1, \cdots, y_t))$. In other words, $\bm{o}_1, \cdots, \bm{o}_t$ is only a partial observation of the true state $(\bm{h}_{\leq t}, y_{t})$ of the dynamic system (\ref{eq:dynadeco}), hindering the capacity of \smallLM to predict the right tokens of \bigLM.
+
+\paragraph{Layer Self-Attention}
+Aiming to alleviate this, our new architecture takes as input the state of the dynamic system (\ref{eq:dynadeco}). However, $\bm{h}_{\leq t}$ is a large tensor of shape $(T, L, 2E_{kv})$ where $T$ is the sequence length, $L$ the number of layers in \bigLM, and $E_{kv}$ the embedding size of the key and values. 
+Therefore, we introduce Layer Self-Attention (LSA) followed by a mean aggregation operation to reduce its dimension to $(T, 2E_{kv})$ and extract the most relevant token information from every layer (Fig \ref{fig:main_figure}).
+Self-attention is performed over the layer dimension and each token is treated independently in this layer.
+During drafting, we have access to the past key values of all the layers, therefore, the attention mask of LSA is bidirectional/full, see Figure~\ref{fig:masks}.
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=.98\linewidth]{img/arch_single.pdf}
+    \caption{A schematic overview of the mixture of attentions information flow. Layer Self-Attention and mean aggregation are called \textit{only once per drafting cycle}, i.e after each verification. 
+    New tokens are drafted auto-regressively using Self-Attention, updating only the Cross-Attention layer query.}
+    \label{fig:main_figure}
+\end{figure}
+
+\subsubsection{Lack of on-policyness}
+
+Discrepancies between training and testing scenarios arise because, during training, transformer models are typically conditioned on ground-truth sequences, assuming that all previous inputs are correct. If this assumption seems unproblematic for the standard training of transformers, assuming it for training \smallLM in speculative-decoding scenarios is much more delicate. It is known that some of the previous inputs are generated directly from \smallLM, therefore much less accurate. The more tokens we predict with \smallLM only, the more error accumulation we can expect. To alleviate this, EAGLE adds uniform noise into its observations $(\bm{o}_1, \cdots, \bm{o}_t)$ at training time, but this is not ideal. 
+
+\mz{In order to train \smallLM optimally, we need to ensure that its training and inference conditions are closely matched. Specifically, this means training \smallLM as if some of the previous tokens were generated by itself. Additionally, we should account for situations where the activations from \bigLM are not available, i.e. during the drafting cycle.
+This approach is called \textit{on-policy} training. In on-policy training, the data used for training is generated by the same policy (or model) that is currently being trained. 
+For example, when we train a transformer using next-token prediction on a static dataset, this is considered \textit{off-policy} because the data doesn't change based on the model's decisions. However, if we mix this static dataset with data generated by the model itself during training, we move towards a more \textit{on-policy} approach.
+Similarly, if the model won't have access to certain information, e.g. the activations of \bigLM during generation, then always training \smallLM with that information would also be considered \textit{off-policy}. 
+
+However, on-policy training is very costly because we would need to generate from the model during training. }
+To formalise this limitation, we introduce the concept of T-step boundedness:
+
+\begin{property}[T-step bounded]\label{prop:TStepBound}
+A drafter $f$ is said to be \emph{$T$-step bounded} if, in a single forward pass, it can predict up to $T$ future tokens without additional input from \bigLM, i.e.,
+$f(y_1, y_2, \ldots, y_t) \rightarrow (\hat{y}_{t+1}, \hat{y}_{t+2}, \ldots, \hat{y}_{t+T}).$
+\end{property}
+
+This property is important to efficiently train the drafter. For instance, the EAGLE drafter is 1-step bounded. If one wanted to perform prediction at time $t+2$, two forward passes would be required due to the auto-regressive layer that requires the previous $\bm{\hat{o}}_{t+1}$ as input, which would be very costly to train on-policy.
+By contrast, a drafter that is $T$-step bounded with $T > 1$ can predict multiple future tokens within a single forward pass.
+
+\paragraph{Cross-Attention} 
+In order to make our drafter partly $T$-step bounded with $T > 1$, the main component of our architecture is a Cross-Attention (CA) layer where the query comes from the tokens and the key and values come from \bigLM activations.
+More precisely, the key and values come from the output of LSA.
+Having input queries for time $t+1$ to $t+K$ coming into the CA layer and keys-values from \bigLM only up to time $t$ effectively means the CA layer is $K$-step bounded.
+This allows us to train the CA layer more \textit{on-policy} efficiently because it simulates what would happen during generation: we only have access to the activations from \bigLM up to time $t$ but still have to make prediction for up to time $t+K$.
+Note that it is still not fully \textit{on-policy} yet as the input queries for time $t+1$ to $t+K$ are not assumed to be generated from \smallLM.
+During training, multiple $K$ are sampled to simulate different lengths of accepted drafts by changing the CA layer mask. 
+For instance, in Figure~\ref{fig:masks}, we have $K=4$ followed by $K=3$.
+On the contrary, during generation, we do not apply masking as we want to let \smallLM attend all the currently available activations of \bigLM.
+
+\paragraph{Self-Attention}
+
+In order to motivate the introduction of a self-attention (SA) layer, we start by observing that the cross-attention layer is input-independent (\ref{prop:input_independance}) w.r.t. the input queries, i.e
+one input query does not influence the results of another query.
+
+\begin{property}[Input-independence]\label{prop:input_independance}
+A layer f is input-independent if for any choice of $n$ inputs $\bm x = (x_1, \cdots, x_n)$, we have $f(\bm x) = (f(x_0), \cdots, f(x_n))$.
+\end{property}
+
+Therefore, if the queries of the CA layer came directly from the embedded tokens $y_1, \cdots, y_t$, \smallLM would not have been aware of previously drafted tokens. 
+It would only know the previous token treated by \bigLM and the most recent $y_t$. 
+But, in order to make accurate predictions, \smallLM needs to be aware of the previously drafted tokens.
+Hence, we introduce a causal self-attention layer on the queries to mitigate this problem, shown in Figure \ref{fig:main_figure} and summarised in Table~\ref{tab:properties}.
+
+\begin{table}[h]
+    \centering
+    \caption{Comparison of the properties of our new architecture.}
+    \label{tab:properties}
+    \begin{tabular}{lcccc}
+        \toprule
+         \smallLM & Autoregressive & $T$-step bounded & More on-policy & Observability  \\
+        \midrule
+        Ours & SA layer & variable $T$ for CA layer & CA \& LSA layers & LSA-enhanced \\
+        EAGLE-2 & \cmark & 1 & \xmark & partial \\
+        Medusa & \xmark & fixed $T$ & \xmark & partial \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{figure}
+    \hspace{0.07\textwidth}
+    \begin{minipage}{0.3\textwidth}
+        \begin{tikzpicture}[scale=0.25, transform shape]
+        \foreach \i in {1,...,10} {
+            \foreach \j in {1,...,10} {
+    			\fill[orange] (\i-1,-\j+1) rectangle (\i-1+1,-\j+1-1);
+                \draw (\i-1,-\j+1) rectangle (\i-1+1,-\j+1-1);
+            }
+        }
+        \node at (5, -11) {\fontsize{30}{30}\selectfont model layers};
+        \node at (-0.5, -9.5) {\fontsize{30}{30}\selectfont $L$};
+        \node at (9.5, 0.5) {\fontsize{30}{30}\selectfont $L$};
+        
+        \node at (5., -12.5) {\fontsize{30}{30}\selectfont\bf Layer Self-Attention};
+        \end{tikzpicture}%
+    \end{minipage}
+    \begin{minipage}{0.3\textwidth}
+        \begin{tikzpicture}[scale=0.25, transform shape]
+        \foreach \i in {1,...,10} {
+            \foreach \j in {1,...,10} {
+    			\pgfmathparse{(\i <= \j ) || (\i>=0 && \i <=7 && \i <= \j && \j >= 7 )?int(1):int(0)}
+    			\ifnum\pgfmathresult>0
+    				\fill[orange] (\i-1,-\j+1) rectangle (\i-1+1,-\j+1-1);
+    			\else
+                    \fill[white] (\i-1,-\j+1) rectangle (\i-1+1,-\j+1-1);
+    			\fi
+                \draw (\i-1,-\j+1) rectangle (\i-1+1,-\j+1-1);
+            }
+        }
+    
+        \node at (1.5, -11) {\fontsize{30}{30}\selectfont prompt};
+        \node at (6.5, -11) {\fontsize{30}{30}\selectfont response};
+
+        \node at (-0.5, -9.5) {\fontsize{30}{30}\selectfont $T$};
+        \node at (9.5, 0.5) {\fontsize{30}{30}\selectfont $T$};
+
+        \node at (5, -12.5) {\fontsize{30}{30}\selectfont\bf Self-Attention};
+    
+        \draw[very thick] (3, 0) -- (3, -10.4);
+    
+        \end{tikzpicture}%
+\end{minipage}
+    \begin{minipage}{0.3\textwidth}
+        \begin{tikzpicture}[scale=0.25, transform shape]
+            \foreach \i in {1,...,10} {
+                \foreach \j in {1,...,10} {
+        			\pgfmathparse{(\i>=0 && \i <=3 && \i <= \j ) || (\i>=0 && \i <=7 && \i <= \j && \j >= 7 )?int(1):int(0)}
+        			\ifnum\pgfmathresult>0
+        				\fill[orange] (\i-1,-\j+1) rectangle (\i-1+1,-\j+1-1);
+        			\else
+                        \fill[white] (\i-1,-\j+1) rectangle (\i-1+1,-\j+1-1);
+        			\fi
+                    \draw (\i-1,-\j+1) rectangle (\i-1+1,-\j+1-1);
+                }
+            }
+        
+            \node at (3, -11) {\fontsize{25}{25}\selectfont calls \bigLM};
+            \node at (8, -11) {\fontsize{25}{25}\selectfont calls \bigLM};
+            \node at (5.1, -12.5) {\fontsize{30}{30}\selectfont\bf Cross-Attention};
+
+            \node at (-0.5, -9.5) {\fontsize{30}{30}\selectfont $T$};
+            \node at (9.5, 0.5) {\fontsize{30}{30}\selectfont $T$};
+        
+            \draw[very thick] (3, 0) -- (3, -10.4);
+            \draw[very thick] (7, 0) -- (7, -10.4);
+        
+        \end{tikzpicture}
+    \end{minipage}\hspace{0.01\textwidth}
+    \caption{\textbf{Layer Self-Attention}: \bigLM activations are transposed so that attention is computed over the layer dimension in order to aggregate token activations across layers. \textbf{Self-Attention:} The first 3 tokens represent the prompt, speculative decoding starts at token 4. \textbf{Cross-Attention:} Tokens 4 to 7 only attend to the prompt while tokens 8 to 10 attend to the first 7 tokens once \bigLM was called for the second time allowing \smallLM to use the activations from the newly verified tokens.}
+    \label{fig:masks}
+\end{figure}
+
+\subsection{Target Layer Inference}
+Previous work assumed that the final hidden layer before \textit{LM\_head} was the most appropriate target (activations) \smallLM should predict.
+However, we challenge that assumption by hypothesising that targeting a deeper \bigLM layer may be more advantageous in terms of draft quality.
+We thus decompose the dynamic system (\ref{eq:dynadeco}) layer-by-layer by introducing $l$ as the (superscript) layer index:
+\begin{equation*}
+    \begin {aligned}
+         & \bm{o}^1_{t+1} = \textit{token\_embed}(y_t),\hspace{2.5cm}  \bm{h}^l_{\leq t+1}, \bm{o}^{l+1}_{t+1} = f^l_\text{decoder}(\bm{h}^l_{\leq t}, \bm{o}^l_{t+1}), \\
+         & y_{t+1} \sim \text{Softmax}(\textit{LM\_head(}\bm{o}^{L + 1}_{t+1})) \hspace{2.95cm} l=1, \dots, L                  
+    \end{aligned}    
+\end{equation*}
+where $f^l_\text{decoder}$ is the decoder layer of \bigLM at layer $l$.
+The state of this new dynamic system is composed of $(\bm{o}^l_{t+1}, \bm{h}^{< l}_{\leq t + 1}, \bm{h}^{l\ge}_{\leq t})$.
+We observe that to perfectly predict $\bm{o}^{L + 1}_{t+1}$, it is sufficient to perfectly predict $\bm{o}^{L}_{t+1}$ and \textit{reuse} the $f^L_{\text{decoder}}$ of \bigLM and the already computed KV cache $\bm{h}^L_{\leq t}$ of the layer $L$ at time $t$.
+The same recursive reasoning can be made to predict $\bm{o}^{L}_{t+1}$ from $\bm{o}^{L - 1}_{t+1}$, etc.
+We assume (and later show) that predicting $\bm{o}^{l}_{t+1}$ is always easier than predicting $\bm{o}^{k}_{t+1}$ for $l < k$ due to $\bm{o}^{l}_{t+1}$ undergoing fewer layer transformations.
+Hence, we introduce a new hyperparameter $N$ to refer to the target layer $\bm{o}^{L+1-N}$ that the \smallLM should predict.
+When $N > 0$, the $N$ last layers of \bigLM (kept frozen during training) and their KV cache are used to output $\bm{o}^{L+1}$.
+Henceforth, we use notation (\textbf{$N=l$}) where $l$ is an integer, to denote the target layer for inference. 
+We can now provide the equation describing our $\mathcal{M}^{\text{Ours}}_\text{Small}$ for a given $N$ assuming $t$ was the last time we verified with \bigLM:
+\begin{equation*}
+    \begin {aligned}
+         \bm{\hat{o}}^{L+1-N}_{T+1} &= \mathcal{M}^{\text{Ours}}_\text{Small} (\bm{h}_{\leq t} , \textit{token\_embed}(y_1, \cdots, y_t, \hat{y}_{t+1}, \cdots , \hat{y}_T) ), \\
+         \hat{\bm{h}}^l_{T+1} , \bm{\hat{o}}^{l+1}_{T+1} & = f^l_\text{decoder}((\bm{h}^l_{\leq t}, \bm{\hat{h}}^l_{>t, \leq T} ),  \bm{\hat{o}}^l_{T+1}), \hspace{1cm} l=L-N, \dots, L, \\
+         \hat{y}_{T+1} &\sim \text{Softmax}(\textit{LM\_head(}\bm{\hat{o}}^{L + 1}_{T+1})).
+    \end{aligned}    
+\end{equation*}
+
+\subsection{Loss} 
+Let \smallLM be parameterised by $\bm\theta$, we use a similar training loss as EAGLE, i.e. a reverse-KL loss, shown to be more suitable for distillation \citep{gu2024minillmknowledgedistillationlarge}, with a Smooth-L1 loss $\mathcal{L}$ between the predicted activations of the \smallLM $\bm{\hat{o}}^{L+1-N}$ and the target one obtained from \bigLM: 
+\begin{equation} \label{eq:loss}
+    \arg \min_{\bm\theta} \ \lambda_0 \text{KL}[\smallLMMath(\bm\theta) || \bigLMMath] + \lambda_1 \mathcal{L}\left(\bm{\hat{o}}^{L+1-N}, \bm{o}^{L+1-N}\right).
+\end{equation}
+To keep the training lightweight, we do not generate from \bigLM or \smallLM during training.
+This loss is only defined over the response part of the prompt of a fixed training dataset.
+
+
+
+\section{Experiments}
+
+
+
+In all experiments, we use \textit{LLama3-8B-Instruct} \citep{dubey2024llama3herdmodels} as \bigLM.
+We train \smallLM on the Ultrachat dataset \citep{ding2023enhancing} without a system prompt and we do not assume that we know the system prompt at test time. \bigLM is trained with the standard Llama3-Instruct chat template.
+Ultrachat is composed of around 200k prompts with around 240M tokens using the LLama3 tokenizer.
+We use multiple test datasets for generation including various tasks such as reasoning, code generation, multi-turn conversation and summarisation.
+We notably relied on the SpecBench benchmark \citep{xia2024unlocking} and the following datasets: MT-Bench \citep{zheng2023judging}, HumanEval \citep{chen2021codex}, GSM8K \citep{cobbe2021gsm8k}, Alpaca \citep{alpaca}, CNN/Daily Mail \citep{nallapati2016abstractive} and Natural Questions \citep{kwiatkowski2019natural}.
+We compare our method to EAGLE-2 and an independent distilled \smallLM of similar size (denoted "Independent").
+In order to train the EAGLE model, we assume $N=0$ in the distillation loss (\ref{eq:loss}).
+The independent \smallLM leverages the \textit{token\_embed} and \textit{LM\_head} parameters of \bigLM with only the decoder layers trained using an identical distillation loss (\ref{eq:loss}) and $\lambda_1 = 0$.
+We do not compare to Medusa as EAGLE has consistently demonstrated superior speedups on various benchmarks \citep{xia2024unlocking}.
+We also compare the performance of the official EAGLE-2 weights shared by \citet{li2024eagle}. 
+We refer to this as "EAGLE-2 off.".
+Note that this model was trained on different data and with a fixed system prompt.
+For tree decoding, we use a max breadth of 8, a depth of 6 and 62 max tokens to verify. We use float16 except for the attention softmax weights that are upscaled to float32.
+
+We use standard metrics: \textit{token-per-second} and \textit{speedup ratios} to measure walltime improvements as well as hardware-independent metrics: average \textit{acceptance length} $\tau$ (the average number of \smallLM tokens accepted by \bigLM) and the \textit{number of calls} to \bigLM. 
+
+\subsection{Single Device}
+
+We now present the main single-device experiments using the SpecBench \cite{xia2024unlocking} benchmark without a system-prompt to ensure a fair comparison between models.
+
+\begin{table}[h]
+    \centering
+    \caption{Speedup ratio and acceptance length $\tau$ on SpecBench using prompts from MT-Bench, HumanEval, GSM8K, Alpaca, Sum and QA datasets. Each model is fine-tuned for 30 epochs and uses EAGLE-2 tree decoding.}
+    \label{tab:main_single_device_more}
+    \resizebox{\columnwidth}{!}{
+    \tabcolsep=0.05cm
+    \begin{tabular}{lcc|cccccccccccc|cc}
+        \toprule
+          & Total & Trainable & \multicolumn{2}{c}{MT-bench} & \multicolumn{2}{c}{HumanEval} & \multicolumn{2}{c}{GSM8K} & \multicolumn{2}{c}{Alpaca} & \multicolumn{2}{c}{CNN/DM} & \multicolumn{2}{c}{Natural Ques.} & \multicolumn{2}{|c}{Mean} \\
+         \smallLM & size & size & Speedup & $\tau$ & Speedup & $\tau$ & Speedup & $\tau$ & Speedup & $\tau$ & Speedup & $\tau$ & Speedup & $\tau$ & Speedup & $\tau$\\
+        \midrule
+        Ours (N=3) &  1.8B & 250M & 1.74 & \bf 4.65 & 2.02 & \bf 5.41 & 1.74 & \bf 4.65 & 1.81 & \bf 4.80 & 1.89 & \bf 5.04 & 1.59 & \bf 4.23 & 1.79 & \bf 4.79 \\
+        Ours (N=1) & 1.55B & 250M & \bf 1.83 & 4.19 & \bf 2.29 & 5.30 &  \bf 1.83 & 4.19 & 2.02 & 4.65 & 2.04 & 4.74 & 1.71 & 3.94 & \bf 1.95 & 4.50\\
+        Ours (N=0) & 1.3B & 250M & 1.80 & 3.86 & 2.28 & 4.98 & 1.80 & 3.86 & \bf 2.03 & 4.36 & \bf 2.10 & 4.55 & \bf 1.72 & 3.73 & \bf 1.95 & 4.22 \\
+        \midrule
+        EAGLE-2 & 1.3B & 250M & 1.77 & 3.55 & 1.95 & 3.92 & 1.69 & 3.36 & 1.89 & 3.77 & 1.84 & 3.69 & 1.66 & 3.32 & 1.78 & 3.60 \\
+        EAGLE-2 off. & 1.3B & 250M & 1.75 & 3.52 & 2.06 & 4.15 & 1.80 & 3.60 & 1.70 & 3.37 & 1.60 & 3.19 & 1.38 & 2.75 & 1.71 & 3.43
+        \\
+        Independent & 1.7B & 650M & 1.50 & 3.63 & 1.91 & 4.64 & 1.26 & 3.01 & 1.57 & 3.81 & 1.56 & 3.78 & 1.72 & 3.94 & 1.58 & 3.80 \\
+        Independent & 1.3B & 250M & 1.23 & 3.50 & 1.50 & 4.36 & 0.95 & 2.70 & 1.33 & 3.79 & 1.28 & 3.59 & 1.10 & 3.13 & 1.23 & 3.51 \\
+        \bottomrule
+    \end{tabular}
+    }
+\end{table}
+
+Looking at Table~\ref{tab:main_single_device_more}, we can see that our Mixture of Attentions for SD achieves SOTA speedups when $N=1$ and $N=0$.
+Compared to EAGLE-2, we are on average 9.5\% faster in terms of \textit{tokens-per-second} generated.
+We also increase the acceptance length by 25\% when $N=1$.
+More single device experiments e.g.
+
+\subsection{Client-Server}
+
+In this study, we investigate how \textit{self-drafting} with our method performs in a client-server scenario.
+
+The server is performing verification and sends the relevant \bigLM activations to the client, which in turn is proposing new tokens.
+The server has 3 times more float16 tflops than the client.
+The devices are located in two different cities, separated by $\sim$300 km.
+The ping between the devices is around 9 ms and the bandwidth $\sim$50 Mbits/sec.
+In order to simulate a realistic client-server scenario, we are using 5G and 4G network profiles.
+In 4G, we assume a maximum of 20 Mbits/sec with a normally distributed delay of 21 ms ± 19 ms and a 0.1\% chance of dropping packets.
+In 5G, we assume a normally distributed delay of 10 ms ± 10 ms with a 0.1\% chance of dropping packets.
+To do so, we rely on the Linux traffic control subsystem.
+
+In this scenario, the token-per-second performance also depends on the size of the messages.
+To this end, we analyse the length of the messages sent between the client and the server (see Table~\ref{tab:message_length}).
+There is a clear distinction between \textit{self-drafting} methods that need to send/receive activation tensors and \textit{independent} methods that only exchange text (e.g. token ids).
+Therefore, we shall analyse whether the improvement in drafting quality can offset the increase in message lengths.
+On the client, we encode each node in the draft tree using 3 bytes for the token id and 1 byte for its position in the tree.
+The server answers with the accepted tokens encoded using 3 bytes each plus the associated activations, if required.
+For Llama3-8B-Instruct and $N \leq 1$, our architecture's payload is less than or equal to EAGLE message lengths.
+In order to further reduce message sizes, we quantise the $E$ and $E_{kv}$ tensors to 8 bits.
+For both EAGLE and Mixture of Attentions, the initial message sent by the server (before the first token is drafted) is typically the biggest as it represents the activations of the entire prompt. Therefore, we additionally gzip-compress this message after quantisation.
+
+\begin{table}[h]
+    \centering
+    \caption{Performance on \textit{HumanEval} with EAGLE-2 tree decoding under 5G and 4G profiles.}
+    \label{tab:main_multidevice}
+    \resizebox{\columnwidth}{!}{
+    \tabcolsep=0.16cm
+    \begin{tabular}{llccccc}
+        \toprule
+         \smallLM & Total size & Trainable size & \multicolumn{2}{l}{Tokens per second $\uparrow$ } & Acceptance length $\uparrow$ & Calls \bigLM $\downarrow$ \\
+          &  & & 5G & 4G & \\
+        \midrule
+        Ours (N=3) & 1.8B & 250M & 25.0 & 14.6 & \bf 4.99 & \bf 20.8 \\
+        Ours (N=1) & 1.55B & 250M & 30.6 & 20.3 & 4.68 & 22.5 \\
+        Ours (N=0) & 1.3B & 250M & \bf 34.1 & \bf 25.1 & 4.30 & 24.1 \\
+        \midrule
+        EAGLE-2 & 1.3B & 250M & 24.3 & 13.6 & 2.81 & 36.4 \\
+        EAGLE-2 off. & 1.3B & 250M & 28.6 &  15.0 & 3.51 & 29.5 \\
+        Independent & 1.7B & 650M & 28.5 & 23.7 & 3.73 & 27.1 \\
+        Independent & 1.3B & 250M & 18.3 & 16.1 & 3.16 & 32.4 \\
+        \bottomrule
+    \end{tabular}
+    }
+\end{table}
+
+In Table~\ref{tab:main_multidevice}, we can observe that "Ours (N=0)" achieves the fastest decoding speeds.
+Interestingly, it is even faster than independent small models that do not exchange any activation tensors.
+ 
+
+However, for this setting to be viable, just recovering the speed of vanilla decoding is not sufficient as it does not provide an advantage over an API call to \bigLM. Therefore, we show that our model can continue to generate the response by simulating a complete disconnection from the server.
+\begin{table}[ht]
+    \centering
+    \caption{The success rate (pass@1, greedy decoding) on \textit{HumanEval} in the event of an interrupted connection between the client and the server. EAGLE-2 tree decoding is used.}
+    \label{tab:interruption}
+    \tabcolsep=0.17cm
+    \begin{tabular}{lccccccc}
+        \midrule
+          & & & \multicolumn{5}{c}{A disconnection occurs after B new tokens.}  \\
+        \midrule
+         \smallLM & Total size & Trainable size & B = 1 & B = 10 & B = 25 & B = 50 & B = $\infty$ \\
+        \midrule
+        Ours (N=3) & 1.8B & 250M &  2.48 \% & \bf 11.18 \% & 18.01 \% & \bf 31.67 \% &  45.9 \% \\
+        Ours (N=1) & 1.55B & 250M & \bf 3.10 \% & 10.55 \% & \bf 21.11 \% & 30.43 \% &  45.9 \% \\
+        Ours (N=0) & 1.3B & 250M &  2.48 \% &  9.31 \% & 19.2 \% &  29.81 \% &  45.9 \% \\
+        \midrule
+        EAGLE-2 & 1.3B & 250M & 0 \% & 8.07 \% & 16.77 \% & 27.32 \% & 45.9 \% \\
+        EAGLE-2 off. & 1.3B & 250M & 1.24 \% & 6.83 \% & 18.01 \% & 28.57 \% & 45.9 \% \\
+        Independent & 1.7B & 650M & 0 \% & 6.83 \% & 18.63 \% & 29.81 \% & 45.9 \% \\
+        Independent & 1.3B & 250M & 0 \% & 6.21 \% & 18.01 \% & 27.95 \% & 45.9 \% \\
+        \midrule
+          & & & \multicolumn{5}{c}{Generation stops after B new tokens.}  \\
+        \midrule
+        \multicolumn{3}{l}{Without local model (lower bound)} & 0 \% & 5.59 \% & 16.77 \% & 27.32 \% & 45.9 \% \\
+        \bottomrule
+    \end{tabular}%
+\end{table}
+
+In Table~\ref{tab:interruption}, we can see that indeed, if a disconnection occurs, unlike API calls to \bigLM, we can continue to generate the response \textit{right on the device}, i.e. complete additional correct solutions to competitive programming problems in HumanEval.
+Therefore, with an acceptable speed and the possibility to generate useful responses after a disconnection, we prove the viability of our proposed client-server setting, paving the way for a new framework for serving LLMs with small devices.
+
+\subsection{Ablation Study}
+We now present important ablation results for different components of our Mixture of Attentions architecture.
+Since multiple models were required to be fine-tuned for this study, we have limited each run to 10 epochs. For this ablation, we introduce the "Ours (N=\textit{l}, -LSA)" variant that does not rely on LSA and takes as input $\bm{o}_1, \cdots, \bm{o}_t$ as the keys and values of the CA layer.
+We also include two more EAGLE baselines, one with additional trainable parameters "EAGLE (more params)" and another with additional decoder layers "EAGLE (more layers)" but an equal number of trainable parameters.
+This is to ensure that the benefit of our architecture does not come from simply adding decoder layers or parameters.
+In this experiment, we use the HumanEval dataset with strict stopping criteria, exiting decoding as soon as the model no longer generates source code.
+
+\begin{table}[ht]
+    \centering
+    \caption{An ablation study of our proposed architecture, tested on \textit{HumanEval}. Each model is trained on $\sim$2.4B tokens. Chain (not tree) drafting with maximum 4 tokens is used for this study. The averages are computed over around 8500 drafting-verification cycles.}
+    \label{tab:ablation}
+    \tabcolsep=0.12cm
+    \begin{tabular}{lrccc}
+        \toprule
+         \smallLM & Total size & Trainable size & Tokens per second & Acceptance length $(\tau)$ \\
+        \midrule
+        Ours (N=3) & 1.8B & 250M & 39 & \bf 2.54 \\
+        Ours (N=1) & 1.55B & 250M & 39 & 2.25 \\
+        Ours (N=0) & 1.3B & 250M & \bf 40 & 2.14 \\
+        Ours (N=1, -LSA) & 1.55B & 250M & 36 & 2.04 \\
+        Ours (N=0, -LSA) & 1.3B & 250M & 38 & 1.93 \\
+        EAGLE & 1.3B & 250M & 30 & 1.45 \\
+        EAGLE (more params) & 1.45B & 400M & 29 & 1.28 \\
+        EAGLE (more layers) & 1.3B & 250M & 27 & 1.01 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+\paragraph{Does the on-policyness (brought with the CA layer) and the $T$-step bounded property have a positive impact on the quality of the drafts?}
+
+In Table~\ref{tab:ablation}, we compare EAGLE with "Ours (N=0, -LSA)" for an answer to this question. We can see that these components provide a major improvement of 26\% in tokens-per-second as well as improved acceptance length of 33\%.
+
+\paragraph{How does partial observability influence the drafter \textit{acceptance rate}?}
+In Table~\ref{tab:ablation}, we can compare "Ours (N=0, -LSA)" to "Ours (N=0)" as well as "Ours (N=1, -LSA)" to "Ours (N=1)" and report that the tokens-per-second performance improves by 6\% by introducing LSA, decreasing partial observability. 
+Its impact is less crucial than the on-policyness brought by the CA layer.
+
+\paragraph{Does increasing $N$ increase the \textit{acceptance rate}?}
+Finally, by looking at the variation of $N$ in Tables~\ref{tab:main_single_device_more},\ref{tab:main_multidevice} and \ref{tab:ablation}, increasing $N$ also increases the acceptance length, as we hypothesised. However, this does not always have a positive impact on the tokens-per-second rate as it also increases the computational time of drafting. In the event of a complete disconnection in a client-server setting, however, a higher $N$ will improve the quality of responses, which is something to consider when deploying Mixture of Attentions for SD on mobile devices.
+
+
+
+\section{Related Work}
+
+\label{related}
+Medusa \citep{cai2024medusa} is one of the earliest works leveraging the activations of \bigLM as inputs to \smallLM for the purpose of SD.
+Thanks to their work, speculative decoding can be applied to any LLM by distilling an \smallLM.
+Medusa generates $K$ future tokens in parallel by training $K$ new \textit{LM\_heads} where each head predicts a token at position $k \in K$.
+EAGLE \citep{li2024eaglespeculativesamplingrequires} and Hydra \citep{ankner2024hydra} are auto-regressive extensions of Medusa.
+They observe that non-auto-regressive generation limits the acceptance length as \smallLM is not aware of previous tokens.
+We do not compare to Medusa or Hydra as EAGLE is ranked higher on the SpecBench leaderboard.
+
+Tandem Transformers \citep{nair2024tandem} propose an effective integration of \bigLM and \smallLM by letting \smallLM attend to the down-projected hidden states of \bigLM. These rich contextualised representations enable \smallLM to draft hypotheses with a higher acceptance rate as the two models are aligned on shared hidden states.
+We were not able to compare with them because of the lack of open-source implementation, the use of closed-source LLMs and an undisclosed amount of data/compute to reproduce the work.
+Moreover, tandem transformers appear to have a high communication overhead between big and small models, making it unrealistic for a client/server setting.
+
+Orthogonal to our work, researchers have recently proposed \textit{training-free} SD methods.
+Lookahead Decoding \citep{fu2024break} generates new tokens with a single \bigLM using Jacobi iterations, extended by
+CLLM \citet{kou2024cllms} and Ouroborous \citep{zhao2024ouroboros}.
+
+For additional related and orthogonal work in the extended SD landscape, we refer the reader to \citet{xia2024unlocking} for a detailed and highly informative speculative decoding survey.
+
+
+
+\section{Conclusion}
+
+
+We have introduced a Mixture of Attentions architecture for Speculative Decoding to effectively address several limitations of existing state-of-the-art methods.
+In order to enhance drafting accuracy of \smallLM, we proposed a mixture of attention layers: Layer Self-Attention to mitigate partial observability and Self-Attention followed by Cross-Attention to train more on-policy. 
+We have then introduced Target Layer Inference, a novel method that lets \smallLM reuse the last $N$ layers of \bigLM, enabling a trade off between the drafting speed and accuracy.
+Experimental results show that we achieve state-of-the-art decoding speedups in the standard single-device setup, improving over EAGLE-2 by 9.5\% and extending acceptance lengths by up to 25\%.
+We have also introduced a client-server paradigm and demonstrated that our \textit{self-drafting} speculative decoding method is a viable alternative to API calls to \bigLM.
+Under this paradigm, the client can continue to generate responses with the highest accuracy and speed after a complete disconnection from the network.
+As a future direction, it would be interesting to investigate whether $N$ could be predicted by \smallLM to automatically balance speed and accuracy depending on the current network conditions.
+
+
+
+

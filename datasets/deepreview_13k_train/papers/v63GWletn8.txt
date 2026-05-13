@@ -1,0 +1,843 @@
+\title{Faster Sampling from Log-Concave Densities over Polytopes via Efficient Linear Solvers}
+
+\begin{abstract}
+We consider the problem of sampling from a log-concave distribution $\pi(\theta) \propto e^{-f(\theta)}$ constrained to a polytope $K:=\{\theta \in \mathbb{R}^d: A\theta \leq b\}$, where $A\in   \mathbb{R}^{m\times d}$ and $b \in \mathbb{R}^m$. 
+The fastest-known algorithm \cite{mangoubi2022faster} for the setting when $f$ is $O(1)$-Lipschitz or $O(1)$-smooth runs in roughly $O(md \times md^{\omega -1})$ arithmetic operations, where the $md^{\omega -1}$ term arises because each Markov chain step requires computing a matrix inversion and determinant (here $\omega \approx 2.37$ is the matrix multiplication constant). 
+We present a nearly-optimal implementation of this Markov chain with per-step complexity which is roughly the number of non-zero entries of $A$ while the number of Markov chain steps remains the same. The key technical ingredients are 1) to show that the matrices that arise in this Dikin walk change slowly, 2) to deploy efficient linear solvers that can leverage this slow change to speed up matrix inversion by using information computed in previous steps, and 3) to speed up the computation of the determinantal term in the Metropolis filter step via a randomized Taylor series-based estimator. 
+This result directly improves the runtime for applications that involve sampling from Gibbs distributions constrained to polytopes that arise in Bayesian statistics and private optimization.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\tableofcontents
+
+\newpage
+
+We consider the  problem of sampling from a log-concave distribution supported on a polytope:
+ Given a polytope 
+$K:=\{\theta \in \mathbb{R}^d: A\theta \leq b\}$,
+where $A\in   \mathbb{R}^{m\times d}$ and $b \in \mathbb{R}^m$,
+and a convex function $f:K \rightarrow \mathbb{R}$, output a sample $\theta \in K$ from the distribution 
+$\pi(\theta) \propto e^{-f(\theta)}$.
+This problem arises in many applications, including in Bayesian inference, differentially private optimization, and integration.
+For instance, in Bayesian Lasso logistic regression,  $f(\theta) = \sum_{i=1}^n \ell(\theta^\top x_i)$ where $\ell$ is the logistic loss and $x_i$ are datapoints 
+with $\|x_i\|_2 \leq 1$, 
+and $K =\{ \theta \in \mathbb{R}^d : \|\theta\|_1 \leq O(1)\}$ is an $\ell_1$-ball (see e.g., \cite{tian2008efficient, BayesianLasso, kim2018logistic}).
+The closely related optimization problem of minimizing a $L$-Lipschitz or $\beta$-smooth convex function $f$ constrained to a polytope arises in numerous contexts as well.
+A special case is the setting where $f$ is linear on $K$, which corresponds to linear programming, since in this case $\beta=0$.
+In applications where one must preserve privacy when minimizing $f$ constrained to $K$, sampling from the exponential mechanism of \cite{mcsherry2007mechanism}, where  $\pi(\theta) \propto e^{-\frac{1}{\epsilon}f(\theta)}$ on $K$, allows one to obtain optimal utility bounds under $\epsilon$-differential privacy (see also \cite{bassily2014private, munoz2021private,kapralov2013differentially}).
+Depending on the application, the polytope $K$ could be e.g. the probability simplex, hypercube, or $\ell_1$-ball, where $m=O(d)$ and $\mathrm{nnz}(A) = O(d)$, as well as many applications where the number of constraints defining the polytope is $m \geq d^2$ and $\mathrm{nnz}(A) = O(m)$ (see e.g. \cite{hsu2014privately}, \cite{barvinok2021quick} for some examples).
+Here $\mathrm{nnz}(M)$ denotes the number of non-zero entries of a matrix $M$.
+
+
+This sampling problem, and its generalization to convex $K$, 
+has been studied in multiple prior works.
+One line of work \cite{kannan2012random}  \cite{narayanan2016randomized}, \cite{lee2018convergence}, \cite{cousins2018gaussian}, \cite{chen2017vaidya}, \cite{jia2021reducing} focuses on the special case ($f \equiv 0$). 
+In particular,  \cite{narayanan2016randomized} gives an algorithm, the Dikin walk Markov chain, which takes $O(md \times m d^{\omega -1}) \times \log(\frac{w}{\delta})$ arithmetic operations to sample within total variation (TV) error $\delta >0$ from the uniform distribution on a polytope $K \subseteq \mathbb{R}^d$ given by $m$ inequalities from a $w$-warm start.
+Here, $\omega=2.37\cdots$ is the matrix-multiplication constant and  a distribution $\mu$ is $w$-warm for $w \geq 1$ w.r.t.\ the target distribution $\pi$ if $\nicefrac{\mu(z)}{\pi(z)} \leq w$ for every $z \in K$.
+Other works consider the more general problem when $\pi$ may not be the uniform distribution.
+ Multiple works \cite{applegate1991sampling, frieze1994sampling,  frieze1999log,lovasz2006fast,lovasz2007geometry, brosse2017sampling} have given algorithms that apply in the general setting when $K$ is a convex body with access given by a membership oracle (or related oracles). 
+ \cite{narayanan2017efficient} give an algorithm based on the Dikin-walk Markov chain to sample from any log-concave $\pi \propto e^{-f}$ on $K$ where $f$ is $L$-Lipschitz or $\beta$-smooth.
+Building upon the work of \cite{narayanan2017efficient}, \cite{mangoubi2022faster} presented a Dikin walk which utilizes a ``soft-threshold'' regularizer,  
+which takes $O((md + d L^2 R^2)\times \log(\frac{w}{\delta}) \times (md^{\omega-1} + T_f))$ 
+ arithmetic operations to sample from an $L$-log-Lipschitz log-concave distribution $\pi$ on a polytope $K$ within error $\delta>0$ in the TV distance from a $w$-warm start.
+Here $T_f$ is the number of arithmetic operations to compute the value of $f$.
+Specifically, each iteration in their soft-threshold Dikin walk algorithm requires $md^{\omega-1}$ arithmetic operations to compute the (inverse) Hessian of the log-barrier function for the polytope $K$ and its determinant.
+\textbf{Our contributions.}
+ We show that the per-iteration cost of computing the (inverse) Hessian of the log-barrier with soft-threshold regularizer, and its determinant, at each step of the soft-threshold Dikin walk can be reduced from $md^{\omega-1}$ to $\mathrm{nnz}(A) + d^2$ (see Theorem \ref{thm_soft_threshold_Dikin_sparse}).
+More specifically, our version of the Dikin walk algorithm (Algorithm \ref{alg_Soft_Dikin_Walk_sparse}) takes $\tilde{O}((md + d L^2 R^2) \log(\frac{w}{\delta})) \times (\mathrm{nnz}(A) + d^2  + T_f)$ arithmetic operations to sample within total variation error $O(\delta)$ from an $L$-log-Lipschitz log-concave distribution on a polytope $K$ defined by $m$ inequalities, and $\tilde{O}((md + d \beta R^2)  \log(\frac{w}{\delta})) \times (\mathrm{nnz}(A) + d^2 + T_f)$ arithmetic operations to sample from a $\beta$-log-smooth log-concave distribution on $K$. 
+Compared to the implementation of the soft-threshold Dikin walk in \cite{mangoubi2022faster}, we obtain an improvement in the runtime for the case of $L$-log-Lipschitz or $\beta$-log-smooth log-concave distributions of at least $d^{\omega-2}$ in all cases where, e.g., $T_f = \Omega(d^2)$.
+If one also has $\mathrm{nnz}(A) = O(m)$, the improvement is $d^{\omega-1}$ if $m \geq d^2$ and $md^{\omega-3}$ if $m \leq d^2$; see Table 1 for comparison to prior works.
+The main challenge in improving the per-step complexity of the soft-threshold Dikin walk is that the current algorithm uses dense matrix multiplication to compute the Hessian of the log-barrier function with soft-threshold regularization, as well as its determinant, which requires $m d^{\omega - 1}$ arithmetic operations.
+The fact that the Hessian of the log-barrier function oftentimes changes slowly at each step of interior point-based methods was used by \cite{karmarkar1984new}, \cite{vaidya1989speeding}, and  \cite{nesterov1991acceleration}, and later by \cite{lee2015efficient}, to develop faster linear solvers for the Hessian to improve the per-iteration complexity of interior point methods for linear programming.
+To obtain similar improvements in the computation time of the soft-threshold Dikin walk, we need to show that the regularized barrier function proposed by  \cite{mangoubi2022faster} changes slowly as well.
+The notion of a barrier function changing slowly with respect to the Frobenius norm proposed in \cite{laddha2020strong} suffices, but we have to show that this notion holds for the soft-threshold regularized log-barrier function.
+To improve the per-iteration complexity of the soft-threshold Dikin walk, we show how to use the efficient inverse maintenance algorithm of \cite{lee2015efficient} to maintain a linear system solver for the Hessian of the log-barrier function with soft-threshold regularizer, and then show how to use this solver to efficiently compute a random estimate whose expectation is the Hessian determinant in $\mathrm{nnz}(A) + d^2$ arithmetic operations.
+This is accomplished by first computing a randomized estimate for the log-determinant of the Hessian, and then converting this estimate into a randomized estimate for a ``smoothed'' Metropolis acceptance probability via a piecewise-polynomial series expansion for the acceptance probability.
+We present a detailed overview of the techniques in Section \ref{sec:overview}.
+
+
+
+\section{Main result}
+
+
+
+\begin{theorem}[Main result]\label{thm_soft_threshold_Dikin_sparse}
+There exists an algorithm (Algorithm \ref{alg_Soft_Dikin_Walk_sparse}) which, given the following inputs,
+1) $\delta, R>0$ and either $L>0$ or $\beta>0$,  2) $A \in \mathbb{R}^{m \times d}$, $b\in \mathbb{R}^m$ that define a polytope $K := \{\theta \in \mathbb{R}^d : A \theta \leq b\}$  such that 
+        $K$ is contained in a ball of radius $R$ and has nonempty interior,
+       3) an oracle for the value of a convex function $f: K \rightarrow \mathbb{R}$, where $f$ is either $L$-Lipschitz or $\beta$-smooth,  and
+4) an initial point sampled from a distribution supported on $K$ which is $w$-warm with respect to $\pi \propto e^{-f}$ for some $w>0$,
+        outputs a point from a distribution $\mu$ where $\|\mu- \pi\|_{\mathrm{TV}} \leq \delta$.
+       This algorithm takes at most 
+        \begin{itemize}
+        \item  
+        $\tilde{O}((md + d L^2 R^2) \log(\frac{w}{\delta})) \times (\mathrm{nnz}(A) + d^2 + T_f)$ arithmetic operations in the setting where $f$ is $L$-Lipschitz,
+        \item 
+        or  $\tilde{O}((md + d \beta R^2)  \log(\frac{w}{\delta})) \times (\mathrm{nnz}(A) + d^2+ T_f)$ arithmetic operations in the setting where $f$ is $\beta$-smooth,
+          \end{itemize}
+      where $T_f$ is the number of arithmetic operations to evaluate $f$.
+\end{theorem}
+
+\noindent 
+Theorem \ref{thm_soft_threshold_Dikin_sparse} improves  by a factor of $\frac{md^{\omega-1} + T_f}{\max(\mathrm{nnz}(A), d^2) + T_f}$ arithmetic operations on the previous bound of \cite{mangoubi2022faster} 
+of $\tilde{O}((md + d L^2 R^2)\times (md^{\omega-1}+ T_f))$  arithmetic operations 
+for sampling from a distribution $\propto e^{-f}$ where $f$ is $L$-Lipschitz from a $w$-warm start.
+Here $\tilde{O}$ hides logarithmic factors in $\delta, w, L, R, d$.
+When $f$ is instead $\beta$-smooth their bound is $\tilde{O}((md + d \beta R^2)\times (md^{\omega-1} + T_f)$, and the improvement is the same.
+When $T_f \leq O(d^2)$  (as may be the case when evaluating $f$ requires computing inner products with $n=d$ datapoints in $\mathbb{R}^d$), the improvement is (at least) $d^{\omega-2}$.
+If one also has that $A$ is $O(m)$-sparse, ($\mathrm{nnz}(A) = O(m)$, as is the case in applications where each constraint inequality involves $O(1)$ variables), the improvement is $d^{\omega-1}$ in the regime $m \geq \Omega(d^2)$ and $md^{\omega-3}$ if $m \leq O(d^2)$.
+
+Theorem \ref{thm_soft_threshold_Dikin_sparse} also improves on the bound of (\cite{lovasz2006fast}; Theorem 1.1) of $\tilde{O}(d^2 (\nicefrac{R}{r})^2) (md + T_f)$ arithmetic operations by $\min((\frac{R}{r})^2, \frac{d}{r^2 L^2})$ when e.g. $T_f = \Omega(d^2)$ and $m=O(d)$.
+In the setting where $f$ is $\beta$-smooth, the improvement is $\min((\frac{R}{r})^2, \frac{d}{r^2 \beta})$.
+
+ In the Bayesian Lasso logistic regression example considered in \cite{mangoubi2022faster}, our algorithm takes $\tilde{O}(d^{4})$ operations from a $w$-warm start as  $f$ is  $\beta$-smooth and $L$-Lipschitz, with $\beta = L = n =m =d$, $R=1$, $r = \nicefrac{1}{\sqrt{d}}$, $\mathrm{nnz}(A) = O(d)$. This improves by $d^{\omega-2}$ 
+ on their bound of $\tilde{O}(d^{2+\omega})$, 
+and by $d$ on the bound of $\tilde{O}(d^5)$ implied by \cite{lovasz2006fast}.
+Theorem \ref{thm_soft_threshold_Dikin_sparse} also 
+improves upon the running time for $(\epsilon, 0)$-differentially private low-rank approximation by a factor of $d^{\omega-2}$ on the bound of $O(d^{2+\omega} \log(\frac{w}{\delta}))$ operations of  \cite{mangoubi2022faster}. 
+Moreover, it improves by a factor of  $\frac{md^{\omega-1}}{\mathrm{nnz}(A) + d^2}$ on their bound of $O((md + d n^2 \eps^2) (\eps n + d  \mathrm{log}(\nicefrac{nRd}{(r\eps)}) (md^{\omega-1}+ T_f))$ arithmetic operations for the problem of finding a minimizer $\hat{\theta} \in K$ of a convex empirical risk function $f(\theta, x) = \sum_{i=1}^n \ell_i(\theta,x_i)$ under $(\varepsilon, 0)$-differential privacy, when the losses $\ell_i(\cdot, x)$ are $\hat{L}$-Lipschitz, for any $\hat{L}>0$ and dataset $x\in \mathcal{D}^n$. See the details in their paper.
+\includegraphics[width=0.95\textwidth]{Table_nnz}
+
+
+
+\section{Algorithm}
+
+
+
+
+    For input $\theta \in  \mathrm{Int}(K)$, let $S(\theta) := \mathrm{Diag}(A \theta -b)$,
+and $ \Phi(\theta) :=  \alpha^{-1}\hat{A}^\top \hat{S}({\theta})^2 \hat{A}$,  where $\hat{S}(\theta) := \begin{pmatrix}
+    S({\theta}) & 0 \\ 0 & \alpha^{\frac{1}{2}} \eta^{-\frac{1}{2}} I_d 
+      \end{pmatrix}$ and $\hat{A} := \begin{pmatrix}
+    A \\ I_d.
+  \end{pmatrix}$
+For input $W \in \mathbb{R}^{d\times d}$ and $t \in [0,1]$, let $\Gamma(W,t):= I_{m+d} + t(W-I_{m+d}).$ 
+For a rectangular matrix $M$, a vector $v \in \mathbb{R}^d$, a diagonal matrix $D$, and a set of algorithmic parameters $P$,  {\bf Solve}$(v, D, M; P)$ outputs a vector $w$ which is (ideally) a solution to the system of linear equations $M^\top D M  w=v$. 
+ Given an initial diagonal matrix $D_0$, ${\bf Initialize}(D_0, M)$ generates parameters $P$ corresponding to $D_0$.
+ Given a new diagonal matrix $D$, and a set of parameters $P$, {\bf Update}$(D, M; P)$ updates the parameters $P$ and outputs some new set of parameters $P'$ corresponding to the new diagonal matrix $D$.
+For any $S\subset \mathbb{R}^d$ denote the interior of $S$ by $\mathrm{Int}(S):= \{\theta \in S :  B(\theta, t) \subseteq S \textrm{ for some } t>0\}$.
+
+
+\LinesNumbered
+\begin{algorithm}[H]
+\small
+\caption{Fast implementation of soft-threshold Dikin walk} \label{alg_Soft_Dikin_Walk_sparse}
+\KwIn{$m,d \in \mathbb{N}$, $A \in \mathbb{R}^{m \times d}$, $b \in \mathbb{R}^m$, which define the polytope $K := \{\theta \in \mathbb{R}^d: A \theta \leq b\}$}
+
+\KwIn{Oracle returning the value of a convex function $f: K \rightarrow \mathbb{R}$. Initial point $\theta_0 \in \mathrm{Int}(K)$}
+
+  
+{\bf Hyperparameters:} $\alpha>0$; $\eta>0$;  $T\in \mathbb{N}$; $\mathcal{N} \in \mathbb{N}; \gamma>0$
+
+Set $\theta \leftarrow \theta_0$,  $\hat{A}= \begin{pmatrix}
+    A \\ I_d,
+  \end{pmatrix}$, 
+$a = \log \det(\hat{A}^\top \hat{A})$ \label{line_a1},  
+ $P = {\bf Initialize}(\hat{S}(\theta)^2, \hat{A})$ \label{maintenance_1a},
+ $Q_0 = {\bf Initialize}(I_d, \hat{A})$ \label{maintenance_1b}
+\For{$i = 1, \ldots, T$}{
+Sample a point $\xi \sim N(0,I_d)$  \label{line_a4}
+
+
+
+Set $u =\hat{A}^\top  \hat{S}(\theta) \xi$ \label{line_a2}
+
+Set $z = \alpha^{-\frac{1}{2}}{\bf Solve}(u, \hat{S}(\theta)^2, \hat{A} ; P)$   \{{\em Computes Gaussian  $z$ with covariance  $ \alpha^{-1}\hat{A}^\top \hat{S}({\theta})^2 \hat{A}$}\}  \label{maintenance_3a}
+\uIf{$z \in \mathrm{Int}(K)$}{
+
+Set $W= \hat{S}(\theta)^{-2} \hat{S}(z)$
+
+\For{$j = 1, \ldots, {\mathcal{N} }$}{
+
+Sample $v \sim N(0,I_d)$   \label{line_a5}
+
+Sample $t$ from the uniform distribution on $[0,1]$. \label{line_a6}
+
+Set $Q = {\bf Update}(\Gamma(W,t), \hat{A} \, ; \, Q_0)$ \label{maintenance_2b}
+
+Set $w = \hat{A}^\top(W - I_d)\hat{A} v$ \label{line_a3}
+
+Set $Y_{j} = v ^\top  \mathbf{Solve}(w, \, \,  \Gamma(W,t), \, \, \hat{A} \, ; \, \,  Q)   + a$ \label{maintenance_3b}
+
+\qquad   \{{\em Computes a random variable $Y_{j}$ with expectation $\log \det \Phi(z) - \log\det\Phi(\theta)$}\}
+
+}
+
+\uIf{$\frac{1}{4} \leq Y_{1} < 2\log\frac{1}{\gamma}$}{
+Set $X = 1 + \frac{1}{2}\sum_{k=1}^{2\mathcal{N}-1} \sum_{\ell = 0}^{{\mathcal{N} }} \left( (-1)^k \frac{1}{\ell !}\prod_{j=1}^\mathcal{\ell}(-2 k Y_{j})\right)$ \label{line_a8}}
+\uIf{$Y_{1}< \frac{1}{4}$}{
+Set  $c_0, \ldots, c_{\mathcal{N} }$ to be the first ${\mathcal{N} }$ coefficients of the Taylor expansion of $\frac{1}{1+e^{-t}}$ at $0$
+Set $X =  \sum_{\ell = 0}^{{\mathcal{N} }} \left( c_\ell \prod_{j=1}^\mathcal{\ell}(Y_{j})\right)$  \label{line_a9}
+}
+
+\If{$Y_{1} \geq 2\log(\frac{1}{\gamma})$}{Set $X=1$}
+
+Accept $\theta\leftarrow z$ with probability $\frac{1}{2}\min(\max( X, 0),1)\min \left (\frac{e^{-f(z)}}
+{e^{-f(\theta)}}e^{\|z- \theta\|_{\Phi(\theta)}^2 - \|\theta- z\|_{\Phi(z)}^2}, 1 \right)$ \label{line_a7}
+
+Set $P = {\bf Update}(\hat{S}(\theta)^2, \hat{A} \, ; \, P)$ \label{maintenance_2a}
+
+}
+
+\Else{Reject $z$}}
+{\bf Output:} $\theta$
+\end{algorithm}
+
+In Theorem \ref{alg_Soft_Dikin_Walk_sparse}, we set $\gamma =  \delta \frac{1}{10^{20}(md +L^2 R^2)} \log^{1.02}(\nicefrac{w}{\delta})$.
+ We set the step size hyperparameters 
+$\alpha = \nicefrac{1}{(10^5 d)} \log^{-1}\left(\nicefrac{1}{\gamma}\right) \mbox{  and  } \eta = \nicefrac{1}{(10^4 d  L^2)}$ if $f$ is $L$-Lipschitz, and the number of steps to be $T= 10^9 \left( 2m \alpha^{-1} + \eta^{-1} R^{2} \right) \times \log(\nicefrac{w}{\delta}) \times \log^{1.01}(10^9 \left( 2m \alpha^{-1} + \eta^{-1} R^{2} \right) \times \log(\nicefrac{w}{\delta}))$
+  When $f$ is $\beta$-smooth (but not necessarily Lipschitz), we instead set $\gamma =  \delta \frac{1}{10^{20}(md +\beta R^2)} \log^{1.01}(\nicefrac{w}{\delta})$, and
+  $\alpha = \nicefrac{1}{(10^5 d)} \log^{-1}\left(\nicefrac{1}{\gamma}\right)$ and $\eta = \nicefrac{1}{(10^4 d  \beta)}$.
+  Thus, in either case, we have $\gamma \leq \nicefrac{\delta}{(1000 T)}$.
+Finally, we set the parameter $\mathcal{N}$, the number of terms in the Taylor expansions, to be $\mathcal{N} = 10\log(\frac{1}{\gamma})$.
+  
+
+
+
+\section{Overview of proof of main result}
+
+We give an overview of the proof of Theorem \ref{thm_soft_threshold_Dikin_sparse}.
+Suppose we are given $A \in \mathbb{R}^{m \times d}$, $b\in \mathbb{R}^m$ that define a polytope $K := \{\theta \in \mathbb{R}^d : A \theta \leq b\}$  with non-empty interior and contained in a ball of radius $R>0$,  and an oracle for the value of a convex function $f: K \rightarrow \mathbb{R}$, where $f$ is either $L$-Lipschitz or $\beta$-smooth.
+Our goal is to sample from $\pi \propto e^{-f}$ on $K$ within any TV error $\delta>0$ in a number of arithmetic operations which improves on the best previous runtime for this problem (when, e.g., $L, \beta,R =O(1)$), which was given for the soft-threshold Dikin walk Markov chain.
+We do this by showing how to design an algorithm to implement the soft-threshold Dikin walk Markov chain with faster per-iteration complexity.
+\paragraph{Dikin walk in the special case $f\equiv 0$.}
+First, consider the setting where one wishes to sample from the uniform distribution ($f\equiv 0$) on a polytope $K$, where $K$ is contained in a ball of radius $R>0$ and contains a ball of smaller radius $r>0$.
+ 
+\cite{kannan2012random} give a Markov chain-based algorithm, the Dikin walk, which uses the log-barrier function from interior point methods to take large steps while still remaining inside the polytope $K$.
+The log-barrier $\varphi(\theta)= - \sum_{j=1}^m \log(b_j - a_j^\top \theta)$ for the polytope $K$ defines a Riemannian metric with associated norm $\|\theta\|_{H(\theta)} := \sqrt{u^\top H(\theta) u}$, where $H(\theta) := \nabla^2 \varphi(\theta) = \sum_{j=1}^m \frac{a_j a_j^\top}{(b_j - a_j^\top \theta)^2}$ is the Hessian of the log-barrier function.
+At any point $\theta \in \mathrm{Int}(K)$, the unit ball with respect to this norm, $E(\theta) := \{z \in \mathbb{R}^d: \|z - \theta\|_{H(\theta)} \leq 1\}$,  referred to as the Dikin ellipsoid, is contained in $K$.
+To sample from $K$, from any point $\theta  \in \mathrm{Int}(K)$, the Dikin walk proposes steps $z$ from a Gaussian with covariance  $\alpha H^{-1}(\theta)$, where $\alpha>0$ is a hyperparameter.
+If one chooses $\alpha \leq O(\frac{1}{d})$, this Gaussian  concentrates inside $E(\theta) \subseteq K$, allowing the Markov chain to propose steps which remain inside $K$ w.h.p.% large steps while still remaining inside the polytope.
+ 
+To ensure the stationary distribution of the Dikin walk is the uniform distribution on $K$, if $z \in \mathrm{Int}(K)$, the Markov chain accepts each proposed step $z$ with probability determined by the Metropolis acceptance rule
+$ \min(\frac{p(z \rightarrow \theta)}{ p(\theta \rightarrow z)}, \, \, 1 ) = \frac{\sqrt{\mathrm{det}(H(\theta))} }{\sqrt{\mathrm{det}(H(z))}} e^{\|\theta - z \|_{H(\theta)}^2  - \|z - \theta \|_{H(z)}^2 }$,
+where $p(\theta \rightarrow z) \propto (\mathrm{det}H(\theta))^{-\frac{1}{2}} e^{-\|\theta - z \|_{H(\theta)}^2}$ denotes the probability (density) that the Markov chain at $\theta$  proposes an update to the point $z$.
+
+If one chooses $\alpha$ too large, each step of the Markov chain will be rejected with high probability.
+Thus, ideally, one would like to choose $\alpha$ as large as possible such that the proposed steps are accepted with probability $\Omega(1)$.
+To bound the terms $\nicefrac{\sqrt{\mathrm{det}(H(z))}}{\sqrt{\mathrm{det}(H(\theta))}}$ and $e^{\|z - \theta \|_{H(z)}^2 - \|\theta - z \|_{H(\theta)}^2 }$, \cite{kannan2012random} use the fact that the Hessian of the log-barrier changes slowly w.r.t.\ the local norm $\|\cdot \|_{H(\theta)}$.
+More specifically, to bound the change in the determinantal term, they use the following property of the log-barrier, discovered by \cite{vaidya1993technique}, which says its log-determinant $V(\theta) := \log \mathrm{det} H(\theta)$  satisfies
+$$\textstyle (\nabla V(\theta))^\top[H(\theta)]^{-1} \nabla V(\theta) \leq O(d) \qquad \qquad \forall \theta \in \mathrm{Int}(K). $$
+Since the proposed update $(z-\theta)$ is Gaussian with covariance $\alpha H^{-1}(\theta)$,  if one chooses $\alpha = \frac{1}{d}$, by standard Gaussian concentration inequalities $(\theta-z)^\top \nabla V(\theta) \leq O(1)$ w.h.p.
+Thus, $\log \mathrm{det}(H(z)) -   \log \mathrm{det}(H(\theta))  = V(z) - V(\theta) = \Omega(1)$, and   $\nicefrac{\sqrt{\mathrm{det}(H(z))}}{\sqrt{\mathrm{det}(H(\theta))}} = \Omega(1)$ w.h.p.
+
+To bound the total variation distance between the target (uniform) distribution $\pi$ and the distribution $\nu_T$ of the Markov chain after $T$ steps, \cite{kannan2012random} use an isoperimetric inequality of \cite{lovasz2003hit} which is defined in terms of the Hilbert distance on the polytope $K$.
+For any distinct points $u,v \in \mathrm{Int}(K)$ the Hilbert distance is
+$$\textstyle \sigma(u,v) :=  \frac{\|u-v \|_2 \times \|p-q\|_2}{\|p-u \|_2 \times \|v-q\|_2},$$
+where $p,q$ are endpoints of the chord through $K$ passing through $u,v$ in the order $p,u,v,q$.
+
+To apply this isoperimetric inequality to the Dikin walk, which proposes steps of size roughly $O(\alpha)$ w.r.t. the local norm $ \|\cdot\|_{\alpha^{-1}H(\theta)}$, they show that the Hilbert distance satisfies
+\begin{equation}\label{eq_T1}
+ \textstyle   \sigma^2(u,v) \geq \frac{1}{m} \sum_{i=1}^m \frac{(a_i^\top(u-v))^2}{(a_i^\top u-b_i)^2}  \geq \frac{1}{m \alpha^{-1}} \|u - v \|_{\alpha^{-1}H(\theta)}^2.
+\end{equation}
+ They then use the isoperimetric inequality w.r.t.\ the Hilbert  distance together with standard conductance arguments for bounding the mixing time of Markov chains (see e.g. \cite{lovasz1993random}), to show that, if the Markov chain is initialized with a $w$-warm start, after $i$ steps, the total variation distance to the stationary distribution $\pi$ satisfies $$\|\nu_i - \pi \|_{\mathrm{TV}} \leq O(\sqrt{w}(1- m\alpha^{-1})^i) \qquad \forall i \in \mathbb{N},$$
+provided that each step proposed by the Markov chain is accepted with probability $\Omega(1)$.
+For $\alpha = O(\frac{1}{d})$, after $T = O(m\alpha^{-1} \log(\frac{w}{\delta})) = O(md \log(\frac{w}{\delta}))$ steps, $\|\nu_T - \pi \|_{\mathrm{TV}} \leq \delta$.
+
+At each step in their algorithm, they compute the proposed update $z = \alpha^{-\frac{1}{2}} \sqrt{ H^{-1}(\theta)} \xi$ where $\xi \sim N(0,I_d)$, and the terms $\nicefrac{\sqrt{\mathrm{det}(H(z))}}{\sqrt{\mathrm{det}(H(\theta))}}$ and $e^{\|z - \theta \|_{H(z)}^2 - \|\theta - z \|_{H(\theta)}^2 }$ in the acceptance probability.
+Writing  $H(\theta) = A^\top S(\theta)^{-2} A$ where $S(\theta) = \mathrm{Diag}(A \theta -b)$, these computations can be done in $O(m d^{\omega-1})$ arithmetic operations using dense matrix multiplication.
+Their algorithm's runtime is then $T \times m d^{\omega-1} = O(md \times m d^{\omega-1} \times \log(\frac{w}{\delta}))$ arithmetic operations. 
+\paragraph{Dikin walks for sampling from Lipschitz/smooth log-concave distributions.} One can extend the Dikin walk to sample from more general log-concave functions on a polytope $K$, by introducing a term $e^{f(\theta) - f(z)}$ to the Metropolis acceptance probability.
+This causes the Markov chain to have stationary distribution $\pi(\theta) \propto e^{-f(\theta)}$, since for every $\theta, z \in \mathrm{Int}(K)$,
+\begin{equation*}
+\textstyle \min\left(\frac{p(z \rightarrow \theta)}{ p(\theta \rightarrow z)}e^{f(\theta) - f(z)}, \, \, 1 \right) p(\theta \rightarrow z) \pi(\theta) = \min\left(\frac{p(\theta \rightarrow z)}{ p(z \rightarrow \theta)}e^{f(z) - f(\theta)}, \, \, 1 \right) p(z \rightarrow \theta) \pi(z).
+\end{equation*}
+However, the term $e^{f(\theta) - f(z)}$ can become exponentially small with the distance $\|z-\theta\|_2$ (and thus with the step-size  $\alpha$) even if, e.g., $f$ is $L$-Lipschitz.
+Thus, to obtain a runtime polynomial in $L, d$, one may need to re-scale the covariance $\alpha H^{-1}(\theta)$ to ensure $e^{f(\theta) - f(z)} \geq \Omega(1)$.
+
+One approach, taken by \cite{mangoubi2022faster}, is to propose steps with (inverse) covariance matrix equal to a regularized log-barrier Hessian, $\Phi(\theta) = \alpha^{-1} H(\theta) + \eta^{-1} I_d$, for some $\eta>0$.
+Setting $\eta = \frac{1}{d L^2}$ ensures (by standard Gaussian concentration inequalities) that the proposed step $z$ satisfies $\|z- \theta\|_2 \leq O(1)$ w.h.p. and hence $e^{f(\theta) - f(z)} = \Omega(1)$ w.h.p.
+
+To bound the total variation distance, in place of \eqref{eq_T1}, they show a lower bound on the Hilbert distance w.r.t.\ the local norm $\|\cdot\|_{\Phi(u)}$,
+$$ \textstyle \sigma^2(u,v) 
+        \geq \frac{1}{2} \frac{\|u-v\|_2^2}{R^2} + \frac{1}{2m} \sum_{i=1}^m \frac{(a_i^\top(u-v))^2}{(a_i^\top u-b_i)^2}
+                \geq \frac{1}{2m \alpha^{-1} + 2 \eta^{-1} R^2}\|u-v\|^2_{\Phi(u)}.$$
+This leads to a bound of $O(m\alpha^{-1} +  \eta^{-1} R^2) \log(\frac{w}{\delta})) = O(md +  L^2 R^2) \log(\frac{w}{\delta}))$ on the number of steps until the Markov chain is within $O(\delta)$ of $\pi$ in the total variation distance.
+ In addition to the operations required in the special case when $f \equiv 0$, each step requires calling the oracle for $f$ which takes $T_f$ arithmetic operations.
+ Thus, they obtain a runtime of $O((md + L^2 R^2) \times (m d^{\omega-1} + T_f) \times \log(\frac{w}{\delta}))$ arithmetic operations to sample from $\pi \propto e^{-f}$.
+
+\paragraph{Faster implementation of matrix operations when $f\equiv 0$.}
+When $f \equiv 0$, one can use that the log-barrier Hessian $H(\theta)$ changes slowly at each step of the Dikin walk to compute the proposed step, and determinantal terms in the acceptance probability, more efficiently.
+
+The fact that the Hessian of the log-barrier function oftentimes changes slowly at each step of interior point-based methods was used by \cite{karmarkar1984new}, and later by \cite{vaidya1989speeding}, and \cite{nesterov1991acceleration} when developing faster linear solvers for $H(\theta)$ to use in interior point methods for linear programming.
+Specifically, they noticed for many interior point methods, which take steps $\theta_1, \theta_2, \ldots \in \mathrm{Int}(K)$, the update to $H(\theta_i) = A^\top D_i A$ at each iteration $i$, where $D_i := S(\theta_i)$, is (nearly) low-rank, since in these interior point methods most of the entries of the diagonal matrix $D_{i+1}^{-1}D_{i}$ are very small at each step $i$.
+This allowed them to use the Woodbury matrix formula to compute a low-rank update for the inverse Hessian $H(\theta_i)$, reducing the per-step complexity of maintaining a linear solver for $H(\theta_i)$ at each iteration $i$.
+Specifically, the Woodbury matrix formula says
+\begin{equation}
+   \textstyle (M + UCV)^{-1} = M^{-1} -  M^{-1}U(C^{-1} + VM^{-1}U)^{-1}V^{-1}M),
+\end{equation}
+for any $M \in \mathbb{R}^{d \times d}$,  $U \in \mathbb{R}^{d \times k}$, $V \in \mathbb{R}^{k \times d}$, $C  \in \mathbb{R}^{k \times k}$, where $k$ may be much smaller than $d$.
+
+\cite{lee2015efficient} obtain an improved algorithm for maintaining linear solvers for sequences of matrices $\{A^\top D_i A\}_{i=1,2,\ldots}$ under the assumption that $D_i$ changes slowly at each iteration $i$ with respect a weighted Frobenius norm,  $\|(D_{i+1} - D_i)D_i^{-1}\|_F \leq O(1)$.
+This assumption is weaker than requiring most of the entries to be nearly constant at each step, as it only requires a (weighted) sum-of-squares of the change in the entries of $D_i$ to be $O(1)$. 
+To obtain their method, they sample diagonal entries of $D_{i}$ with probability proportional to the (change in) the entries' leverage scores, a quantity used to measure the importance of the rows of a matrix  (for a matrix $M$ the $i$'th leverage score is defined as $[M(M^\top M)^{-1}M^\top]_{ii}$)).
+Using these subsampled diagonal entries they show how to obtain a spectral sparsifier for the updates $A^\top (D_{i+1} -D_i)A$, allowing them to make low-rank updates to the matrix $A^\top D_i A$ at each iteration.
+Specifically, for any sequence of diagonal matrices $D_1,D_2,\ldots $ satisfying
+\begin{equation}\label{eq_T2}
+\textstyle \|(D_{i+1} - D_i)D_i^{-1}\|_F \leq O(1)
+\end{equation}
+ at each $i \in \mathbb{N}$, they show that they can maintain a $O(\mathrm{nnz}(A) + d^2)$-time linear system solver for the matrices $A^\top D_i A$, at a cost of $O(\mathrm{nnz}(A) + d^2)$ arithmetic operations per-iteration.  (plus an initial cost of  $O(\mathrm{nnz}(A) + d^\omega)$ to initialize their algorithm).
+
+ \cite{laddha2020strong} apply the fast linear solver of \cite{lee2015efficient} to the Dikin walk  in the special case where $f \equiv 0$.
+Specifically, they show the sequence of log-barrier Hessians $A^\top D_i A$ where $D_i = S^2(\theta_i)$, also satisfies \eqref{eq_T2} when $\theta_i$ are the steps of the Dikin walk.
+They then use the fast linear solver of \cite{lee2015efficient} to evaluate the matrix operations $(A^\top S(\theta_i)^{-2} A)^{-\frac{1}{2}} \xi$ and compute an estimate for $\mathrm{det}(A^\top S(\theta_i)^{-2} A)$ at each iteration.
+This gives a per-iteration complexity of $\mathrm{nnz}(A) + d^2$ for the Dikin walk in the special case $f \equiv 0$.
+\paragraph{Our work.}
+To obtain a faster implementation of the (soft-threshold) Dikin walk in the general setting where $f$ is Lipschitz or smooth on $K$, we would ideally like to apply the efficient inverse maintenance algorithm of \cite{lee2015efficient} to obtain a fast linear solver for the log-barrier Hessian with soft-threshold regularizer $\Phi(\theta)= \alpha^{-1} A^\top S(\theta)^{-2} A + \eta I_d$.
+Specifically, writing $\Phi(\theta) = \alpha^{-1}\hat{A}^\top \hat{S}(\theta)^2 \hat{A}$ where $\hat{A} := \begin{pmatrix}
+    A \\ I_d,
+  \end{pmatrix}$ and $\hat{S}(\theta) := \begin{pmatrix}
+    S({\theta}) & 0 \\ 0 & \alpha^{\frac{1}{2}} \eta^{-\frac{1}{2}} I_d 
+      \end{pmatrix}$, we would like to obtain a fast linear solver 
+ for the sequence of matrices $\Phi(\theta_1), \Phi(\theta_2), \ldots$, where $\theta_1, \theta_2, \cdots$ are the steps of the soft-threshold Dikin walk, and use it to improve the per-iteration complexity of the walk. 
+This poses two challenges:
+ 
+1.  To obtain an $O(\mathrm{nnz}(A) + d^2)$-time linear solver with the efficient inverse maintenance algorithm, we need to show that $\Phi(\theta_i) = \alpha^{-1}\hat{A}^\top \hat{S}(\theta_i)^2 \hat{A}$ does not change too quickly at each step $i$ of the soft-threshold Dikin walk.  Specifically, we need to show, at each $i$ w.h.p.,
+\begin{equation}\label{eq_T4}
+\textstyle \|(\hat{S}^2(\theta_{i+1}) - \hat{S}^{2}(\theta_{i+1}))\hat{S}^{-2}(\theta_{i+1})\|_F \leq O(1).
+\end{equation}
+ Once we have a linear solver for $\Phi(\theta)$, this immediately gives us a way to compute the proposed updates of the Markov chain by solving a system of linear equations (see e.g. Section 2.1.1 of \cite{kannan2012random}).
+2.  We also need to evaluate the  terms $\mathrm{det}(\Phi(\theta))$ in the acceptance probability.
+ However, access to a linear solver for $\Phi(\theta)$ does not directly give a way to compute its determinant.
+\paragraph{Bounding the change in the soft-threshold log-barrier Hessian.}
+From concentration inequalities for multivariate Gaussian distributions, one can show that, with high probability, the Dikin walk proposes updates $z \leftarrow \theta$ which have length $O(\sqrt{d})$ in the local norm: $\|z - \theta \|_{\Phi(\theta)} = O(\sqrt{d})$ w.h.p.
+To bound the change in the soft-threshold-regularized log-barrier Hessian matrix $\Phi(\theta)$ at each step of the walk, we would ideally like to show that the Frobenius norm of the derivative of this matrix changes slowly with respect to the local norm $\|\cdot \|_{\Phi(\theta)}$.
+The soft-threshold-regularized log-barrier function $\Phi$ satisfies the self-concordance property $\mathrm{D}\Phi(\theta )[h] \preceq 2\sqrt{v^\top \Phi(\theta)v} \Phi(\theta)$ for any $\theta, z \in \mathrm{Int}(K)$, and $v \in \mathbb{R}^d$, where $\mathrm{D} M(\theta )[h]$ denotes the derivative of a matrix-valued function $M(\theta)$ in the direction $h$.
+However, the self-concordance property does not directly imply that \eqref{eq_T4} holds, as \eqref{eq_T4} contains a bound in the Frobenius norm.
+To overcome this issue, we show that (a rescaling of) the regularized log-barrier Hessian, $\Psi(\theta) := \alpha^{\frac{1}{2}} \Phi(\theta) = \nabla^2 \varphi(\theta) + \alpha^{\frac{1}{2}} \eta^{-\frac{1}{2}} I_d$ satisfies the following strengthening of the self-concordance property w.r.t. the Frobenius norm: 
+\begin{equation}\label{eq_T5}
+\textstyle    \|(\Psi(z) - \Psi(\theta))^{-1} \Psi^{-1}(\theta) \|_F \leq \frac{\|\theta - z \|_{\Psi(\theta)}}{(1 - \|\theta - z \|_{\Psi(\theta)})^2} \qquad \qquad \forall \theta, z \in \mathrm{Int}(K).
+\end{equation}
+\cite{laddha2020strong} show that \eqref{eq_T5} holds in the special case when $\Phi$ is replaced with the Hessian $H(\theta)$ of the log-barrier function without a regularizer.
+ However, the soft-threshold log-barrier Hessian, $\Phi$, is not the Hessian of a log-barrier function for any set of equations defining the polytope $K$.
+To get around this problem, we instead use the fact (from \cite{mangoubi2022faster}) that $\Phi$ is the limit of a sequence of matrices $\{H_j(\theta) \}_{j=1}^\infty$ where each $H_j$ is the Hessian of a log-barrier function for an increasing set of (redundant) inequalities defining the polytope $K$.
+Combining these two facts allows us to show  Equation \eqref{eq_T5} holds for the Hessian $\Phi$ of the log-barrier function with soft-threshold regularizer (Lemma \ref{Lemma_Frobenius_2}).
+ Next, we apply \eqref{eq_T5} to show that (Lemma \ref{proposition_slack}),
+$$\textstyle \|(\hat{S}^2(z) - \hat{S}^{2}(\theta))\hat{S}^{-2}(\theta)\|_F    \leq     \|(\Psi(z) - \Psi(\theta))^{-1} \Psi^{-1}(\theta) \|_F     
+\leq \frac{\alpha^{-\frac{1}{2}}\|\theta-z\|_{\Phi(\theta)}}{(1-\alpha^{-\frac{1}{2}}\|\theta-z\|_{\Phi(\theta)} )^2} 
+  \leq O(\alpha^{-\frac{1}{2}} \sqrt{d}),$$
+  w.h.p.
+ As the step size $\alpha = \Theta(\nicefrac{1}{d})$, we get that $\|(\hat{S}^2(z) - \hat{S}^{2}(\theta))\hat{S}^{-2}(\theta)\|_F \leq O(1).$ w.h.p.
+\paragraph{Computing a randomized estimate for the determinantal term.} To compute an estimate for the determinantal term in the Metropolis acceptance rule, we use a well-known method for estimating matrix-valued functions using polynomials (see e.g. \cite{barvinok2017approximating} \cite{rudelson2016singular}).
+A related approach to the one presented here for computing the determinant in the special case when $f \equiv 0$ was given in \cite{laddha2020strong}, however it contains a number of gaps in the proof and algorithm.
+Towards this, one can apply the linear solver for $\Phi(\theta)$ to compute a random estimate $Y$ with mean $\log \mathrm{det}( \Phi(\theta)) - \log  \mathrm{det}(\Phi(z))$:
+$Y = v^\top (\hat{A}^\top ( t\hat{S}(\theta)^{-2} + (1-t)I_{m+d}) \hat{A})^{-1} \hat{A}^\top( \hat{S}(\theta)^{-2} - I_{m+d})\hat{A} v + \log\det \hat{A}^\top \hat{A}$,
+Where $v \sim N(0,I_d)$ and $t \sim \mathrm{uniform}(0,1)$.
+ While this provides an estimate for the log-determinant of $\Phi$, 
+ it does not give an estimate with a mean equal to a Metropolis acceptance rule for $\pi$.
+We first replace the Metropolis acceptance rule $$\min(\frac{p(z \rightarrow \theta)}{ p(\theta \rightarrow z)}e^{f(z) - f(\theta)}, \, \, 1 ) = \min\left(\frac{\sqrt{\mathrm{det}(\Phi(z))}}{\sqrt{\mathrm{det}(\Phi (\theta))}} e^{\|z- \theta\|_{\Phi(\theta)}^2 - \|\theta- z\|_{\Phi(z)}^2} e^{f(\theta)- f(z)}, 1\right)$$ with a (different)  Metropolis acceptance rule, $$\mathsf{a}(\theta, z) := \left(1 +(\frac{\mathrm{det}(\Phi(z))}{\mathrm{det}(\Phi(\theta))})^{-\frac{1}{2}}\right)^{-1} \times \min \left (\frac{e^{-f(z)}}
+{e^{-f(\theta)}} \times e^{\|z- \theta\|_{\Phi(\theta)}^2 - \|\theta- z\|_{\Phi(z)}^2}, \, \, 1 \right),$$ whose determinantal term is a smooth function of $\mathrm{det}(\Phi (\theta))$ and $\mathrm{det}(\Phi (z))$:
+\begin{equation}\label{eq_T6}
+    \textstyle \left(1 +(\frac{\mathrm{det}(\Phi(z))}{\mathrm{det}(\Phi(\theta))})^{-\frac{1}{2}}\right)^{-1} = \mathrm{sigmoid}\left(\frac{1}{2}\log \mathrm{det}(\Phi(z)) - \frac{1}{2}\log \mathrm{det}(\Phi(\theta))\right),
+    \end{equation}
+where $\mathrm{sigmoid}(t):= \frac{1}{1+e^{-t}}$.
+Since $\mathsf{a}(\theta, z) p(\theta \rightarrow z)  \pi(\theta) = \mathsf{a}(z, \theta) p(z \rightarrow \theta) \pi(z)$, this acceptance rule preserves the target stationary distribution $\pi(\theta) \propto e^{-f(\theta)}$ of the Markov chain.
+ 
+Next, we would ideally like to plug i.i.d.\ samples $Y_1,\cdots, Y_n$  of mean $\log \mathrm{det} \Phi(\theta) - \log \mathrm{det} \Phi(z)$ into a Taylor series for $\mathrm{sigmoid}(t)$ to obtain an estimate with mean equal to the l.h.s.\ of \eqref{eq_T6}.
+Unfortunately, the Taylor series of $\mathrm{sigmoid}(t)$ at $0$ has finite region of convergence $(-\pi, \pi)$.
+
+While one can use convexity of the function $\log \mathrm{det}(\Phi(\theta))$, together with a bound on the gradient of $\log \mathrm{det}(\Phi(\theta))$,   to show that $\frac{1}{2}\log \mathrm{det}(\Phi(z)) - \frac{1}{2}\log \mathrm{det}(\Phi(\theta)) > - \pi$ w.h.p., one may have that $\frac{1}{2}\log \mathrm{det}(\Phi(z)) - \frac{1}{2}\log \mathrm{det}(\Phi(\theta)) > \pi$ with probability $\Omega(1)$.
+
+To get around this problem, we use two different series expansions for $\mathrm{sigmoid}(t)$ with overlapping regions of convergence:
+\begin{enumerate}
+\item a Taylor series expansion centered at $0$ with region of convergence $(-\pi, \pi)$,
+\item a series expansion ``at $+ \infty$” with region of convergence $(0, +\infty)$, which is a polynomial in $e^{-t}$:  $\mathrm{sigmoid}(t) = \sum_{k=0}^\infty c_k e^{-k t}$.
+\end{enumerate}
+ 
+To determine which series expansion to use at each step of the Dikin walk, we show that each random estimate $Y$ concentrates in the ball of radius $\frac{1}{8}$ about its mean $\mathbb{E}[Y]  = \log \mathrm{det}(\Phi(z)) - \log \mathrm{det}(\Phi(\theta))$ w.h.p.\ (Lemma \ref{lemma_HansonWright_bound}).
+As the regions of convergence of the two series expansions have intersection $(0, \pi)$, this allows us to use the value of the random estimate $Y$ to select a choice of series expansion that, with high probability, contains $\mathbb{E}[Y]   = \log \mathrm{det}(\Phi(z)) - \log \mathrm{det}(\Phi(\theta))$.
+\paragraph{Bounding the number of arithmetic operations.}
+We have already shown that computing the proposed update $z$ (Line \ref{maintenance_3a} of Algorithm \ref{alg_Soft_Dikin_Walk_sparse}) and computing each random estimate $Y_j$ for the log-determinant (Line \ref{maintenance_3b}) can be done in $O(\mathrm{nnz}(A) +d^2)$ arithmetic operations at each step of the Markov chain by using the efficient inverse maintenance linear solver.
+
+As both series expansions converge exponentially fast in the number of terms, only $\log(\nicefrac{1}{\delta})$ terms in the series expansion are needed to compute an estimate $X$ (Lines \ref{line_a8} and \ref{line_a9}) with mean within error $O(\delta)$ of the determinantal term in the Metropolis acceptance probability
+$\textstyle \left|\mathbb{E}[X]- \left(1 +(\frac{\mathrm{det}(\Phi(z))}{\mathrm{det}(\Phi(\theta))})^{-\frac{1}{2}}\right)^{-1}\right| \leq O(\delta).$
+Thus, the number of calls to the linear solver at each Markov chain step is $O(\log(\nicefrac{1}{\delta}))$, taking $O((\mathrm{nnz}(A) +d^2) \log(\nicefrac{1}{\delta})$ arithmetic operations.
+
+Computing the terms $f(\theta)$ and $f(z)$ in the Metropolis acceptance rule requires two calls to the oracle for $f$, which takes $O(T_f)$ arithmetic operations, at each step of the Markov chain.
+ The other steps in the Algorithm take no more time to compute.
+ In particular, while several ``initialization'' steps for the linear solver and other computations (Lines 4-6) require $O(md^{\omega-1})$ arithmetic operations, these computations are not repeated at each step of the Markov chain, and thus do not change the overall runtime.
+
+Since the Markov chain is run for roughly $T= O((md +L^2R^2) \log(\nicefrac{w}{\delta})$ steps, the runtime is roughly $O(T((\mathrm{nnz}(A) +d^2)\log(\nicefrac{1}{\delta} + T_f)) =  O((md +L^2R^2) (\mathrm{nnz}(A) +d^2 + T_f)  \log^2(\nicefrac{w}{\delta})$.
+\paragraph{Bounding the total variation distance.}  \cite{mangoubi2022faster} show that the soft-threshold Dikin walk outputs a point with distribution $\mu_T$ within TV distance $O(\delta)$ of the target distribution $\pi$ after roughly $T= O((md +L^2R^2) \log(\nicefrac{w}{\delta})$ steps; the same TV bound holds if one replaces their acceptance rule with the smooth acceptance rule we use.
+
+ Our bound on the TV distance follows directly from their bound, with some minor adjustments.
+ This is because, while we give a more efficient algorithm to {\em implement} the soft-threshold Dikin walk Markov chain, the Markov chain itself is (approximately) the same as the Markov chain considered in their work.
+ The main difference (aside from our use of a smoothed Metropolis acceptance rule) is that the (mean of) the randomized estimate we compute for the acceptance probability is accurate to within some small error $O(\delta)$, since we only compute a finite number of terms in the Taylor series.
+
+Thus, we can define a coupling between the Markov chain $\theta_1, \theta_2, \ldots, \theta_T$ generated by our algorithm and the Markov chain $\mathcal{Y}_1,\mathcal{Y}_2 ,\ldots \mathcal{Y}_T$ defined in their paper (with smoothed acceptance rule), such that $\theta_i = \mathcal{Y}_i$ at every $i \in \{1,\cdots, T\}$ with probability $\geq 1- T \delta$.
+ This implies that the distribution $\mu$ of the last step of our Markov chain is within total variation distance $O(T\delta)$ of the distribution $\nu_T$ of $\mathcal{Y}_T$.
+Thus, $\|\mu - \pi \|_{\mathrm{TV}} \leq \|\mu - \nu_T \|_{\mathrm{TV}} + \|\nu_T - \pi \|_{\mathrm{TV}} \leq O(T\delta) + O(\delta)$.
+Plugging in $\nicefrac{\delta}{T}$ in place of $\delta$, we get $\|\mu - \pi \|_{\mathrm{TV}} \leq \delta$.
+
+
+\section{Preliminaries needed for the proof}
+
+
+The following lemma of \cite{lee2015efficient} allows us to maintain an efficient linear systems solver for the Hessian of the regularized barrier function $\Phi$:
+\begin{lemma}[Efficient inverse maintenance, Theorem 13 in \cite{lee2015efficient},] \label{lemma_maintenance}
+ Suppose that a sequence of matrices $A^\top C^{(k)}A$ for the inverse maintenance problem, where the sequence of diagonal matrices $C^{(1)},C^{(1)}\ldots$, with $C^{(k)} = \mathrm{diag}(c_1^{(k)}, \ldots,c_d^{(k)})$, satisfies
+   $     \sum_{i=1}^d \left( \frac{c_i^{(k+1)}-c_i^{(k)}}{c_i^{(k)}}\right)^2 = O(1)$  for all $k \in \mathbb{N}.
+ $
+Then there is an algorithm that maintains a $\tilde{O}(\mathrm{nnz}(A) + d^2)$ arithmetic operation linear system solver for the sequence of matrices $\{A^\top C^{(k)}A\}_{k=1}^T$  for $T$ rounds in a total of $\tilde{O}(T(\mathrm{nnz}(A) + d^2) + d^\omega)$ arithmetic operations over all rounds $T$ rounds.
+\end{lemma}
+For any symmetric positive definite matrix $M \in \mathbb{R}^{d\times d}$, define $\|h\|_M := h^\top M h$.
+The following lemma is useful in bounding the change in the log-barrier Hessian:
+\begin{lemma}[Lemmas 1.2 \& 1.5 in \cite{laddha2020strong}] \label{Lemma_frobenius_strong_self_concordance}
+    Let $K:=\{\theta \in \mathbb{R}^d: A\theta \leq b\}$, where $A\in   \mathbb{R}^{m\times d}$ and $b \in \mathbb{R}^m$ such that $K$ is bounded with non-empty interior.
+    Let $H(\theta) = \sum_{j=1}^m \frac{a_j a_j^\top}{(b_j - a_j^\top \theta)^2}$ be the Hessian of the log-barrier function for $K$.
+    Then for any $x,y \in \mathrm{Int}(K)$ with $\|x-y\|_{H(x)} <1$, we have
+    $    \|H^{-\frac{1}{2}}(x)(H(y)-H(x))H^{-\frac{1}{2}}(x)\|_F \leq \frac{\|x-y\|_{H(x)}}{(1-\|x-y\|_{H(x)} )^2}.$
+\end{lemma}
+\noindent
+The following lemma gives a high-probability {\em lower} bound on the determinantal term $\frac{\mathrm{det}\left(\Phi (z)\right)}{\mathrm{det}( \Phi(\theta))}$ in the Metropolis acceptance ratio.
+
+\begin{lemma}[Lemma 6.9 in \cite{mangoubi2022faster}] \label{lemma_det}
+Consider any $\theta \in \mathrm{Int}(K)$, and $\xi \sim N(0,I_d)$.  Let $z= \theta + (\Phi(\theta))^{-\frac{1}{2}} \xi$.
+Then
+\begin{equation}\label{eq_f12}
+    \mathbb{P}\left (\frac{\mathrm{det}\left(\Phi (z)\right)}{\mathrm{det}( \Phi(\theta))} \geq \frac{48}{50} \right) \geq 1-\frac{98}{100},
+\end{equation}
+and
+
+\begin{equation}\label{eq_f13}
+\mathbb{P}\left( \|z - \theta\|_{\Phi(z)}^2 - \|z - \theta\|_{\Phi(\theta)}^2
+\leq \frac{2}{50} \right )\geq \frac{98}{100}.
+\end{equation}
+
+\end{lemma}
+
+\noindent
+The following lemma of \cite{mangoubi2022faster} says that the Hessian $\Phi$ of the regularized barrier function, while not the Hessian of a log-barrier function for any system of inequalities defining $K$, is nevertheless the limit of an infinite sequence of matrices $H_j$, where each $H_j$ the Hessian of a logarithmic barrier function for a system of inequalities defining the same polytope $K$.
+\begin{lemma}[Lemma 6.7 in \cite{mangoubi2022faster}] \label{lemma_limits}
+There exits a sequence of matrix-valued functions $\{H_j\}_{j=1}^{\infty}$, where each $H_j$
+ is the Hessian of a log-barrier function on $K$, such that for all $w \in \mathrm{Int}(K)$,
+\begin{equation*} \label{eq_L1}
+    \lim_{j\rightarrow \infty} H_j(w) = \alpha \Phi(w), \qquad \textrm{and } \qquad  \lim_{j\rightarrow \infty} (H_j(w))^{-1} = \alpha^{-1} (\Phi(w))^{-1},
+\end{equation*}
+uniformly in $w$.
+\end{lemma}
+
+\noindent
+The following Lemma (Lemma \ref{Lemma_TV_output}) gives a mixing time bound for a basic implementation of the soft-threshold Dikin walk (Algorithm \ref{alg_2}, below):
+
+\LinesNumbered
+\begin{algorithm}[H]\caption{Basic implementation of soft-threshold Dikin walk}\label{alg_2}
+\KwIn{$m,d \in \mathbb{N}$, $A \in \mathbb{R}^{m \times d}$, $b \in \mathbb{R}^m$, which define the polytope $K := \{\theta \in \mathbb{R}^d: A \theta \leq b\}$}
+\KwIn{$\mathcal{Y}_0 \in \mathrm{Int}(K)$, $T \in \mathbb{N}$}
+{\bf Hyperparameters:} $\alpha>0$; $\eta>0$;  $T\in \mathbb{N}$;
+\For{$i = 0, \ldots, T-1$}{
+Sample $\zeta_i \sim N(0, I_d)$
+
+Set $H(\mathcal{Y}_i)= \sum_{j=1}^m \frac{a_j a_j^\top}{(b_j - a_j^\top \mathcal{Y}_i)^2}$
+
+Set  $\Phi(\mathcal{Y}_i) = \alpha^{-1} H(\mathcal{Y}_i) +  \eta^{-1}I_d$
+
+ Set $\mathcal{Z}_{i} = \Phi(\mathcal{Y}_i)^{-\frac{1}{2}} \zeta_i$
+
+ \uIf{$\mathcal{Z}_i \in \mathrm{Int}(K)$}{
+
+Set $H(\mathcal{Z}_i)= \sum_{j=1}^m \frac{a_j a_j^\top}{(b_j - a_j^\top \mathcal{Z}_i)^2}$
+
+Set  $\Phi(\mathcal{Z}_i) = \alpha^{-1} H(\mathcal{Y}_i) +  \eta^{-1}I_d$
+ Set $p_i = \frac{1}{2} \frac{\frac{\mathrm{det}(\Phi(\mathcal{Z}_{i}))}{\mathrm{det}(\Phi(\mathcal{Y}_i))}}{\frac{\mathrm{det}(\Phi(\mathcal{Y}_i))}{\mathrm{det}(\Phi(\mathcal{Z}_{i}))} + \frac{\mathrm{det}(\Phi(\mathcal{Z}_{i}))}{\mathrm{det}(\Phi(\mathcal{Y}_i))}} \times \min \left (\frac{e^{-f(\mathcal{Z}_{i})}}{e^{-f(\mathcal{Y}_i)}} \times e^{\|\mathcal{Z}_{i}- \mathcal{Y}_i\|_{\Phi(\mathcal{Y}_i)}^2 - \|\mathcal{Y}_i- \mathcal{Z}_{i}\|_{\Phi(\mathcal{Z}_{i})}^2}, \, \, 1 \right)$
+        
+    Set $\mathcal{Y}_{i+1} = \mathcal{Z}_{i} $ with probability $p_i$,} 
+ \Else{Reject $\mathcal{Z}_{i}$.}
+ {\bf Output:} $\mathcal{Y}_T$
+}
+
+\end{algorithm}
+\begin{lemma}[Lemma 6.15 of \cite{mangoubi2022faster}]\label{Lemma_TV_output}
+Let $\mathcal{Y}_0, \mathcal{Y}_1,\cdots, \mathcal{Y}_T$ be the Markov chain generated by Algorithm \ref{alg_2}.  Let $\delta >0$.  Suppose that $f: K \rightarrow \mathbb{R}$ is either $L$-Lipschitz (or has $\beta$-Lipschitz gradient). Suppose that $\mathcal{Y}_0 \sim \nu_0$ where $\nu_0$ is a $w$-warm  distribution with respect to $\pi \propto e^{-f}$ with support on $K$. 
+For any $t>0$ denote by $\nu_t$ denote the distribution of $\mathcal{Y}_t$,  for $\alpha \leq \frac{1}{10^5 d}$ and $\eta \leq \frac{1}{10^4 d  L^2}$ (or $\eta \leq \frac{1}{10^4 d  \beta}$).
+Then for any $T\geq 10^9 \left( 2m \alpha^{-1} + \eta^{-1} R^{2} \right) \times \log(\frac{w}{\delta})$ we have that
+\begin{equation*}
+ \| \nu_T - \pi \|_{\mathrm{TV}} \leq \delta.  
+\end{equation*}
+
+\end{lemma}
+Note that Lemma \ref{Lemma_TV_output} is given in  \cite{mangoubi2022faster} for the same Markov chain as in Algorithm \ref{alg_2}, but with  acceptance rule  $\frac{1}{2} \times 
+     \min\left (\frac{e^{-f(\mathcal{Z}_{i})} \sqrt{\mathrm{det}(\Phi(\mathcal{Z}_{i}))}}{e^{-f(\mathcal{Y}_i)} \sqrt{\mathrm{det}(\Phi(\mathcal{Y}_i))}} \times e^{\|\mathcal{Z}_{i}- \mathcal{Y}_i\|_{\Phi(\mathcal{Y}_i)}^2 - \|\mathcal{Y}_i- \mathcal{Z}_{i}\|_{\Phi(\mathcal{Z}_{i})}^2}, \, \, 1 \right )$ in place of the acceptance rule $p_i$ used in  Algorithm \ref{alg_2}.
+The same proof of Lemma \ref{Lemma_TV_output} given in  \cite{mangoubi2022faster} holds for the above acceptance rule in  Algorithm \ref{alg_2} with minor modifications.
+The following trace inequality is needed in the proofs.
+
+\begin{lemma}[von Neumann trace Inequality \cite{von1962some}]\label{Von_Neumann_trace}
+Let $M, Z \in \mathbb{R}^{d\times d}$ be matrices, and denote by   $\sigma_1\geq \cdots \geq \sigma_d$ the singular values of $M$ and by $\gamma_1\geq \cdots \geq \gamma_d$ the singular values of $Z$.
+Then
+\begin{equation*}
+    |\mathrm{tr}(MZ)| \leq \sum_{i=1}^d \sigma_i \gamma_i.
+\end{equation*}
+    
+\end{lemma}
+We need the following fact. 
+\begin{proposition}\label{lemma_integral}
+Let $D \in \mathbb{R}^{(d +m) \times (d+m)}$ be a diagonal matrix.  Then\\ $$\log \mathrm{det}(\hat{A}^\top D \hat{A}) - \log \mathrm{det}(\hat{A}^\top \hat{A}) =\int_0^1 \mathrm{tr}\left(\tau \hat{A}^\top D \hat{A} + (1-\tau) \hat{A}^\top \hat{A})^{-1} ( \hat{A}^\top D \hat{A}-   \hat{A}^\top \hat{A}\right) \mathrm{d} \tau.$$
+\end{proposition}
+
+\begin{proof}
+Let $\Theta(\tau) := \tau \hat{A}^\top D \hat{A} + (1-\tau) \hat{A}^\top \hat{A}$ for any $\tau \geq 0$.  Then 
+\begin{align*}
+  \textstyle \frac{\mathrm{d}}{\mathrm{d}\tau} \log \mathrm{det} \Theta(\tau) 
+  &= \mathrm{tr}\left(  \frac{\mathrm{d}}{\mathrm{d}\tau} \log(\Theta(\tau)) \right) = \mathrm{tr}\left( \Theta^{-1}(\tau) \frac{\mathrm{d}}{\mathrm{d}\tau} \Theta(\tau) \right)\\ 
+  &= \mathrm{tr}\left( (\tau \hat{A}^\top D \hat{A} + (1-\tau) \hat{A}^\top \hat{A})^{-1} ( \hat{A}^\top D \hat{A}-   \hat{A}^\top \hat{A}) \right).
+\end{align*}
+ Thus,
+\begin{align*}
+\textstyle &\log \mathrm{det}(\hat{A}^\top D \hat{A}) - \log \mathrm{det}(\hat{A}^\top \hat{A}) =  \int_0^1 \frac{\mathrm{d}}{\mathrm{d}\tau} \log \mathrm{det} \Theta(\tau) \mathrm{d} \tau\\ 
+&  =\int_0^1 \mathrm{tr}\left( (\tau \hat{A}^\top D \hat{A} + (1-\tau) \hat{A}^\top \hat{A})^{-1} ( \hat{A}^\top D \hat{A}-   \hat{A}^\top \hat{A})\right) \mathrm{d} \tau.
+\end{align*}
+\end{proof}
+Finally, we need the following concentration inequality to show a high probability bound on the error $Y-\mathbb{E}[Y]$ of the estimator $Y$ for $\log \mathrm{det} \Phi(z) - \log \mathrm{det} \Phi(\theta)$.
+
+\begin{lemma}[Hanson-Wright concentration inequality]\label{lemma_HR}
+Let $M \in \mathbb{R}^{d\times d}$.  Let $v \sim N(0,I_d)$.  Then for all $t>0$,
+$\mathbb{P}(|v^{\top} M v | > t) \leq 2 \exp\left(-8 \min \left(\frac{t^2}{\|M\|_F^2}, \frac{t}{\|M\|_2}\right) \right).$
+\end{lemma}
+
+
+\section{Proof of the main result}
+
+
+
+To prove Theorem \ref{thm_soft_threshold_Dikin_sparse}, we first show that the Frobenius norm of the Hessian of the log-barrier function with soft-threshold regularizer changes slowly with respect to the local norm (Lemmas \ref{Lemma_Frobenius_2} and  \ref{proposition_slack}).
+We also prove a concentration inequality for  the random estimate $Y$ for the log-determinant (Lemma \ref{lemma_HansonWright_bound}).
+
+We then give a proof of Theorem \ref{thm_soft_threshold_Dikin_sparse}.
+The first part of the proof of Theorem \ref{thm_soft_threshold_Dikin_sparse} bounds the running time, by using Lemma \ref{proposition_slack} together with Lemma \ref{lemma_maintenance} in the preliminaries to show that one can deploy the fast linear solver to obtain a bound of $\mathrm{nnz}(A) + d^2$ on the per-iteration complexity of Algorithm \ref{alg_Soft_Dikin_Walk_sparse}.
+
+The second part of the proof bounds the total variation distance between the output of Algorithm \ref{alg_Soft_Dikin_Walk_sparse} and the target distribution $\pi$.
+Towards this, we use the concentration bound in Lemma \ref{lemma_HansonWright_bound} to show that the series expansions in Lines \ref{line_a8} and \ref{line_a9} of Algorithm \ref{alg_Soft_Dikin_Walk_sparse} converge w.h.p.\ and give a good estimate for the Metropolis acceptance probability.
+To conclude, use this fact to show that there exists a coupling between the Markov chain computed by Algorithm \ref{alg_Soft_Dikin_Walk_sparse} and an ``exact'' implementation of the soft-barrier Dikin walk Markov such that these two coupled Markov chains are equal w.h.p. This allows us to use the bound on the total variation for the ``exact'' Markov chain (Lemma \ref{Lemma_TV_output} in the preliminaries) to obtain a bound on the total variation error of the output of Algorithm \ref{alg_Soft_Dikin_Walk_sparse}.
+\begin{lemma}\label{Lemma_Frobenius_2}
+Let $\varphi(\theta):= -  \sum_{j=1}^{m} \log(b_j-a_j^\top \theta )$ be a log-barrier function for $K:=\{\theta \in \mathbb{R}^d: A\theta \leq b\}$,
+where $A\in   \mathbb{R}^{m\times d}$ and $b \in \mathbb{R}^m$.
+  Let $c\geq 0$, and define the matrix-valued function $\Psi(\theta) := \nabla^2 \varphi(\theta) + c I_d$.
+    Then for any $\theta,z \in \mathrm{Int}(K)$ with $\|\theta-z\|_{\Psi(\theta)} <1$, we have
+    $    \|\Psi^{-\frac{1}{2}}(\theta)(\Psi(z)-\Psi(\theta))\Psi^{-\frac{1}{2}}(\theta)\|_F \leq \frac{\|\theta-z\|_{\Psi(\theta)}}{(1-\|\theta-z\|_{\Psi(\theta)} )^2}.$
+\end{lemma}
+
+\begin{proof}
+Let $\theta, z \in \mathrm{Int}(K)$ be any two points in $\mathrm{Int}(K)$ such that $\|\theta-z\|_{\Psi(\theta)} <1$.
+From  Lemma \ref{lemma_limits}, we have that there exits a sequence of matrix functions $\{H_j\}_{j=1}^{\infty}$, where each matrix
+ is the Hessian of a log-barrier function on $K$, such that for all $w \in \mathrm{Int}(K)$,
+\begin{equation}\label{eq_S3}
+    \lim_{j\rightarrow \infty} H_j(w) =  \Phi(w),
+\end{equation}
+uniformly in $w$, and 
+\begin{equation}\label{eq_S2}
+    \lim_{j\rightarrow \infty} (H_j(w))^{-1} = (\Phi(w))^{-1},
+\end{equation}
+    uniformly in $w$.
+    Thus, we have
+    \begin{align}  \label{eq_R3}
+  \lim_{j \rightarrow \infty}   \|\theta-z\|_{H_j(\theta)} &=   \lim_{j \rightarrow \infty}  \sqrt{(\theta-z)^\top H_j(\theta) (\theta-z)}  \nonumber\\
+  &=   \sqrt{(\theta-z)^\top \lim_{j \rightarrow \infty} H_j(\theta) (\theta-z)} \nonumber\\
+  &\stackrel{\textrm{Eq. }\eqref{eq_S3}}{=}    \sqrt{(\theta-z)^\top \Psi(\theta) (\theta-z)}  \nonumber\\
+ &= \|\theta-z\|_{\Psi(\theta)}.
+    \end{align}
+    In particular,  since $\|\theta-z\|_{\Psi(\theta)} <1$,  \eqref{eq_R3} implies that there exists $J \in \mathbb{N}$ such that 
+    \begin{equation}\label{eq_R5}
+\|\theta-z\|_{H_j(\theta)} < 1 \qquad \qquad \forall j \geq J.
+    \end{equation}
+    Moreover, since $H_j(w)$  is the Hessian of a log-barrier function on $K$ for every $j \in \mathbb{N}$, by Lemma \ref{Lemma_frobenius_strong_self_concordance} and \eqref{eq_R5} we have that
+   \begin{equation} \label{eq_R1}
+       \|H_j^{-\frac{1}{2}}(\theta)(H_j(z)-H_j(\theta))H_j^{-\frac{1}{2}}(\theta)\|_F \leq \frac{\|\theta-z\|_{H_j(\theta)}}{(1-\|\theta-z\|_{H_j(\theta)} )^2} \qquad \forall j \geq J.
+    \end{equation}
+Moreover,
+\begin{align}\label{eq_R2}
+&\lim_{j \rightarrow \infty}  \|H_j^{-\frac{1}{2}}(\theta)(H_j(z)-H_j(\theta))H_j^{-\frac{1}{2}}(\theta)\|_F \nonumber\\
+&\stackrel{\textrm{Eq. }\eqref{eq_R1}}{=}  \| (\lim_{j \rightarrow \infty}  H_j^{-\frac{1}{2}}(\theta))(\lim_{j \rightarrow \infty}H_j(z)- \lim_{j \rightarrow \infty} H_j(\theta)) (\lim_{j \rightarrow \infty} H_j^{-\frac{1}{2}}(\theta))\|_F \nonumber\\
+&\stackrel{\textrm{Eq. } \eqref{eq_S3}, \eqref{eq_S2}}{=} \|\Psi^{-\frac{1}{2}}(\theta)(\Psi(z)-\Psi(\theta))\Psi^{-\frac{1}{2}}(\theta)\|_F 
+\end{align}
+Therefore, plugging \eqref{eq_R2} and \eqref{eq_R3} into \eqref{eq_R1}, we have that
+    \begin{equation*}
+  \|\Psi^{-\frac{1}{2}}(\theta)(\Psi(z)-\Psi(\theta))\Psi^{-\frac{1}{2}}(\theta)\|_F \leq \frac{\|x-y\|_{\Psi(\theta)}}{(1-\|\theta-z\|_{\Psi(\theta)} )^2}.
+    \end{equation*}
+\end{proof}
+
+\begin{lemma}\label{proposition_slack}
+Let $z = \theta + \Phi(\theta)^{-\frac{1}{2}} \xi$ where $\xi \sim N(0,I_d)$.
+Then we have with probability at least $1-\gamma$ that
+\begin{equation*}
+\|\hat{S}(\theta)^{-2} \hat{S}(z)^2 - I_m\|_F \leq \frac{1}{1000 \log(\frac{1}{\gamma})}.
+\end{equation*}
+\end{lemma}
+
+\begin{proof}
+Setting $\Psi(\theta)= \hat{A}^\top \hat{S}(\theta)^2 \hat{A}$, we have that $\Psi(\theta)= \alpha \Phi(\theta) = H(\theta) + \alpha \eta^{-1} I_d$.
+Hence, we have by Lemma \ref{Lemma_Frobenius_2} that, with probability at least $1-\gamma$,
+\begin{align*}
+\|\hat{S}(\theta)^{-2} \hat{S}(z)^2 - I_m\|_F
+&= \|\hat{S}(\theta)^{-1} \hat{S}(z)^2 \hat{S}(\theta)^{-1} - I_m\|_F\\
+&\leq \|(\hat{A}^\top \hat{S}(\theta)^2 \hat{A})^{-\frac{1}{2}} \hat{A}^\top \hat{S}(z)^2 \hat{A} (\hat{A}^\top \hat{S}(\theta)^2 \hat{A})^{-\frac{1}{2}} - I_d\|_F\\
+&=\|\Phi^{-\frac{1}{2}}(x)\Phi(y)\Phi^{-\frac{1}{2}}(x) - I_d\|_F\\
+  &=\|\Phi^{-\frac{1}{2}}(x)(\Phi(y)-\Phi(x))\Phi^{-\frac{1}{2}}(x)\|_F\\
+    &= \|\alpha^{-\frac{1}{2}}\Phi^{-\frac{1}{2}}(x)(\alpha\Phi(y)-\alpha\Phi(x))\alpha^{-\frac{1}{2}}\Phi^{-\frac{1}{2}}(x)\|_F\\
+    &= \|\Psi^{-\frac{1}{2}}(x)(\Psi(y)-\Psi(x))\Psi^{-\frac{1}{2}}(x)\|_F\\
+    &\leq \frac{\|x-y\|_{\Psi(x)}}{(1-\|x-y\|_{\Psi(x)} )^2}\\
+    &= \frac{\alpha^{-\frac{1}{2}}\|\theta-z\|_{\Phi(\theta)}}{(1-\alpha^{-\frac{1}{2}}\|\theta-z\|_{\Phi(\theta)} )^2}\\
+    &\leq \alpha^{-\frac{1}{2}} 8\sqrt{d} \log^{\frac{1}{2}}\left(\frac{1}{\gamma}\right)\\
+    &\leq \frac{1}{1000},
+\end{align*}
+where the second inequality holds by Lemma \ref{Lemma_Frobenius_2}.
+The fourth inequality holds because $\alpha = \frac{1}{10^5 d} \log^{-1}\left(\frac{1}{\gamma}\right)$.  The third inequality holds with probability at least $1-\gamma$ because 
+\begin{equation*}
+    \|\theta-z\|_{\Phi(\theta)}^2 = (\theta-z)^\top\Phi(\theta) (\theta-z) = (\Phi(\theta)^{-\frac{1}{2}} \xi)^\top\Phi(\theta) ( \Phi(\theta)^{-\frac{1}{2}} \xi) \leq 8\sqrt{d} \log(\frac{1}{\gamma})
+    \end{equation*}
+    with probability at least $1-\gamma$ by the Hanson-Wright  inequality (Lemma \ref{lemma_HR}).
+\end{proof}
+
+\begin{lemma} \label{lemma_HansonWright_bound}
+Let $W \in \mathbb{R}^{{m+d}\times {m+d}}$ be a diagonal matrix, and let $t>0$.
+Define $\Theta(t):= \hat{A}^\top(I_{m+d} + t(W-I_{m+d}))\hat{A}.$
+Let $v \sim N(0, I_d)$, and let
+\begin{equation} 
+    Y= v^\top \Theta(t)^{-1}\hat{A}^\top(W-I_m)\hat{A} v + \log \det \hat{A}^\top \hat{A}.
+\end{equation}
+Suppose that $\frac{1}{2}I_m \preceq  W \preceq 2I_m$  and that $\|W-I_m\|_F \leq c$ for some $c>0$.
+Then 
+\begin{equation}\label{eq_S13}
+    \mathbb{P}(|Y - \mathbb{E}[Y]|\geq s \cdot c ) \leq e^{-\frac{1}{8}s} \qquad \forall s \geq 0.
+    \end{equation}
+    
+\end{lemma}
+
+\begin{proof}
+\begin{align} \label{eq_S14}
+  \|\Theta(t)^{-1}\hat{A}^\top(W-I_m)\hat{A}\|_F
+    & \leq  \|(\hat{A}^\top(tW +(1-t)I_m)\hat{A})^{-1}\|_2 \cdot \|A^\top(W-I_m)A\|_F \nonumber\\
+    & \leq  \|(\hat{A}^\top(\frac{1}{2}I_m)\hat{A})^{-1}\|_2 \cdot \|\hat{A}^\top(W-I_m)\hat{A}\|_F\nonumber\\
+        & =  2\|(\hat{A}^\top \hat{A})^{-1}\|_2 \cdot \|\hat{A}^\top(W-I_m)\hat{A}\|_F\nonumber\\
+         & =  2\|(\hat{A}^\top \hat{A})^{-1}\|_2 \cdot \mathrm{Tr}^{\frac{1}{2}}((\hat{A}^\top(W-I_m)\hat{A})^2)\nonumber\\
+          & =  2\|(\hat{A}^\top \hat{A})^{-1}\|_2 \cdot \mathrm{Tr}^{\frac{1}{2}}(\hat{A}^\top(W-I_m)\hat{A} \hat{A}^\top(W-I_m)\hat{A})\hat{A})^{-1}\|_2\nonumber\\
+&\qquad\qquad \cdot \mathrm{Tr}^{\frac{1}{2}}(\hat{A}\hat{A}^\top(W-I_m)\hat{A} \hat{A}^\top(W-I_m))\nonumber\\
+ & \leq  2\|(\hat{A}^\top \hat{A})^{-1}\|_2 \cdot \sqrt{\|\hat{A}\hat{A}^\top\|_2}\cdot |\mathrm{Tr}^{\frac{1}{2}}((W-I_m)\hat{A} \hat{A}^\top(W-I_m))|\nonumber\\
+  & \leq  2\|(\hat{A}^\top \hat{A})^{-1}\|_2 \cdot \sqrt{\|\hat{A}\hat{A}^\top\|_2}\cdot |\mathrm{Tr}^{\frac{1}{2}}(\hat{A} \hat{A}^\top(W-I_m)^2)|\nonumber\\
+   & \leq  2\|(\hat{A}^\top \hat{A})^{-1}\|_2 \cdot \|\hat{A}\hat{A}^\top\|_2\cdot |\mathrm{Tr}^{\frac{1}{2}}((W-I_m)^2)|\nonumber\\
+   & =  2\|W-I_m\|_F,\nonumber\\
+   & \leq 2c,
+\end{align}
+where the fourth and fifth inequalities hold by the von Neumann trace inequality (Lemma \ref{Von_Neumann_trace}).
+Thus, by the Hanson-Wright inequality (Lemma \ref{lemma_HR}) we have that for every $s \geq 0$,
+\begin{align}\label{eq_S15}
+&\mathbb{P}(|v^\top \Theta(t)^{-1}\hat{A}^\top(W-I_m)\hat{A} v - \mathbb{E}[v^\top \Theta(t)^{-1}\hat{A}^\top(W-I_m)\hat{A} v]| \geq s)\nonumber\\
+& \leq 2 \exp \left(-\frac{1}{8} \min \left(\frac{s^2}{\|\Theta(t)^{-1}\hat{A}^\top(W-I_m)\hat{A} \|_F^2}, \frac{s}{\|\Theta(t)^{-1}\hat{A}^\top(W-I_m)\hat{A} \|_2} \right)\right)\nonumber\\
+& \leq 2 \exp \left(-\frac{1}{8} \frac{s}{\|\Theta(t)^{-1}\hat{A}^\top(W-I_m)\hat{A} \|_F}\right).
+\end{align}
+Plugging \eqref{eq_S14} into \eqref{eq_S15}, we get that,
+\begin{equation*}
+    \mathbb{P}(|v^\top \Theta(t)^{-1}\hat{A}^\top(W-I_m)\hat{A} v - \mathbb{E}[v^\top \Theta(t)^{-1}\hat{A}^\top(W-I_m)\hat{A} v]| \geq s c) \leq 2 e^{-\frac{1}{8}s} \qquad  \forall s \geq 0.
+\end{equation*}
+         \end{proof}
+
+\noindent
+
+\begin{proof}[of Theorem \ref{thm_soft_threshold_Dikin_sparse}]
+
+\paragraph{Bounding the runtime.}
+
+{\em Cost of maintaining and using a linear solver:} By Lemma \ref{proposition_slack}, we have that at every iteration of the outer ``for'' loop in Algorithm \ref{alg_Soft_Dikin_Walk_sparse},
+    \begin{equation}\label{eq_S16}
+        \sum_{i=1}^d \left( \frac{\hat{S}(z)^2[i]-\hat{S}(\theta)^2[i]}{\hat{S}(\theta)^2[i]}\right)^2 = \|\hat{S}(\theta)^{-2} \hat{S}(z)^2 - I_m\|_F^2 \leq O(1),
+    \end{equation}
+    with probability at least $1-\gamma$.
+    Rewriting the l.h.s. of \eqref{eq_S16}, we also have that with probability at least $1-\gamma$,
+        \begin{equation}\label{eq_S17}
+        \sum_{i=1}^d \left( (t \hat{S}(z)^2[i]\hat{S}(\theta)^{-2}[i] + (1-t)) - 1\right)^2  \leq \sum_{i=1}^d \left( \hat{S}(z)^2[i] \hat{S}(\theta)^{-2}[i] - 1\right)^2 \leq O(1),
+    \end{equation}
+    for any $t\in[0,1]$.
+To implement Algorithm \ref{alg_Soft_Dikin_Walk_sparse}, we use efficient inverse maintenance to maintain linear solvers for $\Phi(\theta) = A^\top \hat{S}(\theta)^{-2} A$ and $\hat{A}^\top \Psi(\hat{S}(\theta)^{-2} \hat{S}(z)^2,t)\hat{A} = \hat{A}^\top (t\hat{S}(\theta)^{-2} \hat{S}(z)^2 + (1-t)I_{m+d}) \hat{A}$ %$A^\top \hat{S}(\theta)^{-2} \hat{S}(z)^2 A$
+for $T$ rounds, where $T$ is the number of Dikin walk steps.
+Plugging Inequality \eqref{eq_S16} (for the $\Phi(\theta)$ linear system solver) and Inequality \eqref{eq_S17} (for the $\hat{A}^\top \Psi(\hat{S}(\theta)^{-2} \hat{S}(z)^2,t)\hat{A}$ linear system solver) into Lemma \ref{lemma_maintenance}, we get that maintaining these linear system solvers for $T$ steps (Lines \ref{maintenance_1a}, \ref{maintenance_2a}, \ref{maintenance_1b}, and \ref{maintenance_2b} in Algorithm \ref{alg_Soft_Dikin_Walk_sparse}), and applying each linear solver at most $\mathcal{N}$ times at each step (Lines \ref{maintenance_3a} and \ref{maintenance_3b}), takes $O(T\mathcal{N}(\mathrm{nnz}(A) + d^2) + d^\omega)$ arithmetic operations.
+Since $T \geq d^{\omega-2}$, we have that the number of arithmetic operations is $O(T\mathcal{N}(\mathrm{nnz}(A) + d^2))$.
+
+\medskip
+\noindent
+{\em Cost of other steps:} The remaining steps require less that $O(T\mathcal{N}(\mathrm{nnz}(A) + d^2))$ steps to compute:
+
+\begin{itemize}
+
+\item Each time they are run, Lines \ref{line_a2} and \ref{line_a3} can be accomplished in  $O(\mathrm{nnz}(A))$ arithmetic operations by standard matrix-vector multiplication.
+ Sampling a $d$-dimensional Gaussian vector (Lines \ref{line_a4} and \ref{line_a5}) can be done in $O(d) \leq O(\mathrm{nnz}(A))$ arithmetic operations and sampling from the uniform distribution \ref{line_a6} takes $O(1)$ arithmetic operations.
+Lines \ref{line_a2}- \ref{line_a6} are called at most $T \mathcal{N}$ times, and thus require $O(T \mathcal{N} \mathrm{nnz}(A))$ arithmetic operations.
+\item Every time it is run, Line \ref{line_a7} requires computing $f(\theta)$ and $f(z)$, which can be done in 2 calls to the oracle for the value of $f$.
+ It also requires computing $\|z- \theta\|_{\Phi(\theta)}^2$ and $\|\theta- z\|_{\Phi(z)}^2$.
+As $$\|z- \theta\|_{\Phi(\theta)}^2 = (z- \theta)^\top \Phi(\theta) (z- \theta) = (z- \theta)^\top \alpha^{-1}\hat{A}^\top \hat{S}({\theta})^2 \hat{A} (z- \theta),$$
+this can be done in $O(\mathrm{nnz}(A))$ arithmetic operations using standard matrix-vector multiplication.
+For the same reason, computing $\|\theta- z\|_{\Phi(z)}^2$ also takes $O(\mathrm{nnz}(A))$ arithmetic operations.
+ Line \ref{line_a7} is called at most $T$ times, and thus contributes $O(T(\mathrm{nnz}(A) + T_f))$ arithmetic operations to the runtime.
+
+\item Each time they are run, Lines \ref{line_a8} and \ref{line_a9} require computing a Taylor series with at most $O(\mathcal{N}^2)$ terms, with each term requiring $O(\mathcal{N})$ multiplications.
+Lines \ref{line_a8} and \ref{line_a9} are called at most $T$ times and thus require $O(T \mathcal{N}^3)$ arithmetic operations.
+
+\item Line \ref{line_a1}, which computes $\log \det(\hat{A}^\top \hat{A})$, can be accomplished in $O(md^{\omega-1})$ arithmetic operations using dense matrix multiplication.
+Since this step is only run once and $O(md^{\omega-1}) \leq O(T\mathcal{N}(\mathrm{nnz}(A) + d^2))$ arithmetic operations, it does not change the overall runtime by more than a constant factor.
+
+\end{itemize}
+
+\medskip\noindent
+{\em Runtime for all steps:} 
+Thus, the runtime of Algorithm \ref{alg_Soft_Dikin_Walk_sparse} is $O(T\mathcal{N}(T_f + \mathrm{nnz}(A) + d^2)) = O((md + d L^2 R^2) \times  \log^{2.01}(\frac{md +L^2 R^2 +\log(w)}{\delta}) \log(\frac{w}{\delta})) \times (T_f + \mathrm{nnz}(A) + d^2)$ arithmetic operations in the setting where $f$ is $L$-Lipschitz.
+
+In the setting where $f$ is $\beta$-smooth, the number of arithmetic operations is $O(T \mathcal{N}(T_f + \mathrm{nnz}(A) + d^2)) = O((md + d L^2 R^2) \times  \log^{2.01}(\frac{md +\beta R^2 +\log(w)}{\delta}) \log(\frac{w}{\delta})) \times (T_f + \mathrm{nnz}(A) + d^2)$.
+
+\paragraph{Bounding the total variation distance.}
+
+Plugging Lemma \ref{proposition_slack} into Lemma \ref{lemma_HansonWright_bound}, we get that for every $j \in \{1, \ldots, \mathcal{N}\}$,
+\begin{equation} \label{eq_S20}
+    \mathbb{P}\left(|Y_{j} - \mathbb{E}[Y_{j}]| \leq \frac{1}{100}\right) \leq 1- \gamma.
+\end{equation}
+By Proposition \ref{lemma_integral} we have that, 
+\begin{align} \label{eq_trace}
+\mathbb{E}[Y_{j}] &= \mathbb{E}[v^\top (t \hat{A}^\top \hat{S}(\theta)^{-2} \hat{S}(z) \hat{A} + (1-t) \hat{A}^\top \hat{A})^{-1} ( \hat{A}^\top \hat{S}(\theta)^{-2} \hat{S}(z) \hat{A}-   \hat{A}^\top \hat{A})v] \nonumber\\
+&\qquad \qquad+ \log \mathrm{det}(\hat{A}^\top \hat{A})\nonumber\\
+&=\int_0^1 \mathrm{tr}\left(\tau \hat{A}^\top  \hat{S}(\theta)^{-2} \hat{S}(z)  \hat{A} + (1-\tau) \hat{A}^\top \hat{A})^{-1} ( \hat{A}^\top  \hat{S}(\theta)^{-2} \hat{S}(z)  \hat{A}-   \hat{A}^\top \hat{A}\right) \mathrm{d} \tau \nonumber\\
+&\qquad \qquad+ \log \mathrm{det}(\hat{A}^\top \hat{A})\nonumber\\
+&\stackrel{\textrm{Prop. }\ref{lemma_integral}}{=}\log \mathrm{det}(\hat{A}^\top  \hat{S}(\theta)^{-2} \hat{S}(z)  \hat{A}) \nonumber\\
+&=\log \mathrm{det}(\Phi(z)) - \log \mathrm{det}(\Phi(\theta)),
+\end{align}
+where the second equality holds since Algorithm \ref{alg_Soft_Dikin_Walk_sparse} samples the random vector $v \sim N(0,I_{d})$ from the standard Gaussian distribution and the random variable $t \sim \mathrm{unif}([0,1])$ from the uniform distribution on $[0,1]$.
+
+Moreover, by Lemma \ref{lemma_det} we have that
+\begin{align*}
+\mathbb{P}\left(\mathbb{E}[Y_{j}]\geq \frac{9}{10}\right) 
+&\stackrel{\textrm{Eq. }\eqref{eq_trace}}{=}\mathbb{P}\left(\log \mathrm{det}(\Phi(z)) - \log \mathrm{det}(\Phi(\theta))\geq \frac{9}{10}\right)\\
+&\stackrel{\textrm{Lemma }\ref{lemma_det}}{\geq} 1- \frac{1}{100} \gamma.
+\end{align*}
+Next, we show that
+    \begin{equation} \label{eq_S19}
+    \mathbb{P}(0 \leq X \leq 1) \geq 1-2 {\mathcal{N} } 
+ \gamma.
+    \end{equation}
+    and that
+\begin{equation} \label{eq_S18}
+    \left|\mathbb{E}[X] - \frac{\frac{\mathrm{det}(\Phi(z))}{\mathrm{det}(\Phi(\theta))}}{\frac{\mathrm{det}(\Phi(\theta))}{\mathrm{det}(\Phi(z))} + \frac{\mathrm{det}(\Phi(z))}{\mathrm{det}(\Phi(\theta))}} \right| \leq \gamma.
+    \end{equation}
+We first show \eqref{eq_S19} and \eqref{eq_S18} when $\frac{1}{4} \leq Y_{1}  \leq 2 \log(\gamma)$.
+In this case we have by \eqref{eq_S20} that with probability at least $1-\gamma$,
+\begin{equation}\label{eq_S25}
+    \log \mathrm{det}(\Phi(z)) - \log \mathrm{det}(\Phi(\theta) = \mathbb{E}[Y_{1}] \in \left[\frac{1}{4} - \frac{1}{100}, \, \, 2\log\frac{1}{\gamma}\right).
+    \end{equation}
+To show \eqref{eq_S19}, we first note that, by \eqref{eq_S20} we have that, 
+\begin{equation} \label{eq_S22}
+    \mathbb{P}\left(\frac{1}{5} \leq Y_{j} 
+    \leq 3\log\left(\frac{1}{\gamma}\right), \, \, \, \, \forall j\leq \ell \leq {\mathcal{N} }\right) \geq 1-{\mathcal{N} } \gamma.
+\end{equation}
+Thus, with probability at least $1-{\mathcal{N} } \gamma$,
+ \begin{align} \label{eq_S24}
+     X &= 1 + \frac{1}{2}\sum_{k=1}^{2\mathcal{N}-1} (-1)^k \sum_{\ell = 0}^{{\mathcal{N} }}  \frac{1}{\ell !}\prod_{j=1}^\mathcal{\ell}(-2k Y_{j}) \nonumber\\
+&\leq 1 + \frac{1}{2}\sum_{k=1}^{2\mathcal{N}-1} (-1)^k 
+ \sum_{\ell = 0}^{{\mathcal{N} }} \frac{1}{\ell !}\prod_{j=1}^\mathcal{\ell}(-2k \sup_{1\leq j \leq {\mathcal{N} }} Y_{j}) \nonumber\\
+&\leq 1 + \frac{1}{2}\sum_{k=1}^{2\mathcal{N}-1} (-1)^k 
+ \exp(-2k \sup_{1\leq j \leq {\mathcal{N} }} Y_{j})\nonumber\\
+ &\leq 1 + \frac{1}{2}\sum_{k=1}^{2\mathcal{N}-1} (-1)^k 
+ \exp(-2k \sup_{1\leq j \leq {\mathcal{N} }} Y_{j})\nonumber\\
+ &\leq \frac{1}{1+\exp(-\sup_{1\leq j \leq {\mathcal{N} }} Y_{j})} \nonumber\\
+ &\leq 1,
+    \end{align}
+where the fourth inequality holds since
+\begin{equation*}
+    1 + \frac{1}{2}\sum_{k=1}^{2\mathcal{N}-1} (-1)^k 
+ \exp(-2k t) \leq 1 + \frac{1}{2}\sum_{k=1}^{\infty} (-1)^k 
+ \exp(-2k t)  \qquad \qquad \forall t>0,
+\end{equation*}
+and since the infinite series $1 + \frac{1}{2}\sum_{k=1}^{\infty} (-1)^k 
+ \exp(-2k t) = \frac{1}{2} \tanh(\frac{1}{2}t)+1 = \frac{1}{1+e^{-t}}$ has interval of convergence $t\in (0,\infty]$.
+
+Next, we show that with probability at least  $1-{\mathcal{N} } \gamma$,
+ \begin{align} \label{eq_S23}
+     X &= 1 + \frac{1}{2}\sum_{k=1}^{2\mathcal{N}-1} (-1)^k \sum_{\ell = 0}^{{\mathcal{N} }}  \frac{1}{\ell !}\prod_{j=1}^\mathcal{\ell}(-2k Y_{j}) \nonumber\\
+&\geq 1 + \frac{1}{2}\sum_{k=1}^{2\mathcal{N}-1} (-1)^k 
+ \sum_{\ell = 0}^{{\mathcal{N} }} \frac{1}{\ell !}\prod_{j=1}^\mathcal{\ell}(-2k \inf_{1\leq j \leq {\mathcal{N} }} Y_{j})\nonumber\\
+&\geq 1 + \frac{1}{2}\sum_{k=1}^{2\mathcal{N}-1} (-1)^k 
+ \exp(-2k \inf_{1\leq j \leq {\mathcal{N} }} Y_{j})\nonumber\\
+ &= 1 -  \exp(-4 \mathcal{N} \inf_{j \leq \ell \leq {\mathcal{N} }} Y_{j})+ \frac{1}{2}\sum_{k=1}^{2\mathcal{N}} (-1)^k 
+ \exp(-2k \inf_{1\leq j \leq {\mathcal{N} }} Y_{j})\nonumber\\
+ &\geq \frac{1}{1+\exp(-\inf_{1\leq j \leq {\mathcal{N} }} Y_{j})} \nonumber\\
+ &\geq \frac{1}{2} - \exp(-4 \mathcal{N} \inf_{1\leq j \leq {\mathcal{N} }} Y_{j})\nonumber\\
+ &>0,
+    \end{align}
+where the last inequality holds since $ \inf_{1\leq j \leq {\mathcal{N} }} Y_{j} \geq \frac{1}{8}$ with probability at least  $1-{\mathcal{N} } \gamma$ by \eqref{eq_S22}.
+Thus, \eqref{eq_S24}  and \eqref{eq_S23} together imply \eqref{eq_S19}.
+To show \eqref{eq_S18}, we first note that, since $Y_{1}, Y_{2}, \ldots, Y_{\mathcal{N}}$ are i.i.d. random variables, with probability at least  $1-{\mathcal{N} } \gamma$,
+ \begin{align*}
+     \mathbb{E}[X] &= 1 + \frac{1}{2}\sum_{k=1}^{2\mathcal{N}-1} \sum_{\ell = 0}^{{\mathcal{N} }} (-1)^k \frac{1}{\ell !}\prod_{j=1}^\mathcal{\ell}(-2k \mathbb{E}[Y_{j}])\\
+     &= 1 + \frac{1}{2}\sum_{k=1}^{2\mathcal{N}-1} (-1)^k\sum_{\ell = 0}^{{\mathcal{N} }}  \frac{1}{\ell !}\prod_{j=1}^\mathcal{\ell}(-2k (\log \mathrm{det}(\Phi(z)) - \log \mathrm{det}(\Phi(\theta)))\\
+          &= 1 + \frac{1}{2}\sum_{k=1}^{2\mathcal{N}-1} (-1)^k\sum_{\ell = 0}^{{\mathcal{N} }}  \frac{1}{\ell !}(-2k (\log \mathrm{det}(\Phi(z)) - \log \mathrm{det}(\Phi(\theta)))^\ell\\
+      &= \frac{1}{1+\exp(-\log \mathrm{det}(\Phi(z)) - \log \mathrm{det}(\Phi(\theta)))}\\
+      &\qquad \qquad - \frac{1}{2}\sum_{k=1}^{2\mathcal{N}-1} (-1)^k\sum_{\ell = {\mathcal{N} }+1}^{\infty}  \frac{1}{\ell !}(-2k (\log \mathrm{det}(\Phi(z)) - \log \mathrm{det}(\Phi(\theta)))^\ell\\
+      &\qquad \qquad - \frac{1}{2}\sum_{k= 2\mathcal{N}}^{\infty} (-1)^k\sum_{\ell = 0}^{\infty}  \frac{1}{\ell !}(-2k (\log \mathrm{det}(\Phi(z)) - \log \mathrm{det}(\Phi(\theta)))^\ell,\\
+            &= \frac{1}{1+\exp(-\log \mathrm{det}(\Phi(z)) - \log \mathrm{det}(\Phi(\theta)))}\\
+      &\qquad \qquad - \frac{1}{2}\sum_{k=1}^{2\mathcal{N}-1} (-1)^k\sum_{\ell = {\mathcal{N} }+1}^{\infty}  \frac{1}{\ell !}(-2k (\log \mathrm{det}(\Phi(z)) - \log \mathrm{det}(\Phi(\theta)))^\ell\\
+      &\qquad \qquad - \frac{1}{2}\sum_{k= 2\mathcal{N}}^{\infty} (-1)^k\exp(-2k (\log \mathrm{det}(\Phi(z)) - \log \mathrm{det}(\Phi(\theta))),
+     \end{align*}
+     where the fourth equality holds since the infinite series $1 + \frac{1}{2}\sum_{k=1}^{\infty} (-1)^k 
+ \exp(-2k t) = \frac{1}{1+e^{-t}}$ has interval of convergence $t\in (0,\infty]$, and $\log \mathrm{det}(\Phi(z)) - \log \mathrm{det}(\Phi(\theta) \in \left[\frac{1}{4} - \frac{1}{100}, \, \, 2\log(\frac{1}{\gamma})\right)$ by \eqref{eq_S25}.
+Thus,
+ \begin{align*}
+      &\left|\mathbb{E}[X] - \frac{\frac{\mathrm{det}(\Phi(z))}{\mathrm{det}(\Phi(\theta))}}{\frac{\mathrm{det}(\Phi(\theta))}{\mathrm{det}(\Phi(z))} + \frac{\mathrm{det}(\Phi(z))}{\mathrm{det}(\Phi(\theta))}} \right|\\
+     &=\left | \mathbb{E}[X] - \frac{1}{1+\exp(-\log \mathrm{det}(\Phi(z)) - \log \mathrm{det}(\Phi(\theta)))} \right |\\
+     &= \bigg | \frac{1}{2}\sum_{k=1}^{\infty} (-1)^k\sum_{\ell = {\mathcal{N} }+1}^{\infty}  \frac{1}{\ell !}(-2k (\log \mathrm{det}(\Phi(z)) - \log \mathrm{det}(\Phi(\theta)))^\ell\\        
+     &\qquad \qquad + \frac{1}{2}\sum_{k= 2\mathcal{N}}^{\infty} (-1)^k\exp(-2k (\log \mathrm{det}(\Phi(z)) - \log \mathrm{det}(\Phi(\theta))), \bigg |\\
+     &\leq \gamma,
+     \end{align*}
+     since $\mathcal{N} \geq 10\log(\frac{1}{\gamma})$ and $\log \mathrm{det}(\Phi(z)) - \log \mathrm{det}(\Phi(\theta) \in \left[\frac{1}{4} - \frac{1}{100}, \, \, 2\log(\frac{1}{\gamma})\right)$.
+This proves \eqref{eq_S18}.
+Thus, we have shown \eqref{eq_S18} and \eqref{eq_S19} in the setting when $\frac{1}{4} \leq Y_{1}  \leq 2 \log(\gamma)$.
+The proof of  \eqref{eq_S18} and \eqref{eq_S19} when $Y_{1} > \frac{1}{4} $ is identical, except that we use the Taylor series expansion for $\frac{1}{1+e^{-t}} = \frac{1}{2} \tanh(\frac{1}{2}t)+1$ about $0$,  $\frac{1}{1+e^{-t}} = \sum_{\ell=0}^\infty c_\ell t^\ell$ which has interval of convergence $t\in (-1,1)$, in place of the infinite series $1 + \frac{1}{2}\sum_{k=1}^{\infty} (-1)^k 
+ \exp(-2k t) = \frac{1}{2} \tanh(\frac{1}{2}t)+1 = \frac{1}{1+e^{-t}}$ which has interval of convergence $t\in (0,\infty]$.
+
+The proof for \eqref{eq_S18} and \eqref{eq_S19} in the case when $Y_{1} >  2 \log(\frac{1}{\gamma})$ is trivial, as in this case the algorithm sets $X=1$ and $|1- \frac{1}{1+e^{-t}}| \leq \gamma$ for $t > 2 \log(\gamma)$.
+Thus, \eqref{eq_S18} and \eqref{eq_S19} together imply that 
+ \begin{equation}\label{eq_W1}
+      \left|\mathbb{E}[\min(\max( X, 0), 1)] - \frac{\frac{\mathrm{det}(\Phi(z))}{\mathrm{det}(\Phi(\theta))}}{\frac{\mathrm{det}(\Phi(\theta))}{\mathrm{det}(\Phi(z))} + \frac{\mathrm{det}(\Phi(z))}{\mathrm{det}(\Phi(\theta))}} \right| \leq 3\mathcal{N} \gamma.
+\end{equation}
+Let $q_i = \mathbb{E}[\frac{1}{2}\min(\max( X, 0), 1)] \times \min \left (\frac{e^{-f(z)}}{e^{-f(\theta)}} \times e^{\|z- \theta\|_{\Phi(\theta)}^2 - \|\theta- z\|_{\Phi(z)}^2}, \, \, 1 \right)$ denote the probability that the proposed step $z$ is accepted at any iteration $i$ of Algorithm \ref{alg_Soft_Dikin_Walk_sparse}.
+Then for every $i \in \{1,\ldots, T\}$, we have by \eqref{eq_W1} that
+ \begin{equation}\label{eq_W1b}
+      \left|q_i - \frac{1}{2} \frac{\frac{\mathrm{det}(\Phi(z))}{\mathrm{det}(\Phi(\theta))}}{\frac{\mathrm{det}(\Phi(\theta))}{\mathrm{det}(\Phi(z))} + \frac{\mathrm{det}(\Phi(z))}{\mathrm{det}(\Phi(\theta))}} \times \min \left (\frac{e^{-f(z)}}
+{e^{-f(\theta)}} \times e^{\|z- \theta\|_{\Phi(\theta)}^2 - \|\theta- z\|_{\Phi(z)}^2}, \, \, 1 \right) \right| \leq 3\mathcal{N} \gamma
+\end{equation}
+Let $\mathcal{X}_0, \mathcal{X}_1, \ldots$ be the Markov chain where at the beginning of each iteration $i+1$ of  Algorithm \ref{alg_Soft_Dikin_Walk_sparse}, $\mathcal{X}_i = \theta$.
+Moreover, let $\mathcal{Y}_0, \mathcal{Y}_1, \ldots$ be the Markov chain defined in Algorithm \ref{alg_2}.
+We define a probabilistic coupling between these two Markov chains.
+First, define a coupling between the random vector $\xi \equiv \xi_i$ sampled at every iteration $i+1$ of Algorithm \ref{alg_Soft_Dikin_Walk_sparse} and the random vector $\zeta_i$ sampled at every iteration $i$ of Algorithm \ref{alg_2}, such that $\xi_i = \zeta_i$ for all $i \geq 0$.
+Then, by \eqref{eq_W1b}, there exists a coupling between the Markov chains $\mathcal{X}_0, \mathcal{X}_1, \ldots$  and $\mathcal{Y}_0, \mathcal{Y}_1, \ldots$ such that with probability at least $1- 3 T\mathcal{N} \gamma$,
+\begin{equation}\label{eq_W2}
+    \mathcal{X}_i = \mathcal{Y}_i \qquad \forall i \in \{0,1,\ldots, T\}.
+\end{equation}
+Thus, letting $\mu$ denote the distribution of the output $\mathcal{X}_T$ of Algorithm \ref{alg_Soft_Dikin_Walk_sparse}, and letting  $\nu_T$ denote the distribution of $\mathcal{Y}_T$, we have by \eqref{eq_W2} that
+\begin{equation}\label{eq_W3}
+    \| \mu -  \nu_T \|_{\mathrm{TV}} \leq  3 T\mathcal{N} \gamma \leq \frac{1}{2}\delta.
+\end{equation}
+Moreover, by Lemma \ref{Lemma_TV_output}, we have that the distribution $\nu_T$ of $\mathcal{Y}_T$ satisfies
+\begin{equation}\label{eq_W4}
+    \|\nu_T - \pi \|_{\mathrm{TV}} \leq \frac{1}{2} \delta.
+\end{equation}
+Thus, we have that the distribution $\mu$ of the output of Algorithm \ref{alg_Soft_Dikin_Walk_sparse} satisfies
+\begin{equation*}
+    \|\mu - \pi \|_{\mathrm{TV}} \leq \| \mu -  \nu_T \|_{\mathrm{TV}} + \|\nu_T - \pi \|_{\mathrm{TV}} \leq \delta.
+\end{equation*}
+\end{proof}
+
+
+
+\section{Conclusion}
+
+Our main result improves on the runtime bounds of a line of previous works for the problem of sampling from a log-Lipschitz or log-smooth log-concave distribution on a polytope (Table 1).
+Key to our result is showing that the regularized log-barrier Hessian changes slowly at each step of the soft-threshold Dikin walk, which allows us to deploy fast linear solvers from the interior point method literature to reduce the per-iteration complexity of the walk.
+
+The use of fast linear solvers allows us to achieve a per-iteration complexity $\mathrm{nnz}(A) + d^2$ for the soft-threshold Dikin walk that is nearly linear in the input complexity of the problem when $A$ is a dense matrix; when $A$ is sparse, the dependence of the per-iteration complexity on $\mathrm{nnz}(A)$ is nearly-linear as well.
+On the other hand, it would be interesting to see if the $d^2$ term can removed by deploying a different choice of fast linear solver for the Hessian.
+
+Finally, while the fastest-known algorithms for minimizing linear functions on a polytope $K$ have runtime (nearly) equal to the matrix multiplication time   \cite{cohen2021solving, jiang2021faster}, the best runtime bounds for sampling from a distribution $\pi \propto e^{-f}$ on a polytope (even when $f$ is uniform) are a larger polynomial in the dimension $d$.
+Thus, it would be interesting to see if the overall runtime (i.e., the number of steps times the per-step complexity) of sampling methods can be improved to match the runtime of linear programming methods.
+
+
+
+
+

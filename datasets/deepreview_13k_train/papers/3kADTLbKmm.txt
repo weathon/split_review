@@ -1,0 +1,351 @@
+\title{SparseDM: Toward Sparse Efficient Diffusion Models}
+
+\begin{abstract}
+Diffusion models represent a powerful family of generative models widely used for image and video generation. % extensively used in data generation tasks and are recognized as one of the best generative models. 
+However, the time-consuming deployment, long inference time, and requirements on large memory hinder their applications on resource constrained devices.
+In this paper, we propose a method based on the improved Straight-Through Estimator to improve the deployment efficiency of diffusion models. 
+Specifically, we add sparse masks to the Convolution and Linear layers in a pre-trained diffusion model, then transfer learn the sparse model during the fine-tuning stage and turn on the sparse masks during inference.
+Experimental results on a Transformer and UNet-based diffusion models demonstrate that our method reduces MACs by $50\%$ while increasing FID by only 0.44 on average. 
+Sparse models are accelerated by approximately 1.2x on the GPU.
+Under other MACs conditions, the FID is also lower than 1 compared to other methods.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Diffusion Models (DM) \citep{song2021denoising,karras2022elucidating} have been one of the core generative modules in various computer vision tasks. Generally, they are composed of two parts: a forward/diffusion process that perturbs the data distribution to learn the time-dependent score functions, and a reverse/sampling process that generates data samples from a prior distribution in an iterative manner. Though diffusion models have advantages on both sample quality and mode coverage over other competitors, their slow inference speed and heavy computational load during the inference process inevitably restrict their applications on most mobile devices.
+To reduce the computational load in the inference process of diffusion models, various methods have been proposed to minimize the number of inference steps, such as the training-free samplers \citep{bao2021analytic, zhao2023unipc, lu2022dpm, lu2023dpm, zheng2023dpm} and the distillation methods \citep{salimans2022progressive,luo2023lcm,luo2023latent}. However, their sample quality is still unsatisfactory as a few sampling steps cannot faithfully reconstruct the high-dimensional data space, e.g., the image or video samples. 
+This problem is even more pronounced on mobile devices with limited computing capabilities.
+Simultaneously, a few works explore reducing the Multiple-Accumulate operations (MACs) at each inference step \citep{bolya2023token,fang2023structural}. However, their work cannot be accelerated on GPUs.
+Since DM is an intensive model parameter calculation, NVIDIA Ampere architecture GPU supports a 2:4 sparse (4-weights contain 2 non-zero values) model calculation, which can achieve nearly 2 times calculation acceleration \citep{pool2021channel,mishra2021accelerating}.  
+Although structural pruning \citep{fang2023structural} has been used in DM, 2:4 structured sparsity inference has not been implemented.
+Our method aims to reduce MACs at each step through 2:4 and other scale sparsity.
+Recently, several popular computational architectures, such as NVIDIA Ampere architecture and Hopper GPUs, have developed acceleration methods for model inference and have been equipped with fine-grained structured sparse capabilities. A common requirement of these acceleration techniques is the 2:4 sparse mode, which only preserves 2 of the 4 adjacent weights of a pre-trained model, \textit{i.e.}, requires a sparsity rate of $50\%$. Given this sparsity, the acceleration techniques only process the non-zero values in matrix multiplications, theoretically achieving a 2x speedup. In essence, a diffusion model supporting the 2:4 sparsity mode can reduce $50\%$ computational load at each inference step, which is valuable when considering the iterative refinement process in a generation. To the best of our knowledge, previous works have not explored maintaining the sample quality of diffusion models with a 2:4 or other scale sparsity mode, which motivates us to present the techniques in this work.
+
+We use a state-of-the-art Transformer-based DM, named U-ViT \citep{bao2023all}, to analyze the shortcomings of existing 2:4 structured sparse tools.
+Also, we manually design a half-size DM network to test FID and MACs.
+From Table \ref{tab:compare}, we can see that simply reducing the U-ViT model parameters by nearly $50\%$ may cause FID to collapse catastrophically. 
+Automatic Sparsity (ASP) \citep{pool2021channel,mishra2021accelerating}) for model sparse training consumes a lot of GPU time, but FID is poor.
+Therefore, for DM, we need to redesign the pruning method to reduce the amount of calculation and maintain FID as much as possible.
+\input{results2.3.table} 
+This paper proposes a new method for implementing 2:4 structured sparsity and other scale sparse inference.
+(1) Masks with different sparsity rates are applied to convolutional and linear layers.
+(2) Sparse regularization is added to back-propagation, improving the STE method to train sparse models.
+(3) Knowledge is gradually transferred from dense models to sparse models to improve models' performance with high sparsity rates.
+Our contributions can be listed as follows: 
+\begin{itemize}
+\item We propose a transfer learn sparse masks method that achieves 2:4 structured sparse inference and other scale sparse pruning for DMs with a Transformer or UNet backbones.
+\item We conduct experiments on four datasets. The average FID of 2:4 sparse DM is only increased by 0.44 compared with the dense model. The inference acceleration on the GPU is approximately 1.2x.
+\item Testing nine scales, with similar MACs for each scale, our sparse inference FID is $1$ lower than other methods.
+\end{itemize}
+
+
+\section{Problem Formulation}
+
+\subsection{Diffusion Models}
+The diffusion model is divided into a forward process and a backward process. 
+The forward process is a step-by-step process of adding noise to the original image to generate a noisy image,
+generally formalized as a Markov chain process.
+The reverse process is to remove noise from a noisy image and restore the original image as much as possible.
+Gaussian mode was adopted to approximate the ground truth reverse transition of the Markov chain.
+The training process of diffusion models is the process of establishing noise prediction models.
+The loss function of DM is minimizing a noise prediction objective.
+The forward process is formalized as:
+\begin{equation}
+    q(\vx_{1:T}|\vx_0) = \prod_{t=1}^T q(\vx_t|\vx_{t-1}),
+    \label{equ:dm_forward}
+\end{equation}
+where $\vx_t$ is input data at $t$.
+In the backward process, the mean network of the denoising transition probability is formalized as:
+\begin{equation}
+    \vmu_t^*(\vx_t) = \frac{1}{\sqrt{\alpha_t}} \left(\vx_t - \frac{\beta_t}{\sqrt{1-\overline{\alpha}_t}} \E[\vepsilon|\vx_t]\right),
+    \label{equ:dm_backward}
+\end{equation}
+where $\alpha_t$ and $\beta_t$ are the noise schedule at $t$, $\alpha_t+\beta_t=1$. $\overline{\alpha}_t = \prod_{i=1}^t \alpha_i$, and $\vepsilon$ is the standard Gaussian noises added to $\vx_t$.
+The DM training is a task of minimizing the noisy prediction errors, expressed as $\min_{\mathcal{W}} \mathcal{L}(\mathcal{W};\mathcal{D})$, 
+where $\mathcal{D}$ is dataset, $\mathcal{L}$ is loss function, $\mathcal{W}$ is dense weights.
+The DM inference, data generation, is expressed as $\vy_t = \mathcal{F}(\mathcal{W}; \vx_t)$, 
+where $\mathcal{F}$ is trained DM, $\vy_t$ is the output of DM inference.
+
+\subsection{Sparse Pruning}
+Sparse network computation is an effective method to reduce MACs in deep networks and accelerate computation.
+Currently, one-shot sparse training and progressive sparse training are commonly used.
+
+The one-shot training method is easy to use, and the steps are as follows \citep{mishra2021accelerating,pool2021channel}:
+Train a regular dense model.
+Prune the weights on the fully connected and convolutional layers in a 2:4 sparse mode.
+Retrain the pruned model.
+The one-shot pruning is expressed as:
+\begin{equation}
+   \widetilde{\mathcal{W}} = \mathcal{W} \odot \mathcal{M},
+  \label{equ:one_shot_purning}
+\end{equation}
+where, $\widetilde{\mathcal{W}}$ is the sparse weight after the dense weight $\mathcal{W}$ is pruned, recorded as 
+$\widetilde{\mathcal{W}} \leftarrow \text{Pruning}(\mathcal{W})$, $\mathcal{M}$ is a 0-1 mask, $\mathcal{M}$ is the ($N$:$M$) sparse mask ($M$-weights contain $N$ non-zero values), $\odot$ represents element-wise multiplication.
+
+One-shot sparse pruning can cover most tasks and achieve speedup without losing accuracy. However, for some challenging tasks that are sensitive to changes in weight values, doing sparse training for all weights at once will result in a large amount of information loss \citep{han2015learning}. 
+With the same number of tuning iterations, progressive sparse training can achieve higher model accuracy than one-shot sparse training. 
+Suppose there are $k$ masks $[\mathcal{M}_1, \mathcal{M}_2, ..., \mathcal{M}_k]$, the progressive sparse process is formalized as:
+\begin{equation}
+   \widetilde{\mathcal{W}} = \mathcal{W} \odot \mathcal{M}_i , ~~ \mathcal{M}_i \in [\mathcal{M}_1, \mathcal{M}_2, ..., \mathcal{M}_k].
+  \label{equ:progressive_pruning}
+\end{equation}
+The reason why traditional progressive sparse training methods work well is to reuse the knowledge of dense models as much as possible.
+However, this progressive sparse training method has only proven effective when the training data distribution is stable, such as when training a CNN classification model.
+\subsection{Distribution Shift on DM Training and Sparse Pruning}
+Robust Fairness Regularization (RFR) \citep{jiang2024chasing} improved that distribution shift can be transformed as data perturbation, and data perturbation and model weight perturbation are equivalent for classifier models. Assuming that the perturbation of the label is not considered, the equivalent of data perturbation and model weight perturbation is formalized as:
+\begin{equation}
+    \mathbb{E}_{\delta_\mathcal{D}(\mathcal{D})}\mathbb{E}_{(\mathcal{D})\sim \mathcal{P}}[\mathcal{L}(\mathcal{F}_{\mathcal{W}}(\mathcal{D}+\delta_{\mathcal{D}}(\mathcal{D}))] = \mathbb{E}_{(\mathcal{D})\sim \mathcal{P}}[\mathcal{L}(\mathcal{F}_{\mathcal{W}+\Delta\mathcal{W}}(\mathcal{D})).
+    \label{equ:equivalent}
+\end{equation}
+where the training dataset $\mathcal{D}$ with distribution $\mathcal{P}$, suppose the training dataset is perturbed with data perturbation $\delta$, and the neural network is given by $\mathcal{F}_{\mathcal{W}}(\cdot)$, for the general case, there exists model weight pruned as perturbation $\Delta\mathcal{W}$, so that the training loss on perturbed training dataset is the same with that for model weight perturbation $\Delta\mathcal{W}$ on training distribution.
+
+The training process of DMs generally involves only the distribution shift of the noisy data.
+Existing sparse pruning methods generally do not consider the distribution shift of noisy data but only the model's weight changes.
+Inspired by RFR's conclusions, we convert the distribution shifts caused by changes in model weights into distribution shifts caused by data changes for the DM's training process. 
+The DM's sparse ratio is fixed, and then the knowledge of the dense model is transferred to the sparse model.
+
+
+\section{Sparse Finetuning DM}
+
+In this section, we introduce our proposed framework in detail. We start with the overall framework of our proposal. Then, we present the finetuning DM with sparse masks to reduce MACs and prepare for 2:4 sparse GPU acceleration. Moreover, we introduce the training and inference with sparse masks to enhance the DM. 
+Fig.~\ref{fig:overview} shows an overview of the proposed framework. 
+\begin{figure*}[!ht]
+    \centering
+    \includegraphics[scale=0.45]
+    {images/overall14.pdf}
+    \caption{Framework Overview. This includes the process of transfer learning sparse models.}
+    \label{fig:overview}
+\end{figure*}
+\subsection{Straight-Through Estimator for Sparse Training}
+A straightforward solution for training an $N$:$M$ sparsity network is to extend the Straight-through Estimator (STE)~\citep{bengio2013estimating} to perform online magnitude-based pruning and sparse parameter updating. The concrete formula is described as:
+\begin{equation}
+   \mathcal{W}_{t+1} \leftarrow \mathcal{W}_{t} - \gamma_t g(\widetilde{\mathcal{W}^{(N:M)}_t})
+  \label{equ:finetuning}
+\end{equation}
+where $\gamma$ is learning rate, and $g$ is the gradient.  
+In STE, a dense network is maintained during the training process. 
+In the forward pass, the dense weights $\mathcal{W}$ are projected into sparse weights
+$\widetilde{\mathcal{W}^{(N:M)}}=S(\mathcal{W}, N, M)$ 
+satisfying $N$:$M$ sparsity, and here $S(\cdot)$ is a projection function. The sparse DM training task is expressed as:
+\begin{equation}
+    \min_{S(\mathcal{W}, N, M)} \mathcal{L}(\mathcal{W};\mathcal{D}) 
+    \label{equ:sparse_training}
+\end{equation}
+The sparse DM inference is expressed as:
+\begin{equation}
+\vy_t^{(N:M)} = \mathcal{F}(\widetilde{\mathcal{W}^{(N:M)}}; \vx_t)
+\label{equ:sparse_inference}
+\end{equation}
+We incorporate sparse mask information into the backward propagation process to mitigate the negative impact of the approximate gradient calculated by vanilla STE.
+The updated formula is modified as follows:
+\begin{equation}
+\mathcal{W}_{t+1} \leftarrow \mathcal{W}_{t} - \gamma_t \left(g(\widetilde{\mathcal{W}^{(N:M)}_t}) + \lambda_W (\mathcal{W}_{t} - \widetilde{\mathcal{W}^{(N:M)}_t})\right)
+  \label{equ:srfinetuning}
+\end{equation}
+where $\lambda_W$ is a tunable hyperparameter.
+
+Traditional progressive sparse training works well for highly sparse model training \citep{han2015learning,pool2021channel}. However, its training data distribution does not change.
+According to the analysis of the two distribution shifts in Section 2.3, only one distribution shift is usually optimized when training using stochastic gradient descent or its improved algorithms.
+The optimization will fail if two distribution shifts are optimized simultaneously, such as switching the sparsity rate when training a DM.
+Directly training an extremely sparse model, such as 1:32 ($\frac{1}{32}=0.03125$) sparsity, initialized by dense model weight and using extremely sparse weight gradients for reverse propagation may cause the sparse model to collapse. In this process, knowledge of the dense model is easily lost.
+
+\subsection{Transfer Learn Sparse Diffusion Models}
+
+To train a highly sparse DM from a dense DM, we fix the sparsity rate during DM training and transfer the knowledge to the sparse model via samples generated by the dense model.
+This method can accelerate the sparse training of DM and reuse the knowledge of the dense model as much as possible.
+This method does not change the number of sampling steps used to generate samples. 
+The following is a formal description of progressive knowledge transfer.
+$\vx_0$ is the data used to train DM.
+During training, a sparse neural network $\mathcal{F}_\mathcal{W}(\vx_t, t)$ is trained to predict the noise in $\vx_t$ w.r.t. $\vx_0$ by minimizing the L2 loss between them. 
+The loss is formulated as follows:
+\begin{equation}\label{eq:diff_loss}
+    \mathcal{L}_\mathrm{diff} := ||\bm{\epsilon}_t - \mathcal{F}_\mathcal{W}(\vx_t, t)||_2^2.
+\end{equation} 
+The overall loss function of sparse training comprises the original dense task loss, a diffusion loss that optimizes the diffusion model. It can be formulated as:
+\begin{equation} \label{eq:overall_loss}
+    \mathcal{L}_\mathrm{sparse}^i = \lambda_{1} \mathcal{L}_\mathrm{dense} + \lambda_{2} \mathcal{L}_\mathrm{diff}, ~~ i \in [1,k]
+\end{equation}
+where $\lambda_{1}$ and $\lambda_{2}$ are hyper-parameters to balance the losses, with range of $[0,1]$, and $k$ is the sparse mask number. When training a sparse model, especially extremely sparse models, we will select a teacher model, such as a dense or sparse model, and adjust the values of $\lambda_{1}$ and $\lambda_{2}$.
+
+To achieve 2:4 sparse GPU acceleration, the current sparse training method is to directly train from a dense model with a sparsity rate of 0 to a sparse model with a sparsity rate of $50\%$, which can easily cause information loss. Due to the lengthy training process aimed at obtaining $50\%$ of the sparse model, we adopt a progressive sparse training process, ensuring we can obtain $50\% $ of the sparse model with minimal information loss. We add progressive sparse masks to existing STE-based methods. The progressive sparse DM training task is expressed as follows:
+\begin{equation}
+    \min_{S(\mathcal{W} \odot \mathcal{M})}
+    \mathcal{L}(\mathcal{W};\mathcal{D};[\mathcal{M}_1, \mathcal{M}_2, ..., \mathcal{M}_k]), 
+    \label{equ:progressive_training}
+\end{equation}
+The projection function $S(\cdot)$, which is non-differentiable during back-propagation, generates the $N$:$M$ sparse sub-network on the fly. To get gradients during back-propagation, STE computes the gradients of the sub-network $g(\widetilde{\mathcal{W}}) = \bigtriangledown_{\widetilde{\mathcal{W}}}   \mathcal{L}(\widetilde{\mathcal{W}};\mathcal{D})$
+based on the sparse sub-network $\widetilde{\mathcal{W}}$, 
+which can be directly back-projected to the dense network as the approximated gradients of the dense parameters. The approximated parameter update rule for the dense network can be formulated as:
+\begin{equation}
+\mathcal{W}_{t+1} \leftarrow \mathcal{W}_{t} - \gamma_t g(\widetilde{\mathcal{W}^{(N_i:M_i)}_t}), ~~ i \in [1,k]
+  \label{equ:progressive_finetuning}
+\end{equation}
+This STE-based method could be easily improved by sparse mask regularization as follows: 
+\begin{equation}
+   \mathcal{W}_{t+1} \leftarrow \mathcal{W}_{t} - \gamma_t \left(g(\widetilde{\mathcal{W}^{(N_i:M_i)}_t}) + \lambda_W (\mathcal{W}_t - \widetilde{\mathcal{W}^{(N_i:M_i)}_t})\right),  ~~ i \in [1,k]
+  \label{equ:sr-progressive_finetuning}
+\end{equation}
+\subsection{2:4 Sparse Mask for Sampling on GPU}
+The structured sparse function provides fully connected layers and convolutional layers with 2:4 sparse weights to achieve 2:4 sparse acceleration on the GPU. If their weights are pruned ahead of time, these layers can be accelerated using structured sparse functions on the GPU. 
+To test real inference acceleration on an NVIDIA GPU, we used the 2:4 sparse operator in the acceleration library provided by NVIDIA. NVIDIA Ampere architecture GPUs have implemented CUDA operators to accelerate the multiplication of such matrices.
+2:4 sparsity inference is expressed as:
+\begin{equation}
+   \vy^{(2:4)}_t = \mathcal{F}(\widetilde{\mathcal{W}^{(2:4)}}; \vx_t).
+  \label{equ:inference_2_4}
+\end{equation}
+Transposable masks \citep{hubara2021accelerated} is one of the critical technologies for NVIDIA Ampere architecture GPUs to accelerate sparse matrices.
+Transposable masks suggest that a weight matrix and its transpose can be simply pruned by multiplying binary masks, so the backward pass shares the same sparse weight matrix with the forward pass. 
+
+
+\section{Results and Discussion}
+
+In this section, we will compare and discuss the different sparsity rate optimization results and some ablation study results.
+\subsection{Experimental Settings}
+\textbf{Evaluation Metrics.} 
+In this paper, we concentrate primarily on two types of metrics:
+The efficiency metric is MACs;
+The quality metric is FID, which Equ. (\ref{equ:fid}) calculates. 
+\begin{equation}
+    FID_{(x,g)}=\|\mu_x - \mu_g \|^2_2 + T_r(\sigma_x + \sigma_g - 2(\sigma_x\sigma_g)^{0.5}). 
+    \label{equ:fid}
+\end{equation}
+where $T_r$ represents the trace of the matrix. $x$ and $g$ represent real pictures and generated pictures, $\mu$ represents the mean, and $\sigma$ is the covariance matrix.
+We generated 50,000 images and calculated FID together with the original images.
+
+\textbf{Baseline Methods.}
+We compare the performance of our method with the following baseline algorithm at 2:4 or other sparsity.
+Diff-Pruning \citep{fang2023structural} is a method of structural pruning of diffusion models.
+ASP (Automatic SParsity) \citep{pool2021channel,mishra2021accelerating} is a tool that enables 2:4 sparse training and inference for PyTorch models provided by Nvidia.
+Nvidia developed a simple training workflow that can easily generate a 2:4 structured sparse network that matches the accuracy of the dense network.
+STE-based Pruning \citep{bengio2013estimating,zhang2022learning} only uses sparse masks for training and inference.
+To compare the performance of other sparse masks, we give the results of inference with different sparsity rates.
+Finally, we provide the ablation study results of STE-based for the training process and traditional progressive sparse training.
+We give the ablation study results of untrained and STE-trained masks for the inference process.
+\subsection{Result Comparison}
+\textbf{2:4 Sparsity Results.}
+\input{results13.table}  % revise
+We experimented with four datasets (CIFAR10, CelebA, MS COCO 2014, and ImageNet) and three resolutions (32$\times$32, 64$\times$64, and 256$\times$256) on Transformer-based and UNet-based DMs. 
+We reduced the computational load by approximately $50\%$, and the FID only increased by 0.44 on average.
+The higher the resolution, especially for models of similar sizes, the better the FID effect, such as U-ViT on CIFAR10 32$\times$32 and CelebA 64$\times$64.
+This way, our method is more suitable for model acceleration in high-resolution and high-fidelity image generation.
+
+In addition to changes in FID, it is also important to intuitively evaluate the data generated by the sparse acceleration model.
+From the generated images in Fig. \ref{fig:samples}, it can be seen that there is almost no difference between the images generated by our accelerated model and the images generated by the original model due to a slight change in FID.
+\begin{figure*}[t]
+\centering
+\subfigure[MS-COCO 256$\times$256]{\includegraphics[width=0.24\linewidth]{images/mscoco256_2.png}}
+\subfigure[ImageNet 256$\times$256]{\includegraphics[width=0.24\linewidth]{images/imagenet256_2.png}} 
+\subfigure[CIFAR10 32$\times$32]{\includegraphics[width=0.24\linewidth]{images/c1032.png}}
+\subfigure[CelebA 64$\times$64]{\includegraphics[width=0.24\linewidth]{images/celeba64.png}}
+\caption{Image generation results of 2:4 sparse U-ViT: selected samples on MS-COCO 256$\times$256, ImageNet 256$\times$256, on CIFAR10 32$\times$32, and CelebA 64$\times$64.}
+\label{fig:samples}
+\end{figure*}
+\input{results_gpu.tex}
+Based on the theoretical acceleration results of $50\%$, Table \ref{tab:acceleration_gpu} shows the actual acceleration results of testing the 2:4 sparse operator on the GPU, which is approximately 1.2x.
+The acceleration result is defined as the ratio between the running of a dense model and a sparse model in the same setting. The acceleration ratio should almost be the same across all datasets, and the weights have nothing to do with this. 
+There are two significant hyper-parameters of the experiment: mlp\_ratio, which sets the dimension of the MLP layer according to the attention layer dimension, and patch\_size, which sets the sequence length for attention computation. 
+Based on experimental experience, the ratio of sequence length to header dimension affects the speedup ratio.
+Some other hyper-parameters are head\_dimension is 1024, num\_head is 8, and depth is 1. 
+In the above experiments, we only used the most primitive acceleration of 2:4 sparsity provided by PyTorch. Defining more advanced acceleration operators, such as \citep{hu2024accelerating}, provides further acceleration solutions. If we can integrate these methods into our model, our model can achieve faster training and inference.
+\textbf{Other Sparsity Results.}
+To better understand the performance of our sparse training method, except for the $50\%$ sparsity ratio of 2:4, we have also conducted experiments on other sparsity ratios. Since the ASP method is a sparsity tool provided by Nvidia for GPU hardware acceleration, no other sparsity ratios are provided. The following is mainly a comparison of different sparsity levels with other methods. % Diff-Pruning.
+
+Fig. \ref{fig:sparse_inference}(a) shows the effect of different sparsity ratios on FID. We evaluated ten sparsity ratios with 32:32, 31:32, 15:16, 7:8, 3:4, 2:4, 1:4, 1:8, 1:16, and 1:32.
+As shown in this figure, it does not mean that the greater the sparsity, the better the FID. For example, the sparsity of 31:32 ($\frac{31}{32}=0.96875$) and the sparsity of 15:16 ($\frac{15}{16}=0.9375$), which is higher than the FID of 7:8 with a sparsity of ($\frac{7}{8}=0.875$). In addition to GPU hardware acceleration, the sparsity ratio 2:4 also achieves good FID, proving the 2:4 sparse mask training and inference effectiveness.
+
+Except for the 2:4 sparsity ratio, Fig. \ref{fig:sparse_inference}(c) shows that our method achieves significantly lower FID than the Diff-Pruning method at different sparse ratios on CIFAR10 and CelebA64.
+\begin{figure*}[!ht]
+    \centering
+    \subfigure[The relationship between FID and mask sparsity ratio.]{\includegraphics[width=0.32\textwidth, height=0.16\textheight]{images/fid_sparse_ratio2.pdf}}\
+    \subfigure[Comparison between traditional progressive and fixed sparse training.]{\includegraphics[width=0.32\textwidth, height=0.16\textheight]{images/progress_training7.pdf}}\
+    \subfigure[Comparison of FID, MACs trade-off.]{\includegraphics[width=0.32\textwidth, height=0.16\textheight]{images/fid_macs5.pdf}} \   %   
+     \subfigure[Comparison of 2:4 sparse training process.]{\includegraphics[width=0.32\textwidth, height=0.16\textheight]{images/training_ste_ours3.pdf}}\
+    \subfigure[Comparison of FID, MACs trade-off.]{\includegraphics[width=0.32\textwidth, height=0.16\textheight]{images/ablation_fid_macs3.pdf}}  \ 
+    \subfigure[Comparison between the untrained, STE-trained and our mask.]{\includegraphics[width=0.32\textwidth, height=0.16\textheight]{images/inference_diff_masks4.pdf}}
+    \caption{The comparison of sparsity results.}
+    \label{fig:sparse_inference}
+\end{figure*}
+\subsection{Ablation Study}
+Our method involves performing sparse mask fine-tuning on the existing trained model. Masks need to be trained during the training process. We designed three ablation experiments to demonstrate better our method design's rationality and the necessity of each step. The first one is the STE-based method. The second one is traditional progressive sparse training of DM. The last one
+involves fixing the mask during the training process and not performing sparse training.
+
+\textbf{STE Sparse Training.}
+As shown in Fig. \ref{fig:sparse_inference}(d), on datasets CIFAR10 and CelebA64, the learning curve of STE converges significantly slower than our method, mainly because our sparse model is trained with knowledge transfer.
+As shown in Fig. \ref{fig:sparse_inference}(e), STE's results are worse than ours, mainly because our method adds sparse mask information during back-propagation. At high compression ratios, such as 1:32, transfer learn sparse masks also plays an important role.
+
+\textbf{Traditional Progressive Sparse Training.} As shown in Fig. \ref{fig:sparse_inference}(b), DM is trained on dataset CIFAR10. Training after switching sparse masks for the first time is almost ineffective.
+Every 100,000 training steps, the sparsity of masks is increased for progressive sparse training.
+The traditional progressive sparse training does not work well on the diffusion model, especially when switching the sparsity rate every time. It is equivalent to training stopped.
+However, the fixed sparse mask can be continuously trained until convergence.
+This comparison shows that simultaneously transforming the data and model distribution will fail DM training, prompting us to propose a new method for gradually sparsely training DMs.
+
+\textbf{Sparse Mask Inference.} 
+Unlike our trained masks, we generate untrained sparse masks for sparse pruning diffusion models. 
+Dense model weights are imported into the sparse model, and the sparse model is not trained.
+As shown in Fig. \ref{fig:sparse_inference}(f), on dataset CIFAR10, 
+the untrained mask's result is the worst at all MACs conditions because the mask did not participate in training. 
+The STE-trained mask is worse than ours because the mask did not transfer knowledge from dense model.
+Compared to the STE-trained masks, our method achieves 1 less FID at 9 sparsity rates.
+
+
+\section{Related Work}
+
+\subsection{N: M Sparsity}
+A neural network with {$N$:$M$} sparsity ($M$-weights contains $N$ non-zero values) satisfies that, in each group of $M$ consecutive weights of the network, there are at most $N$ weights have non-zero values \citep{zhou2021learning,chmiel2022optimal}. 
+APEX's Automatic SParsity (ASP) \citep{pool2021channel,mishra2021accelerating}) is a 2:4 sparse tool provided by NVIDIA.
+This tool obtains a 2:4 sparse network and can achieve nearly 2x runtime speedup on NVIDIA Ampere and Hopper architecture GPUs \citep{nvidia2020}.
+A provable and efficient method for finding N: M transposed masks for accelerating sparse neural training \citep{hubara2021accelerated}.
+Compared with dense networks, sparse network training has gradient changes, and methods such as STE \citep{bengio2013estimating} should be used to improve training performance. In the forward stage, sparse weight is obtained by pruning dense weight. In the backward stage, the gradient w.r.t. sparse weight will be directly applied to dense weight.
+SR-STE \citep{zhang2022learning} enhances the backward pass information by integrating the sparse weight of the forward pass into the backward pass.
+DominoSearch \citep{sun2021dominosearch} found mixed N: M sparsity schemes from pre-trained dense, deep neural networks to achieve higher accuracy than the uniform-sparsity scheme with equivalent complexity constraints.
+The N: M sparse method is also used in SparseGPT \citep{frantar2023sparsegpt} to accelerate the LLM generation model GPT.
+Although many N: M sparse methods exist, none have been proven effective for sparse DM.
+\subsection{Diffusion Model Pruning}
+Pruning is one of the most used methods to reduce the calculation time of DNN, including DM. 
+The pruning method was divided into structured pruning and unstructured pruning. 
+Structural pruning aims to physically remove a group of parameters, thereby reducing the size of neural networks. In contrast, unstructured pruning involves zeroing out specific weights without altering the network structure  \citep{fang2023depgraph}. 
+Sparsity can reduce the memory footprint of DM to fit mobile devices and shorten training time for ever-growing networks  \citep{hoefler2021sparsity}.
+Pay attention to features and selection of useful features for the target dataset \citep{wang2020pay}, which can also reduce computational complexity.
+The parameter-grouping patterns vary widely across different models, making architecture-specific pruners, which rely on manually designed grouping schemes, non-generalizable to new architectures. Depgraph  \citep{fang2023depgraph}  can tackle general structural pruning of arbitrary architecture.
+Structured sparsity was also used for large language models \citep{ma2023llm,frantar2023sparsegpt,guo2023compresso}.
+Because Transformer has been proven to outperform the other networks in multiple applications, including DM. 
+ToMe \citep{bolya2023token} merge redundant tokens of Transformer.
+There are also proposals for early exiting for accelerated inference in DM \citep{moon2023early}.
+Although there are many pruning methods for DM, either the sparse model FID is poor or structured 2:4 sparsity is not implemented. %\xiaoyu{}
+
+
+
+\section{Conclusion}
+
+In this paper, we studied how to improve the efficiency of DM by sparse matrix for 2:4 sparse acceleration GPU. 
+The existing STE-based methods make it difficult to optimize sparse DM. 
+To address this issue, we improve the STE method and propose to gradually transfer knowledge from dense models to sparse models.
+Our method is tested on the latest Transformer-based DM, U-ViT, and UNet-based DM, DDPM. 
+We trained the 2:4 and other sparse models to perform better than other methods.
+Our approach also provides an effective solution for DM deployment on NVIDIA Ampere architecture GPUs, achieving about 1.2x acceleration.
+
+
+\section{Ethics Statement}
+
+
+While our motivation is to make diffusion models generate images faster, we also recognize the ethical implications inherent in model pruning, as sparse optimization may introduce unintended biases. There are differences between traditional evaluation metrics (such as FID scores) and human eye evaluation, and optimization for FID may not capture subtle deviations in human vision. In addition to performance improvements to diffusion models, we are also actively focusing on the ethical aspects of AI deployment. We are committed to preventing the spread of content that may have a negative social impact. Prevent unintended consequences by acknowledging the limitations of FID indicators.
+
+
+\section{Reproducibility}
+
+
+\textbf{Implementation Details.} 
+All of the experiments are implemented by PyTorch and conducted on servers with 24 GPUs, eight NVIDIA 4090, eight A40, and eight 3090 GPUs.
+We evaluate the FID score every 50K training iterations on 10K generated samples (instead of 50K samples for efficiency).
+
+
+The paper code implementation consists of two parts. The first part, sparse training, trains the sparse DM and verifies the acceleration theory of the sparse diffusion model. The second part, GPU inference, verifies GPU inference acceleration.
+
+
+
+
+

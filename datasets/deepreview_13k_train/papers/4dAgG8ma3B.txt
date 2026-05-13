@@ -1,0 +1,391 @@
+\title{Chemistry-Inspired Diffusion with Non-Differentiable Guidance}
+
+\begin{abstract}
+\vspace{-1em}
+Recent advances in diffusion models have shown remarkable potential in the conditional generation of novel molecules. These models can be guided in two ways: (i) explicitly, through additional features representing the condition, or (ii) implicitly, using a property predictor. However, training property predictors or conditional diffusion models requires an abundance of labeled data and is inherently challenging in real-world applications. We propose a novel approach that attenuates the limitations of acquiring large labeled datasets by leveraging domain knowledge from quantum chemistry as a non-differentiable oracle to guide an unconditional diffusion model. Instead of relying on neural networks, the oracle provides accurate guidance in the form of estimated gradients, allowing the diffusion process to sample from a conditional distribution specified by quantum chemistry. We show that this results in more precise conditional generation of novel and stable molecular structures. Our experiments demonstrate that our method: (1) significantly reduces atomic forces, enhancing the validity of generated molecules when used for stability optimization; (2) is compatible with both explicit and implicit guidance in diffusion models, enabling joint optimization of molecular properties and stability; and (3) generalizes effectively to molecular optimization tasks beyond stability optimization.
+
+\vspace{-1em}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Diffusion models have received increasing attention in molecular design. Their ability to generate novel molecules with desired properties (i.e., guided diffusion) has fostered advances in material science~\citep{manica2023accelerating, yang2023scalable}, chemistry~\citep{anstine2023generative}, protein design~\citep{watson2023novo, abramson2024accurate}, etc. To achieve guided diffusion, one can \textit{explicitly} condition the diffusion process on specific properties in training~\citep{hoogeboom2022equivariant, xu2023geometric}, such that the model is naturally a conditional generator during inference. Alternatively, an unconditional model can be trained without labels, and the diffusion process is guided \textit{implicitly} at inference time~\citep{dhariwal2021diffusion, vignac2022digress} using a property predictor that provides guidance gradients to steer the model toward sampling from the conditional distribution.
+
+Both explicitly and implicitly guided diffusion require a labeled dataset to train the model or the property predictor. The acquisition of labels, however, can be expensive, time-consuming, and often impracticable\footnote{For example, $\text{LD}_{50}$~\citep{erhirhie2018advances} measures the lethal dose of a test substance, which is difficult to calculate from the molecular structure of the substance alone; thus, requiring animal testing.}. Implicitly guided diffusion can help address such challenges. This approach (i) requires no labels to train the model and (ii) can replace the property predictor with domain knowledge from quantum chemistry, fulfilled by quantum chemistry software such as xTB~\citep{bannwarth2019gfn2, bannwarth_extended_2021} and Gaussian~\citep{g16}. Such software can act as an expert oracle to create labeled datasets; thereby, avoiding the extrapolation shortcomings of neural networks.
+
+Despite following certain computation procedures, quantum chemistry is by nature a non-differentiable oracle\footnote{Here it refers to the non-differentiability across the chemical space between different molecules.} that can not be backpropagated with neural networks, as those procedures usually involve proprietary algorithms or extremely computationally expensive to perform, which prevents the integration of quantum chemistry to guide the diffusion models. In this work, we aim to \textit{implicitly} guide the diffusion process with a non-differentiable oracle, and employ zeroth-order optimization methods~\citep{nesterov2017random, Malladi2023FineTuningLM} to estimate the necessary guidance gradients. We refer to our method as \method, a method that leverages quantum chemistry to provide more accurate diffusion guidance. Specifically, given the oracle xTB with the GFN2-xTB method \citep{bannwarth2019gfn2} that conducts quantum chemistry calculation of potential energies and atomic forces, we first use \method to improve the stability of the generated molecular geometry (see Fig.~\ref{fig: vis_xtb_mol}), by guiding the diffusion process towards sampling from a distribution where the net force on the atoms is zero. Further, we formulate diffusion guidance on both molecular property and stability as a bilevel optimization~\citep{colson2007overview} problem, to demonstrate that \method is compatible with both \textit{explicitly} and \textit{implicitly} guided diffusion. We summarize our contributions as follows:
+\begin{itemize}
+    \item We propose \method, which leverages zeroth-order optimization techniques to introduce a non-differentiable chemistry oracle as diffusion guidance (Section~\ref{Sec: method}). To the best of our knowledge, this is the first work of its kind.
+    \item We show in a bilevel optimization framework (Algorithm~\ref{alg: bilevel_opti_noisy_guide}) that \method can be utilized in conjunction with existing guided diffusion methods.
+    \item Experiments and analyses (Section~\ref{sec: exp} and~\ref{sec: analyses}) demonstrate that \method (i) improves the stability of generated molecules when guided with domain knowledge from the semi-empirical quantum chemical method, GFN2-xTB (Section~\ref{sec: exp_uncond_force}); (ii) generalizes to molecular optimization other than stability (Section~\ref{sec: xtb_for_other_prop}); (iii) effectively improves both molecular property and stability when used with other guided diffusion methods (Section~\ref{sec: exp_bilevel}).
+\end{itemize}
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{fig/main.pdf}
+\caption{The overview of \method. On the left, we present the space of all molecules (roughly) as a unimodal distribution, where \textcolor{red}{red}/\textcolor{blue}{blue} region indicates molecules for \textcolor{red}{training}/\textcolor{blue}{novel} molecules \textcolor{blue}{generated} by the diffusion model. In the middle, \method derives non-differentiable guidance from quantum chemistry to steer the diffusion process towards a conditional distribution (e.g., minimized forces). On the right, we present the average forces of 3 sets of molecules generated by GeoLDM~\citep{xu2023geometric} trained on \textit{QM9}~\citep{ramakrishnan2014quantum} (left two) and \textit{GEOM}~\citep{axelrod_geom_2022} (rightmost one) without (above) and with (below) \method.} 
+\label{fig: vis_xtb_mol}
+\end{figure*}
+
+
+\section{Preliminary}
+
+
+In this section, we introduce the key concepts of diffusion models and explore the architecture of a specific diffusion model designed for 3D molecule generation. We will explain how to achieve equivariance in the generated molecules and how the semi-empirical quantum chemical method GFN2-xTB can be utilized for guidance. Additionally, we will also outline our motivation for integrating \method with 3D diffusion models to optimize molecular stability.
+
+\paragraph{Diffusion Models}
+In general, a diffusion model \citep{sohl2015deep, ho2020denoising, song2020denoising} consists of a forward \textit{diffusion process} and a reverse \textit{denoising process}. The diffusion process is a Markov chain that gradually adds Gaussian noises with a predefined variance schedule $\beta_{1:T}$ from timestep 1 to $T$ to the original datapoint $\vx_0$, which is chosen such that $\vx_T \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$. The forward diffusion process $q$ is usually defined as a fixed schedule by the following:
+\begin{equation}\label{eq: diffusion}
+    q(\vx_{1:T}\mid \vx_0) = \prod_{t=1}^T q(\vx_t\mid \vx_{t-1}) \; \; \; \; \; \; \; \; q(\vx_t\mid \vx_{t-1}) = \mathcal{N}(\vx_t; \sqrt{1-\beta_t}\vx_{t-1}, \beta_t\mathbf{I})
+\end{equation}
+The denoising process starts with $\vx_T$ and recovers the original datapoint $\vx_0$ by predicting the mean of $\vx_{t-1}$ given $\vx_t$ using a neural network denoted as $\mu_{\theta}(\vx_t, t)$, where $\theta$ is the parameter.
+\begin{equation}\label{eq: sampling}
+    p_{\theta}(\vx_{0:T}) = p(\vx_T)\prod_{t=1}^T p_{\theta}(\vx_{t-1}\mid \vx_t) \; \; \; \; \; \; \; \; \; \;
+    p_{\theta}(\vx_{t-1}\mid\vx_t) = \mathcal{N}(\vx_{t-1}; \mu_{\theta}(\vx_t, t), \Sigma_{\theta}(\vx_t, t))
+\end{equation}
+In practice, $\Sigma_{\theta}=\sigma_t^2 \mathbf{I}$ with $\sigma_t=\sqrt{\frac{1 - \alpha_{t-1}^2}{1 - \alpha_t^2}\beta_t}$, $\alpha_t = \sqrt{\prod_{i=1}^t (1-\beta_i)}$ for all $t$. For simplicity, \citet{ho2020denoising} reparametrize Eq. \ref{eq: diffusion} such that $\vx_t = \alpha_t \vx_0 + \sqrt{1-\alpha_t^2}\epsilon$, where $\epsilon\sim N(\mathbf{0}, \mathbf{I})$. Hence, instead of predicting $\mu_{\theta}(\vx_t, t)$, we now predict the noise $\epsilon_{\theta}(\vx_t, t)$, where $\mu_{\theta}(\vx_t, t)$ is parameterized as $\frac{1}{\sqrt{1-\beta_t}}(\vx_t - \frac{\beta_t}{\sqrt{1-\alpha_t^2}}\epsilon_{\theta}(\vx_t, t))$. Consequently, we have
+\begin{equation} \label{eq: reverse sample}
+    \vx_{t-1} \sim \mathcal{N}( \frac{1}{\sqrt{1-\beta_t}}(\vx_t - \frac{\beta_t}{\sqrt{1-\alpha_t^2}}\epsilon_{\theta}(\vx_t, t)), \sigma^2_t \mathbf{I})
+\end{equation}
+\paragraph{Latent Diffusion Architecture for 3D Molecule Generation}
+An $N$-atom molecule can be represented as a point cloud $\mathcal{G}=[\mathbf{x}, \mathbf{h}]\in\mathbb{R}^{N\times(3+d)}$, with $\mathbf{x}\in\mathbb{R}^{N\times 3}$ being the $N$ atom's 3D coordinates and $\mathbf{h}\in\mathbb{R}^{N\times d}$ as the atom features indicating atom types. A latent diffusion architecture \citep{rombach2022high, xu2023geometric} consists of a Variational Autoencoder (VAE) and a diffusion model trained consecutively. Particularly, the geometric latent diffusion model \citep{xu2023geometric} uses the encoder of the VAE to project molecules to a continuous latent space, on which the diffusion model is then trained. Denote the encoder as $\mathcal{E}$ and the latent variable by $\mathbf{z}\in\mathbb{R}^{N \times (3+d_z)}$, then $[\mathbf{z}_{\mathbf{x}, 0}, \mathbf{z}_{\mathbf{h}, 0}] = \mathcal{E}([\mathbf{x}, \mathbf{h}])$, with $\mathbf{z}_{\mathbf{h}, 0}\in\mathbb{R}^{N \times d_z}$ and $d_z<d$. Let $\mathbf{z}_t = [\mathbf{z}_{\mathbf{x}, t},  \mathbf{z}_{\mathbf{h}, t}]$, the latent forward diffusion process and reverse denoising process are defined by replacing $\vx$ with $\vz$ in Eq.~\ref{eq: diffusion} and~\ref{eq: sampling}.
+We denote the decoder of the VAE as $\mathcal{D}$, which maps $\mathbf{z}_0$ back to the original molecular space, such that $\mathcal{D}([\mathbf{z}_{\mathbf{x}, 0}, \mathbf{z}_{\mathbf{h}, 0}]) = [\mathbf{x}, \mathbf{h}]\in\mathbb{R}^{N\times(3+d)}$. The encoder $\mathcal{E}$ and the decoder $\mathcal{D}$ are parameterized with an equivariant graph neural network (EGNN) \citep{satorras2021n} to translate between discrete molecular data and latent variables, such that the atom types are invariant and the positions are equivariant to transformations as the following: 
+\begin{equation} \label{eq: equivariance}
+    R \mathbf{z}_{\mathbf{x}, t} + T, \mathbf{z}_{\mathbf{h}, t} = \mathcal{E}(R \mathbf{x}_t + T, \mathbf{h}_t) \; \; \; \; \; \; R  \mathbf{x}_t + T, \mathbf{h}_t = \mathcal{D}(R \mathbf{z}_{\mathbf{x}, t} + T, \mathbf{z}_{\mathbf{h}, t})
+\end{equation} for any rotation matrix $R$ and translation matrix $T$, where $\mathbf{z}_{\mathbf{x}, t}\in\mathbb{R}^{N\times3}$ are required to satisfy zero center gravity and have zero-mean over $N$ atoms for each position. In addition, the latent diffusion model is also parameterized by EGNN such that transitions between each timestep in the denoising process also respect the same characteristics. 
+
+\paragraph{GFN2-xTB Method}
+ Matter such as electrons, atoms, and molecules, interacts with matter inherently to reach configurations with lower potential energies, i.e. stability.
+To formulate this as a molecular geometry optimization problem, let $h_1,\cdots,h_N$ be the $N$ atoms of a given molecule and $\mathbf{x_1},\cdots,\mathbf{x_N}\in \mathbb{R}^3$ be their coordinates in the 3D space. Each atom $h_i$ is subject to a force: 
+\begin{align}
+    \mathbf{f_i} (\mathcal{G}) &= \frac{\partial E_p\left(\mathbf{x_1},\cdots,\mathbf{x_N} \mid h_1,\cdots,h_N\right)}{\partial \mathbf{x_i}} ,\, \forall i \in [N]\label{eq: definition_of_force}
+\end{align}
+where $E_p$ represents the potential energy of the conformation. The force here manifests valid physical interpretations: at a high level, an atom is pushed accordingly by the exerted force until the force reduces to zero and an equilibrium is achieved. The two necessary (but not sufficient) conditions for a stable molecular geometry are: (i) all forces on the atoms should be (close to) zero, i.e., $\forall i \in [N], \mathbf{f_i}(\mathcal{G})=\mathbf{0}$; and (ii) the Hessian matrix, i.e. the second derivative of the potential energy, must be non-negative.
+
+However, the exact mathematical potential energy evaluation, i.e., the solution to the Schr\"{o}dinger equation, is still a ``black box'' \citep{cao_quantum_2019}. Over the years, different levels of theories and methods have been developed to evaluate potential energies, such as force field (FF), semi-empirical methods (e.g., xTB), and density functional theory (DFT) methods (e.g., B3LYP/6-31G(2df,p)), listed in an order of increased accuracy and cost. After trading-off between accuracy and efficiency within a feasible computation cost, we selected GFN2-xTB, a more recent and advanced semi-empirical method \citep{bannwarth2019gfn2}, to calculate the forces of the generated molecular geometry in the diffusion process.
+\paragraph{Motivation for Stability Optimization with 3D Diffusion} Stable molecular geometry is favored for molecule generation. A novel but unstable molecular geometry may not be physically achieved at all and thus carries no substantial meaning. To optimize stability, one can minimize the potential energy of the molecule by iteratively minimizing the forces on the atoms (Eq.~\ref{eq: definition_of_force}), motivating our choice of a 3D diffusion model.
+
+
+
+\section{Methodology}
+
+\subsection{Guidance From Neural Regressor} \label{Sec: neural regressor}
+\paragraph{Noisy Guidance}\label{sec: neural_reg_noisy_guidance} The goal of neural guidance is to direct the denoising process towards a target property value $y$. \citet{dhariwal2021diffusion} propose to modify the denoising process to achieve conditional generation with an unconditional model and using a scalar $s$ that controls the guidance strength:
+\begin{equation}
+    \vx_{t-1} \sim \mathcal{N}( \frac{1}{\sqrt{1-\beta_t}}(\vx_t - \frac{\beta_t}{\sqrt{1-\alpha_t^2}}\epsilon_{\theta}(\vx_t, t))+s\sigma^2_t\nabla_{\vx_t} \log p_{\phi}(y|\vx_t), \sigma^2_t \mathbf{I})\label{eq: guideddiffusion}
+\end{equation}
+Here $p_{\phi}(y|\vx_t)$ is parameterized by a classifier, and $y$ is a categorical label, such that the modification $s\sigma^2_t\nabla_{\vx_t} \log p_{\phi}(y|\vx_t)$ shifts the mean of the sampling distribution to provide guidance. Let  $y \in \mathbb{R}$ and $f_\eta: \mathcal{G} \to \mathbb{R} $ be the neural regressor for the molecular property of interest \citep{vignac2022digress}.  Now, assuming $y|\vx_{t} \sim\mathcal{N}(f_{\eta}(\vx_{t}), \sigma^2_\eta\mathbf{I})$ and $\sigma^2_\eta=1$, we have:
+\begin{align}
+        \nabla_{\vx_{t}} \log p_{\phi}(y\mid \vx_{t})\propto -\nabla_{\vx_{ t}}\|y - f_{\eta}(\vx_{t})\|^2_2 = - \nabla_{\vx_t} \mathcal{L} (y, f_\eta(\vx_t)) \label{eq: regressorguidance}
+\end{align}
+where $\mathcal{L}(y, f_\eta(\vx_t))$ is the Mean Square Error (MSE) between the target and the prediction of $f_\eta(\cdot)$.
+
+However, in the early stage of the denoising process, $\vx_t = \alpha_t \vx_0 + \sqrt{1-\alpha_t^2}\epsilon$ might not be informative enough to predict $y$ as it consists mostly of Gaussian noise. For effective prediction during the denoising process, we estimate the denoised version of $\vx_t$ as~\citet{kawar2022denoising, song2020denoising}:
+\begin{equation} \label{eq: one_step_estimation_t0}
+    t_0(\vx_t) \coloneq \hat{\vx}_0 = \frac{\vx_t - \sqrt{1 - \alpha_t^2} \epsilon_\theta (\vx_t, t)}{\alpha_t}
+\end{equation}
+where $f_\eta(\hat{\vx}_0)$ is used in place of $f_\eta(\vx_t)$ as the predicted molecular property.
+
+\paragraph{Clean Guidance}\label{sec: neural_reg_clean_guidance} Besides applying the gradient as guidance on noisy $\vx_t$, we build insight from \citet{bansal2023universal} and derive guidance in the clean (=noise free) space $\hat{\vx}_0$ as:
+\begin{equation}
+    \Delta \vx_0 = \argmin_{\Delta} \mathcal{L}(y, f_{\eta}(\hat{\vx}_0 + \Delta))
+\end{equation}
+where $\Delta \vx_0$ is approximated using $K$ steps of gradient descent starting from $\Delta=0$. Note that $\Delta \vx_0$ is in clean data space, so we need to translate it back to the noisy space while recovering $\vx_t$:
+\begin{equation}\label{eq: optimal guidance}
+    \vx_t = \alpha_t(\hat{\vx}_0+\Delta \vx_ 0) + \sqrt{1 - \alpha_t^2}\Tilde{\epsilon}
+\end{equation} where $\Tilde{\epsilon}$ is the augmented noise used to to sample $\vx_{t-1}$ and is thus given by:
+\begin{equation}\label{eq: optimal noise}
+    \Tilde{\epsilon} = \epsilon_{\theta}(\vx_t, t) - \frac{\alpha_t}{\sqrt{1 - \alpha_t^2}} \Delta\vx_0
+\end{equation}
+
+\subsection{Guidance From a Non-Differentiable Oracle}\label{Sec: xtb guidance}
+We aim to tackle a challenging problem where the guidance is specified by a non-differentiable oracle (e.g., the GFN2-xTB method). We change our notation from $\vx_t$ to $\mathbf{z}_t$ at each time step to indicate diffusion in the latent space. With the guidance target $y$ being 0, our non-differentiable function $\mathbf{f}$ (Eq.~\ref{eq: definition_of_force}) for force guidance is defined as follows.
+\begin{equation}
+    \mathbf{f} (\mathcal{G})= \frac{1}{N}\sum^N_i\mathbf{f_i}(\mathcal{G})
+\end{equation}
+where the molecular graph is decoded as $\mathcal{G} = \mathcal{D}(\hat{\vz}_0)$ with $\hat{\vz}_0=t_0(\vz_t)$ estimated by Eq. \ref{eq: one_step_estimation_t0}, and we aim to achieve $\mathbf{f}(\mathcal{G}'_0) < \mathbf{f}(\mathcal{G}_0)$. Here $\mathcal{G}'_0, \mathcal{G}_0$ are provided by \method and an unguided diffusion model.
+As $\mathbf{f}$ is non-differentiable across different molecules, we can not directly add guidance using Eq. \ref{eq: regressorguidance}. Instead, we estimate the gradient analytically.
+Recall that $\mathcal{L}(y, \mathbf{f}(\mathcal{G}))$ is the MSE loss, $\mathbf{f}: \mathcal{G}\rightarrow \mathbb{R}$ is the non-differentiable oracle, and $\mathcal{D}$ is the decoder. Let $\mathcal{F}$ be the composition $\mathbf{f} \circ \mathcal{D} \circ t_0$, and we estimate the gradient as: 
+\begin{align}
+    \hat{\nabla}_{\vz_t} \log p_{\phi}(y|\vz_t) &\propto -\nabla_{\mathcal{F}(\vz_t)} \mathcal{L} (y, \mathcal{F}(\vz_{t}))\nabla_{\vz_t}\mathcal{F}(\vz_t)\\
+    &\approx -\nabla_{\mathcal{F}(\vz_{ t})}\mathcal{L}(y, \mathcal{F}(\vz_{t})) \lim_{\zeta\rightarrow 0} \frac{\mathcal{F}([\vz_{\mathbf{x}, t}+\zeta \mathbf{1}_{N \times 3}, \vz_{\mathbf{h}, t}])-\mathcal{F}([\vz_{\mathbf{x}, t}-\zeta \mathbf{1}_{N \times 3}, \vz_{\mathbf{h}, t}])}{2\zeta} \label{gradient}
+\end{align}
+This approximation is possible because $\vz_t$ is continuous and it eliminates the need to train neural regressors for properties such as forces, which comes with approximation error \citep{gasteiger_dimenetpp_2020}. In addition, these regressors are often trained on ground state geometries (optimized stable geometries) instead of non-optimal geometries, which are the most common geometries during the denoising process, making them dubious options for property guidance. 
+However, directly adding (or subtracting) $\zeta \mathbf{1}_{N \times 3}$ to $\vz_{\mathbf{x}, t}$ would break the equivariance requirement in Eq. \ref{eq: equivariance} on the latent variables, as it shifts the mean of the coordinates by $\zeta$. To maintain zero central gravity~\citep{xu2023geometric} of input to $\mathcal{F}(\cdot)$, we construct a perturbation matrix $\mathbf{U} \in \mathbb{R}^{N \times 3}\sim\mathcal{N}(0, 1)$, and apply Simultaneous Perturbation Stochastic Approximation (SPSA) \citep{Spall1992MultivariateSA, nesterov2017random} to estimate the gradient, then Eq.~\ref{gradient} becomes:
+\begin{align}
+     \hat{\nabla}_{\vz_{t}} \log p_{\phi}(y|\vz_{t}) &\propto -\nabla_{\mathcal{F}(\vz_{t})}\mathcal{L}(y, \mathcal{F}(\vz_{t}))\frac{\mathcal{F}([\vz_{\mathbf{x}, t}+\zeta\mathbf{U}, \vz_{\mathbf{h}, t}]) - \mathcal{F}([\mathbf{z}_{\mathbf{x}, t}+\zeta\mathbf{U}, \vz_{\mathbf{h}, t}])}{2\zeta}\mathbf{U}
+     \label{spsa}
+\end{align}
+where $\zeta$ is a small perturbation scale (e.g., $10^{-6}$). The perturbed representations $[\vz_{\mathbf{x}, t}\pm\zeta\mathbf{U}, \vz_{\mathbf{h}, t}]$ obey zero central gravity required by $t_0$, as $\mathbb{E}[\zeta\mathbf{U}]=0$. Note that, unlike neural regressor guidance, we only add guidance to the positions (i.e. $\vz_{\mathbf{x}, t}$) and apply no gradient to the atom types (i.e. $\vz_{\mathbf{h}, t}$). We do this because the force definition (Eq. \ref{eq: definition_of_force}) is only physically grounded when the set of atoms stays constant (i.e. no matter/mass is created from or reduced to void). In other words, since energy is a relative concept, any gradient that arises from atom-type change has no physical interpretation.
+\subsection{Combine Guidance from Neural Network and Non-Differentiable Oracle}\label{Sec: bilevel}
+\begin{algorithm}[t]
+    \caption{Bilevel guided diffusion sampling with \textit{\textbf{noisy neural guidance}}}
+    \label{alg: bilevel_opti_noisy_guide}
+    \begin{algorithmic}
+        \STATE \textbf{Input}: a latent diffusion model $\epsilon_\theta$, a VAE decoder $\mathcal{D}$, a composition function $\mathcal{F}$, target property score $y$, oracle guidance scale $s_o$, regressor guidance scale $s_r$, SPSA perturbation $\zeta$.
+        \STATE \textbf{Output}: optimized molecule $[\mathbf{x}, \mathbf{h}]$
+        \STATE $\vz_T\leftarrow \mathcal{N}(0, \mathbf{I})$
+        \FORALL{$t$ from $T$ to 1}
+                \STATE $\mu_{t-1}, \Sigma_{t-1} \leftarrow \frac{1}{\sqrt{1-\beta_t}}(\vz_t - \frac{\beta_t}{\sqrt{1-\alpha_t^2}}\epsilon_{\theta}(\vz_t, t)), \sigma_t^2\mathbf{I}$ \hfill (Eq.~\ref{eq: reverse sample})
+                \STATE $g_{t-1, \text{regressor}} \propto -\nabla_{\vz_t} \|y - f_{\eta}(\mathcal{D}\circ t_0(\vz_t))\|^2$ \hfill (Eq.~\ref{eq: regressorguidance})
+                \STATE $\vz_{t-1}'\leftarrow \mathcal{N}(\mu_{t-1}+s_r\Sigma_{t-1}g_{t-1, \text{regressor}}, \Sigma_{t-1})$ \hfill (Eq.~\ref{eq: guideddiffusion})
+                \STATE  $\vz_{t}' = \frac{\alpha_t}{\alpha_{t-1}}\vz_{t-1}' + \sqrt{1 - \frac{\alpha_t^2}{\alpha_{t-1}^2}}\epsilon'$, such that $\epsilon'\sim\mathcal{N}(0, \mathbf{I})$ \hfill // project from $t-1$ back to $t$
+            \STATE $\mathbf{U}\leftarrow \mathcal{N}(0, \mathbf{I})$
+            \STATE $g_{t-1} \propto -\nabla_{\mathcal{F}(\vz_0')}\|\mathcal{F}(\vz_0')\|^2\cdot\frac{1}{2\zeta}\left(\mathcal{F}([\vz_{\mathbf{x}, 0}'+\zeta\mathbf{U}, \vz_{\mathbf{h}, 0}']) - \mathcal{F}([\vz_{\mathbf{x}, 0}'-\zeta\mathbf{U}, \vz_{\mathbf{h}, 0}'])\right)\mathbf{U}$ \hfill (Eq.~\ref{spsa})
+            \STATE $\mu_{t-1}', \Sigma_{t-1}' \leftarrow \frac{1}{\sqrt{1-\beta_t}}(\vz_t' - \frac{\beta_t}{\sqrt{1-\alpha_t^2}}\epsilon_{\theta}(\vz_t', t)), \sigma_t^2\mathbf{I}$ \hfill (Eq.~\ref{eq: reverse sample})
+            \STATE $\vz_{t-1}\leftarrow \mathcal{N}(\mu_{t-1} + s\cdot\sigma_{t-1}^2g_{t-1}, \Sigma_{t-1})$ \hfill(Eq.~\ref{eq: guideddiffusion})
+
+        \ENDFOR
+        \STATE $[\mathbf{x}, \mathbf{h}]\leftarrow \mathcal{D}(\vz_0)$
+        \RETURN $[\mathbf{x}, \mathbf{h}]$
+    \end{algorithmic}
+\end{algorithm}
+Apart from guided generation conditioned on one single property (e.g., the norm of static polarizability $\alpha$) with a regressor or a non-differentiable oracle (e.g., GFN2-xTB), we can perform joint optimization with the guidance specified by both the differentiable regressor and the non-differentiable oracle, which is encapsulated under the \textit{bilevel optimization} framework. Formally, recall that $f_{\eta}$ represents the regressor and $\mathcal{F}=\mathbf{f} \circ \mathcal{D} \circ t_0$ is the composition of the non-differentiable oracle $\mathbf{f}$, the VAE decoder $\mathcal{D}$, the latent diffusion model, respectively, the joint optimization is formulated as:
+\begin{align}
+   \min_{\vz_{x, t}} \quad & \mathcal{F}([\vz_{x, t}, \vz_{h, t}^*]) \label{eq: higherlevel}\\
+   \textrm{s.t.} \quad & [\vz_{x, t}^*, \mathbf{z}_{h, t}^*]= \argmin_{[\vz_{x, t}, \vz_{h, t}]}\|f_{\eta}([\vz_{x, t}, \vz_{h, t}]) - y\|^2 \label{eq: lowerlevel}
+\end{align}\label{eq: bilevel}
+where $y$ is the target property value (e.g., we hope the static polarizability $\alpha\rightarrow y$ after optimization). As detailed in Algorithm~\ref{alg: bilevel_opti_noisy_guide}, we first optimize molecular property with $f_{\eta}$, and obtain the optimal atom positions $\vz_{x, t}^*$ and features $\vz_{h, t}^*$ (Eq.~\ref{eq: lowerlevel}); we then optimize stability with $\mathcal{F}$ by fixing $\mathbf{z}_{h, t}^*$ and initializing $\vz_{x, t}$ (Eq.~\ref{eq: higherlevel}) as $\vz_{x, t}^*$.
+
+
+
+
+\section{Experiments}
+
+\subsection{Experiment Setting}
+\paragraph{Dataset} The models in our experiment are trained on the QM9 dataset~\citep{ramakrishnan2014quantum} and the GEOM dataset~\citep{axelrod_geom_2022}. The QM9 dataset is a catalog with 134K small drug-like molecules consisting of up to nine heavy (non-hydrogen) atoms. The Geometric Ensemble Of Molecules (GEOM) dataset includes 450K molecules with up to 91 heavy atoms (on average, 24.9), where 37 million molecular conformations are generated and reported with their geometries, energies, and statistical weight.
+\paragraph{Guidance Property}
+We study guided generation for force and thus energy optimization on QM9 and GEOM. For neural and combined guidance, we evaluate on QM9 as there are no labels in GEOM to train the regressors. We consider the following 6 properties reported in QM9: the norm of static polarizability ($\alpha$, Bohr$^3$), the norm of dipole moment ($\mu$, Debye), heat capacity at room temperature ($C_v$, cal/(mol$\cdot$K)), the energy of the electron in the highest occupied molecular orbital ($\epsilon_{\text{HOMO}}$, eV), the energy of the electron in the lowest unoccupied molecular orbital ($\epsilon_{\text{LUMO}}$, eV), and the HOMO-LUMO energy gap ($\Delta\epsilon$, eV). We choose $s$ (Eq.~\ref{eq: guideddiffusion}) from $\{1, 10^{-1}, 10^{-2}, 10^{-3}, 10^{-4}\}$ for all experiments, and additionally $\{2, 5, 10, 20, 25, 30, 40, 50\}$ for the 6 properties.
+\paragraph{Model} We integrate \method with GeoLDM~\citep{xu2023geometric}, an improvement from EDM~\citep{hoogeboom2022equivariant}. For non-differentiable guidance on force, we compare our method to unconditional EDM and GeoLDM\footnote{EDM and GeoLDM are in short of the unconditional version of the models when the context is clear.}, since there is no available ground-truth force to explicitly train a conditional model. For noisy neural guidance and combined guidance, we choose conditionally trained EDM (C-EDM) and GeoLDM (C-GeoLDM) as the baselines.
+\paragraph{Evaluation Metric} For non-differentiable guidance on the force, we use the Root Mean Square (RMS) of the forces calculated at GFN2-xTB as the evaluation metric. We also report validity, uniqueness, atom stability, molecule stability, and energy above the ground state. 
+For differentiable neural guidance on the 6 properties ($\alpha, \mu, C_v, \epsilon_{\text{HOMO}}, \epsilon_{\text{LUMO}}, \Delta\epsilon$), we follow~\citet{xu2023geometric} and use the Mean Absolute Error (MAE) between the target property $y$ and the predicted value $\hat{y}$ from the regressor of the generated molecule as the evaluation metric.
+
+We add guidance to the last 400 of the 1000 diffusion steps~\citep{han2024trainingfree}, and calculate the change percentage between our method and the GeoLDM/C-GeoLDM baseline.
+\begin{table}[h]
+    \centering
+        \centering
+        \renewcommand{\arraystretch}{1.2}
+        \caption{Metrics of 500 generated molecules from \textit{QM9} using GeoLDM with non-differentiable oracle (i.e. xTB) guidance. * and \textbf{bold} denote the overall best result and our best result, respectively. Percentage changes between our results and GeoLDM are shown in parentheses.}
+        \label{tab: uncond_qm9_xtb}
+        \resizebox{\textwidth}{!}{
+        \begin{tabular}{c|ccccc|cc}
+        \hline\hline
+        \multirow{2}{*}{Metric} & \multicolumn{5}{c|}{Guidance Scale} & \multicolumn{2}{c}{Baseline} \\
+        \cline{2-8}
+         & 0.0001 & 0.001 & 0.01 & 0.1 & 1.0 & EDM & GeoLDM \\
+        \hline
+        Force RMS (Eh/Bohr) & \textbf{0.0104}$^*$ (-6.76\%$\downarrow$) & 0.0104 & 0.0107 & 0.0108 & 0.0125 & 0.0114 & 0.0111  \\
+        Validity & \textbf{91.40\%}$^*$ (1.60\%$\uparrow$) & 91.20\% & 91.20\% & 90.00\% & 89.40\% & 86.60\% & 89.80\%  \\
+        Uniqueness & \textbf{100.00\%}$^*$ & \textbf{100.00\%}$^*$ & \textbf{100.00\%}$^*$ & \textbf{100.00\%}$^*$ & \textbf{100.00\%}$^*$ & 100.00\%$^*$ & 100.00\%$^*$  \\
+        Atom Stability & 99.02\% & 98.97\% & 98.98\% & \textbf{99.03\%}$^*$ (0.10\%$\uparrow$) & 98.67\% & 98.53\% & 98.93\%  \\
+        Molecule Stability & 90.60\% & 90.40\% & 90.20\% & \textbf{91.00\%}$^*$ (2.20\%$\uparrow$) & 87.80\% & 83.60\% & 88.80\%  \\
+        \makecell{Energy above Ground State (Eh)} & \textbf{0.0042}$^*$ (-15.78\%$\downarrow$) & 0.0042 & 0.0045 & 0.0050 & 0.0061 & 0.0072 & 0.0050  \\
+        \hline\hline
+        \end{tabular}
+        }
+\end{table}
+
+\subsection{Non-Differentiable Oracle Guidance on Force}\label{sec: exp_uncond_force}
+We adopt various guidance scales on QM9 and show numeric results in Table~\ref{tab: uncond_qm9_xtb}. It is observed that over different scales, our non-differentiable oracle guidance generates molecules with up to 6.31\% lower force, 1.60\% and 2.20\% higher validity and molecule stability, respectively. Despite optimizing molecular stability via force instead of directly with energy, \method exhibits a smaller energy change than GeoLDM with a 15.78\% decrease. These results show that our method generates molecules closer to the ground state, i.e. the most stable geometry, suggesting that our methods can generate molecules with higher validity and Stability.
+Further, we explore \method on the GEOM dataset with larger molecules and report the results in Table~\ref{tab:uncond_geom_xtb}, where a similar trend is observed in our favor: our method generates valid molecules closer to the ground state. Surprisingly, \method performs better on larger molecules than smaller ones (e.g., a higher decrease in force RMS), which brings potential applications in large-molecule production, e.g., protein. This is partly because larger molecules have more intricate structures and conformational space; thus, are likely to suffer more from distorted geometries than smaller ones, yielding more space for improvement.
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{fig/main_dist.pdf}
+\caption{Histograms and distributions of force RMS and energy change of 500 generated molecules from \textit{QM9} and \textit{GEOM} using GeoLDM with \method under scale=0.0001. Energy change refers to the energy of our generated molecule above its ground state energy.}
+\label{fig: uncond_qm9_dist}
+\end{figure*}
+\begin{table}[t]
+    \centering
+        \centering
+        \renewcommand{\arraystretch}{1.2}
+        \caption{Metrics of 500 generated molecules from \textit{GEOM} using unconditional GeoLDM with non-differentiable oracle (i.e. GFN2-xTB) guidance. * and \textbf{bold} denote the overall best result and our best result. Percentage changes between our results and GeoLDM are shown in parentheses.}
+        \label{tab:uncond_geom_xtb}
+        \resizebox{\textwidth}{!}{
+        \begin{tabular}{c|ccccc|cc}
+        \hline\hline
+        \multirow{2}{*}{Metric} & \multicolumn{5}{c|}{Guidance Scale} & \multicolumn{2}{c}{Baseline} \\
+        \cline{2-8}
+         & 0.0001 & 0.001 & 0.01 & 0.1 & 1.0 & EDM & GeoLDM \\
+        \hline
+        Force RMS (Eh/Bohr) & 0.0445 & 0.0447 & 0.0434 & \textbf{0.0411}$^*$ (-14.16\%$\downarrow$) & 0.0513 & 0.0742 & 0.0478  \\
+        Validity & 47.00\% & 45.20\% & \textbf{51.60\%}$^*$ (2.60\%$\uparrow$) & 50.40\% & 49.40\% & 46.40\% & 49.00\%  \\
+        Uniqueness & \textbf{100.00\%}$^*$ & 100.00\% & 100.00\% & 100.00\% & 100.00\% & 100.00\%$^*$ & 100.00\%$^*$  \\
+        Atom Stability & 84.47\% & 84.49\% & \textbf{84.65\%}$^*$ (0.12\%$\uparrow$) & 84.36\% & 83.45\% & 81.22\% & 84.53\%  \\
+        Energy above Ground State (Eh) & 0.2148 & 0.2085 & 0.2104 & \textbf{0.1935}$^*$ (-13.92\%$\downarrow$) & 0.2650 & 0.3742 & 0.2248  \\
+        \hline\hline
+        \end{tabular}
+        }
+\end{table}
+
+Fig.~\ref{fig: uncond_qm9_dist} shows the plot of the force RMS and energy change histogram and distribution of the 500 generated molecules from EDM, GeoLDM, and \method on QM9 and GEOM. Our method is more concentrated around 0 and less spread to higher regions. Also, note that both EDM and GeoLDM generate outlier molecules with significantly large force and energy change, while no outlier is generated by \method. For example, in Fig.~\ref{fig: uncond_qm9_dist}(a), an outlier with force RMS 0.155 is generated by GeoLDM, which is $\sim$15 times higher than the force RMS where the molecules are concentrated. It demonstrates that our method performs better both on average and molecule-wise, and we provide detailed plots of various scales in Fig.
+
+To further validate the effectiveness of \method, we compute stability metrics at the DFT/B3LYP/6-31G(2df,p) level of theory with \textit{Gaussian16}~\citep{g16} for more precise and strict benchmarking. As \textit{DFT} is computationally demanding, we only present the results of \method with the best scale, GeoLDM, and EDM on QM9 in Table~\ref{tab: dft_uncond}.
+Despite applying a less accurate but computationally feasible oracle (i.e., GFN2-xTB), \method still improves validity and stability (i.e., valid molecular geometry close to optimized ground state geometry), when measured against higher standards (i.e., DFT). On the other hand, applying DFT as the non-differentiable oracle to guide the generation process is computationally expensive and impracticable.
+\begin{figure*}[h]
+    \centering
+    \begin{minipage}[b]{0.63\textwidth}
+        \centering
+        \captionof{table}{Metrics of 500 generated molecules from \textit{QM9} using GeoLDM with \method using scale=0.0001, calculated at DFT/B3LYP/6-31G(2df,p) level of theory, more precise but computationally expensive than GFN2-xTB. \textit{Strict validity} is defined as generated geometries within 50 kcal/mol (0.07968 Eh) of the optimized geometries.
+        * and \textbf{bold} denote the overall best result and our best result. Percentage changes between our results and GeoLDM are shown in parentheses.}
+        \renewcommand{\arraystretch}{1.2}
+        \resizebox{\textwidth}{!}{
+        \begin{tabular}{c|c|cc}
+        \hline\hline
+        Metric & Ours & EDM & GeoLDM \\
+        \hline
+        Validity & \textbf{96.2\%$^*$} (2.6\%$\uparrow$) & 89.0\% & 93.6\% \\
+        Strict Validity & \textbf{95.6\%$^*$} (2.4\%$\uparrow$) & 88.4\% & 93.2\% \\
+        Energy above Ground State (Eh) & \textbf{0.004051$^*$} (-9.6\%$\downarrow$) & 0.006314 & 0.004480  \\
+        Energy above GS (kcal/mol) & \textbf{2.542$^*$} (-9.6\%$\downarrow$) & 3.962 & 2.811\\
+        \hline\hline
+        \end{tabular}
+        }
+        \label{tab: dft_uncond}
+    \end{minipage}%
+    \hspace{0.01\textwidth}  % Space between table and figure
+    \begin{minipage}[b]{0.35\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{fig/main_rg_traj.pdf}
+        \caption{MAE trajectories of GeoLDM, with noisy/clean guidance, and C-GeoLDM on $C_v$.}
+        \label{fig: main_rg_traj}
+    \end{minipage}
+\end{figure*}
+
+\subsection{Neural Network Guidance on Properties} \label{sec: exp_neural_guidance}
+\subsubsection{Unconditional Diffusion with noisy neural guidance} \label{sec: exp_uncond_RG}
+ For all the properties $\alpha$, $\mu$, $C_v$, $\epsilon_{HOMO}$, $\epsilon_{LUMO}$, and $\Delta\epsilon$, noisy neural guidance outperforms \textbf{unconditional} GeoLDM by 57.92\%, 37.24\%, 77.09\%, 23.18\%, 36.87\%, and 37.88\% respectively, which verifies its effectiveness. Furthermore, GeoLDM with noisy neural guidance yields comparable performance with C-GeoLDM and C-EDM, provided that conditional models are explicitly trained for property optimization; surprisingly, we use unconditional GeoLDM as the backbone and outperforms C-GeoLDM in $\alpha$, $\mu$, and $C_v$. To understand the details of guided generation, we plot the MAE of $C_v$ on sampled molecules at each guidance step in Fig.~\ref{fig: main_rg_traj}. Compared to GeoLDM which oscillates in the first 200 steps and converges slowly to a high MAE, the trajectory of noisy neural guidance drops fast in the first 50 steps and the amplitude of the oscillation is less intense, which suggests the guidance smooths the MAE change and quickly steers the model toward better properties. The property MAE trajectories are detailed in Fig.
+
+\subsubsection{Unconditional Diffusion with clean neural guidance} \label{sec: exp_uncond_delta}
+As presented in Table~\ref{tab: neural_regressor_mae}, clean neural guidance outperforms unconditional GeoLDM on all properties and beats C-GeoLDM in $\mu$, $C_v$, $\epsilon_{\text{HOMO}}$, and $\Delta\epsilon$ by $81.68\%$, $67.53\%$, $3.06\%$, and $34.84\%$. Interestingly, it seems that noisy and clean guidance complement each other on different properties (e.g., $\alpha, \Delta\epsilon$). In Fig.~\ref{fig: main_rg_traj}, clean neural guidance shows a similar oscillation trend in the first 200 guidance steps compared to GeoLDM, then exhibits a sharp drop in the last 50 steps and achieves the lowest MAE, which is also observed on other properties shown in Fig. We hypothesize this is due to that molecules are less noisy as denoising steps accumulate; thus, guidance optimization in the clean space manifests its strongest power when $\vz_t$ is less dependent on the one-step estimation function $t_0(\cdot)$ in later steps, where it is closer and more similar to $\vz_0$ (Eq.~\ref{eq: one_step_estimation_t0}).
+\begin{table}[t]
+\centering
+\renewcommand{\arraystretch}{1.2} % Adjust the row height
+\caption{MAE of 500 generated molecules from \textit{QM9} using GeoLDM with noisy/clean neural guidance, where the result from the best configuration is reported. We use C-EDM, C-GeoLDM, and GeoLDM as baselines. $*$ and \textbf{bold} denote the overall best and the best within different scales, respectively. Percentage changes between our results and C-GeoLDM are shown in parentheses.}
+\label{tab: neural_regressor_mae}
+\resizebox{1.0\textwidth}{!}{
+\begin{tabular}{c c |c c c c c c c}
+\hline
+\hline
+ \multicolumn{2}{c|}{Property} & $\alpha$ & $\mu$ & $C_v$ & $\epsilon_{\text{HOMO}}$ & $\epsilon_{\text{LUMO}}$ & $\Delta\epsilon$ \\
+\multicolumn{2}{c|}{Units}  & $\text{Bohr}^3$ & D & $\frac{\text{cal}}{\text{mol}}\text{K}$ & meV & meV & meV \\
+    \hline
+\multicolumn{2}{c|}{Conditional EDM} & 2.6308 & 1.1257 & 1.0804 & 0.3207 & 0.5940 & 0.6301 \\
+    \hline
+\multicolumn{2}{c|}{Conditional GeoLDM} & 2.5551 & 1.1084 & 0.9703 & 0.3327 & 0.5518$^*$ & 0.5878 \\
+    \hline
+\multicolumn{2}{c|}{GeoLDM} & 5.6732 & 1.6461 & 3.1046 & 0.6151 & 1.1778 & 1.2022 \\
+    \hline
+    \multicolumn{2}{c|}{\textbf{GeoLDM w/ Noisy Guidance}}  & \makecell{\textbf{2.3870}$^*$\\ (-6.58\%$\downarrow$)} & 1.0331 & 0.7112 & 0.4725 & 0.7436 & 0.7468 \\
+    \hline
+    \multicolumn{2}{c|}{\textbf{GeoLDM w/ Clean Guidance}}  & 5.4798 & \makecell{\textbf{0.2031}$^*$\\ (-81.68\%$\downarrow$)} & \makecell{\textbf{0.3151}$^*$\\ (-67.53\%$\downarrow$)} & \makecell{\textbf{0.3109}$^*$ \\(-3.06\%$\downarrow$)} & 0.5688 & \makecell{\textbf{0.3830}$^*$\\ (-34.84\%$\downarrow$)} \\
+    \hline
+    \hline
+\end{tabular}
+}
+\end{table}
+
+\subsection{Combined Guidance on Force and Properties}\label{sec: exp_bilevel}
+We present the results for the bilevel optimization on molecular property and stability, with MAE shown in Table~\ref{tab: bilevel_mae}, and the force RMS and energy change in Fig.~\ref{fig: bilevel_force_bar}. We sample 200 molecules for combined guidance, as there are 6 properties to optimize, and force optimization with xTB only supports CPU computation. We choose conditional GeoLDM (C-GeoLDM) as the baseline.
+\begin{table}[h]
+\centering
+\renewcommand{\arraystretch}{1.2} % Adjust the row height
+\caption{MAE of 200 generated molecules using C-GeoLDM with \method and GeoLDM with noisy neural guidance, where the result from the best configuration is reported. We use C-EDM and C-GeoLDM as baselines. $*$ and \textbf{bold} denote the overall best and the best within different scales, respectively. Percentage changes between our results and C-GeoLDM are shown in parentheses.}
+\resizebox{1.0\textwidth}{!}{
+\begin{tabular}{c c |c c c c c c c}
+\hline
+\hline
+ \multicolumn{2}{c|}{Property} & $\alpha$ & $\mu$ & $C_v$ & $\epsilon_{\text{HOMO}}$ & $\epsilon_{\text{LUMO}}$ & $\Delta\epsilon$ \\
+\multicolumn{2}{c|}{Units}  & $\text{Bohr}^3$ & D & $\frac{\text{cal}}{\text{mol}}\text{K}$ & meV & meV & meV \\
+    \hline
+\multicolumn{2}{c|}{C-EDM} & 2.5089 & 1.0571 & 1.0624 & 0.3304 & 0.5046 & 0.6191 \\
+    \hline
+\multicolumn{2}{c|}{C-GeoLDM} & 2.5593 & 1.1582 & 0.9646 & 0.3407 & 0.5927 & 0.4982$^*$ \\
+    \hline
+    \multicolumn{2}{c|}{\makecell{\textbf{Bilevel Optimization} \\ \textbf{w/ Explicit Guidance}}}  & \makecell{\textbf{2.4430$^*$}\\(-4.54\%$\downarrow$)} & 1.0483 & 0.9393 & \makecell{\textbf{0.3404$^*$}\\(-0.09\%$\downarrow$)} & \makecell{\textbf{0.5077$^*$}\\(-14.34\%$\downarrow$)} & \makecell{\textbf{0.5225}\\(4.88\%$\uparrow$)} \\
+    \hline
+    \multicolumn{2}{c|}{\makecell{\textbf{Bilevel Optimization} \\ \textbf{w/ Noisy Guidance}}} & 2.4860 & \makecell{\textbf{0.7246$^*$} \\(-37.43\%$\downarrow$)} & \makecell{\textbf{0.9369$^*$} \\(-2.87\%$\downarrow$)} & 0.4445 & 0.8099 & 0.7041 \\
+\hline
+\hline
+\end{tabular}
+}
+\label{tab: bilevel_mae}
+\end{table}
+\subsubsection{Explicitly Guided Diffusion with \method} \label{sec: exp_bilevel_explicit}
+ We employ C-GeoLDM with \method, which resembles the bilevel optimization framework as C-GeoLDM automatically optimizes molecular property during the denoising process. Compared to C-GeoLDM alone, we expect our method to reduce the force while not hurting MAE. We present the results in Fig. For the 6 properties ($\alpha$, $\mu$, $C_v$, $\epsilon_{HOMO}$, $\epsilon_{LUMO}$, $\Delta\epsilon$), our method reduces the force RMS by 9.21\%, 3.33\%, 8.75\%, 6.69\%, 1.27\%, and 10.19\%, and for the first 5, MAEs decrease 4.54\%, 9.49\%, 2.62\%, 0.09\%, and 14.34\%. The results suggest it is feasible and effective to combine explicitly guided diffusion (e.g., C-GeoLDM) with \method, which goes beyond our expectation as both force RMS and property MAE are reduced.
+
+\subsubsection{Implicitly Guided Diffusion with \method} \label{sec: exp_bilevel_implicit}
+We apply two aforementioned neural network guidance approaches (noisy/clean guidance, Section~\ref{Sec: neural regressor}) for the property optimization step in our bilevel optimization framework (Section~\ref{Sec: bilevel}). We expect that both the property MAE and the force metrics are better than conditional GeoLDM.
+\begin{figure*}[t]
+    \centering
+    \begin{minipage}[t]{0.64\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{fig/bilevel_force_bar.pdf}
+        \caption{Force RMS and energy change of 200 generated molecules using explicit bilevel optimization, implicit bilevel optimization with noisy neural guidance, C-EDM, and C-GeoLDM. Energy change refers to energy above ground state.}
+        \label{fig: bilevel_force_bar}
+    \end{minipage}%
+    \hspace{0.01\textwidth}  % Horizontal space between the two figures
+    \begin{minipage}[t]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{fig/main_bilevel_traj.pdf}
+        \caption{MAE trajectories of GeoLDM, C-GeoLDM, and our bilevel optimization on $C_v$.}
+        \label{fig: main_bilevel_traj}
+    \end{minipage}
+\end{figure*}
+
+\paragraph{Bilevel optimization with noisy guidance} As shown in Table~\ref{tab: bilevel_mae}, our method outperforms C-GeoLDM in $\alpha$, $\mu$, and $C_v$ by 2.86\%, 37.43\%, and 2.87\% in MAE. It is also observed in Fig.~\ref{fig: bilevel_force_bar} that, for the six properties, our method achieves lower force RMS than C-GeoLDM by 1.94\%, 4.57\%, 8.97\%, 10.66\%, 16.26\%, and 7.18\%, with smaller energy change compared to baselines. Details of MAE and force metrics are provided in Table.~\ref{tab: app_bilevel_mae} and Table. Combining property optimization with force optimization, noisy guidance with \method reduces MAE and improves the stability of generated molecules, which suggests that the combined guidance prompts the diffusion model towards generating stabler molecules with better properties.
+
+To further understand how our bilevel framework optimizes property, we provide the MAE trajectory of $C_v$ in Fig.~\ref{fig: main_bilevel_traj}. The trajectories of our noisy neural guidance method (Fig.\ref{fig: main_rg_traj}) and bilevel optimization behave similarly, such that the MAE drops fast in the first 50 steps and oscillates less compared to GeoLDM. However, bilevel optimization is slightly worse than the noisy neural guidance method (i.e. it converges closer to C-GeoLDM than noisy guidance). We suspect it is because guided by gradients from the neural regressor and then \method, the generation process leans less toward a lower MAE, as it keeps a balance between property and stability optimization. Details and explanations of the MAE trajectories of each property can be found in Fig.
+\subsection{\method beyond Stability}\label{sec: xtb_for_other_prop}
+In this section, we explore the potential of using \method to optimize molecular properties other than force and energy. We sample 200 molecules using \textbf{unconditional} GeoLDM with \method on $\alpha$, $\mu$, $\epsilon_{HOMO}$, $\epsilon_{LUMO}$, and $\Delta\epsilon$, which can also be calculated at GFN2-xTB\footnote{$C_v$ is skipped as its calculation requires the Hessian matrix, which is expensive to compute.}, and the results are shown in Table~\ref{tab: ana_xtb_property}. Specifically, since the property label of a molecule from QM9 (calculated at DFT) may be different from the xTB computation, we obtain property scores of all QM9 molecules with xTB as a distribution where we sample the guidance target, which is the reason that GeoLDM has a different MAE than Table~\ref{tab: bilevel_mae}, and \textit{GEOM} is processed similarly. It is observed that \method on properties improves the baseline in $\mu$, $\epsilon_{LUMO}$, and $\Delta\epsilon$. Our method performs less satisfyingly on $\alpha$ and $\epsilon_{HOMO}$ because they are inherently more challenging to optimize, as observed in Table~\ref{tab: neural_regressor_mae}. We can see that \method is general and applicable to a broad range of molecular optimization tasks other than stability across different datasets.
+
+\begin{table}[h!]
+\centering
+\renewcommand{\arraystretch}{1.2} % Adjust the row height
+\caption{\method for properties ($\alpha$, $\mu$, $\epsilon_{HOMO}$, $\epsilon_{LUMO}$, $\Delta\epsilon$) with 200 generated molecules on \textit{QM9} and \textit{GEOM}, where the result from the best configuration is reported. We use GeoLDM as the baseline. $*$ and \textbf{bold} denote the overall best and the best within different scales, respectively. Percentage changes between our results and GeoLDM are shown in parentheses.}
+\resizebox{1.0\textwidth}{!}{
+\begin{tabular}{cc|c c c c c c}
+\hline
+\hline
+\multicolumn{2}{c|}{Property} & $\alpha$ & $\mu$  & $\epsilon_{\text{HOMO}}$ & $\epsilon_{\text{LUMO}}$ & $\Delta\epsilon$ \\
+\multicolumn{2}{c|}{Units}  & $\text{Bohr}^3$ & D  & meV & meV & meV \\
+\hline
+\multirow{2}{*}{\textit{QM9}} & GeoLDM & 4.7555$^*$ & 1.5490 & 0.6264$^*$ & 2.1790 & 2.1568 \\
+ & GeoLDM w/ \method & \makecell{\textbf{4.8781} \\(2.58\%$\uparrow$)} & \makecell{\textbf{1.5295$^*$} \\(-1.26\%$\downarrow$)} & \makecell{\textbf{0.6392} \\(2.04\%$\uparrow$)} & \makecell{\textbf{2.0091$^*$}\\(-7.80\%$\downarrow$)} & \makecell{\textbf{1.9318$^*$} \\(-10.43\%$\downarrow$)} \\
+ \hline
+ \multirow{2}{*}{\textit{GEOM}} & GeoLDM & 24.3424 & 3.3676 & 1.1922$^*$ & 5.0903 & 1.9956 \\
+ & GeoLDM w/ \method & \makecell{\textbf{24.2168}$^*$ \\ (-0.52\%$\downarrow$)} & \makecell{\textbf{3.3412}$^*$ \\(-0.78\%$\downarrow$)} & \makecell{\textbf{1.2939} \\ (8.53\%$\uparrow$)} & \makecell{\textbf{5.0802}$^*$ \\(-0.20\%$\downarrow$)} & \makecell{\textbf{1.9264}$^*$ \\ (-3.47\%$\downarrow$)} \\
+    \hline    \hline
+\end{tabular}
+}
+\label{tab: ana_xtb_property}
+\end{table}
+
+
+
+\section{Analyses}
+
+
+
+
+
+\section{Related Work}
+
+
+
+
+\section{Conclusion \& Future Work}
+
+In this work, we study conditional generation for 3D diffusion models on molecules. We propose \method, which guides the generation process of an unconditionally trained diffusion model using an external, typically non-differentiable, chemistry oracle. By analytically estimating the guidance gradients using zeroth-order optimization methods, while ensuring the equivariance and invariance requirements for 3D diffusion models, we aim to enhance the stability of generated molecules without relying on labeled data to train an additional property predictor. We observe reduced atomic forces and improved molecular validity across both small and large molecule datasets when the model is equipped with \method, highlighting the effectiveness of our approach. Further experiments incorporating both \method and neural guidance within a bilevel optimization framework demonstrate improvements in both molecular properties and stability. This suggests that our non-differentiable guidance is compatible with existing methods. Moreover, when \method is used for property optimization alone, it shows strong generalization beyond force minimization.
+
+However, since xTB runs on CPU and neural guidance requires gradients that heavily utilize GPU resources, our method may be constrained by limited or insufficient computational resources. Future work could explore ways to accelerate the guidance process while reducing computational costs without compromising performance. Additionally, we observe that the guidance scale plays a critical role in the generative process of guided diffusion for molecules, but it is generally difficult to determine in advance. This opens the possibility for research into more effective methods for selecting guidance scales, including automated scale scheduling that optimizes guidance strength.
+
+In summary, we propose \method, which introduces guidance signals for the diffusion process from a non-differentiable quantum chemical oracle. We hope this work sparks further exploration into how domain knowledge from physics and chemistry can be more effectively integrated into neural networks to enhance molecular design.
+
+
+\newpage
+
+
+
+

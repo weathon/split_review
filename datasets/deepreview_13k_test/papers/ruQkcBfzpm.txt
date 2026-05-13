@@ -1,0 +1,387 @@
+\title{mBLIP: Efficient Bootstrapping of Multilingual Vision-LLMs}
+
+\begin{abstract}
+Modular vision-language models (Vision-LLMs) align pretrained image encoders with (frozen) large language models (LLMs)
+and post-hoc condition LLMs to `understand' the image input.
+With the abundance of readily available high-quality English image-text data as well as strong monolingual English LLMs, the research focus has been on English-only Vision-LLMs. 
+Multilingual vision-language models are still predominantly obtained via expensive end-to-end pretraining, resulting in comparatively smaller models, trained on limited multilingual image data supplemented with text-only multilingual corpora. 
+We present mBLIP, the first Vision-LLM leveraging multilingual LLMs, which we obtain in a computationally efficient manner on consumer-level hardware.
+To this end, we \textit{re-align} an image encoder previously tuned to an English LLM to a new, multilingual LLM using only a few million multilingual training examples derived from a mix of vision-and-language tasks, which we obtain by machine-translating high-quality English data to 95 languages. 
+On the IGLUE benchmark and XM3600, mBLIP yields results competitive with state-of-the-art models and it greatly outperforms strong English-only Vision-LLMs like Llava 1.5.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+The success of model and data scaling in NLP from BERT \citep{devlin_bert_2019} to more recent Large Language Models (LLMs) \citep[\textit{inter alia}]{brown_language_2020,zhang2022opt,touvron_llama_2023} has prompted similar endeavors in vision-language pretraining from `small' BERT-size models \citep{chen_uniter_2020,li_oscar_2020,li_align_2021,li_blip_2022-1}  trained on a few million image-text pairs to billion-parameter models trained with billions of examples \citep{wang_simvlm_2021,yu_coca_2022,wang_beit_2022,chen_pali_2022,chen_pali-x_2023}.
+The prohibitive cost of such end-to-end (pre)training, however, has resulted in increased interest in efficient modular methods that leverage existing large language models (LLMs). These align the output of a pretrained image encoder to the LLM's input representation space \citep{tsimpoukelli_multimodal_2021,alayrac_flamingo_2022,li_blip-2_2023}, resulting in a Vision-LLM.
+
+Pretraining vision-language models from scratch requires a massive amount of high-quality image-text data, which is only available in English. 
+Because of this, multilingual pretraining of vision-language models \citep{ni_m3p_2021,zhou_uc2_2021-2,zeng_cross-view_2023,shan_ernie-unix2_2022,li_unifying_2023} commonly supplements limited-size multilingual image-text data with multilingual text-only data (the amount of which often surpasses that of image-text data) to achieve strong results, despite initialization with weights of multilingual text encoders such as XLM-R \citep{conneau_unsupervised_2020}.
+
+In this work, we recognize modular Vision-LLM methods as a potential solution to this problem, observing that: (1) once an image encoder is aligned to one LLM, it requires significantly less data to re-align it to another LLM \citep{zhang_transfer_2023,zhu_minigpt-4_2023} and (2) since image encoding is, in principle, language-agnostic, it may be possible to successfully re-align the image encoder to a strong multilingual LLM, even if it was initially aligned only with English image-text data.
+Based on these observations, we present mBLIP, the first massively multilingual modular Vision-LLM, which we obtain by (re-)aligning an image encoder to a multilingual LLM.
+Putting together a range of recent advances in multimodal representation learning, we efficiently bootstrap a massively multilingual Vision-LLM using only $\sim$2.5 million images (and without any additional multilingual text-only data), training  only 124 million parameters on consumer-grade hardware. We achieve this efficiency by: 1) bootstrapping our model from a) an ``English'' image encoder \citep{li_blip-2_2023}, previously aligned to a monolingual English LLM and b) a strong instruction-tuned multilingual LLM \citep{xue_mt5_2021,scao_bloom_2022, muennighoff_crosslingual_2022}; 2) leveraging recent advances in massively multilingual machine translation \citep{costa-jussa_no_2022}, which we use to translate high-quality English data---both classic captions as well as task instructions  \citep{dai_instructblip_2023}---to 95 languages; and finally 3) coupling parameter-efficient training methods \citep{hu_lora_2022} together with quantization \citep{dettmers_llmint8_2022,dettmers_qlora_2023} to enable training on consumer-grade hardware.
+
+We extensively evaluate mBLIP on different multilingual vision-language tasks to confirm the efficacy of our approach: for multilingual image captioning, mBLIP (with mT0-XL) surpasses (zero-shot) PaLI-X (a model with 55B parameters, trained with billions of examples) \citep{chen_pali-x_2023} on the XM3600  \citep{thapliyal_crossmodal-3600_2022}. 
+On the visual reasoning and QA tasks of the IGLUE benchmark \citep{bugliarello_iglue_2022-1}, mBLIP matches or surpasses the performance of state-of-the-art models, despite training far fewer parameters on far less pretraining data. 
+We consistently outperform state-of-the-art English Vision-LLMs outside of English, highlighting the multilingual prowess of our model.
+
+
+\section{Related Work}
+
+
+\subsection{LLMs and Images}
+The success of scaling up training data and model parameters has resulted in large vision-language models with billions of parameters \citep{wang_simvlm_2021,yu_coca_2022,wang_beit_2022}.
+However, with the number of parameters in single-digit billions, these are still an order of magnitude smaller than text-only models \citep{brown_language_2020}; the compute necessary to pretrain comparably large vision-language models, however, is available only to select few \citep{chen_pali_2022,chen_pali-x_2023}.
+
+Instead, much of the vision-language research turned to approaches that can leverage the power of existing LLMs 
+by training an image encoder to map an image into a sequence of tokens in the LLM embedding space \citep{tsimpoukelli_multimodal_2021,alayrac_flamingo_2022,li_blip-2_2023}, while the LLM is kept as-is or is only partially tuned \citep{alayrac_flamingo_2022}.
+Most recently, the release of strong publicly available LLMs such as Llama \citep{touvron_llama_2023} and the success of conversational instruction tuning \citep{ouyang_training_2022,alpaca,vicuna2023,xu_baize_2023}, has led to a body of work \citep{zhu_minigpt-4_2023,liu_visual_2023,ye_mplug-owl_2023,dai_instructblip_2023,gao_llama-adapter_2023,liu_improved_2023,bai_qwen-vl_2023} that tries to replicate the vision-language skills of GPT-4 \citep{openai_gpt4_2023}. The vast majority of research focused on English, where both an abundance of high-quality image-text data and strong LLMs exist. To the best of our knowledge, we are the first to extend a massively multilingual LLM with ``vision capabilities''.
+
+\subsection{Multilingual Vision-Language Models}
+While the majority of research on vision-language models targets English only, a number of multilingual models have been proposed too. M3P \citep{ni_m3p_2021}, the first transformer-based \citep{vaswani_attention_2017} multilingual vision-language model, adopts the architecture and pretraining objectives of English counterparts \citep{chen_uniter_2020,li_oscar_2020}.
+but trains on (i) the code-switched image-text data 
+in which words in English image captions are replaced with translations from various languages 
+as well as (ii) additional text-only multilingual corpora. 
+UC2 \citep{zhou_uc2_2021-2} uses a similar architecture and a mix of training objectives but instead of code-switching, it machine translates the 3M captions of CC3M \citep{sharma_conceptual_2018} to 5 languages (German, French, Czech, Japanese, and Chinese).
+\citet{li_unifying_2023} and CCLM \citep{zeng_cross-view_2023}, which adopt the ALBEF architecture \citep{li_align_2021} that incorporates additional contrastive learning objectives, use the same translated CC3M data but they additionally supplement 19M parallel sentences (pairing English with all of the languages spanned by their respective downstream evaluation tasks). 
+ERNIE-UniX2 \citep{shan_ernie-unix2_2022}, with an encoder-decoder architecture, adopts the same pretraining objectives but scales up the data to more translated captions and more text-only data (both aligned and monolingual).
+Finally, PaLI \citep{chen_pali_2022} (17B parameters) and PaLI-X \citep{chen_pali-x_2023} (55B parameters) represent two huge encoder-decoder models trained using a mixture of vision-and-language tasks, with billions of web-crawled multilingual captions, machine translated data, automatically extracted data (e.g., OCR and object detection), and generated visual QA (VQA) examples.
+With the exception of the PaLI models and ERNIE-UniX2  -- both of which are not publicly available -- all other multilingual vision-language models represent encoder-only architectures, which cannot perform image captioning out of the box.
+
+\begin{figure*}[t]
+    \centering
+    \footnotesize
+    \includegraphics[width=0.85\textwidth]{media/architecture.pdf} \\
+    \caption{The mBLIP architecture: A Q-Former encodes the image in learned query tokens which are projected to the LLM space. We initialize the Q-Former from a BLIP-2 model and \textit{re-align} it to the multilingual LLM with a multilingual task mix. The image encoder and LLM (aside from LoRA weights) are frozen during training.
+    }
+    \label{fig:architecture}
+\end{figure*}
+
+
+
+\section{mBLIP}
+
+
+We first briefly describe the modular BLIP-2 architecture \cite{li_blip-2_2023} which we adopt in this work, followed by the description of training tasks and data, which we translate to 95 languages. 
+
+\subsection{Architecture}
+We follow the modular BLIP-2 architecture \citep{li_blip-2_2023} depicted in Figure~\ref{fig:architecture}:
+A Query-Former (Q-Former) is an encoder-only transformer \citep{vaswani_attention_2017} with 32 learned query tokens as input: it contextualizes the query tokens -- via the cross-attention mechanism -- with the representations of the image patches encoded by a large (frozen) Vision Transformer (ViT) \citep{dosovitskiy_image_2020}. The visual tokens that are the output of the Q-Former are then projected into the LLM embedding space with a single linear projection matrix $\mathbf{W}_P \in \mathbb{R}^{h_v\times h_l}$, with $h_v$ and $h_l$ as hidden dimensions (i.e., embedding dimensionality) of the Q-Former and LLM, respectively.
+
+During training, only the the Q-Former (including the 32 query tokens) and the linear projection $\mathbf{W}_P$ are updated; all ViT and LLM parameters are kept frozen. 
+Although the Q-Former and  projection have initially been aligned to a monolingual English LLM, they only produce \textit{visual} tokens: we believe that as such they are not overly tailored to English and can therefore be effectively re-aligned to a different, multilingual LLM.   
+
+Because the LLM is frozen in the BLIP-2 training, its parameters cannot adapt to task-specific idiosyncrasies, e.g., in fine-tuning for VQA or for instruction-following \citep{dai_instructblip_2023}. Instead, task-specific fine-tuning of BLIP-2 requires that the text input is not just fed into the LLM but also into the Q-Former in order to enable encoding of \textit{task-specific} visual information from the input. The Q-Former, however, is based on the English BERT \cite{devlin_bert_2019}, preventing the application of this same approach in the multilingual setting (i.e., we cannot feed the text in other languages into the Q-Former nor efficiently make it massively multilingual, i.e., without a large multilingual pre-training effort). Because of this, we opt for a different approach: instead of feeding the text of the image-text instance (e.g., in VQA) to the Q-Former, we partially update the LLM with the parameter-efficient LoRA \citep{hu_lora_2022}, which trains low-rank reparametrization of the LLM matrices. 
+
+\subsection{Training Tasks and Data}
+We create a small but high-quality mix of tasks for our re-alignment training. We start from existing high-quality English data and machine-translate it to 95 languages in order to obtain multilingual training data for re-alignment of the Q-Former to the multilingual LLM.\footnote{Training with only English data, even without LoRA, results in the LLM producing only English output. } We hypothesized that the re-alignment to a new LLM can be done with significantly less data than what is needed to train the original Q-Former \citep{zhu_minigpt-4_2023,zhang_transfer_2023}. Accordingly,  we create a small, high-quality English datasets and make it multilingual via MT rather than training with large-scale but very noisy multilingual image-caption datasets like LAION5B \citep{schuhmann_laion-5b_2022}. In addition, in line with findings from language-only instruction-tuning \citep{sanh_multitask_2022,muennighoff_crosslingual_2022,chung_scaling_2022} and vision-language training \cite{dai_instructblip_2023,liu_visual_2023,liu_improved_2023,bai_qwen-vl_2023}, we expect the training on a mixture of vision-and-language tasks (as opposed to training only for image captioning), with different task instructions, to result in better generalization abilities of the 
+model and improve its (zero-shot) downstream performance and usability.
+
+\noindent\textbf{Task Mix}: We select below the tasks and datasets used to create our training mix for re-alignment (naturally, we ensure that the data does not overlap with our downstream evaluation data; see \S\ref{sec:experiments:evaluation_tasks}). In total, across all tasks, we use 5.1M examples encompassing 2.7M unique images.
+
+\noindent\textbf{1. Image Captioning}: We use MSCOCO \citep{lin_microsoft_2014} along with 2.3 million examples sampled from the synthetic CapFilt dataset \citep{li_blip_2022-1} with the noun phrase method by \citet{liu_visual_2023} to ensure concept diversity. Additionally, we use LLaVA-Instruct-Detail \citep{liu_visual_2023}, which contains longer and more detailed captions. \\
+\noindent \textbf{2. Visual Question Answering and Generation}: For VQA and the inverse task of question generation (given the answer, the model is supposed to produce the question), we use VQAv2 \citep{goyal_making_2017}.
+Additionally, we split the conversations from LLaVA-Instruct-Conversation into separate VQA pairs.
+We use A-OKVQA \citep{schwenk_aokvqa_2022}, a knowledge-intensive VQA dataset with rationales behind the answers, to create data for two additional task variants: 1) given the question, generate the answer and the rationale behind it, 2) given the question and the answer, generate the rationale.
+Finally, we use ImageNet \citep{deng_imagenet_2009} with the multilingual labels from Babel-ImageNet \citep{geigle_babel-imagenet_2023} framed as an open-ended QA task (with questions like \textit{``What is in the image?''} and no predefined answer choices). \\
+\noindent \textbf{3. Matching:}  Inspired by image-text matching \citep{lu_vilbert_2019}, where an encoder has to classify if caption and image match, we propose a \textit{yes}/\textit{no} matching task so that the model learns what is and what is not in the image to reduce hallucinations when interrogating for image content \citep{li_evaluating_2023}. For this, we use the Web CapFilt captions for ``standard'' caption matching with hard negatives. We also use the ImageNet examples with multilingual class labels, where the model has to predict if a given class is in the image or not.
+
+\noindent\textbf{Machine Translation}:
+We translate the above English data with NLLB  \citep{costa-jussa_no_2022} (\textit{nllb-200-distilled-1.3B}), a recent massively multilingual MT model that exhibits strong performance also for low(er)-resource languages.
+To extend the utility of mBLIP to languages beyond what is covered by existing multilingual evaluation benchmarks, 
+we translate the English data to all languages from the mC4 corpora \citep{xue_mt5_2021},\footnote{\href{https://www.tensorflow.org/datasets/catalog/c4\#c4multilingual}{tensorflow.org/datasets/catalog/c4\#c4multilingual}} excluding only a handful of languages not supported by NLLB.\footnote{Excluded are (ISO-1/3 codes): \textit{fy}, \textit{haw}, \textit{hmn}, \textit{la}, and \textit{co}.} 
+Our final training dataset thus covers 96 languages (English and 95 translation languages). 
+Translating all English training instances to every target language would result in a 96 times larger dataset (w.r.t. the original English data) and, consequently, prohibitively expensive re-alignment training. We thus translate English instances to target languages in proportion to the languages' representation in mC4 (e.g., we translate 6\% of English instances to German, because German represents 6\% of the mC4 corpus).  
+ In short, we limit to the top-1500 answers and use consistency with back-translations to filter incorrect translation. We also still use English half the time.} because translating them without context is overly error-prone.  
+\noindent\textbf{Output Language}: Essential for multilingual models is control over the output language and minimizing language hallucinations (,i.e., output in an unwanted language)  \citep{xue_mt5_2021,vu_overcoming_2022,pfeiffer_mmt5_2023,li_why_2023}.
+We achieve this by combining English prompts that explicitly specify the target language (e.g., \textit{``Answer in French.''}) and translating the instructions for image captioning and LLaVA \citep{liu_visual_2023} to the target languages (other templates contain placeholders that make translation difficult).
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+\subsection{Evaluation Tasks and Setup}
+\label{sec:experiments:evaluation_tasks}
+We evaluate our model on a range of languages on (1) classification-style VQA and image understanding tasks, where the model generates a short answer in response to a question or premise and (2) image captioning tasks, where the model describes an image. For VQA and image captioning, we ensured that no evaluation instances were used in re-alignment training. In contrast to VQA and image captioning, the model was not exposed to image understanding during re-alignment: these tasks thus test the model's cross-task generalization abilities. 
+To generate outputs, we use beam search with the beam width of $5$ and a length penalty of $-1$ for classification-style tasks to encourage short answers. 
+
+\noindent\textbf{Image Captioning}:
+XM3600 \citep{thapliyal_crossmodal-3600_2022} is a captioning dataset covering 36 languages, 3600 images, and $\sim$2 captions per image and language. 
+xFlickrCo \citep{bugliarello_iglue_2022-1} combines the 1000 Flickr30k \citep{plummer_flickr30k_2015} test images with 1000 images from the MSCOCO \citep{lin_microsoft_2014} test split\footnote{These captions were created from scratch and not by translating existing MSCOCO captions so this does not constitute leakage from the MSCOCO data of the training mix.} and provides one new caption for each image in 8 languages. For the English xFlickrCo results, we use the standard Flickr30k test split (i.e., without MSCOCO images and with 5 reference captions per image).
+
+For Chinese, Japanese, and Thai, which do not use white space for tokenization, we use the default spaCy 3.5.3 segmenter for the respective languages; our results on those languages are thus \textit{not directly comparable} to previous work -- which, unfortunately, does not disclose the used tokenizer \citep{thapliyal_crossmodal-3600_2022,chen_pali_2022,chen_pali-x_2023}.
+\noindent\textbf{VQA}:
+we leverage xGQA \citep{pfeiffer_xgqa_2022} and MaXM \citep{changpinyo2022maxm}, two VQA datasets with 8 and 7 languages, respectively. While  answers in xGQA are in English (as only the original GQA \citep{hudson_gqa_2019} questions were translated), answers in MaXM are in the language of the question.
+We evaluate our model in zero-shot inference (i.e., without any additional fine-tuning other than the VQA training included in the re-alignment mix) on both datasets. For xGQA, we additionally fine-tune the model on the training portion of the English GQA and perform cross-lingual zero-shot transfer.\footnote{Note that by zero-shot cross-lingual transfer here we refer to the fact that the model has been fine-tuned only on the English GQA data; in re-alignment training, however, it has been exposed to VQA from other datasets.} We use exact match accuracy with open generation, that is, we do not constrain the generation to a fixed set of labels like, e.g., \citet{zeng_cross-view_2023}. For MaXM, an exact match to any one of the answer candidates is correct, as proposed by \citet{changpinyo2022maxm}.
+
+\noindent\textbf{Image Understanding}: 
+XVNLI \citep{bugliarello_iglue_2022-1,xie_visual_2019} is a visual entailment task that covers 5 languages: given an image and a statement, the model has to decide if the image entails, contradicts or is neutral to the statement.  MaRVL \citep{liu_visually_2021-1} is based on NLVR2 \citep{suhr_corpus_2019-1} with new images and concepts spanning different cultures in 6 languages: given two images, the model has to decide if a statement is true or false.
+We \textit{separately} encode the two images with the Q-Former and then concatenate their visual tokens together as input for the LLM.
+Like for xGQA, we evaluate the models on XVNLI and MaRVL with (1) zero-shot inference (i.e., no fine-tuning for XVNLI and MaRVL) and (2) supervised cross-lingual transfer: we fine-tune the re-aligned model on the English training portions (of XVNLI and NLVR2, respectively) and evaluate its performance on the test portions of target languages. % train splits, for a cross-lingual zero-shot setting.
+We report the results in terms of exact match accuracy.
+
+
+\subsection{Implementation Details}
+\textbf{Architecture}: We initialize the mBLIP's ViT (EVA CLIP ViT-g/14 \citep{fang_eva_2022}) and Q-Former with the BLIP-2 Flan-T5-XL checkpoint. For the multilingual LLM, we experiment with mT0-XL and BLOOMZ-7B \citep{muennighoff_crosslingual_2022}, the instruction-tuned versions of mT5-XL \citep{xue_mt5_2021} and BLOOM-7B \citep{scao_bloom_2022}. 
+We use 8/4-bit quantization \citep{dettmers_llmint8_2022,dettmers_qlora_2023}.
+
+\noindent\textbf{Warmup}: Similar to \citet{zhang_transfer_2023,liu_visual_2023}, 
+we first train
+only the linear projection between the Q-Former and LLM. with 1M captions.
+\noindent\textbf{Re-Alignment Training}:
+We train on the re-alignment task mixture for 80k steps (2 epochs), which takes 4 days (mT0) and 6 days (BLOOMZ) with 4 consumer-grade NVIDIA RTX 3090 cards.
+\noindent\textbf{Fine-tuning}: We train 3 runs---reporting their average---and select the optimal checkpoint based only on the English validation data 
+for \textit{true} zero-shot cross-lingual transfer  \cite{schmidt2022don}.
+
+
+\subsection{Results}
+
+\paragraph{Baselines.}
+We compare with various multilingual baselines: PaLI \cite{chen_pali_2022}, PaLI-X \cite{chen_pali-x_2023}, \citet{thapliyal_crossmodal-3600_2022}, LMCap \cite{ramos_lmcap_2023}, UC2 \cite{zhou_uc2_2021-2}, \citet{li_unifying_2023}, CCLM \cite{zeng_cross-view_2023}, Ernie-UniX2 \cite{shan_ernie-unix2_2022}, \citet{changpinyo2022maxm}; and also evaluate two strong English Vision-LLMs (InstructBLIP \cite{dai_instructblip_2023} and Llava 1.5 \cite{liu_improved_2023} (LLM is Vicuna 1.5 \cite{touvron_llama_2023,vicuna2023})).
+
+\begin{table}[t]
+\footnotesize
+\centering
+
+\begin{subtable}[h]{0.99\linewidth}
+     \def\arraystretch{0.97}
+     \resizebox{\linewidth}{!}{
+    \begin{tabular}{lrr rr}
+    \toprule
+    & & & \multicolumn{2}{c}{\bf XM3600}\\
+ \bf Model & \bf Train P. & \bf Total P. & \bf en  & \bf 35-avg  \\
+\midrule
+\citet{thapliyal_crossmodal-3600_2022} $\dagger$  & 0.8B & 0.8B &  57.60 & 28.90\\ 
+PaLI-3B  $\dagger$ & 3B & 3B & 92.80 & 47.00\\ 
+PaLI-17B $\dagger$ & 17B & 17B & \textbf{98.10} & \textbf{53.60} \\ 
+PaLI-X $\dagger$ &  55B & 55B & 94.20 & 53.10  \\  
+\cmidrule(lr){1-1}
+PaLI-X 0-shot & 55B & 55B & 48.80 & 22.70  \\ 
+LMCap \citep{ramos_lmcap_2023} & 0 &  3B &  45.20 & 17.60 \\
+\cmidrule(lr){1-1}
+InstructBLIP Flan-T5-XL & 107M & 4.1B & 85.22 & 1.10 \\
+Llava 1.5 7B & 7B & 7.3B & 55.87 & 9.78\\
+\cmidrule(lr){1-1}
+mBLIP mT0-XL & 124M & 4.9B & 80.17	& 26.77 \\
+mBLIP BLOOMZ-7B & 124M & 8.3B & 76.40	& 21.87 \\
+ \bottomrule
+    \end{tabular}
+    }
+    \caption{
+    mBLIP outperforms 
+    all models except those
+    fine-tuned on MSCOCO translated to all 36 languages ($\dagger$). Different tokenizers for \textit{zh, ja, th} make results not perfectly comparable.}
+    \label{table:res:caption:xm3600}
+\end{subtable}
+\hfill
+\begin{subtable}[h]{0.99\linewidth}
+     \def\arraystretch{0.97}
+     \resizebox{\linewidth}{!}{
+    \begin{tabular}{lrr rr}
+    \toprule
+    & & & \multicolumn{2}{c}{\bf xFlickrCo}\\
+ \bf Model & \bf Train P. & \bf Total P. & \bf en  & \bf 7-avg  \\
+\midrule
+InstructBLIP Flan-T5-XL & 107M & 4.1B & \textbf{84.71} & 1.46\\
+Llava 1.5 7B & 7B & 7.3B &  64.47 & 22.23 \\
+\cmidrule(lr){1-1}
+mBLIP mT0-XL & 124M & 4.9B & 77.00 & \textbf{44.39} \\
+mBLIP BLOOMZ-7B & 124M & 8.3B &  76.75	& 42.11 \\
+ \bottomrule
+    \end{tabular}
+    }
+    \caption{No multilingual baseline on xFlickrCo exists at the time of writing but mBLIP is competitive with English models.}
+    \label{table:res:caption:flickr}
+\end{subtable}
+
+\caption{
+Captioning results (CIDEr) on XM3600 and xFlickrCo for English and other languages.
+}
+\label{tab:res:caption}
+\end{table}
+\begin{table*}[t]
+    \centering
+    \footnotesize
+     \def\arraystretch{0.97}
+     \resizebox{\linewidth}{!}{
+    \begin{tabular}{lrr rr rr rr rr rr rr}
+    \toprule
+    & & & \multicolumn{2}{c}{\bf XVNLI} & \multicolumn{2}{c}{\bf MaRVL} & \multicolumn{2}{c}{\bf xGQA}  & \multicolumn{2}{c}{\bf MaXM} \\
+ \bf Model & \bf Train P. & \bf Total P.  & \bf en  & \bf 4-avg & \bf en  & \bf 5-avg & \bf en  & \bf 7-avg & \bf en  & \bf 6-avg \\
+\midrule
+\multicolumn{3}{l}{\bf Fine-tuned on train split} \\
+\midrule
+ UC2 \citep{bugliarello_iglue_2022-1}  & 270M & 270M  & 76.38 & 62.05 & 70.56 & 57.28 &  55.19 & 29.35 & --- & --- \\
+ \citet{li_unifying_2023} & 330M & 330M & --- & 69.50 & --- & 62.10  & --- & 42.10 & --- & --- \\
+ CCLM (4M) $\dagger$ & 520M & 520M & --- & 73.32 & 83.22 & 67.17 & --- & 46.24  & --- & --- \\
+ CCLM base & 420M & 420M & --- & 74.78 & --- & 68.49 & --- & 48.12  & --- & --- \\
+ CCLM large & 970M & 970M  & --- & \textbf{78.95} & --- & 74.83  & --- & \textbf{56.25} & --- & --- \\
+ Ernie-UniX2 & 910M & 910M & \textbf{87.73} & 77.42 & --- & ---  & 56.68 & 45.25 & --- & ---\\ 
+\cmidrule(lr){1-1}
+mBLIP mT0-XL & 124M & 4.9B  & 82.41	& 76.41 & 85.20 & \textbf{75.13} & 56.54	& 47.71  & --- & --- \\
+mBLIP BLOOMZ-7B  & 124M & 8.3B   & 75.45	& 66.96 & \textbf{86.69}	& 73.94 &\textbf{57.89} & 44.91  & --- & --- \\
+\midrule
+\multicolumn{3}{l}{\bf Zero-shot} \\
+\midrule
+ \citet{changpinyo2022maxm} $\ddagger$ & 1.5B & 1.5B  & --- & --- & --- & --- & 41.50 & 39.44 & 36.60 & 42.42 \\
+ PaLI-17B $\ddagger$ & 17B & 17B  & --- & --- & --- & --- & 54.20 & \textbf{50.77} & \textbf{56.40} & \textbf{57.27}  \\ 
+\cmidrule(lr){1-1}
+InstructBLIP Flan-T5-XL & 107M & 4.1B & \textbf{62.09} & 48.65 & --- & --- & 48.23 & 18.63 & 55.03 & 1.4\\
+Llava 1.5 7B * & 7B & 7.3B & 56.43 & 49.33 & --- & --- & *\textbf{57.37} & *27.53 & 52.01 & 16.22 \\
+\cmidrule(lr){1-1}
+ mBLIP mT0-XL  & 124M & 4.9B  & 60.61	& \textbf{57.65} & \textbf{67.26}	& \textbf{66.66} & 42.55	& 39.20 & 47.99	& 41.04 \\
+mBLIP BLOOMZ-7B & 124M & 8.3B  & 58.26	& 55.46 & 62.26	& 58.61 & 43.35	& 37.73 & 55.70	& 27.91 \\
+
+ \bottomrule
+    \end{tabular}
+    }
+    \caption{
+    VQA and image understanding results for English and averaged over all other languages: The metric is (exact match) accuracy with open generation for mBLIP \& PaLI and constrained generation to a set of labels for CCLM on xGQA.
+    \textbf{Bold} indicates the best score in each column.
+    $\dagger$: From \cite{zeng_cross-view_2022} v1\,(arXiv).
+    $\ddagger$: Fine-tuned on VQAv2 translated to all MaXM \& xGQA languages.
+    *: GQA included in training data.
+    }
+    \label{tab:res:iglue}
+\end{table*}
+\paragraph{Image Captioning.}
+Table~\ref{tab:res:caption} summarizes our image captioning results. 
+On XM3600 (Table~\ref{table:res:caption:xm3600}), mBLIP mT0 outperforms the (training-free) captioning pipeline LMCap \citep{ramos_lmcap_2023} as well as PaLI-X (in zero-shot inference): these results are very encouraging, considering that PaLI-X trains orders of magnitude more parameters (55B vs.\,124M for mBLIP), on billions of multilingual vision-and-language examples. mBLIP, however, substantially trails the performance of the PaLI models fine-tuned on MSCOCO \textit{with full translations to all 35 languages} (yielding $3\times$ more training examples than we do from our entire re-alignment task mix).
+While mBLIP is also trained on MSCOCO with translated captions, PaLI models consume orders of magnitude more data in most languages, especially the low-resource ones.
+With proportionally less mBLIP training for lower-resource languages (according to the language-specific corpus portions in mC4), this yields especially large gains for PaLI models for low-resource languages; mBLIP is more competitive for high-resource languages like Spanish or German.
+
+The English models show strong English results (as expected) but fail for other languages as they either do not generate captions in the target language or, for high-resource languages like German where captioning works, still underperform mBLIP.
+
+We additionally evaluate on xFlickrCo (Table~\ref{table:res:caption:flickr}).
+While we are the first to use it for multilingual captioning (in \citet{bugliarello_iglue_2022-1}, it is used for image-text retrieval), on the English Flickr30k captions, mBLIP achieves performance that is comparable to that of the English LLMs while outclassing them for other languages.
+
+Finally, between the two mBLIP models, the mT0 variant beats the BLOOMZ variant. We believe this is due to the fact that mT5 (the base LLM from which mT0 was derived) was trained on almost 3 times more text (1 trillion tokens vs. 366 billion) and in nearly twice as many languages as BLOOM (the  LLM of BLOOMZ). On a handful of languages like Indonesian or Hindi, however, BLOOMZ outperforms mT0, suggesting that the choice of the mBLIP variant is language-specific. 
+
+\paragraph{VQA and Image Understanding.}
+Table \ref{tab:res:iglue} summarizes the results on VQA and image understanding tasks.
+On xGQA, mBLIP (zero-shot) outperforms the UC2 model that has been fine-tuned on the GQA data \citep{zhou_uc2_2021-2,bugliarello_iglue_2022-1} \textit{for all target languages}.
+When fine-tuned, our mBLIP variants are only outperformed by CCLM (large) \citep{zeng_cross-view_2023}; CCLM (large) trains nearly nine-times more parameters and leverages more multilingual pretraining data\footnote{CCLM is also initialized with the English X2-VLM \citep{zeng_xmbox2-vlm_2022} which is trained on $>$1B images; the BLIP-2 weights, from which we start the mBLIP training, in contrast, were trained using only 129M images.}. Crucially, however, CCLM resorts to constrained generation w.r.t. the available answers, which is an easier yet computationally much more demanding evaluation protocol than our open generation. 
+mBLIP exhibits relatively poor zero-shot XVNLI performance, as it fails to predict the neutral class. After fine-tuning for XVNLI, however, mBLIP mT0 yields multilingual performance (over 4 languages) comparable to that of CCLM (large). 
+The MaRVL zero-shot performance of mBLIP variants is surprisingly good, considering that they were never trained for any task involving multiple images as input; Zero-shot performance of mBLIP mT0 on MaRVL is comparable to that of multiple fine-tuned baselines. When also fine-tuned, mBLIP achieves state-of-the-art MaRVL results, on par with CCLM (large).
+
+On MAXM, mBLIP mT0 (zero-shot) performs comparably to the 1.5B parameter baseline model of \citet{changpinyo2022maxm} but falls short of the performance of the huge PaLI-17B model. 
+mBLIP BLOOMZ exhibits strong English performance, but surprisingly poor results for other languages. We should emphasize here that training on the translated VQAv2 answers is crucial: without it, the LLM consistently generate answers in English. Even though only $\sim$25\% of examples in VQAv2 have non-English answers, this is already sufficient to eliminate language hallucination, where the model only answers in English regardless of the instruction language\footnote{Training with only English VQAv2 answers during re-alignment results in an mBLIP mT0 instances that achieves only 15.5\% accuracy for 6-avg, due to the LLM predominantly generating English answers.}. 
+
+The English Vision-LLMs, like in captioning, show strong results for English but fall behind in other languages. This is particular evident in MAXM, which has non-English answers (unlike xGQA and XVNLI) that the models fail to consistently generate.
+For high-resource languages like German, mBLIP still outperforms them, highlighting its strong multilingual capabilities.
+
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}[b]{0.32\textwidth}
+    \centering
+    \includegraphics[width=1\textwidth]{media/plots/swarm_xgqa.pdf}
+    \caption{xGQA}
+    \label{fig:results:perlanguage:xgqa}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.32\textwidth}
+    \centering
+    \includegraphics[width=1\textwidth]{media/plots/swarm_marvl.pdf}
+    \caption{MaRVL}
+    \label{fig:results:perlanguage:marvl}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.32\textwidth}
+    \centering
+    \includegraphics[width=1\textwidth]{media/plots/swarm_xvnli.pdf}
+    \caption{XVNLI}
+    \label{fig:results:perlanguage:xvnli}
+    \end{subfigure}
+    \caption{Cross-lingual transfer of models fine-tuned on English.
+    The smaller gap of mBLIP mT0 between high- and low-resource 
+    languages suggests better transfer capabilities. (CCLM 4M from \cite{zeng_cross-view_2022} v1 on arXiv.)}
+    \label{fig:results:perlanguage}
+\end{figure*} 
+Looking at results for individual languages on the three IGLUE tasks in Figure \ref{fig:results:perlanguage}, we see that mBLIP with mT0 greatly improves cross-lingual transfer over prior work, especially for lower-resource languages: 
+while CCLM and Ernie-UniX2 exhibit a gap of 20-25\% on xGQA between the best and worst language (German and Bengali), the same gap is only 5\% for our fine-tuned mBLIP. Similarly, on MaRVL, CCLM has a gap of 11\% between Indonesian and Tamil, while the largest gap for mBLIP amounts to 2\%. The same holds for XVNLI, but to a lesser degree: the largest gap between languages for mBLIP (mT0) is 4\%, compared to 8\% for CCLM/Ernie-UniX2.
+The BLOOMZ-based variant, however, exhibits much weaker transfer ability and has in fact larger gaps than prior work; this highlights the importance of deriving mBLIP from a strong multilingual LLM.
+
+
+
+\section{Ablation}
+
+
+We ablate the various components and design decisions for mBLIP, namely: 1) using our instruction mix compared to the `classic' setting used for BLIP-2 with only image-caption data (using the 2M Web CapFilt examples as training data) and compared to the instruction mix translated following the mT5 language distribution, 2) using LoRA on (all) LLM matrices to better align the LLM to the visual input, and 3) using the warm-start where the projection between Q-Former and LLM is trained briefly in a preliminary stage before the full re-alignment training. We use the zero-shot results on xGQA, XVNLI, and XM3600 for evaluation.
+Results are shown in Table~\ref{tab:res:ablation}. In \S\ref{sec:ablation:hallucination}, we provide an additional ablation that investigates the effect of adding the matching tasks to re-alignment mix, demonstrating their effectiveness in reducing hallucinations. 
+In \S\ref{sec:ablation:finetune}, we consider the effect of our design choices on fine-tuned models (on xGQA).
+
+\paragraph{Design \& Training:} 
+For zero-shot xGQA and XVNLI, our complete mBLIP configuration yields the best performance. Not using LoRA (i.e., preventing any updates to the LLM) as well as training only on image captioning (compared to the full instruction task mix) both lead to substantially worse performance. Moreover, training (with LoRA) only for image captioning results in a model that does not follow instructions but merely generates captions, making it (zero-shot) useless for other tasks, barring task-specific fine-tuning. For image captioning, both the warm-start and LoRA fine-tuning boost the performance. Unsurprisingly, the re-alignment on captioning alone yields similar or slightly better captioning performance compared to re-alignment based on the full task mix (i.e., other tasks in the mix do not contribute to captioning ability of mBLIP).
+While the task mix brings additional quality captions from MSCOCO and LLaVA (in addition to the Web CapFilt examples), the model also has to learn the other tasks; Importantly, the ablation shows that including other tasks to re-alignment training does not harm the captioning abilities of the model. % and in fact might even slightly improve them overall.
+
+\paragraph{Language Distribution:}
+Our translation, proportional to the mC4 language distribution, results in 44\% examples in English and, e.g., only 0.003\% Lao examples. To test how the language distribution affects performance, we adopt another distribution: that of the mT5's pretraining corpus (reduces English to 8\% and pushes Lao to 0.3\%). As expected, this reduces the performance for higher-resource languages, and improves it for low(er)-resource languages. However, the changes in performance 
+are relatively small. This would suggest that it is the language distribution of the (much larger) multilingual pretraining of the LLM that determines the downstream performance for individual languages rather than the language distribution of our (much smaller) re-alignment training. 
+\begin{table}[t]
+    \centering
+    \footnotesize
+     \def\arraystretch{0.97}
+     \resizebox{\linewidth}{!}{
+    \begin{tabular}{ccc rr rr rr}
+    \toprule
+ \bf Task & \bf LoRA & \bf Warm- & \multicolumn{2}{c}{\bf xGQA} & \multicolumn{2}{c}{\bf XVNLI} &  \multicolumn{2}{c}{\bf XM3600} \\
+ \bf Mix & & \bf start & \bf en  & \bf avg  & \bf en  & \bf avg  & \bf en  & \bf avg \\
+\midrule
+
+\xmark & \xmark & \cmark & 26.92 & 9.43 & 34.17 & 35.26 & \textbf{86.78} & 22.01  \\ 
+\xmark & all & \cmark & 1.51 & 0.00 & 33.04 & 25.72 &  85.53 & 24.69  \\
+\cmark & \xmark & \cmark & 37.33 & 33.77 & 52.02 & 54.26 &  84.14 & 21.35  \\
+\cmark & q,v & \cmark & 39.83 & 36.50 & 57.91 & 55.22 &  81.45 & 23.46 \\
+\cmark & all & \xmark & 40.89 & 37.88 & 57.74 & 54.50 & 80.68 & 24.38  \\
+mT5 & all & \cmark & 40.91	& 37.67 & 58.00	& 54.96  & 80.13	& \textbf{25.85}  \\
+\cmark & all & \cmark & \textbf{41.98} & \textbf{38.46} & \textbf{58.87} & \textbf{56.28}  & 81.51 & 25.02 \\
+ \bottomrule
+    \end{tabular}
+    }
+    \caption{
+    Ablations for mBLIP (mT0) w.r.t.: (i) instruction mix (\cmark) vs. only captions (\xmark) (i.e., the 2M Web CapFilt examples) vs. instruction mix using the mT5 distribution (mT5), (ii) LoRA (no LoRA \xmark, standard LoRA on query\&value matrices, LoRA on all matrices), and (iii) using the warm-start where the projection between Q-Former and LLM is trained alone first. All model variants are trained (i.e., re-aligned) for 30k steps.
+    }
+    \label{tab:res:ablation}
+\end{table}
+
+\begin{figure*}[t]
+    \centering
+    \footnotesize
+    \includegraphics[width=0.99\textwidth]{media/example_images/multilingual_examples.pdf} \\
+    \caption{Multilingual examples (with translations from Google Translate in parentheses). While the first row shows that the model can handle captioning and QA in diverse languages, the second row shows some failure cases.
+    We use beam search (5 beams) with a repetition penalty of 1.5.}
+    \label{fig:examples:multilingual}
+\end{figure*}
+
+
+
+
+\section{Qualitative Analysis}
+
+\label{sec:qualitative_analysis}
+In addition to the quantitative evaluation on multilingual datasets of previous sections, we perform a qualitative analysis to better understand the model's visual and multilingual capabilities.
+As shown in Figure~\ref{fig:examples:multilingual}, our model can understand instructions in a wide range of languages and describe diverse images, perform simple reasoning, and correctly ground images to world knowledge in those languages. We also see some limitations.
+The capabilities decrease notably for lower-resource languages. The Urdu example is only a short sentence despite asking for a detailed description.
+Similarly, the Azerbaijani caption is completely incorrect (and non-sensical), while the model produces a meaningful caption for that same image in many other languages. 
+The Romanian example shows the limitations of the model's world knowledge as the famous portrait of Vlad III is not recognized (neither when asked in Romanian nor in English with various prompts). Finally, the Croatian example shows the difficulty with controlling the output language that we also saw in the quantitative evaluation: despite being asked in Croatian, the model answers in (related but still distinct) Slovenian.
+
+
+
+\section{Conclusion}
+
+In this work, we presented mBLIP, the first modular and massively multilingual vision-language model based on multilingual LLMs. Using a small task mix from quality English datasets, made massively multilingual by means of MT, we re-align an English BLIP-2 model to an instruction-tuned multilingual LLM. Our approach is highly efficient in compute and data requirements and -- using recent engineering advances such as 8-bit quantization -- can be trained in a few days on consumer-grade hardware (e.g., NVIDIA RTX 3090 cards). We extensively evaluate mBLIP on multilingual vision-language tasks covering image captioning, visual QA, and image understanding to confirm the efficacy of our approach. Results render mBLIP comparable or better than state-of-the-art multilingual vision-language models and strong English Vision-LLMs, despite the fact that we train only a fraction of their number of parameters and on far less data.
+
+
+
+
+
+
+
+
+
+
+
+

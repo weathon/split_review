@@ -1,0 +1,388 @@
+\title{MagicDrive3D: Controllable 3D Generation for Any-View Rendering in Street Scenes}
+
+\begin{abstract}
+
+
+While controllable generative models for images and videos have achieved remarkable success, high-quality models for 3D scenes, particularly in unbounded scenarios like autonomous driving, remain underdeveloped due to high data acquisition costs. In this paper, we introduce \methodname, a novel pipeline for controllable 3D street scene generation that supports multi-condition control, including BEV maps, 3D objects, and text descriptions.
+Unlike previous methods that reconstruct before training the generative models, \methodname first trains a video generation model and then reconstructs from the generated data.
+This innovative approach enables easily controllable generation and static scene acquisition, resulting in high-quality scene reconstruction. To address the minor errors in generated content, we propose deformable Gaussian splatting with monocular depth initialization and appearance modeling to manage exposure discrepancies across viewpoints. Validated on the nuScenes dataset, \methodname generates diverse, high-quality 3D driving scenes that support any-view rendering and enhance downstream tasks like BEV segmentation. Our results demonstrate the framework's superior performance, showcasing its potential for autonomous driving simulation and beyond.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+With the advancement of generative models~\citep{goodfellow2014generative,ho2020denoising,song2020score,rombach2022high}, there has been increasing interest in generating 3D assets~\citep{poole2022dreamfusion,vahdat2022lion,bautista2022gaudi}. While many works focus on object-centric generation~\citep{poole2022dreamfusion,tang2024dreamgaussian}, generating open-ended 3D scenes remains relatively unexplored.
+This gap is even more critical considering many downstream applications, such as virtual reality and autonomous driving, require controllable generation of 3D street scenes, which is an open challenge.
+
+The typical workflow for 3D scene generation is geometry-focused\footnote{In this paper, we focus on generative models where views/scenes are generated from latent variables.}. It begins with reconstructing the scene from multi-view sensors to obtain a compact representation (e.g., voxel grids in NF-LDM~\citep{kim2023neuralfield} and tri-planes in GAUDI~\citep{bautista2022gaudi}), followed by training generative models to produce the scene representation from latent variables. Despite their broad applicability, these methods require expensive data collection for the initial reconstruction step, which sets the upper limit on generation quality.
+Specifically, they often require static scenes and consistent sensor properties, such as exposure and white balance.
+Street view datasets, like nuScenes~\citep{nuscenes}, fail to meet these requirements, making it extremely challenging to train geometry-focused 3D street scene generation models using such datasets.
+
+
+
+Geometry-free methods~\citep{rombach2021geometry} represent another category in 3D-aware view synthesis. In street-view generation, multi-view 2D images or videos can be directly generated based on camera parameters~\citep{gao2023magicdrive,wen2023panacea,wang2023driving}, excelling in photorealistic image generation. However, they often lack sufficient geometric consistency, limiting their ability to extend to viewpoints beyond the dataset~\citep{gao2023magicdrive,wen2023panacea,wang2023driving}.
+Recognizing the advancements in controllable generation by geometry-free view synthesis methods~\citep{chen2024geodiffusion,gao2023magicdrive}, it is potential to use them as data engines. Their controllability and photo-realism could address the challenges faced by geometry-focused methods. However, the limited 3D consistency in synthetic views from geometry-free methods, such as temporal inconsistency among frames and deformation of objects, poses crucial issues for integrating two kinds of methods into a unified framework.
+
+To address these challenges, we propose \methodname, a novel framework that combines geometry-free view synthesis and geometry-focused reconstruction for controllable 3D street scene generation. As illustrated in \figref{fig:overview}, our approach begins with training a multi-view video generation model to synthesize multiple views of a static scene. This model is configured using controls from object boxes, road maps, text prompts, and camera poses. To enhance inter-frame 3D consistency, we incorporate coordinate embeddings that represent the relative transformation between LiDAR coordinates for accurate control of frame positions.
+Next, we improve the reconstruction quality of generated views by enhancing 3D Gaussian splatting from the perspectives of prior knowledge, modeling, and loss functions. Given the limited overlap between different camera views~\citep{ziyang2023snerf}, we adopt a monocular depth prior and propose a dedicated algorithm for alignment in sparse-view settings. 
+Additionally, we introduce deformable Gaussian splatting and appearance embedding maps to handle local dynamics and exposure discrepancies, respectively.
+
+Demonstrated by extensive experiments, our \methodname framework excels in generating highly realistic street scenes that align with road maps, 3D bounding boxes, ego trajectory, and text descriptions, as exemplified in \figref{fig:teaser}.
+We show that the generated camera views can augment training for Bird's Eye View (BEV) segmentation tasks, improving the view-point robustness on perception tasks.
+Notably, \methodname is the first to achieve controllable 3D street scene generation using a common driving dataset (e.g., the nuScenes dataset~\citep{nuscenes}), without requiring repeated data collection from static scenes.
+
+We summarize our contributions as follows:
+\begin{itemize}[leftmargin=*]
+\item We propose \methodname, the first framework to effectively integrate both geometry-free and geometry-focused view synthesis for controllable 3D street scene generation. \methodname generates realistic 3D street scenes that support rendering from any camera view according to various control signals.
+\item We introduce a relative pose embedding technique to generate videos with improved 3D consistency. Additionally, we enhance the reconstruction quality with tailored techniques, including deformable Gaussian splatting, to handle local dynamics and exposure discrepancies in the generated videos.
+\item Through extensive experiments, we demonstrate that \methodname generates high-quality street scenes with multi-dimensional controllability. Our results also show that synthetic data improves 3D perception tasks, highlighting the practical benefits of our approach.
+\end{itemize}
+
+
+\section{Related Work}
+
+\textbf{3D Scene Generation}.
+Numerous 3D-aware generative models can synthesize images with explicit camera pose control~\citep{zhao2024pseudogeneralized,rombach2021geometry} and potentially other scene properties~\citep{tang2023dreamgaussian}, but only a few scale for open-ended 3D scene generation.
+GSN~\citep{devries2021unconstrained} and GAUDI~\citep{bautista2022gaudi}, representative of models generating indoor scenes, utilize NeRF~\citep{mildenhall2020nerf} with latent code input for ``floorplan'' or tri-plane feature.
+Their reliance on datasets covering different camera poses is incompatible with typical driving datasets where camera configuration remains constant.
+NF-LDM~\citep{kim2023neuralfield} develops a hierarchical latent diffusion model for scene feature voxel grid generation.
+However, their representation and complex modeling hinder fine detail generation.
+Contrary to previous works focusing on scene generation using explicit geometry, often requiring substantial data not suitable for typical street view datasets (\eg, nuScenes~\citep{nuscenes}) as discussed in \secref{sec:intro}, we propose merging geometry-free view synthesis with geometry-focused scene representations for controllable street scene creation.
+Methodologically, LucidDreamer~\citep{chung2023luciddreamer} is most similar to our approach, although it relies on a text-controlled image generation model, which cannot qualify as a view synthesis model.
+In contrast, our video generation model is 3D-aware.
+Besides, we propose several improvements over 3DGS for better scene generation quality.
+Besides, inpainting-based methods like LucidDreamer~\citep{chung2023luciddreamer} and WonderJourney~\citep{yu2024wonderjourney} cannot complete our controllable street scene generation task.
+We showcase the differences in \appref{app:baseline}.
+
+
+\noindent\textbf{Street View Video Generation}.
+Diffusion models~\citep{song2020score,ho2020denoising} boost a series of works for street view video generation.
+These works span from single view video (\eg, \citep{wang2023drive}) to multi-view video (\eg, \citep{gao2023magicdrive,wen2023panacea,wang2023driving}).
+Despite cross-view consistency being essential for multi-view video generation, their generalization ability on camera poses is limited due to the data-centric nature~\citep{gao2023magicdrive}. 
+Furthermore, these models lack exact control over frame transformation (\ie, precise ego trajectory), which is crucial for scene reconstruction.
+Our work addresses this by enhancing control in video generation and proposing a dedicated deformable Gaussian splatting for geometric assurance.
+
+\noindent\textbf{Street Scene Reconstruction}.
+Scene reconstruction and novel view rendering for street views are useful in applications like driving simulation, data generation, and augmented and virtual reality.
+For street scenes, attributes like scene dynamic and discrepancies from multi-camera data collection make typical large-scale reconstruction methods ineffective (\eg, \cite{rematas2022urf,martinbrualla2020nerfw,lin2024vastgaussian}). 
+Hence, real data-based reconstruction methods like \cite{ziyang2023snerf,yan2024street} utilize LiDAR for depth prior, but their output only permits novel view rendering from the same scene.
+Unlike these methods, our approach synthesizes novel scenes under multiple levels of conditional controls.
+
+
+\section{Preliminaries}
+
+
+\textbf{Problem Formulation}.
+In this paper, we focus on controllable street scene generation.
+Given scene description $\mb{S}_{t}$, our task is to generate street scenes (represented with 3D Gaussians $\mb{G}$) that correspond to the description from a set of latent $\mb{z}\sim\mathcal{N}(\mb{0},\mb{I})$, \ie $\mb{G}=\mathcal{G}(\mb{S}_{t},\mb{z})$.
+To describe a street scene, we adopt the most commonly used conditions as per \cite{gao2023magicdrive,wang2023driving,wen2023panacea}.
+Specifically, a frame of driving scene $\mb{S}_{t}=\{\mb{M}_{t}, \mb{B}_{t}, \mb{L}_{t}\}$ is described by road map $\mb{M}_{t}\in\{0, 1\}^{w\times h\times c}$ (a binary map representing a $w\times h$ meter road area in BEV with $c$ semantic classes), 3D bounding boxes $\mb{B}_{t}=\{(c_i, b_i)\}_{i=1}^{N}$ (each object is described by box $b_i=\{(x_j, y_j, z_j)\}_{j=1}^{8}\in\mathbb{R}^{8\times 3}$ and class $c_i\in\mathcal{C}$), and text $\mb{L}_{t}$ describing additional information about the scene (\eg, weather and time of day).
+In this paper, we parameterize all geometric information according to the LiDAR coordinate of the ego car.
+
+One direct application of scene generation is any-view rendering. Specifically, given any camera pose $\mb{P} = [\mb{K}, \mb{R}, \mb{t}]$ (\ie, intrinsics, rotation, and translation), the model $\mb{G}(\cdot)$ should render photo-realistic views with 3D consistency, $\mathcal{I}^{r}=\mb{G}(\mb{P})$, which is not applicable to previous street view generation (\eg, \cite{gao2023magicdrive,wang2023driving,wen2023panacea}).
+Besides, we present more applications in \secref{sec:exp}.
+
+\noindent\textbf{3D Gaussian Splatting}.
+We briefly introduce 3DGS since our scene representation is based on it.
+3DGS~\citep{kerbl3Dgaussians} represents the geometry and appearance via a set of 3D Gaussians $\mb{G}$.
+Each 3D Gaussian is characterized by its position $\pmb{\mu}_{p}$, anisotropic covariance $\pmb{\Sigma}_{p}$, opacity $\alpha_{p}$, and spherical harmonic coefficients for view-dependent colors $c_{p}$.
+Given a sparse point cloud $\mathcal{P}$ and several camera views $\{\mathcal{I}_{i}\}$ with poses $\{\mb{P}_{i}\}$, a point-based volume rendering~\citep{zwicker2001ewa} is applied to make Gaussians optimizable through gradient descend and interleaved point densification.
+Specifically, the loss is as \eqref{eq:lgs}, where $\mathcal{I}^{r}$ is the rendered image, $\lambda$ is a hyper-parameter, and $\mathcal{L}_{\text{D-SSIM}}$ denotes the D-SSIM loss~\citep{kerbl3Dgaussians}.
+\begin{equation}
+\mathcal{L}_{\text{GS}} = (1 - \lambda)\mathcal{L}_{1}(\mathcal{I}^{r}_{i}, \mathcal{I}_{i}) + \lambda \mathcal{L}_{\text{D-SSIM}}(\mathcal{I}^{r}_{i}, \mathcal{I}_{i})\label{eq:lgs}
+\end{equation}
+
+
+\section{Methods}
+
+
+In this section, we introduce our controllable street scene generation pipeline.
+Due to the challenges that exist in data collection, we integrate geometry-free view synthesis and geometry-focused reconstruction, and propose a generation-reconstruction pipeline, detailed in \secref{sec:3D scene generation} and \figref{fig:overview}.
+Specifically, we introduce a controllable video generation model to connect control signals with camera views (\secref{sec:video}) and enhance the 3DGS from prior, modeling and loss perspectives (\secref{sec:gs}) for better reconstruction with generated views.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/overview_crop.pdf}
+    \caption{Method Overview of \methodname.
+    For controllable street scene generation, \methodname decomposes the task into two steps:
+    \ding{172} conditional multi-view video generation, which tackles the control signals and provides detailed prior of the scene;
+    and \ding{173} scene reconstruction with deformable Gaussian splatting, which guarantees view consistency for any-view rendering.
+    }
+    \label{fig:overview}
+\end{figure*}
+
+\subsection{3D Street Scene Generation}\label{sec:3D scene generation}
+
+Direct modeling of controllable street scene generation faces two major challenges: scene dynamics and discrepancy in data collection.
+\textit{Scene dynamics} refer to the movements and deformation of elements in the scene, while \textit{discrepancy in data collection} refer to the discrepancy (\eg, exposure) caused by data collection.
+These two challenges are even more severe due to the sparsity of cameras for street views (\eg, typically only 6 surrounding perspective cameras).
+Therefore, reconstruction-generation frameworks do not work well for street scene generation~\citep{kim2023neuralfield,bautista2022gaudi}.
+\figref{fig:overview} shows the overview of \methodname.
+Given scene descriptions $\mb{S}$ as input, \methodname first extend the descriptions into sequence $\{\mb{S}_{t}\}$, where $t\in[0,T]$ according to preset camera poses $\{\mb{P}_{c,t}\}$, and generate a sequence of successive multi-view images $\{\mathcal{I}_{c,t}\}$, where $c\in\{1,\dots,N\}$ refers to $N$ surrounding cameras, according to conditions $\{\mb{S}_{t},\mb{P}_{c,t}\}$ (detailed in \secref{sec:video}).
+Then we construct Gaussian representation of the scene with $\{\mathcal{I}_{c,t}\}$ and camera poses $\{\mb{P}_{c,t}\}$ as input.
+This step contains an initializing procedure with a pre-trained monocular depth model and an optimizing process with deformable Gaussian splatting (detailed in \secref{sec:gs}).
+Consequently, the generated street scene not only supports any-view rendering, but also accurately reflects different control signals.
+\methodname integrates geometry-free view synthesis and geometry-focused reconstruction, where control signals are tackled by a multi-view video generator, while the reconstruction step guarantees the generalization ability for any-view rendering.
+Such a video generator has two advantages:
+first, since multi-view video generation does not require generalization on novel views~\citep{gao2023magicdrive}, it poses less data dependency for street scenes;
+Second, through conditional training, the model is able to decompose control signals, turning dynamic scenes into static scenes that are more friendly for reconstruction.
+Besides, for the reconstruction step, strong prior from the multi-view video reduces the burden for scene modeling with complex details.
+\subsection{Relative Pose Control for Video Generation}\label{sec:video}
+
+Given scene descriptions and a sequence of camera poses $\{\mb{S}_{t},\mb{P}_{c,t}\}$, our video generator is responsible for multi-view video generation.
+Although many previous art for street view generation achieve expressive visual effects, such as~\cite{gao2023magicdrive,wen2023panacea,wang2023driving,wang2023drive}, their formulations leave out a crucial requirement for 3D modeling.
+Specifically, the camera pose $\mb{P}_{c,t}$ is typically relative to the LiDAR coordinate of each frame.
+Thus, there is no precise control signal related to the ego trajectory, which significantly determines the geometric relationship between views of different $t$s.
+
+In our video generation model, we amend such precise control ability by adding the transformation between each frame to the first frame, \ie, $\mb{T}^{0}_{t}$.
+To properly encode such information, we adopt Fourier embedding with Multi-Layer Perception (MLP), and concatenate the embedding with the original embedding of $\mb{P}_{c,t}$, similar to \cite{gao2023magicdrive}.
+As a result, our video generator provides better 3D consistency across frames, most importantly, making the camera poses to each view available in the same coordinate, \ie, $[\mb{R}^0_{c,t},\mb{t}^{0}_{c,t}]=\mb{T}^{0}_{t}[\mb{R}_{c,t},\mb{t}_{c,t}]$.
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/scale_depth_v2.pdf}
+    \caption{
+    We optimize the monocular depths (a) with 2 steps for better alignment: coarse scale/offset estimation with SfM PCD (b) and GS optimization (c).
+    }
+    \label{fig:depth opt}
+\end{figure}
+
+\subsection{Enhanced GS for Generated Content}\label{sec:gs}
+As introduced in \secref{sec:preliminary}, 3DGS is a flexible explicit representation for 3D reconstruction.
+Besides, the fast training and rendering speed of 3DGS make it highly suitable for reducing generation costs in our scene creation pipeline.
+However, similar to other 3D reconstruction methods, 3DGS necessitates high cross-view 3D consistency at the pixel level, which unavoidably magnifies the minute errors in the generated data into conspicuous artifacts. 
+Therefore, we propose improvements for 3DGS from the perspectives of \textit{prior}, \textit{modeling}, and \textit{loss}, enabling 3DGS to tolerate minor artifacts in the generated camera view from our video generation model, thereby becoming a potent tool for enhancing geometric consistency in rendering.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.7\linewidth]{figures/local_dyn.pdf}
+    \caption{Illustration of the local dynamic from two successive generated frames of Front-Left (FL) camera. Even though our video generation model retains fine 3D consistency, minor discrepancies are inevitable. Our DGS can effectively reconstruct the scene with awareness of such discrepancy.}
+    \label{fig:local_dyn}
+\end{figure*}
+
+\noindent\textbf{Prior: Consistent Depth Prior}.
+As essential geometry information, depth is extensively utilized in street scene reconstruction, such as the depth value from LiDAR or other depth sensors used in \cite{ziyang2023snerf,yan2024street}.
+However, for synthesized camera views, LiDAR/depth information is unavailable (also making these methods not suitable for our scenario).
+Therefore, we propose to use pre-trained monocular depth estimator~\citep{bhat2023zoedepth} to infer depth information.
+
+While monocular depth estimation is separate for each camera view, proper scale $s_{c,t}$ and offset $b_{c,t}$ parameters should be estimated to align them for a single scene~\citep{zhou2024dynpoint}, as in \figref{fig:depth opt}(a).
+To this end, we first apply the Point Cloud (PCD) from Structure of Motion (SfM)~\citep{schoenberger2016mvs,schoenberger2016sfm}, shown in \figref{fig:depth opt}(b).
+However, such PCD is too sparse to accurately restore $(s_{c,t}, b_{c,t})$ for any views.
+To bridge the final gap, secondly, we propose further optimizing the $(s_{c,t}, b_{c,t})$ using the GS loss, as in \figref{fig:depth opt}(c).
+Specifically, we replace the optimization for Guassian centers $\pmb{\mu}_{i}$ with $(s_{c,t}, b_{c,t})$.
+After the optimization, we initialize $\pmb{\mu}_{i}$ with points from depth values.
+Since GS algorithm is sensitive to accurate point initialization~\citep{kerbl3Dgaussians,fan2024instantsplat}, our method provides useful prior to reconstructing in this sparse view scenario.
+
+\noindent\textbf{Modeling: Deformable Gaussians for Local Dynamic}.
+Despite the 3D geometric consistency provided by our video generation model, there are inevitably pixel-level disparities in some object details, as shown in \figref{fig:local_dyn}.
+The strict consistency assumption of 3DGS may amplify these minor errors, resulting in floater artifacts.
+To mitigate the impact of these errors, we propose Deformable Gaussian Splitting (DGS), which, reduces the requirement for temporal consistency between frames, thereby ensuring the reconstruction quality of the generated views.
+
+Specifically, as shown in \figref{fig:local_dyn}, we pick the center frame $t=t_{C}$ as the canonical space and enforce all Gaussians in this space.
+Hence, we allocate a set of offsets to each Gaussian, $\pmb{\mu}^{o}_{p}(t)\in\mathbb{R}^{3}$, where $t\in [1,\dots,T]$ and $\pmb{\mu}^{o}_{p}(t_{C})\equiv\mb{0}$.
+Note that, different camera views from the same $t$ share the same $\pmb{\mu}^{o}_{p}(t)$ for each Gaussian, and we apply regularization on them to keep the dynamic in local, as shown in \eqref{equ:reg}:
+\begin{equation}
+    \mathcal{L}_{\text{reg}_{o}} = \Vert \pmb{\mu}^{o}(t)\Vert_{2}. \label{equ:reg}
+\end{equation}
+Consequently, $\pmb{\mu}^{o}_{p}(t)$ can manage the local dynamics driven by pixel-level disparities, while $\pmb{\mu}$ focuses on the global geometric correlations.
+It ensures the quality of scene reconstruction by leveraging consistent parts across different viewpoints, simultaneously eliminating artifacts.
+Besides, with the analytical gradient w.r.t. $SE(3)$ pose of cameras~\citep{Matsuki:Murai:etal:CVPR2024}, we also make the camera pose optimizable in the final few steps of GS iterations, which helps to mitigate the local dynamic from camera poses.
+
+\input{tables/algorithm}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.98\linewidth]{figures/comparison_crop}
+    \caption{Qualitative comparison with NF-LDM~\cite{kim2023neuralfield} and original 3DGS (on the same generated video as ours). 
+    Panoramas for GS are transformed and stitched from perspective cameras with $90^\circ$ FOV.
+    Views in the last row are rendered with unseen camera rigs of nuScenes.}
+    \label{fig:comparison}
+\end{figure*}
+
+\noindent\textbf{Loss: Aligning Exposure with Appearance Modeling}.
+Typical street view datasets are collected with multiple cameras, which capture views independently through auto-exposure and auto-white-balance~\citep{nuscenes}. 
+Since the video generation is optimized to match the original data distribution, the differences from different cameras also exist in the generated data.
+The appearance differences are well-known issues for in-the-wild reconstruction~\citep{martinbrualla2020nerfw}.
+In this paper, we propose a dedicated appearance modeling technique for GS representation.
+
+We hypothesize that the disparity between different views can be represented by affine transformations $\mb{A}_{i}(\cdot)$ for $i$-th camera view.
+An Appearance Embedding (AE) map $\mb{e}_{i}\in\mathbb{R}^{w_{e}\times h_{e}\times c_{e}}$ is allocated for each view, and a Convolutional Neural Network (CNN) is utilized to approximate this transformation matrix $w_{\mb{A}}\in\mathbb{R}^{w \times h\times 3}$ (\appref{app:arch} contains more details).
+The final computation of the pixel-wise $\ell_{1}$ loss is conducted using the transformed image.
+Therefore, our final loss for DGS is as \eqref{equ:loss}, where $\lambda_{{\text{reg}_{o}}}$ is the hyper-parameter for offset regularization.
+\begin{equation}
+\begin{split}
+\mathcal{L}_{\text{DGS}} &= 
+\mathcal{L}_{\text{AEGS}} + \lambda_{{\text{reg}_{o}}}\mathcal{L}_{{\text{reg}_{o}}} \\
+&=(1 - \lambda)\mathcal{L}_{1}(\mb{A}_{i}(\mathcal{I}^{r}_{i}), \mathcal{I}_{i}) \\
+& + \lambda \mathcal{L}_{\text{D-SSIM}}(\mathcal{I}^{r}_{i}, \mathcal{I}_{i}) + \lambda_{{\text{reg}_{o}}}\mathcal{L}_{{\text{reg}_{o}}}  
+\end{split}
+ \label{equ:loss}
+\end{equation}
+
+\noindent\textbf{Optimization Flow}.
+We demonstrate the overall optimization flow of the proposed DGS in \algref{alg:overall}.
+Line 2 is the first optimization of monocular depths.
+Lines 4-8 refer to the second optimization of the monocular depths.
+Lines 10-16 are the main loop for DGS reconstruction, where we consider temporal offsets on Gaussians, camera pose optimization for local dynamics, and AEs for appearance discrepancies among views.
+
+
+
+\section{Experiments}
+
+
+\subsection{Experimental Setup}\label{sec:exp setup}
+\textbf{Dataset}.
+We test our \methodname using the nuScenes dataset~\citep{nuscenes}, which is commonly used for generating and reconstructing street views~\citep{gao2023magicdrive,wen2023panacea,wang2023driving,ziyang2023snerf}.
+The official configuration is followed, using 700 street-view video clips of approximately 20s each for training and another 150 clips for validation.
+For semantics in control signals, we follow \cite{gao2023magicdrive}, using 10 object classes and 8 road classes.
+
+\begin{table}[h]
+    \centering
+    \setlength\tabcolsep{3.5pt}
+    \begin{tabular}{c|c|c|l}
+    \hlinew{0.75pt}
+    name & \#test & \#train & camera poses  \\
+    \hlinew{0.75pt}
+    \multirow{2}{*}{360$^\circ$} & \multirow{2}{*}{6} & \multirow{2}{*}{90} & \multirow{2}{*}{\includegraphics[width=5cm]{figures/360_2.png}} \\
+    &&&\\
+    \hline
+    \multirow{2}{*}{vary-t} & \multirow{2}{*}{12} & \multirow{2}{*}{84} & \multirow{2}{*}{\includegraphics[width=5cm]{figures/varyt_2.png}} \\
+    &&&\\
+    \hlinew{0.75pt}
+    \end{tabular}
+    \caption{
+    Two settings for reconstruction quality evaluation.
+    Testing views are in green while training views are in red.
+    }
+    \label{tab:settings}
+\end{table}
+
+\noindent\textbf{Metrics and Settings}.
+\methodname is primarily evaluated using the Fréchet Inception Distance (FID) by rendering novel views unseen in the dataset and comparing their FID with real images.
+In addition, the method's video generation ability is evaluated using Fréchet Video Distance (FVD), and its reconstruction performance is assessed using L1, PSNR, SSIM~\citep{wang2004image}, and LPIPS~\citep{zhang2018perceptual}.
+For reconstruction evaluation, two testing scenarios are employed: 360$^\circ$, where all six views from $t=9$ are reserved for testing the reconstruction in the canonical space; and vary-t, where one view is randomly sampled from different $t$ to assess long-range reconstruction ability through $t$ in the canonical space (as shown in \tabref{tab:settings}). 
+More implementation details can be found in \appref{app:more details}.
+
+\begin{table}
+\centering
+\setlength\tabcolsep{3pt}
+\begin{tabular}{l|ccc}
+\toprule
+Methods & FVD & FID (seen) & FID (novel) \\
+\midrule
+MagicDrive\cite{gao2023magicdrive} &  177.26 & 20.92  & N/A \\
+Ours (video gen.) & 164.72 & 20.67 & N/A \\
+\midrule
+3DGS & N/A &  45.07 & 145.72  \\
+Ours (scene gen.) & N/A & 23.99 & 34.45 \\
+\bottomrule
+\end{tabular}
+\caption{Generation quality evaluation. We adopt all validation scenes from nuScenes. All generated views are used for reconstruction.
+Novel views are camera poses different from nuScenes.}
+\label{tab:fid}
+\end{table}
+
+\input{tables/recon}
+
+\subsection{Main Results}
+
+\textbf{Generation Quality}.
+As shown in \tabref{tab:fid}, the evaluation of generation quality involves two aspects.
+Firstly, the quality of video generation is assessed using extended 16-frame MagicDrive~\citep{gao2023magicdrive} as a baseline.
+Despite minor improvement in single-frame quality based on FID, \methodname substantially enhances video quality (as evidenced by FVD), demonstrating the efficacy of the proposed relative camera pose embedding in enhancing temporal consistency. 
+Secondly, the image quality of renderings from the generated scene is evaluated using FID.
+We also include qualitative comparisons in \figref{fig:comparison}.
+Compared to 3DGS, our enhanced DGS significantly enhances visual quality in reconstructing contents, particularly in unseen novel views.
+More qualitative comparison can be found in \appref{app:baseline}.
+\noindent\textbf{Reconstruction Quality}.
+Our enhanced DGS, as a reconstruction method, is further evaluated by comparing renderings with ground truth (GT) images.
+Here, the generated views from the video generator are treated as GT.
+We employ two settings per \tabref{tab:settings}, with results displayed in \tabref{tab:recon}.
+As per all metrics, our enhanced DGS not only improves reconstruction quality for training views but also drastically enhances quality for testing views, compared to 3DGS.
+We include comparison and discussion with 4DGS~\citep{Wu_2024_CVPR} in \appref{app:4dgs}.
+
+\input{tables/ablation}
+
+\begin{figure}[t]
+     \centering
+     \begin{subfigure}[b]{0.48\linewidth}
+         \centering
+         \includegraphics[height=2cm]{rebuttal/ori_view.png}
+         \caption{Original view.}
+         \label{fig:mv_ori}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.48\linewidth}
+         \centering
+         \includegraphics[height=2cm]{rebuttal/move_object_0.png}
+         \caption{Move forward 0.1m.}
+         \label{fig:mv_0}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.48\linewidth}
+         \centering
+         \includegraphics[height=2cm]{rebuttal/move_object_3.png}
+         \caption{Move forward 1m.}
+         \label{fig:mv_3}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.48\linewidth}
+         \centering
+         \includegraphics[height=2cm]{rebuttal/move_object_5.png}
+         \caption{Move forward 1.6m.}
+         \label{fig:mv_5}
+     \end{subfigure}
+     \caption{
+     Application on rendering object-level dynamic. After scene generation, we can segment and move the vehicle (the one on the right) in 3D to render a dynamic object.}
+    \label{fig:mv_object}
+\end{figure}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/editing3.pdf}
+    \caption{Qualitative evaluation for controllability (we show the view from back-left to front-right area).
+    By changing different control signals, \methodname can edit the scene from different levels.
+    }
+    \label{fig:editing}
+\end{figure*}
+
+\noindent\textbf{Controllability}.
+\methodname accepts 3D bounding boxes, BEV map, and text as control signals, each of which possesses the capacity to independently manipulate the scene.
+To show such controllability, we edit a scene from the nuScenes validation set, as presented in \figref{fig:editing}.
+Clearly, \methodname can effectively alter the generation of the scene to align with various control signals while maintaining 3D geometric consistency.
+
+\input{tables/cvt}
+
+\subsection{Ablation Study}\label{sec:ablation}
+\noindent\textbf{Ablation on Enhanced Gaussian Splatting}.
+As detailed in \secref{sec:gs}, three enhancements - prior, modeling, and loss - have been made to 3DGS.
+To evaluate their efficacy, each was ablated from the final algorithm, the results of which are shown in \tabref{tab:ablation}.
+Notations ``w/o depth scale opt.'' and ``w/o depth opt.'' represent the absence of GS loss optimization for $(s_{c,t}, b_{c,t})$ and use of direct output from the monocular depth model, respectively.
+Each component's removal lowered the method's performance, while incorrect depth sometimes performs worse than the 3DGS baseline.
+Removal of AE in ``vary-t'' led to inferior PSNR but improved LPIPS, which is reasonable because AE mitigates the pixel-wise color constraint during reconstruction. 
+
+\subsection{Application}
+\textbf{Training Support for Perception Tasks}.
+We demonstrate an application wherein street scene generation serves as a data engine for perception tasks, leveraging the advantage of any-view rendering ability of our method to improve viewpoint robustness for perception models~\citep{tzofi2023view}.
+We employ CVT~\citep{zhou2022cross} and the BEV segmentation task following the evaluation protocols of \cite{zhou2022cross,gao2023magicdrive}.
+By incorporating 4 different rigs on the FRONT camera and adding rendered views for training, the negative impact from viewpoint changes is alleviated (\tabref{tab:cvt}), exemplifying the utility of street scene generation in training perception tasks.
+
+\noindent\textbf{Render Object-level Dynamic}.
+\methodname is capable of generating 3DGS representations of scenes, which facilitates various applications in scene editing. Our method utilizes metric scale modeling, guaranteeing that any modifications made to the scenes accurately reflect real-world physical distances. As illustrated in \figref{fig:mv_object}, we segmented the generated GS and repositioned the object on the right. The resulting scene GS supports rendering effectively.
+
+
+\section{Conclusion and Discussion}
+
+
+
+This paper introduces \methodname, a unique 3D street scene generation framework that integrates geometry-free view synthesis and geometry-focused 3D representations. \methodname significantly reduces data requirements, enabling training on typical autonomous driving datasets, such as nuScenes. \methodname employs a video generation model to enhance inter-frame consistency, while the enhanced deformable GS improves reconstruction quality from generated views. Comprehensive experiments demonstrate that \methodname can produce high-quality 3D street scenes with multi-level controls. Additionally, we show that scene generation can serve as a data engine for perception tasks such as BEV segmentation.
+
+{
+    \small
+    
+
+
+

@@ -1,0 +1,397 @@
+\title{RecurFormer: Not All Transformer Heads Need Self-Attention}
+
+\begin{abstract}
+Transformer-based large language models (LLMs) excel in modeling complex language patterns but face significant computational costs during inference, especially with long inputs due to the attention mechanism's memory overhead. We observe that certain attention heads exhibit a distribution where the attention weights concentrate on tokens near the query token, termed as recency aware, which focuses on local and short-range dependencies. Leveraging this insight, we propose \model{}, a novel architecture that replaces these attention heads with linear recurrent neural networks (RNNs), specifically the Mamba architecture. This replacement reduces the cache size without evicting tokens, thus maintaining generation quality. \model{} retains the ability to model long-range dependencies through the remaining attention heads and allows for reusing pre-trained Transformer-based LLMs weights with continual training. Experiments demonstrate that \model{} matches the original model's performance while significantly enhancing inference efficiency. Our approach provides a practical solution to the computational challenges of Transformer-based LLMs inference, making it highly attractive for tasks involving long inputs.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Transformer-based LLMs~\citep{achiam2023gpt4,touvron2023llama} excel at modeling complex language patterns but come with significant computational costs. During inference, the prefill phase processes the input in parallel, generating the first token and initializing the key-value cache (KV-Cache), while the generation phase recursively produces each token, adding new keys and values to the KV-Cache~\citep{radford2019language,NEURIPS2020_1457c0d6}. In long input tasks like document-based dialogue generation, the attention mechanism's overhead in the prefill phase leads to memory issues, making optimization crucial~\citep{yang-etal-2024-pyramidinfer}.
+
+Currently, one of the optimization methods applicable to the prefill phase is PyramidInfer~\citep{yang-etal-2024-pyramidinfer}, which reduces the KV-Cache size by progressively removing tokens with lower attention weights. However, the intrinsic drawback is that token removal can decrease generation quality as the sequence length increases. Moreover, in modern Transformer-based inference frameworks, such as vLLM~\citep{kwon2023efficient}, the prefix caching strategy is employed, which caches the KV-Cache from long documents or dialogue history to reduce computational complexity during the prefill phase in long document retrieval and multi-turn dialogue scenarios. Since it is difficult to predict which tokens may be needed in future token generation, such scenarios are not suitable for compression through token eviction.
+
+Inspired by the dependency length minimization (DLM) phenomenon~\citep{doi:10.1073/pnas.1502134112} observed in quantitative linguistics and the principles of attention mechanisms, we identified a local, short-range token attention distribution pattern, referred to as the \textit{recency aware}, where attention is concentrated on tokens close to the query token. Additionally, we discovered an attention distribution pattern where the attention weights are independent of relative position, termed \textit{contextual retrieval}, characterized by attention being distributed across tokens at arbitrary positions in the sequence, reflecting a global focus.
+
+While the attention mechanism excels at modeling dependencies over varying distances~\citep{NIPS2017_3f5ee243}, we discover that \textbf{using a linear RNNs is a more efficient option for fitting the recency aware so that it reduces cache size requirements}. On one side, limited cache size makes linear RNNs less effective than Transformer in handling long-range dependencies~\citep{jelassi2024repeat,arora2024simple}, but it still captures local relationships effectively. On the other hand, linear RNNs have a lower cache size compared to the attention mechanism in both the parallel mode of the prefill phase and the recursive mode of the generation phase~\citep{fu2023hungry,gu2023mamba,arora2024simple}.
+
+To avoid such inefficiency, we propose a novel structure named \textbf{\model{}}, which introduces linear \textbf{recur}rent structure to Trans\textbf{former} that achieves better efficiency for model inference. Specifically, it replaced the traditional attention mechanism with the Mamba architecture in attention heads exhibiting the recency aware, as shown in Figure~\ref{fig:example}, where Mamba is a linear RNNs based on selective structured state-space sequence model, supporting parallel and recurrent computation~\citep{gu2023mamba}. Compared to fully attention-based Transformer, RecurFormer reduces cache size in both the prefill and generation phases, without achieving these benefits by directly evicting any tokens. With continual training, RecurFormer can reuse the original model's weights while maintaining performance. The attention heads not replaced can still benefit from existing optimization strategies to further enhance overall performance. The advantages of RecurFormer include: 1) reducing cache size without evicting tokens, which helps maintain generation quality, and 2) the ability to reuse pre-existing Transformer-based model weights.
+
+\begin{figure}[tb!]
+    \centering
+    \includegraphics[width=0.8\linewidth]{media/main.pdf}
+    \caption{The left diagram shows how attention with recency aware updates values via weighted summation, where $f(x) = \text{softmax}(x/\sqrt{d_k})$, and $d_k$ is the dimension of key. The right diagram illustrates the linear RNNs update. $A$ represents the weights for state transitions, while $B_i$ and $C_i$ are input and output gates. Regions with darker shades of orange indicate a greater influence on $V_t^{\text{update}}$, such as representing higher attention weights, while lighter-colored regions have less influence.}
+    \label{fig:example}
+\end{figure}
+
+The key contributions of this paper are as follows:
+\begin{itemize}[leftmargin=10pt, topsep=0pt,itemsep=1pt,partopsep=1pt, parsep=1pt]
+\item Inspired by the DLM phenomenon in quantitative linguistics and the computational principles of attention mechanisms, we are the first to observe that certain attention heads in Transformer-based LLMs can be effectively replaced by a Linear RNNs structure due to the recency aware property.
+\item We propose RecurFormer, a novel recursive-optimized Transformer architecture that replaces attention heads influenced by the recency aware property with the Mamba architecture, reducing cache size while reusing the original model weights.
+\item We show through HashHop experiments that \model{} matches the original model's quality. Continued training confirms performance recovery, and ablation studies with the multiple query associative recall (MQAR) task validate the need to retain certain attention mechanisms.
+\end{itemize}
+
+
+
+\section{Related Work}
+
+\paragraph{Optimization Strategies for Efficient Inference.} Improving the computational and memory efficiency of Transformer-based LLMs has become a key research focus, driven by the need for scalable inference in complex natural language processing applications. Optimization methods can be categorized into token eviction-based and non-eviction-based approaches. Token eviction-based strategies reduce storage and computation by dynamically removing less important tokens, functioning as a sparse attention mechanism. BigBird~\citep{zaheer2020bigbird} pioneered this approach by retaining specific positional and random tokens, while H2O~\citep{zhang2023ho} introduced attention-weight-based eviction to prioritize key information. Further optimizations, such as Scissorhands~\citep{liu2024scissorhands} and PyramidInfer~\citep{yang-etal-2024-pyramidinfer}, evict different tokens at each layer, with PyramidInfer optimizing the prefill phase by expelling tokens with low attention at each layer progressively. However, these methods become less efficient as the decoded sequence grows, especially in tasks requiring the retention of dialogue history or external knowledge. 
+
+Non-eviction-based methods, such as DMC~\citep{nawrot2024dynamic}, maintain higher generation quality by merging the key and value of the current token with the last one in the KV-Cache. While effective at controlling KV-Cache growth, non-eviction methods face limitations in the prefill phase due to their sequential nature, which limits parallelization. This study aims to develop a non-eviction token optimization method applicable to both the prefill and generation phases, with the goal of reducing cache size in Transformer-based LLMs while maintaining generation quality comparable to the original model.
+
+\paragraph{Linear RNNs.} Non-linear RNNs, as the typical form of RNNs, are fundamentally constrained by non-linear dependencies in state transitions, which limit their ability to perform parallel computations across the sequence dimension. Inspired by physical systems, T-LSTM~\citep{balduzzi2016strongly} introduced a pioneering approach to linearize hidden state transitions by decoupling input and hidden states. This linearity enables cell states to be updated through associative operations. Building on this property, GILR-LSTM~\citep{martin2018parallelizing} employs a parallel scan strategy to accelerate computation across sequence elements. 
+
+Recently, Linear RNNs based on state-space models (SSM) have garnered considerable attention. By discretizing SSM, these models become applicable to discrete sequences, and when combined with the Hippo~\citep{gu2020hippo} memory update mechanism, they yield the structured state-space (S4) model~\citep{gu2022efficiently}. Expanding upon S4, the selective structured state-space (S6) model~\citep{gu2023mamba} further enhances sequence modeling capacity by increasing the dimensionality. By integrating S6 with gating architecture, the Mamba~\citep{gu2023mamba} was introduced, showing strong potential in sequence modeling tasks. However, due to limited memory capacity, Mamba still falls short in tasks such as sequence copying and long-range dependency modeling compared to attention-based architectures like Transformer~\citep{jelassi2024repeat}. In \model{}, we identify scenarios that circumvent Mamba's limitations in modeling long-range dependencies, by focusing on cases where short-term dependencies are predominant.
+
+
+
+\section{Methodology}
+
+\paragraph{Overview.} The process begins by identifying attention heads in the model that exhibit a strong short-range focus, characterized by recency aware. Once identified, we replace the attention mechanism in these heads with more efficient linear RNNs, which are better suited for modeling local dependencies. This replacement strategy allows us to maintain the model's generation ability while reducing cache size in both the prefill and generation phase. Our approach involves two steps:
+\begin{itemize}[leftmargin=10pt, topsep=0pt,itemsep=1pt,partopsep=1pt, parsep=1pt]
+    \item \textbf{Select replaced head}(Sec.~\ref{sec:select_head}): We first calculate the  recency ratio (RR) for each attention head in the pre-trained LLMs and assign a recency aware index (RA-I). Attention mechanisms in heads with higher RA-I are prioritized for replacement by a linear RNNs.
+    \item \textbf{Replace and continual training}(Sec.~\ref{sec:replace_head}): We replace the attention mechanism in selected heads with a linear RNNs, enabling \model{} to capture local dependencies more efficiently. continual training is then conducted to restore performance, ensuring it matches the original Transformer while reducing computational costs during prefill and generation phases.
+\end{itemize}
+
+\subsection{Selecting Heads for Replacement}\label{sec:select_head}
+The key insight behind \model{} is the observation that not all attention heads in a Transformer-based LLM exhibit the same focus distribution. We define the recency aware as the phenomenon where the attention weights concentrate more on tokens that are temporally closer to the query token, while others exhibit a more uniform or distant focus across the sequence, which we call contextual retrieval. 
+To quantify the degree of the recency aware in each head, we introduce the concept of RR, which is computed as 
+\begin{equation}
+\text{RR}_h = \frac{\sum_{|i-j| \leq k} A_{h,i,j}}{\sum_{i,j} A_{h,i,j}},
+\label{eq:recency_ratio}
+\end{equation}
+where $A_{h,i,j}$ represents the attention weight from token $i$ to token $j$ in head $h$, and $k$ is a threshold that defines the local region of token interactions, i.e., the local range around the diagonal of the attention matrix. A high RR indicates that the head primarily focuses on recent tokens, suggesting that this head is mainly capturing short-range dependencies.
+
+We begin by calculating the RR for each attention head to quantify its focus on recent tokens, aiming to identify attention distributions that align with the recency aware. For each sample, we compute the RR for every attention head and set a threshold $\alpha$. Attention heads with an RR exceeding $\alpha$ are recorded, and we tally the number of times each head is recorded across the dataset, defining this count as the head's RA-I.
+
+However, during this process, we encountered a recurring issue where certain attention heads consistently assign disproportionately high attention weights to the first token. This attention sink phenomenon~\citep{zaheer2020bigbird}, as illustrated in Figure~\ref{fig:combined_att}, distorts the RR measurement. The excessive attention to the first token makes it difficult to accurately identify attention heads that are genuinely focused on short-range dependencies, which the recency aware is meant to capture.
+
+To address this issue, we analyzed the characteristics of the first token. In causal attention mechanisms, the first token remains unaffected by subsequent tokens during attention-based information mixing, leading to a relatively fixed value distribution. When this special distribution is passed through the model’s fully connected layers, it results in lower L1 and L2 norms compared to other tokens~\citep{yan2024unveiling}, as shown in Figure~\ref{fig:combined_l2}. A token’s contribution to the final output depends on both its attention weight and its value vector, which can be expressed as:
+\begin{equation}
+v^{\text{update}}_t = \sum_{i=0}^t A_{h,t,i} v_i,
+\label{eq:attention_weighted_sum}
+\end{equation}
+where $v^{\text{update}}_t$ represents the updated value for token $t$, $A_{h,t,i}$ is the attention weight between token $t$ and token $i$ in head $h$, and $v_i$ is the value vector for token $i$. Despite often receiving higher attention weights, the first token’s value vector exhibits lower L1 and L2 norms relative to other tokens, which limits its overall contribution to the final output~\citep{guo2024attention,devoto2024l2}, as Figure~\ref{fig:combined_con}.
+
+\begin{figure}[tb!]
+    \centering
+    \begin{subcaptionblock}{0.32\textwidth}
+        \includegraphics[width=\linewidth]{media/con_l2.pdf}
+        \caption{L2 norm}
+        \label{fig:combined_l2}
+    \end{subcaptionblock}
+    \begin{subcaptionblock}{0.32\textwidth}
+        \includegraphics[width=\linewidth]{media/con_attention.pdf}
+        \caption{Attention weight}
+        \label{fig:combined_att}
+    \end{subcaptionblock}
+    \begin{subcaptionblock}{0.32\textwidth}
+        \includegraphics[width=\linewidth]{media/con_con.pdf}
+        \caption{Contribution}
+        \label{fig:combined_con}
+    \end{subcaptionblock}
+    \caption{The figure presents averaged results from the 18th attention head of the 24th layer in the Llama-2-7b model, based on forward propagation through 1024 samples from Wikipedia English articles, each containing more than 1030 tokens, with the first 32 tokens from each sample selected as the input. The subfigures depict: (a) the L2 norm of the value vector for each token, (b) the attention weight matrix, and (c) the product of the L2 norm and the corresponding attention weight for each token, representing its contribution to the attention-weighted sum.}
+    \label{fig:combined}
+\end{figure}
+
+To mitigate the influence of the first token on RR calculations, we modify the RR calculation by excluding the first token. This adjustment provides a clearer measure of the head's focus on short-range dependencies, offering better insight into the recency aware.
+
+Furthermore, when replacing the attention mechanism with a linear RNNs, the input gate in the linear RNNs provides an effective solution to this issue. It projects the value vector $v_t$ for each token in the sequence, adjusting the value distribution across all tokens so that the value vector of the first token can become similar to those of the other tokens. Specifically, this transformation is expressed as $v'_i = B_i v_i$, where $B_i$ is the weight vector of the input gate applied to $v_i$, the original value vector for token $i$. This projection allows the first token to appropriately influence other tokens, as it would in the attention mechanism, without requiring additional sequence-level modeling operations.
+
+\subsection{Replacing Selected Heads and continual training}\label{sec:replace_head}
+Employing attention mechanisms in recency aware dominant heads results in inefficiencies. To address this, we propose substituting these heads with a linear RNNs structure, termed Mamba, within Transformer models. Mamba~\citep{gu2023mamba}, based on the S6 architecture, is designed to model sequence information more efficiently. Although its performance in modeling long-term dependencies is constrained by finite memory compared to Transformer~\citep{jelassi2024repeat}, it mitigates this limitation in scenarios where capturing local dependencies is critical. Additionally, since Mamba's state transitions do not rely on nonlinear activation functions, the operators within its state transitions are associative, allowing for efficient parallel computation via a parallel scan mechanism. This significantly enhances computational efficiency, particularly in the prefill phase, where parallel computation across multiple tokens is required.
+
+Table~\ref{tab:comparison} summarizes the cache peak and cache size of Mamba compared to self-attention with KV-cache, during both the prefill and generation phases. In this table, $l_p$ denotes the length of the input, $l_g$ the length of generated tokens, and $d$ the model dimension. As shown, Mamba reduces both the computational complexity and cache size across these phases.
+
+\begin{table}[tb!]
+    \centering
+    \caption{Comparison of cache peak and cache size between self-attention with KV-cache and Mamba in the prefill and generation phases.}
+    \scalebox{0.85}{
+    \begin{tabular}{c|cc|cc}
+        \toprule
+        \multirow{2}{*}[-0.5ex]{\centering \textbf{Phase}} & \multicolumn{2}{c|}{\textbf{Attention (KV-cache)}} & \multicolumn{2}{c}{\textbf{Mamba}}          \\ 
+        \cmidrule{2-5} 
+                                     & Cache Peak    & Cache Size    & Cache Peak  & Cache Size \\ 
+        \midrule
+        \textbf{Prefill}             & $O({l_{p}}^2 + l_{p} \cdot d)$     & $O(l_{g} \cdot d)$        & $O(l_{p} \cdot d)$  & $O(d)$    \\ 
+        \textbf{Generation}           & $O(l_{g} \cdot d)$     & $O(l_{g} \cdot d)$        & $O(d)$       & $O(d)$       \\ 
+        \bottomrule
+    \end{tabular}
+    }
+    \label{tab:comparison}
+\end{table}
+
+In Mamba, the inference process for generating the next token requires two main cache states: the convolutional state and the SSM state. The convolutional state cache size and the SSM state cache size are given by
+\begin{equation}
+C_{\text{conv}} = d_{\text{inner}} \cdot d_{\text{conv}}, \quad
+C_{\text{SSM}} = d_{\text{inner}} \cdot d_{\text{state}}, \quad
+d_{\text{inner}} = k_\text{epd} \cdot d_{\text{model}}, 
+\end{equation}
+where $d_{\text{conv}}$ is the convolution kernel size, $d_{\text{state}}$ is the state dimension, $k_\text{epd}$ is expand factor, and $d_{\text{model}}$ is the model dimension. Compared to the cache size of Transformer, which increases with the sequence length during the generation phase, Mamba maintains a constant cache size during inference, effectively reducing memory pressure.
+
+We denote the proportion of attention heads to be replaced as $\beta$, with those exhibiting higher RA-I being prioritized for replacement. In these selected heads, Mamba blocks substitute the attention mechanism, as described in Algorithm~\ref{alg:replacement}. $W_Q^\text{part}$ refers to the subset of weights from the original model's linear layer that is used to project the query from $X_{\text{in}}$, only including the necessary weights for the chosen attention heads, thus reducing unnecessary computations. Similarly, $W_K^\text{part}$ is used to project the key. In the S6 model, since each embedding dimension is processed independently, the inputs from all heads utilizing Mamba blocks are aggregated into a single tensor along the embedding dimension, allowing for efficient computation across multiple heads.
+
+\begin{algorithm}
+\caption{\model{} Block}
+\label{alg:replacement}
+\begin{algorithmic}[1]
+\Require $X_{\text{in}} \in \mathbb{R}^{B \times L \times D}$, list $\text{heads}_\text{m}$, list $\text{heads}_\text{att}$
+\Ensure $X_{\text{out}} \in \mathbb{R}^{B \times L \times D}$
+\State $V \gets W_V X_{\text{in}}$ \Comment{Value projections with weight matrix $W_V$}
+\State $Q \gets W_Q^\text{part} X_{\text{in}}$ \Comment{Partial query projections with $W_Q^\text{part}$}
+\State $K \gets W_K^\text{part} X_{\text{in}}$ \Comment{Partial key projections with $W_K^\text{part}$}
+\State $X_{\text{att}} \gets \text{AttentionBlock}(Q, K, V[\text{heads}_\text{att}])$ \Comment{Multi-head self-attention output}
+\State $X_{\text{m}} \gets \text{MambaBlock}(V[\text{heads}_\text{m}])$ \Comment{Mamba block output}
+\State $X_{\text{out}} \gets \text{Concatenate}(X_{\text{att}}, X_{\text{m}})$ \Comment{Concatenating outputs of attention heads and Mamba block}
+\end{algorithmic}
+\end{algorithm}
+
+Since Mamba introduces new parameters, continual training \model{} is necessary to restore its performance to a level comparable to the original Transformer-based LLMs.
+
+
+
+\section{Experiments}
+
+We evaluated \model{} on Qwen2~\citep{qwen2023technical} and Llama2~\citep{touvron2023llama} series to assess cache reduction and generation quality. Ablation studies explored different $\beta$ values, and continued training confirmed \model{}'s ability to reuse pre-trained weights. We visualized the RA-I values of different heads across various models, alongside the attention distributions, and analyzed the contributions of the first token.
+
+\subsection{Generation Quality and Cache Size Reduction}\label{sec:main_exp}
+\paragraph{Backbones.} We utilize the Qwen2-0.5B, Llama2-7B, and Qwen2-7B models as the base models, sourced from the official versions. Llama2-7B uses Multi-Head Attention (MHA), while Qwen2 series use Grouped Query Attention (GQA)~\citep{ainslie2023gqa}. 
+
+\paragraph{Task for Evaluating Generation Quality.} Evaluating natural language generation quality is often subjective. To provide an objective measure, we use the linked list reasoning task, HashHop~\citep{magic2024hashhop}. In this task, the model reconstructs a linked list from its first element. We assess performance using the $h_{gq}$ metric, which is the ratio of the longest correct sequence starting from the first element to the total target list length, as shown in the $h_{gq}$ column of Table~\ref{tab:main}. This provides a clear measure of the model’s ability to maintain quality as generation sequence length increases.
+
+\paragraph{Task for Statistic Cache Size.} We evaluated Qwen2-0.5B, Llama2-7B, and Llama2-13B using randomly generated token sequences as inputs. The results, shown in the $cs_{10k}$ and $cs_{60k}$ columns of Table~\ref{tab:main}, demonstrate that \model{} not only increases the allowable input length but also significantly reduces cache size growth as the generation length extends. When \(\beta\) is 0, corresponding to the original model, we define the cache size under this condition to be 1.0000.
+
+\paragraph{Experiment Implementation.} \model{} was constructed based on the original models with $\beta$ set to 0.9, except for the model with 0.5B parameters, where $\beta$ was set to 0.5. All experiments were performed on a single A100 GPU with 80G of memory, with a batch size of 1.
+
+\paragraph{Main Results.} The primary objective of our experiments was to demonstrate that \model{} can significantly reduce cache size while maintaining generation quality at a level comparable to unoptimized models. Specifically, we aimed to validate the effectiveness of \model{} across different attention mechanisms, such as MHA and GQA, as well as across models with varying parameter sizes. As shown in Table~\ref{tab:main}, \model{} achieved a cache size reduction of 89.7\% at 10,240 tokens and 90.0\% at 61,440 tokens for Llama2-7B, as indicated by the $cs_{10k}$ and $cs_{60k}$ columns, with only a minimal decrease in generation quality, where the $h_{gq}$ score is 0.839 compared to 0.894 for the unoptimized model. Similarly, for Qwen2-7B, \model{} reduced cache size by 87.3\% at 10,240 tokens and by 87.5\% at 61,440 tokens, confirming \model{}'s ability to effectively manage cache size while preserving generation quality across different attention mechanisms, such as MHA and GQA.
+
+Additionally, experiments on Qwen2-0.5B and Qwen2-7B further demonstrated the scalability of \model{} across models with different parameter sizes. As shown in Table~\ref{tab:main}, for Qwen2-0.5B, \model{} reduced cache size by 56.1\% at 10,240 tokens and by 56.3\% at 61,440 tokens, as seen in the $cs_{10k}$ and $cs_{60k}$ columns, while maintaining generation quality comparable to the unoptimized model, as indicated by the $h_{gq}$ column. This consistency in simultaneously preserving generation quality and optimizing cache size and memory requirements across models with different parameter sizes highlights the robustness of \model{}. Furthermore, \model{} increased the maximum input length for all tested models, extending the limit for Llama2-7B from 71,680 tokens to 91,800 tokens and for Qwen2-7B from 122,880 tokens to 132,000 tokens, as shown in the $l_{m}$ column, demonstrating its potential for long-sequence generation tasks.
+
+In the case of Llama2-7B, both \model{} and PyramidInfer achieved similar cache size reductions. \model{} reduced the cache size by 89.7\% at 10,240 tokens and 90.0\% at 61,440 tokens, while PyramidInfer reduced it by 89.46\% and 89.57\%, respectively. However, the key difference lies in the generation quality. \model{} maintained a high generation quality with an $h_{gq}$ score of 0.839, only slightly lower than the unoptimized model’s 0.894. In contrast, PyramidInfer's $h_{gq}$ score dropped significantly to 0.462, indicating a substantial degradation in generation quality compared to the original model. This highlights \model{}’s ability to balance cache optimization with minimal impact on generation quality, a clear advantage over PyramidInfer.
+
+\begin{table}[tb!]
+    \centering
+    \caption{Performance comparison of \model{} across optimization methods for Qwen2-7B, Llama2-7B, and Qwen2-0.5B. The table shows the maximum input length ($l_{m}$), generation quality ($h_{gq}$), and cache size at generation lengths of 10,240 and 61,440 tokens.}
+    \scalebox{0.9}{
+    \begin{adjustbox}{max width=\textwidth}
+    \begin{tabular}{c|c|cccc}
+        \toprule
+        \textbf{Model} & \textbf{Optimization Method} & $\mathbf{l_{m}}$ & $\mathbf{h_{gq}}$ & $\mathbf{cs_{10k}}$ & $\mathbf{cs_{60k}}$ \\ 
+        \midrule
+        \multirow{2}{*}{\centering \textbf{Qwen2-0.5B}} 
+            & Original Model   & 133,120 & 0.881 & 1.0000 & 1.0000 \\ 
+            & \model{}      & 137,216 & 0.815 & 0.4390 & 0.4375 \\
+        \midrule
+        \multirow{3}{*}{\centering \textbf{Llama2-7B}} 
+            & Original Model   & 71,680  & 0.894 & 1.0000 & 1.0000 \\ 
+            & \model{}      & 91,800  & 0.839 & 0.1030 & 0.1000 \\ 
+            & PyramidInfer  & 71,680 & 0.462 & 0.1054 & 0.1043 \\
+        \midrule
+        \multirow{2}{*}{\centering \textbf{Qwen2-7B}} 
+            & Original Model   & 122,880 & 0.995 & 1.0000 & 1.0000 \\
+            & \model{}      & 132,000 & 0.913 & 0.1268 & 0.1252 \\
+        \bottomrule
+    \end{tabular}
+    \end{adjustbox}
+    }
+    \label{tab:main}
+\end{table}
+
+\subsection{continual training}\label{sec:cotr_exp}
+To validate the effectiveness of \model{} in inheriting the weights from Transformer-based LLMs, we performed continued training on \model{} with a $\beta$ value of 0.5, constructed from Qwen2-0.5B, Llama2-7B, and Qwen2-7B. The training was conducted using a masked prediction task on the Wikipedia English training set. The results, presented in Figure~\ref{fig:wiki_tr}, demonstrate \model{}'s ability to converge with the original models and achieve comparable performance. 
+
+\begin{figure}[tb!]
+    \centering
+    \begin{subfigure}[t]{0.32\textwidth}
+        \includegraphics[width=\linewidth]{media/qwen2_05B_wiki.pdf}
+        \caption{Qwen2-0.5B}
+        \label{fig:wiki_tr_q25}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.32\textwidth}
+        \includegraphics[width=\linewidth]{media/llama2_7B_wiki.pdf} 
+        \caption{Llama2-7B}
+        \label{fig:wiki_tr_l27}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.32\textwidth}
+        \includegraphics[width=\linewidth]{media/qwen2_7B_wiki.pdf} 
+        \caption{Qwen2-7B}
+        \label{fig:wiki_tr_q27}
+    \end{subfigure}
+    \caption{Loss values of \model{} and the corresponding original models during continual training on the masked prediction task using the Wikipedia English training set.}
+    \label{fig:wiki_tr}
+\end{figure}
+
+After convergence, we evaluated both \model{} and the corresponding original models on the validation set, using the masked prediction task and calculating the perplexity (PPL), as Table~\ref{tab:wiki-val}.
+
+\begin{table}[tb!]
+    \centering
+    \caption{PPL values for the original models and \model{} on the masked prediction task using the Wikipedia English validation set.}
+    \scalebox{0.85}{
+    \begin{tabular}{c|cc|cc|cc}
+        \toprule
+        \multirow{2}{*}[-0.5ex]{\textbf{Model}} & \multicolumn{2}{c|}{\textbf{Qwen2-0.5B}} & \multicolumn{2}{c|}{\textbf{Llama2-7B}} & \multicolumn{2}{c}{\textbf{Qwen2-7B}} \\ 
+        \cmidrule{2-7}
+                                        & \textbf{Original} & \textbf{\model{}} & \textbf{Original} & \textbf{\model{}} & \textbf{Original} & \textbf{\model{}} \\
+        \midrule
+        \textbf{PPL}                             & 12.088             & 14.202             & 9.023             & 9.199             & 9.215             & 9.692             \\
+        \bottomrule
+    \end{tabular}
+    }
+    \label{tab:wiki-val}
+\end{table}
+
+\subsection{Ablation Studies}\label{sec:abla_exp}
+To verify the necessity of retaining attention heads in \model{}, we extended Table~\ref{tab:main} with different $\beta$ values. When $\beta$ is set to 1.0, meaning no attention heads are retained in \model{}, we observe a significant degradation in generation quality in Table~\ref{tab:ablation}, with $hp_{gq}$ dropping to 0. This phenomenon occurs consistently across models with different parameter sizes, as well as those utilizing either MHA or GQA as the base models. Intrigued by this finding, we conducted additional experiments using the MQAR task on randomly initialized Transformer and \model{} models.
+
+\begin{table*}[tb!]
+    \centering
+    \caption{Expansion of \model{} across different models with various $\beta$ values.}\label{tab:ablation}
+    \resizebox{\textwidth}{!}{
+    \Huge
+    \begin{tabular}{c|cccccc|cccccc|cccccc}
+        \toprule
+        \textbf{Model} & \multicolumn{6}{c|}{\textbf{Qwen2-0.5B}} & \multicolumn{6}{c|}{\textbf{Llama2-7B}} & \multicolumn{6}{c}{\textbf{Qwen2-7B}} \\ \midrule
+        \textbf{$\beta$} & 0.00 & 0.25 & 0.50 & 0.75 & 0.90 & 1.00 & 0.00 & 0.25 & 0.50 & 0.75 & 0.90 & 1.00 & 0.00 & 0.25 & 0.50 & 0.75 & 0.90 & 1.00 \\
+        \midrule
+        $\mathbf{l_{max}}$ & 133,120 & 135,168 & 137,216 & 139,264 & 142,048 & 143,360 & 71,680 & 75,080 & 78,480 & 81,920 & 91,800 & 94,208 & 122,880 & 125,440 & 128,000 & 130,560 & 132,000 & 133,120 \\
+        $\mathbf{h_{gq}}$ & 0.881 & 0.846 & 0.815 & 0.051 & 0.000 & 0.000 & 0.894 & 0.849 & 0.861 & 0.818 & 0.839 & 0.000 & 0.995 & 0.987 & 0.986 & 0.922 & 0.913 & 0.000 \\
+        $\mathbf{cs_{10k}}$ & 1.0000 & 0.7043 & 0.4390 & 0.3145 & 0.0632 & 0.0006 & 1.0000 & 0.7510 & 0.5020 & 0.2530 & 0.1030 & 0.0040 & 1.0000 & 0.6578 & 0.3815 & 0.5930 & 0.1268 & 0.0007 \\
+        $\mathbf{cs_{60k}}$ & 1.0000 & 0.7035 & 0.4375 & 0.3130 & 0.0626 & 0.0001 & 1.0000 & 0.7500 & 0.5000 & 0.2500 & 0.1000 & 0.0010 & 1.0000 & 0.6563 & 0.3800 & 0.5900 & 0.1252 & 0.0001 \\
+        \bottomrule
+    \end{tabular}
+    }
+\end{table*}
+
+ The training set consists of samples with 4 to 64 pairs, and pair lengths ranging from 64 to 256. The test set contains samples with 4 to 256 pairs, and lengths ranging from 64 to 1,024. We used a randomly initialized Transformer model with rotary position encoding (RoPE) ~\citep{SU2024127063} and GQA, specifically with 2 layers, 512 embedding dimensions, 8 attention heads, and 4 key-value heads. After selecting the heads to be replaced in each layer based on $\beta$, we trained the model on the training set. 
+
+We recorded the proportion of correct value predictions, i.e., accuracy, on the validation set for different $\beta$ values, as shown in Figure~\ref{fig:MQAR}. Despite the MQAR task being simpler than the HashHop task, we observed that \model{}, with all attention heads replaced by Mamba blocks, still exhibited poor accuracy, indicating that retaining the attention mechanism in \model{} is necessary.
+
+\begin{figure}[tb!]
+    \centering
+    \begin{subfigure}[t]{0.24\textwidth}
+        \includegraphics[width=\linewidth]{media/mqar_128.pdf}
+        \caption{128 Tokens}
+        \label{fig:MQAR_128}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.24\textwidth}
+        \includegraphics[width=\linewidth]{media/mqar_256.pdf} 
+        \caption{256 Tokens}
+        \label{fig:MQAR_256}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.24\textwidth}
+        \includegraphics[width=\linewidth]{media/mqar_512.pdf} 
+        \caption{512 Tokens}
+        \label{fig:MQAR_512}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.24\textwidth}
+        \includegraphics[width=\linewidth]{media/mqar_1024.pdf}
+        \caption{1024 Tokens}
+        \label{fig:MQAR_1024}
+    \end{subfigure}
+    \caption{Accuracy in the MQAR task for different sequence lengths. Each subfigure shows the accuracy of \model{} and the original Transformer model over validation samples of (a) 128 tokens, (b) 256 tokens, (c) 512 tokens, and (d) 1024 tokens.}
+    \label{fig:MQAR}
+\end{figure}
+
+\subsection{Analytical and Statistical Experiments}\label{sec:as_exp}
+\paragraph{RA-I Visualization.} We selected attention heads with different RA-I values from the Qwen2-0.5B, Llama2-7B, and Qwen2-7B models and visualized their behavior, as shown in Figure~\ref{fig:rr_visualization}. The figure presents the average attention distribution heatmaps for these heads over 512 English samples, each containing more than 1030 tokens. For the analysis, we used the first 256 tokens of each sample as input. Attention heads with a high RA-I tend to focus on tokens close to the query token, resulting in a bright main diagonal that reflects the model's emphasis on local context dependencies. In contrast, heads with a low RA-I exhibit a more uniform attention distribution across the entire sequence, capturing longer-range dependencies. The attention distribution for low RA-I heads displays a mosaic-like pattern, indicating a more global focus. This distinction suggests that high RA-I heads are better suited for handling short-range dependencies, while low RA-I heads play a critical role in capturing long-range information. Although we did not include the first token in the visualization, it was still part of the attention calculation.
+
+\begin{figure}[tb!]
+    \centering
+    \begin{subfigure}[t]{0.32\textwidth}
+        \includegraphics[width=\linewidth]{media/qwen2_05_high.pdf}
+        \caption{Qwen2-0.5B $\text{RA-I}=1024$}
+        \label{fig:q25_rr_high}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.32\textwidth}
+        \includegraphics[width=\linewidth]{media/llama2_7_high.pdf} 
+        \caption{Llama2-7B $\text{RA-I}=1024$}
+        \label{fig:l27_rr_high}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.32\textwidth}
+        \includegraphics[width=\linewidth]{media/qwen2_7_high.pdf} 
+        \caption{Qwen2-7B $\text{RA-I}=1024$}
+        \label{fig:q27_rr_high}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.32\textwidth}
+        \includegraphics[width=\linewidth]{media/qwen2_05_low.pdf}
+        \caption{Qwen2-0.5B $\text{RA-I}=0$}
+        \label{fig:q25_rr_low}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.32\textwidth}
+        \includegraphics[width=\linewidth]{media/llama2_7_low.pdf} 
+        \caption{Llama2-7B $\text{RA-I}=0$}
+        \label{fig:l27_rr_low}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.32\textwidth}
+        \includegraphics[width=\linewidth]{media/qwen2_7_low.pdf} 
+        \caption{Qwen2-7B $\text{RA-I}=0$}
+        \label{fig:q27_rr_low}
+    \end{subfigure}
+    \caption{Visualization of attention distribution for heads with high, mid, and low RA-I values in the Qwen2-0.5B, Llama2-7B, and Qwen2-7B models, averaged over 1024 samples. High RA-I heads focus more on recent tokens (main diagonal), while low RA-I heads show a more global attention pattern, with notably higher attention on the first token.}
+    \label{fig:rr_visualization}
+\end{figure}
+
+Additionally, in Figure~\ref{fig:ra-i}, we visualized the RA-I values of each head in each layer of the Qwen2-0.5B, Llama2-7B, and Qwen2-7B models. It can be observed that more heads in the Qwen2 series exhibit higher RA-I values, indicating that the heads in the Qwen2 models more frequently display a recency aware attention distribution pattern.
+
+\begin{figure}[tb!]
+    \centering
+    \begin{subfigure}[t]{0.32\textwidth}
+        \includegraphics[width=\linewidth]{media/qwen2_05B_rai.pdf}
+        \caption{Qwen2-0.5B RA-I}
+        \label{fig:q25_rai}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.32\textwidth}
+        \includegraphics[width=\linewidth]{media/llama2_7B_rai.pdf} 
+        \caption{Llama2-7B RA-I}
+        \label{fig:l27_rai}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.32\textwidth}
+        \includegraphics[width=\linewidth]{media/qwen2_7B_rai.pdf} 
+        \caption{Qwen2-7B RA-I}
+        \label{fig:q27_rai}
+    \end{subfigure}
+    \caption{RA-I values of each head in each layer of the Qwen2-0.5B, Llama2-7B, and Qwen2-7B models. We observed generally higher RA-I values in the Qwen2 model series, suggesting that more attention heads are primarily recency aware.}
+    \label{fig:ra-i}
+\end{figure}
+
+\paragraph{Token Contribution Analysis.} To verify the hypothesis that the contribution of the first token's value vector is lower than that of other tokens, we analyzed the contribution values across different heads in the Qwen2-0.5B, Llama2-7B, and Qwen2-7B models. The contribution value is computed as the product of the attention weight and the L2 norm of the value vector, as discussed in Section~\ref{sec:select_head}. We used 512 samples from the Wikipedia English dataset, each containing more than 1030 tokens. From these, the first 256 tokens were selected for analysis. Table~\ref{tab:contribution_table} presents the mean contributions along with their 95\% confidence intervals for both the first token and non-first tokens.
+
+\begin{table}[ht!]
+    \centering
+    \caption{Mean L1 and L2 Contribution Values and 95\% Confidence Intervals (CI) for First and Non-First Tokens in Qwen2-0.5B, Llama2-7B, and Qwen2-7B.}
+    \label{tab:contribution_table}
+    \begin{adjustbox}{max width=\textwidth}
+    \begin{tabular}{c|cc|cc}
+        \toprule
+        \multirow{2}{*}[-0.5ex]{\textbf{Model}} & \multicolumn{2}{c|}{\textbf{L1 Contribution}} & \multicolumn{2}{c}{\textbf{L2 Contribution}} \\
+        \cmidrule(r){2-3} \cmidrule(r){4-5}
+        & \textbf{Mean} & \textbf{95\% CI} & \textbf{Mean} & \textbf{95\% CI} \\
+        \midrule
+        \multirow{2}{*}{Qwen2-0.5B} 
+            & 0.0281  & [-0.0530, 0.1094] & 0.0070  & [-0.0083, 0.0222] \\
+            & 0.0718  & [0.0286, 0.1152] & 0.0129  & [0.0046, 0.0212] \\
+        \midrule
+        \multirow{2}{*}{Llama2-7B} 
+            & 0.0082  & [-0.0320, 0.0486] & 0.0013  & [-0.0041, 0.0067] \\
+            & 0.0442  & [0.0254, 0.0630] & 0.0052  & [0.0030, 0.0074] \\
+        \midrule
+        \multirow{2}{*}{Qwen2-7B} 
+            & 0.0708  & [-0.5195, 0.6602] & 0.0120  & [-0.0713, 0.0947] \\
+            & 0.1465  & [0.0615, 0.2314] & 0.0181  & [0.0075, 0.0286] \\
+        \bottomrule
+    \end{tabular}
+    \end{adjustbox}
+\end{table}
+
+As shown in Table~\ref{tab:contribution_table}, the mean contribution of the first token is significantly lower than that of non-first tokens in the Qwen2-0.5B and Llama2-7B models, as indicated by the non-overlapping confidence intervals. Although the variability in the first token’s contribution is higher in the Qwen2-7B model, the trend remains consistent, with the first token contributing less than non-first tokens. These results support the hypothesis that the first token's contribution is limited, providing a basis for ignoring the first token when calculating the RR in practical scenarios.
+
+
+
+\section{Conclusion}
+
+We explored the necessity of self-attention in all heads of Transformer-based LLMs and demonstrated the potential of replacing some self-attention mechanisms with a Linear RNNs. By identifying the recency aware phenomenon, where certain attention heads focus on recent tokens, we introduced \model{}. In \model{}, we replace self-attention with a linear recurrent neural network in these specific heads. This substitution reduces computational costs and cache size during both the prefill and generation phases without compromising performance. Our experiments showed that \model{} effectively reuses pretrained Transformer weights with continual training, maintaining generation quality while enhancing efficiency. However, \model{} faces a key limitation in efficiently parallelizing the computation of Mamba blocks and self-attention heads within the same layer. This challenge is particularly evident under small batch sizes, affecting hardware resource utilization, which we aim to improve in future work. By integrating linear recurrence into Transformer architectures, \model{} provides a promising foundation for future large-scale model architectures, potentially leading to more efficient and scalable neural networks.
+
+
+

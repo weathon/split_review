@@ -1,0 +1,244 @@
+\title{Uncertainty-Aware Decoding with Minimum Bayes' Risk}
+
+\begin{abstract}
+Despite their outstanding performance in the majority of scenarios, contemporary
+language models still occasionally produce undesirable outputs, for example, hallucinated text. While such behaviors have previously been linked to uncertainty,
+there is a notable lack of methods that actively consider uncertainty during text
+generation. In this work, we show how Minimum Bayes’ Risk (MBR) decoding, a
+method that was originally designed to account for the imperfect nature of probabilistic language models, can be generalized into a principled uncertainty-aware
+decoding method. In short, we account for model uncertainty during decoding
+by incorporating a posterior over model parameters into MBR’s computation of
+expected risk. We show that this modified expected risk is useful for both choosing
+outputs and deciding when to abstain from generation. We benchmark different
+methods for learning posteriors and show that performance correlates with the
+diversity of the combined set of models’ predictions.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Today’s language models can generate fluent and coherent text. While they perform well in many scenarios, there are still instances where they fail and, for example, hallucinate factually incorrect outputs or generate harmful language (Ye et al., 2023; Bhandari & Brennan, 2023). Previous works have shown that out-of-distribution inputs (Ren et al., 2023) and (epistemic) uncertainty (Xiao & Wang, 2021; van der Poel et al., 2022; Fadeeva et al., 2024) are indicative of these behaviors—both phenomena which can be linked to uncertainty about model parameters. Yet there is still a lack of methods that react to or adjust for this type of uncertainty during decoding in language generation.  
+
+Minimum Bayes’ Risk (MBR) decoding was originally proposed for statistical machine translation (Kumar & Byrne, 2002), motivated by similar model shortcomings. The idea of MBR is to make use of the entire distribution when choosing an output, because, while the model distribution might be a good overall representation of the target distribution (Smith, 2011), individual samples might not be adequate. More recent works have shown that such problems persist with modern models (Stahlberg & Byrne, 2019; Cohen & Beck, 2019; Eikema & Aziz, 2020), precipitating the resurgence of MBR. In this work, we show how a small adjustment to MBR decoding can enhance it beyond this scope and turn it into an uncertainty-aware decoding method.  
+
+In short, we modify MBR’s definition of expected risk by incorporating an additional expectation over a posterior distribution over model parameters. This adjustment enables us to account for uncertainty in parameter estimates when judging the quality of different hypotheses from a model. In practice, this boils down to combining the predictions of multiple models—sampled from an estimate of the Bayesian posterior—when generating hypotheses for MBR. Model combinations have been shown to provide better-calibrated distributions and can improve robustness and downstream performance (Blundell et al., 2015; Lakshminarayanan et al., 2017; Maddox et al., 2019; Shen et al., 2024). Our framework provides theoretical justification for performing such combinations.  
+
+We explore both sequence-level and token-level methods for model combination. Overall, we find strong evidence that accounting for such weight uncertainty can improve decoding and reduce hallucinations. We find that improvements trend with the expressiveness of the posterior that is used to sample models for combination. Likely related to this, the performance of uncertainty-aware MBR is highly correlated with the prediction diversity across the combined models. We also find that weight uncertainty provides a useful signal for selective prediction, where we observe that uncertainty-aware expected risk can be used to decide when to predict or abstain from generation. Furthermore, we show that performance scales: it improves with more models and larger hypothesis set sizes. Finally, we show the effectiveness of this framework when used to ensemble outputs from black-box LLMs.  
+
+
+
+\section{2 BACKGROUND  }
+
+
+2.1 PROBABILISTIC LANGUAGE GENERATION  
+
+Modern models for language generation are predominantly locally-normalized, autoregressive models of a conditional distribution over next tokens. The probability of a sequence of tokens forming a string can be determined by the product of all next-token probabilities in the sequence. Formally, given input $\mathbf{x}$ and model $p_{\theta}$ the probability of an output sequence $\mathbf{y}=\langle y_{1},y_{2},\dots\rangle$ is computed as  
+
+$$
+p_{\theta}(\mathbf{y}\mid\mathbf{x})=\prod_{t=1}^{|\mathbf{y}|}p_{\theta}(y_{t}\mid\mathbf{y}_{<t},\mathbf{x}).
+$$  
+
+Here, each $y_{t}$ is a token from some predetermined vocabulary $\mathcal{V}$ and $\pmb{\theta}\in\mathbb{R}^{d}$ are the parameters of the model which are also often called weights. The input $\mathbf{x}$ could be text but, for example, also images.  
+
+Learning $p_{\theta}$ . The parameters of models $p_{\theta}$ are generally learned given paired examples $\mathcal{D}=\{\mathbf{x}^{(\widetilde{i})},\mathbf{\widetilde{y}}^{(i)}\}_{i=1}^{N}$ , a loss function and an optimization procedure. The loss function then indicates how well the model $p_{\theta}$ captures the data-generating distribution $p(\cdot\mid\mathbf{x})$ that we assume $\mathcal{D}$ is sampled from. In most cases, language generation models are learned by minimizing an empirical risk over data examples in terms of one parameter set $\pmb{\theta}\in\mathbb{R}^{d}$ , for example, using AdamW (Loshchilov & Hutter, 2019). However, such approaches can not directly model weight uncertainty. In this work, we instead use Bayesian methods to model weight uncertainty. We describe them in $\S3.1$ and $\S4.1$ .  
+
+Decoding from $p_{\theta}$ . At inference time, our goal is to generate a string from $p_{\theta}(\cdot\mid\mathbf{x})$ . The set of decision rules used in this process is often referred to as the decoding strategy. One such strategy is simply to sample tokens autoregressively until a stopping criterion, usually a fixed maximum length or a special end-of-sequence token, is met. Another strategy is to (approximately) search for the maximum probability string according to $p_{\theta}(\cdot\mid\mathbf{x})$ . Both of these approaches have proved problematic empirically (Fan et al., 2018; Holtzman et al., 2020; Eikema & Aziz, 2020; Hewitt et al., 2022), prompting the exploration of alternative strategies. The shortcomings of all of these strategies have been (at least partially) attributed to the fact that they do not consider a string’s utility, which may not perfectly align with its probability. Minimum Bayes Risk decoding aims to solve this issue.  
+
+2.2 MINIMUM BAYES RISK DECODING  
+
+Minimum Bayes Risk decoding is derived from Bayesian Decision Theory, which states that optimal decisions are those that minimize an expected risk or, equivalently, maximize an expected utility (see DeGroot, 2005, inter alia). Given a utility function $u:\nu^{*}\times\nu^{*}\to\mathbb{R}_{\ge0}$ which assigns to each pair of strings a non-negative utility, MBR aims to find the string that maximizes expected utility with respect to the target distribution. This principle is especially appealing when working with a possibly imperfect model of the target distribution, such as $p_{\theta}$ , because it allows using the full model distribution instead of relying on the adequacy of individual samples, which is argued to be the downfall of other decoding strategies (Eikema $\&$ Aziz, 2020). We thus choose the hypothesis:  
+
+$$
+\begin{array}{r}{\mathbf{y}^{*}=\underset{\mathbf{y}^{\prime}\in\mathcal{V}^{*}}{\arg\operatorname*{max}}\underset{\mathbf{y}\sim p_{\theta}(\cdot\vert\mathbf{x})}{\mathbb{E}}\,[u(\mathbf{y},\mathbf{y}^{\prime})]\,}\\ {=\underset{\mathbf{y}^{\prime}\in\mathcal{V}^{*}}{\arg\operatorname*{max}}\,\sum_{\mathbf{y}\in\mathcal{V}^{*}}p_{\theta}(\mathbf{y}\mid\mathbf{x})u(\mathbf{y},\mathbf{y}^{\prime}).}\end{array}
+$$  
+
+There are several obstacles to computing Eq. (3). Both summing over all possible strings in $\mathcal{V}^{*}$ to compute the expectation and searching over them to find the expectation-maximizing hypothesis are computationally infeasible.1Thus, approximations to Eq. (3) are used in practice.  
+
+The common approach to circumvent these obstacles is to employ an (often Monte Carlo) estimator of the expected utility and limit the search space to a subset of $\nu^{*}$ . Since the estimator requires a sample of strings from the distribution of interest, the same strings are often used in both the utility estimation and approximate search.2 We refer to this collection as the hypothesis set and denote the samples used in our estimator as $\mathcal{H}=[\mathbf{y}^{(i)}]_{i=1}^{N}$ . In the case of a Monte Carlo estimator, where all $\mathbf{y}^{(i)}\sim p_{\theta}$ , we denote this collection as $\mathcal{H}_{\theta}$ . This leads to the following approximation to Eq. (3):3  
+
+$$
+\widehat{\mathbf{y}}^{*}=\arg\operatorname*{max}_{\mathbf{y}^{\prime}\in\mathcal{H}_{\theta}}\sum_{\mathbf{y}\in\mathcal{H}_{\theta}}u(\mathbf{y},\mathbf{y}^{\prime}).
+$$  
+
+Most prior work has focused on making the approximation in Eq. (4) more efficient (Eikema & Aziz, 2022; Fernandes et al., 2022; Cheng & Vlachos, 2023; Vamvas & Sennrich, 2024) or on better choices for utility functions (Freitag et al., 2022) but few have considered an important underlying assumption: that $p_{\theta}$ is a good substitute for $p$ . If uncertainty over the suitable model parameters $\pmb{\theta}$ (i.e. weight uncertainty) is high, e.g., when training data is limited, using a single $p_{\theta}$ may not provide a good substitute. Bayesian modeling already provides tools to account for such uncertainty by marginalizing a distribution over possible parameters. However, this has been largely neglected in MBR despite its roots in Bayesian Decision Theory. We use this approach next to establish uncertainty-aware decoding schemes that account for weight uncertainty.  
+
+
+
+\section{3 MINIMUM BAYES’ RISK DECODING WITH WEIGHT-UNCERTAINTY  }
+
+
+In this section, we show how a simple change can turn MBR into an uncertainty-aware decoding method. We first introduce weight uncertainty. Then, we use it to establish an uncertainty-aware variant of MBR before presenting three practical decoding methods based on it.  
+
+
+
+\section{3.1 GENERALIZING MBR WITH WEIGHT UNCERTAINTY  }
+
+
+Placing a probability distribution over model parameters is an oft-employed method for modeling weight uncertainty, where each valid parameterization is attached a probability that can be calculated using Bayes’ theorem as $p(\pmb{\theta}\mid\mathcal{D})\stackrel{{\cdot}}{\propto}p(\mathcal{D}\mid\pmb{\theta})\cdot p(\pmb{\theta})$ with prior $p(\pmb\theta)$ and based on data $\mathcal{D}$ (Graves, 2011; Blundell et al., 2015; Maddox et al., 2019; Osawa et al., 2019; M¨ollenhoff & Khan, 2023; Yang et al., 2024). In general, calculating an exact distribution $p(\pmb\theta\mid\mathcal D)$ over model parameters is intractable and therefore an approximate distribution $q(\cdot)$ is usually used. There are numerous methods one can use for obtaining $q(\cdot)$ ; we discuss the ones that we employ in $\S4.1$ and $\S4.2$ .  
+
+Access to a posterior $q(\cdot)$ allows prediction by combining the outputs of multiple $p_{\theta}$ , weighted by the probability $q(\pmb\theta)$ of each parameterization $\pmb{\theta}$ . The resulting distribution is often referred to as the predictive posterior distribution, which we denote as $p_{\Theta}$ . Empirically, this has been shown to improve calibration (Yang et al., 2024) and uncertainty estimation (Shen et al., 2024). However, in modern language generation, it is not immediately clear how model predictions should be combined in practice. Combining predictions in probability space is difficult for several reasons: for example, frequently-used black-box APIs do not provide sequence- or token-level probabilities. Standard Monte-Carlo-based methods that would avoid this issue are also potentially problematic: even for larger sample sizes, a given string would likely only be sampled once. And while generations might be approximately similar, e.g., differing only in punctuation, this approach treats them as completely disparate. We now show how MBR provides a logical framework for combining model predictions that circumvents these issues.  
+
+We propose the following generalization of standard MBR. By replacing the definition of $p_{\theta}$ in Eq. (3) with the predictive posterior $p_{\Theta}$ , we can account for weight uncertainty:4  
+
+$$
+\mathbf{y}^{\Theta}=\underset{\mathbf{y}^{\prime}\in\mathcal{V}^{*}}{\arg\operatorname*{max}}\sum_{\mathbf{y}\in\mathcal{V}^{*}}p_{\Theta}(\mathbf{y}\mid\mathbf{x})u(\mathbf{y},\mathbf{y}^{\prime}).
+$$  
+
+We recover standard MBR when using the delta method to approximate $p_{\Theta}$ , i.e., approximating the predictive posterior using one model parameterized by the mean of $q$ (Khan & Rue, 2023, App. C).  
+
+The oft-employed Monte-Carlo-based approximations of MBR do not require knowledge of string probabilities—only the ability to sample from the model. Further, the utility function is often a quantification of a soft match between strings, meaning similarities between samples are accounted for rather than treating them as completely distinct.  
+
+For autoregressive sequence generation, there are two logical definitions of the predictive posterior $p_{\Theta}$ , each with different Monte Carlo estimators. One averages models’ probabilities for each token and one for entire sequences. In general, both do not provide the same sequence probabilities and can lead to differing decisions, as discussed in Malinin & Gales (2021, Sec. 3, App.A), who use them for uncertainty estimation in structured prediction tasks. We discuss these definitions and our decoding methods derived from them next.  
+
+
+
+\section{3.2 SEQUENCE-LEVEL POSTERIORS FOR UNCERTAINTY-AWARE DECODING  }
+
+
+While autoregressive language models are trained to model a distribution over tokens, the quantity of interest is often the probability of an entire sequence. Therefore it is natural to model a predictive posterior on a sequence-level by using an expectation over sequence probabilities:  
+
+$$
+p_{\Theta}^{(\mathrm{seq})}(\mathbf{y}\mid\mathbf{x}):=\underset{\theta\sim q}{\mathbb{E}}\left[p_{\theta}(\mathbf{y}\mid\mathbf{x})\right].
+$$  
+
+Using this definition of the predictive posterior to replace the model distribution in Eq. (3) turns out to allow two convenient ways of soft model averaging, where the latter is due to the following: when $u$ is bounded5 or non-negative Fubini’s theorem allows to switch the order of the two expectations in Eq. (5) (the one over models is implicit in the definition of $p_{\Theta}^{(\mathrm{seq})}$ ) (DeGroot, 2005, Sec. 8.9):  
+
+$$
+\begin{array}{r}{\mathbf{y}^{\ominus}=\underset{\mathbf{y}^{\prime}\in\mathcal{V}^{*}}{\arg\operatorname*{max}}\displaystyle\sum_{\mathbf{y}\in\mathcal{V}^{*}}\underset{\pmb{\theta}\sim\boldsymbol{q}}{\mathbb{E}}\left[p_{\theta}(\mathbf{y}\mid\mathbf{x})\right]u(\mathbf{y},\mathbf{y}^{\prime})}\\ {=\underset{\mathbf{y}^{\prime}\in\mathcal{V}^{*}}{\arg\operatorname*{max}}\,\underset{\pmb{\theta}\sim\boldsymbol{q}}{\mathbb{E}}\Big[\displaystyle\sum_{\mathbf{y}\in\mathcal{V}^{*}}p_{\theta}(\mathbf{y}\mid\mathbf{x})u(\mathbf{y},\mathbf{y}^{\prime})\Big].}\end{array}
+$$  
+
+In practice, we can build simple Monte Carlo estimators of Eq. (7) and Eq. (8) by estimating expected utilities on all generated hypotheses or by independently estimating utilities for each model and then summing the per-model utilities of each hypothesis. Formally, this means either using the hypothesis set $\mathcal{H}_{\mathcal{M}}=\uplus\_M\mathcal{M}\mathcal{H}_{\theta}$ in Eq. (4) or using Eq. (4) with each $\mathcal{H}_{\theta}$ before summing the expected utility of each y $\in\cup_{\theta\in\mathcal{M}}\mathcal{H}_{\theta}$ over the $\theta$ . Here, $\uplus$ indicates the additive union, meaning that $\mathcal{H}_{\mathcal{M}}$ allows duplicates to preserve sample counts. Furthermore, we denote with $\mathbf{\mathcal{M}}=\{\pmb{\theta}^{\top_{i}}\sim q(\dot{\pmb{\theta}})\}_{i=1}^{M}$ an ensemble of models sampled i.i.d from $q$ . Our approximate solutions then become:3  
+
+$$
+\widehat{{\mathbf{y}}}^{\Theta}=\operatorname*{arg\,max}_{{\mathbf{y}}^{\prime}\in{\mathcal{H}}_{M}}\sum_{{\mathbf{y}}\in{\mathcal{H}}_{M}}u({\mathbf{y}},{\mathbf{y}}^{\prime})\qquad\quad(9)\qquad\widehat{{\mathbf{y}}}^{\Theta}=\operatorname*{arg\,max}_{{\mathbf{y}}^{\prime}\in{\mathcal{H}}_{M}}\sum_{\theta\in{\mathcal{M}}}\sum_{{\mathbf{y}}\in{\mathcal{H}}_{\theta}}u({\mathbf{y}},{\mathbf{y}}^{\prime}).
+$$  
+
+This is convenient because it allows us to ensemble any set of LLMs given just the ability to sample from them, i.e., we do not require access to model probabilities, and can easily be parallelized. For Eq. (10), even utility computation can be parallelized. There are trade-offs between the two estimators.  
+
+Computational Costs. Eq. (9) requires $(|\mathcal{M}|\cdot|\mathcal{H}_{\pmb{\theta}}|)^{2}$ utility computations, which might be impractical for large sizes of $\mathcal{H}_{\theta}$ but, intuitively, the larger amount of comparisons might be helpful for MBR. Eq. (10) is fast, as it requires only $\lvert\mathcal{M}\rvert\cdot\lvert\mathcal{H}_{\theta}\rvert^{2}$ utility computations and can enable using larger hypothesis set sizes.  
+
+Discussion. In Eq. (9), taking $\mathcal{H}_{\mathcal{M}}$ to be a multi-set rather than a union of hypothesis sets maintains sample counts. Formally, this means that Eq. (9) provides an unbiased estimate of Eq. (7). Intuitively, this is advantageous because it means that highly probable sequences can contribute more to the decision. This differentiates ours from prior work, such as Kobayashi (2018, Alg. 1), who rather use a set union. Recent work (Farinhas et al., 2023) also uses Eq. (9) but does not explore the connection to weight uncertainty. Our methods draw parallels between MBR, which aims to minimize expected risk, and PAC-Bayes bounds (Alquier, 2024), which study the expected risk of predictive posteriors. Finally, it also helps to understand early system aggregation methods that use similar decision rules as shown here, e.g., by optimizing scalar model weights (Gonz´alez-Rubio et al., 2011, Eq. 8).  
+
+3.3 TOKEN-LEVEL POSTERIORS FOR UNCERTAINTY-AWARE DECODING  
+
+We further explore predictive posteriors which combine models by averaging token probabilities:  
+
+$$
+p_{\Theta}^{(\mathrm{tok})}(\mathbf{y}\mid\mathbf{x}):=\prod_{t=1}^{T}\underset{\theta\sim q}{\mathbb{E}}\left[p_{\theta}(y_{t}\mid\mathbf{y}_{<t},\mathbf{x})\right].
+$$  
+
+Since summing over all possible models is intractable, we use the following Monte Carlo estimator, which simply averages the token-level probabilities of the models $\mathcal{M}$ during generation:  
+
+$$
+\widehat{p}_{\Theta}^{(\mathrm{tok})}(y_{t}\mid\mathbf{y}_{<t},\mathbf{x})=\frac{1}{|\mathcal{M}|}\sum_{\theta\in\mathcal{M}}p_{\theta}(y_{t}\mid\mathbf{y}_{<t},\mathbf{x}).
+$$  
+
+n,  saan mMplBinRg  etshtei mhaytpoort lhieksee ts hsee to $\mathcal{H}_{\Theta}$ nf rEoqm.  (t5h)i sc dains tbrieb uustieodn t, oi .ien.,c soarpmoprlaitneg  weeaicghh tt-ouknecne artcacionrtdyi:3ng to $\widehat{p}_{\Theta}^{\mathrm{(tok)}}$  
+
+$$
+\widehat{\mathbf{y}}^{\Theta}=\arg\operatorname*{max}_{\mathbf{y}^{\prime}\in\mathcal{H}\Theta}\sum_{\mathbf{y}\in\mathcal{H}\Theta}u(\mathbf{y},\mathbf{y}^{\prime}).
+$$  
+
+There are several intuitive reasons why this should improve decoding. Perhaps the foremost is that probabilities obtained from model averaging are often better-calibrated than those of a single model (Yang et al., 2024; Shen et al., 2024, inter alia). Connected to this, since predictive uncertainty has been shown to correlate with hallucinations (Xiao & Wang, 2021), one hope would be that incorporating weight uncertainty through averaging output probabilities of multiple models would downweigh potentially hallucinated outputs.  
+
+Computational Costs. Token-level posteriors only require $|\mathcal{H}|^{2}$ -many MBR comparisons when the hypothesis set size is equal to $|{\mathcal{H}}|$ . Sequence-level combination requires $|\bar{\mathcal{M}}|\cdot|\mathcal{H}|^{2}$ -many comparisons for Eq. (10) or even $(|\dot{\mathcal{M}}|\cdot|\mathcal{H}|)^{\dot{2}}$ -many comparisons for Eq. (9) if all hypothesis sets have the same size. However, fitting all models for token-level combination on one GPU can be hard and communication overhead is high when distributing them across GPUs. Further, token-level posteriors can not be used with black-box APIs that do not provide token-level probabilities.  
+
+
+
+\section{3.4 SELECTIVE PREDICTION WITH BAYES’ RISK  }
+
+
+For some inputs, for example, grammatically-incorrect strings, even a good model may not provide good predictions. Then, it can be wise to abstain from answering and, e.g., defer to a human expert instead. Selective prediction tackles this by abstaining for inputs (or outputs) that score highly in some criterion $s:\mathcal{V}^{*}\to\mathbb{R}$ that assigns a score for a given input $\mathbf{x}$ . (Geifman & El-Yaniv, 2017; Ren et al., 2023; Kuhn et al., 2023). In practice, given $\alpha>0$ and a test dataset $\mathcal{D}_{\mathrm{test}}$ , we only evaluate the model’s answers for the top- $\lceil\alpha\cdot\rceil\bar{\mathcal{D}}_{\mathrm{test}}|\rceil$ examples according to $s$ . If $s$ is reliable, performance should improve as $\alpha$ decreases and we evaluate a smaller and smaller subset of outputs.  
+
+Expected utility promises to be a good criterion: if we expect low utility, we should abstain from answering; if we expect high utility, we can place more trust in the model’s answer. We compare different methods for using expected utility as the selective prediction criterion. We first consider the maximum-utility output in $\mathcal{H}_{\Theta}$ or $\mathcal{H}_{\mathcal{M}}$ for Eq. (13) and Eq. (10), i.e:3  
+
+$$
+s_{\mathrm{tok}}^{*}(\mathbf{x})=\operatorname*{max}_{\mathbf{y}^{\prime}\in\mathcal{H}_{\Theta}}\sum_{\mathbf{y}\in\mathcal{H}_{\Theta}}u(\mathbf{y},\mathbf{y}^{\prime})\qquad s_{\mathrm{seq}}^{*}(\mathbf{x})=\operatorname*{max}_{\mathbf{y}^{\prime}\in\mathcal{H}_{M}}\sum_{\theta\in\mathcal{M}}\sum_{\mathbf{y}\in\mathcal{H}_{\theta}}u(\mathbf{y},\mathbf{y}^{\prime}).
+$$  
+
+Note that we can easily define a similar risk for Eq. (9) by replacing $\mathcal{H}_{\Theta}$ with $\mathcal{H}_{\mathcal{M}}$ in the definition of $s_{\mathrm{tok}}^{*}(\mathbf{x})$ . Another strategy is to use the expected utility across outputs for the given input. We can do this by averaging the utility of all outputs in the hypothesis set $\mathcal{H}_{\Theta}$ or $\mathcal{H}_{\mathcal{M}}$ .  
+
+$$
+\bar{s}_{\mathrm{tok}}(\mathbf x)=\sum_{\mathbf y^{\prime}\in\mathcal H\Leftrightarrow\mathbf{\Psi}}\sum_{\mathbf y\in\mathcal H\Leftrightarrow\mathbf{\Psi}}u(\mathbf y,\mathbf y^{\prime})\qquad\bar{s}_{\mathrm{seq}}(\mathbf x)=\sum_{\mathbf{\Psi}\in\mathcal M}\sum_{\mathbf y^{\prime}\in\mathcal H_{\theta}}\sum_{\mathbf y\in\mathcal H_{\theta}}u(\mathbf y,\mathbf y^{\prime}).
+$$  
+
+
+
+\section{4 EXPERIMENTS & RESULTS  }
+
+
+Here, we demonstrate empirically that incorporating weight uncertainty can improve decoding. First, we provide brief experimental details and discuss how we learn weight uncertainty in $\S4.1$ . More details about our experiments are found in App. A. Then, we show results using prompted, finetuned and from-scratch-trained models in $\S4.2$ , where we explore different posteriors and model combination methods. $\S4.3$ looks into the trade-off between performance and ensemble diversity and $\S4.4$ Bayes’ risk for selective prediction. Finally, we show the scaling behavior of various methods in $\S4.5$  
+
+4.1 EXPERIMENTAL DETAILS  
+
+Datasets. We use WMT14 (Bojar et al., 2014), IWSLT14 (Cettolo et al., 2014), afroMT (Reid et al., 2021), IWSLT17 (Cettolo et al., 2017), WMT18 (Bojar et al., 2018), and WMT19 (Barrault et al., 2019) for machine translation, XSUM (Narayan et al., 2018) and SAMSum (Gliwa et al., 2019) for summarization, E2E-NLG (Novikova et al., 2017) for data-to-text generation, and STS-B (Cer et al., 2017) for scoring. For the latter, the model outputs a string representation of its numerical prediction and MBR corresponds to an empirical mean of the numerical predictions (Lukasik et al., 2024).  
+
+Models. We zero-shot prompt Llama-3 8B (Dubey et al., 2024), Mistral 7B (Jiang et al., 2023), Gemma-2 9B (Gemma Team, 2024a), and Qwen-2 7B (Yang et al., 2024). We finetune Gemma-2Bit (Gemma Team, 2024b) using LoRA (Hu et al., 2022) with ca. 0.9M trainable parameters. For training from scratch, we use the Transformerbig architecture with ca. 261M parameters for WMT14 and Transformer $\mathtt{b a s e}$ with 86M-126M parameters otherwise, following Vaswani et al. (2017).  
+
+Metrics. For machine translation, we use the SacreBLEU implementation (Post, 2018) of BLEU (Papineni et al., 2002), chrF (Popovi´c, 2015), the quality estimator $\mathrm{COMET_{22}}$ (Rei et al., 2022), and LaBSE (Feng et al., 2022) to evaluate hallucinations which has shown strong correlation with human judgements (Dale et al., 2023; Himmi et al., 2024). For Summarization and data-to-text generation we use ROUGE (Lin, 2004) and regression is evaluated using root mean-squared error (RMSE). We use FactCC for hallucination evaluation on XSUM (Kryscinski et al., 2020). For the utility function $u$ we use BERTScore (Zhang et al., 2020), except for IWSLT14 and afroMT, where we use BLEU.  
+
+Learning weight uncertainty. We use the variational learning algorithm IVON (Shen et al., 2024) to estimate a posterior distribution over model weights. It is also possible to use other Bayesian Deep Learning methods, such as, Laplace (Daxberger et al., 2021) or SWAG (Maddox et al., 2019). IVON learns a unimodal Gaussian posterior $q(\pmb{\theta}):=\mathcal{N}(\pmb{\theta}\mid\mathbf{m},\pmb{\Sigma})$ with mean m and covariance matrix $\Sigma$ . Setting model parameters equal to the mean of this distribution ${(\bf m)}$ is similar to standard neural network training but $\Sigma$ also provides an estimate of its stability. To be precise, for each parameter $m_{i}$ the variance $\Sigma_{i i}$ indicates how much this parameter can be changed without significant performance degradation. Each training run has only negligible overhead compared to AdamW (Loshchilov & Hutter, 2019) and gives comparable performance. We also use multiple models obtained from IVON training runs to form a Deep Ensemble (Lakshminarayanan et al., 2017) in order to study multimodal posteriors. This can be seen as constructing a mixture-of-Gaussian posterior with equal mixture component weights but incurs training overhead. Unless otherwise stated, we use four models in total for MBR, i.e. $|\mathcal{M}|=4$ . For deep ensembles, we use the mean of each training run and for the unimodal method using IVON we use four samples from the posterior. For smaller models we train all parameters but for larger models we only train newly-inserted LoRA parameters. By denoting these with $\pmb{\theta}^{\prime}\in\mathbb{R}^{e}$ , IVON then learns a distribution $q(\pmb{\theta}^{\prime}):=\mathcal{N}(\pmb{\theta}^{\prime}\mid\bar{\mathbf{m}^{\prime}},\pmb{\Sigma}^{\prime})$ while the original pretrained model parameters $\pmb{\theta}$ are deterministic and stay fixed.  
+
+
+
+\section{4.2 WEIGHT UNCERTAINTY & DECODING  }
+
+
+Weight uncertainty improves decoding. Tab. 1 and Tab. 2 show results using finetuned Gemma2B and Transformer models that were pretrained from scratch, respectively, on various language generation and scoring benchmarks. Results on two low-resource tasks from afroMT are found in App. B.1. For a fair comparison, we match the number of MBR comparisons, i.e. evaluations of the utility function $u$ for the estimator, with the single-model MBR baseline, as described in App. A.4.  
+
+![](images/ac7c2acb4cb825f9366bfbd090154999ad5331ed685eb54588d671d91f2e5d0d.jpg)  
+Table 1: Sequence-level model combination to account for weight-uncertainty can improve the performance of a finetuned Gemma-2B model on various language generation and scoring tasks. Even simple posteriors that do not incur overhead during finetuning can give “for-free” improvements (unimodal). The number of total MBR comparisons is the same for all methods and each dataset. MBR $@$ mean denotes decoding with a single model that is the mean of a variational distribution.  
+
+![](images/a3e5b1e3ff2ea020d1e9d1e57477d9473c326eca7c562a7bac1e6a66b86b44d2.jpg)  
+
+Table 2: Weight uncertainty improves decoding for models trained from scratch when using ancestral sampling and beam search. More complex posteriors (Deep Ensemble) provide better improvements. Results for Transformerbig on WMT14 and Transformerbase on IWSLT17. Effective beam size equals the number of beams per model times the number of ensembled models (we use four models).  
+
+We find in Tab. 1 and Tab. 2 that weight uncertainty improves performance across all benchmarks, even with matched compute budgets. In particular, when using Eq. (9) with unimodal posteriors both training time and time needed for decoding are the same as for the single-model MBR baseline. We ensure that the time needed for decoding is the same by using only as many MBR comparisons as MBR $@$ mean for our methods and always using the same or smaller effective beam size, which is measured by the number of beams per model times the number of models. Not only do results improve when using word-overlap metrics like BLEU, but also when using quality estimation (COMET) and hallucination metrics (LaBSE). Notably, on IWSLT17 all improvements observed in COMET score when using uncertainty-aware vs. standard MBR indicate there is $a>\!85\%$ chance that humans would distinguish the former system as better—as per the results of Kocmi et al. (2024). Improvements also hold for the STS-B sentence similarity scoring task. The estimators of Eq. (9) and Eq. (10) perform similarly even though Eq. (9) uses a smaller hypothesis set size than Eq. (10).  
+
+Comparison of uni- and multimodal posteriors. Next, we compare unimodal posteriors that can be learned without overhead during training to multimodal posteriors based on Deep Ensembles. Such posteriors incur significant overhead during training, because one separate training run with different initialization and data order is required per ensemble member, but can incorporate knowledge from different loss basins—a characteristic that has proven to be beneficial (Lion et al., 2023).  
+
+When training from scratch (Tab. 2), unimodal posteriors do not consistently outperform the single model baseline when compute budgets are equivalent. In contrast, multimodal Deep Ensemble posteriors can deliver significant improvements. On the other hand, when finetuning (Tab. 1), unimodal posteriors can provide strong improvements, performing on par with Deep Ensembles. We hypothesize that this difference can be attributed to the use of LoRA for finetuning—which explores a smaller subspace of potential posterior parameters and may therefore pose a comparably easier learning problem than estimating the variance of a posterior over all parameters. Further, finetuning  
+
+![](images/bfe59988c553bdf83175256ffd1078b188c1d93d1b7e061c1db750cc542d1b1f.jpg)  
+
+Table 3: The sequence-level model combinations from Eq. (9) and Eq. (10) are also useful for ensembling zero-shot prompted LLMs. Eq. (9) performs better but requires more computation.  
+
+![](images/245ea85694b5ce467c31c6753cbafb5d48ce739f01d21ed4e722f275ec2ff6ed.jpg)  
+Figure 1: Our methods are more successful when the ensembled models are diverse. We compare a unimodal to mixture-based posteriors using Snapshot Ensembles and Deep Ensembles. Sampling from a unimodal posterior with higher temperature can increase diversity and improve performance (in blue). Left: token-level combination on IWSLT14 using beam search and Transformer $\mathrm{base}$ . Right: sequence-level combination (Eq. (10)) on IWSLT17 using ancestral sampling and Gemma-2B.  
+
+may not work that well for Deep Ensembles due to the models still landing in the same basin (Frankle et al., 2020). We connect our findings to prediction diversity in $\S4.3$ .  
+
+Comparison of sequence- and token-level posteriors. Here, we compare the use of sequenceand token-level posteriors (Eqs. (9), (10) and (13)) in MBR. Tab. 2 shows that improvements over the baseline with token-level combination are much stronger when using beam search instead of ancestral sampling to create hypothesis sets6. When using a mixture-based posterior, performance is improved in both settings. Sequence-level combination, on the other hand, provides similar improvements for both settings, with Eq. (9) providing similar results to token-level aggregation. Hence, the preferred method may also depend on the decoding algorithm used to create the hypothesis set.  
+
+Ensembling zero-shot models. Tab. 3 shows results obtained when ensembling the outputs of various zero-shot prompted LLMs on IWSLT17 De-En with a hypothesis set size of 10. We compare the estimator using an additive union of hypothesis sets (Eq. (9)) to using a soft model average (Eq. (10)) and the average single model performance. Both estimators are effective for ensembling but Eq. (9) performs best, albeit with the highest computational complexity. Details are in App. A.3.  
+
+4.3 CORRELATION OF QUALITY AND DIVERSITY  
+
+Next, we show that the performance of MBR with weight-uncertainty is correlated with the prediction diversity of ensembled models, potentially, due to incorporating knowledge from multiple loss basins. This is in line with prior works on ensembling which have found that diversity is important for good performance (Fort et al., 2019; Masegosa, 2020) but can form a trade-off with individual model performance (Abe et al., 2022; Wood et al., 2023).  
+
+We empirically validate this in Fig. 1, where we plot BLEU and COMET on IWSLT14 and IWSLT17 against the prediction diversity. We measure diversity as 100 minus average self-BLEU; self-BLEU scores are measured on the set of greedy decoding outputs of each ensemble member, similar to Shen et al. (2019). For finetuning, the models from the unimodal posterior are more diverse than when pretraining. The plot shows a clear correlation between both metrics. We ask two questions: 1) can  
+
+0.2 0.4 0.6 0.2 0.4 0.6 0.8 0.2 0.4 0.4   
+1 −α 1 −α 1 −α 1 −α   
+(a) Total vs. sample utility(b) Unimodal, Beam Search (c) Beam Search (d) Sampling Figure 2: Total risk and best-output-risk are useful for selective prediction. (a) Creating hypothesis sets with sampling performs better than beam search. (b) Increasing temperature when sampling from unimodal posteriors improves selective prediction. (c) When using beam search more Deep Ensembles work best. (d) For sampling, all methods work well. Results on IWSLT14 with Transformerbase. diversity be promoted in unimodal pretrained posteriors to improve performance and 2) can we find a method with the same pretraining overhead as a unimodal posterior but more expressiveness? For the first, note that the variance of the IVON posterior is $\sigma^{2}\,=\,1/\lambda(\mathbf{h}+\delta)$ , where $\mathbf{h}$ is the expected Hessian of the loss, $\delta$ is weight-decay and $\lambda$ the effective sample size which can be seen as an (inverse) temperature parameter. We decrease $\lambda$ gradually, which samples models from the posterior with higher temperature. This improves diversity and can improve performance. For the latter, we use a mixture-of-Gaussian consisting of checkpoints from one training run, denoted by “snapshot” (Huang et al., 2017). This comes at no training time increase but can improve performance by incorporating knowledge from different regions along the optimization trajectory.   
+4.4 SELECTIVE PREDICTION WITH BAYES’ RISK   
+Here, we explore the use of expected Bayes’ risk for selective prediction on IWSLT14. We observe that both the maximum output utility and the expected output utility (i.e., average expected utility across outputs) can be used effectively for selective prediction. Our results are summarized in Fig. 2. First, we find in Fig. 2 (a) that using the average expected utility for selective prediction performs slightly better than using the best-expected-output utility. This is especially true when creating hypothesis sets with beam search, which performs much worse than ancestral sampling. Next, we again sample from the unimodal posterior with different temperatures (via decreasing $\lambda$ ). We find that this improves selective prediction with MBR when using beam search (Fig. 2 (b)).   
+Finally, we evaluate the influence of the posterior approximation. First, we find that a hypothesis set built with ancestral sampling is reliable independent of the used posterior. Even the single model baseline works well but is outperformed by using an ensemble and more expressive posteriors give bigger improvements. For beam search, the baseline completely fails and token-level combination can be unreliable. Sequence-level combination (Eq. (10)) performs much better, especially with more expressive multimodal posteriors. These results are shown in Fig. 2 (c, d).   
+4.5 SCALING BEHAVIOR   
+Lastly, we examine the scaling behavior of token- and sequence-level combination (Eq. (10)) with different posteriors. Results are summarized in Fig. 3. First, we show scaling the ensemble size in Fig. 3 (a) for ancestral sampling and beam search (b). Using beam search, both token- (in blue) and sequence-level (in black) combination using unimodal posteriors provide no improvements. For ancestral sampling, we find improvements with a unimodal posterior, especially at larger ensemble sizes of 32 models, but sequence-level combination of a unimodal posterior only improves until 4 models. In all other settings, scaling the ensemble size is usually beneficial.   
+When scaling hypothesis sets with beam search, the improvements are small, likely because the hypothesis sets lack diversity. Ancestral sampling shows a different picture and we obtain strong  
+
+![](images/1f2c3d78f7628c8aa1b731576f6cae6a7bfbb12fa03317a8cc684ec81030642d.jpg)  
+Figure 3: Scaling behavior on IWSLT14 with Transformerbase in terms of ensemble (a, b) and hypothesis set size (c, d). (a, b) For a unimodal posterior $(\boxed{\varDelta})$ , larger ensembles improve token-level combination using sampling but not beam search. For Deep Ensemble posteriors (◦), larger ensembles generally improve performance. (c, d) Sequence-level combination (Eq. (10)) performs better for smaller beam sizes but is outperformed by token-level combination at larger ones. Scaling the hypothesis set produces stronger improvements for ancestral sampling than beam search.  
+
+improvements when scaling hypothesis sets. For small hypothesis sets it is better to use sequence-level ensembling but for larger sizes token-level combination can be better.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+In this work, we explore the effects of using a Minimum Bayes’ Risk approach to account for weight uncertainty in language model decoding. We investigate different methods, combining predictions from multiple models during generation or afterwards, ensembling their individual hypothesis sets. We benchmark the methods on different language generation and scoring tasks for prompted, finetuned, and from-scratch trained models and show that weight uncertainty can effectively improve decoding. We evaluate the effects of using different posterior distributions. More complex distributions can sometimes provide stronger performance improvements but also simple methods without overhead can improve performance. Perhaps related, prediction diversity is important for both standard MBR and when using its expected utility for selective prediction. Overall, we find that the uncertainty-aware variant of MBR proposed in this paper leads to better and more robust language generation.  
+
+
+

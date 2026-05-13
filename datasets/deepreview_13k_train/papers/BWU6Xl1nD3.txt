@@ -1,0 +1,319 @@
+\title{UniG: Modelling Unitary 3D Gaussians for View-consistent 3D Reconstruction}
+
+\begin{abstract}
+
+In this work, we present UniG, a view-consistent 3D reconstruction and novel view synthesis model that generates a high-fidelity representation of 3D Gaussians from sparse images. 
+Existing 3D Gaussians-based methods usually regress Gaussians per-pixel of each view, create 3D Gaussians per view separately, and merge them through point concatenation. Such a view-independent reconstruction approach often results in a view inconsistency issue, 
+where the predicted positions of the same 3D point from different views may have discrepancies.
+To address this problem, we develop a DETR (DEtection TRansformer)-like framework, which treats 3D Gaussians as decoder queries and updates their parameters layer by layer by performing multi-view cross-attention (MVDFA) over multiple input images. In this way, multiple views naturally contribute to modeling a unitary representation of 3D Gaussians, thereby making 3D reconstruction more view-consistent. 
+Moreover, as the number of 3D Gaussians used as decoder queries is irrespective of the number of input views, allow an arbitrary number of input images without causing memory explosion.
+Extensive experiments validate the advantages of our approach, showcasing superior performance over existing methods quantitatively (improving PSNR by 4.2 dB when trained on Objaverse and tested on the GSO benchmark) and qualitatively.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+3D object reconstruction and novel view synthesis (NVS) are pivotal in computer vision and graphics, converting 2D images into detailed 3D structures in various applications such as robotics, augmented reality, virtual reality, medical imaging, archaeology, and more. Neural Radiance Fields (NeRF) attempts \citep{instantmesh, nerf, IBRNet, MVSNeRF, pixelnerf, liu2024comprehensive, xiong2024mvhumannet} are notable in 3D fields recently. However, their progress is impeded by slow rendering speeds due to the implicit. Recently, as a semi-implicit representation, 3D Gaussian Splatting (3D GS) \citep{3d-gs} has achieved remarkable optimization speed and high-quality novel view rendering performance in representing objects or scenes.
+
+However, many recent 3D Gaussian Splatting (3D GS) techniques encounter the challenge of view inconsistency. For instance, MVGamba \citep{mvgamba} treats images and Gaussians as sequences in Mamba \citep{mamba, mamba2} while suffers from input view order induced view inconsistency. Other attempts like Splatter Image \citep{SplatterImage} and LGM \citep{LGM} predict the Gaussians for pixels in each input view within the view-specific camera space. These Gaussians are then converted to world space and combined to form the ultimate 3D Gaussians, as depicted in Figure~\ref{fig: teaser}(a). 
+However, the independent imprecise dimension lifting from 2D to 3D in different views may result in a single object point being represented by multiple non-overlapping Gaussians, leading to the view-inconsistency issue \citep{consistent, view_con1}.
+
+To address this issue, we propose a \textbf{Uni}tary 3D \textbf{G}aussians (UniG) representation. Inspired by DIG3D \citep{wu2024dig3d} and TAPTR \citep{taptr}, which utilize Deformable DETR \citep{detr-matching, taptr, dino, dab-detr, dfa3d} in single view reconstruction and point tracing tasks, we develop a DETR-like Transformer encoder-decoder framework, which treats 3D Gaussians as decoder queries and updates their parameters layer by layer by performing cross-attention over multiple input views. Specifically, each 3D Gaussian is regarded as a query, consisting of a content part and a positional part (the center of 3D Gaussian), and undergoes iterative refinement through Transformer decoder layers. The ultimate 3D Gaussian parameters can then be regressed from these refined queries. 
+To work over multi-view input, we propose a multi-view deformable attention (MVDFA) operation, where each 3D point fetches related information from multi-view 2D images simultaneously, effectively guaranteeing the consistency. More specifically, MVDFA utilize camera modulation techniques \citep{stylegan, openlrm} to diversify queries based on views. The view-specific queries are then used for performing deformable attention over corresponding images. Although similar to DFA3D \citep{dfa3d} and BEVFormer \citep{bevformer}  in employing deformable attention in 3D with a point projection strategy, our model prioritizes multi-view distinctions to achieve a more precise 3D representation. Further elaboration is available in Section~\ref{sec: 3d dfa}.
+
+As the number of 3D Gaussians is usually very large, e.g. over 10,000, the self-attention operation in a deformable Transformer decoder layer will demand a significant memory and computational cost. To improve the efficiency, inspired by \citep{pvt}, we introduce a 3D Spatial Efficient Self-Attention (SESA) approach, leveraging Fast Point Sampling (FPS) \citep{pointnet} to downsize the number of keys and values while preserving the number of queries.
+  %\jm{In our approach, we employ unitary 3D Gaussians to ensure view consistency and focus on regressing central Gaussians rather than depth.} 
+To address this problem, we utilize a coarse-to-fine framework, where a direct lift from 2D to 3D is employed for every pixel in randomly selected input views at the coarse stage. Then, the 3D Gaussians from this stage serve as the initialization for the deformable Transformer-based refinement network, facilitating meaningful projected positions and aiding in convergence.
+
+In summary, our contributions are as follows:
+\begin{itemize}
+    \item We propose UniG, a novel 3D object reconstruction and NVS algorithm which utilizes a unitary set of 3D Gaussians as queries in deformable Transformer. Such an approach allows all input views to contribute to the same 3D representation and effectively addresses the view inconsistency issue and supports arbitrary number of input views.
+    \item We propose to use MVDFA for tackling the multi-view fusion challenge, SESA for minimizing the memory usage in self-attention, and a coarse-to-fine framework for mitigating the convergence issue when directly regressing world coordinates of 3D Gaussians.
+    \item Both quantitative and qualitative experiments are conducted for evaluation. Our proposed method achieves the state-of-the-art performance on the commonly-used benchmark.
+\end{itemize}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\textwidth]{Figs/teaser.pdf}
+    \caption{(a) Previous methods such as LGM \citep{LGM} directly concatenate Gaussians from different views, leading to view inconsistency. (b) Our method employs a unitary set of 3D Gaussians, projecting them onto each view and integrating information across views for Gaussian updates. (c) Our approach significantly surpasses previous methods in the novel view synthesis task.}
+    \label{fig: teaser}
+\end{figure}
+
+
+\section{Related Work}
+
+
+
+\paragraph{3D reconstruction from images}
+Recently, various methods have been explored to reconstruct detailed 3D object from limited viewpoints. 
+\citep{LGM, one2345, openlrm, dreamgaussian, ddim} view the problem as an image-conditioned generation task. Leveraging pretrained generative models like \cite{stablediffusion}, they achieve realistic renderings of novel views. However, maintaining view consistency in the generated images is challenging and diffusion models require longer time to generate a single image with denoising process, thus limiting their applicability in real-time scenarios. Moreover, the fusion of information from multiple images remains a non-trivial challenge. Neural Radiance Field (NeRF) \citep{nerf} has gained prominence as a widely used 3D representation \citep{pixelnerf, FWD, FE-NVS, visionnerf}. Techniques such as InstantMesh \citep{instantmesh}, which combine triplane and NeRF for 3D reconstruction, have demonstrated promising results. 
+\citep{pixelnerf, IBRNet, MVSNeRF} extract pixel-aligned feature embeddings from multiple views and merge them using MLPs. 
+However, due to its slow rendering speed, NeRF is being supplanted by a new, super-fast, semi-implicit representation—3D Gaussian Splatting (3D GS) \citep{3d-gs}. SplatterImage \citep{SplatterImage}, LGM \citep{LGM} based on 3D Gaussian Splatting, typically handle each input view independently and naively concatenate the resulting 3D Gaussian assets from each view. This method suffers from a lack of information exchange among different views, resulting in inefficient utilization of 3D Gaussians and being view inconsistency. Furthermore, these methods are unable to accommodate an arbitrary number of views as input.
+
+\paragraph{Deformable Transformer in 3D} \label{sec: 3d dfa}
+DFA3D \citep{dfa3d} and BEVFormer \citep{bevformer} are introduced to address the feature-lifting challenge in 3D detection and autonomous driving tasks. They achieve notable performance enhancements by employing a deformable Transformer to bridge the gap between 2D and 3D. DFA3D initially uses estimated depth to convert 2D feature maps to 3D, sampling around reference points for deformable attention in each view. However, the 3D sampling point design causes all projected 2D points to represent a singular point, neglecting view variations. BEVFormer \citep{bevformer} regards the Bird's-Eye-View (BEV) features as queries, projecting the feature onto each input view. The Spatial Cross-Attention facilitates the fusion of BEV and image spaces, though challenges persist sampling 4 height values per pillar in the BEV feature for selecting 3D reference points may limit coverage, posing challenges in accurate keypoint selection for the model. When contrasting DFA3D and BEVFormer with our MVDFA, a commonality lies in projecting onto 3D regression targets to extract data from various image perspectives. However, our model diverges by employing camera modulation to differentiate queries across views, enabling more specific information retrieval. 
+
+
+
+\section{Methods}
+
+
+
+\subsection{Prelimenaries of 3D GS} \label{sec: 3d-gs}
+
+3D GS \citep{3d-gs} is a novel rendering method that can be viewed as an extension of point-based rendering methods \citep{3d-gs, 3d_gs_survey}. Hence, 3D Gaussians can serve as effective 3D representations for efficient differentiable rendering.
+In total, each 3D Gaussian ellipsoid can be described by $\mathbf{G} = \{\mathrm{SH}, \boldsymbol{\mu}, \boldsymbol{\sigma}, \mathbf{R}, \mathbf{S}\}$.
+The color of 3D Gaussians is represented by spherical harmonics (SH $\in \mathbb{R}^{12}$) while the geometry is described by the center positions $\boldsymbol{\mu} \in \mathbb{R}^3$, shapes (covariance matrix $\boldsymbol{\Sigma}$), and opacity ($\boldsymbol{\sigma} \in \mathbb{R}$) of ellipsoids \citep{EWASplatting, 3d-gs}. Especially, the covariance matrix can be optimized through a combination of rotation and scaling for each ellipsoid as $\boldsymbol{\Sigma} = \mathbf{R}\mathbf{S}\mathbf{S}^T\mathbf{R}^T$, where $\mathbf{R} \in \mathbb{R}^4$ (represented by quaternion) represents the rotation and $\mathbf{S} \in \mathbb{R}^3$ contains the scales in three directions. 
+\subsection{Our method} \label{sec: our model}
+\paragraph{Overall framework}
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\textwidth]{overview.pdf}
+    \caption{Overall Framework: In the coarse stage, 3D Gaussians are produced for each pixel of the sampled random views from the input data. In the refinement stage, 3D Gaussians from the coarse stage serves as the initialization for the refinement network. Multi-view features extracted by the feature extractor serves as keys and values of decoder. Queries are updated by the decoder layer with image features and the positions of the centers of 3D Gaussians. The final 3D Gaussian representation is regressed from the queries. MVDFA: multi-view deformable attention in Section~\ref{sec: decoder}. SESA: spatial efficient self-attention in Section~\ref{sec: space_efficient_self_attn}. FFN: feed-forward network.}
+    \label{fig: overview}
+\end{figure}
+As illustrated in Figure~\ref{fig: overview}, our model follows an encoder-decoder framework in a coarse-to-fine manner. We employ unitary 3D Gaussians representation, irrespective of the number of input views.
+During the coarse stage, one or more images are randomly selected as input for a simple encoder-only model to directly predict 3D Gaussians, supervised by a RGB loss. Subsequently, in the refinement network, all input images undergo processing through an image encoder and a cross-view attention module to extract multi-view image features (Section~\ref{sec: encoder}).
+
+Each 3D Gaussian is then projected onto each view to query relevant features and update their respective parameters by query refinement decoder with multi-view deformable attention (MVDFA)(Section~\ref{sec: decoder}). Spatially efficient self-attention is utilized to reduce computational and memory costs, enabling the utilization of more 3D Gaussians for object reconstruction (Section~\ref{sec: space_efficient_self_attn}). Moreover, the coarse-to-fine design aims to ensure that the initial positions of the center of 3D Gaussians are not too distant from the ground truth or outside the field of view to gurantee the training convergence (Section~\ref{sec: coarse-to-fine}). The training objective is detailed in Section~\ref{sec: loss}.
+
+\subsubsection{Feature extractor} \label{sec: encoder}
+To extract image features from multi-view input, we utilize UNet \citep{unet, songunet}, a widely employed feature extractor in 3D reconstruction tasks, as demonstrated in \cite{LGM, SplatterImage}. To enhance the network's understanding of the complete 3D object, multi-view cross-attention is employed to transfer information among views right after the UNet block, activated when the number of input views exceeds one. In this configuration, each input view acts as queries, while the concatenation (post-flattening) of the remaining views serves as keys and values.
+To efficiently enable cross-attention across all views, we employ shifted-window attention, as introduced in the Swin Transformer \citep{swinT}. This mechanism reduces interactions by focusing on tokens within a local window, effectively reducing memory usage for large input sequences. By processing tokens within a fixed window, shifted-window attention effectively lowers the computational complexity, thereby enhancing the overall efficiency.
+
+\subsubsection{View-aware query refinement decoder} \label{sec: decoder}
+\paragraph{Decoder structure}
+
+In the decoder module, we employ a fixed number of queries $\mathbf{Q} \in \mathbb{R}^{N \times C}$ with $N$ and $C$ denote the number of Gaussians and the hidden dimension to model 3D Gaussians by associating queries with 3D Gaussian ellipsoid parameters $\boldsymbol{G}$, including the center $\boldsymbol{\mu}$, opacity $\boldsymbol{\sigma}$, rotation $\mathbf{R}$, scaling $\mathbf{S}$, and Spherical Harmonics $\mathbf{SH}$. 
+As depicted in Figure~\ref{fig: overview}, the queries navigate through multiple decoder layers, each including a multi-view deformable attention (MVDFA) (Section~\ref{sec: mvdfa}) mechanism to leverage image features, a spatial efficient self-attention (SESA) (Section~\ref{sec: space_efficient_self_attn}) layer for inter-Gaussian interactions, and a feed-forward network (FFN). The functionality of a decoder layer can be summarized by Equation~\ref{eq: decoder_layer}, where $\mathbf{F}$ represents image features from different views and $\mathbf{P}^l$ signifies reference points in the $l$-th layer.
+\begin{equation} \label{eq: decoder_layer}
+    \mathbf{Q}^{l+1} = \mathrm{FFN}(\mathrm{SESA}(\mathrm{MVDFA}(\mathbf{Q}^{l}, \mathbf{P}^l, \mathbf{F}))
+\end{equation}
+Finally, queries are processed through a splatter head $\mathcal{S}$ to compute $\Delta \mathbf{G} = \mathcal{S}(\mathbf{Q})$ for updating the 3D Gaussian parameters: $\mathbf{G}' = \mathbf{G} + \Delta \mathbf{G}$ (except for rotation, which is updated by multiplication).
+Here, all views contribute to unitary 3D Gaussians, emphasizing the most relevant features. This strategy effectively alleviates the view inconsistency issue and is computationally more efficient.
+
+\paragraph{Multi-view deformable attention (MVDFA)} \label{sec: mvdfa}
+The goal of MVDFA is to enhance the unified queries and Gaussian representations by integrating multi-view image features. 
+Following original design of DFA, trainable sampling points are employed on the image features to sample the most relevant image features as values \citep{detr0, DETR}. 
+The remaining problem lies in determining the sampling points and attention scores. Specifically, we project the 3D queries onto each image view and adjust it using camera modulation to account for view discrepancies. The sampling offsets and attention scores are subsequently obtained from the view-specific queries.
+
+By leveraging the center $\boldsymbol{\mu}$ of each 3D Gaussian from the previous layer, along with the corresponding camera poses $\pi_i$ and intrinsic parameters $K_i$ for the $i$-th image, we can compute UV coordinates $\mathbf{P}_i$ by projecting the center coordinates of each 3D Gaussian onto the image plane of the $i$-th input image using the pinhole camera model \citep{pinhole1, pinhole2}: $\mathbf{P}_i = K_i\pi_i\boldsymbol{\mu}$. In this context, both matrices $K_i$ and $\pi_i$ are expressed in homogeneous form. These UV coordinates in $\mathbf{P}_i$ then function as the reference points for 2D deformable attention. 
+
+As depicted Figure~\ref{fig: mvdfa} (a), in 3D, we have a set of queries associated with 3D Gaussian paremeters $\mathbf{G}$ while the queries for each image planes should to be adjusted to suit each view individually. To tackle this issue, we start by using camera modulation with the adaptive layer norm (adaLN) \citep{openlrm, stylegan, stylegan1, stylegan2} to generate view-specific queries. More information on this modulation is provided in Figure~\ref{fig: mvdfa}(b). Subsequently, a linear layer to predicts the sampling offsets $\Delta\mathbf{s}$ for retriving images features as values and another linear layer to predicts the attention scores $\boldsymbol{\alpha}$ of the sampling points $\mathbf{s}$. Following \citep{dino, DETR}, we compute attention scores directly from queries, omitting keys to streamline calculations.
+Then, we apply the grid sampling algorithm with bilinear interpolation to extract image features at these sampling points, which act as the values $\mathbf{v}$ for cross attention.
+
+
+    
+    
+    
+    
+    
+    
+    
+\begin{figure}
+\centering
+\begin{subfigure}[b]{0.45\textwidth}
+    \includegraphics[width=\textwidth]{Figs/multi_view_detail.pdf}
+    \caption{MVDFA on the $n$-th 3D Gaussian}
+    
+\end{subfigure}
+\hfill 
+\begin{subfigure}[b]{0.5\textwidth}
+\begin{lstlisting}[mathescape=true, basicstyle=\ttfamily\tiny]
+def MVDFA($\mathbf{F}$, $K$, $\pi$, $\mathbf{Q}$, $\boldsymbol{\mu}$):
+    # Prepare camera embedding
+    camera=concat($K$, $\pi$).flatten() #[B, I, 16]
+    cam_embed=MLP(camera) #[B, I, C]
+    # Modulate query by cameras, [B, I, N, C]
+    shift, scale=MLP(cam_embed).chunk(2)  
+    $\mathbf{q}$=LayerNorm($\mathbf{Q}$)*(1+scale)+shift #[B, I, N, C]
+    $\boldsymbol{\alpha}$=softmax(Linear($\mathbf{q}$)) #Attn score [B, I, N, Ns]
+    # Sampling points
+    $\Delta \mathbf{s}$=Linear($\mathbf{q}$) #[B, I, N, Ns, 2]
+    $\mathbf{P}$=pinhole_proj(camera, $\boldsymbol{\mu}$) #[B, I, N, 1, 2]
+    $\mathbf{s}$=$\mathbf{P}$+$\Delta \mathbf{s}$ #[B, I, N, Ns, 2]
+    # Weighted sum of view-specific queries
+    $\mathbf{V}$=Linear($\mathbf{F}$) # [B, I, H*W, C]
+    $\mathbf{v}$=grid_sample($\mathbf{V}$, $\mathbf{s}$)  #[B, I, Ns, C]
+    $\mathbf{q'}$=($\boldsymbol{\alpha} \cdot \mathbf{v}$).sum(-1) #[B, I, N, C]
+    $w$=sigmoid(Linear($\mathbf{q'}$)) #[B, I, C]
+    $\mathbf{Q'}$=($w \cdot \mathbf{q'}$).sum(-2) #[B, N, C]
+    return $\mathbf{Q^{'}}$ #[B, N, C]
+
+\end{lstlisting}
+\caption{Pseudo code}
+\end{subfigure}
+
+\caption{MVDFA: $\mathbf{Q}_n$ denotes the $n$-th unitary queries while $\textbf{q}_{ni}$ denotes the $n$-th query on the $i$-th view modulated by the $i$-th camera $\mathbf{Cam}_i$. Linear layers are used on $\textbf{q}_{ni}$ to compute the sampling offsets $\Delta\mathbf{s}_{ni}$ and attention score $\boldsymbol{\alpha}_{ni}$. The $n$-th 3D Gaussian is projected onto images, and surrounding sampling points $\mathbf{s}_{ni} = \mathbf{P}_{ni} + \Delta\mathbf{s}_{ni}$ are sampled using offsets $\Delta\mathbf{s}_{ni}$. Values $\mathbf{v}_{ni}$ are image features sampled at $\mathbf{s}_{ni}$. The final query is calculated by the weighted sum of updated view-specific queries $\textbf{q}'_{ni}$, where $w_i$ is the weight calculated by a linear layer on $\textbf{q}'_{ni}$. $B$ is batch size, $I$ is the number of views, $C$ is the hidden dimension, $N$ is the number of Gaussians, $\textit{pinhole\_proj}$ is the projection from 3D to 2D with the pinhole model. $\mathbf{F}$ is the image feature with height $H$ and weight $W$. $K$ and $\pi$ are camera intrinsics and extrinsics, respectively.} 
+\label{fig: mvdfa}
+\end{figure}
+
+Finally, for each input view, we compute the updated queries for each view using the attention scores $\boldsymbol{\alpha}$ and sampled values $\mathbf{v}$. The ultimate unitary queries are then computed as a weighted sum of individual view queries, with the weights calculated using an linear layer on the view-specific queries. Detailed pseudo code for our multi-view deformable cross-attention is available in Figure~\ref{fig: mvdfa}(b).
+
+\subsubsection{Spatial efficient self-attention (SESA)} \label{sec: space_efficient_self_attn}
+
+Our multi-view deformable cross-attention mechanism demonstrates a superior efficiency in terms of computational cost and memory usage. However, self-attention is computationally expensive, especially with numerous 3D Gaussians. Updating each Gaussian with information from all others may not always be essential, as neighboring Gaussians often contain similar information. To tackle this problem, drawing inspiration from \cite{pvt}, we introduce a method to reduce the number of keys and values while keeping the number of queries unchanged during self-attention. This selective update strategy enables each query to be updated with a subset of related queries, effectively enhancing the information exchange efficiency. To ensure crucial information flow, we leverage the Fast Point Sampling (FPS) algorithm from point cloud methodologies \citep{pointnet, pointnet++}. By utilizing Gaussian centers $\boldsymbol{\mu}$ to identify distant points for querying, we optimize memory usage while guaranteeing essential information sharing among Gaussians.
+
+\subsubsection{Coarse-to-fine model} \label{sec: coarse-to-fine}
+
+\paragraph{Locating Gaussian centers in the world space} In \cite{SplatterImage}, the Gaussian centers are located in each input view's camera space, i.e. $\boldsymbol{\mu}_{\text{cam}}=[x_{\text{cam}},y_{\text{cam}},z_{\text{cam}}]=[u_1d+\Delta_{x},u_2d+\Delta_{y},d+\Delta_{z}]$,
+where the center coordinates $x_{\text{cam}}, y_{\text{cam}}, z_{\text{cam}}$ are parameterized by the depth $d$ and offset values $(\Delta_{x}, \Delta_{y}, \Delta_{z})$. The depth $d$ represents the length of a ray originating from the camera center. $u_1, u_2$ are the UV coordinates of the ray passing through the corresponding input image. This design represents each point with multiple Gaussians, potentially introducing view inconsistency due to concatenation issues at various points caused by depth inaccuracies and tend to shortcut input views \citep{wu2024dig3d}. In our framework, we define unitary Gaussians in the world space, project their centers to each input view for feature retrieval, as depicted in Figure~\ref{fig: mvdfa}(a). The centers of Gaussians can be written as $\boldsymbol{\mu}_{\text{world}}=[x_{\text{world}}, y_{\text{world}}, z_{\text{world}}]$. However, during the initial training phases, discrepancies between the 3D Gaussian centers and ground truth often result in imprecise selection of image features at sampling points, presenting challenges for model convergence.
+
+\paragraph{Coarse-to-fine} To address this issue, we utilize a coarse network that directly regress 3D Gaussian parameters with one or more randomly selected input images as input. The role of this network is to provide a coarse initialization of 3D Gaussians for the subsequent refinement network.
+We use the UNet architecture as the feature extractor to train the coarse network. Subsequently, we use this trained parameters to initialize the refinement stage and independently train the refinement network.
+\subsubsection{Training objective} \label{sec: loss}
+Building upon prior 3D Gaussian-based reconstruction approaches, we leverage the differentiable rendering implementation by \cite{3d-gs} to generate RGB images from the 3D Gaussians produced by our model. For each object, we render 4 input views and 8 additional views (12 views in total) for supervision. Furthermore, aligning with the methodologies (\citep{openlrm, LGM}), we employ a RGB loss in Equation~\ref{eq: loss}, which consists of both a mean square error loss $\mathcal{L}_{\text{MSE}}$ and a VGG-based LPIPS (Learned Perceptual Image Patch Similarity) loss \citep{LIPIS} $\mathcal{L}_{\text{LPIPS}}$ to guide the rendered views. Here $I_{pd}$ represents the rendered views supervised by the ground truth images $I_{gt}$.
+\begin{equation} \label{eq: loss}
+    \mathcal{L} = \mathcal{L}_{\text{MSE}}(I_{pd}, I_{gt}) + \lambda\mathcal{L}_{\text{LPIPS}}(I_{pd}, I_{gt})
+\end{equation}
+
+
+
+
+\section{Experiments}
+
+This section delves into experiment details and outcomes. In Section \ref{sec: dataset}, we give dataset specifics, evaluation metrics, and implementation details. Section \ref{sec: quan_res} delves into quantitative and qualitative results for sparse view novel view synthesis, along with the visualization of 3D Gaussian centers as a point cloud. Section \ref{sec: speed} provides a comparative analysis of processing speeds and memory costs. Section \ref{sec: ablation} presents an ablation study.
+Lastly, The versatility of our model extends to tasks such as image-to-3D and text-to-3D generation using a diffusion model, detailed in Section \ref{sec: gen_application}. 
+
+\subsection{Dataset and experiment settings}
+\paragraph{Dataset} \label{sec: dataset}
+We utilized a refined subset of the Objaverse LVIS dataset \citep{objaverse} for training and validation, excluding low-quality models, comprising 36,044 high-quality objects. The training data incorporated two sets of rendering images: one sourced from Zero-1-to-3 \citep{zero123}, where each object featured around 12 random views and corresponding camera poses—while a subset of views was randomly selected as input, all 12 views were used for supervision. The second set involved input rendering images with fixed views (front, right, and more), with supervision drawn from 32 random views at elevations ranging from -30 to 30 degrees. The resolution of the rendered images was downscaled to $128 \times 128$.
+
+To evaluate our model, we conducted tests on the Google Scanned Objects (GSO) benchmark. Two test sets were utilized: one with fixed-view inputs (e.g., front, left, back, right) at 0 degrees elevation, tested on 32 random views with elevations ranging from 0 to 30 degrees, and the other set using rendered images from Free3D \citep{free3d}, which includes 25 random views with corresponding camera poses. Importantly, there are no constraints on the elevation of the rendered views. We refer to these test sets as GSO-random and GSO-fixed in our subsequent analysis.
+
+\paragraph{Evaluation metric} \label{sec: metric}
+We compute the peak signal-to-noise ratio (PSNR), structural similarity index (SSIM) \citep{ssim}, and perceptual distance (LPIPS) \citep{lpips} between the rendered images and the ground truth. These metrics provide quantitative insights into the accuracy and similarity of the synthesized views compared to the originals. Additionally, we offer visual representations of both the rendered images and the 3D Gaussian centers as a point cloud, offering an intuitive illustration of the synthesis outcomes and the model's underlying mechanisms.
+
+\subsection{Comparison with state-of-the-art methods} \label{sec: quan_res}
+\subsubsection{Fixed view input}
+We evaluated recent multi-view reconstruction models using 4 views as input. Splatter Image \citep{SplatterImage} were trained with their native data loaders, adjusting inputs to 4 views and supervision to 12. LGM and InstantMesh were evaluated using the provided checkpoints, with ``Small" indicating models tailored to 128 resolution and ``Large" to 256 resolution. All models were assessed assuming the same number of training views. 
+
+Table~\ref{tab: 4_fix_view_results} showcases the performance of these methods in novel view synthesis using 4 fixed views (front, back, right, left) on the GSO-fixed dataset. Our model surpassed previous approaches in PSNR, SSIM, and LPIPS for novel view synthesis, with a significant improvement of approximately 4.2 dB in PSNR.
+
+\begin{table}[htp]
+  \caption{Quantitative results for inputting 4 views on GSO-fixed dataset. *The results of MV-Gamba are cited from the paper as they do not provide code or a test set.}
+  \label{tab: 4_fix_view_results}
+  \centering
+  \begin{tabular}{llll}
+    \toprule
+       Method & PSNR $\uparrow$     & SSIM $\uparrow$ & LPIPS $\downarrow$ \\
+    \midrule
+    Splatter Image \citep{SplatterImage} & 25.6241 & 0.9151 & 0.1517  \\
+    LGM (Small) \citep{LGM} & 17.4810 & 0.7829 & 0.2180   \\
+    LGM (Large) \citep{LGM}  & 26.2487 & 0.9249 & 0.0541 \\
+    InstantMesh \citep{instantmesh} & 23.0177 & 0.8893 & 0.0886 \\
+    MV-Gamba* \citep{mvgamba}  &  26.2500  & 0.8810 & 0.0690  \\
+    \midrule
+    Our Model & \textbf{30.4245} & \textbf{0.9614} & \textbf{0.0422}  \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+ In our experiments, using a resolution of 128, the LGM model corresponds to the small version. Observations in the figures reveal view inconsistency in LGM and a lack of details in InstantMesh, whereas our model maintains both details and view consistency. 
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=0.9\textwidth]{Figs/fixed_gso.pdf}
+    \caption{Novel views on GSO-fixed dataset for inputting 4 views with resolution 128.}
+    \label{fig: fixed_vis_128}
+\end{figure}
+
+
+\subsubsection{Random view input}
+Previous methods usually rely on fixed views as input, as they align well with views generated from diffusion models like ImageDream \citep{imagedream}. In real-world scenarios, users are more inclined to provide random views as input. Table~\ref{tab: 4_random_view_results} displays the results when utilizing random 4 views as input on the GSO-random dataset. Notably, there is a performance drop observed in LGM and InstantMesh with random input views.
+
+\begin{table}[htp]
+  \caption{Quantitative results for inputting 4 views on GSO-random dataset.}
+  \label{tab: 4_random_view_results}
+  \centering
+  \begin{tabular}{llll}
+    \toprule
+       Method & PSNR $\uparrow$     & SSIM $\uparrow$ & LPIPS $\downarrow$ \\
+    \midrule
+    Splatter Image \citep{SplatterImage} & 25.7660 & 0.8932 & 0.2575 \\
+    LGM \citep{LGM}  & 15.1113 &  0.8440 &  0.1592 \\
+    InstantMesh \citep{instantmesh} & 17.3073 & 0.8525 & 0.1376 \\ 
+    \midrule
+    Our Model & \textbf{26.3020} & \textbf{0.9255} & \textbf{0.0836}  \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsubsection{Inference on arbitrary number of views}
+
+Training costs for 3D methods are considerable, often requiring 32 NVIDIA A100 (80G) GPUs over multiple days. Additionally, memory costs for previous methods increase linearly with the number of views, presenting challenges for training models with varying input views. Therefore, a model supporting inference with any number of inputs while being trained on a fixed set, such as 4 views, would provide significant advantages.
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \centering
+    \includegraphics[width=0.49\textwidth]{random_view_result.pdf}
+    \caption{Quantitative results with random number of views as input. The model is trained with 4 random input views and tested with variate number of views.}
+    \label{fig: random_view_results}
+\end{wrapfigure}
+
+Our model retains unitary 3D Gaussians in world coordinates, treating views as complementary sources without compromising overall 3D integrity. This enables adaptability to variable view counts during inference, despite training on a fixed number of views. Figure~\ref{fig: random_view_results} showcases the results of training the model with 4 random views and testing it with different number of views.
+
+While other methods demonstrate satisfactory performance with 4 views during inference, their effectiveness diminishes as the view count deviates from 4. In contrast, our model excels as the number of views increases. It is important to highlight that LGM is not part of this comparison due to its incapacity to handle variations in the number of views between the training and testing phases.
+
+\subsection{Inference time and memory cost} \label{sec: speed}
+
+We performed inference time tests across different model types, including a diffusion-based method (DreamGaussian \citep{dreamgaussian}), a NeRF-based model (InstantMesh \citep{instantmesh}), a previous Gaussian-based model (LGM \citep{LGM}), and our model, as detailed in Table~\ref{tab: speed}. Our model maintains a reduced number of Gaussians and achieves the fastest rendering speed.
+
+\begin{table}[htp]
+  \caption{Inference time comparison. 3D: 3D Gaussian reconstruction time, render: rendering time, inference: time for one inference including one forward and 32 rendering. Unit in seconds.}
+  \label{tab: speed}
+  \centering
+  \begin{tabular}{llll}
+    \toprule
+       Method & 3D $\downarrow$     & Render $\downarrow$ & Inference $\downarrow$ \\
+    \midrule
+    DreamGaussian & 118.3245 & 0.0038 & 118.4461 \\
+    InstantMesh & \textbf{0.6049} & 0.6206 & 20.4641\\ 
+    LGM & 1.6263 & 0.0090 & 1.9143 \\
+    \midrule
+    Our Model & 0.6939 & \textbf{0.0019} & \textbf{0.7538}  \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+In contrast to previous methods that compute 3D Gaussians per pixel per input view, our model retains a single 3D Gaussian irrespective of the number of views. While conventional methods exhibit linear memory expansion with additional views or higher image resolutions, our approach sustains a consistent memory overhead or experiences slight increments due to the marginally higher cost of the image feature extractor. This design theoretically enables our model to accommodate more input views and higher resolutions for enhanced outcomes, potentially circumventing the out-of-memory limitations encountered by other methods.
+
+\subsection{Ablation studies} \label{sec: ablation}
+\begin{table}[htp]
+  \caption{Ablation study on model design.}
+  \label{tab: ablation_study}
+  \centering
+  \begin{tabular}{llll}
+    \toprule
+    Method & PSNR $\uparrow$     & SSIM $\uparrow$ & LPIPS $\downarrow$ \\
+    \midrule
+    w/o coarse stage (random initialize) & 12.1213 & 0.6531 & 0.6224 \\
+    w/o coarse stage (random initialize in visual cone) & 22.6740 & 0.8711 & 0.2383 \\
+    w/o cross view attention & 25.3923 & 0.9013 & 0.1007  \\
+    coarse stage only (UNet) & 25.6033 & 0.9107 & 0.0930 \\
+    w/o camera modulation on queries & 26.1328 & 0.9201 & 0.0883 \\
+    3D sampling points & 25.8392 & 0.9117 & 0.0945 \\
+    \midrule
+    Full model  & \textbf{26.5334} & \textbf{0.9344} & \textbf{0.0667}  \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+
+ Table~\ref{tab: ablation_study} illustrates an ablation study that evaluates different components of the model architecture. All the experiments are evaluated on the Objaverse validation dataset. Removing the coarse stage and initializing randomly (without any constraint) results in the lowest performance. This problem arises from utilizing image features around the projected 3D Gaussian center within each image view, potentially causing zero features and steep gradients when projections extend beyond the image plane. When the coarse stage is randomly initialized within the visual cone, performance improves. To provide a more meaningful initialization, we incorporate a coarse stage to acquire the approximate Gaussian locations, followed by a refinement stage. This refined initialization empowers our model to achieve superior performance. Moreover, removing cross-view attention leads to a moderate decrease in performance compared to the full model. Using only the coarse stage (UNet-based) slightly underperforms the full model. Furthermore, removing the camera modulation on queries or use 3D sampling points instead of sampling on each view adversely impacts the results, underscoring the critical significance of this view-specific design. The full model achieves the best performance across all metrics, indicating that each component contributes positively to the overall model effectiveness.
+\subsection{Applications in 3D generation} \label{sec: gen_application}
+\textbf{Image-to-3D} conversion represents a fundamental application in 3D generation. Following the methodology of LGM and InstantMesh \citep{LGM, instantmesh}, we initially leverage a multi-view diffusion model, ImageDream \citep{imagedream}, to generate four predetermined views. Subsequently, our model is utilized for 3D Gaussian reconstruction.
+Our model can also do the \textbf{Text-to-3D} task. To evaluate quality, we utilize MVDream \citep{mvdream} to generate a single image from a text prompt. Subsequently, a diffusion model is employed to produce multi-view images, which are then processed by our model to derive a 3D representation.
+
+
+\section{Conclusion and Limitation}
+
+In this paper, we have introduced a novel sparse view 3D reconstruction and novel view synthesis method. Initially, a fixed number of 3D Gaussians with predefined properties are initialized, and each Gaussian ellipsoid is projected onto input image features extracted by a feature extractor. We propose the MVDFA block to integrate image features surrounding the projected 3D Gaussians from each view to refine the 3D Gaussians, employing a coarse-to-fine strategy to ensure robust model convergence. Additionally, we develop a spatially efficient self-attention mechanism to minimize computational costs, tackling view inconsistency and computational inefficiency.
+Our model accommodates an arbitrary number of views as input and showcases its effectiveness through quantitative and qualitative experiments compared to state-of-the-art methods trained on Objaverse and tested on the GSO dataset. Furthermore, with the aid of an off-the-shelf diffusion model, our model undertakes generation tasks such as image-to-3D and text-to-3D conversions. We present an ablation study elucidating the significance of each model component.
+While our model signifies a notable advancement in sparse view 3D reconstruction, there are inherent \textbf{limitations}. Presently, user-provided rough camera parameters are necessary for projecting 3D Gaussians onto images, presenting potential challenges. Addressing this issue stands as a focal point for future research.
+\newpage
+
+
+
+
+
+

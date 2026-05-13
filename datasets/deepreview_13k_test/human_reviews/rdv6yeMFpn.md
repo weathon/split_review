@@ -1,7 +1,7 @@
 # Homomorphism Expressivity of Spectral Invariant Graph Neural Networks
 
 - Decision: Accept
-- Scores: 8, 6, 8, 6, 1, 0
+- Scores: 8, 6, 8, 6, 10
 
 ## Abstract
 Graph spectra are an important class of structural features on graphs that have shown promising results in enhancing Graph Neural Networks (GNNs). Despite their widespread practical use, the theoretical understanding of the power of spectral invariants --- particularly their contribution to GNNs --- remains incomplete. In this paper, we address this fundamental question through the lens of homomorphism expressivity, providing a comprehensive and quantitative analysis of the expressive power of spectral invariants. Specifically, we prove that spectral invariant GNNs can homomorphism-count exactly a class of specific tree-like graphs which we refer to as \emph{parallel trees}. We highlight the significance of this result in various contexts, including establishing a quantitative expressiveness hierarchy across different architectural variants, offering insights into the impact of GNN depth, and understanding the subgraph counting capabilities of spectral invariant GNNs. In particular, our results significantly extend \citet{arvind2024hierarchy} and settle their open questions. Finally, we generalize our analysis to higher-order GNNs and answer an open question raised by \citet{zhang2024expressive}.

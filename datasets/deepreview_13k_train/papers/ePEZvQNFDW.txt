@@ -1,0 +1,365 @@
+\title{Continuous Ensemble Weather Forecasting with Diffusion models}
+
+\begin{abstract}
+Weather forecasting has seen a shift in methods from numerical simulations to data-driven systems. While initial research in the area focused on deterministic forecasting, recent works have used diffusion models to produce skillful ensemble forecasts. These models are trained on a single forecasting step and rolled out autoregressively. However, they are computationally expensive and accumulate errors for high temporal resolution due to the many rollout steps. We address these limitations with Continuous Ensemble Forecasting, a novel and flexible method for sampling ensemble forecasts in diffusion models. The method can generate temporally consistent ensemble trajectories completely in parallel, with no autoregressive steps. Continuous Ensemble Forecasting can also be combined with autoregressive rollouts to yield forecasts at an arbitrary fine temporal resolution without sacrificing accuracy. We demonstrate that the method achieves competitive results for global weather forecasting with good probabilistic properties.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Forecasting of physical systems over both space and time is a crucial problem with plenty of real-world applications, including in the earth sciences, transportation, and energy systems.
+A prime example of this is weather forecasting, which billions of people depend on daily to plan their activities.
+Weather forecasting is also crucial for making informed decisions in areas such as agriculture, renewable energy production, and safeguarding communities against extreme weather events.
+Current \gls{NWP} systems predict the weather using complex physical models and large supercomputers \citep{bauer_quiet_2015}. 
+Recently \gls{MLWP} models have emerged, rivaling the performance of existing \gls{NWP} systems. 
+These models are not physics-based but data-driven and have been made possible thanks to advancements in deep learning. 
+By analyzing patterns from vast amounts of meteorological data \citep{hersbach_era5_2020}, \gls{MLWP} models now predict the weather with the same accuracy as global operational \gls{NWP} models in a fraction of the time \citep{kurth_fourcastnet_2023, lam_learning_2023, bi_accurate_2023}.
+
+Following the success of deterministic \gls{MLWP} models, the focus of the field has increasingly shifted towards probabilistic modeling. 
+The probabilistic models generate samples of possible future weather trajectories.
+By drawing many such samples, referred to as ensemble members, it is possible to generate an ensemble forecast for quantifying forecast uncertainty and detecting extreme events \citep{leutbecher_ensemble_2008}.
+Sampling forecasts from deep generative models also address the blurriness often observed in predictions from deterministic \gls{MLWP}, yielding forecasts that better preserve the variability of the modeled entities. 
+A popular class of deep generative models used for probabilistic \gls{MLWP} are diffusion models \citep{ho_denoising_2020, price_gencast_2024, lang_ensembles_2024, shi_codicast_2024}.
+While these models generate accurate and realistic looking forecasts, they are computationally expensive due to requiring multiple sequential forward passes through the neural network to generate a sample. 
+Moreover, they are often applied iteratively to roll out longer forecasts \citep{price_gencast_2024}, which exacerbates the computational issue.
+Naively switching out this iterative rollout to directly forecasting each future time step does not result in trajectories that are consistent over time. 
+The auto-regressive rollout additionally puts some limitations on the temporal resolution of the forecast.
+Taking too small timesteps results in large accumulation of error over time \citep{bi_accurate_2023}, which forces existing models to resort to a temporal resolution of 12 h \cite{price_gencast_2024, lang_ensembles_2024}.
+However, in many situations it is crucial to obtain probabilistic forecasts at a much higher temporal resolution. This is true not least when the forecasts are used as decision support in extreme weather situations and for capturing rapidly changing weather events.
+We propose a continuous forecasting diffusion model that takes lead time as input and forecasts the future weather state in a single step, while maintaining a temporally consistent trajectory for each ensemble member.\footnote{Our code will be made openly available at publication. To generate ensemble forecasts, the model uses a lead-time-dependent deterministic ODE-solver to solve the probability flow ODE starting in different pure noise samples. To ensure temporal consistency, we correlate the driving noises for the different lead times, e.g., by using a single noise sample for all timesteps, as illustrated in fig.~\ref{fig:cont-ens}, which enables generating a continuous trajectory for each member. This enables parallel sampling of individual ensemble members without the use of any multi-step loss functions, significantly enhancing the efficiency of ensemble forecasting.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[thick,scale=1, every node/.style={transform shape}]
+
+    \draw[->, thick, dotted] (0.1,0) -- (12.5,0) node[anchor=west] {\textsf{Time}};
+    
+    \node[anchor=west, inner sep=0] (initial) at (0,0) {\includegraphics[width=2cm]{images/state-t2m-t0.png}};
+    \node[below=0cm of initial, align=center] {\textsf{Initial condition}};
+    
+    \node[anchor=west, inner sep=0] (ensemble1) at ([xshift= 8cm]initial.east) {\includegraphics[width=2cm]{images/state-t2m-t24.png}};
+    \node[below=0cm of ensemble1, align=center] {\textsf{24 hours}};
+    \draw[->, thick] ([yshift=2mm]initial.east) -- ([xshift=0.02cm, yshift=2mm]ensemble1.west);
+
+    \node[anchor=west, inner sep=0] (ensemble3) at ([xshift=3.5cm]initial.east) {\includegraphics[width=2cm]{images/state-t2m-t6.png}};
+    \draw[->, thick] ([yshift=-2mm]initial.east) -- ([xshift=0.02cm, yshift=-2mm]ensemble3.west);
+    \node[below=0cm of ensemble3, align=center] {\textsf{6 hours}};
+    
+    \node[anchor=west, inner sep=0] (ensemble2) at ([xshift=0.5cm]initial.east) {\includegraphics[width=2cm]{images/state-t2m-t1.png}};
+    \draw[->, thick] ([yshift=-4mm]initial.east) -- ([xshift=0.02cm, yshift=-4mm]ensemble2.west);
+    \node[below=0cm of ensemble2, align=center] {\textsf{1 hour}};
+     
+    \node[anchor=west, inner sep=0] (noise1) at (0cm, 1.9cm) {\includegraphics[width=2cm]{images/state-t2m-noise.png}};
+    \node[below=0cm of noise1, align=center] {\textsf{Fixed noise}};
+    
+    \draw[->, thick] ([xshift=1mm, yshift=1mm]noise1.east) -- ([yshift=2mm]ensemble1.north);
+    \draw[->, thick] ([xshift=1mm, yshift=-1mm]noise1.east) -- ([yshift=2mm]ensemble2.north);
+    \draw[->, thick] ([xshift=1mm]noise1.east) -- ([yshift=2mm]ensemble3.north);
+
+    \node[anchor=west, align=center, fill=white, draw=black] (solver) at (2.5cm, 1.3cm) {\textsf{Deterministic ODE-solver}};
+
+    
+\end{tikzpicture}
+\caption{Diagram of Continuous Ensemble Forecasting.}
+\label{fig:cont-ens}
+\end{figure}
+
+\paragraph{Contributions.}
+
+We propose a novel method for ensemble weather forecasting built on diffusion that: 1) can generate ensemble member trajectories without iteration, 2) can forecast arbitrary lead-times, 3) can be used together with iteration to improve performance on long rollouts, 4) achieves competitive performance in global weather forecasting.
+
+
+
+\section{Related Work}
+
+
+
+\paragraph{Ensembles from perturbations.}
+In \gls{NWP}, ensemble forecasts are created by perturbing initial conditions or model parameterizations. The same idea has been applied in \gls{MLWP} using initial state perturbations \citep{bi_accurate_2023, kurth_fourcastnet_2023, chen_fuxi_2023, li_generative_2024}, model parameter perturbations \citep{hu_swinvrnn_2023, weyn_subseasonal_2021} and Monte Carlo dropout \citep{scher_ensemble_2021, hu_swinvrnn_2023}. 
+In all these cases the underlying model is still deterministic, trained with a mean squared error loss function to predict the average future weather.
+These ensembles can thus be viewed as a mixture of means, inheriting the spatial oversmoothing characteristic of deterministic forecasts.
+
+\paragraph{Generative models.}
+Another way of getting ensembles is by modeling the distribution directly through generative models. \citet{price_gencast_2024} train a graph-based diffusion model to produce 15-day global forecasts, at 12-hour steps and 0.25\degree resolution. 
+Their GenCast model generates realistic forecasts but is slow to sample from, requiring sequential forward passes through the network both for sampling each time step and to roll out the forecast over time. %
+Latent-variable-based MLWP models  \citep{hu_swinvrnn_2023, oskarsson_probabilistic_2024, zhong_fuxi-ens_2024} can perform inference in a single forward pass, but have been shown to suffer from more blurriness compared to diffusion models and require delicate hyperparameter tuning \citep{oskarsson_probabilistic_2024}.
+Apart from forecasting, diffusion models have also been successfully applied to other weather-related tasks, including downscaling \citep{chen_swinrdm_2023, mardani_residual_2024, pathak_kilometer-scale_2024}, enlarging physics-based ensembles \citep{li_generative_2024} %
+and generating realistic weather from climate scenarios \citep{bassetti_diffesm_2023}. However, it is important to note that since the output from these generative models does not directly influence the forecasting process, there are no guarantees that the resulting dynamics will remain continuous over time.
+\cite{hua_weather_2024} explore the possibility to incorporate prior information in MLWP diffusion forecasting, by guidance from existing \gls{NWP} forecasts or climatology, but they do not consider ensemble forecasting.
+
+\paragraph{Temporal resolution.}
+Unlike in \gls{NWP}, where stability conditions dictate the time step, MLWP models are free to predict at any temporal resolution. Still, the most common approach is to learn to forecast a single short time-step (6h) and iterate this process until the desired lead time \citep{lam_learning_2023, chen_fuxi_2023}. Although intuitive, this process can lead to error accumulation and is impossible to parallelize due to its sequential nature \citep{bi_accurate_2023}. Multi-step losses have been shown to reduce the error accumulation for deterministic \citep{lam_learning_2023} and latent-variable based models \citep{oskarsson_probabilistic_2024}, but are not trivially implemented in diffusion models. Taking longer timesteps (24h) has been shown to give better results \citep{couairon_archesweather_2024, bi_accurate_2023}, but comes at the loss of temporal resolution. 
+\cite{bi_accurate_2023} resolves this by training multiple models to forecast different lead times, which are then combined in different ways to reach the lead times of interest. 
+\cite{nguyen_climax_2023, nguyen_scaling_2023} use a similar setup, but train a single model taking the forecast lead time as an input.
+This continuous forecasting parallelizes the prediction of the fine temporal scales, but has so far only been applied to deterministic models.  
+Other approaches have tried to learn fully time-continuous dynamics by using an ODE to generate forecasts \citep{verma_climode_2023, saleem_conformer_2024, cachay_dyffusion_2023, kochkov_neural_2024}.
+
+\paragraph{Spatio-temporal forecasting with diffusion models.}
+Outside of MLWP, diffusion models have also been applied to forecasting other spatio-temporal processes \citep{yang_survey_2024}.
+Notable examples include turbulent flow simulation \citep{kohl_benchmarking_2024, cachay_dyffusion_2023} and PDE solving \citep{lippe_pde-refiner_2024}.
+\cite{yang_denoising_2023} apply diffusion models conditioned on the prediction lead time to a specific floating-smoke fluid field, but do not consider ensemble forecasting.
+Another alternative to autoregressive rollouts is the DYfussion framework \citep{cachay_dyffusion_2023}, where stochastic interpolation and deterministic forecasting is combined into a diffusion-like model.
+The method allows for forecasting at arbitrary temporal resolution, but still requires sequential computations for sampling the prediction.
+DYffusion has been successfully applied to climate modeling \citep{cachay_probabilistic_2024}, but not weather forecasting.
+
+
+\section{Background}
+
+
+\paragraph{Problem statement.}
+This paper targets the global weather forecasting problem, an initial-value problem with intrinsic uncertainty. Consider a weather state space $\mathcal{X}$ containing the grid of target variables. Given information about previous weather states $X(\Omega)\subset\mathcal{X}$ at times $\Omega\subset (-\infty,0]$, the aim is to forecast a trajectory $X(\mathcal{T})$ of future weather states $X:(-\infty, \infty)\to\mathcal{X}$ at times $\mathcal{T}\subset (0,T]$ for some time horizon $T$. In particular, the task is to learn and sample from the conditional distribution $p(X(\mathcal{T})| X(\Omega))$. 
+
+\paragraph{Autoregressive forecasting.}
+To simplify the problem, $\mathcal{T}$ is often chosen as a set of discrete equally spaced times $\{k\delta\}_{k=1}^N$ for some timestep $\delta$. By choosing $\Omega = \{-k\delta\}_{k=0}^M$ and assuming $M$th order Markovian dynamics, the joint distribution of $X[k] \eqdef X(k\delta)$ can be factorized over successive states, 
+\begin{align}
+    p(X[1{:}N]|X[-M{:}0]) = \prod_{k=0}^{N-1}p(X[k{+}1]|X[k{-}M{:}k]),
+\end{align}
+and the forecasts can be sampled autoregressively. This way, the network only has to learn to sample a single step $p(X[k{+}1]|X[k{-}M{:}k])$.
+
+\paragraph{Conditional Diffusion Models.}
+Similarly to \citet{price_gencast_2024}, we model  $p(X[k{+}1]|X[k{-}M{:}k])$ using a conditional diffusion model \citep{ho_denoising_2020, song_score-based_2021, karras_elucidating_2022}. Diffusion models generate samples by iteratively transforming noise into data. To forecast a future weather state $X[k{+}1]$ given $X[k{-}M{:}k]$ we sample a latent noise variable $Z\sim  p_{\text{noise}}$ and iteratively transform it until it resembles a sample from  $p(X[k{+}1]|X[k{-}M{:}k])$. We consider the SDE formulation of diffusion models presented by \cite{karras_elucidating_2022}, which separates training and sampling. Sampling can then be done by solving the probability flow ODE
+\begin{equation}
+\label{eq: flow-ode}
+    \text{d}\boldsymbol{z} =  -
+    \sigma
+    S_\theta(\boldsymbol{z};X[k{-}M{:}k],\sigma)
+    \text{d}\sigma
+\end{equation}
+starting in $Z = \boldsymbol{z}(0)\sim p_{\text{noise}}$ and ending in $X[k{+}1]=\boldsymbol{z}(1)$. Here $S_\theta$ is the neural network trained to match the score function $S$ through the denoising training objective as presented by \citet{karras_elucidating_2022}. The noise level $\sigma$ is fed to $S_\theta$ in each layer as a Fourier embedding similar to \citet{karras_elucidating_2022}.
+Repeating this process for different noise samples $\boldsymbol{z}(0)$ gives an ensemble of forecasts. 
+
+
+\section{Continuous Ensemble Forecasting}
+
+
+Iterative forecasting is simple to train but can suffer from error accumulation at long horizons. Consider again the general problem of sampling from $p(X(\mathcal{T})| X(\Omega))$. 
+In continuous forecasting, a single-step prediction is given by conditioning on the lead time $t\in\mathcal{T}$ and training a conditional score network $S_\theta(\boldsymbol{z};X(\Omega), t, \sigma)$ to simulate directly from the marginal distribution $p(X({t})| X(\Omega), t)$.
+This does not require setting a fixed $\delta$, making the setup more flexible. 
+The lead time $t$ is added to the conditioning arguments for clarity and can be passed to the network in the same way as the noise level $\sigma$.
+While this allows sampling a distribution of states $X(t)$ at each time $t\in\mathcal{T}$, combining these naively does not result in a trajectory $X(\mathcal{T})$. This is because $X(t)$ are samples from the marginal distributions $p(X(t)| X(\Omega), t)$ and not the joint trajectory distribution $p(X(\mathcal{T})| X(\Omega))$. 
+We propose \textit{Continuous Ensemble Forecasting}, a novel method of combining samples from $p(X(t)| X(\Omega), t)$ into forecast trajectories $X(\mathcal{T})$ without resorting to autoregressive predictions.
+The core idea in our method is to control the source of randomness. To sample from $p(X(t)| X(\Omega), t)$, we sample some noise $Z\sim p_{\text{noise}}$ and feed it to an ODE-solver that solves the probability flow ODE, giving us a forecast $X(t)$ for lead time $t$. Since the ODE-solver is deterministic, the randomness is limited to the noise initialization $Z$. If we freeze the noise, the ODE-solver becomes a deterministic map $f_{\theta}^{Z}:\mathcal{X}^{|\Omega|}\times\mathcal{T}\to \mathcal{X}$ parameterized by the neural network $S_\theta$. Applying this map to previous states $X(\Omega)$ and a time $t\in\mathcal{T}$ gives a forecast $X(t)$. Repeating this for several $t_1,\dots,t_N\subset\mathcal{T}$ gives a sequence of forecasts $X(\{t_i\}_{i=1}^N)$. Extending this to all $t\in\mathcal{T}$, we can construct a trajectory $X(\mathcal{T})=f_{\theta}^{Z}(X(\Omega), \mathcal{T})$. We treat this as a sample from $p(X(\mathcal{T})| X(\Omega))$ and propose to use Algorithm \ref{alg:cont-ens} to sample such trajectories. 
+\begin{algorithm}
+\setstretch{1.25}
+\caption{The Continuous Ensemble Forecasting algorithm}
+\label{alg:cont-ens}
+\begin{algorithmic}[1]
+    \State \textbf{input:} Initial conditions $x(\Omega)$, times $\{t_i\}_{i=1}^N$, ensemble size $n_\text{ens}$, network $S_\theta$
+    \State \textbf{sample} \(\{z^k\}_{k=1}^{n_\text{ens}} \sim \mathcal{N}(0, \mathbf{I})\) 
+    \ForAll{$i \in \{1, \dots, N\}, k \in \{1, \dots, n_\text{ens}\}$}
+        \Comment{Can be done fully in parallel for all $k$ and $i$}
+        \State $x^k_i \gets \textsc{ode-solver}(z^k, t_i;x(\Omega), S_\theta)$
+    \EndFor
+    \Return $\{x^k_i\}^{k=1:n_\text{ens}}_{i=1:N}$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Mathematical motivation}
+In a deterministic system, the dynamics can be described by a forecasting function $f:\mathcal{X}^{|\Omega|}\times \mathcal{T}\to\mathcal{X}$ that maps previous states $X(\Omega)\in\mathcal{X}^{|\Omega|}$, to future states $X(t)$. While weather is in principle governed by deterministic equations, its chaotic nature, lack of information, and our inability to resolve the dynamics at sufficiently high spatio-temporal resolution gives it an intrinsic uncertainty. This motivates the formulation of weather as a stochastic dynamical system. In such a system, no function can describe the entire dynamics. At each instance, there might be a range of functions $f^1,f^2,\dots$ that all describe some possible evolution, some more likely than others. If we consider the space $\mathcal{F}$ of all such functions, we can formalize this by defining a probability density $\mu$ over this space, describing the likelihood of each function. To create an ensemble of possible functions, we sample several $f^1,\dots,f^N$, from $\mu$. Given previous states $X(\Omega)$, evaluating each function gives an ensemble of possible trajectories $X^i(\mathcal{T}) = f^i(X(\Omega),\mathcal{T})$. 
+
+\begin{wrapfigure}[12]{r}{0.3\textwidth}%
+    \centering
+    \[\begin{tikzcd}
+    	{(\mathcal{X},p_{\text{noise}})} & {(\mathcal{F},\mu)} \\
+    	\\
+    	& {\mathcal{X}}
+    	\arrow[dashed, tail reversed, from=1-1, to=1-2]
+    	\arrow["{Z \mapsto f^Z_\theta(X(\Omega),t)}"{description, pos=0.22}, curve={height=25pt}, from=1-1, to=3-2]
+    	\arrow["{f\mapsto f(X(\Omega),t)}"{description}, from=1-2, to=3-2]
+    \end{tikzcd}\]
+    \caption{Diagram depicting the connection between the latent noise space and the solution space.}
+    \label{fig:diagram}
+\end{wrapfigure}
+
+The key insight in motivating our method is the identification of the latent noise space $(\mathcal{X}, p_{\text{noise}})$ with the solution space $(\mathcal{F}, \mu)$. 
+In our method, the sampling algorithm can be represented by a parameterized function $f_\theta^Z$, where we have frozen the noise $Z\sim p_\text{noise}$. Under some regularity conditions, this function is uniquely defined by $\theta$ and the ODE-solver for any given $Z$. Thus, as illustrated in fig.~\ref{fig:diagram}, our setting mirrors the theoretical setting. 
+Given sufficient data and model capacity, the neural network $S_\theta$ matches the score function $S$. Consequently, the distribution of the functions $f_\theta^Z$ should mirror that of the solutions $f^i$. 
+Since $f^i$ describes a possible evolution of weather, it has to be continuous as a function of time. 
+To ensure that the generated trajectories are also continuous in $t$, regularity conditions need to be imposed on $S_\theta$ to ensure that it depends smoothly on the lead time. While we do not impose any restrictions on the network, we show empirically in sec. \ref{sec:results} that this is satisfied in practice, and leave a formal analysis for future work. %
+\subsection{Autocorrelated noise}
+As mentioned above, under regularity conditions, we expect the solution map $f_\theta^Z(X(\Omega),t)$ to be continuous in $t$. A shortcoming of this approach, however, is that it also constrains the trajectories to be conditionally deterministic, conditionally on the solution $f_\theta^Z(X(\Omega),t^\star)$ at any fixed time point $t^\star \in \mathcal{T}$. Specifically, consider the conditional distribution $p(X(t) \mid X(t^\star), X(\Omega), t)$ for $t, t^\star \in \mathcal{T}$ under the proposed model.
+Conditionally on $X(t^\star) = f_\theta^Z(X(\Omega),t^\star)$ we can, conceptually, invert the ODE which generated $X(t^\star)$ to recover the driving noise $Z$. Now, if $X(t)  = f_\theta^Z(X(\Omega),t)$ is generated using the exact same noise variable, we find that $p(X(t) \mid X(t^\star), X(\Omega), t)$ is a Dirac point mass concentrated at $f_\theta^Z(X(\Omega),t)$. This violates the assumed stochasticity of the dynamical process that we are modelling.
+
+To address this shortcoming, a simple extension of the proposed model is to replace the fixed $Z$ with a stochastic process $Z(\mathcal{T})$ with continuous sample trajectories. The stochastic process is chosen to be stationary with marginal distribution $Z(t) \sim p_\text{noise}, \forall t\in\mathcal{T}$. This ensures that the generative model at any fixed $t$ is probabilistically equivalent with the fixed noise setting. Specifically, no changes to the training algorithm are needed since the training is based solely on time marginals. Allowing temporal stochasticity in the driving noise process results in a non-deterministic relationship between the states at different lead times, while we can keep the temporal consistency by ensuring that the driving process is sufficiently autocorrelated. A simple choice is to select $Z(\mathcal{T})$ %
+as an Ornstein-Uhlenbeck process \citep{gillespie_exact_1996},
+\(
+    dZ(t) = -\rho Z(t)dt + \sqrt{2\rho} dW(t),
+\)
+for some correlation parameter $\rho > 0$ and $W(t)$ being Brownian motion. This is what we use in Algorithm~\ref{alg:ar-noise}. Alternatively, we can use a Gaussian process with stronger smoothness properties, e.g., with a squared exponential kernel. This could prove useful for formally proving time continuity of the resulting trajectories, but we leave such an analysis for future work.
+
+\begin{algorithm}
+\setstretch{1.25}
+\caption{The Extended Continuous Ensemble Forecasting algorithm}
+\label{alg:ar-noise}
+
+\begin{algorithmic}[1]
+\State \textbf{input:} Initial conditions $x(\Omega)$, times $\{t_i\}_{i=1}^N$, ensemble size $n_\text{ens}$, network $S_\theta$, correlation parameter $\rho$
+
+\State \textbf{sample} \(\{z^k_1\}_{k=1}^{n_\text{ens}} \sim \mathcal{N}(0, \mathbf{I})\)
+\For{\(i = 2\) \textbf{to} \(N\)}
+    \State \textbf{sample} \(\{\nu^k_i\}_{k=1}^{n_\text{ens}} \sim \mathcal{N}(0, \mathbf{I})\) 
+    \State
+    \(
+        z_i^k \gets \exp(-\rho(t_i - t_{i-1})) z^k_{i-1}  + \sqrt{1-\exp(-2\rho(t_i - t_{i-1}))} \nu^k_i
+    \)
+
+\EndFor
+\ForAll{$i \in \{1, \dots, N\}, k \in \{1, \dots, n_\text{ens}\}$}
+        \Comment{Can be done fully in parallel for all $k$ and $i$}
+        \State $x^k_i \gets \textsc{ode-solver}(z^k_i, t_i;x(\Omega), S_\theta)$
+    \EndFor
+\Return $\{x^k_i\}^{k=1:n_\text{ens}}_{i=1:N}$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Autoregressive roll-outs with continuous interpolation}
+\label{sec:combined}
+Continuous forecasting is effective for forecasting hours to days but can struggle to forecast longer lead times where the correlation is weaker. Iterative forecasting excels at long lead times when used with longer (24h) timesteps \citep{bi_accurate_2023}, but comes at the loss of temporal resolution. In our framework, it becomes possible to sample both iterative and continuous forecasts with the same model. We propose to leverage this by iterating on a longer timestep and forecasting the intermediate timesteps using Continuous Ensemble Forecasting, as outlined in Alg.~\ref{alg:arci}. We refer to this combined method as Autoregressive Rollouts with Continuous Interpolation (ARCI). Our method limits the error accumulation without sacrificing temporal resolution. This allows for producing forecasts at an arbitrary fine temporal resolution, while retaining the accuracy of the best iterative methods throughout the whole forecast. By limiting the number of iterative steps, more of the forecast also becomes parallelizable, allowing for rapidly generating forecasts on large compute clusters. 
+Furthermore, we can straightforwardly use different time resolutions during different parts of the forecast trajectories, by for instance forecasting with 1h steps for the first few days and then switching to longer time steps for long lead times.
+Note that ARCI can be used with either fixed (with Alg.~\ref{alg:cont-ens}) or stochastic (with Alg.~\ref{alg:ar-noise}) driving noise. However, we emphasize that these two algorithms are probabilistically equivalent for all time marginals, and only differ in the autocorrelation of forecast trajectories.
+\begin{algorithm}
+\setstretch{1.25}
+\caption{ARCI (Autoregressive roll-outs with continuous interpolation)}
+\label{alg:arci}
+
+\begin{algorithmic}[1]
+\State \textbf{input:} Initial conditions $x_{-M:0}$, interpolation times $\{t_i\}_{i=1}^N$, ensemble size $n_\text{ens}$, autoregressive steps $J$, network $S_\theta$
+
+\For{\(j = 0\) \textbf{to} \(J-1\)}
+    \State $\{x^k_{jN+i}\}^{k=1:n_\text{ens}}_{i=1:N}\gets$ \textbf{Alg. \ref{alg:cont-ens}}$(x_{jN{-}M{:}jN}, \{t_i\}_{i=1}^N, n_\text{ens}, S_\theta)$ \Comment{Also possible to use \textbf{Alg. \ref{alg:ar-noise}}}
+
+\EndFor
+\Return $\{x^k_i\}^{k=1:n_\text{ens}}_{i=1:JN}$
+\end{algorithmic}
+\end{algorithm}
+
+
+
+\section{Experiments}
+
+
+\paragraph{Data.}
+\newcommand{\mathttt}[1]{\text{\texttt{#1}}}
+We evaluate our method on global weather forecasting up to 10 days at 1, 6, and 24 hour timesteps.
+We use the downsampled ERA5 reanalysis dataset \citep{hersbach_era5_2020} at 5.625\degree resolution and 1-hour increments provided by WeatherBench  \citep{rasp_weatherbench_2020}. The models are trained to forecast 5 variables from the ERA5 dataset: geopotential at 500hPa (\texttt{z500}), temperature at 850hPa (\texttt{t850}), ground temperature (\texttt{t2m}) and the ground wind components (\texttt{u10, v10}). The atmospheric fields \texttt{z500} and \texttt{t850} offer a comprehensive view of atmospheric dynamics and thermodynamics, while the surface fields \texttt{t2m} and \texttt{u10, v10} are important for day-to-day activities. We also evaluate the forecast of ground wind speed \texttt{ws10}, computed from the model outputs as $\mathttt{ws10}=\sqrt{\mathttt{u10}^2 + \mathttt{v10}^2 }$. This is useful for evaluating how well the methods model cross-variable dependencies. All variables are standardized by subtracting their mean and dividing by their standard deviation. Together with the previous states we also feed the models with static fields. These include the land-sea mask and orography, both rescaled to $[0,1]$. All models are trained on the period 1979--2015, validated on 2016--2017 and tested on 2018. We consider every hour of each year as forecast initialization times, except for the first 24 h and last 10 days in each subset. This guarantees that all times forecasted or conditioned on lie within the specific years.
+
+\paragraph{Metrics.}
+We evaluate the skill of the forecasting models by computing the Root Mean Squared Error (\textbf{RMSE}) of the ensemble mean.
+As a probabilistic metric we also consider Continuous Ranked Probability Score (\textbf{CRPS}) \citep{gneiting_strictly_2007}, which measures how well the the predicted marginal distributions capture the ground truth.
+We also evaluate the Spread/Skill-Ratio (\textbf{SSR}), which is a common measure of calibration for ensemble forecasts.
+For a model with well calibrated uncertainty estimates the SSR should be close to 1 \citep{fortin_why_2014}.
+
+
+\paragraph{Models.}
+We propose to use the ARCI model described in algorithm \ref{alg:arci} referred to as \textbf{ARCI-24/6h}. We train it to forecast $t\in\{6,12,18,24\}$ (hours) and roll it out autoregressively with 24 h steps, hence the name. Training is done on a 40GB NVIDIA A100 GPU and takes roughly 2 days. We emphasize again that the choice of algorithm inside ARCI results in probabilistically equivalent forecasts for all time marginals, and only differ in the autocorrelation of forecast trajectories. Hence, for all metrics below that are computed for specific lead times we only report results for one version of the algorithm. We return to the difference between Alg.~\ref{alg:cont-ens} and Alg.~\ref{alg:ar-noise} when studying the temporal difference below. 
+To evaluate the effectiveness of our approach, we compare it to other MLWP baselines.
+\textbf{Deterministic} is a deterministic model trained using MSE-loss on a single 6 hour time step, and unrolled up to 10 days.
+\textbf{AR-6/24h} is a diffusion model trained only on forecasting a single fixed $\delta$ ahead, and then autoregressively unrolled up to 10 days. This is the forecasting setup of \citep{price_gencast_2024}.
+\hbox{\textbf{CI-6h}} is a diffusion model performing continuous forecasting conditioned on a specific lead time. It is trained on uniformly sampled lead times from $\{k \delta\}_{k=1}^{40}$, with $\delta = \text{6 h}$. This is the method proposed in alg. \ref{alg:cont-ens}.
+Sampling a 10-day forecast with 6h resolution for a single member from AR-6h takes 32 seconds, but by parallelizing the 6h timesteps in ARCI-24/6h this reduces to 8 seconds.
+
+To compare against another family of ensemble forecasting models from the literature we retrain the \textbf{Graph-EFM} model \citep{oskarsson_probabilistic_2024} on our exact data setup.
+Graph-EFM is a graph-based latent-variable model that produces forecasts by 6 h iterative rollout steps.
+For all models, unless otherwise specified, we condition on the two previous timesteps $\Omega=\{0,-\delta\}$ and sample 50 ensemble members at each initialization time.
+
+\subsection{Results}
+\label{sec:results}
+\paragraph{Quantitative results.} 
+Table \ref{tab:results} and figure \ref{fig:scores-main} show metrics for a selection of lead times and variables. All probabilistic models show a clear improvement over the deterministic model. CI-6h performs well on short-term forecasting but struggles at longer horizons. This is likely due to the challenge of learning any useful relationships between initial states and later lead times, which are weakly correlated. ARCI-24+6h outperforms all models at 6h resolution, including the external baseline Graph-EFM, and matches the best overall model AR-24h in almost all scores. All diffusion-based models have SSR $<$ 1, indicating some systematic underdispersion. 
+\begin{table}
+    \centering
+    \caption{Selection of results for 5 and 10 day forecasting of geopotential at 500 hPa (\texttt{z500}) and temperature at 850 hPa (\texttt{t850}). For RMSE and CRPS, lower values are better, and SSR should be close to 1. The best values are marked with \textbf{bold} and second best \underline{underlined}.}
+    \begin{tabular}{llcccccc}
+    \toprule 
+        & & \multicolumn{3}{c}{Lead time 5 days} & \multicolumn{3}{c}{Lead time 10 days} \\
+        \cmidrule(lr){3-5} \cmidrule(lr){6-8}
+Variable        & Model             & RMSE    & CRPS    & SSR & RMSE  & CRPS  & SSR     \\
+\midrule  
+\texttt{z500}   & Deterministic     & 766.7& 483.9& -& 1042& 661.5& -\\
+                & Graph-EFM          & 699.1& 317.5& \textbf{1.13}& 817.1& 373.6& 1.1\\
+                & AR-6h      & 602.3& 287.8& 0.75& 811.8& 391.9& 0.88\\
+                & AR-24h     & \textbf{544.2}& \textbf{242.7}& 0.84& \textbf{750.6}& \textbf{335.2}& \textbf{0.94}\\
+                & CI-6h         & 707.8& 321.2& 0.59& 885.7& 406.6& 0.6\\
+                & ARCI-24/6h  & \underline{560.9}& \underline{256.7}& \underline{0.86}& \underline{765.6}& \underline{355.2}& \underline{0.93}\\
+\midrule  
+\texttt{t850}   & Deterministic     & 3.48& 2.36& -& 4.54& 3.17& -\\ 
+                & Graph-EFM          & 3.12& 1.56& \underline{1.11}& 3.51& 1.77& 1.12\\
+                & AR-6h      & 2.72& 1.34& 0.82& 3.39& 1.69& 0.92\\
+                & AR-24h     & \textbf{2.55}& \textbf{1.24}& \underline{0.89}& \textbf{3.25}& \textbf{1.6}& \textbf{0.96}\\
+                & CI-6h         & 3.06& 1.5& 0.74& 3.68& 1.85& 0.71\\
+                & ARCI-24/6h  & \underline{2.6} & \underline{1.27}& \textbf{0.9}& \underline{3.29}& \underline{1.63}& \underline{0.95}\\
+\bottomrule
+\end{tabular}
+\label{tab:results}
+\end{table}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{images/combined-6h-t850.pdf}
+    \caption{RMSE, CRPS and SSR for temperature at 850 hPa (\texttt{t850}) with a selection of models at 6h resolution.}
+    \label{fig:scores-main}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{images/forecast-t850.png}
+    \caption{Example forecasts for temperature at 850hPa (\texttt{t850}) at lead time 10 days. The forecasts are generated using ARCI-24/6h except for Deterministic which is sampled using the deterministic model. The bottom row shows 4 ensemble members, randomly chosen out of the 50.}
+    \label{fig:forecast-main}
+\end{figure}
+
+
+\paragraph{Qualitative results.} 
+Figure \ref{fig:forecast-main} shows an example forecast from ARCI-24/6h for temperature at 850 hPa (\texttt{t850}) at 10 days lead time.
+The forecasts are rich in detail, resembling the true state more than the ensemble mean. 
+
+\begin{wrapfigure}[16]{r}{0.49\textwidth}%
+        \centering
+        \includegraphics[trim={0 10pt 0 5pt},clip,width=\linewidth]{images/temp-diff-main.pdf}
+    \caption{Temporal difference for temperature on 850 hPa (\texttt{t850}) for different values of $\rho$ in algorithm \ref{alg:ar-noise}. Choosing $\rho=0$ fixes the noise, $\rho=\text{ln}10$ allows it to vary and $\rho\to\infty$ gives completely uncorrelated noise. The black line refers to the temporal difference of the data.}
+    \label{fig:temp-diff-main}
+\end{wrapfigure}
+
+\paragraph{Temporal Difference.}
+Autoregressively sampled forecast trajectories are necessarily continuous. Since there is no standard way of measuring the continuity of a forecast, we propose using the mean temporal difference ${\Delta X = |X(t)-X(t-1)|}$ as a measure of forecast continuity. Figure \ref{fig:temp-diff-main} shows $\Delta X$ for a CI-1h continuous model trained up to 24 hours with 1-hour timesteps. Compared to using different noise at each step ($\rho\to\infty)$, the temporal difference of our model $(\rho=0)$ stays close to the temporal difference of the data. This supports our claim that continuous ensemble forecasting produces continuous trajectories.
+
+Figure \ref{fig:temp-diff-main} also shows the temporal difference of the continuous model above. When the noise is fixed ($\rho=0$) the temporal difference decreases with lead time, corresponding to predictions with smaller temporal variations. Letting the noise vary with noise factor $(\rho=\text{ln}10)$ as in alg. \ref{alg:ar-noise} stops this from happening. The bias between $\Delta X$ of the data and our model is likely due to the model producing slightly blurrier forecasts, making the differences smaller.
+
+\paragraph{Continuous Time Forecasting.}
+Our ARCI method allows for producing forecasts at arbitrary fine temporal resolution while retaining the accuracy of methods taking longer autoregressive steps.
+We here demonstrate this by producing hourly forecasts.
+Figure \ref{fig:scores-1h-main} shows the scores of a selection of models for \texttt{z500} for 10-day forecasts at 1h resolution. The AR-1h model has the same setup as AR-6h but on 1h resolution. ARCI-24/1h and ARCI-24/2h* are both trained with $\Omega = \{0, -24\}$ to have access to the same information at each timestep. The autoregressive \hbox{AR-1h} model performs much worse than on 6 or 24 hours. The continuous model, however, does not lose performance by increasing the temporal resolution, making the 1h timestep forecasts as skillful as the 24 hour ones. 
+An alternative to directly producing forecasts at a fine temporal resolution would be to linearly interpolate the forecasts sampled using an autoregressive model. In fig.
+
+The ARCI-24/2h* model is trained only on lead times 2h apart (lead times in $\{2k\}_{k=1}^{12}$), but used to forecast each 1h timestep. This showcases the ability of the method to generalize to lead times not considered during training. It performs similarly to the ARCI-24/1h model trained on all timesteps, indicating that it can generalize beyond its training setup to even finer resolutions. 
+For other lead-times $t$ not considered during training, the model has trained on forecasting $t-1$ and $t+1$, thus only having to interpolate to $t$. However, since we do not train on forecasting 0h, the model instead has to extrapolate to $t = \text{1h}$ what was learned for 2h forecasts. This issue could possibly be fixed by letting the network also train on 0h forecasts.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{images/combined-1h-z500.pdf}
+    \caption{RMSE, CRPS, and SSR for geopotential at 500 hPa (\texttt{z500}) with a selection of models at 1h resolution.}
+    \label{fig:scores-1h-main}
+\end{figure}
+
+
+\section{Conclusion}
+
+We present Continuous Ensemble Forecasting, a novel framework for probabilistic MLWP that increases the efficiency, accuracy, and flexibility of weather forecasts at high temporal resolution. When combined with autoregressive prediction, our ARCI method produces 10-day forecasts with a 1-hour resolution that matches the accuracy of a purely autoregressive model with 24-hour steps. 
+With this work, we hope to show that the possibilities with generative modeling for spatio-temporal predictions are still largely unexplored and a fruitful area of research. %
+
+
+\paragraph{Limitations.}
+While our proposed framework achieves good results on 5.625\degree Weatherbench \citep{rasp_weatherbench_2020} data, we have yet to show that the method scales to problems with higher spatial resolution. Additionally, as the lead time increases, the correlation between initial and future states becomes weaker, limiting the application of continuous forecasting. While our method parallelizes more of the sampling than previous autoregressive models, solving the probability flow ODE in eq. \ref{eq: flow-ode} still requires many sequential forward passes through the network. Sampling is thus still slower than for latent variable models, but the predicted distribution more accurate.
+Finally, due to computational limitations, we were not able to retrain our models several times and as such do not report error bars in our results.
+
+\paragraph{Future work.}
+One interesting direction for future work is a further investigation of autocorrelated noise, in particular, how the choice of stochastic process can aid in producing continuous trajectories with a stationary temporal difference. 
+This includes correlating the noise in the autoregressive steps with the continuous steps, which could help ease the transition between them.
+Another idea is to take the direction of DYffusion \citep{cachay_dyffusion_2023} and directly adjust the diffusion objective to better suit temporal data.
+While we have demonstrated continuous ensemble forecasting for weather, the idea is generally applicable and it would also be of interest to apply it to other spatio-temporal forecasting problems.
+
+
+
+
+

@@ -1,0 +1,389 @@
+\title{Variational Bayes Gaussian Splatting}
+
+\begin{abstract}
+
+Recently, 3D Gaussian Splatting has emerged as a promising approach for modeling 3D scenes using mixtures of Gaussians. The predominant optimization method for these models relies on backpropagating gradients through a differentiable rendering pipeline, which struggles with catastrophic forgetting when dealing with continuous streams of data. To address this limitation, we propose Variational Bayes Gaussian Splatting (VBGS), a novel approach that frames training a Gaussian splat as variational inference over model parameters. By leveraging the conjugacy properties of multivariate Gaussians, we derive a closed-form variational update rule, allowing efficient updates from partial, sequential observations without the need for replay buffers. Our experiments show that VBGS not only matches state-of-the-art performance on static datasets, but also enables continual learning from sequentially streamed 2D and 3D data, drastically improving performance in this setting.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+    Representing 3D scene information is a long-standing challenge for robotics and computer vision~\citep{sfm_survey}. A recent breakthrough in this domain relies on representing the scene as a radiance field, i.e., using neural radiance fields~\citep{MildenhallNerf}. Recently, Gaussian Splatting~\citep{kerbl3Dgaussians} has demonstrated the effectiveness of mixture models for 3D scene representation, as highlighted by a surge of subsequent research (see \cite{chen2024survey3dgaussiansplatting} for a survey). This approach leverages the ability of Gaussians to represent physical space as a collection of ellipsoids.
+    
+    The dominant method for optimizing these models involves backpropagating gradients through a differentiable renderer with respect to the parameters of the mixture model. However, in many real-world applications, such as autonomous navigation, data is continuously streamed and must be processed sequentially. Traditional backpropagation-based methods are prone to catastrophic forgetting~\citep{french1999catastrophic}, leading to performance degradation as new data overwrites old knowledge. To mitigate this, replay buffers are often employed to retain and retrain on older data~\citep{matsuki2024splatslam}, which can be computationally expensive and memory intensive.
+
+    In this paper, we propose Variational Bayes Gaussian Splatting (VBGS), casting Gaussian Splatting as a variational inference problem over the parameters of a generative mixture model, enabling a closed-form update rule~\citep{blei2016vi}. Our approach inherently supports continual learning through iterative updates that are naturally accumulative, eliminating the need for replay buffers.
+    
+
+    Our contributions are summarized as follows: 
+    \begin{itemize}
+        \item We propose a generative model of mixtures of Gaussians for representing spatial 2D (image) and 3D (point cloud) data and derive closed-form variational Bayes update rules. 
+        \item We show that VBGS achieves a good model fit with a single parameter update step and enables continual learning without catastrophic forgetting.  
+        \item We demonstrate and benchmark our approach on both 2D image (TinyImageNet~\citep{tinyimagenet}) and 3D point cloud (Blender 3D models~\citep{MildenhallNerf} and Habitat scenes~\citep{Habitat}) datasets. 
+    \end{itemize}
+
+    Our approach offers a robust alternative to gradient-based optimization by allowing continual, efficient updates from sequential data, making it well-suited for real-world applications.
+    
+
+
+\section{Related Work}
+
+
+    
+    \textbf{3D Gaussian Splatting (3DGS)}: Recently, 3DGS~\citep{kerbl3Dgaussians} introduced a novel approach for learning the structure of the world directly from image data by representing the radiance field as a mixture of Gaussians. This method optimizes the parameters of the Gaussian mixture model by backpropagating gradients through a differentiable rendering pipeline. The Gaussians serve as ellipsoid shape primitives for scene reconstruction, with each component associated with deterministic, learned features such as opacity and color. This approach has triggered significant advances in novel view synthesis and sparked interest in many applications across robotics, virtual/augmented reality, and interactive media~\citep{Fei_2024, chen2024survey3dgaussiansplatting}.
+
+    While our method also represents scenes as a mixture of Gaussians, it diverges from 3DGS by modeling a distribution over all features and parameters. Rather than relying on gradient-based optimization through differentiable rendering, we frame the learning process as variational inference. This approach allows us to perform continual learning through closed-form updates, enabling more efficient and robust handling of sequential data.
+
+    \textbf{Image representations}: Gaussian mixture models have also been used for representing image data, particularly for data efficiency and compression~\citep{VerhackSteered}. Steered Mixture-of-Experts (SMoE) models, for instance, typically estimate parameters using the Expectation-Maximization (EM) algorithm, although some work has explored gradient descent optimization~\citep{SMoE_gradient}.
+    
+    Our approach can be seen as an SMoE model on 2D image data, but again, instead of relying on EM or gradient descent, we propose variational Bayes parameter updates for more robust and efficient parameter estimation.
+   
+    \textbf{Continual learning} aims to develop models that can adapt to new tasks from a continuous datastream without forgetting previously learned knowledge~\citep{Wang_continual}. Backpropagation-based methods, such as 3DGS, face significant challenges in this area due to catastrophic forgetting~\citep{french1999catastrophic}, where the model's performance on prior data deteriorates as it trains on new. This issue is particularly evident in real-world scenarios, such as localization and mapping, where data is streamed~\citep{matsuki2024splatslam, keetha2024splatam}. The common mitigation strategy involves maintaining a replay buffer of frames to revisit past data during updates~\citep{sucar2021imap,Fu_2024_CVPR}.
+
+    In contrast, Bayesian approaches offer a more elegant solution for online learning, especially when dealing with conjugate models, allowing for exact Bayesian inference in a sequential setting~\citep{jones2024bayesian}. We leverage this property to update Gaussian splats continuously as new data arrives, eliminating the need for replay buffers.
+
+    
+
+
+\section{Method}
+
+
+    VBGS relies on the conjugate properties of exponential family distributions. This is well suited for variational inference, as we can derive closed-form update rules for inferring the (approximate) posterior. We first write down the functional form of these distributions and then describe the particular generative model for representing space and color. 
+    
+    If the likelihood distribution is part of the exponential family, it can be written down as:
+    \begin{align}
+        p(\vec{x}|\vec{\theta}) = \phi(\vec{x}) \exp\big( \vec{\theta} \cdot T(\vec{x}) - A( \vec{\theta} )\big), 
+    \end{align}
+    where $\vec{\theta}$ are the natural parameters of the distribution, $T(\vec{x})$ is the sufficient statistic, $A(\vec{\theta})$ is the log partition function, and $\phi(\vec{x})$ is the measure function. This likelihood has a conjugate prior of the following form: 
+    \begin{align}
+            p(\vec{\theta}|\vec{\eta}_0,\nu_0) = \frac{1}{Z(\vec{\eta}_0,\nu_0)} \exp\left(\vec{\eta}_0 \cdot \vec{\theta} - \nu_0 \cdot A(\vec{\theta})\right), 
+    \end{align}
+    where $Z(\vec{\eta}_0,\nu_0)$ is the normalizing term. This distribution is parameterized by its natural parameters  $(\vec{\eta}_0, \nu_0)$. The posterior is then of the same functional form as the prior, whose natural parameters can be calculated as a function of the sufficient statistics of the data and the natural parameters of the prior, i.e. $(\vec{\eta}_0 + \sum_{\vec{x}} T(\vec{x}), \nu_0 + \sum_{\vec{x}} 1)$~\citep{murphy2013machine}.
+
+\subsection{The generative model}
+
+    \begin{figure}[!t]
+        \centering
+        \begin{tikzpicture}[square/.style={regular polygon,regular polygon sides=4}]
+        
+        \node[obs] (s) {$\vec{s}$};
+        \node[latent, draw=none] (h) [right=of s] {};
+        \node[obs, right=of h] (c) {$\vec{c}$};
+        
+        \node[latent, above=of h] (z) {$z$};
+        
+        \node[latent, draw=none, above=of z] (h2) {};
+        \node[latent, left=of h2] (sigma_2) {$\Sigma_{\vec{s},k}$};
+        \node[latent, left=of sigma_2] (mu_2) {$\mu_{\vec{s},k}$};
+        \node[latent, right=of h2] (mu_1) {$\mu_{\vec{c},k}$};
+        \node[latent, right=of mu_1] (sigma_1) {$\Sigma_{\vec{c},k}$};
+        
+        \node[latent, below=of mu_2] (pi) {$\pi$};
+        
+        \plate[inner sep=.1cm] {p1} {(s)(c)(z)} {$N$};
+        \plate[inner sep=.1cm] {p2} {(mu_1)(sigma_1)(mu_2)(sigma_2)}{$K$};
+        
+        \edge{z, mu_2, sigma_2} {s};
+        \edge{z, mu_1, sigma_1} {c};
+        
+        \edge{pi} {z};
+        \end{tikzpicture} 
+        \caption{\textbf{The Generative Model}: There are $K$ components in the mixture model, and $N$ observed data points, which are composed of a spatial vector $\vec{s}$, and feature vector $\vec{c}$. The parameters of the distributions of component $k$ ($\mu_{k}$, $\Sigma_{k}$) that generate $\vec{s}$ and $\vec{c}$ are random variables, which influence $\vec{s}$ and $\vec{c}$ respectively. $z$ is the associated mixture component for a given data point, dependent on the categorical parameters $\pi$. White and gray circles denote unobserved and observed variables respectively.} 
+        \label{fig:generativemodel}
+    \end{figure}
+
+    The generative model considered is a mixture model with $K$ components, each characterized by two conditionally independent modalities: spatial position ($\vec{s}$) and color ($\vec{c}$). For 2D images, $\vec{s}$ represents the pixel location in terms of row and column coordinates ($\vec{s} \in \mathbb{R}^2$), while for 3D data, it corresponds to Cartesian coordinates ($\vec{s} \in \mathbb{R}^3$). The color component represents RGB values ($\vec{c} \in \mathbb{R}^3$) for both 2D and 3D data. 
+    Both $\vec{s}_k$, and $\vec{c}_k$ are modeled as multivariate Normal distributions with parameters $(\mu_{\vec{s},k}, \Sigma_{\vec{s},k})$, and $(\mu_{\vec{c},k}, \Sigma_{\vec{c},k})$ respectively, and the components have a mixture weight $z$. The full generative model is visualized as a Bayesian network in Figure~\ref{fig:generativemodel} and is factorized as:
+    \begin{align}
+        p(\vec{s},\vec{c},z,\mu_{\vec{s}},\Sigma_{\vec{s}},\mu_{\vec{c}},\Sigma_{\vec{c}},\pi) =& \bigg( \prod_{n=1}^N p(\vec{s}_n|z_n,\mu_{\vec{s}},\Sigma_{\vec{s}}) p(\vec{c}_n|z_n,\mu_{\vec{c}},\Sigma_{\vec{c}}) p(z_n | \pi) \bigg)  \\ 
+        &\bigg( \prod_{k=1}^K p(\mu_{k,\vec{s}},\Sigma_{k,\vec{s}}) p(\mu_{k,\vec{c}},\Sigma_{k,\vec{c}})  \bigg) p(\pi).
+        \label{eq:generative}
+    \end{align}
+
+    The joint distribution in Equation~\eqref{eq:generative} is factorized into two main components: one representing the likelihoods of $N$ data points $(\vec{s}_n, \vec{c}_n)$ given their assignments, and another representing the priors over the mixture model parameters. The mixture components over space $p(\vec{s}|z,\mu_{\vec{s}}, \Sigma_{\vec{s}})$ are conditionally independent from the component over color $p(\vec{c}|z,\mu_{\vec{c}}, \Sigma_{\vec{c}})$, given mixture component $z$. The following distributions parameterize these random variables:
+    
+{
+\begin{minipage}{0.49\textwidth}
+    \begin{align}
+        z_n &\sim \text{Cat}(\pi) \label{eq:zn} \\
+        \vec{s}_n | z_n=k &\sim \text{MVN}(\mu_{k,\vec{s}}, \Sigma_{k,\vec{s}}) \label{eq:sn}
+    \end{align}  
+\end{minipage}
+\begin{minipage}{0.49\textwidth}
+    \begin{align}
+        \vec{c}_n | z_n=k &\sim \text{MVN}(\mu_{k,\vec{c}},\Sigma_{k,\vec{c}}) \label{eq:cn} \\
+        \nonumber
+    \end{align}
+\end{minipage}
+}
+
+    The parameters of these distributions are also modeled as random variables. Treating the parameters as latent random variables allows us to cast learning as inference using the appropriate conjugate priors. The conjugate prior to a multivariate Normal (MVN) is a Normal Inverse Wishart (NIW) distribution, and the Dirichlet distribution is the conjugate prior to a categorical (Cat) distribution:
+    
+\begin{align}
+    \mu_{k,\vec{s}}, \Sigma_{k,\vec{s}} &\sim \text{NIW}(m_{0,\vec{s}}, \kappa_{0,\vec{s}}, V_{0,\vec{s}}, n_{0,\vec{s}}) \\
+    \mu_{k,\vec{c}}, \Sigma_{k,\vec{c}} &\sim \text{NIW}(m_{0,\vec{c}}, \kappa_{0,\vec{c}}, V_{0,\vec{c}}, n_{0,\vec{c}}) \\
+    \pi &\sim \text{Dirichlet}(\alpha_0), 
+\end{align}
+
+ 
+
+    To estimate the parameters, we infer their posterior distribution. However, as computing this posterior is intractable, we resort to variational inference~\citep{jordan1998variational}. We use a mean-field approximation to make inference tractable, which assumes that the variational posterior factorizes across the latent variables. This factorization allows for efficient coordinate ascent updates for each variable separately. Specifically, the variational distribution $q$ is decomposed as:
+    \begin{align}
+        q(z,\mu_{\vec{s}},\Sigma_{\vec{s}},\mu_{\vec{c}},\Sigma_{\vec{c}},\pi) = &\bigg( \prod_{n=1}^N q(z_n) \bigg)\bigg( \prod_{k=1}^K q(\mu_{k,\vec{c}},\Sigma_{k,\vec{c}}) \bigg) \bigg( \prod_{k=1}^K q(\mu_{k,\vec{s}},\Sigma_{k,\vec{s}}) \bigg) q(\pi),
+        \label{eq:approximate}
+    \end{align}
+
+    We select the distributions of the approximate posteriors to be from the same family as their corresponding priors. For the color variable $\vec{c}$, we model the mean by a Normal distribution but keep the covariance fixed using a Delta distribution. This assures that the mixture components commit to a particular color and do not blend multiple neighboring colors in a single component.
+
+\begin{minipage}{0.52\textwidth}
+\begin{align}
+    q(z_n) &= \text{Cat}(\gamma_{n}) \\
+    q(\mu_{k,\vec{s}}, \Sigma_{k,\vec{s}}) &= \text{NIW}(m_{t,\vec{s}}, \kappa_{t,\vec{s}}, V_{t,\vec{s}}, n_{t,\vec{s}}) \\
+    q(\pi) &= \text{Dirichlet}(\alpha_t) 
+\end{align}
+\end{minipage}
+\hfill
+\begin{minipage}{0.48\textwidth}
+\begin{align}
+    q(\Sigma_{k,\vec{c}}) &= \text{Delta}(\varepsilon I), \\ 
+    q(\mu_{k,\vec{c}}) &= \text{Normal}(m_{t,\vec{c}}, \kappa_{t,\vec{c}}^{-1} \varepsilon I) \\
+    \nonumber
+\end{align}
+\end{minipage}
+
+    where the subscript $t$ indicates the parameters at timestep $t$, and $\varepsilon$ is a chosen hyperparameter. 
+    
+    Images can be generated using the mixture model by computing the expected value of the color, conditioned on a spatial coordinate ($\ev_{p(\vec{c}|\vec{s})}[\vec{c}]$). For 3D rendering, we use the renderer from~\cite{kerbl3Dgaussians}, where the spatial component is first projected onto the image plane using the camera parameters, and the estimated depth is used to deal with occlusion. 
+\subsection{Coordinate ascent variational inference}
+\label{app:update}
+
+    To estimate the posterior over the model parameters, we maximize the Evidence Lower Bound (ELBO) $\mathcal{L}$ with respect to the variational parameters~\citep{jordan1998variational}: 
+    
+\begin{align}
+    \mathcal{L} = \kl[q(z,\mu_{\vec{s}},\Sigma_{\vec{s}},\mu_{\vec{c}},\Sigma_{\vec{c}}, \pi)~||~ p(z,\mu_{\vec{s}},\Sigma_{\vec{s}},\mu_{\vec{c}},\Sigma_{\vec{c}}, \pi | \vec{s},\vec{c})], 
+    \label{eq:appdxelbo}
+\end{align}
+
+    This is done using coordinate ascent variational inference (CAVI)~\citep{beal_variational_nodate,bishop2006prml,blei2016vi} which contains two distinct steps, that are iteratively executed to optimize the model parameters.  It parallels the well-known expectation maximization (EM) algorithm: the first step computes the expectation over assignments $q(z)$ for each data point.
+      Instead of computing the maximum likelihood estimate as is done in EM, in the second step we maximize the variational parameters of the posterior over model parameters. More in detail, in the first step the assignment for each data point $(\vec{s}_n,\vec{c}_n)$ is computed by deriving the ELBO with respect to $q(z_n)$. 
+\begin{align}
+    \log q(z_n = k) = \log \gamma_n &= \ev_{q(\mu_{k,\vec{s}},\Sigma_{k,\vec{s}})}[\log p(\vec{s}_n|\mu_{k,\vec{s}},\Sigma_{k,\vec{s}})] \label{eq:assignment} \\
+    &\quad+ \ev_{q(\mu_{k,\vec{c}},\Sigma_{k,\vec{c}})}[\log p(\vec{c}_n|\mu_{k,\vec{c}},\Sigma_{k,\vec{c}})] \\ 
+    &\quad+ \ev_{q(\pi)}[\log p(\pi)] - \log Z_n, 
+\end{align}
+    where $Z_n$ is a normalizing term, i.e., if $\hat{\gamma}_n$ is the unnormalized logit,  we can find the parameters of the categorical distribution as $\gamma_n = \frac{\hat{\gamma}_n}{\sum \hat{\gamma}_n}$. 
+
+    In the second step, we compute the update of the approximate posteriors over model parameters. To this end, we derive the ELBO with respect to the natural parameters of the distributions. If the distribution is conjugate to the likelihood, we acquire updates of the following parametric form: 
+\begin{minipage}{0.49\textwidth}
+\begin{align}
+    \eta_k &= \eta_{0,k} + \sum_{x_n \in \mathcal{D}} \gamma_{k,n} T(x_n) \label{eq:update1}
+\end{align}
+\end{minipage}
+\hfill
+\begin{minipage}{0.49\textwidth}
+\begin{align}
+    \nu_k &= \nu_{0,k} + \sum_{x_n \in \mathcal{D}} \gamma_{k,n}, \label{eq:update2}
+\end{align}
+\end{minipage}
+
+    where $\eta$ and $\nu$ are the natural parameters of the distribution over the likelihood's natural parameters, and $T(x_n)$ are the sufficient statistics of the data $x_n$. 
+
+    For the approximate posterior $q(\mu_{\vec{s},k},\Sigma_{\vec{s},k})$ over the parameters of the spatial likelihood, the sufficient statistics are given by $T(\vec{s}_n) = (\vec{s}_n, \vec{s}_n \cdot \vec{s}_n^T)$. The NIW conjugate prior consists of a Normal distribution over the mean and an inverse Wishart distribution over the covariance matrix. Hence, for each of the prior's natural parameters, it has two values: $\eta_{0,\vec{s}} = (\kappa_{0,\vec{s}} \cdot m_{0,\vec{s}}, V_{0,\vec{s}} + \kappa_{0,\vec{s}} \cdot m_{0,\vec{s}} \cdot m_{0,\vec{s}}^T)$ and $\nu_{0,\vec{s}} = (\kappa_{0,\vec{s}}, n_{0,\vec{s}} + D_{\vec{s}} + 1)$. Here, $m_{0,\vec{s}}$ is the mean of the Normal distribution over the mean, $\kappa_0$ is the concentration parameter over the mean, $n_{0,\vec{s}}$ indicates the degrees of freedom, $V_{0,\vec{s}}$ the inverse scale matrix of the Wishart distribution, and $D_{\vec{s}}$ the dimensionality of the MVN. 
+
+    For the approximate posterior $q(\mu_{\vec{c},k},\Sigma_{\vec{c},k})$ over the color likelihood, the sufficient statistics are again given by: $T(\vec{c}_n) = (\vec{c}_n, \vec{c}_n \cdot \vec{c}_n^T)$. The prior is parameterized similarly as the NIW over $\vec{s}$: $\eta_{0,\vec{c}} = (\kappa_{0,\vec{c}} \cdot m_{0,\vec{c}}, V_{0,\vec{c}} + \kappa_{0,\vec{c}} \cdot m_{0,\vec{c}} \cdot m_{0,\vec{c}}^T)$ and $\nu_{0,\vec{c}} = (\kappa_{0,\vec{c}}, n_{0,\vec{c}} + D_{\vec{c}} + 1)$. However, as we model the prior over $\Sigma_{k,\vec{c}}$ as a delta distribution, we keep the values for $n_{k,\vec{c}}$ and $V_{k,\vec{c}}$ fixed.
+
+    Finally, the conjugate prior for the approximate posterior $q(\pi)$ over the component assignment likelihood $z$ is a Dirichlet distribution.
+    Here, sufficient statistics are given by $T(x)=1$, and the prior is parameterized by the natural parameter $\eta_{0,z} = \alpha$. 
+
+\subsection{Continual updates}
+\label{app:continualmethod}
+
+    The proposed method supports continual learning because the parameters of each component are updated by aggregating the prior's natural parameters with the data's sufficient statistics via assignments $q(z)$. This iterative update process is order-invariant, allowing the model to adapt without forgetting past knowledge. Components without recent data assignments revert to their prior values, preserving flexibility in the model. Crucially, assignments $q(z)$ are always computed with respect to the initial posterior over parameters $q(\mu_{\vec{s}},\Sigma_{\vec{s}},\mu_{\vec{c}},\Sigma_{\vec{c}},\pi)$. This ensures that components without prior assignments can still be used to model the data.
+
+    Concretely, when data is processed sequentially, at each time point $t$, a batch of $\mathcal{D}_t$ of data points ($\vec{s}_n,\vec{c}_n$) is available, and the variational posterior over model parameters is updated.  For each of these data points, the assignments $\gamma_{k,n}$ can be calculated similarly to Equation~\eqref{eq:assignment}. We can rewrite the update steps from Equations~\eqref{eq:update1} and~\eqref{eq:update2}, in a streaming way for $T$ timesteps:
+
+\begin{minipage}{0.5\textwidth}
+\begin{align}
+    \eta_k = \eta_{0,k} + \sum_{t=1}^T \sum_{x_n \in \mathcal{D}_{t}} \gamma_{k,n} T(x_n)
+\end{align}
+\end{minipage}
+\begin{minipage}{0.5\textwidth}
+\begin{align}
+    \nu_k &= \nu_{0,k} + \sum_{t=1}^T \sum_{x_n \in \mathcal{D}_t} \gamma_{k,n}
+\end{align}
+\end{minipage}
+
+    Hence, we can write an iterative update rule for the natural parameters at timestep $t$ as a function of the natural parameters at $t-1$: 
+
+\begin{minipage}{0.5\textwidth}
+\begin{align}
+    \eta_{t,k} = \eta_{t-1,k} + \sum_{x_n \in \mathcal{D}_{t}} \gamma_{k,n} T(x_n) 
+\end{align}
+\end{minipage}
+\begin{minipage}{0.5\textwidth}
+\begin{align}
+    \nu_{t,k} &= \nu_{t-1,k} + \sum_{x_n \in \mathcal{D}_t} \gamma_{k,n}
+\end{align}
+\end{minipage}
+
+    Here, $x_n$ is a placeholder for the particular data, e.g., when updating $q(\mu_{\vec{s},k},\Sigma_{\vec{s},k})$, this would be $\vec{s}_n$. At $t=0$, the prior values for the natural parameters are used.
+
+    Note that when $\gamma_{k,n}$ is calculated using the initial parameterization of the variational posterior over parameters, applying these continual updates is identical to processing all the data in a single batch, avoiding the problem of catastrophic forgetting.  
+\subsection{Component Reassignments} 
+\label{sect:reassign}
+    In many continual learning settings, the data statistics are not known in advance. The uniform initialization of the model might not adequately cover the data space, leading to a few components aggregating all the assignments with many components remaining unused. For example, consider a room where the largest object density is at the walls, while the center mainly consists of empty space. To mitigate this problem, we introduce a heuristic for reassigning the initial location of a components to data points which the model does not explain well.
+
+    The means of $n$ components for both space and color are replaced by the location and color of $n$ data points, sampled proportional to the negative ELBO under the current model. We choose $n$ as a fraction (5\%) of these unused components. A component is unused if the concentration parameters ($\alpha_k$) of the prior over the mixture weights are equal to their prior value. By choosing $n$ as a fraction of the available components, more reassignments occur for the first frames when the object/scene is not yet known, and fewer near the end. Additionally, this ensures we do not reassign components already used at a different location. After updating the component means for these ``initial'' components, we can run CAVI as described in Section~\ref{app:update}.
+
+
+\section{Results}
+
+
+    We evaluate our approach by benchmarking it against backpropagating gradients through a differentiable renderer. In particular, we compare the following models on the Tiny ImageNet~\citep{tinyimagenet}, Blender 3D~\citep{MildenhallNerf} and Habitat rooms~\citep{Habitat} datasets: 
+    
+    \textbf{VBGS (Ours)}: We consider a variant of VBGS where the means of the initial posteriors ($q(\mu_{\vec{s}},\Sigma_{\vec{s}},\mu_{\vec{c}},\Sigma_{\vec{c}})$) are initialized on sampled points from the normalized data set (Data Init), as well as randomly initialized ($m_{k,\vec{s}}\sim\mathcal{U}[-1,1]$, $m_{k,\vec{c}}\sim\delta(0)$) (Random Init).
+    
+    \textbf{Gradient}: In 3DGS~\citep{kerbl3Dgaussians}, the parameters are directly optimized using stochastic gradient descent on a weighted image reconstruction loss ($(1-\lambda) \cdot \text{MSE} + \lambda \cdot  \text{SSIM}$). In the case of image data, $\lambda$ is set to $0$; in the case of 3D data $\lambda$, it is set to $0.2$. We use spherical harmonics with no degrees of freedom, i.e., the specular reflections are not modeled. In order to be able to compare performance w.r.t. When optimizing for images, we use a fixed camera pose at identity and keep the z-coordinate of the Gaussians fixed at a value of 1. Similar to the VBGS approach, we also consider a variant where the means of the Gaussian components are randomly initialized (Random Init), and on sampled points from the dataset (Data Init).  
+    
+    \begin{figure}[b!]
+    \centering
+    \begin{minipage}[b]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{Figures/image-psnr/boxplot_psnr_img.png}
+        \subcaption[]{}
+        \label{fig:imagepsnr}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{Figures/continual/continual_qualitative.png}
+        \subcaption[]{}
+        \label{fig:image_continual_qual}
+    \end{minipage} 
+    \caption{\textbf{Mixture model performance on image data.} (a) Shows the reconstruction performance in PSNR (dB) for various numbers of components. (b) Shows reconstruction performance in PSNR (dB) at various stages in a continual learning setting for a random initialized model (both VBGS and Gradient-based) with 1K components. }
+    \label{fig:imageresults}
+    \end{figure}
+
+    \subsection{Images}
+
+    We first evaluate performance on the Tiny ImageNet test set consisting of 10k images. Reconstruction accuracy, measured in PSNR (dB), is evaluated across varying numbers of components (Figure~\ref{fig:imagepsnr}). Our results indicate that VBGS achieves reconstruction errors comparable to the gradient-based approach.  We then evaluate the models in a continual learning setting, where data patches are sequentially observed and processed (Figure~\ref{fig:image_continual_qual}). While VBGS maintains consistent reconstruction quality across all observed patches, the gradient-based method disproportionately focuses on the most recent patch. The PSNR over timesteps is shown in Figure~\ref{fig:continual_image_psnr}. VBGS converges to the same accuracy as training on the static dataset, whereas Gradient degrades due to catastrophic forgetting.
+
+    We further compared the computational efficiency by measuring the wall-clock time required for the Gradient approach to reach the performance level of VBGS after a single update step. This was computed over all images of the Tiny ImageNet validation set. We observe that VBGS is significantly (t-test, $p=0$) faster in wall clock time ($0.03 \pm 0.03$ seconds) compared to Gradient ($0.05 \pm 0.02$ seconds).
+    
+    To assess performance in a continual learning setting, we divide each image into 8x8 patches, feeding the model one patch at a time (Figure~\ref{fig:image_continual_qual}). VBGS performs a single update per patch, whereas the Gradient approach performs 100 training steps per patch with a learning rate of 0.1.  Figure~\ref{fig:continual_image_psnr} shows how the reconstruction PSNR evolves at each time step over the tiny ImageNet test set for the model with capacity 10K components. It's important to note that the reconstruction error of VBGS after observing all the patches converges to the same value as observing the whole image at once, as the inferred posterior ends up being identical. Even though the gradient approach, when observing all data at once, achieves much higher PSNR, when the data is fed in continuously, it does not achieve that performance in the continual setting, as it always focuses on the latest observed patch (see Figure~\ref{fig:image_continual_qual}). 
+
+    \begin{figure}[t]
+        \centering
+        \begin{minipage}[b]{0.33\textwidth}
+            \includegraphics[width=\textwidth]{Figures/continual/image_psnr.png}
+            \subcaption[]{}
+            \label{fig:continual_image_psnr}
+        \end{minipage}
+        \hfill
+        \begin{minipage}[b]{0.63\textwidth}
+            \includegraphics[width=\textwidth]{Figures/continual/continual_3d.png}
+            \subcaption[]{}
+            \label{fig:continual_volume_psnr}
+        \end{minipage}
+        \caption{\textbf{Continual learning performance.} (a) Evolution of image reconstruction performance measured as PSNR (dB) after feeding image patches of size 8x8 sequentially to the model. Confidence intervals are the $Z_{95}$ interval computed over the 10k validation images of the Tiny ImageNet dataset of size 64x64. (b) Evolution of the reconstruction performance, measured as PSNR (dB), after feeding in consecutive images of an object. 
+        The shaded area indicates the 95\% confidence interval computed over the 100 frames from the validation set.}
+    \end{figure}
+
+    \subsection{Blender 3D Objects}
+    
+    Next, we evaluate VBGS on 3D objects from the Blender dataset~\citep{MildenhallNerf}. Model parameters are inferred using 200 frames which include depth information. VBGS is trained on the 3D point cloud, which is acquired by transforming the RGBD frame to a shared reference frame.  In contrast, the gradient-based approach is optimized using multi-view image reconstruction.  We evaluate reconstruction performance on 100 frames from the validation set. The results, measured as PSNR, for a model with a capacity of 100K components are shown in Table~\ref{tab:psnr3d}. Our results show improved performance for both methods when components are initialized from data rather than randomly. VBGS achieves performance similar to the gradient-based approach under Data Init conditions. In random initialization, our approach outperforms the gradient-based approach except for the ``ship'' object. 
+
+    \begin{table}[t!]
+    \centering
+    \caption{\textbf{Prediction performance for the 3D dataset}. Measured as PSNR (dB). Values ($\mu \pm \sigma$) are computed over 100 validation frames for each of the 8 blender objects. All models in this table have 100K components. The best performance for each column is marked in bold.}
+    \label{tab:psnr3d}
+    \begin{tabular}{lcccccccc}
+    \toprule
+    &\textbf{chair} & \textbf{drums} & \textbf{ficus} & \textbf{hotdog} & \textbf{lego} & \textbf{materials} & \textbf{mic} & \textbf{ship}\\
+    \midrule
+    \vtop{\hbox{\strut VBGS}\hbox{\strut $^{\text{(Data Init)}}$}} &  \vtop{\hbox{\strut$22.82$}\hbox{\strut \tiny{$^{\pm0.94}$}}} & \vtop{\hbox{\strut$\mathbf{19.50}$}\hbox{\strut \tiny{$^{\pm0.47}$}}} & \vtop{\hbox{\strut$\mathbf{22.06}$}\hbox{\strut \tiny{$^{\pm0.79}$}}} & \vtop{\hbox{\strut$\mathbf{23.62}$}\hbox{\strut \tiny{$^{\pm1.23}$}}} & \vtop{\hbox{\strut$\mathbf{22.53}$}\hbox{\strut \tiny{$^{\pm0.89}$}}} & \vtop{\hbox{\strut$\mathbf{20.55}$}\hbox{\strut \tiny{$^{\pm1.64}$}}} & \vtop{\hbox{\strut$24.78$}\hbox{\strut \tiny{$^{\pm0.60}$}}} & \vtop{\hbox{\strut$21.23$}\hbox{\strut \tiny{$^{\pm0.64}$}}} \\
+    \vtop{\hbox{\strut VBGS}\hbox{\strut $^{\text{(Random Init)}}$}} &  \vtop{\hbox{\strut$21.35$}\hbox{\strut \tiny{$^{\pm0.69}$}}} & \vtop{\hbox{\strut$18.71$}\hbox{\strut \tiny{$^{\pm0.43}$}}} & \vtop{\hbox{\strut$21.49$}\hbox{\strut \tiny{$^{\pm0.75}$}}} & \vtop{\hbox{\strut$22.24$}\hbox{\strut \tiny{$^{\pm0.97}$}}} & \vtop{\hbox{\strut$20.59$}\hbox{\strut \tiny{$^{\pm0.86}$}}} & \vtop{\hbox{\strut$20.47$}\hbox{\strut \tiny{$^{\pm1.36}$}}} & \vtop{\hbox{\strut$24.42$}\hbox{\strut \tiny{$^{\pm0.58}$}}} & \vtop{\hbox{\strut$20.80$}\hbox{\strut \tiny{$^{\pm0.90}$}}} \\
+    \vtop{\hbox{\strut Gradient}\hbox{\strut $^{\text{(Data Init)}}$}} &  \vtop{\hbox{\strut$\mathbf{22.98}$}\hbox{\strut \tiny{$^{\pm1.23}$}}} & \vtop{\hbox{\strut$19.05$}\hbox{\strut \tiny{$^{\pm0.57}$}}} & \vtop{\hbox{\strut$21.08$}\hbox{\strut \tiny{$^{\pm0.92}$}}} & \vtop{\hbox{\strut$21.47$}\hbox{\strut \tiny{$^{\pm1.67}$}}} & \vtop{\hbox{\strut$19.97$}\hbox{\strut \tiny{$^{\pm2.24}$}}} & \vtop{\hbox{\strut$20.53$}\hbox{\strut \tiny{$^{\pm1.64}$}}} & \vtop{\hbox{\strut$\mathbf{25.25}$}\hbox{\strut \tiny{$^{\pm0.90}$}}} & \vtop{\hbox{\strut$\mathbf{23.55}$}\hbox{\strut \tiny{$^{\pm1.20}$}}} \\
+    \vtop{\hbox{\strut Gradient}\hbox{\strut $^{\text{(Random Init)}}$}} &  \vtop{\hbox{\strut$20.59$}\hbox{\strut \tiny{$^{\pm0.85}$}}} & \vtop{\hbox{\strut$15.04$}\hbox{\strut \tiny{$^{\pm1.13}$}}} & \vtop{\hbox{\strut$19.41$}\hbox{\strut \tiny{$^{\pm0.90}$}}} & \vtop{\hbox{\strut$19.81$}\hbox{\strut \tiny{$^{\pm1.86}$}}} & \vtop{\hbox{\strut$19.10$}\hbox{\strut \tiny{$^{\pm1.02}$}}} & \vtop{\hbox{\strut$16.11$}\hbox{\strut \tiny{$^{\pm1.45}$}}} & \vtop{\hbox{\strut$23.03$}\hbox{\strut \tiny{$^{\pm0.72}$}}} & \vtop{\hbox{\strut$21.15$}\hbox{\strut \tiny{$^{\pm0.82}$}}} \\
+    \bottomrule
+    \end{tabular} 
+    \end{table}
+    
+    \begin{figure}[t!]
+        \centering
+        \begin{minipage}[b]{0.475\textwidth}
+            \includegraphics[width=\textwidth]{Figures/volume-psnr/qualitative_3D_100k.png} 
+            \subcaption[]{}
+            \label{fig:qualitative3d}
+        \end{minipage}
+        \hfill
+        \begin{minipage}[b]{0.475\textwidth}
+            \includegraphics[width=\textwidth]{Figures/volume-psnr/qualitative_evolution_val.png} 
+            \subcaption[]{}
+            \label{fig:ncomponents3dqual}
+        \end{minipage}
+
+        \caption{\textbf{Mixture model performance on 3D data.} (a) Image reconstructions for each of the eight objects, given a VBGS with 100k components. (b) Qualitative performance when using various amounts of components for reconstructing ``lego'' for both VBGS and the gradient approach. }
+        \label{fig:volumeperformance}
+    \end{figure}
+
+    Novel view predictions for the eight blender objects are shown in Figure~\ref{fig:qualitative3d}. These renders are generated using a VBGS with 100K components, observed from a camera pose selected from the validation set. Note that these are rendered on a white background, and only the 3D object is modeled by the VBGS. Figure~\ref{fig:ncomponents3dqual} shows the reconstruction performance as a function of the number of available components. It can be observed that for lower component regimes, VBGS renders patches of ellipsoids, while the gradient approach fills the areas more easily. We attribute this to a strong prior over the covariance shape encoded in the Wishart hyperparameters.
+
+    Finally, we also conduct the continual learning experiment for 3D and observe that the same properties from the 2D experiment hold, reaching an average reconstruction error over all objects of $11.19 \pm 3.53$ dB for VBGS (Random Init) and $21.26 \pm 1.76$ dB for Gradient (Random Init). Crucially,  in the continual learning setting, the model does not have access to the data for initialization and has to be initialized randomly. 
+    
+    For the continual setting, 200 images are streamed in a continuous stream to the model, similar to the patches in the image experiment. For each observed (RGBD) image, VBGS applies a single update, and the gradient baseline applies 100 gradient steps with a learning rate of 0.1. We evaluate performance as the measured PSNR on novel-view prediction. Figure~\ref{fig:continual_volume_psnr} shows the evolution of performance as a function of observed data. Note how the gradient approach's performance deteriorates after observing more frames. This figure also indicates how VBGS converges quickly to an adequate level of performance after 50 steps. 
+
+    \subsection{Habitat Rooms}
+    
+    \begin{figure}[t!]
+        \centering
+        \begin{minipage}[b!]{\textwidth}
+        \centering 
+        \includegraphics[width=0.8\linewidth]{Figures/habitat/rooms_qual.png}
+        \subcaption[]{}
+        \label{fig:habitatperformance}
+        \end{minipage}
+        \begin{minipage}[b!]{\textwidth}
+        \centering
+        \includegraphics[width=0.8\linewidth]{Figures/habitat/continual_rooms_v2.png}
+        \subcaption[]{}
+        \label{fig:continualhabitat}
+        \end{minipage}
+        \caption{\textbf{Mixture model performance on 3D rooms data.} (a) Qualitative results for the different models after observing all the data. (b) Evolution of the reconstruction performance, measured as PSNR (dB), after feeding in consecutive images of the room. The shaded area indicates the 95\% confidence interval computed over the 100 frames from the validation set. }
+        \label{fig:habitatrooms}
+    \end{figure}
+
+    Finally, we evaluate on a dataset of 3D rooms, which is relevant for e.g. autonomous navigation for robotics in unseen environments. We consider three rooms from the Habitat test suite (``Van Gogh Room'', ``Apartment 1'' and ``Skokloster Castle'')~\citep{Habitat}. The model parameters are inferred using 200 randomly sampled views from each room using the preprocessing pipeline of~\citep{wang2023dust3rgeometric3dvision}. On top of the models from the previous sections, we now also evaluate the model with component reassignments as detailed in Section~\ref{sect:reassign}. 
+
+    Figure~\ref{fig:habitatperformance} shows the qualitative performance for the various considered models. Similar to previous experiments, we observe that initializing using the data yields the best performance. In contrast to the earlier experiments, random initialization does not capture well the structure of the room. This is mainly due to the randomly sampled initial means of the mixture model not covering the data well. For the Gradient approach, there are too few components that provide a gradient signal to optimize the observed view. In contrast, for VBGS, a single component might always be closer to the data than others, aggregating all the assignments. This is further evidenced by the noticeable performance improvement when using the reassign mechanism on top of VBGS
+
+    We also evaluate the models in a continual setting in Figure~\ref{fig:continualhabitat}, where 200 frames (RBGD + pose) of the environment are observed sequentially. Note that these frames are randomly sampled from the environment and are not captured using a trajectory through the room. We observe that the gradient approach does not integrate the information well, even though the views are randomly sampled and cover the room. VBGS, without reassignments, does integrate the information and reaches performance on par with the Gradient trained in the non-continual setting. Finally, we observe that adding reassignments drastically improves performance on all three rooms.
+    
+
+
+
+\section{Discussion and Conclusion}
+
+
+    In this paper, we introduced a novel approach to optimizing Gaussian splats using variational Bayes. Our approach achieves comparable performance to backpropagation-based methods on 2D and 3D datasets, while offering key advantages for scenarios involving continual learning from streaming data.
+    
+    One limitation of VBGS compared to 3D Gaussian Splatting (3DGS) is its reliance on RGBD data, as opposed to optimizing directly on RGB projections. For many use cases we envision, such as robot navigation, depth information is often readily available from stereo vision, lidar or other sensing technologies. Furthermore, most 3DGS approaches still rely on pre-computed camera parameters obtained from structure-from-motion algorithms~\citep{sfm_survey}, which implicitly also provide depth information through triangulation. 
+    One could also use a pretrained neural network that predicts depth from monocular RGB data~\citep{yang2024depthv2}, as evidenced by~\cite{Fu_2024_CVPR}.
+    
+    Additionally, 3DGS dynamically adjusts the model size by growing and shrinking as needed, a feature that we have not yet incorporated. In future work, we aim to explore principled approaches for dynamic model sizing, leveraging model evidence~\citep{friston2023supervisedstructurelearning} to guide this process.
+
+ 
+    While VBGS requires only a single update step per observation, this step is computationally more expensive than a single gradient descent iteration in backpropagation. For extremely large datasets that do not fit into memory, VBGS may need to process data in distinct update steps, where stochastic gradient descent (SGD) might offer better efficiency. However, in streaming or partial data settings, VBGS excels by allowing updates without replay buffers, opening avenues for active data selection, a potential future research direction. Investigating active learning mechanisms, particularly in robotic SLAM or autonomous systems, could optimize data usage, ensuring that only the most informative observations are processed.
+    
+
+    
+    The continual learning capabilities of VBGS make it especially suited for applications requiring real-time adaptation and learning, such as autonomous navigation, augmented reality, and robotics. By continuously integrating new information without the need for replay buffers, VBGS reduces the computational burden typically associated with processing large-scale data streams. Furthermore, the variational posterior over model parameters enables parameter-based exploration~\citep{Schwartenbeck2013}, allowing agents to efficiently explore and build a model of their environment in real-time. This suggests exciting opportunities for VBGS to contribute to adaptive, real-time learning systems in various real-world domains.
+
+
+
+\section{Code availability}
+
+
+
+
+

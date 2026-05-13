@@ -1,0 +1,362 @@
+\title{Stabilizing the Kumaraswamy Distribution}
+
+\begin{abstract}
+Large-scale latent variable models require expressive continuous distributions that support efficient sampling and low-variance differentiation, achievable through the reparameterization trick. The Kumaraswamy (KS) distribution is both expressive and supports the reparameterization trick with a simple closed-form inverse CDF. Yet, its adoption remains limited. We identify and resolve numerical instabilities in the inverse CDF and log-pdf, exposing issues in libraries like PyTorch and TensorFlow. We then introduce simple and scalable latent variable models based on the KS, improving exploration-exploitation trade-offs in contextual multi-armed bandits and enhancing uncertainty quantification for link prediction with graph neural networks. Our results support the stabilized KS distribution as a core component in scalable variational models for bounded latent variables.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Probabilistic models use probability distributions as building blocks to model complex joint distributions between random variables. Such distributions can model unobserved `latent' variables $\vz$, or observed `data' variables $\vx$. Bounded interval-supported latent variables are central to many key applications, such as unobserved probabilities (e.g., user clicks in recommendation systems or links between network nodes), missing measurements in control systems (e.g., joint angles in $[0, 2\pi]$), and stochastic policies over bounded actions in reinforcement learning (e.g., motor torque in $[-10, 10]$).
+
+To meet the demands of large-scale latent variable models, bounded interval-supported distributions must satisfy the following criteria: 
+(i) support the reparameterization trick through an explicit reparameterization function, such as a closed-form inverse CDF, enabling efficient sampling and low-variance gradient estimates; 
+(ii) provide sufficient expressiveness to capture complex latent spaces; and 
+(iii) offer simple distribution-related functions (log-pdf, explicit reparameterization function, and gradients) that allow fast and accurate evaluation. 
+In Section~\ref{sec:background}, we argue that the Kumaraswamy (KS) distribution uniquely meets these criteria, yet remains surprisingly underused.
+
+In this paper, we make the following technical contributions: 
+\begin{itemize}[leftmargin=*]
+    \item We identify and resolve numerical instabilities in the KS’s log-pdf and inverse CDF, impacting core auto-differentiation libraries. To this end, we introduce an %novel
+    unconstrained logarithmic parameterization, enhancing its compatibility with neural network (NN) settings (Section~\ref{sec:stabilizing-ks}).
+    \item We propose the Variational Bandit Encoder (VBE), addressing exploration-exploitation trade-offs in contextual Bernoulli multi-armed bandits (Section~\ref{ssec:mab}).
+    \item We propose the Variational Edge Encoder (VEE) for improved uncertainty quantification in link prediction with graph neural networks (Section~\ref{ssec:link-pred-gnn}).
+\end{itemize}
+
+With the stabilized KS distribution at their core, these simple and scalable variational models open new avenues for addressing 
+pressing challenges in large-scale latent variable models, including those in recommendation systems, reinforcement learning, and network analysis.
+
+
+\section{Background}
+
+
+
+The KS distribution~\citep{kumaraswamy1980OrigKS, jones2009KS} has pdf $f(x) = abx^{a-1}(1-x^a)^{b-1}$ and inverse CDF $F^{-1}(u) = (1-u^{b^{-1}})^{a^{-1}}$, both defined for $x, u \in (0, 1)$ and  parameterized by $a, b > 0$.
+
+\noindent\textbf{Continuous distributions with bounded interval support.}
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.215\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/sampling_gradient_timing.png}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.77\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/distrib_shapes_row.png}
+    \end{subfigure}
+    \caption{Comparison of relevant bounded interval-supported distributions. Left: Time for sampling and differentiating through samples. The Beta lacks explicit reparameterization, and has slower sampling and gradients. Right: Expressiveness in terms of attainable prototypical shapes.}
+    \label{fig:sampling-gradient-timing-and-distrib-shapes}
+\end{figure}
+Among bounded interval-supported distributions, the KS uniquely satisfies criteria (i)--(iii) in Section~\ref{sec:intro}. It supports the reparameterization trick through its closed-form, differentiable inverse CDF, providing efficient sampling and low-variance gradients. The KS supports four distinct prototypical shapes --- bell, U, increasing, and decreasing (Figure~\ref{fig:sampling-gradient-timing-and-distrib-shapes}, right) ---
+providing expressivity for diverse modeling tasks. Its log-pdf and inverse CDF, along with their gradients, are composed only of affine transformations, exponentials, and logarithms, and can be parameterized directly in terms of unconstrained logarithmic values. This enables straightforward implementation with minimal dependencies and keeps most computation in the more stable and accurate log-space. The unconstrained logarithmic parameterization makes it well-suited for NNs, eliminating the need for positivity-enforcing link functions. Additionally, the KS has differentiable, closed-form expressions for moments, entropy $\mathcal{H}$, and the Kullback-Leibler (KL) divergence to the Beta distribution, facilitating efficient incorporation of prior information.
+
+Other common interval-supported distributions face limitations. 
+The Continuous Bernoulli ($\mathcal{CB}$) distribution is less expressive with only a single parameter. 
+Truncated distributions lack the reparameterization trick and often require slower, rejection-based sampling methods~\citep{figurnov2018implicit}. 
+Squashed Gaussian distributions, like the tanh-normal ($\tanh_{\mathcal{N}}$), support the reparameterization trick but suffer from numerical instabilities in the log-pdf and require sample approximations for moments, entropy, and KL divergences to distributions 
+outside their family. 
+Mitigating log-pdf instability typically requires careful control of the underlying Gaussian parameters and clipping of log-pdf values~\citep{haarnoja2018RLsoftactorcritic}.  
+The two-parameter Beta distribution shares the same four fundamental shapes as the KS and benefits from being in the exponential family, which provides a rich set of KL divergences. However, it lacks the reparameterization trick, relying on rejection sampling for generation and implicit reparameterization (reviewed later in this section) for gradient computation. Figure~\ref{fig:sampling-gradient-timing-and-distrib-shapes} (left) shows Beta sampling is nearly an order of magnitude slower than KS sampling on an Apple M$2$ CPU.
+
+\noindent\textbf{Latent variable modeling with stochastic variational inference (SVI).}
+The primary method for fitting large-scale latent variable models is SVI~\citep{hoffman2013stochastic}. Consider a model $p_{\boldsymbol{\theta}}(\vx) = \int p_{\boldsymbol{\theta}}(\vx | \vz)p(\vz) d\vz$, where $\vx \in \mathbb{R}^M$ is the observation, $\vz \in \mathbb{R}^D$ is a vector-valued latent variable, $p_{\boldsymbol{\theta}}(\vx|\vz)$ is the likelihood function with parameters $\boldsymbol{\theta}$, and $p(\vz)$ is the prior distribution. Except for a few special cases, maximum likelihood learning in such models is intractable because of the difficulty of the integrals involved. Variational inference~\citep{jaakkola2000bayesianVI} provides a tractable alternative by introducing a variational posterior distribution $q_{\boldsymbol{\phi}}(\vz|\vx)$ and maximizing a lower bound on the marginal log-likelihood called the ELBO: 
+\begin{equation}
+    \label{eq:ELBO}
+    \mathcal{L}(\vx, \boldsymbol{\theta}, \boldsymbol{\phi}) = \mathbb{E}_{q_{\boldsymbol{\phi}}(\vz|\vx)} \left[ \log p_{\boldsymbol{\theta}}(\vx|\vz)\right] 
+    - D_{\text{KL}}\left(q_{\boldsymbol{\phi}}(\vz | \vx) \, \| \, p(\vz)\right)
+    \leq \log p_{\boldsymbol{\theta}}(\vx).
+\end{equation}
+Training models with modern SVI~\citep{kingma2013VAE, rezende2014stochastic} %paisley2012variational} 
+involves gradient-based optimization of this bound w.r.t. both the model parameters $\boldsymbol{\theta}$ and the variational parameters $\boldsymbol{\phi}$. The first term in (\ref{eq:ELBO}) encourages the model to assign high likelihood to the data, but its exact evaluation and gradients are typically intractable and so the expectation is often approximated with samples from $q_{\boldsymbol{\phi}}(\vz|\vx)$. The KL divergence term incorporates prior information by penalizing deviations of the variational posterior from the prior $p(\vz)$. Closed-form expressions of $D_{\text{KL}}\left(q_{\boldsymbol{\phi}}\left(\vz | \vx \right) \, \| \, p\left(\vz \right) \right)$ allow efficient encoding of prior information; otherwise, sample-based approximations are required. Modifying the ELBO by scaling the KL term with a parameter $\beta_{\text{KL}}>0$ is often necessary to balance the trade-off between data likelihood and prior regularization~\citep{alemi2018fixing}. We denote the sample-based approximation of this modified ELBO as $\hat{\mathcal{L}}_{\beta_{\text{KL}}}$.
+
+\noindent\textbf{Gradient reparameterization: explicit and implicit.} A distribution $q_{\boldsymbol{\phi}}(\vz)$ is said to be \textit{explicitly} reparameterizable, or amenable to the `reparameterization trick', if it can be expressed as a deterministic, differentiable transformation $\vz = g(\boldsymbol{\epsilon}, \boldsymbol{\phi})$ of a base distribution $\boldsymbol{\epsilon} \sim p(\boldsymbol{\epsilon})$. This base distribution is typically simple, such as Uniform or standard Normal, enabling fast sample generation by first sampling from the base and then applying $g$. This enables the use of backpropagation to compute gradients of the form [cf. (\ref{eq:ELBO})]
+\begin{equation}
+    \nabla_{\boldsymbol{\phi}} \mathbb{E}_{q_{\boldsymbol{\phi}}(\vz)}[f(\vz)]
+    = \mathbb{E}_{p(\boldsymbol{\epsilon})}[\nabla_{\boldsymbol{\phi}} f(g(\boldsymbol{\epsilon}, \boldsymbol{\phi}))]
+    = \mathbb{E}_{p(\boldsymbol{\epsilon})}[\nabla_{\vz} f(\vz)|_{\vz = g(\boldsymbol{\epsilon}, \boldsymbol{\phi})} \nabla_{\boldsymbol{\phi}} g(\boldsymbol{\epsilon}, \boldsymbol{\phi})],
+    \label{eq:gradient-expectation}
+\end{equation}
+an expectation with form encompassing %common objectives in variational inference, namely 
+the ELBO. Explicit reparameterization is compatible with distributions in the location-scale family (e.g., Gaussian, Laplace, Cauchy), distributions with tractable inverse CDFs (e.g., exponential, KS, $\mathcal{CB}$), or those expressible as deterministic transformations of such distributions (e.g., $\tanh_{\mathcal{N}}$).
+When explicit reparameterization is not available, implicit reparameterization~\citep{figurnov2018implicit} is commonly used for distributions with numerically tractable CDFs, %(or more generally `standardization functions'), 
+such as truncated, mixture, Gamma, Beta, Dirichlet, or von Mises distributions. This method expresses the parameter gradient through the sample 
+$\nabla_{\boldsymbol{\phi}} \vz$ 
+as a function only of the CDF gradients, not its inverse. Such CDF gradients are either found analytically (if feasible) or more commonly using numerical methods, e.g., forward mode auto-differentiation on CDF estimates, %numerical methods to estimate the CDF 
+as in the Gamma and Beta distributions. 
+Without explicit reparameterization, sampling and gradient computations tend to be slower and more complex, and produce higher-variance %gradient 
+estimates of (\ref{eq:gradient-expectation}), reducing learning efficiency and stability~\citep{kingma2013VAE, jang2017GumbSoftmax}.
+
+
+\section{Stabilizing the Kumaraswamy}
+
+\label{sec:stabilizing-ks}
+\noindent\textbf{Identifying the instability}: 
+$\log \left(1 - \exp\left(x\right)\right)$. Naive computation of $\log \left(1 - \exp\left(x\right)\right)$ for $x < 0$ leads to significant numerical errors as $x$ approaches $0$ (Figure~\ref{fig:log1mexp}, red). These errors grow so large that they can cause \textit{numerical instability}, i.e., an irrecoverable error such as $\texttt{-inf}$. These errors result from \textit{catastrophic cancellation}, %see~\citep{muller2018FloatArithm}.
+which occurs when subtracting nearly equal numbers --- here, $1 - \exp(x)$. As $x \to 0$, $\exp(x) \approx 1$, so \texttt{1 - exp(x)} results in the cancellation of leading significant bits, leaving only a few less significant, less accurate bits to represent the result. This causes large relative errors in \texttt{1 - exp(x)}, which are amplified when input to the logarithm as its magnitude grows sharply near zero. If the cancellation is complete, \texttt{1 - exp(x)} underflows to $0$ and the logarithm returns \texttt{-inf}, as seen in Figure~\ref{fig:log1mexp} (red) when $\log_2 |x| < -24$.
+
+\begin{wrapfigure}{r}{0.52\textwidth} %{0.332\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/log1mexp.png}
+    \caption{\texttt{log1mexp(x)} maintains accuracy throughout single precision.}
+    \label{fig:log1mexp}
+\end{wrapfigure}
+
+ These functions form the basis for two common methods to compute $\log \left(1 - \exp(x)\right)$: \texttt{log(-expm1(x))} and \texttt{log1p(-exp(x))}. \citep{machler2012log1mexp} showed neither method provides sufficient accuracy across the domain. However, each approach is accurate in complementary regions, leading to
+\begin{equation}
+    \label{eq:log1mexp}
+    \texttt{log1mexp}(x) := 
+    \begin{cases} 
+    \texttt{log(-expm1(x))} & -\log 2 \leq x < 0 \\ %
+    \texttt{log1p(-exp(x))} & x < -\log 2,
+    \end{cases}
+\end{equation}
+which computes $\log \left( 1 - \exp\left( x \right) \right)$ accurately throughout single precision, shown in Figure~\ref{fig:log1mexp} (blue).
+\noindent\textbf{A Stable Kumaraswamy.} 
+The direct implementation of the KS's log-pdf and inverse CDF --- as found in all core auto-differentiation libraries --- produces numerical instabilities. Here, we introduce a novel parameterization in terms of unconstrained logarithmic parameter values, eliminating the need for positivity-enforcing link functions, and whose expressions involve only affine, exponential, and logarithmic transformations. It also makes clear the presence of the unstable terms 
+\begin{align*}
+    \red{w_{b^{-1}}(u)} &= \log(1 - u^{b^{-1}}) &\hspace{-2.105cm} &= \log(1 - \exp(b^{-1} \log u))\\
+    \red{w_{a}(x)}      &= \log(1 - x^a)        &\hspace{-2.105cm} &= \log(1 - \exp(a \log x)),
+\end{align*}
+allowing the log-pdf, inverse CDF, and their gradients to be expressed as:
+\begin{align}
+    \log f(x)
+    &= \log a + \log b + (a-1) \log x + (b-1)\red{w_{a}(x)}\label{eq:log_pdf}\\
+    \nabla_{\log x} \log f(x)
+    &= (a-1) - (b-1) \cdot \exp(a \log x - \red{w_{a}(x)} + \log a)\\
+    \nabla_{\log a} \log f(x)
+    &= 1 + a \log x \cdot \{1 -  (b - 1) \cdot \exp(a \log x - \red{w_a(x)})\}\\
+    \nabla_{\log b} \log f(x)
+    &= 1 + b \cdot \red{w_{a}(x)}\label{eq:nabla_log_b_log_pdf}\\
+    \noalign{\vskip 0.5ex} % add vertical space
+    F^{-1}(u)
+    &= (1-u^{b^{-1}})^{a^{-1}}
+    = \exp(a^{-1} \red{w_{b^{-1}}(u)}) \label{eq:inv_cdf}\\
+    \nabla_{\log a} F^{-1}(u)
+    &= \exp (- \log a + a^{-1}  \red{w_{b^{-1}}(u)}) \cdot (- \red{w_{b^{-1}}(u)})\label{eq:inv_cdf_nabla_log_a}\\
+    \nabla_{\log b} F^{-1}(u)
+    &=\exp( - \log a - \log b + b^{-1} \log u + (a^{-1} - 1) \red{w_{b^{-1}}(u)}) \cdot \log u. \label{eq:inv_cdf_nabla_log_b}
+\end{align}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{figures/pdf_invcdf_rsamples_compare.png}
+    \caption{
+    {Stabilizing $\log(1 - \exp(x))$ terms eliminates numerical instabilities in the KS log-pdf and inverse CDF.} 
+    We compare the unstable PyTorch KS implementation (top row) and our stable KS (bottom row) for realistic KS distributions ($\log_2 b = 24$, varying $a$).  %desirable /realistic meaning any reasonable KS implemenation should be able to handle these in a stable/accurate manner
+    Catastrophic cancellation in the $\log(1 - \exp(x))$ terms in the PyTorch KS causes jagged curves and inverse CDF underflow beyond $u \approx 1-39.3$, resulting in a point mass of $\approx 39.3$ at $x=0$ in the sampling distribution. Our stable KS removes the instability by using \texttt{log1mexp}.
+    }
+    \label{fig:pytorch-vs-stable}
+\end{figure}
+This parameterization's algebraic form allows direct replacement of the dominant unstable terms, substituting $\red{w_{b^{-1}}(u)}$ with \texttt{log1mexp}$\left(b^{-1} \log u\right)$ and $\red{w_a(x)}$ with \texttt{log1mexp}$\left(a \log x\right)$. 
+Access to $\log a$ and $\log b$ avoids errors from unnecessary 
+transitions in-and-out of log-space.
+We also avoid the error prone expressions produced in backpropogation's direct application of the chain rule, e.g.,
+\(
+\frac{1}{a} \cdot 
+\exp\left(\frac{1}{a} \log \left( 1 \text{-} \exp\left(\frac{1}{b} \log u \right) \right) \right) \cdot
+\text{-} \left( 1 \text{-} \exp \left( \frac{1}{b} \log u \right) \right)^{-1}
+\cdot
+\exp \left( \frac{1}{b} \log u \right) \cdot
+\log u \cdot 
+\frac{-1}{b^2} \cdot
+b
+\) 
+and (\ref{eq:inv_cdf_nabla_log_b}) are equivalent expressions for $\nabla_{\log b} F^{-1}$, but their computed values can differ greatly for extreme parameter values. Desirable KS distributions can obtain such problematic extreme parameter values, e.g., the KS distributions in Figure~\ref{fig:pytorch-vs-stable} have $b \approx 10^6$.
+
+Figure~\ref{fig:pytorch-vs-stable} compares the PDF, inverse CDF, and histograms of reparameterized samples for KS distributions which are typical to real-world modeling scenarios. The PyTorch implementation (top row) shows jaggedness in both the PDF and inverse CDF, caused by catastrophic cancellation in the unstable terms $\red{w_a(x)}$ and $\red{w_{b^{-1}}(u)}$. Additionally, the PyTorch inverse CDF underflows beyond $u \approx 1 - 39.3$: here, $\red{w_{b^{-1}}(u)} = -\infty$, and \(F^{-1}(u) = \exp(a^{-1} \cdot -\infty )= 0\). This underflow results in a point mass at $x=0$ (a point outside of the KS support) with probability $\approx 39.3$ in each of the reparameterized sampling distributions, and produces infinite gradients via $\nabla_{\log a} F^{-1} = \infty$ [cf. (\ref{eq:inv_cdf_nabla_log_a})]. This infinite gradient triggers a cascade: infinite parameter values after the optimizer step and \texttt{NaN} activations in the next forward pass, which is what users ultimately observe when training fails. 
+
+
+\section{Experiments}
+
+
+We provide evidence toward the stabilization of the KS in three settings, beginning with the well-established Variational Auto-Encoder (VAE) framework on the MNIST and CIFAR-$10$ datasets. The KS serves both as a variational posterior [Eqns. (\ref{eq:inv_cdf})--(\ref{eq:inv_cdf_nabla_log_b})] and as a likelihood function [Eqns. (\ref{eq:log_pdf})--(\ref{eq:nabla_log_b_log_pdf})]. Models utilizing the stabilized KS consistently converge and perform well, often exceeding or matching alternative distributions. In contrast, models using the unstable KS produce \texttt{NaN} errors and are therefore excluded.
+Next, we introduce novel deep variational models which highlight the KS’s broad utility in addressing large-scale problems.  In Section~\ref{ssec:mab}, the Variational Bandit Encoder (VBE) models unobserved %$[0, 1]$ 
+mean rewards in contextual Bernoulli multi-armed bandits, improving exploration-exploitation trade-offs. In Section~\ref{ssec:link-pred-gnn}, the Variational Edge Encoder (VEE) models the unobserved probabilities of each network link's existence using graph neural networks, improving uncertainty quantification. In both cases, the KS is more effective and easier to use than alternative variational distributions. For instance, 
+$\tanh_{\mathcal{N}}$ models require log-pdf clipping for stability, while Beta models show significant performance variability based on the chosen positivity-enforcing link function and often fail to converge, e.g., on CIFAR-$10$ in Section~\ref{ssec:image-vae}. Finally, our models are fast: the VBEs in Section~\ref{ssec:mab} are $8-22\times$ faster than the state-of-the-art baseline. 
+
+\subsection{Image Variational Auto-Encoders}
+\label{ssec:image-vae}
+\begin{table}[t]
+\small
+\begin{minipage}[t]{.48\linewidth}
+\centering
+\caption{VAE on MNIST and CIFAR-10.}
+\begin{tabular}{@{\titlecolspace}c@{\titlecolspace}c@{\titlecolspace}c@{\colspace}c@{\colspace}c@{\colspace}c@{\colspace}c@{\colspace}c@{\colspace}}
+
+\toprule
+Prior & $q_{\phi}(\vz|\vx)$ & $p_{\boldsymbol{\theta}}(\vx|\vz)$ & \multicolumn{2}{c}{MNIST} & \multicolumn{2}{c}{CIFAR-10} \\
+\cmidrule(lr){4-5} \cmidrule(lr){6-7}
+& & & LL & $\mathcal{K}(\phi)$ & LL
+& $\mathcal{K}(\phi)$ \\
+\midrule
+$\mathcal{N}_{(0, 1)}$ & $\mathcal{N}$ & $\mathcal{CB}$ & $1860$ & $97.3$ & $1241$ & $37.9$ \\
+U$_{(0, 1)}$           & KS            & $\mathcal{CB}$ & $1860$ & $97.4$ & $\mathbf{1256}$ & $\mathbf{41.5}$ \\
+U$_{(0, 1)}$           & Beta          & $\mathcal{CB}$ & $\mathbf{1861}$ & $\mathbf{97.5}$ & $1250$ & $40.3$ \\
+\midrule
+$\mathcal{N}_{(0, 1)}$ & $\mathcal{N}$ & Beta           & $4121$ & $\mathbf{92.1}$ & $\mathbf{3716}$ & $48.5$ \\
+U$_{(0, 1)}$           & KS            & Beta           & $4105$ & $91.3$ & $3637$ & $\mathbf{50.1}$ \\
+U$_{(0, 1)}$           & Beta          & Beta           & $\mathbf{4123}$ & $90.1$ & N/A & N/A \\
+\midrule
+$\mathcal{N}_{(0, 1)}$ & $\mathcal{N}$ & KS             & $3357$ & $96.4$ & $1782$ & $47.1$ \\
+U$_{(0, 1)}$           & KS            & KS             & $3326$ & $96.8$ & $\mathbf{1812}$ & $\mathbf{48.8}$ \\
+U$_{(0, 1)}$           & Beta          & KS             & $\mathbf{3382}$ & $\mathbf{97.1}$ & N/A & N/A \\
+\bottomrule
+\end{tabular}
+\label{table:vae}
+\end{minipage}
+\begin{minipage}[t]{.51\linewidth}
+    \centering
+    \caption{MNIST test digit VAE reconstructions.}
+    \includegraphics[width=\linewidth]{figures/mnist_reconstructions_grid.png}
+    \label{fig:mnist-reconstruct-grid}
+\end{minipage}
+\end{table}
+The VAE~\citep{kingma2013VAE} is a generative latent variable model trained using amortized variational inference. Both the variational posterior $q_{\boldsymbol{\phi}}(\vz|\vx)$ and the conditional likelihood $p_{\boldsymbol{\theta}}(\vz | \vx)$ are parameterized using NNs, known as the encoder $e_{\boldsymbol{\phi}}(\vx): \mathbb{R}^M \mapsto \mathbb{R}^D$ and decoder $d_{\boldsymbol{\theta}}(\vz): \mathbb{R}^D \mapsto \mathbb{R}^M$, respectively. VAEs typically use the standard Normal distribution as the prior and a factorized Normal as the variational posterior. The use of alternative variational distributions allows incorporating different prior assumptions about the latent factors of the data, such as bounded support or periodicity~\citep{figurnov2018implicit}. 
+
+\noindent\textbf{Experimental setup and metrics.} Inspired by~\citep{loaiza2019continuousBer}, we train VAEs with fully factorized priors and variational posteriors on MNIST and CIFAR-$10$ without pixel binarization, using an unmodified ELBO ($\beta_{\text{KL}} = 1$). For each variational posterior factor, we choose the canonical prior: $\mathcal{N}_{(0, 1)}$ for $\mathcal{N}$, and $U_{(0,1)}$ for KS and Beta. We evaluate the models using test Log Likelihood (LL), approximated by decoding a single sample from the encoded posterior and computing the log conditional likelihood. To assess usefulness of the learned latent representations, we encode test data $\vx_n$, compute the mean $\mathbb{E}[q_{\boldsymbol{\phi}}(\vz_n|\vx_n)]$, and classify the test labels using a $15$-nearest neighbor classifier; the classifier accuracy ($\%$) is denoted $\mathcal{K}(\boldsymbol{{\phi}})$. For subjective evaluation, we display the mean decoded likelihood of a single sample from the encoded posterior of random test digits in Table~\ref{fig:mnist-reconstruct-grid}.
+
+\noindent\textbf{Discussion of results.} The results in Table~\ref{table:vae} show that across datasets, VAEs with KS-distributed variational posteriors consistently produce useful latent spaces, evidenced by strong $\mathcal{K}(\phi)$, and yield reconstructions with high LLs and visual quality. Notably, such KS VAEs maintain numerical stability while VAEs with Beta-distributed variational posteriors often do not; indeed,~\citep{figurnov2018implicit}
+reported strong performance on binarized MNIST using a softplus link function, but did not present results on CIFAR-$10$, nor could we find other works that did. We suspect this is due to similar instability issues, with the higher gradient variance of the Beta's implicit reparameterization a likely explanation. In an attempt to overcome this instability in Beta VAEs we report the best metrics across softplus or $\exp$ link functions in Table~\ref{table:vae}. When neither converges, we report N/A.
+
+When paired with any variational posterior, a KS likelihood yields stronger MNIST reconstructions than Beta likelihoods: compare rows $*$-Beta to $*$-KS in Table~\ref{fig:mnist-reconstruct-grid}. As in~\citep{loaiza2019continuousBer}, we find $\mathcal{CB}$ likelihoods produce the most subjectively performant VAEs on MNIST, 
+unsurprising as $\mathcal{CB}$ was introduced specifically for the approximately binary MNIST pixel data.
+
+\subsection{Contextual Bernoulli multi-armed bandits} \label{ssec:mab}
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[t]{0.425\textwidth}
+        \begin{algorithm}[H]
+        \caption{Variational Bandit Encoder}% (VBE)}
+        \label{alg:vbe}
+        \begin{algorithmic}[1]
+            \Require $\{\mathbf{x}_k\}_{k=1}^K$, $\{z_k\}_{k=1}^K$, $\eta$, $\beta_{\text{KL}}$
+            \State Variation posterior $q \leftarrow$ KS
+            \State Replay buffer $\mathcal{D} \leftarrow \emptyset$
+            \For{$t = 1 \dots T$}
+                \State Encode: $(a_k, b_k) = e_{\boldsymbol{\phi}}(\mathbf{x}_k)$
+                \State Sample: $\tilde{z}_k \sim q(z_k; a_k, b_k)$
+                \State TS: $a = \text{argmax}_{k} \{\tilde{z}_k\}$
+                \State Reward: $r \sim \text{Ber}(z_a)$
+                \State $\mathcal{D} \leftarrow \mathcal{D} \cup \{(\vx_{a}, a, r)\}$
+                \State Construct $\hat{\mathcal{L}}_{\beta_{\text{KL}}}$ as in (\ref{eq:VBE-ELBO})
+                \State $\boldsymbol{\phi} \leftarrow \boldsymbol{\phi} + \eta \nabla_{\boldsymbol{\phi}} \hat{\mathcal{L}}_{\beta_{\text{KL}}}$%$(\mathcal{D}, \boldsymbol{\phi}, \beta)$
+            \EndFor
+        \end{algorithmic}
+        \end{algorithm}
+    \end{minipage}%
+    \hfill
+    \begin{minipage}[t]{0.525\textwidth} % .375
+        \centering
+        \includegraphics[width=\linewidth]{figures/bandits_regret_reward_time_topM_1_mean.png}
+        \caption{Synthetic bandit performance over $5$ runs.}
+        \label{fig:bandits-regret}
+    \end{minipage}
+\end{figure}
+The contextual Bernoulli multi-armed bandit (MAB) problem involves a decision maker who, at each time step $t = 1, \dots, T$, selects one arm from a finite set of $K$ options. Each arm has an associated context $\vx_k \in \mathbb{R}^d$, and pulling an arm yields a binary reward $r_k \sim \text{Ber}(z_k)$, where $z_k \in [0, 1]$ is the unknown mean reward. MABs originate by analogy to casino slot machines, where each machine (arm) has a different payout rate, and the challenge lies in deciding which arms to pull in order to maximize total winnings while learning about their payout rates, a situation called the exploration-exploitation dilemma.
+MABs have found applications in modern recommendation systems~\citep{li2010contextual}, clinical trials design~\citep{villar2015MABClinicalTrial}, and mobile health~\citep{tewari2017MABmobilehealth}. Thompson Sampling (TS) is a simple, empirically effective~\citep{chapelle2011empiricalTS}, and scalable~\citep{jun2017scalableTS} arm selection heuristic. It selects the arm corresponding to the highest value drawn from the posterior distributions over the latent $z_k$'s. This approach naturally balances exploration and exploitation: the uncertainty in the posteriors promote exploration, while concentration of probability mass on large mean rewards drive exploitation.
+
+\noindent\textbf{Variational Bandit Encoder (VBE): VAE $\cap$ TS.} 
+Our novel VBE posits a fully factorized KS variational posterior $\prod_k q_{\boldsymbol{\phi}}(z_k | \vx_k)$, prior $p(\vz) = U_{(0, 1)}^K$, and a Bernoulli reward likelihood $p(r | z_k)$ for each arm. Similar to VAEs, we employ amortized inference using a shared NN encoder $e_{\boldsymbol{\phi}}(\vx_k)$, which defines a reparameterizable variational distribution $q_{\boldsymbol{\phi}}(z_k | \vx_k)$. However, unlike VAEs, VBEs omit the decoder; samples $\tilde{z}_k \sim$ $q_{\boldsymbol{\phi}}(z_k | \vx_k)$ directly parameterize the reward likelihood. The arm selection at step $t$ follows TS: $a = \text{argmax}_k \{\tilde{z}_k\}$. We then draw reward $r \sim $ Ber($z_{a}$) and record it in the replay buffer $\mathcal{D} \leftarrow \mathcal{D} \cup \{(\vx_{a}, a, r)\}$. We construct a sample approximation of the modified ELBO over the subset of arms $\mathcal{K}_t \subset \{1, \dots, K\}$ that have been pulled by time $t$ as
+\begin{align}
+    \label{eq:VBE-ELBO}
+    \hat{\mathcal{L}}_{\beta_{\text{KL}}}(\mathcal{D}, \boldsymbol{\phi}) =
+    \sum_{(\vx_a, a, r) \in \mathcal{D}} \log p(r | \tilde{z}_a)
+    + 
+    \beta_{\text{KL}} \sum_{k \in \mathcal{K}_t} \mathcal{H}[q_{\boldsymbol{\phi}}(z_k | \vx_k) ],
+\end{align}
+ The second term promotes exploration by penalizing overconfidence with the exploration effect proportional to $\beta_{\text{KL}}$. We maximize (\ref{eq:VBE-ELBO}) w.r.t. $\boldsymbol{\phi}$ via gradient ascent, enabled by the reparameterizable KS. VBE execution is summarized in Algorithm~\ref{alg:vbe}.
+
+\noindent\textbf{VBE advantages.}
+VBEs provide four primary advantages over alternative TS-based Bernoulli MAB approaches, discussed in Section~\ref{sec:related-work}. 
+\begin{itemize}[leftmargin=*]
+    \item \textit{Scalability and Compatibility.} VBE training consists of a forward pass through a NN, %n MLP, 
+    sampling an explicitly reparameterized distribution, and a backward pass for gradient-based updates.  This process is scalable and fully compatible with existing gradient-based infrastructure.
+    \item \textit{Prior Knowledge Incorporation.} When prior knowledge exists on an arm $k$ it can be efficiently encoded as $p(z_k) = \text{Beta}(a_k, b_k)$, 
+    replacing $\mathcal{H}[q_{\boldsymbol{\phi}}(z_k | \vx_k)]$ with $-D_{\text{KL}}\left(q_{\boldsymbol{\phi}}(z_k | \vx_k) \, \| \, p(z_k)\right)$.
+    \item \textit{Interpretability and Independence.} Encoding $\vx_k$ produces KS distribution parameters, fully encapsulating the model's beliefs about $z_k$. This is independent of other arms and past data.
+    \item \textit{Simplicity.} VBEs lack numerous hyperparameters and complex architectural components.
+\end{itemize}
+Alternative methods lack some or all of these properties because they do not directly model the mean rewards nor differentiate through mean reward samples; instead, they model the parameters $\boldsymbol{\phi}$.
+
+\noindent\textbf{Experimental setup. We evaluate VBEs with either a KS (VBE-KS), Beta (VBE-Beta), or $\tanh_{\mathcal{N}}$ (VBE-$\tanh_{\mathcal{N}}$) all using $\beta_{\text{KL}} = |\mathcal{K}_t|^{-1}$, which makes the second term in (\ref{eq:VBE-ELBO}) a mean. VBE-$\tanh_{\mathcal{N}}$'s performance is sensitive to the number of samples used in its entropy estimate: we found degraded performance beyond $10$ samples. % likely by altering exploration.
+The learning rate is set to $\eta=10^{-2}$. 
+As a baseline, we use LMC-TS, which employs Langevin Monte Carlo (LMC) to sample posterior parameters of a NN, known for state-of-the-art performance across various tasks~\citep{xu2022langevinbandit}. All models use an MLP with $3$ hidden layers of width $32$. 
+LMC-TS hyperparameters (inverse temperature, LMC steps, weight decay) are set or tuned based on the authors’ code. We repeat experiments $5$ times on an Apple M$2$ CPU and report the mean and standard deviation across these runs in Figure~\ref{fig:bandits-regret}.
+
+\noindent\textbf{Metrics and evaluation.} The optimal policy always selects the arm with the highest mean reward $r^*$. 
+Our objective is to minimize regret, defined as the cumulative difference between the expected reward of the chosen action and the optimal action (accessible in the synthetic setting), i.e.,
+\(
+\sum_{t=1}^T (r^* - r_{a_t})
+\).
+VBE-KS achieves lower regret and higher cumulative reward than all baselines. VBE-Beta performs significantly worse than VBE-KS and VBE-$\tanh_{\mathcal{N}}$, highlighting the importance of explicit reparameterization. LMC-TS is performant --- worse than VBE-KS and better than VBE-$\tanh_{\mathcal{N}}$ --- but is $8$--$22 \times$ slower than VBEs: VBEs avoid the computational overhead of LMC. % sampling.
+
+\subsection{Variational link prediction with Graph Neural Networks} \label{ssec:link-pred-gnn}
+Graph Neural Networks (GNNs) have become a powerful tool for learning from graph-structured data, with applications in critical areas like drug discovery~\citep{zhang2022GNNDrugDisc} and finance~\citep{wang2022GNNFinance}. A key task is link prediction, where the goal is to infer unobserved edges between nodes. However, real-world deployment of graph learning models is often hindered by a lack of reliable uncertainty estimates and limited capacity to incorporate prior knowledge~\citep{wasserman2024GSLBNN}. To address these challenges, we propose a variational approach where the GNN encodes a KS to model the unobserved probabilities of each network link’s existence, enabling uncertainty quantification and prior knowledge integration with minimal computational overhead.
+
+In a typical link prediction setup, the GNN has access to the features $\mX \in \mathbb{R}^{N \times d}$ of all $N$ nodes, but only a subset of positive edges in the training $\mathcal{D}_{tr}$ and validation $\mathcal{D}_{val}$ sets. Edges are labeled as $1$ (present) or $0$ (absent). The GNN generates edge embeddings through message passing and neighborhood aggregation, outputting probabilities $z_{u,v} \in (0, 1)$ that parameterize a Bernoulli likelihood. The seminal work of~\citep{kipf2016variational} proposed Variational Graph Auto-encoders (VGAEs), which posits a Gaussian variational posterior over the final \textit{node} embeddings. When used for link prediction it samples final node embeddings from the variational posterior and decodes them to produce edge probabilities. In contrast, our approach directly models the probability of an edge using the KS. An advantage of directly modeling edge probabilities is interpretability; deep nodal embeddings are often difficult to interpret, and priors are typically selected for computational tractability rather than their ability to incorporate meaningful prior information. However, the probability of an edge $(u, v)$ existing between two nodes is an interpretable quantity that can often be informed by domain expertise. For example, in gene regulatory networks, epidemiological networks, and social networks experts often have prior knowledge about the likelihood of specific interactions, transmissions, or friendships, respectively, which can be directly incorporated into edge prior $p(z_{(u,v)})$. We believe the limited exploration of variational modeling for edge probabilities is due to the previous lack of an expressive, stable, explicitly reparameterizable bounded-interval distributions.
+
+\noindent\textbf{Variational Edge Encoder (VEE).} We propose a fully factorized KS variational posterior $\prod_{(u, v) \in \mathcal{D}_{tr}} q_{\boldsymbol{\phi}}(z_{u,v} | \mX, \mathcal{D}_{tr})$ with a uniform prior $p(\vz) = U_{(0,1)}^{|\mathcal{D}_{tr}|}$.  The GNN encoder $e_{\boldsymbol{\phi}}$ parameterizes a KS distribution for each possible edge $(u,v)$. The remaining structure is highly similar to VBEs: a single sample $\tilde{z}_{u, v} \sim q_{\boldsymbol{\phi}}(z_{u,v} | \mX, \mathcal{D}_{tr})$ directly parameterizes the Bernoulli likelihood, and we maximize a sample approximation of the modified ELBO
+\begin{align}
+    \label{eq:VEE-ELBO}
+    \hat{\mathcal{L}}_{\beta_{\text{KL}}}((\mX, \mathcal{D}_{tr}), \boldsymbol{\phi}) =
+    \sum_{(u, v) \in \mathcal{D}_{tr}} \log p(z_{(u,v)} | \mX, \mathcal{D}_{tr})
+    + 
+    \beta_{\text{KL}}  \sum_{(u, v) \in \mathcal{D}_{tr}}
+    \mathcal{H}[q_{\boldsymbol{\phi}}(z_{(u,v)} | \mX, \mathcal{D}_{tr})].
+\end{align}
+From their similarity with VBEs, VEEs inherit the same advantages outlined in Section~\ref{ssec:mab}.
+
+\noindent\textbf{Models, metrics, and datasets.} 
+All models use a $2$-layer GNN with Graph Convolutional Network (GCN) layers and a hidden/output nodal dimension of $32$. In Base-GNN, an MLP decodes the final nodal embeddings into link probabilities. In VEE-KS/Beta/$\tanh_{\mathcal{N}}$ an MLP parameterizes the KS/Beta/$\tanh_{\mathcal{N}}$ variational distributions; all take $\beta_{\text{KL}} = .05|\mathcal{D}_{tr}|^{-1}$. 
+We use $10$ samples in $\tanh_{\mathcal{N}}$'s entropy estimate; more did not produce significant performance differences. We train for $300$ epochs, with a learning rate of $.01$, averaging results over $5$ runs with different seeds. The posterior predictive distribution over binary links $p(\mA) = \int p(\mA|\mZ)p(\mZ) d\mZ$ is estimated by using a single sample from each KS/Beta distribution, parameterizing each edge Bernoulli distribution with such samples, followed by sampling binary edges. For Base-GNN we directly sample binary edges from the likelihood. Using $30$ posterior predictive samples, we compute the edge-wise posterior predictive mean (pred. mean) and standard deviation (pred. stdv.). We report the Pearson correlation $\rho$ between predictive uncertainty (pred. stdv.) and error ($\ell_1$ difference between pred. mean and the true label), as a measure of uncertainty calibration: useful uncertainty estimates should show strong associations between uncertainty and error. Additionally, we compute area under the ROC curve (AUC) using pred. mean as a predictor. Figure~\ref{fig:gnn-bar} shows performance across $3$ standard citation networks: Cora, Citeseer, and Pubmed.
+\begin{wrapfigure}{r}{0.69\textwidth}
+    \centering
+\includegraphics[width=\linewidth]{figures/gnn_bar.png}%_and_time_series.png}
+    \caption{VEE-KS produces informative and calibrated edge \\posterior predictives.}
+    \label{fig:gnn-bar}
+\end{wrapfigure}
+
+\noindent\textbf{Discussion of results.} On all datasets and all metrics, VEE-KS outperforms or matches the most performant baselines, providing higher predictive accuracy (AUC) and better uncertainty calibration (higher $\rho$). Similar to Section~\ref{ssec:mab}, we find Beta distributed variational posteriors perform significantly worse than those using KS or $\tanh_{\mathcal{N}}$, further underlining the importance of explicit reparameterization. Moreover, models using explicitly reparameterizable latents are faster: on the largest dataset (Pubmed), the average time (ms) per epoch for VEE-KS, VEE-$\tanh_{\mathcal{N}}$, and VEE-Beta was
+\(381 \pm 61\),
+\(301 \pm 26\), and
+\(447 \pm 86\) 
+respectively, on an Apple M$2$ CPU.
+
+
+\section{Related Work}
+
+
+
+\noindent\textbf{VBEs in context: TS-based Bernoulli MAB approaches.} 
+Existing TS-based approaches for Bernoulli MABs assume a prior over model parameters $p(\boldsymbol{\phi})$, which map contexts to rewards through $e_{\boldsymbol{\phi}}$.
+At each round, parameters are sampled from the posterior, $\tilde{\boldsymbol{\phi}}_t \sim p(\boldsymbol{\phi} | \mathcal{D})$, and used to compute mean reward posterior samples $\{e_{\tilde{\boldsymbol{\phi}}_t}(\vx_k)\}_{k=1}^K$. However, the Bernoulli likelihood often leads to intractable posteriors, making parameter sampling difficult. Common methods use either variational approximations~\citep{chapelle2011empiricalTS, urteaga2018variational, clavier2023vits}, primarily Laplace, or MCMC approaches like Gibbs sampling~\citep{dumitrascu2018pgLogisticCB} or LMC~\citep{xu2022langevinbandit}.
+These approaches face several limitations.
+First, incorporating prior knowledge is challenging since the relationship between a parameter’s value and its effect on rewards is often unclear, except in the simplest models. 
+Second, scalability is a concern: Laplace approximations become inefficient with large context dimensions % % O(d^3) Cholesky decomp
+or model sizes, while MCMC-based methods are compute and memory intensive, requiring long burn-in periods (typically $10^2$ iterations) and large machine memory to store the buffer $\mathcal{D}$. % also: MCMC/Gibbs samplers don't scale well with number of model parameters 
+Third, interpreting model beliefs over mean rewards requires drawing numerous posterior samples, adding further computational cost. 
+Finally, these methods often introduce significant complexity through intricate algorithms, architectures, optimization steps, and hyperparameters, particularly MCMC parameters (e.g., burn-in iterations, chain length, LMC inverse temperature/weight decay and their respective schedules). By directly modeling mean rewards with a KS, 
+instead of the parameters $\boldsymbol{\phi}$, VBEs offer a simple, scalable, and interpretable approach to Bernoulli MABs.
+
+\noindent\textbf{Kumaraswamy as a Beta surrogate}. A simple approach to overcome the Beta distribution's lack of explicit reparameterization is to use the KS as a surrogate. This surrogate approach is feasible due to their significant similarities when defined by the same two parameters %meaning: plug in the same a and b and we get a and Beta(a, b) \approx KS(a, b)
+and the availability of a high-fidelity closed-form approximation of the KL divergence between Beta and KS distributions.~\citep{nalisnick2016approximateDLGM, nalisnick2022stickBreakVAE} use KSs as surrogates for Betas in the Dirichlet Process stick-breaking construction to allow for stochastic latent dimensionality in a VAE. However, both require parameter clipping for numerical stability. In their published code~\citep{nalisnick2016approximateDLGM} constrains KS parameters $\log a, \log b \in [-2.3, 2.py#L431
+, significantly limiting the expressiveness of latent KS distributions. Also,~\citep{nalisnick2022stickBreakVAE} comments under a \textit{Computational Issues} section that `If NaNs are encountered...clipping the parameters of the variational Kumaraswamys usually solve the problem
+\citep{stirn2019MvKumar} improved upon~\citep{nalisnick2016approximateDLGM} by resolving the order-dependence issue in approximating a Beta with a KS. Similarly,~\citep{singh2017IndianBuffet} followed a comparable process using an Indian Buffet Process. Both works maintained numerical stability by restricting the uniform base distribution's support from the unit interval to a narrower interval, before passing the samples through the inverse CDF producing a distortion of the reparameterized sampling distribution. 
+This work eliminates the need for such distortions, enabling more accurate Beta approximations and simplifying the use of the KS distribution by ensuring numerical stability without additional interventions.
+
+
+\section{Conclusion, Limitations, and Future Work}
+
+
+We identified and resolved key numerical instabilities in the KS distribution, a uniquely attractive option in scalable variational models for bounded latent variables. Our work demonstrates that the stabilized KS can tackle a wide range of large-scale machine learning challenges by powering simple deep variational models. We introduce the Variational Bandit Encoder, which enhances exploration-exploitation trade-offs in contextual Bernoulli MABs, and the Variational Edge Encoder, which improves uncertainty quantification in link prediction using GNNs. Our empirical results show these models are both performant and fast, achieving their best performance with the KS while avoiding the instability and complexity seen in alternatives like the Beta or $\tanh_{\mathcal{N}}$ distributions. These models open avenues for addressing other large-scale challenges, including in recommendation systems, reinforcement learning with continuous bounded action spaces, network analysis, and uncertainty quantification in deep learning, such as modeling per-parameter dropout probabilities using a Concrete distribution~\citep{gal2017concrete}.
+
+KS generalizations~\citep{usman2020invertedKS} inherit $\log(1 - \exp(x))$ instabilities, which future work can resolve by building on our stabilization technique. 
+A limitation of the current models is their inability to capture multimodal posteriors. Future work could explore KS mixtures or hierarchical latent spaces to bridge this gap. Further, optimizing the $\beta_{\text{KL}}$ parameter with techniques like warm-up schedules could yield further performance gains~\citep{alemi2018fixing}. Lastly, a theoretical analysis of the VBE, particularly in proving regret bounds, could extend its applicability to critical areas like clinical trials, where robust decision-making under uncertainty is essential.
+
+
+
+

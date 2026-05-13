@@ -1,0 +1,347 @@
+\title{ROOT DEFENCE STRATEGIES: ENSURING SAFETY OF LLM AT THE DECODER LEVEL}
+
+\begin{abstract}
+Large language models (LLMs) have demonstrated immense utility across various industries. However, as LLMs advance, the risk of harmful outputs increases due to incorrect or malicious instruction prompts. While current methods effectively address jailbreak risks, they share common limitations: 
+1) Judging harmful responses from the prefill-level lacks utilization of the model's decoding outputs, leading to relatively lower effectiveness and robustness. 2) Rejecting potentially harmful responses based on a single evaluation can significantly impair the model's helpfulness.
+This paper examines the LLMs' capability to recognize harmful outputs, revealing and quantifying their proficiency in assessing the danger of previous tokens. Motivated by pilot experiment results, we design a robust defense mechanism at the decoding level.
+Our novel decoder-oriented, step-by-step defense architecture corrects harmful queries directly rather than rejecting them outright. We introduce speculative decoding to enhance usability and facilitate deployment to boost secure decoding speed. Extensive experiments demonstrate that our approach improves model security without compromising reasoning speed. Notably, our method leverages the model's ability to discern hazardous information, maintaining its helpfulness compared to existing methods.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+In recent years, significant progress has been made in developing large language models (LLMs). Meanwhile, the safety of LLMs has attracted significant attention from the research community and industry~\citep{weidinger2021ethical, achiam2023gpt, wu2023autogen}. One of the primary safety concerns is \textit{jailbreaking}, where malicious actors or errant inputs prompt LLMs to produce harmful or inappropriate content, effectively bypassing ethical guidelines. Many attempts have been made to address these risks. For example, Meta has implemented several strategies in both pre-training and fine-tuning phases to improve the safety of their Llama-series models~\citep{touvron2023llama,dubey2024llama}. Despite these efforts, some studies have reported that focusing too narrowly on safety may diminish the models' general capability~\citep{bai2022training, huang2024safealigner}. Therefore, enhancing LLMs' safety without compromising their utility has become a critical area of research.
+
+Recent defense strategies against jailbreaks can be roughly categorized into two groups (as shown in Figure~\ref{intro}). The first group is \textit{prefill-level defense}~\citep{wu2023defending, phute2023llm, zheng2024prompt}. It enhances the models' protective capabilities by integrating additional security measures into the initial prompts (prefills) or refining their representation. However, this approach primarily depends on user inputs to detect harmful responses, making it susceptible to rapidly advancing jailbreaking techniques. Moreover, this reliance can lead to inaccuracies in interpreting user intentions, thereby reducing the overall utility of the LLMs. Another group of methods is \textit{response-level defenses}~\citep{phute2023llm, xu2024safedecoding}. It involves using safety filters that assess the potential harmfulness of model-generated responses. This method focuses on the output of the models, potentially offering improved performance by directly addressing the content generated. However, this strategy typically involves a single evaluation point, which may result in false positives that could diminish the model's utility by restricting benign responses.
+
+\begin{figure}[!t]
+    \begin{minipage}{\linewidth}
+    	\centerline{\includegraphics[width=\textwidth]{intro.png}}
+    	\end{minipage}
+      \caption{Examples of two kinds of imperfect defenses and RDS. (a) Prefill-level defenses fail to refuse the harmful query with $N$ harmful tokens. (b) Response-level defenses judge the whole output in a single-point evaluation without consideration of the prefill. (c) RDS conducts step-by-step assessments for each sampled token to enhance the security of LLMs at the decoder level.}
+      \label{intro}
+\end{figure}
+
+In practice, jailbreak instructions can bypass the prefill-level defenses and achieve their purposes in the model's response~\cite {wei2024jailbroken}. Therefore, assessing jailbreak behavior in LLMs should focus on decoding dimensions, including the context of both the prefill and the model's response. We aim to directly address and rectify jailbreak behavior by focusing on the decoding level. \citep{zheng2024prompt} has demonstrated models' ability to distinguish between harmful and benign prefill. This raises the question: \textbf{Can LLMs extend this discriminative capability to their own decoding?} To investigate this hypothesis, we conduct a series of preliminary experiments to explore the model's ability to discern its own decoding. Specifically, we evaluate five open-source LLMs and visualize the hidden state of the decoding on a token-by-token basis. We observe that LLMs cannot distinguish harmful tokens from harmless tokens in one step, but it can achieve identification through multi-step judgment at the decoding, especially for harmful prefill.
+Based on pilot results, we introduce a novel decoder-oriented defense, termed RDS, defencing by step-by-step evaluation during inference. Informed by the discriminative capability of LLMs on decoding, RDS utilizes a trainable classifier to assess the harmfulness of candidate tokens during sampling and adjust their logits accordingly. Subsequently, RDS reorders the candidate tokens and prioritizes the token with lower harmfulness at each step to ensure a safe response iteratively. The step-by-step safe generation provides a root defense on LLM's decoding (encompassing the context of both prefill and response) perspective and multi-step evaluation. Furthermore, speculative decoding is incorporated into RDS for hidden state prediction to enhance the generation speed, potentially achieving a more fundamental and efficient defense mechanism. 
+
+We evaluate RDS on five LLMs and a series of harmful and harmless query benchmarks. Experimental results demonstrate that RDS outperforms existing approaches in terms of both security and helpfulness, reducing compliance with harmful queries from 14.4\% to 2.4\% on Xstest (\citep{rottger2023xstest}) (without safety prompt) and increasing token generation speed by \textbf{$\mathbf{2.12\times \sim 3.09\times}$} compared to other baselines. We hope this method offers a new perspective to security defense, i.e., assessing the security of a problem from the decoding level, thereby achieving a root defense effect.
+
+
+
+\section{Preliminary: Decoding-level Defence}
+
+In this section, we design a series of experiments to evaluate the capability of LLMs to discriminate between harmful and benign outputs at the decoding stage. We first outline the rationale for shifting focus from prefill analysis to decoding, followed by the details of our experimental setup. Finally, we summarize the experimental results and provide a deeper analysis of their implications.
+
+\subsection{LLMs' Discriminative Capability of Decoding}
+The prefill stage for LLMs typically includes a user query, often accompanied by prefixed or suffixed elements such as system prompts. Previous studies have demonstrated that LLMs can discriminate between different types of prefill and use this ability to enhance safety mechanisms. However, relying solely on prefill analysis for security evaluations presents significant limitations: 1) Jailbreaking behaviors often manifest in the model's output, and focusing solely on prefill may overlook these behaviors, compromising overall robustness; 2) Evaluation based purely on prefill places excessive dependence on the model's initial discriminative capacity, and a single-stage evaluation may lead to rejecting outputs prematurely, reducing the model's utility.
+
+To address these limitations, we explore whether LLMs can discriminate harmful from benign content during decoding, which encompasses both the prefill and the model’s generated outputs. If LLMs can reliably evaluate the safety of their own outputs in real time, they can offer a more comprehensive and proactive approach to security. Decoding-based defenses leverage the dynamic nature of model outputs, allowing for a more fundamental and continuous risk assessment.
+
+\subsection{Experiments}
+In this section, we evaluate five open-source LLMs and utilize Principal Component Analysis (PCA) to visualize their hidden states during the decoding process. To facilitate classifier training, we curate Custom from the DRO~\citep{zheng2024prompt} as the training dataset of the classifier, consisting of 100 harmful and 100 benign queries, all beginning with the phrase ``How to''. The evaluated LLMs are accessible on HuggingFace: \texttt{Llama-2-chat-7B}~\citep{touvron2023llama}, \texttt{Llama-3-8b-Instruct}~\citep{llama3modelcard}, \texttt{Qwen2-7B-Instruct}~\citep{yang2024qwen2}, \texttt{Vicuna-7B-v1.3}, and \texttt{Vicuna-13B-v1.3}~\citep{chiang2023vicuna}. Notably, some models, such as those in the Llama series, have undergone extensive safety alignment.
+
+Following previous studies~\citep{zheng2024prompt}, we use the hidden states $\mathbf{h}$ of the prefill at the top layer of the model for classifier training. The classifier is applied to the decoding sampling strategy. Refusal responses often start with special tokens, such as ``I'm sorry'' or ``As an AI'', which distinguish them from compliant responses. Given the distinct nature of refusal and compliant responses, particularly at the start of the output, we focus on the first three tokens and the last token of the output (i.e., $i \in {1,2,3,N}$, where $N$ is the length of the output), visualizing the hidden states of each token from the top layer.
+
+The responses to harmful queries are assessed using Llama-guard~\citep{bhatt2023purple}, which is a safety classification model based on LLaMA-2~\citep{touvron2023llama}. Benign responses are evaluated through string matching. If refusal strings are identified in the response, it is categorized as a refusal response; otherwise, it is not. A compliant answer is assigned an evaluation score $s$ of 1, otherwise 0. Lower scores are preferable for harmful queries, while higher scores are ideal for benign queries. In the preliminary experiment, we sample one response for each query.
+
+
+\subsection{Visualization Analysis} 
+
+We apply PCA to visualize the hidden state and compute the first four principal components of the hidden states. Figure \ref{ideal} respectively show the visual results from the first to the third token and the last token of the refusal responses for harmful queries (represented by ``refusal+i'') and compliance for benign queries (represented by ``compliance+i''). In Figure \ref{ideal}, harmful and benign queries can be clearly distinguished at the hidden state layer. The boundary, depicted by a black dashed line, separates these two queries using training with only a few parameters. LLMs naturally can discern the harmfulness of inputs.
+
+\textbf{Can LLMs extend this discriminative capability to their own decoding?} In Figure \ref{ideal}, from 1-th to 3-th token, almost all the \textit{tokens to benign queries maintain at the benign side} for all LLMs. However, for harmful queries, although refusal tokens refer to safe responses, the first few tokens are not classified correctly. Instead, we observe that the \textit{refusal tokens to harmful queries tend to converge towards the benign side with a smaller offset than harmful tokens.} This shift is most pronounced in llama-2-chat-7B and Qwen2-7B-Instruct, whose responses to harmful queries are all refusal. Even on models with poor defense, this shift still exists. We interpret these observations as the discriminative capacity of LLMs to their own decoding.
+
+\textbf{Can we consider LLMs' output harmful based on a single judgment?} Figure \ref{ideal} illustrates that the classifier cannot accurately determine whether the output is harmful based solely on the model's overall decoding (i.e., the complete output). Even current advanced methods cannot guarantee 100\% filtering. Considering the experimental results, we believe that making a single-step judgment is insufficient to determine if the output is harmful. In conjunction with Figure \ref{ideal}, although the model cannot make an accurate judgment in one attempt, it can achieve better discrimination through a step-by-step evaluation of the decoding. Therefore, we believe a gradual assessment approach at the decoding can lead to more effective defense mechanisms.
+\begin{figure}[!t]
+    \begin{minipage}{0.235\linewidth}
+    	 	\centerline{\includegraphics[width=\textwidth]{ideal/Llama-2-7b-chat-hf_2.jpg}}
+    	 	\centerline{\includegraphics[width=\textwidth]{ideal/qwen2-7b-instruct_1.jpg}}
+                \centerline{\includegraphics[width=\textwidth]{ideal/vicuna-13B-1.3_2.jpg}}
+
+    	 	\centerline{(1) i=1 }
+    	 \end{minipage}
+      \begin{minipage}{0.235\linewidth}
+    	 	\centerline{\includegraphics[width=\textwidth]{ideal/Llama-2-7b-chat-hf_3.jpg}}
+    	 	\centerline{\includegraphics[width=\textwidth]{ideal/qwen2-7b-instruct_2.jpg}}
+                \centerline{\includegraphics[width=\textwidth]{ideal/vicuna-13B-1.3_3.jpg}}
+
+    	 	\centerline{(2) i=2}
+    	 \end{minipage}
+      \begin{minipage}{0.235\linewidth}
+    	 	\centerline{\includegraphics[width=\textwidth]{ideal/Llama-2-7b-chat-hf_4.jpg}}
+    	 	\centerline{\includegraphics[width=\textwidth]{ideal/qwen2-7b-instruct_3.jpg}}
+            
+                \centerline{\includegraphics[width=\textwidth]{ideal/vicuna-13B-1.3_4.jpg}}
+
+    	 	\centerline{(3) i=3}
+    	 \end{minipage}
+      \begin{minipage}{0.235\linewidth}
+    	 	\centerline{\includegraphics[width=\textwidth]{ideal/Llama-2-7b-chat-hf_last.jpg}}
+    	 	\centerline{\includegraphics[width=\textwidth]{ideal/qwen2-7b-instruct_last.jpg}}
+                \centerline{\includegraphics[width=\textwidth]{ideal/vicuna-13B-1.3_last.jpg}}
+    	 	\centerline{(4) i=last}
+    	 \end{minipage}
+      \caption{Performance of the classifier at the decoding from the 1-th to 3-th token and last token of the output. The red crosses represent the hidden states for harmful queries, while the blue circles represent the hidden values for benign queries.}
+      \label{ideal}
+\end{figure}
+
+
+
+\section{Methodology}
+
+Motivated by validating the capability to recognize responses, we propose RDS to ensure the safety of LLMs at the decoder level. The architecture of RDS is illustrated in Figure \ref{rds}. We design a step-by-step defense mechanism that directly corrects the harmful token into a safe token when generating the response. Additionally, we introduce speculative decoding into RDS to speed up token generation. Benefitting from step-by-step safe generation and speculative decoding, RDS achieves root security without compromising helpfulness and speed.
+
+\begin{figure}[!htbp]
+    \begin{minipage}{\linewidth}
+    	 \centerline{\includegraphics[width=0.95\textwidth]{RDS.png}}
+    	 \end{minipage}
+      \caption{RDS comprises two key modules: 1) Step-by-step token generation: The root classifier is designed based on the discriminative capacity of queries. By adjusting the logits of candidate tokens, RDS reorders the token and prioritizes the benign token. 2) Speculative decoding: RDS predicts the hidden state from speculative decoding instead of multiple transformer blocks.}
+      \label{rds}
+\end{figure}
+
+\subsection{Problem Formulation}
+ RDS aims to minimize $c_i$ at each step. We formulate this process as follows:
+\begin{equation}
+\underset{x_i}{\min_{}} \sum_{i=1}^{N} c_i \quad ; \quad x_{i} = \text{LLM}(x_{i-1};\mathbb{C}_{i})
+\label{eq_problem}
+\end{equation}
+where $N$ is the length of outputs, and at each step $t_i$, the LLM obtains prior decoding $x_{i-1}$ and the harmful results $\mathbb{C}_{i}$ of candidate tokens to generate next token $x_{i}$. RDS constructs the candidate tokens according to the logit value and samples a new token from the candidate tokens. By ensuring the security of each step, RDS promises a safe response. 
+
+\subsection{Step-by-step safe generation}
+
+During the autoregressive decoding of LLMs, LLM maps the hidden state of its decoding $x_{i-1}$ at step $t_{i-1}$ to the vocabulary dimension and sample the next token by top-$k$~\citep{fan2018hierarchical}:
+\begin{equation}
+    \mathbb{I}_{i}, \mathbb{V}_{i}= \mathrm{Topk}(\mathrm{softmax}(\mathbf{l}_{i-1})),
+\label{eq_candidate}
+\end{equation}
+where $\mathbf{l}_{i-1}=\text{LM\_Head}(\mathbf{h}_{i-1})$ represents the logits of the decoding at step $t_{i-1}$, $\mathbf{h}_{i-1}$ represents the hidden state of the decoding at step $t_{i-1}$, $\mathbb{I}_{i}$ and $\mathbb{V}_{i}$ represent the set of top-$k$ candidate tokens and the logits values of these candidate tokens, respectively. 
+
+Safety disclaimers frequently rank among the top tokens \citep{zheng2023judging} in the inference process. To enhance security, RDS aims to adjust the logits of these tokens further. The classifier from the pilot experiments is integrated into the sampling strategy during decoding. This integration provides a real-time safety assessment of candidate tokens, adjusting the top-$k$ tokens to safer alternatives, ensuring the safety of the next generated token. Consequently, the computation of $c_i$ in Equation (\ref{eq_problem}) is detailed into the following components:
+\begin{equation}
+    \mathbf{m}_{k} = {\mathbf{V}}^T(\mathbf{h}_i^{k} -\mathbf{u}),
+\label{eq_pca_candidate}
+\end{equation}
+\begin{equation}
+    c_{k} = {\mathbf{W}}^T\mathbf{m}_{k}+\mathbf{b},
+\label{eq_score_candidate}
+\end{equation}
+\begin{equation}
+    x_{i} = \mathrm{argmax}(\mathbb{C}_{i}),
+\label{eq_safetoken}
+\end{equation}
+where $\mathbf{h_i^{k}}$ is the hidden state of the dececoding at step $t_{i}$ concatenated with the candidate token from $\mathbb{I}_{i}$, $\mathbf{m_{k}}\in \mathbb{R} ^m$ represents the first $m$ principal components of $\mathbf{h_{k}}$, $c_{k}\in \mathbb{R} ^1$ is the harmful score of the candidate token, $\mathbb{C}_{i}$ is the set of harmful scores of the candidate tokens. 
+\subsection{Speculative decoding}
+
+RDS leverages the discriminative ability of decoding for defense by computing the harmful score of candidate tokens based on their hidden states. It concatenates decoding at step $t-1$  with candidate tokens to obtain the hidden state at step $t$ resembling speculative decoding processes (such as EAGLE \citep{li2024eagle}) that predict hidden states from decoding and tokens. To increase decoding speed, RDS extends EAGLE's resampling to accelerate generation.
+Unlike traditional LLMs that compute hidden state through autoregressive decoding with multiple Transformers blocks, RDS utilizes  $\mathrm{EAGLE\_Head}$ to predict the hidden state $\mathbf{h}_{i}$ at step $t_i$, thereby accelerating the inference process. This prediction is based on the candidate token and the hidden state of decoding at step $t_{i-1}$. The hidden state in Equation (\ref{eq_pca_candidate}) can be expressed as:
+\begin{equation}
+    \mathbf{h}_{i}^k  = \mathrm{EAGLE\_Head}(\mathbf{h}_{i-1},\mathbf{e}_{k}),
+\label{eq_eagle_predict}
+\end{equation}
+where $\mathrm{EAGLE\_Head}$ consists of a FC layer and a decoder layer from the original LLM; $\mathbf{e}_{k}$ represents the embedding of the candidate token $x_{k}$. After predicting the hidden state at step $t_i$, the step-by-step safe token generation is conducted on this predicted hidden state. 
+
+We summarize the inference process of RDS as $\mathrm{Draft\_Model}$, which can be formulated as:
+\begin{equation}
+    x_{N}=\mathrm{Draft\_Model}(\mathbf{h}_{0}).
+\label{eq_eagle}
+\end{equation}
+where $\mathbf{h}_{0}$ denotes the hidden state of the prefill at step $t_0$, $x_{N}$ represents the output of LLMs. Equation (\ref{eq_eagle}) reveals that RDS only generates the safe response from the hidden state of prefill, without additional LLMs training nor other models introduced.
+\subsection{Highlights}
+
+As a decoder-oriented defense, the advantages of RDS are summarized as follows:
+
+First, RDS demonstrates a root defense by leveraging the discriminative capabilities in LLMs' decoding level. It fully utilizes the model's understanding of context by evaluating the harmfulness from both input and output dimensions. Guided by a classifier with fewer parameters, RDS identifies harmful tokens during the early inference stage and corrects them to safe tokens, thereby reducing harmfulness in the output. Subsequent experimental results indicate that RDS can enhance the model's defensive capability without additional training for the LLMs.
+
+Secondly, RDS adopts a step-by-step correction strategy by incrementally adjusting the token logits during the sampling process and progressively correcting harmful labels. Instead of relying on single-point evaluations, RDS improves the safety of LLMs through multi-step evaluations, thereby providing stronger assistance capabilities and a lower false alarm rate for user queries. Furthermore, experiments demonstrate that RDS is more helpful than other methods on various safety benchmarks, further indicating the transferability of RDS.
+
+Finally, to enhance the reasoning speed of RDS and facilitate its practical implementation, we incorporate a speculative decoding structure into the resampling process. It leverages the advantages of the step-by-step mechanism to accelerate the generation process. Experimental results demonstrate that the token generation speed of RDS is approximately $\mathbf{2.12\times \sim 3.09\times}$ faster than that of the baselines. These improvements demonstrate both the effectiveness and efficiency of RDS.
+
+
+
+\section{Experiments}
+
+
+\subsection{Experimental setup}
+\paragraph{Benchmarks}
+We evaluate the security and helpfulness of RDS and baselines on five benchmarks. 
+(1) \textbf{Custom}~\citep{zheng2024prompt} contains 100 harmful and 100 harmless queries, which are ``How to do'' query pairs synthesized from gpt-3.5-turbo. 
+(2) \textbf{AdvBench}~\citep{zou2023universal} contains 250 harmful queries, we select the top-100 for evaluation. 
+(3) \textbf{MaliciousInstruct}~\citep{huang2023catastrophic} contains 100 harmful question prompts, such as ``How to ...?'' and ``Ideas for...?''. It is specifically designed to encompass various harmful intents (a total of 10), including sabotage, theft, defamation, etc. 
+(4) \textbf{Testset}~\citep{zheng2024prompt} contains 100 harmless queries synthesized from gpt-3.5-turbo to evaluate the false refusals of baselines. 
+(5) \textbf{Xstest}~\citep{rottger2023xstest} contains multiple contrastive queries; we select 100 harmful queries and 100 benign queries in contrastive groups. 
+
+\paragraph{Models}
+We deploy RDS on five opensource LLMs, namely \textbf{Llama-2-chat-7B}~\citep{touvron2023llama}, \textbf{Llama-3-8b-Instruct}~\citep{dubey2024llama}, \textbf{Qwen2-7B-Instruct}~\citep{yang2024qwen2}, \textbf{Vicuna-7B-v1.3}~\citep{chiang2023vicuna}, and \textbf{Vicuna-13B-v1.3}~\citep{chiang2023vicuna}. For brevity, we use LLaMA2, LLaMA3, Qwen2, Vicuna-7B, and Vicuna-13B to refer to them, respectively.
+\begin{table*}[!t]
+	\centering
+    \small
+	\caption{Compliance results on harmful benchmarks of baselines and RDS ($\downarrow $). The best results are in \textbf{bold}. We sample five responses for each query. Once a response is compliant ($s_i>0$) is the answer treated to be compliant. ``base'' represents the original LLM.}
+    \label{harmful_results}
+    \begin{center}
+	\begin{tabular}{llcccccc}
+    \toprule
+    Data&Defense&Vicuna-7B &Vicuna-13B&LLaMA2 &LLaMA3 &Qwen2&Average\\
+    \midrule
+    \multirow{6}{*}{Custom} &base&19&6&0&0&0&5.0 \\
+    &safety prompt&6&0&0&0&0&1.2 \\
+    &Self-Remind  &0&0&0&0&0&0\\
+    &DRO&0&1&0&0&0&0.2\\
+    &Self-Examination &0&0&0&0&0&0\\
+    &SafeDecoding  &0&0&0&0&0&0\\
+    & \cellcolor[RGB]{235,245,250}{RDS}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{\textbf{0}}\\
+    \midrule
+    \multirow{6}{*}{AdvBench} &base&22&10&0&1&2&7.0 \\
+    &safety prompt&6&0&0&0&0 &1.2 \\
+    &Self-Remind  &0&0&0&1&0&0.2\\
+    &DRO&2&0&0&0&0&0.4\\
+    &Self-Examination &0&0&0&0&0&\textbf{0}\\
+    &SafeDecoding  &0&0&0&0&0&\textbf{0}\\
+    & \cellcolor[RGB]{235,245,250}{RDS}&\cellcolor[RGB]{235,245,250}{1}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{0.2}\\
+    
+     \midrule
+    \multirow{6}{*}{\makecell{Malicious\\Instruct}}&base&16&3&0&0&3 &4.4\\
+    &safety prompt&16&3&0&0&3 &4.4\\
+    &Self-Remind  &0&0&0&0&0&\textbf{0}\\
+    &DRO&3&2&0&1&2&1.2\\
+    &Self-Examination &0&0&0&0&0&\textbf{0}\\
+    &SafeDecoding  &0&0&0&0&0&\textbf{0}\\
+    & \cellcolor[RGB]{235,245,250}{RDS}&\cellcolor[RGB]{235,245,250}{1}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{1}&\cellcolor[RGB]{235,245,250}{0.4}\\
+    \midrule
+    \multirow{6}{*}{Xstest} &base&48&12&0&0&12&14.4 \\
+    &safety prompt&0&0&0&0&0&0 \\
+    &Self-Remind  &0&0&0&0&0&0\\
+    &DRO &4&4&0&0&0&1.6\\
+    &Self-Examination &0&0&0&0&0&0\\
+    &SafeDecoding  &0&0&0&0&0&0\\
+    & \cellcolor[RGB]{235,245,250}{RDS}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{\textbf{0}}\\
+    \bottomrule
+	\end{tabular}
+    \end{center}
+
+\end{table*}
+
+\paragraph{Baselines}
+We select five methods as the baselines. The safety prompt serves as the system prompt of LLMs. (2) \textbf{Self-Remind} (\citep{wu2023defending}), which encapsulates the user's query in a system prompt to remind LLMs to respond responsibly. (3) \textbf{DRO} (\citep{zheng2024prompt}), which utilizes the distinguished ability at the prefill level to train the safety prompt embedding to improve the moving direction of the input. Response-based defenses contain: (4) \textbf{Self-Examination} (\citep{phute2023llm}), which checks the response by the LLM itself. (5) \textbf{SafeDecoding} \citep{xu2024safedecoding} that matches the string of safety disclaimers and amplifies the token probabilities of safety disclaimers by training an additional expert model for LLMs. 
+
+\paragraph{Evaluation Metric}
+We select five samples for each query. The evaluation method still follows Section 2.2 to judge whether the response is compliant. We take the average evaluation score of all samples as the final score, which can be denoted as:
+\begin{equation}
+    s_i=\frac{1}{n}  {\textstyle \sum_{j=1}^{n}} s_{ij},
+\label{eq_score}
+\end{equation}
+where $n=5$ is the number of response samples. For harmful queries, the threshold is set to 0. For benign queries, the threshold is set to 0.5.
+\subsection{Main Results}
+Table \ref{harmful_results} presents the baselines, and RDS compliance results on harmful datasets. ``base'' represents the original model. From Table \ref{harmful_results}, we have the following inclusions. %We extend two parts that ``no prompt'' without safety prompt and ``default'' with LLaMA-2 official safety prompt. 
+
+Firstly, RDS effectively reduces compliance to harmful queries on most datasets. After applying the safety prompt, the defense ability of all LLMs further improves (i.e., vicuna-7B on Xstest). However, safety prompt does not always work (i.e., vicuna-7B on MaliciousInstruct). Compared with prefill-level defenses, RDS demonstrates further advantages (0.4 vs. 1.2 on MaliciousInstruct; 0 vs. 1.6 on Xstest). Compared with response-level defense, RDS is on par with SafeDecoding. These indicate that \textbf{RDS demonstrates excellent defense ability at the decoder level.}  %Additionally, for the aligned model, our approach maintains its alignment.  Without safety prompt, RDS is still effective compared to the backbone (1.2 vs.5.0 on Custom; 5.4 vs.7.0 on Advenbench; 3.0 vs. 8.0 on MaliciousInstruct; 2.4 vs.14.4 on Xstest).
+
+Secondly, though trained on Custom, the classifier retains its discriminative ability on other datasets, which demonstrates \textbf{the transferability of the classifier and the generalization ability of RDS.}
+
+Thirdly, \textbf{larger models demonstrate better initial defense than smaller ones within the same series of LLMs.} For instance, in the Vicuna series models, the 13B model surpasses the 7B model in security (6 vs.19 on Custom; 10 vs. 22 on Advenbench; 24 vs. 43 on MaliciousInstruct; 12 vs. 48 on Xstest). We speculate this is because the larger model achieves better safety alignment during training on the more extensive training data.
+
+\begin{table*}[!t]
+	\centering
+    \small
+	\caption{Refusal results on benign benchmarks of the baselines and RDS ($\downarrow$). We sample five responses for each query. The query is treated as a refusal if half of the responses ($s<0.5$) are refused.}
+    \label{benign_results}
+    \begin{center}
+	\begin{tabular}{llcccccc}
+    \toprule
+    Data&Defense&Vicuna-7B &Vicuna-13B&LLaMA2 &LLaMA3 &Qwen2&Average\\
+    \midrule
+
+    \multirow{5}{*}{Custom} &base&0&0&4&0&0&0.8 \\
+    &safety prompt &0&0&5&1&0&1.2\\
+    &Self-Remind &1&3&5&7&1&3.4\\
+    &DRO&0&0&5&0&0&1.0 \\
+    &Self-Examination  &0&0&100&17&0&23.4\\
+    &SafeDecoding  &5&6&14&3&3&6.2\\
+    & \cellcolor[RGB]{235,245,250}{RDS}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{3}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{\textbf{0.6}}\\
+    \midrule
+    \multirow{5}{*}{Testset} &base&0&0&1&0&0&0.2 \\
+    &safety prompt &0&2&3&0&0&1.0\\
+    &Self-Remind &3&2&1&8&1&3.0\\
+    &DRO&0&0&3&0&0&0.6 \\
+    &Self-Examination  &2&1&100&10&0&22.6\\
+    &SafeDecoding  &4&4&16&2&3&5.8\\
+    & \cellcolor[RGB]{235,245,250}{RDS}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{1}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{\textbf{0.2}}\\
+     \midrule
+    \multirow{5}{*}{Xstest} &base&4&20&64&12&12 &22.4\\
+    &safety prompt &16&28&88&36&8&35.2\\
+    &Self-Remind &52&48&96&92&24&62.4\\
+    &DRO&32&72&88&36&24&46.0\\
+    &Self-Examination  &24&28&100&48&24&44.8\\
+    &SafeDecoding  &64&72&96&64&60&71.2\\
+    & \cellcolor[RGB]{235,245,250}{RDS}&\cellcolor[RGB]{235,245,250}{0}&\cellcolor[RGB]{235,245,250}{12}&\cellcolor[RGB]{235,245,250}{64}&\cellcolor[RGB]{235,245,250}{12}&\cellcolor[RGB]{235,245,250}{12}&\cellcolor[RGB]{235,245,250}{\textbf{20.0}}\\
+
+		\bottomrule
+	\end{tabular}
+    \end{center}
+\end{table*}
+
+\subsection{Helpfulness Analysis}
+Table \ref{benign_results} presents the refusal results on the benign datasets of baselines and RDS. The higher the refusal score, the greater the loss of helpfulness caused by defense methods.
+
+Compared to all baselines, our model shows fewer refusal results to benign queries (0.6 vs.23.4 on Custom; 0.2 vs. 22.6 on Testset; 20.0 vs. 62.4 on Xstest). Besides, RDS can even correct the original model's overcorrection (20.0 vs. 22.4 on Xstest). Combined with Table \ref{harmful_results}, it can be included that \textbf{RDS can enhance the security of LLMs without compromising its helpfulness.}
+
+What's more, there is an interesting observation that alignment models tend to reject benign queries (LLaMA2 vs. vicuna-7B). This phenomenon is most evident in Xstest, as it contains polysemous words. For instance, ``kill'' is harmful when referring to ``killing a person'' whereas it is benign when referring to ''kill time''. The increased refusal results of the alignment models on Xstest also reveal that current safety alignment is, to some extent, word-level alignment (20.0 of RDS vs. 46.0 of DRO). While \textbf{RDS can correct this over-correction at the token level.
+
+\subsection{Efficiency Analysis}
+We evaluate the efficiency of baselines and RDS on the Custom (benign). We select one response for each query and collect the number of tokens generated per second in Table \ref{spped_results}. 
+
+The inference speed of prefill-level defenses nearly matches that of the original LLMs. At the same time, response-level defenses are notably lower than the original model's when inferencing. Due to the string matching and additional inference of the expert model, SafeDecoding demands supplementary computational resources. Moreover, SafeDecoding necessitates training the expert model for each LLM, which demands exceptionally high computational resources. Conversely, RDS employs step-by-step safe token generation without additional training of LLMs, utilizing speculative decoding to enhance the inference speed, proving significantly more efficient than other baseline methods. With the support of speculative decoding, the generation speed of RDS is 2.12x $\sim$ 3.09x faster than other baselines. We design another variant, ``- w/o SD'', that removes the speculative decoding of RDS. In ``- w/o SD'', The inference speed significantly drops. We include the reason for the drop that ``- w/o SD'' predicts the hidden state of candidate tokens by autoregressive decoding.
+\begin{table*}[t]
+	\centering
+    \small
+	\caption{Number of tokens generated per second of the baselines and RDS (tokens /s $\uparrow$). ``- w/o SD'' removes the speculative decoding of RDS.}
+    \label{spped_results}
+    \begin{center}
+	\begin{tabular}{lccccc}
+    \toprule
+    Model &vicuna-7B &vicuna-13B& LLaMA2&LLaMA3&Qwen2 \\
+    \midrule
+     base  &41.68&31.74&42.30&38.77&34.61
+     \\
+     safety prompt &43.43&32.15&43.09&40.20&36.43\\
+     Self-Remind  &31.85&25.62&32.27&29.15&40.81\\
+     DRO &43.69&32.99 &43.02&39.41 &35.48  \\
+     Self-Examination &32.19&25.70&25.15&25.00&39.75\\
+     SafeDecoding  &31.99&25.32&31.71&28.75&37.30\\
+     \midrule
+     \cellcolor[RGB]{235,245,250}{RDS}   &\cellcolor[RGB]{235,245,250}{\textbf{73.17}}  &\cellcolor[RGB]{235,245,250}{\textbf{78.29}} &\cellcolor[RGB]{235,245,250}{\textbf{97.77}} &\cellcolor[RGB]{235,245,250}{\textbf{69.98}}  &\cellcolor[RGB]{235,245,250}{\textbf{73.46}} \\
+     - w/o SD &21.25&16.85&21.04&22.25&20.39\\
+		\bottomrule
+	\end{tabular}
+    \end{center}
+\end{table*}
+
+
+\section{Related Work}
+
+\subsection{Existing Defenses}
+Existing safety defenses can be divided into input-based defenses and output-based defenses.
+
+Prefill-level defenses induce LLMs to reject harmful questions by optimizing the input, such as adding a safety system prompt or filtering the input. For instance, IAPrompt (\citep{zhang2024intention}) delves into the intent of input before decoding. Perplexity filtering (\citep{alon2023detecting}) proposes to detect the adversarial suffixes as the signal of harmful input before generating a response. Modifying the input on the encoder for defense can also be modified for attack (\citep{zhao2024weak}). Modifying input for attacks is a deficient consumption and efficient behavior. At present, multiple methods have successfully carried out jailbreak attacks from user input, such as GCG (\citep{zou2023universal}), Auto-DAN (\citep{zhu2023autodan}), Evil Geniuses (\citep{tian2023evil}). Besides, input-based defenses show poor helpfulness with over-defense (\citep{zhou2024robust}).
+
+Response-level defenses enhance the security of LLMs by judging the generated response, which follows the paradigm of generate and then judge. For instance, Self-Examination (\citep{phute2023llm}) checks the response response itself by a pre-defined prompt. SelfDecoding (\citep{xu2024safedecoding}) captures the safety disclaimers from top tokens and amplifies their token probabilities. Response-level defenses must fully generate the output before judging, which affects the model's efficiency. While RDS monitors the token step-by-step, forcing safe token generation in time.
+\subsection{Speculative Decoding}
+Traditionally, token generation is performed step-by-step, where the model generates one token for each step by autoregressive decoding. The generated token concatenated to the input serves as the new input for the next step (\citep{chen2023accelerating}). This approach is straightforward but can be computationally expensive and slow, particularly when generating long text (\citep{kim2023squeezellm}). 
+
+Speculative Decoding is an optimization technique used in LLMs to accelerate the process of token generation (\citep{leviathan2023fast,chen2023cascade}). By the Draft-then-Verify paradigm, speculative decoding generates multiple tokens at each step (\citep{xia2024unlocking}). For example, \citep{zhang2024tinyllama} proposes to use the same serious but more minor LLM as the draft model without additional training. Not all models have a smaller draft model; self-draft becomes a new paradigm instead of using a separate draft model. For instance, Medusa (\citep{cai2024medusa}) incorporates feedforward neural heads atop the decoder to predict tokens in different positions in parallel. 
+
+
+
+\section{Conclusions}
+
+Our study delves into and confirms the discriminative capacity of LLMs at the decoder level. Through preliminary validation, we indicate that LLMs consistently can discern the harmfulness of output tokens at multiple steps. Motivated by these findings, we propose a Root Defense Strategy originating from the decoding level, namely RDS. The incremental safe token generation process enforces security measures. Furthermore, speculative decoding is introduced in RDS to enhance usability and facilitate deployment. Comparative experimental results demonstrate that RDS offers robust and efficient security defense without compromising utility.
+
+\newpage
+
+
+
+
+

@@ -1,0 +1,483 @@
+\title{A Simulation-Free Deep Learning Approach to Stochastic Optimal Control}
+
+\begin{abstract}
+We propose a simulation-free algorithm for the solution of generic problems in stochastic optimal control (SOC). Unlike existing methods, our approach does not require the solution of an adjoint problem, but rather leverages Girsanov theorem to directly calculate the gradient of the SOC objective on-policy. This allows us to speed up the optimization of control policies parameterized by neural networks since it completely avoids the expensive back-propagation step through stochastic differential equations (SDEs) used in the Neural SDE framework. In particular, it enables us to solve SOC problems in high dimension and on long time horizons. We demonstrate the efficiency of our approach in various domains of applications, including standard stochastic optimal control problems, sampling from unnormalized distributions via construction of a Schr\"odinger-F\"ollmer process, and fine-tuning of pre-trained diffusion models. In all cases our method is shown to outperform the existing methods in both the computing time and memory efficiency.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Stochastic Optimal Control (SOC) problems~\citep{mortensen1989stochastic,fleming2012deterministic} arise in a wide variety of applications in sciences and engineering~\citep{pham2009continuous,FLEMING2004979,zhang2022path,holdijk2023stochasticoptimalcontrolcollective,hartmann2013characterization,HartmannCarsten}. Their general aim is to add an adjustable drift (the control) in a reference stochastic differential equation (SDE) so that the solutions of the controlled SDE minimize some cost. 
+
+In low dimensions, SOC problems can be tackled by standard numerical methods for partial differential equations since the optimal control can be obtained from the solution of a Hamilton-Jacobi-Bellman equation. In high dimensions, these methods are not applicable, and there has been a lot of recent  effort to solve SOC problems via deep learning (DL), see e.g.~\citep{han2016deep,han2018solving,hure2020deep,domingo2023stochastic,germain2021neural,hu2024recent}. 
+
+The most direct way to leverage DL in the context of SOC is to parameterize the control by a deep neural network, view the SOC objective as a loss for the network parameters, evaluate this loss empirically using solutions of the controlled SDE, and use stochastic gradient descent to evolve the parameters until convergence. This fits into the framework of Neural SDE~\citep{tzen2019neural,li2020scalable}. While straightforward in principle, this approach faces a practical difficulty: since the SOC objective involves expectation over the solutions of an SDE that depend on the control, calculating the gradient of this objective requires differentiating through these solutions. This makes the training costly both in terms of computing time and memory requirement, and has prevented scaling up deep learning calculations of SOC policies.
+
+A way to avoid this difficulty is to use Girsanov theorem to compute the SOC objective via an expectation over a reference process with a control that is independent from the control being optimized. Unfortunately, this requires to introduce an exponential weighing factor under the expectation to remove the bias incurred, and the variance of this factor is typically large if the control in the reference process is far from the actual control. This again limits the scalability of the approach. 
+
+In this paper, we propose a different procedure based on the observation that the gradient of the SOC objective over parameters in the control  can be expressed exactly in terms of an expectation over the controlled process  (which is referred to as \textit{on-policy evaluation}) \textit{without differentiating through the solution of this process}. This result, first derived in~\cite{yang1991monte}, is obtained using Girsanov theorem, but it gives an expression for the gradient that does not involve any exponential weighing factor. We also show that it is possible to calculate  this gradient via automatic differentiation of an alternative objective, provided that we detach some of its parameters via stopgrad.
+
+Specifically, our work makes the following \textbf{main contributions}:
+
+\begin{itemize}[leftmargin=0.15in]
+    \item We propose a simulation-free, on-policy algorithm for solving generic SOC problems by deep learning and scaling up these calculations to situations where methods based on the Neural SDE framework is too costly to be applied. 
+    \item We discuss how to apply the method to construct F\"ollmer processes between a point mass and an unnormalized target distribution. Our approach can be used to sample this target and compute its normalization constant. 
+    \item We also discuss how to apply the method to fine-tune generative models based on diffusions: that is, assuming that we have at our disposal an SDE that samples a given distribution, we show how to find, via solution of a SOC problem, a new SDE that samples the distribution obtained by tilting the first one by a given reward function.
+    \item We illustrate these results with numerical experiments showing that our method is much less expensive in terms of computing time and memory requirement than vanilla methods requiring differentiation through the solution of the SDE (such as in the Neural SDE framework). 
+\end{itemize}
+
+\subsection{Related Work}
+\label{sec:related}
+Besides the traditional applications of SOC, such as finance and economics~\citep{pham2009continuous,FLEMING2004979,aghion1992model}, and robotics~\citep{theodorou2011iterative,pavlov2018narrow}, this framework has recently has also found a variety of new applications, for example, sampling of complex non-log-concave probability distributions or simulation rare events~\citep{zhang2022path,holdijk2023stochasticoptimalcontrolcollective,hartmann2013characterization,HartmannCarsten,ribeira2024improving}. Our approach is aimed at solving problems of this sort by deep learning. 
+
+Deep learning for SOC has attracted a growing interest in the recent years. Notably, \cite{han2016deep} have proposed a deep learning method for high-dimensional SOC problems by learning the feedback control function. This method then inspired other algorithms to solve backward stochastic differential equations and partial differential equations~\citep{han2018solving}. Further developments can be found e.g. in \citep{ji2020three}, which studied three different algorithms. Another line of research proposed to use dynamic programming instead of learning the optimal control by simulating whole trajectories: see~\citep{hure2021deep} for applications to SOC problems, and~\citep{hure2020deep} for an extension to solving PDEs. Another recent approach is stochastic optimal control matching~\citep{domingo2023stochastic}, based on iterative diffusion optimization (IDO)~\citep{nüsken2023solvinghighdimensionalhamiltonjacobibellmanpdes}. Compared to the approach we propose, these methods either avoid differentiating through the SDE solution by using a independent reference process (off-policy learning), but this typically leads to estimators with high variance; or they use on-policy objectives, but it then requires to differentiate  through the solution of the SDE. Our approach is on-policy but avoids this costly differentiation step. 
+
+ A variant of formula for the gradient of the SOC objective that we used first appeared in \citep{yang1991monte} in the context of sensitivity analysis with applications to finance and economics~\citep{pham2009continuous,FLEMING2004979,aghion1992model}. This formula is also discussed in~\cite{gobet2005sensitivity}, who generalized it to problems in which the volatility also depends on the control. It is also mentioned in several works interested in solving SOC problem with DL \citep{mohamed2020monte,li2020scalable,lie2021frechet,domingo2023stochastic,ribeira2024improving,domingoenrich2024taxonomy}, but to the best of our knowledge it has not been exploited systematically to develop the type of algorithm we propose here.
+
+ SOC also has deep connections with Reinforcement Learning (RL), see e.g. \cite{quer2024connecting,domingo2024adjointmatching,domingoenrich2024taxonomy} for a discussion. The algorithm we propose can be viewed as a continuous-time variant of the well-known REINFORCE method \citep{williams1992simple,williams1988towards,sutton1999policy}.
+
+One application of SOC is the construction of a F\"ollmer process~\citep{follmer1986time}, i.e. a Schr\"odinger bridge between a Dirac delta distribution and a target distribution with unknown normalization coefficient. The Path Integral Sampler (PIS) proposed in \cite{zhang2022path} is a way to solve this problem via DL. PIS offers an alternative to other deep learning methods that have been introduced to calculate Schr\"odinger-F\"ollmer process~\citep{huang2021schrodinger, jiao2021convergence,vargas2023bayesian} . PIS performs the minimization the SOC objective on-policy, and requires to differentiate through the solution of the controlled process. In contrast, our simulation-free approach performs on-policy minimization of the same objective, but it avoids this differentiation  step which, as we will show below, results in significant gains in terms of memory requirement and computing time.
+
+Another context in which SOC problems have found applications is the fine-tuning of generative models~\citep{fan2024reinforcement,clark2024directly,uehara2024finetuning}.  The aim here is to start from a diffusion model trained to sample a given data distribution and adjust the drift in this model so that it samples the probability distribution obtained by tilting the first by a reward function.  Assuming that this reward function is differentiable, a method termed Adjoint Matching was recently proposed in \cite{domingo2024adjointmatching} to perform this fine-tuning: this method uses a specific scheduling of the noise in the diffusion and uses an adjoint method to compute the gradient of a tailored-built SOC objective.  This second step avoids explicit differentiation through the solution of the controlled SDE by solving instead an ODE for an adjoint variable backward in time. Our simulation-free approach is an alternative to Adjoint Matching which uses the original SOC objective and avoid solving the ODE for the adjoint. It also works for any noise schedule, but requires that the base distribution used in the generative model be a point mass distribution. 
+
+
+\section{Methods}
+
+\label{sec:method}
+
+\subsection{Problem setup} 
+\label{sec:setup}
+
+We consider the following stochastic optimal control (SOC) problem:
+\begin{equation}
+    \label{eq:soc}
+    \min_{u \in \mathcal{U}} J(u),
+\end{equation}
+where the objective function is
+\begin{equation}
+\label{eq:obj}
+    J(u) = \mathbb{E}_{X^u} \left[\int_{0}^T \left(\tfrac{1}{2} | u_t(X_t^u)|^2 + f_t(X_t^u)  \right) dt + g(X_T^u)\right],
+\end{equation}
+with $(X_t^u)_{t\in[0,T]}$ solution to the stochastic differential equation (SDE)
+\begin{equation}
+\label{eq:sde}
+    d X_t^u = \left( b_t(X_t^u) + \sigma_t  u_t(X_t^u) \right) dt +  \sigma_t d W_t, \qquad X_0^u \sim \mu_0.
+\end{equation}
+In these equations,  $X^u_t\in \R^d$ is the system state, $\E_{X^u}$ denotes expectation over the law of $(X_t^u)_{t\in[0,T]}$, $u : [0,T]\times \R^d \to \R^d$ is a closed-loop Markovian control that belongs to some set $\mathcal{U}$ of admissible controls to be specified later, $f: [0,T]\times \R^d \to \R^d$ is the state cost,  $g:\R^d \to \R^d$ is the terminal cost, $b:[0,T]\times \R^d \to \R^d$ is the base drift,  $\sigma : [0, T ] \to\R^d\times \R^d$ is the  volatility matrix, which we assume invertible and independent of the state~$X^u_t$, $(W_t)_{t\in [0,T]}$ is a Wiener process taking values in~$\R^d$, and $\mu_0$ is some probability distribution for the initial state. 
+
+We are interested in solving~\eqref{eq:soc} in situations where the set  of admissible controls $\mathcal{U}$ is a rich parametric class, for example made of deep neural networks (DNN). We denote functions in the class by $u^\theta$, where $\theta\in \Theta$ collectively denotes the parameters to be adjusted, e.g. the weights if we use a DNN. 
+
+\subsection{Reformulation with Girsanov theorem}
+\label{sec:grisa}
+
+The main difficulty we face when solving the SOC problem~\eqref{eq:soc} is that the process $X^u_t$ depends on the control $u$ since this control enters the SDE~\eqref{eq:sde}. In particular, vanilla calculation of the gradient of the objective requires to differentiate $X^u_t$: for example, if we parameterize $u=u^\theta$, we need to back-propagate the gradient through the solution of the SDE~\eqref{eq:sde}, which can be very costly. Our aim is to avoid this step and design a simulation-free method to compute the gradient of~\eqref{eq:obj}.
+To this end, our starting point wil be to use Girsanov theorem to rephrase the problem in a way that render the control $u$ explicit in the objective:
+
+\begin{lemma}
+    \label{th:girs}
+    Given a reference control $v \in \cU$, the objective~\eqref{eq:obj} can be expressed as
+\begin{equation}
+\label{eq:obj:G}
+    J(u) = \mathbb{E}_{X^v} \left(\left[\int_{0}^T \left(\tfrac{1}{2} | u_t(X_t^v)|^2 + f_t(X_t^v) \right)  dt + g(X_T^v)\right] M (u,v)\right),
+\end{equation}
+where $(X^v_t)_{t\in[0,T]}$ solves the SDE~\eqref{eq:sde} with $u$ replaced by $v$, $M(u,v)$ is the Girsanov factor
+\begin{equation}
+\label{eq:gfact}
+    M (u,v) =  \exp\left(- \int_{0}^T \left(v_t(X_t^v) - u_t(X_t^v)\right) \cdot d W_t - \frac{1}{2} \int_{0}^T \left|v_t(X_t^v) - u_t(X_t^v)\right|^2 dt  \right),
+\end{equation}
+and the expectation $\E_{X^v}$ in~\eqref{eq:obj:G} is taken over the law of $(X^v_t)_{t\in[0,T]}$.
+\end{lemma}
+
+\begin{proof}
+    The result is a direct consequence of Girsanov change of measure formula between the law of the SDE~\eqref{eq:sde} and of its variant with $u$ replaced by $v$.
+\end{proof}
+
+The main advantage of expression~\eqref{eq:obj:G} for the objective $J(u)$ is that it is explicit in~$u$ since $(X^v)_{t\in[0,T]}$ is independent of this control (which is referred to as an off-policy objective). As a result, the evaluation of the gradient of~\eqref{eq:obj:G} with respect to $u$ no longer requires differentiation through the trajectory of the state process. Of course, if we evaluate empirically $J(u)$ and its gradient via \eqref{eq:obj:G} by replacing the expectation $\mathbb{E}_{X^v}$ by an empirical expectation over a finite set of independent solution of the SDE for $X^v_t$, the variance of the resulting estimator will depend crucially on the reference control~$v$ that we use. This suggests to keep this reference control~$v$ close to the actual control~$u$. Next, we show that we can actually use \eqref{eq:obj:G} to evaluate the gradient of $J(u)$ using the actual process.
+
+\subsection{Gradient computation} 
+\label{sec:grad}
+
+The method proposed in this paper is the following formula for the gradient of $J(u)$ when we parameterize $u=u^\theta$. A similar formula first appeared in~\cite{yang1991monte} and it is also given in~\cite{ribeira2024improving}:
+
+\begin{proposition}
+\label{th:grad}
+Let $u^\theta$ with $\theta\in \Theta$ be a parametric realization of a control in $\mathcal{U}$ and denote $L(\theta) \equiv J(u^\theta)$ the objective~\eqref{eq:obj} viewed as a function of $\theta$. Then 
+\begin{equation}
+\label{eq:grad}
+\begin{aligned}
+\partial_\theta L(\theta)
+    &= \EE_{X^\theta}\left[ \int_0^T u_t^\theta(X^{\theta}_t) \cdot \partial_\theta u_t^\theta(X^{\theta}_t) dt\right]
+    \\ 
+    &\qquad + \EE_{X^\theta}\left[ \left(\int_{0}^T \left(\tfrac{1}{2} | u^\theta_t(X_t^\theta)|^2  + f_t(X_t^\theta) \right) dt  + g(X_T^\theta)\right) \int_0^T \partial_\theta u_t^\theta(X^{\theta}_t)\cdot dW_t \right]
+\end{aligned}
+\end{equation}
+where $\partial_\theta u_t^\theta(X^{\theta}_t)$ denotes $\partial_\theta u_t^\theta(x)$ evaluated at $x=X^{\theta}_t$ and  $(X^\theta_t)_{t\in [0,T]} \equiv (X^{u^\theta}_t)_{t\in [0,T]}$ solves the SDE
+\begin{equation}
+\label{eq:sde:theta}
+    d X_t^\theta = \left( b_t(X_t^\theta) + \sigma_t u^\theta_t(X_t^\theta) \right) dt +  \sigma_t  d W_t, \qquad X^\theta_0 \sim \mu_0,
+\end{equation}
+and the expectation $\E_{X^\theta}$ in~\eqref{eq:grad} is taken over the law of $(X^\theta_t)_{t\in[0,T]}$.
+\end{proposition}
+
+We stress that the gradient expression~\eqref{eq:grad} avoids completely the need of differentiating through the trajectory of the state process $(X^\theta_t)_{t\in[0,T]}$. \eqref{eq:grad} requires that the volatility $\sigma_t$ be invertible (so that \eqref{eq:sde} is elliptic) and independent of the control: it can however be generalized to state-dependent controls via Malliavin calculus~\citep{gobet2005sensitivity}. 
+
+\begin{proof}
+    Equation~\eqref{eq:grad} follows from~\eqref{eq:obj:G} by a direct calculation in which we first evaluate the gradient of the objective $L(\theta) = J(u^\theta)$ with the fixed reference control $v$, which gives:
+    \begin{equation}
+\label{eq:grad:1}
+\begin{aligned}
+&\partial_\theta L(\theta)
+    = \EE_{X^v}\left(\left[ \int_0^T u_t^\theta(X^{v}_t) \cdot \partial_\theta u_t^\theta(X^{v}_t) dt\right] M(u^\theta,v)\right)
+    \\
+    &+ \EE_{X^v}\left[ \left(\int_{0}^T \left(\tfrac{1}{2} | u^\theta_t(X_t^\theta)|^2 + f_t(X_t^\theta) \right)  dt + g(X_T^v)\right) \right. \\
+    & \quad \times \left. \left(\int_0^T \partial_\theta u_t^\theta(X^{v}_t)\cdot dW_t + \int_0^T (v_t(X_t^v)-u^\theta(X_t^v)) \cdot \partial_\theta u_t^\theta(X^{v}_t)\cdot dW_t \right) M(u^\theta,v)\right].
+\end{aligned}
+\end{equation}
+Because \eqref{eq:grad:1} holds for any $v$, we can now evaluate it at $v = u^\theta$. Since $M(u^\theta,u^\theta)=1$, this gives~\eqref{eq:grad}. 
+\end{proof}
+
+
+\begin{algorithm}[tb]
+\caption{Simulation-Free On-Policy Training}
+\begin{algorithmic}[1]
+\State \textbf{Initialize:} $n$ walkers, $K$ time steps, model parameters $\theta$ for $ u^\theta$, gradient descent optimizer
+
+\Repeat
+\State Set $\bar \theta = \text{stopgrad}(\theta)$
+\State Randomize time grid: $t_1, \dots, t_K \sim \text{Uniform}(0, T)$
+\State Add $t_0=0$, $t_{K}=T$, and sort such that $0=t_0 < t_1 < \dots < t_{K-1}< t_{K} =T$
+\State Set $\Delta t_k = t_{k+1} - t_k$
+\For{each walker $i = 1, \dots, n$} 
+ \State Set $x^i_{0} \sim \mu_0$, $A^i_0=0$, $\bar A^i_0 =0$,  $\bar B^i_0=0$,  $C^i_0=0$
+\For{$k=0, \dots, K-1$}
+        \State $\Delta W^i_k = \sqrt{\Delta t_k} \, \zeta^i_k$, where $\zeta^i_k \sim N(0,\text{Id})$
+        \State $x^i_{t_{k+1}} = x^i_{t_k} + u^{\theta}_{t_k} (x^i_{t_k}) \Delta t_k  + \sigma_{t_k}\Delta W^i_k $
+        \State $A_{t_{k+1}^i} = A_{t_k}^i + \tfrac12  |u^\theta_{t_k}(x^i_{t_k})|^2\Delta t_k $
+        \State $\bar A_{t_{k+1}}^i = \bar A_{t_k}^i + \tfrac12  |u^{\bar \theta}_{t_k}(x^i_{t_k})|^2\Delta t_k$
+        \State $\bar B_{t_{k+1}}^i = \bar B_{t_k}^i + f_{t_k}(x^i_{t_k}) \Delta t_k$
+        \State $C_{t_{k+1}}^i = C_{t_k}^i + u_{t_k}^\theta(x^i_{t_k})  \cdot \Delta W^i_k $
+    \EndFor
+\EndFor
+    \State Compute $\hat L_n(\theta,\bar\theta) = n^{-1} \sum_{i=1}^n \big[ A_{t_{K}}^i + \big( \bar A_{t_{K}}^i + \bar B^i_{t_{K}} + g(x^i_{t_{K}})\big) C_{t_{K}}^i \big]$.
+    \State Compute %the gradient of $\hat L_n(\theta,\bar\theta)$
+    $\partial_\theta \hat L(\theta,\bar \theta)\big|_{\bar \theta = \theta}$ and take a step of gradient descent to update $\theta$.
+\Until{converged}
+\end{algorithmic}
+\label{alg:train}
+\end{algorithm}
+
+\subsection{Alternative objective for implementation}
+\label{sec:impl}
+
+Equation~\eqref{eq:grad} can be implemented to directly estimate the gradient of the objective $L(\theta)=J(u^\theta)$ by replacing the expectation $\EE_{X^\theta}$ by an empirical expectation over an ensemble of independent realizations of the SDE~\ref{eq:sde:theta}. Alternatively, we can use automatic differentiation of an alternative objective,  proposed concurrently in~\cite{domingoenrich2024taxonomy}:
+
+\begin{proposition}
+    \label{th:altloss}
+    We have 
+\begin{equation}
+    \label{eq:equiv:grad}
+    \partial_\theta L(\theta) = \partial_\theta \hat L(\theta,\bar \theta)\big|_{\bar \theta = \theta},
+\end{equation}
+where  we defined
+\begin{equation}
+\label{eq:alt:loss}
+\begin{aligned}
+\hat L(\theta,\bar \theta)
+    &= \EE_{X^{\bar \theta}}\left[ \int_0^T \tfrac12|u_t^\theta(X^{\bar \theta}_t) |^2 dt\right]
+    \\ 
+    &\qquad + \EE_{X^{\bar \theta}}\left[ \left(\int_{0}^T \left(\tfrac{1}{2} | u^{\bar \theta}_t(X_t^{\bar \theta})|^2  + f_t(X_t^{\bar \theta}) \right) dt + g(X_T^{\bar \theta})\right) \int_0^T u_t^\theta(X^{\bar \theta}_t)\cdot dW_t \right]
+\end{aligned}
+\end{equation}
+in which $(X^{\bar \theta}_t)_{t\in[0,T]} \equiv (X^{u^{\bar \theta}}_t)_{t\in [0,T]}$ solves \eqref{eq:sde:theta} with $u^\theta$ replaced by $u^{\bar \theta}$ and the expectation $\E_{X^\theta}$ in~\eqref{eq:grad} is taken over the law of this process.
+\end{proposition}
+The proof of this proposition is immediate by direct calculation so we omit it for the sake of brevity. 
+Note that can express the objective~\eqref{eq:alt:loss} as
+\begin{equation}
+\label{eq:alt:loss:2}
+\begin{aligned}
+\hat L(\theta,\bar \theta)
+    &= \EE_{\bar X} \left[ A^\theta_T + \left( \bar A_T  + \bar B_T + g(\bar X_T)\right) \bar C^\theta_T \right]
+\end{aligned}
+\end{equation}
+by defining
+\begin{equation}
+\label{eq:alt:ABC}
+\begin{aligned}
+    d\bar X_t &= b_t(\bar X_t) dt + \sigma_t u^{\bar \theta}_t (\bar X_t) dt +\sigma_t dW_t, \qquad && \bar X_0 \sim \mu_0\\
+    dA^\theta_t &= \tfrac12|u^\theta_t(\bar X_t)|^2 dt, \qquad && A^\theta_0 = 0\\
+    d\bar A_t &= \tfrac12 |u^{\bar \theta}_t(\bar X_t)|^2 dt, \qquad && \bar A_0 = 0\\
+    d\bar B_t & = f_t(\bar X_t) dt, \qquad && \bar B_0 = 0\\
+    d C^\theta _t & = u_t^{\theta}(\bar X_t) \cdot dW_t, \qquad && C^\theta_0 = 0
+\end{aligned}
+\end{equation}
+where  $\bar X_t \equiv X^{\bar \theta}_t$, we use the bar to denote quantities that depend only on $\bar \theta$ and are therefore detached from differentiation over $\theta$, and the Wiener process $W_t$ used in the equations for $\bar X_t$ and $C^\theta_t$ is the same.
+In practice, the calculation of $\partial_\theta \hat L(\theta,\bar \theta)\big|_{\bar \theta = \theta}$ can be implemented using automatic differentiation by setting $\bar\theta=\text{stopgrad}(\theta)$. This avoids again differentiation of $\bar X_t \equiv X^{\bar \theta}_t$ despite working with an on-policy objective. In practice we can again replace the expectation $\EE_{X^\theta}$ by an empirical expectation over an ensemble of independent realizations of the equations in~\eqref{eq:alt:ABC}. This leads to the training method summarized in Algorithm~\ref{alg:train}, which involves one forward pass to evaluate the loss and avoids the need of memorizing any trajectory.
+
+
+\subsection{Application to sampling via construction of a F\"ollmer process}
+\label{sec:follmer}
+
+By definition, the F\"ollmer process that samples a given target probability distribution~$\mu$ is the process $(Y^u_t)_{t\in[0,1]}$ that uses the optimal control $u$ obtained by solving
+\begin{equation}
+\label{eq:obj:folder}
+\begin{aligned}
+     &\min_{u\in \mathcal{U}} \mathbb{E}_{X^u} \int_{0}^1 \tfrac{1}{2} | u_t(Y_t^u)|^2 dt\\
+     \text{where:} \qquad &  d Y_t^u = u_t(Y_t^u) dt +  d W_t, \qquad Y_0^u \sim \delta_0, \quad Y^u_{t=1} \sim \mu.
+\end{aligned}
+\end{equation}
+This problem is a special case of the Schr\"odinger bridge problem~\citep{leonard2014survey} when the base distribution is the Dirac delta distribution $\delta_0$, i.e. the point mass at $x=0$. 
+
+The minimization problem in~\eqref{eq:sde:follmer} is not a SOC problem of the type~\eqref{eq:soc} because of the terminal condition in the SDE that enforce $Y^u_{t=1} \sim \mu$.  Interestingly, it can however be shown~\citep{leonard2014survey,chen2014relation} that the F\"ollmer process can also be constructed by solving a SOC problem, an observation that was exploited by~\cite{zhang2022path}. We recall  this result as follows:
+
+\begin{proposition}
+    \label{th:follmer}
+    Assume that $\mu$ is absolutely continuous with respect of the Lebesgue measure and let its probability density function be $\rho(x) = Z^{-1}e^{-U(x)}$ where $U:\R^d \to\R$ is a known potential and $Z=\int_{\R^d} e^{-U(x)} dx <\infty$ is an unknown normalization factor. Consider the SOC problem using the objective
+\begin{equation}
+\label{eq:obj:folder:soc}
+    J(u) = \mathbb{E}_{X^u} \left[\int_{0}^1 \tfrac{1}{2} | u_t(X_t^u)|^2 dt  -\tfrac12 |X^u_1|^2 + U(X^u_1)]\right],
+\end{equation}
+where $(X_t^u)_{t\in[0,T]}$ solves the SDE
+\begin{equation}
+    \label{eq:sde:follmer}
+    dX^u_t = u_t(X^u_t) dt + dW_t, \qquad X^u_{t=0} \sim \delta_0.
+\end{equation}  
+Then the process $(X^u_t)_{t\in[0,1]}$ obtained by using the optimal control minimizing~\eqref{eq:obj:folder:soc} in the SDE~\eqref{eq:sde:follmer} is the F\"ollmer process that satisfies $X^u_{t=1} \sim \mu$.
+\end{proposition}
+
+We omit the proof of this proposition since it is a special case of Proposition~\ref{th:fine:tune} established below.
+
+The solution to the SOC problem in Proposition~\ref{th:follmer} can be achieved with our approach, thereby offering a simulation-free implementation of the Path Integral Sampler (PIS) proposed by~\cite{zhang2022path} that avoids the extra cost of the differentiation through the solution of the SDE~\eqref{eq:sde:follmer} needed in the original PIS. The computational advantage this offers will be illustrated via examples in Sec.~\ref{sec:expeiments}.
+
+Note that since we have dropped the terminal constraint in the SDE~\eqref{eq:sde:follmer} and replaced in by a terminal cost in~\eqref{eq:obj:folder:soc}, we are no longer guaranteed that $X^u_{t=1} \sim \mu$ if we do not use the optimal $u$. We can however compute unbiased expectation over the target $\mu$ with any control via reweighing using Girsanov theorem, a fact that was also exploited by~\cite{zhang2022path}: 
+
+\begin{proposition}
+    \label{th:girs:follm}
+    Consider the process~$(X^u_t)_{t\in[0,T]}$ obtained by solving the SDE~\eqref{eq:sde:follmer} with any (not necessary optimal) control $u$. Then, given any suitable test function $h:\R^d\to\R$, we have
+\begin{equation}
+    \label{eq:expect}
+    \begin{aligned}
+ \int_{\R^d} h(x) \mu(dx) = Z^{-1} \E_{X^u} \left[h(X^u_T) M(u)\right], \qquad  Z = \int_{\R^d} e^{-U(x)} dx = \E_{X^u} \left[M(u)\right],
+\end{aligned}
+\end{equation}
+where we defined
+\begin{equation}
+    \label{eq:M:f}
+    M(u) = (2\pi)^{d/2}\exp\left( - \int_0^1  \tfrac12|u_t(X^u)|^2dt-\int_0^1 u_t(X^u_t)\cdot dW_t +\tfrac12 |X_1^u|^2- U(X^u_1) \right).
+\end{equation}
+In addition  $M(u)=Z$ \textit{iff} $u$ is the optimal control minimizing the SOC problem with objective~\eqref{eq:obj:folder:soc}. 
+\end{proposition}
+
+We also omit the proof of this proposition since it is a special case of Proposition~\ref{th:fine:tune:2} established below.
+
+\subsection{Application to fine-tuning}
+\label{sec:finetuning}
+
+We can consider a variant of the problem in Sec.~\ref{sec:follmer} aiming at fine-tuning a generative model. Suppose that we are given a process $(Y_t)_{t\in[0,T]}$
+\begin{equation}
+    \label{eq:ref:Y}
+    d Y_t = b_t(Y_t) dt+ \sigma_t dW_t, \qquad Y_0 \sim \delta_0,
+\end{equation}
+where the drift $b$ has been tailored in such a way that $Y_{t=T} \sim \nu$ where $\nu$ is a given probability distribution. Learning such a $b$ can for instance be done using the framework of score-based diffusion models~\citep{song2021scorebasedgenerativemodelingstochastic} or stochastic interpolants~\citep{albergo2022building,albergo2023stochasticinterpolantsunifyingframework} tailored to building F\"ollmer processes~\citep{chen2024forecasting}. Assume that we would like to fine-tune this diffusion so that it  samples instead the probability distribution 
+\begin{equation}
+    \label{eq:nu}
+    \mu(dx) = Z^{-1} e^{r(x)} \nu(dx), \qquad Z= \int_{\R^d} e^{r(x)} \nu(dx)<\infty ,
+\end{equation}
+obtained by tilting $\nu$ by the reward function $r:\R^d \to \R$ (assuming that this tilted measure is normalizable, i.e. $Z<\infty$). Such problems arise in the context of image generation where they have received a lot of attention lately. Our next result shows that it can be cast into a SOC problem.
+
+\begin{proposition}
+    \label{th:fine:tune}  
+    Consider the SOC problem~\eqref{eq:soc} with zero running cost, $f=0$, and terminal cost set to  minus the reward function, $g=-r$, in the objective~\eqref{eq:obj:folder}. Assume also that the drift $b$ and the volatility $\sigma$ used in  the SDE~\eqref{eq:sde} are the same as those used in the SDE~\eqref{eq:ref:Y}  that guarantee that $Y_{t=T} \sim \nu$. Then the solutions of the SDE~\eqref{eq:sde} solved with the optimal $u$ minimizing this SOC problem and $X^u_{t=0} = 0$ are such that $X^{u}_{t=T} \sim \mu$.
+\end{proposition}
+
+ Note that  Proposition~\ref{th:follmer} follows from Proposition~\ref{th:fine:tune} as a special case if we set $b_t(x)=0$,  $\sigma_t=1$, and $T=1$, in which case $\nu = N(0,\text{Id})$, and we can set $r(x) = -U(x)+\frac12 |x|^2$ to target $\mu(dx) = Z^{-1} e^{-U(x)} dx$. 
+
+The SOC problem in Proposition~\ref{th:fine:tune} can again be solved in a simulation-free way using our approach, thereby offering a simple alternative to the Adjoint Matching method proposed in~\citep{domingo2024adjointmatching}. Since in practice the learned control will be imperfect, we will need to reweigh the samples to get unbiased estimates of expectations over them. It can be done using this result:
+
+\begin{proposition}
+    \label{th:fine:tune:2}
+    Let $X^u_t$ solves SDE~\eqref{eq:sde} from the initial condition $X^u_{t=0} = 0$ with an arbitrary (not necesary optimal) $u$ and with the drift $b$ and the volatility $\sigma$  that guarantee that the solutions the SDE~\eqref{eq:sde} satisfy $Y_{t=T} \sim \nu$. Then given any suitable test function $h:\R^d\to\R$, we have
+\begin{equation}
+    \label{eq:expect:ft}
+    \begin{aligned}
+ \int_{\R^d}  h(x) \mu(dx) = Z^{-1} \E_{X^u} \left[h(X^u_T) M_r(u)\right], \quad  Z = \int_{\R^d} e^{r(x)} \nu(dx) = \E_{X^u} \left[M_r(u)\right]
+\end{aligned}
+\end{equation}
+where we defined
+\begin{equation}
+    \label{eq:M:ft}
+    M_r(u) = \exp\left( - \int_0^T  \tfrac12|u_t(X^u)|^2dt-\int_0^T u_t(X^u_t)\cdot dW_t +r(X^u_T) \right)
+\end{equation}
+In addition,  $M_r(u)=Z$ \textit{iff} $u$ is the optimal control  specified in Proposition~\ref{th:fine:tune}. 
+\end{proposition}
+
+ Proposition~\ref{th:girs:follm} follows from Proposition~\ref{th:fine:tune:2} as a special case if we set $b_t(x)=0$,  $\sigma_t=1$, $T=1$,  and  $r(x) = -U(x)+\frac12 |x|^2$.
+
+
+\section{Experiments}
+
+\label{sec:expeiments}
+\subsection{Linear Ornstein-Uhlenbeck Example}
+\label{sec:ou:lin}
+
+We consider the SOC problem in~\eqref{eq:soc} with $f = 0$, $g(x) = \gamma\cdot x$, $\sigma_t= \sigma = cst$, $\lambda = 1$ and $ b_t(x) = Ax$, where $\gamma\in \R^d$ and $\sigma,A\in \R^d\times \R^d$. This example was proposed by~\cite{nüsken2023solvinghighdimensionalhamiltonjacobibellmanpdes} and its optimal control can be calculated analytically:
+\begin{align}
+    u^\ast_t(x) = - \sigma_0^{\top} \exp(A^{\top} (T-t)) \gamma.
+\end{align}
+We take $d = 20$ and initialize the samples at $X_0 \sim \mathcal{N} (0, \frac12\text{Id})$. We use our simulation-free method to estimate the control $u_t(x)$ after parameterizing it by a fully connected MLP with 4 layers and 128 hidden dimensions in each layer. The parameters of this MLP network are initialized with the default random initializations of PyTorch.  For comparison, we also minimize the SOC objective with the vanilla method that requires differentiation though the solution of the SDE, using the same exact setup. To make fair comparisons, we use the Adam optimizer \citep{kingma2014adam} with the same learning rate of $3\cdot 10^{-4}$ and the same cosine annealing learning rate scheduler for both methods. 
+The numerical results are shown in Figure~\ref{fig:linear_OU} and the squared $L_2$ error in each figure is computed by approximating the following quantity with Monte-Carlo estimations over $256$ sample trajectories
+\begin{equation}
+    E =   \int_{0}^{T} \mathbb{E}_{X^{\ast}_t}\left[\left|u_t(X^{\ast}_t) - u^\ast_t(X^{\ast}_t) \right|^2 \right] dt
+\end{equation}
+where $X^{\ast}_t$ is the process generated with the optimal control $u^\ast$ and $X^\ast_0 \sim \mathcal{N} (0, \frac12\text{Id})$.
+\begin{figure}[t]
+    \centering
+\includegraphics[width=0.48\linewidth]{figs/linear_time_2.pdf}
+\includegraphics[width=0.48\linewidth]{figs/linear_time_loss_2.pdf}
+\caption{\textbf{Linear Ornstein-Uhlenbeck Example}: Our method outperforms the vanilla method in terms of accuracy measured by the squared $L_2$ error  (left panel) and computational efficiency (right panel). }
+\label{fig:linear_OU}
+\end{figure}
+
+As compared to the vanilla method, our method is both more computationally efficient and more accurate (see Table~\ref{table:linear_OU} for a detailed comparison in terms of memory cost and computational time). 
+
+\begin{table}
+\centering
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabular}{@{} l r r r r@{}}\toprule
+Model  
+& \tcen{Memory Cost (GB)} & \tcen{Run Time for Back-Prop (s)}\\
+\cmidrule(r){1-1}\cmidrule(lr){2-2} \cmidrule(lr){3-3} 
+
+Our Method & 
+$\mathbf{1.962}$ {\tiny $\pm 0.001$} & 
+$\mathbf{0.003}$ {\tiny $\pm 0.000$}\\
+
+Vanilla Method & 
+$2.590$ {\tiny $\pm 0.001$} & 
+$0.177$ {\tiny $\pm 0.0006$}\\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Linear Ornstein-Uhlenbeck Example}: Comparison between our method and the vanilla method in terms of the GPU memory usage and runtime for one back-propagation pass. Here, we use a batch size of $5$k and $256$ time steps. }
+\label{table:linear_OU}
+\end{table}
+
+\subsection{Quadratic Ornstein-Uhlenbeck Example}
+\label{sec:ou:quad}
+
+\begin{figure}[t]
+    \centering
+\includegraphics[width=0.48\linewidth]{figs/quadratic_time_error.pdf}
+\includegraphics[width=0.48\linewidth]{figs/quadratic_time_loss_vanilla.pdf}
+
+\caption{\textbf{Quadratic Ornstein-Uhlenbeck Example (easy setup, no warm-start)}: $L^2_2$ error (left panel)  and training loss (right panel) for our method and the vanilla method.  }
+\label{fig:quadratic_OU_easy}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+\includegraphics[width=0.48\linewidth]{figs/quadratic_time_hard_error.pdf}
+\includegraphics[width=0.48\linewidth]{figs/quadratic_time_loss_hard.pdf}
+\caption{\textbf{Quadratic Ornstein-Uhlenbeck Example (hard setup, no warm-start)}: $L^2_2$ error (left panel)  and training loss (right panel) for our method and the vanilla method. }
+\label{fig:quadratic_OU_hard}
+\end{figure}
+
+\begin{table}
+\centering
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabular}{@{} l r r r r@{}}\toprule
+Model  
+& \tcen{Memory Cost (GB)} & \tcen{Run Time for Back-Prop (s)}\\
+\cmidrule(r){1-1}\cmidrule(lr){2-2} \cmidrule(lr){3-3} 
+
+Our Method & 
+$\mathbf{0.102}$ {\tiny $\pm 0.001$} & 
+$\mathbf{0.002}$ {\tiny $\pm 0.003$}\\
+
+Vanilla Method & 
+$0.160$ {\tiny $\pm 0.001$} & 
+$0.112$ {\tiny $\pm 0.0006$}\\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Quadratic Ornstein-Uhlenbeck Example (hard setup, no warm-start)}: Comparison between our model and the vanilla method in terms of the GPU memory usage and runtime for one back-propagation pass. Here, we use a batch size of $512$ and $256$ time steps.  }
+\label{table:quadratic_OU}
+\end{table}
+We also consider a more complicated case where  the SOC objective includes a quadratic running cost with $f(x) = x^T P x$, $g(x) = x^T Q x$, $b_t(x) = Ax$, $\sigma_t = \sigma_0$, where $P,Q,A\in \R^d\times \R^d$. This type of SOC problems are often referred to as linear quadratic regulator (LQR) and they have closed-form analytical solution \citep{van2007stochastic}:
+\begin{equation}
+    u^*_t(x) = - 2 \sigma_0^{\top} F_t x, 
+\end{equation}
+where $F_t$ solves the Riccati equation
+\begin{equation}
+    \frac{dF_t}{dt} + A^{\top} F_t + F_t A - 2 |\sigma_0^{\top} F_t|^2 + P = 0
+\end{equation}
+with the final condition $F_T = Q$.
+We consider this example in the two setups investigated by \cite{domingo2023stochastic}:
+
+\begin{itemize}[leftmargin=0.15in]
+    \item \textit{Easy:} $d=20$, $A = 0.2 I$, $P = 0.2 I$, $Q = 0.1 I$, $\sigma_0 = I$, $\lambda = 1$, $T=1$, $X_0 \sim  N(0,\tfrac12 \text{Id})$. 
+    \item \textit{Hard:} $d=20$, $A = I$, $P = I$, $Q = 0.5 I$, $\sigma_0 = I$, $\lambda = 1$, $T=1$, $X_0 \sim N(0,\tfrac12 \text{I})$.  
+\end{itemize}
+However, in contrast to what was done in \cite{domingo2023stochastic} in the hard case, we use no warm-start. We use the same neural network parameterization and initialization for $u_t(x)$ as in Sec.~\ref{sec:ou:lin}. We quantify the gain in efficiency in terms of the memory cost and computational cost of our method over the vanilla method in Table~\ref{table:quadratic_OU}. In Figures~\ref{fig:quadratic_OU_easy} and~\ref{fig:quadratic_OU_hard} we compare both methods in terms of $L_2$ accuracy and training time for both the easy and the hard setups. As can be see, with the same time of compute, our method achieve a better accuracy measured by the $L_2$ error than the vanilla method. Training with our method is also more stable than with vanilla method,  as the fluctuations in the empirical loss functions of our method are much smaller.
+
+\subsection{Sampling from an unnormalized distribution}
+\label{sec:unnorm}
+
+Next, we consider an example of SOC problem relevant to the setup of Sec.~\ref{sec:follmer}. Specifically we sample Neal's funnel distribution in $d=10$ dimension, for which $x_0\sim N(0,\sigma_0)$ and $x_{1:9}|x_0\sim N(0,e^{x_0}\text{Id})$. This distribution was also used by~\cite{zhang2022path} to test their Path Integral Sampler (PIS): it becomes exponentially challenging to sample as $\sigma_0$ increases, as the spread $x_{1:9}$ is exponentially small for negative values of $x_0$ and exponentially large for positive values of $x_0$ (hence the funnel shape of the distribution), and the spread of $x_0$ around 0 increases with $\sigma_0$. We study this example with $\sigma_0=1$ and $\sigma_0=3$.
+
+We use the same neural network parameterization as~\cite{zhang2022path}, where the control is parameterized as follows
+\begin{equation}
+    u^\theta_t (x) = \text{NN}_1^\theta (t,x) + \text{NN}_2^\theta (t) \times \nabla \log \rho (x).
+\end{equation}
+Here $\rho (x)$ is the probability density function of the funnel distribution and $\nabla \log \rho (x)$ is its score. Note that the score function is the exact control we need if the time horizon $T \rightarrow \infty$.  As what is reported in~\cite{zhang2022path}, for one pass $\text{NN}_1^\theta$ and $\text{NN}_2^\theta$, we lift the scalar $t$ to $128$ dimensions with Fourier positional encoding, followed by two fully connected layers with $64$ hidden units to extract $64$-dimensional signal features. We use an independent two-layer MLP to extract $64$-dimensional features for $x$. Then, we concatenate the features of the two MLPs for $x, t$ and use it as the input to a three-layer neural network to obtain the output. To make the problem challenging, we initialize at zero the weights of the last linear layers of $\text{NN}_1^\theta$ and $ \text{NN}_2^\theta$, so that $u^\theta_t (x) = 0$ at initialization. We use the Adam optimizer \citep{kingma2014adam} with a learning rate of $5\cdot 10^{-3}$ for all the experiments on the funnel distribution example. 
+
+To measure the quality of the learned samplers, we estimate the log normalization constants $\log Z$ of the funnel distribution with $\sigma_0= 1.0$ and $\sigma_0 = 3.0$ with the unbiased estimator given in \eqref{eq:expect}. We report the results as well as the computational costs in Table~\ref{table:funnel_large}: our method reaches the same level of accuracy as the vanilla PIS but with  much smaller memory cost and  computing time, which is a  big advantage for problems in high dimensions. The generated samples themselves are shown in Figure~\ref{fig:funnel_samples}.
+
+\begin{table}
+\centering
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabular}{@{} l r r r r r@{}}\toprule
+Model  & \tcen{Bias} 
+& \tcen{Memory Cost (GB)} & \tcen{Run Time for Back-Prop (s)}\\
+\cmidrule(r){1-1}\cmidrule(lr){2-2} \cmidrule(lr){3-3} 
+\cmidrule(lr){4-4}
+
+Our Method ($\sigma_0 = 1.0$)& 
+$\mathbf{-0.005}$ {\tiny $\pm 0.000$}& 
+$\mathbf{16.95}$ & 
+$\mathbf{0.0032}$ {\tiny $\pm 0.000$}\\
+($\sigma_0 = 3.0$)& $0.032$ {\tiny $\pm 0.005$} & 
+$\mathbf{16.95}$ & 
+$\mathbf{0.0032}$ {\tiny $\pm 0.000$} \\
+Path Integral Sampler ($\sigma_0 = 1.0$)& 
+$-0.006$ {\tiny $\pm 0.000$}& 
+$35.20$ & 
+$1.014$ {\tiny $\pm 0.0024$}\\
+($\sigma_0 = 3.0$)& $\mathbf{0.029}$ {\tiny $\pm 0.007$} & $35.20$ & 
+$1.014$ {\tiny $\pm 0.0024$} \\
+\bottomrule
+\end{tabular}
+\caption{{\bf Funnel distribution example:} Comparison between our model and the PIS/Neural SDEs in terms of memory cost and runtime for $\sigma = 1.0, 3.0$. Here we use a batch size of $10^4$ and $400$ time steps. For different experimental setups $\sigma_0 = 1.0$ and $\sigma_0 = 3.0$, the computational and memory cost are the same for the same method.  }
+\label{table:funnel_large}
+\end{table}
+\begin{figure}[!hbt]
+    \centering
+\includegraphics[width=0.32\linewidth]{figs/funnel_sigma1_true.pdf}
+\includegraphics[width=0.32\linewidth]{figs/funnel_sigma1_our.pdf}
+\includegraphics[width=0.32\linewidth]{figs/funnel_sigma1_PIS.pdf}
+
+\caption{{\bf Funnel distribution example ($\sigma = 1$):} The samples from the funnel distribution (left panel), Path Integral Samplers (middle panel) and our method (right panel). To plot the samples of the ten-dimensional funnel distribution in 2D, we use the independence of its coordinates $\{x_1,\cdots, x_9\}$, squeeze these nine dimensions into one coordinate, and keep the first dimension $x_0$. }
+\label{fig:funnel_samples}
+\end{figure}
+
+
+
+
+\section{Conclusion}
+
+\label{sec:conclu}
+
+We have introduced a simulation-free on-policy approach to SOC problems: we simulate trajectories using an actual control but detach this control for the computational graph when computing the gradient of the objective. This leads to a new way of training a deep neural network to learn the feedback control, which is more efficient and scalable than the vanilla method commonly used thus far. We have illustrated the efficacy of our method on several examples from the SOC literature and the sampling literature, with applications to sampling via F\"ollmer processes and fine-tuning of diffusion-based generative models .
+
+\paragraph{Limitations.} While our approach is simpler and more efficient than the vanilla method to minimize the SOC objective, it eventually performs the same minimization of the SOC objective. As a result, it is prone to the same issues: slow convergence of the training in absence of good warm-start and potential lack of convergence to the non-convexity of the SOC objective. Nevertheless the experiments reported here clearly show the potential of our approach for large-scale experiments on real-world problems, which we leave for future work.
+
+
+

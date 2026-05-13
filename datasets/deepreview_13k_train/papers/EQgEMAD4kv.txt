@@ -1,0 +1,223 @@
+\title{CAKE: Cascading and Adaptive KV Cache Eviction with Layer Preferences}
+
+\begin{abstract}
+Large language models (LLMs)' proficiency in handling long sequences boosts KV caching demand. Recent efforts to evict KV cache have alleviated the burden for inference, but they often fail to allocate resources rationally across layers with different attention patterns. In this paper, we introduce Cascading and Adaptive KV cache Eviction (CAKE), a method that significantly improves LLM inference efficiency by optimizing KV cache eviction through an adaptive cache allocation strategy implemented via a cascading cache management and an innovative eviction indicator. We approach KV cache eviction as a ``cake-slicing problem,'' assessing each layer's KV cache needs by considering attention dynamics in both spatial and temporal dimensions. During the prompt prefilling, CAKE allocates rational cache size for layers by analyzing layer-specific KV cache preferences and manages the memory budgets with the guidance of these preferences in a cascading manner. This approach allows for a global view of cache size allocation, distributing resources optimally based on the diverse attention mechanisms across layers. Also, we've designed a new eviction indicator that considers the shifting importance of tokens over time, addressing a limitation in existing methods that often overlook temporal dynamics. Our comprehensive experiments on the LongBench and NeedleBench datasets show that CAKE is capable of preserving the performance of models when retaining only 3.2\% KV cache and consistently outperforms current baselines across various models and memory constraints, especially in low-memory situations. Moreover, CAKE outperforms full cache with FlashAttention implementation, achieving 10$\times$ faster decoding for 128K-token sequences and maintaining consistent decoding speed across sequence lengths.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large language models (LLMs) (Zhao et al., 2023; Achiam et al., 2023; Dubey et al., 2024; Anthropic, 2024; AI, 2024) have enhanced their long-text processing capabilities, improving performance in multi-turn dialogues (Chiang et al., 2023), document summarization (Zhang et al., 2024a), question answering (Kamalloo et al., 2023), and information retrieval (Liu et al., 2024c). New models such as GPT-4 (Achiam et al., 2023), Claude 3.5 (Anthropic, 2024), LLaMA 3.1 (Dubey et al., 2024) and Mistral Large 2 (AI, 2024) have extended token processing capacities beyond 128K. Expanded contexts necessitate a linear increase in key-value (KV) cache size, resulting in heavier inference-time memory burdens. Shazeer (2019); Ainslie et al. (2023) partially address this issue by merging key-value heads during the training phase. However, optimizing key-value cache without additional training is crucial for efficient inference of long contexts under memory constraints, particularly in typical deployment scenarios where the model structure is fixed.  
+
+One way to maintain a manageable KV cache size on the fly is to remove some KV pairs (Xiao et al., 2023; Zhang et al., 2024b; Li et al., 2024b). The idea is to eliminate less important KV pairs based on certain rules. Although recent methods have enhanced pair selection for removal, they typically assign uniform cache sizes across layers, disregarding layer-specific requirements. This approach can impair performance under memory constraints. Recent research is trying to improve this by looking at how attention works in different layers (Yang et al., 2024a; Cai et al., 2024). These methods, which depend on prior observations, might not work well for all input types and models. Another idea is to adjust the cache size based on the current attention pattern (Wan et al., 2024). This can help, but it may not always optimize overall performance.  
+
+![](images/706a084afc01791917d90ffcedfbbd67946eedef9433ea274179810f488a6f51.jpg)  
+
+Figure 1: Variation in spatial (a, b) and temporal (c, d) characteristics of attention patterns. We provide toy examples (left) and real examples from Mistral’s different layers (right) for illustration. Allocating optimal cache sizes for different layers with a fixed memory budget is akin to “cakeslicing.” The crux of this challenge is assessing each layer’s affinity for KV cache, which is mirrored in its attention mechanisms. Our research delves into these mechanisms, examining spatial and temporal aspects across layers. Spatially, attention distribution across tokens can differ markedly between layers. Some layers may spread attention broadly, while others concentrate on specific tokens, as depicted in Figure 1(a) and Figure 1(b). Temporally, attention hotspots in certain layers shift over time in Figure 1(c), whereas in others, they remain constant in Figure 1(d). The variability of attention pattern necessitates a dynamic approach to memory allocation that goes beyond uniform (Zhang et al., 2024b; Liu et al., 2024d; Ren & Zhu, 2024; Li et al., 2024b), depicted in Figure 2(a), or fixedpattern methods (Yang et al., 2024a), drawn in Figure 2(b). They lack the flexibility to adapt to the nuanced attention dynamics. To enhance cache efficiency, a comprehensive strategy is required, factoring in each layer’s attention pattern and KV cache preference. Moreover, conventional methods that evict KV pairs relying solely on static spatial attention scores often overlook the temporal evolution of attention, missing critical insights into how token relevance changes in various contexts. In this paper, we introduce Cascading and Adaptive KV cache Eviction (CAKE), enhancing KV cache eviction by leveraging proposed preference-prioritized adaptive cache allocation strategy coupled with an innovative token eviction strategy. It is progressive and dynamic, employing a novel metric that assesses each layer’s cache size preference, taking into account both the dispersion of spatial attention and the shifts in temporal attention, as outlined in Figure 2(c). To optimize cache allocation from a holistic viewpoint while keeping peak memory usage within desired limits, we have designed a cascading memory management system. This system dynamically adjusts the KV cache during the prompt prefilling phase, eliminating the need to store all KV cache for all layers. For token eviction, acknowledging the limitations of existing methods, we introduce an eviction indicator that considers sustained importance and attention variability, thereby minimizing the adverse effects of eviction on subsequent decoding steps. Extensive experiments have been conducted using various LLM architectures on the LongBench and NeedleBench benchmarks, encompassing nine major task categories. Results demonstrate CAKE’s superior performance across diverse memory scenarios within these benchmarks. The allocation strategy in CAKE, which can complement and enhance existing KV cache eviction methods, offers a versatile solution for improved cache management. Furthermore, compared to full cache FlashAttention-2 implementation, CAKE significantly reduces memory consumption while simultaneously enhancing LLM throughput. Our contributions are: (1) An analysis of attention dynamics revealing spatial dispersion and temporal shifts, leading to a layer-specific metric for cache size requirements. (2) An adaptive cache allocation strategy that optimizes overall cache allocation based on layer preferences. (3) A cascading cache management method that dynamically adjusts the KV cache during the prefilling stage, achieving memory usage efficiency comparable to uniform strategies without sacrificing eviction performance. (4) A new eviction indicator that considers the sustained importance and variability of tokens, enhancing token eviction performance.  
+
+
+
+\section{2 BACKGROUND AND RELATED WORKS  }
+
+
+Basics of KV Cache Operations. We revisit the fundamentals of KV caching. We focus on a single attention head, characterized as weight matrices $\mathbf{W}_{Q},\mathbf{W}_{K},\mathbf{W}_{V}\,\in\,\mathbb{R}^{D\times D},$ , where $D$ denotes the model’s hidden dimension. Considering a prompt embedding $\mathbf{X}\in\mathbb{R}^{S\times D}$ , with $S$ representing the sequence length, an attention module has two phases: prompt prefilling and token decoding.  
+
+Prompt Prefilling: The query, key, and value states are initially calculated as follows:  
+
+$$
+\mathbf{Q}=\mathbf{X}\mathbf{W}_{Q},\quad\mathbf{K}=\mathbf{X}\mathbf{W}_{K},\quad\mathbf{V}=\mathbf{X}\mathbf{W}_{V}.
+$$  
+
+Then, the output of the attention module is determined as:  
+
+$$
+\operatorname{Attn}(\mathbf{Q},\mathbf{K},\mathbf{V})=\mathbf{A}\mathbf{V},
+$$  
+
+with attention weights $\begin{array}{r}{\mathbf{A}=\mathrm{Softmax}(\frac{\mathbf{Q}\mathbf{K}^{T}}{\sqrt{D}})\in\mathbb{R}^{S\times S}}\end{array}$ . The key-value states $\mathbf{K}$ and $\mathbf{V}$ are then stored in a cache, establishing the KV cache.  
+
+Token Decoding: The KV cache is used and updated to produce new tokens. For each decoding step $i$ , let the new token embedding be $\mathbf{x}_{i}\in\mathbb{R}^{1^{\mathbf{\hat{\Delta}}}\times D}$ . To circumvent repeated key-value projections, the KV cache is concatenated with the newly generated KV pair $\mathbf{x}_{i}\dot{\mathbf{W}}_{K},\mathbf{x}_{i}\dot{\mathbf{W}_{V}}\,\in\,\mathbb{R}^{\dot{1}\times\check{D}}$ for the current attention computation and to refresh the KV cache:  
+
+$$
+{\bf K}=\operatorname{Concat}({\bf K},{\bf x}_{i}{\bf W}_{K}),\quad{\bf V}=\operatorname{Concat}({\bf V},{\bf x}_{i}{\bf W}_{V}).
+$$  
+
+Though the KV cache alleviates the considerable computational demands of attention mechanisms, its linear growth with sequence length poses a challenge for extremely long input or output sequences. Efficiently managing the KV cache within a finite cache budget remains a formidable issue, especially in contexts that demand longer context lengths.  
+
+KV Cache Eviction. KV cache eviction during model inference enhances computational efficiency without altering the attention mechanism. This optimization relies on strategic cache reduction techniques. Early approaches to KV cache eviction focus on specific parts of the input sequence. For instance, StreamingLLM (Xiao et al., 2023) and LM-Infinite (Han et al., 2023) prioritize the retention of the first and last tokens. However, this strategy risks ignoring potentially important tokens in the middle of the sequence. Recognizing this limitation, subsequent research introduces more sophisticated indicators to filter unnecessary KV cache entries, such as using cumulative attention scores (Zhang et al., 2024b; Liu et al., 2024d), last token attention scores (Oren et al., 2024), mean attention scores (Ren & Zhu, 2024), or clustering recent attention scores (Li et al., 2024b). While these methods offer more nuanced approaches to cache eviction, they often apply the uniform allocation strategy, which may not maximize cache utilization. Recent FastGen (Ge et al., 2023) chooses which tokens to keep based on special markers, but it doesn’t limit the total cache size. PyramidInfer (Yang et al., 2024a) and PyramidKV (Cai et al., 2024) allocate the budget in a pyramid-shaped manner, while D2O (Wan et al., 2024) adjusts cache size based on the current layer’s attention density. While these methods have shown promise, they often rely on predefined cache allocation strategies across all layers or are just based on the local layer attention, which does not fully capture the complex dynamics of attention mechanisms and lacks a global perspective on layer preferences for the cache. In contrast, our work addresses these limitations by considering layer-specific cache preferences with a comprehensive and global perspective.  
+
+![](images/4066f306d60c6bc0756b31d2a59b2904eb543a5f4546027c4d2befdab52ff9b0.jpg)  
+Figure 3: Analysis of attention dynamics. (a) Heatmap for spatial attention dispersion (upper) and temporal attention shift (lower), red color with high value, while blue for low value. The $\mathbf{X}$ -axis represents samples, and the y-axis represents layers. (b) Variation of spatial attention dispersion (upper) and temporal attention shift (lower) across layers and models. The experimental data is derived from the LongBench dataset (Bai et al., 2023).  
+
+
+
+\section{3 INSIGHTS INTO ATTENTION DYNAMICS  }
+
+
+Recent studies (Xiao et al., 2023; Zhang et al., 2024b) have shown that only a few KV cache elements are crucial during token decoding. Building on this, our analysis identifies two pivotal attention traits: spatial attention dispersion, showing how one token’s attention spreads across others, and temporal attention shift, tracking the evolution of highly-attended tokens over time.  
+
+Recall some basics about the attention weights A. Each ${\bf A}[i,j]$ shows how much the $i^{\th}$ -th query token attends to the $j$ -th key token. We analyze the matrix spatially and temporally to explore attention dynamics in decoder-only models. (1) Spatial Analysis: Row $i$ , $\mathbf{A}[i,:]$ , shows how the $i$ -th token’s attention is distributed across tokens in one step. Examining $\mathbf{A}[i,:]$ reveals the attention landscape at that step. This helps reveal how the model prioritizes information at each generation step. (2) Temporal Analysis: Column $j,\mathbf{A}[:,j]$ , shows how attention to the $j$ -th token changes over steps. Each row in $\mathbf{A}[:,j]$ represents a time step, showing the $j$ -th token’s evolving attention. This dimension is key to tracking the model’s shifting focus during sequence generation.  
+
+In this paper, we quantify the spatial attention dispersion by the entropy of $\mathbf{A}[i,:]$ , defined as:  
+
+$$
+\mathrm{H}(\mathbf{A})=-\sum_{i=0}^{S-1}\mathbf{A}[i,:]\log(\mathbf{A}[i,:])^{T},
+$$  
+
+where the inner product is conducted between each row of A and its element-wise logarithm. Rows show higher values with even attention distribution and lower values with focused attention. Aggregating these values measures the evenness of attention distribution per token.  
+
+Accordingly, the temporal attention shift is characterized by the variance of $\mathbf{A}[:,j]$ , expressed as:  
+
+$$
+\operatorname{V}(\mathbf{A})=\sum_{j=0}^{S-1}\operatorname{Var}(\mathbf{A}[:,j]),
+$$  
+
+which computes the variance for each column of $\mathbf{A}$ . Higher values indicate significant attention shifts across positions, while lower values suggest stable attention. Summing the variances columnwise captures the attention mechanism’s temporal dynamics.  
+
+We analyze attention dynamics across multiple LLM layers using the LongBench dataset’s longcontext samples (Bai et al., 2023). Figure 3 (upper) shows attention dispersion changes across layers, and Figure 3 (lower) shows attention focus shifts. The results show significant variations in attention dispersion and shift across layers, models, and contexts. Despite recent KV cache advances (Xiao et al., 2023; Zhang et al., 2024b), our findings highlight LLM attention complexity, indicating a need for tailored KV cache management strategies to effectively handle the dynamic nature of attention.  
+
+
+
+\section{4 METHODOLOGY  }
+
+
+4.1 PREFERENCE-PRIORITIZED ADAPTIVE ALLOCATION  
+
+Given the variability in attention mechanisms across layers, models, and contexts, uniform or fixedpattern cache allocation strategies prove inefficient, especially under limited memory budgets. To address these challenges, we introduce the preference-prioritized adaptive allocation strategy. It considers each layer’s unique characteristics and adaptively allocates cache sizes from a global view of attention patterns. We define a preference metric for each layer’s KV cache requirements, considering both the spatial dispersion and temporal shift of attention:  
+
+$$
+\mathcal{P}=\mathcal{H}^{\frac{1}{\tau_{1}}}\cdot\mathcal{V}^{\frac{1}{\tau_{2}}},\quad\mathcal{H}=\mathrm{H}(\mathbf{A}[-S_{w}:,:-S_{w}]),\quad\mathcal{V}=\mathrm{V}(\mathbf{A}[-S_{w}:,:-S_{w}]),
+$$  
+
+where $\mathcal{P}$ is the preference score for an attention layer’s cache size. As dispersed attention (high $\mathcal{H}$ ) requires retaining broader contexts, while frequent shifts (high $\mathcal{V}$ ) demand support for complex temporal patterns, layers with high preference score $\mathcal{P}$ benefit more from larger KV cache to maintain performance. Accounting for the varying importance of attention dispersion and shift across models and memory constraints, we introduce temperature parameters $\tau_{1}$ and $\tau_{2}$ to adjust their influence on $\mathcal{P}$ . We focus on the submatrix $\mathbf{A}[-S_{w}\bar{\mathbf{\xi}};,:-S_{w}\bar{\mathbf{\xi}}]$ of $\mathbf{A}$ , representing a recent window of size $S_{w}$ . This focus on the recent window chunk of prefilling attention weights is inspired by recent research (Li et al., 2024b; Yang et al., 2024a). These studies have demonstrated that decoding patterns can be effectively captured by analyzing the attention patterns of recent queries.  
+
+We implement the preference-prioritized adaptive allocation strategy using layer-specific preference scores. These scores adjust dynamically to varying models and contexts, ensuring adaptability. Each layer’s cache size is set by normalizing the preference scores and allocating the total memory budget accordingly. This results in an adaptive cache size set ${\bf B}=\{B_{l}\}_{l=0}^{L-1}$ , calculated as follows:  
+
+$$
+B_{l}=\frac{\mathcal{P}_{l}}{\sum_{k=0}^{L-1}\mathcal{P}_{k}}\cdot B_{\mathrm{total}},
+$$  
+
+where $\mathcal{P}_{l}$ is the preference score for layer $l$ , and $B_{\mathrm{total}}$ is the total cache budget. This method optimizes cache size allocation for each layer’s unique characteristics and the input context.  
+
+4.2 PREFERENCE-GUIDED CASCADING CACHE MANAGEMENT  
+
+Our preference-prioritized adaptive allocation strategy, though optimal, initially requires a comprehensive view of prefilling attention weights across all layers. This leads to the peak memory usage of $O(S\cdot L)$ , which may exceed the cache budget $B_{\mathrm{total}}$ .  
+
+To overcome this, we further develop the preference-guided cascading cache management, as illustrated in Figure 4. It dynamically maintains the cache budget during prefilling, effectively reducing peak memory usage to the target. Algorithm 1 outlines our cache management procedure, which partitions the prefilling process into $L$ stages, one for each model layer, and cascadingly manages cache memory guided by preference scores. At each stage, as a new layer completes its prefilling computation, the budget is redistributed based on the current obtained preference scores (Algorithm 1, lines 3–7), and KV caches are updated among all processed layers according to the redistributed budget (Algorithm 1, lines 9–14, which, while presented sequentially, can be parallelized as KV caches are pre-computed, reducing the time complexity to that of a single iteration). This approach ensures constant memory usage during the prefilling stage while maintaining equivalent cache distribution and eviction results as the standard strategy.  
+
+Proposition 1. For any layer $l\in[L]$ , the allocated budget size decreases monotonically from stage l to $L-1$ :  
+
+$$
+B_{l}^{(m+1)}<B_{l}^{(m)},m\in[l,L-1],
+$$  
+
+where $B_{l}^{(m)}$ is the redistributed cache budget for layer $l$ at stage $m$ , calculated based on the current obtained preference score $\mathcal{P}$ :  
+
+$$
+B_{l}^{(m)}=\frac{\mathcal{P}_{l}}{\sum_{k=0}^{m}\mathcal{P}_{k}}\cdot B_{t o t a l}.
+$$  
+
+![](images/23f008629f4c162c6a9d23747d53b2a519dbbb407834834e58b6ba9a45d51906.jpg)  
+
+Proposition 1 guarantees that the cache budget allocated to each layer decreases monotonically as stages process, ensuring that the KV cache $\{\mathbf{\bar{K}}_{l},\mathbf{V}_{l}\}^{(m+1)}$ is always a proper subset of the previous stage’s cache $\{\mathbf{K}_{l},\mathbf{V}_{l}\}^{(m)}$ , regardless of the eviction method used.  
+
+Before presenting Theorem 1, let’s define some operational details related to our algorithm. Given indicator vector $\breve{\mathbf{I}}_{l}\in\mathbb{R}^{S}$ , it measures token importance for layer $l$ . The specific calculation of our eviction indicator will be detailed in the subsequent section. For each stage $m\in[L]$ , the eviction operation, denoted as $\operatorname{EVICT}(\cdot)$ , retains KV pairs $\hat{\mathbf{K}}_{l}^{(m)},\hat{\mathbf{V}}_{l}^{(m)}\in\mathbb{R}^{B_{l}^{(m)}\times D}$ from the current cache $\mathbf{K}_{l}^{\left(m\right)},\mathbf{V}_{l}^{\left(m\right)}\;\in\;\mathbb{R}^{B_{l}^{\left(m-1\right)}\times D}$ corresponding to the top- $B_{l}^{(m)}$ positions with the highest scores in $\mathbf{I}_{l}^{(m)}\,\in\,\mathbb{R}^{B_{l}^{(m-1)}}$ . The indicator vector $\mathbf{I}_{l}^{(m)}$ is also updated to $\hat{\mathbf{I}}_{l}^{(m)}\in\mathbb{R}^{B_{l}^{(m)}}$ , retaining only the elements corresponding to the preserved positions. The updated cache and indicator $\{\hat{\bf K}_{l},\hat{\bf V}_{l}\}^{(m)}$ , $\hat{\mathbf{I}}_{l}^{(m)}$ will serve as the basis $\{\mathbf{K}_{l},\mathbf{V}_{l}\}^{(m+1)}$ and $\mathbf{I}_{l}^{(m+1)}$ for further updates in the next stage $m+1$ .  
+
+Theorem 1. For any layer $l\in[L]$ , the KV cache $\{\mathbf{K}_{l},\mathbf{V}_{l}\}^{(L-1)}$ obtained through cascading eviction from stage l to stage $L-1$ is equivalent to the result of applying the eviction operation once on the full $K V$ cache $\{\mathbf{K}_{l},\mathbf{V}_{l}\}\in\mathbb{R}^{S\times\hat{D}}$ with the cache budget $B_{l}$ computed in Eq.(7):  
+
+$$
+\{\mathbf{K}_{l},\mathbf{V}_{l}\}^{(L-1)}=\mathrm{EVICT}(\{\mathbf{K}_{l},\mathbf{V}_{l}\}^{(m)},B_{l}^{(m)},\mathbf{I}_{l}^{(m)})_{m=l}^{L-1}=\mathrm{EVICT}(\{\mathbf{K}_{l},\mathbf{V}_{l}\},B_{l},\mathbf{I}_{l}).
+$$  
+
+Theorem 1 demonstrates that our preference-guided cascading cache management achieves equivalent KV cache eviction results to the vanilla preference-prioritized adaptive allocation strategy, despite its cascading operation. This method is theoretically compatible with existing KV eviction techniques, a claim that will be empirically validated in Section 5.5.  
+
+4.3 ATTENTION-SHIFT TOLERANT EVICTION INDICATOR  
+
+Current top eviction indicators, such as accumulated or mean attention scores (Zhang et al., 2024b; Liu et al., 2024d; Ren & Zhu, 2024), simplify tokens’ attention profiles into single values, effectively identifying important tokens. However, this approach may overlook tokens whose importance fluctuates, as it fails to capture the dynamics of shifting attention. This could result in prematurely evicting tokens from the cache, affecting the model’s future ability to retrieve relevant information.  
+
+We propose a robust eviction strategy tolerant of attention shifts. We use a multi-faceted indicator considering sustained importance and attention variability. For layer $l$ , the eviction indicator $\mathbf{I}_{l}\in\mathbb{R}^{S}$ is computed, where each element $\mathbf{I}_{l}[n]$ signifies the importance of token $n$ , computed as:  
+
+$$
+\begin{array}{r}{\mathbf{I}_{l}[n]=\left\{\!\!\begin{array}{l l}{\mathbf{M}\mathrm{ean}(\mathbf{A}_{l}[-S_{w}:,n])+\gamma\cdot\mathbf{V}\mathrm{ar}(\mathbf{A}_{l}[-S_{w}:,n]),}&{\mathrm{if}\quad n<S-S_{w},}\\ {\Omega,}&{\mathrm{otherwise},}\end{array}\!\!\right.}\end{array}
+$$  
+
+where Mean $(\cdot)$ and $\operatorname{Var}(\cdot)$ measure sustained importance and attention variability, respectively, with $\gamma$ adjusting their influence. Inspired by recent research (Li et al., 2024b; Yang et al., 2024a), we assign an arbitrarily large value $\Omega$ to ensure the preservation of the most recent $W$ tokens. Also, a pooling layer clusters $\bar{\mathbf{I}_{l}}[:S-S_{w}]$ to maintain context and prevent information fragmentation.  
+
+The eviction operation $\mathrm{EVICT}(\{{\bf K}_{l},{\bf V}_{l}\},B_{l},{\bf I}_{l})$ is then executed, retaining the KV pairs $\{\hat{\mathbf{K}}_{l},\hat{\mathbf{V}}_{l}\}$ that correspond to the top- $B_{l}$ scores in $\mathbf{I}_{l}$ :  
+
+$$
+\hat{\mathbf{K}}_{l}=\mathbf{K}_{l}[\mathbf{D}_{l},:],\quad\hat{\mathbf{V}}_{l}=\mathbf{V}_{l}[\mathbf{D}_{l},:],\quad\mathbf{D}_{l}=\mathrm{TopK}(\mathbf{I}_{l},B_{l}),
+$$  
+
+where TopK selects the indices $\mathbf{D}_{l}\in\mathbb{R}^{B_{l}}$ of the top $B_{l}$ scores in $\mathbf{I}_{l}$  
+
+
+
+\section{5 EXPERIMENTATION  }
+
+
+5.1 EXPERIMENTAL SETTINGS  
+
+Backbone LLMs. Our experiments involve five major open-source LLMs (7B-70B parameters) capable of handling 4k-128k token contexts. These models feature two representative attention structures: (1) Multi-head attention: including Llama2-Chat (Touvron et al., 2023) and GemmaInstruct (Team et al., 2024). (2) Grouped-query attention: including Llama3-Instruct (Dubey et al., 2024), Mistral-v0.3 (Jiang et al., 2023), and Qwen2.5-Instruct (Team, 2024).  
+
+Baseline Methods. We assess CAKE’s performance against five baselines: (1) Uniform Allocation: StreamingLLM (Xiao et al., 2023) balances initial and recent tokens, H2O (Zhang et al., 2024b) uses cumulative attention, TOVA (Oren et al., 2024) adopts last-token attention, and SnapKV (Li et al., 2024b) clusters recent attention. (2) Non-Uniform Allocation: PyramidKV (Cai et al., 2024) employs a fixed pyramid-shaped allocation strategy with SnapKV’s eviction indicator.  
+
+Evaluating Tasks. To evaluate CAKE’s performance across various memory budgets, we use two carefully designed benchmarks: (1) LongBench (Bai et al., 2023): Focuses on long-context understanding, encompassing 16 datasets in six categories: Single/Multi-Document QA, Summarization, Few-shot Learning, Synthetic Tasks, and Code Completion. (2) NeedleBench (Li et al., 2024a): Tests retrieval and reasoning in complex contexts through three subtasks: Single-Needle Retrieval, Multi-Needle Retrieval, and Multi-Needle Reasoning.  
+
+Implementation Details. CAKE is compared to baseline methods across different total memory budgets ranging from $64L$ to $2048L$ . For uniform allocation, each layer has a fixed KV cache size. Non-uniform methods like PyramidKV and CAKE vary cache sizes per layer while keeping total memory constant. Tokens are evicted during both prefilling and decoding to maintain memory usage. Experiments are run on NVIDIA A100 80GB GPUs.  
+
+5.2 EVALUATIONS ON LONGBENCH DATASET  
+
+We benchmark CAKE against other methods on 16 datasets. Figure 5 displays the performance of various methods under different memory constraints across three models. SnapKV surpasses legacy methods like StreamingLLM and H2O by using an observation window for memory retention. TOVA, relying solely on the last token, falls short by ignoring the broader context. Despite similarities to SnapKV, PyramidKV underperforms in many scenarios, possibly due to its limited adaptability. CAKE, however, outperforms others by dynamically allocating memory to each layer based on its specific needs, especially under tight memory conditions. Notably, CAKE achieves performance comparable to full cache models while only utilizing a small cache budget $(B_{\mathrm{total}}>512L)$ .  
+
+![](images/4a963acc0581df4df622962c52db1a7797a9f700c9d88fc1f7509ba81f67ff91.jpg)  
+Figure 5: Average score among 16 datasets of LongBench under different cache budgets.   
+Table 1: Performance comparison over 16 datasets of LongBench. The best result is highlighted in bold, the second best in underline.  
+
+![](images/8ab77e7c8b4ebb248a1f6ec79e96d1d92b2e39ec9b8d24d2110cd6455f0261f5.jpg)  
+
+For detailed analysis, see Table 1 for results across two memory scenarios: a low setting $\mathrm{\Delta}B_{\mathrm{total}}=$ $128L_{\sun}$ ) and a high setting $\langle B_{\mathrm{total}}\ =\ 1024L\rangle$ .1. CAKE consistently ranks among the top performers or closely matches them across various tasks. In the low memory scenario with the Llama2 model, CAKE leads or finishes second in all datasets. CAKE’s adaptive allocation strategy and robust eviction indicator consistently demonstrate superior and balanced performance, as its generalizability extends well to various model architectures with ranging model sizes. We evaluate this on two more architectures, Qwen2.2 and F.3.  
+
+![](images/12020e741f71ea3467fbaf8d5a5386896459b283c6a85ae8098070d1376752ca.jpg)  
+Figure 6: Performance comparison on NeedleBench 32K.  
+
+
+
+\section{5.3 EVALUATIONS ON NEEDLEBENCH DATASET  }
+
+
+We also test CAKE on retrieval and reasoning tasks using the NeedleBench dataset, with the results depicted in Figure 6. Consistent with the LongBench outcomes, CAKE shows superior overall performance. While utilizing only $3.2\%$ of the cache size, CAKE preserves the model’s capabilities for processing 32K-token-long contexts, and even surpasses the full cache in the Single-Needle Retrieval task. This suggests that pruning specific cache information may eliminate superfluous details, allowing generation to focus on the most salient aspects and enhance its overall efficacy. Notably, CAKE outperforms existing methods in more complex tasks akin to real-world scenarios, particularly in Multi-Needle Retrieval. This can be attributed to CAKE’s design, which balances long-term significance and short-term relevance, maintaining a more comprehensive and balanced representation of contextual information while avoiding premature discarding of information that could be vital for subsequent complex retrievals.  
+
+
+
+\section{5.4 EVALUATION OF MEMORY AND THROUGHPUT  }
+
+
+We assess the effectiveness of our method in reducing memory consumption and enhancing time efficiency during LLM inference by analyzing peak memory usage and decoding latency on Mistral7B-Instruct-v0.3 implemented with FlashAttention-2 (Dao, 2023). Our comparison includes full cache, and three KV cache eviction methods, all with $B_{\mathrm{total}}=1024L$ : SnapKV (uniform allocation strategy), PyramidKV (fixed-pattern allocation strategy), and our proposed CAKE method.  
+
+Peak Memory Usage. As depicted in the left panel of Figure 7, CAKE exhibits substantial memorysaving capabilities, comparable to other KV cache eviction methods such as uniform allocation (SnapKV) and fixed-pattern non-uniform allocation (PyramidKV). All these approaches maintain a fixed-size KV cache. When compared to the full cache implementation, CAKE achieves an impressive reduction in peak memory usage of approximate $48.63\%$ with a 128K context length.  
+
+Throughput Analysis. Regarding decoding latency, the right panel of Figure 7 shows that both uniform and non-uniform eviction methods exhibit comparable inference performance. As input length increases, decoding latency for the full cache method grows significantly due to escalating computational demands and I/O latency bottlenecks. In contrast, CAKE maintains a relatively stable decoding speed by preserving a fixed amount of KV cache, resulting in significantly lower latency compared to the full cache, particularly for longer sequences. It is noteworthy that CAKE demonstrates remarkable efficiency, achieving over $10\times$ speedup in decoding latency compared to the full cache approach when processing sequences with 128K context length.  
+
+5.5 COMPATIBILITY WITH EXISTING KV EVICTION METHODS  
+
+Our preference-prioritized adaptive allocation strategy demonstrates strong compatibility with existing eviction indicators. We evaluate its performance using two representative methods: H2O, which serves as a classical indicator, and SnapKV, which represents a new advanced indicator. The experiments are conducted on LongBench datasets using Llama2-7B-Chat under $B_{\mathrm{total}}$ of $128L$ and $512L$ . We report the average performance across six tasks. In Figure 8, when compared with vanilla uniform cache allocation, methods equipped with our allocation strategy consistently improve performance across nearly all tasks. Importantly, they achieve significant overall performance gains. This comprehensive improvement across different eviction methods and tasks demonstrates the versatility and effectiveness of our allocation approach. It stresses the potential of our strategy as a generalizable framework for optimizing KV cache eviction, enhancing various existing methods.  
+
+![](images/1345d512dd086e486a12c5986b1547be19dd00011c1a70f11a57a5432fbb45b4.jpg)  
+5.6 ABLATION STUDIES  
+
+In this section, we present a series of ablation studies on LongBench to evaluate the effectiveness of our proposed allocation strategy and eviction indicator. We use Llama2-7B-Chat with cache budget $B_{\mathrm{total}}=128L$ as the default setting.  
+
+Effectiveness of Proposed Allocation Strategy. To assess our preference-prioritized adaptive allocation strategy, we compare it with various cache allocation strategies, including uniform, pyramidshaped, and random allocation. As shown in Table 2, the pyramid-shape allocation strategy performs better than the uniform allocation strategy in this case. However, it may become ineffective in many scenarios, as we verified in the previous experimental section. Notably, the random method even outperforms the uniform strategy in some cases. This indicates that the conservative allocation strategy of uniform distribution fails to fully utilize the limited memory budget. Our allocation strategy consistently outperforms all baselines, as our method comprehensively measures the KV cache preference by capturing complex layer-specific attention patterns both spatially and temporally.  
+
+Effectiveness of Proposed Eviction Indicator. We further investigate effective eviction indicators to identify the most crucial tokens for preserving model performance. We compare different metrics for the eviction indicator: mean only, variance only, and combinations of mean and variance (multiplication and addition). The results in Table 3 suggest that, compared to variance only, tokens selected by mean attention are more conducive to maintaining performance. While the multiplicative combination of mean and variance slightly underperforms the individual metrics, the additive combination achieves the best performance overall. As we analyze, using mean attention effectively captures tokens with long-term importance, ensuring the retention of consistently relevant information. On the other hand, incorporating variance helps identify positions with the most significant changes, thus aiding in maintaining the attention distribution. The additive combination optimally balances these two aspects, leading to more informed eviction decisions.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+In this paper, we propose Cascading and Adaptive KV cache Eviction (CAKE), a novel approach for optimizing KV cache evicting in LLMs. CAKE dynamically allocates cache sizes by leveraging a global view of layer-specific attention patterns, using cascading cache management guided by layer preferences. Additionally, CAKE introduces a new eviction indicator that accounts for both the long-term influence and temporal variability of token importance, allowing for more informed token selection. Experiments on the LongBench and NeedleBench benchmarks highlight CAKE’s superior performance across different models and memory constraints, especially in low-memory scenarios. Our method enhances both LLM performance on long-context tasks and inference efficiency.  
+
+
+

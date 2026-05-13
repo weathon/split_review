@@ -1,0 +1,437 @@
+\title{Revealing the Unseen: Guiding Personalized Diffusion Models to Expose Training Data}
+
+\begin{abstract}
+Diffusion Models (DMs) have evolved into advanced image generation tools, especially for few-shot fine-tuning where a pretrained DM is fine-tuned on a small set of images to capture specific styles or objects. Many people upload these personalized checkpoints online, fostering communities such as Civitai and HuggingFace. However, model owners may overlook the potential risks of data leakage by releasing their fine-tuned checkpoints. Moreover, concerns regarding copyright violations arise when unauthorized data is used during fine-tuning.  In this paper, we ask: \textit{“Can training data be extracted from these fine-tuned DMs shared online?” } A successful extraction would present not only data leakage threats but also offer tangible evidence of copyright infringement. To answer this, we propose FineXtract, a framework for extracting fine-tuning data.  Our method approximates fine-tuning as a gradual shift in the model's learned distribution---from the original pretrained DM toward the fine-tuning data. By extrapolating the models before and after fine-tuning, we guide the generation toward high-probability regions within the fine-tuned data distribution. We then apply a clustering algorithm to extract the most probable images from those generated using this extrapolated guidance. Experiments on DMs fine-tuned with datasets such as WikiArt, DreamBooth, and real-world checkpoints posted online validate the effectiveness of our method, extracting approximately 20\% of fine-tuning data in most cases, significantly surpassing baseline performance. 
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Recent years have witnessed the advancement of Diffusion Models (DMs) in computer vision. These models demonstrate exceptional capabilities across various tasks, including image editing~\citep{kawar2022imagic}, and video editing~\citep{yang2022diffusion}, among others.  Particularly noteworthy is the advent of few-shot fine-tuning methods~\citep{hu2021lora,ruiz2023dreambooth, Qiu2023OFT}, in which a pretrained model is fine-tuned to personalize generation based on a small set of training images. These approaches have significantly reduced both memory and time costs in training. Moreover, these techniques offer powerful tools for adaptively generating images based on specific subjects or objects, embodying personalized AI and making AI accessible to everyone.
+
+
+Building on these innovations, several communities, such as Civitai~\citep{civitai} and HuggingFace~\citep{huggingface}, have emerged, hosting tens of thousands of fine-tuned checkpoints and attracting millions of downloads. Although many users willingly share their fine-tuned models, they may be unaware of the risk of data leakage inherent in this process. This is particularly concerning when fine-tuning involves sensitive data, such as medical images, human faces, or copyrighted material. Moreover, many of these checkpoints are fine-tuned using unauthorized data, including artists' work. This unauthorized fine-tuning process raises significant concerns regarding  ``reputational damage, economic loss, plagiarism and copyright infringement" as mentioned in~\citet{jiang2023ai}, and has prompted numerous objections from data owners~\citep{advdm, wu2024cgi, glaze}. 
+ 
+
+
+
+In this paper, we pose a critical question: \textbf{“Is it possible to extract fine-tuning data from these fine-tuned DM checkpoints released online?”} Successfully doing so would 
+  confirm that fine-tuning data is indeed leaked within these checkpoints. Moreover, the extracted images could serve as strong evidence that specific data was used in the fine-tuning process, thereby aiding those whose rights have been infringed to seek legal protection and take necessary legal action.
+
+\begin{figure}[t]
+    \includegraphics[width=\linewidth]{compressed_real-world-exp_res_v2.pdf}
+\caption{Extraction results from real-world fine-tuned checkpoints on HuggingFace using our FineXtract. \textbf{Top:} Extracted images. \textbf{Bottom:} Corresponding training images.}
+    \label{real-world_vis}
+  \end{figure}
+More specifically, extracting fine-tuning data can be seen as targeting specific portions of the training data, whereas previous work on extracting data from diffusion models has mainly focused on general generative processes~\citep{carlini2023extracting, ext2, ext3}, often overlooking more detailed or interesting data. 
+To address this gap, we propose a new framework, called \textbf{FineXtract}, for efficiently and accurately extracting training data from the extrapolated guidance between DMs before and after fine-tuning.
+We begin by providing a parametric approximation of the fine-tuned DMs distribution, modeling it as an interpolation between the pretrained DMs' distribution and the fine-tuned data distribution.  
+With this approximation, we demonstrate that extrapolating the score functions of the pretrained and fine-tuned DMs can effectively \emph{guide} the denoising process toward the high-density regions of the fine-tuned data distribution, a process we refer to as \emph{model guidance}.
+We then generate a set of images within such high-density regions and apply a clustering algorithm to identify the images that are most likely to match the training data within the fine-tuning dataset.
+Our method can be applied to both unconditional and conditional DMs. Specifically, when the training caption $c$ is available, we approximate the learned distribution of DMs conditional on caption $c$ as an interpolation between the unconditional DM learned distribution and the conditional data distribution. Combined with model guidance, this leads to an extrapolation from the noise predicted by the pretrained unconditional DM to that by the fine-tuned conditional DM, guiding generation toward the high-density region of the fine-tuned data distribution conditioned on $c$.
+Experiments across different datasets, DM structures, and real-world checkpoints from HuggingFace demonstrate the effectiveness of our method, which extracts around 20\% of images in most cases (See Fig. \ref{real-world_vis} for visual examples).
+
+
+In summary, our contributions are as follows:
+
+\begin{itemize}
+\item We approximate the learned distribution during the fine-tuning process of DMs and demonstrate how this guides the model towards the high-density regions of the fine-tuned data distribution.
+\item We propose a new framework, FineXtract,  for extracting fine-tuning datasets using this approximation. With a clustering algorithm, our method can extract images visually close to fine-tuning dataset. 
+\item Experimental results on fine-tuned checkpoints on various datasets (WikiArt, DreamBooth), various DMs and real-world checkpoints from HuggingFace validate the effectiveness of our methods.
+\end{itemize}
+
+
+
+\section{Background and Related Works}
+
+\subsection{Diffusion Models and Few-shot Fine-tuning}
+\textbf{Diffusion Models and Score Matching.} 
+Diffusion Models 
+(DMs)~\citep{ho2020denoising,sohl2015deep} are generative models that approximate data distributions by gradually denoising a variable initially sampled from a Gaussian distribution. These models consist of a forward diffusion process and a backward denoising process. In the forward process, noise \(\varepsilon \in \mathcal{N}(0,1)\) is progressively added to the input image \(x_0\) over time \(t\), following the equation \(x_t = \sqrt{\alpha_t}x_{0} + \sqrt{1-\alpha_t}\varepsilon\).  Conversely, in the backward process, DMs aim to estimate and remove the noise using a noise-prediction module, \(\epsilon_{\theta}\), from the noisy image \(x_t\).  The difference between the actual and predicted noise forms the basis of the training loss, known as the diffusion loss, which is defined as \(\mathcal{L}_{DM} = \mathbb{E}_{\varepsilon\sim \mathcal{N}(0,1), t}\left[\|\epsilon_{\theta}(x_t, t) - \varepsilon\|_2^2\right]\).
+
+Another series of works focus on score matching, offering insights into DMs from a different perspective~\citep{vincent2011connection,song2019generative,song2020score}. Score matching aims to learn a score network \( s_\theta(x) \) trained to predict the score (i.e., the gradient of the log probability function) \( \nabla_x \log q(x) \) of data $x$ within real data distribution $q(x)$~\citep{vincent2011connection}. To improve accuracy and stability, 
+subsequent research proposes predicting the score of the Gaussian-perturbed data distribution $q(x_t)$~\citep{song2019generative,song2020score}: \( s_\theta(x_t, t) \approx \nabla_{x_t}\log q(x_t) = -\frac{\epsilon_{\theta}(x_t, t)}{\sqrt{1-\overline{\alpha_t}}} \), where \( \overline{\alpha_t} = \prod_{i=1}^{t} \alpha_{i} \). These works show a strong alignment between the predicted noise \( \epsilon_{\theta}(x_t, t) \) and the score \( \nabla_x \log q(x) \). 
+
+
+
+\textbf{Few-shot Fine-tuning.} 
+Few-shot fine-tuning in DMs~\citep{ti,hu2021lora, ruiz2023dreambooth} aims to personalize these models using a limited set of images, enabling the generation of customized content. 
+\citet{ti} introduced a technique that incorporates new tokens within the embedding space of a frozen text-to-image model to capture the concepts in the provided images. 
+However, this method has limitations in accurately reproducing the detailed features of the input images~\citep{ruiz2023dreambooth}. 
+To address this, \citet{ruiz2023dreambooth} proposed DreamBooth, which fine-tunes most parameters in DMs using a reconstruction loss to capture details and a class-specific preservation loss to ensure alignment with textual prompts.
+Additionally, \citet{hu2021lora} introduced LoRA, a lightweight fine-tuning approach that inserts low-rank layers to be trained while keeping other parameters frozen.
+\subsection{Memorization and Data Extraction in Diffusion Models}
+Recent studies on DMs have highlighted their tendencies toward data memorization and methods have been proposed to extract training data based on it. \citet{carlini2023extracting}
+used a graph algorithm to identify the generated data most likely to have been included in the training set, thereby retrieving DM's memorized training data. Further investigations \citep{ext2, ext3} explore the underlying causes of this memorization, revealing that conditioning plays a significant role, and the nature of training prompts notably influences the likelihood of reproducing training samples. However, these studies are primarily  empirical with no parametric formulation on learned distribution of DMs, and they do not address personalization scenarios. In contrast, our approach introduces a parametric approximation of the learned distribution of fine-tuned DMs, enabling the design of a pipeline that efficiently extracts training samples from fine-tuned checkpoints upload online.
+
+
+\section{Threat Model and Metrics}
+
+\subsection{Threat Model}
+
+Our threat model involves extracting training data from a fine-tuned DM alongside its corresponding pretrained DM, with two key parties: model providers and attackers.
+
+\textbf{Model providers.} Providers fine-tune a pretrained model $\theta$ using an image dataset $X_0$. After fine-tuning, they upload the fine-tuned model checkpoint $\theta'$ to specific websites, including necessary details such as the name of the pretrained model $\theta$ to make the fine-tuned model checkpoint usable. Additional training details, such as training captions, are sometimes provided~\citep{civitai, huggingface}.
+\textbf{Attackers.} Attackers download the checkpoints $\theta'$ from these websites. They also acquire the pretrained model $\theta$. By default, we assume that the attacker can access the training caption, following previous work~\citep{ext2,ext3,carlini2023extracting}. \ref{caption-details}, where we show that even without direct access, captions can be partially extracted using inversion on linear projection layers.)
+ Attackers have no prior knowledge about the image dataset $X_0$. Their goal is to extract as much information about $X_0$ as possible. A successful attack occurs when  attacker  extracts an image set $\widehat{X}$ that is almost identical to the training image set $X_0$.
+\subsection{Evaluation Metrics}
+Attacker produces an extracted dataset $\widehat{X}$, which is evaluated by comparing it with the training image set $X_0$. Specifically, we consider the following two metrics:
+
+\noindent \textbf{Metric 1: Average Similarity (AS).} Average similarity  is computed between images in the extracted dataset $\widehat{X}$ and those in the training dataset $X_0$. The metric is defined as:
+
+\begin{equation} 
+\mbox{AS}(X_0, \widehat{X}) = \frac{1}{|X_0|}\sum\limits_{i=1}^{|X_0|}\max\limits_{j}\mbox{sim}(X_0^{(i)}, {\widehat{X}}^{(j)}).
+\end{equation}
+
+Here, $\mbox{sim}(\cdot, \cdot)$ denotes the similarity function, with output ranging from 0 to 1. Following previous works~\citep{ext2, ext3, chen2024extracting}, we use the Self-Supervised Descriptor (SSCD) score~\citep{sscd}, designed to detect and quantify copying in DMs, for similarity computation in this paper. Intuitively, AS measures how well the extracted dataset $\widehat{X}$ covers the images within the training dataset $X_0$.
+
+\noindent \textbf{Metric 2: Average Extraction Success Rate (A-ESR).} Following previous work~\citep{carlini2023extracting}, when the similarity between an extracted image and a training image exceeds a given threshold,  the extraction of that image is considered as successful. To assess the extraction of an entire dataset, we compute the average extraction success rate as follows:
+
+\begin{equation}
+    \mbox{A-ESR}_{\tau}(X_0, \widehat{X}) = \frac{1}{|X_0|}\sum\limits_{i=1}^{|X_0|}\mathbbm{1}\left(\max\limits_{j}\mbox{sim}(X_0^{(i)}, {\widehat{X}}^{(j)}) > \tau\right),
+\end{equation}
+
+where \(\mathbbm{1}\) is the indicator function. Following previous work~\citep{ext2, ext3}, the threshold \(\tau\) is set to 0.7 for a strictly successful extraction. We also present results where the threshold \(\tau\) is set to 0.6, which represents a moderate similarity and can be considered a loosely successful extraction~\citep{chen2024extracting}.
+
+
+\begin{figure}[t]
+  \centering
+    \includegraphics[width=\linewidth]{framework_2.pdf}
+  \caption{Our framework FineXtract, extracting training images using DMs before and after fine-tuning.}
+  \label{framework}
+\end{figure}
+
+
+\section{FineXtract: Extracting Fine-tuning Data}
+
+\label{met}
+In this section, we introduce FineXtract, a framework designed for robust extraction using DMs before and after fine-tuning. As shown in Fig. \ref{framework}, we first address a simplified scenario considering unconditional DMs (Sec. \ref{main}). Next, we explore the case where the training caption 
+$c$ is provided (Sec. \ref{capti}). Finally, we apply a clustering algorithm to identify the images with the highest probability of matching those in the training dataset (Sec. \ref{clustering}) from generated image set $X$. The output of the clustering algorithm serves as the extracted image set $\widehat{X}$, closely resembling the training images set $X_0$.
+
+
+\subsection{Model Guidance}
+\label{main}
+We denote the the fine-tuned data distribution as \( q(x) \) for a fine-tuning dataset \( X_0 \). During the fine-tuning process, the DMs progressively shift their learned distribution from the pretrained DMs' distribution \( p_{\theta}(x) \) toward the fine-tuned data distribution \( q(x) \). Thus, we parametrically approximate that the learned distribution of the fine-tuned DMs, denoted as \( p_{\theta'}(x) \), satisfies:
+
+\begin{equation}
+    p_{\theta'}(x) \propto p^{1-\lambda}_{\theta}(x)q^{\lambda}(x),
+    \label{first}
+\end{equation}
+where $\lambda$ is a coefficient ranging from 0 to 1, relating to the training iterations. More training iterations result in larger $\lambda$, showing the fine-tuned DMs distribution $p_{\theta'}(x)$ more closely ensemble fine-tuned data distribution $q(x)$.
+In this case, we can derive the score of the fine-tuned model distribution \(p_{\theta'}(x)\) by:
+\begin{equation}
+    \nabla_{x} \log p_{\theta'}(x) = (1-\lambda)\nabla_{x} \log p_{\theta}(x) + \lambda\nabla_{x} \log  q(x),
+\end{equation}
+This means that we can derive the guidance towards the fine-tuning dataset $X_0$ by using the score of the fine-tuned data distribution and pretrained DMs distribution:
+
+\begin{equation}
+\nabla_{x} \log q(x) = \frac{1}{\lambda}\nabla_{x} \log p_{\theta'}(x)  - \frac{1-\lambda}{\lambda} \nabla_{x} \log p_{\theta}(x). 
+\label{before-trans}
+\end{equation}
+Recalling the equivalence between denoisers and the score function in DMs~\citep{vincent2011connection}, we employ a time-varying noising process and represent each score as a denoising prediction, denoted by \( \epsilon(x_{t}, t) \), similar to previous work \citep{erase}:
+
+\begin{equation}
+ \epsilon_{q}(x_{t}, t) = \epsilon_{\theta'}(x_{t}, t)   + (w-1)(\epsilon_{\theta'}(x_{t}, t) - \epsilon_{\theta}(x_{t}, t)),
+ \label{final1}
+\end{equation}
+
+where \( w = 1/\lambda \). Eq. \ref{final1} demonstrates that by extrapolating from the pretrained denoising prediction  $\epsilon_{\theta}(x_{t}, t))$ to the fine-tuned denoising prediction $\epsilon_{\theta'}(x_{t}, t)$, we can derive guidance toward the fine-tuned data distribution. We call this process ``model guidance''. The guidance scale \( w \) should be inversely related to the number of training iterations. With model guidance, we can effectively simulate a ``pseudo-" denoiser \( \epsilon_{q} \), which can be used to steer the sampling process toward the high-probability region within fine-tuned data distribution \( q(x) \).
+
+\subsection{Guidance with Training Caption  Provided}
+\label{capti}
+We further consider the scenario where DMs are fine-tuned with a given caption \(c\). As discussed in previous work on classifier-free guidance (CFG)~\citep{ho2022classifier}, DMs often struggle to accurately learn the distribution conditional on a given caption \(c\) and therefore require additional guidance from unconditional generation. We can adopt a similar approximation to the one presented in Sec. \ref{main}:
+
+\begin{equation}
+    p_{\theta}(x|c) \propto p^{1-\lambda'}_{\theta}(x)q_0^{\lambda'}(x|c),
+\end{equation}
+where  $q_0(x|c)$ denotes the data distribution conditioned on $c$.
+The above formulation indicates that conditional DMs learn a mixture of the conditional distribution of real data and the unconditional distribution of DMs. To capture the score of a denoiser \(\epsilon_{q_0}(x, c)\), which guides sampling toward the high-probability region of  \(q_0(x|c)\), we follow the transition from Eq. \ref{before-trans} to Eq. \ref{final1}, using denoising prediction to represent the scores:
+
+\begin{equation}
+ \epsilon_{q_0}(x_{t}, t, c) = \epsilon_{\theta}(x_{t}, t, c)   + (w'-1)(\epsilon_{\theta}(x_{t}, t, c) - \epsilon_{\theta}(x_{t}, t)),
+ \label{final}
+\end{equation}
+where $w' = 1/\lambda'$. This results in CFG with guidance scale $w'$~\citep{ho2022classifier}. Furthermore, for fine-tuned DMs $\theta'$, we similarly obtain:
+
+
+\begin{equation}
+    p_{\theta'}(x|c) \propto p^{1-\lambda'}_{\theta'}(x)q^{\lambda'}(x|c),
+\end{equation}
+
+where  $q(x|c)$ denotes the fine-tuned data distribution conditioned on $c$. Combined with Eq. \ref{first}: 
+\begin{equation}
+    p_{\theta'}(x|c) \propto p^{(1-\lambda)(1-\lambda')}_{\theta}(x)q^{\lambda(1-\lambda')}(x)q^{\lambda'}(x|c).
+\end{equation}
+This implies that:
+\begin{equation}
+    \epsilon_{\theta'}(x_t, t, c) = (1-\lambda)(1-\lambda')\epsilon_{\theta}(x_t, t) + \lambda(1-\lambda') \epsilon_q(x_t, t) + \lambda'\epsilon_{q}(x_t, t, c).
+    \label{before-omit}
+\end{equation}
+Since the real-data distribution involving two modalities is expected to be more peaked than a single-modality distribution, we assume that the conditional fine-tuned data distribution $q(x|c)$ is also much more concentrated than the unconditional one, $q(x)$. This results in a significant difference in the magnitude of their score, i.e., \( \Vert \nabla_x \log q(x) \Vert \ll \Vert \nabla_x \log q(x, c) \Vert \). Consequently, based on the transformation in Eq. \ref{before-trans} and Eq. \ref{final1}, we have $ \epsilon_{q}(x, t) \ll \epsilon_{q}(x, t,c)$, allowing us to approximate Eq. \ref{before-omit} by omitting  by omitting \( \epsilon_{q}(x, t) \):
+
+
+\begin{equation}
+    \epsilon_{\theta'}(x_t, t, c) \approx (1-\lambda)(1-\lambda')\epsilon_{\theta}(x_t, t)  + \lambda'\epsilon_{q}(x_t, t, c),
+\end{equation}
+
+
+which indicates:
+
+
+
+ 
+ \begin{equation}
+ \epsilon_{q}(x_{t}, t, c) \approx  \epsilon_{\theta'}(x_{t}, t, c) + (w'-1) ( \epsilon_{\theta'}(x_{t}, t, c) -  \epsilon_{\theta}(x_{t},t)) + k \epsilon_{\theta}(x_{t},t).
+ \label{eq:combine}
+\end{equation}
+
+Here, \( w = \frac{1}{\lambda} \), \( w' = \frac{1}{\lambda'} \) and  \( k = \frac{w'-1}{w}\).
+This transformation demonstrates that we can guide generation within the conditional fine-tuned data distribution, $q(x|c)$, by extrapolating from the unconditional denoising prediction  of the pretrained DM, $\epsilon_{\theta}(x_{t},t)$, to the conditional denoising prediction of the fine-tuned model DM, $\epsilon_{\theta'}(x_{t}, t, c)$, using the guidance scale $w'$. This process also involves an additional correction term \( k \epsilon_{\theta}(x_{t},t) \), which, intuitively,  compensates the mismatch between model guidance and CFG .
+
+In practice, the training caption $c$ may not always be available. However, we find that it is possible to extract some information about the training caption by analyzing only the first few trainable linear projection layers before and after fine-tuning. \ref{caption-details}. 
+
+\subsection{Clustering Generated Images}
+\label{clustering}
+Sections \ref{main} and \ref{capti} explain how to sample images within high probability region of fine-tuned data distribution. However, the randomness in the sampling process affects the images, reducing extraction accuracy. To further improve extraction accuracy, we take inspiration from  previous work~\citep{carlini2023extracting}, sampling \( N \) images and applying a clustering algorithm to identify the images with the highest probability, where \( N \gg N_{0} \) and \( N_{0} \) is the number of training images.
+
+Specifically, inspired by~\citet{carlini2023extracting}, we compute the similarity between each pair of generated images and construct a graph where each image is represented as a vertex. We connect two vertices when the similarity between the corresponding images exceeds a threshold \(\phi\), i.e., if \( \text{sim}(x_{i}, x_{j}) \geq \phi \), we connect vertices \(i\) and \(j\). By default, we use SSCD~\citep{sscd} to measure similarity, in line with previous work~\citep{ext2,ext3}. Instead of using a fixed threshold~\citep{carlini2023extracting}, we gradually increase the threshold \(\phi\) until the number of cliques, each denoted by $A^{(k)}$, within the graph identical to the proposed number of training images \(N_{0}\). This approach helps us identify the generated image subset (i.e., the clique $A^{(k)}$ ) corresponding to each training image ($X_{0}^{(k)})$. 
+Next, we identify the central image \(\hat{x}^{(k)}\) for each clique \(A^{(k)}\). The central image is defined as the one that maximizes the average similarity with the other images in the clique: $
+\hat{x}^{(k)} = \arg\max\limits_{x} \frac{1}{|A^{(k)}|} \sum_{x_{q} \in A^{(k)}} \text{sim}(x, x_{q}).$
+The final extracted image set is represented as \(\widehat{X} = \{\hat{x}^{(0)}, \hat{x}^{(1)}, \dots, \hat{x}^{(N_{0})}\}\).
+
+Intuitively, our clustering algorithm first seeks to find the subset of extracted images corresponding to each training image and then identifies the central image within each subset.
+
+
+
+
+
+
+
+
+
+
+\section{Experiments}
+
+
+In this section, we apply our proposed method, FineXtract, to extract training data under various few-shot fine-tuning techniques across different types of DMs. We conduct experiments on two common scenarios for few-shot fine-tuning: style-driven and object-driven generation. For style-driven generation, which focuses on capturing the key style of a set of images, we randomly select 20 artists, each with 10 images, from the WikiArt dataset~\citep{wikiart}. For object-driven generation, which emphasizes the details of a given object, we experiment on 30 objects from the Dreambooth dataset~\citep{ruiz2023dreambooth}, each consisting of 4-6 images. This setup aligns with the recommended number of training samples in the aforementioned fine-tuning methods~\citep{ruiz2023dreambooth, hu2021lora}. We experiment with two most widely-used  few-shot fine-tuning techniques:  DreamBooth~\citep{ruiz2023dreambooth}, and LoRA~\citep{hu2021lora}. \ref{training-details}.
+
+
+The default model used for training is Stable Diffusion (SD) V1.4\footnote{https://huggingface.co/CompVis/stable-diffusion-v1-4}. Additionally, we demonstrate the adaptability of our method to various types and versions of DMs, larger training datasets, and different numbers of generated images (refer to Sec. ~\ref{gener} for more details).
+By default, we set the generation count $N$ to $50 \times N_0$, where $N_0$ represents the number of training images. The number of extracted images is set equal to $N_0$ to best evaluate our method's ability to extract the exact training dataset. For DreamBooth, the guidance scale $w'$ for both FineXtract and CFG set to 3.0 by default, with the correction term scale $k$ set to -0.02 in Equations \ref{final} and \ref{eq:combine}. For LoRA, $w'$ is set to 5.0 for FineXtract and 3.0 for CFG, respectively.   For the clustering algorithm, we by default set the maximum clustering time for each threshold to be 30s. If clustering does not end, we simply move to the next threshold to reduce computation time. We discuss how these hyperparameters influence extraction efficiency in Sec. \ref{ablation}. FineXtract under potential defenses and toward real-world checkpoints on HuggingFace are discussed in Sec. \ref{defense} and Sec. \ref{real-world-sec}, respectively.
+
+
+\begin{table}[t]
+\caption{Comparison of FineXtract and other baseline methods in fine-tuning data extraction  for style-driven generation using WikiArt dataset~\citep{wikiart} and for object-driven generation under Dreambooth dataset~\citep{ruiz2023dreambooth} under different fine-tuning methods.  $\mbox{A-ESR}_{0.6}$ and $\mbox{A-ESR}_{0.7}$ refer to the Average Extraction Success Rate, with the threshold $\tau$ for successful extraction set at 0.6 and 0.7, respectively. The experimental results demonstrate that FineXtract exhibits stronger performance under all scenarios and metrics than baselines.}
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{threeparttable}
+
+\begin{tabular}{ccccccc}
+\multicolumn{7}{c}{\textbf{Style-Driven Generation: WikiArt Dataset}}         \\ 
+\toprule
+\multirow{2}{*}{Metrics and Settings}                          & \multicolumn{3}{c}{DreamBooth}                                                                        & \multicolumn{3}{c}{LoRA}                                                                            \\ 
+\multicolumn{1}{c}{}                           & \multicolumn{1}{c}{AS$\uparrow$} & \multicolumn{1}{c}{$\mbox{A-ESR}_{0.7}$$\uparrow$} & \multicolumn{1}{c}{$\mbox{A-ESR}_{0.6}$$\uparrow$} & AS$\uparrow$                   & \multicolumn{1}{c}{$\mbox{A-ESR}_{0.7}$$\uparrow$} & \multicolumn{1}{c}{$\mbox{A-ESR}_{0.6}$$\uparrow$} \\
+\midrule
+
+\multicolumn{1}{c}{Direct Text2img+Clustering} &      \multicolumn{1}{c}{0.317}      &                 0.00                      & \multicolumn{1}{c}{0.01}                 & \multicolumn{1}{c}{0.299} &                             0.00          &          0.00                            \\
+\multicolumn{1}{c}{CFG+Clustering}             &      \multicolumn{1}{c}{0.396}       &      0.03                                 & \multicolumn{1}{c}{0.11}                 &      0.357        & 0.00 & 0.01 \\
+\multicolumn{1}{c}{FineXtract}                 & \multicolumn{1}{c}{\textbf{0.449}}                         &     \textbf{0.06}                              &  \textbf{0.22}  & \textbf{0.376} & \textbf{0.01} &  \textbf{0.05} \\
+\bottomrule
+\\
+\multicolumn{7}{c}{\textbf{Object-Driven Generation: DreamBooth Dataset}}       \\
+\toprule
+\multirow{2}{*}{Metrics and Settings}                          & \multicolumn{3}{c}{DreamBooth}                                                                        & \multicolumn{3}{c}{LoRA}                                                                            \\ 
+\multicolumn{1}{c}{}                           & \multicolumn{1}{c}{AS$\uparrow$} & \multicolumn{1}{c}{$\mbox{A-ESR}_{0.7}$$\uparrow$} & \multicolumn{1}{c}{$\mbox{A-ESR}_{0.6}$$\uparrow$} & AS$\uparrow$                   & \multicolumn{1}{c}{$\mbox{A-ESR}_{0.7}$$\uparrow$} & \multicolumn{1}{c}{$\mbox{A-ESR}_{0.6}$$\uparrow$} \\
+\midrule
+
+\multicolumn{1}{c}{Direct Text2img+Clustering} &  0.418    &            0.03                      &         0.11       & \multicolumn{1}{l}{0.347} &                   0.00                    &                             0.02 \\
+\multicolumn{1}{c}{CFG+Clustering}             &      \multicolumn{1}{c}{0.528}                                       & \multicolumn{1}{c}{0.15}                 & 0.36 & \multicolumn{1}{l}{ 0.379 } &             0.01                          &                    0.05                  \\
+\multicolumn{1}{c}{FineXtract}                 &      \multicolumn{1}{c}{\textbf{0.557}} &                                        \multicolumn{1}{c}{\textbf{0.25}}                 & \textbf{0.45} & \multicolumn{1}{l}{\textbf{0.466}} &                        \textbf{0.04}               &                                \textbf{0.18}     
+\\ \bottomrule
+\end{tabular}%
+\end{threeparttable}
+}
+
+\label{tab:main-res}
+\end{table}
+\begin{figure}[t]
+\begin{subfigure}{0.49\linewidth}
+\includegraphics[width=\linewidth]{vis_main_res_wiki_2.pdf}
+\caption{Comparison on WikiArt dataset.}
+\label{fig:sigma}
+\end{subfigure}
+    \begin{subfigure}{0.49\linewidth}
+\includegraphics[width=\linewidth]{vis_main_res_db_3.pdf}
+\caption{Comparison on DreamBooth dataset.}
+\label{fig:lambda}
+\end{subfigure}
+\caption{Qualitative comparison of the extracted result between FineXtract and baseline methods. All baselines are combined with the clustering algorithm proposed in Sec. \ref{clustering}.}
+\end{figure}
+\subsection{Comparison}
+Previous extraction methods primarily focus on the generation capabilities of text-to-image DMs, employing either direct text-to-image generation or classifier-free guidance (CFG)~\citep{carlini2023extracting,ext2,ext3}. To better demonstrate the effectiveness of our framework, we compare FineXtract with Direct Text-to-Image and CFG, both combined with the clustering algorithm proposed in Section \ref{clustering}. For both CFG and FineXtract, we set the guidance scale $w'$ to 3.0 under DreamBooth fine-tuning. Under LoRA fine-tuning, $w'$ are set to 3.0 for CFG and 5.0 for FineXtract.  These hyperparameters are found to perform well (see Sec. \ref{ablation} for details).
+All methods use the same number of generation iterations, $N$, set to $50 \times N_0$, and the number of extracted images set to $N_0$ to ensure a fair comparison. The results, shown in Table \ref{tab:main-res}, demonstrate a significant advantage of FineXtract over previous methods, with an improvement of approximately 0.02 to 0.05 in AS and a doubling of the A-ESR in most cases.
+
+\subsection{Generalization}
+\label{gener}
+In this section, we take a step further to test whether our method can be applied to a broader range of scenarios, including different DM structures, varying numbers of training images $N_0$, and different numbers of generated images $N$. We experiment on 4 classes in WikiArt dataset fine-tuning DMs with DreamBooth.
+\noindent\textbf{Different DMs.} We select  three distinguishable Diffusion Models: Stable Diffusion Model~\citep{rombach2022high}, Stable Diffusion Model XL~\citep{podell2023sdxl}, and AltDiffusion~\citep{alt-ye2023altdiffusion}, which are representative of latent-space DMs, high-resolution DMs and multilingual DMs, respectively. We conduct experiments using the following versions of the three models: SD (V1.4)\footnote{https://huggingface.co/CompVis/stable-diffusion-v1-4}, SDXL (V1.0)\footnote{https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0}, and AltDiffusion\footnote{https://huggingface.co/BAAI/AltDiffusion}. As shown in Tab. \ref{tab:cross-model}, the improvement of our method compared to the baseline is consistent across different DMs.
+
+\noindent\textbf{Number of Training Images $N_0$.} As the number of training images increases, the learned concept during fine-tuning becomes more intricate, thereby enhancing the difficulty of extracting training images. To thoroughly examine how this influences performance, we conduct experiments with varying numbers of training images in 5 classes in WikiArt, the results of which are presented in Fig. \ref{img:training}, where we can observe a performance drops when the number of the training images is large.
+  
+
+  
+\begin{wrapfigure}[15]{r}{0.60\linewidth}
+  \centering
+  \begin{minipage}{0.49\linewidth}
+    \includegraphics[width=\linewidth]{gen_img_num.pdf}
+    \subcaption{Different $N_0$}
+    \label{img:training}
+  \end{minipage}
+  \hfill
+  \begin{minipage}{0.49\linewidth}
+    \includegraphics[width=\linewidth]{gen_num.pdf}
+    \subcaption{Different $N$}
+    \label{img:gen}
+  \end{minipage}
+  \caption{Experiment on generalization ability of FineXtract across different number of generated images and training images. We experiment on 4 classes of WikiArt dataset fine-tuning on SD (V1.4) with DreamBooth.}
+\end{wrapfigure}
+\noindent\textbf{Different Numbers of Generated Images $N$.} As previously mentioned, the clustering algorithm allows attackers to leverage more generation iterations to improve extraction accuracy. We test our method with different numbers of generated images $N$, ranging from $N_0$ to $50 \times N_0$. As shown in Fig. \ref{img:gen}, increasing $N$ significantly improves performance. However, the time complexity of finding maximal cliques can grow exponentially with the number of nodes~\citep{tomita2006worst}. Thus, further increasing $N$ to larger than $50 \times N_0$ makes it considerably more difficult for the clustering algorithm to converge. 
+\begin{table}[t]
+\caption{Experiments of FineXtract on different DMs. We experiment on 4 classes in WikiArt dataset using DreamBooth for fine-tuning. The guidance scale $w'$ for both CFG and FineXtract is set to the value that achieves the highest AS for each DM.}
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{threeparttable}
+\begin{tabular}{ccccccc}
+\toprule
+\multirow{2}{*}{Metrics and Settings}   & \multicolumn{2}{c}{SD (V1.4)}                                        & \multicolumn{2}{c}{SDXL (V1.0)}                                           & \multicolumn{2}{c}{AltDiffusion}                                                         \\ 
+\multicolumn{1}{l}{}      & AS$\uparrow$  & $\mbox{A-ESR}_{0.6}$$\uparrow$ & AS$\uparrow$ & $\mbox{A-ESR}_{0.6}$$\uparrow$ & AS$\uparrow$  & \multicolumn{1}{c}{$\mbox{A-ESR}_{0.6}$$\uparrow$} \\
+\midrule
+Direct Text2img+Clustering &   0.341                             &     0.03                           &  0.335                                  &         0.05                       &  0.282           &                                        0.00            \\ 
+CFG+Clustering             &  0.434                             &                           0.23     &                0.360                   &        0.10                       &   0.364        &                                          0.03          \\
+
+FineXtract                 & \textbf{0.501}                       &                    \textbf{0.35}               &              \textbf{0.467}                  &   \textbf{0.25}                             &   \textbf{0.388}          &                                       \textbf{0.05}             \\
+\bottomrule
+\end{tabular}%
+\end{threeparttable}
+}
+
+\label{tab:cross-model}
+\end{table}
+
+\begin{wrapfigure}[14]{r}{0.6\linewidth}
+  \centering
+  \begin{minipage}{0.49\linewidth}
+    \includegraphics[width=\linewidth]{ablation_w.pdf}
+    \subcaption{Ablation on $w'$}
+    \label{w-exp}
+  \end{minipage}
+  \hfill
+  \begin{minipage}{0.49\linewidth}
+    \includegraphics[width=\linewidth]{ablation_k.pdf}
+    \subcaption{Ablation on $k$}
+    \label{k-exp}
+  \end{minipage}
+  \caption{Ablation Study on hype-parameters $w'$ and $k$. We experiment on 4 classes of WikiArt dataset fine-tuning on SD (V1.4) with DreamBooth.}
+\end{wrapfigure}
+\subsection{Ablation Study}
+\label{ablation}
+In this section, we experiment with hyperparameters in Eq. \ref{eq:combine}, including the guidance scale $w'$ and the correction term scale $k$. We experiment on 4 classes in WikiArt fine-tuning with DreamBooth. \ref{Lora-hyper}.
+
+\begin{figure}[t]
+    \includegraphics[width=\linewidth]{vis_ablation.pdf}
+    \caption{Visualization of generated images using FineXtract under different $w'$ with one fixed starting noise $x_{T}$.}
+    \label{vis_ablation_w}
+  \end{figure}
+
+\textbf{Guidance Scale $w'$.} The guidance scale $w'$ is the most critical hyperparameter influencing extraction efficiency. If $w'$ is too low, the guidance provided by fine-tuning methods is weakened. Conversely, if $w'$ is too high, it often causes generation failures, resulting in unrealistic outputs (see visual examples in Fig.  \ref{vis_ablation_w}). As shown in Fig. \ref{w-exp},  $w'=3.0$ works well for both CFG and FineXtract when DMs are fine-tuned using DreamBooth.
+
+\textbf{Correction Term Scale \(k\).} In Eq. \ref{eq:combine}, we introduce a correction term \(k \epsilon_{\theta}(x_{t},t)\) to address the inconsistency between CFG and model guidance. Although Eq. \ref{eq:combine} indicates that \(k\) should not be less than 0, our experiments suggest that setting \(k = -0.02\) typically yields the best results, as illustrated in Fig. \ref{k-exp}. This may be due to the complex interaction between \(w'\) and \(k\), where \(k\) can only be guaranteed to be greater than 0 if the true value of \(w'\) can be identified, which is often impractical in real-world scenarios.
+
+
+\subsection{FineXtract under Defense}
+\label{defense}
+As highlighted in prior research~\citep{mia-dm1,mia-dm2,mia-whitebox}, it is possible to partially defend against privacy-related attacks, such as membership inference attacks (MIA). 
+
+\begin{wrapfigure}[8]{r}{0.45\linewidth}
+\refstepcounter{table}
+Table \thetable: FineXtract under  defenses.
+\label{tab:defense}
+\centering
+\centering
+\begin{threeparttable}
+ \centering
+    \begin{tabular}
+    {ccc}
+\toprule
+\multicolumn{1}{c}{Defense Methods} & \multicolumn{1}{c}{AS$\uparrow$}           & \multicolumn{1}{c}{$\mbox{A-ESR}_{0.6}$$\uparrow$} \\ \midrule
+No Defense    & 0.501 &             0.35         \\
+Cutout    &0.397& 0.08   \\
+RandAugment                         &0.267& 0.03  \\ \bottomrule
+\end{tabular}%
+
+\end{threeparttable}
+
+\end{wrapfigure}
+Naturally, this raises the question of whether these defense methods can also protect against extraction techniques. To explore this, we conducted experiments on FineXtract under two defenses:  Cutout~\citep{mia-defense2}, and RandAugment~\citep{mia-defense3}.  Notably, RandAugment is recognized as a strong privacy-preserving defense at the cost of  severe decline in generation quality~\citep{mia-dm1}.
+\begin{wrapfigure}[18]{r}{0.6\linewidth}
+  \centering
+   \begin{minipage}{1.0\linewidth}
+    \includegraphics[width=\linewidth]{compressed_aug_vis_2.pdf}
+    \caption{Images generated by SD (V1.4) fine-tuned under various scenarios, where a noticeable decline in quality can be observed when defenses are applied.}
+    \label{defense:fig}
+  \end{minipage}
+  
+\end{wrapfigure}
+
+The results presented in Tab.~\ref{tab:defense} illustrate how these methods can partially defend FineXtract, though at the cost of generation performance.  Cutout and RandAugment indeed proves to be quite strong at defense. However, as shown in Fig. \ref{defense:fig}, the added transformations render the output images largely unusable, making them difficult to leverage in practice. Our results highlight that while these approaches may be partially effective in defense, there is a lack of research on how to fine-tune models on such transformed data while preserving the defensive effects. This remains an area for further investigation.
+
+\subsection{Real-world Results}
+\label{real-world-sec}
+Finally, we test our method on fine-tuned checkpoints available in the real world. We experiment on 10 checkpoints from HuggingFace where the corresponding training datasets are provided, allowing us to evaluate the effectiveness of our extraction method. \ref{info-checkpoints}. Quantitative results are shown in Table \ref{real-world-exps}, where FineXtract consistently outperforms the baseline methods, increasing AS by at least 0.03 and doubling A-ESR in most cases.
+
+\begin{table}[t]
+\centering
+\caption{Comparison of FineXtract with baseline methods towards real-world checkpoints. }
+\resizebox{\columnwidth}{!}{%
+\begin{threeparttable}
+
+\begin{tabular}{ccccccc}
+
+\toprule
+\multirow{2}{*}{Metrics and Settings}                          & \multicolumn{3}{c}{DreamBooth}                                                                        & \multicolumn{3}{c}{LoRA}                                                                            \\ 
+\multicolumn{1}{c}{}                           & \multicolumn{1}{c}{AS$\uparrow$} & \multicolumn{1}{c}{$\mbox{A-ESR}_{0.7}$$\uparrow$} & \multicolumn{1}{c}{$\mbox{A-ESR}_{0.6}$$\uparrow$} & AS$\uparrow$                   & \multicolumn{1}{c}{$\mbox{A-ESR}_{0.7}$$\uparrow$} & \multicolumn{1}{c}{$\mbox{A-ESR}_{0.6}$$\uparrow$} \\
+\midrule
+
+\multicolumn{1}{c}{Direct Text2img+Clustering} &      \multicolumn{1}{c}{0.362}      &  0.00                                    & \multicolumn{1}{c}{0.00}                 & \multicolumn{1}{c}{0.270} &                       0.00               &                  0.00                \\
+\multicolumn{1}{c}{CFG+Clustering}             &      \multicolumn{1}{c}{0.468}       &             0.04                          & \multicolumn{1}{c}{0.20}                 &     0.338         & 0.00  &  0.04 \\
+\multicolumn{1}{c}{FineXtract}                 & \multicolumn{1}{c}{\textbf{0.533}}                         &     \textbf{0.13}                              &  \textbf{0.38}  & \textbf{0.371} & \textbf{0.02} &  \textbf{0.11} \\
+\bottomrule
+\\
+
+\end{tabular}%
+\end{threeparttable}
+}
+
+\label{real-world-exps}
+\end{table}
+
+
+
+
+\section{Conclusion}
+
+
+In conclusion, our proposed framework, FineXtract, effectively addresses the challenge of extracting fine-tuning data from publicly available DM fine-tuned checkpoints. By leveraging the transition from pretrained DM distributions to fine-tuning data distributions, FineXtract accurately guides the generation process toward high-probability regions of the fine-tuned data distribution, enabling successful data extraction. Our experiments demonstrate the method’s robustness across various datasets and real-world checkpoints, highlighting the potential risks of data leakage and providing strong evidence for copyright infringements.
+
+\newpage
+
+
+
+
+
+
+

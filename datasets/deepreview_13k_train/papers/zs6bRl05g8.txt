@@ -1,0 +1,317 @@
+\title{Accelerating Block Coordinate Descent for LLM Finetuning via Landscape Correction}
+
+\begin{abstract}
+Training and finetuning large language models (LLMs) are resource-intensive tasks, with memory limitations being a key bottleneck. A classic optimization method, block coordinate descent (BCD), offers solutions by segmenting the trainable parameters into multiple blocks and optimizing one active block at a time while freezing the others, thereby significantly reducing memory cost. However, we identify that blindly applying BCD to train LLMs can be inefficient for two reasons. First, optimizing only the active block requires backpropagating through multiple deeper yet inactive blocks, resulting in wasteful computations. Second, the frozen blocks, when they are not quite close to optimality, can narrow the optimization landscape, potentially misguiding the training of the active block. To address these issues simultaneously, we propose integrating BCD with *landscape correction*, which unfreezes the inactive blocks and updates them in a cost-efficient manner during the same backpropagation as the update to the active block. We show that our method empirically improves vanilla BCD with minimal additional computation and memory. Experiments on 8B and 70B models demonstrate that our proposed method surpasses memory efficient baselines and matches Adam's downstream performance while reducing memory cost by 80% compared to Adam.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large language models (LLMs) have gained significant popularity within the research community and industry. Training these models typically entails a pretraining phase on a vast dataset, followed by a series of finetuning adjustments to tailor the model for specific domain tasks. Both phases demand extensive computational resources, with memory being a primary constraint. For instance, optimizing a model containing $N$ billion parameters using standard mixed-precision training requires at least $18N$ gigabytes of GPU memory (refer to Section 2 for additional details). Given the usual limitations of GPU memory, this constraint impedes researchers from experimenting with larger models.  
+
+To address this practical challenge, researchers have developed memory efficient algorithms for LLM training such as parameter efficient finetuning (PEFT), including Adapter Houlsby et al. (2019), LoRA Hu et al. (2021), prompt tuning Lester et al. (2021), prefix tuning Li & Liang (2021), etc. These techniques focus on training a small set of additional parameters while maintaining the original pretrained model unchanged. Other memory efficient methods for full parameter training have also been investigated. For example, Galore Zhao et al. (2024) applies a low-rank space projection to both the gradient and the optimizer’s states to reduce memory consumption.  
+
+In addition to the existing approaches, a classic optimization paradigm, known as block coordinate descent (BCD), holds a strong potential for memory efficient LLM training and finetuning. Intuitively, BCD reduces the memory cost by partitioning the trainable parameters into several blocks and optimizing over only one active block at a time. For instance, segmenting an $N$ -billion parameter model into $D$ blocks decreases the memory consumption from $18N$ to $\mathit{\check{2N}}+\mathit{\frac{16N}{D}}$ GB, as only the gradient and optimizer states of the active block need to be stored. In fact, BCD has been the method of choice in many data science problems, with a wide array of variants developed for improving memory, performance, convergence, and efficiency; see, e.g., (Hsieh et al., 2008; Chang & Roth, 2011; Yu et al., 2012; Treister & Turek, 2014; Richta´rik & Taka´cˇ, 2014).  
+
+In stark contrast to the previous memory efficient methods, and despite its intuitive memory benefits, BCD has been overlooked and rarely explored in the context of LLMs. It was not until very recently that Luo et al. (2024) proposed BAdam, which integrates BCD into an LLM finetuning framework by training each active block with several Adam steps. Even though BAdam has shown preliminary success in reducing memory cost during training and improving performance at test time, its direct use of vanilla BCD leaves at least two fundamental aspects to be questioned:  
+
+• Computing the (stochastic) gradient for a single active block via backpropagation necessitates calculating the partial derivatives of the activations of multiple deeper yet inactive layers. This is wasteful of computation as these partial derivatives are not even used to update their corresponding weights.   
+• Given that the training objective is highly nonconvex, and since all blocks are frozen except for the active one, BCD tends to be misled by its local view of the optimization landscape, which potentially slows down its convergence speed.  
+
+Standing on the ground offered by BAdam, we push the research frontier by proposing a simple remedy to the above two issues. Our method, termed BREAD, is a blend of two components: (1) Similarly to BAdam, we update the active block using several Adam steps (the BCD component); (2) differently, we unfreeze the inactive blocks and update them using lightweight memory efficient optimization techniques (the landscape correction component). Since landscape correction utilizes the gradients of the activations that are already calculated, it adds minimal additional computation and in fact addresses the wasteful computation issue. Furthermore, the landscape correction component provides BCD a better view of the optimization landscape for better updating the current active block, thereby addressing the second point of concern. In combination, BREAD maintains the memory efficient feature of BCD with improved learning capability and faster convergence. Our main contributions are outlined as follows:  
+
+• Limitations of Standard BCD in LLMs: Our research identifies two fundamental limits of vanilla BCD when applied to neural networks (hence LLMs): The wasted computation of gradients during backpropagation and the suboptimal landscape caused by freezing inactive blocks. These limitations partly explain why the application of BCD in neural networks is uncommon. • Blending BCD with Landscape Correction: We propose a new method termed BREAD, which combines BCD with a landscape correction technique to address these two limitations simultaneously. It unfreezes some of (or all) the inactive blocks and updates them using memory efficient optimization techniques. BREAD maintains the memory efficiency of BCD with improved optimization ability. • Excellent Performance: Our experiments on instruction tuning and preference optimization with the Llama 3.1-8B and Llama 3.1-70B models demonstrate that BREAD clearly outperforms state-of-the-art memory efficient training methods and achieves comparable downstream performance to that of Adam on five math benchmarks and MT-bench scores.  
+
+
+
+\section{2 PRELIMINARIES ON BLOCK COORDINATE DESCENT FOR LLM TRAINING  }
+
+
+Our main focus lies in improving the efficiency of BCD when utilized to finetune LLMs. Therefore, we first review some preliminary concepts of LLM and BCD in this section.  
+
+Objective of training LLMs. Consider minimizing a general objective function minW ${\cal{H}}({\cal{W}})=$ $\begin{array}{r}{\frac{1}{n}\sum_{j=1}^{n}h_{j}(W)}\end{array}$ , where $\boldsymbol{W}\,\in\,\mathbb{R}^{d}$ , $n$ is the number of data samples. In the context of training/finetuning LLMs, $h_{j}(W)$ represents the negative log-likelihood of the autoregressive probability $\begin{array}{r}{\mathbb{P}_{W}[y_{j}|\pmb{x}_{j}]=\prod_{s=1}^{m}\mathbb{P}_{W}[\pmb{y}_{j,s}|\pmb{y}_{j,1:s-1},\pmb{x}_{j}]}\end{array}$ for the $j$ -th prompt $\scriptstyle{\mathbf{\boldsymbol{x}}}_{j}$ and its corresponding $j$ -th output $\pmb{y}_{j}$ . In most  LLM models, this autoregressive probability is modeled by a transformer architecture Vaswani et al. (2017), and thus $\boldsymbol{W}\,\in\,\mathbb{R}^{d}$ encompasses all trainable parameters of the transformer, including the query, key, value, and output attention matrices, as well as the gate, up, and down projection matrices of each transformer layer.  
+
+BCD for LLM training. Instead of minimizing the objective function over the entire set of trainable parameters $W$ , the key idea of BCD is to break down this high dimensional optimization problem into a series of lower dimensional ones, thereby significantly reducing the memory requirement of GPU RAM. Specifically, BCD first splits the model parameters into $D$ block, i.e.,  
+
+$W=\left\{W_{1},\cdots,W_{\ell},\cdots,W_{D}\right\}$ , where $W_{\ell}\in\mathbb{R}^{d_{\ell}}$ and $\textstyle\sum_{\ell=1}^{D}d\ell=d$ . The block partition in such a splitting can be very flexible. For instance, the block variable $W_{\ell}$ can be either a single matrix or all the trainable matrices of a transformer layer. Then, at each block iteration, BCD updates only one active block while fixing the others at their most up-to-date values. This makes each sub-problem of BCD a $D\times$ smaller problem compared to the original one if the $D$ blocks are partitioned evenly. Suppose at the $(t+1)$ -th block iteration the active block is $W_{\ell}$ , BCD solves the following problem:  
+
+$$
+\boldsymbol{W}_{\ell}^{t+1}\in\operatorname*{argmin}_{W_{\ell}\in\mathbb{R}^{d_{\ell}}}\frac{1}{|\mathcal{N}|}\sum_{j\in\mathcal{N}}h_{j}\big(\boldsymbol{W}_{1}^{t+1},\cdot\cdot\cdot,\boldsymbol{W}_{\ell-1}^{t+1},\boldsymbol{W}_{\ell},\boldsymbol{W}_{\ell+1}^{t},\cdot\cdot\cdot,\boldsymbol{W}_{D}^{t}\big)
+$$  
+
+where ${\mathcal{N}}\subseteq\{1,\cdot\cdot\cdot,n\}$ is a batch of the training dataset. Updating from block $\ell\,=\,1$ to block $\ell=D$ is counted as one block-epoch. Since it is intractable to solve (1) exactly, one can instead approximate the solution by implementing $K$ Adam steps, as utilized in BAdam Luo et al. (2024).  
+
+BCD is a memory efficient full parameter optimization method for LLM training. It is evident to see that BCD is a full parameter optimization method, as all the trainable parameters $W$ will be updated after one block-epoch. More importantly, BCD is also memory efficient.  
+
+Let us first analyze the memory consumption of the Adam optimizer under the mixed precision training setting Micikevicius et al. (2017). The memory cost is attributed to the storage of the model parameters, gradients, and optimizer states. We consider an LLM with $N$ billion parameters and express GPU memory consumption in gigabytes (GB). Initially, one must store the FP16 model parameters for the backpropagation (BP) process, requiring $2N$ memory. Additionally, the optimizer maintains a copy of the model in FP32 precision, consuming another $4N$ memory. The gradients, momentum, and second moment vectors are all stored in FP32 precision with each requiring $4N$ memory. Consequently, the total memory required is at least $18N$ . For example, in order to train a Llama 3-8B or a Llama 3-70B model, Adam requires at least $144\;\mathrm{GB}$ or 1260 GB of GPU RAM, respectively, which can be prohibitive in limited memory scenarios.  
+
+In sharp contrast to Adam, BCD only requires storing the FP32 model parameters, gradients, and optimizer states for the active block $W_{\ell}$ , which is only $1/D$ of the memory consumption needed for all the parameters. Thus, in addition to maintaining an FP16 model that requires $2N$ memory, BCD needs a total of only 2N + 16DN memory. Therefore, for training a Llama 3-8B or a Llama 3-70B model and when $D=32$ or $\Dot{D}=80$ (partition each transformer layer as a block), BCD only needs roughly $20\:\mathrm{GB}$ or 154 GB of GPU RAM, respectively, which is significantly cheaper compared to the costs of Adam. For a more detailed analysis on memory cost, we refer to Luo et al. (2024).  
+
+
+
+\section{3 LIMITATIONS OF BCD FOR NEURAL NETWORKS  }
+
+
+Although BCD is proven to be memory efficient for training and finetuning LLMs, we will illustrate two major limitations of the BCD optimization scheme when it is used for training models induced by a neural network structure in this section. The results apply to the setting of training and finetuning LLMs as well. Motivated by these limitations, we will develop a more efficient training method based on BCD, which achieves superior performance compared to that of the vanilla BCD.  
+
+To ease our analysis, let us consider a $L$ -layer feedforward neural network model:  
+
+$$
+\begin{array}{r}{z_{\ell+1}=f_{W_{\ell}}^{\ell}(z_{\ell}),\;\forall1\leq\ell\leq L,\quad\mathrm{with}\quad z_{1}=x,}\end{array}
+$$  
+
+where $L$ is the total number of layers, $\textbf{\em x}$ is the input, $f_{\mathbf{W}_{\ell}}^{\ell}$ is the $\ell_{}$ -th layer’s transform.  
+
+Limitation I: Ineffective utilization of intermediate derivatives during backpropagation. Due to the compositional structure of deep neural networks, the gradients of the trainable parameters are calculated according to the chain rule. For example, taking the stochastic gradient of the $\ell\cdot$ -th layer’s parameters $W_{\ell}$ requires computing the partial derivatives with respect to all the activation values of deeper layers, as shown in the following equation:  
+
+$$
+\frac{\partial H}{\partial W_{\ell}}=\underbrace{\frac{\partial H}{\partial z_{L+1}}\frac{\partial z_{L+1}}{\partial z_{L}}\cdot\cdot\cdot\frac{\partial z_{\ell+2}}{\partial z_{\ell+1}}}_{I_{\ell+1}}\frac{\partial z_{\ell+1}}{\partial W_{\ell}},
+$$  
+
+where $H$ is the objective function of the neural network training problem. During the backpropagation process in optimization method like Adam, the intermediate partial derivatives $I_{\ell+1}$ of the activations in (3) are properly utilized for computing the gradients of the $L,L\mathrm{~-~}1,\cdot\cdot\cdot\mathrm{~,~}\ell\mathrm{~+~}1$ -th layers’ weight parameters as well. However, since BCD only updates the active block $W_{\ell}$ , the term $I_{\ell+1}$ is merely used for calculating the gradient of $W_{\ell}$ , resulting in ineffective utilization of the computed partial derivatives of the activations during backpropagation.  
+
+Limitation II: Suboptimal landscape of BCD’s sub-problem. To tackle a training problem, optimization methods such as Adam optimize over all the trainable parameters $W$ , while the BCD optimization scheme (1) minimizes the objective over only the current active block, keeping the others fixed. Intuitively, BCD appears to narrow the optimization landscape of the training problem by freezing most of the parameters in each of its sub-problems, potentially eliminating better search directions that can lead to rapid decrease of the objective function. To establish such an intuition formally, we consider the following simple regression problem modeled by a 3-layer neural network:  
+
+$$
+\operatorname*{min}_{W_{1},W_{2}}{\cal W}_{3}\;H(W_{1},W_{2},W_{3}):=\|{\pmb y}-{\pmb y}\|_{2}^{2},
+$$  
+
+$$
+\mathrm{where}\quad z_{2}=\sigma(W_{1}x),\quad z_{3}=\sigma(W_{2}z_{2}),\quad\hat{y}=W_{3}z_{3}.
+$$  
+
+Here, $\textbf{\em x}$ is a non-zero input vector, $\textit{\textbf{y}}$ is the true label vector, and $\sigma(z):=\operatorname*{max}\left(0,z\right)$ is the ReLU activation function. The following proposition states that the optimization landscape of one of the BCD sub-problems is suboptimal in terms of minimizing $H$ .  
+
+Proposition 1. (suboptimal landscape of BCD’s sub-problem) Define  
+
+$$
+\widetilde{H}^{*}:=\operatorname*{min}_{W_{2}}\|y-\hat{y}\|_{2}^{2},\quad a n d\quad H^{*}:=\operatorname*{min}_{W_{1},W_{2},W_{3}}\|y-\hat{y}\|_{2}^{2}.
+$$  
+
+Here, $\widetilde{H}^{*}$ is the optimal value returned BCD that minimizes $H$ only over block $W_{2}$ , while fixing $W_{1}$ and $W_{3}$ . Suppose that the fixed $W_{3}$ in BCD has full column rank. If $z_{3}^{*}:=(W_{3}^{\top}W_{3})^{-1}W_{3}^{\top}{\bar{y}}$ has at least one negative entry, then $\widetilde{H}^{*}>H^{*}$ .  
+
+2. We note that the full column rank assumption of the fixed weight matrix $W_{3}$ is mild. In LLMs, the last matrix is typically the tall LM head matrix, which has more rows (vocabulary size) than columns (embedding dimension). In practice, a tall matrix often has full column rank. In addition, it is always feasible to have negative entries in $z_{3}^{*}$ by choosing a specific $\textit{\textbf{y}}$ . Moreover, although we prove such a result for a simple regression problem modeled by a 3-layer neural network, we expect it to occur more frequently in the training and finetuning of LLMs, as the training objective of LLMs is much more complicated. Finally, the result in Proposition 1 can be readily generalized to any nonnegative or bounded activation functions, e.g., Swish Ramachandran et al. (2017), SiLU Elfwing et al. (2018), Sigmoid, etc.  
+
+When fixing $W_{1}$ and $W_{3}$ and training only on the intermediate layer’s weight matrix $W_{2}$ , the sub-problem of BCD represents a partial landscape of the full optimization problem. Proposition 1 demonstrates that this sub-problem might be incapable of finding the optimal value 0. It is important to note that this result does not necessarily imply that BCD cannot find an optimal solution. Recall that BCD is a full parameter optimization method, and the weight matrices $W_{1}$ and $W_{3}$ will indeed be updated in subsequent block iterations. Therefore, BCD may eventually converge to an optimal solution that achieves 0 function value. However, our analysis reveals that the sub-problem of BCD potentially excludes parts of the optimization landscape that provide search directions toward the optimal solution. This observation suggests that BCD might slow down the convergence speed compared to Adam.  
+
+Based on these limitations of BCD, we will design a new method to correct the landscape of BCD’s sub-problem and simultaneously utilize the computed partial derivatives of the activations properly.  
+
+
+
+\section{4 ACCELERATING BCD VIA LANDSCAPE CORRECTION  }
+
+
+In this section, we propose a new BCD method with landscape correction to solve the two limitations revealed in Section 3 simultaneously.  
+
+
+
+\section{4.1 THE BREAD METHOD  }
+
+
+In Section 3, our analysis indicates that the incomplete landscape of BCD’s sub-problem may slow down the convergence speed. To address this issue, one immediate approach is to apply Adam to other blocks as well. However, this essentially reverts to using Adam and undermines the memory efficient property of the BCD optimization scheme. Fortunately, for the regression problem we analyzed in Section 3, we show in the following proposition that a low-rank landscape correction is sufficient to compensate for the incompleteness of BCD’s sub-problem.  
+
+![](images/1f4ae839ec357b90c820cf367f1b7238ad2fe4c66e9d9e03875dc220420d0df6.jpg)  
+Figure 1: When $W_{3}$ is frozen, the projection error $\lVert y-$ Figure 2: With rank-1 landscape $\hat{y}\|_{2}^{2}>0$ . When $W_{3}$ is trainable, the learnable space rotates correction, BREAD converges sigto cover the label $\textit{\textbf{y}}$ , the error $\|\pmb{\psi}-\hat{\pmb y}\|_{2}^{2}=0$ . nificantly faster than BCD.  
+
+Proposition 2 (rank-1 landscape correction). For any non-zero input $\textbf{\em x}$ and label $\textit{\textbf{y}}$ , there exists a rank-1 matrix $_{C}$ such that the following problem has optimal value $\boldsymbol{O}$ :  
+
+$$
+\begin{array}{r}{\underset{W_{2},C}{\mathrm{min}}\,||\boldsymbol{y}-\boldsymbol{\hat{y}}||_{2}^{2},\quad\quad\quad\quad\quad\quad}\\ {w h e r e\quad z_{2}=\sigma(W_{1}z),\quad z_{3}=\sigma(W_{2}z_{2}),\quad\boldsymbol{\hat{y}}=(W_{3}+C)z_{3}.}\end{array}
+$$  
+
+2. Motivated by this proposition, we propose to introduce additional trainable low-rank correction matrices to the matrices in the frozen inactive blocks $\{W_{\ell^{\prime}}\}_{\ell^{\prime}\neq\ell}$ , where $W_{\ell}$ is the current active block. For simplicity, let us assume that each block is a matrix, and our design applies to general layer-wise or other types of partitions as well. Mathematically, all the inactive block matrices are corrected by low-rank correction matrices as follows:  
+
+$$
+\begin{array}{r}{W_{\ell^{\prime}}+C_{\ell^{\prime}}\mathrm{~with~rank}(C_{\ell^{\prime}})\leq r,\quad\forall\ell^{\prime}\neq\ell.}\end{array}
+$$  
+
+To maintain memory efficiency, we use the Burer-Monteiro factorization representation of a lowrank matrix Burer $\&$ Monteiro (2003):  
+
+$$
+C=U V,\quad U\in\mathbb{R}^{m\times r},V\in\mathbb{R}^{r\times n}.
+$$  
+
+Following the spirit of adapter Houlsby et al. (2019) and LoRA Hu et al. (2021), we only store the low dimensional matrices $U$ and $V$ rather than $_{C}$ . This approach allows us to store the gradients and optimizer states for these much smaller sized matrices, resulting in only negligible additional memory consumption.  
+
+We note that one can add the landscape correction matrix $_{C}$ to each matrix in the inactive blocks or to part of the matrices, leading to two different variants. Additionally, we may also add a full-rank correction matrix $_{C}$ , training it using an on-the-fly SGD method Lv et al. (2023) to maintain the memory efficient feature of BCD. We refer to Section 4.3 for details.  
+
+Algorithm design. Based on the above developments, we propose accelerating block coordinate descent via landscape correction (BREAD). We present the detailed procedure in Algorithm 1. Suppose we can add a total of $P$ landscape correction matrices. BREAD first splits the model into $D$ blocks, which can be partitioned either in a layer-wise or matrix-wise manner. Then, each block subproblem is approximately solved using $K$ steps of landscape corrected updates. For each landscape corrected update (Algorithm 1, line $9-1\ell$ 6), we sample a batch of data in a random reshuffled manner, and calculate the gradient of both active block and the correction matrices in one backward pass. Then, we update the active block and correction matrices with a single Adam step. Notably, optimizer states of the correction matrices are accumulated throughout the entire algorithm execution, as they occupy only negligible memory space.  
+
+![](images/bcf55d16dd346f9a71d8cecafbac02efbef7d482e194b0204fd1e41c46fa3ce6.jpg)  
+
+We now carry out a simple experiment to validate the effectiveness of Algorithm 1 and the insights in Proposition 1 and Proposition 2. Specifically, we train a 3-layer neural network with rank-1 BREAD, with 100 Adam optimization steps for each sub-problem. As shown in Figure 2, rank-1 BREAD (orange) achieves significantly faster convergence than BCD (blue). The loss difference between rank-1 BREAD and BCD is eventually 0.586. This is a significant amount, as the loss is only decreased by 0.06, if we train $_{C}$ only (rank-1 update only, green). These empirical observations verify that the proposed combination of BCD and landscape correction accelerates the convergence of the individual scheme (BCD alone or landscape correction alone).  
+
+Convergence result.1 for the detailed assumptions and analysis.  
+
+Theorem 1. (informal) Under certain common assumptions, BREAD with deterministic gradient is a descent method with the following property  
+
+$$
+\begin{array}{r}{H(W^{t+1})-H(W^{t})\leq-\mathcal{O}(\alpha K)\|\nabla H(W^{t})\|^{2}.}\end{array}
+$$  
+
+Consequently, BREAD finds $\varepsilon-$ approximate stationary point with $\mathcal{O}(\varepsilon^{-2})$ iterations.  
+
+4.2 MEMORY AND COMPUTATIONAL EFFICIENCY OF BREAD  
+
+In this section, we analyze the memory and computational cost of BREAD, showing that BREAD only introduces marginal additional costs compared to vanilla BCD.  
+
+Memory cost analysis. To simplify the analysis, we consider a $D$ -layer neural network where each layer consists of one matrix with dimensions $\mathbb{R}^{m\times m}$ . The rank $r$ correction matrix introduces additional $2D m r$ parameters. Since the correction matrix is primarily used for coarse-grained landscape correction, the rank is set to be small, e.g., $r\in[1,8]$ , making the additional memory required almost negligible. In the scenario where $r=4$ , $D=32$ , and $m=4096$ , BREAD only increases memory cost by $\begin{array}{r}{\frac{D r(m+m)}{m^{2}}\approx2.6\%}\end{array}$ compared to BCD.  
+
+Computational cost analysis. We now show that the additional backward cost is also cheap, since the intermediate partial derivatives used for computing the active block’s gradient can be directly used for computing correction matrices’ gradients, as we have identified in (3). Specifically, the gradient of the correction matrix $C_{j}$ can be expressed as  
+
+$$
+\frac{\partial H}{\partial\pmb{C}_{j}}=\underbrace{\frac{\partial H}{\partial\pmb{z}_{L+1}}\frac{\partial\pmb{z}_{L+1}}{\partial\pmb{z}_{L}}\cdot\cdot\cdot\frac{\partial\pmb{z}_{j+2}}{\partial\pmb{z}_{j+1}}}_{\mathrm{Computed\;in\;}(3),\;\forall j\ge\ell}\frac{\partial\pmb{z}_{j+1}}{\partial\pmb{C}_{j}}.
+$$  
+
+Clearly, when $j\geq\ell$ , computing the (stochastic) gradient of $C_{j}$ only requries additional computation of ∂(zj+1), which is cheap given the low dimensionality after low-rank factorization representation, i.e., $C_{j}^{\,}=U_{j}V_{j}$ . We empirically measure the memory and epoch training time in Table 1.  
+
+4.3 PRACTICAL VARIANTS OF BREAD  
+
+A computational efficient variant. For simplicity, we consider an $L$ -layer neural network where each layer consists of one weight matrix, and our block partition is layer-wise. Based on the derivation of (6), evaluating the gradients of the correction matrices is inexpensive for layers $\ell+1,\ldots,L$ . However, the gradient evaluation for layers $1,\ldots,\ell-1$ is more costly, as it requires calculating ∂∂zjzj+1 for j = 1, . . . , ℓ−1. These intermediate partial derivatives of the activations are not computed during the backpropagation to the active layer $\ell$ . Therefore, one computationally efficient variant of BREAD is to add correction matrices only for layers $\ell+1,\ldots,L$ . This leads to two strategies of selecting correction matrices:  
+
+$$
+J={\left\{\begin{array}{l l}{[P],}&{{\mathrm{if~use~BREAD}}}\\ {\{j\,|\,j\in[P],\,C_{j}{\mathrm{~corrects~layers~}}\,\ell+1,\ldots,L\},}&{{\mathrm{if~use~BREAD-partial}}}\end{array}\right.}
+$$  
+
+A full-rank memory efficient variant. The previous implementation uses low-rank matrices for landscape correction. Alternatively, one can apply a potentially full-rank linear transformation to correct features. This can be achieved through a memory efficient on-the-fly SGD update on the inactive blocks. Specifically, due to the compositional structure of neural networks, the gradient of the model is computed from the deep layers to the shallow layers. The strategy is to perform an SGD update on a matrix whenever its (stochastic) gradient is available, and then immediately discard the corresponding gradient after the update. We term this approach BREAD-SGD. It introduces additional memory cost for storing the gradient of the largest matrix, but this overhead is usually negligible. We formally present this variant in Algorithm 2.  
+
+We compare the performance of these two variants of BREAD in Section 5.4.  
+
+
+
+\section{5 NUMERICAL EXPERIMENTS  }
+
+
+We evaluate the proposed BREAD in finetuning Llama 3.1-8B and Llama 3.1-70B model on math finetuning and instruction tuning tasks, comparing its memory cost, time cost and downstream performance with full training algorithm and memory efficient baselines.  
+
+5.1 SETUP  
+
+We begin by introducing the experimental setup.  
+
+Baselines. We compare BREAD with 1) BAdam Luo et al. (2024), which applies vanilla BCD algorithm with Adam as the inner solver; 2) LoRA Hu et al. (2021), which freezes the pre-trained weight and only updates the injected low-rank adapters; 3) Galore Zhao et al. (2024), which projects the gradient into low-rank spaces for reducing the memory cost; 4) Adam Kingma (2014), which serves as the full parameter training baseline.  
+
+Math finetuning. We finetune the Llama 3.1-70B and Llama 3.1-8B models on MathInstruct dataset Yue et al. (2023) for 3 epochs, which contains 260K questions that covers wide range of fields in mathematics. The finetuned models are evaluated on 4 in-domain mathematical benchmarks, i.e., GSM8K, MATH, NumGLUE, and AQuA Cobbe et al. (2021); Hendrycks et al. (2021); Mishra et al. (2022); Ling et al. (2017), and 1 out-of-domain mathematical benchmarks, i.e., SimulEq KoncelKedziorski et al. (2016). The evaluations are based on 0-shot prompt and 4-shot chain-of-thought prompt, respectively. Due to the limited computational resource, we do not include the Adam’s results for 70B model. Since there is no model parallel implementation released for Galore by the finish of the manuscript, we are unable to report its 70B results as well.  
+
+![](images/2363979a8ea54ebf6070468fed49ae411795564ef5642dee9edc92ecddcb58b6.jpg)  
+Table 1: Memory footprint and time cost for finetuning models on MathInstruct.  
+
+Instruction tuning. We perform supervise finetuning on the Llama 3.1-8B model using AlpacaGPT4 dataset Peng et al. (2023), which contains 52K questions and corresponding GPT-4 generated answers. The model is evaluated on MT-bench Zheng et al. (2023) for examining the model’s instruction-following capability.  
+
+Preference optimization. After the instruction tuning, we further align the tuned model using direct preference optimization (DPO) Rafailov et al. (2024) on Ultrafeedback dataset Cui et al. (2023). To compare with the baseline optimization methods more comprehensively, we report the evaluation results of using Adam instruction tuned model as base model, and using the same optimization method for both phases.  
+
+All the experiments are run for 3 epochs. The reported scores are the best one among checkpoints at epoch 1, 2, 3.  
+
+
+
+\section{5.2 MEMORY AND TIME COST MEASURE  }
+
+
+In Table 1, we empirically measure the peak memory cost and one epoch’s time cost of finetuning models on the MathInstruct dataset. The GPU hour is calculated as the training time $\times\,\mathrm{GPU}$ number.  
+
+We set the LoRA rank to 64 to keep its number of trainable parameters (0.83 billion) close to a single block of BREAD (0.86 billion). Compared with LoRA, the proposed BREAD consumes slightly lower memory and costs about the same amount of training time. The computational-efficient variant BREAD-partial requires significantly less training time than BREAD, and is comparable to BAdam.  
+
+Remark. The reported memory cost is higher than the theoretical value, especially for the 70B model’s experiments which requires distributed training. This additional memory cost arises from storing activation values and computational buffers, e.g. the gradient buffer for performing reduce scatter operation. Furthermore, the training time may have slight fluctuations for different runs.  
+
+5.3 FINETUNING PERFORMANCE  
+
+Math finetuning. The evaluation results on math benchmarks are shown in Table 2. For the 8B model’s finetuning, BREAD beats all the other 3 memory efficient baselines in both 0-shot and 4- shot average score. Under the 0-shot setting, BREAD even outperforms Adam baseline by 1.1. For the finetuning of 70B model, BREAD outperforms BAdam in all tasks, demonstrating the effectiveness of landscape correction. Furthermore, BREAD beats LoRA in 8 out of 10 tasks.  
+
+![](images/f3f9fe8d8114c35a28a6292be3e477105e49f369e2e2e2bcdbd4466ad2e48277.jpg)  
+
+432   
+433   
+434   
+435   
+436   
+437   
+438   
+439   
+440   
+441   
+442   
+443   
+444   
+445   
+446   
+447   
+448   
+449   
+450   
+451   
+452   
+453   
+454   
+455   
+456   
+457   
+458   
+459   
+460   
+461   
+462   
+463   
+464   
+465   
+466   
+467   
+468   
+469   
+470   
+471   
+472   
+473   
+474   
+475   
+476   
+477   
+478   
+479   
+480   
+481   
+482   
+483   
+484   
+485  
+
+Table 2: Math evaluation results for models finetuned on MathInstruct dataset.   
+
+![](images/a0a9c5c1ac89739d0ff5d9d425869c47dbab91c53a241d0c57a41399c486d38c.jpg)  
+
+Table 3: MT-bench scores of different methods finetuning Llama 3.1-8B.  
+
+![](images/105e41287178fb1070e63605f093585f5b969ee3ffbf43830036bbc46d05a274.jpg)  
+Figure 3: Convergence of BAdam, BREAD and its variants on MathInstruct dataset.  
+
+Instruction tuning and DPO. We report the MT-bench score evaluated by both GPT-4 and GPT-4o models in Figure 3. After SFT, the MT-bench score of all baseline approaches improves over the base model. BREAD achieves the highest scores in both evaluations, which are even higher than Adam, demonstrating the effectiveness of landscape correction. Based on the model finetuned by Adam, we further align the model using direct preference optimization (DPO). Notably, BREAD achieves the highest evaluation score by GPT-4o model.  
+
+
+
+\section{5.4 ABLATION ON VARIANTS OF BREAD  }
+
+
+We present 1-epoch training loss of BREAD and its variants in Figure 3. For reference, we also display the loss of BAdam. Here, BREAD-partial means that only deeper layers of the active block will be updated; the BREAD-SGD applies on-the-fly SGD update for all the frozen blocks; the BREAD-SGD-partial incorporates the feature of both, updating frozen blocks that are deeper than the active block using SGD. Since SGD usually requires higher learning rate, we scale the SGD’s learning rate up by 10 times compared to the update of the active block. As we can see, all the variants converge faster than the baseline method BAdam, justifying the effectiveness of landscape correction. The BREAD outperforms BREAD-partial since it optimizes all the correction matrices in each iteration. The BREAD-SGD variants converge faster than the low-rank ones, which may attribute to the higher learning rate of the correction matrices and the high-rank update. Notably, the BREAD-SGD-partial exhibits similar convergence as BREAD-SGD.  
+
+5.5 ADDITIONAL EXPERIMENTAL RESULTS  
+
+ Below, we summarize the experimental results: 1) Effect of $K$ . We observe a consistent improved convergence speed when increasing $K$ , which may due to that Adam can aggregate more historical information with larger $K$ . 2) Effect of $r$ . BREAD with rank-2 correction significantly outperforms BAdam, and can be further accelerated with larger choices of $r$ . 3) Effect of ordering strategies. Different block ordering yields similar convergence behavior. 4) Convergence versus time. In terms of wall-clock time, BREAD-SGD-partial yields the fastest convergence among the BREAD variants.  
+
+
+
+\section{6 RELATED WORKS  }
+
+
+Block coordinate descent method. Block coordinate descent (BCD) is a classic optimization paradigm that dates back at least to Hildreth (1957). It has gained popularity in recent years, due to its scalability and efficiency for many machine learning applications (Nesterov, 2012; Richta´rik & Taka´cˇ, 2014; Peng & Vidal, 2023; Ding et al.; Peng & Yin, 2024). The community seems to converge to a consensus that, in order for BCD to be efficient, the problem it optimizes needs to possess the so-called coordinate-friendly structure (Shi et al., 2016). Nevertheless, deep networks are of a compositional nature and not coordinate-friendly, which is perhaps why recent surveys or books have never mentioned training deep networks as an application of BCD (Wright, 2015; Shi et al., 2016; Beck, 2017; Wright & Recht, 2022; Sayed, 2022). Recently, BAdam Luo et al. (2024) was proposed to finetune LLMs based on the BCD framework, where each block sub-problem is approximately solved using several Adam steps. Although BAdam achieved preliminary success, it is based on the vanilla BCD framework and shares the fundamental limitations we revealed in this work. In light of these, we believe identifying the limitations of BCD for LLM fintuning and fixing them entail certain insights, and this is what makes our contributions non-trivial and valuable.  
+
+Memory efficient finetuning. To address memory issue, multiple variants have been proposed. Parameter efficient finetuning (PEFT) methods achieve memory efficiency by only training small portion of (possibly extra) parameters while freezing most of the others, such as Adapter tuning Houlsby et al. (2019), prompt tuning, and prefix tuning Lester et al. (2021); Li & Liang (2021). Low-rank adaptation (LoRA) is perhaps the most popular technique that approximates model updates using two smaller, trainable low-rank matrices Hu et al. (2021). LoRA’ variants have been proposed to address its rank constraints and further reducing the memory cost Lialin et al. (2024); Xia et al. (2024); Dettmers et al. (2023). Galore Zhao et al. (2024) projects the gradient into low-rank space so that it does not need to store the full gradient and optimizer states in the memory. LOMO updates parameters in real time during the backpropagation process Lv et al. (2023), so that one can perform SGD without store stochastic gradients. MeZO offers an alternative by approximating SGD using only forward passes Malladi et al. (2023), drawing from zeroth-order optimization that estimates stochastic gradients through the difference in function values. While this paper addresses the same application as these methods, they remain orthogonal to the proposed approaches. They can function as lightweight updates in the frozen layers for landscape correction.  
+
+
+
+\section{7 CONCLUSIONS AND DISCUSSIONS  }
+
+
+This paper investigates the application of a classic optimization method, known as BCD, to the finetuning of LLMs. We pinpoint two primary shortcomings of the standard BCD approach when applied to deep neural networks: the unnecessary computational overhead during backpropagation, and the misguiding optimization landscape caused by frozen blocks. To overcome these challenges, we introduce a new method termed BREAD, which unfreezes the inactive blocks and updates them in a lightweight manner. Our experimental results demonstrate that BREAD significantly enhances downstream task performance while maintaining the original BCD algorithm’s memory and computational efficiency.  
+
+For future research, it would be intriguing to explore the potential of BCD in the (continual) pretraining phase of LLMs. Moreover, it is not necessary to apply feature correction at each iteration. Exploring the frequency of updating correction matrices is another meaningful direction, which can further save the computational cost.  
+
+
+

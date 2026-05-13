@@ -1,0 +1,208 @@
+\title{Zero-Shot Image Compression with Diffusion-Based Posterior Sampling}
+
+\begin{abstract}
+Diffusion models dominate the field of image generation, however they have yet to make major breakthroughs in the field of image compression. 
+Indeed, while pre-trained diffusion models have been successfully adapted to a wide variety of downstream tasks, 
+existing work in diffusion-based image compression require task specific model training, which can be both cumbersome and limiting. This work addresses this gap by harnessing the image prior learned by existing pre-trained diffusion models for solving the task of lossy image compression. This enables the use of the wide variety of publicly-available models, and avoids the need for training or fine-tuning. 
+Our method, PSC (Posterior Sampling-based Compression), utilizes zero-shot diffusion-based posterior samplers. It does so through a novel sequential process inspired by the active acquisition technique ``Adasense'' to accumulate informative measurements of the image. This strategy minimizes uncertainty in the reconstructed image and allows for construction of an image-adaptive transform coordinated between both the encoder and decoder. PSC offers a progressive compression scheme that is both practical and simple to implement. Despite minimal tuning, and a simple quantization and entropy coding, PSC achieves competitive results compared to established methods, paving the way for further exploration of pre-trained diffusion models and posterior samplers for image compression.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Diffusion models excel at generating high-fidelity images~\citep{ho2020denoising, sohl2015deep, song2020score, dhariwal2021diffusion, vahdat2021score, latent_diffusion}. As such, these models have been harnessed for solving a wide variety of tasks, including inverse problems~\citep{saharia2021image, saharia2022palette, chung2023diffusion, kawar2021snips, kawar2022denoising, song2023pseudoinverse}, image editing~\citep{meng2021sdedit, brooks2022instructpix2pix, kawar2023imagic, huberman2023edit}, and uncertainty quantification~\citep{belhasin2023principal}. Conveniently, it has been demonstrated that many of these downstream tasks can be solved with a pre-trained diffusion model, thus alleviating the need for task specific training. 
+
+Image compression is crucial for efficiently storing and transmitting visual data. This task has therefore attracted significant attention over the past several decades. The core idea in designing an effective compression scheme is to preserve as much of the information in the image while discarding less important portions, resulting in a lossy compression paradigm that introduces a trade-off between image quality and file size. Traditional compression methods, such as JPEG~\citep{wallace1991jpeg} and JPEG2000~\citep{skodras2001jpeg}, achieve this goal by applying a fixed whitening transform on the image and quantizing the obtained transform coefficients. These algorithms allocate bits dynamically to the coefficients based on their importance, and wrap this process with entropy coding for further lossless compression. More recently, neural compression methods have demonstrated improved performance over their classical counterparts. 
+These techniques employ deep learning %for getting more sophisticated compression techniques that
+and incorporate the quantization and entropy-coding directly into the training loss~\citep{balle2018variational, minnen2018joint, cheng2020image, balle2016end, theis2017lossy, toderici2015variable}. In this context, deep generative models, such as GANs~\citep{mentzer2020high} or diffusion models~\citep{yang2024lossy}, can be used to improve the perceptual quality of decompressed images, fixing visual artifacts that are commonplace in many classic compression methods, such as JPEG~\citep{wallace1991jpeg}. 
+
+Several works attempted to harness diffusion models for image compression. Many of these methods utilize an existing compression algorithm for the initial compression stage, and use a diffusion model for post-hoc decoding. A notable example for this approach is the family of diffusion-based algorithms for JPEG decoding~\citep{kawar2022jpeg, saharia2022palette, song2023pseudoinverse, ghouse2023residual}. While these methods show promising results, they remain limited by the inherent shortcomings of the base compression algorithm on which they build. Another approach interleaves training the neural compression component with the diffusion model-based decoding \citep{careil2023towards, yang2024lossy, relic2024lossy}. Such methods reach impressive results, but they require training a task-specific diffusion model and thus cannot exploit the strong prior embedded within large pre-trained models. 
+\begin{figure}[t]
+\begin{center}
+  \includegraphics[width=\textwidth]{figures/compression-diagram-2.pdf}  \caption{\textbf{PSC diagram:} Both the compression and the decompression parts employ the AdaSense algorithm for building an image-specific sensing matrix $\mH$, to which rows are added progressively based on posterior sample covariance. While the encoder requires access to the real image $\rvx$ for computing the measurements $\rvy$, both the encoder and the decoder use the quantized measurements for the AdaSense computations. This, along with a coordinated random seed, guarantee that both sides produce the same deterministic outputs, alleviating the need for transmitting the sensing matrix as side information.}
+    \label{fig:diagram}
+\end{center}
+\end{figure}
+
+In this paper, we introduce PSC (Posterior Sampling-based Compression), a zero-shot image compression method that leverages the general-purpose image prior learned by pre-trained diffusion models. PSC enables exploiting the vast array of publicly available models without requiring training a model that is specific for the compression task. PSC employs a progressive sampling strategy inspired by the recent adaptive compressed sensing method \emph{AdaSense}~\citep{elata2024adaptive}. Specifically, in each step PSC utilizes a diffusion-based zero-shot posterior sampler to identify the linear projection of the image that minimizes the reconstruction error. These projections are constructed progressively at the encoder and quantized to form the compressed code. At the decoder side, the exact same calculations are applied (fixing the seed), so that both the encoder and the decoder reproduce exactly the same image-adaptive transform, eliminating the need for transmitting side-information beyond the projections.
+
+We evaluate the effectiveness of PSC on a diverse set of images from the ImageNet dataset~\citep{imagenet}. 
+We compare PSC to established compression methods like JPEG~\citep{wallace1991jpeg}, BPG~\citep{bpg}, and HiFiC~\citep{mentzer2020high} in terms of distortion (PSNR) and image quality.
+Our experiments demonstrate that PSC achieves superior performance, offering the flexibility to prioritize either low distortion or high image quality~\citep{blau2019rethinking} based on user preference, all while using the same compressed representation. Furthermore, we explore the potential of using Text-to-Image latent diffusion models~\citep{latent_diffusion} for image compression. This approach enables the use of more efficient DNN architectures and incorporates a textual description of the image for better compression. Our Latent-PSC exhibits superior compression results in term of image quality and semantic similarity, suggesting its potential for tasks where preserving image content and meaning is crucial. These experiments showcase the promising results of PSC and its variants, highlighting the potential of pre-trained diffusion models and posterior sampling for efficient image compression. 
+In summary, the proposed compression approach is a novel strategy that relies on the availability of an (approximate) posterior sampler. The compression is obtained by constructing a sequentially growing image-adaptive transform that best fits the intermediate uncertainties throughout the process.
+
+This work presents an initial exploration that employs a simplified quantization strategy, and lacks tailored entropy coding. Also, the proposed approach incurs a high computational cost. Nevertheless, we believe that the presented method represents a promising direction for future research. Advancements in diffusion-based posterior samplers and our proposed training-free compression scheme have the potential to lead to significant improvements in compression of images or other signals of interest.
+
+
+\section{Background}
+
+\label{sec:background}
+
+\begin{algorithm}[t]
+\caption{A single iterative step of AdaSense -- Denoted as $\text{AdaSenseStep}\left( \mH_{0:k}, \rvy_{0:k}, r \right)$}
+\label{alg:adasense-step}
+ \begin{algorithmic}[1]
+    
+    \Require Previous sensing rows $\mH_{0:k}$, corresponding measurements $\rvy_{0:k}$, number of new measurements $r$
+    \State $\{\rvx_i\}_{i=1}^s \sim p_{\rvx|\mH_{0:k},\rvy_{0:k}}$  \Comment{\textcolor{gray}{generate $s$ posterior samples}}
+    \State $\{\rvx_i\}_{i=1}^s \gets \{\rvx_i - \frac{1}{s} \sum_{j=1}^s \rvx_j \}_{i=1}^s$ \Comment{\textcolor{gray}{center samples}}
+    \State $\Tilde{\mH} \gets \text{Append top $r$ right singular vectors of }\begin{pmatrix}\rvx_1 , \dots , \rvx_s \end{pmatrix}^\top $ 
+    \Comment{\textcolor{gray}{select $r$ principal components}}
+    \State \textbf{return} $\Tilde{\mH} $ 
+ \end{algorithmic}
+\end{algorithm}
+
+Our proposed compression scheme, PSC, leverages AdaSense~\citep{elata2024adaptive}, a sequential adaptive compressed sensing algorithm that gathers optimized linear measurements that best represent the incoming image. 
+Formally, for inverse problems of the form $\rvy = \mH\rvx$ with a sensing matrix $\mH\in\R^{d\times D}$ ($d < D$), we would like to select $\mH$  for reconstructing a signal $\rvx\in\R^D$ from the linear measurements $\rvy\in\R^d$ with a minimal possible error. AdaSense starts with an empty matrix and selects the rows of $\mH$ sequentially. At stage $k$, we have the currently held\footnote{In our notations, the subscript $\{0:k\}$ implies that $k$ elements are available, from index $0$ to index $k-1$. } matrix $\mH_{0:k}$ and measurements $\rvy_{0:k} = \mH_{0:k}\rvx$. The selection of the next row is done by generating samples from the posterior $p(\rvx|\mH_{0:k},\rvy_{0:k})$ and using them to identify the principal direction of uncertainty via PCA. This direction is chosen as the next row in $\mH$, which is used to acquire a new measurement of $\rvx$. More generally, instead of selecting one new measurement, it is possible to add $r$ new measurements in each iteration. A single iteration of AdaSense is described in \autoref{alg:adasense-step}, and should be repeated $d$ times. This algorithm presents a strategy of choosing the $r$ leading eigenvectors of the PCA at every stage instead of a single one, getting a substantial speedup in the measurements' collection process at a minimal cost to adaptability. 
+
+AdaSense relies on the availability of a posterior sampling method, which can be chosen according to the merits and pitfalls of existing samplers. Using a zero-shot diffusion-based posterior sampler~\citep{kawar2022denoising, kawar2021snips, song2023pseudoinverse, chung2023diffusion, chung2022improving} enables the use of one of the many existing pre-trained diffusion models. 
+The described process produces an image-specific sensing matrix $\mH$ and corresponding measurements $\rvy$, and these can be used for obtaining a candidate reconstruction $\hat{\rvx}$ by leveraging the final posterior, $p(\rvx|\mH,\rvy)$, where $\mH$ is the final matrix (obtained at the last step). This final reconstruction step can lean on a different posterior sampler, more adequate for this task (e.g., choosing a slower yet more exact method, while relying on the fact that it is applied only once). Please refer to the original publication for derivations.
+
+
+\section{PSC: The Proposed Compression Method}
+
+\label{sec:method}
+
+\begin{algorithm}[t]
+\caption{PSC: Posterior Sampling Compression}
+\label{alg:PSC}
+ \begin{algorithmic}[1]
+    \Require Image $\rvx$, number of steps $N$, number of measurements per step $r$.
+    \IfEThenElseD{\textbf{initialize} $\rvy_{0:0}$ as an empty vector}{\textbf{initialize} $\rvy_{0:Nr}$ from compressed representation}
+    
+    \For{$n\in\{0 : N-1\}$}
+        \State $\mH_{nr:nr+r} \gets \text{AdaSenseStep}\left( \mH_{0:nr}, \rvy_{0:nr}, r \right)$ \Comment{\textcolor{gray}{use \autoref{alg:adasense-step} to obtain the next $r$ rows}}
+        \If{Encoder} 
+        \State $\rvy_{0:nr+r} \gets \text{Append} \left[ \rvy_{0:nr}, Q (\mH_{nr:nr+r} \rvx) \right]$ \Comment{\textcolor{gray}{measure the real image $\rvx$ and quantize}}
+        \Else{\ Decoder} \algorithmicthen
+        \State $\rvy_{0:nr+r} \gets \text{Append} \left[ \rvy_{0:nr}, \rvy_{nr:nr+r} \right]$ \Comment{\textcolor{gray}{measurements from compressed representation}}
+        \EndIf
+        \State $\mH_{0:nr+r} \gets \text{Append} \left[ \mH_{0:nr}, \mH_{nr:nr+r} \right]$
+    \EndFor
+    \State \textbf{return} $\rvx_1 = f(\rvy_{0:Nr}, \mH_{0:Nr}) $ \Comment{\textcolor{gray}{posterior sampling or alternative restoration}}
+ \end{algorithmic}
+\end{algorithm}
+
+We start by describing the commonly used transform-based compression paradigm, as practiced by classical methods, and then contrast this with PSC -- our proposed approach. Image compression algorithms, like JPEG~\citep{wallace1991jpeg}, apply a pre-chosen, fixed and Orthonormal\footnote{Having orthogonal rows has two desirable effects -- easy-inversion and a whitening effect. Using a biorthogonal system as in JPEG2000~\citep{skodras2001jpeg} has similar benefits. } transform on the input image, $\rvx\in\R^D$, obtaining its representation coefficients. These coefficients go through a quantization stage, in which portions of the transform coefficients are discarded entirely, and other portions are replaced by their finite representation, with a bit-allocation that depends on their importance for the image being compressed. As some of the transform coefficients are discarded, this scheme can be effectively described as using a partial transform matrix $\mH\in\R^{d\times D}$ with orthogonal rows, and applying the quantization function $Q(\cdot)$ to the remaining measurements $\rvy = \mH\rvx$.
+Under the assumption that the obtained coefficients are (nearly) statistically independent, the quantization may operate scalar-wise on the elements of $\rvy$ effectively. 
+Image compression algorithms include an entropy coding stage that takes the created bit-stream and passes it through a lossless coding block (e.g.\ Huffman coding, arithmetic coding, etc.) for a further gain in the resulting file-size. Just to complete the above description, the decoder has knowledge of the transform used, $\mH$; it obtains $Q(\rvy)$ and produces the image $\mH^{\dagger} Q(\rvy)$ as the decompressed output. 
+
+When an algorithm is said to be progressive, this means that the elements of $\rvy$ are sorted based on their importance, and transmitted in their quantized form sequentially, enabling a decompression of the image at any stage based on the received coefficients so far. Progressive compression algorithms are highly desirable, since they induce a low latency in decompressing the image. 
+Note that the progressive strategy effectively implies that the rows of $\mH$ have been sorted as well based on their importance, as each row gives birth to the corresponding element in $\rvy$. 
+Adopting this view, 
+at step $k$ we consider the sorted portions of $\mH$ and $\rvy$, denoted by $\mH_{0:k}\in\R^{k\times D}$ and $\rvy_{0:k} =\mH_{0:k}\rvx \in\R^k$. As the decoder gets $Q(\rvy_{0:k})$, it may produce $\mH_{0:k}^\dagger Q(\rvy_{0:k})$ as a temporary output image. 
+
+In this work we propose PSC (Posterior Sampling-based Compression) -- a novel and highly effective lossy compression scheme. PSC shares much with the above description: A linear orthogonal transform is applied, a scalar-wise quantization of the coefficients is deployed, an entropy coding stage is used as well, and the overall structure of PSC is progressive. However, the major difference lies in the identity of $\mH$: Rather than choosing $\mH$ to be a fixed matrix, PSC constructs it row-by-row, while fully adapting it's content with the incoming image to be compressed. This modus-operandi is counter-intuitive, as the immediate question that comes to mind is this: How would the decoder know which transform to apply in recovering the image? PSC answers this question by leaning on the progressive compression structure adopted. The core idea is to use the currently held matrix $\mH_{0:k}$ and the quantized measurements $Q(\rvy_{0:k})\in\R^k$, available in both the encoder and the decoder, for computing the next row, $\rvh_k\in\R^{1 \times D}$, identically on both sides. This row joins the matrix $\mH_{0:k}$, obtaining the transform matrix for the next step, 
+\begin{eqnarray}
+\mH_{0:k+1} = \left[
+\begin{array}{c}
+\mH_{0:k} \\
+\rvh_k
+\end{array}
+\right]   
+\in\R^{(k+1)\times D}.
+\end{eqnarray}
+Once created, the encoder projects the image onto the new direction, $y_k=\rvh\rvx$, and a quantized version of this value is transmitted to the decoder. 
+
+Clearly, the key for the above process to operate well is the creation of $\rvh_k$ based on the knowledge of $Q(\rvy_{0:k})$. This is exactly where AdaSense comes into play. PSC's compression algorithm leverages the AdaSense scheme (described in \Cref{sec:background}) to generate the same sensing matrix $\mH$ in the encoder and the decoder, thereby avoiding the need for side-information. Specifically, the encoder and decoder algorithms share the same seeds, the same accumulated matrix $\mH_{0:k}$ and the same measurements $Q(\rvy_{0:k})$, ensuring the next row of the sensing matrix $\mH$ is identical on both sides. Interestingly, as a by-product of the AdaSense algorithm, the obtained sensing matrix $\mH$ has orthogonal rows, disentangling the measurements, as expected from a compression algorithm. 
+
+For completeness of our disposition, here is a more detailed description of the AdaSense/PSC computational process for evaluating $\rvh_k$. Consider the posterior probability density function $p(\rvx|\mH_{0:k},Q(\rvy_{0:k}))$. This conditional PDF describes the probability of all images that comply with the accumulated measurements so far. By evaluating the first two moments of this distribution, $\mu_k\in\R^{D}$ and $\Sigma_k\in\R^{D\times D}$, we get access to the spread of these images. Notice that the original image being compressed, $\rvx$, is likely to reside within the area of high probability of this conditional Gaussian. Thus, by choosing $\rvh_k$ to be the eigenvector corresponding to the largest eigenvalue of $\Sigma_k\in\R^{D\times D}$, we get a highly informative direction on which to project $\rvx$, so as to get the most valuable incremental information about it. Knowing $y_k=\rvh_k \rvx$ (or its quantized value) implies that we have reduced the uncertainty of the candidate images probable in the posterior distribution $p(\rvx|\mH_{0:k},Q(\rvy_{0:k}))$ in the most effective way. PSC (like AdaSense) deploys a diffusion-based posterior sampler that can handle inverse problems of the form\footnote{In sampling from the Posterior, we  disregard the quantization, thus resorting to approximate samplers.} $\rvy = \mH \rvx$, enabling the use of publicly available pre-trained diffusion models, without any additional training. By drawing many such samples from the posterior, we can compute their PCA, which provides a reliable estimate of the top principal component of the true posterior covariance.
+
+\begin{figure}[t]
+  \begin{center}
+  \includegraphics[width=0.95\textwidth]{figures/compress_imagenet_256.pdf}
+  \caption{\textbf{Rate-Distortion (left) and Rate-Perception (right) curves for ImageNet256 compression.} Distortion is measured as average PSNR of images for the same desired rate or specified compression quality, while Perception (image quality) is measured by FID.}
+    \label{fig:imagenet-256-curves}
+  \end{center}
+\end{figure}
+
+The detailed procedures for compression and decompression with PSC are presented in \autoref{alg:PSC}. Here as well we consider a possibility of working with blocks of $r$ measurements at a time for speed-up consideration.
+A diagram of our proposed method is provided in \autoref{fig:diagram}.
+In our implementation we focus on a simple quantization approach, reducing the precision of $\rvy$ from float32 to float8~\citep{micikevicius2022fp8}. We employ Range Encoding implemented using~\citep{bamler2022constriction} as an entropy coding on the quantized measurements. The quantization, the posterior sampler and the entropy coding could all be improved, posing promising directions for future work. Finally, after reproducing $\mH$ on the decoder side, PSC can leverage a (possibly different) posterior sampler to produce the decompressed output $\hat{\rvx}$.
+
+\begin{figure}[t]
+\begin{center}
+  \includegraphics[width=\textwidth]{figures/compress-qualitative.pdf}
+  \caption{\textbf{Qualitative examples for compression with PSC, compared to other compression algorithms with similar BPP.} BPP and PSNR are reported per each. Our method can be used for both low-distortion with DDRM or high perceptual quality with $\Pi$GDM using the same compressed representation.}
+    \label{fig:imagenet-256}
+\end{center}
+\end{figure}
+
+To summarize, PSC facilitates a greedy step-wise optimal decrease in the volume of the posterior by the accumulated directions chosen, and the corresponding measurements computed with them. This way, the overall manifold of high quality images is intersected again and again, narrowing the remaining portion, while zeroing on the given image $\rvx$. 
+The progressive nature of PSC provides a key advantage in its flexibility. The same compression algorithm can be used to achieve different points in the Rate-Distortion-Perception (RDP) trade-off space~\citep{blau2019rethinking}. Lower compression rates can be achieved by using fewer measurement elements, potentially increasing the perceived distortion. 
+Note that, just like AdaSense, PSC may use a different final posterior sampler during decompression, in an attempt to further boost perceptual quality for the very same measurements. %This versatility is a consequence of the fact that the compression scheme is agnostic to the final inverse problem activated. 
+In contrast to all the above, many other compression methods using generative models, e.g., HiFiC~\citep{mentzer2020high, careil2023towards, yang2024lossy}, require separate training of both the encoder and decoder changing the rate or traversing the RDP function. This fixed configuration limits their ability to adapt to different compression demands.
+
+
+\section{Experiments}
+
+
+We evaluate the performance of PSC on color images from the ImageNet~\citep{imagenet} dataset. We compare distortion (PSNR) and bit-per-pixel (BPP) averaged on a subset of validation images, using one image from each of the 1000 classes, following~\citep{pan2021exploiting}. Unconditional diffusion models from~\citep{dhariwal2021diffusion} are used for images of size 256$\times$256. We apply \autoref{alg:adasense-step} to progressively decode at higher rates, selecting $r=12$, as detailed in \autoref{app:implementation}. The choice of hyperparameter is accounted for in \autoref{app:rank}.
+
+A key advantage of PSC is its ability to prioritize perceptual quality during decompression by changing the final reconstruction algorithm. However, this flexibility comes with a caveat: using a high-quality reconstruction algorithm will inevitably lead to higher distortion~\citep{blau2019rethinking}. Despite this, using PSC, the same compressed representation can be decoded using either a low-distortion or high perceptual quality approach with minimal additional computational cost. Specifically, we find that $\Pi$GDM~\citep{song2023pseudoinverse} produces the highest quality images for our reconstruction problem, while DDRM~\citep{kawar2022denoising} leads to the lowest distortion. 
+
+\autoref{fig:imagenet-256-curves} presents the rate-distortion and rate-perception curves of PSC compared to several established methods: classic compression techniques like JPEG~\citep{wallace1991jpeg}, JPEG2000~\citep{skodras2001jpeg}, and BPG~\citep{bpg}, as well as HiFiC~\citep{mentzer2020high}, a prominent GAN-based neural compression method. Distortion is measured by averaging the PSNR across different algorithms for a given compression rate. Image quality is quantified using FID~\citep{fid}, estimated on 50 random 128$\times$128 crops from each image, compared to the same set of baselines. The graphs demonstrate that PSC achieves comparable or superior performance, particularly at low BPP regimes, when considering both distortion and image quality. \autoref{fig:imagenet-256} showcases qualitative image samples compressed using different algorithms at the same rate, further supporting our findings. Notably, PSC achieves exceptional image quality despite the fact that it does not require any task-specific training for compression.
+
+\begin{figure}[t]
+\begin{center}
+  \includegraphics[width=0.95\textwidth]{figures/AdaSense-Latent-Diagram.pdf}  \caption{\textbf{Latent-PSC diagram:} Latent Text-to-Image diffusion models such as Stable Diffusion can be used for effective image compression with PSC. The latent representation is compressed using linear measurements. The textual prompt is used for conditioning the diffusion model in both the compression and decompression, and thus this text is also transmitted.}
+    \label{fig:latent-diagram}
+\end{center}
+\end{figure}
+
+Latent Text-to-Image diffusion models have gained popularity due to their ease-of-use and low computational requirements. These models employ a VAE~\citep{kingma2013auto} to conduct the diffusion process in a lower-dimensional latent space~\citep{vahdat2021score, latent_diffusion}. In this work we also explore the integration of PSC with Stable Diffusion~\citep{latent_diffusion}, a publicly available latent Text-to-Image diffusion model. 
+This variant, named Latent-PSC, operates in the latent space of the diffusion model. Both compression and decompression occur within this latent space, leveraging the model's VAE decoder to reconstruct the image from the decompressed latent representation. Additionally, we condition all posterior sampling steps on a textual description, which must be given along with the original image or inferred using an image captioning module~\citep{vinyals2016show, li2022blip, li2023blip}. The text prompt must be added to the compressed representation to avoid side-information. A detailed diagram of Latent-PSC is presented in Figure~\ref{fig:latent-diagram}.
+
+We evaluate Latent-PSC on $512\times512$ images from the MSCOCO~\citep{lin2014microsoft} dataset, which includes textual descriptions for each image.
+We compress the textual description assuming 6 bits per character, with no entropy encoding. \autoref{fig:stable} shows decompressed samples using Latent-PSC, demonstrating  good semantic similarity to the originals and high perceptual quality. 
+While Latent-PSC exhibits promising results, we observe a significant drop in PSNR when decoding the images using the VAE decoder. This is not unexpected, as simply encoding and decoding images  without compression also leads to a noticeable PSNR reduction. We believe that future advancements in latent-to-pixel-space decoding methods have the potential to address this limitation.
+
+\begin{figure}[t]
+\begin{center}
+  \includegraphics[width=0.95\textwidth]{figures/LatentExamples.pdf}
+  \caption{\textbf{Qualitative examples of Latent-PSC with Stable Diffusion.} For each image and corresponding text, several results for different bit-rates are shown. BPP and LPIPS are reported.}
+    \label{fig:stable}
+\end{center}
+\end{figure}
+
+\autoref{fig:captioning} illustrates the impact of using a captioning model to obtain the textual representation. In this experiment, the captions generated by BLIP~\citep{li2022blip} achieved comparable or superior results to human annotated description from the dataset. However, omitting the prompt causes some degradation of quality.
+
+\begin{figure}[t]
+\begin{center}
+  \includegraphics[width=\textwidth]{figures/Latent_caption.pdf}
+  \caption{\textbf{Qualitative examples of Latent-PSC with various prompt configurations.} For each image we compare compression results with human annotated textual description, auto-captioning using a model, and using no caption.}
+    \label{fig:captioning}
+\end{center}
+\end{figure}
+
+
+
+\section{Related Work}
+
+
+Diffusion models have been used in tandem with existing classical compression algorithms, providing an alternative data-driven decompression scheme for high-perceptual quality reconstruction~\citep{ghouse2023residual, saharia2022palette}. Among those, several works attempt to preform zero-shot diffusion based reconstruction~\citep{kawar2022jpeg, song2023pseudoinverse}, creating a training-free decompression method. Unlike our proposed approach, these works are limited to specific compression algorithms, which may be lacking.
+
+Recent advancements combine neural compression for the encoding stage and diffusion models for decompression. The straightforward approach uses separate~\citep{hoogeboom2023high} or joint~\citep{yang2024lossy} neural compression and diffusion training to create a compact compressed representation, and a conditional diffusion model for decompressing this representation into high-quality images. A similar approach is taken by~\citep{careil2023towards, relic2024lossy}, which makes use of latent diffusion~\citep{latent_diffusion} and text-conditioned models to make training more simple and efficient. While promising, these methods require complex rate-specific training for compression, hindering their flexibility.
+
+Interestingly, the concept of using pre-trained diffusion models for compression was initially introduced in the DDPM publication~\citep{ho2020denoising}. However, their proposed approach focused on the theoretical compression limit and did not propose a practical compression algorithm. \citet{theis2022lossy} analyzes a similar theoretical limit based on a more realistic reverse channel coding techniques~\citep{li2018strong}. However, their implementation suffers from high computational complexity and lacks publicly available code, preventing a direct comparison with our approach.
+
+
+
+
+\section{Limitations}
+
+The primary limitation with our proposed method is its high computational cost, caused by the recurring sampling using a diffusion model. This inherently ties the capabilities of our method to the quality of zero-shot posterior sampler. Fortunately, there is ongoing research focused on improving the speed and quality of diffusion models and posterior sampling, which could significantly reduce this limitation in the future.
+The current implementation utilizes an oversimplified quantization strategy for the measurements. Employing a more sophisticated quantization method has the potential to significantly improve compression rates. Exploring advanced quantization techniques is a promising avenue for future research.
+Lastly, PSC is currently limited to  linear measurements due to the capabilities of existing posterior samplers. Investigating the use of non-linear measurements along with corresponding inverse problem solvers could potentially lead to further improvements in compression performance.
+
+
+\section{Conclusion}
+
+This work introduces PSC, a novel zero-shot diffusion-based image compression method. PSC utilizes a posterior sampler to progressively acquire informative measurements of an image, forming a compressed representation. The decompression reproduces the steps taken in the compression algorithm using the encoded measurements, to finally reconstruct the desired image. PSC is simple to implement, requires no training data, and demonstrates flexibility across various image domains. We believe that future progress would offer better quantization algorithms along with matching sampling procedures, and lead to a further improvement in image compression. 
+
+
+
+
+

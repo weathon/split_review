@@ -1,8 +1,8 @@
 # Unposed Sparse Views Room Layout Reconstruction in the Age of Pretrain Model
 
 - Decision: Accept
-- Avg Score: 3.60
-- Scores: 1, 0, 6, 5, 6
+- Avg Score: 6.75
+- Scores: 10, 6, 5, 6
 
 ## Abstract
 Multiple-perspective images room layout reconstruction is poorly investigated due to the tedious and cumbersome steps that emerge from multi-view geometry, e.g camera intrinsic/extrinsic estimation, image matching, and triangulation. However, with the advancement of the current 3D foundation model DUSt3R, a paradigm shift has occurred in the 3D reconstruction realm, moving from a multi-step Structure-from-motion approach to an end-to-end single-step reconstruction without error accumulation and instability.

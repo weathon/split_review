@@ -1,0 +1,423 @@
+\title{Massive Editing for Large Language Models via Meta Learning}
+
+\begin{abstract}
+While large language models (LLMs) have enabled learning knowledge from the pre-training corpora, the acquired knowledge may be fundamentally incorrect or outdated over time, which necessitates rectifying the knowledge of the language model (LM) after the training.
+A promising approach involves employing a hyper-network to generate parameter shift, whereas existing hyper-networks suffer from inferior scalability in synchronous editing operation amount \citep{hase21,huang23tp}.
+For instance, \citet{mitchell2022mend} mimic gradient accumulation to sum the parameter shifts together, which lacks statistical significance and is prone to cancellation effect.
+To mitigate the problem, we propose the \textbf{MA}ssive \textbf{L}anguage \textbf{M}odel \textbf{E}diting \textbf{N}etwork (MALMEN), which formulates the parameter shift aggregation as the least square problem, subsequently updating the LM parameters using the normal equation.
+To accommodate editing multiple facts simultaneously with limited memory budgets, we separate the computation on the hyper-network and LM, enabling arbitrary batch size on both neural networks.
+Our method is evaluated by editing up to thousands of facts on LMs with different architectures, \emph{i.e.}, BERT-base, GPT-2, T5-XL (2.8B), and GPT-J (6B), across various knowledge-intensive NLP tasks, \emph{i.e.}, closed book fact-checking and question answering.
+Remarkably, MALMEN is capable of editing hundreds of times more facts than MEND \citep{mitchell2022mend} with the identical hyper-network architecture and outperforms editor specifically designed for GPT, \emph{i.e.}, MEMIT \citep{meng2023memit}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large language models (LLMs) have exhibited the ability to acquire knowledge from pre-training corpora and demonstrated promising performance in knowledge-intensive NLP tasks such as fact verification and question answering \citep{thorne18fever,petroni19, roberts20}.
+However, such knowledge may be factually incorrect and outdated over time.
+For instance, a language model (LM) trained before 2023 probably predicts ``Paris Saint-Germain'' rather than ``Inter Miami CF'' when prompted with ``What sports team does Messi play for?''.
+A straightforward remedy is to fine-tune the model on the corrected datasets, whereas such an approach suffers the risk of overfitting and catastrophic forgetting \citep{Kirkpatrick17,zhu20}.
+It is challenging to edit the model precisely as the knowledge is implicitly and distributionally encoded in the parameters of LM.
+An ideal editing method is expected to be (\romannumeral1) \emph{generalizable}, where the model behaves consistently across a different formulation of an injected fact and (\romannumeral2) \emph{local}, where the updates do not affect the remainder of the acquired knowledge \citep{decao2021ke,mitchell2022mend}.
+
+Several lines of research have investigated editing LM effectively and locally \citep{dai21kn,huang23tp}, among which an emerging approach entails training a hyper-network to generate updated parameters \citep{ha16hypernet,decao2021ke,hase21,mitchell2022mend}.
+Unlike fine-tuning, hyper-networks can explicitly designate editing generalizability and locality as objectives, learning to uphold the consistency and reliability of the LM \citep{decao2021ke,hase21,mitchell2022mend}.
+Recognizing that pre-trained weight is a good initialization, \cite{decao2021ke,hase21,mitchell2022mend} predict the parameter shift rather than directly generating the updated parameter.
+Existing hyper-networks also generate the parameter shift conditioned on the standard fine-tuning gradient as the gradient serves as a viable starting point for model editing and provides rich insights into how knowledge is encoded within the LM \citep{decao2021ke,hase21,mitchell2022mend}.
+Although existing hyper-networks have shown notable performance in editing a single or few facts, they exhibit limited scalability in synchronous editing operation amount \citep{hase21,huang23tp}.
+Due to the consideration of computation complexity, the language model is typically frozen when training the hyper-networks \citep{decao2021ke,hase21,mitchell2022mend}.
+A following downside is that the hyper-networks tend to overfit to the present state of the LM, allowing for only a few updates before necessitating re-training to adapt to the LM's new state, which renders meta-learning computationally expensive for mass editing in actual industrial scenarios \citep{hase21,huang23tp}. 
+\cite{hase21} sought to extend meta-learning to sequential editing but only scale to few, \emph{e.g.}, 10, updates.
+In this paper, we focus on another direction, which is to edit multiple facts at once so that the cost of training the hyper-network amortized to each editing is lower.
+
+There are mainly two challenges to the issue: (\romannumeral1) the impact of varying edits on the model parameters may be contradictory, making it difficult to ascertain the parameters effective for all facts to be injected \citep{yu20}; (\romannumeral2) training hyper-networks to edit a large number of facts simultaneously results in substantial memory consumption, potentially exceeding the hardware limit.
+Regarding the first challenge, existing hyper-networks resort to mimicking gradient accumulation to sum the parameter shifts together, which lacks statistical significance and is prone to cancellation effect \citep{mitchell2022mend}.
+In contrast, we formulate the parameter shift aggregation as a least square problem to seek for the parameter shift effective for all facts to be injected.
+For the second challenge, instead of concatenating the hyper-network to the LM, we delineate the computation between the hyper-network and LM. The decomposition permits arbitrary batch sizes on both neural networks, significantly reducing the memory required.
+
+The primary contribution of this work is an LM editing algorithm called MAssive Language Model Editing Network (MALMEN), which is designed for scalability across numerous facts while maintaining commendable editing performance and economical memory consumption.
+Empirical evaluations are conducted to edit up to thousands of facts on LMs with diverse architectures, \emph{i.e.}, BERT-base \citep{devlin19bert}, GPT-2 \citep{radford19gpt2}, T5-XL \citep[2.8B;][]{raffel20t5}, and GPT-J \citep[6B;][]{gptj} across various knowledge-intensive NLP tasks, \emph{i.e.}, closed book fact verification and question answering.
+We also perform ablation studies to elucidate the effect of design components of MALMEN.
+
+
+
+\section{Related Work}
+
+
+Several lines of research have investigated on model editing, including fine-tuning with hard constraint \citep{zhu20}, editing with external memory \citep{mitchell23serac,hartvigsen2023grace,huang23tp}, locate-and-edit  \citep{dai21kn,gupta23memitcsk,hase23}, and meta-learning \citep{sinitsin20enn,decao2021ke,mitchell2022mend}.
+We refer readers to \cite{yao23survey} for a comprehensive survey.
+
+\paragraph{Editing with External Memory}
+\cite{mitchell23serac} store edits in an explicit memory, utilizing a scope classifier to evaluate the probability that an input falling within the realm of a stored edit point.
+If the input matches any point in the storage, the counter-factual model generates output conditioned on the input and edit point.
+\cite{huang23tp} address an LM error by incorporating an additional neuron into the feed-forward network (FFN) of the last Transformer block.
+By leveraging the sparsity of GeLU activation function \citep{hendrycks16gelu}, the neuron is trained to be only valid for in-scope inputs, then the inserted neuron does not alter the output of unrelated input.
+
+\paragraph{Locate-and-edit}
+\cite{dai21kn} employ integrated gradients \citep{sundararajan17} to pinpoint the location of knowledge within LM at the neuron level.
+Drawing inspiration from \cite{geva2021keyvalue}, \cite{dai21kn} hand-craft modifications to the value slots corresponding to knowledge neurons to rectify LM outputs.
+\cite{meng22rome,meng2023memit} measure the efficacy of hidden states in GPT for fact recall through causal tracing \citep{vig20}, where the representation of the subject's last token within the FFN at intermediate layers to be significant.
+On the basis, \cite{meng22rome,meng2023memit} conceptualize the linear layers as a key-value memory association and modify the value of effective hidden states.
+However, \cite{hase23} observe that representation denoising provides limited insights into the best layer for model editing.
+
+\paragraph{Meta-learning}
+\cite{sinitsin20enn} describe a bi-level meta-learning that identifies model initialization for quick fine-tuning.
+\cite{decao2021ke,mitchell2022mend} learn to transform the standard fine-tuning gradient to a more targeted parameter shift, where they mainly focus on building light-weight hyper-networks as a naive multi-layer perception (MLP) that intakes the gradients and outputs the parameter shifts of a linear layer suffer a quadratic complexity with respect to the hidden size.
+Specifically, \cite{decao2021ke} pose LSTM \citep{hochreiter97lstm} to project the sentence embedding into rank-1 masks \citep{krueger17} over the gradients; \cite{mitchell2022mend} decompose the gradient into the outer product of keys and value gradients and apply low-rank MLPs \citep{hu22lora} to refine the keys and value gradients.
+
+
+
+\section{Problem Formulation}
+
+
+Let $\X$ be the prompt set and $\Y$ be the answer set, \emph{e.g.}, for fact verification, the answer set is binary, \emph{i.e.}, \{True, False\}; for question answering, the answer set is the vocabulary set.
+For each \emph{edit} prompt-answer tuple $(x,y)\in \X\times \Y$, let
+\begin{itemize}
+    \item $E(x,y)\subseteq \X\times\Y$ be the \emph{equivalent} tuple collection subject to $(x,y)$ such that $(x^e,y^e)$ is semantically equivalent to $(x,y)$ for any $(x^e,y^e)\in E(x,y)$. For example, for the edit tuple (``What is the capital of China?'', ``Beijing.''), an equivalent tuple is (``Of what country is Beijing the capital?'', ``China.'');
+    \item $U(x,y)=(\X\times\Y)\backslash E(x,y)$ be the \emph{unrelated} tuple collection subject to $(x,y)$, where $(x^u,y^u)$ is unrelated to $(x,y)$ for any $(x^u,y^u)\in U(x,y)$.
+    For the edit tuple example above, an unrelated tuple is (``What is the capital of the United States?'', ``Washington D.C.'').
+\end{itemize}
+
+Let $p:\X\times \Y \to [0,1]$ be the LM that maps each prompt-answer tuple $(x,y)$ to the probability $p(y|x)$ that $y$ is the answer to the prompt $x$.
+We parameterize the LM by $\W=\{W_\l:\l\in\L\}$ and then denote the LM as $p_\W$, where $W_\l$ is the weight of the linear layer $\l$ and $\L$ is the collection of \add{trainable} linear layers in the LM.
+
+Our goal is to edit $m$ prompt-answer tuples $(x_i,y_i)_{i=1}^m$ simultaneously, generalize to their equivalent tuple collection $\bigcup_{i=1}^m E(x_i,y_i)$, and maintain the the prediction for unrelated tuple collection $\bigcap_{i=1}^m U(x_i,y_i)=(\X\times\Y)\backslash \bigcup_{i=1}^m E(x_i,y_i)$ unchanged.
+In this regard, we measure the performance of the editing using the editing success (ES), generalization success (GS), and locality success (LS) defined as follows:
+
+\begin{equation*}
+\begin{aligned}
+    \text{ES}&=\P_{(x,y)\sim (x_i,y_i)_{i=1}^m}\left[y=\mathop{\arg\max}_{y'\in\Y}p_{\tilde{\W}}(y'|x)\right]\\
+    \text{GS}&=\P_{(x^e,y^e)\sim \bigcup_{i=1}^m E(x_i,y_i)}\left[y^e=\mathop{\arg\max}_{y\in\Y}p_{\tilde{\W}}(y|x^e)\right]\\
+    \text{LS}&=\P_{(x^u,y^u)\sim \bigcap_{i=1}^m U(x_i,y_i)}\left[y^u=\mathop{\arg\max}_{y\in\Y}p_{\tilde{\W}}(y|x^u)\right]
+\end{aligned}
+\end{equation*}
+
+where $\tilde{\W}=\{\tilde{W}_\l:\l\in\L\}$ is the post-edit weight.
+
+
+\section{Method}
+
+
+In this section, we introduce MALMEN, an LM editing hyper-network that generates parameter shifts with generality and locality conditioned on the standard fine-tuning gradient.
+MALMEN enjoy commendable scalability in synchronous editing operation amount with the identical architecture with MEND \citep{mitchell2022mend}.
+Recall that scaling meta-learning to multiple editing mainly faces two challenges: (\romannumeral1) The parameter shifts corresponding to different facts may be contradictory, making it challenging to determine a parameter shift effective for all facts \citep{yu20}; (\romannumeral2) It is memory demanding to accommodate the representation of numerous facts into the hyper-network simultaneously.
+We address these difficulties in the following two subsections, respectively.
+
+\subsection{Aggregating Parameter Shifts using the Normal Equation}
+
+Let us firstly consider a single linear layer with weight $W\in\R^{d'\times d}$, which transforms input (key) $u\in\R^d$ into output (value) $v=W u\in\R^{d'}$ (We omit the bias term for simplicity).
+\add{
+MEND $g_\theta:\R^d\times \R^{d'}\to \R^{d'\times d}$ leverages low-rank decomposition to transform the raw gradient into a more targeted pseudo gradient.
+Specifically, the tuple of key $u$ and value gradient $\nabla_v L$ (where $L$ is the standard fine-tuning loss) are fed into the hyper-network $g_\theta$ to generate parameter shift $S=g_\theta(u,\nabla_v L)\in\R^{d'\times d}$ (see \Cref{sec:mend} for the detail).
+When editing $m$ prompt-answer tuples $(x_i,y_i)_{i=1}^m$ (that contains $n$ tokens in total) simultaneously, MEND cache the tuples $(u_j,\nabla_{v_j}L)_{j=1}^n$ and  generate parameter shifts $(S_j)_{j=1}^n$ for all tokens and update the weight $W$ by summing the parameter shifts, \emph{i.e.}, $\tilde{W}\leftarrow W+\sum_{j=1}^n S_j$ \citep{mitchell2022mend}.
+}
+The procedure of summing the parameter shifts bears resemblance to gradient accumulation in supervised learning, where the stochastic gradient of each batch acts as a Monte Carlo estimation of the expected gradient, rendering their means an unbiased estimator of the expected gradient.
+However, in the case of parameter shifts generated by the hyper-network, summing them lacks statistical significance.
+We contend that such summing could potentially give rise to a cancellation effect, where the parameter shifts corresponding to differing keys exhibit significant magnitudes that counteract each other \citep{yeh22traclnwe}.
+Inspired by \cite{meng22rome,meng2023memit}, we consider the linear layers in the FFNs of Transformers as key-value memories.
+Given that a linear layer with weight $W$ transforms key $u$ into value $v=W u$, the effect of a parameter shift $S$ subject to key $u$ is to change the value from $v=W u$ to $W u+Su$.
+Now let $(S_1,\dots,S_n)\in\R^{n\times d'\times d}$ be the parameter shifts subject to the key matrix $U=(u_1,\dots,u_n)\in\R^{d\times n}$.
+Our aim is to aggregate the parameter shifts, or equivalently, find a single parameter shift $S$ with nearly the same effect.
+We formulate it as the following (regularized) least square problem, where $D=(d_1,\dots,d_n)\in\R^{d'\times n}$ is the value difference matrix such that $d_j=S_ju_j,\forall j\in[n]$.
+The intuition is that the optimal parameter shift $S^*$ has nearly equivalent effect with parameter shifts $(S_1,\dots,S_n)$ as it approximately maps each key $u_j$ into the value difference $d_j$.
+We add the regularization term $\lambda\|S\|_2^2$ to guarantee the numerical stability when $U$ is not row-wise full rank, where $\lambda$ is a learnable parameter.
+\begin{equation*}
+    \min_{S\in \R^{d'\times d}} \|SU-D\|_2^2+\lambda \|S\|_2^2
+\end{equation*}
+
+The solution to the above optimization problem is the normal equation: $S^*=DU^T(UU^T+\lambda I)^{-1}$.
+In this regard, we can modify the weight of a linear layer by a similar procedure with MEND but computing the value difference matrix $D$ and then update using the normal equation instead of summing the parameter shifts.
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+\begin{algorithm}[H]
+    \caption{Editor Inference}\label{alg:infer}
+    \KwIn{Edit tuples $(x_i,y_i)_{i=1}^m$}
+    $L\leftarrow -\sum_{i=1}^m\log p_\W(y_i|x_i)$\\
+    Cache $(u_{\l,j})_{\l\in \L,j\in[n]}$\\
+    Back-propagate $L$\\
+    Cache $(\nabla_{v_{\l,j}}L)_{\l\in\L,j\in[n]}$\\
+    $S_{\l,j}\leftarrow g_\theta(u_{\l,j}, \nabla_{v_{\l,j}}L),\forall \l\in\L,j\in [n]$\\
+    {\color{red}$S_\l^*\leftarrow \sum_{j=1}^n S_{\l,j},\forall \l\in\L$} \\
+    {\color{blue}$d_{\l,j}\leftarrow S_{\l,j} u_{\l,j} ,\forall \l\in\L,j\in [n]$\\
+    $U_\l\leftarrow [\dots,u_{\l,j},\dots],\forall \l\in\L$\\
+    $D_\l\leftarrow [\dots,d_{\l,j},\dots],\forall \l\in\L$\\
+    $S_\l^*\leftarrow D_\l U_\l^T(U_\l U_\l^T+\lambda_\l I)^{-1},\forall \l\in\L$}\\
+    $\tilde{W}_\l\leftarrow W_\l +S_\l^*,\forall \l\in\L$\\
+    $\tilde{\W}\leftarrow \{\tilde{W}_\l:\l\in\L\}$\\
+\end{algorithm}
+\end{wrapfigure}
+
+We edit linear layers $\l\in\L$ using the above procedure simultaneously, which yields the algorithm summarized in \Cref{alg:infer}, where $u_{\l,j}$ and $v_{\l,j}$ denote the key and value subject to the linear layer $\l$ and the $j$-th token of the prompt-answer tuples $(x_i,y_i)_{i=1}^m$ \add{and $U_\l$, $D_\l$ and $S_\l^*$ denote the key matrix, value difference matrix and optimal parameter shift of linear layer $\l$, respectively}.
+As a comparison, the red line is unique for MEND \citep{mitchell2022mend}, and the blue lines are unique for MALMEN. %(MALMEN can be implemented by changing few lines of MEND, see \cref{sec:diff}).
+Notice that one may choose $\L$ as a subset of linear layers in the LM by freezing other linear layers or cache $(u_{\l,j},\nabla_{v_{\l,j}}L)$ for a subset of tokens in the prompt-answer tuples $(x_i,y_i)_{i=1}^m$.
+Notice also that when editing several layers simultaneously, the changes in former layers will affect the keys to the latter layers, and thus the post-edit keys to the linear layer are different from those in the updating formula.
+However, the issue similarly occurs in the standard fine-tuning and does not lead to empirical failure (see \Cref{sec:input_bias} for a detailed discussion).
+\subsection{Memory Economic Training}\label{sec:train}
+
+Recall the editing purpose is that the post-edit LM $p_{\tilde{\W}}$ can generalize to the equivalent tuple collection $\bigcup_{i=1}^m E(x_i,y_i)$ and maintain the prediction for unrelated tuple collection $\bigcap_{i=1}^m U(x_i,y_i)$ unchanged.
+Following \cite{decao2021ke,mitchell2022mend}, we set the negative log-probability as the generalization loss $L_{\gen}$ and the KL divergence as the locality loss $L_{\loc}$ as follows.
+The total meta loss $L_{\meta}$ is a weighted sum of the generalization loss $L_{\gen}$ and locality loss $L_{\loc}$, where $\lambda_{\loc
+}$ is a hyper-parameter that governs the locality weight.
+
+\begin{equation}\label{eq:loss}
+\begin{aligned}
+    & L_{\gen}(\theta)=-\E_{(x^e,y^e)\sim\bigcup_{i=1}^m E(x_i,y_i)}[\log p_{\tilde{\W}}(y^e|x^e)]\\
+    & L_{\loc}(\theta)=\E_{(x^u,y^u)\sim\bigcap_{i=1}^m U(x_i,y_i)}[\KL(p_\W(\cdot| x^u)||p_{\tilde{\W}}(\cdot| x^u))]\\
+    & L_{\meta}(\theta)= L_{\gen}(\theta)+\lambda_{\mathrm{loc}}L_{\loc}(\theta)
+\end{aligned}
+\end{equation}
+\begin{wrapfigure}{r}{0.5\textwidth}
+\begin{center}
+    \includegraphics[width=0.5\textwidth]{trad.pdf}
+    \caption{The procedure to compute $\nabla_\theta L_{\meta}$ in \cite{mitchell2022mend}.
+    The cached tuples are fed into the hyper-network to generate the updated LM parameter, which is differentiable w.r.t. the hyper-network parameter.
+    After feeding the equivalent and unrelated prompt-answer tuples into the LM, the meta loss is back propagated along the red arrow.
+    }\label{fig:back_prop}
+\end{center}
+
+\end{wrapfigure}
+In practice, we sample an equivalent tuple $(x_i^e,y_i^e)$ and locality tuple $(x_i^u,y_i^u)$ for each edit tuple $(x_i,y_i)$ to compute the empirical meta loss.
+Notice that the meta loss $L_{\meta}$ is a function of the hyper-network parameter $\theta$.
+Traditionally we concatenate the hyper-network to the LM so that the meta loss can be back propagated into the hyper-network \citep{decao2021ke,mitchell2022mend}, as illustrated in \Cref{fig:back_prop}. 
+However, it requires caching all intermediate variables in the hyper-network to prepare for the back-propagation.
+Recall that the total number of cached tuples $(u_{\l,j},\nabla_{v_{\l,j}} L)_{\l\in\L,j\in[n]}$ equals to the number of linear layers to be edited multiply the number of tokens $n$ in the prompt-answer tuples $(x_i,y_i)_{i=1}^m$, which can be enormous when editing thousands of facts.
+It is problematic to compute the meta gradient $\nabla_\theta L_{\meta}$ by following the traditional procedure due to exceedingly high memory costs.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\textwidth]{malmen.pdf}
+    \caption{The overall procedure to compute the meta gradient $\nabla_\theta L_{\meta}$:
+    (\romannumeral1) The edit prompt-answer tuples $(x_i,y_i)_{i=1}^m$ are fed into the LM $p_\W$, where keys $(u_{\l,j})_{\l\in\L,j\in[n]}$ are cached.
+    (\romannumeral2) Back-propagate the standard fine-tuning loss $L$ and cache the gradient with respect to values, \emph{i.e.}, $(\nabla_{v_{\l,j}} L)_{\l\in\L,j\in[n]}$.
+    (\romannumeral3) Feed cached tuples $(u_{\l,j},\nabla_{v_{\l,j}} L)_{\l\in\L,j\in[n]}$ into the hyper-network $g_\theta$ to infer the updated LM parameter $\tilde{\W}$ without caching any intermediate variable.
+    (\romannumeral4) Feed the equivalent and unrelated tuples $(x_i^e,y_i^e)_{i=1}^m,(x_i^u,y_i^u)_{i=1}^m$ into the post-edit LM $p_{\tilde{\W}}$.
+    (\romannumeral5) Back-propagate the meta loss $L_{\meta}$ on linear layers $\l\in\L$ and compute $(\nabla_{D_\l}L_{\meta})_{\l\in\L}$ and $(dL_{\meta}/d\lambda_\l)_{\l\in\L}$.
+    (\romannumeral6) Again, feed the cache tuples $(u_{\l,j},\nabla_{v_{\l,j}}L)_{\l\in\L,j\in[n]}$ into the hyper-network $g_\theta$ to generate the value difference matrices $(D_\l)_{\l\in\L}$ but with the training mode.
+    (\romannumeral7) Back propagate the proxy loss $\tilde{L}=\sum_{\l\in\L,j\in[n]}\nabla_{d_{\l,j}}L_{\meta}^T d_{\l,j}$.
+    All inputs to neural networks, including $(x_i,y_i,x_i^e,y_i^e,x_i^u,y_i^u)_{i=1}^m$ and $(u_{\l,j},\nabla_{v_{\l,j}}L)_{\l\in\L,j\in[n]}$, can be split into batches, where the gradients of the meta loss $L_{\meta}$ and proxy loss $\tilde{L}$ are accumulated.
+    }
+    \label{fig:malmen}
+\end{figure}
+\begin{wrapfigure}{r}{0.5\textwidth}
+\begin{algorithm}[H]
+    \add{
+    \caption{Editor Training}\label{alg:train}
+    \KwIn{$(x_i,y_i,x_i^e,y_i^e,x_i^u,y_i^u)_{i=1}^m$}
+    $\tilde{\W}\leftarrow$ Editor Inference $((x_i,y_i)_{i=1}^m)$\\
+    Cache $(u_{\l,j},\nabla_{v_{\l,j}}L)_{\l\in\L,j\in[n]}$ and $(S_\l^*)_{ \l\in\L}$\\
+    Compute $L_{\meta}$ following \Cref{eq:loss}\\
+    Back-propagate $L_{\meta}$ on the LM\\
+    Cache $(\nabla_{\tilde{W}_\l}L_{\meta})_{\l\in\L}$\\
+    $U_\l\leftarrow [\dots,u_{\l,j},\dots],\forall \l\in\L$\\
+    $M_\l\leftarrow \nabla_{\tilde{W}_\l}L_{\meta}\cdot(U_\l U_\l^T+\lambda_\l I)^{-1},\forall \l\in\L$\\
+    $\nabla_{D_\l} L_{\meta}\leftarrow M_\l U_\l,\forall \l\in\L$\\
+    $dL_{\meta}/d\lambda_\l\leftarrow -\tr(M_\l S_\l^*),\forall \l\in\L$\\
+    $S_{\l,j}\leftarrow g_\theta(u_{\l,j},\nabla_{v_{\l,j}}L),\forall \l\in\L,j\in[n]$\\
+    $d_{\l,j}\leftarrow S_{\l,j} u_{\l,j} ,\forall \l\in\L,j\in [n]$\\
+    $D_\l\leftarrow [\dots,d_{\l,j},\dots],\forall \l\in\L$\\
+    $\tilde{L}\leftarrow \sum_{\l\in\L}\tr(\nabla_{D_\l}L_{\meta}^T D_\l)$\\
+    Back-propagate $\tilde{L}$\\
+    }
+\end{algorithm}
+\end{wrapfigure}
+
+To allow back-propagation on both neural networks with arbitrary batch size,  we separate the back-propagation on the LM and hyper-network.
+\add{
+In the first stage, equivalent and unrelated tuples are fed into the LM in batches and the meta gradients are accumulated on linear layers $\l\in\L$ to obtain $(\nabla_{\tilde{W}_\l}L_{\meta})_{\l\in\L}$, whose size is constant w.r.t. the number of edits.
+In the second stage, we manually compute the meta gradient w.r.t. each value difference $d_{\l,j}$ when needed following $\nabla_{d_{\l,j}}L_{\meta}=\nabla_{\tilde{W}_\l}L_{\meta}\cdot (U_\l U_\l^T+\lambda_\l I)^{-1}u_{\l,j}$ (See \Cref{thm:d_grad}), then the component of the meta gradient $\nabla_\theta L_{\meta}$ contributed by the tuple $(u_{\l,j},\nabla_{v_{\l,j}}L)$ can be computed through back-propagating the proxy loss $\nabla_{d_{\l,j}}L_{\meta}^T d_{\l,j}$.
+This allows us to compute the meta gradient $\nabla_\theta L_{\meta}$ by dividing the cached tuples $(u_{\l,j},\nabla_{v_{\l,j}}L)_{\l\in\L,j\in[n]}$ into batches and accumulating the gradient component contributed by tuples from different batches.
+}
+Recall that the regularization factor $\lambda_\l$ is a trainable parameter.
+We also compute its gradient by manually back-propagating the meta loss, \emph{i.e.}, $d L_{\meta}/d\lambda_\l =-\tr(\nabla_{\tilde{W}_\l}L_{\meta}\cdot(U_\l U_\l^T+\lambda_\l I)^{-2}U_\l D_\l^T)=-\tr(\nabla_{\tilde{W}_\l}L_{\meta}\cdot(U_\l U_\l^T+\lambda_\l I)^{-1}S_\l^{*T})$ (\Cref{thm:lamda_grad}).
+Notice that our computation amount and result are identical to the traditional procedure, while the decomposition substantially reduces the memory required.
+The overall algorithm to compute the meta gradient $\nabla_\theta L_{\meta}$ is summarized in \Cref{alg:train,fig:malmen}.
+After obtaining the meta gradient $\nabla_\theta L_{\meta}$, the hyper-network parameter $\theta$ is updated by the Adam optimizer \citep{kingma15adam}.
+
+
+
+\section{Empirical Evaluation}
+
+
+
+A primary objective of MALMEN is to achieve scalability in synchronous editing operation amount, where the algorithm is anticipated to be effective (as measured by ES, GS, and LS) and efficient (in terms of computation time and memory usage).
+Our experimentation aims to (\romannumeral1) assess the scalability of the editing performance subject to the number of edits, and (\romannumeral2) elucidate the impact of MALMEN's design elements.
+
+The experiments are implemented on LMs with different architectures, \emph{i.e.}, BERT-base \citep{devlin19bert}, GPT-2 \citep{radford19gpt2}, T5-XL \citep[2.8B;][]{raffel20t5}, and GPT-J \citep[6B;][]{gptj} in various knowledge-intensive NLP tasks, \emph{i.e.}, closed book fact verification and question answering.
+For BERT-base, we use the Fact Extraction and VERtification (FEVER) dataset \citep{thorne18fever} with the identical train/val splits with \cite{decao2021ke,mitchell2022mend}, \add{which contains 104,996 training and 10,444 validation samples.}
+The unrelated tuples $(x_i^u,y_i^u)_{i=1}^m$ are randomly sampled from FEVER2 \citep{thorne19fever2}.
+Before the editing, we concatenate the LM to a linear layer that maps the final hidden state of the BOS (beginning of the sentence) token to a log-probability and fine-tune the whole model on the FEVER dataset (see \Cref{sec:pft} for the detail).
+During the editing, to simulate the scenario in practice, the answers in the edit and equivalent tuples are opposite to the ones when fine-tuning.
+For GPT-2, T5-XL, and GPT-J, we use the zero-shot Relation Extraction (zsRE) question answering dataset \citep{levy2017zsre} with the identical train/val splits with \cite{decao2021ke,mitchell2022mend}, \add{which has 244,173 training and 27,644 validation instances.}
+The unrelated tuples $(x_i^u,y_i^u)_{i=1}^m$ are sampled from Natural Questions \citep[NQ;][]{kwiatkowski19nq}.
+Due to the difficulty of fine-tuning all parameters of T5-XL and GPT-J and fine-tune a subset of the parameters can lead to unfair comparison, in contrast to BERT-base, we do not fine-tune GPT-2, T5-XL, and GPT-J before the editing.
+We also use the correct answers to the edit and equivalent prompts to edit GPT-2, T5-XL and GPT-J.
+Notice that this setting is identical to \cite{meng22rome,meng2023memit} but different with \cite{decao2021ke,mitchell2022mend}.
+To better evaluate the locality of editing, we use the publicly available version of T5-XL fine-tuned on NQ.
+
+
+\subsection{Scaling Curve}\label{sec:scaling}
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+\begin{center}
+    \includegraphics[width=0.4\textwidth]{select.pdf}
+    \caption{Hooked module in GPT-J.
+    The module of interest is highlighted with a yellow pentagram.
+    }\label{fig:select}
+\end{center}
+\end{wrapfigure}
+We compare MALMEN with fine-tuning (FT; \Cref{sec:ft}), MEND, and MEMIT.
+To scale MEND to multiple editing with limited memory budget, we use a re-implementation using a similar method with \Cref{sec:train}.
+In contrast to \cite{meng2023memit,huang23tp}, who deploy MEND trained by \cite{mitchell2022mend} for making a single edit, we train and evaluate MEND on applying simultaneous edits.
+The hyper-parameter of MEND is also tuned to achieve better performance in multiple editing scenario.
+We use \textbf{identical hyper-parameters} for MALMEN across different models and tasks.
+For BERT-base, GPT-2, and GPT-J, we select $\L$ as the second linear layer in the FFN of the last 6 Transformer blocks and only cache the tokens that output the answer, \emph{e.g.}, for BERT-base, the BOS token.
+\add{For T5-XL, we select $\L$ as the second linear layer in the FFN of the last 3 Transformer blocks in both encoder and decoder.}
+An example of GPT-J is illustrated in \Cref{fig:select}.
+
+\begin{figure}[h]
+    \centering
+    \subfigure{\includegraphics[width=0.3\textwidth]{bert-base_ES.pdf}}
+    \subfigure{\includegraphics[width=0.3\textwidth]{bert-base_GS.pdf}}
+    \subfigure{\includegraphics[width=0.3\textwidth]{bert-base_LS.pdf}}
+    \caption{Scaling curve of BERT-base (110M)}
+    \label{fig:bert-base}
+\end{figure}
+\begin{figure}[h]
+    \centering
+    \subfigure{\includegraphics[width=0.3\textwidth]{gpt-2_ES.pdf}}
+    \subfigure{\includegraphics[width=0.3\textwidth]{gpt-2_GS.pdf}}
+    \subfigure{\includegraphics[width=0.3\textwidth]{gpt-2_LS.pdf}}
+    \caption{Scaling curve of GPT-2 (124M)}
+    \label{fig:gpt-2}
+\end{figure}
+We present the scaling curves of small models, \emph{i.e.}, BERT-base and GPT-2, in \Cref{fig:bert-base,fig:gpt-2}, where the number of edits $m$ is varied from $2^4$ to $2^{12}$ and $2^6$ to $2^{12}$ respectively.
+All experiments are repeated at least 3 times where the shaded area represents the standard deviation.
+MALMEN demonstrates the strongest scalability across the number of edits.
+Compared to MEND, MALMEN can edit over an order of magnitude more facts with similar performance.
+On BERT-base, fine-tuning is fragile, where a slightly larger or smaller learning rate causing failure on LS or ES and GS.
+This might due to the labels in the editing are opposite to those in FT, allowing LM to achieve low loss by merely reversing the output.
+FT also suffers larger gap between ES and GS compared with MEND and MALMEN, indicating that the parameter shifts generated by hyper-networks enjoy better generalization.
+
+\begin{figure}[h]
+\add{
+    \centering
+    \subfigure{\includegraphics[width=0.3\textwidth]{t5-xl_ES.pdf}}
+    \subfigure{\includegraphics[width=0.3\textwidth]{t5-xl_GS.pdf}}
+    \subfigure{\includegraphics[width=0.3\textwidth]{t5-xl_LS.pdf}}
+    \caption{Scaling curve of T5-XL (2.8B)}
+    \label{fig:t5-xl}
+}
+\end{figure}
+\begin{figure}[h]
+    \centering
+    \subfigure{\includegraphics[width=0.3\textwidth]{gpt-j_ES.pdf}}
+    \subfigure{\includegraphics[width=0.3\textwidth]{gpt-j_GS.pdf}}
+    \subfigure{\includegraphics[width=0.3\textwidth]{gpt-j_LS.pdf}}
+    \caption{Scaling curve of GPT-J (6B)}
+    \label{fig:gpt-j}
+\end{figure}
+
+\add{
+The scaling curves of large models, \emph{i.e.}, T5-XL and GPT-J, are illustrated in \Cref{fig:t5-xl,fig:gpt-j}, where the number of edits $m$ is varied from $2^8$ to $2^{14}=16,384$ and $2^5$ to $2^{14}$.
+As the model scale increases, the performance of all editing methods improve.
+MALMEN maintains strong scalability, although its LS is slightly lower than the lead (the gap is consistently smaller than 0.02).
+}
+It is remarkble that MALMEN can edit more than two orders of magnitude more facts than MEND on GPT-J with similar performance and outperforms editor specifically designed for GPT, \emph{i.e.}, MEMIT.
+As for computation time, it takes 12.25 and 33.75 hours in total (including training) for MALMEN and MEMIT to edit 16,384 facts on GPT-J using a single NVIDIA A100 GPU, respectively.
+\subsection{Ablation Study}
+\begin{table}[h!]
+    \centering
+    \begin{tabular}{ccccccc}
+        \toprule
+         & \multicolumn{3}{c}{FEVER, $m=512$} & \multicolumn{3}{c}{zsRE, $m=512$}\\
+        \cmidrule(lr){2-4}\cmidrule(lr){5-7}
+         & \multicolumn{3}{c}{BERT-base (110M)} & \multicolumn{3}{c}{GPT-2 (124M)}\\
+        
+        \hline
+        Variant & ES (\%) $\uparrow$ & GS (\%) $\uparrow$ & LS (\%) $\uparrow$ & ES (\%) $\uparrow$ & GS (\%) $\uparrow$ & LS (\%) $\uparrow$ \\
+        
+        \hline
+        Sum param. shifts & 79.1 (1.6) & 75.1 (1.9) & 72.9 (3.1) & 52.2 (1.4) & 50.7 (1.4) & \textbf{17.0 (0.5)}\\
+        No regularization & – & – & – & 0.0 (0.0) & 0.0 (0.0) & 0.0 (0.0)\\
+        Edit first FC in FFN & 50.3 (2.4) & 50.3 (1.7) & 51.0 (3.2) & 97.7 (1.3) & 89.1 (2.6) & 15.8 (1.3)\\
+        Cache all tokens & \textbf{97.0 (0.7)} & \textbf{90.0 (1.4)} & \textbf{90.3 (1.4)} & 99.2 (0.3) & 94.0 (0.8) & 16.6 (1.0)\\
+        \midrule
+        MALMEN & 93.0 (1.6) & 85.8 (2.1) & 89.5 (2.1) & \textbf{99.7 (0.2)} & \textbf{96.1 (0.6)} & 16.5 (1.0)\\
+        \bottomrule
+    \end{tabular}
+    \caption{Ablation study on BERT-base and GPT-2}
+    \label{table:ablation}
+\end{table}
+
+\Cref{table:ablation} shows ablations of MALMEN's main difference with MEND, where the numbers in brackets represent the standard deviation.
+``Sum param. shifts'' replaces updating using the normal equation by summing the parameter shifts.
+``No regularization'' removes the regularization term in the least square problem.
+Recall that the input size of the second linear layer in the FFN of BERT-base and GPT-2 is 3072 and 1024, respectively.
+When $m=512$, the normal equation is problematic as key matrix is not row-wise full rank.
+On BERT-base, training cannot be conducted due to a matrix singularity error. Although there is no error reported on GPT-2 (possibly due to the limitation of computation precision), MALMEN is unable to converge properly.
+``Edit first FC in FFN'' turns to edit the first linear layer in the FFN of the last 6 Transformer blocks, which generally achieves inferior performance.
+``Cache all tokens'' refers to caching the tuple of key and value gradient for all tokens rather than those output the answer.
+It is remarkable that ``Cache all tokens'' enjoys better performance on BERT-base.
+However, the advantage reverses when continuing to scale the number of facts to be edited, as illustrated by \Cref{table:ablation-j}.
+Moreover, only caching tokens that output the answer also accelerate training and inference (38.9\% fewer time on a single NVIDIA A40 GPU).
+
+\begin{table}[h!]
+    \centering
+    \begin{tabular}{ccccc}
+        \toprule
+         & \multicolumn{4}{c}{zsRE, $m=8192$} \\
+        \cmidrule(lr){2-5}
+         & \multicolumn{4}{c}{GPT-J (6B)} \\
+        \hline
+        Variant & ES (\%) $\uparrow$ & GS (\%) $\uparrow$ & LS (\%) $\uparrow$ & Time (h) $\downarrow$\\
+        
+        \midrule
+        Cache all tokens & 94.0 (0.3) & 85.5 (0.7) & \textbf{25.9 (0.2)} & 7.2\\
+        MALMEN & \textbf{99.7 (0.0)} & \textbf{92.8 (0.3)} & 25.1 (0.3) & \textbf{4.4}\\
+        \bottomrule
+    \end{tabular}
+    \caption{Ablation study on GPT-J}
+    \label{table:ablation-j}
+\end{table}
+\begin{wrapfigure}{r}{0.33\textwidth}
+\add{
+\begin{center}
+    \includegraphics[width=0.3\textwidth]{residual.pdf}
+    \caption{Cancellation effect}\label{fig:resiual}
+\end{center}
+}
+\end{wrapfigure}
+To \add{see whether the design of normal equation alleviates the cancellation effect, MALMEN is compared with ``Sum param. shifts'' under different number of edits on GPT-2 in \Cref{fig:resiual}.
+We define the residual subject to linear layer $\l$ and the $j$-th token as $r_{\l,j}=\|S_{\l}^*u_{\l,j}-d_{\l,j}\|/\|d_{\l,j}\|$, which describes the offset volume caused by the parameter shift aggregation, and measure the cancellation effect by the mean residual (MR), \emph{i.e.}, $\frac{1}{\left|\L\right|n}\sum_{\l\in\L}\sum_{j\in[n]}r_{\l,j}$.
+It can be observed that for both methods, MR increases along with the number of edits while the MR of MALMEN is about three orders of mangitude smaller.
+}
+
+\begin{wrapfigure}{r}{0.33\textwidth}
+\begin{center}
+    \includegraphics[width=0.3\textwidth]{memory.pdf}
+    \caption{Memory consumption}\label{fig:memory}
+\end{center}
+\end{wrapfigure}
+We also illustrate the effect of memory economic training by varying $m$ from $2^5$ to $2^{13}$ on GPT-2, as presented by \Cref{fig:memory}.
+``MEND-style'' concatenates the hyper-network to the LM as in \Cref{fig:back_prop}, which yields substantially higher memory consumption and quickly exceeds the hardcore limit.
+In contrast, the memory consumption of MALMEN grows slowly subject to the number of edits, allowing it to edit thousands of facts on a single GPU.
+
+
+\section{Discussion}
+
+
+We present an LM editing hyper-network scalable to thousands of facts, called MAssive Language Model Editing Network (MALMEN).
+Our evaluations demonstrate that, with an identical architecture, MALMEN can edit hundreds of times more facts than MEND, and outshines MEMIT, an editor specifically designed for GPT, thereby positioning itself as a competitive alternative for real-world industrial applications.
+MALMEN formulate the parameter shift aggregation as a least square problem, subsequently updating the LM parameter utilizing the normal equation.
+To allow arbitrary batch size on both neural networks, the computation on hyper-network and LM are segregated, making it feasible to edit multiple facts with constrained memory limits.
+
+\paragraph{Limitations}
+Although MALMEN achieves decent performance in editing thousands of facts simultaneously, it requires computation with linear complexity in relation to the number of facts to compute the meta gradient.
+Additionally, MALMEN still fails to generalize to rephrasings not just occurring in prompts. For instance, an ideal editor could infer from the tuple (``What is the capital of France?'', ``Paris.'') to (``Of what country is Paris the capital?'', ``France.''). Ensuring model consistency over a larger scope through local editing remains a challenge.
+
+
+
+
+

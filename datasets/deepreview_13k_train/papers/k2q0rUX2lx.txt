@@ -1,0 +1,413 @@
+\title{Enhancing Multi-Step Reasoning Abilities of Language Models through Direct Q-Function Optimization}
+
+\begin{abstract}
+
+Reinforcement Learning (RL) plays a crucial role in aligning large language models (LLMs) with human preferences and improving their ability to perform complex tasks. However, current approaches either require significant computational resources due to the use of multiple models and extensive online sampling for training (e.g., PPO) or are framed as bandit problems (e.g., DPO, DRO), which often struggle with multi-step reasoning tasks, such as math problem-solving and complex reasoning that involve long chains of thought. 
+To overcome these limitations, we introduce Direct Q-function Optimization (DQO), which formulates the response generation process as a Markov Decision Process (MDP) and utilizes the soft actor-critic (SAC) framework to optimize a Q-function directly parameterized by the language model. The MDP formulation of DQO offers structural advantages over bandit-based methods, enabling more effective process supervision. 
+Experimental results on two math problem-solving datasets, GSM8K and MATH, demonstrate that DQO outperforms previous methods, establishing it as a promising offline reinforcement learning approach for aligning language models.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Large language models (LLMs) have shown remarkable performance and potentials on a wide range of tasks including dialog generation~\citep{han2024psydial}, general question answering~\citep{alawwad2024enhancing}, code generation~\citep{jimenez2023swe,chen2024teaching}, agent~\citep{wang2024opendevin} and math problem solving~\citep{yumetamath,shao2024deepseekmath}. 
+To ensure good performance, one of the key procedures is to align the language models with human preference or task-specific requirements by reinforcement learning (RL)~\citep{bai2022training,touvron2023llama}. Canonically, the alignment training pipeline consists of two stages~\citep{ouyang2022training}. In the first stage, a reward model under the Bradley-Terry model~\citep{bradley1952rank} is trained on human or environment-labeled preference data. Then the language model is trained by online RL algorithms like Proximal Policy Optimization (PPO) \citep{schulman2017proximal} with the reward signals provided by the reward model trained in stage one.
+
+Despite the good performance achieved, the online RL methods usually involve sampling during training, which is both costly and unstable compared to offline methods \citep{Choshen2020On}. These issues are overcome by offline preference learning methods, of which the representative is Direct Preference Optimization (DPO) \citep{rafailov2024direct}. DPO and its follow-ups (e.g., \citet{zhao2023slic,azar2024general}) treat the language model as the policy model and reward model simultaneously and train the model on offline pairwise preference data directly, therefore eliminating the need for a separate reward model. Though simple, direct preference learning has been shown effective and efficient in LLM alignment \citep{tunstall2023zephyr}.
+
+However, in practice, sometimes it is hard to acquire pairwise data required by the above methods. This issue becomes particularly severe under scenarios like math problem solving or code generation when generating high-quality data requires domain-specific expertise \citep{saunders2022self,bowman2022measuring}. This drawback of DPO has recently been circumvented by Direct Reward Optimization (DRO) \citep{richemond2024offline}. DRO formulates the LLM generation task as a single-step MDP (i.e., bandit) and adopts the framework soft actor-critic (SAC) \citep{haarnoja2018soft}, where the advantage is directly parameterized by the language model. Consequently, DRO inherits the advantage of offline policy gradient and gets rid of the dependency on pairwise data. 
+
+Nevertheless, DRO treats the process as a bandit problem, which neglects the intrinsic long-horizon nature of a wide spectrum of tasks that require complex multi-step reasoning like math problem solving and code generation \citep{kang2024mindstar,miaoselfcheck}, where an erroneous reasoning is almost fatal. 
+Previous RL research found that if rewards are only provided at the end of the episode, discovering this sparse reward signal is a hard exploration problem and sparse reward functions may not be able to meaningfully distinguish between a wide range of different policies, which makes the training inefficient \citep{Martin18Learning,wilcox2022monte}.
+In the meanwhile, recent studies show that signals from process reward models (PRMs) can further boost the performance of language model  \citep{zhang2024rest,lightman2023let}. The positional information of PRM scores usually implies the critical mistakes in the reasoning and therefore provides stronger supervision signals.
+However, if the whole generation process is simplified as a single action, the process reward will be aggregated and the positional information will be lost, implying that DRO cannot efficiently utilize process supervision.
+\begin{table}[bt!]
+\centering
+\caption{A comparison between DQO, offline learning algorithms, including supervised fine-tuning (SFT), reject sampling (RS) \citep{dong2023raft}, DPO \citep{rafailov2024direct}, KTO \citep{ethayarajh2024kto}, DRO~\citep{richemond2024offline} and online algorithm PPO \citep{schulman2017proximal}. DQO enjoys all the benefits listed in the left-most column.}
+\resizebox{.9\columnwidth}{!}{
+\begin{tabular}{l | c | c | c | c | c | c | c}
+\toprule
+& SFT & RS & DPO & KTO & DRO & PPO & \bf{DQO} \\ %\hline
+	\midrule
+Free from online sampling during training  & \textcolor{green}{\ding{51}} & \textcolor{green}{\ding{51}} & \textcolor{green}{\ding{51}} & \textcolor{green}{\ding{51}} & \textcolor{green}{\ding{51}} & \textcolor{red}{\ding{55}}  & \textcolor{green}{\ding{51}} \\ %\hline
+Learn from negative samples    & \textcolor{red}{\ding{55}}  & \textcolor{red}{\ding{55}}  & \textcolor{green}{\ding{51}} & \textcolor{green}{\ding{51}} & \textcolor{green}{\ding{51}} & \textcolor{green}{\ding{51}} & \textcolor{green}{\ding{51}} \\
+Learn from unbalanced samples & \textcolor{red}{\ding{55}}  & \textcolor{red}{\ding{55}}  & \textcolor{red}{\ding{55}}  & \textcolor{green}{\ding{51}} & \textcolor{green}{\ding{51}} & \textcolor{green}{\ding{51}} & \textcolor{green}{\ding{51}} \\ 
+Ability to use process supervision  & \textcolor{red}{\ding{55}}  & \textcolor{red}{\ding{55}}  & \textcolor{red}{\ding{55}}  & \textcolor{red}{\ding{55}} & \textcolor{red}{\ding{55}} & \textcolor{green}{\ding{51}} & \textcolor{green}{\ding{51}} \\
+\midrule
+\end{tabular}
+}
+\label{table:motivation}
+\end{table}
+In order to overcome the aforementioned issues, in this paper, we propose Direct $Q$-function optimization (DQO), an offline RL algorithm for LLMs. In DQO, the responding procedure is formulated as a Markov Decision Process (MDP) and our goal is to learn an optimal policy under KL-regularization. Our algorithm adopts the framework of soft $Q$-learning, where the $Q$-function is directly parameterized by the language model. Then both the $Q$-function network and the value network are updated according to Soft Bellman Equation on offline data. The MDP formulation makes DQO a multi-step learning algorithm, and can therefore exploit process reward signals. A holistic comparison of our method and other alignment methods is shown in Table~\ref{table:motivation}. 
+Unlike DPO or DRO, where all tokens (actions) within a response (trajectory) are evenly incentivized or punished, DQO can discover the correct reasoning steps in a incorrect response, see the case in Table~\ref{table:example}. 
+Specifically, our contributions are summarized as follows
+\begin{itemize}[leftmargin=*]
+    \item We propose Direct $Q$-function optimization, or DQO, an offline RL algorithm for LLMs. Compared to previous methods, DQO can learn from offline and negative or unbalanced samples. Moreover, DQO is featured by step-wise learning, which is favorable for long-horizon tasks and able to exploit process rewards.
+    \item We introduce a practical instantiation of DQO, which equips DQO with $\lambda$-return and importance sampling. These techniques stabilize the training process and ensure a good performance.
+    \item We empirically compare DQO with a wide range of widely used alignment algorithms on math problem-solving tasks. Experiment results show that DQO outperforms these baselines on both GSM8K and MATH datasets. Moreover, as shown by our experiment, when process rewards are available, the performance of DQO can be further boosted, indicating that DQO can benefit from process rewards. 
+\end{itemize}
+
+\begin{table}[bt!]
+\centering
+\Huge
+\caption{A case study of learned $V$-function. We select a prompt-response pair from the GSM8K training set and split the response into nine segments by double line breaks. We extract the $V$-function value at each line break. The model makes a mistake at the beginning of the fifth segment (where \texttt{\$\$x=y\$\$} is erroneous). The model predicts high $V$-values from the first segment to the fourth segment. After that, the predictions drop significantly. The value trends preciously reflect the correctness of the reasoning and thus can serve as an informative process supervision.}
+\resizebox{.9\columnwidth}{!}{
+\begin{tabular}{l | l | c | c}
+\toprule
+&  \textbf{Text} & \textbf{Process Value} & \textbf{Correctness} \\ \midrule
+\textbf{Prompt} &  
+\parbox[t]{25cm}{
+Jorge has an equal number of baseball cards as Matias, who has 6 fewer cards than Carlos.
+If Carlos has 20 baseball cards, what is the total number of baseball cards the three have? \\
+}
+ & - & -\\ \midrule
+\textbf{Response} & \colorbox{lightgreen}{\parbox[b]{25cm}{\texttt{**Step 1: Identify the information provided**} \\}} & 0.6016 & \textcolor{Green}{\ding{51}} \\ 
+  & \colorbox{lightgreen}{\parbox[b]{25cm}{ \texttt{- Jorge has an equal number of baseball cards as Matias.\\
+     - Matias has 6 fewer cards than Carlos.\\
+     - Carlos has 20 baseball cards.} \\}}
+     & 0.6719 &  \textcolor{Green}{\ding{51}} \\
+  & \colorbox{lightgreen}{\parbox[b]{25cm}{ \texttt{**Step 2: Translate the information into equations**} \\}}
+     & 0.7969 & \textcolor{Green}{\ding{51}}  \\
+  & \colorbox{lightgreen}{\parbox[b]{25cm}{ \texttt{Let x be the number of baseball cards Jorge and Matias each have. \\
+Let y be the number of baseball cards Carlos has.} \\}}
+     & 0.6680 & \textcolor{Green}{\ding{51}}  \\
+  &  \colorbox{lightred}{ \parbox[b]{25cm}{ \texttt{\$\$x = y\$\$ \$\$y = x + 6\$\$ \$\$y = 20\$\$}\\} }
+     & 0.1016 & \textcolor{red}{\ding{55}}  \\
+  &  \colorbox{lightred}{\parbox[b]{25cm}{ \texttt{**Step 3: Substitute the equations to find x**}\\} }
+     & 0.0013 & \textcolor{red}{\ding{55}}  \\
+  & \colorbox{lightred}{ \parbox[b]{25cm}{ \texttt{\$\$x = x + 6\$\$ \$\$0 = 6\$\$ This is a contradiction, so the given information is not consistent.}\\}} 
+     & 0.4688 & \textcolor{red}{\ding{55}}  \\
+  & \colorbox{lightred}{ \parbox[b]{25cm}{ \texttt{**Therefore, there is no solution to the problem as the given constraints are contradictory.**}\\} }
+     & {0.1768} & \textcolor{red}{\ding{55}}  \\ 
+    & \parbox[b]{25cm}{ \colorbox{lightred}{ \texttt{\#\#\#\# 0 $\langle$eos$\rangle$ }} }    & - & \textcolor{red}{\ding{55}}  \\ 
+\bottomrule
+\end{tabular}
+}
+\label{table:example}
+\end{table}
+
+
+
+
+
+
+
+
+
+
+\section{Preliminaries}
+
+
+In this section, we introduce the foundational concepts and notations that underpin our proposed algorithm. We first review the basic framework of modeling language generation as a reinforcement learning task, followed by a KL-regularized reinforcement learning objective.
+
+\noindent\textbf{Modeling Language Generation as Token-Level MDP} 
+Reinforcement Learning (RL) is concerned with learning a policy that maximizes the cumulative reward for an agent interacting with an environment. 
+In this work, we formalize language generation tasks as a Markov decision process (MDP). 
+We denote prompt as $x$ and a response to the prompt as $y$, which can each individually be broken down into a sequence of tokens, for example, $x = (x_0, \dots, x_m)$, from a fixed discrete vocabulary $\mathcal{A}$.
+We define the token-level MDP as a tuple $\mathcal{M} = (\mathcal{S}, \mathcal{A}, \mathbb{P}, r, d_0, \omega)$. In the defined MDP, $\mathcal{S}$ is the space of the state consisting of all tokens generated so far, i.e., $s_t = (x_0, \dots, x_m, y_0, \dots, y_t)$. The action space $\mathcal{A}$ is the fixed discrete vocabulary. The dynamics $\mathbb{P}$ are the deterministic transition model between tokens, i.e., $\mathbb{P}(s_{t+1}|s_t,a) = 1$ for $s_t = (x_0, \dots, x_m, y_0, \dots, y_t)$, $a = y_{t+1}$ and $s_{t+1} = (x_0, \dots, x_m, y_0, \dots, y_t, y_{t+1})$\footnote{For notational simplicity, we ignore the case that LLM can call an external tool. If the tool does not introduce randomness, the state transitions are also deterministic. Even if the state transitions are random, we can use samples to approximate the state transition probabilities.}. The generation process will terminate once the terminal action $\omega$ (usually end-of-sentence token) is taken. 
+The reward function $r(s,a)$ provides scalar feedback for the agent’s performance after taking action $a$ in state $s$. In RLHF, the reward function is usually learned from human feedback over preferences or given by a series of rules depending on the specific tasks. The initial state distribution $d_0$ is a distribution over prompts $x$, where an initial state $s_0$ is comprised of the tokens from $x$.
+\noindent\textbf{KL-Regularized Reinforcement Learning Objective} We formulate the optimization objective as a KL-regularized RL problem. Our goal is to approximate the optimal KL-regularized policy 
+\begin{align}\label{eq:objective}
+   \pi^* =  \argmax_\pi \mathbb{E}_{\pi, s_0 \sim d_0} \left[ \sum_{h=0}^H  \left(r(s_h, a_h) - \beta \text{KL} \big( \pi(\cdot | s_h) \| \pi_{\text{ref}}(\cdot | s_h) \right)\big) \right],
+\end{align}
+where $H$ is the total number of decision steps, $s_0$ is a prompt sampled from the dataset, $r(s_h, a_h)$ is the token-level reward from the reward function, $\beta$ is the coefficient controlling the magnitude of KL-regularization and $\pi_{\text{ref}}$ is the initialisation policy. 
+In classic RLHF and most LLM-related tasks, the reward is sparse and is only applied at the terminal action $\omega$, i.e. the end-of-sentence token \texttt{<eos>}. However, our structure is flexible enough to incorporate both dense and sparse rewards from ruled-based reward models, turn-level reward models, process-supervised reward models (PRM), or just outcome-supervised reward models.
+
+We consider rewriting our objective function~\eqref{eq:objective} under the framework of max-entropy reinforcement learning. Specifically, we decompose the KL-regularization term $\mathrm{KL}(\pi(\cdot | s_h) \| \pi_{\text{ref}}(\cdot | s_h))$ into cross-entropy and entropy, leading to the following objective:
+\begin{align}
+\pi^* &=  \argmax_\pi \mathbb{E}_{\pi, s_0 \sim d_0} \left[ \sum_{h=0}^H  \left(r(s_h, a_h) + \log\pi_{\text{ref}}(a_h | s_h)+ \beta \mathcal{H}(\pi(\cdot | s_h)) \right) \right] \notag \\
+    &=  \argmax_\pi \mathbb{E}_{\pi, s_0 \sim d_0} \left[ \sum_{h=0}^H  \left(\overline{r}(s_h, a_h)+ \beta \mathcal{H}(\pi(\cdot | s_h)) \right) \right],\label{eq:maxentropyllm}
+\end{align}
+where $ \mathcal{H}(\pi(\cdot | s_h)) = -\mathbb{E}_{a \sim \pi} \log \pi(a|s_h)$ denotes the entropy of the policy at state \( s_h \) and the KL-regularized reward $\overline{r}$ is defined as 
+$\overline{r}(s_h, a_h) = \beta \log \pi_{\text{ref}}(a_h | s_h) + r(s_h, a_h)$.
+Equation~\ref{eq:maxentropyllm} leads to a maximum entropy reinforcement learning problem, which enjoys the well-known closed-form solution \citep{haarnoja2018soft} as follows:
+\begin{align} 
+    \pi^* (a | s_h) = \exp{\left( \frac{Q^*(s_h, a) - V^*(s_h)}{\beta} \right)} \label{eq:optpi},
+\end{align}
+where the Soft $Q$-function is defined as
+\begin{align}
+    Q^*(s_h, a) = \overline{r}(s_h, a) + \mathbb{E}_{\pi^*} \left[ \sum_{j=h+1}^{H} \left(\overline{r}(s_j, a_j) + \beta \mathcal{H}(\pi^*(\cdot | s_j)) \right) \right],
+\end{align}
+and the Soft $V$-function is given by:
+\begin{align}
+    V^*(s_h) = \beta \log \sum_{a} \exp{\left( \frac{Q^*(s_h, a)}{\beta} \right)} = \mathbb{E}_{\pi^*} \left[ \sum_{t=h}^{H} \left(\overline{r}(s_t, a_t) + \beta \mathcal{H}(\pi^*(\cdot | s_t)) \right) \right]. 
+\end{align}
+Equation~\eqref{eq:optpi} reveals that the optimal policy \( \pi^* \), soft $Q$-function \( Q^* \), and soft V-function \( V^* \) are interdependent, which means that knowing any two of them allows us to compute the third one.
+
+
+
+\section{Direct $Q$-function Optimization (DQO)}
+
+
+\subsection{The DQO objective}\label{sec:dqo-obj}
+
+We adopt the Soft Actor-Critic (SAC) learning framework to learn the state value function $V$ and state-action value function $Q$. In SAC, the $Q$-function and $V$-function, which are parameterized by $\theta$ and $\phi$ respectively, are updated by minimizing the following squared residuals:
+\begin{align} 
+    L_V(\phi) & = \mathbb{E}_{s_h \sim \mathcal{D}} \bigg[ \bigg( V_\phi(s_h) - \mathbb{E}_{a_t \sim \pi}\Big[Q_\theta(s_h, a_h) + \beta \mathcal{H}\big(\pi(\cdot | s_h)\big)\Big] \bigg)^2 \bigg] \label{eq:SACV}, \\
+    L_Q(\theta) &= \mathbb{E}_{(s_h, a_h) \sim \mathcal{D}} \left[ \left( Q_\theta(s_h, a_h) - \overline{r}(s_h, a_h) - V_\phi(s_{h+1}) \right)^2 \right], \label{eq:SACQ}
+\end{align}
+where $\mathcal{D}$ is the distribution of previously sampled states and
+actions, or a replay buffer.
+As shown in~\eqref{eq:optpi}, the optimal policy $\pi^* $, optimal $Q$-function $Q^*$, and optimal value function $V^*$ are tightly interconnected. Specifically, they satisfy the following relationship
+\begin{align}
+    Q^*(s_h, a_h) = \beta \log \pi^*(a_h | s_h) + V^*(s_h).
+\end{align}
+Inspired by this, we parameterize the $Q$-value-network with the policy as follows
+\begin{align}\label{eq:reparam-q}
+    Q_\theta(s_h, a_h) = \beta \log \pi_\theta(a_h | s_h) + V_\phi(s_h),
+\end{align}
+where $\pi_{\theta}(\cdot | \cdot)$ is the policy network, or the language model in this paper. In equation~\eqref{eq:reparam-q}, instead of using an additional model to parameterize $Q$-value and learning the optimal policy from the optimal $Q$-function $Q^*$, we directly infer the policy from the $Q$-function by parameterizing it with $\pi$. Therefore, we name our algorithm as Direct $Q$-function optimization (DQO).
+
+By plugging in~\eqref{eq:reparam-q} to~\ref{eq:SACQ}, we can rewrite the loss function for the policy as:
+\begin{align}
+    L_\pi(\theta) = \mathbb{E}_{(s_h, a_h) \sim \mathcal{D}} \left[ \overline{r}(s_h, a_h) + V_\phi(s_{h+1}) - V_\phi(s_h) - \beta \log \pi_\theta(a_h | s_h) \right]^2.
+\end{align}
+Substituting $\overline{r}(s_h, a_h)$ by its definition $\beta \log \pi_{\text{ref}}(a_h | s_h) + r(s_h, a_h)$, we obtain the objective function of the policy network as follows:
+\begin{align}\label{eq:online_pi}
+L_\pi(\theta) = \mathbb{E}_{(s_h, a_h) \sim \mathcal{D}} \bigg[ \bigg( \beta \log \frac{\pi_\theta(a_h | s_h)}{\pi_{\text{ref}}(a_h | s_h)} - \Big( r(s_h,a_h) + V_\phi(s_{h+1}) - V_\phi(s_h) \Big) \bigg)^2 \bigg].
+\end{align}
+To eliminate the $Q$-function in the $V$-function objective~\eqref{eq:SACV}, we consider the soft Bellman equation:
+\begin{align}
+    Q_{\theta}(s_h, a_h) = \overline{r}_h(s_h, a_h) + \mathbb{E}_{s_{h+1} \sim \mathbb{P}(\cdot|s_h, a_h)}[V^\pi(s_{h+1})].
+\end{align}
+When $\mathcal{D}$ is generated online by the current policy $\pi_{\theta}$, we can estimate the expectation in state transitions by sampling and therefore substitute $\mathbb{E}_{s_{h+1} \sim \mathbb{P}(\cdot|s_h, a_h)}[V^\pi(s_{h+1})]$ with $V_{\phi}(s_{h+1})$. Consequently, we obtain the loss for the value function $V$ in the following form:
+\begin{align} \label{eq:onlineV}
+L_V(\phi) = \mathbb{E}_{(s_h, a_h) \sim \mathcal{D}} \Big[ \big(\overline{r}(s_h, a_h) + V_\phi(s_{h+1}) + \beta \mathcal{H}(\pi_{\theta}(\cdot | s_h)) - V_\phi(s_h)\big)^2 \Big].
+\end{align}
+When $\mathcal{D}$ is composed of pre-generated offline data, we employ importance sampling to reweight the offline data, ensuring that the offline dataset can be used effectively. We defer the detailed discussion to Section~\ref{sec:IS}.
+It is worth highlighting that in our formulation of DQO, we consider generating each single token as an action. If we consider generating the whole utterance as a single action and set the horizon length $H=1$, then equation~\eqref{eq:online_pi} and equation~\eqref{eq:onlineV} degenerates to the loss used by DQO~\citep{richemond2024offline}. This means that DRO can be viewed as a special case of the learning framework of DQO.
+
+\subsection{Mitigating Bias with $\lambda$-Return}
+
+One-step temporal difference (TD) errors have high bias and perform poorly when the value function is not well-initialized, resulting in inefficient learning. To address this, we incorporate $\lambda$-return~\citep{schulman2015high} to improve the updates for $Q$-function and $V$-function. By definition, we know that $V(s_h)$ is the sum of reward gained by next $n$ action and $V(s_{h+n})$, or formally, 
+\begin{align}
+    V^\pi(s_h) = \mathbb{E}_\pi \left[ V^\pi(s_{h+n}) + \sum_{l=0}^{n-1} \left(\beta \log \frac{\pi_{\text{ref}}(a_{h+l} | s_{h+l})}{\pi(a_{h+l} | s_{h+l})}+r(a_h,s_h) \right) \right].
+\end{align}
+Given a trajectory $\{s_0,a_0,r_0,\cdots,s_H,a_H,r_H\}$ where $r_h = r(a_h,s_h)$, we use the empirical sample to estimate the n-step return and define the empirical $n$-step return as:
+\begin{align}
+    G_{\phi,\theta}^{(n)}(s_h) = V_\phi^\pi(s_{h+n}) + \sum_{l=0}^{n-1}\left(\beta \log \frac{\pi_{\text{ref}}(a_{h+l} | s_{h+l})}{\pi_\theta(a_{h+l} | s_{h+l})}+r_{h+l} \right) .
+\end{align}
+Now we are able to define $\lambda$-return, which is the weighted average of all $n$-step returns:
+\begin{align}
+G_{\phi,\theta}^\lambda(s_h) = \begin{cases}
+    (1 - \lambda) \sum_{n=1}^{H-h} \lambda^{n-1} G_{\phi,\theta}^{(n)}(s_h), & \text{if } \lambda < 1 \\
+    G_{\phi,\theta}^{(H-h)}(s_H), & \text{if } \lambda=1
+\end{cases} .
+\end{align}
+We replace the target for value updates from one-step return $V_{\phi}(s_{h+1})$ to the $\lambda$-return $ G_{\overline{\phi},\overline{\theta}}^\lambda(s_h)$, where $\overline{\phi}$ is the copy of $\phi$ but does not counted into the back-propagation gradients. Now we have the loss function for the value network as follows:
+\begin{align}
+    L_V(\phi) = \mathbb{E}_{s_h \in \mathcal{D}} \left[ (G_{\overline{\phi},\overline{\theta}}^\lambda(s_h) - V_\phi(s_h))^2 \right]. \label{eq:sacv-lambda}
+\end{align}
+Similarly, the loss for $Q$-function ($\pi$) using $\lambda$-return is:
+\begin{align}
+    L_Q(\theta) = \mathbb{E}_{(s_h, a_h) \sim \mathcal{D}} \left[ \left(\beta \log \frac{\pi_\theta(a_h | s_h)}{\pi_{\text{ref}}(a_h | s_h)} - \left( r(s_h, a_h) + G_{\overline{\phi},\overline{\theta}}^\lambda(s_{h+1}) - V_\phi(s_h) \right) \right)^2 \right]. \label{eq:sacq-lambda}
+\end{align}
+
+\subsection{Reweighting Offline Data with Importance Sampling} \label{sec:IS}
+
+Offline RL, also known as batch RL, focuses on learning a policy from a pre-collected, fixed dataset without further interaction with the environment. A key challenge in offline RL is the {\bf distributional shift} between the behavior policy \( \mu \), which generated the data, and the target policy \( \pi \). 
+In order to mitigate this mismatch, offline RL algorithms often incorporate regularization techniques, such as importance sampling or constraints on the learned policy, to remain close to the behavior policy and avoid overestimating the Q-values for out-of-distribution actions. In this work, we first use a KL-constrained RL objective and then employ importance sampling to reweight the offline data to match the distribution of trajectories generated by the current optimized policy.
+
+Here, we introduce importance sampling to help correct this mismatch, ensuring that the offline dataset can be used effectively for policy updates. Let $\mu$ represent the behavior policy under which the offline data $\mathcal{D}$ was generated and $\pi$ be the current online policy. 
+The probability of a trajectory $\tau$ under $\mu$ and $\pi$ are computed as follows:
+\begin{align*}
+\mu(\tau | s_1) = \prod_{h=0}^H \mu(a_h | s_h), \quad \pi(\tau | s_1) = \prod_{h=0}^H \pi(a_h | s_h).
+\end{align*}
+Therefore, we know that when the offline dataset $\mathcal{D}$ is sampled from $\tau$, we have 
+\begin{align*}
+    \mathbb{E}_{\tau \sim \pi}[f(\tau)] = \mathbb{E}_{\tau \sim \mathcal{D}}\bigg[ \frac{\pi(\tau | s_h)}{\mu(\tau | s_h)} f(\tau)\bigg]  = \mathbb{E}_{\tau \sim \mathcal{D}}\bigg[ \frac{\prod_{h=0}^H \pi(a_h | s_h)}{\prod_{h=0}^H \mu(a_h | s_h)} f(\tau)\bigg],
+\end{align*}
+where $f(\tau)$ is any function of trajectory $\tau$. This indicates that we can use the importance ratio $\pi(\tau | s_h)/\mu(\tau | s_h)$ to adjust the loss. Empirically, we truncate the importance sampling rate to avoid gradient explosion caused by extreme values. The final ratio we apply is shown as follows
+\begin{align}
+w(\tau) = \min \left( e, \prod_{h=1}^H \frac{\pi(a_h | s_h)}{\mu(a_h | s_h)} \right) = \exp \left( \min \left( 1, \sum_{h=1}^H \log \frac{\pi(a_h | s_h)}{\mu(a_h | s_h)} \right) \right) \label{eq:is-ratioo},
+\end{align}
+Now we plug in the importance ratio in~\eqref{eq:is-ratioo} to the loss functions~\eqref{eq:sacv-lambda} and~\eqref{eq:sacq-lambda} and then obtain our final loss functions for offline learning.
+\begin{align*}
+    L_V(\phi) &= \mathbb{E}_{\tau \sim \mathcal{D}} \left[ w(\tau) \cdot \sum_{h=1}^H (G_{\overline{\phi},\overline{\theta}}^\lambda(s_h) - V_\phi(s_h))^2 \right], \\
+L_\pi(\theta) &= \mathbb{E}_{\tau \sim \mathcal{D}} \left[ w(\tau) \cdot \sum_{h=1}^H \left(\beta \log \frac{\pi_\theta(a_h | s_h)}{\pi_{\text{ref}}(a_h | s_h)} - \left( r(s_h, a_h) + G_{\overline{\phi},\overline{\theta}}^\lambda(s_{h+1}) - V_\phi(s_h) \right) \right)^2 \right].
+\end{align*}
+What notable is that the importance sampling weight $w(\tau)$ is not involved in the gradient backward computation. The introduction of importance ration enables us to leverage offline datasets in an online RL framework, ensuring that the updated policy remains consistent with the distribution of trajectories it would encounter during online interaction. 
+
+
+
+\section{Experiments}
+
+
+In this section, we conduct extensive experiments to demonstrate the effectiveness of our proposed method. Moreover, we show that our method can be further augmented by utilizing process rewards.
+\subsection{Datasets}
+We evaluate the models using two widely established mathematical problem-solving datasets: MATH \citep{hendrycks2021measuring} and GSM8K \citep{cobbe2021gsm8k}. The MATH dataset consists of 5,000 challenging problems in its test set and 7500 in its train set. The problems cover various fields like algebra, geometry, probability, and calculus. The GSM8K dataset consists of a train set of 7473 problems and a test set of 1319 problems. The problems are mostly simpler grade-school math word problems.  The problems in both datasets usually require multi-step reasoning and complex arithmetic to derive the correct answers.
+
+We use the 7.5K training problems from the MATH dataset and 7.47K training problems from the GSM8K dataset to generate the training corpus of our baselines and DQO. 
+We use our base model and sample 20 responses for each prompt in the training set and then label all these responses as positive and negative responses.
+\subsection{Models, Baselines and Evaluation}
+
+In our experiments, we select two pretrained models, Gemma-1.1-it-7B\footnote{https://huggingface.co/google/gemma-1.1-7b-it} (Gemma) \citep{team2024gemma} and Qwen2-7B-Instruct\footnote{https://huggingface.co/Qwen/Qwen2-7B-Instruct} (Qwen) \citep{yang2024qwen2} as our base model. We implement our method based on HybridFlow~\citep{pezeshkpour2024reasoning}
+\begin{itemize}[leftmargin=*]
+    \item SFT and reject sampling: We use the canonical responses provided in the training set as the target for our SFT and all the collected positive responses as the target for reject sampling. We train the model for 3 epochs.
+    \item DPO: For each prompt, we pair up all generated positive and negative responses. Due to a large number of pairs which makes the training inefficient, we sample from these pairs to make our training set size moderate. We train the model for 1 epochs.
+    \item KTO, DRO and DQO: We use all the generated responses for training. We assign reward 1 to those correct responses and reward 0 to those incorrect response. For KTO, we train the models for 1 epochs. For DRO and DQO, We select the best checkpoint according to the training curves for evaluation.
+\end{itemize}
+We evaluate the models generated by our method and baseline methods on the test set of GSM8K and MATH. We consider two inference strategies, greedy generation and sampling. We set the sampling parameters the same as when we generated the training corpus.
+
+\subsection{Empirical Results and Ablation Studies}
+
+\begin{table}[ht!]
+\centering
+\caption{Experiment results for \textit{Qwen2-7B-Instruct} model. We use \textbf{bold} for the best and \underline{underline} for the second best. DQO significantly improves the base model's performance. This improvement surpass all the baselines when doing sampling. As for greedy generation, DQO is comparable to DPO when doing greedy generation and surpass all other baselines. } 
+\begin{tabular}{ c | c | c | c | c }
+\toprule
+Data                 & \multicolumn{2}{c|}{GSM8K}  & \multicolumn{2}{c}{MATH}  \\
+Generation Method       & Greedy   & Sample    & Greedy     & Sample \\
+\midrule
+\it{Qwen2-7B-Instruct}      & 59.06          & 53.30          & 37.44                                      & 35.42            \\
+\midrule
+SFT                    & 85.06          & 84.15          & 44.56                                      & 41.34         \\
+Reject Sampling        & 84.15          & 83.47          & 49.82                                      & 48.02         \\
+DPO                    & \bf{87.26}   & \underline{84.23}          & \underline{51.66}                                      & \underline{49.00}         \\
+KTO                    & 86.35              & 83.55              & 50.32                                      & 46.30         \\
+DRO                    & 86.73         & 83.39         & 51.18                                     & 48.40        \\
+\midrule
+\rowcolor{LightCyan} DQO  & \bf{87.26} & \bf{84.69} & \bf{51.72} & \bf{50.18}        \\
+\bottomrule
+\end{tabular}
+\label{tab:result-qwen}
+\end{table}
+
+Here we show our main results on both the GSM8K and MATH datasets. The results are shown in Table~\ref{tab:result-qwen} and Table~\ref{tab:result-gemma} respectively. From Table~\ref{tab:result-qwen}, we see that all the methods improve the performance of the base models by a significant margin. Particularly, on GSM8K, DQO improves the performance from 59.06\% to 87.26\% for greedy generation and 53.30\% to 84.69\% for sampling. This improvement is comparable with DPO and surpasses DRO and other baselines by a margin of 1.30\% for sampling and 0.53\% for greedy generation.
+On MATH, we also see a significant performance improvement from DQO. The performance of DQO, while comparable with DPO and DRO, surpasses all other baselines by a margin of 1.40\%. As for sampling, DQO reaches a performance of 50.18\%, which surpasses the performance of the best baseline method DPO by a margin of 1.18\%. These results indicate that DQO achieves a comparable performance of DPO and surpasses other baselines by a considerable margin.
+\begin{table}[ht!]
+\centering
+\caption{Experiment results for \textit{Gemma-1.1-7B-it} model. We use \textbf{bold} for the best performance and \underline{underline} for the second best performance. DQO significantly improves the 
+base model's performance. On GSM8K, DQO surpasses all other baselines by a significant margin. On MATH dataset, DQO achieves a comparable performance with DRO when doing greedy sampling and outperforms all the baseline when doing sampling at inference.} 
+\begin{tabular}{c | c | c | c | c }
+\toprule
+Data                 & \multicolumn{2}{c|}{GSM8K} & \multicolumn{2}{c}{MATH}  \\
+Generation Method       & Greedy  & Sample  & Greedy   & Sample \\
+\midrule
+\it{Gemma-1.1-7B-it}    & 39.65    & 38.89         & 17.04                                       & 16.06           \\
+\midrule
+SFT                    & 53.45    & 45.46          & 21.64                                      & 18.00         \\
+Reject Sampling        & 53.60    & 53.37          & 21.74                                      & 20.42         \\
+DPO                    & 57.85    & 59.41          & 22.62                                      & 22.66         \\
+KTO                    & 50.49    & 50.19          & 18.56                                      & 18.56         \\
+DRO                    & \underline{60.58}    & \underline{60.05}      & \underline{24.56}          & \underline{23.70}        \\
+\midrule
+\rowcolor{LightCyan} DQO   & \textbf{63.91}  & \textbf{64.06}         & \textbf{24.90}          & \textbf{24.68}        \\
+\bottomrule
+\end{tabular}
+\label{tab:result-gemma}
+\end{table}
+
+When it turns to the results on Gemma, we see that DQO enjoys larger advantages. As demonstrated in Table~\ref{tab:result-gemma}, we see that all considered methods result in significant improvement. Specifically, on GSM8K, DQO improves the base model's performance by a margin of 24.36\% for greedy generation and 25.17\% for sampling. This significantly surpasses the improvement obtained by DRO by margins of 3.33\% and 4.01\% for the two generation strategies respectively, and even more compared to other baseline methods. On the MATH dataset, we see that DQO also improves the model's performance by a prominent margin of 7.86\% and 8.62\% for greedy generation and sampling, respectively. This improvement is comparable with DRO and surpasses DPO and other baseline methods by a margin of at least 2.28\% for greedy generation and 2.02\% for sampling. In summary, DQO results in promising improvement over the base models under all the scenarios and outperforms all our baseline methods.
+\subsubsection{Importance sampling}
+
+\begin{table}[ht!]
+\centering
+\caption{The impact of importance sampling rate on both $Q$-function loss and $V$-function loss. The experiments are conducted on Gemma. When training without an importance sampling ratio on $Q$-function loss, the performances degenerate significantly on both GSM8K and MATH. When keeping the importance ratio only on $Q$-function loss, there is also a moderate performance loss on MATH.} 
+\begin{tabular}{l | c | c | c | c | c}
+\toprule
+\multicolumn{2}{c |}{Data}   & \multicolumn{2}{c|}{GSM8K} & \multicolumn{2}{c}{MATH} \\
+\multicolumn{2}{c |}{Generation Method}       & Greedy  & Sample  & Greedy   & Sample \\
+\midrule
+\multirow{2}{*}{$Q$-loss w/o IS} & $V$-loss w/o IS & 58.68      &  60.20   &21.96     &  22.68   \\
+                         & $V$-loss w/ IS & 56.03      &  56.48   & 20.82     &  20.94  \\
+\midrule
+\multirow{2}{*}{$Q$-loss w/ IS} & $V$-loss w/o IS &  63.53    &  \bf{64.06}    &  22.28  &   23.18   \\
+                         & $V$-loss w/ IS &  \bf{63.91}      &  \bf{64.06}  & \bf{24.90}    & \bf{24.68}    \\
+\bottomrule
+\end{tabular}
+\label{tab:ablation-importance}
+\end{table}
+
+To demonstrate the impact of the importance sampling ratio in DQO, we train DQO on Gemma without the importance sampling ratio for $Q$-function loss, $V$-function loss, and both. We present the results in Table~\ref{tab:ablation-importance}. The results show that, without adding importance sampling, the performance will be significantly deteriorated. Specifically, on the GSM8K dataset, when importance sampling is not introduced to $Q$-function loss, the performance degenerates by a margin over 3.86\%. Similarly, on the MATH dataset, we see that when we exclude the importance sampling ratio from $Q$-function loss, the performance decreases by a margin of about 2\%. When we keep the importance sampling ratio only on $Q$-function loss, the performance on GSM8K almost maintains but we still see a moderate performance loss on MATH. These results show that the importance sampling ratio, on both $Q$-function and $V$-function loss, plays important roles in DQO training.
+\subsubsection{$\lambda$-return}
+
+\begin{table}[ht!]
+\centering
+\caption{The impact of $\lambda$-return on Gemma. When decreasing $\lambda$ from 1.0 to 0.95, we observe a significant performance dropping more than 3.71\% on GSM8K and 2.30\% on MATH. } 
+\begin{tabular}{ c | c | c | c | c}
+\toprule
+   Data  & \multicolumn{2}{c|}{GSM8K} & \multicolumn{2}{c}{MATH} \\
+   Generation Method       & Greedy  & Sample  & Greedy   & Sample \\
+\midrule
+ $\lambda=0.95$   & 60.20    & 59.21     & 22.60    & 22.26    \\
+$\lambda=1.0$     & \bf{63.91}     & \bf{64.06}     & \bf{24.90}    & \bf{24.68}    \\
+\bottomrule
+\end{tabular}
+\label{tab:ablation-gae-return}
+\end{table}
+
+In order to demonstrate the impact of $\lambda$-return, we vary the value of $\lambda$ and evaluate the training results on Gemma. Empirically, we find that the best performance is obtained at $\lambda=1$ and quickly degenerates when decreasing $\lambda$. Therefore we pick $\lambda=0.95$ to make the comparison. The results are shown in Table~\ref{tab:ablation-gae-return}. When switching $\lambda$ to 0.95, we observe that the performance on GSM8K decreases by a margin of more than 3.71\% for greedy generation and almost 5\% for sampling. The results on MATH demonstrate a similar pattern and the performances of $\lambda=0.95$ dropped by a margin of 2.3\% on both inference strategies. The results indicate that $\lambda$-return is the key component in the target of policy training.
+
+
+
+\begin{figure}[th]
+    \centering
+    \includegraphics[width=.9\textwidth]{./DQO_PRM.pdf}  
+    \caption{A visual demonstration of our process reward construction. We split all the responses to segments. For correct responses we assign all process reward to one. For negative responses, we start from each prefix and generate 20 samples. We then find the longest prefix where the best of 20 samples is correct and assign all the process rewards before to 1. }
+    \label{fig:prm-construct}
+\end{figure}
+\subsection{DQO with Process Score}
+
+
+In this section, we show that when process scores at intermediate steps are available, the performance of DQO can be further improved. Here, we use synthetic process scores. In order to obtain a synthetic process score, we consider using an empirical passing rate to estimate the quality of a given response prefix. Specifically, given a prompt string $x$, for each failed response $y$, we first split the response into several segments $y[0:n]$, where $n$ is the number of segments and we use $y[0:i]$ to denote the concatenation of first $i$ segments. Beginning from $i=n-1$, we randomly sample 20 trajectories given prefix $\mathrm{contat}(x,y[0:i])$. If there is at least one correct completion, we assume that the reasoning process in $y[0:i]$ is correct and all the process rewards for the previous step will be set to $1/n$. We combine these process reward scores with the original rewards. The process is summarized in Figure~\ref{fig:prm-construct}.
+
+\begin{table}[ht!]
+\centering
+\caption{Experiment results for DQO augemented by process scores. With process rewards, the performance of DQO is further enhanced by 1.13\% on GSM8K and 0.64\% on MATH. The performance when doing sampling also increase on GSM8K and maintains almost the same on MATH.} 
+\begin{tabular}{c | c | c | c | c }
+\toprule
+Method             & \multicolumn{2}{c|}{GSM8K} & \multicolumn{2}{c}{MATH}  \\
+Generation Method       & Greedy  & Sample  & Greedy   & Sample \\
+\midrule
+\it{Gemma-1.1-7b-it}        & 39.65    & 38.89         & 17.04                                       & 16.06           \\
+\midrule
+DQO   & 63.91  & 64.06         & 24.90          & 24.68        \\
+DQO w/ process scores   & \bf{65.04}  & \bf{65.35}  & \bf{25.54}      & \textbf{25.10}        \\
+\bottomrule
+\end{tabular}
+\label{tab:result-gemma-prm}
+\end{table}
+
+We conduct the experiments on Gemma, and the results are summarized in Table~\ref{tab:result-gemma-prm}. Equipped with our estimated process scores, we see a further improvement. Specifically, on GSM8K, using our process scores further increases the performance by 1.13\% for greedy generation and 1.29\% for sampling. On MATH, process scores also boost the model's performance by a further 0.64\% when doing greedy generation and 0.42\% for sampling. The results imply that DQO can be further enhanced by utilizing process scores. Additionally, we discovered that even without process scores, DQO is capable of identifying correct reasoning steps. The trained values demonstrate a growing correlation with the synthetic process scores, see in Figure~\ref{fig:correlation}, suggesting that DQO effectively learns to recognize correct reasoning steps, enhancing the reasoning process over time.
+
+\begin{figure}[bth]
+    \centering
+    \includegraphics[width=.5\textwidth]{correlation_large.pdf}  
+    \caption{The correlation between the trained values (trained without process scores) and our constructed process scores. As the training proceeds, we observe a growth in the correlation between these two values, indicating that the value model in DQO learns the correctness of the reasoning process. }
+    \label{fig:correlation}
+\end{figure}
+
+
+
+\section{Related Work}
+
+
+   
+
+
+\noindent\textbf{Reinforcement Learning for Language Model Alignment} Aligning language models with human preferences, or reinforcement learning with human feedback (RLHF), dates back to the work of  \citet{wirth2017survey} and \citet{christiano2017deep}. It has been widely applied to a bunch of recent models including GPT-4~\citep{achiam2023gpt}, Gemini~\citep{team2023gemini}, and Llama~\citep{touvron2023llama}, leading to the surprising performance of these models. The alignment procedure usually takes place after supervised finetuning (SFT). In the canonical approaches of RLHF~\citep{ouyang2022training,bai2022training, munosnash}, a reward model is first trained with preference data and then the model is updated with Proximal Policy Optimization (PPO). Another line of works, initiating from Direct Preference Optimization (DPO)~\citep{rafailov2024direct}, include SLiC~\citep{zhao2023slic}, IPO~\citep{azar2024general}, KTO~\citep{ethayarajh2024kto} and so on. These approaches are featured by directly parameterizing the reward models with the language model and then training on offline preference data. Following DPO, one branch of works, including GSHF~\citep{xiong2024iterative}, SPPO~\citep{wu2024self} and INPO~\citep{zhang2024iterative}, adapts DPO or its variant to online samples and iterative training and resulted to state-of-the-art models. 
+On the other hand, \citet{richemond2024offline} adapted offline reinforcement learning algorithm to direct preference learning and proposed Direct Reward Optimization (DRO), which combined offline policy learning with a value function learning and updated policy network and value network iteratively. Our work has a similar structure to DRO, but models the language generation as an MDP rather than a bandit and can utilize process supervision to facilitate training. 
+
+\noindent\textbf{Multi-step and Long Horizon RL for LLM alignment} Many tasks for LLMs require LLMs to reason step by step or interact with the environment turn by turn. However, the rewards are usually sparse since they are only provided at the end of a long horizon of reasoning or interactions. In traditional RL literature, one approach towards breaking the curse of lone horizon and sparse reward is to train or estimate an intermediate value function or process reward~\citep{park2024hiql} and use the process reward to guided searching~\citep{torne2023breadcrumbs,zhang2024rest} and RL training. The utilization of process reward has also led to better performance for LLM reasoning~\citep{zhang2024rest,lightman2023let}.
+Most straightforwardly, \citet{snelloffline} proposed ILQL, which employed implicit Q-learning to train a Q-function network and V-function network. Then, at inference time, ILQL uses learned value functions to perturb the log probabilities of the initial policy towards utility-maximizing behavior. 
+The success of direct preference learning also stimulates a lot of work adapting DPO to multi-turn scenarios. To estimate process reward and utilize the information provided, ~\citet{chen2024step,lai2024step,xie2024monte} leverages process reward signals or AI feedback to construct preference pairs for intermediate steps and update the model with original DPO. On the other hand, \citet{xiong2024building, shani2024multi} extends the vanilla DPO to accommodate the multi-turn structure. However, these approaches require pairwise data, which might not be available or easy to obtain on some specific occasions. Our work, while following the approach of direct preference learning, eliminates the need for pairwise data and can be boosted by process rewards.
+
+
+
+
+\section{Conclusion}
+
+
+In this work, we propose DQO, an offline reinforcement learning algorithm for enhancing the language model's ability in multi-step reasoning. Compared to previous online methods like PPO, the offline nature of DQO bypasses the requirement of an extra reward model and online sampling during training. Previous offline methods usually formulate the LLMs' responding process as a bandit problem, which usually fails to capture the implicit long-horizon and multi-step nature of those tasks requiring a long chain of thought. In contrast, DQO frames the tasks as a Markov decision process and further employs a soft actor-critic framework to learn the $V$-function and the $Q$-function, which is directly parameterized by the language model. To verify the effectiveness of DQO, we conduct extensive experiments on two math-problem-solving datasets, GSM8K and MATH, and empirical results show that DQO outperforms all our baseline. Currently, our experiment results are limited to two base models due to time constraints and we leave it as future work.
+
+
+
+
+
+
+

@@ -1,0 +1,438 @@
+\title{Consistency Trajectory Models: Learning Probability Flow ODE Trajectory of Diffusion}
+
+\begin{abstract}
+Consistency Models (CM)~\citep{song2023consistency} accelerate score-based diffusion model sampling at the cost of sample quality but lack a natural way to trade-off quality for speed. To address this limitation, we propose \textbf{C}onsistency \textbf{T}rajectory \textbf{M}odel (CTM), a generalization encompassing CM and score-based models as special cases. CTM trains a single neural network that can -- in a single forward pass -- output scores (i.e., gradients of log-density) and enables unrestricted traversal between any initial and final time along the Probability Flow Ordinary Differential Equation (ODE) in a diffusion process. CTM enables the efficient combination of adversarial training and denoising score matching loss to enhance performance and achieves new state-of-the-art FIDs for single-step diffusion model sampling on CIFAR-10 (FID $1.73$) and ImageNet at $64\times64$ resolution (FID \djk{$1.92$}). CTM also enables a new family of sampling schemes, both deterministic and stochastic, involving long jumps along the ODE solution trajectories. It consistently improves sample quality as computational budgets increase, avoiding the degradation seen in CM. %Furthermore, CTM's access to the score accommodates all diffusion model inference techniques, including exact likelihood computation.
+Furthermore, unlike CM, CTM's access to the score function can streamline the adoption of established controllable/conditional generation methods from the diffusion community. This access also enables the computation of likelihood.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Deep generative models encounter distinct training and sampling challenges. Variational Autoencoder (VAE)~\citep{kingma2013auto} can be trained easily but may suffer from posterior collapse, resulting in blurry samples, while Generative Adversarial Network (GAN)~\citep{goodfellow2014generative} generates high-quality samples but faces training instability. Conversely, Diffusion Model (DM)~\citep{sohl2015deep,ho2020denoising, song2020score} addresses these issues by learning the score (i.e., gradient of log-density)~\citep{song2019generative}, which can generate high quality samples.
+However, compared to VAE and GAN excelling at fast sampling,  DM involves a gradual denoising process that slows down sampling, requiring numerous model evaluations.
+
+Score-based diffusion models synthesize data by solving the reverse-time (stochastic or deterministic) process corresponding to a prescribed forward process that adds noise to the data~\citep{song2019generative,song2020score}. Although advanced numerical  solvers~\citep{lu2022dpm, zhang2022fast} of Stochastic Differential Equations (SDE) or Ordinary Differential Equations (ODE) substantially reduce the required Number of Function Evaluations (NFE), further improvements are challenging 
+due to the intrinsic discretization error present in all differential equation solvers~\citep{de2021diffusion}. Recent developments in sample efficiency thus focus on \emph{Distillation models}~\citep{salimans2021progressive} (Figure~\ref{fig:i_am_fig_1}) that directly estimates the integral along the Probability Flow (PF) ODE sample trajectory, amortizing the computational cost of numerical solvers, exemplified by the Consistency Model (CM)~\citep{song2023consistency}. However, their generation quality does not improve as NFE increases (the red curve of Figure \ref{fig:sampling_cifar10}). Theorem 1 (in this paper) explains this inherent absence of speed-quality trade-off in CM's multistep sampling by the overlapping time intervals between jumps. This persists as a fundamental issue when training jumps solely to zero-time as in CM. 
+
+\begin{figure}[th]
+ \vskip -0.05in
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/fig_1_ver2.pdf}
+    \caption{Training and sampling comparisons of score-based and distillation models with CTM. Score-based models exhibit discretization errors during SDE/ODE solving, while distillation models can accumulate errors in multistep sampling. CTM mitigates these issues with $\gamma$-sampling ($\gamma=0$).}
+    \label{fig:i_am_fig_1}
+    \vskip -0.1in
+\end{figure}
+This paper introduces the \emph{\textbf{C}onsistency \textbf{T}rajectory \textbf{M}odel} (CTM) as a unified framework simultaneously assessing both the integrand (score function) and the integral (%sample
+\djk{jump}) of the PF ODE, thus bridging score-based and distillation models. More specifically, CTM estimates anytime-to-anytime jump, ranging both infinitesimally small jumps (score function) and long jumps (integral over any time horizon) along the PF ODE, providing increased  flexibility at inference time. Particularly, our unique feature enables a novel sampling method called \emph{$\gamma$-sampling,} which alternates forward and backward jumps along the solution trajectory, with $\gamma$ governing the level of stochasticity.
+
+CTM's anytime-to-anytime jump along the PF ODE greatly enhances its training flexibility as well. It allows the combination of the distillation loss and auxiliary losses, such as denoising score matching (DSM) and adversarial losses. These auxiliary losses measures statistical divergences\footnote{The DSM loss is closely linked to the KL divergence \citep{song2021maximum,kim2022soft}. Also, the adversarial GAN loss is a proxy of $f$-divergence \citep{nowozin2016f} or IPMs \citep{arjovsky2017wasserstein}.} between the data distribution and the sample distribution, which provides student high-quality training signal for better jump learning. Notably, leveraging these statistical divergences to student training enables us to train the \textit{student as good as teacher}, reaffirming the conventional belief established in the distillation community of classification tasks that auxiliary losses beyond distillation loss can enhance student performance. In experiments, we achieve the new State-Of-The-Art (SOTA) performance in both density estimation and image generation for CIFAR-10~\citep{krizhevsky2009learning} and ImageNet~\citep{russakovsky2015imagenet} at a resolution of $64\times64$.
+
+
+
+\section{Preliminary}
+
+
+In DM~\citep{sohl2015deep,song2020score}, the encoder structure is formulated using a set of continuous-time random variables defined by a fixed forward diffusion process\footnote{This paper can be extended to VPSDE encoding~\citep{song2020score} with re-scaling~\citep{kim2022refining}.}, $\diff\mathbf{x}_t =  \sqrt{2t} \diff\mathbf{w}_t$, initialized by the data variable, $\mathbf{x}_{0}\sim p_{\text{data}}$. A reverse-time process~\citep{anderson1982reverse} from $T$ to $0$ is established as $\diff\mathbf{x}_t =  - 2t \nabla\log p_t(\mathbf{x}_t)  dt + \sqrt{2t} \diff\bar{\mathbf{w}}_t$, where $\bar{\mathbf{w}}_t$ is the standard Wiener process in reverse-time, and $p_t(\mathbf{x})$ is the marginal density of $\mathbf{x}_t$ following the forward process. The solution of this reverse-time process aligns with that of the forward-time process marginally (in distribution) when the reverse-time process is  initialized with $\mathbf{x}_{T}\sim p_{T}$. The deterministic counterpart of the reverse-time process, called the PF ODE~\citep{song2020score}, is given by 
+\begin{equation*}%\label{eq:prob_ode_gt}
+     \frac{\diff \mathbf{x}_t}{\diff t} =  -t \nabla \log p_t (\mathbf{x}_t)=\frac{\mathbf{x}_{t}-\mathbb{E}_{p_{t0}(\mathbf{x}\vert\mathbf{x}_{t})}[\mathbf{x}\vert\mathbf{x}_{t}]}{t},
+ \end{equation*}
+where $p_{t0}(\mathbf{x}\vert\mathbf{x}_{t})$ is the probability distribution of the solution of the reverse-time stochastic process from time $t$ to zero, initiated from $\mathbf{x}_{t}$. Here, $\mathbb{E}_{p_{t0}(\mathbf{x}\vert\mathbf{x}_{t})}[\mathbf{x}\vert\mathbf{x}_{t}]=\mathbf{x}_t + t \nabla \log p_t (\mathbf{x}_t)$ is the denoiser function~\citep{efron2011tweedie}, an alternative expression for the score function $\nabla\log{p_{t}(\mathbf{x}_{t})}$. For notational simplicity, we omit $p_{t0}(\mathbf{x}\vert\mathbf{x}_{t})$, a subscript in the expectation of the denoiser, throughout the paper. 
+
+In practice, the denoiser $\mathbb{E}[\mathbf{x}\vert\mathbf{x}_{t}]$ is approximated using a neural network $D_{\bm{\phi}}$, obtained by minimizing the DSM~\citep{vincent2011connection, song2020score} loss 
+$\mathbb{E}_{\mathbf{x}_{0},t,p_{0t}(\mathbf{x}\vert\mathbf{x}_{0})}[\Vert \mathbf{x}_{0}-D_{\bm{\phi}}(\mathbf{x},t) \Vert_{2}^{2}]$, where $p_{0t}(\mathbf{x}\vert\mathbf{x}_{0})$ is the transition probability from time $0$ to $t$, initiated with $\mathbf{x}_{0}$. With the approximated denoiser, the empirical PF ODE is given by
+\begin{align}\label{eq:emp_pf_ode_main}
+    \frac{\diff \mathbf{x}_{t}}{\diff {t}} =\frac{\mathbf{x}_{{t}}-D_{\bm{\phi}}(\mathbf{x}_{t},{t}) }{{t}}.
+\end{align}
+Sampling from DM involves solving the PF ODE, equivalent to computing the integral
+\begin{align}\label{eq:int_target}
+    \int_{T}^{0}\frac{\diff\mathbf{x}_{t}}{\diff t}\diff t=\int_{T}^{0}\frac{\mathbf{x}_{{t}}-D_{\bm{\phi}}(\mathbf{x}_{t},{t}) }{{t}}\diff t\iff \mathbf{x}_{0}=\mathbf{x}_{T}+\int_{T}^{0}\frac{\mathbf{x}_{{t}}-D_{\bm{\phi}}(\mathbf{x}_{t},{t}) }{{t}}\diff t,
+\end{align}
+where $\mathbf{x}_{T}$ is sampled from a prior distribution $\pi$ approximating $p_T$. 
+Decoding strategies of DM primarily fall into two categories: \emph{score-based sampling} with time-discretized numerical integral solvers, and \emph{distillation sampling} where a neural network directly estimates the integral.
+\paragraph{Score-based Sampling}
+Any off-the-shelf ODE solver, denoted as $\texttt{Solver}(\mathbf{x}_{T},T,0;\bm{\phi})$ (with an initial value of $\mathbf{x}_T$ at time $T$ and ending at time $0$), can be directly applied to solve Eq.~\eqref{eq:int_target}~\citep{song2020score}. For instance, DDIM~\citep{song2020denoising} corresponds to a 1st-order Euler solver, while EDM~\citep{karras2022elucidating} introduces a 2nd-order Heun solver. Despite recent advancements in numerical solvers~\citep{lu2022dpm, zhang2022fast}, further improvements may be challenging due to the inherent discretization error present in all solvers~\citep{de2021diffusion}, ultimately limiting the sample quality obtained with few NFEs.
+\paragraph{Distillation Sampling}
+Distillation models~\citep{salimans2021progressive,meng2023distillation} successfully amortize the sampling cost by directly estimating the integral of Eq.~\eqref{eq:int_target} with a single neural network evaluation. However, their multistep sampling approach~\citep{song2023consistency} exhibits degrading sample quality with increasing NFE, lacking a clear trade-off between computational budget (NFE) and sample fidelity. Furthermore, multistep sampling is not deterministic, leading to uncontrollable sample variance.
+
+
+\section{CTM: An Unification of Score-based and Distillation Models}
+
+To address the challenges in both score-based and distillation samplings, we introduce the Consistency Trajectory Model (CTM), which integrates both decoding strategies to sample from either SDE/ODE solving or direct anytime-to-anytime jump along the PF ODE trajectory.
+
+\subsection{Decoder Representation of CTM}\label{sec:motivation}
+\begin{wrapfigure}{r}{0.3\textwidth}
+	\vskip -0.1in
+	\centering
+	\includegraphics[width=\linewidth]{figures/s_t_plot_ver2.pdf}
+	\caption{Learning objectives of Score-based ($t=s$ line), distillation ($s=0$ line), and CTM (upper triangle).}
+	\label{fig:s_t_plot}
+  \vskip -0.6in
+\end{wrapfigure}
+CTM predicts both infinitesimally small step jump and long step jump of the PF ODE trajectory. Specifically, we define $G(\mathbf{x}_{t},t,s)$ as the solution of the PF ODE from initial time $t$ to final time $s\le t$:
+\begin{align*}%\label{eq:oracle_sol}
+    G(\mathbf{x}_{t},t,s)&:=\mathbf{x}_{t}+\int_{t}^{s}\frac{\mathbf{x}_{u}-\mathbb{E}[\mathbf{x}\vert\mathbf{x}_{u}]}{u}\diff u.
+\end{align*}
+For stable training\footnote{Directly learning $\mathbf{x}_{t}+\int_{t}^{s}\frac{\mathbf{x}_{u}-\mathbb{E}[\mathbf{x}\vert\mathbf{x}_{u}]}{u}$ or $\int_{t}^{s}\frac{\mathbf{x}_{u}-\mathbb{E}[\mathbf{x}\vert\mathbf{x}_{u}]}{u}$ with a neural network can easily lead to divergence.
+}, we express $G$ as a mixture of $\mathbf{x}_{t}$ and a function $g$, %inspired by the Euler solver\footnote{Solving the PF ODE from $t$ to $s$ with a single-step Euler solver gives $\mathbf{x}_{s}^{\text{Euler}}=\mathbf{x}_{t}-(t-s)\frac{\mathbf{x}_{t}-\mathbb{E}[\mathbf{x}\vert\mathbf{x}_{t}]}{t}=\frac{s}{t}\mathbf{x}_{t}+(1-\frac{s}{t})\mathbb{E}[\mathbf{x}\vert\mathbf{x}_{t}]$. Our scale choices of $\frac{s}{t}$ and $1-\frac{s}{t}$, thus, are naturally derived from the Euler representation by replacing $\mathbb{E}[\mathbf{x}\vert\mathbf{x}_{t}]$ with $g$.}:
+(\djk{inspired from} the Euler solver\footnote{Solving the PF ODE from $t$ to $s$ with a single-step Euler solver gives $\mathbf{x}_{s}^{\text{Euler}}=\mathbf{x}_{t}-(t-s)\frac{\mathbf{x}_{t}-\mathbb{E}[\mathbf{x}\vert\mathbf{x}_{t}]}{t}=\frac{s}{t}\mathbf{x}_{t}+(1-\frac{s}{t})\mathbb{E}[\mathbf{x}\vert\mathbf{x}_{t}]$. Our scale choices of $\frac{s}{t}$ and $1-\frac{s}{t}$, thus, are naturally derived from the Euler representation by replacing $\mathbb{E}[\mathbf{x}\vert\mathbf{x}_{t}]$ with $g$.}):
+\begin{align*}
+    G(\mathbf{x}_{t},t,s)=\frac{s}{t}\mathbf{x}_{t}+\Big(1-\frac{s}{t}\Big)g(\mathbf{x}_{t},t,s),
+\end{align*}
+where $g(\mathbf{x}_{t},t,s)=\mathbf{x}_{t}+\frac{t}{t-s}\int_{t}^{s}\frac{\mathbf{x}_{u}-\mathbb{E}[\mathbf{x}\vert\mathbf{x}_{u}]}{u}\diff u$. We predict
+\begin{align*}
+    G_{\bm{\theta}}(\mathbf{x}_{t},t,s)=\frac{s}{t}\mathbf{x}_{t}+\Big(1-\frac{s}{t}\Big)g_{\bm{\theta}}(\mathbf{x}_{t},t,s)
+\end{align*}
+as the neural jump, a combination of $\mathbf{x}_{t}$ and a neural output $g_{\bm{\theta}}$.  This ensures the neural jump $G_{\bm{\theta}}$ satisfies the initial condition $G_{\bm{\theta}}(\mathbf{x}_{t},t,t)=\mathbf{x}_{t}$  for free. It removes the necessity of enforcing the initial condition in neural network training, transforming the optimization problem from constrained to unconstrained. \djk{Figure~\ref{fig:s_t_plot} contrasts CTM's learning target with that of previous models.} %and expanding the parameter space from a restricted domain to the entire space.
+
+A crucial characteristic of $g$ becomes evident when taking the limit as $s$ approaches $t$.  From the definition, we obtain
+\begin{align*}
+    \lim_{s\rightarrow t}g(\mathbf{x}_{t},t,s)=\mathbf{x}_{t}+t\lim_{s\rightarrow t}\frac{1}{t-s}\int_{t}^{s}\frac{\mathbf{x}_{u}-\mathbb{E}[\mathbf{x}\vert\mathbf{x}_{u}]}{u}\diff u=\mathbb{E}[\mathbf{x}\vert\mathbf{x}_{t}].
+\end{align*}
+Therefore, estimating $g$ leads to the approximation of not only the $t$-to-$s$ jump but also the \textit{infinitesimal} $t$-to-$t$ jump\footnote{In contrast, $G$ is unaware of this infinitesimal jump as it collapses to the identity function when $s\rightarrow t$, and estimating the denoiser with finite differences along the time derivative is imprecise due to numerical issues.} (denoiser function). 
+Indeed, from the Taylor expansion, we have 
+\begin{align*}
+    g(\mathbf{x}_{t},t,s)&=\mathbf{x}_{t}+\frac{t}{t-s}\int_{t}^{s}\frac{\mathbf{x}_{u}-\mathbb{E}[\mathbf{x}\vert\mathbf{x}_{u}]}{u}\diff u=\mathbf{x}_{t}+\frac{t}{t-s}\bigg[ (s-t)\frac{\mathbf{x}_{t}-\mathbb{E}[\mathbf{x}\vert\mathbf{x}_{t}]}{t} + \mathcal{O}((t-s)^{2}) \bigg]\\
+    &=\mathbb{E}[\mathbf{x}\vert\mathbf{x}_{t}]+\mathcal{O}(\vert t-s\vert).
+\end{align*}
+Therefore, $g(\mathbf{x}_{t},t,s)$ (with general $s\le t$) is interpreted as the denoiser function added with a residual term of the Taylor expansion. %\jcr{Figure~\ref{fig:s_t_plot} contrasts CTM's learning target with that of previous models.}
+
+\subsection{Distillation Loss: Soft Consistency Loss}
+\begin{wrapfigure}{r}{0.33\textwidth}
+ \vskip -0.6in
+	\centering
+		\includegraphics[width=\linewidth]{figures/ctm_model_ver2.pdf}
+	\caption{An illustration of CTM's two predictions at time $s$ with an initial value $\mathbf{x}_t$.}
+	\label{fig:ill_models}
+  \vskip -0.1in
+\end{wrapfigure}
+To achieve trajectory learning, CTM should match the neural jump $G_{\bm{\theta}}$ to the true jump $G$ by
+    $G_{\bm{\theta}}(\mathbf{x}_{t},t,s)\approx G(\mathbf{x}_{t},t,s)$,
+for any $s\le t$. We opt to train $G_{\bm{\theta}}$ by comparing with \djk{a solution of the numerical solver, $\texttt{Solver}(\mathbf{x}_{t},t,s;\bm{\phi})$, of the pre-trained PF ODE in Eq.~\eqref{eq:emp_pf_ode_main}:}
+\begin{align*}%\label{eq:global}
+    G_{\bm{\theta}}(\mathbf{x}_{t},t,s)\approx \texttt{Solver}(\mathbf{x}_{t},t,s;\bm{\phi})\approx G(\mathbf{x}_{t},t,s).
+\end{align*}
+With a perfect teacher $\bm{\phi}$, $\texttt{Solver}$ accurately reconstructs $G(\mathbf{x}_{t},t,s)$, and the optimal $G_{\bm{\theta}^{*}}(\mathbf{x}_{t},t,s)$ coincides with the ground truth $G(\mathbf{x}_{t},t,s)$, given sufficient student network flexibility. 
+
+For a more precise estimation of the entire solution trajectory, we introduce \emph{soft consistency matching}. As illustrated in Figure~\ref{fig:ill_models}, soft consistency compares two $s$-predictions: one from the teacher and the other from the student. More precisely, the target prediction is a mixture of teacher and student, where we solve the teacher PF ODE on the $(u, t)$-interval and jump to $s$ using the stop-gradient student. In summary, soft consistency compares
+\begin{align}\label{eq:soft}
+    G_{\bm{\theta}}(\mathbf{x}_{t},t,s)\approx G_{\texttt{sg}(\bm{\theta})}\big(\texttt{Solver}(\mathbf{x}_t, t,u;\bm{\phi}),u,s\big),%, \quad \text{for any } u\in[s,t),
+\end{align}
+where a random $u\in[s,t)$ determines the amount of teacher information to distill, and $\texttt{sg}$ is exponential moving average stop-gradient $\texttt{sg}(\bm{\theta})\leftarrow \texttt{stopgrad}(\mu\texttt{sg}(\bm{\theta})+(1-\mu)\bm{\theta})$.
+
+By the choice of $u$, this soft matching spans two frameworks:
+\begin{itemize}
+\item At $u= s$, Eq.~\eqref{eq:soft} enforces \emph{global consistency}, i.e., the student distills the teacher information on the entire interval $(s,t)$.
+\item At $u= t-\Delta t$, Eq.~\eqref{eq:soft} is \textit{local consistency}, i.e., the student only distills the teacher information on a single-step interval $(t-\Delta t,t)$. Moreover, it becomes CM's distillation target when $s=0$.
+\end{itemize}
+
+To quantify the dissimilarity between the student prediction $G_{\bm{\theta}}(\mathbf{x}_{t},t,s)$ and the teacher prediction $G_{\texttt{sg}(\bm{\theta})}(\texttt{Solver}(\mathbf{x}_t, t,u;\bm{\phi}),u,s)$, we use a feature distance $d$ in clean data space by transporting two $s$-time predictions to $0$-time using a stop-gradient student $G_{\texttt{sg}(\bm{\theta})}(\cdot, s,0)$. More specifically, transported predictions become $\mathbf{x}_{\text{est}}(\mathbf{x}_{t},t,s):=G_{\texttt{sg}(\bm{\theta})}(G_{\bm{\theta}}(\mathbf{x}_{t},t,s),s,0)$ and $\mathbf{x}_{\text{target}}(\mathbf{x}_{t},t,u,s):=G_{\texttt{sg}(\bm{\theta})}(G_{\texttt{sg}(\bm{\theta})}\big(\texttt{Solver}(\mathbf{x}_t, t,u;\bm{\phi}),u,s\big),s,0)$. Summing altogether, the CTM loss is defined as
+\begin{align*}%\label{eq:ctm_loss}
+    \mathcal{L}_{\text{CTM}}(\bm{\theta};\bm{\phi})&:=\mathbb{E}_{t\in[0,T]}\mathbb{E}_{s\in[0,t]}\mathbb{E}_{u\in[s,t)}\djk{\mathbb{E}_{\mathbf{x}_{0}}\mathbb{E}_{\mathbf{x}_{t}\vert\mathbf{x}_{0}}\Big[d\big(\mathbf{x}_{\text{target}}(\mathbf{x}_{t},t,u,s),\mathbf{x}_{\text{est}}(\mathbf{x}_{t},t,s)\big)\Big]},
+\end{align*}
+which leads to the neural jump, at optimum, to match with the jump provided by solving the empirical PF ODE of Eq.
+
+\subsection{Auxiliary Losses for Better Training of Student}
+
+In knowledge distillation for classification problems, it is widely acknowledged that the student classifier often performs as well as, or even outperforms, the teacher classifier. A crucial factor contributing to this success is the direct training signal derived from the data label. More precisely, the student loss $\mathcal{L}_{\text{distill}}(\text{teacher},\text{student})+\mathcal{L}_{\text{cls}}(\text{data},\text{student})$ combines a distillation loss $\mathcal{L}_{\text{distill}}$ and a classifier loss $\mathcal{L}_{\text{cls}}$, which provides a high-quality signal to the student with the data label.
+
+However, in the context of generation tasks, distillation models tend to exhibit inferior sample quality compared to the teacher. This is primarily because model optimization relies solely on the distillation loss. In our approach, we extend the principles of classification distillation to our model by introducing direct signals from both DSM and adversarial losses to facilitate student learning.
+First, we guide the student training with the DSM loss, given by
+\begin{align*}%\label{eq:CTM_DM}
+    \mathcal{L}_{\text{DSM}}(\bm{\theta})=\mathbb{E}_{t,\mathbf{x}_{0}}\mathbb{E}_{\mathbf{x}_{t}\vert\mathbf{x}_{0}}[\Vert \mathbf{x}_{0}-g_{\bm{\theta}}(\mathbf{x}_{t},t,t) \Vert_{2}^{2}].
+\end{align*}
+The optimal $g_{\bm{\theta}^*}$ obtained from the DSM loss becomes $g_{\bm{\theta}^{*}}(\mathbf{x}_{t},t,t)=\mathbb{E}[\mathbf{x}\vert\mathbf{x}_{t}]=g(\mathbf{x}_{t},t,t)$\footnote{We opt to use the conventional DSM loss instead of the score matching loss of $\mathbb{E}[\Vert D_{\bm{\phi}}(\mathbf{x}_{t},t)-g_{\bm{\theta}}(\mathbf{x}_{t},t,t)\Vert_{2}^{2}]$ to ensure the exact denoiser estimation at the optimality.}. Therefore, the DSM loss improves jump precision when $s\approx t$ \djk{by acting as a regularizer.} %, as a regularizer. 
+We remark that the DSM loss mitigates the vanishing gradient problem of $g$ learning when $s\rightarrow t$ (because the scale factor $1-\frac{s}{t}\rightarrow 0$) and significantly improves the accuracy of small neural jumps.
+
+Second, we employ adversarial training for enhanced student learning, utilizing the GAN loss
+\begin{align*}%\label{eq:CTM_GAN}
+    \mathcal{L}_{\text{GAN}}(\bm{\theta},\bm{\eta})=\mathbb{E}_{\mathbf{x}_{0}}[\log{d_{\bm{\eta}}(\mathbf{x}_{0})}]+\djk{\mathbb{E}_{t\in[0,T]}\mathbb{E}_{s\in[0,t]}\mathbb{E}_{\mathbf{x}_{0}}\mathbb{E}_{\mathbf{x}_{t}\vert\mathbf{x}_{0}}\big[\log{\big(1-d_{\bm{\eta}}(\mathbf{x}_{\text{est}}(\mathbf{x}_t,t,s )})\big)\big]},
+\end{align*}
+where $d_{\bm{\eta}}$ is a discriminator. This adversarial loss is motivated by VQGAN~\citep{esser2021taming}, which shows that a combination of reconstruction and adversarial losses is beneficial for generation quality. %It enables the student model (CTM) to surpass the teacher model (DM).
+
+In summary, CTM incorporates distillation, DSM and GAN losses as
+\begin{align*}%\label{eq:ultimate_loss}
+    \mathcal{L}(\bm{\theta},\bm{\eta}):=\mathcal{L}_{\text{CTM}}(\bm{\theta};\bm{\phi})+\lambda_{\text{DSM}}\mathcal{L}_{\text{DSM}}(\bm{\theta})+\lambda_{\text{GAN}}\mathcal{L}_{\text{GAN}}(\bm{\theta},\bm{\eta}),
+\end{align*}
+ into a single and unified training framework\footnote{The DSM loss is closely linked to the KL divergence~\citep{song2021maximum,kim2022maximum} and the GAN loss is a proxy of $f$-divergences~\citep{nowozin2016f} or IPMs~\citep{arjovsky2017wasserstein}. Therefore, our comprehensive loss can be interpreted as $\mathcal{L}_{\text{distill}}(\text{teacher},\text{student})+D_{\text{KL}}(\text{data}\Vert\text{student})+D_{f}(\text{data},\text{student})$, which combines the distillation loss (between teacher/student) with statistical divergences (between data/student).}; and CTM solves the mini-max problem $\min_{\bm{\theta}}\max_{\bm{\eta}}\mathcal{L}(\bm{\theta},\bm{\eta})$. Following VQGAN, we employ adaptive weighting with $\lambda_{\text{DSM}}=\frac{\Vert \nabla_{\bm{\theta}_{L}}\mathcal{L}_{\text{CTM}}(\bm{\theta};\bm{\phi}) \Vert}{\Vert \nabla_{\bm{\theta}_{L}}\mathcal{L}_{\text{DSM}}(\bm{\theta}) \Vert}$ and $\lambda_{\text{GAN}}=\frac{\Vert \nabla_{\bm{\theta}_{L}}\mathcal{L}_{\text{CTM}}(\bm{\theta};\bm{\phi}) \Vert}{\Vert \nabla_{\bm{\theta}_{L}}\mathcal{L}_{\text{GAN}}(\bm{\theta};\bm{\eta}) \Vert}$, where $\theta_{L}$ is the last layer of the UNet output block. This adaptive weighting significantly stabilizes the training by balancing the gradient scale of each term. Algorithm~\ref{alg:CTM} summarizes CTM's training algorithm.
+
+
+
+\section{Sampling with  CTM}
+
+
+\begin{wrapfigure}{r}{0.63\textwidth}
+	\vskip -0.6in
+	\centering
+	\includegraphics[width=0.9\linewidth]{figures/Cat_model_comparison_v6.pdf}
+ \vskip -0.05in
+	\caption{Comparison of score-based models (EDM), distillation models (CM), and CTM with various sampling methods and NFE trained on AFHQ-cat~\citep{choi2020stargan} $256\times256$.}
+	\vskip -0.2in
+	\label{fig:sample_comparison}
+\end{wrapfigure}
+CTM enables exact score evaluation through $g_{\bm{\theta}}(\bm{x}_t, t, t)$, supporting standard score-based sampling with ODE/SDE solvers. In high-dimensional image synthesis, as shown in Figure~\ref{fig:sample_comparison}'s left two columns, CTM performs comparably to EDM using Heun's method as a PF ODE solver.
+
+CTM additionally enables time traversal along the solution trajectory, allowing for 
+the newly introduced \emph{$\gamma$-sampling} method, refer to Algorithm~\ref{alg:gamma}  and Figure~\ref{fig:gamma_sampling}. Suppose the sampling timesteps are $T=t_0>\cdots>t_N=0$. With $\mathbf{x}_{t_0}\sim\pi$, where $\pi$ is the prior distribution, $\gamma$-sampling denoises $\mathbf{x}_{t_{0}}$ to time $\sqrt{1-\gamma^{2}}t_{1}$ with $G_{\bm{\theta}}(\mathbf{x}_{t_{0}},t_{0},\sqrt{1-\gamma^{2}}t_{1})$, and perturb this neural sample with forward diffusion to the noise level at time $t_{1}$. The $\gamma$-sampling iterates this back-and-forth traversal until reaching to time $t_N=0$.
+
+Our $\gamma$-sampling is a new distillation sampler that unifies previously proposed sampling techniques, including distillation sampling and score-based sampling.
+
+\begin{figure}[t]%{r}{0.4\textwidth}
+\vskip -0.1in
+	\centering
+	\begin{subfigure}{0.31\linewidth}
+		\centering
+		\includegraphics[width=0.8\linewidth]{figures/gamma_1.pdf}
+		\subcaption{$\gamma=1$ (Fully stochastic)}
+	\end{subfigure}
+	\begin{subfigure}{0.33\linewidth}
+		\centering
+		\includegraphics[width=0.8\linewidth]{figures/gamma_mid.pdf}
+		\subcaption{$1>\gamma>0\qquad\quad$}
+	\end{subfigure}	
+ 	\begin{subfigure}{0.32\linewidth}
+		\centering
+		\includegraphics[width=0.8\linewidth]{figures/gamma_0.pdf}
+		\subcaption{$\gamma=0$ (Deterministic)}
+	\end{subfigure}
+	\caption{Illustration of $\gamma$-sampling with varying $\gamma$ value. It denoises with the network evaluation and iteratively diffuses the sample in reverse by $(t_{n}\xrightarrow{\text{Denoise}} \sqrt{1-\gamma^{2}}t_{n+1}\xrightarrow{\text{Noisify}} t_{n+1})_{n=0}^{N-1}$.}
+    \label{fig:gamma_sampling}
+	 \vskip -0.1in
+\end{figure}
+
+\begin{itemize}
+\item Figure~\ref{fig:gamma_sampling}-(a): When $\gamma=1$, it coincides to the multistep sampling introduced in CM, which is fully stochastic and results in semantic variation when NFE changes, e.g., compare samples of NFE 4 and 40 with the deterministic sample of NFE 1 in the third column of Figure~\ref{fig:sample_comparison}. With a fixed $\mathbf{x}_{T}$, CTM reproduces CM's samples in the fourth column of Figure~\ref{fig:sample_comparison}.
+
+\item Figure~\ref{fig:gamma_sampling}-(c): When $\gamma=0$, it becomes the deterministic distillation sampling that estimates the solution of the PF ODE. A key distinction between the $\gamma$-sampling and score-based sampling is that CTM avoids the discretization errors, e.g., compare (score-based) samples in the leftmost column and ($\gamma=0$ distillation) samples in the rightmost column of Figure~\ref{fig:sample_comparison}.
+
+\item Figure~\ref{fig:gamma_sampling}-(b): When $0<\gamma<1$, it generalizes the EDM's stochastic sampler (Algorithm~\ref{alg:EDM}).
+\end{itemize}
+
+\begin{figure*}[t]
+\vskip -0.1in
+	\centering
+	\includegraphics[width=0.8\linewidth]{figures/cat_stroke.pdf}
+}
+	\label{fig:cat_stroke}
+	\vskip -0.1in
+\end{figure*}
+
+The optimal choice of $\gamma$ depends on practical usage and empirical configuration~\citep{karras2022elucidating,xu2023restart}. Figure~\ref{fig:cat_stroke} demonstrates $\gamma$-sampling in stroke-based generation~\citep{meng2021sdedit}, revealing that the sampler with $\gamma=1$ leads to significant semantic deviations from the reference stroke, while smaller $\gamma$ values yield closer semantic alignment and maintain high fidelity. Moreover, Figure~\ref{fig:sampling_cifar10} showcases $\gamma$'s impact on generation performance. In Figure~\ref{fig:sampling_cifar10}-(a), $\gamma$ has less influence with small NFE, but the setup with $\gamma\approx 0$ is the only one that resembles the performance of the Heun's solver as NFE increases. Additionally, CM's multistep sampler ($\gamma=1$) significantly degrades sample quality as NFE increases. This quality deterioration concerning $\gamma$ becomes more pronounced with higher NFEs, shown in Figure~\ref{fig:sampling_cifar10}-(b), potentially attributed to the error accumulation during the iterative neural jump overlap to zero-time. We explain this phenomenon using a 2-steps $\gamma$-sampling example in the following theorem, see Theorem~\ref{th:sampling_agg_error_N_steps} for a generalized result for $N$ steps. 
+
+\begin{wrapfigure}{r}{0.55\textwidth}
+\vskip -0.2in
+	\centering
+	\begin{subfigure}{0.49\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{figures/FID_by_nfe.pdf}
+		\subcaption{FID by NFE}
+	\end{subfigure}
+	\begin{subfigure}{0.49\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{figures/FID_by_gamma.pdf}
+		\subcaption{Sensitivity to $\gamma$}
+	\end{subfigure}	
+	\caption{(a) CTM enables score-based sampling and distillation $\gamma$-sampling on CIFAR-10. (b) The FID degrade highlights the importance of trajectory learning.}
+	\label{fig:sampling_cifar10}
+	\vskip -0.2in
+\end{wrapfigure}
+
+\begin{theorem}[(Informal) 2-steps $\gamma$-sampling]\label{th:sampling_agg_error_2_steps}
+Let $t\in(0,T)$ and $\gamma \in [0,1]$. Let $p_{\bm{\theta}^{*},2}$ denote as the density obtained from the $\gamma$-sampler with the optimal CTM, following the transition sequence $T\rightarrow\sqrt{1-\gamma^2}t\rightarrow t \rightarrow 0$, starting from $p_T$. Then
+$D_{TV}\left( p_{\text{data}}, p_{\bm{\theta}^{*},2}\right)\footnote{The total variation of two densities $p$ and $q$ is defined as $D_{TV}( p, q):=\frac{1}{2}\int\abs{p(\mathbf{x})-q(\mathbf{x})}\diff\mathbf{x}$.}
+         = \mathcal{O}\big(\sqrt{T-\sqrt{1-\gamma^2}t+ t}  \big)$.
+\end{theorem}
+When it becomes $N$ steps, the $\gamma$-sampling with $\gamma=1$ iteratively conducts long jumps from $t_n$ to $0$ for each step $n$, which aggregates the error to $\mathcal{O}(\sqrt{T + t_1+\cdots+t_N})$. In summary, CTM addresses challenges associated with large NFE in distillation models with $\gamma=0$ and removes the discretization error in score-based models. 
+
+
+
+\section{Experiments}
+
+
+\begin{table}[t]
+\vskip -0.2in
+\begin{minipage}[t]{.52\linewidth}
+	\scriptsize
+ \caption[Performance comparisons on CIFAR-10.]{Performance comparisons on CIFAR-10\footnotemark.}
+ \vskip -0.05in
+ \resizebox{.95\linewidth}{!}{
+	\centering
+	\begin{tabular}{lcccc}
+		\toprule
+		\multirow{2}{*}{Model} & \multirow{2}{*}{NFE} & \multicolumn{2}{c}{Unconditional} & Conditional \\\cmidrule(lr){3-4}\cmidrule{5-5}
+  & & FID$\downarrow$ & NLL$\downarrow$ & FID$\downarrow$ \\\midrule
+            \multicolumn{5}{l}{\textbf{GAN Models}}\\
+            BigGAN~\citep{brock2018large} & 1 & 8.51 & \xmark & - \\
+            StyleGAN-Ada~\citep{karras2020training} & 1 & 2.92 & \xmark & 2.42 \\
+            StyleGAN-D2D~\citep{kang2021rebooting} & 1 & - & \xmark & 2.26 \\
+            StyleGAN-XL~\citep{sauer2022stylegan} & 1 & - & \xmark & 1.85 \\
+            \midrule
+            \multicolumn{5}{l}{\textbf{Diffusion Models -- Score-based Sampling}}\\
+            DDPM~\citep{ho2020denoising} & 1000 & 3.17 & 3.75 & - \\
+            \multirow{2}{*}{DDIM~\citep{song2020denoising}} & 100 & 4.16 & - & - \\
+            & 10 & 13.36 & - & - \\
+            Score SDE~\citep{song2020denoising} & 2000 & 2.20 & 3.45 & - \\
+            VDM~\citep{kingma2021variational} & 1000 & 7.41 & \underline{2.49} & - \\
+            LSGM~\citep{vahdat2021score} & 138 & 2.10 & 3.43 & - \\
+            EDM~\citep{karras2022elucidating} & 35 & 2.01 & 2.56 & 1.82 \\\midrule
+            \multicolumn{5}{l}{\textbf{Diffusion Models -- Distillation Sampling}}\\%\cdashlinelr{1-7}
+            KD~\citep{luhman2021knowledge} & 1 & 9.36 & \xmark & - \\
+            DFNO~\citep{zheng2023fast} & 1 & 3.78 & \xmark & - \\
+            2-Rectified Flow~\citep{liu2022flow} & 1 & 4.85 & \xmark & - \\
+            PD~\citep{salimans2021progressive} & 1 & 9.12 & \xmark & - \\
+            CD (official report)~\citep{song2023consistency} & 1 & 3.55 & \xmark & - \\%\cdashlinelr{1-5}
+            CD (retrained) & 1 & 10.53 & \xmark & - \\
+            CD + GAN~\citep{lu2023cm} & 1 & 2.65 & \xmark & - \\
+            \cc{15}CTM~(ours) & \cc{15}1 & \cc{15}\underline{1.98} & \cc{15}\textbf{2.43} & \cc{15}\underline{1.73} \\\cdashlinelr{1-5}%\cmidrule(lr){1-2}%\cdashlinelr{1-5}
+            PD~\citep{salimans2021progressive} & 2 & 4.51 & - & - \\
+            CD~\citep{song2023consistency} & 2 & 2.93 & - & - \\
+            \cc{15}CTM~(ours) & \cc{15}2 & \cc{15}\textbf{1.87} & \cc{15}\textbf{2.43} & \cc{15}\textbf{1.63} \\\midrule
+            \multicolumn{5}{l}{\textbf{Models without Pre-trained DM -- Direct Generation}}\\
+            CT & 1 & 8.70 & \xmark & - \\
+            \cc{15}CTM~(ours) & \cc{15}1 & \cc{15}2.39 & \cc{15}- & \cc{15}- \\
+            \bottomrule
+	\end{tabular}
+ \label{tab:cifar10_baseline}
+ }
+    \end{minipage}%
+    \hfill
+    \begin{minipage}[t]{.46\linewidth}
+	\caption[Performance comparisons on ImageNet $64\times64$.]{Performance comparisons on ImageNet $64\times64$.}
+ \vskip -0.05in
+	\label{tab:ImageNet64_baseline}
+	\scriptsize
+ \resizebox{.95\linewidth}{!}{
+	\centering
+	\begin{tabular}{lcccc}
+		\toprule
+		Model & NFE & FID$\downarrow$ & IS$\uparrow$ & Rec$\uparrow$ \\\midrule
+  Validation Data & & 1.41 & 64.10 & 0.67 \\\midrule
+            ADM~\citep{dhariwal2021diffusion} & 250 & 2.07 & - & 0.63 \\
+            EDM~\citep{karras2022elucidating} & 79 & 2.44 & 48.88 & \textbf{0.67} \\
+            BigGAN-deep~\citep{brock2018large} & 1 & 4.06 & - & 0.48 \\
+            StyleGAN-XL~\citep{sauer2022stylegan} & 1 & 2.09 & \textbf{82.35} & 0.52 \\\midrule
+            \multicolumn{4}{l}{\textbf{Diffusion Models -- Distillation Sampling}}\\%\cdashlinelr{1-7}
+            PD~\citep{salimans2021progressive} & 1 & 15.39 & - & 0.62 \\
+            BOOT~\citep{gu2023boot} & 1 & 16.3 & - & 0.36 \\
+            CD~\citep{song2023consistency} & 1 & 6.20 & 40.08 & 0.63 \\
+            \cc{15}CTM (ours) & \cc{15}1 & \cc{15}\underline{1.92} & \cc{15}\underline{70.38} & \cc{15}0.57 \\\cdashlinelr{1-5}
+            PD~\citep{salimans2021progressive} & 2 & 8.95 & - & \underline{0.65} \\
+            CD~\citep{song2023consistency} & 2 & 4.70 & - & 0.64 \\
+            \cc{15}CTM (ours) & \cc{15}2 & \cc{15}\textbf{1.73} & \cc{15}64.29 & \cc{15}0.57 \\
+            \bottomrule
+	\end{tabular}}
+ \centering
+ \vskip 0.05in
+ \includegraphics[width=\linewidth]{figures/fid_is_curve.pdf}
+ \vskip -0.15in
+ \captionof{figure}{FID-IS curve on ImageNet.}\label{fig:fid_is}
+\end{minipage} 
+\vskip 0.1in
+\begin{minipage}[t]{.95\linewidth}
+     \centering
+\begin{subfigure}{0.27\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{figures/edm_NFE_79_v3.png}
+		\subcaption{EDM ($79$ NFE)}
+	\end{subfigure}
+	\begin{subfigure}{0.27\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{figures/ctm_NFE_1_v3.png}
+		\subcaption{CTM w/o GAN ($1$ NFE)}
+	\end{subfigure}	
+ 	\begin{subfigure}{0.27\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{figures/ctm_gan_NFE_1_v3.png}
+		\subcaption{CTM w/ GAN ($1$ NFE)}
+	\end{subfigure}
+ \vskip -0.1in
+ \captionof{figure}{Samples generated by (a) EDM, (b) CTM without GAN ($\lambda_{\text{GAN}}= 0$), and (c) CTM with GAN (adaptive $\lambda_{\text{GAN}}$). %CTM distills knowledge from EDM and employs adversarial training for further refining fine-grained details. 
+}
+	\label{fig:sampling_imagenet}
+ \end{minipage}
+\vskip -0.25in
+\end{table}
+
+\subsection{Student (CTM) beats teacher (DM) -- Quantitative Analysis}
+\footnotetext{Bold text indicates the best performance, while underlined text means the second best performance.}
+
+We evaluate CTM on CIFAR-10 and ImageNet $64\times 64$, using the pre-trained diffusion checkpoints from EDM (CIFAR-10) and CM (ImageNet) as the teacher models. We adopt EDM's training configuration for $\mathcal{L}_{\text{DSM}}(\bm{\theta})$ and employ StyleGAN-XL's~\citep{sauer2022stylegan} discriminator for $\mathcal{L}_{\text{GAN}}(\bm{\theta},\bm{\eta})$. For student, we use EDM's DDPM++ implementation on CIFAR-10; and CM's ADM implementation on ImageNet. In addition to these default architectures, we incorporate $s$-information via auxiliary temporal embedding with positional embedding~\citep{vaswani2017attention}, and add this embedding to the $t$-embedding.999; 3) we reuse the skip connection and output scaling of the pre-trained diffusion model to our neural output modeling: $g_{\bm{\theta}}(\mathbf{x}_{t},t,s)=c_{\text{skip}}(t)\mathbf{x}_{t}+c_{\text{out}}(t)\text{NN}_{\bm{\theta}}(\mathbf{x}_{t},t,s)$, where $\text{NN}_{\bm{\theta}}$ is a neural network. 
+The selection of $c_{\text{skip}}$ and $c_{\text{out}}$ ensures that the initialized $g_{\bm{\theta}}(\mathbf{x}_{t},t,t)$ closely aligns with the pre-trained denoiser, with slight random noise introduced from the $s$-embedding. Reusing $c_{\text{skip}}$ and $c_{\text{out}}$ directs the student network to focus on training long jumps while preserving the accuracy of small jumps (via $\mathcal{L}_{\text{DSM}}$) from the initial training phase. Consequently, achieving good performance requires only 100K iterations (10x faster) for CIFAR-10 and 30K iterations (20x faster) for ImageNet, compared to corresponding baselines.
+\textbf{CIFAR-10 } CTM's NFE $1$ FID ($1.98$) excels not only CM ($3.55$) on unconditional generation, but CTM ($1.73$) outperforms the SOTA models, such as EDM ($1.82$ with $35$ NFE) and StyleGAN-XL ($1.85$) on conditional generation. In addition, CTM achieves the SOTA FID ($1.63$) with $2$ NFEs, surpassing all previous generative models. These results on CIFAR-10 are obtained upon the official PyTorch code of CM, where retraining CM with their code yields FID of $10.53$ (unconditional), significantly worse than the reported FID of $3.55$. Additionally, CTM's ability to approximate scores using $g_{\bm{\theta}}(\mathbf{x}_{t},t,t)$ enables evaluating Negative Log-Likelihood (NLL)~\citep{song2021maximum,kim2022maximum}, establishing a new SOTA NLL. This improvement can be attributed, in part, to CTM's reconstruction loss when $u=s$, and improved alignment with the oracle process~\citep{pmlr-v202-lai23d}.
+
+\textbf{ImageNet } CTM surpasses any previous non-guided generative models in FID. Also, CTM most closely resembles the IS of validation data, which implies that StyleGAN-XL tends to generate samples with a higher likelihood of being classified for a specific class, even surpassing the probabilities of real-world validation data, whereas CTM's generation is statistically consistent in terms of the classifier likelihood. In sample diversity, CTM reports an intermediate level of recall, but the random samples in Figure \ref{fig:image_results} exhibits the actual samples are comparably diverse to those of EDM or CM. Furthermore, the high likelihood of CTM on CIFAR-10 indirectly indicates that CTM has no issue on mode collapse. Lastly, we emphasize that all results in Tables~\ref{tab:cifar10_baseline} and \ref{tab:ImageNet64_baseline} are achieved within $30$K training iterations, requiring only $5\%$ of the iterations needed to train CM and EDM.
+
+\textbf{Classifier-Rejection Sampling } CTM's fast sampling enables classifier-rejection sampling. In the evaluation, for each class, we select the top 50 samples out of $\frac{50}{1-r}$ samples based on predicted class probability, where $r$ is the rejection ratio. This sampler, combined with NFE $1$ sampling, consumes an average of NFE $\frac{1}{1-r}$. In Figure~\ref{fig:fid_is}, CTM shows a FID-IS trade-off comparable to classifier-guided results~\citep{ho2021classifier} achieved with high NFEs of 250 (see Figure~\ref{fig:classifier_rejection} for samples). %Additionally, Figure~\ref{fig:classifier_rejection} confirms that samples rejected by the classifier exhibit superior quality and maintain class consistency, in agreement with the findings of \citet{ho2021classifier}. We employ the classifier at resolution of $64\times64$ provided by \citet{dhariwal2021diffusion}.
+\subsection{Qualitative Analysis}
+
+\begin{wrapfigure}{r}{0.6\textwidth}
+\vskip-0.56in
+\begin{subfigure}{0.48\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{figures/FID_by_loss_NFE_1_final.pdf}
+		\subcaption{NFE $1$}
+	\end{subfigure}	
+	\begin{subfigure}{0.48\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{figures/FID_by_loss_NFE_18_final.pdf}
+		\subcaption{NFE $18$}
+	\end{subfigure}	
+ \vskip -0.05in
+ \caption{Comparison of local, global, and the proposed soft consistency matching.}
+	\label{fig:CTM}
+ \vskip-0.1in
+\end{wrapfigure}
+\textbf{CTM Loss} Figure~\ref{fig:CTM} highlights that soft consistency outperforms local consistency and performs comparable to global consistency. Specifically, local consistency distills only 1-step teacher, so the teacher of time interval $[0,T-\Delta t]$ is not used to train the neural jump starting from $\mathbf{x}_{T}$. Rather, teacher on $[t-\Delta t,t]$ with $t\in [0,T-\Delta t]$ is distilled to student from neural jump starting from $\mathbf{x}_{t}$, not $\mathbf{x}_{T}$. The student, thus, has to extrapolate the learnt but scattered teacher across time intervals to estimate the jump from $\mathbf{x}_{T}$, which could potentially lead to imprecise estimation. Hence, soft matching serves as a computationally efficient and high-performing loss.
+
+\begin{wrapfigure}{r}{0.6\textwidth}
+\centering
+ \vskip -0.25in
+	\begin{subfigure}{0.48\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{figures/FID_by_DSM_NFE_1_final.pdf}
+		\subcaption{NFE $1$}
+	\end{subfigure}	
+        \begin{subfigure}{0.48\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{figures/FID_by_DSM_NFE_18_final.pdf}
+		\subcaption{NFE $18$}
+	\end{subfigure}	
+        \vskip -0.05in
+	\caption{The effect of DSM loss.}
+	\label{fig:DSM}
+ \vskip -0.3in
+\end{wrapfigure}
+\textbf{DSM Loss } Figure~\ref{fig:DSM} illustrates two benefits of incorporating $\mathcal{L}_{\text{DSM}}$ with $\mathcal{L}_{\text{CTM}}$. It preserves sample quality for small NFE unless DSM scale outweighs CTM. For large NFE sampling, it significantly improves sample quality due to accurate score estimation. Throughout the paper, we maintain $\lambda_{\text{DSM}}$ to be the adaptive weight (the case of CTM $+ 1.0$DSM), based on insights from Figure~\ref{fig:DSM}.
+
+\begin{wrapfigure}{r}{0.6\textwidth}
+\vskip -0.35in
+\centering
+\begin{subfigure}{0.48\linewidth}
+\centering
+		\includegraphics[width=\linewidth]{figures/FID_ctm_dsm_gan_NFE_1_final.pdf}
+		\subcaption{NFE $1$}
+	\end{subfigure}	
+	\begin{subfigure}{0.48\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{figures/FID_ctm_dsm_gan_NFE_18_final.pdf}
+		\subcaption{NFE $18$}
+	\end{subfigure}	
+\vskip -0.05in
+ \caption{The effect of GAN loss.}
+	\label{fig:GAN}
+  \vskip -0.15in
+ \end{wrapfigure}
+\textbf{GAN Loss } Figure~\ref{fig:GAN} highlights the benefits of integrating the GAN loss for both small- and large-NFE sample quality. In Figure~\ref{fig:sampling_imagenet}, CTM shows superior sample production compared to the teacher, with GAN refining local details. Throughout the paper, we implement a GAN warm-up strategy: deactivating GAN training with $\lambda_{\text{GAN}}=0$ during warm-up iterations and subsequently activating GAN training with an adaptive $\lambda_{\text{GAN}}$, following the VQGAN's approach.
+
+\textbf{Training Without Pre-trained DM } Leveraging our score learning capability, we replace the pre-trained score approximation, $D_{\bm{\phi}}(\mathbf{x}_{t},t)$, with CTM's approximation, $g_{\bm{\theta}}(\mathbf{x}_{t},t,t)$, allowing us to obtain the corresponding empirical PF ODE $\diff\mathbf{x}_{t}=\frac{\mathbf{x}_{t}-g_{\bm{\theta}}(\mathbf{x}_{t},t,t)}{t}$. Consequently, we can construct a pretrained-free target, $\hat{\mathbf{x}}_{\text{target}}:=G_{\texttt{sg}(\bm{\theta})}(G_{\texttt{sg}(\bm{\theta})}(\texttt{Solver}(\mathbf{x}_{t},t,u;\texttt{sg}(\bm{\theta}))),u,s),s,0)$, to replace $\mathbf{x}_{\text{target}}$ in computing the CTM loss $\mathcal{L}_{\text{CTM}}$. When incorporated with DSM and GAN losses, it achieves a NFE $1$ FID of $2.39$ on unconditional CIFAR-10, a performance on par with pre-trained DMs. Contrastive to CM, our CTM uses the identical form of loss from its score approximation capability.
+
+
+\section{Conclusion}
+
+CTM, a novel generative model, addresses issues in established models. With a unique training approach accessing intermediate PF ODE solutions, it enables unrestricted time traversal and seamless integration with prior models' training advantages. A universal framework for Consistency and Diffusion Models, CTM excels in both training and sampling. Remarkably, it surpasses its teacher model, achieving SOTA results in FID and likelihood for few-steps diffusion model sampling on CIFAR-10 and ImageNet $64\times64$, highlighting its versatility and process.
+
+
+
+
+

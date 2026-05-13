@@ -1,0 +1,349 @@
+\title{Graph Transformers for Large Graphs}
+
+\begin{abstract}
+
+Transformers have recently emerged as powerful neural networks for graph learning, showcasing state-of-the-art performance on several graph property prediction tasks. However, these 
+results have been limited to small-scale graphs, such as ligand molecules with fewer than a hundred atoms, where the computational feasibility of the global attention mechanism is possible. The next goal is to scale up these architectures to handle very large graphs on the scale of millions or even billions of nodes. With large-scale graphs, global attention learning is proven impractical due to its quadratic complexity w.r.t. the number of nodes. On the other hand, neighborhood sampling techniques become essential to manage large graph sizes, yet
+finding the optimal trade-off between speed and accuracy with sampling techniques remains challenging.
+This work advances representation learning on single large-scale graphs with a focus on identifying model characteristics and critical design constraints for developing scalable graph transformer (GT) architectures. We argue such GT requires layers that can adeptly learn both local and global graph representations while swiftly sampling the graph topology. 
+As such, a key innovation of this work lies in the creation of a fast neighborhood sampling technique coupled with a local attention mechanism that encompasses a 4-hop reception field, but achieved through just 2-hop operations. This local node embedding is then integrated with a global node embedding, acquired via another self-attention layer with an approximate global codebook, before finally sent through a downstream layer for node predictions.
+The proposed GT framework, named \frameworkname{}, overcomes previous computational bottlenecks 
+and is validated on three large-scale node classification benchmarks.
+We report a $3\times$ speedup and $16.8\%$ performance gain on \texttt{ogbn-products} and \texttt{snap-patents} compared to their nearest %or best 
+baselines respectively, while we also scale \frameworkname{} on \texttt{ogbn-papers100M} with a $5.9\%$ improvement in performance
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+
+Transformer networks \citep{vaswani2017attention} have revolutionized representation learning in various domains, particularly in the field of natural language processing \citep{devlin2018bert, liu2019roberta, yang2019xlnet, raffel2020exploring, brown2020language, dosovitskiy2020image, touvron2023llama, openai2023gpt4}. Their unique ability to model intricate all-pair dependencies in sequential data (or sets of data tokens) has sparked interest in extending Transformer architectures beyond just sequential data, leading to promising research in the area of graph representation learning \citep{zhang2020graph, dwivedi2021generalization, kreuzer2021rethinking, mialon2021graphit, ying2021graphormer, rampavsek2022recipe, shirzad2023exphormer}. However, these advances are not without their challenges. As graph-based learning tasks grow more complex and the scales of the graph data increase, the limitations of current Graph Transformer (GT) architectures become increasingly evident \citep{zhao2021gophormer, chen2022nagphormer, kong2023goat}.
+
+On the other hand, traditional message-passing neural networks (MPNNs), including variants like GCN \citep{kipf2016semi}, GAT \citep{velickovic2018GAT}, and GatedGCN \citep{bresson2017GatedGCN}, function effectively on small-scale graphs such as molecular structures, operating in the order of $O(E)$, or $O(N)$ for sparse graphs \citep{gilmer2017neural}. However, their efficiency rapidly decreases when applied to larger graphs with even less than a million nodes. This is primarily because MPNNs consider all neighbors during their aggregation and update steps. To mitigate this, some approaches use neighborhood sampling (NS) to limit the number of sampled neighbors for each node up to a certain number of hops \citep{hamilton2017inductive}. While this method keeps computational costs in check, it encounters intractability issues when the graph scales to hundreds of millions of nodes or more. Moreover, even if NS is computationally feasible for two or three hops, the MPNNs become confined to capturing only highly localized information, which might be insufficient for tasks on large graphs where more global context is crucial \citep{lim2021new, dwivedi2022LRGB, kong2023goat}.
+
+Graph Transformers (GTs) could provide a potential solution, given their ability to model long-range dependencies and attend to global neighborhoods \citep{rampavsek2022recipe}. However, the intractability remains, given that GTs with all-pair attention, \textit{i.e.}, each node attending to every node, would be quadratic ($O(N^2)$) computationally. When applied with NS, GTs inherit the same limitations, confining their effectiveness to localized regions. Without NS, the task of attending to global neighborhoods necessitates approximation \citep{wu2022nodeformer, wu2023difformer, shirzad2023exphormer} or sampling \citep{zhao2021gophormer, zhang2022hierarchical, zhu2023hierarchical} for computational feasibility, thus bringing us back to the original challenges of sampling and (in)efficient access to global information.
+{\bf Present Work.} In this paper, we introduce a comprehensive approach to overcoming the aforementioned critical challenges in learning on large-scale graphs by focusing on two essential design principles: model capacity and scalability. 
+We enhance model capacity by integrating both local and global graph information for building node representations, while ensuring scalability with an efficient sampling approach. The proposed framework is summarized as follows:
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Framework Design}: We present \frameworkname{}, a new framework that integrates both local and global graph representations while minimizing the computational cost incurred at both the stages. In consistency with recent working recipes in graph learning \citep{rampavsek2022recipe, kong2023goat} \frameworkname{} utilizes two distinct modules — \textsc{LocalModule} and \textsc{GlobalModule} — to handle local and global information exchange efficiently.
+    \item  \textbf{Localized Representations}: Within the \textsc{LocalModule}, we present a novel tokenization strategy that prepares a fixed set of tokens for each graph node to be processed by a Transformer encoder, resulting in rich local feature representations. Importantly, this mechanism leverages a neighborhood sampling approach that consists of an offline sampling stage and incorporates local context features, enabling a broad 4-hop receptive field through just 2-hop operations.
+    \item \textbf{Global Representations}: For the \textsc{GlobalModule}, we implement an approximate codebook-based approach, adapted from \cite{kong2023goat}, to enable global graph attention with computational complexity linear to the codebook size. This design choice ensures that both modules can operate independently of the graph size, thereby ensuring scalability.
+    \item  \textbf{Computational Efficiency}: Our approach effectively mitigates computational bottlenecks traditionally associated with sampling techniques and global information flow. As a result, we enable incorporation of both local and global graph representations without compromising performance.
+    \item \textbf{Empirical Validation}: We validate the competitiveness and scalability of \frameworkname{} with baselines in a scalable setting using \texttt{ogbn-products}, \texttt{snap-patents} and \texttt{ogbn-papers100M} datasets which are among the largest benchmarks with node in ranges 2.5M, 2.9M and 111.1M, respectively. 
+    Notably, we obtain a $3\times$ speedup and $16.8\%$ performance gain on \texttt{ogbn-products} and \texttt{snap-patents} compared to their best baselines respectively, while on \texttt{ogbn-papers100M} we scale \frameworkname{} with a $5.9\%$ improvement in performance.
+\end{enumerate}
+
+Overall, our work not only investigates on the key challenges and presents design elements for GTs 
+at scale but also provides a robust framework for future research in this area.
+
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+
+{\bf Challenges in MPNN Scaling.} When learning on large graphs, the principal issue faced by message-passing based graph neural networks (MPNNs) is the neighbor explosion phenomenon \citep{hamilton2017inductive, zhao2021gophormer}, since the neighborhood sets of nodes at successive hops expand exponentially \citep{alon2021on}. Early efforts in scaling MPNNs employed the use of neighbor sampling (NS) to sample neighbors of nodes in a graph recursively that reduces the overall neighborhood sets sending messages for nodes' feature updates \citep{hamilton2017inductive}. While this brings a reduction in memory and compute footprint, the MPNN is still intractable to (i) aggregate information at hops greater than 2 or 3 in very large graphs due to the fact that the the size of the successive neighborhood grows exponentially, and (ii) access global information in the graph, which is also a well-acknowledged limitation for several works along this line \citep{chen2017stochastic, chen2018fastgcn, huang2018adaptive, zeng2019graphsaint}. Information propagation \textit{prior to} or \textit{after} the training stage \citep{gasteiger2018predict, wu2019simplifying, frasca2020sign} are also adopted as ways to address the intractability brought by neighborhood explosion, which follow the aforementioned limitations.  Several works also propose pre-training \citep{han2022mlpinit} or distillation strategies \citep{zhang2021graph, guo2023linkless} to mitigate these impacts.
+
+{\bf Graph Transformers and Scalability.} The apparent access to global information is a driving factor behind the recent plethora of works on Graph Transformers (GTs) with all pair attention \citep{ying2021graphormer}. We refer to \cite{muller2023attending} for a detailed taxonomy and component-wise study of GTs. However, an obvious barrier for GTs to scale to large graphs is the quadratic complexity brought by full-graph attention, \textit{i.e.}, $O(N^2)$, with $N$ being the number of nodes in a graph. The use of sparse Transformers \citep{rampavsek2022recipe, shirzad2023exphormer} or approximated global attention \cite{wu2022nodeformer, wu2023difformer} alleviate this issue to some extent to bring down the complexity to sub-quadratic. Yet, these methods remain unscalable on single large graphs due to the entire graph structure being operated upon. In order to address this limitation, either NS-like computational boundary is enforced for each node \citep{shi2020masked, zhao2021gophormer} or a fixed length sequence or set is prepared for each node prior to training \citep{zhang2020graph, chen2022nagphormer}. Such solutions either inherit the limitations of NS as discussed above, or face infeasibility due to adjacency matrix multiplications as the graph size grows larger.
+{\bf Clustering based GTs.} Orthogonally, several recent works use hierarchical clustering or partitioning to perform global attention on the coarsened or super nodes \citep{zhang2022hierarchical, zhu2023hierarchical}. However, the coarsening step remains intractable for very large graphs with sizes in hundreds of millions or more. Finally, \cite{kong2023goat} use a combination of NS based local module and a global module consisting of a trainable fixed-sized codebook that represents global centroids. While the sampling limitations remain, the global module based on the centroids is efficient and something that we consider in our proposed approach to compute global representations.
+
+
+
+\section{Recipe for Building Transformers for Large Graphs}
+
+In the previous sections, we identified critical limitations in existing graph learning models, specifically their inability to effectively merge local and global graph features when working with very large graphs. While 
+MPNNs struggle with the `neighbor explosion' problem, making it difficult to aggregate information beyond 2-3 hops, 
+GTs \emph{can} capture global context, but are hampered by quadratic complexity in full graph attention. These challenges, although formidable, outline the essential criteria for a successful GT model tailored for large graphs. This leads us to present a recipe focusing on model capacity and scalability for building GTs for large graphs.
+In this section, we first discuss the design principles of model capacity\footnote{Note that in this work, we do not contextualize a model's capacity in terms of Weisfeiler-Leman (WL)'s expressiveness \citep{weisfeiler1968reduction, morris2019, xu2018how} as it is known that almost all of non-isomorphic graphs (or subgraphs) are distinguishable by a 1-WL equivalent model (MPNN) in the presence of node features \citep{cotta2021reconstruction}, and we do not consider graphs with anonymous nodes.} and scalability. These factors play a crucial role in determining the design and feasibility of a Graph Transformer, particularly when it comes to managing extremely large graphs that have node counts in the millions or higher.
+Finally, following the design characteristics, we introduce our proposed framework — \frameworkname{}.
+\subsection{Design Principles}%Characteristics}
+\label{sec:design_characteristics}
+
+
+{\bf D1- Model Capacity.} A graph learning model should possess the ability to incorporate both local and global information from the original large graph.
+
+
+\textit{Local Inductive Bias}: A node's local 
+connectivity presents a rich source of information that is essential to utilize even in a large graph setting. A straightforward local aggregation of all neighboring nodes followed by update equation in an MPNN is impractical due to which several works utilize sampling techniques (as discussed in Section \ref{sec:related_work}).  
+The incorporation of such local information, while remaining in a feasible computational boundary, is a key ingredient when building a graph learning model for larger graphs and helps immensely in homophilic tasks \citep{ma2021homophily, mao2023demystifying}. 
+
+\textit{Access to Non-Local Information}: A node's capability to incorporate features beyond near-local neighbors may be vital for long-range or non-homophilic tasks \citep{lim2021new, dwivedi2022LRGB}. The sampling strategies discussed in Section \ref{sec:related_work} fail to allow a model to access nodes' distant hops or global information, motivating the use of GTs \citep{rampavsek2022recipe, shirzad2023exphormer}. 
+GTs with all-pair attention alleviate this concern, however not all such
+mechanisms
+reviewed in Section \ref{sec:related_work} are scalable, which is a key concern.
+The recent global attention mechanism proposed in GOAT \citep{kong2023goat} uses dimensionality reduction scheme serving as a ``conceptual'' global context for a node to attend when looking for non-local information. Without exhaustive computation, a large graph learning model should allow access to global graph context \citep{cai2023connection}.
+
+{\bf D2- Scalability.} Learning on large graphs become infeasible for several existing models due to hindrances in sampling mechanisms or global information modules \citep{ying2021graphormer, rampavsek2022recipe, zhao2021gophormer}. As such, we consider the following factors to be vital for computational feasibility and ensuring scalability of the GTs when graphs grow larger.
+
+\textit{Efficient Neighbor Node Set Retrieval}: As reviewed in Section \ref{sec:related_work}, despite the use of sampling techniques, it becomes intractable to retrieve neighbor node sets from hops greater than two or three if the graph in consideration is very large \citep{zhang2021graph,guo2023linkless}. In fact, even a third hop neighbor set retrieval takes a significant 
+amount of time for graphs with hundreds of millions of nodes, as the computational complexity of retrieving a node's $l$ hop neighborhood is $O(d^l)$, where $d$ is the average node degree. Therefore, for efficient retrieval for large graphs, we establish \textit{only} two hops retrieval as a key constraint; this limit is commonly adopted in large-scale graph learning applications \citep{sankar2021graph, ying2018graph, tang2022friend}.
+\textit{Efficient Global Information Access}: As much as the significance of global information is discussed as a key recipe in the Design \textbf{D1}, we reiterate that the global information flow should come at an inexpensive cost. There are multiple candidates for an efficient access to global information, such as sparse global attention \citep{shirzad2023exphormer}, use of virtual nodes \citep{cai2023connection} and use of an approximate centroid-based codebook \citep{kong2023goat}. Since we focus on large graphs where the former two candidates can be infeasible due to their dependency on the number of nodes in the graph, we aim for incorporating global information without bottlenecks due to a graph's large size, such as the method implemented in \cite{kong2023goat} which depends on a dynamic codebook comprising of global centroid tokens.
+ 
+\textit{Distributed Training}:
+Handling very large graphs will be impractical without taking advantage of the distributed computing infrastructure in which several of the real world graphs occur, \textit{eg}. social networks, which are massive and are generally distributed over different machines. Ensuring efficient run times during both training and inference is vital to allow a GT to handle large graphs within acceptable time frames, keeping the cost feasible and lower. For a model to scale on large graphs, the training steps should do away with the bottlenecks brought by traditional MPNNs and sparse GTs. For instance, MPNNs usually sample nodes and their neighbors during the mini-batching step of the training process, which also applies in recent GTs \citep{zhao2021gophormer, kong2023goat}. In principle, this translates to maintaining the adjacency matrix of a graph in one machine. This can be challenging given an example that a simple 3-layer GraphSAGE with NS requires around 350GB+ RAM on the 111.1M sized \texttt{ogbn-papers100M} following standard configurations of OGB \cite{hu2020ogb}. The single-machine memory requirement  can be much larger than the availability on standard machines with on sophisticated models and on industry-scale graphs with billions of nodes and edges \citep{shi2023embedding, ying2018graph}. Thus, avoiding the need to maintain the entire graph data on a single machine when learning is desirable.
+
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=0.94\textwidth]{images/architecture2.pdf}
+    \caption{Architectural diagram of \frameworkname{} illustrating the process of updating a node's representation denoted by the seed node. FFN and Norm denotes Feed Forward Network and Normalization layer respectively. Neighbors are sampled for a central or seed node offline, prior to the training stage using Algorithm \textsc{LocalNodes}. The feature vectors coming from both local module and global module are concatenated before passing to the `FFN, Norm and Residual' module. }
+    \label{fig:architecture}
+\end{figure}
+
+
+\subsection{Our Proposed Framework: \frameworkname{}}
+\label{sec:framework_definition}
+Incorporating these desiderata jointly, we next introduce our proposed framework, \frameworkname{} which is designed from first-principles to enable the application of GTs to massive large-scale graphs.
+We refer to Figure \ref{fig:architecture} for a sketch of the proposed architecture. 
+{\bf Notations.}
+We denote a given graph with $\mathcal{G}= (\mathcal{V}, \mathcal{E})$ with $\mathcal{V}$ being the set of nodes and $\mathcal{E}$ the set of edges, and $N=|\mathcal{V}|$ and $E=|\mathcal{E}|$ being their cardinalities. The graph structure is represented by the adjacency matrix $\mathbf{A} \in \mathbb{R}^{N \times N}$ where $\mathbf{A}_{ij} = 1$ if there exists an edge between nodes $i$ and $j$, otherwise $\mathbf{A}_{ij} = 0$. 
+The features for a node $i$ is denoted by $\mathbf{H}_i \in \mathbb{R}^{1 \times D}$ and for all nodes in the graph $\mathcal{G}$ is denoted by $\mathbf{H} \in \mathbb{R}^{N \times D}$. 
+While we assume, for simplicity, that the graph $\mathcal{G}$ has no edge features, these can be incorporated using standard methods as done in the literature, such as using edge features during message passing to update node representations.
+
+{\bf Update Algorithm.} We now define the equations which update the feature representations of a node using the \frameworkname{} framework. Given a node $i$ with its input feature $\mathbf{H}_i^{\text{in}} \in \mathbb{R}^{1 \times D_\text{in}}$,
+the aim is to obtain its output features $\mathbf{H}_i^{\text{out}} \in \mathbb{R}^{1 \times D_\text{out}}$ which can be passed to appropriate prediction heads and/or loss functions, subsequently, depending on the learning task. For simplicity, we will represent $\mathbf{H}_i \in \mathbb{R}^{1 \times D}$ in the following equations.
+
+\begin{eqnarray}
+    \mathbf{S}_i &=& \textsc{LocalNodes}_i(\mathbf{A}, K) \hspace{30pt} \in \mathbb{R}^{1 \times K} \label{eqn:localnodes}\\
+    \mathbf{X}_i &=& \textsc{InputTokens}_i(\mathbf{S}_i, \mathbf{H}_i^{\text{in}}, \mathbf{C}_i) \hspace{6pt} \in \mathbb{R}^{1 \times 3K \times D} \label{eqn:inputokens}\\
+    \mathbf{H}_i^\text{local} &=& \textsc{LocalModule}(\mathbf{X}_i) \hspace{36pt} \in \mathbb{R}^{1 \times D} \\
+    \mathbf{H}_i^\text{global} &=& \textsc{GlobalModule}(\mathbf{H}_i^{\text{in}}) \hspace{26pt} \in \mathbb{R}^{1 \times D} \label{eqn:globalmodule}\\
+    \hat{\mathbf{H}}_i &=& \textsc{FFN}(\mathbf{H}_i^\text{local} \ || \ \mathbf{H}_i^\text{global}) \hspace{36pt} \in \mathbb{R}^{1 \times D} \label{eqn:update_equation1}\\
+    \mathbf{H}^{\text{out}}_i &=& \mathbf{H}_i^{\text{in}} + \textsc{Norm}(\hat{\mathbf{H}}_i) \hspace{50pt} \in \mathbb{R}^{1 \times D} 
+    \label{eqn:update_equation}
+\end{eqnarray}
+where, $\mathbf{S}_i$ reflects the $K$ sampled local nodes from \textsc{LocalNodes} in Algorithm \ref{alg:localnodes}, and $\mathbf{X}_i$ is the set of input tokens of size $3K$ prepared using \textsc{InputTokens} in Algorithm \ref{alg:inputokens}.
+$||$ denotes concatenation.
+$\mathbf{C} \in \mathbb{R}^{N \times 2 \times D}$ is the context feature matrix which provides the 1 and 2 hop neighborhood context for all nodes in the graph and can be precomputed as $\mathbf{C}^0 = \tilde{\mathbf{A}}\mathbf{H} \in \mathbb{R}^{N \times 1 \times D}$ and $\mathbf{C}^1 = \tilde{\mathbf{A}}^2\mathbf{H} \in \mathbb{R}^{N \times 1 \times D}$ where $\tilde{\mathbf{A}}$ is the normalized adjacency matrix \citep{chen2022nagphormer}. 
+
+Finally, \textsc{FFN} refers to a feed forward network used in Transformers, and \textsc{Norm} is normalization, which can be either of LayerNorm \citep{ba2016layer} or BatchNorm \citep{ioffe2015batchnorm}. Additionally, we note here that the Algorithms \ref{alg:localnodes} and \ref{alg:inputokens} are defined for either all nodes or a mini-batch of nodes, while their respective outputs can be accessed index-wise in the above Eqns. \ref{eqn:localnodes} and \ref{eqn:inputokens}.
+
+{\bf Offline Step Prior to Training.} The Algorithm \ref{alg:localnodes} \textsc{LocalNodes} is run on CPU prior to the training to sample local nodes for each node in the graph, and can be parallelized to multiple cores or machines. The parallelization is possible due to the fact that the fetch of 1-hop and 2-hop neighbors in Step 3 and the subsequent steps of Algorithm \ref{alg:localnodes} is independent for each node and can be executed on different CPU cores in parallel. It's also worth mentioning that the graph is not required to be stored on a single machine's memory for this step. In line with our design principles, the graph can be distributed across multiple machines using techniques such as key-value stores or graph databases to circumvent the issue of memory limitations. This ensures that the offline step aligns with the scalability considerations of handling very large graphs.
+
+\begin{algorithm}[!t]
+\footnotesize
+\caption{\textsc{LocalNodes}: Algorithm to fetch a multiset of local nodes from 1 and 2 hop neighbors for each node.}
+\label{alg:localnodes}
+\begin{algorithmic}[1] % The number indicates line numbering interval
+\REQUIRE A graph with adjacency matrix $\mathbf{A} \in \mathbb{R}^{N \times N}$, and the size of the multiset $K$.
+\ENSURE Return the matrix with $K$-sized multisets for each node $\mathbf{S} \in \mathbb{R}^{N \times K}$ 
+
+\STATE \textbf{Initialize:} Multisets for all nodes $\mathbf{S} \in \mathbb{R}^{N \times K}$
+
+\FOR{$i = 0$ to $N-1$}
+    \STATE $\hat{\mathbf{T}} \leftarrow$ 1 and 2 hop neighbors of node $i$
+    \IF{$|\hat{\mathbf{T}}| \geq K-1$}
+        \STATE $\mathbf{T} \leftarrow$ Randomly sample $K-1$ nodes from $\hat{\mathbf{T}}$
+    \ELSIF{$|\hat{\mathbf{T}}| < K-1$ and $|\hat{\mathbf{T}}| > 0$}
+        \STATE $\mathbf{T} \leftarrow$ Randomly sample from $\hat{\mathbf{T}}$ with replacement to make $K-1$ nodes
+    \ELSE
+        \STATE $\mathbf{T} \leftarrow$ Randomly sample $K-1$ nodes from $\{0, 1, 2, \ldots, N-1\}$ 
+    \ENDIF
+    \STATE $\mathbf{S}_i \leftarrow \{i\} + \{\mathbf{T}\} \in \mathbb{R}^{K}$
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+
+\begin{algorithm}[!t]
+\footnotesize
+\caption{\textsc{InputTokens}: Algorithm for Mini-Batch Preparation for Local Module}
+\label{alg:inputokens}
+\begin{algorithmic}[1] 
+\REQUIRE Mini-batch of $M$ samples $\mathbf{S} \in \mathbb{R}^{M \times K}$ where $K$ is the total size of the multiset of nodes for each node, Feature matrix $\mathbf{H} \in \mathbb{R}^{N \times D}$, Hop context features $\mathbf{C} \in \mathbb{R}^{N \times 2 \times D}$. 
+\ENSURE Return the input data of all nodes in mini-batch $\mathbf{X} \in \mathbb{R}^{M \times 3K \times D}$.
+
+\STATE \textbf{Initialize:} $\mathbf{X} \in \mathbb{R}^{M \times 3K \times D}$
+
+\FOR{$i = 0$ to $M-1$}
+    \FOR{$j = 0$ to $3K$ with step $3$}
+        \STATE $\mathbf{X}_{i, j} \leftarrow \mathbf{H}[\mathbf{S}_{i, j}]$ \ \hspace{30pt} \# node feature for node $i$ from the feature matrix $\mathbf{H}$
+        \STATE $\mathbf{X}_{i, {j + 1}} \leftarrow \mathbf{C}[\mathbf{S}_{i, j}, 0]$ \hspace{14pt} \# 1 hop context feature for the node $i$ from $\mathbf{C}$
+        \STATE $\mathbf{X}_{i, {j + 2}} \leftarrow \mathbf{C}[\mathbf{S}_{i, j}, 1]$ \hspace{14pt} \# 2 hop context feature for the node $i$ from $\mathbf{C}$
+    \ENDFOR
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+
+
+{\bf Mini-Batching for Local Module.} The Algorithm \ref{alg:inputokens} 
+\textsc{InputTokens} 
+abstracts a mini-batching stage during the training, which prepares the input tokens for each node in the mini-batch with $M$ node samples. This process contains a nested loop that can also be heavily parallelized across available cores. The mini-batch algorithm is implemented in a dataloader's preparation function, such as the PyTorch DataLoader \texttt{collate} \citep{paszke2019pytorch}.
+Besides, an important feature provided by \textsc{InputTokens} is that it \textit{increases} the receptive field of a node \textit{up to 4 hops}, based on just 2-hop computations. To illustrate this, consider a node with its $K$ sized sampled set of 1-hop and 2-hop neighbors. Since the steps 5-6 in Algorithm \ref{alg:inputokens} allows for a nodes' 1-2 hop neighbors to retrieve \textit{their} 1-hop and 2-hop neighborhood context, the node $i$ in consideration will have access to information from up to 4 hops.
+
+
+{\bf Characteristics of the Framework.} The \frameworkname{} framework fulfills the desired characteristics (D1-D2, Section \ref{sec:design_characteristics}) for a graph learning model to scale on large graphs. \textbf{D1-Model Capacity}: By incorporating both a local and global module, \frameworkname{} can build node representations using information from local neighborhoods as well as global graph context. The local module leverages offline neighbor sampling and local context features to efficiently aggregate local structure up to 4 hops while the global module allows attending to the entire graph through a trainable codebook.
+\textbf{D2-Scalability}: The framework only samples up to 2-hop neighbors for each node, ensuring efficient neighbor set retrieval. The runtime is also efficient as the local module operates on sampled neighbors and the global module utilizes a fixed size codebook, which is already efficient as demonstrated in \cite{kong2023goat}.
+Similarly, the offline neighbor sampling step allows the local node sets and neighborhood contexts to be prepared independently of the graph structure, essentially converting the graph learning task into a standard neural network training problem on the sampled nodes and contexts. This allows easy parallelization across machines like for other modalities such as image and text, alleviating bottlenecks caused in traditional GNN training that require adjacency matrix access on each machine, in principle. The input token preparation is also independent of the graph structure.
+In summary, \frameworkname{} satisfies the key design principles of model capacity and scalability to effectively scale on large graph datasets. The local and global components allow it to learn both from local structure as well as model global dependencies in the graph, without any \textit{explicit} bottleneck caused due to the size of a graph.  In the next section, we will demonstrate that this model is not only scalable, but offers strongly competitive performance. 
+
+{\bf Complexity.} The computational complexity of the \textsc{LocalModule} in \frameworkname{} is $O((3K)^2)$, while that of the \textsc{GlobalModule} is $O(B)$ where $K$ is the size of the local nodes, $3K$ is the size of the tokens for the \textsc{LocalModule} and $B$ is the size of the codebook in \textsc{GlobalModule}. As such, the framework is not bottlenecked with the size of nodes in the graph, as in prior literature. Note that the complexity of Algorithm \ref{alg:localnodes}, which is a one-time offline step, does not affect the computational complexity of \frameworkname{}.
+
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+\subsection{Datasets and Experimental Setup}
+\label{sec:datasets_experimental_setup}
+
+\begin{table}[!b]
+\centering
+\caption{Summary of the datasets used in our experiments.}
+\label{tab:dataset_summary}
+\scalebox{0.73}{
+\begin{tabular}{rrrccc}
+\toprule
+Dataset Name & Total Nodes & Total Edges & Node Feats & Class Size & Class Label\\
+\midrule
+\texttt{ogbn-products} & 2,449,029 & 61,859,140 & 100 & 47 & product category\\
+\texttt{snap-patents} & 2,923,922 & 13,975,788 & 269 & 5 & time granted\\
+\texttt{ogbn-papers100M} & 111,059,956 & 1,615,685,872 & 128 & 172 & subject area\\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+{\bf Datasets.} We evaluate the proposed \frameworkname{} model architecture on single large graph datasets with node classification tasks. Since we particularly focus on large graphs, we do not conduct evaluations on smaller benchmarks with lesser than million nodes as the limitations of scaling a model are not present. 
+We use \texttt{ogbn-products} and \texttt{snap-patents} for our model prototyping and experiments, while we also scale our model on \texttt{ogbn-papers100M}. The datasets' summary is presented in Table \ref{tab:dataset_summary}. \textbf{\texttt{ogbn-products}} is a dataset containing Amazon co-purchasing network \citep{bhatia2016extreme} with nodes representing products and edges representing the products being purchased together. 
+We use the Open Graph Benchmark \citep{hu2020ogb} version of the dataset with their standard splits and available features. 
+\textbf{\texttt{snap-patents}} is a network of US patents \citep{leskovec2014snap} where each node represents a patent and an edge represents patent nodes which cite each other. 
+We use the \texttt{snap-patents} dataset from \cite{lim2021new} with their default splits and features.
+Finally, we use \textbf{\texttt{ogbn-papers100M}} dataset \citep{hu2020ogb} which is one of the largest publicly available single large graph benchmarks. Nodes in the graph denote an arXiv paper while directed edges denote papers which cite other papers \citep{wang2020microsoft}. 
+As with the former dataset, we use the default splits and features provided by OGB. Among the three datasets, \texttt{snap-patents} is a non-homophilic dataset, while the rest are homophilic.
+
+
+{\bf Scalable Baselines.} We design our experiments in a way to ensure scalability with efficient neighbor node set retrieval (\textbf{D2}, Section \ref{sec:design_characteristics}) on large graphs, with sizes even beyond the benchmarks we use for the demonstration in this work.
+As such, we use constrained versions of existing MPNNs or GT baselines, denoted by Model\textbf{-\constraintname} and call them `Scalable Baselines'. We select GraphSAGE \citep{hamilton2017inductive}, GAT \citep{velickovic2018GAT}, GT-sparse \citep{shi2020masked, dwivedi2021generalization}, NAGphormer \citep{chen2022nagphormer} and GOAT \citep{kong2023goat} as the baselines which encompass fundamental GNNs as well as recent scalable GTs. Following \textbf{D2}, we constrain the graph propagation related operations in all these baselines to 2 hops only.
+The goal of our experimental setup is to show how the scalability constraints affect existing models' capabilities, which can be addressed by \frameworkname{}; for this reason, we do not use enhanced techniques for obtaining top leaderboard results such as auxiliary label propagation \citep{shi2020masked, huang2020combining} or augmentations \citep{kong2020flag}. We apply similar restrictions in our proposed \frameworkname{} as well. For hyperparameters, architectural and training setup of the baselines, we adopt the hyperparameters available in the original model papers or the OGB examples repository (see Section \ref{sec:hyperparameters}). 
+{\bf \frameworkname{} Models.} We train and evaluate two versions of \frameworkname{} in our experiments, denoted as \frameworkname{}-local and \frameworkname{}-full. In local version we omit the \textsc{GlobalModule} (Eqn \ref{eqn:globalmodule}) and only use local representations in Eqn. \ref{eqn:update_equation1}. In the full version, we use both the local and global modules and follow the entire formulation as in Eqns. \ref{eqn:localnodes}-\ref{eqn:update_equation}. We implement single layer of Transformer encoder in the local and global modules.\footnote{We observed decreased performance when stacking multiple layers, in consistent with recent works such as \cite{chen2022nagphormer, kong2023goat}, and leave the exploration of multi-layered version for later.} Other hyperparameter details are included in Section \ref{sec:hyperparameters}.
+
+
+\begin{table}[!t]
+\centering
+\caption{Results for \texttt{ogbn-products}, \texttt{snap-patents} and \texttt{ogbn-papers100M} datasets. All results reported are on 4 runs. \frameworkname{} as well as models with \textbf{-\constraintname} suffix are the versions of the respective original architecture with \textbf{D2}, \textit{i.e.}, only upto 2-hop computations. GraphSAGE, GAT and GT-sparse use NS with sizes $[20, 10]$. Colors denote \best{First}, \textbf{\good{Second}} and \textbf{Third}. Higher is better. }
+    \scalebox{0.75}{
+    \begin{subtable}{.43\linewidth}
+      \centering
+      \caption{\texttt{ogbn-products}}
+        \begin{tabular}{rc}
+        \toprule
+        \textbf{Model} & \textbf{Test Acc} \\
+        \midrule
+        GraphSAGE\textbf{-\constraintname} &  76.62±0.93 \\
+        GAT\textbf{-\constraintname} &  77.38±0.59 \\
+        GT-sparse\textbf{-\constraintname} &  60.76±0.00 \\
+        NAGphormer\textbf{-\constraintname} &  75.28±0.04  \\
+        GOAT-local\textbf{-\constraintname} &  \best{81.17±0.12}  \\
+        GOAT-global\textbf{-\constraintname} & 70.28±1.95 \\
+        GOAT-full\textbf{-\constraintname} &  \textbf{\good{79.88±0.20}}  \\
+        \midrule
+        \frameworkname{}-local &  \textbf{78.95±0.80}  \\
+        \frameworkname{}-full &  \textbf{\good{79.81±0.25}} \\
+        \bottomrule
+        \end{tabular}
+        \label{tab:comparison_ogbn_products}
+    \end{subtable}%
+    \begin{subtable}{.43\linewidth}
+      \centering
+      \caption{\texttt{snap-patents}}
+        \begin{tabular}{rc}
+        \toprule
+        \textbf{Model} & \textbf{Test Acc} \\
+        \midrule
+        GraphSAGE\textbf{-\constraintname} &  48.43±0.21 \\
+        GAT\textbf{-\constraintname} &  45.92±0.22 \\
+        GT-sparse\textbf{-\constraintname} &  47.81±0.00 \\
+        NAGphormer\textbf{-\constraintname} &  \textbf{60.11±0.05} \\
+        GOAT-local\textbf{-\constraintname} &  40.95±0.16 \\
+        GOAT-global\textbf{-\constraintname} &  42.65±0.07  \\
+        GOAT-full\textbf{-\constraintname} &  50.28±0.14 \\
+        \midrule
+        \frameworkname{}-local &  \textbf{\good{68.19±3.11}}  \\
+        \frameworkname{}-full &  \best{70.21±0.12}  \\
+        \bottomrule
+        \end{tabular}
+        \label{tab:comparison_snap_patents}
+    \end{subtable}
+    \begin{subtable}{.43\linewidth}
+      \centering
+      \caption{\texttt{ogbn-papers100M}}
+        \begin{tabular}{rc}
+        \toprule
+        \textbf{Model} & \textbf{Test Acc} \\
+        \midrule
+        GOAT-full\textbf{-\constraintname} &  61.12±0.10 \\
+        \midrule
+        \frameworkname{}-full &  \best{64.73±0.05}  \\
+        \bottomrule
+        \end{tabular}
+        \label{tab:comparison_ogbn_papers100M}
+    \end{subtable}
+    
+    }
+    \label{tab:results_main}
+\end{table}
+
+
+\subsection{Numerical Results and Discussion}
+\label{sec:results_analysis}
+
+We now present the numerical results in this section. Table \ref{tab:results_main} presents the main comparison of the baselines Model\textbf{-\constraintname} with the \frameworkname{} models. For \texttt{ogbn-papers100M}, we only report the best performing baseline on the homophilic task of \texttt{ogbn-products}  due to computational constraints. Figure \ref{fig:epoch_time_analysis} shows the training time per epoch incurred by the models, while Figure \ref{fig:k_hparam_analysis} shows the sensitivity analysis of the number of nodes sampled ($K$) in Algorithm \ref{alg:localnodes} which is used by \textsc{LocalModule} in \frameworkname{}. We present our observations as follows.
+
+{\bf On Performance.} On comparison with the scalable baselines in Table \ref{tab:results_main} consisting of both GNNs and GTs, we observe \frameworkname{} to attain competitive performance to the best baseline GOAT-local\textbf{-\constraintname} on \texttt{ogbn-products}, while on \texttt{snap-patents}, \frameworkname{} beats all the baselines. The lower scores of GraphSAGE\textbf{-\constraintname} and GAT\textbf{-\constraintname} models reveal, 
+in part, how the constraint \textbf{D2} brings down the model capacity and such a network with a 2-hop graph receptive field may not incorporate necessary information required to build useful node representations. Among all the models on \texttt{ogbn-products}, GOAT-local\textbf{-\constraintname} is the best performing, which on \texttt{snap-patents} ranks the lowest, understandably due to the latter's non-homophilic characteristic where local-only information aggregation may not be enough. 
+All results considered, \frameworkname{} ranks among the best models on both the datasets, suggesting the capacity to work well in both homophilic and non-homophilic settings. Finally, we report the results of \frameworkname{}-full on \texttt{ogbn-papers100M} together with GOAT-full\textbf{-\constraintname} which is the best performing baseline on a similar homophilic task \texttt{ogbn-products} on a computational budget of 48h. We observe \frameworkname{}-full to be significantly better ($5.9\%$) in performance compared to GOAT-full\textbf{-\constraintname}, hence showing the ability to scale to massive graphs.
+
+
+\begin{figure}[t!]
+    \centering
+    \begin{subfigure}[b]{0.43\textwidth}
+        \includegraphics[width=\textwidth]{images/ogbn_products_epochtime.pdf}
+        \caption{\texttt{ogbn-products}}
+        \label{fig:ogbn-products-val}
+    \end{subfigure}
+    \hspace{10pt} 
+    \begin{subfigure}[b]{0.43\textwidth}
+        \includegraphics[width=\textwidth]{images/snap_patents_epochtime.pdf}
+        \caption{\texttt{snap-patents}}
+        \label{fig:ogbn-products-test}
+    \end{subfigure}
+    \caption{Training time per epoch of various baselines with the proposed architecture. \frameworkname{} reports relatively faster epoch times compared to the best baselines despite performing competitively.}
+    \label{fig:epoch_time_analysis}
+\end{figure}
+{\bf On Design Characteristics.} The scores of \frameworkname{} indicate the need to incorporate both local and global neighbor information, as well as the suitability of such architecture to perform both in homophilic and non-homophilic tasks. The absolute gain in performance of \frameworkname{}-full against \frameworkname{}-local which is around 1\% and 2\% respectively for \texttt{ogbn-products} and \texttt{snap-patents} demonstrates how \frameworkname{} satisfies \textbf{D1} design characteristic. \textbf{D2} which necessitates the computational feasibility of a network helps keep the epoch times of each baseline feasible, along with \frameworkname{}. See the epoch times of each experiments in Figure \ref{fig:epoch_time_analysis}. If we further compare GOAT-full\textbf{-\constraintname} with the original GOAT-full (NS of 3 hops) \citep{kong2023goat}, we report per epoch times of 205s and 497s respectively on \texttt{ogbn-products}, which suggests how existing works without \textbf{D2} can be computationally expensive. % to train. 
+Finally, we ensure parallelizability in principle given that the Algorithms \ref{alg:localnodes}-\ref{alg:inputokens} effectively convert the training problem on a single large graph to a standard neural network training on the sampled tokens, which can leverage parallelization without the need of a single global graph context maintained in the memory of any one machine.
+
+\begin{minipage}{0.57\textwidth} 
+{\bf On Runtime.} In Figure \ref{fig:epoch_time_analysis}, we present the training time per epoch of all the models considered. We observe the epoch time of \frameworkname{} to be faster up to a maximum of 3$\times$ times (GOAT-full\textbf{-\constraintname} vs. \frameworkname{}-full). Further, Fig. \ref{fig:valition_test_curves} in Sec. \ref{sec:additional_runtime_analysis} shows better learning and generalization curves of our proposed architecture against the baselines.  
+{\bf On Node set sizes $K$.} In Figure \ref{fig:k_hparam_analysis}, we show results of \frameworkname{}-full experiment on an important hyperparameter in our proposed framework, the number of nodes to be sampled from \textsc{LocalNodes} (Algorithm \ref{alg:localnodes}). The value of $K$ is chosen from a list of [20, 40, 50, 60, 80, 100, 150, 200]. We observe best performance on $K=100$ and $K=50$ for \texttt{ogbn-products} and \texttt{snap-patents} respectively, which somewhat aligns with the extent of their tasks being non-homophilic since a lower $K$ would reflect lesser tokens from the local neighborhood.
+\end{minipage}
+\hspace{8pt}
+\begin{minipage}{0.4\textwidth} % Width for the figure
+\begin{figure}[H]
+\centering
+  \includegraphics[width=\linewidth]{images/k_hparam_analysis.pdf}
+  \caption{$K$ hyperparameter analysis of Ours-full model on \texttt{ogbn-products} and \texttt{snap-patents} datasets. Labels on the data points denote the training time per epoch. }
+  \label{fig:k_hparam_analysis}
+  \end{figure}
+\end{minipage}
+
+
+
+
+
+\section{Conclusion}
+
+In this work, we propose the \frameworkname{} framework for designing Graph Transformers on very large graphs, such at those with at least millions nodes. We studied the characteristics and constraints necessary for a learning model to effectively scale on large graphs, namely model capacity, computational feasibility, and distributed training ability.
+We design \frameworkname{} to satisfy the intended criteria, and show a proof of concept of how these components can be incorporated into a GT model to obtain competitive results in an improved runtime compared to architectures in prior literature.
+
+{\bf Further research.}
+In our \frameworkname{} framework, we focus on key design elements that offer both a robust model and the ability to scale on large graphs. We believe some features of this framework are worth further study. The main goal of this work is to demonstrate the core components like the sampling and tokenization steps (\textsc{LocalNodes}, \textsc{InputTokens}), as well as the update modules (\textsc{LocalModule}, \textsc{GlobalModule}). However, these can be further optimized for specific types of graphs. For instance, our current tokenization approach allows a wide 4-hop receptive field through simpler 2-hop operations. Yet, other sampling techniques could be more efficient in capturing complex relationships. Same applies for exploration on \textsc{GlobalModule}'s efficiency.
+
+
+
+

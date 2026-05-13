@@ -1,0 +1,415 @@
+\title{Dense Video Object Captioning from Disjoint Supervision}
+
+\begin{abstract}
+We propose a new task and model for \emph{dense video object captioning} -- detecting, tracking and captioning trajectories of objects in a video.
+This task unifies spatial and temporal localization in video, whilst also requiring fine-grained visual understanding that is best described by natural language.
+We propose a unified model, and demonstrate how our end-to-end approach is more accurate and temporally coherent than a multi-stage pipeline combining state-of-the-art detection, tracking, and captioning models.
+Moreover, we propose a training strategy based on a mixture of disjoint tasks, which allows us to leverage diverse, large-scale datasets which supervise different parts of our model.
+Although each pretraining task only provides weak supervision, they are complementary and, when combined, result in noteworthy zero-shot ability and serve as strong initialization for additional finetuning to further improve accuracy.
+We carefully design new metrics capturing all components of our task, and show how we can repurpose existing video grounding datasets (\eg VidSTG and VLN) for our new task.
+We show that our model improves upon a number of strong baselines for this new task.
+Furthermore, we can apply our model to the task of spatial grounding, outperforming prior state-of-the-art on VidSTG and VLN, without explicitly training for it.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Powered by gigantic datasets and models, \emph{language} is becoming the output modality of the most capable artificial intelligence models~\citep{team2023gemini,alayrac2022flamingo,ouyang2022training,li2023blip,liu2023llava,tong2024cambrian,li2024llava}.
+Language unifies different tasks with the same output space~\citep{raffel2020exploring, chen2023palix}, is more descriptive than discrete class labels~\citep{wu2022grit,long2023capdet}, and naturally facilitates zero-shot prediction of novel tasks~\citep{radford2021learning, brown2020language}.
+Inspired by advances in natural language understanding, the vision community has explored language in a number of tasks including image captioning~\citep{chen2015microsoft}, dense image captioning~\citep{krishna2017visual}, question answering~\citep{antol2015vqa}, video captioning~\citep{Monfort_2021_CVPR} and representation learning~\citep{radford2021learning}.
+However, likely due to the scarcity of large-scale, aligned training data, we are not aware of any existing single vision-language model that unifies both fine-grained \textbf{spatial}- (by detecting objects) and \textbf{temporal}- (by reasoning across time in videos) understanding.
+
+In this paper, we propose a new task and model for \emph{dense video object captioning} (\DenseVOC) -- the task of generating captions of trajectories of all objects from video (Fig.~\ref{fig:teaser}). %
+\DenseVOC requires understanding across space, time, and language (Fig.~\ref{fig:taskcube}), and is therefore a superset of existing vision tasks, namely object detection~\citep{everingham2015pascal,lin2014microsoft}, multi-object tracking~\citep{dendorfer2021motchallenge,dave2020tao} and captioning~\citep{chen2015microsoft}.
+
+\input{figures/teaser.tex}
+
+A prominent challenge for training our model is that datasets with captioned trajectories are scarce.
+However, annotations for each sub-task, or even each combination of the sub-tasks, are abundant.
+For example, we can train our object proposal component using image-level object detection labels from COCO~\citep{lin2014microsoft}, and the captioning component from video-level captioning datasets like SMiT~\citep{Monfort_2021_CVPR}.
+These disjoint training tasks are complementary, and in combination supervise our entire model.
+This enables us to perform our \DenseVOC task in a zero-shot manner, and we show that we can achieve noteworthy performance despite not having access to any full, captioned object trajectories during training.
+Furthermore, this pretraining serves as a powerful initialization for finetuning on the full \DenseVOC task, where limited annotations are available.
+
+\input{figures/taskcube.tex}
+
+Another challenge in our task is to produce holistic and consistent captions for objects across frames.
+Note that a baseline of applying a strong, dense image captioning model per-frame, and then linking objects together is poorly suited to this scenario: the captions at each frame are likely to be different due to subtle appearance changes across frames.
+This motivates our end-to-end trained model, which includes a novel end-to-end tracking algorithm that aggregates features of the same object across time, enabling the subsequent captioner to leverage global features to produce coherent captions.
+Although we are the first to our knowledge to study \DenseVOC, we can still repurpose existing video grounding datasets for evaluation and domain-specific finetuning.
+We use VidSTG~\citep{zhang2020does} and VLN~\citep{voigtlaender2023connecting}, originally designed for spatiotemporal sentence grounding:
+Instead of finding an object tube given a sentence query (grounding), we predict object trajectories
+directly and use the sentence queries as the ground truth captions.
+In addition, we show that our generative model trained for \DenseVOC can perform grounding by simply selecting the bounding boxes with the maximum likelihood of producing the query sentence.
+We also develop a new metric that jointly measures captioning, detection and tracking accuracy
+by extending HOTA~\citep{luiten2021hota}, the most popular metric for multi-object tracking.
+
+Experiments show that our end-to-end trained \DenseVOC model outperforms baselines consisting of strong, per-task models by a substantial margin, producing more accurate and inherently temporally consistent captions.
+Moreover, we achieve significant improvements from our disjoint, multi-dataset training.
+We additionally show how we can readily apply our model to related domain-specific datasets:
+by finetuning our model on a recent person tracking and captioning dataset, BenSMOT~\citep{li2024beyond}, we outperform prior work by $18.2$ points.  %
+Furthermore, by applying our generative captioning model to the discriminative grounding task, we are able to outperform dedicated spatial grounding models on both VidSTG and VLN.
+In summary, we propose the following contributions:
+\begin{spacing}{0.8}
+\begin{enumerate}
+	\item We propose the new task of Dense Video Object Captioning. We propose novel evaluation metrics, and repurpose existing grounding datasets for evaluation. %
+	\item We design an end-to-end architecture for our task, with a novel tracking algorithm and feature aggregator that ensures temporally consistent captions. Unlike conventional offline trackers, our tracker is trained end-to-end with the model and produces long-term trajectory features for subsequent captioning. %
+	\item We show our model can be trained without full annotations for the task, with a mixture of disjoint datasets which supervise different parts of our model.
+	\item We further show how our models generalize to downstream video grounding tasks, achieving state-of-the-art results on two datasets, without explicitly being trained for grounding.
+	\item Moreover, we significantly improves the state-of-the-art on the BenSMOT dataset~\cite{li2024beyond} for Semantic Multi-Object Tracking.
+\end{enumerate}
+\end{spacing}
+
+
+
+\section{Related Work}
+
+
+\noindent\textbf{Image captioning}~\citep{chen2015microsoft,anderson2018bottom,xu2015show,rennie2017self} describes the content of an image with language.  
+State-of-the-art methods map the input image to output text by using multi-modal models~\citep{jiang2020defense,desai2020virtex,li2020oscar,zhang2021vinvl,li2023blip, yu2022coca} pretrained on large datasets~\citep{sharma2018conceptual,radford2021learning}.
+For example, GIT~\citep{wang2022git} simple forwards vision tokens from a ViT encoder~\citep{dosovitskiy2020image} to an auto-regressive language decoder~\citep{vaswani2017attention, devlin2018bert}.
+Similar ideas apply to \textbf{video captioning}~\citep{xu2016msr,zhou2018towards,Monfort_2021_CVPR},
+by concatenating~\citep{wang2022git} or pooling~\citep{yan2022video} features from each frame, before feeding them to an auto-regressive text decoder.
+Our work builds on existing captioning architectures~\citep{wang2022git},
+and extends them to trajectory captioning using our end-to-end model and weak supervision~\citep{Monfort_2021_CVPR,krishna2017visual,lin2014microsoft}.
+
+\noindent\textbf{Dense object captioning} in contrast, detects objects in an image and describes them with text~\citep{johnson2016densecap,li2019learning,shao2022region,wu2022grit}.
+It was \popularised by the Visual Genome~\citep{krishna2017visual} dataset, which contains full annotations for the task.
+Early work, DenseCap~\citep{johnson2016densecap} used a one-stage detector~\citep{redmon2016you} followed by an LSTM text decoder~\citep{hochreiter1997long} on dense feature maps.
+Most recently, GRiT~\citep{wu2022grit} built upon the state-of-the-art image captioning architecture of GIT~\citep{wang2022git}, and generated object captions, also with a transformer decoder~\citep{vaswani2017attention}, from RoI-pooled~\citep{he2017mask} image features.
+Our model advances architectures like GRiT to videos and incorporates end-to-end tracking.
+We also note that \textbf{dense video captioning} in the literature refers to the task of \localising and captioning multiple events \emph{temporally} in videos~\citep{krishna2017dense, zhou2018towards, wang2021pdvc, yang2023vid2seq}.
+Our task, in contrast, involves tracking and captioning objects in a video, and therefore requires \emph{spatial} \localisation, which is why we name our task ``dense video object captioning''.
+\noindent\textbf{Multi-object tracking} detects objects and track them with a consistent identity label.
+The predominant approach is tracking-after-detection~\citep{Bewley2016_sort,zhang2021fairmot,du20211st}, \ie first running detectors on each frame and then using a separate tracker to link them.
+While this works well for existing benchmarks with only a few classes~\citep{dendorfer2021motchallenge,Geiger2012CVPR,Yang2019vis}, it is more challenging in our case: we need tracks \emph{before} captioning to have a single, consistent textual output for the whole trajectory.
+Thus, our work follows \textbf{end-to-end multi-object tracking}~\citep{cheng2021mask2former,li2022videoknet,wang2021end,zhou2022global}.
+We adopt a global tracker GTR~\citep{zhou2022global}, which casts tracking as pairwise association among all objects within a video.
+Whilst GTR applies a sliding-window-based identity association algorithm during inference as a post-processing step, we design an efficient algorithm to perform this process end-to-end.
+This is necessary for our task, since our trajectory features are used by a subsequent captioning module which is trained jointly.
+We are not aware of prior work which efficiently assigns object identities and corresponding features to tracks, and trains end-to-end through this process.
+Finally, note that \textbf{video object tracking and segmentation}~\citep{yang2021aot,yang2021aost,yang2022deaot,cheng2022xmem,cheng2023putting} focuses on following only a \textit{single} object which is given in the first frame~\citep{perazzi2016benchmark,xu2018youtube}.
+This is therefore a different setting from our task of detecting, tracking and captioning multiple objects.
+
+\noindent\textbf{Video object grounding}~\citep{zhang2020does,voigtlaender2023connecting} finds a spatio-temporal tube given a video and query sentence as inputs.
+Existing, discriminative methods~\citep{zhang2020does,yang2022tubedetr,jin2022embracing, su2021stvgbert} co-embed visual and text inputs, and use the sentence feature to find the corresponding object.
+In contrast, we use our generative language model for this task by selecting the object with the highest likelihood of producing the query.
+To our knowledge, we are the first work to explore the alternate paradigm of generative models for this task.
+Finally, we note that these tasks are also related to video-referring segmentation~\citep{bellver2020refvos,wu2022language,yu2016modeling} which grounds textual queries to segmentation masks.
+Segmentation, however, is not the focus of our work.
+Concurrent to our work, BeyondMOT~\citep{li2024beyond} proposes an video object tracking and captioning benchmark and model.
+We highlight two differences:
+1. \citet{li2024beyond} uses a frame-by-frame tracker similar to our baselines (\reftbl{tracking}), and we propose a novel end-to-end tracker.
+2. Our work aims to track and caption \textbf{all objects} in the video, while \citet{li2024beyond} handles \textbf{only persons}.
+As a result, our task is much more challenging, and we show our model yields superior performance on their benchmark.
+OW-VISCap~\citep{choudhuri2024ow} on the other hand augments a video segmentation model, \citet{cheng2021mask2former}, with a language model (OPT with 2.7 billion parameters~\citep{zhang2022opt}) head for video segmentation and captioning.
+In contrast, our model is trained flexibly using our disjoint pretraining, which enables us to achieve better detection and tracking performance whilst still using a substantially smaller model. 
+
+
+
+\section{Method}
+
+\label{sec:method}
+
+\input{figures/model_overview.tex}
+
+As shown in Fig.~\ref{fig:model_overview}, our end-to-end model consists of
+interlinked heads for object proposal, tracking and captioning the resulting trajectories.
+Before introducing our novel components, we review prior techniques for captioning and dense object captioning in images~\citep{wu2022grit, wang2022git}. %
+
+\subsection{Background}
+\label{sec:method_background}
+
+Image captioning maps an input image, $\mathbf{I} \in \mathbb{R}^{H \times W \times 3}$, to a caption $c = (y_1, y_2, \ldots, y_{n_t})$ which is a sequence of up to $n_t$ text tokens from a given vocabulary.
+The minimal set of components is an image encoder, followed by a text decoder~\citep{vaswani2017attention}.
+The encoder maps the input image $\mathbf{I}$, to a feature representation $\mathbf{f} \in \mathbb{R}^{n_v \times d}$ consisting of $n_v$ tokens with dimensionality $d$.
+The subsequent text decoder is auto-regressive~\citep{graves2013generating} -- it predicts the next text token, $y_i$, as a function of both the image features, $\mathbf{f}$, and previously generated text tokens, $\mathbf{y}_{0:i-1}$, denoted by $y_i = \text{Decode}(\mathbf{f}, \mathbf{y}_{0:i-1})$.
+Note that the first step of decoding begins with $y_0 = \texttt{BOS}$, a special beginning-of-sentence token, and the caption ends when the end-of-sentence token, $\texttt{EOS}$, is output by the model.
+This simple image captioning model has been demonstrated to be effective and scalable by GIT~\citep{wang2022git}, achieving state-of-the-art results across a number of captioning datasets.
+
+GRiT~\citep{wu2022grit} extends the approach further to dense object captioning of images:
+Here, the authors use an object proposal network~\citep{zhou2019objects} to produce a set of $K$ class-agnostic bounding boxes, $b_1, b_2, \ldots, b_K$.
+Features corresponding to each of these objects are obtained using RoIAlign~\citep{he2017mask}, resulting in a \localised feature, $f_k \in \mathbb{R}^{r \times r \times d}$ where $r = 7$ is the output resolution of RoIAlign.
+Each of these grid features is flattened into $f_k \in \mathbb{R}^{r^2 \times d}$ and decoded independently by the text decoder, as done in GIT.
+Therefore, the loss used to train a GRiT model consists of $L = L_{object} + L_{caption}$ where $L_{caption}$ is a cross-entropy loss over all text tokens in the vocabulary, and $L_{object}$ consists of bounding box regression and objectness terms, as standard in object detection literature~\citep{zhou2019objects, ren2015faster, lin2017focal}.
+
+We now describe how we extend object captioning to videos by tracking object proposals over time (Sec.~\ref{sec:method_end_to_end_tracking}) and aggregating trajectory features and captioning them (Sec.~\ref{sec:method_trajectory_captioning}) in an end-to-end fashion.
+Section~\ref{sec:method_disjoint_pretraining} explains how we train our model, whilst Sec.~\ref{sec:grounding} describes how we apply our model directly to video object grounding tasks.
+
+\subsection{End-to-end tracking}
+\label{sec:method_end_to_end_tracking}
+As shown in Fig.~\ref{fig:model_overview} (left), we first produce object proposals separately for each frame. 
+Tracking then aims to assign each object in each frame a unique trajectory identity $\delta \in \mathbb{N}$.
+We define $\mathbf{f}^t_k \in \mathbb{R}^{r^2 \times d}$ as the ROI feature of object proposal $k$ in frame $t$, $\mathbf{F} = [\mathbf{f}^t_k]_{t=1, k=1}^{T, K_t}$ as the concatenation of all object features in the video.
+Let $M = |\mathbf{F}| = \sum_{t=1}^{T} K_t$ as the total number of objects in all frames, where $K_t$ is the number of object proposals at the $t^{\text{th}}$ frame. Thus, we have $\mathbf{F} \in \mathbb{R}^{M \times r^2 \times d}$.
+
+\input{text/tracking_algorithm}
+
+From these object features, $\mathbf{F}$, we predict a global association matrix, $\mathbf{A} \in \mathbb{R}^{M \times M}$, where $\mathbf{A}_{ij} = 1$ if the objects denoted by the $i^{th}$ row and $j^{th}$ column are from the same trajectory (Fig.~\ref{fig:model_overview} middle).
+Otherwise, $\mathbf{A}_{ij} = 0$ means that they are from different trajectories, or one of them is the background.
+
+We use a transformer module, $\TrackingHead$, with two self-attention layers, similar to ~\citet{zhou2022global}, to predict the association matrix
+$\mathbf{A} = \sigma(\TrackingHead(\mathbf{F})$), where $\sigma$ is the sigmoid activation.
+Given the object trajectory annotations, we construct the ground truth association matrix $\mathbf{\bar{A}}$ for $\mathbf{A}$, where $\mathbf{\bar{A}}_{ij} = 1$ if and only if row $i$ and column $j$ of $\mathbf{A}$
+are matched to the same ground truth trajectory using an Intersection over Union (IoU) criteria of 0.5.
+The training loss $L_{assoc}$ for this module is then a binary cross entropy between $\mathbf{A}$ and $\mathbf{\bar{A}}$,
+$L_{assoc} = \frac{1}{M}\sum_{ij} \text{BCE}(A_{ij}, \bar{A}_{ij})$.
+After constructing our association matrix, $\mathbf{A}$, we need to aggregate object-level features according to identities $\delta = [\delta_{k}^t]_{t=1, k=1}^{T, K_t}$, to generate trajectory-level captions for the next captioning stage.
+Here, $\delta_{k}^t$ denotes the identity of the $k$-th object proposal in the $t$-th frame.
+We design a greedy grouping algorithm (\refalg{tracking})
+operating on $\mathbf{A}$ to obtain $\delta$.
+Concretely, we greedily extract the longest trajectory from untracked objects, until there are no possible associations left (indicated by the association score being above a threshold $\theta$).
+This guarantees each trajectory has at most one object in each frame.
+This algorithm can be implemented efficiently on accelerators, allowing us to backpropagate through it.
+
+As aforementioned, prior trackers~\citep{zhang2021fairmot,zhou2020tracking,zhou2022detecting} do not explicitly perform identity assignment within the model, but rather as a post-processing step since tracking is the final output for such methods.
+Our work efficiently assigns object identities to tracks in an end-to-end trainable network, which enables us to perform joint trajectory-level captioning training as described next.
+
+\subsection{Trajectory captioning}
+\label{sec:method_trajectory_captioning}
+
+Our end-to-end tracking module produces object features, $\mathbf{f}_k$ (we omit the frame index $t$ below for clearer notation), paired with their identities, $\delta_k$, which denote their correspondence over time.  %
+We now describe two methods for aggregating features along this trajectory in order to caption it.
+
+\noindent\textbf{Soft aggregation.}
+A straightforward way to leverage object features over time is to compute a weighted sum to combine them into a single, global trajectory feature.
+We observe that the association matrix,  $\mathbf{A}$ (Sec.~\ref{sec:method_end_to_end_tracking}), already serves as a summation weight.
+Specifically, we set $\mathbf{G} = \frac{\mathbf{A}}{||\mathbf{A}||} \cdot \mathbf{F}$, where $\cdot$ denotes matrix multiplication, and $||\cdot||$ normalizes $\mathbf{A}$ by rows.
+Each row of $\mathbf{G}$, $\mathbf{g}_k \in \mathbb{R}^{r^2 \times d}$, therfore denotes an aggregated feature over its trajectory for object $k$. 
+
+\noindent\textbf{Hard aggregation.}
+An alternative to weighted temporal averaging is to concatenate and construct new trajectory features.
+Let $\mathbf{f}_\tau = \{\mathbf{f}_{k'}\}_{\delta_{k'} = \tau}$ be the set of all object features with identity $\tau$. We note $\mathbf{f}_\tau$ can be as long as the entire video, and thus it may be expensive to directly use $\mathbf{f}_\tau$. %
+Therefore, we uniformly sample a subset of object features from the trajectory, denoted as $\mathbf{g}_\tau = \text{UniformSample}(\mathbf{f}_\delta, m)$, where $\mathbf{g}_{\tau} \in \mathbb{R}^{mr^2 \times d}$, inspired by~\citet{wang2022git}.
+$m$ is the number of sampled frames, and we set $m = 6$ following ablations in \supplement{tracking-sampling}.
+
+The trajectory-aggregated features for each object, $\mathbf{g}_k$, are then autoregressively decoded into output captions for each object, $\mathbf{y}_k$.
+This follows Sec.~\ref{sec:method_background}, where $y_{k,i} = \text{Decode}(\mathbf{g}_k, \mathbf{y}_{k, 0:i-1})$.
+Note that the language decoder has the same parameters as in single-frame object captioning, but processes more input tokens.
+Therefore, we train it in the same manner with a softmax cross-entropy loss over the vocabulary of text tokens, denoted by $L_{caption}$.
+
+\subsection{Pretraining with disjoint subtasks}
+\label{sec:method_disjoint_pretraining}
+\lblsec{disjoint-training}
+
+As shown in Fig.~\ref{fig:model_overview}, our model is trained with the loss function, $L = L_{object} + L_{assoc} + L_{caption}$.
+When we have full \DenseVOC annotations, which supervise each component of our model we can train our entire model end-to-end.
+However, to leverage more weakly-labeled data, we can also decompose \DenseVOC into subtasks, and use each subtask to supervise the relevant part of our model using the available annotations as shown in Tab.~\ref{tab:disjoint_pretraining}.
+This approach also enables us to perform our final task in a zero-shot manner (\ie without training on any full \DenseVOC annotations).
+
+\input{tables/disjoint_pretraining.tex}
+
+\noindent\textbf{Object detection.}
+Using detection datasets for images, we can train the object proposal generator with $L_{object}$.
+We use COCO~\citep{lin2014microsoft} as it is the most popular dataset for this task.
+
+\noindent\textbf{Dense captioning in images.}
+Dense object captioning datasets of images allow us to train both the object proposal generator and the text decoder, by supervising $L_{object}$ and $L_{caption}$.
+Here, we use Visual Genome~\citep{krishna2017visual}, the largest dataset for this task. 
+
+\noindent\textbf{Global video captioning.}
+Video captioning datasets help us to reduce the domain gap to our final task by also training on video.
+In particular, we use Spoken Moments in Time (SMiT)~\citep{Monfort_2021_CVPR} which is the largest dataset for this task and contains narrations for short clips (roughly 3 seconds).
+As there are no object annotations, but only video-level captions, we construct an object proposal from the entire frame and caption that with our text decoder, applying $L_{caption}$.
+This approach is inspired by prior work on weakly-supervised object detection~\citep{zhou2022detecting,bilen2016weakly,arnab2020uncertainty}.
+
+\noindent\textbf{Tracking.}
+Training the tracking module of our network (Sec.~\ref{sec:method_end_to_end_tracking}) requires annotations that associate detections of an object identity throughout the video.
+We found that existing tracking datasets either have too limited vocabularies for general objects (MOT~\citep{dendorfer2021motchallenge}, KITTI~\citep{Geiger2012CVPR}, YouTube VIS~\citep{Yang2019vis}), or are too small (TAO~\citep{dave2020tao} and UVO~\citep{wang2021unidentified} label 600 and 5 000 videos respectively),
+and thus giving unsatisfactory results in our setting (\supplement{UVO}).
+As a result, following existing work~\citep{zhang2021fairmot,zhou2020tracking}, we instead augment image datasets into tracking ones by applying two different data augmentations to the same image, and then linearly interpolating the frames in between to form a pseudo-video.
+In particular, we augment COCO (referred to as Aug-COCO~\citep{zhou2020tracking}).
+This enables us to apply $L_{assoc}$ and $L_{object}$ when training our model.
+
+\subsection{Application to video object grounding}
+\lblsec{grounding}
+
+The task of video object grounding~\citep{zhang2020does, voigtlaender2023connecting} consists of two inputs: a video, $\mathbf{V}$, and a sentence query, $\bar{c}$.
+The output is a sequence of bounding boxes, $[b^s, b^{s+1}, \dots, b^{e}]$, corresponding to the sentence query, where $s$ and $e$ are the indices of the start and end frames respectively.
+
+Our model, however, generates captions, $c$, at the output, rather than requiring it as an input.
+To apply our model to grounding, we follow an analogous approach to prior works that performed closed-set image classification with captioning models~\citep{alayrac2022flamingo, chen2022pali}:
+we evaluate the likelihood (i.e., exponential negative cross-entropy loss) of the sentence query, $\bar{c}$, for each of the object trajectories produced by our model.
+In practice, we find that instead of just taking the object trajectory with the highest sentence-likelihood, we achieve higher accuracy by weighting the likelihood by the detection score, $s_k$, from our object proposal module.
+Thus, given bounding boxes, trajectory features and detection scores, $\{(b_k^t, s_k^t, \mathbf{g}_k)\}_{t=1, k=1}^{T, K_t}$, we choose the bounding boxes with the highest weighted likelihood:
+\begin{equation}
+{k}^{*} = \argmax_{k} \left(s_k^t \cdot \text{exp}(-L_{caption}(\text{Decode}(\mathbf{f}_k^t), \bar{c})) \right), \qquad b^t = b_{{k}^*}^t.
+\end{equation}
+
+
+\section{Experimental Evaluation}
+
+
+As we are proposing a new task, there is no dedicated dataset or evaluation metric for dense video object captioning for all objects.
+Fortunately, existing video grounding datasets~\citep{zhang2020does, voigtlaender2023connecting} have annotations for object trajectories and their captions, allowing us to repurpose them for \DenseVOC, as defined next.
+We also report results on concurrent person-focused video object tracking and captioning benchmark, BenSMOT\citep{li2024beyond}.
+
+\subsection{Datasets}
+\lblsec{downstream-datasets}
+\noindent\textbf{VidSTG~\citep{zhang2020does}} was originally created for spatio-temporal sentence grounding, but can be used for \DenseVOC:
+Each video annotates multiple textual queries and their corresponding spatio-temporal tubes.
+By aggregating these across all videos, we obtain the paired trajectory-caption annotations that we need for training and evaluating our model.
+
+VidSTG has exhaustive trajectory (\ie bounding box and tracking) annotations for all objects~\citep{shang2019annotating}, but not all objects are used in grounding, and thus not all objects have captions.
+We account for this fact in both training and testing.
+Specifically, we do not compute $L_{caption}$ on objects without caption annotations, and also exclude them during evaluation (see \refsec{metrics}).
+In particular, when a prediction is matched to a ground truth without caption annotations, we do not evaluate its captioning metrics, but still evaluate detection metrics.
+The dataset contains 5,436 training videos and 602 validation videos, with each video being at most 200 frames long.
+We use the declarative annotations from the dataset containing 19,000 captioned trajectories
+for training.
+
+\noindent\textbf{Video Localized Narratives (VLN)~\citep{voigtlaender2023connecting}} augments existing datasets by narrating the ``actors'' in a video.
+We therefore use these narrations as our target captions.
+We use the subset from the UVO dataset~\citep{wang2021unidentified} as UVO has exhaustive detection and tracking annotations for all objects.
+Like VidSTG, the captions are not exhaustive for all objects, so we exclude objects without captions in both training and evaluating the captioning module.
+Each video has bounding box annotations for 3 sparsely sampled frames, and thus we train and evaluate on these frames.
+The dataset contains a total of 5,136 training and 2,451 validation videos.
+
+\noindent\textbf{BenSMOT~\citep{li2024beyond}} contains person bounding boxes trajectories and their manually-annotated captions for 3292 YouTube videos. The dataset has in average 2.2 trajectories per video.
+
+\subsection{Evaluation metrics}
+\lblsec{metrics}
+
+\noindent\textbf{Captioned-HOTA (CHOTA).}
+Our primary metric, \CHOTA, builds on Higher Order Tracking Accuracy (HOTA)~\citep{luiten2021hota} -- which is now the
+most popular metric in multi-object tracking -- by adding a captioning term.
+HOTA decomposes tracking into two subproblems: detection and association, with the final score being the geometric mean of detection accuracy (DetA) and Association Accuracy~(AssA): $\text{HOTA} = \sqrt{\text{DetA} \cdot \text{AssA}}$.
+Here, $\text{DetA}=\frac{|TP|}{|TP| + |FP| + |FN|}$, and AssA averages the ``Association IoU'' over true-positives, as $\text{AssA}=\frac{1}{|TP|}(\sum_{(x, y) \in TP}\text{Ass-IoU(x, y))}$, where $(x, y)$ are the matched prediction-ground truth box pairs in each frame.
+Note that HOTA computes the DetA and AssA for each detection in each frame, rather than for each trajectory, as the overall trajectory performance is implicitly measured by the association of detections over time.
+Moreover, it considers all possible trajectory matches that can be made simultaneously (Sec.~7 of~\citet{luiten2021hota}).
+Our task consists of captioning, detection and association.
+Therefore, we also define an additional ``Captioning Accuracy'' (CapA) term as:
+
+\begin{equation}
+\text{CapA} = \frac{1}{3 |TP'|} \sum_{(x, y)\in TP'}({\text{METEOR}(x, y) + \text{CIDEr}(x, y) + \text{SPICE}(x, y)}),
+\end{equation}
+
+which uses three popular image-captioning metrics~\citep{chen2015microsoft}, and $TP'$ are the true-positive detection pairs that have caption annotations (as discussed in \refsec{downstream-datasets}). %
+Note that for compatibility with HOTA, we follow DetA and AssA and compute CapA separately per-object on each frame.
+The final metric is then $\text{CHOTA} = \sqrt[3]{\text{DetA} \cdot \text{AssA} \cdot \text{CapA}}$, effectively adding a captioning term to the HOTA metric.
+We include further details and code in \supplement{additional_exp_detail}, along with results using the image dense object captioning metrics, mAP-METEOR (\supplement{apm-details}).
+
+\subsection{Implementation details}
+\lblsec{implement-details}
+
+Our implementation is based on the public release of GRiT~\citep{wu2022grit}.
+GRiT uses a ViTDet-Base~\citep{li2022exploring} backbone (\initialised with CLIP~\citep{radford2021learning}), a CenterNet~\citep{zhou2019objects} object proposal network and RoI Head, and a randomly-\initialised text decoder.
+
+We first train our model for general \DenseVOC on large-scale disjoint datasets~(Sec.~\ref{sec:method_disjoint_pretraining}).
+During disjoint pretraining, we sample batches from different datasets with an even ratio, (1: 1: 1: 1), thus avoiding additional hyperparameters.
+For video datasets, we sample 8 frames for a video and use a local batch size of 1.
+For image datasets, we use a local batch size of 8.
+We train our model on 32 GPUs, which means we have an effective batch size of 256 images or 32 videos.
+
+\input{tables/eval_tracking_thresh05.tex}
+
+We then evaluate the models on the two fully-annotated datasets (Sec.~\ref{sec:downstream-datasets}) in both zero-shot and full-finetuning setups.
+For VidSTG, we sample 16 frames during training, and then run on all 200 frames during testing.
+For VLN, we use all 3 annotated frames in both training and evaluation.
+In both cases, we use an input size of $384\!\times\!384$.
+During inference, we threshold the outputs of our object proposal module with a score of $0.5$, and only track the remaining objects.
+We include exhaustive implementation details and hyperparameters in \supplement{training-details} with the full code.
+
+\subsection{Analysis of end-to-end tracking}
+
+We first study the benefits of our end-to-end model in Tab.~\ref{tab:tracking}.
+We do this by comparing to multiple, strong baseline models running in sequence.
+Concretely, we use the state-of-the-art image-dense object captioning model ~\citet{wu2022grit} followed by tracking as a post-processing step.
+We use trackers ranging from a simple IoU-based tracker~\citet{wu2019detectron2} to more recent, sophisticated methods like FairMOT~\citep{zhang2021fairmot}, and ByteTrack~\citep{zhang2022bytetrack}.
+
+As the baseline predicts captions independently on each frame, the caption is not consistent over the entire trajectory.
+Therefore, we consider an additional baseline where we only use the caption from the middle frame of the trajectory.
+Finally, note that as our baseline captioner is pretrained on Visual Genome, and then finetuned on individual frames of VidSTG, it has been trained on identical data to our model, allowing us to make fair comparisons.
+
+As shown in Tab.~\ref{tab:tracking}, per-frame captioners followed by offline trackers produce temporally inconsistent captions (\rowNumber{\#1}-\rowNumber{\#3}).
+Naively selecting the caption from the middle frame as the trajectory-level caption produces temporally consistent captions, but comes at the cost of captioning accuracy, as a single frame may not be representative of the entire event (\rowNumber{\#4}).
+Both variants of our model (\rowNumber{\#5} and \rowNumber{\#6}) improve tracking quality substantially, as shown by their large improvement on AssA, demonstrating the benefits of end-to-end training and incorporating temporal information.
+Our model improves on CapA too, showing that improved object trajectories provide better features for subsequent captioning.
+Finally, we note that the quality of the initial detections at each frame, measured by DetA, does not really change between the baselines and our method. This does, however, show that training our model jointly with multiple loss functions does not compromise performance on individual tasks.
+
+Overall, our end-to-end model (\rowNumber{\#6}) improves the CHOTA by 2.6 points over the best baseline (\rowNumber{\#3}).
+As hard aggregation performs slightly better, we use it in our following experiments.
+
+\subsection{Analysis of disjoint training}
+
+\input{tables/combined_zeroshot_and_fintuning_eval.tex}
+\noindent\textbf{Zero-shot evaluation.}
+We first pretrain on multiple disjoint datasets (\refsec{disjoint-training}), and evaluate zero-shot on our target datasets, VidSTG and VLN, without training on them in Tab.~\ref{tab:zeroshot_and_finetune} left.
+Zero-shot evaluation is simple to perform for captioning models compared to classification, thanks to their open vocabulary.
+
+As mentioned in Tab.~\ref{tab:disjoint_pretraining} and Fig.~\ref{fig:model_overview}, each dataset supervises different parts of our model.
+For example, a model that is only trained on COCO (\rowNumber{\#1} in Tab.~\ref{tab:zeroshot_and_finetune}), is only trained with $L_{object}$, meaning that it only produces object proposals which we can evaluate with the Detection Accuracy component of our \CHOTA metric.
+Visual Genome (VG) can supervise both the object proposal and captioning heads of our model.
+However, there is a large domain gap between the captions in VG and our target datasets, since the captions in VG are for single images and focus on very different vocabularies. Furthermore, VG tends to annotate bounding boxes around object parts rather than entire objects.
+Consequently, our zero-shot DetA is low when training only on VG (\rowNumber{\#2}).
+To mitigate the differences in the type of bounding boxes annotated by VG, we ignore $L_{object}$ on it when using it in conjunction with COCO.
+Note that we cannot evaluate a model trained only on SMiT, as it does not produce bounding boxes.
+
+We observe in Tab.~\ref{tab:zeroshot_and_finetune} (left) that the different datasets have complementary properties: Adding COCO improves detection accuracy (\rowNumber{\#2} to \rowNumber{\#5}, \rowNumber{\#4} to \rowNumber{\#7}), and adding SMiT improves the captioning accuracy (\rowNumber{\#2} to \rowNumber{\#4}, \rowNumber{\#5} to \rowNumber{\#7}) even though SMiT only captions at a video-level.
+Finally, training with Aug-COCO allows us to also supervise $L_{assoc}$ and thus the tracking module of our model.
+A model trained on all the datasets (\rowNumber{\#8}) can therefore perform the full \DenseVOC task, and shows good performance on all individual metrics compared to models trained on fewer datasets.
+Notably, we observe our final model with tracking improves captioning ability (CapA) without adding captioning training data.
+Similar to Tab.~\ref{tab:tracking}, the improvements are likely from our ability to leverage temporal information.
+
+\noindent\textbf{Finetuning evaluation.}
+We now finetune each of the pretrained models from Tab.~\ref{tab:zeroshot_and_finetune} left and show results in the right.
+We also include a baseline (\rowNumber{\#0}) which \initialises from only a CLIP-pretrained checkpoint, observing that this model performs poorly.
+Once again, we observe that different pretraining datasets are complementary, as adding either SMiT or COCO (\rowNumber{\#2} to \rowNumber{\#4}, ~\rowNumber{\#2} to \rowNumber{\#5}, ~\rowNumber{\#1} to \rowNumber{\#6}) improves results further.
+Adding more pretraining datasets improves results further (\rowNumber{\#7}), and
+we achieve the best results with our model pretrained on all pretraining datasets (\rowNumber{\#8}), which outperforms the best single-dataset pretrained model by 2.0 \CHOTA on VidSTG, and 0.7 \CHOTA on VLN.
+The improvement over only a CLIP-pretrained checkpoint is even larger, by 9.1 \CHOTA and 11.6 \CHOTA on the two respective datasets.
+Qualitative visualizations are shown in the supplement.
+
+\subsection{Comparison to concurrent works BenSMOT and OW-VISCap.}
+
+We compare to the concurrent work \citet{li2024beyond}, which focuses on person category rather than all classes like our task.
+We finetune our model on the training set using the same hyper-parameters as our VidSTG experiments.
+Our full model achieved 90.19 HOTA and 0.254 CIDEr on this benchmark, significantly outperforming \citet{li2024beyond}. There are two major advantages of our model: our disjoint pretraining, and our use of a larger backbone (ViT-B vs. DLA-34 in BeyondMOT).
+We further break down the improvements by removing these two components in \reftbl{bensmot}. The results show:
+1. Our pretraining provides consistent gains on \citet{li2024beyond} benchmark, improving especially captioning metrics. 2. With a small backbone and no pretraining, our model still outperforms \citet{li2024beyond} on tracking and captioning metrics, showing the advantages of our end-to-end architecture.
+
+\input{tables/bensmot.tex}
+
+We compare to OW-VISCap which uses a Mask2Former architecture with video object queries.
+\reftbl{owviscap} shows an improved overall performance in CHOTA.
+Our largest improvement is in Association Accuracy, showing that our end-to-end tracking module (\refsec{method_end_to_end_tracking}) outperforms the Mask2Former counterparts.
+OW-VisCap gets a higher captioning accuracy as they used a substantially larger, 2.7 billion parameter OPT language decoder~\citep{zhang2022opt}, whilst we used a smaller, 46 million parameter language model as in GIT~\citep{wang2022git}.
+
+\subsection{State-of-the-art comparison on video grounding}
+\lblsec{sota-grounding}
+
+As introduced in \refsec{grounding}, \DenseVOC models can be directly used for sentence grounding, by finding the proposals with the maximum likelihood of generating the query.
+We evaluate spatial grounding on the VLN Location-QA~\citep{voigtlaender2023connecting} and VidSTG~\citep{zhang2020does} benchmarks.
+\noindent\textbf{VLN Location-QA} consists of questions starting with ``Where is'', and requires the model to produce a bounding box at each frame in the video.
+The task is therefore effectively a sentence grounding problem, and indeed, the ReferFormer~\citep{wu2022language} baseline used by~\citet{voigtlaender2023connecting} performs sentence grounding after removing ``Where is'' from the question.
+We also remove this prefix before grounding following Sec.~\ref{sec:grounding} for both our final model, and an additional GRiT baseline.
+
+In this dataset, only one annotated frame (unknown at inference time) is evaluated, and this benchmark therefore effectively does not involve temporal \localisation.
+As the annotation of this dataset is based on mouse traces instead of bounding boxes, the evaluation metric considers bounding box coverage (recall) and precision (full details in~\citet{voigtlaender2023connecting}).
+As shown in Tab.~\ref{tab:sota-vln}, we improve substantially over ReferFormer and our GRiT~\citep{wu2022grit} baseline.
+
+\input{tables/sota_vln_vidstg_combined.tex}
+
+\noindent\textbf{VidSTG} requires producing a sequence of bounding boxes for a given sentence query.
+The evaluation metric is the average of the Intersection over Union (IoU) at each frame, between the predicted and ground truth bounding boxes for the target object.
+We compare to other prior works on this dataset in Tab.~\ref{tab:sota-vidstg}, assuming that the input video is already trimmed temporally to the objects of interest.
+Our model achieves the best IoU, outperforming models designed specifically for grounding, thereby showing that our generative framework can be used effectively in the discriminative grounding task.
+We also evaluate zero-shot without training on VidSTG, and still perform competitively. This emphasizes the efficacy of our disjoint pretraining.
+We provide more results in \supplement{vidstg-temporal}.
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+
+We proposed the new task of dense video object captioning.
+Although this task requires expensive annotations across space, time and language, we show that we can train a model on existing larger-scale datasets for disjoint subtasks.
+We show our proposed end-to-end architecture is important for producing more accurate and coherent captions.
+
+
+
+
+
+

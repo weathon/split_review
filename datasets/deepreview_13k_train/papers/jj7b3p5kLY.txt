@@ -1,0 +1,288 @@
+\title{The AdEMAMix Optimizer: Better, Faster, Older}
+
+\begin{abstract}
+Momentum based optimizers are central to a wide range of machine learning applications. These typically rely on an Exponential Moving Average (EMA) of gradients, which decays exponentially the present contribution of older gradients. This accounts for gradients being local linear approximations which lose their relevance as the iterate moves along the loss landscape. This work questions the use of a single EMA to accumulate past gradients and empirically demonstrates how this choice can be sub-optimal: a single EMA cannot simultaneously give a high weight to the immediate past, and a non-negligible weight to older gradients. Building on this observation, we propose AdEMAMix, a simple modification of the Adam optimizer with a mixture of two EMAs to better take advantage of past gradients. Our experiments on language modeling and image classification show---quite surprisingly---that gradients can stay relevant for tens of thousands of steps. They help to converge faster, and often to lower minima: e.g., a $1.3$B parameter AdEMAMix LLM trained on $101$B tokens performs comparably to an AdamW model trained on $197$B tokens ($+95\%$). Moreover, our method significantly slows-down model forgetting during training. Our work motivates further exploration of different types of functions to leverage past gradients, beyond EMAs.  
+
+\end{abstract}
+
+\section{Introduction}
+
+
+With large neural networks, deep-learning has revolutionized numerous fields, such as computer vision and natural language processing. At the heart of this paradigm lies the challenge of optimizing complex, non-convex loss functions using noisy gradient estimates. This optimization process is typically carried out using variants of Stochastic Gradient Descent (SGD) \citep{sgd} or adaptive methods such as Adam and AdamW \citep{adam,adamw}, which have become ubiquitous in training state-of-the-art models \citep{bert,gpt3,DosovitskiyB0WZ21,clip,Zhai0HB22,DMPHGSCGAJB23,llama2,llama3}.
+
+A key component in many of these iterative optimization algorithms is momentum, which has long been shown to accelerate convergence~\citep{nemirovskii1985optimal} and often leads to solutions with superior generalization properties \citep{sutskever13}. By accumulating gradient vectors over successive optimization steps, momentum helps overcome small local variations of the loss landscape, potentially escaping shallow local minima, and accelerate in plateau regions \citep{QIAN1999145,Ruder16,goh2017why}. Both SGD with momentum (SGD+M) and Adam incorporate momentum under the form of Exponential Moving Averages (EMAs) of past gradients $\gG^T = \{\vg^{(0)},\ldots,\vg^{(T)}\}$: 
+\begin{align*}\tag{EMA}
+    \text{EMA}(\beta, \gG^T) \triangleq \beta \cdot \text{EMA}(\beta, \gG^{(T-1)}) + (1-\beta) \vg^{(T)} = \sum_{i=0}^T \beta^i (1-\beta) \vg^{(T-i)} .
+\end{align*}
+Two considerations support the use of EMAs. From a practical standpoint, the recursive formula of EMA allows for efficient implementations, which do not require maintaining a buffer of past gradients. From a theoretical standpoint, gradient descent with momentum leads to optimal convergence rates for quadratics \citep{polyak,Nesterov1983AMF}. However, those results do not guarantee any optimality for general non-quadratic cases~\citep{goujaud2023provable}. 
+
+The use of momentum in optimization is grounded in the varying nature of gradients. As local linear approximations of the loss landscape, their information can quickly become outdated as the optimization process progresses \citep{PascanuMB13}. 
+For this reason, practitioners typically employ moderate momentum values (i.e. $\beta \approx 0.8$ or $0.9$), effectively creating a moving average of recent gradients while discarding older information. Selecting larger $\beta$ values seems counter-intuitive, as it would suggest that older gradients maintain their relevance over extended periods of training. While it is tempting to see the use of small $\beta$s as a confirmation of the limited temporal relevance of gradients, our work reveals instead that older gradients can efficiently be used. 
+When we increase $\beta$, we decrease the relative importance of recent gradients, and the iterate now fails to respond to local changes in the loss landscape. We observe that a single EMA cannot both give a significant weight to recent gradients, and give a non-negligible weight to older gradients (see Fig.~\ref{fig:limitation-EMA}). However, a linear combination between a ``fast-changing'' (e.g. $\beta=0.9$ or $\beta_1=0$) and a ``slow-changing'' (e.g. $\beta=0.9999$) EMA allows the iterate to beneficiate from (i) the great speedup provided by the larger (slow-changing) momentum, while (ii) still being reactive to small changes in the loss landscape (fast-changing). More precisely, we find the following statement to convey an important intuition behind this approach: 
+\begin{adjustwidth}{2em}{2em}
+\emph{While changing the direction of the slow momentum is difficult, any adjustment orthogonal to that direction is easy---which favors fast progress in sinuous canyon-like landscapes.}
+\end{adjustwidth}
+A toy illustration of this can be seen in Fig.~\ref{fig:toy_rosenbrock}. Based on this idea, we propose AdEMAMix (\textbf{Ad}aptive \textbf{EMA} \textbf{Mix}ture), a novel Adam based optimizer which successfully leverages very old gradients to reach better solutions.  
+
+\begin{figure*}[t]
+  \centering
+  \begin{subfigure}[t]{0.32\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figs/small_ademamix_llm_loss_bs64.pdf}
+  \caption{$110$M parameters.}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.32\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figs/medium_ademamix_llm_loss.pdf}
+  \caption{$330$M parameters.}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.315\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figs/xl_ademamix_llm_loss.pdf}
+  \caption{$1.3$B parameters.}
+  \end{subfigure}
+ \caption{\textbf{Comparing AdamW and AdEMAMix on language modeling.} In \textbf{(a,b,c)}, we plot the loss obtained using AdamW and AdEMAMix (our optimizer) to train Transformer models of various sizes on the Redpajama dataset. In \textbf{(a)}, we train multiple baselines for $256k$, $400k$, and $500k$ iterations, resulting in processing from $17$B to $33$B tokens. Two AdamW runs with different number of iterations look very different as we use a cosine-decay for the learning rate. We compare those baselines to training AdEMAMix for $256k$ iterations. We observe that our method reaches a similar loss as an AdamW model trained on nearly twice the number of tokens. Analogous comparisons can be derived from \textbf{(b)} and \textbf{(c)}. Notably, in \textbf{(c)}, a $1.3$B parameter AdEMAMix model trained on $101$B tokens performs comparably to an AdamW model trained on $197$B tokens ($95\%$ more, blue horizontal line). See \S~\ref{sec:llm-results} and App.~\ref{app:llm_exp} for a detailed description of our experimental setup, including hyperparameters.
+ }
+ \label{fig:llm_results}
+\end{figure*}
+\textbf{Contributions.} Our contributions can be summarized as follows:
+\begin{itemize}%$[leftmargin=15pt]
+    \item We propose AdEMAMix, a novel optimizer which better leverages past gradients by avoiding a common pitfall of EMA-based optimizers (see \S~\ref{sec:method}).
+    \item We empirically demonstrate the superiority of our method over Adam by training ViT and language models (Transformers and Mamba) of up to $1.3$B parameters (see \S~\ref{sec:results}). In addition, we show gains from switching mid-training from Adam to AdEMAMix (see Fig.~\ref{fig:time_resume}).
+    \item We show AdEMAMix forgets the training data slower when compared to Adam (see Fig.~\ref{fig:forgetting}).
+    \item More broadly, our findings contribute to a deeper understanding of the optimal balance between using historical gradients and adapting to the rapidly changing loss landscape. Our work invites further research in methods combining old and recent gradients, beyond EMAs. 
+\end{itemize}
+\begin{figure*}[t]
+  \centering
+  \begin{subfigure}[t]{0.32\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figs/rosenbrock-no-lr-decay-5ksteps-lr006-a9.pdf}
+  \caption{$\|\vx^{(t)}-\vx^{\star}\|_2$.}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.32\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figs/rosenbrock-no-lr-decay-adam-5ksteps-lr006.pdf}
+  \caption{Adam trajectories.}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.32\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figs/rosenbrock-no-lr-decay-ademamix-5ksteps-lr006-a9.pdf}
+  \caption{AdEMAMix trajectories.}
+  \end{subfigure}
+ \caption{\textbf{Comparing Adam and AdEMAMix on the Rosenbrock function.} Starting from $\vx^{(0)}=[-3,5]$, we minimize the Rosenbrock function $f(x_1,x_2)=(1-x_1)^2+100 (x_2-x_1^2)^2$. The global minimum (\textcolor{red}{$\mathbf{\star}$}) is $\vx^{\star}=[1,1]$. We use $\beta_2=0.999$ for Adam and $(\beta_1,\beta_2,\alpha)=(0.9,0.999,9)$ for AdEMAMix (see \S~\ref{sec:method}). We reduce the learning rate for AdEMAMix to compensate for the influence of $\alpha$. We do a sweep over $\beta_1$ (resp. $\beta_3$) for Adam (resp. for AdEMAMix). In \textbf{(b)}, When Adam's $\beta_1$ is small (e.g. $0.9$), the iterates do not oscillate but convergence is slow. Increasing $\beta_1$ makes the iterates move faster but with large oscillations. In contrast, for AdEMAMix in \textbf{(c)}, we observe that despite $\beta_3$ being large, the iterates moves fast and without oscillations. This results in reaching better solutions faster as can be seen in \textbf{(a)}.
+ }
+ \label{fig:toy_rosenbrock}
+\end{figure*}
+
+
+
+\section{Related Work}
+
+
+\textbf{Works on understanding momentum.} From the seminal work of \cite{polyak}, many publications analyzed the effect of gradient descent + momentum (GD+M) in both convex and non-convex settings \citep{GhadimiFJ15,FlammarionB15,KidambiN0K18,Defazio20,SebbouhGD21}. While the acceleration in the noise-free setting has been long theorized for convex functions, several publications indicate this effect might not necessarily extend to stochastic settings \citep{JMLR:v17:16-157,KidambiN0K18,LMTwoRegimes}, emphasizing instead a link between momentum and effective learning rate. Recent work have been seeking to understand the impact of momentum on generalization through studying the implicit bias of momentum methods \citep{igrheavyball, PapazovPF24}, exposing a preference of SGD+M for lower norm solutions. Those further exposed a link between higher momentum and higher effective learning rate and higher variance reduction. Despite the volume of prior work on the subject, our understanding of momentum methods in non-convex stochastic settings is still incomplete~\citep{JMLR:v17:16-157}. Oscillatory behaviours, and the sometimes ambiguous effect of variance on optimization render the analysis tedious. From a theoretical standpoint, our work raises several questions. First, given that we gain from averaging very old gradients, what can it reveal of the loss landscape and the consistency of one batch's gradient during training? Second, would our approach not decrease the variance up to a point that is harming generalization \citep{igrheavyball}? While no answer to those questions is given in this work, we provide a toy justification which indicates that large momentums can have a positive impact in noise-free non-convex settings (see Fig.~\ref{fig:toy_rosenbrock})---indicating the improvement of our approach is at least partially explainable without considering variance-reduction effects. We moreover expose a link between momentum and forgetting the training data (see Fig.~\ref{fig:forgetting}), which to our knowledge is novel.  
+
+\textbf{Works on deep-learning optimizers.} Despite the popularity of Adam and AdamW \citep{adam,adamw} in training deep neural networks, optimizer design is a rich field of research and we focus on a few of the works most relevant to this study. Adafactor \citep{Adafactor} improves Adam's memory efficiency by factorizing the second moment estimate. Lamb \citep{lamb} extends Adam by adding layerwise normalized updates. \citet{lion} use algorithm discovery to derive the Lion optimizer. Contrary to Adam, Lion uses a single momentum term and the sign function to produce updates with the same magnitude across dimensions. Interestingly, \citet{lion} also report better scores are obtained when using a slightly larger momentum term ($\beta=0.99$). In this work we show how increasing the momentum well beyond this value can still be beneficial. See App.~\ref{app:lion} for a detailed comparison between AdEMAMix and Lion. Recently, \citet{sophia} introduced Sophia, a scalable second-order optimizer designed for LLM training. Sophia uses a Hessian-based pre-conditioner which better normalizes the step size, penalizing steps in high curvature direction and accelerating in low curvature directions. Understanding in which circumstances those novel optimizers bring improvements is still being investigated \citep{KaddourKNMK23}, and Adam's dominance remains mostly unchallenged.      
+\textbf{Work incorporating an additional momentum term.} \citet{grokfast} introduce Grokfast, which uses a pre-filtering step on the gradient to amplify the low frequencies and help solve groking. When combined with Adam, it effectively applies the Adam's EMAs on top of another gradient averaging method (e.g. EMA for Grokfast-EMA). Somewhat similarly, \cite{admeta} refer to the Double EMA (DEMA) used in some finance applications \citep{dema} as one motivation for their AdMeta optimizer. Our motivation behind AdEMAMix is to combine both a high sensitivity to the recent gradients as well as incorporating very distant gradient, in this respect, using nested EMAs is not the right candidate as it reduces the influence of recent gradients. A more detailed review of AdMeta and DEMA is in App.~\ref{app:admeta}. Most relevant to us, \citet[AggMo]{aggmo} also observe that using a combination of EMAs can enable the use of larger $\beta$s, and incorporates a sum of $K$ momentum terms into \emph{GD}
+They show their approach reaches similar performances as baseline optimizers, with a faster convergence. In contrast, we modify \emph{Adam}, and introduce schedulers that are critical to reaching good performances at larger scales. 
+This allows us to outperform Adam by a significant margin.
+In App.~\ref{app:aggmo}, we notice no further improvement by adding more momentum terms. Finally, \citet{szegedy2024} propose a general framework to derive and study optimizers with linear combinations of memory vectors---which encompasses EMA mixtures.
+
+\textbf{Works on distributed optimization.} Perhaps surprisingly, recent work on distributed optimization---DiLoCo and SlowMo \citep{diloco,slowmo}---are relevant to our work. $N$ workers $\vtheta^{(t)}_1,\ldots,\vtheta^{(t)}_N$ are trained independently for $K$ steps (e.g. $K=500$). Every $K$ steps, the delta updates $\{\Delta \vtheta_i\}_{i=1}^N \triangleq \{\vtheta_i^{(t+K)}-\vtheta_i^{(t)} \}_{i=1}^N$ are averaged and applied to each worker using an outer optimizer \emph{with momentum $\beta$}: $\vtheta_i^{(t+K)} = \vtheta_i^{(t)} - \eta \cdot \text{Opt}(\frac{1}{N} \sum_i \Delta \vtheta_i, \beta)$. The application of the outer momentum every $500$ steps increases the importance of old gradients in the optimization trajectory. We believe this observation might in parts explain the strong results provided by those methods, and further motivated our work.    
+
+
+
+\section{Our method: AdEMAMix}
+
+
+\begin{figure*}[t]
+  \centering
+  \begin{subfigure}[b]{0.32\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figs/ema_limitation.pdf}
+  \caption{Limitation of EMAs.}
+  \label{fig:limitation-EMA}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.33\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figs/xl_ademamix_constant_lr_lin_decay.pdf}
+  \caption{Constant $\eta$-scheduler.}
+  \label{fig:constant_lr}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.337\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figs/mamba-168m-fineweb-128ksteps.pdf}
+  \caption{Mamba results ($168$M).}
+  \label{fig:mamba}
+  \end{subfigure}
+\caption{\textbf{Limitation of EMAs, constant $\eta$-scheduler, \& Mamba results.} In \textbf{(a)}, we plot the weights $w_t$---for each past gradient $\vg^{(t)}$---given by different EMAs after $10k$ steps. For a given $\beta$, $\text{EMA}(\beta, \vg^{(0)}, \ldots, \vg^{(T)}) = \sum_{i=0}^T \beta^i (1-\beta) \vg^{(T-i)}$, which decays the contribution of past gradients exponentially. A small $\beta$ (e.g. $0.9$) will give a high weight to the immediate past and negligible weights to older timesteps. In contrast, a high $\beta$ (e.g. $0.9999$) is giving a relatively uniform, yet non-negligible weight to all gradients. No $\beta$ value can simultaneously give a high weight to the immediate past and a non-negligible weight to very old timesteps. In \textbf{(b)}, we train multiple $1.3$B language models using $3k$ steps of warmup and then a constant learning rate $\eta=10^{-4}$. This allows us to observe the gap between AdamW and AdEMAMix without the cosine decay as a confounder. We still use schedulers for $\alpha$ and $\beta_3$ with $T_{\alpha,\beta_3}=500k$, $\alpha=5$. Similar to \citet{Zhai0HB22,minicpm,alexlrdecay}, we decay the learning rate linearly at $t=1$M and $t=1.3$M. The loss-gap between AdamW and AdEMAMix increases at first, and then remains constant. AdEMAMix still outperforms AdamW after decaying the learning rate. See App.\ref{app:misc} to see the impact of the linear decay duration. In \textbf{(c)}, we train $168$M parameter Mamba models, showing how AdEMAMix's performances can generalize outside of the Transformer architecture. 
+ }
+ \label{fig:ema_forgetting}
+\end{figure*}
+\textbf{Setup \& notations.} Let $\gL_\vtheta: \gX \mapsto \R$ be a loss function parameterized by $\vtheta$, and mapping inputs $\vx \in \gX$ to $\R$. Given a sampled batch $\vx$, let $\vg = \nabla_{\vtheta} \gL_\vtheta(\vx)$ be a stochastic gradient of the loss w.r.t. $\vtheta$. To minimize the empirical loss, the Adam optimizer \citep{adam} relies on first and second moments, resp. $\vm$ and $\vnu$, estimated via two EMAs parametrized by $(\beta_1,\beta_2) \in [0,1[^2$. A weight-decay parameter $\lambda\in\R^+$ is often used as in \citet{adamw}:
+\begin{align*}
+  \begin{cases}
+    \vm^{(t)} = \beta_1 \vm^{(t-1)} + (1-\beta_1) \vg^{(t)} , \quad \quad \hat{\vm}^{(t)} = \frac{\vm^{(t)}}{1-\beta_1^t} \\
+    \vnu^{(t)} = \beta_2 \vnu^{(t-1)} + (1-\beta_2) {\vg^{(t)}}^2 , \quad \quad \hat{\vnu}^{(t)} = \frac{\vnu^{(t)}}{1-\beta_2^t} \\
+    \vtheta^{(t)} = \vtheta^{(t-1)} - \eta \big( \frac{\hat{\vm}^{(t)}}{\sqrt{\hat{\vnu}^{(t)}}+\eps} + \lambda \vtheta^{(t-1)} \big) .
+  \end{cases}\tag{AdamW}\label{eq:adam}
+\end{align*}
+With $t>0$ being the timestep, $\eta$ being the learning rate, and $\eps$ a small constant. Initially $\vm^{(t=0)}=\vnu^{(t=0)}=\mathbf{0}$. To prevent the bias induced by the initial $\vm^{(t=0)}$ and $\vnu^{(t=0)}$, the outputs of the two EMAs are corrected into $\hat{\vm}^{(t)}$ and $\hat{\vnu}^{(t)}$. Those are used to compute the final weight update, scaled by the learning rate.  
+\textbf{How far to look into the past?} A typical value for $\beta_1$ is $0.9$. Fig.~\ref{fig:limitation-EMA} shows the weights given to past gradients for different values of $\beta$. The larger the $\beta$, the more uniform the average is. To put this in perspective---observing that $\sum_{i=0}^\infty \beta^i(1-\beta)=1$ for $\beta\in [0,1[$---the number of successive previous steps receiving a cumulative weight of $0.5$, is $t_{half}=\frac{\ln(0.5)}{\ln(\beta)}-1$. For $\beta=0.9$, $t_{half}\approx 6$, meaning that half of the weight is given to the previous six gradients. This observation can also be extended to SGD with e.g. polyak or nesterov momentums \citep{polyak,Nesterov1983AMF}, which typically relies on similar $\beta$ values. The value of $\beta_1$ is rarely increased beyond $\sim 0.9$.
+In our experiments with AdamW, increasing $\beta_1$ further degraded the performance (see App.~\ref{app:one_ema_limits}). Does this mean older gradients are outdated? We show that this is not the case, rather, increasing beta is reducing the sensitivity to recent gradients too much. We design AdEMAMix such that the sensitivity to recent gradients is kept, while also incorporating information from much older gradients using an additional momentum term. This allows for the use of much larger $\beta$ values e.g. $0.9999$. To compare, for $\beta=0.9999$, $t_{half}\approx 6{,}930$, spreading half of the mass over the previous $6{,}930$ past gradients. 
+\textbf{AdEMAMix.} To keep a high sensitivity to recent gradients, while also incorporating information from older gradients, we add a second EMA (changes compared to AdamW are in Blue):
+\begin{align*}
+  \begin{cases}
+    \vm_1^{(t)} = \beta_1 \vm_1^{(t-1)} + (1-\beta_1) \vg^{(t)} , \quad \quad \hat{\vm}_1^{(t)} = \frac{\vm_1^{(t)}}{1-\beta_1^t} \\
+    \textcolor{blue}{\vm_2^{(t)}} \textcolor{blue}{= \beta_3 \vm_2^{(t-1)} + (1-\beta_3) \vg^{(t)}} \\
+    \vnu^{(t)} = \beta_2 \vnu^{(t-1)} + (1-\beta_2) {\vg^{(t)}}^2 , \quad \quad \hat{\vnu}^{(t)} = \frac{\vnu^{(t)}}{1-\beta_2^t} \\
+    \vtheta^{(t)} = \vtheta^{(t-1)} - \eta \big(\frac{\hat{\vm}_1^{(t)} \textcolor{blue}{+ \alpha \vm_2^{(t)}}}{\sqrt{\hat{\vnu}^{(t)}}+\eps} + \lambda \vtheta^{(t-1)} \big) .
+  \end{cases}\tag{AdEMAMix}\label{eq:ademamix}
+\end{align*}
+In our experiments, while the values of $\beta_1, \beta_2$ remain similar to those of \eqref{eq:adam}, we often use $\beta_3=0.9999$. We find $\alpha \in[4,10]$ to work well in practice. 
+
+\textbf{Tackling early training instabilities.} Early training instabilities are commonplace when training deep models, and empirically motivated the introduction of methods such as learning rate warmup and gradient clipping. \citet{gilmer2022a} show how the use of learning rate warmup can be justified from a curvature perspective; allowing the iterates to move to parts of the optimization landscape where larger learning rates are stable. While we use learning rate warmup in all our experiments, we still noticed AdEMAMix models using a large $\beta_3$ would diverge early. This, despite not using bias correction over $\vm_2$, which lets the momentum buffer fill itself slowly. Those failed runs are characterized by updates of large magnitudes in the early phase of training (see App.~\ref{app:misc}, Fig.~\ref{fig:exploding-norm}).  
+For this reason, we progressively increase the values of $\beta_3$ and $\alpha$ using schedulers. For $\alpha$ we use a linear scheduler. A linear scheduler for $\beta_3$ would be ill-fitted as the same increment of $\beta_3$ has a different impact for different values of $\beta_3$. For instance, observe that an increase of $\beta$ of $\delta_\beta=0.0001$ barely increases the $t_{half}$ for $\beta=0.9$, while $0.999\rightarrow 0.999+\delta_\beta$ increases the $t_{half}$ of $77$. For this reason, we design the $\beta_3$ scheduler to \emph{increase $t_{half}$ linearly} (see App.~\ref{app:beta_scheduler} for a derivation of that scheduler). The two schedulers are summarized below:
+\begin{align*}
+    \alpha^{(t)} &= f_\alpha(t,\alpha,T_\alpha) = \min(\frac{t\alpha}{T_\alpha}, \alpha), \tag{$f_\alpha$} \\
+    \beta_3^{(t)} &= f_{\beta_3}(t,\beta_3,\beta_{start},T_{\beta_3}) = \min\big(\exp\big(\frac{\ln(\beta_{start})\ln(\beta_3)}{(1-\frac{t}{T_{\beta_3}})\ln(\beta_3)+ \frac{t}{T_{\beta_3}} \ln(\beta_{start})}\big), \beta_3\big) . \tag{$f_{\beta_3}$}\label{eq:schedulers}
+\end{align*}
+With $T_\alpha$ and $T_{\beta_3}$ are resp. the warmup times for $\alpha^{(t)}$ and $\beta^{(t)}_3$ to reach their final and maximal values. In practice we always set those two to the same value: $T_\alpha=T_{\beta_3}=T_{\alpha,\beta_3}$, and we typically use $T_{\alpha,\beta_3}=T$, with $T$ being the total number of iterations. $\beta_{start}$ is always set to $\beta_1$ in our experiments. The use of those schedulers is not always required, especially, we found those have no impact when AdEMAMix is activated later during training (see Fig.~\ref{fig:time_resume}). The full AdEMAMix optimizer, including the schedulers, is shown in Alg.~\ref{alg:ademamix}.
+
+\begin{algorithm}[ht!]
+   \caption{AdEMAMix optimizer. Differences with AdamW are in \textcolor{blue}{blue}.}
+   \label{alg:ademamix}
+\begin{algorithmic}[1]
+   \State {\bfseries Input:} Data distribution $\gD$. Initial model parameters $\vtheta^{(0)}$. Number of iterations $T$. Learning rate $\eta$. $\epsilon$ a small constant. AdamW parameters: $\beta_1$, $\beta_2$ and $\lambda$. \textcolor{blue}{AdEMAMix parameters $\beta_3$, $\alpha$. Warmup parameter $T_{\alpha,\beta_3}$, note that we usually set it to $T$. $\beta_{start}$ is usually set to $\beta_1$.}  
+   \State Initialize timestep: $t \leftarrow 0$  \State Initialize EMAs: $\vm_1^{(0)} \leftarrow \mathbf{0}$ , \textcolor{blue}{$\vm_2^{(0)} \leftarrow \mathbf{0}$} , $\vnu^{(0)} \leftarrow \mathbf{0}$
+   \For{$t \in [T]$}
+        \State $t \leftarrow t+1$
+        \State Optional: use schedulers $\eta^{(t)}$\textcolor{blue}{, $\beta_3^{(t)}\leftarrow f_{\beta_3}(t,\beta_3,\beta_{start},T_{\alpha,\beta_3})$ and $\alpha^{(t)}\leftarrow f_{\alpha}(t,\alpha,T_{\alpha,\beta_3})$}
+        \State Sample batch: $x \sim \gD$
+        \State Compute gradient: $\vg^{(t)} \leftarrow \nabla_{\vtheta} \gL_{\vtheta^{(t-1)}}(\vx)$
+        \State Update the fast EMA $\vm_1$: $\vm_1^{(t)} \leftarrow \beta_1 \vm_1^{(t-1)} + (1-\beta_1) \vg^{(t)}$ 
+        \State \textcolor{blue}{Update the slow EMA $\vm_2$: $\vm_2^{(t)} \leftarrow \beta_3^{(t)} \vm_2^{(t-1)} + (1-\beta_3^{(t)}) \vg^{(t)}$} 
+        \State Update the second moment estimate: $\vnu^{(t)} \leftarrow \beta_2 \vnu^{(t-1)} + (1-\beta_2) {\vg^{(t)}}^2$ 
+        \State Apply bias corrections: $\hat{\vm}_1^{(t)} \leftarrow \frac{\vm_1^{(t)}}{1-\beta_1^t}$ , $\hat{\vnu}_1^{(t)} \leftarrow \frac{\vnu_1^{(t)}}{1-\beta_2^t}$
+        \State Update parameters: $\vtheta^{(t)} \leftarrow \vtheta^{(t-1)} - \eta^{(t)} \big(\frac{\hat{\vm}_1^{(t)} \textcolor{blue}{+ \alpha^{(t)} \vm_2^{(t)}}}{\sqrt{\hat{\vnu}^{(t)}}+\eps} + \lambda \vtheta^{(t-1)} \big)$
+   \EndFor
+   \State \textbf{Return} optimized parameters $\vtheta^{(T)}$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{figure*}[t]
+  \centering
+  \begin{subfigure}[t]{0.28\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figs/forgetting/ademamix_forgetting_90k.pdf}
+  \caption{$t_B=90k$.}
+  \end{subfigure}
+  \begin{subfigure}[t]{0.23\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figs/forgetting/ademamix_forgetting_170k.pdf}
+  \caption{$t_B=170k$.}
+  \end{subfigure}
+  \begin{subfigure}[t]{0.23\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figs/forgetting/ademamix_forgetting_190k.pdf}
+  \caption{$t_B=190k$.}
+  \end{subfigure}
+  \begin{subfigure}[t]{0.225\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figs/forgetting/ademamix_forgetting_230k.pdf}
+  \caption{$t_B=230k$.}
+  \end{subfigure}
+\caption{\textbf{Measuring forgetting using a held-out batch $B$.} The top row is for AdamW, the bottom row is for AdEMAMix. We trained one AdamW and AdEMAMix model on a RedPajama dataset \emph{not} containing the batch $B$, those runs are in blue. We then run multiple experiments where we inject $B$ in the training data at a specific timestep $t_B$. Those runs are in orange. To inspect how much influence $B$ had when it is injected at $t_B$, we can observe the evolution of the gap between the blue and the orange curves. For both optimizers, we observe a rapid decrease of the loss on $B$ right after training on $B$. The sharpness of this decrease in loss is more pronounced for AdamW compared to AdEMAMix. However, when using AdamW, the loss on $B$ then increases faster, which we interpret as the model forgetting $B$ faster. In contrast, the curves for AdEMAMix are smoother, the loss on $B$ goes back up slower, and ultimately $B$ had a bigger impact on the training when using AdEMAMix---as can be seen by looking at the larger gap between the orange and blue curves for the last iteration. Finally, the forgetting behaviour evolve during training, with the later training batches being remembered better. See App.~\ref{app:forgetting} for a more detailed analysis of forgetting as training progresses. 
+ }
+ \label{fig:forgetting}
+\end{figure*}
+\textbf{Using $\beta_1=0$ to save memory.} By setting $\beta_1=0$, we can save on memory by replacing $\hat{\vm}_1^{(t)}$ by $\vg^{(t)}$. In this case, the memory cost of AdEMAMix is the same as for AdamW. We show in App.~\ref{app:hyperparam_sensitivity} (Fig.~\ref{fig:b1_sweep}) and App.~\ref{app:removing_m1} that using $\beta_1=0$ often works, at the cost of potentially less stable training.
+
+\textbf{Computational overheads.} Adding an additional EMA requires additional memory and compute. The added compute is negligible in comparison to what is required for the forward-backward, and has little impact over the total runtime as shown in Fig.~\ref{fig:time_resume_time}. Moreover---when considering larger distributed setups---it is worth noting that AdEMAMix is not increasing communication (gradient reduction) over Adam. Therefore, we expect the runtime overhead of AdEMAMix to shrink in those settings, as data movements occupy a larger fraction of the total runtime. A more significant overhead is in terms of memory when $\beta_1 \neq 0$, as AdEMAMix requires to allocate both $\vm_1$ and $\vm_2$, which are of the same size as the model parameters $\vtheta$. We believe this issue is of lesser consequences as Fully-Sharded-Data-Paralellism \citep[FSDP]{pytorchfsdp} can always be used to distribute the optimizer states across compute nodes. In the cases where memory remains an issue, one mitigation strategy could be to apply factorization strategies as in \cite{Adafactor,abs-2407-07972}.
+
+\textbf{Hyperparameter sensitivity.} While we introduce up to four new hyperparameters:  $\alpha$, $\beta_3$, $T_{\alpha}$, and $T_{\beta_3}$, in practice we always set $T_\alpha=T_{\beta_3}=T_{\alpha,\beta_3}$, and use $T_{\alpha,\beta_3}=T$ in most cases. We show in App.~\ref{app:hyperparam_sensitivity} that $T_{\alpha}$ and $T_{\beta_3}$ should only be large enough to prevent instabilities early during training. While all of our experiments on language modeling use $\beta_3=0.9999$, other values such as $0.999$ or even $0.99999$ still can outperform the AdamW baseline (see App.~\ref{app:hyperparam_sensitivity}, Fig.~\ref{fig:alpha_beta_hyp}). On vision tasks, the scatter plots in Fig.~\ref{fig:vit_results} show all the AdEMAMix models trained for those experiments, highlighting how easy it can be to find good $\alpha$ and $\beta_3$ values. Overall, we find the ranges of values of $\alpha,\beta_3$ and $T_{\alpha,\beta_3}$ providing improvements over AdamW to be wide. See App.~\ref{app:hyperparam_sensitivity} for hyperparameter sweeps. 
+
+\textbf{Limitations.} AdEMAMix consists in leveraging very old gradients. Therefore, the method is best suited to settings where the number of iterations is important. We report on this effect in App.~\ref{app:fewer_iters}, additionally showing how smaller values of $\beta_3$ (e.g. $\beta_3=0.999$) can be better for low iterations scenarios. Moreover, retaining gradient information over many thousands steps can pose a problem in domains requiring fast adaptation to a sudden distribution shift. 
+
+
+\section{Results}
+
+
+In this section we use AdEMAMix to train language models (\S~\ref{sec:llm-results} and \S~\ref{sec:mamba-results}) and vision transformers (\S~\ref{sec:vit-results}) ranging from $24$M to $1.3$B parameters. 
+\subsection{Transformer LLM Training}\label{sec:llm-results}
+
+\textbf{Experimental setup.} We use a transformer architecture \citep{transformer} with learnt positional encoding. All of our experiments are using sequences of $1{,}024$ tokens. We experiment with three sizes of transformers: $110$M, $335$M, and $1.3$B. For the learning rate, we use $3$k warmup steps followed by---unless specified---a cosine decay to $10^{-5}$. We extensively tuned the hyperparameters for both AdamW and AdEMAMix models (see App.~\ref{app:llm_exp}). We use the RedPajama v2 \citep{redpajama} dataset for all of our experiments. We use batch sizes of $64$, $96$ and $128$ for respectively our $110$M, $335$M, and $1.3$B parameter models. Depending on the model, we vary the number of iterations from $256k$ to $1.5$M. For AdEMAMix, we use $\beta_3=0.9999$ and $\alpha\in\{5,8,10\}$ depending on the model. A full description of the architecture and hyperparameters used is in App.~\ref{app:llm_exp}. We train on up to $8$ A100 NVIDIA GPUs using data-parallelism. 
+
+\begin{figure*}[t]
+  \centering
+  \begin{subfigure}[t]{0.32\linewidth}\vskip 0pt
+  \includegraphics[width=\textwidth,clip]{./figs/training_time_llm.pdf}\vskip 7.7pt
+  \caption{Train time for $256k$ iters.}
+  \label{fig:time_resume_time}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.32\linewidth}\vskip 0pt
+  \includegraphics[width=\textwidth,clip]{./figs/small_ademamix_from_adamw_bs64_500k.pdf}
+  \caption{From AdamW ($110$M).}
+  \label{fig:from_adamw_110}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.33\linewidth}\vskip 0pt
+  \includegraphics[width=\textwidth,clip]{./figs/xl_ademamix_from_adamw.pdf}
+  \caption{From AdamW ($1.3$B).}
+  \label{fig:from_adamw_1300}
+  \end{subfigure}
+\caption{\textbf{Training time comparison \& starting AdEMAMix from AdamW.} In \textbf{(a)}, we compare the time required to train $110$M and $1.3$B parameter models for $256k$ iterations. The additional EMA renders AdEMAMix slightly slower than AdamW. However, if we were to train AdamW longer to compensate for this gap, we would only train for an additional $2379$ and $5421$ iterations for resp. $110$M and $1.3$B parameter models. Those additional iterations would not be sufficient to close the gap (see Fig.~\ref{fig:llm_results}). In \textbf{(b)} and \textbf{(c)}, we show---for two different model sizes---the effect of switching from AdamW to AdEMAMix during training. AdEMAMix's additional parameter $\vm_2$ is initialized to $\mathbf{0}$, no scheduler is used for $\alpha$ or $\beta_3$. For both model sizes, we observe the loss increases slightly at first before decreasing and outperforming the baseline. In both cases, the earlier AdEMAMix is used, the better the final loss. See App.~\ref{app:misc} for results using schedulers.
+ }
+ \label{fig:time_resume}
+\end{figure*}
+
+\textbf{Why not simply increasing AdamW's $\beta_1$?} While our toy experiment in Fig.~\ref{fig:toy_rosenbrock} already gives some intuition on why increasing Adam's $\beta_1$ is likely not to have the same effect as having an additional EMA as in AdEMAMix, we verify this intuition by training multiple $110$M models using Adam with large $\beta_1\in \{0.99,0.999,0.9999,0.99999\}$. When we use a large $\beta_1$ from the beginning of training, we observe instabilities for larger $\beta_1$ values and no $\beta_1>0.9$ improves upon the AdamW baseline. One can imagine this to be due to increasing $\beta_1$ too early. Therefore, we also modify AdamW and add the same scheduler on $\beta_1$ as we use on AdEMAMix's $\beta_3$. $\beta_1$ is now increased steadily over the entire training duration. While this mostly stabilizes the training, none of the experiments outperformed the baseline using $\beta_1=0.9$. Moreover, to rule out any effect that could be due to early training instabilities, we run the same experiments starting from a pre-trained AdamW checkpoint trained for $300k$ iterations. We simply resume training and either increase $\beta_1$ suddenly or using a scheduler. Here again---unlike when using AdEMAMix---none of those experiments outperform the baseline. The details of those experiments are available in App.~\ref{app:one_ema_limits}. Those experiments show that simply increasing the $\beta_1$ value in AdamW is not enough, which justifies our design of AdEMAMix.   
+\textbf{Better perplexity for the same number of steps.} For all model sizes, all the number of iterations used---ranging from $256$k to $1$M---, AdEMAMix always outperforms the AdamW baseline. In Fig.~\ref{fig:llm_results}, we show the validation loss curves for AdamW and AdEMAMix models trained---for each size---on various numbers of tokens. For $110$M parameter models, training for $256k$ iterations gives similar results as training an AdamW model for $500k$ iterations. The gap between baseline and our method seems to be increasing as we increase the number of iterations. For $1.3$B parameter models, training using $770k$ steps is on par with training the baseline for $1.5$M iterations---reaching the same performance with $51\%$ fewer tokens (an economy of $96$M tokens). In Fig.~\ref{fig:constant_lr}, we observe similar improvements when using a constant and then linear decay learning rate scheduler. 
+
+\textbf{Training speed comparison.} We measure the time per iteration for all of our experiments. In Fig.~\ref{fig:time_resume_time} we plot the time required to train our $110$M and $1.3$B parameter models for $256k$ iterations. We observe that the impact of using an additional EMA on the training speed is negligible. If we were to train new models with a fix time budget, the extra iterations of the baseline would not be sufficient to close the gap. For instance, to match a $110$M parameter AdEMAMix model trained for $256k$ iterations, we need to train an AdamW model for $500k$ iterations, and the time advantage of AdamW would only allow us to do $2{,}379$ additional iterations. Moreover, as mentioned in \S~\ref{sec:method}, we expect the time overhead to decrease when multi-node training is used, as IOs would become an important bottleneck, and AdEMAMix is not increasing IOs.
+
+\textbf{Consistency of the gain across token-budgets.} In Fig.~\ref{fig:llm_results}, given that enough tokens have been used w.r.t. the model size, we observe consistent gains accross token budgets. It seems our method is able to bring a constant improvement over the baseline. This can be seen more clearly in Fig.~\ref{fig:constant_lr}, showing results when using a constant learning rate scheduler---which removes the confounder of the cosine learning rate decay. We observe how, after an initial phase in which the gap grows, this gap becomes seemingly constant after a sufficient number of iterations.      
+
+\textbf{Resume from AdamW vs. training AdEMAMix from scratch.} So far we trained AdEMAMix models from scratch. We show it is also possible to switch from an AdamW to an AdEMAMix state in the middle of training. When switching to AdEMAMix at step $t_{switch}$, we initialize $\vm_2^{(t_{switch})}=\mathbf{0}$ and replace $t$ by $t-t_{switch}$ in the scheduler equations---if those are used. However, we find that schedulers are not required when resuming training and report results without them in the main paper (see App.~\ref{app:misc} for more details). In Fig~\ref{fig:from_adamw_110} and Fig.\ref{fig:from_adamw_1300}, we show that (i) it is possible to improve upon the baseline when activating AdEMAMix later during training, and (ii) the earlier the switch, the larger the gain, with diminishing returns. This indicates that the improvement of AdEMAMix cannot be attributed solely to early training dynamics, but rather, late training dynamics seem to play an important role. This is further corroborated by the reverse experiment---which switches from AdEMAMix to AdamW mid-training and show a performance degradation (see results in App.~\ref{app:rm_ema_mid_train}). 
+
+\textbf{AdEMAMix models forget the training data slower.} As an attempt to understand the reason for AdEMAMix's improvements over AdamW, we study how fast a training batch is forgotten after being used during training. We focus on following one specific batch $B$. We start by removing $B$ from the RedPajama training data and train AdamW and AdEMAMix models. For those runs, $B$ is therefore akin to a batch from the validation set. We measure the loss on $B$ while training. Now we can resume training from various checkpoints, and inject $B$ into the training data at various times $t_B$. By comparing the two runs---one having trained on $B$, while the other never saw $B$---we can visualize how $B$ is learned, and how it is forgotten. After training on $B$, we expect the loss on $B$ to decrease suddenly and then increase as the model forgets the contribution of that batch. When comparing the forgetting curves for AdamW and AdEMAMix in Fig.~\ref{fig:forgetting}, we see striking differences. AdamW models forget much faster---the loss over $B$ increases faster---than AdEMAMix models. Moreover, at the end of training, batches processed by AdEMAMix see their loss being improved over many thousands of iterations. Additional experiments on forgetting can be found in App.~\ref{app:forgetting}.
+\subsection{Mamba LM Training}\label{sec:mamba-results}
+
+\textbf{Experimental setup \& results.} Our experimental setup is similar to \S~\ref{sec:llm-results}, except that we now train $168$M parameter Mamba models \citep{mamba} using the FineWeb dataset \citep{fineweb}. See App.~\ref{app:mamba_exp} for more details.
+In Fig.~\ref{fig:mamba} the improvement using AdEMAMix is consistent with our experiments on Transformer models. This shows how AdEMAMix's gains can extend beyond Transformer models. 
+
+\subsection{ViT Training}\label{sec:vit-results}
+
+\begin{figure*}[h]
+  \centering
+  \begin{subfigure}[t]{0.33\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figs/vit-24m-imagenet21k-test-train-loss.pdf}
+  \captionsetup{justification=centering}
+  \caption{$24$M params, $11$M images.\\(ImageNet-21k)}
+  \label{fig:vit-a}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.338\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figs/vit-86m-imagenet21k-test-train-loss.pdf}
+  \captionsetup{justification=centering}
+  \caption{$86$M params, $11$M images.\\(ImageNet-21k)}
+  \label{fig:vit-b}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.32\linewidth}
+  \includegraphics[width=\textwidth,clip]{./figs/vit-86m-imagenet-test-train-loss.pdf}
+  \captionsetup{justification=centering}
+  \caption{$86$M params, $1.3$M images.\\(ImageNet-1k)}
+  \label{fig:vit-c}
+  \end{subfigure}
+\caption{\textbf{ViT results for different capacity/data ratio.} As described in \S~\ref{sec:vit-results}, we compare the train vs. test loss between AdEMAMix and AdamW, on multiple scenarios \textbf{(a,b,c)}. Those have different capacity/data ratios. For each setting, we first tune an AdamW baseline by testing multiple hyperparameters, those are represented by blue dots. We then pick the hyperparameters of the best baseline---corresponding to the lowest test loss---and train multiple AdEMAMix models by simply testing various $\alpha \in \{1,5,10,15,20\}$ and $\beta_3\in\{0.999,0.9999\}$. Those are represented by orange squares and red triangles. See App.~\ref{app:vit_exp} for detailed hyperparameters. The red area in the above plots represents the area in which we achieve both a better training and test loss compared to the best baseline. The diagonal black line represents the line we would follow when we improve upon the baseline without adding any overfitting (i.e. an improvement in train loss yields the same improvement in test loss). \textbf{(a)} represents the most desirable setting, in which we have relatively a lot of data compared to the model size. In this setting, AdEMAMix outperforms the baseline for all hyperparameters tested. If we increase the model size as in \textbf{(b)}, most AdEMAMix hyperparameters are improving upon the baseline. If we now decrease the dataset size, using a $86$M model with $1.3$M images as in \textbf{(c)}, doing a total of $320$ epochs, we do not observe an improvement from using AdEMAMix. See App.~\ref{app:vit_results} to see classification accuracies and loss curves for those experiments. 
+ }
+ \label{fig:vit_results}
+\end{figure*}
+
+\textbf{Experimental setup.} In this section we consider a different setting in which the data is now a limited resource, and we do multiple epochs (e.g. $37$ or $320$). We use two subsets of the ImageNet \citep{imagenet} dataset: (i) the widely used ImageNet-1k subset, consisting of $1.3$M images and $1{,}000$ possible classes; (ii) a filtered and pre-processed version of the ImageNet-21k \citep{processedImagenet21k} containing $11$M images corresponding to $10{,}450$ classes. For each, we measure the test loss on a held-out test set. We use the ViT architecture \citep{vit16x16} at two different scales: $24$M and $86$M parameters. Importantly, if it is common in the vision literature to pre-train large ViT models and finetune them on smaller datasets, this work focuses on pretraining optimization and we therefore train and test on the same distribution. The models' hyperparameters are detailed in App.~\ref{app:vit_exp}, we use a batch size of $4096$ for all our experiments. We used training hyperparameters from \cite{vit16x16} as a starting point and did some additional tuning of the learning-rate, dropout, and weight decay for our AdamW baselines. We then use the hyperparameters of the best AdamW baseline and train AdEMAMix models with various values of $\alpha\in\{1,5,10,15,20\}$ and $\beta_3\in\{0.999,0.9999\}$. We train models for $320$ and $37$ epochs for resp. the ImageNet-1k and ImageNet-21k datasets, corresponding in both cases to $100k$ iterations. Data-augmentation techniques have been shown to be central to the efficient training of ViTs \cite{TouvronCDMSJ21,TouvronCJ22}. We use simple data-augmentations, which includes mixup \citep{mixup}. We train on $8$ A100 NVIDIA GPUs using Pytorch Fully Sharded Data-Parallelism \citep[FSDP]{pytorchfsdp}.   
+
+\textbf{AdEMAMix for different capacity/data ratios.} We consider three scenarios that differ by their capacity/data ratios. First, we trained $24$M parameter models on $11$M images (ImageNet-21k), for $37$ epochs. In this setting, as can be seen in Fig.~\ref{fig:vit-a}, it is trivial to find AdEMAMix parameters outperforming the baseline in terms of both training and test accuracy. We now increase the model size to $86$M parameters. Fig.~\ref{fig:vit-b} shows it is still easy to find parameters outperforming the baseline. We now keep the model size of $86$M parameters and switch to the smaller ImageNet-1k dataset ($1.3$M images), which---given our $100k$ iterations---increases the number of epochs to $320$. In this setting, Fig.~\ref{fig:vit-c} shows that outperforming the baseline becomes difficult. These experiments show how AdEMAMix seems to perform best in scenarios with large volumes of data w.r.t. the capacity of the model. Overall, we found AdEMAMix to consistently reduce the training loss more efficiently than AdamW. When this decrease in training loss correlates with a decrease in test loss, AdEMAMix outperforms the AdamW baseline.   
+ 
+
+
+\section{Conclusion}
+
+
+In this work, we find that old gradients can be leveraged to efficiently train large language models and ViTs. Our proposed optimizer combines two momentum terms. A slow (large $\beta$) momentum gathers information over many timestep, while a fast (low $\beta$) momentum can adapt the trajectory of the iterates to the rapidly changing loss landscape. We demonstrate the superiority of our optimizer over AdamW through a set of experiments on text modeling and image classification. We moreover reveal how our optimizer forgets the training data at a slower pace.
+
+
+
+\section{Acknowledgements}
+
+
+We thank Alaaeldin Mohamed Elnouby Ali for guiding us throughout the training of our ViT models, as well as Federico Danieli and Abhinav Moudgil for their help training Mamba models. We also thank Angelos Katharopoulos and Ronan Collobert for their insightful comments and feedback.
+ 
+
+
+
+
+

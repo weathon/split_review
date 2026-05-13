@@ -1,0 +1,409 @@
+\title{GraphGPT: Graph Learning with Generative Pre-trained Transformers}
+
+\begin{abstract}
+We introduce \textit{GraphGPT}, a novel model for Graph learning by self-supervised Generative Pre-training Transformers.
+Our model transforms each graph or sampled subgraph into a sequence of tokens representing the node, edge and attributes reversibly using the Eulerian path first. 
+Then we feed the tokens into a standard transformer decoder and pre-train it with the next-token-prediction (NTP) task. 
+Lastly, we fine-tune the GraphGPT model with the supervised tasks. 
+This intuitive, yet effective model achieves superior or close results to the state-of-the-art methods for the graph-, edge- and node-level tasks on the large scale molecular dataset PCQM4Mv2, the protein-protein association dataset ogbl-ppa and the ogbn-proteins dataset from the Open Graph Benchmark (OGB).
+Furthermore, the generative pre-training enables us to train GraphGPT up to 400M+ parameters with consistently increasing performance, which is beyond the capability of GNNs and previous graph transformers.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+After the breakthrough of deep learning in 2012 \citep{alexnet2012}, the computer vision (CV) and natural language processing (NLP) communities prosper till now. Graph community also benefits from this paradigm shifting from traditional machine learning to deep learning with the proposal of various graph neural networks (GNNs) \citep{kipf2017semi,hamilton2017inductive,zhang2018link,wu2020comprehensive}.
+
+Nowadays, both CV \citep{dosovitskiy2021image,liu2021swin} and NLP \citep{devlin2018bert,radford2018improving} adopt the transformer backbone as the canonical architecture, and expand the model scale to billions or even hundreds of billions of parameters \citep{liu2021swin,brown2020language}. These large models are trained with web-scale data \citep{schuhmann2022laion,touvron2023llama}, and achieve performance superior to human beings in many benchmark datasets \citep{deng2009imagenet,wang2019glue,wangP2019superglue}. These works also boost the commercial applications like Midjourney \citep{midjourney2023} and ChatGPT \citep{openai2022chatgpt}. 
+However, GNNs are still suffering from the over-smoothing \citep{rusch2023survey} and over-squashing \citep{alon2021on} problems, which limit them to be expanded to larger scale and trained with larger amount of graph data.
+In recent years, there are many works that tried to utilize transformers to model the graph data, and obtained good performance in certain graph datasets \citep{ying2021transformers,kim2022pure,luo2022one,muller2023attending}. 
+Nevertheless, they often use complex tricks to handcraft features to encode structure information explicitly, and then inject them into either the input or the attention layers. These tricks restrain the generalization beyond specific datasets. In addition, these graph transformers (GTs) often perform well in graph-level tasks, but not applicable for the edge-/node-level tasks \citep{muller2023attending}. 
+Last but not least, self-supervised generative pre-training is the key of the success of GPTs \citep{radford2018improving}, but it is hardly incorporated in the GTs \citep{min2022transformer,muller2023attending}.
+
+In this work, we propose \textit{GraphGPT}, a novel model for graph learning. It consists of three non-trivial components: 1) transforming the (sub)graphs into a reversible sequence of tokens via the Eulerian path, 2) pre-training a transformer decoder using the NTP task, and 3) fine-tuning the transformer with any supervised graph tasks. 
+GraphGPT is able to overcome the disadvantages of GNNs and Graph Transformers, and obtains state-of-the-art (SOTA) results in graph-/edge-/node-level tasks.
+Our contributions are summarized as follows:
+\begin{itemize}
+
+\item GraphGPT employs (semi-)Eulerian path\footnote{For a quick recap, a graph with every node of even degree is Eulerian, and with exactly two nodes of odd degree is semi-Eulerian.} to transform the graphs into the sequences of tokens, which ensures the transformation is lossless, reversible and optimal. Together with subgraph sampling and node identity encoding techniques, we can transform graphs of various sizes into sequences of tokens.
+
+\item GraphGPT is generatively pre-trained with the NTP task, which brings 3 advantages: $a$) learning the graph's structural and semantic information without relying on handcrafted features or tailored transformer architectures; $b$) scaling up to 400M+ parameters with consistent performance improvement; $c$) possessing the capability to generate graphs.
+
+
+\item GraphGPT utilizes a novel approach to format graph-/edge-/node-level tasks, making them compatible with the transformer decoder architecture and enabling them to fully benefit from the generative pre-training.
+\item Through extensive experiments on the public OGB datasets, GraphGPT achieves SOTA results in graph-level and edge-level tasks, and the performance in node-level tasks approaches the SOTA level.
+
+\end{itemize}
+
+
+
+\section{Approach}
+
+\label{sec:app}
+
+\begin{figure}[thpb]
+\begin{center}
+\includegraphics[width=\textwidth]{all_in_one.pdf}
+\end{center}
+\caption{Model overview. The left part shows the procedure to convert a (sub)graph into a sequence of tokens. The dashed line indicates the duplicated edge added to the original graph to make it (semi-)Eulerian. The right part shows the pre-training with the self-supervised NTP task and fine-tuning on the supervised graph-/edge-/node-level tasks. We use edge $(A,D)$ as an example for the edge-level task, and node $C$ for the node-level task.}
+\label{fig:eulerize}
+\end{figure}
+
+\subsection{Overview}
+In our GraphGPT model, we transform the given graph into a sequence of tokens in a reversible manner, ensuring that the graph and the resulting sequence are equivalent. Then we utilize a standard transformer backbone, such as Llama from \citet{touvron2023llama}, to process the sequence data and train it using the self-supervised NTP task. Finally, we fine-tune the transformer with the supervised tasks such as graph classification/regression, link prediction and node classification. %Touvron et al. (2023)
+
+\subsection{Graph to Sequence of Tokens}
+In this section, we show how to convert a graph into a sequence of tokens. For small graphs, \eg, molecular graphs, we convert them to sequences as in Sec. \ref{sec:serialize}. Big graphs, \eg, graphs with hundreds of thousands of nodes, millions or even billions of edges and many node or edge attributes, are processed differently. We first sample subgraphs (see Sec. \ref{sec:sampling}) with the node identity information preserved (see Sec. \ref{sec:node-coding}), and then transform them into sequences in accordance with Sec. \ref{sec:serialize}.
+
+\subsubsection{Serializing graphs with (semi-)Eulerian Path}
+\label{sec:serialize}
+
+We aim to find a lossless and reversible method to serialize (sub)graphs into sequences of tokens. This requires all the nodes and edges shall be represented in the sequence. Therefore, a path that transverses all the edges and nodes at least once would be a candidate.
+
+This type of path is studied in the literature as the Chinese Postman Problem six decades ago, and it can be solved in polynomial time \citep{mei1962graphic,edmonds1973matching}. In precise, if the graph has a (semi-)Eulerian path, that path is an optimal solution. Otherwise, we need to find the smallest number of existing edges to duplicate so that the resulting multigraph does have an (semi-)Eulerian path. 
+Given a (sub)graph, we can easily check whether it is (semi-)Eulerian \citep{west2001introduction}. If it is not, we can always convert it to be a (semi-)Eulerian graph by duplicating some existing edges, which is defined as Eulerization \citep{edmonds1973matching,daubechies2009}. Then, we can obtain the (semi-)Eulerian path for the given graph. 
+Since there are often more than one path for the (semi-)Eulerian graph, we randomly sample one of the paths for training. 
+This can be regarded as data augmentation, which has been proven to be very helpful in CV \citep{perez2017effectiveness}.
+
+We then re-index the nodes with $1,2,\cdots, n$ according to the order of their appearance in the path, where $n$ is the total number of nodes. 
+As in the example of the Fig. \ref{fig:eulerize}, $n$ of the path $i$ is 6, and the node $F$ is re-indexed as `1' and $A$ is re-indexed as `2'.
+
+For graphs with node attributes, and edge weights/attributes/directions (\ie, directed graphs), we represent the discrete attributes with tokens, and split the continuous numbers into individual digits as the tokens. We assign two tokens to represent the incoming and outgoing edge directions respectively. The tokens of a node's attributes are appended right after the node token (\eg, `1', `2'), and the tokens of the edge's attributes are put in between the source and destination nodes (see \Cref{app:graph,app:edge,app:node} for detailed examples).
+
+For the graph with disconnected components, we connect them by adding edges between the randomly picked nodes from different components. We use the token $<$edge\_jump$>$ as those edges' attributes. 
+
+We claim that the conversion of the graph to the sequence of tokens is lossless and reversible, because one can always recover the original graph by connecting the adjacent tokens. For example, in the sequence $i$ of Fig. \ref{fig:eulerize}, by linking `1' to `2', `2' to `3' and so on, we obtain all the edges as ensured by the Eulerian Path Theorem. With all the edges, we are able to construct a graph equivalent to the original one except for the notations of the nodes. More rigorously, they are isomorphic \citep{grohe2020graph}.
+\subsubsection{Subgraph Sampling}
+\label{sec:sampling}
+Serializing a large graph as in Sec. \ref{sec:serialize} leads to an extremely long sequence, which cannot be fed into the transformer. To tackle the problem, one way is to convert the whole graph into a sequence first, and then divide it into segments that can be fed into the transformer. The other way involves sampling subgraphs and then converting them into sequences.
+Both Eulerizing a big graph and finding its Eulerian path are quite time-consuming. Additionally, it causes the inconsistency between the sequences in pre-training and fine-tuning. Therefore, we adopt the second way to serialize a large graph.
+
+To be more specific, we sample a subgraph randomly around the central edge or node using the ShaDowKHop sampler introduced in \cite{zeng2021decoupling}. To ensure the resulting sequences to fit into the context window, we pre-calculate the depth and number of neighbors of the ShaDowKHop sampler. They vary across different datasets and context windows (see App. \ref{app:subgraph} for more).
+
+\subsubsection{Node Identity Encoding}
+\label{sec:node-coding}
+When sampling subgraphs from a large graph, we need to preserve the nodes' global identity, otherwise much information will be lost. One straightforward method is to represent each node as a unique token in the transformer's vocabulary, \ie, to encode each node with a learnable embedding vector. However, when the number of nodes in the graph is huge, the vocabulary size becomes enormous, causing the model size to increase significantly, and making the training difficult.
+
+To avoid the problem, we propose to encode each node with multiple tokens. For example, given a graph with 10 billion ($10^{10}$) nodes, we can encode each node uniquely with two tokens, and each token ranges from 1 to $10^5$. 
+As a result, this encoding would utilize $10^5$ instead of previous $10^{10}$ tokens in the vocabulary. It can be implemented with METIS \citep{karypis1997metis} to partition the graph into $10^5$ partitions, and each partition roughly has $10^5$ nodes. 
+To further reduce the vocabulary size, we can encode each node with more tokens. 
+For instance, encoding with five tokens results in a vocabulary size of 100. 
+However, note that encoding each node with more tokens would increase the length of the resulting graph sequence.
+
+The above encoding schema is in analogy with the coding of characters in computing. We can encode any characters with variable numbers of bytes in utf-8 \citep[Chapter~2]{allen2012unicode}, and the resulting vocabulary is 256, which is the count of all possible bytes.
+
+Through encoding each node uniquely with multiple tokens, we guarantee that the nodes' identity information is preserved during the subgraph extraction process. We show later in the ablation study in Sec. \ref{sec:ablation-node-id} that it does improve the results. 
+
+\subsection{Modeling with the transformer decoder}
+In this section, we show that we can model various graph tasks with the pre-training and fine-tuning paradigm using the transformer decoder architecture on the graph sequence of tokens.
+
+\subsubsection{Pre-training with the NTP task}
+Self-supervised pre-training has been shown very beneficial for various NLP tasks \citep{devlin2018bert,radford2019language}. The next-token-prediction (NTP) and masked-token-prediction tasks are two widely adopted self-supervised tasks. The NTP helps various models attain the SOTA results in many NLP tasks, and it enables the resulting model with strong generation capability \citep{brown2020language}. So we choose the NTP as our pre-training task.
+
+As shown in the right part of Fig. \ref{fig:eulerize}, the NTP predicts the next node to connect in the context of graph sequence. The next node can be a new node, one of the previous nodes, or the end (\ie, the $<$eos$>$ token). For example, in the semi-Eulerian path $i$, given the node sequence `1', `2' and `3', we predict that the next node is a new node and assign the notation `4' to it. Subsequently, we predict to connect to the previous node `2', and so on. Finally, after we arrive at node `6', we predict the end. In the presence of node and edge attributes, the NTP also predicts the corresponding discretized tokens encoded in the graph sequence.
+
+\subsubsection{Fine-tuning on downstream graph tasks}
+\label{sec:graph-tasks}
+As shown in Fig. \ref{fig:eulerize}, we append a special token $<$gsum$>$ at the end of the graph sequence, and feed its embedding output to a multilayer perceptron (MLP) for the supervised graph-level task. The parameters of the transformer are initialized from the pre-trained checkpoint, while the MLP layers are randomly initialized. All the parameters are updated during the fine-tuning stage.
+
+For the supervised edge-level task, we append the tokens of the source and destination nodes of the target edge at the end of the sequence. The output of the last token from the transformer is then fed to a MLP layer for the task. Similarly, for the node-level task, we append the target node's token at the end of the graph sequence and utilize its output for the task's MLP layer.
+
+By reformatting the graph-/edge-/node-level tasks as above, our pre-training and fine-tuning are aligned in an elegant manifestation. The alignment allows the fine-tuning tasks to better exploit the competency of pre-training, which is verified by many NLP literature \citep{brown2020language,wei2021finetuned}. Moreover, one can eliminate the task-specific MLP layer and convert the supervised task labels into tokens. Then the model is fine-tuned to generate these tokens, in analogy to the approach employed by GPT-3 for many NLP tasks \citep{brown2020language}.\footnote{We do not investigate it in this work, and leave it for future study.}
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+\subsection{Datasets}
+Applying AI to accelerate scientific discovery has been prevailing recently \citep{hassabis2023using}, which motivates us to validate our proposal on the large-scale graph datasets from physical, chemical, pharmaceutical and bio-informatics domains. 
+Also, we aim to demonstrate that our GraphGPT is applicable in the mainstream graph tasks, including graph-/edge-/node-level tasks. 
+Therefore, we choose PCQM4Mv2 and ogbg-molpcba for the graph-level task, and ogbl-ppa for the edge-level task and ogbn-proteins for the node-level task \citep{hu2020open,hu2021ogb}. Their statistics are shown in Tab. \ref{tab:stats} of App. \ref{app:data}.
+
+The PCQM4Mv2 is a quantum chemistry dataset of more than 3.7 million small organic molecules from the PubChemQC project \citep{nakata2017pubchemqc}. 
+The ogbg-molpcba is a much small molecular dataset \citep{wu2017molecule}. In these 2D molecular graphs, nodes are atoms, and edges are chemical bonds. The node attributes are 9-dimensional, containing atomic number, chirality and other atom features. The edge attributes are 3-dimensional, \ie, bond type, bond stereochemistry and conjugation.
+
+In the ogbl-ppa dataset, the nodes are proteins from 58 different species, and edges represent biologically meaningful associations between proteins \citep{szklarczyk2019string}. It is a large graph of over 30 millions edges.
+
+The ogbn-proteins dataset is an undirected, weighted, and typed dense graph. The nodes are proteins from 8 species, and the edges' 8-dimensional attributes represent 8 types of association strengths. It has nearly 40 millions edges. See more implementation details in App. \ref{app:impl}.
+\subsection{Graph-level tasks}
+\label{sec:exp-graphlevel}
+
+\begin{table}[ht]
+\caption{Results of the graph classification task on the ogbg-molpcba dataset. All the baseline results are from the OGB leaderboard and the corresponding papers. The best results are in bold, and second-best are underlined.}
+\label{tab:graph-pcba}
+\begin{center}
+\begin{tabular}{l|ll|l}
+\toprule
+\multirow{2}{*}{Models}      & \multicolumn{2}{c|}{Average Precision (AP)}                & \multirow{2}{*}{Params} \\ 
+                             & \multicolumn{1}{c}{Test}          & \multicolumn{1}{c|}{Valid}        &    \\ \midrule
+GCN                          & \multicolumn{1}{l}{0.2020±0.0024}   & 0.2059±0.0033   & 0.57M                   \\
+GIN                    & \multicolumn{1}{l}{0.2266±0.0028}   & 0.2305±0.0027   & 1.92M                   \\
+GINE+bot                      & \multicolumn{1}{l}{0.2994±0.0019}   & \underline{0.3094±0.0023}   & 5.51M                   \\
+Nested GIN+virtual node          & \multicolumn{1}{l}{\underline{0.3007±0.0037}}   & 0.3059±0.0056   & 44.19M                  \\
+PDF           & \multicolumn{1}{l}{\bftab0.3031±0.0026}   & \bftab0.3115±0.0020   & 3.84M                  \\ \midrule
+GraphGPT-mini                & \multicolumn{1}{l}{0.2385±0.0012}   &     0.2777±0.0017         &   4.48M               \\
+GraphGPT-base                & \multicolumn{1}{l}{0.2517±0.0041}   &    0.2857±0.0033          &   114.12M               \\
+GraphGPT-large               & \multicolumn{1}{l}{0.2722±0.0022}   &    0.2966±0.0027         &   403.84M               \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+For the two molecular datasets, the tasks are to predict quantum chemical property only from 2D molecular graphs without their 3D equilibrium structures, which is practically favorable. We predict 128 binary molecular properties for ogbg-molpcba and the HOMO-LUMO gap for PCQM4Mv2.
+We experiment 3 models of parameters from 4.48M to 403.84M for the ogbg-molpcba dataset. We pre-train the models with 16B tokens, and then fine-tuned for 10 epochs. The results from the epoch that maximizes the validation metric are reported in Tab. \ref{tab:graph-pcba}. 
+
+Our GraphGPT produces results much better than the powerful GNNs like GCN and GIN \citep{kipf2017semi,xu2019how}. Our results also approach the SOTA from those sophisticated GNNs. % that ensemble various GNNs or GTs. 
+In addition, GraphGPT yields consistently improved results as we increase the model size up to 400M. This verifies that GraphGPT does not suffer from the over-smoothing or over-squashing problems common in GNNs. It suggests that GraphGPT can perform even better if pre-trained with more data and more parameters.
+
+\begin{table}[ht]
+\caption{Results of the graph regression task on the PCQM4Mv2 dataset. The metric is mean absolute error (MAE), the smaller the better. We highlight the results that do not use 3D data.}
+\label{tab:graph-pyqm4m}
+\begin{center}
+\begin{tabular}{ll|c|cc|l}
+\toprule
+ & \multirow{2}{*}{Models} & \multirow{2}{*}{Use 3D}     & \multicolumn{2}{c|}{MAE}                & \multirow{2}{*}{Params} \\ 
+ &       &                       & \multicolumn{1}{c}{Valid}         & \multicolumn{1}{c|}{Test}        &                         \\ 
+
+\midrule
+
+\multicolumn{1}{l|}{\multirow{4}{*}{GNNs}}           & GCN & \ding{55} & \multicolumn{1}{c}{0.1379} & 0.1398 & 2.0M \\
+\multicolumn{1}{l|}{}                               & GIN & \ding{55} & \multicolumn{1}{c}{0.1195} & 0.1218 & 3.8M \\
+\multicolumn{1}{l|}{}                               & GCN-VN & \ding{55} & \multicolumn{1}{c}{0.1153} & 0.1152 & 4.9M \\
+\multicolumn{1}{l|}{}                               & GIN-VN & \ding{55} & \multicolumn{1}{c}{0.1083} & 0.1084 & 6.7M \\\midrule
+\multicolumn{1}{l|}{\multirow{4}{*}{GTs}}           & TokenGT & \ding{55} & \multicolumn{1}{c}{\underline{0.0910}}   & 0.0919    & 48.5M                       \\ 
+\multicolumn{1}{l|}{}                               & Graphformer    &      \ding{55}               & \multicolumn{1}{c}{\bftab0.0864}   & N/A   & 48.3M                   \\ 
+\multicolumn{1}{l|}{}                               & Transformer-M      & \ding{51} & \multicolumn{1}{c}{0.0772}   & 0.0782   & 69.0M    \\ 
+\multicolumn{1}{l|}{}                               & Uni-Mol+    & \ding{51}    & \multicolumn{1}{c}{0.0693}   & 0.0705   & 770.3M                  \\
+
+\midrule
+
+\multicolumn{1}{l|}{Ours}        & GraphGPT          & \ding{55} & \multicolumn{1}{l}{\bftab0.0875}     &     N/A    &    49.7M    \\  \bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+As for PCQM4Mv2, we compare to two GTs that do not utilize the molecular 3D data, \ie, TokenGT and Graphformer \citep{kim2022pure,ying2021transformers}. We configure our transformer backbone the same as theirs for a fair comparison. The resulting model has 49.7M parameters, and is pre-trained with about 49.5B tokens. %After fine-tuning with the supervised regression task, GraphGPT achieves the best result among the models.
+The TokenGT uses the vanilla transformer backbone, and it serializes the graph into tokens by directly unfolding all the nodes and edges. The serialization method prohibits it from being self-supervised pre-trained. TokenGT also supplements the inputs with handcrafted structural features. 
+The Graphformer transforms the graph into the sequence of tokens using nodes only. The structural information possessed in the edges are completely lost in the input sequence, so Graphformer has to add them back through modifying the transformer's attention layers and enhancing the inputs with sophisticated tricks like centrality encoding and spatial encoding to handcraft structural information. Same as TokenGT, Graphformer cannot adopt self-supervised pre-training.
+
+In contrast, our GraphGPT does not require any handcrafted features, and obtains better results than TokenGT on the valid dataset, \ie, 0.0875 versus 0.0910. Our result is comparable to Graphformer. What's more, GraphGPT surpasses all the GNNs by a large margin. The exceptional performance of GraphGPT implies that our lossless serialization and the  self-supervised generative pre-training enable the model to fully capture the graph's structural and semantic information. We are pre-training larger GraphGPT with more compute budget in order to attain better results.
+\subsection{Edge-level tasks}
+\label{sec:exp-edgelevel}
+
+The edge-level task of the dataset ogbl-ppa is link prediction. We use two tokens for the node identity encoding introduced in Sec. \ref{sec:node-coding}. Specifically, we use the species to partition the nodes, so the first token represents the species, and the second is the local indices of proteins inside each species (see App. \ref{app:edge} for details).
+
+We experiment 5 different model sizes ranging from 14.75M to 444.92M, and report 3 of them in Tab. \ref{tab:edge} (see App. \ref{app:edge} for more). GraphGPT-mini/base/large are pre-trained with 25.6B/39B/50B tokens respectively, and then fine-tuned with the classification task. The fine-tuning data consists of subgraphs induced by the positive edges for training and equal negative edges randomly sampled.
+
+As in Tab. \ref{tab:edge}, GraphGPT performs much better than all kinds of models, including GNNs, Heuristic and Latent Factor models. Our smallest model outperforms the strong GNNs like GCN, GraphSAGE and SEAL a lot \citep{kipf2017semi,hamilton2017inductive,zhang2018link}. Our best result 67.15 surpasses the current SOTA 63.22 by a large margin. 
+
+AGDN \citep{sun2020adaptive}, the largest GNN in the leaderboard, has only 36.9M parameters. The prevailing GNNs like GCN, GraphSAGE and SEAL have less than 1M parameters. They cannot be further scaled up to achieve better results due to the over-smoothing and over-squashing problems. In contrast, GraphGPT is able to scale up to 400M+ with consistently increasing  performance. This motives further study on larger models and more data with more compute budget.
+
+What's more, previously no GTs are listed in the ogbl-ppa's leaderboard, and we show that transformer based models can excel in edge-level tasks.
+
+\begin{table}[ht]
+\caption{Results of the link prediction task on the ogbl-ppa dataset.}
+\label{tab:edge}
+\begin{center}
+\begin{tabular}{ll|ll|l}
+\toprule
+   & \multirow{2}{*}{Models}      & \multicolumn{2}{c|}{HR@100 (\%)}                & \multirow{2}{*}{Params} \\ 
+   &                              & \multicolumn{1}{c}{Test}         & \multicolumn{1}{c|}{Valid}        &                         \\ \midrule
+\multicolumn{1}{l|}{\multirow{3}{*}{Heuristic}}     & Common Neighbor              & \multicolumn{1}{l}{27.65±0.00}   & 28.23±0.00   & 0                       \\ 
+\multicolumn{1}{l|}{}                               & Adamic Adar                  & \multicolumn{1}{l}{32.45±0.00}   & 32.68±0.00   & 0                       \\ 
+\multicolumn{1}{l|}{}                               & Resource Allocation          & \multicolumn{1}{l}{49.33±0.00}   & 47.22±0.00   & 0                       \\ \midrule
+\multicolumn{1}{l|}{\multirow{2}{*}{Latent Factor}} & DeepWalk                     & \multicolumn{1}{l}{28.88±1.53}   & -            & 150.14M                 \\ 
+\multicolumn{1}{l|}{}                               & Matrix Factorization         & \multicolumn{1}{l}{32.29±0.94}   & 32.28±4.28   & 147.66M                 \\ \midrule
+\multicolumn{1}{l|}{\multirow{5}{*}{GNN}}           & GCN                          & \multicolumn{1}{l}{18.67±1.32}   & 18.45±1.40   & 0.28M                   \\ 
+\multicolumn{1}{l|}{}                               & GraphSAGE                    & \multicolumn{1}{l}{16.55±2.40}   & 17.24±2.64   & 0.42M                   \\ 
+\multicolumn{1}{l|}{}                               & SEAL                         & \multicolumn{1}{l}{48.80±3.16}   & 51.25±2.52   & 0.71M                   \\ 
+\multicolumn{1}{l|}{}                               & AGDN                         & \multicolumn{1}{l}{41.23±1.59}   & 43.32±0.92   & 36.90M                  \\ 
+\multicolumn{1}{l|}{}                               & SIEG                         & \multicolumn{1}{l}{63.22±1.74}   & 65.33±2.34   & 1.99M                   \\ \midrule
+\multicolumn{1}{l|}{\multirow{3}{*}{GraphGPT (Ours)}} & mini                & \multicolumn{1}{l}{55.56±1.14}   & 54.87±0.66   & 14.75M                  \\ 
+\multicolumn{1}{l|}{}                                 & base                & \multicolumn{1}{l}{\underline{64.98±1.73}}   & \underline{66.68±1.33}   & 144.93M                 \\ 
+\multicolumn{1}{l|}{}                                 & large               & \multicolumn{1}{l}{\bftab67.15±1.36}   & \bftab68.60±1.40   & 444.92M                 \\ 
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+\subsection{Node-level tasks}
+\label{sec:exp-nodelevel}
+
+The task of the ogbn-proteins dataset is to predict 112 binary labels of proteins that each indicates the presence of one type of function. The node identity is encoded with two tokens similar to the ogbl-ppa in Sec. \ref{sec:exp-edgelevel} (see App. \ref{app:node} for details).
+
+We pre-train 5 different models that scale from 10.76M to 428.94M with 51.2B tokens, and then fine-tune them for 16 epochs. We pick the 3 consecutive epochs that maximize the metric of valid data and then calculate the mean and variance. We report the results of 3 models in Tab. \ref{tab:node}. 
+
+
+For this dataset, GNNs usually use random partition \citep{li2020deepergcn} to sample subgraphs. The resulting subgraphs usually have more than 20,000 nodes and 1 million edges. In contrast, our subgraphs usually have about 10 nodes and 20 edges, because we limit the transformers' context window to be 256. It is remarkable that GraphGPT's results surpass GCN and GraphSAGE, and approach the SOTA with such a small neighborhood to gather information. We hypothesize that during the pre-training, the global structural and semantic information of the big graph have been encoded in the node tokens' embeddings and the transformer's parameters.
+
+GNNs in the leaderboard are very small. For example, GCN and GraphSAGE has 0.1M to 0.2M parameters, and even DeeperGCN does not exceed 2.37M \citep{li2020deepergcn}. The largest GNN model RevGNN-wide has 68M parameters \citep{li2021training}. In contrast, our GraphGPT-large has 400M+ parameters and can be well trained. Compared to the only transformer based model UniMP in the leaderboard \citep{shi2020masked}, GraphGPT is able to train much larger transformers and attains improved results.
+
+Despite of the fine performance of GraphGPT, the small context window may restrain its capability. Techniques like Flash Attention \citep{dao2022flashattention} and Positional Interpolation \citep{chen2023extending} can be utilized to make the context window much longer.\footnote{We experimented with the context window of 1024, and observed some gains.}% and Positional Interpolation with minimal fine-tuning on much longer sequences \citep{chen2023extending}. to more than 32,000
+
+\begin{table}[ht]
+\caption{Results of the node classification task on the ogbn-proteins dataset.}
+\label{tab:node}
+\begin{center}
+\begin{tabular}{l|ll|l}
+\toprule
+\multirow{2}{*}{Models}      & \multicolumn{2}{c|}{ROC-AUC (\%)}                & \multirow{2}{*}{Params} \\ 
+                             & \multicolumn{1}{c}{Test}          & \multicolumn{1}{c|}{Valid}        &    \\
+\midrule
+GCN                          & \multicolumn{1}{l}{72.51±0.35}   & 79.21±0.18   & 0.10M                   \\
+GraphSAGE                    & \multicolumn{1}{l}{77.68±0.20}   & 83.34±0.13   & 0.19M                   \\
+DeeperGCN                    & \multicolumn{1}{l}{85.80±0.17}   & 91.06±0.16   & 2.37M                   \\
+UniMP                        & \multicolumn{1}{l}{86.42±0.08}   & 91.75±0.06   & 1.91M                   \\
+RevGNN-wide                  & \multicolumn{1}{l}{\underline{88.24±0.15}}   & \underline{94.50±0.08}   & 68.47M                  \\
+GIPA (Wide\&Deep)            & \multicolumn{1}{l}{\bftab89.17±0.07}   & \bftab94.72±0.20   & 17.44M                  \\ 
+\midrule
+GraphGPT-mini                & \multicolumn{1}{l}{75.61±1.37}   & 80.47±0.94   & 10.76M                  \\
+GraphGPT-base                & \multicolumn{1}{l}{83.37±0.15}   & 87.68±0.25   & 132.94M                 \\
+GraphGPT-large               & \multicolumn{1}{l}{84.80±0.18}   & 89.35±0.24   & 428.94M                 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+\subsection{Ablation Study}
+\label{sec:ablation}
+We present the ablation study on three key ingredients of GraphGPT, \ie, pre-training, node re-indexing and node identity encoding.
+
+
+\subsubsection{Pre-training}
+Pre-training with the NTP task is the key to the success of our GraphGPT. Experiment results on graph/edge/node-level tasks in Tab. \ref{tab:ablation-pretrain} show that pre-training can boost the performance a lot. The lift of metrics ranges from 30\% to 100\%. This implies that pre-training enables the model to understand both the graph structure and the semantics possessed in the node and edge attributes.
+
+\begin{table}[ht]
+\caption{Ablation study of pre-training on the datasets of various types of tasks.}
+\label{tab:ablation-pretrain}
+\begin{center}
+\begin{tabular}{l|l|l|l|c|cc}
+\toprule
+ Task Type     & Datasets  & Params & Metrics & Pre-training & Test & Valid       \\
+
+\midrule
+
+\multicolumn{1}{l|}{\multirow{4}{*}{Graph}}     & \multicolumn{1}{l|}{\multirow{2}{*}{ogbg-molpcba}} & 
+\multicolumn{1}{l|}{\multirow{2}{*}{4.48M}}     & 
+\multicolumn{1}{c|}{\multirow{2}{*}{AP}}        &
+         \ding{55}  & 0.1280 & 0.1331\\
+ & & & & \ding{51}  & \bftab0.2385 & \bftab0.2777 \\
+
+\cline{2-7}
+
+\multicolumn{1}{l|}{}     & \multicolumn{1}{l|}{\multirow{2}{*}{PCQM4Mv2}} & 
+\multicolumn{1}{l|}{\multirow{2}{*}{49.7M}}     & 
+\multicolumn{1}{c|}{\multirow{2}{*}{MAE}}        &
+         \ding{55}  & N/A & 0.1086\\
+ & & & & \ding{51}  & N/A & \bftab0.0875 \\
+
+\midrule
+
+ \multicolumn{1}{l|}{\multirow{2}{*}{Edge}}     & \multicolumn{1}{l|}{\multirow{2}{*}{ogbl-ppa}} & 
+ \multicolumn{1}{l|}{\multirow{2}{*}{14.75M}}   & 
+\multicolumn{1}{c|}{\multirow{2}{*}{HR@100}}        &
+         \ding{55} & 41.28 &  40.14 \\
+ & & & & \ding{51} & \bftab55.56 &  \bftab54.87 \\
+
+\midrule
+
+  \multicolumn{1}{l|}{\multirow{2}{*}{Node}}     & \multicolumn{1}{l|}{\multirow{2}{*}{ogbn-proteins}} & 
+  \multicolumn{1}{l|}{\multirow{2}{*}{10.76M}}   & 
+\multicolumn{1}{c|}{\multirow{2}{*}{ROC-AUC}}        &
+         \ding{55} & 57.52 & 61.19 \\
+ & & & & \ding{51} & \bftab75.61 & \bftab80.47 \\
+
+\bottomrule
+
+\end{tabular}
+\end{center}
+\end{table}
+
+\subsubsection{Node Re-indexing}
+\label{sec:ablation-node-reindex}
+As shown in Fig. \ref{fig:eulerize}, we re-index the nodes according to their order in the (semi-)Eulerian path. We conduct experiments using the ogbg-molpcba dataset to assess its effectiveness. As shown in Tab. \ref{tab:ablation-node-reindex}, node re-indexing improves the downstream tasks for different model sizes, although it increases the pre-training loss. This is because node re-indexing can be regarded as data augmentation. It prevents the model from memorizing the unimportant information of the graph, \ie, the notation of the nodes, and leads to better generalization performance. In addition, the re-indexing allows us to restrict the decoding space of node tokens when generating graphs with GraphGPT.
+\begin{table}[ht]
+\caption{Ablation study of node re-indexing on the ogbg-molpcba dataset with two model sizes.}
+\label{tab:ablation-node-reindex}
+\begin{center}
+\begin{tabular}{l|c|c|c|cc}
+\toprule
+Params & Metrics & Re-index & Pre-training Loss & Test & Valid       \\
+
+\midrule
+
+\multicolumn{1}{l|}{\multirow{2}{*}{114.12M}} & 
+\multicolumn{1}{c|}{\multirow{2}{*}{AP}} & 
+                          \ding{55} & \bftab0.0689 & 0.2270 & 0.2621\\
+                      & & \ding{51} & 0.0750 & \bftab0.2517 & \bftab0.2857\\
+
+\midrule
+
+ \multicolumn{1}{l|}{\multirow{2}{*}{4.48M}} & 
+ \multicolumn{1}{c|}{\multirow{2}{*}{AP}} & 
+                          \ding{55} & \bftab0.0844 & 0.2310 & 0.2525\\
+                      & & \ding{51} & 0.0874 & \bftab0.2385 & \bftab0.2777\\
+
+\bottomrule
+
+\end{tabular}
+\end{center}
+\end{table}
+
+\subsubsection{Node Identity Encoding}
+\label{sec:ablation-node-id}
+As illustrated in Sec. \ref{sec:node-coding}, we encode each node in a big graph uniquely with multiple tokens. Here we show its importance for edge-/node-level tasks. We use GraphGPT-mini to conduct the ablation study to save time and compute budget. Node identity encoding can obviously improve the results as in Tab. \ref{tab:ablation-node-coding}. For more details, see \cref{app:edge,app:data}.
+\begin{table}[ht]
+\caption{Ablation study of node identity encoding on the ogbl-ppa and ogbn-proteins datasets.}
+\label{tab:ablation-node-coding}
+\begin{center}
+\begin{tabular}{l|l|l|l|c|cc}
+\toprule
+ Task Type     & Datasets  & Params & Metrics & Node ID encoding & Test & Valid       \\
+
+\midrule
+
+ \multicolumn{1}{l|}{\multirow{2}{*}{Edge}}     & \multicolumn{1}{l|}{\multirow{2}{*}{ogbl-ppa}} & 
+ \multicolumn{1}{l|}{\multirow{2}{*}{14.75M}}   & 
+\multicolumn{1}{c|}{\multirow{2}{*}{HR@100}}        &
+                          \ding{55} & 44.38 & 45.08 \\
+                  & & & & \ding{51} & \bftab55.56 & \bftab54.87 \\
+
+\midrule
+
+  \multicolumn{1}{l|}{\multirow{2}{*}{Node}}     & \multicolumn{1}{l|}{\multirow{2}{*}{ogbn-proteins}} & 
+  \multicolumn{1}{l|}{\multirow{2}{*}{10.76M}}   & 
+\multicolumn{1}{c|}{\multirow{2}{*}{ROC-AUC}}        &
+                          \ding{55} & 60.22 & 65.66 \\
+                  & & & & \ding{51} & \bftab75.61 & \bftab80.47 \\
+
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+
+\section{Related works}
+
+\label{sec:rel-works}
+
+\textbf{\emph{Graph Neural Networks (GNNs)}} GNNs have been dominating the graph learning in the past decades. They have many variants, and gain excellent performance in various graph tasks \citep{wu2020comprehensive}. However, most GNNs suffer from the over-smoothing and over-squashing problems, which restrict them from scaling up \citep{rusch2023survey,alon2021on}.
+
+\textbf{\emph{Graph Transformers (GTs)}} Inspired by the success of transformers in NLP and CV, graph community starts to embrace transformer architectures in recent years \citep{ying2021transformers,rampasek2022recipe,muller2023attending}. The various GTs have attained some good results, especially in graph-level tasks with large-scale datasets \citep{muller2023attending}. Nevertheless, they have to employ handcrafted features or GNN modules to encode the structure information in the inputs \citep{ying2021transformers,kim2022pure}, and/or in the self-attention layers \citep{ying2021transformers,chen2022structure,luo2022one}. In addition, they mostly adopt the transformer encoder instead of the decoder, preventing them from being pre-trained in a self-supervised manner.
+
+\textbf{\emph{Pre-training and fine-tuning}} After the invention of the transformer \citep{vaswani2017attention}, the self-supervised pre-training and supervised fine-tuning paradigm starts to flourish in NLP and brings significant improvements across various tasks \citep{devlin2018bert,radford2018improving}. Pre-training with web-scale text data \citep{brown2020language} and followed by instruction tuning \citep{wei2021finetuned} or reinforcement learning from human feedback \citep{ouyang2022training} advances the paradigm and boosts the performance even further. In CV, pre-training with the large scale supervised datasets and fine-tuning on the small datasets gains much success, which is termed as transfer learning \citep{yosinski2014transferable}. Recently, MAE from \citet{he2022masked} shows that self-supervised pre-training by predicting large portion of masked image patches can also attain SOTA results.
+
+
+\section{Conclusions}
+
+We propose the novel model GraphGPT that can be adapted for the graph-/edge-/node-level tasks, and it can attain SOTA or close to SOTA results. %We bridge the gap of the learning paradigm between the graph community and the CV/NLP communities through modeling the graph data with transformers in an elegant way, such that the transformers can be scaled up easily and pre-trained with the NTP task. 
+With GraphGPT, we train large models of up to hundreds of millions parameters, and observe consistent performance increase. GraphGPT has the potential to be scaled up to hundreds of billions parameters, and can be aligned or integrated with large language models. For a comprehensive understanding of GraphGPT, we discuss its limitations in App. \ref{app:discussion}.
+
+
+
+
+
+
+
+

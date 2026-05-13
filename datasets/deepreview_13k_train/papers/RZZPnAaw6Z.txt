@@ -1,0 +1,387 @@
+\title{Self-rationalization improves LLM as a fine-grained judge}
+
+\begin{abstract}
+
+
+LLM-as-a-judge models have been used for evaluating both human and AI generated content, specifically by providing scores and rationales. Rationales, in addition to increasing transparency, help models learn to calibrate its judgments. Enhancing a model's rationale can therefore improve its calibration abilities and ultimately the ability to score content. We introduce Self-Rationalization, an iterative process of improving the rationales for the judge models, which consequently improves the score for fine-grained customizable scoring criteria (i.e., likert-scale scoring with arbitrary evaluation criteria). Self-rationalization works by having the model generate multiple judgments with rationales for the same input, curating a preference pair dataset from its own judgements, and iteratively fine-tuning the judge via DPO. Intuitively, this approach allows the judge model to self-improve by learning from its own rationales, leading to better alignment and evaluation accuracy. After just two iterations -- while only relying on examples in the training set -- human evaluation shows that our judge model learns to produce higher quality rationales, with a win rate of $62\%$ on average compared to models just trained via SFT on rationale . This judge model also achieves high scoring accuracy on BigGen Bench and Reward Bench, outperforming even bigger sized models trained using SFT with rationale, self-consistency or best-of-$N$ sampling by $3\%$ to $9\%$. 
+
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large language models (LLMs) have shown impressive capabilities in natural language understanding and generation \citep{radford_language_2019}. However, aligning these models with human preferences, values and reasoning has posed significant challenges \citep{amodei2016concreteproblemsaisafety}. Consequently, two key approaches have emerged as powerful solutions to address these challenges - Reinforcement Learning from Human Feedback \citep{christiano2023deepreinforcementlearninghuman}, known as RLHF, and its more scalable extension Reinforcement Learning from AI Feedback \citep{bai2022constitutionalaiharmlessnessai}, known as RLAIF. Both approaches represent a significant shift in how LLMs are trained, focusing on feedback-driven learning to align models more closely with human preferences.
+
+At the core of RLHF is the concept of learning through interaction with human evaluators who provide feedback on model generated content by ranking or scoring outputs based on quality, correctness or alignment with desired outputs. This feedback allows LLMs to learn more directly from human values, making them more aligned with real-world expectations. However, relying exclusively on human feedback can be resource-intensive and difficult to scale. To overcome this, RLAIF introduces a new paradigm where AI systems provide feedback instead. In this setting, LLMs can act as evaluators of their own or other model generated content.  This method leverages the power of LLMs to perform the role of \textit{Judges}, an \textit{LLM-as-a-Judge} \citep{vu2024foundationalautoraterstaminglarge, kim2023prometheus} which provide judgements on content quality, coherence and alignment. It has become a core component in RLAIF, where LLMs are tasked with evaluating AI generated content providing not only scores but also detailed \textit{rationales} that explain their decisions. These rationales are critical as they offer insight into the model's reasoning process, helping both the model developers as well the model itself to assess the quality of judgements. 
+
+Moreover, rationales are more than just explanations; they are learning mechanism for the model itself. By producing and reflecting on rationales, LLMs can improve their scoring abilities. The iterative process of generating and improving rationales leads to better aligned judgements and more calibrated evaluations. Consequently, enhancing a model's reasoning quality may improve its overall evaluating accuracy, particularly in subjective tasks where alignment with human values is paramount.
+
+To harness this potential, we introduce \textit{Self-Rationalizing Evaluators} (SRE) - a new approach of improving \textit{LLM-as-Judges} through iterative preference optimization focusing on enhancing generated rationales. In other words, the model generates multiple judgements with accompanying rationales for a given input, then applies preference curation techniques to create preference pairs from those judgements. Using the preference data, the model is fine-tuned through Direct Preference Optimization (DPO) \citep{rafailov2024directpreferenceoptimizationlanguage} which enables it to self-improve both its rationale generation and response evaluation capabilities. Table \ref{table:eval:methods_comparison} displays some key differences between \textit{Self-Rationalization} and other existing training methods. 
+
+Finally, through experiments, we demonstrate the effectiveness of the SRE approach. In just two iterations of self-rationalization--relying only on examples from the training data, our model significantly improves both its rationale quality and its scoring accuracy. When evaluated against models trained via supervised fine-tuning (SFT), our SRE model consistently outperforms them in terms of rationale coherence and scoring accuracy.
+
+Furthermore, our experiments show that \textit{Self-Rationalizing Evaluators} outperform similar sized models and larger sized models on diverse evaluation benchmarks, namely Feedback Bench \citep{kim2024prometheus2opensource}, Reward Bench \cite{lambert2024rewardbenchevaluatingrewardmodels} and BiGGen Bench \citep{kim2024biggenbenchprincipledbenchmark}. It also outperforms methods such as Best-of-$N$ and Self-Consistency \citealp{wang2023selfconsistencyimproveschainthought}. Furthermore, results demonstrate that training a judge with rationales and DPO (through self-rationalization) achieves better judging results. Additionally, human evaluations provide strong evidence that self-rationalization improves the quality of rationales. 
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{iclr_figure.pdf}
+    \caption{Overview of the iterative alignment process for enhancing the performance of LLM-as-judge through self-rationalization: The process begins with \textbf{Seed Initialization} using a supervised fine-tuned judge model $J_1$ trained on an initial labeled dataset $(X,Y)$. Next, \textbf{Self-Rationalization} generates $k$ judgements from the model for an input $x_i$ each consisting of rationale $r_i$, followed by score $s_i$. In the \textbf{Preference Selection} step, these judgements are evaluated to form preference pairs $(y_i^{c}, y_i^{r})$ where $y_i^{c}$ is the higher quality judgement and $y_i^{r}$ is the rejected judgment. Finally, in \textbf{Preference Optimization}, the model is fine-tuned on these preference pairs using \textbf{DPO} leading to the enhanced judge model $J_{t+1}$.}
+    \label{fig:ablation-epochs}
+\end{figure}
+
+
+
+\section{Background}
+
+We consider a general LLM-as-judge \citep{vu2024foundationalautoraterstaminglarge}. In particular, we consider training such an LLM-as-judge on a multi-task setting comprising of point-wise and pairwise assessments. 
+\begin{itemize}
+    \item \textbf{Pointwise Assessment}: In a pointwise assessment, the judge evaluates a single response given a context. Formally, the judge model $J$ can be represented as a function:
+\[
+J(c, a, e, i_{point}; \theta) \rightarrow (s, r)
+\]
+where $c$ is the conversation context, $a \in \mathcal{A}$ is the response, $e \in \mathcal{E}$ is the scoring criterion (e.g., safety, factuality, helpfulness), $i_{point}$ is the input instruction for the pointwise task, $\theta$ represents the model parameters, $s \in \mathcal{S}$ is the score (on a Likert scale, from 1 to 5), and $r \in \mathcal{R}$ is the rationale explaining the reasoning behind the score.
+
+    \item \textbf{Pairwise Assessment}: In a pairwise assessment, the judge evaluates two responses and selects the better one. Formally, the judge model $J$ for pairwise assessment can be represented as a function:
+\[
+J(c, a_1, a_2, e, i_{pair}; \theta) \rightarrow (p, r)
+\]
+where $c$ is the conversation context, $a_1, a_2 \in \mathcal{A}$ are the two responses being compared, $e \in \mathcal{E}$ is the scoring criterion for choosing the better response(e.g., safety, factuality, helpfulness), $i_{pair}$ is the input instruction for the pairwise task, $\theta$ represents the model parameters, $p \in \{1, 2\}$ is the index of the preferred response, and $r \in \mathcal{R}$ is the rationale explaining the reasoning behind the preference.
+
+\end{itemize}
+
+Supervised fine-tuning (SFT) approaches for training \textit{LLM-as-judge} models have inherent limitations. SFT typically exposes the model to positive examples—teaching it to generate “correct”
+ responses or judgments—but it does not explicitly show the model what constitutes an incorrect response. As a result, models trained solely with SFT may struggle with generalization, especially when they encounter ambiguous or edge-case inputs where multiple interpretations exist, or where the “correctness” of a response may not be binary. \citet{wang2023selfconsistencyimproveschainthought} introduced Self-Consistency, an approach that explores multiple reasoning paths to arrive at a final judgment. By aggregating responses across various paths, we can achieve more robust and reliable outputs. Another useful strategy is the Best-of-N approach, where we sample multiple outputs (N) from the base SFT $J_\text{SFT}$ model, select the most appropriate responses, and use them for further fine-tuning. By doing so, we expose the model to better judgements that can theoretically mitigate the limitations of relying on a single response.
+
+While both Self-Consistency and Best-of-N help improve the diversity and robustness of model outputs by considering multiple responses, they share a critical shortcoming with SFT: they focus primarily on identifying the best or correct outputs and do not address how models should learn from negative or incorrect responses.
+To address this, we follow the SFT step with Direct Preference Optimization (DPO) \citep{rafailov2024directpreferenceoptimizationlanguage}. In this setting, we train the model on pairs of judgments, where one is preferred over the other, providing more diverse learning signals. For each input $\{c,a,e\}$ the model is presented with two contrasting judgments: a superior well-reasoned judgement and an inferior judgement.
+
+
+
+    
+
+
+\section{Training Self-Rationalizing Evaluators}
+
+\label{headings}
+We propose a new training recipe to enhance the performance of LLM-as-Judge through an iterative alignment process using synthetic data generated via self-rationalization. Our iterative approach consists of several stages: the creation of base judge model, the utilization of generated rationales by model to refine its judgement capabilities (self-rationalization), the selection of preference data through different curation methods and finally performing alignment via Direct Preference Optimization (DPO). This iterative process is depicted in Figure \ref{fig:ablation-epochs} consists of:
+
+\begin{enumerate}
+    \item \textbf{Seed Initialization:} We begin with a base supervised fine-tuned judge model $J_{\text{SFT}}$, trained on an initial labeled dataset $(X, Y)$ using supervised learning. This serves as the starting point for our iterative improvement process.
+
+    \item \textbf{Self-Rationalization:} Given an input $x_i \in X$ (e.g., a conversation context and response to evaluate), we generate $N$ judgments from the current model $J_t$, each comprising a score $s_i$ and rationale $r_i$. This step allows the model to produce diverse evaluations of the same input.
+
+    \item \textbf{Preference Data Curation:} The $N$ generated judgments undergo a selection process to create preference pairs $(y_i^c, y_i^r)$. The chosen output $y_i^c$ represents a higher quality judgment, while $y_i^r$ is the rejected, lower quality judgment. This step is crucial for identifying the most promising rationales and scores.
+
+    \item \textbf{Preference Optimization:} Finally, the model is fine-tuned on these preference pairs using Direct Preference Optimization (DPO) \citep{rafailov2024directpreferenceoptimizationlanguage}, resulting in an improved judge model $J_{t+1}$.
+\end{enumerate}
+
+This process is repeated iteratively, starting with $J_1$, producing $J_2$ , and continuing through each iteration $t$. We refer the final model ($J_2$) also as $J_\text{SRE}$.  Each cycle aims to refine the model's ability to generate high-quality rationales and accurate scores. In the following subsections, we will describe this process in detail.
+
+\subsection{Base Judge Creation}
+
+Our approach assumes access to a pre-trained seed model with instruction-following capabilities and a labeled training dataset. The input data $X$ consists of conversation context and a response ($C$, $A$), while the output includes both $S$ and rationale $R$. Based on the findings of \citet{kim2024prometheusinducingfinegrainedevaluation}, we aim to train a base judge that can perform pointwise (e.g., Likert-scale ratings) and pairwise evaluations. Accordingly, we assume that the labeled dataset consists of both pairwise and pointwise data. With this, as a first step, we fine-tune a base judge model through supervised fine tuning (SFT) and the resulting model is subject to further calibration in the downstream steps.
+
+\subsection{Self-Rationalization}
+
+To enable the model to learn from its own reasoning process, we generate multiple judgments with the $t^{th}$ iteration of the judge Model i.e. $J_t$ for the same input $x_i$. Each judgment $j_k=(r_k,s_k)$ comprises a rationale, followed by a score that is conditioned on the provided rationale. We refer this process as \textit{Self-rationalizing}, encourages the model to refine its own decision-making by linking reasoning with the the judgment score. Notably, the model first generates the rationale, followed by the score, ensuring that the score is conditioned on the rationale. We hypothesize that as the quality of the rationales improves, the accuracy of the scores will also improve.  
+
+On each iteration we sample $p\%$ of the seed dataset, perform self-rationalization for each input $N$ times to get multiple judgements $[\Psi]= \{j_1, \dots, j_N$\}, which will then be subject to preference data selection, thus refining the reasoning ability in each iteration. 
+
+\subsection{Preference Data Curation}
+At each iteration, judgements $[\Psi]$ generated in \textit{Self-Rationalization} is used to construct Preference Pairs $(j_m, j_n)$ where $j_m$ and $j_n$ are chosen and rejected judgements respectively. We apply several methods to guide the creation of these pairs, allowing flexibility based on task-specific objectives and data characteristics.
+\paragraph{Correct-Answer Preference Pairing}
+In this method, once the judgements with rationales and scores for the inputs are obtained, preference pairs are constructed by designating a judgement with a score that matches the ground truth as the chosen judgement, while one of the other judgements as the rejected judgement. Additionally, to facilitate the model's learning and enable it to effectively contrast correct and incorrect pairs, further filtering can be done based on the \textit{margin} i.e. difference between the scores of chosen and rejected score. 
+
+\paragraph{Meta-Judge}
+In this method, we employ a meta-judge \cite{wu2024metarewardinglanguagemodelsselfimproving} to evaluate all possible pairs based the quality of the judgments. The criteria for assessment for the \textit{LLM-as-Meta-Judge} are the correctness of the score and also the quality of rationales . On the basis of the score from the meta-judge, all possible  preference pairs are constructed wherein the chosen judgement $j_m$ is ranked higher than rejected judgement $j_n$ by the meta-judge, to create the $(j_m, j_n)$ pairs from the judgment pool $[\Psi]$.
+
+\paragraph{Majority-voting/Self-consistency}
+During the self-rationalization phase, we analyze the score distribution generated by multiple judgements $[\Psi]$, for each input $x_i$. The majority score within this distribution is designated as the chosen judgment, while the scores that do not constitute the majority are classified as rejected pairs.
+
+\subsection{Iterative Rationalizing Preference Optimisation}
+
+For each iteration, we sample $p\%$ of the training dataset, generate synthetic preference pairs from the selected subset and apply DPO to obtain the $t^{th}$ iteration of the judge model. In summary, our proposed methodology begins with performing SFT on a seed pre-trained model using labeled data $D_\text{seed}$ to obtain $J_{\text{SFT}}$. We then apply DPO for $T$ iterations, enhancing the judgment capabilities of model at each iteration.
+
+\begin{itemize}[topsep=0pt,itemsep=4pt,parsep=0pt]
+\item[Base ] : Fine-tune the seed pre-trained model on $D_\text{seed}$ using SFT to get $J_{\text{SFT}}$.
+\item[Iter 1]: Initialize with $J_{\text{SFT}}$, create synthetic preference-data $D_1$ using $p_1$\% of $D_\text{seed}$ and perform DPO to obtain $J_1$.
+\item[Iter 2]: Initialize with $J_1$, create synthetic preference-data $D_2$ using $p_2$\% of $D_\text{seed}$ and apply DPO to obtain $J_2$ termed as $J_\text{SRE}$. 
+
+\end{itemize}
+
+
+
+
+
+\begin{wraptable}{R}{0.6\textwidth}
+  \centering
+  {
+   \caption{\normalsize Comparison of Judge Training Methods Across Various Judge Characteristics. 
+  Respectively, the columns represent: whether the judge generates rationales, whether synthetic seed prompts need to be generated, the use of models smaller than 10B parameters, and whether scoring criteria can be customized at inference time.}
+  \renewcommand{\arraystretch}{1.5} % Add extra space between rows for this table only
+  \resizebox{0.6\textwidth}{!}{% Resized table width for better visibility
+  \setlength{\tabcolsep}{5pt}
+  \large
+  \begin{tabular}{lcccc}
+    \toprule
+    \parbox[t]{4.0cm}{\bf Training Methods} & \parbox[t]{2.0cm}{\centering {\bf Rationales}} & \parbox[t]{2.2cm}{\centering {\bf No Extra \\ Training Data}} & \parbox[t]{1.6cm}{\centering {\bf LM size \\ ($<$10B)}} & \parbox[t]{2.0cm}{\centering {\bf Customizable \\ Scoring Criteria}} \\
+    \midrule
+    \parbox[t]{3cm}{Self-taught Evaluators \\ \citep{wang2024selftaughtevaluators}}       & \textbf{\checkmark} & \textbf{\checkmark} & \texttimes & \texttimes \\
+    \parbox[t]{3cm}{Prometheus 2\\ \citep{kim2024prometheus2opensource}}  & \checkmark & \texttimes & \checkmark & \checkmark \\
+    \parbox[t]{3cm}{IRPO \\ \citep{pang2024iterativereasoningpreferenceoptimization}}    & \checkmark & \checkmark & \texttimes & \texttimes \\
+    \parbox[t]{3cm}{Self-Rewarding LMs \\ \citep{yuan2024self}}           & \checkmark & \texttimes & \texttimes & \texttimes \\
+    \parbox[t]{3cm}{Meta-Rewarding LMs \\ \citep{wu2024metarewardinglanguagemodelsselfimproving}}           & \checkmark & \texttimes & \checkmark & \texttimes \\
+    \parbox[t]{3cm}{\textbf{Self-Rationalization} \\ } & \textbf{\checkmark} & \textbf{\checkmark} & \textbf{\checkmark} & \textbf{\checkmark} \\
+    \bottomrule
+  \end{tabular}
+  }
+ 
+  \label{table:eval:methods_comparison}
+  }
+\end{wraptable}
+
+
+
+
+
+
+\section{Experimental Setup}
+
+\subsection{Training Details}
+
+In the process of creating a base SFT model, in line with the findings of \citet{kim2024prometheusinducingfinegrainedevaluation}, our empirical observations suggest that when the base judge model is equipped to perform both pairwise comparisons and pointwise evaluations (Likert-scale ratings), it exhibits enhanced alignment capabilities and a positive task-transfer during the process of Preference Optimization. To achieve a model capable of performing both pairwise and pointwise evaluation tasks, we train two separate judge models respectively by SFT on Preference-Collection (pairwise) by \citet{kim2023prometheus} and Feedback-Collection (pointwise) by \citet{kim2024prometheusinducingfinegrainedevaluation} with the seed pre-trained model as Llama3.1-8b-Instruct \citep{dubey2024llama3herdmodels}. Thereafter, we perform weight-merging between pointwise and pairwise models to get the final base judge model referred as  $J_{\text{SFT}}$, upon which we apply iterative preference optimization.
+
+For preference curation, in each iteration we create $N=10$ predictions with temperature 1.0, and then create all possible pairs according to the chosen preference selection method and optional margin. We sample 5000 data samples for Iteration 1 and 500 for Iteration 2 and apply DPO for 2 iterations.
+
+Additionally, in Table \ref{table:sft_dpo}, we show that applying Direct Preference Optimization (DPO) after Supervised Fine-Tuning (SFT) significantly improves judging performance compared to using only SFT or DPO on the seed model. This highlights the importance of alignment after SFT for LLM-as-Judge: while SFT teaches the model general task performance, DPO fine-tunes it to align with user preferences, boosting the SFT model resulting in better judgment outcomes.
+
+\subsection{Evaluation Benchmarks}
+To evaluate fine-grained and general-purpose judging-capability of \textit{Self-Rationalizing Evaluators}, we perform a comprehensive evaluation across a broad set of tasks:
+\begin{itemize}
+    \item Reward Bench \citep{lambert2024rewardbenchevaluatingrewardmodels}: Assesses the judging capabilities of the model on 4 categories comprising Chat, Chat-Hard, Safety and Reasoning.
+\end{itemize}
+
+\subsection{Baselines}
+We compare our model against several popular open-source general-purpose judge models trained for various evaluation tasks. 
+Our comparisons include models of comparable sizes such as Prometheus2-7B \citep{kim2024prometheus2opensource} , Auto-J 13B \citep{li2023generativejudgeevaluatingalignment} %and LLama-3-offset-Bias8B
+as well as larger models like the MoE Prometheus-2 8x7B \citep{kim2024prometheus2opensource} and Prometheus-2-BGB 8x7B \citep{kim2024biggenbenchprincipledbenchmark}. Notably, all variants of of Prometheus and Auto-J 13B were specifically trained for performing fine-grained custom evaluation. We do not include pairwise judge models such as Skywork-Critic-Llama-3.1-8B in the comparison, as it was only trained for preference selection and are not equipped for the more challenging task of fine-grained pointwise evaluation. 
+Additionally, we also perform comparisons with extensions of SFT methods. One of the these methods is Self-Consistency (Majority Voting) where we perform inference from the SFT model $J_\text{SFT}$ with $N=5$ and select the most consistent answer as the final output. Another baseline method is Best-of-N or rejection sampling which involves generating $N$ generations and select the one that scores high according to a reward model and perform SFT on those generations. In our case, we simply use the ground truth score to guide this selection. 
+
+
+
+
+\section{Results and Discussion}
+
+
+\paragraph{Self-Rationalizing improves fine-grained evaluation}
+As shown in Table \ref{table:results}, \textit{Self-Rationalizing Evaluators}, obtained by performing Iterative DPO on $J_\text{SFT}$ not requiring any human annotated preference data, show significant improvements over the seed model (LLaMA-3.1-8B-Instruct). These evaluators outperform many similar sized and even larger models on fine-grained evaluation tasks on Feedback Bench and BiGGen Bench, as well as generative judging capability on Reward bench. For fine-grained judging in particular, we further show the histogram plot in Figure \ref{fig:hist_diff_rationale}, for the SFT model $J_\text{SFT}$, the seed model and our Self-Rationalizing Evaluator($J_\text{SRE})$, demonstrating the gain in performance for pointwise judging due to the proposed recipe. We compare three models: LLaMa-3.1-8B-Instruct, SFT, DPO. The positive values indicate a prevelance of False Negatives, whereas the negative values reflect an increase in False Positives. DPO consistently produces a higher frequency of correct predictions, signifying more accuracy when compared to both SFT and LLaMa. This distribution highlights DPO's strength in generating more accurate predictions. Our experiments demonstrate that Self-Rationalizing Evaluators outperform extension of SFT methods, such as Self-consistency and Best-of-N, across all leaderboards. The proposed SRE approach requires fewer training samples and compute resources as it converges faster these extended SFT variants.
+
+\paragraph{Rationales with DPO improves judging}
+
+Conditioning the final score on the rationales, and using preference optimisation techniques like DPO significantly improves overall judging capabilities compared to baseline models trained or prompted not to 
+provide rationale. As shown in Table \ref{table:results-ablation-results}, \textit{Self-rationalizing evaluators} outperform models trained without rationale, including both SFT base models outputting only scores and as well as self-consistency. 
+Furthermore, we reinforce the findings of \citet{chen2024improvinglargelanguagemodels}, as demonstrated in Table \ref{table:results-ablation-results} that performing RLHF or SFT on long rationales can lead to external noise and complexity in token prediction. That is to say, long rationales dilute the training signal offered by the score. In contrast, DPO proves to be a more effective approach in achieving optimal model alignment with rationale, overcoming the problem of training signal dilution. Furthermore, we compare both $J_\text{SFT}$ and $J_\text{SRE}$ by prompting the model to output only a score (without rationales). We observe that $J_\text{SRE}$ performs significantly worse than $J_\text{SFT}$. This highlights the importance of rationales in enhancing the effectiveness of judging through DPO as compared to SFT.  
+\paragraph{Self-rationalization implicitly leads to better rationale quality}
+
+To demonstrate the improvement in rationale quality using the Self-Rationalizing recipe, we conducted a human evaluation comparing ground truth rationales with those predicted by Self-Rationalizing Evaluators. Figure \ref{fig:win_rate} presents the win rate of the Self-Rationalizing Evaluator over the base SFT model, $J_\text{SFT}$ and best-of-$n$  model $J_\text{best-of-n}$, which shows the notable improvement resulting by self-rationalizing with Preference Optimization.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.1\linewidth]{win_rate_comparison.pdf}
+    \caption{The figure compares win rates of $J_{SRE}$ after two iterations of DPO against baseline models, based on annotator preferences for rationales. The plot on the left compares $J_{SRE}$ to $J_{SFT}$, while the right compares $J_{SRE}$ to $J_{Best-of-N}$. Win rates are averaged across three annotators and shown for BigGen and FeedbackBench benchmarks, along with the overall win rate. In $55\%$ of cases, annotators preferred the $J_{SRE}$ rationales over $J_{SFT}$, and in $69\%$ of cases, they preferred $J_{SRE}$ over $J_{Best-of-N}$}
+    \label{fig:win_rate}
+\end{figure}
+
+
+
+\paragraph{Marginalizing preferences}
+
+We explored different preference data selection strategies to assess their impact on fine-grained evaluation performance. Specifically, we experimented with different margin thresholds to control the quality of preference data used for training. Two margin settings were studied: (1) DPO with a high margin threshold ($\geq 2$) and (2) DPO with non-zero margin ($\geq 1$). The margin threshold essentially controls the separation between preference signals and therefore varying the margin threshold would help us to understand if richer signals would lead to better generalization. To further study the impact of preference data quality, we considered self-consistency heuristic, where we construct chosen judgements and rejected judgements based on the majority voting of scores. 
+
+Previously, we have constructed preference pairs by separating them solely on judgement scores (either using ground truth scores or majority voted scores). The underlying assumption is that aligning the scores would implicitly improves also the reasoning behind the decisions. Moreover, we can adopt a more targeted approach of improving the rationalization by performing \textit{meta-judging} in which the current model $J_t$ itself evaluates generated judgements. 
+
+To evaluate these preference selection heuristics, we ran ablations on DPO on Reward Bench and BigGen bench by training DPO model for each strategy. The results in Table \ref{table:results-ablations} reveal several key trends. The DPO model with a high margin threshold ($\geq 2$) consistently outperformed the model with a margin threshold of ($\geq 1$) across all dimensions, indicating that focusing on higher-quality preference data is critical for better alignment. Interestingly, the self-consistency mechanism showed sub-optimal performance, suggesting that majority-voted judgments do not align well with ground truth and optimising on noisy labels is the underlying cause of declined performance. Similarly, meta-judge approach also performed worse than margin based approach. Upon closer investigation, we found that the base model $J_{SFT}$ is not capable of performing meta-judge. In particular, the model exhibits a  bias towards judgements with higher score.  Overall these findings highlight that preference data quality is the key and simply re-purposing the labeled data for preference selection is already a strong approach. We leave the exploration of different approaches for directed preference selection aimed at improving rationales as future work.
+
+
+
+
+
+
+
+\begin{table*}[t!]
+\centering
+\tiny
+\caption{\label{table:results} Comparative performance of our Self-Rationalizing Evaluator Judge model against other baseline judges across Reward-Bench, BigGen Bench, and Feedback Bench benchmarks. Scores in bold represent the highest performance within that category. The Self-Rationalizing Evaluator in Iteration 2 outperforms the other baselines for Reward-Bench, BigGen Bench Human  Correlation score and FeedbackBench Correlation score. }
+\resizebox{0.99\textwidth}{!}{
+\begin{tabular}{lC{0.6cm}C{0.9cm}C{0.8cm}C{1.4cm}C{1.0cm}C{1.1cm}C{1.1cm}C{1.3cm}}
+\toprule
+\textbf{Model}&\multicolumn{5}{c}{\textbf{Reward-Bench}}  & \multicolumn{2}{c}{\textbf{BiGGen Bench}} & \textbf{FeedbackBench} \\
+&Chat&Chat-hard&Safety&Reasoning&Total Score&Human Pearson&GPT4 Pearson&GPT4 Pearson\\
+\toprule
+\textit{\underline{Baseline models}}&&&&&&&&\\ 
+Prometheus-2 7B&  0.85& 0.49& 0.77& 0.76&0.72&0.50 &0.62&0.88\\
+Prometheus-2 8x7B&0.93&0.47 &0.80 &\textbf{0.77}&0.74&	\textbf{0.52} & \textbf{0.67}& 0.84\\
+Prometheus-2-BGB 8x7B&-&-&-&-&-&0.44&0.55&0.58\\
+Auto-J-13B&-&-&-&-&-&0.30  & 0.38&0.41\\
+\midrule
+
+\textit{\underline{SFT Base}}&&&&&&&&\\
+LLama-3.1-8B-Instruct(seed model)&0.74 &	\textbf{0.56}&	0.75&	0.63&	0.66& 0.39 & 0.48 &0.65 \\
+SFT $J_\text{SFT}$ &0.79&	0.53&	0.82&	0.65&	0.68&	0.49& 0.60 &0.86 \\
+
+\textit{\underline{Other Post-SFT methods}}&&&&&&&&\\ 
+ Self-consistency $(N=5) $ &0.82&	0.53&	0.82&	0.64&	0.68&	0.50& 0.62 &0.88\\
+Best-of-N $(N=10)$&0.80&0.51&	0.83&	0.63&	0.67&	0.49& 0.59&0.86\\
+
+\midrule
+\textit{\underline{Self-rationalizing evaluators}}&&&&&&&&\\  
+
+Single stage DPO($8k$ samples) &0.87&	0.54&	0.84&	0.71&	0.73&	0.50& 0.63&0.93 \\
+Self-Rationalizing && &&&& &\\
+\quad $Iter\ 1$\ ($J_1$,5k samples)&0.87&	0.55&	0.85&	0.73&	0.75&	0.50& 0.64 & 0.92\\
+\quad $Iter\ 2$\ ($J_2$,500 samples): \textbf{$J_\text{SRE}$}& \textbf{0.88}&	\textbf{0.56}&	\textbf{0.86}&	0.74&	\textbf{0.76}&	\textbf{0.52} & 0.65& \textbf{0.93}\\
+
+\bottomrule
+\end{tabular}
+}
+
+\end{table*}
+
+\begin{table}[t]
+\scriptsize
+\centering
+\tiny
+\captionsetup{width=\textwidth}
+\caption{\label{table:results-ablation-results} Ablation studies showing the impact of rationales on model performance. Our SRE judge ($J_\text{SRE}$) trained with rationales, consistently outperform judges trained/ prompted without rationales on the Reward-Bench and BigGen Bench benchmarks, indicating that the incorporation of reasoning enhances both decision-making and evaluation capabilities in \textit{LLM-as-a-judge} models. }
+\resizebox{0.99\textwidth}{!}{
+\begin{tabular}
+{l|C{1.0cm}C{1.5cm}C{1.0cm}C{1.5cm}C{1.0cm}C{1.0cm}C{0.9cm}}
+\toprule
+\textbf{Model}&\multicolumn{5}{c}{\textbf{Reward-Bench}}  & \multicolumn{2}{c}{\textbf{BiGGen Bench}} \\
+&Chat&Chat-hard&Safety&Reasoning&Total Score&Human Pearson&GPT4 Pearson\\
+
+\toprule
+
+\textit{ Trained without rationale} &&&&& \\
+SFT ($J_{\text{SFT\_wo\_ratioanale}}$
+) &0.88&	0.52&	0.79&	0.71&	0.72&	0.47& 0.62  \\
+
+Self-consistency on $J_{\text{SFT\_wo\_ratioanale}}$
+ &\textbf{0.89}&	0.50	&0.79&	\textbf{0.74}& 0.73&		0.47& 0.62  \\
+\midrule
+\textit{Trained with rationale}&&&&& \\
+
+SFT ($J_\text{SFT}$) prompted w/o rationale &0.81&	0.51&	0.83&	0.65&	0.69&	0.48& 0.60 \\
+SFT $J_\text{SFT}$ &0.79&	0.53&	0.83&	0.66&	0.69&	0.49 & 0.60 \\
+SRE($J_\text{SRE}$) prompted w/o rationale &0.87&	\textbf{0.56}&	0.85&	0.72&	0.74&	0.48& 0.61\\
+SRE($J_\text{SRE}$)  &0.88&	\textbf{0.56}&	\textbf{0.86}&	\textbf{0.74}&	\textbf{0.76}&	\textbf{0.52} & \textbf{0.65} \\
+
+\bottomrule
+\end{tabular}
+}
+\end{table}
+\begin{table}[t!]
+\footnotesize
+\centering
+\tiny
+\caption{\label{table:results-ablations} Comparing different Methods for Preference Data Curation for the Judge.}
+\resizebox{0.99\textwidth}{!}{
+\begin{tabular}
+{l|C{1.0cm}C{1.5cm}C{1.0cm}C{1.5cm}C{1.0cm}C{1.0cm}C{0.9cm}}
+\toprule
+\textbf{Model}&\multicolumn{5}{c}{\textbf{Reward-Bench}}  & \multicolumn{2}{c}{\textbf{BiGGen Bench}} \\
+&Chat&Chat-hard&Safety&Reasoning&Total Score&Human Pearson&GPT4 Pearson\\
+
+\toprule
+
+
+SRE on Majority-votes (margin $\geq2$) & 0.84& 0.52	& \textbf{0.85}	& 0.69 & 0.72	& 0.51 &0.64\\
+SRE via rationale-judge (margin $\geq2$) & 0.84&	0.53&	0.84& 0.67&	0.71& 0.51 &0.62\\
+
+Self-Assessment  & 0.82& 0.52	& 0.82	& 0.65&	0.68& 0.49& 0.61\\
+SRE($J_\text{SRE}$) (margin $\geq1$) & \textbf{0.87}& 0.55	& 0.83	& 0.71&	0.73& 0.46 &0.57\\
+SRE($J_\text{SRE}$) (margin $\geq2$) & \textbf{0.87}& \textbf{0.56}	& \textbf{0.85}	& \textbf{0.74} & \textbf{0.75}	& \textbf{0.52} &\textbf{0.65}\\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\begin{table*}[t!]
+\centering
+\tiny
+\caption{\label{table:sft_dpo} Performance comparison of models illustrating that the combined training approach of (SFT + DPO) significantly outperforms individual methods (SFT and DPO) across Reward-Bench and BiGGen Bench}
+\resizebox{0.99\textwidth}{!}{
+\begin{tabular}{lC{0.6cm}C{0.9cm}C{0.8cm}C{1.4cm}C{1.0cm}C{1.1cm}C{1.1cm}C{1.3cm}}
+\toprule
+\textbf{Model}&\multicolumn{5}{c}{\textbf{Reward-Bench}}  & \multicolumn{2}{c}{\textbf{BiGGen Bench}} \\
+&Chat&Chat-hard&Safety&Reasoning&Total Score&Human Pearson&GPT4 Pearson\\
+\midrule
+LLama-3.1-8B-Instruct(seed model)&0.74 &	\textbf{0.56}&	0.75&	0.63&	0.66& 0.39 & 0.48  \\
+
+SFT base model $J_\text{SFT}$ &0.79&	0.53&	0.82&	0.65&	0.68&	0.49& 0.60  \\
+DPO on LLama3.1-8b (w/o SFT)&0.82&	\textbf{0.56}&	0.68&	0.67&	0.67&	0.44& 0.55\\
+SRE (SFT+DPO on 8k samples) &\textbf{0.87}&	0.54&	\textbf{0.84}&	\textbf{0.71}&	\textbf{0.73}&	\textbf{0.50}& \textbf{0.63} \\
+\bottomrule
+\end{tabular}
+}
+\end{table*}
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.90\linewidth]{histogram_final.png}
+    \caption{Histograms showing the differences between model predictions and ground truth labels for (a) BigGen Bench and (b) Feedback Bench across three models: LLaMa-3.1-8B-Instruct (blue), SFT (red), and DPO (green). Positive values (right of origin) indicate more False Negatives, while negative values (left of origin) indicate more False Positives. DPO consistently produces more predictions at 0, showing higher accuracy, followed by SFT and LLaMa. The distribution highlights DPO's tendency for more accurate predictions in comparison to SFT and LLaMa.}
+    \label{fig:hist_diff_rationale}
+\end{figure}
+
+
+
+
+
+
+\section{Related Work}
+
+
+
+\textbf{Rationales:} In the context of language models, rationales can refer to chain of thought reasoning  \citep{kojima2023largelanguagemodelszeroshot} or simply natural language feedback for a model's output \citep{wang2024pandalmautomaticevaluationbenchmark}. The former refers to a sequence of logically dependent arguments that reach a conclusion (for instance, a mathematical proof), whereas the latter involves an analysis which could involve logically independent arguments (for example, explaining why a movie received a bad review). Rationales have been explored in various flavors: generated by humans \citep{zaidan-etal-2007-using, ross2017rightrightreasonstraining}, or AI models \citep{kojima2023largelanguagemodelszeroshot}; introduced during inference \citep{wang2023selfconsistencyimproveschainthought}, or in the prompt during training \citep{rajani2019explainyourselfleveraginglanguage}. 
+
+In the context of an LLM-as-a-judge, a chain of thought rationale ``improves data efficiency, accelerates convergence to higher-performing models, and reduces verbosity bias and hallucination" \citep{just2024datacentrichumanpreferenceoptimization}. The same authors find that enriching preexisting datasets with machine generated rationales is effective for training. According to \citet{kim2024prometheusinducingfinegrainedevaluation}, fine-tuning on rationales can improve capabilities for evaluation. To the best of our knowledge no research has explored using DPO to specifically and automatically enhance the quality of rationales as a means to improve the scores of a judge. This gap provides an opportunity to explore methods for improving rationale quality, and potentially the scoring capabilities of a judge. 
+
+\textbf{LLM-as-a-judge and reward models:} LLM-as-a-judge is now a common approach within the industry to evaluate language models \citep{fernandes2023devilerrorsleveraginglarge, bai2023benchmarkingfoundationmodelslanguagemodelasanexaminer, saha2024branchsolvemergeimproveslargelanguage, li2024hrlaifimprovementshelpfulnessharmlessness, lee2024rlaifvsrlhfscaling}. It involves using an LLM to provide feedback on content, performance, or responses from human users or other AI models, in the form of a score (reward model) and optionally a rationale. These models can be used to align other models through RLAIF which has been shown to be both less expensive and time-consuming compared to RLHF \citep{li2024hrlaifimprovementshelpfulnessharmlessness}. As a consequence, it is imperative to develop efficient methods to train a judge. Multiple methods have been developed which create judges via training or prompting \citep{bai2022constitutionalaiharmlessnessai}. However, these methods do not apply DPO to improve the performance on a judge that provides both a rationale and score, to iteratively improve the performance of those models. 
+ \citep{wu2024metarewardinglanguagemodelsselfimproving} present a method that in part creates a judge, using DPO, to improve their conversational and reward model.
+ Nonetheless, the main focus of the authors is on improving the conversational model's capabilities, rather than the judge's abilities to provide high quality rationales, and their results represent that emphasis. Research is therefore required to assess whether one can improve the accuracy of the score and rationale produced by a judge, using DPO. 
+
+\textbf{Self-curation for model improvement:}
+Many studies have investigated approaches to improving models by training on the self-curated generations, a technique where a model is trained on its own outputs.  \citet{yuan2024self} propose a methodology in which a language model generates both a response and a reward signal, which are used to create a preference dataset and train via DPO. 
+\citet{pace2024westofnsyntheticpreferencegeneration} suggest training a model on a labelled dataset, using it to augment the data by labelling an unlabelled dataset, and finally training a model on the augmented dataset. %However, the models showed improvement within computer vision, machine translation, and vision language models. Research is therefore needed to assess whether a similar pipeline improves performance of an LLM-as-a-judge with rationale.
+Another line of research explores using a seed model to create chain-of-thought rationales and answers to generate a preference dataset and train using DPO \citep{pang2024iterativereasoningpreferenceoptimization}. Furthermore, another study focused on a judge for pairwise (preference) evaluation and adding noise to prompts to self-curate datasets for DPO training \citep{wang2024selftaughtevaluators}. These papers have shown promising results for the use of self-curating datasets and utilizing them for DPO. The difference between some of these methods and \textit{Self-Rationalization} are explained in Table \ref{table:eval:methods_comparison}.
+
+Best-of-$N$ sampling, sampling $N$ times from the model and taking the best result, is also helpful in improving the performance of models \citep{gui2024bonbonalignmentlargelanguage}. In a similar spirit, \citet{wang2023selfconsistencyimproveschainthought} introduce a promising sampling method called self-consistency, where one samples n times from the judge model, and then outputs the average score. These methods are useful in the context of self-curating datasets, as they potentially increase dataset quality.  
+
+Despite the success of these methods, there is a lack of research on how self-curated datasets, especially those enhanced through sampling techniques, affect the quality of rationales and scoring in LLM-as-a-judge models. Table \ref{table:eval:methods_comparison} shows the comparison of current judge training methods, emphasizing their respective limitations. As a consequence, there are opportunities to explore the potential benefits of combining DPO with advanced sampling methods to improve both rationale quality and overall model performance.
+
+
+\section{Conclusion}
+
+
+This paper presents the novel methodology \textit{Self-Rationalization}, in which the judge model generates multiple rationales with judgments for the same input. A preference pair dataset is synthetically curated from these judgments, and the model is iteratively fine-tuned using DPO. The main benefits are that we do not require extra data labelling, it improves rationale quality, and it can evaluate based on customizable scoring criteria, while having less than 10B parameters. Our results show that \textit{Self-Rationalizing Evaluators} obtained by performing iterative DPO outperform similar sized models and even larger sized models on evaluations leaderboards. It also outperforms regular SFT and other common post-SFT methods such as self-consistency and best-of-$N$. Furthermore, we found that rationale quality increases, and consequently, rationales improve the scoring performance, under the condition that the model is trained via DPO. Self-Rationalizing is thus an effective approach to improve performance of judges. These judges have great practical applications, as they can be used to improve the performance of conversational models, or even evaluate human performance. 
+Future work could explore whether enhancing the judge's capacity to better generate and differentiate between good and bad responses would improve its evaluation capabilities. 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

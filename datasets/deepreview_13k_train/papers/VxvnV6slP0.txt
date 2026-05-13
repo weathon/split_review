@@ -1,0 +1,594 @@
+\title{Solving Token Gradient Conflict in Mixture-of-Experts for Large Vision-Language Model}
+
+\begin{abstract}
+The Mixture-of-Experts (MoE) has gained increasing attention in studying Large Vision-Language Models (LVLMs). 
+It uses a sparse model to replace the dense model, achieving comparable performance while activating fewer parameters during inference, thus significantly reducing the inference cost. 
+Existing MoE methods in LVLMs encourage different experts to handle different tokens, and they usually employ a router to predict the routing of each token. 
+However, the predictions are based solely on sample features and do not truly reveal the optimization directions of tokens. 
+This may lead to severe optimization interference between different tokens assigned to an expert. 
+To address this problem, this paper proposes a novel method based on token-level gradient analysis, \textit{i.e.}, \textbf{S}olving \textbf{T}oken \textbf{G}radient \textbf{C}onflict (STGC).
+Specifically, we first use token-level gradients to identify \textit{conflicting tokens} in experts. 
+After that, we add a specialized loss tailored to eliminate conflicts among tokens within each expert. 
+Our method can serve as a plug-in for diverse Large Vision-Language Models, and extensive experimental results demonstrate its effectiveness.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large Vision-Language Models (LVLMs) have recently demonstrated significant advancements by integrating visual processing modules into Large Language Models (LLMs), bringing LLMs closer to Artificial General Intelligence. 
+Many recent LVLM works \citep{zhang2023internlm, bai2023qwenvl, zhang2023llavar, zhao2023svit, chen2023sharegpt4v} show that large model size and large dataset size are especially important to enhance intelligence, \textit{i.e.}, the scaling law. 
+Even when the model size is sufficiently large, models exhibit "Emergent Abilities", which are not present in small models but are only present in large models. 
+Thus, a series of studies \citep{li2022blip, dai2023instructblip, liu2023improved} have expanded the capacity of LVLMs to 13 billion parameters, leading to state-of-the-art performance on various tasks.
+
+Under realistic applications, deploying such large models requires considerable computational resources, making inference extremely expensive.
+For reducing the inference cost, a popular solution is using the Mixture-of-Experts (MoE) architecture. 
+The MoE, a form of sparsely activated model, has been verified by many works~\citep{fedus2022switch, zoph2022st, komatsuzaki2022sparse} to achieve comparable performance with dense models when activating fewer parameters. 
+
+With multiple experts in the MoE, a fundamental problem is the routing of tokens. 
+To route tokens to different experts, existing MoE works~\citep{lin2024moellava,dai2024deepseekmoe} typically use a router, such as a linear layer, to predict the probability of each token belonging to different experts. 
+The tokens are then dispatched to the expert with the Top-$k$ predicted probability. 
+Additionally, to prevent load imbalance, existing methods usually incorporate a load-balancing loss, which aims to prevent the overuse or underuse of some experts.
+
+\begin{figure}[tb]
+\begin{center}
+\includegraphics[width=1.0\linewidth]{img/teaser_3.pdf}
+\end{center}
+  \caption{
+    (a) In this work, our goal is to resolve interference among diverse data by reducing gradient conflicts among tokens within an expert.
+    (b) We present statistics on the \textit{gradient consistency} (the mean similarity among gradients of all tokens within an expert). 
+    By incorporating the proposed STGC, the \textit{gradient consistency} increases, thereby verifying that STGC achieves our goal.
+    }
+\label{intro}
+\end{figure}
+
+Beyond balancing the load, another important goal of routing tokens to different experts is to reduce interference among diverse data. 
+To achieve this goal, some recent works have performed sample-level clustering on instruction embeddings~\citep{gou2023mixture}, grouping similar samples sent to the same expert. 
+However, because routing during training is at the token level, existing methods struggle with interference between tokens within a sample. 
+Meanwhile, samples with similar embeddings may have distinct optimization objectives, so embedding-based routing is still risky for generating optimization interference among tokens within an expert. 
+Fortunately, the gradient can directly reveal the optimization direction.
+Therefore, in this work, we aim to explore data interference in the MoE through the lens of \textbf{token-level gradients}. 
+As shown in~\cref{intro} (a), our basic idea is to reduce gradient conflicts of tokens within an expert, addressing severe data interference during the learning of LVLMs under complex and real-world scenarios.
+
+To this end, we propose a novel regularization loss based on token-level gradients in this paper, for \textbf{S}olving \textbf{T}oken \textbf{G}radient \textbf{C}onflict (STGC). 
+The proposed STGC consists of two steps:
+Specifically:
+$(i)$ Conflicting Token Identification.
+After processing a batch of data, we perform a backward pass to obtain the token-level gradients for each expert, without updating any model parameters. 
+Within an expert, we define the average gradient of all tokens as the \textit{average gradient}, representing the holistic optimization direction of the expert. 
+Then, all tokens with gradients having negative cosine similarity to the \textit{average gradient} are identified as \textit{conflicting tokens}.
+$(ii)$ Conflict Elimination Loss.
+For the \textit{conflicting tokens}, we record their routing scores predicted by the router. 
+We then reduce the routing probabilities of these tokens to other experts. 
+As shown in~\cref{intro} (b), the proposed STGC makes the gradient directions of tokens within an expert become more consistent, \textit{i.e.}, reduces the gradient conflicts of tokens within an expert.
+
+In conclusion, our contribution can be summarized as:
+\begin{itemize}
+\item Beyond relying on sample-level cues, we propose using token-level gradients to identify optimization interference among tokens within an expert.
+
+\item We propose a novel conflict elimination loss to resolve gradient conflicts among tokens within an expert, making the gradient directions of tokens within an expert more consistent. 
+This actually prompts the further specialization of experts.
+
+\item Designed as a plug-in, our method can be seamlessly integrated into existing Large Vision-Language Models (LVLMs). 
+Extensive experiments confirm its effectiveness.
+\end{itemize}
+
+
+
+\section{Related Works}
+
+\subsection{Large Vision-language Model}
+Large Language Models (LLMs) have demonstrated strong instruction following and generalization capabilities. 
+To maintain these capabilities while incorporating visual information, Large Vision-Language Models (LVLMs) such as GPT-4 and LLaVA utilize frozen visual encoders and trainable visual projectors to integrate visual data into LLMs. 
+They typically encode visual information into visual tokens and use these tokens to condition the adaptation of language tokens within LLMs~\citep{openai2023gpt4, touvron2023llama, wei2022chain, touvron2023llama2, zheng2023judging, team2023internlm, sun2023moss, du2021glm, bai2023qwen, yang2023baichuan, penedo2023refinedweb, taori2023alpaca}.
+Recent works have focused on improving performance through two types of methods. 
+The first type optimizes training strategies, \textit{e.g.}, ~\citep{bai2023qwenvl, chen2023minigpt}.
+Most works belong to the second type, focusing on enhancing visual components, including expanding visual instruction-tuning datasets~\citep{liu2023aligning, zhang2023llavar}, improving image encoders~\citep{chen2023internvl, bai2023qwenvl}, and aligning the input and projection layers~\citep{lin2023video, cha2023honeybee, alayrac2022flamingo, dai2023instructblip, ye2023mplug, zhao2023svit}.
+These efforts, particularly the expansion of visual instruction-tuning datasets and the increase in model scales, have significantly enhanced the visual understanding abilities of LVLMs.
+
+\subsection{Mixture-of-Experts (MoE)}
+The Mixture-of-Experts (MoE) is a hybrid model, consisting of multiple sub-models known as experts, and has shown potential in scaling up models \citep{shazeer2017outrageously}. 
+The key concept of MoE lies in the use of a router to determine the token set that each expert handles, aiming for reducing interference among tokens from different types of samples. 
+Early MoE works have utilized the hard routing mode, where each expert is typically assigned a specific role.
+For example, a series of works \citep{bao2022vlmo, long2023multiway, satar2022rome, wang2022image, shen2023scaling} consider language and vision gaps in multi-modal data \citep{liang2022mind}, decoupling experts by modal category and assigning a specific role to each expert. 
+The key feature of hard routers is that they eliminate the need to learn routing assignments. 
+The hard routing has also been widely applied in task-specific MoEs \citep{li2023pace, zhu2022uni, ma2023cot, kudugunta2021beyond}.
+
+Then, soft routers enable a dynamic allocation of tokens among different experts, allowing each expert to focus on its expertise and achieving model sparsity. 
+Recent LLM~\citep{shazeer2017outrageously, lepikhin2020gshard, fedus2022switch, zoph2022st, komatsuzaki2022sparse} and LVLM works have mainly focused on soft routers. 
+For instance, Gshard \citep{lepikhin2020gshard} incorporates MoE into transformers and achieves excellent performance. 
+Lifelong-MoE \citep{chen2023lifelong} uses MoE to mitigate the challenge of catastrophic forgetting in lifelong learning. 
+MoE-LLaVA \citep{lin2024moellava} and LLaVA-MoLE \citep{chen2024llavamole} utilize MoE and its variants to empower LVLMs. 
+The approach of expert segmentation increases the number of experts to achieve greater specialization. 
+DeepSeekMoE \citep{dai2024deepseekmoe} and QwenMoE \citep{bai2023qwen} segment experts by splitting the FFN intermediate hidden dimension. 
+Cluster-based methods, such as MoCLE \citep{gou2023mixture}, cluster samples and then route those in the same cluster to the same expert. 
+DEMIX \citep{gururangan2021demix} clusters samples according to their task type, ensuring that samples in the same cluster are routed to the same expert. 
+Existing methods primarily operate at the sample level and rely solely on either features or labels, which makes it challenging to address interference between different tokens within a sample. This work aims to utilize token-level gradients to identify and resolve token optimization interference within an expert in the MoE.
+
+
+
+\section{Methodology}
+
+\begin{figure}[tb]
+\begin{center}
+\includegraphics[width=1.0\linewidth]{img/pipeline_1.pdf}
+\end{center}
+  \caption{Our pipeline.
+  (a) Conflicting Token Identification.
+  When the gradient of a token has a sufficiently low cosine similarity to the \textit{average gradient} of its assigned expert, this token is marked as a \textit{conflicting token}.
+  (b) Conflict Elimination Loss.
+  We propose a loss term aimed at discouraging the routing of \textit{conflicting tokens} to their assigned experts, achieved by reducing the routing scores for these tokens for their assigned experts.
+  }
+\label{methodology}
+\end{figure}
+
+\subsection{Overview}
+\textbf{Large Vision-Language Model}: A Large Vision-Language Model (LVLM) aims to effectively integrate the capabilities of the pre-trained LLM and a visual model. 
+Specifically, given a RGB image $\mathbf{v} \in \mathbb{R}^{H \times W \times 3}$, where $H$ and $W$ are its height and width, the vision encoder processes the input image to obtain a visual token sequence $\mathcal{Z}=[z_{1},z_{2},\cdots,z_{P}]\in\mathbb{R}^{P\times C}$, where $P$ is the sequence length of visual tokens, calculated as $P=\frac{H \times W}{14^2}$.
+A visual projection layer is then used to map $\mathcal{Z}\in\mathbb{R}^{P\times C}$ to $\mathcal{V}\in\mathbb{R}^{P\times D}$, where $D$ represents the hidden layer size of Large Language Model (LLM). 
+Similarly, the text undergoes word embedding by layer $g$ and is projected to obtain the sequence tokens $\mathcal{T}=[t_{1},t_{2},\cdots,t_{N}]\in\mathbb{R}^{N\times D}$, where $N$ represents the sequence length of text tokens.
+Subsequently, the visual and text tokens are concatenated together and fed into a large language model. 
+This model consists of stacked multi-head self-attention (MSA) and feed-forward neural networks (FFN), with layer normalization (LN) and residual connections typically used within each block:
+\begin{equation}
+    \mathbf{x}_0 =[v_{1},v_{2},\cdots,v_{P},\cdots,t_{1},t_{2},\cdots,t_{N}],
+\end{equation}
+\begin{equation}
+    \mathbf{x}_{\ell}^{\prime} =\mathrm{MSA}(\mathrm{LN}(\mathbf{x}_{\ell-1}))+\mathbf{x}_{\ell-1},  \ell \in \{1, \ldots, L\},
+\label{ffn}
+\end{equation}
+\begin{equation}
+    \mathbf{x}_{\ell} =\mathrm{FFN}(\mathrm{LN}(\mathbf{x^{\prime}}_{\ell}))+\mathbf{x^{\prime}}_{\ell},  \ell \in \{1, \ldots, L\},
+\label{ffn2}
+\end{equation}
+\begin{equation}
+    \mathcal{Y}=\mathrm{LN}(\mathbf{x}_L),
+\end{equation}
+where $L$ is the layer number of LLM. 
+The LVLM model generates an output text sequence $\mathcal{Y}=[y_{1},y_{2},\cdots,y_{K}]\in\mathbb{R}^{K\times D}$ by progressively generating each element, where $K = P + D$ represents the total length of the output text sequence. 
+Then, the outputs are optimized through a generative loss in an auto-regressive manner.
+The loss is formulated as:
+
+\begin{equation}
+  \mathcal{L}_{\text{main}}=-\sum_{i=1}^D \text{log} \ p_\theta\left(\mathcal{Y}^{[P+i]} \mid \mathcal{V}, \mathcal{T}^{[:i-1]}\right),
+  \label{eq:gen}
+\end{equation}
+where $\theta$ is a trainable parameter.
+The auto-regressive loss for the token $t_n$ is abbreviated as $\mathcal{L}_n(\theta)$. 
+
+\textbf{MoE}: The Mixture-of-Expert (MoE) layer is used to replace the FFN layer, \textit{e.g.}, ~\citep{dai2024deepseekmoe}.
+A MoE layer consists of multiple FFNs, each representing an expert, \textit{i.e.}, $\mathcal{E}=[e_{1},e_{2},\cdots,e_{E}]$, where $E$ is the number of experts. 
+The router is typically a linear layer that predicts the probability of each token being assigned to each expert, and we formulate this process as:
+\begin{equation}
+    p_{\text{moe}}(\mathbf{x})_i = \frac{e^{z_{\text{moe}}(\mathbf{x})_i}}{\sum_{j=1}^E e^{z_{\text{moe}}(\mathbf{x})_j}},
+\end{equation}
+where $z_{\text{moe}}(\mathbf{x}) = \mathbf{W}\cdot\mathbf{x}$ and $p_{\text{moe}}(\mathbf{x})_i$ is the routing score of $\mathbf{x}$ for the $i$-th expert. 
+The matrix $\mathbf{W}\in\mathbb{R}^{D\times E}$ represents the lightweight training parameters for routing. 
+We calculate a weighted sum of the outputs from the Top-$k$ experts with the highest softmax probabilities, where the weighting of each expert is related to the routing score:
+\begin{equation}
+\begin{aligned}
+    w_{\text{moe}}(\mathbf{x})_i &= \frac{e^{z_{\text{moe}}(\mathbf{x})_i}}{\sum_{j=1}^k e^{z_{\text{moe}}(\mathbf{x})_j}}, \\
+    \mathrm{MoE}(\mathbf{x}) &= \sum_{i=1}^k w_{\text{moe}}(\mathbf{x})_i \cdot e_i(\mathbf{x}),
+\end{aligned}
+\end{equation}
+where $w_{\text{moe}}(\mathbf{x})_i$ represents the weight of the $i$-th expert for $\mathbf{x}$, and $e_i(\mathbf{x})$ is the output of the $i$-th expert.
+We express $\mathcal{L}_n(\theta)$ as $\mathcal{L}_n(\theta_{e_{i}}, \theta')$, where $\theta_{e_{i}}$ denotes the $i$-th expert, and $\theta'$ represents all other parameters except for $\theta_{e_{i}}$.
+
+\textbf{Our Method}: In this work, our goal is to propose a novel learning strategy for the MoE architecture for reducing interference among diverse data. 
+Specifically, as illustrated in Figure~\ref{methodology}, we model the interference among tokens within an expert using token-level gradients, and then design a novel loss function that requires tokens with conflicting gradients to be handled by different experts.
+The details of these modules will be introduced in the subsequent sections.
+
+\subsection{Conflicting Token Identification}
+For the MoE, the key to reducing interference among diverse data is to prevent optimization interference between tokens within an expert. 
+A possible approach is to cluster samples based on their features, using the clustering results to decide which expert the samples should be assigned to. 
+Alternatively, decisions can be made based on the specific task associated with each sample. 
+However, these approaches have two main limitations: $(i)$ They operate at the sample level, whereas the routing is at the token level; routing all tokens within a sample to the same expert does not effectively address interference between tokens within the sample. 
+$(ii)$ The optimization direction is jointly influenced by features and labels, but these methods rely on only one of these two factors.
+To address these issues, we propose using token-level gradients, which can accurately depict optimization directions at the token level, to identify optimization interference between tokens within an expert.
+
+First, we introduce the negative impact brought by the gradient conflicts.
+Without loss of generality, we discuss two distinct text tokens, $t_n$ and $t_{n'}$, as shown in Figure~\ref{methodology} (a).
+Assume that both $t_n$ and $t_{n'}$ are processed by the expert $e_i$.
+Let $\mathbf{g}_n=\nabla_{\theta_{e_i}}\mathcal{L}_n(\theta_{e_i}, \theta')$ denote the gradient of the token $t_n$ with respect to the expert $\theta_{e_i}$.
+A small change in $\theta_{e_i}$ in the direction of $-\mathbf{g}_n$ is given by $\theta_{\mathrm{e_i}} \leftarrow \theta_{\mathrm{e_i}} - \delta \mathbf{g}_n$, with a step size $\delta$. 
+The effect of this change on the performance of another token $t_{n'}$ is measured by:
+\begin{equation}
+    \Delta\mathcal{L}_{n'} = \mathcal{L}_{n'}(\theta_{e_i}-\delta \mathbf{g}_n, \theta') - \mathcal{L}_{n'}(\theta_{e_i}, \theta') = 
+    - \delta \mathbf{g}_n \cdot \mathbf{g}_{n'} + o(\delta),
+\end{equation}
+where the second equality is obtained by first-order Taylor approximation.
+Likewise, the effect of an update of $\theta_{e_i}$ in the direction of the negative gradient of token $n'$ (\textit{i.e.}, $-\mathbf{g}_{n'}$) on the performance of token $n$ is $\Delta\mathcal{L}_i=-\delta \mathbf{g}_n \cdot \mathbf{g}_{n'} + o(\delta)$.
+Thus, the model update for token $n$ is considered to negatively affect token $n'$ when $\mathbf{g}_n \cdot \mathbf{g}_{n'}<0$, since it increases the loss of token $n'$, and vice versa.
+We define $\mathbf{g}_n$ and $\mathbf{g}_{n'}$ as conflicting gradients when their cosine similarity $\cos{\phi_{nn'}}<\tau$, where $\tau$ is a threshold and $\phi_{nn'}$ is the angle between $\mathbf{g}_n$ and $\mathbf{g}_{n'}$.
+Gradient conflicts can cause the optimizer to struggle to converge to a desirable solution, especially when there is a large difference in gradient magnitudes.
+
+We then define the \textit{conflicting token}.
+The parameters of the expert $e_i$ are updated using the \textit{average gradient}.
+Let the tokens processed by the expert $e_i$ be denoted as $\{t_1, \cdots, t_{N_{e_i}}\}$, the \textit{average gradient} on the expert $e_i$ is represented as:
+\begin{equation}
+\mathbf{g}_{mean} = \frac{\sum_{n=1}^{N_{e_i}}\mathbf{g}_n}{N_{e_i}}.
+\end{equation}
+The \textit{average gradient} indicates the direction of parameter updates for the expert at each iteration.
+When the gradient of a token and the \textit{average gradient} are conflicting gradients, it suggests that the token is detrimental to the learning of the expert $e_i$, so his token should be considered for assignment to another expert.
+A formal definition of a \textit{conflicting token} is provided as follows:
+\begin{definition}[Conflicting Token]\label{def:token_conflict}
+The token $t_n$ is said to a conflicting token if $\mathbf{g}_n$ and $\mathbf{g}_{mean}$ are conflicting gradients, where $\mathbf{g}_{mean}$ is the average gradient of all tokens in the expert of $t_n$.
+\end{definition}
+
+Lastly, we detail our method for identifying \textit{conflicting tokens}, as illustrated in Figure~\ref{methodology}(a). 
+Initially, we unfreeze only the expert layer in the MoE and compute the main loss. 
+We then perform back-propagation to calculate the token-level gradients for each token within the expert layer.
+Subsequently, we calculate the \textit{average gradient}, as well as the cosine similarity between the gradient of each token and the \textit{average gradient}. 
+Lastly, when the cosine similarity is less than $\tau$, we mark the token as a \textit{conflicting token}. 
+Identifying these tokens allows us to use the precise optimization direction represented by the gradients to reduce interference among diverse data in the next section.
+
+\subsection{Conflict Elimination Loss}
+The learning of a \textit{conflicting token} tends to increase the loss of most other tokens within its corresponding expert. 
+Thus, once a \textit{conflicting token} is identified, it should be reassigned to a different expert for processing. 
+To achieve this goal, we propose a simple yet effective regularization loss by constraining the routing scores predicted by the router, as shown in Figure~\ref{methodology}(b).
+
+Specifically, for each expert within every layer, we first identify the \textit{conflicting tokens} using token-level gradients. 
+Then, the router predicts the probability of each token being assigned to different experts. 
+For a \textit{conflicting token} $t_n$, we record the routing logits $z_{\text{moe}}(t_n)$, the routing scores $p_{\text{moe}}(t_n)$, and the expert ID $id_{\text{moe}}$ it is currently assigned to. 
+Using the expert ID $id_{\text{moe}}$, we calculate the loss:
+\begin{equation}
+\begin{aligned}
+    z'_{\text{moe}}(t_n) &= - z_{\text{moe}}(t_n), \\
+    p'_{\text{moe}}(t_n)_i &= \frac{e^{z'_{\text{moe}}(t_n)_i}}{\sum_{j=1}^E e^{z'_{\text{moe}}(t_n)_j}}, \\
+    \mathcal{L}_{\text{token}} &=\frac{1}{N \cdot E} \sum_{n=1}^{N} \sum_{i=1}^{E} \text{log}(p'_{\text{moe}}(t_n)_i) \cdot q_{\text{moe}}(t_n)_i,
+\end{aligned}
+\end{equation} 
+Where $N$ is the count of all \textit{conflicting tokens}, $E$ is the number of experts, and $p'_{\text{moe}}(t_n)$ represents the inverted routing score for the token $t_n$. 
+The ${q}_{\text{moe}}(t_n)$ define one-hot vectors, with ${q}_{\text{moe}}(t_n)_{id_{\text{moe}}} = 1$. 
+This loss is designed to encourage the reassignment of \textit{conflicting tokens} to different experts. 
+When $k$ in Top-$k$ exceeds 1, a token may be assigned to multiple experts. 
+Our method focuses on considering all tokens within each expert, regardless of whether a token has also been assigned to other experts.
+
+\subsection{Total Loss}
+ 
+To encourage experts to handle tokens in a balanced manner, the differentiable load balancing loss, as introduced in~\citep{fedus2022switch}, is typically defined for each MoE layer as follows:
+\begin{equation}
+    \mathcal{L}_{\text{aux}}=E\cdot\sum_{i=1}^{E}\mathcal{F}_i\cdot \mathcal{P}_i,
+\end{equation} 
+where $\mathcal{F}$ represents the fraction of tokens processed by each expert $e_i$, and $\mathcal{P}$ represents the average routing probabilities assigned to expert $e_i$.
+
+In conclusion, the total loss is given by:
+\begin{equation}
+    \mathcal{L}_{\text{total}} = \mathcal{L}_{\text{main}} + \alpha \cdot \mathcal{L}_{\text{aux}} + \beta \cdot \mathcal{L}_{\text{token}},
+\end{equation} 
+where $\alpha$ and $\beta$ are hyper-parameters.
+
+
+
+\section{Experiments}
+
+
+\begin{table*}[!t]
+\scriptsize
+\setlength\tabcolsep{0.6mm}
+\caption{\textbf{Comparison among different LVLMs on image understanding benchmarks.} 
+``Act.'', ``V'', ``Q'', ``P'', ``M'', and ``S'' represent activated parameters, Vicuna~\citep{chiang2023vicuna}, Qwen~\citep{bai2023qwen}, Phi-2~\citep{phi2}, MobileLLaMA~\citep{chu2023mobilevlm}, and StableLM~\citep{StableLM-2-1.6B}, respectively.
+Evaluation Benchmarks include VQA$^{\text{v2}}$~\citep{goyal2017making}; GQA~\citep{hudson2019gqa}; VisWiz~\citep{gurari2018vizwiz}; SQA$^\text{I}$: ScienceQA-IMG~\citep{lu2022learn}; VQA$^\text{T}$: TextVQA~\citep{singh2019towards}; POPE~\citep{li2023evaluating}; MME~\citep{fu2023mme}; MMB: MMBench~\citep{liu2023mmbench}; MM-Vet~\citep{yu2023mm}; AI2D~\citep{kembhavi2016diagram}; ChartQA~\citep{masry2022chartqa}; DocVQA~\citep{mathew2021docvqa}.
+$^*$ indicates that there is some overlap in the training data. 
+$^{\dagger}$ indicates that a stronger visual encoder (siglip-so400m-patch14-384) is used.
+All ``Sparse Model" methods employ the configure 4-Top-2. 
+}
+  \label{tab:main}
+  \centering
+  \begin{tabular}{l|cc|cccccccccccc|c}
+    \toprule
+    \textbf{Method} & \textbf{LLM} & \textbf{Act.} & VQA$^\text{v2}$ & GQA & VisWiz & SQA$^\text{I}$ & VQA$^\text{T}$ & POPE & MME & MMB & MM-Vet & AI2D & ChartQA & DocVQA & Avg \\
+    \midrule
+    \multicolumn{12}{l}{\textit{Dense Model}} \\
+    \rowcolor{mygray} \textcolor{gray}{LLaVA-1.5} & \textcolor{gray}{V-13B} &  \textcolor{gray}{13B} & \textcolor{gray}{80.0$^*$} & \textcolor{gray}{63.3$^*$} & \textcolor{gray}{53.6} & \textcolor{gray}{71.6} & \textcolor{gray}{61.3} & \textcolor{gray}{85.9} & \textcolor{gray}{1531.3}  & \textcolor{gray}{67.7} & \textcolor{gray}{35.4}& \textcolor{gray}{49.6}& \textcolor{gray}{18.1}& \textcolor{gray}{24.0}& \textcolor{gray}{55.5} \\
+    \rowcolor{mygray}  \textcolor{gray}{Qwen-VL} & \textcolor{gray}{Q-7B} & \textcolor{gray}{6.7B} & \textcolor{gray}{78.8$^*$} & \textcolor{gray}{59.3$^*$} & \textcolor{gray}{35.2} & \textcolor{gray}{67.1} & \textcolor{gray}{63.8} & \textcolor{gray}{-} & \textcolor{gray}{-} & \textcolor{gray}{38.2} & \textcolor{gray}{-}& \textcolor{gray}{-}& \textcolor{gray}{-}& \textcolor{gray}{-}& \textcolor{gray}{-} \\
+    \rowcolor{mygray} \textcolor{gray}{LLaVA-1.5} &  \textcolor{gray}{V-7B} &  \textcolor{gray}{6.7B}  &  \textcolor{gray}{78.5$^*$} & \textcolor{gray}{62.0$^*$} &  \textcolor{gray}{50.0} &  \textcolor{gray}{66.8} & \textcolor{gray}{58.2} &  \textcolor{gray}{85.9} &  \textcolor{gray}{1510.7} &  \textcolor{gray}{63.4} &  \textcolor{gray}{30.5} & \textcolor{gray}{-}& \textcolor{gray}{-}& \textcolor{gray}{-}& \textcolor{gray}{-} \\
+    TinyGPT-V & P-2.7B & 2.7B & - & 33.6$^*$ & 33.4 & - & - & - & - & - & - & - & - & - & - \\
+    MobileVLM& M-2.7B & 2.7B & - & 59.0$^*$ & - & 61.0 & 47.5 & 84.9 & 1288.9 & 59.6 & - & - & - & - & - \\
+    LLaVA-Phi & P-2.7B & 2.7B & 71.4$^*$ & - & 35.9 & {68.4} & {48.6} & {85.0} & 1335.1 & {59.8} & {28.9} & - & - & - & - \\
+    \midrule
+     \multicolumn{12}{l}{\textit{Sparse Model}} \\
+    MoE-LLaVA & S-1.6B & 2.0B & {76.7$^*$} & {60.3$^*$} & {36.2} & {62.6} & {50.1} & {85.7} & 1318.2 & {60.2} & {26.9} & 48.8 & 15.3 & 18.4 & 49.2 \\
+    MoE-LLaVA & P-2.7B & 3.6B & {77.6$^*$} & {61.4$^*$} & {43.9} & {68.5} & {51.4} & {86.3} & {1423.0} & {65.2} & {34.3} & 58.8 & 19.9 & 21.5 & 53.5 \\ 
+    DYNMOE-LLaVA & P-2.7B & 3.4B & {77.9$^*$} & {61.6$^*$} & 45.1 & {68.0} & {51.8} & 86.0 & {1429.6} & {66.6} & 33.6 & - & - & - & - \\
+    MoE-LLaVA$^{\dagger}$ & P-2.7B & 3.6B & 79.9$^*$ & 62.6$^*$ & 43.7 & 70.3 & 57.0 & 85.7 & 1431.3 & 68.0 & 35.9 & 59.5 & 15.4 & 25.6 & 54.9 \\
+    \midrule
+    Our Method$^{\dagger}$ & P-2.7B & 3.6B & 80.0$^*$ & 63.0$^*$ & 48.6 & 70.9 & 58.8 & 86.5 & 1481.7 & 71.0 & 40.7 & 64.5 & 44.7 & 42.1 & 61.0 \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+\subsection{Experimental Setup}
+\textbf{Benchmark}: In this work, we follow existing works~\citep{liu2023visual,lin2024moellava} to evaluate the proposed STGC. 
+STGC is only used in the instruction tuning stage.
+Some academic-task-oriented and instruction-following benchmarks are collected for evaluating the LVLMs.
+For academic-task-oriented benchmarks, VQA-v2~\citep{goyal2017vqav2} and GQA~\citep{hudson2019gqa} assess the visual perception capabilities of models through open-ended short answers.
+The VizWiz dataset~\citep{gurari2018vizwiz}, containing 8,000 images, evaluates the zero-shot generalization of models on visual questions asked by visually impaired people. 
+ScienceQA~\citep{lu2022learn}, a multiple-choice benchmark, evaluates the zero-shot generalization of models on scientific question answering. 
+TextVQA~\citep{singh2019textvqa} focuses on text-rich visual question answering tasks.
+ChartQA~\citep{masry2022chartqa} focuses on visual and logical reasoning tasks over charts through open-ended short answers.
+DocVQA~\citep{mathew2021docvqa} focuses on reading comprehension tasks over document images through open-ended short answers.
+
+For instruction-following benchmarks, POPE~\citep{li2023pope} evaluates the degree of hallucination in model responses on three sampled subsets of COCO~\citep{lin2014mscoco}: Random, Common, and Adversarial. 
+MME~\citep{fu2023mme} assesses the visual perception of models with yes/no questions. 
+MMBench~\citep{liu2023mmbench} evaluates the robustness of model answers with all-round shuffling on multiple choice answers. 
+MM-Vet~\citep{yu2023mmvet} evaluates the model capabilities in engaging in visual conversations on a diverse range of tasks, and evaluates the correctness and helpfulness of the responses using the GPT-4 evaluation framework.
+AI2D~\citep{kembhavi2016diagram}, a multiple-choice benchmark, evaluates the model capabilities for science diagram comprehension.
+
+\textbf{Baseline}: Our main baseline is set to MoE-LLaVA~\citep{lin2024moellava} in this paper.
+MoE-LLaVA incorporates a Mixture-of-Experts (MoE) into LVLMs, and has proposed a three-stage training scheme. 
+It trains only the MoE in the third stage, \textit{i.e.}, the instruction tuning stage. 
+MoE-LLaVA has 4 experts and selects the Top-2 experts to handle tokens, and we refer to this configuration as 4-Top-2. 
+Building on MoE-LLaVA, we add a novel regularization loss $\mathcal{L}_{\text{token}}$ in this work during the instruction tuning stage to enhance the MoE. 
+For the language model backbone, we follow MoE-LLaVA~\citep{lin2024moellava} to use StableLM-1.6B and Phi2-2.7B.
+The visual encoder is typically set as clip-vit-large-patch14-336.
+$\alpha$ is set to 0.01, following MoE-LLaVA~\citep{lin2024moellava}.
+We also compare with DYNMOE-LLaVA~\citep{guo2024dynamic}, which improves the MoE-LLaVA by dynamically setting the selected expert count during inference.
+
+\subsection{Image Understanding Evaluation}
+\textbf{Image Question Answering}: We evaluate the performance of our method on five image question-answering benchmarks, as shown in Table~\ref{tab:main}, and report the number of activated parameters as a measure of efficiency. 
+Our method demonstrates superior image understanding capabilities, achieving the 80.0\%, 63.0\%, 48.6\%, 70.9\%, and 58.8\% performance on VQA$^{\text{v2}}$, GQA,  VisWiz, SQA$^\text{I}$, and VQA$^{\text{T}}$, respectively.
+Compared to LLaVA-1.5 with 7B activated parameters, our method brings 0.6\%, 1.0\%, 4.1\%, and 0.8\% performance increase on VQA$^{\text{v2}}$, GQA, SQA$^\text{I}$, and VQA$^{\text{T}}$, respectively, when only activating 3.6B parameters.
+
+\textbf{Benchmark Toolkit}: 
+To comprehensively evaluate the multi-modal understanding capabilities of our method, we assess its performance across four benchmark toolkits. 
+These toolkits typically involve open-ended answers and serve as tools to verify the model ability to engage in natural language questioning. 
+As shown in Table~\ref{tab:main}, our method demonstrates superior image understanding capabilities, achieving the 86.5\%, 1481.7, 71\%, and 40.7\% performance on VQA$^{\text{v2}}$, GQA, VisWiz, SQA$^\text{I}$, and VQA$^{\text{T}}$, respectively.
+Compared to LLaVA-1.5 with 7B activated parameters, our method brings 0.6\%, 7.6\%, and 10.2\% performance increase on POPE, MMB, and MM-Vet, respectively, when only activating 3.6B parameters.
+
+\subsection{Ablation Study}
+
+\textbf{STGC as a plug-in}: We design the proposed STGC as a plug-in for existing MoE methods.
+To fully verify the robustness and effectiveness of the proposed STGC, we select different baselines, including different MoE configures (4-Top-2 \& 4-Top-1), LLMs (S-1.6B \& P-2.7b), and visual encoders (clip \& siglip).
+Then, we add STGC onto these baselines.
+As shown in~\cref{tab:plugin}, under diverse baselines, adding STGC always brings a stable and convincing performance increase.
+
+\begin{table*}[!t]
+\footnotesize
+\setlength\tabcolsep{0.5mm}
+\caption{\textbf{STGC as a plug-in}. 
+We set different baselines and add the proposed STGC.
+4-Top-1 means that 4 experts are set and the Top-1 expert is selected to handle tokens. 
+$^*$ indicates that there is some overlap in the training data. 
+$^{\dagger}$ indicates that a stronger visual encoder (siglip) is used.
+}
+  \label{tab:plugin}
+  \centering
+  \begin{tabular}{l|cc|ccccccccc|c}
+    \toprule
+    \textbf{Method} & \textbf{LLM} & \textbf{Act.} & VQA$^\text{v2}$ & GQA & VisWiz & SQA$^\text{I}$ & VQA$^\text{T}$ & POPE & MME & MMB & MM-Vet & Avg \\
+    \midrule
+    MoE-LLaVA-4-Top-1 & S-1.6B & - & 74.5$^*$ & 58.6$^*$ & 25.7 & 55.8 & 45.0 & 85.2 & 1245.3 & 56.2 & 27.2 & 53.5 \\
+    +STGC & S-1.6B & - & {74.9$^*$} & {59.4}$^*$ & {27.4} & {57.5} & {46.5} & {85.8} & {1276.8} & {56.8} & {28.5} & 54.6 \\
+    \midrule
+    MoE-LLaVA-4-Top-2 & S-1.6B & 2.0B & {76.7$^*$} & {60.3$^*$} & {36.2} & {62.6} & {50.1} & {85.7} & 1318.2 & {60.2} & {26.9} & 57.3 \\
+    +STGC & S-1.6B & 2.0B & {76.9$^*$} & {60.9$^*$} & {37.7} & {62.6} & {50.7} & {85.9} & {1355.1} & {60.7} & {28.2} & 58.0 \\
+    \midrule
+    MoE-LLaVA-4-Top-2 & P-2.7B & 3.6B & {77.6$^*$} & {61.4$^*$} & {43.9} & {68.5} & {51.4} & {86.3} & {1423.0} & {65.2} & {34.3} & 61.1 \\ 
+    +STGC & P-2.7B & 3.6B & {78.0$^*$} & {62.1$^*$} & {47.2} & {68.1} & {52.3} & {86.9} & {1429.2} & {66.7} & {33.3} & 61.8 \\
+    \midrule
+    MoE-LLaVA-4-Top-2$^{\dagger}$ & P-2.7B & 3.6B & 79.9$^*$ & 62.6$^*$ & 43.7 & 70.3 & 57.0 & 85.7 & 1431.3 & 68.0 & 35.9 & 62.9 \\
+    +STGC & P-2.7B & 3.6B & {80.3$^*$} & {63.2$^*$} & {45.1} & {70.3} & {57.4} & {86.1} & {1447.6} & {69.7} & {35.7} & 63.5 \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+\begin{table*}[!t]
+\small
+\caption{\textbf{Study about Conflicting Token Identification.}
+Settings for results in Table~\ref{tab:plugin} are highlighted in \colorbox{myblue}{blue}.
+The best results are indicated by \textbf{boldface}.
+StableLM-1.6B is used.
+}
+\label{tab:token_identification}
+\centering
+    \subfloat[
+	\label{tab:strategy}
+	\textbf{\textit{Conflicting token} identification strategy.}
+	]{
+		\centering
+        \setlength\tabcolsep{0.3mm}
+		\begin{minipage}{0.5\linewidth}{\begin{center}
+              \begin{tabular}{c|ccccc}
+                \toprule
+                \textbf{Strategy} & GQA & VisWiz & VQA$^\text{T}$ & MMB & MM-Vet\\
+                \midrule
+                embedding-based & 56.1 & 35.4 & 48.7 & 60.6 & 25.2 \\
+                \rowcolor{myblue} gradient-based & \textbf{60.9} & \textbf{37.7} & \textbf{50.7} & \textbf{60.7} & \textbf{28.2} \\
+                \bottomrule
+              \end{tabular}
+		\end{center}}\end{minipage}
+	}
+    \subfloat[
+	\textbf{The threshold for identifying \textit{conflicting tokens}.}
+	\label{tab:threshold}
+	]{
+        \setlength\tabcolsep{0.5mm}
+		\begin{minipage}{0.5\linewidth}{\begin{center}
+              \begin{tabular}{c|ccccc}
+                \toprule
+                \textbf{Threshold} & GQA & VisWiz & VQA$^\text{T}$ & MMB & MM-Vet\\
+                \midrule
+                0.1 & 60.6 & 35.1 & \textbf{50.9} & 61.3 & 25.6 \\
+                \rowcolor{myblue} 0.0 & \textbf{60.9} & \textbf{37.7} & {50.7} & {60.7} & \textbf{28.2} \\
+                -0.1 & 60.6 & 34.9 & 50.5 & \textbf{61.4} & 25.9 \\
+                \bottomrule
+              \end{tabular}
+		\end{center}}\end{minipage}
+	}
+\end{table*}
+
+\textbf{Study about Conflicting Token Identification}:
+Our method uses token-level gradients as the cue to identify \textit{conflicting tokens}. 
+To verify the superiority of token-level gradients as the cue over sample-level embeddings, we conduct experiments:
+$(i)$ Sample-level expert labels, based on clustering for instruction embeddings, which is similar to~\citep{chen2024llavamole}.
+$(ii)$ Token-level expert labels, based on the token-level gradients in each expert.
+Besides, when the gradient $\mathbf{g}_n$ of the token $t_n$ and and the \textit{average gradient} $\mathbf{g}_{mean}$ satisfy the condition $\cos{\phi_{nmean}}<\tau$, we flag the token as a \textit{conflicting token}. 
+We discuss different thresholds for identifying \textit{conflicting tokens}: 
+$\tau \in \{0.1, 0.0, -0.1\}$.
+
+As shown in Table~\ref{tab:token_identification}, we find:
+$(i)$ The performance using token-level gradients to identify \textit{conflicting tokens} is significantly higher than using sample-level embedding clusters. 
+For example, our method achieves a 4.8\% higher performance improvement over the embedding-based scheme on GQA.
+(ii) When $\tau=0$, the performance on most datasets is the best. 
+The results are consistent with the common belief, \textit{i.e.}, gradients are considered conflicting when their cosine similarity is less than 0.
+
+\begin{table*}[!t]
+\small
+\caption{\textbf{Study about Conflict Elimination Loss.}
+Settings for results in Table~\ref{tab:plugin} are highlighted in \colorbox{myblue}{blue}.
+The best results are indicated by \textbf{boldface}.
+StableLM-1.6B is used.
+}
+\label{tab:conflict_elimination}
+\centering
+    \subfloat[
+	\label{tab:layer}
+	\textbf{Different layers to compute the loss.}
+	]{
+		\centering
+        \setlength\tabcolsep{0.7mm}
+		\begin{minipage}{0.5\linewidth}{\begin{center}
+              \begin{tabular}{c|ccccc}
+                \toprule
+                \textbf{Layer} & GQA & VisWiz & VQA$^\text{T}$ & MMB & MM-Vet\\
+                \midrule
+                \rowcolor{myblue} 0-24 & \textbf{60.9} & \textbf{37.7} & {50.7} & {60.7} & \textbf{28.2} \\
+                0-12 & {60.7} & {35.2} & \textbf{50.9} & \textbf{61.9} & 25.5 \\          
+                12-24 & {60.5} & {34.9} & 50.7 & 61.6 & 26.7 \\
+                \bottomrule
+              \end{tabular}
+		\end{center}}\end{minipage}
+	}
+    \subfloat[
+	\textbf{The weighting of our proposed loss.}
+	\label{tab:loss_weighting}
+	]{
+        \setlength\tabcolsep{0.7mm}
+		\begin{minipage}{0.5\linewidth}{\begin{center}
+              \begin{tabular}{c|ccccc}
+                \toprule
+                \textbf{$\beta$} & GQA & VisWiz & VQA$^\text{T}$ & MMB & MM-Vet\\
+                \midrule
+                0.5 & 60.5 & 35.6 & 50.5 & \textbf{61.4} & 26.9 \\
+                \rowcolor{myblue} 1.0 & \textbf{60.9} & \textbf{37.7} & {50.7} & {60.7} & \textbf{28.2} \\
+                2.0 & {60.6} & 35.9 & \textbf{50.9} & 60.6 & 27.2 \\
+                \bottomrule
+              \end{tabular}
+		\end{center}}\end{minipage}
+	}
+\end{table*}
+
+\textbf{Study about Conflict Elimination Loss}:
+We propose the Conflict Elimination Loss to reduce interference among diverse data types.
+We explore the impact of applying the loss at different layers, with a total of 24 layers:
+$(i)$ All layers (0-23).
+$(ii)$ The second half of the layers (12-23).
+$(iii)$ The first half of the layers (0-11).
+We also consider different loss weightings $\beta \in \{0.5, 1.0, 2.0\}$.
+
+As shown in Table~\ref{tab:conflict_elimination}, we find:
+$(i)$ Applying the proposed loss to all layers yields the best performance on most datasets, verifying its importance across all layers.
+$(ii)$ The proposed loss is not sensitive to different loss weightings $\beta$, with the highest performance on most datasets when $\beta$ is set as 1.0.
+
+\begin{figure}[tb]
+\begin{center}
+\includegraphics[width=1.0\linewidth]{img/statistic_1.pdf}
+\end{center}
+  \caption{
+    \textbf{Statistical Verification}.
+    We conduct a deep analysis of the role of STGC.
+    ``Baseline" means MoE-LLaVA.
+    ``Baseline + STGC" means our method.
+    (a) We present the change of routing scores of \textit{conflicting tokens} on their current experts, to verify that STGC is moving \textit{conflicting tokens} away from their current experts.
+    (b) We compute a novel metric, \textit{gradient consistency} (the mean similarity among gradients of all tokens within an expert), for verifying that the decrease of the proposed loss leads to the more consistent token gradients within an expert.
+    (c) We further analyze the \textit{gradient consistency} on different layers.
+  }
+\label{statistic_verification}
+\end{figure}
+
+\textbf{Scalability of STGC}: One necessary hypothesis of this work is that there are severe optimization interference among diverse training data.
+Therefore, STGC should bring a more significant performance increase when using a more complex dataset to train.
+To verify this, we expand the size of the public dataset we are using for further experiments.
+e.}, $\text{open-llava-next\_instruct\_mix1M}$.
+As shown in~\cref{tab:moredata}, under more data, STGC brings a more significant average performance increase (1.1\% \textit{vs.} 0.6\%).
+
+\begin{table*}[!t]
+\footnotesize
+\setlength\tabcolsep{0.4mm}
+\caption{\textbf{Scalability of STGC}.
+We consider to employ the larger scale of data.
+Under more data, the STGC can brings the more significant performance increase.
+}
+  \label{tab:moredata}
+  \centering
+  \begin{tabular}{l|cc|ccccccccc|c}
+    \toprule
+    \textbf{Method} & \textbf{LLM} & \textbf{Data} & VQA$^\text{v2}$ & GQA & VisWiz & SQA$^\text{I}$ & VQA$^\text{T}$ & POPE & MME & MMB & MM-Vet & Avg \\
+    \midrule
+    MoE-LLaVA-4-Top-2$^{\dagger}$ & P-2.7B & 665K & 79.9$^*$ & 62.6$^*$ & 43.7 & 70.3 & 57.0 & 85.7 & 1431.3 & 68.0 & 35.9 & 62.9 \\
+    +STGC & P-2.7B & 665K & {80.3$^*$} & {63.2$^*$} & {45.1} & {70.3} & {57.4} & {86.1} & {1447.6} & {69.7} & {35.7} & 63.5 \\
+    \midrule
+    MoE-LLaVA-4-Top-2$^{\dagger}$ & P-2.7B & 1021K & 79.7$^*$ & 63.0$^*$ & 42.7 & 71.1 & 56.9 & 84.3 & 1439.9 & 70.4 & 42.2 & 63.8 \\
+    +STGC & P-2.7B & 1021K & {80.0$^*$} & {63.0$^*$} & {48.6} & {70.9} & {58.8} & {86.5} & {1481.7} & {71.0} & {40.7} & 64.9 \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+\textbf{Statistical Verification}:
+The main claim of this work is that STGC can effectively reduce the gradient conflicts of tokens within an expert, \textit{i.e.}, making the gradient directions of tokens within an expert more consistent, thus decreasing data interference and improving model performance.
+To verify this, we design a statistical verification experiment. 
+In this experiment, the training consists of two steps:
+The first step is to capture the gradient similarities of tokens within an expert.
+In detail, we gather all tokens within an expert $e_i$ and compute their cosine similarity to form a similarity matrix.
+Then, we compute the mean of the similarity matrix as $\text{mean}(\cos{\phi_{i}})$.
+We define the average of $\text{mean}(\cos{\phi_{i}})$ on all experts as \textit{gradient consistency}, serving as a novel metric to evaluate whether the gradient directions are consistent within an expert.
+The second step is to update models.
+In this experiment, we only use the proposed loss to update parameters, for undisturbedly observing the impact of the proposed loss to the \textit{gradient consistency}.
+
+We first provide the change in routing scores of \textit{conflicting tokens} on their corresponding experts in~\cref{statistic_verification} (a).
+Then, we provide the curve graph of the proposed loss and the \textit{gradient consistency} obtained from the TensorBoard dashboard in~\cref{statistic_verification} (b).
+We also provide the \textit{gradient consistency} on different layers; The total layer number is 32, and we analyze the layers \{0, 8, 16, 24\}.
+We find:
+$(i)$ Our method significantly reduces the mean routing score from 0.3866 to 0.3349, verifying that our method encourages \textit{conflicting tokens} to be assigned to other experts instead of the current ones.
+$(ii)$ By reducing the mean routing score of \textit{conflicting tokens}, the \textit{gradient consistency} significantly improves, indicating that the token gradient directions within an expert become more consistent.
+This verifies the role of STGC in reducing gradient conflicts.
+$(iii)$ For different layers, STGC always increases the \textit{gradient consistency}.
+The deeper layers seem to have higher \textit{gradient consistency} after adding STGC while the shallower layers have lower \textit{gradient consistency}.
+
+\begin{figure}[tb]
+\begin{center}
+\includegraphics[width=1.0\linewidth]{img/statistic_2.pdf}
+\end{center}
+  \caption{
+    \textbf{Expert Loading}.
+    We select three validation datasets, \textit{i.e.}, VizWiz~\citep{gurari2018vizwiz}, SQA~\citep{lu2022learn}, and TextVQA~\citep{singh2019textvqa}, to analyze the expert loading.
+    ``Baseline" means MoE-LLaVA.
+    ``Baseline + STGC" means our method.
+  }
+\label{statistic_load}
+\end{figure}
+
+\textbf{Expert Loading}: We present some statistical results about the expert loading during inference on several datasets.
+As shown in~\cref{statistic_load}, STGC benefits the expert load balance.
+A possible reason is that the expert load imbalance means that many tokens are routed to an expert, significantly increasing the possibility that tokens have gradient conflicts.
+By adding STGC, many tokens are moved to the expert with fewer tokens.
+This may also be a new perspective on why the expert load balance is important to the MoE system.
+
+
+\section{Conclusion}
+
+Our study reveals that there is still severe optimization interference of tokens within an expert for the MoE, leading to sub-optimal learning for the experts. 
+To reduce optimization interference among tokens, we propose employing token-level gradients to identify \textit{conflicting tokens}, and then adding a novel conflict elimination loss based on the routing scores. 
+Our method acts as a plug-in, which can be easily integrated into existing MoE-based LVLMs. 
+Extensive experiments demonstrate the superior performance of our approach across diverse datasets.
+Especially when the data diversity is larger, our method brings a more significant performance increase.
+
+
+
+
+
+
+
+
+

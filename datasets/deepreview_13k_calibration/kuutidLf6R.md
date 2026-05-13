@@ -1,8 +1,8 @@
 # Diffusion Attribution Score: Which Training Sample Determines Your Generation?
 
 - Decision: Accept
-- Avg Score: 4.20
-- Scores: 8, 6, 1, 0, 6
+- Avg Score: 7.50
+- Scores: 8, 6, 10, 6
 
 ## Abstract
 As diffusion models advance, the scientific community is actively developing methods to curb the misuse of generative models, which aims to prevent the reproduction of copyrighted, explicitly violent, or personally sensitive information in generated images.

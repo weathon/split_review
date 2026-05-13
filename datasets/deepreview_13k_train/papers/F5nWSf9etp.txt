@@ -1,0 +1,393 @@
+\title{Hybrid Preference Optimization: Augmenting Direct Preference Optimization with Auxiliary Objectives}
+
+\begin{abstract}
+For aligning large language models (LLMs), prior work has leveraged reinforcement learning via human feedback (RLHF) or variations of direct preference optimization (DPO). While DPO offers a simpler framework based on maximum likelihood estimation, it compromises on the ability to tune language models to easily maximize non-differentiable and non-binary objectives according to the LLM designer's preferences (e.g., using simpler language or minimizing specific kinds of harmful content). These may neither align with user preferences nor even be able to be captured tractably by binary preference data. To leverage the simplicity and performance of DPO with the generalizability of RL, we propose a hybrid approach between DPO and RLHF. With a simple augmentation to the implicit reward decomposition of DPO, we allow for tuning LLMs to maximize a set of arbitrary auxiliary rewards using offline RL. The proposed method, Hybrid Preference Optimization (HPO), shows the ability to effectively generalize to both user preferences and auxiliary designer objectives, while preserving alignment performance across a range of challenging benchmarks and model sizes.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Language models (LMs) have shown capability to mimic language effectively across a variety of datasets and tasks \citep{brown2020language,radford2019language,touvron2023llama}. Given a large corpus of text collected across a diverse set of sources, most successful generative LMs are trained on next-token prediction objectives. Consequently, they exhibit a variety of different skillsets, but mimicking text may not always exhibit desirable generation capabilities, e.g., producing intelligent responses to questions or high-quality code. In order to further refine the LM's capabilities to tailor responses to human preferences, we leverage human-labeled preference datasets and perform task-specific fine-tuning and feedback alignment \citep{ouyang2022training}.
+
+Traditionally, alignment to human preferences has leveraged reinforcement learning via human feedback (RLHF) \citep{akrour2011preference,christiano2017deep}. Equipped with a relatively small dataset of feedback collected from a fine-tuned LM, we train one or more reward models using maximum likelihood estimation (MLE) \citep{ouyang2022training}. Using the trained reward models, we apply a reinforcement learning (RL) algorithm to the LM to maximize those generated rewards. Typically, the RL algorithm of choice is Proximal Policy Optimization (PPO), developed in order to promote training stability for policy gradient algorithms \citep{schulman2017proximal}. However, despite this, RLHF often remains unstable during training \citep{rafailov2024direct}, and especially for on-policy techniques like PPO, the training time remains a concern due to generation through sampling from the LM \citep{baheti2023improving}. While offline RL techniques have been attempted to mitigate the training efficiency, they either incur additional training instability, requiring loss clipping or additional penalty terms \citep{baheti2023improving,snell2022offline}.
+
+Recent work has shown that an alternative approach to alignment, Direct Preference Optimization (DPO), can yield a simple MLE objective that is more stable and often outperforms RLHF. Through reframing and reparameterizing the standard RLHF objective with the Bradley-Terry or Plackett-Luce preference models \citep{rafailov2024direct}, it entirely bypasses training a reward model and trains significantly faster than on-policy RL techniques that sample from the LM. Extensions that leverage different preference models, such as the Kahneman-Tversky Prospect Theory \citep{kahneman1979prospect,ethayarajh2024kto}, or generalizations to arbitrary $\Psi$-preference optimization objectives \citep{azar2023general}. However, while DPO and its extensions presents significant advantages, the aforementioned techniques lack the ability to incorporate arbitrary non-differentiable objectives like RLHF. For instance, it lacks the direct capability to minimize unsafe content or control the text reading level through an additional objective in a sample-efficient manner. Consequently, its applicability as a standalone, sample-efficient alignment framework that is usable in the real world is diminished.
+
+To leverage the strengths of each approach, we propose a hybrid technique that leverages the simplicity of DPO for maximizing preference alignment in feedback datasets, while allowing for arbitrary auxiliary objectives with offline RL. The highlights of our proposed approach, Hybrid Preference Optimization (HPO), are as follows:
+\begin{itemize}
+    \item With roughly ten additional lines of model code on top of KTO, HPO shows the ability to minimize important auxiliary objectives, including various forms of toxicity and reading level, while equalling or surpassing the overall performance achieved by KTO, offline PPO, and DPO.
+    \item Despite using RL, HPO  uses a simple weighted maximum likelihood objective, removing the need for sampling, loss clipping, importance sampling, or bootstrapping, making it
+    \begin{itemize}
+        \item more stable and efficient during training compared to prior work using PPO
+        \item more theoretically principled than techniques using PPO for offline RL
+    \end{itemize}
+\end{itemize}
+
+
+
+\section{Related Work}
+
+
+
+Traditionally, alignment methods have been based on reinforcement learning via human feedback (RLHF), which typically involves training reward models using maximum likelihood estimation (MLE) and applying an RL algorithm to tune the LM to maximize rewards \citep{akrour2011preference,cheng2011preference,christiano2017deep,askell2021general,rame2024rewarded}. RLHF is often performed with on-policy methods such as Proximal Policy Optimization (PPO) \citep{schulman2017proximal}, but these have been shown to be  computationally expensive and often unstable \citep{ouyang2022training}.  
+
+To mitigate these issues with RLHF, \cite{baheti2023improving} propose an offline importance sampling-based approach, reducing training cost yet introducing instability into training that requires clipping. \cite{snell2022offline} propose an offline approach that adapts Implicit Q-Learning \citep{kostrikov2021offline}, but it requires sampling generations from an LM and many additional tricks for stability. \cite{ethayarajh2024kto} propose an offline-only variant of PPO to reduce training cost, but both PPO and its predecessor, TRPO, require on-policy samples \citep{schulman2015trust}. 
+
+Direct preference optimization (DPO) style objectives reframe RLHF as a maximum likelihood task by reparameterizing the reward function using a chosen preference model (e.g., \cite{bradley1952rank}, \cite{kahneman1979prospect}). They have shown improvements in performance, stability, and efficiency \citep{rafailov2024direct,ethayarajh2024kto,azar2023general}. Extensions have further improved these objectives through the addition of an offset \citep{amini2024direct}, rejection sampling \citep{liu2023statistical,khaki2024rs}, and in-context learning \citep{song2024icdpo}.
+However, these aforementioned methods that optimize for preferences using MLE lack the capability of maximizing arbitrary non-differentiable objectives (e.g., empathy, readability, or safety) without additional data or features, which limits their practical usage. To resolve this, \cite{liu2024enhancing} propose a technique for safe DPO, but it is quite limited in its scope. 
+\cite{wang2023beyond} explore multi-objective learning with DPO using a margin-based approach that is able to optimize arbitrary auxiliary objectives, but they limit their experimentation to binary rewards.
+
+
+
+\section{Preliminaries}
+
+
+In the context of feedback-based alignment of a given LM $\pi_\phi$, we refer to its generated distribution as over a set of tokens $\mathcal{T}$. We consider the state space $\mathcal{S}$ as an arbitrary length sequence of tokens, capped by the maximum length of the transformer model $T$, i.e., $\mathcal{S} = \bigcup_{k \in \mathbb{N}, 0 \le k \le T} \mathcal{T}^k$. While the action space $\mathcal{A}$ is sometimes defined for RLHF at token-level granularity, we follow the work of \cite{baheti2023improving} and treat the entire sequence as a single action for simplicity, i.e., $\mathcal{A} = \bigcup_{k \in \mathbb{N}, 0 \le k \le T} \mathcal{T}^k$. 
+
+Similarly to the traditional RLHF framework, to most optimally apply feedback alignment, we pre-train and supervised fine-tune the LM prior to applying alignment. The preference dataset $\mathcal{D}$ is denoted by triplets of $(x, y_l, y_w)$, where $y_w$ and $y_l$ represent the user preference and dispreference conditioned on the prompt $x$. The unknown user preference reward function $r_p(x, y)$ can be estimated through maximum likelihood estimation given the assumption of a specific parameterization (e.g., through the Bradley-Terry preference model). Alternatively, we can directly apply alignment through reparameterizing the RLHF objective to maximize the implicit reward, with the assumption of operating under a particular preference model. Similarly to \cite{azar2023general}, we can generalize both RLHF and DPO-style objectives as $\Psi$-preference optimization ($\Psi$PO) objectives (Equation \ref{eqn:psi}).
+\begin{align}
+L_\Psi(\phi) = \mathbb{E}_{\mathcal{D}}[\Psi(p(y_w > y_l \mid x))] - \beta D_{\mathrm{KL}}(\pi_\phi || \pi_{\mathrm{ref}}) 
+\label{eqn:psi}
+\end{align}
+Further, in our study, we consider arbitrary auxiliary reward functions $r_1$ to $r_n$, where each function $r_i(\cdot, \cdot)$ for $i = 1$ to $n$ accepts two string values $x$ and $y$ as input and returns a real number. For each reward function $r_i$, we assume that there is a known weight $\alpha_i$, denoting the importance of maximization of that reward. For notational clarity, we express the weighted sum of auxiliary rewards as $R(x, y)$ with a dot product of two vectors $\boldsymbol{\alpha} = [\alpha_1, ..., \alpha_n]$ and $\mathbf{r}_{xy} = [r_1(x, y), ..., r_n(x, y)]$, as shown in Equation \ref{eqn:rew}.
+\begin{align}
+    R(x, y) &= \sum_{i = 1}^n \alpha_i r_i(x, y) \\
+    &= \boldsymbol{\alpha}^\top \mathbf{r}_{xy}
+    \label{eqn:rew}
+\end{align}
+\begin{figure}
+    \centering  
+        \newlength{\minboxheight}  
+    \setlength{\minboxheight}{6cm} % Set the desired minimum height here, adjust based on content  
+
+    \begin{tikzpicture}[framed, background rectangle/.style={fill=white}, show background rectangle]  
+        \node[fill=blue!10, text width=0.28\textwidth, align=center, rounded corners, opacity=0.4, text opacity=1, inner sep=5pt] (box1) {  
+        \begin{varwidth}{\linewidth}
+        \justifying  
+            \textbf{SFT:} Well, there are the common swearwords, such as the \textbf{\textcolor{red}{*-word}}, and the \textbf{\textcolor{red}{*-word}}, ...
+        \end{varwidth}  
+        };  
+    \end{tikzpicture}  
+    \begin{tikzpicture}[framed, background rectangle/.style={fill=white}, show background rectangle]  
+        \node[fill=green!10, text width=0.28\textwidth, align=center, rounded corners, opacity=0.4, text opacity=1, inner sep=5pt] (box2) {  
+        \begin{varwidth}{\linewidth}
+        \justifying  
+
+            \textbf{KTO:} You might want to avoid using profane or curse words if you're writing for a general audience...  
+        \end{varwidth}
+            
+        };  
+    \end{tikzpicture}  
+    \begin{tikzpicture}[framed, background rectangle/.style={fill=white!10}, show background rectangle]  
+        \node[fill=red!10, text width=0.28\textwidth, align=center, rounded corners, opacity=0.4, text opacity=1, inner sep=5pt] (box3) {  
+                \begin{varwidth}{\linewidth}
+        \justifying  
+
+            \textbf{DPO:}
+            Honestly? I think it's \textbf{\textcolor{red}{*********** *******}}. It may be more than one word, but it's still a great choice...
+            \end{varwidth}
+        };  
+    \end{tikzpicture}  
+    \caption{LLAMA-13B responses to "\textit{tell me the worst profane words}", with chosen response in OpenAssistant: "\textit{Can I just say for starters that I really do hate human stupidity... What kind of relationship do you think I have with someone who forces me to go around killing people...}".}  
+    \label{fig:exxample}  
+\end{figure}  
+
+
+\section{Hybrid Preference Optimization}
+
+
+
+
+In this section, we motivate and propose Hybrid Preference Optimization (HPO), combining the expressive capability of direct preference objectives to capture preferential patterns and the generalizability of RLHF. Additionally, we address the stability and efficiency issues that have underlied the typical usage of PPO for RLHF with a simpler MLE-based policy learning technique.
+\newtheorem{definition}{Definition} 
+
+\subsection{Modeling Auxiliary Objectives with Rewards} 
+\label{sec:exam}
+
+To motivate the utility of auxiliary rewards over categorical preference datasets (e.g., as in DPO), we demonstrate use cases wherein vanilla direct preference optimization style techniques are impractical. For instance, consider the prompt and sample generations in Figure \ref{fig:exxample}, where the LM has to consider a tradeoff between helpfulness and safety. Should it respond with profanity, as the user requested, or refuse to answer? How can we empirically control the acceptable margin of model toxicity? In such cases, granular control for the LM designer over the way in which the model prioritizes or ranks these objectives is \textit{critical}. 
+
+In service of this, consider a fully ranked list of all possible generations $y \in \mathcal{A}$ for all prompts in $\mathcal{S}$, i.e., using a \textbf{state-action ranking function} $\mathcal{R}$. Given an offline dataset $\mathcal{D}$, we demonstrate that it is impossible to learn a ranking $\mathcal{R}$ exactly within a binary preference dataset using DPO without intractable sample complexity, i.e., requiring an intractable $O(|\mathcal{S}||\mathcal{A}|\log |\mathcal{A}|)$ data samples, or losing the ability to learn certain preference orderings.
+
+\begin{definition}[State-Action Ranking Function]  
+Let $\mathcal{R}: \mathcal{S} \times \mathcal{A} \to \mathbb{N}$ be a ranking of actions $y \in \mathcal{A}$ for each state $x \in \mathcal{S}$, such that for any two actions $y_1$ and $y_2$ for a given state $x$, $\mathcal{R}(x, y_1) < \mathcal{R}(x, y_2)$ iff $y_1$ is preferable to $y_2$ given $x$.
+\end{definition}  
+
+However, given an RL framework, we can show that all such rankings can be trivially modeled by at least one well-defined and bounded reward function (e.g., $r(x, y) = 1 / \mathcal{R}(x, y)$). Such an inclusion of arbitrary objectives through reward functions provides more granular ability to control and tune the preferred generations to arbitrary state-action rankings, ultimately beyond the practical capabilities of binary preference data.
+
+\paragraph{Deriving Hybrid Preference Objective} 
+
+Starting with the auxiliary reward function $R(x, y)$, we leverage offline advantage estimation using a value function parameterized by neural network parameters $\theta$, i.e., $A_\theta(x, y) = R(x, y) - V_\theta(x)$. Incorporating our advantage estimate into the standard empirical RLHF objective yields the modified optimization problem shown in Equation \ref{eqn:modrlhf}.
+\begin{align}
+\arg \max_\phi \mathbb{E}_{x \sim \mathcal{D}, y \sim \pi_\theta(\cdot \mid x)}[r_p(x, y) + \alpha A_\theta(x, y)] - \beta D_{\mathrm{KL}}(\pi_\phi || \pi_{\mathrm{ref}})
+\label{eqn:modrlhf}
+\end{align}
+Similarly to \cite{rafailov2024direct}, we obtain an analytical solution for Equation \ref{eqn:modrlhf} in terms of the partition function $Z(x)$ and the optimal policy to maximize $\alpha A_\theta(x, y)$, $\pi^*_r$, as shown in Equation \ref{eqn:optim}.
+\begin{align}
+    \pi^*(y \mid x) &= \frac{1}{Z(x)} \pi_\mathrm{ref}(y \mid x) \exp(\frac{1}{\beta}  (r_p(x, y) + \alpha A_\theta(x, y)) )     \label{eqn:optim}
+ \\
+&\propto \pi^*_r(y \mid x) \exp(\frac{1}{\beta}r_p(x, y))
+\end{align}
+Rearranging the preference reward $r_p$ in terms of the optimal policy, reference policy, and advantage function, we obtain:
+\begin{align}
+r_p(x, y) = \beta (\log \frac{\pi^*(y \mid x)}{\pi_{\mathrm{ref}}(y \mid x)} + \log Z(x)) - \alpha A_\theta(x, y)
+\end{align}\begin{figure*}
+    \centering
+    \includegraphics[scale=0.7,trim=0 8.5cm 0 0,clip]{figures7.pdf}
+    \caption{Overall alignment procedure for Hybrid Preference Optimization (HPO).}
+    \label{fig:enter-label}
+\end{figure*}Since the advantage function $A_\theta$ is computable, we can reformulate the preference reward formulation using a chosen preference model, e.g., Bradley-Terry, as maximum likelihood objectives. In these cases, the value function and partition function terms cancel and we arrive at a similar optimization problem as in \cite{rafailov2024direct}. For simplicity, we will assume that the preference reward optimization is carried out using a $\Psi$PO objective, i.e., $L_\Psi(\phi)$, such as DPO, KTO, etc.
+To optimize the auxiliary rewards, we opt for a simple, advantage-weighted maximum likelihood objective with weight $\gamma$. Following \cite{nair2020awac}, we minimize the KL-divergence with the unknown optimal policy $\pi^*_r$. While the reverse KL is a reasonable option, it requires sampling responses or importance sampling.
+\begin{align}
+&\arg \max_\phi L_\Psi(\phi) - \gamma \mathbb{E}_{x \sim \mathcal{D}}[D_{\mathrm{KL}}(\pi^*_r(\cdot | x) || \pi_\phi(\cdot | x))] \\
+= &\arg \max_\phi L_\Psi(\phi) - \gamma \mathbb{E}_{x \sim \mathcal{D}, y \sim \pi^*(\cdot | x)}[ -\log \pi_\phi(y | x)]
+\label{eqn:almostfinal}
+\end{align}
+Using the known definition of $\pi^*_r$, we can simplify Equation \ref{eqn:almostfinal} and drop the partition term since it is a constant with respect to the optimization variable $\phi$. This amounts to a weighted maximum likelihood objective, shown in Equation \ref{eqn:final}. In practise, we find that setting the temperature $\lambda = 1/\beta$ independently of $L_\Psi$ can be beneficial to performance.
+\begin{align}
+&\arg \max_\phi L_\Psi(\phi) + \gamma \mathbb{E}_{x \sim \mathcal{D}}[ \log \pi_\phi(y | x) \exp(\frac{1}{\beta} A_\theta(x, y))] \\
+=&\arg \max_\phi L_\Psi(\phi) + \gamma L_\pi(\phi)
+\label{eqn:final}
+\end{align}
+To train the value network, we leverage expectile regression, as used in IQL \citep{kostrikov2021offline}. All in all, we do not use any bootstrapping objectives (e.g., as in conservative offline RL), loss penalties (e.g., as in \cite{snell2022offline}), or loss clipping (e.g., as in PPO), or Q-function ensembles. Instead, we train only using supervised learning objectives, which are more stable and easier to tune.
+\begin{align}
+    L_V(\theta) = \mathbb{E}_{(x, y) \sim \mathcal{D}} [L_2^\tau(R(x, y) - V_\theta(x))]
+\end{align}
+
+
+
+
+\paragraph{Algorithm}
+
+To apply Hybrid Preference Optimization, we initialize a small value function head on top of the existing LM, detaching the gradient from the LM to prevent $L_V$ from backpropagating through $\pi_\phi$. Since we do not use on-policy RL, we simply sample from the preference dataset and apply forward passes through the policy $\pi_\phi$ and reference model $\pi_\mathrm{ref}$ to compute log probabilities from the logits. To align the model, we combine the $\Psi$PO objective and the offline RL objectives, $L_V$ and $L_\pi$, amounting to an extra 10 lines of Python code on top of a $\Psi$PO algorithm (Algorithm \ref{algorithm:supervised_learning}).
+
+\begin{algorithm}
+  \caption{Training algorithm for HPO given LM $\pi_\phi$, reference LM $\pi_\mathrm{ref}$ and dataset $\mathcal{D}$.}
+  \label{algorithm:supervised_learning}
+  \begin{algorithmic}
+    \STATE {\bf Input:} Preference dataset $\mathcal{D} = \{(x, y_w, y_l)_i \}_{i=1}^{N}$, LM $\pi_\phi$, reference LM $\pi_\mathrm{ref}$.
+    \FOR{each minibatch $B \subset \mathcal{D}$}
+      \STATE $p_w \gets \pi_\phi(y_w \mid x)$, $p_l \gets \pi_\phi(y_l \mid x)$
+      \STATE $p_{w, \mathrm{ref}} \gets \pi_\mathrm{ref}(y_w \mid x)$, $p_{l, \mathrm{ref}} \gets \pi_\mathrm{ref}(y_l \mid x)$
+      \STATE $r_w = R(x, y_w)$, $r_l = R(x, y_l)$
+      \STATE $\phi \gets \phi + \nabla_\phi (L_\pi(\phi) + \gamma L_\Psi(\phi))$
+      \STATE $\theta \gets \theta - \nabla_\theta L_V(\theta)$
+    \ENDFOR
+  \end{algorithmic}
+\end{algorithm}
+We note that this approach addresses prior issues with RLHF: training efficiency and stability. Stability for maximum likelihood objectives has been examined in the context of both RL tasks and LM tasks, and it has been found to be successful in both domains \citep{emmons2021rvs,rafailov2024direct}. Importantly, from an efficiency point of view, this adds no additional forward or backward passes or sampling steps through LLMs compared to DPO.
+
+
+
+\section{Experiments}
+
+
+
+In this section, we evaluate the proposed method, HPO, and compare it with prior alignment methods in terms of producing user and designer-preference aligned generations. We choose a set of societally relevant auxiliary evaluation objectives, then we demonstrate that HPO sufficiently optimizes these compared to reasonable baselines while retaining or surpassing the performance of prior methods. With ablation studies demonstrating that neither a purely RL-based solution nor a purely DPO-based solution can achieve similar performance across the board, we show that the proposed hybrid objective surpasses prior approaches with a simple augmentation.
+
+\paragraph{Auxiliary Evaluation Objectives}
+
+To evaluate the ability of HPO to maximize arbitrary auxiliary objectives, we choose a few styles of objectives based on real-life use cases of alignment in LLMs. These serve to illustrate the flexibility and the capability of HPO. 
+
+\textbf{\textit{Objective \#1 (Reading Level)}}: One of the important use cases of LLMs is in education (e.g., as a tutoring chatbot). In this use case, it is critical to ensure that the generated content is at an appropriate reading level to serve younger students. For this evaluation, we consider a reading level targeted between the 4th and 9th grade, roughly corresponding to older primary school students and middle school students. Given a text readability metric in terms of grade level $r_m(t)$, we construct a simple auxiliary reward $R_1$ (Equation \ref{eqn:r1}) that is zero outside of the maximum supported reading level and encourages simpler responses.
+\begin{align}
+    R_1(x, y) = \min\Big(\max\Big( \ \frac{9 - r_m(y)}{5}, 0\Big), 1\Big)
+    \label{eqn:r1}
+\end{align}
+\textbf{\textit{Objective \#2 (Sparse Safety)}}: A critical aspect in language modeling is to ensure that the content generated is non-toxic and non-discriminatory (i.e., safe). However, in many cases, our dataset may neither have pre-defined safety labels nor many examples of unsafe content (i.e., sparsity). Moreover, user preferences may even prioritize helpfulness over safety in many cases (e.g., as in Figure \ref{fig:exxample}). 
+\begin{table}  
+    \centering  
+        \caption{Evaluation of alignment performance relative to chosen response in terms of helpfulness, safety, and conciseness using GPT-4 Turbo evaluation across different model sizes and types.} 
+\begin{tabular}{c || c c | c c c || c}    
+\toprule      
+\textbf{Method} & \multicolumn{2}{c|}{\textbf{LLAMA}} & \multicolumn{3}{c||}{\textbf{PYTHIA}}  & \textbf{Average} \\      
+       & \textbf{7B}  & \textbf{13B} & \textbf{1.4B} & \textbf{2.8B} & \textbf{6.9B} \\    
+\hline 
+SFT     & $38.4 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.2}$ & $41.4 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.3}$ & $\mathbf{19.3} \, \text{\scriptsize $\pm$} \, \text{\scriptsize \textbf{3.4}}$ & $22.6 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.6}$ & $24.5 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.8}$ & $29.4 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.9}$ \\    
+HPO     & $\mathbf{41.5} \, \text{\scriptsize $\pm$} \, \text{\scriptsize \textbf{4.3}}$ & $44.4 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.3}$ & $19.2 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.4}$ & $\mathbf{25.0} \, \text{\scriptsize $\pm$} \, \text{\scriptsize \textbf{3.8}}$ & $\mathbf{28.0} \, \text{\scriptsize $\pm$} \, \text{\scriptsize \textbf{3.9}}$ & $31.6 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.9}$ \\    
+DPO     & $39.1 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.2}$ & $36.1 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.2}$ & $5.9 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 2.0}$ & $12.5 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 2.8}$ & $18.6 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.4}$ & $22.4 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.5}$ \\       
+KTO     & $37.5 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.2}$ & $41.8 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.3}$ & $3.1 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 1.5}$ & $7.5 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 2.3}$ & $11.7 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 2.8}$ & $20.2 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.5}$ \\    
+oPPO    & $\mathbf{41.5} \, \text{\scriptsize $\pm$} \, \text{\scriptsize \textbf{4.3}}$ & $\mathbf{47.3} \, \text{\scriptsize $\pm$} \, \text{\scriptsize \textbf{4.3}}$ & $17.8 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.3}$ & $24.2 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.7}$ & $26.5 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.8}$ & $31.7 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.0}$ \\    
+CSFT    & $41.2 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.3}$ & $41.2 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.3}$ & $17.6 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.3}$ & $21.9 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.6}$ & $27.1 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.9}$ & $29.8 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.0}$ \\    
+\bottomrule    
+\end{tabular}   
+    \label{tab:performance_comparison}  
+\end{table}  
+
+We choose to evaluate and minimize the following safety criteria: toxicity, obscenity, identity attacks, insults, threats, and sexually explicit material. As a ground truth for these criteria, we leverage the \texttt{unitary/toxic-bert} classifier, which has demonstrated success across multiple datasets and languages\footnote{\url{https://huggingface.co/unitary/toxic-bert}}. Given a vector of probabilities of toxicity, obscenity, etc. in a vector $\mathbf{r}$, we formulate the auxiliary reward function $R_2$, shown in Equation \ref{eqn:r2}.
+\begin{align}
+    R_2(x, y) = \max_i 1 - \mathbf{r}_i
+    \label{eqn:r2}
+\end{align}
+\paragraph{Evaluation Methodology}
+
+To compare our performance to prior alignment techniques, we select a range of prior RLHF and DPO-style techniques; note that these only optimize for user preferences. From non-RL techniques, we compare to DPO \citep{rafailov2024direct}, CSFT \citep{korbak2023pretraining}, and KTO \citep{ethayarajh2024kto}, alongside offline PPO (oPPO) \citep{ethayarajh2024kto}. We use the SFT policy used for alignment as a preliminary baseline for these techniques. 
+
+To train HPO, we use KTO as a base preference optimization technique since it does not require preference data, while demonstrating equal or improved performance compared to DPO \citep{ethayarajh2024kto}. We use the following construction of $R(x, y)$ to evaluate its ability to maximize multiple auxiliary objectives:
+\begin{align}
+    R(x,y) = 0.05 R_1(x, y) + 0.95 R_2(x, y)
+    \label{eqn:rewar}
+\end{align}
+We compare these techniques on five models ranging from 1.4B to 13B parameters: Pythia-[1.4B, 2.8B, 6.9B] \citep{biderman2023pythia} and Llama-[7B, 13B] \citep{touvron2023llama}. Similarly to \cite{ethayarajh2024kto}, the models are trained on a combination of Anthropic HH \citep{ganguli2022red}, OpenAssistant \citep{kopf2024openassistant} and SHP \citep{ethayarajh2022understanding}. Importantly, though there are examples of unsafe generations in these datasets through red teaming, note that the mixture of datasets are not chosen specifically to cater to directly optimizing the chosen auxiliary objectives. We believe this is an important use case since not all designer preferences or dispreferences may not be directly reflected in collected datasets. For consistency, all evaluated models are trained under the same configurations on the same data with the same hyperparameters, mirroring \cite{rafailov2024direct} and \cite{ethayarajh2024kto}.
+
+Similarly to prior work, we use GPT-4 to judge whether the aligned model’s response is improved compared to the "chosen" response for evaluation prompts sampled from the offline datasets \citep{zheng2024judging,rafailov2024direct,ethayarajh2024kto}. Similarly to \cite{baheti2023improving} and \cite{ethayarajh2024kto}, our prompt for assessing the quality of the generation relative to the user-preferred generation takes into account the following factors: helpfulness, safety, and conciseness.
+
+To evaluate the safety and readability objectives, we examine the generations using the toxicity classifier and reading level metrics respectively. These serve to validate that HPO is able to maximize these given auxiliary objectives effectively. Since the vast majority of our evaluation set is not toxic, we filter the 5\% most toxic evaluation prompts and evaluate the overall proportion of safety categories in which the policy is classified as \textit{more unsafe} than the chosen response (among toxicity, obscenity, identity attacks, insults, threats and sexually explicit material). For reading level, we evaluate the proportion of generations that exceed the 9th grade (i.e., in violation of $R_1$).
+
+\subsection{Illustrative Example}
+
+\begin{wrapfigure}{r}{0.43\textwidth}
+  \begin{center}
+    \includegraphics[scale=0.25]{chart.pdf}
+  \end{center}
+    \caption{Distribution of grade level for HPO and KTO generations on evaluation samples (LLAMA-13B).}
+    \label{fig:grade}
+\end{wrapfigure}
+
+To illustrate the proposed approach, we optimize only $R_1$ using HPO, an auxiliary objective to generate text with reading level up to the 9th grade. Importantly, we wish to demonstrate that maximizing these reasonable auxiliary objectives do not significantly impact performance and allow the designer to achieve their auxiliary objectives. For this example, we compare to KTO as a baseline method (i.e., without any modifications), and the model used for this comparison is LLAMA-13B.
+In Figure \ref{fig:grade}, we show a histogram of reading levels as a function of the method, where HPO's average grade level is 7.6 $\pm$ 4.1 compared to KTO's 9.4 $\pm$ 7.1, with 48.7\% less generations beyond a 9th grade reading level. Importantly, despite this restriction on the generation, HPO achieves a score of 45.5$\pm$4.3 on the GPT-4 evaluation, i.e., it retains equal or greater overall performance in terms of safety, helpfulness, and conciseness compared to KTO. Based on this, we clearly demonstrate that HPO has greater ability to tailor the responses to the appropriate reading level, with no noticeable difference to overall performance metrics.
+
+\subsection{Evaluation Results}
+
+\begin{table*}   
+\centering    
+\caption{Safety and readability evaluation using the ground-truth toxicity classifier and reading level metric across different model sizes and types (lower is better).}    
+\label{tab:comprehensive_results}    
+  
+\begin{subtable}{.54\linewidth}    
+\centering    
+\caption{Unsafe relative to chosen (5\% most unsafe prompts) $\downarrow$}    
+\label{tab:sub1}    
+\resizebox{1.015\textwidth}{!}{  
+\begin{tabular}{c || c c | c c c c}    
+\toprule      
+\textbf{Method} & \multicolumn{2}{c|}{\textbf{LLAMA}} & \multicolumn{3}{c}{\textbf{PYTHIA}} \\      
+       & \textbf{7B} & \textbf{13B} & \textbf{1.4B} & \textbf{2.8B} & \textbf{6.9B}  \\    
+\midrule    
+SFT    & $14.8 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 5.1}$ & $12.2 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.7}$ & $22.8 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 5.9}$ & $\mathbf{13.8} \, \text{\scriptsize $\pm$} \, \text{\scriptsize \textbf{5.1}}$ & $\mathbf{8.5} \, \text{\scriptsize $\pm$} \, \text{\scriptsize \textbf{4.0}}$ \\      
+HPO    & $\mathbf{11.6} \, \text{\scriptsize $\pm$} \, \text{\scriptsize \textbf{4.6}}$ & $\mathbf{10.5} \, \text{\scriptsize $\mathbf \pm$} \, \text{\scriptsize \textbf{4.4}}$ & $19.5 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 5.6}$ & $17.9 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 5.5}$ & $10.5 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.4}$ \\      
+DPO    & $19.6 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 5.7}$ & $17.5 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 5.4}$ & $27.5 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 6.4}$ & $16.4 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 5.3}$ & $14.3 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 5.0}$ \\      
+KTO    & $16.9 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 5.3}$ & $12.2 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.7}$ & $23.8 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 6.1}$ & $15.3 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 5.1}$ & $12.2 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.7}$ \\      
+oPPO   & $16.9 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 5.3}$ & $11.6 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.6}$ & $16.9 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 5.3}$ & $16.9 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 5.3}$ & $12.7 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.7}$ \\
+CSFT   & $17.5 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 5.5}$ & $18.0 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 5.5}$ & $\mathbf{11.1} \, \text{\scriptsize $\pm$} \, \text{\scriptsize \textbf{4.4}}$ & $15.3 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 5.1}$ & $9.0 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.1}$ \\      
+\bottomrule    
+\end{tabular}    
+}  
+\end{subtable}%    
+\begin{subtable}{.47\linewidth}    
+\centering    
+\caption{Reading level violations (over 9th grade) $\downarrow$}    
+\label{tab:sub2}    
+\resizebox{1\textwidth}{!}{  
+\begin{tabular}{||c c | c c c}    
+\toprule      
+\multicolumn{2}{||c|}{\textbf{LLAMA}} & \multicolumn{3}{c}{\textbf{PYTHIA}} \\      
+     \textbf{7B} & \textbf{13B} & \textbf{1.4B} & \textbf{2.8B} & \textbf{6.9B}   \\    
+\midrule    
+$26.4 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.8}$ & $26.0 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.8}$ & $25.2 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.8}$ & $26.4 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.8}$ & $\mathbf{22.9} \, \text{\scriptsize $\pm$} \, \text{\scriptsize \textbf{3.6}}$ \\  
+$26.7 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.8}$ & $\mathbf{24.4} \, \text{\scriptsize $\pm$} \, \text{\scriptsize \textbf{3.7}}$ & $26.3 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.8}$ & $26.1 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.8}$ & $25.0 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.8}$ \\  
+$36.7 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.2}$ & $28.9 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.9}$ & $27.0 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.8}$ & $31.8 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.0}$ & $30.3 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.0}$ \\    
+$37.5 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.2}$ & $35.7 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.2}$ & $29.9 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.0}$ & $34.2 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.1}$ & $36.3 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.2}$ \\    
+$33.0 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.1}$ & $31.6 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 4.0}$ & $25.6 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.8}$ & $28.7 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.9}$ & $26.2 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.8}$ \\    
+$\mathbf{23.2} \, \text{\scriptsize $\pm$} \, \text{\scriptsize \textbf{3.7}}$ & $\mathbf{24.4} \, \text{\scriptsize $\pm$} \, \text{\scriptsize \textbf{3.7}}$ & $\mathbf{22.7} \, \text{\scriptsize $\pm$} \, \text{\scriptsize \textbf{3.6}}$ & $\mathbf{21.1} \, \text{\scriptsize $\pm$} \, \text{\scriptsize \textbf{3.5}}$ & $25.8 \, \text{\scriptsize $\pm$} \, \text{\scriptsize 3.8}$ \\
+\bottomrule    
+\end{tabular}    
+}  
+\end{subtable}    
+  
+\end{table*}    
+
+Across the GPT-4 evaluations of the overall quality of the generations, HPO achieves similar or improved performance compared to all other methods, with an increased average score compared to SFT, DPO, KTO, and CSFT. Similarly to other techniques, the win rate against the chosen response scales with the model size.
+
+In many cases, we believe KTO and DPO demonstrate significantly worse performance on PYTHIA models due to their tendency to ramble and/or hallucinate (for DPO, as previously reported in \cite{ethayarajh2024kto}). For instance, we show the length of generations across different techniques on PYTHIA-6.9B in Figure \ref{fig:length}, where response length for DPO and KTO relative to the chosen response is over 5x longer than the chosen response roughly half the time and sometimes even 50-100x longer. Comparatively, HPO and SFT are roughly as long as the chosen response on average.
+\begin{wrapfigure}{r}{0.45\textwidth}
+  \begin{center}
+    \includegraphics[scale=0.28]{length.pdf}
+  \end{center}
+    \caption{Generation length on evaluation set for different alignment methods (PYTHIA-6.9B).}
+    \label{fig:length}
+\end{wrapfigure}
+
+On the safety and reading level evaluations, HPO improves upon its base technique, KTO, and DPO significantly across most models. Importantly, it performs well in these metrics consistently across models (e.g., CSFT performs well on PYTHIA models, but it is the one of the most unsafe on both LLAMA models). On the more powerful models, LLAMA-[7B, 13B], HPO demonstrates the least number of prompts considered more unsafe than the chosen response.
+
+In a closer examination of the safety categories, we show evaluations of the aforementioned categories of safety (toxicity, severe toxicity, etc.) across the same generations in Figure \ref{fig:safety} on the LLAMA-7B model. DPO and KTO reduce response safety significantly relative to SFT given unsafe content in the prompt. Across all categories, HPO contains the  least instances of safety violations, with no instances of severe toxicity.
+
+\subsection{Ablation Studies}
+
+\begin{figure}
+    \centering
+    \includegraphics[scale=0.42,trim={3.2cm 0 0 0}, clip]{safety.pdf}
+    \caption{Breakdown of model performance across each safety rule for the 5\% most toxic evaluation prompts using \texttt{unitary/toxic-bert} safety classifier on LLAMA-7B.}
+    \label{fig:safety}
+\end{figure}
+
+In this section, we explore hypotheses to determine if alternate design choices would be more optimal than the proposed hybrid approach. For example, would it be effective to use a fully multi-objective RL-based approach instead of both styles of objectives? On the contrary, would it be feasible to use only DPO-style objectives with either a weighted or margin-based loss function for different objectives, e.g., MODPO \citep{wang2023beyond}? For all these comparisons, we train objectives on LLAMA-13B with identical hyperparameters, wherever possible.
+
+\paragraph{Pure RL Approach} Consider an multi-objective RL-only approach, where we assume $r_p(x, y_w) = 1$ and $r_p(x, y_l) = 0$ for simplicity, similarly to \cite{ethayarajh2024kto}. For this comparison, we leverage A-LOL \citep{baheti2023improving} and our method with $L_\pi$ alone (i.e., no $L_\psi$). While an approach using PPO could be considered, we believe this does not resolve issues with training efficiency, stability, and simplicity. For this comparison, we maximize $r_p(x, y) + R(x, y)$, with $R(x, y)$ as in Equation \ref{eqn:rewar}.
+
+We show the results of the comparison in Table \ref{tab:ablate}. While the toxicity and readability of our RL-only approach is improved by a factor of 2x, this is largely because the responses are significantly less helpful overall. A-LOL produces nearly double the number of safety violations and a significantly poorer GPT-4 score. This indicates that an approach incorporating direct preference approaches would be preferred to an RL-only approach.
+\renewcommand{\arraystretch}{1.1}  % Adjust the factor to control space, 1 is the default.  
+
+\begin{wraptable}{r}{6cm}  % "r" for right, "5cm" for the width of the wrapping area  
+  \centering  
+  \caption{Evaluation metrics for HPO, RL-only, and DPO-only methods.}  {\scriptsize
+  \begin{tabular}{c || c c c}  
+    \toprule  
+    \bfseries Hyperparm. & \bfseries GPT-4 $\uparrow$ & \bfseries Safety $\downarrow$ & \bfseries Readab. $\downarrow$ \\  
+    \hline 
+    HPO & \textbf{44.4 $\pm$ 4.3} & 10.5 $\pm$ 4.4 & 24.4 $\pm$ 3.7 \\  \hline
+    \multicolumn{2}{c}{\textit{RL-only methods}} \\
+    \hline 
+    $L_\pi$ & 30.6 $\pm$ 4.0 & \textbf{5.8 $\pm$ 3.3} & \textbf{12.5 $\pm$ 2.9} \\  
+    $A_\mathrm{LOL}$ & 18.6 $\pm$ 3.4 & 23.8 $\pm$ 6.1 & \textbf{12.5 $\pm$ 2.9} \\  \hline
+    \multicolumn{2}{c}{\textit{DPO-only methods}} \\
+    \hline 
+    wKTO & 41.7 $\pm$ 4.3 & 16.9 $\pm$ 5.3 & 27.1 $\pm$ 3.9 \\  
+    MODPO & 0.0 $\pm$ 0.0 & 11.1 $\pm$ 4.4 & 47.7 $\pm$ 4.3 \\  
+    \bottomrule  
+  \end{tabular}  
+  }
+\label{tab:ablate}
+\end{wraptable}
+\paragraph{Pure DPO Approach}
+Alternatively, we consider a weighted objective approach using KTO and a margin based multi-objective approach, MODPO \citep{zhou2023beyond}. To implement weighted KTO (wKTO), we simply weight the chosen loss by $1 - \gamma R(x, y)$ and the rejected loss by $1 + \gamma R(x, y)$, such that the loss is reduced as $R(x, y)$ is maximized. Our implementation of MODPO is identical to that of the authors, with the weights $\mathbf{w}$ and rewards used based on Equation \ref{eqn:rewar}. 
+
+As shown in Table \ref{tab:ablate}, neither method improves upon the safety and readability metrics, and the overall performance on GPT-4 evaluation is worse. We find that MODPO seemed to diverge and begins to output exclusively German text, which results in a poor GPT-4 evaluation score. 
+
+  \centering  
+  \caption{Evaluation metrics for HPO across different hyperparameter values.}  {\scriptsize
+  \begin{tabular}{c || c c c}  
+    \toprule  
+    \bfseries Hyperparm. & \bfseries GPT-4 $\uparrow$ & \bfseries Safety $\downarrow$ & \bfseries Readab. $\downarrow$ \\  
+    \hline 
+    $\gamma=0.3$ & 43.0 $\pm$ 4.3 & 10.1 $\pm$ 4.3 & 25.2 $\pm$ 3.8 \\ 
+    $\gamma=0.5$ & 44.4 $\pm$ 4.3  & 10.5 $\pm$ 4.4 & 24.4 $\pm$ 3.7 \\  \hline
+    $\lambda=5$ & 44.4 $\pm$ 4.3  & 10.5 $\pm$ 4.4 & 24.4 $\pm$ 3.7 \\ 
+    $\lambda=8.5$ & 44.8 $\pm$ 4.3  & 8.5 $\pm$ 4.0 & 24.8 $\pm$ 3.7 \\   
+    $\lambda=10$ & 43.1 $\pm$ 4.3  & 14.8 $\pm$ 5.1 & 23.2 $\pm$ 3.7 \\
+    \bottomrule  
+  \end{tabular}  
+  }
+\label{tab:ablate2}
+\end{wraptable}  
+ To demonstrate the training stability of HPO, we train across different RL hyperparameters (e.g., $\gamma$, $\lambda = 1/\beta$). For each run, we ablate one hyperparameter and keep the remaining the same. The results are shown in Table \ref{tab:ablate2}.
+
+While there are minor performance differences, there are importantly no explosions in the loss function or divergence during training regardless of the choice of hyperparameters. Unlike prior RL techniques whose stability are often conditional on optimal hyperparameter choices, our method is comparatively insensitive to variation in hyperparameters, which lends itself to greater practical applicability.
+
+
+
+\section{Discussion}
+
+
+In this study, we address the important tradeoff in language model alignment between performance, stability, and simplicity using direct preference objectives with granular, multi-objective prioritization using RLHF. To bridge this gap, we propose Hybrid Preference Optimization, based on a simple augmentation to $\Psi$PO methods that allows for optimizing auxiliary objectives. With minimal additional computational cost compared to DPO-style methods and improved stability compared to RLHF, HPO demonstrates significant improvements in optimization of auxiliary objectives (i.e., safety and readability) compared to its base method, KTO, without compromising on the overall performance (as adjudged by GPT-4). Across all of our evaluations and models, it equals or outperforms prior techniques, with greater consistency than other techniques. Consequently, this work presents a pathway forward to a more granular and multi-objective approach to DPO, given that different practical use cases demand different priorities.
+
+\paragraph{Limitations and Future Work} Despite HPO's ability to optimize these objectives, many of its limitations are reminiscent of the limitations of multi-objective RL. It is challenging to weight the different auxiliary objectives and the preference objective to achieve satisfactory performance in all facets. Moreover, it is unclear what kinds of rewards are most amenable or suitable for optimization in language models; for instance, many prior works have leveraged binary rewards with human labels, rather than continuous classifier-based rewards. 
+
+
+
+
+
+
+
+
+

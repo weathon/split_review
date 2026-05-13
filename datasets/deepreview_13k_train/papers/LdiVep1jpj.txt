@@ -1,0 +1,278 @@
+\title{RASP Quadratures: Efficient Numerical Integration for High-Dimensional Mean-Field Variational Inference}
+
+\begin{abstract}
+Efficient high-dimensional integration enables novel approaches to calibrate and control model uncertainty during training. In particular, the recently-proposed projective integral update formulation of variational inference derives model uncertainty from expectations that extract the local loss topography. Thus, we propose random-affinity sigma-point (RASP) quadratures, which are designed to eliminate integration errors from basis functions that drive Gaussian mean-field updates. Using only 3 gradient evaluations, RASP quadratures can extract locally-averaged gradients and Hessian diagonals from the loss, while eliminating errors from over half of all quadratic total-degree terms. Alternatively, we can use 6-point RASP quadratures to obtain 5th-order exactness in all univariate terms as well as 3rd-order exactness for two-thirds of bivariate terms. This work presents the design of RASP quadratures, theoretical guarantees on exactness, and analysis of expected errors. We also provide an open-source PyTorch implementation of RASP quadratures with quasi-Newton variational Bayes (QNVB), i.e. the projective integral update algorithm for Gaussian mean fields. Although RASP quadratures are designed to support QNVB, they are also compatible with other forms of variational inference, such as stochastic gradient variational Bayes (SGVB). Our experiments compare alternative integration schemes and training methods using three different learning tasks and architectures, demonstrating that efficient integration can improve generalizability for architectures with suitable loss structure.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+
+
+\section{1.1 MOTIVATION  }
+
+
+Bayesian inference provides a foundational framework for reconciling new data with plausible predictive models and Markov-chain Monte Carlo (MCMC) (Metropolis et al., 1953; Hastings, 1970) is a well-known method to obtain posterior samples for prediction tasks. However, variational inference (VI) (Mézard et al., 1987; Parisi & Shankar, 1988) provides a needed alternative for large models and datasets, when the time and storage complexities of MCMC become unacceptable (Bishop & Nasrabadi, 2006; Jordan et al., 1999; Blei et al., 2017; Zhang et al., 2018).  
+
+Mean-field VI (MFVI) (Anderson & Peterson, 1987; Peterson & Hartman, 1989; Hinton & Van Camp, 1993) provides an alternative means to capture model uncertainty in large learning models by approximating a local component of the full posterior. Mean-field distributions represent uncertainty as a product of independent distributions in each parameter, reducing storage to a small constant times the number of parameters. Other forms of VI are possible (Dhaka et al., 2021), Gaussian mean-fields provide a simple method to calibrate local parameter uncertainty and improve predictions by taking small model variations into account. Localized uncertainty also supports adaptive rounding schemes to reduce representational complexity after training (Banner et al., 2019; Choukroun et al., 2019; Cai et al., 2020; Nagel et al., 2020).  
+
+Projective integral updates (Duersch, 2023) provide an efficient framework for updating variational densities using local integrals to project the posterior onto a corresponding basis of functions. For Gaussian mean-fields, these updates yield the quasi-Newton variational Bayes (QNVB) algorithm, which analytically recovers quasi-Newton steps as locally optimal updates. However, these updates require the potentially noisy or expensive computation of the expected gradient and Hessian diagonal of the training loss. To enhance the projective integral update framework, particularly in resourceconstrained settings when each gradient is expensive, we desire more efficient methods to reduce evaluations and minimizing projection errors for components that dominate the VI update.  
+
+
+
+\section{1.2 CONTRIBUTIONS  }
+
+
+This work proposes random-affinity sigma-point (RASP) quadratures, an efficient integration approach for mean-field densities that supports projective integral updates by minimizing the error corresponding to basis functions that dominate variational updates. This framework allows us to approximate the locally-averaged gradient and Hessian using ordinary backpropagation to support uncertainty calibration during training. RASP quadratures are also compatible with other VI algorithms, such as stochastic gradient variational Bayes (Kingma & Welling, 2013).  
+
+RASP quadratures can eliminate integration errors from all univariate quadratics and half of all bivariate quadratic basis functions using only 3 function evaluations. Similarly, we can achieve fifthorder exactness in univariate polynomials and two-thirds of bivariate quadratic basis functions using 6 function evaluations. These results are further substantiated by our experiments, which show that different learning architectures benefit from QNVB with RASP quadratures to achieve competitive test accuracy against multiple baselines. Efficient methods for high-dimensional integration facilitate training with model uncertainty while using very few function evaluations, making them ideal for resource-constrained environments.  
+
+The main contributions of this work (Section 3) include:  
+
+1. the design and error analysis of RASP quadratures (Section 3),   
+2. comparisons to recent work (Section 4), and   
+3. an open-source PyTorch implementation of QNVB with RASP quadratures1.  
+
+
+
+\section{2 BACKGROUND  }
+
+
+
+
+\section{2.1 VARIATIONAL INFERENCE  }
+
+
+Here, we briefly review VI. (Jordan et al., 1999; Blei et al., 2017; Zhang et al., 2018) provide more thorough overviews. VI addresses the intractability of Bayesian inference in high-dimensional model classes. A dataset $\mathcal{D}$ comprising ordered pairs of features $\textbf{\em x}$ and labels $\textit{\textbf{y}}$ informs a distribution over plausible models. Each model $\bar{\pmb{\theta}}\in\mathbb{R}^{d}$ acts on inputs to generate a distribution over label predictions $\mathbf{\bar{p}}(y\mid\theta,\,x)$ . By taking the product over all data samples, we obtain the likelihood $\mathbf{p}({\mathcal{D}}\mid{\bar{\pmb{\theta}}})$ . Given a prior over models $\mathbf{p}(\pmb\theta)$ , Bayes’ theorem yields the posterior $\mathbf{p}(\pmb{\theta}\mid\mathcal{D})\propto\mathbf{p}(\mathcal{D}\mid\pmb{\theta})\mathbf{p}(\pmb{\theta})$ .  
+
+Unfortunately, parameter regions that dominate the posterior are difficult to locate and store when the number of trainable parameters $d$ is high. Thus, we only seek to capture a component of the posterior using a simpler variational distribution $\mathbf{q}(\pmb\theta\mid\varphi)$ , where the variational parameters $\varphi$ describe its shape.  
+
+Mean-field densities are products of independent factor densities in each parameter, ${\bf q}(\pmb\theta\mid\varphi)=$ $\textstyle\prod_{i=1}^{d}\mathbf{q}(\pmb{\theta}_{i}\mid\pmb{\varphi}_{i})$ , where each $\varphi_{i}$ is a block of shape parameters that describe uncertainty in $\theta_{i}$ This structure makes mean fields an attractive choice for the family of variational densities in high dimensions, because they support efficient optimization, storage, and integration. These properties ultimately serve to improve the feasibility of obtaining more robust predictions from the variationalpredictive integral, which is defined as  
+
+$$
+\mathbf{q}(y\mid x,\,\varphi)=\int\mathbf{p}(y\mid x,\,\theta)\,d\mathbf{q}(\theta\mid\varphi).
+$$  
+
+Optimization minimizes the KL-divergence from the posterior to the variational distribution:  
+
+$$
+\varphi^{*}=\underset{\varphi}{\mathrm{argmin}}\,\int d\mathbf{q}(\pmb{\theta}\mid\varphi)\log\!\left(\frac{\mathbf{q}(\pmb{\theta}\mid\varphi)}{\mathbf{p}(\pmb{\theta}\mid\mathcal{D})}\right).
+$$  
+
+Projective integral updates (PIU) (Duersch, 2023) optimize the variational density by computing expectations over a compatible basis of functions $\mathcal{F}$ , provided $\operatorname{span}({\mathcal{F}})$ contains every log-density in the variational family, i.e.  
+
+$$
+\log\mathbf{q}(\theta\mid\varphi)=\sum_{\ell=0}^{m}\varphi_{\ell}f_{\ell}(\theta)\quad{\mathrm{where}}\quad{\mathcal{F}}=\left\{f_{0}(\theta)\!=\!1\,{\mathrm{and~}}f_{\ell}(\theta)\,{\mathrm{for~}}\ell\in[m]\right\}.
+$$  
+
+By using the variational density at training step $t$ , i.e. $\mathbf{q}(\pmb{\theta}\mid\varphi^{(t)})$ , to define an inner product on functions, we can obtain each projection coefficient φ(ℓt+1)for ℓ∈[m] with the fixed-point iteration  
+
+$$
+\varphi_{\ell}^{(t+1)}=\frac{\langle f_{\ell},\,\log\,\mathbf{p}(\mathcal{D}\mid\theta)\mathbf{p}(\theta)\rangle_{\varphi^{(t)}}}{\langle f_{\ell},\,f_{\ell}\rangle_{\varphi^{(t)}}}\quad\mathrm{where}\quad\langle f,\,g\rangle_{\varphi}\equiv\int f(\theta)g(\theta)\,d\mathbf{q}(\theta\mid\varphi)
+$$  
+
+and normalization determines $\varphi_{\mathrm{0}}$ . The optimum of Equation (2) is a fixed point of Equation (4).  
+
+When projective integral updates are applied to Gaussian mean fields, denoted as ${\bf q}(\pmb\theta\mid\pmb\mu,\,\pmb\sigma^{2})\equiv$ $\mathcal{N}(\pmb{\theta}\mid\hat{\mu},\mathrm{\vec{diag}}(\pmb{\sigma})^{2})$ , the resulting algorithm is called quasi-Newton variational Bayes (QNVB). In this case, a suitable orthogonal basis $\mathcal{F}$ contains $m=2d+1$ functions, taking the form  
+
+$$
+\mathcal{F}=\left\{\begin{array}{l l}{f_{0}(\pmb{\theta})\!=\!1,\;f_{2i-1}(\pmb{\theta})\!=\!\pmb{\theta}_{i}-\pmb{\mu}_{i},\;f_{2i}(\pmb{\theta})\!=\!(\pmb{\theta}_{i}-\pmb{\mu}_{i})^{2}-\pmb{\sigma}_{i}^{2}\mid i\in[d]\end{array}\right\}.
+$$  
+
+In this case, the projection coefficients are equivalent to the expected gradient $\textbf{\textit{g}}$ and Hessian diagonal $^h$ of the loss (i.e., the unnormalized negative log posterior), which we can write as  
+
+$$
+{\mathcal{L}}(\theta\mid{\mathcal{D}})\equiv-\log\mathbf{p}({\mathcal{D}}\mid\theta)\mathbf{p}(\theta)\approx{\mathcal{L}}_{\mu}+(\theta-\mu)^{T}\left[g+{\frac{1}{2}}h*(\theta-\mu)\right].
+$$  
+
+The constant $\mathcal{L}_{\mu}$ approximates the loss at $\pmb{\mu}$ , the gradient $\pmb{g}\in\mathbb{R}^{d}$ captures linear perturbations, and the Hessian diagonal $\pmb{h}\in\mathbb{R}^{d}$ captures quadratic effects. Note that $^*$ is the Hadamard (elementwise) product and powers are also elementwise, e.g. $\pmb{h}^{-1}\,*\,\pmb{g}\:=\:\mathrm{diag}(\pmb{h})^{-1}\pmb{g}$ . This local quadratic approximation of the loss topography updates the variational density with a quasi-Newton step, i.e. $\pmb{\mu}\leftarrow\pmb{\mu}-\pmb{h}^{-1}*\pmb{g}$ and $\sigma\leftarrow h^{-1/2}$ . Since both $\textbf{\textit{g}}$ and $^h$ can be computed from simple integrals:  
+
+$$
+\begin{array}{l}{\displaystyle\pmb{g}=\int\nabla_{\theta}\mathcal{L}(\pmb{\theta}\mid\mathcal{D})\,d\mathbf{q}(\theta\mid\mu,\,\pmb{\sigma}^{2})\quad\mathrm{and}}\\ {\displaystyle h=\pmb{\sigma}^{-2}\ast\int(\pmb{\theta}-\pmb{\mu})\ast\nabla_{\theta}\mathcal{L}(\pmb{\theta}\mid\mathcal{D})\,d\mathbf{q}(\theta\mid\mu,\,\pmb{\sigma}^{2})\,,}\end{array}
+$$  
+
+efficient integration for high-dimensional mean-fields may enhance PIU optimization.  
+
+
+
+\section{2.3 QUADRATURES AND SIGMA POINTS  }
+
+
+Numerical quadratures approximate weighted integrals by taking linear combinations of specific function evaluations. In this work, we consider functions $f:\mathbb{R}^{\bar{d}}\rightarrow\mathbb{R}$ over the model parameter domain and seek to approximate integrals against $\mathbf{q}(\pmb{\theta}\mid\pmb{\mu},\-b{\sigma}^{2})$ . In this setting, quadrature formulas take the form  
+
+$$
+Q[f]=\sum_{k=1}^{n}w_{k}f\left(\pmb{\theta}^{(k)}\right)\approx\int f(\pmb{\theta})\,d\mathbf{q}(\pmb{\theta}\mid\mu,\,\pmb{\sigma}^{2}).
+$$  
+
+Each evaluation index $k\,\in\,[n]$ has a weight $w_{k}\,\in\,\mathbb{R}$ and an evaluation node $\pmb{\theta}^{(k)}\,\in\,\mathbb{R}^{d}$ . These weights and nodes are solved to exactly integrate some basis $\mathcal{F}_{\varepsilon}$ , so that  
+
+$$
+Q[f_{\ell}]=\int f_{\ell}(\pmb\theta)\,d\mathbf{q}(\pmb\theta\mid\pmb\mu,\,\sigma^{2})\quad\mathrm{for\,all}\quad f_{\ell}\in\mathcal{F}_{\varepsilon}.
+$$  
+
+Since both the weighted integral and the quadrature are linear functionals, it follows that the quadrature is exact for all $f\in\operatorname{span}(\mathcal{F}_{\varepsilon})$ . Thus, it is beneficial to construct a quadrature for which $\mathcal{F}\subset\mathcal{F}_{\varepsilon}$ from Equation (5). This will suppress errors in $\textbf{\textit{g}}$ and $^h$ by collecting a set of gradient evaluations from standard backpropagation, i.e.  
+
+$$
+g\approx Q[\nabla_{\theta}\mathcal{L}(\theta\mid\mathcal{D})]\quad\mathrm{and}\quad h\approx\sigma^{-2}*Q[(\theta-\mu)*\nabla_{\theta}\mathcal{L}(\theta\mid\mathcal{D})].
+$$  
+
+For quadrature formulas that obtain second-order exactness over multivariate Gaussians, the evaluation nodes are called sigma points in the non-linear filtering literature. These formulas are used to propagate uncertainty in unscented Kalman filters (Uhlmann, 1995). The symmetric set used by Uhlmann, see (McNamee & Stenger, 1967), comprises $2d+1$ nodes. Unfortunately, even minimal sigma-point quadratures require $d+1$ nodes (Wan-Chun et al., 2007), which is infeasible for large $d$ .  
+
+
+
+\section{3 RANDOM-AFFINITY SIGMA-POINT (RASP) QUADRATURES  }
+
+
+
+
+\section{3.1 COMPOSITION  }
+
+
+RASP quadratures $Q[\cdot]$ are generated by first forming a reference quadrature $R[\cdot]$ that acts on functions in a reference domain with $r$ dimensions. The exactness of $R[\cdot]$ impacts that of $Q[\cdot]$ and Section 3.2 provides a detailed analysis of this relationship.  
+
+Using weights $w_{k}$ and nodes $\pmb{\rho}^{(k)}\in\mathbb{R}^{r}$ for each evaluation $k\in[n]$ , we have the reference quadrature  
+
+$$
+R[f]=\sum_{k=1}^{n}w_{k}f(\pmb\rho^{(k)})\approx\int\!f(\pmb\rho)\,d\mathcal N(\pmb\rho\mid0,\pmb I).
+$$  
+
+In principle, $R[\cdot]$ could be any quadrature formula (also called cubature in multiple dimensions), but the number of evaluations $n$ will determine the number of gradients computed from backpropagation per training step. Thus, sigma points are preferred because they achieve second-order exactness with few evaluations, but higher-order quadratures exist (McNamee & Stenger, 1967; Smolyak, 1963; Novak & Ritter, 1999; Dick et al., 2013; Menegaz et al., 2015).1) generate reference quadratures from the simplex- and cross-polytope vertices, respectively.  
+
+We can then generate a RASP quadrature $Q[\cdot]$ by randomly mapping each parameter dimension to a signed reference dimension. For each $i\,\in\,[d]$ , select a reference dimension $j_{i}\,\in\,[r]$ uniformly at random (with replacement) along with a random sign $s_{i}\,\in\,\{-1,\,1\}$ . These random parameter affinities with reference dimensions yield the RASP quadrature  
+
+$$
+Q[f]=\sum_{k=1}^{n}w_{k}f(\pmb{\mu}+\pmb{\sigma}\ast\pmb{x}^{(k)})\approx\int\!f(\pmb{\theta})\,d\mathbf{q}(\pmb{\theta}\mid\mu,\,\sigma^{2})\quad\mathrm{where}\quad\pmb{x}_{i}^{(k)}=s_{i}\rho_{j_{i}}^{(k)}.
+$$  
+
+Memory management A memory-efficient implementation tracks random signs by doubling the number of reference dimensions. Each reference node is concatenated with its negative, i.e. $\widehat{\pmb{\rho}}^{(k)\bar{T}}=$ $\left[\pmb{\rho}^{(k)T}\ -\pmb{\rho}^{(k)T}\right]$ , so that both the sign and reference index can be constructed from a single   array of integers in $[2r]^{d}$ . Algorithm 3 shows how this technique is implemented. For large architectures, this approach avoids excessive memory by generating each evaluation node only when it is needed. In contrast, the quasi Monte Carlo methods tested in Section 4 match sample moments to the distribution (Caflisch, 1998), which requires sampling, storing, and modifying $n\times d$ floating-point numbers simultaneously, rather than one node at a time.  
+
+
+
+\section{3.2 EXACTNESS  }
+
+
+To analyze the exactness properties of $Q[\cdot]$ , we distinguish degrees of exactness $\varepsilon_{1}$ and $\varepsilon_{2}$ for univariate and bivariate polynomials, respectively. That is, $\varepsilon_{1}$ is the maximum polynomial degree for  
+
+functions that depend only on a single coordinate, $f(\pmb\rho)\equiv p(\pmb\rho_{j})$ , that satisfies  
+
+$$
+R[f]=\int\!f(\pmb\rho)\,d\!N(\pmb\rho\mid0,\,\pmb I).
+$$  
+
+Likewise, for functions that are polynomial in two coordinates, i.e $f(\pmb{\rho})\equiv p(\pmb{\rho}_{j_{1}},\,\pmb{\rho}_{j_{2}}).$ , let $\varepsilon_{2}$ be the maximum total degree of $p$ for which Equation (14) holds.  
+
+For example, Algorithm 1 uses $\textit{n}=\textit{r}+1$ nodes to obtain degrees of exactness $\varepsilon_{1}\,=\,\varepsilon_{2}\,=\,2$ Alternatively, Algorithm 2 generates $n=2r$ symmetric nodes. Here, symmetry means that for each $k\in[n]$ , there exists $k^{\prime}\in[n]$ for which ${\pmb\rho}^{(k^{\prime})}\stackrel{\cdot}{=}-{\pmb\rho}^{(k)}$ and $w_{k^{\prime}}=w_{k}$ . This property increases the degree of exactness to $\varepsilon_{1}=\varepsilon_{2}=3$ . It is also worth noting that when $r=3$ , we obtain univariate exactness $\varepsilon_{1}=5$ .  
+
+![](images/27fd1a943fd4f710180cf29367ecbf323f517e291b362aaebf0255690e937a0d.jpg)  
+Figure 1: Fraction of quadratic basis functions that integrate exactly with different methods. RASPsimplex quadratures attain the largest exact fraction for a fixed number of nodes.  
+
+Theorems 3.1 and 3.2 explain how the exactness of $R[\cdot]$ influences the exactness of $Q[\cdot]$ . Figure 1 shows the fraction of quadratic basis functions that are exactly integrated for different quadrature methods, including some proposed by Duersch (2023).  
+
+Although Theorem 3.2 implies that a fraction of bivariate terms will not be exact, Theorem 3.3 shows that even in such cases, the expected error is zero. Further, when the reference quadrature is symmetric, Theorem 3.4 shows that every odd total-degree term (centered at $\pmb{\mu}$ ) becomes exact.  
+
+Theorem 3.1 Let $R[\cdot]$ be a reference quadrature, as in Equation (12), with univariate exactness $\varepsilon_{1}$ . Every RASP quadrature $Q[\cdot]$ , from Equation (13), also has univariate exactness $\varepsilon_{1}$ .  
+
+ture with bivariate exactness $\varepsilon_{2}$ . The probability that a RASP quadrature $Q[\cdot]$ has the same bivariate exactness in two parameters θi1 and θi2 is rr− 1  
+
+Theorem 3.2 Let $R[\cdot]$ be a reference quadra.  
+
+Theorem 3.3 For bivariate quadratics of the form $f(\pmb\theta)=(\pmb\theta_{i_{1}}-\pmb\mu_{i_{1}})(\pmb\theta_{i_{2}}-\pmb\mu_{i_{2}})$ , the expected error of $Q[f]$ is zero.  
+
+Theorem 3.4 If $R[\cdot]$ is a symmetric reference quadrature then every RASP quadrature $Q[\cdot]$ exactly integrates all odd total-degree basis functions of the form  
+
+$$
+f(\pmb\theta)=\prod_{i=1}^{d}(\pmb\theta_{i}-\pmb\mu_{i})^{m_{i}}\quad w h e r e\quad\sum_{i=1}^{d}m_{i}\quad i s\,o d d.
+$$  
+
+3.3 ERROR COMPARISONS  
+
+To gain insight into the errors associated with different integration methods, we examine a third-order expansion of the loss topography (simplified by setting $\pmb{\mu}=0$ ) and the corresponding gradient, i.e.  
+
+$$
+\begin{array}{r l}&{\displaystyle\mathcal{L}(\pmb{\theta})\approx\mathcal{L}_{\mu}+\sum_{i=1}^{d}\pmb{\theta}_{i}\left(\pmb{g}_{i}+\sum_{j=1}^{d}\frac{\pmb{\theta}_{j}}{2}\left[H_{i j}+\sum_{k=1}^{d}\frac{\pmb{\theta}_{k}}{3}T_{i j k}\right]\right),}\\ &{\mathrm{which~gives}\quad\displaystyle\partial_{i}\mathcal{L}(\pmb{\theta})\approx\pmb{g}_{i}+\sum_{j=1}^{d}\pmb{\theta}_{j}\left[H_{i j}+\sum_{k=1}^{d}\frac{\pmb{\theta}_{k}}{2}T_{i j k}\right].}\end{array}
+$$  
+
+This expansion gives the exact expected gradient and Hessian diagonal in element $i$ ,  
+
+$$
+{\mathbb E}_{{\bf q}(\theta|0,\sigma^{2})}\left[\partial_{i}\mathcal{L}(\theta)\right]=g_{i}+\sum_{\substack{j=1\,j\neq i}}^{d}T_{i j j}\sigma_{j}^{2}\quad\mathrm{and}\quad{\mathbb E}_{{\bf q}(\theta|0,\sigma^{2})}\left[\frac{\theta_{i}\partial_{i}\mathcal{L}(\theta)}{\sigma_{i}^{2}}\right]=H_{i i}.
+$$  
+
+Although RASP quadratures recover univariate contributions, e.g. $Q[{\pmb{\tau}}_{i j j}{\pmb{\theta}}_{j}^{2}]=T_{i j j}{\pmb{\sigma}}_{j}^{2}$ , they also encounter errors from some cross terms. For gradient and Hessian expectations, these errors are  
+
+$$
+Q\big[\mathcal{T}_{i j k}\pmb{\theta}_{j}\pmb{\theta}_{k}\big]=\pm T_{i j k}\pmb{\sigma}_{j}\pmb{\sigma}_{k}\quad\mathrm{and}\quad Q\bigg[\mathcal{H}_{i j}\frac{\theta_{i}\theta_{j}}{\pmb{\sigma}_{i}^{2}}\bigg]=\pm H_{i j}\frac{\sigma_{j}}{\sigma_{i}}\quad\mathrm{for~some}\quad i,~j,~k\in[d].
+$$  
+
+2. Since $n\geq r{+}1$ , we see that Monte Carlo integration yields lower variance for cross terms. Thus, different choices of integration strategy may be superior for different architectures, depending on the relative weight of univariate terms to bivariate terms.2 for a table of error comparisons.  
+
+RASP quadratures aim to reduce errors on basis function integrals that dominate QNVB updates, but also incur persistent errors on higher-order basis functions. While the resulting estimator is not unbiased, our experiments show that RASP quadratures produce competitive results.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+These experiments compare RASP quadratures with Monte Carlo (MC) and Variance-Reduced Monte Carlo (VRMC) integration for two VI optimization algorithms: stochastic gradient variational Bayes (SGVB) (Kingma & Welling, 2013; Ranganath et al., 2014; Titsias & Lázaro-Gredilla, 2014) and QNVB (Duersch, 2023). VRMC-1 translates Monte Carlo samples to match the sample mean to $\pmb{\mu}$ (first-order exactness). Likewise, VRMC-2 also scales the samples to match the variance diag $(\pmb{\sigma})^{2}$ (univariate second-order exactness). See related work in Section 5.  
+
+We measure performance across a number of learning tasks and architectures: 1. ResNet18 (He et al., 2016) with CIFAR-10 (Krizhevsky & Hinton, 2009) for image classification, 2. Deep Learning Recommendation Model (DLRM) (Naumov et al., 2019) with the Criteo Ad Kaggle dataset for ad recommendation, and 3. Tensorized Transformer (Ma et al., 2019) with the Penn Treebank (PTB) (Marcus et al., 1993) dataset for text completion.  
+
+While our experiments use flat priors, many other priors would be equivalent to regularization terms in the negative log posterior. Notably, Fortuin et al. (2021) shows that wide-tailed distributions (e.g., $L_{1}$ regularization) are usual more effective for neural networks than Gaussian priors (i.e., $L_{2}$ ). Both SGVB and QNVB are compatible with regularization by simply adding the desired terms to the loss. In the context of Bayesian inference, a cross-validation search for optimal hyperparameters can be understood as a hierarchical model for which the hyperparameters are chosen by finding the maximum likelihood estimator.  
+
+MC, VRMC, and RASP quadratures are tested with 3, 4, and 6 evaluations each, excluding cases where the quadrature does not exist for the given number of evaluations. Each trial begins by setting a random seed for reproducibility. Therefore, the only source of variation across each set of experiments comes from the training method. For each set of seeds, we present the optimal validation run (bolded line) and full range of outcomes (shaded area).3 for prediction quality comparisons with other ML training algorithms. These experiments show that the quadratures we compare have a more significant impact on QNVB than SGVB.  
+
+ResNet18 / CIFAR-10 Figure 2 and Figure 3 show that the choice of integration method has a marked effect on the optimization trajectory. SGVB does not appear to benefti from RASP quadratures, but the range of outcomes is worse than those for QNVB. For QNVB, the range of accuracy outcomes is significantly higher for all first-moment matched methods (VRMC and RASP) than MC. Notably, the RASP-simplex outperforms VRMC-1 and uses less memory than both VRMC-1 and VRMC-2.  
+
+DLRM / Criteo Ad Kaggle The DLRM architecture we tested contains approximately 540 million parameters, causing VRMC methods exceed GPU memory limits. Thus, we only compare Monte Carlo, RASP-simplex, and RASP-cross quadratures. Figures 4 and 5 shows that the Monte Carlo quadrature outperforms the RASP quadratures for this architecture.2).  
+
+Tensorized Transformer / PTB The 3-evaluation quadrature comparisons in Figure 7 show that the RASP-simplex reduces the validation loss much earlier, and to a lower minimum, than alternatives. The other quadratures can achieve comparable validation loss, but require more gradient evaluations. We also compare QNVB (using RASP-simplex 3) to other training algorithms in Figure 10 and find that it achieves better validation perplexity. In particular, it achieves a significantly lower perplexity of 9.45, whereas the next lowest perplexity is 45.67 with SGVB.  
+
+
+
+\section{5 RELATED WORK  }
+
+
+A large body of work focuses on reducing integration errors using Quasi Monte Carlo (QMC) methods. For overviews, see Morokoff & Caflisch (1994); Caflisch (1998); Dick et al. (2013); Leobacher &  
+
+![](images/7891ffb464cfb841a6c2c85548eddf7ebe43d6c87026c6f24dc109017261ac50.jpg)  
+Figure 2: We compare quadratures on ResNet18 trained with SGVB for 3, 4, and 6 evaluations. RASP quadratures do not appear to offer any benefit for this architecture and training algorithm. Validation optima are achieved with MC and VRMC-2.  
+
+![](images/d7ef30e183a85c9de61040e5a5ab7cd69b5ab31eed732e67f186e6df2eae15ea.jpg)  
+Figure 3: We compare quadratures on ResNet18 trained with QNVB for 3, 4, and 6 evaluations. QNVB offers a clear improvement in the range of outcomes. There is clear separation between Monte Carlo and first-moment matched methods. RASP quadratures frequently achieve peak performance and use less memory than VRMC.  
+
+![](images/0340044fd424c396523c417ba6cae108a6bd8bea56c4947f0b5f6ec2c54fd610.jpg)  
+Figure 4: We compare computationally-feasible quadratures on the DLRM architecture trained with SGVB. Technically, the validation-optimum is achieved by RASP simplex 3, but only very slightly. RASP quadratures do not appear to offer any notable benefit for this training algorithm.  
+
+Pillichshammer (2014). QMC improves expectation approximations by generating samples from the unit hypercube $[0,\,1]^{d}$ that are roughly evenly distributed. Randomized variants (RQMC) further protect against the worst-case errors that QMC can encounter (L’Ecuyer, 2018; Dick et al., 2022;  
+
+![](images/5160553786fc47fbc1e32ac12c55598ec18a50f614e401da9a2c13b34e215d4d.jpg)  
+Figure 5: Here we compare the same quadratures on the DLRM architecture trained with QNVB. The loss characteristics of DLRM drive the Monte Carlo quadratures to achieve better performance.  
+
+![](images/afde8e22c6e32a59c2889f2ef1bd5c8b002d2db15e636d29acf8d33111aa8c36.jpg)  
+Figure 6: We compare quadratures using 3, 4, and 6 evaluations on the Tensorized Transformer with SGVB. RASP quadratures offer no significant benefit for SGVB.  
+
+![](images/dfd4153393e9780c313eeee56d8629be13dc549fd84108b5abefd2d7783e3369.jpg)  
+Figure 7: We compare the same quadratures on the Tensorized Transformer trained with QNVB. RASP-Simplex 3 reduces the loss early on and achieves a lower minimum at 3 evaluations.  
+
+Owen, 2023). Efforts to incorporate RQMC into VI (Buchholz et al., 2018; Liu & Owen, 2021) seek to improve training by improving the convergence of general integrals and Lin et al. (2022) provide explicit convergence guarantees.  
+
+The success of (R)QMC methods for many high-dimensional integration problems is somewhat unexpected. As Trefethen (2017) explains, integrals that are dominated by terms with complexity that depends on only a few important directions should perform well, but rotating such functions produces problems due to the anisotropy of the hypercube. In contrast, this work aims to minimize function evaluations by incorporating low-dimensional symmetry into high-dimensional integration. Our experiments demonstrate competitive results with only 3 RASP-simplex evaluations. In comparison, tests by Buchholz et al. (2018) use 10 samples and Liu & Owen (2021) performs convergence experiments from 8 to 2048 samples.  
+
+Our approach leverages the fact the integrals comprising projective integral updates (Duersch, 2023) are dominated by specific basis functions. Rather than enhancing convergence of arbitrary integrals, we only seek to reduce errors associated with the basis functions needed for QNVB updates. Since VRMC methods (Cafilsch, 1998) also yield $1^{\mathrm{st}}$ -order and univariate $2^{\mathrm{nd}}$ -order exactness, they provide a useful comparison against RASP quadratures for Gaussian MFVI. Nevertheless, it may be beneficial to examine modified RQMC methods that target exactness on second-order basis functions, while also retaining guarantees on convergence.  
+
+To the best of our knowledge, the RASP method of generating high-dimensional quadratures from sigma points has not been previously proposed. Sigma points take advantage of isotropy and are specifically designed for Gaussian integration. Menegaz et al. (2015) surveys sigma-point methods, which have not focused on applications where $n\,=\,d+1$ , the minimal sigma-point rule (WanChun et al., 2007), is prohibitive. Since then, Radhakrishnan et al. (2018) have proposed a new sigma-point method using $4r+1$ evaluations that reduces high-order sensitivity by increasing the evaluation weights near the center of the density. The recent book by Dick et al. (2022) also covers high-dimensional numerical integration with lattices and QMC methods on the unit hypercube. If a method similar to ours has been proposed before, it is not commonly discussed.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+RASP quadratures provide an evaluation-efficient method for high-dimensional Gaussian mean-field integration that can improve model uncertainty calibration. Specifically, RASP quadratures minimize the error corresponding to basis functions that dominate variational updates for Gaussian mean fields. We presented the design of RASP quadratures and memory-efficient implementations, with a link to our PyTorch implementation. We also proved theoretical guarantees of exactness and expected errors, showing how RASP quadratures are more efficient than Monte Carlo for univariate basis functions. Our results demonstrate that RASP quadratures can eliminate integration error from all univariate quadratics and half of all bivariate quadratic basis functions using only 3 evaluations. Further, we experimentally demonstrated the efficacy of RASP quadratures. In tests on ResNet18 and Tensorized Transformer architectures, RASP quadratures frequently achieved peak performance while using less memory than VRMC methods. QNVB with select RASP quadratures achieved higher accuracy and lower perplexity than several state-of-the-art training algorithms.  
+
+RASP quadratures offer a reliable numerical approximation of the local loss topography at a manageable cost, enabling superior error control with only a few model evaluations and standard backpropagation. RASP quadratures may support more advanced training methodologies by informing the effect that potential parameter perturbations have on prediction quality. Similarly, computationally-limited learning tasks and in situ data processing, including power-limited control systems, may benefti from reducing the number of model evaluations needed to propagate uncertainty.  
+
+ACKNOWLEDGMENTS [anonymized acknowledgements]  
+
+
+
+

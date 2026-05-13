@@ -1,0 +1,297 @@
+\title{Improving Discrete Diffusion with Schedule-Conditioning}
+
+\begin{abstract}
+Discrete diffusion models, like continuous diffusion models, generate high-quality sequence data by gradually undoing noise applied to datapoints via a Markov process. Gradual generation in theory comes with many conceptual benefits; for example, inductive biases can be incorporated into the noising Markov process. In practice however, the best performing discrete diffusion model is consistently masking, which does not denoise gradually. Here we explain the performance of masking diffusion by noting that it makes use of a fundamental difference between continuous and discrete Markov processes: discrete Markov processes evolve by discontinuous jumps at a fixed rate and, unlike other discrete diffusion models, masking diffusion builds in the known distribution of jump times and only learns where to jump to. We show that we can similarly bake in the known distribution of jump times into any discrete diffusion model; despite their simplicity, our new models -- schedule-conditioned diffusion (SCUD) -- generalize classical discrete diffusion and masking diffusion. By applying SCUD to models with noising processes that incorporate inductive biases on images, text, and protein data, we build diffusion models that outperform masking.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Discrete diffusion models are state of the art models for conditional generation of discrete sequences. In biological sequence design, for example, they allow one to generate sequence flexibly conditioned on protein structure (Luo et al., 2022), DNA function (Sarkar et al., 2024), protein family (Alamdari et al., 2023), and other properties (Gruver et al., 2023; Nisonoff et al., 2024). They are also nearing state-of-the-art generation on language data (Sahoo et al., 2024). To define a diffusion model, one proposes a “forward” process by which data is gradually transformed token-by-token into noise and then learns a “backward” transformation that turns noise into data by optimizing an ELBO. In principle, the quality of the learned model should benefit from a forward process that captures structure in the data distribution. For example, works have suggested forward processes that are more likely to transform tokens into similar tokens – therefore the noising process is more “gradual” (Austin et al., 2021; Alamdari et al., 2023) ; as well as “state-dependent” processes that transform certain tokens more quickly than others (Shi et al., 2024). Surprisingly, these methods are all outperformed by “masking diffusion” which has the simplest possible forward process – one transforms each token into a masking token at a uniform rate (Austin et al., 2021; Alamdari et al., 2023; Shi et al., 2024).  
+
+Here we propose that this is because masking diffusion benefits from a parameterization that forces the distribution of corruption / transition events, the “transition schedule”, in the backward process to match the distribution in the forward process. We use this insight to build models that unlock the benefits of structured and state-dependent processes in practice. First in Sec. 3 we provide a new decomposition of the ELBO that includes a term describing the mismatch in the distribution of the schedules of the forward and backward processes. Then in Sec. 4 we describe how to efficiently train models that build in the transition schedule (Fig. 1) to set this term to 0. We call our models schedule conditioned diffusion (SCUD). In Sec. 5 we show that when SCUD is applied to discrete diffusion with a uniform forward process, the result is masking diffusion, explaining its superior performance. Finally in Sec. 7 we unlock the potential of structured and state-dependent discrete diffusion by building SCUD versions of these methods and see that they finally beat masking diffusion (Fig 2). We release our code at https://anonymous.4open.science/r/SCUD-3844/.  
+
+
+
+\section{2 BACKGROUND  }
+
+
+Our goal is to model data from a distribution $p(x_{0})$ where $x_{0}$ is a sequence of discrete elements that belong to a set of size $B$ . First we consider the one-dimension case and consider sequences later.  
+
+![](images/05dd43d825ecd836071a6dafb4433cbd9908e09b217f5ef9bfcbcd1d82c1451d.jpg)  
+from the forward process, and only learns where to transition.  
+
+![](images/80f9cc69f01f11d196e5bbe387cac975e0a01d0ce12472c06cd9fdeaa3a21f8c.jpg)  
+Figure 2: Conditioning on the transition schedule results in a better fit to CIFAR10. As $\gamma\rightarrow1$ , more information about the schedule is incorporated into the model. Models are fit on CIFAR10 with $B=128$ states. We show mean and standard deviation over 3 replicates. Details are in App. D.  
+
+Discrete diffusion In diffusion, we start with a distribution that is easy to sample from, $q(x_{1})$ ; we then learn a parameterized Markov process from time 1 to time 0 that evolves samples from $q(x_{1})$ to a distribution $q_{\theta}(x_{0})$ that is approximately $p(x_{0})$ . To learn a Markov process that evolves $q(x_{1})$ to $p(x_{0})$ , we first pick a simple Markov process that approximately evolves samples from $p(x_{0})$ to $q(x_{1})$ from time 0 to 1; then we try to match the trajectories from the parameterized Markov process $q_{\theta}\big((\dot{x}_{t})_{t\in[0,1]}\big)$ that evolves “backward” from time 1 to 0 to those of the simple process $p((x_{t})_{t\in[0,1]})$ that evolve “forward” from time 0 to 1 (Campbell et al., 2022). We do so by maximizing the evidence lower bound (ELBO)  
+
+$$
+\begin{array}{r l}&{E_{p(x_{0})}\log q_{\theta}(x_{0})\geq E_{p(x_{0})}E_{p((x_{t})_{t\in[0,1]}\mid x_{0})}\log\frac{q_{\theta}\left(\left(x_{t}\right)_{t\in[0,1]}\right)}{p\left(\left(x_{t}\right)_{t\in[0,1]}\mid x_{0}\right)}}\\ &{\qquad\qquad\qquad\qquad=E_{p((x_{t})_{t\in[0,1]})}\log\frac{q_{\theta}\left(\left(x_{t}\right)_{t\in[0,1]}\mid x_{1}\right)}{p\left(\left(x_{t}\right)_{t\in[0,1]}\mid x_{0},x_{1}\right)}+E_{p(x_{1},x_{0})}\log\frac{q(x_{1})}{p\left(x_{1}\mid x_{0}\right)}.}\end{array}
+$$  
+
+This ELBO is maximized when the distribution of forward and backward trajectories match. The second term of the right hand side measures if the forward process indeed evolves samples $x_{0}~\sim$ $p(x_{0})$ to $q(x_{1})$ . The first term measures how well the forward and backward trajectories match.  
+
+Discrete Markov processes and infinitesimal generators To define a diffusion model, we need to define a simple Markov process to generate $p\bar{((x_{t})_{t\in[0,1]})}$ and we need to parameterize the backward Markov process Fortunately, discrete Markov processes are much easier to define than their continuous counterparts. Every time-homogeneous discrete Markov process is fully described by a $B\times B$ matrix that describes the “flow” of a particle at each instant in time known as the infinitesimal generator $\mathcal{L}$ . In particular, $\mathcal{L}_{b,b^{\prime}}$ describes the rate at which state $b$ transitions to state $b^{\prime}$ ; the diagonal of $\mathcal{L}$ describes the rate of transitions out of $b$ : $\begin{array}{r}{\mathcal{L}_{b,b}=-\sum_{b^{\prime}\neq b}\mathcal{L}_{b,b^{\prime}}}\end{array}$ . Therefore, to simulate from a Markov process described by $\mathcal{L}$ , starting at $x_{t}$ , one simulates the time at which $x_{t}$ would transition to each other state $\Delta t_{b}\sim\mathrm{Exp}(\mathcal{L}_{x_{t},b})$ for $b\neq x_{t}$ ; then one transitions $x_{t}$ according to the first transition sampled: it take $\Delta t=\operatorname*{min}_{b}\Delta t_{b}$ time to transition and $x_{t}$ transitions to $x_{t+\Delta t}=\mathrm{argmin}_{b}\Delta t_{b}$ . By a property of exponential distributions, the transition time is distributed according to the value on the diagonal of $\mathcal{L}$ : $\begin{array}{r}{\Delta t\sim\mathrm{Exp}(\sum_{b\neq x_{0}}\mathcal{L}_{x_{0},b})=\mathrm{Exp}(-\mathcal{L}_{x_{0},x_{0}})}\end{array}$ . This procedure is known as the Gillespie algorithm (Gillespie, 1977).  
+
+Picking the forward process Two popular choices for the forward process are the uniform and masking processes. The uniform process has a constant rate of transitioning to any state $(\mathcal{L}_{b,b^{\prime}}\,=$ $1/(B-1)$ if $b\neq b^{\prime}$ and $\mathcal{L}_{b,b}\,=\,-1\,$ ) and the masking distribution has a constant rate of transition to a masking state $\varnothing$ (for $b\neq\emptyset$ , $\mathcal{L}_{b,b^{\prime}}\,=\,0$ if $b\neq b^{\prime}\neq\emptyset,\mathcal{L}_{b,\emptyset}=1,\mathcal{L}_{b,b}=-1$ , and $\mathcal{L}_{\varnothing,\varnothing}\,=\,0_{.}$ ). Both of these processes are simple to simulate – simply sample $\Delta t\sim\mathrm{Exp}(1)$ and then transition to a uniformly random state or to $\varnothing$ . There are also other processes that bake in inductive biases for text, images, and proteins (Austin et al., 2021; Alamdari et al., 2023).  
+
+![](images/b78a70c7c388dc0d49d96ec7b44b958d2d9aa531a490f86cadbdb7228aa3efc0.jpg)  
+(a) D3PM (uniform forward process) on UniRef50. (b) τLDR (Gaussian forward process) on CIFAR10.  
+
+Figure 3: State of the art discrete diffusion models have backwards processes which do not match the forward process in when they transition. We plot the transition rate of the backward process minus that of the forward process. We discuss details in App. D.  
+
+For typical Markov processes, information about the starting state $x_{0}$ becomes lost as $t$ gets larger and $p(\boldsymbol{x}_{t})$ gets closer to a stationary distribution $p(x_{\infty})$ . This distribution is a natural choice for $q(x_{1})$ as long as $p(x_{1}|x_{0})$ is close to converging to the stationary distribution.  
+
+In practice, $p(x_{1}|x_{0})$ is usually not near $p(x_{\infty})$ , so we modulate the speed of the process by a rate $\beta_{t}$ at time $t-$ at the instant $t$ we simulate from the process $\beta_{t}\mathcal{L}$ . Simulating this modulated process for time $t$ is equivalent to simulating the original process for time $\int_{0}^{t}\beta_{s}d s$ . By choosing $\beta_{t}$ to become large as $t\rightarrow1$ , we can be sure $p(x_{1}|x_{0})\approx p(x_{\infty})=q(x_{1})$ .  
+
+Parameterizing the backward distribution The backward Markov process is usually defined in terms of a parameterized, time-dependent, infinitesimal generator $\mathcal{L}_{\theta,t}$ . The first term of Eqn. 1 is usually written as an integral in time $E_{t\sim\mathrm{Unif}(0,1)}L(\mathcal{L}_{\theta,t};t)$ , for some $L$ which intuitively measures how well the $\mathcal{L}_{\theta,t}$ describes the “flow” of the reversal of $p((x_{t})_{t})$ at instant $t$ (Campbell et al., 2022; Luo et al., 2022).  
+
+
+
+\section{3 LEARNING WHEN AND WHERE TO TRANSITION  }
+
+
+To fit a discrete diffusion model, the backward process should match the forward in both when it transitions and where it transitions to. One should expect that learning where to transition is hard; on the other hand, since the distribution of when to transition is simple and known a priori in many cases, one should expect learning when to transition should be trivial. We see however in Fig. 3 that this is not necessarily true – state of the art published diffusion models have detectable differences in the transition rates of their forward and backward processes.  
+
+Unlike previously derived forms of the ELBO which are written as an integral of the discrepancy of the flow at each moment $t$ , with some algebra, we break up the ELBO into discrepancy of when and where to transition. Define the “transition schedule”, $S\,{\dot{=}}\,\left\{t_{1},t_{2},\dots,t_{M}\right\}$ , as the set of times at which $x_{t}$ transitions.  
+
+Proposition 3.1. (Proof in Prop A. $^{\,l}$ is equal to the expression in Eqn 2 for some constant $C$ .  
+
+$$
+E_{p((x_{t})_{t})}\log\frac{q_{\theta}((x_{t})_{t}|x_{1},S)}{p((x_{t})_{t}|x_{0},x_{1},S)}-\mathrm{KL}(p(S)||q_{\theta}(S))-E_{p(S,x_{0})}\mathrm{KL}(p(x_{1}|S,x_{0})||q_{\theta}(x_{1}|S))+C.
+$$  
+
+The first term represents the difference in log likelihoods between $q_{\theta}$ and $p$ when the transitions are known – it measures if the forward and backward processes match where they transition to. The second term measures if the forward and backward processes match when they transition. The third term, like the second term of Eqn. 1 intuitively measures if $p(x_{1}|x_{0})$ has converged to $p(x_{\infty})$ . To build diffusion models that better fit their objective, we therefore would like to incorporate knowledge of $p(S)$ into the model. Eqn 2 is suggestive of how to do this: set $q(S)\,=\,p(\bar{S})$ so that the second term becomes 0 and then learn where to transition by optimizing the first term. We call this procedure “schedule conditioning” (Fig. 1) and in Sec. 4 we describe how to perform it in practice. Unlike diffusion models with the uniform forward process, diffusion models with the masking forward process are parameterized so that the distribution of times at which tokens are masked matches the distribution of times at which they are unmasked – these models know when to transition. In practice they have been observed to outperform uniform diffusion models. In Sec. 5 we will prove that applying our methods in Sec. 4 gives exactly masking distribution, explaining their superior performance. By schedule conditioning other processes with more appropriate inductive biases, we also improve on masking diffusion (Fig 2).  
+
+
+
+\section{4 SCHEDULED CONDITIONED DIFFUSION (SCUD)  }
+
+
+In this section, motivated by Eqn. 2, we describe how to incorporate information about when to transition into a discrete diffusion model. Ideally we could set $q(\bar{S})=p(S)$ ; however, in general, $\mathcal{L}$ may not have constant transition rates at each state, in which case $S$ may be correlated with $x_{0}$ and $p(S)$ may be a complex distribution. Instead of looking directly at transitions then, we introduce latent “events” which will act as transitions did above – they occur with constant rate and often result in transitions; in some cases we discuss below, they will coincide exactly with transitions. $S$ will describe the schedule of these events and this is what we’ll condition on.  
+
+In Sec. 4.1 we will describe models that condition on these event schedules, SCUD. Next in Sec. 4.2 we will write the loss in a form that is easy to train on high dimensional data. Finally in Sec. 4.3 we will describe how to parameterize and sample from SCUD.  
+
+4.1 CONDITIONING ON EVENT SCHEDULES  
+
+Markov processes with event schedules To sample from a uniform forward process starting at $x_{t}$ , we sampled a transition time according to a rate that was independent of the current state, $\Delta t\sim$ $\operatorname{Exp}(1)$ , and then sampled $x_{t+\Delta t}$ with uniform probability. Consider more generally the discrete Markov process on $x_{t}$ such that we sample an “event” $\Delta t\,\sim\,\mathrm{Exp}(r)$ , and then sample $x_{t+\Delta t}\,\sim$ Categorical $\left(K_{x_{t},\cdot}\right)$ where $K_{x_{t}}$ ,· is a matrix whose rows are normalized distributions; note in this case $x_{t}$ may be equal to $x_{t+\Delta t}$ . By appealing to the formal definition of $\mathcal{L}$ , the next proposition tells us that this process has infinitesimal generator that flows according to the rate $r\times K$ , with a $-I$ to describe the flow out of $x$ .  
+
+Proposition 4.1. (Proof in Prop A. In particular, any Markov process with $\mathcal{L}$ can be simulated in the above way by picking an $r\ge\operatorname*{max}_{b}-\mathcal{L}_{b,b}$ and setting $K=\bar{\mathcal{L}}/r+I$ .  
+
+We note there are many choices of $r$ that allow one to write the same Markov process in this way and we will evaluate different choices in Sec. 5.  
+
+Reversing the process conditioned on the event schedule Call $p((x_{t})_{t})$ the distribution of paths that start at $p(x_{0})$ and evolve according to the above Markov process. The next proposition uses a bit of algebra to suggest that we can simulate from $p((x_{t})_{t})$ “backwards” by 1) sampling the ending point $x_{1}\,\sim\,p(x_{1})$ , 2) sampling the event schedule $\{t_{1},t_{2},\ldots,t_{M}\}\,\sim\,p(S)$ , and then 3) going backwards, sampling where the particle came from at the $m$ -th event.  
+
+Proposition 4.2. (Proof in Prop A. Call $s_{t}$ the number of events up to time $t,$ , so $s_{t_{m}}=m$ .  
+
+$$
+p((x_{t})_{t},S)=p(S)p(x_{1})\prod_{m=1}^{M}p(x_{t_{m-1}}|x_{t_{m}},s_{t_{m}}).
+$$  
+
+We now aim to model this backwards process.  
+
+SCUD: schedule conditioned discrete diffusion models As suggested in Sec 3, we wish to build a discrete diffusion model $q_{\theta}$ by setting $q(x_{1})\;=\;p(x_{\infty})$ and $q(S)\;=\;p(S)$ . Prop. 4.2 suggests parameterizing $q$ so that, at each event, it predicts the previous state $x_{t_{m-1}}$ given 1) the current state $x_{t_{m}}$ and 2) the number of events that have occurred so far $s_{t}$ . We call such a model a SCUD (schedule conditioned diffusion) model. With some algebra, in analogy with Eqn. 2 we get a closed form objective.  
+
+Proposition 4.3. (Proof in Prop A
+
+$$
+\begin{array}{r l}&{E_{p(x_{0})}\log q_{\theta}(x_{0})\geq\!E_{p((x_{t})_{t},S,x_{0})}\displaystyle\sum_{m=1}^{M}\mathrm{KL}(p(x_{t_{m-1}}|x_{t_{m}},x_{0},s_{t_{m}})||q_{\theta}(x_{t_{m-1}}|x_{t_{m}},s_{t_{m}}))}\\ &{\qquad\qquad\qquad\qquad-E_{p(S,x_{0})}\mathrm{KL}(p(x_{1}|s_{1},x_{0})||p(x_{\infty})).}\end{array}
+$$  
+
+This objective is minimized when $q_{\theta}(x_{t_{m-1}}|x_{t_{m}},s_{t_{m}})=p(x_{t_{m-1}}|x_{t_{m}},s_{t_{m}}).$ .  
+
+The first term is from the first term of Eqn 2 and teaches $q_{\theta}$ where to go at each event. The second term of Eqn 2 vanishes and the third term becomes the third term of Eqn 4, which should be small if $p(x_{1})$ converges to $p(x_{\infty})$ . By Prop. 4.2 then, as the objective in Eqn. 4 is minimized, $q_{\theta}((x_{t})_{t})$ approaches $p((x_{t})_{t})$ .  
+
+Computing the objective The ELBO in Eqn. 4 is straightforward to compute. To calculate the first term, we note, writing each state as a one-hot vector,  
+
+$$
+p(x_{t_{m-1}}|x_{t_{m}},x_{0},s_{t})=\frac{p(x_{t_{m-1}}|x_{0},s_{t})p(x_{t_{m}}|x_{t_{m-1}},s_{t})}{p(x_{t_{m}}|x_{0},S)}=\frac{x_{0}^{T}K^{s_{t}-1}x_{t_{m-1}}x_{t_{m-1}}^{T}K x_{t_{m}}}{x_{0}^{T}K^{s_{t}}x_{t_{m}}}.
+$$  
+
+To calculate the second, we note $p(x_{\infty})$ can be derived as the left eigenvector of $\mathcal{L}$ that corresponds to the eigenvalue 0 (as it does not change under flow from $\mathcal{L}$ ) and $p(\bar{x}_{1}|s_{1},x_{0})=x_{0}^{T}K^{s_{1}}x_{1}$ .  
+
+4.2 HIGH DIMENSIONAL DATA  
+
+For high dimensional discrete data such as images, language, and biological sequences, it is common to choose processes $\mathcal{L}$ that act on each dimension independently. Say our data is $D$ dimensional with dimensions x10, . . . , x0D with each $\boldsymbol{x_{0}^{d}}$ a discrete object in a set of size $B$ . We extend SCUD to this case by simulating $D$ parallel schedules for each dimension $S^{1},\ldots,S^{D}\sim p(S)$ ; here $s_{t}$ becomes a $D$ -dimensional vector.  
+
+Parameterizing $q\theta$ For a time $t$ , if $s_{t}^{d}>0$ , define $\mathrm{pr}(x_{t}^{d})$ as the state at the last event in dimension $d$ and $\mathrm{pr}(\boldsymbol{x}_{t})$ the previous state at each dimension; i.e. if the event schedule at dimension $d$ is $S^{d}=\{t_{1}^{d},\dots,t_{m}^{\dot{d}}\}$ and $t\in[t_{m}^{d},t_{m+1}^{d})$ , then $\mathrm{pr}(x_{t}^{d})=x_{t_{m-1}^{d}}^{d}$ . Our formula for reversing $p((x_{t})_{t})$ in Prop. 4.2 remains the same, but in App. B.2 we show $p(\mathrm{pr}(x_{t})|x_{t},s_{t})$ factorizes. Thus we parameterize our predictor $q_{\theta}(\mathrm{pr}(x_{t})|x_{t},s_{t})$ so it also factorizes as $\textstyle\prod_{d=1}^{D}q_{\theta}(\operatorname{pr}(x_{t}^{d})|x_{t},s_{t})$ . Thus we get an objective as in Eqn 4 but with a sum over $D$ in front.  
+
+Efficient loss We could technically use our objective in Eqn. 4 by taking empirical estimates of the expectation and the sum over events. In this case however, each empirical sample corresponds to one event which effects a single dimension $d$ , so it only checks the prediction $q_{\theta}^{\bar{}}(\mathrm{pr}(x_{t}^{d})|\dot{x_{t}},s_{t})$ . The loss of other diffusion models, written as $\begin{array}{r}{E_{t\sim\mathrm{Unif}(0,1)}E_{x_{t}\sim p(x_{t}|x_{0})}\sum_{d=1}^{D}L^{d}(\mathcal{L}_{\theta},x_{t},t|x_{0},\mathcal{L}),}\end{array}$ , allow one to sample $t$ and then check the predictions of $q_{\theta}(\mathrm{pr}(x_{t}^{d})|x_{t},s_{t})$ at that time for every $d$ in parallel. To write our objective in a similar form, we sample $t\sim\mathrm{Unif}(0,1)$ and then add a weight $s_{t}^{d}\times\beta_{t}/\int_{0}^{t}\beta_{s}d s$ representing how likely an event is to occur at the instant $t$ :  
+
+Proposition 4.4. (SCUD loss) (Proof in Prop. A. 4 is  
+
+$$
+-E_{t\sim\mathrm{Unif}(0,1)}E_{p(x_{t},x_{0},S)}\frac{\beta_{t}}{\int_{0}^{t}\beta_{s}d s}\sum_{d}s_{t}^{d}\mathrm{KL}(p(\mathrm{pr}(x_{t}^{d})|x_{t}^{d},s_{t}^{d},x_{0}^{d})||q_{\theta}(\mathrm{pr}(x_{t}^{d})|x_{t},s_{t})).
+$$  
+
+We can approximate this objective by empirical estimates of all of the expectations and optimize with minibatch gradient descent. For a single evaluation of $q_{\theta}$ we can predict $\mathrm{pr}(x_{t}^{d})$ for each dimension $d$ in parallel and check whether it matches the forward process along every dimension. The algorithm for calculating an estimate of the ELBO for a $x_{0}$ is summarized in App. B.1.  
+
+4.3 SCHEDULE CONDITIONING IN PRACTICE  
+
+Parameterization $q_{\theta}$ must predict, for each dimension, $p(\mathrm{pr}(x_{t}^{d})|x_{t},s_{t})$ , which is an expectation over the posterior of $\boldsymbol{x}_{0}^{d}$ given $x_{t}$ and $S$ :  
+
+$$
+\sum_{x_{0}^{d}}p(\mathrm{pr}(x_{t}^{d})|x_{t}^{d},s_{t}^{d},x_{0}^{d})p(x_{0}^{d}|x_{t},S)=\sum_{x_{0}^{d}}p(x_{t}^{d}|\mathrm{pr}(x_{t}^{d}))p(\mathrm{pr}(x_{t}^{d})|s_{t}^{d},x_{0}^{d})\frac{p(x_{0}^{d}|x_{t},s_{t})}{p(x_{t}^{d}|s_{t}^{d},x_{0}^{d})}.
+$$  
+
+In App. B.2 we show that the fraction on the right hand side is proportional to $p(x_{0}^{d}|x_{t}^{-d},s_{t}^{-d})$ where $x_{t}^{-d}$ and $s_{t}^{-d}$ are $x_{t}$ and $s_{t}$ without dimension $d$ . Other discrete diffusion methods parameterize their $q_{\theta}$ to predict analogues of this quantity – Austin et al. (2021) predicted a similar quantity rather than  
+
+directly predicting $p(x_{0}^{d}|x_{t},S)$ , and predicting $p(x_{0}^{d}|x_{t}^{-d},s_{t}^{-d})$ is identical to predicting $p(x_{0}^{d}|x_{t},S)$ when $\dot{x}_{t}^{\dot{d}}$ is masked. Predicting this quantity has the benefit that we do not need to learn what $\boldsymbol{x}_{t}^{d}$ tells us about $\boldsymbol{x_{0}^{d}}$ ; it is rather baked into our prediction. We parameterize our $q_{\theta}$ similarly.  
+
+Thus, to predict $q_{\theta}(\mathrm{pr}(x_{t}^{d})|x_{t},S)$ we input $x_{t}$ and $s_{t}$ into a neural network that outputs a vector of probabilities $\tilde{x}_{0,\theta}$ and set  
+
+$$
+q\theta(\mathrm{pr}(x_{t}^{d})|x_{t},s_{t})=\sum_{b}p(x_{t}^{d}|\mathrm{pr}(x_{t}^{d}))p(\mathrm{pr}(x_{t}^{d})|s_{t}^{d},x_{0}^{d}=b)\tilde{x}_{0,\theta,b}=K x_{t}^{d}\circ K^{s_{t}^{d}-1,T}\tilde{x}_{0,\theta}.
+$$  
+
+Note we do not explicitly forbid $\tilde{x}_{0,\theta}$ from using $x_{t}^{d},s_{t}^{d}$ to predict $\boldsymbol{x_{0}^{d}}$ .  
+
+Sampling To sample, in principle we could take $x_{1}\,\sim\,p(x_{\infty}),\,S\,\sim\,p(S)$ , and then iteratively reverse each event in $S$ in order using our predictions of $q_{\theta}(\mathrm{pr}(x_{t}^{d})|x_{t},s_{t})$ . For data with many dimensions however, $S$ could contain tens of thousands of events, requiring many evaluations of $\tilde{x}_{0,\theta}$ . Instead, like Campbell et al. (2022) and Zhao et al. (2024), we reverse many events at once. In particular we use an analogue of a $\boldsymbol{\mathrm{k}}$ -Gillespie procedure (Zhao et al., 2024) – we pick $k$ events to reverse and reverse them with a single evaluation of $\tilde{x}_{0,\theta}$ . We describe the particulars of which transitions to reverse and how to many transitions at once in App. B.3.  
+
+Choosing the rate $\beta_{t}$ Our choice of $\beta_{t}$ describes how we compress the forward process running from time 0 to $\textstyle\int_{0}^{1}\beta_{s}d s$ into the interval $[0,1]$ . It controls what times we sample when training the objective Eqn. 6 and $\textstyle\int_{0}^{1}\beta_{s}d s$ controls the convergence of $p(x_{1})$ to $p(x_{\infty})$ . Austin et al. (2021) suggest picking $\beta_{t}$ so that the mutual information between $x_{0}$ and $x_{t}$ decreases linearly to $\epsilon$ on the interval $[0,1]$ . For SCUD models, we pick $\beta_{t}$ so that the same is true when conditioning on the schedule: $E_{s_{t}}\mathrm{MI}(x_{0},x_{t}|s_{t})$ decreases linearly on the interval $[0,1]$ . We discuss details in App. B.4.  
+
+
+
+\section{5 SCHEDULE CONDITIONING TO CONDITION ON TRANSITIONS  }
+
+
+To incorporate information about transitions into $q_{\theta}$ , we wish to condition on the schedule. We described how conditioning on “events” in the previous section allow us to incorporate this structure. However not every event corresponds to a transition. The amount of information about the transitions that we bake into our model depends on the diagonal of $K$ – the probabilities of no transition at an event. In turn the diagonal of $K$ will depend on our choice of the rate of events $r$ . For a fixed $\mathcal{L}$ , we can choose any rate $r\geq r^{*}=\operatorname*{max}_{b}-\mathcal{L}_{b,b}$ . Let’s parameterize our choices of rate with a parameter $\gamma$ : let $r=\gamma^{-1}r^{*}$ . When $\gamma$ is 1, the rate of events is as slow as possible; when $\gamma\to0$ , the rate of events goes to $\infty$ .  
+
+$\gamma$ controls the diagonal of $K$ and therefore how much we condition on the schedule. We can write $K=\gamma\mathcal{L}/r^{*}+I$ ; the larger $\gamma$ is, the smaller the diagonal of $K$ . When $\mathcal{L}$ is “normalized” so that every entry on the diagonal is the same, $\gamma=1$ coincides with $K$ with zero diagonal; in this case, every event is a transition and we’ve fully conditioned on the transition schedule. On the other hand, as $\gamma\to0$ , the diagonals of $K$ get closer to 1, so that almost no events result in a transition.  
+
+We now show that when $\mathcal{L}$ is uniform and $\gamma=1-1/D$ , that is, we nearly fully condition on the schedule, our process is equivalent to masking diffusion. On the other hand, as $\gamma\to0$ , we learn a backwards process while baking in no information about transitions; we show this recovers classical discrete diffusion exactly.  
+
+5.1 CONNECTION TO MASKING DIFFUSION  
+
+Say $\gamma\,=\,1\mathrm{~-~}1/B$ and $\mathcal{L}$ is uniform: $\mathcal{L}_{b,b^{\prime}}$ is $1/B$ when $b\neq b^{\prime}$ . For this choice, $K$ is a matrix which has $1/B$ at every position. If a token is corrupted at least once by $K$ then it is distributed uniformly; it tell us nothing about $x_{0}$ so it is as if that token is “masked”. When we condition on the event schedule, $s_{t}$ will tell us exactly which positions are masked when $s_{t}^{d}>0$ . By integrating out $s_{t}$ conditioned on the mask, we get exactly the masking diffusion objective (Shi et al., 2024).  
+
+Proposition 5.1. (Proof in Prop. A. $\widetilde{x}_{0,\theta}(x_{t},s_{t})$ only depends on $s_{t}$ through $m_{t}$ . Defining $\begin{array}{r}{\alpha_{t}=\exp(-\int_{0}^{t}\beta_{s}d s)}\end{array}$ , the objective Eqn. 6 is  
+
+$$
+E_{t\sim\mathrm{Unif}(0,1)}E_{p(m_{t})}E_{p(x_{t}|x_{0},m_{t})}\frac{\beta_{t}\alpha_{t}}{1-\alpha_{t}}\sum_{d}x_{0}^{T}\log\tilde{x}_{0,\theta}(x_{t},m_{t})^{d}.
+$$  
+
+The mask $m_{t}$ is distributed according to $m_{t}^{d}\sim\mathrm{Bern}(1-\alpha_{t})$  
+
+In App. B.4 we also show that our choice for rate $\beta_{t}$ discussed in Sec. 4.3 for this SCUD process is linear (in the sense $\alpha_{t}=1-t)$ , just as for the masking process as discussed in (Austin et al., 2021).  
+
+5.2 CONNECTION TO CLASSICAL DISCRETE DIFFUSION  
+
+As $\gamma\to0$ , each event represents an infinitesimal change in $x_{t}$ . As well, the number of events up to time $t$ , $s_{t}$ , grows larger but fluctuates less and less; inputting $s_{t}$ into $q_{\theta}(\mathrm{pr}(x_{t}^{d})|x_{t},s_{t})$ becomes approximately identical to inputting the time $t$ into $q_{\theta}$ . Therefore, as $\gamma\to0$ , $q_{\theta}$ predicts the infinitesimal change at time $t$ : the infinitesimal generator. This is exactly the objective of classical discrete diffusion. The next proposition shows that when we take the limit $\gamma\to0$ we recover exactly the loss from SEDD (Luo et al., 2022) which is also equivalent to that from $\tau$ LDR (Campbell et al., 2022).  
+
+Proposition 5.2. (Proof in Prop. A., 2022)1  
+
+$$
+\tilde{s}(x_{t},t)_{\theta,b}^{d}=\frac{q_{\theta}(x_{t}^{d}=b|x_{t}^{-d})}{q_{\theta}(x_{t}^{d}|x_{t}^{-d})}:=\frac{E_{\tilde{x}_{0,\theta}(x_{t},s_{t})}p(x_{t}^{d}=b|x_{0}^{d})}{E_{\tilde{x}_{0,\theta}(x_{t},s_{t})}p(x_{t}^{d}|x_{0}^{d})}.
+$$  
+
+Suppressing the dependence of $\tilde{s}_{\theta}$ on $x_{t},t,a s\,\gamma\to0$ the objective in Eqn. 6 converges to  
+
+$$
+-E_{t\sim\mathrm{Unif}(0,1)}E_{p(x_{0},x_{t})}\beta_{t}\sum_{d}\left[\sum_{b\neq x_{t}^{d}}\mathcal{L}_{b,x_{t}^{d}}\left(\tilde{s}_{\theta,b}^{d}-\frac{p(x_{t}^{d}=b|x_{0}^{d})}{p(x_{t}^{d}|x_{0}^{d})}\log\tilde{s}_{\theta,b}^{d}-g\left(\frac{p(x_{t}^{d}=b|x_{0}^{d})}{p(x_{t}^{d}|x_{0}^{d})}\right)\right)\right]
+$$  
+
+where $g(x)=x(\log x-1)$ .  
+
+In App. B.4 we also show that our choice for rate $\beta_{t}$ discussed in Sec. 4.3 approaches the rate function for classical discrete diffusion as $\gamma\to0$ .  
+
+
+
+\section{6 RELATED WORK  }
+
+
+Diffusion generative models are state of the art for images and other continuous data (Ho et al., 2020; Dhariwal & Nichol, 2021; Peebles & Xie, 2022), but have so far lagged behind autoregressive models on discrete sequence data like text. Inspired by its success on continuous modalities, a number of works have attempted to extend diffusion to discrete domains. D3PM (Austin et al., 2021), for example, adapts Ho et al. (2020)’s continuous framework and extends early work by Hoogeboom et al. (2021) by introducing a family of categorical noise processes based on structured discrete transition matrices. Our method takes inspiration from the diverse noise processes explored in D3PM but is ultimately more flexible, as our formalism can use any $\mathcal{L}$ which converges to a stationary distribution and does not require doubly stochastic matrices.  
+
+To allow for more flexible sampling and principled model development, a number of methods have extended diffusion from discrete time to continuous time. For example, $\tau$ LDR (Campbell et al., 2022) intro a continuous-time Markov chain formulation and a corresponding continuoustime ELBO. In related work, SEDD (Lou et al., 2023) introduced score-matching loss for discrete spaces, intended to parallel score-matching for continuous spaces (Song & Ermon, 2019), which allows flexible continuous time sampling. These models differ primarily in how they are parameterized and how they estimate the ELBO objective. SCUD on the other hand is more flexible as it only requires that one can calculate matrix vector products with $K$ , or equivalently $\mathcal{L}$ . Recently, many works have chosen to focus purely on masking state diffusion, proposed weighted losses that have pushed compression metrics closer and closer to numbers obtained from autoregressive models (Sahoo et al., 2024; Shi et al., 2024; Ou et al., 2024). While SCUD is closely related to recent work in continuous-time discrete diffusion, we find that schedule conditioning allows structured noise processes to improve performance and thereby leads to non-masking diffusion with state-of-the-art performance.  
+
+In the realm of sampling, Chen et al. (2023) also considered an accelerated procedure for simple diffusion models in which the transition schedule is sample sampled first followed by the transitions conditioned on the schedule, which shares similar motivations with SCUD. SCUD, however, describes how to build in this information into training a model.  
+
+Lastly, inspired by flow-matching developments in image modeling, many authors have begun to propose flow-matching frameworks for discrete data. Campbell et al. (2024b) for instance propose a flow-matching framework that accommodates joint modeling of discrete and continuous modalities, enabling applications in protein design. Similarly, Gat et al. (2024) presents a general framework for learning probability paths on discrete sequences and trains large-scale models on text datasets. Unlike papers on discrete flow matching, we still employ a diffusion framework and use an ELBO loss, but it’s possible that our investigation of schedule conditioning or structured forward processes could yield insights that are also useful for score matching, as many of the underlying modeling methods are shared.  
+
+
+
+\section{7 RESULTS  }
+
+
+We show that by incorporating information about transitions, SCUD better fits the forward process. We first demonstrate the results of Sec. 5 that SCUD with a uniform forward process interpolates between uniform and masking discrete diffusion. We next show that applying SCUD to state of the art classical discrete diffusion models without schedule conditioning improves their likelihoods on images, text, and protein data. Finally, by building SCUD with forward processes that build in inductive biases, we also show scale that we can improve over SCUD uniform which is similar to masking (Sec. 5.1), thereby unlocking the potential of structured discrete diffusion. Throughout this section, SCUD refers to $\gamma=1$ .  
+
+The structured forward processes we build for each modality will be inspired by those from Austin et al. (2021). However Austin et al. (2021) used processes in discretized time that are not equivalent to and continuous time Markov process; thus we describe new structured processes for continuous time in terms of $\mathcal{L}$ or $K$ .  
+
+In all cases we try to make only minor modifications to the architecture and training parameters from previous models so that differences in scores are due to schedule conditioning. We employed a few strategies so that moving from classical discrete diffusion to SCUD did not add substantial computational overhead, summarized in App. D.5. Other experimental details are in App. D.  
+
+
+
+\section{7.1 CONNECTION TO OTHER MODELS  }
+
+
+Here we show that by incorporating information about the distribution of transitions into a discrete diffusion model, one gets better fits to the forward process.  
+
+We fit models to CIFAR10 where each pixel takes a value from 1 to $B\,=\,128$ . In Fig. 2 we see that on this dataset discrete diffusion with a uniform forward process is outperformed by masking diffusion. We see that sweeping $\gamma$ between 0.1 and 1, SCUD with the uniform forward process interpolates the performance of the two models as predicted above.  
+
+Next we build a structured forward process that builds in the inductive bias that similar pixel values describe similar colors – we set $\begin{array}{r}{\mathcal{L}_{i,j}\,=\,\exp(-200\left(\frac{i-j}{B}\right)^{2})}\end{array}$ , similar to the discrete-time Gaussian forward process in Austin et al. (2021). We see that a discrete diffusion model with this forward process slightly outperforms masking distribution. We next build SCUD models with this forward process; we see that these models better fit their objective as we incorporate more information about transitions – $\gamma\ \rightarrow\ 1$ . These models outperform models that have structured forward processes (Gaussian) or those that just condition on the transition schedule (masking) without doing the other.  
+
+
+
+\section{7.2 IMAGES  }
+
+
+Here we build models on CIFAR10 with $B\,=\,256$ and compare to state of the art diffusion models. We use the architecture from (Kingma et al., 2021) as in discrete diffusion models MD4 (Shi et al., 2024) and similar to that in D3PM (Austin et al., 2021) and $\tau\mathrm{LDR}$ Campbell et al. (2022). To incorporate $s_{t}$ into our function, we replace additive layers that inject $t$ into every layer with FiLM (Perez et al., 2017) layers that incorporate $s_{t}$ into every layer. We also use the logistic parameterization from Salimans et al. (2017) also used in D3PM, which interprets the output of the model as the parameters of a discretized logistic distribution over pixel values, so that similar pixel intensities have similar probabilities.  
+
+![](images/90d9fcba4b1816b752832d70da6207f06d02859a5822ec9b2cb16c1ca35301cb.jpg)  
+
+Table 1: Schedule conditioning improves model fit on images. We compare to other discrete diffusion models and report model fit in bits per dimension on CIFAR10. Models labelled “Gaussian” implement numerically different forward processes that are united in a Gaussianity assumption.  
+
+![](images/8417354804d17f3b074132f0cfc6b54b4ebb89ff13b32cd54b29f017df008962.jpg)  
+Figure 4: Samples from SCUD Gaussian trained on CIFAR10.  
+
+In Table 1 we compare SCUD with discrete diffusion models D3PM (Austin et al., 2021), τLDR (Campbell et al., 2022), and MD4 (Shi et al., 2024) as well as our implementations of classical discrete diffusion models. We see that applying SCUD to model the Gaussian forward processes substantially improves likelihood with a fraction of the compute. Among previous discrete diffusion models, masking diffusion is the most performant despite not incorporating inductive biases. When controlled for compute in our baselines, SCUD beats masking. This suggests that masking beats Gaussian diffusion in classical models because the benefit of schedule conditioning outweighs the benefit of incorporating inductive biases. By both incorporating inductive biases and schedule condition, SCUD unlocks the potential of Gaussian discrete diffusion on images.  
+
+Fig. 4 shows samples from SCUD Gaussian. The samples from SCUD resemble real objects much more than those from autoregressive models PixelCNN $^{++}$ (Salimans et al., 2017) and PixelSNAIL (Chen et al., 2017) which have state of the art likelihoods. However they do not contain clear objects like those from D3PM (Austin et al., 2021) or τLDR (Campbell et al., 2022); MD4 did not show or evaluate images. The quality of samples from those models are known to depend heavily on modelling choices, such as modifications of the objective, choice of $\beta_{t}$ , and training time; and sampling procedure, such as the inclusion of corrector steps or how to denoise many dimensions at once. Here we focus on achieving low likelihoods and leave the task of translating a better fit into higher quality images to future work.  
+
+
+
+\section{7.3 LANGUAGE  }
+
+
+Here we build models on the one billion words dataset with a $B\,=\,30522$ vocabulary size. To improve over masking diffusion, we want to build in inductive biases about which vocabulary tokens are more similar. However, it is not trivial to efficiently simulate a process over 30 thousand states. To do so, we define a sparse 10-nearest neighbour graph over the most frequent 2000 states, which make up $95\%$ of tokens in the data. Our forward process diffuses along this graph with some probability or transitions approximately uniformly with some small probability; the less frequently used 25 thousand states always transition uniformly. We discuss the details in App C.  
+
+![](images/cb348f036db4a50f5400c65d40b123bfaf4b60b1a9ff5845767a787f669c886f.jpg)  
+
+Table 2: Schedule conditioning improves model fit on language. We compare to other discrete diffusion models on LM1B.   
+
+![](images/b0b670f723b830eef643b3aef44b9fee9142ecdcca20267a8052d0161dccc066.jpg)  
+
+Table 3: Schedule conditioning improves model fit on proteins. We implement and compare to the small architecture from (Alamdari et al., 2023) on UniRef50.  
+
+SCUD allows one to flexibly incorporate a forward process by only requiring one to define $K$ and take powers to evaluate likelihoods. Classical discrete diffusion models such as SEDD on the other hand require closed form $p(x_{t}|x_{0})$ which requires a matrix exponential to evaluate. While in some cases the matrix exponential is easy to evaluate, that is not the case for our forward process. This also means that we could not compare to classical diffusion on this structured classical diffusion.  
+
+In Tab. 2 we compare SEDD (Luo et al., 2022) and MDLM (Sahoo et al., 2024) to SCUD and an ablation without structure, SCUD uniform. As expected, among previous models, masking beats uniform; in (Austin et al., 2021) it was noted that masking also beats discrete diffusion with a nearest neighbour structure on this dataset2. We see again that applying SCUD to uniform diffusion improves its fit to the data with a fraction of the compute. We also again see that unlike previous discrete diffusion models, when we add structure to the forward process, we improve our fit.  
+
+
+
+\section{7.4 PROTEINS  }
+
+
+Here we train models on the UniRef50 protein dataset with architectures from (Alamdari et al., 2023). As in (Alamdari et al., 2023) we build a forward process using the BLOSUM matrix; this matrix describes the rates of mutations between amino acids seen in nature. We describe the details of our process in App C; we note $B=31=20$ canonical amino acids $+\,11$ special tokens.  
+
+In Tab. 3 we compare SCUD BLOSUM with the small D3PM models from (Alamdari et al., 2023) as well as our implementations of classical discrete diffusion models. We see again that applying SCUD to uniform and BLOSUM diffusion substantially improves the model fit given a fraction of the compute budget. In classical discrete diffusion, masking strongly outperforms BLOSUM diffusion. We see the opposite for SCUD, where by both schedule conditioning and incorporating inductive biases, SCUD BLOSUM outperforms masking, and thereby unlocks the potential of BLOSUM diffusion.  
+
+
+
+\section{8 CONCLUSION  }
+
+
+The choice of forward process is critical to the definition of a discrete diffusion model. Yet previous results have shown very strong performance from the simplest forward process – the masking process. SCUD offers an explanation for the superior performance of masking diffusion – it incorporates information about the transition schedule. By incorporating this information into models with other forward processes, SCUD allows us to build models that build in inductive biases and outperform masking.  
+
+
+
+\section{9 REPRODUCIBILITY  }
+
+
+We include code to train, evaluate, and sample from SCUD models in our code release. We include   
+implementations for the exact architectures used in our experiments. The training and evaluation   
+details for experiments we ran on images, language and proteins were described by previous papers   
+   
+
+

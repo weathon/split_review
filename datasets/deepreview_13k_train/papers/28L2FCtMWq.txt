@@ -1,0 +1,583 @@
+\title{Ground-A-Video: Zero-shot Grounded Video Editing using Text-to-image Diffusion Models}
+
+\begin{abstract}
+Recent endeavors in video editing have showcased promising results in single-attribute editing or style transfer tasks, either by training 
+text-to-video (T2V) models on text-video data or adopting training-free methods.
+However, when confronted with the complexities of multi-attribute editing scenarios, they exhibit shortcomings such as omitting or overlooking intended attribute changes, modifying the wrong elements of the input video, and failing to preserve regions of the input video that should remain intact.
+To address this, here we present a novel grounding-guided video-to-video translation framework called Ground-A-Video for multi-attribute video editing.
+Ground-A-Video attains temporally consistent multi-attribute editing of input videos in a training-free manner without aforementioned shortcomings.
+Central to our method is the introduction of Cross-Frame Gated Attention which incorporates groundings information into the latent representations in a temporally consistent fashion, along with Modulated Cross-Attention and optical flow guided inverted latents smoothing.
+Extensive experiments and applications demonstrate that Ground-A-Video's zero-shot capacity outperforms other baseline methods in terms of edit-accuracy and frame consistency.
+Further results and code are available at \textit{\href{http://ground-a-video.io}{http://ground-a-video.io}.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Coupled with massive text-image datasets \citep{schuhmann2022laion}, diffusion models \citep{sohl2015deep, ho2020denoising, song2020score} have  revolutionized text-to-image (T2I) generation, making it increasingly accessible to generate high-quality images from text descriptions.
+Additionally, the domain has seen profound expansion into several subfields, including controlled generation and real-world image editing.
+On the other hand, the endeavor to extend the success to the video domain poses a significant computational hurdle.
+Attaining time-consistent and high-quality results necessitates training on expensive video datasets—an endeavor beyond the means of most researchers, particularly given the absence of publicly available, generic text-to-video models.
+
+As such, pioneering approaches exhibit promise in text-to-video generation \citep{ho2022video, ho2022imagen} and video editing \citep{esser2023structure} by repurposing T2I diffusion model weights for extensive video data training.
+Specifically, in pursuit of cost-effective video generation, \cite{wu2022tune} suggests fine-tuning the T2I model on a single video, which enables generating variations of the video.
+Similar to the practice of manipulating attention maps within the realm of image editing \citep{hertz2022prompt, tumanyan2023plug, parmar2023zero}, various methods guide the denoising process by self-attention maps \citep{ceylan2023pix2video}, cross-attention maps \citep{liu2023video, wang2023zero}, or both \citep{qi2023fatezero}, which are obtained during the input video inversion stage.
+Recently, to incorporate the denoising process with additional structural cues, ControlNet \citep{zhang2023adding} has been transferred to video domain, achieving structure-consistent output frames in video generation \citep{khachatryan2023text2video} and translation \citep{hu2023videocontrolnet, chu2023video, chen2023control, zhang2023controlvideo}.
+Nonetheless, in the scenario of fine-grained video editing involving multiple attribute changes, i.e.
+$\Delta\tau {=} \{
+\tau_{a} {\shortrightarrow} \tau_{a'},  % change
+\tau_{b} {\shortrightarrow} \tau_{b'},   % change
+\tau_{c} {\shortrightarrow} \tau_{c},    % preserve
+\ldots,
+\varnothing {\shortrightarrow}\tau_{new} % add
+\}$, where $\tau$ represents a specific attributed indexed by subscript,
+they encounter issues of degraded frame consistency, severe semantic misalignment \citep{park2023energy}, or both, as depicted in Fig.~\ref{problem-figure}-\textit{Left} and Sec.~\ref{supple:misalignment}.
+In specific, instances of neglecting intended attribute edits ($\tau_{a} {\shortrightarrow} \tau_{a}$),
+modifying the wrong elements ($\tau_{a} {\shortrightarrow} \tau_{b'}$),
+mixing two separate edits ($\tau_{a} {\shortrightarrow} \tau_{a'} {\cdot} \tau_{b'}$),
+and struggling to preserve regions that should remain unchanged ($\tau_{c} {\shortrightarrow} \tau_{c'}$) are observed.
+This is because in the existing models, the Cross-Attention layer is the single domain where the complex semantic changes wield their influence,
+where the list of intricate changes being entangled as a form of ``one-sentence target prompt"
+makes the problem worse.
+
+The key to address this issue lies in spatially-disentangled layout information, comprising bounding box coordinates and textual captions, namely `groundings'.
+Groundings disentangle the complex semantic combination by localizing each semantic element with precise location.
+Recently, grounding has been successfully employed to text-to-image generation tasks.
+\cite{li2023gligen} and \cite{yang2023reco} finetune existing T2I models to adhere to grounding conditions using box-image paired datasets, while \cite{xie2023boxdiff} achieves training-free box-constrained image generation by injecting binary spatial masks into the cross-attention space.
+However, unlike the literature on single-image synthesis, guiding video generation process with groundings alone could significantly detriment frame consistency.
+One major problem is that localizing the bounding box is insufficient for the smooth frame transition (Fig. \ref{problem-figure}-\textit{right}), which calls the need for additional structural guidance.
+Consequently, we propose to integrate two distinct modalities:
+1) spatially-continuous conditions, including depth and optical flow maps, are employed to maintain consistent structure across frames;
+2) spatially-discrete conditions, specifically `groundings', enable precise localization and editing of each attribute within the source video. 
+
+The principal contributions of \texttt{Ground-A-Video} are summarized as follows:
+\begin{itemize}[noitemsep]
+    \item To our knowledge, we present the first groundings-driven video editing framework, also marking the first instance of integrating both spatially-continuous and discrete conditions.
+    \item We propose a novel Modulated Cross-Attention mechanism which efficiently enables interactions between differently optimized unconditional embeddings. 
+    \item To further enhance consistency, we suggest smoothing inverted latent representations using optical flow information, which can be employed following any type of inversion. 
+    \item Extensive experiments and applications demonstrate the effectiveness of our method in achieving time-consistent and precise multi-attribute editing of input videos.
+\end{itemize}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]
+    {problem-figure.png}
+    \caption{\textit{Left}: 
+    Failure cases of multi-attribute video editing by various methods, 
+    driven by the target text ``\textit{A squirrel is eating an orange on the grass, under the aurora}." Ground-A-Video's successful result for the same task is shown in the second row of Fig. \ref{figure:teaser}. \: \textit{Right}: Input video reconstruction with and without ControlNet.}
+    \label{problem-figure}
+\end{figure}
+
+
+
+\section{Background}
+
+\label{background}
+
+\textbf{Stable Diffusion.}
+Distinct from traditional diffusion models \citep{ho2020denoising}, Stable Diffusion (SD) functions within a low-dimensional latent space, which is accessed via VAE autoencoder $\mathcal{E}, \mathcal{D}$ \citep{kingma2013auto}. 
+More precisely, once the latent representation $z_{0}$ is obtained by compressing an input image $f \in \mathbb{R}^{H \times W \times 3}$ through the encoder $\mathcal{E}$, i.e. $z_{0} = \mathcal{E}(f)$, diffusion forward process gradually adds Gaussian noise to $z_{0}$ to obtain $z_{t}$ through
+Markov transition with the transition probability:
+\begin{equation}
+\begin{aligned}
+q(z_{t}|z_{t-1}) = \mathcal{N}(z_{t};\sqrt{1-\beta_{t}}z_{t-1},\beta_{t}\textit{I})\:, \quad t=1,\ldots,T  \:,
+\end{aligned}
+\end{equation}
+where the noise schedule $\{\beta_t\}_{t=1}^{T}$ is an increasing sequence of $t$ and $T$ is the number of diffusion timesteps.
+Then, the backward denoising process is given by the transition probability:
+\begin{equation}
+\begin{aligned}
+p_{\theta}(z_{t-1}|z_{t}) = \mathcal{N}(z_{t-1}; \mu_{\theta}(z_{t},t), \sigma^{2}_{t}\textit{I})\:, \quad t=T,\ldots,1\:.
+\end{aligned}
+\end{equation}
+Here, the mean $\mu_{\theta}(z_{t},t)$ can be represented using
+ the noise predictor $\epsilon_{\theta}$ which is learned by the minimization of 
+the MSE loss with respect to $\theta$:
+$\mathbb{E}_{f, \tau, \epsilon\sim\mathcal{N}(0,\textit{I}), t}\left\|\epsilon-\epsilon_{\theta}\left(z_{t}, t, \tau \right)\right\|_{2}^{2}$,
+where $\epsilon$ refers to the zero mean unit variance Gaussian noise vector,
+and $\tau = \psi(\mathcal{T})$ is the embedding of a text $\mathcal{T}$.
+Specifically, a prevalent approach in diffusion-based image editing is to use the deterministic DDIM scheme \citep{song2020denoising} to accelerate the sampling process.
+Within this scheme, the noisy latent $z_{T}$ can be transformed into a fully denoised latent $z_{0}$: %with a reduced number of timesteps:
+\begin{equation}
+\begin{aligned}
+z_{t-1} = \sqrt{\cfrac{\alpha_{t-1}}{\alpha_{t}}} z_{t} 
++ \left( \sqrt{\cfrac{1-\alpha_{t-1}}{\alpha_{t-1}}}
+- \sqrt{\cfrac{1-\alpha_{t}}{\alpha_{t}}} \right) \epsilon_{\theta}\:,
+\quad
+t=T,\ldots,1\:,
+\end{aligned}
+\end{equation}
+where $\alpha_{t}$ is a reparameterized noise scheduler.
+
+\textbf{Null-text Optimization.}
+To augment the effect of text conditioning, \cite{ho2022classifier} have presented the classifier-free guidance technique (cfg), where the noise prediction by $\epsilon_{\theta}$ is also carried out unconditionally, namely by `null text'.
+Then the null-conditioned prediction is extrapolated with the text-conditioned prediction to produce the classifier-free guidance prediction:
+\begin{equation}
+\begin{aligned}
+\Tilde{\epsilon}_{\theta} (z_{t}, t, \tau, \varnothing)
+= w \cdot
+\underbrace{\epsilon_{\theta} (z_{t}, t, \tau)}
+_{\scriptscriptstyle\text{conditional prediction}} 
++ (1-w) \cdot
+\underbrace{\epsilon_{\theta} (z_{t}, t, \varnothing)}
+_{\scriptscriptstyle\text{unconditional prediction}}
+,
+\label{eq:cfg}
+\end{aligned}
+\end{equation}
+where $\varnothing = \psi(``~")$ denotes the embedding of a null text and $w$ denotes the guidance scale.
+However, when coupled with cfg featuring large guidance scale $w\gg1$, DDIM inversion accumulates errors during the denoising process, resulting in flawed image reconstruction.
+In order to fix these errors, \cite{mokady2023null} optimizes the embeddings of a null text.
+First, DDIM inversion trajectory $\{z^{*}_{t}\}_{t=0}^{T}$ and the predicated backward trajectory $\{\Bar{z}_{t}\}_{t=0}^{T}$ are computed.
+Then, at each timestep starting from $T$, unconditional embeddings
+$\{\varnothing_t\}_{t=1}^{T}$ are tuned towards minimizing
+$\left\| \Bar{z}_{t-1} - z^{*}_{t-1} \right\|_{2}^{2}$.
+
+
+\section{Method}
+
+\subsection{Ground-A-Video: Overview}
+Given a series of source video frames $f^{1:N}$  and a list of intended edits $\Delta\tau$, our goal is to accurately edit various attributes of the source video while avoiding unwanted modifications, in a zero-shot yet time-consistent manner.
+ Fig.~\ref{overview} illustrates the overall architecture of Gound-A-Video to achieve this.
+ Initially,  we automatically acquire grounding information through GLIP \citep{li2022grounded}.
+    The groundings and the source prompt are manually refined to form target groundings and target prompt, commonly following $\Delta\tau$.
+    On the other branch, the input frames undergo individual DDIM inversion and null optimization, followed by optical flow-based smoothing to form smoothed latent features.
+    The smoothed latents are separately fed into the inflated SD and ControlNet, which are modified with a sequence of attentions to achieve the temporal consistency of the video editing.
+    The inflated ControlNet takes an additional input of depth maps.
+    Subsequently, the target groundings are directed to the Cross-Frame Gated Attentions of the SD model, while the target prompt and optimized null-embeddings are channeled into the Modulated Cross Attentions of both SD and ControlNet models.
+    
+    
+
+\add{In Sec. \ref{method:inflation-inversion}, we discuss our inflated SD with per-frame inversion approach and proposed attention mechanisms (Modulated Cross-Attention \& Cross-Frame Gated Attention). 
+In Sec. \ref{method:controlnet}, we introduce the inflated ControlNet to incorporate a spatially-continuous prior of input video: a sequence of depth maps.
+Lastly in Sec. \ref{method:smoothing}, we present optical flow guided smoothing which is applied to the inverted latent features before they are fed into the SD and ControlNet models, to further improve the consistency across frames.}
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\textwidth]
+    {figure-overview.png}
+    \caption{
+    \add{
+    \textit{Left}: \textbf{Input preparation}.
+    We automatically obtain video groundings of input video frames $f^{1:N}$ via GLIP.
+    This is followed by a handcraft editing phase for both the groundings and the source prompt.
+    The input frames undergo individual inversion and null optimization, followed by optical flow-based smoothing.
+    Furthermore, ControlNet input $d^{1:N}$ are obtained via ZoeDepth estimator.
+    \textit{Right}: \textbf{Denoising process}.
+    The smoothed latents $z^{1:N}$ are fed into the inflated SD and ControlNet.
+    The target grounding tokens $U^{1:N}$ are directed to Cross-Frame Gated Attention, while context vectors \{$\tau^{1:N}, \varnothing^{1:N}$\} are directed to Modulated Cross Attention.
+    The series of attentions in inflated SD's transformer blocks includes Spatial-Temporal Attention, Cross-Frame Gated Attention, and Modulated Cross Attention, whereas Cross-Frame Gated Attention layers are not appended in inflated ControlNet.
+    If a binary mask, the intersection of common outer spaces of target bounding boxes, exists, it is utilized for inpainting before each denoising step.
+    This process helps preserve regions that are not the target of editing (see Sec. \ref{application}). For brevity, we omitted timestep $t$ in all variables.
+    }
+    }
+    \label{overview}
+\end{figure}
+\subsection{Inflated Stable Diffusion Backbone}
+\label{method:inflation-inversion}
+\textbf{Attention Inflation with Spatial-Temporal Self-Attention.}
+To exploit pretrained SD which is trained without temporal considerations, recent video editing methods
+\citep{wu2022tune, qi2023fatezero, chen2023control} commonly
+inflate Spatial Self-Attention along the temporal frame axis.
+In a similar vein, Ground-A-Video enables inter-frame interaction by refactoring the Spatial Self-Attention into \textbf{Spatial-Temporal Self-Attention} while retaining the pretrained weights.
+In specific, for the latent representation ${z}^{i}_t$ of source frame $f^{i}$, query features are derived from spatial features of ${z}^{i}_t$, while key and value features are computed from spatial features of concatenated latents $[{z}^{1}_{t}, \ldots ,{z}^{N}_{t}]$.
+Specifically, this process can be written by the following mathematical representation:%  can be written as:
+$$ Q = W^{Q} \cdot{z}^{i}_{t},\quad
+K = W^{K}\cdot [{z}^{1}_{t}, \ldots ,{z}^{N}_{t}],\quad
+V = W^{V} \cdot[{z}^{1}_{t}, \ldots ,{z}^{N}_{t}],
+$$
+where $W^{Q}$, $W^{K}$, $W^{V}$ are projection matrices.
+\textbf{Per-frame Inversion with Modulated Cross-Attention.}
+Although model inflation, such as the Spatial-Temporal Attention discussed above or the Sparse-Causal Attention in \citep{wu2022tune}, can contribute to preserving global semantic consistency across frames, 
+prior research on the model inflation \citep{liu2023video} has shown that it adversely degrades the generation quality of the original SD model, leading to imprecise reconstruction.
+This occurs because Spatial Self-Attention parameters are employed to compute frame correlations, which have not been taught during the pre-training.
+Hence, the inflated SD model falls short for the approximate inversion.
+To mitigate this issue, they fine-tune the attention projection matrices on the input video.
+
+In contrast, our pipeline adopts a per-frame approach to video inversion using the original, non-inflated SD model without any training.
+In this process, for each of the $N$ frames within the video $f^{1:N}$, we carry out DDIM inversion and null-text inversion (Sec. \ref{background}) individually to obtain inverted latents ${z}^{1:N}_{T}$ and optimized null-embedding trajectories $\{\varnothing^{1:N}\}_{t=1}^{T}$.
+The latents ${z}^{1:N}_{T}$ are then subjected to Optical flow guided latents smoothing (Sec. \ref{method:smoothing}), before proceeding to the denoising process.
+Additionally, to guide the separately optimized embeddings $\{\varnothing^{1:N}\}_{t=1}^{T}$ to restore the temporal correlation,
+ we reengineer the Cross-Attention mechanism  within the transformer blocks of SD  that
+calculates correspondence between latent pixels and context vectors.
+ Specifically, when performing cfg (Eq. \eqref{eq:cfg}), unlike conditional prediction where context vectors $\tau^{1:N}$ are uniform across frames, unconditional prediction employs unique context vectors $\varnothing^{1:N}$.
+Since even minor variations in the context vectors
+across frames adversely impact the global frame consistency (see Fig. \ref{ablation:attention}),
+we propose reprogramming the Cross-Attention mechanism into \textbf{Modulated Cross-Attention}, which can be formulated as
+$\mathsf{\mathsf{Attn}}(Q,K,V) = \mathrm{Softmax}( \tfrac{QK^{T}}{\sqrt{d}}V )$
+, with
+\setlength{\abovedisplayskip}{3pt}
+\setlength{\belowdisplayskip}{3pt}
+\begin{equation}
+\begin{aligned}
+Q = W^{Q}\cdot {z}^{i}_{t},\quad
+K =
+\left\{
+\begin{array}{ll}
+    W^{K}  c^{i}_{t} 
+    & \mbox{if \textit{cond}}\\
+    W^{K}  \left[ c^{1}_{t},\ldots,c^{N}_{t} \right]
+    & \mbox{if \textit{uncond}}\\
+\end{array}
+\right.,~
+V =
+\left\{
+\begin{array}{ll}
+    W^{V} c^{i}_{t} 
+    & \mbox{if \textit{cond}}\\
+    W^{V}  \left[ c^{1}_{t},\ldots,c^{N}_{t} \right]
+    & \mbox{if \textit{uncond}}\\
+\end{array}
+\right. .
+\end{aligned}
+\end{equation}
+Here, ${z}^{i}_{t}$ denotes a spatial latent feature of frame $f^{i}$ at timestep $t$, while `\textit{cond}' and `\textit{uncond}' refer to conditional and unconditional predictions, respectively.
+In the process of computing the unconditional prediction branch of cfg (Eq. (\ref{eq:cfg})), the proposed modulation produces attention maps that correlate with the similarity between ${z}^{i}_{t}$ and the merged null-embeddings [$ c^{1}_{t},\ldots,c^{N}_{t}$], thus opening a path for interaction between variant context vectors.
+\add{\textbf{Video Groundings with Cross-Frame Gated Attention.}}
+\cite{li2023gligen} proposed GLIGEN that achieves open-world grounded text-to-image generation via continual learning.
+In specific, they extend the SD model by adding a gated self-attention layer and fine-tuning this layer to incorporate layout information, while freezing the original SD weights.
+Ground-A-Video adopts GLIGEN's gated attention module and refactor the operation to accommodate the video-grounding in a time-consistent fashion, which has not been explored before.
+
+Following the same notations, we denote the semantic information associated with the $i$-th grounding entity as $e_i$ and a set of bounding box coordinates for the $i$-th grounding entity as \textbf{$\bm{l}_i$}.
+Next, we define the concept of `grounding' for a single image, expressed as
+$
+\bm{g} {=} \left[
+\left(e_1,\bm{l}_1\right), ... , \left(e_M,\bm{l}_M\right)
+\right]
+$
+with $M$ denoting the number of entities to ground.
+Expanding from image space to video space, we aggregate groundings across $N$ frames of the input video, yielding $\bm{g}^{1:N} {=} \left[ 
+\bm{g}^{1}, ... ,\bm{g}^{N} 
+\right]$.
+Subsequently, we disentangle the complex editing objectives and introduce handcraft modifications, transitioning $e_i$ to $e'_i$ for $i{=}1,\ldots,M$, resulting in $\bm{g}'^{1:N}$—the revised grounding input for our model.
+For example, consider the first frame's grounding, denoted as $\bm{g}^1$, within the input video in Figure \ref{overview}, which takes the form of
+$
+\left[
+\left(\textrm{\textit{`rabbit'}}, (0.0,0.0,0.7,0.9)\right),
+\ldots,
+\left(\textrm{\textit{`table'}}, (0.0,0.8,1.0,1.0)\right)
+\right]
+$.
+Then, the editing objectives
+$
+\Delta\tau {=} \{
+\tau_{\mbox{\textit{rabbit}}} {\shortrightarrow} \tau_{\mbox{\textit{kangaroo}}},
+\ldots,
+\tau_{\mbox{\textit{table}}} {\shortrightarrow} \tau_{\mbox{\textit{snow}}}
+\}$
+transforms grounding $\bm{g}^1$ to grounding input $\bm{g}'^1$, which is written as
+$
+\left[
+\left(\textrm{\textit{`kangaroo'}}, (0.0,0.0,0.7,0.9)\right), \ldots,
+\left(\textrm{\textit{`snow'}}, (0.0,0.8,1.0,1.0)\right)
+\right].
+$
+The prepared grounding input requires post-processing prior to proceeding to the reverse diffusion.
+The semantic information $e_{i}^{j}$ is directed to the CLIP text encoder, where it is transformed into text tokens.
+Meanwhile, the layout information $l_{i}^{j}$ is encoded using Fourier embedding, following \cite{mildenhall2021nerf}, to produce layout tokens.
+The text tokens and layout tokens are then projected to the single `grounding' space using an MLP, resulting in grounding tokens:
+\begin{equation}\label{eq:ui}
+\begin{aligned}
+u_{i}^{j} = 
+\textrm{MLP} 
+([
+\underbrace{\mathcal{E}_\textrm{CLIP}(e_{i}^{j})}
+_{\scriptscriptstyle\text{text token}},
+\underbrace{\textrm{Fourier}(l_{i}^{j})}
+_{\scriptscriptstyle\text{layout token}}
+]).
+\end{aligned}
+\end{equation}
+
+Given the grounding tokens for frame $i$ and an intermediate latent representation of frame $i$ at time $t$, denoted as ${z}^{i}_{t}$,
+our goal is to project the grounding information onto the visual latent representation.
+However, frame-individual projection leads to temporal incoherence as, for example, the same text conditioning for `kangaroo' is projected differently onto the $i$-th latent ${z}^{i}_{t}$ and the $j$-th latent ${z}^{j}_{t}$ unless ${z}^{i}_{t}$ is identical to ${z}^{j}_{t}$.
+Therefore, we propose the \textbf{Cross-Frame Gated Attention} which globally integrates grounding features onto the latent representation via 
+$\mathrm{TS}(\mathrm{Softmax}(\tfrac{QK^{T}}{\sqrt{d}}V))$ with:
+\begin{equation*}
+\begin{aligned}
+Q = W^{Q}\cdot[{z}^{i}_{t},U^{i}],\quad
+K = W^{K}\cdot[{z}^{1}_{t},U^{1},\dots,{z}^{N}_{t},U^{N}], \quad
+V = W^{V}\cdot[{z}^{1}_{t},U^{1},\dots,{z}^{N}_{t},U^{N}],
+\end{aligned}
+\end{equation*}
+where
+$U^{i} = [u_{1}^{i},\ldots,u_{M}^{i}]$ for the grounding tokens from \eqref{eq:ui},  and
+ the operation TS denotes the token slicing, which ensures that the output shape of the proposed attention operation remains consistent with the input shape.
+\add{\subsection{Inflated ControlNet}}
+\label{method:controlnet}
+ControlNet \citep{zhang2023adding} starts with a trainable copy of SD UNet, purposefully designed to complement the SD.
+The trainable branch is then fine-tuned to accommodate task-specific visual conditions, extending the input of $\epsilon_{\theta}\left(z_{t}, t, c \right)$ to $\left(z_{t}, t, c, d \right)$, where $d$ represents the additional conditions such as depth maps or edge maps.
+This combined locked-copy and trainable-copy framework preserves the original synthesis capabilities of SD while enabling precise control over the structural attributes of the generated images.
+
+To incorporate structural guidance into the video generation process, we employ inflated ControlNet architecture and depth condition.
+Initially, we estimate depth maps from the source video, converting $d$ to $d^{1:N}$, and apply the Self-Attention inflation and Cross-Attention modulation (Sec. \ref{method:inflation-inversion}) on ControlNet while retaining the fine-tuned weights.
+\add{
+During the denoising stage, the residual latent features $z_{res}^{1:N} \in \mathbb{R}^{N \times h \times w \times c}$ of ControlNet are first scaled by `ControlNet Scale' hyperparameter, then transmitted to the inflated SD UNet, as illustrated in Figure \ref{overview}.
+The scaling parameter regulates the degree of structural preservation between the input and output (see Fig. \ref{fig:controlnet-scale}, \ref{figure:controlnet_scale_full}).
+}
+
+\begin{algorithm}[!hbt]
+\caption{ Optical Flow guided Inverted Latents Smoothing }
+\label{algorimth:smoothing}
+\begin{algorithmic}
+\State \textbf{Require:} 
+Number of frames $N$, 
+Source video frames $f^{1:N}$,
+Timesteps $T$,
+Text-Image Diffusion Model (\textsf{SD}),
+Optical flow estimator (\textrm{RAFT}),
+Threshold for magnitude difference $M_{thres}$
+\State ${z}^{1:N}_{T} \xleftarrow{} $ DDIM\_INV($f^{1:N}$, $T$, \textsf{SD})
+\textcolor{gray}{\Comment{run inversion (e.g. DDIM inversion)}}
+\ForAll{$i = 2,3,...,N$}
+    \State $map_{opt}^{i} \xleftarrow{} \textrm{RAFT}(f^{i-1},f^{i})$
+    \textcolor{gray}{\Comment{obtain optical flow map}}
+    \add{
+    \State $map_{mag}^{i} \xleftarrow{} 
+    \textrm{normalize}(\lVert map_{opt}^{i} \lVert))$
+    }
+    \textcolor{gray}{\Comment{compute magnitude map}}
+    \add{
+    \State $map_{mask}^{i} \xleftarrow{} map_{mag}^{i}<M_{thres}$
+    }
+    \textcolor{gray}{\Comment{obtain binary mask denoting static region}}
+    \State $map_{mask}^{i} = \textrm{downsample}(map_{mask}^{i})$
+    \textcolor{gray}{\Comment{downsample to latent-level size}}
+    \add{
+    \State ${z}^i_T = {z}^{i-1}_T * map_{mask}^i + {z}^{i}_T * (1-map_{mask}^i)$
+    }
+    \textcolor{gray}{\Comment{flow guided smoothing}}
+\EndFor
+\State \textbf{Return} ${z}^{1:N}_T$
+\textcolor{gray}{\Comment{temporally smoothed latents}}
+\end{algorithmic}
+\end{algorithm}
+\subsection{\add{Optical Flow Guided Inverted Latents Smoothing}}
+\label{method:smoothing}
+As a video consists of a temporal series of images with a considerable overlap of nearly identical pixels, contemporary video compression techniques \citep{hu2021fvc, hu2022fvc} harness motion information to mitigate temporal redundancy instead of saving individual pixels for every frame of a video.
+Inspired by this, \cite{chen2023control} introduces pixel-level residuals of the source video into the diffusion process, while \cite{hu2023videocontrolnet} leverages motion prior to prevent the regeneration of redundant areas for frame consistency.
+
+In our framework, latent codes of the input video are individually computed by performing inversion on each frame through the T2I model. Hence, the approach of aggregating these latent representations and directly feeding them into the denoising process is suboptimal with respect to preserving consistency on static regions.
+Also inspired by the video codecs, we propose to refine the inverted latents, guided by optical flow information extracted from the input video frames, which accurately captures the motion changes across frames.
+The pseudo algorithm is shown in Algorithm \ref{algorimth:smoothing}. 
+
+Specifically, we first acquire an optical flow map $map^{i}_{opt}$ between the consecutive frames $(f^{i-1}, f^{i})$ using an optical flow estimation network. 
+This flow map is represented as a two-channel image, with each channel capturing vertical and horizontal motion movement. 
+Subsequently, we incorporate the two different motion channels into a one-channel magnitude map $map^{i}_{mag}$ by calculating the Euclidean distance at each pixel location, followed by channel-wise normalizations.
+The resulting $map^{i}_{mag}$ represents the comprehensive motion prior between $f^{i-1}$ and  $f^{i}$.
+After thresholding $map^{i}_{mag}$ on pre-configured threshold $M_{thres}$, which generates a binary mask ($map_{mask}^{i}$), we perform smoothing on inverted latents $({z}^{i-1}_T, {z}^{i}_T)$ using the obtained mask. This processing guarantees that static regions share the same pixel values between frames.
+
+
+\section{Experiments}
+
+\subsection{Implementation Details}
+We leverage pretrained weights of Stable Diffusion v1.4 \citep{rombach2022high} and ControlNet-Depth \citep{zhang2023adding} in addition to self gated attention weights from GLIGEN \citep{li2023gligen}. 
+We use a subset of 20 videos from DAVIS dataset \citep{pont20172017}.
+Generated videos are configured to consist of 8 frames, unless explicitly specified, with a uniform resolution of 512x512.
+We benefit from BLIP-2 \citep{li2023blip} for the automated generation of video captionings. 
+We then feed-forward video frames and captionings to GLIP \citep{li2022grounded} model to obtain bounding boxes of the target objects. 
+For the applications of video style transfer, bounding box coordinates are uniformly set as $[0.0, 0.0, 1.0, 1.0]$ which covers the whole frame.
+RAFT-Large network \citep{teed2020raft} and ZoeDepth \citep{bhat2023zoedepth} are employed for estimating optical flow maps and depth maps, respectively.
+ \ref{supple:details}), we provide a detailed configuration of hyperparameters related to the forward and reverse diffusion processes.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]
+    {main-comparison.png}
+    \caption{Qualitative comparison with baseline methods:
+    Our results exhibit superior temporal consistency, no mutated body parts, accurate structural preservation, and the highest Edit-Accuracy without omitting or mixing components of edits.
+    Best viewed at high zoom levels.}
+    \label{figure:comparison}
+\end{figure}
+
+\subsection{Baseline Comparisons}
+\textbf{Qualitative Evaluation.} We offer a visual comparison against various state-of-the-art video editing approaches in Fig. \ref{figure:comparison}.
+ControlVideo (CV) \citep{zhang2023controlvideo} stands out as the most relevant work to ours, as it introduces a training-free video editing model that is also conditioned on ControlNet.
+Control-A-Video (CAV) \citep{chen2023control} translates a video with ControlNet guidance as well, with a first-frame conditioning strategy.
+Tune-A-Video (TAV) \citep{wu2022tune} efficiently fine-tunes their inflated SD model on the input video.
+To ensure a fair evaluation, as TAV is not provided structural guidance, we apply their inflation logic to ControlNet and fine-tune the inflated-SD-ControlNet on the input video.
+Gen-1 \citep{esser2023structure} presents a video diffusion architecture with additional structure and content guidance specifically designed for video editing.
+It's worth noting that CAV and Gen-1 train their models with video datasets and that the methods with ControlNet uniformly employed depth guidance for a fair comparison.
+
+\textbf{Quantitative Evaluation.}
+We evaluate the proposed method against aforementioned baselines using both automatic metrics and a user study. The results are outlined in Tab \ref{quantitative}.
+
+\begin{wraptable}{r}{6.8cm}
+\setlength{\tabcolsep}{2.5pt}
+\resizebox{0.5\columnwidth}{!}{
+\begin{tabular}{@{\extracolsep{0pt}}c|cc|ccc@{}}
+\hline
+Method & Text-Align & Frame-Con & Edit-Acc & Preserve-Acc & Frame-Con\\
+\hline
+TAV  & 0.810 & 0.959 & 2.99 & 3.13 & 3.05 \\
+CAV          & 0.801 & 0.955 & 2.25 & 2.50 & 2.88 \\
+CV & 0.822 & 0.963 & 2.36 & 2.02 & 2.08 \\
+Gen-1        & 0.833 & 0.939 & 2.41 & 2.51 & 2.56 \\
+Ours         & \textbf{0.837} & \textbf{0.970} & \textbf{4.13} & \textbf{4.24} & \textbf{4.01} \\
+\hline
+\end{tabular}
+}
+\caption{Summary of quantitative evaluations using CLIP (\textit{Left}) and user study (\textit{Right}).}
+\label{quantitative}
+\end{wraptable}
+
+\textit{(a) Automatic metrics.}
+We use CLIP \citep{radford2021learning} for automatic metrics.
+For textual alignment \citep{hessel2021clipscore}, we calculate  average cosine similarity between the target prompt and the edited frames.
+For frame consistency, we compute CLIP image features for all frames in the output video then calculate the average cosine similarity between all pairs of video frames.
+As shown in Tab. \ref{quantitative}, our method outperforms baselines in both textual alignment and temporal consistency.
+\textit{(b) User study.} We surveyed 28 participants to evaluate accuracy of editing and consistency of frames in the edited videos, utilizing a rating scale ranging from 1 to 5.
+Specifically, to measure editing accuracy, we divided the evaluation into two questions: \lowercase\expandafter{\romannumeral1}.``\textit{Were all the elements in the input video that needed to be edited accurately edited?}"
+\lowercase\expandafter{\romannumeral2}.``\textit{Were the elements in the output video that needed to be preserved accurately preserved?}"
+Tab. \ref{quantitative} shows that our method surpasses the baselines in all three aspects, particularly with a significant lead in Edit-Accuracy and Preserve-Accuracy.
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]
+    {ablation-attentions.png}
+    \caption{
+    \textit{Left}: Comparison of Modulated Cross-Attention with the original Cross-Attention, in the context of individually optimized null-embeddings. 
+    \textit{Right}: Comparison of Cross-Frame Gated Attention against original frame-independent gated mechanism and the absence of a gated attention layer. 
+    The rightmost case shows editing with frame-independent groundings can yield subpar results compared to editing without any groundings.
+    }
+    \label{ablation:attention}
+\end{figure}
+
+\begin{wraptable}{r}{5cm}
+\setlength{\tabcolsep}{3pt}
+\resizebox{0.35\columnwidth}{!}{
+\begin{tabular}{@{\extracolsep{0pt}}c|cc@{}}
+\hline
+        & Text-Align & Frame-Con\\
+\hline
+w/o Modulated CA    & 0.835 & 0.967 \\
+w/o Groundings      & 0.802 & 0.960 \\
+w/o Cross-Frame GA  & 0.829 & 0.956 \\
+w/o ControlNet      & 0.823 & 0.948 \\
+\hdashline
+Full components     & \textbf{0.837} & \textbf{0.970} \\
+\hline
+\end{tabular}
+}
+\caption{
+\add{
+Quantitative assessments on pipeline components using CLIP.
+}
+}
+\label{ablation-quantitative}
+\end{wraptable}
+\subsection{Ablation Studies}
+\textbf{Attentions.}
+We compare the use of the original Cross-Attention with the Modulated Cross-Attention in Fig. \ref{ablation:attention}-\textit{Left}.
+The results reveal variations in unconditional context vectors lead to distinct appearances of the subject within a video and the Modulated mechanism promotes the coherency of the subject's appearance.
+In Fig. \ref{ablation:attention}-\textit{Right}, we compare our proposed Cross-Frame Gated Attention to scenarios with no gated attention (no grounding conditions) and with the direct application of GLIGEN's Gated Attention.
+The example of `Iron man' illustrates the semantic edit of `man ${\shortrightarrow}$ Iron man' is neglected in the absence of groundings guidance and that frame-independent Gated Attention causes discrepancy in the appearance of the shoulder area of `Iron man'
+The `yellow car' example reveals that grounding guidance can result in inferior results compared to the generation with no grounding conditions at all, if not applied in a cross-frame manner.
+These results underscore the pivotal role of Cross-Frame Gated Attention in both edit-accuracy and time-consistency.
+\add{
+Moreover, we provide a quantitative analysis detailing the impact of each module in Tab.\ref{ablation-quantitative}.
+}
+
+\begin{figure}[!htb]
+    \centering
+    \includegraphics[width=0.95\textwidth]
+    {ablation-smoothing-controlnet.png}
+    \caption{
+    \add{
+    \textit{Left}: Editing outcomes using different thresholds for Optical Flow Smoothing.
+    }
+    \textit{Right}: Input video reconstruction results with and without ControlNet guidance.
+    }
+    \label{ablation:smoothing-controlnet}
+\end{figure}
+
+\textbf{ControlNet.}
+We ablate the utilization of ControlNet-Depth.
+Fig. \ref{problem-figure}- and Fig. \ref{ablation:smoothing-controlnet}-\textit{Right} depict instances of inaccurate reconstruction of the input video.
+ControlNet's structure guidance is necessitated to draw accurate structure of `rabbit' and `penguin' inside the bounding boxes, respectively.
+\add{
+To further validate the usage of ControlNet, we conducted a quantitative analysis to assess the impact of the proposed inflated ControlNet, as presented in Table \ref{ablation-quantitative}.
+}
+
+\textbf{Optical Flow Smoothing.}
+\add{
+To assess the impact of optical flow-guided inverted latents smoothing, we ablate the smoothing using three threshold values: 0 (no smoothing applied), 0.2 and 0.6.
+As revealed in Fig. \ref{ablation:smoothing-controlnet}, our flow-guided smoothing effectively eliminates artifacts within static regions and enhance consistencies.
+To find optimal threshold value, we computed Frame Consistencies using thresholds of 0.2, 0.3, and 0.4. Notably, the 0.2 threshold resulted in superior frame consistency (0.970 for threshold 0.2 $>$ 0.968 for threshold 0.3, 0.964 for threshold 0.4).
+}
+\subsection{Applications of Ground-A-Video}
+\label{application}
+\textbf{Groundings-guided Editing with Inpainting.}
+Employing a grounding condition offers a significant advantage, as it facilitates the creation of an inpainting mask. 
+This mask is readily obtained by intersecting the shared outer areas of bounding boxes.
+By utilizing this acquired mask during editing, which identifies regions in the source video that should remain unaltered, Preserve-Accuracy is further enhanced.
+For instance, in Fig. \ref{applications}-\textit{Middle}, the common outer spaces of red bounding boxes and blue bounding boxes form a binary mask which is used for inpainting.
+Yet, in Fig. \ref{applications}-\textit{Bottom}, there is no intersection of common outer spaces, and thus, inpainting is not applied in this scenario.
+\textbf{Video Style Transfer \& Text-to-video Generation with Pose Control.}
+In the video style transfer task of \ref{applications}-\textit{Middle}, target style texts are injected to UNet backbone in both Cross-Frame Gated Attention and Modulated Cross Attention layers. 
+The second row showcases the application of style transfer, while the third row shows style transfer combined with attributes editing.
+Our method adeptly translates input video into the desired style, all while incorporating semantic edits when necessary.
+Fig. \ref{applications}-\textit{Right} illustrates the use of Ground-A-Video for zero-shot text-to-video generation with pose map guidance.
+The pose map images are sourced from \cite{ma2023follow}.
+These spatially-continuous pose map conditions are integrated into the diffusion reverse process via inflated ControlNet.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.96\textwidth]
+    {applications.png}
+    \caption{
+    \textit{Left}: Video editing with and without inpainting.
+    \textit{Middle}: Video style transfer with attribute change.
+    \textit{Right}: Text-to-video generation with pose maps.
+    All three results are generated with zero-shot inference.
+    }
+    \label{applications}
+\end{figure}
+
+\begin{wrapfigure}{r}{0.33\textwidth}
+\centering
+    \includegraphics[width=0.33\textwidth]{figure-controlnet-scale.png}
+    \caption{
+    \add{
+    Video editing results with different ControlNet Scales.
+    }
+    }
+    \label{fig:controlnet-scale}
+\end{wrapfigure}
+
+
+\section{Conclusion}
+
+In our work, we addressed the problem of complex multi-attribute editing of a video and proposed an answer of utilizing both spatially-continuous and discrete conditions.
+\texttt{Ground-A-Video} offers precise video editing capabilities without the need for fine-tuning off-the-shelf diffusion models on any video data.
+We demonstrated the power of our method on various input videos and applications.
+We provided detailed comparisons to existing baselines along with an extensive user study, demonstrating its superiority in terms of consistency and accuracy.
+
+\textbf{Limitations.}
+Since video groundings play a crucial role in our pipeline, misleading groundings (e.g., incorrect bounding box coordinates) may result in inaccurate editing outcomes.
+\add{
+Although the use of ControlNet inherently brings the issue of structural flexibility between the input and output,
+this can be effectively controlled through the `ControlNet Scale' hyperparameter (see Fig. \ref{fig:controlnet-scale}, \ref{figure:controlnet_scale_full}).
+}
+
+
+\textbf{Ethics \& Reproducibility.}
+The use of T2I foundation models brings forth several ethical considerations.
+These models possess the potential for malicious applications, such as the creation of misleading or counterfeit content, which could yield adverse societal consequences.
+Our work heavily relies on one such model, making it susceptible to these concerns.
+Furthermore, the models were trained on a dataset of internet-sourced images \citep{schuhmann2022laion}, which may encompass inappropriate content and inherent biases.
+Consequently, these models might perpetuate such biases \citep{mishkin2022dall} and generate inappropriate imagery.
+To address these potential concerns and foster reproducibility, we will release our source code, model, and data under a license that encourages ethical and legal usage.
+ \ref{supple:details}).
+
+\textbf{Acknowledgements.}
+This research was supported by the National Research Foundation of Korea (NRF) (RS-202300262527),
+Field-oriented Technology Development Project for Customs Administration funded by the Korean government (the Ministry of Science \& ICT and the Korea Customs Service) through the National Research Foundation (NRF) of Korea under Grant 
+NRF2021M3I1A1097910 \& NRF2021M3I1A1097938, Korea Medical Device Development Fund grant funded by the Korea government
+(the Ministry of Science and ICT, the Ministry of Trade, Industry, and Energy, the Ministry of Health \& Welfare, the Ministry of Food and Drug Safety) (Project Number: 1711137899, KMDF\_PR\_20200901\_0015), and Culture, Sports,
+and Tourism R\&D Program through the Korea Creative Content Agency grant funded by the Ministry of Culture, Sports and Tourism in 2023.
+
+
+
+
+
+

@@ -1,0 +1,510 @@
+\title{Hybrid Preferences: Learning to Route Instances for Human vs. AI Feedback}
+
+\begin{abstract}
+    Learning from human feedback has enabled the alignment of language models (LMs) with human preferences.
+    However, directly collecting human preferences can be expensive, time-consuming, and can have high variance.
+    An appealing alternative is to distill preferences from LMs as a source of synthetic annotations as they are more consistent, cheaper, and scale better than human annotation; however, they are also prone to biases and errors.
+    In this work, we introduce a routing framework that combines inputs from humans and LMs to achieve better annotation quality, while reducing the total cost of human annotation.
+    The crux of our approach is to identify preference instances that will benefit from human annotations.
+    We formulate this as an optimization problem: given a preference dataset and an evaluation metric, we train a \textit{performance prediction model} to predict a reward model's performance on an arbitrary combination of human and LM annotations and employ a routing strategy that selects a combination that maximizes predicted performance.
+    We train the performance prediction model on \multipref{}, a new preference dataset with 10K instances paired with human and LM labels.
+    We show that the selected hybrid mixture of LM and direct human preferences using our routing framework achieves better reward model performance compared to using either one exclusively.
+    We simulate selective human preference collection on three other datasets and show that our method generalizes well to all three.
+    We analyze features from the routing model to identify characteristics of instances that can benefit from human feedback, e.g., prompts with a moderate safety concern or moderate intent complexity.
+    We release the dataset, annotation platform, and source code used in this study to foster more efficient and accurate preference collection in the future.
+
+        {
+            \small
+            \begin{center}
+                \renewcommand{\arraystretch}{1.co/datasets/allenai/multipref}
+                \end{tabular}
+            \end{center}
+        }
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\addtocontents{toc}{\protect\setcounter{tocdepth}{0}}
+
+Reinforcement learning from human feedback \citep{christiano2017deep} has been integral to the alignment of large language models (LMs) with human objectives and values \citep[\textit{inter alia}]{ouyang2022training, bai2022training}.
+Central to this process are preference datasets, i.e., instances of inputs to language models paired with candidate model outputs and human judgment annotations indicating the preferred output.
+Collecting preference data involves several key design decisions, and one important consideration is determining the source of preference annotations \citep{kirk2023past,kirk2024prism}.
+This choice impacts not only the cost and effort required to procure these annotations, but also the performance of models trained on them.
+
+There are two major approaches to obtaining preference annotations.
+One approach is to solicit \textbf{preferences directly from humans}.
+Although this setup leads to generally high-quality data \citep{wang2024helpsteer2}, the annotation process itself is expensive and time-consuming.
+Moreover, human annotators can make mistakes, especially when faced with complex examples or when the content extends beyond their expertise \citep{jiang2022investigating,sandri2023dont}.
+As an alternative, preference annotation can be \textbf{synthesized from LMs} \citep{bai2022constitutional,lee2023rlaif,cui2023ultrafeedback}.
+This approach is scalable, as it only requires prompting an off-the-shelf LM for preference annotations.
+However, LMs do not always reflect the nuances of human annotators and can be prone to certain biases or errors in judgment \citep{singhal2023long,wang2024notfair}.
+Hence, we posit that obtaining high-quality and cost-efficient preference data involves finding the right combination of direct human preferences and synthetic preferences from LMs.
+
+In this work, we present a \textbf{routing framework} that allocates preference instances to human or LM annotators, resulting in a set of \textbf{hybrid annotations}  (\S\ref{section:methodology}).
+The crux of our approach is to identify specific instances that will benefit from direct human annotations, while the rest are routed to the LM.
+We ground this decision in the performance of reward models trained on the resulting preference datasets, measured by RewardBench \citep{lambert2024rewardbench}.
+Our framework consists of a \textbf{performance prediction model} (PPM, \S\ref{section:preformance_prediction_model}) and a \textbf{routing strategy} (\S\ref{section:routing_strategy}) as illustrated in \autoref{fig:main_methods}.
+The PPM learns to predict the performance of a preference dataset based on the statistics of the subset being routed to human annotators.
+We then use our trained model to predict the performance of arbitrary simulated hybrid datasets, to recommend the potentially best-performing one.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth, trim={0 0 0 0}]{figures/main_figure.pdf}
+    \caption{
+        \textbf{Overview of the routing framework.}
+        Our proposed method consists of a performance prediction model (PPM) and a routing strategy based on that model.
+        We train the PPM to predict the performance of a dataset based on the statistics of the subset routed to human annotators.
+        Then, we use the PPM to score many simulations of candidate datasets, and recommend the potentially best-performing routing configuration.
+    }
+    \label{fig:main_methods}
+\end{figure}
+To put this framework into practice, we first construct \textbf{\multipref{}}, a preference dataset containing 10k instances paired with both human and LM preference annotations that follow the same carefully designed annotation guidelines (\S\ref{section:multipref}).
+Then, we train the PPM on this dataset and use the routing strategy to obtain hybrid annotations from either LMs or humans.
+We also evaluate the trained PPM on other existing preference datasets, including Helpsteer2 \citep{wang2024helpsteer2}, AlpacaFarm \citep{dubois2023alpacafarm}, and Chatbot Arena Conversations (ChatArena, \citealt{zheng2023lmsyschat1m})on RewardBench and other common LM benchmarks through best-of-N reranking.
+To obtain synthetic annotations for other human preference datasets, we prompt an LM on the same annotation guidelines used for human annotation.
+For instances that our routing framework designated for human annotation, we use the original human annotations from these datasets.
+
+Our experiments show that hybrid annotations constructed from the router's predictions result in better reward models than those trained (a) entirely on direct human preferences, (b) entirely on synthetic preferences, and (c) a random combination of direct human and synthetic preferences given the same human annotation budget (\S\ref{section:results}), supporting our hypothesis that there exist optimal combinations of annotations that are not exclusively direct human or synthetic.
+The superior performance of reward models also generalizes beyond RewardBench and achieves better performance on common LM benchmarks through best-of-N reranking (\S\ref{section:generalization_to_other_evals}).
+The resulting hybrid preference datasets outperform the corresponding original ones by a large margin, with 7--13\% (absolute) improvement on RewardBench and up to 3\% (absolute) improvement on downstream evaluations on average, demonstrating the generalization of our routing framework.
+We then present an analysis of factors that render a preference instance to benefit from direct human annotations (\S\ref{section:analysis}).
+
+We also publicly release all data and code associated with this work.
+We hope that this work contributes to a more cost-effective approach to preference data collection while providing actionable, data-centric insights on preference learning.
+
+
+
+\section{Routing Framework: Formulation and Methodology}
+
+\label{section:methodology}
+
+\newcommand{\origPrefDataset}[1]{$\mathcal{D}$}  % original dataset
+\newcommand{\candidateDataset}[1]{$\mathcal{\hat{D}}$}  % during PPM training
+\newcommand{\perf}[1]{\textsc{Perf}$(\mathcal{\hat{R}}$}  % the performance of the candidate dataset that we use for PPM training
+\newcommand{\proxyDataset}[1]{$\mathcal{D^*}$}  % during test time
+\subsection{Problem Formulation}
+We first formulate the preference routing problem.
+Let $\mathcal{D} =\{\langle x^{(i)}, y_1^{(i)}, y_2^{(i)}\rangle\}_{i=1}^{n}$ be a dataset of $n$ unlabeled preference instances, where each instance can be assigned a label from either of the two sources: one provided by a human annotator, or one generated by an LM.
+We introduce a binary decision variable $z_i \in \{0, 1\}$ for each instance, where $z_i = 0$ corresponds to selecting the human-provided label and $z_i = 1$ corresponds to selecting the LM-generated label.
+Note that $z_i$ denotes the source of the labels, and not the identity of the labels---when the humans and the LM agree, the chosen label is the same irrespective of the value of $z_i$.
+
+The goal for routing is to optimize the selection of binary decision variables $z_i$ for the dataset in order to maximize a performance metric.
+This optimization problem can be expressed as:
+
+\begin{equation}\label{eq:routing}
+    \max_{z \in \{0, 1\}^n} \textsc{Perf}(R(\mathcal{D}(z))),
+\end{equation}
+
+where $\textsc{Perf}(R(\mathcal{D}(z)))$ is the performance of the RM trained on $\mathcal{D}(z)$.
+Here, $z = \{z_1, z_2, \dots, z_n\}$ is the \textit{routing configuration}, representing the vector of binary label choices for all instances.
+
+Maximizing \autoref{eq:routing} is difficult as there is no closed-form solution.
+In addition, finding the best routing configuration is computationally heavy, as brute force search would  entail training and evaluating a reward model for $2^n$ configurations.
+So instead, we construct \textit{candidate} labeled datasets $\hat{\mathcal{D}}(z)$ with different routing configurations $z$ which we use to train reward models, denoted as $\hat{R}(\hat{\mathcal{D}}(z))$.\footnote{
+    Onwards, we will ignore the $z$ variable for simplicity and denote the candidate labeled dataset as $\mathcal{\hat{D}}$.
+}
+We use these candidates to train a \textbf{performance prediction model} that approximates $\textsc{Perf}(\hat{R}(*))$ (\S\ref{section:preformance_prediction_model}).
+After training the model, we use a simulation-based \textbf{routing strategy} that aims to find the optimal $z$ to maximize the predicted performance (\S\ref{section:routing_strategy}).
+
+\subsection{Performance Prediction Model (PPM)}
+\label{section:preformance_prediction_model}
+
+PPM is a regression model that provides an estimate of the performance of a reward model trained on a candidate preference dataset $\hat{\mathcal{D}}$.
+The PPM takes as input a feature vector representing the routing configuration of $\hat{\mathcal{D}}$ and outputs a scalar value as the predicted performance.
+Training the PPM requires a seed preference dataset $\mathcal{D}$ with both human and LM labels, and multiple samples of candidate datasets $\{\hat{\mathcal{D}_i}\}$ with different routing configurations and their actual evaluation performance.
+
+\paragraph{Step 1: Defining a feature space for the feature vector.}
+Instead of directly operating on individual preference instances, we define a feature space for the PPM so that we can make routing decisions about groups of instances that share features, allowing our routing procedure to generalize to other datasets where these features might be present.
+We construct a feature space based on textual and descriptive information (or \textbf{tags} $T$) of a preference instance's prompt-response triples.
+\begin{itemize}[leftmargin=3mm,topsep=0mm,itemsep=0mm]
+    \item \textbf{Textual tags} characterize textual information such as the cosine similarity of the encoded representation\footnote{We use the \texttt{all-distilroberta-v1} embedding model from \texttt{sentence-transformers} \citep{reimers2019sentence}.} of the responses $y_1$ and $y_2$,
+          the length of the prompt $x$, or the token length difference between two responses.
+          We discretize the textual tags to convert them into categorical bins.
+    \item \textbf{Descriptive tags} include metadata about the prompt or instruction such as the \textit{subject of expertise} needed to answer the prompt, or the \textit{complexity of user intent} in the prompt based on the number of goals or requirements among many others.
+          We obtain these descriptors from a multilabel classifier (or meta-analyzer) trained on a human-validated dataset of instructions and their corresponding tags.
+\end{itemize}
+
+These tags are obtained at the instance level. We then represent the routing configuration of a candidate dataset as a vector $v = \{C_{t_{j}, \text{~human}} \mid t_j \in T \}$, where $C_{t_{j}, \text{~human}}$ denotes the count of instances routed to human annotations with the $j^{th}$ tag.
+
+\begin{wrapfigure}{R}{0.55\textwidth}
+    \begin{minipage}{1\linewidth}
+        \begin{algorithm}[H]
+            \caption{Generating a candidate dataset $\mathcal{\hat{D}}$}
+            \label{algo:sampling}
+            \begin{algorithmic}[1]
+                \Require Unrouted dataset $\mathcal{D} = \{d_1, d_2, \dots, d_N\}$, Mapping between tags $t$ and instances with that tag, $M = \{t_i \mapsto \{d_j \in \mathcal{D} \mid d_j \text{ has tag } t_i\} \mid i = 1, 2, \dots, N\}$
+                \State Budget $b$ $\sim$ \text{Uniform}(1, $|\mathcal{D}| - 1$) \Comment{Sample a random budget}
+                \State $S_{\text{~human}}$ $\gets$ \{\}  \Comment{Initialize subset that will use human annotations}
+                \State $M \gets$ \textsc{Shuffle}($M$) \Comment Shuffle the order of features
+                \While {$|S_{\text{~human}}| < b$}
+                \For {$m$ in $M$}
+                \State $S_{\text{human}} \gets m$ \Comment{Add instances associated with tag $m$ to $S_{\text{~human}}$}
+                \EndFor
+                \EndWhile
+                \State $z \gets \{0 \text{ if } d_i \in S_{\text{human}} \text{ else } 1 \mid d_i \in \mathcal{D}\}$
+                \State $\mathcal{\hat{D}}$ $\gets$ $\mathcal{D}(z)$
+                \State \Return $\mathcal{\hat{D}}$
+            \end{algorithmic}
+        \end{algorithm}
+    \end{minipage}
+\end{wrapfigure}
+\paragraph{Step 2: Sampling candidates and obtaining their performance.}
+
+We generate candidate datasets $\{\hat{\mathcal{D}}_i\}$ from the unrouted dataset $\mathcal{D}$ by sampling different routing configurations $z$ as shown in Algorithm \ref{algo:sampling}.
+We also include candidates where all preference labels are from human annotations ($|S_{\text{human}}| = |D|$) and all labels are from LMs ($|S_{\text{human}}| = 0$).
+Our sampling algorithm attempts to cover many human annotation budgets and different types of instances assigned to them.
+For each candidate dataset, we train a reward model $\hat{R}$ and evaluate its performance $\textsc{Perf}(\hat{R})$ on an evaluation metric.
+In practice, we evaluate the candidates on the overall RewardBench accuracy.
+This process leads to a PPM training dataset with the tag counts as features and the RM performance as the target as shown in \autoref{fig:multipref_counts}.
+
+\paragraph{Step 3: Training the Performance Prediction Model.}
+We fit a regression model to predict the RewardBench performance of a candidate dataset.
+We use the feature vector $v$ as the features and the reward model performance on RewardBench $\textsc{Perf}(\hat{R})$ as the target.
+In practice, we collected 200 candidates $\hat{\mathcal{D}}$ and their performance from \multipref{} for training the PPM.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\textwidth, trim={0 0 0 1cm}]{figures/tag_counts_heatmap.pdf}
+    \caption{
+        \textbf{Feature representation of candidate datasets and their actual reward modeling performance as the training data for PPM.}
+        We use the count of instances that belong to the human annotation subset $S_{\text{~human}}$ as the feature value for each tag, and the RewardBench overall accuracy as the target.
+        This heatmap shows the features derived from \multipref{}.
+    }
+    \label{fig:multipref_counts}
+\end{figure}
+
+\subsection{Routing strategy based on PPM}
+\label{section:routing_strategy}
+
+The goal of routing is to find the best routing configuration $z^* = \{z_1, z_2, \dots, z_n\}$ that will maximize reward model performance $\textsc{Perf}(\mathcal{\hat{D}}(z^*))$.
+We approach this by simulating many candidate datasets and predict their performance using the PPM (Algorithm \ref{algo:sampling}).
+Since the PPM allows us to approximate the expected performance of any $\mathcal{\hat{D}}_i$, we can simulate a large number of candidates and obtain their performance without training actual reward models. Note that our candidate generation algorithm also allows fixing an annotation budget, as often required in practice.
+
+After predicting the performance of all simulated candidates, we take the candidate with highest predicted RM performance and use its configuration $z^*$ for routing.
+For each preference instance $d_i$ in $\mathcal{D}$, we take the decision $z_i$ and route the instance to humans if $z_i=0$ and to LMs if $z_i=1$. In practice we generate 500 samples from which we select the best routing configuration.
+
+
+
+\section{\multipref{}
+
+\label{section:multipref}
+
+\multipref{} is a preference dataset containing 10,461 instances with human and GPT-4 annotations, which we can use as a seed dataset to facilitate training the PPM.
+We collect prompts from a variety of open resources such as ShareGPT \citep{vicuna2023}, WildChat \citep{zhao2024inthewildchat}, Anthropic HH-RLHF \citep{bai2022training}, and ChatArena \citep{chiang2024chatbot}.
+Then, we generate model responses using models
+including Llama-2-Chat 70B \citep{touvron2023llama}, Llama-3-Instruct 70B \citep{dubey2024llama}, \textsc{T\"ulu}-2 7B and 70B \citep{ivison2023camels}, GPT-3.5 (\texttt{gpt-3.5-turbo-0125}), and GPT-4 (\texttt{gpt-4-turbo-2024-04-09}, \citealt{achiam2023gpt}).
+
+\begin{wraptable}{r}{0.40\textwidth}
+    \centering
+    \caption{\multipref{} dataset statistics.}
+    \scalebox{0.90}{
+        \begin{tabular}{ll}
+
+            \toprule
+            \textbf{Dataset statistics}   &        \\
+            \midrule
+            \# unique prompts            & 5,323  \\
+            \# models for generation     & 6  \\
+            \# model pairs               & 21     \\
+            \# comparisons               & 10,461 \\
+            \# annotations               & 41,844 \\
+            \# annotation per instance   & 4      \\
+            \midrule
+            \textbf{Annotator statistics} &        \\
+            \midrule
+            Total \# of crowdworkers     & 289    \\
+            \makecell[l]{Avg. qualification test   \\ pass rate} & 34.8\%     \\
+            \bottomrule
+        \end{tabular}
+    }
+    \label{table:dataset_statistics}
+\end{wraptable}
+
+\multipref{} is then annotated with our careful efforts to control the annotation quality, while working with crowdworkers on a fair and reasonable wage. We recruit annotators from Prolific,\footnote{\url{https://www.prolific. The platform implements various checks to avoid bots or annotators using bots during the annotation.
+Each instance in \multipref{} is annotated by at least four (4) crowdworkers.
+We aggregate these labels via a majority vote to mitigate noise in annotation.
+We also collect LM annotations using GPT4 (\texttt{gpt-4-turbo-2024-04-09}) and include in its prompt the same annotation guidelines we presented to the human annotators.
+Since we allow ties during annotation, we filter instances that are labeled as a ``Tie'' by either human or GPT4, ending up with 7K non-tie preference instances that can be used for model training.
+
+
+
+\section{Experiments}
+
+\label{section:results}
+
+We first intrinsically evaluate how well the PPM fits on a domain it was trained on (\S\ref{section:results_ppm_fit}), then we assess how well the same PPM generalizes to other preference datasets (\S\ref{section:generalization_to_unseen_datasets}) on the same target evaluation metric (RewardBench).
+Finally, we test how well the routing framework generalizes to other LM benchmarks given different preference datasets (\S~\ref{section:generalization_to_other_evals}).
+
+\subsection{Details of the performance prediction model}
+\label{section:results_ppm_fit}
+
+In order to train the PPM, we generate 200 candidates from \multipref{} and train reward models using T\"ulu 2 13B \citep{ivison2023camels} as base.
+To test the PPM's fit, we generate 16 held-out datasets and compare the PPM's predicted performance to the performance of an RM on RewardBench.
+
+We measure the comparison using the root-mean-square error (RMSE) and the Spearman $\rho$ correlation.
+
+We train three types of regressors: a linear model, a quadratic model, and a tree-based model called LightGBM \citep{ke2017lightgbm}. As shown in \autoref{table:simulation_results} and \autoref{fig:simulation_results}, the \textbf{quadratic model} fits the data the best. Hence, we use the quadratic model as our PPM for subsequent experiments.
+
+\begin{figure}[t]
+    \begin{minipage}[t]{.48\linewidth}
+        \centering
+\begin{tabular}{@{}lcc@{}}
+    \toprule
+    \textbf{Model type} & \textbf{Spearman $\rho$} $\uparrow$ & \textbf{RMSE} $\downarrow$ \\ \midrule
+    Linear              & 0.515                              & 0.239                      \\
+    LightGBM            & 0.377                              & 0.481                      \\
+    Quadratic           & \textbf{0.673}                     & \textbf{0.201}             \\ \bottomrule
+\end{tabular}
+        \captionof{table}{Spearman $\rho$ of the predicted and actual ranks of 16 held-out candidate datasets, and the RMSE between the predicted performance against actual performance.}
+        \label{table:simulation_results}
+    \end{minipage}\hfill
+    \begin{minipage}[t]{.48\linewidth}
+        \centering
+        \includegraphics[width=0.5\linewidth, trim={1cm 0.8cm 0 0.5cm}]{figures/test_dataset.pdf}
+        \captionof{figure}{Predicted and actual RewardBench scores for 16 held-out candidate datasets using the quadratic PPM.}
+        \label{fig:simulation_results}
+    \end{minipage}
+\end{figure}
+
+\subsection{Generalization to Unseen Preference Datasets}
+\label{section:generalization_to_unseen_datasets}
+
+\begin{figure}[b]
+    \centering
+    \includegraphics[width=\textwidth, trim={0.7cm 0 0.5cm 0}]{figures/rewardbench_multipref_feats_simulated_quadratic.pdf}
+    \caption{
+        Comparison between our routing framework and random selection given different annotation budgets on various preference datasets.
+        The optimal budget and its corresponding performance is marked by a star (\textcolor{ai2Green}{$\bigstar$}).
+        We report the average of the RewardBench score across three runs.
+    }
+    \label{fig:dataset_generalization}
+\end{figure}
+
+We next test whether our regression model trained on \multipref{} generalizes to other unseen preference datasets.
+To do so, we apply the same routing strategy using the PPM trained on \multipref{}, on other unrouted preference datasets, i.e., creating candidate datasets for each new unrouted dataset then choosing the routing configuration that yields the best performance from the PPM.
+
+\paragraph{Datasets}
+We use datasets with existing human preference annotations and augment them with LLM annotations from GPT-4 (\texttt{gpt-4-turbo-2024-04-09}) to simulate scenarios of routing a preference instance to a human annotator.
+These datasets include:
+\textbf{Helpsteer2} \citep{wang2024helpsteer2} is a multi-aspect human preference dataset containing 10k instances, with annotations from ScaleAI; we convert the ratings into binarized preferences using the same weights the authors used for training a 70B reward model, \textbf{ChatArena Conversations} \citep{zheng2023judging}  contains 33k conversations with pairwise preferences from Chatbot Arena users \citep{chiang2024chatbot} from April to June 2023;
+we filter prompts such that they are both single-turn and in English, and \textbf{AlpacaFarm Human Preferences} \citep{dubois2023alpacafarm} contains 9.69k preferences from human annotators.
+To control the effect of dataset size when comparing across datasets, we limit each preference mix to 7K instances after removing ties, the same size as \multipref{}.
+
+\paragraph{Baselines}
+For each dataset, we use the following preference mixes to compare against our hybrid annotations:
+ We train reward models using T\"{u}lu 2 13B \citep{ivison2023camels} as base on each of these mixes and our hybrid annotated set, and evaluate their performance on RewardBench.
+
+\begin{table*}[t]
+  \centering
+  \caption{
+    Comparison of full direct human preferences and synthetic preferences on the best hybrid preference mix given unlimited budget on RewardBench.
+    Reporting the average of three runs.
+  }
+  \resizebox*{\textwidth}{!}{
+    \begin{tabular}{@{}lccccc|ccccc@{}}
+      \toprule
+                              & \multicolumn{10}{c}{\textbf{RewardBench Performance}}                                                                                                                                                                                                       \\
+      \cmidrule(lr){2-11}
+
+                              & \multicolumn{5}{c}{\% Direct Human for Best Hybrid: \textbf{37.4\%}} & \multicolumn{5}{c}{\% Direct Human for Best Hybrid: \textbf{69.6\%}}                                                                                                                 \\
+                              & Overall                                                              & Chat                                                                 & Chat-Hard   & Safety      & Reasoning   & Overall     & Chat        & Chat-Hard   & Safety      & Reasoning   \\
+      \midrule
+      100\% Human             & \p{60.4}                                                             & \p{89.1}                                                             & \best{37.8} & \p{71.6}    & \p{42.9}    & \p{72.4}    & \best{90.6} & \p{60.7}    & \p{68.0}    & \p{76.7}    \\
+      100\% Synth.            & \p{66.5}                                                             & \p{90.2}                                                             & \p{34.6}    & \p{69.7}    & \p{71.3}    & \p{65.8}    & \p{71.6}    & \p{64.0}    & \p{45.2}    & \p{82.7}    \\
+      Best Hybrid             & \best{70.6}                                                          & \best{94.4}                                                          & \p{35.1}    & \best{74.8} & \best{78.2} & \best{79.7} & \p{89.9}    & \best{64.9} & \best{77.0} & \best{87.0} \\
+      \cmidrule(lr){2-11}
+      \textbf{Preference Mix} & \multicolumn{5}{c}{AlpacaFarm \citep{dubois2023alpacafarm}}          & \multicolumn{5}{c}{ChatArena \citep{zheng2023judging}}                                                                                                                               \\
+                              & \multicolumn{5}{c}{\% Direct Human for Best Hybrid: \textbf{67.2\%}} & \multicolumn{5}{c}{\% Direct Human for Best Hybrid: \textbf{23.0\%}}                                                                                                                 \\
+                              & Overall                                                              & Chat                                                                 & Chat-Hard   & Safety      & Reasoning   & Overall     & Chat        & Chat-Hard   & Safety      & Reasoning   \\
+      \midrule
+      100\% Human             & \p{55.0}                                                             & \p{85.5}                                                             & \p{44.5}    & \p{38.5}    & \p{51.6}    & \p{59.0}    & \p{90.6}    & \p{50.4}    & \p{36.3}    & \p{58.8}    \\
+      100\% Synth.            & \p{60.9}                                                             & \p{87.2}                                                             & \p{41.4}    & \p{56.1}    & \p{58.5}    & \p{71.6}    & \p{93.5}    & \p{50.2}    & \best{69.4} & \p{73.2}    \\
+      Best Hybrid             & \best{66.8}                                                          & \best{94.5}                                                          & \best{50.8} & \best{58.1} & \best{63.8} & \best{72.2} & \best{94.7} & \best{51.3} & \p{67.6}    & \best{75.1} \\
+      \bottomrule
+    \end{tabular}
+  }
+  \label{table:rewardbench_results}
+\end{table*}
+
+\paragraph{Results}
+\autoref{fig:dataset_generalization} shows the overall RewardBench score for each dataset on different human annotation budgets across four preference datasets.
+Results show that in the majority of annotation budgets, \textbf{hybrid annotations from the routing framework outperform that of random sampling.}
+This suggests that combining annotations is expected to result in RMs that perform better than relying solely on annotations from a single source (human or LM), and the performance can improve with a better routing strategy.
+
+We also obtain the best hybrid mix with empirical optimal budget for any given preference dataset as shown in \autoref{table:rewardbench_results}.
+We observe that \textbf{the best hybrid mix requires 20--70\% of direct human annotations} in order to outperform a more costly 100\% direct human annotation setup.
+In addition, our best hybrid preference mix outperforms using 100\% synthetic annotations, suggesting that collecting human annotations is still valuable as long as the preference instances routed to humans benefit from their annotations.
+
+Furthermore, we observe that in general, \textbf{RMs trained on full synthetic preference annotations tend to perform better on RewardBench than 100\% human annotations}, except in Helpsteer2.
+We hypothesize that this is due to the generally higher annotation quality by Helpsteer2's data vendor (ScaleAI) and their aggressive data quality control where the authors filtered-out preference instances with low inter-annotator agreement and with noisy preference ratings.
+Nevertheless, our results in \autoref{fig:dataset_generalization} suggest that the routing framework can still push this performance further by using just 70\% human annotations.
+
+\subsection{Generalization to other Evaluation Tasks}
+\label{section:generalization_to_other_evals}
+
+\begin{table*}[t]
+    \centering
+    \caption{
+        Comparison of full direct human preferences and synthetic preferences on the best hybrid preference mix given unlimited budget using Best-of-N evaluation.
+    }
+    \resizebox*{\textwidth}{!}{
+        \begin{tabular}{@{}lcccccc|cccccc@{}}
+            \toprule
+                               & \multicolumn{12}{c}{\textbf{Best-of-N Evaluation Performance}}                                                                                                                                                                                                                          \\
+            \cmidrule(lr){2-13}
+            \textbf{Pref
+                               & \multicolumn{6}{c}{\% Direct Human for Best Hybrid: \textbf{37.4\%}} & \multicolumn{6}{c}{\% Direct Human for Best Hybrid: \textbf{69.6\%}}                                                                                                                                             \\
+                               & Avg.                                                                 & GSM8K                                                                & BBH         & IFEval      & Codex       & AlpacaEval  & Avg.        & GSM8K       & BBH         & IFEval      & Codex       & AlpacaEval  \\
+            \midrule
+            100\% Human        & \p{48.3}                                                             & \p{38.0}                                                             & \p{47.3}    & \p{43.1}    & \best{24.4} & \best{88.6} & \p{52.6}    & \best{52.3} & \p{51.0}    & \p{45.8}    & \p{26.2}    & \best{87.7} \\
+            100\% Synth.       & \p{49.4}                                                             & \p{41.7}                                                             & \p{49.0}    & \best{44.9} & \p{23.2}    & \p{88.3}    & \p{51.0}    & \p{48.6}    & \best{52.0} & \p{47.0}    & \p{24.4}    & \p{83.1}    \\
+            Best Hybrid        & \best{50.5}                                                          & \best{48.1}                                                          & \best{50.2} & \p{44.7}    & \p{21.3}    & \p{88.1}    & \best{52.8} & \p{51.7}    & \p{49.9}    & \best{48.1} & \best{29.3} & \p{85.1}    \\
+            \cmidrule(lr){2-13}
+            \textbf{Pref. Mix} & \multicolumn{6}{c}{AlpacaFarm \citep{dubois2023alpacafarm}}          & \multicolumn{6}{c}{ChatArena \citep{zheng2023judging}}                                                                                                                                                           \\
+                               & \multicolumn{6}{c}{\% Direct Human for Best Hybrid: \textbf{67.2\%}} & \multicolumn{6}{c}{\% Direct Human for Best Hybrid: \textbf{23.0\%}}                                                                                                                                             \\
+                               & Avg.                                                                 & GSM8K                                                                & BBH         & IFEval      & Codex       & AlpacaEval  & Avg.        & GSM8K       & BBH         & IFEval      & Codex       & AlpacaEval  \\
+            \midrule
+            100\% Human        & \p{50.4}                                                             & \p{48.2}                                                             & \p{50.7}    & \p{42.7}    & \best{23.8} & \p{86.6}    & \best{53.9} & \p{52.3}    & \best{52.4} & \best{44.9} & \best{28.7} & \best{91.4} \\
+            100\% Synth.       & \p{53.1}                                                             & \p{52.3}                                                             & \p{52.6}    & \p{44.7}    & \p{26.2}    & \p{89.6}    & \p{53.7}    & \best{54.0} & \p{52.3}    & \p{44.5}    & \p{26.8}    & \p{90.9}    \\
+            Best Hybrid        & \best{53.3}                                                          & \best{53.5}                                                          & \best{52.7} & \best{45.5} & \best{23.8} & \best{91.0} & \p{52.8}    & \p{51.9}    & \p{51.8}    & \p{44.5}    & \p{25.0}    & \p{90.8}    \\
+            \bottomrule
+        \end{tabular}
+    }
+    \label{table:bon_results}
+\end{table*}
+
+So far, we have been using the RewardBench score as the optimization target for our routing framework. Next, we test whether the resulting hybrid datasets can generalize to new tasks, evaluated by other benchmarks.
+
+\paragraph{Setup}
+
+We follow the practice in \cite{ivison2024unpacking} to convert several popular LLM benchmarks into a ``Best-of-N'' reranking format for evaluating reward models: we sample 16 generations from the \tulu-2 13B SFT model, score them using the testing reward models, and then use the top-scoring generation as the final output to compute the metrics.
+We evaluate on the following datasets: GSM8K \citep{cobbe2021training} for math, BIG-Bench Hard (BBH) \citep{suzgun2022challenging} for reasoning, IFEval \citep{zhou2023instruction} for precise instruction following, Codex HumanEval \citep{chen2021evaluating} for coding, and AlpacaEval \citep{alpaca_eval} for the general chatting capabilities.
+
+\paragraph{Results}
+\autoref{table:bon_results} shows the Best-of-N evaluation performance of the best hybrid mix found by our method. Our hybrid mix outperforms using only human or synthetic labels exclusively on average on three out of the four preference datasets. Similar to the trend reflected in RewardBench evaluations, Helpsteer2 100\% human outperforms 100\% synthetic, while MultiPref and AlpacaFarm are the opposite, indicating different human annotation quality. Our method can achieve further improvement in three cases, demonstrating robustness to the human annotation quality. ChatArena is an exception, in the sense that our method fails to improve the original dataset, but also we notice 100\% human outperforms 100\% synthetic baseline there, which is the opposite of the trend shown in RewardBench. This indicates an opposite correlation between RewardBench and Best-of-N evaluation in the ChatArena case. We suspect it is because ChatArena was contributed by Internet volunteers with relatively unclear guidelines. We leave the investigation of reasons for future work.
+
+
+
+\section{Analysis: When are human annotations helpful?}
+
+\label{section:analysis}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\textwidth, trim={0 0 0 1cm}]{figures/multipref_example2.pdf}
+    \caption{
+        Gain distribution in \multipref{} where gain is defined as the improvement in RM performance if a particular instance is routed to humans for annotation.
+        Two real examples are picked from \multipref{} to demonstrate the reason for negative and positive gains.
+        In the \protect\hlpink{\textbf{negative-gain}} example, the human annotation prefers a wrong answer to the math question.
+        In the \protect\hlteal{\textbf{positive-gain}} example,
+        the GPT-4 annotation prefers a response with limited scientific evidence, while the human annotator chooses the opposite.
+    }
+    \label{fig:gain_multipref}
+\end{figure}
+
+\begin{table*}[t]
+    \caption{
+        Average gain in \multipref{}'s performance (as predicted by the quadratic PPM) when routing 100 random preference instances to a human annotator for each tag.
+
+    }
+    \centering
+    \resizebox{\textwidth}{!}{
+        \begin{tabular}{@{}lr|lr@{}}
+            \toprule
+            \textbf{Tag}                               & \textbf{Gain} $\times10^{-3}$ & \textbf{Tag}                                            & \textbf{Gain} $\times10^{-3}$ \\
+            \midrule
+            BERTScore $\in [0.33, 0.67]$               & \g{0.19}                  & Subject Of Expertise: Logic                             & \g{-0.02}                 \\
+            Subject Of Expertise: Chemical Engineering & \g{0.11}                  & Subject Of Expertise: Transportation                    & \g{-0.03}                 \\
+            Subject Of Expertise: Religion             & \g{0.09}                  & Subject Of Expertise: Architecture And Design           & \g{-0.03}                 \\
+            Safety Concern: Moderate                   & \g{0.09}                  & Cosine similarity $\in [0.0, 0.33]$                     & \g{-0.03}                 \\
+            Subject Of Expertise: Anthropology         & \g{0.06}                  & Subject Of Expertise: Philosophy                        & \g{-0.05}                 \\
+            Subject Of Expertise: Chemistry            & \g{0.05}                  & Subject Of Expertise: Materials Science And Engineering & \g{-0.09}                 \\
+            Subject Of Expertise: Visual Arts          & \g{0.05}                  & Subject Of Expertise: Library And Museum Studies        & \g{-0.10}                 \\
+            Subject Of Expertise: Earth Sciences       & \g{0.05}                  & Subject Of Expertise: Media Studies And Communication   & \g{-0.10}                 \\
+            Subject Of Expertise: Space Sciences       & \g{0.04}                  & Subject Of Expertise: Military Sciences                 & \g{-0.10}                 \\
+            Complexity Of Intents: Moderate            & \g{0.03}                  & Subject Of Expertise: Family And Consumer Science       & \g{-0.63}                 \\
+            \bottomrule
+        \end{tabular}
+    }
+    \label{table:performance_gain}
+\end{table*}
+
+In this section, we investigate the features learned by the PPM in order to understand characteristics that render a preference instance a better fit for direct human annotation.
+To quantify the effect of routing an instance to human annotators, we compute its \textbf{expected performance gain}.
+We define gain by measuring the improvement in RM performance if a particular instance is routed to humans for annotation.
+We calculate it by getting the difference between a (1) routing configuration where a specific instance is routed to human annotators and a (2) routing configuration where no instances are routed to human annotators (i.e., 100\% synthetic annotations): $\Delta = \text{PPM}(v_n) - \text{PPM}(v_0)$.
+\autoref{fig:gain_multipref} shows the gain distribution in \multipref{} when routing each preference instance individually to human annotators, along with high- and low-gain examples and actual human and GPT-4 annotations.
+
+In order to estimate the performance gain of each tag $t \in T$, we route $n$ instances that satisfy the tag's condition (e.g., ``BERTScore between two responses is $\in [0.33, 0.67]$'') and compute the gain $\Delta$ normalized on the count of instances with that tag.
+
+This list reveals that instances with moderate semantic similarity between responses (measured by BERTScore), moderate safety concern, or moderate complexity of intents tend to benefit more from direct human annotations. This \textbf{moderation trend} is interesting but reasonable if we interpret that simple examples may not need human annotation and complex examples may be equally or even more challenging for humans.
+
+We also find that \textbf{most subjects of expertise (60\%) benefit from human annotations}, contributing positively to the RewardBench score.
+Preferences with prompts that require expert domain knowledge ($\Delta$: 6.438E-6) to answer also benefit from human annotations as opposed to prompts requiring basic domain knowledge ($\Delta$: -0.095E-6) or answerable by the general public ($\Delta$: -0.050E-6).
+
+
+
+\section{Related Work}
+
+
+\paragraph{Preference feedback for model training}
+Modern LMs go through an RLHF (Reinforcement Learning from Human Feedback) training stage before deployment \citep[\textit{inter alia}]{ouyang2022training, bai2022training}. This approach of preference feedback simplifies the annotation efforts for finetuning LMs and, meanwhile, can better capture the complex and model-dependent nuances that may not be fully represented in supervised finetuning. Typically, such preference data is incorporated into model training via either PPO \citep{schulman2017proximal} that uses the preference data to train a reward model (RM), which later is used to score model generations in an online RL setup, or DPO \citep{rafailov2023direct} that directly
+trains models based on the preferences. In this work, we mainly focus on the RM part by directly evaluating RMs on RewardBench \citep{lambert2024rewardbench} and Best-of-N reranking performance \citep{ivison2024unpacking}.
+\paragraph{Data mixing and selection in LM training.}
+Data mixing and selection have emerged as critical components in the large language model (LM) training pipeline \citep{albalak2024survey}. Various studies have addressed these challenges in different stages of the LM training process, particularly in pretraining \citep[\textit{inter alia}]{xie2024doremi, liu2024regmix} and supervised fine-tuning \citep[\textit{inter alia}]{wang2023tulu, lu2023instag,xia2024less}. A notable contribution by \citet{ivison2024unpacking} evaluates the impact of different preference datasets during the RLHF training stage and finds that synthetic preference data \citep{cui2023ultrafeedback} outperforms human preference datasets available at the time. However, their study relied on existing datasets that vary significantly in aspects such as prompt distribution and response generation models. 
+Our work introduces a novel routing framework aimed at optimizing in the preference label space, featuring an automated algorithm to select the appropriate annotation source, utilizing human input only when necessary. In this regard, our approach aligns with the active learning paradigm, which seeks to achieve comparable or superior model performance with fewer human labeled examples \citep{cohn1994improving,settles2009active}.
+In relation to this paradigm, another framework called \textit{CoAnnotating} \citep{li-etal-2023-coannotating}, uses uncertainty measurements such as entropy and an LM's self-evaluation in order to decide whether an annotation instance will be allocated to humans or LMs. 
+However, their work focuses on downstream NLP tasks such as topic classification, semantic similarity, and nuanced comprehension whereas our framework is for preference annotation.
+
+\paragraph{Performance Prediction}
+Our routing framework relies on a performance prediction model (PPM) to predict the performance metric given a dataset. This problem has been studied before based on various factors \citep{birch2008predicting, xia2020predicting, ye2021towards}. Our work has a special focus on the data perspective, particularly in the label space. Our approach to predicting model behavior based on the underlying dataset it is trained on shares similar thoughts to \textit{datamodels} \citep{ilyas2022datamodels,engstrom2024dsdm}, but we use a denser tag-based feature vector to represent the data and our objective is to predict the performance metric rather than the direct model outputs. Our simulation-based routing strategy, given the PPM, is inspired by \citet{liu2024regmix}, which studies domain mixing in the pretraining stage.
+
+
+\section{Conclusion}
+
+
+We propose a routing framework for preference learning that allocates instances to human annotators or an LM by identifying a subset that benefits from human annotation.
+Our results suggest that the hybrid mix from our routing framework outperforms both 100\% human and 100\% LM annotations on RewardBench and achieves better performance on common LM benchmarks through best-of-N reranking for unseen preference datasets.
+Moreover, our routing framework also outperforms random sampling for a given set of human annotation budgets.
+We also leverage the routing framework to identify key characteristics that render an instance benefit more from human annotations: high similarity between responses, prompts that require human expertise and knowledge, and prompts that fall under select subject areas to name a few.
+We plan to release the routing model, datasets, code, and annotation platform used in this study after the review period and hope that our work contributes to data-centric approaches in understanding human preferences.
+
+
+
+\section{Discussion and Limitations}
+
+
+\paragraph{Grounding of preference feedback quality.} Quality control is critical for human data annotation, especially in the modern era of building LMs. Typically, researchers use agreement as a metric for quality. However, for preference annotation, early works all ended up with relatively low agreement between annotators or even between annotators and researchers \citep{bai2022training, touvron2023llama, dubois2023alpacafarm}. This is largely due to the complexity of the tasks (e.g., many facts to verify, the expertise required, etc.), as well as the subjectivity in many cases (e.g., style preference, sensitive topics, safety threshold, etc.). This poses challenges for the data annotation process, as there is no ground truth for measuring the quality. In this work, we decide to ground the data quality into the model training performance (i.e., the utility of the data), and our framework can optimize towards this goal. Future work can explore other downstream utility metrics for optimization.
+
+\paragraph{Scaling the size of preference annotation.}
+Although we show the successful generalization of our router when applying it to other preference datasets (\S\ref{section:generalization_to_unseen_datasets}), this set of experiments is done at the same size (7K after removing ties). It remains unclear how well our performance prediction model can extrapolate beyond the training data size and predict what instances can add performance gain after 7K, so that we can keep growing our preference data to a larger size. We believe our current results and the patterns we find (\S\ref{section:analysis}) can provide insights on how to save human efforts, but a systematic scaling of our framework may require future work.
+
+\paragraph{Feedback beyond pairwise comparisons.}
+We focus on pairwise preferences which compare overall model responses.
+However, several formulations of preference feedback exist such as fine-grained preferences \citep{wu2024fine}, aspect-based preferences \citep[also available in \multipref{}]{wang2023helpsteer,wang2024helpsteer2} and preferences for process-reward models \citep{lightman2023let, uesato2022solving}. These annotations are more time consuming, hence, even more expensive, thus providing more room for leveraging LM annotation when possible.
+We leave this exploration for future work.
+
+\paragraph{Generalization to downstream DPO / policy model performance.}
+While hybrid preference annotations improve direct RM evaluation performance, it's unclear if these gains extend to downstream tasks when training a DPO model or a policy model using PPO with the reward models. \cite{ivison2024unpacking} found that improvements in reward models do not necessarily translate to improved downstream performance in PPO, as there are many confounding factors (e.g., the unlabeled prompts in PPO, the KL penalty, etc) that impact the PPO training. We hypothesize that downstream task performance is hard to measure (and still is an open research problem), and requires data collection at a larger scale to see significant effects.
+
+
+\section{Ethics Statement}
+
+
+This research explores a better combination of human and AI annotations for preference learning. Throughout the human annotation process, we ensured that all human participants were fully informed about the annotation task, and their annotations would be used to develop AI models. Participants provided explicit consent prior to their involvement, and all data collected was anonymized to protect individual privacy.
+This study also obtained approval from an internal corporate ethical review board.
+We acknowledge the potential societal impacts of replacing human laborers with AI models, even partially as this study, and we still emphasize the importance of maintaining human oversight in AI-assisted decision-making processes.
+
+
+
+\section{Reproducibility Statement}
+
+
+For the reproducibility of our experiments, we will release the datasets and our codebase after the review period.
+ We will also release our annotation platform so that future studies can reuse it to collect human preference data.
+
+
+

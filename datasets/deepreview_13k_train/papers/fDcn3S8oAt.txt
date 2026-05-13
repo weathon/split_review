@@ -1,0 +1,366 @@
+\title{LASeR: Learning to Adaptively Select Reward Models with Multi-Armed Bandits}
+
+\begin{abstract}
+Reward Models (RMs) play a crucial role in aligning large language models (LLMs) with human preferences, enhancing their performance by ranking outputs during inference or iterative training. However, the degree to which an RM generalizes to new tasks is often not known \emph{a priori}. For instance, some RMs may excel at scoring creative writing, while others specialize in evaluating math reasoning. Therefore, using only one fixed RM while training LLMs can be \emph{suboptimal}. Moreover, optimizing LLMs with multiple RMs simultaneously can be prohibitively computationally-intensive and challenging due to conflicting signals from different RMs, potentially degrading performance. To address these challenges, we introduce \textbf{\method{}} (\fullform{}), which iteratively trains LLMs using multiple RMs, selecting and utilizing the most well-suited RM for each instance to rank outputs and generate preference data, framed as a multi-armed bandit problem. Our empirical results on commonsense and math reasoning tasks demonstrate that \method{} can boost iterative LLM optimization by optimizing for multiple RMs, improving the absolute average accuracy of Llama-3-8B over three datasets by $2.67\%$  over training with ensemble RM scores while also showing superior training efficiency (e.g., a $2\times$ speedup). Moreover, on WildChat, a benchmark of instruction-following prompts in open-form generation, we find that using Llama-3-8B \method{} leads to a $71.45\%$ AlpacaEval win rate over sequentially optimizing multiple RMs. Extending to long-context generation tasks, we find that on Llama-3-8B, \method{} achieves an average improvement of $2.64$ F1 points on single-document QA tasks and $2.42$ F1 points on multi-document QA over random RM selection when used with best-of-$n$ sampling. Our analysis shows that \method{} is robust to noisy rewards and generalizes to multiple settings.  Finally, we demonstrate that \method{}'s RM selection changes depending on the underlying task or instance, and we verify the presence of conflicting preferences from multiple RMs, which can be mitigated using \method{}
+\end{abstract}
+
+\section{Introduction}
+
+
+When comparing two responses, human preferences often differ depending on factors like the underlying task, who the annotators are \citep{pmlr-v202-santurkar23a,ahmadian2024multilingual}, and how preferences are elicited \citep{bansalpeering}. 
+Therefore, models of preference data are also likely to differ, and might include noise as well as any biases contained in the preference data used to train them. 
+This can pose a problem when using such models as ``reward models'' (RMs) to align large language models (LLMs) to human preferences using reinforcement learning with human feedback~\citep{ref:christiano2017deep,ref:ziegler2019fine,ref:ouyang2022training}. 
+Recent work has focused on aligning LLMs through iterative training, using reward models as proxies for human judgment~\citep{gulcehre2023reinforced}, leveraging the LLM to act as an implicit RM or judge~\citep{ref:yuan2024self, ref:chen2024self}, or using the gold answer to compute a reward~\citep{ref:pang2024iterative}. 
+Under this paradigm, there are three stages to training LLMs:
+(i) \emph{generating multiple responses} to a query from an LLM; 
+(ii) \emph{scoring the responses with an RM} to create preference data with better and worse responses; and (iii) using \textit{model-generated preference data} to further train the LLM. 
+Note that for most domains, the gold reward is not readily available, making the quality of the RM or the degree to which it reflects human preferences (i.e., the gold reward) crucial to improving LLM performance. Indeed, several prior efforts aim to train new RMs that better reflect human preferences~\citep{ref:lambert2024rewardbench}. 
+
+However, \emph{selecting one reward model} to guide LLM training can be \emph{suboptimal} for three main reasons:  
+(1) A single RM may not be generalized to heterogeneous sets of examples. 
+RMs are typically designed to reflect specific objectives and may be trained on offline preference datasets. 
+Thus, an RM that performs well on one dataset or domain \textit{may not generalize effectively} to others, leading to misaligned outputs across different tasks or domains~\citep{ref:kirk2023understanding, ref:chen2024odin, ref:casper2023open, ref:gao2023scaling}. For instance, creativity plays a key role in evaluating the quality of a story, whereas correctness is more important in scoring math solutions. 
+(2) RM performance leaderboards (e.g., \citet{ref:lambert2024rewardbench}) that rely on human-annotated preferences can have unreliable rankings due to the presence of \textit{incorrect and ambiguous preferences}~\citep{ref:yu2024rlhf, ref:hejna2023contrastive}. 
+(3) Lastly, over-optimization on a particular RM can lead to \emph{reward hacking}~\citep{skalse2022defining, ref:rafailov2024scaling}, resulting in minimal gain or even drops in downstream performance. 
+
+To mitigate these issues, a prevalent approach is to \textit{ensemble multiple reward models}~\citep{ref:coste2023reward, ref:eisenstein2023helping, ref:zhang2024improving, ref:rame2024warm}. 
+However, these methods also come with significant challenges: as RMs are typically based on LLMs, training with multiple RMs often requires loading and managing several large models simultaneously, which can be \textit{computationally expensive}, becoming infeasible as models increase in size.
+Moreover, aggregating multiple RM scores together is susceptible to 
+\textit{noisy rewards or conflicting preferences} from RMs, especially RMs that are not well-suited for the specific task~\citep{ref:rita2024countering}.  
+This in turn, can degrade the quality of the preference data, leading to low-quality updates during training~\citep{ref:wang2024secrets}.
+Finally, manually selecting a subset of RMs to combine is a labor-intensive process that involves training many different variants on a combinatorially large set of RM groupings.
+This underscores the need for more efficient methods that efficiently and robustly optimize LLMs using multiple RMs. 
+In this work, we introduce \textit{\fullform{}} (\method{}), that, given a set of RMs, adaptively and efficiently \emph{selects} a suitable RM for each instance by casting selection as a \emph{multi-armed bandit} problem~\citep{ref:vermorel2005multi, ref:audibert2009exploration}. 
+Specifically, during training, the RM (arm) is chosen dynamically based on contextual information about the model’s performance and past interactions.
+The LLM is then fine-tuned based on the RM-annotated data, and the bandit's parameters are updated accordingly to reflect the performance of the LLM after training on preference data annotated using selected RM (see \cref{fig:process}). 
+By design, \method{}'s adaptive instance-level RM selection (c.f.~\cref{sec:method}) addresses the three shortcomings of choosing one reward model (lack of generalization, unreliable rankings, and over-optimization) and outperforms using the same RM across all instances, yielding higher downstream performance and better generalization.  
+Moreover, unlike previous multi-RM methods that require simultaneously loading and running multiple RMs~\citep{ref:rame2024warm, ref:coste2023reward}, our method selects one reward model at a time (\cref{sec:exp}). This makes the training more efficient and improves performance by allowing the model to adaptively focus on the most suitable RM for each specific instance or phase of training.
+Empirically, we demonstrate the effectiveness of \method{} for iteratively training LLMs using multiple RMs on three broad domains: reasoning, instruction-following in text generation, and long-context understanding (\cref{sec:exp-main}). 
+We show that on reasoning benchmarks such as StrategyQA~\citep{ref:geva2021strategyqa} (testing commonsense reasoning) and GSM8K~\citep{ref:cobbe2021gsm8k} (testing math reasoning), \method{} with Llama-3-8B outperforms training with the single best RM by $1.45\%$, and jointly optimizing with ensemble (average) RM scores by $2.67\%$ in absolute accuracy averaged over datasets. 
+\method{} is also effective on general instruction-following: we show that using \method{} with four strong 7B RMs from RewardBench to finetune Llama-3-8B on a subset of WildChat~\citep{zhao2024wildchat} beats LLMs trained with the best RM in the ensemble and a sequential baseline, with $56.34\%$ and $71.45\%$ win rates (respectively) on length-controlled AlpacaEval~\citep{dubois2024length}. Moreover, our results show the effectiveness of \method{}'s RM selection strategy at inference-time on long-form generation tasks; on LongBench~\citep{bai2022training}, we find \method{} beats random RM selection baseline by $2.64$ F1 points on single-document QA tasks and $2.42$ F1 points on multi-document QA
+when using best-of-$n$ sampling for Llama-3-8B.
+Our analysis reveals that \method{} is more efficient than sequential multi-RM and RM ensemble baselines in terms of training time (wall-clock hours) by a factor of $3\times$, and $2\times$, respectively while being more robust to noisy rewards and conflicting preferences from multiple RMs (\cref{sec:analysis}). Finally, we demonstrate that \method{} effectively selects RMs based on the underlying instance and generalizes to multiple settings, including out-of-distribution datasets, different training loss functions, etc. 
+
+
+\section{Related work}
+
+\paragraph{Multiple Reward Ensembles.} 
+Training large language models (LLMs) with multiple reward functions is an emerging research area focused on aligning model outputs with complex objectives that require diverse evaluation metrics. One prior approach involves using ensembles of multiple rewards~\citep{ref:rame2024warm, ref:wu2024fine, ref:coste2023reward, ref:zhang2024improving, ref:wang2024arithmetic, ref:jang2023personalized, ref:eisenstein2023helping}. 
+Unlike these methods, which train multiple RMs or use multiple RMs during LLM training, \method{} selects only a single pretrained RM at each LLM training step. 
+Not only is optimizing for one RM at a time more efficient, but it also avoids the problem of having conflicting rewards~\citep{ref:rita2024countering}.
+In \cref{sec:exp-main}, we show that \method{} outperforms an offline variant of optimizing LLMs with an ensemble of RMs (consistent with the mean optimization setting from \citet{ref:coste2023reward}).
+Another line of work uses mixture-of-experts (MoE) techniques for training an RM from multiple interpretable objectives~\citep{ref:wang2024interpretable} or jointly training task-specific RMs and a sparse MoE router~\citep{ref:quan2024dmoerm}. 
+Instead of relying on static datasets with human-annotated attributes for RM training (as \citet{ref:wang2024interpretable} does), we employ existing RMs to train LLMs on its own generations, a strategy that has been shown to be more effective~\citep{ivison2024unpacking}. 
+Unlike \citet{ref:quan2024dmoerm}, who jointly train multiple RMs and sparse MoE router (requiring loading all models at once), \method{} implicitly and efficiently learns a sparse router and does not need to train RMs.
+\method{} performs RM selection via multi-armed bandits over existing off-the-shelf RMs with strong performance on leaderboards~\citep{ref:lambert2024rewardbench}. 
+\paragraph{Multi-Armed Bandits (MABs).} There is a long-standing history of using multi-armed bandit algorithms for diverse applications in machine learning spanning online advertising~\citep{chen2013combinatorial}, recommendation systems~\citep{ref:li2010contextual}, hyperparameter optimization~\citep{li2018hyperband}, curriculum learning~\citep{ref:graves2017automated}, with some recent work at the intersection of MABs and language models~\citep[][\textit{inter alia}]{pasunuru2020dorb,ref:krishnamurthy2024can,ref:dwaracherla2024efficient}. 
+In the realm of RLHF specifically, \citet{ref:dwaracherla2024efficient} use double Thomson Sampling~\citep{wu2016double} to select which of the sampled responses should be annotated and paired using a single fixed RM, improving LLM performance.
+In contrast, \method{} first selects which RM (i.e., model of preferences) should be used to annotate LLM's responses to a query and then creates multiple preference pairs from these responses. 
+\citet{pasunuru2020dorb} optimize text generation models for different evaluation metrics such as ROUGE-L and BLEU via policy gradients~\citep{williams1992simple} over existing (static) question and data-to-text generation datasets.  
+In contrast, \method{} adopts an iterative training recipe and improves downstream generation performance across a wide range of tasks from instruction-following to math and commonsense reasoning by selecting relevant RMs and scoring the LLM's own generated responses without access to true rewards, i.e., gold labels, and without optimizing for the downstream evaluation metric. 
+\paragraph{Iterative LLM Training.} Recent works on training LLMs incorporate reinforcement learning with human feedback (RLHF) due to its effectiveness in improving instruction following the ability of LLMs over their pretrained counterparts~\citep{ref:ouyang2022training,bai2022training,touvron2023llama}.  The standard RLHF training pipeline, which comprises finetuning the LLM on static datasets with human-annotated preferences, is bottlenecked by the size and quality of annotated preference data as well as the limited effectiveness of off-policy optimization~\citep{xu2023some,xiong2024iterative,ref:yuan2024self,guo2024direct}. 
+To remedy this, recent work focuses on training LLMs iteratively, 
+scoring the LLM's own generations to create feedback data for RLHF.
+This line of work obtains scores either from gold labels \citep{singh2023beyond, ref:pang2024iterative}, from a single RM \citep{gulcehre2023reinforced}, or from the generating LLM \citep{ref:yuan2024self, ref:chen2024self}. 
+In contrast, we take advantage of the abundance of publicly-available RMs and growing interest in developing RMs \citep{ref:lambert2024rewardbench} by using \emph{multiple} RMs.
+This has several advantages over past work: it works in cases where gold labels are not available (e.g., generation tasks), deals with the three issues associated with using a single RM (unreliable rankings, lack of generalizability, and over-optimization), reduces the burden on the user to pick the right RM, and avoids problems stemming from the inability of LLMs to judge their own responses for certain domains~\citep{huang2023large}.
+
+
+\section{\method{}
+
+In this section, we describe \method{} in detail. 
+First, we expand on the training pipeline (in one iteration) with a general reward function (\cref{sec:rm_iter}). 
+Then, in \cref{sec:rm_bandit}, we describe how \method{} dynamically selects an RM from a set of multiple RMs using MAB algorithms, i.e., how we dynamically assign the reward function for a given instance or batch of instances. 
+Finally, in \cref{ssec:rm_train}, we describe the overall training setup across iterations and specifically how we update the parameters of the MAB at the end of each iteration. A detailed illustration of \method{} is shown in \cref{fig:process}. 
+
+\begin{figure*}[t]
+        \centering   
+        \includegraphics[trim={0cm 0 0 0.3cm},clip,scale=0.3]{figures/bandit_overall.pdf}
+        \caption{Overview of \method{}. 
+        Given the query, the multi-armed bandit selects an RM depending on the underlying query and the bandit's parameters (based on the usage of each RM and the expected MAB reward). At iteration $m$, the LLM generates multiple responses that are scored based on the selected RM for that query, scoring each response.
+        These responses are ranked into preference pairs, which are then used to fine-tune the model. The same train loss $\mc{L}^m$ is used to update the parameters of the LLM as well as the MAB for the next iteration, making the entire pipeline iterative.
+        }
+        \label{fig:process}
+\end{figure*}
+
+\subsection{Training LLMs using a Reward Function}
+\label{sec:rm_iter}
+
+\method{} involves training with multiple RMs using a multi-arm bandit (MAB), which selects one model at a time. 
+Therefore, we first describe how we train LLMs with generated data assuming a single RM; this corresponds to the top-right in~\cref{fig:process} (in blue). 
+
+\paragraph{Notation.} 
+Following \citet{ref:yuan2024self} and \citet{ref:pang2024iterative}, we adopt an iterative training pipeline to finetune the LLM for $M$ iterations. 
+Let $\pi_m$ be the LLM at iteration $m$; we assume that we start from an initial pretrained model $\pi_0$. 
+Let $\mc D = \{x_1, x_2, \dots, x_N\}$ represent the training inputs, where $x_i$ is an input query or prompt. Corresponding to each input query $x_i$, we sample a set of $n$ responses from the LLM at the current $m^{\text{th}}$ iteration as $\mathbf{y}_i = \{y^1_i, y^2_i, \dots, y^n_i\} \sim \pi_m(y | x_i)$. Let $R^\star\!:\!(y_i^j|x_i) \rightarrow \mathbb{R}$ be a reward function that can score an LLM generated response $y_i^j$ to a query $x_i$ based on how well it aligns with specific task objectives or instructions. Note that $R^\star(.)$ can be any reward function and may correspond to a single RM, one of the multiple RMs selected by the MAB (as in our case), or even the true reward. 
+
+\paragraph{Generating Preference Pairs.} We evaluate each response $y_i^j$ using the reward function $R^\star(y_i^j|x_i)$. 
+By comparing the rewards assigned to different responses, we can form preference pairs $(y_i^w, y_i^l)$, where $y_i^w$ is preferred over $y_i^l$ if $R^\star(y_i^w|x_i) > R^\star(y_i^l|x_i)$, thereby building a preference dataset:\footnote{Following~\citet{ref:pang2024iterative}, in our experiments, we randomly sample $P\!=\!10$ pairs corresponding to each prompt $x_i$. For brevity, we omit this in the notation of $\mc{D}_\mathrm{pref}$; but in our setting $|\mc{D}_\mathrm{pref}| = P\times|\mc{D}|$.}
+\[
+\mc D_{\mathrm{pref}} = \{(x_i, y_i^{w}, y_i^{l}) \mid x_i \in \mc D, R^\star(y_i^{w}) > R^\star(y_i^{l})\}.
+\]
+\paragraph{Training Loss Function ($\mathcal{L}^m$).} 
+In each iteration, we fine-tune the model using the generated preference dataset $\mc D_{\mathrm{pref}}$,  resulting in $M$ models $\pi_1, \pi_2,\dots, \pi_M$. 
+Specifically, we update the model using the DPO loss~\citep{ref:rafailov2024direct} for learning from the preference pairs. In this work, we use the following loss functions for training the LLM at iteration $m$: 
+\begin{align}
+\begin{split}
+       \mc L^m_{\textsc{dpo}}(\pi_m)\!&=\!-\mbb E_{(x_i, y_i^w, y_i^l) \sim \mc D_{\mathrm{pref}}}\left[\log \sigma\left(\beta \log \frac{\pi_m(y_i^w\!\mid\!x)}{\pi_{m-1}(y_i^w \mid x)} - \beta \log \frac{\pi_m( y_i^l\!\mid\!x)}{\pi_{\scriptstyle m-1}(y_i^l\!\mid x)}\right)\right] \\
+     \mc L^m_{\textsc{nll}}(\pi_m)\!&=\! -\mbb E_{(x_i, y_i^w) \sim \mc D_{\mathrm{pref}}}\left[\frac{\log \pi_m(y_i^w\!\mid\!x_i)}{|y_i^w|}\right],  
+\end{split}
+\end{align}
+where $\pi_m$, and $\pi_{m-1}$ denotes the LLM in the current iteration $m$ and the previous iteration $m-1$ (used as the reference model in DPO loss). 
+Following~\citet{ref:yuan2024self}, we use the standard DPO loss for instruction-finetuning. 
+Following \citet{ref:pang2024iterative}, we use the NLL loss on the preferred responses as an additional regularizer for reasoning tasks, i.e., $\mc L^m \!=\! \mc L ^m_{\textsc{dpo}}+ \mc{L}^m_{\textsc{nll}}$. In \cref{sec:app-gen}, we show that \method{} outperforms baselines irrespective of the choice of the loss function $\mc L^m$.
+
+\subsection{Bandit Algorithms for Adaptive RM Selection}
+\label{sec:rm_bandit}
+
+\cref{sec:rm_iter} described the data creation and LLM training procedure for our method when using a general RM (\cref{fig:process}; top-right), which trains the LLM for a single mini-batch. 
+Here, we describe the process by which we adaptively \emph{select an RM for each batch of queries} using bandit algorithms (shown in \cref{fig:process}-left, in yellow) and update the parameters of the bandit (more details in \cref{sec:app-bandit}).  
+
+\paragraph{Background: Multi-Armed Bandits.}
+The multi-armed bandit (MAB) problem addresses the challenge of balancing exploration and exploitation in sequential decision-making~\citep{ref:vermorel2005multi, ref:audibert2009exploration}. 
+The goal is to maximize cumulative MAB rewards over time by selecting arms that yield the highest MAB rewards.\footnote{In order to distinguish between rewards or scores generated by RMs and the rewards used in MAB literature, we refer to the latter as ``MAB rewards''.} 
+A decision-making agent faces a trade-off: whether to exploit the arm with the highest known MAB reward based on past observations or explore other, less familiar arms to gather more information that might lead to even better rewards in the future.
+In a contextual MAB setting, the agent is also provided with additional information in the form of a context, such as current state and input, to help inform arm selection accordingly.
+\paragraph{RM selection in \method{}.} \method{} uses mini-batch training for each iteration, i.e., we use MABs to select a\textit{ single RM for a batch of prompts} $\mathbf{x}_t$ for $t^{\text{th}}$ batch or training step (total of $T$ steps/batches in each iteration).\footnote{Note that \method{} can switch between RMs at the instance level if the batch size is set to 1; however, for the sake of efficiency, we batch instances together both for \method{} and the baselines, as this reduces the computational overhead associated with loading RMs onto the GPU.}
+Let the set of $K$ reward models (or arms) denoted by $\mc{R} = \{R_1, R_2, \dots, R_K\}$, where each $R_k$ corresponds to a different RM. 
+We employ \textbf{\texttt{LinUCB}}~\citep{ref:li2010contextual}, a contextual bandit algorithm for the arm or RM  selection. \citet{ref:li2010contextual} assume that the MAB reward -- in our case, the cumulative train loss function on the batch ($\mc{L}^m$) at the given iteration $m$ -- can be modeled linearly as a function of context features and computes the expected MAB reward of each arm with an upper confidence bound to ensure exploration~\citep{ref:garivier2008upper, ref:garivier2011upper}. 
+In each step $t$, we have a batch of input prompts $\mathbf{x}_t$ for which we compute sentence embeddings, using the policy model $\pi_m$, and use the mean sentence embedding as the context $c(t)$ to the MAB, i.e., $c(t) = \sum_{x \in \mathbf{x}_t} e_m(x) / |\mathbf{x}_t|$, where $e_m(.) \in \mbb{R}^d$ yields the sentence embedding from the model $\pi_m$. We calculate the embedding for a prompt as the last token embedding from model $\pi_m$.   
+The learned parameters of the LinUCB bandit include $\hat \theta_k \in \mbb{R}^d$ which represents the learned weights for the features of each reward model and $A_k \in \mbb{R}^{d \times d}$ (a covariance matrix) and a bias vector $b_k \in \mbb{R}^{d}$ corresponding to each arm or RM $R_k$.  We initialize the parameters for LinUCB by randomly initializing $b_k$ and setting parameter $A_k$ to the identity matrix. 
+Based on the LinUCB algorithm, for each batch, the selected RM $R^{\star}_t$ is determined by:
+\be \label{eq:arm-linucb}
+R^{\star}_t = \arg \max_{k \in [1,K]} \left(c(t)^\top \hat \theta_k + \alpha \sqrt{c(t)^\top A_k^{-1} c(t)}\right),
+\ee
+where $\hat \theta_k=A_k^{-1} b_k$. $A_k$ and $b_k$ are updated based on the MAB reward for each RM, which corresponds to the normalized negative train loss $-\hat{\mc{L}}^m$ (described in detail in \cref{sec:app-bandit}): 
+\be \label{eq:update-linucb}
+A_{k} \leftarrow A_{k} +  c(t)c(t)^\top ;
+b_{k} \leftarrow b_{k} - \hat{\mc{L}}^m(t) c(t).
+\ee
+
+
+\subsection{LLM and Bandit Training in \method{}}
+\label{ssec:rm_train}
+
+A key aspect of our approach is the generation of new preference training data in each iteration using the generations of the LLM itself and the RM selected by the MAB. 
+\cref{fig:process} presents our training procedure, broken down into three stages: (i) the MAB selects an RM $R^\star_t$ (see \cref{sec:rm_bandit}; \cref{fig:process} left), generating preference pairs by scoring the LLM's outputs using the RM (\cref{fig:process} (top-right)), and parameter updates to the LLM and MAB.
+In this way, the model continuously learns from its own outputs, guided by the selected reward model. 
+After each LLM train step (i.e., one mini-batch), the MAB's parameters are updated based on the observed MAB reward, i.e., how much the LLM's loss decreased from using the selected RM. 
+In the case of LinUCB, this involves updating the parameter estimates $b_k, A_k$ (see \cref{fig:process}; bottom in green). This entire process -- selection of reward models, generation of new supervision data, fine-tuning, and bandit updates -- repeats for a total of $M$ iterations (summarized in Algorithm~\ref{alg:training}).
+
+\paragraph{\method{} with Best-of-$n$ Sampling.} 
+For settings where finetuning the LLM is not desirable or feasible, \method{} can also be applied to learn the MAB parameters without training the LLM.
+Rather than fine-tuning the model with preference data, we employ best-of-$n$ sampling~\citep{lightman2023let,sun2024easytohardgeneralizationscalablealignment}, where multiple responses are generated, and the best one is selected based on the RM. The bandit parameters are then updated using equation~\eqref{eq:update-linucb}, with the MAB reward calculated as the negative normalized NLL loss on the train data. 
+This updated bandit can subsequently be used for inference on the test set. 
+This approach is particularly useful for tasks such as long-context understanding, where training would be too computationally intensive (example setting in~\cref{sec:exp-main}).
+
+
+
+\section{Experiments and Results}
+
+
+\subsection{Experimental Setup}\label{sec:exp-setup}
+\paragraph{Models.} We conduct our experiments on the Llama-3-8B base~\citep{ref:llama3modelcard} and the Mistral-7b-v3-instruct~\citep{ref:jiang2023mistral} models. For training, all models are fine-tuned
+using Low-Rank Adaptation (LoRA)~\citep{ref:hu2021lora} for efficiency. For both training and inference, we do 0-shot prompting and sampling $n\!=\!30$ responses per prompt with temperature $0.8$ (see \cref{sec:app-setting}). 
+
+\paragraph{Reward models.} We select $K=4$ strong 7B RMs from RewardBench~\citep{ref:lambert2024rewardbench}, which include Zephyr-7B-Alpha, Qwen1.5-7B-Chat, Eurus-7B-KTO, and OLMo-7B-Instruct. Following the pipeline outlined in~\citet{ref:lambert2024rewardbench}, for these models, we compute the reward for each response as the log likelihood of the RM for that response (details in \cref{sec:app-setting}). 
+\paragraph{Datasets and Metrics.} Our experiments cover a range of tasks and datasets (see \cref{sec:app-setting}):
+
+\begin{itemize}[topsep=0pt,itemsep=0pt,leftmargin=*]
+    \item \textbf{Reasoning:} Evaluating reasoning abilities is crucial for testing the model’s capacity to handle complex, multi-step tasks and has presented a challenge to iterative preference optimization methods~\citep{ref:yuan2024self,ref:chen2024self}. 
+    We train and evaluate on 
+    StrategyQA~\citep{ref:geva2021strategyqa}, MMLU~\citep{ref:hendryckstest2021,ref:hendrycks2021ethics}, and  GSM8K~\citep{ref:cobbe2021gsm8k}.
+    \item \textbf{Instruction-Following:} We further evaluate our method on heterogeneous tasks without gold labels. We use user prompts from WildChat dataset~\citep{zhao2024wildchat}, which contains a collection of natural user-chatbot interactions. 
+    This dataset has five primary categories of instruction-following prompts: creative writing, analysis, coding, factual information, and math reasoning. 
+    Due to computational constraints, we randomly subsample 5K prompts from each category for model training. 
+    We compare models trained with \method{} against baselines (described below) using length-controlled AlpacaEval~\citep{dubois2024length} that pairs responses from two different LLMs and uses GPT-4 as a judge to pick the winner, accounting for the length of both responses.
+    \item \textbf{Long-Context Understanding:} As finetuning LLMs on long-context inputs is computationally intensive, we demonstrate the effectiveness of \method{} using Best-of-$n$ sampling on
+    LongBench~\citep{ref:bai2023longbench} which consists of multiple tasks, such as single-document QA, multi-document QA, summarization, and few-shot learning. 
+    For the QA and few-shot learning tasks, we measure performance with F1 score, while for summarization we use Rouge-L~\citep{lin-2004-rouge}. 
+\end{itemize}
+\paragraph{Baselines.} We compare our models against the following baselines:
+
+\begin{itemize}[topsep=0pt,itemsep=0pt,leftmargin=*]
+  
+    \item \textbf{Best RM}: From our collection of RMs, we pick the RM that corresponds to the best overall score on RewardBench~\citep{ref:lambert2024rewardbench}: Zephyr-7B-Alpha. 
+    We use this \emph{single} RM during training (c.f.~\cref{sec:rm_iter}). 
+    This baseline reflects the performance gain a user could expect when selecting the best RM from a leaderboard without knowing \emph{a priori} how it generalizes to a particular domain.
+    
+    \item \textbf{Avg. RM}: Here, we perform single RM training over all the RMs in our collection and report the average performance. A comparison with this baseline represents an expected gain from a randomly-picked RM
+    from a leaderboard.
+    
+    \item \textbf{Random RM Selection:} In this baseline, we randomly sample a single RM from the set of RMs (from a uniform distribution) for each training batch in every iteration. This comparison demonstrates whether, without prior knowledge of which RM is best suited for a downstream task, \method{} can outperform random sampling of RMs during training. 
+    
+    \item \textbf{Sequential RM Selection}: In training, this method explores different RM sequentially and based on a set order in each iteration to examine their impact on model training, demonstrating that, instead of optimizing with all RMs, \method{} can adaptively select the best RM for each batch. 
+    \item \textbf{Offline RM Ensemble:}  We generate multiple responses for each query, which are scored (offline) using each RM, and the preference dataset is created by averaging the scores across all RMs (following \citet{ref:coste2023reward}); thus, comparing \method{} with using all RMs simultaneously. 
+\end{itemize}
+
+Conceptually, the best RM baseline serves as an ``exploit-only'' setting that exploits the best available RM based on RewardBench. 
+On the other hand, the random and sequential selection baselines are ``explore-only'' in that they pick a new RM either randomly or via a predefined sequence irrespective of the performance of each arm (RM). 
+In our experiments, we train each model to convergence. In particular, \method{}, ``Best RM'', ``Avg. RM'', and RM ensemble baselines were trained for 10 iterations. 
+For both the sequential and random RM selection, we found LLM training took longer to converge, and consequently, the model was trained for 25 iterations. 
+The number of iterations for each approach was chosen based on stabilization in performance on the dev set (see \cref{sec:app-setting}).
+
+\begin{table}[t]
+\caption{Performance on reasoning benchmarks. The baselines also include supervised fine-tuning on human-written responses (SFT) as a reference for performance without preference optimization. The highest accuracy is shown in bold, and the second-highest accuracy is underlined. Across both Llama-3-8B and Mistral-7B models, \method{} yields the highest accuracy for each task.
+}
+\label{tab:rewardbench}
+\centering
+\small
+\setlength{\tabcolsep}{3 pt}
+\begin{tabular}{lcccccccrc}
+\toprule
+\multirow{2}{*}{\textbf{Method}} & \multicolumn{4}{c}{\textbf{Llama-3-8B}} & \multicolumn{4}{c}{\textbf{Mistral-7B}} \\
+\cmidrule(lr){2-5}\cmidrule(lr){6-9}
+ & StrategyQA & GSM8K & MMLU & Avg. & StrategyQA & GSM8K & MMLU & Avg. \\
+\midrule
+\rowcolor{gray!20}
+SFT & 80.41 & 69.43 & 65.66 & 71.83 & 68.57 & 43.62 & 56.48 & 56.22 \\
+Best RM & 84.29  & \underline{73.16} & 67.15 & 74.87 & 70.06 & 45.81 & \underline{62.04} & \underline{59.30} \\
+Avg. RM & 82.62 & 71.57 & 66.67 & 73.62 & 69.62  & 45.47  &  59.58 & 58.22 \\
+Offline RM Ensemble & 82.96 & 70.94  & 67.04 & 73.65 & 68.89 & 44.53 & 58.23 & 57.22 \\
+Random RM Selection & \underline{84.37} & 71.99 & 67.85 & 74.74 & 69.97  & 45.12  &  59.88 & 58.32 \\
+Sequential RM Selection & 83.90 & 72.94 & \underline{68.02} & \underline{74.95} & \underline{70.59} & \underline{46.11} & 59.66 & 58.79 \\
+\method{} (Ours) & \textbf{85.96} & \textbf{74.75} & \textbf{68.24} & \textbf{76.32}& \textbf{73.06} & \textbf{46.89} & \textbf{62.27} & \textbf{60.74} \\
+\bottomrule
+\end{tabular}
+\end{table}
+\subsection{Main Results} \label{sec:exp-main}
+\paragraph{\method{} achieves the best average accuracy on reasoning tasks.} Table~\ref{tab:rewardbench} shows our method consistently outperforms the baselines across multiple benchmarks, particularly in the StrategyQA and GSM8K tasks. 
+For example, using the Llama-3-8B model, \method{} yields the highest reasoning accuracy average across all tasks, with improvements of approximately $2\%$ absolute accuracy over the sequential baseline on both GSM8K and StrategyQA. 
+On the Mistral-7B model, \method{} also improves average accuracy by roughly $2\%$ over the sequential baseline. Additionally, our method outperforms the best RM (based on RewardBench) baseline in average accuracy by $1.45\%$ and $1.44\%$ absolute accuracy with Llama-3-8B and Mistral-7B, respectively. 
+In cases where the best RM is not known beforehand, \method{} surpasses the performance of the average RM by $2.7
+\%$ on Llama-3-8B and using RM ensemble for each instance by $2.67
+\%$ and $3.52\%$ on Llama-3-8B and Mistral-7B, respectively (in accuracy averaged over the three tasks). 
+Overall, \method{} provides \emph{consistent} results while the underlined second-place models show \emph{inconsistent} performance across datasets and models. 
+These results also emphasize the benefit of \method{}, as it eliminates the need to choose a different RM in advance, such as random, sequential selection, or the best RM. 
+
+
+\paragraph{\method{} beats baselines at instruction-following.} 
+Often, LLMs are used by large numbers of people with a diverse set of queries, goals, and intentions, and their preferences vary based on the underlying query. To demonstrate the effectiveness of \method{} in such settings, we compare the instruction-following performance, i.e., AlpacaEval win rates, of LLMs trained using \method{} with the baselines using WildChat (see \cref{sec:exp-setup}).
+Specifically, with Llama-3-8B, \method{} achieves substantial win rates compared to the random and sequential baselines, with $78.33\%$, and $71.45\%$, respectively.
+We also outperform training with the single best RM (per RewardBench) by a $56.34\%$ win rate. 
+We hypothesize the lower win rate of the baselines stems from the inability of these baselines to deal with conflicting signals from multiple RMs (see \cref{fig:agree} for further analysis). 
+The results are also applicable to the Mistral-7B model, which achieved a win rate of $58.72\%$ against the best-RM baseline and a win rate of $63.72\%$ against the sequential selection baseline. Overall, these results highlight that \method{} excels in tasks without gold labels and performs consistently well at following instructions across various user queries, showcasing its adaptability to diverse tasks. 
+\begin{figure*}[t]
+        \centering   \includegraphics[width=1.0\linewidth]{figures/wildchat_1.pdf}
+        \caption{Length-controlled AlpacaEval win rates comparing \method{} against baselines on the instruction-following tasks on WildChat using Llama-3-8B.}
+        \label{fig:wildchat}
+\end{figure*}
+\paragraph{\method{}'s adaptive RM selection helps long-context understanding.} 
+Given the cost of training long-context systems,
+ for LongBench~\citep{ref:bai2023longbench}, rather than finetuning a model using RMs, we employ the selected RM to rerank generation in Best-of-$n$ sampling (see \cref{ssec:rm_train}).
+In \cref{tab:long-context}, we observe that \method{} consistently outperforms the baselines across tasks on Llama-3-8B and Mistral-7B except on summarization, where we achieve comparable performance. \method{} improves single-doc QA by $3.58$ F1 points over the base Llama-3-8B model and $2.64$ F1 points over random RM selection.  
+On multi-doc QA, our approach improves performance over the Llama-3-8B and Mistral-7B models by $\approx\!4$ F1 points each, beating out random RM selection by $2.42$ F1 points on Mistral-7B.
+Lastly, on few-shot learning tasks, \method{} provides over $3$ points gain in F1 compared to the base model for both Llama-3-8B and Mistral-7B, surpassing the average RM performance by up to $2.4$ F1 points (on Llama-3-8B) and demonstrating its effectiveness across tasks.
+ 
+\begin{table}[t]
+\caption{\method{} outperforms baselines in long-context understanding tasks with Llama-3-8B and Mistral-7B.
+Sequential RM selection is not applicable in this setting as only inference is conducted. For QA and few-shot learning tasks, we report F1 scores, and for summarization we report Rouge-L.}
+\label{tab:long-context}
+\centering
+\small
+\setlength{\tabcolsep}{3 pt}
+\begin{tabular}{lccccccccr}
+\toprule
+\multirow{2}{*}{\textbf{Method}} & \multicolumn{2}{c}{\textbf{Single-Doc QA}} & \multicolumn{2}{c}{\textbf{Multi-Doc QA}} & \multicolumn{2}{c}{\textbf{Summarization}} & \multicolumn{2}{c}{\textbf{Few-shot Learning}} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}\cmidrule(lr){8-9}
+ & Llama-3 & Mistral & Llama-3 & Mistral & Llama-3 & Mistral & Llama-3 & Mistral \\
+\midrule
+Base model & 33.89 & 26.01 & 32.96  & 24.06 & 29.54 & 26.47 & 70.23 &  64.93   \\ 
+Best RM & \underline{35.12} & \underline{28.93} & \underline{35.83}& \textbf{27.93}  & \textbf{34.26} & \textbf{30.42} & \underline{71.79} & \underline{68.34} \\
+Avg. RM & 34.96 & 27.47 & 35.39 & 26.38  & 31.71 & 27.34  & 71.28 & 66.94 \\
+Random RM Selection & 34.83 & 27.44 & 35.19 & 25.38  &  31.57 & 27.19 &  70.91 & 66.72 \\
+\method{} (Ours) & \textbf{37.47} & \textbf{29.14} & \textbf{36.94} & \underline{27.80} & \underline{34.13} & \underline{30.08} & \textbf{73.31} & \textbf{68.47}  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+
+\section{Additional Analysis of \method{}
+
+\paragraph{Robustness to Noisy Rewards.} 
+To examine the robustness of our method in the presence of noisy or irrelevant rewards, we conduct the following analysis using Llama-3-8B on GSM8K. We add varying amounts of Gaussian noise $\sigma$ to the rewards generated by RMs sampled from the distribution $\mc{N}(0, \sigma I)$, where $I$ is the identity matrix, to simulate noisy rewards when using RMs in out-of-distribution settings. 
+In addition to \method{} using the LinUCB algorithm (c.f. \cref{sec:rm_bandit}), 
+\begin{wrapfigure}{r}{0.5\textwidth}
+        \centering
+        \includegraphics[trim={1.2cm 0 0 0},clip,scale=0.2]{figures/robust_rewardbench_1.pdf}
+        \caption{Impact of the magnitude of Gaussian noise on the accuracy of \method{} and sequential baseline on RewardBench.
+        } 
+        \label{fig:robust-analysis}
+\end{wrapfigure} 
+we also use Exp3~\citep{ref:auer2002nonstochastic} designed for adversarial bandit settings. 
+In \cref{fig:robust-analysis}, we find that even as the degree of noise in RM scores increases (from $\sigma\!=\!$ 0.1 to 0.4), \method{}'s selection strategy continues to perform robustly, mitigating the effects of noise compared to the sequential baseline. 
+Specifically, \method{} has an average performance drop of only $0.55\%$ accuracy at a noise level of $\sigma\!=\!0.3$, whereas the sequential baseline suffers a $1.6\%$ accuracy drop (3 times as much) under the same conditions. 
+Furthermore, \method{} using Exp3, the most noise-robust method, maintains consistent performance, with only a $0.26\%$ accuracy drop. 
+   \begin{wrapfigure}{r}{0.4\textwidth}
+        \begin{center}
+        \includegraphics[scale=0.3]{figures/wall_clock_1.pdf}
+        \caption{Training efficiency of \method{} (LinUCB, and Exp3) vs. sequential selection and RM ensemble on GSM8K.}
+        \label{fig:wall-clock}
+        \end{center}
+\end{wrapfigure}
+\paragraph{Training Efficiency of \method{}.} 
+ As we noted in \cref{sec:exp-setup}, standard multi-reward baselines
+    such as sequential and random RM selection are slow to converge. We now concretely
+  show the accuracy-training time tradeoff in \cref{fig:wall-clock} by comparing the GSM8K performance of training with \method{} (with LinUCB and Exp3) with sequential RM selection and the offline RM ensemble, along with the corresponding wall clock training time.\footnote{Wall clock time is measured as the training time of a model (hours), keeping compute resource consistent.} We find that sequentially optimizing over each RM performs the worst in terms of training time ($3\times$ of \method{}) while offline RM ensemble has the worst accuracy (and takes $2\times$ the training time of \method{}). Among the MAB algorithms, LinUCB achieves the best balance. Exp3, while slower than LinUCB, reaches the highest accuracy, demonstrating its strength in effectively managing exploration across RMs. 
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \centering   
+    \includegraphics[scale=0.275]{figures/agreement_rate_2.pdf}
+    \caption{Agreement in preference rankings between RMs on output pairs generated by Llama-3-8B on MMLU (left) and WildChat (right).}
+    \label{fig:agree}
+\end{wrapfigure}
+\paragraph{Presence of Conflicting Signals among RMs.} 
+In \cref{sec:exp-main}, we find that \method{} consistently outperforms other multi-reward baselines across a wide variety of tasks. We attribute some of these performance gains to the inability of the multi-reward baseline to handle conflicting signals, resulting in subpar training data from multiple RMs. To study this, we 
+sample pairs of outputs generated by Llama-3-8B on MMLU as well as WildChat and evaluate the consistency of response preferences measured by multiple RMs.
+Since pair-wise preferences are binary, we compute F1 to measure consistency with one RM's preferences serving as the reference.~\cref{fig:agree} (left on MMLU) reveals that Qwen and Zephyr have the highest agreement rate at $0.77$, while Qwen's agreement with Eurus and Olmo is lower at $0.58$ and $0.43$, respectively. Zephyr also shows low agreement with Olmo at $0.57$. This is expected as Qwen and Zephyr are the top-performing models in reasoning according to RewardBench, while Olmo ranks the lowest in reasoning ability among the four models. We observe similar trends in agreement across RMs on  WildChat (albeit with different agreement scores), which contains user queries asked LLMs in the wild; see \cref{fig:agree} (right). It appears that for more heterogeneous datasets with more categories, the level of disagreement among RMs (or conflict) increases. This also highlights the benefit of \method{} over multi-RM baselines that do not adequately address conflicts in RMs. 
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+        \centering   
+        \includegraphics[scale=0.24]{figures/util_2.pdf}
+        \caption{Utilization (\%) of each RM on instruction-following queries from WildChat. The bars are arranged based on their overall scores on RewardBench, from lowest to highest. \method{} dynamically selects from different RMs depending on the nature of the underlying instance.
+        }
+        \label{fig:util}
+\end{wrapfigure}
+\paragraph{\method{}'s selected RM adjusts to the Query.} 
+\cref{fig:util} shows the relative utilization rates of each arm (i.e., RM) of the bandit on WildChat. 
+ We observed vastly different RM utilization rates depending on the underlying query within the \emph{same dataset}. On queries requiring creativity in LLM responses, we find that Olmo and Eurus RMs are utilized about $20\%$ more often than Qwen RM, despite Qwen RM being ranked higher on RewardBench. This can be explained by the fact that the Qwen RM largely underperforms on the ``chat'' subsplit of RewardBench (behind Olmo and Eurus by nearly 40 points in chat score). On the other hand, Qwen RM is used roughly half the time for user prompts involving math, while Olmo and Eurus are used sparingly. This is consistent with Qwen RM's ranking on the ``reasoning'' split of RewardBench, outperforming Eurus and Olmo RMs by 15-20 points. Note that \method{} \emph{automatically} deduces these relative rankings of RMs and uses them depending on the underlying query \emph{without having access to the RewardBench leaderboard}.
+Therefore, RM utilization of \method{} can serve as an analysis tool for future work when assessing performance on untested domains.
+\paragraph{Generalization ability of \method{}.} 
+While recent work focuses on building RMs that reflect preferences across domains, a large body of prior work developed a suite of evaluation metrics catered to specific domains such as reasoning~\citep{ref:golovneva2022roscoe, ref:prasad2023receval}. In \cref{tab:roscoe} (\cref{sec:app-gen}), we show that Llama-3-8B trained using \method{}, to adaptively select relevant evaluation metrics, outperforms baselines by $1.62\%$ on average and can effectively filter underperforming metrics without degrading performance (c.f. \cref{fig:robust-roscoe}). Furthermore, from \cref{tab:loss-analysis}, we observe that on reasoning datasets \method{} outperforms sequential RM optimization under four different choices of loss functions: NLL, DPO~\citep{ref:rafailov2024direct}, DPO + NLL~\citep{ref:pang2024iterative}, and KTO~\citep{ethayarajh2024kto}. Finally, in \cref{tab:generalization}, we find that models trained with \method{} also exhibit the highest generalization to out-of-distribution settings such as on CommonsenseQA~\citep{ref:talmor2018commonsenseqa} and MATH~\citep{ref:hendrycks2021math}, reiterating the broad generalizability of \method{}. 
+
+
+
+\section{Discussion and Conclusion}
+
+\paragraph{\method{} with different ``kinds'' of RMs.}
+In \cref{sec:exp-main}, we show that \method{} can choose from a set of candidate RMs, and our analysis in \cref{fig:robust-analysis} highlights the fact that \method{} is robust to noisy RMs.
+Furthermore, in \cref{sec:app-gen}, we show that \method{} can also be used with metric-based rewards \citep{ref:golovneva2022roscoe}. 
+These experiments reflect a conceptual split between the generator (the LLM) and the scorer (the RM or metric).
+Thus, \method{} is applicable to other settings that follow this paradigm, e.g., using an LLM-as-a-judge~\citep{zheng2023judging}, where \method{} could be used to choose between different judge models or prompts or different combinations of RMs and metrics. We leave adding such models into \method{} to future work.
+
+\paragraph{Quality of RMs used with \method{}.} 
+Methods that rely on RMs for scoring generally assume that these RMs have a strong correlation with human judgments. 
+\method{} tempers this assumption in a number of ways: 
+first, by ensembling multiple RMs, \method{} weakens the effect of noisy RMs; this can be seen in \cref{fig:robust-analysis}, where \method{} mitigates the negative impact of a noisy RM even as the level of noise is increased. 
+Moreover, the fact that \method{} can select RMs at an instance-level means that there need not be a \emph{single} RM that always correlates well across all instances.
+However, \method{} does require at least one RM to be positively correlated with human judgments on each instance.
+If this assumption is not met (i.e., \emph{all} RMs are poorly-correlated across \emph{all} instances), then optimizing for the RMs will yield poor results. Note that this holds true for any method optimizing for RMs. 
+Because \method{} selects from multiple RMs, its contributions are complementary to developments in RMs, which can easily be integrated into \method{}, as well as improvements to preference optimization loss functions (see \cref{sec:app-gen}). 
+Such RM improvements are likely to be necessary as LLMs are deployed in domains that are out of scope for existing systems and domains with heterogeneous requirements (e.g., our generation domains in \cref{sec:exp-main}).
+In these cases, there will be no single ``perfect'' existing RM, and successful solutions will likely involve mixing multiple RMs. 
+A core benefit of \method{} is its the ability to automatically filter RMs; in \cref{fig:util} we see that utilization differs across domains. 
+This allows users to avoid expensive experimentation with subsets of RMs: they can simply offload this task to \method{}, which will automatically select the more useful RM(s). 
+
+\paragraph{Conclusion.} 
+We present \method{}, an adaptive method for selecting RMs and iteratively training LLMs using multiple RMs. 
+We formulate RM selection as a contextual multi-armed bandit problem, learning to select the RM that most improves the LLM conditioned on the given input or query.
+We test \method{} across diverse settings, demonstrating its utility on reasoning tasks, open-ended instruction-following tasks, as well as long-context generation, where we use the selected RM to rerank outputs without training the LLM. 
+Across domains, we show that \method{} \emph{consistently} results in superior performance, whereas multi-RM baselines that select RMs using random or fixed strategies, or ensemble multiple RMs uniformly, have lower and more variable performance.
+In our analysis, we show that \method{} is robust to noisy RMs, and flexibly uses different RMs depending on the domain, and generalizes to multiple settings. 
+Moreover, by selecting one RM at a time, \method{} provides the best of both worlds: consistently outperforming all baselines while still maintaining efficiency by only optimizing for one model at a time. 
+Taken together, our results indicate that \method{} is a powerful tool for improving LLMs, providing us with the robustness and performance improvements associated with training against multiple RMs without incurring the downsides of having to select only one fixed RM or having to handle conflicting reward signals. 
+
+
+

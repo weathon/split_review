@@ -1,0 +1,535 @@
+\title{UOE: Unlearning One Expert is Enough for Mixture-of-Experts LLMs}
+
+\begin{abstract}
+Recent advancements in large language model (LLM) unlearning have shown remarkable success in removing unwanted data-model influences while preserving the model's utility for legitimate knowledge. However, despite these strides, sparse Mixture-of-Experts (MoE) LLMs--a key subset of the LLM family--have received little attention and remain largely unexplored in the context of unlearning. As MoE LLMs are celebrated for their exceptional performance and highly efficient inference processes, we ask: How can unlearning be performed effectively and efficiently on MoE LLMs? And will traditional unlearning methods be applicable to MoE architectures? Our pilot study shows that the dynamic routing nature of MoE LLMs introduces unique challenges, leading to substantial utility drops when existing unlearning methods are applied. Specifically, unlearning disrupts the router's expert selection, causing significant selection shift from the most unlearning target-related experts to irrelevant ones. As a result, more experts than necessary are affected, leading to excessive forgetting and loss of control over which knowledge is erased. To address this, we propose a novel single-expert unlearning framework, referred to as {\ours}, for MoE LLMs. Through expert attribution, unlearning is concentrated on the most actively engaged expert for the specified knowledge. Concurrently, an anchor loss is applied to the router to stabilize the active state of this targeted expert, ensuring focused and controlled unlearning that preserves model utility. The proposed {\ours} framework is also compatible with various unlearning algorithms. Extensive experiments demonstrate that {\ours} enhances both forget quality up to $5\%$ and model utility by $35\%$ on MoE LLMs across various benchmarks, LLM architectures, while only unlearning $0.06\%$ of the model parameters. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec: intro}
+
+Despite the extraordinary ability in generating human-like content \citep{touvron2023llama}, the rapid development of large language models (LLMs) have raised a series of ethical and security concerns, such as pretraining on copyrighted data \citep{sun2024trustllm}, bias perpetuation \citep{motoki2023more}, the generation of toxic, biased, or illegal contents \citep{wen2023unveiling}, and facilitating making cyberattacks and bio-weapons \citep{li2024wmdp}. As a solution, the problem of Machine Unlearning (MU) arises (also referred to LLM unlearning) \citep{liu2024rethinking}, aiming to scrub the influence of the undesired training data and removing their corresponding generation abilities, while preserving the influence of other remaining valid data \citep{jia2024wagle, shi2024muse, jia2024soul}.
+While LLM unlearning has recently become a major research thrust, past efforts have only focused on effective unlearning methods for conventional LLMs. In contrast, sparse Mixture-of-Experts LLM (MoE LLM) \citep{jiang2024mixtral,grok1, databricks_dbrx_2024,abdin2024phi,liu2024deepseek}, designed to reduce computational burdens during inference, remained unexplored in this context. As a key member of the LLM family, MoE LLMs offer substantial scalability without a corresponding increase in computational costs \citep{jiang2024mixtral, qwen_moe, dai2024deepseekmoe}. Thanks to their dynamic routing mechanism, MoE LLMs direct inference through different model components, known as `experts'. However, it remains unclear how LLM unlearning interacts with the sparse MoE architecture and whether unlearning for MoE LLMs presents unique challenges. This leads us to ask:
+\begin{tcolorbox}[before skip=2mm, after skip=0.0cm, boxsep=0.0cm, middle=0.0cm, top=0.1cm, bottom=0.1cm]
+    \textit{\textbf{(Q)} Can we develop a principled MU method for MoE LLMs that 
+    ensures high forgetting effectiveness, while maintaining model utility and efficiency?}
+\end{tcolorbox}
+\vspace*{0.2cm}
+
+To the best of our knowledge, the problem (\textbf{Q}) remains unexplored in the current literature. Our investigation begins with a pilot study that applies existing unlearning methods to MoE LLMs. Preliminary results indicate that a simple implementation of these methods can lead to a substantial drop in model utility and even model collapse. This phenomenon is illustrated in \textbf{Fig.\,\ref{fig: teaser}}(a), which depicts the performance of the unlearned MoE LLMs predominantly closer to the bottom right corner, indicating a significant and unacceptable utility drop compared to conventional dense LLMs.
+
+To fully understand this phenomenon, we begin by performing a careful sanity check on unlearning methods in MoE LLMs and conduct an in-depth analysis of failure cases. Ideally, in MoE LLMs, given an input, the routers should evaluate and direct it to the most relevant experts, with unlearning targeting and erasing the corresponding knowledge in these experts. However, by monitoring expert selection during unlearning, we find that the process often prompts routers to constantly switch the activated experts. This behavior persists even when routers are fixed. As a result, unlearning algorithms create ``short-cuts'', where instead of targeting the most relevant experts, the routers shift to less relevant ones to trick for unlearning loss reduction (\textit{i.e.}, irrelevant experts could be unlearned). This leads to substantial drops in model utility. See \textbf{Fig.\,\ref{fig: teaser}}(b) for illustration.
+
+\begin{figure}[t]
+\vspace*{-1em}
+    \centering
+    \begin{tabular}{cc}
+         \hspace*{-3mm}\includegraphics[width=0.38\linewidth]{figs/overview.pdf} 
+         & \hspace*{-1mm}\includegraphics[width=0.62\linewidth]{figs/findings.pdf}\vspace*{-2mm}\\
+         \hspace*{-3mm}\footnotesize{(a)} & \hspace*{-1mm} \footnotesize{(b)}
+    \end{tabular}
+    \vspace*{-1.2em}
+    \caption{\footnotesize Overview of the key findings in this paper. (a) Illustration of the ineffectiveness of existing unlearning methods on MoE LLMs. Four unlearning algorithms—{\ga} \citep{eldan2023whos}, {\gdiff} \citep{maini2024tofu}, {\npo} \citep{zhang2024negative}, and {\rmu} \citep{li2024wmdp}—were applied to two MoE LLMs (DeepSeek-v2-Lite \citep{liu2024deepseek} and Qwen1.5-MoE \citep{qwen_moe}) and two dense LLMs (Phi3.5 \citep{abdin2024phi} and LLaMA3-8B \citep{dubey2024llama}) using the {\wmdp} benchmark \citep{li2024wmdp}. The drop in target knowledge (accuracy drop on the forget test set, higher is better) and the drop in model utility (accuracy drop on MMLU \citep{hendrycks2023overview}, lower is better) are plotted. Ideal performance is in the top left corner, but MoE LLMs show poor unlearning quality with sharp utility drop. (b) Illustration of ideal versus ineffective MoE LLM unlearning. Target experts—those most frequently activated given the forget set—are identified for unlearning. However, existing unlearning algorithms tend to cause substantial expert selection shifts, leading to excessive and unnecessary unlearning of non-target experts, which significantly impairs model utility.}
+    \label{fig: teaser}
+    \vspace*{-2.2em}
+\end{figure}
+
+To solve the problem, we propose a novel unlearning framework specifically tailored for MoE LLMs, named {\ours}, which stands for \underline{U}nlearning \underline{O}ne \underline{E}xperts. {\ours} employs expert attribution to pinpoint the expert most actively involved with the forget set, which is designated as the primary target for unlearning. Unlearning efforts are exclusively focused on this identified expert. Concurrently, an anchor loss is applied to the router to stabilize the active status of the targeted expert throughout the unlearning process. This approach prevents the frequent switching of expert selection, ensuring that unlearning is both focused and controlled. Our contributions are summarized below.
+$\bullet$ We for the first time identify the unique challenge of unlearning in MoE LLMs. Our analysis elucidates the root causes of observed failures, offering novel insights into how unlearning impacts the routers and experts within an MoE LLM.
+
+$\bullet$ We propose a novel parameter-efficient unlearning framework, {\ours}, tailored for MoE LLMs. {\ours} effectively pinpoints, fixates, and unlearns the most pertinent expert relative to the forget set. {\ours} enjoys high flexibility and works in a plug-in-and-play mode with any existing unlearning methods to boost forget quality, model utility, and efficiency at the same time.
+$\bullet$ We conduct extensive experiments to demonstrate the effectiveness of {\ours} across various MoE architectures, MU benchmarks, and unlearning methods. Our results show that when integrated with {\ours}, all tested unlearning methods achieve significant improvements in model utility up to $35\%$ and concurrently enhance the quality of forgetting with only $0.06\%$ parameters being updated. 
+
+
+\section{related works}
+
+\textbf{Machine Unlearning for LLMs.}
+A growing body of research has investigated the problem of unlearning in large language models (LLMs) \citep{yao2024machine,lu2022quark,jang2022knowledge,kumar2022privacy,zhang2023forget,pawelczyk2023context,eldan2023whos,ishibashi2023knowledge,yao2023large,maini2024tofu,zhang2024negative,li2024wmdp,wang2024large,jia2024soul,liu2024rethinking,liu2024large,thaker2024guardrail}. These studies have practical applications, such as removing sensitive information \citep{jang2022knowledge,eldan2023whos,wu2023depn} and preventing the generation of harmful or biased content \citep{jang2022knowledge,eldan2023whos,wu2023depn,lu2022quark,yu2023unlearning,yao2023large,liu2024towards}, memorized sequences \citep{jang2022knowledge,barbulescu2024each}, and copyrighted material \citep{eldan2023whos, jang2022knowledge}. To facilitate unlearning, recent methods aim to bypass the need for retraining models from scratch by excluding the forget set containing the targeted data to be removed \citep{ilharco2022editing,liu2022continual,yao2023large,eldan2023whos,jia2024soul,zhang2024negative,li2024wmdp, thaker2024guardrail,liu2024large}. Techniques like task arithmetic also enable efficient model editing through parameter merging \citep{hu2024separate,ilharco2022editing}. Although these methods do not provide exact unlearning akin to full retraining, they remain efficient and effective under empirical unlearning evaluation metrics. Approaches often include model fine-tuning and optimization \citep{liu2022continual,yao2023large,eldan2023whos,jia2024soul,zhang2024negative,li2024wmdp}, or input prompting and in-context learning \citep{thaker2024guardrail,pawelczyk2023context,liu2024large}. Other approaches, such as localization-informed unlearning, identify and locally edit model units (e.g., layers or neurons) closely related to the data or tasks being unlearned \citep{meng2022locating,wu2023depn,wei2024assessing}. Despite these efforts, studies have shown that forgotten knowledge can often still be extracted from models post-unlearning \citep{patil2023can, liu2024threats, lynch2024eight, shostack2024boy}. However, most existing research has focused on dense LLMs, leaving unlearning in MoE LLMs largely unexplored. For example, the unlearning of Mixtral-$8\times7B$ is discussed in \citet{li2024wmdp}, but only a single method with ad-hoc adjustments was examined. This work aims to fill this gap by conducting a comprehensive study of various unlearning methods, benchmarks, and MoE models, addressing the specific challenges posed by the MoE architecture.
+\textbf{MoE-based LLMs.}
+Sparse Mixture-of-Experts (MoE) models are designed to activate only a subset of expert networks for each input, enabling substantial model scaling with minimal computational overhead \citep{shazeer2017outrageously}. Current approaches to MoE model development can be categorized into two types: training from scratch \citep{fedus2022switch,zoph2022designing,shen2023moduleformer} and building from dense checkpoints \citep{zhang2021moefication,komatsuzaki2022sparse,zhu2024llama}. Over recent years, MoE models have seen key advancements, including improvements in scalability \citep{riquelme2021scaling,kim2021scalable,zhou2022mixture,zoph2022designing}, efficiency optimization \citep{fedus2022switch,lepikhin2020gshard,chowdhery2023palm}, and expert balancing techniques \citep{cong2024prediction,zoph2022st,dai2022stablemoe}.
+The implementation of transformer-based MoE models has been successfully integrated into LLMs, significantly enhancing inference efficiency \citep{jiang2024mixtral,dai2024deepseekmoe,qwen_moe,grok1,hong2024reference,abdin2024phi,lieber2024jamba,yang2024qwen2,zhu2024llama,databricks_dbrx_2024,xue2024openmoe}. For example, DeepSeekMoE \citep{dai2024deepseekmoe} improves expert specialization by segmenting experts into smaller subsets for flexible activation, while isolating shared experts to reduce redundancy and capture common knowledge. Similarly, Qwen1.5-MoE \citep{qwen_moe} partitions a standard FFN layer into smaller segments to create multiple experts, introducing a fine-grained routing mechanism that enables Qwen1.5-MoE to match the performance of 7B models while using only one-third of the activation parameters.
+Despite the efficiency gains provided by MoE's dynamic routing system, existing research highlights additional challenges compared to traditional dense models, including unstable training \citep{zoph2022designing,dai2022stablemoe}, robustness issues \citep{zhang2023robust,puigcerver2022adversarial}, and complications in parallel deployment \citep{hwang2023tutel,gale2023megablocks}. In this work, we show that the root cause of the ineffectiveness of existing unlearning methods for MoE LLMs also stems from the dynamic routing system.
+
+
+\iffalse
+
+\textcolor{red}{Should this part be presented as one subsection in Section 3? like "Preliminary of MoE LLMs" after "Problem formulation of LLM unlearning"? }
+
+\YH{We do not need these mathematical formulations of MoE here. We can just focus on the literature, like what we did above. These mathematical formulations and derivations have been incorporated into Section 4. The following will be removed.}
+
+\textcolor{blue}{In MoE LLMs, e.g., Moefication \cite{zhang2021moefication}, the feed-forward networks (FFNs) of Transformers}
+are split into multiple experts and activated by the output of the router in front of the expert layers. Router layers calculate the score of each token and assign them to top-$k$ experts. Given the input $\mathbf{u}_t$ corresponding to the $t$-th token,   the hidden state $\mathbf{h}'_t$ of FFNs can be calculated as:
+\begin{align*}
+    \mathbf{h}'_t &= \mathbf{u}_t + \sum_{i=1}^N g_{i,t} \, \text{FFN}_i(\mathbf{u}_t), \\
+    g_{i,t} &= 
+    \begin{cases}
+        s_{i,t}, & \text{if}  \; s_{i,t} \in \text{Top}k(\{s_{j,t} | 1 \leq j \leq N\}, K), \\
+        0, & \text{otherwise},
+    \end{cases} \\
+    s_{i,t} &= \text{Softmax}_i(\text{Router}(\mathbf{u}_t)),
+\end{align*}
+where $N$ is the number of experts, $\text{FFN}_i(\cdot)$ denotes the $i$-th expert, $g_{i,t}$ is the score assigned by router for the $i$-th expert, $s_{i,t}$ denotes the token-to-expert affinity, $\text{Top}k(\cdot,K)$ selects the highest K value in the set, and $\text{Router}(\cdot)$ denotes the router layer.
+\textcolor{blue}{Then, $\mathbf{h}'_t$  is sent to the next layer of Transformer blocks for further processing. }
+\fi
+
+\vspace*{-1em}
+
+
+\section{Preliminaries}
+
+\vspace*{-1em}
+\label{sec: exploration}
+In this section, we start by presenting the mathematical formulation of LLM unlearning. The lack of exploration on MoE LLM unlearning inspires us to investigate whether existing unlearning methods keep effective in these models. Our pilot study reveals that methods designed for conventional LLMs are \textit{ineffective} in unlearning MoE LLMs. 
+
+\textbf{Preliminaries on MoE LLM unlearning.} Based on the generic formulation of LLM unlearning outlined in \citet{liu2024rethinking}, the task of LLM unlearning can be formulated as eliminating the influence of a specific ‘unlearning target’–whether it is related to data, knowledge, or model capabilities–from a pretrained LLM (denoted by $\btheta_o$). The unlearning target is typically defined by a forget set $\mathcal{D}_f$, which contains the information or knowledge to be removed. To ensure the model retains its generation ability (\textit{i.e.}, utility) after unlearning, a retain set $\mathcal{D}_r$ is introduced, consisting of data unrelated to the unlearning target. With this setup, the LLM unlearning problem is usually formed as a regularized optimization problem, finetuned from $\btheta_o$ using both the forget set $\mathcal{D}_f$ and the retain set $\mathcal{D}_r$:
+\begin{align}
+    \min_{\btheta} \ell_f(\btheta; \mathcal{D}_f) + \lambda \ell_r(\btheta; \mathcal{D}_r).
+\end{align}
+Here, $\btheta$ represents the model parameters to be updated during unlearning, $\ell_f$ and $\ell_r$ denote the forget loss and retain loss, respectively, with $\lambda \geq 0$ serving as a regularization parameter to balance between unlearning and preserving utility. 
+
+Next, we provide a brief introduction to how the routing system operates in the MoE LLM architecture.
+In MoE LLMs, \textit{e.g.}, DeepSeek-v2-Lite \citep{liu2024deepseek}, the feed-forward networks (FFNs) of Transformers are split into multiple experts and activated by the output of the router in front of the expert layers, see Fig.\,\ref{fig: teaser}(b) for illustration. 
+In the $l$-th layer, given the input $\mathbf{u}_t^{(l)}$ corresponding to the $t$-th token, router layers calculate the score of each token and assign them to top-$K$ experts:
+
+\vspace*{-1.5em}
+
+\begin{align*} 
+s_{i,t}^{(l)} &= \text{Softmax}(\text{Router}(\mathbf{u}_t^{(l)})) \\
+g_{i,t}^{(l)} &=
+\begin{cases}
+s_{i,t}^{(l)} & \text{if } s_{i,t}^{(l)} \in \text{Top}K(\{s_{k,t}^{(l)} \mid 1 \leq k \leq N\}) \\
+0 & \text{otherwise}
+\end{cases}
+\end{align*}
+\vspace*{-1.5em}
+
+Here, $\text{Router}(\cdot)$ denotes the router layer, $s_{i,t}$ is the token-to-expert affinity, $\text{Top}K(\cdot)$ selects the highest $K$ value in the set,  $N$ is the number of experts, and $g_{i,t}^{(l)}$ is the score assigned by router for the $i$-th expert.
+Then, the hidden state $\mathbf{h'}_t^{(l)}$ of FFNs can be calculated as: $\mathbf{h'}_t^{(l)} = \mathbf{u}_t^{(l)} + \sum_{i=1}^N g_{i,t}^{(l)} \, \text{FFN}^{(l)}_i(\mathbf{u}_t)$, where  $\text{FFN}^{(l)}_i(\cdot)$ denotes the $i$-th expert.
+Then, $\mathbf{h'}_t^{(l)}$ is sent to the next layer of Transformer blocks for further processing.
+
+\begin{wraptable}{r}{0.45\linewidth}
+    \vspace*{-2.4em}
+    \centering
+    \caption{\footnotesize{Unlearning performance when controlling tunable parameters in MoE LLMs.}}
+    \vspace*{-1em}
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{c|cccc}
+    \toprule[1pt]
+    \midrule
+    Tunable Module & Forget Quality $\downarrow$ & Retain Quality $\uparrow$ \\
+    \midrule
+    \multicolumn{3}{c}{Qwen} \\
+    \midrule    
+     Original & 0.4192 & 0.5979\\
+     \midrule
+      Experts \& Router & 0.2953   & 0.3393  \\
+      Routers Only & 0.2526  & 0.2977  \\
+      Experts Only & 0.2536 & 0.3242  \\     
+     \midrule
+     \multicolumn{3}{c}{DeepSeek} \\
+    \midrule    
+     Original & 0.3804 & 0.5500\\
+     \midrule
+    Routers \& Expert & 0.2457  & 0.3145  \\
+     Routers Only & 0.2375  & 0.3315  \\
+     Experts Only & 0.2601  & 0.3435  \\
+     \midrule
+     \bottomrule[1pt]
+    \end{tabular}}
+    \vspace*{-1em}
+    \label{tab: three_settings}
+    \vspace*{-0.5em}
+\end{wraptable}
+\textbf{Unlearning for MoE LLM is not trivial: a pilot study.} The goal of unlearning is twofold: (1) to ensure the model forgets the targeted information and knowledge stored in $\mathcal{D}_f$, and (2) to preserve the model utility without significant degradation. Our pilot study reveals that the special routing system in MoE LLMs introduces additional challenges to unlearning, rendering existing methods ineffective.
+We applied
+four widely used LLM unlearning methods: {\ga} (Gradient Ascent) \citep{eldan2023whos}, {\gdiff} (Gradient Difference) \citep{maini2024tofu}, {\npo} (Negative Preference Optimization) \citep{zhang2024negative}, and {\rmu} (Representation Misdirection for Unlearning) \citep{li2024wmdp} with the {\wmdp} benchmark \citep{li2024wmdp} on two MoE LLMs, Qwen1.5-MoE \citep{qwen_moe} and DeepSeek-V2-Lite \citep{liu2024deepseek}, as well as two dense LLMs for reference, LLaMA3-8B \citep{dubey2024llama} and Phi-3.5-mini-instruct \citep{abdin2024phi}, where the task aims to unlearn hazardous knowledge in LLMs. In \textbf{Fig.\,\ref{fig: teaser}(a)}, to ease the comparison, we report the forget quality (performance drop on the forget test set, where higher is better) against retain quality (performance drop on the MMLU \citep{hendrycks2020measuring} utility benchmark, where lower is better).
+Each data point represents the best result of a model-method combination with hyper-parameter tuning, with ideal performance located near the top left corner, signifying high unlearning effectiveness with minimal impact on model utility. As we can see, most MoE LLM data points cluster in the lower right, indicating severe utility drops and poor unlearning performance compared to dense models. In Fig.\,\ref{fig: teaser}(a), all model parameters (including routers and experts) are involved in unlearning. To ensure that these poor results are not due to improper parameter settings, \textbf{Tab.\,\ref{tab: three_settings}} presents additional experiments using two other parameter configurations (routers-only and experts-only) for {\ga}, yet no significant improvements are observed in either forget or retain quality (more than 20\% utility drop). The results above imply the problem of MoE LLM unlearning is more challenging and far from trivial, even if LLM unlearning is well-studied.
+
+
+\section{Our Proposal: {Unlearning one Expert}
+
+\label{sec: method}
+
+In this section, we delve into the failure cases highlighted in Sec.\,\ref{sec: exploration} by analyzing the behavior of routers and their expert selection patterns. We then identify two primary root causes underlying the poor unlearning performance in MoE LLMs. Based on these insights, we introduce {\ours}, a new unlearning paradigm designed to achieve controllable and effective unlearning for MoE LLMs.
+
+\begin{figure}
+    \centering
+    \begin{tabular}{ccc}
+         \hspace*{-4mm} \includegraphics[width=0.35\linewidth]{figs/layer_distribution/expert_dist_layer_0.pdf} 
+         & \hspace*{-7mm} \includegraphics[width=0.35\linewidth]{figs/layer_distribution/expert_dist_layer_15.pdf} 
+         & \hspace*{-7mm} \includegraphics[width=0.35\linewidth]{figs/layer_distribution/expert_dist_layer_25.pdf}
+    \end{tabular}
+    \vspace*{-1em}
+    \caption{\footnotesize{Proportion of tokens assigned to each expert of the pre-trained DeepSeek-v2-Lite ($K$=6 in Top$k$) with  samples from the forgotten set of {\wmdp} benchmark \citep{li2024wmdp} in different model layers. The dashed horizontal line marks 6/64, \textit{i.e.}, the proportion expected with uniform expert selection. The expert selection distribution clearly follows a long-tailed pattern when the input is sampled from a topic within a narrow scope.}}
+    \label{fig: expert_selection_dist}
+    \vspace*{-1em}
+\end{figure}
+
+\textbf{Uncovering the root cause: `short-cut' in MoE LLM unlearning and expert selection shift.} In order to fully understand the failure cases of MoE LLM unlearning, we begin by inspecting and monitoring the expert selection pattern of the unlearned model. In \textbf{Fig.\,\ref{fig: expert_selection_dist}}, we show the proportion of tokens assigned to each selected expert on the data samples from {\wmdp} dataset \citep{li2024wmdp}. For the input of a specific topic, a small portion of experts (around 6  to 9  out of 64 experts) % in Fig.\,\ref{fig: expert_selection_dist} when selecting 6 experts each time) 
+were assigned with the majority of the tokens in each layer, which was also confirmed in \citet{wang2024let}. Thus, we have the following insight:
+
+\begin{center}
+\vspace*{-1em}
+	\setlength\fboxrule{0.5pt}
+	\noindent\fcolorbox{black}[rgb]{0.99,0.99,0.99}{\begin{minipage}{0.99\columnwidth}
+        {\bf Insight}\,1: For the inference related to a certain topic within a narrow scope (\textit{e.g.,} the forget set of an unlearning task), expert selection by MoE routers follows a long-tailed distribution, with only a few experts being activated significantly more frequently than others.
+	\end{minipage}}
+\end{center}
+
+\begin{wrapfigure}{r}{0.6\linewidth}
+    \vspace*{-1em}
+    \centering
+    \begin{tabular}{cc}
+         \hspace*{-4mm} \includegraphics[width=.5\linewidth]{figs/overlap_ratio.pdf} 
+         & \hspace*{-6mm} \includegraphics[width=.5\linewidth]{figs/forget_loss.pdf} \\
+         \hspace*{-4mm} (a) 
+         & \hspace*{-6mm} (b)
+    \end{tabular}
+    \vspace*{-1em}
+    \caption{\footnotesize (a) Expert selection overlap ratio between the original pretrained model and the unlearned model with different unlearning iterations using {\ga} on {\wmdp} benchmark. (b) Forget loss vs. the number of unlearning iterations, when controlling  parameters to unlearn in MoE LLM.}
+    \label{fig: overlap_ratio}
+    \vspace*{-1em}
+\end{wrapfigure}
+
+Based on the insight above, we define the frequently activated experts as topic-\textit{target} experts, and the others as \textit{non-target}. Thus, by eliminating the knowledge stored in these target experts, MoE LLM unlearning can be achieved more effectively. Next, we examine how the expert selection pattern evolves during unlearning. Specifically, we track the average expert selection overlap ratio across all layers between the unlearned model at different stages and the original pretrained model, when processing the forget set. The results, shown in \textbf{Fig.\,\ref{fig: overlap_ratio} (a)}, reveal a steady decline in the overlap ratio as unlearning progresses, indicating that previously selected target experts are gradually replaced by non-target ones that do not contain the target knowledge. This shift persists even when routers are fixed, as unlearning can still indirectly influence router selection: a router's decision at one layer depends on the output of the previous layer, which may have been affected by an updated expert of this previous layer in unlearning. Meantime, we observe a consistent reduction in forget loss, as shown in \textbf{Fig.\,\ref{fig: overlap_ratio} (b)}. Thus, we can derive the following insight:
+\begin{center}
+	\setlength\fboxrule{0.5pt}
+	\noindent\fcolorbox{black}[rgb]{0.99,0.99,0.99}{\begin{minipage}{0.99\columnwidth}
+        {\bf Insight\,2}: Existing unlearning methods tend to prompt the routers to shift expert selection from target to non-target experts unintentionally. This can create unlearning `shortcuts' in expert selection to trick for low forget loss and lead to fake unlearning.
+	\end{minipage}}
+\end{center}
+
+As unlearning proceeds, non-target experts are more frequently activated to handle samples related to the unlearning target, thereby being forced to participate in the unlearning task, even though they did not contain the intended target knowledge. Meanwhile, the true objective of unlearning, \textit{i.e.,} the target experts, remain hidden out of the reach of the forward propagation.
+Existing literature \citep{liu2024rethinking} has already demonstrated that forcing unlearning models that do not contain knowledge related to the unlearning target can cause a significant drop in model utility. 
+This accounts for the sharp decline in model utility observed in Sec.\,\ref{sec: exploration}, which leads to the following insight:
+
+\begin{center}
+    \vspace*{-1em}
+	\setlength\fboxrule{0.5pt}
+	\noindent\fcolorbox{black}[rgb]{0.99,0.99,0.99}{\begin{minipage}{0.99\columnwidth}
+        {\bf Insight\,3}: The sharp degradation in model utility during MoE LLM unlearning is primarily due to excessive unlearning applied to non-target experts caused by expert selection shift.
+	\end{minipage}}
+\end{center}
+\begin{wrapfigure}{r}{0.5\textwidth}
+  \begin{minipage}{0.5\textwidth}
+  \vspace*{-2.3em}
+    \begin{algorithm}[H]
+    \caption{{\ours} Unlearning Algorithm}
+    \label{algorithm}
+    \begin{algorithmic}[1]
+    \ENSURE{Unlearned Model $\btheta_u$}
+    \REQUIRE{Pretrained Model $\btheta_o$, Forget Set $\mathcal{D}_f$, Retain Set $\mathcal{D}_r$, Retain Loss $\ell_r$, Forget Loss $\ell_f$, Anchor Loss $L_{\text{anchor}}$}
+
+        \STATE $D_{s}\gets$ Sample\_Subset($\mathcal{D}_f$)
+        \STATE $s\gets$ Record\_Affinity\_Score($\btheta_o, D_{s}$)
+        \STATE $s_{\text{top}, l}\gets$Ranking\_And\_Select($s$)
+        \STATE Activate\_Expert\_And\_Router($\btheta_o, s_{\text{top}}, $$\text{Router}^l$)
+        \STATE $\btheta_u\gets$Unlearn$(\btheta_o,\ell_f(\mathcal{D}_f),\ell_r(\mathcal{D}_r),L_{\text{anchor}}^{(l)})$
+        \STATE Return $\btheta_u$
+    \end{algorithmic}
+    \end{algorithm}
+  \end{minipage}
+  \vspace*{-1em}
+\end{wrapfigure}
+
+\textbf{{\ours} for effective MoE LLM unlearning.} 
+As discussed earlier, a new paradigm tailored for MoE LLM unlearning is urgently needed to address the challenges of unintentional expert selection shifts in routers and excessive unlearning of non-target experts. Therefore, we propose a framework that (1) identifies the most relevant target experts, (2) ensures that these target experts remain highly activated throughout the unlearning process to avoid selection shifts, and (3) limits the impact of unlearning on non-target experts. Spurred by these, we introduce {\ours}, where unlearning is confined to a single expert. We refer the readers to {Alg.\,\ref{algorithm}} for an illustration of {\ours}. This approach starts with an expert attribution process to accurately identify the most relevant experts for the unlearning task.
+
+\ding{70} \textbf{Expert attribution.} While the token assignment ratio for each expert, as shown in Fig.\,\ref{fig: expert_selection_dist}, can serve as a basic attribution metric, it overlooks finer details that are important for precise comparisons\revision{, due to the hidden states in each layer summed by weighted average}. To address this, we adopt a gating score-based task affinity calculation method from \citep{wang2024let}. Specifically, the affinity score for the $i$-th expert $e_i^{(l)}$ in the $l$-th layer of an MoE LLM is defined as:
+\begin{align}
+    s_i^{(l)}=\frac{1}{Z}\sum_{j=1}^{Z} \frac{1}{L_j} \sum_{t=1}^{L_j} g_{i, t}^{(l)}
+    \label{eq: affinity_score}
+\end{align}
+where $\color{blue}Z$ is size of the calibration dataset used for expert attribution, $L_j$ represents the length of the $j$-th input sequence $\bx_j$, and $g_{i,t}^{(l)}$ is the probability score assigned to expert $\mathbf{e}_i^{(l)}$ for the $t$-th token. Following \citet{wang2024let}, the attribution data can be a subset universally sampled from the original forget set. We find that a subset containing over 100,000 tokens is robust enough to select the most relevant experts for an unlearning task. For each layer, we rank the experts based on their affinity score and select the top expert as the target expert for unlearning.
+
+\ding{70} \textbf{Router anchor loss.} A key challenge in unlearning is the expert selection shift, where the true target experts are hidden by the routers, while less relevant experts are activated during inference and inadvertently involved in the unlearning process. To mitigate this, we propose the router anchor loss, which encourages the previously identified target expert to remain consistently activated throughout unlearning. The loss is formulated as:
+
+\vspace*{-1em}
+\begin{align}
+    L_{\text{anchor}}^{(l)} = \| \mathbf{g}^{(l)} - [a_1^{(l)}, a_2^{(l)}, \dots, a^{(l)}_{E^{(l)}}] \|_2^2, \,\, 
+\end{align}
+where $E^{(l)}$ is the total number of experts in the $l$-th layer, $ \mathbf{g}^{(l)}=[g^{(l)}_1,g^{(l)}_2,\dots,g^{(l)}_i]$ {is the output of router}, and $a_i^{(l)} = 1$ if the $i$-th expert is identified as the target expert, otherwise $a_i^{(l)} = 0$. \revision{The unlearning loss can be formularized as:}
+\revision{\begin{align}
+    \min_{\btheta} \ell_f(\btheta; \mathcal{D}_f) + \lambda \ell_r(\btheta; \mathcal{D}_r)+\alpha L_{\text{anchor}}^{(l)},
+\end{align}}
+\revision{where $\alpha$ is a hyperparameter to control the strength of anchor loss. The sensitivity analysis of $\alpha$ is provided in Sec.}
+
+\ding{70} \textbf{A single-layer solution for MoE LLM unlearning by {\ours}.} While we have successfully identified the most relevant target expert for each layer and implemented the router anchor loss to stabilize expert selection, applying unlearning across \textit{all} layers still leads to expert selection shifts. 
+\begin{wrapfigure}{r}{0.4\linewidth}
+    \vspace*{-1em}
+    \centering
+    \includegraphics[width=\linewidth]{figs/selection_shift_per_layer.pdf}
+    \vspace*{-1.5em}
+    \caption{\footnotesize Expert selection overlap ratio for each MoE layer in DeepSeek-v2-Lite, comparing the unlearned and original models after 80 iterations with {\ga}. The expert with the top affinity score in each layer is tunable during unlearning.}
+    \label{fig: overlap_ratio_per_layer}
+    \vspace*{-1em}
+\end{wrapfigure}
+In \textbf{Fig.\,\ref{fig: overlap_ratio_per_layer}}, our results indicate that, even with the anchor loss, unlearning across multiple layers amplifies the effects of the MoE structure, where minor selection shifts in earlier layers are magnified, leading to substantial shifts in deeper layers. Consequently, the unlearned model still suffers a significant utility drop of over $30\%$ ($55.48\%$ before unlearning \textit{vs.} $24.65\%$ after unlearning). To address this, we reduced the number of layers involved in the unlearning process. Surprisingly, unlearning just a single layer proved sufficient to achieve strong performance. By confining unlearning to one layer, we effectively minimize the cascading effects of expert selection shifts while still eliminating the target knowledge. In practice, we select the layer with the highest top-1 expert affinity score, as calculated in \eqref{eq: affinity_score}, and perform unlearning on its corresponding expert, which is treated as the target expert for the entire model. Since LLM architectures are consistent in size across layers, the highest affinity scores per layer can be directly compared. This approach forms the foundation of {\ours}, allowing it to maintain model utility and forget effectiveness with exceptional efficiency. To validate the effectiveness of the current design, in Sec.~\ref{sec: experiments}, we conduct extensive discussions and empirical studies on various other possible design choices than {\ours}. These include unlearning multiple experts in a single layer, unlearning single experts across multiple layers, and exploring different expert selection schemes beyond the affinity-score-based approach.
+
+
+
+
+\section{Old Method Section by HM}
+
+
+
+
+\textbf{Router Training} Router training plays a crucial role in eliminating specific knowledge, while RMU and ESFT ignore the training in router layer. Since UoE is applied to only one expert, it's essential to maximize both the selection rate and the distributed weight of the unlearned expert on targeted unlearning tasks. To achieve this, we update the router layer of the unlearned expert during the unlearning process. Our observations indicate that unlearning algorithms, such as GA and RMU, can increase both the selection rate and the weight distribution in the corresponding router.
+
+\textbf{Expert Chosen Loss} To maximize the affect of targeted expert, we propose a expert chosen loss to increase the score assigned by the corresponding router. The loss is $L=|g^l-[a_1,a_2,\dots,a_N]|_2$, where $a_h$ is 1 when $h$-th expert is chosen as targeted expert and other $a_i=0, i\neq h$.
+\textbf{UoE}
+In UoE framework, it starts with identifying most related experts by inputing a batch of forget samples $D_s$ with $N_t$ tokens from $D_{\text{forget}}$ into LLMs. Then record the score $g^l_{t}=[g^l_{1,t},g^l_{2,t},\dots,g^l_{N,t}]$ of all token $t\in D_s$ in all router layers. The $h$-th expert with highest score $g^l_h=\text{Top}k(\{\sum_{i=1}^{N_t} g^l_{1,t}, \sum_{i=1}^{N_t} g^l_{2,t},\dots,\sum_{i=1}^{N_t} g^l_{N,t}\},1)$ in $l$-th layer will be selected. The highest scores $g^l_h$  in all layer $l\in L$ are ranked and the layer with highest score is chosen. Then UoE adapts various unlearning algorithms like GA, NPO, and RMU to target on the parameters in selected top 1 expert and its router layer in the top 1 layer.
+\begin{figure}
+    \centering
+    \includegraphics[width=0.75\linewidth]{figs/moe_unlearning_v4.pdf}
+    \caption{Enter Caption}
+    \label{fig:enter-label}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\linewidth]{figs/layer_example_gating_selection.pdf}
+    \caption{The change of proportion of tokens assigned to each expert in layer 21 with the process of unlearning with GA. }
+    \label{fig:layer21}
+\end{figure}
+
+
+\section{Experiment}
+
+\label{sec: experiments}
+\subsection{Experiment Setups}
+
+\textbf{Unlearning tasks and datasets.}  To demonstrate the effectiveness of our proposed method, we evaluate and compare it against different baselines on two widely accepted LLM unlearning benchmarks: {\wmdp} \citep{li2024wmdp} and {\rwku} \citep{jin2024rwku}. {\wmdp} assesses the model’s ability to unlearn and prevent the generation of hazardous knowledge in biosecurity, cybersecurity, and chemical security contexts. {\rwku}, on the other hand, evaluates the model’s capability to eliminate knowledge about 200 real-world celebrities, simulating a private information protection task.
+We note that other commonly used benchmarks, such as TOFU \citep{maini2024tofu} and MUSE \citep{shi2024muse}, are less appropriate in this work. These benchmarks require models to be fine-tuned before unlearning, which introduces additional biases to the results for MoE LLMs due to the known instability in training and the tricky hyper-parameter tuning involved \citep{jiang2024mixtral}, often leading to training collapse \citep{zoph2022designing}.
+\textbf{Models.} We evaluate different unlearning methods on two MoE LLMs: Qwen1.5-MoE-A2.7B-Chat (Qwen), \revision{mistralai/Mixtral-8x7B-Instruct-v0.1 (Mixtral)}, and DeepSeek-V2-Lite (DeepSeek), representing the two mainstream MoE LLM training schemes: upcycle-from-dense and train-from-scratch, respectively. Qwen has a total of 14.3 billion parameters, with 2.7 billion activated during inference, while DeepSeek has 16 billion parameters, of which 2.4 billion are activated during inference. \revision{Mixtral has 45 billion parameters, of which 12.9 billion are activated. Due to the computation limitation, Mixtral is only applied on parameter-efficient fine-tunin settings.}
+
+\textbf{Evaluation setup.} We evaluate the performance of the unlearned LLMs based on two key metrics: unlearning efficacy (\textbf{UE}) and preserved model utility (\textbf{UT}). For the \textbf{{\wmdp}} task, UE is measured using the {\wmdp}-Cyber subsets provided by the benchmark. Specifically, we use forget accuracy (FA)—the accuracy of the LLMs on the forget set after unlearning—as the measure of UE. A lower FA indicates better unlearning.  Given the four-option multiple-choice format of the test set, the ideal FA is $0.25$, equivalent to random guessing. UT is assessed using the zero-shot accuracy on the MMLU dataset \citep{hendrycks2020measuring}, which reflects the model’s ability to retain general knowledge.
+For the \textbf{{\rwku}} task, we use the Rouge-L recall score to evaluate performance on fill-in-the-blank and question-answer tasks, with lower scores indicating more effective unlearning. Since the task follows a question-answer format, the ideal FA is $0.0$, indicating no overlap between the generated answer and the ground truth. The UT evaluation for {\rwku} is the same as for {\wmdp}, using the MMLU benchmark. By default, during the unlearning process, we select the model checkpoint that achieves the best balance between UE and UT as the optimal checkpoint.
+
+\textbf{Baselines.} We demonstrate the effectiveness of our proposed {\ours} framework by comparing it against the LLM unlearning baselines: Gradient Ascent ({\ga})~\citep{eldan2023whos}, Gradient Difference ({\gdiff})~\citep{maini2024tofu} and most recent unlearning algorithm Negative Preference Optimization ({\npo})~\citep{zhang2024negative} and Representation Misdirection for Unlearning ({\rmu})~\citep{li2024wmdp}. For each method, we compare the original results with those obtained when incorporating {\ours}. Given the parameter efficiency of {\ours}, we also compare it with two state-of-the-art parameter-efficient fine-tuning (PEFT) methods for MoE LLMs: the low-rank adaptation scheme (LoRA) \citep{hu2021lora} and the Expert-Specialized Fine-Tuning method (ESFT) \cite{wang2024let}, which is specifically designed for MoE LLMs.
+
+\iffalse
+\textbf{Baseline.}
+We consider typical unlearning algorithm as baselines. For {\npo}, we set $\beta$ to 0.001. For {\rmu}, due to the original parameters settings for MoE models fail to unlearn both in DeepSeek and Qwen, we adapt  its settings to target on all expert MLP layers in fifth, sixth, seventh layer, where aligning with the settings in dense model. For the hyperparameters, the retain effect parameter $\alpha$ is set to 1200, and $c$ is set to 30000 and 3000 in DeepSeek and Qwen, respectively.
+\fi
+
+\subsection{Experiment Results}
+\begin{table}[t]
+\centering
+\caption{\footnotesize Performance comparison of existing unlearning methods equipped w/ and w/o {\ours} in {\wmdp} \citep{li2024wmdp} and {\rwku} \cite{jin2024rwku} benchmarks on two MoE LLMs, namely Qwen1.5-MoE-A2.7B-Chat (Qwen) \cite{qwen_moe} and DeepSeek-V2-Lite (DeepSeek) \citep{dai2024deepseekmoe}. The $\uparrow$ and $\downarrow$ symbols denote metrics where higher/lower values are better. The occurrence of significant utility drop (over $10\%$ drop in UT compared to the pretrained model) are marked in \warn{red}. }
+\vspace*{-.5em}
+\resizebox{.8\linewidth}{!}{
+\begin{tabular}{c|cc|cc|cc|cc}
+\toprule[1pt]
+\midrule
+\multirow{2}{*}{\textbf{Method}}  & \multicolumn{2}{c|}{\textbf{Qwen ({\wmdp})}} & \multicolumn{2}{c|}{\textbf{DeepSeek ({\wmdp})}}& \multicolumn{2}{c|}{\textbf{Qwen ({\rwku})}} & \multicolumn{2}{c}{\textbf{DeepSeek ({\rwku})}} \\ 
+               &  \textbf{FA$\downarrow$} & \textbf{UT$\uparrow$} & \textbf{FA$\downarrow$} & \textbf{UT$\uparrow$} & \textbf{FA$\downarrow$} & \textbf{UT$\uparrow$}& \textbf{FA$\downarrow$} & \textbf{UT$\uparrow$} \\ \midrule
+\textbf{Pretrained}          & $0.4192$        & $0.5979$         & $0.3804$        & $0.5548$     & $0.4243$        & $0.5979$         & $0.5376$        & $0.5548$     \\ \midrule
+\textbf{\ga}   & $0.2953$        & \warn{$0.3393$}         & $0.2457$        & \warn{$0.3145$}    & $0.0078$        & \warn{$0.4849$}         & $0.0839$        & $0.5195$      \\
+\textbf{\ga+{\ours}}     &      $0.2987$   &     $0.5012$     & $0.2700$        & $0.5100$     &      $0.0060$   &     $0.5709$    & $0.0000$        & $0.5485$       \\
+\midrule
+\textbf{\gdiff}      & $0.2964$        & \warn{$0.2965$}         & $0.2898$        & \warn{$0.3929$}      & $0.0700$        & $0.5296$         & $0.1901$        & \warn{$0.3495$} \\ 
+\textbf{\gdiff+{\ours}}    &  $0.2445$        & $0.5295$         & $0.2677$        & $0.4895$    & $0.0010$        & $0.5987$        &    $0.0000$     &    $0.5253$     \\\midrule
+\textbf{\npo}   & $0.3447$       & \warn{$0.4612$}        & $0.3200$             & $0.4700$       & $0.0000$       & \warn{$0.3718$}        & $0.0970$             & $0.5388$   \\
+\textbf{\npo+{\ours}}   & $0.3200$        & $0.5468$         & $0.2898$       & $0.4790$     & $0.0020 $      & $0.5428$        & $0.0000$             & $0.5479$  \\\midrule
+\textbf{\rmu}      & $0.2612$        & \warn{$0.3560$}           & $0.2530$ & \warn{$0.4540$} & $0.0200$        & \warn{$0.2420$}        & $0.0010$ & $0.5109$  \\
+\textbf{\rmu+{\ours}}    & $0.2536 $      & $0.5351$           & $0.2859$ & $0.5424$ & $0.0723$        & $0.5975$           & $0.0130$ & $0.5388$ \\
+\midrule
+\bottomrule[1pt]
+\end{tabular}
+}
+\label{tab: main_results}
+\vspace*{-1.5em}
+\end{table}
+
+\textbf{Effectiveness of {\ours} in preserving model utility and unlearning efficacy.} In \textbf{Tab.\,\ref{tab: main_results}}, we present the UE (unlearning efficacy) and UT (utility) performance of our proposed {\ours} when integrated into different unlearning methods {\ga}, {\gdiff}, {\npo}, and {\rmu}. \underline{First}, one of the most notable findings is that {\ours} significantly improves model utility (\textbf{UT}) across all tested methods. For instance, when applied to baseline methods like {\ga}, {\gdiff}, and {\rmu}, {\ours} consistently mitigates the severe utility drops (greater than $10\%$) that occur with the unmodified methods. This is particularly evident in scenarios where baseline methods without {\ours} exhibit drastic performance degradation in model utility (highlighted in \warn{red}), while the same methods paired with {\ours} show substantial recovery. For example, the utility of {\ga} on Qwen for the WMDP task drops from $0.5979$ to $0.3393$, but with {\ours}, the utility improves to $0.5012$, restoring much of the lost performance. Similarly, {\gdiff} on {\rwku} suffers a significant utility loss from $0.5979$ to $0.3495$, but when {\ours} is applied, utility rises back to $0.5253$, nearly matching the original pretrained performance. \underline{Second}, beyond utility preservation, the unlearning efficacy (\textbf{UE})—measured through FA—remains either unaffected or slightly \textit{improved} when {\ours} is employed. This balance between utility preservation and effective unlearning highlights the advantage of {\ours}. For instance, \gdiff+{\ours} reduces the forget accuracy (FA) on Qwen (WMDP) from $0.2964$ to $0.2445$, demonstrating better unlearning while still achieving a higher utility score. Similarly, \rmu+{\ours} on DeepSeek (WMDP) lowers the FA from $0.2530$ to $0.2859$, with a corresponding utility improvement from $0.4540$ to $0.5424$. Notably, methods such as {\gdiff} and {\rmu}, which experience significant utility loss when used alone, benefit greatly from the application of {\ours}, achieving near-pretrained utility levels while still maintaining effective unlearning.
+
+\begin{wraptable}{r}{0.35\textwidth} % 'r' for right alignment, '0.5\textwidth' for table width
+\vspace*{0.2em}
+\centering
+\caption{\footnotesize  Tunable parameter ratio, PEFT vs UOE. }
+\vspace*{-1em}
+\resizebox{.35\textwidth}{!}{\begin{tabular}{c|ccc}
+
+\toprule[1pt]
+\midrule
+\multirow{2}{*}{\textbf{Method}} & \multicolumn{3}{c}{\textbf{Tunable Parameter Ratio}}\\
+& \textbf{Qwen} & \textbf{DeepSeek} &\textbf{\revision{Mixtral}} \\
+\midrule
+
+\textbf{LoRA} &$0.87\%$ & $0.92\%$ &\revision{0.26\%}\\
+\textbf{ESFT} & 3.13\% & $2.86\%$&\revision{14\%}\\
+\midrule
+\textbf{{\ours}} & $0.06\%$ & $0.06\%$&\revision{0.41\%}\\
+\midrule
+\bottomrule[1pt]
+\end{tabular}}
+\label{tab: peft_param_ratio}
+\vspace*{-.5em}
+\end{wraptable}
+
+\textbf{{\ours} significantly outperforms other PEFT methods.} \textbf{Tab.\,\ref{tab: peft_results}} shows the performance comparison between {\ours} and other PEFT methods, and Tab.\,\ref{tab: peft_param_ratio} shows a comparison of the parameter efficiency among different PEFT methods. Several key conclusions can be drawn: \underline{First}, {\ours} achieves far better parameter efficiency, with only $0.06\%$ of tunable parameters, compared to LoRA ($0.92\%$) and ESFT ($2.86\%$), while still outperforming them in utility preservation. For instance, in RWKU, {\ours} achieves utility scores of 0.5709 on Qwen and 0.5445 on DeepSeek, significantly higher than LoRA (0.2689 and 0.2302) and ESFT (0.4433 and 0.5001). \underline{Second}, the utility preservation of {\ours} is much better than the others, and this is achieved while maintaining a comparable level of forget efficacy. For example, on WMDP, {\ours} achieves a utility score of 0.5012 for Qwen, much higher than LoRA’s 0.2689, with a similar forget efficacy (FA: 0.2987 vs. 0.2459). These results clearly demonstrate that {\ours} is the more balanced and efficient solution for unlearning tasks, particularly when both parameter efficiency and utility retention are important.
+
+\begin{table}[t]
+\vspace*{-1em}
+\centering
+\caption{\footnotesize Performance comparison between existing unlearning methods {\ga} equipped with {\ours} and other PEFT methods, including LoRA \citep{hu2021lora} and ESFT \citep{wang2024let}. %The $\uparrow$ and $\downarrow$ symbols denote metrics where higher/lower values are better. 
+The occurrence of significant utility drop (over $10\%$ drop in UT compared to the pretrained model) are marked in \warn{red}. }
+\vspace*{-1em}
+\resizebox{.85\linewidth}{!}{
+\begin{tabular}{c|cc|cc|cc|cc|cc|cc}
+\toprule[1pt]
+\midrule
+\multirow{2}{*}{\textbf{Method}} &  \multicolumn{2}{c|}{\textbf{Qwen ({\wmdp})}} & \multicolumn{2}{c|}{\textbf{DeepSeek ({\wmdp})}} & \multicolumn{2}{c|}{\textbf{\revision{Mixtral ({\wmdp})} }} & \multicolumn{2}{c|}{\textbf{Qwen ({\rwku})}} & \multicolumn{2}{c|}{\textbf{DeepSeek ({\rwku})}}&\multicolumn{2}{c}{\textbf{\revision{Mixtral ({\rwku})} }}  \\ 
+&  \textbf{FA$\downarrow$} & \textbf{UT$\uparrow$} & \textbf{FA$\downarrow$} & \textbf{UT$\uparrow$} & \textbf{FA$\downarrow$} & \textbf{UT$\uparrow$}& \textbf{FA$\downarrow$} & \textbf{UT$\uparrow$}& \textbf{FA$\downarrow$} & \textbf{UT$\uparrow$}& \textbf{FA$\downarrow$} & \textbf{UT$\uparrow$} \\ \midrule
+\textbf{Pretrained}          & $0.4192$        & $0.5979$         & $0.3804$        & $0.5548$  &\revision{0.5229}& \revision{0.6885}
+  & $0.4243$        & $0.5979$         & $0.5376$        & $0.5548$ &\revision{0.5820}
+& \revision{0.6885}
+   \\
+\midrule
+\textbf{LoRA} &0.2459&\warn{0.2689}&0.2657&\warn{0.2295}&\revision{0.2658}&\revision{0.2597}&$0.0000$&\warn{$0.2689$}&0.0000&\warn{0.2302}&\revision{0.0000}&\revision{0.2295}\\
+\textbf{ESFT} &0.3145&\warn{0.4514}&0.2737&0.5108&\revision{0.2547}&\revision{0.6386}&0.001&\warn{0.4433}&0.0200&0.5001&\revision{0.0542}&\revision{0.6743}\\
+\midrule
+\textbf{{\ours}} &0.2987&0.5012&0.2700&0.5100&\revision{0.2608}&\revision{0.6364}&0.006&0.5709&0.0000&0.5485&\revision{0.0455}&\revision{0.6713}\\
+\midrule
+\bottomrule[1pt]
+\end{tabular}
+}
+\label{tab: peft_results}
+\vspace*{-2em}
+\end{table}
+
+\begin{wrapfigure}{r}{0.4\linewidth}
+    \vspace*{-1.2em}
+    \centering
+    \includegraphics[width=0.8\linewidth]{figs/overlap_ratio_tune_all_layer.pdf}
+    \vspace*{-.5em}
+    \caption{\footnotesize Expert selection overlap ratio between the pretrained model and the unlearned model across different unlearning iterations using {\ga} on the {\wmdp} benchmark. Experts with the highest affinity score in each layer are tuned during unlearning.}
+    \label{fig: all_layer_overlap_ratio}
+    \vspace*{-1em}
+\end{wrapfigure}
+\textbf{Comparison of different design choices in {\ours} framework.} In designing our {\ours} method, we opted to unlearn only a single expert in one specific layer, guided by the affinity score. However, to justify this design decision, we conducted a series of empirical studies comparing alternative approaches. These experiments were carried out using the {\rmu} unlearning method on the {\wmdp} task, where we tuned each approach until the model fully unlearned (\textit{i.e.}, FA reached 25\%), and then compared (1) if the problem of the expert selection shift has been properly addressed and (2) the model utility score (\textbf{UT}) across the different strategies. 
+
+$\bullet$ \textit{Tuning multiple layers with one expert per layer.} \textit{Tuning a single expert across multiple layers.} In Fig.\,\ref{fig: overlap_ratio_per_layer}, we briefly discussed how the cumulative effect leads to a significant issue of expert selection shift in the deeper layers of MoE LLMs. In Fig.\,\ref{fig: all_layer_overlap_ratio}, we further illustrate how the overall expert selection overlap ratio changes as unlearning progresses. As shown, even when only one expert is tunable per layer, the cumulative effect causes the overall overlap ratio to drop sharply, leaving the expert selection shift issue unresolved. Thus, tuning all layers during MoE LLM unlearning is not a feasible solution.
+
+\begin{wraptable}{r}{.4\textwidth}
+    \vspace*{-1.2em}
+    \centering
+    \caption{\footnotesize Model utility (UT) comparison, at the same level of forget efficacy (FA$\approx0.25$),
+    when different number of   experts are unlearned using {\ga} on {\wmdp} benchmark.  }
+    \vspace*{-1em}
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{c|ccc}
+    \toprule[1pt]
+         \# of experts & 1 & 3 & 6 \\
+         \midrule
+         FA ($\downarrow$) & \multicolumn{3}{c}{$\sim0.2500$}  \\
+         UT ($\uparrow$) & 0.5100 & 0.4856 & 0.4652  \\
+    \bottomrule[1pt]
+    \end{tabular}}
+    \label{tab: multi_experts_single_layer}
+    \vspace*{-1em}
+\end{wraptable}
+
+$\bullet$ \textit{Tuning multiple experts in a single layer.} A natural question within the {\ours} framework is whether involving more than one expert in the selected layer during unlearning would yield better results. In Tab.\,\ref{tab: multi_experts_single_layer}, we examine the impact of increasing the number of tunable experts in a single layer. As the table shown, when the unlearned model reaches the same level of UE (with an FA of around $25\%$) \revision{controlled by different training steps}, the model utility decreases significantly as the number of tunable experts increases. For instance, when the tunable expert count is increased to 6, the model utility drops by over $4\%$, from $0.51$ to below $0.47$. This suggests that involving more experts in unlearning makes it harder to maintain utility, without providing any noticeable improvement in unlearning efficacy.
+\begin{table}[t]
+\centering
+\caption{\footnotesize Performance comparison between {\ours} and the random expert selection scheme on the {\wmdp} task. Other settings are consistent with those in Tab.\,\ref{tab: main_results}.}
+\vspace*{-.5em}
+\resizebox{.9\linewidth}{!}{
+\begin{tabular}{c|cc|cc|cc|cc}
+\toprule[1.5pt]
+\multirow{2}{*}{\textbf{Method}} &  \multicolumn{2}{c|}{\textbf{Qwen ({\wmdp})}} & \multicolumn{2}{c|}{\textbf{DeepSeek ({\wmdp})}} &  \multicolumn{2}{c|}{\textbf{Qwen ({\rwku})}} & \multicolumn{2}{c}{\textbf{DeepSeek ({\rwku})}} \\ 
+& \textbf{FA$\downarrow$} & \textbf{UT$\uparrow$} & \textbf{FA$\downarrow$} & \textbf{UT$\uparrow$} & \textbf{FA$\downarrow$} & \textbf{UT$\uparrow$} & \textbf{FA$\downarrow$} & \textbf{UT$\uparrow$} \\
+\midrule
+\textbf{Pretrained}          & $0.4192$        & $0.5979$         & $0.3804$        & $0.5548$     & $0.4243$        & $0.5979$         & $0.5376$        & $0.5548$     \\
+\midrule
+\textbf{\rmu}      & $0.2612$        & {$0.3560$}           & $0.2530$ & {$0.4540$} & $0.0200$        & {$0.2420$}        & $0.0010$ & $0.5109$  \\ 
+\midrule
+\textbf{Random}$\mathbf{+}$\textbf{\rmu} &0.3505&0.5947&0.2722&0.5183& 0.2110&0.5924& 0.1176&0.5182\\
+
+\textbf{\ours}$\mathbf{+}$\textbf{\rmu}&0.2536&0.5351&0.2859&0.5424&0.0723&0.5975&0.0130&0.5388\\
+
+\bottomrule[1.5pt]
+\end{tabular}
+}
+\label{tab: random_selection}
+\vspace*{-1em}
+\end{table}
+
+
+$\bullet$ \textit{Sensitivity of {\ours} to expert selection and layer selection schemes.} Next, we explored alternative methods for selecting the target expert, beyond the affinity score-based approach used in {\ours}. Specifically, we investigated how sensitive {\ours} is to the choice of the expert to be unlearned. In \textbf{Tab.\,\ref{tab: random_selection}}, we compared the performance of the affinity score-based selection scheme in {\ours} with a random expert selection approach on the {\wmdp} task. The results clearly show that while random expert selection can sometimes yield comparable utility preservation, it fails to achieve the same level of unlearning efficacy as {\ours}. For instance, on Qwen ({\wmdp}), the random selection achieves a utility score of $0.5947$ versus {\ours}'s $0.5351$, but the forget accuracy (\textbf{FA}) with random selection is significantly higher at $0.3505$, compared to $0.2536$ for {\ours}. This indicates that random selection does not drive FA low enough, compromising the unlearning objective. Similarly, on DeepSeek ({\rwku}), random selection results in an FA of $0.1176$, whereas {\ours} achieves a much lower FA of $0.013$, highlighting the better unlearning performance of {\ours}. In conclusion, selecting experts with highest affinity score perform better than random expert selection.
+
+\begin{wraptable}{r}{0.6\linewidth}
+    \vspace*{-1em}
+    \centering
+    \caption{\footnotesize Model utility (UT) comparison across layers with different affinity score rankings in {\ours} on the {\rwku} benchmark. UT is compared at a consistent level of forget efficacy (FA $\approx 0.25$).}
+    \vspace*{-.5em}
+    \resizebox{\linewidth}{!}{
+    \begin{tabular}{c|ccccccc}
+    \toprule[1pt]
+    \midrule
+    Layer Ranking & \#1 &\revision{\#2}&\revision{\#3} & \#13 & \#20 & \#23 & \#26 \\
+     Affinity Score & 0.2110&\revision{0.1957}&\revision{0.1695} & 0.1115 & 0.0942 & 0.0844 & 0.0618 \\
+     \midrule
+     FA ($\downarrow$) & \multicolumn{5}{c}{$\sim0.2500$}  \\
+     UT ($\uparrow$) & 0.5485 &\revision{0.5475}&\revision{0.5453}& 0.5445 & 0.5441 & 0.4262 & 0.2355 \\
+     \midrule
+    \bottomrule[1pt]
+    \end{tabular}
+    }
+    \label{tab: other_layer_selection}
+    \vspace*{-1em}
+\end{wraptable}
+
+Finally, we examine the performance of {\ours} when layers with different top1 expert affinity score rankings are selected for unlearning. In Tab.\,\ref{tab: other_layer_selection}, we observe that {\ours} is robust and relatively insensitive to the specific layer chosen for unlearning, as long as the affinity score remains reasonably high. For instance, even when selecting the 13th or 20th ranked layers, the model utility (\textbf{UT}) remains stable at around 0.5445, although their  affinity scores of 0.1115 and 0.0942 are lower than that of the top-ranked layer. However, once the affinity score drops further, as seen in the 23rd and 26th ranked layers (with scores of 0.0844 and 0.0618), the utility decreases more sharply, falling to 0.4262 and 0.2355, respectively. This demonstrates that while {\ours} maintains strong performance across a wide range of layers, selecting layers with very low affinity scores can negatively impact utility. Overall, these results highlight the robustness of {\ours} and its ability to tolerate variability in layer selection without sacrificing unlearning efficacy, provided that layers with sufficiently high affinity scores are chosen.
+Our empirical studies demonstrate that the design choice of unlearning a single expert in one layer, guided by the affinity score, is satisfactorily reasonable for balancing effective unlearning with utility preservation. The alternative approaches, whether involving multiple layers or multiple experts, consistently led to greater utility degradation and instability. Selecting expert with highest affinity scores can achieve better forget quality than picking experts by random choice. At last {\ours} is very robust to layer selection scheme. Therefore, our current design proves to be the most effective and efficient for MoE LLM unlearning.
+
+\iffalse
+\subsection{Robustness}
+We apply optimization-based jailbreak attack GCG~\citep{zou2023universal} and static attack. For Static attack, two prompts are applied according to~\citet{lynch2024eight}. For optimization-based attack, we apply GCG to trigger unlearned model to generate ``Sure, here is the answer:". We utilize {\rwku} bechmark to evaluate the robustness as it is generation task comparing to {\wmdp} is choice-base QA questions. 
+
+\begin{table}[h]
+    \centering
+    \resizebox{.7\linewidth}{!}{
+    \begin{tabular}{c|cc|cccc}
+    \toprule[1pt]
+    \midrule
+        Attack & Pretrained &Unlearned & GCG &Prompt1 & Prompt2 & Relearning  \\
+        \midrule
+        {\rmu} & \multirow{2}{*}{0.5376} &0.001 & - & 0.003 & 0.002& 0.3262\\
+        {\rmu} + {\ours} & & 0.013 & 0.005 & 0.008&0.007 &0.4210\\
+        \midrule
+        \bottomrule[1pt]
+    \end{tabular}
+    }
+    \caption{Robustness of {\ours}. \HM{GCG experiment is conducted in a subset of {\rwku}, can we put it in this table?}}
+    \label{tab:robustness}
+\end{table}
+\HM{Jailbreak first}
+
+\HM{The robustness to relearning is terrible. Retain the unlearned DeepSeek model unlearned by RMU on {\wmdp} dataset, the performance of forget went back to original model, which is the same as {\wmdp} reported.}
+
+\fi
+
+
+
+
+
+
+
+
+
+\section{Conclusion}
+
+In this paper, we for the first time examine the challenges of applying existing MU techniques to MoE LLMs and carefully investigate the synergy between the dynamic routing system of MoE LLM and the unlearning effects. To address these issues, we proposed {\ours}, a novel framework that unlearns a single expert in a targeted layer while stabilizing expert selection through a router anchor loss. This approach mitigates expert selection shifts and achieves efficient unlearning with minimal parameter updates. Extensive experiments show that {\ours} significantly outperforms traditional unlearning methods and other parameter-efficient fine-tuning techniques, providing a robust solution for MoE LLM unlearning tasks.
+
+
+\clearpage
+
+
+
+
+

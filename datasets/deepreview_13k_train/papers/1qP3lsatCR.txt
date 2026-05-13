@@ -1,0 +1,263 @@
+\title{NetMoE: Accelerating MoE Training through Dynamic Sample Placement}
+
+\begin{abstract}
+Mixture of Experts (MoE) is a widely used technique to expand model sizes for better model quality while maintaining the computation cost constant. In a nutshell, an MoE model consists of multiple experts in each model layer and routes the training tokens to only a fixed number of experts rather than all. In distributed training, as experts are distributed among different GPUs, All-to-All communication is necessary to exchange the training tokens among the GPUs after each time of expert routing. Due to the frequent and voluminous data exchanges, All-to-All communication has become a notable challenge to training efficiency.
+
+In this paper, we manage to accelerate All-to-All communication in MoE models from the training sample perspective, which is unexplored so far. In particular, we put forward the observation that tokens in the same training sample have certain levels of locality in expert routing. Motivated by this, we develop \name, which takes such locality into account and dynamically rearranges the placement of training samples to minimize All-to-All communication costs. Specifically, we model the All-to-All communication given the sample placement and formulate an integer programming problem to deduce the optimal placement in polynomial time. Experiments with 32 GPUs show that NetMoE achieves a maximum efficiency improvement of $1.67 \times$ compared with state-of-the-art MoE training frameworks.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+In recent years, large language models (LLMs) have shown impressive performance in language understanding and generation (OpenAI, 2023; Touvron et al., 2023) due to the increasing model size. However, larger models often come with greater computational costs, making further scaling difficult. To address this, Mixture of Experts (MoE) models have been introduced to expand the model size greatly without increasing the computational cost. Combining MoE with Transformer-based models can yield outstanding performance across various tasks, including natural language processing (Lepikhin et al., 2021; Fedus et al., 2022), computer vision (Riquelme et al., 2021; Liang et al., 2022), recommendation systems (Tang et al., 2020; Zou et al., 2022), and speech recognition (You et al., 2022; Kwon & Chung, 2023).  
+
+![](images/1d333376fa9f922fceef4847f4d6d89cf99fba231b5fda45029927ad092c5b69.jpg)  
+Figure 1: An example of expert parallelism applied to an MoE model with $J$ devices and $E=$ $2J$ experts (each device has two different experts).  
+
+network (FFN) layer with the MoE layer, which   
+consists of a gating network and several small FFNs, representing different experts. In the MoE layer, each token is routed by the gating network to only a few selected experts, and the final output is obtained by a weighted sum of the computations from the selected experts. By such means, we can increase the number of experts to expand the model size for better performance, while keeping the computation complexity constant.  
+
+![](images/eb374daeed0b4bd3b37cb7eed14f896bf2ba20cdcc1d4df3fc3faceb28e335ef.jpg)  
+(b) A gather operation in the MoE layer without adjusting the  (c) A gather operation in the MoE layer after sample placement sample placement. adjustment is enabled.  
+
+Figure 2: An example of sample exchange. The figure illustrates the All-to-All gather operation in a MoE layer with two nodes, each containing two devices, and each device having one expert. Different colors represent tokens sent to different experts, and $i{-}j$ denotes the $j$ -th token in the $i$ -th sample. Fig. 2(a) illustrates the complete process of a MoE layer during forward propagation. Fig. 2(b) shows the All-to-All gather operation in the MoE layer without adjusting the sample placement, where the inter-node communication volume of each node is 5 tokens. Fig. 2(c) displays the All-to-All gather operation after sample placement adjustment is enabled — the positions of samples on the devices change (samples 0 and 3 are exchanged), reducing the inter-node communication volume to 2 tokens per node.  
+
+Despite the above benefit, given the potentially large number of experts, the memory capacity of a single device is often insufficient. As a result, expert parallelism (Lepikhin et al., 2021; Fedus et al., 2022) is a common technique to facilitate the distributed training of MoE models. As shown in Fig. 1, each device holds only a subset of the experts to reduce memory consumption. Meanwhile, other model parameters are replicated and stored on all devices, and the training data assigned to each device are different. In each MoE layer, based on the routing result of the gating network, each token is sent to the device where the selected expert is located. The output from the expert is then sent back to the original device of the corresponding token. This involves two communication operations, namely the All-to-All scatter and All-to-All gather (He et al., 2021), respectively.  
+
+Due to the dynamic nature of routing, training MoE models efficiently faces several challenges, with the All-to-All communication, being the most significant one. Particularly, the All-to-All communication time can account for up to $80\%$ of the total training time (Hwang et al., 2023; Liu et al., 2023; He et al., 2022; Li et al., 2023; Yu et al., 2024). One reason is because all tokens need to participate in the All-to-All operation, leading to a high communication volume. Another reason is the communication frequency. Considering both the forward and backward propagation, each MoE layer requires four All-to-All communications per training iteration. Such frequent and extensive communication incurs significant time costs. Therefore, accelerating All-to-All communication is essential to improve training efficiency.  
+
+Motivation: Recent studies have demonstrated that expert routing exhibits a certain degree of data locality. To be specific, input tokens may have distinct preferences for experts, and the corresponding distribution is often skewed (He et al., 2022; Nie et al., 2023; Xue et al., 2024; Jiang et al., 2024). In other words, the All-to-All operation in MoE models can be highly unbalanced across different devices, thus bounded by the device pair with the highest communication volume. Meanwhile, it is well known that network locality is an inherent characteristic of modern clusters for deep learning training. In particular, there are various communication channels in modern clusters, e.g. intra-node devices usually communicate via PCIe or NVLINK, while inter-node devices use Ethernet or InfiniBand, with intra-node communication usually faster than inter-node ones. To achieve load balancing, existing methods propose techniques from the model perspective (Nie et al., 2023; Lewis et al., 2021). Typically, they either dynamically adjust the model placement but introduce a lot of additional communication, or modify the model definition but sacrifice the model performance (see $\S2.2$ for more discussion). Yet optimization from the data perspective is under explored. Inspired by this, we propose NetMoE, which accelerates the All-to-All communication by combining the data locality in expert routing with the network locality among training devices. The essential idea of NetMoE is to dynamically adjust the placement of data samples during training based on expert routing results so that more tokens will be transmitted through high-speed channels rather than low-speed ones. As illustrated in Fig. 2, sample0 shows a preference for $e x p e r t_{2}$ that resides on $n o d e_{1}$ , while sample3 favors $e x p e r t_{0}$ that resides on $n o d e_{0}$ . Using the vanilla All-to-All communication method would result in significant inter-node communication overhead, as shown in Fig. 2(b). However, by swapping the positions of $s a m p l e_{0}$ and sample3 as depicted in Fig. 2(c), part of the inter-node communication can be converted into intra-node communication or even intradevice memory copying, significantly reducing the time cost (detailed in $\S3.1\$ ). In this way, we can accelerate the All-to-All communication without affecting the computing results.  
+
+However, it is non-trivial to achieve dynamic sample placement. For one thing, how to adjust the placement to maximize efficiency is a complex and unexplored question. For another, since the adjustment should be done for every layer in every iteration, it is vital to devise an efficient algorithm to deduce the placement on the fly. To address these problems, we first revisit the cost modeling for All-to-All communication and formulate the dynamic sample placement problem into a combinatorial optimization problem. Subsequently, we split it into two stages to ease the solving and design a corresponding polynomial-time algorithm to ensure a timely solution.  
+
+In short, the technical contributions of this work are summarized as follows:  
+
+• We propose NetMoE, the first effort that leverages both the data locality and network locality to accelerate the All-to-All communication through dynamic sample placement.   
+• We formulate the dynamic sample placement problem as a combinatorial optimization problem, which aims to find the best sample placement that maximizes efficiency given the expert routing. • We dissect the problem into two stages and develop a polynomial-time solution to efficiently derive the sample placement during training.   
+• We conduct experiments with various models on 32 NVIDIA A800 GPUs. Experimental results show that NetMoE outperforms state-of-the-art MoE training systems by up to $1.67\times$ in terms of training efficiency.   
+2 PRELIMINARY   
+2.1 PARALLELISM IN DISTRIBUTED TRAINING   
+Data and Model Parallelism: In data parallelism (Li et al., 2020; Sergeev & Balso, 2018), each device maintains a complete copy of the model parameters, while different training samples are assigned to each device. After the backward computation is completed, the model gradients from all devices are aggregated before updating the model parameters. In model parallelism (Narayanan et al., 2021b; Huang et al., 2019; Narayanan et al., 2021a), model parameters are distributed across multiple devices, with each device responsible for only a portion of the model. Communication operations are necessary to transmit the intermediate results (a.k.a. forward activations and their backward gradients) to accomplish the forward and backward propagation.   
+Expert Parallelism: As shown in Fig. 1, expert parallelism (Lepikhin et al., 2021; Fedus et al., 2022) can be regarded as combining model parallelism and data parallelism. It distributes expert parameters across different devices like model parallelism, while replicating other parameters on all devices like data parallelism. In each MoE layer, each token will be routed by the gating network to top $K$ different experts for processing, where $K$ is a hyperparameter, typically a small value, such as 1 or 2, which helps to reduce the computational complexity. After the MoE layer obtains the gating routes, tokens are sent to the devices where the corresponding experts are located based on the routing. The results from the expert computations are then sent back to the original devices where the tokens are located. Since the experts are distributed across different devices, communication during this process involves all devices sending and receiving messages with one another, leading to what is known as All-to-All communication.  
+
+2.2 DISTRIBUTED TRAINING ACCELERATION TECHNIQUES FOR MOE MODELS  
+
+Dynamic Expert Placement: The efficiency of MoE models is constrained by the extensive and frequent All-to-All communication required during training. In response to this issue, some studies have observed that data tends to show a preference for certain experts during training. Then, based on this observation, they further propose to dynamically adjust the placement of experts to reduce communication volume (He et al., 2022; Nie et al., 2023; Zhai et al., 2023). For instance, popular experts can be placed on more devices in the data parallel manner, so that the communication volume related to them would decrease. However, due to the growing size of experts, these approaches incur substantial overhead of transmitting expert parameters among the devices, so they cannot adjust the expert placement for every iteration, leading to sub-optimality. In contrast, our work tries to reduce the communication volume from a different perspective: we dynamically adjust the placement of samples in every iteration to accelerate the All-to-All communication. To be specific, we formulate an optimization problem to deduce the best sample placement that minimizes the time cost of Allto-All communication. As we will evaluate in $\S4$ , our work outperforms existing works based on dynamic expert placement when training MoE models.  
+
+Modification in Model Definition: To achieve better workload balance in MoE training, there are many existing works developed to modify the model definition (e.g., routing mechanisms, model architectures). Some approaches modify the routing mechanism to balance the load across experts, which helps reduce synchronization time between devices (Lewis et al., 2021). Recognizing the network locality in distributed training, several works introduce a routing topology loss to prioritize routing tokens within the same node, thereby reducing inter-node communication (Li et al., 2024; Chen et al., 2022). Other approaches (Zeng & Xiong, 2023) map tokens to smaller hidden layer dimension before inter-node communication, further decreasing the communication load. SCMoE (Cai et al., 2024) proposes feeding the output of the current attention layer directly into the next MoE layer, enabling parallel forward propagation with the current MLP layer in order to fully overlap All-to-All communication with computation. Although these methods improve training efficiency, they inevitably impact model convergence. When applying these methods, we usually need to run numerous trials to tune the hyper-parameters, such as adjusting the weight of the topologyaware routing loss (Chen et al., 2022) or tuning the hyper-parameters for different communication channels (Zeng & Xiong, 2023). Given that each trial of LLM training can take days or even months, their utility is inevitably hampered. In contrast, our work focuses on how to accelerate All-to-All communication without affecting model convergence.  
+
+
+
+\section{3 NETMOE  }
+
+
+In this section, we introduce NetMoE, a novel framework designed to optimize distributed training for MoE models by considering both data and network locality. Given a target MoE model and the hardware environment, NetMoE aims to minimize the All-to-All communication cost. Its core innovation lies in optimizing the placement of samples within each MoE layer to maximize the utilization of faster intranode bandwidth, thereby reducing the communication volume over slower inter-node connections. Specifically, NetMoE swaps the samples across devices during each MoE layer, enabling more tokens to communicate within the node during All-to-All communication.  
+
+![](images/82556d00ec4602c27de854ca5f2864dff2b135c51f3a29aacb50bd94a10f09a5.jpg)  
+Figure 3: The overview of the method of NetMoE.  
+
+Fig. 3 illustrates the overview of this section. We begin by introducing the modeling of All-to-All communication in MoE training and formulate our optimization problem in $\S3.1$ . We then illustrate how to solve the problem in $\S3.2$ , with the detailed algorithm shown in Alg. 1. We also present our implementation details in $\S3.3$ . For clarity, the frequently used notations are listed in Table 1.  
+
+Table 1: Notations used throughout this work. We assume $I$ is divisible by $_J$ , and $_J$ is divisible by $N$ , which are common in distributed training.  
+
+![](images/de79482bd9f74c5c7297dde106e0856d2bbe975713a141c1121ea354de986c42.jpg)  
+
+3.1 PROBLEM FORMULATION  
+
+Communication Modeling: We first discuss the mathematical modeling of All-to-All communication, which is the optimization target of NetMoE. We use the $\alpha{-}\beta$ model (Sarvotham et al., 2001) to analyze All-to-All communication, where $\alpha$ represents the latency cost and $\beta$ represents the bandwidth cost. Specifically, we classify communication into three categories: intra-device, intra-node, and inter-node communication, each using different channels. Table 2 lists the bandwidth of each channel used in our experiments. Since intra-device communication is typically achieved via memory copying, it is significantly faster than the other two categories and thus not considered in our modeling. Therefore, the communication time is determined by the maximum time required for data transfer across the intra-node and inter-node channels. The bandwidths of these channels are represented by $v_{i n t r a}$ , and $v_{i n t e r}$ , respectively. Thus, for each All-to-All communication, its time cost can be expressed by the following formula, where $s$ · represents the communication volume for the corresponding channel.  
+
+$$
+\begin{array}{r}{t=\operatorname*{max}(t_{i n t r a},t_{i n t e r}),\quad\mathrm{where}\quad t_{i n t r a}=\alpha_{i n t r a}+\beta_{i n t r a}s_{i n t r a},\beta_{i n t r a}=1/v_{i n t r a},}\\ &{t_{i n t e r}=\alpha_{i n t e r}+\beta_{i n t e r}s_{i n t e r},\beta_{i n t e r}=1/v_{i n t e r}}\end{array}
+$$  
+
+The bandwidth $(v.)$ and latency $\left(\alpha.\right)$ can be obtained by profiling the hardware environment before training, while the communication volume (s·) needs to be dynamically determined based on the routing results within the MoE layer. We then analyze how to calculate the communication volume.  
+
+Let route $\in\mathbb{N}^{I\times L\times K}$ be the token routing results of the gating network, which represents the $K$ experts that each token will be sent to. Then, the number of tokens that the $i$ -th sample needs to send to the $e$ -th expert can be counted as  
+
+$$
+n u m_{i,e}=\sum_{l,k}\mathbb{I}[r o u t e_{i,l,k}=e]\;\mathrm{for}\;i\in[\![I]\!],e\in[\![E]\!]
+$$  
+
+Next, $n u m\,\in\,\mathbb{N}^{I\times E}$ can be used to model the communication volume across different channels. Let $\mathtt{E x p D e v}(e)$ be the device index of the $e$ -th expert, $\mathsf{S m p D e v}(i)$ the device index where the $i$ -th sample should be routed to, and ${\mathrm{Node}}(j)$ the node index of the $j$ -th device. By considering the communication volume as the number of tokens that need to be transmitted, we have  
+
+$$
+s_{i n t r a}=\sum_{(i,e)\in S_{i n t r a}}n u m_{i,e},\quad s_{i n t e r}=\sum_{(i,e)\in S_{i n t e r}}n u m_{i,e}
+$$  
+
+where $S_{i n t r a}$ and $S_{i n t e r}$ can be calculated via the device indices of experts and samples:  
+
+$$
+\begin{array}{r l}&{S_{i n t r a}=\{(i,e)|\mathtt{N o d e}(\mathtt{S m p D e v}(i))=\mathtt{N o d e}(\mathtt{E x p D e v}(e))\wedge\mathtt{S m p D e v}(i)\neq\mathtt{E x p D e v}(e)\}}\\ &{S_{i n t e r}=\{(i,e)|\mathtt{N o d e}(\mathtt{S m p D e v}(i))\neq\mathtt{N o d e}(\mathtt{E x p D e v}(e))\}}\end{array}
+$$  
+
+Rationality of Dynamic Sample Placement: Given the aforementioned modeling, there is no doubt that the time cost of All-to-All communication is highly related to the placement of experts and samples. In practice, dynamically adjusting the placement does not affect the training results as the All-to-All communication is still correctly performed. Combining with the common fact of network locality that $v_{i n t r a}\,>\,v_{i n t e r}$ , we can adjust the placement of samples and/or experts to reduce the inter-node communication volume, even if the intra-node communication volume becomes slightly higher. In fact, with a similar goal, several existing works have proposed to dynamically adjust the placement of experts based on their popularities (He et al., 2022; Nie et al., 2023; Zhai et al., 2023), as introduced in $\S2$ . However, all these works overlook the data locality — tokens of the same sample are usually routed to the same expert (Xue et al., 2024; Jiang et al., 2024), thereby missing the optimization opportunity of dynamic sample placement. More importantly, the size of the parameters of experts is usually much larger than the size of the samples. This prevents previous works from adjusting the expert placement in every iteration. In contrast, the adjustment of sample placement can be fused with the All-to-All communication by nature (detailed below), requiring zero extra communication. Consequently, this work focuses on the unexplored aspect, aiming to accelerate MoE training by dynamically adjusting the sample placement.1  
+
+To help readers better understand the strength of dynamic sample placement, we take Fig. 2 as an example, where $I=4,L=4,E=4,K=1$ , and both the experts and samples are placed sequentially, i.e., $\mathtt{E x p D e v}=[0,1,2,3]$ , $\mathrm{{SmpDev}=[0,1,2,3]}$ . Fig. 2(b) shows the communication without changing the placement of samples. According to Eq. 3 and Eq. 4, if we only consider the sending volume of node 0, then $S_{i n t e r}=\{(0,2),(0,3),(1,2),(1,3)\}$ , indicating that $s_{i n t e r}=5$ . However, after optimizing the placement of samples as in Fig. 2(c), i.e., $\mathrm{{SmpDev}=[3,1,2,0]}$ , the corresponding inter-node communication volume changes into $S_{i n t e r}=\{(3,2),(3,3),(1,2),(1,3)\}.$ , which gives $s_{i n t e r}\,=\,2$ . Furthermore, it is worth noting that the sample placement adjustment can be combined with the All-to-All gather operation. To be specific, instead of restoring tokens to their original positions, they are directly placed in their new positions according to the altered sample placement. This method directly optimizes the current communication operation without introducing any extra communication.  
+
+Problem Formulation: After the sample placement adjustment is determined, it can be seen that altering SmpDev affects two All-to-All operations: the gather operation of the current MoE layer and the scatter operation of the next MoE layer. Thus, our optimization targets these two operations. For the $l$ -th layer, the optimization problem can be written as follows.  
+
+$$
+\begin{array}{r l}{\underset{\mathrm{suppev}(i)\in[J]}{\mathrm{arg\,min}}}&{t^{(l,g a t h e r)}+t^{(l+1,s c a t t e r)}}\\ &{=\operatorname*{max}\left(t_{i n t r a}^{(l,g a t h e r)},t_{i n t e r}^{(l,g a t h e r)}\right)+\operatorname*{max}\left(t_{i n t r a}^{(l+1,s c a t t e r)},t_{i n t e r}^{(l+1,s c a t t e r)}\right)}\\ {\mathrm{s.t.}}&{\underset{i\in[I]}{\sum}\mathbb{I}[\mathrm{smpDev}(i)=j]=I/J\,\mathrm{for}\;j\in[J]}\end{array}
+$$  
+
+Since a single change in sample placement affects two All-to-All operations, both communication times are included in the optimization objective. Additionally, to ensure computational and memory balance across devices, each device should retain the same number of samples before and after the sample placement adjustment. This forms the basis for the constraints in our optimization.  
+
+3.2 PROBLEM SOLVING  
+
+Eq. 5 is a complex combinatorial optimization problem, which cannot be solved optimally in polynomial time. As the cluster size increases, even finding an approximate solution may take a significant amount of time. Since this problem needs to be solved before each gather operation, solving it directly would result in unbearable additional time costs. To address this, we design an efficient method to obtain approximate solutions. In particular, we first dissect the optimization problem into two stages and develop a polynomial-time algorithm to achieve the solution, as introduced below.  
+
+Two-Stage Dissection: Although Eq. 1 takes the maximum value of the two kinds of communication cost, in practice, due to the significant bandwidth difference between the inter- and intra-node connections, the most time-consuming term is usually the inter-node one. Therefore, we propose a two-stage solving strategy: the first stage optimizes $t_{i n t e r}$ at the global scale, while the second stage minimizes $t_{i n t r a}$ within each node, without affecting $t_{i n t e r}$ . Formally, suppose there are $N$ nodes and each node consists of $J/N$ devices, then the optimization formula of the first stage can  
+
+![](images/0a2f2ee233923d7960db01a88907752992847a0d2603bfa56b896cf7e2ab473c.jpg)  
+(a) Sample placement after the first stage.  
+
+![](images/ae5e343cc9cc98b9da39fff185769578b6e02c6a7b80ea6b2afa74fe2f7b16af.jpg)  
+(b) Sample placement after the second stage.  
+
+Figure 4: An example of the second stage optimization. Fig. 4(a) shows the MoE layer in $N o d e_{1}$ after the first stage optimization in Fig. 2(c). By applying the second stage optimization within the node, the intra-node communication can be reduced by 1 token (by swapping samp $\iota_{e_{0}}$ and sample2), as shown in Fig. 4(b).  
+
+be written as the following integer linear programming (ILP) problem:  
+
+$$
+\begin{array}{r l}{\underset{\mathrm{Node}(\mathrm{Smprov}(i))\in\ensuremath{[N]}\mathrm{~for}\,i\in\ensuremath{[I]}}{\arg\operatorname*{min}}}&{t_{i n t e r}^{(l,g a t h e r)}+t_{i n t e r}^{(l+1,s c a t t e r)}}\\ {\mathrm{s.t.}\quad}&{\displaystyle\sum_{i\in\ensuremath{[I]}}\ensuremath{\mathbb{I}\big[\mathrm{Node}(\mathrm{SmpDev}(i))=n\big]}=I/N\;\mathrm{for}\;n\in\ensuremath{[N]}}\end{array}
+$$  
+
+The constraint of balance across devices in Eq. 5 is turned into the balance across nodes since we focus on inter-node communication in the first stage. After obtaining the optimal solution of the first stage, the second stage considers rearranging the samples within each node individually. For the $n$ -th node, denote $[[I]_{n}^{*}\subseteq[!I]$ as the set of samples appointed to it after solving Eq. 6. And let $[J]]_{n}=\{j|j\in[\lceil J\rceil\land\mathbf{\dot{Node}(j)}\overleftarrow{=}n\}$ be the set of experts reside on it $(\mathbb{[}J]]_{n}$ is determined by the dev ice placemen t r ather than obtained by Eq. 6). Then, to optimize for  th e $n$ -th node, we should solve the following ILP problem:  
+
+$$
+\underbrace{\mathrm{arg\,min}}_{\substack{\mathrm{suppov}(i)\in[J]_{n}\,\mathrm{for}\,i\in[J]_{n}^{*}}}t_{i n t r a}^{(l,g a t h e r)}+t_{i n t r a}^{(l+1,s c a t t e r)}\quad\mathrm{s.t.}\quad\sum_{i\in[I]_{n}^{*}}\mathbb{I}[\mathrm{SmpDev}(i)=j]=I/J\,\mathrm{for}\;j\in[J]_{n}
+$$  
+
+Specifically, Fig. 2 can be regarded as the optimization of the first stage, while Fig. 4 demonstrates the second stage of optimization built upon it. Although the second stage consists of $N$ ILP problems, each for one node, they are independent and can be solved concurrently.  
+
+Polynomial-time Solver: By dissecting the original combinatorial optimization problem, we obtain $N+1$ ILP problems, which can be solved via existing libraries like PuLP (Mitchell et al., 2011). However, recall that we need to solve these problems for each layer in each training iteration, the efficiency of problem-solving is vital. Unfortunately, since ILP problems are NP-hard, when we try to solve them via PuLP, the time cost of solving exceeds the time cost of scatter communication and experts’ computation (as evaluated in $\S4.4\O_{,}$ ), making it impractical. Given the fact that each sample must be assigned to one device, we reconsider the ILP problems as assignment problems by transforming them into weighted bipartite matching problems, and subsequently develop a polynomial-time solver based on the widely used Kuhn-Munkres (KM) algorithm.  
+
+We first introduce how to transform the ILP problems into weighted bipartite matching problems. Let $c_{i,n}$ and $c_{i,j}^{\prime}$ represent the inter- and intra-node communication volume generated by placing the $i$ -th sample on the $j$ -th device that resides in the $n$ -th node, They can be calculated using the following formulas:  
+
+$$
+\begin{array}{r l}&{c_{i,n}=\displaystyle\sum_{e\in S}n u m_{i,e},\quad c_{i,j}^{\prime}=\displaystyle\sum_{e\in S^{\prime}}n u m_{i,e},\quad\mathrm{where}}\\ &{S=\{e|\mathrm{Node}(\mathtt{E x p D e v}(e))\neq n\},S^{\prime}=\{e|\mathrm{Node}(\mathtt{E x p D e v}(e))=\mathrm{Node}(j)\wedge\mathtt{E x p D e v}(e)\neq j\}.}\end{array}
+$$  
+
+To make the expression clearer, let $p_{i,n},p_{i,j}^{\prime}\in\{0,1\}$ indicate whether the $i$ -th sample is placed on the $n$ -th node and the $j$ -th device, respectively. Then, the optimization objective can be expressed as  
+
+$$
+\begin{array}{r l}&{t_{i n t e r}=\alpha_{i n t e r}+\beta_{i n t e r}\displaystyle\sum_{\substack{i\in[I],\,n\in[N]}}c_{i,n}p_{i,n},\quad t_{i n t r a}=\alpha_{i n t r a}+\beta_{i n t r a}\displaystyle\sum_{\substack{i\in[I],\,j\in[J]}}c_{i,j}^{\prime}p_{i,j}^{\prime},\quad\mathrm{where~}}\\ &{p_{i,n}=\mathbb{I}[\mathrm{Node}(\mathrm{SmpDev}(i))=n],\quad p_{i,j}^{\prime}=\mathbb{I}[\mathrm{SmpDev}(i)=j]\quad\mathrm{for}\;i\in[I],n\in[N],j\in[J]}\end{array}
+$$  
+
+Algorithm 1 NetMoE Optimization   
+1: function $\mathtt{S o l v e}(n u m)$   
+2: Get $c,c^{\prime}$ via Eq. 8 and build bipartite graphs   
+3: Get the optimal solution $p^{*}$ via the Kuhn-Munkres (KM) algorithm   
+4: return the optimal sample placement according to $p^{*}$   
+5: The Main Training Process:   
+6: for submodule in model do   
+7: if submodule is a MoE layer then   
+8: Get route from the gating network and calculate num via Eq. 2   
+9: Invoke $\mathtt{S o l v e}(n u m)$ in a background thread $\triangleright$ Offloading solving process   
+10: Get input from All-to-All scatter   
+11: Get output from expert computation   
+12: $o u t p u t=i n p u t+o u t p u t$ ▷Expert residual inlining   
+13: Get the optimal sample placement from the background thread   
+14: Perform All-to-All gather with the optimal sample placement   
+15: else   
+16: submodule.forward()  
+
+After modifying the corresponding constraints, we transform the ILP problems into (0,1)-ILP problems. For instance, below presents the transformed problem for the first stage2 (i.e., Eq. 6):  
+
+$$
+\begin{array}{r l}{\underset{p_{i,n}\mathrm{~for~}i\in[I],n\in[N]}{\mathrm{arg\,min}}}&{\alpha_{i n t e r}+\beta_{i n t e r}\displaystyle\sum_{i\in[I],n\in[N]}\left(c_{i,n}^{(l,g a t h e r)}+c_{i,n}^{(l+1,s c a t t e r)}\right)p_{i,n}}\\ {\mathrm{s.t.}}&{\displaystyle\sum_{i\in[I],n\in[N]}p_{i,n}=I/N\,\mathrm{for}\,n\in[N],\quad\sum_{n\in[N]}p_{i,n}=1\mathrm{~for~}i\in[I]}\end{array}
+$$  
+
+378   
+379   
+380   
+381   
+382   
+383   
+384   
+385   
+386   
+387   
+388   
+389   
+390   
+391   
+392   
+393   
+394   
+395   
+396   
+397   
+398   
+399   
+400   
+401   
+402   
+403   
+404   
+405   
+406   
+407   
+408   
+409   
+410   
+411   
+412   
+413   
+414   
+415   
+416   
+417   
+418   
+419   
+420   
+421   
+422   
+423   
+424   
+425   
+426   
+427   
+428   
+429   
+430   
+431  
+
+![](images/714c7a1355bfc429eeb6b10fa5068ea70fe4bc51d0b765aa3c9a178c140f1098.jpg)  
+Figure 5: An example of a bipartite.  
+
+This (0,1)-ILP problem can be modeled as a weighted bipartite matching problem. In particular, consider a bipartite graph with two sets of graph nodes, $P$ and $Q$ . The set $P$ represents all training samples, and $|P|=I$ . The set $Q$ represents all training nodes (machines), where each training node can handle $B:=I/\bar{N}$ training samples. To model this, each graph node in $Q$ is duplicated $B$ times, resulting in $|Q|=I$ . A weighted edge exists between every pair of graph nodes from $P$ and $Q$ . Let $P_{i}$ represent the $i^{\th}$ -th training sample and $Q_{n}$ the $\lfloor n/B\rfloor$ -th training node. The weight of the edge between Pi and Qn is denoted as Wi,n = ci(,l,⌊gna/tBh⌋er $\bar{W_{i,n}}=c_{i,\lfloor n/B\rfloor}^{(l,g a t h e r)}+c_{i,\lfloor n/B\rfloor}^{(l+1,s c a t t e\bar{r})}$ This transformation reduces the problem of finding a minimum weight perfect matching in this bipartite graph, which can be efficiently solved to optimality in polynomial time using the KuhnMunkres (KM) algorithm. Fig. 5 illustrates an example of constructing a bipartite graph during the first stage in Fig. 2. The graph nodes on the left represent set $P$ , and the graph nodes on the right represent set $Q$ . Each pair of graph nodes is connected by a weighted edge, depicted by a dotted line. The red edges indicate the final matching scheme, where the total weight of all matched edges is minimized.  
+
+3.3 IMPLEMENTATION  
+
+NetMoE is implemented on top of PyTorch (Paszke et al., 2019), with custom operations (e.g., the calculation of $n u m,c,c^{\prime}$ , and the KM algorithm) implemented in $C++$ and CUDA. The complete workflow of NetMoE is presented in Alg. 1. In addition to the problem-solving introduced in $\S3.2$ , NetMoE has been optimized in the following ways.  
+
+Expert Residual Inlining: In classic MoE models, residual connections are independent of the MoE layers. However, in NetMoE, the position of the training data changes after the All-to-All benefits of load balancing are less pronounced. Consequently, by dynamically adjusting the sample placement, NetMoE consistently outperforms the state-of-the-art systems. Last but not least, it is noteworthy that our method is compatible with dynamic expert placement. By adjusting the $\mathtt{E x p D e v}(\cdot)$ that is fed to our solver, NetMoE can be combined with dynamic expert placement to achieve even higher efficiency. We plan to explore this integration in our future work.  
+
+Table 4: Time cost of different solvers vs.   
+
+![](images/49d8a484d2f56e3fffdaca801086a74094a3f4a04fac2775c0e013a64f7352c4.jpg)  
+
+![](images/aed460db8697113e89c249b3255810e5730e24183132bad3cb2bde7d7f5c24e0.jpg)  
+Figure 7: The actual and theoretic speedup in terms of All-to-All communication cost.  
+
+
+
+\section{4.3 ALL-TO-ALL PERFORMANCE  }
+
+
+As shown in Fig. 7, we conducted experiments on three kinds of model to observe the differences in All-to-All communication before and after applying NetMoE and compared these results with the theoretical optimization values provided by the solver. It can be seen that the actual speedup in Allto-All communication is slightly less than the theoretical values. This discrepancy is reasonable, as our modeling of All-to-All communication assumes ideal conditions and does not account for potential routing conflicts or hardware-induced errors.  
+
+4.4 SOLVER PERFORMANCE  
+
+To verify the efficiency of the solver, we compared the solving time under different scales with the summed time cost of All-to-All scatter and expert computation, as shown in Table 4. KM represents the algorithm used in NetMoE, while PuLP (Mitchell et al., 2011) refers to the commonly used toolkit for solving linear programming problems. It can be observed that although the solving time exhibits super-linear growth with the increase in $I$ , the solving process is consistently hidden by the All-to-All scatter and expert computation for various scenarios. In contrast, PuLP’s solving time is difficult to get overlapped. This highlights the necessity of designing specialized optimization methods in scenarios with high real-time performance demands.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+We proposed NetMoE to optimize All-to-All communication, which is the primary bottleneck in training MoE models. By leveraging data and network locality, our method dynamically adjusts the placement of training samples during training, transforming inter-node communication into intra-node communication to enhance All-to-All communication efficiency. We modeled the Allto-All communication time and the sample placement as an optimization problem and designed a polynomial-time approach to solve it. Empirical results demonstrate that NetMoE outperforms existing MoE training systems by up to $1.67\times$ in terms of training efficiency.  
+
+
+

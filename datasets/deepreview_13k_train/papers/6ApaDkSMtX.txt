@@ -1,0 +1,395 @@
+\title{Encoder-only Next Token Prediction}
+
+\begin{abstract}
+\rebuttal{Next-token prediction is conventionally done using decoder-only Transformers with causal attention, as this approach allows for efficient reuse of keys and values. What if we were not compute-limited, should we still use decoder-only Transformers? In this work, we introduce \textbf{E}ncoder-only \textbf{N}ext \textbf{T}oken \textbf{P}rediction (ENTP). We use small scale experiments to explore the differences between ENTP and decoders, highlighting potential advantages of ENTP in setting with unbounded compute. We introduce the $\operatorname{Count3}$ task and show, both theoretically and experimentally, that while ENTP can perform this task easily, a decoder-only Transformer cannot. Finally, we empirically demonstrate ENTP’s superior performance across various synthetic tasks, such as length generalization and in-context learning.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Traditionally, auto-regressive language modeling has relied on decoder-only Transformers~\citep{vaswani2023attentionneed} with causal attention, trained using the next-token prediction objective. Causal attention ensures that each token can only attend to previous tokens, preventing future tokens from influencing past outputs. This mechanism makes training and inference more efficient, as past keys and values do not need to be recomputed for each token. This efficiency enables the scaling of decoder-only Transformers, such as GPT-4 \citep{openai2024gpt4technicalreport} and Llama-3 \citep{dubey2024llama3herdmodels}, up to billions of parameters using current hardware.
+
+However, causal attention also introduces artificial constraints. Given tokens $x_1, x_2, ..., x_n$, the contextual embedding of $x_j$ (where $j < n$) can only attend to embeddings of earlier tokens, even when predicting $x_{n+1}$. \rebuttal{While this constraint ensures a strict causal structure, it may not always be necessary or beneficial. We investigate what happens when we remove this constraint, while still maintaining causality externally.}
+
+Specifically, we look at Encoder-only Transformers, which are typically used for tasks like classification, and do not impose this causality constraint. Though traditionally not used for auto-regressive tasks, encoder-only architectures can be adapted for next-token prediction. When computing the output at the current time step, an encoder-only Transformer, or any sequence model, can be made causal by only providing inputs up to and including the current time step. Therefore, in this work, we investigate the idea of using encoder-only Transformers for next-token prediction. We summarize our findings below.
+
+\paragraph{Functions expressible with Decoder-only and Encoder-only Transformers.} We demonstrate that the sets of functions expressible by decoder-only and encoder-only Transformers are not comparable, which goes against intuition that the expressivity of encoders would subsume that of decoders. Rather, there exist functions expressible with decoder-only Transformers that are not expressible with encoder-only Transformers, and vice versa, as well as functions expressible by both architectures.
+
+\paragraph{Complexity of Decoder-only and Encoder-only Transformers.} Based on the minimum time and space complexities, we give a description of the functions that can be performed by decoder-only and encoder-only Transformers. We propose an auto-regressive task that can be performed by encoder-only Transformers, and cannot be performed by decoder-only Transformers (given that some mild assumptions hold). We validate our hypothesis
+with small experiments using small decoder-only and encoder-only Transformers, as well as experiments fine-tuning GPT-4o \citep{openai2024gpt4technicalreport} and Llama3-8B \citep{dubey2024llama3herdmodels}.
+
+\paragraph{Additional Experiments.} We compare the performance of decoder-only and encoder-only Transformers on a range of more realistic tasks. We test the sample complexity and length generalization capabilities of decoders and encoders using addition tasks~\citep{leeteaching}. We also train both architectures to perform in-context learning~\citep{icl} on various simple functions, such as linear functions and two-layer neural networks. Additionally, we train small decoder-only and encoder-only Transformers on a large text dataset~\citep{Gokaslan2019OpenWeb} to assess their performance in language modeling tasks.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=.95\linewidth]{figures/entp_main_re.pdf}
+    \caption{\textbf{An overview of decoder-only vs. encoder-only Transformers in next token prediction.} Decoders use a causal attention, ensuring that each token attends only to the preceding tokens. In contrast, encoders allow all tokens to attend to each other by performing attention computation from scratch for each token prediction.}
+    \label{fig:ced}
+\end{figure}
+
+
+\section{Related Work}
+
+\paragraph{Expressive Power of Transformers.}
+There have been various literature exploring the expressive power of Transformers. From the lens of universal approximation, \cite{yun2020Transformers} showed that any continuous sequence-to-sequence function over a compact set can be approximated arbitrary close by a Transformer (of finite albeit very large size). Other works approach expressiveness from the perspective of computability and complexity such as \cite{perez2021attention} which showed Transformers are Turing complete and \cite{merrill2022saturated, merrill2024logic, li2024chain} which use circuit complexity to characterize the languages recognizable by Transformers of fixed depth. \cite{pmlr-v202-giannou23a} presents a framework for Transformers as universal computers by placing them in a loop. Communication complexity has also been used to show the impossibility of one-layer Transformers of expressing certain functions e.g.~induction head, without the model size being linear in the length of the input \citep{tf-limitations,sanford2024one}. We modify functions introduced in \citep{tf-limitations} to compare the expressive power decoder-only Transformers against ENTP. We note that the existing bounds \citep{tf-limitations,sanford2024one} are highly related, but they do not directly imply the relative expressive power of encoder and decoder (and specifically of the same fixed model size).
+\paragraph{Transformer Architectures for Next Token Prediction.}
+Transformers have become the de facto backbones for next-token prediction tasks, leading to several variants such as encoder-decoder, causal decoder-only, and prefix decoder-only models. In the encoder-decoder model~\citep{bart, chung2024scaling}, similar to the vanilla Transformer~\citep{vaswani2023attentionneed}, the encoder transforms the input tokens into conditioning features, and the decoder auto-regressively predicts the target tokens by using cross-attention over the encoded representation and causal attention over the output tokens. In contrast, the causal decoder-only model~\citep{gpt3, palm} uses only the Transformer decoder and applies causal attention to all tokens to perform next-token prediction, ensuring that each token attends only to previous tokens. The prefix decoder-only model~\citep{T5, wu2021yuan} is similar to the causal decoder-only model but differs in that it applies non-causal attention (i.e., full self-attention) to the input sequence (see Figure~\ref{fig:attention_pattern} for visualizations of the attention patterns in these variants).
+
+With the development of these models, recent studies have investigated the performance of each variant across various tasks. Notably, \cite{zeroshot}  examined the zero-shot generalization performance of each model along with various objectives, and \cite{ding2024causallm} analyzed the performance of causal decoder-only and prefix decoder-only models in in-context learning. However, despite these diverse studies, there is a lack of research on encoder-only models that do not impose the constraint of causal attention for every next-token prediction. Therefore, in this work, we analyze the characteristics of encoder-only next token prediction (ENTP), comparing them with decoder-only models.
+
+
+\section{Preliminaries}
+
+\paragraph{Sequence-to-Token Functions and Autoregression.}
+Given a vocabulary $V$ (which we traditionally think of as some finite set, but could in general be any arbitrary perhaps uncountable set e.g.~$\mathbb R^d$), we can define a sequence over $V$ as $(x_1,\dots,x_n)$ where $x_1,\dots,x_n \in V.$ Let $V^* = \{(x_1,\dots,x_n): n\in\mathbb N; x_i \in V\}$ be the set of all sequences generated by $V$. Then, we say that $f:V^* \to V$ is a sequence-to-token function. 
+
+We can view a causal model as a map from an input sequence to an output sequence with the causality constraint that the $i$'th ouput token depends only on the first $i$ input tokens. Mathematically, we enforce this causality contraint by characterizing our causal model, $\mathcal T_f:V^* \to V^*$, with some sequence-to-token function $f$
+where on input sequence $(x_1,\dots,x_n)$ we have that
+\begin{equation}\label{eq:Tf}
+      \mathcal T_f(x_1,x_2,\dots,x_n) \coloneqq (f(x_1),f(x_1,x_2),\dots,f(x_1,x_2,\dots,x_n)).
+\end{equation}
+
+Observe that a sequence-to-token function $f$ can be used auto-regressively to generate tokens from some initial sequence $(x_1,\dots,x_n)$ via the following update rule:
+\begin{equation}\label{eq:auto}
+    x_{n+i} \coloneqq f(x_1,\dots,x_{n+i-1}).
+\end{equation}
+This can also be viewed as a special case of the causal model, where the input sequence is chosen so that
+\begin{equation}
+ \mathcal T_f(x_1,x_2,\dots,x_n) = (x_2,x_3,\dots,x_{n+1}).   
+\end{equation}
+
+Hence, if we are trying to learn a causal or auto-regressive model, it suffices to learn the sequence function that generates it. Thus in this paper, we focus on the type of sequence functions that encoders versus decoders can learn and express.
+
+\paragraph{Encoders and Decoders.}
+We will use the letters $\mathcal E$ and $\mathcal D$ respectively to refer to encoders and decoders. In this paper, both models refer to variants of the Transformer architecture introduced in \cite{vaswani2023attentionneed}, where the only difference lies in the masking used on the attention scores (decoder uses a causal mask while encoder allows full attention, as illustrated in \Cref{fig:ced}).
+
+The model size of a Transformer is determined by two parameters:
+\begin{itemize}
+    \item $L$: number of Transformer blocks.
+    \item $D$: embedding dimension.
+\end{itemize}
+
+As Transformers are sequence-to-sequence maps, we will use subscript notation where $\mathcal T(x_1,\dots,x_n)_i$ denotes the $i$'th value in the output sequence. We also allow our models the option to use positional embeddings. Tilde-notation i.e.~$\widetilde{\mathcal E}$ and $\widetilde{\mathcal D}$ will denote models that do not use positional embeddings. 
+For token embeddings $x_1,\dots,x_n$ and positional embeddings $p_1,\dots,p_n$:
+\begin{equation*}
+   \mathcal E(x_1,\dots,x_n) \coloneqq \widetilde{\mathcal{ E}}(x_1+p_1, \dots, x_n + p_n).
+\end{equation*}
+In our experiments, we will use encoder and decoder models that have access to trainable positional embeddings.
+
+\paragraph{Encoder and Decoders as Causal Models.}
+Given encoder $\mathcal E$ and decoder $\mathcal D,$ we can associate them with sequence-to-token functions as follows:
+\begin{align*}
+    f_{\mathcal E}: (x_1,\dots,x_n) &\mapsto \mathcal E(x_1,\dots,x_n)_n\\
+    f_{\mathcal D}: (x_1,\dots,x_n) &\mapsto \mathcal D(x_1,\dots,x_n)_n.
+\end{align*}
+We then have $\mathcal T_{\mathcal E}$ and  $\mathcal T_{\mathcal D}$ as the causal models of $\mathcal E$ and $\mathcal D$ when used as sequence functions $f_{\mathcal E}$ and $f_{\mathcal D}$ respectively.\footnote{To be fully consistent with notation in \eqref{eq:Tf}, we should denote them as $\mathcal T_{f_{\mathcal E}}$ and $\mathcal T_{f_{\mathcal D}}$ respectively. However we abuse notation and use $\mathcal T_{\mathcal E}$ and $\mathcal T_{\mathcal D}$ for sake of simplicity.} 
+
+Under this characterization, we make two observations. Firstly, we can view $\mathcal T_{\mathcal E}$ as an explicit and necessary way to introduce causality to the encoder $\mathcal E$ since there is nothing implicit to the encoder that forces causality. Secondly, in juxtaposition to the previous statement, the causal model $\mathcal T_{\mathcal D}$ is exactly equivalent to just using $\mathcal D$, that is $\mathcal T_{\mathcal D} = \mathcal D.$ This is because $\mathcal D$ enforces causality implicitly via the attention mask (see \Cref{sec:tdd} for formal proof). Therefore the explicit enforcement becomes redundant.
+
+
+
+
+\section{Expressive Power of Encoder-only vs.~Decoder-only Transformers}
+
+Given that we can learn causal functions \rebuttal{(defined as causal model in preliminary) } using either encoders and decoders, the natural question to ask is how the expressive power of each model is related, i.e.~can the encoder express more causal functions than a decoder of the \emph{same} model size? Or perhaps they express the exact same class of causal functions? \rebuttal{Towards answering this question, one trivial observation is that one-layer decoders and encoders are equivalent (formal proof in \Cref{sec:ede}) which directly implies the existence of causal functions\footnote{Here causal function refers to sequence-to-sequence function where the outputs are only determined by current and previous inputs, i.e. $\mathcal F(x_1, x_2, ..., x_n)_i$ only depends on $x_1, x_2, ..., x_i$, and not $x_j$ for any $j > i$.} that both architecture can model exactly.}
+
+Now, what about causal functions that a decoder can model but not encoder, or vice versa --- that encoder can model but not decoder? 
+These functions exist too, as we show in the following two theorems:
+
+\begin{theorem}\label{thm:dyen}
+    For any $L\ge 2$ and $D \ge 1,$ there exists a position-free decoder $\widetilde{\mathcal D}$ that has $L$-layers and embedding dimension $D,$ such that for any encoder $\mathcal E$, there exists some input sequence $(x_1, x_2, \dots)$ with $x_1,x_2,\dots \in\mathbb R^D,$ and $\mathcal T_{\widetilde{\mathcal D}}(x_1, x_2, \dots) \neq \mathcal T_{\mathcal E}(x_1,x_2,\dots)$.
+\end{theorem}
+
+\begin{theorem}\label{thm:eydn}
+  For any $L\ge 2$ and $D \ge 1,$ there exists a position-free encoder $\widetilde{\mathcal E}$ that has $L$-layers and embedding dimension $D,$ such that for any decoder $\mathcal D$ with positional embeddings satisfying $p_1\neq p_2$, there exists some input sequence $(x_1, x_2, \dots)$ with $x_1,x_2,\dots \in\mathbb R^D,$ and $\mathcal T_{\widetilde{\mathcal E}}(x_1,x_2,\dots)\neq \mathcal T_{\mathcal D}(x_1, x_2, \dots)$.
+\end{theorem}
+
+The above two theorems are existential in nature. Informally, \Cref{thm:dyen} says that if we consider causal model defined over the entirety of $\mathbb R^D$ as its vocabulary, we can find some decoder, for which any encoder will differ from it on some input sequence. \Cref{thm:eydn} makes a similar (albeit weaker statement) in the other direction; namely the existence of a causal function computable by an encoder, but not by any decoder that uses ``non-trivial'' positional embeddings (e.g.~embeddings for different positions are unique).
+Detailed proof of both theorems are deferred to \Cref{sec:dpf}.
+
+Of course, the setting and assumptions of the above two statements are not necessarily very realistic. For one, they focus on general class of causal models rather than only auto-regressive ones. Furthermore, the results only pertain to exact realization and say nothing about approximation. The assumption of unbounded domain is also not realistic as in practice decoders are trained and used over a finite domain of tokens, each with some fixed embeddings. And specific to \Cref{thm:eydn}, no claim is made about decoders that do not use positional embeddings. But despite the limitations, these theorems give an indication that the expressive power of encoder and decoder model are different --- despite the almost identical description modulo the attention mask. Changing the mask on the attention scores causes significant changes to the properties of the model. Thus, in the following sections we propose an auto-regressive tasks and run experiments comparing encoders and decoders that corroborates this view.
+
+
+\section{Time and Space Complexity Comparisons}
+
+Inspired by the different computational models of encoder-only and decoder-only Transformers, we characterize the causal sequence functions learnable by encoders and decoders based on their required computational complexity. We give an informal comparison of encoders and decoders in terms of their required time and space complexities --- both over the entire sequence and for each additional token. We propose $\operatorname{Count3}$, which is closely related to $\operatorname{Match3}$ \citep{tf-limitations}, to highlight the ``gap'' between the complexity of encoders and decoders. $\operatorname{Count3}$ is feasible for an encoder but challenging for a decoder due to its limited computation complexity.
+
+\paragraph{Time Complexity Comparison.} \rebuttal{Decoder-only Transformers, using KV-Cache, take $O(n)$ time to generate each token, and $O(n^2)$ time to generate an entire sequence. Because an ENTP has to compute the entire attention matrix for every token, it takes $O(n^2)$ time to generate each token. Thus, it takes $O(n^3)$ time to generate the entire sequence. While this implies that ENTP is more compute-intensive (i.e., ENTP will be slower than decoder-only Transformer), this also implies that ENTP can express more compute-intensive functions than decoders. Specifically, since the total amount of compute that decoders use for generating n tokens is $O(n^2)$, they cannot run any algorithm whose runtime is $\omega(n^2)$ (strictly greater than quadratic time).}
+
+\paragraph{Space Complexity Comparison.} Both encoder-only and decoder-\rebuttal{only} use $O(n)$ space complexity to generate an entire sequence. Although the standard implementation of attention uses $O(n^2)$ space, attention can be implemented using only $O(n)$ space. Thus, we need a more detailed approach to find a difference between the space complexity of the two models.
+
+Towards this end, we classify memory used for the computation over the current token as either precomputed or additional. Precomputed memory stores values from computation over past tokens. Values stored in precomputed memory \emph{persist}, and are used for computation over current and future tokens, e.g.~the keys and values of previous tokens for a decoder. Additional memory stores values that depend on the current token, e.g.~keys and values of the current token.
+
+When generating the $n$th token, a decoder uses $O(n)$ precomputed memory to store keys and values of previous tokens and $O(1)$ additional memory to compute results over the current token. An encoder computes everything from scratch for each token, so it uses $O(n)$ additional memory and no precomputed memory. Under this view, there is a space complexity gap between encoder and decoder.
+
+\setlength{\tabcolsep}{16pt}
+\renewcommand{\arraystretch}{1.2} 
+\begin{table}[h]
+    \centering
+    \caption{Complexity for next token inference.}
+    \label{tab:cc}
+    \resizebox{0.7\linewidth}{!}{
+       \begin{tabular}{c|cc}
+            \toprule
+            Complexity & Encoder-only & Decoder-only \\
+            \midrule
+            Additional Time Complexity  & $O(n^2DL)$ & $O(nDL)$  \\
+            Precomputed Space Complexity  & N/A & $O(nDL)$ \\
+            Additional Space Complexity & $O(nD)$ & $O(D)$\\
+            \bottomrule
+        \end{tabular}
+    }
+\end{table}
+
+Most of our complexity analysis focuses on Transformers with fixed sizes, so we primarily consider complexity with respect to the sequence length $n$. However, we also account for the embedding dimension $D$ and the number of layers $L$  in \Cref{tab:cc}. Both encoder-only and decoder-only Transformers use $O(LD)$ time because the attention operation is performed $O(L)$ times, and computing each query, key, and value vector is $O(D)$. In the case of multi-head attention, we assume $D = hd$, where $h$ is the number of heads and $d$ is the dimension of the query, key, and value vectors. A decoder uses $O(nhdL) = O(nDL)$ precomputed space because it stores $nhL$ query, key, and value $d$-dimensional vectors. Both encoders and decoders use $O(D)$ additional space for current token's embedding vector --- and we specifically note that there is no dependence on $L$ as Transformer do computation sequentially on the layer (i.e.~all the additional computation required for layer $\ell$ is done before all the additional computation required for layer $\ell+1$). Thus, we can do the computation over $L$ layers using $O(D)$ space by overwriting computation over previous layers.
+\subsection{$\operatorname{Count3}$ Definition and Complexity}
+
+\begin{algorithm}[t]
+   \caption{Algorithm to compute \textbf{$\operatorname{Count3}$} in $O(n^2)$ time and $O(1)$ space}
+   \label{alg:tc1}
+\begin{algorithmic}[1]
+\algsetup{
+  indent=1.5em,
+  linenosize=\scriptsize}
+    \REQUIRE length $n$ sequence of integers $(x_1,\dots,x_n)$
+    \STATE $\text{count} \gets 0$
+    \FOR{$i  = 1, \dots, n$}
+        \FOR{$j  = 1, \dots, n$}
+            \IF{$(x_i + x_j + x_n) \equiv 0 \pmod n$}
+                \STATE $\text{count} \gets \text{count} + 1$
+            \ENDIF
+        \ENDFOR
+    \ENDFOR
+    \RETURN $\text{count} \pmod n$
+  \end{algorithmic}
+\end{algorithm}
+\begin{algorithm}[t]
+   \caption{Algorithm to compute \textbf{$\operatorname{Count3}$} in $O(n)$ time and $O(n)$ space}
+   \label{alg:tc2}
+\begin{algorithmic}[1]
+\algsetup{
+  indent=1.5em,
+  linenosize=\scriptsize}
+    \REQUIRE length $n$ sequence of integers $(x_1,\dots,x_n)$
+    \STATE $\text{count} \gets 0$
+    \STATE table $\gets$ zero-indexed length-$n$ array of $0$'s
+    \FOR{$i  = 1, \dots, n$}
+        \STATE $k \gets -x_i \mod n$
+        \STATE $\text{table}[k] \gets \text{table}[k] + 1$
+    \ENDFOR
+    \FOR{$i  = 1, \dots, n$}
+        \STATE $k \gets (x_i + x_n) \mod n$
+        \STATE $\text{count} \gets \text{count} + \text{table}[k]$
+    \ENDFOR
+    \RETURN $\text{count} \pmod n$
+  \end{algorithmic}
+\end{algorithm}
+
+Consider the sequence function that maps an input sequence of positive integers $x_1, x_2, \dots, x_n$ to the number of pairs $x_i, x_j$ where the modulo-$n$ sum of $x_i, x_j$ and $x_n$ is equal to $0$. More formally,
+\begin{equation}\label{eq:ftrip}
+    \operatorname{Count3}(x_1,x_2,\dots,x_n) \coloneqq \Big| \big\{(i,j) \in [n]^2 : x_i + x_j + x_n \equiv 0 \pmod n\big\}\Big| \pmod n.
+\end{equation}
+
+$\operatorname{Count3}$ is an augmented version of $\operatorname{Match3}$ \citep{tf-limitations}. As shown in 
+\citep{tf-limitations}, the triple-wise relationships, used in both $\operatorname{Match3}$ and $\operatorname{Count3}$, are difficult for Transformers to represent, because of the pairwise nature of self-attention.
+
+Note that there exists algorithms that can compute $\operatorname{Count3}$ on some length-$n$ input sequence  $x_1, x_2, \dots, x_n$ in either $O(n^2)$ time and $O(1)$ space or in $O(n)$ time and $O(n)$ space. See \Cref{alg:tc1} and \Cref{alg:tc2} for exact pseudocode implementations. In brief, \Cref{alg:tc1} iterates through all $n^2$ pairs checking if they meet the modulo-$n$ sum requirement. \Cref{alg:tc2} uses the fact that $x_i + x_j + x_n \equiv 0 \pmod n$ is equivalent to $x_i + x_n \pmod n \equiv -x_j \pmod n$. In two linear passes, it counts each $-x_j \pmod n$ and stores each count in a table, then sums the values in the table for each $x_i + x_n \pmod n$. Now, given these two algorithms, we make the following conjecture:
+
+\begin{conjecture} \label{con:ts2}
+    Given an algorithm $\mathcal A$ that computes $\operatorname{Count3}(x_1, x_2, \dots, x_n)$, at least one of the following must hold true:
+    \begin{enumerate}[label=(\roman*)]
+        \item  $\mathcal A$ requires $\Omega(n^2)$ time with access to $x_n$\label{enum:t}
+        \item  $\mathcal A$ requires $\Omega(n)$ space storing values unique to $n$. \label{enum:s}
+    \end{enumerate}
+\end{conjecture}
+
+This conjecture seems plausible given that both \Cref{alg:tc1} and \Cref{alg:tc2}, which we consider to be optimal, adhere to it. \Cref{alg:tc1} uses $O(n^2)$ time after accessing $x_n$ (line 4 of \Cref{alg:tc1}) and \Cref{alg:tc2} requires $O(n)$ memory, where the stored values are a function of $n$ (line 4 of \Cref{alg:tc2}). Given this conjecture, we can show the following lemma:
+
+\begin{lemma} 
+\label{lem:conjl2} Given that Conjecture \ref{con:ts2} holds and assuming $O(\log n)$ precision, any decoder-only Transformer with fixed embedding dimension $D$ satisfying $\mathcal{D}(x_1,\dots,x_m)_m = \operatorname{Count3}(x_1,\dots,x_m)$ for all sequences of length $m \leq n$ must have $L = \Omega(n)$. \footnote{$O(\log n)$ precision is not required for Lemma \ref{lem:conjl2}, but it is included to be consistent with Lemma \ref{lem:enc-bound}.}
+\end{lemma}
+
+\begin{proof}
+    Let $\mathcal D$ be a decoder with $L$ layers and embedding dimension $D$ satisfying $\mathcal D(x_1,\dots,x_m)_m = \operatorname{Count3}(x_1,\dots,x_m)$ for all sequences of length $m \leq n$. We can use $\mathcal D$ as an algorithm to compute $\operatorname{Count3}(x_1,\dots,x_n)$, by outputting  $\mathcal D(x_1,\dots,x_n)_n$ on input $(x_1,\dots,x_n).$ Thus either condition \ref{enum:t} or \ref{enum:s} of Conjecture \ref{con:ts2} must hold when $\mathcal D$ computes the output sequence over $(x_1,\dots,x_n)$.
+
+    \paragraph{Case 1: \ref{enum:t} is true.} In this case $\mathcal D$ requires $\Omega(n^2)$ time with access to $x_n$, i.e.~$\mathcal D$ uses $\Omega(n^2)$ time for the last token. From \Cref{tab:cc}, we know that $\mathcal D$ uses $O(nLD)$ time for each token. Thus condition \ref{enum:t} is true only if we have that $nLD = \Omega(n^2).$ Since $D$ is fixed, it follows that $L = \Omega(n).$
+
+    \paragraph{Case 2: \ref{enum:s} is true.} In this case, $\mathcal D$ requires $\Omega(n)$ space storing values unique to $n$. Because decoders are causal, we have $\mathcal D(x_1,\dots,x_n)_i = \operatorname{Count3}(x_1,\dots,x_i)$ for all $i\in [n]$. Then since we assume \ref{enum:s} is true, computing $\mathcal D(x_1,\dots,x_n)_i$ requires $\Omega(i)$ space for each $i\in [n]$. Furthermore by the uniqueness assumption of \ref{enum:s}, for $i \neq j$, the values stored when computing $\operatorname{Count3}(x_1,\dots,x_i)$ are different from the values stored when computing $\operatorname{Count3}(x_1,\dots,x_j)$. Since decoders are causal, the space used to compute $\mathcal D(x_1,\dots,x_n)_i$ cannot be overwritten when computing $\mathcal D(x_1,\dots,x_n)_j$, for $j > i$. Hence, when $\mathcal D$ computes $\operatorname{Count3}(x_1,\dots,x_n)$, it uses $\Omega(i)$ space to compute $\operatorname{Count3}(x_1,\dots,x_i)$, for each $i \in [n]$. Thus, $\mathcal D$ uses $\Omega\left(\sum_{i\in [n]} i\right) = \Omega(n^2)$ space to compute $\operatorname{Count3}(x_1,\dots,x_n)$. From \Cref{tab:cc}, we know that $\mathcal D$ uses $O(nLD)$ space for the entire sequence. Then $nLD = \Omega(n^2)$. Since $D$ is fixed, it follows that $L = \Omega(n).$
+    
+   Finally, as $L = \Omega(n)$ is a necessary condition for both conditions \ref{enum:t} and \ref{enum:s}, \Cref{lem:conjl2} follows.
+\end{proof}
+\begin{lemma} 
+\label{lem:enc-bound}
+Assuming $O(\log n)$ precision, there exists an encoder $\mathcal E$ with $L = O(1)$ and $D = O(1)$ such that $\mathcal E(x_1,\dots,x_m)_m = \operatorname{Count3}(x_1,\dots,x_m)$ for all sequences of length $m \leq n$. \footnote{We assume $x_1, ..., x_m < m$.}
+\end{lemma}
+
+Proof of Lemma \ref{lem:enc-bound} is in \Cref{sec:enc-bound-proof}.
+
+\begin{remark}With linear chain-of-thought (generating $O(n)$ tokens before answering), a decoder would be able to perform $\operatorname{Count3}$. We provide a RASP\footnote{\rebuttal{RASP \citep{rasp} is a programming language that describes Transformer computations, by mapping attention and feed-forward computation into simple primitives.}} \citep{rasp} program, \Cref{alg:rasp_count_triplets_cot}, to demonstrate this.\end{remark} 
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=.95\linewidth]{figures/count3_example.pdf}
+    \caption{An example of a sequence used in a $\operatorname{Count3}$ experiment.}
+    \label{fig:sequence_for_triplet}
+\end{figure}
+
+\subsection{Small-Scale Experiment} \label{sec:triplet_small}
+We train small decoder-only and encoder-only Transformers on auto-regressive sequences generated from \Cref{eq:ftrip}. 
+To generate unique sequences, we start each sequence with a seed containing 16 random integers between 0 and 63. 
+Then we extend the sequence to 64 integers using \Cref{eq:ftrip} (see~\Cref{fig:sequence_for_triplet}). 
+Seeds are generated randomly during training. 
+The seed portion of the sequence was not used to compute the loss during training, so the model was only trained on the deterministic part of the sequence. 
+As shown in \Cref{fig:trip_loss}, the decoder-only Transformers demonstrate some ability to learn patterns related to the distribution of numbers in $\operatorname{Count3}$ sequences, but they completely fail to learn the task. In contrast, the encoder successfully learns the task with near-perfect accuracy.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=.9\linewidth]{figures/triplet_full.pdf}
+    \caption{\textbf{Training loss and sequence accuracy curve for the $\operatorname{Count3}$.} The ENTP successfully learns to perform the $\operatorname{Count3}$ task, but the decoder-only models struggle to learn it.}
+    \label{fig:trip_loss}
+\end{figure}
+
+\subsection{$\operatorname{Count3}$ with Large Language Model} \label{sec:llm-trip-cnt}
+
+Furthermore, we investigate the performance of decoder-only large language models (LLMs) on the $\operatorname{Count3}$ task. We fine-tune Llama-3~\citep{dubey2024llama3herdmodels} and GPT-4o~\citep{openai2024gpt4technicalreport} using sequences of 64 integers, including 16 seeds, as introduced in Section~\ref{sec:triplet_small}. To enable the LLMs to leverage their knowledge, we also include the code for Algorithm~\ref{alg:tc1} in the prompt, asking the models to provide the result after executing the code (see Table~\ref{table:llm_prompt_code} for the full prompt). As shown in Figure~\ref{fig:llm_finetuning}, the LLMs struggle with the $\operatorname{Count3}$ task, which is consistent with our small-scale experiment. It demonstrates that the suggested characteristics of causal decoder-only models hold true even at large scales.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/llm_finetuning5.pdf}
+    \caption{Results of LLM fine-tuning on $\operatorname{Count3}$.}
+    \label{fig:llm_finetuning}
+\end{figure}
+$\operatorname{Count3}$ sequences have very small Kolmogorov complexity \rebuttal{i.e., the size of the smallest program that can generate this data}, as \Cref{alg:tc1} \rebuttal{(which uses only six lines of pseudocode) serves as an upper bound.} However, as shown by \Cref{lem:conjl2} and the experiments in \Cref{sec:llm-trip-cnt}, a decoder, no matter how large, cannot efficiently learn the task. 
+
+\rebuttal{We fine-tune BERT~\citep{devlin2019bertpretrainingdeepbidirectional} as an ENTP model, and it successfully learns $\operatorname{Count3}$ faster than small-scale ENTP models. See \Cref{fig:added_triplet} for details.}
+
+\subsection{Similar Function Learnable by Decoder}
+Motivated by the question of how we need to change $\operatorname{Count3}$ so that it can be learned by a decoder, we examine a modified version of $\operatorname{Match3}$ \citep{tf-limitations}. \footnote{The main difference between $\operatorname{Match3}$ and $\operatorname{Match3}'$ is that $\operatorname{Match3}'$ operates on triplets $(x_1, x_i, x_j)$.}
+
+\begin{equation}\label{eq:TI}
+    \operatorname{Match3}'(x_1,x_2,\dots,x_n) \coloneqq \begin{cases}
+        1 & \exists \ (i, j) : x_1 + x_i + x_j = 0 \pmod{128}\\
+        0 & \text{otherwise}\\
+    \end{cases}
+\end{equation}
+
+There are several key differences between $\operatorname{Count3}$ and $\operatorname{Match3}'$:
+\begin{enumerate}[label=(\roman*)]
+    \item $\operatorname{Match3}'$ uses a fixed modulus, whereas $\operatorname{Count3}$ employs the sequence length as the modulus. This simplifies the decoder's task, as the modulus remains constant across all tokens, enabling reuse of intermediate values from previous tokens.
+    
+    \item $\operatorname{Match3}'$ operates on triplets $(x_1, x_i, x_j$) rather than $(x_i, x_j, x_n$). By using $x_1$ instead of $x_n$, it becomes easier for the decoder since $x_1$ remains unchanged for different tokens, facilitating the reuse of intermediate values across tokens.
+    
+    \item $\operatorname{Match3}'$ checks for the existence of a condition rather than counting occurrences. Counting is challenging to implement within the attention mechanism without scaling values by the sequence length. Due to the causal mask, scaling value vectors by sequence length is not straightforward.
+\end{enumerate}
+
+We provide RASP \citep{rasp} program, \Cref{alg:rasp_has_triplet} that satisfies $\mathcal D(x_1, x_2, ..., x_n)_n = \operatorname{Match3}'(x_1, x_2, ..., x_n)$ for sequences of any length, assuming $O(\log n)$ precision. We train small Transformers to verify that both decoders and encoders can perform $\operatorname{Match3}'$, and find that both models can perform $\operatorname{Match3}'$ with high accuracy.
+
+\setlength{\tabcolsep}{15pt}
+\renewcommand{\arraystretch}{1.1} 
+\begin{table}[ht]
+    \centering
+    \caption{$\operatorname{Match3}'$ performance.}
+    \resizebox{1.0\linewidth}{!}{
+       \begin{tabular}{c|ccc}
+            \toprule
+             {Model}
+             & Min Loss & Individual Token Accuracy  & Full Sequence Accuracy
+             \\
+            \midrule
+            Medium Decoder (6 layer)  & \textbf{0.0001}  & \textbf{99.99\%} & \textbf{99.92\%} \\
+            Medium Encoder (6 layer) & 0.0016 & 99.97\% & 99.50\% \\
+            \bottomrule
+        \end{tabular}
+    }
+\end{table}
+
+
+\section{Additional Experiments}
+
+\subsection{Generalization on Addition}
+We test the sample complexity and length generalization capabilities of decoders and encoders using addition tasks. We use the reversed addition format (\texttt{\$123+456=975\$}) from \cite{leeteaching}. We find that encoders exhibit lower sample complexity compared to decoders, as seen in \Cref{fig:reversed_addition_small}, meaning they require fewer training examples to achieve similar performance. Additionally, encoders demonstrate superior ability to generalize to longer sequences, as shown in \Cref{fig:len_gen_addition}. We provide more experimental details and results in \Cref{sup:addition}.
+
+\begin{figure}[htbp]
+    \centering
+    \begin{minipage}{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/reversed.pdf}
+        \caption{\textbf{Addition Sample Complexity.} The train and test datasets include numbers with up to 3 digits.\\ \ }
+        \label{fig:reversed_addition_small}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/len_gen_addition.pdf}
+        \caption{\textbf{Addition Length Generalization.} The train dataset includes numbers with up to 10 digits, and the test dataset has numbers with up to 15 digits.}
+        \label{fig:len_gen_addition}
+    \end{minipage}
+\end{figure}
+ 
+\subsection{In-Context Learning}
+We consider the problem of learning a function class $\mathcal{F}$ using in-context example~\citep{icl}. 
+In this problem, a function $f \in \mathcal{F}$ is sampled from a distribution $\mathcal{D_F}$, and a sequence of random inputs is sampled i.i.d. from $\mathcal{D_X}$, forming a prompt $P$ : $\left(x_1, f\left(x_1\right), x_2, f\left(x_2\right), \ldots, x_N, f\left(x_N\right)\right)$. 
+
+The objective is for the model to in-context learn the function 
+$f$ from the prompt $P$ and predict $f(x_{\text{query}})$ for a new input $x_\text{query}$. 
+To this end, we train the model $M_{\theta}$, parameterized by $\theta$, by minimizing the expected loss over random sampled prompts as follows:
+\begin{equation}
+\min _\theta \mathbb{E}_P\left[\frac{1}{N} \sum_{i=1}^{N-1} \ell\left(M_\theta\left(P^i\right), f\left({x}_{i+1}\right)\right)\right],
+\end{equation}
+where $\ell(\cdot, \cdot)$ is loss function and $P^i$ refers to the partial prompt containing $i$ in-context examples with $(i+1)^{th}$ input (i.e., $\left({x}_1, f\left({x}_1\right), \ldots, {x}_i, f\left({x}_i\right), {x}_{i+1}\right)$). 
+
+In this work, we examine four types of function classes: linear function, sparse linear function, two-layer neural network and decision tree. For all function classes, we sample $x_i$ from a Gaussian distribution $N\left(0, \mathbf{I}_d\right)$ where $d$ represents the dimension of $x_i$, and utilize the squared error as loss function.
+
+We provide the in-context-learning results according to the number of in-context examples for each function class in Figure~\ref{fig:icl_result}.
+The encoder-only models demonstrate better performance compared to the decoder-only models in linear regression and sparse linear regression, while exhibiting competitive performance in two-layer NN regression and decision tree.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/icl_new.pdf}
+    \caption{
+    \textbf{Results of in-context learning experiment.} The encoder-only models demonstrate superior or competitive performance across all function classes compared to the decoder-only models. 
+    }
+    \label{fig:perm_invariant}
+    \label{fig:icl_result}
+\end{figure}
+
+\subsection{OpenWebText}
+
+We train Transformers on the OpenWebText dataset \citep{Gokaslan2019OpenWeb}, an open-source replication of the WebText dataset used to train GPT-2 \citep{Radford2019LanguageMA}, with the next-token prediction objective. We use medium models, described in Table~\ref{tbl:model_sizes}, \rebuttal{and hyperparameters from \Cref{tab:owt_hyperparameters}}. As shown in \Cref{tbl:owt}, encoder-only Transformer slightly outperforms decoder-only Transformer.
+\setlength{\tabcolsep}{18pt}
+\renewcommand{\arraystretch}{1.1} 
+\begin{table}[h] 
+    \centering
+    \caption{Minimum values of training and validation loss, as well as perplexity, for decoder-only and encoder-only Transformers on the OpenWebText dataset.}
+    \label{tbl:owt}
+    \resizebox{1.0\linewidth}{!}{
+       \begin{tabular}{c|cccc}
+            \toprule
+            Model & Train Loss & Validation Loss & Train Perplexity & Validation Perplexity \\
+            \midrule
+            Decoder-only  & 4.694 & 4.705 & 109.3 & 110.5 \\
+            Encoder-only  & \textbf{4.643} & \textbf{4.650} & \textbf{103.9} & \textbf{104.6} \\
+            \bottomrule
+        \end{tabular}
+    }
+\end{table}
+
+
+
+
+\section{Conclusion and Future Work}
+
+In this work, we present theoretical and novel experimental results suggesting that, assuming compute is unlimited, decoder-only Transformers are not the ideal model for sequence modeling. We show that ENTP is more expressive without compromising generalization. Using \Cref{thm:dyen} and \ref{thm:eydn}, we find that the classes of functions encoder-only and decoder-only Transformers can exactly learn are different. We introduce the $\operatorname{Count3}$ task and demonstrate, both theoretically (assuming Conjecture \ref{con:ts2}) and experimentally, that while encoders can perform this task easily, decoders cannot. We also find that encoders outperform decoders on a variety of auto-regressive tasks, including length generalization and in-context learning. However, the expressivity gained by removing the causal mask comes at the expense of efficiency.
+
+\paragraph{Future Work.} Several open avenues for further research remain in ENTP theory, such as proving \Cref{lem:conjl2} without relying on Conjecture \ref{con:ts2} (or providing a counterexample) and generalizing $\operatorname{Count3}$ to a broader class of tasks where encoders perform well but decoders do not. Further investigation into length generalization across tasks beyond addition is valuable to confirm the findings of this paper. Another natural extension of our work would be to explore whether we can further enhance expressivity past ENTP. In a more practical direction, as both training and inference with ENTP are compute-intensive, future work may focus on reducing computational costs. For instance, could we first train a decoder and then efficiently convert it to ENTP? Is it possible to combine decoders with ENTP? More broadly, are there better methods for efficiently training ENTP models?
+
+
+\clearpage
+\newpage
+
+
+
+
+

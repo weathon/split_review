@@ -1,0 +1,269 @@
+\title{Data Debugging with Shapley Importance over Machine Learning Pipelines}
+
+\begin{abstract}
+When a machine learning (ML) model exhibits poor quality (e.g., poor accuracy or fairness), the problem can often be traced back to errors in the training data. Being able to discover the data examples that are the most likely culprits is a fundamental concern that has received a lot of attention recently. One prominent way to measure "data importance" with respect to model quality is the Shapley value. Unfortunately, existing methods only focus on the ML model in isolation, without considering the broader ML pipeline for data preparation and feature extraction, which appears in the majority of real-world ML code. This presents a major limitation to applying existing methods in practical settings. In this paper, we propose Datascope, a method for efficiently computing Shapley-based data importance over ML pipelines. We introduce several approximations that lead to dramatic improvements in terms of computational speed. Finally, our experimental evaluation demonstrates that our methods are capable of data error discovery that is as effective as existing Monte Carlo baselines, and in some cases even outperform them. We release our code as an open-source data debugging library available at https://github.com/easeml/datascope.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Data quality issues have been widely recognized to be among the main culprits for underperforming machine learning (ML) models, especially when it comes to tasks that are otherwise considered solved by ML (Liang et al., 2022; Ilyas & Chu, 2019). A common type of data errors are wrong labels. For example, biomedical images can be misdiagnosed due to human error which results in label errors. Many systematic methods have been developed to repair data errors (Rekatsinas et al., 2017; Krishnan et al., 2017). Unfortunately, in many practical scenarios, repairing data in a reliable manner requires human labor, especially if humans have been involved in producing the original data. The high cost of this data debugging process has led to a natural question – Can we prioritize data repairs based on some notion of importance which leads to the highest quality improvements for the downstream model?  
+
+In recent years, several approaches have emerged to answer these questions. One line of work suggests expressing importance using influence functions (Koh & Liang, 2017) which is essentially a gradientbased approximation of the leave-one-out (LOO) method. Here, the importance of a training data example is expressed as the difference in the model quality score observed after removing that data example from the training set. This quality difference is referred to as the marginal contribution of that data example. Another line of work proposes Shapley value as a measure of importance (Ghorbani & Zou, 2019; Jia et al., 2019b; 2021) that has a long history in game theory (Shapley, 1951). In the context of data importance, it can be seen as a generalization of LOO. Namely, instead of measuring the marginal contribution over the entire training set, we measure it over every subset of the training set and then compute a weighted average. Apart from having many useful theoretical properties, the Shapley value was shown to be very effective in many data debugging scenarios (Jia et al., 2021).  
+
+On the flip side, because the Shapley value requires enumerating exponentially many subsets, computing it is intractable in practical settings. There have been different ways to approximate this computation. This includes Monte Carlo (MC) sampling (Ghorbani & Zou, 2019) or group testing (Jia et al., 2019b) to sample subsets of training data, train models as black boxes on those subsets, compute marginal contributions of training data examples, and aggregate the results to compute the final approximated result. Unfortunately, re-training the model can be quite costly, especially for large models. Some methods try to overcome this by leveraging proxy models such as K-nearest neighbors  
+
+![](images/cc6d06103b08c9a217b6260b029abd5b0dc8fcf7670222e279942dac15a60da1.jpg)  
+Data Debugging Occurs Here   
+Existing Methods Assume This Setting  
+
+Figure 1: Existing data debugging methods were designed to compute data importance of already preprocessed data. In typical real-world scenarios, data errors occur in source datasets, before being passed through a data preparation pipeline. The goal of our work is to help close that gap.  
+
+(KNN) (Jia et al., 2019a) and exploiting its simple structure to derive dynamic programming (DP) algorithms for computing the Shapley value.  
+
+One major trait of the existing work in this space is that it primarily focuses on computing the importance of data examples in the prepared training dataset. This poses a challenge in practical settings where data errors typically occur earlier in the data preparation process. In most realistic scenarios, this process involves taking one or more source training datasets, joining them together if needed, and applying a composition of data preprocessing operators (Figure 1). The simplest operators may represent a 1-1 map of input dataset elements to output dataset elements (referred to as tuples in the data management literature). Some operators, such as the data augmentation operator, fork the data by converting a single input data tuple into multiple output tuples. On the other hand, an output tuple of a join operator can be the product of multiple input tuples. Finally, some operators involve a reduce operation which involves computing some intermediate result based on the entire input dataset (e.g. the mean and standard deviation) and then applying that result to output tuples.  
+
+This new setting impacts existing approximation methods in several ways. Firstly, given that it is a black box approach, Monte Carlo sampling (Ghorbani & Zou, 2019) can directly be applied to this setting. However, this comes with the computational cost of re-running the data preprocessing operators for every subset of the training data that we sample. Depending on the complexity of the preprocessing pipeline, this cost can be quite significant. Secondly, the existing KNN-based Shapley approximation method (Jia et al., 2019a) strictly relies on the ability to independently remove tuples from the prepared training dataset in order to compute their marginal contributions. Given the aforementioned complexity induced by preprocessing operators, the tractability result of the previous KNN-based method does not hold directly in this new setting. Therefore, a novel analysis is needed to see whether the Shapley value computation can be made tractable depending on the structure of the data preprocessing pipeline.  
+
+Contributions. In this paper, we focus on studying the relationship between the structure of ML pipelines and our ability to efficiently compute Shapley values of source data examples. We make use of data provenance (Green et al., 2007; Cheney et al., 2009), a simple yet powerful theoretical toolkit for tracing individual data examples as they pass through a data processing pipeline. We propose ease.ml/datascope, a framework for modeling the interdependence between tuples induced by data preprocessing operators. Our contributions can be summarized as follows:  
+
+• We apply the notion of data provenance to ML pipelines in order to relate the input and output datasets as a function of the pipeline structure. We introduce the notion of a “canonical pipeline” which we simply define as a distinct pipeline structure that lends itself to efficiently relating pipeline inputs and outputs, as well as efficiently computing Shapley values. We identify three classes of canonical pipelines: map, fork and one-to-many join. (section 3)   
+• We show how approximating pipelines as canonical leads to significant speed-ups of Monte Carlo methods for Shapley computation. We also demonstrate how the majority of real-world ML pipelines can be approximated as canonical. (section 3)   
+• We combine canonical pipelines with the K-nearest neighbor as a proxy model. We show how canonical pipelines can be compiled into efficient counting oracles and used to derive PTIME Shapley computation algorithms. Under this framework, the KNN Shapley method from prior work represents a special case applicable to map pipelines. (section 4)   
+• We conduct an extensive experimental evaluation by applying all considered Shapley computation methods to the task of repairing noisy labels in various real-world datasets. We conclude that in most cases our method is able to achieve solid performance in terms of reducing the cost of label repair while demonstrating significant improvements in computational runtime. (section 5)  
+
+
+
+\section{2 PROBLEM: COMPUTING THE SHAPLEY VALUE OVER ML PIPELINES  }
+
+
+Shapley Value. Let $\mathcal{D}_{t r}$ be a training dataset and $u$ some utility function used to express the value of any subset of $\mathcal{D}_{t r}$ by mapping it to a real number. Then, the Shapley value, denoting the importance of a tuple $t_{i}\in\mathcal{D}_{t r}$ , is defined as  
+
+$$
+\begin{array}{r}{\varphi(t_{i})=\frac{1}{|\mathcal{D}_{t r}|}\sum_{\mathcal{D}\subseteq\mathcal{D}_{t r}\backslash\{t_{i}\}}\left(\stackrel{|\mathcal{D}_{t r}|-1}{|\mathcal{D}|}\right)^{-1}\left(u(\mathcal{D}\cup\{t_{i}\})-u(\mathcal{D})\right).}\end{array}
+$$  
+
+Intuitively, the importance of $t_{i}$ for a subset $\mathcal{D}\subseteq\mathcal{D}_{t r}\backslash\{t_{i}\}$ is measured as the difference between the utility $u(\mathcal{D}\cup\{t_{i}\})$ with $t_{i}$ and the utility $u(\mathcal{D})$ without $t_{i}$ . The Shapley value takes a weighted average of all of the $2^{|\mathcal{D}_{t r}|-1}$ possible subsets $\mathcal{D}\subseteq\mathcal{D}_{t r}\backslash\{t_{i}\}$ , which enables it to have a range of desired properties that significantly benefti data debugging tasks, often leading to more effective data debugging mechanisms compared to other leave-one-out methods.  
+
+Quality of ML Pipelines. As mentioned, the utility function $u$ is defined to measure the value of any subset of $\mathcal{D}_{t r}$ , which in our context corresponds to the source training dataset. We assume that this dataset can be made up of multiple sets of tuples (e.g. a multi-modal dataset involving a set of images and a table with metadata). The validation dataset $\mathcal{D}_{v a l}$ is defined in a similar manner.  
+
+Then, let $f$ be a data preprocessing pipeline that transforms any training data subset $\mathcal{D}\subseteq\mathcal{D}_{t r}$ into a set of tuples $\{t_{i}=(x_{i},y_{i})\}_{i\in[M]}$ made up of $M$ feature and label pairs that the ML training algorithm $\boldsymbol{\mathcal{A}}$ takes as input. Finally, we obtain a trained ML model ${\mathcal{A}}\circ f({\mathcal{D}})$ which we can evaluate using some model quality metric. Based on this, we can define the utility function $u$ used to express the value of a training data subset $\mathcal{D}$ as a measure of the quality of an ML pipeline ${\mathcal{A}}\circ f({\mathcal{D}})$ when scored using $\mathcal{D}_{v a l}$ . Formally, we write this as  
+
+$$
+u(\mathcal{D}):=m(A\circ f(\mathcal{D}),f(\mathcal{D}_{v a l})).
+$$  
+
+Here, $m$ can be any model quality metric such as accuracy or a fairness metric such as equalized odds difference. Note that, for simplicity, we assume that we are applying the same pipeline to both the training data subset $\mathcal{D}$ and the validation dataset $\mathcal{D}_{v a l}$ . In general, these two pipelines can differ as long as the data format of $f(\mathcal{D}_{v a l})$ is readable by the trained ML model. For example, a data augmentation operation is typically applied to training data only (as is the case in our experiments).  
+
+Core Technical Problem. In this work, we focus on the ML pipeline utility $u$ defined in Equation 2 and we ask the following question: How can we approximate the structure of $u$ in order to obtain Shapley-based data importance that is $(I)$ computationally fast; and (2) effective at downstream data debugging tasks?  
+
+
+
+\section{3 CANONICAL ML PIPELINES  }
+
+
+In this section, we take a closer look at a data preprocessing pipeline $f$ that can, in principle, contain an arbitrarily complex set of data processing operators. This complexity can result in a heavy overhead on the cost of computing the Shapley value. This overhead comes from having to re-evaluate the pipeline many times for different training data subsets. In this section, we describe a framework for minimizing that overhead by solving a concrete technical problem.  
+
+Problem 1. We are given a training dataset $\mathcal{D}_{t r}$ , a data preprocessing pipeline $f$ , and the output set $f(\mathcal{D}_{t r})$ . For an arbitrary subset $\mathcal{D}\subseteq\mathcal{D}_{t r}$ and some tuple $t^{\prime}\in f(\mathcal{D}_{t r})$ , decide whether $t^{\prime}\in f(\mathcal{D})$ in time $O(1)$ w.r.t. $|\mathcal{D}_{t r}|$ .  
+
+It is easy to see how solving this problem virtually removes the cost of computing the pipeline output of an arbitrary training data subset. Next, we describe a reduced version of the data provenance framework (Green et al., 2007; Cheney et al., 2009) which we will apply to solve this problem.  
+
+
+
+\section{3.1 DATA PROVENANCE FOR ML PIPELINES  }
+
+
+We define a set of binary variables $A$ and associate a variable $a_{t}\in A$ with every training data tuple $t\,\in\,\mathcal{D}_{t r}$ . Each subset $\mathcal{D}\subseteq\mathcal{D}_{t r}$ can be defined using a value assignment $v(a)\mapsto\{0,1\}$ , where $v(a_{t})=1$ means that $t\in\mathcal{D}$ . We can use $\mathcal{D}_{t r}[v]$ to denote $\mathcal{D}$ . We write $\nu_{A}$ to denote the set of all the $2^{|A|}$ possible value assignments. Next, with every tuple $t^{\prime}\in f(\mathcal{D}_{t r})$ we associate a “provenance polynomial” $p_{t^{\prime}}$ which is a logical formula with variables in $A$ (e.g. $a_{1}+a_{2}\cdot a_{3})$ . For a given value assignment $v$ , we define an evaluation function $\mathrm{eval}_{v}(p_{t^{\prime}})\mapsto\{0,1\}$ which simply follows the  
+
+![](images/8f14e8b6160ee04083611a6555c33b7e6540857ab46e853ea83c23e2d14ab386.jpg)  
+
+Figure 2: (a-c) Three types of canonical pipelines where data provenance allows us to efficiently compute subsets. (d) A majority of real-world ML pipelines (Psallidas et al., 2019) either already exhibit a canonical pipeline pattern, or are easily convertible to it using our approximation scheme.  
+
+standard logical reduction rules to determine the truthiness of $p_{t^{\prime}}$ given $v$ . For a tuple $t^{\prime}\in f(\mathcal{D}_{t r})$ and a value assignment $v$ , we define $t^{\prime}\in f(D_{t r}[v])$ iff $\mathrm{eval}_{v}(p_{t^{\prime}})=1$ . It is easy to see that we can directly apply this framework to solve Problem 1. However, to respect the $O(1)$ time complexity, $\left|p_{t}\right|$ must be $O(1)$ w.r.t. $|\mathcal{D}_{t r}|$ . In subsection 3.2, we explore when this condition is met.  
+
+Redefining the Shapley value. Using this framework, we can rewrite the Shapley value as:  
+
+$$
+\begin{array}{r}{\varphi(t_{i})=\frac{1}{|A|}\sum_{v\in\mathcal{V}_{A\setminus\{a_{i}\}}}\big(\O_{|\mathrm{supp}(v)|}^{|A|-1}\big)^{-1}u(\mathcal{D}_{t r}[v;a_{i}\leftarrow1])-u(\mathcal{D}_{t r}[v;a_{i}\leftarrow0])}\end{array}
+$$  
+
+The notation $[v;a_{i}\leftarrow X]$ for $X\in\{0,1\}$ means that we augment $v$ with $v(a_{i})=X$ . Also, we define the support of $v$ as $\operatorname{supp}(v):=\{a\in A\ :\ v(a)=1\}$ .  
+
+3.2 APPROXIMATION: ML PIPELINES ARE CANONICAL  
+
+As mentioned above, solving Problem 1 in $O(1)$ time depends on $\left|p_{t}\right|$ being $O(1)$ w.r.t. $|\mathcal{D}_{t r}|$ . This does not necessarily hold true for an arbitrary pipeline $f$ . However, it does hold true for some classes of pipelines, which we refer to as canonical pipelines. Hence, if we approximate the pipeline $f$ as canonical, then we can solve Problem 1. The three classes of canonical pipelines that we identified to be useful in the context of this work are: map, fork, and one-to-many join pipelines (Figure 2).  
+
+Map pipelines. This is the simplest form of pipeline where each input tuple $t\in\mathcal{D}_{t r}$ corresponds to at most one output tuple $t^{\prime}\in f(\bar{D}_{t r})$ , after passing through an optional per-tuple mapping function $\mu(t)\mapsto t^{\prime}$ (Figure 2a). Examples of such pipelines include missing value indicators, polynomial feature generators, pre-trained embeddings, etc.  
+
+Fork pipelines. In this pipeline, each input tuple $t\in\mathcal{D}_{t r}$ can be associated with multiple output tuples $t^{\prime}\in f(\mathcal{D}_{t r})$ , but a single output tuple is associated with a single input tuple (Figure 2b). A prominent example is a data augmentation pipeline that outputs several slightly altered versions of every input tuple.  
+
+One-to-many Join pipelines. This pipeline contains table join operators like the one in Figure 1. Here, the training dataset $\mathcal{D}_{t r}=\left\{\mathcal{D}_{t},\mathcal{D}_{a_{1}},...\,,\mathcal{D}_{a_{k}}\right\}$ is made up of multiple tuple sets that form a "star schema". This means that any training example tuple $t\in\mathcal{D}_{t}$ can be joined with no more than one tuple from each of the auxiliary tables $\mathcal{D}_{a_{1}},\ldots,\mathcal{D}_{a_{k}}$ . Note that, for this pipeline, the provenance polynomial of each output tuple is a Boolean product of variables associated with all tuples that were joined to produce that output tuple (Figure 2c).  
+
+
+
+\section{3.3 APPROXIMATING REAL ML PIPELINES  }
+
+
+Even though many real-world pipelines can be directly represented as our canonical pipelines, there is still a solid amount that cannot be represented. Nevertheless, upon taking a closer look, we can identify a class of pipelines that we might be able to approximately represent. These are the pipelines that exhibit an estimator-transformer pattern $f(\mathcal{D})=\mathrm{map}(\mathrm{reduce}(\mathcal{D}),\mathcal{D})$ . Specifically, they are made up of some reduce operation performed on the entire dataset which produces some intermediate data, which is used to parameterize a map operation which is performed on individual tuples. An example of such a pipeline is a min-max scaler, where the reduce step computes min and max statistics for each feature, which are then used to re-scale individual tuples.  
+
+The reduce step of this pipeline causes every output tuple to depend on every input tuple, which does not fit into our canonical pipeline framework. However, we can still approximate such pipelines by isolating the intermediate data produced by reduce $(\mathcal{D}_{t r})$ . Then, conditioned on that intermediate data, we can re-define our pipeline $f$ to be a conditional map pipeline $f^{*}$ as follows:  
+
+$$
+f(\mathcal{D})=\operatorname*{map}(\mathrm{reduce}(\mathcal{D}),\mathcal{D})\mapsto f^{*}(\mathcal{D})=\operatorname*{map}(\mathrm{reduce}(\mathcal{D}_{t r}),\mathcal{D}).
+$$  
+
+Evaluation of Effectiveness. We evaluate our method of approximating pipelines as canonical and apply it directly to compute the Shapley value using the Truncated Monte Carlo (TMC) sampling method (Ghorbani & Zou, 2019). We run the evaluation for 10 and 100 Monte Carlo iterations $(\mathrm{x}\,10/\mathrm{x}100)$ . We can see that our approach exhibits comparable performance with significant gains in computational runtime (Figure 3). See section 5 for more details about the experimental protocol.  
+
+![](images/f98589b13215733391f85c01b04dad5a4d3d430996bf41ec24a7836c9056f81f.jpg)  
+Figure 3: An ML pipeline with an estimator-transformer pattern approximated as a canonical pipeline can achieve comparable performance on a label repair task, with significantly faster runtime.  
+
+Statistics of Real-world Pipelines. A natural question is how common these families of pipelines are in practice. Figure 2d illustrates a case study that we conducted using 500K real-world pipelines provided by Microsoft (Psallidas et al., 2019). We divide pipelines into three categories: (1) “pure” map/fork pipelines, based on our definition of canonical pipelines; (2) “conditional” map/fork pipelines, which are comprised of a reduce operator that can be effectively approximated using the scheme we just described; and (3) other pipelines, which contain complex operators that cannot be approximated. We observe that a vast majority of pipelines we encountered in our case study fall into the first two categories that we can effectively approximate using our canonical pipelines framework.  
+
+
+
+\section{4 SHAPLEY VALUE OVER CANONICAL PIPELINES  }
+
+
+In section 3 we described an approach for treating the data preprocessing pipeline $f$ as a white box which led us to directly attainable performance improvements of Monte Carlo Shapley methods. However, these methods still rely on treating the model $\boldsymbol{\mathcal{A}}$ as a black box and retraining it for different training data subsets, which often results in slow runtime. In this section, we are interested in PTIME algorithms that give orders of magnitude faster runtime and thus open the door for interactive data debugging. Specifically, we focus on the following technical problem:  
+
+Problem 2. We are given a training dataset $\mathcal{D}_{t r}$ , a data preprocessing pipeline $f$ and a model quality metric $m$ computed over a given validation dataset $\mathcal{D}_{v a l}$ . Compute the Shapley value (as defined in Equation 1) of a given tuple $t_{i}\in\mathcal{D}_{t r}$ for the ML pipeline utility (as defined in Equation 2) in time polynomial w.r.t. $|\mathcal{D}_{t r}|$ and $|\mathcal{D}_{v a l}|$ .  
+
+We will now explore additional approximations we can make on the model $\boldsymbol{\mathcal{A}}$ as well as the model quality metric $m$ . Specifically, we replace the model with a KNN classifier, and we assume that the quality metric has a specific additive structure. We then sketch the outline of a solution to the given problem that leverages these approximations. It should be noted that although prior work has explored the idea of using the KNN proxy model for PTIME algorithms (Jia et al., 2019a), to the best of our knowledge, the work presented in this paper is the first to analyze the relationship between the structure of different types of ML pipelines and the computational complexity of the Shapley value computation.  
+
+4.1 APPROXIMATION: THE MODEL IS KNN AND THE MODEL QUALITY METRIC IS ADDITIVE  
+
+Here we define two structures which we will use as building blocks for approximating ML pipelines: the KNN model and additive model quality metrics. In the following section we will show how these building blocks can be leveraged to provide PTIME algorithms for computing Shapley values.  
+
+K-Nearest Neighbor (KNN) Model. We provide a specific definition of the KNN model in order to facilitate our further analysis. Given some set of training tuples $\mathcal{D}$ and a validation tuple $t_{v a l}$ , the KNN model $A_{K N N}({\mathcal{D}})$ can be defined as follows:  
+
+$$
+A_{K N N}(\mathcal{D})(t_{v a l}):=\operatorname{argmax}_{y\in\mathcal{Y}}\Biggl(\operatorname{tally}\Bigl(\mathcal{D}\Bigm|\operatorname{top}_{K}\bigl(\mathcal{D}\bigm|\lnot v a l\bigr),t_{v a l}\Bigr)(y)\Biggr).
+$$  
+
+Here, $\mathrm{top}_{K}(\mathcal{D}\mid t_{v a l})$ returns a tuple $t_{K}\in\mathcal{D}$ that takes the $K$ -th position when ranked by similarity with the validation tuple $t_{v a l}$ . Furthermore, $\mathrm{tally}(\mathcal D\mid t_{K},t_{v a l})$ tallies up the class labels of all tuples in $\mathcal{D}$ that have similarity with $t_{v a l}$ higher or equal to $t_{K}$ . It returns $\gamma$ , a label tally vector that is indexed by class labels (i.e. $\gamma:\mathcal{Y}\rightarrow\mathbb{N})$ ). Note that the sum of all elements in $\gamma$ must be $K$ . Given a set of classes $\boldsymbol{\wp}$ , we define $\Gamma_{\mathcal{V},K}$ to be the set of all possible label tally vectors. Finally, assuming a standard majority voting scheme, $\mathrm{argmax}_{y\in\mathcal{Y}}$ returns the predicted class label with the highest tally. Additive Model Quality Metric. We say that a model quality metric is additive if there exists a tuple-wise metric $m_{T}$ such that $m$ can be written as:  
+
+$$
+\begin{array}{r}{m(A\circ f(\mathcal{D}),f(\mathcal{D}_{v a l}))=w\cdot\sum_{t_{v a l}\in f(\mathcal{D}_{v a l})}m_{T}\biggl(\Bigl(A\circ f(\mathcal{D})\Bigr)(t_{v a l}),t_{v a l}\biggr)}\end{array}
+$$  
+
+Here, $w$ is a scaling factor that can depend only on $\mathcal{D}_{v a l}$ . The tuple-wise metric $m_{T}:(y_{p r e d},t_{v a l})\mapsto$ $[0,1]$ takes a validation tuple $t_{v a l}\in\mathcal{D}_{v a l}$ as well as a class label $y_{p r e d}\in\mathcal{Y}$ predicted by the model for $t_{v a l}$ . It is easy to see that some popular utilities, such as validation accuracy, are additive, e.g., the accuracy utility is simply defined by plugging $m_{T}(y_{p r e d},(x_{v a l},y_{v a l})):=\mathbb{1}\overleftarrow{\{y_{p r e d}=y_{v a l}\}}$ and $w:=1/|D_{v a l}|$ into Equation 5. In subsection E.3, we show even more examples of such metrics.  
+
+
+
+\section{4.2 COMPUTING THE SHAPLEY VALUE  }
+
+
+We now outline our approach to computing the Shapley value of a training data tuple $t_{i}\in\mathcal{D}_{t r}$ using our approximation described in subsection 3.2 and subsection 4.1. We start off from Equation 3 and plug in $u$ as defined in Equation 2. Next, since we assume that our model quality metric is additive, we plug in $m$ as defined in Equation 5. By rearranging the sums, we can write the Shapley formula as $\begin{array}{r}{\varphi(t_{i})=w\cdot\sum_{t_{v a l}\in f(\mathcal{D}_{v a l})}\varphi(t_{i},t_{v a l})}\end{array}$ , where $\varphi(t_{i},t_{v a l})$ is a validation tuple-wise Shapley value. Under the assumption that our model is KNN, we can plug in as defined in Equation 4, rearrange the sums, and arrive at the following definition of $\varphi(t_{i},t_{v a l})$ :  
+
+$$
+\begin{array}{r}{\varphi(t_{i},t_{v a l})=\frac{1}{|A|}\sum_{t^{\prime},t^{\prime\prime}\in f(\mathcal{D}_{t r})}\sum_{\alpha=1}^{|A|}\binom{|A|-1}{\alpha}^{-1}\sum_{\gamma^{\prime},\gamma^{\prime\prime}\in\Gamma_{\mathcal{V},K}}m_{\Delta}(\gamma^{\prime},\gamma^{\prime\prime}\mid t_{v a l})\cdot\omega(\alpha,\gamma^{\prime},\gamma^{\prime\prime}\mid t_{i},t_{v a l},t^{\prime},t^{\prime\prime}).}\end{array}
+$$  
+
+We define $\begin{array}{r}{\underset{\s}{m}\Delta(\gamma^{\prime},\gamma^{\prime\prime}\mid t_{v a l}):=m_{T}(\mathrm{argmax}_{y\in\mathcal{Y}}\gamma^{\prime\prime}(y),t_{v a l})-m_{T}(\mathrm{argmax}_{y\in\mathcal{Y}}\gamma^{\prime}(y),t_{v a l})}\end{array}$ as the differential metric.  
+
+Counting Oracles. The function $\omega$ in Equation 6 is a counting oracle which we introduce to help us isolate and analyze the exponential sum from Equation 3. We define it as:  
+
+$$
+\begin{array}{r l}{\omega(\alpha,\gamma^{\prime},\gamma^{\prime\prime}\mid t_{i},t_{v a l},t^{\prime},t^{\prime\prime}):=\displaystyle\sum_{v\in V_{A\setminus\{a_{i}\}}}\cdot1\Big\{\alpha=\mathrm{lsupp}(v)|\Big\}}\\ &{\cdot1\Big\{t^{\prime}=\mathrm{top}_{K}\big(f(\mathcal{D}_{t r}[v;a_{i}\gets0])\mid t_{v a l}\big)\Big\}\cdot1\Big\{t^{\prime\prime}=\mathrm{top}_{K}\big(f(\mathcal{D}_{t r}[v;a_{i}\gets1])\mid t_{v a l}\big)\Big\}}\\ &{\cdot1\Big\{\gamma^{\prime}=\mathrm{tally}\big(f(\mathcal{D}_{t r}[v;a_{i}\gets0])\mid t^{\prime},t_{v a l}\big)\Big\}\cdot1\Big\{\gamma^{\prime\prime}=\mathrm{tally}\big(f(\mathcal{D}_{t r}[v;a_{i}\gets1])\mid t^{\prime\prime},t_{v a l}\big)\Big\}.}\end{array}
+$$  
+
+Intuitively, the counting oracle is a function that returns the number of value assignments with exactly $\alpha$ variables set to 1, and the label tally of the top-K tuples will be exactly $\gamma^{\prime\prime}$ when $t_{i}$ is included in the training dataset, and $\gamma^{\prime}$ when it is excluded. By looking at Equation 6 we can observe that all the sums are polynomial w.r.t. the size of data
+
+Theorem 4.1. If we can compute the counting oracle ω as defined in Equation 7 in time polynomial w.r.t. $|\mathcal{D}_{t r}|$ and $\left|\mathcal{D}_{v a l}\right|,$ , then we can compute the Shapley value of a tuple $t_{i}\in\mathcal{D}_{t r}$ in time polynomial w.r.t. $|\mathcal{D}_{t r}|$ and $|\mathcal{D}_{v a l}|$ .  
+
+The above theorem outlines a solution of Problem 2, given that we can find a PTIME solution for computing the counting oracle. Next, we cover a solution that models the problem as a model counting problem by leveraging a data structure which we call Additive Decision Diagrams (ADD’s).  
+
+Counting Oracle as Model Counting over ADD’s. We use Additive Decision Diagram (ADD) to compute the counting oracle $\omega_{t,t^{\prime}}$ (Equation 7). For our purpose, we define $\mathcal{E}:=\{1,...,|A|\}\times\Gamma_{\mathcal{V},K}\times\Gamma_{\mathcal{V},K}$ Then, we define a function over Boolean inputs $\bar{\phi(v\mid t_{i},,t_{v a l},t^{\prime},t^{\prime\prime})}$ as follows:  
+
+$$
+\begin{array}{r l}&{\phi(v\mid t_{i},t_{v a l},t^{\prime},t^{\prime\prime}):=\left\{\overset{\infty}{\infty},\qquad\qquad\mathrm{if~}t^{\prime}\notin\mathcal{D}_{t r}[v;a_{i}\gets0],}\\ &{\phi(v\mid t_{i},t_{v a l},t^{\prime},t^{\prime\prime}):=\left\{\overset{\infty}{\infty},\qquad\qquad\mathrm{if~}t^{\prime\prime}\notin\mathcal{D}_{t r}[v;a_{i}\gets1],}\\ &{\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\qquad\quad\mathrm{otherwise},}\\ {\alpha:=|\operatorname*{supp}(v)|,\quad\gamma^{\prime}:=\operatorname{tally}\left(\mathcal{D}_{t r}[v;a_{i}\gets0]\mid t^{\prime},t_{v a l}\right),\quad\gamma^{\prime\prime}:=\operatorname{tally}\left(\mathcal{D}_{t r}[v;a_{i}\gets1]\mid t^{\prime\prime},t_{v a l}\right).}\end{array}
+$$  
+
+![](images/e9cb07a4af0782d4d2db54d77867addaaddf633ab28be181d71990de542d0362.jpg)  
+Figure 4: Computing the Shapley value by using KNN as a proxy model can achieve comparable performance on a label repair task, with orders of magnitude faster runtime.  
+
+If we can construct an ADD that computes $\phi(v\mid t_{i},t_{v a l},t^{\prime},t^{\prime\prime})$ , then the model counting operation on that ADD exactly computes $\omega(\alpha,\gamma^{\prime},\gamma^{\prime\prime}\mid t_{i},t_{v a l},t^{\prime},t^{\prime\prime})$ . As the complexity of model counting is $O(|\mathcal{N}|\cdot|\mathcal{E}|)$ (see Equation 12) and $|\mathcal{E}|$ is polynomial in the data size, we have the following result:  
+
+Theorem 4.2. If we can represent the $\phi_{t,t^{\prime}}(\boldsymbol{v})$ in Equation 8 with an ADD of size polynomial in $|A|$ and $|\mathcal{D}_{t r}^{f}|$ , we can compute the counting oracle $\omega_{t,t^{\prime}}$ in time polynomial of $|A|$ and $|\mathcal{D}_{t r}^{f}|$ .  
+
+ For specific canonical pipelines, we have the following corollaries.  
+
+Corollary 4.1. (One-to-Many Join Pipelines) For the $K$ -NN accuracy utility and a one-to-many join pipeline, which takes as input two datasets, $\mathcal{D}_{F}$ and $\mathcal{D}_{D}$ , of total size $\left|\mathcal{D}_{F}\right|+\left|\mathcal{D}_{D}\right|=N$ and outputs a joined dataset of size $O(N)$ , the Shapley value can be computed in $O(N^{4})$ time.  
+
+Corollary 4.2. (Fork Pipelines) For the $K$ -NN accuracy utility and $a$ fork pipeline, which takes as input a dataset of size $N$ and outputs a dataset of size $M$ , the Shapley value can be computed in $O(\bar{M}^{2}N^{2})$ time.  
+
+Corollary 4.3. (Map Pipelines) For the $K$ -NN accuracy utility and a map pipeline, which takes as input a dataset of size $N$ , the Shapley value can be computed in $O(N^{2})$ time.  
+
+Evaluation of Effectiveness. We evaluate our method of computing the Shapley value by using KNN as a proxy model (Figure 4). We can see that its effectiveness is comparable even when applied to the task of label repair over pipelines that have different models. On the other hand, we can see that the computational cost is orders of magnitude lower when compared to MC methods.  
+
+
+
+\section{5 EXPERIMENTAL EVALUATION  }
+
+
+We evaluate the performance of our method by applying it to a common data debugging scenario – label repair. The goal of this empirical study was to validate that: (1) our approximations enable significantly faster computation of Shapley values, and (2) in spite of any inherent biases, these approximations still manage to enable effective data debugging.  
+
+
+
+\section{5.1 EXPERIMENTAL SETUP  }
+
+
+Protocol. We conduct a series of experimental runs that simulate a real-world importance-driven data debugging workflow. We developed a custom experimental infrastructure based on dcbench (Eyuboglu et al., 2022). In each experimental run, we select a dataset, pipeline, model, and data repair method. If a dataset does not already have human-generated label errors, we follow the protocol of Li et al. (2021) and Jia et al. (2021) and artificially inject $50\%$ of label noise. We compute the importance using a validation dataset and use it to prioritize our label repairs. We divide the range between $0\%$ data examined and $100\%$ data examined into 100 checkpoints. At each checkpoint, we measure the quality of the given model on a separate test dataset using some metric (e.g. accuracy). We also measure the time spent on computing importance scores for the entire training dataset. We repeat each experiment 10 times and report the median as well as the 90-th percentile range (either shaded or with error bars).  
+
+Data Debugging Methods. We apply various methods of computing data importance:  
+
+• Random — Importance is a random number and thus we apply data repairs in random order. • TMC x10 / x100 — Shapley values computed using the Truncated Monte-Carlo (TMC) method (Ghorbani & Zou, 2019), with 10 and 100 Monte-Carlo iterations, respectively. • Datascope TMC x10 / x100 — This applies our method of approximating pipelines using data provenance over canonical pipelines to the TMC method of computing the Shapley value.  
+
+![](images/26cf28909b46107c5fae40b9ad05e405267dcd54b9b2b942ce4562a41081f22b.jpg)  
+
+Figure 5: Under our framework it is possible to optimize for model quality metrics other than accuracy. Here we show a commonly used fairness metric – equalized odds difference (lower is better). Given that approximating this metric is more complex, optimal results are achieved by using KNN Interactive which recomputes the Shapley value after each data repair checkpoint.  
+
+• Datascope KNN — This is our method for efficiently computing the Shapley value over ML pipelines by using the KNN as a proxy model.   
+• Datascope KNN Interactive — While the above methods compute importance only once at the beginning of the repair process, the speed of our method allows us to recompute the importance after each data repair checkpoint.  
+
+Data Preprocessing Pipelines. We obtained a dataset with about $500K$ machine learning workflow instances from internal Microsoft users (Psallidas et al., 2019). Each workflow consists of a dataset, a data preprocessing pipeline, and an ML model. We identified a handful of the most representative pipelines and translated them to sklearn pipelines. All pipelines used in our experiments are listed in Table 1 along with the operators they  
+
+![](images/1bf3aaf01edcce9edd95a237b9aa38465a87a12dbdc27c90278fac3945c7fc4f.jpg)  
+
+are made up of. Some pipelines are purely canonical, while some involve a reduce operation.  
+
+
+
+\section{5.2 RESULTS  }
+
+
+In this section, we highlight some of the most interesting results of our empirical analysis and point out some key insights that we can draw. We start off with three general scenarios: (1) accuracy-driven label repair; (2) fairnessdriven label repair to demonstrate usage of different model quality metrics; and (3) label repair in deep learning scenarios. In each one, we study the tradeoff between computational cost of any data repair approach, and the labor cost, which is measured as the amount of data repairs that need to be conducted to deliver the biggest improvement of model quality. Finally, we conduct a scalability analysis of our algorithm to showcase its potential for handling large datasets.  
+
+Improving Accuracy. In this set of experiments, our goal is to improve model accuracy with targeted label repairs. In Figure 4 we show one example workflow for the FolkUCI Adult dataset and the pipeline from Figure 1 without the join operator. We evaluate our KNN-based method over pipelines that contain two different ML models: LogisticRegression and XGBoost. We can draw two key conclusions about our KNN-based algorithm. Firstly, given that our KNN-based method is able to achieve comparable performance to Monte Carlo-based methods, we can conclude that KNN can indeed serve as a good proxy model for computing the Shapley value. Secondly, it is able to achieve this performance at only a fraction of the computational cost which makes it even more compelling.  
+
+Improving Accuracy and Fairness. Next, we explore the relationship between accuracy and fairness when performing label repairs. In these experiments, we use tabular datasets that have a ‘sex’ feature that we use to compute group fairness using equalized odds difference (Hardt et al., 2016). In Figure 5 we explore the tradeoff between two data debugging goals – the left panel illustrates the behavior of optimizing for accuracy whereas the right panel illustrates the behavior of optimizing for fairness. We first notice that being able to debug specifically for fairness is important because for some datasets improving accuracy does not necessarily improve the fairness of the trained model. Secondly, we can see that even when we do optimize for fairness, not all methods will end up being successful. The best-performing method is Datascope KNN Interactive which is the only one that recomputes the Shapley value at each of the 100 checkpoints (due to the speed of our KNN-based method). It is likely that the complexity of the equalized odds difference as a metric makes it challenging to compute the Shapley value. Especially since some interventions on the dataset might end up shifting the optimal path, and only by recomputing are we able to detect this shift.  
+
+![](images/98858b238927e27745a4326fc6aa719277a34965ee4922db6947667096e10cef.jpg)  
+Figure 6: The KNN proxy can offer effective data debugging in various deep-learning scenarios.  
+
+Deep learning pipelines. We also measured the effectiveness of our approximation methods in several scenarios that involve deep learning models. In Figure 6a we use a pre-trained ResNet-18 model as the target model. We fine-tune it for 5 epochs on a noisy label dataset and see that Datascope KNN fares favorably compared to random label repair. Figure 6b shows the result of applying a pre-trained embedding model and evaluating both the Datascope KNN and the Datascope TMC approximations, where the KNN proxy again shows good performance. Finally, in Figure 6c we show how our method can be used to repair labels of a dataset used as a support set for a one-shot learning neural network. We use the matching networks model (Vinyals et al., 2016) which employs a learned “distance metric” between examples in the test set and those in the support set. This allows us to replace the standard Euclidean distance metric in our KNN proxy model with a custom one and achieve effective label repairs with efficiently computed Shapley values.  
+
+Scalability. We evaluate the speed of our algorithm for larger training datasets. We test the runtime for various sizes of the training set $(10k{-}1M)$ , the validation set $(100{-}10k)$ , and the number of features $(100{-}1k)$ . As expected, the impact of the training set size and validation set size is roughly linear (Figure 7). Even for large datasets, our method can compute Shapley scores in minutes.  
+
+![](images/628a376709b7aaaf9a24d59c590a42101700081f0bd25b0bb92af748e3da91ad.jpg)  
+Figure 7: Scalability analysis of our Datascope KNN Shapley algorithm over different training set, validation set, and feature vector sizes.  
+
+
+
+\section{6 RELATED WORK  }
+
+
+Targeted data repairs have been studied for some time now. Apart from the work mentioned in section 1, a notable piece of work is CleanLab which leverages confident learning to make targeted repairs of noisy labels (Northcutt et al., 2021). Our work focuses on the Shapley value given it was shown to be applicable to many scenarios (Jia et al., 2021). Apart from the data valuation scenario, the Shapley value has also been used for computing feature importance (Lundberg & Lee, 2017). On the other hand, the scope of our work is data importance over ML pipelines.  
+
+Debugging data pipelines has started receiving some attention recently. Systems such as Data X-Ray can debug data processing pipelines by finding groups of data errors that might have the same cause (Wang et al., 2015). Another example is mlinspect which also uses data provenance as an abstraction for automatically analyzing data preprocessing pipelines and discovering data distribution errors (Grafberger et al., 2022). A system called Rain leverages influence functions as a method for analyzing pipelines comprising of a model and a post-processing query (Wu et al., 2020). Rain also uses data provenance as a key ingredient, but their focus is on queries that take as input predictions of a model that has been trained directly on the source data.  
+
+
+
+\section{7 CONCLUSION AND OUTLOOK  }
+
+
+In this paper, we propose ease.ml/datascope, a framework for representing a wide range of ML pipelines that appear in real-world scenarios with the end goal of efficiently computing the Shapley value of source data examples. We show how this framework can be leveraged to provide significant speed-ups to Monte Carlo-based methods for Shapley value computation. Furthermore, we provide PTIME algorithms for computing the Shapley value using the KNN proxy model for several classes of ML pipelines. Finally, we empirically demonstrate that our methods achieve significant speed-ups over previously developed baselines while demonstrating competitive performance in a downstream data debugging task.  
+
+
+
+

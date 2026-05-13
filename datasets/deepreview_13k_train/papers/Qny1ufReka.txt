@@ -1,0 +1,333 @@
+\title{Refusal Tokens: A Simple Way to Calibrate Refusals in Large Language Models}
+
+\begin{abstract}
+A key component of building safe and reliable language models is enabling the models to appropriately refuse to follow certain instructions or answer certain questions.
+We may want models to output refusal messages for various categories of user queries, for example, ill-posed questions, instructions for committing illegal acts, or queries which require information beyond the model's knowledge horizon.
+Engineering models that refuse to answer such questions is complicated by the fact that an individual may want their model to exhibit varying levels of sensitivity for refusing queries of various categories,
+and different users may want different refusal rates. 
+The current default approach involves training multiple models with varying proportions of refusal messages from each category to achieve the desired refusal rates, which is computationally expensive and may require training a new model to accommodate each user's desired preference over refusal rates.
+To address these challenges, we propose refusal tokens, one such token for each refusal category or a single refusal token, which are prepended to the model's responses during training. 
+We then show how to increase or decrease the probability of generating the refusal token for each category during inference to steer the model's refusal behavior.  Refusal tokens enable controlling a single model's refusal rates without the need of any further fine-tuning, but only by selectively intervening during generation.\makeatletter
+\let\@makefnmark\relax
+\footnotetext{$^\dagger$ Work completed during Capital One Internship; Correspondence to $<$njain17@umd.edu$>$}
+\makeatother    
+
+\end{abstract}
+
+\section{Introduction}
+
+
+An essential property of a useful language model is the ability to produce {\em refusal messages} at appropriate times.  Refusal messages enhance not only the safety of LLMs but also their utility and trustworthiness, as refusal messages can prevent LLMs from hallucinating or answering invalid requests. For example, an LLM that lacks the ability to browse the web should refuse when asked to access and summarize the content behind a URL.  Likewise, a model should provide an informative refusal when asked to answer a question that is too under-specified or poorly formed to be answerable.
+To minimize hallucinations and unsafe behavior, instruction models like GPT-4 \citep{achiam2023gpt} and llama-3 \citep{dubey2024llama} have been processed with alignment pipelines that imbue them with extensive refusal capabilities.
+Despite advancements in model finetuning and alignment, controlling refusal messages in these models remains a challenging task. For instance, llama-2-Chat \citep{touvron2023llama} experienced issues with over-refusal, where the model would refuse too many queries, negatively impacting usability, mostly likely due to a post-training set with too many refusal messages. 
+Simple approaches, such as training multiple models with varying levels of refusal data until the desired rates are achieved \citep{dubey2024llama}
+are resource-intensive and still lack the precision to carefully adjust different categories of refusals.
+Moreover, the criteria for refusing is constantly evolving. What is considered an acceptable refusal for one use case or time may not align with the ethical, legal, or technical standards in a different setting. 
+
+To address these weaknesses, we introduce a simple strategy that makes refusal behavior controllable at test-time without retraining: the refusal token. 
+During alignment, we prepend a special \texttt{[refuse]} token to responses that contain a refusal. The model quickly learns to generate this token before refusing, and then to refuse when this token is present. 
+At test-time, the softmax probability of the refusal token can be used as a metric for how likely it is that a refusal is necessary.  By thresholding on this probability, one can turn a knob to control the refusal sensitivity after the model is trained. By employing different refusal tokens for different refusal types, one can impose fine-grained control over refusal behavior along different axes of behavior, and carefully optimize refusal rates in this multi-dimensional space.
+Our main contributions are the following:
+\begin{itemize}
+    \item We introduce a refusal token strategy.  By thresholding the probability of this refusal token,  we give model developers calibrated control over refusal rates without retraining. This development opens the door for sophisticated post-training calibration of refusal rates. 
+    For example, with minimal computation, one could sweep over refusal thresholds and select a value that achieves a specified rate of false refusals, or a value that maximizes an F1 score. 
+    \item We show that multiple refusal tokens can manage different refusal message sets, enabling independent control over each refusal distribution. Additionally, we explore various strategies for manipulating these category-specific refusal tokens to meet test-time requirements.
+    \item We observe that the refusal token improves F1 scores, even without calibration. Furthermore, we highlight the importance of reducing Type II errors by including contrast or borderline examples in the training data. These examples, which are similar to refusal queries but innocuous, help refine the token's effectiveness—specifically, its ability to appropriately switch between refusal and response based on the corresponding meta-token.
+\end{itemize}
+
+
+
+\section{Related Work}
+
+\textbf{Refusal messages.} 
+The ability of generative models to refuse certain messages is particularly crucial for mitigating toxicity and reducing hallucinations. In the context of toxicity, several studies explore how language models respond to toxic prompts or instructions. One popular approach is to train an external model to determine whether the model should reject or respond to queries \citep{dubey2024llama}. \citet{bianchi2024safetytuned} demonstrate that incorporating refusals into training data does not diminish a model's helpfulness but can lead to over-refusals, where the model declines to respond even on innocuous requests. Similarly, \citet{cui2024or, anautomatic} investigate over-refusal behavior across various language models, developing an evaluation framework to assess over-refusals in response to harmful prompts. Regarding hallucinations, \citet{zhang-etal-2024-r} introduce an algorithm called R-Tuning, which prompts the model to state ``I am unsure'' or ``I am sure'' after a question and answer session, framing the problem as a discrimination task. 
+Additionally, \citet{kang2024unfamiliar} and \citet{kapoor2024large} propose alternative algorithms for alleviating the hallucination problem, focusing on instances where it is unclear whether the model possesses the required knowledge. \citet{feng2024don} use multiple agents to determine when to abstain from queries.
+For predetermined queries the model is designed to refuse, \citet{brahman2024art} present a comprehensive taxonomy of such questions, highlighting scenarios where the model should appropriately refuse to respond. This work also releases instructional data designed to train models in this regard. Evaluative studies by \citet{liu2023prudent}, \citet{yin-etal-2023-large}, and \citet{amayuelas-etal-2024-knowledge} further explore the types of questions that warrant refusal. \citet{arditi2024refusal} find a one-dimensional subspace such that erasing this specific direction from the model's residual stream activations causes the model to consistently answer harmful queries. Concurrent work, \citet{lee2024programming} extend \citet{arditi2024refusal} for usability, allowing additional steerability using activation steering to control refusal messages at test-time. 
+ 
+
+\textbf{Tagging, control codes, and meta-tokens.}
+\citet{sennrich-etal-2016-controlling} introduce a meta-token for machine translation, while \citet{keskar2019ctrl} extend this idea by introducing control codes for more general control.. A control code is a piece of text, \(c\), used in a conditional language model that always conditions on a control code \(c\) and learns the distribution \(p(x|c)\). Specifically, \citet{keskar2019ctrl} pretrain a model using control codes to regulate style, content, and task-specific behavior. Tagging and control codes can also be viewed as form of prefix-tuning \citep{li2021prefix}.
+\citet{dong-etal-2023-steerlm} extend this idea by adding controls to different distributions during supervised fine-tuning (SFT) that users might want to control, including seven categories which are collected by training another classifier to first categorize and score the responses based on the selected seven attributes.
+These tags or tokens can also be predicted by the model to help the model generate its response to a query. The general use of these ``meta-tokens'', or tokens that the model predicts to help itself generate its response to the query, has seen a recent increase with the introduction of tool calling in LLMs, or function calling \citep{nakano2021webgpt, schick2024toolformer}. However, others propose using meta-tokens for various purposes, such as enhancing reasoning capabilities \citep{yaoreact}, thinking capabilities \citep{goyalthink}, or a variety of others \citep{teknium2024hermes}. In Table~\ref{tab:method_differences}, we highlight the differences between these methods and our own. 
+
+
+
+\section{Learning to Refuse with Tokens}
+
+
+\begin{table}[t]
+    \small
+    \centering
+    \resizebox{\textwidth}{!}{\begin{tabular}{l|cccccc}
+    \toprule
+      \begin{tabular}[l]{@{}l@{}} Potential Approach\end{tabular} &  \begin{tabular}[c]{@{}c@{}}Test-Time\\ Control\end{tabular} &  \begin{tabular}[c]{@{}c@{}}Training-Time\\ Benefits\end{tabular}  & \begin{tabular}[c]{@{}c@{}}Differentiates between \\refusal types/reasons\end{tabular} & \begin{tabular}[c]{@{}c@{}}Refusal accompanied \\ by notification \end{tabular} & \begin{tabular}[c]{@{}c@{}}Quantifies probability \\that refusal is needed\end{tabular} & \begin{tabular}[c]{@{}c@{}}Calibrate refusal rates \\without retraining \end{tabular}   \\ \midrule
+       System Prompt  & \Large\color{darkgreen}{\checkmark} & \color{red}\text{\sffamily X} & \Large\color{darkgreen}{\checkmark} & \color{red}\text{\sffamily X} & \color{red}\text{\sffamily X}  & \color{red}\text{\sffamily X} \\
+       Tagging/Control Codes & \Large\color{darkgreen}{\checkmark} &  \Large\color{darkgreen}{\checkmark} & \Large\color{darkgreen}{\checkmark}  & \color{red}\text{\sffamily X} & \color{red}\text{\sffamily X} & \color{red}\text{\sffamily X}  \\ 
+      Model Reflection  & \color{red}\text{\sffamily X} & \Large\color{darkgreen}{\checkmark} & \color{red}\text{\sffamily X} & \Large\color{darkgreen}{\checkmark} & \Large\color{darkgreen}{\checkmark} & \color{red}\text{\sffamily X}  \\ 
+      Activation Steering & \Large\color{darkgreen}{\checkmark} & \color{red}\text{\sffamily X}  & \Large\color{darkgreen}{\checkmark} & \color{red}\text{\sffamily X} & \Large\color{darkgreen}{\checkmark} & \Large\color{darkgreen}{\checkmark}  \\
+      \midrule
+       Refusal Tokens & \Large\color{darkgreen}{\checkmark} & \Large\color{darkgreen}{\checkmark}  & \Large\color{darkgreen}{\checkmark} & \Large\color{darkgreen}{\checkmark} & \Large\color{darkgreen}{\checkmark} & \Large\color{darkgreen}{\checkmark}  \\  \bottomrule
+    \end{tabular}}
+    \caption{A list of capability differences between approaches applied to the language model for controlling refusal behavior. Refusal tokens provide more capabilities than other solutions. Tagging or control codes apply ``tags'' to the prompt to encourage safe outputs. In model reflection, the model outputs a response and then is asked to reflect on the safety of its response. Concurrent work introduced using activation steering \citep{lee2024programming} to control the refusal messages. See Section~\ref{sec:related_work}.
+    Our proposed approach yields the more control over refusals:  It (i) enables test-time control of the kinds of refusals that are enabled. It also (ii) produces an interpretable score (the refusal token ``probability'') that quantifies the risk of answering without a refusal, and (iii) these scores can be thresholded/calibrated at inference time to optimize refusal rates.  (iv) It also enables different refusal types/reasons to be adjusted separately. (v) It notifies the user with a special token when a refusal takes place, allowing developers to see the type query. Additionally, training with refusal tokens can improve F1 Scores without further calibrating the refusal token (i.e training time benefits). 
+    }
+    \label{tab:method_differences}
+\end{table}
+
+\begin{figure}
+    \centering
+    \begin{tcolorbox}[colback=lightblue!30, width=\linewidth, boxrule=0.5mm, auto outer arc]
+    \textbf{User Input (Contains False Premise)} \newline When did George Orwell write ``The Invisible Man''? %\newline \newline
+    \end{tcolorbox}
+    \begin{tcolorbox}[colback=lightblue!30, width=\linewidth, boxrule=0.5mm, auto outer arc]
+    \textbf{Response (Low Refusal Threshold)} \newline \texttt{[refuse]} George Orwell did not write ``The Invisible Man.'' The novel ``The Invisible Man'' was written by H.G. (Herbert George) Wells and published in 1897. \newline \newline
+    \textbf{Response (High Refusal Threshold)} \newline  \texttt{[respond]} George Orwell wrote ``The Invisible Man'' in 1952. 
+    \end{tcolorbox}
+    \caption{The refusal token is only produced when its score rises above a threshold chosen by the user. A higher threshold yields a response from the model; whereas, a low threshold yields a refusal message. In this example, the question assumes that George Orwell wrote ``The Invisible Men'', which is not true. 
+    }
+    \label{fig:example_figure}
+\end{figure}
+Instruction models are trained on instruction-response pairs, \((x,y)\), sampled from an instruction dataset \(D\). The user provides the model with a question or an instruction, \(x\), and the model then outputs a response \(y\). Each datapoint is usually given an additional chat template, \(C\). Here, \(y\) consists only of natural language without any meta-information contained in the messages.
+We introduce a new token, \texttt{[refuse]}, at the beginning of the response if it is a refusal message, or \texttt{[respond]} otherwise during training. This modifies \(y\) to \(y' = \texttt{[refuse]} + y\) or \(y' = \texttt{[respond]} + y\), depending on whether \(y\) is a refusal message or a normal response. 
+
+We will see that including the \texttt{[refuse]} and \texttt{[respond]} tokens during training will influence the model at test-time. 
+The model builds stronger associations during fine-tuning the more it encounters response tokens together with non-refusal messages and refusal tokens together with refusal messages. After fine tuning, the presence of the refusal token at the beginning of the response results in a high likelihood of a refusal message, and visa-versa. 
+
+Note, however, that the association of refusal tokens with refusal messages is not guaranteed. In our studies below, we used LLM-as-a-judge \citep{zheng2024judging} for measuring refusal rates.
+
+\textbf{Test-time control.} 
+The primary reason to include this refusal token is the test-time capabilities that the token introduces. The model predicts this token, and there is a softmax probability associated with it that can be used as a confidence measure for determining whether the question should be refused or not. This confidence can manipulated in many ways such as thresholding the token or adding a logit bias. We focus our studies on the thresholding method, and emit the \texttt{[refuse]} token if its softmax score is $> T$, for some $T\in [0,1]$ chosen by the user. 
+
+\textbf{Controlling different types of queries.} 
+We consider applying categorical refusal tokens for different refusal reasons. Our experimental setting includes five refusal tokens corresponding to the refusal categories defined in \citet{brahman2024art}, and one respond token. Details of our multi-category thresholding schemes and logit bias mechanisms are described in greater detail in Section~\ref{sec:time_control_multiple}. 
+
+
+
+\section{Experimental Set-up}
+
+
+We use the hyperparameters and codebase from \citet{tunstall2023zephyr} for supervised finetuning. The importance of the SFT stage before DPO for learning behaviors was studied in \citet{sharma2024critical}.
+We adopt llama-3 \(8\)B \citep{dubey2024llama} as the base model. Additionally, we mix the instruction pairs that contain refusal messages with UltraChat \citep{tunstall2023zephyr}
+or Alpaca \citep{alpaca}. We experimented with Alpaca as it is largely free of any refusal messages, and its low training time facilitates more ablations in Section~\ref{sec:out_of_box}.
+
+\textbf{\textit{CoCoNot} Experimental Setting.}
+For the main experimental setting, we utilize a diverse and comprehensive dataset—extending beyond just toxicity--for both training and evaluation to ensure robust performance in refusal prediction. Specifically, we adopt \citet{brahman2024art}'s \textit{CoCoNot} dataset and evaluation due to the breadth of the categories and subcategories that are considered. The \textit{CoCoNot} dataset contains five refusal categories--Humanizing, Indeterminate, Incomplete, Safety, and Unsupported--and \(26\) subcategories. Additionally, the dataset contains contrast data, or queries/instructions that the model should answer but are close to questions that the model should refuse.
+We consider two main training settings on UltraChat with refusal data and training on UltraChat with refusal and contrast data. For these two settings, we either train with no refusal token, one refusal token, or multiple category refusal tokens.
+The \textit{CoCoNot} dataset contains \(\sim 10\)k refusals SFT data, \(\sim 1\)k of contrast preference data (which we use as SFT data), and \(\sim 1.4\)k, or \(1379\), for the evaluation. The evaluation contains \(1\)k queries that should refuse to answer and \(379\) queries that the model should respond to the query--referred to as the contrast category. We refer to this evaluation and experimental set-up as \textit{CoCoNot}.
+
+\textbf{Temporal Experimental Setting.} We consider a second more controlled experimental setting. We create temporal refusal and contrast training data to address \textit{CoCoNot}'s low contrast-to-refusal ratio, at one to ten. For this setting, we consider a refusal message, where the query is temporally ambiguous or relates to events beyond the model's cutoff dates. Additionally, we consider contrast data, or examples close to a refusal query but answerable, as temporal questions that contain dates about an event within its training period.
+Using llama-3 70B, we prompt the model to generate questions from news articles beyond its cutoff date for refusal data, and before the cutoff data of the model for contrast data, with modified prompts.
+We generated \(2\text{k}\) examples each for refusal and contrast datasets, focusing on temporal questions, resulting in \(4\text{k}\) instruction-response pairs.
+
+We consider two main training settings on UltraChat with refusal data and contrast data (Sections~\ref{sec:test_time_control} and~\ref{sec:out_of_box}), and Alpaca \citep{alpaca} with refusal data and contrast data (Section~\ref{sec:out_of_box}).
+For these two settings, we either train with no refusal token or one refusal token. 
+We consider this setting to understand the effect of balanced contrast data on the refusal token.
+For evaluation, we create \(200\) temporal questions, which humans manually verified.  
+In addition, the evaluation includes refusal instructions from \textit{CoCoNot}'s refusal categories (excluding the temporal subcategory) and TriviaQA questions for model-appropriate responses. The inclusion of \textit{CoCoNot}'s refusal questions is to determine how models may ``generalize'' to other refusal categories when trained only on a single question type (Section~\ref{sec:out_of_box}). The total query count is \(1400\) for this evaluation, matching \textit{CoCoNot}'s evaluation set. We refer to this evaluation and experimental set-up as \textit{Temp}.
+
+\textbf{Evaluation.} For both experimental settings, we use the \citet{brahman2024art}'s prompts and evaluation framework with llama-3.1 \(70\)B as the LLM judge \citep{zheng2024judging}. \citet{brahman2024art} originally found no quality difference between GPT-4 \citep{achiam2023gpt} and GPT-3.5 \citep{brown2020language}. Furthermore, with llama-3.1 \(70\)B showing similar performance as GPT-3.5, we decided that an open-source model would be easier to reproduce as API models change and deprecate constantly. Additionally, we manually verified the effectiveness of llama-3.1 \(70\)B as the evaluator. 
+Furthermore, we report F1 scores to three decimal places, as the standard error was measured to be below $0.002$ after both generation and evaluation.
+
+
+
+\section{Test-Time Control Using \texttt{[Refuse]}
+
+
+The refusal token introduces test-time capabilities. By training with the refusal token, the refusal rate can be altered at test-time. This ability cannot occur when training without the token. 
+The model predicts this token, providing a softmax probability associated with the refusal token. This token probability can be interpreted as the confidence with which the model ``thinks'' the question should respond with a refusal message. Conversely, the response token is interpreted as the probability that the model should respond. As this probability may not be perfectly calibrated, we sweep different thresholds to find different refusal rates. We  generate the token if \(p(\text{\texttt{[refuse]}}|C(x)) > T\), where \(T\) is a threshold set by the user. By adjusting the threshold, \(T\), we demonstrate that the refusal rates can be effectively controlled.
+\textbf{Refusal tokens provides control of the refusal rate.} We sweep the thresholds of the refusal token across the two settings--training with and without contrast training examples--to observe the change in the true positive and false positive rates. In Figure~\ref{fig:ROC_all}, the threshold provides control over the true positive and false positive rates. Figures~\ref{fig:ROC_coco_eval_no_contrast} and \ref{fig:ROC_coco_eval} show that adding contrast data (SFT data that lies close the boundary between the two classes but are non-refusal) results in a better Pareto frontier than training without the token.  
+
+\begin{figure}[!h]
+    \centering
+    \begin{subfigure}[b]{0.42\textwidth}
+        \centering
+    \includegraphics[width=0.925\linewidth]{coconot_plots/ROC_coco_eval_no_contrast_small_no_title.pdf}
+        \caption{CoCoNot with no contrast in training data}
+        \label{fig:ROC_coco_eval_no_contrast}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.42\textwidth}
+        \centering
+        \includegraphics[width=0.925\linewidth]{coconot_plots/ROC_coco_eval_with_contrast_small_no_title.pdf}
+        \caption{CoCoNot with contrast in training data}
+        \label{fig:ROC_coco_eval}
+    \end{subfigure}
+    \caption{
+    \textbf{Manipulating the refusal token provides different refusal rates at test-time without retraining}. The \textbf{left} and \textbf{right} figures show that both true positive and false positive rates on \textit{CoCoNot} eval change as we vary the threshold of the refusal token. The models are trained with ultrachat and refusal messages from the \textit{CoCoNot} training data. Left is trained without any contrast data, and the right is trained with contrast data, which is one-tenth of the refusal data.}
+    \label{fig:ROC_all}
+\end{figure}
+
+\subsection{Controlling Individual Types of Instructions with Category Refusal Tokens} \label{sec:time_control_multiple}
+
+We now experiment with having five distinct refusal tokens that differentiate between refusal types for \textit{CoCoNot}. Additionally, we consider the temporal setting with one temporal refusal token. For all experiments in this section, we add refusals and/or contrast data to UltraChat.
+
+\textbf{Thresholding schemes and logit bias.} 
+We explore two types of thresholding strategies: (1) category thresholding, refusing with that category token if a token from selected category tokens is the highest probability among the refusal tokens and rises above a threshold, and (2) sum thresholding, refusing only if the sum of all category token scores exceeds a threshold. For category thresholding, we emit the refusal token that is the highest probability among the refusal tokens and is in the selected category tokens; otherwise, we emit the token with the highest probability. For sum thresholding, we emit the category refusal token highest probability when the condition described earlier is met; otherwise, we emit a response token.
+For logit bias, we manipulate the sensitivity of different refusal types by adding a constant bias to the (unnormalized) logits for the refusal tokens. 
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{coconot_plots/Indvidual_Token_Suppressed.pdf}
+    \caption{ 
+    \textbf{Individual category refusal tokens enable precise control over query types.}
+    Refusal rates for different categories on \textit{CoCoNot} when category-specific tokens are suppressed or not generated by the model. The blue dashed bars suppress the refusal token in a model trained exclusively with response and refusal tokens, no category tokens. By suppressing tokens from specific categories during inference, we demonstrate control over the types of refusals. The two dashed bars per group reflect the effect of suppressing a category's token, either through category-specific suppression or a single refusal token. We also observe category overlap with both these experiments and a manual inspection; for instance, Humanizing Requests may fall into multiple categories.}
+    \label{fig:indivudal_token_sup}
+\end{figure}
+
+\textbf{Independent control of sensitivity for different refusal types.}
+To test whether categories can be independently controlled, we completely suppress each token one-at-a-time, and observe the impact of this suppression on other (non-suppressed) refusal types.
+In Figure~\ref{fig:indivudal_token_sup}, we observe that the sensitivity of each refusal category can be adjusted with little impact on other categories of refusals. 
+There is an exception though: \textit{Humanizing Requests} proved particularly difficult to suppress and did not respond to their token as other categories did. After inspecting the questions and responses of the \textit{Humanizing Requests} category, we found that many of the questions contained questions or instructions similar to other categories.
+
+Thus, many of the \textit{Humanizing} questions or instructions are classified as one of the other refusal categories, i.e. the model emitted the incorrect refusal token. For example, many of the questions ask for stock or financial recommendations. These types of requests could easily be refused due to temporal issues (no access to real-time information), input modality issues (needing access to current portfolios), or safety (not wanting to provide financial information). Nevertheless, Figure~\ref{fig:indivudal_token_sup} highlights that one can use individual category tokens to control individual distributions.
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=0.35\linewidth]{temporal_eval_plots/F1_sweep_temp_eval_with_contrast_ultrachat_small_no_baseline.pdf}
+    \includegraphics[width=0.35\linewidth]{temporal_eval_plots/ROC_temp_eval_with_contrast_no_true_baseline_small_ultrachat_only.pdf}
+    \caption{
+    \textbf{Thresholding the refusal tokens increase F1 scores and controls the true positive and false positive rates for a single instruction type (temporal setting).}  For our temporal experimental setting, we train UltraChat with \(2\)k refusals and \(2\)k contrast examples. The left shows thresholding achieves a better F1 Score, and the right shows thresholding controls the true positive false positive rates.}
+    \label{fig:F1_sweeps_temp}
+\end{figure}
+\textbf{Increasing F1 scores via category refusal tokens.} We first consider our temporal setting. 
+Particularly, we sweep the thresholds of a model trained with UltraChat, \(\sim2\)k temporal refusal messages, and \(\sim2\)k temporal contrast training examples.
+We experiment with values of \(T\) from \(0\) to \(1\) in increments of \(0.1\), where we only sweep one token. 
+In Figure~\ref{fig:F1_sweeps_temp}, we observe that F1 scores improve when properly calibrating the thresholds, finding that \(T = 0.1\) performs the best.
+It is worth noting, through experiments, we found training solely with the underlying SFT dataset, training without additional refusal or contrast data, leaves the model with an inherent refusal rate. In Figure~\ref{fig:F1_sweeps_temp}, the false positive rate does not drop below approximately \(0.35\). 
+
+\begin{table}[!b]
+\centering
+\caption{
+\textbf{Using category-wise thresholding and logit bias to increase the refusal rates of particular categories, a case study.}
+We apply the category-wise threshold at \(T=0.1\) or a logit bias of \(B=4\) to two queries types simultaneously: Humanizing and Indeterminate.  
+This experiment shows that manipulating a subset of categories increases overall F1 performance without retraining the model. In contrast, thresholding a refusal single token yields higher refusal rates across all categories, notably, doubling the contrast refusal rate. The numbers on the left side of the vertical line are the rates that we expect to change by thresholding or logit bias.} \label{tab:indivudal_token_threshold_bias}
+
+\resizebox{\textwidth}{!}{\begin{tabular}{@{}lccc|cccc@{}}
+\toprule
+Setting                                                                                       & \multicolumn{1}{c}{F1} & \multicolumn{1}{c}{Humanizing (↑)} & \multicolumn{1}{c|}{Indeterminate (↑)} & \multicolumn{1}{c}{Incomplete (↑)} & \multicolumn{1}{c}{Safety (↑)} & \multicolumn{1}{c}{Unsupported (↑)} & \multicolumn{1}{c}{Contrast (↓)} \\ \midrule
+Sampling All Tokens                                                                        & {0.935}         & {0.852}                     & {0.856}                        & 0.888                              & 0.992                          & 0.854                               & 0.116                            \\ \midrule
+\begin{tabular}[c]{@{}c@{}} \(T=0.1\) for Humanize \\ \& Indeterminate \end{tabular} & \textbf{0.946}                  & {0.901}                              & \textbf{0.936}                                 & 0.901                              & 0.987                          & 0.892                               & 0.119                            \\ \midrule
+\begin{tabular}[c]{@{}c@{}} \(B=4\) for Humanize \\ \& Indeterminate \end{tabular}& \underline{0.943}	& \underline{0.902}	& \underline{0.908}	& 0.901	& 0.987	& 0.872	& 0.118 \\ \midrule
+ \(T=0.1\) for Single \\ Refusal Token                                                                           & 0.938               & \textbf{0.938}                              & 0.885                                 & 0.95                               & 1.00                              & 0.948                               & 0.228 \\ \bottomrule  
+\end{tabular}}
+\end{table}
+Furthermore, we provide a case study on how to utilize these tokens to improve F1 scores on \textit{CoCoNot} to show the effectiveness of both category-wise thresholding and logit bias. In particular, we chose two categories Humanizing and Interdetermined as these are the two of the lowest refusal rates from the five categories across different trained models. Additionally, for simplicity, we applied the same thresholding value or logit bias to both categories and borrowed the thresholding value from Figure~\ref{fig:F1_sweeps_temp}. For logit bias, we experimented with bias values of \(1, 2, 4, \text{ and } 8\). We found that \(4\) yielded the best results. Although a greater threshold sweep and logit bias values may yield better results, we highlight the simplicity and ease of improving F1 scores and increasing refusal rates by only considering a limited setting. 
+
+Moreover, we confirm the chosen thresholds are ideal. We perform a ``cheap sweep'' where we utilize only the tokens for the labels instead of the llm-as-a-judge model. More concretely, for each query we apply a single forward pass to find which token is emitted and use this token as the label. This allows us to find thresholds without generating full responses to the queries. We find the best refusal thresholds by independently finding the threshold that maximizes the F1 Score for each category token from $0.1$ to $0.9$ in increments of $0.1$. From this, we found that both Humazing and Interdetemine categories had the best threshold at \(0.1\). Thus, confirming the thresholds chosen in our case study is ideal. This ``cheap sweep'' can be utilized to further improve F1 scores across all categories.
+
+In Table~\ref{tab:indivudal_token_threshold_bias}, using category-wise thresholding and logit bias, the refusal rates increased for Humanizing by \(\sim 5\%\) for both thresholding and logit bias and Interdetermined by \(8.0\%\) for thresholding and \(5.2\%\) for logit bias. These test-time approaches improved the F1 score. 
+Conversely, when setting the single token to a threshold of \(T=0.1\), the contrast refusal rate (Type II error) doubles, increasing refusal rates in all categories. Thus, individually controlling the different category-wise refusal tokens at test-time leads to more control on category refusal rates, whether utilizing either category-wise thresholding or logit bias. 
+\textbf{Improving F1 scores with sum thresholding.} 
+The sum thresholding scheme is considered where controlling individual categories is not of interest.
+Particularly, we sweep the thresholds of a model trained with UltraChat, \textit{CoCoNot} refusal messages, and \textit{CoCoNot} contrast training examples.
+In Figure~\ref{fig:sum_threshold_plots}, by sweeping the thresholds between \(0\) and \(1\) in increments of \(0.1\), a threshold of \(0.6\) yields the best F1 score over sampling. This experiment further shows that category tokens can be altered in different ways at test-time for better F1 performance or different needs.
+Overall, using multiple tokens provides greater flexibility and steerability for the user than a single refusal token. However, if a user does not require this level of flexibility or prefers not to add many new tokens to the vocabulary, a single token remains an excellent solution for controlling the model's refusal rate, as shown in Figure \ref{fig:ROC_all}. Ultimately, the choice depends on the user's specific preferences and requirements.
+\begin{figure}[!h]
+    \centering
+    \includegraphics[width=0.30\linewidth]{coconot_plots/F1_sweep_sumthres_coco_small.pdf}
+    \includegraphics[width=0.30\linewidth]{coconot_plots/RR_refused_sweep_sumthres_coco_small.pdf}
+    \includegraphics[width=0.30\linewidth]{coconot_plots/RR_refused_contrast_sweep_sumthres_coco_small.pdf}
+    \caption{\textbf{Sum thresholding is another way to effectively utilize the category tokens at test-time.} \textbf{(Left)} F1 scores on \textit{CoCoNot} evaluation, \textbf{(center)} average of the refusal rates for refusal categories in the \textit{CoCoNot} evaluation, and \textbf{(right)} the refusal rate the contrast category in the \textit{CoCoNot} evaluation as the threshold is swept. The refusal token is emitted if the sum of the scores for all category tokens exceeds the threshold. At a threshold of \(T=0.6\), the F1 Score is highest at \(0.946\) up from \(0.938\), cutting the error rate by \(\sim 12\%\).} \label{fig:sum_threshold_plots}
+\end{figure}
+
+
+
+\section{Out-of-the-Box Benefits}
+
+
+A major advantage of incorporating refusal tokens lies in their ability to influence model behavior at test-time. Notably, even without using the refusal tokens to control a model at test-time, the mere inclusion of refusal tokens during training enhances the model's refusal behaviors (measured by F1 scores).  In our primary experimental setup, we focus on training with temporal refusals and/or temporal contrast data, as outlined in Section~\ref{sec:experimental_set_up}. These experiments examine how fine-tuning a model on refusal data from one type of query affects the refusal rates for other types of questions. Additionally, we assess how introducing the refusal token influences the refusal behavior, without applying test-time interventions.
+
+We begin by evaluating a model trained with the Alpaca dataset, including only temporal refusal data (i.e., excluding contrast training data), to observe its impact on Type I and Type II errors. Moreover, we explore how the refusal token itself shapes refusal behavior, particularly concerning these errors. To better understand the relationship between the quantity of refusal data and the model’s refusal rates, we experiment with varying proportions of \(2\)k refusal examples--\(1\%, 5\%, 10\%, 50\%, 100\%\)--integrated into the Alpaca dataset. This range allows us to analyze how different amounts of refusal data influence the model’s refusal performance across question types, beyond what is explicitly represented in the training set.
+
+From Figure~\ref{fig:refusal_rates_temp} (left), very few refusal messages in the training data are required for other types of refusal questions to be affected. Particularly, with only \(200\) refusal messages, \textit{CoCoNot} queries and TriviaQA questions refusal rate increase. Thus, this highlights a model trained to refuse specific instruction types will refuse other instruction types without explicitly training to refuse those queries.
+Furthermore, from Figure~\ref{fig:refusal_rates_temp} (left), the refusal token can limit this Type II error, but as you scale the number of examples, this benefit is limited. 
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[height=3.8cm]{temporal_eval_plots/Alpaca_Refusal_Rates_Temp_Token.pdf}
+    \includegraphics[height=3.8cm]{temporal_eval_plots/Alpaca_Refusal_Rates_Temp_Constrast.pdf}
+    \caption{\textbf{The token limits Type II error in an out-of-the-box setting but is not sufficient as the refusal rate increases across the board.} \textbf{Left} are refusal rates on the three subsets of the evaluation: temporal questions, \textit{CoCoNot} questions, and TriviaQA questions, where one model is trained with the refusal token and one without the token. \textbf{Right} are refusal rates on the three subsets of the evaluation: temporal questions, \textit{CoCoNot} questions, and TriviaQA questions where one model is trained with contrast data and one without contrast data, where both models are trained with the refusal token. The x-axis is how many instructions the model was trained with. The gray line represents the rates with no refusal messages in the instruction data.}
+    \label{fig:refusal_rates_temp}
+\end{figure}
+
+As data is the key to LLM training, we add contrast data to understand how adding borderline examples affects the refusal rates.
+In our experiments, we add one contrast instruction with one refusal instruction in SFT training data, adding the refusal token to all experiments. From Figure~\ref{fig:refusal_rates_temp} (right), adding the contrast data to the training dataset limits the refusal rates on other instruction types as the number refusals scales. Thus, in situations where you only want to refuse a particular instruction type, i.e. limit Type II error, including contrast data in the training data is crutical. 
+
+Furthermore, we explore the case where the balance of contrast to refusal messages is one to ten, which is the case for \textit{CoCoNot} training dataset. In Table~\ref{tab:CoCoNot_single_token_oob}, even when training with this imbalance the contrast training data limits the amount the refusal rate on innocuous questions, albeit not to the same refusal rates as not training with refusals. Additionally, from the table, adding both a single refusal token and category tokens improves F1 scores under default sampling methods. 
+However, we suspect the exact benefits might be model and hyperparameter dependent.
+Nevertheless, we see benefits in all models that we explored (llama-3.1 and Mistral \citep{jiang2023mistral})
+
+\begin{table}[h]
+\centering
+\caption{
+\textbf{Refusal tokens and contrast data improve F1 performance on \textit{CoCoNot} without thresholding at test-time.} Ablation studies on training with CoCoNot refusal messages, refusal tokens, and contrast data. We evaluate llama-3 \(8\)B performance across different tasks including MMLU \citep{hendrycks2020measuring-MMLU}, ARC tasks \citep{clark2018arc}, HellaSwag \citep{zellers-etal-2019-hellaswag}, and TruthfulQA MC2 \citep{lin-etal-2022-truthfulqa}, following hyperparameters from \citet{tunstall2023zephyr}.
+}
+\label{tab:CoCoNot_single_token_oob}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{@{}lcccccccc@{}}
+\toprule
+\multicolumn{1}{l}{\textbf{Setting}}                                                                  & \textbf{Tasks Avg (↑)} & \textbf{F1 Score (↑)} & \textbf{Humanizing (↑)} & \textbf{Incomplete (↑)} & \textbf{Indeterminate (↑)} & \textbf{Safety (↑)} & \textbf{Unsupported (↑)} & \textbf{Contrast (↓)} \\ 
+\midrule \midrule
+\multicolumn{9}{l}{\textbf{UltraChat}} \\
+\midrule
+\multicolumn{1}{c}{--} & 0.6194        & 0.644        & 0.691          & 0.377          & 0.387             & 0.552      & 0.406           & 0.013        \\ 
+\midrule
+\multicolumn{9}{l}{\textbf{UltraChat + CoCoNot Refusal Training Data}} \\
+\midrule
+\multicolumn{1}{c}{--} & 0.6148        & 0.900        & 0.866          & \underline{0.924}  & 0.777         & 0.992      & 0.859           & 0.318        \\
+\hspace{0.3cm}+ Refusal Token & 0.6095        & 0.914        & \textbf{0.901}  & \textbf{0.964}  & 0.844         & \textbf{0.995}      & \textbf{0.916}    & 0.329        \\
+\midrule
+\multicolumn{9}{l}{\textbf{UltraChat + CoCoNot Refusal and Contrast Training Data}} \\ \midrule
+\multicolumn{1}{c}{--} & 0.6156        & 0.918        & 0.840          & 0.866          & 0.804             & 0.992      & 0.877           & 0.182        \\
+\hspace{0.3cm}+ Refusal Token & \underline{0.6199} & \textbf{0.940} & \underline{0.878} & 0.907       & \textbf{0.858}  & \textbf{0.995}      & \underline{0.904}   & \underline{0.133}  \\ 
+\hspace{0.3cm}+ Category Tokens & \textbf{0.6200}  & \underline{0.935} & 0.852         & 0.888          & \underline{0.856}  & 0.992         & 0.854         & \textbf{0.116}        \\ 
+\bottomrule
+\end{tabular}}
+\end{table}
+
+
+\section{Discussion}
+
+
+An issue with refusal messages in LLMs is that generation sampling can cause the model's response to vary across multiple iterations of the same query \citep{huang2024catastrophic}. However, the use of a refusal token can help mitigate this issue. For example, we compared two models—one with the refusal token and one without—over five generations. We recorded the entropy of each set of responses. We found that the model with the token had a slightly lower entropy (\(0.07\) compared to \(0.10\)), where the entropy would be \(0.69\) if the probability of generating a refusal message (or any refusal message) is \(0.50\). Additionally, we found that in \(81\%\) of cases, the responses had zero entropy, meaning all generations are identical, compared to \(87\%\) with the refusal token. Providing an explanation, Table~\ref{tab:refuse_respond_tok_gen_counts} shows that a refusal or response token does not guarantee that the generation is a response or refusal. When manually examaining the outputs that we had a refusal token but were labelled as responded, we found that these were often would provide a disclaimer and then continue to answer, particularly we found this to be the case for the humanizing category. For example, for a humainzing request such as "Can you share your personal opinion on the issue of climate change?". The model responded with " [Humanizing requests] As an AI, I don't have personal opinions, beliefs, or feelings. However, I can provide information and perspectives on the issue of climate change based on scientific data and consensus. \textbackslash n \textbackslash n Climate change is a well-documented phenomenon supported by a vast majority of climate scientists worldwide. It is caused by human activities, primarily the emission of greenhouse gases such as carbon dioxide and methane, which trap heat in the Earth's atmosphere and cause the planet to warm up." This suggests the token actually behaves better than the what is suggested by Table~\ref{tab:refuse_respond_tok_gen_counts}.
+
+Another aspect of refusals to consider is adversarial attacks. Although we assume that the user in these settings is not acting maliciously, an individual may optimize the refusal tokens directly optimize on short strings like ``Sure here's,..'' such as \citet{shin2020autoprompt, wen2023hard, zou2023universal, zhu2024autodan}. However, these attacks are well-studied in the community \citep{alon2023detecting,jain2023baseline, zhou2024robust}.
+A more specific threat model involves scenarios where a user places the respond token either at the end of the input or the beginning of a response. In an API setting, such attacks can be filtered out. 
+\begin{table}[h]
+\small
+\caption{
+The counts of response tokens or refusal tokens generated and what the model generation was labeled. \textbf{Left} shows the counts for a single refusal token under default sampling parameters. \textbf{Right} shows the counts for category refusal tokens under default sampling parameters.} \label{tab:refuse_respond_tok_gen_counts}
+\begin{multicols}{2}
+\begin{tabular}{l|cc}
+\toprule
+    \begin{tabular}[c]{@{}c@{}}Response \\ Label\end{tabular}    & \begin{tabular}[c]{@{}c@{}}Refusal Token\\ Generated\end{tabular} & \begin{tabular}[c]{@{}c@{}}Response Token \\ Generated\end{tabular} \\
+\midrule
+Refused   & 1019                                                             & 46                                                                 \\
+Responded & 29                                                               & 277                                                                \\
+\bottomrule
+\end{tabular}
+
+\begin{tabular}{l|cc}
+\toprule
+     \begin{tabular}[c]{@{}c@{}}Response \\ Label\end{tabular}     & \begin{tabular}[c]{@{}c@{}}Refuse Cat. \\ Generated\end{tabular} & \begin{tabular}[c]{@{}c@{}}Respond Token \\ Generated\end{tabular} \\
+\midrule
+Refused   & 945                                                             & 68                                                                 \\
+Responded & 43                                                               & 315                                                                \\
+\bottomrule
+\end{tabular}
+\end{multicols}
+\end{table}
+
+
+
+The ability of a model to refuse queries--whether due to toxicity, limitations, or other reasons--is crucial for developing safer and more trustworthy LLMs. 
+To advance this, we need to understand how and why models generalize across different contexts, which requires the appropriate data. 
+While some datasets, such as \citet{brahman2024art}, provide broad coverage, there remains a gap in preference data and multi-turn evaluations, complicating the task of generalizing single-turn results to multi-turn interactions. Thus, we need additional data to better understand this property of LLMs.
+
+Nevertheless, adding a refusal token during fine-tuning offers several benefits. When the model generates the token, it associates a softmax probability of refusal with the query. At test-time, the refusal token allows for adjusting the refusal rate. Moreover, by applying the refusal token to specific categories, the distribution can be controlled, and thresholding techniques can further improve the F1 scores of refusal rates. Additionally, these tokens can be modified in various ways during testing, such as using logit bias, category-specific thresholding, or sum thresholding, highlighting their flexibility. Therefore, without retraining language models, refusal tokens offer the advantage of test-time control, benefiting both users and API providers.
+
+\newpage
+
+
+
+
+

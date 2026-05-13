@@ -1,0 +1,364 @@
+\title{ReLU to the Rescue: Improve Your On-Policy Actor-Critic with Positive Advantages}
+
+\begin{abstract}
+    This paper introduces an effective and practical step toward approximate Bayesian inference in on-policy actor-critic deep reinforcement learning. This step manifests as three simple modifications to the Asynchronous Advantage Actor-Critic (A3C) algorithm: (1) applying a ReLU function to advantage estimates, (2) spectral normalization of actor-critic weights, and (3) incorporating \emph{dropout as a Bayesian approximation}. We prove under standard assumptions that restricting policy updates to positive advantages optimizes for value by maximizing a lower bound on the value function plus an additive term. We show that the additive term is bounded proportional to the Lipschitz constant of the value function, which offers theoretical grounding for spectral normalization of critic weights. Finally, our application of dropout corresponds to approximate Bayesian inference over both the actor and critic parameters, which enables prudent \textit{state-aware} exploration around the modes of the actor via Thompson sampling. Extensive empirical evaluations on diverse benchmarks reveal the superior performance of our approach compared to existing on- and off-policy algorithms. We demonstrate significant improvements for median and interquartile mean metrics over PPO, SAC, and TD3 on the MuJoCo continuous control benchmark. Moreover, we see improvement over PPO in the challenging ProcGen generalization benchmark.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+
+Deep Reinforcement Learning (DRL) is a paradigm for finding approximate solutions to complex sequential decision-making problems in domains such as robotics \citep{ibarz2021train}, autonomous driving \citep{kiran2021deep}, strategy games \citep{mnih2015human,silver2017mastering,arulkumaran2019alphastar}, and human-computer interaction \citep{ziegler2019fine}. 
+However, their use in real-world applications depends on their capacity to execute tasks while making policy updates in the face of finite observations of a world in flux. On-policy algorithms, such as Proximal Policy Optimization (PPO) \citep{schulman2017proximal} or Asynchronous Advantage Actor-Critic (A3C) \citep{mnih2016asynchronous}, update differentiable policies based on recent interactions with the environment. This recency bias and the capacity to actively sample informative observations make on-policy approaches compelling candidates for applications in dynamic real-world environments.
+
+A key facet of active sampling is exploration. On-policy actor-critic methods typically incorporate exploration through entropy regularization or by learning a homogeneous variance parameter for continuous action spaces \citep{schulman2015trust, mnih2016asynchronous, schulman2017proximal}. While effective, such on-policy DRL exploration methods are \emph{state-agnostic}, promoting exploration equally regardless of the novelty or familiarity of a given state. This work is motivated by a desire to introduce effective and grounded uncertainty-aware exploration to the on-policy actor-critic framework. Approximate Bayesian inference over actor weights would enable principled exploration, but it is not straightforward due to the policy-gradient objective for optimizing the actor. Thus, we ask, "What is the minimal step we can take toward approximate Bayesian inference," and present VSOP (which stands for Variational [b]ayes, Spectral-normalized, On-Policy reinforcement learning). VSOP consists of three simple modifications to the A3C algorithm: (1) applying a ReLU function to advantage estimates, (2) spectral normalization of actor-critic weights, and (3) incorporating \emph{dropout as a Bayesian approximation} \citep{gal2016dropout}. Under standard assumptions, we prove that restricting policy updates to positive advantages maximizes value by maximizing a lower bound on the value function plus an additive term. We show that the additive term is bounded proportional to the Lipschitz constant of the value function, grounding the use of spectral normalization as a Lipschitz constant regularizer. Lastly, we show how dropout corresponds to approximate Bayesian inference over the actor and critic parameters, which enables state-aware exploration via Thompson sampling.
+
+ Moreover, VSOP significantly outperforms PPO on the challenging ProcGen generalization benchmark, demonstrating improved performance when deployed under distribution shift.
+
+
+
+\section{Background}
+
+\label{sec:background}
+
+\textbf{Notation.}
+We consider a discounted, $\Step$-horizon Markov Decision Process (MDP) defined by the tuple $(\Scal, \Acal, \mathrm{P}, \rt, \gamma)$, where $\Scal$ is the state space, $\Acal$ is the action space, $\mathrm{P}$ is the state transition probability, $\rt$ is the immediate reward upon transitioning from state $\st$ to state $\st^{\prime}$ under action $\at$, and $\gamma \in [0, 1]$ is the discount factor. MDPs provide a framework for modeling sequential decision-making problems, where an agent interacts with an environment over discrete time steps to achieve a goal \citep{puterman2014markov}. Following the notation of \citet{sutton2018reinforcement}, we define states at time $\step \in \Step$ by the $d$-dimensional, real-valued, random variable, $\St_{\step}: \Omega \to \Scal \subseteq \Real^d$, with observable instances $\st_{\step} = \St_{\step}(\omega_{\step}): \forall  \omega_{\step} \in \Omega$. We define actions by the $m$-dimensional random variable $\At_{\step}: \Omega \to \Acal$, with observable instances, $\at_{\step} = \At_{\step}(\omega_{\step}): \forall  \omega_{\step} \in \Omega$. Rewards are defined by the continuous-valued random variable, $\Rt_{\step}:\Omega \to \Rcal \subseteq \Real$, with observable instances, $\rt_{\step} = \Rt_{\step}(\omega_{\step}): \forall  \omega_{\step} \in \Omega$. Let the random variable, $\Gt_{\step} \coloneqq \sum_{\kstep = \step + 1}^{\Step} \gamma^{\kstep - 1 - \step} \Rt_{\kstep}$, denote the discounted return. We use the standard definitions for the conditional action distribution/density (policy), $\pi(\at \mid \st)$, the state value function under the policy, $v_{\pi}(\st) \coloneqq \E_{\pi} \left[ \Gt_{\step} \mid \St_{\step} = \st \right]$, and state-action value function under the policy, $q_{\pi}(\st, \at) \coloneqq \E_{\pi} \left[ \Gt_{\step} \mid \St_{\step} = \st,  \At_{\step} = \at\right]$.
+
+\textbf{On-policy Actor-critic reinforcement learning.} 
+On-policy, Actor-critic approaches to reinforcement learning are called \emph{policy-gradient} methods. They directly optimize a policy function, $\pi(\at \mid \st, \paramp)$, differentiable with respect to parameters, $\paramp$, to maximize the expected discounted return under the policy, $v_{\pi}(\st)$. On-policy approaches differ from off-policy approaches in that they only use recent samples from the current policy to achieve this objective. Actor-critic methods differ from other policy-gradient methods because they fit an approximate value function (critic), $v(\st, \paramv)$, to the data collected under the policy, in addition to optimizing the policy function (actor). The critic is typically used in actor optimization but not generally for decision-making.
+
+Deep reinforcement learning implements the actor and critic using neural network architectures, where the function parameters correspond to network weights. We denote the parameters of the actor and critic networks as $\paramp$ and $\paramv$, respectively. The output likelihood of the actor makes distributional assumptions informed by characteristics of the action space, $\Acal$. A common choice for continuous action spaces is an independent multivariate normally distributed likelihood with homogeneous noise variance, $\pi(\at_{\step} \mid \st_{\step}, \paramp) \sim \mathcal{N}(\at \mid \bm{\mu}(\st, \paramp), \mathrm{I}\bm{\sigma}^2(\paramp))$, where $\bm{\sigma}^2(\paramp) = (\sigma^2_1, \dots, \sigma^2_m)$ is the vector of inferred action noise variances. For discrete action spaces, the likelihood is often a categorical distribution, $\pi(\at \mid \st, \paramp) \sim \mathrm{Categorical}(\at \mid \bm{\mu}(\st, \paramp))$. In both cases, the mean parameter of the likelihood, $\bm{\mu}(\st, \paramp)$, is the $m$-dimensional, vector-valued output of a neural network architecture with parameters, $\paramp$. Critic networks are commonly fit using a mean squared error objective, which implies a univariate normally distributed output likelihood with unit variance, $\mathrm{G} \mid \st, \paramv \sim \mathcal{N}(\mathrm{g} \mid v(\st, \paramv), 1)$, where the mean parameter is the approximate value function, $v(\st, \paramv)$, and is given by the scalar-valued output of any neural network architecture with parameters, $\paramv$.
+
+The baseline on-policy, actor-critic policy gradient algorithm performs gradient ascent with respect to the ``performance'' function, $J(\paramp) \coloneqq v_{\pi}(\st_0, \paramp)$, where $v_{\pi}(\st_0, \paramp)$ is the value function with respect to the parameters $\paramp$. By the policy gradient theorem \citep{sutton1999policy}, we have: $\nabla_{\paramp} J(\paramp) = \nabla_{\paramp} v_{\pi}(\st_{0}) \propto \int_{\Scal} \rho(\st) \int_{\Acal} q_{\pi}(\st, \at) \nabla_{\paramp} \pi(\at \mid \st, \paramp) d\at d\st$. \citet{sutton2018reinforcement} show that a generalization of this result includes a comparison of the state-action value function, $q_{\pi}(\st, \at)$, to an arbitrary baseline that does not vary with the action, $\at$. When the baseline is the state value function, $v_{\pi}(\st)$, we have an objective in terms of the \emph{advantage function} \citep{schulman2015high}, $h_{\pi}(\st, \at) \coloneqq q_{\pi}(\st, \at) - v_{\pi}(\st)$, namely: $\nabla_{\paramp} J(\paramp) \propto \int_{\Scal} \rho(\st) \int_{\Acal} h_{\pi}(\st, \at) \nabla_{\paramp} \pi(\at \mid \st, \paramp) d\at d\st$. This formulation in terms of \emph{all actions} can be further simplified in terms of sampled actions and states as $\nabla_{\paramp} J(\paramp) \propto \E_{\pi} \left[ h_{\pi}(\St_{\step}, \At_{\step}) \nabla_{\paramp} \log{\pi(\At_{\step} \mid \St_{\step}, \paramp)} \right]$. We use $\E_{\pi}$ to denote an expectation over states $\St_{\step}$ and actions $\At_{\step}$ collected under the policy $\pi(\at \mid \st)$.
+
+In general, because neither the state-action, $q_{\pi}(\st, \at)$, nor the state value, $v_{\pi}(\st)$, functions are known, we need an estimator for the advantage function. For compactness, we will focus on the generalized advantage estimator (GAE) proposed by \citet{schulman2015high}: $h(\st_{\step}, \rt_{\step}, \paramv) = \sum_{\kstep = \step + 1}^{\Step} (\gamma \lambda)^{\kstep - 1 - \step} \delta_{\step - \kstep + 1}^{\paramv},$ where $0 < \lambda \leq 1$, and $\delta_{\step}^{\paramv} = \rt_{\step} + \gamma v(\st_{\step + 1}; \paramv) - v(\st_{\step}; \paramv)$ is the temporal difference (TD) residual of the value function with discount, $\gamma$ \citep{sutton2018reinforcement}. The GAE then yields a low-variance gradient estimator for the policy function: $\widehat{\nabla_{\paramp} J}(\paramp) \coloneqq \E_{\pi} \left[ h(\St_{\step}, \Rt_{\step}, \paramv) \nabla_{\paramp} \log{\pi(\At_{\step} \mid \St_{\step}, \paramp)} \right]$. Finally, the actor and critic networks are generally optimized by using mini-batch stochastic gradient descent \cite{robbins1951stochastic} to fit the functions induced by the network weights to a batch of data collected under the current policy, $\Dcal^{b}_{\pi} = \{\st_{i}, \at_{i}, \rt_{i}\}_{i=1}^b$. The parameter updates are given by,
+\begin{subequations}
+    \begin{align}
+        \paramp &\gets \paramp - \eta \frac{1}{b} \sum_{i = 1}^{b} h(\st_{i}, \rt_{i}, \paramv) \nabla_{\paramp} \log{\pi(\at_{i} \mid \st_{i}, \paramp)}, \label{eq:actor-update} \\
+        \paramv &\gets \paramv - \eta \frac{1}{b} \sum_{i = 1}^{b} \nabla_{\paramv} \log{p(\mathrm{g}(\st_{i}, \rt_{i}, \tilde{\paramv}) \mid \st_{i}, \paramv)},
+    \end{align}
+    \label{eq:updates}
+\end{subequations}
+where, $\eta$, is the  learning rate, $\mathrm{g}(\st_{i}, \rt_{i}, \tilde{\paramv}) = h(\st_{i}, \rt_{i}, \tilde{\paramv}) + v(\st_{i}, \tilde{\paramv})$, and $\tilde{\paramv}$ are previous parameters.
+
+
+
+\section{Methods}
+
+\label{sec:methods}
+
+This work takes a top-down approach to state-aware exploration for on-policy actor-critic DRL. To employ principled exploration strategies, we would like to have approximate posteriors, $q(\Paramp \mid \Dcal_{n-1})$ and $q(\Paramv \mid \Dcal_{n-1})$, for the weights of the actor and critic given data, $\Dcal_{n-1} = \{\st_{i}, \at_{i}, \rt_{i}\}_{i=1}^{|\Tcal_{n-1}|}$, collected under the policy, $\pi(\at \mid \st, \Paramp_{n-1})$, over a set of horizons, $\Tcal_{n-1} = \Step^{n-1}_1 \cup \Step^{n-1}_2 \cup \dots$. However, fastidiously Bayesian, bottom-up approaches often yield strategies less effective than the state-of-the-art. Leaving debates on evaluation aside, we start from the A3C algorithm and ask, ``what minimum changes can we make to get close to an approximate posterior?"
+
+Starting with the critic, $v(\st, \paramv)$, this task seems straightforward because we train the critic with mean squared error loss. Hence, we can use the implied likelihood, $\mathcal{N}(\mathrm{g} \mid v(\st, \paramv), 1)$, and use the \textit{dropout as a Bayesian approximation} \citep{gal2016dropout} framework to infer an approximate posterior density over critic weights, $q(\paramv \mid \widehat{\paramv}, p_d)$, where $\widehat{\paramv}$ is the variational parameter for the network weights, and $p_d$ is the dropout rate. We outline the resulting optimization procedure in lines 16-17 of \Cref{alg:vsop} for a unit Normal prior over critic weights, $p(\paramv) = \mathcal{N}(\paramv \mid 0, \mathbf{I})$.
+
+\begin{algorithm}
+    \caption{VSOP for Dropout Bayesian Neural Networks \label{alg:vsop}}
+    \begin{algorithmic}[1]
+        \Require{initial state, $\st'$, environment, $p(\st', \rt \mid \st, \at)$, rollout buffer, $\Dcal$, initial actor parameters, $\widehat{\paramp}$, initial critic parameters, $\widehat{\paramv}$, dopout rate, $p_d$, learning rate, $\eta$, minibatch size, $b$.}
+        \Statex
+        \While{true}
+            \State $\Dcal \gets  \emptyset$ \Comment{reset rollout buffer}
+            \While{acting} \Comment{interact with the environment}
+                \State $\st \gets \st'$ \Comment{update current state}
+                \State  $\paramp \sim q(\paramp \mid \widehat{\paramp}, p_d)$ \textbf{if} TS \textbf{else}  $\paramp \gets \widehat{\paramp}$ \Comment{sample actor params if Thompson sampling (TS)}
+                \State $\at \sim \pi(\at \mid \st, \paramp)$ \Comment{sample action from policy}
+                \State $\st', \rt \sim p(\st', \rt \mid \st, \at)$ \Comment{sample next state and reward from environment}
+                \State $\Dcal \gets \Dcal \cup \{(\st, \at, \rt)\}$ \Comment{update rollout buffer}
+            \EndWhile
+            \State $\paramv^* \gets \widehat{\paramv}$ \Comment{freeze critic weights for advantage estimates}
+            \State $\beta \gets (1 - p_d) / \left(2|\Dcal|\right)$ \Comment{set parameter precision}
+            \While{fitting} \Comment{update actor and critic}
+                \State $\{\st_i, \at_i, \rt_i\}_{i=1}^{b} \sim \Dcal$ \Comment{sample minibatch from rollout buffer}
+                \State  $\widetilde{\paramv} \sim q(\paramv \mid \paramv^*, p)$ \textbf{if} TS \textbf{else}  $\widetilde{\paramv} \gets \paramv^*$ \Comment{sample advantage params if TS}
+                \State $\paramp \sim q(\paramp \mid \widehat{\paramp}, p_d)$ \Comment{sample actor parameters}
+                \State $\widehat{\paramp}\gets \widehat{\paramp} - \eta \frac{1}{b} \sum_{i = 1}^{b} h^+(\st_{i}, \rt_{i}, \widetilde{\paramv}) \nabla_{\paramp} \log{\pi(\at_{i} \mid \st_{i}, \paramp)} + 2\beta\paramp$ \Comment{update actor}
+                \State $\paramv \sim q(\paramv \mid \widehat{\paramv}, p_d)$ \Comment{sample critic parameters}
+                \State $\widehat{\paramv} \gets \widehat{\paramv} - \eta \frac{1}{b} \sum_{i = 1}^{b} \nabla_{\paramv} \log{p(\mathrm{g}(\st_{i}, \rt_{i}, \widetilde{\paramv}) \mid \st_{i}, \paramv)} + 2\beta\paramv$ \Comment{update critic}
+            \EndWhile
+        \EndWhile
+    \end{algorithmic}
+\end{algorithm}
+
+The inference task is less straightforward for the actor because the A3C objective, $\nabla_{\paramp} J(\paramp) \propto \E_{\pi} \left[ h_{\pi}(\St_{\step}, \At_{\step}) \nabla_{\paramp} \log{\pi(\At_{\step} \mid \St_{\step}, \paramp)} \right]$, is not merely maximization of the log-likelihood. Instead, the log-likelihoods, $\log{\pi(\at \mid \st, \paramp)}$, are scaled by the advantage function, $h_{\pi}(\st, \at)$. The \textit{dropout as Bayesian approximation} framework estimates the integral over the log evidence lower bound objective using Monte-Carlo integration. For a single sample from the approximate posterior density, $\paramp \sim q(\paramp \mid \widehat{\paramp}, p_d)$, the integrand is of the general form:
+\begin{equation}
+    \mathcal{L} = \sum_{i=1}^{|\mathcal{D}|} \log p(\cdot \mid \st_{i}, \paramp) - \mathrm{KL}(q(\paramp) || p(\paramp)).
+    \label{eq:elbo_integrand}
+\end{equation}
+We make the same prior assumption, $p(\paramp) = \mathcal{N}(\paramp \mid 0, \mathbf{I})$, for the actor as for the critic, so we only need to focus on the first r.h.s., log-likelihood term. Here we introduce a normal-gamma distribution over the actions r.v., $\At_{\step}$, and a random variable $\Ht_{\step}$:
+\begin{equation}
+    p(\At_{\step}, \Ht_{\step} \mid \st, \paramp, \tau, \alpha, \beta) \coloneqq
+    \begin{cases}
+        \At_{\step} \mid \Ht_{\step}, \st, \paramp, \tau \sim \mathcal{N}\left(\at \mid \mu(\st, \paramp), (\tau \Ht_{\step})^{-1}\right) \\
+        \Ht_{\step} \mid \alpha, \beta \sim \text{Gamma}(\alpha, \beta).
+    \end{cases}
+\end{equation}
+Given a dataset, $\mathcal{D} = \{\At_i, \St_i, \Ht_i\}_{i=1}^N$, and differentiating the log-likelihood of this distribution with respect to $\paramp$, we have:
+\begin{equation}
+    \begin{split}
+        \nabla_{\paramp}&\log{p(\At_{\step}, \Ht_{\step} \mid \St_{\step}, \paramp, \dots)} \\
+        &= \sum_{i=1}^N\nabla_{\paramp}\log{\left(
+            \frac{\beta^{\alpha}\sqrt{\tau}}{\Gamma(\alpha)\sqrt{2\pi}}
+            \mathrm{h}_i^{\alpha - \frac{1}{2}}
+            \exp\left(-\beta\mathrm{h}_i\right)
+            \exp\left(-\frac{1}{2}\mathrm{h}_i\tau(\at_i - \mu(\st_i, \paramp))^2\right)
+        \right)} \\
+        &= -\frac{1}{2} \sum_{i=1}^{N}\mathrm{h}_i\nabla_{\paramp}\tau \left(\at_i - \mu(\st_i, \paramp)\right)^2 \\
+        &= -\frac{1}{2} \sum_{i=1}^{N}\mathrm{h}_i\nabla_{\paramp}\log{\pi(\at_{\step} \mid \st_{\step}, \paramp)}.
+    \end{split}
+    \label{eq:gamma}
+\end{equation}
+Thus, the normal-gamma assumption allows us to recover the A3C optimization form in \Cref{eq:actor-update} while enabling approximate Bayesian inference over the actor parameters. However, the advantage function, $h_{\pi}(\st, \at)$, is not gamma distributed, as it can take on values in the range $(-\infty, 0]$, so we cannot plug it directly into \Cref{eq:gamma}. This discrepancy motivates our second, though not strictly valid due to the introduction of zeros, minimal step of passing the advantages through a ReLU function, enabling approximate Bayesian inference over the parameters of the actor to obtain the approximate posterior density of the actor, $q(\paramp \mid \widehat{\paramp}, p_d)$. We outline the resulting optimization procedure in lines 14-15 of \Cref{alg:vsop}, where $h^+(\st_{i}, \rt_{i}, \widetilde{\paramv}) \coloneqq \max\big(0, h(\st_{i}, \rt_{i}, \widetilde{\paramv})\big)$. Note that the clipped advantages as an actor precision modifier have a very intuitive interpretation. When advantage estimates are low (no evidence of past good actions), the variance of the policy will be high, indicating that the actor should explore more. Conversely, when the advantage estimates are high (evidence of past good actions), the variance of the policy will be low, indicating that the actor should explore less.
+
+\textbf{What function does VSOP optimize?}
+Clipping the advantage estimates to be non-negative has been explored in many policy-gradient contexts \citep{srinivasan2018actor,oh2018self,petersen2019deep,ferret2020self}. Here, we examine how this augmentation affects the optimization procedure in the context of on-policy actor-critic RL and offer a theoretical hypothesis to ground both our method and the Regret Matching Policy Gradient (RMPG) method of \citet{srinivasan2018actor}.
+
+\begin{theorem}
+    \label{th:main}
+    Let, $\Gt_{\step} \coloneqq \sum_{\kstep = \step + 1}^{\Step} \gamma^{\kstep - 1 - \step}  \Rt_{\kstep}$, denote the discounted return.
+    Let $q_{\pi}(\st, \at) = \E_{\pi} \left[ \Gt_{\step} \mid \St_{\step} = \st,  \At_{\step} = \at\right]$, denote the state-action value function, and
+    $v_{\pi}(\st) = \E_{\pi} \left[ \Gt_{\step} \mid \St_{\step} = \st \right]$, denote the state value function, under policy $\pi(\at \mid \st, \paramp)$.
+    Let $\big(x\big)^+ \coloneqq \max(0, x)$.
+    Assume, without loss of generality, that rewards, $\Rt_{\step}$, are non-negative.
+    Assume that the gradient of the policy, $\nabla \pi(\at \mid \st, \paramp)$, is a conservative vector field.
+    Then, performing gradient ascent with respect to,
+    \begin{equation}
+        \nabla_{\paramp} J(\paramp) = \E_{\pi}\left[ \Bigl(q_{\pi}(\St_{\step}, \At_{\step}) - v_{\pi}(\St_{\step}) \Bigr)^+ \nabla_{\paramp} \log \pi(\At_{\step} \mid \St_{\step}, \paramp) \right],
+        \label{eq:main-objective}
+    \end{equation}
+    maximizes a lower-bound, $v_{\pi}^*(\st)$, on the state value function, $v_{\pi}(\st)$, plus an additive term:
+    \begin{equation}
+        v_{\pi}^*(\st) \leq v_{\pi}(\st) + C_{\pi}(\st).
+        \label{eq:main-bound}
+    \end{equation}
+    Where, $C_{\pi}(\st) = \iint \Big( \gamma v_{\pi}(\st') - v_{\pi}(\st) \Big)^{+} d\Prob(\st' \mid \St_{\step}=\st, \At_{\step} = \at) d\Pi(\at \mid \St_{\step}=\st)$, is the expected, clipped difference in the state value function, $\gamma v_{\pi}(\st') - v_{\pi}(\st)$, over all actions, $\at$, and next states, $\st'$, under the policy given state, $\st$. Here, we use $\int \dots d\Pi(\at \mid \st)$ to denote $\sum_{\at} \dots \pi(\at \mid \st)$ for discrete action spaces and $\int \dots \pi(\at \mid \st)d\at$ for continuous action spaces. Similarly, we use $\int \dots d\Prob(\st' \mid \st, \at)$ to denote $\sum_{\st'} \dots p(\st' \mid \st, \at)$ for discrete state spaces and $\int \dots p(\st' \mid \st, \at)d\st'$ for continuous state spaces. We provide proof in \Cref{app:constant-proof}.
+\end{theorem}
+
+\textbf{Bounding $C_\pi(\st)$.}
+For a $K_{\pi}$-Lipschitz value function and $\gamma=1$, the additive term is bounded proportional to the expected absolute difference between states:
+\begin{subequations}
+    
+    \begin{align*}
+        C_{\pi}(\st) 
+        &= \iint \Big( v_{\pi}(\st') - v_{\pi}(\st) \Big)^{+} d\Prob(\st' \mid \St_{\step}=\st, \At_{\step} = \at) d\Pi(\at \mid \St_{\step}=\st) && \\
+        &\leq= \frac{1}{2} \iint \big| v_{\pi}(\st') - v_{\pi}(\st) \big| d\Prob(\st' \mid \St_{\step}=\st, \At_{\step} = \at) d\Pi(\at \mid \St_{\step}=\st) && \Cref{lem:relu-lt-abs} \\
+        &\leq \frac{1}{2} \iint K_{\pi}\big|\big| \st' - \st \big|\big| d\Prob(\st' \mid \St_{\step}=\st, \At_{\step} = \at) d\Pi(\at \mid \St_{\step}=\st). &&
+    \end{align*}
+\end{subequations}
+This interpretation motivates using spectral normalization \citep{miyato2018spectral} of the value function estimator weights, $v(\st, \paramv)$, which regulates the Lipschitz constant, $K_{\pi}$, of the estimator and can improve off-policy DRL performance \citep{bjorck2021towards,gogianu2021spectral}. Moreover, this bound is not vacuous for the continuous (nor the discrete) action setting. Under weak assumptions, $f(\at, \st) \coloneqq \int K_{\pi}\big|\big| \st' - \st \big|\big| d\Prob(\st' \mid \St_{\step}=\st, \At_{\step} = \at)$, is finite for all $\at$. Therefore, $f^*(\st) = \max_{\at}(\int f(\at, \st)d\Pi(\at \mid \St_{\step}=\st))$, exists and is finite, and $C_{\pi}(\st) \leq \frac{1}{2}f^*(\st)$.
+
+We term this method VSOP for Variational [b]ayes, Spectral-normalized, On-Policy reinforcement learning. \Cref{alg:vsop} details VSOP for dropout BNNs.
+
+\textbf{Comments.}
+The derivation in \Cref{eq:gamma} assumes access to the policy precision parameter, $\tau = 1 / \sigma^2$, and samples of $\Ht_{\step}$. In practice, we fit $\tau$ using maximum likelihood estimation and use clipped GAEs to obtain samples of $\Ht_{\step}$. Moreover, it is only valid for continuous action spaces. We evaluate discrete action spaces below but leave theoretical grounding for future work.
+
+Note that while we show in \Cref{eq:gamma} that approximate Bayesian inference of $\paramp$ under an assumed policy that scales actor precision, $\tau$, by clipped advantages, $h^+$, yields an equivalent likelihood objective, we do not implement a policy, $\pi(\at \mid \st, \paramp)$, that includes this scaling. We leave this exploration to future work as it requires joint inference over $\tau$ and $\paramp$ and an appropriate state conditional advantage estimator.
+
+Finally, the conservative vector field assumption of \Cref{th:main} assumes that the actor implements a smooth function. This assumption is often broken in practice as non-smooth ReLU activation functions see use in the baselines we compare to. We leave the investigation of using smooth activation functions to future work.
+
+
+
+\section{Related Works}
+
+\label{sec:related-works}
+VSOP is an on-policy RL algorithm. \Cref{table:performance metrics} compares the gradient of the performance function, $\nabla J(\paramp)$, for VSOP with those for relevant on-policy algorithms. We discuss each algorithm below.
+
+\begin{table}[ht]
+    \caption{Comparison of performance functions for on-policy methods}
+    \label{table:performance metrics}
+    \centering
+    \begin{tabular}{@{}lll@{}}
+        \toprule
+        Method  & \multicolumn{2}{c}{$\nabla J(\paramp)$} \\ \midrule
+        A3C     & $\E_{\pi}\left[ h_{\pi}(\St_{\step}, \At_{\step}) \nabla \log \pi(\At_{\step} \mid \St_{\step}, \paramp) \right];$ & $h_{\pi}(\St_{\step}, \At_{\step}) = q_{\pi}(\St_{\step}, \At_{\step}) - v_{\pi}(\St_{\step})$ \\
+        \textbf{VSOP}    & $\E_{\pi}\left[ h_{\pi}^+(\St_{\step}, \At_{\step}) \nabla \log \pi(\At_{\step} \mid \St_{\step}, \paramp) \right];$     & $h_{\pi}^+(\St_{\step}, \At_{\step}) = \max\big(0, h_{\pi}(\St_{\step}, \At_{\step})\big)$ \\
+        RMPG    & $\E_{\pi}\left[ \int h_{\pi}^+(\St_{\step}, \at) \nabla d\Pi(\at \mid \St_{\step}, \paramp) \right]$ & \\
+        TRPO    & $\E_{\pi}\left[ h_{\pi}(\St_{\step}, \At_{\step}) \nabla \rho(\St_{\step}, \At_{\step}, \paramp) \right];$ & $\rho(\St_{\step}, \At_{\step}, \paramp) = \frac{\pi(\At_{\step} \mid \St_{\step}, \paramp)}{\pi(\At_{\step} \mid \St_{\step}, \paramp_{\mathrm{old}})}$ \\
+        PPO     & \multicolumn{2}{l}{$\E_{\pi}\left[ \min \bigg( h_{\pi}(\St_{\step}, \At_{\step}) \nabla \rho(\St_{\step}, \At_{\step}, \paramp), \textrm{clip}\Big( h_{\pi}(\St_{\step}, \At_{\step}) \nabla \rho(\St_{\step}, \At_{\step}, \paramp), 1-\epsilon, 1 + \epsilon \Big) \bigg) \right]$} \\
+        DPO & \multicolumn{2}{l}{
+            $\E_{\pi}\left[ \nabla \begin{cases}
+                \big( h_{\pi}(\rho(\paramp) - 1) - a \tanh( h_{\pi}(\rho(\paramp) - 1)/a ) \big)^+ & h_{\pi}(\St_{\step}, \At_{\step}) \geq 0 \\
+                \big( h_{\pi}\log(\rho(\paramp)) - b \tanh(h_{\pi}\log(\rho(\paramp) / b) \big)^+ & h_{\pi}(\St_{\step}, \At_{\step}) < 0 \\
+            \end{cases} \right]$
+        } \\
+        CVaR    & $\E_{\pi}\left[ \big( \nu_{\alpha} - \Gt_{\step}   \big)^+ \nabla \log \pi(\At_{\step} \mid \St_{\step}, \paramp) \right];$ & $\nu_{\alpha} \coloneqq \alpha\text{-quantile of return, } \Gt_{\step}$ \\
+        RSPG    & $\E_{\pi}\left[ \big( \Gt_{\step} - \nu_{\alpha} \big)^+ \nabla \log \pi(\At_{\step} \mid \St_{\step}, \paramp) \right];$ &  $\Gt_{\step} \coloneqq \sum_{\kstep = \step + 1}^{\Step} \gamma^{\kstep - 1 - \step} \Rt_{\kstep}$ \\
+        EPOpt   & $\E_{\pi}\left[ \mathds{1}\big(\Gt_{\step} \leq \nu_{\alpha}\big) \nabla J(\theta, \St_{\step}, \At_{\step}) \right];$ & $J(\theta, \St_{\step}, \At_{\step})$ on-policy perf. function  \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\textbf{Mirror Learning.}
+\emph{Proximal Policy Optimization (PPO)} \citep{schulman2017proximal}, improves upon the baseline policy gradient method by constraining the maximum size of policy updates. PPO employs a clipped surrogate objective function to limit the size of policy updates. PPO simplifies the optimization procedure compared to TRPO \citep{schulman2015trust}, making it more computationally efficient and easier to implement. While PPO constrains policy updates based on the ratio between the new and old policies, VSOP constrains policy updates according to the sign of the estimated advantage function. As such, PPO is an instance of the \emph{mirror learning} framework \cite{kuba2022mirror}, whereas VSOP does not inherit the same theoretical guarantees.
+\citet{lu2022discovered} explores the Mirror Learning space by meta-learning a “drift” function. They term their immediate result Learned Policy Optimization (LPO). Through its analysis, they arrive at \emph{Discovered Policy Optimisation (DPO)}, a novel, closed-form RL algorithm.
+
+\textbf{Regret Matching Policy Gradient (RMPG).} \citet{srinivasan2018actor} present a method inspired by their regret policy gradient (RPG) objective, which maximizes a lower-bound on the advantages: $(h(\st, \at))^{+} \leq h(\st, \at)$. RPG directly optimizes the policy for an estimator of the advantage lower-bound, denoted as $\nabla_{\paramp} J^{\textrm{RPG}}(\paramp)$. RMPG, being inspired by RPG, has a different objective, $\nabla_{\paramp} J^{\textrm{RMPG}}(\paramp)$. In both cases, $q(\st, \at, \paramv)$ is a parametric estimator of the state-action value function, $q_{\pi}(\st, \at)$.  RMPG has demonstrated improved sample efficiency and stability in learning compared to standard policy gradient methods.
+VSOP is closely related to RMPG; however, we provide the missing theoretical foundations to ground RMPG (\Cref{app:constant-proof}), extend RMPG from the \emph{all actions} formulation making it more suitable for continuous control (\Cref{sec:rmpg-to-vsop}), and employ the GAE rather than the state-action value function estimator, $q(\st, \at, \paramv)$.
+
+\textbf{Thompson Sampling in Deep Reinforcement Learning.}
+Thompson sampling has been extensively explored in conventional and Deep Q-Learning \citep{strens2000bayesian,wang2005bayesian,osband2016deep,moerland2017efficient,azizzadenesheli2018efficient} to improve exploration and sample efficiency.
+\citet{clements2019estimating} and \citet{nikolov2018information} propose similar sampling-based exploration strategies for Deep Q-Learning.
+\citet{jiang2023importance} propose a Thompson sampling strategy based on an ensemble of quantile estimators of the state-action value distribution.
+In the context of \emph{policy gradient} methods, related Upper Confidence Bound (UCB) \citep{ciosek2019better} and Hamiltonian Monte-Carlo (HMC) \citep{xu2022improving} approaches are proposed for off-policy Soft Actor-Critic (SAC) \citep{haarnoja2018soft}, and \citet{henaff2022exploration} proposes an elliptical episodic reward for general use. 
+\citet{igl2019generalization} propose Selective Noise Injection using fixed dropout masks to sample policies and then actions, but stop short of formalizing this as Thompson sampling.
+Similarly for \citet{hausknecht2022consistent}.
+We believe our work is the first to formalize and show the benefit of Thompson sampling for on-policy actor-critic methods.
+
+
+
+\section{Experiments}
+
+We comprehensively evaluate VSOP against on-policy RL methods across various domains, including continuous and discrete action spaces and diverse dimensionalities in both the action and observation spaces. 
+
+In \Cref{sec:exp-procgen}, we assess the capacity of VSOP to learn policies that generalize to unseen environments at test time using the ProcGen benchmark \citep{cobbe2020leveraging}.
+We use the rliable package to evaluate robust normalized median (Median), interquartile mean (IQM), mean (Mean), optimality gap (OG), and probability of improvement (Prob. Improve) metrics \cite{agarwal2021deep}.
+Additional results are provided in \Cref{app:additional-results}.
+
+\subsection{MuJoCo}
+\label{sec:exp-gymnasium}
+
+We give full implementation details in \Cref{app:implementation-details-gym}.
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}[b]{0.72\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/iclr/mujoco_mechanisms.png}
+        \caption{Episodic return}
+        \label{fig:sprectral-performance}
+    \end{subfigure}
+    ~
+    \begin{subfigure}[b]{0.26\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/iclr/mujoco_mechanisms_pi.png}
+        \caption{Prob. Improve}
+        \label{fig:sprectral-performance}
+    \end{subfigure}
+    
+    \begin{subfigure}[b]{0.72\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/iclr/mujoco_mechanisms_efficiency.png}
+        \caption{Area Under Return Curve}
+        \label{fig:sprectral-performance}
+    \end{subfigure}
+    ~
+    \begin{subfigure}[b]{0.26\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/iclr/mujoco_mechanisms_efficiency_pi.png}
+        \caption{Prob. Improve}
+        \label{fig:sprectral-performance}
+    \end{subfigure}
+    \caption{MuJoCo. Ablating the effect of the proposed mechanisms. Here we compare VSOP to VSOP without spectral normalization (no-spectral), VSOP without Thompson sampling (no-hompson), VSOP without advantage clipping (no-ReLU Adv.), and VSOP using all-actions policy optimization (all actions). We see that no single mechanism contributes greater than the sum of all changes, lending credence to the validity of our theory. These results hold for overall performance (a-b), and sample efficiency (c-d). Metrics are computed wrt to the average episodic return of the last 100 episodes and the area under the episodic return curve over 10 random seeds}
+    \label{fig:rliable-mechanisms}
+\end{figure}
+
+\textbf{Ablation of mechanisms.}
+First, we investigate the influence of our four proposed mechanisms on the performance of VSOP.
+For reference, the mechanisms are positive advantages, single-action setting, spectral normalization, and Thompson sampling.
+To ablate each mechanism, we compare VSOP to four variants: VSOP without advantage clipping (no-ReLU Adv.), VSOP in the all-actions setting (all-actions), VSOP without spectral normalization (no-spectral), and VSOP without Thompson sampling (no-Thompson).
+We hyperparameter tune each variant in accordance with the same procedure used for VSOP (see \Cref{table:gymnasium-ablation-hypers} for details).
+\Cref{fig:rliable-mechanisms} summarizes these results, and we see clearly that no single mechanism contributes greater than the sum of all changes, lending credence to our theoretical analysis. 
+We see that positive advantages and operating in the single-action regime impact performance on MuJoCo significantly.
+Spectral normalization and Thompson sampling also influence performance on MuJoCo positively, especially in high-dimensional action and observation space settings such as Humanoid, Humanoid Stand-Up, and Ant, as shown in \Cref{fig:mujoco-hyper} of \Cref{app:additional-results-mech}.
+The performance gains for spectral normalization align with results given by \citet{bjorck2021towards} and \citet{gogianu2021spectral} for DDPG \citep{lillicrap2015continuous}, DRQ \citep{kostrikov2020image}, Dreamer \citep{hafner2019dream}, DQN \citep{wang2016dueling} and C51 \citep{bellemare2017distributional}.
+
+\textbf{Comparison to baselines.}
+Next, we compare VSOP to baseline implementations: PPO, A3C, SAC, and TD3. 
+We use the CleanRL \citep{huang2022cleanrl} implementation of PPO, SAC and TD3; the StableBaselines3 \citep{stable-baselines3} hyper-parameter settings for A3C.
+We also include comparisons to RMPG (adapted for continuous control) and VSPPO (PPO with spectral normalization, and Thompson sampling via dropout).
+We tune RMPG and VSPPO using the same Bayesian optimization \citep{snoek2012practical} protocol as VSOP.
+\Cref{fig:rliable-baselines} summarizes our results, where we see that VSOP shows significant improvement over each baseline with respect to each metric, except for the SAC and TD3's mean scores.
+See \Cref{fig:mujoco-baselines} in \Cref{app:additional-results-baselines} for training curves of these results. 
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/iclr/mujoco_sac.png}
+    \caption{MuJoCo. Comparison to baselines. We see that VSOP (blue) shows significant improvement over each baseline with respect to the Median and IQM metrics. VSOP only trails SAC and TD3 for the mean metric. Metrics are computed wrt to the average episodic return of the last 100 episodes over 10 random seeds}
+    \label{fig:rliable-baselines}
+\end{figure}
+
+\textbf{Effect of asynchronous parallelization.}
+Following \citet{lu2022discovered}, we also evaluate VSOP on the Brax implementation of MuJoCo in a massively parallel setting. 
+Where in the above experiments we set the number of asynchronous threads to 1 and the number of steps per rollout to 2048, here we set the number of asynchronous threads to 2048 and the number of steps to 10.
+We see in \Cref{fig:rliable-brax-mujoco} that while VSOP still outperforms A3C significantly, it trails PPO.
+Full training curves are shown in \Cref{fig:brax} of \Cref{sec:exp-gymnax}.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.7\textwidth]{figures/iclr/brax_mujoco.png}
+    \caption{MuJoCo. Comparison to on-policy baselines with extreme parallelization. Here we compare VSOP to on-policy baselines on MuJoCo with 2048 threads and 10 steps per rollout. Metrics are computed wrt to the average episodic return of the last 100 episodes over 20 random seeds}
+    \label{fig:rliable-brax-mujoco}
+\end{figure}
+
+Interestingly, hyper-parameter tuning showed spectral normalization to be detrimental to the performance of VSOP in this massively parallel setting.
+We investigate the effect of parallelization on VSOP effectiveness and efficiency in \Cref{fig:rliable-specrtal}.
+Here we set the rollout size to 2048 environment interactions and sweep the number of threads and number of steps.
+For each configuration, we do a hyper-parameter sweep in MuJoCo Brax using the reacher, hoppper, and humanoid evironments over 1 million environment interactions. 
+We then evaluate on 10 MuJoCo environments over 3 million environment interactions.
+The blue bars show metrics for VSOP with spectral normalization. 
+We see that VSOP is most effective and efficient with spectral normalization with a low thread count and that for a fixed rollout size, these measures fall with increasing parallelization.
+For VSOP without spectral normalization, the trend is less clear, but appears to be generally the opposite for a fixed rollout size.
+This indicates that spectral normalization will be beneficial in applications where it is not feasible to run many parallel agents.
+
+\begin{figure}
+    \centering
+    \begin{subfigure}[b]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/iclr/mujoco_spectral.png}
+        \caption{Episodic return}
+        \label{fig:sprectral-performance}
+    \end{subfigure}
+    \begin{subfigure}[b]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/iclr/mujoco_spectral_efficiency.png}
+        \caption{Area under the curve}
+        \label{fig:sprectral-efficiency}
+    \end{subfigure}
+    \caption{MuJoCo: effect of parallelization on VSOP. Naming convention: \#threads/\#steps/spectral norm. We see that VSOP is most effective \ref{fig:sprectral-performance} and most efficient \ref{fig:sprectral-efficiency} in lower thread settings for a fixed rollout size of 2048 steps when using spectral normalization. Metrics are computed wrt to the average episodic return or area under the curve for the last 100 episodes over 5 random seeds}
+    \label{fig:rliable-specrtal}
+\end{figure}
+
+\subsection{ProcGen}
+\label{sec:exp-procgen}
+In lieu of finding a suitable benchmark for continuous control, we assess the capacity of VSOP to generalize to unseen environments using ProcGen \citep{cobbe2020leveraging}. ProcGen is a set of 16 environments where game levels are procedurally generated, creating a virually unlimited set of unique levels. 
+We follow the ``easy'' generalization protocol where, for a given environment, models are trained on 200 levels for 25 million time steps and evaluated on the full distribution of environments.
+We use the same architecture as PPO in the CleanRL library, and do a Bayesian optimization hyper-parameter search using the bossfight environment.
+We search over the learning rate, GAE $\lambda$, number of minibatches per epoch, number of epochs per rollout, the dropout rate, and the entropy regularization coefficient.
+Full implementation details are given in \Cref{app:implementation-details-procgen}.
+\Cref{fig:rliable-procgen} summarizes our results. 
+We see broad significant improvement over PPO across both the PPO and Min-Max normalized metrics.
+Furthermore, we see improvement over EDE \cite{jiang2023importance} with respect to the IQM, mean, and optimality gap metrics.
+These results present strong evidence for the suitability of VSOP for deployment in non-stationary environments.
+See \Cref{fig:procgen-graphs} in of \Cref{app:additional-results-proc} for full training and test curves.
+
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}[b]{\textwidth}
+        \centering
+        \includegraphics[width=0.6\textwidth]{figures/iclr/procgen_ppo.png}
+    \end{subfigure}
+    \begin{subfigure}[b]{\textwidth}
+        \centering
+        \includegraphics[width=0.8\textwidth]{figures/iclr/procgen_minmax.png}
+    \end{subfigure}
+    \begin{subfigure}[b]{\textwidth}
+        \centering
+        \includegraphics[width=0.8\textwidth]{figures/iclr/ede.png}
+    \end{subfigure}
+    \caption{ProcGen comparison to PPO. In the top pane, we see significant improvement over PPO with respect to all metrics for the PPO normalized scores. In the middle pane, we see significant improvement over PPO in terms of the IQM, mean and optimality gap metrics for the Min-Max normalized scores. In the bottom pane, we include results reported by \citet{jiang2023importance}. It appears as though we improve over EDE with respect to the IQM, mean, and optimality gap metrics. Metrics are computed wrt to the average episodic return of the last 100 episodes over 5 random seeds}
+    \label{fig:rliable-procgen}
+    
+\end{figure}
+
+
+
+\section{Conclusion}
+
+
+This work represents a step towards principled approximate Bayesian inference in the on-policy actor-critic setting. Our method is realized through simple modifications to the A3C algorithm, optimizes a lower bound on value plus an additive term and integrates exploration via Thompson sampling. Our empirical evaluations across several diverse benchmarks confirm our approach's improved performance compared to existing on-policy algorithms.
+
+
+
+
+

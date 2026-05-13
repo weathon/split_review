@@ -1,0 +1,580 @@
+\title{Optimizing Posterior Samples for Bayesian Optimization via Rootfinding}
+
+\begin{abstract}
+Bayesian optimization devolves the global optimization of a costly objective function
+to the global optimization of a sequence of acquisition functions.
+This inner-loop optimization can be catastrophically difficult if it involves posterior sample paths,
+especially in higher dimensions.
+We introduce an efficient global optimization strategy for posterior samples
+based on global rootfinding.
+It provides gradient-based optimizers with two sets of
+judiciously selected starting points, designed to combine exploration and exploitation.
+The number of starting points can be kept small without sacrificing optimization quality.
+Remarkably, even with just one point from each set, the global optimum is discovered most of the time.
+The algorithm scales practically linearly to high dimensions, breaking the curse of dimensionality.
+For Gaussian process Thompson sampling (GP-TS),
+we demonstrate remarkable improvement in both inner- and outer-loop optimization,
+surprisingly outperforming alternatives like EI and GP-UCB in most cases.
+Our approach also improves the performance of other posterior sample-based acquisition functions,
+such as variants of entropy search.
+Furthermore, we propose a sample-average formulation of GP-TS,
+which has a parameter to explicitly control exploitation
+and can be computed at the cost of one posterior sample.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{introduction}
+
+Bayesian optimization (BO) is a highly successful approach to
+the global optimization of expensive-to-evaluate black-box functions,
+with applications ranging from hyper-parameter training of machine learning models
+to scientific discovery and engineering design \citep{Jones1998,Snoek2012,Frazier2018,Garnett2023}.
+Many BO strategies are also backed by strong theoretical guarantees
+on their convergence to the global optimum \citep{Srinivas2010, Bull2011, Russo2014, Chowdhury2017}.
+
+Consider the global optimization problem $\min_{\mathbf{x} \in \mathcal{X}} f(\mathbf{x})$
+where $\mathbf{x} \in \mathcal{X} \subset \mathbb{R}^d$ represents the vector of input variables and $f(\mathbf{x}) \in \mathbb{R}$ the objective function which can be evaluated at a significant cost,
+subject to observation noise.
+At its core, BO is a sequential optimization algorithm 
+that uses a probabilistic model of the objective function to guide its evaluation decisions.
+Starting with a prior probabilistic model and some initial data,
+BO derives an acquisition function $\alpha(\mathbf{x})$ from the posterior model,
+which is much easier to evaluate than the objective function
+and often has easy-to-evaluate derivatives.
+The acquisition function is then optimized globally, using off-the-shelf optimizers,
+to provide a location to evaluate the objective function.
+This process is iterated until some predefined stopping criteria are met.
+
+Effectively there are two nested iterations in BO:
+the outer-loop seeks to optimize the objective function $f(\mathbf{x})$,
+and the inner-loop seeks to optimize the acquisition function $\alpha(\mathbf{x})$ at each BO iteration.
+The premise of BO is that the inner-loop optimization can be solved accurately and efficiently,
+so that the outer-loop optimization proceeds informatively with a negligible added cost.
+In fact, the convergence guarantees of many BO strategies
+assume \textit{exact} global optimization of the acquisition function.
+However, the efficient and accurate global optimization of acquisition functions
+is less trivial than it is often assumed to be \citep{Wilson2018}.
+
+Acquisition functions are, in general, highly non-convex and have many local optima.
+In addition, many common acquisition functions
+are mostly flat surfaces with a few peaks \citep{Rana2017}, %
+which take up an overwhelmingly large portion of the domain as the input dimension grows.
+This creates a significant challenge for generic global optimization methods.
+
+Some acquisition functions involve sample functions from the posterior model,
+which need to be optimized globally.
+Gaussian process Thompson sampling (GP-TS) \citep{Chowdhury2017} uses posterior sample paths directly as random acquisition functions.
+In many information-theoretic acquisition functions
+such as entropy search (ES) \citep{Hennig2012}, predictive entropy search (PES) \citep{HernandezLobato2014},
+max-value entropy search (MES) \citep{WangZ2017}, and joint entropy search (JES) \citep{Tu2022,Hvarfner2022},
+multiple posterior samples are drawn and optimized to find their global optimum location and/or value.
+Such acquisition functions are celebrated for their nice properties in BO:
+TS has strong theoretical guarantees \citep{Russo2014, Russo2016}
+and can be scaled to high dimensions \citep{Mutny2018};
+information-theoretic acquisition functions are grounded
+in principles for optimal experimental design \citep{MacKay2003};
+and both types can be easily parallelized in synchronous batches
+\citep{Shah2015, HernandezLobato2017, Kandasamy2018}.
+However, posterior sample paths are much more complex than other acquisition functions,
+as they fluctuate throughout the design space, and are less smooth than the posterior mean and marginal variance.
+The latter are the basis of many acquisition functions,
+such as expected improvement (EI) \citep{Jones1998}, probability of improvement (PI) \citep{Kushner1964},
+and upper confidence bound (GP-UCB) \citep{Srinivas2010}.
+As a consequence, posterior sample paths have many more local optima,
+and the number scales exponentially with the input dimension.
+
+While there is a rich literature on prior probabilistic models and acquisition functions for BO,
+global optimization algorithms for acquisition functions have received little attention.
+One class of global optimization methods is derivative-free,
+such as the dividing rectangles (DIRECT) algorithm \citep{Jones1993},
+covariance matrix adaptation evolution strategy (CMA-ES) algorithms \citep{Hansen2003},
+and genetic algorithms \citep{Mitchell1998}.
+Gradient-based multistart optimization, on the other hand,
+is often seen as the best practice to reduce the risk of getting trapped in local minima \citep{Kim2021},
+and enjoys the efficiency of being embarrassingly parallelizable.
+For posterior samples, their global optimization may use
+joint sampling on a finite set of points \citep{Kandasamy2018},
+or approximate sampling of function realizations followed by gradient-based optimization
+\citep{HernandezLobato2014, Mutny2018}.
+The selection of starting points is crucial for the success of gradient-based multistart optimization.
+This selection can be deterministic (e.g., grid search), random \citep{Bergstra2012,Balandat2020}, or adaptive \citep{Feo1995}.
+
+In this paper, we propose an adaptive strategy for selecting starting points for
+gradient-based multistart optimization of posterior samples.
+This algorithm builds on the decomposition of posterior samples by pathwise conditioning, %
+taps into robust software in univariate function computation based on univariate global rootfinding,
+and exploits the separability of multivariate GP priors.
+Our key contributions include:
+\begin{itemize}[leftmargin=*,topsep=0pt,itemsep=-1ex,partopsep=1ex,parsep=1ex]
+	\item A novel strategy for the global optimization of posterior sample paths.
+	The starting points are dependent on the posterior sample,
+	so that each is close to a local optimum that is a candidate for the global optimum.
+	The selection algorithm scales linearly to high dimensions.
+	\item We give empirical results across a diverse set of problems
+	with input dimensions ranging from 2 to 16,
+	establishing the effectiveness of our optimization strategy.
+	Although our algorithm is proposed for the inner-loop optimization of posterior samples,
+	perhaps surprisingly, we see significant improvement in outer-loop optimization performance,
+	which often allows acquisition functions based on posterior samples to converge faster
+	than other common acquisition functions.
+	\item A new acquisition function via the posterior sample average that explicitly controls the exploration--exploitation balance \citep{Chapelle2011},
+	and can be generated at the same cost as one posterior sample.
+\end{itemize}
+
+
+
+\section{General Background}
+
+\label{sec:background}
+
+\paragraph{Gaussian Processes.}
+
+Consider an unknown function $\ftrue: \mathcal{X} \mapsto \mathbb{R}$, where domain $\mathcal{X} \subset \mathbb{R}^d$.
+We can collect noisy observations of the function through the model $y^i = \ftrue(\mathbf{x}^i) + \varepsilon^i$,
+$i \in \{1, \cdots, n\}$, with $\boldsymbol{\varepsilon} \sim \mathcal{N}_n(0, \boldsymbol{\Sigma})$.
+To model the function $\ftrue$, we use a Gaussian process (GP) as the prior probabilistic model: $f \sim \pi \in \mathcal{GP}$.
+A GP is a random function $f$ such that for any finite set of points $X = \{\mathbf{x}^i\}_{i=1}^n$, $n \in \mathbb{N}$,
+the values $\mathbf{f}_n = (f(\mathbf{x}^i))_{i=1}^n$ have a multivariate Gaussian distribution $\mathcal{N}_n(\boldsymbol{\mu}_n, \mathbf{K}_{n,n})$,
+with mean $\boldsymbol{\mu}_n = (\mu(\mathbf{x}^i))_{i=1}^n$
+and covariance $\mathbf{K}_{n,n} = [\kappa(\mathbf{x}^i, \mathbf{x}^j)]_{i \in n}^{j \in n}$. Here, $\mu(\mathbf{x})$ is the mean function and $\kappa(\mathbf{x}, \mathbf{x}')$ is the covariance function.
+
+\paragraph{Decoupled Representation of GP Posteriors.}
+
+Given a dataset $\mathcal{D} = \{(\mathbf{x}^i, y^i)\}_{i=1}^n$,
+the posterior model $f | \mathcal{D}$ is also a GP.
+Samples from the posterior have a decoupled representation called pathwise conditioning,
+originally proposed in \citep{Wilson2020, Wilson2021}:
+\begin{equation}\label{eq:posterior-decoupled}
+    (f|\mathcal{D})(\mathbf{x}) \eqdist f(\mathbf{x})
+    + \boldsymbol{\kappa}_{\cdot,n}(\mathbf{x}) (\mathbf{K}_{n,n} + \boldsymbol{\Sigma})^{-1}
+    (\mathbf{y} - \mathbf{f}_n - \boldsymbol{\varepsilon}),
+    \quad f \sim \pi,
+    \; \boldsymbol{\varepsilon} \sim \mathcal{N}_n(0, \boldsymbol{\Sigma}),
+\end{equation}
+where $f(\mathbf{x})$ is a sample path from the GP prior,
+$\boldsymbol{\kappa}_{\cdot,n}(\mathbf{x}) = (\kappa(\mathbf{x}, \mathbf{x}^i))_{i=1}^n$ is the canonical basis,
+$\mathbf{f}_n = (f(\mathbf{x}^i))_{i=1}^n$, and $\boldsymbol{\varepsilon}$ is a sample of the noise.
+We may interpret $\mathbf{f}_n + \boldsymbol{\varepsilon}$ as a sample from the prior distribution of the observations
+$\mathbf{y} = (y^i)_{i=1}^n$.
+This representation has its roots in Matheron's update rule that transforms a joint distribution of Gaussian variables into a conditional one (see e.g., \cite{Hoffman1991}).
+This formula is exact, in that $\eqdist$ denotes equality in distribution,
+and it preserves the differentiability of the prior sample.
+It is also computationally efficient for posterior sampling:
+the cost is independent of the input dimension $d$,
+linear in the data size $n$ at evaluation time,
+and the weight vector for $\boldsymbol{\kappa}_{\cdot,n}(\mathbf{x})$
+can be solved accurately using an iterative algorithm that scales linearly with $n$ \citep{LinJ2023}.
+
+
+
+\section{Global Optimization of Posterior Samples}
+
+\label{sec:methods}
+
+In this section, we introduce an efficient algorithm for the global optimization of posterior sample paths.
+For this, we exploit the separability of prior samples and useful properties of posterior samples
+to judiciously select a set of starting points for gradient-based multistart optimizers.
+
+\paragraph{Assumptions.}
+
+Following \Cref{sec:background}, we impose a few common assumptions throughout this paper:
+(1) the domain is a hypercube: $\mathcal{X} = \prod_{i=1}^d [\ximin, \ximax]$;
+(2) prior covariance is separable: $\kappa(\mathbf{x}, \mathbf{x}') = \prod_{i=1}^d \kappa_i(x_i, x_i')$;
+(3) prior samples are continuously differentiable: $f(\mathbf{x}; \randprior) \in C^1$.
+Without loss of generality, we also assume that the prior mean $\mu(\mathbf{x}) = 0$:
+any non-zero mean function can be subtracted from the data by replacing $\ftrue$ with $\ftrue - \mu$.
+While additive and multiplicative compositions of univariate kernels can be used in the prior \citep{Duvenaud2013},
+assumption (2) is the most popular choice in BO.
+It is possible to extend our method to generalized additive models.
+
+\alglanguage{pseudocode}
+\begin{algorithm}[t]
+	\caption{\texttt{TS-roots}: Optimizing posterior samples via rootfinding}
+	\label{alg:TSroots}
+	\begin{algorithmic}[1] %
+		\Input prior samples $f(\mathbf{x})$, $\boldsymbol{\varepsilon}$;
+            prior covariances $\kappa(\mathbf{x}, \mathbf{x}')$, $\boldsymbol{\Sigma}$;
+            dataset $\mathcal{D}$; set sizes $\ncandidate, \nexplore, \nexploit$.
+		\State $\Xcandidate \gets \texttt{minsort}(f(\mathbf{x}), \ncandidate)$
+            \Comment{Smallest $\ncandidate$ local minima of the prior sample (\Cref{alg:minsort})}
+		\State $[\widetilde{\mathbf{f}}_{\text{e}}, I_{\text{e}}] \gets \texttt{mink}(\widetilde{f}(\Xcandidate), \nexplore)$
+            \Comment{Smallest $\nexplore$ values and indices of the posterior sample in $\Xcandidate$}
+		\State $[\widetilde{\mathbf{f}}_{\text{x}}, I_{\text{x}}] \gets \texttt{mink}(\widetilde{f}(X), \nexploit)$
+            \Comment{Smallest $\nexploit$ values and indices of the posterior mean in $X$}
+            \State $\Xexplore \gets \Xcandidate[I_{\text{e}}, :], \; \Xexploit \gets X[I_{\text{x}}, :]$
+            \Comment{Starting points: exploration set and exploitation set}
+		\State $[\xopt, \fopt] \gets \texttt{minimize}(\widetilde{f}(\mathbf{x}), S), \; S = \Xexplore \cup \Xexploit$
+            \Comment{Gradient-based multistart optimization}
+		\Output Thompson sample $\xopt$
+            \Comment{Global minimum of the posterior sample}
+	\end{algorithmic}
+\end{algorithm}
+
+\subsection{TS-roots Algorithm}
+
+We observe that, given the assumptions, a posterior sample in \cref{eq:posterior-decoupled} can be rewritten as:
+\begin{equation}\label{eq:posterior-sample}
+\widetilde{f}(\mathbf{x}; \randpost) = f(\mathbf{x}; \randprior) + b(\mathbf{x}; \randpost),
+\quad f(\mathbf{x}; \randprior) = \prod_{i=1}^d f_i(x_i; \randprior_i),
+\quad b(\mathbf{x}; \randpost) = \sum_{j=1}^n v_j \kappa(\mathbf{x}, \mathbf{x}^j).
+\end{equation}
+Here, the prior sample $f(\mathbf{x})$ is a separable function determined by the random bits $\randprior$.
+Data adjustment $b(\mathbf{x})$ is a sum of the canonical basis with coefficients
+$\mathbf{v} = (\mathbf{K}_{n,n} + \boldsymbol{\Sigma})^{-1} (\mathbf{y} - \mathbf{f}_n - \boldsymbol{\varepsilon})$.
+Both the data adjustment and the posterior sample are determined by the random bits
+$\randpost = (\randprior, \boldsymbol{\varepsilon})$.
+In the following, we denote the prior and the posterior samples as $\fprior$ and $\fpost$, respectively.
+Our goal is to find the global minimum $(\xoptpost, \foptpost)$ of the posterior sample $\fpost(\mathbf{x})$.
+
+The global minimization of a generic function, in principle, requires finding all its local minima and then selecting the best among them.
+However, computationally efficient approaches to this problem are lacking even in low dimensions
+and, more pessimistically, the number of local minima grows exponentially as the domain dimension increases.
+The core idea of this work is to use the prior sample $\fprior$ as a surrogate of the posterior sample $\fpost$ for global optimization.
+Another key is to exploit the separability of the prior sample for
+efficient representation and ordering of its local extrema.
+
+We define \textit{TS-roots} as a global optimization algorithm for GP posterior samples
+(given the assumptions) via gradient-based multistart optimization.
+The starting points include:
+(1) a subset $\Xexplore$ of the local minima $\Xlocminprior$ of a corresponding prior sample;
+and (2) a subset $\Xexploit$ of the observed locations $X$.
+We call $\Xexplore$ the exploration set and $\Xexploit$ the exploitation set.
+Specifically, let
+\begin{equation} \label{eq:Xcandidate}
+    \Xcandidate = \argmink_{\mathbf{x} \in \Xlocminprior} (\fprior(\mathbf{x}), \ncandidate)
+\end{equation}
+be the $\ncandidate$ smallest local minima of the prior sample.
+The set of starting points, $S$, is defined as:
+\begin{equation} \label{eq:starting_points}
+    S = \Xexplore \cup \Xexploit,
+    \quad \Xexplore = \argmink_{\mathbf{x} \in \Xcandidate} (\fpost(\mathbf{x}), \nexplore),
+    \quad \Xexploit = \argmink_{\mathbf{x} \in X} (\fpost(\mathbf{x}), \nexploit).
+\end{equation}
+\Cref{alg:TSroots} outlines the procedure for TS-roots.
+Here, $\nexplore$ and $\nexploit$ are imposed to control the cost of gradient-based multistart optimization,
+and $\ncandidate$ is set to limit the number of evaluations of $\fpost$ in the determination of $\Xexplore$. 
+Considering the cost difference, we can have $\ncandidate \gg \nexplore$.
+We observe that $\nexplore$ and $\nexploit$ can be set to small values, and $\ncandidate$ to a moderate value,
+without sacrificing the quality of optimization, see \Cref{apd:Minsize}.
+The TS-roots algorithm scales linearly in $d$, see \Cref{sub:complexity}.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{img/ExploreExploitSets.pdf}
+\caption{Illustrations of exploration and exploitation sets for the global optimization of GP-TS acquisition functions
+in one dimension (top row) and two dimensions (bottom row).
+\textit{Left column:} When the global minimum $\xoptpost$ of the GP-TS acquisition function lies outside the interpolation region,
+it is typically identified by starting the gradient-based multistart optimizer at a local minimum of the prior sample.
+\textit{Right column:} When $\xoptpost$
+is within the interpolation region,
+it can be found by starting the optimizer at either an observed location or a local minimum of the prior sample.} 
+\label{fig:ExploreExploitSets}
+\end{figure}
+
+\subsection{Relations between the Local Minima of Prior and Posterior Samples}
+
+\Cref{fig:ExploreExploitSets} shows several posterior samples $\fpost$ in one and two dimensions,
+each marked with its local minima $\Xlocminpost$ and global minimum $\xoptpost$.
+Here the exploration set $\Xexplore$ is the local minima $\Xlocminprior$ of %
+$\fprior$,
+and the exploitation set $\Xexploit$ is the observed locations $X$.
+We make the following observations:
+\begin{enumerate}[wide, labelwidth=!, labelindent=0pt, label=(\arabic*),itemsep=1pt]
+\item The prior sample $\fprior$ is more complex than the data adjustment $\fadjust$
+in the sense that it is less smooth and has more critical points.
+The comparison of smoothness can be made rigorous in various ways: for example,
+for GPs with a \matern covariance function where the smoothness parameter is finite,
+$\fprior$ is almost everywhere one time less differentiable than $\fadjust$
+(see e.g., \citet{Garnett2023} Sec. 10.2, \citet{Kanagawa2018}).
+\item Item (1) implies that
+  when the prior sample $\fprior$ is added to the smoother landscape of $\fadjust$,
+  each local minimum $\xlocminprior$ of $\fprior$ will be located near a local minimum $\xlocminpost$ of
+  the posterior sample $\fpost$.
+  Away from the observed locations $X$, each $\xlocminpost$
+  is closely associated with an $\xlocminprior$, with minimal change in location.
+  In the vicinity of $X$, an $\xlocminpost$ may have
+  both a data point $\xdata$ and an $\xlocminprior$ nearby,
+  but because of the smoothness difference of $\fprior$ and $\fadjust$,
+  in most cases the one closest to $\xlocminpost$ is an $\xlocminprior$.
+\item It is possible that near $X$, sharp changes in $\fprior$
+  may require sharp adjustments to the data,
+  which may move some $\xlocminprior$ by a significant distance,
+  or create new $\xlocminpost$
+  that are not near any $\xlocminprior$ or any $\xdata$.
+\item Searching from $\xdata$ with good observed values can discover
+  good $\xlocminpost$ in the vicinity of $X$,
+  which can pick up some local minima not readily discovered by $\Xlocminprior$.
+  This is especially true if $\fprior$ is relatively flat near $\xdata$.
+\item Since the posterior sample $\fpost$ adapts to the dataset, searches from $\xdata$ will tend to converge to
+  a good $\xlocminpost$ among all the local optima near $\xdata$.
+  Even if the searches from $X$ cannot discover all the local minima in its vicinity,
+  they tend to discover a good subset of them.
+  Therefore, (4) can help address the issue in (3), if not fully eliminating it.
+  By combining subsets of $\Xlocminprior$ and $X$, 
+we can expect that the set of local minima of $\fpost$ discovered with these starting points
+includes the global minimum $\xoptpost$ with a high probability with respect to $\randpost$.
+\end{enumerate}
+
+\subsection{Representation of Prior Sample Local Minima}
+\label{sec:representation_extrema}
+
+For each component function $f_i(x_i; \randprior_i)$ of the prior sample $\fprior(\mathbf{x})$,
+define $h_i(\ximin) = f_i'(\ximin)$, $h_i(\ximax) = -f_i'(\ximax)$, and $h_i(x_i) = f_i''(x_i)$ for $x_i \in (\ximin, \ximax)$.
+We call a coordinate $\xi_i \in [\ximin, \ximax]$ of \textit{mono type} if $f_i(\xi_i) h_i(\xi_i) > 0$
+and call it of \textit{mixed type} if $f_i(\xi_i) h_i(\xi_i) < 0$.
+Let $\xicritical = \{\xi_{i,j}\}_{j=1}^{r_i}$ be the set of interior critical points of $f_i$
+such that $\xi_{i,j} \in (\ximin, \ximax)$ and $f_i'(\xi_{i,j}) = 0$, $j \in \{1, \cdots, r_i\}$.
+Denote $\xi_{i,0} = \ximin$ and $\xi_{i,r_i + 1} = \ximax$.
+Partition the set of candidate coordinates $\xicandidate = \{\xi_{i,j}\}_{j=0}^{r_i+1}$
+into mono type $\xicandidatemono$ and mixed type $\xicandidatemixed$.
+\Cref{prop:representation_extrema} gives a representation of the sets of strong local extrema of the prior sample.
+Its proof and the set sizes therein are given in \Cref{apd:proofs}.
+
+\begin{proposition} \label{prop:representation_extrema}
+The set of strong local minima of the prior sample $\fprior(\mathbf{x})$ can be written as:
+\begin{equation} \label{eq:Xlocminprior}
+    \Xlocminprior = \Xneglocminprior \sqcup \Xposlocminprior, \quad
+    \Xneglocminprior = \{ \boldsymbol{\xi} \in \Xmixed : \fprior(\boldsymbol{\xi}) < 0 \}, \quad
+    \Xposlocminprior = \{ \boldsymbol{\xi} \in \Xmono : \fprior(\boldsymbol{\xi}) > 0 \},
+\end{equation}
+where tensor grids $\Xi^{(j)} = \prod_{i=1}^d \xicandidate^{(j)}$, $j \in \{0, 1\}$.
+The set $\Xlocmaxprior$ of strong local maxima of $\fprior(\mathbf{x})$ has an analogous representation,
+and satisfies $\Xlocmaxprior \sqcup \Xlocminprior = \Xmono \sqcup \Xmixed$, where $\sqcup$ is the disjoint union.
+\end{proposition}
+
+\paragraph{Critical Points of Univariate Functions via Global Rootfinding.}
+To compute the set $\xicritical$ of all critical points of $f_i$
+is to compute all the roots of the derivative $f'_i$ on the interval $[\ximin, \ximax]$.
+Since $f'_i$ is continuous, this can be solved robustly and efficiently
+by approximating the function with a Chebyshev or Legendre polynomial
+and solving a structured eigenvalue problem (see e.g., \citet{Trefethen2019}).
+The \texttt{roots} algorithm for global rootfinding based on polynomial approximation
+is given as \Cref{alg:roots} in \Cref{apd:algorithms}.
+
+\subsection{Ordering of Prior Sample Local Minima}
+\label{sec:ordering_minima}
+
+While the size of $\Xlocminprior$ grows exponentially in domain dimension $d$,
+its representation in \cref{eq:Xlocminprior} enables an efficient algorithm
+to compute the best subset $\Xcandidate$ (\cref{eq:Xcandidate}) without enumerating its elements.
+
+With \cref{eq:Xlocminprior},
+we see that $\Xneglocminprior$ consists of all the local minima of $\fprior$ with negative function values.
+Consider the case where $\Xneglocminprior$ has at least $\ncandidate$ elements
+so that in the definition of $\Xcandidate$ we can replace $\Xlocminprior$ with $\Xneglocminprior$,
+which in turn can be replaced with $\Xmixed$.
+As we will show later, the problem of finding the largest elements of $|\fprior(\mathbf{x})|$ within $\Xmixed$
+is easier than finding the smallest negative elements of $\fprior(\mathbf{x})$.
+Once the former is solved, we can solve the latter simply by removing the positive elements.
+Therefore, we convert the problem of \cref{eq:Xcandidate} into three steps:
+\begin{enumerate}
+    \item $\Xmixedmag = \argmaxk_{\mathbf{x} \in \Xmixed} (|\fprior(\mathbf{x})|, \alpha \ncandidate)$,
+    with buffer coefficient $\alpha \ge 1$;
+    \item $\Xprecandidate = \{ \mathbf{x} \in \Xmixedmag : \fprior(\mathbf{x}) < 0 \}$,
+    so that $\Xprecandidate \subseteq \Xneglocminprior$;
+    \item $\Xcandidate = \argmink_{\mathbf{x} \in \Xprecandidate} (\fprior(\mathbf{x}), \ncandidate)$,
+    assuming that $|\Xprecandidate| \ge \ncandidate$.
+\end{enumerate}
+The last two steps are by enumeration and straightforward.
+The first step can be solved efficiently using min-heaps,
+with a time complexity that scales linearly in $\sum_{i=1}^d |\xicandidatemixed|$ rather than $\prod_{i=1}^d |\xicandidatemixed|$,
+see \Cref{apd:ordering}.
+The coefficient $\alpha$ is chosen so that $|\Xprecandidate| \ge \ncandidate$.
+The case when $|\Xneglocminprior| < \ncandidate < |\Xlocminprior|$ can be handled similarly.
+If $\ncandidate \ge |\Xlocminprior|$, no subsetting is needed.
+The overall procedure to compute $\Xcandidate$ is given in \Cref{alg:minsort} in \Cref{apd:algorithms}.
+
+
+
+\section{Sample-average Posterior Function}
+
+\label{averageTS}
+We finally propose a sample-average posterior function that explicitly controls the exploration--exploitation balance
+and, notably, can be generated at the cost of generating one posterior sample. Let $\meanpost(\mathbf{x}) = \boldsymbol{\kappa}_{\cdot,n}(\mathbf{x}) (\mathbf{K}_{n,n} + \boldsymbol{\Sigma})^{-1} \mathbf{y}$
+be the posterior mean function.
+For noiseless observations with $\widetilde{\omega} = \omega$,
+we can rewrite the GP posterior function in \cref{eq:posterior-sample} as
+$\widetilde{f}_\omega(\mathbf{x}) = \fprior(\mathbf{x}) + \meanpost(\mathbf{x}) + \xi_\omega(\mathbf{x})$,
+where $\xi_\omega(\mathbf{x}) = - \boldsymbol{\kappa}_{\cdot,n}(\mathbf{x}) \mathbf{K}_{n,n}^{-1} \mathbf{f}_n$.
+Define $\alpha_\text{aTS}(\mathbf{x})  = \frac{1}{N_\text{c}} \sum_{j=1}^{N_\text{c}} \widetilde{f}^j_\omega(\mathbf{x})$
+as the sample-average posterior function, where $\widetilde{f}^j_\omega(\mathbf{x})$ are samples generated from the GP posterior
+and $N_\text{c} \in \mathbb{N}_{>0}$. Since $\meanpost(\mathbf{x})$ is deterministic,
+and the scaled prior sample $\frac{1}{\sqrt{N_\text{c}}} f^j_\omega(\mathbf{x})$ can be written as
+$\frac{1}{\sqrt{N_\text{c}}} f^j_\omega(\mathbf{x}) \overset{\text{iid}}{\sim} \mathcal{GP}(0,\frac{1}{N_\text{c}} \kappa(\mathbf{x},\mathbf{x}'))$,
+we have $\alpha_\text{aTS}(\mathbf{x})  = \mu(\mathbf{x}) + \frac{1}{\sqrt{N_\text{c}}} \left( \fprior(\mathbf{x}) + \xi_\omega(\mathbf{x})\right)$, where the first and second terms favor exploitation and exploration, respectively.
+Thus, we can consider $N_\text{c}$ as an exploration--exploitation control parameter that, at large values, prioritizes exploitation
+by concentrating the conditional distribution of the global minimum location, i.e., $p(\mathbf{x}^\star|\mathcal{D})$,
+at the minimum location of $\meanpost(\mathbf{x})$, see \Cref{fig:averTSConcept} in \Cref{apd:AdditionalResults}.
+With $\alpha_\text{aTS}(\mathbf{x})$, we can reproduce $\widetilde{f}_\omega(\mathbf{x})$ and the GP mean function $\meanpost(\mathbf{x})$
+by setting $N_\text{c} = 1$ and  $N_\text{c} = \infty$, respectively.
+
+
+
+\section{Related Works}
+
+
+\paragraph{Sampling from Gaussian Process Posteriors.}
+A prevalent method to sample GP posteriors with stationary covariance functions is via weight-space approximations based on Bayesian linear models of random Fourier features \citep{Rahimi2007}.
+This method, unfortunately, is subject to the variance starvation problem \citep{Mutny2018,Wilson2020} which can be mitigated using more accurate feature representations (see e.g., \cite{Hensman2018,Solin2020}). An alternative is pathwise conditioning \citep{Wilson2020} that draws GP posterior samples by updating the corresponding prior samples. The decoupled representation of the pathwise conditioning can be further reformulated as two stochastic optimization problems for the posterior mean and an uncertainty reduction term, which are then efficiently solved using stochastic gradient descent \citep{LinJ2023}.
+
+\paragraph{Optimization of Acquisition Functions.}
+While their global optima guarantee the Bayes’ decision rule, BO acquisition functions are highly non-convex and difficult to optimize \citep{Wilson2018}.
+Nevertheless, less attention has been given to the development of robust algorithms for optimizing these acquisition functions.
+For this inner-loop optimization, gradient-based optimizers are often selected because of their fast convergence and robust performance \citep{Daulton2020}.
+The implementation of such optimizers is facilitated by Monte Carlo (MC) acquisition functions whose derivatives are easy to evaluate \citep{Wilson2018}.
+Gradient-based optimizers also allow multistart settings that use a set of starting points which can be, for example,
+midpoints of data points \citep{Jones2001}, uniformly distributed samples over the input variable space \citep{Frazier2018,Ament2023},
+or random points from a Latin hypercube design \citep{WangJ2020}.
+However, multistart-based methods with random search may have difficulty determining the non-flat regions of acquisition functions, especially in high dimensions \citep{Rana2017}.
+The log reformulation approach is a good solution to the numerical pathology of flat acquisition surface over large regions of the input variable space \citep{Ament2023}. While this approach works for acquisition functions prone to the flat surface issue such as the family of EI-based acquisition functions, its performance has yet to be evaluated for acquisition functions with many local minima like those based on posterior samples.
+
+\paragraph{Posterior Sample-Based Acquisition Functions.}
+As discussed in \Cref{introduction}, the family of posterior sample-based acquisition functions is determined from samples of the posterior.
+GP-TS \citep{Chowdhury2017} is a notable member that extends the classical TS for finite-armed bandits to continuous settings of BO
+(see algorithms in \Cref{apd:gp-ts}).
+GP-TS prefers exploration by the mechanism that iteratively samples a function from the GP posterior of the objective function, optimizes this function, and selects the resulting solution as the next candidate for objective evaluation.
+To further improve the exploitation of GP-TS, the sample mean of MC acquisition functions can be defined from multiple samples of the posterior \citep{Wilson2018,Balandat2020}. 
+Different types of MC acquisition functions can also be used to inject beliefs about functions into the prior \citep{Hvarfner2024iclr}.
+
+
+
+\section{Results}
+
+\label{results}
+
+We assess the performance of TS-roots in optimizing benchmark functions. We then compare the quality of solutions to the inner-loop optimization of GP-TS acquisition functions obtained from our proposed method, a gradient-based multistart optimizer with uniformly random starting points, and a genetic algorithm. 
+We also show how TS-roots can improve the performance of MES.
+Finally, we propose a new sample-average posterior function and show how it affects the performance of GP-TS. The experimental details for the presented results are in \Cref{apd:ExperimentDetails}.
+
+\paragraph{Optimizing Benchmark Functions.}
+
+We test the empirical performance of TS-roots on challenging minimization problems of five benchmark functions: the 2D Schwefel, 4D Rosenbrock, 10D Levy, 16D Ackley, and 16D Powell functions \citep{Surjanovic2013}.
+The analytical expressions for these functions and their global minimum are given in \Cref{apd:BenchmarkFunctions}. 
+
+In each optimization iteration, we record the best observed value of the error $\log(y_{\min} - f^\star)$
+and the distance $\log\left(\left\| \mathbf{x}_{\min} - \mathbf{x}^\star\right\|\right)$,
+where $y_{\min}$, $\mathbf{x}_{\min}$, $f^\star$, and $\mathbf{x}^\star$
+are the best observation of the objective function in each iteration, the corresponding location of the observation,
+the true minimum value of the objective function, and the true minimum location, respectively.
+We compare the optimization results obtained from TS-roots and other BO methods, including GP-TS using decoupling sampling with random Fourier features (TS-DSRF), GP-TS with random Fourier features (TS-RF), expected improvement (EI) \citep{Jones1998}, and lower confidence bound (LCB)---the version of GP-UCB \citep{Srinivas2010} for minimization problems.
+
+\Cref{fig:OptResultsValues} shows the medians and interquartile ranges of solution values obtained from 20 runs of each of the considered BO methods. The corresponding histories of solution locations are in \Cref{fig:OptResultsLocations} of \Cref{apd:AdditionalResults}.
+With a fair comparison of outer-loop results (detailed in \Cref{apd:ExperimentDetails}),
+TS-roots surprisingly shows the best performance on the 2D Schwefel, 16D Ackley, and 16D Powell functions,
+and gives competitive results in the 4D Rosenbrock and 10D Levy problems.
+Notably, TS-roots recommends better solutions than its counterparts, TS-DSRF and TS-RF, in high-dimensional problems
+and offers competitive performance in low-dimensional problems.
+Across all the examples, EI and LCB tend to perform better in the initial stages, while TS-roots shows fast improvement in later stages. This is because GP-TS favors exploration, which delays rewards.
+The exploration phase, in general, takes longer for higher-dimensional problems.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{img/OptResults_values.pdf}
+\caption{Outer-loop optimization results for the (a) 2D Schwefel, (b) 4D Rosenbrock, (c) 10D Levy, (d) 16D Ackley, and (e) 16D Powell functions.
+The plots are histories of medians and interquartile ranges of solution values from 20 runs of TS-roots, TS-DSRF
+(i.e., TS using decoupled sampling with random Fourier features), TS-RF (i.e., TS using random Fourier features), EI, and LCB.} 
+\label{fig:OptResultsValues}
+\end{figure}
+
+\paragraph{Optimizing Real-world Problem.}
+We implement TS-roots to optimize an engineered ten-bar truss structure (see \Cref{apd:10bartruss}). Ten design variables of the truss are the cross-sectional areas of the truss members. The objective is to minimize a weighted sum of the scaled total cross-sectional area and the scaled vertical displacement at a node of interest.
+
+\Cref{fig:OptResultsValues}(f) shows the outer-loop optimization results for the truss obtained from 20 runs of each BO method, where $f^{\star}$ is a lower bound of the best objective function value we observed from all runs. TS-roots provides the best optimization result with rapid convergence. 
+
+\begin{figure}[t]
+	\centering
+	\includegraphics[width=\textwidth]{img/InnerResults1.pdf}
+	\caption{Inner-loop optimization results by rootfinding, a gradient-based multistart optimizer with random starting points (random multistart), and a genetic algorithm for (a) the 2D Schwefel and (b) 4D Rosenbrock functions. The plots are cumulative values of optimized GP-TS acquisition functions $\alpha_k^\star$, cumulative distances between new solution points ${\bf x}_k^\star$ and the true global minima ${\bf x}_k^\text{t}$ of the acquisition functions, and cumulative CPU times $t_k$ for optimizing the acquisition functions.} 
+	\label{fig:innercompare1}
+\end{figure}
+
+\begin{figure}[t]
+	\centering
+	\includegraphics[width=\textwidth]{img/InnerResults2.pdf}
+	\caption{Inner-loop optimization results by rootfinding, a gradient-based multistart optimizer with random starting points (random multistart), and a genetic algorithm for (a) the 10D Levy, (b) 16D Ackley, and (c) 16D Powell functions. The plots are cumulative values of optimized GP-TS acquisition functions $\alpha_k^\star$ and cumulative CPU times $t_k$ for optimizing the acquisition functions.} 
+	\label{fig:innercompare2}
+\end{figure}
+
+\paragraph{Optimizing GP-TS Acquisition Functions via Rootfinding.}
+
+We assess the quality of solutions and computational cost for the inner-loop optimization of GP-TS acquisition functions by the proposed global optimization algorithm, referred to as rootfinding hereafter.
+We do so by computing the optimized values $\alpha_k^\star$ of the GP-TS acquisition functions, the corresponding solution points $\mathbf{x}_k^\star$, and the CPU times $t_k$ required for optimizing the acquisition functions during the optimization process.
+For low-dimensional problems of the 2D Schwefel and 4D Rosenbrock functions,
+we also compute the exact global solution points $\mathbf{x}_k^\mathrm{t}$ of the GP-TS acquisition functions
+by starting the gradient-based optimizer at a large number of initial points (set as $10^4$),
+which is much larger than the maximum number of starting points set for TS-roots.
+For comparison, we extend the same GP-TS acquisition functions to inner-loop optimization using a gradient-based multistart optimizer with random starting points (i.e., random multistart) and a genetic algorithm. 
+In each outer-loop optimization iteration, the number of starting points for the random multistart and the population size of the genetic algorithm are equal to the number of starting points recommended for rootfinding.
+The same termination conditions are used for the three algorithms.
+
+\Cref{fig:innercompare1} shows the comparative performance of the inner-loop optimization for low-dimensional cases:
+the 2D Schwefel and 4D Rosenbrock functions.
+We see that the optimized acquisition function values and the optimization runtimes by rootfinding and the random multistart algorithm are almost identical, both of which are much better than those by the genetic algorithm. Rootfinding gives the best quality of the new solution points in both cases, while the genetic algorithm gives the worst. Notably in higher-dimensional settings of the 10D Levy, 16D Ackley, and 16D Powell functions shown in \Cref{fig:innercompare2}, rootfinding performs much better than the random multistart and genetic algorithm in terms of optimized acquisition values and optimization runtimes, which verifies the importance of the judicious selection of starting points for global optimization of the GP-TS acquisition functions and the efficiency of rootfinding in high dimensions.
+The performance of random multistart becomes worse in higher dimensions.
+\Cref{apd:AdditionalResults} provides additional results for gradient-based multistart optimization
+using two other initialization schemes: uniform grid and Latin hypercube sampling.
+Rootfinding outperforms both, especially in higher dimensions.
+
+\paragraph{TS-roots to Information-Theoretic Acquisition Functions.}
+
+We show how TS-roots can enhance the performance of MES \citep{WangZ2017},
+which uses information about the maximum function value $f^\star$ for conducting BO.
+One approach to computing MES generates a set of GP posterior samples using TS-RF
+and subsequently optimizes the generated functions for samples of $f^\star$
+using a gradient-based multistart optimizer with a large number of random starting points \citep{WangZ2017}.
+We hypothesize that high-quality $f^\star$ samples can improve the performance of MES.
+Thus, we assign both TS-roots and TS-RF as the inner workings of MES and then compare the resulting optimal solutions.
+Note that the inner-loop optimization of MES, which strongly influences the optimization results, is not addressed by TS-roots.
+
+Specifically, we minimize the 4D Rosenbrock, 6D Hartmann, and 10D Levy functions using four versions of MES, namely MES-R 10,  MES-R 50, MES-TS-roots 10, and MES-TS-roots 50.
+Here, MES-R \citep{WangZ2017} and MES-TS-roots correspond to TS-RF and TS-roots, respectively, while 10 and 50 represent the number of random samples $f^\star$ generated for computing the MES acquisition function in each iteration.
+
+\begin{figure}[t]
+	\centering
+	\includegraphics[width=\textwidth]{img/OptResults_MES.pdf}
+	\caption{Performance of MES-R 10 and MES-R 50 for (a) the 4D Rosenbrock function, (b) the 6D Hartmann function, and (c) the 10D Levy function when TS-RF and TS-roots are used for generating random samples from $f^\star|\mathcal{D}$. The plots are histories of medians and interquartile ranges of solutions from ten runs of each method.} 
+	\label{fig:MESResults}
+\end{figure}
+
+\Cref{fig:MESResults} shows the optimization histories for ten independent runs of each MES method.
+On the 4D Rosenbrock and 6D Hartmann functions,
+MES with TS-roots demonstrates superior optimization performance and faster convergence compared to MES with TS-RF,
+especially when 50 samples of $f^\star$ are generated.
+For the 10D Levy function, TS-roots outperforms TS-RF when using 10 samples of $f^\star$,
+while their performance is comparable when 50 samples are used.
+
+\paragraph{Performance of Sample-Average Posterior Functions.}
+
+We investigate how $\alpha_\text{aTS}(\mathbf{x})$ influences the outer-loop optimization results. 
+For this, we set $N_\text{c} \in \{1,10,50,100\}$ for TS-roots to optimize the 2D Schwefel, 4D Rosenbrock, and 6D Ackley functions.
+We observe that increasing $N_\text{c}$ from $1$ to $10$ improves TS-roots performance on the 2D Schwefel, 4D Rosenbrock, and 6D Ackley functions (see \Cref{fig:averTSResults} in \Cref{apd:AdditionalResults}).
+However, further increases in $N_\text{c}$ from 10 to 50 and 100 result in slight declines in solution quality as TS-roots transitions to exploitation.
+These observations indicate that there is an optimal value of $N_\text{c}$ for each problem at which TS-roots achieves its best performance by balancing exploitation and exploration.
+However, identifying the optimal value to maximize the performance of $\alpha_\text{aTS}(\mathbf{x})$
+for a particular optimization problem remains an open issue.
+
+
+
+\section{Conclusion and Future Work}
+
+
+We presented TS-roots, a global optimization strategy for posterior sample paths.
+It features an adaptive selection of starting points for gradient-based multistart optimizers,
+combining exploration and exploitation.
+This strategy breaks the curse of dimensionality by exploiting the separability of Gaussian process priors.
+Compared with random multistart and a genetic algorithm, TS-roots consistently yields higher-quality solutions
+in optimizing posterior sample paths, across a range of input dimensions.
+It also improves the outer-loop optimization performance of GP-TS and information-theoretic acquisition functions such as MES
+for Bayesian optimization. For future work, we aim to extend TS-roots to other spectral representations per Bochner’s theorem \citep{Mutny2018,Hensman2018,Solin2020}.
+We also plan to study the ways and the probability of TS-roots failing to find the global optimum,
+as well as the impact of subset sizes.
+
+\clearpage
+
+
+
+
+

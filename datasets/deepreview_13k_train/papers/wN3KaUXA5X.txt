@@ -1,0 +1,232 @@
+\title{Diffusion On Syntax Trees For Program Synthesis}
+
+\begin{abstract}
+Large language models generate code one token at a time. Their autoregressive generation process lacks the feedback of observing the program's output. Training LLMs to suggest edits directly can be challenging due to the scarcity of rich edit data. To address these problems, we propose neural diffusion models that operate on syntax trees of any context-free grammar. Similar to image diffusion models, our method also inverts ``noise'' applied to syntax trees. Rather than generating code sequentially, we iteratively edit it while preserving syntactic validity, which makes it easy to combine this neural model with search. We apply our approach to inverse graphics tasks, where our model learns to convert images into programs that produce those images. Combined with search, our model is able to write graphics programs, see the execution result, and debug them to meet the required specifications. We additionally show how our system can write graphics programs for hand-drawn sketches. Video results can be found at \videourl.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large language models (LLMs) have made remarkable progress in code generation, but their autoregressive nature presents a fundamental challenge: they generate code token by token, without access to the program's runtime output from the previously generated tokens. This makes it difficult to correct errors, as the model lacks the feedback loop of seeing the program's output and adjusting accordingly. While LLMs can be trained to suggest edits to existing code \cite{chakraborty2020codit, zhang2022coditt5, jin2023inferfix}, acquiring sufficient training data for this task is difficult.
+
+In this paper, we introduce a new approach to program synthesis using \emph{neural diffusion} models that operate directly on syntax trees. Diffusion models have previously been used to great success in image generation \cite{ho2020denoising, nichol2021glide, song2020score}. By leveraging diffusion, we let the model learn to iteratively refine programs while ensuring syntactic validity. Crucially, our approach allows the model to observe the program's output at each step, effectively enabling a debugging process.
+
+In the spirit of systems like AlphaZero \cite{silver2018general}, the iterative nature of diffusion naturally lends itself to search-based program synthesis. By training a value model alongside our diffusion model, we can guide the denoising process toward programs that are likely to achieve the desired output. This allows us to efficiently explore the program space, making more informed decisions at each step of the generation process.
+
+We implement our approach for inverse graphics tasks, where we posit domain-specific languages for drawing images. Inverse graphics tasks are naturally suitable for our approach since small changes in the code produce semantically meaningful changes in the rendered image. For example, a misplaced shape on the image can be easily seen and fixed in program space.
+
+Our main contributions for this work are (a) a novel approach to program synthesis using diffusion on syntax trees and (b) an implementation of our approach for inverse graphics tasks that significantly outperforms previous methods.
+
+\begin{figure}
+  \centering
+  \includegraphics[width=0.8\textwidth]{figures/recovery.png}
+  \caption{Examples of programs recovered by our system. The top row shows a hand-drawn sketch of an icon (left), the recovered program (middle), and the compilation of the recovered program (right). The top two rows are for the constructive solid geometry language (\texttt{CSG2D-Sketch}). The last row is an example output from our \texttt{TinySVG} environment that learns to invert hierarchical programs of shapes and colors. Video examples can be found at \videourl.}
+  \label{fig:recovery}
+\end{figure}
+
+
+
+\section{Background \& Related Work}
+
+
+\paragraph{Neural program synthesis}
+Neural program synthesis is a prominent area of research, in which neural networks generate programs from input-output examples. Early work, such as \citet{parisotto2016neurosymbolic}, demonstrated the feasibility of this approach. While modern language models can be directly applied to program synthesis, combining neural networks with search strategies often yields better results and guarantees. In this paradigm, the neural network guides the search process by providing proposal distributions or scoring candidate programs. Examples of such hybrid methods include \citet{balog2016deepcoder}, \citet{ellis2021dreamcoder}, and \citet{devlin2017robustfill}. A key difference from our work is that these methods construct programs incrementally, exploring a vast space of partial programs. Our approach, in contrast, focuses on \emph{editing} programs, allowing us to both grow programs from scratch and make corrections based on the program execution.
+
+\paragraph{Neural diffusion}
+Neural diffusion models, a class of generative models, have demonstrated impressive results for modeling high-dimensional data, such as images \cite{ho2020denoising, nichol2021glide, song2020score}.
+A neural diffusion model takes samples from the data distribution (e.g. real-world images), incrementally corrupts the data by adding noise, and trains a neural network to incrementally remove the noise. To generate new samples, we can start with random noise and iteratively apply the neural network to denoise the input.
+
+\paragraph{Diffusion for discrete data} 
+Recent work extends diffusion to discrete and structured data like graphs \cite{vignac2022digress}, with applications in areas such as molecule design \cite{mol1, mol2, mol3}. Notably, \citet{lou2023discrete} proposed a discrete diffusion model using a novel score-matching objective for language modeling. Another promising line of work for generative modeling on structured data is generative flow networks (GFlowNets) \cite{bengio2023gflownet}, where neural models construct structured data one atom at a time.
+
+\paragraph{Diffusion for code generation} \citet{singh2023codefusion} use a diffusion model for code generation. However, their approach is to first embed text into a continuous latent space, train a \emph{continuous} diffusion model on that space, and then unembed at the end. This means that intermediate stages of the latent representation are not trained to correspond to actual code. The embedding tokens latch to the nearest embeddings during the last few steps.
+
+Direct code editing using neural models has also been explored. \citet{chakraborty2020codit} use a graph neural network for code editing, trained on a dataset of real-world code patches. Similarly, \citet{zhang2022coditt5} train a language model to edit code by modifying or inserting \texttt{[MASK]} tokens or deleting existing tokens. They further fine-tune their model on real-world comments and patches. Unlike these methods, our approach avoids the need for extensive code edit datasets and inherently guarantees syntactic validity through our pretraining task. 
+
+\paragraph{Program synthesis for inverse graphics} We are inspired by previous work by \citet{sharma2018csgnet, ellis2018learning, ellis2019write}, which also uses the \texttt{CSG2D} language. \citet{sharma2018csgnet} propose a convolutional encoder and a recurrent model to go from images to programs. \citet{ellis2019write} propose a method to provide a neural model with the intermediate program execution output in a read--eval--print loop (REPL). Unlike our method, the ability to execute partial graphics programs is a key requirement for their work. Our system operates on complete programs and does not require a custom partial compiler. As mentioned in their work, their policies are also brittle. Once the policy proposes an object, it cannot undo that proposal. Hence, these systems require a large number of particles in a Sequential Monte-Carlo (SMC) sampler to make the system less brittle to mistakes.
+
+
+
+\section{Method}
+
+\label{method}
+\begin{figure}
+  \centering
+  \includegraphics[width=\textwidth]{figures/overview.png}
+  \caption{An overview of our method. Analogously to adding noise in image diffusion, we randomly make small mutations to the syntax trees of programs. We then train a conditional neural model to invert these small mutations. In the above example, we operate in a domain-specific language (DSL) for creating 2D graphics using a constructive solid geometry language. The leftmost panel ($z_0$) shows the target image (bottom) alongside its program as a syntax tree (top). The $y$ value of the circle gets mutated from $16$ to $10$ in the second panel, making the black circle "jump" a little higher. Between $z_1$ and $z_2$, we see that we can mutate the \texttt{Subtract} ($-$) node to a \texttt{Circle} node, effectively deleting it.}
+  \label{fig:overview}
+\end{figure}
+
+The main idea behind our method is to develop a form of denoising diffusion models analogous to image diffusion models for syntax trees.
+
+Consider the example task from \citet{ellis2019write} of generating a constructive solid geometry (\texttt{CSG2D}) program from an image. In \texttt{CSG2D}, we can combine simple primitives like circles and quadrilaterals using boolean operations like addition and subtraction to create more complex shapes, with the context-free grammar (CFG),
+\begin{align*}
+    \texttt{S} \to \texttt{S} + \texttt{S} \ | \ \texttt{S} - \texttt{S} \ | \ \texttt{Circle}^r_{x,y} \ | \ \texttt{Quad}_{x,y,\theta}^{w,h}.
+\end{align*}
+In Figure~\ref{fig:overview}, $z_0$ is our \emph{target program}, and $x_0$ is the rendered version of $z_0$. Our task is to invert $x_0$ to recover $z_0$. Our noising process randomly mutates \texttt{y=16} to \texttt{y=10}. It then mutates the whole $\oneg$ sub-tree with two shapes with a new sub-tree with just one shape. Conditioned on the image $x_0$, and starting at $z_3, x_3$, we would like to train a neural network to reverse this noising process to get to $z_0$.
+
+In the following sections, we will first describe how ``noise'' is added to syntax trees. Then, we will detail how we train a neural network to reverse this noise. Finally, we will describe how we use this neural network for search.
+
+\subsection{Sampling Small Mutations}
+Let $z_t$ be a program at time $t$. Let $p_{\mathcal{N}}(z_{t+1} | z_{t})$ be the distribution over randomly mutating program $z_{t}$ to get $z_{t+1}$. We want $p_{\mathcal{N}}$ mutations to be: (1) small and (2) produce syntactically valid $z_{t+1}$'s.
+
+To this end, we turn to the rich computer security literature on grammar-based fuzzing \cite{fuzzingbook2023:GrammarFuzzer, godefroid2008grammar, srivastava2021gramatron, wang2019superion}. To ensure the mutations are small, we first define a function $\sigma(z)$ that gives us the ``size'' of program $z$. For all our experiments, we define a set of terminals in our CFG to be \textit{primitives}. As an example, the primitives in our \texttt{CSG2D} language are $\{\texttt{Quad}, \texttt{Circle}\}$. In that language, we use $\sigma(z) = \sigma_{\text{primitive}}(z)$, which counts the number of primitives. Other generic options for $\sigma(z)$ could be the depth, number of nodes, etc.
+
+We then follow \citet{luke2000two} and \citet{fuzzingbook2023:GrammarFuzzer} to randomly sample programs from our CFG under exact constraints, $\sigma_{\min} < \sigma(z) \leq \sigma_{\max}$. We call this function $\texttt{ConstrainedSample}(\sigma_{\min}, \sigma_{\max})$. Setting a small value for $\sigma_{\max}$ allows us to sample \textit{small} programs randomly. We set $\sigma_{\max} = \sigma_{\text{small}}$ when generating small mutations.
+
+To mutate a given program $z$, we first generate a set of candidate nodes in its tree under some $\sigma_{\text{small}}$,
+\begin{align*}
+    \mathcal{C} &= \{n \in \texttt{SyntaxTree}(z) \mid \sigma(n) \leq \sigma_{\text{small}} \}.
+\end{align*}
+Then, we uniformly sample a mutation node from this set,
+\begin{align*}
+    m &\sim \text{Uniform}[\mathcal{C}].
+\end{align*}
+Since we have access to the full syntax tree and the CFG, we know which production rule produced $m$, and can thus ensure syntactically valid mutations. For example, if $m$ were a number, we know to replace it with a number. If $m$ were a general subexpression, we know we can replace it with any general subexpression. Therefore, we sample $m'$, which is $m$'s replacement as,
+\begin{align*}
+    m' \sim \texttt{ConstrainedSample}(\texttt{ProductionRule}(m), \sigma_{\text{small}}).
+\end{align*}
+
+\subsection{Policy}
+\subsubsection{Forward Process}
+We cast the program synthesis problem as an inference problem. Let $p(x | z)$ be our observation model, where $x$ can be any kind of observation. For example, we will later use images $x$ produced by our program, but $x$ could also be an execution trace, a version of the program compiled to bytecode, or simply a syntactic property. Our task is to invert this observation model, i.e.\ produce a program $z$ given some observation $x$.
+
+We first take some program $z_0$, either from a dataset, $\mathcal{D} = \{z^0, z^1, \ldots\}$, or in our case, a randomly sampled program from our CFG. We sample $z_0$'s such that $\sigma(z_0) \leq \sigma_{\max}$. We then add noise to $z_0$ for $s \sim \text{Uniform}[1, s_{\max}]$, steps, where $s_{\max}$ is a hyper-parameter, using,
+\begin{align*}
+    z_{t+1} \sim p_{\mathcal{N}}(z_{t+1} | z_{t}).
+\end{align*}
+We then train a conditional neural network that models the distribution,
+\begin{align*}
+    q_\phi(z_{t - 1} | z_{t}, x_{t}; x_0),
+\end{align*}
+where $\phi$ are the parameters of the neural network, $z_{t}$ is the current program, $x_{t}$ is the current output of the program, and $x_0$ is the target output we are solving for.
+
+\subsubsection{Reverse Mutation Paths}
+\label{section:reverse}
+
+Since we have access to the ground-truth mutations, we can generate targets to train a neural network by simply reversing the sampled trajectory through the forward process Markov-Chain, $z_0 \to z_1 \to \ldots$. At first glance, this may seem a reasonable choice. However, training to simply invert the last mutation can potentially create a much noisier signal for the neural network.
+
+Consider the case where, within a much larger syntax tree, a color was mutated as,
+\begin{align*}
+    {\color{red} \texttt{Red}} \to {\color{blue} \texttt{Blue}} \to {\color{darkgreen} \texttt{Green}}.
+\end{align*}
+The color in our target image, $x_0$, is {\color{red} \texttt{Red}}, while the color in our mutated image, $x_2$, is {\color{darkgreen} \texttt{Green}}. If we naively teach the model to invert the above Markov chain, we are training the network to turn the {\color{darkgreen} \texttt{Green}} to a {\color{blue} \texttt{Blue}}, even though we could have directly trained the network to go from {\color{darkgreen} \texttt{Green}} to a {\color{red} \texttt{Red}}.
+
+Therefore, to create a better training signal, we compute an \emph{edit path} between the target tree and the mutated tree. We use a tree edit path algorithm loosely based on the tree edit distance introduced by \citet{apted1, apted2}. The general tree edit distance problem allows for the insertion, deletion, and replacement of any node. Unlike them, our trees can only be edited under an action space that only permits \textit{small} mutations. For two trees, $z_A$ and $z_B$, we linearly compare the syntax structure. For changes that are already $\leq \sigma_{\text{small}}$, we add that to our mutation list. For changes that are $> \sigma_{\text{small}}$, we find the first mutation that reduces the distance between the two trees. Therefore, for any two programs, $z_A$ and $z_B$, we can compute the first step of the mutation path in $O(|z_A| + |z_B|)$ time.
+
+\subsection{Value Network \& Search}
+
+We additionally train a value network, $v_\phi(x_A, x_B)$, which takes as input two rendered images, $x_A$ and $x_B$, and predicts the edit distance between the underlying programs that generated those images. Since we have already computed edit paths between trees during training, we have direct access to the ground-truth program edit distance for any pair of rendered images, allowing us to train this value network in a supervised manner.
+
+Using our policy, $q_\phi(z_{t - 1} | z_{t}, x_{t}; x_0)$, and our value, $v_\phi(x_{t_A}, x_{t_B})$, we can perform beam-search for a given target image, $x_0$, and a randomly initialized program $z_t$. At each iteration, we maintain a collection of nodes in our search tree with the most promising values and only expand those nodes.
+\subsection{Architecture}
+\label{section:arch}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\textwidth]{figures/arch.png}
+  \caption{We train $q_\phi(z_{t - 1} | z_{t}, x_{t}; x_0)$ as a decoder only vision-language transformer following \citet{vlm}. We use an NF-ResNet as the image encoder, which is a normalizer-free convolutional architecture proposed by \citet{nfresnet}. The image encoder encodes the current image, $x_t$, and the target images, $x_0$. The current program is tokenized according to the vocabulary in our context-free grammar. The decoder first predicts an \textit{edit} location in the current program, and then tokens that replace what the edit location should be replaced by. We constrain the autoregressive decoding by our context-free grammar by masking only the valid token logits. }
+  \label{fig:arch}
+\end{figure}
+
+Figure~\ref{fig:arch} shows an overview of our neural architecture. We use a vision-language model described by \citet{vlm} as our denoising model, $q_\phi(z_{t-1} | z_t, x_t; x_0)$. We use an off-the-shelf implementation \cite{rw2019timm} of NF-ResNet-26 as our image encoder, which is a normalizer-free convolutional architecture proposed by \citet{nfresnet} to avoid test time instabilities with Batch-Norm \cite{wu2023training}. We implement a custom tokenizer, using the terminals of our CFG as tokens. The rest of the edit model is a small decoder-only transformer \cite{vaswani2017attention, radford2019language}.
+
+We add two additional types of tokens: an \texttt{<EDIT>} token, which serves as a start-of-sentence token for the model; and \texttt{<POS x>} tokens, which allow the model to reference positions within its context. Given a current image, a target image, and a current tokenized program, we train this transformer model to predict the edit position and the replacement text autoregressively. While making predictions, the decoding is constrained under the grammar. We mask out the prediction logits to only include edit positions that represent nodes in the syntax tree, and only produce replacements that are syntactically valid for the selected edit position.
+
+We set $\sigma_{\text{small}} = 2$, which means the network is only allowed to produce edits with fewer than two primitives. For training data, we sample an infinite stream of random expressions from the CFG. We choose a random number of noise steps, $s \in [1, 5]$, to produce a mutated expression. For some percentage of the examples, $\rho$, we instead sample a completely random new expression as our mutated expression. We trained for $3$ days for the environments we tested on a single Nvidia A6000 GPU.
+
+
+
+\section{Experiments}
+
+\label{section:exps}
+
+\subsection{Environments}
+
+\paragraph{\texttt{CSG2D}}  A 2D constructive solid geometry language where primitive shapes are added and subtracted to create more complex forms, as explored in our baseline methods \cite{ellis2019write, sharma2018csgnet}. We also create \texttt{CSG2D-Sketch}, which has an added observation model that simulates hand-drawn sketches using the algorithm from \citet{wood2012sketchy}.
+
+\paragraph{\texttt{TinySVG}} A language featuring primitive shapes with color, along with \texttt{Arrange} commands for horizontal and vertical alignment, and \texttt{Move} commands for shape offsetting. Figure~\ref{fig:recovery} portrays an example program.  Unlike the compositional nature of \texttt{CSG2D}, \texttt{TinySVG} is hierarchical: sub-expressions can be combined into compound objects for high-level manipulation. We also create, \texttt{Rainbow}, a simplified version of \texttt{TinySVG} without \texttt{Move} commands for ablation studies due to its reduced computational demands.
+
+We implemented these languages using the Lark \cite{lark} and Iceberg \cite{iceberg} Python libraries, with our tree-diffusion implementation designed to be generic and adaptable to any context-free grammar and observation model.
+
+\subsection{Baselines}
+
+We use two prior works, \citet{ellis2019write} and CSGNet \cite{sharma2018csgnet} as baseline methods.
+
+\paragraph{CSGNet} \citet{sharma2018csgnet} employed a convolutional and recurrent neural network to generate program statements from an input image. For a fair comparison, we re-implemented CSGNet using the same vision-language transformer architecture as our method, representing the modern autoregressive approach to code generation. We use rejection sampling, repeatedly generating programs until a match is found.
+
+\paragraph{REPL Flow} \citet{ellis2019write} proposed a method to build programs one primitive at a time until all primitives have been placed. They also give a policy network access to a REPL, i.e., the ability to execute code and see outputs. Notably, this \textit{current image} is rendered from the current \textit{partial program}. As such, we require a custom \textit{partial compiler}. This is straightforward for \texttt{CSG2D} since it is a compositional language. We simply render the shapes placed so far. For \texttt{TinySVG}, it is not immediately obvious how this partial compiler should be written. This is because the rendering happens bottom-up. Primitives get arranged, and those arrangements get arranged again (see Figure~\ref{fig:recovery}). Therefore, we only use this baseline method with \texttt{CSG2D}. Due to its similarities with Generative Flow Networks \cite{bengio2023gflownet}, we refer to our modified method as ``REPL Flow''.
+
+\paragraph{Test tasks} For \texttt{TinySVG} we used a held-out test set of randomly generated expressions and their images. For the \texttt{CSG2D} task, we noticed that all methods were at ceiling performance on an in-distribution held-out test set. In \citet{ellis2019write}, the authors created a harder test set with more objects. However, simply adding more objects in an environment like \texttt{CSG2D} resulted in simpler final scenes, since sampling a large object that subtracts a large part of the scene becomes more likely. Instead, to generate a hard test set, we filtered for images at the $95th$ percentile or more on incompressibility with the LZ4 \cite{lz4, lzw} compression algorithm.
+
+\paragraph{Evaluation} In \texttt{CSG2D}, we accepted a predicted program as matching the specification if it achieved an intersection-over-union (IoU) of $0.99$ or more. In \texttt{TinySVG}, we accepted an image if $99\%$ of the pixels were within $0.005 \approx \frac{1}{256}$.
+
+All methods were trained with supervised learning and were not fine-tuned with reinforcement learning. All methods used the grammar-based constrained decoding method described in Section~\ref{section:arch}, which ensured syntactically correct outputs. While testing, we measured performance based on the number of compilations needed for a method to complete the task.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/all_perf.pdf}
+    \caption{Performance of our approach in comparison to baseline methods in \texttt{CSG2D} and \texttt{TinySVG} languages. We give the methods $n = 256$ images from the test set and measure the number of nodes expanded to find a solution. The auto-regressive baseline was queried with rejection sampling. Our policy outperforms previous methods, and our policy combined with search helps boost performance further. Error bars show standard deviation across 5 random seeds. }
+    \label{fig:results}
+\end{figure}
+
+Figure~\ref{fig:results} shows the performance of our method compared to the baseline methods. In both the \texttt{CSG2D} and \texttt{TinySVG} environments, our tree diffusion policy rollouts significantly outperform the policies of previous methods. Our policy combined with beam search further improves performance, solving problems with fewer calls to the renderer than all other methods. Figure~\ref{fig:examples} shows successful qualitative examples of our system alongside outputs of baseline methods. We note that our system can fix smaller issues that other methods miss. Figure~\ref{fig:sketches} shows some examples of recovered programs from sketches in the \texttt{CSG2D-Sketch} language, showing how the observation model does not necessarily need to be a deterministic rendering; it can also consist of stochastic hand-drawn images.
+
+\subsection{Ablations}
+
+\begin{figure}
+    \centering
+    \subfloat[\centering]{{\includegraphics[width=0.42\textwidth]{figures/ablations.pdf} }}%
+    \subfloat[\centering]{{\includegraphics[width=0.42\textwidth]{figures/mixture.pdf} }}%
+    \caption{Effects of changing several design decisions of our system. We train smaller models on the \texttt{Rainbow} environment. We give the model $n = 256$ test problems to solve. In (a), for \texttt{No Reverse Path}, we train the model without computing an explicit reverse path, only using the last step of the noising process as targets. For \texttt{No Current Image}, we train a model that does not get to see the compiled output image of the program it is editing. For \texttt{No Noising}, instead of using our noising process, we generate two random expressions and use the path between them as targets. In (b) we examine the effect of training mixture between forward diffusion ($\rho = 0.0$) and pure random initialization ($\rho = 1.0$) further. Error bars show standard deviation across $5$ random seeds.}
+    \label{fig:ablations}
+\end{figure}
+
+To understand the impact of our design decisions, we performed ablation studies on the simplified \texttt{Rainbow} environment using a smaller transformer model.
+
+First, we examined the effect of removing the current image (no REPL) from the policy network's input. As shown in Figure~\ref{fig:ablations}(a), this drastically hindered performance, confirming the importance of a REPL-like interface observed by \citet{ellis2019write}.
+
+Next, we investigated the necessity of our reverse mutation path algorithm. While training on the last mutation step alone provides a valid path, it introduces noise by potentially targeting suboptimal intermediate states. Figure~\ref{fig:ablations}(a) demonstrates that utilizing the reverse mutation path significantly improves performance, particularly in finding solutions with fewer steps. However, both methods eventually reach similar performance levels, suggesting that a noisy path, while less efficient, can still lead to a solution.
+
+Finally, we explored whether the incremental noise process is crucial, given our tree edit path algorithm. Couldn't we directly sample two random expressions, calculate the path, and train the network to imitate it? We varied the training data composition between pure forward diffusion ($\rho = 0.0$) and pure random initialization ($\rho = 1.0$) as shown in Figure~\ref{fig:ablations}(b). We found that a small proportion ($\rho = 0.2$) of pure random initializations combined with forward diffusion yielded the best results. This suggests that forward diffusion provides a richer training distribution around target points, while random initialization teaches the model to navigate the program space more broadly. The emphasis on fine-grained edits from forward diffusion proves beneficial for achieving exact pixel matches in our evaluations.
+
+\begin{figure}
+  \centering
+  \includegraphics[width=0.68\textwidth]{figures/examples_labels.png}
+  \caption{Qualitative examples of our method and baselines on two inverse graphics languages, \texttt{CSG2D} (top two rows) and \texttt{TinySVG} (bottom two rows). The leftmost column shows the ground-truth rendered programs from our test set. The next columns show rendered programs from various methods. Our methods are able to finely adjust and match the ground-truth programs more closely.}
+  \label{fig:examples}
+\end{figure}
+\begin{figure}
+  \centering
+  \includegraphics[width=0.7\textwidth]{figures/sketches.png}
+  \caption{Examples of programs recovered for input sketches in the \texttt{CSG2D-Sketch} language. The input sketches are from our observation model that simulates hand-drawn sketches (top-row). The output programs rendered (bottom row) are able to match the input sketches by adding and subtracting basic shapes. Video results for these sketches can be found at \videourl. }
+  \label{fig:sketches}
+\end{figure}
+
+
+
+\section{Conclusion}
+
+\label{section:conclusion}
+
+In this work, we proposed a neural diffusion model that operates on syntax trees for program synthesis. We implemented our approach for inverse graphics tasks, where our task is to find programs that would render a given image. Unlike previous work, our model can construct programs, view their output, and in turn edit these programs, allowing it to fix its mistakes in a feedback loop. We quantitatively showed how our approach outperforms our baselines at these inverse graphics tasks. We further studied the effects of key design decisions via ablation experiments.
+
+\paragraph{Limitations} There are several significant limitations to this work. First, we operate on expressions with no variable binding, loops, strings, continuous parameters, etc. While we think our approach can be extended to support these, it needs more work and careful design. Current large-language models can write complicated programs in many domains, while we focus on a very narrow task. Additionally, the task of inverse graphics might just be particularly suited for inverse graphics where small mutations make informative changes in the image output.
+
+\paragraph{Future Work} In the future, we hope to be able to leverage large-scale internet data on programs to train our system, making small mutations to their syntax tree and learning to invert them. We would also like to study this approach in domains other than inverse graphics. Additionally, we would like to extend this approach to work with both the discrete syntax structure and continuous floating-point constants. 
+
+\paragraph{Impact} Given the narrow scope of the implementation, we don't think there is a direct societal impact, other than to inform future research direction in machine-assisted programming. We hope future directions of this work, specifically in inverse graphics, help artists, engineering CAD modelers, and programmers with a tool to convert ideas to precise programs for downstream use quickly.
+
+
+\begin{ack}
+We would like to thank Kathy Jang, David Wu, Cam Allen, Sam Toyer, Eli Bronstein, Koushik Sen, and Pieter Abbeel for discussions, feedback, and technical support. Shreyas was supported in part by the AI2050 program at Schmidt Futures (Grant G-22-63471). Erik was supported by fellowships from the Future of Life Institute and Open Philanthropy.
+\end{ack}
+
+{
+\small
+
+
+
+

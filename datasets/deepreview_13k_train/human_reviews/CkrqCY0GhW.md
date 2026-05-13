@@ -1,0 +1,260 @@
+# Language Model Agents Suffer from Compositional Decision Making
+
+- Decision: Reject
+- Scores: 6, 8, 6, 6
+
+## Abstract
+Language model agents (LMA) recently emerged as a promising paradigm on muti-step decision making tasks, often outperforming humans and other reinforcement learning agents.
+Despite the promise, their performance on real-world applications that often involve combinations of tasks is still underexplored.
+In this work, we introduce a new benchmark, called CompWoB -- 50 new compositional web automation tasks reflecting more realistic assumptions.
+We show that while existing prompted LMAs (gpt-3.5-turbo or gpt-4) achieve 94.0% average success rate on base tasks, their performance degrades to 24.9% success rate on compositional tasks.
+On the other hand, transferred LMAs (finetuned only on base tasks) show less generalization gap, dropping from 85.4% to 54.8%.
+By balancing data distribution across tasks, we train a new model, HTML-T5++, that surpasses human-level performance (95.2%) on MiniWoB, and achieves the best zero-shot performance on CompWoB (61.0%).
+While these highlight the promise of small-scale finetuned and transferred models for compositional generalization, their performance further degrades under different instruction compositions changing combinational order.
+In contrast to the recent remarkable success of LMA, our benchmark and detailed analysis emphasize the necessity of building LMAs that are robust and generalizable to task compositionality for real-world deployment.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The authors propose a web automation agent model and test it on a proposed "compositional" benchmark. They show that standard general-purpose language model agents have their performance deteriorate more on their proposed benchmark than models fine-tuned on similar tasks.
+
+### Strengths
+This is solid research that asks and answers a somewhat important question. It is thorough, with a reasonable set of agent techniques and a reasonable methodology for extending MiniWoB.
+
+### Weaknesses
+The contribution is relatively minor (which, in my view, is fine - obviously, not every ICLR paper needs to be revolutionary). This is especially true because "compositionality" is inherently somewhat arbitrary: the tasks in MiniWoB are arguably already compositional since they require a series of steps performed in the right order. By the same reasoning, arguably, all language model hierarchical/long-range planning papers, not to mention several multimodal language model approaches designed to reason over images, are performing compositional tasks. I'd also point out that there are specific strategies that have been proposed specifically for compositional action (e.g., Parsel from Zelikman et al. 2022, which uses LMs to propose a high-level plan in language and implements each subpart independently).
+
+Some nitpicks: The title makes it sound like the model itself is harmed, but that doesn't really make sense. And, in conjunction with the earlier point about MiniWoB also being somewhat compositional, the title isn't necessarily backed up by the experiments. I think this could be easily partially fixed by simply adding "for web automation" to the title after LMA, and web automation is probably relevant enough that with this narrower scope, it's still fine. I expect I would lower my score if the authors don't commit to making this or some other disambiguating change.
+
+### Questions
+See limitations
+
+### Soundness
+3 good
+
+### Presentation
+4 excellent
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper looks at the ability of LMAs to solve compositional web-tasks. A new dataset is introduced based on the existing Mini-WoB. Models are prompted with base tasks and then asked to solve tasks that are composed of different base tasks. Experiments show that performance drops across both LMAs and fine-tuned models.
+
+### Strengths
+- The topic of compositionally in web tasks  is extremely important given how many papers have been released in the past year showing that GPT can be used for web tasks. 
+- A new dataset is introduced which can show how well LMAs actually do given a combination of tasks without any prompting. One strong aspect of the benchmark is that consists of individual tasks that LLMs already know how to solve so it is clear that the difficulty is in combining tasks. 
+- The paper is well written and has a thorough analysis about the different results. In particular, section 6.4 gives insight into what makes tasks more difficult, something not usually addressed.
+
+### Weaknesses
+ - For LMAs, there is no discussion on how the prompt could be modified for combining tasks. For example, if a prompt shows how to perform a joint task, is the performance any better?
+
+### Questions
+None (see above)
+
+### Soundness
+4 excellent
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper proposes a new benchmark, called CompWoB – 50 new **compositional** web automation tasks reflecting more realistic assumptions. The authors then evaluate different LLMs to show that LLM-based agents suffer from compositional decision making. Detailed observations include: 1) while prompted gpt-3.5-turbo or gpt-4 achieve 94.0% average success rate on base tasks, their performance degrades to 24.9% success rate on compositional tasks; 2) transferred LLM-based agents (finetuned only on base tasks) show less generalization gap, dropping from 85.4% to 54.8%; 3) balancing data distribution across tasks, a finetuned model, HTML-T5++, surpasses human-level performance (95.2%) on MiniWoB, and achieves the best zero-shot performance on CompWoB (61.0%).
+
+-----
+after rebuttal, I increased the score to weak accept.
+
+### Strengths
+1. A noval and original study about the compositional web automation task is proposed and many insights are provided.  
+
+2. Propose a data distribution balancing method across tasks and finetune a new model to surpass human-level performance on MiniWoB.  
+
+3. Clear writting. The reviewer can follow most of this paper easily.
+
+### Weaknesses
+1. The reviewer did not get why Section 4 is needed (with such a large space), since most of the introductions are baseline methods.  Also, I did not know why RCI/AdaPlanner/Synapse are used for baselines.  
+
+2. Only test on 50 compositional web automation tasks. Are the methods and evaluations/insights generalizable to other tasks?  
+
+3. A lot of details are shown in the appendix (e.g., task difficulty estimation and data balancing method).
+
+### Questions
+1. why RCI/AdaPlanner/Synapse are used for baselines?  
+
+2. Are the methods and evaluations/insights generalizable to other tasks?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The authors study the incompetence of LLMs in dealing with compositional decision making tasks, by proposing CompWoB, a new benchmark with 50 new compositional web automation tasks, training 
+HTML-T5++, a new model, with balanced data distribution across tasks, and empirically comparing with existing methods, including RCI, AdaPlanner, and Synapse.
+
+### Strengths
+originality
+
+The authors study the incompetence of LLMs in dealing with compositional decision making tasks with a new benchmark and a new model with relatively comprehensive empirical study. It is novel.  
+
+quality
+
+The paper is basically technically sound.
+
+clarity
+
+The paper is basically well-organized and clearly written.
+
+significance
+
+Language model-based agent becomes a buzz word, without carefully studying the capability of the foundational language models. The authors study the incompetence of LLMs in dealing with compositional decision making tasks. The community should carefully think how to make progress in language model-based agent, e.g., as recommended by the authors in the Discussion section, improving generalizable prompting methods, agent-specialized large language models, and parsing complex instructions to executable plan.
+
+### Weaknesses
+See questions below.
+
+1.
+HTML-T5++ is an important contribution, which deserves a separate section, with more details of fine-tuning HTML-T5-XL, besides balancing data distribution.
+
+2.
+Can synthetic composing of web tasks represent realist ones? Are there ways to generate realist web tasks?
+
+3.
+Should web tasks be sequential decision making problems? That is, should there be dependencies between sub-web-tasks? Or simple composition of sub-tasks? How to achieve such dependancy?
+
+If there is no dependancy among sub-tasks, why LLMs do not perform well on compositional tasks, which may be treated as multiple separated tasks? How to measure such dependancy?
+
+4.
+LLMs do not perform well at reverse-order instructions? Why? LLMs are widely regarded as being very competent with NLP tasks.
+
+5.
+"Figure 5 visualizes the correlation between the success rate averaged across WebGUM, HTML-T5, RCI, AdaPlanner, and Synapse (y-axis) and each statistic of compositional tasks (x-axis)"
+
+Is such average success rate a good way?
+Average may hide something.
+Should we study each method individually, or the one with the best performance?
+
+6. Some minor issues below
+
+2 RELATED WORKS
+Web Automation 
+"Although prior works have solved the problems with imitation learning and reinforcement learning ..."
+
+6 RESULTS
+“Otherwise mentioned, we adopt gpt-3.5-turbo as a backbone LLM.”
+something wrong. how about "We adopt gpt-3.5-turbo as a backbone LLM, unless mentioned otherwise."
+
+Figure 2
+"and the dark color does in CompWoB"
+Something wrong. How about "and the dark color for CompWoB"
+
+Figure 3
+Redundant info from Figure 2 
+"The light color represents the performance in CompWoB"
+And the colors are different
+
+### Questions
+1.
+HTML-T5++ is an important contribution, which deserves a separate section, with more details of fine-tuning HTML-T5-XL, besides balancing data distribution.
+
+2.
+Can synthetic composing of web tasks represent realist ones? Are there ways to generate realist web tasks?
+
+3.
+Should web tasks be sequential decision making problems? That is, should there be dependencies between sub-web-tasks? Or simple composition of sub-tasks? How to achieve such dependancy?
+
+If there is no dependancy among sub-tasks, why LLMs do not perform well on compositional tasks, which may be treated as multiple separated tasks? How to measure such dependancy?
+
+4.
+LLMs do not perform well at reverse-order instructions? Why? LLMs are widely regarded as being very competent with NLP tasks.
+
+5.
+"Figure 5 visualizes the correlation between the success rate averaged across WebGUM, HTML-T5, RCI, AdaPlanner, and Synapse (y-axis) and each statistic of compositional tasks (x-axis)"
+
+Is such average success rate a good way?
+Average may hide something.
+Should we study each method individually, or the one with the best performance?
+
+6. Some minor issues below
+
+2 RELATED WORKS
+Web Automation 
+"Although prior works have solved the problems with imitation learning and reinforcement learning ..."
+
+6 RESULTS
+“Otherwise mentioned, we adopt gpt-3.5-turbo as a backbone LLM.”
+something wrong. how about "We adopt gpt-3.5-turbo as a backbone LLM, unless mentioned otherwise." 
+
+Figure 2
+"and the dark color does in CompWoB"
+Something wrong. How about "and the dark color for CompWoB"
+
+Figure 3
+Redundant info from Figure 2 
+"The light color represents the performance in CompWoB"
+And the colors are different
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good

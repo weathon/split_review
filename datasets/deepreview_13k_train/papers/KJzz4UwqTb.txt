@@ -1,0 +1,479 @@
+\title{L4Q: Parameter Efficient Quantization-Aware Fine-Tuning on Large Language Models}
+
+\begin{abstract}
+Due to the high memory and computational costs associated with large language models (LLMs), model compression techniques such as quantization, which reduces inference costs, and parameter-efficient fine-tuning (PEFT) methods like Low-Rank Adaptation (LoRA), which reduce training costs, have gained significant popularity. This trend has spurred active research into quantization-aware PEFT techniques, aimed at maintaining model accuracy while minimizing memory overhead during both inference and training.
+Previous quantization-aware PEFT methods typically follow a two-step approach: first, applying post-training quantization (PTQ) to model weights, followed by PEFT on the quantized model. However, recovering from the quantization error introduced by PTQ through fine-tuning has proven challenging. Additionally, most PTQ-based PEFT methods result in a mixture of low-precision quantized weights and high-precision adapter weights, limiting the efficiency of full quantization during inference.
+While a previous method attempted to address these issues, it still suffers from limited adaptability due to the constrained LoRA parameter structure required to produce fully-quantized models. To overcome these challenges, we propose L4Q, a method that integrates Quantization-Aware Training (QAT) with LoRA to effectively reduce quantization error.
+By employing a memory-optimized layer design, L4Q significantly reduces QAT’s memory overhead while producing fully-quantized weights, enabling effective adaptation to downstream tasks. Our experiments demonstrate that this combined approach to quantization and fine-tuning achieves superior accuracy compared to decoupled fine-tuning schemes, particularly in sub-4-bit quantization, positioning L4Q as an efficient QAT solution. Using the LLaMA model families and instructional datasets, we showcase L4Q’s capabilities in language tasks and few-shot learning.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+
+Given their impressive scalability, Large Language Models (LLMs) such as GPT, OPT, PaLM, and LLaMA~\citep{brown2020language, zhang2022opt, chowdhery2022palm, touvron2023llama, touvron2023llama2} are popular in natural language processing.
+However, their substantial memory and computational demands pose challenges for practical deployment, making model compression~\citep{han2016deep} crucial for LLM deployment.
+Quantization is a prominent method that reduces model size by lowering the bit precision of model parameters~\citep{hubara2018quantized}, so LLM quantization has been actively studied~\citep{liu2023llmqat, xiao2023smoothquant, frantar2023gptq, dettmers2023case}.
+These quantization methods are generally divided into two categories: post-training quantization (PTQ) and quantization-aware training (QAT). QAT effectively reduces quantization error by integrating quantization into the training process, where both model weights and quantization parameters, are trained together~\citep{esser2020learned, bhalgat2020lsq}. However, applying QAT to LLM quantization is challenging due to the significant memory overhead it incurs during training. As a result, PTQ, which applies quantization without retraining the pre-trained model weights and with minimal calibration of the quantization parameters, is widely adopted for LLM quantization~\citep{xiao2023smoothquant, lin2024awq, heo2024rethinking}.
+
+ 
+
+Concurrently, to enhance the problem-solving abilities of LLMs for specific applications, fine-tuning pre-trained LLMs on downstream tasks is crucial as it improves accuracy on target tasks and related tasks~\citep{wei2022finetuned, scialom2022finetuned}.
+However, fine-tuning is a resource-intensive process due to the large number of model weight parameters involved.
+Parameter-efficient fine-tuning (PEFT) addresses this issue~\citep{hu2021lora, li-liang-2021-prefix, liu2022fewshot, wang2023multitask} by training a small subset of parameters while freezing the majority of pre-trained weights.
+One of the most prominent techniques within PEFT is Low-Rank Adaptation (LoRA)~\citep{hu2021lora}, which inserts trainable rank decomposition matrices into each layer to represent updates to the frozen weights.
+
+\begin{wrapfigure}{r}{0.55\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{ICLR2025/images/fig1.png}
+    \caption{A diagram of model fine-tuning and quantization represented with an example of LLaMA-1 7B model.
+     L4Q produces fast and accurate quantized model.} 
+    \label{fig:overview}
+\end{wrapfigure}
+
+The integration of quantization and PEFT holds significant potential for developing highly efficient and accurate LLMs for downstream tasks. Recent research has introduced quantization-aware PEFT approaches to achieve high-quality quantized models~\citep{dettmers2023qlora, kim2023memoryefficient, xu2023QALoRA, li2023loftq}. Previous works involve a two-stage optimization strategy: first, a PTQ technique, such as GPTQ~\citep{frantar2023gptq}, is applied to pre-trained LLMs for compression. Then, these quantized LLMs undergo PEFT, such as LoRA, where quantized weights are kept fixed and only the LoRA parameters are fine-tuned. While fine-tuning can mitigate the effects of quantization errors, separating quantization and fine-tuning into distinct state hinders the models from achieving the best accuracy. Furthermore, as high-precision LoRA parameters are adopted alongside the quantized weight matrix, these methods eventually produce mixed-precision models, which limits the efficiency of full quantization during inference. Recently, QA-LoRA~\citep{xu2023QALoRA} addresses this issue by strictly constraining the LoRA parameter structure to integrate with quantization parameters, but this constraint can limit the fine-tuning capability.
+In this paper, we propose a novel quantization-aware fine-tuning technique, named L4Q (Low-rank adaptive Learning quantization for LLMs).
+L4Q addresses the limitations of PTQ-based PEFT methods by introducing QAT alongside LoRA. While QAT and LoRA have advantages in reducing quantization error and enabling memory-efficient training, respectively, their straightforward integration diminishes the benefits of each approach.
+Therefore, L4Q carefully integrates these two approaches to properly leverage their advantages.
+First, L4Q applies the quantization process after fully combining the model weights and LoRA parameters in the linear layer. This approach produces a fully-quantized model that enables memory-efficient and fast inference without limiting the training capabilities of either QAT or LoRA.
+Moreover, to preserve the memory-efficient nature of LoRA during training, we design the backpropagation path of L4Q to eliminate the need to store weight gradients required for QAT.
+Finally, the full integration of QAT and LoRA in the proposed L4Q allows for the joint optimization of both the quantization and LoRA parameters, thereby improving of quantized LLMs.
+As a result, L4Q significantly improves the accuracy of quantized models while maintaining low memory costs during both inference and training, and achieves inference speed comparable to state-of-the-art approaches, making it a more effective solution compared to previous works, as illustrated in Figure~\ref{fig:overview}.
+
+
+
+
+
+\section{Backgrounds}
+
+\label{sec:backgrounds}
+
+\subsection{PEFT with LoRA}
+
+LoRA inserts the rank-decomposition matrices composed of a pair of parameter matrices $A \in R^{r \times i}$ and $B \in R^{o \times r}$.
+Here, $i$ and $o$ represent the size of input and output dimensions of the original weight matrix, respectively. $r \ll i, o$ is the rank of the LoRA matrices, and $\alpha$ is a constant that adjusts the influence of the LoRA matrices.
+During the fine-tuning process, the pre-trained weight matrix $W_{0} \in R^{o \times i}$ is frozen, preserving the pre-trained features.
+For a given input activation $X \in R^{i \times s \times b}$ ($s$: sequence length, $b$: batch size), the output $Y \in R^{o \times s \times b}$ of a layer utilizing LoRA is computed as follows:
+\begin{equation}
+    \label{eq:lora_forward}
+        Y = (W_{0} + \alpha BA)X = W_{0}X + \alpha BAX %\enspace (\tilde{X} := AX)
+\end{equation}
+
+The fine-tuning of the LoRA parameters is guided by the gradient of a loss function $L$, which is calculated with respect to each parameter matrix. The gradients are derived as follows:
+\begin{equation}
+    \label{eq:lora_backward}
+        \frac{\partial L}{\partial A} = \alpha \frac{\partial L}{\partial \tilde{X}} X^{\top}, \quad
+        \frac{\partial L}{\partial B} = \alpha \frac{\partial L}{\partial Y} \tilde{X}^{\top}
+\end{equation}
+
+Here, $\tilde{X} := AX$ represents the intermediate input activation of $B$, which is the transformation of $X$ by $A$. These gradients guide the adjustment of the LoRA parameters to minimize the loss and more accurately approximate the necessary updates to the original model weights.
+
+\subsection{Quantization}
+Uniform quantization is a widely used quantization scheme due to its simplicity and broad compatibility with various computing kernels and hardware units~\citep{liu2022uniform}.
+Therefore, considering the adaptability on the broad quantization scheme, including both weight-only and activation quantization scenarios, we refer to the term `quantization' specifically as uniform quantization throughout this paper.
+A common practice is to organize a quantization group consisting of a certain number of consecutive weight elements that share the same quantization scale $s$ and bias $b$, which control the quantization step size and zero point, respectively.
+
+The weights $W$ within the quantization group are quantized according to the following equation:
+\begin{equation}
+    \label{eq:quant}
+        \tilde{w} = R(clamp(\frac{W-b}{s},Q_n,Q_p)), \quad
+        W_{q} = \tilde{w} \times s + b
+\end{equation}
+
+Here, $\tilde{w}$ denotes the quantized integer value obtained through a sequence of division, clamping, and rounding. Clamping is applied within the range $Q_n = -2^{n-1}$ to $Q_p = 2^{n-1} - 1$, where $n$ is the bit-width, followed by the rounding function $R$. $W_q$ represents the dequantized version of the quantized weight, which is adjusted using $s$ and $b$ from $\tilde{w}$ to approximate the original weight.
+
+During QAT, the straight-through estimator (STE) approximates the derivative of the rounding function with an identity function~\citep{bengio2013estimating, choi2018pact, esser2020learned}, enabling gradients to propagate through non-differentiable rounding operations and allowing effective weight parameter training.
+Building on conventional QAT, LSQ~\citep{esser2020learned} and LSQ+~\citep{bhalgat2020lsq} extend this process by training quantization parameters $s$ and $b$, alongside model weights. This tuning scheme provides finer control over quantization, improving model accuracy.
+The quantization parameters tuning during backpropagation proceeds as follows, where $w$ denotes the value $\frac{W-b}{s}$:
+
+\begin{equation}
+    \label{eq:quant_lsq_s}
+        \frac{\partial L}{\partial s} = \frac{\partial W_{q}}{\partial s} \frac{\partial L}{\partial W_{q}} \enspace
+        s.t. \enspace \frac{\partial W_{q}}{\partial s} = -w + \tilde{w},
+        \quad
+        \mathrm{if} \enspace Q_n\leq w\leq Q_p
+\end{equation}
+
+\begin{equation}
+    \label{eq:quant_lsq_b}
+        \frac{\partial L}{\partial b} = \frac{\partial W_{q}}{\partial b} \frac{\partial L}{\partial W_{q}} \enspace
+        s.t. \enspace \frac{\partial W_{q}}{\partial b} =  1,
+        \quad \quad \;
+        \mathrm{if} \enspace w<Q_n \enspace or \enspace w>Q_p
+\end{equation}
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{ICLR2025/images/fig2.png}
+        \caption{A categorization of training scheme and inference strategy of QA-LoRA, QLoRA, QAT-LoRA, and L4Q.
+    Compared to QA-LoRA, L4Q utilizes higher optimization ability with non-constrained LoRA parameters and quantization parameters.
+    Additionally, compared to QLoRA and QAT-LoRA, L4Q exploit fully-quantized weights rather than the mixed-precision weights during inference and perform a solid co-optimization of parameters.
+    }
+    \label{fig:diagram}
+\end{figure}
+
+\subsection{LLM Quantization}
+Quantization compress LLMs by lowering the bit precision of model parameters~\citep{hubara2018quantized}.
+However, a key challenge with quantization is the introduction of errors that reduce model accuracy, leading to extensive research aimed at mitigating these losses through calibration or training.
+A notable examples of PTQ for LLM compression are GPTQ\citep{frantar2023gptq} and OmniQuant~\citep{shao2023OmniQuant}.
+In contrast, QAT integrates quantization into the training process, adaptively training model parameters to account for quantization errors during training, ensuring that the quantized model retains much of its accuracy and functionality through training.
+
+Despite its advantages, QAT faces challenges, primarily due to its high training overhead, which limits its use in resource-intensive models like LLMs. The memory overhead of QAT stems from storing weight gradients and their optimizer states, each requiring multiple times the memory of the weights.
+For example, applying QAT to a 7B model that fine-tunes all weight parameters requires at least 14GB for the model weights, 14GB for the gradients, 28GB for optimizer states, and additional dozens of GB for activations. This often exceeds the memory capacity of a single GPU, which typically offers a maximum of 80GB of memory.
+Therefore, previous works have primarily focused on the application of PTQ for LLM compression, while research on QAT remains in its early stages, especially in terms of improving training efficiency. 
+\subsection{Quantization-Aware PEFT}
+\label{sec:backgrounds_qapeft}
+To improve the accuracy of quantized LLMs, recent research has introduced quantization-aware PEFT approaches~\citep{dettmers2023qlora, kim2023memoryefficient, xu2023QALoRA, li2023loftq}. Among these, QLoRA~\citep{dettmers2023qlora}, QA-LoRA~\citep{xu2023QALoRA}, and LoftQ~\citep{li2023loftq} stand out as notable methods.
+As illustrated in Figure~\ref{fig:diagram}, QLoRA begins by applying PTQ to a pre-trained model. After this initial quantization, LoRA fine-tuning is performed, with the quantized weight parameters kept frozen. The LoRA parameters are fine-tuned using higher precision formats such as bfloat16 or float16, allowing the method to correct quantization errors during the fine-tuning.
+However, QLoRA introduces computational inefficiencies during inference due to the additional forward path on LoRA parameters. This inefficiency arises because the high-precision LoRA parameters and low-precision quantized weights cannot be merged into low-precision values.
+We further examine the impact of this unmerged LoRA path on inference efficiency by comparing the speed of fully-quantized models with mixed-precision models in Section~\ref{sec:experiments}. 
+
+QA-LoRA~\citep{xu2023QALoRA} addresses the issue of high-precision LoRA parameters by modifying the structure of the LoRA matrix, allowing these parameters to be integrated with the quantized weights after training (Figure~\ref{fig:diagram}). 
+The input dimension of the LoRA matrix $A$ is set to the number of weight quantization groups. 
+This adjustment ensures that each element of $BA$ corresponds directly with individual quantization groups, enabling the LoRA parameters to be seamlessly integrated into the quantization bias as $b' = b - \alpha BA$ at the end of training.
+However, this solution presents a new challenge: the constrained LoRA structure in this setup limits the model's ability to achieve optimal accuracy during the PEFT stage.
+
+A broader issue with previous quantization-aware PEFT approaches is that quantization and fine-tuning are performed sequentially rather than simultaneously. Starting the fine-tuning process from a pre-quantized model with inherent quantization errors is less optimal than starting from a pre-trained model. While LoftQ attempts to address these quantization errors by approximating them using LoRA with iterative singular-value decomposition (SVD), the limitations on subsequent adaptation persist, making it challenging to fully recover and optimize model performance during fine-tuning.
+These challenges highlight the need for continued research to improve quantization-aware PEFT techniques, aiming to enhance both the quantization and PEFT processes for better accuracy and efficiency in LLMs.
+
+
+
+\section{Methods}
+
+\label{sec:methods}
+
+\subsection{Straightforward Integration of QAT and LoRA}
+\label{sec:qat_lora}
+
+\textbf{QAT-LoRA} \enspace
+One of the key principles in our proposed L4Q scheme is the integration of the QAT and LoRA to facilitate the simultaneous calibration for quantization and fine-tuning on downstream tasks. To achieve this, we begin with a straightforward integration of QAT and LoRA, referred to as QAT-LoRA, which serves as our baseline approach for combining QAT and PEFT.
+In QAT-LoRA, pre-trained weights are frozen, while LoRA parameters are added to the linear layers (Figure~\ref{fig:diagram}). Additionally, quantization scales and bias parameters are introduced, similar to advanced QAT techniques like LSQ, which are crucial for calibrating the quantization function.
+Freezing the weights reduces the need for optimizer states, while a small number of LoRA and quantization parameters are introduced to approximate updates to the weight matrix and to update the quantization function, respectively. This results in more efficient memory usage compared to standard QAT. 
+Detailed analysis results of the memory efficiency of QAT-LoRA is further discussed in Section~\ref{sec:experiments}.
+\textbf{Limitations of QAT-LoRA} \enspace
+However, several issues arise with this straightforward integration of QAT and LoRA, where quantized weights and LoRA parameters remain distinct. First, although freezing the pre-trained weights eliminates the need for optimizer states, weight gradients $\frac{\partial L}{\partial W_q}$ must still be stored to update the quantization parameters, as shown in Equations ~\ref{eq:quant_lsq_s}-~\ref{eq:quant_lsq_b}.
+As a result, QAT-LoRA still incurs memory overhead from weight gradients, undermining the memory efficiency benefits of LoRA fine-tuning.
+Secondly, QAT-LoRA produces a mixed-precision model with both quantized weights and high-precision LoRA parameters. This mixed-precision approach negates the advantages of LLM quantization, similar to previous methods such as QLoRA and LoftQ discussed in Section~\ref{sec:backgrounds_qapeft}.
+Lastly, the gradient updates for quantization and LoRA parameters are decoupled, limiting the potential for comprehensive optimization across the model.
+As outlined in Equations ~\ref{eq:quant_lsq_s}-~\ref{eq:quant_lsq_b}, updates to the quantization parameters rely on the quantized weight matrix $W_q$, while updates to the LoRA parameters depend on weights $A$ and $B$. This limits the effectiveness of model training, as it prevents holistic adjustments where changes in LoRA parameters could directly influence quantization adjustments and vice versa.
+To address these challenges, we introduce L4Q, an enhanced integration of QAT and LoRA. L4Q features an advanced layer design that seamlessly integrates QAT and LoRA. By applying quantization after merging the weights and LoRA parameters, along with a custom backpropagation path that reduces the memory overhead from the complex quantization and LoRA processes, L4Q effectively overcomes the primary challenges encountered with QAT-LoRA.
+
+\subsection{L4Q: Low-rank Adaptive Learning Quantization}
+\label{sec:l4q}
+
+\textbf{Fully-Quantized Linear Layer} \enspace
+As high-precision LoRA weights introduces inference overhead, it is crucial to design a fully-quantized linear layer. In this context, L4Q first combines the original weights $W_0$ and the LoRA parameters $BA$ into a unified parameter matrix:
+\begin{equation}
+    \label{eq:l4q_Wcombine}
+        W_{comb} = W_0 + \alpha BA
+\end{equation}
+Then, quantization is applied to the fully combined weight $W_{comb}$ as follows:
+\begin{equation}
+    \label{eq:l4q_Wquant}
+        \enspace W_{q} = R(clamp(\frac{W_{comb} -b}{s},Q_n,Q_p))\times s + b
+\end{equation}
+In this way, during inference, L4Q only uses quantized weights, simplifying the forward path of the linear layer as follows:
+\begin{equation}
+    \label{eq:l4q_forward}
+        Y = W_q X 
+\end{equation}
+While QA-LoRA also achieves fully-quantized linear layers by introducing constraints on the LoRA parameter structure, the proposed L4Q imposes no such restrictions. This flexibility allows L4Q to fully leverage the benefits of LoRA-based fine-tuning, all while achieving fully-quantized linear layers.
+
+\textbf{Memory Efficient QAT} \enspace
+As discussed in the previous section, QAT requires weight gradients for training the quantization parameters $s$ and $b$. Since weight gradients are a major source of memory overhead during training, we compute these gradients locally in the backpropagation path of the linear layer, utilizing the input and output of the layer. The weight gradients are calculated as follows:
+\begin{equation}
+    \frac{\partial L}{\partial W_q} = \frac{\partial L}{\partial Y} X^{\top}
+\end{equation}
+We use these weight gradients to calculate gradients of $s$ and $b$ with Equation~\ref{eq:quant_lsq_s} and~\ref{eq:quant_lsq_b}. Once the gradient computation for the linear layer is complete, the weight gradients are immediately flushed to conserve memory.
+
+\textbf{Efficient LoRA Training} \enspace
+To compute the gradients of the LoRA parameters in the L4Q linear layer, we must trace back from Equation~\ref{eq:l4q_forward} to~\ref{eq:l4q_Wcombine}.
+Due to the full integration of quantization and LoRA parameters (Equation~\ref{eq:l4q_Wcombine} and~\ref{eq:l4q_Wquant}), the gradients of the LoRA parameters also rely on the weight gradients. This then be described as follows:
+\begin{equation}
+    \label{eq:l4q_backward}
+        \frac{\partial L}{\partial A} = \frac{\partial L}{\partial W_{q}}\frac{\partial W_{q}}{\partial A}, 
+        \quad
+        \frac{\partial L}{\partial B} = \frac{\partial L}{\partial W_{q}}\frac{\partial W_{q}}{\partial B}
+\end{equation}
+
+Since we reuse the weight gradient $\frac{\partial L}{\partial W_{q}}$ that have already been computed for QAT, we only need to compute $\frac{\partial W_{q}}{\partial A}$ and $\frac{\partial W_{q}}{\partial B}$ to obtain the gradients of LoRA parameters. 
+Both terms are derived by applying the chain rule to Equation~\ref{eq:l4q_Wquant} and Equation~\ref{eq:l4q_Wcombine}.
+Since Equation~\ref{eq:l4q_Wquant} contains a rounding function, we apply STE and clamping with conditional gradient propagation to $\frac{\partial W_{q}}{\partial A}$ and $\frac{\partial W_{q}}{\partial B}$. Moreover, in Equation~\ref{eq:l4q_Wcombine}, the LoRA parameters $A$ and $B$ are simply multiplied, so its gradients are expressed directly as $\alpha B^{\top}$ and $\alpha A^{\top}$, respectively. This leads to the following expressions for $\frac{\partial W_{q}}{\partial A}$ and $\frac{\partial W_{q}}{\partial B}$:
+
+\begin{equation}
+    \label{eq:l4q_backward_wab}
+        \frac{\partial W_{q}}{\partial A} = \begin{cases}
+        \alpha B^{\top}, & \quad \mathrm{if} \enspace Q_n \leq w \leq Q_p \\
+        0, & \quad otherwise
+        \end{cases}
+        , \quad
+        \frac{\partial W_{q}}{\partial B} = \begin{cases}
+        \alpha A^{\top}, & \quad \mathrm{if} \enspace Q_n \leq w \leq Q_p \\
+        0,  & \quad otherwise
+        \end{cases}
+\end{equation}
+
+Therefore, the proposed L4Q efficiently processes LoRA training by simply reusing the weight gradients computed for QAT parameter training.
+
+\textbf{Joint Optimization of Quantization and LoRA parameters} \enspace
+Since $\frac{\partial L}{\partial W_q}$ is involved in the gradient calculation for the LoRA parameters (Equation~\ref{eq:l4q_backward}), the proposed L4Q ensures that the impact of quantization is directly reflected in the updates to the LoRA parameters. This enables the joint optimization of LoRA parameters and the quantization process, enhancing the accuracy of the fully-quantized LLMs. 
+
+In summary, the proposed L4Q produces a fully-quantized model for memory-efficient and fast LLM inference by fully integrating the model weights and LoRA parameters prior to the quantization process. Additionally, the training process of L4Q is memory-efficient due to careful handling of gradient computation for quantization. Finally, L4Q can improve the accuracy of quantized LLMs through the joint optimization of the quantization and LoRA parameters.
+
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{ICLR2025/images/fig3.png}
+    \caption{The MMLU 5-shot benchmark results for LLaMA-2 7B models with 100-step training, along with the sum of quantization and clipping errors, are presented for the initialization methods: LSQ+, symmetric, asymmetric, and L4Q. Errors are reported at both the initial point (Initial) and after training (Post-train).}
+    \label{fig:init}
+\end{figure}
+
+\subsection{Quantization Parameter Initialization}
+\label{sec:quantinit}
+In L4Q, we address the outlier-sensitive nature of LLMs by improving the quantization parameter initialization at the start of fine-tuning.  While the initialization scheme in LSQ+ (LSQ+$_{init}$) has been shown to be effective by using multiples of standard deviation of weights as the quantization range and setting the quantization scale accordingly, this approach was originally designed for CNNs, not transformer-based LLMs. Studies on LLM quantization have shown that outliers in activation and their corresponding salient weights significantly impact model performance~\citep{xiao2023smoothquant, dettmers2022llmint8, lin2024awq}.
+In LLM, the standard deviation of the small number of weight groups is often much smaller than the absolute maximum value, causing large weights to be more prone to clipping, resulting in significant clipping errors.
+To address this, we introduce a quantization initialization scheme, L4Q$_{init}$, which minimizes clipping errors by adopting a conservative quantization scale that captures both minimum and maximum outliers during training. The detailed equation is as follows:
+\begin{equation}
+    \label{eq:l4q_quant_init}
+    s = Max(|\frac{Min(W)}{Qn}|, |\frac{Max(W)}{Qp}|), \quad b = 0
+\end{equation}
+Note that conventional symmetric initialization involves division of the absolute maximum value of the numbers, and asymmetric initialization involves division of the minimum to maximum range of the number for the quantization scale initialization.
+
+We evaluate the models trained with L4Q using various initialization methods, comparing the accuracy, the sum of quantization error $|W-W_q|$, and the sum of clipping error of the overflowed outliers at both the initialization point and the end of training.
+As shown in Figure~\ref{fig:init}, L4Q$_{init}$ achieves the highest accuracy, while LSQ+$_{init}$ struggles to recover from quantization errors. Although the overall quantization error remains similar across methods, clipping errors are notably higher in LSQ+$_{init}$ and symmetric initialization.
+Additionally, while asymmetric initialization avoids outliers at the start, it fails to handle emerging outliers during fine-tuning as the weight distribution shifts. Its tight initialization, focused on the minimum to maximum range, becomes insufficient as weights change, leading to higher clipping error.
+In contrast, L4Q$_{init}$ considers the broader weight distribution in LLMs, reducing both quantization and clipping errors effectively. 
+
+\subsection{Overall L4Q Algorithm}
+The overall L4Q algorithm is outlined in Algorithm~\ref{algo:L4Q}.
+In the initial phase, L4Q undergoes a warm-up stage with LoRA fine-tuning only.
+Since the quantization function includes a clamping mechanism, applying it to LoRA at the beginning of training can suppress gradient updates for outlier values, which negatively affects LLM accuracy.
+Hence, L4Q warms up the LoRA parameters before applying quantization.
+The LoRA warm-up consists of $T_{wp}$ iterations, where $T_{wp} << T$, with $T$ representing the total number of training steps.
+
+After the warm-up phase, L4Q combines the pre-trained weights and LoRA parameters (Equation~\ref{eq:l4q_Wcombine}), and then initializes the quantization parameters $s$ and $b$, which determine the quantization range, using these combined weights. While previous QAT schemes use the standard deviation of weights to set the initial quantization range, and prior LLM quantization approaches rely on the min/max of the weights, L4Q employs a relaxed min/max-based initialization as discussed in Section~\ref{sec:quantinit}.
+Then, the proposed L4Q conducts both QAT and LoRA, with gradient computation as described in Section~\ref{sec:l4q}, to achieve high-accuracy fully-quantized models.
+
+
+\label{sec:l4q_algo}
+\begin{algorithm}[t]
+\caption{L4Q Algorithm}\label{algo:L4Q}
+\begin{algorithmic}
+\Require Pre-trained weight $W_0$, Fine-tuned weight $W_{comb}$, Quantized weight $W_q$
+\Require LoRA parameter $A, B$, LoRA configuration $r, \alpha$
+\Require Quantization parameter $s, b$, Quantization bit-width $n$
+\Require Training step $T$, LoRA warm-up step $T_{wp}$, State $I_{init}$
+    \State Initialize $A \sim N(0, \sigma^2), B\leftarrow0, \alpha \leftarrow \frac{1}{2r}, I_{init} \leftarrow False$
+    \For{$t$ = 1 to $T$}
+        \If{$t \leq T_{wp}$} \Comment{LoRA warm-up stage}
+            \State Forward $W_0X + \alpha BAX$ and Update $(A, B)$
+        \Else \Comment{L4Q fine-tuning stage}
+            \If{not $I_{init}$}
+                \State Set $W_{comb} \leftarrow W_0 + \alpha BA$
+                \State Initialize $s, b\leftarrow$ L4Q$_{init}$ \Comment{L4Q$_{init}$ described in the equation ~\ref{eq:l4q_quant_init}}
+                \State Set $I_{init}\leftarrow$True
+            \EndIf
+            \State Forward $W_qX$ and Update $(A, B, s, b)$ \Comment{$W_q$ described in the equation ~\ref{eq:l4q_forward}}
+        \EndIf
+    \EndFor
+  \end{algorithmic}
+\end{algorithm}
+
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+\subsection{Experimental Settings}
+\textbf{Target Foundation Models} \enspace
+
+Specifically, we assess the OpenLLaMA model with 3B parameters, LLaMA-1 models with 7B, 13B, and 33B parameters, and LLaMA-2 models with 7B and 13B parameters.
+When applying quantization, the quantization group size is set to 128 for the LLaMA-1 and LLaMA-2 models, and 64 for the OpenLLaMA models.
+
+\textbf{Baselines} \enspace
+We compare the proposed L4Q with previous PTQ and QA-PEFT methods.
+The baseline PTQ methods include GPTQ and OmniQuant, while the baseline QA-PEFT methods include QLoRA, QA-LoRA, and LoftQ. 
+Although the original QLoRA and LoftQ employ non-uniform quantization, we apply uniform quantization in our experiments for consistency across methods. These uniformly quantized versions are referred to as QLoRA* and LoftQ*.
+
+\textbf{Evaluation Setups} \enspace
+git}, both of which are open-source LLM frameworks.
+The rank of LoRA parameter $r$ is set to 4 by default, as our experiments showed that $r=4$ is sufficient to maintain performance.
+Meanwhile, as QA-LoRA reduces the input dimension of the LoRA parameters to integrate them with the quantization bias parameter, we double the rank $r$ to 8 for a fair comparison in terms of the number of LoRA parameters. 
+For the fine-tuning process, we use the Stanford-Alpaca~\citep{alpaca} dataset that consists of 52k instruction-following samples generated from the instruction-tuned GPT 3.5 model~\citep{brown2020language}.
+This dataset is split into a training set with 50k samples and a validation set with 2k samples.
+In line with standard LLM training conventions, we used bfloat16 for numerically stable fine-tuning.
+The batch size for fine-tuning is 128.
+All experiments were conducted on an NVIDIA A100 80GB GPU.
+
+\textbf{Evaluation Metrics} \quad
+We evaluate the accuracy of LLMs on Commonsense QA (CSQA)~\citep{leo_gao_lmeval} and MMLU~\citep{hendrycks2021measuring} benchmarks.
+The CSQA benchmark includes tasks from Hellaswag~\citep{zellers2019hellaswag}, PIQA~\citep{bisk2019piqa}, ARC-challenge and ARC-easy~\citep{clark2018arc}, Winogrande~\citep{sakaguchi2019winogrande}, BoolQ~\citep{clark2019boolq}, and Openbook QA~\citep{talmor2019commonsenseqa}.
+The MMLU benchmark spans four subject categories: Humanities, STEM, Social Sciences, and others made up of 57 subcategories of language tasks.
+
+\newcolumntype{L}[1]{>{\arraybackslash}m{#1}}
+\newcolumntype{P}[1]{>{\centering\arraybackslash}m{#1}}
+
+\begin{figure}
+\begin{minipage}[b]{0.49\textwidth}
+    \centering
+    \resizebox{1.0\textwidth}{!}{
+    \begin{tabular}{L{1.5cm}P{1.5cm}P{1cm}P{1cm}P{1cm}}
+    \toprule
+     \rowcolor{Gray}& \small OpenLLaMA & \multicolumn{3}{c}{\small LLaMA-1} \\
+     \rowcolor{Gray}Methods & 3B & 7B & 13B & 33B \\
+     \midrule
+     
+     \small LoRA  & 15.1 & 25.1 & 43.8 & 71.9 \\
+     \arrayrulecolor{lightgray}\cmidrule{1-5}
+     \small QLoRA  & 5.2 & 7.9 & 19.6 & 31.9 \\
+     \small LoftQ  & 5.2 & 7.9 & 19.6 & 31.9 \\
+     \small QA-LoRA  & 7.8 & 14.8 & 27.8 & 67.2 \\
+     \arrayrulecolor{lightgray}\cmidrule{1-5}
+     \small QAT  & 44.2 & 79.5  & OOM & OOM \\
+     \small QAT-LoRA  & 22.6 & 41.9 & 70.6 & OOM \\
+     \small L4Q  & 15.3 & 25.4 & 44.3 & 73.2 \\
+     
+
+    \arrayrulecolor{black}\bottomrule
+    \end{tabular}
+    }
+    \captionof{table}{Memory cost (GB) for fine-tuning LLMs on NVIDIA A100 GPU. (OOM: Out of Memory)}
+    \label{table:memory}
+\end{minipage}
+\hfill
+\begin{minipage}[b]{0.48\textwidth}
+    \centering 
+    \includegraphics[width=\textwidth]{ICLR2025/images/fig5.png}
+    \captionof{figure}{
+    The average inference speedup of quantized models compared to pre-trained models.
+    }
+    \label{fig:speedup}
+\end{minipage}
+\end{figure}
+
+\subsection{Evaluation Results}
+
+     
+
+\textbf{Memory Cost for Fine-Tuning} \quad
+We measure the peak memory usage during fine-tuning of 4-bit LLMs using both the baseline methods and L4Q, as reported in Table~\ref{table:memory}. 
+Since PTQ-based PEFT methods apply PTQ before fine-tuning, the size of linear layers in the model is reduced by a factor of 1/4, resulting in lower memory usage compared to naïve LoRA, which fine-tunes full-precision models.
+While both QAT and QAT-LoRA result in 2–3 times higher memory costs compared to LoRA, the memory usage of L4Q is similar to that of LoRA. Although L4Q cannot reduce memory costs as much as PTQ-based PEFT methods due to the use of 16-bit full-precision models during fine-tuning, this result highlights that L4Q is well-designed to leverage the memory-efficient nature of LoRA in training.
+
+
+\textbf{Inference Speedup} \quad
+We measure the inference speed of 16-bit pre-trained models and quantized models using LLaMA-1 models. The quantized models include fully-quantized 4-bit models (L4Q and QA-LoRA), which contain only quantized parameters, and mixed-precision 4\&16-bit models (LoftQ*, QLoRA*, and QAT-LoRA), which use additional 16-bit LoRA parameters. The inference speed was measured with input batch sizes ranging from 1 to 64.
+The average speedup of quantized models compared to full-precision 16-bit models is reported in Figure~\ref{fig:speedup}. The 4-bit models achieve a speedup of 1.8$\times$ to 2.3$\times$ over the 16-bit models. More importantly, these 4-bit models achieve a 1.4$\times$ to 1.6$\times$ speedup compared to mixed-precision 4\&16-bit models, which are also quantized versions of LLMs. This demonstrates that the full integration of QAT and LoRA in L4Q plays a crucial role in achieving the best inference speed.
+
+
+\begin{table}[!ht]
+    \centering
+    \caption{Accuracy (\%) evaluation results with 4-bit quantization. The bit precision of weight parameters is indicated under the method name. The notation ‘4+16’ refers to the requirement of 16-bit LoRA parameters alongside 4-bit weights for inference.}
+    \renewcommand{\arraystretch}{1.0}
+    \label{table:csqa_mmlu_4bit}
+    \resizebox{\textwidth}{!}{
+    \begin{tabular}{l l
+    |P{1.0cm}P{1.0cm}|P{1.1cm}P{1.1cm}|P{1.1cm}P{1.1cm}P{1.1cm}|P{1.1cm}P{1.1cm}}
+    \toprule
+    \rowcolor{Gray}
+             ~ & ~ &   \bf Pre-trained & \bf LoRA &    \bf GPTQ &    \bf OmniQ. &    \bf LoftQ* &    \bf QLoRA* &    \bf QA-LoRA &    \bf QAT-LoRA &    \bf L4Q \\
+    \rowcolor{Gray}
+        Model & \bf Benchmark & \small 16 & \small 16 &\small 4 &\small 4 &\small 4+16 & \small 4+16 &\small 4 &\small 4+16 &\small 4 \\
+        \midrule
+         OpenLLaMA 3B & CSQA & 54.8 & 55.9 & 50.7 & 54.1 & 54.2 & 54.4 & 54.5 & 54.6 & \bf 55.0 \\
+         \midrule
+        LLaMA-1 7B & CSQA & 61.7 & 63.4 & 59.4 & 58.1 & 62.6 & 61.3 & 61.3 & 62.4 & \bf 62.7 \\
+        ~ & MMLU\tiny 0-shot & 32.5 & 36.3 & 28.3 & 30.9 & 33.0 & 32.8 & 34.5 & 33.8 & \bf 34.9 \\
+        ~ & MMLU\tiny 5-shot & 35.1 & 36.7 & 32.7 & 33.3 & 35.1 & 33.6 & 35.6 & 34.8 & \bf 35.7 \\
+        \midrule
+        LLaMA-1 13B & CSQA & 63.8 & 65.2 & 63.5 & 60.4 & 64.2 & 63.8 & 62.5 & 64.4 & \bf 64.5 \\
+        ~ & MMLU\tiny 0-shot & 43.6 & 44.3 & 40.1 & 42.6 & 42.4 & 42.1 & 42.4 & 42.0 & \bf 43.2 \\
+        ~ & MMLU\tiny 5-shot & 46.3 & 47.0 & 45.7 & 45.7 & 45.4 & 45.9 & 45.8 & 45.5 & \bf 46.0 \\
+        \midrule
+        LLaMA-1 33B & CSQA & 67.4 & 68.3 & 65.7 & 62.9 & 67.4 & 66.2 & 65.3 & 67.3 & \bf 67.5 \\
+        ~ & MMLU\tiny 0-shot & 53.0 & 54.4 & 51.4 & 52.0 & 51.8 & 51.0 & 48.9 & 52.3 & \bf 53.3 \\
+        ~ & MMLU\tiny 5-shot & 56.4 & 57.6 & 55.7 & 55.8 & 56.4 & 55.6 & 55.0 & 56.7 & \bf 56.7 \\
+        \midrule
+        LLaMA-2 7B & CSQA & 61.9 & 63.3 & 60.7 & 59.5 & 61.7 & 61.3 & 61.0 & 61.9 & \bf 63.6 \\
+        ~ & MMLU\tiny 0-shot & 41.6 & 43.9 & 37.1 & \bf 41.0 & 38.5 & 38.6 & 38.9 & 37.9 & 40.9 \\
+        ~ & MMLU\tiny 5-shot & 45.4 & 46.0 & 42.9 & 45.4 & 43.7 & 44.6 & 44.4 & 43.8 & \bf 45.5 \\
+        \midrule
+        LLaMA-2 13B & CSQA & 65.0 & 66.5 & 64.4 & 59.9 & 64.9 & 64.0 & 64.5 & 64.7 & \bf 65.8 \\
+        ~ & MMLU\tiny 0-shot & 52.1 & 52.5 & 50.0 & 51.8 & 51.7 & 50.7 & 50.4 & 50.7 & \bf 51.9 \\
+        ~ & MMLU\tiny 5-shot & 54.8 & 55.7 & 54.7 & 54.7 & 54.5 & 54.2 & 54.1 & 53.8 & \bf 55.2 \\
+        \bottomrule
+    \end{tabular}
+    }
+\end{table}
+
+\begin{table}[!ht]
+    \centering
+    \caption{Accuracy (\%) evaluation results with 3-bit quantization. The bit precision of weight parameters is indicated under the method name. The notation ‘3+16’ refers to the requirement of 16-bit LoRA parameters alongside 3-bit weights for inference.}
+    \renewcommand{\arraystretch}{1.0}
+    \label{table:csqa_mmlu_3bit}
+    \resizebox{\textwidth}{!}{
+    \begin{tabular}{l l
+    |P{1.0cm}P{1.0cm}|P{1.0cm}P{1.1cm}|P{1.1cm}P{1.1cm}P{1.1cm}|P{1.1cm}P{1.1cm}P{1.1cm}}
+    \toprule
+    \rowcolor{Gray}
+             ~ & ~ &   \bf Pre-trained & \bf LoRA & \bf GPTQ & \bf OmniQ & \bf LoftQ* &    \bf QLoRA* &    \bf QA-LoRA &    \bf QAT-LoRA &    \bf L4Q \\
+    \rowcolor{Gray}
+        \bf Model & \bf Benchmark & \small 16 & \small 16 & \small 3 & \small 3 & \small 3+16 &\small 3+16 &\small 3 &\small 3+16 &\small 3 \\
+        \midrule
+         OpenLLaMA 3B & CSQA & 54.8 & 55.9 & 52.2 & 50.0 & 38.1 & 51.0 & 51.5 & 53.2 & \bf 54.0 \\
+        \midrule
+        LLaMA-1 7B & CSQA & 61.7 & 63.4 & 53.4 & 56.5 & 49.8 & 59.1 & 58.7 & 60.7 & \bf 61.2 \\
+        ~ & MMLU\tiny 0-shot & 32.5 & 36.3 & 23.7 & 29.0 & 23.4 & 27.7 & 28.0 & 30.6 & \bf 30.6 \\
+        ~ & MMLU\tiny 5-shot & 35.1 & 36.7 & 27.3 & 31.6 & 23.1 & 31.5 & 29.1 & 31.5 & \bf 31.8 \\
+        \midrule
+        LLaMA-1 13B & CSQA & 63.8 & 65.2 & 61.0 & 58.9 & 54.0 & 61.3 & 61.1 & 63.2 & \bf 63.4 \\
+        ~ & MMLU\tiny 0-shot & 43.6 & 44.3 & 33.1 & 34.8 & 25.0 & 36.1 & 37.5 & 38.8 & \bf 40.7 \\
+        ~ & MMLU\tiny 5-shot & 46.3 & 47.0 & 38.2 & 41.6 & 25.3 & 40.4 & 38.2 & 40.9 & \bf 41.8 \\
+        \midrule
+        LLaMA-1 33B & CSQA & 67.4 & 68.3 & 65.1 & 62.3 & 54.8 & 64.3 & 64.6 & 67.4 & \bf 67.4 \\
+        ~ & MMLU\tiny 0-shot & 53.0 & 54.4 & 50.0 & 50.2 & 24.6 & 45.6 & 46.1 & 50.1 & \bf 50.5 \\
+        ~ & MMLU\tiny 5-shot & 56.4 & 57.6 & 51.9 & 52.4 & 24.0 & 50.1 & 48.7 & 50.6 & \bf 53.1 \\
+        \midrule
+        LLaMA-2 7B & CSQA & 61.9 & 63.3 & 57.6 & 57.9 & 34.7 & 57.6 & 56.3 & 57.4 & \bf 61.3 \\
+        ~ & MMLU\tiny 0-shot & 41.6 & 43.9 & 31.3 & 34.3 & 22.9 & 32.5 & 31.0 & 31.5 & \bf 34.9 \\
+        ~ & MMLU\tiny 5-shot & 45.4 & 46.0 & 37.5 & 37.7 & 24.2 & 37.6 & 37.5 & 36.8 & \bf 38.0 \\
+        \midrule
+        LLaMA-2 13B & CSQA & 65.0 & 66.5 & 61.7 & 59.9 & 39.3 & 62.5 & 61.7 & 64.3 & \bf 65.1 \\
+        ~ & MMLU\tiny 0-shot & 52.1 & 52.5 & 46.3 & 46.3 & 23.5 & 46.8 & 46.4 & 45.9 & \bf 47.1 \\
+        ~ & MMLU\tiny 5-shot & 54.8 & 55.7 & 50.4 & 50.2 & 26.0 & \bf \bf 50.6 & 49.9 & 48.9 & 50.0 \\
+        \bottomrule
+    \end{tabular}
+    }
+\end{table}
+
+
+\textbf{Accuracy Results}
+We compare the accuracy of baselines and L4Q. Specifically, we evaluate zero-shot accuracy on the CSQA benchmark, and evaluate both zero-shot and few-shot (5-shot) accuracy on the MMLU benchmark. 
+Table~\ref{table:csqa_mmlu_4bit} presents a comprehensive comparison between baselines and the proposed L4Q after 4-bit LLM quantization.
+Since previous QA-PEFT methods involve a fine-tuning stage after PTQ, they generally achieve higher accuracy compared to PTQ methods.
+L4Q further improves accuracy of 4-bit models by adopting QAT strategy, and it achieves accuracy comparable to 16-bit models. Moreover, L4Q consistently outperforms QAT-LoRA, which adopts QAT but keeps quantization and LoRA parameters decoupled. This highlights the advantage of L4Q in achieving superior accuracy through the joint optimization of quantization and LoRA parameters.
+We also evaluate accuracy with 3-bit LLM quantization. As presented in Table~\ref{table:csqa_mmlu_3bit}.
+L4Q achieves the best accuracy in this case as well.
+Notably, the impact of applying QAT on accuracy is more pronounced in 3-bit quantization, as previous approaches experience significant accuracy degradation with 3-bit quantization.
+
+
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+In this work, we introduce L4Q, a parameter-efficient quantization-aware fine-tuning method for large language models. L4Q enables element-wise adaptation of model weights for downstream tasks while simultaneously optimizing quantization parameters. This concurrent optimization ensures that the adaptation parameters effectively account for quantization errors.
+We demonstrate the efficiency of L4Q, which significantly reduces training resource requirements compared to traditional QAT. Moreover, since the L4Q layer is designed to produce fully quantized low-bit model weights, it maintains inference efficiency, unlike QLoRA, LoftQ, or QAT-LoRA, which result in mixed-precision models.
+The effectiveness of L4Q as a QAT framework is further supported by experimental results across various task evaluations. L4Q consistently achieves superior quality maintenance on language tasks, demonstrating its enhanced adaptability compared to QAT-LoRA and PTQ-based PEFT methods.
+
+
+\newpage
+
+

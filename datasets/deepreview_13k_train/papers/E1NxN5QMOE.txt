@@ -1,0 +1,298 @@
+\title{Enhancing Group Fairness in Online Settings Using Oblique Decision Forests}
+
+\begin{abstract}
+Fairness, especially group fairness, is an important consideration in the context of machine learning systems. The most commonly adopted group fairness-enhancing techniques are in-processing methods that rely on a mixture of a fairness objective (e.g., demographic parity) and a task-specific objective (e.g., cross-entropy) during the training process.  However, when data arrives in an online fashion -- one instance at a time -- optimizing such fairness objectives poses several challenges. In particular, group fairness objectives are defined using expectations of predictions across different demographic groups.  In the online setting, where the algorithm has access to a single instance at a time, estimating the group fairness objective requires additional storage and significantly more computation (e.g., forward/backward passes) than the task-specific objective at every time step. In this paper, we propose {\X}, an ensemble of oblique decision trees, to make fair decisions in online settings.  The hierarchical tree structure of {\X} enables parameter isolation and allows us to efficiently compute the fairness gradients using aggregate statistics of previous decisions, eliminating the need for additional storage and forward/backward passes. We also present an efficient framework to train {\X} and theoretically analyze several of its properties.  We conduct empirical evaluations on 5 publicly available benchmarks (including vision and language datasets) to show that {\X} achieves a better accuracy-fairness trade-off compared to baseline approaches.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Critical applications of machine learning, such as hiring \citep{dastin2022amazon}  and criminal recidivism \citep{larson2016we}, require special attention to avoid perpetuating biases present in training data~\citep{corbett2017algorithmic, buolamwini2018gender, raji2019actionable}.
+ Group fairness, which is a well-studied paradigm for mitigating such biases in machine learning~\citep{mehrabi2021survey, hort2022bias}, tries to achieve statistical parity of a system's predictions among different demographic (or protected) groups (e.g., gender or race).
+ In general, group fairness-enhancing techniques can be broadly categorized into three categories: {pre-processing}~\citep{zemel2013learning, calmon2017optimized}, {post-processing}~\citep{hardt2016equality, pleiss2017fairness, alghamdi2022beyond}, and {in-processing}~\citep{quadrianto2017recycling, agarwal2018reductions, lowy2021stochastic, baharlouei2024fferm} techniques. Most of these approaches rely on group fairness objectives that are optimized alongside task-specific objectives in an offline setting~\citep{dwork2012fairness}. Group fairness objectives (e.g., demographic parity) are defined using expectations of predictions across different demographic groups, requiring access to labeled data from different groups. \edit{However, in many modern applications (e.g., output moderation using toxicity classifiers for chatbots, social media content, etc.), data arrives in an online fashion.  In such cases, the definition of safety is evolving, and new unsafe data points are identified on the fly, making them prime candidates for online learning.}
+
+
+In the online setting, optimizing for group fairness poses several unique challenges. Central to this paper, in-processing techniques require additional storage or computation since the system only has access to a single input instance at any given time. In online settings, 
+naively training the model using group fairness loss involves storing all (or at least a subset of) the input instances seen so far, and performing forward/backward passes through the model using these instances at each step of online learning, which can be computationally expensive.
+We also note that other techniques such as pre-processing techniques are clearly impractical as they require prior access to data. Post-processing techniques typically assume black-box access to a trained model and a held-out validation set~\citep{hardt2016equality}, which can be impractical or expensive to acquire during online learning.  
+
+In this paper, we present a novel framework {\X}, which consists of
+an ensemble of oblique decision trees. {\X} uses the structural properties of the tree to enhance group fairness in decisions made during online learning. 
+The final prediction in oblique trees is a combination of local decisions at individual tree nodes. 
+We show that imposing group fairness constraints on local node-level decisions results in parameter isolation, which empirically leads to better and fairer solutions. In the online setting, we show that maintaining the aggregate statistics of the local node-level decisions allows us to efficiently estimate group fairness gradients, eliminating the need for additional storage or forward/backward passes. We present an efficient framework to train  {\X} using state-of-the-art autograd libraries and modern accelerators. We also theoretically study several properties of {\X} including the convergence of gradient estimates. Empirically, we observe that {\X} achieves the best accuracy-fairness trade-off on 5 different online learning setups.
+Our paper is organized as follows: (a) We begin by introducing the fundamentals of oblique decision trees and provide the details of oblique decision forests used in {\X} (Section~\ref{sec:background}), (b) We describe the problem setup and discuss how to enforce group fairness in the simpler offline setting (Section~\ref{sec:problem} \&~\ref{sec:offline}), (c) We describe the functioning of {\X} in the online setting (Section~\ref{sec:online}), (d) We describe an efficient training procedure for oblique decision forests that enables gradient computation using back-propagation (Section~\ref{sec:training}), (e) We theoretically analyze several properties of {\X} (Section~\ref{sec:theory}), and (f) We describe the experimental setup and results of {\X} and other baseline approaches on several datasets (Section~\ref{sec:exp}). We observe that {\X} achieves the best accuracy-fairness tradeoff, and provides significant time and memory complexity gains compared to naively storing input instances to compute the group fairness loss.
+
+
+
+
+\section{Oblique Decision Trees}
+
+\label{sec:background}
+
+We introduce our proposed framework, {\X}, an ensemble of oblique decision trees, for achieving group fairness in an online setting.
+In this section, we introduce the fundamentals of oblique decision trees and discuss the details of the prediction function used in {\X}.
+Similar to a conventional decision tree, an oblique decision tree splits the input space to make predictions by routing samples through different paths along the tree. However, unlike a decision tree, which only makes axis-aligned splits, an oblique decision tree can make arbitrary oblique splits by using routing functions that consider all input features. The routing functions in oblique decision tree nodes can be parameterized using neural networks~\citep{murthy1994system, jordan1994hierarchical}.
+This allows it to potentially fit arbitrary boundary structures more effectively.   We formally describe the details of the oblique decision tree structure below:
+
+\begin{definition}[Oblique binary decision tree~\citep{karthikeyan2022learning}]
+An oblique tree of height $h$ represents a function $f(\mathbf{x; W, B, \Theta}): \mathbb{R}^d \rightarrow \mathbb{R}^c$  parameterized by $\mathbf w_{ij} \in \R^d$, $\mathbf b_{ij} \in \mathbb{R}$ at $(i, j)$-th node ($j$-th node at depth $i$). Each node computes $n_{ij}(\x) = \mathbf w_{ij}^T \mathbf x + \mathbf b_{ij} > 0$, which decides whether $\mathbf x$ must traverse the left or right child. After traversing the tree, input $\x$ arrives at the $l$-th leaf that outputs $\theta_l \in \R^c$ ($c>1$ for classification and $c=1$ for regression).
+\label{def:1}
+\end{definition}
+
+The oblique tree parameters $(\W, \B, \mathbf{\Theta})$ can be learned using gradient descent~\citep{karthikeyan2022learning}. However, the hard routing in oblique decision trees ($\x$ is routed either to the left or right child) makes the learning process non-trivial. In our work, we consider a modified soft version of oblique trees where an input $\x$ is routed to both left and right child at every tree node with certain probabilities based on the node output, $n_{ij}(\x)$.
+\begin{definition}[Soft-Routed Oblique binary decision tree]
+Using the same parameterization in Definition~\ref{def:1}, soft-routed oblique trees route $\x$ to both children at each node with a certain probability. At $(i, j)$-th node, the probability that $\mathbf{x}$ is routed to the left node $p(\swarrow) = n_{ij}(\x)$, and the right node is $p(\searrow) = 1 -n_{ij}(\x)$, where $n_{ij}(\x) = g(\mathbf w_{ij}^T \mathbf x + \mathbf b_{ij})$ and $g(x) \in [0, 1]$ is an activation function. The output $f(\mathbf{x}) = \sum_l p_l(\mathbf{x})\theta_l$, where $p_l(\mathbf{x})$ is the probability with which $\mathbf{x}$ reaches the $l$-th leaf.
+\label{def:2}
+\end{definition}
+
+In soft-routed oblique decision trees, we observe that the prediction $f(\mathbf{x})$ is a linear combination of {all} the leaf parameters. The coefficients $p_l(\mathbf{x}) = \prod_{i=1}^h n_{i, A(i, l)}(\x)$ is the product of all probabilities along the path from the root to the $l$-th leaf and $A(i, l)$ is the $l$-th leaf's ancestor at depth $i$. We observe that learning the parameters of the soft-routed tree structure is much easier as we can easily compute the gradients of parameters w.r.t. $f(\mathbf{x})$ using backpropagation. We further improve the efficiency by computing $f(\mathbf{x})$ using matrix operations as described in Section \ref{sec:training}. In our work, we use a complete binary tree of height $h$ to parameterize obliques trees. Note that the proposed soft-routed oblique trees are reminiscent of the sigmoid tree decomposition~\citep{yang2019mixtape} used in alleviating the softmax bottleneck.
+
+We use an ensemble of trees and the expected output as the final prediction to reduce the variance and increase the predictive power of the outputs of soft-routed oblique decision trees. 
+We call this \textit{soft-routed oblique forest}, which is computed as:    $f(\mathbf{x}) = {1/}{|\mathcal{T}|}\sum_{t=1}^{|\mathcal{T}|} f^{t}(\mathbf{x})$,
+where $f^{t}(\mathbf{x})$ is the output of the $t$-th soft-routed oblique decision tree. The schematic diagram is shown in Figure~\ref{fig:odt}.
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\textwidth, keepaspectratio]{figures/oblique_tree.pdf}
+    \caption{Schematic diagram of the functioning of Oblique Decision Forests. ({Left}): We illustrate the computation of a soft-routed oblique tree output $f^t(\x)$ using individual tree node outputs. We observe that the final tree decision is composed of individual node outputs. (Right): We showcase how decisions from multiple oblique trees are combined to form $f(\x)$.}
+    \label{fig:odt}
+\end{figure}
+
+
+
+\section{{\name}
+
+In this section, we present {\X}, a framework to enhance group fairness in decisions made during online learning. In this work, we focus on the group fairness notion of statistical or demographic parity. 
+
+\subsection{Problem Formulation}
+\label{sec:problem}
+We describe the online learning setup where input instances arrive incrementally $\{\x_1, \x_2, \ldots \}$, with $\mathbf{x}_t$ arriving at time step $t$. The goal of the oblique decision forest $f$ is to make accurate decisions w.r.t. the \textit{task}, $y$ (e.g., hiring decisions) while being fair w.r.t. the \textit{protected attribute}, $a$ (e.g., gender). 
+At time step $t$, $f$ outputs a prediction $\hat y_t$ based on $f(\mathbf{x}_t)$, where $\hat{y}_t = f(\mathbf{x}_t)$ for regression and $\hat{y}_t = \argmax f(\mathbf{x})$ for classification. 
+With a slight abuse of notation, we denote decisions made for an instance $\x$ with protected attribute $a=k$ as $f(\x|a=k)$ (forest output) or $n(\x|a=k)$ (node output), where $k =\{0, 1\}$. 
+Following prior work~\citep{faht}, we consider the setup where the model receives both the true label $y_t$ and demographic label $a_t$ of an instance $\x_t$ after predicting $\hat{y}_t$. 
+The model can then use this feedback to update its parameters. \edit{In this work, we consider the scenario where the model is not allowed to store previous samples. Note that storing previous instances may pose additional challenges in applications that need to adhere to privacy guidelines~\citep{gdpr} or involve distributed infrastructure, such as federated learning~\citep{konevcny2016federated}.} 
+In this work, we focus on demographic parity notion of fairness:
+\begin{equation}
+    \mathrm{DP} = |\mathbb{E}[f(\x|a=0)] - \mathbb{E}[f(\x|a=1)]|.
+\end{equation}
+Note that in the above definition, we consider a slightly modified version of demographic parity to handle scenarios where the preferred outcome (or target label) is not explicitly defined. 
+ 
+
+\subsection{Offline Setting}
+\label{sec:offline}
+We begin by describing the simpler offline setting, in which all the training data is accessible prior to making predictions. In this setting, 
+$f$ is optimized using stochastic gradient descent in a batch-wise manner. The constrained objective function is shown below:
+\begin{equation}
+    \min_f \mathcal{L}(f(\mathbf{x}), y), \text{  subject to } 
+    \left|\mathbb{E}[f(\mathbf x|a=0)] - \mathbb{E}[f(\mathbf x|a=1)]\right| < \epsilon,
+    \label{eqn:offline}
+\end{equation}
+where $\mathcal{L}(\cdot, \cdot)$ is the task loss function\footnote{We assume that the task loss can be defined using a single instance. This holds for most commonly used loss functions like cross entropy and mean squared error.}  ({e.g.,} cross entropy loss) and $y$ is the true task label. 
+The non-convex and non-smooth nature of the fairness objective (L1-norm in the DP term) makes it difficult to optimize the group fairness loss. 
+When $f$ is an oblique decision forest, we leverage its hierarchical prediction structure to impose group fairness constraints on the local node-level outputs, $n_{ij}(\x)$ ($j$-th node at depth $i$) of the tree. \textcolor{black}{The rationale behind applying constraints at the node outputs stems from the observation that if instances from different groups receive similar decisions at every node, then the final decision (which is an aggregation of the local decisions, Definition~\ref{def:2}) is expected to be similar.} We can formulate the node-level fairness constraints ($\mathcal{F}_{ij}$) as shown below: 
+\begin{equation}
+    \min_f \mathcal{L}(f(\mathbf{x}), y), \text{ s.t. } \forall ({i, j})\; |\mathcal{F}_{ij}| < \epsilon, \text{ where } \mathcal{F}_{ij} = \mathbb{E}[n_{ij}(\mathbf x|a=0)] - \mathbb{E}[n_{ij}(\mathbf x|a=1)].
+    \label{eqn:node_offline}
+\end{equation}
+The node constraints $|\mathcal{F}_{ij}|$ are applied to all nodes (indexed by $(i, j)$) in the tree. We discuss the relation between node-level constraints and group fairness in Section~\ref{sec:theory}. We note that $\mathcal{F}_{ij}$ is a function of the parameters of the $(i, j)$-th node only. In practice, we observe that this parameter isolation~\citep{rusu2016progressive} achieved by imposing fairness constraints on the local node-level outputs makes it easier to optimize $f$.
+
+
+However, the optimization procedure in Equation~\ref{eqn:node_offline} is hard to solve. We relax it  
+by using a smooth surrogate for the L1-norm and turning the constraint into a regularizer. 
+In particular, we use Huber loss function~\citep{huber1992robust} (with hyperparameter $\delta > 0$) and the relaxed optimization objective is:
+\begin{equation}
+    \min_f \left\{\mathcal{L}(f(\mathbf{x}), y) + \lambda\sum_{i,j} H_\delta(\mathcal{F}_{ij})\right\}, \text{ where } \; H_\delta(\mathcal{F}_{ij}) := \begin{cases} \mathcal{F}_{ij}^2/2, &\text{if } |\mathcal{F}_{ij}| < \delta\\ \delta |\mathcal{F}_{ij} - \delta/2|, &\text{otherwise}  \end{cases},
+    \label{eqn:huber_offline}
+\end{equation}
+with $\lambda$ being a hyperparameter. In the offline setting, the expectations over input instances in $\mathcal{F}_{ij}$ (Equation~\ref{eqn:node_offline}) are computed using samples within a training batch. In the online setup, computing these expectations is challenging as we only have access to individual instances at a time and not to a batch. Therefore, naively optimizing Equation~\ref{eqn:node_offline} or \ref{eqn:huber_offline} in the online setup requires storing all (or at least a subset) of the input instances. 
+Moreover, we need to perform additional forward and backward passes for all stored instances to compute the group fairness gradients. In practice, this can be quite expensive in the online setting. In the following section, we discuss how to efficiently compute these group fairness gradients in the online setting.
+
+\subsection{Online Setting}
+\label{sec:online}
+In this section, we describe the training process for {\X} in the online setting. As noted in the previous section, computing the expectations in group fairness terms is challenging due to storage and computational costs.  However, we do not need to compute the loss exactly using previous input instances as we only need the gradients of the loss function to update the model. We show that it is possible to estimate the fairness gradients by maintaining aggregate statistics of the node-level outputs in the tree.   Taking the derivative of Equation~\ref{eqn:huber_offline}, with respect to node parameters $\Theta \in [\W, \B]$ of model $f$, we get the following gradients:
+\begin{equation}
+    \centering
+    \begin{aligned}
+    G(\Theta) = \nabla_\Theta \mathcal{L}(f(\mathbf{x}), y) &+ \lambda\sum_{\forall  i,j} \nabla_\Theta H_\delta (\mathcal{F}_{ij}), \\
+    &\text{where } \nabla_\Theta H_\delta{(\mathcal{F}_{ij})} = 
+    \begin{cases} 
+        \mathcal{F}_{ij}\nabla_\Theta \mathcal{F}_{ij},&\text{if } |\mathcal{F}_{ij}| < \delta \\ 
+        \delta\mathrm{sgn}\left(\mathcal{F}_{ij} - {\delta/}{2}\right)\nabla_\Theta \mathcal{F}_{ij}, &\text{otherwise} 
+    \end{cases}\\
+    &\text{and }\nabla_\Theta\mathcal{F}_{ij} = \mathbb{E}[\nabla_\Theta n_{ij}(\mathbf x|a=0)] - \mathbb{E}[\nabla_\Theta n_{ij}(\mathbf x|a=1)].
+    \end{aligned}
+    \label{eqn:grad}
+\end{equation}
+In the above equation, we have an unbiased estimate of the task gradient: $\nabla_\Theta \mathcal{L}(f(\mathbf{x}), y)$ for an i.i.d. sample $\x$.
+The fairness gradient $\nabla_\Theta H_\delta (\mathcal{F}_{ij})$ can be estimated by maintaining a number of aggregate statistics at each decision tree node. Specifically, we need to store the following aggregate statistics: (a) $\E[n_{ij}(\x|a=k)]$ and (b) $\E[\nabla_\Theta n_{ij}(\x|a=k)], \forall k$, where $k \in \{0, 1\}$ denotes different protected attribute labels. In practice, for every incoming sample $\x_t$ we compute $n_{ij}(\x_t)$ and $\nabla_\Theta n_{ij}(\x_t)$, and update the aggregate statistics based on the protected label $a_t$. We denote the node constraints and gradients estimated using aggregate statistics as $\widehat{\mathcal{F}}_{ij}$ and $\widehat{G}(\Theta)$ respectively. 
+
+Note that in this setup, we do not need to store the previous input instances or query $f$ multiple times. 
+Furthermore, computing $n_{ij}(\x)$ and $\nabla_\Theta n_{ij}(\x)$ is relatively inexpensive. For sigmoid functions, both $n_{ij}(\x)$ and $\nabla_\Theta n_{ij}(\x)$ can be obtained using a forward pass as: $\nabla_{\Theta} n_{ij}(\x) = n_{ij}(\x) (1-n_{ij}(\x))$. We discuss several properties of the estimated gradient $\widehat{G}(\Theta)$ in Section~\ref{sec:theory}. 
+\subsection{Training Procedure}
+\label{sec:training}
+
+In this section, we present an efficient training strategy for {\X}. In general, tree-based architectures are slow to train using gradient descent as gradients need to propagate from leaf nodes to other nodes in a sequential fashion. We introduce a parameterization that enables us to compute oblique tree outputs only using matrix operations. This enables training on modern accelerators (like GPUs or TPUs) and helps us to efficiently compute task gradients (Equation~\ref{eqn:grad}) by using state-of-the-art autograd libraries.
+We begin by noting that all tree node outputs are independent of each other given the input $\x$. Therefore, the node outputs can be computed in parallel as shown below:
+\begin{equation}
+    \mathbf{N} = g(\W^T\x + \B) \in \R^{m}, \text{where } \W \in \mathbb{R}^{m \times d}, \B \in \R^{m}  \nonumber
+\end{equation}
+and $m = 2^h -1$ is the number of internal nodes (for a complete binary tree).
+Subsequently, these node outputs are utilized to calculate the probabilities required to reach individual leaf nodes. The path probabilities are computed by creating $2^h$ (number of leaf nodes) copies of the node outputs, $\overline{\mathbf N} =
+        \begin{pmatrix}
+            \N, &  \N, & \cdots &, \N
+        \end{pmatrix}
+     \in \R^{m \times 2^h}$, and applying a mask, $\mathbf{A}$, that selects the ancestors for each leaf node. Each element of the mask  $\mathbf{A}_{ij} \in \{-1, 0, 1\}$ selects whether the leaf path from a selected node is left (1), right (-1), or doesn't exist (0). The exact probabilities are then stored in $\mathbf{P}$. This sequence of operations is shown below:
+\begin{align}
+ f(\x) = \exp{(\mathbf{1}_{1 \times m}\log \mathbf{P})}\mathbf \Theta, \text{ where } \mathbf{P} = \mathrm{ReLU}(\overline{\N} \odot \mathbf{A}) + (\mathbf 1_{m \times 2^h}-\mathrm{ReLU}(-\overline{\N} \odot \mathbf{A}))  \nonumber
+\end{align}
+and $\mathbf{\Theta} \in \R^{2^h \times c}$. The selected probabilities can be utilized to compute the final output as $f(\x)$. 
+
+
+\section{Theoretical Analysis}
+
+\label{sec:theory}
+
+In this section, we theoretically analyze several properties of {\X}. First, we discuss the conditions of the node-level decisions and how they relate to group fairness constraints. Second, we analyze the properties of the gradient estimates (Equation~\ref{eqn:grad}) and show that the expected gradient norm converges for small step size and large enough time steps.
+
+ 
+
+\begin{lem}[Demographic Parity Bound]
+Let $f(\x)$ be a soft-routed oblique decision tree of height $h$ with $\|\theta_l\|=1$ and assume an equal number of input instances $\x$ for each group of a binary protected attribute $a \in \{0, 1\}$. Then, if all the node-level decisions satisfy the following condition:
+\begin{equation}
+    \E[|n_{ij}(\x|a=0) - n_{ij}(\x|a=1)|] \leq \epsilon,\; \forall (i, j).
+    \label{eqn:cond}
+\end{equation}
+Then, the overall demographic parity of $f(\x)$ is bounded as: $\mathrm{DP} \leq h2^{h}\epsilon$, for $\epsilon > 0$. 
+\label{lem:dp_bound}
+\end{lem}
+ 
+We note that the node constraint $|\mathcal{F}_{ij}|$ (Equation~\ref{eqn:huber_offline}) is a weaker constraint than the one derived above. The rationale behind using $\mathcal{F}_{ij}$ over the derived constraint is based on two key considerations: First, the expectation is computed using sample pairs from complementary groups (in Equation~\ref{eqn:cond}), which is challenging to compute in both offline and online settings. Second, optimizing this constraint can severely limit the task performance as it encourages the trivial solution of having the same node outputs for all instances.
+
+ Next, we derive the Rademacher complexity of soft-routed decision trees.
+\begin{lem}[Rademacher Complexity]
+Empirical Rademacher complexity, $\hat{R}_n(\mathcal{H})$, for soft-routed decision tree (of height $h$) function class, $f(\x) \in \mathcal{H}$,  and $\|\theta_l\|=1$ is bounded as: $\hat{R}_n(\mathcal{H}) \leq {2^h/}{\sqrt{n}}$.
+\label{lem:rade}
+\end{lem}
+ We observe that the bound exponentially increases with the height of the tree, $h$. Interestingly, according to the DP bound in Equation~\ref{eqn:cond}, it appears that we can easily improve group fairness by using a shallower tree (smaller $h$).
+ This illustrates the trade-off between fairness and accuracy, highlighting that it is not feasible to enhance group fairness without a substantial impact on accuracy.
+Next, we derive the estimation error bound for the gradients  (in Equation~\ref{eqn:grad}), which stems from the fact that we use aggregate statistics of node outputs from previous time steps where the model parameters were different. First, we derive the estimation error bounds for the aggregate statistics $\mathcal{\widehat F}_{ij}$ and $\nabla\mathcal{\widehat F}_{ij}$ (Lemma~\ref{lem:estimation_error}).
+\begin{lem}[Fairness Gradient Estimation Error]
+For a soft-routed oblique decision tree $f(\x)$ with $L_g$-smooth activation function $g(\cdot)$, bounded i.i.d. input instances $\|\x_t\| \leq B$, and compact parameter set $\Theta_t \in \mathcal{B_F}(0, R)$ (Frobenius norm ball of radius $R$), the estimation error can be bounded:
+     \begin{equation}
+     \|\nabla_\Theta H_\delta(\mathcal{F}_{ij}) - \nabla_\Theta H_\delta(\widehat{\mathcal{F}}_{ij})\| \leq {\delta B}/{2},    
+     \end{equation}
+where $\delta$ is the Huber loss parameter (Equation~\ref{eqn:huber_offline}). 
+    \label{lem:fair_grad_error}
+\end{lem}
+
+\begin{thm}[Gradient Norm Convergence]
+Using the assumptions in Lemma~\ref{lem:fair_grad_error}, the expected gradient norm  $\Psi_T = {1}/{T} \sum_{t=0}^{T-1} \E[\|\widehat{G}(\Theta_t)\|^2]$ can be bounded as:  $\Psi_T \leq \left( \epsilon + {2^{2h-2}\lambda^2\delta^2 B^2}\right)$,
+
+\label{lem:grad_conv}
+\end{thm}
+
+ In the following sections, we perform experiments to empirically verify the theoretical results. 
+
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+In this section, we present the details of our experimental setup and results to evaluate {\X}.
+
+
+\textbf{Baselines}. We compare {\X} {\ar} with the following online learning algorithms:   {\vht} Hoeffding Trees (HT)~\citep{ht} performs decision tree learning for online data streams by leveraging the Hoeffding bound~\citep{hoeffding1994probability}, 
+{\aht} Adaptive Hoeffding Trees (AHT)~\citep{aht} improves upon HTs by detecting changes in the input data stream and updating the learning process accordingly,
+r.t. leaf-level predictions or the final output instead of the node predictions, {\maj} Majority is a post-processing baseline considers the output of $f(\x)$ with probability $p$ and outputs the majority label with $(1-p)$ probability. We report the results for different values of $p$. The majority baseline can provide a fairness improvement by simply decreasing the task performance, but it requires prior access to target label information. In practice, outperforming the majority baseline is not easy. As pointed out by \citep{lowy2021stochastic}, many offline techniques fall short of the majority's performance when batch sizes are small, which is consistent with the online learning setup.
+
+\textbf{Online Setup \& Evaluation}. 
+We use the online learning setup described in Section~\ref{sec:problem}. 
+For each algorithm, we retain predictions $\hat{y}_t$ from every step and report the average task performance (accuracy) and demographic parity. In all experiments (unless otherwise stated), we use oblique forests with 3 trees and each tree has a height of 4 (based on a hyperparameter grid search). 
+
+Next, we present the evaluation results of fair online learning using {\X} and other baselines on 3 tabular datasets, a vision, and a language-based dataset. 
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[height=0.28\textwidth, keepaspectratio]{results/main_results_1.pdf}
+    \caption{We report the group fairness (\textit{demographic parity}) vs. task performance (\textit{accuracy}) trade-off plots for different systems in (left) Adult, (center) Census, and (right) COMPAS datasets. Ideally, a fair online system should achieve low demographic parity along with high accuracy scores. Considering the inverted $x$-axis, the performance of a fair system should lie in the top right quadrant of each plot. We report {\X}'s performance for different $\lambda$'s and observe that it 
+    achieves better accuracy-fairness trade-off compared to baseline systems.}
+    \label{fig:results}
+\end{figure}
+
+\subsection{Tabular Datasets}
+We conducted our experiments on the following tabular datasets: (a) {UCI Adult}~\citep{adult}, (b) {Census}~\citep{census}, and (c) {ProPublica COMPAS}~\citep{propublica}. {Adult} dataset contains 14 features of $\sim$48K individuals. The task involves predicting whether the annual income of an individual is more than \$50K or not and the protected attribute is gender. {Census} dataset has the same task description but contains 41 attributes for each individual and 299K instances. {Propublica COMPAS} considers the binary classification task of whether a defendant will re-offend with the protected attribute being race. COMPAS has $\sim$7K instances.
+Figure~\ref{fig:results} demonstrates the fairness-accuracy trade-off, where $x$ and $y$-axis show the average demographic parity (DP) and accuracy scores respectively. 
+Ideally, we want an online system to achieve low DP and high accuracy, making the top-right quadrant the desired outcome ($x$-axis is inverted).   We report {\X}'s performance for different $\lambda$ values  (Equation~\ref{eqn:grad}), which controls the trade-off. We observe that {\ar} {\X}'s results lie in the top-right portion, showcasing that it can achieve the best trade-off. We also observe that the variance in the results of {\X} is high in COMPAS. This could be because COMPAS has fewer instances than other datasets, potentially affecting convergence.
+
+We also assess the significance of the tree structure in {\X} by examining the {\X} MLP {\mlp} baseline that employs the same gradient accumulation method discussed in Section~\ref{sec:online}, but without the tree structure. In all datasets, we observe that the MLP baseline is unable to improve the fairness scores beyond a certain point. Upon further investigation, we found that this phenomenon happens due to the vanishing fairness gradients in the layers further from the output. We also observe the same phenomenon for {\leaf} Leaf baseline, where the fairness gradients for nodes away from the leaves become very small and they cannot be trained effectively. This showcases the importance of parameter isolation in {\X} and the application of group fairness constraints on local decisions. We also note that the conventional Hoeffding tree-based baselines (HT {\vht}, AHT {\aht}, and FAHT {\faht}) achieve poor fairness scores, often falling behind \textit{majority} post-processing, which shows that HT based approaches are unable to robustly improve the group fairness. Overall, we observe that {\X} can achieve a better accuracy-fairness trade-off than baseline approaches across all datasets. 
+
+
+\subsection{Vision \& Language Datasets}
+We also conduct experiments on  (a) CivilComments~\citep{jigsaw} toxicity classification and (b) CelebA~\citep{liu2015faceattributes} image classification datasets. CivilComments is a natural language dataset where the task involves classifying whether an online comment is toxic or not. We use religion as the protected attribute and consider instances of religion labels: ``\textit{Muslim}'' and ``\textit{Christian}'', as they showcase the maximum discrepancy in toxicity. For CivilComments, we obtain text representations from the instruction-tuned model, Instructor~\citep{INSTRUCTOR} by using the prompt ``Represent a toxicity comment for classifying its toxicity as toxic or non-toxic: [\texttt{comment}]''. CelebA dataset contains 200K images of celebrity faces with 40 categorical attributes. Following previous works~\citep{jung2022re, qiao2022graph, jung2022learning, liu2021just},  we select ``blond hair" as the task label and ``gender" as the protected attribute. For CelebA, we retrieve the image representations from the CLIP model~\citep{radford2021learning}.
+
+In Figure~\ref{fig:results-2}, we report the fairness-accuracy trade-off plots, where we observe that {\X} {\ar} achieves the best accuracy-fairness trade-off on both datasets. Similar to tabular datasets, we observe that the MLP  {\mlp} and Leaf {\leaf} baselines are unable to improve the fairness scores at all. Hoeffding tree (HT) baseline {\vht} achieves decent fairness scores but is unable to converge on the task. This highlights the limitations of traditional decision trees when dealing with non-axis-aligned data. 
+
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[height=0.28\textwidth, keepaspectratio]{results/secondary_results_pdf_1.pdf}
+    \caption{We report the group fairness vs. accuracy trade-off plots for different systems in (left) CivilComments and (right) CelebA datasets. We observe that {\X} achieves significantly better accuracy-fairness trade-off than baseline systems.}
+    \label{fig:results-2}
+\end{figure}
+\subsection{Analysis}
+In this section, we perform empirical evaluations to analyze the functioning of {\X}. 
+
+\textbf{Reservoir Variant}. We compare the performance of {\X} with a variant (using oblique forests) that stores all samples in the online stream to compute the fairness loss. We refer to this variant as ``\textit{Reservoir}". In Figure~\ref{fig:analysis} (left), we observe that {\X} achieves a similar accuracy-fairness tradeoff compared to the reservoir variant on the Adult dataset. As {\X} does not need to store previous input samples, it is quite efficient -- achieving a $\sim$3x improvement in computation time and $\sim$23\% reduction in memory utilization. 
+\textbf{Gradient Convergence}. We investigate the convergence of the gradients used to update the oblique tree. We conduct our experiment on CivilComments dataset using {\X} with a single tree and report the norm of the total gradients and fairness gradients used to update  $\mathbf{W}$ (weight parameter of each node). In Figure~\ref{fig:analysis} (center), we observe that the norm of both task and fairness gradients converge over time during the online learning process. This corroborates our theoretical guarantees in Lemma~\ref{lem:grad_conv}.
+
+\textbf{Tree Height Ablations}. We study the effect of varying the tree height in oblique forests on the fairness-accuracy tradeoff. In Figure~\ref{fig:analysis} (right), we report {\X}'s performance on the Adult dataset with a fixed parameter $\lambda=0.1$. We observe that the accuracy increases with height and the demographic parity worsens ($y$-axis is inverted) with increasing height. This is consistent with our theoretical results (Lemma~\ref{lem:dp_bound} \&~\ref{lem:rade}). However, we have observed a slight decrease in accuracy when using large tree heights (height=8). This observation suggests that oblique trees may overfit the training data when reaching a certain height, and choosing a shallower tree could be beneficial.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[height=0.24\textwidth]{results/reservoir.pdf}
+    \includegraphics[height=0.24\textwidth]{results/gradient_norm.pdf}
+    \includegraphics[height=0.24\textwidth]{results/depth.pdf}
+    \caption{(left) We compare {\X} with the reservoir variant that stores all input instances, (center) we investigate the gradient convergence, and (right) the impact of tree height on performance.}
+    \label{fig:analysis}
+\end{figure}
+
+
+
+\section{Related Works}
+
+
+\textbf{Fairness.} Existing work on promoting group fairness can be classified into three categories: {pre-processing}~\citep{zemel2013learning, calmon2017optimized}, {post-processing}~\citep{hardt2016equality, pleiss2017fairness, alghamdi2022beyond}, and {in-processing}~\citep{quadrianto2017recycling, agarwal2018reductions, mary2019fairness, prost2019toward, baharlouei2019renyi, lahoti2020fairness, lowy2021stochastic, ads, farm, kram, baharlouei2024fferm} techniques. These are trained and tested on a static dataset, {and} there is a growing concern that they fail to remain fair under distribution shifts~\citep{barrett2019adversarial, mishler2022fair, rezaei2021robust, wang2023robust}. This calls for fairness-aware systems that can adapt to distribution changes and update themselves in an online manner.
+ However, an online learning setting, where input instances arrive one at a time, presents several challenges that make it difficult to apply existing techniques: 
+  (a) pre-processing techniques are not feasible as they require prior access to input instances; (b) post-processing techniques often require access to a held-out set, which may be impractical; and (c) 
+ in-processing techniques need a batch of samples to estimate the group fairness loss, which may not always be feasible due to privacy reasons~\citep{gdpr} or distributed infrastructure~\citep{konevcny2016federated}.
+FERMI~\citep{lowy2021stochastic} is the only in-processing approach that can work with a batch size of $1.$
+Although several works~\citep{gillen2018online, bechavod2020metric} have studied individual fairness in online settings, only a few recent works~\citep{fairl, zhao2023towards, chen2023interpolating, yin2024long, truong2024fairness, jiang2024chasing} considered group fairness in settings where the underlying task or data distribution changes over time. However, these systems are incrementally trained on sub-tasks, requiring access to task labels, which is not available in online data streams.
+\textbf{Gradient-based learning of trees.}  Similar to {\X} that leveraged a gradient-based objective, 
+\citep{karthikeyan2022learning} 
+uses gradient-based methods to discover the structure
+of oblique decision tree classifiers. Discovering tree structures with gradient-based methods has been also considered in works  on autoencoders \citep{nagano2019wrapped, shin2016tree}, on discovering structure (e.g., parses) in natural language \citep{yin-etal-2018-structvae, drozdov2019unsupervised}, hierarchical clustering \citep{monath2017gradient,
+monath2019gradient,
+zhao2020unsupervised,
+chami2020trees}, phylogenetics \citep{macaulay2023differentiable, penn2023leaping}, and extreme classification \citep{yu2022pecos, jernite2016simultaneous, sun2019contextual, jasinska2021online}.
+
+
+\section{Conclusion}
+
+In this paper, we propose {\X}, a framework to achieve group fairness in online learning. {\X} uses an ensemble of oblique decision trees and leverages its hierarchical prediction structure to store aggregate statistics of local decisions. These aggregate statistics help in the efficient computation of group fairness gradients in the online setting, eliminating the need to store previous input instances. 
+Empirically, we observe that {\X} achieves significantly better accuracy-fairness trade-off compared to baselines on a wide range of tabular, image, and text classification datasets. Through extensive analysis, we showcase the utility of our proposed tree-based prediction structure and fairness gradient approximation. While we investigated binary oblique tree structures, their ability to fit complex functions can be limited when compared to fully connected networks.
+ Future research can explore other parameterizations (e.g., graph-based structures) that enable effective gradient computation to impose group fairness in online settings with superior prediction power.
+
+\subsection*{Reproducibility Statement}
+
+We have submitted the implementation of {\X} in the supplementary materials. We will make our implementation public once the paper is published. 
+
+\subsection*{Ethics Statement}
+
+In this paper, we introduce an online learning framework, {\X},  to enhance group fairness while making decisions for an online data stream. {\X} has been developed with the intention of mitigating biases of machine learning systems when they are deployed in the wild. However, it is crucial to thoroughly assess the data's quality and the accuracy of the demographic labels used for training {\X}, as otherwise, it may still encode negative biases.  In our experiments, we use publicly available datasets and obtain data representations from open-sourced models. We do not obtain any demographic labels through data annotation or any private sources. 
+
+
+
+

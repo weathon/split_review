@@ -1,0 +1,309 @@
+\title{An Evolved Universal Transformer Memory}
+
+\begin{abstract}
+Prior methods propose to offset the escalating costs of modern foundation models by dropping specific parts of their contexts with hand-designed rules, while attempting to preserve their original performance.
+We overcome this trade-off with \implname (\implacro), introducing a learned network for memory management that improves \textit{both} the performance and efficiency of transformers.
+We \textit{evolve} \implacro atop pre-trained transformers to provide different latent contexts focusing on the most relevant information for individual layers and attention heads.
+\implacro are universally applicable to any model using self-attention as they condition exclusively on the values in the produced attention matrices. 
+Learning \implacro on a small set of problems, we achieve substantial performance improvements across multiple long-context benchmarks while cutting the model's input contexts up to a fraction of the original sizes. %
+We show the generality of our conditioning enables zero-shot transfer of \implacro trained \textit{only} on language to entirely new transformer architectures even across input modalities, with their benefits carrying over to vision and reinforcement learning.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec1:intro}
+
+\begin{wrapfigure}{r}{0.6\textwidth}
+\begin{center}
+    \includegraphics[width=0.6\textwidth]{figures/visualizations/Figure1_small_c.png}
+  \end{center}
+  \caption{\implacro use evolution to optimize the performance of LMs by pruning their KV cache memory. Evolved \implacro can be zero-shot transferred to other transformers, even across input modalities and task domains.}
+  \label{fig:fig1}
+\end{wrapfigure}
+
+Transformer architectures have become the golden standard in deep learning, with ubiquitous applications in the design of modern foundation models, exhibiting exceptional performance and scalability~\citep{achiam2023gpt,das2023decoder,team2023gemini,dosovitskiy2020image,chen2021decision,brohan2023rt,gur2023real}.
+The outputs of a transformer are exclusively conditioned on a recent context of input tokens, which for language models (LMs) generally correspond to a window of preceding words.
+Thus, addressing the challenge of extending this context window is critical to enable tackling long-range tasks and is currently a focal area of research~\citep{long_context_survey}.
+However, long contexts also immediately impact training and inference costs, with modern foundation models being increasingly resource-hungry and expensive. Many recent methods proposed to partially offset these costs by studying how to heuristically quantify the importance of each token stored in the model's \textit{latent memory}, i.e., stored in its \textit{Key-Value (KV) cache}. Then, by simply \textit{evicting} the least important tokens with hand-designed strategies, they have shown early success at reducing memory size while limiting performance losses~\citep{KV_cache_management_rev}. %
+
+
+Our research aims to go beyond these hand-designed strategies as we hypothesize that shaping the latent memory KV cache of transformers entails new opportunities to \textit{improve} their capabilities in downstream tasks.
+One widely evidenced example in support of our hypothesis is the effectiveness of hand-crafted input context modifications through prompt engineering~\citep{liu2023pre}, even allowing foundation models to learn \textit{in-context} entirely new skills at test time~\citep{brown2020language}.
+Furthermore, unlike prompt engineering, directly managing the memory of transformers enables the provisioning of distinct contexts to each latent level independently, such that individual layers and attention heads can focus on the most relevant information for their specific needs. %
+
+Motivated by these considerations, we propose \implname (\implacro), introducing a new class of networks trained with evolution to learn an efficient memory system that maximizes the downstream performance of pre-trained transformers. 
+Evolution inherently overcomes the non-differentiability of memory management operations with binary outcomes (selecting tokens to preserve/discard) which renders gradient-based optimization incompatible.
+Our efforts are inspired by the key role that natural evolution played in shaping human memory, which analogously appears to selectively incorporate and actively prune information based on its lifelong usefulness~\citep{sherry1987evolution,nairne2010adaptive,frankland2005organization}.
+
+\input{tables/rebuttal/table_summ}
+
+Our \implacro are conditioned on features entirely constructed from the attention matrix, making them universally applicable to any transformer-based architecture.
+Learning \implacro atop a pre-trained Llama 3 8B model~\citep{llama3}, we not only obtain efficiency benefits, with substantial reductions in the number of retained tokens in the KV cache, but also \textit{exceed} the performance of the full-context model with notable margins. We validate these findings across 36 different tasks from LongBench~\citep{longbench}, InfiniteBench~\citep{infinitebench}, and \textit{ChouBun}\footnote{ChouBun is the pronunciation of ``\ja{長文}'', literally translating to ``long text'' in Japanese.}, a new Japanese benchmark designed to assess long-context capabilities beyond the common English and Chinese. These results mark a clear contrast with the aforementioned hand-designed strategies that appear to inevitably trade off efficiency for performance, in line with their stated purpose. %
+
+Furthermore, we show that the generality of our parameterization enables \textit{zero-shot transfer} of \implacro trained on three natural language tasks to entirely new transformer models.
+In particular, we obtain further performance and efficiency improvements not only when using the evolved \implacro with other LMs of increased size, but also transformers with entirely different architectures concerned with new input modalities, for problems such as vision and reinforcement learning. 
+In a nutshell, our main technical contributions can be summarized as the following:
+\begin{itemize}
+\item We introduce \implacro, a novel memory evolution framework that adds a new dimension to optimizing transformer models without altering their powerful architectures.
+\item We design and successfully train \implacro on top of pre-trained transformer models, obtaining both performance and efficiency gains on several long context language tasks.
+\item We show \implacro, trained only on language tasks, can be transferred zero-shot to any other transformers, retaining benefits across different input modalities and task domains.
+\end{itemize}
+
+
+
+\section{Background and preliminaries}
+
+
+\label{sec2:background}
+
+\textbf{Attention and transformers.} Transformers are neural network architectures designed specifically for efficiently processing input sequences.
+These models take as input a stream of tokens (e.g., embeddings of words, image patches, robotic states, etc.) and, produce a set of latents with the same length within their layers.
+Multi-headed dot product attention~\citep{attention_sem}, or simply \textit{self-attention}, characterizes modern transformers, facilitating effective information sharing across token representations.
+The attention layer conducts a set of parallel computations, each known as an attention head, mapping tokens to query, key, and value vectors $\in \R^d$. These vectors are organized along the sequence dimension in the matrices $Q$, $K$, and $V$, and the layer's output is computed as:
+\begin{equation}
+   \textit{attention}_M(Q, K, V) = AV, \quad \text{where, } \quad A = \textit{softmax}\left(M\times\frac{QK^T}{\sqrt{d}}\right).
+\end{equation}
+Here, $M$ represents an optional mask multiplying the \textit{attention matrix} $A$, usually enforcing an \textit{auto-regressive conditioning} such that each token cannot attend to its future. An interpretation of the attention layer comes from the elements of the attention matrix $A^j_i$, i.e., the dot products between each key $i$ and query $j$ normalized along the column dimension. 
+Intuitively, each of these values can be understood as the relative \textit{importance} of token $i$ in processing the input representation of token $j$.
+
+\textbf{Frequency-based feature extraction.} An established canonical technique to pre-process one-dimensional non-stationary signals is the Short-Time Fourier Transform (STFT) \citep{allen1977unified}. This technique has seen plenty of applications for feature extraction concerning audio, biomedical, seismic, and many more kinds of modalities. The STFT performs a time-convolution of a signal, shifting each convolutional window to the frequency domain through a discrete Fourier transform, producing a \textit{spectrogram} representation of the original input. We use $\omega^t\in \R^{N+1}$ to denote the fixed-sized vector produced at each timestep $t$, where the $N$ frequencies span from zero up to the Nyquist frequency (half the original sampling rate).
+Mathematically, \reb{the $n$-th} frequency from an STFT for time $t$ is extracted from an input vector $v\in\R^T$ as:
+\begin{equation}
+    \omega^t[n] = \sum_{t'=0}^{T} v[t'] w[t-t'] e^{\frac{-n \pi t}{N}}.
+\label{eq:prel:STFT}
+\end{equation}
+Here, the convolutional filter of the SFTF is defined by the product of a finite-length \textit{window function} $w$ with each exponential term in the Fourier transform. A popular choice for $w$ is the Hann window  \citep{oppenheim1999discrete}, employing a smooth decay at its edges which helps minimize the overestimation of the magnitudes of the higher frequencies in $\omega$ due to \textit{spectral leakage} \citep{spectral_leakage}.
+
+
+\section{\implname}
+
+
+\label{sec3:method}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/visualizations/BAM_summary_fc.png}
+    }
+\end{figure}
+
+An immediate limitation of transformers is the quadratic costs associated with computing the attention matrix $A$.
+To partially address this issue, during auto-regressive generation, the latents for the keys and values of the tokens generated at the previous steps are usually stored in what is referred to as the KV cache. 
+This object can be regarded as being analogous to the \textit{memory} of the transformer, which now, at each step, only needs to compute the query, key, and value of the latest token and perform attention over a horizontal vector by exploiting causal ordering. %
+In this section, we describe the feature extraction, architecture, and optimization of \implacro, which have been designed to act on the KV cache to improve both the performance and practicality of this powerful class of models.
+
+\subsection{Attention spectrograms for model-agnostic feature extraction}
+The feature extraction framework of \implacro is designed to be agnostic to the parameterization of the base transformer they are applied for. 
+In particular, \reb{we build a representation for each token in the current KV cache memory directly from its corresponding unmodified column vector in the attention matrix $A_i$.}
+To meaningfully compress this unbounded vector signal, we process it via an STFT with a fixed-sized Hann window (Figure \ref{fig:neural_memory_overview}, left).
+This operation produces a spectrogram representation of the attention columns $\omega_i^t$, representing the frequencies with how the queries attend to each of the stored key tokens (indexed by $i$) on a compressed time-axis (indexed by $t$). 
+Thus, this representation exposes precisely the knowledge of how each token's relative importance varies across all past queries in a compact form factor, discarding all other information specific to the learned transformer weights.
+
+As \implacro rely only on the attention values for their input, they are universally applicable to any layer producing an attention matrix. 
+This property is crucial, enabling us to avoid learning individual memory models for the different layers of a transformer, thus, greatly limiting the number of total optimized parameters. Furthermore, it also allows efficient training on top of smaller foundation models for targeted problems, and later transferring the resulting models zero-shot at test-time to larger architectures and arbitrary applications.
+
+\subsection{Memory model design and cross-token communication}
+
+\begin{wrapfigure}{r}{0.3\textwidth}
+\begin{center}
+    \includegraphics[width=0.3\textwidth]{figures/visualizations/bam_mask_causal.png}
+  \end{center}
+  \caption{
+  Our backward mask makes each token attend exclusively to its future relatives in the KV cache.
+  }
+  \label{fig:bam_mask}
+\end{wrapfigure}
+
+\implacro parameterize a small neural network $m_\phi$ to output a scalar \textit{selection score} $s_i = m_\phi(\omega_i^{1:T})$ for each $i^{th}$ token in the KV cache.
+First, to obtain a consistent input dimension, we reduce the attention spectrogram into a smaller feature vector $\omega_i$ by compressing the time-axis via an element-wise exponentially moving average (EMA: $\omega_i = \sum_t \gamma^t \omega^t_i$; Figure~\ref{fig:neural_memory_overview}, center).
+We then append positional encodings and feed the vector $\omega_i$ to the memory model's network $m_\phi$ to produce the score $s_i$.
+Finally, we evict from the KV cache memory all latent tokens with $s_i<0$, effectively treating the problem as a binary classification task.
+We repeat this process with a fixed interval, every set number of new input tokens, $n_\mathrm{up}$.
+\textbf{Backward attention memory models (BAM).} For the design of $m_\phi$, we posit that sharing information from all tokens in memory could be key for assessing their importance.
+A particularly motivating scenario in LMs arises when considering the case of repeated words or sentences, where learning a diversity measure that compares different tokens would allow preventing redundancies in the KV cache. 
+Corroborating this intuition, even from a biological perspective, memory formation and retention appear to adhere to models of neuronal competition~\citep{neuronal_comp_memory_formation}.
+
+Based on these considerations, we design the backward attention memory architecture (BAM) for parameter-efficient sharing of information while making use of the powerful inductive biases enabled by the masked self-attention operation.
+In particular, we implement $m_\phi$ via an initial self-attention layer with a \textit{counter-causal} mask $\hat{M}$, which we refer to as \textit{backward} (Figure~\ref{fig:bam_mask}). This design serves to introduce a purposeful asymmetric relationship, allowing to distinguish between older and newer tokens. We then output $s_i$ from a final linear operation:
+\begin{align}
+    o_i = \textit{attention}_{\hat{M}}(K_\Omega, V_\Omega, Q_\Omega), \quad s_i &= \textit{linear}(o_i),
+    \label{eq:BAM_attn}
+\end{align}
+where $K_\Omega, V_\Omega, Q_\Omega$ are the key, value, and query matrices from all feature vectors $\omega_i$ in memory.
+Using BAM to tackle the previous motivating scenario, only the representation for older tokens would be potentially affected by the presence of newer duplicates.
+Thus, just by learning a simple diversity metric within self-attention, backward masking would provide the memory model with the potential to preserve only the most informed occurrence of each token without risking discarding any information in its entirety (since the score for the latest instance of each repeated token would be independent of its past).
+\begin{wrapfigure}{R}{0.46\textwidth}
+    \begin{minipage}{0.46\textwidth}
+\begin{algorithm}[H]
+\tiny
+\caption{\implacro}
+\label{alg:summ_namm}
+\begin{algorithmic}[1]
+\Statex \textbf{Input:}
+{%
+KV cache,
+Iteration $k$,
+Stride size $s_w$,
+Update interval $n_{up}$,
+Attention matrix $A$ (latest $n_{up}$ queries),
+Past STFT $\omega'$
+}
+\If{$k$ \% $n_{up} == 0$} \Comment{use \implacro every $n_{up}$ steps}
+    \For {each $i^{th}$ token in the KV cache} \Comment{or column $A_i$ in $A$}
+    \State STFT $\omega_i^t$ for $t = 0, \dots, n_T$ \Comment{Eq.~\ref{eq:prel:STFT}, $n_T = n_{up} / s_w$}
+    \State Reduce $\omega_i = (\sum_t \gamma^t\omega_i^t) + \gamma^{n_T}\omega'$\Comment{EMA reduction}
+    \EndFor
+    \State $s_i=m_\phi(\omega_i)$ \Comment{apply \implacro, Eq.~\ref{eq:BAM_attn}}
+\EndIf
+\Statex \textbf{Output:} KV cache where $s_i > 0$ \Comment{update the KV cache}
+\end{algorithmic}
+\end{algorithm}
+\end{minipage}
+  \end{wrapfigure}
+
+In \reb{practice, when applying \implacro, we only affect the KV cache of the base model with a fixed frequency, once every $n_{up}$ steps. When feeding longer prompts to our model, we simply split the tokens into $n_{up}$-sized chunks. We summarize the full execution pipeline of  \implacro in Algorithm~\ref{alg:summ_namm}.
+}
+
+\subsection{Incremental evolution} 
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/results/training_curves_bam.png}
+\end{figure}
+
+We evolve the network weights of our \implacro to directly optimize the performance on a subset of long-context language modeling tasks from LongBench~\citep{longbench}. As we share a single $m_\phi$ across all layers, even with our largest \implacros we only evolve about 4000 total parameters. 
+We use the seminal CMA-ES optimization algorithm~\citep{cma_es} and apply \implacros atop a Llama 3 8B base model \citep{llama3} with a context extended from 8192 to 32768 tokens via NTK-aware positional interpolation \citep{NTK_aware_pi}.
+Due to the inference costs of LMs with long inputs, we sample a subset of different prompts from each task in each generation and propose training in an \textit{incremental} fashion: starting from a single task, and adding additional tasks at later training stages.
+
+The performance of modern LMs on LongBench varies considerably across tasks, and even across different task prompts.
+Hence, instead of using the raw scores, we opt to maximize normalized performance relative to the vanilla base model's stored evaluation performance on each same subset of prompts, retaining all tokens in its KV cache memory. \reb{Using evolution, we note that our training loop simply corresponds to running inference \implacro atop the base, requiring no expensive backpropagation or dedicated hardware.} 
+
+We choose three tasks from different LongBench categories across both English and Chinese where the Llama 3 base model seems to particularly struggle: PassageRetrieval-en, DuReader, and NarrativeQA\reb{; optimizing the normalized exact match, ROUGE-L, and F1 metrics, respectively}.   
+We evolve our \implacros for 300 generations in its first incremental phase, 250 in its second, and 120 in its third. We diminish the number of generations to counteract the increasing costs with each additional phase and make more efficient use of computational resources. 
+At the end of each phase, we resume from the best previous checkpoint. %
+We provide training curves of our main backward-attention model in Figure~\ref{fig:training_curves_bam}, showing the average and standard deviation of the normalized batch performance across the population (left), together with the normalized per-task and average performance on all samples of the optimized mean from CMA-ES (right).
+
+
+
+
+\section{Experimental Results}
+
+
+\label{sec4:experiments}
+
+In this section, we evaluate and analyze evolved \implacro as compared to full-context transformers and \reb{three recent hand-designed methods for KV cache management: H2O \citep{h2o} and L2 \citep{l2_cache}, and FastGen \citep{kv_cache_adaptive}}. We compare each method in terms of absolute and normalized performance and also provide the resulting average cache size recorded at the end of each prompt. We first consider three long-context language modeling benchmarks spanning 36 diverse tasks in three languages, using the same Llama 3 8B base transformer from training. Then, we evaluate the capabilities of zero-shot transferring \implacro to other \textit{unseen} transformers and task domains. In particular, we not only consider transfer to larger LMs, but also transformers with tokens constructed from modalities other than language. Across all these settings, we also compare BAM with a simpler 2-layer MLP architecture and provide summarized results after every stage of incremental evolutions.g., transferring \implacro to a Mistral LM), ablation studies (e.g., comparing different architectures and input features), and all learning curves. Lastly, we conclude the Section with a targeted qualitative analysis, aimed at understanding the behavior of our new memory framework.
+\subsection{Long-context language understanding}
+\input{tables/rebuttal/table_lb_main}
+
+\begin{wrapfigure}{r}{0.45\textwidth}
+\begin{center}
+    \includegraphics[width=0.45\textwidth]{figures/rebuttal/perf_per_cs_no_title.png}
+  \end{center}
+  \caption{\reb{Comparing \implacros with H2O and L2 while varying the cache size.}
+}
+  \label{fig:reb:perf_per_cs}
+\end{wrapfigure}
+
+\textbf{Longbench.} \reb{In Table~\ref{tab:res:longbench}, we provide results across all LongBench tasks \citep{longbench} and in Figure~\ref{fig:reb:perf_per_cs} we provide a summarized comparison varying the maximum cache size of H2O and L2 (we provide a similar analysis for FastGen in Figure~\ref{fig:reb:app:perf_per_th})}.
+Our \implacros yields concrete improvements to the Llama 3 8B transformer %
+both when considering the full set or exclusively the held-out set of \textit{test} tasks that were not used for evolution, with improvements of 11\% and 7\% respectively. At the same time, our \implacros also yields efficiency side benefits, notably reducing the context-extended KV cache size. \reb{Instead, H2O, L2, and Fastgen all come with performance costs which notably grow the smaller their cache sizes - in line with their stated objective of \textit{retaining} rather than \textit{improving} the original full-context performance. These results emphasize the inevitable tradeoff induced by prior hand-designed methods, able to obtain efficiency gains but at increasing performance costs due to their lossy heuristics. On the other hand, we find \implacro successfully provide a paradigm shift, yielding consistent improvements from the base model across both 
+ performance and efficiency axes by learning to discard unhelpful information, highlighting how end-to-end evolutionary optimization can open new orthogonal directions beyond what is feasible with manually-designed heuristics.}
+
+\input{tables/rebuttal/table_ib_main}
+
+\textbf{InfiniteBench.} In Table \ref{table:res:infbench}, we provide results across the InfiniteBench tasks~\citep{infinitebench}. In this benchmark, the average prompt length is close to 200K tokens making it extremely challenging, especially for LMs that were not expensively finetuned for very long context understanding. In fact, as reported by \citet{infinitebench}, even GPT4~\citep{achiam2023gpt} cannot exceed a performance of 1\% on some of its problems. In line with these results, the full-context Llama 3 together with H2O and L2 obtain near-zero performance on most tasks. Instead, our \implacros provides outstanding improvements, bringing overall benchmark performance from 1.05\% to 11\%. 
+We also observe that while our \implacros's memory size is larger than for LongBench, it is considerably lower in relation to the base model's (now only 40\%). This result suggests that \implacro emergently learned a scalable memory strategy, forgetting redundant and detrimental information at an increasing rate with longer contexts without requiring the hand-designed hard cache limits enforced by L2 and H2O.
+
+\input{tables/rebuttal/table_lbja_main}
+
+\textbf{\benchacro.} Our new benchmark focuses on tasks designed exclusively in Japanese, a novel language unseen during \implacro training. We hope this benchmark might itself be a valuable contribution to the research community, allowing the assessment of long-context capabilities in multilingual LLMs beyond the already-ubiquitous English and Chinese. In Table~\ref{table:res:longbenchJA}, we report our results evaluating \implacro. Once again, we observe a clear contrast with prior hand-designed methods. While integrating either H2O or L2 leads to notable performance drops, \implacro provides substantial improvements, with overall performance up by 15\% from the full-context Llama 3 8B base model. 
+
+
+
+\subsection{Zero-shot transfer across architectures and modalities}
+
+\input{tables/table_70b_main}
+
+\input{tables/table_vlm_main}
+
+\textbf{Cross-scale adaptation.} In Table~\ref{tab:res:70b}, we provide results zero-shot transferring our \implacros from the Llama 3 8B to the Llama 3 70B model on LongBench. Across all tasks, we find performance to be very close to the full-context baseline with an overall gap of less than 1\% even for the test subset. While \implacro are not able to improve the overall full-context performance in this first transfer setting outside specific task categories (e.g., coding and few-shot learning), they still outperform both H2O and L2 baselines and retain a similar efficiency as with their original training transformer.
+\textbf{Vision Language Understanding.} In Table~\ref{table:res:vlm}, we provide results zero-shot transferring to the computer vision domain, evaluating \implacro with a Llava Next Video 7B model~\citep{zhang2024llavanext-video} on LongVideoBench~\citep{wu2024longvideobench} and Multi-Task Long Video Understanding (MLVU)~\citep{MLVU}. As when evaluated atop Llama 8B, our \implacros is the only method recording gains over the full-context base transformer in both benchmarks. Furthermore, we find that \implacro learns to forget almost exclusively parts of redundant video frames rather than the language tokens describing the final prompt, even though they were never faced with such modality during training. This result validates that our \implacros recovered a domain-agnostic memory management strategy, further highlighting their flexibility.
+
+\input{tables/table_rl_main}
+
+\textbf{Reinforcement learning.} \reb{In Table~\ref{table:res:offline_rl}, we provide our zero-shot transfer results for the offline reinforcement learning setting, where we apply \implacro atop a decision transformer~\citep{decision_transformer} using the open-sourced models from \citet{decision_transformer_hf} pre-trained on the canonical the continuous-control tasks from  D4RL~\citep{d4rl}}. We find our \implacros improves the base transformer quite considerably in this domain across eight out of nine offline tasks with over 9\% overall gains, opposing the performance loss of the other efficient baselines. We posit that since the nature of the decision transformer optimization is closely tied to behavior cloning, the ability to discard part of the context is likely to allow \implacro to \textit{forget} and avoid imitating previous mistakes autoregressively. In support of this hypothesis, we observed slightly higher average rewards in the transitions for the retained tokens (by 1.4\%, 0.8\%, and 12.3\% for the Hopper, Walker2d, and HalfCheetah environments, respectively).
+
+\input{tables/table_summ_abl}
+
+\textbf{\implacro comparison.} In Table~\ref{tab:res:abl_summary}, we provide summarized results comparing \implacro with either BAM or the simpler MLP architecture at the end of each stage of incremental evolution. First, we note that even the MLP \implacros after stage 1 impressively improves performance across all language benchmarks. Additionally, performance sees near-monotonic improvements with each additional stage of incremental evolution in both language and zero-shot transfer settings. Comparing our implementations, the performance benefits from the memory models with BAM appear consistently superior to the MLP. Moreover, on \benchacro. we observe that the performance with BAM sees a notable upswing after the second stage of incremental training, which might be associated with the introduction of another ideogram-based language in the training set.\footnote{The DuReader task, used in the second stage of incremental training, uses the Chinese language.} The same improvement not occurring with the MLP-based \implacro might be further evidence of architectural performance saturation, highlighting the effectiveness of our main implementation.
+
+\subsection{Understanding \implname}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/visualizations/analysis_per_layer_task.png}
+\end{figure}
+
+\textbf{Influence of layer depth.} 
+We begin analyzing \implacro by focusing on the final amount of retained tokens and their oldness\footnote{We define \textit{oldness} of a retained token as the number of new queries since its introduction in the KV cache.}. 
+At the top of Figure~\ref{fig:analysis_per_layer_task}, we provide these normalized metrics as a function of layer depth.
+Interestingly, our learned \implacros does not appear to affect the KV cache uniformly, retaining visibly more and older tokens for some of the early-middle layers of the base transformer. 
+One possible interpretation of our results, complementing recent analysis~\citep{llamas_eng_an}, is that these layers might be particularly important for processing and aggregating information over longer contexts, thus requiring larger memories than the rest. %
+
+\textbf{Influence of task structure.}  
+At the bottom of Figure~\ref{fig:analysis_per_layer_task}, we instead provide these metrics while varying the source task, this time normalized by the average prompt lengths shown in green. Our results illustrate an inverse correlation between normalized memory size and prompt length (with a Pearson coefficient of -0.84), further confirming our earlier observations of sub-linear memory growth and favorable scaling to longer contexts. Additionally, we observe that in the code completion tasks (with task id 6-1 and 6-2) \implacro learn to preserve visibly more tokens relative to their average prompt lengths. This result appears intuitively consistent with the higher information density in code, leaving room for less redundancy as opposed to natural language.
+
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/visualizations/analysis_tok_pruning.png}
+\end{figure}
+
+\textbf{Selected qualitative examples.} We qualitatively find these analyzed trends by inspecting the text corresponding to the forgotten tokens for a few selected prompts. In particular, we consider the layers with the highest and lowest average retained tokens (15 and 24), for tokens from either a natural language or coding task (PassageRetrieval-en, id 5-1, and RepoBench-P, id 6-2). As shown in Figure~\ref{fig:analysis_qual_pruning}, for early-middle layers, \implacro tend to focus on retaining global information such as the task preamble and key words throughout the text. Instead, for later layers, \implacro seem to forget many of these tokens, whose information has likely been already incorporated in the previous layers, allowing the transformer to focus more on tokens with more detailed local information. Furthermore, in coding tasks, we find that the pruned tokens are mostly contiguous, corresponding to whitespace, comments, and whole segments of boilerplate code. This is in contrast to natural language tasks, where \implacro appear trying to exploit some of the grammatical redundancies of the English syntax often dropping specific tokens mid-sentences.
+
+
+\textbf{Additional analysis. For instance, \reb{we analyze how the presence of each token in memory affects the scores of the other tokens}, we compare the generated responses before and after the introduction of \implacro in a very long context task, and show the sensitivities of the token scores for each input feature. \reb{These results show that \implacro learn mechanisms for `cross-token' competition relying on high-frequency components of the attention matrices and illustrate how they learn to overcome different failure modes of long context LMs,} further evidencing the need to go beyond simple strategies and the potential of end-to-end learning for token-level memory systems. %
+
+
+\section{Related works}
+
+
+\label{sec5:related}
+
+
+\citet{l2_cache} and \citet{rel_ENTROPY} try to identify the least important tokens to evict using heuristics such as L2 magnitude and entropy to improve efficiency. Alternative strategies include considering simple statistics from the attention matrix~\citep{scissorhands_cache, rel_TOVA, h2o}. \citet{kv_cache_adaptive} and \citet{rel_SNAP} build on these ideas by applying multiple strategies based on matching specific attention patterns. Motivated by similar considerations, \citet{dmc_rel} proposed directly fine-tuning the original base transformer to compress the KV cache while minimizing a regularization loss to preserve the original base model's behavior and limit performance degradation.
+\reb{Complementary to our method, MQA~\citep{rel_MHA} and GQA~\citep{rel_GQA} propose merging attention heads during training to improve inference throughput.  Similarly, also KV cache quantization is another orthogonal area where different hand-designed strategies have been proposed~\citep{kv_quant0, kv_quant1, kv_quant_3}, with even recent work empirically showing their direct compatibility with token eviction methods~\citep{cachegen}. 
+ We note that, unlike this prior work, our approach uniquely learns a black-box model to \textit{maximize performance} through token-level memory management and shows potential for providing improvements to both the effectiveness and efficiency of transformers.} We refer to App.~\ref{appE:extRelated} for references and to the wider literature, including efficient architectures, memory, and evolution.
+
+
+
+
+
+
+\section{Discussion and future work}
+
+
+\label{sec6:discussion_conclusion}
+
+This work introduced \implname, providing a new framework to enhance the performance of transformers while significantly reducing memory footprint. 
+By evolving \implacro on top of pre-trained LMs, we demonstrated their effectiveness across diverse long-context tasks in three languages, significantly surpassing previous hand-designed KV cache eviction frequently hindering performance, and the original model relying on costly full-context conditioning.
+Our carefully designed approach also enabled \implacro, trained solely on language tasks, to achieve zero-shot transferability across architectures, input modalities, and task domains. \reb{While \implacro do appear to provide benefits beyond what achieved with hand-designed strategies, we believe there is much room for improvement (e.g., see Limitations~\ref{appElimitations}).} 
+This work has only begun to explore the design space of our memory models, which we anticipate might offer many new opportunities to advance future generations of transformers.
+In this regard, we believe \implacro should not be viewed as a replacement for gradient-based optimization, but rather an orthogonal framework that could be combined and alternated with parameter fine-tuning. Such an extension has the potential to unlock efficient long-context training, drawing parallels to the iterative process of learning and evolution that shaped human memory.
+
+
+\ificlrfinal
+
+
+
+\section{Author contributions}
+
+
+Edoardo Cetin initiated the project, led the design and implementation of \implacro, and provided major contributions to writing. Qi Sun designed and implemented the zero-shot transfer experiments with Llama 3 70B and Llava Next Video 7B, and provided contributions and feedback to writing. Tianyu Zhao devised and implemented \benchacro, and provided contributions and feedback to writing.
+Yujin Tang coordinated the project, gave key advice for the design of \implacro, and provided major contributions to writing.
+
+
+

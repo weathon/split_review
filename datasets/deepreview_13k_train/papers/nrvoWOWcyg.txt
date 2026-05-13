@@ -1,0 +1,234 @@
+\title{Chunk-Distilled Language Modeling}
+
+\begin{abstract}
+We introduce Chunk-Distilled Language Modeling (CD-LM), an approach to text generation that addresses two challenges in current large language models (LLMs): the inefficiency of token-level generation, and the difficulty of adapting to new data and knowledge. Our method combines deep network-based LLMs with a straightforward retrieval module, which allows the generation of multi-token text chunks at a single decoding step. Our retrieval framework enables flexible construction of model- or domain-specific datastores, either leveraging the internal knowledge of existing models, or incorporating expert insights from human-annotated corpora. This adaptability allows for enhanced control over the language model's distribution without necessitating additional training. We present the CD-LM formulation along with performance metrics demonstrating its ability to improve language model performance and efficiency across a diverse set of downstream tasks. Code and data will be made publicly available.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large language models (LLMs) have become a crucial component of intelligent systems, but still suffer from fundamental challenges to their efficiency and performance. LLMs are most commonly based on autoregressive Transformers (Vaswani et al., 2017) and typically generate text sequences one token at a time in a serial fashion, which limits their efficiency. Moreover, once pre-trained, updating the model parameters requires expensive data and computational resources, making it difficult to incorporate dynamic knowledge into the model.  
+
+Several techniques have been proposed to improve the efficiency and performance of LLMs, such as speculative decoding (Leviathan et al., 2023; Chen et al., 2023; Miao et al., 2024; Spector & Re, 2023) and retrieval-augmented generation (RAG) (Lewis et al., 2020; Guu et al., 2020; Borgeaud et al., 2022). The former relies on a smaller model to speculate several tokens at a time to reduce inference runtime while retaining the same model distribution, while the latter combines parametric language models with non-parametric memory to improve adaptability to dynamic knowledge but often without efficiency gains.  
+
+This work aims to alleviate both challenges via a fine-grained retrieval-augmented language modeling approach that focuses on text chunks, or contiguous spans of tokens that often appear together. The intuition for this approach is that a substantial amount of linguistic or factual knowledge can be expressed in text chunks spanning multiple contiguous tokens, such as named entities, multiword expressions, and other common phrases. These sub-sentence structures tend to exhibit lower variability compared to larger text units such as sentences, and are often memorized precisely by well-trained LLMs. Figures 1 and 2 demonstrate this effect: Chunks conveying key content are often repeated verbatim across multiple decoding runs with similar contexts, and the LLM probabilities over token sequences show recurring plateaus of high probability within such multi-token chunks. By injecting memorized or novel chunks into the generation process, we may be able to improve the models’ ability to adapt to new domains or knowledge. In addition, if entire chunks can be cached and retrieved during inference, we should also be able to speed up text generation.  
+
+Inspired by these observations, we present Chunk-Distilled Language Modeling (CD-LM), a new training-free generation approach that mixes LM token generation with chunk retrieval. To facilitate efficient search, we store text chunks of variable sizes, along with their preceding contexts, in a trie-structured datastore, and retrieve the most likely chunks as possible text continuations given the current generation. The context matching is done in the vector representation space induced by the  
+
+![](images/f7a0a933b4279ea5ccdbf6a2d72118eec84900e2e3d797dce91b4d2891c0a60c.jpg)  
+
+![](images/46911bab742d5353343ba4669014c107b4cfd342b0599f6fd3d769987fcbc4f4.jpg)  
+Figure 1: LLMs may generate sequences with repeated chunks spanning continuous tokens conveying key information in similar contexts. Examples are generated from Llama-2-7b-chat.   
+Figure 2: LLM token probabilities for the sentence: “The answer to life, the universe, and everything is 42, according to Douglas Adams’ The Hitchhiker’s Guide to the Galaxy.” These models bind token sequences such as Douglas Adams’ and The Hitchhiker’s Guide to the Galaxy into chunks with plateaus of high probability.  
+
+LM itself without the additional overhead of specialized embedding modules, commonly used in RAG (Lan et al., 2023; Ram et al., 2023; Borgeaud et al., 2022). Well-matched chunk continuations are accepted, skipping multiple token decoding steps.  
+
+Using the same generation approach, CD-LM allows language models (LMs) to work with chunks mined in different ways to achieve various goals in applications. As suggested by Figure 2, chunks can be naturally derived from any parametric pre-trained LM as memorized high-probability sequences. When the chunks are extracted from the distribution of a more powerful or specialized LM, CD-LM implements a form of knolwedge distillation, adapting the base model’s distribution (without any additional training) by injecting chunks during inference. In this setting CD-LM can either improve smaller models with knowledge drawn from larger models or perform training-free domain adaptation. On the other hand, when the chunks are extracted from the same LM used for generation, they form a self-memory datastore that can be used to improve inference efficiency while maintaining the same model distribution, as in speculative decoding. Finally, the chunks can be not only extracted from a parametric model but even directly curated from human experts. Such external knowledge can be factual information or private data that the LM may not have direct access to.  
+
+CD-LM requires no training and can work with any off-the-shelf language model in both chunk discovery and sequence generation. We conduct a diverse set of empirical studies, including language modeling perplexity, text generation, and domain adaptation, showing the ability of CD-LM to improve inference efficiency and modeling performance.  
+
+
+
+\section{2 BACKGROUND  }
+
+
+While many attempts have been made to improve language modeling and generation efficiency, it remains a significant challenge to address both simultaneously. For example, non-parametric approaches like kNN-LM (Khandelwal et al., 2020) reduce LM perplexity in certain domains, but tends to require a sizable database for retrieval and adds latency during generation; specialized inference algorithms like speculative decoding (Spector & Re, 2023) speed up generation but keep the LM’s distribution fixed. Unlike prior work, CD-LM can both speed up generation and adapt the LM’s distribution, offering a solution to the seemingly insoluble speed-performance dilemma.1  
+
+Non-Parametric Language Modeling kNN-LM (Khandelwal et al., 2020) extends a pre-trained LM by linearly interpolating its distribution with a non-parametric $\mathbf{k}$ -nearest neighbors model based on token retrieval, thereby often improving language modeling performance. However, it is typically very inefficient as it performs retrieval at each token, and it affects the immediate next token distribution via soft mixing. There is a series of proposed methods that improve the efficiency of kNN-LM (He et al., 2021; Alon et al., 2022); however, they are still slower than the pre-trained LM. Unlike kNN-LM, CD-LM does not involve retrieval at each token and makes a hard decision about multiple tokens in a chunk rather than mixing token distributions, enabling it to enjoy the benefits of dynamic retrieval but also save on kNN searches.  
+
+![](images/d304132ae28d80a476d63e681c26e1ee8c41b4211444db89e92ebc67564abc1b.jpg)  
+Figure 3: Overview of CD-LM. Colored text spans are generated together by chunk retrieval, interleaved with LM.  
+
+Speculative Decoding Speculative decoding (Leviathan et al., 2023; Chen et al., 2023; Miao et al., 2024; Spector & Re, 2023; He et al., 2024) is an inference acceleration technique. Given a particular target LLM, a smaller LM is used to quickly generate multiple draft tokens, which are then considered together by the target LLM. The work most closely related to ours is REST (He et al., 2024), which retrieves draft token sequences from an external datastore. While CD-LM also retrieves chunks from a datastore, it is fundamentally different from speculative decoding. Speculative decoding methods use the target LLM for draft token verification, so the language model’s distribution and therefore downstream performance cannot be further improved and no new knowledge can be injected. In contrast, CD-LM is designed to inject chunk-level knowledge into generation so the model distribution can be adapted.  
+
+
+
+\section{3 LANGUAGE MODELING WITH CHUNK GENERATION  }
+
+
+In this section, we introduce a general framework of language modeling that interleaves chunk generations with tokens from a standard autoregressive LM. We then describe the operational details of the chunk generation process with retrieval from a structured database in Section 4. Together, these two sections build the core ideas of CD-LM. Finally, we derive a tractable algorithm for computing sequence probabilities under CD-LM in Section 5.  
+
+
+
+\section{3.1 PRELIMINARIES  }
+
+
+An autoregressive language model assigns a probability to any given sequence of tokens $(x_{1},x_{2},\ldots,x_{N})$ as follows  
+
+$$
+p_{\theta}(x_{1},x_{2},...,x_{N})=\prod_{n=1}^{N}p_{\theta}(x_{n}\vert x_{<n})
+$$  
+
+where $\theta$ is the model parameters and $\boldsymbol{x}_{<n}=\left(x_{1},x_{2},\dots,x_{n-1}\right)$ . Modern LLMs are usually parameterized by Transformer (Vaswani et al., 2017) architectures composed of stacks of self-attention and feedforward layers. Individual tokens from a closed vocabulary $V$ are sequentially passed into the model with their embedding vectors, and the next token probability distribution is computed by  
+
+$$
+\begin{array}{c}{h_{n}=f_{\boldsymbol{\theta}}(x_{1},x_{2},...,x_{n-1})}\\ {p_{\boldsymbol{\theta}}(x_{n}|\boldsymbol{x}_{<n})=\mathrm{softmax}\;(W_{o}h_{n})}\end{array}
+$$  
+
+where $f_{\theta}(\cdot)$ denotes the functional process that maps the previous sequence of tokens into a fixedsize context vector $h_{n}\,\in\,\mathbb{R}^{d}$ , and $W_{o}\,\in\,\mathbb{R}^{|V|\times d}$ is the output embedding matrix that projects the representation vector onto the vocabulary space. Given a learned model, text can be generated by sampling from the next token distribution autoregressively one token at a time, resulting in $N$ forward runs for a sequence of length $N$ .  
+
+3.2 TEXT CHUNK GENERATION MODELING  
+
+Instead of producing text one token at a time, we provide a mechanism that can directly generate a span of multiple consecutive tokens, or chunks, with better efficiency and flexibility of injecting knowledge on fine-grained sub-sentence levels into the model distribution on the fly.  
+
+Formally, we use $n$ to index sequential token position, and $t$ to index generation steps. For every step, we allow generation of either a single token from a base LM $\mathcal{M}_{\theta}$ with parameter $\theta$ , or a text chunk from a different model $\mathcal{G}$ , which we call the chunk proposal model. Let $l_{t}$ denote the sequence length (i.e., the number of tokens) after $t$ steps. Unlike typical token-based decoding, we have $l_{t}\geq t$ . In particular, the chunk proposal model $\mathcal{G}$ takes any prefix $x_{<n}$ and returns a possible text chunk continuation $c_{n}\;=\;(x_{n},x_{n+1},\ldots,x_{n+\tau_{n}-1})$ with acceptance probability $q_{n}\in[0,1]$ , and $\tau_{n}$ the length of the proposed chunk.2 We introduce a binary random variable $z_{n}$ that denotes whether the generation at token position $n$ uses the chunk proposed by $\mathcal{G}$ or defaults to the single token generated by the LM, and $p(z_{n}=1)=q_{n}$ . The chunkintegrated generative process is as follows:  
+
+![](images/43fc4ce260baa643cf4acd089dad186f7f880dea7832ec16d9e626dd75d331bb.jpg)  
+Figure 4: A graphical model illustration of the probabilistic model of CD-LM. The token sequence $x_{n}$ nodes are observed, and chunk acceptance variables $z_{n}$ are latent, governing how many tokens are to be generated at one step.  
+
+(1) For step $t=1$ , LM $\mathcal{M}_{\theta}$ generates the first token $x_{1}$ . We have current sequence length $l_{1}=1$ .   
+(2) At step $t\geq2$ , set next token position: $n=l_{t-1}+1$ ;   
+(3) Chunk proposal: $\mathcal{G}(x_{<n})\to\bar{(c_{n},q_{n})}$ , and length of $c_{n}$ is $\tau_{n}$ ;   
+(4) Sample: $z_{n}\sim\mathrm{Bernoulli}(q_{n})$ ;   
+(5) If $z_{n}=1$ : accept $c_{n}$ , and $l_{t}=l_{t-1}+\tau_{n}$ ;   
+(6) Else $z_{n}=0$ : reject $c_{n}$ . Generate $x_{n}$ from the base LM $\mathcal{M}_{\theta}$ , and $l_{t}=l_{t-1}+1$ ;   
+(7) Move to generation step $t+1$ .  
+
+The above process is also illustrated as a graphical model in Figure 4.  
+
+We call it Chunk-Distilled Language Modeling, or CD-LM. The chunk proposal model $\mathcal{G}$ could take any parametric or non-parametric forms in principle, and next we specifically adopt a simple retrieval model of text segments to reduce the cost of chunk proposals.  
+
+
+
+\section{4 CD-LM WITH FINE-GRAINED RETRIEVAL  }
+
+
+In this section, we describe in detail our retrieval-based chunk proposal model $\mathcal{G}$ needed for step (3) defined in Section 3.2, completing the chunk-interleaved generative process under CD-LM. These details include datastore representation of chunks (Section 4.1), chunk proposal process with retrieval (Section 4.2), and chunk sources that enable different applications (Section 4.3).  
+
+4.1 CHUNK DATASTORE CONSTRUCTION  
+
+Given any text corpus $\mathcal{C}$ , suppose there is an expert model $\mathcal{E}$ (to be elaborated in Section 4.3) that identifies text spans in $\mathcal{C}$ that we want to re-use for generation. These chunks often convey integral information about linguistic rules or factual concepts, such as “is $4\,2^{\,,}$ or “Douglas Adams’” in Figure 1. We construct a datastore of the identified chunks with preceding contexts as $\mathcal{D}=$ $\{(r_{i},s_{i})\}_{i=1}^{|\mathcal{D}|}$ ,r bwithrearrey $r_{i}$ nigs tthh.e previous content leading to the chunk and $s_{i}$ is the text chunk which  
+
+We break down the chunk context $r_{i}$ into two parts, $r_{i}=(u_{i},v_{i})$ , where $u_{i}$ is the preceding context except the last token, and $v_{i}$ is the last token immediately leading into the chunk $s_{i}$ , which we define as an entry token. For instance, for the chunk “is $4\,2^{\bullet}$ in Figure 1, the entry token is “everything”. We will use $u_{i}$ as keys to match contexts for chunk retrieval, and use $v_{i}$ as entry points linking to possible chunk candidates.  
+
+The chunk contexts $u$ are represented by the context vectors $f_{\theta}(u)$ produced by running the forward process of the LM $\mathcal{M}_{\theta}$ as in $\operatorname{Eq}$ (2), which will facilitate context matching in vector space (Khandelwal et al., 2020).3 We store the chunks using a collection of trie structures for efficient storage and retrieval, so that $\mathcal{D}=\{\mathcal{T}_{w_{1}},\mathcal{T}_{w_{2}},...\,,\mathcal{T}_{w_{|V|}}\}$ where each $\mathcal{T}_{w}$ stores all chunks that follow the same entry token $w$ in the LM vocabulary $V$ . We refer to the $\tau_{w}$ as entry token tries, where entry token $w$ is the root node of $\mathcal{T}_{w}$ , each node is a token, and the paths from the root to each node represent either a chunk or a prefix of a chunk. Each node of a trie contains all of the context vectors corresponding to the unique chunk represented by the node (see Figure 3 for an example).  
+
+4.2 ADAPTIVE CHUNK RETRIEVAL FOR GENERATION  
+
+Given previously generated tokens $x_{<n}$ , we formulate the chunk proposal model $\mathcal{G}(x_{<n})~~\rightarrow$ $(c_{n},q_{n})$ as a chunk retrieval process to be interleaved with the LM generation. We use the information from the LM computation en route to the most recent token $x_{n-1}$ to derive plausible chunk proposals. Per Eq (2), right before generation of $x_{n-1}$ , the context vector $f_{\theta}(x_{<n-1})$ provides a summary of the context, which we use as the query for chunk retrieval. We use $x_{n-1}$ as the entry token to confine the chunk search to the corresponding trie $\mathcal{T}_{x_{n-1}}$ , leading to smooth chunk continuations (for instance, see the searched trie in Figure 3). This is crucial for improving the naturalness of the retrieved chunks combined with the previous context. Formally, the chunk proposal model $\mathcal{G}$ is given by  
+
+$$
+\begin{array}{r l}&{(u^{*},c_{n})=\underset{(u,s)\in\mathcal{T}_{x_{n-1}}}{\arg\operatorname*{max}}\ \{\sin(f_{\theta}(x_{<n-1}),f_{\theta}(u))\}}\\ &{\quad\quad q_{n}=g_{\phi}\left(\sin(f_{\theta}(x_{<n-1}),f_{\theta}(u^{*}))\right)}\end{array}
+$$  
+
+where $u$ is the stored chunk context except entry token, $\in\,\tau_{x_{n-1}}$ means searching for each node in trie, $\mathrm{sim}(\cdot,\cdot)$ is a vector similarity measure for which we use cosine similarity, and $g_{\phi}(\cdot)$ is a function parametrized by $\phi$ to convert the similarity scores to acceptance probabilities, which can be tuned for different base LMs $\mathcal{M}_{\theta}$ (implementation details described in Section 6).4  
+
+
+
+\section{4.3 CHUNK EXTRACTION MODEL  }
+
+
+Now we describe the expert model $\mathcal{E}$ that provides the chunks for the datastore. We categorize the possible knowledge sources into three major types intended for various CD-LM applications:  
+
+Knowledge Distillation As suggested earlier in Figure 2, well-trained LLMs memorize text chunks with high probabilities in contexts. This provides a natural source of automatically defined chunks from models’ internal knowledge. Let $\mathcal{M}_{\theta_{T}}$ denote the pre-trained model with parameter $\theta_{7}$ that we derive chunks from. It is often a more powerful model that is larger or more specialized, which serves as a teacher to help adapt the distribution of the base LM $\mathcal{M}_{\theta}$ .2 for an example). Formally, chunk $s$ along with context $r$ is extracted if $\exists r$ , s.t. $p_{\theta}(x_{i}|r,x_{<i})\,\ge\,\gamma,\forall(x_{i},x_{<i})\,\in\,s$ . Note that the chunk datastore construction this way only needs one forward pass of $\mathcal{M}_{\theta_{\mathcal{T}}}$ on $\mathcal{C}$ . We also run a forward pass of the base model $\mathcal{M}_{\theta}$ on the chunk contexts for their hidden vectors for retrieval during generation described in Section 4.2. In this scenario CD-LM essentially performs a form of knowledge distillation from $\mathcal{M}_{\theta_{T}}$ to $\mathcal{M}_{\theta}$ but without any training, by directly injecting $\mathcal{M}_{\theta_{7}}$ defined chunks during inference on the fly. We term this setting as knowledge CD-LM, or KCDLM.  
+
+Self Distillation We can also allow the teacher model $\mathcal{M}_{\theta_{T}}$ to be the same as the base model $\mathcal{M}_{\theta}$ , where we perform self distillation via chunk generation to improve inference efficiency. The datastore serves as an explicit self-memory consisting frequently generated chunks of high probabilities, as shown in Figure 1. By retrieving from the explicit self-memory, we reduce the computational cost of re-generating every token sequentially within the same chunks in future generations from the model. Chunk datastore construction follows the same thresholding heuristic as in KCD-LM, for which we run one single forward pass of $\mathcal{M}_{\theta}$ on $\mathcal{C}$ for extracting both chunks and their context vectors from the same model. This allows us to improve efficiency while maintaining the same model distribution.5 We call this setup self CD-LM, or SCD-LM in short.  
+
+Expert Distillation With KCD-LM and SCD-LM, the extracted chunks represent the parametric knowledge of an LM. In some situations, the chunks could directly come from human experts as added knowledge to inject into generations. For example, one source of such expert knowledge could be hyperlinked text spans in Wikipedia articles. Another important source could be private information in a personal database that cannot be accessed by the parametric model. With chunks provided this way, we only run $\mathcal{M}_{\theta}$ to acquire the context vectors for the datastore construction. This is also a knowledge distillation process but with non-parametric expert-curated knowledge. We call this approach expert CD-LM, or ECD-LM.  
+
+
+
+\section{5 PROBABILITY DISTRIBUTION UNDER CD-LM  }
+
+
+Sampling text with the CD-LM generative process in Section 3.2 is fairly easy, but assigning probabilities to a given text sequence is non-trivial. This requires enumerating all possible chunk proposals at different token positions to marginalize the $z_{n}$ variables, which is complicated due to variable chunk lengths and dependency structures shown in Figure 4. We derive a dynamic program similar to a backward algorithm for computing sequence probabilities under CD-LM, allowing use to measure intrinsic language modeling performance with perplexity (PPL).  
+
+For any given sequence $x_{1:N}^{*}$ , the chunk proposals at every position $(c_{n},q_{n})$ from $\mathcal{G}(x_{<n}^{*})$ are deterministic given the datastore $\mathcal{D}$ and thus can be pre-computed. CD-LM models the joint distribution of $x_{1:N}^{*},z_{2:N}$ as  
+
+$$
+p(x_{1:N}^{*},z_{2:N})=p(x_{1}^{*})\prod_{n=2}^{N}\left[p(z_{n}|x_{<n}^{*},z_{<n})\cdot p(x_{n:n+\tau_{n}-1}^{*}|x_{<n}^{*},z_{\leq n})\right]^{\mathbb{I}\{n;z_{1:n}\}}
+$$  
+
+where the binary indicator function $\mathbb{1}\{n;z_{2:n}\}$ marks whether the token position $n$ is inside of a sampled chunk based on the values of $z_{2:n}$ .6 To marginalize over $z_{2:N}$ , we define  
+
+$$
+\begin{array}{r l}&{\alpha_{n}=p(x_{n:N}^{*}|z_{n}=1,x_{<n}^{*},z_{<n})=\mathbb{1}\{x_{n:n+\tau_{n}-1}^{*}=c_{n}\}\cdot\left[\alpha_{n+\tau_{n}}q_{n+\tau_{n}}+\beta_{n+\tau_{n}}(1-q_{n+\tau_{n}})\right]}\\ &{\beta_{n}=p(x_{n:N}^{*}|z_{n}=0,x_{<n}^{*},z_{<n})=p_{\theta}(x_{n}^{*}|x_{<n}^{*})\cdot\left[\alpha_{n+1}q_{n+1}+\beta_{n+1}(1-q_{n+1})\right]}\end{array}
+$$  
+
+where the function $1\{x_{n:n+\tau_{n-1}}^{*}=c_{n}\}$ indicates whether the proposed chunk $c_{n}$ exactly matches the given text segment, and $p_{\theta}$ is the probability from $\mathcal{M}_{\theta}$ . By computing $\alpha$ and $\beta$ values backward from $N$ to 2, we can get the marginal sequence probability under CD-LM as  
+
+$$
+p(x_{1:N}^{*})=p_{\theta}(x_{1}^{*})\left[\alpha_{2}q_{2}+\beta_{2}(1-q_{2})\right]
+$$  
+
+  
+
+
+
+\section{6 EXPERIMENTS  }
+
+
+We conduct experiments on multiple LMs and tasks. We formulate $g_{\phi}$ in Eq (3) as a simple piecewise linear function, where the maximum context matching similarity score only maps to a non-zero chunk acceptance probability $q_{n}$ if the score is larger than $\eta\geq0$ , which is a hyperparameter. Similarity scores in the range $[\eta,1]$ are then linearly mapped to $[0,1]$ .4 for full details. We decode $z_{n}$ greedily, which is equivalent to accepting $z_{n}=1$ when the chunk context matching similarity score passes a threshold $\textstyle{\frac{{\bar{\eta}}+1}{2}}$ .  
+
+6.1 KNOWLEDGE DISTILLATION  
+
+Model and Data We focus on two objectives: improving language modeling performance and enabling domain adaptation, using a weak pre-trained 137M GPT-2 small model as the base language model, $\mathcal{M}_{\theta}$ , for KCD-LM.7 Dockerflie is a low-resource code language and the base model has poor PPL on the Dockerflie data. This setting allows us to explore the effectiveness of KCD-LM in low-resource settings. For domain adaptation, we focus on adapting to medical and legal domains. We use the Medical Instruction Dataset,8 which contains conversations between an AI assistant and patients during medical consultations, and the Federal Register subset of the Pile-of-Law (Henderson et al., 2022). For these tasks, we set as the teacher model $\mathcal{M}_{\theta_{\mathcal{T}}}$ either a pretrained 1.5B GPT-2 XL model (for code) or an off-the-shelf domain-specific GPT-2 XL model (for WikiText, medical, and law).9 Chunk datastores are constructed from the corresponding training sets. Empirically, extracting chunks from WikiText-103 takes under an hour on four A4000 GPUs for a small base model like GPT-2. Building the WikiText datastore takes up to 1.5 hours on a single A4000 GPU, while other datastores are built within 30 minutes.  
+
+Table 1: Perplexity on test sets with KCD-LM.  
+
+Table 2: MAUVE score on generations with  
+
+![](images/7d23a7f7c4171df8de02257fb9aad0240b7aa9a1cd6876befd771f4c4cbfedfd.jpg)  
+Figure 5: Comparison between KCD-LM and kNN-LM on PPL, along with datastore sizes controlled by chunk extraction threshold $\gamma$ .  
+
+Evaluation We measure PPL computed from 512-token sequences on corresponding test sets.10 PPL is computed with our dynamic program derived under CD-LM distribution in Section 5. Since datastore sizes vary under different chunk extraction thresholds $\gamma$ , we ensure the datastore remains consistent when comparing PPL between KCD-LM and baselines. We also evaluate text generation in these domains with the MAUVE score (Pillutla et al., 2021) to measure the similarity between texts generated by $\mathcal{M}_{\theta}$ and ground truth continuations in the test data. To generate text, we follow prior work on evaluating text generation with kNN-LM (Wang et al., 2023), sampling 5,000 sequences of 100 tokens each from both validation and test sets. These tokens serve as prompts for the LMs to produce an additional 150 tokens using greedy decoding.  
+
+Table 3: SCD-LM results on MT-Bench-80.   
+
+![](images/0deebab9c76ec959eac3423f0c6deaa0e3c2b6243d189815e101ffc63644320b.jpg)  
+
+Table 4: SCD-LM results on MT-Bench-10.   
+
+![](images/bfdb09744d06dae4bab178f84461ee946cccd2030955ec610e16cf3e0837338c.jpg)  
+
+Results As shown in Table 1, our KCD-LM model significantly reduces the PPL across all evaluated datasets, surpassing both the base LM, kNN-LM and RETOMATON (Alon et al., 2022).11 We achieve drastic PPL reduction on WikiText, Code, and Medical with GPT-2 small on the fly without the need to update the weak model. Without any additional training, our distillation process significantly reduces GPT2-small’s perplexity, bringing its performance much closer to that of the teacher model while being ten times smaller. KCD-LM achieves comparable or even better PPL than GPT2- small directly fine-tuned on domain-specific data. We exclude PPL results on Code because we lack a domain-specific model for it, making direct fine-tuning of GPT2-small an unfair comparison with our distillation method. Additional PPL results and datastore sizes are also illustrated in Figure 5, with varying chunk extraction threshold $\gamma$ for datastore construction with $\mathcal{M}_{\theta_{\mathcal{T}}}$ . KCD-LM beats kNN-LM with explicit and sparse chunk retrievals. For text generation, Table 2 shows substantial improvements with our approach over $\mathcal{M}_{\theta}$ measured by MAUVE.12  
+
+
+
+\section{6.2 SELF DISTILLATION  }
+
+
+Experimental Setup We focus on practical scenarios where language models operate in environments with frequent repetition of similar or thematically related queries. In such contexts—common in customer support or domain-specific assistants—building datastores for common topics and caching frequent generations can enhance efficiency. We use three instruction-tuned LMs as $\mathcal{M}_{\theta}$ : GPT-2-xl-conversational,13 LLaMA-2-7b-chat (Touvron et al., 2023), and Mistral-7B-Instruct-v0.2 (Jiang et al., 2023a). We build two testbeds for SCD-LM from the MT-Bench (Zheng et al., 2023) dataset of multi-turn conversational questions. The first testbed uses the initial question from each of the 80 sets of multi-turn questions, which we call MT-Bench-80. For each of the 80 questions, we generate 5 responses using the tested LMs to collectively serve as the corpus to build the chunk datastore $\mathcal{D}_{s}$ that is shared for all 80 questions. The second testbed randomly selects 10 questions from the writing and roleplay categories of MT-Bench, which we call MT-Bench-10. We either use the shared datastore $\mathcal{D}_{s}$ , or build a unique datastore for each question by sampling more responses for paraphrased questions. We set $\gamma=0.9$ for all chunk extractions.  
+
+Evaluation We prompt the models with the same set of questions at test time. We measure both the inference efficiency and generation quality. For efficiency, we compute the relative decrease $(\%)$ in decoding time per token, or token time saved (TTS), and in number of forward passes, or forward passes saved (FPS), by generating texts repeatedly with SCD-LM and comparing with the base LM. To measure quality, we compute the PPL of the generated sequences under the base LM to measure how well SCD-LM retains its distribution, as well as ROUGE-L (Lin, 2004) and BLEURT (Sellam et al., 2020) against the base LM generations.  
+
+Results As shown in Table 3, SCD-LM significantly improves inference efficiency when used with all base LMs.14 For instance, GPT-2-xl-conversational with SCD-LM achieves a $19.59\%$ decrease in mean token times and saves $43.33\%$ forward passes on average. Figure 6 presents additional efficiency and generation quality results with varying retrieval similarity threshold $\eta$ . The higher the value of $\eta$ , the less frequently chunks are used, and the closer SCD-LM generations are to the base  
+
+![](images/777c4fb193813114c788ba2cd24a777ab1d6fa58b0befefc6a499cc6c38f7d16.jpg)  
+Figure 6: SCD-LM performance on MT-Bench-80 with varying retrieval similarity threshold $\eta$ .  
+
+Table 5: Examples of SCD-LM generation using Mistral-7B-Instruct-v0.2 with varying retrieval similarity threshold $\eta$ . Text highlighted in red indicates retrieved chunks.   
+
+![](images/641fc5907d9a5dfe05bb3d4988e23e748405a0379f1e4082c9050c2aedf67e08.jpg)  
+
+Figure 7: Distribution plot for GPT2-xlconversational when answering knowledgeintensive questions about Alan Turing. The plot compares the frequency versus rank of entities in generated responses for the Base LM vs. CD-LM.2 for all plots.  
+
+![](images/3082d6cc2ad4f2f5a95f9429ea330a72eea2d1f5a7848b5455a4cb9b46fa7d7d.jpg)  
+6.3.2 PRIVATE INFORMATION INJECTION  
+
+Table 6: Entity counting metrics for knowledgeintensive QA about Alan Turing with ECD-LM.   
+
+![](images/3dc4406b2e55ab63e8d3e2769cfcf5df36de4ae9dfd914f776303ec1e8bbbf92.jpg)  
+
+![](images/7a45a78002afdff58df56b463c03882c5aab3a3338ab56c2a653630aca1c5077.jpg)  
+Figure 8: Human evaluation results for fluency of responses from the base LM and ECD-LM with 5-point Likert scale: $2=\mathrm{ECD-LM}$ is more fluent, $-2=$ Base LM is more fluent, and $0\,{=}$ they are similar. The y-axis represents the number of questions evaluated for each fluency score.  
+
+Table 7: The PII accuracy $(\%)$ for GPT2-xlconversational and LLaMA-2 under three settings: base language model (Base LM), base language model with in-context learning (Base LM (ICL)), and our method using ECD-LM.  
+
+![](images/5f2530cc6c8690784a953df649d8d2425a5db4b6cab4d8551ddd4285d4562c81.jpg)  
+
+Setup We consider a senario where a user’s personally identifiable information (PII) is stored in an external datastore. We create artificial user profiles containing user information, such as phone number and office address. When building the datastore, we collect common prefixes for each of the information types. We use the common prefixes provided by (Huang et al., 2023) augmented with GPT-4-generated prefixes. After constructing the datastore, we prompt GPT-4 to generate 1000 different queries asking about users’ private information. We then use these queries to prompt GPT2-xl-conversational, LLaMA-2-7b-chat, and Mistral-7B-Instruct-v0.2. To evaluate accuracy, we use regular expressions to extract all PII strings from the generated responses and compare them with the user information in our datastore. See Appendices G.5, G.6, and G.7 for the user profile, example common prefixes, and example queries and generated responses.  
+
+We test three configurations: Base LM: The LM is prompted with questions about PII, but it does not have any prior knowledge of the PII. Base $\mathbf{LM}+\mathbf{ICL}$ (In-Context Learning): All PII is appended to the beginning of the prompt, and then the LM is asked to answer a question regarding the PII. ECD-LM: The base LM is used, but it retrieves information only from the PII datastore.  
+
+Results Table 7 shows the accuracy of private information injection using different models and setups. CD-LM significantly improves accuracy for smaller models like GPT-2-XL, reaching $75.7\%$ compared to $0\%$ for Base LM and $46.4\%$ for Base LM (ICL). This shows our method works well for smaller models and even outperforms in-context learning. For the larger model LLaMA-2, our method achieves similar performance to in-context learning, while saving context space.  
+
+
+
+\section{7 CONCLUSION  }
+
+
+We propose chunk-distilled language modeling (CD-LM) for adaptive and efficient language modeling and generation. Instead of generating a single token at a time, it integrates contiguous text chunk generations through fine-grained retrieval into any pre-trained LM, and augments the LM distributions with flexible knowledge injection from either parametric LMs or nonparametric annotations. By skipping token generation steps within chunks, CD-LM also achieves better efficiency at inference with saved LM forward runs. No training is needed and CD-LM is also lightweight to run by having sparse databases of chunks. Experiments on diverse applications demonstrate improvements with CD-LM on both inference efficiency and language modeling performance. In this work, we do not focus on optimizing the retrieval process. We leave further engineering efforts to reduce retrieval overhead—such as quantization, datastore pruning, or alternative search strategies—for future work.  
+
+
+

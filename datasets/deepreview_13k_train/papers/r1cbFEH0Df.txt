@@ -1,0 +1,419 @@
+\title{How to Correctly Do Semantic Backpropagation on Language-based Agentic Systems}
+
+\begin{abstract}
+Language-based agentic systems have shown great promise in recent years, transitioning from solving small-scale research problems to being deployed in challenging real-world tasks.
+However, optimizing these systems often requires substantial manual labor.
+Recent studies have demonstrated that these systems can be represented as computational graphs, enabling automatic optimization. Despite these advancements, most current efforts in Graph-based Agentic System Optimization (GASO) fail to properly assign feedback to the system's components given feedback on the system's output.
+To address this challenge, we formalize the concept of \textit{semantic backpropagation} with \textit{semantic gradients}---a generalization that aligns several key optimization techniques, including reverse-mode automatic differentiation and the more recent TextGrad by exploiting the relationship among nodes with a common successor.
+This serves as a method for computing directional information about how changes to each component of an agentic system might improve the system's output.
+To use these gradients, we propose a method called \textit{semantic gradient descent} which enables us to solve GASO effectively.
+Our results on both BIG-Bench Hard and GSM8K show that our approach outperforms existing state-of-the-art methods for solving GASO problems.
+A detailed ablation study on the LIAR dataset demonstrates the parsimonious nature of our method
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Language-based agentic systems are being hailed as a major breakthrough in artificial intelligence, with real-world deployment well underway and numerous companies already being founded based on this technology (e.g., \citet{gpt-pilot}
+).
+Such agentic systems typically consist of multiple components.
+These components are selected to perform specific tasks, such as question answering, implementing and executing computer programs, or performing web searches~\citep{wang2024survey, guo2024large}.
+Due to the strength of Large Language Models (LLMs) in doing a wide array of tasks, agentic systems typically have most of their key components rely on querying LLMs. This results in communication between the components of such systems being handled with free-form natural language~\citep{zhuge2023mindstorms}.
+However, while relying on LLMs does partially alleviate the engineering burden of building such systems, designing agentic systems remains nontrivial.
+
+Agentic systems are often modeled as computational graphs, with components involving frozen large models having auxiliary optimizable parameters \citep{zhugegptswarm}.
+When the graph topology is fixed, the challenge of optimizing these parameters to enable an agentic system to solve a specific problem can be modeled as the Graph-based Agent System Optimization (GASO) problem.
+
+Famous methods that attempt to solve the GASO problem include DSPy prompt optimization methods (e.g., COPRO)~\citep{khattab2024dspy}, GPTSwarm's node optimization~\citep{zhugegptswarm}, Textgrad~\citep{yuksekgonul2024textgrad}, and Trace's OptoPrime~\citep{cheng2024trace}.
+DSPy prompt optimization methods and GPTSwarm's node optimization both do so by optimizing a prompt template for each node given the input-output pairs of each node that were observed during predictions.
+In contrast, both TextGrad and OptoPrime adopt a backpropagation-inspired approach, wherein both of them attempt to assign a feedback to each of the components in a system by message passing in the reverse topological order (backward) of the graph given an output feedback.
+However, OptoPrime fails to build a compact and explicit representation of how each component can be improved to pass backward.
+On the other hand, TextGrad omits neighborhood nodes while computing the backward messages.
+We argue that the aforementioned drawbacks of OptoPrime and TextGrad significantly hinder the effectiveness of backpropagation and reverse-mode automatic differentiation.%
+\begin{figure}
+    \centering
+\includegraphics[width=\textwidth]{figures/main_figure_5.pdf}
+    \caption{The entire process of our proposed LLM-based solution to GASO. Given a sample query to optimize over, (1) the forward pass of each node can be executed by joining an instruction alongside other inputs to process. Then, (2,3) the semantic gradients are generated through semantic backpropagation that crucially takes into account the neighboring nodes. And finally, (4), the semantic gradients accumulated are joined with the optimizable parameter (e.g., the instruction) and an optimization meta-prompt to retrieve update in the direction given by the semantic gradients.}
+    \label{fig:main}
+\end{figure}
+
+To address the issues with TextGrad and other proposed GASO solutions, we propose \textit{semantic backpropagation} over \textit{semantic gradients}.
+Semantic gradients generalize mathematical gradients by representing directional information in any semantically interoperable form, indicating  how a variable in a system would change to improve the overall system performance.
+Semantic backpropagation serves to align TextGrad with reverse-mode automatic differentiation~\citep{linnainmaa1970representation, linnainmaa1976taylor}, which is also known as backpropagation~\citep{werbos1982applications} in the context of neural network optimization.
+\footnote{The method proposed in this paper is not to be confused with semantic backpropagation in Genetic Programming~\citep{pawlak2014semantic} where input-output pairs are propagated which, while different, both pass messages backward, in different semantic spaces.}
+We further propose \textit{semantic gradient descent} which uses semantic gradients to update the optimizable parameters, and therefore solve the GASO problem. Our overall approach to solving the GASO problem is summarized in Figure \ref{fig:main}.
+
+We apply semantic backpropagation and semantic gradient descent to BIG-Bench Hard (BBH)~\citep{suzgun2023challenging} and GSM8K~\citep{cobbe2021training}, finding that semantic gradient descent outperforms TextGrad, OptoPrime, and COPRO on these benchmarks.
+We also perform an extensive ablation study on the LIAR~\citep{wang2017liar} dataset, showing that the method is parsimonious.
+
+Our contributions can be summarized as follows: We \textbf{(1)} formalize the Graph-Based Agentic System Optimization (GASO) problem. \textbf{(2)} Introduce Semantic Gradients, Semantic Gradient Descent, and Semantic Backpropagation, demonstrating how these methods resolve challenges in existing GASO solvers. \textbf{(3)} Show improved performance over other GASO solvers, including COPRO, OptoPrime, and TextGrad when evaluating on BBH and GSM8K with a general question-answering setup. \textbf{(4)} Perform an ablation study on the LIAR dataset that highlights a decrease in performance when key components of our methods are removed.
+
+
+
+
+
+
+
+\section{Background}
+
+\label{sec:problem}
+\subsection{The Graph-based Agentic System Optimization Problem}
+\label{sec:gaso}
+The Graph-based Agentic System Optimization (\textit{GASO}) problem aims to optimize a system capable of delivering precise answers to a variety of user queries through a structured computational approach. We formalize this system using a directed acyclic computational graph $(V, E, H, \Theta)$. In this graph, $V$ represents the set of vertices or nodes, with each node $v\in V$ being a variable within the system. $E$ denotes the set of directed edges between nodes, $H$ is a set of forward functions assigned to certain nodes, and $\Theta \subset V$ consists of variables that are optimizable parameters\footnote{While the GASO problem is general and accounts for both node and edge optimization within a graph, in this work, we are interested in credit assignment methods that distribute a semantic feedback to each of the node variables. Therefore, we focus on the special case where we assume that the edges are fixed and only optimize the parameters $\Theta$.}.
+
+For any vertex $v$ in the graph, let $\Predecessors(v)$ denote its predecessor vertices and $\Successors(v)$ denote its successor vertices. If a node $v \in V$ has no predecessors, it either holds a specified user query $Q$ or an optimizable parameter $\theta \in \Theta$. Conversely, if a node has predecessors, it contains the result of computations performed by the function $h_v \in H$ on its predecessors, expressed as:
+\begin{align}
+\label{eq:forward}
+    \forall v\in V \, \text{s.t.} \Predecessors(v) \neq \emptyset,\, v = h_v (\Predecessors(v)).
+\end{align}
+The final response $A$ to the user query $Q$ is produced by a special output node where $\Successors(v) = \emptyset$. The notation $A(Q, \Theta)$ highlights the functional relationship between the graph output and the user query-parameter pair. To obtain the final response, each node of the graph is executed in topological order.
+
+The objective in the GASO problem is to find a set of parameters $\Theta^*$ that minimizes the expected loss $\E_{Q \sim D} [ l(Q, A(Q, \Theta^*))]$ over a distribution of queries $D$. Here, $l$ represents a loss function (e.g., negative utility) defined for a query and its corresponding response. In addition to the loss $l(Q, A)$, a semantic alphanumeric feedback $F(Q, A)$ is provided as an additional signal for optimization.
+In this paper, we focus on cases where variables are represented in free-form natural language; that is, $Q$, $A$, $\Theta$, and the outputs of $h_v$ are composed of alphanumeric strings.
+To effectively process the semantic content, the functions $h_v$ often require querying LLMs.
+For instance, consider a variable $v_a$ linked to its predecessors $v_q$ (a user query) and $v_{\theta}$ (an additional optimizable instruction that can affect the response to $v_q$). The function for $v_a$ could be expressed as
+\(
+    h_{v_a}(v_q, v_{\theta}) = \LLM(v_q \oplus v_{\theta}),
+\)
+where $\oplus$ denotes the concatenation operator, and the $\LLM$ function returns an LLM response. In practical applications, $v_{\theta}$ is often a prompt prefix or suffix optimized to improve the LLM's response to the task. In the general case, forward functions could take more complex forms, such as accessing a file, executing a command line and reading the result, and managing some internal thought~\citep{wang2024survey, zhang2024survey, jin2024llms}.
+
+\subsection{Reverse-Mode Automatic Differentiation}
+When the forward functions and the loss function are differentiable, first-order optimization methods (see the work of \citet{beck2017first}) %
+compute the gradient of the loss with respect to all optimizable parameters to solve GASO. Reverse-mode automatic differentiation~\citep{linnainmaa1970representation, linnainmaa1976taylor}, or RMAD, facilitates this by computing the gradient of each variable in accordance with the chain rule:
+\begin{equation}
+    \frac{\partial l}{\partial v} = \sum_{w\in \Successors(v)} \frac{\partial l}{\partial w} \frac{\partial w}{\partial v}
+    =  \sum_{w\in \Successors(v)} \frac{\partial l}{\partial w} \mathbb{J}_{h_w^v},\label{eq:rmad}
+\end{equation}
+where $h_w^v$ represents the function $h_w$ with variables $\Predecessors(w) \setminus \{v\}$ fixed at their current values. Here, $\mathbb{J}$ denotes the Jacobian of $h_w^v$ with respect to $v$.
+The numerical gradients can be interpreted as a vector that could be added to the weights if one wants to improve the loss function.
+In the next section, we generalize the numerical gradients of RMAD to arbitrary strings, and the RMAD method to handle arbitrary forms of gradients.
+
+
+\section{Methods}
+
+\label{sec:bp}
+Building on the foundational work of \citet{linnainmaa1970representation, linnainmaa1976taylor},
+\citet{pryzant2023automatic}, and \citet{yuksekgonul2024textgrad}, we introduce the concept of \textit{Semantic Backpropagation} over \textit{Semantic Gradients}.
+In the context of the GASO problem, the semantic gradient of a loss function $l(Q, A(Q, \Theta))$ with respect to a variable $v$, denoted as $\nabla_v l_Q$, provides directional information on how altering $v$ can improve system performance for a query $Q$.
+Semantic backpropagation employs the final semantic gradient $\nabla_A l_Q$---typically derived from the answer feedback $F(Q, A)$---to generate semantic gradients $\nabla_v l_Q$ for all variables $v \in V$.
+Specifically, for a given variable $v$, the backward functions---acting as a generalization of the chain rule---are used to partially compute the semantic gradients for $\Predecessors(v)$ using the semantic gradient with respect to $v$. This procedure is systematically applied to all variables $v \in V$, proceeding in reverse topological order.
+
+Using semantic gradients, we propose \textit{Semantic Gradient Descent} to address the GASO problem.
+Generalizing from numerical gradient descent~\citep{lemarechal2012cauchy}, this method involves the following iterative steps: \textbf{(1)} Sample a query $Q$ from a distribution $D$, \textbf{(2)} Apply semantic backpropagation to compute the semantic gradients $\nabla_v l_Q$ for all variables $v \in V$ if $l(Q, A(Q, \Theta))$ exceeds a specified threshold,
+\textbf{(3)} Use an optimizer $\phi$ on each parameter $\theta \in \Theta$, guided by its semantic gradients, to update the optimizable parameters. The subsequent sections detail the mechanisms of semantic backpropagation and semantic gradient descent.
+
+
+
+
+\subsection{Semantic Backpropagation}
+Given a computational graph as described in Section \ref{sec:problem}, in our approach, we generalize the term $\frac{\partial l}{\partial w} \mathbb{J}_{h_w^v}$ in~\Cref{eq:rmad} by introducing a set of backward functions $\{\hat h^v_w : w\in V, v \in \Predecessors(w)\}$. Each backward function $\hat h^v_w$ serves as an analogue to the product of the derivative and the Jacobian in RMAD, extending it to arbitrary forward functions $h_w$ that might incorporate natural language. Specifically, for any query $Q$, node $w\in V$, and $v \in \Predecessors(w)$, $\hat h_w^v$ maps the values of $\Predecessors(w)$, $w$, and the gradient $\nabla_w l_Q$, to a direction $\nabla_v^w l_Q$, in the space of $v$. This direction represents how a change in $v$ would affect $w = h_w(\Predecessors(w))$ in alignment with $\nabla_v^w l_Q$, while keeping the other predecessors fixed.
+
+Instead of the summation over successors in RMAD, we introduce an aggregation function $\mathcal{A}_v$ that combines the set of directions $\{\nabla_v^w l_Q : w\in \Successors(v)\}$ into a single semantic gradient $\nabla_v l_Q$ for each variable $v$. This generalizes the summation operator in RMAD, allowing for more flexible and problem-specific methods of combining gradients. Formally, we have:
+\begin{equation*}
+\label{eq:backward}
+    \nabla_{v}l_Q = \mathcal{A}_v(\{\nabla_v^w l_Q \, : w\in \Successors(v)\}),\, \text{where} \;
+    \nabla_v^w l_Q = \hat h_w^v(\Predecessors(w), w, \nabla_w l_Q)
+\end{equation*}
+for all $w\in \Successors(v)$. Algorithm~\ref{alg:semantic_backpropagation} shows the procedure for backpropagation of semantic gradients. Our formulation thus extends the chain rule and RMAD to accommodate arbitrary functions and aggregation mechanisms.
+\begin{algorithm}[ht]
+\begin{algorithmic}
+\REQUIRE A computational graph with vertices $V$, a set of backward functions $\{\hat h^v_w : w\in V, v \in \Predecessors(w)\}$, a set of gradient aggregation functions $\{\mathcal{A}_v : v\in V\}$, and $\nabla_A l_Q$, the gradient of $l(Q, A)$ for some query $Q$ with respect to answer $A$.
+\FOR{$v$ in $\text{ReverseTopologicalSort}(V \setminus\{A\})$}
+\FOR{$w$ in $\Successors(v)$}
+\STATE $\nabla_v^w l_Q \leftarrow \hat h_w^v(\Predecessors(w), w, \nabla_w l_Q)$
+\ENDFOR
+\STATE $\nabla_v l_Q \leftarrow \mathcal{A}_v(\{\nabla_v^w l_Q \, : w\in \Successors(v)\})$
+\ENDFOR
+\ENSURE $\{\nabla_v l_Q : v\in V\}$
+\end{algorithmic}
+\caption{Semantic Backpropagation}\label{alg:semantic_backpropagation}
+\end{algorithm}
+\begin{tcolorbox}[colback=feedbackPurple!5!white,colframe=white!25!black,title=Implementation 1: Feedback on Optimizable Parameters,label=example:1]
+
+For an \textbf{optimizable parameter} $\theta \in \Theta$, $\nabla_\theta^w l_Q = \hat h_w^\theta(\Predecessors(w), w, \nabla_w l_Q$), the direction of change of $\theta$ that would move $w$ towards to the direction $\nabla_w l_Q$ for $w\in \Successors(\theta)$ is set to be the string:
+ \begin{center}
+ \small
+  \begin{tabular}{l}
+    \textit{Input:}\\
+    $\qquad \Predecessors(w) \setminus \theta$
+     \\
+    \textit{My output:}\\
+    $\qquad w$
+     \\
+    \textit{Feedback received on my output:}\\
+    $\qquad \nabla_w l_Q$.
+  \end{tabular}
+ \end{center}
+Here, the aggregator $\mathcal{A_\theta}$ is string concatenation.
+
+\end{tcolorbox}
+In this work, the forward functions $h_v$ process semantic information from natural language inputs. Our implementation of the corresponding backward functions $\hat h_v^w$ involves querying an LLM to understand how the input value $v$ influences the output value $w$. This requires considering all inputs of $h_w$(i.e., $\Predecessors(w)$) and the semantic gradient of the output $\nabla_w l_Q$. These backward functions can be customized as needed. For example, in this paper, we adopt a specific form of semantic gradient for all optimizable parameters $\theta \in \Theta$, where $\nabla_\theta l_Q$ is calculated as the aggregation over all successors of $\theta$, their semantic gradients, and the predecessors of $h_w$ excluding $\theta$ for all $w \in \Successors(\theta)$.
+Implementation~\hyperref[example:1]{1} provides an example of our approach for computing semantic gradients for optimizable parameters.
+\subsection{Semantic Gradient Descent}\label{sec:optimization}
+In this section, we first formalize the notion of parameter updating given semantic gradients, and then present in detail the procedure in which it is applied.
+\subsubsection{Parameter Update Function}
+\label{sec:alternatives}
+Similar to numerical gradient descent, semantic gradient descent also requires a parameter update function, denoted as $\phi$. Given an optimizable parameter $\theta$ and a set of semantic gradients $G_\theta = \{\nabla_\theta l_{Q_i} : i \in \mathbb{N}, i \leq k\}$ of losses $l_{Q_i}=l(Q_i, A(Q_i, \Theta))$ for queries $Q_i$, the function $\phi$ updates the parameter value by moving $\theta$ according to $G_\theta$. Analogously to numerical gradient descent, the parameter $\theta$ is updated by applying the formula $\theta \leftarrow \theta - \alpha \sum_{i=1}^k \nabla_\theta l_{Q_i}$.
+One method to implement $\phi$ involves querying an LLM for an improved version of $\theta$, conditioned on $G_\theta$.
+We adopt this strategy and detail our implementation of the parameter update function in Implementation~\hyperref[example:2]{2}.
+\begin{tcolorbox}[colback=updateOrange!5!white,colframe=white!25!black,title=Implementation 2: Parameter Update Function,label=example:2]
+Given an optimizable parameter $\theta$ and a set of its semantic gradients $G_{\theta}$,
+\[\phi(\theta, G_\theta) = \text{PostProc}(\text{LLM}(s)),\]
+where s is the string
+ \begin{center}
+ \small
+  \begin{tabular}{l}
+    \textit{I'm trying to write a task-specific question answering assistant.}\\
+
+    \textit{My current prompt is:}\\
+    $\qquad \theta$\\
+
+    \textit{Here are some examples that it did not answer well:}\\
+    $\qquad l(G_\theta)$\\
+
+    \textit{Based on the above examples, write an improved prompt.}\\
+    \textit{Do not include the keyword ``feedback" or any example-specific content in the prompt.}\\
+    \textit{Finish with the improved prompt wrapped by $<$prompt$>$ and $<$/prompt$>$},
+  \end{tabular}
+ \end{center}
+$l$ lists the semantic gradients with a prefix ``$\#\#$ Example k" attached to the $k^{th}$ gradient,
+ and PostProc is a post-processing function that extracts the improved prompt wrapped by $<$prompt$>$ and $<$/prompt$>$ from the LLM response.
+ \end{tcolorbox}
+\subsubsection{The Optimization Procedure}
+Given a parameterized graph, a loss function as described in Section \ref{sec:problem}, and a parameter update function $\phi$, semantic gradient descent solves the agentic graph optimization problem as follows.
+The optimizable parameters $\Theta$ are first initialized. Then, we iteratively execute the following steps.
+First, we repeatedly sample a query $Q$ and only compute the semantic gradients of $l_Q$ with respect to the variables if $l(Q, A(Q, \Theta))$ is above a certain threshold. Move to the next step if this threshold condition is met $b$ times for some batch size $b$.
+Second, we apply $\phi$ to each parameter-gradients pair $(\theta, G_\theta)$ to obtain an alternative parameter value $\theta'$ for each parameter $\theta \in \Theta$.
+Lastly, we apply an update gate\footnote{Note that while TextGrad does not include such a mechanism, the official implementation of TextGrad does include it.} so that the parameters values are updated if the newly generated values outperform the current values on a validation set. Formally, define a validation function
+\[
+L_\text{Val}(\Theta) = \sum_{Q \in \text{Val}} l(Q, A(Q, \Theta)),
+\]
+where elements of $\text{Val}$ are samples from the query distribution $D$.
+We update $\Theta \leftarrow \{\phi(\theta, G_\theta) : \theta\in \Theta\}$ if $ L_\text{Val}(\{\phi(\theta, G_\theta) : \theta\in \Theta\}) \leq L_\text{Val}(\Theta)$.
+See Algorithm \ref{alg:semantic_gradient_descent} for details.
+
+\begin{algorithm}[ht]
+\begin{algorithmic}
+\REQUIRE A computational graph with vertices $V$ and optimizable parameters $\Theta \subset V$, a distribution of queries $D$, a loss function $l$, a output feedback function $F$, a parameter update function $\phi$, a loss threshold $\tau$, a batch size $b$, and validation function $L_\text{Val}$.
+\STATE Initialize $\theta$ for all $\theta \in \Theta$.
+\WHILE{terminate condition not met}
+\STATE $G_v \leftarrow \emptyset$
+\WHILE{$|G_v| < b$ for any $v \in V$}
+\STATE Sample query $Q \sim D$.
+\IF{$l(Q, A(Q, \Theta)) > \tau$}
+\STATE Given an output feedback $F(Q, A(Q, \Theta))$, compute semantic gradients $\nabla_v l_Q$ according to Algorithm \ref{alg:semantic_backpropagation} for all $v \in V$.
+\STATE $G_v \leftarrow G_v \cup \{\nabla_v l_Q\}$ for all $v \in V$
+\ENDIF
+\ENDWHILE
+\IF{$ L_\text{Val}(\{\phi(\theta, G_\theta) : \theta\in \Theta\}) < L_\text{Val}(\Theta)$}
+\STATE $\Theta \leftarrow \{\phi(\theta, G_\theta) : \theta\in \Theta\}$
+\ENDIF
+\ENDWHILE
+\ENSURE $\Theta$
+\end{algorithmic}
+\caption{Semantic Gradient Descent}\label{alg:semantic_gradient_descent}
+\end{algorithm}
+
+\paragraph{Remark} Unlike numerical gradient descent, which keeps updating the solution in each iteration, our practical experience suggests that the update gate is essential to avoid the solution deviating to less favored regions. We argue that this gating process is necessary for consistent performance improvement against the always-update strategy implemented by many first-order optimization methods since there is a lack of theoretical justification for semantic gradient descent to improve. See empirical evidence for the significance of this gating in Section~\ref{sec:ablt}.
+\subsection{Difference with TextGrad}
+Here we present our difference with TextGrad~\citep{yuksekgonul2024textgrad}. Inspired by backpropagation, TextGrad aims to solve the GASO problem by propagating``textual gradients" in the reverse direction of the computational graph. A textual gradient of a variable is defined as a criticism of the variable presented in natural language. See Section~\ref{sec:tg_for_po} for more details on textual gradients.
+Given a query $Q$, TextGrad can be implemented as a special case of semantic backpropagation by having $A_v$ as an identity function and the backward functions $\hat h$ satisfying:
+\begin{align}
+\hat h_w^v(\cdot, w, \nabla_w l_Q) &= \hat h_w^u(\cdot, w, \nabla_w l_Q), \quad \text{and} \label{eq:tg1}\\
+\hat h_w^v(\Predecessors(w), w, \nabla_w l_Q) &= \hat h_w^v(v, w, \nabla_w l_Q)\label{eq:tg2}
+\end{align}
+for all $u\in V, w\in \Successors(v),$ and $u \in \Predecessors(w)$.
+
+We believe \Cref{eq:tg1} and \Cref{eq:tg2} are critical issues of TextGrad.
+These equations can be interpreted as follows: the function to compute $\nabla^w_v l_Q$ is independent of $v$; and $\nabla_v^w l_Q$---the direction of how $v$ changes that would lead to a change of $w$---does not depend on any other predecessors of $w$ .
+These are not the case in reverse-mode automatic differentiation, where $\hat h_w^v$ implements $\frac{\partial l}{\partial w} \mathbb{J}_{h_w^v}$ depending on $v$, and $h_w^v$ is the function $h_w$ with predecessors other than $v$ fixed at their current value.
+Equations~\ref{eq:tg1} and~\ref{eq:tg2} implicitly impose independence and symmetry among the input variables of the forward functions, which is typically not true in computational graphs.
+This limitation is especially apparent in agentic graphs, where heterogeneity between neighboring nodes is of high importance in order for complimentary and synergistic behavior to emerge~\citep{zhuge2023mindstorms}.
+A prominent example is the importance of having system prompts that synergize well with users' prompts in a conversational LLM, which allows it to successfully approach virtually any objective \citep[e.g.,][]{openai2024documentation}. It is neither necessary, nor justified, to ignore nodes with a common successor during backpropagation.
+
+Consider, for a concrete example, a variable $v_a$ with predecessors $v_q$ and $v_\theta$, where $v_q$ is a user query, $v_a$ is an answer to the query, and $v_\theta$ is an instruction that helps produce a good answer to the user query with relation
+    $v_a = h_{v_a}(v_q, v_\theta)$
+for some $h_{v_a}$.
+Following TextGrad's formulation, the gradient with respect to instruction $v_\theta$, would only explicitly depend on $v_\theta$ and $v_a$, and not the question $v_q$.
+It keeps any possibly useful information about the question unavailable when updating $v_\theta$.
+This could potentially lead to an instance learning an instruction $v_\theta$ that completely ignores the nature of the approached question, e.g., attempting to memorize the last suited answer as the exact instruction to follow.
+Moreover, when computing the gradient with respect to the question $v_q$, an identical function is applied as when computing the gradient with respect to $v_\theta$, which disregards the difference between the role of these variables in the system.
+
+Semantic backpropagation solves this issue by incorporating dependency and heterogeneity between neighboring nodes into our formulation.
+In~\Cref{sec:ablt}, we show empirical evidence that this issue can decrease the optimization performance. %
+
+
+
+\section{Related Works}
+
+\subsection{Textual Gradients for Prompt Optimization}
+\label{sec:tg_for_po}
+The concept of textual gradient was first introduced in the context of prompt optimization as ``a local loss signal which contains information on how to improve the current prompt"~\citep{pryzant2023automatic}.
+Furthermore, \citet{pryzant2023automatic} propose ProTeGi, an optimization method that improves prompt parameters that are used to instruct an LLM to produce an answer.
+Given some query-expected-answer pairs, ProTeGi computes a textual gradient for each pair and applies the textual gradients to optimize the prompt parameter.
+By refining the prompt through a series of textual gradient-informed edits, an improvement is observed over baseline methods including APE~\citep{zhoularge} and AutoGPT~\citep{Significant_Gravitas_AutoGPT}.
+GRAD-SUM \citep{austin2024grad} extends ProTeGi by introducing a gradient summation procedure to prevent the prompt updates from being too specific to a query-expected-answer pair. GRAD-SUM also generalizes ProTeGi by incorporating an LLMs-as-a-judge module~\citep{zheng2024judging,fu2023gptscore,chen2024mllm} to relax the expected-answer requirement of ProTeGi.
+While textual gradient ~\citep{Significant_Gravitas_AutoGPT}, ProTeGi and GRAD-SUM introduce first-order optimization-like methods to text-based functions,
+these methods are not defined for variables not directly connected to the output variable. In addition, we observe an interesting analogy between optimizing textual prompts using textual gradients and optimizing numerical prompts using numerical gradients, as done by \citet{schmidhuber2015learning}, where numerical prompts are used to query a world model~\citep{Schmidhuber:90diff1} through a numerical interface.
+\subsection{Other Backpropagation-Inspired Methods for GASO}
+Trace~\citep{cheng2024trace} models the execution trace of computer programs as computational graphs (i.e., trace graphs).
+In Trace, the authors introduce OptoPrime as an optimization algorithm similar to TextGrad and semantic backpropagation that uses a feedback signal propagated backwards in the trace graph and then used for optimization.
+For each node $v$ in the trace graph, a subgraph that contains all nodes $u$ such that there is a path from $v$ through $u$ and then to the output node is assigned as feedback to $v$.
+Conceptually, this subgraph includes all computations influenced by $v$ that have an effect on the output.
+Then, an optimizer (typically based on large language models) leverages the subgraphs as feedback signals to improve the optimizable nodes.
+Although the subgraph of $v$ contains all relevant information on how $v$ influences the output,
+it does not directly indicate how improvements can be made (i.e., there is no gradient-like information).
+Without gradient-like information gained from a backpropagation-like process, an optimizer must itself implicitly try to estimate such information---a very non-trivial task.
+Another issue with the aforementioned subgraphs is that the size of these graphs scales linearly with the depth of the overall computational graph.
+This makes Trace incompatible with large graphs when the optimizer uses transformer-based language models~\citep{vaswani2017attention,schmidhuber1992learning,schlag2021linear}.
+Unlike in Trace,
+semantic backpropagation explicitly backpropagates this gradient-like information and is not limited by the same linear scaling requirement.
+\citet{zhou2024symbolic}---a concurrent work---introduces a backpropagation-like method for GASO which includes edge optimization. However, this approach is limited to chain-structured agentic systems, with edge optimization involving the addition, removal, or rearrangement of agents within the chain.
+\subsection{Other Methods for GASO}
+DSPy \citep{khattab2024dspy} attempts to abstract executions of language model pipelines into \textit{text transformation graphs}.
+Each node in such a graph is defined as a declarative module that takes a type of text as input and transforms it to another type of text as output.
+These nodes are parameterized by the instructions and sets of demonstrations that are prefixed to the input text before querying an LLM. DSPy has many implementations of optimizers for finding the best values for these parameters. Two such optimizers are BootstrapFewshot, which provides few-shot demonstrations for each step in the pipeline, and COPRO, which does coordinate-ascent optimization on
+each of the optimizable instruction prompts in the pipeline. These two optimizers are locally focused, i.e. each step is only implicitly aware of the entire pipeline.
+
+GPTSwarm's node optimization method~\cite{zhugegptswarm} solves GASO when the edges are fixed, which is the focus of this paper. Compared to COPRO, in each iteration of GPTSwarm's node optimization method, each node's parameter is updated with respect to a local objective function specific to the node. Such local objective functions are not always available and require an accurate understanding of the function of each specific node.
+Optimizing such a local objective function also limits the possibility that a node could change its function through global optimization. On the other hand, GPTSwarm offers an edge optimization method that can be used as a complement of our method when approaching the GASO problem with optimizable edges.
+
+
+
+\section{Experimental Results}
+
+
+
+In this section, we evaluate semantic gradient descent on BIG-Bench Hard (BBH)~\citep{suzgun2023challenging}, GSM8k~\citep{cobbe2021training} (for comparing with TextGrad, Trace's OptoPrime and DSPy's COPRO), BigCodeBench (BCB)~\citep{zhuo2024bigcodebench}, and LIAR~\citep{wang2017liar} (for performing ablation and evaluating ProTeGi) datasets. Using these datasets allows for multi-domain benchmarking of our method.
+In all experiments, the number of forward computations required is significantly higher than the number of backward computations and optimizer calls.
+Therefore, for consideration of the cost-quality balance, unless otherwise specified, we use \texttt{gpt-4o-mini} (a relative cheap language model)
+when performing forward execution and \texttt{gpt-4-turbo}
+when executing the backward computation or the parameter update function.
+See \Cref{app:llm} for more discussion on the choice of language models.
+\subsection{General Question Answering}
+\begin{wrapfigure}{R}{0.5\textwidth}
+    \centering
+    \includegraphics[width=1\linewidth]{figures/two_topos.pdf}
+    \caption{Initial graphs for general question answering on BBH and GSM8K (a) and LIAR (b). The variables in green (the $\theta$s) are optimizable.}
+    \label{fig:two_initial_graphs}
+\end{wrapfigure}
+\label{sec:general_qa}
+In the GSM8K, BBH, and BCB datasets, we do not provide any a priori information to the agentic system regarding the task (e.g., we do not tell the system whether ``True" should be represented by a ``1" or by the word ``True").
+
+The computational graph consists of seven variables with three optimizable parameters, initialized identical across tasks. The initialization is chosen to be generic. Specifically, the first two parameters are initialized to ``Work out an intermediate step that helps solve the problem" and the last parameter is initialized to ``Solve the problem" (Figure~\ref{fig:two_initial_graphs}, a).
+
+\textbf{Tasks.}
+We experiment with the GSM8K, BBH, and BCB datasets. The GSM8K dataset includes samples of mathematical problems with a numerical answer. The BBH dataset consists of 23 tasks and 27 subtasks. Mastering all (sub)tasks requires a diverse set of skills, ranging from general mathematics to formal language processing to geometrical reasoning and more.
+BCB consists of diverse coding tasks, with many tasks requiring explicit function calls to external libraries.
+
+\textbf{Baselines.}
+We compare against TextGrad on all three datasets, and OptoPrime on the GSM8K and BBH datasets.
+To make this a fair comparison, we use \texttt{gpt-4o-mini} as the LLM for the GASO loss evaluations and \texttt{gpt-4-turbo} for the backward computations and parameter updates.
+In all instances, we use the official implementations but with minor modifications made to allow them to work without task-specific assumptions.
+We detail these modifications in \Cref{app:baseline}.
+We also compare against the performance of OptoPrime and COPRO on the BBH dataset, as reported by~\citet{cheng2024trace}.
+Due to missing implementation details, we were unable to reproduce a comparable level of performance---even when \texttt{gpt-4o-mini} was fully replaced in the implementation by \texttt{gpt-4-turbo}.
+We compare with the reported results on DSPy's COPRO instead of BootstrapFewshot since the latter optimizes few-shot demonstration examples, while the methods looked at here perform prompt optimization.
+
+
+\textbf{Experimental Setup.}
+For each of the (sub)tasks, we apply our method and the baselines to a training set, and report the accuracy in a test set. For GSM8K, the training set consists of 128 randomly selected samples from the training split, and the test set is GSM8K's test split. For each of the BBH (sub)tasks, following \citet{cheng2024trace}, 20 samples are randomly selected as the training set, and the rest of the samples are taken as the test set. For BCB, we use the first 50 samples training split and the rest for testing. We apply four iterations of optimization with GSM8k and BBH, and 12 for BCB, where an iteration is counted when a new set of parameters is proposed.
+This proposal may be integrated or rejected depending on the (as introduced in~\Cref{sec:optimization}iteration regardless.
+This update gate helps minimize destructive parameter updates and, in our experiments, it is computed using the training samples.
+In our method, we set the query distribution $D$ to be the uniform distribution on the training set. See~\Cref{app:exp} for more details.
+
+\textbf{Results and Analysis.}
+The full experimental results are shown in Table \ref{tab:experimental_results}.
+BBH results are averaged over two categories (NLP and Algorithmic),
+following the methodology of~\citet{suzgun2023challenging}.
+Semantic gradient descent performs roughly equal to TextGrad on BCB and the best in all other instances.
+See~\Cref{app:taskwise} for the BBH subtask-wise results.
+Notably, our method clearly outperforms OptoPrime as well as COPRO under BBH---even in the setting where OptoPrime and COPRO are making exclusive use of a much more expensive language model.
+\begin{table}[ht]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Method}                    & \textbf{GSM8K} & \textbf{BBH NLP} & \textbf{BBH Algorithmic} & \textbf{BCB} \\
+\midrule
+\textbf{Semantic Gradient Descent} & \textbf{93.2}  & \textbf{82.5}    & \textbf{85.6}            & \textbf{27.8} \\
+TextGrad                           & 78.2           & 48.7             & 66.9                     & 27.6 \\
+OptoPrime                          & 83.9           & 42.3             & 50.4                     & - \\
+OptoPrime$^\dag$                   & -              & 75.8             & 80.6                     & - \\
+COPRO$^\dag$                       & -              & 73.9             & 70.0                     & - \\
+\bottomrule
+\end{tabular}
+\caption{Average accuracy of our method on BBH (NLP and Algorithmic categories), BCB, and the GSM8K dataset.
+The $\dag$ symbol denotes results originally reported by~\citet{cheng2024trace}.}%
+\label{tab:experimental_results}
+\end{table}
+
+
+
+\subsection{Specialized Initialization Experiments and Ablation Study}
+\label{sec:ablt}
+In this section, we perform an ablation study to validate the importance of each component in the semantic gradient descent pipeline.
+We look at a more realistic scenario where the variables of the initial graph are highly specialized.
+This matches better the contemporary usage of agentic systems, where the components of the systems are assigned to implement specific and fine-grained functions \citep{wang2024survey}, e.g., considering the question from a particular role's perspective~\citep{li2023camel}.
+\textbf{Task.}
+In
+the LIAR dataset~\citep{wang2017liar},
+the task is to decide whether a political statement is a lie or not.
+Each sample in the dataset consists of five attributes, i.e., (i) the statement, (ii) the political party of the speaker, (iii) the job title of the speaker, (iv) the state from which the speaker comes from, and (v) the
+source from which this statement is released.
+This five-attribute structure leads to an intuitive decomposition of the problem, where each component of an agentic system analyzes an attribute and then merges the analysis%
+(\Cref{fig:two_initial_graphs}, b).
+This intuitive decomposition is desirable here as it allows for a relatively naive yet practically plausible agentic system architecture and prompts.
+Thus we can focus our evaluation on the performance of the optimizers.
+We use the binary classification version of LIAR as done by \citet{pryzant2023automatic}.%
+Here, the prefix of the response (required to be either ``Yes" or ``No") is used to determine how the agentic system has classified a query.
+\textbf{Experiment Design.}
+Following the aforementioned decomposition strategy, we optimize a graph of 13 variables, of which six are optimizable parameters. These six optimizable parameters serve as instructions for an LLM. Five are initialized to guide the LLM in analyzing specific attributes of a sample, while the last parameter instructs the LLM to formulate a final answer based on the previous analyses. See Figure~\ref{fig:two_initial_graphs} for the visualization of the initial graph.
+We compare our optimization method with four variants: (1) optimizing without semantic gradients by removing the feedback (see Implementation~\hyperref[example:1]{1}) as input of the parameter update function;
+(2) optimizing one parameter only (running this variant six times with a different parameter each time and reporting the average); (3) optimizing with semantic gradients computed without conditioning the neighborhood (i.e., as in~\Cref{eq:tg1}), emulating TextGrad in our implementation; and (4) optimizing without the update gate introduced in~\Cref{sec:optimization}, where update gate accepts parameter updates only if they performs better on a validation set.
+
+Each variant is applied for 8 iterations. We run all the variants five times with different random seeds except for the variant that optimizes one parameter only. For this variant
+, we try optimizing each of the six parameters separately (once each) and report the average of these six optimizations.
+We optimize on 50 randomly selected samples from the LIAR training split, as done by~\citet{pryzant2023automatic}. We use these 50 random samples as both the query distribution $D$ and the validation set. Samples with missing values are filtered out since in this study we are interested in the case where each of the attributes is analyzed specifically by a component of the system.
+
+\textbf{Results.}
+Table~\ref{tab:ablation} shows the performance results and their respective standard errors.
+A noticeable drop in performance is observed when a component is removed.
+This supports the minimalism of semantic gradient descent.
+For the one instruction variant, we also compare with a best-of-$N$ method.
+\begin{table}[ht]
+\centering
+\begin{tabular}{l c}
+\toprule
+\textbf{Method}                          & \textbf{Classification Accuracy (\%)} \\
+\midrule
+\textbf{Semantic Gradient Descent}       & \textbf{71.2 $\pm$ 3.2}               \\
+No Gradient                     & 66.0 $\pm$ 2.8                        \\
+One Instruction                       & 67.7                                  \\
+Gradient without Neighborhood            & 63.2 $\pm$ 4.1                        \\
+No Validation                            & 49.2 $\pm$ 5.0                        \\
+\bottomrule
+\end{tabular}
+\caption{Ablation study results on the LIAR dataset. The table reports the empirical mean and standard error of the classification accuracy (i.e., the negative loss plus one). The ``one instruction" variant does not have a corresponding standard error since the optimization results under this category are averaged over different optimizable parameters, which are not i.i.d. random variables. }
+\label{tab:ablation}
+\end{table}
+
+We observe that the semantic gradient descent outperforms its one instruction variant on the best-of-$N$ metric.
+
+
+
+
+\section{Conclusion}
+
+
+
+In this work, we tackled the challenge of optimizing language-based agentic systems by introducing \textit{semantic gradients} and \textit{semantic backpropagation}.
+These concepts generalize existing credit-assignment methods, such as reverse-mode automatic differentiation and TextGrad, by incorporating neighborhood conditioning to compute directional information which can be leveraged to improve each optimizable component of the system.
+This framework enabled us to propose \textit{semantic gradient descent}, effectively solving the Graph-based Agentic System Optimization (GASO) problem.
+Altogether, our results indicate that semantic gradients can significantly reduce the manual effort needed to optimize agentic systems, paving the way for greater scalability in AI solutions.
+
+
+
+\ificlrfinal
+
+

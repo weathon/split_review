@@ -1,0 +1,279 @@
+\title{BTBS-LNS: Binarized-Tightening, Branch and Search on Learning LNS Policies for MIP}
+
+\begin{abstract}
+Learning to solve large-scale Mixed Integer Program (MIP) problems is an emerging research topic, and policy learning-based Large Neighborhood Search (LNS) has been a popular paradigm. However, the explored space of LNS policy is often limited even in the training phase, making the learned policy sometimes wrongly fix some potentially important variables early in the search, leading to local optimum in some cases. Moreover, many methods only assume binary variables to deal with. We present a practical approach, termed Binarized-Tightening Branch-and-Search for Large Neighborhood Search (BTBS-LNS). It comprises three key techniques: 1) the ``Binarized Tightening" technique for integer variables to handle their wide range by binary encoding and bound tightening; 2) an attention-based tripartite graph to capture global correlations among variables and constraints for an MIP instance; 3) an extra branching network as a global view, to identify and optimize wrongly-fixed backdoor variables at each search step. Experiments show its superior performance over the open-source solver SCIP and LNS baselines. Moreover, it performs competitively with, and sometimes better than the commercial solver Gurobi (v9.5.0), especially on the MIPLIB2017 benchmark chosen by Hans Mittelmann, where our method can deliver 10\% better primal gaps compared with Gurobi in a 300s cut-off time.
+\end{abstract}
+
+\section{1 INTRODUCTION AND RELATED WORK  }
+
+
+Mixed-integer programming (MIP) is a well-established optimization problem. In many cases, feasible or even optimal solutions are required under strong time limits, and thus efficiently finding high-quality solutions is of great importance. Recently, machine learning for combinatorial optimization has been an emerging topic (Bengio et al., 2021) with prominent success in different tasks, e.g. graph matching (Yan et al., 2020), and ML4MIP is also an emerging field (Zhang et al., 2023).  
+
+A variety of deep learning-based solving methods were proposed to deal with specific MIP problems, including construction methods (Ma et al., 2019; Xing & Tu, 2020; Fu et al., 2021; Zhang et al., 2020; Khalil et al., 2017; Xin et al., 2021) and iterative-based refinements (Wu et al., 2021b; Chen & Tian, 2019; Lu et al., 2019; Li et al., 2020). While they cannot be directly applied to a wider scope of MIP problems, and thus learning the solving policies for general MIP problems has also been intensively studied, in which the primal heuristics catch more attention, including Large Neighborhood Search (LNS) (Wu et al., 2021a; Song et al., 2020; Nair et al., 2020a) and Local Branching (LB) (Liu et al., 2022). This paper focuses on LNS for solving general MIP problems – the powerful yet expensive iteration-based heuristics (Hendel, 2022).  
+
+Traditional LNS methods usually explore a complex neighborhood by predefined heuristics (Gendreau et al., 2010), in which the heuristic selection is a long-standing challenging task, especially for general MIP problems, which may require heavy efforts to design valid heuristics. Learningbased methods provide a possible direction. Both Imitation Learning (IL) (Song et al., 2020) and Reinforcement Learning (RL) (Wu et al., 2021a; Nair et al., 2020a) showed effectiveness in learning decomposition-based LNS policies. While there still exist some challenges. The performance of the learned policies may significantly degrade when applied to general integers due to the vast scale of candidate values (compared to binary variables), leading to a large complexity in optimization. Moreover, the learned policies may be trapped in local optimum for complicated cases.  
+
+Table 1: Comparison of our method to existing works, and it achieves the SOTA performance on public benchmarks.   
+
+![](images/0dfc3ce54b8dd4d8d920255701f25aefafccfbd7bb4bb57378ea23e7fce3268b.jpg)  
+
+In this paper, we propose a Binarized-Tightening, Branch and Search-based LNS approach (BTBSLNS) for general MIP problems. Specifically, we design the “Binarized Tightening” algorithm to deal with the optimization for general integer variables, where we first binarize the general integer variables and express them with the resulting bit sequence, and then tighten the bound of original variables w.r.t. the LNS decision along with the current solution. This way, the variable bounds can be tightened and effectively explored at a controlled complexity. Based on our binarization formulation, we further employed an attention-based tripartite graph (Ding et al., 2020) to encode the MIP instances and improved the attention architecture by removing the softmax normalization, which allows us to fully preserve the raw weights between neighboring nodes. Meanwhile, to enhance exploration and optimize some wrongly-fixed backdoor variables (Williams et al., 2003; Khalil et al., 2022) by the learned LNS policy, we leverage an extra branching network at each step, providing branching decisions at the global view 1 to help escape local optimum. In a nutshell, this paper can be characterized by the following bullets, which we believe are common building blocks:  
+
+1) Bound Tightening for MIP. We propose a new “Binarized Tightening” scheme for general MIP problems with an efficient embodiment of variable encoding and bound tightening techniques.  
+
+2) Combining global information step by step with LNS. To assist the learned policy in escaping the local optimum efficiently, we devise an extra variable branching mechanism to select and optimize the LNS wrongly fixed backdoor variables, by contrast with the global optimum. The hybrid branch and search policy greatly enhances exploration and show efficiency.  
+
+3) Problem encoding with improved attention architecture. We employ an attention-based tripartite graph to encode MIP problems and capture correlations using an improved attention approach, which demonstrates empirical effectiveness.  
+
+4) Strong empirical results. Experiments on seven MIP problems show that our method consistently outperforms the LNS baselines and open-source SCIP (Gamrath et al., 2020). On MIPLIB2017 benchmark2 chosen by Hans Mittelmann, it even achieves superior performance over Gurobi, purely taking SCIP as the baseline solver.4).  
+
+1.   
+Source code will be publicly available.  
+
+
+
+\section{2 PRELIMINARIES  }
+
+
+Mixed Integer Program (MIP) is in general defined as:  
+
+$$
+\begin{array}{r l}{\operatorname*{min}}&{\mathbf{c}^{\top}\mathbf{x}}\\ {s.t.}&{\mathbf{Ax}\leq\mathbf{b}}\\ &{x_{i}\in\{0,1\},\forall i\in\mathcal{B};x_{j}\in Z^{+},\forall j\in\mathcal{G};x_{k}\geq0,\forall k\in\mathcal{C}}\end{array}
+$$  
+
+where $\mathbf{x}\in\mathbb{R}^{n}$ is a vector of $n$ decision variables; $\mathbf{c}\in\mathbb{R}^{n}$ denotes the vector of objective coefficients. $\mathbf{Ax}\_\mathbf{b}$ denotes the overall $m$ linear constraints, where $\textbf{A}\in\ \mathbb{R}^{m\times n}$ represents the incidence matrix, with $\mathbf{b}\in\mathbb{R}^{m}$ . For general MIP instances, the index set of $n$ variables $\mathcal{N}:=\{1,...,n\}$ can be partitioned into three sets, binary variable set $\boldsymbol{\mathrm{\Delta}}\boldsymbol{\mathrm{\Omega}}_{\boldsymbol{B}}$ , general integer variable set $\mathcal{G}$ and continuous variable set $\mathcal{C}$ . MIP presents greater challenges compared to integer programming (Wu et al., 2021a) as the continuous variables may require distinct optimization policies with integer variables.  
+
+![](images/8cf20604a6c741fd37db8c8a5296fc660a5d14c0d6fd99108b2ba25eec3c0837.jpg)  
+Figure 1: Overview of BTBS-LNS. First, we propose “Binarize Tightening” to handle general integer variables. The Binarize mechanism can binary-encode the variables and split them into suboptimization bits. With the bit-wise decision by LNS, the variable bounds can be refined by bound tightening. Second, we devise a branching network on top of LNS to select wrongly fixed backdoor variables at a global view, which may help efficiently escape local optimum in some cases.   
+variable to optimize Current solution Variable to branch $\bigcirc$ re-optimized solution  
+
+Large Neighborhood Search (LNS) is a powerful yet expensive heuristic for MIP (Gendreau et al., 2010). It takes the best feasible solution so far $\mathbf{x}^{*}$ as input and searches for the local optimum in its neighborhood:  
+
+$$
+\mathbf{x}^{\prime}=\underset{\mathbf{x}\in N(\mathbf{x}^{*})}{\arg\operatorname*{min}}\{\mathbf{c}^{\top}\mathbf{x}\}
+$$  
+
+where $N(\cdot)$ is a predefined neighborhood - the search scope at each step, and $\mathbf{x}^{\prime}$ denotes the optimized solution within $N(\mathbf{x}^{*})$ , obtained by destroying and re-optimization from the current solution.  
+
+Compared to local search heuristics, LNS can be more effective by using a broader neighborhood. However, the selection of neighborhood function $N(\cdot)$ is nontrivial. Heuristic methods mainly rely on problem-specific operators, e.g., 2-opt (Flood, 1956) in TSP, which call for considerable trialand-error and domain knowledge (Papadimitriou & Steiglitz, 1998). The currently popular learningbased approaches mainly focus on binary variables and may be trapped in local optimum due to the learning complexity. In this paper, we propose a binarized-tightening branch-and-search LNS approach, designed to address general MIP problems. It may efficiently escape local optimum when the LNS decisions are unreliable in some scenarios.  
+
+
+
+\section{3 METHODOLOGY  }
+
+
+3.1 OVERVIEW  
+
+Fig. 1 presents the overview of our approach. The input is a MIP instance, with its initial feasible solution $\mathbf{x}_{\mathrm{0}}$ generated by a baseline solver. General integer variables are first encoded into binary substitute variables, and the instance is subsequently represented as a tripartite graph (Ding et al., 2020), which is then fed into the large neighborhood search network, selecting the variable subsets that may need to be optimized at each step, with the remaining variables fixed or boundtightened (see Sec. 3.2 and 3.3). Additionally, we devise an extra branching network to select some wrongly-fixed backdoor variables by the learned LNS policy, to help escape local optimum. With the sequential decisions of the branch and search policy and the resulting tightened variable bounds, an off-the-shelf solver, e.g. SCIP, is applied to obtain the optimized feasible solution $\mathbf{x}_{t+1}$ . Iterations continue until the time limit is reached, and the optimized solutions can be obtained.  
+
+In general, the neighborhood search policy and branching policy are trained sequentially, where the training details are described in Sec. 3.3 and Sec. 3.4, respectively. They optimize the current solution from different views and may remedy the local search drawbacks in some cases.  
+
+
+
+\section{3.2 THE BINARIZED TIGHTENING SCHEME  }
+
+
+Variables in general MIP instances can be divided into three categories: binary, general integer (with arbitrary large value), and continuous variables. Previous studies mainly focused on the binary vari  
+
+ables $(0/1)$ . Limited values greatly simplify the optimization, making it easier to deal with compared to the general integer variables, and some learning frameworks have proved their effectiveness (Wu et al., 2021a; Song et al., 2020). In this paper, we concentrated on more general MIP problems, especially for general integer variables.   
+An intuitive method is to directly migrate some efficient binary LNS approaches, e.g., Wu et al. (2021a), to general integers. In this way, different types of variables are equally treated. At each step, we fix some of the variables (no matter what type the variable belongs to), and solve the sub-MIP with a baseline solver e.g. SCIP (Gamrath et al., 2020) or Gurobi (G., 2020). However, empirical results revealed that the simplified generalized LNS approach (e.g., RL-LNS $\mathrm{W}\mathbf{u}$ et al., 2021a)) is much slower and significantly underperforms the MIP solvers, e.g., Gurobi. (see Table 4 and Fig. 3 for detail comparison.)  
+
+To address these challenges, we propose the so-called “Binarized Tightening” scheme for MIP. The idea is to confine the variables within a narrow range around the current solution, rather than directly fixing them, to balance exploration and exploitation. It shares similar insights with local search, which relies on the current best solution to guide the search, thus avoiding blind search throughout the entire solution space. Specifically, we represent each general integer variable with $d\ =\ \lceil\log_{2}\left(u b-l\bar{b}\right)\rceil$ binary variables at a decreasing magnitude, where $u b$ and $l b$ are original variable upper and lower bounds, respectively. The subsequent optimization is applied to the substitute binary variables, indicating whether the current solution is reliable or not. In this way, we transform the LNS for the original variable to multiple decisions on substitution variables. Note  
+
+Algorithm 1 Bound tightening for binarized integer variable $x_{i}$ Require: Initial lower and upper bound of $x_{i}\colon l b,u b$ ;   
+Current solution value: $x_{i}=p$ ;   
+Binary LNS decision for $x_{i}$ : $a_{i}^{t}$ for unbounded variables, and $\{a_{i,j}^{t}|j=1,2,...,d\}$ for others.   
+Ensure: Tightened $l b$ , ub   
+1: if $x_{i}$ unbounded then   
+2: if $l b$ existed and $a_{i}^{t}=0$ then   
+3: $u b=2p-l b$   
+4: else if ub existed and $a_{i}^{t}=0$ then   
+5: $l b=2p-u b$   
+6: end if   
+7: else   
+8: $\begin{array}{r l}&{=\left\lceil\log_{2}\left(u b-l b\right)\right\rceil}\\ &{\,\,j=0:d\,{\bf d o}}\\ &{{\bf f}\,a_{i,j}^{t}=0\,{\bf t h e n}}\\ &{\,\,l b=\operatorname*{max}(l b,p-1/2(u b-l b));}\\ &{\,\,u b=\operatorname*{min}(u b,p+1/2(u b-l b));}\end{array}$   
+9: for   
+10:   
+11:   
+12:   
+13: else   
+14: break;   
+15: end if   
+16: end for   
+17: end if  
+
+The decision for each substitute variable can be obtained from the LNS policy (see Sec. 3.3), where 0 means the variable indicates reliability at the current encoded bit, and 1 means it still needs exploration. We design a bound-tightening scheme to fully use the bit-wise decisions in Alg. A.8 for a small numerical example). Specifically, let $a_{i,j}^{t}$ represent the decision for the $\stackrel{..}{j}^{t h}$ substitute variable of variable $i$ at step $t$ . Decisions $a_{i,j}^{t}$ for all $j$ are checked, and the upper and lower bounds will be tightened around the current solution whenever $a_{i,j}^{t}\,=\,0$ , as in Line 11-12. Therefore, more fixed substitute variables can contribute to tighter bounds. In our embodiment, variables that sit far from both bounds can have a significantly wider exploration scope than close-to-bound variables, as they showed no explicit “preference” on either bound direction, which is significantly different from Nair et al.1 for detailed discussion). Tightening on either bound when the current solution sits precisely at the midpoint of variable bounds, may contribute to performance degradation, which conceptually drives us to design the bound tightening scheme, tightening the bounds on the far side iteratively.  
+
+In addition, as for unbounded variables, meticulous analysis of MIPLIB2017 benchmark (Gleixner et al., 2021) revealed that all unbounded variables within the instances are characterized by unbounded in only one direction, which means that either $l b$ or $u b$ will exist for all general integer variables (otherwise it will be free to optimize in our implementation). In this respect, we define a virtual upper (lower) bound when $a_{i}^{t}\,=\,0$ as in Line 3 and 5, which share similar insights with regular variables to put the current solution at precisely the midpoint of the updated bounds.  
+
+3.3 GRAPH-BASED LNS POLICY PARAMETERIZATION  
+
+A bipartite graph is recently popularly utilized in Gasse et al. (2019), Nair et al. (2020b), and Wu et al. (2021a) to represent the MIP instance states. However, the objective is not explicitly considered, which may contribute to performance degradation in some cases, e.g., when all discrete variables do not exist in the objectives (Yoon, 2022). To capture the correlations between objectives with variables and constraints reasonably, we propose to describe the input instance as a tripartite graph $\mathcal{G}=(\mathcal{V},\mathcal{C},\mathcal{O},\mathcal{E})$ , where $\nu,\mathcal{C}_{\mathrm{:}}$ , and $\scriptscriptstyle\mathcal{O}$ denote the variable, constraint, and objective nodes, and $\mathcal{E}$ denotes the edges.2, where the new objective node representations are defined as the average states of corresponding variables.  
+
+We parameterize the policy $\pi_{\theta}\big(a_{t}|s_{t}\big)$ by an attention-based Graph Convolution Network (GCN). Different from Graph Attention Networks (GATs) utilized in (Velicˇkovic´ et al., 2018; Ding et al., 2020), we remove the softmax normalization to fully reserve the raw weights between neighboring nodes and edges, capturing the contributions for each node to the final objectives (see Table 2, 4 for comparison with traditional message passing mechanism: LNS-ATT). The ${\mathcal C}\to\mathcal V$ passing is as follows (likewise for others):  
+
+$$
+\mathbf{h}_{i}^{t+1}=f_{\mathit{c}\nu}\left(\mathrm{CONCAT}\left(\mathbf{h}_{i}^{t},\frac{\sum_{j\in\mathcal{C}\cap N_{i}}w_{i j}^{t}(\mathbf{h}_{j}^{t}+\mathbf{h}_{{e}_{i j}}^{t})}{|\mathcal{C}\cap N_{i}|}\right)\right)
+$$  
+
+where $\mathbf{h}_{i}^{t}$ and $\mathbf{h}_{e_{i j}}^{t}$ are the features of node $i$ and edge $(i,j)$ at step $t$ ; $f_{\mathit{c}\nu}$ is a 2-layer perceptron with relu activation that maps the current states to the next iteration $\mathbf{h}_{i}^{t+1}$ ; $N_{i}$ denotes the neighborhood nodes of $i$ and $|\mathcal{C}\cap N_{i}|$ is the counts of neighborhood constraint nodes for node $i$ , used to normalize the weighted sum neighboring features; $\bar{w_{i j}^{t}}$ denotes the weighted coefficient between node $i$ and node $j$ at step $t$ , measuring their correlations as follows, where $\mathbf{W}_{\mathcal{C V}}$ is the weight matrix between constraint and variable.  
+
+$$
+\boldsymbol{w}_{i j}^{t}=\sigma_{s}(\mathbf{W}_{\mathcal{C V}}\cdot\mathrm{CONCAT}(\mathbf{h}_{i}^{t},\mathbf{h}_{e_{i j}}^{t},\mathbf{h}_{j}^{t}))
+$$  
+
+At each graph attention layer, the message passing between different types of nodes are $\nu\rightarrow\mathcal{O}$ , $\mathcal{O}\to c,\bar{\nu}\to c,c\to\mathcal{O},\mathcal{O}\to\mathcal{V},c\to\bar{\nu},$ which are calculated as Eq. 3 sequentially. In this way, after $K$ iterations, the features for both the nodes and edges are updated. We finally process the variable nodes by a multi-layer perceptron and the output value can be regarded as the destroy probability for each variable at this step, serving as the neighborhood search policy in Fig. 1. It is trained with $\mathrm{{Q}}.$ -actor-critic by RL, following the same protocol with $\mathrm{Wu}$ et al. (2021a), while with the following differences:  
+
+States: We adopt an attentional tripartite graph to capture correlations among variables, constraints, and objectives.  
+
+Actions: For the general variable $x_{i}$ with $d$ substitutes, the LNS decision at step $t$ will contain $d$ binary actions $a_{i,j}^{t}$ , indicating the current solution reliable or not at each encoded bit $j$ (see Alg. 1).  
+
+Transition and rewards: We follow the same protocol as in (Wu et al., 2021a), where the next state $s_{t+1}$ is obtained by the baseline solver, and the reward is defined as objective improvements.  
+
+3.4 STEP-WISE GLOBAL INFORMATION BY BRANCHING  
+
+As discussed above, previous single-policy approaches were easily trapped in local optimum at an early stage in some complicated tasks, due to the learning complexity and limited exploration even in the training phase. To remedy this issue, an intuition is to select and optimize those wrongly fixed backdoor variables by LNS policy at each step. With this insight, we proposed to learn an extra branching network with  
+
+![](images/8a14f5e6ae1a06ba42d2f70e6436c0ae5ce754c074deb8e1d31a53a0f0e7f213.jpg)  
+Figure 2: Global branching vs Local branching on different label collection schemes  
+
+imitation learning on top of LNS to filter out those variables at each step. Note that it was only applied to binary variables which are more likely to be backdoors that were fixed earlier, leading to local optima.  
+
+The most critical issue for the branching policy learning is the collection of branching variable labels. In other words, we need to figure out how to identify the potentially wrongly-fixed variables at each step. We proposed two different variants, which deal with the issue in global and local view respectively as in Fig. 2:  
+
+Global branching (BTBS-LNS-G): It gathers labels from the fixed variables by LNS at each step and contrasts them with the global optimal solution. Variables that exhibit differing values between these solutions are indicative of potentially misclassified variables within the current LNS decisions from a global perspective. Since the global optimal solution may be too difficult to acquire in a reasonable time, it  
+
+was replaced by the best-known solution obtained across various approaches within the same time budget.  
+
+Algorithm 2 Offline training of branching policy for LNS  
+
+Require: graph-based states $S=\{s_{t}|t=1,2,...,n\}$ LNS decisions at each step $\begin{array}{r l r}{N}&{{}=}&{\{n_{t}|t\ \ =\ }\end{array}$ $1,2,...,n\}$ branching variable labels $B=\{b_{t}|t=1,2,...,n\}$ collected from the global or local branching;   
+Ensure: trained policy $\pi_{\theta}(B|S,N)$   
+1: // Samples are collected by resolving the training instances, along with the learned LNS;   
+2: Let $D=\{((s_{t},n_{t}),b_{t})|t=1,2,...,n\}$ .   
+3: // train the model;   
+4: Initialize all learnable parameters $\theta$ ;   
+5: while stopping criteria not meet do   
+6: Randomly select a batch of instances $D_{C}$ from D;   
+7: Optimize $\theta$ by minimizing cross-entropy loss;   
+8: end while  
+
+Local branching (BTBS-LNS-L): Different from the global view contrast, it gathers labels by incorporating the following local branching constraints (Liu et al., 2022) at each step:  
+
+$$
+\sum_{i\in B\cap\mathcal{F}}|x_{i}^{t+1}-x_{i}^{t}|\leq k
+$$  
+
+where $\mathcal{F}$ is the currently fixed variables set by LNS. With this extra constraint, the re-defined sub-MIP can be solved by the baseline solver, and up to $K$ changed fixed variables will be selected at a local view as the branching variable labels at the current step. The selected variables are regarded as locally wrongly fixed variables by LNS.  
+
+With the collected labels for each variable, branch (1) or not (0), the branching network can be trained offline. Note that the input states are collected by resolving the training instances, along with the learned LNS policy. The labels are also gathered within the resolving at each step. Then the graph-based features are fed into a similar  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+4.1 SETTINGS AND PROTOCOLS  
+
+Peer methods. We compare with the following baselines in a 200s time limit by default.  
+
+1) SCIP (v7.0.3), Gurobi (v9.5.0): state-of-the-art open source and commercial solvers, and were fine-tuned with the aggressive mode to focus on improving the objectives.  
+
+2) U-LNS(Wu et al., 2021a), R-LNS(Song et al., 2020): randomized LNS following its implementation as in Wu et al. (2021a) and Song et al. (2020).  
+
+3) DINS (Ghosh, 2007), GINS (Maher et al., 2017), RINS (Danna et al., 2005) and RENS (Berthold, 2014): heuristic-based LNS policies that were common utilized.  
+
+![](images/f74f3a32ccf268103ed2456a5762646423becd4a0b75cd0936d23b56be7ab553.jpg)  
+Figure 3: Performance on Item (Left) & AMIPLIB (Right).  
+
+
+
+\section{4) FT-LNS (Song et al., 2020), RL-LNS (Wu et al., 2021a), Branching (Sonnerat et al., 2021), CL-LNS (Huang et al., 2023b) and GNN-GBDT (Ye et al., 2023): some learning-based LNS policies with imitation learning or RL, following the same protocol as its original implementation.  }
+
+
+5) LNS-TG, LNS-Branch, LNS-IBT, LNS-IT, LNS-ATT: Degraded versions of BTBS-LNS, where we i) replace the tripartite graph with bipartite graph (LNS-TG); ii) remove the extra branching (LNS-Branch); iii) remove the binarized encoding (LNS-IBT) and bound tightening (LNS-IT); iv) replace the attention-based graph network with widely used GAT (Velicˇkovi´c et al., 2018) (LNSATT).2 for details.  
+
+6) BTBS-LNS-F: A variant of BTBS-LNS, where we replace our bound tightening mechanism with (Nair et al., 2020b).  
+
+Instances. It covers both binary and MIP problems. We follow (Wu et al., 2021a) to test four NPhard binary Integer Programming Problems: Set Covering (SC), Maximal Independent Set (MIS), Combinatorial Auction (CA), and Maximum Cut (MC). We generate 200, 20, and 100 instances as training, validation, and testing sets, respectively. To evaluate the generalization ability, we also generate scale-transfer test instances, such as SC2 and MIS4 in Table 3.2.  
+
+We also test on two MIP datasets in Machine Learning for Combinatorial Optimization (ML4CO) competition3: Balanced Item Placement (Item) and Anonymous MIPLIB (AMIPLIB), on their official testing instances. Balanced Item Placement contained 1050 binary variables, 33 continuous variables, and 195 constraints per instance. The anonymous MIPLIB consists of a curated set of instances from MIPLIB2017, a long-standing benchmark for MIP solvers with diverse distributions, in which general integer variables are included. We also show empirical results on the whole MIPLIB2017 benchmark set in Sec. 4.5, where our BTBS-LNS even surpasses Gurobi on average.  
+
+Hyperparameters. We run experiments on an Intel 2.50GHz CPU.5.6). We use the open-source SCIP (v7.0.3) as the baseline solver by default (recall the blue box in Fig. 1).4. We train 20 epochs for each instance, with 50 iterations per epoch and a 2s re-optimization time limit per iteration. LNS and branching are trained sequentially, with RL (see Sec. 3.3) and imitation learning (see Sec. 3.4), respectively. The graph convolutional layers were set as $K\,=\,2$ for both policies, with 64-dimensional latent representations for the nodes and edges. Specifically for branching, we set the max branching variables $k=50$ in Eq. 5 for the local branching variant. In the inference phase, the branching variable ratio $r$ in Alg. 3 is empirically set to $10\%$ for both branching variants. BTBSLNS by default denotes the local branching variant BTBS-LNS-L throughout this paper.  
+
+Evaluation metric. We calculate the average primal gap (Nair et al., 2020b) to measure the gap between the current solution $\mathbf{x}$ and the best-known solution $\mathbf{x}^{*}$ found by all methods among the $N$ testing instances, within a fixed time limit $T_{0}$ :  
+
+$$
+g a p=\frac{1}{N}\sum_{i=1}^{N}\frac{|\mathbf{c}_{i}^{\top}\mathbf{x}_{i}-\mathbf{c}_{i}^{\top}\mathbf{x}_{i}^{*}|}{\operatorname*{max}\{|\mathbf{c}_{i}^{\top}\mathbf{x}_{i}|,|\mathbf{c}_{i}^{\top}\mathbf{x}_{i}^{*}|\}}
+$$  
+
+We also calculate the average Primal Integral (PI, (Huang et al., 2023b; Achterberg et al., 2012)) to evaluate the anytime performance within the time limit:  
+
+$$
+P I=\frac{1}{N}\sum_{i=1}^{N}\left(\int_{t=0}^{T_{0}}\mathbf{c}_{i}^{\top}\mathbf{x}_{i}^{t}d t-T_{0}\mathbf{c}_{i}^{\top}\mathbf{x}_{i}^{*}\right)
+$$  
+
+where $\mathbf{x}_{i}^{t}$ denotes the best solution within $t$ for instance $i$ .  
+
+4.2 OVERALL PERFORMANCE EVALUATION  
+
+Table 2 compares the results on integer programming. As can be seen, compared with SCIP and all competing LNS baselines, both BTBS-LNS-G and BTBS-LNS-L achieve consistently superior performance across all problems. LNS-TG, LNS-Branch, and LNS-ATT are degraded versions of BTBS-LNS, and they all perform slightly worse, revealing the effectiveness of the attention-based tripartite graph and the extra branching policy. Comparing the two variants, BTBS-LNS-G delivers consistently superior performance over BTBS-LNS-L, and it even surpasses the leading commercial solver on SC, CA, and MC. Note that detailed anytime performance on these instances are shown in Fig. 6 to Fig.7, further revealing the effectiveness of BTBS-LNS.  
+
+We also test our method on two NP-hard MIP problems, and the results are gathered in Table 4. Note that the anytime primal gap comparison is also shown in Fig. 3. Our method consistently outperforms SCIP and the competing LNS baselines and is slightly worse than Gurobi, capable of finding even better solutions for around $27\%$ test instances on both Item and AMIPLIB.  
+
+For the AMIPLIB problem, which contains a curated set of instances from MIPLIB, we split the instances into train, validation, and test sets by $70\%$ , $15\%$ , and $15\%$ with cross-validation. Policies learned from diverse training instances are directly applied to the test set. We increase the solving and re-optimization time limit at each step to 1800s and 60s for the instances, as they are too large to be solved. Different from $\mathrm{W}\mathbf{u}$ et al. (2021a), we consistently utilize open-source SCIP as the baseline solver. As seen from Table 4 and Fig. 3, our method significantly outperforms SCIP and LNS baselines and even delivers slightly better performance than Gurobi at an early stage. LNS-IBT, LNS-IT and BTBSLNS-F achieve significantly inferior performance than our BTBS-LNS, showing the effect of the “Binarized Tightening” technique and its superiority over Nair et al. (2020b).  
+
+Table 4: Performance on MIP instances.   
+
+![](images/c638d18d9ca1b8cf4c9be09bd9c023fa45a3bc9b509f6b32a76e8c1f3d775fb0.jpg)  
+
+
+
+\section{4.3 PROBLEM-SCALE GENERALIZATION ABILITY STUDY  }
+
+
+We test the generalization ability in line with (Wu et al., 2021a) with a 200s time limit. We directly use the trained policies on small-scale problems in Sec. 4.2, with results shown in Table 3.  
+
+As can be seen, the two variants show similar performance on the generalized instances. Compared with SCIP and all the competing LNS baselines, our approach still delivers significantly superior performance, showing a better generalization ability. As the problem sizes become larger, it can produce even better results than Gurobi on SC2, SC4, CA2, CA4, and MC4, and only slightly inferior on the remaining 3 groups. It suggests that our policies can sometimes be more efficient for larger instances than the leading commercial solver. Notably, there is a significant gap between BTBS-LNS and Gurobi for Combinatorial Auction (CA), particularly on CA4.  
+
+Table 5: Evaluation on CA against Gurobi.   
+
+![](images/db79bf6c3fc618a987a44489f4d8b1e220a968e6d59b5d3aeb742a0341059591.jpg)  
+
+We further increase the time limit to 500s and 1000s respectively on CA, with results shown in Table 5. Our method consistently outperforms Gurobi with the same time limit. For CA4, it can even produce better solutions with a much shorter time limit. It empirically requires over 3 hours for Gurobi to deliver the same primal gap on CA4, being $58\times$ slower than our method.  
+
+![](images/804e386dc12edb42aa5620baccb5fc773544ba4c57661f40ab7aeb0daa7f4727.jpg)  
+
+Figure 4: Impact of different branching ratios (Left). Selected & Optimized variables by the LNS (Middle) & Branching (Right) on Balanced Item Placement instances. The upper dotted line denotes the selected variable ratio that can be re-optimized by the learned Search & Branch policy, while the Solid red line denotes the variable ratio with solution value changes.  
+
+Table 6: Performance comparison on the whole MIPLIB2017 benchmark set.   
+
+![](images/f78c0f96b5f328e3ed3fead760fbf0074869dd322e8504c034a8b310816263c4.jpg)  
+
+
+
+\section{4.4 BRANCHING POLICY STUDY BY VARIABLE RATIOS  }
+
+
+To enhance exploration, an extra branching policy was developed to incorporate global information and help the learned LNS policy escape local optimum. Fig. 4 (Left) depicts the impact of branching variables ratios $r$ (see Alg. 3).  
+
+When the ratio $r<0.1$ , a larger size leads to better performance, optimizing some wrong decisions made by the learned LNS. Fig. 4 (Right) depicts the filtered and updated variable ratios. As can be seen, with the increasing iterations, more and more LNS fixed variables were re-optimized by the extra branching policy, indicating the LNS decisions were somewhat unreliable in some cases. In other words, branching on top of LNS was quite necessary to make up for some potential wrong decisions. However, when the branching size becomes extremely large, the performance significantly degrades limited by the solving ability.  
+
+
+
+\section{4.5 EXPERIMENTS ON MIPLIB2017 BENCHMARK  }
+
+
+To further evaluate our proposed approach on some heterogeneous and hard instances, we also evaluated the whole MIPLIB2017 benchmark set from Hans Mittelmann. It contains 240 instances with diverse distributions and difficulties. We compared different methods in a 300s time limit, which is the geometric mean of solving time of the solved instances with SCIP, and the re-optimization time for each iteration was set as 5s. Other hyperparameters remain the same as AMIPLIB in Sec. 4.2. We perform cross-validation to make a full comparison on all the instances and split them into training, validation, and testing sets by $70\%$ , $15\%$ , and $15\%$ at each round. Policies learned from diverse training instances are directly applied to the test set.  
+
+The overall comparison results were gathered in Table 6. As can be seen, our proposed BTBS-LNS can deliver $10\%$ better primal gaps compared with Gurobi and achieve significantly better results compared with all the competing baselines. Compared with Gurobi, it can deliver better solutions on $12.4\%$ instances, and obtained equally better solutions on $77\%$ instances, indicating its effectiveness and generalization ability. Furthermore, we notice that BTBS-LNS-F performs slightly inferior to Gurobi and our approach, further revealing the superior performance of our Binarized Tightening technique over Nair et al. (2020b).8.3.  
+
+
+
+\section{5 CONCLUSION AND OUTLOOK  }
+
+
+We have proposed a binarized tightening branch and search approach to learn LNS policies. It was designed to efficiently deal with general MIP problems and delivers superior performance over numerous competing baselines, including MIP solvers, learning and heuristic-based LNS approaches, on ILP, MIP datasets, and even heterogeneous instances from MIPLIB2017. Sufficient ablation studies demonstrate the effectiveness of each component. Considering the potential of our proposed BTBS-LNS on large-scale and cross-distribution instances, the applications in real-world scenarios may be our future direction.  
+
+
+

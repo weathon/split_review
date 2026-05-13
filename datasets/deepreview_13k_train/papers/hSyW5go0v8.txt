@@ -1,0 +1,489 @@
+\title{Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection}
+
+\begin{abstract}
+Despite their remarkable capabilities, large language models (LLMs) often produce responses containing factual inaccuracies due to their sole reliance on the parametric knowledge they encapsulate. 
+Retrieval-Augmented Generation (RAG), an ad hoc approach that augments LMs with retrieval of relevant knowledge, decreases such issues. 
+However, indiscriminately retrieving and incorporating a fixed number of retrieved passages, regardless of whether retrieval is necessary, or passages are relevant, diminishes LM versatility or can lead to unhelpful response generation.
+We introduce a new framework called {\bf Self-Reflective Retrieval-Augmented Generation (\model)} that enhances an LM's quality and factuality through retrieval and self-reflection. 
+Our framework trains a single arbitrary LM that adaptively retrieves passages on-demand, and generates and reflects on retrieved passages and its own generations using special tokens, called {\it reflection} tokens. Generating reflection tokens makes the LM controllable during the inference phase, enabling it to tailor its behavior to diverse task requirements. 
+Experiments show that \model (7B and 13B parameters) significantly outperforms state-of-the-art LLMs and retrieval-augmented models on a diverse set of tasks. 
+Specifically, \model outperforms ChatGPT and retrieval-augmented Llama2-chat on Open-domain QA, reasoning and fact verification tasks, and it shows significant gains in improving factuality and citation accuracy for long-form generations relative to these models.\footnote{{Our code and trained models are available at \url{https://selfrag.io/}}.}  
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+State-of-the-art LLMs continue to struggle with factual errors~\citep{mallen2022not,min2023factscore} despite their increased model and data scale~\citep{ouyang2022training}. 
+Retrieval-Augmented Generation (RAG) methods (Figure~\ref{fig:taxonomy} left;~\citealt{lewis2020retrieval,guu2020retrieval}) augment the input of LLMs with relevant retrieved passages,  reducing factual errors in knowledge-intensive tasks~\citep{ram2023context, asai-etal-2023-retrieval}. 
+However, these methods may hinder the versatility of LLMs or introduce unnecessary or off-topic passages that lead to low-quality generations ~\citep{pmlr-v202-shi23a} since they retrieve passages indiscriminately regardless of whether the factual grounding is helpful.
+Moreover, the output is not guaranteed to be consistent with retrieved relevant passages~\citep{gao2023enabling} since the models are not explicitly trained to leverage and follow facts from provided passages. 
+This work introduces {\bf Self-Reflective Retrieval-augmented Generation (\model)} to improve an LLM's generation quality, including its factual accuracy without hurting its versatility, via on-demand retrieval and self-reflection. 
+We train an arbitrary LM in an end-to-end manner to learn to reflect on its own generation process given a task input by generating both task output and intermittent special tokens (i.e., \textit{reflection tokens}). Reflection tokens are categorized into \textit{retrieval} and \textit{critique} tokens to indicate the need for retrieval and its generation quality respectively (Figure~\ref{fig:taxonomy} right). 
+{
+In particular, given an input prompt and preceding generations, \model first determines if augmenting the continued generation with retrieved passages would be helpful. If so, 
+it outputs a {\bf retrieval} token that calls a retriever model on demand (Step 1). 
+Subsequently, \model concurrently processes multiple retrieved passages, evaluating their relevance and then {\bf generating} corresponding task outputs (Step 2). It then generates critique tokens to \textbf{criticize} its own output and choose best one (Step 3) in terms of factuality and overall quality. 
+This process differs from conventional RAG (Figure~\ref{fig:taxonomy} left), which consistently retrieves a fixed number of documents for generation regardless of the retrieval necessity (e.g., the bottom figure example does not require factual knowledge) and never second visits the generation quality.
+Moreover, \model provides citations for each segment with its self-assessment of whether the output is supported by the passage, leading to easier fact verification. }
+
+\model trains an arbitrary LM to generate text with reflection tokens by unifying them as the next token prediction from the expanded model vocabulary. 
+{
+We train our generator LM on a diverse collection of text interleaved with reflection tokens and retrieved passages. 
+Reflection tokens, inspired by reward models used in reinforcement learning~\citep{ziegler2019fine, ouyang2022training}, are inserted offline into the original corpus by a trained {\it critic} model. This eliminates the need to host a critic model during training, reducing overhead.
+The critic model, in part, is supervised on a dataset of input, output, and corresponding reflection tokens collected by prompting a propriety LM (i.e., GPT-4; \citealt{openai2023gpt}).
+While we draw inspiration from studies that use control tokens 
+to start and guide text generation~\citep{lu2022quark,keskar2019ctrl},
+our trained LM uses critique tokens to assess its own predictions after each generated segment as an integral part of the generation output.
+}
+{\model further enables a customizable 
+decoding algorithm to satisfy hard or soft constraints, which are defined by reflection token predictions.}
+In particular, our inference-time algorithm enables us to (1) flexibly adjust retrieval frequency for different downstream applications and (2) customize models' behaviors to user preferences by leveraging reflection tokens through segment-level beam search using the weighted linear sum of the reflection token probabilities as segment score. 
+\begin{figure}[t!]
+\includegraphics[width=\textwidth]{figs/teaser_self_rag_v8.pdf}\caption{Overview of \model. \model learns to retrieve, critique, and generate text passages to enhance overall generation quality, factuality, and verifiability. 
+} \label{fig:taxonomy}
+\end{figure}
+
+Empirical results on six tasks, including reasoning and long-form generation, demonstrate that \model significantly outperforms pre-trained and instruction-tuned LLMs that have more parameters and  widely adopted RAG approaches with higher citation accuracy. 
+In particular, \model outperforms retrieval-augmented ChatGPT on four tasks, Llama2-chat~\citep{touvron2023llama} and Alpaca~\citep{dubois2023alpacafarm} on all tasks. 
+Our analysis demonstrates the effectiveness of training and inference with reflection tokens for overall performance improvements as well as test-time model customizations (e.g., balancing the trade-off between citation previsions and completeness). 
+
+
+
+\section{Related Work}
+
+\noindent{\bf Retrieval-Augmented Generation.}
+{
+Retrieval-Augmented Generation (RAG) augments the input space of LMs with retrieved text passages~\citep{guu2020retrieval,lewis2020retrieval}, leading to large improvements in knowledge-intensive tasks after fine-tuning or used with off-the-shelf LMs~\citep{ram2023context}. 
+A more recent work~\citep{luo2023sail} instruction-tunes an LM with a fixed number of retrieved passages prepended to input, or pre-train a retriever and LM jointly, followed by few-shot fine-tuning on task datasets~\citep{izacard2022few}. }
+While prior work often retrieves only once at the beginning, \cite{jiang2023active} propose to
+adaptively retrieve passages for generation on top of a proprietary LLM or ~\cite{schick2023toolformer} train an LM to generate API calls for named entities. 
+Yet, the improved task performance of such approaches often comes at the expense of runtime efficiency~\citep{mallen2022not}, robustness to irrelevant context~\citep{pmlr-v202-shi23a}, and lack of attributions~\citep{liu2023evaluating,gao2023enabling}. 
+We introduce a method to train an arbitrary LM to learn to use retrieval \textit{on-demand} for diverse instruction-following queries and introduce controlled generation guided by reflections tokens to further improve generation quality and attributions. 
+
+\noindent{\bf Concurrent RAG work. }
+{
+A few concurrent works\footnote{All work is arXived within a week of this preprint.} on RAG propose new training or prompting strategies to improve widely-adopted RAG approaches. 
+\cite{lin2023radit} fine-tune both the retriever and LM on instruction-tuning datasets in two steps.
+While we also train our model on diverse instruction-following datasets, \model enables retrieval on demand and selection of the best possible model output via fine-grained self-reflection, making it widely applicable and more robust and controllable. 
+\citet{Yoran2023MakingRL} use a natural language inference model and \citet{xu2023recomp} use a summarization model to filter out or compress retrieved passages before using them to prompt the LM to generate the output.
+\model processes passages in parallel and filters out irrelevant ones through self-reflection, without relying on external models at inference. Moreover, our self-reflection mechanism also evaluates other aspects of the model output quality including factuality.
+LATS~\citep{zhou2023language} prompt off-the-shelf LMs to search for relevant information for question answering tasks and to generate with tree search, guided by LM-generated value scores. 
+While their value function simply indicates an overall score of each generation, \model trains to an arbitrary LM to learn to generate fine-grained self-reflection and customizable inference. 
+}
+
+\noindent{\bf Training and generating with critics.}
+Training LLMs with reinforcement learning (e.g., Proximal Policy Optimization or PPO; \citealt{schulman2017proximal}) from human feedback (RLHF) has proven effective in aligning LLMs with human preferences~\citep{ouyang2022training}. 
+\citet{wu2023fine} introduce fine-grained RLHF with multiple reward models. 
+Though our work also studies fine-grained critique on retrieval and generation, we train our target LM on task examples augmented with reflection tokens from a critic 
+model offline, with a far lower training cost compared to RLHF. In addition, reflection tokens in \model enable controllable generation at inference, while RLHF focuses on human preference alignment during training.
+Other works use general control tokens to guide LM generation~\citep{lu2022quark,korbak2023pretraining}, while \model uses reflection tokens to decide the need for retrieval and to self-evaluate generation quality.
+\cite{xie2023decomposition} propose a self-evaluation-guided decoding framework, but they focus only on reasoning tasks with one evaluation dimension (reasoning path consistency) and without retrieval.
+Recent work on LLM refinement \citep{dhuliawala2023chainofverification, madaan2023selfrefine, paul2023refiner} prompts a model to generate task output, natural language feedback and refined task output iteratively, but at the cost of inference efficiency.
+
+
+
+\section{\model: Learning to Retrieve, Generate and Critique}
+
+We introduce Self-Reflective Retrieval-Augmented Generation (\model), shown in Figure~\ref{fig:taxonomy}. \model is a framework that enhances the quality and factuality of an LLM through retrieval and self-reflection, without sacrificing LLM's original creativity and versatility. 
+Our end-to-end training lets an LM \mgen ~{\bf generate} text informed by {\bf retrieved} passages, if needed, and {\bf criticize} the output by learning to generate special tokens. 
+These {\it reflection tokens} (Table~\ref{tab:reward}) signal the need for retrieval or confirm the output's relevance, support, or completeness. 
+In contrast, common RAG approaches retrieve passages indiscriminately, without ensuring complete support from cited sources. 
+
+\subsection{Problem Formalization and Overview}
+\label{sec:overview}
+Formally, given input $x$, we train \mgen to sequentially generate textual outputs $y$ consisting of multiple segments $y=[y_1, \dots, y_T]$, where $y_t$ indicates a sequence of tokens for the $t$-th segment.\footnote{
+In this paper, we treat one sentence as a segment in our experiments, but our framework is applicable to any segment unit (i.e., sub-sentence).} 
+Generated tokens in $y_t$ include text from the original vocabulary as well as the reflection tokens (Table~\ref{tab:reward}). 
+
+\begin{table*}[t!]
+\centering
+\footnotesize
+\begin{tabular}{p{2cm}p{1.2cm}p{3.5cm}p{5.5cm}}\toprule
+Type & Input & Output & Definitions \\ \midrule
+\ret   & $x$ / $x,y$ & \{yes, no, continue\} & Decides when to retrieve with \mret \\
+\crel  & $x, d$  &\{{\bf relevant}, irrelevant\}  &   $d$ provides useful information to solve $x$. \\
+\cgr  & $x, d, y$  &\{{\bf fully supported}, partially supported, no support\}  & All of the verification-worthy statement in $y$ is supported by $d$.   \\
+\cuse & $x, y$  &\{{\bf 5}, 4, 3, 2, 1\}  & $y$ is a useful response to $x$.   \\
+\bottomrule
+\end{tabular}
+    \caption{Four types of reflection tokens used in \model. Each type uses several tokens to represent its output values. 
+    The bottom three rows are three types of \crt~tokens, and {\bf the bold text} indicates the most desirable critique tokens. $x, y, d$ indicate input, output, and a relevant passage, respectively. 
+    }
+    \label{tab:reward}
+\end{table*}
+
+\begin{algorithm}
+\caption{\model Inference}\label{alg:self_reward inference}
+\begin{algorithmic}[1]
+\Require Generator LM \mgen, Retriever \mret, Large-scale passage collections $\{d_1, \ldots, d_N\}$ 
+\State {\bf Input:} input prompt $x$ and preceding generation $y_{<t}$, {\bf Output:} next output segment $y_t$
+\State \mgen predicts \ret~given $(x,y_{<t})$
+\If{\ret~ == \texttt{Yes}}
+    \State Retrieve relevant text passages $\mathbf{D}$  using \mret given $(x,y_{t-1})$ \Comment{\textcolor{blue}{Retrieve} }
+    \State \mgen predicts \crel given $x, d$ and $y_{t}$ given $x,d, y_{<t}$ for each $d \in \mathbf{D}$ \Comment{\textcolor{blue}{Generate} }
+    \State \mgen predicts \cgr and \cuse given $x, y_t, d$ for each $d \in \mathbf{D}$ \Comment{\textcolor{blue}{Critique} }
+    \State Rank $y_t$ based on \crel, \cgr, \cuse \Comment{\textcolor{gray}{Detailed in Section~\ref{sec:fine_grained_decoding} }}
+\ElsIf{\ret~ == \texttt{No}}
+    \State $\mathcal{M}_{gen}$ predicts $y_t$ given $x$ \Comment{\textcolor{blue}{Generate} }
+    \State $\mathcal{M}_{gen}$ predicts \cuse given $x,y_t$\Comment{\textcolor{blue}{Critique} }
+\EndIf
+\end{algorithmic}\label{algo:inference}
+\end{algorithm}
+
+\noindent {\bf Inference overview.}
+Figure~\ref{fig:taxonomy} and Algorithm~\ref{algo:inference} present an overview of \model at inference. 
+For every $x$ and preceding generation $y_{<t}$, the model decodes a retrieval token to evaluate the utility of retrieval. If retrieval is not required, the model predicts the next output segment, as it does in a standard LM.   
+If retrieval is needed, the model generates: a critique token to evaluate the retrieved passage's relevance, the next response segment, and a critique token to evaluate if the information in the response segment is supported by the passage. Finally, a  new critique token evaluates the overall utility of the response.\footnote{We follow \citet{liu2023evaluating} in using a ``perceived'' utility value that is independent of retrieved passages.} 
+To generate each segment, \model processes multiple passages in parallel and uses its own generated reflection tokens to enforce soft constraints (Section~\ref{sec:fine_grained_decoding}) or hard control (Algorithm~\ref{algo:inference}) over the generated task output. 
+For instance, in Figure~\ref{fig:taxonomy} (right), the retrieved passages $d_1$ is selected at the first time step since $d_2$ does not provide direct evidence (\crel is {Irrelevant}) and $d_3$ output is only partially supported while $d_1$ are fully supported. 
+
+\noindent {\bf Training overview.} 
+\model enables an arbitrary LM to generate text with reflection tokens by unifying them as next token predictions from the expanded model vocabulary (i.e., the original vocabulary plus reflection tokens). We train \mcrt to generate reflection tokens for evaluating retrieved passages and the quality of a given task output (Section \ref{sec:critic_trainig}). 
+Using the critic model, we update the training corpus by inserting reflection tokens into task outputs offline.  
+Subsequently, we train the final generator model (\mgen) using the conventional LM objective (Section \ref{sec:gen_training}) to enable \mgen to generate reflection tokens by itself without relying on the critic at inference time. 
+
+\subsection{\model Training}
+Here,  we describe the supervised data collection and training of two models, the critic \mcrt 
+(Section~\ref{sec:critic_trainig}) and the generator \mgen (Section~\ref{sec:gen_training}). 
+
+
+\subsubsection{Training the Critic Model}
+\label{sec:critic_trainig}
+
+\noindent{\bf Data collection for critic model.} 
+Manual annotation of reflection tokens for each segment is expensive~\citep{wu2023fine}. 
+A state-of-the-art LLM like GPT-4~\citep{openai2023gpt} can be effectively used to generate such feedback~\citep{liu2023gpteval}. 
+However, depending on such proprietary LMs can raise API costs and diminish reproducibility%, as their behaviors change over time
+~\citep{chen2023chatgpt}. 
+We create supervised data by prompting GPT-4 to generate reflection tokens and then distill their knowledge into an in-house \mcrt. 
+For each group of reflection tokens, we randomly sample instances from the original training data: $\{X^{sample}, Y^{sample}\} \sim \{X, Y\}$. 
+{
+As different reflection token groups have their own definitions and input, as shown in Table~\ref{tab:reward}, we use different instruction prompts for them. Here, we use \ret~ as an example. We prompt GPT-4 with a type-specific instruction (``Given an instruction, make a judgment on whether finding some external documents from the web helps to generate a better response.'') followed by few-shot demonstrations $I$ the original task input $x$ and output ${y}$ to predict an appropriate reflection token as text: $p(r|I, x, y)$.
+Manual assessment reveals that GPT-4 reflection token predictions show high agreement with human evaluations.
+We collect 4k-20k supervised training data for each type and combine them to form training data for \mcrt. 
+\paragraph{Critic learning.}
+After we collect training data $\mathcal{D}_{critic}$, we initialize \mcrt with a pre-trained LM %parameterized by $\theta$ 
+and train it on $\mathcal{D}_{critic}$ using a standard conditional language modeling objective, maximizing likelihood:
+\begin{equation}\label{eq:crt_training}
+    \max_{\mathcal{C}}\mathbb{E}_{((x,y),r) \sim \mathcal{D}_{critic}} \log p_{\mathcal{C}} (r| x, y), \text{ 
+$r$ for reflection tokens. }
+\end{equation}
+Though the initial model can be any pre-trained LM, we use the same one as the generator LM (i.e., Llama 2-7B; \citealt{touvron2023llama}) for \mcrt initialization. 
+ 
+
+\begin{figure}[t!]
+  \begin{center}
+    \includegraphics[width=0.95\textwidth]{figs/training_examples.pdf}
+  \end{center}
+  \caption{\model training examples. The left example does not require retrieval while the right one requires retrieval; thus, passages are inserted.}\label{fig:training_example}
+\end{figure}
+
+\subsubsection{Training the Generator Model}
+\label{sec:gen_training}
+
+\paragraph{Data collection for generator.}
+Given an input-output pair $(x, y)$, we augment the original output $y$ using the retrieval and critic models to create supervised data that precisely mimics the \model inference-time process (Section~\ref{sec:overview}). 
+For each segment $y_t \in y$, we run \mcrt to assess whether additional passages could help to enhance generation.  
+If retrieval is required, the retrieval special token \ret~=\texttt{Yes} is added, and \mret retrieves the top $K$ passages, $\mathbf{D}$. 
+For each passage, \mcrt further evaluates whether the passage is relevant and predicts \crel. 
+If a passage is relevant, \mcrt further evaluates whether the passage supports the model generation and predicts \cgr. 
+Critique tokens \crel and \cgr are appended after the retrieved passage or generations.  
+At the end of the output, $y$ (or $y_T$),  \mcrt predicts the overall utility token \cuse 
+, and an augmented output with reflection tokens and the original input pair is added to $\mathcal{D}_{gen}$. 
+See the example training data in Figure~\ref{fig:training_example}. 
+
+
+\noindent{\bf Generator learning.}
+We train the generator model \mgen by training on the curated corpus augmented with reflection tokens $\mathcal{D}_{gen}$ using the standard next token objective:
+\begin{equation}\label{eq:gen_training}
+    \max_{\mathcal{M}}\mathbb{E}_{(x,y,r) \sim \mathcal{D}_{gen}} \log p_{\mathcal{M}} (y, r| x). 
+\end{equation}
+Unlike \mcrt training (Eq.~\ref{eq:crt_training}), \mgen learns to predict the target output as well as the reflection tokens.  
+During training, we mask out the retrieved text chunks (surrounded by \texttt{<p>} and \texttt{</p>} in Figure~\ref{fig:training_example}) for loss calculation and 
+expand the original vocabulary $\mathcal{V}$ with a set of reflection tokens $\{\crt, \ret\}$. 
+
+\paragraph{Connections to prior work on learning with critique.}
+Recent work 
+incorporates additional critique (feedback) during training, e.g.,  RLHF~(\citealt{ouyang2022training}) via PPO. 
+While PPO relies on separate reward models during training, we compute critique offline and directly insert them into the training corpus, where the generator LM is trained with a standard LM objective. This significantly reduces training costs compared to PPO. 
+Our work also relates to prior work that incorporates special tokens to control generation ~\citep{keskar2019ctrl,lu2022quark, korbak2023pretraining}. Our \model learns to generate special tokens {\it to evaluate its own prediction} after each generated segment,  
+enabling the use of a soft re-ranking mechanism or hard constraints at inference (discussed next). 
+
+\subsection{\model Inference}
+\label{sec:fine_grained_decoding}
+Generating reflection tokens to self-evaluate its own output makes \model controllable during the inference phase, enabling it to tailor its behavior to diverse task requirements. 
+For tasks demanding factual accuracy~\citep{min2023factscore}, we aim for the model to retrieve passages more frequently to ensure that the output aligns closely with the available evidence. Conversely, in more open-ended tasks, like composing a personal experience essay, the emphasis shifts towards retrieving less and prioritizing the overall creativity or utility score. In this section, we describe approaches to enforce control to meet these distinct objectives during the inference process.
+
+\noindent{\bf Adaptive retrieval with threshold.}
+\model dynamically decides when to retrieve text passages by predicting \ret. 
+Alternatively, our framework allows a threshold to be set.   
+\noindent{\bf Tree-decoding with critique tokens.}
+At each segment step $t$, when retrieval is required,  based either on hard or soft conditions, \mret retrieves $K$ passages, and the generator 
+\mgen processes each passage in parallel and outputs $K$ different continuation candidates. 
+We conduct a segment-level beam search (with the beam size=$B$) to obtain the top-$B$ segment continuations at each timestamp $t$, and return the best sequence at the end of generation. The score of each segment $y_t$ with respect to passage $d$ is updated with a critic score $\mathcal{S}$
+that is the linear weighted sum of the normalized probability of each \crt~token type. 
+For each critique token group $G$ (e.g., \crel), we denote its score at timestamp $t$ as $s_t^G$, 
+and we compute a segment score as follows:  
+\begin{equation}
+    f(y_t,  d, \crt) = p(y_{t} | x, d, y_{<t})) + \mathcal{S}(\crt){\rm , where}
+\end{equation}
+\begin{equation}\label{eq:reward}
+    \mathcal{S}(\crt) = \sum_{G \in \mathcal{G}} w^G s_t^G %{\sum_{l} p(t_a^l) } 
+    \mbox{ for } \mathcal{G} = \{\crel, \cgr, \cuse\}, 
+\end{equation}
+where  $s_t^G = \frac{p_t(\hat{r})}{\sum_{i=1}^{N^G} p_t(r_i)}$ stands for the generation probability of the most desirable reflection token $\hat{r}$ (e.g., \crel=\texttt{Relevant}) for the critique token type $G$ with $N^G$ distinct tokens (that represent different possible values for $G$). 
+The weights $w^G$ in Eq.~\ref{eq:reward} are hyperparameters that can be adjusted at inference time to enable customized behaviors at test time. 
+For instance, to ensure that result $y$ is mostly supported by evidence, we can set a weight term for the \cgr score higher, while relatively lowering weights for other aspects. 
+Alternatively, we could further enforce hard constraints during decoding using \crt. 
+Instead of using a soft reward function in Eq.~\ref{eq:reward}, we could explicitly filter out a segment continuation when the model generates an undesirable $\crt$ token (e.g., \cgr=\texttt{No support}) . 
+{Balancing the trade-off between multiple preferences has been studied in RLHF~\citep{touvron2023llama,wu2023fine}, which often requires training to change models' behaviors. \model tailors an LM with no additional training.  
+}
+
+
+
+\section{Experiments}
+
+\subsection{Tasks and Datasets} 
+We conduct evaluations of our \model and diverse baselines on a range of downstream tasks, holistically evaluating outputs with metrics designed to assess overall correctness, factuality, and fluency. 
+Throughout these experiments, we conduct zero-shot evaluations, where we provide instructions describing tasks without few-shot demonstrations~\citep{wei2022finetuned,sanh2022multitask}. 
+ 
+\noindent{\bf Closed-set tasks} include two datasets, i.e., a fact \textit{verification dataset} about public health ({\bf PubHealth}; \citealt{zhang2023interpretable}) and a \textit{multiple-choice reasoning dataset} created from scientific exams ({\bf ARC-Challenge}; ~\citealt{clark2018think}). 
+We use accuracy as an evaluation metric and report on the test set. 
+ 
+ 
+
+\noindent{\bf Short-form generations tasks} include two open-domain question answering (QA) datasets, PopQA~\citep{mallen2022not} and TriviaQA-unfiltered~\citep{joshi-etal-2017-triviaqa}, where systems need to answer arbitrary questions about factual knowledge. 
+For PopQA, we use the long-tail subset, consisting of 1,399 rare entity queries whose monthly Wikipedia page views are less than 100. 
+As the TriviaQA-unfiltered (open) test set is not publicly available, we follow prior work's validation and test split~\citep{min-etal-2019-discrete,guu2020retrieval}, using 11,313 test queries for evaluation. 
+We evaluate performance based on whether gold answers are included in the model generations instead of strictly requiring exact matching, following \cite{mallen2022not,schick2023toolformer}. 
+
+\noindent{\bf Long-form generation tasks} include a biography generation task~\citep{min2023factscore} and a long-form QA task~{\bf ALCE-ASQA}~\cite{gao2023enabling,stelmakh2022asqa}. 
+We use FactScore~\citep{min2023factscore} to evaluate biographies, and we use official metrics of correctness (str-em), fluency based on MAUVE~\citep{pillutla2021MAUVE}, and citation precision and recall~\citep{gao2023enabling} for ASQA
+
+\subsection{Baselines}
+\noindent{\bf Baselines without retrievals.}
+We evaluate strong publicly available pre-trained LLMs, Llama2$_{\textsc{7b},\textsc{13b}}$~\citep{touvron2023llama}, instruction-tuned models, Alpaca$_{\textsc{7b},\textsc{13b}}$~\citep{dubois2023alpacafarm} (our replication based on Llama2); and models trained and reinforced using private data, ChatGPT~\citep{ouyang2022training} and Llama2-chat$_{\textsc{13b}}$. 
+For instruction-tuned LMs, we use the official system prompt or instruction format used during training if publicly available. 
+We also compare our method to concurrent work, CoVE$_\textsc{65b}$~\citep{dhuliawala2023chainofverification}, which introduces iterative prompt engineering to improve the factuality of LLM generations. 
+
+\noindent{\bf Baselines with retrievals.}  
+We evaluate models augmented with retrieval at test time or during training. The first category includes standard RAG baselines, where an LM (Llama2, Alpaca) generates output given the query prepended with the top retrieved documents using the same retriever as in our system. It also includes {Llama2-FT}, where Llama2 is fine-tuned on all training data we use without the reflection tokens or retrieved passages.
+{We also report the result of retrieval-augmented baselines with LMs trained with private data: Ret-ChatGPT and Ret-Llama2-chat, which deploy the same augmentation technique above, as well as perplexity.ai, an InstructGPT-based production search system. 
+}
+The second category includes concurrent methods that are trained with retrieved text passages, i.e., { SAIL}~\citep{luo2023sail} to instruction-tune an LM on the Alpaca instruction-tuning data with top retrieved documents inserted before instructions, and {Toolformer}~\citep{schick2023toolformer} to pre-train an LM with API calls (e.g., Wikipedia APIs).\footnote{We report numbers using the results reported in the paper as the implementations are not available.}
+\subsection{Experimental settings}
+\noindent{\bf Training data and settings.}
+Our training data consists of diverse instruction-following input-output pairs. 
+In particular, we sample instances from Open-Instruct processed data~\citep{wang2023far} and knowledge-intensive datasets~\citep{petroni-etal-2021-kilt,stelmakh2022asqa,mihaylov-etal-2018-suit}. 
+In total, we use 150k instruction-output pairs. 
+We use Llama2 7B and 13B~\citep{touvron2023llama} as our generator base LM, and we use Llama2 7B as our base critic LM. 
+For the retriever model \mret, we use off-the-shelf Contriever-MS MARCO~\citep{izacard2021towards} by default and retrieve up to ten documents for each input. 
+ 
+
+\noindent{\bf Inference settings.}
+As a default configuration, we assign the weight terms \crel, \cgr, \cuse values of 1.0, 1.0 and 0.5, respectively.
+ To encourage frequent retrieval, we set the retrieval threshold to 0.2 for most tasks and to 0 for ALCE~\citep{gao2023enabling} due to citation requirements.    
+We speed up inference using vllm~\citep{kwon2023efficient}. 
+At each segment level, we adopt a beam width of 2.  
+For a token-level generation, we use greedy decoding.  
+By default, we use the top five documents from Contriever-MS MARCO~\citep{izacard2021towards}; for biographies and open-domain QA, we use additional top five documents retrieved by a web search engine, following~\cite{luo2023sail}; for ASQA, we use the author-provided top 5 documents by GTR-XXL~\citep{ni2021large} across all baselines for a fair comparison. 
+
+
+
+
+\section{Results and Analysis}
+
+\begin{table*}[t!]
+\centering
+\footnotesize
+    \caption{
+    Overall experiment results on six tasks. {\bf Bold} numbers indicate the best performance among non-proprietary models, and \textcolor{gray}{\bf gray-colored} bold text indicates the best proprietary model when they outperforms all non-proprietary models.  
+    $^*$ indicates concurrent or recent results reported by concurrent work.  -- indicates numbers that are not reported by the original papers or are not applicable. Models are sorted based on scale. FS, em, rg, mau, prec, rec denote FactScore (factuality); str-em, rouge (correctness); MAUVE (fluency); citation precision and recall, respectively. 
+    }
+    \label{tab:main}
+\begin{tabular}{lrrrrrrrrrr}\toprule
+&\multicolumn{2}{c}{Short-form} & \multicolumn{2}{c}{Closed-set} & \multicolumn{6}{c}{Long-form generations (with citations)}     \\
+& PopQA & TQA &  Pub & ARC &  Bio  &\multicolumn{5}{c}{ASQA} \\ 
+LM & (acc) & (acc) & (acc) & (acc) & (FS) & (em) & (rg) & (mau) & (pre) & (rec) \\
+\midrule
+\multicolumn{11}{c}{\it LMs with proprietary data } \\
+Llama2-c$_{\textsc{13b}}$  & 20.0 & 59.3 & 49.4 & 38.4 & 55.9 & 22.4 & 29.6 & 28.6 & -- & -- \\
+Ret-Llama2-c$_{\textsc{13b}}$  & 51.8  & 59.8& 52.1 & 37.9 &  {79.9} & 32.8 & 34.8 & 43.8 & 19.8& 36.1 \\
+ChatGPT  & 29.3 &   \textcolor{gray}{\bf 74.3} & 70.1 &  \textcolor{gray}{\bf 75.3}  & 71.8 & 35.3  & 36.2  & 68.8 & -- & --\\ 
+Ret-ChatGPT &  50.8 & 65.7 &  54.7 & \textcolor{gray}{\bf 75.3} & -- & \textcolor{gray}{\bf 40.7} &  \textcolor{gray}{\bf 39.9} & \textcolor{gray}{\bf 79.7} & {65.1} & \textcolor{gray}{\bf 76.6}  \\
+Perplexity.ai &  -- & -- & -- & -- & 71.2 & -- &  -- & -- & -- &--  \\ \midrule
+\multicolumn{11}{c}{\it Baselines without retrieval} \\
+Llama2$_{\textsc{7b}}$ & 14.7 & 30.5 & 34.2 & 21.8  & 44.5  & 7.9 & 15.3&19.0 & -- & --  \\
+Alpaca$_{\textsc{7b}}$  &  23.6 & 54.5  & 49.8 &45.0 & 45.8 & 18.8 & 29.4 & 61.7 & -- & --  \\
+Llama2$_{\textsc{13b}}$   &  14.7 & 38.5  & 29.4 & 29.4 & 53.4 & 7.2 & 12.4 & 16.0  & -- & -- \\
+Alpaca$_{\textsc{13b}}$ &  24.4  &  61.3  & 55.5  & 54.9 & 50.2 & 22.9 &  32.0&  70.6 & -- & -- \\
+CoVE$_{\textsc{65b}}$ * &  -- & -- & -- & -- & 71.2  & --  & -- & -- & -- & -- \\  
+\midrule
+
+\multicolumn{11}{c}{\it Baselines with retrieval} \\
+Toolformer*$_{\textsc{6b}}$  & -- & 48.8  & -- & -- & -- & --  & -- & -- & -- & --  \\ 
+Llama2$_{\textsc{7b}}$  & 38.2  & 42.5 & 30.0 & 48.0 & 78.0 & 15.2 & 22.1 & 32.0 & 2.9 & 4.0 \\
+Alpaca$_{\textsc{7b}}$   & 46.7 & 64.1  & 40.2 & 48.0 & 76.6  & 30.9 & 33.3 & 57.9 & 5.5 & 7.2 \\
+Llama2-FT$_{\textsc{7b}}$  & 48.7 & 57.3 & 64.3 & 65.8& {78.2} & 31.0 & 35.8 & 51.2 & 5.0 & 7.5 \\
+SAIL*$_{\textsc{7b}}$  &  -- & -- & 69.2 & 48.4 & -- & --  & -- & -- & -- & --  \\ 
+Llama2$_{\textsc{13b}}$  &  45.7  & 47.0 & 30.2  & 26.0 & 77.5  & 16.3 & 20.5 & 24.7 & 2.3 & 3.6  \\
+Alpaca$_{\textsc{13b}}$ & 46.1& {66.9}  &  51.1 & 57.6 & 77.7 & {\bf 34.8} & 36.7 & 56.6 & 2.0 & 3.8 \\
+\hdashline
+{\bf Our }\model$_{\textsc{7b}}$ &{  54.9} &  66.4  & { 72.4} & 67.3 & {\bf 81.2} & 30.0 & 35.7 & {\bf 74.3} & {66.9} & { 67.8} \\
+{\bf Our }\model$_{\textsc{13b}}$  &  {\bf 55.8} & {\bf 69.3} & {\bf 74.5} & {\bf 73.1} &  80.2 & 31.7 & {\bf 37.0} & { 71.6} & {\bf 70.3} & {\bf 71.3} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+\subsection{Main Results} 
+\noindent{\bf Comparison against baselines without retrieval. }
+Table~\ref{tab:main} (top) presents the baselines without retrieval. 
+Our \model (bottom two rows) demonstrates a substantial performance advantage over supervised fine-tuned LLMs in all tasks and even outperforms ChatGPT in PubHealth, PopQA, biography generations, and ASQA (Rouge and MAUVE). 
+Our approach also significantly outperforms a concurrent method that employs sophisticated prompt engineering; specifically, on the bio generation task, our 7B and 13B models outperform the concurrent CoVE~\citep{dhuliawala2023chainofverification}, which iteratively prompts Llama2$_\textsc{65b}$ to refine output. 
+
+\noindent{\bf Comparison against baselines with retrieval.}
+As shown in Tables~\ref{tab:main} (bottom), our \model also outperforms existing RAG in many tasks, obtaining the best performance among non-proprietary LM-based models on all tasks. 
+While our method outperforms other baselines, on PopQA or Bio, powerful instruction-tuned LMs with retrieval (e.g., LLama2-chat, Alpaca) show large gains from their non-retrieval baselines. 
+However, we found that these baselines provide limited solutions for tasks where we cannot simply copy or extract sub-strings of retrieved passages. 
+On PubHealth and ARC-Challenge, baselines with retrieval do not improve performance notably from their no-retrieval counterparts.
+We also observe that most baselines with retrieval struggle to improve citation accuracy. 
+On ASQA, our model shows significantly higher citation precision and recall than all models except ChatGPT. 
+\citet{gao2023enabling} found that ChatGPT consistently exhibits superior efficacy in this particular task, surpassing smaller LMs. 
+{
+Our \model bridges this performance gap, even outperforming ChatGPT in citation precision, which measures whether the model-generated claim is fully supported by cited evidence. } 
+We also found that on the metrics for factual precision, \model 7B occasionally outperforms our 13B due to the tendency of smaller \model to often generate precisely grounded yet shorter outputs. 
+{
+Llama2-FT$_{\textsc{7b}}$, which is the baseline LM trained on the same instruction-output pairs as \model without retrieval or self-reflection and is retrieval-augmented at test time only, lags behind \model. This result indicates \model gains are not solely from training data and demonstrate the effectiveness of \model framework.  } 
+
+\begin{figure}[t!]
+\begin{subfigure}[b]{0.38\textwidth}
+\centering
+\footnotesize
+\begin{tabular}{lccc}
+\toprule
+ & PQA & Med & AS \\
+ & (acc) & (acc) & (em) \\
+\midrule
+\model (50k) & 45.5 & 73.5  & 32.1 \\ \hdashline
+\multicolumn{4}{l}{\it Training } \\
+No Retriever \mret & 43.6 & 67.8 & 31.0 \\
+No Critic \mcrt &  42.6 & 72.0 & 18.1  \\\hdashline
+\multicolumn{4}{l}{\it Test } \\
+No retrieval & 24.7 &  73.0 & --  \\
+Hard constraints&  28.3 &  72.6 & --  \\
+Retrieve top1 & 41.8 & 73.1 & 28.6  \\
+Remove \cgr & 44.1  & 73.2 & 30.6 \\ 
+\bottomrule
+\end{tabular}
+\caption{ Ablation}
+\label{tab:ablatioon}
+\end{subfigure}%
+  \hspace{.3cm}
+  \begin{subfigure}[b]{0.265\textwidth}
+        \includegraphics[width=\textwidth]{figs/soft_alignment.pdf}
+        \caption{Customization}
+        \label{fig:customization}
+  \end{subfigure}%
+    \begin{subfigure}[b]{0.325\textwidth}
+        \includegraphics[width=\textwidth]{figs/tradeoff_fever.pdf}
+        \caption{Retrieval}
+        \label{fig:retrieval_freq}
+  \end{subfigure}%
+\caption{{\bf Analysis on \model:} (a) {\bf Ablation studies} for key components of \model training and inference based on our 7B model.  (b) {\bf Effects of soft weights} on ASQA citation precision and Mauve (fluency). (c) {\bf Retrieval frequency} and {\it normalized} accuracy on PubHealth and PopQA.   }
+\end{figure}
+\subsection{Analysis}
+\label{sec:analyis}
+\paragraph{Ablation studies.}
+We conduct a set of ablations of our framework to identify which factors play key roles. 
+We evaluate two model variants trained differently than our model: {\it No Retriever} trains an LM using the standard instruction-following method given instruction-output pairs, without retrieved passages;  {\it No Critic} trains an LM trained with input-output pairs that are always augmented with the top one retrieved document without reflection tokens. 
+This is similar to SAIL~\citep{luo2023sail}, and we use our instruction-output data instead of using the Alpaca dataset~\citep{dubois2023alpacafarm}, as in SAIL. 
+We also conduct ablation on our inference-time algorithm, including {\it No retrieval} disables retrieval during inference; {\it Hard constraints} indicates the model performance that retrieves when \ret=\texttt{Yes} instead of using the adaptive threshold; {\it Retrieve top 1} always retrieves and uses the top one document only, similar to standard RAG approaches; {\it Remove \cgr} indicates the model performance that removes \cgr score only during critique-guided beam search in Eq.~\ref{eq:reward}. 
+{In this ablation experiment, we use a training instance size of 50k for a more efficient exploration of training variations. Later in this section, we conduct an analysis of the effect of training data size. 
+We conduct the ablation studies on three datasets, PopQA, PubHealth, and ASQA. On ASQA, we evaluate models on sampled 150 instances and exclude ablations involving adaptive or no retrieval processes. }
+
+We show in Table~\ref{tab:ablatioon} the ablation results. 
+The top part of the table shows results for training ablations, and the bottom part is for inference ablations. We see that all components play important roles.
+We also observe a large performance gap between \model and No Retriever or Critic baselines across tasks, indicating that training an LM with those models largely contributes to the performance gain of \model. 
+{
+Using the top passages regardless of their relevance (Retrieve top 1) as in conventional RAG approaches causes a large drop in PopQA and ASQA, and removing \cgr during the beam search results hurts performance on ASQA. 
+This demonstrates the effectiveness of \model's capabilities of carefully selecting generations based fine-grained multiple criterion, instead of naively using all of the top passages from the retrieval model or solely depending on relevance scores. 
+}
+\noindent{\bf Effects of inference-time customization.}
+One key benefit of our proposed framework is that it enables us to control how much each critique type affects the final generation sampling. We analyze the effects of different parameter weights on the top of our 7B model during inference time on ASQA, where multiple evaluation aspects are considered. 
+Figure~\ref{fig:customization} shows the effects of changing the weighting term for \cgr, which criticizes how supported the output is by the text passage. 
+As the figure shows, increasing the weight leads to positive effects on the models' citation precision since this puts more emphasis on whether model generation is supported by the evidence. 
+{
+On the contrary, a larger weight results in lower MAUVE scores: when generation gets longer and more fluent, there are often more claims that are not fully supported by citations, consistent with findings by \cite{liu2023evaluating}. }
+Our framework lets practitioners choose and customize models' behaviors at test time by adjusting such parameters without requiring additional training. 
+
+\noindent{\bf Efficiency and accuracy trade-off.}
+Using our framework, practitioners can adjust how often retrieval occurs using the token probability of reward tokens. We evaluate how this adaptive threshold affects overall accuracy and frequency of retrieval, and we evaluate the performance with varying numbers of threshold $\delta$ (larger $\delta$ results in less retrieval) on PubHealth and PopQA. 
+Figure~\ref{fig:retrieval_freq} shows that the model's retrieval frequencies dramatically change on both datasets. as $\delta$ varies.  
+On one hand, performance deterioration by retrieving less is smaller on PubHealth but larger in PopQA. 
+
+\noindent{\bf Effects of training data size.}
+{We conduct an analysis of how the data scale affects the model's performance. In particular, we randomly sample 5k, 10k, 20k, and 50k instances from our original 150k training instances, and fine-tune four \model$_{\textsc{7b}}$ variants on those subsets. Then, we compare the model performance on PopQA, PubHealth, and ASQA (citation precision) with our final \model trained on the full 150k instances. 
+We also evaluate 
+Figures~\ref{fig:popqa_scale}, \ref{fig:med_sacle} and \ref{fig:asqa_prec_scaling} shows the models' performance trained on different amount of data. 
+Across all datasets, increasing data size often shows upward trajectories and the improvements are significantly larger in PopQA and ASQA, while we do not observed such significant improvements on Llama2-FT$_{\textsc{7b}}$ when increasing the training data from 50k to 150k. 
+These results also indicate that further expanding the training data of \model may lead to further improvements, although in this work we limit our training data size to 150k. 
+}
+
+\noindent{\bf Human evaluations.}
+{We conduct small human evaluations on \model outputs, as well as the reliability of predicted reflection tokens. 
+In particular, we sampled 50 samples from PopQA and Bio results. 
+Following \citet{menick2022teaching}, human annotators evaluate {\it S\&P}, which indicates whether the model output is plausible (i.e., the output is a reasonable and on-topic response to the question as if it were occurring in a conversation) and supported (i.e., the provided evidence is sufficient to verify
+the validity of the answer). For {S\&P}, we do not consider the instances where \model predicts \texttt{irrelevant} or \texttt{no support}. 
+We then ask our annotators whether the model-predicted reflection tokens about \crel and \cgr match their inspections (e.g., whether the {\it fully supported} output is supported by the cited evidence).  
+Human annotators find \model answers are often plausible and supported by relevant passages with higher S\&P scores on short-form PopQA, which is consistent with \citet{menick2022teaching}. 
+Human annotators also find \crel and \cgr reflection token predictions are mostly aligned with their assessments. 
+ 
+}
+
+\begin{figure}[t!]
+  \begin{subfigure}[b]{0.24\textwidth}
+        \includegraphics[width=\textwidth]{figs/PopQA_scale.pdf}
+        \caption{PopQA}
+        \label{fig:popqa_scale}
+  \end{subfigure}%
+    \begin{subfigure}[b]{0.21\textwidth}
+        \includegraphics[width=\textwidth]{figs/med_scale.pdf}
+        \caption{PubHealth}
+        \label{fig:med_sacle}
+  \end{subfigure}%
+    \begin{subfigure}[b]{0.21\textwidth}
+        \includegraphics[width=\textwidth]{figs/ASQA_Prec.pdf}
+        \caption{ASQA (prec)}
+        \label{fig:asqa_prec_scaling}
+  \end{subfigure}
+\begin{subfigure}[b]{0.3\textwidth}
+\centering
+\footnotesize
+\begin{tabular}{lcc}
+\toprule
+& Pop & Bio. \\
+\midrule
+S \& P & 92.5 & 70.0 \\ \hdashline
+\crel & 95.0 & 90.0 \\
+\cgr & 90.0 &  85.0 \\
+\bottomrule
+\end{tabular}
+\caption{Human evaluation on PopQA and Bio generation. }
+\label{tab:human_eval}
+\end{subfigure}%
+  \hspace{.3cm}
+\caption{{\bf Training scale and Human analysis:} (a) (b) (c) {\bf Training scale analysis} shows the effect of the training data scale on PopQA, PubHealth and ASQA (citation precision), respectively.  
+(d) {\bf Human analysis} on \model outputs as well as reflection tokens. }
+\end{figure}
+
+
+\section{Conclusion}
+
+This work introduces \model, a new framework to enhance the quality and factuality of LLMs through retrieval on demand and self-reflection. 
+\model trains an LM to learn to retrieve, generate, and critique text passages and its own generation by predicting the next tokens from its original vocabulary as well as newly added special tokens, called reflection tokens. 
+\model further enables the tailoring of LM behaviors at test time by leveraging reflection tokens. 
+Our holistic evaluations on six tasks using multiple metrics demonstrate that \model significantly outperforms LLMs with more parameters or with conventional retrieval-augmented generation approaches. 
+
+
+

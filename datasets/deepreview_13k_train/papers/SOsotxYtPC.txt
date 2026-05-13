@@ -1,0 +1,436 @@
+\title{LoGra-Med: Long-Context Multi-Graph Alignment for Medical Visual-Language Models}
+
+\begin{abstract}
+\vspace{-0.1in}
+State-of-the-art medical multi-modal large language models (med-MLLM), such as \textsc{LLaVA-Med} or \textsc{BioMedGPT}, leverage instruction-following data in their pre-training stages.
+However, those models primarily focus on scaling the \textit{model size} and \textit{data volume} to boost performance while mainly relying on the autoregressive learning objectives. Surprisingly, we reveal that such learning schemes might result in a weak alignment between vision and language modalities, making these models highly reliant on extensive pre-training datasets — a significant challenge in medical domains due to the expensive and time-consuming nature of curating high-quality instruction-following instances.
+We address this challenge with a new multi-graph alignment algorithm, namely \textsc{LoGra-Med}, which enforces triplet correlations on the latent embedding space among image modalities, conversation-based descriptions, and extended contextual captions. Owing to this technique, the model is encouraged to capture the semantic meaning of the context, handle linguistic variability where the captions or questions may differ from training instances, and learn cross-modal associations, linking visual elements with various textual interpretations.
+To scale our algorithm to the med-MLLM setting, we also design an efficient end-to-end learning scheme based on advanced black-box gradient-estimation techniques that permit fast forward and backward steps through the LLM model (LLaMa 7B). Empirical results show that we can match the performance of LLAVA-Med pre-trained on 600K image-text pairs from PMC-15M for Medical VQA tasks and significantly outperform it when trained on only $10\%$ of the data. For instance, on VQA-RAD, we exceed LLAVA-Med (both trained on $10\%$) by $20.13\%$ and achieve near parity with the $100\%$ pre-training setting ($72.52\%$ vs. $72.64\%$).
+Additionally, we also surpass other SOTA pre-training methods and med-MLLM such as \textsc{BiomedGPT} on \textit{visual chatbot} or \textsc{RadFM} on \textit{zero-shot image classification with VQA}, showcasing the power of multi-graph alignment in improving vision-language integration for medical-MLLM.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\footnote{$^{*}$ Co-second contribution, $^{\dagger}$ Co-senior authors.}
+\addtocontents{toc}{\protect\setcounter{tocdepth}{-1}}
+Generic Multi-Modal Large Language Models (MLLM) are an emerging field integrating processing and generation across text, images, and audio. Models like GPT-4V \citep{achiam2023gpt}, LLaVa \citep{llava}, and Next-GPT \citep{wu2023next} handle tasks from image captioning to complex visual reasoning. A critical component in training these models is instruction-following (IF) data \citep{lou2023comprehensive}, which involves complex, multi-turn interactions \citep{sun2024parrot} where the model is expected to respond to specific instructions or questions about the image. In the medical domain, current efforts have been focused on building medical MLLM by curating specialized IF datasets encompassing medical images, clinical notes, and diagnostic criteria \citep{xie2024medtrinity}. These datasets are used to adapt general-purpose MLLM, aiming to transfer foundational knowledge of generic concepts and reduce computation costs required in training steps. For instance, in LLAVA-Med, \citep{llava-med}  600K biomedical image-text pairs are sampled from PMC-15M \citep{pmc-15m} and GPT-4 is used to create instruction data from the text inputs, resulting in approximately 60K multi-modal IF data points. In the next step, (i) vision encoders and language decoders are taken from LLaVa and are first aligned through trainable projection layers before (ii) the models (with the exception of the vision encoders) are trained together on collected medical IF data. Both steps are called the \textit{pre-training} phase, where the auto-regressive function is used as the primary objective. The model can then be fine-tuned to various downstream tasks.
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \centering % Centers the figure within the wrapfigure
+    \includegraphics[width=0.5\textwidth]{./figures/perf_vqarad.pdf}
+    \caption{\textit{Illustration of the data-hungry behavior of auto-regressive modeling} in LLaVA-Med when varying pre-training IF data size. Models are fine-tuned and performance is reported on VQA-RAD.}
+    \label{fig:auto-regressive-less}
+\end{wrapfigure}
+
+Following the above approach, most later works have focused on scaling up the amount of medical IF data \citep{xie2024medtrinity,zhang2023biomedgpt,he2024meddr} or increasing the model size by incorporating larger vision encoders or language decoders \citep{radfm,jiang2024moe} while relying on the same standard autoregressive learning scheme. Contrary to this, we question the effectiveness of autoregressive objective functions when learning medical-MLLM with IF data. Surprisingly, \textit{our findings reveal that autoregressive learning is highly data-hungry during pre-training}, i.e., without sufficient medical IF samples, model performance plummets for downstream tasks, \textit{even after fine-tuning}. To illustrate this,
+we pre-trained LLAVA-Med using only $10\%$ of the data and compared it to the version trained on $100\%$. Both models were fine-tuned on two medical visual question-answering tasks - VQA-RAD \citep{lau2018dataset} and PathVQA \citep{he2020pathvqa} - and their average performance on open- and close-ended questions compared. The results show a dramatic decline: from $72.64\%$ to $52.39\%$ on VQA-RAD and from $64.06\%$ to $56.15\%$ on PathVQA (Figure \ref{fig:auto-regressive-less}). This underscores the instability of medical-MLLM trained with autoregressive methods and highlights the problem that these methods require the curation of enough medical IF data to achieve satisfactory performance.
+
+To address this challenge, we present a novel multi-graph alignment algorithm, namely \textsc{LoGra-Med}, that improves the model’s ability to learn complex interactions between vision and language modalities, mitigating the limitations of autoregressive functions when trained on limited instruction-following data. Specifically, given pairs of input images with instruction data, we use GPT-4 \citep{achiam2023gpt} to \textit{form a longer version of the instruction}, with more in-context explanations for concepts and correlations among entities while preserving the same meaning. These data pairs are fed into the MLLM, where a vision encoder extracts features for the image while the language model (LLaMa) computes latent embedding of the instruction data and its extended versions. The embedding vectors obtained from different IF samples in a batch are then used to construct three graphs. The first graph's vertices are the image features, while the vertices of the two other graphs are the embeddings of the instructions and their extended versions. We subsequently learn feature representation by solving the combinatorial multi-graph alignment problem between these three graphs such that the input embedding of the graph alignment will output the triplet coupling among the image, its instruction data, and the longer extension. By jointly learning this alignment with autoregressive methods, we aim to preserve the LLMs’ sequential generation capabilities while enhancing the model’s ability to capture deeper semantic relationships. This approach goes beyond memorization, increases resilience to linguistic variability, and significantly improves cross-modal coherence.
+
+Our method differentiates itself from existing multi-modal alignment techniques for LLM \citep{park2024bridging,li2023blip,chen2023videollm} in two ways. First, while prior contrastive objectives primarily focus on \textit{learning projections} to connect frozen vision encoders with frozen language models, our algorithm directly trains LLM using the multi-graph framework. 
+Second, we unify and generalize pairwise contrastive learning, which focuses on individual image-caption pairs, by incorporating global constraints through graph structures. This allows us to integrate both feature and structural consistencies using graph edges, enhancing robustness for similar entities (whether images or descriptions) commonly found in medical datasets.
+Although combinatorial graph alignment is generally non-differentiable and solving multi-graph alignment is computationally expensive, we overcome these challenges by leveraging modern implicit maximum likelihood estimation techniques \citep{niepert2021implicit,minervini2023adaptive}. This enables efficient gradient estimation and allows for fast forward and backward propagation through large LLMs (e.g., LLaMa-7B), using a \textit{barycenter graph} \citep{agueh2011barycenters} for alignment. As a result, the model can scale effectively with extensive datasets on large LLMs while maintaining alignment performance.
+
+In summary, we make the following key contributions:
+\begin{itemize}
+    \item We reveal the data-demanding nature of autoregressive modeling in pre-training medical-MLLM (LLaVa-Med), showing that insufficient instruction-following data leads to significant performance drops on downstream tasks, even after fine-tuning.
+    \item We introduce a novel multi-graph alignment objective that establishes triplet constraints among images, their instruction-following context, and their enriched versions. Additionally, we developed an efficient solver for training with LLMs and outlined theoretical properties related to distance and the shortest path in the geodesic space of multi-modal graphs.
+    \item We demonstrate that using a small amount of pre-training data can achieve performance comparable to LLaVa-Med trained on $100\%$ data. Additionally, when trained on larger datasets, \textsc{LoGra-Med} outperforms several state-of-the-art medical mLLMs and advanced multi-modal pre-training algorithms across three Medical VQA tasks, medical visual chat, and the average zero-shot image classification performance on 23 datasets.
+\end{itemize}
+
+
+
+\section{Related Work}
+
+\textbf{Medical Multi-modal LLMs.}
+Recent developments in medical-MLLM like Biomed-GPT \citep{zhang2023biomedgpt}, MedFlamingo \citep{moor2023med}, Med-Dr \citep{he2024meddr}, LLAVA-Med \citep{llava-med}, and Med-PaLMs \citep{singhal2023towards,tu2024towards} are transforming healthcare by integrating diverse data types and scaling medical instruction data. Biomed-GPT excels with multiple biomedical modalities, MedFlamingo focuses on few-shot learning for medical visual question answering, 
+and LLAVA-Med leverages large-scale biomedical image-text pairs for improved performance. Commonly, these models emphasize scaling medical instruction data and increasing model parameters to enhance accuracy and applicability in real-world medical scenarios. In contrast, our approach examines the widely used autoregressive pre-training algorithms and demonstrates that incorporating long-context multi-graph alignment of exist instruction samples can significantly enhance medical-MLLM performance without requiring larger models or extensive datasets.
+
+\textbf{Visual Instruction Tuning.}
+Visual instruction tuning techniques aim to bridge the gap between frozen vision-language models and frozen LLMs trained on unimodal data, enabling them to work effectively in a multi-modal context. These methods involve (i) learning a multi-layer perceptron (MLP) layer to map embeddings from the vision model to the language model as LLaVa \citep{llava}, VideoLLM \citep{chen2023videollm}; (ii) using adapter-based adjustment as LLaMa-adapter \citep{zhang2024llama}, Voxposer \citep{huang2023voxposer}, or (iii) learning multi-modal perceiver by gated cross-attention \citep{alayrac2022flamingo} or Q-Former as in BLIP-2 \citep{li2023blip}. Pre-training algorithms to train these models can be combined with both auto-regressive and contrastive learning \citep{park2024bridging,zhai2023sigmoid} or image-text matching as in \citep{li2022blip,li2023blip}. Our algorithm differs from those by focusing on directly training LLMs rather than lightweight projectors. This requires a fast solver capable of efficiently handling forward and backward passes through large-scale LLMs with extensive parameters.
+
+\textbf{Vision-language Pretraining Algorithm.}
+Pre-training algorithms commonly applied for vision-language models, like CLIP \citep{radford2021learning}, follow various strategies. Generative approaches, such as masked prediction in language models \citep{devlin2018bert,song2020mpnet}, or autoregressive algorithms that predict sequential text in LLMs \citep{llava,zhang2024llama}, are widely used. Another direction focuses on discriminative methods, which learn contrastive distances between image-text pairs \citep{liu2023contrastive,zhai2023sigmoid,khan2023contrastive}, optimal transport \citep{chen2022plot,nguyen2024dude}, or impose clustering constraints \citep{park2024bridging}. Our function departs from these by generalizing them into a combinatorial graph-matching formulation across cross-domain graphs. While LVM-Med \citep{mh2024lvm} is the most similar to our approach, it targets alignment within vision tasks, whereas we align images, instruction-following data, and extended contextual information.
+
+Graph alignment across $K$ domains ($K \geq 3$) is highly computationally intensive. Current methods, such as multi-marginal optimal transport \citep{complexity_multimarginalOT, piran2024contrasting}, Wasserstein barycenters \citep{nguyen2024structure}, and multi-adjacency matrix assumptions \citep{bernard2019hippi,swoboda2019convex}, relax the problem but are limited to small-scale tasks and require multiple solver steps, making them inefficient for LLM training. In contrast, our approach utilizes heuristic solvers \citep{swoboda2017study,rolinek2020deep} and modern gradient estimation techniques for black-box optimization \citep{niepert2021implicit,minervini2023adaptive}, enabling scalable and efficient performance for large language models.
+
+
+
+\section{Multi-graph Alignment Learning}
+
+We denote the vision encoder, projector, and large-language  model (LLM) models are $f_{\theta}(.),\, h_{\phi}(.),\, g_{\sigma}(.)$, respectively.  Figure \ref{fig:overview} illustrates our \textsc{LoGra-Med} algorithm, which learns parameters for these models by solving a triplet alignment between modalities in instruction tuning data. Below, we summarize the notations used before describing each component in detail.
+\begin{figure}[t]
+\centering
+\includegraphics[width=1.0\textwidth, trim=0 0 2.2cm 0, clip]{./figures/LoGra_Med_v1.pdf}
+\caption{Overview of \textsc{LoGra-Med}: We train the large language model $g_{\sigma}$ and projector $h_{\phi}$ by aligning a triplet consisting of the input image, its instruction data, and its extended long-context version using a structure-aware multi-graph alignment between $\gG_{v}, \gG_{a},$ and $\gG_{ae}$ through a barycenter graph $\gG_{br}$.}
+\label{fig:overview}
+\end{figure}
+
+{\bf Notation.} Given any tensor $\tT=(\etT_{i,j,k,l})$ and matrix $\mM = (\emM_{k,l})$, we use $\tT\otimes \mM$ to denote the tensor-matrix multiplication, \ie~the matrix $(\sum_{k,l}\etT_{i,j,k,l}\emM_{k,l})_{i,j}$. Given
+$\mY = [\vy_1, \vy_2,...,\vy_N] \in \R^{N\times d}$, we define $\mathbb{E}(\mY) = \frac{1}{N}\sum_{i=1}^{N} \vy_{i} \in \R^{d}$.
+Moreover, we define the matrix scalar (or inner) product associated with the Frobenius norm between two matrices $\mM = (\emM_{i,j})$ and  $\mN = (\emN_{i,j})$ as $\langle \cdot, \cdot \rangle$, \ie~$\langle \mM, \mN\rangle = \sum_{i,j} \emM_{i,j} \emN_{i,j}$. 
+We write $[M] = \{1, 2, \ldots, M\}$ for any natural number $M$.
+\subsection{Long-context enriched medical instruction-following data}
+Recent research has demonstrated that incorporating long-context significantly enhances LLMs’ ability to process complex inputs and improves instruction-following by retaining more relevant information \citep{liu2024lost,an2024training,pawar2024and}. Building on this insight, we extend medical instruction-following data by generating \textit{long-context paraphrased versions of existing samples in the dataset}, providing an additional enriched perspective of the original data. 
+
+In particular, a typical instruction sample includes $\{\mX_{v}, [\mX_{q}^{1},\,\mX_{a}^{1}],...,[\mX_{q}^{L},\,\mX_{a}^{L}]\}$ where $\mX_{v}$ is an input image, $\mX_{q}^{l}$ a question, and $\mX_{a}^{l}$ an answer at round $l$ in multi-round $L$ of a conversation. In the medical domain, most of the questions are generic, and the information answer usually covers the question, so we only focus on extending the answer $\mX_{a}$. We leverage the \texttt{GPT} API with a \texttt{prompt} to form a longer-context for each $\mX_{a}^{l}$ by:
+\begin{equation}
+    \mX_{ae}^{l} = \mathrm{GPT}\left(\mX_{q}^{l}, \mX_{a}^{l},\mathrm{prompt}\right),\  \forall l \in [L].
+    \label{eq:gpt}
+\end{equation}
+ In short, we ask GPT to provide additional explanations for concepts that appeared in the original answer $\mX_a$ while keeping the content consistent. An example output 
+for $\mX_{ae}^{l}$ is illustrated in Figure \ref{fig:long-context-example}. 
+\subsection{Multi-graph construction on vision-language  embedding}
+For each \textit{image} $\mX_{v} \in \R^{3\times H \times W}$ where $(H, W)$ are the original spatial dimensions. We divide it into a sequence of visual patches $\mU = [u_{i}]_{i=1}^{N}$ with $N = (H \times W)/U$
+with $U$ as the patch size. Using a pre-trained ViT model $f_{\theta}$, we extract patch-wise features as $\mV = f_{\theta}(\mU) \in \R^{N\times d_v}$ and apply another projector to map it into the projected embedding $\mZ = h_{\phi}(\mV) \in \R^{N \times d}$. We then pool the features from the image patches to define a global description as 
+$\mZ_{v} = \mathbb{E}(\mZ) \in \R^{d}$. For each \textit{language input} $\mX_{c}^{l} \in \{\mX_{a}^{l},\mX_{ae}^{l}\}$ with $c \in \{a,ae\}$, we assume it has $M$ tokens, i.e., $\mX_{c}^{l} = [\vx_j]_{j=1}^{M} \in \R^{M}$, and feed it into the \texttt{LLM} model to extract a set of embedding $\mZ_{c}^{l} = g_{\sigma}([\vx_j]_{j=1}^{M}) = [\ve_j]_{j=1}^{M} \in \R^{M\times d}$. We subsequently concatenate all multi-round $L$ in each single instruction tuning to define $\mZ_{c} = \textstyle \frac{1}{L} \sum_{l=1}^{L} \mathbb{E}(\mZ_{c}^{l})$ which collects average text embedding of original answers ($c=a$) and their longer-context extended versions ($c=ae$) respectively. 
+
+\begin{wrapfigure}{r}{0.4\textwidth}
+    \centering % Centers the figure within the wrapfigure
+    \includegraphics[width=0.4\textwidth]{./figures/long_context_ui.pdf}
+    \caption{Illustration for creating the longer-context instruction-following data powered by GPT-4o.} 
+    \label{fig:long-context-example}
+\end{wrapfigure}
+
+Given a batch size of $B$ instruction-tuning samples, we now construct three graphs $\gG_{v} =(\gV_{v}, \gE_{v})$,  $\gG_{a} =(\gV_{a}, \gE_{a})$, and $\gG_{ae} =(\gV_{ae}, \gE_{ae})$ representing for visual image features, text embedding encoded by LLM for original answers and their long-context embedding extended by GPT. Specifically, for each triplet pair $\{\mX_{v}^{(k)}, [\mX_{a}^{l}]^{(k)}, [\mX_{ae}^{l}]^{(k)}\}_{k},\, (k \in [B])$, we add a node representing $\mX_{v}^{(k)}$ to $\gV_{v}$, a node for $[\mX_{a}^{l}]^{(k)}$ to $\gV_{e}$, and finally a node for $[\mX_{ae}^{l}]^{(k)}$ to $\gV_{ae}$. This results in a set of nodes $\gV_{v} = \{\mX_{v}^{(1)},...,\mX_{v}^{(B)}\}$; $\gV_{c} = \{[\mX_{c}^{l}]^{(1)},...,[\mX_{c}^{l}]^{(B)}\}$ for each $c \in \{a,ae\}$. We equip node-level feature matrices for these graphs using their embedding computed above, i.e., $\mF_{v} = \{\mZ_{v}^{(1)},...,\mZ_{v}^{(B)}\}$, $\mF_{c} = \{\mZ_{c}^{(1)},...,\mZ_{c}^{(B)}\}$. The edges for $\gE_{v}, \gE_{c}$ afterward can be created through the k-nearest neighbors algorithm given the feature node matrices $\mF_{v},\,\mF_{c}$. Finally, we can run a message-passing network $m_{\alpha}(.)$ on three built graphs to learn richer node representations. This approach has proven effective for representation learning \citep{tang2022unifying,ju2024comprehensive}, resulting in aggregated feature-node matrices as $\{\hat{\mZ}_{s}^{(1)},...,\hat{\mZ}_{s}^{(B)}\} = m_{\alpha}(\mF_{s}, \gE_{s})$, with $s \in \{v,a, ae\}$.
+\subsection{Second-order graph alignment problem}
+We first provide background about the second-order graph alignment between two arbitrary graphs $\gG_1=(\gV_1,\gE_1)$ and $\gG_2=(\gV_2,\gE_2)$, which is mentioned as quadratic assignment problem and applied in several problems in vision and graphics to find correspondences between two graph structures under \textit{consistent between node features and structure constraints }\citep{zanfir2018deep,haller2022comparative,ehm2024partial}.
+We denote by $\mV \in \{0,1\}^{|\gV_1||\gV_2|}$, with $|\gV_1| = M$ and $|\gV_2| = N$, the indicator matrix  of matched vertices, that is, $\emV_{i,j} = 1$ if a vertex $v_i \in \gV_1$ is matched with $v_j\in \gV_2$ and  $\emV_{i,j} = 0$ otherwise. That is, $\mV$ is a binary matrix with exactly one non-zero entry in each row and column.
+Similarly, we set $\tE \in \{0,1\}^{|\gE_1||\gE_2|}$ as the indicator tensor of match edges, that is, $\etE_{i,k,j,l} = 1$ if  $\emV_{i,j} = 1$ and  $\emV_{k,l} = 1$ and $\etE_{i,k,j,l} = 0$ otherwise. This implies that the tensor $\tE$ is fully determined by the matrix $\mV$, that is, $\etE_{i,k,j,l} = \emV_{i,j} \emV_{k,l}$. 
+We also define the vertex affinity matrix and edge affinity tensor as $\mA^v \in \R^{|\gV_1||\gV_2|}$ and $\tA^e \in \R^{|\gE_1||\gE_2|}$, respectively. 
+The set $\gA(\gG_1,\gG_2)$ indicates for all admissible pairs $(\mV,\tE)$ that encode a valid matching between $\gG_1$ and $\gG_2$. 
+\iffalse
+If graphs $\gG_1$ and $\gG_2$ have $M$ and $N$ vertices, respectively, then the set of all admissible pairs is defined as follows:
+\fi
+\setlength{\abovedisplayskip}{2pt}
+\setlength{\belowdisplayskip}{2pt}
+\begin{align}
+    \gA(\gG_1,\gG_2) = \left\{\mV \in \{0,1\}^{M\times N}:\sum_{i=1}^M\emV_{i,j} = 1,\sum_{j=1}^N\emV_{i,j} = 1\right\}.
+\end{align}
+The second-order graph alignment (SoGA) problem now is defined as: 
+\setlength{\abovedisplayskip}{4pt}
+\setlength{\belowdisplayskip}{4pt}
+\begin{align}\label{eq_GM}
+    \text{SoGA}(\mA^v,\tA^e) &= \argmin_{\mV \in \gA(\gG_1,\gG_2)} \langle\mA^v+\tA^e\otimes \mV, \mV\rangle=\argmin_{\mV \in \gA(\gG_1,\gG_2)}\sum_{i,j}\emA^v_{i,j}\emV_{i,j}+\sum_{i,j,k,l}\etA^e_{i,j,k,l}\emV_{i,j} \emV_{k,l}.
+\end{align}
+\iffalse
+We now establish the second-order graph alignment (SGM) problem as: 
+\setlength{\abovedisplayskip}{4pt}
+\setlength{\belowdisplayskip}{4pt}
+\begin{align}\label{eq_GM}
+    \text{SoGA}(\mA^v,\tA^e) &= \argmin_{\mV \in \gA(\gG_1,\gG_2)} O(\mA^v,\tA^e,\mV) \text{ where } O(\mA^v,\tA^e,\mV) = \langle\mA^v+\tA^e\otimes \mV, \mV\rangle.
+\end{align}
+Note that the objective function in Eq.~(\ref{eq_GM}) is expanded as sum of vertex and edge costs:
+\begin{align}\label{eq_GM_expa}
+   O(\mA^v,\tA^e,\mV) = \sum_{i,j}\emA^v_{i,j}\emV_{i,j}+\sum_{i,j,k,l}\etA^e_{i,j,k,l}\emV_{i,j} \emV_{k,l}.
+\end{align}
+\fi
+\subsection{Scalable Multi-graph Alignment}
+Our aim is to solve the graph alignment between three graphs $\gG_{v}, \gG_{a}$, and $\gG_{ae}$ to form a triplet constraint between input image embedding, its original instruction embedding, and the long-context extended version ones. However, solving a structure-aware graph alignment between $K$ domains is computationally expensive. One potential solution is to perform pairwise graph alignments $\binom{K}{2}$ times, as shown in Eq.~(\ref{eq_GM}), while applying specific constraints to maintain consistency between correspondences \citep{bernard2019hippi,swoboda2019convex}. However, this method becomes impractical as $K$  increases, making it unsuitable for larger-scale problems.  
+
+Another direction leverages the barycenter concept from optimal transport, which identifies a central distribution that minimizes the weighted sum of Wasserstein distances to the given input distributions. We follow this idea to reformulate the alignment of $K$  graphs into $K$  separate alignments with a barycenter graph. Unlike previous unsupervised methods that estimate the barycenter before aligning, 
+we directly define the barycenter using known triplet pairs across the three graphs. This significantly reduces complexity, making our solver more efficient in LLM settings.
+
+Specifically, we define a new barycenter graph $\gG_{br} = (\gV_{br},\gE_{br})$ where $\gV_{br} = \left\{v_{br}^{(1)},...,v_{br}^{(B)}\right\}$ with $v_{br}^{(k)} = \overline{\mX}^{(k)} =\{\mX_{v}^{(k)}, [\mX_{a}^{l}]^{(k)}, [\mX_{ae}^{l}]^{(k)}\}$ and  a correspondence feature node as $\mF_{br} =  \dfrac{1}{3}\left\{\sum_{s}\hat{\mZ}_{s}^{(1)},...,\sum_{s}\hat{\mZ}_{s}^{(B)}\right\}$ with $s \in \{v,a,ae\}$. The edge set $\gE_{br}$ is formed similarly to another graph by running the k-nearest neighbor on feature node $\mF_{br}$. We now state the multi-graph alignment as:
+\setlength{\abovedisplayskip}{5pt}
+\setlength{\belowdisplayskip}{5pt}
+\begin{equation}\label{eq:multi-graph}
+    \text{SoGA}(\mA_{s}^v,\tA_{s}^e) = \argmin_{\mV_{s} \in \gA(\gG_{s},\gG_{br})}  \sum_{s \in \{v,a,ae\}} \, \langle\mA_{s}^v+\tA_{s}^e\otimes \mV_{s}, \mV_{s}\rangle,
+\end{equation}
+where $\mV_{s}$ is the indicator matrix representing for valid mapping between $\gG_{s}$ and $\gG_{br}$, $\mA_{s}^v \in \R^{|\gV_s||\gV_{br}|}$ and $\tA_{s}^e \in \R^{|\gE_s||\gE_{br}|}$ be vertex affinity matrix and edge affinity tensor between $\gG_{s}$ and $\gG_{br}$. For e.g., $\left(\mA_{s}^v\right)_{ij} = d\left(\hat{\mZ}_{s}^{(i)}, \dfrac{1}{3}\sum_{s}\hat{\mZ}_{s}^{(j)}\right)$ with $d(.)$ be a distance metric (e.g., cosine distance) measuring similarity between node $i^{th}$ in $\gG_{s}$ and node $j^{th}$ in $\gG_{br}$. 
+
+To address the NP-Hard nature of aligning each graph to the barycenter graph $\gG_{c}$, which arises from its combinatorial complexity, we employ efficient heuristic solvers utilizing Lagrange decomposition techniques \citep{swoboda2017study,rolinek2020deep}.
+\subsection{Backpropagation with Black-box Gradient Estimation}
+Given $\hat{\mV}_{s} = \text{SoGA}(\mA_{s}^v,\tA_{s}^e)$ be solution obtained from the solver, we aim to learn feature representation for LLMs such that $\hat{\mV}_{s}$ be identical to true triplet alignments explicitly indicated by the barycenter graph. By denoting $\mV_{s}^{*}$ be an optimal mapping between the graph $\gG_{c}$ to $\gG_{br}$, we compute the following total of hamming loss function:  
+\setlength{\abovedisplayskip}{3pt}
+\setlength{\belowdisplayskip}{3pt}
+\begin{equation}
+    \mathcal{L}(\hat{\mV}_{s}, \mV_{s}^{*}) = \sum_{s \in \{v,a,ae\}} \langle \hat{\mV}_{s}, (1-\mV_{s}^{*})\rangle + \langle \mV_{s}^{*} , (1 - \hat{\mV}_{s})\rangle.
+\end{equation}
+However, computing the gradient of the loss function with respect to the matching problem inputs \(\left(\mA_{s}^{v}, \tA_{s}^{e}\right)\), i.e., \(\nabla_{\mA_{s}^{v}, \tA_{s}^{e}} \mathcal{L}\left(\hat{\mV}_{s}, \mV_{s}^{*}\right)\), poses a challenge due to the piecewise constant nature of the graph matching objective in Eq.~(\ref{eq:multi-graph}) \citep{poganvcic2020differentiation, rolinek2020optimizing}. To address this, we resort to the IMLE techniques \citep{niepert2021implicit,minervini2023adaptive}, a method permitting estimate gradients over solutions of the combinatorial optimization problem by taking the difference between solutions of matching problem perpetuated by Gumbel noise.
+
+In particular, given $(\epsilon, \epsilon') \sim\mathrm{Gumble}(0,1)$ and for each $s \in \{v, a, ae\}$, we compute:
+\setlength{\abovedisplayskip}{5pt}
+\setlength{\belowdisplayskip}{5pt}
+\begin{align}
+    \left(\dfrac{\partial\mathcal{L}}{\partial \mA_{s}^{v}}, \dfrac{\partial\mathcal{L}}{\partial \tA_{s}^{e}}\right) & \approx \Tilde{\mV}_{s} - \text{SoGA}\left(\mA_{s,\lambda}^v,\tA_{s,\lambda}^e\right) 
+    \text{ where }   \Tilde{\mV}_{s}   = \text{SoGA}\left(\mA_{s}^v + \epsilon,\tA_{s}^e + \epsilon'\right), \\
+    \left(\mA_{s,\lambda}^v,\tA_{s,\lambda}^e\right) & = \left(\mA_{s}^v + \epsilon,\tA_{s}^e + \epsilon'\right) - \lambda \nabla_{\Tilde{\mV}_{s}} \mathcal{L}(\Tilde{\mV}_{s}, \mV_{s}^{*}), \text{ with } \lambda \text{ is a step size.}
+\end{align}
+
+\subsection{Structure alignment-based graph distance properties}
+In this section, we present theoretical insights into the graph-matching problem outlined in Eq.~(\ref{eq_GM}). Specifically, we demonstrate that once the optimal matching between two graphs is established, it defines a valid metric distance. Additionally, the geodesic path (i.e., the shortest path distance) connecting the two graphs in the manifold space can be derived based on the computed matching alignments. We define a discrete between two graphs given a solution of matching alignment as:
+\setlength{\abovedisplayskip}{3pt}
+\setlength{\belowdisplayskip}{3pt}
+\begin{align}\label{eq_SGM}
+    d_{\text{SoGA}}(\gG_1,\gG_2) &= \min_{\mV \in \gA(\gG_1,\gG_2)} \Big(\sum_{i,j}\emA^v_{i,j}\emV_{i,j}+\sum_{i,j,k,l}\etA^e_{i,j,k,l}\emV_{i,j} \emV_{k,l}\Big).
+\end{align}
+We consider labelled graphs as tuples of the form $\gG = (\gV,\gE,\gL_f,\gL_s)$, where the labelling function $\gL_f:\gV \mapsto \cF$ assigns each vertex $v_i\in\gV$ to a feature $f_i = \gL_f(v_i)$ in some feature space $(\cF,d_f)$. Similarly, we denote $\gL_s:\gV \mapsto \cS$ as a structure function which links each vertex $v_i \in \gV$ with its structure information $s_i = \gL_s(v_i)$, \eg~edge information, in some structure space $(\cS,d_s)$.
+By associating a weight to each vertex, we allow the graph $\gG$ to be represented by a fully supported mixing measure $\mu = \sum_{i=1}^N w_i \delta_{(f_i,s_i)}$ over the product between feature space and structure space  $\gF\times\gS$. Notably, $\mu$ is not necessarily a probability measure as the summation of its weights can be different from one. We have the vertex affinity matrix between two graphs as $\mA^v \in \R^{M \times N}$, where $\emA^v_{i,j} = (d_f(f_i,f_j)){i,j}$. Structural similarity is measured by pairwise distances within each graph, represented by $\tA^{e} \in \R^{|\gE_1||\gE_2|}$, with $\etA^e_{i,j,k,l} = |d_{s}(s_i,s_k) - d_{s}(s_j,s_l)|$, where $d_s(\cdot)$ models node distance, such as the shortest path.
+We then define the space of all structured graphs $(\gF\times\gS,d_f,\mu)$ over a metric feature space $(\gF,d_f)$ as $\sS(\gF)$, where  $(\cS,d_s)$ is a metric structure space and $\mu = \sum_{i=1}^N w_i \delta_{(f_i,s_i)}$ is a mixing measure over $\gF\times\gS$. 
+\iffalse
+\begin{definition}[\textbf{Space of structured graphs}]
+    We define the space of all structured graphs $(\gF\times\gS,d_f,\mu)$ over a metric feature space $(\gF,d_f)$ as $\sS(\gF)$, where  $(\cS,d_s)$ is a metric structure space and $\mu = \sum_{i=1}^N w_i \delta_{(f_i,s_i)}$ is a mixing measure over $\gF\times\gS$. 
+    \iffalse
+    For the sake of simplicity, we 
+    denote the labeled graphs $\gG$ and structured graphs discussed above only by $\mu$ the whole structured graph.
+    \fi
+\end{definition}
+\fi
+
+\begin{theorem}[\textbf{Metric properties}]\label{theorem_SGM_distance}      
+    The distance $d_{\text{SoGA}}$ in Eq.~(\ref{eq_SGM}) defines a metric in $\sS(\cF)$.
+    \iffalse
+    More precisely, for any two graphs $\gG_1$ and $\gG_2$ in the structured graph space $\sS(\gF)$,
+    it holds 
+    \begin{enumerate}
+        \item Positivity: $d_{\text{SoGA}}(\gG_1,\gG_2) > 0$ for any $\gG_1 \neq \gG_2$.
+
+        \item Equality relation: $d_{\text{SoGA}}(\gG_1,\gG_2) = 0$ if and only if $\gG_1 = \gG_2$.
+
+        \item Symmetry: $d_{\text{SoGA}}(\gG_1,\gG_2) = d_{\text{SoGA}}(\gG_2,\gG_1)$.
+
+        \item Triangle inequality: $d_{\text{SoGA}}(\gG_1,\gG_3) \le d_{\text{SoGA}}(\gG_1,\gG_2) + d_{\text{SoGA}}(\gG_2,\gG_3)$ for any graph $\gG_3$.
+    \end{enumerate}
+    \fi
+\end{theorem}
+ Intuitively, we can compare two graphs, $\gG_1$ and $\gG_2$, described by their mixing measures $\mu_1 = \sum_{i=1}^M w_{1i} \delta_{(f_{1i},s_{1i})}$ and $\mu_2 = \sum_{j=1}^N w_{2j} \delta_{(f_{2j},s_{2j})}$, with uniform vertex weights (\ie~$w_{1i} = 1, \forall i \in [M]$, $w_{2j} = 1, \forall j \in [N]$) and shortest path structure matrices. The SoGA distance is zero if and only if there exists a one-to-one mapping between the graph vertices that preserves both shortest paths and features and both graphs have the same number of vertices.
+\iffalse
+\begin{proof}[Proof of Theorem \ref{theorem_SGM_distance}] 
+
+Note first that 1. Positivity and 3. Symmetry hold trivially.
+
+    {\bf Proof of 2. Equality relation.} 
+
+    {\bf Proof of 4. Triangle inequality.} Let us consider two arbitrary graphs $\gG_1$ and $\gG_2$, described respectively by their probability measure $\mu_1 = \sum_{i=1}^M w_{1i} \delta_{(f_{1i},s_{1i})}$ and $\mu_2 = \sum_{j=1}^N w_{2j} \delta_{(f_{2j},s_{2j})}$.
+    
+\end{proof}
+\fi
+This geodesic property is useful in optimal transport (discrete measures) to define the dynamic formulation and can be used in representation learning by sampling new data on the geodesic connect two endpoints graphs.
+\iffalse
+To achieve this objective, it is necessary to collect fundamental material using Definition \ref{definition_geodesic} from metric geometry for a general metric space $(\sM,d)$.
+\begin{definition}[Length and geodesic spaces]\label{definition_geodesic}
+    Let $(\sM,d)$ be a metric space and two points $x,y \in \sM$. 
+    We say that a path (curve) $p:[0,1] \mapsto\sM$ connect or join $x$ to $y$ if $p(0) = x$ and $p(1) = y$ and $p$ is a continuous map. We also define the length $L(p) \in  \R$ of a path $p:[0,1] \mapsto \sM$ as  $L(p):=\sup \sum_{i=1}^n d(p(t_i),p(t_{i+1}))$ where we take the supremum over all $n\ge 1$ and all $n$-tuples $t_1<\ldots<t_n$ in $[0,1]$. 
+
+    We denote a metric space $\sM$ as a length space if for all $x,y \in \sM$, $d(x,y) = \inf_p L(p)$ where the infimum is taken over all paths $p$ connecting $x$ to $y$. We call a length space as a geodesic space if for all $x,y\in\sM$, there exists a path $p(x,y):[0,1] \mapsto \sM$ such that $d(x,y) = \min_{p(x,y)} L(p(x,y))$. 
+    
+    We also denote the path $p(x,y)$ as a geodesic between $x$ and $y$.
+    Finally, we define a path $p:[0,1] \mapsto \sM$ as a constant speed geodesic if and only if $d(p(s),p(t)) = |t-s|d(p(0),p(1))$, for all $s,t \in[0,1]$.
+\end{definition}
+\fi
+\begin{theorem}[\textbf{Geodesic space}]\label{theorem_constant_geodesic}
+    The space $\sS(\cF)$ equipped with the $d_{\text{SoGA}}$ distance is geodesic.
+    \iffalse
+    We consider an optimal coupling $V^*$ for SoGA distance between two graphs $\gG_1$ and $\gG_2$, \ie~$d_{\text{SoGA}}(\gG_1,\gG_2) = \min_{\mV \in \gA(\gG_1,\gG_2)}  O(\mA^v,\tA^e,\mV) = O(\mA^v,\tA^e,\mV^*)$, described respectively by their mixing measure $\mu_1 = \sum_{i=1}^M w_{1i} \delta_{(f_{1i},s_{1i})}$ and $\mu_2 = \sum_{j=1}^N w_{2j} \delta_{(f_{2j},s_{2j})}$.
+    Moreover, we define $\nu_t:\gF\times\gS_1\times \gF\times\gS_2 \mapsto \gF\times\gS_1\times \gS_2$ such that $\nu_t(f_1,s_1,f_2,s_2)=((1-t)f_1+tf_2,s_1,s_2)$ and $\mu_t := \nu_t\#\mV^* = \sum_{i=1}^M \sum_{j=1}^N \emV^*_{i,j} \delta_{((1-t)f_1+tf_2,s_{1i},s_{2j})}$.
+    Then $(\gF\times\gS_1\times \gS_2,(1-t)d_{s_1} \oplus t _{s_2},\mu_t)_{t\in[0,1]}$ is a constant speed geodesic joining $(\gF\times\gS_1,d_{s0},\mu_1))$ and $(\gF\times\gS_2,d_{s2},\mu_2))$ in the metric space $(\sS(\gF),d_{\text{SoGA}})$.
+    \fi
+\end{theorem}
+
+
+\section{Experiments}
+
+\subsection{Implementation Details}
+\textbf{Model architectures.}
+We use the \texttt{LLaMA} large language model \citep{touvron2023llama}, the \texttt{CLIP-ViT-L-Patch14} visual encoder \citep{radford2021learning}, and an MLP projection similar to \texttt{LLaVA 1.5} \citep{llava_15}.
+Stage 1 follows the standard \texttt{LLaVA-Med} \citep{llava-med} setup, while \textit{stage 2 incorporates our multi-graph alignment with autoregressive training}. For multi-graph alignment, a 2-layer graph convolutional network is applied to the output of the Projection and LLM Decoder (handling both image and text modalities). We train for 1 epoch in stage 1 and 3 epochs in stage 2 using the same dataset as \texttt{LLava-Med}. The model is optimized using \texttt{Adam} \citep{kingma2014adam} with CosineAnnealingLR scheduler and learning rates of $2e-3$ and $2e-5$ for stages 1 and 2, respectively.
+
+\textbf{Pre-training data.}
+We follow the same dataset being used in \texttt{LLaVA-Med} \citep{llava-med}. For stage 1, there are 600K image-text pairs filtered from \texttt{PMC-15M}. They are all converted to instruction-following data with simple instructions for describing the image. For stage 2, there are 60K image-text pairs extracted from \texttt{PMC-15M} with 5 modalities: CXR (chest X-ray), CT (computed tomography), MRI (magnetic resonance imaging), histopathology, and gross (i.e., macroscopic) pathology. Then, the authors from \texttt{LLaVA-Med} \citep{llava-med} use language-only \texttt{GPT-4} to generate multi-round questions and answers in a tone as if it could see the image to convert these pairs to instruction-following format. 
+
+\textbf{Running-time.}
+We train \textsc{LoGra-Med} using 4 A100-GPUs per with 80GB for both stages and complete the training process for stage 1 in 7 hours and for stage 2 in 7.5 hours. With original \texttt{LLaVA-Med} (version 1.5) \citep{llava-med}, the training process for stage 1 finishes in 6.5 hours, and for stage 2 finishes in 7 hours. In total, we need extra one more hour to complete the whole pre-training process compared to the LLaVa-Med.
+\subsection{Data-hungry Problem of Autoregressive}
+We begin by presenting the data-intensive nature of autoregressive training. To assess this, we used \texttt{LLaVA-Med}, a state-of-the-art multimodal large language model in the biomedical domain. \texttt{LLaVA-Med} follows a two-stage in their training process: Stage 1 aligns image-text tokens with biomedical concepts, and Stage 2 fine-tunes the model for instruction-based tasks. We pre-trained \texttt{LLaVA-Med} on varying data amounts (10\%, 40\%, 70\%) and used the checkpoints to fine-tune the visual question answering downstream task. As shown in Figure~\ref{fig:auto-regressive-less}, performance on the VQA-RAD dataset sharply declines when using 10\% pre-training data compared with fully-training on 100\%.
+To the best of our knowledge, this is the first time that the auto-regressive mechanism's data dependency issue in medical-MLLM has been revealed. This evidence indicates that without using enough instruction-tuning data, the auto-regressive creates a weak connection between visual features and text embeddings in LLM.
+
+To tackle this issue,
+our \textsc{LoGra-Med} enhances image-text alignment through the semantic constraints between input images, their instruction response, and the long-context extended contexts.
+We experiment with \textsc{LoGra-Med} under the same settings as \texttt{LLaVA-Med}, pretraining on varying data sizes and utilizing the checkpoints for instruction fine-tuning. Figure~\ref{fig:auto-regressive-less} demonstrates that \textsc{LoGra-Med} effectively learns the biomedical concept alignment task, producing strong pretraining checkpoints for downstream fine-tuning while using only 10\% of the data. For instance, while LLaVa-Med is at $52.39$ with $10\%$, \textsc{LoGra-Med} reaches $72.52\%$, which is approximately LLaVa-Med pre-trained on $100\%$. Across 10\%, 40\%, and 70\% data usage, \textsc{LoGra-Med} shows stable performance with consistent improvement, positioning it as a competitive model compared to other medical-MLLM like \texttt{BioMed-GPT} \citep{zhang2023biomedgpt} or \texttt{Med-MoE} \citep{jiang2024moe}. This suggests that the multi-graph alignment strategy effectively mitigates the data-intensive demands of autoregressive mechanisms in mLLMs.
+
+\subsection{Multi-modal Pre-training Comparison}
+To validate the benefit of our multi-graph alignment, we compare it with other vision-language pre-trained methods designed to train for the CLiP model or in visual instruction tuning to bridge frozen vision-language models.
+\begin{table}[H]
+    \centering
+    \begin{adjustbox}{width=0.95\textwidth}
+    \setlength{\tabcolsep}{3.5 pt}
+    \begin{tabular}{l ccc ccc ccc l}
+        \toprule
+        \multirow{2}{*}{\textbf{Method}} & \multicolumn{3}{c}{\textbf{VQA-RAD}} & \multicolumn{3}{c}{\textbf{SLAKE}} & \multicolumn{3}{c}{\textbf{PathVQA}} & \multirow{2}{*}{\textbf{Overall}} \\
+        \cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10}
+        & Open & Closed & Avg. & Open & Closed & Avg. & Open & Closed & Avg. & \\
+        \midrule
+        LLaVA-Med (100\%) & 63.65&81.62&72.64&83.44&83.41&83.43&36.78&91.33&64.06& 73.37 \\
+        LLaVA-Med (10\%) & 43.38\textcolor{red}{$\downarrow$\scriptsize{20.27}}&61.4\textcolor{red}{$\downarrow$\scriptsize{20.22}}&52.39\textcolor{red}{$\downarrow$\scriptsize{20.25}}&80.94\textcolor{red}{$\downarrow$\scriptsize{2.5}}&80.29\textcolor{red}{$\downarrow$\scriptsize{3.12}}&80.62\textcolor{red}{$\downarrow$\scriptsize{2.81}}&24.26\textcolor{red}{$\downarrow$\scriptsize{13.69}}&88.03\textcolor{red}{$\downarrow$\scriptsize{3.18}}&56.15\textcolor{red}{$\downarrow$\scriptsize{7.91}}&63.05\textcolor{red}{$\downarrow$\scriptsize{10.32}}\\
+        InfoNCE&59.39&77.57&68.48&82.4&83.17&82.78&34.59&\textbf{91.45}&63.02&71.43 \\
+        PLOT&16.86&26.47&21.67&37.81&56.25&47.03&11.79&81.36&46.58&38.42 \\
+        SigLIP&56.99&77.94&67.47&80.86&80.53&80.69&18.08 &50.85 &34.465 &60.88\\
+        VLAP&57.49&76.47&66.98&80.05&82.21&81.13&32.21 &91.16 &61.685 &69.93\\
+        \rowcolor{Gray}
+        \textbf{LoGra-Med}&\textbf{66.02}&\textbf{79.04}&\textbf{72.52}&\textbf{84.92}&\textbf{85.1}&\textbf{85.01}&\textbf{37.25}&\textbf{91.45}&\textbf{64.34}&\textbf{73.96} \\
+        \bottomrule
+    \end{tabular}
+    \end{adjustbox}
+    \caption{Fine-tuning performance on MedVQA downstream datasets (pre-trained 10\%). \textbf{Bold} indicates the best values among pre-training algorithms, excluding \texttt{LLaVA-Med} (pre-trained 100\%)}.
+    \label{tab:model_comparison_10percent}
+\end{table}
+\textbf{Datasets.} We evaluate pre-trained models on three prominent biomedical VQA datasets: \texttt{VQA-RAD} \citep{lau2018dataset}, \texttt{SLAKE} \citep{liu2021slake}, and \texttt{PathVQA} \citep{he2020pathvqa}. \texttt{VQA-RAD} includes 3,515 questions across 315 radiology images, while \texttt{SLAKE} contains 642 radiology images from various body parts and over 7k QA pairs. \texttt{PathVQA}, focused on pathology, features 5k images and 32.8k questions. All datasets include open-ended (e.g., what, why, where) and closed-ended (yes/no or two-option) question types. 
+
+\textbf{Baselines.} 
+We compare four approaches, including \texttt{InfoNCE}-based methods \citep{khan2023contrastive,liu2023contrastive}, \texttt{SigLIP} \citep{zhai2023sigmoid}, \texttt{PLOT} \citep{chen2022plot}, and \texttt{VLAP} \citep{park2024bridging}. Among this, \texttt{SigLIP} adapts the Sigmoid loss on image-text pairs to break the global view of the pairwise similarities for normalization, resulting in scaling in large batch size. \texttt{PLOT} defines optimal transport as a distance between visual image patches and text embedding. In contrast, \texttt{VLAP} uses assignment prediction to bridge the modality gap between the visual and LLM embeddings. We train the baselines under the same settings as \textsc{LoGra-Med} with varying pre-training data rates and compare their performance on downstream tasks.
+
+\textbf{Results.} In Tables \ref{tab:model_comparison_10percent}, \ref{tab:model_comparison_40percent} and \ref{tab:model_comparison_100percent}, 
+We compare the performance of \textsc{LoGra-Med} and the baselines when pre-trained with $10\%$, $40\%$, and $100\%$ of instruction-tuning data. While most contrastive baselines improve \texttt{LLaVA-Med} at 10\%, \textsc{LoGra-Med} consistently outperforms \texttt{LLaVA-Med} and other methods overall. In open-ended questions, which require external knowledge, \textsc{LoGra-Med} delivers the best results. Notably, it maintains stable improvements across all three VQA datasets, unlike other methods that peak at $40\%$ pre-training and decline afterward. For example, \texttt{SigLIP} scores $72.14\%$ (Average) and $72.12\%$ (Overall) on VQA-RAD at $40\%$ but drops over $6\%$ and $1\%$ at $100\%$. In contrast, \textsc{LoGra-Med} continues to improve, reaching $74.91\%$ (Average) and $74.75\%$ (Overall).
+\begin{table}[H]
+    \centering
+    \begin{adjustbox}{width=0.95\textwidth}
+    \setlength{\tabcolsep}{3.5 pt}
+    \begin{tabular}{l ccc ccc ccc l}
+        \toprule
+        \multirow{2}{*}{\textbf{Method}} & \multicolumn{3}{c}{\textbf{VQA-RAD}} & \multicolumn{3}{c}{\textbf{SLAKE}} & \multicolumn{3}{c}{\textbf{PathVQA}} & \multirow{2}{*}{\textbf{Overall}} \\
+        \cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10}
+        & Open & Closed & Avg. & Open & Closed & Avg. & Open & Closed & Avg. & \\
+        \midrule
+        LLaVA-Med (100\%) & 63.65&81.62&72.64&83.44&83.41&83.43&36.78&91.33&64.06&73.37 \\
+        LLaVA-Med (40\%) & 62.23\textcolor{red}{$\downarrow$\scriptsize{1.42}}&79.41\textcolor{red}{$\downarrow$\scriptsize{2.21}}&70.82\textcolor{red}{$\downarrow$\scriptsize{1.82}}&84.42\textcolor{red}{$\uparrow$\scriptsize{0.98}}&83.65\textcolor{red}{$\downarrow$\scriptsize{0.24}}&84.04\textcolor{red}{$\uparrow$\scriptsize{0.61}}&31.86\textcolor{red}{$\downarrow$\scriptsize{4.92}}&84.99\textcolor{red}{$\downarrow$\scriptsize{6.34}}&58.43\textcolor{red}{$\downarrow$\scriptsize{5.63}}&71.09\textcolor{red}{$\downarrow$\scriptsize{2.28}}\\
+        InfoNCE&63.11&77.57&70.34&82.68&83.89&83.29&33.58 &89.62 &61.6 &71.74 \\
+        PLOT&64.36&79.41&71.89&83.38&82.93&83.16&35.11 &89.59 &62.35 &72.46 \\
+        SigLIP&63.02&81.25&72.14&81.26&80.29&80.77&36.01 &90.86 &63.435 &72.12\\
+        VLAP&63.17&79.04&71.11&83.38&83.89&83.64&35.62 &90.83 &63.225 &72.66\\
+        \rowcolor{Gray}
+        \textbf{LoGra-Med}&\textbf{66.01}&\textbf{82.72}&\textbf{74.37}&\textbf{84.17}&\textbf{85.82}&\textbf{84.99}&\textbf{37.41} &\textbf{91.27} &\textbf{64.34} &\textbf{74.57} \\
+        \bottomrule
+    \end{tabular}
+    \end{adjustbox}
+    \caption{Performance fine-tuning on MedVQA downstream datasets (pre-trained 40\%). \textbf{Bold} indicate for best values among pre-training algorithms excluding \texttt{LLaVA-Med} (pre-trained 100\%).}
+    \label{tab:model_comparison_40percent}
+\end{table}
+\subsection{Med-VQA Comparison with Medical MLLMs}
+We now compare \textsc{LoGra-Med} pre-trained with $100\%$ data against other medical foundation models, each trained on varying datasets and employing different architectures or model sizes.
+
+\textbf{Baselines.} 
+We compare with \textit{eight competitors}, both generic or medical foundation models, including
+\texttt{LLaVA} \citep{llava}, \texttt{LLaVA-Med} \citep{llava-med}, \texttt{Med-Flamingo} \citep{moor2023med}, \texttt{Med-Dr} \citep{he2024meddr}, \texttt{Biomed-GPT} \citep{zhang2023biomedgpt}, \texttt{M2I2} \citep{10230743}, \texttt{GPT-4o} \citep{achiam2023gpt} and \texttt{Med-MoE} \citep{jiang2024moe}. Whilst LLaVA and GPT-4o have no medical background, the others are pre-trained on a variety of biomedical knowledge. With the exception of \texttt{LLaVa}, which we reproduced, the results for the other baselines are taken from the literature. Moreover, we also present an enhanced version, \textsc{LoGra-Med + DCI}, which integrates multi-scale visual features from vision encoders \citep{yao2024dense}, potentially benefiting medical image analysis by considering both local (detailed) and global (contextual) features.
+
+\begin{table}[H]
+    \centering
+    \begin{adjustbox}{width=0.95\textwidth}
+    \setlength{\tabcolsep}{3.5 pt}
+    \begin{tabular}{l l ccc ccc ccc l}
+        \toprule
+        \multirow{2}{*}{\textbf{Method}} & \#\textbf{Params} & \multicolumn{3}{c}{\textbf{VQA-RAD}} & \multicolumn{3}{c}{\textbf{SLAKE}} & \multicolumn{3}{c}{\textbf{PathVQA}} & \multirow{2}{*}{\textbf{Overall}} \\
+        \cmidrule(lr){3-5} \cmidrule(lr){6-8} \cmidrule(lr){9-11}
+        & & Open & Closed & Avg. & Open & Closed & Avg. & Open & Closed & Avg. & \\
+        \midrule
+        LLaVA-Med \citep{llava-med} & 7B & 63.65&81.62&72.64&83.44&83.41&83.43&{36.78}&{91.33}&\underline{64.06}& {73.37} \\
+        BiomedGPT-B \citep{zhang2023biomedgpt}& 182M & 60.9&81.3&71.1&84.3&\textbf{89.9}&\textbf{87.1}&28&88&58&72.07\\
+        M2I2 \citep{10230743}& - &61.8&81.6&71.7&74.7&91.1&82.9&36.3&88&62.15&72.25 \\
+        BioMed-CLIP \citep{zhang2303large} & 422M & \textbf{67.6}&79.8&73.7&82.5&89.7&\underline{86.1}& & & & \\
+        Med-Dr \citep{he2024meddr} & 40B & 37.5&78.9&58.2&74.2&83.4&78.8&33.5&90.2&61.85&66.28 \\
+        LLaVA (general) \citep{llava} & 7B & 50&65.1&57.55&78.2&63.2&70.7&7.7&63.2&35.45&54.57 \\
+        GPT-4 \citep{achiam2023gpt} & 200B & 39.5&78.9&59.2&33.6&43.6&38.6 & & & & \\
+        Med-MoE (Phi2) \citep{jiang2024moe}& 3.6B &58.55&\underline{82.72}&70.64&\underline{85.06}&{85.58}&85.32&34.74&\textbf{91.98}&63.36&73.11 \\
+        Med-MoE (Stable LM) \citep{jiang2024moe}& 2B &50.08&80.07&65.08&83.16&83.41&83.29&33.79&91.30&62.55&70.3 \\
+        \rowcolor{Gray}
+        \textbf{LoGra-Med} & 7B &{66.35}&\textbf{83.46}&\textbf{74.91}&\textbf{85.34}&{85.58}&85.46&\underline{36.82}&90.92&{63.87}&\underline{74.75}\\
+        \rowcolor{Gray}
+        \textbf{LoGra-Med + DCI} & 7B &\underline{67.31}&{81.99}&\underline{74.65}&{84.88}&\underline{85.82}&85.23&\textbf{37.77}&\underline{91.86}&\textbf{64.82}&\textbf{74.9}\\
+        \bottomrule
+    \end{tabular}
+    \end{adjustbox}
+    \caption{Performance comparing on MedVQA vs. other Med-MLLM.}
+    \label{tab:model_comparison}
+\end{table}
+\textbf{Results.}
+Overall, two \textsc{LoGra-Med} versions perform better than the baseline models (Table \ref{tab:model_comparison}), especially the version combined with DCI gains the best performance for PathVQA on Average score (64.82\%) and for Overall result (74.9\%). Compared to \texttt{LLaVA-Med}, \textsc{LoGra-Med} exhibits significant improvements on every task result, such as 2.01\% on VQA-RAD, 2.03\% on SLAKE and 0.76\% on PathVQA. Furthermore, it is important to note that both the plain and DCI versions of \textsc{LoGra-Med} demonstrate competitive performance across all VQA datasets, despite having significantly fewer parameters. For instance, the two 7B-parameter \textsc{LoGra-Med} versions outperform the 40B-parameter \texttt{Med-Dr} across all three datasets.
+\subsection{Medical Visual Chatbot Evaluation}
+\textbf{Datasets.}
+Following the experimental settings in \texttt{LLaVA-Med}, we evaluate \textsc{LoGra-Med} on a biomedical multimodal conversational dataset containing a total of 193 questions including
+conversation (143 samples), description (50 samples). Additionally, the experimental setup categorizes the test samples into five medical domains, including Chest X-ray (CXR), Magnetic Resonance Imaging (MRI), Histology, Gross, and Computed Tomography (CT).
+
+\textbf{Baselines.}
+We evaluate with several SOTA multimodal large language models, including general models like \texttt{LLaVA} and \texttt{GPT-4o}, as well as medical-focused models such as \texttt{LLaVA-Med} and its variants, \texttt{Med-Flamingo}, \texttt{Med-Dr}, and \texttt{Biomed-GPT}. We use the officially provided weights for all comparison baselines without additional reproduction steps.
+
+\textbf{Results.} Table \ref{tab:med_vis_chatbot_eval} summarizes our finding results, which shows that in most of the settings, two of our \textsc{LoGra-Med} deliver the top records.
+\begin{minipage}{\textwidth}
+  \begin{minipage}[t]{0.6\textwidth}
+    \begin{table}[H]
+        \centering
+        \begin{adjustbox}{width=\textwidth}
+        \setlength{\tabcolsep}{3.5 pt}
+        \begin{tabular}{l l cc ccccc c}
+            \toprule
+            \multirow{2}{*}{\textbf{Method}} & \multirow{2}{*}{\#\textbf{Params}} & \multicolumn{2}{c}{\textbf{Question Type}} & \multicolumn{5}{c}{\textbf{Domain}} & \multirow{2}{*}{\textbf{Overall}} \\
+            \cmidrule(lr){3-4} \cmidrule(lr){5-9}
+            & & Conver. & Descr. & CXR & MRI & Histology & Gross & CT & \\
+            \midrule
+            LLAVA  & 7B & 39.40&26.20&41.60&33.40&38.40&32.91&33.40&36.1 \\
+            LLAVA-Med 1.0$^{*}$ & 7B &47.4&33.99&51.31&36.32&45.61&41.09&\underline{44.87}&43.93\\
+            LLAVA-Med 1.5$^{*}$ & 7B &46.78&34.58&54.58&36.5&41.85&40.3&\textbf{45.02}&43.62\\
+            MedFlamingo & 8.3B &28.58&13.89&26.93&21.34&22.09&32.71&22.25&24.77\\
+            Med-Dr & 40B &35.61&19.28&38.98&26.28&29.10&35.40&28.30&31.38\\
+            Biomed-GPT& 182M &20.71&17.99&27.53&18.50&17.18&14.72&22.08&20.01\\
+            GPT-4o & 200B &42.04&25.47&42.77&\textbf{39.74}&38.68&31.40&35.59&37.75\\
+            \rowcolor{Gray}
+            \textbf{LoGra-Med}& 7B &48.49&\underline{34.32}&\underline{58.37}&\underline{36.82}&\underline{46.05}&\textbf{45.19}&38.24&\underline{44.82}\\
+            \rowcolor{Gray}
+            \textbf{LoGra-Med} +  DCI & 7B &\textbf{48.99}&34.01&\textbf{59.9}&32.34&\textbf{51.88}&\underline{42.53}&38.28&\textbf{45.11}\\
+            \bottomrule
+        \end{tabular}
+        \end{adjustbox}
+        \caption{Medical visual chatbot evaluation. Results are reported using GPT-4 as the scorer.}
+        \label{tab:med_vis_chatbot_eval}
+    \end{table}
+  \end{minipage} \ 
+  \begin{minipage}[t]{0.4\textwidth}
+    \begin{table}[H]
+        \centering
+\resizebox{\columnwidth}{!}{
+\begin{tabular}{@{\hspace{-0pt}}l@{\hspace{8pt}}c@{\hspace{8pt}}c@{\hspace{10pt}}c}%rrrrrrrrrrrr
+\toprule
+Method         & VQA-RAD  & SLAKE \\
+\midrule
+LoGra-Med (Full)                    & \textbf{74.37}     & \textbf{84.99} \\
+\rowcolor{cyan!50}
+LVM-Med with synonyms               &  72.39   & 82.93  \\
+LoGra-Med in two stages                   &  72.81  & 84.14  \\
+\rowcolor{cyan!50}
+LVM-Med w/o long-context             &  72.12   & 81.95 \\
+LVM-Med w/o message passing             &  73.90   & 84.29 \\
+\bottomrule
+\end{tabular}}
+\caption{{LoGra-Med ablation study. Results are presented as average scores on VQA-RAD and SLAKE, using pre-trained weights on 40\%. The two key factors are emphasized.}}
+\label{tab:logra_ablation}
+    \end{table}
+  \end{minipage}
+\end{minipage}
+\subsection{Zero-shot Image Classification as MedVQA}
+\textbf{Datasets.} We assess the generalization of \textsc{LoGra-Med} on zero-shot image classification by adapting public datasets from \citep{hu2024omnimedvqa}. We focus on three key data modalities prevalent in our pre-training: \texttt{Microscopy}, Computed Tomography \texttt{(CT)}, and Chest X-Ray \texttt{(CXR)}. This evaluation spans several downstream tasks, including \texttt{8} datasets for \texttt{Microscopy}, \texttt{4} for \texttt{CT}, and \texttt{11} for \texttt{CXR}, totaling \texttt{23} datasets.
+
+\textbf{Baselines.} We use checkpoints from \texttt{LLaVa-Med}, \texttt{Med-Flamingo}, and \texttt{RadFM} \citep{radfm} for zero-shot inference on the collected datasets. Notably, \texttt{RadFM} is pre-trained on $16M$ 2D and 3D medical scans, while \textsc{LoGra-Med} is trained on just $600K$ instruction-following data. 
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \centering % Centers the figure within the wrapfigure
+    \includegraphics[width=0.5\textwidth]{./figures/omnimed_vqa.pdf}
+    \caption{\textsc{LoGra-Med} performance on \textit{$23$ zero-shot image classification tasks} within three data modalities.} 
+    \label{fig:omnimed_vqa_performance}
+\end{wrapfigure}
+\textbf{Results.} Figure~\ref{fig:omnimed_vqa_performance} illustrates the average performance of \textsc{LoGra-Med} across Microscopy, CT, and Chest X-Ray modalities, with the total number of images and question-answer items listed below. Overall, \textsc{LoGra-Med} still outperforms other models across all datasets, especially excelling in the microscopy modality, where it exceeds the runner-up, RadFM, by $8.2\%$.  We attribute these benefits to the strong alignment between visual features and language embeddings achieved through triplet constraints, which compel the model to capture deeper semantic relationships.
+
+\subsection{Ablation Studies}
+We validate \textsc{LoGra-Med} under the following settings: (i) applying multi-graph alignment in both stages instead of only in stage 2 (default); (ii) performing simple paraphrasing during instruction tuning by replacing keywords with their synonyms; (iii) using only two graphs in the alignment step (excluding long-context graphs); and (iv) applying message passing to enhance node features. Table \ref{tab:logra_ablation} shows that each proposed factor boosts the final performance wherein the multi-graph alignment and using ChatGPT as an extender are the most crucial components.
+
+
+\section{Conclusion}
+
+We have shown that enforcing triplet correlations among image modalities, their instruction data, and the extended contextual captions can improve vision-language alignment, which is often lacking in models trained by auto-regressive, especially given less pre-training data size as demonstrated for the LLaVa-Med model. We also present \textsc{LoGra-Med}, a new multi-graph alignment algorithm to handle such requirements, which is efficient in training and matches LLAVA-Med’s performance on just 10\% of the training data while outperforming other state-of-the-art methods on various tasks. These findings underscore that selecting the appropriate learning algorithm for training MLLMs is as crucial as scaling model size or data volume.
+\paragraph{Limitations and Future Work} 
+While we have conducted several experiments using the LLaVa model, it is crucial to validate \textsc{LoGra-Med} with other architectures, such as the Flamingo model \citep{alayrac2022flamingo}. Additionally, integrating a vision encoder or LLM specifically trained on medical sources \citep{chen2023meditron,mh2024lvm} holds promise for enhancing performance and improving robustness—an approach we have not yet evaluated. Lastly, we propose to investigate adaptor-based methods \citep{hu2021lora,zhang2023llama} for fine-tuning downstream tasks, as frozen backbone models can significantly reduce memory usage and maximize efficiency.
+
+
+
+
+

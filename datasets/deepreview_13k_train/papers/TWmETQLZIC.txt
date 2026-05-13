@@ -1,0 +1,480 @@
+\title{Unmasking Trees for Tabular Data}
+
+\begin{abstract}
+Despite much work on advanced deep learning and generative modeling techniques for tabular data generation and imputation, traditional methods have continued to win on imputation benchmarks. 
+We herein present UnmaskingTrees, a simple method for tabular imputation (and generation) employing gradient-boosted decision trees which are used to incrementally unmask individual features. 
+This approach offers state-of-the-art performance on imputation, and on generation given training data with missingness; and it has competitive performance on vanilla generation.
+To solve the conditional generation subproblem, we propose a tabular probabilistic prediction method, BaltoBot, which fits a \emph{bal}anced \emph{t}ree \emph{o}f \emph{bo}osted \emph{t}ree classifiers. 
+Unlike older methods, it requires no parametric assumption on the conditional distribution, accommodating features with multimodal distributions; unlike newer diffusion methods, it offers fast sampling, closed-form density estimation, and flexible handling of discrete variables.
+We finally consider our two approaches as meta-algorithms, demonstrating in-context learning-based generative modeling with TabPFN.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Given a tabular dataset, it is frequently desirable to impute missing values within that dataset, and to generate new synthetic examples. 
+On data generation, recent work \citep{jolicoeurmartineau2023generating} (ForestDiffusion) has shown state-of-the-art results on data generation using gradient-boosted trees \citep{chen2016xgboost} trained on diffusion or flow-matching objectives, outperforming deep learning-based approaches.
+However, this approach tended to struggle on tabular imputation tasks, outperformed by MissForest \citep{stekhoven2012missforest}, an older multiple imputation approach based on random forests \citep{breiman2001random}.
+
+\iffalse
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=3in,clip=true,trim=3in 0 0 3in]{figures/moons-demo.png}
+    \caption{Overview}
+    \label{fig:overview}
+\end{figure}
+\fi 
+
+We address this shortfall by training gradient-boosted trees to autoregressively unmask features in random order, via permutation language modeling \citep{yang2019xlnet}.
+This autoregressive approach, which we dub UnmaskingTrees, naturally performs conditional generation (i.e. imputation): we simply fill in and condition on observed values, autoregressively generating the remaining missing values.
+This contrasts with tabular diffusion modeling, for which the RePaint inpainting algorithm \citep{Lugmayr_2022_CVPR} is employed to mediocre effect \citep{jolicoeurmartineau2023generating}.
+Because the predictor for a given feature must condition on varying subsets of the other features, the ability of gradient-boosted trees to handle missing features makes them a natural choice for autoregressive modeling.
+Hence, we maintain the tree-based approach of \cite{jolicoeurmartineau2023generating}, while replacing their tree-based regressors with our novel tree-based probabilistic predictors, which we turn to next.
+
+While mean-estimating regression models are satisfactory for diffusion, for autoregression we must inject noise, and hence must estimate the entire conditional distribution of each feature.
+We therefore revisit the long-studied problem of (tabular) probabilistic prediction \citep{le2005nonparametric,meinshausen2006quantile}.
+Because the conditional distribution is possibly multi-modal, parametric approaches such as XGBoostLSS \citep{marz2019xgboostlss}, NGBoost \citep{duan2020ngboost}, and PGBM \citep{sprangers2021probabilistic} are poor choices for our setting. 
+Meanwhile, quantization of a continuous variable can model its multi-modality, but at the cost of destroying either low-resolution or high-resolution information.
+A diffusion-based method, Treeffuser \cite{beltran2024treeffuser}, was recently proposed to address these problems.
+However, as a diffusion method, it suffers from slow sampling and is unable to provide closed-form density estimates; furthermore, Treeffuser does not naturally model discrete outcomes.
+To address these problems, we propose BaltoBot, a \emph{bal}anced \emph{t}ree \emph{o}f \emph{bo}osted \emph{t}rees. 
+For each individual variable, we recursively divide its output space with the kernel density integral (KDI) quantizer \citep{mccarter2023the} into a ``meta-tree'' of binary classifiers, which for us are gradient-boosted trees.
+This allows us to efficiently generate samples and estimate densities, because each sample follows only one path from root to leaf of the meta-tree.
+Performing regression with hierarchical classification proved successful in computer vision object bounding box prediction \citep{li2020hierarchical}, but has been surprisingly underexplored in tabular ML and in generative modeling.
+
+Our two methods are in fact meta-algorithms that, in combination, can create a generative model out of \textit{any} probabilistic binary classifier.
+To demonstrate this flexibility, we swap out XGBoost \citep{chen2016xgboost} for TabPFN \citep{hollmann2022tabpfn}. 
+TabPFN is a deep learning model pretrained to perform in-context learning for tabular classification.
+While it has state-of-the-art classification benchmark performance \citep{mcelfresh2024neural}, it currently does not perform regression tasks, nor does it inherently perform generative modeling \citep{ma2024tabpfgen}.
+Constructing a generative model out of TabPFN \citep{hollmann2022tabpfn} was first proposed in TabPFGen \citep{ma2024tabpfgen}, which approximates the posterior from TabPFN-provided likelihoods by iteratively applying stochastic gradient Langevin dynamics \citep{welling2011bayesian}. 
+But unlike the previous work, ours requires only a few TabPFN forward-passes for each sample rather than many iterative data updates.
+
+We showcase UnmaskingTrees on two tabular case studies, and on the benchmark of 27 tabular datasets presented by \cite{jolicoeurmartineau2023generating}.
+Most notably on this benchmark, our approach offers state-of-the-art performance on imputation and on generation given training data with missingness; and it has competitive performance on vanilla generation.
+We also demonstrate that BaltoBot is on its own a promising method for probabilistic prediction, showing its advantages on synthetic case studies and on a heavy-tailed sales forecasting benchmark.
+
+ 
+ 
+In addition to being useful for practitioners, we hope our work sparks study within the tabular ML community about whether diffusion or autoregression is better for tabular data. 
+\textcolor{black}{Previous autoregressive tabular modeling methods, TabMT \citep{gulati2024tabmt} and DP-TBART \citep{castellon2023dp}, use Transformer \citep{vaswani2017attention} models, making them less applicable for the GPU-poor.}
+Our simple, efficient implementations of UnmaskingTrees and BaltoBot contribute to investigating this question.
+
+
+\section{Method}
+
+
+\subsection{UnmaskingTrees for tabular joint distribution modeling}
+
+UnmaskingTrees combines the gradient-boosted trees of ForestDiffusion \citep{jolicoeurmartineau2023generating} with the training objective of generalized autoregressive language modeling \citep{yang2019xlnet}, inheriting the benefits of both.
+Consider a dataset with $N$ examples and $D$ features. \textcolor{black}{We learn the joint distribution over $D$-dimensional example $\rvx$ by maximizing the expected log-likelihood with respect to all possible permutations of the factorization order,
+\begin{gather*}
+    \log p(\rvx) = \log \E_{\sigma \in \gU(G_D)} \Big[ \prod^D_{t=1} p\big(x_{\sigma(t)}|\rvx_{\sigma(<t)}\big) \Big],
+\end{gather*}
+where $\sigma$ is a permutation drawn uniformly from $\gU(G_D)$, the permutation group on $D$ features; $\rvx_{\sigma(< t)}$ denotes all features that precede the $t$-th feature in the permuted sequence of features.
+If we were to have marginalized over permutations, we would have obtained a masked language modeling procedure with a randomly-sampled masking rate $r \sim \gU(0, 1)$ \citep{kitouni2023disk,kitouni2024factorization};
+such a procedure was previously shown to have benefits in combination with tabular Transformer models \citep{gulati2024tabmt} (TabMT).
+}
+
+For each example, we generate new training samples by randomly sampling an order over the features, then incrementally masking the features in that random order.
+Given duplication factor $K$, we repeat this process $K$ times with $K$ different random permutations,
+leading to a training dataset with $KND$ samples. 
+Given this, we train XGBoost \citep{chen2016xgboost} models to predict each unmasked sample given the more-masked example derived from it, one per feature.
+\textcolor{black}{We model categorical features via softmax-based classification with cross-entropy loss; our approach for continuous features is described in Section \ref{subsec:baltobot}.}
+
+For both generation and imputation, we generate features of each sample in random order.
+For imputation rather than generation tasks, we begin by filling in each sample with the observed values, and run inference on the remaining unobserved features.
+Implementing this is very simple: it requires about 70 lines of Python code for training, and about 20 lines for inference.
+\subsection{BaltoBot for tabular probabilistic prediction}
+\label{subsec:baltobot}
+
+A key problem when autoregressively generating continuous data is that a regression model will attempt to predict the mean of a conditional distribution, whereas we would like it to sample from the possibly-multimodal conditional distribution.
+The simplest solution is to quantize continuous features into bins,
+because classification over histograms is inherently multimodal;
+TabMT \citep{gulati2024tabmt} did this with 1d k-Means clustering \citep{lloyd1982least}.
+Yet this not only destroys information within bins due to rounding, it also destroys information about the proximity among the ordered bins.
+Thus, it forces us to choose between a small number of quantization bins, yielding low resolution; or to choose a large number of bins, risking catastrophic errors due to overfitting and/or clumping of generated samples due to poor calibration.
+This not only limits performance, but also necessitates hyperparameter tuning \citep{gulati2024tabmt}.
+
+Inspired by this, we propose a general-purpose solution to the tabular probabilistic prediction problem.
+For each individual regression output variable, we build a \textcolor{black}{height-$H$} balanced tree of binary classifiers.
+Consider \textcolor{black}{a node with height $h$} on this ``meta-tree'', which is fit with $(\rmX_\textrm{train} \in \sR^{n \times d}, \rvy_\textrm{train} \in \sR^{n})$.
+Using kernel density integral quantization (KDI) \citep{mccarter2023the}, which adaptively interpolates between uniform quantization and quantile quantization, we obtain binarized $\tilde{\rvy}_\textrm{train} \in [0,1]^{n}$.
+\textcolor{black}{Thus, the input space to every node is partitioned into two with the splitting point determined by KDI.}
+We train an XGBoost classifier on $(\rmX_\textrm{train}, \mathbf{\tilde{y}}_\textrm{train})$.
+If $h > 0$, we then recursively pass $\{ (\rmX^{(i)}, y^{(i)}) \in (\rmX_\textrm{train}, \mathbf{y}_\textrm{train}) | \tilde{y}^{(i)} =0\}$ to its left child, and analogously for $\tilde{y}^{(i)} =1$ to its right child.
+At a leaf node, $h = 0$, if given a single unique training set output value in a bin, we record this value.
+At inference time, given a query input $\rmX$, we descend the tree by obtaining predicted probabilities from each node's XGBoost classifier, then sampling from these.
+Once we reach a leaf node, we either sample uniformly from its appropriate bin, or we return the lone output value if a singleton bin.
+
+At training and inference time, each XGBoost model within the meta-tree only sees examples that fall into its corresponding region of the output space.
+Thus, for a meta-tree with height $H$ (and thus $2^H$ models), each example is only passed as input to $H$ different models.
+While lower-level classifiers receive less data and are poorer quality, the magnitude of such errors are smaller due to our hierarchical partitioning approach.
+Furthermore, our singleton-bin technique allows us to adaptively generate discrete and even mixed-type variables, if these discrete outcomes are high-frequency relative to the total size of the data and to the height of the meta-tree. 
+(Up to $2^H$ discrete outcomes can be produced by BaltoBot.)
+Finally, eschewing diffusion modeling enables us to perform closed-form conditional density estimation.
+
+}
+
+\subsection{Computational complexity}
+
+ForestDiffusion, with $T$ diffusion steps and duplication factor $K$, constructs a training dataset of size $TKN \times D$.
+Given the same duplication factor $K$, UnmaskingTrees will construct a training dataset of size $KND \times D$. 
+Meanwhile, ForestDiffusion must train $DT$ different XGBoost regression models.
+We, on the other hand, train $D$ different BaltoBot models, one per feature;
+with BaltoBot meta-tree height of $H$, we then train a total of $D 2^H$ XGBoost binary classifiers. 
+However, classifiers lower in the BaltoBot meta-tree become progressively faster to train.
+Indeed, each constructed training sample will be seen by $DT$ different XGBoost regressors with ForestDiffusion, but only $DH$ classifiers with our approach.
+Given that $T \sim 50$ and $H \sim 4$, this yields a large speedup for our approach.
+
+The KDI quantizer \citep{mccarter2023the} has negligible contribution to runtime, because it uses the polynomial-exponential kernel density estimator (KDE) \citep{hofmeyr2019fast}, which has linear complexity in sample size for 1d data, unlike the quadratic complexity of the Gaussian KDE.
+
+At inference time, each ForestDiffusion generated sample passes through $T$ steps of the diffusion reverse-process, for a total of $DT$ XGBoost predictions.
+For UnmaskingTrees with BaltoBot, each generated sample instead requires only $DH$ XGBoost predictions, because each sample follows only one path from root to leaf of the meta-tree.
+The resulting speedup is especially impactful for the multiple imputation scenario, where inference time dominates.
+
+\subsection{In-context learning-based generation with BaltoBoTabPFN and UnmaskingTabPFN}
+
+Within our flexible frameworks for joint and conditional modeling, TabPFN \citep{hollmann2022tabpfn} can be used as a base learner for probabilistic prediction and generative modeling.
+For UnmaskingTabPFN joint modeling, a difficulty arises from TabPFN's inability to handle inputs $\rmX_{\textrm{train}}$ with missing values (NaNs).
+\textcolor{black}{To address this, we developed NanTabPFN, a wrapper for TabPFN that supports missingness in both training and test features.
+Based on each test query $\rvx_\textrm{test}$, we select row indices $\gR$ and column indices $\gC$ so that $[\rmX_\textrm{train}]_{\gR,\gC}$ has no NaNs, using the following key idea.
+Consider a particular train example $\rvx_\textrm{train}$ and test query $\rvx_\textrm{test}$, with visible (non-missing) features denoted by sets $\gV(\rvx_\textrm{train})$ and $\gV(\rvx_\textrm{test})$. 
+We can maximize the number of utilized features, while also ensuring that TabPFN receives no NaNs, by restricting the set of columns to those observed for the test query, $\gC := \gV(\rvx_\textrm{test})$, then choosing training examples $\gR := \{i | \gC \subseteq \gV(\rvx^{(i)}_\textrm{train})\}$. 
+In practice, our procedure is more complicated, because the above choices may result in either empty $\gC$ or empty $\gR$. 
+If $\gR$ is empty, we incrementally set random features of $\rvx_\textrm{test}$ to missing until we are able to obtain a non-empty training set.
+If $\gC$ is empty, we introduce a new all-1s feature to both $\rmX_\textrm{train}$ and $\rvx_\textrm{test}$.
+}
+\iffalse
+In brief, for each test example, given its pattern of missingness we choose a subset of training samples and a subset of features such that no NaNs are sent as input to TabPFN.
+In the best case, we are able to use all features that were observed for that test example, and all training samples whose observed features are a superset of those observed test features.  
+To address TabPFN's sample size limit of 1024, we performed random subsampling without replacement.
+
+\fi 
+
+
+
+\section{Results}
+
+
+\begin{figure}[h!]
+    \centering
+    \addtolength{\tabcolsep}{-0.8em}
+    \begin{tabular}{ll}
+      \hspace{-0.3in}\includegraphics[width=2.5in]{figures/moons-generation.png} & \includegraphics[width=3.5in]{figures/moons-imputation.png} \\
+    \end{tabular}
+    \addtolength{\tabcolsep}{0.8em}
+    \caption{Results on Two Moons case study. Original data is shown in green; generated data is shown in red; imputed data is shown in blue.}
+    \label{fig:moons}
+\end{figure}
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=4.8in]{figures/iris-full.png}
+    \caption{Results on Iris dataset, with species, petal width, and petal length depicted. Original data and synthetically-generated datasets are shown on the left columns. The imputed dataset is shown on the right columns, with $\times$ symbols highlighting the samples with any missingness that required imputation.}
+    \label{fig:iris}
+\end{figure}
+
+We evaluate UnmaskingTrees on two case studies (Section \ref{subsec:case}) and on a tabular benchmark of 27 datasets (Section \ref{subsec:benchmark}).
+We then evaluate BaltoBot and BaltoBoTabPFN on tabular probabilistic prediction case studies (Section \ref{subsec:experiments-baltobot}) and on a sales forecasting dataset (Section \ref{subsec:m5}).
+Results were obtained always using the default hyperparameters: output tree height of 4, and duplication factor $K=50$. 
+These hyperparameter values were tuned on the Two Moons and Iris case studies, then applied without further tuning to the remaining experiments, because hyperparameter tuning is no fun at all.
+XGBoost hyperparameters were set to their defaults.
+Experiments were performed on a iMac
+(21.5-inch, Late 2015) with 2.8GHz Intel Core i5 processor and 16GB memory.
+
+Overall, UnmaskingTrees (using BaltoBot) has state-of-the-art performance on imputation and on generation after training on incomplete data; and it has competitive performance on vanilla tabular generation scenarios.
+We further demonstrate the benefits of BaltoBot and BaltoBoTabPFN when evaluated in their own right for probabilistic prediction.
+
+\subsection{Case studies on Two Moons and Iris datasets}
+\label{subsec:case}
+
+\paragraph{Two Moons dataset}
+We first compare our approach to previous leading methods on the synthetic Two Moons dataset with 200 training samples and noise level $\mathcal{N}(0,0.1)$.
+We compare UnmaskingTrees to MissForest \citep{stekhoven2012missforest}, MICE-Forest \citep{van1999multiple,vonwilson2022} (another popular traditional multiple imputation method), and ForestDiffusion, with default hyperparameters for all methods.
+For ForestDiffusion, we evaluate both the variance-preserving SDE diffusion (Forest-VP) and flow-matching (Forest-Flow) versions on generation; on imputation, we evaluate Forest-VP with and without RePaint, again using default RePaint hyperparameters; Forest-Flow does not support imputation.
+
+We show results in Figure \ref{fig:moons}.
+On generation, Forest-VP appears to do best according to visual inspection, while UnmaskingTrees and Forest-Flow perform similarly decently.
+UnmaskingTabPFN performs poorly, but does capture the overall shape of the distribution.
+Next, we turn to imputation, wherein we request a single imputation for a copy of the original training data with the second dimension ($y$-axis) values masked out.
+ForestDiffusion struggles with and without RePaint, with substantial out-of-distribution imputations, and MissForest and MICE-Forest share this problem to lesser degrees.
+Meanwhile, UnmaskingTrees generates impeccable imputations.
+
+\paragraph{Iris dataset}
+In Figure \ref{fig:iris}, we show results for the Iris dataset \citep{fisher1936use}, plotting petal length, petal width, and species.
+We compare both methods on generation, and to compare on imputation, we create another version of the Iris dataset, with missingness completely at random: we randomly select samples with 50\% chance to have any missingness, and on these samples, we mask the non-species feature values with 50\% chance.
+Visually, ForestDiffusion and UnmaskingTrees perform about equally well on generation.
+Meanwhile, on imputation, UnmaskingTrees does a better job conditioning on species information than ForestDiffusion.
+UnmaskingTrees also produces more diverse imputations than MissForest.
+
+\subsection{Benchmarking UnmaskingTrees on 27 tabular datasets}
+\label{subsec:benchmark}
+
+\paragraph{Imputation}
+Here, we add UnmaskingTrees to the benchmark of 8 imputation methods on 27 public datasets, evaluated according to 9 metrics, developed by \cite{jolicoeurmartineau2023generating} for evaluating tabular imputation and generation methods.
+\textcolor{black}{This benchmark primarily contains smaller-sized (with $103 \le N \le 20{,}640$ and $4 \le D \le 90$) datasets, which our approach is especially geared towards.}
+Namely, we compare our approach against Forest-VP \cite{jolicoeurmartineau2023generating}, as well as k-NN imputation \citep{troyanskaya2001missing}, ICE \citep{buck1960method}, MICE-Forest \citep{van1999multiple,vonwilson2022}, MissForest \citep{stekhoven2012missforest}, Softimpute \citep{hastie2015matrix}, minibatch Sinkhorn optimal transport \citep{muzellec2020missing}, and generative adversarial nets (GAIN) \citep{yoon2018gain}. 
+\footnote{We do not add TabMT \citep{gulati2024tabmt} and TabPFGen \citep{ma2024tabpfgen} to the benchmark because no code was provided. We do not add UnmaskingTabPFN because of out-of-memory errors on our machine.}
+We follow \cite{jolicoeurmartineau2023generating} in
+computing the per-dataset rank of
+each method relative to other methods, then reporting the average over 27 datasets.
+For all methods other than our own, we compute ranks by reusing the raw scores provided in \cite{jolicoeurmartineau2023generating}'s code repository.
+
+Results for imputation are shown in Table \ref{tab:imp}.
+UnmaskingTrees wins first place on 3/9 metrics, including both metrics based on downstream prediction tasks; and it generally outperforms ForestDiffusion, winning on 8/9 metrics. While MissForest wins first place on 4/9 metrics, UnmaskingTrees wins 5-4 head-to-head vs MissForest; UnmaskingTrees has average \textit{averaged rank} of 3.2 compared to 3.5 for MissForest.
+UnmaskingTrees is also the only method with better than 5th place rank on all metrics.
+
+We report further ablation experiments in Table \ref{tab:imp-ablation-rank}, wherein we run UnmaskingTrees without BaltoBot, and instead with vanilla quantization using k-Means clustering \citep{lloyd1982least} and KDI quantization \citep{mccarter2023the}.
+Results showing progressive improvements for the UnmaskingTrees framework, for KDI quantization versus k-Means, and for the BaltoBot method used in our full proposed solution. 
+
+\begin{table*}[ht]
+\caption{Tabular data imputation (27 datasets, 3 experiments per dataset, 10 imputations per experiment) with 20\% missing. Shown are \textit{averaged rank} over all datasets and experiments (standard-error). Overall best is \hl{highlighted}; better of Forest-VP versus ours is \boldblue{boldface blue}. Metrics are Minimum and Average mean-absolute error (MinMAE and AvgMAE) to ground-truth, Wasserstein distance to train and test dataset distributions ($W_{train}$ and $W_{test}$), Mean Absolute Deviation (MAD) around the median/mode (for diversity), $R^2$ and $F_1$ for downstream regression / classification problems, and percent bias $P_{bias}$ and confidence interval coverage rate $Cov_{rate}$ for statistical inferences.}
+\label{tab:imp}
+\justrighttiny
+\centering
+\addtolength{\tabcolsep}{-0.2em}
+\begin{tabular}{r|llll|l|ll|ll}
+ & MinMAE $\downarrow\!$ & AvgMAE $\downarrow$ & $W_{train} \downarrow$ & $W_{test} \downarrow$ & MAD $\downarrow$ & $R^2 \downarrow$ & $F_1 \downarrow$ & $P_{bias} \downarrow$ & $Cov_{rate} \downarrow$   \\ \hline & & & & & & & & & \\
+KNN & 5.5 (0.5) & 6.3 (0.4) & 4.9 (0.4) & 5.0 (0.4) & 8.4 (0) & 6.5 (1) & 5.7 (1.1) & 6.2 (1) & 5.4 (0.6) \\ 
+  ICE & 6.8 (0.4) & 4.7 (0.4) & 7.0 (0.5) & 7.2 (0.4) & \hl{1.6} (0.2) & 6.2 (1) & 7.0 (0.6) & 5.7 (0.9) & 5.3 (0.6) \\ 
+  MICE-Forest & 3.9 (0.4) & \hl{2.5} (0.4) & 2.9 (0.2) & 3.0 (0.2) & 3.6 (0.2) & 3.7 (1.4) & 3.2 (1) & 5.5 (1.2) & 4.3 (0.6) \\ 
+  MissForest & \hl{2.7} (0.5) & 4.0 (0.4) & \hl{1.8} (0.3) & \hl{2.0} (0.3) & 5.5 (0.2) & 3.8 (1.4) & 2.5 (0.5) & 5.5 (1.5) & \hl{3.3} (0.5) \\ 
+  Softimpute & 6.7 (0.4) & 7.6 (0.4) & 7.1 (0.5) & 7.3 (0.5) & 8.4 (0) & 6.0 (0.9) & 7.8 (0.4) & 6.3 (0.9) & 6.7 (0.4) \\ 
+  OT & 5.9 (0.4) & 6.1 (0.3) & 6.0 (0.5) & 6.0 (0.5) & 3.7 (0.3) & 6.2 (0.5) & 6.8 (0.6) & 5.5 (0.8) & 4.8 (0.5) \\ 
+  GAIN & 4.7 (0.4) & 6.5 (0.3) & 6.0 (0.3) & 6.0 (0.2) & 6.9 (0.1) & 5.7 (0.8) & 5.4 (0.8) & 4.7 (1) & 5.0 (0.6) \\ 
+  Forest-VP & 5.3 (0.4) & 4.0 (0.5) & 5.8 (0.3) & 5.1 (0.4) & \boldblue{3.2} (0.4) & 4.5 (0.9) & 4.6 (0.8) & 3.3 (0.6) & 5.5 (0.7) \\ 
+  UTrees & \boldblue{3.5} (0.5) & \boldblue{3.2} (0.5) & \boldblue{3.5} (0.4) & \boldblue{3.5} (0.5) & 3.8 (0.2) & \boldblue{\hl{2.5}} (0.6) & \boldblue{\hl{2.2}} (0.6) & \boldblue{\hl{2.3}} (0.9) & \boldblue{4.7} (0.6) \\ 
+  \hline
+\end{tabular}
+\addtolength{\tabcolsep}{0.2em}
+\end{table*}
+\begin{table*}[h]
+\caption{Averaged ranks from ablation study of tabular data imputation (27 datasets, 3 experiments per dataset, 10 imputations per experiment) with 20\% missing. Shown are \textit{averaged rank} over all datasets and experiments (standard-error). Overall best is \hl{highlighted}; better of Forest-VP versus ours is \boldblue{boldface blue}. See Table \ref{tab:imp} for column meanings.}
+\label{tab:imp-ablation-rank}
+\justrighttiny
+\centering
+\addtolength{\tabcolsep}{-0.2em}
+\begin{tabular}{r|llll|l|ll|ll}
+ & MinMAE $\downarrow$ & AvgMAE $\downarrow$ & $W_{train} \downarrow$ & $W_{test} \downarrow$ & MAD $\downarrow$ & $R^2 \downarrow$ & $F_1 \downarrow$ & $P_{bias} \downarrow$ & $Cov_{rate} \downarrow$   \\ \hline & & & & & & & & & \\
+KNN & 6.8 (0.6) & 7.8 (0.6) & 6.0 (0.4) & 6.1 (0.5) & 10.4 (0) & 8.2 (1.3) & 7.0 (1.5) & 7.5 (1.5) & 6.5 (0.8) \\ 
+  ICE & 8.3 (0.5) & 5.8 (0.5) & 8.5 (0.6) & 8.8 (0.5) & \hl{1.9} (0.4) & 8.0 (1.1) & 9.0 (0.6) & 7.2 (1.1) & 6.4 (0.8) \\ 
+  MICE-Forest & 4.8 (0.6) & 3.3 (0.6) & 3.5 (0.3) & 3.4 (0.3) & 4.6 (0.4) & 4.3 (1.8) & 4.3 (1.3) & 6.8 (1.6) & 4.8 (0.7) \\ 
+  MissForest & \hl{3.3} (0.7) & 5.0 (0.6) & \hl{2.2} (0.4) & \hl{2.3} (0.4) & 7.2 (0.3) & 4.7 (1.8) & 3.3 (0.9) & 6.8 (1.9) & \hl{3.8} (0.6) \\ 
+  Softimpute & 8.3 (0.5) & 9.3 (0.5) & 8.8 (0.6) & 8.9 (0.6) & 10.4 (0) & 7.5 (1.2) & 9.8 (0.4) & 8.3 (0.9) & 7.9 (0.6) \\ 
+  OT & 7.2 (0.5) & 7.6 (0.4) & 7.4 (0.6) & 7.4 (0.6) & 4.8 (0.4) & 8.2 (0.5) & 8.8 (0.6) & 7.3 (0.7) & 5.8 (0.7) \\ 
+  GAIN & 5.8 (0.5) & 8.3 (0.4) & 7.2 (0.5) & 7.5 (0.4) & 8.9 (0.1) & 7.5 (0.8) & 7.4 (0.8) & 6.7 (1) & 6.1 (0.8) \\ 
+  Forest-VP & 6.4 (0.5) & 4.8 (0.6) & 7.0 (0.4) & 6.1 (0.5) & \boldblue{3.8} (0.5) & 6.5 (0.9) & 6.6 (0.8) & 4.5 (0.8) & 6.5 (0.8) \\ 
+  UTrees-kMeans & 6.0 (0.6) & 5.8 (0.5) & 6.3 (0.6) & 6.1 (0.6) & 4.1 (0.3) & 4.0 (0.7) & \boldblue{\hl{2.9}} (0.6) & 3.8 (1) & 6.0 (0.7) \\ 
+  UTrees-KDI & 5.1 (0.5) & 5.1 (0.5) & 5.4 (0.6) & 5.6 (0.5) & 4.8 (0.3) & 4.5 (0.9) & 4.0 (0.5) & \boldblue{\hl{3.5}} (1.2) & 6.4 (0.7) \\ 
+  UTrees & \boldblue{3.8} (0.5) & \boldblue{\hl{3.2}} (0.5) & \boldblue{3.8} (0.4) & \boldblue{3.8} (0.5) & 5.0 (0.3) & \boldblue{\hl{2.7}} (0.6) & \boldblue{\hl{2.9}} (0.8) & \boldblue{\hl{3.5}} (0.8) & \boldblue{5.8} (0.7) \\  
+  \hline
+\end{tabular}
+\addtolength{\tabcolsep}{0.2em}
+\end{table*}
+
+\paragraph{Generation with and without missingness}
+
+We next repeat the experimental setup of \cite{jolicoeurmartineau2023generating} for evaluating tabular generation methods.
+For tabular generation, using the same 27 datasets, \cite{jolicoeurmartineau2023generating} benchmark their methods (Forest-VP and Forest-Flow) against 6 other methods, namely, Gaussian Copula \citep{joe2014dependence}, tabular variational autoencoding (TVAE) \citep{xu2019modeling}, two conditional generative adversarial net methods (CTGAN \citep{xu2019modeling} and CTAB-GAN+ \citep{zhao2021ctab}), and two other tabular diffusion methods (STaSy \citep{kim2022stasy} and TabDDPM \citep{kotelnikov2023tabddpm}).
+These are evaluated with 9 metrics, in the vanilla fully-observed setting and in the synthetically-induced 20\% missing completely at random (MCAR) setting.
+
+Results for partially-missing data are shown in Table \ref{tab:gen-missing}. UnmaskingTrees is first place on 5/9 metrics; head-to-head, UnmaskingTrees beats TabDDPM 5-4, and beats Forest-Flow 6-3.
+Results for fully-observed data are shown in Table \ref{tab:gen}.
+UnmaskingTrees loses head-to-head to Forest-Flow, Forest-VP, and TabDDPM, but wins against the other methods.
+
+\begin{table*}[h!]
+\caption{Tabular data generation with incomplete data (27 datasets, 3 experiments per dataset, 20\% missing values), MissForest is used to impute missing data except in Forest-VP, Forest-Flow, and UnmaskingTrees; \textit{averaged rank} over all datasets and experiments (standard-error). Overall best is \hl{highlighted}; better of Forest-VP versus Forest-Flow versus ours is \boldblue{boldface blue}.}
+\label{tab:gen-missing}
+\justrighttiny
+\centering
+\addtolength{\tabcolsep}{-0.3em}
+\begin{tabular}{r|ll|ll|lll|ll}
+ & $W_{train} \downarrow$ & $W_{test} \downarrow$ & $cov_{train}$ $\downarrow$ & $cov_{test}$ $\downarrow$ & $R^2_{fake} \downarrow$ & $F1_{fake} \downarrow$ & $F1_{disc} \downarrow$ & $P_{bias} \downarrow$ & $cov_{rate} \downarrow$ \\
+ \hline & & & & & & & & & \\
+GaussianCopula & 7.0 (0.3) & 7.1 (0.2) & 7.2 (0.3) & 7.1 (0.3) & 6.3 (0.4) & 6.6 (0.3) & 6.7 (0.4) & 5.5 (1.0) & 7.7 (0.6) \\ 
+  TVAE & 5.2 (0.3) & 4.9 (0.3) & 5.7 (0.3) & 5.8 (0.2) & 6.0 (1.0) & 5.8 (0.5) & 5.8 (0.4) & 8.0 (0.4) & 6.2 (1.0) \\ 
+  CTGAN & 8.3 (0.2) & 8.4 (0.2) & 8.4 (0.2) & 8.3 (0.2) & 8.3 (0.3) & 8.4 (0.2) & 6.5 (0.2) & 4.8 (1.2) & 7.1 (0.7) \\ 
+  CTABGAN & 6.7 (0.4) & 6.5 (0.4) & 7.1 (0.3) & 6.8 (0.3) & 7.3 (0.6) & 7.1 (0.4) & 6.6 (0.3) & 7.5 (1.0) & 6.1 (0.6) \\ 
+  Stasy & 5.9 (0.2) & 6.1 (0.3) & 5.3 (0.2) & 5.1 (0.3) & 5.8 (0.9) & 4.4 (0.4) & 5.3 (0.4) & \hl{3.7} (0.4) & 4.6 (1.1) \\ 
+  TabDDPM & 3.0 (0.7) & 3.4 (0.7) & 2.3 (0.5) & 2.9 (0.6) & \hl{1.7} (0.3) & 3.3 (0.6) & 3.9 (0.6) & 3.8 (1.2) & \hl{2.0} (0.5) \\ 
+  Forest-VP & 3.7 (0.2) & 3.2 (0.3) & 3.9 (0.2) & 3.8 (0.3) & 3.2 (0.3) & \boldblue{\hl{2.3}} (0.3) & 4.2 (0.4) & 4.2 (0.8) & 4.5 (1.1) \\ 
+  Forest-Flow & 3.0 (0.3) & \boldblue{\hl{2.6}} (0.3) & 2.6 (0.3) & 2.7 (0.2) & \boldblue{3.0} (0.7) & 3.7 (0.3) & 5.0 (0.5) & 3.8 (0.9) & \boldblue{3.2} (0.8) \\ 
+  UTrees & \boldblue{\hl{2.1}} (0.2) & 2.8 (0.3) & \boldblue{\hl{2.5}} (0.2) & \boldblue{\hl{2.5}} (0.2) & 3.3 (0.8) & 3.5 (0.5) & \boldblue{\hl{1.0}} (0.0) & \boldblue{\hl{3.7}} (0.9) & 3.7 (1.0) \\ 
+   \hline
+\end{tabular}
+\addtolength{\tabcolsep}{0.3em}
+\end{table*}
+
+\begin{table*}[h]
+\caption{Tabular data generation with complete data (27 datasets, 3 experiments per dataset); \textit{averaged rank} over all datasets and experiments (standard-error). Overall best is \hl{highlighted}; better of Forest-VP versus Forest-Flow versus ours is \boldblue{boldface blue}.}
+\label{tab:gen}
+\justrighttiny
+\centering
+\addtolength{\tabcolsep}{-0.3em}
+\begin{tabular}{r|ll|ll|lll|ll}
+ & $W_{train} \downarrow$ & $W_{test} \downarrow$ & $cov_{train}$ $\downarrow$ & $cov_{test}$ $\downarrow$ & $R^2_{fake} \downarrow$ & $F1_{fake} \downarrow$ & $F1_{disc} \downarrow$ & $P_{bias} \downarrow$ & $Cov_{rate} \downarrow$ \\ 
+ \hline & & & & & & & & & \\
+  GaussianCopula & 7.1 (0.3) & 7.2 (0.3) & 7.3 (0.3) & 7.4 (0.3) & 6.2 (0.2) & 6.4 (0.3) & 7.0 (0.4) & 6.5 (1.1) & 7.5 (0.7) \\ 
+  TVAE & 5.3 (0.2) & 5.1 (0.2) & 5.7 (0.2) & 5.7 (0.2) & 6.5 (0.7) & 6.0 (0.5) & 5.5 (0.3) & 7.3 (0.6) & 6.7 (0.6) \\ 
+  CTGAN & 8.4 (0.1) & 8.4 (0.2) & 8.3 (0.2) & 8.1 (0.2) & 8.5 (0.2) & 8.3 (0.2) & 6.7 (0.3) & 5.3 (1.1) & 7.2 (0.5) \\ 
+  CTAB-GAN+ & 6.8 (0.3) & 6.7 (0.3) & 7.2 (0.3) & 7.1 (0.3) & 6.8 (0.4) & 6.9 (0.4) & 6.9 (0.3) & 7.7 (0.8) & 6.7 (0.8) \\ 
+  STaSy & 6.1 (0.2) & 6.3 (0.2) & 5.3 (0.2) & 5.4 (0.2) & 6.0 (1.2) & 5.1 (0.3) & 6.1 (0.3) & 4.5 (0.8) & 4.2 (1.1) \\ 
+  TabDDPM & 3.0 (0.7) & 3.9 (0.6) & 2.8 (0.5) & 3.4 (0.5) & \hl{1.2} (0.2) & 3.8 (0.6) & 3.2 (0.4) & 3.0 (0.9) & \hl{1.4} (0.2) \\ 
+  Forest-VP & 3.2 (0.2) & 2.8 (0.2) & 3.6 (0.3) & 3.3 (0.3) & 2.8 (0.3) & \boldblue{\hl{2.2}} (0.3) & 4.3 (0.4) & 3.2 (0.9) & 3.5 (0.8) \\ 
+  Forest-Flow & \boldblue{\hl{1.9}} (0.2) & \boldblue{\hl{1.5}} (0.2) & \boldblue{\hl{1.7}} (0.2) & \boldblue{\hl{1.8}} (0.2) & \boldblue{2.3} (0.4) & 2.4 (0.3) & 4.3 (0.4) & \boldblue{\hl{2.8}} (0.5) & \boldblue{2.7} (0.4) \\ 
+  UTrees & 3.1 (0.1) & 3.1 (0.2) & 3.1 (0.2) & 2.8 (0.2) & 4.7 (0.3) & 3.9 (0.3) & \boldblue{\hl{1.0}} (0.0) & 4.7 (0.7) & 5.2 (0.9) \\
+   \hline
+\end{tabular}
+\addtolength{\tabcolsep}{0.3em}
+\end{table*}
+
+}
+
+\subsection{Evaluating BaltoBot on synthetic probabilistic prediction case studies}
+\label{subsec:experiments-baltobot}
+
+\paragraph{Wave dataset}
+We compare our approach with Treeffuser \citep{beltran2024treeffuser} on the ``wave'' synthetic dataset from Treeffuser \citep{beltran2024treeffuser}, which as shown in Figure \ref{fig:wave} is nonlinear, multimodal, and heteroskedastic.
+On the raw probabilistic predictions in Figure \ref{fig:wave}(A), we see that BaltoBot and BaltoBoTabPFN are (by visual inspection) able to model the conditional distribution as well as Treeffuser.
+Yet this case study illustrates the two advantages of BaltoBot. First, in Figure \ref{fig:wave}(B) we show the runtime of the different methods: training, sampling, and total.
+To train on 5000 samples, Treeffuser took 1.1s and BaltoBot took 2.6s.
+But to generate 5000 samples, Treeffuser took 5.0s while BaltoBot took 0.72s, for $\sim7\times$ speedup. 
+Second, BaltoBot offers the ability to estimate a closed-form probability density function (pdf) of the predictive distribution as shown in Figure \ref{fig:wave}(C); in contrast, Treeffuser can only sample from the predictive distribution.
+
+\paragraph{Poisson-distributed count data}
+We generate 500 samples of $X_i \sim \textrm{Unif}[0, 3], Y_i \sim \textrm{Poisson}(\lambda=\sqrt{X_i})$, and show probabilistic predictions for $Y$ in Figure \ref{fig:poisson}.
+Whereas Treeffuser generates a spurious negative-valued outlier and many non-integer $Y$ samples, our approach automatically models the count-type distribution of the data.  
+
+\begin{figure}[t]
+\begin{tabular}{ll}
+   \includegraphics[width=3in]{figures/wave-demo.png}
+    &  \includegraphics[width=2.2in]{figures/wave-time-pdfat2.png}
+\end{tabular}
+    \caption{Comparison of Treeffuser and our approach on wave synthetic data with 5000 samples. (A) Probabilistic predictions for Treeffuser (top), BaltoBot (center), and BaltoBoTabPFN (bottom). (B) Runtime comparison for the different methods. (C) Estimated pdf from our methods at $X=2$, depicted as the vertical dotted line in (A).}
+    \label{fig:wave}
+\end{figure}
+\begin{figure}[h]
+   \centering
+   \includegraphics[width=5.0in]{figures/poisson-demo.png}
+    \caption{Comparison of Treeffuser, BaltoBot, and BaltoBoTabPFN on Poisson-distributed data. The input variable is on the x-axis, while probabilistic predictions are shown on the y-axis.}
+    \label{fig:poisson}
+\end{figure}
+
+\subsection{Sales forecasting with uncertainty}
+\label{subsec:m5}
+
+We employ the M5 sales forecasting Kaggle dataset \citep{m5} to compare BaltoBot with other probabilistic prediction methods.
+The dataset has five years of sales data from ten Walmart stores, and the task requires predicting the (heavy-tailed) number of units sold given a product's attributes and previous sales.
+We use the exact same data preparation used for Treeffuser \citep{beltran2024treeffuser} experiments, which yields 1k products, 120k training samples, and 10k test samples.
+As in the Treeffuser evaluation \citep{beltran2024treeffuser}, we evaluate probabilistic predictions with the continuous ranked probability score (CRPS), and evaluate the conditional mean predictions with the mean absolute error (MAE) and root mean-squared error (RMSE).
+
+For full comparability, we follow the Treeffuser evaluation setup \citep{beltran2024treeffuser} and evaluate CRPS by generating 100 samples from our estimators' $p(y | \rmX)$ for each $\rmX$ in the testset; and for MAE and RMSE, we estimate the conditional means $\mathbb{E}[y | \rmX]$ using 50 samples.
+For comparability, for this (and only this) dataset, we also evaluate BaltoBot with hyperparameter tuning, using the same setup used for all other methods (10 folds, each with 80\%-20\% train-validation split, and 25 Bayesian optimization iterations). \footnote{We optimize over the following XGBoost hyperparameter spaces: \texttt{learning\_rate} $\in \textrm{log-uniform}(0.05, 0.5)$, \texttt{max\_leaves} $\in \{0, 25, 50\}$, and \texttt{subsample} $\in \textrm{log-uniform}(0.3, 1)$.}
+We also compare Treeffuser, BaltoBot, and BaltoBoTabPFN when run without hyperparameter tuning.
+
+We report results in Table \ref{tab:m5}.
+In addition to ours' and Treeffuser, we report results for Deep Ensembles \citep{lakshminarayanan2017simple}, IBUG \citep{brophy2022instance}, NGBoost Poisson \citep{duan2020ngboost}, and Quantile Regression Forests \citep{meinshausen2006quantile}. 
+For methods other than our own, we report the metrics provided in Table 2 of \citep{beltran2024treeffuser}. 
+Overall, our proposed methods outperform previous methods at combining excellent performance on both conditional distribution prediction and conditional mean prediction.
+Treeffuser and BaltoBot (both with tuning) tie for first-place according to CRPS, yet BaltoBot outperforms Treeffuser on RMSE and MAE.
+The winners on conditional mean metrics (RMSE and MAE) are Deep Ensembles and BaltoBoTabPFN, yet BaltoBoTabPFN (no tuning) strongly outperforms Deep Ensembles on CRPS.
+
+\begin{table}[t]
+\caption{Sales forecasting evaluation on M5 dataset. We \hl{highlight} the best 2 methods for each metric. The best of Treeffuser versus ours (with tuning) is \boldblue{boldface blue}; the best of Treeffuser versus ours (without tuning) is \boldgreen{boldface brown}.}
+\label{tab:m5}
+\begin{center}
+\begin{tabular}{l@{\hskip 0.7in}lll}
+{\bf Method}  & {\bf CRPS} $\times 10^{-1} (\downarrow)$ & {\bf RMSE} $\times 10^{0} (\downarrow)$ & {\bf MAE} $\times 10^{0} (\downarrow)$
+\\ \hline \\
+Deep Ensembles & 7.05 & \hl{2.03} & \hl{0.97} \\
+IBUG & 8.90 & 2.12 & 1.00 \\
+NGBoost Poisson & 6.86 & 2.33 & 0.99 \\
+Quantile Regression Forests & 7.11 & 2.88 & 1.01 \\
+Treeffuser & \boldblue{\hl{6.44}} & 2.09 & 0.99 \\
+BaltoBot & \boldblue{\hl{6.44}} & \boldblue{2.07} & \boldblue{0.98} \\
+Treeffuser (no tuning) & \boldgreen{6.62} & 2.09 & 0.99 \\
+BaltoBot (no tuning) & 6.69 & 2.19 & 0.98 \\
+BaltoBoTabPFN (no tuning) & 6.66 & \boldgreen{\hl{2.06}} & \boldgreen{\hl{0.97}} \\
+\hline
+\end{tabular}
+\end{center}
+\end{table}
+
+
+
+\section{Limitations}
+
+
+While UnmaskingTrees is \emph{overall} state-of-the-art on the tabular imputation benchmark, MissForest still outperformed on the metrics based on Wasserstein distance to train and test dataset distributions.
+And Forest-Flow still won on vanilla generation benchmark (without any missingness).
+It remains to be seen whether a single method can be developed which wins on all scenarios and metrics.
+While BaltoBoTabPFN performed well on probabilistic prediction tasks, when used as a subroutine in UnmaskingTabPFN, it is very slow and experienced out-of-memory errors on the \citep{jolicoeurmartineau2023generating} benchmark on our machine.
+Further improvements either to it, or to how it is employed, are needed to make it practical for all but the smallest datasets.
+
+
+
+\section{Discussion and Related Work}
+
+
+Diffusion modeling has recently gained popularity in tabular ML \citep{zheng2022diffusion,jolicoeurmartineau2023generating,beltran2024treeffuser,kotelnikov2023tabddpm}.
+Our proposed approach is an instance of the autoregressive discrete diffusion framework \citep{hoogeboom2021autoregressive}, instances of which have shown success in a variety of tasks \citep{yang2019xlnet,austin2021structured,kitouni2024factorization,jolicoeur2024any}.
+Yet our results call into question whether diffusion is beneficial for tabular conditional generation, or whether autoregression is sufficient for our setting.
+It has been observed that diffusion is autoregression in frequency space, progressing from low frequencies to high frequencies, which makes it a good match for image data with its power law spectra \citep{rissanen2022generative,dieleman2024spectral,riley}.
+In tabular datasets without this phenomena, we would expect diffusion modeling to be less advantageous.
+
+Why is ForestDiffusion better at vanilla generative modeling, while UnmaskingTrees is better on %generation given partially-missing data and especially on imputation?
+missing data problems?
+We offer two speculative explanations.
+First, imputation is a conditional modeling scenario, except that you do not know the partition of the features into input features and output features \textit{a priori}.
+One could address imputation by learning all possible $2^D$ conditional distributions, but this is impractical for large $D$, so one would prefer to learn a single joint distribution.
+Both autoregression and diffusion are ways of learning a joint distribution; because autoregression does so by learning conditional distributions, it is more suited to the conditional modeling imputation setting.
+Second, for missing data, diffusion has a train-inference gap: during training, observed features begin the reverse process from $\mathcal{N}(0,1)$; during inference for imputation, observed features begin the reverse process at their actual values.
+On the other hand, the advantages of diffusion modeling 
+give it superiority when these problems can be avoided.
+
+Despite their strong outperformance on other modalities, deep learning approaches have laboured against gradient-boosted decision trees on tabular data \citep{shwartz2022tabular,jolicoeurmartineau2023generating}.
+Previous work \citep{breejen2024context} suggests that tabular data requires an inductive prior that favors sharpness rather than smoothness, showing that TabPFN \citep{hollmann2022tabpfn} (the leading deep learning tabular classification method) can be further improved with synthetic data generated from random forests.
+We anticipate that our XGBoost classifiers may be swapped out for a future variant of TabPFN that learns sharper boundaries and handles missingness.
+
+We also note that MissForest \citep{stekhoven2012missforest}, hailing from statistical literature on multiple imputation, has yet to be completely dethroned.
+Future progress in tabular conditional generation may require going back to the well of this traditional literature.
+As one example, we observe that MissForest exploits feature missingness fraction information, but we are not aware of any ``machine learning'' approaches which do so.
+The statistical literature has also previously explored the value of conditional modeling for joint modeling \citep{gelman2001using,liu2014stationary,kropko2014multiple}.
+Indeed, our UnmaskingTrees approach, and all autoregressive modeling, is presaged by the full-mechanism bootstrap \citep{efron1994missing}.
+
+Finally, we observe where randomness enters into our generation process compared to previous work.
+Flow-matching \citep{liu2022flow,albergo2022building,lipman2022flow} (used in Forest-Flow) injects randomness solely at the beginning of the reverse process via Gaussian sampling, whereas diffusion modeling \citep{sohl2015deep,song2019generative} (used in Forest-VP) injects randomness both at the beginning and during the reverse process.
+In contrast, because our method starts with a fully-masked sample, it injects randomness gradually during the generation process.
+First, we randomly generate the order over features for unmasking. 
+Second, we do not ``greedily decode'' to the most likely leaf in the meta-tree, but instead sample according to predicted probabilities. 
+Third, for continuous features, having sampled a particular meta-tree leaf bin, we sample from within the bin, treating it as a uniform distribution.
+
+
+
+\section{Conclusions}
+
+ 
+We proposed tree-based autoregressive modeling of tabular data, especially for data with missingness.
+For the subproblem of conditional probabilistic prediction of individual variables, we presented a hierarchical partitioning method with benefits over vanilla quantization and diffusion-based probabilistic prediction.
+We then considered each of these as meta-algorithms that enable pure in-context learning-based modeling using TabPFN as base classifier.
+We showed SotA results %on tabular benchmarks 
+for imputation and for generation given data with missingness, and on probabilistic prediction for sales forecasting.
+
+\iffalse
+
+
+\section{Reproducibility Statement}
+
+
+We evaluate on public real datasets, using experimental setups released by previous works; or on synthetic data, using scripts in our repo.
+\fi 
+
+\clearpage
+\newpage
+
+
+
+
+

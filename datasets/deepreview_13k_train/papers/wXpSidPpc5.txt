@@ -1,0 +1,308 @@
+\title{CLEX: Continuous  Length Extrapolation for Large Language Models}
+
+\begin{abstract}
+Transformer-based Large Language Models (LLMs) are pioneering advances in many natural language processing tasks, however, their exceptional capabilities are restricted within the preset context window of Transformer. Position Embedding (PE) scaling methods, while effective in extending the context window to a specific length, demonstrate either notable limitations in their extrapolation abilities or sacrificing partial performance within the context window.  Length extrapolation methods, although theoretically capable of extending the context window beyond the training sequence length, often underperform in practical long-context applications.
+To address these challenges, we propose \textbf{C}ontinuous \textbf{L}ength \textbf{EX}trapolation (\textbf{\ourMethod{}}) for LLMs. We generalise the PE scaling approaches to model the continuous dynamics by ordinary differential equations over the length scaling factor, thereby overcoming the constraints of current PE scaling methods designed for specific lengths. Moreover, by extending the dynamics to desired context lengths beyond the training sequence length, \ourMethod{} facilitates the length extrapolation with impressive performance in practical tasks. We demonstrate that \ourMethod{} can be seamlessly incorporated into LLMs equipped with Rotary Position Embedding, such as LLaMA and GPT-NeoX, with negligible impact on training and inference latency. Experimental results reveal that \ourMethod{} can effectively extend the context window to over 4$\times$ or almost 8$\times$ training length, with no deterioration in performance. Furthermore, when evaluated on the practical LongBench benchmark, our model trained on a 4k length exhibits competitive performance against state-of-the-art open-source models trained on context lengths up to 32k.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Transformer-based large language models (LLMs), such as GPT-4~\citep{openai2023gpt4} and LLaMA~\citep{touvron2023llama,touvron2023llama2}, have now emerged as the state-of-the-art models in various natural language processing (NLP) tasks. However, these models grapple with the limitations inherent to the Transformer architecture - mainly, a preset context window, beyond which performance plummets catastrophically~\citep{press2022train}.
+The quadratic complexity of the attention mechanism renders training LLMs with a larger context window extraordinarily resource-intensive.
+Prior works~\citep{dai-etal-2019-transformerxl,Beltagy2020Longformer,bulatov2022recurrent} have proposed circumventing full context length access via hierarchical architecture or sparse attention, albeit at the expense of forfeiting partial context information. 
+
+Recently, there have been two lines of methods aimed at efficiently extending the pre-trained context length of LLMs, both centred on position embedding (PE). The first line of methods, known as \textit{PE scaling}, are proposed to effectively extend the context window of LLMs integrated with Rotary Position Embedding (RoPE)~\citep{su2022roformer}. They allow LLMs to access longer context by scaling either position indices~\citep{chen2023extending} or frequency basis~\citep{rozière2023code, peng2023yarn} of RoPE, demonstrating remarkable performance in long-context applications. However, such methods are designed for extending the context length corresponding to a fixed scaling factor, which either restricts their ability to extrapolate to longer sequences (when using small factors) or impairs the performance even within the native context window (when using large factors) as shown in~\Cref{fig:overall_line}.
+On the other hand, \textit{length extrapolation} methods~\citep{press2022train, sun-etal-2023-length, kerple, chi-etal-2023-dissecting}, typified by ALiBi~\citep{press2022train}, strive to achieve test-time context length extension (i.e., ``training on short, testing on long'') by substituting position embeddings with additional biases, where the biases encode positional information to the attention scores.
+Despite their impressive capability in language modelling, ALiBi-like methods usually struggle in the practical tasks requiring long-context dependency~\citep{pal2023giraffe} (also see \Cref{subsec:longbench}).
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\textwidth]{figures/line_plot.pdf}
+\caption{The PPLs of our \ourMethod{} and various baselines tested on 64k context length.}
+\label{fig:overall_line}
+\end{figure}
+
+In this work, we present \textbf{C}ontinuous \textbf{L}ength \textbf{EX}trapolation (\textbf{\ourMethod}), a novel approach that efficiently extrapolates the context window of LLMs through continuous PE scaling. Concretely, we propose a unified view of PE scaling via  generalising the PE scaling methods to the transition of frequency basis. Upon it, we formulate the PE scaling as a \textit{continuous dynamical system}, which models the transition of frequency basis through the continuous dynamics over the length scaling factor. We argue that previous PE scaling methods, training models using fixed (discrete) scaling factors, overlook the progressively continuous dynamics over the gradually length-extending process. This ensnares themselves in the aforementioned dilemma between extrapolating the length and preserving the performance within shorter lengths.
+In contrast, our \ourMethod{} exploits a neural ordinary differential equation (ODE)~\citep{neuralode}, parameterised by an up-and-down projection layer with lightweight parameters to learn these continuous dynamics, enabling fine-grained extending to long context. More essentially, by extending the dynamics beyond training length, 
+\ourMethod{} empowers models to progressively extrapolate to longer contexts even when trained with short sequences.
+
+\ourMethod{} can serve as a drop-in component for RoPE-based LLMs, such as LLaMA~\citep{touvron2023llama,touvron2023llama2} and GPT-NeoX~\citep{black-etal-2022-gpt},  with negligible overhead in computation and parameters size.  We evaluate the performance of \ourMethod{} on two datasets: (1) a subset of RedPajama-Book~\citep{together2023redpajama} for long-context language modelling, and (2) LongBench~\citep{bai2023longbench} for long-context practical tasks. Empirically, \ourMethod{} demonstrates remarkable length extrapolation ability in language modelling, which can extend the context window to more than 4$\times$ training length without any performance deterioration. For example, LLaMA-2-7B trained with \ourMethod{} on 16k context length achieves comparable perplexities when testing on 16k and 64k tokens, respectively. 
+By scaling the base model scale from 7B to 13B, \ourMethod{} exhibits an expanded extrapolation scope from 4$\times$ to almost 8$\times$ training length. 
+To be complementary, we also conduct instruction tuning~\citep{wei2022finetuned} with the proposed \ourMethod{} on the sequences of 4k length.
+The resulting model, when evaluated on the LongBench benchmark, is on par with current state-of-the-art open-source models trained on context lengths up to 32k. 
+These findings underscore the effectiveness of \ourMethod{} in extrapolating context length, signifying its efficiency for developing long-context LLMs.
+
+
+
+
+\section{Preliminaries}
+
+
+
+\subsection{Rotary Position Embedding (RoPE)}
+Rotary Position Embedding (RoPE)~\citep{su2022roformer} has recently emerged as the most prevailing positional encoding method in open-source LLMs like LLaMA. It integrates both absolute and relative positional information for Transformer models.
+Given a position index $m \in [1, L]$, RoPE injects the absolute positional information into $\vx \in \mathbb{R}^d$ via the transformation $f\colon \mathbb{R}^d \to \mathbb{R}^d$ as:
+\begin{equation}
+\label{eq:rope}
+    f(\vx, m, \vtheta) = \mR_{\vtheta,m}\vx,
+\end{equation}
+where $\vtheta \in \mathbb{R}^{\lfloor d/2 \rfloor}$ is the rotation \textit{frequency basis} and $\evtheta_i = 10,000^{-2i/d}$;
+$\mR_{\vtheta,m}\in \mathbb{R}^{d\times d}$ is a block diagonal matrix formed by the elements
+\begin{equation}
+    \left(\mR_{\vtheta,m}\right)_i = 
+\begin{bmatrix}
+\cos m\evtheta_i & -\sin m\evtheta_i \\
+\sin m\evtheta_i & \cos m\evtheta_i 
+\end{bmatrix}, \text{ for } i=1,2,..., \lfloor d/2 \rfloor.
+\end{equation}
+The transformation in~\Cref{eq:rope} is applied to the query and key vectors during self-attention. When calculating the attention score for the query vector $\vq_m \in \mathbb{R}^d$ at position $m$ and the key vector $\vk_n \in \mathbb{R}^d$ at position $n$, we have
+\begin{equation}
+    (\mR_{\vtheta,m}\vq_m)^\top (\mR_{\vtheta,n}\vk_n) = \vq_m \mR_{\vtheta,n-m} \vk_n.
+\end{equation}
+Hence, the relative positional information $\mR_{\vtheta,n-m}$ is implicitly incorporated into the attention scores. However, even given the relative information, LLMs trained with RoPE, e.g., LLaMA,  still cannot achieve reasonable performance beyond the pre-trained context length.
+
+\subsection{PE Scaling Methods}
+To extend the context length $L$,  several strategies are proposed to adjust the position embedding by scaling either the position index $m$ or frequency basis $\vtheta$ in~\Cref{eq:rope}. Formally, we define $t=L^\prime/L$ as the length scaling factor where $L^\prime$ denotes the desired extended length. While \citet{chen2023extending} introduces scaling the index $m$ by 
+\textit{Position Interpolation (PI)} as
+\begin{equation}
+   f^{\text{PI}}_t(\vx, m, \vtheta) =  f(\vx, \frac{m}{t}, \vtheta).
+\end{equation}
+This strategy maintains the position indices within the range $[1, L]$, while effectively extending the processed range to $[1, t\cdot L]$ by minimal fine-tuning steps on $t\cdot L$ sequences. On the other hand,
+~\citet{peng2023yarn} proposes Yarn, a.k.a.\,  NTK-Aware Scaled RoPE, extends the context window by frequency basis scaling (FBS). This strategy is similarly utilised by CodeLLaMA~\citep{rozière2023code}. Formally, the FBS methods are denoted as
+\begin{equation}
+   f^{\text{FBS}}_t(\vx, m, \vtheta) =  f(\vx, m, \vtheta_{t}),
+\end{equation}
+where $\vtheta_{t}$ is the scaled frequency basis. Specifically, $\evtheta_{t, i} \!=\! \evtheta_i \cdot (t)^{-2i/(d-2)}$ in Yarn  and $\evtheta_{t, i} = \evtheta_i \cdot 100^{-2i/d}$ in CodeLLaMA.
+
+
+\section{Methodology}
+
+\label{sec:method}
+This section demonstrates the details of \ourMethod{}. We first generalise the PE scaling to a continuous dynamical system in a unified manner (see~\Cref{subsec:unified}). On  top of the continuous dynamical system, \ourMethod{} employs the neural ODE, parameterised by an up-and-down projection layer, to adaptively learn the continuous dynamics during PE scaling (see~\Cref{subsec:neuralode}). In~\Cref{subsec:training_testing}, we introduce the training strategy of \ourMethod{} that distributes the continuous dynamics beyond the training sequence length, thereby enabling the generalisation of continuous PE scaling to achieve the length extrapolation.
+\subsection{Position Embedding Scaling: A Unified View}
+\label{subsec:unified}
+Given the various methods that extend models' context length through position indices scaling and frequency basis scaling, we first show that the transformations applied to position indices are essentially casting the frequency basis, which is formalised in Theorem 1.
+
+\paragraph{Theorem 1.} \textit{For the transformation $\mathcal{T}$ to position index $m$, there exists an equivalent transformation $\bm{\mathcal{T}}$ to frequency basis $\vtheta$ in~\Cref{eq:rope}, namely}
+\begin{equation}
+\label{eq:eq_of_pi_fb}
+    f(\vx, \mathcal{T} \cdot m, \vtheta) = f(\vx, m, \bm{\mathcal{T}} \odot \vtheta),
+\end{equation}
+\textit{where $\bm{\mathcal{T}}=\left[\mathcal{T}\right]_{i=1}^{d/2} $ and $\odot$ denotes the element-wise transformation.}
+
+\textbf{Proof.} \textit{From~\Cref{eq:rope}, we have $f(\vx, \mathcal{T} \cdot m, \vtheta) = \mR_{\vtheta,\mathcal{T}m}\vx$ and $f(\vx, m, \bm{\mathcal{T}} \odot \vtheta) = \mR_{\bm{\mathcal{T}} \odot \vtheta,m}\vx$. For any $\bm{\mathcal{T}}=\left[\mathcal{T}\right]_{i=1}^{d/2} $,}
+\begin{equation}
+    \left(\mR_{\vtheta, \mathcal{T} m}\right)_i = 
+\begin{bmatrix}
+\cos \mathcal{T} m\evtheta_i & -\sin \mathcal{T} m\evtheta_i \\
+\sin \mathcal{T} m\evtheta_i & \cos \mathcal{T} m\evtheta_i 
+\end{bmatrix}
+=
+\begin{bmatrix}
+\cos  m(\bm{\mathcal{T}} \odot \evtheta_i) & -\sin  m(\bm{\mathcal{T}} \odot\evtheta_i) \\
+\sin  m (\bm{\mathcal{T}} \odot\evtheta_i) & \cos  m (\bm{\mathcal{T}} \odot\evtheta_i )
+\end{bmatrix}
+= \left(\mR_{\bm{\mathcal{T}} \odot \vtheta, m}\right)_i.
+\end{equation}
+
+Hence, there is a unified form for PE scaling that consistently projects the frequency basis by $\valpha(t)$:
+\begin{equation}
+\label{eq:unified_formulation}
+    f_t(\vx, m, \vtheta) = f\left(\vx, m,  \valpha(t) \odot \vtheta \right),
+\end{equation}
+ where $\valpha(t)$ is a single-variable transformation defined over the length scaling factor $t$.  Through this unified formulation, PI~\citep{chen2023extending} and Yarn~\citep{peng2023yarn} can be viewed as the special cases when plugging $\valpha^{\text{PI}}(t)=\left[1/t\right]_{i=1}^{d/2}$ and $\valpha^{\text{Yarn}}(t)=\left[ t^{-2i/(d-2)}\right]_{i=1}^{d/2}$ into Eq.~\ref{eq:unified_formulation}, respectively.
+
+
+Note that $\vtheta_t \!=\! \valpha(t) \odot \vtheta$  denotes the scaled frequency basis at context length of $t \cdot L$ and $\vtheta_1 \!=\! \vtheta$ (namely $\valpha(1)\!=\!1$). As illustrated in~\Cref{fig:model}, this indicates a progressive chain across discrete $t$ values that 
+\begin{equation}
+\label{eq:unified}
+    \vz(t) = \vz(1) + \log \valpha(t) = \vz(t-1) + \log \frac{\valpha(t)}{\valpha(t-1)},
+\end{equation}
+where $\vz(t) \!=\! \log \vtheta_t$.
+
+By continuizing the progressive chain, we can formulate the PE scaling as a continuous dynamical system, with the continuous dynamics of frequency basis ${d \vz(t)} / {d t}$ as
+\begin{equation}
+\label{eq:continuous_dynamic}
+    \frac{d \vz(t)} {d t} = \frac{d \log \valpha(t) } {d t}.
+\end{equation}
+In essence, recent PE scaling methods, concentrating on manually formulating the $\valpha(t)$, are equivalent to applying various dynamics for frequency basis that enable models to adapt to longer contexts.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\textwidth]{figures/model.pdf}
+\caption{The graphical model of discrete PE scaling (left) and our continuous PE scaling (right).}
+\label{fig:model}
+\end{figure}
+
+\subsection{Continuous PE Scaling via Neural ODE}
+\label{subsec:neuralode}
+Even given the continuous dynamics of frequency basis, previous methods are inherently designed for
+extending the context length at discrete $t$ values. For example, PI~\citep{chen2023extending} fine-tunes the model on a specific scaling factor $t$ to extend the context window length to $t \cdot L$. One potential issue of these methods, as depicted in~\Cref{fig:overall_line}, is that they are susceptible to overfitting to the specified frequency basis, leading to either poor extrapolation ability to longer lengths beyond training or performance drops within short lengths, or both in some cases. Therefore, our \ourMethod{} aims to build a \textit{continuous} PE scaling, which induces the model to adapt the frequency basis corresponding to a continuous scope of $t$ as illustrated in~\Cref{fig:model} (right). 
+
+Recall that previous PE scaling, corresponding to a manually defined $\valpha(t)$, implies the constant dynamics in~\Cref{eq:continuous_dynamic}. In our method, we utilise a variable function $g\colon \mathbb{R}^{d/2} \to \mathbb{R}^{d/2}$ to model the dynamics, hence towards a more general and flexible view as:
+\begin{equation}
+    \frac{d \vz(t)} {d t} = g(\vz(t), t).
+\end{equation}
+By restricting the function to be associated with the latent states $\vz(t)$, $g$ is capable of capturing the fine-grained changes of frequency basis during the length-extending process. However, it is non-trivial to manually define the $\vz(t)$-aware function $g$. Here, we directly parameterise the function using the neural network $\vphi$. Therefore, for any $t^{\prime} \in [1, t]$, there is a neural ODE modelling the scaling of frequency basis as
+\begin{equation}
+\label{eq:ode}
+    \vz(t^\prime) = \vz(1) + \int_1^{t^\prime} g_\vphi(\vz(t), t) d t,
+\end{equation}
+where the frequency basis at the length $t^{\prime} \!\cdot\! L$ can be derived by $\vtheta_{t^\prime}=\exp(\vz(t^\prime))$.
+
+More specifically, we adopt an up-and-down projection as the neural network, expressed as:
+\begin{equation}
+\label{eq:network}
+    g_\vphi(\vz(t), t) = \mW_{\text{down}} \cdot \sigma\left( \mW_{\text{up}}\cdot \vz(t)\right) + \rvxi_t,
+\end{equation}
+where $\mW_{\text{up}} \in \mathbb{R}^{\frac{d}{2} \times \lambda d}$ and $\mW_{\text{down}} \in \mathbb{R}^{\lambda d \times \frac{d}{2} }$ are the transformation matrices, of which the parameters are determined by the amplification factor $\lambda$; $\sigma$ is the SiLU activation function and $\rvxi_t$ is the scalar embedding typifying the scaling procedure at factor of $t$. Here, we adopt the constant dynamics of Yarn as the $\rvxi_t$ for  speeding up convergence, namely
+\begin{equation}
+\label{eq:time_embedding}
+    \rvxi_t = \frac{d \log\valpha^{\text{Yarn}}(t)}{dt} = -\left[ \frac{2i}{(d-2)\cdot t}\right]_{i=1}^{d/2}
+\end{equation}
+
+\subsection{Continuous Length Extrapolation: Train on Short, Test on Long}
+\label{subsec:training_testing}
+
+Continuous PE scaling can serve as a more adaptive and flexible PE scaling method to extend the context length  to a given training length $L^{\text{Train}}$. 
+Unlike the previous PE scaling methods built on a larger scaling factor, which would lead to inferior performance on the lengths corresponding to smaller counterparts, the continuous PE scaling would enable non-destructively generalisation to larger scaling factors via adaptive continuous dynamics. Therefore, by simply extending the continuous dynamics beyond the factor $t\!=\! L^{\text{Train}}/L$ during training (where we denote the desired scaling factor as $t^{\text{Train}}$), we can access the \textit{continuous length extrapolation} (CLEX) method, which achieves the capability of ``training on short, testing on long''.
+
+Moreover, to learn the neural ODE in~\Cref{eq:ode} for continuous $t$, we randomly sample $t^{\prime} \in [1, t^{\text{Train}}]$ for each training step, enabling the model to adapt to the broad scope frequency basis without overfitting a specific one. Note that the frequency basis is bound with the position index in~\Cref{eq:rope}. This reveals the aforementioned training involves inconsistency between the frequency basis and position indices: the frequency basis is varied corresponding to the $t^{\prime}\in [1, t^{\text{Train}}]$, while the position indices are fixed as $\{1,2,\dots,L^{\text{Train}}\} $. Here, we propose the \textit{position extrapolation} strategy to address this consistency. Contrary to PI, which shrinks the position indices into the context length, we enlarge the position indices $\{1, 2, \dots, L^{\text{Train}}\}$ of the trained sequences up to the range $[1, t^\prime\!\cdot\! L]$ for each training step. The position indices can be acquired by uniformly scaling to $\{1\!\cdot\! s, 2 \!\cdot\! s, \dots, L^{\text{Train}} \!\cdot\! s\}$ where $s=t^\prime\!\cdot\! L/L^{\text{Train}}$, or alternatively, by  randomly sampling $L^{\text{Train}}$ of indices from $[1, t^\prime\!\cdot\! L]$. Empirically, we found that random sampling generally performs better. More discussions can be found in~\Cref{subsec:ablation}.
+
+
+During inference, the ideal scenario is to acquire the frequency basis corresponding to each sequence length. However, this approach is computationally demanding. To improve efficiency,  we first cache some frequency basis derived from $g_\vphi$ for $K$ discrete $t$ values as $\{t_k | k \in [1, K]\}$. For each sequence with a length of $L^{\text{Infer}}$ during inference, we employ the frequency basis corresponding to the nearest upper bound within $t_k \!\cdot\! L$ for $k=1,\dots, K$. Through this, our method introduces negligible time cost compared to naive inference of LLMs.
+
+
+\section{Experiments}
+
+\label{sec:experiment}
+
+In this section, we conduct a thorough evaluation of \ourMethod{}'s performance in terms of handling long contexts and its extrapolation capabilities. We compare our approach against other methods covering both length extrapolation (i.e., ALiBi~\citep{press2022train} and random positions (denoted as RandomPos)~\citep{ruoss-etal-2023-randomized}) and PE scaling methods (i.e., PI~\citep{chen2023extending} and Yarn~\citep{peng2023yarn}). 
+We primarily conduct experiments on the LLaMA-2-7B model.
+For the language modelling,  we train our model and the baselines on 2B tokens extracted from Redpajama-Book~\citep{together2023redpajama}, which is collected from Pile-Books3~\citep{gao2020pile} and PG-19~\citep{raecompressivepg2019} datasets. The performance of the models is assessed based on perplexity and next-token-prediction accuracy, with evaluation sequence lengths up to 64k.  Furthermore, we conduct instruction tuning for LLaMA-2-7B using \ourMethod{} on the UltraChat dataset~\citep{ding2023enhancing}. The evaluation is performed on the LongBench benchmark~\citep{bai2023longbench}, where we compare our model with GPT-3.5-turbo and other LLaMA-2-based open-source models designed for handling long context.
+Further details about baselines and training configuration will be discussed in~\Cref{sec:experimental_details}, as well as more experimental results and ablations in~\Cref{sec:additional_results}.
+\begin{table}[!t]
+\resizebox{\textwidth}{!}{
+\renewcommand\arraystretch{1.2}
+\begin{tabular}{l|c|cccccccccccccc}
+\toprule
+            &                     Train         & \multicolumn{14}{c}{Evaluation Length}                                                                                                                                                                                                                                                                                                                                                                                                                                                                 \\ \cline{3-16} 
+                                           &Length  & \multicolumn{2}{c}{4096 (4k)}                                                  &                          & \multicolumn{2}{c}{8192 (8k)}                                                   &  & \multicolumn{2}{c}{16,384 (16k)}                                              &                          & \multicolumn{2}{c}{32,768 (32k)}                                               &                          & \multicolumn{2}{c}{65,536 (64k)}                                               \\ \cline{3-4} \cline{6-7} \cline{9-10} \cline{12-13} \cline{15-16} 
+\multirow{-3}{*}{Methods} &     & PPL                                   & ACC.                                   &                          & PPL                                    & ACC.                                   &  & PPL                                   & ACC.                                  &                          & PPL                                   & ACC.                                   &                          & PPL                                   & ACC.                                   \\
+LLaMA-2    & 4k                                   & 6.04                                  & 58.18                                  &                          & 20.54                                   & 44.50                                  &  & \textgreater100                                  & 22.43                                 &                          & \textgreater1000                                 & 12.70                                  &                          & \textgreater 1000                      & 10.64                                  \\
+CodeLLaMA    & 16k                                   & 7.60                                  & 54.88                                  &                          & 7.40                                   & 55.19                                  &  & 7.33                                  & 55.30                                 &                          & 15.12                                 & 44.70                                  &                          & 52.02                      & 31.16                                  \\
+Naive FT        & 16k                               & 5.98                                  & 58.83                                  &                          & 5.93                                   & 58.91                                  &  & 5.91                                  & 58.58                                 &                          & 18.31                                 & 43.04                                  &                          & \textgreater 100                      & 26.05                                  \\
+PI        & 16k                               & 5.90                                  & 59.05                                  &                          & 5.71                                   & 59.44                                  &  & 5.72                                 & 59.87                                 &                          & 6.05                                  & 58.5                                   &                          & 8.75                                  & 52.02                                  \\
+Yarn ($t$=16)   & 16k                            & 6.50                                  & 57.28                                  &                          & 5.71                                   & 59.57                                  &  & 5.73                                  & 59.87                                 &                          & 5.99                                  & 58.13                                  &                          & 8.51                                  & 52.62                                  \\
+Yarn ($t$=32)     & 16k                          & 6.61                                  & 57.12                                  &                          & 5.94                                   & 58.27                                  &  & 5.96                                  & 58.04                                 &                          & 6.08                                  & 57.73                                  &                          & 6.22                                  & 57.98                                  \\
+CL-Scaling             & 16k                          & 24.99                                 & 37.84                                  &                          & 5.86                                   & 59.08                                  &  & 5.87                                  & 59.05                                 &                          & 10.56                                 & 50.47                                  &                          & 41.09                                 & 34.16                                  \\ 
+ALiBi           & 4k                          & 6.34                                  & 58.01                                  &                          & 6.39                                   & 57.8                                   &  & 6.41                                  & 57.78                                 &                          & 6.50                                   & 57.47                                  &                          & 6.51                                  & 56.44                                  \\
+RandomPos              & 4k                          & 5.88                                  & 58.49                                  &                          & \textgreater{}100                      & 34.23                                  &  & \textgreater{}1000                    & 18.27                                 &                          & \textgreater{}1000                    & 9.31                                   &                          & \textgreater{}1000                    & 7.44                                   \\ \hline
+      & 4k                                & \cellcolor[HTML]{BEB9DC}\textbf{5.86} & \cellcolor[HTML]{BEB9DC}\textbf{59.21} & & 5.70 & 59.62 &  & 5.87                                  & 58.93                                 &                          & 14.53                                 & 47.55                                  &                          & 30.51                                 & 35.33                                  \\
+\ourMethod{}            & 8k                              & 5.98                                  & 58.75                                  &                          & 5.78                                   & 59.44                                  &  & 5.71                                  & 59.64                                 &                          & 5.99                                  & 58.66                                  &                          & 11.74                                 & 47.50                                  \\
+  & 16k & 5.88                                  & 59.21                                  &                          & \cellcolor[HTML]{BEB9DC}\textbf{5.68}                                   & \cellcolor[HTML]{BEB9DC}\textbf{59.73}                                  &\cellcolor[HTML]{BEB9DC}  & \cellcolor[HTML]{BEB9DC}\textbf{5.52} & \cellcolor[HTML]{BEB9DC}\textbf{60.28} & \cellcolor[HTML]{BEB9DC} & \cellcolor[HTML]{BEB9DC}\textbf{5.55} & \cellcolor[HTML]{BEB9DC}\textbf{60.06} & \cellcolor[HTML]{BEB9DC} & \cellcolor[HTML]{BEB9DC}\textbf{5.64} & \cellcolor[HTML]{BEB9DC}\textbf{59.94} \\ \bottomrule %\hline
+\end{tabular}
+}
+\caption{Perplexity (PPL) and next-token-prediction accuracy (ACC.) on language modeling with evaluation lengths from 4k to 64k. We train the LLaMA-2-7B using length extrapolation methods on 4k length and PE scaling methods on 16k length, while reporting the results of \ourMethod{} trained across 4k, 8k and 16k. CL-Scaling denotes training LLaMA-2-7B with the scaling method of CodeLLaMA but using our training data. The training loss curves are depicted in~\Cref{fig:loss_curve}.
+}
+\label{table:language_modelling}
+\end{table}
+\subsection{Long-Context Language Modelling}
+\paragraph{\ourMethod{} achieves length extrapolation.} We first report the experimental results of baselines and \ourMethod{} on language modelling, with the evaluation length from 4k to 64k. As shown in~\Cref{table:language_modelling}, our \ourMethod{}  consistently demonstrates remarkable performance in length extrapolation, being able to extrapolate the context length to more than 4$\times$ training length without any performance drops. 
+ Taking \ourMethod{}-4k as an example, its PPL on 4k sequence (training length) is comparable to that on 16k sequence (5.86 vs. 5.87). 
+ When evaluated on the sequences within 16k, \ourMethod{}-4k is on par with or even better than all of the compared methods trained on lengths up to 16k. 
+ Moreover, with the increase in training length, our CLEX not only exhibits promising generalisation capability to very long contexts (up to 64k) but also guarantees performance on short sequences.
+
+We also found that discrete PE scaling methods (i.e., PI and Yarn) have \textit{self-extending} property: training with scaled frequency basis equips the model with the ability to extrapolate to further-scaled counterparts (see~\Cref{subsec:self-extending} for more discussions.).
+As depicted in~\Cref{fig:overall_line}, however, the extrapolation capability of these methods is limited, accompanied by a significant performance decline even within the naive context length. 
+This indicates the inherent challenge of achieving a delicate balance between extrapolation to longer lengths and performance maintenance within short lengths when using the discrete scaling factor. In contrast, \ourMethod{} tackles this issue via learnable continuous dynamics, providing a more fine-grained extrapolation while preserving the performance for the internal context.
+
+Note that ALiBi may extend further than \ourMethod{} trained on 4k sequences (though typically producing inferior results), our experiments reveal that these gains may come at the cost of long-term information, leading to underperformance in long-context practical tasks (see~\Cref{subsec:longbench} for more details).
+
+
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/scaling.pdf}
+\caption{Left: The PPLs of \ourMethod{} on different evaluation sequence lengths with 7B and 13B parameter sizes. Right: The PPLs of \ourMethod{} cross variable training data size with different parameter sizes and evaluation lengths.}
+\label{fig:scaling}
+\end{figure*}
+\paragraph{The scaling law for the extrapolation ability of \ourMethod{}.} To investigate the effectiveness of \ourMethod{} over the scale of the base model and training data size, we further port our method to LLaMA-2-13B. As depicted in~\Cref{fig:scaling}, when trivially extending the base model scale from 7B to 13B, our \ourMethod{} demonstrates an increased capacity to extrapolate to longer context lengths. Specifically, the extrapolation ability of \ourMethod{}-13B trained on 4k length approaches that of \ourMethod{}-7B trained on 8k. While the training data scale, more surprisingly, does not significantly impact the extrapolation capability of \ourMethod{}. Models trained with 0.25B or 2B tokens with 4k sequence length achieve comparable PPLs when evaluating on 16k or 32k lengths in~\Cref{fig:scaling}, indicating the negligible margins from the larger training data size. This also implies that \ourMethod{} can efficiently extend the context length of LLMs through minimal training steps resembling PI and Yarn.
+
+Based on these findings, we propose a scaling law for \ourMethod{}: to scale the context length of LLMs to moderately desired lengths (e.g., 16k $\rightarrow$ 64k),  one should proportionally enlarge the training sequence lengths (e.g., 4k $\rightarrow$ 16k). For scaling the context length up to considerably long lengths (e.g., $>$200k), the parameter size of the base model should be correspondingly increased while maintaining the training length, since the contexts may take more footprints than model parameters. Note that scaling the training data does not directly affect the extrapolation ability of \ourMethod{}, but may be implicitly incorporated when scaling the base pre-trained LLMs.
+
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=0.95\textwidth]{figures/ablation.pdf}
+\caption{The ablation studies for continuous dynamics, sampling strategies and $\lambda$ factor in~\Cref{eq:network}.}
+\label{fig:ablation}
+\end{figure*}
+
+\subsection{Ablation Study}
+\label{subsec:ablation}
+We now conduct three types of ablations
+to investigate the efficacy of the components in \ourMethod{}:
+\paragraph{Continuous dynamics.}
+To learn the continuous dynamics using neural ODE, we adopt a distinct training approach that involves sampling the scaling factor $t$ for each data batch. Here we seek to explore if the exceptional extrapolation ability of \ourMethod{} is solely derived from the variable $t$ rather than the continuous dynamics. We employ the discrete Yarn method with $t=16$, that undergoes the same training procedure of \ourMethod{} but removes the ODE parameters, serving as a discrete baseline. In~\Cref{fig:ablation} (left), we discover that the discrete approach equipped with the random-sampled $t$ significantly underperforms our \ourMethod{}, indicating the essentiality of the learnable continuous dynamics in \ourMethod{} for accessing the extrapolation ability.
+\paragraph{Position extrapolation.} 
+We adopt the position extrapolation strategy, which extends the scope of position indices in training sequences by sampling from a broader range, to reconcile the inconsistency between frequency basis and position indices during the training process. In this study, we examine the impact of various sampling strategies (uniform or random) and contrast them with the naive position indices.
+The results in \Cref{fig:ablation} underscore the efficacy of position extrapolation in \ourMethod{}, without which the extrapolation ability of models declines significantly. Furthermore, random sampling slightly performs better than uniform sampling, so we adopt it across all experiments.
+
+\paragraph{The parameter scale of ODE.}
+We also study the impact of parameter size of the neural ODE in \ourMethod{}. The parameter size is determined by the $\lambda$, namely the amplification factor in~\Cref{eq:network}. In~\Cref{fig:ablation}, we plot the results of \ourMethod{} with $\lambda=1,2,4$, where they achieve similar performance. Note that the parameter size of neural ODE in~\ourMethod{} is quite small even when $\lambda=4$, as the dimension $d$ in~\Cref{eq:network} is usually equal to 128. Although it is possible to enhance \ourMethod{} with larger $\lambda$ (e.g., 32), we set the $\lambda$=1 in all experiments for the minimal effect on inference latency.
+
+\begin{figure*}[!t]
+\centering
+\begin{minipage}[t]{0.53\textwidth}
+\includegraphics[width=\textwidth]{figures/crane_longbench.pdf}
+
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.45\textwidth}
+\includegraphics[width=\textwidth]{figures/length_scatter.pdf}
+
+\end{minipage}
+\caption{ Left: the average scores for each domain of tasks in LongBench. Right: the average scores of all tasks corresponding to the training length of each model. Note that \ourMethod{} is trained on 4k sequence length but directly tested on 16k context length without truncation. }
+\label{fig:longbench}
+\end{figure*}
+
+\subsection{Evaluation on Long-Context Benchmark}
+\label{subsec:longbench}
+To ascertain the comprehensive performance of \ourMethod{} in real-world scenarios,  we further conduct an evaluation on the zero-shot LongBench benchmark. This benchmark encompasses a broad range of tasks, such as question-answering, summarization, and code completion, where the evaluation length ranges from 5k to 15k. We perform a pilot instruction tuning for LLaMA-2-7B by employing \ourMethod{} on the UltraChat dataset, with a sequence length of 4k. During inference, we harness all models to tackle the context length of 16k, thereby ensuring the comprehensive exploitation of contextual information in the tasks.
+As depicted in~\Cref{fig:longbench}, we present the average scores of each domain in LongBench for \ourMethod{}, in comparison to the GPT-3.5-Turbo-16k model and strong open-source LLMs like LongChat-v1.5-7B-32k and CodeLLaMA-7B-16k.
+
+Generally, when trained with sequences of 4k length, \ourMethod{} holds its own against any open-source LLMs that are trained on lengths up to 32k. In the specific domains of Summarization, Few-shot Learning, and Code Completion, \ourMethod{} on LLaMA-2-7B remains competitive with or even surpasses the GPT-3.5-Turbo-16k. 
+We note that the Baichuan-13B-4k, pre-trained with ALiBi~\citep{press2022train}, demonstrates marked underperformance on the LongBench although with a larger parameter size. 
+Additionally, similar poor results are achieved by ALiBi when applying it upon LLaMA-2-7B using the same training procedure as CLEX (see~\Cref{subsec:results_of_longbench}).
+This could likely be attributed to ALiBi's overemphasis on local context through the attention bias, which, while advantageous for language modelling, restricts access to long-context information in practical tasks.
+In contrast, \ourMethod{} directly extends the context length of LLMs without imposing any constraints on context, which consistently achieves superior extrapolation ability on both language modelling and the LongBench. This substantiates the considerable potential of \ourMethod{} to serve as the state-of-the-art approach for extrapolating the context length of LLMs to excel in long-context applications.
+
+In addition, we highlight that our \ourMethod{} merely introduces minuscule inference latency. Given a context length of 16k in LongBench with a generation length of 512, the generation throughput between our \ourMethod{}-7B and LLaMA-2-7B is comparable (27.8 tokens/s vs 28.3 tokens/s, in a single A100), when using the cache mechanism introduced in~\Cref{subsec:training_testing}.
+
+
+
+
+\section{Related Work}
+
+
+
+
+\paragraph{Hierarchical Architecture / Sparse Attention.} 
+To overcome the quadratic complexity of attention, \citet{dai-etal-2019-transformerxl} proposes the Transformer-XL that handles the long sequence at segment level by Transformer, with these segments interacting through a recurrence mechanism. The Recurrent Memory Transformer~\citep{bulatov2022recurrent} refines this mechanism by incorporating special memory tokens into the recurrence, which is capable of scaling the context length to the millions~\citep{bulatov2023scaling}. On the other hand, \citet{child2019generating,Beltagy2020Longformer} proposed using the sparse attention to circumvent the full access to the long sequences, hence reducing the complexity. The sparse attention has been adopted by~\citet{ding2023longnet} to scale the context length of transformers into the billions.
+However, these methods sacrifice the utilisation of the entire sequence during attention, resulting in an inevitable loss of some contextual information. Additionally, modifications to the model architecture make these methods challenging to apply to existing pre-trained LLMs. Conversely, our \ourMethod{} serves as a drop-in component for LLMs, can efficiently extend the capacity of models to tack the entire long sequences without explicit drops of context information.
+
+\paragraph{Length Extrapolation.}
+Building on the foundation laid by ALiBi~\citep{press2022train}, a series of works~\citep{sun-etal-2023-length, kerple, chi-etal-2023-dissecting} seek to train the Transformer-based models on a short length, while directly testing on longer counterparts. These methods substitute the position embedding with bias introduced into attention scores, thereby incorporating positional information. Notably, the bias typically gives higher profits to closer tokens. This mechanism intuitively amplifies the local context for each token at the expense of distant information. Consequently, these length-extrapolation methods encounter challenges in effectively handling long contexts in practical applications~\citep{pal2023giraffe}. However, our \ourMethod{} demonstrates remarkable effectiveness in practical tasks such as summarization, indicating the de facto extrapolation ability for applications.
+\paragraph{Position Embedding (PE) Scaling.}
+Recent research has sought to extend the context length of Transformers through the scaling of the extensively employed RoPE. Specifically, \citet{chen2023extending} proposed position interpolation, a method that efficiently extends the context window by scaling the position index within RoPE. In a similar vein, \citet{peng2023yarn, rozière2023code} opted to scale the frequency basis, achieving superior performance. However, these methods necessitate training (or fine-tuning) on the desired extended length. As a result, they exhibit a limited ability to extrapolate beyond the trained length and even suffer from performance drops within the shorter lengths. In \ourMethod{}, we generalise the discrete PE scaling to a continuous counterpart, hence uniformly extrapolating the context length of LLMs while preserving the performance within short lengths.
+
+
+\section{Conclusion}
+
+We have presented the Continuous Length EXtrapolation (\ourMethod{}), a novel approach that efficiently extrapolates the context length of Large Language Models (LLMs) to over 4x the training (fine-tuning) length without any decline in performance. \ourMethod{} utilises the neural ODE to learn the continuous dynamics over the length scaling factor during PE scaling, hence enabling fine-grained extension for the frequency basis in the RoPE. We conduct thorough experiments to investigate the effectiveness of \ourMethod{} compared to a variety of strong LLMs, covering the language modelling task and LongBench benchmark. The experimental results have demonstrated the exceptional extrapolation ability of \ourMethod{}, where our \ourMethod{} trained with a sequence length of 4k holds the potential to remain competitive to any open-source long-context LLMs (e.g., CodeLLaMA) trained on lengths up to 32k. These results highlight the potential of CLEX as a state-of-the-art approach for efficiently extrapolating the context length of LLMs, paving the way for advancements in long-context applications. By scaling the base model size up, we found \ourMethod{} can be correspondingly enhanced and subsequently is capable of extrapolating the model to a longer context length. This property indicates the tempting effectiveness of \ourMethod{} in the era of LLMs.
+
+
+\clearpage
+
+

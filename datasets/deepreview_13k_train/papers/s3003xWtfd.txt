@@ -1,0 +1,456 @@
+\title{CoreInfer: Accelerating Large Language Model Inference with Semantics-Inspired Adaptive Sparse Activation}
+
+\begin{abstract}
+Large language models (LLMs) with billions of parameters have sparked a new wave of exciting AI applications. However, their high computational costs and memory demands during inference pose significant challenges. Adaptive sparse activation inference, which activates only a small number of neurons for each token, offers a novel way to accelerate model inference without degrading performance, showing great potential for resource-constrained hardware devices. Nevertheless, existing methods predict activated neurons based on individual tokens with additional MLP, which involve frequent changes in activation maps and resource calls, limiting the acceleration benefits of sparse activation.
+In this paper, we introduce \textbf{CoreInfer}, an MLP-free adaptive sparse activation inference method based on sentence-level prediction. Specifically, we propose the concept of sentence-wise core neurons,  which refers to the subset of neurons most critical for a given sentence, and empirically demonstrate its effectiveness. To determine the core neurons, we explore the correlation between core neurons and the sentence's semantics. Remarkably, we discovered that core neurons exhibit both stability and similarity in relation to the sentence's semantics—an insight overlooked by previous studies. Building on this finding, we further design two semantic-based methods for predicting core neurons to fit different input scenarios. In CoreInfer, the core neurons are determined during the pre-filling stage and fixed during the encoding stage, enabling zero-cost sparse inference. We evaluated the model generalization and task generalization of CoreInfer across various models and tasks. Notably, on an NVIDIA TITAN XP GPU, CoreInfer achieved a 10.33$\times$and 2.72$\times$speedup compared to the Huggingface implementation and PowerInfer, respectively.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Generative Large Language Models (LLMs) have garnered significant attention for their exceptional abilities in creative writing, advanced code generation, and complex natural language processing tasks \citep{1,2,3,4,5}. These models have profoundly impacted our daily lives and work practices. A generation task typically involves multiple inferences—a single inference during the pre-filling stage and multiple inferences during the decoding stage—but due to the vast number of parameters in LLMs, executing these inferences becomes highly expensive \citep{6}. To make generative LLMs more accessible, an increasing number of researchers are focusing on accelerating the inference process. The key challenge is: \textbf{how can we reduce the memory and computational requirements for model inference without degrading performance?}
+
+Model compression \citep{7,8,9} has been extensively studied to address this issue by transforming the original model into a light version. Representatively, quantization \citep{10,11,12} uses fewer bits to represent parameters, reducing the memory needed for model storage and inference. Pruning \citep{13,14,15,16} decreases the computational load during inference by removing unimportant neurons or structural blocks from the model. However, these methods usually break the original structure and trade-off the performance for efficiency. Additionally, due to the diversity of modern hardware, these methods cannot achieve hardware generalization. For instance, although 3-bit quantization has shown potential, most current hardware devices do not support it yet \citep{8,17}.
+
+Dynamic activation sparse inference \citep{dejavu} is another way to accelerate inference without the limitations of model compression. This approach is based on the observation that activation of individual tokens in large language models is often highly sparse \citep{powerinfer}. During the decoding stage, dynamic activation sparse inference activates only a small number of neurons for each token, effectively accelerating model inference. This method has already demonstrated significant potential on resource-constrained devices. For instance, PowerInfer \citep{powerinfer} accelerates LLMs inference by 11.6$\times$ on PCs by implementing activation prediction and dynamic sparse inference. PowerInfer2 \citep{powerinfer2} and LLM in the Flash \citep{llminflash} apply this technique to mobile phones to accelerate LLMs inference on mobile platforms. These methods usually train an MLP predictor in each activation layer to predict neurons that will be activated
+\citep{dejavu,powerinfer,powerinfer2,llminflash}. Such strategies present two weaknesses: (1) \textbf{Irregular and frequent resource calls during decoding} due to the token-wise activation prediction, which may hinder further acceleration of the decoding stage.
+(2) \textbf{Additional computation costs during decoding} due to the introduction of MLP per activation layer, which sometimes cannot be ignored.
+For example, MLPs will introduce an additional 10\% computation cost when applied \citep{llminflash}.
+
+\begin{figure*}[t]
+\centering
+	\begin{minipage}{1\linewidth}
+		\centerline{\includegraphics[width=\textwidth]{FIG/Fig1.pdf}}
+	\end{minipage}
+         
+\caption{The overview framework of CoreInfer. In the pre-filling stage, at each activation layer, taking the $i$-th activation layer as an example, we first extract the token-wise core neurons based on the top-k selection and then further extract the top-k commonly activated core neurons among all tokens, which go through the stability estimation to determine how to update the sentence-wise core neuron set. After determination, the core neuron set will be fixed and utilized for sparse decoding.}
+\label{fig_overview}
+\end{figure*}
+To this end, aiming at solving the above two problems, 
+we propose \textbf{CoreInfer, a novel sparse inference strategy featuring the sentence-wise activation sparsity without additional MLP predictors.}
+Specifically, we first define a set of core neurons for each sentence, representing the most essential neurons an LLM needs to process it. These core neurons are empirically demonstrated sufficient enough for an LLM to perform lossless generation tasks.
+Then, to predict a sentence's core neurons, we explore the relationship between a sentence's core neurons and its semantics. We performed explorations at the level of stability and similarity between core neurons and semantics and found strong correlations in both aspects. Inspired by this, we propose two methods to predict a sentence's core neurons based on its semantics. 
+
+Fig. \ref{fig_overview} shows our overview and algorithm flow.
+Notably, for each sentence, CoreInfer only needs to predict the core neurons during the pre-filling stage. During the decoding stage, it consistently uses this set of neurons without needing to repeatedly predict and change the activation map as previous methods do. Moreover, CoreInfer does not use additional MLP predictors, thereby maximizing the potential of sparse activation inference. In summary, our contributions are as follows:
+\begin{itemize}
+    \item We propose CoreInfer, a sentence-level adaptive sparse inference framework, in which we define sentence-wise core neurons as the most essential group of neurons for decoding.
+    \item By exploring the relationship between core neurons and semantics, we discover that core neurons exhibit both stability and similarity in relation to the sentence's semantics.
+    \item Through experiments, we demonstrate that our method possesses both model generalization and task generalization. Without degrading task performance, it achieves a 10$\times$ and 3$\times$ acceleration compared to Huggingface and PowerInfer on NVIDIA GPUs, respectively.
+\end{itemize}
+
+
+
+
+\section{Related Work}
+
+
+
+\paragraph{Dynamic Inference with Sparsity of Activation.}
+Recent studies have shown that LLMs exhibit significant sparsity in neuron activation \citep{dejavu}. For example, it was found that about 80\% of the neurons in the OPT-30B model remained inactive during inference \citep{llminflash}. Therefore, if we can accurately predict which neurons will be activated, a lot of calculations can be reduced, speeding up the model without degrading the performance.
+This possibility has attracted the attention of many researchers. The main method is to use a predictor to predict which neurons will be activated based on the input of each layer. For example, DejaVu \citep{dejavu} inserts an MLP predictor in each layer of an LLM and achieves 93\% activation prediction accuracy. Powerinfer \citep{powerinfer} proposed dividing neurons into hot neurons that are frequently activated and cold neurons that are not frequently activated through the phenomenon of power-law activation in LLMs. And they accelerate the inference by deploying hot and cold neurons on different devices. Furthermore, LLM in Flash \citep{llminflash} and PowerInfer2 \citep{powerinfer2} optimize this algorithm for mobile phones, so that LLMs can require less DRAM memory during inference.
+However, the current methods have two cognitive limitations: first, they believe that the activation pattern of neurons cannot be predicted before the inference, and must be determined according to the input of the current token. Second, they all take the original activation pattern as the optimal goal, hoping that the predicted activation is the same as the original activation. Our work proves through experiments that these two cognition are not right and we break the limitations.
+
+\paragraph{Semantic Similarity.}
+Semantic similarity has received increasing attention in the era of deep learning \citep{18,19}. A series of models such as BERT \citep{19} and Sentence-BERT \citep{20} have been proposed to measure the semantic similarity between sentences. Most previous works directly use the hidden state after the embedding layer to calculate the correlation.
+Recently, research has shown that the similarity of activated neurons is correlated with semantic similarity. By observing the activation pattern, \cite{sementic} proposed to use activation similarity as an evaluation metric for semantic similarity. The Spearman correlation of this metric on the classic semantic datasets STS-B \citep{sts} and SICK \citep{sick} is as high as 0.66 and 0.51. Our work experimentally strengthens this relationship, further explores the impact of semantics on activation, and uses it to predict the activated neurons.
+
+ 
+
+
+\section{Definition and Exploration of Core neurons}
+
+\label{sec_core_neurons}
+In this section, we first present the definition of core neurons and prove their effectiveness (Sec. \ref{sec_definition}). Then, several exciting insights are observed about the correlation between sentence-wise core neurons and their semantics in both stability and similarity (Sec. \ref{sec_explor}).
+
+\subsection{Definition and Role of Core Neurons}
+\label{sec_definition}
+Motivated by previous works \citep{llminflash} attempting to predict the most important neurons for inference and the fact that large activation values in LLMs often contribute more to model performance than small ones, we first define token-wise core neurons and extend it to sentence-wise definition.
+
+\textbf{Definition 1: Token-wise Core Neurons.}
+For a single token $x$ at the $i$-th activation layer of the LLM, the input is denoted as $x_i$. And the activation can be denoted by the vector $A_i(x_i) = [a_1, a_2, \dots, a_N]$, where $N$ is the number of neurons and $a_n$ is the activation value of the $n$-th neuron. We define the core neurons of $x_i$ as the top $\alpha$ of neurons with the largest positive activation values (i.e., $a_n > 0$).
+
+The core neurons for token $x$ at the $i$-th layer is defined as the top $\alpha$ largest activated neurons, whose set can be formulated as follows.
+\begin{equation}
+ \mathcal{C}_\alpha(x_i) = \{n \mid  a_n \geq \text{Percentile}(A_i^+, \alpha)\},
+\label{eq_defination_token}
+\end{equation}
+where $A_i^+ = \{a_n \mid a_n > 0, a_n \in A_i\}$ represents the set of positively-activated neurons at the $i$-th activation layer, and $\text{Percentile}(A_i^+, \alpha)$ denotes the $\alpha$-th percentile of the positive activation.
+
+\par
+
+\textbf{Definition 2: Sentence-wise Core Neurons.}
+For a sentence $\bm{s}$ containing $M$ tokens, the input of the $i$-th layer is $\bm{s}_i=[x_i^1, x_i^2, \dots, x_{i}^M ]$. 
+Based on Equation \ref{eq_defination_token}, each $x_i^m$ has core neurons $\mathcal{C}_\alpha(x_i^m)$.
+We define the core neurons for $\bm{s}_i$, $\mathcal{C}_\alpha^\beta(\bm{s}_i)$, as the top $\beta$ of neurons that appear most frequently in the core neurons of all tokens, i.e., $\{\mathcal{C}_\alpha(x_i^1), \mathcal{C}_\alpha(x_i^2), \dots, \mathcal{C}_\alpha(x_i^M)\}$, thus can be formulated as Equation \ref{eq_defination_sentence_2}. 
+\begin{equation}
+\mathcal{C}_\alpha^\beta(\bm{s}_i) = \{n \mid f_\alpha(n; \bm{s}_i) \geq \text{Percentile}(f_\alpha(\bm{s}_i), \beta)\},
+\label{eq_defination_sentence_2}
+\end{equation}
+where $f_\alpha(\bm{s}_i)$ denotes the count set of each neuron across all tokens, which is formulated as follows.
+\begin{align}
+f_\alpha(\bm{s}_i) = \{f_\alpha(n; \bm{s}_i)\}_n = \{\sum_{m=1}^{M} \mathbb{I}(n \in \mathcal{C}_\alpha(x_i^m))\}_n,
+\label{eq_defination_sentence_1}
+\end{align}
+where $\mathbb{I}(\cdot)$ is an indicator function that returns \texttt{one} if $n$ is in $\mathcal{C}_\alpha(x_i^m)$ else \texttt{zero}.
+$\text{Percentile}(f_\alpha(\bm{s}_i), \beta)$ denotes the $\beta$-th percentile of $f_\alpha(\bm{s}_i)$.
+
+\begin{figure*}[t]
+	\centering
+	\begin{minipage}{0.32\linewidth}
+        \label{fig_alpha_beta_clster_a}
+		\centerline{\includegraphics[width=\textwidth]{FIG/alpha_value.pdf}}
+          \centerline{\small(a)}
+	\end{minipage}
+	\begin{minipage}{0.33\linewidth}
+        \label{fig_alpha_beta_clster_b}
+		\centerline{\includegraphics[width=\textwidth]{FIG/beta_value.pdf}}
+        \centerline{\small(b)}
+	\end{minipage}
+	\hspace{2pt}
+	\begin{minipage}{0.3\linewidth}
+        \label{fig_alpha_beta_clster}
+		\centerline{\includegraphics[width=\textwidth]{FIG/sentence_cluster.pdf}}
+         \centerline{\small(c)}
+	\end{minipage}
+	
+	\caption{(a) (b) The impact of different $\alpha$ and $\beta$ on final performance. The experiment is conducted on the OPT 6.7b model and the C4 dataset. (c) Clustering of token-wise core neurons in different sentences. We randomly selected 50 sentences from the C4 dataset and observed the activation pattern of the 25-th layer of the model. Each point represents a $\mathcal{C}_\alpha(x_i)$. The same color represents in the same sentence. We used t-SNE \citep{tsne} to reduce the data dimension.}
+	\label{fig_alpha_beta_clster}
+\end{figure*} 
+\textbf{Effectiveness of Core Neurons.} We test the effectiveness of the proposed core neurons at two levels by experimenting on the C4 benchmark \citep{c4} with multiple hyper-parameter settings.
+The results are shown in Fig. \ref{fig_alpha_beta_clster} (a) and (b).
+As can be seen from Fig. \ref{fig_alpha_beta_clster} (a), it is exciting that when $\alpha$ and $\beta$ are very low, the model has only a small performance loss.
+For example, perplexity (ppl) only increases by $2\%$ when $\alpha$ is $0.4$. And when $\beta = 0.25$, ppl only increases by $3\%$.
+To understand why the sentence-wise core neurons are effective, we further explore the distribution of token-wise core neurons in different sentences, and the results are shown in Fig. \ref{fig_alpha_beta_clster} (c).  
+It can be seen that the distribution of core neurons of tokens in the same sentence is always closer (meaning that there are more identical neurons in their core neurons), while the distribution of core neurons of tokens in different sentences shows a clustering phenomenon.
+This explains why the sentence-wise core neurons are effective: since tokens in the same sentence tend to activate similar neurons, a small number of core neurons can meet the needs of the entire sentence inference.
+
+This result reveals a powerful potential of core neurons: \textbf{For an input sentence, LLMs only need the core neurons to maintain performance.} Different from prior works exploring token-wise sparsity in activation layers, our work is the first to explore sentence-wise sparsity in activation layers. 
+
+
+\subsection{Exploration of Core Neurons}
+\label{sec_explor}
+
+In the previous section, we defined core neurons and explained their effectiveness.
+To better predict core neurons, in this section, we explore the relationship between core neurons and the input sentence.
+
+Semantics is a crucial aspect of the information conveyed by the input sentence. 
+Recent studies \citep{sementic} have demonstrated that the similarity of LLMs activation shows a strong correlation with semantic similarity.
+This prompts us to speculate and explore: Are core neurons related to the semantics of the input sentence?
+Here we introduce two of our insights into the relationship between semantic and core neurons, respectively related to stability and similarity.
+
+
+\begin{figure*}[t]
+	\centering
+	\begin{minipage}{0.29\linewidth}
+		\centerline{\includegraphics[width=\textwidth]{FIG/sementic_similarity.pdf}}
+          \centerline{\small(a)}
+	\end{minipage}
+	\begin{minipage}{0.29\linewidth}
+		\centerline{\includegraphics[width=\textwidth]{FIG/coreneuron_similarity.pdf}}
+        \centerline{\small(b)}
+	\end{minipage}
+	\begin{minipage}{0.4\linewidth}
+		\centerline{\includegraphics[width=\textwidth]{FIG/stabel_opt_dimision.pdf}}
+         \centerline{\small(c)}
+	\end{minipage}
+        \begin{minipage}{0.98\linewidth}
+		\centerline{\includegraphics[width=\textwidth]{FIG/hot_combine.pdf}}
+	\end{minipage}
+
+	\caption{(Upper)(a) (b): When adding tokens after the original sentence, The semantics similarity and core neurons similarity between the extended and the original sentence. (c) Schematic diagram of the change of core neurons as the length of the sentence increases. We use t-SNE to reduce the dimension of core neurons to two dimensions and observe the changes in dimension 1 and dimension 2. (Lower) Visualization of core neurons when the token length of the continuous input sentence is 10, 50, 100, 200, and 300. We randomly selected 256 neurons in the 25-th layer of the OPT-6.7b model. Each pixel represents a neuron, and the color indicates the frequency of the neuron in all the current $\mathcal{C}_\alpha(x_i)$.  $\mathcal{C}_\alpha^\beta(s_i)$ is a part of the neurons with the highest frequency (brightest). }
+	\label{fig_add_sentence}
+\end{figure*} 
+
+ 
+ 
+
+\textbf{Insight-1: The Stability of Core Neurons Is Related to Semantic Stability.}
+
+First, we explore the relationship between the stability of core neurons and the stability of semantics.
+To investigate this, we extended sentences of varying lengths with coherent and fluent continuations, subsequently measuring the semantic similarity and core neuron similarity between the original and the extended sentences. The results, illustrated in Fig. \ref{fig_add_sentence} (a)(b), reveal a robust correlation between the changes in semantic similarity and core neuron similarity. Notably, when there is a high semantic similarity between an original sentence and its extension, the core neuron similarity is also elevated.
+
+As shown in Fig. \ref{fig_add_sentence} (a)(b), we can find that adding 8-token and 64-token continuations to a sentence of 256 tokens does not change the semantics at all (semantic similarity is 1). In this case, the core neurons change by only 3\% and 6\%, respectively. Furthermore, in Fig. \ref{fig_add_sentence} (c), we show the changes in $\mathcal{C}_\alpha^\beta(\bm{s}_i)$ as the length of a fluent and continuous sentence increases. It can be seen that as the sentence length increases and the semantics become clearer, the core neurons gradually stabilize. Adding more to the sentence at this point does not cause significant changes in the core neurons.
+In Fig. \ref{fig_add_sentence} lower, we visualize the core neurons of the same sentence at different lengths. We can see that core neurons are still changing when the sentence length is less than 100, and when the sentence length is 200 and 300, the core neurons have basically remained unchanged. Thus, our experimental analysis reveals that during the generation process, core neurons tend to remain stable when the semantics of the sentence are consistent.
+
+
+\textbf{Insight-2: The Similarity of Core Neuron Is Related to Semantic Similarity.}\label{insight-2}
+
+Furthermore, we investigate the relationship between core neuron similarity and semantic similarity. To illustrate this intuitively, we select the ag\_news dataset \citep{ag_news}, which contains sentences from four different topics, sentences within the same topic often have closer semantics. We input different sentences from ag\_news into the model and observed the distribution of their core neurons. Semantic similarity is measured by using Sentence-BERT, while core neuron similarity is measured by calculating the ratio of identical neurons to the total number of neurons involved.
+The experimental results are shown in Fig. \ref{fig_sementic_cluster}.
+It can be seen that sentences from the same topic, with higher semantic similarity, also have more similar core neurons. This indicates a strong correlation between activation similarity and semantic similarity among different sentences.
+Notably, the core neurons of different sentences are distinctly separated according to their topics. Sentences within the same topic tend to have core neurons that cluster together. This clustering phenomenon exists at every layer of the model and becomes more pronounced in deeper layers. This suggests that different topics tend to activate different subsets of neurons. 
+In Sec. \ref{sec_exp_verification}, we further show the test results of core neurons on the semantic dataset in Tab. \ref{fig_sementic_simiar}.
+
+\begin{figure*}[t]
+	\centering
+	\begin{minipage}{0.32\linewidth}
+		\centerline{\includegraphics[width=\textwidth]{FIG/opt_sentence_cluster_5.pdf}}
+          \centerline{\small(a) 5-th Layer}
+	\end{minipage}
+	\begin{minipage}{0.32\linewidth}
+		\centerline{\includegraphics[width=\textwidth]{FIG/opt_sentence_cluster_15.pdf}}
+        \centerline{\small(b) 15-th Layer}
+	\end{minipage}
+	\hspace{5pt}
+	\begin{minipage}{0.32\linewidth}
+		\centerline{\includegraphics[width=\textwidth]{FIG/opt_sentence_cluster_25.pdf}}
+         \centerline{\small(c) 25-th Layer}
+	\end{minipage}
+	
+	\caption{Relationship between the core neurons of sentences and their topics. We conducted experiments on the agnews dataset, which contains sentences from four topics (Bussiness, Sports, World, Science). Each point in the figure is a $\mathcal{C}_\alpha^\beta(\bm{s}_i)$. Different colors represent sentences from different topics. We use t-SNE to reduce the dimension and display it. It can be seen that the core neurons of different layers all show clustering based on the topic.}
+	\label{fig_sementic_cluster}
+\end{figure*} 
+
+Therefore, we can observe that: The more similar between sentence simantics, the more similar their core neurons. 
+And sentences within the same topic tend to activate the same subset of neurons.
+
+
+
+
+
+
+
+ 
+
+
+	 
+
+
+
+
+
+\section{Core Neurons-based Spares Inference}
+
+
+\label{sec_coreinfer}
+In this section, we introduce CoreInfer, an efficient activation-sparse inference framework. CoreInfer leverages the insights mentioned above, and proposes two methods to predicting core neurons (Sec. \ref{sec_prediction}). 
+Based on this prediction, we propose a core-neuron inference framework (Sec. \ref{sec_overview}).
+\subsection{Semantic-guided core neurons prediction}
+\label{sec_prediction}
+Consider the generation task, given an input sentence $\bm{s}$ in the pre-filling stage, an LLM generates content $\bm{g}$ in the decoding stage. Our goal is to predict $\mathcal{C}_\alpha^\beta([\bm{s},\bm{g}]_i)$, for $i = 1, 2, \dots, L$.
+
+\paragraph{Stability-guided Prediction.}
+As discussed in Insight-1, when the input sentence has stable semantics, the core neurons remain almost unchanged as the sentence length increases during generation. Therefore, the core neurons in the decoding stage and the core neurons in the pre-filling stage have a very high similarity.
+In this scenario, we can approximate the $\mathcal{C}_\alpha^\beta([\bm{s},\bm{g}]_i)$ by directly using the core neurons $\mathcal{C}_\alpha^\beta(\bm{s}_i)$ identified during the pre-filling stage.
+\paragraph{Similarity-guided Prediction.}
+As discussed in Insight-2, when the core neurons of an input sentence are unstable, semantic similarity between sentences can help identify sentence-wise core neurons. Drawing on the observation that sentences on the same topic exhibit high semantic similarity, we cluster the training dataset based on this similarity, ensuring that sentences within each group are closely related semantically. Once the input sentence’s group is determined, its core neurons are identified by selecting the top $\gamma$ neurons that appear most frequently within that semantic group.
+In summary, when the $\mathcal{C}_\alpha^\beta(\bm{s}_i)$ is stable, we can use the stability-guided prediction. Conversely, when $\mathcal{C}_\alpha^\beta(\bm{s}_i)$ is unstable, similarity-guided prediction should be employed. Whereas, when the input sentence is short, e.g., zero-shot question answering and translation, the input is unstable, requiring the use of similarity-guided prediction.
+As shown in Fig. \ref{fig_add_sentence} (c), the experiment shows that if the input sentence is fluent and natural sentences, the stability may be related to the length of the input sentence. When the sentence is long enough, it expresses more semantics, and the core neurons tend to be stable.
+\begin{figure*}[t]
+\centering
+		\centerline{\includegraphics[width=\textwidth]{FIG/Fig5.pdf}}
+        
+\caption{(Upper) Performance of stability-guided prediction on the generation task ($\alpha =0.4, \beta = 0.2$). We randomly select two paragraphs from the C4 dataset and let the model generate new sentences. (Lower) Performance of similarity-guided prediction on the question-answering task ($\alpha =0.4, \gamma = 0.2$). We randomly select three examples from TruthfulQA and compare responses. 
+}
+\label{fig_example}
+\end{figure*} 
+
+\subsection{Efficient Core Neurons Inference}
+\label{sec_overview}
+The flow of our algorithm is illustrated in Fig.\ref{fig_overview}. In the pre-filling stage, core neurons are computed at each layer. If the input is stable, we apply stability-guided prediction. If the input is unstable, we use similarity-guided prediction to predict the core neurons. In the decoding stage, we directly use the predicted $\mathcal{C}_\alpha^\beta({[\bm{s}, \bm{g}]}_i)$ for model inference, without changing the neurons.
+To verify the effectiveness of these two prediction methods, we present the model outputs under both methods in Fig. \ref{fig_example}.
+It can be seen that when using the stability-guided perdition, the results generated by our algorithm are basically consistent with the original model, as the core neuron is stable at this time, and the $\mathcal{C}_\alpha^\beta(\bm{s}_i)$ is sufficient to provide semantic expression. 
+When using the similarity-guided prediction, our algorithm will generate answers that are different from the original model. 
+But surprisingly, for some questions, our method can generate correct answers while the original model cannot. 
+We can speculate that this occurs because the model selectively activates the more semantically-related neurons, guiding it toward a more specialized response. We present more experimental results in Sec. \ref{sec_exp}.
+
+Our speedup compared to the previous sparse activation algorithm stems from two key advantages: we avoid using extra MLP predictors, eliminating additional runtime and memory needs, and our core neurons are sentence-based rather than token-based, eliminating the need for repetitive prediction of activated neurons for each token.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Experiment}
+
+\label{sec_exp}
+
+Our experiments are conducted at three levels. First, we verify the correlation of core neurons to semantics by testing on the semantic test set and analyzing the number of core neurons required for different tasks (Sec. \ref{sec_exp_verification}). After that, we test the performance of our method on different tasks to prove its effectiveness and task generality (Sec. \ref{sec_exp_task}). Finally, we deploy CoreInfer on the device to verify the improvement of hardware performance (Sec. \ref{sec_exp_hard}).
+
+\textbf{Models.}
+We conduct experiments across a variety of model sizes, including OPT-7b, OPT-13b, OPT-30b \citep{opt}, LLaMA2-7b \citep{LLaMA2}, and LLaMA3.1-8b \citep{LLaMA3}. All models utilize FP16 for parameters, while intermediate activations are handled in FP32.
+
+ 
+\textbf{Tasks.} We conduct experiments on six datasets, categorized into three types of tasks: Information Extraction (Xsum \citep{xsum} and SQuAD \citep{squad}), Question Answering (TruthfulQA \citep{truthqa} and TriviaQA \citep{triviaqa}), and Translation (wmt16-de-en and wmt16-ro-en \citep{wmt}). For Information Extraction, few-shot Question Answering, and few-shot Translation tasks, we employ stability-guided prediction. Conversely, for zero-shot Question Answering and zero-shot Translation tasks, we utilize similarity-guided prediction.
+
+\textbf{Hardware.} We conduct experiments on two distinct hardware configurations. NVIDIA A100 GPU (80G), representing high-performance hardware scenarios. In contrast, NVIDIA TITAN XP GPU (12G), representing low-performance hardware scenarios.
+
+\textbf{Baseline.} We compare CoreInfer with DejaVu \citep{dejavu} and PowerInfer \citep{powerinfer}, the most advanced activation sparse inference algorithms that conduct prediction by MLPs.}.
+
+\textbf{Implementation Details.} CoreInfer shares the setting of hyper-parameters among all activation layers in a model. For stability-guided prediction, the hyper-parameters include the token-wise core neuron ratio $\alpha$ and sentence-wise core neuron ratio $\beta$. For similarity-guided prediction, the hyper-parameters also include the $\gamma$. Specifically, we take $\alpha=0.4$ and empirically determine $\beta$ and $\gamma$ for different tasks, which will be introduced in Sec. \ref{sec_exp_verification}.
+
+\begin{figure}[t]
+\begin{minipage}{.3\linewidth}
+
+\centering
+
+\resizebox{1\linewidth}{!}{
+\begin{tabular}{ccc}
+
+		\toprule% 顶部线
+		 Model&STS-B&SICK\\
+		 \midrule
+		 \midrule
+		 OPT-6.7b&0.56&0.42\\ 
+          \midrule
+		 OPT-13b&0.52&0.41\\
+          \midrule
+          OPT-30b&0.53&0.45\\
+          \midrule
+          LLaMA2-7b&0.66&0.49\\
+          \midrule
+          LLaMA3.1-8b&0.65&0.51 \\
+		\bottomrule % 底部线
+	\end{tabular}}
+ \captionof{table}{Spearman correlation between core neurons similarity and semantic similarity.}
+\label{fig_sementic_simiar}	
+
+\end{minipage}
+\hfill
+\begin{minipage}{.66\linewidth}
+\centering
+\includegraphics[width=0.49\textwidth]{FIG/beta_keep_ratio.pdf}
+\includegraphics[width=0.49\textwidth]{FIG/gamma_keep_ratio.pdf}
+\caption{Performance impact of $\beta$ (left) and $\gamma$ (right) in stability-guided and similarity-guided predictions, respectively. The ordinate is the performance change compared to the original model.}
+\label{fig_paramter_impact}
+\end{minipage}
+\end{figure} 
+\subsection{Verification and Analysis}
+\label{sec_exp_verification}
+
+\textbf{Performance of Core Neurons on Semantic Task Sets.}
+In addition to the discussions in Sec. \ref{insight-2} regarding the relationship between semantic similarity and core neuron similarity, we further explore this relationship more precisely and quantitatively by conducting experiments on semantic benchmarks STS-B and SICK. As illustrated in Tab. \ref{fig_sementic_simiar}, a strong correlation was observed between core neuron similarity and semantic similarity. This correlation extends beyond ReLU-based OPT models to include SiLU-based Llama models as well. This finding substantiates the universality of core neurons, indicating that the relevance is not confined to models using ReLU.
+\textbf{Determination of Core Neuron Size.}
+To determine optimal values for $\beta$ and $\gamma$, we conducted ablation experiments across various tasks, with results depicted in Fig. \ref{fig_paramter_impact}. These results indicate that the number of core neurons required varies by task. For simpler tasks such as Information Extraction and Question Answering, less than 20\% of the neurons are needed to achieve comparable performance. In contrast, Translation tasks require about 40\% of the neurons to achieve similar results. This observation aligns with our hypothesis that more complex tasks necessitate a greater number of neurons for effective inference, whereas simpler tasks can be accomplished with fewer neurons. Consequently, for subsequent experiments, we set $\beta = \gamma = 0.2$ for Information Extraction and Question Answering tasks, and $\beta = \gamma = 0.4$ for Translation tasks. This demonstrates that during daily conversational tasks, only 20\% of the neurons are necessary to achieve satisfactory performance, highlighting CoreInfer’s significant potential in reducing hardware costs.
+
+\begin{table}[t]
+\caption{Performance comparisons with original models across various tasks using the lm-evaluation-harness \citep{eval-harness}. For Question Answering and Translation tasks, the two sub-columns refer to the results of few-shot (six-shot) and zero-shot scenarios. For difficult tasks, i.e., zero-shot Question Answering and Translation tasks, the similarity-guided strategy is employed, while for other tasks, we use the stability-guided strategy. }
+	\centering
+	\resizebox{1\textwidth}{!}{
+	\begin{tabular}{c|c|c|c|c|c|c|c|c|c|c|c}
+		\toprule% 顶部线
+		&&\multicolumn{2}{|c}{Information Extraction}&\multicolumn{4}{|c}{Question Answering}&\multicolumn{4}{|c}{Translation}\\
+		\midrule
+		\multirow{2}{*}{Model}&\multirow{2}{*}{Method}& \quad Xsum \quad 
+ &SQuAD&\multicolumn{2}{c}{TruthfulQA}&\multicolumn{2}{|c}{TriviaQA}&\multicolumn{2}{|c}{wmt16-de-en}&\multicolumn{2}{|c}{wmnt16-ro-en}\\
+		\cdashline{3-12}[2pt/2pt]
+		 \rule{0pt}{10pt}
+        && rouge &contains&\multicolumn{2}{c}{BLEU max}&\multicolumn{2}{|c}{Exact Match}&\multicolumn{4}{|c}{BLEU}\\ 
+        \midrule
+        \midrule
+        \multirow{2}{*}{OPT-6.7b} &Ori&6.7&52.1&23.6&7.88&34.9&21.2&30.4&28.7&30.7&29.0\\ 
+        \cdashline{2-12}[2pt/2pt]
+		 \rule{0pt}{10pt}
+        ~&Ours&6.3&53.2&23.8&9.12&32.8&21.8&27.9&26.3&29.3&27.8\\
+        \midrule
+        \multirow{2}{*}{OPT-13b} &Ori&7.0 &53.3&23.0&9.35&40.7&27.5&32.6&31.3&32.0&30.1\\ 
+        \cdashline{2-12}[2pt/2pt]
+		 \rule{0pt}{10pt}
+        ~&Ours&6.8 &53.1 &23.2 &9.86 &38.9 &28.3 &33.4 &35.2 &32.2 & 31.1\\
+        \midrule
+        \multirow{2}{*}{OPT-30b} &Ori&6.7&55.8&22.8&8.53&44.8&30.5&34.6&32.8&33.91&32.1\\ 
+        \cdashline{2-12}[2pt/2pt]
+		 \rule{0pt}{10pt}
+        ~&Ours& 6.4& 53.2&23.9 &9.03 &43.2 &28.6 &31.2 &33.7 & 31.8&31.8 \\
+        \midrule
+        \multirow{2}{*}{LLaMA2-7b} &Ori&6.4&50.8&30.8&7.79&64.3&52.5&39.7&36.7&37.4&34.1\\ 
+        \cdashline{2-12}[2pt/2pt]
+		 \rule{0pt}{10pt}
+        ~&Ours&5.9 &49.2&28.9&7.80&61.8&53.7&37.2&36.0&34.1 &34.9 \\
+        \midrule
+        \multirow{2}{*}{LLaMA3.1-8b} &Ori&6.2&54.3&21.1&9.32&70.4&61.7&43.4&41.5&40.9&37.9\\ 
+        \cdashline{2-12}[2pt/2pt]
+		 \rule{0pt}{10pt}
+        ~&Ours&5.8 &49.7 &21.8 &9.61 &69.8 &62.0 &41.2 &40.2 &37.3 &37.7 \\
+		\bottomrule % 底部线
+	\end{tabular}}
+	\label{tab_performance}
+\end{table} 
+\subsection{Task Performance}
+\label{sec_exp_task}
+To test the impact of CoreInfer on model performance, we conducted experiments on three types of classic tasks. The experimental results are shown in Table \ref{tab_performance}.
+
+\textbf{Task Generality.} Table \ref{tab_performance} compares the results of our algorithm on different tasks. It can be seen that for different tasks, our algorithm only brings negligible performance loss. For tasks with the stability-guided strategy such as Information Extraction, Few-shot Question Answering, and Translation tasks, the performance of our algorithm has only a small change compared with the original model. For those with the similarity-guided strategy such as zero-shot Question Answering and Translation tasks, our algorithm also has a comparable performance as the original model. Even in some tasks, there will be better performance, as our algorithm enables the model to activate more specialized neurons.
+
+\textbf{Model Generality.} As indicated in Table \ref{tab_performance}, our algorithm not only performs well on OPT models but also on the cutting-edge LLaMA3 models. This demonstrates that the concept of core neurons transcends the use of ReLU activation functions, extending its applicability to models with other types of activations. Further validation 
+
+
+
+
+
+
+
+\subsection{Hardware Performance}
+\label{sec_exp_hard}
+\textbf{Performance on Different Models.} Fig. \ref{fig_speedup} (Upper) presents the generation speeds of CoreInfer across a range of models, benchmarked against the Transformer and PowerInfer methods. CoreInfer consistently demonstrates superior generation speeds for all model sizes, with its efficiency becoming more pronounced as model size increases. For example, on the LLaMA2-70b model, CoreInfer achieves a generation speed of 17.2 tokens per second, outperforming the Transformer by 5.5 times. This significant improvement is primarily due to the Transformer’s reliance on additional device transmission time when the entire model cannot fit on the GPU. In comparison to PowerInfer, CoreInfer achieves up to a 2.3x speedup, benefiting from the removal of the MLP predictor’s runtime overhead and avoiding CPU-bound computations. Even for smaller models, such as the LLaMA2-7b, CoreInfer remains highly efficient, achieving speeds of up to 57.2 tokens per second. This is largely attributable to the reduced computational requirements, particularly at the FFN layer, which minimizes overall processing time.
+
+\begin{table}[t]
+\caption{Comparison of resources required by different methods to run OPT-6.7b on NVIDIA TITAN XP. `NA' means that the metric is not applicable.}
+	\centering
+	\resizebox{\textwidth}{!}{
+	\begin{tabular}{c|ccc|cc|cc}
+		\toprule% 顶部线
+		 &\multicolumn{3}{|c}{Predictor}&\multicolumn{2}{|c}{Hardware Resources}&\multicolumn{2}{|c}{Decoding Speed}\\
+		\midrule
+		
+		Method&Predictor Free&\makecell{Predictor Latency\\(ms)} &\makecell{Predictor Memory\\(GB)}& I/O Free & \makecell{Memory \\(GB)} &\makecell{Decode Speed \\(tokens/s)}&Speed Up\\
+        
+		\midrule
+		\midrule
+		Transformer&\ding{51}&\yhc{NA}&\yhc{NA}&\ding{55}&12&1.92&1$\times$\\
+		
+		Deja&\ding{55}&9.62&1.85&\ding{55}&12&2.73&1.42$\times$\\
+
+        PowerInfer&\ding{55}&15.96&3.36&\ding{51}&9.26&7.32&3.81$\times$\\
+		\cdashline{1-8}[2pt/2pt]
+		 \rule{0pt}{15pt}
+		\textbf{Ours}&\ding{51}&\yhc{NA}&\yhc{NA} & \ding{51}&\textbf{7.28}&\textbf{19.83}&\textbf{10.33}$\times$\\
+ 
+		\bottomrule % 底部线
+	\end{tabular}}
+	\label{tab_speedup}
+\end{table} 
+
+\begin{figure*}[t]
+\centering
+	 
+		\centerline{\includegraphics[width=1\textwidth]{FIG/speedup.pdf}}
+        \centerline{\includegraphics[width=1\textwidth]{FIG/Memory.pdf}}
+	
+	\caption{(Upper) Speedup of various models on A100 80GB. The X-axis indicates the output length. The Y axis represents the speedup compared with Transformer. The number above each bar indicates the end-to-end generation speed (tokens/ s). The experiment is configured with an input length of around 64. (Lower) Runtime memory requirements of different models and methods. Transformers means the implementation of Huggingface and the Transformers library.}
+	\label{fig_speedup}
+\end{figure*} 
+
+\textbf{Overhead on Different Models.}
+Fig. \ref{fig_speedup} (Lower) displays the memory requirements of various algorithms when executing different models. Notably, CoreInfer does not necessitate an additional system footprint in comparison to other methods. For instance, when operating the OPT-66b model, CoreInfer requires only 59GB of GPU memory, whereas the base method consumes 78GB of GPU memory plus an additional 44GB of system memory. This efficiency stems from CoreInfer’s approach of identifying and deploying the necessary neurons to the GPU during the pre-filling stage, without any alterations during the decoding stage.
+
+\textbf{Comprehensive Hardware Metrics Comparisons.} To provide a comprehensive evaluation of the hardware efficiency of our algorithm, we deployed CoreInfer on a low-performance NVIDIA TITAN XP GPU and benchmarked it against established algorithms. As detailed in Table \ref{tab_speedup}, CoreInfer demonstrates a notable reduction in both time and memory overhead, primarily due to the absence of auxiliary predictors. Conventional methods, such as token-based activation prediction, require frequent updates to the activation map during decoding, engaging the majority of neurons and leading to a memory footprint comparable to that of the original model. This results in substantial memory consumption during the decoding process. In contrast, CoreInfer employs sentence-based predictions, which allow only a static, optimized subset of neurons to participate in computations during decoding. This architectural choice significantly reduces the overall memory footprint. For instance, when running the OPT-6.7b model, CoreInfer requires only 7.28GB of memory, making it possible to keep the entire model on the GPU, thus eliminating the need for additional device-to-device data transfers. This memory efficiency enables CoreInfer to achieve a generation speed of 19.83 tokens per second, resulting in a remarkable 10.33$\times$ speedup. When compared to DejaVu and PowerInfer, CoreInfer delivers a 7.27$\times$ and 2.71$\times$ performance boost, respectively, underscoring its advantages in both computational efficiency and reduced memory utilization.
+
+
+\section{Conclusion}
+
+This paper introduces CoreInfer, an adaptive activation sparsity inference framework based on sentence-level prediction. We first define core neurons, a group of neurons that enable the model to effectively infer the input sentence. Then, we establish the connection between core neurons and semantics. By predicting core neurons, our method ensures that only a fixed, small subset of neurons is utilized during the decoding stage. CoreInfer addresses the issue of frequent resource calls in previous activation sparsity inference methods, demonstrating the significant potential for use on resource-constrained devices. Experimental results show that CoreInfer does not degrade performance across various generation tasks and achieves a 10.3$\times$ speedup on NVIDIA GPUs.
+
+
+
+
+
+
+

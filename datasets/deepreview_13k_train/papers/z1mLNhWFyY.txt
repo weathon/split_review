@@ -1,0 +1,242 @@
+\title{Gradient Routing: Masking Gradients to Localize Computation in Neural Networks}
+
+\begin{abstract}
+Neural networks are trained primarily based on their inputs and outputs, without regard for their internal mechanisms. These neglected mechanisms determine properties that are critical for safety, like (i) transparency; (ii) the absence of sensitive information or harmful capabilities; and (iii) reliable generalization of goals beyond the training distribution. To address this shortcoming, we introduce \emph{gradient routing}, a training method that isolates capabilities to specific subregions of a neural network. Gradient routing applies data-dependent, weighted masks to gradients during backpropagation. These masks are supplied by the user in order to configure which parameters are updated by which data points. We show that gradient routing can be used to (1) learn representations which are partitioned in an interpretable way; (2) enable robust unlearning via ablation of a pre-specified network subregion; and (3) achieve scalable oversight of a reinforcement learner by localizing modules responsible for different behaviors. Throughout, we find that gradient routing localizes capabilities even when applied to a limited, ad-hoc subset of the data. We conclude that the approach holds promise for challenging, real-world applications where quality data are scarce.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+As AI systems become more powerful and more prevalent, there is an increasing need to explain and control the inner mechanisms governing their behavior. To address this challenge, some researchers aim to fully understand AI systems, 
+either by reverse engineering the operations of conventionally trained models \citep{olah2020zoom, olsson2022context} or 
+with inherently interpretable architectures \citep{pmlr-v119-koh20a, hewitt2023backpack, Xin2022ExploringTW}. This is not necessary. If we could control the mechanisms underlying a neural network's computation with respect to a limited set of safety-critical properties, such as hazardous information or the capacity for deception, that might be sufficient to make significant safety guarantees. Since manual specification of network internals is likely infeasible, there is a need for \emph{mechanistic supervision}: the use of data to exert targeted influence over neural network internals.
+
+To achieve mechanistic supervision, we propose gradient routing, a modification of backpropagation that uses data-dependent, weighted masks to control which network subregions are updated by which data points. By appropriately specifying these masks, a user can configure which parts of the network (parameters, activations, or modules) are updated by which data points (e.g.\ specific tokens, documents, or based on data labels). In this work, we apply gradient routing to a variety of problems:
+\begin{description}[itemsep=0pt, topsep=0pt, leftmargin=20pt]
+    \item[\Cref{sec:mnist}] We use gradient routing to split the encoding learned by an MNIST autoencoder into two halves, with each half representing different digits. We do the same for a CIFAR classifier in \cref{sec:cifar}. In this way, we demonstrate supervised control of learned representations.
+    \item[\Cref{sec:language_models}] We apply gradient routing to localize features in language models. First, we train a model that can be steered by a single scalar value, showing that feature localization is possible, even with narrowly-scoped labels. Next, we present {\em Expand, Route, Ablate}, an application of gradient routing that enables robust removal of capabilities via ablation of a pre-specified network subregion. When data is partially labeled, the method outperforms all baselines, including data filtering, a gold standard of unlearning. Finally, we show that this unlearning method scales to a much larger (0.7B) model.
+    \item[\Cref{sec:scalable_oversight}] We apply gradient routing to the problem of scalable oversight \citep{amodei2016concrete}, where the aim is to train a performant policy despite limited access to reliable labels. We train a policy network by reinforcement learning to navigate to two kinds of grid squares in a toy environment, \good{} and \bad{}. Using gradient routing, we localize modules responsible for these two behaviors. We show that we can steer the policy towards \good{} by ablating the \bad{} module. Gradient routing trains steerable networks even when the amount of labeled training data is small (1\%), and even when the policy is able to condition on the existence of labels. As a result, our method outperforms baselines based on behavioral supervision alone.
+\end{description} 
+Throughout, we find evidence of an {\bf absorption} effect, where gradient routing applied to narrow data localizes capabilities relevant to a broader superset of data. Absorption answers the question ``if one has labels that are suitable for localizing undesirable computation, why not use those labels to filter the data?'' When labels do not encompass all training data from which harmful capabilities arise \citep{zhuSemiSupervised2009}, filtering may be inadequate \citep{welbl2021challenges}, whereas absorption means that localization can still occur. Furthermore, localization influences model internals without modifying the loss function. This can enable scalable oversight when perfect supervision is not feasible.
+
+We conclude by noting that black-box training techniques may be insufficient for high-stakes machine learning applications. Localization techniques, like gradient routing, may provide a solution.
+
+
+
+\section{Background and related work}
+
+
+\textbf{Training to localize pre-specified capabilities.} Akin to gradient routing, work in modular machine learning trains modules to contain concepts or abilities determined in advance of training. Typically, modular architectures involve a routing function that selects modules to apply on a forward pass \citep{pfeiffer2023modular}. Routing functions are often unsupervised, but some rely on metadata, inducing modules with known specializations \citep{waibel1992}. For example, routing has been based on (i) the modality of data in multi-modal models \citep{Pfeiffer2021xGQACV}, (ii) language \citep{Pfeiffer2020MADXAA, pfeiffer-etal-2022-lifting, JMLR:v22:20-1307}, and (iii) low- vs.\ high-level control or task type in robotics \citep{2016arXiv161005182H, 7989250}. \citet{Gururangan2021DEMixLD} separate the training data of a language model by domain and assign one expert in each layer to a single domain. By disabling the expert for a domain, they are able to approximate a model that was not trained on the domain. 
+
+Other methods freeze the weights of a pre-trained model and train a new  module, with the aim of localizing the task to the new module \citep{NIPS2017_e7b24b11, Rebuffi_2018_CVPR, pmlr-v97-houlsby19a, bapna-firat-2019-simple}. \citet{zhang2024instilling} locate capabilities in models by learning a weight mask, transfer the identified sub-network to a randomly initialized model, then train as if from scratch. By choosing a suitable sub-network, they can, e.g., induce a vision model to identify ImageNet \citep{5206848} classes by shape, not texture.  \Cref{apx:extended-comparisons-to-other-methods} contains extended comparisons to select methods.
+ 
+
+\textbf{Adversarial representation learning and concept erasure.} In order to control the information in learned representations, some have proposed to train feature extraction networks adversarially against discriminator networks that predict this information \citep{Goodfellow2014GenerativeAN, Schmidhuber1992LearningFC, pmlr-v37-ganin15, JMLR:v17:15-239, Edwards2015CensoringRW}. Other methods attempt to remove concepts by modifying activations at inference time \citep{Ravfogel2020NullIO, belrose2023leace, Elazar2020AmnesicPB, Bolukbasi2016ManIT}. In contrast, gradient routing localizes capabilities during training, with the option of ablation afterward.
+
+\textbf{Robust unlearning.} Machine unlearning seeks to remove undesired knowledge or abilities from a pre-trained neural network \citep{7163042, li2024wmdp}. Typical unlearning methods are brittle in the sense that the unlearned abilities of the model can be recovered by fine-tuning on a tiny number of data points \citep{10.1145/3600211.3604690, sheshadri2024targeted, lynch2024methodsevaluaterobustunlearning, Liu2024RethinkingMU, shi2024detecting, Patil2023CanSI, lo2024large, Lermen2023LoRAFE}. \citet{lee2024mechanistic, łucki2024adversarialperspectivemachineunlearning} suggest that undesired concepts are more easily ``bypassed'' than thoroughly removed from model weights. In this paper, we pre-train models with gradient routing. Consequently, localized capabilities can be robustly removed via ablation. Tampering Attack Resistance (TAR) \citep{tamirisa2024tamperresistantsafeguardsopenweightllms} also targets robust unlearning in LLMs, but does so via fine-tuning.
+
+Like gradient routing, some robust unlearning approaches prune or mask parts of the network most important for the target behavior. SISA \citep{9519428} trains multiple independent models based on a partition of the dataset and ensembles them at inference time. Similar to ablating a network subregion, a model can be dropped to achieve robust unlearning. \citet{huang2024antidote} and \citet{pochinkov2024dissectinglanguagemodelsmachine} remove neurons related to harmful behavior in order to restore the alignment of an adversarially fine-tuned language model. \citet{guo2024robust} fine-tune the parameters of only the most important components for the task. \citet{lizzo2024unlearnefficientremovalknowledge} instead delete subspaces of the model parameters in order to remove specific knowledge.  Unfortunately, \citet{lo2024large} find that models pruned to remove a concept can very quickly relearn the concept with further training. This may be because \emph{identifying} the precise sub-network for a task post-hoc is very challenging, as evidenced by the modest success of ``circuit discovery'' in mechanistic interpretability thus far \citep{wang2023interpretability, NEURIPS2023_34e1dbe9, miller2024Transformer, McGrath2023TheHE}.
+
+\textbf{Limits of data filtering for removal of undesired capabilities.} The challenge of limited or imperfect data labeling is ubiquitous in modern ML systems \citep{anwar2024foundational}. Obtaining comprehensive labels for harmful capabilities or behaviors is difficult. Current filtering approaches rely on simple heuristics and blacklists \citep{albalak2024a}. Automated toxicity filtering can inadvertently exclude valuable content from marginalized groups \citep{dodge2021documenting, chowdhery2023palm}. Similarly, research on dataset filtering has shown that both rule-based approaches \citep{raffel2020exploring} and narrow classifiers \citep{gehman2020realtoxicityprompts, solaiman2021process} struggle to effectively identify and filter harmful content \citep{welbl2021challenges}.
+
+
+
+\section{Gradient routing controls what is learned where}
+
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.23\textwidth]{figures/gradient_routes/route_0.pdf} \hspace{0.3cm}
+  \includegraphics[width=0.23\textwidth]{figures/gradient_routes/route_1.pdf} \hspace{0.3cm}
+  \includegraphics[width=0.23\textwidth]{figures/gradient_routes/route_2.pdf}
+  \caption{Gradient routing applies weighted masks to selectively block or re-weight gradients during backpropagation. By supplying different masks for different data, the user can induce specialization in network subregions. The figure shows three masks, which would correspond to three data points.} \label{fig:gradient_routing}
+\end{figure}
+
+{\bf Gradient routing} applies data-dependent, weighted masks to gradients during backpropagation to configure {\bf what} data (whether it be defined in terms of tokens, documents, or based on other labels) is learned {\bf where} in the network (e.g.\ at the level of parameters, activations, or modules). The result is a model with a partially-understandable internal structure, where particular regions correspond to known capabilities. {\em Throughout this paper, we will use ``route $X$ to $Y$'' to mean ``use gradient routing to limit learning updates for data points $X$ to region $Y$ of the neural network.''}
+
+Let $(\mathcal{V}, \mathcal{E})$ be the nodes and edges of the computational graph corresponding to a neural network and loss function, with $v(z)$ taken to be the output of node $v$ if $z$ is input to the network. Given a dataset $\mathcal{D} = \{z_i\}_{i=1}^n$, for each data point $z_i$, gradient routing requires the specification of a {\bf gradient route} given by $\widetilde{\mathcal{E}}_i = \{ \alpha^i_e \in \R : e \in \mathcal{E}\}$ and visualized in \cref{fig:gradient_routing}. Define $\frac{\partial L(z)}{\partial{v}} \triangleq \frac{\partial L(\zeta)}{\partial{v}(\zeta)}|_{\zeta = z}$, the partial derivative of the loss $L$ with respect to the output of node $v$ when evaluated at input $z$. The routed derivative (denoted with a tilde) of the loss over a batch $\mathcal{B} \subseteq [n]$ is then defined recursively as $\frac{\widetilde{\partial} L(z_i)}{\widetilde{\partial} L} \triangleq 1 \text{ for all } i \in \mathcal{B}$, and
+\begin{align*}
+    \frac{\widetilde{\partial} L(z_i)}{\widetilde{\partial} v} \triangleq \sum_{u \in \mathrm{child}(v)} { \alpha^i_{(v,u)}} \frac{\widetilde{\partial} L(z_i)}{\widetilde{\partial} u} \frac{\partial u(z_i)}{\partial v}, \label{eqn:ddgr_recursion}
+\end{align*}
+for all non-terminal nodes $v \in \mathcal{V} \setminus \{L\}$ and $i \in \mathcal{B}$. Choosing $\alpha_e^i \equiv 1$ recovers standard backpropagation. This weighting is only applied in the backward pass; the forward pass is left unchanged. Any gradient-based optimizer, like SGD or Adam \citep{kingma2014adam}, can then be used to train with these modified gradients. 
+
+In practice, gradient routing masks need not be defined over every data point and edge in the computational graph. Instead, we limit masks to a small set of edges, like the outputs of specific MLP neurons or the outputs of specific layers. Also, we typically assign gradient routes to data points based on membership in a coarse partition, like the forget set or retain set in an unlearning problem. Implementation is straightforward and efficient: \cref{alg:forward} gives sample Pytorch \citep{paszke2019pytorch} code in which masking is applied to the outputs of sequential layers.
+
+In all of our applications, masks are applied to activations of a few select layers. In most of our applications, these masks are binary, with 1's allowing the flow of gradients and 0's preventing the flow of gradients. Guidance for choosing these masks, and precise mask specifications for all our experiments, are given in \cref{apx:choosing-gradient-routes}. Informal descriptions are also given in the following section.
+\begin{figure}[H]
+   
+    \centering
+    \begin{lstlisting}[backgroundcolor=\color{blue!4}, rulecolor=\color{blue!25}, basicstyle=\ttfamily]
+def forward(self, x: Tensor, gradient_masks: list[Tensor]):
+    for layer, mask in zip(self.layers, gradient_masks):
+        act = layer(x)
+        x = mask * act + (1 - mask) * act.detach()
+    return x    
+    \end{lstlisting}
+    \captionsetup{type=algorithm}
+    \caption{Example of gradient routing implemented in PyTorch. For each batch of training data points {\small \lstinline{x}}, a batch of {\small \lstinline{gradient_masks}} corresponding to those data points is passed as well. The {\small \lstinline{detach()}} method applies the stop-gradient operator, preventing gradients from being backpropagated through {\small \lstinline{act}} but leaving its value unchanged.  \label{alg:forward}}
+\end{figure}
+
+
+
+\section{Applications}
+
+\subsection{Routing gradients to partition MNIST representations} \label{sec:mnist}
+
+As a first example of feature localization via gradient routing, we train a simple MLP autoencoder on the MNIST handwritten digit dataset \citep{lecun1998gradient} and use label-dependent stop-gradients to control where features for different digits are encoded. The goal is to obtain an autoencoder that reconstructs all digits (0--9) via an encoding that is made up of non-overlapping subcomponents corresponding to distinct subsets of digits. We choose subsets $\{0,1,2,3,4\}$ and $\{5,6,7,8,9\}$. To hint at the potential difficulty of this task, we note the encodings learned by an autoencoder trained on one of these sets admit low-error reconstructions on the other set, despite never being trained on it (details in \cref{apx:mnist-details}).
+
+We use a simple architecture of three-layer MLP modules with ReLU activations: an Encoder, a Decoder, and two ``certificate'' decoders. The Encoder processes a 28$\times$28 image into a vector in $\R^{32}$, and the Decoder processes that vector into a 28$\times$28 reconstruction. Each certificate is trained on {\em half} of the encoding, which takes values in $\R^{16}$. Certificate updates do not affect the encoding. If the Decoder can reconstruct a digit that a certificate cannot, this ``certifies'' that robust feature localization occurred (away from the half of the encoding the certificate was trained on). 
+
+We use gradient routing to train an encoding split such that the top half encodes digits 0--4 and the bottom half encodes digits 5--9. While training on all digits, we route digits 0--4 to the top half of the encoding and route digits 5--9 to the bottom half of the encoding. To induce specialization in the two halves of the encoding, we add the L1 norm of the encoding as a penalty term to the loss. The setup is shown in \cref{fig:mnist-architecture}. The results, shown in \cref{fig:mnist-loss-barchart} and \cref{fig:mnist-reconstructed-images}, are stark: while using the entire encoding allows the Decoder to reproduce all digits with low loss, the Certificate is only able to reproduce 5--9 from the bottom half of the encoding, as desired. Furthermore, the certificate's learned predictions for digits 0--4 are approximately constant. This suggests that we have successfully eliminated most information relevant to digits 0--4 from the encoding. \Cref{apx:mnist-details} contains experiment details, ablations, and an extension to a ResNet \citep{he2016deep} trained for CIFAR image classification \citep{krizhevsky2009learning}.
+
+\begin{figure}[tbh]
+    \centering
+    \begin{subfigure}[t]{0.53\textwidth}
+    \includegraphics[width=\textwidth]{figures/mnist/mnist_architecture_two_certificates.pdf}
+    \caption{An autoencoder trained to encode digits 0--4 in the top half encoding and digits 5--9 in the bottom half. The full encoding is processed by a single Decoder module trained with gradient routing; we illustrate this using weight tying and stop gradients. The two certificates are trained to reconstruct all digits from different halves of the encoding.
+    } 
+    \label{fig:mnist-architecture}
+    \end{subfigure}  
+    \hfill
+    \begin{subfigure}[t]{0.44\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/mnist/mnist_performance_two_certificates.pdf}
+    \caption{Average (across 20 runs) validation set reconstruction losses, measured as the pixel-wise mean absolute error (MAE) for the Decoder and the certificates, demonstrating successful localization of information about digits. Run-to-run variation is negligible.
+    } \label{fig:mnist-loss-barchart}
+    \end{subfigure}
+    \begin{subfigure}{\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/mnist/mnist_reconstruction.pdf}
+    \caption{Bottom half certificate reconstructions from the validation set. The near-constant prediction of the certificate on digits 0--4 illustrates the absence of information about those digits from the bottom half of the encoding.}
+    \label{fig:mnist-reconstructed-images}
+    \end{subfigure}
+    \caption{Gradient routing induces a clean split in the encodings of a simple MLP autoencoder trained on MNIST digits. By applying data-dependent stop-gradients and L1 regularization, the top half of the encoding comes to represent digits 0--4 only, and the bottom half of the encoding comes to represent digits 5--9 only.} \label{fig:mnist-mega-figure}
+\end{figure}
+
+\subsection{Localizing targeted capabilities in language models} \label{sec:language_models}
+In this section, we show that gradient routing applied to a small set of tokens can be used to localize broader features or capabilities in Transformer \citep{vaswani2017attention} language models. This is first demonstrated in terms of model activations, then applied to MLP layers for the purpose of robust unlearning.
+
+\subsubsection{Steering scalar: localizing concepts to residual stream dimensions} \label{subsubsec:steer-scalar}
+\citet{elhage2021mathematical} frames the inter-block activations of a Transformer, or {\em the residual stream}, as the central communication channel of a Transformer, with all layers ``reading from'' and ``writing into'' it. Usually, the standard basis of the residual stream is indecipherable, with the axes not corresponding to interpretable concepts. We pre-train a 20-layer, 303M parameter Transformer on the FineWeb-Edu dataset \citep{penedo_fineweb_2024} while routing the gradients for all \texttt{\_California}\footnote{We use a leading \texttt{\_} to represent a leading space before a token.} tokens to the \zeroth{} entry of the residual stream on layers 6--18. On token positions predicting \texttt{\_California}, we mask gradients (to zero) on every residual stream dimension except the \zeroth{} in layers 6--18. This masking causes the learning updates for those token positions to be localized to the weights that write into the \zeroth{} dimension of the residual stream. After training, we look at which tokens' unembedding vectors have the highest cosine similarity with the one hot vector for the \zeroth{} entry of the residual stream. We find that \texttt{\_California} has the highest cosine similarity, followed by \texttt{California}, \texttt{\_Californ}, \texttt{\_Oregon}, \texttt{\_Colorado}, \texttt{\_Texas}, \texttt{\_Florida}, \texttt{\_Arizona}, \texttt{\_Sacramento}, and \texttt{\_Los}; see \cref{apx:steer-scalar} for the top 300. These tokens all have semantic similarity to California, but gradient routing was not applied to them. This shows that gradient routing localizes
+ broader semantic concepts, rather than the narrow set of explicitly-routed tokens.
+
+Past work on activation steering \citep{turner2023activation,rimsky-etal-2024-steering} computed (non-axis aligned) \emph{steering vectors} specified by $d_\text{model}$ different values. However, since we localized California-related concepts to the \zeroth{} dimension of the residual stream, we can steer the model to generate text related to California by adding a single scalar value to the \zeroth{} entry of the residual stream during the forward pass. \Cref{apx:steer-scalar} provides steered model completions.
+
+\subsubsection{Gradient routing enables robust unlearning via ablation} \label{sec:tinystories-unlearning}
+Robust unlearning \citep{sheshadri2024targeted} means training models that lack the internal mechanisms or ``knowledge'' required for certain tasks, as opposed to merely performing poorly on those tasks. To address this open problem, we show that gradient routing can be used to localize capabilities to a known region of the network. Then, that region can be deleted to remove those capabilities. We find that gradient routing excels in situations where data is only partially labeled.
+
+\begin{figure}[tb]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/expand-route-ablate/era.pdf}
+\caption{Backpropagation in the Route step of Expand-Route-Ablate, showing the flow of gradients through a Transformer for tokens in the forget set.  This assumes a learning rate of zero for the original dimensions in target layers. Gradients for retain tokens are unmodified. Additional dimensions, shown with dashed outlines, were added to {\bf target} layers in the MLP and attention blocks, and will be removed after training in the Ablate step. All modules participate in the forward pass.}
+\label{fig:expand-route-ablate}
+\end{figure}
+
+To enable comprehensive comparisons, our initial study on robust unlearning applies gradient routing to a small (28M parameter) Transformer. This model is trained on an LLM-generated dataset of simple children's stories based on the TinyStories dataset \citep{ eldan2023tinystories, delphi}. We partition the data into a {\bf forget set} made up of any story containing one of the keywords ``forest(s)'', ``tree(s)'', or ``woodland(s)'', and a {\bf retain set} made up of all other stories; the forget set constitutes 20\% of the training data. An example story is given in \cref{apx:tinystories-details}. The goal is to train a model that performs well on the retain set but poorly on the forget set, and whose forget set performance is not easily recoverable by fine-tuning. 
+
+To do this, we route specific forget tokens to designated MLP neurons using a three-step process termed Expand, Route, Ablate (ERA):
+\textbf{1.\ Expand:} Increase the dimensionality of the model by adding randomly-initialized neurons to particular \emph{target layers}. \textbf{2.\ Route:} train the model from scratch by supervised learning on next-token prediction. On select tokens in forget stories, reduce the learning rate (possibly below 0) in the original dimensions of the model at the target layers. \Cref{fig:expand-route-ablate} illustrates the routing step. \textbf{3.\ Ablate:} delete the additional neurons. Post-ablation, apply a very small number of steps of fine-tuning on retain data to correct for degradation caused by ablation. 
+
+\textbf{Experiments.} We compare ERA against three unlearning methods. (a) \emph{Data filtering} discards a model trained on all data, then re-trains from scratch on retain data only. By not training on forget data, it serves as a gold standard for unlearning. (b) \emph{Representation misdirection for unlearning} (RMU) \citep{li2024wmdp} fine-tunes a model trained on all data to corrupt its internal representations of forget data. It is a conventional post-hoc unlearning method. (c) \emph{DEMix plus ablation} replaces all MLPs with domain expert mixture layers \citep{Gururangan2021DEMixLD} comprised of an MLP that operates only on retain data and an MLP that only operates on forget data; after training the whole model on all data, the forget expert is ablated. DEMix plus ablation serves as an alternative localization-based approach.
+
+Models are trained with different proportions of forget data labeling to simulate the challenges of real-world data labeling \citep{anwar2024foundational}. When a forget sample (a story) is not labeled, it is treated as a retain sample for training and unlearning purposes. Validation data is always labeled correctly. We report three metrics: \emph{unlearning} is the difference in forget loss before and after unlearning is applied; \emph{robust unlearning} is the difference in forget loss before unlearning is applied and after it is applied \emph{and} the model is retrained on 64 forget samples; \emph{retain set performance} is the loss on the retain set after applying the method.
+
+{\bf Results.} When labeling is limited (\textless 100\%), ERA dominates, outperforming even the gold-standard data filtering baseline
+(\cref{fig:tinystories-unlearning-results}, \emph{left}), both in terms of unlearning and robust unlearning. This comes at the cost of degraded retain set performance, proportional to the amount of data that routing was applied to (\cref{fig:tinystories-unlearning-results}, \emph{right}). DEMiX + ablate, the localization-based competitor, has negative unlearning in all settings except 100\% labeling. This is because the forget expert is trained only on labeled forget stories, whereas the retain expert trains on the much-larger retain set and unlabeled forget stories.
+
+At 100\% oversight, the top performers are as expected: RMU, a conventional unlearning method, attains the highest loss after unlearning but before being retrained on forget data. Data filtering, a gold standard, is the most robust to retraining. In contrast, most of RMU's unlearning is undone by retraining. Although ERA achieves higher retrained forget loss than RMU (\cref{apx:tinystories-additional-figures}, \cref{fig:tinystories-four-methods-pre-post}), when correcting for the general performance degradation of ERA, ERA robust unlearning matches that of RMU (\cref{fig:tinystories-unlearning-results}, \emph{center}). However, by combining ERA and RMU (indicated by a ``+"), we achieve better robust unlearning than either method alone. Further discussion, experiment details, hyperparameters, and results are given in \cref{apx:tinystories-details}.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/tinystories/all_unlearning_results.pdf}
+    \caption{Effect of unlearning methods on forget and retain validation loss depending on the proportion of forget samples labeled. Highlighted regions denote 95\% C.I. for the mean across at least $N=5$ training runs. \emph{Left}: how much each method increases forget loss after it is applied. For ERA and DEMix + ablate, this is pre- vs.\ post-ablation. \emph{Center}: how much forget loss increases after a method is applied and the model is fine-tuned on 64 forget stories. (The minimum validation forget loss over fine-tuning is reported.) \emph{Right}: the retain set performance after applying each method. \emph{Note: we include an additional data point for RMU at 0.95 of forget stories labeled. We also include a point for ERA+RMU (denoted with a ``+'') at full labeling.}}
+    \label{fig:tinystories-unlearning-results}
+\end{figure}
+
+\subsubsection{Scaling robust unlearning to larger language models} \label{sec:virology-unlearning}
+
+Gradient routing can localize capabilities in larger models. Motivated by the dual-use nature of AI \citep{urbina_dual_2022}, we would like to train useful models that lack certain harmful capabilities. Here, we seek to localize and remove bioweapon-related capabilities in a 0.7B parameter Transformer. To do this, we route 20 tokens related to virology\footnote{Specifically, we route on \texttt{COVID},  \texttt{\_COVID},  \texttt{RNA},  \texttt{\_infections},  \texttt{DNA},  \texttt{\_genome},  \texttt{\_virus},  \texttt{\_gene},  \texttt{\_viruses},  \texttt{\_mutations},  \texttt{\_antibodies},  \texttt{\_influenza},  \texttt{\_bacteria},  \texttt{PCR},  \texttt{\_cell},  \texttt{\_herpes},  \texttt{\_bacterial},  \texttt{\_pathogens},  \texttt{\_tumor}, and  \texttt{\_vaccine}.} to the \zeroth{} through 79\textsuperscript{th} MLP dimensions on layers 0 through 7 of the Transformer.  \Cref{apx:largemodel} provides further details.
+
+\Cref{tab:bigger-model-losses} evaluates the model on a validation split of regular FineWeb-Edu data and on some of the WMDP-bio \citep{li2024wmdp} forget set. Ablating the target region of the network increases loss greatly on both datasets. We then fine-tune the model on a train split of FineWeb-Edu for 32 steps to restore some performance. Finally, we retrain for twenty steps on a separate split of two WMDP-bio forget set datapoints, as in \citet{sheshadri2024targeted}, and report the lowest loss on the validation split of the WMDP-bio forget set. 
+
+The results are striking: even after retraining on virology data, loss increases much more on the WMDP-bio forget set (+0.182) than on FineWeb-Edu (+0.032), demonstrating successful localization and robust removal of virology capabilities. A natural concern would be that ablation merely decreased probabilities on the routed tokens, without decreasing overall virology capabilities. To test this, we measured cross-entropy loss on the forget set excluding the 20 tokens we routed on. Even after this exclusion, the loss increase is still much higher than the increase on FineWeb-Edu (+0.171 vs.\ +0.032). This shows that gradient routing generalizes beyond limited labels.
+
+\begin{table}
+    \centering
+    \caption{Performance of a language model trained with gradient routing on virology tokens. The final column evaluates the model after fine-tuning on FineWeb-Edu and then retraining on two examples from the WMDP-bio forget set, choosing the retraining step with the lowest loss. The increase in loss on (the validation split of) the WMDP-bio forget set is much higher than the increase in loss on FineWeb-Edu data,  demonstrating successful localization and robust unlearning. Intriguingly, this increase persists even when excluding routed tokens from the loss calculation, showing a broader localizing effect.}
+    \label{tab:bigger-model-losses}
+    \begin{tabular}{r|ccc}
+        \toprule
+         Dataset&  Loss& Ablated loss ($\Delta$) & Retrained loss ($\Delta$) \\ 
+         \midrule
+         WMDP-bio forget set $\uparrow$&  2.596&4.283 (+1.687) & 2.778 (+0.182) \\
+         
+         WMDP-bio forget set  (sans routed toks)$\uparrow$& 2.567  & 4.205 (+1.638) & 2.738 (+0.171) \\
+         
+         FineWeb-Edu $\downarrow$&  2.925& 4.864 (+1.939) & 2.957 (+0.032)\\
+         \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{Localizing behavioral modules enables scalable oversight in reinforcement learning} \label{sec:scalable_oversight}
+
+In complex settings, reliable data labels are often scarce, especially when labeling requires human input \citep{zhuSemiSupervised2009, stiennon2020learning, Bai2022ConstitutionalAH, baker2022video}. 
+The aim of \emph{scalable oversight} \citep{amodei2016concrete, Finn2016GeneralizingSW} methods is to leverage limited supervision in order to effectively learn from unlabeled data. A challenge to scalable oversight is that label quality or availability may be correlated with task difficulty, as in \emph{weak-to-strong generalization} \citep{pmlr-v235-burns24b}. The correlation poses a key challenge to scalable oversight of a reinforcement learner: the learner may indirectly condition its behavior on the extent to which we can oversee it, exploiting limitations of the labels \citep{krakovna2020specification, karwowski2024goodharts}. In this section, we show that gradient routing can be used to achieve scalable oversight even in this challenging setting: by routing labeled data to submodules, we leverage unlabeled data to obtain a performant policy that does not exploit the limits of our labels.
+
+We use gradient routing to train a policy to reach two types of squares in a gridworld, \good{} and \bad{}. The aim is to produce a policy that reliably navigates to \good{} and not \bad{}. However, access to the type of square reached, or \emph{oversight}, is available only for some episodes. Furthermore, we allow the policy to  condition on the presence or absence of oversight, modeling an agent that observes features that are not accessible to the supervisor. Because of this information asymmetry, the desired agent behavior cannot be specified by \emph{any} reward function. Despite this challenging setup, gradient routing induces efficient learning by causing learning updates from the two behaviors to accumulate in different parts of the network.
+
+\begin{figure}[ht]
+        \begin{subfigure}[T]{0.4\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/rl/rl_performance_by_oversight.pdf}
+        \caption{Average stepwise ground truth returns at different oversight levels, evaluated at the end of training. (Highlights: 95\% C.I. for the mean across runs, 5th/95th quantiles.)}
+        \label{fig:rl-performance-by-oversight}
+    \end{subfigure}
+        \hfill
+    \begin{subfigure}[T]{0.58\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/rl/policy_steered.pdf}
+        \caption{The gradient-routed MoE policy in an instance of the environment. Neither terminal square is under oversight. Nevertheless, steering induces desired behavior. Arrows: N/W/S/E action probabilities. %Left: Unsteered policy. Middle: Steered towards \good{}. Right: Steered towards \bad{}. 
+        The policy was trained under 10\% oversight.}
+        \label{fig:rl-expert-policies}
+    \end{subfigure}
+    \hfill
+    \caption{Using gradient routing and a mixture of experts layer, we train an agent that can be steered towards desirable behaviors, even when oversight is limited. 
+    Policies were evaluated on 512 randomly generated environments, each run for 32 steps.}
+\end{figure}
+
+\textbf{Partial oversight environment.}
+The environment is based on a $5 \times 5$ gridworld Markov Decision Process \citep{puterman1990markov} with two randomly placed terminal squares: \good{} and \bad{}. At each step, the agent can move north, west, south, or east. Episodes end upon reaching a terminal square or after 32 steps. The environment state includes a boolean variable for every grid square that indicates terminal squares that are under oversight. These indicators are sampled randomly and independently at the beginning of each episode according to the \emph{oversight level} $p \in [0,1]$. If an episode ends with the agent reaching a terminal grid square with the oversight indicator set to FALSE, then the reward function does not have access to the square type labels (\good{}, \bad{}) for that entire episode. The policy takes the entire state as input, including oversight indicators.
+
+\textbf{Architecture and training.} The policy network is a Mixture of Experts (MoE) network \cite{Eigen2013LearningFR} with two MLP experts (a \good{} expert and a \bad{} expert) and a MLP gating network, each of which takes the environment state as input. The expert outputs are combined via a convex combination with weight computed by the gating network. This value is processed by a linear layer to produce policy logits. \Cref{apx:scalable-oversight-details} has details.
+
+The policy network is trained with REINFORCE \citep{williams1992simple}. When a terminal square with oversight is reached, we mask gradients so that the learning update is restricted to either the \good{} expert or \bad{} expert depending on which terminal square the agent reached; we also train the gating network to activate only the module through which the gradients were routed.
+In episodes without oversight, we perform only a normal REINFORCE update with regular backpropagation.
+\textbf{Experiment setup.} We compare gradient routing with two baselines trained with behavioral supervision. \emph{Data filtering} trains only on episodes where the end state is observed, discarding unlabeled episodes. \emph{Naive training} utilizes all episodes, using a reward of \textminus 1 when reaching \bad{} under oversight, and +1 when reaching a terminal square in any other case. Naive training can be understood in terms of process supervision \citep{Uesato2022SolvingMW}: it rewards outcomes (finishing the episode quickly) and evaluates process (which terminal state reached) only when possible. We compare the methods by the average stepwise \emph{ground truth return} they attain; the ground truth return is 1 for reaching \good{}, \textminus1 for reaching \bad{}, and 0 otherwise, with a discount factor of 0.97 to reward shorter paths. Policies are trained for 20,000 algorithm steps (328M environment steps).
+
+\textbf{Results.} Gradient routing successfully localizes expert modules responsible for navigating to \good{} and \bad{} (\cref{fig:rl-expert-policies}), even when evaluated at states where oversight is not present. Utilizing the \good{} expert outperforms baselines and achieves nontrivial performance at oversight as low as 1\% (\cref{fig:rl-performance-by-oversight}). At 5\% oversight, the \good{} expert reaches performance comparable to that of the other methods trained with six times greater oversight. Importantly, we note that improved baseline performance at high oversight levels is largely a consequence of a greater proportion of evaluation environments having oversight, rather than good baseline performance when oversight is lacking.
+
+Further discussion, learning curves at 10\% oversight, experiment details, and ablations are given in \cref{apx:scalable-oversight-details}. We find that naive training exploits the limits of oversight, learning to avoid \bad{} with oversight and seek nearby \bad{} without oversight. We also find that data filtering fails to learn \emph{even in the limit of train time}. In contrast, an \emph{oracle filtering} baseline, which is able to observe all end states but downsamples the training data based on the oversight level, eventually achieves convergence. In summary, gradient routing is strictly better than feasible baselines at low oversight.
+
+
+
+\section{Discussion}
+
+
+{\bf Gradient routing induces absorption.} Routing a subset of the data related to some knowledge or capability appears to localize that knowledge or capability more generally. This held for an i.i.d.\ subset of the data (TinyStories unlearning in \cref{sec:tinystories-unlearning}), and for semantically limited data (steering scalar in \cref{subsubsec:steer-scalar}, virology unlearning in \cref{sec:virology-unlearning}, scalable oversight in \cref{sec:scalable_oversight}). Notably, this effect did not hold for DEMix, a modularity method in which localized modules are sequestered so that only one (per layer) participates in each forward pass. To explain these observations, we posit  {\em absorption}: (i) routing limited data to a region creates units of computation or features that are relevant to a broader task; (ii) these units then participate in the model's predictions on related, non-routed data, reducing prediction errors on these data, so that (iii) the features are not learned elsewhere. Absorption may also amplify the features causing it. When data labels are semantically or quantitatively limited, absorption means that gradient routing can be useful even in cases where conventional training or data filtering methods are inadequate.
+
+{\bf Mechanistic supervision avoids Goodharting.} When the ability to label (or score) outcomes is imperfect, attempting to suppress undesirable behavior via behavioral training is fraught \citep{Goodhart1984, karwowski2024goodharts}. In contrast, gradient routing provides mechanistic supervision, influencing training without modifying the behavioral objective. We showed this empirically in \cref{sec:scalable_oversight}, where an agent trained naively based on partially observed outcomes learned to pursue the user-desired outcome when observed but not otherwise. On the other hand, gradient routing utilized the same observations to induce the desired behavior mechanistically.
+
+\textbf{Entangled capabilities motivate gradient routing.} In many machine learning problems, capabilities are \emph{entangled} in the sense that there are connections or dependencies between the computation learned to perform different tasks \citep{Arora2023ATF, deChiusole2013modeling}. Entanglement might occur because certain capabilities or behaviors are reinforced by a broad range of training objectives \citep{Omohundro2008TheBasic,turner2021optimal,krakovna2020specification}. More simply, capabilities required to perform desired tasks may overlap with those required to perform undesired tasks. For example, biological knowledge entails much of the knowledge required to construct biological weapons. For this reason, filtering or training against bioweapon-specific data might not prevent a network from learning enough to create bioweapons from general biology sources or would require such broad filtering so as to render the model useless at biology in general. In principle, gradient routing can avoid this by localizing a more limited subset of capabilities, then ablating them.\footnote{Entangled capabilities present fundamental tradeoffs: the removal or attenuation of a capability may \emph{necessarily} harm capabilities entangled with it. The claim is not that gradient routing avoids this tradeoff, but that it plausibly enables more efficient tradeoffs.} Alternatively, gradient routing could be employed to robustly detect when a given capability is being used by the model (when a localized module strongly activates). This kind of monitoring would provide an avenue for the application of access controls \citep{sandhu1994access, samaratiAccessControl} to high-stakes AI deployment, as explored in \cref{apx:relevance-to-ai-safety}.
+{\bf Limitations and future work.} (a) Gradient routing's performance is sensitive to its hyperparameters: what data to route on, what regions to localize to, and what mask weights to use. This makes it hard to balance retain set performance vs.\ unlearning, for example. We suspect that methodological improvements will reduce this sensitivity. (b) In our experiments with language models, we route gradients on a token-by-token basis, ignoring neighboring tokens. This naive strategy is surprisingly effective. However, it is plausible that contextual information will be critical in some problems, necessitating routing strategies that depend on entire sequences. Finding practical ways of choosing what data to route in order to localize broad capabilities is an intriguing open problem. (c) Our empirical results for scalable oversight pertain to a simplistic, narrow setting. Furthermore, our method for scalable oversight requires that the ablated policy produce coherent behavior. This does not hold in general, so scaling oversight via localization may require new ideas. (d) We elaborate on application-specific limitations in \cref{apx:extended_limitations_applications}. 
+
+
+
+\section{Conclusion}
+
+Gradient routing enables data-driven supervision of the internal mechanisms learned by neural networks. Even when this supervision is based on simple or limited data labels, it can achieve robust unlearning of pre-specified capabilities and scalable oversight. Consequently, gradient routing may facilitate the safe deployment of AI systems, particularly in high-stakes scenarios where black-box methods are insufficiently robust.
+
+
+

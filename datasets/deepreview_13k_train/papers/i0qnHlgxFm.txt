@@ -1,0 +1,337 @@
+\title{Periodical Moving Average Accelerates Gradient Accumulation for Post-Training}
+
+\begin{abstract}
+High gradient variance challenges training Large Language Models (LLMs) on memory-limited devices. Existing practical approaches, such as small batch size or using Gradient Accumulation (GA), face the dilemma between low convergence rates due to high variance in parameter updates and long training times due to the serial GA process. In this paper, we identify that the exponential nature of the Exponential Moving Average (EMA) rapidly forgets historical gradients at an exponential rate in momentum updates, making it difficult to utilize the historical gradients to stabilize the update steps. To address this issue, we embed the idea of GA into the momentum update and propose the Periodical Moving Average (PMA) technique. PMA splits the training steps into periods and employs moving averages instead of EMA in each period. We apply PMA to AdamW and Lion, resulting in AdamW-PMA and Lion-PMA. Theoretical analysis demonstrates that AdamW-PMA achieves a comparable convergence rate with Adam. Extensive experiments showcase the superiority of PMA on post-training tasks, including Supervised Fine-Tuning and Direct Preference Optimization, that the PMA-based methods achieve approximately at least $2\times$ speedup and higher scores on downstream tasks.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Scaling up Large Language Models (LLMs) has been empirically evaluated as a necessary approach to enhance their capabilities (Radford et al., 2019; Kaplan et al., 2020; Brown et al., 2020; Hoffmann et al., 2022; Zhang et al., 2022; Touvron et al., 2023a;b; Achiam et al., 2023; Bi et al., 2024). Each stage of the LLM post-training, including Supervised Fine-tuning (SFT), and reinforcement-learningbased training, including Reinforcement Learning from Human Feedback (RLHF) (Ouyang et al., 2022) and beyond (OpenAI, 2024), demands high computation costs on GPU-sufficient clusters (Lee & Sengupta, 2022). However, scaling up require larger GPU memories, posing a challenge for implementation on GPU-memory-limited devices.  
+
+Alternative approaches to training LLMs on GPU-memory-limited devices share a common weakness of prolonged training time consumption. The most straightforward method is to employ a small batch size. However, the large gradient noise slows down the training process and makes the model hard to converge. Another approach is to use Gradient Accumulation (GA), which involves multiple backpropagations followed by gradient averaging before a parameter update step, achieving an equivalent large batch size. This approach converts the utilization of abundant GPU resources in parallel processing into a sequential process, also albeit at the expense of increased training time.  
+
+In this paper, we propose Periodical Moving Average (PMA), a momentum update method designed to accelerate momentum-based optimizers in LLM training on GPU-memory-limited devices. The technical challenge lies in achieving both low variance and low time cost simultaneously. On the one hand, from the perspective of GA, it is dificult to take more parameter updates without interrupting the GA process or requiring extra memory allocation. On the other hand, from the side of small-batch training, stabilizing the parameters becomes challenging when gradients are sampled from a small batch, leading to increased variance. However, we observe that post-training usually uses a lower learning rate than pre-training, preventing the parameters after training from deviating significantly from the pre-trained model. This suggests that the gradients over the last few steps tend to have similar expectations. PMA divides the entire training process into multiple periods, each consisting Oof $K$ steps. During each period, the momentum is updated using a moving average instead of the  
+
+![](images/cef8524309c4f189d59bff66f8152daa3282bcc20991a1b03f0be1297c81c654.jpg)  
+Figure 1: Optimizers with PMA achieves about $2\times$ speedup compared with the optimizers with EMA. (1alb) Comparison of the number of steps needed to achieve the same validation loss with Phi-2 2.7B model on SFT task and Alpaca dataset. (1c1d) Comparison of the number of steps needed to achieve the same validation loss with Phi-2 2.7B model on DPO task and HH-RLHF dataset.  
+
+Exponential Moving Average (EMA) (Kingma & Ba, 2014; Loshchilov & Hutter, 2017; Chen et al., 2023; Liu et al., 2023), effectively reducing momentum variance. Between periods, the vanilla EMA is employed to leverage the high convergence rate of standard EMA-based optimizers.  
+
+The challenge of trajectory deviation arises when applying PMA to existing optimizers. Since the same weight is applied to gradients within a period, the averaged gradients may lead to a parameter update trajectory that deviates from the desired path. However, the optimizer cannot access the true expectations of the stochastic gradients, making it difficult to detect or regulate any potential deviation. To mitigate this trajectory deviation, we implement a linear decay of the learning rate within each period, while resetting the learning rate to its initial value at the start of each new period. This strategy ensures that the gradients do not deviate excessively from one another, thereby stabilizing the update steps between periods and maintaining the desired trajectory.  
+
+By applying PMA, we modify AdamW (Loshchilov & Hutter, 2017) and Lion (Chen et al., 2023), proposing AdamW-PMA and Lion-PMA. To verify the effectiveness of AdamW-PMA and Li on-PMA, we conduct extensive experiments covering the post-training process of an LLM, including Supervised Fine-training (SFT) and Direct Preference Optimization (DPO) (Rafailov et al., 2023) on GPT-2 (Brown et al., 2020), Phi-2 (Javaheripi et al., 2023), Qwen1.5 (Team, 2024a), Qwen2 (Yang et al., 2024) and Llama2 (Touvron et al., 2023b). Empirical evaluation shows that AdamW-PMA and Li on-PMA achieve approximately $2\times$ speedup in the post-training process and deliver better performance on downstream tasks. Furthermore, we provide a theoretical analysis of AdamW-PMA on the learning rate strategy and regret bound, demonstrating that the theoretical convergence properties of AdamW-PMA are on par with those of Adam.  
+
+Our technical contributions are summarized as follows:  
+
+· We propose Periodical Moving Average (PMA), a momentum update method to accelerate LLM fine-training on GPU-memory-limited devices. We adopt PMA to Adam W and Lion, to propose AdamW-PMA and Lion-PMA. Both algorithms stabilize the training and cost no more memory and computation overhead in each step, achieving the same level of loss with less time and less data compared to the original algorithms.  
+
+· We conduct extensive experiments across model sizes (from 0.1B to 7B) and training tasks (SFT and DPO) to evaluate the performance of AdamW-PMA and Lion-PMA. PMAmodified methods achieve approximately $2\times$ speedup in the training process and deliver better performance on downstream tasks.  
+
+· We provide theoretical analyses of AdamW-PMA. The regret analysis on convex functions shows that the theoretical convergence property of AdamW-PMA is at the same level as Adam. The convergence analysis of the small update steps shows the correctness of our designed learning rate strategy.  
+
+
+
+\section{2 PRELIMINARIES  }
+
+
+2.1 BACKGROUND: FIRST ORDER OPTIMIZATION   
+Adam (Kingma & Ba, 2014; Reddi et al., 2019) and AdamW (Loshchilov & Hutter, 2017) amalgamate adaptive and momentum-based methods, emerging as widely adopted optimizers for LLM training. Adam's update rule is as follows: Given an bjective function $f:\bar{\mathbb{R}^{d}}\rightarrow\bar{\mathbb{R}}$ at time $t$ after computing the gradient $g_{t}=\nabla f$ the first and second momenta are updated as $m_{t}=\beta_{1}m_{t-1}+(1-\beta_{1})g_{t}$ and $v_{t}=\beta_{2}v_{t-1}^{\phantom{}}+(1-\beta_{2})g_{t}^{2}+\epsilon,$ respectively, where $\epsilon$ is a small constant. Each momentum is then debiased by dividing by $\sqrt{1-\beta_{1}^{t}}$ and $\sqrt{1-\beta_{2}^{t}}$ to obtain $\hat{m}_{t}$ and $\hat{v}_{t}$ , respectively. Since the weight of the historical gradients decays exponentially, this method is also known as the EMA.Finally, the model parameter is updated by Tt+1 ← Ct -Y: , where $\gamma$ represnts thlin ate, and all operations are element-wise. Recent representative advances by Chen et al. (2023) is Lion, which employs with the first momentum only, and uses EMA to update it.   
+However, Adam-based methods face significant challenges related to high gradient variance in memory-limited environments. Language model training inherently presents a high-variance optimization problem (McCandlish et al., 2018). To tackle this issue, high-performance clusters are often employed to increase the batch size (Touvron et al., 2023a). Conversely, reducing the batch size exacerbates stochastic gradient noise, impeding model convergence ( Yuan et al., 2016; Bottou et al., 2018; Kunstner et al., 2023; Fu et al., 2023).   
+2.2THEORETICAL SOLUTION: VARIANCE REDUCTION IN SGD   
+In this subsection, we discuss the methods to reduce gradient variance in SGD (Bottou et al., 2018) and their drawbacks. The gradient aggregation methods reduce variance by reusing previously computed information. Specifically, at time step $t$ ,SVRG (Johnson & Zhang, 2013) maintains a copy of the historical parameter $\theta_{k}$ where $k\,<\,t$ . The iterate averaging method (Polyak, 1991) stores the parameters after each SGD step and returns the average of the stored parameters. Recent advances proposed methods with recursive gradient updates without storing past gradients, such as SARAH (Nguyen et al., 2017) and STORM (Cutkosky & Orabona, 2019).   
+However, current variance reduction methods either require large memory space, which is not feasible when tuning the LLMs, or have low sampling efficiency. SAGA needs to store a gradient for each data sample, and the memory cost is proportional to the size of the dataset. The iterate averaging method needs to store al the updated parameters, with memory proportional to the number of steps. SVRG needs to sample a large batch in each step to reduce the gradient variance. Although SARAH and STORM does not require storing past gradients, they need more than one more back-propagation on the past parameters for one update, leading to a high computation overhead for training LLMs. 2.3 PRACTICAL SOLUTION: GRADIENT ACCUMULATION   
+To mitigate the high variance of stochastic gradients in memory-limited scenarios, a straightforward alternative method is $\mathrm{GA^{1}}$ . GA involves partitioning the large batch into $K$ smaller batches and computing the gradient on each small batch without overwhelming the available memory. Subsequently, the gradients from these small batches are averaged to obtain the gradient of the large batch for parameter update. Importantly, the accumulated gradient obtained through GA remains equivalent to the gradient obtained directly from the large batch.   
+However, GA faces significant practical challenges, primarily related to computational time. This is due to the fact that GA mitigates memory overhead by transforming parallel computations, typical in large clusters, into serial computations on memory-limited devices. Specifically, GA requires performing feed-forward and back-propagation $K$ times before updating the parameters once, resulting in lower computational effciency. Pham et al. (2023) modified the GA process to reduce the memory cost, but they did not touch the target of speeding up training on memory-limited devices.  
+
+
+
+\section{2.4 THE DILEMMA  }
+
+
+Throughout the analysis in Section 2.2 and Section 2.3, we identified a dilemma between theoretical solutions and practical approaches when performing high-variance optimization on GPU-memorylimited devices. Theoretical variance-reduction solutions often entail high memory overhead, which is impractical in our scenario. Existing practical approaches either suffer from slow convergence rates due to high gradient variance or prolonged training times due to serial operations of GA. Since the crux of this dilemma lies in the high variance of the gradients, it is imperative to design a method to reduce the variance of parameter updates while maintaining a similar level of memory and computational costs as the current approaches.  
+
+
+
+\section{3METHODOLOGY: PERIODICAL MOVING AVERAGE  }
+
+
+To relieve the dilemma in Sec.2.4, we introduce PMA as an extension to EMA to reduce the variance of the gradients. Section 3.1 specifies the high-level design idea of PMA and explains the connection and difference and existing work, providing an intuitive explanation. Section 3.2 dives into the design details by introducing the dynamics of $\beta$ and the learning rate schedule. Section 3.3 provides two cases, demonstrating how PMA can be applied to Adam W and Lion.  
+
+
+
+\section{3.1  HIGH-LEVEL IDEA  }
+
+
+GA reduces variance, let's mimic it. At a high level, the PMA mimics the GA process in the momentum update. Unlike the EMA method, which forgets the historical gradient with an exponential rate, PMA retains the same weights for some recent gradients. This is realized by splitting the training process into periods and performing the vanilla moving average for momentum updates in each period. This approach mimics the GA process, thus ensuring that the momenta have approximately low variance compared with those of EMA-based optimizers with GA (Sec. 3.2.1).  
+
+GA updates no parameters, let's update them. The core concept of PMA revolves around taking small steps forward during each GA round. Specifically, the main procedure of PMA alternates between using large and small learning rates during GA. We refer to the step using a large learning rate as the large update step, while the others are termed small update steps. Each large update step,following $K$ small update steps, mimics an update step in EMA-based optimizers with GA. Conversely, each small update step, employing a small learning rate, aims to accelerate convergence while avoiding excessive movement to disrupt the GA process (Sec. 3.2.2).  
+
+The superiority of PMA over EMA-based optimizers with GA mainly stems from the update steps with the smaller learning rate. These small update steps, interspersed between two large update steps, allow the parameters to be updated after each round of gradient computation, rather than waiting until all $K$ rounds of gradients are accumulated.  
+
+
+
+\section{3.2 DETAILED DESIGN  }
+
+
+In this subsection, we introduce the update method of the first momentum as an example.  
+
+Instead of setting $\beta$ to be a constant during the training process as EMA, the adaptation of PMA employs dynamic $\beta^{2}$ to achieve the vanilla moving average nature of PMA. Since the weights of each historical gradient in a period is required to be the same, the $\beta$ should decay through a period, assigning a reducing $\beta$ to the newer gradient. In the following, we introduce the dynamics of $\beta$ in the large and small update steps separately, and an illustration of the $\beta$ is given in Fig. 2a.  
+
+At Large Update Steps: Small Gradient Weight for Low Variance. At the first small update step after a large update step, i.e., $\tau=0$ , the updates of the momentum is given by $m_{t}\gets\beta_{1}m_{t-1}+(1-$ $\beta_{1})g_{t}/K$ . This update method bears resemblance to that of EMA, wherein historical gradients decay  
+
+216   
+217   
+218   
+219   
+220   
+221   
+222   
+223   
+224   
+225   
+226   
+227   
+228   
+229   
+230   
+231   
+232   
+233   
+234   
+235   
+236   
+237   
+238   
+239   
+240   
+241   
+242   
+243   
+244   
+245   
+246   
+247   
+248   
+249   
+250   
+251   
+252   
+253   
+254   
+255   
+256   
+257   
+258   
+259   
+260   
+261   
+262   
+263   
+264   
+265   
+266   
+267   
+268   
+269  
+
+At Small Update Steps: Moving Average with Dynamic Weights. When $\tau=1,\dots,K-1$ the update of momentum are given by $\begin{array}{r}{m_{t}\,\leftarrow\,\frac{\tau}{\tau+1}m_{t-1}+\frac{1-\beta_{1}}{\tau+1}g_{t}}\end{array}$ Iitially, the current gradient is multiplied by $1-\beta$ . Our update method for the small steps replaces the EMA method used in RMSprop and Adam with the moving average method. This modification aims to emulate the GA method, ensuring that the gradients of the small update steps have the same weight in $m_{t,K-1}$ ， thereby enabling the large update step to mimic an update step in EMA-based optimizers while keeping a low variance. Notably, in $m_{t,K-1}$ ， $m_{t-1,K-1}$ has a weight of $1-\beta_{1}$ , while $g_{t,\tau}$ has a weight of $\frac{1\!-\!\beta_{1}}{K}$ for all $\tau$ . These weights mirror those in GA.  
+
+![](images/db10358b643f8229d3d8471b2b84ee566f6f18a870133a7e42a0d8f97be49ed1.jpg)  
+
+with the factor $\beta$ and the current gradient is multiplied by $1-\beta$ . However, a key distinction from EMA lies in our approach of dividing the current $g_{t,0}$ by $K$ , and after the update, the first and second momenta are scaled by $K$ . This operation serves a dual purpose: firstly, to mitigate the variance of the first and second momenta, and secondly, to ensure that after the subsequent $K$ small steps, the accumulated gradients $g_{t,0},\ldots,g_{t,K-1}$ are weighted equally in $m_{t,K-1}$ , thereby aligning the momenta with those in GA.  
+
+3.2.2 THE LEARNING RATE SCHEDULE  
+
+![](images/2f79f358b3fc1c331b4c999cf6baa254f4757826ab330c4cc0cb872a2870f791.jpg)  
+(a) Example of dynamic (b) Example of lr ( $[\mathrm{K}=8$ $\beta$ $[\mathrm{K}=8$ $\beta=0.9_{\cdot}$ $\gamma=1,$  
+
+![](images/4e42d81eb9bdd399196c42e4a9f09dfac9f781456b873b5f599316e455c35395.jpg)  
+Figure 2: Illustrations of the dynamics of $\beta$ and learning rate.  
+
+To cope with the dynamics of the momentum update in Sec.3.2.1, we design a learning rate scheduler that differentiates between small and large update steps in this subsection. This strategy employs a decaying learning rate for small update steps instead of using a uniform learning rate for each step. The necessity of such a design stems from mimicking GA to avoid excessive movement that could disrupt the mimicked GA process. An example of the dynamic learning rate is illustrated in Fig. 2b.  
+
+The design intuition for the learning rate strategy aims to advance the $K$ small update steps relatively further to expedite convergence compared to Adam with GA while preventing these steps from advancing too much and causing $m_{t,K}$ to deviate significantly from the momentum of EMA-based optimizers with GA. With this intention, we scale the momentum by $1/K$ at the small update steps after the momentum update. Considering the scaling of momenta in Lines 16-18 and the momentum update method with varying weights, the actual learning rate at small update step $\tau$ is $\begin{array}{r}{\eta\cdot\frac{K}{K}\cdot\prod_{i=1}^{\tau}\frac{\mathbf{\mu}_{i}}{i+1}=\eta/(\tau+1)}\end{array}$ , decreasing at linear rate.  
+
+
+
+\section{3.3 CASE STUDY  }
+
+
+
+
+\section{3.3.1FROM ADAMW TO ADAMW-PMA  }
+
+
+We modify AdamW to AdamW-PMA by replacing the EMA with the PMA as introduced in Sec.3.2. The pseudo-code of AdamW-PMA is provided in Alg. 1. We replace the EMA method for the first and second momentum updates in AdamW with PMA, following Sec.3.2.1. Note that the update of Adam W is computed by $\bar{m}/\sqrt{v}$ (ignoring weight decay), and both the first and second momentum are scaled by $K$ at large update steps. The learning rate is scaled by $1/K$ at small update steps, resulting in a learning rate that is effectively scaled by $\sqrt{K}/K=1/\sqrt{K}$ . For the remaining components of AdamW-PMA, we keep them unchanged from AdamW.  
+
+
+
+\section{3.3.2 FROM LION TO LION-PMA  }
+
+
+The modification to Lion follows a similar approach to Adam W. It is noteworthy that the learning rate is decayed by $1/K$ at small update steps, instead of $1/\sqrt{K}$ in AdamW -PMA. The reason is that there is no second momentum in Lion. Thus, we choose $1/K$ to align with the rescaling of momentum after the large update step, ensuring that the actual learning rate linearly decays as discussed in Sec.3.2.2. For the remaining components of Li on-PMA, we keep them unchanged from Lion. The pseudo-code of Li on-PMA is illustrated in Alg. 2.  
+
+
+
+\section{4 THEORETICAL ANALYSIS  }
+
+
+
+
+\section{4.1 CONVERGENCE ANALYSIS  }
+
+
+In this section, we provide a theoretical analysis on the convergence property of Adamw-PMA. Specifically, we focus on the convergence properties concerning the number of large update steps. This focus is due to the time cost between two large steps being approximately equal to the time between two updates of Adam with GA. During the analysis, we slightly modify the notations for ease of analysis. Unlike Alg. 1, where the index of small update steps ranges from O to $K-1$ , in the subsequent analysis, this index ranges from 1 to $K$ . When $\tau=K$ , the update step from $x_{t,K}$ to $x_{t+1,1}$ is considered a large update step for all $t$ . For the other $\tau\in[K-1]$ ,the subsequent update step is a small step.  
+
+We analyze the convergence property of AdamW-PMA following the same settings of Kingma & Ba (2014). The metric of interest is the regret, defined as:  
+
+$$
+R_{\tau}(T)=\sum_{t=1}^{T}f(x_{t,\tau})-f(x^{*}),
+$$  
+
+where $\tau$ is the index of the small update steps. We demonstrate that AdamW-PMA has an $O(\sqrt{T})$ regret bound, comparable to Adam in the same setting. We use some definitions simplify our notation, where $g_{t,\tau}=\nabla f(x_{t,\tau})$ and $g_{t,\tau,i}$ as the $i$ th element.  
+
+Theorem1.Assumethatthe optimization objective $f$ isconvexandhasboundedgradients, $\|\nabla f(x)\|_{2}\;\leq\;G,\;\|\nabla f(x)\|_{\infty}\;\leq\;G_{\infty}$ and thedistancebetweenany parameter generated by AdamW-PMA is bounded, $\begin{array}{r}{\|{\boldsymbol x}_{t_{1},\tau_{1}}-{\boldsymbol x}_{t_{2},\tau_{2}}\|_{2}\leq D,\,\|{\boldsymbol x}_{t_{1},\tau_{1}}-{\boldsymbol x}_{t_{2},\tau_{2}}\|_{\infty}\overset{\cdot}{\leq}D_{\infty}}\end{array}$ for any $t_{1},t_{2}\in[T]$ and T1, T2 E [K], and β, β2 satisfy β $\begin{array}{r}{\frac{\sqrt{1-\beta_{2}}}{1-\beta_{1}}\ \leq\ 1}\end{array}$ AdamW-PMA achieves the following regret guarantee, for all $T\geq1$  
+
+$$
+R_{K}(T)\leq\frac{\sqrt{K}D^{2}}{2\gamma(1-\beta_{1})}\sum_{i=1}^{d}\sqrt{T\hat{v}_{T,K,i}}+\frac{(1+\gamma)K^{\frac{3}{2}}G_{\infty}}{2(1-\beta_{1})}\sum_{i=1}^{d}\|g_{1:K T,i}\|_{2}+\frac{D_{\infty}^{2}G_{\infty}(K-1)}{2(1-\beta_{1})}.
+$$  
+
+ Theorem 1 implies that given a horizon $T$ , the cumulative regret decreases with the data sparsity, consistent with the theoretical analysis of Adam. Additionally, it is observed that the regret increases with the number of small steps $K$ The intuition behind this relationship is that choosing a larger $K$ can help AdamW-PMA converge faster to the optimal point. However, when $K$ is too large, the trajectory of AdamW-PMA deviates significantly from the trajectory of Adam, potentially resulting in a large regret.  
+
+4.2 RESOURCE OVERHEAD ANALYSIS  
+
+AdamW-PMA does not incur higher memory costs compared to Adam and AdamW with GA. The memory usage of AdamW-PMA primarily consists of parameters, gradients, and first and second momenta, which is identical to Adam. When AdamW-PMA and Adam with GA use the same small batch size, their memory requirements are equivalent.  
+
+
+
+\section{5 EVALUATION  }
+
+
+5.1EXPERIMENTAL SETUP  
+
+Tasks. Our experiments evaluate AdamW-PMA and Lion-PMA through language modeling tasks, covering SFT, and DPO (Rafailov et al., 2023) tasks3. For the SFT task, we use Phi-2 (Javaheripi et al., 2023) with 2.7B pre-trained parameters and the Alpaca dataset (Taori et al., 2023) as the instruction tuning dataset. For the DPO task, we fine-tune the pre-trained Phi-2 and Qwen1.5-0.5B models on the HH-RLHF-harmless dataset (Bai et al., 2022).  
+
+Baselines. We mainly compare AdamW-PMA and Lion-PMA with AdamW and Lion, respectively. For example, after setting a batch size $B$ and a period length $K$ for AdamW-PMA4, we compare it with AdamW with $K$ times of $\mathrm{GA^{5}}$ , whose batch size is $B$ , and the equivalent batch size is $K B$ achieved by GA. In each group of experiments, the hyperparameters are the same across all the optimizers. For the AdamW-PMA group, we set $l r=2e-6,2e-6$ for the two tasks, respectively, and the betas are set to (0.9, 0.95) for AdamW-PMA and the baselines in all the experiments. For the Lion-PMA group, we set the same learning rate as the AdamW-PMA group and let betas be (0.95, 0.98) in all the experiments as in Chen et al. (2023).  
+
+Implementation. All the following experiments are conducted on a server with $8\times$ NVIDIAA40 GPUswith $8\times48G$ GPU memory and Intel(R) Xeon(R) Gold 6330 CPU and Ubuntu 20.04.2. The implementation is based on the Swift framework (Team, 2024b) and PyTorch (Paszke et al., 2019). Weset $K=8,16$ for the SFT, and DPO tasks, respectively. For the batch size, we set $B=32,16$ for each task, respectively.  
+
+Metrics. For the SFT task, we evaluate the validation loss on the validation dataset and the performance of the trained model on MMLU (Hendrycks et al., 2020) benchmark. For the DPO task, we evaluate the validation loss and the accuracy of classifying the accepted and rejected responses on the validation dataset. Specifically, if the predicted probability of the accepted response is larger than the rejected response, we regard it as a correct classification.  
+
+Methodology of Comparison. To compare the performance of AdamW-PMA and Lion-PMA with their baselines, we consider two methodologies of comparing the evaluated metrics. The first methodology is data efficiency. Specifically, we compare the amounts of training data fed into the model when the metrics of the optimizers reach the same level. The intuition behind this comparison methodology is that if an optimizer is faster, it should achieve a specific low loss with fewer training steps. Since the (quasi-equivalent) batch sizes of the optimizers in each group are different, we consider the amount of training data to be fairer to measure the data efficiency instead of the number of steps. The second methodology is comparing the fops. Specifically, we compare the flops of the optimizers when the metrics reach the same level. This intuition is that the fops are the most straightforward metric to measure the speed of an optimizer. If an optimizer is faster, it should achieve a certain level of loss using less time in practice.  
+
+![](images/799b4333e6e6cf71868c92b2c2ea6f9402e6d06bc312b5a6d1ef2f0242ecd09b.jpg)  
+Table 1: Comparison of the validation loss and the performance on zero-shot MMLU for various algorithmswith $l r=2e-6$ , where validation loss is from the Alpaca dataset after one epoch training. With limited space, we only choose four representative categories and the total average score.  
+
+
+
+\section{5.2 SUPERVISED FINE-TUNING (SFT)  }
+
+
+Table 1 shows that for Adam W family and Lion family algorithm, our method PMA can improve the performance of SFT explicitly. For the validation loss, the AdamW-PMA with $K=8$ (which iswhat Adam W-PMA-8 refers to. So are the other abbreviations.) is better than other Adam W algorithms, and for Lion family algorithms, Li on-PMA with $K=4$ is better.  
+
+In the MMLU-ZS (Zero-Shot) classification tasks, as shown in the table, algorithms incorporating PMA technology achieve superior performance across all categories except for Humanities. Specifically, in the STEM, Social, and Other categories, PMA-enhanced algorithms, consistently outperform their non-PMA counterparts. On average, PMA-enhanced algorithms demonstrate better performance, as indicated by the overall scores (e.g., 27.7 for Adam W-PMA-8).  
+
+Interestingly, Table 1 also reveals that algorithms scoring high in Humanities tasks tend to perform poorly in other categories. For instance, Adam W-8 achieves the highest score in Humanities (19.2) within the AdamW group but has one of the lowest overall average scores (23.3). This phenomenon is believed to be caused by the unbalanced SFT data, which lacks sufficient data in Humanities. Conversely, Lion-PMA-4, while maintaining a competitive score in Humanities (17.7), excels in other categories except for the averaged score. The low average score of Lion-PMA-4 is caused by the lack of data in Humanities, lowering the average score despite high scores in many other categories.  
+
+5.3 DIRECT PREFERENCE OPTIMIZATION (DPO)  
+
+PMA achieves higher accuracy. We verified the effectiveness of the PMA-enhanced optimizers on the DPO task. In Fig. 3a and 3b, we set K to 1 and 16, respectively, and compared the validation accuracy curves of four optimizers from the perspective of total flops. Figure 3c3d use the number of update steps and the number of samples as references, comparing the effects of the four optimizers applied to the DPO task under $K{=}8$ and ${\mathrm{K}}{=}16$ parameter settings. Among these four optimizers, Adam W is the slowest and achieves the lowest accuracy. When the PMA method is applied to Adam W with smaller values of $\mathbf{K}=8$ , as illustrated in Fig. 3a3c, AdamW-PMA's final convergence accuracy is comparable to that of Lion, which serves as another baseline. Although its convergence speed greatly surpasses that of AdamW, it remains slightly slower than Lion. However, with larger values of K, as shown in Fig. 3b3d, AdamW-PMA not only matches Lion in terms of convergence accuracy but also significantly outpaces both AdamW and Lion in terms of convergence speed. Among them, Li on-PMA exhibits the best optimization performance. We observed that both AdamW-PMA and Li on-PMA exhibit significant improvements in both convergence speed and ultimate accuracy compared to AdamW and Lion.  
+
+![](images/513868b6286e33c7187acf5fa73a523fcd5a85db8ad84257f953f93efc709f97.jpg)  
+
+432   
+433   
+434   
+435   
+436   
+437   
+438   
+439   
+440   
+441   
+442   
+443   
+444   
+445   
+446   
+447   
+448   
+449   
+450   
+451   
+452   
+453   
+454   
+455   
+456   
+457   
+458   
+459   
+460   
+461   
+462   
+463   
+464   
+465   
+466   
+467   
+468   
+469   
+470   
+471   
+472   
+473   
+474   
+475   
+476   
+477   
+478   
+479   
+480   
+481   
+482   
+483   
+484   
+485  
+
+PMA reduces runtime. We compare the runtime of PMA and EMA-based optimizers to achieve the same validation loss, showing that DPO can reduce the training time. We use the same settings as Fig. 3, and the runtime is illustrated in Fig. 4. On the one hand, results in Fig. 4 show that PMA takes significantly less time to achieve the same validation loss than EMA. On the other hand, after reaching the same loss as EMA, PMA can utilize the left data to achieve a higher accuracy, which aligns with the result in Fig. 3.  
+
+PMA overfits less.  We compare the validation loss of EMA and PMA after more epochs of DPO training. The experiment setting is the same as Fig. 3 but the model is replaced with Qwen2-0.5B. The result is shown in Fig. 5. PMA-based optimizers achieve lower validation losses than EMA-based optimizers, especially after more training epochs. Specifically, the loss of AdamW-PMA achieves a series of decreasing validation loss across the three epochs, compared with the increasing loss of AdamW, showing that PMA can achieve a lower level of over-fiting than EMA.  
+
+5.4HYPER-PARAMETER SENSITIVITY  
+
+PMA is sensitive to $\mathbf{K}$ .We conducted experiments using AdamW-PMA and AdamW, setting the hyperparameter $K$ at different values to assess its impact on the speedup factor of PMA. In Fig. 6, we present the results for the DPO task utilizing the Phi-2 and Qwen1.5 model, with Adam W as the baseline. When $K=1$ , AdamW-PMA bypasses the PMA stage and directly reverts to Adam W, thus failing to leverage the variance reduction and acceleration benefits of the PMA method. Conversely, when K is set too high, although the variance in momentum updates is reduced, the excessive reduction in learning rate during the PMA stage leads to a diminished extent of acceleration. When $K=16$ for Phi-2 and $K=2$ for Qwen, the reduction in the variance of the momentum updates and the decrease in learning rate achieve a relatively optimal balance, therefore the application of the PMA method achieved the highest observed speedup.  
+
+![](images/569173d1af03327fd9e63558d4e8fb8263afee965e1972899ebd599220ec1179.jpg)  
+  
+Figure 7: Comparison of the magnitude in variance with respect to on Liamaz-/B. Aaam w-rr takes a similar time as AdamW, the training loss and time for our algorithm versus AdamW. The but achieves a much lower loss. vertical coordinates all use log scale since our algorithm is orders of magnitude different from other algorithms.   
+  
+Figure 8: Validation loss of SFT  
+
+5.5 OTHER PROPERTIES  
+
+PMA reduces variance. We demonstrate that PMA can achieve a lower variance of the update direction than that of EMA. For our experiments, we employ the GPT-2 medium (Brown et al., 2020) model with 350M parameters, and utilize the Alpaca dataset with all three algorithms configured identically: $l r=5e-6$ , and betas are set to (0.9, 0.95). The GA step and K value in Alg. 1 are both set to 16. We use the last layer gradient to approximate the gradient of the whole model (Ash et al., 2019; Mirzasoleiman et al., 2020; Killamsetty et al., 2021b;a).  
+
+Figure 7a shows that, at equivalent levels of training loss, our algorithm exhibits lower gradient update variance. Furthermore, as depicted in Fig. 7b, the update variance of our algorithm consistently remains substantially lower than that of the benchmark throughout the training duration.  
+
+PMA can scale up and be quantized. We evaluate the performance of AdamW-PMA on a 7B-level BF16 model, to demonstrate that PMA can scale up on larger models. The experiment is conducted on Llama2-7B-base quantized to BF16 and SFT on the DuReader_Robust dataset (Tang et al., 2020). The model is trained for one epoch. The statistics of the validation loss are plotted in Fig. 8. AdamW-PMA achieves lower validation loss than AdamW across the whole training process, demonstrating the superiority of PMA than EMA.  
+
+PMA costs a little more time. As shown in Fig. 8, AdamW-PMA takes about $2\%$ more time than Adam when training a 7B model, indicating that although there are more update steps and more communication overhead in AdamW-PMA, these small update steps do not take too much time.  
+
+
+
+\section{6  DISCUSSION AND CONCLUSION  }
+
+
+We address the problem of high-variance stochastic optimization on GPU-memory-limited devices for training LLMs. We identified that the low convergence rate of current momentum-based optimizers is primarily due to the EMA method, which forgets historical gradients too quickly, thus failing to leverage them effectively for stabilizing updates. To tackle this, we propose PMA, a new momentum update method that splits the training process into periods and applies a vanilla moving average within each period. This approach assigns a higher weight to historical gradients, thereby stabilizing updates when gradient variance is high. We modify AdamW and Lion using PMA, resulting in AdamW-PMA and Li on-PMA, respectively. Empirical evaluations on SFT and DPO tasks using the Phi-2 and Qwen model demonstrate that PMA achieves approximately $2\times$ speedup in the training process and delivers better performance on downstream tasks.  
+
+However, PMA modified methods could incur higher communication overhead in multi-GPU training scenarios, especially when $K$ is large. For example, Since AdamW-PMA employs extra steps of parameter update during GA, more communication overhead is required when multiple GPUs are employed for the training task. Specifically, since there are $K$ more communication rounds in AdamW-PMA than in Adam with GA, the communication cost of AdamW-PMA is $K$ timeshigher than that of Adam with GA.  
+
+REPRODUCIBILITY STATEMENT  
+
+The code of the experiment is attached in the supplementary material as a zip fle. Please refer to the   
+README_ICLR_submi ssion . md for detailed usage.   
+
+

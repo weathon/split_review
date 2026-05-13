@@ -1,8 +1,8 @@
 # Scaling and evaluating sparse autoencoders
 
 - Decision: Accept
-- Avg Score: 1.75
-- Scores: 3, 1, 0, 1, 0, 8, 1, 0
+- Avg Score: 8.20
+- Scores: 3, 10, 10, 8, 10
 
 ## Abstract
 Sparse autoencoders provide a promising unsupervised approach for extracting interpretable features from a language model by reconstructing activations from a sparse bottleneck layer.  Since language models learn many concepts, autoencoders need to be very large to recover all relevant features.  However, studying the properties of autoencoder scaling is difficult due to the need to balance reconstruction and sparsity objectives and the presence of dead latents.  We propose using k-sparse autoencoders \citep{makhzani2013k} to directly control sparsity, simplifying tuning and improving the reconstruction-sparsity frontier. Additionally, we find modifications that result in few dead latents, even at the largest scales we tried.  Using these techniques, we find clean scaling laws with respect to autoencoder size and sparsity.  We also introduce several new metrics for evaluating feature quality based on the recovery of hypothesized features, the explainability of activation patterns, and the sparsity of downstream effects. These metrics all generally improve with autoencoder size.  To demonstrate the scalability of our approach, we train a 16 million latent autoencoder on GPT-4 activations for 40 billion tokens.blob.core.windows.net/sparse-autoencoder/sae-viewer/index.html}{visualizer}.blob.core.windows.net/sparse-autoencoder/sae-viewer/index.html}{https://openaipublic.blob.core.windows.net/sparse-autoencoder/sae-viewer/index.html}}

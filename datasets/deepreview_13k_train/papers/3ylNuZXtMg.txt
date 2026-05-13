@@ -1,0 +1,228 @@
+\title{Activations Aren't Cheap in LoRA, Weights Are}
+
+\begin{abstract}
+LoRA has become the prevailing technique for finetuning large neural networks with limited computational resources. Historically, activations have been regarded as small and computationally inexpensive to manipulate—a view reflected by LoRA, which leverages this assumption and adds a low-rank term to intermediate activations. However, in the era of modern large language models (LLMs) and diffusion models, this notion has been challenged by the desire for increasing context lengths and smaller models, a trend which inevitably leads activations to consume more memory than the model weights themselves. Surprisingly, when finetuning a 1B model with a context length greater than 2048, we find that LoRA finetuning uses more memory than full-parameter finetuning. This study finds that manipulating additional model weights within the computation graph in parameter-efficient finetuning techniques can often be more memory-efficient than operating on the activations. We provide a semantically-equivalent computation graph reformulation for LoRA, and other popular PeFT techniques, which saves memory and trains faster, advancing the Pareto-frontier for finetuning tasks that can be achieved on consumer hardware. Under practical conditions, this reformulation provides up to a 1.4x reduction in max memory usage and latency for LoRA finetuning across various language and diffusion transformers.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+The release of the transformer architecture (Vaswani et al., 2017) inspired the widespread scaling of language models with billions or trillions of parameters. This unprecedented scale ushered in a fundamental paradigm shift in language modeling: it was no longer necessary to train models from scratch when generalist pre-trained models could be finetuned for higher performance on downstream tasks. It is no coincidence that as these models continued to scale, the field has taken a significant effort to understand how to finetune them efficiently, as doing so otherwise often meant consuming hundreds of gigabytes of GPU memory.  
+
+The existence of pretrained LLMs led to the creation of LoRA (Hu et al., 2021), a finetuning technique that focuses not on optimizing the parameters of the target model but instead on a small set of new parameters that can be merged into the original model without extra cost during inference. LoRA has now become a bedrock technique for efficiently finetuning LLMs. It introduces a pair of low-rank matrices that are forward-passed in parallel to a given model layer; these activations are summed and passed forward to the rest of the network. This approach can offer a significant memory saving over full-parameter finetuning, in which all original network parameters are optimized, as well as regularizes the model to forget less pre-training information (Biderman et al., 2024). LoRA achieves memory savings by eliminating the need to store the optimizer’s state, including the firstorder and second-order moments required by optimizers like ADAM. LoRA achieves 3x memory saving when fine-tuned on GPT-3 with 175B parameters (Hu et al., 2021).  
+
+The field of language modeling has seen substantial growth in recent years. New architectures, larger corpuses of multimodal data, and increased FLOP scaling have led to smarter, more capable models. Irrespective of these trends, the use of LoRA has largely persisted, and it continues to be a popular technique for finetuning the latest available models.  
+
+![](images/95d3d5157aeee404474feb8c8551b36b39111bee904088861611485de0d74532.jpg)  
+Figure 1: LoRA saves less GPU memory. In comparison to full-parameter finetuning, LoRA exhibits less memory savings on smaller models. Furthermore, LoRA incurs higher memory consumption than full finetuning when applied to longer context lengths.  
+
+However, the memory saving of LoRA might not persist as there are two emergent trends in the development of LLMs: smaller models and longer context length. These two trends are characterized by the creation of LLaMA-3.2-1B (Dubey et al., 2024), which is, at the time of writing, the smallest model in LLaMA series and supports a 128K context length. As LoRA’s memory savings come from not storing weight-sized tensors in optimizer states, a smaller model would necessarily mean less memory saving. Furthermore, since LoRA induces additional activations, when activations are large due to long context length, this overhead may dominate the memory saving of LoRA. As shown in figure 1, LoRA saves less (or even increases) the memory usage compared to full finetuning when applied on smaller models.  
+
+One may ask the question: why use LoRA in these scenarios at all when full-parameter finetuning is possible? Critically, LoRA acts as a regularizer – it mitigates forgetting (Biderman et al., 2024). Where low-memory devices are used, compression techniques such as $N F4$ (Dettmers et al., 2024) can make the original weights non-differentiable, preventing full-parameter finetuning. Additionally, as we show is the case in Table 5 for diffusion models, full-parameter finetuning can have larger latency than LoRA. Also, LoRA adapters are lightweight and preferable when it is necessary to quickly swap them in and out of memory.  
+
+While larger models continue to scale, efforts have been made to develop small models based on large models. For example, Phi (Gunasekar et al., 2023), a lightweight model, is trained using synthetic data from GPT-3.5, and LLaMA-3.2-1B is developed using both pruning and distillation from larger LLaMA variants. Methods are developed to efficiently use both weights and outputs of pretrained large models to develop smaller models (Xia et al., 2024; Xu et al., 2024). In fact, context length supported by pretrained LLMs has indeed grown larger over years as shown in figure 2.  
+
+![](images/792a08b09e6b1de527261f3fb00307d957f87ab368aba09035951e15fbde94a2.jpg)  
+Figure 2: Longer context lengths. As time has progressed, the maximum context lengths, in terms of tokens, has trended upwards. This trend has serious implications for the amount of memory it takes to finetune transformers moving forward.   
+With these trends in mind, techniques like LoRA and its variants lose their memory efficiency as they produce and store even larger intermediate activations for backpropagation. It may soon be  
+
+come evident that activation-based parameter efficient finetuning approaches, once champions for accessibility, might be too memory-intense for current and future models.   
+Will LoRA and other activation-based approaches still be usable at the current trend rate? In this study, we establish a semantically equivalent computation graph for LoRA and other PEFT techniques that depends less on these trends and drastically decreases their memory and latency overhead without affecting performance or changing their meaning. We begin by establishing a memory complexity analysis of activations versus weights, which leads us to a key observation that modifying weight representations requires less memory than modifying activations.   
+Leveraging this insight, we reformulate these techniques using simple, few-line changes to their definitions. We test our weight-based reformulation across a suite of popular modern LLMs, such as LLaMA 3.2, as well as diffusion transformers (Peebles & Xie, 2023), and observe a $1.4\mathrm{x}$ reduction in memory and latency.   
+This reformulation is widely applicable and effective at saving memory and reducing latency. Its implementation pushes forward the Pareto-frontier of what can be achieved on consumer GPUs without sacrificing accuracy. We hope that these insights can offer a new theoretical perspective on designing future parameter-efficient finetuning techniques while practically enabling broader access to LLM finetuning.   
+2 MOTIVATION   
+2.1 PRELIMINARIES   
+Low-rank adaptation (LoRA). LoRA (Hu et al., 2021) inserts two trainable low-rank matrices $A\,\in\,\mathbb{R}^{m\times r}$ and $B\in\mathbb{R}^{r\times n}$ for every targeted weight $W\,\in\,\mathbb{R}^{m\times n}$ in a pretrained model. During a forward pass of the model, they are used to construct an additional projection that is added to the hidden state in the form:   
+$y=W x+B A x$   
+where $B A x$ term would be scaled by a constant factor $c$ before added to $W x$ . During finetuning, only the parameters $A$ and $B$ are updated, while all weights from the pretrained model are frozen. During inference, $A$ and $B$ ’s product is merged back to $W$ , and thus does not increase the inference latency.   
+$(\mathbf{IA})^{3}$ . $\mathrm{(IA)^{3}}$ (Liu et al., 2022) is a PEFT method that learns rescaling factors for activations in the network. Given a frozen weight $W\in\mathbb{R}^{m\times n}$ , bias $b\in\mathbb{R}^{m\times n}$ , input $\bar{x}\in\mathbb{R}^{n\times1}$ , $(\mathrm{IA})^{3}$ would insert a trainable vector $l\in\mathbb{R}^{m\times1}$ to directly rescale the activations:   
+$y=(W x+b)\odot l$   
+where $\odot$ means the hadamard product which performs column-wise scaling.   
+2.2 ACTIVATIONS   
+Activations are the tensors passed forward between layers in a neural network. They are retained during training for backpropagation. In a transformer-based (Vaswani et al., 2017) model, an intermediate activation is typically a three-dimensional tensor of shape (B, S, D), where $B$ is batch size, $S$ is sequence length, and D is hidden size.   
+${\mathrm{Size~of~Activation}}=B\times S\times D$ (1) $D$ would remain fixed for the same pretrained model. In contrast, batch size and sequence length could differ for different training runs.   
+Batch size. Larger batch size produces comparatively more reliable gradient direction, providing a more accurate approximation for the whole-dataset gradient (Liu et al., 2023). The linear-scaling rule (Goyal et al., 2017) between batch size and learning rate also suggests that larger batch size allows for larger steps in training and stabilizes training. In the context of LLM training and finetuning, a common practice is to use the maximum batch size that GPU memory allows.   
+Sequence length. Pretrained LLM’s context length grows over time. For example, LLaMA (Touvron et al., 2023a) is pretrained using a context length of 2048, and LLaMA2 (Touvron et al., 2023b)  
+
+4096. LLaMA3 series (Dubey et al., 2024) progressively increases the context length from 8K to 128K during pretraining. With pretrained models supporting longer context length, long context finetuning is playing an increased role in adapting pretrained LLMs; for example with datasets related to instruction finetuning and chain-of-thought. Furthermore, finetuning models are not bounded by their pretrained context lengths. Works have been done to adapt a pretrained LLM to a context length longer than that of the pretraining stage (Jin et al., 2024).  
+
+Transformer-based diffusion models also benefit from longer sequence lengths. DiT (Peebles & Xie, 2023) demonstrated that reducing the patch size, thereby increasing the sequence length of patches, leads to a significant improvement in image generation quality.  
+
+Growth of activations. With both batch size $B$ and sequence length $S$ being pushed up by the current trend, from formula 1 it is immediately clear that the size of activations would continue to grow over time.  
+
+2.3 ACTIVATIONS V.S. WEIGHTS  
+
+Activation-to-weight ratio. Unlike activations, the dimension $D$ of a model’s weights remains fixed across different finetuning runs. This static nature of weights contrasts with the dynamic growth of activations, which scale with batch size $B$ and sequence length $S$ .  
+
+Consider the size of the intermediate activations, which can be represented as $B\times S\times D$ . For simplicity, suppose this corresponds to a linear layer of size $D\times D$ producing these activations. Then the ratio between the size of the activations and the size of its corresponding weights can be expressed as:  
+
+$$
+{\frac{B\times S\times D}{D\times D}}={\frac{B\times S}{D}}
+$$  
+
+As illustrated in the previous section, batch size $B$ and sequence length $S$ would continue to be scaled up in the forseeable future. Thus for any existing model, future finetuning runs would possibly have a larger activation-to-weight ratio.  
+
+Smaller models. Smaller models have been designed to handle increasingly longer context lengths. For example, models like LLaMA-3.2-1B are capable of handling sequence lengths of 128K tokens, far longer than its larger predecessors. This trend demonstrates that improvements in model architecture and training techniques have allowed for smaller models (and thus smaller $D$ ) to manage longer contexts, further driving up the activation-to-weight ratio in formula 2.  
+
+2.4 OPERATING ON WEIGHTS INSTEAD OF ACTIVATIONS  
+
+Activation-based paradigm. Currently, PyTorch is based on activations. Weights are implemented as functions that operates on activations. The implementation paradigm of a neural network in PyTorch is to iteratively apply different operations to the intermediate activation $x$ .  
+
+Activation-based PEFT implementation. The current PEFT implementation follows the activation-based paradigm during training. For example, in the standard LoRA implementation, LoRA operates at the level of the activations as it injects a low-rank update into the activation flow rather than directly manipulating the weight matrices. This LoRA implementation falls into the category where a reformulation to weights is possible, which will be illustrated in the next section.  
+
+Weight-based operations. During the forward pass during training, if an operation on activations could be reformulated to an operation on its corresponding weights, then the intermediate representation that needs to be stored shifts from an activation to the weight. The size of the intermediate representation would decrease when activations are larger than weights.  
+
+
+
+\section{3 METHOD  }
+
+
+
+
+\section{3.1 LORA REFORMULATION  }
+
+
+Consider a standard LoRA training setting given the pretrained weights $W\,\in\,\mathbb{R}^{D^{\prime}\times D}$ . The input tensor $x$ is a three-dimensional tensor $x$ of shape $(B,S,D)$ , where $B$ is the batch size, $S$ is the  
+
+![](images/fc7854ae179749a928976f6f7a67460aed728179bf31f865c6776121425802d9.jpg)  
+Figure 3: Weight-based LoRA reformulation. The left figure illustrates the weight-based reformulation of LoRA during training, while the right figure presents the activation-based reformulation.   
+Table 1: Weight-based reformulation. Many PEFT techniques can be reformulated to be weightbased. ⋆(Hu et al., 2021), †(Liu et al., 2022), ⋄(Kopiczko et al., 2024), △(Zhengxuan Wu, 2024), ‡(Zhengxuan Wu, 2024).  
+
+sequence length, and $D$ is the hidden size. In our approach, instead of computing activations for the lora branch and the main path separately, we reformulate it into merging the product of $B A$ into $W$ .  
+
+$$
+W x+B A x\Rightarrow(W+B A)x
+$$  
+
+Note that this is different from original LoRA setting, where merging only happens for inference. As shown in Figure 3, in our formulation, $(W+B A)$ gets calculated first, and the multiplication with the input tensor only happens once, in contrast to twice $W x$ and $B A x$ ) in the original setting.  
+
+The key difference lies in the intermediate tensors created: the weight-based method primarily generates $B A$ and $W+B A$ , while the activation-based approach produces $W x,A x,B(\bar{A}x)$ . As batch size and sequence length increase, the dimensions of these activation tensors grow proportionally, leading to significantly higher memory consumption in the activation-based method compared to the weight-based approach, where the size of $W\!+B A$ remains constant regardless of input dimensions. This provides compelling motivation for the weight-based method’s improved performance which we further analyze empirically.  
+
+3.2 REFORMULATION FOR OTHER METHODS   
+
+![](images/5218003202884e999b75960a6356f3f06d2b1c0b51e4e307bbba004ddf72c552.jpg)  
+
+The weight-based reformulation principle we’ve introduced extends beyond LoRA-based techniques, encompassing a diverse range of Parameter-Efficient finetuning (PEFT) methods. Table 1 summarizes the original formulations and their corresponding weight-based reformulations for various PEFT techniques. Notably, this reformulation strategy applies not only to additive methods like LoRA (Hu et al., 2021) and VeRA (Kopiczko et al., 2024), but also to $\mathrm{\dot{I}A^{3}}$ (Liu et al., 2022), which was originally designed to scale activations element-wise. Our reformulation incorporates this scaling directly into the weight matrix using a diagonal matrix multiplication. Furthermore, we show that even more complex methods like LoReFT and DiReFT (Zhengxuan Wu, 2024), which weren’t originally designed to be merged into the base model and instead manipulate activations of representation layers, can be reformulated in this way. Our weight-based reformulation encompasses a wide spectrum of PEFT techniques while maintaining their semantic equivalence.  
+
+In the following section, we present results comparing our weight-based reformulation to the original formulation for both IA³ and LoRA. These two PEFT techniques were chosen because of their popularity and compatiblity with Huggingface’s PEFT library.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+We conduct evaluations to understand the empirical effects of our reformulation on popular benchmarks and LLMs.  
+
+
+
+\section{4.1 EXPERIMENTAL SETUP  }
+
+
+Language modeling. To understand our weight-based reformulation’s practical impact, we choose popular models paired with established datasets. Specifically, we employ the models LLaMA-3.2- 1B and LLaMA-3.2-3B. These models have hidden dimensions of 2048 and 3072, respectively. For datasets, we use the MATH (Hendrycks et al., 2021), wikitext (Merity et al., 2016), and CNNDailyMail (Nallapati et al., 2016) datasets. The maximum sequence lengths, in number of tokens, for these datasets vary per model tokenizer and are provided with the results. The tokenization of these datasets create sequences whose length closely mirror the sequence lengths of data that the model may encounter in practical scenarious.  
+
+Diffusion models. Diffusion finetuning using LoRA is actively supported in huggingface diffusers library (von Platen et al.). We study our reformulation on diffusion transformers (DiT) (Peebles & Xie, 2023). Transformer-based diffusion models has been shown to have good scaling performance on FLOPs, which relies heavily on sequence length. A smaller patch size directly translates to slicing images into more patches, resulting in a larger sequence length for diffusion transformers. We conduct experiments on DiT-S/2, DiT-B/2, DiT-L/2, DiT-XL/2, whose parameter counts range from $33\mathbf{M}$ to 675M. The embedding dimensions range from 384 to 1152.  
+
+Baselines and measurements. We apply our reformulation to the PEFT methods $\mathrm{{IA}^{3}}$ and LoRA $r=8$ , applied to all linear layers). We compare our reformulation to the traditional weight-based approach as well as full-parameter finetuning. We use the Huggingface peft (Mangrulkar et al., 2022) library for our LLM activation-based PEFT implementations and a custom PEFT implementation for diffusion transformers. For memory measurements, we record the maximum memory usage across all CUDA GPUs. For latency measurements, we measure the time, in seconds, per batch, averaged over twenty batches.  
+
+
+
+\section{4.2 DOES THE WEIGHT-BASED REFORMULATION SAVE MEMORY?  }
+
+
+The memory savings of our weight-based reformulation of two PEFT techniques on LLMs are presented in Table 2, which shows the peak required GPU memory for a particular model, dataset, and batch size combination. This reformulation saves memory as compared to the activation-based baseline in every combination. As hypothesized, the savings of the weight-base reformulation over the activation-based approach increase proportionally as batch size and sequence length increase. Simultaneously, it also benefits from the smaller hidden dimension of the smaller models. For example, when finetuning LLaMA-3.2-3B on the MATH dataset with a batch size of 16, the activationbased approach uses $\mathbf{1.4x}$ more memory than our reformulation. These savings are important; with them, one could elect to increase their batch size, train on longer sequences, or even opt for a larger model.  
+
+Furthermore, with this reformulation, LoRA and $\mathrm{{IA}^{3}}$ now match or even beat the memory usage of full finetuning. This is to be expected: the memory that would be used by the Adam optimizer $\mathbf{\Psi}^{2\mathbf{x}}$ the size of the model weights) for finetuning all parameters is compensated for by the introduction of the intermediate tensors $B A$ and $(W+B A)$ on the computation graph, each of which is $1\mathbf{x}$ the size of the model weights.  
+
+We seek to see if these results hold for diffusion transformers. As shown in Table 3, across DiT variants of different sizes, there is consistent memory savings by our weight-based reformulation. For these models, We see that the activation-based approach consumes, at minimum, $1.24\mathrm{x}$ more memory for $\mathrm{{IA}^{3}}$ and $1.13\mathbf{x}$ more memory for LoRA than our weight-based reformulation for diffusion  
+
+Table 2: We record the maximum memory usage (GiB) of running finetuning on a given batch size, model, and dataset combination. We do this for two techniques, $\mathrm{\bar{I}A^{3}}$ and LoRA. We then calculate how much worse the original formulation performs as a multiple of our weight-based-formulation’s performance in the Memory Efficiency $(x)$ rows. Out of memory errors are denoted with a dash.  
+
+324 325 326 327 328 329 330 331 332 333 334 335 336 337 338 339 340 341 342 343 344 345 346 347 348 349 350 351 352 353 354 355 356 357 358 359 360 361 362 363 364 365 366 367 368 369 370 371 372 373 374 375 376 377   
+
+![](images/613869468062b7136f12e1e67acedc92e9f5d9120316dd90789b3e9cb1ed1a90.jpg)  
+
+![](images/111bdc78e5e9b9afebb77efecd90326d700196568dadc0ad15115beee18707de.jpg)  
+
+Table 3: Maximum memory usage (GiB) of Diffusion Transformers finetuned with a fixed batch size of 1. The input resolution given to all models is of the same size $256\times256$ .  
+
+models. Additionally, whereas the activation-based approach for $\mathrm{{IA}^{3}}$ was more memory expensive than full-finetuning, with the weight-based reformulation it is now more memory-efficient.  
+
+Finally, we noticed that, empirically, these results have some deviation. This behavior is primarily due to the CUDA backend of PyTorch, whose kernels have been optimized to speed up computation at the expense of allocating additional memory in certain programs. While out of scope for this work, these features explain marginal additional memory allocations.  
+
+
+
+\section{4.3 DOES THE WEIGHT-BASED REFORMULATION IMPROVE LATENCY?  }
+
+
+Transferring data between the global memory and the tensor cores can induce a significant latency overhead. Additionally, smaller tensors mean fewer FLOPs during matrix multiplication. Given that our approach is more memory efficient, we hypothesize that, for this reason, it could induce lower latency as well.  
+
+Table 4 shows the second per batch for our weight-based reformulation versus the activation-based approach on LoRA and $\mathrm{{I}\dot{\mathbf{A}}^{3}}$ . The results in this table empirically confirm this hypothesis, showing that our reformulation is consistently faster than the activation-based approach. Specifically, for finetuning LLaMA-3.2-1B on wikitext, the activation-based approach can take as much as $\mathbf{1.4x}$ longer to complete a batch than our weight-based reformulation. This conclusion is further compounded by the latency improvements on diffusion models as presented in Table 5, where similarly the activation-based approach can take as much as $1.39\mathbf{x}$ longer to complete a batch than  
+
+378 379 380 381 382 383 384 385 386 387 388 389 390 391 392 393 394 395 396 397 398 399 400 401 402 403 404 405 406 407 408 409 410 411 412 413 414 415 416 417 418 419 420 421 422 423 424 425 426 427 428 429 430 431   
+
+![](images/11180adccb888b8c822030fc91a8a9bbc834b07409ba72823289352cea76f3ea.jpg)  
+
+Table 4: We record the latency in terms of seconds per batch of running LoRA and $\mathrm{{IA}^{3}}$ finetuning on a given batch size, model, and dataset combination on. We then calculate how much worse the original formulation performs as a multiple of our weight-based-formulation’s performance in the Latency Speedup $(x)$ rows. Out of memory errors are denoted with a dash.  
+
+![](images/f7fb6b224714aafb391c7690070998bfd906ad00339b66e29a5c68a8b0ca0ccf.jpg)  
+
+Table 5: We record the latency in terms of seconds per batch of running LoRA and $\mathrm{{IA}^{3}}$ finetuning on a given model. We calculate how much worse the original formulation performs as a multiple of our weight-based-formulation’s performance in the Latency Speedup $(x)$ rows. Out of memory errors are denoted with a dash.  
+
+the weight-based reformulation, particularly on DiT-L/2. Given that access to training hardware can be limited, this impact is important for minimizing training time.  
+
+
+
+\section{5 ANALYSIS  }
+
+
+To better characterize the nature of the relationship between the weight-based reformulation versus the activation-based approach, we conduct ablation studies across rank, batch size, and sequence length.  
+
+
+
+\section{5.1 LORA RANK  }
+
+
+Figure 4 shows the changes in memory consumption in our weight-based reformulation versus the activation-based approach as $r$ is varied. The results in this table show that the rank of LoRA matrices does not contribute significantly to the overall memory consumption for values of $r$ less than or equal to 128. We also observed that as the rank increases, the original implementation increases more rapidly than our reformulation. This trend is due to the intermediate tensor generated by the $A x$ multiplication in $W x+B A x$ , in which one of the dimensions is of size $r$ in the activation based formulation of LoRA. We note that both methods see in increase in memory consumption as $r$ increases due to the optimizer states accounting for more trainable parameters. From this experiment it is clear that the weight-based formulation is not significantly dependent on the rank used by LoRA, offering an avenue to explore higher values of $r$ without trading off memory.  
+
+![](images/5996b7f0ba1bb4eb9d2e702cc926c7afa6184d3da19bad7247feb0276e45963e.jpg)  
+Figure 4: LoRA rank. The weight-based reformulation prevents the need to save the activation produced after the down projection $A x$ . Thus, when using higher LoRA rank, our reformulation saves additional memory.  
+
+5.2 BATCH-SIZE  
+
+Table 6: Maximum memory usage (GiB) for training LLaMA-3.2-1B with varying batch sizes.   
+
+![](images/105de093e99ef9f8d2a8bcebb3b5aa7dbf3f343d73e593d6118db9718c1bfeb7.jpg)  
+
+Table 6 illustrates the memory usage as we vary the batch size when training on LLaMA 3.2 1B on wikitext, comparing our LoRA reformulation to the original method. At smaller batch sizes, the memory savings from our approach are modest, nearly identical to the original. However, as the batch size increases, our weight-based reformulation demonstrates significant improvements in memory efficiency. These trends suggest that our reformulation is particularly well-suited for larger batch sizes which is crucial for faster and more stable training.  
+
+5.3 SEQUENCE LENGTH  
+
+![](images/1182bafe968bef293da54e29db9244e8c3e1cf8a4ffedd352a3efb17c961f829.jpg)  
+
+Table 7: Maximum memory usage (GiB) for training LLaMA-3.2-1B with varying sequence lengths.  
+
+Table 7 demonstrates how memory is affected as we increase the sequence length of the data that we finetune on using our weight-based reformulation versus the activation-based approach. We created a fake dataset with randomly sampled tokens of a specified sequence length. The trend supports the hypothesis: as we increase the sequence length, we see increasing gains from our reformulation in memory savings. We only go up to a sequence length of 4096, but LLaMA-3.2-1B’s maximum sequence length is 128,000. As inputs to these models trend larger, particularly in the age of chainof-thought reasoning and agents, being able to effectively manage the memory for finetuning on these longer sequences becomes even more important.  
+
+
+
+\section{6 RELATED WORKS  }
+
+
+PEFT $^+$ Compression. Methods such as QLoRA Dettmers et al. (2024) and LoftQ (Li et al., 2024) reduce model size in memory through low-bit quantization of model parameters, while reducing information with LoRA. Similarly, Wanda (Sun et al., 2024) uses pruning to reduce the number of active weights in the model and uses LoRA to regain lost model performance. While these techniques reduce memory footprints via model compression, our approach further complements these by decreasing the memory consumption during post-compression training. Our contribution furthers the memory efficiency of finetuning with compression without sacrificing performance.  
+
+Finetuning Frameworks. Finetuning frameworks like DeepSpeed (Rasley et al., 2020) and ZeRO (Rajbhandari et al., 2020) focus on infrastructure-level optimizations to improve parallelism and latency efficiency by sharding optimizer states across accelerators. Our method is designed to integrate with these frameworks. These frameworks take a fixed computation graph and optimize the training system over this graph. Our technique aims to build on top of these methods by providing a more efficient computation graph to the frameworks.  
+
+Compilers. Other methods have approached efficient training through compilation. PyTorch2 (Ansel et al., 2024) introduced TorchDynamo, a just-in-time compiler for computation graphs. While these works focus on speeding up training time, our work complements it by addressing memory consumption. As a byproduct of our work, we also improve on latency, as shown in 4.3.  
+
+
+
+\section{7 LIMITATIONS AND CONCLUSION  }
+
+
+We acknowledge that our work is not without its limitations. It is important to recognize that the benefits of our reformulation can diminish, particularly in situations where the batch size and sequence length is small or when the hidden dimension size is large. We believe the field is moving away from this paradigm as smaller models become more capable and contexts become longer. Additionally, although not being actively used, the current dropout implementation in LoRA is only applied to activations that pass through the LoRA branch, while not being applied to the input to the frozen weight. Therefore, the activation-based LoRA dropout implementation would make weightbased reformulation not exactly equivalent to the LoRA when using dropout. Nonetheless, Lin et al. (2024) proposes to apply dropout to LoRA weights, which is compatible with our weight-based reformulation.   
+Parameter-efficient finetuning techniques have prevailed for their ability to reduce memory usage during finetuning as well as overfitting (Biderman et al., 2024). In this study, we offer an equivalent reformulation for these these techniques that further reduces their memory usage and latency. Our main insight is the trend that capable, state-of-the-art models are getting smaller while their context lengths are getting larger. This insight means that activations are trending towards becoming larger than the size of the weights of the model. We leverage this information to have these PEFT techniques not produce activations, but rather a delta to the weights they are being applied to. Our experiments demonstrate that this leads to memory and latency savings as sequence lengths and batch sizes increase. We hope that that this research provides greater accessibility to finetuning and inspires future research in optimizing PEFT methods.  
+
+4open.science/r/slimscale-19B6. It is also included in the supplementary material.  
+
+
+

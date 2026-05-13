@@ -1,0 +1,493 @@
+\title{Fourier Head: Helping Large Language Models Learn Complex Probability Distributions}
+
+\begin{abstract}
+As the quality of large language models has improved, there has been increased interest in using them to model non-linguistic tokens.
+For example, the Decision Transformer recasts agentic decision making as a sequence modeling problem, using a decoder-only LLM to model the distribution over the discrete action space for an Atari agent.
+However, when adapting LLMs to non-linguistic domains, it remains unclear if softmax over discrete bins captures the continuous structure of the tokens and the potentially complex distributions needed for high quality token generation.
+We introduce a neural network layer, constructed using Fourier series, which we can easily substitute for any linear layer if we want the outputs to have a more continuous structure.
+We perform extensive analysis on synthetic datasets, as well as on large-scale decision making and time series forecasting tasks.
+We also provide theoretical evidence that this layer can better learn signal from data while ignoring high-frequency noise.
+All of our results support the effectiveness of our proposed Fourier head in scenarios where the underlying data distribution has a natural continuous structure.
+For example, the Fourier head improves a Decision Transformer agent's returns by 46\% on the Atari Seaquest game, and increases a state-of-the-art times series foundation model's forecasting performance by 3.5\% across 20 benchmarks unseen during training.
+We release our implementation at \url{https://nategillman.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begin{figure}[h!]
+\begin{center}
+    Fourier Head Learns Higher Quality Densities\par\medskip
+    \includegraphics[scale=0.48]{images/toy_predicted_vs_true_gmm_2.png}
+\end{center}
+\caption{We task an MLP with learning to approximate a \tabgreen{continuous bimodal density} using a categorical distribution and a cross entropy objective.
+We observe that a standard \tabred{linear classification head}  fails to distinguish between the two modes, and overfits to high-frequency noise in the training set.
+In contrast, our proposed \tabblue{Fourier head} learns a smoother, more accurate categorical distribution.}
+\label{fig:toy_example_1d_cropped}
+\end{figure}
+
+
+Human language can be viewed as a discretization for a \textit{continuous}, often \textit{probabilistic} representation of the world that is construed in our mind~\citep{spivey2008continuity}. The continuous structure can be partially captured by language models with their token embeddings, where ``nearby'' tokens are embedded to have latent representations with high cosine similarities. 
+The embeddings themselves are acquired as a result of the data-driven learning process. 
+Can we, based on rich prior knowledge about the continuous world, inform the language model about the underlying continuity of its inputs, like the fact that the word ``emerald'' is more similar to ``shamrock'' than ``pine'' when they are used to describe different shades of green? 
+As large language models (LLMs) have evolved into ``foundation models'' that are adapted to a diverse range of tasks, tokens that are \textit{a priori} continuous are more essential than ever, for example for arithmetic computations~\citep{liu2023improving}, decision making with continuous or discrete actions~\citep{chen2021decisiontransformer}, future anticipation and time-series forecasting~\citep{ansari2024chronos}, or simply drawing random numbers given a probability distribution~\citep{hopkins2023can}.
+
+We view the problem of informing LLMs to utilize the continuity prior from the perspective of probability density estimation. For simplicity, we adopt the standard next token prediction framework whose training objective is softmax cross entropy.
+Assuming non-overlapping vocabulary, continuous values can be discretized via binning~\citep{ansari2024chronos}. 
+On one hand, the linear head adopted by LLMs independently projects each token into probabilities, and has the expressive power to flexibly approximate arbitrary probability density functions subject to the ``quantization'' errors. 
+The linear head however does not consider any continuous structure that resides among the tokens (i.e. a random re-shuffle of the tokens in the vocabulary would not change the predictions). 
+On the other hand, a head based on a parameterized distribution (e.g. Gaussian or Gaussian Mixtures) naturally incorporates the continuous structure, but is often too simple (and overly ``smooth'') to account for multi-modal distributions for future prediction or decision making. Can we design a head that is both expressive and incorporates continuous structures?
+
+We introduce the Fourier head, motivated by Fourier series as universal function approximators. 
+\textbf{The Fourier head learns a \emph{continuous} probability density function, and returns a \emph{discrete} approximation of it.}
+Intuitively, returning a discretization of a continuous density in this way allows the classification head to better model the low-frequency signals from the training data, because overfitting to high-frequency noise is explicitly penalized by the Fourier head's built-in regularization.
+At a high level, the Fourier head inputs $x\in\mathbb R^n$, uses a linear layer to learn the coefficients for a Fourier series with $N$ frequencies over $[-1,1]$, and quantizes the interval $[-1,1]$ into $m$ equal bins.
+Then, the Fourier head evaluates the learned Fourier PDF at those $m$ bin center points, and returns those $m$ likelihoods as a categorical distribution.
+
+
+
+Our main contributions are as follows.
+
+\begin{enumerate}
+    \item First, we reveal the underlying principle on the trade-off between the Fourier head's expressive power and the ``smoothness'' of the predicted distributions. 
+    We have proven a theorem which demonstrates a scaling law for the Fourier head.
+    Namely, as we increase the quantity of Fourier coefficients that the Fourier head learns, the layer is able to model increasingly more complicated distributions; however, the Fourier head will necessarily fit to more high-frequency noise, thereby outputting categorical distributions which are less smooth.
+    \item Second, we propose a practical implementation of the Fourier head that allows us to handle sequential prediction tasks by modeling complex multi-modal distributions. 
+    Alongside our implementation, we propose strategies to improve the layer's performance, including Fourier coefficient norm regularization, weight initialization, and the choice of how many Fourier frequencies to use.
+\end{enumerate}
+
+We demonstrate the effectiveness of the Fourier head on two large scale tasks, where intuitively a continuity inductive bias over the output dimensions ought to help the model's generation performance.
+In the first task, an offline RL agent which uses a decoder-only transformer to model the next-action distribution for an Atari game, we improve returns by $46\%$.
+And in the second, we outperform a state-of-the-art time series foundation model on zero-shot forecasting by 3.5\% across a benchmark of 20 datasets unseen during training. 
+
+
+
+
+
+\section{Fourier Head}
+
+
+\subsection{Fourier Head: Motivation}
+
+When practitioners apply LLMs to model complex probability distributions over non-linguistic tokens, a standard technique is to quantize the latent space into $m$ tokens and learn a conditional categorical distribution over those tokens.
+We share two examples here:
+\begin{itemize}
+    \item The Decision Transformer \citep{chen2021decisiontransformer} models an Atari agent's behavior in the Seaquest game by learning a categorical distribution over the 18 possible actions (move left, move right, shoot left, etc.).
+    They use an decoder-only transformer architecture.
+    \item The Chronos time series foundation model \citep{ansari2024chronos} models the distribution of next numerical values by quantizing the closed interval $[-15,15]$ into $4096$ bins, and learning a categorical distribution over those bins.
+    They use an encoder-decoder transformer.
+\end{itemize}
+In a pure language modeling task, token ID $1000$ and token ID $1001$ likely represent unrelated words.
+However, in a task where the token IDs represent numerical values, the token ID $1000$ and $1001$ would represent numbers that are close together.
+
+The final layers of an LLM for such a task are generally a linear layer, followed by softmax, followed by cross entropy loss.
+We hypothesize that in scenarios where nearby token IDs encode similar items, an inductive bias that encourages them to have similar probabilities will improve performance. A generic linear layer learns an unstructured categorical distribution and thereby allows more arbitrary probabilities.
+\textbf{In this work, we propose to give the model this inductive bias by letting the classification head learn a categorical distribution as the discretization of a continuous learned function from a suitably flexible class.}
+In this paper, we consider the very flexible class of truncated Fourier series with $N$ frequencies.
+These are functions of the form
+\begin{equation}\label{eq:fourier_series_truncated}
+    f(x) = c_0 + \sum_{k=1}^N c_k \exp(i k\pi z).
+\end{equation}
+Fourier series are a classical tool for solving quantitative problems \citep{stein2011fourier} because functions like \Eqref{eq:fourier_series_truncated} are universal function approximators, with the approximation improving as $N$ increases.
+
+
+\subsection{Fourier Head: Definition}
+
+We now propose a replacement for the generic linear layer token classification head, built using Fourier series.
+We call our replacement the \textbf{Fourier Series Classification Head}, or the \textbf{Fourier head} for short.
+The Fourier head inputs any vector $x\in\mathbb R^n$, and outputs a categorical distribution in $\mathbb R^m$.
+For a high level summary of how it works--\emph{the Fourier head inputs $x\in\mathbb R^m$, uses a linear layer to extract the coefficients for a Fourier series over $[-1,1]$, quantizes the interval $[-1,1]$ into $m$ equal bins, evaluates the learned Fourier PDF at those $m$ bin centerpoints, and returns those $m$ likelihoods as a categorical distribution.}
+We formally define this layer in Algorithm~\ref{alg:fourier_head}, and we present a concrete low-dimensional demonstration of the Fourier head in action in Section~\ref{subsection:audio_example}.
+
+
+\begin{algorithm}
+\caption{Fourier head}\label{alg:fourier_head}
+\algrenewcommand\algorithmiccomment[1]{\hfill\parbox[t]{.45\linewidth}{\raggedright\textcolor{gray}{// #1}}}
+\begin{algorithmic}
+\Require the input dimension $n$, output dimension $m$, number of frequencies $N$
+\Ensure define a linear layer $A:\mathbb R^n\to\mathbb R^{2(N+1)}$
+\Comment{maps input to autocorrelation coefficients}
+\State INPUT $x=(x_1,\dots,x_n)\in\mathbb R^n$
+\State $(\alpha_0, \beta_0, \dots,\alpha_{N},\beta_{N}) \gets Ax$ 
+\State $a_k \gets \alpha_k+i\beta_k\in\mathbb C$, for every $k=0,\dots,N$
+\Comment{compute autocorrelation coefficients}
+\State $c_k \gets \sum_{\ell=0}^{N-k}a_\ell a_{\ell+k}^*\in\mathbb C$, for every $k=0,\dots,N$
+\Comment{compute Fourier coefficients}
+\State $p(z) = \frac{1}{2}+\Re\left(\sum_{k=1}^N\frac{c_k}{\Re(c_0)}\exp(ik\pi z)\right)$
+\Comment{define Fourier PDF over $[-1,1]$}
+\State $b_k \gets (-m+1 + 2k)/m$, for every $k=0,\dots,m-1$ 
+\Comment{define $m$ bin centerpoints}
+\State $y_k \gets \frac{p(b_k)}{\sum_{j=0}^{m-1}p(b_j)}$, for every $k=0,\dots,m-1$ 
+\Comment{evaluate PDF at $m$ bin centerpoints}
+\State OUTPUT $(y_1,\dots y_m)\in\mathbb R^m$ 
+\Comment{by design, $\sum_{k=1}^m y_k=1$ and each $y_k\ge 0$}
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Fourier Head: Motivating Example}\label{subsection:audio_example}
+To illustrate a simple problem setting where the design of the Fourier head is appropriate, we use it as a drop-in replacement for a linear classification head in the Audio Spectrogram Transformer \citep{gong_psla}. 
+We consider the task of beats per minute (BPM) classification for metronome-like audio samples \citep{Wei2024-music} within the tempo range $\{50, 51, \dots,210\}$. While this task is not difficult, we use this audio classification task to illustrate some of the design choices one can make when using the Fourier head. 
+In this case, it is natural to group the BPMs into contiguous bins $\{[50,54], [55, 59],\dots\}$ and use the Fourier head to classify them. These bins have a natural continuous structure, which is where the Fourier head performs well.
+We also expect that the categorical distribution over possible BPMs for a given audio clip ought to be unimodal and therefore require few frequencies to approximate. 
+In fact, our best performing model for this example uses only one frequency. 
+
+We initialize the Audio Spectrogram Transformer with pretrained weights from AudioSet \citep{audioset}, and we train two different models--one with a standard linear classification head, and one with the Fourier head. 
+The Fourier head outperforms the linear classification head by an F1 score improvement of $+118\%$. 
+We attribute this success to the inductive bias of continuity that the Fourier head imparts. % to achieve better performance with fewer parameters. 
+In Figure~\ref{fig:toy_example_audio_smooth} we present the learned probability masses of both heads on the same input sample.
+This graph illustrates that the Fourier head learns smoother PMFs than the linear head, a concept which we will later formalize and explore. 
+
+
+
+\begin{figure}[!h]
+\begin{center}
+    \includegraphics[scale=0.6]{images/audio_PMFs.png}
+\end{center}
+\caption{Comparison between the PMF learned by the \tabred{linear head}, and the \tabblue{Fourier head} with 2 frequencies, for the toy BPM classification task, on a \tabgreen{single audio example}.
+We observe that the \tabblue{Fourier head} learns a smoother categorical distribution over its predicted values, and is better centered around the \tabgreen{ground truth label}.
+We also note the small mini-sine wave artifacting on the left side of the Fourier model, which tends to occur when using few frequencies. %The $x$ axis denotes the bin center.
+}
+\label{fig:toy_example_audio_smooth}
+\end{figure}
+
+\subsection{Fourier Head: Considerations for Using it During Training}\label{sec:mathematical_considerations}
+
+We highlight the main design choices for a user when applying the Fourier head in practice.
+
+\textbf{Training objective:} The Fourier head inputs a signal $x\in\mathbb R^n$ and extracts from that signal an intermediate representation of a probability distribution $p_x(z)$ defined over $z\in[-1,1]$.
+This probability distribution has a closed formula equal to a Fourier series.
+In our experiments, we optimize the parameters of the Fourier PDF by discretizing it over the latent space and training using cross entropy loss.
+However, we should note that the Fourier layer allows MLE training directly on continuous values, by evaluating the Fourier PDF directly on the ground truth value in the latent space.
+But for consistency of comparison, and to demonstrate how easy it is to swap the Fourier head with a linear layer, we use softmax cross-entropy loss as the objective.
+
+\textbf{Choice of hyperparameter $N$:} The Fourier head has one crucial hyperparameter--namely, the number of frequencies. 
+How should one choose this in practice?
+We offer Theorem~\ref{thm:scaling_law} as guiding principle beyond simple trial and error.
+This result provides a scaling law which formalizes the smoothness-expressive power trade-off in choosing the number of frequencies.
+In general, using more frequencies leads to more expressive power, and generally better success metrics, but at the cost of a learning less smooth densities, as well as more model parameters.
+
+\textbf{Fourier regularization:} A generic Fourier series such as \Eqref{eq:fourier_series_truncated} has Fourier coefficients which decay quickly enough for the infinite series to converge absolutely.
+For example, for the class of Fourier series which have continuous second derivatives, the Fourier coefficients decay on the order of $1/k^2$.
+To impose this regularity assumption on the learned Fourier densities, we follow \citep{de2024fourier} and add a regularization term to the loss to prevent higher order Fourier coefficients from growing too large during training.
+This helps ensure that the learned Fourier PDF doesn't overfit to noise in the data.
+In the notation from Algorithm~\ref{alg:fourier_head}, this means adding a regularization term of $\gamma\cdot\frac{2\pi^2}{m}\sum_{k=1}^m k^2|c_n|^2$ to the loss function, where $\gamma$ is a hyperparameter.
+We find that in the low-frequency domain, using $\gamma=0$ can give better performance than $\gamma>0$; and in the high frequency domain, $\gamma=10^{-6}$ works well.
+\textbf{Binning strategy:} The choice of how we bin the data can affect performance significantly.
+As we already discussed, we should only apply the Fourier head when nearby bins are ``similar'' in some sense.
+This means we should order our bins in a semantically meaningful ordering.
+Further, in the case where the bins represent quantized numerical values over a continuous latent space, it can be helpful to use a ``mixed-precision'' binning strategy.
+For instance, if we want to model all values from $[-15,15]$, but we find that most values lie in the range $[-1,10]$, then we should allocate a higher proportion of bins to the dense data interval. 
+Specifically, if we would like to use $m$ total bins to quantize the data, then we control the allocation of bins using a hyperparameter $d \in [0, 1)$, where $\floor{d\cdot m}$ uniformly spaced bins are allocated to the sparse data interval while the remaining $m - \floor{d\cdot m}$ bins are allocated to the dense range (estimated from training data).
+This is motivated and supported by the Fourier theory as well, since by increasing precision in the dense data range we are effectively de-localizing the quantized data distribution, which leads to a more localized Fourier spectrum.
+This lets us obtain a quicker decay of higher frequency content, which ensures that we can more effectively learn the same distribution with lower-frequency Fourier heads.
+
+\textbf{Weight initialization:} The learned parameters for the Fourier head consist of the learned linear layer which extracts autocorrelation parameters.
+In PyTorch, the linear layers uses the He initialization \citep{he2015delving} by default, which ensures that the linear layer outputs values close to zero in expectation.
+Similarly, it's better for the learning dynamics for the Fourier densities to be initialized to uniform $p(z)\approx 1/2$.
+We accomplish this by dividing the weights and biases by a large number, such as $1000$, after He initialization; this guarantees that the linear layer outputs very small values, so that Fourier coefficients output from the autocorrelation step are very small as well.
+
+
+
+
+\section{Theory}
+
+
+\subsection{``Smoothness'': A Metric for High Frequency Content}
+
+In this section we propose a smoothness metric which inputs a categorical distribution $y=(y_1,\dots,y_m)\in\mathbb R^m$, and assigns a numerical value depending on how smooth it is.
+The score will output $0$ if $y$ is the smoothest possible categorical distribution, and larger values if $y$ is less smooth. 
+We will first specify what we mean by ``smooth'':
+
+\begin{heuristic}\label{heuristic:smoothness}
+We say a function is \textbf{smooth} if it contains \textbf{very little high-frequency information}.
+\end{heuristic}
+
+For example, the uniform categorical distribution contains no high-frequency information, so it is the smoothest possible function, and should get a smoothness score of $0$.
+In contrast, a categorical distribution containing samples from $\sin(100\pi x)$ contains lots of high frequency information, so it should get a smoothness score greater than $0$.
+We seek to define a metric which measures smoothness according to Heuristic~\ref{heuristic:smoothness}.
+
+We will first develop a smoothness metric in the general case of a function $f:[a,b]\to\mathbb R$, then specialize to case of the discrete categorical distribution that we consider in the paper.
+If we let $\alpha_\sigma\in\R$ be weights satisfying $\int_0^\infty\alpha_\sigma d\sigma=1$, and $D$ be some measure of discrepancy such as $L^2$, and let $g_\sigma(x)*f(x)$ denote the convolution of $f(x)$ with a Gaussian kernel of standard deviation $\sigma$, then it is reasonable to define the smoothness of $f$ to be the quantity
+\begin{equation} \label{eq:1}
+    s(f):=\int_0^\infty \int_a^b \alpha_\sigma D[f(x), g_\sigma(x)*f(x)]dxd\sigma.
+\end{equation}
+In this expression, the discrepancy $D[f(x), g_\sigma(x)*f(x)]$ measures how different $f(x)$ is from a Gaussian-smoothed version of itself.
+Because the Gaussian is a low-pass filter, we can interpret \Eqref{eq:1} as saying, at a high level, that a function is  ``smooth'' if it doesn't change that much when you remove high frequency content from it.
+
+In our experiments, we consider discrete categorical distributions, and wish to evaluate how smooth they are in a numerically tractable way.
+Accordingly, we define a specific case of this as follows.
+
+\begin{definition}[Smoothness metric for categorical distributions]\label{def:smoothness}
+Suppose $y=(y_1,\dots,y_m)\in\mathbb R^m$ is a categorical distribution, so every $y_k\ge 0$ and $\sum_{k=1}^m y_k=1$.
+Denote by $g_\sigma\in\mathbb R^{2m-1}$ the discrete Gaussian kernel of standard deviation $\sigma$ and radius $m-1$.
+Define the weights $\alpha_\sigma = 6/\pi^2\sigma^2$.
+Then we define the \textbf{smoothness} of $y$ to be the constant
+\begin{equation} \label{eq:2}
+    s(y) := \sum_{\sigma=1}^\infty \alpha_\sigma \|y - g_\sigma*y\|_2.
+\end{equation}
+\end{definition}
+
+\subsection{A Scaling Law for the Fourier Head, in Frequency-aspect}
+In this subsection, we share a theorem that analyzes the quality of the Fourier head as the quantity of frequencies changes. 
+We refer to this as the \textbf{Fourier head scaling law} as it quantifies the trade-off between modeling capacity and smoothness as the number of frequencies increases. 
+On one hand, it is a celebrated result from Fourier analysis that a Fourier series with a greater number of frequencies models a larger class of functions; but on the other hand, we show that increasing frequencies also incurs loss in smoothness.  
+This is to be expected, as we designed our smoothness metric with the intention of identifying a distribution as less smooth if it contains more high-frequency information.
+
+\begin{restatable}{theorem}{scalinglaw}(Fourier head scaling law.)\label{thm:scaling_law}
+Consider a Fourier head with input dimension $n$, output dimension $m$, and $N$ frequencies. 
+Suppose that $1 \ll N < \frac{m}{2}$.
+Then the following are true:
+\begin{enumerate}
+
+    \item (\textbf{Increasing $N$ improves modeling power}.) As $N$ increases, the Fourier head is capable of learning a larger class of densities.
+    
+    \item (\textbf{Increasing $N$ degrades smoothness}.)
+    Consider an input to the Fourier head $x\in\mathbb R^n$, and denote by $f_x:[-1,1]\to\mathbb R$ the optimal conditional distribution that we would like the Fourier head to approximate for this input.
+    Suppose that there exists some $t \geq 2$ such that the Fourier coefficients of $f_x$ decay on the order of $1/k^t$.
+    Denote by $f_{x,N}$ the truncation of $f_x$ to its first $N$ frequencies, 
+    denote by $\vec{b}\in\mathbb R^m$ the $m$ bin centerpoints in $[-1,1]$,
+    and denote by $y^{(N)}=f_{x,N}(\vec{b})/(f_{x,N}(b_0)+\cdots+f_{x,N}(b_{m-1}))\in\mathbb R^m$ the discretization of $f_{x,N}$ into $m$ bins.
+    Then, there exist constants $C_1,C_2 > 0$ such that
+    \begin{equation}\label{eq:scaling_law_asymptotic}
+        s(y^{(N)}) = C_1 - \frac{C_2}{N^{2t-1}} + O(1/N^{2t}).
+    \end{equation}
+\end{enumerate}
+\end{restatable}
+
+Note that the smoothness scaling law asymptotic in \Eqref{eq:scaling_law_asymptotic} shows that as $N$ increases, so does $s(y^{(N)})$. 
+Further, note that if the Fourier spectrum of the underlying distribution decays quicker (controlled by $t$) then the rate at which smoothness degrades is slower; this is because if what we are learning has little high frequency content, then increasing the frequencies shouldn't affect the smoothness of the learned distribution very much.
+In part (2), our assumption that the Fourier coefficients decay at least quadratically is reasonable since if $f_x$ is at least twice continuously differentiable, we already know its Fourier coefficients corresponding to the $k$-th frequency are in $O(1/k^2)$ \cite[Ch.2, Cor. 2.4]{stein2011fourier}. Our Fourier quadratic weight decay regularization helps toward ensuring that this condition is met in practice as well. 
+
+
+
+\section{Toy Example: Learning A Continuous Conditional Distribution}
+
+
+
+We demonstrate the advantage of using the Fourier head to learn a probability distribution for a simple task: learning the conditional distribution of the third number in the sequence given the first two. Here we will use $q(z)$ to denote the quantization of $z$.
+
+\textbf{Dataset}: We create 3 synthetic datasets, which we name \textbf{Gaussian}, \textbf{GMM}, and \textbf{GMM-2}. 
+Each dataset consists of $5000$ quantized triples $\{(q(x),q(y),q(z))\}\subseteq\mathbb [-1,1]^3$.
+Crucially, $z$ is sampled from a distribution which is conditioned on $x$ and $y$, and we have an explicit closed formula for this distribution.
+By design, the Gaussian dataset is unimodal in $z$, whereas the more challenging GMM and GMM-2 datasets are not unimodal.
+
+\textbf{Task}: Predict the conditional distribution of $q(z)$ given the quantized tuple $(q(x),q(y))$.
+
+\textbf{Model architecture}: 
+Our model is an MLP with ReLU activations and one hidden layer, which maps $\mathbb R^2\to\mathbb R^{64}\to\mathbb R^{32}\to\mathbb R^{50}$.
+The output of the model has dimension $50$ because we quantize the interval $[-1,1]$ into 50 bins.
+For the baseline, the classification head is a linear layer followed by a softmax; for the Fourier model, the classification head is the Fourier head.
+We sweep over frequencies $N=2,4,\dots,20$, and we consider regularization $\gamma\in\{0,10^{-6}\}$.
+We train all models using cross entropy loss.
+
+\textbf{Model evaluation}: We use three metrics for evaluation. Let $\mathcal{P}(x,y)$ denote the fixed conditional distribution of $z$ given $(x,y)$. Our first metric is the average KL divergence $D_{\text{KL}}(q(\mathcal{P}_2(x,y))|| M(q(x),q(y)))$, where $M(q(x),q(y))$ denotes the predicted categorical conditional distribution of $q(z)$, and $q(\mathcal{P}(x,y))$ is the quantized approximation of $\mathcal{P}(x,y)$, where $\mathcal{P}(x,y)$ is the fixed conditional distribution, obtained by evaluating the density function of $\mathcal{P}(x,y)$ at the bin centers, multiplying by the bin width, and finally scaling by the sum of the likelihoods. 
+Our second metric is MSE.
+To compute this, we use the point of maximum likelihood under the learned categorical distribution as a prediction for $q(z)$ and compute the difference between the prediction and true value in the test set. 
+And our third metric is smoothness.
+
+\begin{table}[!h]
+\centering
+\begin{tabular}{|l||c|c||c|c|}
+    \hline
+    & \multicolumn{2}{c|}{KL Divergence ($\downarrow$)} & \multicolumn{2}{c|}{Smoothness ($\downarrow$)} \\
+    \hline
+    Dataset & \multicolumn{1}{c|}{Linear} & \multicolumn{1}{c|}{Fourier} & \multicolumn{1}{c|}{Linear} & \multicolumn{1}{c|}{Fourier} \\
+    \hline\hline
+    Gaussian & \multicolumn{1}{c|}{\raggedright 0.170 $\pm$ 0.052} & \multicolumn{1}{c|}{\raggedright \textbf{0.116} $\pm$ 0.043} & \multicolumn{1}{c|}{\raggedright 0.116 $\pm$ 0.049} & \multicolumn{1}{c|}{\raggedright \textbf{0.057} $\pm$ 0.011} \\
+    GMM & \multicolumn{1}{c|}{\raggedright 0.185 $\pm$ 0.037} & \multicolumn{1}{c|}{\raggedright \textbf{0.091} $\pm$ 0.004} & \multicolumn{1}{c|}{\raggedright 0.078 $\pm$ 0.041} & \multicolumn{1}{c|}{\raggedright \textbf{0.034} $\pm$ 0.010} \\
+    GMM-2 & \multicolumn{1}{c|}{\raggedright 0.238 $\pm$ 0.032} & \multicolumn{1}{c|}{\raggedright \textbf{0.146} $\pm$ 0.033} & \multicolumn{1}{c|}{\raggedright 0.068 $\pm$ 0.022} & \multicolumn{1}{c|}{\raggedright \textbf{0.038} $\pm$ 0.007} \\
+    \hline
+\end{tabular}
+\caption{We compare metrics between the linear head, and the Fourier head with $12$ frequencies and no regularization (i.e. $\gamma=0$), for every dataset in our toy example.
+We observe that the Fourier head outperforms the linear head across all metrics.
+Notably, using Fourier head improves the KL divergence (the primary success metric) on average by approximately 40\%.
+We aggregate metrics over 4 different seeds and report the standard deviation.}
+\label{tab:toy_metrics}
+\end{table}
+
+\begin{figure}[h]
+\begin{center}
+    \includegraphics[scale=0.48]{images/toy_predicted_vs_true.png}
+\end{center}
+\caption{Comparison between the PMFs learned by the \tabred{linear head}, and the best performing \tabblue{Fourier head}, for each of the datasets in the toy example.
+We observe that the \tabblue{Fourier head} learns a smoother categorical distribution than the \tabred{linear head} over its predicted values.
+Furthermore, the \tabblue{Fourier head} better fits the \tabgreen{true conditional PDF}; this is reflected in our KL divergence and smoothness metrics.}
+\label{fig:toy_example_1d}
+\end{figure}
+
+\textbf{Results:} The metrics for the best performing model on each dataset are reported in Table \ref{tab:toy_metrics}. 
+Figure \ref{fig:toy_example_1d} presents sample visualizations of the learned conditional distributions alongside the true densities. 
+
+Notably, this study provides empirical evidence for the Fourier head scaling law in Theorem~\ref{thm:scaling_law}, as it demonstrates that for all datasets, as frequency increases, the smoothness degrades, and model performance improves until it reaches a saturation point.
+Crucially, we observe that the Fourier head flexibly learns all three distributions better than the linear baseline does.
+
+
+
+
+
+
+
+
+
+\section{Large-Scale Study: Offline Reinforcement Learning}
+
+
+The Decision Transformer \citep{chen2021decisiontransformer} casts the problem of reinforcement learning as sequentially modeling rewards, states, and actions.
+Here, we study the performance of the Decision Transformer on the Seaquest game in the Atari \citep{bellemare2013arcade} benchmark.
+The Seaquest game contains 18 actions, with two groups of eight actions that have a natural ``closeness'' metric defined on them: move left, up left, up, up right, right, down right, down, down left; as well as shooting in those eight directions.
+In their architecture, a decoder-only language model \citep{radford2018improving} encodes the context and then maps it through a linear layer, outputting a categorical distribution over the 18 possible actions.
+In our study, we replace that linear classification head with a Fourier head.
+Intuitively, this ought to give the model the prior that actions like ``move left'' and ``move up left'' are semantically similar, and therefore should have similar likelihoods.
+Our study confirms that the Fourier head outperforms the linear head in returns obtained by as much as $46\%$, in the reward conditioned setting considered in the paper, using identical training hyperparameters.
+\textbf{Dataset}: We use the same dataset from the original Decision Transformer implementation \citep{chen2021decisiontransformer}.
+This dataset consists of 500k transitions experienced by an online deep Q-network agent \citep{mnih2015human} during training on the Seaquest game.
+
+\textbf{Task}: In the Seaquest game, the agent moves a submarine to avoid enemies, shoot at enemies, and rescue divers.
+The Seaquest game contains 18 actions: move left, up left, up, up right, right, down right, down, down left; as well as shooting in those eight directions; as well as no move, and a generic fire move.
+We consider this task in the Offline RL setting.
+The agent observes the past states, actions, and rewards, as well as the return-to-go, and attempts to predict the action that matches what an agent operating like the dataset would likely do.
+
+\textbf{Model architecture}: \citep{chen2021decisiontransformer} used the GPT-1 model \citep{radford2018improving} to autoregressively encode the context, which is then fed through a linear layer of dimension $18$, and the model ultimately optimizes the cross entropy loss between the action logits and the ground truth action from the dataset.
+We refer to this model as the linear baseline.
+To create our Fourier-$N$ version, we simply replace the linear head with a Fourier head with $N$ frequencies and Fourier regularization $\gamma=10^{-6}$.
+In our experiments we consider frequencies $N\in\{2, 4,6,8,\dots,30,32\}$.
+
+\textbf{Model evaluation}:
+We present mean reward totals for rollouts across $4$ seeds.
+In Table~\ref{tab:decision_transformer_large_scale_metrics} we can see that normalized returns are as much as $46.2\%$ higher for sufficiently large frequencies.
+In Figure~\ref{fig:decision_transformer_varying_frequencies}, we can see that, as we increase the quantity of frequencies, the returns increase and the learned PMFs become less smooth, in accordance with Theorem~\ref{thm:scaling_law}.
+Qualitatively, we can also see that in Figure~\ref{fig:decision_transformer_PMFs_example} the PMFs learned by the Fourier head are smoother.
+
+\begin{table}[!h]
+    \centering
+        \begin{tabular}{|l||r|r|r}
+        \hline
+        Decision Transformer Model & Normalized Return $(\uparrow)$& Smoothness $(\downarrow)$ \\ \hline\hline
+        Linear          & 2.53 $\pm$ 0.63 & 0.48 $\pm$ 0.14  \\ \hline
+        Fourier-8       & 2.78 $\pm$ 0.47 & \textbf{0.22 $\pm$ 0.04}  \\ \hline
+        \textbf{Fourier-14}      & \textbf{3.70 $\pm$ 0.47} & 0.39 $\pm$ 0.11  \\ \hline
+        \end{tabular}
+    \caption{We present Decision Transformer results for the linear baseline, and for two representative Fourier head experiments.
+    We observe that the Fourier head with 14 frequencies improves on the linear baseline by 46.2\%.
+    We report normalized return values (mean, and standard deviation) from \citep{chen2021decisiontransformer}, and we compute all other metrics ourselves.
+    We compute the returns (mean and standard deviation) by averaging over four seeds, and we compute smoothness using all the evaluation rollouts from a single seed.}
+    \label{tab:decision_transformer_large_scale_metrics}
+\end{table}
+
+\begin{figure}[h]
+\begin{center}
+    \includegraphics[scale=0.45]{images/atari_graph_varying_freqs.png}
+\end{center}
+\caption{We present empirical results for how the quantity of Fourier frequencies impacts returns and smoothness for the imitation learning task.
+For normalized returns, higher is better; for smoothness, lower is better.
+We can see that the \tabblue{Fourier} agent achieves higher normalized returns than the \tabred{linear} baseline agent when sufficiently many Fourier frequencies are used, while still learning smoother next-action distributions.}
+\label{fig:decision_transformer_varying_frequencies}
+\end{figure}
+
+\begin{figure}[h]
+\begin{center}
+    \includegraphics[scale=0.5]{images/atari_graph_PMFs-65.png}
+\end{center}
+\caption{We present example next action distributions for a single step in the Decision Transformer test split.
+The \tabblue{Fourier} agent with 8 frequencies produces a ``clump'' of actions that is semantically meaningful.
+Namely, this agent almost certainly wants to shoot in the down right or right direction, presumably because there is a submarine in that direction.
+In contrast, the \tabred{linear} agent's next-action distribution doesn't clearly depict a strategy, and incorrectly assigns higher likelihoods to incorrect actions.
+Because the Fourier head outputs a smoother PMF, it learns to concentrate more probability mass near the correct action.
+}
+\label{fig:decision_transformer_PMFs_example}
+\end{figure}
+\begin{table}[!h]
+    \centering
+        \scalebox{0.9}{
+        \begin{tabular}{|l||r|r|r|r|}
+        \hline
+        Chronos Time Series Model & MASE $(\downarrow)$ & WQL $(\downarrow)$ & Smoothness $(\downarrow)$ \\ \hline\hline
+        
+        Linear      & 0.883 & 0.750 & 0.1689 $\pm$ 0.1087 \\ \hline
+        Fourier-64  & 0.875 & 0.798 & \textbf{0.0032 $\pm$ 0.0012} \\ \hline
+        Fourier-128 & 0.872 & 0.767 & 0.0068 $\pm$ 0.0035 \\ \hline
+        Fourier-256 & 0.859 & 0.755 & 0.0139 $\pm$ 0.0087 \\ \hline
+        \textbf{Fourier-550} & \textbf{0.852} & \textbf{0.749} & 0.0283 $\pm$ 0.0224 \\ \hline\hline
+        Fourier-550 (no regularization) & 0.861 & 0.753 & 0.0286 $\pm$ 0.0219 \\ \hline
+        Fourier-550 (uniform precision binning) & 0.873 & 0.747 & 0.0395 $\pm$ 0.0252 \\ \hline
+        \end{tabular}
+        }
+    \caption{We present large-scale experiments on Chronos time series forecasting.
+    Notably, every Fourier model outperforms the linear baseline on MASE and smoothness metrics.
+    We can see that within the Fourier model class, decreasing the number of frequencies lets you trade off the continuity of the learned probability mass functions (smoothness) for the quality of the forecasts (MASE, WQL).
+    In the bottom two rows, we present an ablation for our large-scale experiments on Chronos time series forecasting.
+    The best overall performing Fourier-550 model uses Fourier regularization and mixed precision binning, which are both techniques informed by Fourier analysis.
+    We observe that both of these interventions improve the MASE, but have minimal effect on the WQL.
+    Note that the choice of binning strategy doesn't affect the performance of the linear baseline.}
+    \label{tab:Chronos_large_scale_metrics}
+\end{table}
+
+
+\section{Large-Scale Study: Probabilistic Time Series Forecasting}
+
+
+
+The Chronos time series foundation models \citep{ansari2024chronos} ``learn the language of time series''.
+They do this by approaching time series forecasting as language modeling, by tokenizing the quantized number line, learning token embeddings for each of those quantized values, and finally learning a categorical distribution to decide what the next value ought to be.
+This model is built on top of the encoder-decoder T5 model \citep{raffel2020exploring}.
+In particular, this model normalizes time series values to the range $[-15,15]$ and quantizes this interval into $4096$ tokens.
+As usual for language modeling, the final layer is a linear map which learns a categorical distribution over next tokens.
+In particular, we observe that token $i$ represents a number very close to tokens $i-1$ and $i+1$.
+However, we note that there is no inductive bias in the T5  architecture which pushes their likelihoods to be similar.
+\textbf{The motivation for replacing the linear head with the Fourier head is to ``smooth'' out the distribution in the left side of Figure~\ref{fig:chronos_PMFs_example}, to help the forecasting model better learn the signal, and ignore the noise.}
+In this figure, we can see that the Fourier head accomplishes this successfully.
+
+In this section, we study how the performance of the Chronos time series foundation model changes when we pre-train using the Fourier head, instead of the linear head.
+For all of the frequencies that we consider, the Fourier head outperforms the Chronos linear baseline on the MASE metric, while learning next token multinomials which are at least 8x smoother, with fewer parameters than the baseline.
+
+\textbf{Dataset}: We use the same training dataset for large-scale pretraining that \citet{ansari2024chronos} used.
+We gather an evaluation benchmark of 20 time series datasets which were not seen during training.
+These 20 come from the zero-shot eval from \citep{ansari2024chronos}.
+\textbf{Model architecture}: We use the Chronos model, which is built using the T5 architecture \citep{raffel2020exploring}.
+The original model has a linear classification head.
+For our study, we will replace this with a Fourier head with frequencies $N=64, 128, 256, 550$.
+We use mixed precision binning; this is informed by an analysis of the Fourier spectrum of the next-token distribution, as described in Section~\ref{sec:mathematical_considerations}.
+We also use Fourier quadratic weight decay regularization with $\gamma=10^{-6}$.
+For the task, the model learns to input time series context of length 512, and output a probabilistic forecast of length 64.
+
+\textbf{Model evaluation}: We have two sets of metrics: model performance from \citep{ansari2024chronos} (MASE measures the accuracy of median forecast, and WQL measures the quality of the probabilistic forecast), as well as our smoothness metric.
+Our Fourier metrics in Table~\ref{tab:Chronos_large_scale_metrics} demonstrate that every Fourier model outperforms the linear baseline for MASE and smoothness.
+And for the largest Fourier model that we consider, Fourier outperforms linear on WQL as well.
+We also conduct an ablation study; the results in Table~\ref{tab:Chronos_large_scale_metrics} show that mixed precision binning and regularization improve the MASE and smoothness for the Fourier head.
+
+
+
+
+\section{Related Work}
+
+
+\textbf{LLMs outside of natural language domains:} LLMs are often adapted to domains beyond natural language, as general purpose sequence models. 
+For example, they have been used in protein synthesis \citep{madani2023large}, time series forecasting \citep{ansari2024chronos,das2024decoderonlyfoundationmodeltimeseries,jin2024timellmtimeseriesforecasting}, music generation \citep{Dhariwal2020jukebox,Agostinelli2023musicLM,Copet2023musicgen,yuan2024chatmusician}, and as well as in decision making \citep{li2022pretrainedlanguagemodelsinteractive,chen2021decisiontransformer}.
+We consider three categories to adapt LLMs to non-language domains: 
+    when the output of a language-trained LLM is used as a feature for some out-of-domain task; 
+    when a language-pretrained LLM is fine-tuned on a domain-specific task;
+    and when an LLM architecture is trained on a domain-specific dataset from scratch.
+Our work directly considers the latter method of LLM adaptation, particularly in settings where the outputs approximate continuous values. 
+We note that using LLMs to model numerical functions has seen success in continuing sequences \citep{mirchandani2023largelanguagemodelsgeneral} but has been challenging for modeling samplers for probability distributions \citep{hopkins2023can}.
+In a related direction, \citet{razeghi-etal-2022-impact} found that model performance on numerical reasoning tasks is correlated with the frequency of specific numbers in its corpus. Further, some have re-framed continuous regression as a descretized classification problem to leverage LLMs in numerical modeling contexts \citep{song2024omnipredlanguagemodelsuniversal}. While even frozen LLMs with no further training show interesting empirical results as regressors \citep{vacareanu2024wordsnumberslargelanguage}, there is a conceptual mismatch between the downstream task and model construction because tokenized numerical values trained using cross-entropy loss does not explicitly enforce numerical relationships between the tokens. 
+\textbf{Fourier series in neural networks:} Many works leverage the Fourier transform as a data pre-processing step or a deterministic transformation within the network, or use Fourier analysis to motivate design choices. 
+It is far less common to learn the Fourier series directly. 
+\citet{de2024fourier} learned marginal univariate densities parameterized using a Fourier basis; our work extends their Fourier Basis Density model to multivariate settings with an autoregressive scheme. 
+Our method learns conditional univariate densities using a Fourier basis, where the coefficients of the Fourier density model are input dependent.
+\citet{sitzmann2020implicit} proposed sinusoidal activation functions, which can be seen as learning the \emph{frequencies} of a Fourier series; in contrast, we fix the frequencies to the canonoical choice $\{1,2,\dots,N\}$, and learn the \emph{amplitudes}.
+This allows the Fourier head to directly benefit from approximation results from Fourier analysis.
+
+
+
+\section{Conclusion}
+
+
+We propose the Fourier head and demonstrate its positive impact on performance on several tasks. 
+We prove a scaling law that characterizes the trade-off between the model's expressivity and the smoothness of its output distribution. 
+The Fourier head is a modular architecture that can be easily added to existing models that would benefit from the continuity inductive bias that the head imparts. 
+The Fourier head extends the already extensive reach of LLMs into more diverse, numerical, and probabilistic domains. 
+Future work includes exploring alternative training objectives that do not depend on discretizing probability density functions, and incorporating the Fourier head in general-purpose LLM training, where the head can be adaptively employed when needed.
+
+
+

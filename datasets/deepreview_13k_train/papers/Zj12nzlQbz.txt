@@ -1,0 +1,292 @@
+\title{INSIDE: LLMs' Internal States Retain the Power of Hallucination Detection}
+
+\begin{abstract}
+Knowledge hallucination have raised widespread concerns for the security and reliability of deployed LLMs. Previous efforts in detecting hallucinations have been employed at logit-level uncertainty estimation or language-level self-consistency evaluation, where the semantic information is inevitably lost during the token-decoding procedure. Thus, we propose to explore the dense semantic information retained within LLMs' \textbf{IN}ternal \textbf{S}tates for halluc\textbf{I}nation \textbf{DE}tection (\textbf{INSIDE}). In particular, a simple yet effective \textbf{EigenScore} metric is proposed to better evaluate responses' self-consistency, which exploits the eigenvalues of responses' covariance matrix to measure the semantic consistency/diversity in the dense embedding space. Furthermore, from the perspective of self-consistent hallucination detection, a test time feature clipping approach is explored to truncate extreme activations in the internal states, which reduces overconfident generations and potentially benefits the detection of overconfident hallucinations. Extensive experiments and ablation studies are performed on several popular LLMs and question-answering (QA) benchmarks, showing the effectiveness of our proposal. 
+
+
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{Intro}
+Large Language Models (LLMs) have recently achieved a milestone breakthrough and demonstrated impressive abilities in various applications \citep{ouyang2022training, openai2023gpt4}. 
+However, it has been widely observed that even the state-of-the-art LLMs often make factually incorrect or nonsense generations \citep{cohen2023lm,ren2022out,kuhn2022semantic}, which is also known as knowledge hallucination \citep{ji2023survey}. 
+The potentially unreliable generations make it risky to deploy LLMs in practical scenarios. 
+Therefore, hallucination detection, that is, accurately detecting and rejecting responses when hallucinations occur in LLMs, has attracted more and more attention from the academic community \citep{azaria2023internal, ren2022out, kuhn2022semantic}.
+
+The token-level uncertainty estimation (e.g., predictive confidence or entropy) has shown its efficacy in hallucination detection on conventional NLP tasks~\citep{malinin2020uncertainty,huang2023look}.
+However, how to derive the sentence-level uncertainty from the token-level remains a challenge, especially for modern auto-regressive LLMs whose response contents are generally diverse and sophisticated~\citep{malinin2020uncertainty,kuhn2022semantic,duan2023shifting}. Thus, to avoid complicated token-to-sentence uncertainty derivation, researchers propose to evaluate the sentence uncertainty by the output languages directly~\citep{kadavath2022language,yin2023large,zhou2023navigating}. Among the recent advancements, prompting LLMs to generate multiple responses to the same question and evaluating the \textit{self-consistency} of those responses has been proven effective in hallucination detection~\citep{wang2022self,shi2022natural}. However, such a post-hoc semantic measurement on decoded language sentences is inferior to precisely modeling the logical consistency/divergence~\cite{manakul2023selfcheckgpt,zhang2023siren}.
+
+Hence, instead of logit-level or language-level uncertainty estimation, this paper proposes to leverage the internal states of LLMs to conduct hallucination detection.
+The motivation is intuitive: LLMs preserve the highly-concentrated semantic information of the entire sentence within their internal states~\citep{azaria2023internal}, allowing for the direct detection of hallucinated responses in the sentence embedding space. 
+
+In particular, with the generalized framework of \textbf{IN}ternal \textbf{S}tates for halluc\textbf{I}nation \textbf{DE}tection (\textbf{INSIDE}), this paper performs hallucination detection from two perspectives.
+First, skipping secondary semantic extraction via extra models, we directly measure the self-consistency/divergence of the output sentences using internal states of LLMs. In order to explore semantic consistency in the embedding space, Section~\ref{EigenScore} introduces an \textbf{EigenScore} metric regarding the eigenvalues of sentence embeddings' covariance matrix.
+Second, to handle the self-consistent (overconfident) hallucinations, we propose to rectify abnormal activations of the internal states.
+Specifically, Section \ref{FC} develops a feature clipping approach to truncate extreme features, which tends to prevent overconfident generations during the auto-regressive procedure.
+In Section \ref{Exp}, the effectiveness of our method is validated through extensive experiments on several well-established QA benchmarks.
+
+The main contributions of our work are as follows:
+
+\begin{itemize}
+    \item We propose a generalized INSIDE framework that leverages the internal states of LLMs to perform hallucination detection.
+    \item We develop an EigenScore metric to measure the semantic consistency in the embedding space, and demonstrate that the proposed EigenScore represents the differential entropy in the sentence
+embedding space.
+    \item A test time feature clipping approach is introduced to truncate extreme activations in the feature space, which implicitly reduces overconfident generations and helps identify the overconfident hallucinations.
+    \item We achieve state-of-the-art hallucination detection performance on several QA benchmarks, and conduct extensive ablation studies to verify the efficacy of our method.
+\end{itemize}
+
+
+
+
+
+
+\section{Background on Hallucination Detection}
+
+In this work, we mainly focus on the knowledge hallucination detection of natural language generation based on LLMs, especially for Q\&A task \citep{reddy2019coqa, kwiatkowski2019natural}. Given an input context $\bm{x}$, a typical LLM \citep{zhang2022opt, touvron2023llama} parameterized with $\bm\theta$ is able to generate output sequences in autoregressive manner $y_t = f(\bm{x}, y_1, y_2, \cdots, y_{t-1}|\bm\theta)$, where $\bm y=[y_1, y_2, \cdots, y_T]$ denotes the output sequence and $y_t$ denotes the t-$th$ output token. We denote $p(y_t|y_{<t}, \bm{x})$ the Maximum Softmax Probability (MSP) of $t$-th token. For a traditional classification model, the MSP measures the confidence level of the classification result and has been widely used as an uncertainty measure of predictions \citep{hendrycks2016baseline}. Therefore, for sequence generation task, a straightforward sequence uncertainty can be defined as the joint probability of different tokens, which is known as \textbf{Perplexity} \citep{ren2022out}, 
+
+\begin{equation}
+\label{eq1}
+    P(\bm{y}|\bm{x}, \bm\theta) = -\frac{1}{T}\log\prod_t p(y_t|y_{<t}, \bm{x}) = -\frac{1}{T}\sum_t\log p(y_t|y_{<t}, \bm{x})
+\end{equation}
+
+As shorter sequences generally have lower perplexity, the length of the output sequence $T$ is utilized to normalize the joint probability. Since different tokens contribute differently to the semantics of the sentence \citep{raj2023semantic, duan2023shifting},  the perplexity defined by averaging token-level uncertainty cannot effectively capture the uncertainty of the entire sequence. It has been demonstrated that utilizing multiple generations for one input is beneficial to estimate the sequence-level uncertainty \citep{malinin2020uncertainty, kuhn2022semantic, manakul2023selfcheckgpt}. We denote $\mathcal Y = [\bm{y}^1, \bm{y}^2, \cdots, \bm{y}^K]$ as $K$ generated responses for input context $\bm{x}$. For a given LLM, multiple responses could be easily obtained by the top-p/top-k sampling strategy during inference time \citep{touvron2023llama, kadavath2022language}. In \cite{malinin2020uncertainty}, the \textbf{Length Normalized Entropy} is proposed to measure the sequence-level uncertainty by making use of multiple generations, which is defined as
+
+\begin{equation}
+\label{eq2}
+    H(\mathcal Y|\bm{x}, \bm\theta) = -\mathbb{E}_{\bm{y}\in\mathcal Y}\frac{1}{T_{\bm y}}\sum_t\log p(y_t|y_{<t}, \bm{x}) 
+\end{equation}
+When a model is uncertain about its response, it generates hallucination context, resulting in an answer distribution with a high entropy \citep{kadavath2022language}. It has been shown that the length-normalized entropy performs better than the non-normalized one \citep{lin2023generating}.
+
+In addition to the predictive uncertainty or entropy, the semantic consistency \citep{lin2023generating, raj2023semantic} among multiple responses has also been widely explored to measure the hallucination degree of LLMs, which hypothesis that the LLMs are expected to generate similar outputs if they know the input context and they are sure about the answers \citep{wang2022self, manakul2023selfcheckgpt}. An intuitive semantic consistency metric is \textbf{Lexical Similarity} \citep{lin2022towards, lin2023generating}, which explores the average similarity across multiple answers as consistency measure
+
+\begin{equation}
+\label{eq3}
+    S(\mathcal Y|\bm{x}, \bm\theta) = \frac{1}{C}\sum_{i=1}^{K}\sum_{j=i+1}^{K} sim(\bm y^i, \bm y^j)
+\end{equation}
+
+ where $C = K\cdot (K-1)/2$ and $sim(\cdot, \cdot)$ is the similarity defined by Rouge-L \cite{lin2004rouge}. 
+
+
+\section{Method}
+
+\begin{figure}[t!]
+\centering  
+\includegraphics[width=0.99\textwidth]{Figure/fig1.pdf}
+\caption{Illustration of our proposed hallucination detection pipeline. During inference time, for a given question, the extreme features in the penultimate layer are truncated and the EigenScore is computed based on the sentence embeddings across multiple responses. }
+\label{fig1}
+\end{figure}
+
+In this section, we introduce the details of our proposed INSIDE framework for hallucination detection. The whole pipeline is illustrated as Fig. \ref{fig1}. In section \ref{EigenScore}, we demonstrate a simple but effective EigenScore metric by exploring sentence-level semantics in the internal states of LLMs. In section \ref{FC}, a test-time feature clipping approach is introduced to effectively alleviate the issue of overconfident generation, thereby aiding in the identification of self-consistent hallucinations
+
+\label{method}
+\subsection{Hallucination Detection by EigenScore}
+\label{EigenScore}
+The existing uncertainty or consistency based hallucination detection metrics are exploited in the logit or language space, which neglect the dense semantic information that is retained within the internal states of LLMs. To better exploit the dense semantic information, we propose to measure the semantic divergence in the sentence embedding space. For the $t$-th output token $y_t$, we denote the hidden embedding in the $l$-th layer as $\bm h^l_t \in\mathbb{R}^d$, where $d$ is the dimension of the hidden embedding ($d=4096$ for LLaMA-7B and $d=5120$ for LLaMA-13B). According to \cite{ren2022out, azaria2023internal}, the sentence embedding can be obtained by averaging the token embedding $\bm z = \frac{1}{T}\sum_{t=1}^{T} \bm h_t$, or taking the last token embedding as sentence embedding $\bm z = \bm h_T$. In our main experiments, we use the embedding of the last token in the middle layer as the sentence embedding, as it effectively captures the sentence semantic \citep{azaria2023internal}. The comparison results of using different sentence embeddings are demonstrated in the ablation studies \ref{Ablation}. For $K$ generated sequences, the covariance matrix of $K$ sentence embeddings can be computed as
+
+\begin{equation}
+\label{eq5}
+\bm\Sigma = \mathbf Z^\top\cdot \mathbf J_d \cdot\mathbf Z 
+\end{equation}
+
+where $\bm\Sigma\in\mathbb{R}^{K\times K}$ represents the covariance matrix that captures the relationship between different sentences in the embedding space, $\mathbf Z = [\bm z_1, \bm z_2, \cdots, \bm z_K] \in\mathbb{R}^{d\times K}$ represents the embedding matrix of different sentences, $\mathbf J_d = \bm I_d - \frac{1}{d}\mathbf{1}_K\mathbf{1}_K^\top$ is the centering matrix and $\mathbf{1}_K\in\mathbb{R}^K$ is the all-one column vector. Then, the proposed EigenScore can be defined as the logarithm determinant (LogDet) of the covariance matrix, 
+
+\begin{equation}
+\label{eq6}
+E(\mathcal Y|\bm{x}, \bm\theta) = \frac{1}{K}\log \text{det}(\bm\Sigma+\alpha\cdot \mathbf{I}_K)
+\end{equation}
+
+Here, $\text{det}(\mathbf{X})$ represents the determinant of matrix $\mathbf{X}$, and a small regularization term $\alpha\cdot \mathbf{I}_K$ is added to the covariance matrix to explicitly make it full rank. Since the matrix determinant can be obtained by solving the eigenvalues, the EigenScore can be computed as
+
+\begin{equation}
+\label{eq7}
+E(\mathcal Y|\bm{x}, \bm\theta) = \frac{1}{K}\log(\prod_i \lambda_i) = \frac{1}{K}\sum_i^K\log(\lambda_i)
+\end{equation}
+
+where $\lambda = \{\lambda_1, \lambda_2, \cdots, \lambda_K\}$ denotes the eigenvalues of the regularized covariance matrix $\bm\Sigma+\alpha\cdot \mathbf{I}$, which can be solved by Singular Value Decomposition (SVD). Eq. \ref{eq7} shows that the hallucination degree of LLM's generation can be measured by the average logarithm of the eigenvalues. The conclusion is intuitive, as the eigenvalues of covariance matrix capture the divergence and correlation relationship between embeddings of different sentences. When the LLM is confident to the answers and $K$ generations have similar semantic, the sentence embeddings will be highly correlated and most eigenvalues will be close to 0. On the contrary,  when the LLM is indecisive and hallucinating contents, the model will generate multiple sentences with diverse semantics leading to more significant eigenvalues. The following remark is also provided to explain why the proposed EigenScore is a good measure of knowledge hallucination.
+
+\textbf{Remark 1. LogDet of covariance matrix represents the differential entropy in the sentence embedding space.}
+Differential Entropy is the natural extension of discrete Shannon Entropy $H_e(X) = -\sum_X -p(x)\log p(x)$. The differential entropy $H_{de}(X)$ in continuous space can be defined by replacing the probability function with its density function $f(x)$ and integrating over $x$, i.e., $H_{de}(X) = -\int_x f(x)\log f(x)dx$. In principle \citep{zhouyin2021understanding}, for a multivariate Gaussian distribution $X \sim N(\bm\mu, \mathbf\Sigma)$, the differential entropy can be represented as 
+
+\begin{equation}
+\label{eq8}
+H_{de}(X) = \frac{1}{2}\log\text{det}(\mathbf\Sigma) + \frac{d}{2}(\log 2\pi+1) = \frac{1}{2}\sum_{i=1}^d\log\lambda_i + C
+\end{equation}
+
+where $d$ is the dimension of variables and $C$ is a constant. Therefore, the differential entropy is determined by the eigenvalues (LogDet) of the covariance matrix.
+
+According to \textbf{Remark 1}, the proposed EigenScore defined by Eq. \ref{eq7} represents the differential entropy in the sentence embedding space, which offers valuable insight into using EigenScore as a semantic divergence measure. Compared to existing uncertainty or consistency metrics that obtained in logit or language space \citep{malinin2020uncertainty, huang2023look, lin2022towards}, the advantages of EigenScore are: (1) It captures the semantic divergence (entropy) in the dense embedding space, which is expected to retain highly-concentrated semantic information compared to logits or languages \citep{reimers2019sentence}.  (2) Representing semantic divergence in embedding space can effectively solve the semantic equivalence (linguistic invariances) problem \citep{kuhn2022semantic} in natural language space. (3) Fine-grained semantic relationship among different responses can be exploited by using eigenvalues of covariance matrix. Therefore, through the exploration of dense semantic information in the internal states, the EigenScore is expected to outperform existing uncertainty and consistency metrics, resulting in improved hallucination detection performance.
+
+\begin{figure}[t!]
+\centering  
+\subfigure[Neuron Activation]{
+\label{Afig11}
+\includegraphics[width=0.38\textwidth]{Figure/NeuronActivation.pdf}}
+\subfigure[Feature Distribution]{
+\label{Afig12}
+\includegraphics[width=0.37\textwidth]{Figure/FeatureDistribution.pdf}}
+\caption{Illustration of activation distributions in the penultimate layer of LLaMA-7B. (a) Activation distribution in the penultimate layer for a randomly sampled token. (b) Activation distribution for a randomly sampled neuron activation of numerous tokens.}
+\label{Afig1}
+\end{figure}
+
+\subsection{Test Time Feature Clipping}
+\label{FC}
+
+Recent works have shown that the LLMs are subject to the risks of self-consistent (overconfident) hallucinations \citep{ren2022out,ji2023survey}, which has not been considered by existing consistency based methods. Therefore, to address those common failure cases caused by overconfident generation, a test time feature clipping approach is introduced during the computation of EigenScore. As shown in Figure. \ref{Afig1}, we illustrate the activation distribution in the penultimate layer of LLaMA-7B. An intuitive observation is that the penultimate layer of LLMs tends to exhibit numerous extreme features, consequently increasing the likelihood of generating overconfident and self-consistent generations. Inspired by prior works that rectify internal activations to reduce overconfident prediction for Out-of-Distribution (OOD) detection \citep{sun2021react, djurisic2022extremely},  we introduce a test time feature clipping (\textbf{FC}) method to prevent LLMs generate overconfident hallucinations. To rectify those extreme features, the FC operation is defined as the following piecewise function
+
+\begin{equation}
+\label{eq9}
+	FC(h) = \begin{cases}
+    h_{min}, & h< h_{min} \\
+	h, & h_{min} \leq h \leq h_{max} \\
+	h_{max} & h> h_{max}
+	\end{cases}
+\end{equation}
+
+where $h$ represents the feature of the hidden embeddings in the penultimate layer of the LLMs, $h_{min}$ and $h_{max}$ are two thresholds for determining the minimum and maximum truncation activations. When $h_{min}=-\infty$ and $h_{max}=+\infty$, the output feature embedding is equivalent to the original output. For the determination of the optimal truncation thresholds, a memory bank which dynamically pushes and pops element in it, is utilized to conserve $N$ token embeddings during test time. Then, for each hidden neuron, the thresholds $h_{min}$ and $h_{max}$ are set to the top and bottom $p$-th percentiles of the features in the memory bank. Refer to the three-sigma-rule \cite{pukelsheim1994three}, we set $p=0.2$ in all cases. This implies that the activations falling within the largest and smallest top 0.2\% in the memory bank are identified as abnormal features and subsequently truncated for reducing overconfident generation.
+
+
+
+\section{Experiments}
+
+\label{Exp}
+
+\subsection{Experimental Setup}
+\textbf{Datasets.} We utilize four widely used question answering (QA) datasets for evaluation, including two open-book conversational QA datasets CoQA \citep{reddy2019coqa} and SQuAD \citep{rajpurkar2016squad}, as well as two closed-book QA datasets TriviaQA \citep{joshi2017triviaqa} and Natural Questions (NQ) \citep{kwiatkowski2019natural}. We follow \cite{lin2023generating} to utilize the development split of CoQA with 7983 QA pairs, the validation split of NQ with 3610 QA pairs and the validation split of the TriviaQA (\textit{rc.nocontext subset}) with 9,960 deduplicated QA pairs. For the SQuAD dataset, we filter out the QA pairs with their flag \textit{is\_impossible = True}, and utilize the subset of the development-v2.0 split with 5928 QA pairs. The lengths of the sequences vary in the four datasets. Specifically, the ground truth answers in CoQA and SQuAD are relatively longer, while and TriviaQA typically consists of answers that are only with one or two words.  %the NQ dataset contains answers of varying lengths,
+
+\textbf{Models.} We use two representative open source LLMs, including LLaMA \citep{touvron2023llama} and OPT \citep{zhang2022opt} in our experiments. Specifically, we consider off-the-shelf LLaMA-7B \footnote{https://huggingface.co/decapoda-research/llama-7b-hf}, LLaMA-13B \footnote{https://huggingface.co/decapoda-research/llama-13b-hf}, OPT-6.7B \footnote{https://huggingface.co/facebook/opt-6.7b} and their corresponding tokenizer provided by Hugging Face \footnote{https://huggingface.co/}. We use the pre-trained wights and do not finetune these models in all cases.
+\textbf{Evaluation Metrics.}
+Following prior work \cite{kuhn2022semantic, ren2022out}, we evaluate the hallucination detection ability of different methods by employing them to determine whether the generation is correct or not. Therefore, the area under the receiver operator characteristic curve (AUROC) and Pearson Correlation Coefficient (PCC) are utilized as the performance measure. AUROC is a popular metric to evaluate the quality of a binary classifier and uncertainty measure \citep{ren2022out, lin2023generating}. Higher AUROC scores are better. PCC is utilized to measure the correlation between the hallucination detection metric and the correctness measure, which is usually defined as the ROUGE score \citep{lin2004rouge} or semantic similarity \citep{reimers2019sentence} between the generated answers and ground truth answers. A higher PCC score is better.  %with a perfect hallucination detection measure scoring 1 and a random measure scoring 0.5. 
+
+\textbf{Baselines.} We compare our proposal with the most popular uncertainty-based methods \textbf{Perplexity} \cite{ren2022out} and Length-normalized Entropy (\textbf{LN-Entropy}) \cite{malinin2020uncertainty}, and the consistency-based metric \textbf{Lexical Similarity} \citep{lin2022towards}. Besides, in order to investigate whether traditional OOD detection methods can be used for hallucination detection, we also introduce a popular OOD detection method \textbf{Energy} score \citep{liu2020energy} as a comparison method.
+\textbf{Correctness Measure.}
+We follow \cite{kuhn2022semantic, lin2023generating} to utilize both the ROUGE-L \citep{lin2004rouge} and the semantic similarity \citep{reimers2019sentence} as the correctness measure. The generation is regarded as correct when the ROUGE-L (f-measure) is large than a given threshold, which we set to 0.5 in our main experiments. Besides, we also use the embedding similarity as the correctness measure. The sentence embeddings of model generation and the ground truth answer are extracted by the \textit{nli-roberta-large} model \footnote{https://huggingface.co/sentence-transformers/nli-roberta-large}, and the generation is regarded as true when the cosine similarity between two embeddings is larger than 0.9. % In the ablation studies, we also explore the sensitivity of using different thresholds for correctness measure.
+\textbf{Implementation Details.}
+Implementation of this work is based on pytorch and transformers libraries. For the hyperparameters that are used for sampling strategies of LLMs' decoder, we set \textit{temperature} to 0.5, \textit{top-p} to 0.99 and \textit{top-k} to 5 through the experiments. The number of generations is set to $K=10$. For the sentence embedding used in our proposal, we use the last token embedding of the sentence in the middle layer, i.e., the layer index is set to int(L/2). For the regularization term of the covariance matrix, we set $\alpha=0.001$. For the memory bank used to conserve token embeddings, we set $N=3000$. When implement the Energy Score, we average the token-level energy score as the sentence-level energy score.
+
+\subsection{Main Results}
+
+\begin{table}[t]
+\caption{Hallucination detection performance evaluation of different methods on four QA tasks. AUROC (AUC) and Pearson Correlation Coefficient (PCC) are utilized to measure the performance. $\text{AUC}_s$ represents AUROC score with sentence similarity as correctness measure, and $\text{AUC}_r$ represents AUROC score with ROUGE-L score as correctness measure. All numbers are percentages.}
+\label{tab1}
+\resizebox{\linewidth}{!}{
+\setlength{\tabcolsep}{1pt}
+\begin{tabular}{cc|ccc|ccc|ccc|ccc}
+\toprule
+\multirow{2}{*}{Models}    & Datasets                  & \multicolumn{3}{c|}{CoQA}                     & \multicolumn{3}{c|}{SQuAD}                    & \multicolumn{3}{c|}{NQ}                       & \multicolumn{3}{c}{TriviaQA}                  \\ %\cline{2-14} 
+                           & Methods                   & AUC$_s$        & AUC$_r$         & PCC           & AUC$_s$        & AUC$_r$         & PCC           & AUC$_s$        & AUC$_r$         & PCC           & AUC$_s$        & AUC$_r$         & PCC           \\ \midrule
+\multirow{5}{*}{LLaMA-7B}  & Perplexity                & 64.1          & 68.3          & 20.4          & 57.5          & 60.0          & 10.2          & 74.0          & 74.7          & 30.1          & \textbf{83.6} & 83.6          & 54.4          \\
+                           & Energy                    & 51.7          & 54.7          & 1.0           & 45.1          & 47.6          & -10.7         & 64.3          & 64.8          & 18.2          & 66.8          & 67.1          & 29.1          \\
+                           & LN-Entropy                & 68.7          & 73.6          & 30.6          & 70.1          & 70.9          & 30.0          & 72.8          & 73.7          & 29.8          & 83.4          & 83.2          & 54.0          \\
+                           & Lexical Similarity        & 74.8          & 77.8          & 43.5          & 74.9          & 76.4          & 44.0          & 73.8          & 75.9          & 30.6          & 82.6          & \textbf{84.0} & 55.6          \\
+                           & \textbf{EigenScore}          & \textbf{80.4}          & \textbf{80.8} & \textbf{50.8}          & \textbf{81.5} & \textbf{81.2} & \textbf{53.5} & \textbf{76.5}          & \textbf{77.1}          & \textbf{38.3}          & 82.7          & 82.9          & \textbf{57.4}          \\ \midrule
+\multirow{5}{*}{LLaMA-13B} & Perplexity       & 63.2          & 66.2          & 20.1          & 59.1          & 61.7          & 14.2          & 73.5          & 73.4          & 36.3          & \textbf{84.7} & \textbf{84.5} & 56.5          \\
+                           & Energy                    & 47.5          & 49.2          & -5.9          & 36.0          & 39.2          & -20.2         & 59.1          & 59.8          & 14.7          & 71.3          & 71.5          & 36.7          \\
+                           & LN-Entropy                & 68.8          & 72.9          & 31.2          & 72.4          & 74.0          & 36.6          & 74.9          & 75.2          & 39.4          & 83.4          & 83.1          & 54.2          \\
+                           & Lexical Similarity        & 74.8          & 77.6          & 44.1          & 77.4          & 79.1          & 48.6          & 74.9          & 76.8          & 40.3          & 82.9          & 84.3          & 57.5          \\
+                           & \textbf{EigenScore} & \textbf{79.5}          & \textbf{80.4} &  \textbf{50.2}          & \textbf{83.8} & \textbf{83.9} & \textbf{57.7} & \textbf{78.2}          & \textbf{78.1}          & \textbf{49.0}          & 83.0          & 83.0          & \textbf{58.4}          \\ \midrule
+\multirow{5}{*}{OPT-6.7B}  & Perplexity                & 60.9          & 63.5          & 11.5          & 58.4          & 69.3          & 8.6           & 76.4          & 77.0          & 32.9          & \textbf{82.6} & \textbf{82.0} & \textbf{50.0} \\
+                           & Energy                    & 45.6          & 45.9          & -14.5         & 41.6          & 43.3          & -16.4         & 60.3          & 58.6          & 25.6          & 70.6          & 68.8          & 37.3          \\
+                           & LN-Entropy                & 61.4          & 65.4          & 18.0          & 65.5          & 66.3          & 22.0          & 74.0          & 76.1          & 28.4          & 79.8          & 80.0          & 43.0          \\
+                           & Lexical Similarity        & 71.2          & 74.0          & 38.4          & 72.8          & 74.0          & 39.3          & 71.5          & 74.3          & 23.1          & 78.2          & 79.7          & 42.5          \\
+                           & \textbf{EigenScore} & \textbf{76.5}          & \textbf{77.5}          & \textbf{45.6}          & \textbf{81.7}          & \textbf{80.8} & \textbf{49.9}          & \textbf{77.9}          & \textbf{77.2}          & \textbf{33.5}          & 80.3          & 80.4          & 0.485          \\ \bottomrule
+\end{tabular}}
+\end{table}
+\textbf{Effectiveness of EigenScore.} In Table. \ref{tab1}, we compare our proposed EigenScore with several representative reliability evaluation methods on three LLMs and four QA datasets. The results show that: (1) In both LLaMA and OPT models, our proposed EigenScore consistently outperforms other comparison methods by a large margin in CoQA, SQuAD and NQ datasets under different evaluation metrics. In particular, the EigenScore outperforms Lexical Similarity by 5.6\% in CoQA and 8.9\% in SQuAD with AUROC metric at most. (2) It's interesting to see that the Perplexity performs best in TriviaQA dataset but performs poorly on other datasets, especially for CoQA and SQuAD. This is because the generations and ground truth answers on TrivaiQA dataset is very simple, with only one or two words in the most cases. Therefore, the performance of different methods in TriviaQA is close and by simply averaging the token-level confidence as uncertainty measure performs well. (3) On average, the performance in LLaMA-13B is better than that in LLaMA-7B and OPT-6.7B, while the performances in LLaMA-7B is slightly better than that in OPT-6.7B. It demonstrates that better hallucination detection performance can be achieved with a more powerful pre-trained LLM.
+\textbf{Effectiveness of Feature Clipping.} 
+To demonstrate the effectiveness of the introduced test-time feature clipping, we compare the hallucination detection performance of different methods with and without applying the feature clipping technique. The results are shown in Table \ref{tab2}. As can be seen, the introduced feature clipping consistently improves the performance of different methods, with the largest improvement being 1.8\%  in AUROC. % Besides, the comparison results also indicates that using the EigenScore without FC also significantly outperforms existing hallucination detection metrics.
+\begin{table}[t]\small
+\caption{Hallucination detection performance evaluation of different methods with and without (w/o) applying feature clipping (FC). "+FC" denotes applying feature clipping and EigenScore (w/o) denotes EigenScore without applying feature clipping. All numbers are percentages.}
+\label{tab2}
+\centering
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{ccccccccc}
+\toprule
+Model                   & \multicolumn{4}{c}{LLaMA-7B}                      & \multicolumn{4}{c}{OPT-6.7B}                      \\
+Datasets                & \multicolumn{2}{c}{CoQA} & \multicolumn{2}{c}{NQ} & \multicolumn{2}{c}{CoQA} & \multicolumn{2}{c}{NQ} \\
+Methods                 & AUC$_s$       & PCC       & AUC$_s$      & PCC      & AUC$_s$       & PCC       & AUC$_s$      & PCC      \\ \midrule
+LN-Entropy      & 68.7          & 30.6      & 72.8        & 29.8     & 61.4         & 18.0      & 74.0        & 28.4     \\
+\rowcolor{lightgray} LN-Entropy + FC & 70.0         & 33.4      & 73.4        & 31.1     & 62.6         & 21.4      & 74.8        & 30.3     \\ \midrule
+Lexical Similarity      & 74.8         & 43.5      & 73.8        & 30.6     & 71.2         & 38.4      & 71.5        & 23.1     \\
+\rowcolor{lightgray} Lexical Similarity + FC & 76.6         & 46.3      & 74.8        & 32.1     & 72.6         & 40.2      & 72.4        & 24.2     \\ \midrule
+EigenScore (w/o)        & 79.3         & 48.9      & 75.9        & 38.3     & 75.3         & 43.1      & 77.1        & 32.2     \\
+\rowcolor{lightgray} EigenScore  & 80.4         & 50.8      & 76.5        & 38.3     & 76.5         & 45.6      & 77.9        & 33.5     \\ \bottomrule
+\end{tabular}
+\end{table}
+
+
+
+\subsection{Ablation Studies}
+\label{Ablation}
+\begin{figure}[t!]
+\centering  
+\subfigure[]{
+\label{fig21}
+\includegraphics[width=0.4\textwidth]{Figure/NGenerations.pdf}}
+\subfigure[]{
+\label{fig22}
+\includegraphics[width=0.4\textwidth]{Figure/LayerIndex.pdf}}
+\caption{(a) Performance in LLaMA-7B and NQ dataset with different number of generations. (b) Performance in LLaMA-7B and CoQA dataset with sentence embedding in different layers. Orange line indicates using the last token's embedding in the middle layer (layer 17) as sentence embedding. Gray line indicates using the averaged token embedding in the last layer as sentence embedding. The performance is measured by $\text{AUROC}_s$.}
+\label{fig2}
+\end{figure}
+\textbf{Number of Generations.} For the methods that explore semantic consistency for hallucination detection, the number of generations $K$ is a key factor to the performance. Therefore, to evaluate the impact of the number of generations, we select $K$ from $\{5, 10, 15, 20, 30, 40\}$ and perform experiments with LLaMA-7B and the NQ dataset. The performance in Figure \ref{fig21} shows that: (1) Our proposed EigenScore consistently outperforms LN-Entropy and Lexical Similarity by a large margin for different $K$. (2) When $K<15$, the performance of different methods increases as $K$ increases and  when $K>15$, the performance tends to remain stable. The results suggeste that setting K to 20 provides the optimal trade-off between performance and inference cost. (3) Compared to EigenScore and Lexical Similarity, LN-Entropy is less sensitive to the number of generations, which demonstrates that Lexical Similarity and our EigenScore are more effective at utilizing the information in different generations.
+\textbf{How EigenScore Performs with Different Sentence Embeddings.} In the main experiments, we employ the embedding of the last token in the middle layer as sentence embedding. Here, we also investigate how the model performs with different sentence embeddings. In Figure. \ref{fig22}, we show the hallucination detection performance by using sentence embedding from different layers. The results show that using the sentence embedding in the shallow and final layers yields significantly inferior performance compared to using sentence embedding in the layers close to the middle. Besides, another interesting observation is that utilizing the embedding of the last token as the sentence embedding achieves superior performance compared to simply averaging the token embeddings, which suggests that the last token of the middle layers retain more information about the truthfulness of generations.
+\textbf{Sensitivity to Correctness Measures.} It's difficult to develop automatic metrics for QA task that correlate well with human evaluations. Therefore, the choice of correctness measures is a crucial component of hallucination detection evaluation. In this section, we evaluate the performance with different correctness measure thresholds in LLaMA-7B and CoQA dataset. The experimental results are presented in Table. \ref{tab4}. It shows that the threshold has a great influence on the final hallucination detection performance. Significantly, our proposed EigenScore consistently outperforms comparison methods in different thresholds. Besides, the results also indicate that the hallucination detection performance of different methods will be better under a rigorous correctness measure.
+\begin{table}[t]
+\caption{Performance evaluation with different correctness measure thresholds in LLaMA-7B and CoQA dataset. The ROUGE-L (f-measure) score and Sentence Similarity with different thresholds are employed to measure the correctness of the generated answers.}
+\label{tab4}
+\centering
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{ccccccc}
+\toprule
+Correctness Measures & \multicolumn{3}{c}{ROUGE-L}       & \multicolumn{3}{c}{Sentence Similarity}       \\ 
+Threshold            & 0.3           & 0.5           & 0.7           & 0.7           & 0.8           & 0.9           \\ \midrule
+Perplecity           & 65.2          & 68.3          & 68.1          & 63.7          & 63.5          & 64.1          \\
+LN-Entropy           & 67.4          & 73.6          & 74.1          & 65.2          & 65.6          & 68.7          \\
+Lexical Similarity   & 75.8          & 77.8          & 79.3          & 72.8          & 73.9          & 74.8          \\
+\textbf{EigenScore}  & \textbf{76.4} & \textbf{80.8} & \textbf{83.5} & \textbf{75.9} & \textbf{77.2} & \textbf{80.4} \\ \bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Sensitivity to Hyperparameters.}
+The hyperparameters, including temperature, top-k and top-p, of the LLMs' decoder determine the diversity of the generations. To evaluate the impact of those hyperparameters. We provide a sensitivity analysis in Figure \ref{fig3}. As observed, the performance is greatly influenced by temperature but shows little sensitivity to top-k. The performance of the consistency based methods (EigenScore and Lexical Similarity) drops significantly when the temperature is greater than 1. The optimal temperature can be selected from $[0.1, 1.0]$.
+\begin{figure}[t!]
+\centering  
+\subfigure[]{
+\label{fig31}
+\includegraphics[width=0.36\textwidth]{Figure/Temp.pdf}}
+\subfigure[]{
+\label{fig32}
+\includegraphics[width=0.36\textwidth]{Figure/topK.pdf}}
+\caption{(a) Performance sensitivity to temperature. (b) Performance sensitivity to top-k. The performance is measured by $\text{AUROC}_s$.}
+\label{fig3}
+\end{figure}
+
+
+
+\section{Related Work}
+
+\label{RelatedWork}
+
+\textbf{Reliability Evaluation of LLMs}
+During real-world deployments, the reliability of LLMs poses a substantial challenge, as LLMs reveal their propensity to exhibit unreliable generations \citep{ji2023survey,zhang2023siren}. Therefore, considerable efforts has been made to address the security and reliability evaluation of LLMs \citep{huang2023look, malinin2020uncertainty, kuhn2022semantic, kadavath2022language, cohen2023lm, azaria2023internal}. Among those methods, uncertainty based metric has been widely explored, which typically involves predictive confidence or entropy of the output token \citep{malinin2020uncertainty, kuhn2022semantic, duan2023shifting}.  Besides, consistency based methods also play an important role in reliability evaluation, which hypothesizes that LLMs tend to generate logically inconsistent responses to the same question when they are indecisive and hallucinating contents \citep{kuhn2022semantic, raj2023semantic, manakul2023selfcheckgpt}. Based on the consistency hypothesis, researchers also found it is feasible to prompt the LLMs to evaluate their responses themselves \citep{kadavath2022language, cohen2023lm, manakul2023selfcheckgpt}. %In addition to the aforementioned works, other related methods that developed for model calibration \citep{desai2020calibration, jiang2021can}, selective generation \cite{kamath2020selective,ren2022out} and truthfulness detection \cite{pagnoni2021understanding, honovich2022true} are also highly related to reliability evaluation of LLMs.
+ 
+\textbf{Eigenvalue as Divergence Measure} The eigenvalue or determinant of covariance matrix captures the variability of the data and has been widely explored as divergence measure in a wide range of machine learning tasks \citep{wold1987principal, kulesza2011k, xu2021validation, zhouyin2021understanding, cai2015law}. For instance, in \cite{wold1987principal}, the authors proposed the well-known Principal Components Analysis (PCA) and demonstrates that the most largest eigenvalues of sample covariance matrix corresponds to the principle semantic of sample set. Besides, the determinant of covariance matrix, determined by the eigenvalues, has been utilized to sample a diversity subset in determinantal point processes (DDP) \citep{kulesza2011k} and activation learning \citep{xu2021validation} tasks, which demonstrates the determinant of covariance matrix is a good diversity measure. Besides, several studies also proposed to approximate the differential entropy with the logarithm determinant of covariance matrix \citep{zhouyin2021understanding, klir1999uncertainty}.
+
+
+\section{Conclusion}
+
+Measuring the hallucination degree of LLM's generation is of critical importance in enhancing the security and reliability of LLM-based AI systems. This work presents an INSIDE framework to exploit the semantic information that are retained within the internal states of LLMs for hallucination detection. Specifically, a simple yet effective EigenScore is proposed to measure the semantic consistency across different generations in the embedding space. Besides, to identify those self-consistent (overconfident) hallucinations which have been overlooked by previous methods, a feature clipping technique is introduced to reduce overconfident generations by truncating extreme features. Significant performance improvement has been achieved in several popular LLMs and QA benchmarks. 
+Although our experiments focus on QA task, our method does not make any assumptions about the task modality, and we believe our method is widely applicable to other tasks, such as summarization and translation. We hope that our insights inspire future research to further explore the internal semantics of LLMs for hallucination detection.
+
+
+
+
+
+
+
+

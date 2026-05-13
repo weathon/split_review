@@ -1,0 +1,175 @@
+\title{MatFormer: Nested Transformer for Elastic Inference}
+
+\begin{abstract}
+
+Transformer models are deployed in a wide range of settings, from multi-accelerator clusters to standalone mobile phones. The diverse inference constraints in these scenarios necessitate practitioners to train foundation models such as PaLM 2, Llama, \& ViTs as a series of models of varying sizes. Due to significant training costs, only a select few model sizes are trained and supported, limiting more fine-grained control over relevant tradeoffs, including latency, cost, and accuracy. This work introduces MatFormer\footnote{MatFormer stands for \mdoll~\textbf{Mat}ryoshka Trans\textbf{former} due to the model's inherent nested nature.}, a nested Transformer architecture designed to offer elasticity in a variety of deployment constraints. Each Feed Forward Network (FFN) block of a  MatFormer model is jointly optimized with a few nested smaller FFN blocks. 
+This training procedure allows for the Mix'n'Match of model granularities across layers -- i.e., a trained universal MatFormer model enables extraction of \textit{hundreds} of accurate smaller models, which were never explicitly optimized.  We empirically demonstrate MatFormer's effectiveness across different model classes (decoders \& encoders), modalities (language \& vision), and scales (up to 2.6B parameters). We find that a 2.6B decoder-only MatFormer language model (MatLM) allows us to extract smaller models spanning from 1.5B to 2.6B, each exhibiting comparable validation loss and one-shot downstream evaluations to their independently trained counterparts. Furthermore, we observe that smaller encoders extracted from a universal MatFormer-based ViT (MatViT) encoder preserve the metric-space structure for adaptive large-scale retrieval. Finally, we showcase that speculative decoding with the accurate and {\em consistent} submodels extracted from  MatFormer can further reduce inference latency. 
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+\input{sections/TabsNFigs/teaser.tex}
+Large Foundation models~\citep{anil2023palm,openai2023gpt,dehghani2023scaling} are deployed in a variety of settings like real-time response on mobile phones or in batch setting on multi-cluster GPUs for web-scale serving. To handle such varied settings, each model family provides a few {\em independently trained} models of different sizes. In order to cover a wide range of applications, typically these models' sizes are nearly linear on log-scale. For example, Llama family provides models with 7B, 13B, 33B and 65B parameters~\citep{touvron2023llama1}. 
+
+Such an approach has two key drawbacks: (a) as the models are independently trained, they incur significant overhead for colocation during inference and are not behaviorally consistent with each other which are detrimental to inference optimization techniques like speculative decoding~\citep{leviathan2023fast} and model cascades~\citep{wang2020multiple}, and (b) due to training overhead, practitioners typically train only a few models which do not cover the entire set of downstream use-cases. For example, a deployment setup might, say, have the latency budget to support 40B parameter Llama model, but can only host a 33B variant because the next bigger model (65B) has significantly higher latency. So, one would need to settle for a less accurate model despite the larger latency budget. While model compression approaches aim to address this issue, they typically require additional training for each model that needs to be extracted. Furthermore, when applied to LLMs, 
+these techniques are known to significantly drop the accuracy~\citep{jaiswal2023compressing}. 
+
+In this paper, we propose MatFormer, a natively elastic Transformer~\citep{vaswani2023attention} architecture that allows for training one {\em universal} model which can be used to extract hundreds of smaller submodels without {\em any additional training} (Figure~\ref{fig:teaser}). MatFormer is a general architecture that can be applied to both encoders and decoders, is domain agnostic, and is compatible with most design choices and training pipelines of large Transformer-based models -- LLMs \& ViTs.
+
+MatFormer follows the principle of matryoshka representation learning~\citep{kusupati2022matryoshka}, to introduce nested substructure inside the standard Transformer block. Formally, MatFormer defines a Transformer blocks $T_i$, such that, $T_1 \subset T_{2} \subset \dots \subset T_g$, where $g$ is the number of nested transformer blocks, and $T_{i}\subset T_{i+1}$ relation indicates that the parameters of $T_{i}$ are contained in those of $T_{i+1}$. 
+
+MatFormer can induce such sub-structure in both the attention and the feedforward network (FFN) blocks of the Transformer (see Figure~\ref{fig:teaser}). Consider a FFN block that has $d_{\text{ff}}$ neurons in the hidden layer. Then, MatFormer induces matryoshka structure on these neurons, where $T_i$ contains the first $m_i$ neurons and $1\leq m_1\leq m_2 \dots \leq m_g=d_{\text{ff}}$ represent the number of neurons for each granularity or sub-model. Intuitively, this implies that the first $m_1$ neurons are ``most significant'' neurons  as they belong to all the blocks followed by the next $m_2-m_1$, and so on. We can form a similar sub-structure on the attention heads, with the heads being organized from ``most'' to ``least'' significant, where the more significant heads are shared by more sub-models. 
+In fact, we can also introduce this sub-structure in the token embedding ($d_{\text{model}}$) supplied to each Transformer block.
+
+However, in most LLMs and ViTs, the FFN block in the Transformer accounts for more than $60\%$ non-embedding parameters and is responsible for the largest chunk of latency during inference. So, in this work, we focus on inducing the MatFormer's nested sub-structure in the FFN block. We then stack the individual blocks (for $l$ layers) to form $g$ nested models ($\mathcal{M}_{1\dots g})$ with shared parameters i.e., $\mathcal{M}_i \subset \mathcal{M}_{i+1}$. Finally, we jointly train these $g$ models by combining each model's loss.
+
+This leads to a natural question: can one extract more than $g$ models after inducing the MatFormer structure? Yes, in fact, it is possible to extract exponentially many models. Using the trained MatFormer blocks $T_1, \dots, T_g$ at each layer, one can form new models by Mix'n'Match, i.e., by taking an arbitrary combination of these blocks across layers. For example, in the first layer, one can select $T_g$, the largest block, choose $T_2$ in the second layer, and so on, forming $g^l$ different models. As we explicitly optimized only for $g$ models, instead of the exponentially many models, are the extracted models accurate? Surprisingly, in multiple settings, and for a various model sizes, we observe that the extracted models indeed are accurate, with accuracy scaling with the size of the extracted model. 
+
+We train Matformer-based decoder-only Language Models (MatLM) up to 2.6B parameters and observe that: (a) MatLMs explicitly trained with $g$ exponentially spaced granularities (4 in this work) almost match validation loss and one-shot downstream evals of respective $g$ baseline models trained independently from scratch, (b) our extracted models using Mix'n'Match lie on the accuracy-vs-parameters trade-off curve generated by the $g$ explicitly trained models, (c) through multiple scaling experiments we observe that the loss vs compute law for different MatFormer models remains similar to vanilla Transformer models across different granularities and (d) the submodels extracted from MatLM natively have highly consistent behavior that is highly desirable for inference optimizations and deployment across scales.  
+
+We further studied MatFormer-based ViT models (MatViT) and have similar observations as MatLM. For example, MatViT-L/16 improves the accuracy of the standard ViT-L/16 model on ImageNet-1K, and the extracted sub-models all match or even perform better than the independently trained baselines. Furthermore, we demonstrate that, due to high consistency, MatViT models can be used as ``elastic encoders'' for adaptive image retrieval. That is, the metric-space of an image encoded by the universal (i.e. the largest) MatViT model is roughly preserved by the nested submodels. Hence, based on query complexity, system load, and various other considerations, we can use one of the extracted MatViT encoders at inference time for retrieval on a fixed corpus encoded by the universal model -- providing over $40\%$ lesser compute overhead with $<0.5\%$ drop in accuracy.
+\textbf{We make these key contributions:}
+    \itemsep 0pt
+    \topsep 0pt
+    \parskip 2pt
+    \item We introduce MatFormer, which incorporates a nested sub-structure within the standard Transformer and jointly optimizes all the $g$ granularities to produce a single, universal elastic model.
+    
+    \item Employing Mix'n'Match of granularities across layers in a universal MatFormer model yields hundreds of accurate and consistent submodels without any additional training cost (Section~\ref{sec:method}).
+    
+    \item MatFormer generalizes effectively to both decoder-only language models (MatLM) and vision encoders (MatViT), scaling as reliably and accurately as the standard Transformer, while enabling significantly faster autoregressive generation and large-scale adaptive dense retrieval (Section~\ref{sec:expts}).  
+
+\end{enumerate}
+
+\vspace*{-2mm}
+
+
+\section{Related Work}
+
+\vspace*{-2mm}
+\label{sec:rw}
+A standard Transformer~\citep{vaswani2023attention} has become the unifying model architecture for foundation models~\citep{bommasani2021opportunities} across modalities like language~\citep{brown2020language}, vision~\citep{dehghani2023scaling} and audio~\citep{radford2023robust}. While extremely powerful, the standard Transformer block is not natively elastic in a way that enables large-scale adaptive and flexible deployment across various resource constraints. To cater to the plethora of deployment requirements, existing solutions include training a family of models of varying sizes~\citep{anil2023palm,touvron2023llama}, post-hoc efficiency techniques like quantization~\citep{dettmers2023case}, pruning~\citep{lagunas2021block}, distillation~\citep{sanh2019distilbert} and mixture of varying capacity experts (MoE)~\citep{zhang2012ensemble}. However, these solutions often are specific to the single constraint at hand, and require additional training or trade-off memory/compute during inference making them far from being a truly elastic solution for adaptive deployment. Lastly, Transformer based LLMs are often sped-up during inference with techniques like speculative decoding~\citep{leviathan2023fast,chen2023accelerating} -- that benefits from the smaller draft \& the larger verifier models having similar behavior -- or early exiting~\citep{schuster2022confident} to enable real-time deployment. 
+
+Obtaining multiple smaller models from a single model has been explored in the past~\citep{yu2018slimmable,yu2019universally,cai2019once,grimaldi2022dynamic} with most works focusing on CNN encoders. For example, OFA~\citep{cai2019once} creates a universal CNN model which is used to extract and finetune submodels for a handful of deployment constraints while slimmable networks~\citep{yu2018slimmable} optimize for limited preset widths and require explicit training to interpolate for a few more intermediate widths~\citep{yu2019universally}. These techniques fall short of being truly elastic and come with significant training overheads. More recently some of them have been extended to Transformer encoders~\citep{chavan2022vision,hou2020dynabert,salehi2023sharcs} for extracting sub-models in both static or dynamic settings but fail at extending further to decoder-only language models. While not in the weight space, matryoshka representation learning~\citep{kusupati2022matryoshka} \& FlexiViT~\citep{beyer2023flexivit} showcase elasticity in output \& input spaces respectively by smoothly spanning deployment constraints with minimal overhead. MatFormer is inspired by both these lines of work to enable truly elastic and adaptive Transformer-based (decoder \& encoder) models that span all the accuracy-vs-compute tradeoff (statically or dynamically) with minimal changes and training overhead (Figure~\ref{fig:teaser}). Finalyl, we also point the readers to SortedNet~\citep{valipour2023sortednet}, a concurrent work with similar goals applied to encoders, which optimizes many sampled submodels (akin to prior works) unlike MatFormer's joint optimization of a few (typically 4) nested submodels.
+
+
+\section{MatFormer}
+
+\label{sec:method}
+In this section, we define MatFormer's nested substructure (Section~\ref{sec:mat_ffn}) and discuss its training procedure for a chosen $g$ model granularities (Section~\ref{sec:training}). We then discuss elastic inference using Mix'n'Match models (Section~\ref{sec:mnm}) from MatFormer along with its deployment considerations.
+\subsection{MatFormer Structure}
+\label{sec:mat_ffn}
+MatFormer defines $g$ Transformer blocks $T_i$, such that, $T_1 \subset T_{2} \subset \dots \subset T_g$
+where $T_{i}\subset T_{i+1}$ indicates that the parameters of $T_{i}$ are contained in those of $T_{i+1}$.
+
+The FFN block in Transformer has a single hidden layer with $d_{\text{ff}}$ neurons and both input and outputs in $\mathbb{R}^{d_{\text{model}}}$, and a fixed FFN ratio $:=d_{\text{ff}}/d_{\text{model}}$ (typically $\geq 4$). MatFormer introduces the matryoshka nested structure with $g$ granularities on the hidden representation $d_{\text{ff}}$ of the FFN block. Concretely, a nested sub-block of the Transformer, $T_i$ contains the first $m_i$ neurons of the FFN and $1\leq m_1\leq m_2 \dots \leq m_g=d_{\text{ff}}$ represent the number of neurons for each granularity or sub-model. So depending on the chosen granularity the FFN operation of $T_i$ i.e., $T_i^{\text{FFN}}$ on an input $x \in \mathbb{R}^{d_\text{model}}$  is: \begin{equation}
+    T_i^{\text{FFN}}(x) =  \sigma(x\cdot\mathbf{W}_1[0:m_i]^\top)\cdot\mathbf{W}_2[0:m_i],
+\end{equation}
+
+where the weight matrices of FFN are $\mathbf{W}_1, \mathbf{W}_2 \in \mathbb{R}^{d_\text{ff}\times d_\text{model}}$ and bias terms are omitted for simplicity. $\mathbf{W}_1[0:k]$ denotes the submatrix with the first $k$ rows of $\mathbf{W}_1$. Finally, $\sigma$ is a non-linearity often set to GELU~\citep{hendrycks2016gaussian} or squared ReLU~\citep{so2021primer}.
+In this work, we chose the $g=4$ exponentially spaced granularities with FFN ratios of $\{0.5, 1, 2, 4\}$ i.e., the nested hidden neurons are of the sizes $\{\frac{d_{ff}}{8}, \frac{d_{ff}}{4}, \frac{d_{ff}}{2}, d_{ff}\}$. 
+With the nested MatFormer blocks $T_1, T_{2} \dots T_g$, we can combine these to form a MatFormer model, with $g$ nested submodels $\mathcal{M}_1 \subset \mathcal{M}_2 \dots, \subset \mathcal{M}_g$ where $\mathcal{M}_i\leftarrow [T_i]^{\times l}$, i.e., $\mathcal{M}_i$ is formed by stacking $T_i$ for $l$ layers. The input and output embedding matrices are shared across the models. 
+
+\subsection{Training}
+\label{sec:training}
+For a Transformer model $\mathcal{M}$, the forward pass on an input $x$ is denoted by $\mathcal{M}(x)$ and let $\mathcal{L}$ denote the loss function between the output and the target $y$: $\mathcal{L}(\mathcal{M}(x), y)$. 
+
+MatFormer relies on a simple training strategy of jointly optimizing all the $g$ nested submodels together. To this end, we set the MatFormer loss as a weighted average of loss of $g$ submodels and train for it using the standard stochastic gradient-based optimizers~\citep{shazeer2018adafactor}:
+\begin{equation}
+    \mathcal{L}_{\textsc{joint}}(x, y) = \sum_{i=1}^{g} \lambda_i \cdot\mathcal{L}(\mathcal{M}_i(x), y),
+    \label{eq:train}
+\end{equation}
+where $\lambda_i>0$ is the weight of $i$-th granular submodel. In this paper, we set $\{\lambda_i\}_{i=1\dots g}$ to be uniform i.e. 
+
+The joint training in MatFormer involves one forward pass per each of the $g$ submodels and benefits from portions of shared computation during backpropagation. MatFormer training results in $g$ accurate nested submodels $\mathcal{M}_{1\dots g}$ inside the universal MatFormer model ($\mathcal{M}_g$).
+ Finally, instead of pretraining models with MatFomer structure, we can also induce this structure via finetuning. 
+
+ However, MatFormer also enables the extraction of hundreds of smaller submodels along the accuracy-vs-compute curve traced by the $g$ explicitly optimized submodels (Section~\ref{sec:mnm}). These models emerge for free using Mix'n'Match during inference and drastically reduce the amortized training cost per model obtained through MatFormer. The joint optimization, even without self-distillation from $\mathcal{M}_g$, results in smaller submodels that have highly consistent behavior (Section~\ref{sec:deployment}) with the universal model.
+
+\subsection{Mix'n'Match}
+\label{sec:mnm}
+At inference time, it is trivial to extract one of the $g$ submodels $\mathcal{M}_1 \subset \mathcal{M}_2 \dots, \subset \mathcal{M}_g$ by stacking the corresponding Transformer block $T_i$ across layers. However, by selecting different granularity for each MatFormer layer, it is possible to generate a combinatorially large number of accurate smaller models for free. We call this simple procedure \textit{Mix'n'Match} and observe that these additional model granularities --which were never explicitly optimized -- are highly performant.
+
+In fact, we can further increase the number of extracted models by generating interpolating blocks between fixed granulaties~\citep{kusupati2022matryoshka}. For example, we can generate a $\widetilde{T}$ block that uses first $\frac{1}{2} (m_i + m_{i+1})$ neurons in the FFN layer which still tends to be highly accurate.
+
+To summarize, given a computational budget, we can extract a highly accurate model with Mix'n'Match for the constraints rather than using a smaller less accurate model or training a model for this specific constraint (Sections~\ref{sec:cond_compute} \&~\ref{sec:MatViT}). We note that a compute constraint can be satisfied by various Mix'n'Match models with different accuracies,  making identifying the best Mix'n'Match configurations without downstream validation is an exciting direction for future work.
+
+\subsection{Deployment}
+\label{sec:deployment}
+During deployment, all we need to store is the single universal MatFormer model for different types of elastic inference depending on the constraints. In the case of static workloads, where compute resources are known beforehand and the inputs remain relatively similar in difficulty, one can choose the most accurate static submodel for the constraints using Mix'n'Match. This eliminates the usage of a less accurate preexisting model or training of a new one for the specific constraints. 
+
+For dynamic workloads, where the compute resources or the input hardness change on the fly, we can use the universal MatFormer model to dynamically extract the optimal submodel for token-based routing in LLMs akin to MoE~\citep{kudugunta2021beyond,li2022branch} and elastic encoders in dense retrieval (Section~\ref{sec:adaptive_image}). This works largely because all the extracted submodels have high behavioral \textit{consistency} with universal MatFormer model (Section~\ref{sec:MatLM}) -- minimizing the drift across predictions from various submodels. We measure the consistency between two generative models as the \textit{percentage of matching tokens} generated by them for the same prefix or using the \textit{KL divergence} of the smaller model outputs with the larger model outputs -- this accounts for potential sampling strategies in decoding. This highly consistent nature of MatFormer results in superior inference time speedups for techniques like speculative decoding~\citep{leviathan2023fast} (Section~\ref{sec:cond_compute}) and can assist in reducing prediction drift between cross platform deployments.
+We also show that higher model consistency also aids metric-space structure preservation in encoder models (Section~\ref{sec:adaptive_image}).
+
+
+
+\section{Experiments}
+
+\label{sec:expts}
+In this section, we empirically evaluate MatFormer across modalities (language and vision), model classes (decoder and encoder), and scales (up to 2.6B parameters). Specifically, we train and analyze MatFormer-based decoder-only Language Models -- MatLMs (Section~\ref{sec:MatLM}) -- and encoder-only Vision Transformers -- MatViT (Section~\ref{sec:MatViT}) models with $g=4$ nested granularities across various model sizes. For a fair comparison, we also independently train the Transformer baseline for the submodel of each granularity across model sizes for the same tasks.
+
+We primarily focus on the elastic deployment of MatFormer-based models (Sections~\ref{sec:cond_compute} \&~\ref{sec:MatViT}) for tasks spanning from one-shot generative evals to adaptive image retrieval. Additionally, we also investigate the reliable scaling behavior~\citep{kaplan2020scaling} of the MatFormer models (Section~\ref{sec:scaling_matlm}).
+\subsection{MatLM: MatFormer Language Models}
+\label{sec:MatLM}
+We build MatFormer-based decoder-only Language Models -- MatLMs -- and contrast them to their vanilla Transformer counterparts (LMs)~\citep{liu2018generating}. The LMs broadly follow the training pipeline and procedure outlined by~\citet{thoppilan2022lamda}. For each MatLM model with a set $d_{\text{model}}$, we jointly optimize for $g=4$ nested granularities 
+represented by FFN ratios of $\{0.5, 1, 2, 4\}$ -- i.e., only the hidden representation size of the FFN block changes. We denote these submodels as MatLM -- \{S, M, L, XL\} in increasing order of model size and refer to MatLM-XL as the universal MatLM. For baselines, we train vanilla Transformer models with comparable architectures. That is, for each MatLM, we train 4 separate baseline models with FFN ratios of $\{0.5, 1, 2, 4\}$ for a fixed $d_{\text{model}}$ denoted as Baseline -- \{S, M, L, XL\}. We evaluate these models on validation loss ($=$ log perplexity) and average accuracy on 26 English tasks similar to~\citep{brown2020language,du2022glam,anil2023palm}. Of these 26 tasks, we group 5 tasks that require generating multiple tokens under “GEN” and the remaining tasks that involve choosing an option from the input text under “RANK”.
+
+\subsubsection{Elastic Inference with MatLM}
+\label{sec:cond_compute}
+
+To showcase elastic inference, we evaluate the 2.6B parameter MatLM models on its ability (a) to provide models spanning the accuracy-vs-compute curve using Mix'n'Match (Section~\ref{sec:mnm}) and (b) to improve post-hoc inference optimization techniques like Speculative Decoding~\citep{leviathan2023fast} to further speed-up accurate auto-regressive generation. 
+
+\textbf{Accurate MatLM submodels for every constraint for free with Mix'n'Match.} Leveraging  Mix'n'Match, a MatLM can provide accurate models for every compute constraint (between S and XL), not just the explicitly optimized granularities  \{S, M, L, XL\}. We evaluate the impact of Mix'n'Match on the 2.6B parameter MatLM in Figure~\ref{fig:lm_mnm} through validation loss and downstream evals and contrast them to four granularities  \{S, M, L, XL\} of the 2.6B baseline LM (all trained independently). In Figures~\ref{fig:2B-mnm-loss},~\ref{fig:2B-mnm-rank} \&~\ref{fig:2B-mnm-gen}, we show that all MatLM -- \{S, M, L, XL\} models all perform as well as their corresponding baselines -- with marginal improvements and drops across the scale.
+In Figure~\ref{fig:2B-mnm-loss} we see that Mix'n'Match helps obtain many models on the optimal loss-vs-compute curve at zero cost. Moreover, downstream eval tasks on these Mix'n'Match models also mimic this trend, as shown in Figures~\ref{fig:2B-mnm-gen} \&~\ref{fig:2B-mnm-rank}. In a deployment setting that only has $55\%$ of the required compute resources needed for the MatLM-XL model, it is now possible to have a Mix'n'Match submodel with $<2\%$ accuracy drop on RANK evals. Without elastic deployment due to Mix'n'Match, we would see a $>2.5\%$ accuracy drop due to the use of the MatLM-M model. Note that we highlight only a few of the hundreds of accurate Mix'n'Match models along the curves.
+
+\input{sections/TabsNFigs/LM_MnM}
+\textbf{MatLM submodels speed up speculative decoding.} Speculative decoding leverages an accurate lightweight LM as a draft model to autoregressively generate a few tokens, followed by verifying these drafts with a larger model through parallel decoding on the generated tokens. Based on the extent of accurate generation, the draft model is rolled back and reset to the larger model's output. This results in considerable inference speed-up for the \textit{same accuracy as the large model}. We point the reader to the original paper for a more detailed explanation~\citep{leviathan2023fast}.
+
+A draft model that is significantly more consistent with the larger verifier model \input{sections/TabsNFigs/specdec} would lead to less frequent rollbacks of the draft 
+ predictions and therefore lower latency. As seen in Figure~\ref{fig:consistency} the MatLM submodels can be up to $8.5\%$ more consistent than the baselines to their corresponding XL model. This improved consistency along with the need for only a single universal model positions MatLM favourably to improve techniques that require draft and verifier models such as speculative decoding. 
+Table~\ref{tab:spec} shows the inference time speed-ups from speculative decoding using the S and XL submodels of the 2.6B language model for drafting and verification respectively. Speculative decoding with independently trained baseline LMs results in a speed-up of up to $10\%$ over the standard autoregressive decoding of the 2.6B-XL model. 
+But MatLM-based speculative decoding is up to $6\%$ faster than traditional speculative decoding. Finally, MatLM further reduces the memory overhead for inference by removing the need to have two models during resource-constrained deployment. 
+\input{sections/TabsNFigs/scaling_laws_summary}
+\subsubsection{MatLM Scales as well as Vanilla Transformer LMs}
+\label{sec:scaling_matlm}
+Now that we have established that a 2.6B MatLM model and its submodels are as accurate as the baseline Transformer LMs, we want to examine the scalability of training MatLM models. So, we study the scaling properties~\citep{kaplan2020scaling,hoffmann2022training} of MatLMs and compare them to vanilla Transformer baseline LMs trained for the same number of tokens. We train models ranging from 78M to 2.6B parameters on 10B to 160B tokens and plot the validation loss for MatLM -- \{S, M, L, XL\} compared against their baselines in Figure~\ref{fig:scaling_laws}. 
+
+First, in Figure~\ref{fig:xl-loss-scaling-summary}, we observe that the training of MatLM-XL models across model sizes scale as reliably as the Baseline-XL LMs for loss vs. number of parameters. However, Figure~\ref{fig:loss-scaling-summary} interestingly shows that it is not just the XL models but rather all the nested submodels, irrespective of granularity \{S, M, L, XL\}, of MatLM and Baseline that follow the same scaling trend. \input{sections/TabsNFigs/scaling_law_fit}Therefore, we fit a scaling law according to the number of non-embedding parameters ($N$) and training tokens ($D$) for all possible submodels for both MatLMs and the baselines in Table~\ref{tab:scaling-fit}. We observe that the fitted parameters are extremely similar, suggesting that MatLMs scale similarly to vanilla Transformer LMs. In Figures~\ref{fig:rank-scaling-summary} \& \ref{fig:gen-scaling-summary} we also find that the downstream evals for MatLM are within $0.5\%$ of the baselines, with the smaller submodels even outperforming the baselines at scale. 
+We note that the scaling law equation does not capture how (1) MatLMs have been optimized for multiple submodels and even have performant submodels that have not been explicitly optimized for (Section \ref{sec:cond_compute}), and (2) MatLMs and baselines of the same size have different training FLOPs per step.
+
+\subsection{MatViT: MatFormer Vision Transformers}
+\label{sec:MatViT}
+In this section, we extend MatFormer to Vision Transformer (ViT)~\citep{dosovitskiy2020image} based computer vision encoder models. MatFormer-based ViT -- MatViT -- enables elastic inference for fundamental tasks like image classification and retrieval. To this end, we train the MatFormer variant of the standard ViT-B/16 and ViT-L/16 models -- MatViT-B/16 and MatViT-L/16 that are trained with $g=4$ prechosen nested granularities (FFN ratios of $\{0.5, 1, 2, 4\}$). 
+B/16 models are trained on ImageNet-1K~\citep{russakovsky2015imagenet} with AugReg~\citep{steiner2021train} while L/16 models are pretrained on ImageNet-21K~\citep{deng2009imagenet} followed by finetuning on ImageNet-1K. All models are trained with the training setup and optimal hyperparameters of the standard ViT variants from the Scenic library~\citep{dehghani2022scenic}. 
+
+\input{sections/TabsNFigs/ViT_MnM_Class.tex}
+\subsubsection{Image Classification}
+For image classification, we evaluate both ViT \& MatViT models on ImageNet-1K. Figure~\ref{fig:vit-b-class} shows that the explicitly optimized granularities in MatViT result in as accurate models as the independently trained baselines for the B/16. However for L/16, as shown in Figure~\ref{fig:vit-l-class}, we see that the MatViT models are up to $0.35\%$ more accurate than the baseline for the same inference cost.
+ Further, finetuning using MatFormer enhances elastic deployment depending on the constraints at hand through Mix'n'Match.
+\textbf{Adaptive Encoders with Mix'n'Match.} Furthermore, our Mix'n'match models' accuracy almost lies on the line joining accuracy of explicitly trained granularities. In scenarios where, say, an application can host 50M parameter B/16 model, MatViT can provide $0.8\%$ more accurate model than the current approach which would host the largest baseline model with $\leq $ 50M parameters. 
+
+During deployment, the universal MatViT model can be stored in memory and depending on the compute constraints be used to extract an adaptable smaller model to maximize accuracy with the available resources at that moment. Currently, we find the Mix'n'Match models on the accuracy-compute curve through a quick inference on the validation set. While relatively scalable, this points to the need for optimal budget allocation across layers in neural networks~\citep{kusupati2020soft}.
+\input{sections/TabsNFigs/ViT_MnM_KNN.tex}
+\subsubsection{Adaptive Image Retrieval}
+\label{sec:adaptive_image}
+The goal of image retrieval is to find semantically similar images -- e.g. images from the same class -- using representations obtained from a pretrained encoder~\citep{chen2022deep}. Standard approach is to encode the database images as well as query image with same encoder and run nearest neighbor retrieval for the query embedding. While we can embed database images with an expensive encoder, the query encoder generally has to be real-time. Furthermore, the setting of query encoding might be varied, e.g., on-device vs. cloud processing, varying query load and query complexity. Current solutions have to stick to a fixed encoder thus compromising on accuracy or cost for various settings. 
+
+Given the elastic nature of MatViT, it is a good candidate for query encoder. However, retrieval also requires that submodels preserve distances between fixed database (with large encoder) and query embeddings  across all the granularities. If we use smaller baseline ViT models only for query encoding, these distances are not preserved and lead to nearly $0$ retrieval accuracy (see Figure~\ref{fig:ViT-knn}). 
+
+We evaluate both ViT and MatViT encoders on ImageNet-1K for image retrieval. Figure~\ref{fig:ViT-knn}  shows that submodels extracted from MatViT can approximately preserve distances and provide significantly more flexibility. For example, with a loss of $<0.5\%$ accuracy, MatViT-L/16 can reduce compute cost by $40\%$. To our knowledge, this is the first result of its kind and opens up a wide variety of adaptive inference strategies for large-scale semantic search. 
+
+
+\section{Conclusions}
+
+\label{sec:conc}
+
+In this work we presented MatFormer, a natively elastic Transformer architecture that allows training a single universal model which can be used to extract hundreds of smaller accurate submodels at zero additional cost. We find that the MatFormer Language Model (MatLM) matches the perplexity \& 1-shot accuracy of independently trained models. In fact, MatLM demonstrates an interesting loss-vs-compute scaling curve that is nearly {\em independent} of trained granularity indicating robust generalization to {\em extremely} large models as well. Finally, MatFormer submodels enable diverse inference time speedups like faster autoregressive generation with speculative decoding and elastic query encoders for adaptive dense retrieval across modalities. 
+
+
+
+
+
+

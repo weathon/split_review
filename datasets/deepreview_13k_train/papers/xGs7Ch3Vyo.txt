@@ -1,0 +1,320 @@
+\title{Better autoregressive regression with LLMs}
+
+\begin{abstract}
+Large language models (LLMs) have proven successful on many machine learning  tasks,
+including those that do not involve language generation. 
+In specific, LLMs have been shown to be effective in solving regression, where the targets are real-numbers.
+One common approach is to fine tune the LLM based on the log-perplexity loss and use  autoregressive sampling at the inference time. 
+Another approach relies on adding a predictive head and finetuning it with a suitable loss. 
+Despite the success, there has not been a study on the principled ways of using decoder LLMs for regression. 
+In this work we compare different prior works under a unified view, and introduce RAFT, regression-aware fine-tuning, a novel approach based on the Bayes-optimal decision rule. 
+We demonstrate how RAFT improves over established baselines on several benchmarks and model families.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Decoder-based large language models (LLMs) (OpenAI et al., 2023; Anil et al., 2023; Touvron et al., 2023; Gemini Team et al., 2024) have set new benchmarks in challenging generative tasks (e.g., summarization, open-ended dialogue). Such models’ versatility has further prompted their exploration for classic non-generative tasks (e.g., classification, regression, ranking) (Liu & Low, 2023; Fernandes et al., 2023; Qin et al., 2023; Vacareanu et al., 2024b; Yang et al., 2023; Duki´c & Snajder, 2024; Lukasik et al., 2024; Vacareanu et al., 2024a), once the purview of encoder-only models such as BERT (Devlin et al., 2019). Such exploration is expected to increase given the sustained efforts towards building ever-larger decoder-based LLMs, with limited parallels in scaling encoder-based models.  
+
+Our interest is in natural language regression, where the goal is to predict a real-valued target given a textual input. This covers important practical applications such as semantic similarity prediction (Cer et al., 2017), quality estimation (Kocmi & Federmann, 2023; Jain et al., 2023; Fernandes et al., 2023), and sentiment analysis (Zhang et al., 2024). Given the discordance between natural language and numbers, one may ask: how do we best apply decoder-based LLMs for natural language regression? Existing works have followed two broad approaches. Autoregressive regression approaches rely on standard LLM decoding to directly predict as text the numerical targets (e.g., predict a number 12.34 by iteratively predicting tokens: ’1’, ’2’, ’.’, ’3’, ’4’) (Gruver et al., 2023; Liu & Low, 2023; Yang et al., 2023; Lukasik et al., 2024), or corresponding discretised categories (e.g., predict one of { "very bad", "bad", "ok", "good", "very good" }) (Fernandes et al., 2023). Predictive head approaches, inspired from encoder-based models, learn a separate head on encoded inputs, thus side-stepping the autoregressive mechanism inherent to decoder-based LLMs. Common choices of encoding include mean pooling of the output embeddings (Zhuang et al., 2023), and the final-token logit for a special token (e.g., <extra_id_ $.\varnothing>$ in T5) (Fernandes et al., 2023).  
+
+Both autoregressive and predictive head approaches have proven successful for natural language regression tasks. However, there has been (to our knowledge) no systematic comparison between these methods; further, each of them has a conceptual shortcoming. The autoregressive regression approach does not exploit the numerical nature of the regression targets, and thus does not consider the fact that for a target of 1, predicting 11 is worse than predicting 1.1. On the other hand, the predictive head approach deviates from the pre-training objective typically used in decoder-based LLMs, viz. next-token prediction (Radford et al., 2018), and thus may not use the model in an optimal manner. This prompts us to ask: how can we respect both the LLM pre-training objective and the numerical nature of targets for natural language regression tasks?  
+
+![](images/389d0bdc13e7c72bd7603265d0171e787732df4cd712feb7b67d6378e4ce2052.jpg)  
+
+Table 1: Summary of the approaches to applying decoder-based LLMs to natural language regression tasks. There are previous works relying either on using the model autoregressively (i.e., analogously to how it was pre-trained) or as an encoder (i.e., an output is constructed based on embeddings or logits obtained for the inputs). Different training and inference approaches have been considered for both autoregressive and encoder based approaches.  
+
+In this work, we introduce regression-aware fine-tuning (RAFT), a novel approach to autoregressive regression which makes use of the numerical nature of the targets. We prove theoretical limitations of established alternative approaches to autoregressive-based regression, and prove that RAFT mitigates them. We systematically compare RAFT against autoregressive and predictive head baselines, and consider several ablations for understanding what design decisions are crucial for making a decoderbased LLM work under different settings. See Table 1 for an overview of both the previous works and the approach introduced in this work. Overall, our contributions are as follows:  
+
+(i) We propose regression-aware fine-tuning (RAFT), a novel approach to autoregressive regression, and prove that it mitigates the theoretical limitations of prior works (Section 3).  
+
+(ii) We present a unified view of decoder-based LLM regression approaches, capturing both the autoregressive and the prediction head approaches, and explicating their limitations (Section 4).  
+
+(iii) We systematically compare autoregressive regression baselines, predictive head and RAFT approaches across mulitple datasets and LLMs. We also conduct a series of extensive experiments for pinpointing the sources of differences in the performance between different approaches, explicating what design choices make RAFT so effective (Section 5).  
+
+
+
+\section{2 BACKGROUND  }
+
+
+We first introduce notation and review previous works on applying decoder-based LLMs to regression.  
+
+
+
+\section{2.1 NOTATION  }
+
+
+For a finite vocabulary $\boldsymbol{\mathcal{V}}$ of tokens (e.g., words in English), let $\mathcal{X}\subseteq\mathcal{V}^{*}$ be a set of inputs comprising strings of tokens, and $\mathcal{Y}\subset\mathbb{R}$ be a set of real-valued targets. We assume that each $y\overline{{\in\;\big{y}}}$ has a unique string representation $\mathtt{s t r}(y)\in\mathcal{V}^{*}$ ; for example, the integer 1 has the string encoding $"1"$ . Let $\mathbb{P}$ denote a ground-truth distribution over $\mathcal{X}\times\mathcal{Y}$ , with the decomposition $\mathbb{P}(\boldsymbol{\bar{x_{}}},\boldsymbol{y})=\mathbb{P}(\boldsymbol{\bar{x}})\cdot\mathbb{P}(\boldsymbol{y}\mid\boldsymbol{x})$ . The natural language regression problem involves learning a predictor ${\hat{y}}\colon{\mathcal{X}}\to\mathbb{R}$ that minimises the mean squared error over (input, target) pairs drawn from $\mathbb{P}$ :  
+
+$$
+L(\hat{y})=\mathbb{E}_{(x,y^{*})\sim\mathbb{P}}\left[(y^{*}-\hat{y}(x))^{2}\right].
+$$  
+
+Note that the mean squared error is a canonical choice in regression (Fernandes et al., 2023). The Bayes-optimal predictor minimizing the above is $\hat{y}(x)=\mathbb{E}_{y^{*}\sim\mathbb{P}(\cdot|x)}[y^{*}]$ .  
+
+We seek to employ large language models (LLMs) for such regression tasks. An LLM specifies a distribution $p$ over strings in $\overline{{\mathcal{V}^{*}}}$ . Given an input $x\,\in\,{\mathcal{X}}$ , let $\bar{p}(\cdot\mid x)$ denote the corresponding conditional distribution over possible continuations. Note that it may be possible for $p(z\mid x)>0$ where $z\in\mathcal{V}^{*}$ does not have a numerical representation; we discuss this issue more in Section 2.2.  
+
+LLMs are typically pre-trained on large corpora via self-supervised objectives (Radford et al., 2018), and can perform few-shot or in-context learning given suitably crafted prompts (Brown et al., 2020). For example, if the goal is to predict the probability that a user will enjoy a movie titled “Cure”, we may construct an input $x=$ “Hereditary: 0.7 | Ringu: 0.9 | Cure: ”, and probe the LLM’s estimate of plausible continuations via $p(\cdot\mid x)$ . We next discuss inference (or decoding) procedures for deriving a predictor $\hat{y}$ given a pre-trained LLM.  
+
+2.2 STANDARD DECODING FOR REGRESSION  
+
+Standard decoding involves predicting numerical targets in a generative manner, by performing autoregressive decoding to draw a sample from the distribution $p(\cdot\mid x)$ :  
+
+$$
+\begin{array}{r l}{\hat{y}_{\mathrm{AR}}(x)\doteq\mathsf{f l o a t}(z)}&{}\\ {z\sim p(\cdot\mid x).}&{}\end{array}
+$$  
+
+Here, $z\in\mathcal{V}^{*}$ is generated autoregressively on a token-by-token basis. Different algorithms may be used for this generation, e.g., greedy decoding and temperature sampling (Naseh et al., 2023). In many cases, such algorithms are seeking to approximate the mode of the distribution:  
+
+$$
+{\hat{y}}_{\mathrm{mode}}(x):=\operatorname*{arg\,max}_{y\in\mathcal{Y}}\,p(y\mid x).
+$$  
+
+Further, $\mathsf{f l o a t}(z)$ denotes an operator that converts a given string $z$ (e.g., $^{\ast}12.34^{\ast})$ to a corresponding numeric value (e.g., 12.34); if $z$ does not have a numeric representation (e.g., “banana”), then we assume that a suitable default value is returned. Unless otherwise stated, we assume $\mathsf{f l o a t}(z)=0.0$ for $z\not\in\mathcal{Y}$ . As an alternative, one may choose to restrict the output space to numerical targets, e.g., by employing a form of constrained decoding (Geng et al., 2023). However, in practice, the targets from high-quality LLMs tend to be numerical even under zero-shot settings (Lukasik et al., 2024).  
+
+
+
+\section{2.3 MALI: METRIC-AWARE LLM INFERENCE FOR REGRESSION  }
+
+
+Recently, Lukasik et al. (2024) pointed out a limitation of decoding the most likely target when employing autoregressive models for regression. Decoding of the most likely targets can be shown to minimize the 0-1 loss $\ell(y,\hat{y})=\mathbb{1}(y\neq\hat{y})$ , and may not be well aligned with regression metrics such as squared loss. As a remedy, instead of autoregressive decoding per Equation 1, Lukasik et al. (2024) proposed the MALI method, which given a loss $\ell$ and model prediction $p(\cdot\mid x)$ estimates the Bayes-optimal output minimizing the expected loss:  
+
+$$
+\hat{y}_{\mathrm{MALI}}(x)=\underset{v\in\mathbb{R}}{\arg\operatorname*{min}}\,\mathbb{E}_{y\sim p(\cdot|x)}\left[\ell(\mathsf{f l o a t}(y),v)\right],
+$$  
+
+where $\mathsf{f l o a t}(\cdot)$ is as per the previous section. For the squared loss $\ell(y,\hat{y})=(y-\hat{y})^{2}$ , the optimal decision rule can be shown to take the following closed-form solution:  
+
+$$
+\hat{y}_{\mathrm{MALI}}(x)=\mathbb{E}_{y\sim p(\cdot|x)}\left[{\mathsf{f l o a t}}(y)\right].
+$$  
+
+Since $p(\cdot\mid x)$ is a distribution over all possible strings, it is typically intractable to compute the above expectation exactly; this remains true even if we restrict attention to those strings corresponding to a valid numerical value (of which there are infinitely many). In practice, Equation 4 can be estimated either via sampling a finite number of $y$ values, or via scoring of targets. In the latter, suppose we have some restricted target grid $\mathcal{Y}_{\mathrm{grid}}\subset\mathcal{Y}$ . Then, the MALI predictor is averaged over $\mathcal{Y}_{\mathrm{grid}}$ , yielding:  
+
+$$
+\hat{y}_{\mathrm{MALI}}(x;\mathcal{Y}_{\mathrm{grid}})=\sum_{y\in\mathcal{Y}_{\mathrm{grid}}}p(s\mathbf{t}r(y)\mid x)\cdot y.
+$$  
+
+Note that $\begin{array}{r}{\sum_{y\in\mathfrak{Y}_{\mathrm{grid}}}p(\mathsf{s t r}(y)\mid x)\neq1}\end{array}$ is possible, so the above is technically not an expectation;   
+however, in practice, high-quality LLMs tend to concentrate most mass on numerical targets.  
+
+There are several choices of $\mathcal{Y}_{\mathrm{grid}}$ available to the practitioner. For discrete targets $\mathcal{Y}$ of moderate size, one may simply choose $y_{\mathrm{grid}}=y$ . For bounded $\mathcal{Y}$ , one choice is equally spaced targets covering the range of $\mathcal{Y}$ , e.g. integers or fixed-precision numbers (e.g. 2 decimal points) (Lukasik et al., 2024).  
+
+The above approaches operate on a pre-trained LLM via few-shot prompting. However, it has been consistently observed that direct fine-tuning of LLMs on the task of interest can be beneficial (Liu et al., 2022). We now consider how to perform LLM fine-tuning for regression tasks.  
+
+
+
+\section{3 REGRESSION-AWARE LLM FINE-TUNING  }
+
+
+We now develop a theoretically grounded approach to regression with decoder-based LLMs in the fine-tuning setting. We begin by reviewing the standard fine-tuning setup, and explicate its limitations.  
+
+3.1 STANDARD FINE-TUNING  
+
+Fine-tuning seeks to adapt an LLM to the target distribution $\mathbb{P}$ by minimizing  
+
+$$
+L(p)=\mathbb{E}_{(x,y^{*})\sim\mathbb{P}}\left[\ell(y^{*},p(\cdot\mid x))\right]
+$$  
+
+for a suitable loss function $\ell\colon\mathcal{Y}\times\Delta v_{^{\ast}}\rightarrow\mathbb{R}$ , where $\Delta_{S}$ denotes the set of distributions over a set $S$ . Given a sample $\overline{{S\in(\mathcal{X}\times\mathcal{Y}}}$ of $N$ (input, target) pairs drawn from $\mathbb{P}$ , the empirical loss is  
+
+$$
+\hat{L}(p)=\frac{1}{N}\sum_{(x,y^{*})\in S}\ell(y^{*},p(\cdot\mid x)).
+$$  
+
+A standard choice of $\ell$ is the log-loss (also referred to as log-perplexity):  
+
+$$
+\ell(y^{*},p(\cdot\mid x))=-\log p(\mathsf{s t r}(y^{*})\mid x),
+$$  
+
+recalling that $\mathsf{s t r}(y^{\ast})$ denotes the string representation of a numeric target $y^{*}\in\mathbb{R}$ . More generally, one may use categorical descriptions of the target after discretising to some finite grid $\mathcal{Y}_{\mathrm{grid}}\subset\mathcal{Y}$ ; e.g., { "very bad", "bad", $"_{0}\mathbf{k}"$ , "good", "very good" } (Fernandes et al., 2023).  
+
+3.2 LIMITATIONS OF STANDARD FINE-TUNING AND STANDARD DECODING  
+
+A natural baseline is to employ log-perplexity based fine-tuning by minimizing Equation 7, and to then apply standard decoding (see Equation 2). Since the log-loss is strictly proper, minimizing Equation 7 recovers the Bayes distribution $\mathbb{P}(\cdot\mid x)$ in the population limit (Gneiting & Raftery, 2007). In practice, however, the fine-tuned model distribution $p(\cdot\mid x)$ may deviate from $\mathbb{P}(\cdot\mid x)$ . The following lemma shows that even small deviations from $\mathbb{P}$ can cause the predictor to incur a high squared error compared to the Bayes-optimal predictor.  
+
+Lemma 1. Assume $|\y|\ge2$ and $0\in\mathcal{Y}$ , with $N\doteq\operatorname*{max}(\mathcal{Y})$ . For any $\epsilon>0$ , there exists $\mathbb{P},p$ such that: $\mathbb{E}_{x}\left[\|\mathbb{P}(\cdot\mid x)-p(\cdot\mid x)\|_{1}\right]\le\epsilon$ , and $\begin{array}{r}{\mathbb{E}_{x}\left[\left(\mathbb{E}_{y^{*}\sim\mathbb{P}(\cdot|x)}[y^{*}]-\hat{y}_{\mathrm{mode}}(x)\right)^{2}\right]\ge\left(\frac{N}{2}\right)^{2}\left(1+\frac{\epsilon}{2}\right)^{2}}\end{array}$ .  
+
+Thus, using the log-perplexity fine-tuning with standard decoding is not well-aligned with the eventual goal of approximating $\mathbb{E}_{y^{*}\sim\mathbb{P}(\cdot|x)}[y^{*}]$ .  
+
+3.3 LIMITATIONS OF STANDARD FINE-TUNING AND MALI DECODING  
+
+Given that MALI performs well in few-shot regression tasks, a natural means of further improving its performance is to employ log-perplexity based fine-tuning by minimizing Equation 7, and to then apply the MALI decoding (see Equation 5).  
+
+However, as before, we can show that the predictor can significantly deviate from the optimal prediction.  
+
+Lemma 2. Assume $|\y|\ge2$ and $0\in\mathcal{Y}$ , with $N\doteq\operatorname*{max}(\mathcal{Y})$ . For any $\epsilon>0$ , there exists $\mathbb{P},p$ such that: $\mathbb{E}_{x}\left[\|\mathbb{P}(\cdot\mid x)-p(\cdot\mid x)\|_{1}\right]\le\epsilon$ , and $\begin{array}{r}{\mathbb{E}_{x}\left[\left(\mathbb{E}_{y^{*}\sim\mathbb{P}(\cdot|x)}[y^{*}]-\hat{y}_{\mathrm{MALI}}(x)\right)^{2}\right]\ge\left(\frac{\epsilon N}{2}\right)^{2}}\end{array}$ .  
+
+Thus again, using the log-perplexity fine-tuning with MALI may not be well-aligned with the eventual goal of approximating $\mathbb{E}_{\boldsymbol{y}^{*}\sim\mathbb{P}(\cdot|\boldsymbol{x})}[\boldsymbol{y}^{*}]$ . Intuitively, log-perplexity fine-tuning treats all “wrong” predictions the same, as it is unaware of the difference in the magnitude of the numerical values represented by the tokens. For example, assuming that numbers 100 and 1000 are represented with a single token, placing too much mass on the token representing $\overline{{100}}$ is penalized similarly as placing too much mass on the token 1000.  
+
+One solution to the above issue is to directly employ the MALI predictor in the fine-tuning process.   
+This requires going beyond the log-loss in Equation 8, as we now detail.  
+
+3.4 RAFT: REGRESSION-AWARE FINE-TUNING  
+
+To overcome the drawbacks of using MALI with traditional fine-tuning, we propose a novel regressionaware objective that seeks to directly minimize the squared loss on the MALI predictor:  
+
+Definition 1. Define the regression-aware fine-tuning (RAFT) loss as follows,  
+
+$$
+\ell_{\mathrm{RAFT}}(y^{*},p(\cdot\mid x))=\left(y^{*}-\mathbb{E}_{y\sim p(\cdot\mid x)}[{\sf f l o a t}(y)]\right)^{2}.
+$$  
+
+Equally, this uses the MALI predictor $\hat{y}_{\mathrm{MALI}}(x)$ to construct a numeric value from the LLM, and measures the square loss against the target $y^{\ast}$ . Given a finite grid $\mathcal{Y}_{\mathrm{grid}}\subset\mathcal{Y}$ and fine-tuning set $S$ , the empirical loss corresponding to Equation 9 is:  
+
+$$
+\hat{L}_{\mathrm{RAFT}}(p;\mathcal{Y}_{\mathrm{grid}})=\frac{1}{N}\sum_{(x,y^{*})\in S}\left(y^{*}-\sum_{y\in\mathcal{Y}_{\mathrm{grid}}}p(s\mathfrak{t r}(y)\mid x)\cdot y\right)^{2}.
+$$  
+
+Note that computing this loss only requires scoring each $y\in\textstyle{\mathcal{Y}}_{\mathrm{grid}}$ under the model; we do not need to perform any explicit sampling or decoding during training.  
+
+Compared to standard fine-tuning with MALI decoding, note here that we attempt to avoid the issue in Lemma 2 by directly minimizing $\mathbb{E}_{\boldsymbol{x}}\left[\left(\mathbb{E}_{\boldsymbol{y}^{*}\sim\mathbb{P}(\cdot|\boldsymbol{x})}[\boldsymbol{y}^{*}]-\hat{y}_{\mathrm{MALI}}(\boldsymbol{x})\right)^{2}\right]$ . Surprisingly, despite computing $\hat{y}_{\mathrm{MALI}}(x)$ over the restricted target space $\ y_{\mathrm{grid}}$ , under mild conditions the minimizer of Equation 9 exactly mimics the Bayes-optimal predictor over the full space $\mathcal{Y}$ .  
+
+Lemma 3. Suppose $\mathcal{Y}\subset\mathbb{R}$ , and $\arg\operatorname*{min}_{y\in{\mathfrak{Y}}}\in{\mathfrak{Y}}_{\mathrm{grid}}$ and a $\mathrm{\Delta}_{\mathrm{irg\,max}_{y\in\mathcal{Y}}}\in\mathcal{Y}_{\mathrm{grid}}$ . Let $p^{*}(\cdot\mid x)$ be the minimizer of the RAFT loss from definition 1 over all distributions $p(\cdot\mid x)$ . Then the MALI predictor $\begin{array}{r}{\hat{y}_{\mathrm{MALI}}(x;\mathcal{Y}_{\mathrm{grid}})=\sum_{y\in\mathcal{Y}_{\mathrm{grid}}}p^{*}(\mathsf{s t r}(y)\mid x)\cdot y}\end{array}$ constructed from $p^{*}(\cdot\mid x)$ satisfies:  
+
+$$
+\hat{y}_{\mathrm{MALI}}(x;\mathcal{Y}_{\mathrm{grid}})=\mathbb{E}_{y^{*}\sim\mathbb{P}(\cdot|x)}[y^{*}].
+$$  
+
+The intuition behind this result is that any numerical target in $\mathcal{Y}$ can be expressed by a convex combination of the smallest and largest numbers in $\mathcal{Y}$ , and can thus be realized by the MALI predictor.  
+
+
+
+\section{4 A UNIFIED VIEW OF LLM-BASED REGRESSION APPROACHES  }
+
+
+We next compare and contrast RAFT and the predictive head approaches in a unified view. In Table 2, we present a summary of different choices for the predictors considered in prior and the present work.  
+
+4.1 PREDICTIVE HEAD APPROACHES TO REGRESSION  
+
+Predictive head approaches formulate a predictor function ${\hat{y}}(x)$ by utilizing activations or embeddings from the forward pass of LLM. Abstractly, such approaches first extract a suitable input representation $\Phi(x)\in\mathbb{R}^{q}$ , which is then fed into a regressor $s\colon\ensuremath{\mathbb{R}}^{q}\to\ensuremath{\mathbb{R}}$ . Canonically, the regressor is simply a linear model $s(\Phi(x))=b+w^{\top}\Phi(x)$ for learnable $w\in\mathbb{R}^{q},b\in\mathbb{R}$ , but one may also consider an MLP with a single real-valued output.  
+
+Various choices for $\Phi(x)$ have been considered in previous works. To describe these, we need some additional notation. Given a string $x\in\mathcal{V}^{*}$ of length $L$ , a Transformer-based language model (Vaswani et al., 2017) first constructs an input embedding $\epsilon_{\mathrm{in}}\overline{{(x)\ \in\ \mathbb{R}^{D\times L}}}$ , via a matrix $E_{\mathrm{in}}\ \in\ \mathbb{R}^{D\times L}$ of token embeddings: concretely, $\epsilon_{\mathrm{in}}(x)\;=\;E_{\mathrm{in}}\overline{{\epsilon}}_{\mathrm{oh}}(\dot{x})$ , where $\epsilon_{\mathrm{oh}}(x)\ \in\ \mathbb{R}^{V\times L}$ is the one-hot embedding of each token in $x$ . Next, this input embedding is passed through a stack of attention and MLP layers, to produce the output embedding $\epsilon_{\mathrm{out}}(x)\overset{\ 、\ 、}{\in}\dot{\mathbb{R}}^{D\times L}$ . One further projects this to the vocabulary space to produce output logits $f_{\mathrm{out}}(\cdot\mid x)\in\mathbb{R}^{V\times L}$ , where $f_{\mathrm{out}}(\cdot\mid x)\stackrel{\cdot}{=}\dot{E}_{\mathrm{out}}^{\top}\epsilon_{\mathrm{out}}(x)$ . Finally, one transforms these to a distribution over possible tokens via the softmax operator, yielding $p_{\mathrm{out}}(\cdot\mid x)=\mathrm{softmax}(f_{\mathrm{out}}(\cdot\mid x))\in[0,1]^{V\times L}$ . For certain models (e.g., Gemma), the input and output vocabulary embedding matrices are tied, i.e., $E_{\mathrm{in}}=E_{\mathrm{out}}$ .  
+
+Given the above, one may extract an input representation through multiple means, most commonly pooling or selection of the output token embeddings, output logits, or output probabilities. Common  
+
+![](images/0db1a4dfc60204236bbab89c19d31c7f5232fb604572ac016ea2bb5818840356.jpg)  
+
+Table 2: Different approaches for applying decoder-based LLMs to regression. Here, $p(\cdot\mid x)$ denotes a distribution over possible outputs given an input string $x$ , and ${\hat{y}}(x)\in\mathbb{R}$ a predictor given by a predictive head approach. $b$ and $w$ are learnable parameters, $v^{*}\in\mathcal{V}$ is a fixed token, pool is a pooling operator (such as taking a per-dimension average), and $L$ is the length of input $x$ , $\mathcal{Y}_{d i g i t s}$ denotes all digits covering the range of targets (unless otherwise stated, $\rightarrow_{1}\cdot\dotsc\langle5^{\prime}\rangle$ . The first 4 rows show the autoregressive baselines: standard decoding (Section 2.2), MALI zero-shot (Section 2.3), standard fine-tuning and decoding (Section 3.1), MALI with standard fine-tuning (Section 3.3). The next 2 rows show RAFT: the general autoregressive form $(\mathrm{Y}=\mathrm{y}_{\mathrm{grid}}$ for general output spaces), and the single digit version (e.g. $\mathcal{Y}=\{1,2,3,4,5\})$ . The following 2 rows present the prior works from Fernandes et al. (2023); Zhuang et al. (2023). The last 3 rows present new predictive head approaches that attempt to mimic the behavior of RAFT.  
+
+pooling strategies include mean-pooling, and passing through an attention operator; common selection strategies include picking the value corresponding to the final token. For example, we may consider the final-token logit activation for a special token $v_{*}\in\mathcal{V}$ (Fernandes et al., 2023; Zhuang et al., 2023), or mean-pooling the output token embeddings (Zhuang et al., 2023).  
+
+Given a suitable predictor, one may directly optimize the mean squared error during fine-tuning; i.e., given a fine-tuning set $S$ , we minimize  
+
+$$
+\hat{L}_{\mathrm{PH}}(\hat{y})=\frac{1}{N}\sum_{(x,y^{*})\in S}(y^{*}-\hat{y}(x))^{2}.
+$$  
+
+Compared to autoregressive baselines, an important distinction is that that no autoregressive decoding is conducted at inference.  
+
+4.2 RAFT VERSUS PREDICTIVE HEAD APPROACHES  
+
+Our discussion of RAFT highlighted its close relation to autoregressive MALI decoding, which appears rather different to predictive head approaches. However, in the case of a single-digit grid $\mathcal{Y}_{\mathrm{grid}}$ (wherein each element corresponds to a single token in $\mathcal{V}$ ), the predictor function formulations for RAFT bears similarities to the predictive head approaches. Note that if $y\in\textstyle{\mathcal{Y}}_{\mathrm{grid}}$ corresponds to a single token, by definition $p(\mathsf{s t r}(y)\mid x)=p_{\mathrm{out}}(\cdot\mid^{\bullet}x)_{\mathsf{s t r}(y),L},$ . Then, the MALI predictor becomes  
+
+$$
+\hat{y}_{\mathrm{MALI}}(x;\mathsf{\vec{y}}_{\mathrm{grid}})=\sum_{y\in\mathsf{\vec{y}}_{\mathrm{grid}}}y\cdot p(\mathsf{s t r}(y)\mid x)=\sum_{y\in\mathsf{\vec{y}}_{\mathrm{grid}}}y\cdot p_{\mathrm{out}}(\cdot\mid x)_{\mathsf{s t r}(y),L}.
+$$  
+
+We may compare this with the final-token logit activation method from Table 2. Both take the following form for an activation $\Psi$ and weight vector $w\in\mathbb{R}^{\mathcal{V}}$ :  
+
+$$
+\hat{y}(x)=b+w^{\top}\Psi\left(f_{\mathrm{out}}(\cdot\mid x)_{:,L}\right).
+$$  
+
+Importantly, RAFT predictor at initialization corresponds to MALI, and thus, forms a strong predictor for a zero-shot inference with LLMs (Lukasik et al., 2024). Most alternative predictive head approaches will incur a high error at initialization due to deviating from the next token prediction task.  
+
+Therefore, RAFT can be seen as a predictive head approach with strong performance at initialization, potentially making optimization easier.  
+
+Contrasting the RAFT and the final-token logit method, we observe the following differences:  
+
+• Activation: for single-digit RAFT, $\Psi$ is the softmax activation that converts $f_{\mathrm{out}}(\cdot\mid x)$ to the probability vector $p_{\mathrm{out}}(\cdot\mid x)$ . For the final-token logit, $\Psi$ is the identity activation. • Weight vector: for the final-token logit, $w$ is a one-hot vector with 1 corresponding to the special token position. For single-digit RAFT, $w_{v}\,=\,\mathsf{f l o a t}(v)$ for each $v\,\in\,\mathcal V$ ; note that, as a result, positions corresponding to non-digits have weight 0.  
+
+In light of the close similarities between RAFT and the final-token logit approach, it is prudent to carefully analyze these differences and identify whether any of these choices play an important role in RAFT’s performance. Therefore, we introduce the following new predictive head variants:  
+
+• MLP on final-token logits: this is a variant of the final-token logit method, wherein a 2-layer MLP with a non-linear activation (sigmoid) is employed on the entire final-token logit vector, rather than selecting the logit for a single special token:  
+
+$$
+\hat{y}(x)=b+\operatorname{MLP}(f_{\mathrm{out}}(\cdot\mid x)_{:,L}).
+$$  
+
+• Learnable-RAFT: this is a variant of RAFT, wherein the weights over the output model probabilities are learned, rather than being fixed to the vector $w_{v}={\mathsf{f l o a t}}(v)$ :  
+
+$$
+\hat{y}(x)=\sum_{y^{\prime}\in\mathcal{Y}}w_{y^{\prime}}\cdot p_{\mathrm{out}}(x)_{\mathrm{str}(y^{\prime}),L}
+$$  
+
+The learnable-RAFT variant adds more flexibility to the predictor function $\hat{y}$ over the vanilla RAFT method. However, as with other predictive head methods, it deviates from the next-token prediction pre-training task. Which of these two factors – predictor flexibility, and alignment to the pre-training task – is the most important? To answer this question, we compare learnable-RAFT against RAFT, and also experiment with fine-tuning from a randomly initialized (as opposed to a pre-trained) model.  
+
+5 CONTRASTING THE REGRESSION METHODS WITH AUTOREGRESSIVE LLMS  
+
+We now present experiments and ablations comparing the autoregressive regression and predictive head approaches on natural language regression datasets. In summary, we make the following main empirical findings: (i) RAFT outperforms all autoregressive regression and predictive head baselines across datasets and models; (ii) Ablations indicate the importance of aligning fine-tuning to the pre-training loss; (iii) RAFT tends to work well when the grid corresponds to digit tokens.  
+
+5.1 EXPERIMENT SETTINGS  
+
+Datasets. We use the following natural language regression datasets:  
+
+(i) Semantic Textual Similarity Benchmark (STSB) (Cer et al., 2017), which comprises of sentence pairs human-annotated with a similarity score from 0 to 5; To measure the impact of varying the fine-tuning set size, we apart from using the full train set, we also consider using only the first $1\,\mathrm{`000}$ examples for training (STSB 1k).   
+(ii) US Amazon reviews, where we aim to predict the 5-star rating for a product review (Ni et al., 2019);. We consider a few categories from the Amazon reviews datasets, each forming a separate dataset: Wireless, Music, Personal products. We use $1\!\cdot\!500$ examples for the test set (after Lukasik et al. (2024)), 1’500 for validation and $10^{\circ}000$ examples for training.   
+(iii) MovieLens-1M, where we construct a movie rating prediction task across users, follow the  
+
+methodology from (Luo et al.5 for the results).  
+
+  
+
+Models. We experiment with Gemma-2 (Team et al., 2024) and PaLM-2 (Anil et al., 2023) instructiontuned model families of different sizes. We select the best learning rate (from $\{10^{-4},10^{-5}\})$ and training step (up to a maximum of $100K$ steps) based on held-out validation set performance. Where standard deviations are reported, fine-tuning is performed 3 times.  
+
+Dataset Model size Zero-shot Zero-shot Standard fine-tuning Standard fine-tuning Predictive head RAFT standard decoding MALI standard decoding MALI   
+Wireless 2B 0.88 1.42 0.70±0.01 0.67±0.01 0.51±0.01 0.47±0.01 9B 0.87 1.40 0.78±0.05 0.86±0.03 0.46±0.00 0.45±0.00 Personal care 2B 0.98 1.75 0.77±0.01 0.74±0.01 0.52±0.02 0.49±0.00 9B 0.95 1.73 0.73±0.14 0.59 ±0.01 0.48±0.01 0.47±0.01 Music 2B 1.28 2.46 1.16±0.11 0.88±0.12 0.52±0.00 0.50±0.00 9B 1.28 2.46 0.83±0.35 0.61±0.02 0.50±0.00 0.47±0.00 STSB 1k 2B 1.10 0.94 0.61±0.01 0.65±0.02 0.58±0.01 0.58±0.00 9B 1.31 0.99 0.57±0.01 0.62±0.05 0.57±0.01 0.56±0.01 STSB 2B 1.10 0.94 0.59±0.01 0.61±0.02 0.54±0.00 0.54±0.01 9B 1.31 0.99 0.58±0.00 0.58±0.02 0.52±0.00 0.51±0.01 Table 3: RMSE across datasets, methods, and Gemma-2 models of varying sizes. Fine-tuning methods report mean $\pm$ std dev from model retraining. Methods. We compare the following methods: (1) autoregressive baselines (Section 2.2), MALI zeroshot (Section 2.3), MALI with log-perplexity fine-tuning (Section 3.3); (2) predictive head approaches from Fernandes et al. (2023); Zhuang et al. (2023); (3) the new RAFT method (Section 3.4); (4) new predictive head approaches that attempt to mimic the behavior of RAFT (Section 4.2). In zero-shot standard decoding, we use greedy decoding; in zero-shot MALI, we use the scoring variant (Lukasik et al., 2024) over the default grid from RAFT. We also run ablations with replacing causal attention masking with bi-directional attention masking, following previous works on classification with decoder-based LLMs (Dukic´ & Snajder, 2024; Qorib et al., 2024).   
+Implementation of the RAFT objective. An important practical consideration is how to choose the grid $\mathcal{Y}_{\mathrm{grid}}$ . Targets from both Amazon and STSB dataset families belong to [0, 5]. Unless otherwise stated, we choose the grid $\mathcal{Y}_{\mathrm{grid}}\,=\,\{\begin{array}{c}{{\mathrm{~}^{\prime}\,1\,\mathrm{~,~}\,\mathrm{~}^{\prime}\,2\,\mathrm{~,~}\,\mathrm{~}^{\prime}\,3\,\mathrm{~,~}\,\mathrm{~}^{\prime}\,4\,\mathrm{~,~}\,\mathrm{~}^{\prime}\,5\,\mathrm{~\}}}\end{array}\}$ . For Amazon reviews datasets, $\ y_{\mathrm{grid}}=\ y$ , while for STSB, $\mathcal{Y}_{\mathrm{grid}}\subset\mathcal{Y}$ (as the targets take floating point values). Recall that Lemma 3 shows that RAFT can represent floating point targets even under such a choice for $\mathcal{Y}_{\mathrm{grid}}$ . Nonetheless, we empirically verify whether the choice of $\mathcal{Y}_{\mathrm{grid}}$ impacts the results.   
+5.2 RAFT LEADS TO BETTER AUTOREGRESSIVE REGRESSION   
+We compare different autoregressive and prediction head approaches across across Gemma-2 models of varying sizes in Table 3. We make several observations. First, we verify the importance of both (1) the use of an appropriate decision rule at inference time (greedy versus metric-aware inference), and (2) the value of fine-tuning over zero-shot inference. Indeed, we find that the zero-shot greedy decoding, MALI (see Section 2.3), autoregressive finetuning with greedy decoding (see Section 3.3) and autoregressive fine-tuning with MALI inference (see Section 3.4) work increasingly better.   
+Second, we find that the predictive head approach outperforms the autoregressive baselines, including those that perform autoregressive fine-tuning. This corroborates Lemma 2, which pointed at the limitations of autoregressive fine-tuning due to it being misaligned with the squared error.   
+Finally, we find RAFT to outperform the predictive head and the autoregressive approaches by a large margin across almost all settings. RAFT outperforming the autoregressive approaches corroborates the posited importance of aligning the fine-tuning loss in regression tasks to a regression loss. RAFT outperforming the predictive head approach corroborates the posited importance of not deviating from the autoregressive setting, which aligns with the next-token prediction pre-training task. We next investigate different design choices to further pinpoint the reasons for RAFT’s performance.  
+
+![](images/3a53106b9cd5af15ebeb4c96506456d671a4388190093431e8e51d56f67755e1.jpg)  
+
+In Table 4, we report results from additional ablations considering different choices for the predictor $\hat{y}$ , as well as other design choices pertaining to the model (i.e., the use of pre-training and attention masking). We next discuss the key findings.  
+
+Role of pre-training. In order to shed light on the importance of aligning the method with the pretraining task, we experiment with fine-tuning from randomly initialized model weights as opposed to initializing with the pre-trained checkpoint. We find that autoregressive fine-tuning does not converge to a reasonable result, while RAFT converges to a very poor predictor. Under this setting, predictive head fares the best among the 3 methods. To further analyze the role of pre-training, we run additional experiments on a synthetic regression dataset from Vacareanu et al. We corroborate the finding that RAFT improves over predictive head when initialized from a pre-trained checkpoint, and not when the model weights are initialized randomly. This finding supports the hypothesis that RAFT outperforms predictive head due to better alignment with the pre-training checkpoint.  
+
+Predictive head non-linear variant. We experiment with two variants of learnable-RAFT: one where the weight vector is learnt for all vocabulary entries, and the second, where only entries corresponding to digits $\rightarrow\uparrow\ '-\ '\5'$ are learnt, while other entries are fixed to 0. For both variants we found it necessary to initialize from the solution corresponding to RAFT, as random initialization did not lead to good training dynamics. Overall, we find both approaches to not improve over RAFT. We also consider adding a non-linear function over the special-token logit in the form of a two-layer MLP. This again does not lead to improvements over RAFT. Both results demonstrate that it may be more important to align the fine-tuning to the pre-training loss, as opposed to only try make the predictor more expressive.  
+
+Predictive head design choices. Lastly, we experiment with additional variants, including pooling over the full sequence of token embeddings from the LLM, instead of taking the final token activation. We find it to not lead to significantly better results than the special-token logit method. We also find bi-directional masking of attention does not significantly affect the results of the predictive head and RAFT, while expectedly making autoregressive fine-tuning untrainable (due to the model being able to attend to the predicted target during training). Overall, none of the predictive head  
+
+![](images/83dee0296d3bb0802370e824e75aea39e814f7d61dce62de1cd7bf019601478d.jpg)  
+
+Table 5: Comparison of RMSE (mean $\pm$ std dev) across variants of RAFT with varying sizes of the grid $\mathcal{Y}_{\mathrm{grid}}$ . The choice of $\rightarrow\uparrow\ '-'\5'$ outperforms the alternatives.  
+
+variants improves over the RAFT approaches, again supporting the hypothesis of the importance of not deviating from the pre-training loss in fine-tuning.  
+
+
+
+\section{5.4 RAFT ABLATIONS  }
+
+
+Sensitivity to the grid size Following Lemma 3, $\hat{y}_{\mathrm{MALI}}(x)$ can express any numerical target in the population limit, even with a coarse grid. Empirically, however, one might expect different grids to affect the results. We now assess this point on the Amazon reviews Wireless dataset, comparing the following choices for $\mathcal{Y}_{\mathrm{grid}}$ : (1) $\{\,\,^{\prime}\,1\,^{\prime}\,,\,^{\prime}\,2\,^{\prime}\,,\,^{\prime}\,3\,^{\prime}\,,\,^{\prime}\,4\,^{\prime}\,,\,^{\prime}\,5\,^{\prime}\,\}$ (the default choice for RAFT), (2) { $\leftrightarrows\}$ (viz. max $(\ Y)$ ), (3) $\{\,\,^{,}\,1\,^{,}\,,\,^{,}\,{\mathfrak{g}}\,^{,}\,\}$ (the smallest and largest digit in $\boldsymbol{\mathcal{V}}$ ), (4) $\{\,\,^{,}\,4\,^{,}\,,\,^{,}\,5\,^{,}\,\,\}$ (the two largest digits in $\mathcal{Y}$ for all datasets), (5) $\{\begin{array}{r}{\cdot\,7\,^{\,\prime}\,,\,\cdot\,8\,^{\prime}\,,\,\cdot\,9\,^{\,\prime}\,\}}\end{array}$ (the two largest digits in $\boldsymbol{\mathcal{V}}$ ).  
+
+In Table 5, we report the results for different choices for $\ y_{\mathrm{grid}}$ . We find that, aligned with Lemma 3, limiting the grid does not significantly impact the results. One explanation for this finding is the following. As shown by Lukasik et al. (2024), the choice of $\{\,\,^{\prime}\,\uparrow\,,\,^{\prime}\,2^{\prime}\,,\,^{\prime}\,3\,^{\prime}\,,\,^{\prime}\,4\,^{\prime}\,,\,^{\prime}\,5\,^{\prime}\,\}$ yields a reasonable result for the zero-shot MALI approach, and thus it provides a good starting point for fine-tuning. Recall that the zero-shot MALI corresponds to the RAFT approach at step 0 of training, since the predictors for each are equivalent.  
+
+Sensitivity to the grid token indices The next question we pose is about the importance of strictly sticking to numeric tokens: what would happen if the RAFT predictor $\hat{y}_{\mathrm{RAFT}}(x)$ used non-numeric tokens? To analyze this question, let us consider a more general form of the predictor:  
+
+$$
+\hat{y}_{\mathrm{RAFT-NN}}(x)=\sum_{y\in\mathbb{Y}_{\mathrm{grid}}}p(\mathbf{token}(y)\mid x)\cdot y,
+$$  
+
+where token $(y)\in\mathcal{V}$ denotes a token of choice corresponding to the numerical target $y$ .  
+
+We keep $\mathcal{Y}_{\mathrm{grid}}$ as composed of the digits $\{\begin{array}{l}{\mathrm{~`~`~,~`~2~'~,~'~3~'~,~'~4~'~,~'~5~'~}}\end{array}\}$ , and use the predictor in Equation 11 with the following choices for tokens: (1) token for each digit becomes an alphabet token starting with ’a’ and ending with $\mathbf{\dot{a}}$ , (2) each token is a digit (i.e., $\bullet\,\intercal\,\ '$ becomes $\leftrightarrowsuit\gamma$ , $\bullet\,2\,^{\bullet}$ becomes $\cdot\,_{4}\cdot_{\phantom{+},}$ ), (3) we only consider digit $\because5\cdot$ . In certain settings, we even find a large drop in performance (e.g., the choice of characters or months). However, by enlarge, we find the results do not worsen signifanctly when different tokens are used.  
+
+
+
+\section{6 DISCUSSION AND FUTURE WORK  }
+
+
+We introduced regression-aware fine-tuning (RAFT), a new method for fine-tuning decoder-based LLMs to predict numeric targets. We demonstrated empirically that RAFT can consistently outperform existing methods that perform standard log-perplexity fine-tuning, as well as methods that construct separate predictive heads. An interesting direction for study would be applications of such techniques to problems like time-series forecasting, as well as problems of ordinal regression.  
+
+
+
+

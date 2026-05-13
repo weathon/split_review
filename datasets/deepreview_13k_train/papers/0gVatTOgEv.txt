@@ -1,0 +1,277 @@
+\title{Glider: Global and Local Instruction-Driven Expert Router}
+
+\begin{abstract}
+The availability of performant pre-trained models has led to a proliferation of fine-tuned expert models that are specialized to a particular domain or task. This has enabled the creation of powerful and adaptive routing-based ``Model MoErging"~\citep{yadav2024moergingsurvey} methods with the goal of using expert modules to create an aggregate system with improved performance or generalization. However, existing MoErging methods often prioritize generalization to unseen tasks at the expense of performance on held-in tasks.  
+This limitation adversely impacts practical applicability, as real-world deployments require robust performance across both known and novel tasks. 
+We observe that current token-level routing mechanisms neglect the global semantic context of the input task. This token-wise independence hinders effective expert selection, particularly for held-in tasks, as routing decisions fail to incorporate the holistic semantic properties of the task.
+To address this, we propose a novel method, \methodlong{} (\method{}) that integrates a multi-scale routing mechanism, encompassing a semantic global router and a learned local router.  As recent LLMs demonstrate advanced reasoning capabilities for semantic-related contexts, the global router leverages this ability to enhance expert selection. By utilizing the input query and an LLM, the router generates semantic task instructions that guide the retrieval of the most relevant experts across all layers. This global guidance is complemented by a local router that facilitates token-level routing decisions within each module, enabling finer control and enhanced performance on unseen and challenging tasks. Our experiments using T5-based expert models for T0 and FLAN tasks demonstrate that \method{} achieves substantially improved held-in performance while maintaining strong generalization on held-out tasks. Additionally, we perform ablations experiments to dive deeper into the components of \method{} and plot routing distributions to show that \method{} can effectively retrieve the correct expert for held-in tasks while also demonstrating compositional capabilities for held-out tasks. 
+Our experiments highlight the importance of our multi-scale routing that leverages LLM-driven semantic reasoning for MoErging methods. 
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1\textwidth]{figs/pipeline.pdf}
+    \caption{Overview of our method. \uline{Contributor}~(left): Each contributor utilizes local data to train several components: the PEFT module (comprising $\mathtt{A_i}$ and $\mathtt{B_i}$), task vectors ($\mathtt{v_i}$), and global routing vectors ($\mathtt{g_i}$). For the latter, an LLM is employed to generate semantically-informed instructions based on $3$ randomly selected examples, which are then embedded into $\mathtt{g_i}$.  \uline{Aggregator}~(right): The aggregator utilizes local and global task vectors to construct local routers $ [ \bar{\mathtt{v}}^\mathtt{1}; \hdots; \bar{\mathtt{v}}^\mathtt{N}]$ and a global router $[\mathtt{g}^\mathtt{1}; \hdots; \mathtt{g}^\mathtt{N}]$, respectively. For each query, the global router uses an LLM-generated instruction embedding to produce the global routing score. This score is then scaled and combined with the local routing score, enabling fine-grained control over expert selection.
+    } 
+    \label{fig:overview}
+\end{figure}
+
+\label{sec:introduction}
+The emergence of highly capable large language models~(LLMs) has marked an increased attention in downstream task specialization. This specialization often leverages parameter-efficient fine-tuning (PEFT) techniques, such as LoRA~\citep{hu2021lora}, which introduce minimal trainable parameters (``adapters") to adapt pre-trained LLMs for specific tasks. The compact size of these specialized PEFT modules enables easy sharing of these modules, which has led to the distribution of an evergrowing number of adapters on various platforms. 
+
+This proliferation of expert models, \textit{i.e.}~specialized adapters, has led to the development of methods for re-using such experts to improve performance or generalization~\citep{muqeeth2024learning,ostapenko2024towards,huang2024lorahub}. Central to these approaches are routing mechanisms that adaptively select relevant experts for a particular task or query. These routing methods have been referred to as ``Model MoErging”~\citep{yadav2024moergingsurvey} since they frequently share methodologies and ideas with mixture-of-experts (MoE) models~\citep{shazeer2017outrageously,fedus2022switch,du2022glam} and model merging~\citep{yadav2023ties,yadav2023compeft,ilharco2022editing}. However, MoE methods that train experts jointly from scratch~\citep{gupta2022sparsely} while MoErging utilizes a decentralized, community-sourced pool of pre-trained experts. Furthermore, it departs from traditional model merging techniques by dynamically and adaptively combining these experts, optimizing performance at the query or task level.
+MoErging methods offer three key advantages: ($1$) They support decentralized model development by reusing and routing among independently trained experts, reducing reliance on centralized resources. ($2$) They facilitate modular capability expansion and ``transparency" in updates as they either add or modify specialized expert models.
+3) They allow for compositional generalization by recombining fine-grained skills from various experts, extending the system's abilities to new unseen tasks beyond the capabilities of the individual expert models.
+
+Most existing methods for MoErging often prioritize performance on either known expert tasks (held-in) or generalization to unseen tasks (held-out) depending on their use cases~\citep{chronopoulou2023adaptersoup,muqeeth2024learning,zhao2024loraretriever}. 
+This specialization limits practical applicability, as real-world deployments demand robust performance across both held-in and held-out tasks. Consequently, existing methods exhibit suboptimal performance when evaluated on both held-in and held-out tasks, often leading to suboptimal overall performance.
+For example, while Phatgoose~\citep{muqeeth2024learning} demonstrate strong performance on held-out data, they do not perform well on held-in tasks.
+We hypothesize that this gap arises from the model's token-level routing mechanism. We show that for the held-in tasks the independent routing decisions at each layer, based solely on individual token embeddings, lack sufficient global context to retrieve the correct expert for all token at every module. 
+This leads to suboptimal routing which may propagate noise through the network, further hindering accurate expert utilization in deeper layers. 
+This highlights a critical limitation of token-level approaches to handling both held-in tasks, which hence falls short of the goal of building a routing system that seamlessly handles arbitrary queries.
+We believe that adding a global routing mechanism based on semantic task information can further aid the token level router for correct retrieval for held-in tasks. Hence, we ask the question. 
+\begin{tcolorbox}[before skip=0.2cm, after skip=0.2cm, boxsep=0.0cm, middle=0.2cm, top=0.2cm, bottom=0.2cm]
+\textit{\textbf{(Q)}} \textit{Can we leverage LLMs to generate semantics-aware task instructions to guide routing mechanism to facilitate both specialization and generalization?}
+\end{tcolorbox}
+This paper addresses the challenges by investigating the potential of leveraging the inherent reasoning and generalization capabilities of LLMs to guide the routing process in an MoE-like model composed of specialized LoRA modules. We introduce, \methodlong{} (\method{}) that hinges on a multi-scale routing mechanism that contains both local and global routers as shown in Figure~\ref{fig:overview}. This high-level guidance is then complemented by a learned local router, which makes token-level routing decisions at each module, enabling fine-grained control and improving performance on the challenging held-out tasks. Through this framework, we highlight the crucial role of LLM reasoning in unlocking the compositional generalization capabilities of MoE models.
+
+To test the effectiveness of our \method{} method, we follow Phatgoose~\citep{muqeeth2024learning} and use T5 models~\citep{raffel2020exploring} to create expert models for T0 held-in~\citep{sanh2022multitask} and FLAN tasks~\citep{longpre2023flan} and test performance on T0 held-in \& held-out~\citep{sanh2022multitask} and big-bench lite~\citep{srivastava2023beyond} \& hard tasks~\citep{suzgun2022challenging}. 
+Our key contributions and findings are:
+\begin{itemize}[nosep]
+    \item We introduce \method{}, which employs LLM-guided multi-scale global and local attention. Our experiments show that \method{} outperforms previous methods, significantly improving performance on held-in tasks (\textit{e.g.} $6.6\%$ over Phatgoose on T0 held-in) while also enhancing zero-shot held-out compositional generalization (\textit{e.g.} $0.9\%$ over Phatgoose on T0 held-out).
+   \item We find that without LLM assistance, MoE models underperform individual specialized models on held-in tasks by $8.2\%$. Incorporating semantic-aware instructions enables \method{} to achieve comparable performance, demonstrating the LLM's capacity to effectively infer task identity and guide module selection without explicit task labels.
+    \item \method{} also maintains strong performance on held-out tasks, showcasing its adaptability and generalization capabilities. Our work highlights the critical role of LLMs in enhancing MoE models' compositional generalization, advancing the development of more robust and versatile AI systems capable of handling both familiar and novel tasks.
+
+\end{itemize}
+
+
+
+\section{Related Works}
+
+
+\paragraph{MoErging Methods.} The abundance of specialized expert models has spurred the development of techniques to leverage ``experts" models for enhanced performance and generalization. \citet{yadav2024moergingsurvey} in their recent survey called such techniques as ``MoErging" \footnote{See e.g. \url{https://huggingface.co/spaces/open-llm-leaderboard/open_llm_leaderboard}} methods which rely on adaptive routing mechanisms to select relevant experts for specific tasks or queries.
+These methods can be broadly classified into four categories based on the design of their routing mechanisms.
+
+$\mathtt{Embedding-Based~Routing:}$ This category encompasses methods that derive routing decisions from learned embeddings of expert training data. These methods typically compare a query embedding against the learned expert embeddings to determine the optimal routing path.  Examples include AdapterSoup~\citep{chronopoulou2023adaptersoup}, Retrieval of Experts~\citep{jang2023exploring}, Token-Level Adaptation~\citep{belofsky2023tokenlevel}, LoraRetriever~\citep{zhao2024loraretriever}, Mo'LoRA~\citep{maxine2023llama}, the embedding-based approach of Airoboros~\citep{durbin2024airoboros}, and Dynamic Adapter Merging~\citep{cheng2024dam}. 
+
+$\mathtt{Classifier-Based~Routing:}$ This category consists of methods that train a router to function as a classifier. This router is trained to predict the optimal routing path based on features extracted from expert datasets or unseen data.  Representative methods in this category include Zooter~\citep{lu2023routing}, Branch-Train-Mix~\citep{sukhbaatar2024branch}, Routing with Benchmark Datasets~\citep{shnitzer2023large}, Routoo~\citep{mohammadshahi2024leeroo}, and RouteLLM~\citep{ong2024routellmlearningroutellms}.  The key distinction between embedding-based and classifier-based routing lies in the router's architecture and training methodology. While embedding-based routing often employs a nearest neighbor approach, classifier-based routing typically relies on logistic regression or analogous classification techniques.
+
+$\mathtt{Task-Specific~Routing:}$ This category focuses on methods tailored to enhance performance on specific target tasks. These methods learn a task-specific routing distribution over the target dataset to optimize performance for the given task. Methods in this category include LoraHub~\citep{huang2023lorahub}, LoRA-Flow~\citep{wang2024lora}, AdapterFusion~\citep{pfeiffer2020adapterfusion}, $\pi$-Tuning~\citep{wu2023pi}, Co-LLM~\citep{shen2024learning}, Weight-Ensembling MoE~\citep{tang2024wemoe}, MoLE~\citep{wu2024mole}, MeteoRA~\citep{Xu2024MeteoRAME}, PEMT~\citep{lin2024pemt}, MixDA~\citep{Diao2023MixtureofDomainAdaptersDA}, and Twin-Merging~\citep{lu2024twin}.
+
+$\mathtt{Routerless~Methods:}$ This final category encompasses methods that do not rely on an explicitly trained router. Instead, these methods often employ alternative mechanisms, such as heuristics or rule-based systems, for routing decisions. Examples include Arrow $\nearrow$~\citep{ostapenko2024towards}, PHATGOOSE~\citep{muqeeth2024learning}, the ``ask an LLM" routing of Airoboros~\citep{durbin2024airoboros} and LlamaIndex~\citep{liu2024llamaindex}.
+
+\paragraph{Model Merging.} Model merging~\citep{yadav2023ties,choshen2022fusing,wortsman2022model,rame2022recycling,matena2022merging,ilharco2022editing,tam2023merging,jin2022dataless,yang2023adamerging} consolidates multiple independently trained models with identical architectures into a unified model that preserves individual model capabilities. While simple parameter averaging suffices for models within a linearly connected low-loss parameter space~\citep{mcmahan2017communication,stich2018local,frankle2020linear, wortsman2021learning}, more sophisticated techniques are necessary for complex scenarios. For instance, task vectors facilitate merging expert models trained on diverse domains~\citep{ilharco2022editing}. Additionally, methods like weighted merging using Fisher Importance Matrices~\citep{matena2022merging, tam2023merging} and TIES-Merging, which addresses sign disagreements and redundancy~\citep{yadav2023ties} offers improved performance. As a non-adaptive expert aggregation method, merging serves as a fundamental baseline for numerous Model Editing with Regularization (MoErging) techniques.
+\paragraph{Multitask Learning (MTL).} research offers valuable insights for decentralized development. Notably, investigations into task-relatedness~\citep{standley2020tasks, bingel2017identifying, achille2019task2vec, vu2020exploring, Zamir2018TaskonomyDT, Mou2016HowTA} provide guidance for designing routing mechanisms, while MTL architectures addressing the balance between shared and task-specific knowledge~\citep{Misra2016CrossStitchNF, Ruder2017LatentMA, Meyerson2017BeyondSH, Zaremoodi2018AdaptiveKS, Sun2019AdaShareLW} offer strategies for combining expert contributions in a decentralized manner.
+
+\paragraph{MoE for Multitask Learning.} Recent research has extensively investigated mixture-of-experts (MoE) models for multitask learning, achieving promising results in unseen task generalization. These approaches generally fall into two categories: ($1$) Example Routing: Studies like \citet{muqeeth2023soft, zadouri2023pushing, wang2022adamix} train routers to dynamically select experts for each input, while \citet{caccia2023multi} demonstrate the efficacy of routing at a finer granularity by splitting expert parameters into blocks.  ($2$) Task Routing:  \citet{ponti2023combining} employs a trainable skill matrix to assign tasks to specific parameter-efficient modules, while \citet{gupta2022sparsely} leverages task-specific routers selected based on domain knowledge. \citet{ye2022eliciting} proposes a layer-wise expert selection mechanism informed by task representations derived from input embeddings. Such approaches leverage task-specific representation to allow the router to effectively select the most suitable experts for unseen tasks. While these studies differ from our setting by assuming simultaneous data access, they offer valuable insights applicable to our exploration of  creating routing mechanisms over expert models.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=1\textwidth]{figs/routing.pdf}
+    \caption{We present routing heatmaps for \method{} and Phatgoose on two held-in and two held-out tasks. For held-in tasks, oracle experts are marked with red dashed lines. \method{} selects oracle experts more frequently than Phatgoose for held-in tasks, leading to improvements of $3.3\%$ on CommonGen and $6.5\%$ on PAWS. For held-out tasks, \method{} also tends to select the most relevant experts across most LoRA modules, resulting in improvements of $2.2\%$ on COPA and $5.8\%$ on StoryCloze.}
+    \label{fig:routing-heatmap}
+\end{figure}
+
+
+
+\section{Problem Statement}
+
+\label{sec:problem_statement}
+In our work, we aim to build a routing mechanism capable of performing well on diverse queries from various tasks, including both seen and unseen tasks. For each query/token and module, this routing mechanism dynamically selects a model from a large pool of specialized expert models to achieve high performance. 
+To facilitate modular development, we adopt a \textit{contributor-aggregator} framework~\citep{yadav2024moergingsurvey} where individual contributors create specialized expert models from a generalist model for their respective tasks and distribute these models to others for public usage. The aggregator builds a routing mechanism over the expert models that shared by the contributor to direct queries to the most relevant experts. 
+Following recent works~\citep{muqeeth2024learning,ostapenko2024towards}, we use parameter-efficient finetuning (PEFT)~\citep{liu2022few,Sung2022LST,poth2023adapters} methods like LoRA~\citep{lora} to train the expert models. Since PEFT typically has lower computational and communication costs than full-model finetuning~\citep{lora,liu2022few}, the use of PEFT makes it easier to participate and contribute. PEFT methods introduce modules throughout the model – for example, LoRA~\citep{lora} introduces a low-rank update at every linear layer in the model. We refer to each of these updates as a \textit{module}. 
+Subsequently, the trained expert models and additional information are shared with the aggregators. The aggregator's job is to collect these expert models and the additional information and design the post-hoc routing mechanism. This mechanism will effectively direct incoming queries to the most appropriate expert model for each token and at each module to ensure optimal performance on both seen and unseen tasks. This approach allows for the seamless integration of new capabilities by adding expert models to the existing pool. Next, we formally define our contributor-aggregator framework. 
+
+
+Let us assume that there are $N$ contributors, $\{c_1, c_2, \hdots, c_\mathtt{N}\}$, and each contributor $c_i$ has access to a task-specific datasets $\mathcal{D}_i$. Each contributor, $c_i$, follows the predefined training protocol $\mathcal{T}$ provided by the aggregator.
+The training protocol ($\mathcal{T}$) takes in a base model ($\boldsymbol{\theta}_\textrm{base}$) and a dataset ($\mathcal{D}_i$). It returns the expert model parameters ($\phi_{i}$) along with any additional information ($\Psi_{i}$) that needs to be shared with the aggregators, for example, the gate vectors described in \Cref{ssec:expert_training_protocol}. Specifically, $\{\phi_{i},~\Psi_{i}\} \leftarrow \mathcal{T}(\boldsymbol{\theta}_\textrm{base}, \mathcal{D}_i)$.  
+All contributors share this information with the aggregator, which creates a pool of models containing $\{(\phi_i, \Psi_i)\}_{i=1}^\mathtt{N}$. The aggregators ($\mathcal{A}$) then uses these expert models and the auxiliary information to create a routing mechanism $\mathcal{R}(.)$ that takes the user query $q$ as the input and return routing path describing how the information is routed through the given set of expert models. Formally, $\mathcal{R}(.) \leftarrow \mathcal{A}(\{(\phi_i, \Psi_i)\}_{i=1}^\mathtt{N})$. The function $\mathcal{R}(.)$ describe the full path of input query by making various choices about 1) expert input granularity, choosing to route per-token, per-query, or per-task, 2) expert depth granularity, opting for either per-module or model-level routing, and 3) selecting between sparse or dense routing. Finally, the aggregator uses the routing mechanism to answer incoming queries.  
+
+
+
+
+
+\section{Methodology}
+
+\label{sec:method}
+
+To recap, our goal is to build a MoErging method that dynamically routing queries to a diverse pool of specialized expert models, addressing the challenge of effectively handling queries from various tasks and ensuring both held-in and held-out performance. Our proposed method, \methodlong{} (\method{}), leverages a combination of local and global routing vectors to achieve this goal. Specifically, contributors train task-specific routing vectors, while a large language model (LLM) generates a global semantic task instructions which are then converted to global instruction routing vectors.  During inference, these local and global routing vectors are combined to perform top-k discrete routing, directing queries to the most suitable expert model. This process is visualized in Figure~\ref{fig:overview} and described in detail below. 
+
+\subsection{Expert Training Protocol} \label{ssec:expert_training_protocol}
+Our expert training protocol $\mathcal{T}$ takes as input the base model parameters, $\theta_\textrm{base}$, and a dataset $\mathtt{d}$ and performs three steps to obtain the required output. First, we train the LoRA experts ($\phi$), then train the local routing vectors ($\mathtt{l}$) while keeping the LoRA experts fixed. Finally, we train obtain the global routing vector ($\mathtt{g}$) by using an LLM and an embedding model. Formally, in our case, $\phi,~\Psi = \{\mathtt{l}, \mathtt{g}\} \leftarrow \mathcal{T}(\theta_\textrm{base}, \mathtt{d})$ which are then shared with the aggregators to create the routing mechanism. We described these steps in detail below.
+
+\paragraph{PEFT Training of Expert Model.} 
+\method{} is compatible with expert models trained using parameter-efficient finetuning methods (\textit{e.g.} LoRA~\citep{lora}, Adapters~\citep{houlsby2019parameter}) that introduce small trainable modules throughout the model. We focus on PEFT experts because they typically have lower computational and communication costs than full-model finetuning~\citep{yadav2023compeft}, making it easier to train and share expert models. Following Phatgoose~\citep{muqeeth2024learning}, this work specifically focuses in LoRA~\citep{lora} due to its widespread use. 
+LoRA introduces a \underline{\textit{module}} comprising the trainable matrices $\mathtt{B}\in \mathbb{R}^{\mathtt{d} \times \mathtt{r}}$ and $\mathtt{A} \in \mathbb{R}^{\mathtt{r} \times \mathtt{n}}$ in parallel to each linear layer with parameters $\mathtt{W} \in \mathbb{R}^{\mathtt{d} \times \mathtt{n}}$. Given the $\mathtt{t}^{\text{th}}$ input token activation $\mathtt{u_i}$, LoRA modifies the output of the linear layer from $\mathtt{Wu_i}$ to $\mathtt{Wu_i + \frac{\alpha}{r} * BAu_i}$ where $\mathtt{\alpha}$ is a constant and usually is set to $\mathtt{1}$. During training, the matrices $\mathtt{A}$ and $\mathtt{B}$ are trainable while the original linear layer $\mathtt{W}$ is kept frozen. We denote the final trained expert parameters with $\phi = \{(\mathtt{A_1}, \mathtt{B_1}), \hdots, (\mathtt{A_m}, \mathtt{B_m})\}$, where $\mathtt{m}$ is the number of modules in the model.
+
+\paragraph{Training Local Routing Vectors.} 
+
+Following Phatgoose~\citep{muqeeth2024learning}, after training the PEFT modules on their dataset, a local router is introduced before each PEFT module. This router, employing a shared vector across all queries and tokens, dynamically determines the utilization of the PEFT module based on the input token activations. The router is trained for a small number of steps using the same dataset and objective as the PEFT module, while keeping the expert PEFT parameters fixed. This process effectively learns to associate the token activation patterns with the learned expert model. For LoRA, the local router, represented by a trainable vector  $\mathtt{v} \in \mathbb{R}^{\mathtt{d}}$, controls the contribution of the PEFT module to the final output. This results in a modified linear layer of the form $\mathtt{Wu_i + \frac{\alpha}{r} * BAu_i * \sigma(v^\mathsf{T}u_i)}$, where $\mathtt{\alpha}$, $\mathtt{W}$, $\mathtt{B}$, and $\mathtt{A}$ are frozen, and the local router $\mathtt{v}$ is learned. We denote the final local routing vectors as $\mathtt{l} = \{\mathtt{v_1}, \hdots, \mathtt{v_m}\}$ where $\mathtt{m}$ is the number of modules in the model.
+
+\paragraph{Creating LLM-Aided Global Routing Vector.} 
+The local routing vectors capture the intricate relationships between token activations and expert models, enabling efficient query routing in cases where no dedicated expert is available. Conversely, for queries corresponding to held-in tasks, direct retrieval of the relevant expert model is preferred to process the full query. For this purpose, we create a global routing vector that utilizes an LLM to generate a semantically-informed instruction, termed as \underline{task description}, which effectively captures the essence of the kind of queries the expert can handle. We prompt an LLM with three randomly selected in-context examples to generate this task description. The resulting task description is then embedded using an off-the-shelf embedding model, specifically the \texttt{nomic-embed-text-v1.5} model, to produce a global routing vector for the task. We denote the global routing vector as $\mathtt{g} \in \mathbb{R}^{\mathtt{d_g}}$. 
+
+
+\subsection{\method{}: Inference Expert Aggregation Phase}
+
+Following training, all contributors share their expert models along with the auxiliary information comprising of the local and global routing vectors, $\{\mathtt{\phi^t},~\mathtt{l^t},~\mathtt{g^t}\}_{\mathtt{t=1}}^{\mathtt{N}}$ with the aggregators. The \method{} method subsequently leverages this information to perform inference on arbitrary queries.
+\paragraph{Local Router.} Before each input module $\mathtt{m}$, a separate local router $\mathtt{L}_{\mathtt{m}} \in \mathbb{R}^{\mathtt{N \times d}}$ is inserted to make local per-token, per-module routing decisions. For a given module $\mathtt{m}$ and expert model $\mathtt{c}$, we first standardize the task-specific local routing vectors $\mathtt{v_m^c}$ by subtracting its mean and dividing by the standard deviation to obtain $\bar{\mathtt{v}}_\mathtt{m}^\mathtt{c}$. Next, we obtain the local router for module $\mathtt{m}$ by stacking these standardised local routing vectors as $\mathtt{L}_{\mathtt{m}} = [ \bar{\mathtt{v}}_\mathtt{m}^\mathtt{1}; \hdots; \bar{\mathtt{v}}_\mathtt{m}^\mathtt{N}] \in \mathbb{R}^{\mathtt{N \times d}}$. Next, for each token $\mathtt{i}$ with activation $\mathtt{u_i}$ coming into module $\mathtt{m}$, we standardise it to obtain $\bar{\mathtt{u}}_\mathtt{i}$. We then compute the local affinity scores, $\mathtt{s}^\mathtt{loc}_{\mathtt{m}} \in \mathbb{R}^{\mathtt{N}}$ between the local router $\mathtt{L}_{\mathtt{m}}$ and $\mathtt{u_i}$ as $\mathtt{s}^\mathtt{loc}_{\mathtt{m}} = \texttt{cos-sim}(\mathtt{L}_{\mathtt{m}}, \mathtt{u_i})$.
+
+\paragraph{Global Router.} 
+The global router aims to capture task semantics to retrieve relevant experts for any given input query. We create the global router $\mathtt{G} \in \mathbb{R}^{\mathtt{N \times d_g}}$ by stacking the global routing vectors from all the expert models as $\mathtt{G} = [\mathtt{g}^\mathtt{1}; \hdots; \mathtt{g}^\mathtt{N}]$.  This router is not a part of the base model and is added before the model to independently process the fully query. We then embed this task description using the same embedding model (\texttt{nomic-embed-text-v1.5}) to obtain the vector $\mathtt{q_u} \in \mathbb{R}^{\mathtt{d_g}}$. We then compute the global affinity score, $\mathtt{s}^{\mathtt{glob}} \in \mathbb{R}^{\mathtt{N}}$, by computing the cosine similarity as $\mathtt{s}^{\mathtt{glob}} = \texttt{cos-sim}(\mathtt{G}, \mathtt{q_u})$.
+
+
+\paragraph{Combining Global and Local Router.} At each module $\mathtt{m}$, we have the global and local affinity scores $\mathtt{s}^\mathtt{glob}$ and $\mathtt{s}^\mathtt{loc}_{\mathtt{m}}$ respectively. Following Phatgoose~\citep{muqeeth2024learning}, we scale the local scores with a factor of $1/\sqrt{\mathtt{N}}$. However, the global router's main goal is to retrieve the correct expert for the held-in tasks. Therefore, we first check if the expert with the highest global affinity score ($\texttt{max}(\mathtt{s}^\mathtt{glob})$) is above a threshold ($\mathtt{p}$). If such experts exist, then we set a high $\alpha$ to enforce retrieval and vice versa. Hence, we propose to scale the global scores with $\alpha$, where $\alpha = \gamma * \mathbb{I}_{\{\texttt{max}(\mathtt{s}^\mathtt{glob}) - \mathtt{p} > 0\}} + \beta$, where $\mathtt{p}$ is the cosine similarity threshold, and $\gamma$ and $\beta$ are scaling hyperparameters. Using our ablation experiments in Section~\ref{sec:ablation}, we set $\mathtt{p}=\mathtt{0.8}$, $\gamma = 100$ and $\beta=3$. 
+We then obtain the final affinity score $\mathtt{s} \in \mathbb{R}^{\mathtt{N}} = \alpha * \mathtt{s}^\mathtt{glob}$ + $\mathtt{s}^\mathtt{loc}_{\mathtt{m}} / \sqrt{\mathtt{N}}$. Then \method{} selects the top-$\mathtt{k}$ experts after performing \texttt{softmax} over the final affinity score $\mathtt{s}$ as $\mathcal{E}_{\mathtt{top}}$ = \texttt{top}-$\mathtt{k}(\texttt{softmax}(\mathtt{s}))$. 
+Finally, the output of the module for token activation $u_i$ is computed as $\mathtt{Wu_i} + \sum_{\mathtt{k} \in \mathcal{E}_\mathtt{top}} \mathtt{w_{k}* B_kA_ku_i}$. 
+
+
+
+\section{Experiments}
+
+
+\subsection{Setting}
+
+\paragraph{Dataset.}
+
+Our experiments utilize the multitask prompted training setup introduced by \citet{sanh2021multitask}, which has become a standard benchmark for evaluating generalization to unseen tasks \citep{chung2022scaling,longpre2023flan,jang2023exploring,zhou2022not}. Following Phatgoose~\citep{muqeeth2024learning}, we employ LM-adapted T5.1.1 XL~\citep{lester2021power} as our base model which is a 3B parameter variant of T5~\citep{raffel2020exploring} further trained on the C4 dataset using a standard language modeling objective. For held-out evaluations, we follow Phatgoose~\citep{muqeeth2024learning} and use three held-out benchmark collections. We use the T0 held-out (T0HO) datasets used in~\citet{sanh2021multitask} and the two subsets of BIG-bench~\citep{srivastava2023beyond}. Specifically, we use BIG-bench Hard (BBH)~\citep{suzgun2022challenging}, consisting of 23 challenging datasets, and BIG-bench Lite (BBL)~\citep{srivastava2023beyond}, a lightweight 24-dataset proxy for the full benchmark. Similar to \citet{muqeeth2024learning}, we exclude certain BIG-bench datasets due to tokenization incompatibility with the T5 tokenizer.
+
+\paragraph{Expert Creation.}
+To create the pool of expert module for routing, we follow \citet{muqeeth2024learning} and use two distinct dataset collections: \ding{182} T0 Held-In~\citep{sanh2021multitask} consisting of the 36 held-in prompted datasets for tasks from the T0 training procedure. \ding{183} The ``FLAN Collection"~\citep{longpre2023flan} which significantly expands the T0 tasks by incorporating prompted datasets from SuperGLUE~\citep{wang2019superglue}, Super Natural Instructions~\citep{wang2022super}, dialogue datasets, and Chain-of-Thought datasets~\citep{wei2022chain}. Following \citet{muqeeth2024learning}, we create $\mathtt{166}$ specialized models from the FLAN Collection. For each dataset in these collections, we train Low-Rank Adapters (LoRAs)~\citep{hu2021lora} modules resulting in pools of $\mathtt{36}$ and $\mathtt{166}$ expert models for T0 Held-In and FLAN, respectively. Similar to Phatgoose, we use a rank of $r = 16$ and train for $\mathtt{1000}$ steps using the AdamW optimizer~\citep{Loshchilov2017DecoupledWD} with a learning rate of $5 \times 10^{-3}$ and a warmup ratio of $0.06$. After training the LoRA module, we freeze it and train the local routing vectors for an additional 100 steps with the same hyperparameters. Finally, following prior work~\citep{shazeer2016outrageously,du2022glam,lepikhin2020gshard}, \method{} performs top-$k$ routing with $k = 2$.
+\subsection{Baselines}
+
+\textbf{Expert Merging.}
+Model Merging~\citep{yadav2023ties,choshen2022fusing} involves averaging the parameters of multiple models or modules to create a single aggregate model. We merge by multiplying the LoRA matrices and then taking an unweighted average of all the experts within the pool. It is important to note that this merging strategy requires homogeneous expert module architectures; in contrast, \method{} can accommodate heterogeneous expert modules.
+
+\textbf{Arrow.} 
+Following \citet{ostapenko2024towards}, we employ a routing mechanism where gating vectors are derived from LoRA expert modules.  Specifically, the first right singular vector of the outer product of each module's LoRA update ($BA$) serves as its gating vector. Input routing is determined by a probability distribution based on the absolute dot product between the input representation and each gating vector. We utilize top-$k$ routing with $k=2$.
+
+\textbf{Phatgoose.} Phatgoose~\citep{muqeeth2024learning} first learn the LoRA modules for each, followed by learning a sigmoid gating vector similar to our local router. During inference, they make routing decisions for each token independently for all modules. Specifically, they first standardize the input token activations and gating vectors from all experts and then perform similarity-based top-2 routing.
+
+\textbf{LoRA Hub.}
+LoraHub~\citep{huang2023lorahub} method performs gradient-free optimization using few-shot task samples to learn mixing coefficients for different expert models while keeping them fixed. Once the coefficients are learned, they merge the experts with the learned weight and route through the merged expert.
+
+\textbf{Multi-task Fine-Tuning.} 
+While multitask training, a proven method for enhancing zero-shot generalization~\citep{sanh2021multitask,wei2021finetuned}, is infeasible given our problem setting and data access limitations, we include it as a baseline using publicly available models.  Specifically, we utilize the T0-3B model~\citep{sanh2021multitask} for the T0 Held-In datasets, given its training on a matching dataset collection. For FLAN, a directly comparable publicly available model is unavailable; therefore, we report results for FLAN-T5 XL, trained on a different, undisclosed dataset mixture, while acknowledging the limitations of this indirect comparison.
+
+\textbf{Oracle.} 
+Following \cite{jang2023exploring} and \cite{muqeeth2024learning}, we employ an Oracle routing scheme as a performance upper bound. This scheme selects the expert exhibiting optimal performance on a given evaluation dataset, thus representing a non-zero-shot approach.
+
+\subsection{Main Results}
+
+Table~\ref{tab:main-results} presents the comparison results among our \method{} and six baselines on both held-in and held-out settings. To further illustrate the performance, we also include the results of Oracle Expert, which has extra access to the task identities of expert modules and evaluated datasets and can be regarded as an \textit{upper bound}.
+
+\paragraph{T0 Setting.} In the T0 task set, the following observations can be drawn: \ding{182} For the held-in tasks, \textit{i.e.} T0-HI, \method{} significantly outperforms other baselines and almost matches the performance of Oracle Expert upper bound. \ding{183} For T0-HO and BBL tasks, \method{} achieves the best performance among all the methods, including Oracle Expert upper bound. \ding{184} \method{} has negligible lower performance, \textit{i.e.} $0.01\%$, compared to the Expert Merging baseline in BBH but outperforms it by around $12\%$ on T0-HO and $1.5\%$ on BBL. Besides Expert Merging, \method{} outperforms all other methods on BBH, including the Oracle Expert upper bound.
+
+\begin{table}[t]
+  \centering
+  \caption{Performance evaluated on the T0 set and FLAN set. We present the performance on both held-in tasks (\textit{i.e.} T0-HI) and held-out tasks (\textit{i.e.} T0-HO, BBH, and BBL). We compare the following methods: ($1$) performance upper bound, \textit{i.e.} Oracle Expert; ($2$) zero-shot baselines, \textit{i.e.} Multi-Task Fine-Tuning, Expert Merging, Arrow, and Phatgoose;  ($3$) few-shot baselines, \textit{i.e.} LoRA Hub and \method{}. We mark the best performance besides the upper bound (\textit{i.e.}, Oracle Expert) in \textbf{bold}.}
+   \resizebox{0.75\linewidth}{!}{
+    \begin{tabular}{l|cccc|cc}
+    \toprule
+    \midrule
+    \multirow{2}[2]{*}{\textbf{Method}} & \multicolumn{4}{c|}{\textbf{T0}} & \multicolumn{2}{c}{\textbf{FLAN}} \\
+    & \textbf{T0-HI} & \textbf{T0-HO} & \textbf{BBH} & \textbf{BBL} & \textbf{BBH} & \textbf{BBL}\\
+    \midrule
+    Oracle Expert & \textcolor{gray}{$69.60$} & \textcolor{gray}{$51.60$} & \textcolor{gray}{$34.90$} & \textcolor{gray}{$36.60$} & \textcolor{gray}{$38.90$} & \textcolor{gray}{$45.40$} \\
+    \midrule
+    Multi-Task Fine-Tuning & $55.90$ & $51.60$ & $34.90$ & $36.60$ & $\mathbf{38.90}$ & $\mathbf{45.40}$ \\
+    Expert Merging & $30.73$ & $45.40$ & $\mathbf{35.30}$ & $36.00$ & $34.60$ & $34.00$ \\
+    Arrow & $39.84$ & $55.10$ & $33.60$ & $34.50$ & $30.60$ & $29.60$ \\
+    Phatgoose & $61.42$ & $56.90$ & $34.90$ & $37.30$  & $35.60$ & $35.20$ \\
+    \midrule
+    LoRA Hub & $31.90$ & $46.85$ &
+    $31.35$ & 
+    $31.18$ & $34.50$ & $30.54$   \\
+    \method{} & $\mathbf{68.04}$ & $\mathbf{57.78}$ & $35.29$ & $\mathbf{37.46}$ & $
+    35.07$ & $35.52$  \\
+    \midrule
+    \bottomrule
+    \end{tabular}}
+  \label{tab:main-results}
+\end{table}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/global-routing.pdf}
+    \caption{ Global routing scores for tasks in the T0 set. The red horizontal line indicates our design threshold of $0.8$. Each column represents an evaluated task from {T0-HI, T0-HO, BigBench} using T0 held-in experts. All global routing scores for each task are plotted, corresponding to the $35$ experts in total.}
+    \label{fig:global-routing}
+\end{figure}
+\subsection{Ablation Study and Further Investigation}
+\label{sec:ablation}
+\begin{table}[t]
+    \begin{minipage}{0.46\textwidth}
+      \centering
+      \caption{Ablation on the instruction coefficient $\alpha$. We mark the best performance in \textbf{bold} and the performance corresponding to the selected $\alpha$ by \method{} in \colorbox{cyan!30}{blue}. }
+       \resizebox{\linewidth}{!}{
+        \begin{tabular}{l|cccc}
+        \toprule
+        \midrule
+        \multirow{2}[2]{*}{\textbf{$\alpha$}} & \multicolumn{4}{c}{\textbf{T0}} \\
+        & \textbf{T0-HI} & \textbf{T0-HO} & \textbf{BBH} & \textbf{BBL} \\
+        \midrule
+        $1$ & $62.20$ & $57.04$ & $35.05$ & $\mathbf{37.79}$   \\
+        $3$ & $63.40$ & \colorbox{cyan!30}{$57.78$} & \colorbox{cyan!30}{$\mathbf{35.29}$} & \colorbox{cyan!30}{$37.46$}  \\
+        $10$ & $65.52$ & $\mathbf{57.98}$ & $34.80$ & $37.04$    \\
+        $100$ & \colorbox{cyan!30}{$\mathbf{68.04}$} & $53.22$ & $31.73$ & $34.97$    \\
+        $1000$ & $66.88$ & $52.91$ & $30.71$ & $34.31$    \\
+        $3000$ & $66.69$ & $52.37$ & $30.03$ & $33.24$    \\
+        \midrule
+        \bottomrule
+        \end{tabular}}
+      \label{tab:instruction-coefficient}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.48\textwidth}
+      \centering
+      \caption{Ablation on the routing strategy. \method{} employs \colorbox{gray!20}{$\mathtt{top}\texttt{-}\mathtt{2}$} routing. We mark the best performance among  $\mathtt{top}\texttt{-}\mathtt{k}$ and $\mathtt{top}\texttt{-}\mathtt{p}$ routing in \textbf{bold}, respectively.}
+       \resizebox{\linewidth}{!}{
+        \begin{tabular}{c|cccc}
+        \toprule
+        \midrule
+        \multirow{2}[2]{*}{\textbf{Method}} & \multicolumn{4}{c}{\textbf{T0}} \\
+        & \textbf{T0-HI} & \textbf{T0-HO} & \textbf{BBH} & \textbf{BBL} \\
+        \midrule
+        \texttt{Top-$1$} & $67.96$ & $56.07$ & $33.91$ & $35.82$ \\
+        \rowcolor[gray]{0.9}
+        \texttt{Top-$2$} & $68.04$ & $\mathbf{57.78}$ & $\mathbf{35.39}$ & $37.46$  \\
+        \texttt{Top-$3$} & $\mathbf{68.06}$ & $57.52$ & $35.08$ & $\mathbf{38.55}$  \\
+        \midrule
+        \texttt{Top-$25\%$} & $67.98$ & $56.53$ & $34.10$ & $36.32$  \\
+        \texttt{Top-$50\%$} & $67.95$ & $57.25$ & $35.07$ & $37.49$  \\
+        \texttt{Top-$75\%$} & $\mathbf{68.02}$ & $\mathbf{57.86}$ & $\mathbf{35.38}$ & $\mathbf{38.65}$  \\
+        \midrule
+        \bottomrule
+        \end{tabular}}
+      \label{tab:top-k-routing-ablation}
+    \end{minipage}
+\end{table}
+
+
+\paragraph{Ablation on the global routing scale $\alpha$.} To illustrate how the specialization and generalization abilities change as we scale the coefficient $\alpha$ of the global routing score, we conduct the ablation study of $\alpha$ ranging $\{1, 3, 10, 100, 1000, 3000\}$. As shown in Table~\ref{tab:instruction-coefficient}, we present experimental results of the T0 task set on both held-in and held-out tasks. For held-in tasks, \textit{i.e.}~T0-HI, \method{} can select the optimal $\alpha$ to scale the global routing score. For held-out tasks, \textit{i.e.}~\{T0-HO, BBH, BBL\}, \method{} produce either the optimal $\alpha$~(for BBH) or the sub-optimal $\alpha$ with slightly lower performance to the optimal ones~(for T0-HO and BBL). 
+\paragraph{Ablation on the routing strategy.} There exists a trade-off between performance and efficiency when using different $\mathtt{top}\texttt{-}\mathtt{k}$ routing strategies~\citep{ramachandran2018diversity}. To investigate the impact of routing strategy in \method{}, we evaluate $\mathtt{top}\texttt{-}\mathtt{k}$ routing of $\mathtt{k}$ in $\{1, 2, 3\}$. Moreover, we further evaluate the $\mathtt{top}\texttt{-}\mathtt{p}$ routing~\citep{huang2024hardertasksneedexperts,zeng2024adamoetokenadaptiveroutingnull} of $\mathtt{p}$ in $\{25\%, 50\%, 75\%\}$, where each token selects experts with higher routing probabilities until the cumulative probability exceeds threshold $\mathtt{p}$. As shown in Table~\ref{tab:top-k-routing-ablation}, we can draw the following conclusions: ($1$)~For $\mathtt{top}\texttt{-}\mathtt{k}$ routing, $\mathtt{k}=2$ shows comparable or better performance than $\mathtt{k}=3$, particularly for T0-HO and BBH, while offering improved efficiency. ($2$)~For $\mathtt{top}\texttt{-}\mathtt{p}$ routing, higher $\mathtt{p}$ values consistently yield better performance at the cost of efficiency. Therefore, we use $\mathtt{top}\texttt{-}\mathtt{2}$ routing in \method{} by default.
+
+
+\paragraph{Investigation on the threshold design of global scores.} As described in Section~\ref{sec:method}, we compute the scale $\alpha$ for global scores using the formula $\alpha = \gamma * \mathbb{I}_{\{\texttt{max}(\mathtt{s}^\mathtt{glob}) - 0.8 > 0\}} + \beta$, where we establish a threshold of $0.8$ to differentiate evaluated tasks. Figure~\ref{fig:global-routing} presents the global routing scores for each task in the T0 set to motivate the rationale behind this design. For all \uline{held-in} tasks~(\textit{i.e.}, T0-HI), at least one expert~(typically the oracle expert trained on the evaluated task) achieves global routing scores exceeding $0.8$. Consequently, \method{} applies a higher $\alpha=100$, enabling effective identification of tasks corresponding to a specifically trained expert and enhancing retrieval of this oracle expert. For nearly all \uline{held-out} tasks~(\textit{i.e.}, T0-HO and BigBench), no global routing score surpasses $0.8$, prompting \method{} to utilize a lower $\alpha=3$. Two exceptions among the held-out tasks are \texttt{bbq\_lite\_json} and \texttt{strange\_stories} in BigBench, as shown in the figure, where one score marginally exceeds $0.8$ in each case. For these two, \method{} employs the higher $\alpha=100$, resulting in performance improvements of $1.3\%$ and $2.9\%$ respectively over $\alpha=3$, thus showing the effectiveness of our design.
+
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+This paper introduces \method{}, a novel multi-scale routing mechanism that incorporates both global semantic and local token-level routers. By leveraging the semantic reasoning capabilities of LLMs for global expert selection and refining these choices with a learned local router, \method{} addresses the limitations of existing methods that often perform poorly on held-in tasks. Our empirical evaluation on T0 and FLAN benchmarks, using T5-based experts, demonstrates that \method{} achieves substantial improvements in held-in task performance while maintaining competitive generalization on held-out tasks. These findings suggest that incorporating global semantic task context into routing mechanisms is crucial for building robust and practically useful routing-based systems.
+
+
+
+
+
+
+
+

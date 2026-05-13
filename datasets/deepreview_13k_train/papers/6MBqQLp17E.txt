@@ -1,0 +1,522 @@
+\title{Linear Transformer Topological Masking with Graph Random Features}
+
+\begin{abstract}
+\vspace{-2mm}
+ When training transformers on graph-structured data, incorporating information about the underlying topology is crucial for good performance. 
+\emph{Topological masking}, a type of relative position encoding, achieves this by upweighting or downweighting attention depending on the relationship between the query and keys in a graph. 
+In this paper, we propose to parameterise topological masks as a \emph{learnable function of a weighted adjacency matrix} -- a novel, flexible approach which incorporates a strong structural inductive bias.
+By approximating this mask with \emph{graph random features} (for which we prove the first known concentration bounds), we show how this can be made fully compatible with linear attention, preserving $\mathcal{O}(N)$ time and space complexity with respect to the number of input tokens.
+The fastest previous alternative was $\mathcal{O}(N \log N)$ and only suitable for specific graphs.
+Our efficient masking algorithms provide strong performance gains for tasks on image %, video%
+and point cloud data, including with $>30$k nodes.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Across data modalities, transformers have emerged as a leading machine learning architecture \citep{vaswani2017attention, dosovitskiy2020image, arnab2021vivit}.
+They derive their success from modelling complex dependencies between the tokens using an \emph{attention mechanism}.
+However, in its vanilla instantiation the transformer is a set function, meaning it is invariant to permutation of its inputs. 
+This is often undesireable; e.g.~words tend to be arranged in a particular sequence, and graph nodes are connected to a particular set of neighbours.
+Therefore, it has become standard to modify the attention matrix depending on any underlying structure, building in inductive bias.
+For instance, \emph{causal attention} applies a triangular binary mask to ensure that tokens only attend to preceding elements of the sequence \citep{yang2019xlnet}. 
+Meanwhile, \emph{relative position encoding} (RPE) captures the spatial relationship between the tokens \citep{shaw2018self}.
+In some cases, the queries and keys can be arranged in a graph $\mathcal{G}$ and a function $\mathbf{M}(\mathcal{G})$ can be used to modulate the transformer attention. 
+This is referred to as \emph{topological masking} \citep{choromanski2022block}. 
+It provides a powerful avenue for incorporating structural inductive bias from $\mathcal{G}$ into transformers, in some cases closing the performance gap with the best-customised graph neural networks \citep{ying2021transformers}.
+\pg{Topological masking of low-rank attention}
+Topological masking is simple when the attention is full-rank.
+In this case, the entire attention matrix $\mathbf{A} \in \mathbb{R}^{N \times N}$ (with $N$ the number of input tokens) is materialised in memory, so its individual entries $\mathbf{A}_{ij}$ can be pointwise multiplied by a (fixed or learnable) mask $\mathbf{M}(\mathcal{G})_{ij}$.
+But full-rank attention famously incurs a quadratic $\mathcal{O}(N^2)$ space and time complexity cost, which may become prohibitive on large inputs. 
+This has motivated a number of \emph{low-rank decompositions} of $\mathbf{A}$. 
+These improve scalability by avoiding computing $\mathbf{A}$ explicitly, instead doing so implicitly in feature space. 
+The question of how to perform topological masking in the low-rank setting is challenging and not fully solved.
+Previously proposed algorithms are limited to inexpressive functions $\mathbf{M}$ and restricted classes of graphs $\mathcal{G}$ (e.g.~trees and grids), and are often $\mathcal{O}(N \log N)$ time complexity rather than $\mathcal{O}(N)$ \citep[App.~\ref{app:related_work};][]{choromanski2022block, liutkus2021relative}. 
+Addressing these shortcomings is the chief focus of this manuscript.
+Our central question is:
+\emph{how can we implement efficient yet flexible topological (graph-based) masking of transformer attention, in the low-rank setting where $\mathbf{A}$ is never explicitly instantiated?}
+
+\pg{Graph random features}
+To answer the question posed above, we propose to use \emph{graph random features} (GRFs) \citep{choromanski2023taming, reid2023universal}. 
+GRFs are sparse, randomised vectors whose dot product gives an unbiased estimate of arbitrary functions of a weighted adjacency matrix, a class that captures the structure of $\mathcal{G}$ and is popular in classical graph-based machine learning \citep{smola2003kernels, kondor2002diffusion}. %; they provide a natural choice for topological masking. 
+GRFs have been used for approximate kernelised node clustering and in scalable graph-based Gaussian processes \citep{reid2023quasi,reid2024variance}, but never before in transformers. 
+Advancing understanding of the convergence properties of GRFs is another key goal of this work.
+
+\pg{Our contributions} We present the first known $\mathcal{O}(N)$ algorithm for topological masking of linear attention transformers with general $\mathcal{G}$, using graph random features (Fig.~\ref{fig:overall_schematic}).%and the first concentration inequalities for GRFs.  
+\begin{enumerate}[leftmargin=*, labelsep=1em]
+\item We propose to modulate the transformer attention mechanism with a \emph{learnable function of a weighted adjacency matrix} -- a simple, general topological masking trick which brings a strong inductive bias and substantial improvements to predictive performance. 
+\item For scalability, we replace the exact, deterministic mask with a sparse, stochastic estimate constructed using \emph{graph random features} (GRFs). %This improves efficiency whilst preserving strong gains for image, video and robotics data modalities.
+We use a novel exponential concentration bound to prove that our method is linear time and space complexity with respect to input size, the first known algorithm with this property. 
+\item We demonstrate strong accuracy gains on image %and video
+data, as well as for modelling the dynamics of massive point clouds ($>30$k particles) in robotics applications where efficiency is essential.  
+\end{enumerate}
+
+\begin{figure}
+    \centering \hspace{-50mm}
+    \input{schematic}
+    \caption{Schematic overview. 
+    Regular attention is $\mathcal{O}(N^2)$, with $N$ the number of input tokens. Topological masking modulates $\mathbf{A}$ by a graph function $\mathbf{M}(\mathcal{G})$, improving predictive performance. 
+    Linear attention reduces the time complexity to $\mathcal{O}(N)$ by leveraging a low-rank decomposition. 
+    Our contribution (\textcolor{blue}{blue}) is \emph{the first algorithm to achieve both} -- $\mathcal{O}(N)$ topological masking of low-rank attention -- by approximating $\mathbf{M}(\mathcal{G})$ with graph random features (GRFs).
+    \label{fig:overall_schematic}
+\end{figure}
+
+
+
+\section{Preliminaries}
+
+\pg{Masked attention}
+Denote by $N$ the number of input tokens and $d$ the dimensionality of their latent representations. 
+Consider matrices $\mathbf{Q}, \mathbf{K}, \mathbf{V} \in \mathbb{R}^{N \times d}$ whose rows are given by the query ($\{\boldsymbol{q}_i\}_{i=1}^N$), key ($\{\boldsymbol{k}_i\}_{i=1}^N$) and value vectors ($\{\boldsymbol{v}_i\}_{i=1}^N$) respectively. 
+The \emph{attention mechanism}, a basic processing unit of the transformer, can be written:
+\begin{equation} \label{eq:regular_attention}
+    \textrm{Att}(\mathbf{Q}, \mathbf{K}, \mathbf{V}) \coloneqq \mathbf{D}^{-1}\mathbf{A}\mathbf{V}, \quad \mathbf{A} \coloneqq \mathcal{K}(\mathbf{Q}, \mathbf{K}), \quad \mathbf{D} \coloneqq \mathbf{A} \mathbf{1}_N.
+\end{equation}
+Here, the function $\mathcal{K}$ assigns a similarity score to each query-key pair and $\mathbf{1}_N \coloneqq [1]_{i=1}^N \in \mathbb{R}^N$.
+For regular softmax attention, one simply takes $\mathcal{K}(\mathbf{Q}, \mathbf{K})_{ij} = \exp(\boldsymbol{q}_i^\top \boldsymbol{k}_j)$, optionally also normalising by $d$.
+To incorporate \emph{masking}, we make the modification
+\begin{equation} \label{eq:masking}
+    \mathbf{A}_\mathbf{M} \coloneqq \mathbf{M} \odot \mathcal{K}(\mathbf{Q}, \mathbf{K}),
+\end{equation} 
+where $\mathbf{M}\in \mathbb{R}^{N \times N}$ is a (hard or soft) \emph{masking matrix} and $\odot$ denotes the Hadamard (element-wise) product.
+For softmax, this is equivalent to adding a bias term $b_{ij} \coloneqq \log \mathbf{M}_{ij}$ to $\boldsymbol{q}_i^\top \boldsymbol{k}_j$ before exponentiating.
+As remarked in Sec.~\ref{sec:intro}, this can be used to enforce causality or as a relative position encoding (RPE) \citep{shaw2018self}. %. Position encoding is essential for good transformer performance 
+Taking $\mathbf{M}(\mathcal{G})$ so that attention is modulated by a function of the underlying graph structure is called \emph{topological masking}.
+Topological masking is \emph{not} just a mechanism to sparsify attention for efficiency gains; its goal is to incorporate topological signal from the underlying graph, improving predictive performance via a useful inductive bias. 
+
+\pg{Improving efficiency with low-rank attention}
+The time-complexity of Eq.~\ref{eq:regular_attention} is $\mathcal{O}(N^2)$, which famously limits the ability of regular transformers to scale to long inputs. 
+A leading approach to mitigate this and recover $\mathcal{O}(N)$ complexity is \emph{linear} or \emph{low-rank attention} \citep{katharopoulos2020transformers,choromanski2020rethinking}.
+This takes a feature mapping $\phi: \mathbb{R}^d \to \mathbb{R}^m$ with $m \ll N$ and constructs the matrices $\mathbf{\Phi}_\mathbf{Q} \coloneqq [\phi(\mathbf{q}_i)]_{i=1}^N$ and $\mathbf{\Phi}_\mathbf{K} \coloneqq [\phi(\mathbf{k}_i)]_{i=1}^N$, where $\mathbf{\Phi}_{\mathbf{Q}, \mathbf{K}} \in \mathbb{R}^{N \times m}$. 
+One then defines $\mathcal{K}_\textrm{LR}(\mathbf{Q}, \mathbf{K}) \coloneqq \mathbf{\Phi}_{\mathbf{Q}} \mathbf{\Phi}_{\mathbf{K}}^\top$ and computes 
+\begin{equation} \label{eq:lr_attention}
+    \textrm{Att}_\textrm{LR}(\mathbf{Q}, \mathbf{K}, \mathbf{V}) \coloneqq \mathbf{D}^{-1} \left( \mathbf{\Phi}_{\mathbf{Q}} \left ( \mathbf{\Phi}_{\mathbf{K}}^\top \mathbf{V} \right)\right), \quad \mathbf{D} \coloneqq \mathbf{\Phi}_{\mathbf{Q}} \left( \mathbf{\Phi}_{\mathbf{K}}^\top \mathbf{1}_N \right),
+\end{equation}
+where the parentheses show the order of computation. 
+Exploiting associativity, the time complexity is reduced to $\mathcal{O}(Nmd)$, albeit usually with some sacrifice in performance compared to full-rank softmax attention.
+Different choices of feature maps $\phi$ exist; for example, one can take a \emph{random feature map} that provides a Monte Carlo estimate of the softmax kernel \citep[Performer;][]{choromanski2020rethinking, choromanski2021hybrid, likhosherstov2024dense}, or a deterministic nonlinearity like $\textrm{elu}(x)+x$ \citep[linear transformer;][]{katharopoulos2020transformers}. 
+
+\pg{Efficient masking of low-rank attention}
+As Eq.~\ref{eq:lr_attention} suggests, low-rank attention derives its speed from avoiding computing $\mathbf{A}=\mathcal{K}_\textrm{LR}(\mathbf{Q}, \mathbf{K})$ explicitly, preferring to evaluate faster products like $\mathbf{\Phi}_\mathbf{K}^\top \mathbf{V}$ and $\mathbf{\Phi}_\mathbf{K}^\top \mathbf{1}_N$ first and use them to weight the query features $\mathbf{\Phi}_\mathbf{Q}$.
+This makes the direct Hadamard product implementation of masking in Eq.~\ref{eq:masking} impossible: if the matrix $\mathbf{A}$ is never explicitly materialised in memory, one cannot pointwise multiply each of its elements.
+Algorithms have been proposed to mask \emph{implicitly} (without instantiating $\mathbf{A}$ or $\mathbf{M}$) in very simple cases, e.g.~causal masking \citep{choromanski2020rethinking} or one-dimensional RPE \citep{liutkus2021relative, luo2021stable}.
+Subquadratic implicit masking is also possible when $\mathbf{M}$ is very structured: e.g.~functions of shortest path distance on grid graphs and trees \citep{choromanski2022block}, or of the degrees of the pair of input nodes \citep{chen2024masked}.
+See App.~\ref{app:related_work} for a review.
+However, an $\mathcal{O}(N)$ algorithm capable of masking with flexible functions on general graphs has, until now, remained out of reach.
+
+\pg{Remainder of manuscript} In \textbf{Sec.~\ref{sec:graph_node_kernels}} we parameterise topological masks $\mathbf{M}(\mathcal{G})$ as learnable functions of weighted adjacency matrices, which incorporates strong structural inductive bias into attention and boosts performance. 
+\textbf{Sec.~\ref{sec:masking_implicitly}} shows how this can be implemented \emph{implicitly}, without instantiating $\mathbf{A}$ or $\mathbf{M}$ in memory. 
+\textbf{Sec.~\ref{sec:GRFs}} offers a faster stochastic alternative using GRFs, which we prove is $\mathcal{O}(N)$ time and space complexity.
+\textbf{Sec.~\ref{sec:experiments}} gives experimental evaluations across data modalities, including images %, videos
+and point clouds.
+The \textbf{Appendices} present proofs and extra details too long for the main text, and extended discussion about related work.
+
+
+
+\section{Towards linear topological masking}
+
+This section details our main results.
+Consider an undirected graph \smash{$\mathcal{G}(\mathcal{N},\mathcal{E})$} where \smash{$\mathcal{N}\coloneqq\{v_1,...,v_N\}$} is the set of nodes and $\mathcal{E}$ is the set of edges, with $(v_i,v_j)\in \mathcal{E}$ if and only if there exists an edge between $v_i$ and $v_j$ in $\mathcal{G}$. 
+The size of the graph $N$ corresponds to the number of tokens.
+\subsection{Graph node kernels as topological masks} \label{subsec:graph_node_kernels}
+As remarked above, a common choice for $\mathbf{M}(\mathcal{G})_{ij}$ is a function of the shortest path distance between nodes $v_i$ and $v_j$ \citep{ying2021transformers}.
+Though effective at improving performance, this requires computation for every pair of nodes so it cannot straightforwardly be applied to low-rank attention in a scalable way -- except for special structured $\mathcal{G}$ where the mask becomes simple \citep{choromanski2022block}.  %block-Toeplitz
+Shortest path distances are also very sensitive to changes like the addition or removal of edges, and need access to the whole graph upfront. 
+
+\pg{A new topological mask: graph node kernels} \label{sec:graph_node_kernels}
+Given that we intend $\mathbf{M}(\mathcal{G})_{ij}$ to quantify some sense of topological similarity between $v_i$ and $v_j$, a more principled choice may be \emph{graph node kernels}: positive definite, symmetric functions $k: \mathcal{N} \times \mathcal{N} \to \mathbb{R}$ mapping from pairs of graph nodes to real numbers.
+These are widely used in bioinformatics \citep{borgwardt2005protein}, community detection \citep{kloster2014heat} and recommender systems \citep{yajima2006one}, with more recent applications in manifold learning for deep generative modelling \citep{zhou2020learning} and solving single- and multiple-source shortest path problems \citep{crane2017heat}.
+They are also used to model the covariance function in geometric Gaussian processes \citep{zhi2023gaussian,borovitskiy2021matern}.
+
+Graph node kernels are often parameterised as follows. 
+Let $\mathbf{W} \in \mathbb{R}^{N \times N}$ be a \emph{weighted adjacency matrix}, so that $\mathbf{W} \coloneqq [w_{ij}]_{i,j \in \mathcal{N}}$ with $w_{ij}$ nonzero if and only if $(v_i,v_j) \in \mathcal{E}$. % ($v_i$ and $v_j$ are neighbours in $\mathcal{G}$). 
+A common choice is $w_{ij} = 1/\sqrt{d_id_j}$, with $d_i$ the degree of $v_i$. 
+Then consider the power series
+\begin{equation} \label{eq:power_series}
+    \mathbf{M}_\alpha (\mathcal{G}) \coloneqq \sum_{k=0}^\infty  \alpha_k \mathbf{W}^k
+\end{equation}
+where $(\alpha_k)_{k=0}^\infty \subset \mathbb{R}$ is a set of real-valued Taylor coefficients. 
+This is positive definite if and only if $\sum_{k=0}^\infty \alpha_k \lambda_i^k>0 \hspace{0.2em} \forall \hspace{0.2em} \lambda_i \in \Lambda(\mathbf{W})$, where $\Lambda(\mathbf{W})$ denotes the set of eigenvalues of $\mathbf{W}$. 
+With different choices for $(\alpha_k)_{k=0}^\infty$, Eq.~\ref{eq:power_series} includes many of the most popular graph node kernels in the literature, e.g.~heat, diffusion, cosine and $p$-step random walk. 
+Kernel learning can be implemented by optimising $\alpha_k$ \citep{reid2023universal, zhi2023gaussian}. 
+
+Eq.~\ref{eq:power_series} provides a very effective parameterisation for topological attention masks, striking the right balance between flexibility and hard-coded structural inductive bias.
+In Sec.~\ref{sec:experiments} we will show that it boosts performance compared to unmasked attention.
+However, explicitly computing $\mathbf{M}_\alpha (\mathcal{G}) \in \mathbb{R}^{N \times N}$ and storing it in memory is incompatible with $\mathcal{O}(N)$ low-rank attention. 
+The next section will show how this can be avoided by masking \emph{implicitly}. 
+
+\subsection{Implicit masking with graph features} \label{sec:masking_implicitly}
+Linear attention is fast because it replaces softmax attention \smash{$\exp(\mathbf{q}_i^\top \mathbf{k}_j)$} with a `featurised' alternative \smash{$\phi(\mathbf{q}_i)^\top \phi(\mathbf{k}_j)$}. %, with $\phi(\mathbf{q}_i) \in \mathbb{R}^m$. 
+Can we do the same for $\mathbf{M}_\alpha (\mathcal{G})$? 
+The following is true.
+\begin{remark}[Explicit $N$-dimensional features for graph node kernels \citep{reid2023universal}] \label{rem:feature_mask}
+    There exists a feature matrix $\mathbf{\Phi}_\mathcal{G} \in \mathbb{R}^{N \times N}$ satisfying 
+        $\mathbf{M}_\alpha (\mathcal{G}) = \mathbf{\Phi}_\mathcal{G} \mathbf{\Phi}_\mathcal{G}^\top$,
+    given by $\mathbf{\Phi}_\mathcal{G} \coloneqq \sum_{k=0}^\infty f_k \mathbf{W}^k.$
+\end{remark}
+This is can be shown in a few lines of algebra; see App.~\ref{app:features_remark}. 
+We refer to the rows of the feature matrix $\mathbf{\Phi}_\mathcal{G}$ as \emph{graph features}, letting  $\mathbf{\Phi}_\mathcal{G} \eqqcolon [ \phi_\mathcal{G}(v_i) ]_{i=1}^N$ with $ \phi_\mathcal{G}(v_i) \in \mathbb{R}^N$ the graph feature of node $v_i$.
+For every kernel there trivially exists a feature map \citep{gretton2013introduction}, but unusually in this case it is finite-dimensional and admits a simple closed form. 
+
+Let \smash{$\otimes: \mathbb{R}^m \times \mathbb{R}^N \to \mathbb{R}^{ m\times N}$} denote the \emph{outer product} which maps a pair of vectors to a matrix, and \smash{$\textrm{vec}: \mathbb{R}^{m \times N} \to \mathbb{R}^{mN}$} denote the \emph{vectorising} operation that flattens a matrix into a vector. 
+Then \smash{$\phi(\mathbf{q}_i) \otimes \phi_\mathcal{G}(v_i)$} is an $m \times N$ matrix whose $jk$th element is \smash{$\phi(\mathbf{q}_i)_j   \phi_\mathcal{G}(v_i)_k$, and $\mathrm{vec} \left( \phi(\mathbf{q}_i) \otimes \phi_\mathcal{G}(v_i) \right)$} is an $mN$-dimensional vector whose $(N(j-1) + k)$th entry is \smash{$\phi(\mathbf{q}_i)_j   \phi_\mathcal{G}(v_i)_k$}.
+Observe the following:\footnote{Recall the old adage: the dot product of outer products is the product of dot products.} 
+\begin{equation} 
+\begin{multlined} 
+    \\ = \sum_{k=1}^m \sum_{l=1}^N \phi(\mathbf{q}_i)_k   \phi_\mathcal{G}(v_i)_l \phi(\mathbf{k}_j)_k   \phi_\mathcal{G}(v_j)_l  = \left( \phi(\mathbf{q}_i)^\top \phi(\mathbf{k}_j) \right) \left( \phi_\mathcal{G}(v_i)^\top \phi_\mathcal{G}(v_j)\right) = {\mathcal{K}_\textrm{LR}}_{ij} {\mathbf{M}_\alpha}_{ij}. 
+\end{multlined}
+\end{equation}
+\normalsize
+Hence, taking $\{ \mathrm{vec} \left( \phi( \left \{\mathbf{q}_i, \mathbf{k}_i \right \}) \otimes \phi_\mathcal{G}(v_i) \right) \}_{v_i \in \mathcal{N}} \subset \mathbb{R}^{mN}$ as features, we can compute masked attention implicitly, without materialising $\mathbf{A}$ and $\mathbf{M}_\alpha$. 
+Concretely, we have that: 
+\begin{equation} \label{eq:top_graph_features}
+\mathbf{\Phi}_{\mathbf{Q}, \mathcal{G}}   \mathbf{\Phi}_{\mathbf{K}, \mathcal{G}} ^\top = \mathcal{K}_\textrm{LR} \odot \mathbf{M}_\alpha \quad \textrm{if} \quad
+    \mathbf{\Phi}_{\{\mathbf{Q}, \mathbf{K} \}, \mathcal{G}} \coloneqq \left [   \mathrm{vec} \left( \phi( \left \{ \mathbf{q}_i, \mathbf{k}_i \right \}) \otimes \phi_\mathcal{G}(v_i) \right) \right]_{i=1}^N \in \mathbb{R}^{N \times Nm}.
+\end{equation}
+Masked low-rank attention can then be computed using $\mathbf{\Phi}_{\{\mathbf{Q}, \mathbf{K} \}, \mathcal{G}}$ as the feature matrices:
+\begin{equation} \label{eq:masked_lr_attention}
+    \textrm{Att}_{\textrm{LR}, \mathbf{M}}(\mathbf{Q}, \mathbf{K}, \mathbf{V}, \mathcal{G}) \coloneqq \mathbf{D}^{-1} \left( \mathbf{\Phi}_{\mathbf{Q}, \mathcal{G}} \left ( \mathbf{\Phi}_{\mathbf{K}, \mathcal{G}}^\top \mathbf{V} \right)\right), \quad \mathbf{D} \coloneqq \mathbf{\Phi}_{\mathbf{Q}, \mathcal{G}} \left( \mathbf{\Phi}_{\mathbf{K}, \mathcal{G}}^\top \mathbf{1}_N \right).
+\end{equation}
+
+\pg{Time complexity}
+Eqs \ref{eq:top_graph_features} and \ref{eq:masked_lr_attention} give a recipe for computing 
+masked attention implicitly in feature space, without needing to materialise $\mathbf{A}$ or $\mathbf{M}$ in memory. 
+However, this approach relies on computing the feature matrix \smash{$ \mathbf{\Phi}_{\{\mathbf{Q}, \mathbf{K} \}, \mathcal{G}} \in \mathbb{R}^{N \times Nm}$} and evaluating products like 
+\smash{$\mathbf{\Phi}_{\mathbf{K}, \mathcal{G}}^\top \mathbf{1}_N$}, which still incurs $\mathcal{O}(N^2)$ space and time complexity. 
+For a linear masking algorithm, we must reduce this to $\mathcal{O}(N)$.
+This can be achieved by approximating the features.
+\subsection{Faster implicit masking with graph \underline{random} features} \label{sec:GRFs}
+Our goal is now to replace $\mathbf{\Phi}_{ \{\mathbf{Q}, \mathbf{K}\}, \mathcal{G}}$ by Monte Carlo estimates $\widehat{\mathbf{\Phi}}_{ \{\mathbf{Q}, \mathbf{K}\}, \mathcal{G}}$ that satisfy 
+\begin{equation}
+    \mathbb{E} \left( \widehat{\mathbf{\Phi}}_{ \mathbf{Q}, \mathcal{G}} \widehat{\mathbf{\Phi}}_{ \mathbf{K}, \mathcal{G}}^\top \right) = \mathbf{\Phi}_{\mathbf{Q}, \mathcal{G}}   \mathbf{\Phi}_{\mathbf{K}, \mathcal{G}} ^\top = \mathcal{K}_\textrm{LR} \odot \mathbf{M}_\alpha, \quad \widehat{\mathbf{\Phi}}_{\mathbf{K}, \mathcal{G}}^\top \boldsymbol{v} \sim \mathcal{O}(N) \hspace{1mm} \forall \hspace{1mm} \boldsymbol{v} \in \mathbb{R}^N,
+\end{equation}
+meaning we apply the desired topological mask in expectation but in linear time. 
+This can be achieved using \emph{graph random features} (GRFs) \citep{choromanski2023taming, reid2023universal}.
+
+At a high-level, GRFs can be understood as follows. 
+From Remark \ref{rem:feature_mask}, the graph feature for node $v_i$ is given by \smash{$\phi_\mathcal{G}(v_i) \coloneqq  [ \sum_{k=0}^\infty f_k \mathbf{W}^k_{ij} ]_{j=1}^N$}.
+Since $\mathbf{W}$ is an adjacency matrix, $\mathbf{W}^k_{ij}$ counts the number of graph walks of length $k$ between nodes $i$ and $j$, weighted by the product of traversed edge weights. 
+So $\phi_\mathcal{G}(v_i)_j$ can be interpreted as a weighted sum over \emph{all} walks of any length between nodes $v_i$ and $v_j$, with
+longer contributions suppressed since edge weights are at most $1$ (by normalisation of $\mathbf{W}$).
+GRFs apply importance sampling, approximating this infinite sum by a Monte Carlo estimate \smash{$\widehat{\phi}_\mathcal{G}(v_i)$} using random walks. 
+
+\pg{Using GRFs} Concretely, to build the GRF $\widehat{\phi}_\mathcal{G}(v_i)$ one samples $n$ random walks \smash{$\{ \omega^{(i)}_k \}_{k=1}^n \subset \Omega$} out of node $v_i$, where \smash{$\Omega \coloneqq \left \{(v_i)_{i=1}^l \,|\, v_i \in \mathcal{N}, (v_i,v_{i+1}) \in \mathcal{E}, l \in \mathbb{N} \right \}$} is the set of all walks. 
+Denote by $p(\omega)$ the probability of walk $\omega$ which is known from the sampling mechanism.
+$p(\omega)$ is typically chosen so that walks randomly halt, prioritising sampling lower powers of $\mathbf{W}$ that contribute more to the kernel. 
+    \widetilde{\omega}(\omega) \coloneqq \left \{ \prod_{i=1}^{\textrm{len}(\omega)} \mathbf{W}_{\omega[i]\omega[i+1]} \textrm{ if } \textrm{len}(
+    \omega)>1, \quad 1 \textrm{ otherwise}\right \}, 
+\end{equation}
+where $\textrm{len}(\omega)$ is the number of hops and $\omega[i]$ is the node visited at the $i$th timestep. Then:
+\begin{equation} \label{eq:grf_def}
+    \widehat{\phi}_\mathcal{G}(v_i)_q \coloneqq \frac{1}{n} \sum_{k=1}^n \sum_{\omega_{iq} \in \Omega_{iq}} \frac{\widetilde{\omega}(\omega_{iq}) f_{\textrm{len}(\omega_{iq})}}{p(\omega_{iq})} \mathbb{I}(\omega_{iq} \textrm{ prefix subwalk of } \omega_k^{(i)}), \quad q = 1,...,N,
+\end{equation}
+where $\Omega_{iq}$ denotes the set of all walks between nodes $v_i$ and $v_q$, of which $\omega_{iq}$ is a member.
+`Prefix subwalk' means that the walk \smash{$\omega_k^{(i)}$} beginning at node $v_i$ initially follows the sequence of nodes $\omega_{iq}$, then optionally continues. 
+This complicated notation belies a very simple algorithm: one simulates $n$ random walks out of node $v_i$.
+At every visited node, one adds a contribution to the corresponding GRF coordinate that depends on 1) the product of traversed edge weights, 2) the probability of the subwalk and 3) the function $f$. 
+The result is normalised by dividing by the number of walks $n$.
+ 
+ = {\mathbf{M}_\alpha}_{ij}.$} 
+This follows because \smash{$\mathbb{E} [\mathbb{I}(\omega_{iq} \textrm{ prefix subwalk of } \omega_k^{(i)}) ] = p(\omega_{iq})$}.
+Unbiasedness is one of our required properties; we also need $\widehat{\mathbf{\Phi}}_{\{ \mathbf{Q}, \mathbf{K} \},\mathcal{G}}$ to support $\mathcal{O}(N)$ matrix-vector multiplication.
+We will show this by providing the first known proof that GRFs are \emph{sparse}: \smash{$\widehat{\phi}(v_i)$} has $\mathcal{O}(1)$ nonzero entries $\hspace{0.2em} \forall \hspace{0.2em} v_i \in \mathcal{N}$.  
+It is intuitive that GRFs are sparse. 
+The walk sampler $p(\omega)$ is chosen so that walks are short, e.g.~taking simple random walks with geometrically distributed lengths.  
+From Eq.~\ref{eq:grf_def}, this means that \smash{$\widehat{\phi}_\mathcal{G}(v_i)$} is only nonzero at nodes `close' to $v_i$. Most of its entries are $0$. 
+However, to prove that $\widehat{\mathbf{\Phi}}_{\{ \mathbf{Q}, \mathbf{K} \}\mathcal{G}}$ supports $\mathcal{O}(N)$ matrix-vector multiplication we need to rigorously relate this to the quality of approximation of $\mathbf{M}_\alpha(\mathcal{G})$.
+This requires concentration inequalities for GRFs, but no such bounds were previously known. %, of which none were previously known.
+The following result is novel.
+
+\begin{theorem}[GRF exponential concentration bounds] \label{thm:conc_in}
+    Consider a graph $\mathcal{G}$ with adjacency matrix $\mathbf{W}$ and node degrees $\{d_i\}_{v_i \in \mathcal{N}}$. 
+    Suppose we construct GRFs $\{\widehat{\phi}_\mathcal{G}(v_i)\}_{v_i \in \mathcal{G}}$ by sampling $n$ random walks $\{\omega_k^{(i)}\}_{v_i \in \mathcal{N},\hspace{0.2em} k \in [\![1,n]\!] }$ with geometrically distributed lengths, terminating with probability $p_\textrm{halt}$ at each timestep. 
+    Let 
+       $ c \coloneqq \sum_{k=0}^\infty |f_k| ( \max_{v_i, v_j \in \mathcal{N}} \frac{|\mathbf{W}_{ij}| d_i}{1-p_\textrm{halt}} )^k.$
+    Suppose $c$ is finite, which is guaranteed e.g.~for bounded $f$ and suitably normalised $\mathbf{W}$, or if there exists some $i_\textrm{max} \in \mathbb{N}$ such that $f_i$ vanishes for all $i > i_\textrm{max}$ (see App.~\ref{app:sparse_proof}).
+    Then: 
+   \textrm{\emph{Pr}} \left( |\widehat{\phi}_\mathcal{G}(v_i)^\top \widehat{\phi}_\mathcal{G}(v_j) 
+ - {\mathbf{M}_\alpha}_{ij}| > t \right ) \leq  2 \exp \left( - \frac{t^2 n^3}{2(2n-1)^2 c^4}  \right).
+\end{equation}
+\end{theorem}
+Treat each pair of random walks \smash{$X_k \coloneqq (\omega_k^{(i)}, \omega_k^{(j)}) \in \Omega \times \Omega$}, simulated out of nodes $v_i$ and $v_j$ respectively, as a random variable. 
+Let $k \in [\![1,n]\!] $ so we sample $n$ such pairs of walks in total. 
+Consider modifying one of the pairs of walks. 
+If $c$ is finite, the maximum load it is capable of depositing is finite so we can bound the $L_1$-norm of the contribution made to \smash{$\widehat{\phi}_\mathcal{G}(v_i)$ and $\widehat{\phi}_\mathcal{G}(v_j)$}. 
+This allows us to bound the change in the estimator \smash{$\widehat{\phi}_\mathcal{G}(v_i)^\top \widehat{\phi}_\mathcal{G}(v_j)$} if $X_k$ is modified.
+Applying McDiarmid's inequality, the result follows. \qed
+
+Thm \ref{thm:conc_in} provides an exponential bound on the probability of a topological mask estimate deviating from its true value. 
+Moreover, assuming that $c$ remains constant (i.e.~we fix a maximum edge weight and node degree as the graph grows), this probability is \emph{independent of the number of nodes $N$}. 
+Therefore, if we fix $t$ and the probability $\textrm{Pr}$, we can solve for the minimum number of walkers $n$ to guarantee a good mask estimate with high probability, independent of graph size.
+Now observe the following.
+\begin{lemma}[GRF sparsity] \label{eq:sparsity_lemma}
+    With probability at least $1 - \delta$,  $\widehat{\phi}_\mathcal{G}(v_i)$ will have \smash{$n\log(1 - (1 - \delta)^{1/n})\log(1-p_\textrm{halt})^{-1}$} or fewer nonzero entries.
+\end{lemma}
+\emph{Proof.} 
+Since the walk lengths are geometrically distributed, the probability that a single walk is of length $b$ or shorter is $1 - (1-p_\textrm{halt})^b$. 
+$n$ independent walkers are all $b$ or shorter with probability \smash{$\left( 1 - (1-p_\textrm{halt})^b \right)^n$}. 
+Let this be equal to $1-\delta$ and solve for $b$.
+At most $bn$ entries of \smash{$\widehat{\phi}_\mathcal{G}(v_i)$} can then be nonzero, so the sparsity guarantee follows. \qed
+Lemma \ref{eq:sparsity_lemma} means that, if we fix the number of walkers $n$ (e.g.~using the bound in Eq.~\ref{eq:exp_bound}), we can also bound GRF sparsity with high probability.
+Crucially: the number of nonzero GRF entries is independent of the graph size $N$.
+We conclude the following.
+\begin{corollary}[GRFs implement $\mathcal{O}(N)$ topological masking]
+Suppose we construct a set of graph random features \smash{$\{\widehat{\phi}_\mathcal{G}(v_i) \}_{v_i \in \mathcal{N}}$}, choosing the number of walkers $n$ as described above with $c$, $p_\textrm{halt}$, $\delta$, $t$ and the deviation probability $\textrm{\emph{Pr}} \left( |\phi_\textrm{\emph{GRF}}(v_i)^\top \phi_\textrm{\emph{GRF}}(v_j) 
+ Then the number of nonzero entries in \smash{$\widehat{\mathbf{\Phi}}_{ \{\mathbf{Q}, \mathbf{K} \}, \mathcal{G}} \in \mathbb{R}^{N \times Nm}$} is \emph{linear} in $N$, which means that \textbf{topological masking is implemented with $\mathcal{O}(N)$ time complexity}. 
+\end{corollary}
+The time complexity of the sparse matrix-matrix multiplication \smash{$\widehat{\mathbf{\Phi}}_{\mathbf{K}, \mathcal{G}}^\top \mathbf{V}$} is $\mathcal{O}(Nmd)$ and \smash{$\widehat{\mathbf{\Phi}}_{\mathbf{K}, \mathcal{G}}^\top \mathbf{1}_N $} is $\mathcal{O}(Nm)$.
+Both these time complexities are linear in $N$.
+\qed
+
+\pg{Further comments on theoretical results}
+We have provided the first concentration bounds for GRFs and quantification of the tradeoff between sparsity and kernel approximation quality. 
+These results may be of interest independent from topological masking, e.g.~for applications in scalable geometric Gaussian processes \citep{reid2024variance, borovitskiy2021matern}.
+Thm.~\ref{thm:conc_in} is \textbf{remarkably general}, requiring only the modest assumption about $\mathcal{G}$ and $f$ that $c$ is finite.
+To guarantee $\mathcal{O}(N)$ scaling we assume that $c$ is fixed as $\mathcal{G}$ changes, which is guaranteed by e.g.~fixed maximum node degree and edge weight. 
+Alg.~\ref{alg:main_alg} presents our method.
+The results of Secs \ref{subsec:graph_node_kernels}-\ref{sec:theory} can be intuitively understood as follows (see Fig.~\ref{fig:schematic_2} for an overview). 
+Graph node kernels, which compute an infinite weighted sum of walks between pairs of input nodes, provide an effective RPE mechanism for transformers.
+They capture the topological relationship between queries and keys. %, boosting predictive performance.
+Using graph features, we can implement this implicitly, without needing to actually materialise the mask matrix. 
+Replacing these dense features by graph \emph{random} features, a sparse approximation, we can reduce the cost of implicit masking to $\mathcal{O}(N)$ with low performance loss. 
+Eq.~\ref{eq:exp_bound} gives a remarkably tight bound on the quality of mask estimation.
+Physically, masking with GRFs means that nodes $v_i$ and $v_j$ only attend to one another if members of their respective ensembles of random walks \emph{hit}, such that they visit some of the same nodes.
+This incorporates a strong structural inductive bias from $\mathcal{G}$. 
+It upweights crucial interactions between nearby nodes, whilst also sampling longer-range attention with lower probability. 
+\begin{figure}
+    \centering \hspace{-50mm}
+    \input{schematic2}
+    \caption{Visual overview. 
+    A graph $\mathcal{G}$ (left) has a weighted adjacency matrix $\mathbf{W}$ (centre left). 
+    A learnable power series \smash{$\mathbf{M}_\alpha(\mathcal{G})\coloneqq \sum_{i=0}^\infty \alpha_i \mathbf{W}^i$} is an effective topological mask or graph RPE (centre right).
+    $\mathbf{M}_\alpha(\mathcal{G})$ can be efficiently approximated using graph random features (centre top), which perform importance sampling of halting random walks. 
+    The feature \smash{$\widehat{\phi}_\mathcal{G}(v_i)$} is only nonzero at entries visited by the ensemble of walks beginning at $v_i$.
+    In Thm.~\ref{thm:conc_in}, we prove that the number of such entries is $\mathcal{O}(1)$ whilst still accurately estimating $\mathbf{M}_\alpha(\mathbf{W})_{ij}$ with high probability, so GRFs are sparse.
+    This unlocks $\mathcal{O}(N)$ topological masking. 
+    Note that \smash{$\widehat{\phi}_\mathcal{G}(v_i)^\top \widehat{\phi}_\mathcal{G}(v_j)$} is only nonzero if the features are nonzero at some of the same coordinates, which happens if their respective ensembles of walks `hit'. 
+    This incorporates a strong structural inductive bias. 
+    The equations on the right formalise our method mathematically. 
+    }
+    \label{fig:schematic_2}
+\end{figure}
+
+\pg{Distributed computation, expressivity and GATs}
+Alg.~\ref{alg:main_alg} is simple to distribute for massive graphs that cannot be stored on a single machine; to simulate random walks one only needs a node's immediate neighbours rather than all of $\mathcal{G}$ upfront. 
+This desirable property is not shared by masking algorithms that rely on the fast Fourier transform \citep{luo2021stable, choromanski2022block}. 
+Moreover, our method can distinguish graphs identical under the $1$-dimensional Weisfeiler Lehman graph isomorphism heuristic (with colours replaced by node features) because their adjacency matrices and hence masks differ.
+In this sense, GRF transformers are \emph{more expressive than standard graph neural networks and unmasked transformers}, which notoriously fail this test \citep{morris2019weisfeiler, xu2018powerful}.
+Finally, we remark that our algorithm can be interpreted as a stochastic extension of graph attention networks \citep[GATs;][]{velivckovic2017graph}, with a greater focus on linear attention and scalability.
+Tokens still attend to a subset of other tokens informed by the topology of $\mathcal{G}$, but importance sampling random walks permits interactions beyond nearest-neighbour.
+Incorporating learnable parameters \smash{$(f_i)_{i=0}^{i_\textrm{max}}$} lets us estimate a principled function of $\mathbf{W}$. 
+
+\caption{$\mathcal{O}(N)$ topologically-masked attention for general graphs}\label{alg:main_alg}
+\textbf{Input:} query matrix $\mathbf{Q} \in \mathbb{R}^{N \times d}$, key matrix $\mathbf{K} \in \mathbb{R}^{N \times d}$, value matrix $\mathbf{V} \in \mathbb{R}^{N \times d}$, graph $\mathcal{G}$ with weighted adjacency matrix $\mathbf{W} \in \mathbb{R}^{N \times N}$, learnable mask parameters $(f_i)_{i=0}^{i_\textrm{max}}$, number of random walks to sample $n \in \mathbb{N}$, query/key feature map $\phi(\cdot): \mathbb{R}^d \to \mathbb{R}^m$. \\
+\begin{algorithmic}[1]
+\State \emph{Simulate} $n$ terminating random walks $\{\omega_k^{(i)} \}_{k=1}^n$ out of every node $v_i \in \mathcal{N}$  
+\State \emph{Compute} sparse graph random features $\{\widehat{\phi}_\mathcal{G} (v_i) \}_{v_i \in \mathcal{N}} \subset \mathbb{R}^N$ using the walks $\{\omega_k^{(i)} \}_{k=1}^n$ and learnable mask parameters $(f_i)_{i=0}^{i_\textrm{max}}$
+\State \emph{Compute} the query and key features $\{\phi(\mathbf{q}_i)\}_{i=1}^N$, $\{\phi(\mathbf{k}_i)\}_{i=1}^N $, with $\phi$ the chosen linear-attention nonlinearity (e.g.~$\textrm{elu}(x)+x$ \citep{katharopoulos2020transformers} or a Monte Carlo estimate of softmax \citep{choromanski2020rethinking})
+\begin{equation} \label{eq:masked_lr_attention_2}
+\end{equation} 
+\end{algorithmic}
+\end{algorithm}
+
+
+
+\section{Experiments}
+
+In this section, we test our algorithms for topological masking with GRFs.
+We consider data modalities with different graph topologies: images and point clouds.
+
+\begin{wrapfigure}{r}{0.45\textwidth}
+\includegraphics[width=0.8\linewidth]{iclr2024/images/flops_3.pdf} 
+\end{wrapfigure}
+\textbf{Time complexity.}
+For a hardware-agnostic comparison, we first compute the total number of FLOPs for evaluating (i) unmasked softmax, (ii) unmasked linear and (iii) GRF-masked linear attention for graphs of different sizes $N$. 
+Fig. \ref{fig:flops} shows the results.
+For concreteness we use $1$-dimensional grid graphs, though the theoretical results in Sec.~\ref{sec:theory} are independent of $\mathcal{G}$ (provided $c$ is upper bounded). 
+We take $n=4$ random walkers per node with termination probability $p_
+\textrm{halt}=0.5$.
+The latent dimension is $d=8$ and the feature size is $m=8$. %, taking $\phi(\boldsymbol{x}) = \boldsymbol{x}$ for the query and key features. 
+In the masked case we show the \emph{mean} number of FLOPs over $10$ seeds since GRF sparsity is itself a random variable.
+As anticipated, the time complexity of our mechanism is $\mathcal{O}(N)$; there is a constant multiplicative cost for topological masking.
+We clearly improve upon the time complexity of $\mathcal{O}(N^2)$ softmax attention.
+
+\pg{ViTs: grid graphs and image data}
+Next, we use our topological masking algorithm to improve the vision transformer \citep[ViT; ][]{dosovitskiy2020image}.
+The underlying graph $\mathcal{G}$ is a square grid of size \lstinline{num_x_patches} $\times$ \lstinline{num_y_patches}, with nodes connected by an edge if they are neighbours in $x$ or $y$. 
+Since the graph is fixed, random walks can be pre-computed and frozen for each attention head and layer before training and inference. Full architectural and training details are in App.~\ref{app:experiments}.
+All our ViT models also endow tokens with learned additive absolute position embeddings. 
+
+Table \ref{tab:image_results} shows the final test accuracies for ImageNet \citep{deng2009imagenet}, iNaturalist2021 \citep{inaturalist} and Places365 \citep{places}.
+For the \emph{slow} (superlinear) variants, we include (i) unmasked softmax and (ii) Toeplitz-masked linear \citep{choromanski2022block} attention. 
+Toeplitz can only be used for this specific, structured graph topology.
+We also include (iii) $\mathbf{M}_\alpha(\mathcal{G})$-masked linear, which takes an explicit power series in $\mathbf{W}$ (Eq.~\ref{eq:power_series}) to directly modulate the $N \times N$ attention matrix.
+This is equal to our Monte Carlo GRFs algorithm in the $n \to \infty$ limit, so it indicates the asymptotic performance of GRFs with very many random walkers.
+For the \emph{fast} (linear) variants, we include (iv) unmasked linear and (v) GRF-masked linear attention. 
+Our algorithm gives strong improvements above the unmasked baseline, by $\mathbf{+3.7\%}$, $\mathbf{+2.2\%}$ and $\mathbf{+0.5\%}$ respectively.
+Remarkably, it is competitive with much more expensive variants: GRFs often match or beat Toeplitz.
+\begin{table}[H]
+    \centering
+    \small
+    \begin{tabular}{c c|c| c | c |c } 
+    \toprule
+        & Variant  & Time comp. &  ImageNet & iNaturalist2021 & Places365 (Small) \\ 
+        & & & 1M & 2.7M & 1.8M \\ \midrule
+        \multirow{3}{*}[0ex]{\begin{turn}{90} \textcolor{black!60}{\tiny{SLOW}} \end{turn}} & Unmasked softmax  & $\mathcal{O}(N^2)$ & 0.741 & 0.699 & 0.567 \\ 
+        & Toeplitz-masked linear  & $\mathcal{O}(N \log N)$ & 0.733 & 0.674 & 0.550 \\ 
+        & $\mathbf{M}_\alpha(\mathcal{G})$\textbf{-masked linear}  & $\mathcal{O}(N^2)$ & 0.741 & 0.692 & 0.551 \\ 
+    \midrule
+       \multirow{2}{*}[0ex]{\begin{turn}{90} \textcolor{black!60}{\tiny{FAST}} \end{turn}} & Unmasked linear  & $\mathcal{O}(N)$ & 0.693 & 0.667 & 0.543 \\
+       & \textbf{GRF-masked linear}  & $\mathcal{O}(N)$ &  \textbf{0.730} & \textbf{0.689} & \textbf{0.548} \\ 
+    \bottomrule
+    \caption{Final transformer test accuracies across attention masking variants and datasets. 
+    Our algorithms are shown in \textbf{bold}.
+    Topological masking with GRFs is the \textbf{best $\mathcal{O}(N)$ mechanism}, matching or beating more expensive alternatives.}
+    \label{tab:image_results}
+
+\pg{Ablation studies}
+In App.~\ref{sec:ablations}, we perform ablation studies for the ViT experiments. 
+We find that predictive performance improves with the number of walkers $n$ because the accuracy of the Monte Carlo estimate \smash{$\widehat{\mathbf{M}}_\alpha(\mathcal{G})$} increases.
+Moreover, importance sampling walks is crucial; if we fail to upweight improbable walks, the gains vanish.
+Lastly, the inductive bias from parameterising $\mathbf{M}_\alpha(\mathcal{G})$ as a function of $\mathbf{W}$ is key.
+Fully learnable graph features of the same dimensionality $N$, an impractical and expensive alternative to our method, give much smaller gains.
+
+\pg{PCTs: predicting particle dynamics for robotics}
+As a final task, we use our algorithm to model \emph{high-density visual particle dynamics} \citep[HD-VPD; ][]{whitney2023learning, whitney2024modeling}, predicting the physical evolution of scenes involving a bi-manual robot using a point cloud transformer (PCT). 
+Images from a pair of cameras are unprojected to a set of 3D particles. 
+Their interactions, conditioned on specific robot actions, are modelled by a dynamics network. 
+We predict updates to the latent point cloud, render the result to an image with a conditional NeRF \citep{mildenhall2021nerf}, and train end-to-end with video prediction loss.
+Such learned dynamics models are attracting growing interest in robotics as a more flexible alternative to physical simulators, but to scale to the massive point clouds needed for detailed predictions efficiency and effective structural inductive biases are key.
+
+For the dynamics network, we use an \emph{Interlacer}: a PCT which alternates unmasked linear attention and message passing-style updates between neighbouring particles \citep{whitney2024modeling}.
+This architecture is twice as fast as GNNs with the same prediction quality, and can handle $4 \times$ bigger point clouds. 
+To test the ability of GRFs to efficiently capture local topological structure, we replace message passing by GRF-masked linear attention, taking query/key features $\phi(\cdot) = \textrm{ReLU}(\cdot)$.
+Implementation details for HD-VPD, including the robotic arm and camera configurations, are the same as reported by \citet{whitney2024modeling}; see App.~\ref{app:interlacer} for discussion. 
+To disambiguate, we will refer to our model as the \emph{GRF Interlacer} and Whitney et al.'s as the \emph{message passing (MP) Interlacer}. 
+\def\width{1.5cm}
+\setlength{\tabcolsep}{2pt} % Adjust horizontal padding
+\renewcommand{\arraystretch}{0.8} % Adjust vertical padding
+
+\begin{figure}
+    \centering
+    \begin{tabular}{c!{\vrule width 0.75pt} ccc|ccc} \toprule
+    \makecell{\emph{\small{Groundtruth}} \\ \emph{\small{video frame}}}  &
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/2/00001.jpg}} & 
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/2/00005.jpg}} & 
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/2/00006.jpg}} & 
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/1/00001.jpg}} & 
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/1/00004.jpg}} & 
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/1/00005.jpg}}
+    \\
+    \makecell{\emph{\small{GRF Interlacer}} \\ \emph{\small{prediction}}} &  
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/2/00001_1.jpg}} & 
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/2/00005_1.jpg}} & 
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/2/00006_1.jpg}}  &
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/1/00001_1.jpg}} & 
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/1/00004_1.jpg}} & 
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/1/00005_1.jpg}} 
+    \midrule
+    \makecell{\emph{\small{Groundtruth}} \\ \emph{\small{video frame}}} & 
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/3/00001.jpg}} & 
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/3/00003.jpg}} & 
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/3/00005.jpg}} &
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/4/00001.jpg}} & 
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/4/00004.jpg}} & 
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/4/00005.jpg}} 
+    \\
+    \makecell{\emph{\small{GRF Interlacer}} \\ \emph{\small{prediction}}} & 
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/3/00001_1.jpg}} & 
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/3/00003_1.jpg}} & 
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/3/00005_1.jpg}} & 
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/4/00001_1.jpg}} & 
+    \adjustbox{valign=m}{\includegraphics[width=\width]{iclr2024/final_renderings/4/00004_1.jpg}} & 
+   \makecell{\emph{\small{Timestep}}} & \small{$t$} & \small{$t+\Delta t$} & \small{$t + 2\Delta t$} & \small{$t$} & \small{$t+\Delta t$} & \small{$t+ 2 \Delta t$}
+    \\ \bottomrule
+    \end{tabular}
+    \caption{Rendered rollouts. NeRF renderings of the predictive dynamics of a bimanual Kuka robot, conditioned on the initial scene and sequence of robot actions.
+    We show four tasks: using a dustpan and brush, lifting a can, moving a green block, and dropping a can.
+    GRF Interlacers model point cloud dynamics more accurately, so the predicted frame rendings are closer to the ground truth.}
+\end{figure}
+
+\setlength{\tabcolsep}{3pt} % Adjust horizontal padding
+\renewcommand{\arraystretch}{1.0} % Adjust vertical padding
+
+\begin{wrapfigure}{r}{0.37\textwidth}
+\caption{Accuracy comparison. 
+Structural similarity index measure (SSIM) between ground truth camera frames and predictive NeRF renderings after $100$k training steps, plotted against rollout timestep. Higher is better.
+\end{wrapfigure}
+In contrast to our previous experiments, for HD-VPD the underlying graph $\mathcal{G}$ is no longer fixed so walks cannot be pre-computed.
+Instead, we construct them on the fly, using an approximate $k$-nearest neighbours solver to get adjacency lists of length $k=3$ for each node.
+We use repelling random walks for variance reduction \citep{reid2023repelling}, sampling $3$ hops. 
+For easy integration with existing Interlacer code, we use \emph{asymmetric} GRFs \citep[App.~\ref{app:asymmetric};][]{reid2023universal}. 
+We consider point clouds with $N=32768$ particles, which is too many to explicitly instantiate $\mathbf{A}$ or $\mathbf{M}$ in memory. 
+
+Fig.~\ref{fig:renderings} shows example NeRF renderings of test set predictive dynamics for four rollouts.
+Since the model is deterministic, predictions blur with long time horizons. 
+Incorporating a diffusion head \citep{song2020score} is left to future work.
+Fig.~\ref{fig:ssim_plot} shows predicted video frame accuracy (image SSIM) vs. rollout timestep for each model.
+GRFs outperform the vanilla transformer and MP Interlacer baselines, modelling the particle dynamics more faithfully.
+We include examples of predictive videos in the supplementary material.
+
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Conclusion}
+
+We have presented the first linear algorithm for transformer topological masking on general graphs, based on sampling random walks.
+It uses graph random features, for which we have proved the first known concentration inequalities and sparsity guarantees.
+Our algorithm brings strong performance gains across data modalities, including on massive point clouds with $>30$k particles for which computational efficiency is essential.
+Future work might include improving hardware and libraries for high-dimensional sparse linear algebra to fully benefit from the guaranteed complexity improvements, and investigating whether dimensionality reduction techniques like the Johnson-Lindenstrauss transform \citep{dasgupta_jlt} can be applied to GRFs for further speedups.
+
+\newpage
+
+
+\section{Ethics and reproducibility}
+
+\textbf{Ethics statement}: Our work is foundational with no immediate ethical concerns apparent to us. 
+However, increases in scalability provided by improvements to efficient transformers could exacerbate existing and incipient risks of machine learning, from bad actors or as unintended consequences. 
+
+\textbf{Reproducibility statement}: 
+We have made every effort to ensure the work's reproducibility. 
+The core algorithm is presented clearly in Alg.~\ref{alg:main_alg}.
+Theoretical results are proved with accompanying assumptions in Sec.~\ref{sec:theory} and App.~\ref{app:sparse_proof}.
+Proof sketches are also included for clarity. 
+We will make source code available once accepted.
+Apart from the robotics dataset, all datasets are standard and freely available online.
+Exhaustive experimental details about the training and architectures are reported in App.~\ref{app:experiments}; see especially Table \ref{tab:vit_archs_and_hyps}.
+
+
+
+\section{Contributions and acknowledgements}
+
+\pg{Relative contributions}
+IR and KC conceptualised the project and co-designed the algorithms.
+IR proved the theoretical results, implemented the GRFs code, ran the Interlacer experiments and wrote the text.
+KAD was crucially involved throughout, running the ViT and ViViT experiments and guiding the project's direction. 
+DJ and WW helped set up the Interlacer experiments.
+AA, JA, AB, MJ, AM, DR, CS, RT, RW and AW provided thoughtful feedback on the project and manuscript, helped set up experimental infrastructure, and made Cambridge and Google great places to work.
+
+\pg{Acknowledgements and funding}
+IR acknowledges support from a Trinity College External Studentship. 
+This work was completed whilst employed as a student researcher at Google.
+IR sincerely thanks Silvio Lattanzi for making this possible.
+RET is supported by Google, Amazon, ARM, Improbable, EPSRC grant EP/T005386/1, and the EPSRC Probabilistic AI Hub (ProbAI, EP/Y028783/1).
+AW acknowledges support from a Turing AI fellowship under grant EP/V025279/1 and the Leverhulme Trust via CFI.
+\newpage
+
+
+\newpage
+
+
+

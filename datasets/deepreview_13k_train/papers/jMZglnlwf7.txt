@@ -1,0 +1,135 @@
+\title{Tree Attention: Topology-Aware Decoding for Long-Context Attention}
+
+\begin{abstract}
+Self-attention is the core mathematical operation of modern transformer architectures and is also a significant computational bottleneck due to its quadratic complexity in the sequence length. 
+In this work, we derive the scalar energy function whose gradient computes the self-attention block, thus elucidating the theoretical underpinnings of self-attention. 
+Our formulation reveals that the reduction across the sequence axis can be efficiently computed in parallel through a tree reduction. 
+Our algorithm, called Tree Attention, for parallelizing exact attention computation across multiple GPUs enables cross-device decoding to be performed symptotically faster (up to 8x faster in our experiments) than state-of-the-art approaches such as Ring Attention, while also requiring significantly less communication volume and incurring 2x less peak memory. 
+We demonstrate that Tree Attention speeds up decoding up to 4x on Llama 3.1-8B and can be applied to a variety of hardware and networking setups such as H100 DGX nodes, AMD MI300x nodes, and PCIe connected NVIDIA RTX 4090s.
+Our code is publicly available here: https://anonymous.4open.science/r/tree_attention-7C32
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+The self-attention operation is the core computational building block of the transformer architecture Bahdanau et al. (2014); Vaswani et al. (2017), which has become an ubiquitous and highly effective workhorse architecture currently applied at scale to language Brown et al. (2020); Kaplan et al. (2020); Hoffmann et al. (2022); Team et al. (2023); Achiam et al. (2023); Pilault et al. (2023), vision Dosovitskiy et al. (2020), audio Betker (2023), and decision-making Chen et al. (2021); Reed et al. (2022). Nonetheless, the quadratic time complexity of self-attention means that significant resources are required to train and generate from transformer-based Large Language Models (LLMs), especially for models with large context lengths.  
+
+During inference, the attention block largely determines the computational and memory requirements, which become more demanding as the input sequence length increases. Although LLMs generate one token at a time, the entire sequence of past tokens must still be stored in memory and used to compute attention scores during generation. Since attention performs a similarity matching of every token representation with every other, it incurs quadratic computational complexity in terms of flops.  
+
+There have been recent advances in training LLMs to handle extremely long contexts (up to 1M tokens) Chen et al. (2023); kai (2023); Peng et al. (2023). Such models attain qualitatively new capabilities such as extremely large-scale in-context learning of entire small datasets held in the prompt Reid et al. (2024); Lee et al. (2024); Bertsch et al. (2024). They can also avoid putting multi-modal continuous data through a lossy tokenization scheme Reid et al. (2024); Team (2024) by directly operating at the byte level Xue et al. (2022); Wu et al. (2024). The issue however is that performing inference on such long contexts is very expensive.  
+
+To speed up inference and alleviate memory requirements, recent works have attempted to alter the attention mechanism itself, either by linearizing it Katharopoulos et al. (2020), or approximating it by a kernel map Choromanski et al. (2020b); Peng et al. (2021); Arora et al. (2024), which reduces the complexity to linear at the cost of reduced expressiveness. Others have invented alternative sequence mixing architectures such as state-space models which are designed to be efficiently computable in  
+
+![](images/a12a6a13819d49cb1a6de1d7658111de1c2f6214760b026a8dac51e3459a4373.jpg)  
+linear time and constant memory Gu & Dao (2023); Dao & Gu (2024); Katsch (2023); Sun et al. (2023); Glorioso et al. (2024).   
+Figure 1: Ring and Tree Attention Topologies. Due to the associative properties of the logsumexp and max operations of Tree Attention (Fig. 1(a)), is possible to structure the reduction across the sequence as a tree, requiring asymptotically fewer communication steps than Ring Attention (Fig. 1(b)) as well as less memory and communications volume.  
+
+Other approaches utilize efficient algorithms to reduce the computational burden of attention while keeping the core computation the same. These include memory-efficient attention Rabe & Staats (2021), Flash Attention Dao et al. (2022) and Flash Decoding fla (2024), which provide a set of IO-aware kernels to map the attention operation to the GPU hardware resources in an extremely efficient way, significantly reducing the memory overhead required. Further works Character AI (2024); Kang et al. (2024); Liu et al. (2024); Nawrot et al. (2024) explore compressing or otherwise reducing the KV cache required in generation. Finally, Ring Attention Liu et al. (2023) proposes a way to parallelize the attention computation across the sequence axis between GPUs, thus enabling significantly longer contexts than can be served on a single GPU. Since our proposed method is an exact calculation of attention1, it is a plugin replacement for any multi-GPU sequence parallel mechanism such as the state of the art Ring Attention mechanisms. By leveraging the exact energy function for the self-attention block, we develop a method to speed up inference for long context use-cases when keys and values are sharded across multiple GPUs along the sequence axis.  
+
+Our proposed algorithm for computing attention via the gradient of the energy function is built on top of an efficient parallel computation and tree reduction communication strategy. In particular, this formulation lets us devise an asymptotically faster algorithm for performing decoding in which the number of communication steps scales logarithmically with the number of devices, instead of linearly in alternatives such as Ring Attention Liu et al. (2023). Our topology-aware approach illustrated in Fig. 1 significantly outperforms leading attention parallelization methods such as Ring Attention on multiple devices.  
+
+
+
+\section{2 RELATED WORKS  }
+
+
+The computational complexity of self-attention, introduced by Vaswani et al. (2017), poses challenges for long sequences due to its quadratic dependency on sequence length, $O(n^{2}\cdot d)$ . To address this, attention approximation mechanisms like Linformer (Wang et al., 2020) and Performer (Choromanski et al., 2020a) reduce complexity to linear $O(n)$ using low-rank projections and kernelized approximations on a single device. Sparse models such as Longformer (Beltagy et al., 2020) and BigBird (Zaheer et al., 2020) further optimize computations by restricting attention to local windows or sparsity patterns, significantly reducing resource demands while maintaining performance for specific tasks. Such methods however provide approximations to the attention mechanism while we seek to parallelize an exact attention computation across the sequence axis.  
+
+Theoretical work has also contributed to improving the efficiency of both exact and approximate methods. Kernel-based approaches, such as those by Tsai et al. (2019), suggest alternative formulations to self-attention that are computationally efficient. Surveys like Tay et al. (2020) highlight these advancements, emphasizing the synergy between parallelization strategies and sparsity or approximation techniques, ensuring self-attention remains scalable even in constrained computational environments. It must be noted as well that Duman Keles et al. (2022) established lower bounds on the computational complexity of self-attention, demonstrating that achieving sub-quadratic time complexity is unlikely unless the Strong Exponential Time Hypothesis (SETH) is false.  
+
+In addition to approximation methods, several approaches focus on parallelizing exact attention computations. FlashAttention (Dao et al., 2022), for instance, reorganizes the attention computation into smaller, memory-efficient blocks that leverage GPU memory hierarchies to enable faster and parallelized processing of exact attention. Other techniques use optimized matrix operations and tiling strategies to distribute attention computations across cores or threads efficiently (Shen et al., 2021). While these methods aim to maximize throughput while maintaining the precision of exact attention, they focus on speeding up single-device attention computation. Since we parallelize exact attention across multiple devices, Ring Attention (Liu et al., 2023) is the most comparable to our work. Finally, to the best of our knowledge, there are no other techniques that explore multi-device parallel decoding as we have.  
+
+
+
+\section{3 SELF-ATTENTION  }
+
+
+The self-attention operation can be represented as a set of dot product similarity searches between queries and keys. These similarity scores are then reduced along the sequence axis and softmaxed, so that for a given query, there is a probability distribution of the similarities of each given key. We then take the expectation of the value vectors against this distribution. We denote the queries assigned to a sequence of length $N$ as $\{q_{a},a=1,\cdot\cdot\cdot N\}$ , where each query is a vector of size $d$ that stands for hidden dimension, $q_{a}\in\mathbb{R}^{d}$ , and similarly the keys and values $\bigl\{(k_{a},\nu_{a}),a=1,\cdots N\bigr\}$ . Attention can be written as  
+
+$$
+z^{a}=\sum_{i=1}^{N}\mathrm{softmax}(q_{a}\cdot k_{i}^{T})\nu_{i}\,.
+$$  
+
+Naively computing attention in this way requires materializing the $q k$ matrix with computational and memory cost quadratic in the sequence length. Memory-efficient attention Rabe & Staats (2021) is an iterative way to compute the softmax similarities without ever having to materialize the full attention matrix. It performs the following operations, one query (or a chunk of queries) at a time:  
+
+$$
+\begin{array}{r l}&{s_{i}^{(j)}=\exp(q_{j}\cdot k_{i})}\\ &{n_{i}^{(j)}=n_{i-1}^{(j)}+\nu_{i}s_{i}^{(j)}}\\ &{d_{i}^{(j)}=d_{i-1}^{(j)}+s_{i}^{(j)}}\end{array}
+$$  
+
+Then, once the values $\nu$ and softmax denominator $d$ are computed, we divide to get the final softmaxed   
+scores 𝑧( 𝑗) = 𝑛( 𝑗) for every query index $j$ . Computing attention in this iterative manner significantly 𝑑( )   
+reduces the required memory.  
+
+Flash Attention Dao et al. (2022) utilizes a similar approach to reduce the memory and computational cost of attention, but the algorithm is not adapted for multi-GPU computation. Flash Attention performs the iterative algorithm of Rabe & Staats (2021) in a blockwise manner, utilizing the block-parallel computational primitives available inside single GPU tensor cores. Additionally, it precisely sizes the blocks such that they can fti into the SRAM of the GPU for the entire attention computation, effectively performing kernel fusion and preventing many unnecessary IO operations.  
+
+
+
+\section{4 SELF-ATTENTION AS THE GRADIENT OF AN ENERGY FUNCTION  }
+
+
+Following the ubiquitous success of the transformer architecture, there has been significant effort to mathematically understand the nature and meaning of the attention operation and link it to energy models (Krotov & Hopfield, 2016; Krotov, 2021; Millidge et al., 2022; Hoover et al., 2024), such as Hopfield Networks (Ramsauer et al., 2020; D’Amico & Negri, 2024). Ramsauer et al. (2020) pioneered this field by performing a similar but distinct analysis to relate self-attention with the modern Hopfield networks, providing a novel and insightful interpretation of self-attention as performing hetero-associative memory lookups using a high-powered nonlinear similarity function. This work was later extended by Hoover et al. (2023), who derived a modified version of the transformer based off an energy function. However, while it has long been known that the softmax operation can be derived as the gradient of the following scalar function:  
+
+$$
+\partial_{z_{j}}\log\sum_{a=1}^{n}\exp(z_{a})=\frac{e^{z_{j}}}{\sum_{a=1}^{n}e^{z_{a}}}=\mathrm{softmax}(z_{j}),
+$$  
+
+known as the log-sum-exp, an equivalent function for the self-attention block has not yet been derived. We develop in this paper a link between attention and energy functions by introducing an auxiliary source vector $\zeta$ , which represents the “external contributions” to the system’s energy (Hopfield, 1982). The source $\zeta$ is the parameter with respect to which we compute the gradient of the scalar energy function to obtain the self-attention operation. As we will see, we need the source in order to write down the generating function of the moments of the distribution since taking the gradient with respect to $\zeta$ yields the exact self-attention operation.  
+
+This insight allows us to make the following observation:  
+
+Observation 1. Attention can be expressed at the gradient of an scalar energy function $F(\zeta)$ with respect to the source $\zeta$ , such that:  
+
+$$
+\sum_{a=1}^{N}\mathrm{softmax}(q\cdot k_{a})\nu_{a}=\frac{\partial F}{\partial\zeta}\Bigg|_{\zeta=0},
+$$  
+
+where the moment generating function (i.e. the energy function) $F(\zeta)$ is defined as:  
+
+$$
+F(\zeta)=\log\sum_{a}\exp\left(q\cdot k_{a}^{T}+\zeta\cdot\nu_{a}^{T}\right).
+$$  
+
+1.2 and motivates our Tree Attention algorithm in the next Section 5.  
+
+
+
+\section{5 TREE ATTENTION  }
+
+
+In this section we show how the formulation of the attention operation as the gradient of an energy function suggests an efficient parallel strategy for computing it. The key insight is to leverage an efficient algorithm to compute the energy, and then differentiate it in order to obtain an efficient algorithm to compute attention.  
+
+5.1 EFFICIENT ENERGY FUNCTION COMPUTATION  
+
+Let us focus on the case of decoding with a KV cache in a causal language model where we have one query and $N$ keys and values. In this case, the energy function is:  
+
+$$
+F_{d e c}=\log\sum_{a=1}^{N}\exp(q\cdot k_{a}^{T}+\zeta\cdot\nu_{a}^{T})\equiv\log\mathrm{sumexp}_{a}(\{q\cdot k_{a}^{T}+\zeta\cdot\nu_{a}^{T},a=1,\cdots,N\}).
+$$  
+
+A crucial fact is that both logsume $\mathrm{xp}_{a}$ and $\mathrm{max}_{a}$ are associative operations:  
+
+$$
+\begin{array}{r}{\ l o g s u m e x p_{a}(\{T_{a},\log\mathrm{sumexp}_{a}(\{R_{a},S_{a}\})\})=\ l o g s u m e x p_{a}(\{\log\mathrm{sumexp}_{a}(\{T_{a},R_{a}\}),S_{a}\}),}\end{array}
+$$  
+
+$$
+\operatorname*{max}_{a}(\{\operatorname*{max}_{a}(\{T_{a},R_{a}\}),S_{a}\})=\operatorname*{max}_{a}(\{T_{a},\operatorname*{max}_{a}(\{R_{a},S_{a}\})\}).
+$$  
+
+We can prove that this associative property allows these reductions to be performed efficiently in parallel with logarithmic time complexity, provided we have adequately many parallel workers:  
+
+Theorem 1. The time complexity of a reduction operation involving an associative function, such as logsume $\Phi_{a}$ or $\mathrm{max}_{a}$ , over an array of size $N$ using 𝑝parallel processors is $O\left({\frac{N}{p}}+\log p\right)$ . When the number of processors $p$ is equal to $N$ , the time complexity is reduced to ${\cal O}(\log N)$ .  
+
+  
+
+Putting this result together, and for $\hat{a},\hat{b}\in\{1,\cdots,t\}$ intra-chunk indices, we get the following highly parallel Algorithm 1:  
+
+
+
+\section{7 DISCUSSION AND CONCLUSION  }
+
+
+In this paper, we have derived the energy function for self-attention and demonstrated how the computation of the derivative of this function provides a novel and efficient method for computing attention in parallel. This advantage is especially apparent when performing decoding across multiple devices, in which case our Tree Attention enables us to substantially outperform SOTA Ring Attention with an asymptotically superior algorithm, with $\times8$ speedups when we use 128 GPUs on a sequence length of 5.12M. We also see that the AllReduce operation that we use involves sending partially reduced objects, which greatly reduces the volume of communicated data as well as the peak memory requirement. In a real-world application, using the Llama 3.1 model with 1B and 8B parameters, we find that decoding with a prefill stage using Tree Attention gets us $\times3{-}5$ speedupds compared to Ring Attention. Further, by testing our method on various types of GPUs clusters including AMD MI300xs, we show that Tree Attention generalizes very well to various communication protocols and network topologies.  
+
+
+

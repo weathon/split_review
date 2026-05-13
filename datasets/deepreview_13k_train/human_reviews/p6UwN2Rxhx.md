@@ -1,0 +1,229 @@
+# Unveiling Temporal Telltales: Are Unconditional Video Generation Models Implicitly Encoding Temporal Information?
+
+- Decision: Reject
+- Scores: 6, 3, 5, 3, 5
+
+## Abstract
+Unconditional video generation models seemed to generate realistic videos. However, in this paper, we delve into what could be the meaning of `realness' in the video generation models, taking into account that Convolutional Neural Networks (CNNs) are built with the inspiration from human visual neuroscience. Similar to human observers, we expected CNNs to struggle in classifying the temporal location of generated videos using a single frame due to the limited temporal information a single frame alone provides. However, our preliminary experiments unveil that current unconditional video generation models actually do inadvertently encode temporal location into each frame, enabling CNNs to correctly classify the temporal location of generated videos. To alleviate such a problem, we propose a method by adding the Gradient Reversal Layer (GRL) with lightweight CNN to the prior works to explicitly neglect this implicitly encoded temporal information. The experimental results, indeed, show that the implicit encoding of temporal information while training the unconditional video generator does negatively influence the FVD score. Moreover, experiments on diverse prior video generation models and datasets show that our approach can be used in a plug-and-play manner. Also, the results show the successful elimination of implicitly encoded temporal information without compromising the FVD score, highlighting the need to consider temporal classification accuracy as a supplementary metric in video generation models.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The paper discusses a phenomenon in unconditional video generation models where each frame seems to inadvertently encode information about its temporal location, which should not be the case since a single frame typically provides limited temporal context. This unintended encoding allows Convolutional Neural Networks (CNNs), which are designed to mimic aspects of human visual processing, to classify the temporal location of a video's frames accurately. To address this issue, the authors propose a new method that involves incorporating a Gradient Reversal Layer (GRL) with a lightweight CNN into existing models. The GRL layer aims to explicitly disregard the temporal information that has been implicitly encoded into frames. The authors' method was tested across various video generation models and datasets and was found to be effective in a plug-and-play fashion. The results indicated that their approach could reduce the undesired temporal information encoding without negatively affecting the Frame Video Distance (FVD) score, a common metric for video generation quality. The research suggests that temporal classification accuracy should be an additional metric to assess the performance of video generation models.
+
+### Strengths
+- The paper presents an Interesting phenomenon that widely used convolutional neural networks embed temporal information inside the single framework. 
+- The paper provides an effective method to tackle the problem it proposes and demonstrates that alleviating this artifact would lead to improved video synthesis quality.
+- As deep fake is widely concerned today, this artifact this paper proposed can be served as a method of detecting the generated videos.
+
+### Weaknesses
+ - It is not clear why encoding the temporal information inside the frame would lead to the video quality degradation. Some empirical / theoretical explanation could be useful to provide further insights. Specifically, it's unclear if the temporal encoding is a byproduct of the generation process itself or if it's a consequence of the training data. If the training data contains implicit temporal cues, the model might learn to exploit these cues, even if they are not explicitly provided. Furthermore, it is not clear whether the degradation is a direct result of the temporal information itself, or if it's due to the model using this information as a shortcut instead of learning more robust features. 
+- The argument that since CNN is inspired from humans, then they should not be able to detect the temporal signal embedded in the generated frames is not necessary. The main point of the paper tries to show that the generated videos have clear temporal information inside a single frame. The author could raise less confusion if framing the CNN detector is a simple quantitative tool to detect the time information embedded inside the video frame. The current framing introduces an unnecessary anthropomorphic element that doesn't strengthen the core argument.
+- The paper would become more appealing if framing it as a method against fake generated video and find applications in face swapping detection. Adding some experiments in this domain could make the impact broader. The current experiments focus on general video generation, but the temporal artifact could be particularly relevant in the context of deepfakes, where subtle inconsistencies in temporal dynamics can be a key indicator of manipulation. Exploring this connection could significantly increase the practical relevance of the work.
+
+### Questions
+The authors mentioned about the human study but there is no explicit section to document the details of how to conduct the human study.
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper tackles video generation problem. The authors find that temporal information are "secretly" encoded in videos generated by existing GAN-based video generation methods. To ensure temporal information is not encoded in generated videos, the authors propose to add Gradient Reversal Layer (GRL) to video generation models. Experiments are conducted on three datasets. The proposed method outperforms MoCoGAN and achieves comparable performance with StyleGAN.
+
+### Strengths
+1. Although the presentation of this paper can be improved, it is quite easy to follow the main idea.
+
+2. Comparison with 2 baselines, MoCoGan and StyleGAN are conducted on three different datasets. The proposed method outperforms MoCoGAN and achieves comparable performance with StyleGAN.
+
+### Weaknesses
+1. Lack of comparison with recent methods, e.g., [1, 2, 3]. These mehtods seem to have much lower FVD than the proposed methods on UCF101 dataset.
+
+2. Marginal performance improvement. The proposed method achieves slightly better performance than its baseline, i.e., MoCoGAN, on various datasets. However, the margin is quite small, e.g., FVD of 2539 (MoCoGAN) v.s. FVD of 2360 (proposed method). Such FVD improvement may not be sufficient to convince readers that visual quality of videos generated by the proposed method is better than that of MoCoGAN. The improvement, while present, is not substantial enough to justify the complexity introduced by the Gradient Reversal Layer (GRL).
+
+3. I am not able to see why encoding temporal information in generated videos is a major problem that prevents GAN-based methods to generate high quality videos. The paper does not sufficiently motivate why removing temporal encoding is a desirable goal, especially when the aim is to generate realistic videos that inherently possess temporal coherence. It's unclear if the goal is to improve visual quality or some other aspect of video generation.
+
+4. Minor issues (1) There are "??" in this paper. (2) The authors claim that they investigate "meaning of ‘realness’ in the video generation models" in the abstract. However, I am having a hard time finding how the meaning of 'realness' connects to the proposed method. The connection between the proposed method and the concept of 'realness' is tenuous and not well-established within the paper.
+
+### Questions
+1. Why encoding temporal information in generated videos is a major problem that prevents GAN-based methods to generate high quality videos?
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+This paper demonstrates current unconditional video generation models do not considering the subtle characteristics of real-world video and proposes a simple method using Gradient Reversal Layer (GRL) with lightweight CNN to disregard the implicitly encoded temporal information within each frame. The experiment results show that neglecting implicitly encoded temporal information does not affect generated video quality and can achieve better or comparable FVD score.
+
+### Strengths
+This paper presents a very interesting perspective to estimate the realness of the generated video samples: the temporal locations of frames within random videos. This paper finds CNNs fail to classify the temporal locations from real-world video samples. But CNNs can precisely classify the temporal location of generated video samples. Based on this phenomenon, this paper proposes to use a lightweight CNN to disregard the implicitly encoded temporal information within each frame.
+
+### Weaknesses
+I agree that the videos generated by the model should strive to be as similar as possible to real-world videos in various aspects. However, I have some doubts about your design using CNNs to classify the absolute positions of each frame in a 16-frame video. The positions of video frames should be relative rather than absolute. For example, after sampling many short videos of 16 frames each from a long video, the first frame of one short video may be the last frame of another video. This might make it difficult for CNNs to classify the position of every video frame in real-world datasets. However, for videos generated by video generation models, since they are trained on short videos (e.g., 16 frames) during their training phase, it is easy for the generation model to remember the relative positions between frames. This makes it easier for CNN classifiers to classify the positions of video frames. I believe that more training on real-world datasets may improve their classification performance.
+
+This paper employs a Gradient Reversal Layer (GRL) to weaken the temporal information in each video frame. The authors use GRL in several places, such as, "We integrate a Gradient Reversal Layer (GRL) along with an ImageNet pre-trained model," "We adopt an adversarial training technique using GRL with a simple network," "We propose a method consisting of GRL with the temporal classifier." These statements may have caused a lot of confusion for readers in understanding GRL. What exactly is GRL, and how does it function within the context of this article?
+
+In terms of experiments, the authors do not provide a video demo to demonstrate the quality of its visual generation. I think in terms of video generation, the visual quality of the generated video results is far more important than the value of FVD.
+
+In addition, there are some typos in the article:
+The proposed method can be simply added to existing video generation methods in a plug-and-play manner. The full framework of the proposed method is shown in Fig. ??. -> In page 5
+
+it is negligible as the difference is only 5%p. -> In page 8
+
+### Questions
+see weakness
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes to integrate the Gradient Reversal Layer (GRL) into unconditional video generation, aiming at preventing the encoding of temporal location into each frame's features. This stems from the observation that humans struggle to classify the temporal location of a frame, while CNNs show impressive temporal classification accuracy on generated video frames. The experiments indicate that explicitly training unconditional video generation models to disregard the temporal information in the frames results in reduced temporal classification accuracy, while maintaining comparable or improved Frechet Video Distance (FVD) performance.
+
+### Strengths
+- The exploration of the relationship between temporal classification accuracy and the quality of unconditional video generation is novel and intriguing.
+- Preliminary experiment results show the effort to unveil this novel insight, although the experimental design requires refinement.
+- The proposed approach enhances several GAN-based unconditional video generation methods concerning the FVD metric.
+
+### Weaknesses
+1. The preliminary experiment design needs refinement:
+- Experiments should encompass multiple baselines to bolster the claim that current unconsitional video generation methods implicitly encode temporal information.
+- The constructed dataset used for training the temporal classifier appears overly homogenous since the clips are sampled from a single video clip of FaceForensics, Sky–Timelapse, or UCF-101. The lack of diversity in the training data makes it difficult to generalize the findings to more complex real-world scenarios. The temporal classifier may be learning dataset-specific artifacts rather than genuine temporal features.
+- The labels for certain frames seem less meaningful due to the frame's presence in various clips at different positions, arising from the repeated random sampling during the construction of the temporal classification dataset. This introduces ambiguity and noise into the training process, potentially hindering the classifier's ability to learn meaningful temporal representations. The random sampling strategy needs to be re-evaluated to ensure that the labels are consistent and informative.
+
+2. Figure-related issues require attention:
+- Figure 2 lacks an introduction of f_{temp} in the caption, and the caption references an ImageNet pre-trained model not presented in the figure. The absence of a clear definition for f_{temp} makes it difficult to understand the role of the temporal classifier in the proposed framework. The reference to an ImageNet pre-trained model without specifying its architecture or implementation details further complicates the reproducibility of the experiments.
+- An invalid figure reference in the last paragraph of Section 3 suggests a missing figure in the manuscript.
+
+3. The training quality of the reproduced MoCoGAN-256 appears suboptimal. Tables 2, 3, and 4 reveal an extremely high FVD value for MoCoGAN with 256x256 compared to the other high-resolution video generation baselines. This raises concerns about the reliability of the experimental results and the validity of the conclusions drawn from them. The poor performance of MoCoGAN-256 may indicate issues with the implementation or training procedure.
+
+4. The validity of the negative gradient provided by the temporal classifier during training needs reconsideration. The temporal classifier is trained using frames from different videos, which is different from the practice in the preliminary experiment and the evaluation stage that constrains the training frames to have the same content. This discrepancy in the training and evaluation procedures introduces a potential bias and raises questions about the effectiveness of the proposed approach. The temporal classifier may be learning to discriminate between different videos rather than temporal locations within a single video.
+
+5. The absence of recent diffusion models for video generation (Luo et al., 2023; Yu et al., 2023; Harvey et al., 2022) in the experiments diminishes the contribution of this work. The lack of evaluation on state-of-the-art diffusion models limits the generalizability of the findings and their relevance to the current research landscape. The proposed approach needs to be tested on a wider range of video generation models to demonstrate its robustness and effectiveness.
+
+6. Additional insights on designing architectures that "do not necessitate classification" in the discussion section would be beneficial.
+
+### Questions
+- Why not use MoCoGAN-HD and StyleGAN-V in the preliminary experiment? This would avoid reproducing MoCoGAN-256.
+
+- Can you visualize some real and generated video frames used in the preliminary experiment? This could enhance clarity.
+
+- What is the reason for using distinct videos for evaluating temporal accuracy and FVD computation? Why not use the temporal classifier from the training process to evaluate temporal classification accuracy?
+
+- Can you provide qualitative comparisons on UCF101? This would provide additional insights.
+
+- Can you provide some failure cases of video generation with GRL?
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 5
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The authors propose a method to prevent unconditional video generation models from encoding temporal location in their outputs. The motivation for this modification is that humans do not rely on temporal location to classify dynamic visual information. The authors show that reducing the bias to encode temporal location often improves generation performance on video quality metrics aligned with human perception. Through their work, they argue that the ability to classify temporal location based on output videos could be used as an evaluation metric for video generation.
+
+### Strengths
+The authors make an interesting observation that temporal location is implicitly encoded in the outputs of unconditional video generation models. The experiment where they show that CNNs struggle to classify temporal information in real videos, but succeed on generated videos is an intriguing contribution and well motivated the preliminary problems statement.  Finally, the proposed method for reducing the bias to encode temporal location appears novel and sound to me.
+
+### Weaknesses
+I found the general argument of the work to be quite confusing. The logic came across as "humans cannot identify temporal location from one video frame, so it should not be possible to classify video frames from a good quality generative model." In general, it is difficult to justify how doing poorly at a task would improve a model. I think it would have been more effective and interesting to analyze *what other features* humans pay attention to when processing spatiotemporal information if not temporal location.
+
+Although the authors emphasized that CNNs were inspired by human neuroscience, this was confusing as there was little discussion of how this work contributes to our understanding of CNNs as models of human visual processing. There was also little justification for why CNNs are good models of human spatiotemporal processing. Standard CNNs, in fact, have been shown to often be mis-aligned with human perception when looking at the temporal property perceptual straightness (Toosi & Issa 2023, Harrington et al. 2023). The classification experiment, however, was still interesting, and I think it could be made stronger by de-emphasizing the human angle and focusing on the fact that temporal location is much easier to classify in generated videos than real.
+
+Finally, the organization of the paper was a bit odd at times. I do not understand why the related work section came before the discussion. I also think the discussion could be expanded on, especially in thinking about what information humans use in video perception if not temporal location.
+
+### Questions
+As I touched on in the weakness, are the authors trying to make a statement on how human perception relates to CNNs? Or is it more about making classifying temporal location a human-inspired video quality metric? If it is more about the metric, did the authors consider analyzing a wider set of models or even running a human experiment to validate their results?
+
+In general, I think the work could be strengthened by thinking what other features of human spatiotemporal perceptual could your work give us insight into other than the lack of temporal location encoding? Although I see notable weakness, I think there is a lot of potential in this work and would like to hear more from the authors about what they are hoping to convey about human perception and video generation through their work.
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair

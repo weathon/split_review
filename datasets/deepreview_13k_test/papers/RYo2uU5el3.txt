@@ -1,0 +1,258 @@
+\title{A Continual Learning Perspective to Entropy Regularized Deep Reinforcement Learning}
+
+\begin{abstract}
+Research on Continual Learning (CL) tackles learning with non-stationary data distributions. The non-stationary nature of data is also one of the challenges of deep Reinforcement Learning (RL), and as a consequence, both CL and deep RL rely on similar approaches to stabilize learning, from the use of replay buffers to the choice of regularization terms. However, while dynamic neural architectures that grow in size to learn new tasks without forgetting older ones are well researched in CL, it remains a largely understudied research direction in RL. In this paper, we argue that Policy Mirror Descent (PMD), a regularized policy iteration RL algorithm, would naturally benefit from dynamic neural architectures as the current policy is a function of the sum of all past Q-functions. To avoid indefinitely increasing the neural architecture, we study PMD-like algorithms that only keep in memory the last $M$ Q-functions, and show that a convergent algorithm can be derived if $M$ is large enough. This theoretical analysis provides insights on how to utilise a fixed budget of Q-functions to reduce catastrophic forgetting in the policy. We implement this algorithm using a new neural architecture that stacks the last $M$ Q-functions as 3-dimensional tensors to allow for fast GPU computations. StaQ, the resulting algorithm, is competitive with state-of-the-art deep RL baselines and typically exhibits lower variance in performance. Beyond its performance, we argue that the simplicity and strong theoretical guarantees of StaQ's policy update makes it an ideal research tool over which we can further build a fully stable deep RL algorithm.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Continual Learning (CL) moves from the usual i.i.d assumption of supervised learning towards a more general assumption that data distributions change through time (Parisi et al., 2019; Lesort et al., 2020; De Lange et al., 2021; Wang et al., 2024). A CL setting usually goes in pair with memory constraints, limiting the storage of past data. As it cannot access old data, it is desirable for a CL learner to possess i) stability, which is the ability to retain prior knowledge ii) plasticity, which is the ability to learn new knowledge. When training a neural network (NN), these two properties are typically conflicting and we talk of the plasticity-stability dilemma (Grossberg, 1988), which if not handled properly can lead to catastrophic forgetting (McCloskey & Cohen, 1989), i.e. a sudden loss of prior knowledge when trying to acquire new knowledge. To fight catastrophic forgetting, CL applies methods that can be categorized in three groups (De Lange et al., 2021): a) rehearsal methods (Robins, 1995; Rolnick et al., 2019) that keep samples from older data distributions to periodically retrain a learner on them, b) regularization-based methods (Li & Hoiem, 2016; Kirkpatrick et al., 2017; Zenke et al., 2017), that prevent an NN from changing too fast and c) parameter isolation methods (Rusu et al., 2016; Xu & Zhu, 2018; Yoon et al., 2018; Li et al., 2019) that grow an NN, usually while freezing older weights, to increase plasticity without compromising on stability.  
+
+Somewhat independently, deep RL has known rapid development in the past decade, achieving super-human results on several decision making tasks (Mnih et al., 2015; Silver et al., 2016; Wurman et al., 2022). RL is not always a true CL setting in the sense that an agent may not need to continually adapt to remain optimal, as most environments considered in RL are of a stationary nature, unlike in CL (Abel et al., 2023). However, deep RL and CL both face non-stationary datasets. This non-stationarity coupled with the use of neural networks makes deep RL very sensitive to hyper-parameters (Henderson, 2018) and makes its empirical behavior often poorly align  
+
+![](images/b7446cd9b0dc3fd5f539ce1aa17f2de712808096d9e2aeee7694288694df2b15.jpg)  
+
+Figure 1: Overview of StaQ, showing a continual training of a Q-function (left), from which we periodically “stack” frozen weight snapshots to form the policy (right). See Sec. 5 for more details. At each iteration $k$ , two steps are performed. i) Policy evaluation, where we generate a dataset $\mathcal{D}_{k}$ of transitions that are gathered by a behavior policy $\pi_{k}^{b}$ , typically derived from $\pi_{k}$ , and then learn $Q^{\pi_{k}}$ from $\mathcal{D}_{k}$ . ii) Policy update, performed by “stacking” the NN of $Q^{\pi_{k}}$ into the current policy. The policy update is optimization-free and theoretically grounded (Sec. 4), thus only the choice of $\pi_{k}^{b}$ and the policy evaluation algorithm remain sources of instabilities in this deep RL setting.  
+
+with our theoretical understandings (Ilyas et al., 2020; Kumar et al., 2020; van Hasselt et al., 2018). As they face similar problems, deep RL and CL often end-up using similar remedies (see discussion in Sec. 2.4.3 of Lesort et al. (2020)). For instance, the rehearsal methods in CL have their counterpart in the use of replay buffers in DQN (Mnih et al., 2015) or SAC (Haarnoja et al., 2018). As for regularization-based CL methods, approaches such as EWC (Kirkpatrick et al., 2017) and its online version (Chaudhry et al., 2018) are extremely similar to TRPO (Schulman et al., 2015)—contrast the regularized cost of Eq. 5 in Chaudhry et al. (2018) with the Kullback-Leibler divergence (further referred to as $D_{\mathrm{KL}}$ ) in regularized policy update of TRPO, they are identical up to differences in loss functions between supervised learning and RL. However, while parameter isolation methods have been tested in continual RL settings (Rusu et al., 2016), their use in single task RL problems remains largely understudied.  
+
+In this paper, our main inspiration from the CL research community is the use of growing neural architectures to implement our policy update. Such neural architectures belong to the class of parameter isolation methods in the CL literature, which offer some of the best stability-performance trade-offs (see Sec. 6 in De Lange et al. (2021)). While the policy’s growing architecture eliminates catastrophic forgetting in the policy by construction, it still seems to be present in the Q-function network (Sec. 6.3), causing instabilities of the learning process. We provide some ad hoc workarounds in this paper, but we believe several CL approaches—as those discussed in Sec. 7—could be helpful to further stabilize deep RL, and we hope that one side effect of this paper is to further encourage the transfer of ideas between the RL and CL communities.  
+
+Our policy update that uses a growing neural architecture is from a class of Policy Mirror Descent algorithms (PMD, Neu et al. (2017); Abbasi-Yadkori et al. (2019); Geist et al. (2019); Zhan et al. (2023)). PMD with $D_{\mathrm{KL}}$ -regularization is a policy iteration algorithm where the policy at iteration $k$ is given by a weighted average of past Q-functions, such that  
+
+$$
+\pi_{k}\propto\exp\left(\alpha\sum_{i=0}^{k}\beta^{i}Q^{k-i}\right),
+$$  
+
+for temperature $\alpha\,>\,0$ and decay factor $\beta\in[0,1]$ , where $\beta$ is strictly $<1$ if an entropy bonus is used in addition to the $D_{\mathrm{KL}}$ regularizer (see Sec. 3 for more details). The averaging over previous Q-functions induced by the $D_{\mathrm{KL}}$ regularizer is known to average out approximation errors over the true Q-functions and has stabilizing properties in practice (Geist et al., 2019; Abbasi-Yadkori et al., 2019). The policy in Eq. 1 naturally calls for a parameter isolation approach that would store all past Q-functions, leading to exact entropy-regularized policy update. Abbasi-Yadkori et al. (2019) performed an experiment of the sort on an Atari RL task (Bellemare et al., 2013), keeping in memory the past $10\,\mathrm{Q}$ -functions, and noted increased stability and performance over vanilla DQN.  
+
+Overall, this paper extends prior work on PMD (Abbasi-Yadkori et al., 2019; Lazic et al., 2021; Zhan et al., 2023) in several ways. i) We propose an NN architecture called Stacked NNs (SNNs) that stacks NN weights through a third dimension (representing the iteration number, see Sec. 5 for more details), allowing us to efficiently compute on a GPU several hundreds of Q-functions, approaching the exact policy formulation in Eq. 1. ii) We study theoretically the convergence of PMD-like algorithms that store up to $M$ most recent Q-functions, replacing the oldest Q-function with the newest one when $k>M$ . These theoretical results extend those of (Zhan et al., 2023) that studied PMD with an inexact policy update. In Eq. 1, when $\beta<1$ , one can clearly see that the weight of old Q-functions decays to 0 as $k$ goes to infinity. Thus, by choosing a large enough $M$ , we can control the error stemming from the use of a finite number of Q-functions. A more subtle result of our theoretical analysis is that Q-functions become increasingly similar as learning progresses. As a result, deleting an old Q-function affects less and less the policy, and we can show that there is a finite $M$ —that depends on $\beta$ and the discount factor $\gamma$ of the decision task—large enough to ensure convergence to the optimal policy without residual error, although at a reduced rate than exact PMD. iii) Experiments on a large set of tasks confirm the preliminary results of Abbasi-Yadkori et al. (2019): the averaging over past Q-functions stabilizes learning and improves performance in several cases. The proposed algorithm, which we call StaQ, uses a closed-form policy update that reduces the sources of errors and increase the overall stability. Still, some instabilities may remain coming from the choice of the behavior policy (see Fig. 1) or the policy evaluation algorithm. Yet, we believe that the simplicity of StaQ’s policy update, its strong theoretical foundation and its empirical behavior brings us closer to a completely stable deep RL algorithm.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+Entropy-regularization in RL. Entropy regularization has seen widespread usage in RL. It was used with (natural) policy gradient (Kakade, 2001; Schulman et al., 2015), policy search (Deisenroth et al., 2013), policy iteration (Abbasi-Yadkori et al., 2019; Zhan et al., 2023) and value iteration methods (Fox et al., 2016; Vieillard et al., 2020). Common choices of regularizers include minimizing the $D_{\mathrm{KL}}$ between the current and previous policy (Azar et al., 2012; Schulman et al., 2015) or encouraging high Shannon entropy (Fox et al., 2016; Haarnoja et al., 2018), but other forms of entropy regularizers exist (Lee et al., 2019; Alfano et al., 2023). We refer the reader to Neu et al. (2017); Geist et al. (2019) for a broader categorization of entropy regularizers and their relation to existing deep RL methods. In this paper, we use both a $D_{\mathrm{KL}}$ penalization w.r.t. the previous policy and a Shannon entropy bonus in a policy iteration context. In Vieillard et al. (2020), both types of regularizers were used but in a value iteration context. Abbasi-Yadkori et al. (2019); Lazic et al. (2021) are policy iteration methods but only use $D_{\mathrm{KL}}$ penalization. Finally, Zhan et al. (2023) is in the same setting as our work but is mostly theoretical. In this paper, we study a family of practical deep RL algorithms that extend the analysis of the approximate algorithms in Zhan et al. (2023), and provide both a theoretical analysis and an extensive empirical evaluation of these algorithms.  
+
+Continual Learning (CL) and RL. In CL a learner faces non-stationary data distributions (commonly referred to as tasks) and aims at obtaining good performance (e.g. classification accuracy) on the newest task without hindering performance on previous tasks (De Lange et al., 2021; Wang et al., 2024). RL and CL connect in several ways: some continual supervised learning settings can be formulated as RL problems (Kumar et al., 2023), while RL can be extended to the CL setting by having non-stationary rewards or environment dynamics (Rusu et al., 2016; Khetarpal et al., 2020). Even when the rewards and dynamics are stationary—setting which we refer to as single task RL— data in RL can still arrive in a non-stationary fashion as in CL. As such, both RL and CL can end-up using surprisingly similar approaches, as discussed in the previous section. Nonetheless, not all research in CL might be relevant to single task RL and vice versa. For example, in RL, the learner can (indirectly) control the data distribution, providing additional mechanisms to reduce catastrophic forgetting which are not always possible in CL (see Sec. 6.3 for an example).  
+
+Growing neural architectures in RL. Saving past Q-functions was investigated in the context of policy evaluation. In Tosatto et al. (2017), a first Q-function is learned then frozen and a new network is added, learning the residual error. Anschel et al. (2017) extended DQN by saving the past 10 Q-functions, and using them to compute lower variance target values. Both Girgin & Preux (2008) and Della Vecchia et al. (2022) use a special neural architecture called the cascade-correlation network (Fahlman & Lebiere, 1989) to grow neural policies. The former work studies such policies in combination with LSPI (Lagoudakis & Parr, 2003), without entropy regularization. The latter work is closer to ours, as it uses a $D_{\mathrm{KL}}$ -regularizer but does not include a deletion mechanism. As such the policy grows indefinitely, limiting the scaling of the method. Finally, Abbasi-Yadkori et al. (2019) save the past $10\;\mathrm{Q}.$ -functions to compute the policy in Eq. 1 for the specific case of $\beta=1$ , but do not study the impact of deleting older Q-functions as we do in this paper. Growing neural architectures are more common in the neuroevolution community (Stanley & Miikkulainen, 2002). Such evolutionary approaches were already used for RL tasks but are beyond the scope of this paper.  
+
+3 PRELIMINARIES  
+
+Let a Markov Decision Problem (MDP) be defined by the tuple $(S,A,R,P,\gamma)$ , such that $S$ and $A$ are finite state and action spaces, $R$ is a bounded reward function $R:S\times A\mapsto[-R_{\mathrm{x}},R_{\mathrm{x}}]$ for some positive constant $R_{\mathrm{x}}$ , $P$ defines the (Markovian) transition probabilities of the decision process and $\gamma$ is a discount factor. The algorithms presented in this paper can be extended to more general state spaces. However, the limitation to a finite $A$ is non-trivial to lift because of the sampling from softmax distributions as in Eq. 1. We discuss in Sec. 7 potential ways to address this limitation.  
+
+Let $\Delta(A)$ be the space of probability distributions over $A$ , and $h$ be the negative entropy given by $h:\Delta(A)\mapsto\mathbb{R}$ , $h\bar{(}p)=p^{\bar{\cdot}}\log p$ , where $\cdot$ is the dot product and the log is applied element-wise to the vector $p$ . Let $\pi:S\mapsto\Delta(A)$ be a stationary stochastic policy mapping states to distributions over actions. We denote the entropy regularized V-function for policy $\pi$ and regularization weight $\tau>0$ as $V_{\tau}^{\pi}:S\mapsto\mathbb{R}$ , which is defined by:  
+
+$$
+V_{\tau}^{\pi}(s)=\mathbb{E}_{\pi}\left[\sum_{t=0}^{\infty}\gamma^{t}\{R(s_{t},a_{t})-\tau h(\pi(s_{t}))\}\right]s_{0}=s\right].
+$$  
+
+In turn, the entropy regularized Q-function is given by $Q_{\tau}^{\pi}(s,a)\,=\,R(s,a)+\gamma\mathbb{E}_{s^{\prime}}\left[V_{\tau}^{\pi}(s^{\prime})\right]$ . The V-function can be written as the expectation of the $\mathrm{^Q}$ -function plus the current state entropy, i.e. $V_{\tau}^{\pi}(s)=\mathbb{E}_{a}\left[Q_{\tau}^{\pi}(s,a)\right]-\tau h(\pi(s))$ which leads to the Bellman equation:  
+
+$$
+Q_{\tau}^{\pi}(s,a)=R(s,a)+\gamma\mathbb{E}_{s^{\prime},a^{\prime}}\left[Q_{\tau}^{\pi}(s^{\prime},a^{\prime})-\tau h(\pi(s^{\prime}))\right].
+$$  
+
+In the following, we will write policies of the form $\pi(s)\propto\exp(Q(s,\cdot))$ for all $s\,\in\,S$ more succinctly as $\pi\propto\exp(Q)$ . We define optimal $\mathrm{v}$ and Q functions by  
+
+$$
+\mathrm{~for~all~}s\in S,a\in A,\quad V_{\tau}^{\star}(s):=\operatorname*{max}_{\pi}V_{\tau}^{\pi}(s),\quad Q_{\tau}^{\star}(s,a):=\operatorname*{max}_{\pi}Q_{\tau}^{\pi}(s,a).
+$$  
+
+Moreover, the policy $\begin{array}{r}{\pi^{\star}\propto\exp\left(\frac{Q_{\tau}^{\star}}{\tau}\right)}\end{array}$ satisfies $Q_{\tau}^{\pi^{\star}}\,=\,Q_{\tau}^{\star}$ and $V_{\tau}^{\pi^{\star}}\,=\,V_{\tau}^{\star}$ simultaneously for all $s\in S$ (Zhan et al., 2023). In the following, we will overload notations of real functions defined on $S\times A$ and allow them to only take a state input and return a vector in $\mathbb{R}^{|A|}$ . For example, $Q_{\tau}^{\pi}(s)$ denotes a vector for which the $i^{\mathrm{th}}$ entry $i\in\{1,\dotsc,|A|\}$ is equal to $Q_{\tau}^{\pi}(s,i)$ . Finally we define  
+
+$$
+\bar{R}:=\frac{R_{\mathrm{x}}+\gamma\tau\log|A|}{1-\gamma},
+$$  
+
+as the finite upper-bound of $\|Q_{\tau}^{\pi}\|_{\infty}$ for any policy $\pi$ , that can be computed by assuming the agent collects the highest reward and entropy possible at every step.  
+
+3.1 ENTROPY-REGULARIZED POLICY MIRROR DESCENT  
+
+To find $\pi^{\star}$ , we focus on Entropy-regularized Policy Mirror Descent (EPMD) methods (Neu et al., 2017; Abbasi-Yadkori et al., 2019; Lazic et al., 2021) and notably on those that regularize both the policy update and the Q-function (Zhan et al., 2023; Lan, 2022). The PMD setting discussed here is also equivalent to the regularized natural policy gradient algorithm on softmax policies of Cen et al. (2022). Let $\pi_{k}$ be the policy at iteration $k$ of EPMD, and $Q_{\tau}^{\overline{{k}}}:=Q_{\tau}^{\pi_{k}}$ its Q-function. The next policy in EPMD is the solution of the following optimization problem:  
+
+$$
+\begin{array}{r l}&{\mathrm{for~all~}s\in S,\pi_{k+1}(s)=\underset{p\in\Delta(A)}{\mathrm{arg}\,\mathrm{max}}\left\{Q_{\tau}^{k}(s)\cdot p-\tau h(p)-\eta D_{\mathrm{KL}}(p;\pi_{k}(s))\right\},}\\ &{\qquad\qquad\qquad\qquad\propto\pi_{k}(s)^{\frac{\eta}{\eta+\tau}}\exp\left(\frac{Q_{\tau}^{k}(s)}{\eta+\tau}\right),}\end{array}
+$$  
+
+where $D_{\mathrm{KL}}(p;p^{\prime})=p\!\cdot\!(\log p\!-\!\log p^{\prime})$ and $\eta>0$ is the $D_{\mathrm{KL}}$ regularization weight. The closed form expression in Eq. 6 is well-known and its proof can be checked in Zhan et al. (2023) for instance. We let $\begin{array}{r}{\alpha=\frac{1}{\eta+\tau}}\end{array}$ η+1τ and β = $\begin{array}{r}{\beta=\frac{\eta}{\eta+\tau}}\end{array}$ , hereafter referred to as a step-size and a decay factor respectively. Our paper focuses on single task RL but sees the policy update in Eq. 5 through the lens of CL. Please see App. $\boldsymbol{\mathrm E}$ for more details. Let $\xi_{k}$ be a real function of $S\times A$ for any positive integer $k$ . We assume as the initial condition that $\pi_{0}\propto\exp(\xi_{0})$ with $\xi_{0}=0$ , i.e. $\pi_{0}$ is uniform over the actions. At every iteration of EPMD, the update in Eq. 6 yields the following logits update  
+
+$$
+\pi_{k+1}\propto\exp(\xi_{k+1}),\quad\xi_{k+1}=\beta\xi_{k}+\alpha Q_{\tau}^{k}.
+$$  
+
+From the recursive definition of $\xi_{k+1}$ , it can easily be verified that $\begin{array}{r}{\xi_{k+1}=\alpha\sum_{i=0}^{k}\beta^{k-i}Q_{\tau}^{i}}\end{array}$ . The convergence of EPMD is characterized by the following theorem  
+
+Theorem 3.1 (Adapted from Zhan et al. (2023), Thm. 1). At iteration $k$ of EPMD, the $Q$ -function of $\prime\prime_{k}$ satisfies $\left\|Q_{\tau}^{\star}\!\stackrel{\cdot}{-}Q_{\tau}^{k}\right\|_{\infty}\leq\gamma d^{k-1}\left(\left\|Q_{\tau}^{\star}-Q_{\tau}^{0}\right\|_{\infty}+2\beta\left\|Q_{\tau}^{\star}\right\|_{\infty}\right)$ , with $d=\beta+\gamma(1-\beta)<1$ .  
+
+The above theorem shows that by following EPMD, we have a linear convergence of $Q_{\tau}^{k}$ towards $Q_{\tau}^{\star}$ , with a convergence rate of $d$ . In the next section, we will be interested in an approximate version of EPMD, where the Q-function $Q_{\tau}^{k}$ is computed exactly but where $\xi_{k}$ is limited to summing at most $M$ Q-functions. We name this setting finite-memory EPMD. In the main paper, we only focus for clarity on error introduced in the policy update introduced by this deletion mechanism. Results for additional errors in the policy evaluation are deferred to App. A.  
+
+
+
+\section{4 FINITE-MEMORY POLICY MIRROR DESCENT  }
+
+
+Let $M>0$ be a positive integer defining the maximum number of Q-functions we are allowed to store. As a warm-up, we first show in Sec. 4.1 a straightforward implementation of finite-memory EPMD, where we simply truncate the sum of the Q-functions in Eq. 1 to the last $M$ Q-functions. The convergence analysis of this algorithm is largely based on the analysis of the approximate EPMD of Zhan et al. (2023), which assumes a bounded sub-optimality of the policy update procedure (Eq. 5). Compared to the proof from the prior work, the main step in our setting consists in quantifying the effect of the finite-memory assumption to the policy improvement step. As in the class of approximate algorithms analyzed in Zhan et al. (2023), the algorithm in Sec. 4.1 always exhibits an irreducible error for a finite $M$ . To address this issue, we introduce a weight corrected algorithm that rescales the policy in Eq. 1 to account for its finite-memory nature. This rescaling introduces long range dependencies that complicate the analysis, but can result in convergence to $Q_{\tau}^{\star}$ , provided a large enough $M$ .  
+
+4.1 VANILLA FINITE-MEMORY EPMD  
+
+Consider an approximate EPMD setting where the update to $\xi_{k}$ is given by  
+
+$$
+\xi_{k+1}=\beta\xi_{k}+\alpha\left(Q_{\tau}^{k}-\beta^{M}Q_{\tau}^{k-M}\right),
+$$  
+
+with $Q_{\tau}^{k-M}:=0$ whenever $k-M<0$ . Compared to $\xi_{k+1}$ in Eq. 7, we simultaneously add the new $Q_{\tau}^{k}$ and ‘delete’ an old Q-function by subtracting ${Q}_{\tau}^{k-M}$ in Eq. 8. As a result, $\xi_{k+1}$ can now be written as $\begin{array}{r}{\xi_{k+1}=\alpha\sum_{i=0}^{M-1}\beta^{i}Q_{\tau}^{k-i}}\end{array}$ , and thus it is a finite-memory EPMD algorithm using at most Q-functions.  
+
+We now want to investigate if we have any convergence guarantees of $Q_{\tau}^{k}$ towards $Q_{\tau}^{\star}$ as for EPMD. Let the policy $\tilde{\pi}_{k}$ be defined by $\tilde{\pi}_{k}\propto\exp(\tilde{\xi}_{k})$ with $\begin{array}{r}{\tilde{\xi}_{k}\,=\,\alpha\sum_{i=0}^{M-2}\beta^{i}Q_{\tau}^{k-1-i}}\end{array}$ . Here, $\tilde{\xi}_{k}\,=\,\xi_{k}\,-$ $\alpha\beta^{M-1}Q_{\tau}^{k-M}$ , i.e. it is obtained by deleting the oldest Q-f unction from $\xi_{k}$ and thus is a sum of $M-1$ Q-functions. The update in Eq. 8 can now be rewritten as $\xi_{k+1}=\beta\tilde{\xi}_{k}+\alpha Q_{\tau}^{k}$ . From Sec. 3, we recognize this update as the result of the following optimization problem:  
+
+$$
+\mathrm{for~all~}s\in S,\quad\pi_{k+1}(s)=\underset{p\in\Delta(A)}{\arg\operatorname*{max}}\left\{Q_{\tau}^{k}(s)\cdot p-\tau h(p)-\eta D_{\mathrm{KL}}(p;\tilde{\pi}_{k}(s))\right\}.
+$$  
+
+In this approximate scheme, we compute the $D_{\mathrm{KL}}$ regularization w.r.t. $\tilde{\pi}_{k}$ instead of the previous policy $\pi_{k}$ . This can negatively impact the quality of $\pi_{k+1}$ as it might force $\pi_{k+1}$ to stay close to the potentially bad policy $\tilde{\pi}_{k}$ . In the following theorem, we provide a form of an approximate policy improvement of $\pi_{k+1}$ on $\pi_{k}$ , that depends on how close $\tilde{\pi}_{k}$ is to $\pi_{k}$ . This theorem applies to a generic policy $\tilde{\pi}_{k}$ , therefore it can be of interest beyond the scope of this paper.  
+
+Theorem 4.1 (Approximate policy improvement). Let $\pi_{k}\propto\exp(\xi_{k})$ be a policy with associated $Q$ -function $Q_{\tau}^{k}$ . Let $\tilde{\pi}_{k}\propto\exp(\tilde{\xi}_{k})$ be an arbitrary policy. Let $\pi_{k+1}$ be the policy optimizing Eq. 9 w.r.t. the hereby defined $Q_{\tau}^{k}$ and $\tilde{\pi}_{k}$ , then the $Q$ -function $Q_{\tau}^{k+1}$ of $\pi_{k+1}$ satisfies  
+
+$$
+Q_{\tau}^{k+1}\geq Q_{\tau}^{k}-\gamma\eta\frac{\operatorname*{max}_{s\in\cal{S}}\left\|\left(\pi_{k}-\tilde{\pi}_{k}\right)\!\left(s\right)\right\|_{1}\left\|\xi_{k}-{\tilde{\xi}_{k}}\right\|_{\infty}}{1-\gamma}.
+$$  
+
+The proof of Thm. 4.1 and all future proofs are given in App. A. Applying Thm. 4.1 to our setting gives the following policy improvement lower bound  
+
+Corollary 4.1.1. Let $\pi_{k}\,\propto\,\exp(\xi_{k})$ be a policy with associated $Q$ -function $Q_{\tau}^{k}$ , such that $\xi_{k}\,=$ $\begin{array}{r}{\alpha\sum_{i=0}^{M-1}\beta^{i}Q_{\tau}^{k-1-i}}\end{array}$ . $\begin{array}{r}{\cot\tilde{\pi}_{k}\propto\exp(\tilde{\xi}_{k})}\end{array}$ be the policy such that $\begin{array}{r}{\tilde{\xi}_{k}=\alpha\sum_{i=0}^{M-2}\beta^{i}Q_{\tau}^{k-1-i}}\end{array}$ . Let $\pi_{k+1}$ be the policy optimizing Eq. 9, then the $Q$ -function $Q_{\tau}^{k+1}$ of $\pi_{k+1}$ satisfies  
+
+$$
+Q_{\tau}^{k+1}\geq Q_{\tau}^{k}-\gamma\beta^{M}\frac{\operatorname*{min}\left\{2,\alpha\beta^{M-1}\bar{R}\right\}\bar{R}}{1-\gamma}.
+$$  
+
+In vanilla EPMD, it is guaranteed that $Q_{\tau}^{k+1}\geq Q_{\tau}^{k}$ (Zhan et al., 2023). In this approximate setting, we can bring the error arbitrarily close to 0 through the term $\beta^{M}$ by choosing a large enough $M$ , since $\beta<1$ .  
+
+Having quantified the error in the policy improvement step, we follow the general steps of the proof of approximate EPMD of Zhan et al. (2023) and come to the following convergence guarantees.  
+
+Theorem 4.2 (Convergence of vanilla finite-memory EPMD). After $k\geq0$ iterations of Eq. 8, we have that $\left\|Q_{\tau}^{\star}-Q_{\tau}^{k}\right\|_{\infty}^{\circ}\leq\gamma d^{k}\left(\left\|Q_{\tau}^{\star}\right\|_{\infty}+\left\|Q_{\tau}^{0}\right\|_{\infty}\right)+\gamma\beta^{k}\left\|Q_{\tau}^{0}\right\|_{\infty}+\beta^{M}C_{1},$ , with $d=\beta+\gamma(1-$ β) < 1 and C1 =1γ− Rγ $\begin{array}{r}{C_{1}=\frac{\gamma\bar{R}}{1-\gamma}\left[\frac{\gamma\operatorname*{min}\left\{2,\alpha\beta^{M-1}\bar{R}\right\}}{(1-\beta)(1-\gamma)}+2\right]}\end{array}$ .  
+
+Since $\beta\ <\ d\,<\,1$ , the slowest term vanishes at a rate of $d$ as with exact EPMD. However, we eventually reach an error of $\beta^{M}C_{1}$ , that does not decrease as $k$ increases, and that we can only control by increasing the memory size $M$ . A problem with the current algorithm is that even if all past Q-functions are equal to $Q_{\tau}^{\star}$ , then $\begin{array}{r}{\tau\xi_{k}=\bar{(1-\beta)}\sum_{i=0}^{M-1}\beta^{i}Q_{\tau}^{\star}=\bar{(1-\beta^{M})}Q_{\tau}^{\star}}\end{array}$ , whereas we know that asymptotically $\xi_{k}$ should converge to the logits of $\pi^{\star}$ (Sec. 3) which are Qττ . This suggests a slightly modified algorithm that rescales $\xi_{k}$ by $1-\beta^{M}$ , which we analyze in the next section.  
+
+4.2 WEIGHT CORRECTED FINITE-MEMORY EPMD  
+
+Consider now the alternative update to $\xi_{k}$ given by  
+
+$$
+\xi_{k+1}=\beta\xi_{k}+\alpha Q_{\tau}^{k}+\frac{\alpha\beta^{M}}{1-\beta^{M}}(Q_{\tau}^{k}-Q_{\tau}^{k-M}),
+$$  
+
+where $Q_{\tau}^{k-M}:=0$ whenever $k-M<0$ . In contrast to the vanilla algorithm in Sec. 4.1, we now delete the oldest Q-function in $\xi_{k}$ and also slightly overweight the most recent Q-function to ensure that the Q-function weights sum to 1. Indeed, assuming that $\xi_{0}:=0$ , we can show (see App. A.4.1 for a proof) for all $k\geq0$ that the logits only use the past $M$ Q-functions and are given by  
+
+$$
+\xi_{k+1}=\frac{\alpha}{1-\beta^{M}}\sum_{i=0}^{M-1}\beta^{i}Q_{\tau}^{k-i}.
+$$  
+
+Similar to the previous section, we introduce a policy $\tilde{\pi}_{k}\propto\exp(\tilde{\xi}_{k})$ with $\begin{array}{r}{\tilde{\xi}_{k}=\xi_{k}+\frac{\alpha\beta^{M-1}}{1-\beta^{M}}(Q_{\tau}^{k}-}\end{array}$ ${Q_{\tau}^{k-M}})$ such that logits of $\pi_{k+1}$ are given by $\xi_{k+1}=\beta\tilde{\xi}_{k}+\alpha Q_{\tau}^{k}$ . This form of $\xi_{k+1}$ implies that $\pi_{k+1}$ satisfies the policy update in Eq. 9, and thus Thm. 4.1 applies and we have  
+
+Corollary 4.1.2. Let $\pi_{k}\,\propto\,\exp(\xi_{k})$ be a policy with associated $Q$ -function $Q_{\tau}^{k}$ , such that $\xi_{k}\,=$ $\begin{array}{r}{\frac{\alpha}{1-\beta^{M}}\sum_{i=0}^{M-1}\beta^{i}Q_{\tau}^{k-1-i}}\end{array}$ . $L e t\,\tilde{\pi}_{k}\propto\exp(\tilde{\xi}_{k})$ be the policy such that $\begin{array}{r}{\tilde{\xi}_{k}=\xi_{k}\!+\!\frac{\alpha\beta^{M-1}}{1-\beta^{M}}\big(Q_{\tau}^{k}\!-\!Q_{\tau}^{k-M}\big)}\end{array}$ . Let $\pi_{k+1}$ be the policy optimizing Eq. 9 with the hereby defined $Q_{\tau}^{k}$ and $\tilde{\pi}_{k}$ , then the $Q$ -function $Q_{\tau}^{k+1}$ of $\pi_{k+1}$ satisfies  
+
+$$
+Q_{\tau}^{k+1}\geq Q_{\tau}^{k}-2\gamma\beta^{M}\frac{\|Q_{\tau}^{k}-Q_{\tau}^{k-M}\|_{\infty}}{(1-\gamma)(1-\beta^{M})}.
+$$  
+
+fdCueonpcmetnipodarsne s do cntoo $\left\|Q_{\tau}^{k}-Q_{\tau_{-}}^{k-M}\right\|_{\infty}^{\;\;\;\mathbf{x}}$ ogilneitsc tytei aigdmh tpeorrfo  avjuensdmt $\big\|Q_{\tau}^{k-M}\big\|_{\infty}$ .a.1n ,t eTwehes u ssoe,n e  wtthheae t c tpahonel  ilecoxyw pieemcr-tp brtoohuvante dma isen n ttEh qes.t  e1Qp4-, $Q_{\tau}^{\star}$ which in turn guarantees convergence to $Q_{\tau}^{\star}$ without the residual error of Sec. 4.1. The next two results show that indeed, for $M$ large enough, the finite-memory EPMD scheme defined by Eq. 12 leads to convergence to $Q_{\tau}^{\star}$ . Lem. 4.3 provides an upper bounding sequence for $\left\|Q_{\tau}^{\star}-Q_{\tau}^{k}\right\|_{\infty}$ .  
+
+Lemma 4.3. Let $x_{k+1}=d_{1}x_{k}+d_{2}x_{k-M}$ be a sequence such that $\forall k<0,$ , $\begin{array}{r}{x_{k}\,=\,\frac{\|Q_{\tau}^{\star}\|_{\infty}}{\gamma}}\end{array}$ ∥Qτ ∥∞, x0 = $\left\lVert Q_{\tau}^{\star}\right\rVert_{\infty}+\left\lVert Q_{\tau}^{0}\right\rVert_{\infty}$ , $\begin{array}{r}{d_{1}:=\beta+\gamma\frac{1-\beta}{1-\beta^{M}}+\gamma c_{2},\,d_{2}:=\frac{2c_{1}\gamma^{2}}{1-\gamma}}\end{array}$ 21c1−γγ , c1 :=1−ββM , and c2 := 11−+γγ −β c1. After $k\geq0$ iterations of Eq. 12, we have that $\left\lVert Q_{\tau}^{\star}-Q_{\tau}^{k}\right\rVert_{\infty}\leq x_{k}$ .  
+
+Then, we compute values of $M$ for which the sequence $x_{k}$ converges to 0 and characterize the convergence rate of $\left\|Q_{\tau}^{\star}-Q_{\tau}^{k}\right\|_{\infty}$ through Thm. 4.4.  
+
+Theorem 4.4 (Convergence of weight corrected finite-memory EPMD). With the definitions of Lemma 4.3, if $\begin{array}{r}{M\ >\ \log\frac{(1-\gamma)^{2}(1-\beta)}{\gamma^{2}(3+\beta)+1-\beta}(\log\beta)^{-1}}\end{array}$ then $\operatorname*{lim}_{k\to\infty}x_{k}~=~0$ . Moreover, $\forall k~\geq~0$ , $\begin{array}{r}{\big\|Q_{\tau}^{\star}-Q_{\tau}^{k}\big\|_{\infty}\leq(d_{1}{+}d_{2}d_{3}^{-1})^{k}\operatorname*{max}\Bigl\{\frac{\|Q_{\tau}^{\star}\|_{\infty}}{\gamma},\|Q_{\tau}^{\star}\|_{\infty}{+}\|Q_{\tau}^{0}\|_{\infty}\Bigr\}.}\end{array}$ , where $\begin{array}{r}{d_{3}:=\left(d_{1}^{M}+d_{2}\frac{1-d_{1}^{M}}{1-d_{1}}\right)}\end{array}$ and $\mathrm{lim}_{M\rightarrow\infty}\,d_{1}+d_{2}d_{3}^{-1}=\beta+\gamma(1-\beta)$ .  
+
+Thm. 4.4 defines a minimum memory size that guarantees convergence to $Q_{\tau}^{\star}$ . This minimum $M$ depends only on $\beta$ and $\gamma$ , and is usually within the range of practical values: for example, with $\gamma\,=\,0.99$ and $\beta\,=\,0.95$ , the minimum $M$ suggested by Thm. 4.4 is 265, which is reasonable in terms of memory and computation with current GPUs (we used $M=300$ in all our experiments). As can be expected, these values of $M$ are generally pessimistic and in practice we did not observe better performance when using as large $M$ as suggested by Thm. 4.4.  
+
+In terms of convergence rate, $d_{1}\!+\!d_{2}d_{3}^{-1}$ given in $\operatorname{Thm}4.4$ tends to $d_{\mathrm{}}$ —the convergence rate of exact EPMD—as $M$ goes to infinity. Thus, it is slower than exact EPMD, and slower than the algorithm in Sec. 4.1, but unlike the latter it does not have an irreducible error and converges to $Q_{\tau}^{\star}$ .  
+
+5 STACKED NEURAL NETWORKS To study finite-memory EPMD in the memory regimes suggested by Thm. A.6, we propose the Stacked NN architecture (SNN, illustrated in Fig. 1) that makes efficient use of GPUs to compute multiple Q-values in parallel, and we call the resulting algorithm StaQ. An SNN is parameterized by $M$ , the maximum number of networks kept in memory. The main operation of an SNN is a push function, that “stacks” an input NN into an SNN. The stacking consists in building tensors with one extra dimension for every weight matrix of the NN Q-function. For instance, let $A_{k}$ be a $256\times256$ weight matrix of a hidden layer of (the neural approximation of) $Q_{\tau}^{k}$ . Let $A_{k}$ be a $k\times256\times256$ tensor of the SNN that stores all past $A_{i}$ weight matrices for $i\leq k$ . In the forward pass of the SNN, to compute past Q-functions $Q_{\tau}^{i}$ for $i\leq k$ , we use the batch matrix operation of PyTorch (Paszke et al., 2017) on $A_{k}$ to make full use of the GPU parallel computing power. Finally, if the SNN contains more than $M$ NNs after a push operation, the oldest NN is deleted from the SNN in a ”first in first out” fashion. This push operation of SNNs currently supports multi-layer Perceptron NN architectures only. We leave the extension to other neural architectures such as CNNs (LeCun et al., 2015) or LSTMs (Hochreiter & Schmidhuber, 1997) to future work. To further reduce the impact of a large $M$ , we pre-compute $\xi_{k}$ for all entries in the replay buffer1 at the start of policy evaluation. The logits $\xi_{k}$ are used to sample on-policy actions when computing the targets for $Q_{\tau}^{\tilde{k}}$ . As a result of the pre-computation, during policy evaluation, forward and backward passes only operate on the current Q-function and hence the impact of large $M$ is minimized. Beyond policy evaluation, computing $\xi_{k}$ is also used in data collection by the behavior policy $\pi_{k}^{b}$ that typically relies on computing $\pi_{k}$ (see Sec. 6). Conversely, the policy update consists only of the above push operation, and thus, is optimization free and (almost) instantaneous. Table 1 shows the training time of StaQ over 5 million steps as a function of $M$ for two environments. Varying $M$ (up to 500) or the size of the state space has little impact on the runtime of StaQ when running on GPU.  
+
+![](images/7fb99251e0899da3aada65ad54fbfe19125234f0a35224cbde86c70968a0e510.jpg)  
+
+![](images/dbbe5393f03ae294acdaf9a8ed6e71ab85cae400c721be9c50cbe920a0f88081.jpg)  
+Table 1: Training times for $\mathrm{StaQ}$ (5 million steps), as a function of $M$ , on Hopper-v4 (state dim. $=\!11$ ) and Ant-v4 (state dim. $=105$ ), computed on an NVIDIA Tesla V100 and averaged over 3 seeds.   
+Figure 2: Policy return of StaQ, compared with deep RL baselines. Plots show mean and one standard deviation computed over 10 seeds. StaQ matches or exceeds state-of-the-art on several tasks and has generally lower variance. Even when the variance appears to be of the same order than the deep RL baselines, the oscillations within runs are generally reduced, see e.g. Fig. 3. See App. B.1 for all results.  
+
+
+
+\section{6 EXPERIMENTS  }
+
+
+In this section, we assess the empirical merits of StaQ, paying attention to both the performance and stability. Note that, in the context of Continual Learning, we can relate this to the stability-plasticity trade-off, since plasticity in this single-task setting is measured by the policy return. Regarding stability, we check if the averaging over the large number of Q-functions (several hundred) done by SNN improves the stability of the learning process, in terms of reducing performance oscillations across iterations of the same seed. Naturally, we also investigate the hyper-parameter $M$ to determine values for which the above stability might manifest. Finally, we discuss some of the limitations of our algorithm and how they open new perspectives towards a fully reliable deep RL solver.  
+
+Environments. We use all 9 environments suggested by Ceron & Castro (2021) for comparing deep RL algorithms with finite action spaces, comprising 4 classic control tasks from Gymnasium (Towers et al., 2023) and all MinAtar tasks (Young & Tian, 2019). To that we add 5 Mujoco tasks (Todorov et al., 2012), adapted to discrete action spaces by considering only extreme actions similarly to (Seyde et al., 2021). To illustrate, the discrete version of a Mujoco task with action space $\dot{A}=[-1,1]^{d}$ consists in several $d$ dimensional vectors that have zeroes everywhere except at entry $i\in\{1,\ldots,d\}$ that can either take a value of 1 or $-1$ ; to that we add the zero action, leading to a total of $2d+1$ actions.  
+
+Baselines. We compare StaQ against the value iteration algorithm DQN (Mnih et al., 2015) and its entropy-regularized variant M-DQN (Vieillard et al., 2020), the policy gradient algorithm TRPO (Schulman et al., 2015) as it uses a $D_{\mathrm{KL}}$ regularizer and PPO (Schulman et al., $\bar{2}017)^{2}$ . SAC (Haarnoja et al., 2018) is another popular deep RL baseline that uses entropy regularization but is not adapted for discrete action environments, as discussed in App. D. Comparisons with baselines are averaged over 10 seeds and show the mean and standard deviation of the return. The return is computed by evaluating every 100K steps the current deterministic policy by averaging 50 rollouts. Hyperparameters for StaQ and the baselines are provided in App. F.  
+
+StaQ’s components. We consider the behavior policy $\pi_{k}^{b}$ that is an $\epsilon$ -softmax policy over $\pi_{k}$ — by analogy with $\epsilon$ -greedy policies, which mixes the softmax policy $\pi_{k}$ and a uniform policy with probabilities $(1\mathrm{~-~}\epsilon)$ and $\epsilon$ respectively. We use the $\epsilon$ -softmax policy instead of $\pi_{k}$ as we found that using only $\pi_{k}$ can cause catastrophic forgetting in the Q-function, as discussed in Sec. 6.3. For  
+
+![](images/c316fe443925284390e9b40d6723389292648275e5fba07d89a48596cfa9694d.jpg)  
+(a) Return of individual runs, centered at each step.  
+
+![](images/c47a15c7021e1eda3d55c11dda72c1dc35abd99f0199a399de67f567b65758aa.jpg)  
+(b) Impact of memory size M.  
+
+Figure 3: Left: Deviation from mean policy returns for individual runs on Hopper, comparing StaQ and the closest performing baseline TRPO. Returns are centered at every timestep by subtracting the mean across 10 seeds. In general, individual runs of StaQ have significantly lower variance across timesteps compared to TRPO. For clarity, we only plot the first three seeds. See App B.2 for further environments and algorithms. Right: Policy returns under different choice of $M$ . On the simpler Acrobot task, $M>5$ seems sufficient but on Humanoid, even $M=100$ seems insufficient. Plots showing mean and one standard deviation computed over 5 seeds.  
+
+learning $Q_{\tau}^{k}$ , we used a similar approach to SAC (Haarnoja et al., 2018), sampling an action from the current policy and use an ensemble of two target Q-functions updated in a hard manner. At the start, the NN for ${\dot{Q}}_{\tau}^{0}$ is initialized with the zero output, so that $\pi_{0}$ is a uniform policy, for all consecutive iterations the NN for $Q_{\tau}^{k}$ is initialized at the computed $\bar{Q}_{\tau}^{k-1}$ (to make the transfer from $Q_{\tau}^{k}$ to $Q_{\tau}^{k-1}$ smoother). When computing the Q-values in the next states, we aggregate the target values by taking either the min or the mean of the two Q-functions. We discuss the impact of this choice in App. B.5. For the full set of hyperparameters consult App. F. To account for the varying action dimension $|A|$ of the environments, we set the scaled entropy coefficient $\bar{\tau}$ as a hyperparameter, defined by ${\bar{\tau}}=\tau\log|A|$ , rather than directly setting $\tau$ . Furthermore, the entropy weight is linearly annealed from its minimum and maximum values over the first 1 million timesteps.  
+
+
+
+\section{6.1 STABILITY AND PERFORMANCE OF STAQ  }
+
+
+A comparison of StaQ to deep RL baselines is shown for a selection of environments in Fig. 2, and for all environments in App. B.1. In general, the performance matches or exceeds previous state-of-the-art algorithms, with lower variance and less performance oscillation. The improved stability of StaQ is more clearly seen when we look at the variability within individual runs. An example of this is shown in Fig. 3 (Left) for Hopper, where we plot the return for each seed, centered by subtracting the mean return across all seeds at each evaluation timestep. More comparisons are provided in App. B.2. These experiments confirm the preliminary results of Abbasi-Yadkori et al. (2019) that a policy averaging over multiple Q-functions stabilizes learning. While prior work considered only saving the last $10\;\mathrm{Q}.$ -functions, we show next that, on more complex tasks, saving an order of magnitude more Q-functions can still have positive effects on stability and performance.  
+
+6.2 THE IMPACT OF THE MEMORY-SIZE $M$  
+
+According to Sec. 4.2, $M$ is a crucial parameter that should be large enough to guarantee the convergence. The $M$ estimation obtained from Thm. A.6 may be very conservative in practice. In Fig. 3 (Right), we present the results for different choices of $M$ for Acrobot and Humanoid. Despite that some low $M\leq100$ $M\leq10$ for Acrobot) can still give us decent average performance, stability is negatively affected, which is especially pronounced for more challenging environment such as Humanoid. Conversely, higher $M\,=\,500$ , while being more expensive to compute, does not lead to any improvement either in terms of performance or stability. Thus, $M=300$ is the best compromise between stability and compute time. More environments are shown in App B.2.  
+
+6.3 CATASTROPHIC FORGETTING IN THE Q-FUNCTION  
+
+As illustrated in Fig. 4, when the behavior policy $\pi_{k}^{b}$ is the current soft  
+max policy $\pi_{k}$ , there are more performance drops than when using an   
+$\epsilon$ -softmax policy introduced earlier. To understand this behavior, we   
+have recorded the $\mathrm{^Q}$ -values across 100 states for two variants of StaQ   
+that only differ in whether or not the behavior policy adds a probability   
+$\epsilon=0.05$ of picking actions uniformly at random. The results are shown   
+in App. B.4. On several states, the Q-values show larger variability when   
+$\epsilon=0.0$ than when $\epsilon=0.05$ , which itself creates instability in the policy   
+as discussed in App. B.4. While $\epsilon\:=\:0.05$ improves stability, the plot   
+
+the Q-values, which can still negatively impact performance. Moreover,   
+$\epsilon$ -softmax policies, similarly to $\epsilon$ -greedy ones, might prevent deep explo  
+ration (Osband et al., 2016) and their off-policy nature might complicate   
+learning (Kumar et al., 2020). In this paper, we focus on the instability   
+of the policy; we believe that proper continual learning treatment of the Q-function, as discussed in  
+
+![](images/502ac0bbf209530c76ca22b3b6e2cee6dc59192097003f2e89903ab37fcae087.jpg)  
+Figure 4: Policy return of StaQ for two different ϵ- softmax behavior policies, with $\epsilon\mathrm{~\,~}=\,\mathrm{~0.05~}$ or $\epsilon\mathrm{~\ensuremath~{~\leftmoon~}~}$ 0. Plot shows mean and one standard deviation over 5 seeds.  
+
+Sec. 7, could potentially fix all remaining instabilities in deep RL.  
+
+
+
+\section{6.4 ENTROPY REGULARIZATION DOES NOT SOLVE EXPLORATION IN RL  }
+
+
+StaQ is generally competitive with the state-of-the-art, but it might fail on some environments such as MountainCar or a few MinAtar environments. These environments are considered as hard exploration ones by Ceron & Castro (2021), and the combination of a deterministic policy with $\epsilon$ -greedy exploration seems to fare better in some tasks than the softmax policies of StaQ, PPO and TRPO, as also discussed by Vieillard et al. (2020), App. B.2. This is especially evident in MountainCar, where the initial maximum-entropy policy that picks an action uniformly at random always observes the same reward and remains close to the uniform policy throughout the learning process. To address this challenge, we have experimented with $\epsilon$ -greedy behavior policies in MountainCar as discussed in App. B.5, which improves performance. Although we used a fixed entropy weight for all experiments, we found that on the harder MinAtar environments, tuning the values of the entropy weight can improve performance, as presented in App. B.5. Overall, we believe that exploration is an orthogonal problem to the stability of the policy update we address in this paper, and while entropy regularization is often used as an exploration heuristic, we only use its stabilizing properties here, and leave the development of theoretically sound exploration strategies to future work.  
+
+
+
+\section{7 DISCUSSION AND FUTURE WORK  }
+
+
+In this paper, we have proposed to stabilize the policy update of approximate policy iteration by averaging over a very large number $M$ of past Q-functions. Surprisingly, even when $M$ is large, the final computational burden is small on modern hardware mostly thanks to the proposed SNN architecture. The resulting policy update has a solid theoretical foundation and clear empirical benefits as it greatly reduces learning instability on several tasks. Yet, while the policy update is more stable, instability in learning the Q-function remains and would benefit from a more thorough continual learning treatment. To prevent the catastrophic forgetting of low probability actions, one promising idea would be to better manage the replay buffer to keep representative samples, as done in CL by Aljundi et al. (2019) for example. Another interesting line of research from the CL community is the dual architecture based on the complementary learning systems theory (e.g. Lee et al. (2016)). Adapted to RL, the Q-function would be split between a fast learning—but potentially unstable— component that adapts to the most recent samples and a slower learning component that is stabilized using, for example, growing neural architectures as in this work to avoid catastrophic forgetting. If the neural architecture of the Q-function is much larger than the one used in this paper, it might be relevant to compress periodically the policy during learning as done in CL (Schwarz et al., 2018). Finally, extending StaQ to continuous action domains could be done as in SAC (Haarnoja et al., 2018), using an extra actor network learned by minimizing the $D_{\mathrm{KL}}$ to a soft policy. This will lose the optimization-free and exact nature of the policy update but may still result in improved stability if we replace the soft policy $\exp(Q_{\tau}^{k})$ used by SAC with $\exp(\xi_{k})$ which stabilizes the target by averaging over a large number of past Q-functions.  
+
+We provide the code of StaQ with the examples of launching files in the supplementary material. In   
+addition, we carefully report the hyperparameters used for all runs of StaQ and baseline algorithms,   
+see App. F. The code for reproducing the baselines results is withheld for anonymity reasons, as it   
+uses a publicly available in-house library.   
+
+

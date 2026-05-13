@@ -1,0 +1,462 @@
+\title{Recursive Abstractive Processing for Retrieval in Dynamic Datasets}
+
+\begin{abstract}
+Recent retrieval-augmented models enhance basic methods by building a hierarchical structure over retrieved text chunks through recursive embedding, clustering, and summarization.
+The most relevant information is then retrieved from both the original text and generated summaries. 
+However, such approaches face limitations with dynamic datasets, where adding or removing documents over time complicates the updating of hierarchical representations formed through clustering.
+We propose a new algorithm to efficiently maintain the recursive-abstractive tree structure in dynamic datasets, without compromising performance.
+Additionally, we introduce a novel post-retrieval method that applies query-focused recursive abstractive processing to substantially improve context quality. 
+Our method overcomes the limitations of other approaches by functioning as a black-box post-retrieval layer compatible with any retrieval algorithm.
+Both algorithms are validated through extensive experiments on real-world datasets, demonstrating their effectiveness in handling dynamic data and improving retrieval performance.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large Language Models (LLMs) have established themselves as powerful tools across a wide range of natural language processing (NLP) tasks, thanks to their ability to store vast amounts of factual knowledge within their parameters \citep{petroni2019language, jiang2020can}. These models can be further fine-tuned to specialize in specific tasks \citep{roberts2020much}, making them highly versatile. However, a key limitation of LLMs lies in their static nature: as the world evolves and new information emerges, the knowledge encoded within an LLM can quickly become outdated. 
+A promising alternative to relying solely on parametric knowledge is retrieval augmentation \citep{gao2023retrieval}. This approach involves the use of external retrieval systems to supply relevant information in real-time. 
+Instead of encoding all knowledge directly into the model, large text corpora are indexed, segmented into manageable chunks, and dynamically retrieved as needed \citep{lewis2020retrieval, gao2023retrieval}. 
+Retrieval-augmented methods not only improve model accuracy but also offer a practical solution for maintaining performance as knowledge evolves over time.
+
+However, retrieval-augmented approaches also have limitations.
+Many existing methods only retrieve short, specific chunks as context, which restricts the model's ability to answer questions requiring a broader understanding of the text. 
+To address this, RAPTOR was introduced \citep{sarthi2024raptor}. 
+It recursively embeds, clusters, and summarizes text chunks, enabling the retrieval of relevant information from both original document chunks and generated summaries.
+Yet, RAPTOR introduces new challenges, especially with dynamic datasets where documents are frequently added or removed. 
+The clustering component makes the tree structure sensitive to these updates, requiring a full re-computation of the tree after each change, which is computationally expensive.
+
+To address these limitations, we introduce \textbf{adRAP} (adaptive Recursive Abstractive Processing), an algorithm designed to efficiently update RAPTOR’s recursive-abstractive structure as new documents are added or removed.
+By incrementally adjusting the structure, adRAP avoids full re-computation, preserving retrieval performance while significantly reducing computational overhead.
+Furthermore, both RAPTOR and adRAP introduce memory overhead and require periodic maintenance when used with dynamic datasets. 
+As an alternative, we propose \textbf{postQFRAP}, a post-retrieval method that applies query-focused recursive abstractive processing as a black-box layer, as illustrated in Figure~\ref{fig:postQFRAPDiagram}.
+This post-processing method integrates seamlessly into any retrieval pipeline while significantly enhancing the quality of the retrieved context.
+For example, naïve RAG \citep{gao2023retrieval} can serve as the underlying model since it processes documents independently, allowing easy addition or removal of documents. 
+Moreover, by initially retrieving enough documents, questions requiring a broader understanding can be answered by passing the generated summary to the LLM, rather than passing all potentially relevant documents, thus mitigating challenges like limited context window size and information loss in large contexts \citep{liu2024lost, yu2024defenserageralongcontext}.
+Through extensive experiments on real-world datasets, we demonstrate that adRAP provides a good approximation of the RAPTOR tree, while postQFRAP effectively enhances retrieval quality.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.6\linewidth]{Figures/postQFRAPDiagram.pdf}
+    \caption{\textbf{Retrieval pipeline with postQFRAP}: we first retrieve from a dataset $k_0$ chunks relevant to the query, then we build a query-focused recursive-abstractive tree on those chunks. Finally, we summarize the contents of the root layer of that tree to get the context that is passed to the LLM.}
+    \label{fig:postQFRAPDiagram}
+\end{figure}
+
+
+\section{Related Work}
+
+
+\paragraph{Retrieval Algorithms}
+In the context of LLMs, retrieval-augmented generation (RAG) involves retrieving relevant information from external sources and appending it to the LLM's context alongside the original query \citep{ram2023context}. 
+Naïve RAG methods \citep{gao2023retrieval} address this challenge by converting documents into text, splitting it into chunks, and embedding these chunks in a vector space where semantically similar chunks are mapped to nearby vectors. 
+The query is similarly embedded, and the $k$-nearest vectors are retrieved to augment the LLM’s context. 
+However, segmenting text into contiguous chunks may fail to capture its full semantic richness, and retrieving overly granular segments can overlook key information \citep{gao2023retrieval}.
+
+The recursive-abstractive summarization method by \citet{wu2021recursivelysummarizingbookshuman} addresses this issue by breaking down tasks to summarize smaller text segments, which are then integrated to form summaries of larger sections. 
+While effective at capturing broader themes, it may miss finer details. 
+RAPTOR \citep{sarthi2024raptor} improves on this technique by recursively grouping and summarizing similar chunks, retaining both summaries and initial chunks. 
+This approach captures a representation of the text at multiple levels of detail while preserving inter-dependencies within the text.
+
+\paragraph{Post-Retrieval Algorithms}
+To optimize retrieval algorithms, post-retrieval strategies are commonly employed. 
+These include re-ranking retrieved chunks and compressing the context \citep{gao2023retrieval}, as large contexts fed directly into LLMs often result in information loss, particularly in the middle sections \citep{liu2024lost, yu2024defenserageralongcontext}. 
+The closest approach to our setting is the query-focused summarization algorithm by \citet{zhang2024beyond}. 
+They retrieve relevant documents which they also summarize using a prompt designed to extract key information before generating the summary. The latter is then passed as context to the LLM.
+In contrast, we construct a hierarchical tree over the retrieved documents, allowing us to recursively filter noise by focusing on smaller, manageable chunks at each step. This yields a more refined and relevant summary.
+
+
+\section{Preliminaries}
+
+
+\subsection{Clustering with Gaussian Mixture Models (GMMs)}
+Gaussian Mixture Models assume that data points are generated from a mixture of multiple Gaussian distributions. 
+They have two key advantages: they allow non-isotropic Gaussians, enabling varied cluster shapes and orientations, and they support soft clustering, where a data point can belong to multiple clusters.
+Let $K$ represent the number of clusters, and $x_1, \dots, x_n$ be the data points.
+Each cluster $k$ is defined by its mean $\mu_k$, covariance matrix $\Sigma_k$, and mixture weight $\pi_k$, which represents the prior probability of a data point belonging to cluster $k$. 
+The probability density function (PDF) for a data point $x$ is given by $p(x) = \sum_{k=1}^K \pi_k \mathcal{N}(x | \mu_k, \Sigma_k)$ where $\mathcal{N}(x_i | \mu_k, \Sigma_k)$ is PDF of a multivariate normal distribution with mean $\mu_k$ and covariance $\Sigma_k$.
+The cluster parameters are learned by maximizing the log-likelihood using the Expectation-Maximization (EM) algorithm \citep{moon1996expectation}, which iterates the two following steps until convergence, i.e., when the change in log-likelihood between consecutive iterations becomes negligibly small.
+
+\noindent \textbf{Expectation step:} Compute the posterior probability (responsibility) that the $k$-th Gaussian component generated the data point $x_i$:
+\begin{equation}
+\gamma(z_{ik}) = \frac{\pi_k \mathcal{N}(x_i | \mu_k, \Sigma_k)}{\sum_{j=1}^{K} \pi_j \mathcal{N}(x_i | \mu_j, \Sigma_j)},
+\end{equation}
+
+\noindent \textbf{Maximization step:} Update the parameters $\pi_k$, $\mu_k$, and $\Sigma_k$ by maximizing the expected log-likelihood given the responsibilities:
+\begin{equation}
+\label{eq:GMM_max}
+\pi_k = \frac{1}{n} \sum_{i=1}^{n} \gamma(z_{ik}), \quad 
+\mu_k = \frac{\sum_{i=1}^{n} \gamma(z_{ik}) x_i}{\sum_{i=1}^{n} \gamma(z_{ik})}, \quad 
+\Sigma_k = \frac{\sum_{i=1}^{n} \gamma(z_{ik}) (x_i - \mu_k)(x_i - \mu_k)^\top}{\sum_{i=1}^{n} \gamma(z_{ik})}
+\end{equation}
+
+\subsection{Dimensionality Reduction with UMAP}
+\label{sec:UMAP}
+Clustering algorithms often struggle with the curse of dimensionality, where data becomes sparse, and distances between points lose distinction in high dimensions. 
+To address this, Uniform Manifold Approximation and Projection (UMAP) \citep{mcinnes2018umap} reduces the dimensionality of embeddings, significantly enhancing clustering performance \citep{allaoui2020considerably}.
+UMAP learns a low-dimensional representation that preserves both local and global structures, with the key parameter \textit{n\_neighbors} controlling the trade-off between local and global structure preservation.
+
+\subsection{Recursive-Abstractive Tree Construction}
+\label{sec:treeConstruction}
+The process of building the recursive-abstractive tree is outlined first, as it is key to understanding our new algorithms. 
+The construction, based on \citet{sarthi2024raptor} with minor adjustments, consists of four steps: dataset chunking, clustering, summarizing, and recursive construction.
+
+\paragraph{Dataset Chunking}
+Given a dataset, the first step is to divide the text into sentences using the NLTK Punkt Sentence Tokenizer\footnote{\url{https://www.nltk.org/api/nltk.tokenize.punkt.html}}. 
+These sentences are then grouped into chunks of up to 250 tokens, with a 50-token overlap between consecutive chunks, resulting in chunks of up to 300 tokens.
+To maintain coherence, sentences are kept intact between chunks: if a sentence exceeds 250 tokens, it is included in the next chunk. 
+Sentences longer than 250 tokens are split at punctuation marks.
+Note that we use 250 tokens with a 50-token overlap instead of the 100-token chunks used by \citep{sarthi2024raptor}. Preliminary experiments (not included in this work) suggest that the larger chunk size with overlap improves output quality.
+
+\paragraph{Clustering}
+The goal is to group $n$ chunks $c_1, \dots, c_n$ into $k$ clusters $C_1, \dots, C_k$, where $k$ is to be determined.
+Clustering is performed on the embeddings, not the raw text. So, using an encoder model, embeddings $v_1, \dots, v_n$ are generated for the chunks.
+Then, dimensionality reduction is performed using UMAP, followed by clustering with Gaussian Mixture Models (GMMs). This process is repeated twice, varying UMAP's \textit{n\_neighbors} parameter to create a hierarchical clustering, an approach shown to be effective for this task \citep{sarthi2024raptor}.
+
+First, \textit{n\_neighbors} is set to $\sqrt{n}$, generating 10-dimensional embeddings $v_1^g, \dots, v_n^g$.
+GMMs are then applied, yielding global clusters $C_1^g, \dots, C_{k_g}^g$. 
+Next, refinement occurs within each global cluster. UMAP is applied with \textit{n\_neighbors} set to 10, resulting in reduced embeddings $v_1^l, \dots, v_m^l$, where $m$ is the size of the current global cluster. 
+GMMs are then used to form local clusters $C_1^l, \dots, C_{k_l}^l$. The final clustering is the union of all local clusters.
+To determine $k_g$, values from 1 to $\max(50, \sqrt{n})$ are evaluated, and we select the value that minimizes the Bayesian Information Criterion (BIC) \citep{schwarz1978estimating}. A similar approach is used to determine $k_l$.
+
+\paragraph{Summarizing}
+After clustering, a large language model generates summaries for each cluster, providing a concise overview of the content. 
+The summary length is limited to 1,000 tokens to ensure the summaries remain manageable.
+\paragraph{Recursive Construction}
+The clustering and summarization process is repeated recursively to obtain a multi-layered representation of the dataset. 
+This approach is outlined in Algorithm~\ref{alg:treeConstruction}.
+
+\begin{algorithm}
+\caption{Recursive-Abstractive Tree Construction}
+\label{alg:treeConstruction}
+\begin{algorithmic}[1]
+\State \textbf{Input:} Dataset
+\State \textbf{Output:} Recursive-Abstractive Tree
+
+\State Chunk the dataset, initializing the leaf nodes as these chunks.
+
+\While{the top layer contains more than 10 nodes \textbf{and} there are fewer than 5 layers}
+    \State Compute embeddings for the nodes in the top layer.
+    \State Apply the two-step clustering process to group these nodes.
+    \State Generate a summary for each cluster.
+    \State Form a new layer with one new node per cluster.
+\EndWhile
+\end{algorithmic}
+\end{algorithm}
+\subsection{Retrieving Documents}
+Given a query and a tree constructed over a relevant dataset, the goal is to retrieve $k$ documents that are helpful in answering the query. 
+\citet{sarthi2024raptor} compared tree-based retrieval with a collapsed-tree approach, where all nodes are considered simultaneously. The latter performed better, and is the method used in our experiments.
+
+In the collapsed-tree approach, the tree is flattened, and the $k$ most similar documents are retrieved using cosine similarity on the embeddings. 
+This method can be seen as augmenting the dataset with document summaries, followed by applying naïve RAG to the expanded dataset. 
+
+
+
+\section{adRAP: Adaptive Recursive-Abstractive Processing}
+
+
+\subsection{Overview}
+The problem we are addressing can be formally described as follows.
+Let $T_0$ represent a recursive-abstractive tree built on an initial dataset $D_0$. 
+Given an updated dataset $D = D_0 \cup D_1$, where $|D_0| \gg |D_1|$, let $T$ be the tree constructed over $D$. 
+The goal is to efficiently update $T_0$ to approximate $T$ without fully recomputing the tree on $D$.
+
+To achieve this, UMAP is used to reduce the dimensionality of the new documents, which are then assigned to clusters, potentially updating the existing clustering. 
+We first examine these components individually, then explain how they are combined to create a dynamic data structure.
+\subsection{Adaptive UMAP}
+Let $d \in D_1$ be a new document with embedding $v$. 
+The first step is to reduce the dimensionality of $v$ to 10. 
+To do this, we find the $n\_neighbors$ nearest neighbors of $v$ in the original high-dimensional space and interpolate their positions in the previously learned low-dimensional embedding to obtain the reduced embedding $v'$.
+This preserves the local relationships of $v$ with its neighbors, maintaining the structure learned during fitting. 
+Given $|D_0| \gg |D_1|$, we assume this property holds for all new documents.
+This process requires storing the fitted UMAP models (both global and local) with our tree. 
+We use the $\texttt{UMAP-learn}$\footnote{\url{https://umap-learn.readthedocs.io/en/latest/}} library for UMAP fitting and dynamic transformations.
+
+\subsection{Adaptive GMM}
+A key component of the recursive-abstractive tree construction (Algorithm~\ref{alg:treeConstruction}) is its clustering algorithm, which poses challenges when handling dynamic datasets.
+Given a fitted Gaussian Mixture Model (GMM) $\mathcal{I}$ with $K$ clusters defined by their means $\{\mu_k\}_{k=1}^K$, covariance matrices $\{\Sigma_k\}_{k=1}^K$, and mixing coefficients $\{\pi_k\}_{k=1}^K$, and given points $\{x_i\}_{i=1}^n$ assigned to these clusters, the goal is to assign a new point $x_{n+1}$ to one or more clusters. 
+This may involve updating the clustering structure or introducing new clusters.
+While prior work addresses online GMMs \citep{song2005highly, declercq2008online, zhang2008effective}, our setting differs in that we start with a GMM fit on a dataset, we have access to all the points and we want to minimize the number of updated clusters, as each update requires multiple re-generated summaries.
+
+First, assume $n$ is large, i.e., many points have already been clustered.
+Given a new point $x_{n+1}$, we compute its posterior probability $\gamma(z_{n+1,k})$ for $k \in [K]$, and approximate the maximization step by updating the parameters with the new point's contribution as follows:
+\[
+\mu_k \leftarrow \frac{n \pi_k \mu_k + \gamma(z_{n+1,k}) x_{n+1}}{n \pi_k + \gamma(z_{n+1,k})},
+\quad \Sigma_k \leftarrow \frac{n \pi_k \Sigma_k + \gamma(z_{n+1,k}) (x_{n+1} - \mu_k)(x_{n+1} - \mu_k)^\top}{n \pi_k + \gamma(z_{n+1,k})}
+\]
+\begin{equation}
+\pi_k \leftarrow \frac{n \pi_k + \gamma(z_{n+1,k})}{n+1}
+\end{equation}
+
+The updated parameters match those from applying Equation~\ref{eq:GMM_max} to the points $\{x_i\}_{i=1}^{n+1}$. 
+After updating the cluster parameters, we recompute the posterior for $x_{n+1}$ and assign it to clusters $\{k : \gamma(z_{n+1,k}) > 0.1\}$, without affecting other point assignments. 
+Although this remains an approximation, it has been shown to be an effective way to incrementally fit a GMM \citep{neal1998view}.
+The update is efficient, as its time is independent of $n$, with only a few clusters being updated (those assigned to $x_{n+1}$).
+When $n$ is small, we perform full EM steps instead of updating using only the new point, as the smaller number of clusters makes this affordable.
+This also yields more significant improvements, as clusterings with fewer points are more sensitive to new data.
+
+At this stage, an issue may arise as the number of clusters $k$ remains fixed, whether we use approximate or full EM steps.
+If points are repeatedly added to the same cluster, it may grow too large, causing a node at layer 1 to resemble one at layer 3, which undermines the hierarchical structure.
+To address large clusters, we attempt to split them, thereby increasing $k$. 
+The splitting approach varies with $n$. 
+For large $n$, we focus on the large clusters independently of other clusters. We attempt to subdivide these large clusters by applying a GMM to them with $k' = 1, 2, 3$ subclusters, and we select the best model according to the Bayesian Information Criterion (BIC). 
+This method has a runtime independent of $n$, and at most 3 clusters are updated or created.
+For small $n$, we explore larger values of $k$ and fit a new GMM from scratch, selecting the $k$ that optimizes the BIC.
+
+We summarize these ideas in Algorithm~\ref{alg:onlineGMM}. 
+The parameter $\tau_n$ controls the trade-off between quality and computation time, determining whether to perform full or approximate EM updates based on $n$. 
+Similarly, $\tau_c$ sets the cluster size threshold for triggering a potential split.
+
+\begin{algorithm}
+\caption{Adaptive Clustering}
+\label{alg:onlineGMM}
+\begin{algorithmic}[1]
+\State \textbf{Input:} GMM Instance $\mathcal{I}$ with $n$ points, new point $x_{n+1}$, thresholds $\tau_n, \tau_c$
+\State \textbf{Output:}  Updated Instance $\mathcal{I'}$
+
+\If {$n \leq \tau_n$}
+    \State Perform full EM steps until convergence.
+    \State Let $c$ be the number of clusters with more than $\tau_c$ points.
+    \State Fit GMM instances with $K$ up to $K+c$ clusters, keeping the best one with respect to BIC.
+\Else
+    \State Perform a maximization step using $x_{n+1}$'s contribution.
+    \State Assign $x_{n+1}$ to clusters $\{k : \gamma(z_{n+1,k}) > 0.1\}$.
+    \If {some cluster $k$ contains more than $\tau_c$ points}
+        \State Fit a GMM on cluster $k$ to get a sub-clustering with at most 3 clusters.
+    \EndIf
+\EndIf
+\end{algorithmic}
+\end{algorithm}
+\subsection{adRAP Algorithm}
+\label{sec:adRAP}
+The process starts with an initial tree $T_0$ and a new data chunk $d \in D_1$. 
+First, $d$'s embedding $v$ is computed, and a corresponding leaf node is created in $T_0$.
+The first layer above the leaves (call it layer 1) is then updated to account for the new node.
+
+To do so, the global reduced embedding $v_g$ is derived from $v$ using the global UMAP model and assigned to the most probable cluster in the global clustering. 
+Since the global clustering includes all $|D_0|$ nodes, it is considered stable and no dynamic adjustments are made.
+Next, we focus on the global cluster to which $v_g$ was assigned, applying the local UMAP model to compute a reduced local embedding $v_l$. 
+The local clustering is updated using Algorithm~\ref{alg:onlineGMM}, potentially creating new nodes.
+
+In $T_0$, nodes with updated children regenerate their summaries and recompute embeddings, with updates propagated to their ancestors (up to five levels).
+If new clusters are created at layer $i$, this procedure is recursively applied at layer $i+1$.
+By design, only a few clusters are affected, minimizing the need for summary re-computation.
+
+Though we focused on adding documents, the algorithm easily handles deletions by removing the chunk from the tree and recomputing summaries for its ancestors. 
+For frequent deletions, one can either recompute the local clustering by trying smaller values for $K$ or leave the clusters unchanged.
+
+
+\section{postQFRAP:  post-retrieval Query-Focused Recursive-Abstractive Processing}
+
+
+\subsection{Motivation}
+
+Maintaining adRAP is costly, as it requires updating clusters and summaries with each new document.
+Moreover, when many documents are added, the entire tree has to be recomputed to maintain solution quality.
+Integrating this system poses significant development challenges, and companies with established retrieval algorithms may be hesitant to adopt a completely new system.
+
+To address this, we propose a modified version of the recursive-abstractive tree as a black-box post-retrieval solution that can be integrated with retrieval algorithms handling dynamic datasets (e.g., naïve RAG). 
+This approach enhances the initial construction by incorporating query-focused summaries, improving the context relevance of the output.
+\subsection{postQFRAP Algorithm}
+Let $\mathcal{R}$ be a retrieval algorithm that takes as input an integer $k \in \mathbb{N}^+$ and a query $q$, and returns $k$ documents relevant to the query. A simple example is the naïve RAG algorithm \citep{gao2023retrieval}.
+We augment $\mathcal{R}$ as follows. 
+First, we retrieve $k_0$ documents without imposing a token limit.
+Then, we apply a query-focused version of Algorithm~\ref{alg:treeConstruction} to these $k_0$ documents to build a recursive-abstractive tree. 
+ 
+Since the tree is constructed to answer $q$, summarizing information relevant to $q$ ensures that key details are preserved while recursively filtering out irrelevant content.
+Additionally, we modify the clustering to rely solely on local embeddings, as retrieving $k_0$ documents already serves as a global filtering step.
+In other words, we assume the retrieved documents belong to the same global cluster. 
+Finally, a summarization step is applied to all nodes at the last layer of the tree, instead of using a top-$k$ retrieval approach, to reduce redundancy in the results. 
+This process is detailed in Algorithm~\ref{alg:augmentedRetrieval}.
+
+\begin{algorithm}
+\caption{postQFRAP Algorithm}
+\label{alg:augmentedRetrieval}
+\begin{algorithmic}[1]
+\State \textbf{Input:} Retrieval Algorithm $\mathcal{R}$, Initial Number of Chunks $k_0$, Query $q$, Token Threshold $\tau$
+\State \textbf{Output:} Final summary with at most $\tau$ tokens
+\State Retrieve $k_0$ documents using $\mathcal{R}(k_0, q)$.
+\State Construct a tree $T$ on the $k_0$ documents using Algorithm~\ref{alg:treeConstruction} with query-focused summarization and one-step clustering.
+\State Generate a final query-focused summary from the content of the top layer of $T$, using at most $\tau$ tokens.
+\State Return the final summary.
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Key Properties}
+postQFRAP can be seamlessly integrated as a black-box solution with any retrieval algorithm that handles dynamic datasets. 
+A prime example of the latter is the naïve RAG algorithm, where adding documents is easy: chunk the new documents, embed each chunk, and add them to the vector database.
+Removing documents is equally simple—just delete them from the database.
+
+Moreover, by recursively applying query-focused summarization, postQFRAP continuously extracts information relevant to answering the question.
+Then, the final summarization step removes redundancy and serves as a last denoising phase, producing a highly relevant and coherent context. 
+It is important to note that increasing the hyperparameter $k_0$ enables the model to handle broader questions without expanding the generated context size, though it increases inference time.
+
+Furthermore, postQFRAP avoids relying on a summarization model with a large context length due to its recursive structure, which focuses on small chunks at each step. 
+This enables the use of a distilled model for greater inference efficiency (e.g., the abstractive compressor of \citet{xu2023recomp}).
+
+
+
+\section{Experiments}
+
+
+\subsection{Datasets}
+We evaluate our methods on three question-answering datasets: \textit{MultiHop}, \textit{QASPER}, and \textit{QuALITY}. 
+
+\textit{MultiHop} consists of news articles published between 2013 and 2023 \citep{tang2024multihop}.
+Although the original questions focus on retrieving and reasoning across multiple documents, they primarily target explicit fact retrieval. 
+To create more challenging questions requiring a broader understanding, we construct a RAPTOR tree on the dataset, sample chunks/summaries from the tree, and ask an LLM to generate questions based on those chunks.
+
+\textit{QASPER} consists of 1,585 NLP papers with associated questions \citep{dasigi2021datasetinformationseekingquestionsanswers}.
+Each question seeks information from the full text and is written by an NLP practitioner who has only seen the title and abstract. 
+For our experiments, we use the first 300 questions and their relevant papers. 
+To make each question context-independent, we include the paper's name in the question (e.g. instead of asking "What are the observed results?", we ask "In paper X, what are the observed results?")
+
+\textit{QuALITY} consists of multiple-choice questions paired with context passages averaging 5,000 tokens \citep{pang2022qualityquestionansweringlong}. 
+This exceeds the size of the context generated by the retrieval algorithms in our experiments.
+We also select the first 300 questions along with their corresponding context passages.
+
+\subsection{Metrics}
+A key factor in the evaluation is the prompt used for the Question-Answering model. 
+To focus on the effectiveness of retrieval algorithms, we instruct the model to rely solely on the provided context.
+
+To evaluate our algorithms, we use two methods: a rating-based evaluation, providing a score for each model independently, and a head-to-head comparison.
+Since the model is restricted to using only the retrieved context, measuring faithfulness is unnecessary. 
+Instead, we focus on ensuring the context provides sufficient information to answer the question. 
+Thus, we compute the proportion of \textbf{answered questions} and measure \textbf{context relevance} \citep{es2023ragas}. The latter acts as context precision, while the former is analogous to context recall, as it checks whether the necessary chunks are retrieved. 
+However, we avoid using context recall directly, as it is difficult to formally define with summarized chunks.
+
+Some generated answers may lack coherence, either in their internal structure or in relation to the question.
+Providing summarized content as context may help the model generate more coherent responses.
+To evaluate this, we introduce a novel metric called \textbf{Human Coherence Rating}, which prompts an LLM to assess whether an answer is coherent and resembles one that could plausibly be generated by a human expert. 
+To gain deeper insights into our algorithms, we conduct a head-to-head evaluation. 
+Given our focus on questions requiring a global understanding, we adopt the evaluation metrics from \citet{edge2024local}, which assess \textbf{comprehensiveness}, \textbf{diversity}, \textbf{empowerment}, and \textbf{directness}.
+For each comparison, the evaluator LLM is given the question, a prompt describing the target metric, and two answers. 
+The LLM evaluates which answer is superior or if it is a tie, providing a rationale for its decision.
+To mitigate position bias \citep{zheng2024judging}, the evaluation is repeated for each pair of answers with their positions swapped. 
+If the same answer wins both trials, it is declared the winner; otherwise, the result is a tie.
+
+\subsection{Hyperparameter Selection}
+\label{sec:hyperparam}
+A key hyperparameter to consider is the context size, or equivalently, the number of documents to retrieve. 
+\citet{sarthi2024raptor} evaluated different context lengths on a subset of the QASPER dataset, finding that 2,000 output tokens yielded the best results.
+Based on this, we set the output context size to 2,000 tokens for all algorithms unless stated otherwise. 
+
+To select $k_0$ for the postQFRAP algorithm, we compare different values on two validation datasets.
+We choose $k_0=20$, as larger values increase computational complexity without significant quality gains, while smaller values substantially reduce context relevance. 
+\subsection{Baselines}
+\label{sec:baselines}
+We compare the adRAP algorithm against Naïve RAG, RAPTOR, and a greedy variant of adRAP, which assigns each new point to its most probable cluster without updating the GMM fit. 
+To compute adRAP, we first construct a full tree using 70\% of the dataset. The remaining 30\% is added using the adRAP algorithm (Section~\ref{sec:adRAP}) where we set $\tau_c = 11$ and $\tau_n = \max(100, \sqrt{|D_0|})$ for Algorithm~\ref{alg:onlineGMM}. 
+ 
+For the greedy variant, a similar procedure is used. 
+To simulate a challenging scenario, we remove the last 30\% of documents instead of random sampling. 
+
+We compare postQFRAP with other post-retrieval methods: no processing (naïve RAG) with $k=7, 20$ retrieved documents, one-shot summarization, re-ranking, and postRAP. 
+
+For re-ranking, we use the \texttt{ms-marco-MiniLM-L-12-v2}\footnote{\url{https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-12-v2}} cross-encoder from HuggingFace, retrieving 20 documents via naïve RAG, then re-ranking them to keep the top 7. 
+Finally, postRAP is a variant of postQFRAP without query-focused summarization which retrieves the top-$k$ most similar chunks from the tree built on the $k_0$ chunks.
+
+We also tried adding query expansion \citep{jagerman2023query} to our postQFRAP algorithm, but this barely affected the results. 
+We use OpenAI's \texttt{text-embedding-3-large}\footnote{\url{https://platform.openai.openai. 
+All retrieval algorithms use a chunk size of 300 tokens with a 50-token overlap.
+To account for the non-determinism of LLM evaluators, we repeat each experiment three times, reporting the average and standard error.
+\subsection{Results}
+
+Figure~\ref{fig:adRAPBars} shows that adRAP's performance is generally on par with RAPTOR across most metrics, with the exception of context relevance, where adRAP falls short by at least 3\%. 
+However, adRAP outperforms both the naïve RAG and the greedy algorithm, particularly in the QuALITY dataset. 
+These findings are further corroborated by the head-to-head evaluations in Figures~\ref{fig:adRAP_H2H_MultiHop}, \ref{fig:adRAP_H2H_QASPER}, and \ref{fig:adRAP_H2H_QuALITY}.
+Notably, in the QuALITY dataset, adRAP exceeds RAPTOR in metrics such as comprehensiveness, diversity, and empowerment, despite its lower performance in context relevance.
+On the other hand, adRAP underperforms compared to RAPTOR in the MultiHop and QASPER datasets.
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\textwidth]{Figures/adRAP/adRAP_barPlots_combined.pdf}
+    \caption{Evaluation of adRAP (Section~\ref{sec:adRAP}) on 3 datasets.}
+    \label{fig:adRAPBars}
+\end{figure}
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\textwidth]{Figures/adRAP/MultiHop_adRAP_H2H_combined.pdf}
+    \caption{Percentage of Wins, Ties and Losses for adRAP vs other algorithms on MultiHop.}
+    \label{fig:adRAP_H2H_MultiHop}
+\end{figure}
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\textwidth]{Figures/adRAP/QASPER_adRAP_H2H_combined.pdf}
+    \caption{Percentage of Wins, Ties and Losses for adRAP vs other algorithms on QASPER.}
+    \label{fig:adRAP_H2H_QASPER}
+\end{figure}
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\textwidth]{Figures/adRAP/QuALITY_adRAP_H2H_combined.pdf}
+    \caption{Percentage of Wins, Ties and Losses for adRAP vs other algorithms on QuALITY.}
+    \label{fig:adRAP_H2H_QuALITY}
+\end{figure}
+
+Figure~\ref{fig:postQFRAP_bars} shows that algorithms with query-focused summarization consistently outperforms other approaches across all metrics.
+While one-shot summarization scores slightly higher in answered questions and human coherence, postQFRAP excels in context relevance, demonstrating the effectiveness of recursive summarization in filtering noise from input chunks.
+The superiority of postQFRAP as a post-retrieval algorithm becomes apparent in head-to-head evaluations. As shown in Figures~\ref{fig:H2H_MultiHop}, \ref{fig:H2H_QASPER}, and \ref{fig:H2H_QuALITY}, postQFRAP excels in comprehensiveness, diversity, and empowerment.
+The lower directness scores are expected, as directness often contrasts with these qualities, as noted by \citet{edge2024local}.
+Overall, postQFRAP's recursive extraction produces a more diverse, comprehensive, and empowering context, enhancing the quality of the final answer.
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\textwidth]{Figures/barPlots_combined.pdf}
+    \caption{Evaluation of postQFRAP (Algorithm~\ref{alg:augmentedRetrieval}) on 3 datasets.}
+    \label{fig:postQFRAP_bars}
+\end{figure}
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\textwidth, height=2.55cm]{Figures/MultiHop_postQFRAP4_H2H_combined.pdf}
+    \caption{Percentage of Wins, Ties and Losses for postQFRAP vs other algorithms on MultiHop.}
+    \label{fig:H2H_MultiHop}
+\end{figure}
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\textwidth, height=2.55cm]{Figures/QASPER_postQFRAP4_H2H_combined.pdf}
+    \caption{Percentage of Wins, Ties and Losses for postQFRAP vs other algorithms on QASPER.}
+    \label{fig:H2H_QASPER}
+\end{figure}
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\textwidth, height=2.55cm]{Figures/QuALITY_postQFRAP4_H2H_combined.pdf}
+    \caption{Percentage of Wins, Ties and Losses for postQFRAP vs other algorithms on QuALITY.}
+    \label{fig:H2H_QuALITY}
+\end{figure}
+
+
+
+
+\section{Limitations}
+
+While adRAP is more efficient than repeatedly recomputing the full RAPTOR tree for dynamic datasets, it introduces some overhead.
+It requires extra memory to store multiple UMAP and GMM models and adds complexity to the retrieval pipeline, as it must be triggered when new documents are added. 
+Additionally, a full tree recomputation may still be needed if a large volume of new documents is introduced, increasing implementation effort. 
+With postQFRAP, generated summaries can make it harder to trace original sources. 
+Additionally, multiple summarization calls are required during inference, although this follows the current trend of shifting more computational workload to inference time, as seen with OpenAI's o1 model \citep{openai2024, brown2024largelanguagemonkeysscaling}.
+
+
+\section{Conclusion}
+
+In this paper, we introduced adRAP, an adaptive extension of the RAPTOR algorithm, designed to efficiently approximate clustering when documents are added or removed.
+Our experiments show that adRAP performs comparably to RAPTOR, making it a viable solution for dynamic datasets.
+
+We also presented postQFRAP, a novel post-retrieval algorithm that applies query-focused, recursive-abstractive processing to refine large contexts. 
+By filtering out irrelevant information, postQFRAP produces highly relevant summaries. 
+Our results demonstrate that postQFRAP consistently outperforms traditional methods, proving its effectiveness for post-retrieval processing.
+
+
+\section{Reproducibility Statement}
+
+\paragraph{Language Model Used} Open AI's \texttt{gpt-4o-mini-2024-07-18}\footnote{\url{https://platform.openai. Open AI's \texttt{text-embedding-3-large}\footnote{\url{https://platform.openai.
+
+\paragraph{Hyperparameters} All hyperparameters and model configurations used in the experiments are clearly detailed in Sections~\ref{sec:hyperparam} and \ref{sec:baselines}.
+org/data/qasper}{QASPER}. 
+
+
+
+
+
+

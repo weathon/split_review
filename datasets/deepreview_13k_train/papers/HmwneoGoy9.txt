@@ -1,0 +1,625 @@
+\title{SeerAttention: Learning Intrinsic Sparse Attention in Your LLMs}
+
+\begin{abstract}
+Attention is the cornerstone of modern Large Language Models (LLMs). Yet its quadratic complexity limits the efficiency and scalability of LLMs, especially for those with a long-context window. A promising approach addressing this limitation is to leverage the sparsity in attention. However, existing sparsity-based solutions predominantly rely on predefined patterns or heuristics to approximate sparsity. This practice falls short to fully capture the dynamic nature of attention sparsity in language-based tasks. 
+This paper argues that attention sparsity should be \textit{learned} rather than \textit{predefined}. To this end, we design \aname{}, a new Attention mechanism that augments the conventional attention with a learnable gate that adaptively selects significant blocks in an attention map and deems the rest blocks sparse.
+Such block-level sparsity effectively balances accuracy and speedup.
+To enable efficient learning of the gating network, we develop a customized FlashAttention implementation that extracts the block-level ground truth of attention map with minimum overhead.
+\aname{} not only applies to post-training, but also excels in long-context fine-tuning.
+Our results show that at post-training stages, \aname{} significantly outperforms state-of-the-art static or heuristic-based sparse attention methods, while also being more versatile and flexible to adapt to varying context lengths and sparsity ratios.
+When applied to long-context fine-tuning with YaRN, \aname{} can achieve a remarkable 90\% sparsity ratio at a 32k context length with minimal perplexity loss, offering a $5.67\times$ speedup over FlashAttention-2. Recent works have explored leveraging the sparsity in attention maps, but predefined patterns or heuristic methods to approximate fall short to capture the dynamic nature of sparsity across different inputs and attention heads.
+
+In this paper, we propose \aname{}, a novel attention mechanism that learns and leverages the intrinsic sparsity in attention for efficient long-context LLM inference. %learn in a data-driven approach
+Inspired by Mixture of Experts (MoE), \aname{} integrates a traditional attention network with a learnable gating network that adaptively selects significant blocks in the attention maps.
+Block-level sparsity effectively balances efficiency and accuracy, and it integrates seamlessly with Flash Attention. 
+To enable efficient training of the gating network, we customized Flash Attention to extract block-level ground truth of attention maps.
+Our results show that \aname{} outperforms state-of-the-art methods, offering a versatile and flexible solution that adapts to varying context lengths and sparsity ratios with a single model.
+Apply \aname{} in continued pretraining, where both the gate and attention are optimized together, achieves near-lossless accuracy with a 50\% sparsity ratio.
+
+\end{comment}
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}[b]{0.323\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/loss_comparison.pdf}
+        \caption{Fine-tuning Loss.}
+        \label{fig:sub1}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.329\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/combined_teaser.pdf}
+        \caption{Test Perplexity.}
+        \label{fig:sub2}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.326\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/teaser_speedup_32k.pdf}
+        \caption{Kernel Speedup.}
+        \label{fig:sub2}
+    \end{subfigure}
+    \caption{\aname uses a learning-based approach to exploit attention sparsity of LLMs, applicable in both post-training and fine-tuning stages. 
+    By incorporating \aname with YaRN~\citep{yarn} to extend a Llama-3-8B model from 8k to 32k context length, the loss curves for 50\% to 90\% sparsity are nearly identical to the dense YaRN baseline (a); For test perplexity, 50\% sparsity achieves near-lossless performance, and even at 90\% sparsity, the loss remains minimal (b); SeerAttention achieves up to 5.67x inference speedup at 90\% sparsity over FlashAttention-2~\citep{flash2};}
+    \label{fig:teaser}
+\end{figure}
+
+
+\begin{comment}
+
+Attention mechanism is complex with $O(n^2)$. Previous effort has explored designing new models/attention-mechanism. But accuracy is not as good as full attention and not widely adopted. 
+Previous system-level approach has focus on leveraging sparsity. They are either (1) static-pattern attention mask or (2) some heuristic-based methods to dynamically determine attention mask. 
+
+However, these methods are not general enough. The central problem is that the attention is dynamically sparse and output sparse. Pattern-based or heuristic-based methods are not general and scalable enough.
+
+In this work, we adopts a learnable methods to address this challenge. We train additional module to predict block-level attention score during runtime. 
+
+However, training this module in practice is also challenging. Flash-Attention does not output attention-score. The downsampling of q and k can also mess up the rope information. 
+
+To address that, we modify flash-attention kernel and generate pooling outputs and redesign rope for predictor module.
+
+So far, our contribution can be summary as:
+xxx
+\end{comment}
+
+Attention is a fundamental mechanism in transformer-based LLMs~\citep{attention}. Despite its effectiveness, the quadratic complexity of attention requires substantial computation and memory resources, limiting the scalability and efficiency of LLMs, especially with a long-context window. This problem has become an active research topic in the community. One potential solution is to replace the quadratic attention with cheaper architectures like linear attention or recurrent networks~\citep{linearattention, rwkv} with subquadratic complexity. These solutions, although efficient, struggle to match the efficacy of full attention, especially when the scale is large.
+
+A promising approach with increasing interests is to leverage sparsity in attention. Sparsity commonly exists in attention maps, and it becomes more prominent in longer contexts. In certain LLM attention heads, the sparsity ratio can reach 95\% or even 99\%, posing great opportunities for efficiency improvement. However, prior studies often rely on predefined sparsity patterns or heuristics to approximate the attention mechanism~\citep{minference, moa, hip, sample_attn, hyperattention}. 
+The sparsity shown in attention maps varies significantly across different models, language inputs and attention heads, making predefined patterns or heuristics insufficient.
+In this paper, we argue that attention sparsity should be \textit{learned} rather than predefined.  To achieve this, we introduce \aname{}, a novel attention mechanism that enhances the standard attention with a learnable gate.
+During the forward pass of \aname{}, the Q and K inputs are pooled and processed by the learnable gate to adaptively identify the important blocks, allowing the downstream block-sparse attention kernel to effectively reduce the I/O and computation by skipping  unimportant blocks.
+
+In the training of \aname{}, the gate learns the block-wise attention sparsity from the model itself, i.e., using the attention map generated from the standard attention.
+However, FlashAttention~\citep{flash1}, the state-of-the-art attention kernel used predominantly in LLMs, eliminates the explicit output of the intermediate attention maps via operation fusion to improve efficiency.
+This posts great challenges in our training processes, especially in long-context scenarios as the na\"ive manual attention implementation is slow and memory hungry.
+To address this challenge, \aname{} customizes a FlashAttention kernel to extract our targeted block-wise attention map information without maintaining the original full size attention map. This new implementation achieves negligible overheads and significantly boosts the scalability of training process.
+
+We evaluate \aname{} in two settings: post-training, where only the gate parameters are learned using a small set of calibration data; 
+and fine-tuning, where both the gate and weights of the original model are jointly optimized during long context extension.
+Our results demonstrate that \aname{} surpasses state-of-the-art sparse attention methods like Minference~\citep{minference} and MoA~\citep{moa}. 
+Notably, in contrast to previous methods that require careful calibration of sparse configuration for different settings, \aname{} offers strong capabilities of adaptation to arbitrary context lengths and sparsity ratios.
+More importantly, the inherent learning capability of \aname{} achieves near-lossless accuracy with 50\% sparsity and minimal loss even with 90\% sparsity during long-context fine-tuning (shown in \Figref{fig:teaser}). The block-sparse kernel also demonstrates up to $5.67\times$ speedup over FlashAttention-2 dense baseline at 32k context size with 90\% sparsity. 
+Remarkably, with block-sparse pattern, \aname{} exhibits the ability to learn more diverse patterns, including A-shape and Vertical-Slash, further demonstrating its versatility and performance.
+
+Our contributions can be summarized as follows:
+\begin{itemize}
+    \item We propose \aname{}, an innovative attention mechanism that learns and leverages the intrinsic sparsity in attention to enhance efficiency for long-context LLMs.
+    \item We develop a customized FlashAttention kernel that effectively obtains block-level attention map ground truth, enabling scalable learning of sparse attention.
+    \item Experiments show that SeerAttention outperforms previous approaches in post-training, offers adaptability to various context lengths and sparsity ratios, and excels in long-context fine-tuning, maintaining near-lossless accuracy even at high sparsity levels.
+\end{itemize}
+
+\begin{comment} %comment by Fan
+
+The attention mechanism is foundational to transformer-based Large Language Models (LLMs). 
+While extremely powerful, its quadratic complexity presents significant system challenges, particularly when processing long contexts. 
+The substantial computational and memory demands restrict the scalability and efficiency of long-context LLMs, necessitating innovative solutions.
+One approach has been revisiting RNN-based architectures. Although efficient, they struggle to match the accuracy of full attention at larger model scales and longer sequence lengths.
+
+To address the complexity issue, there is increasing interest in leveraging the sparsity within attention.
+Attention maps naturally exhibit sparsity, which becomes more prominent with longer context lengths. 
+In certain attention heads, sparsity rates can reach 95\% or even 99\%.
+Prior studies have explored predetermined sparsity patterns or heuristic methods to approximate the attention mechanism.
+However, these methods fall short due to the \textit{dynamic} and \textit{data-dependent} nature of attention sparsity. 
+Attention maps vary significantly across different inputs and attention heads, making fixed patterns or heuristics insufficient.
+In this work, we introduce \aname{}, a novel attention mechanism designed to learn and the intrinsic sparsity in attention and harness the learned sparsity for efficient long-context LLM inference. 
+Drawing inspiration from MoE, \aname{} integrates a traditional attention network with a learnable gating network that adaptively identifies significant blocks in attention maps (Figure~\ref{}).
+By focusing on block-level sparsity, \aname{} naturally integrates with Flash Attention and enhances efficiency by reducing the computational burden associated with processing long contexts.
+During the forward pass of \aname{}, The Q and K inputs are pooled and processed by the gating network to determine the important blocks. The resulting sparse block indices are then used in the attention computation, seamlessly integrating with flash attention to achieve near-linear latency reduction.
+
+The introduced \aname{} mechanism is straightforward, training the gating network presents a significant challenge. Jointly training the gate and attention from scratch, as in MoE, is costly and difficult.
+Fortunately, unlike MoE, where gating network must learn expert selection from scratch, the gating network in \aname{} has a ground truth in standard attention as guidance. 
+The main challenge is retrieving this ground truth.
+Flash Attention is a fused approach where the attention map vanishes, making retrieval impossible.
+Conversely, a naïve gemm implementation leads to out of memory due to quadratic complexity.
+To address this, we customized Flash Attention with pooling to obtain the block-level max-pooled attention map.
+The latency and memory overhead of our kernel, compared to the original Flash Attention~\cite{flashattention2}, is negligible, allowing us to efficiently train the gating network without sacrificing performance.
+
+We evaluate \aname{} in two settings: post-training, where only the gate parameters are learned using a small set of calibration data, and fine-tuning, where both the gate and attention are jointly optimized during continued pretraining.
+Our results demonstrate that \aname{} surpasses state-of-the-art methods like Minference and MoA. Notably, \aname{} offers a single model capable of adapting to arbitrary context lengths and sparsity ratios, unlike previous methods which require/search separate configurations for different settings. Additionally, the inherent learning capability of \aname{} achieves near-lossless accuracy during continued pretraining. In terms of kernel inference efficiency, the block pattern utilized by \aname{} proves superior to the A-shape pattern in MoA and the vertical slash in Minference.
+Remarkably, on top of our block pattern, \aname{} also exhibits the ability to learn A-shape and vertical slash patterns, further enhancing its versatility and performance.
+\end{comment}
+\begin{comment}
+    
+Results are xxx. highlight: 
+1. better than sota minference, moa. 
+2.one model that can adapt to arbitrary context length and sparsity, while minference and moa needs seperate config for different context length or sparsity. 
+3.the built in learning ability can even achieve near lossless accuracy in continue pretrain (if applicable).
+In terms of kernel inference efficiency, block pattern in \aname{} is better than A shape in moa and vertical slash in minference. Surprisingly or let alone, \aname{} can learn A shape and verticle slash pattern above block pattern.
+\end{comment}
+
+
+
+
+\section{Background and Motivation}
+
+
+\paragraph{Powerful but Complex Attention in Transformer.}
+
+The advent of attention mechanisms, particularly within the Transformer architecture~\citep{attention}, marked a significant advancement in natural language processing. 
+Attention enables improved handling of long-range dependencies and a better understanding of context by
+attending each token to every other token in the sequence,  resulting in a quadratic memory and time complexity \(O(n^2)\), where \(n\) is the sequence length.
+This presents a significant challenge as the community moves towards LLMs that can process increasingly longer contexts.
+Many studies explore alternative attention mechanisms to mitigate this complexity.
+The Reformer architecture~\citep{reformer} reduces the complexity to \(O(n \log n)\) and the linear attention mechanism~\citep{linearattention} further decreases complexity to \(O(n)\).
+Recently, there has been a trend of revisiting recurrent neural networks, leading to the proposal of new architectural frameworks such as RWKV~\citep{rwkv}, RetNet~\citep{retnet}, and Mamba~\citep{mamba}.
+Despite their promise of efficiency, these methods struggle to match the performance of full attention mechanisms, particularly with larger models and longer contexts.
+\paragraph{Intrinsic but Dynamic Sparsity in Attention.}
+Attention mechanisms inherently exhibit sparsity, which arises from the attention map $\mathbf{A}$ generated by $\mathbf{Q}$ and $\mathbf{K}$: $\mathbf{A} = \mathrm{softmax}(\mathbf{QK^{T}}/\sqrt{d})$.
+The softmax function often produces a multitude of negligible scores that can be treated as zeros without impacting model accuracy~\citep{zaheer2020big, xieyuan_sparse, spatten, spasretrans}.
+Attention sparsity becomes more pronounced with longer contexts, presenting opportunities to optimize inference speed.
+Unfortunately, this sparsity is dynamic, varying across different inputs and attention heads, each displaying distinct sparsity locations and ratios. 
+Prior research has attempted to approximate attention sparsity using predefined patterns and heuristics~\citep{moa,minference}.
+Yet, these methods lack generality and often rely on handcrafted features, struggling to fully capture the sparsity behavior of attention mechanisms.
+The dynamic and input-dependent nature of attention sparsity echoes the principles of Mixture of Experts (MoE) models ~\citep{moe,MoEswitch} suggesting that sparsity should ideally be learned directly from data within the model itself. This approach would allow models to adaptively harness sparsity, improving efficiency while maintaining accuracy.
+
+
+
+
+\section{SeerAttention}
+
+
+\aname{} adopts a fully learning-based approach to adaptively identify attention sparsity in LLMs and leverages the learned sparsity for efficient inference. To ensure efficiency on modern hardware like GPUs, we focus on learning block sparsity, which can seamlessly integrate with the tiling computation scheme of FlashAttention~\citep{flash1}.
+\Figref{fig:seerattention arch} illustrates the overall model architecture of \aname{}, which augments conventional attention with a learnable gating module, termed \textit{Attention Gate} (\gate). This module contains learnable parameters that identify the locations of significant blocks in the attention maps. By utilizing these block indices, the subsequent attention computation can employ a block-sparse FlashAttention kernel, significantly enhancing performance by reducing I/O and computation overhead.
+
+\subsection{Attention Gate}
+The \gate module is designed to learn block-wise information with minimal overhead. It takes the original matrices $\mathbf{Q}$ and $\mathbf{K}$ as inputs and downsamples them using pooling along the sequence dimension. As shown in \Figref{fig:seerattention inference}, for a given attention head, the sizes of the downsampled $\mathbf{Q}$ and $\mathbf{K}$ become $[seq/B, d]$, where $B$ is the block size. The downsampled $\mathbf{Q}$ and $\mathbf{K}$ are then processed through a linear layer and multiplied together, similar to the standard attention operation. This results in a matrix of size $[seq/B, seq/B]$, where each element corresponds to one block in the full attention map. With a typical block size of 64, the output of the \gate module is only $\frac{1}{4096}$ the size of the original attention map. During inference, by selecting the Top-k blocks in each row, the block-sparse FlashAttention kernel can efficiently load and process only the active blocks.
+
+
+
+\paragraph{Pooling Selection.}
+
+In \aname{}, different pooling methods can be composed for the $\mathbf{Q}$ and $\mathbf{K}$ tensors, currently allowing for combinations of average, max, and min pooling. Multiple pooling operations can be applied to each matrix, with the resulting downsampled matrices concatenated before being fed into the linear layer. Experimental results indicate that the optimal combination is to use average pooling on $\mathbf{Q}$ and a combination of max and min pooling on $\mathbf{K}$ (details in \Figref{fig:Pooling_exp}).
+
+\paragraph{Additional RoPE in Attention Gate.}
+Modern LLMs typically employ RoPE~\citep{rope} to encode positional information. 
+If the \gate relies solely on the original RoPE in the model, i.e., feeding the \gate with $\mathbf{Q}$ and $\mathbf{K}$ after RoPE, the relative positional encoding properties will be lost because of the pooling operation. 
+This compromises the \gate's ability to extrapolate to longer context lengths during training. 
+Specifically, if the \gate is trained on 8k sequences, it struggles with inputs longer than 16k. To address this issue, we introduce a separate RoPE within the \gate.
+This RoPE can reuse the parameters from the original RoPE, but assigns position ids based on the starting positions of each block. This is equivalent to using a reduced rotational angle $\theta' = \theta / B$, but encode the position of each block. 
+\subsection{Block-Sparse FlashAttention Inference Kernel}
+Block sparsity is not officially supported in FlashAttention-2~\citep{flash2}, so we implement our own block-sparse FlashAttention kernel with Triton~\citep{triton} to speedup the inference of \aname. It uses similar dataflow of FlashAttention-2 where $\mathbf{Q}$ is split across different warps. Each warp reads the sparse block indices generated by \gate and loads the corresponding $\mathbf{K}$ and $\mathbf{V}$ blocks on-chip for computation. This approach efficiently reduces both I/O and computation overhead by skipping non-activated blocks.
+
+
+
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}[b]{0.4\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/inference.pdf}
+        \caption{\aname at Inference Time}
+        \label{fig:seerattention inference}
+    \end{subfigure}
+    \hspace{0.1\textwidth}
+    \begin{subfigure}[b]{0.43\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/tranining.pdf}
+        \caption{\aname at Training Time}
+        \label{fig:seerattention training}
+    \end{subfigure}
+    \caption{\aname Architecture. (a) \aname incorporates an efficient module, \gate, to adaptivily identify sparse block locations in attention maps.  
+    (b) During training, \aname uses the max-pooled attention map of full attention as ground truth to guide the \gate. 
+    }
+    \label{fig:seerattention arch}
+\end{figure}
+
+
+\section{Training \aname}
+
+
+While the introduced \aname{} architecture is straightforward, training it is challenging. Jointly training the gate and attention from scratch, as in MoE, is costly and difficult.
+Fortunately, unlike MoE, where gating network must learn expert selection from scratch, the \gate in \aname{} has a ground truth in standard attention as guidance. 
+\subsection{Training the Attention Gate}
+
+We train the \gate to learn block-level sparsity by using the 2D max-pooled attention map from full attention as ground truth, as illustrated in \Figref{fig:seerattention training}. 
+To align distributions, the \gate's output is scaled and passed through a softmax, similar to standard attention mechanisms. Additionally, the max-pooled attention map is row-normalized to sum to 1, consistent with the softmax output. Mean-Square-Error (MSE) loss is used in training. 
+This auto-regressive training scheme also enables flexible usage of \aname, allowing users to adjust the Top-k ratio to balance accuracy and efficiency with a single model.
+\subsection{FlashAttenion with Max-Pooling: A Customized training kernel}
+
+Obtaining the max-pooled attention map for training is non-trivial especially in long-context scenarios.
+Modern LLMs rely on FlashAttention, which fuses operations and doesn't explicitly compute the attention map. The naïve mannul implementation is impractical due to quadratic memory complexity. To address this challenge, we customize an efficient kernel that directly outputs the max-pooled attention map by modifying FlashAttention but largely reuses its original computation flow. \Figref{fig:attn_pooling} shows the pseudo code and diagram of this customized kernel.
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.8\linewidth]{figures/flash_pooling.pdf}
+    \caption{Efficient FlashAttention kernel with pooling of attention map. }
+    \label{fig:attn_pooling}
+\end{figure}
+
+
+Normally, the softmax function ensures numerical stability by subtracting the maximum value before applying the exponential operation. FlashAttention computes the local row max of each block, and gradually updates the global maximum through iteration:
+\begin{equation}
+    S_{ij} = Q_i K^T_j;\   \,  r_{ij} = \mathrm{rowmax}(S_{ij});  \,  \ m_{ij} = \mathrm{max}(m_{i(j-1)}, r_{ij})
+\end{equation}
+where $r_{ij}$ is typically treated as a temporary result. However, we store it in HBM and rescale it later with the final global max $m_i$ and sum of exp $l_i$ after the iteration:
+\begin{equation}
+    a_{ij} = \mathrm{exp}(r_{ij} - m_i) / l_i
+\end{equation}
+This $a_{ij}$ represents the correct row max of the original attention block. With that, 2D max-pooling is achieved by applying a column max over $a_{ij}$. This introduces only minor overhead (storing and rescaling $r_{ij}$) but significantly improves the efficiency of obtaining the ground truth.
+
+\subsection{Apply \aname in Post-training and Fine-tuning Stages}
+\paragraph{Post-training.} \aname{} can be directly applied to a pre-trained model.
+In this case, only the weights of \gate are learned and updated, leaving the original model weights unchanged.
+This method is highly efficient and cost-effective, requiring gradients solely for the \gate, and quickly converges using minimal calibration data. 
+The learned gate also allows for adjustable Top-k ratios during inference, providing a flexible tradeoff between accuracy and efficiency.
+\paragraph{Fine-tuning.}
+\aname{} can also be applied to long-context extension fine-tuning, enabling improved model performance and higher sparsity ratios. In practice, to ensure stable training, the \gate is first initialized using the post-training method before fine-tuning the entire model. During fine-tuning, we fix the Top-k ratio and use both the original training loss and the attention map MSE loss.
+
+
+
+
+
+
+
+
+
+   
+        
+
+   
+
+
+   
+   
+
+
+
+
+
+
+
+\section{Experiments}
+
+In this section, we evaluate both the accuracy and efficiency of \aname. 
+The accuracy is evaluated under two distinct scenarios: (1) post-training stage and (2) long-context extension fine-tuning stage. 
+For the efficiency evaluation, we present kernel-level and end-to-end latency speedup results across various sparse configurations.
+In our current experiments, block-size $B$ for the model and kernel is fixed at 64 and \gate currently solely applies in the prefill stage.  
+\paragraph{Models, Tasks and Baselines.} 
+
+We apply \aname{} to the pre-trained models Llama-3.1-8B~\citep{llama_3} and Mistral-7B-v0.3~\citep{mistral} to assess its impact on LLM perplexity across different \gate designs and sparsity configurations. For perplexity evaluation, we use the PG19~\citep{PG19} and Proof-pile~\citep{proofpile} test splits. Following YaRN~\citep{yarn}, 10 documents over 128k tokens are sampled from Proof-pile, while all documents exceeding 128k tokens from PG19 are selected. The input sequences are truncated to evaluation context length before feeding into the model. 
+We also conduct experiments using an instruction-tuned model, Llama-3.1-8B-Instruct, and compare \aname{} with two state-of-the-art sparse attention methods, MoA~\citep{moa} and MInference~\citep{minference}, on the LongBench~\citep{longbench} benchmark, perplexity and efficiency. MoA uses an offline search scheme to apply static sparse patterns across different attention heads, while MInference dynamically generates sparse indices using heuristic methods for each head based on pre-defined sparse patterns.
+\paragraph{Post-training Setup.} 
+We use the RedPajama~\citep{together2023redpajama} dataset for calibration, chunked into 64k and 32k segments for Llama-3.1 and Mistral, respectively.%, with BOS and EOS tokens. 
+We use a learning rate of 1e-3 with cosine decay and the global batch size of 16. The \gate is only trained in 500 steps using the ground truths from our customized FlashAttention kernel, with DeepSpeed~\citep{deepspeed} stage 2 optimization on 4 A100 GPUs. As only \gate parameters are learned and updated in post-training, this process can be completed with hours.
+
+\paragraph{Long-context Extension Fine-tuning Setup.}
+We extend the context size of a Llama-3-8B model from 8K to 32K, following the setup from YaRN~\citep{yarn}, while introducing attention sparsity via \aname. The Top-k number in the \gate is fixed during the forward pass to allow the model to adapt to the sparsity.
+We use a learning rate of 1e-5 with linear decay and a global batch size of 8 on RedPajama dataset. The entire model weights are fine-tuned on 4 A100 GPUs with DeepSpeed stage 3 optimization. 
+
+\subsection{Accuracy of Post-Training}
+\paragraph{Perplexity on Pre-trained Models.}
+\Figref{fig:base-model ppl} shows the perplexity results on the Proof-pile dataset for both Llama-3.1-8B and Mistral-7B-v0.3 across different context lengths and sparsity ratios.
+It should be noted that the results for each model come from the same checkpoint with trained \gates, and different sparsity ratios are achieved by adjusting the value of $k$ in the Top-k. The results show that \aname{} only slightly increases perplexity as the sparsity ratio increases, compared to full attention. For instance, with the Mistral-7B model at a 32k context size, \aname{} achieves a perplexity of 2.45, compared to the baseline of 2.29, despite introducing a significant 90\% attention sparsity. \Figref{fig:base-model ppl} also demonstrates that longer context lengths allow for greater sparsity with minimal accuracy degradation.
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}[b]{0.4\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/llama3.1_proofpile.pdf}
+        \caption{Llama-3.1-8B}
+        \label{fig:base-model ppl llama}
+    \end{subfigure}
+    \hspace{0.05\textwidth}
+    \begin{subfigure}[b]{0.4\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/mistral_proofpile.pdf}
+        \caption{Mistral-7B-v0.3}
+        \label{fig:base-model ppl mistral}
+    \end{subfigure}
+    \caption{Perplexity results on Proof-pile across various context lengths and sparsity ratios. Note that results on various sparsity ratios comes from the same trained \gates by only adjusting the Top-k ratios. Longer context sizes allow for higher sparsity with minimal performance loss.}
+    \label{fig:base-model ppl}
+\end{figure}
+
+\paragraph{Perplexity Comparison with Related Works.}
+Table~\ref{tab:ppl-pg19} compares the perplexity of \aname at post-training with MoA and MInference, using the Llama-3.1-8B-Instruct model on the PG19 dataset. 
+For MoA, we adopt their "KV Sparsity" in 0.5 which means "Attention Sparsity" in 0.35. 
+For MInference, we use their official setup, where all attention heads choose the "Vertical-Slash" sparsity pattern for Llama-3.1-8B-Instruct.
+Since MInference dynamically generates sparse indices for each input, we record their \textbf{average} attention sparsity across different context lengths for comparison.
+\aname outperforms MoA and MInference even with higher sparisty in most cases, except at the 128k context length.
+This is likely due to MInference applies varying sparsity per head, whereas the fixed sparsity ratio across all heads in \aname.
+Varying sparsity per head could be applied to \aname for enhancement, which remains a topic for future work.
+
+
+\begin{table}[h]
+\centering
+\footnotesize
+\caption{
+Comparing the perplexity of \aname at post-training with MoA and MInference, using the Llama-3.1-8B-Instruct model on the PG19 dataset.}
+\label{tab:ppl-pg19}
+\begin{tabular}{ccccccc}
+\hline
+                               &              &                & \multicolumn{4}{c}{Evaluation Context Length}                    \\
+                               & Sparsity $s$ & 8k             & 16k           & 32k            & 64k            & 128k           \\ \hline
+Original                       & 0.0          & 10.03          & 9.88          & 9.92           & 9.97           & 10.03          \\ \hline
+MoA                            & 0.35         & 10.07          & 9.97          & 10.02          & 10.13          & OOM            \\ \hline
+\multirow{2}{*}{MInference}    &              & 10.12          & 10.06         & 10.24          & 10.43          & \textbf{10.89} \\
+                               &              & $s=0.37$       & $s=0.55$      & $s=0.69$       & $s=0.80$       & $s=0.9$        \\ \hline
+\multirow{6}{*}{\aname} & 0.4          & \textbf{10.06} & 9.92          & 9.96           & 10.10          & 10.29          \\
+                               & 0.5          & 10.08          & 9.94          & 9.99           & 10.15          & 10.38          \\
+                               & 0.6          & 10.12          & \textbf{9.96} & 10.04          & 10.21          & 10.50          \\
+                               & 0.7          & 10.18          & 10.01         & \textbf{10.10} & 10.29          & 10.71          \\
+                               & 0.8          & 10.30          & 10.07         & 10.18          & \textbf{10.39} & 11.18          \\
+                               & 0.9          & 10.75          & 10.24         & 10.30          & 10.56          & 13.20          \\ \hline
+\end{tabular}
+\end{table}
+
+
+\paragraph{LongBench Evaluation.}
+To evaluate performance on instruction-following tasks, we conduct experiments on LongBench, a long-context understanding benchmark, and compare the results with MoA and MInference using the Llama-3.1-8B-Instruct model. 
+As shown in \tabref{tab:longbench}, \aname consistently outperforms both MoA and MInference under similar or higher sparsity ratios. 
+\begin{table}[h]
+\centering
+\footnotesize
+\caption{Comparing the accuracy of \aname at post-training with MoA and MInference on LongBench.}
+\label{tab:longbench}
+\begin{tabular}{cccccc}
+\hline
+                                       &                                &              & \multicolumn{3}{c}{LongBench}                    \\
+Model                                  & Attention                      & Sparsity $s$ & 0-4k           & 4-8k           & 8k+            \\ \hline
+\multirow{7}{*}{Llama-3.1-8B-Instruct} & Original                       & 0.0            & 55.32          & 53.98          & 52.90           \\ \cline{2-6} 
+                                       & MoA                            & 0.35         & 50.74          & 49.84          & 51.89          \\ \cline{2-6} 
+                                       & \multirow{2}{*}{MInference}    &              & 55.23          & 53.87          & 52.18          \\
+                                       &                                &              & $s=0.06$       & $s=0.25$       & $s=0.45$       \\ \cline{2-6} 
+                                       & \multirow{3}{*}{\aname} & 0.1          & \textbf{55.91} & 54.32          & 53.28          \\
+                                       &                                & 0.25         & 55.00             & \textbf{54.09} & 52.22          \\
+                                       &                                & 0.5          & 52.40           & 52.85          & \textbf{52.43} \\ \hline
+\end{tabular}
+\end{table}
+\subsection{Accuracy of Long-Context Extension Fine-Tuning}
+
+We follow YaRN~\citep{yarn} to extend the context size of a Llama-3-8B model from 8k to 32k. We integrate \aname into YaRN and compare the performance against the YaRN dense baseline and the post-training \aname applied after YaRN.
+\Figref{fig:sub1} presents the loss curves of the YaRN dense baseline and \aname at 50\% and 90\% sparsity. The curve at 50\% sparsity nearly overlaps with the baseline, while the curve at 90\% sparsity shows slightly higher loss.
+\tabref{tab:continued pretraining} displays the test perplexity on the PG19 and ProofPile datasets evaluated at a 32k context length. The YaRN dense baseline achieves perplexity scores of 8.79 and 2.46, respectively. Post-training \aname results in increased perplexity. 
+When applying \aname during the YaRN extension fine-tuning, it maintains near-lossless performance at 50\% sparsity (with scores of 8.81 and 2.47), and even at 90\% sparsity, the loss remains minimal.
+\begin{table}[h]
+\centering
+\footnotesize
+\caption{Perplexity of YaRN baseline, \aname after YaRN and YaRN with \aname.}
+\label{tab:continued pretraining}
+\begin{tabular}{c|c|ccccc|ccccc}
+\hline
+ & YaRN  & \multicolumn{5}{c|}{Post-training \aname after YaRN} & \multicolumn{5}{c}{YaRN with \aname} \\
+Sparsity   & 0.0  & 0.5  & 0.6  & 0.7  & 0.8  & 0.9   & 0.5  & 0.6  & 0.7  & 0.8  & 0.9  \\ \hline
+PG19       & 8.79 & 9.16 & 9.30 & 9.48 & 9.73 & 10.18 & 8.81 & 8.82 & 8.85 & 8.93 & 9.16 \\
+Proof-pile & 2.46 & 2.53 & 2.57 & 2.61 & 2.68 & 2.85  & 2.47 & 2.47 & 2.48 & 2.51 & 2.60 \\ \hline
+\end{tabular}
+\end{table}
+
+\subsection{Efficiency evaluation}
+We evaluate the efficiency of \aname using our implementation of Triton~\citep{triton} kernels. We evaluate the kernel-level as well as end-to-end speedup using a Llama-3.1-8B-Instruct on a single A100 GPU. Results are compared to FlashAttention-2 (dense baseline), MoA and MInference. 
+\subsubsection{Kernel evaluation}
+
+\paragraph{Negligible Overhead in \gate and Top-k.}
+\Figref{fig:speedup_full} shows the kernel-level latency breakdown of \aname. It demonstrates that the overhead introduced by the \gate and Top-k operations during inference is minimal. For instance, at a context length of 32k and a sparsity of 0.5, the \gate and Top-k contribute only 1\% and 2\% to the total latency, respectively. In the cases of 128k sequence length, the relative overhead almost diminishes.
+
+\paragraph{Block-Sparse FlashAttention Kernel Speedup.}
+\Figref{fig:speedup_full} also shows that our kernel demonstrates linear speedup over various sparsity levels. At a sequence length of 128k with 90\% sparsity, \aname achieves a speedup of 5.47× compared with FlashAttention-2 on a single A100 GPU. While the current implementation is based on Triton, further performance gains are possible by optimizing the kernel using CUDA in future work.
+
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/latency_full_8k.pdf}
+        \caption{Sequence length = 8k}
+        \label{fig:kernel_sub1}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/latency_full_32k.pdf}
+        \caption{Sequence length = 32k}
+        \label{fig:kernel_sub2}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/latency_full_128k.pdf}
+        \caption{Sequence length = 128k}
+        \label{fig:kernel_sub2}
+    \end{subfigure}
+    \caption{\aname time breakdown compared to FlashAttention-2. At sequence length 128k with 90\% sparity ratio, \aname speeds up attention computation by 5.47× over FlashAttention-2.}
+    \label{fig:speedup_full}
+\end{figure}
+\paragraph{Compared to Related Works.}
+We compare the speedup of \aname with MoA and MInference. MInference uses offline calibration to identify a pre-defined sparse pattern for each layer. For Llama-3.1-8B-Instruct model, MInference consistently uses "Vertical-slash" pattern across all layers. During runtime, MInference will dynamically generate non-zero indices based-on their approximation algorithm. On the other hand, MoA uses "A-shape" blocks as their sparse pattern and calibrate the shape parameters offline under given sparsity constraint. 
+
+\Figref{fig:compared} shows the sparsity v.s. speedup plots of different methods on 8k, 32k, 128k sequences length, where the speedup baseline is FlashAttention-2. 
+The sparsity statistics were collected on PG19 datasets. For MoA, we generated the sparse configurations under their 0.5 overall "KV-sparsity" constraints, which corresponds to an average of 0.35 sparsity in attention. The results demonstrates that \aname outperforms both MoA and MInference in most cases. At 128k, the performance of all three methods converges, where the benefits of sparsity significantly outweigh the associated overhead.
+
+
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}[b]{0.33\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/kernel_8K.pdf}
+        \caption{Sequence length = 8k}
+        \label{fig:kernel_8k}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.326\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/kernel_32K.pdf}
+        \caption{Sequence length = 32k}
+        \label{fig:kernel_32k}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.318\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/kernel_128K.pdf}
+        \caption{Sequence length = 128k}
+        \label{fig:kernel_128k}
+    \end{subfigure}
+    \caption{\aname block sparse FlashAttention inference kernel speedup.}
+    \label{fig:compared}
+\end{figure}
+
+\subsubsection{End-to-End Speedup}
+To assess the end-to-end speedup of our method, we measured the average prefilling time, or time-to-first-token (TTFT), using the Llama-3.1-8B-Instruct model. Following the experimental setup used in MoA, we also recorded the average sparsity statistics for each method. The results show that \aname consistently achieves lower latency compared to MInference, even with lower sparsity ratios. As for MoA, it requires an exhaustive search for different sparse configurations under varying sparsity constraints, which is time-consuming. Therefore, we only compared against its default configuration.
+
+\begin{comment}
+\begin{table}[]
+\centering
+\footnotesize
+\caption{Time to First Token (ms)}
+\label{tab:ttft}
+\begin{tabular}{ccccccc}
+\hline
+                            &          & \multicolumn{5}{c}{Evaluation Context Length} \\
+                            &          & 8k     & 16k    & 32k     & 64k     & 128k    \\ \hline
+Flash-Attn-v2               & Latency  & 901    & 1946   & 4627    & 10091   & 35542   \\ \hline
+\multirow{2}{*}{MoA}        & Latency  & 1294   & 3440   & 10336   & OOM     & OOM     \\
+                            & Sparsity & 0.35   & 0.35   & 0.35    & 0.35    & 0.35    \\ \hline
+\multirow{2}{*}{MInference} & Latency  & 2327   & 3097   & 4681    & 8209    & 14380   \\
+                            & Sparsity & 0.37   & 0.65   & 0.77    & 0.86    & 0.95    \\ \hline
+\multirow{2}{*}{SeerAttention}& Latency  & 781      & 1645      & 3600       & 7688       & 13369       \\
+                            & Sparsity & 0.5    & 0.6    & 0.7     & 0.8     & 0.95     \\ \hline
+\end{tabular}
+\end{table}
+\end{comment}
+
+\begin{table}[]
+\centering
+\caption{Time to First Token results (s).}
+\footnotesize
+\label{tab:ttft}
+\begin{tabular}{ccccccc}
+\hline
+\multirow{2}{*}{Latency (Sparsity)} & \multicolumn{5}{c}{Evaluation Context Length} \\
+                                    & 8k             & 16k            & 32k            & 64k            & 128k           \\ \hline
+FlashAttn-2                       & 0.90 (0)       & 1.95 (0)       & 4.63 (0)       & 10.09 (0)      & 35.54 (0)      \\ 
+MoA                                 & 1.29 (0.35)    & 3.44 (0.35)    & 10.34 (0.35)   & 36.34 (0.35)            & OOM            \\ 
+MInference                          & 2.33 (0.37)    & 3.10 (0.65)    & 4.68 (0.77)    & 8.21 (0.86)    & 14.38 (0.95)   \\ 
+SeerAttention                       & 0.78 (0.50)     & 1.65 (0.60)     & 3.60 (0.70)     & 7.69 (0.80)     & 13.37 (0.95)   \\ \hline
+\end{tabular}
+\end{table}
+
+
+
+
+\section{Analysis and Ablation}
+
+\paragraph{Visualization of Learned Attention Maps.}
+The \gate module automatically learns diverse sparse patterns without any prior knowledge or heuristics. \Figref{fig:vis mask} shows several example outputs from \gate, including (a) "A-shape," (b) "Vertical," (c) "Slash" with empty vertical spaces, (d) block sparsity along the diagonal, and (e) random patterns. These patterns not only encompass but also extend beyond those observed in previous works such as MoA and MInference, showcasing the versatillty of our learning based methods. 
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}[b]{0.19\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/mask_3.pdf}
+        \caption{}
+        \label{fig:mask_0}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.19\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/mask_0.pdf}
+        \caption{}
+        \label{fig:mask_1}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.19\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/mask_1.pdf}
+        \caption{}
+        \label{fig:mask_2}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.19\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/mask_5.pdf}
+        \caption{}
+        \label{fig:mask_3}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.19\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/mask_2.pdf}
+        \caption{}
+        \label{fig:mask_4}
+    \end{subfigure}
+    \caption{Visualization of the \gate's outputs.}
+    \label{fig:vis mask}
+\end{figure}
+
+\paragraph{Analysis of FlashAttention with Max-Pooling Training Kernel.}
+We evaluate our customized FlashAttention kernel with maxpooling attention map for scalable training of \aname by comparing against with PyTorch na\"ive manual attention implementation and FlashAttention-2. As shown in Figure \ref{fig:pooling_sub1}, the PyTorch kernel runs out of memory (OOM) when the sequence length exceeds 4k, while our customized kernel costs similar peak memory usage compared to FlashAttention-2. Regarding latency, since PyTorch encounters OOM for sequences longer than 8K, the attention operations per head into a loop to assess kernel-level latency. Figure \ref{fig:pooling_sub1} shows that the latency overhead introduced by the additional pooling operation is minimal compared to the FlashAttention-2, while the PyTorch implementation suffers from a significant slowdown.
+
+
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}[b]{0.4\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/Pooling_memory.pdf}
+        \caption{Memory}
+        \label{fig:pooling_sub1}
+    \end{subfigure}
+    \hspace{0.05\textwidth}
+    \begin{subfigure}[b]{0.4\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/Pooling_latency.pdf}
+        \caption{Latency}
+        \label{fig:pooling_sub1}
+    \end{subfigure}
+    \caption{Memory and latency of customized FlashAttention with max-pooling training kernel.}
+    \label{fig:pooling_mem_latency}
+\end{figure}
+
+\paragraph{RoPE Ablation.}
+In our experiments, we found that incorporating an additional RoPE module in the \gates, shown in \Figref{fig:seerattention arch}, significantly enhances its ability to extrapolate context length when training \gates. 
+\Figref{fig:rope ablation} shows the results with and without RoPE in \gate on PG19 with Llama-3.1-8B model using 8k length training data. 
+The \gate with RoPE shows very consistent performances on larger context lengths despite only trained with 8k length data.  
+
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/rope_0.5.pdf}
+        \caption{Sparsity = 0.5}
+        \label{fig:rope1}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/rope_0.6.pdf}
+        \caption{Sparsity = 0.6}
+        \label{fig:rope2}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/rope_0.7.pdf}
+        \caption{Sparsity = 0.7}
+        \label{fig:rope3}
+    \end{subfigure}
+    \caption{Perplexity with and without RoPE in \gate.}
+    \label{fig:rope ablation}
+\end{figure}
+\paragraph{Pooling Ablation.}
+Different pooling methods can be composed in the \gates. To study the best configuration, we test all the possible combinations of pooling in $\mathbf{Q}$ and $\mathbf{K}$ choosing from average, max and min pooling. There are in total 49 combinations. We train each configuration in post-training setting using Llama-3.1-8B model with 32k length data and test the perplexity on PG19 dataset with 128k evaluation context length. \Figref{fig:Pooling_exp} shows the Top-12 configurations. The one with average pooling on $\mathbf{Q}$ and max plus minpooling on $\mathbf{K}$ performs the best. 
+This may relate to the observations in LLM quantization that $\mathbf{K}$ often exhibits more outliers. 
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.55\linewidth]{figures/pooling_exp.pdf}
+    \caption{Perplexity of \aname with different pooling methods.}
+    \label{fig:Pooling_exp}
+\end{figure}
+
+
+
+\section{Conclusion and Future Work}
+
+This paper presents \aname{}, a new attention mechanism that learns and leverages the intrinsic sparsity in attention to boost long-context LLMs. 
+Our experiments demonstrate that \aname{} not only outperforms previous approaches in post-training scenarios, but also excels in long-context fine-tuning, maintaining near-lossless accuracy even at high sparsity levels.
+For future work, there are several promising directions to explore for improving and expanding the capabilities of \aname.
+One key area is enhancing the training methodologies for \aname, such as applying \aname in long-context continued pre-training with more training tokens to achieve higher sparsity without sacrificing accuracy.
+Another important avenue is applying \aname{} in the decoding stage of LLMs.
+While this work primarily focuses on the prefill phase, it remains an open question whether the learned attention sparsity can similarly benefit the efficiency and accuracy of the decoding process.
+
+
+
+
+

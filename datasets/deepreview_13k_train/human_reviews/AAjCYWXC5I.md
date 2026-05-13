@@ -1,0 +1,185 @@
+# Review and Rebuttal: Zero-shot In-context Adversarial Learning for Improving Research Ideation
+
+- Decision: Reject
+- Scores: 3, 6, 5
+
+## Abstract
+Recent studies highlight that the advancements in Large Language Models (LLMs) have opened up exciting possibilities for scientific discovery, where LLMs can assist researchers in generating novel hypotheses and ideas. In this work, we draw inspiration from Generative Adversarial Networks (GANs) and make the first effort to formalize the concept of zero-shot in-context adversarial learning and implement it through multi-LLM-agent interactions to improve the research ideation process. Our approach takes the best of two worlds: (1) by making in-context learning adversarial, the utilization of an LLM’s vast parametric knowledge can be optimized; and (2) by keeping adversarial learning in context, we eliminate the need for bi-level optimization through additional model training. To evaluate the quality of the open-ended generation produced by LLMs, we develop a relative quality ranking metric, designed to serve as a proxy for human evaluation when human assessments are impractical or costly. Our findings demonstrate that zero-shot in-context adversarial learning significantly enhances idea generation across two dimensions. Specifically, with GPT-4o, the novelty of generated ideas improved by 21%, and feasibility of the ideas saw an impressive increase of 322%. These results underscore the transformative potential of zero-shot in-context adversarial learning in driving innovation and creativity within the research process.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4
+
+### Summary
+This paper proposes an adversarial setting between LLM agents to do scientific ideation via iterative prompting. The setting includes a proposer, a review, and an area chair (AC) agent. The paper claims that the proposer and the AC serve as the role of generator and discriminator respectively just as the two roles in the traditional GAN setting. Each iteration, the proposer comes up with new ideas that are criticized by the reviewer agent, modified by the proposer again, and finally evaluated by the AC agent. Through multiple iterations until convergence or a hard limit, the system would be expected to produce a novel and feasible idea for a given user query. The paper also designs a new ranking-based metric with GPT-4o as a judge to evaluate idea quality. The paper conducts experiments with biomedical papers from semantic scholars and present good performance of the proposed method.
+
+### Strengths
+The paper adopts an interesting concept of adversarial learning from previous literature about GAN. The illustration and figures of the setting and pipeline is clear and intuitive. The structure of the paper is complete and the writing is coherent. Prompts for different agents are well-documented in the appendix. The paper overall is easy to read.
+
+### Weaknesses
+1. The setting though sounds interesting lacks mathematical foundation. While the original methods from GAN is well-established from theory to experiments, this paper adopts the concept of the minimax objective without implementing it with mathematical justifications. The discriminator relies on the assumption that the proposed ideas lies within neighborhood $B_\epsilon(y)$, which may not be realistic in practice. The performance of the reviewer is unclear. We do not know how close it is approximating a gradient update to guide the proposer to update generations. Multiple quality indicator traits are designed in the prompt but not evaluated specifically.
+
+2. The evaluation is weak. The paper poses to evaluate LLM generations with LLM, which may carry neglected biases [1]. The ranking-based metric only reflects the relative quality of generated ideas, and lacks comparability across different batch or with other quality metrics. Both the proposed method and the validity of the metric needs user study for verification. 
+
+3. Experiments are not solid enough. All of the numbers reported lack confidence interval. There is no guarantee that the reported results is reproducible. All the models the paper evaluates the proposed methods on are from the OpenAI GPT family, which is not convincing enough. More models including open models should be in the experiments.
+
+### Questions
+1. Line 206 where you mention $\hat{y}_{i-1} < \hat{y}_i$, what value are you comparing?
+2. For each target paper, how do you select the $k$ reference papers as background information? Do you only consider papers cited by the target paper?
+3. Do you have any observations of the reliability of your GPT-4o evaluation? Do they give the same ranking each time?
+
+### Soundness
+2
+
+### Presentation
+2
+
+### Contribution
+2
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4
+
+### Summary
+This paper examines an approach that they call zero-shot in-context adversarial learning to enhance research ideas generated by LLMs. To evaluate this method, the authors introduce a relative quality ranking metric that assesses the quality of LLM-generated ideas against a benchmark of human-generated ideas. The metric focuses on two key quality indicators: novelty and feasibility.  Their work involves creating a dataset of 500 high-quality biomedical research papers, with the research ideas from these papers serving as the "gold standard" for both novelty and feasibility.  Target papers provide background information for the LLMs, simulating a human researcher gathering context before ideation. The system, using different LLMs (GPT-4o, GPT-4o Mini, GPT-3.5 Turbo), generates research ideas based on this background information.  GPT-4o is then tasked with ranking these LLM-generated ideas alongside the human-generated idea based on either novelty or feasibility. This ranking is done blindly, without GPT-4o knowing which idea is human-generated. The relative quality ranking score is then calculated based on the rank of the human-generated idea. A higher score indicates that the LLM-generated ideas are generally ranked higher (meaning better) than the human-generated one for the given quality indicator. Humans set the stage by providing the benchmark ideas and contextual information, while GPT-4o uses this information to evaluate and rank the quality of LLM-generated ideas. This allows for a quantifiable assessment of how well the zero-shot in-context adversarial learning method enhances the novelty and feasibility of research ideas compared to human performance.
+
+### Strengths
+The paper presents a novel approach to enhancing research ideation using LLMs.
+
+Originality:
+
+The paper examines the seemingly novel setting of "zero-shot in-context adversarial learning" specifically for research idea generation. This framework draws inspiration from GANs but adapts it to the unique challenges of working with LLMs and open-ended tasks. This indeed represents a creative combination of existing ideas applied to a new domain. The paper proposes a new evaluation metric, the "relative quality ranking score," to assess LLM-generated research ideas against a benchmark of human-generated ideas. This addresses the challenge of evaluating open-ended text generation, moving beyond traditional metrics and offering a more nuanced assessment. The authors implement the adversarial learning framework through a unique multi-agent system, where each agent (Proposer, Reviewer, Area Chair) plays a specific role in the idea refinement process. This mimics the dynamics of scientific peer review and leverages the strengths of multiple LLMs working in concert.
+
+Quality:
+The experiments demonstrate the effectiveness of the proposed method. The results show significant improvements in both novelty and feasibility of the generated ideas compared to baselines and human-generated ideas.  This highlights the practical value of the approach.
+The paper provides a comprehensive analysis of the method's performance, including convergence analysis and ablation studies. This evaluation strengthens the claims made and provides insights into the contribution of each component of the system. The authors build a dataset of 500 high-quality biomedical research papers and their references, providing a robust foundation for evaluating the research idea generation process. 
+
+Clarity:
+The theoretical framework of zero-shot in-context adversarial learning is clearly articulated – but it is important for the reader to appreciate that the GAN framing is really more of a metaphor since as the authors point out, there is no backprop going on and the theta’s used are  not parameters of the model. The paper provides reasonable explanations and illustrative examples of the agent interactions, prompt templates, and the relative quality ranking metric. This level of detail enhances reproducibility and transparency. The inclusion of case studies helps to demonstrate the practical application of the method and how it leads to improvements in both novelty and feasibility of research ideas. These examples make the benefits of the approach more tangible and accessible to readers.
+
+Significance:
+The paper contributes significantly to the growing body of research exploring the potential of LLMs in scientific discovery. The proposed method offers a promising avenue for leveraging LLMs to assist researchers in generating and refining high-quality research ideas.  The paper's theoretical foundation and empirical findings can contribute to a better understanding of in-context learning in LLMs, particularly how adversarial dynamics can enhance the utilization of LLMs' parametric knowledge, despite being a bit “hand wavy” in the way in which the mathematics here is being used to describe the method. The methods and evaluation techniques introduced in the paper could be adapted and applied to other domains involving user interaction with LLMs, potentially leading to improvements in areas such as creative writing, problem-solving, and decision-making.
+
+Overall, the paper presents a fairly well-executed and clearly communicated study that introduces a novel and effective approach to enhancing research ideation with LLMs.
+
+### Weaknesses
+Weaknesses and Areas for Improvement
+
+1. Limited Scope of Evaluation
+The evaluation focuses solely on the biomedical domain. While the approach is theoretically applicable to other research areas, the generalizability of the findings to other domains needs to be investigated. Experiments with datasets from diverse research areas would strengthen the claims of broader applicability. But this is a somewhat minor issue in my view as this paper is the first to introduce this idea.
+The current evaluation assesses novelty and feasibility separately, without considering their interplay. A combined metric or analysis of the trade-offs between these qualities would provide a more holistic view of the generated ideas' overall quality. Comparisons to other relevant baselines are limited. For instance, comparing against methods that specifically target novelty or feasibility in idea generation, such as those referenced in the related work section, might provide a more comprehensive assessment of the method's performance. While the relative quality ranking metric offers a scalable alternative, including a smaller-scale human evaluation study would provide valuable insights into the alignment between GPT-4o's rankings and human judgments of novelty and feasibility. This would strengthen the validity of the proposed metric as a proxy for human evaluation.
+
+2. Potential Bias in Evaluation
+ Using GPT-4o for both idea generation and evaluation introduces potential bias. While the ranking process is blinded, there's a possibility that GPT-4o might implicitly favor ideas generated by its own model family. Exploring alternative evaluation methods or incorporating human evaluators could mitigate this concern. The performance of the system is likely sensitive to the specific prompts used for each agent. A more in-depth analysis of prompt engineering techniques and their impact on the quality of generated ideas would be beneficial.
+* How robust is the method to variations in prompting? 
+* What are the best practices for crafting effective prompts?
+
+3. Computational Cost and Efficiency
+The multi-agent system, especially when using high-capacity LLMs like GPT-4o, likely requires substantial computational resources. A discussion on the computational cost and potential optimizations for efficiency would be valuable for practical implementation.
+
+4. Theoretical Limitations
+The GAN formulation is mathematical, but more metaphorical than actually a rigorous description of the procedure here: This is the biggest weakness in my view. This GAN framing starts out seeming conceptually coherent with the procedure that is going to be applied, but the way in which the thetas and theta stars are used to define the procedure of altering parametric memories just doesn’t seem coherent with what is actually being done here. The whole procedure is more of a dialogue and in the end it is about generated tokens and their properties, and not really about parametric memory updates. This part of the theoretical presentation is weak and it makes it hard to also perform any real theoretical analysis because it just doesn’t seem consistent with what is actually being done.
+
+5. The experiments:  
+The paper compares the proposed method against two baselines: the initial idea baseline and the self-reflection baseline. While these baselines provide a starting point, including additional baselines that represent alternative approaches to LLM-based idea generation would strengthen the evaluation. For example, comparing against methods that use prompt engineering (e.g. DSPy) or fine-tuning techniques for research idea generation would provide a more comprehensive assessment of the proposed method's effectiveness.
+
+6. Future Directions
+User Interaction and Feedback: The system, in its current form, assumes a fixed set of quality indicators (novelty and feasibility). Exploring mechanisms for incorporating user preferences and feedback into the refinement process would enhance the system's usability and tailor it to specific research needs. 
+* How could the system be made more interactive and responsive to user input?
+
+### Questions
+Questions and Suggestions for the Authors
+
+1)	Could the theoretical explanation of this whole procedure be improved and synchronized more with the reality of the method? I might be missing something, but I find this whole theta and theta star framing to be a bit of a distraction from what seems to really be going on. I open to being convinced that this way of thinking about it is coherent with the actual procedure here, but I think this could be reformulated to make the paper a much more significant contribution.
+
+2)	An idea might be very novel but completely infeasible. 
+How does the system handle this tension?
+
+3)	Regarding the Novelty of Relative Quality Ranking Metric: While the paper introduces the relative quality ranking metric as a novel contribution, a discussion on its relationship to existing evaluation metrics for open-ended text generation would be beneficial. Are there similar metrics in the literature? How does the proposed metric offer advantages or address limitations of these existing metrics?
+
+4)	The paper acknowledges the potential of the proposed method for other tasks involving LLM interaction. However, providing concrete examples of such tasks and discussing how the framework could be adapted would strengthen the claims of broader impact and significance. What specific adaptations or modifications would be needed to apply the method to other tasks?
+
+5)	Regarding the Area Chair: 
+Why do you think the removal of the area chair agent has a more pronounced impact on feasibility compared to novelty?
+Do you have any insight on the specific cues or signals the Area Chair agent might be looking for to determine whether significant improvements have been made ? 
+Have you considered examining how the agent's judgment aligns with human assessments of improvement?
+
+### Soundness
+3
+
+### Presentation
+3
+
+### Contribution
+3
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4
+
+### Summary
+The paper introduces zero-shot in-context adversarial learning for Large Language Models (LLMs) to enhance research ideation by integrating adversarial learning techniques inspired by GANs. Through a system of multi-agent LLM interactions—including a proposer, reviewer, and area chair—the framework iteratively refines research ideas along novelty and feasibility dimensions. It uses a novel relative quality ranking metric to approximate human evaluations, offering scalable assessment of idea generation quality. The study shows substantial improvements, with a 21% boost in novelty and a 322% increase in feasibility for ideas generated by GPT-4, highlighting the potential of adversarial learning to enhance creativity and practical relevance in research ideation.
+
+### Strengths
+**Originality** 
+The paper adapts adversarial learning to zero-shot, in-context applications for LLM-driven research ideation. Using a multi-agent system modeled on academic peer review (proposer, reviewer, area chair), it effectively promotes iterative refinement in idea generation, filling a gap in the field with a conceptually novel approach.
+
+**Quality** 
+The work is empirically solid, with extensive experimentation on a biomedical dataset. The model demonstrates clear performance gains in novelty and feasibility over strong baselines, with ablation studies and convergence analyses and potential for real-world application.
+
+**Clarity** 
+The paper is well-organized, clearly explaining the framework, agent roles, and evaluation metrics.
+
+**Significance**
+The framework has potential for advancing automated scientific ideation, making research ideation more scalable and accessible. Its relative ranking metric could potentially generalize to other applications.
+
+
+**Summary**
+This paper is a valuable contribution in LLM-driven research and ideation.
+
+### Weaknesses
+The relative quality ranking metric would benefit from validation through a small-scale human study or comparisons with established evaluation metrics. This would improve confidence in the metric as a reliable proxy for human assessment, particularly for its scalability and alignment with human judgment.
+
+Expanding experiments to other domains could demonstrate the framework’s adaptability beyond biomedical research, supporting its broader applicability claims.
+
+Discussing practical deployment considerations for the multi-agent system, such as computational overhead.
+
+### Questions
+How reliable is the relative quality ranking metric as a proxy for human judgment in assessing novelty and feasibility? Has the metric been validated against human evaluations or other established metrics in a controlled way? Including these details or insights would strengthen confidence in the metric's robustness.
+
+### Soundness
+3
+
+### Presentation
+3
+
+### Contribution
+2

@@ -1,0 +1,323 @@
+\title{Towards Understanding Why Label Smoothing Degrades Selective Classification and How to Fix It}
+
+\begin{abstract}
+    Label smoothing (LS) is a popular regularisation method for training neural networks as it is effective in improving test accuracy and is simple to implement. ``Hard'' one-hot labels are ``smoothed'' by uniformly distributing probability mass to other classes, reducing overfitting. 
+    Prior work has suggested that in some cases \textit{LS can degrade selective classification (SC)} -- where the aim is to reject misclassifications using a model's uncertainty. In this work, we first demonstrate empirically across an extended range of large-scale tasks and architectures that LS \textit{consistently} degrades SC. 
+    We then address a gap in existing knowledge, providing an \textit{explanation} for this behaviour by analysing logit-level gradients: LS degrades the uncertainty rank ordering of correct vs incorrect predictions by regularising the max logit \textit{more} when a prediction is likely to be correct, and \textit{less} when it is likely to be wrong.
+    This elucidates previously reported experimental results where strong classifiers underperform in SC.
+    We then demonstrate the empirical effectiveness of post-hoc \textit{logit normalisation} for recovering lost SC performance caused by LS. Furthermore, linking back to our gradient analysis, we again provide an explanation for why such normalisation is effective.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Label smoothing (LS) \citep{inception} is a common regularisation technique used to improve classification accuracy in deep learning. The one-hot labels used for cross entropy (CE) are linearly combined with a uniform distribution over classes, redistributing the probability mass and ``smoothing'' the ``hard'' targets, discouraging overfitting. Due to its simplicity and empirical effectiveness, label smoothing features in many recent training recipes \citep{transformer,mnasnet,bag,deit,liu2021Swin,liu2021swinv2,Liu_2022_convnext,efficientnet,efficientnetv2}, being particularly popular on the ImageNet-1k \citep{Russakovsky2015ImageNetLS} image classification benchmark.
+
+Within the domain of uncertainty estimation, LS is well explored in the context of model calibration \citep{ls_help,empreg,focal,devil_margin}, where the aim is to align a model's output probabilities with its empirical accuracy. The pairing is intuitive as LS encourages models to output lower probabilities, and models are typically more confident than they are accurate \citep{pmlr-v70-guo17a}. %
+On the other hand, there is very little research investigating the effects of LS in the context of \emph{Selective Classification}. 
+Selective Classification (SC) \citep{hendrycks17baseline,Geifman2017SelectiveCF,Xia_2022_ACCV,failure_detection} is a problem setting where, in addition to the primary classification task, a binary rejection decision is made based on the uncertainty estimated by the model, \ie \textit{reject/abstain if uncertain}. The aim is to reduce the number of failures served by the classifier by pre-emptively rejecting potential misclassifications. It is well motivated by applications where safety and reliability are important due to the high cost of failure. For example, when uncertain, an autonomous driving system may require driver assistance ~\citep{kendalunc}, a medical diagnosis system may defer to a doctor~\citep{medunc,med_unc_rev}, or a visual aid system for the visually impaired may abstain from answering a query \citep{SC_VQA}.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=.87\linewidth]{figure_8.pdf}
+    
+\resizebox{.9\linewidth}{!}{
+\begin{tabular}{l|r|rrr|r}
+\toprule
+ResNet-50 ImageNet MSP  & CE &  LS $\alpha=0.1$ &  LS $\alpha=0.2$ &  LS $\alpha=0.3$ &  LS $\alpha=0.2$ -- logit norm \\
+\midrule
+\%coverage@risk=1\%$\uparrow$ & 17.69 &              \textcolor{red}{0.2} &             \textcolor{red}{0.53} &             \textcolor{red}{0.49} &                          21.9 \\
+\bottomrule
+\end{tabular}
+}
+    \caption{\textbf{Top}: LS causes overconfidence for semantic segmentation. The LS-trained model predicts much lower (ranked) uncertainty on incorrect \xmark~segmentations than CE. In particular, \textbf{for the erroneous region on the left where the model has predicted parts of the ``sidewalk'' as ``road'', the LS model is highly overconfident}. This could have dire consequences in a safety-critical application such as autonomous driving. \textbf{Bottom}: LS leads to close to 0\% of samples being accepted (coverage) when a strict tolerance of 1\% error on accepted samples (risk) is imposed on ImageNet. Deployment-time logit normalisation effectively negates the degradation caused by LS.}
+    \label{fig:semseg_overconf}
+\end{figure}
+
+Recently \citet{rethinkconf,revisitconf} empirically observe that LS can lead to worse SC for convolutional neural networks (CNNs) performing image classification, \textit{yet it is not clear why this occurs}.
+Concurrently, large-scale empirical evaluations of open-source pre-trained models have shown that many strong classifiers have surprisingly poor SC ability \citep{galil2023what,Cattelan2023ImprovingSC}. \citet{Cattelan2023ImprovingSC} additionally present deployment-time logit normalisation as a sometimes-effective approach to improving SC, \textit{but the reason for its effectiveness remains unclear}. 
+In this work, we aim to empirically validate and analytically demystify the effect of LS on SC, tying together and filling in the gaps in knowledge of previous work with the following \textbf{key contributions}:
+\begin{enumerate}[left=0pt]
+    \item We show empirically, across a range of large-scale architectures (CNN,ViT) and tasks (image classification, semantic segmentation), that \textit{training with LS consistently leads to degraded SC performance} (see \cref{fig:semseg_overconf}), even if it may improve accuracy. Moreover, we show that the degradation worsens with stronger LS. 
+    As LS can be found in the training recipes of many of the models evaluated in~\citep{galil2023what, Cattelan2023ImprovingSC}, this suggests LS as one potential cause for previously unexplained negative results where strong classifiers underperform at SC. 
+    \item We address a gap in the understanding of LS by providing an explanation of this behaviour through analysing the logit-level gradients of the LS loss. We show that the amount LS regularises/suppresses the max logit directly corresponds to the true probability of error $P_\text{error}$, with regularisation \textit{increasing(decreasing)} the more likely a prediction is correct(wrong). This leads to relatively \textit{higher} uncertainty on correct predictions and \textit{lower} uncertainty on misclassifications, degrading the ranking of uncertainties and hurting SC compared to vanilla CE.
+    \item We show that post-hoc \textit{logit normalisation} \citep{Cattelan2023ImprovingSC} is effective in negating the degradation from LS (\cref{fig:semseg_overconf}). Moreover, we elucidate this effectiveness through the lens of our gradient-based analysis. Linking back to the imbalanced logit regularisation of LS, we find that logit normalisation compensates for this effect by increasing uncertainty as the max logit increases.
+\end{enumerate}
+
+
+\section{Preliminaries}
+
+Consider a $K$-class neural network classifier with parameters $\b \theta$ that models the conditional distribution $P(y|\b x;\b \theta)$ of labels $y\in\mathcal{Y}=\{\omega_k\}_{k=1}^K$ given inputs $\b x\in \mathcal{X}=\mathbb{R}^D$. Typically the network has a categorical softmax output $\b \pi(\b x;\b \theta) \in [0,1]^K$,
+\begin{equation}\label{eq:softmax}
+     P(\omega_k|\b x;\b \theta) = \pi_k(\b x;\b \theta) = \exp v_k(\b x)/\sum\nolimits_{i=1}^K \exp v_i(\b x)~, \quad \b v = \b W \b z + \b b~,
+\end{equation}
+where $\b v  \in \mathbb R^K$ are the logits output by the final layer with weight matrix $\b W \in \mathbb R^{K\times L}$, bias $\b b \in  \mathbb R^K$, and pre-logit features $\b z \in \mathbb R^L$ as inputs. 
+The neural network is trained by minimising the cross entropy (CE) loss on a finite dataset $\mathcal{D}_\text{tr}=\{ x^{(n)},y^{(n)}\}_{n=1}^N$ drawn from distribution $p_\text{data}(\b x, y)$, such that it approximately learns the true conditional $P_\text{data}(y|\b x)$,
+\begin{align}\label{eq:ce_approx}
+    \m L_\text{CE}(\b \theta) &= -\frac{1}{N}\sum\nolimits_{n}\sum\nolimits_{k} \delta_{y^{(n)} \omega_k}\log P(\omega_k|\b x^{(n)};\b \theta) \\ 
+    &\approx -\mathbb E_{p_\text{data}(\b x)}\biggl[\sum\nolimits_{k} P_\text{data}(\omega_k|\b x)\log P(\omega_k|\b x;\b \theta)\biggr] \\\label{eq:ce_true}&= \mathbb{E}_{p_\text{data}(\b x)}\left[\text{KL}\left[\bar{\b \pi}(\b x)||\b \pi(\b x;\b \theta)\right]\right] + \text{const.}~ =\m L_\text{CE}^\text{true}(\b \theta)~,  
+\end{align}
+where $\delta$ is the Kronecker delta and KL$[\cdot||\cdot]$ is the Kullback–Leibler divergence. We use $\bar{\b \pi}(\b x) \in [0,1]^K$ as a shorthand for the true conditional categorical, \ie $\bar\pi_k = P_\text{data}(\omega_k|\b x)$. Predictions $\hat y$ are then made on new unlabelled input data $\b x^*$ using classifier function $f$ during deployment,
+\begin{equation}\label{eq:classifier}
+    \hat y = f(\b x^*;\b \theta) = \argmax\nolimits_\omega P(\omega|\b x^*;\b \theta)~.
+\end{equation}
+We also define the probability of the classifier making an error on a given sample as $P_\text{error} = 1 - \bar{\pi}_{\hat y}~$, where in a slight abuse of notation $\bar{\pi}_{\hat y}$ is the true probability of the predicted class $P_\text{data}(\hat{y}|\b x)$.
+\subsection{Label smoothing (LS)}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=.49\linewidth]{illustrate_ls.pdf}
+    \includegraphics[width=0.49\linewidth]{illustrative_sc.pdf}
+    \caption{\textbf{Left}: illustration of how \textbf{label smoothing} (LS) alters a training label. %
+    LS reduces \textcolor{sup}{data supervision} and adds \textcolor{reg}{regularisation}, potentially improving generalisation by reducing overfitting. \textbf{Right}: illustration of \textbf{selective classification} (SC). Uncertain samples ($U>\tau$) are rejected/detected, to reduce the number of errors \colwrong~served by the system. Rejected samples can be discarded or processed separately (\eg deferred to a human expert). We wish to better separate/rank \colright~vs \colwrong~via $U$.}
+    \label{fig:prelims}
+\end{figure}
+Label smoothing involves mixing the original one-hot labels ($\delta$ in \cref{eq:ce_approx}) with a uniform categorical distribution $\b u = 1/K \cdot \b 1$ using hyperparameter $\alpha \in [0,1]$ (see \cref{fig:prelims}). The LS loss is thus
+\begin{align}\label{eq:ls_approx}
+    \m L_\text{LS}(\b \theta;\alpha) &= -\frac{1}{N}\sum\nolimits_{n}\sum\nolimits_{k} \left[(1-\alpha)\delta_{y^{(n)} \omega_k}+\alpha \frac{1}{K}\right]\log P(\omega_k|\b x^{(n)};\b \theta) \\ 
+    &=(1-\alpha)\m L_\text{CE}(\b \theta) + \alpha\frac{1}{N}\sum\nolimits_n \left[\text{KL}\left[\b u||\b \pi(\b x^{(n)};\b \theta)\right]\right] + \text{const.}~  \\\label{eq:ls_true}
+    &\approx \mathbb{E}_{p_\text{data}(\b x)}\Bigl[\text{KL}\Bigl[\underbrace{(1-\alpha)\bar{\b \pi}(\b x)}_\text{\textcolor{sup}{data supervision}}\,\,+\!\!\!\!\underbrace{\alpha \b u}_\text{\textcolor{reg}{regularisation}}\!\!\!\!||\b \pi(\b x;\b \theta)\Bigr]\Bigr] + \text{const.}=\m L_\text{LS}^\text{true}(\b \theta;\alpha)~,
+\end{align}
+where we see that it can also be viewed as \textit{reduced} 
+CE \textcolor{sup}{supervision} from the data combined with a \textcolor{reg}{regularisation} term encouraging the softmax $\b \pi$ to be uniform and preventing it from overfitting to the training data (\cref{fig:prelims}). \cref{eq:ls_true} also shows that LS can be seen as learning to predict a ``softened'' version of the true conditional $(1-\alpha)\bar{\b \pi}(\b x) + \alpha\b u$, encouraging a model to be less confident on \textit{all} samples.
+
+\subsection{Selective classification (SC)}\label{sec:prob_rej}
+A simple downstream task for estimates of predictive uncertainty is to reject (or detect) predictions that may incur a high cost \citep{Xia_2022_ACCV,failure_detection}, using a \textit{binary rejection function},
+\begin{equation}\label{eq:rej}
+    g(\b x;\tau) = \begin{cases}
+    0\text{ (reject prediction)}, &\text{if }U(\b x) > \tau \text{ (uncertain)}\\
+    1\text{ (accept prediction)}, &\text{if }U(\b x) \leq \tau \text{ (confident)}~,
+    \end{cases}
+\end{equation}
+where $U(\b x)$ is a scalar measure of predictive uncertainty extracted from the prediction model and $\tau$ is a user-set operating threshold. Intuitively, we reject if the model is uncertain, preventing the system from serving failures, which may then be processed separately. We are only concerned with the \textit{relative rankings} of $U$s rather than absolute values - we want to be \textit{more uncertain} on failures. 
+In the case where the prediction task is \textit{classification} and we wish to reject potential misclassifications (\xmark), %
+we can use a \textit{selective classifier} \citep{chows,ElYaniv2010OnTF} $(f,g)$, which is simply the combination of a classifier $f$ (\cref{eq:classifier}) and the aforementioned binary rejection function $g$ (\cref{eq:rej}). \cref{fig:prelims} contains an illustration. To evaluate a selective classifier, we use the 0/1 classification error,
+\begin{equation}\label{eq:loss}
+    \m L_\text{SC}(f(\b x),y) = \begin{cases}
+    0, &\text{if } f(\b x) = y \quad \text{(correct \colright)}\\
+    1, &\text{if } f(\b x) \neq y\quad \text{(misclassified \colwrong)}~,
+    \end{cases}
+\end{equation}
+to define the \textit{selective risk} \citep{ElYaniv2010OnTF,Geifman2017SelectiveCF} as 
+\begin{equation}\label{eq:risk}
+    \text{Risk}(f,g;\tau) = \frac{\mathbb E_{p_\text{data}(\b x, y)}[g(\b x;\tau)\m L_\text{SC}(f(\b x), y)]}{\mathbb E_{p_\text{data}(\b x, y)}[g(\b x;\tau)]}~,
+\end{equation}
+which is the average error on the \textit{accepted} samples. The denominator of \cref{eq:risk} is the proportion of samples accepted, or the \textit{coverage}, $\text{Cov} = \mathbb E_{p_\text{data}(\b x)}[g(\b x;\tau)]$. Our objective is to minimise risk for a given coverage (lower \%error on accepted samples) and/or maximise coverage for a given risk (accept more samples). Note this can be achieved both through improving $f$ (fewer errors) and through improving $g$ (better rejection). SC performance is evaluated via the Risk-Coverage (RC) curve \citep{Geifman2017SelectiveCF} (see \cref{fig:sc_res} for examples). The area under the curve (AURC$\downarrow$) provides an aggregate metric over $\tau$,\footnote{We note that there are a number of alternative aggregate metrics to AURC \citep{geifman2018biasreduced,Cattelan2023ImprovingSC,augrc}. We choose to omit them, as we focus on non-aggregated results in this work.} whilst the curve can also be inspected at specific operating points \citep{SC_VQA, Xia_2023_ICCV}, \eg coverage at 5\% risk (Cov@5$\uparrow$). For deployment, $\tau$ can be set using a held-out validation dataset by finding a suitable operating point on the RC curve according to an external requirement \eg risk$=$1\% if tolerance for failure is low.
+\begin{equation}
+    U(\b x) = -\text{MSP}(\b x)  = -\pi_\text{max}= -\max\nolimits_k \pi_k(\b x;\b\theta) = - P(\hat y|\b x; \b \theta)~,
+\end{equation}
+\ie the (negative of the) Maximum Softmax Probability (MSP) \citep{hendrycks17baseline} is the model's estimate of the probability of its prediction $\hat y$. We focus on this uncertainty measure $U$ for SC as it is a popular default choice and has been shown to consistently and reliably perform well in the literature \citep{Xia_2022_ACCV, Xia_2023_ICCV, failure_detection, feng2023towards} compared to alternatives. MSP is a natural choice as $P(y|\b x; \b \theta)$ models $P_\text{data}(y|\b x)$, and $U=-\max_k P_\text{data}(\omega_k|\b x)$ (or any scalar monotonic to it) provides the \textit{optimal} risk if the true distribution $P_\text{data}(y|\b x)$ is known \citep{chows}.
+We omit evaluations on other softmax-based $U$ from the main paper as we find them to behave similarly to MSP. In line with previous work \citep{Xia_2022_ACCV, failure_detection,revisitconf}, we find that OOD detection \citep{yang2021oodsurvey} scores perform poorly at SC, and also omit them (see \cref{app:other_scores} for discussion and additional results).
+
+\textbf{Over/Underconfidence.} 
+Since we are only concerned about the \textit{relative ranking} of $U$, we loosely refer to \textit{overconfidence} as when a model's estimate of uncertainty for a given sample is (relatively) low when $P_\text{error}$ high, as we want a model to be uncertain when it is likely to be wrong. \textit{Underconfidence} is then the inverse. Both will result in worse SC: overconfidence leads to errors being accepted, underconfidence to correct predictions being rejected.
+Intuitively, over/underconfidence may arise from poorness of fit, 
+where $\b\pi(\b x;\b\theta)$ fails to accurately model the true conditional distribution  $\bar{\b \pi}(\b x)$ (\cref{fig:ls_grad}). 
+
+This is \textit{different} to the definition used in model calibration \citep{pmlr-v70-guo17a}, which, notably, is concerned with marginal 
+properties (averaged over the input distribution) 
+rather than per-sample properties, as well as absolute probabilities rather than relative rankings. It is possible to be highly over/underconfident in calibration but optimal for SC and vice versa \citep{revisitconf}, \eg applying the monotonic transformation $U=-\max_k [P_\text{data}(\omega_k|\b x)]^{1000}$.
+We note that model calibration is an independent task to SC \citep{failure_detection}, 
+is well explored in the context of LS \citep{ls_help}, 
+and is not the focus of this work. LS may improve calibration by increasing the uncertainty of \textit{both} correct \cmark~\textit{and} incorrect \xmark~predictions, however, this will not necessarily help SC \citep{revisitconf}.
+
+
+
+\section{The effect of label smoothing on selective classification}
+
+\citet{rethinkconf,revisitconf} observe empirically (as part of a broader investigation) that for a single value of $\alpha$ LS degrades SC for CNN-based image classification. In this section we aim to validate this behaviour on a wider range of large-scale tasks and architectures. We find that \textbf{LS leads to consistent degradation in SC}, with stronger LS leading to greater degradation. We suggest that it may partially explain the findings of recent large-scale empirical evaluations of open-source pre-trained models \citep{galil2023what,Cattelan2023ImprovingSC} where strong classifiers surprisingly \textit{underperform on SC}.
+
+\textbf{Experimental details.}
+We investigate large-scale\footnote{We additionally provide $32\times32$ small-scale CIFAR experiments in \cref{app:cifar}.} image classification on ImageNet-1k~\citep{Russakovsky2015ImageNetLS} and semantic segmentation (%
+pixel-level classification) on Cityscapes~\citep{cityscapes}. For ImageNet, we evaluate on the original validation set %
+and randomly split 50,000 images from the training set for validation. For Cityscapes, we randomly split the original validation set into 100 validation and 400 evaluation images. To estimate the risk, we extract the model output prior to the final interpolation and subsample 5000 labelled pixels per image at random. We evaluate on the same pixels between models.
+The only parameter varied between training runs is the level of LS $\alpha$, and to isolate the effects of LS, we train all models from scratch using simple recipes. We purposely avoid augmentations such as MixUp \citep{zhang2018mixup} and CutMix \citep{cutmix} as these directly affect the training labels, which would interfere with our experiments.  For ImageNet classification, we train ResNet-50 \citep{He2016DeepRL} and ViT-S-16 \citep{dosovitskiy2020vit} using only random resized cropping and flipping for data augmentation. To achieve decent accuracy for ViT training from scratch without advanced augmentations, we use sharpness-aware minimisation (SAM)~\citep{foret2021sharpnessaware, samvit}.  For semantic segmentation on Cityscapes, we train %
+DeepLabV3+ \citep{deeplabv3plus} 
+(ResNet-101 backbone) using only random cropping, flipping and colour jitter for augmentations.
+Full training details for reproducibility can be found in the \cref{app:reprod}. We will release our code in the future.
+\subsection{Label smoothing degrades selective classification}
+\begin{figure}[]
+    \centering
+    \includegraphics[width=\linewidth]{resnet_rc_curve_diff.pdf}
+    
+    \includegraphics[width=\linewidth]{vit_rc_curve_diff.pdf}
+    
+    \includegraphics[width=\linewidth]{deeplab_rc_curve_diff.pdf}
+    \caption{Risk-coverage plots for different levels of LS $\alpha$ for different models and tasks (ImageNet classification and Cityscapes semantic segmentation).
+    Although LS may improve error rate at 100\% coverage, \textbf{increasing $\alpha$ increasingly and consistently degrades SC performance.}}
+    \label{fig:sc_res}
+\end{figure}
+
+To examine the effects of LS on SC, we plot RC curves in \cref{fig:sc_res}. We use $U=-\text{MSP}$ and vary only the LS level $\alpha$ between training runs. We see that \textbf{training with LS leads to a noticeable degradation for selective classification}, with higher $\alpha$ worsening the effect. 
+We provide illustrative examples of LS overconfidence on ImageNet in \cref{fig:overconf_ex}. Although LS leads to slightly better risk at higher coverage, it quickly becomes worse than CE as coverage is reduced. The degradation is especially evident for the low-risk regime, which is relevant to \textit{safety-critical} scenarios where tolerances for error are strict. For example, if the target is to achieve only 1\% error/risk on ImageNet, then \textit{all} of our LS models have close to zero coverage, rendering them effectively useless (\cref{fig:semseg_overconf,fig:sc_res}). 
+To further highlight the overconfidence caused by LS, we visualise the uncertainty ranking of incorrect pixels for the segmentation of a Cityscapes scene in \cref{fig:semseg_overconf}. The LS-trained model is extremely confident for an erroneous region where it has predicted the ``sidewalk'' as ``road''. Whilst the CE model has made the same error, it is much more uncertain. This illustrates potential danger in an autonomous driving scenario if the vehicle is making decisions based on uncertainty estimates.
+
+Upon inspection, many of the SC-underperforming models benchmarked in \citep{galil2023what,Cattelan2023ImprovingSC} are trained using LS,
+ aligning with our results.
+The models are sourced from repositories such as \texttt{torchvision} \citep{torch} and \texttt{timm} \citep{rw2019timm}, where the training recipes are optimised for top-1 accuracy. %\footnote{This blog post is a good example {\sfdefault\url{ https://pytorch.org/blog/how-to-train-state-of-the-art-models-using-torchvision-latest-primitives/}}.}
+We note that for ImageNet, LS is such a common technique that it is often used \textit{by default}, and not even mentioned in papers, \eg \citep{efficientnet,efficientnetv2}.
+Overall, our results highlight that \textbf{only optimising for accuracy may result in negative downstream consequences} and that practitioners of SC need to be aware of the effects of their training recipes. We include additional discussion of existing benchmarks and model checkpoints in \cref{app:bench}.
+
+
+
+\section{Towards explaining the negative effect of LS on SC}
+
+In the following section, we attempt to delve deeper into \textit{why} our empirical results (and those in \citep{revisitconf}) occur, shedding light on a previously unexplained phenomenon. It might intuitively seem odd that LS degrades SC performance as the transform applied to the true targets in \cref{eq:ls_true} $(1-\alpha)\bar{\b \pi}(\b x)+\alpha\b u$ reduces the max probability for all samples but does not change the \textit{relative ranking}. However, this only carries over to the model when it is knowledgeable about the data, so it is well fit $\b \pi(\b x;\b \theta)\approx(1-\alpha)\bar{\b \pi}(\b x)+\alpha\b u$. For such samples, the model has \textit{learnt to be more uncertain}. However, we cannot assume that 
+the model is equally well fit on \textit{all} regions of the data distribution.\footnote{For the sake of simplicity we avoid the term epistemic uncertainty (see \cref{app:unc_decomp} for brief discussion).}  
+
+Through analysing the logit gradients, we provide a potential explanation: LS suppresses the max logit differently depending on how well fit the model is to a given sample -- suppression is stronger(weaker) the more likely a model is correct(wrong), harming the model's ability to separate \cmark~vs \xmark. 
+\subsection{Comparing logit gradients between CE and LS}\label{sec:grad_ls}
+To better understand how LS could lead to degraded SC, we consider how LS affects logit-level \textit{training gradients}. These are the first term in the chain rule for backpropagation and so directly contribute to all parameter gradients during training. 
+We take the gradient of $\m L^\text{true}$ (\cref{eq:ce_true,eq:ls_true}),\footnote{Here we assume that the empirical loss $\m L$ (\cref{eq:ce_approx,eq:ls_approx})  approximates $\m L^\text{true}$, in order to relate our discussion to $P_\text{error}$. However, the same analysis on the empirical loss leads to similar conclusions (see \cref{app:emp_anal}).}
+\begin{equation}\label{eq:logit_grads}
+         \frac{\partial \mathcal{L}_\text{CE}^\text{true}}{\partial v_k} = -\left[\bar{\pi}_k\!\!-\pi_k\right], \quad  \frac{\partial \mathcal{L}_\text{LS}^\text{true}}{\partial v_k} = -\biggl[\Bigl[\,\underbrace{(1-\alpha)\bar{\pi}_k}_\text{\textcolor{sup}{data supervision}} + \!\!\!\!\underbrace{\alpha/K}_\text{\textcolor{reg}{regularisation}}\!\!\!\!\Bigr] \!- \pi_k\biggr],
+\end{equation}
+for a single sample, where in a slight abuse of notation
+we omit the outer expectation over $p_\text{data}(\b x)$ for convenience. 
+We can then define the \textbf{\textcolor{reg}{regularisation} gradient} on the logits,
+\begin{equation}\label{eq:reg_grad}
+       \frac{\partial \mathcal{L}^\text{true}_\text{reg}}{\partial v_k} = \frac{\partial (\mathcal{L}_\text{LS}^\text{true}-\mathcal{L}_\text{CE}^\text{true})}{\partial v_k} = \frac{\mathcal{L}_\text{LS}^\text{true}}{\partial v_k}-\frac{\mathcal{L}_\text{CE}^\text{true}}{\partial v_k}= \alpha \left[\bar{\pi}_k-1/K\right]=\alpha \bar{\pi}_k-\alpha/K~,
+\end{equation}
+which is the \textit{difference} between the LS and CE gradients. This represents how LS influences training at the logit level in comparison to CE. Notably, it \textit{only depends on the target} $\bar{\b\pi}$. %
+Gradient descent involves updating weights in the \textit{opposite} direction to the gradient. Hence $\alpha\bar{\pi}_k$ suppresses $v_k$ when the true probability $\bar{\pi}_k$ is higher. The second term $-\alpha/K$ uniformly increases the logits for all samples, which does not affect the softmax as it is invariant to uniform logit shifts $\b\pi(\b v) = \b\pi(\b v + \eta\b 1)$, $\eta\in\mathbb R$.
+\subsection{Imbalanced regularisation degrades uncertainty ranking of \colright~vs \colwrong}\label{sec:ls_sc_exp}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{illustrate_label_smoothing_grad_overconfidence.pdf}
+    \caption{How the \textcolor{reg}{regularisation} gradient (\cref{eq:reg_grad}), which is the \textit{difference} between LS and CE gradients, affects the logits differently. \textbf{LS affects the max logit differently depending on how well fit the model is for a given sample $\b x$.} On the left when $U$ is lower (sharper softmax), the regularisation on the max logit is \textit{lower} when the model is poorly fit and likely to be wrong. On the right when $U$ is higher (flatter softmax), the regularisation is \textit{higher} when the model is poorly fit and more likely to be correct. 
+    Thus, \textbf{LS degrades the softmax's ability to separate \colright~vs \colwrong~, hurting SC}.}
+    \label{fig:ls_grad}
+\end{figure}
+
+We now consider how the regularisation gradient affects the maximum logit $v_\text{max}$,
+\begin{equation}\label{eq:vmax_reg}
+    \frac{\partial \mathcal{L}^\text{true}_\text{reg}}{\partial v_\text{max}} = \alpha \bar{\pi}_{\hat y}-\alpha/K = \alpha [1-P_\text{error}] -\alpha/K,
+\end{equation}
+which shows that \textit{the regularisation on $v_\text{max}$ decreases as the probability of error increases}. This %
+directly impacts softmax-based $U$ such as MSP (see \cref{eq:softmax}), especially for lower uncertainties where $v_\text{max}$ dominates the softmax. \cref{eq:vmax_reg} suggests that for predictions that share the same value of $U$, those with higher $P_\text{error}$ (more likely \xmark), will have $v_\text{max}$ regularised \textit{less}, whilst predictions with lower $P_\text{error}$ (more likely \cmark) will have $v_\text{max}$ regularised \textit{more}. Thus, softmax-based $U$ will have the \textit{relative ranking} of correct~\cmark~and incorrect \xmark~predictions degraded -- less uncertain on \xmark~, more uncertain on \cmark.
+To further build an intuition, we consider how a model may not be uniformly well-fit over the data distribution during training. As illustrated in \cref{fig:ls_grad}, varying levels of fit with regards to the true distribution $\bar{\pi}$ leads to differing $P_\text{error}$ for predictions with similar $U$, resulting in the degradation described above. 
+Finally, as the regularisation gradient in \cref{eq:vmax_reg} is proportional to $\alpha$, this explains why stronger LS leads to greater degradation.
+\textbf{In summary: for a given predicted $U$ the $P_\text{error}$ will vary depending on how well fit the model is. LS suppresses the max logit \textit{more(less)} when $P_\text{error}$ is \textit{lower(higher)}, degrading the ranking of \colright~vs \colwrong~for softmax-based $U$, hurting SC.} 
+We note that although our analysis is performed on \textit{training} gradients, all our experiments are performed on \textit{evaluation} data, suggesting that effects indeed generalise to unseen data. We also note that our explanation is purely based on the loss, and thus generalises across network architectures and tasks, matching the empirical results in \cref{sec:ls_sc}.
+
+\textbf{LS empirically leads to higher $v_\text{max}$ on misclassifications \colwrong.}
+To further validate the effects of \cref{eq:vmax_reg}, we plot the mean$\pm$std. of $v_\text{max}$ \textit{given} $\pi_\text{max}$ for ResNet-50 on evaluation data in \cref{fig:cond_max_logit}. We see that for LS the distribution of correct \cmark~ is \textit{below} incorrect \xmark, whilst for CE they are roughly similar. This provides further empirical support for \cref{eq:vmax_reg} which states that when using LS, $v_\text{max}$ is more strongly suppressed for lower $P_\text{error}$. For results on other models see \cref{app:results_others}.
+
+\textbf{LS empirically leads to increasing overconfidence on less-well-fit data.}
+To further investigate how LS affects uncertainty differently depending on how well-fit/knowledgeable the model is about data, we artificially introduce distribution-shifted data that we expect our models to be worse fit on. We use ImageNet-Sketch \citep{imagenet-sketch}, a dataset containing sketches of each ImageNet class and evaluate on the \textit{combination} of the 50,889 ImageNet-Sketch and 50,000 ImageNet evaluation images in \cref{fig:mixed_tab}.
+Even though the regularisation of LS improves the error rate, the degradation of SC at lower coverages from LS is exacerbated by the distribution-shifted data. At 10\% coverage of the combined evaluation set, LS leads to accepting many more errors compared to CE, with an increasing proportion originating from ImageNet-Sketch. That is to say, LS leads to increasing overconfidence on less-well-fit data (ImageNet-Sketch). This empirically highlights the situation illustrated on the \textit{left} of \cref{fig:ls_grad} where confident and well-fit samples have their max logit suppressed, whilst confident but poorly fit samples do not, leading to samples with higher $P_\text{error}$ being relatively less uncertain (overconfident).
+For results on other models see \cref{app:results_others}.
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{msp_max_logit_various.pdf}
+    \caption{Distribution of the max logit $v_\text{max}$ \textit{given} the MSP $\pi_\text{max}$ for correct \colright~and incorrect \colwrong~predictions on evaluation data. $v_\text{max}$ is \textit{lower} for \colright~for the LS model, whilst the distributions are roughly similar for CE. \textbf{This empirically matches the imbalanced max logit regularisation described in \cref{eq:vmax_reg}}. We calculate the mean$\pm$std. in a 0.05-wide sliding window.}
+    \label{fig:cond_max_logit}
+\end{figure}
+
+\begin{figure}
+    \centering
+    
+ \centering
+    \begin{minipage}{0.62\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{mixed_resnet_rc_curve_small.pdf} %
+     
+    \end{minipage}\hfill
+    \begin{minipage}{0.34\textwidth}
+        \centering
+\resizebox{\textwidth}{!}{
+\begin{tabular}{p{1.7cm}p{1.5cm}p{1.5cm}p{1cm}}
+\toprule
+&  \multicolumn{3}{c}{@10\% coverage of ImageNet + Sketch}\\
+\cmidrule(lr){2-4}
+                &            & ImageNet & Sketch \\
+\midrule
+\multirow{3}{*}{CE} & \#samples &     8994 &   1094 \\
+                & \#errors &       93 &     80 \\
+                & error rate &      1.0 &    7.3 \\
+\cline{1-4}
+\multirow{3}{*}{LS $\alpha=0.1$} & \#samples &     8561 &   1527 \\
+                & \#errors &      187 &    211 \\
+                & error rate &      2.2 &   13.8 \\
+\cline{1-4}
+\multirow{3}{*}{LS $\alpha=0.2$} & \#samples &     8171 &   1917 \\
+                & \#errors &      244 &    365 \\
+                & error rate &      3.0 &   19.0 \\
+\cline{1-4}
+\multirow{3}{*}{LS  $\alpha=0.3$} & \#samples &     7915 &   2173 \\
+                 & \#errors &      297 &    541 \\
+                 & error rate &      3.8 &   24.9 \\
+\bottomrule
+\end{tabular}
+}
+    \end{minipage}
+\caption{\textbf{Left}: Evaluation on the combination of ImageNet + ImageNet-sketch. We see that for low-uncertainty predictions, the degradation caused by LS is exacerbated when distribution shift is artificially introduced (vs \cref{fig:sc_res}). \textbf{Right}: statistics @10\% coverage of the combined evaluation set. As the level of LS $\alpha$ increases, the number of accepted errors increases, \textit{especially from ImageNet-Sketch}. This shows that \textbf{LS leads to increasing overconfidence on less-well-fit data}.}
+    \label{fig:mixed_tab}
+\end{figure}
+
+
+
+\section{Logit normalisation improves the SC of LS-trained models}
+
+Ideally, we would like to find a way to recover from the degradation caused by LS. A recent empirical study by \citet{Cattelan2023ImprovingSC} has shown that \textit{logit normalisation} can improve the SC performance of many (but not all) pre-trained models. During deployment the logits are normalised by their $p$-norm and then the MSP score $\pi_\text{max}$ is replaced by %
+the normalised max logit,
+\begin{equation}\label{eq:logitnorm}
+     U = -v'_\text{max}=-\max\nolimits_k v'_k, \quad \b v' = \b v/\norm{\b v}_p = \b v\big/\bigl(\sum\nolimits_k |v_k|^p\bigr)^{\frac{1}{p}}~,
+\end{equation}
+where $p$ is found via AURC$\downarrow$ grid search on a validation set.\footnote{\citet{Cattelan2023ImprovingSC} additionally centralise the logits by subtracting the per-sample mean, however, we find this step to be unnecessary for our models so we omit it for simplicity (see \cref{app:exp_ln}).} We investigate the efficacy of this approach, applying it to our LS-trained models. \cref{fig:logitnorm,fig:others_normed} show the SC performance with and without logit normalisation, and we indeed find that \textbf{applying logit normalisation greatly improves SC performance for models trained using LS}, allowing for improved error rate (@100\% coverage) with good SC. This is further visualised for semantic segmentation in \cref{fig:seg_norm}, where logit normalisation successfully mitigates the overconfidence caused by LS. However, we also find that logit normalisation does not notably improve the SC of CE models. This aligns with \citep{Cattelan2023ImprovingSC} where certain models do not benefit from logit normalisation so the authors suggest ``falling back'' to the MSP.  
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{normed_resnet_rc_curve_diff.pdf}
+    \caption{RC curves with inference-time logit normalisation. \textbf{Logit normalisation improves SC performance on LS models}, but has little effect on CE models. For other models, see \cref{app:results_others}.}
+    \label{fig:logitnorm}
+\end{figure}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=.9\linewidth]{figure_comparison_8.pdf}
+    \caption{Visualisation of the effect of logit normalisation for segmentation (same scene as \cref{fig:semseg_overconf}). \textbf{Logit normalisation significantly reduces the overconfidence of the LS-trained model}, although it has little effect on the uncertainty of the CE-trained model.}
+    \label{fig:seg_norm}
+\end{figure}
+\subsection{Explaining the effectiveness of logit normalisation.}\label{sec:exp_logit_norm}
+Although \citet{Cattelan2023ImprovingSC} empirically validate this approach on a large number of pre-trained models, it remains unclear as to \textit{why} it is so effective, or why it isn't effective sometimes (further discussion in \cref{app:exp_ln}). %
+Let us shed light on the interaction between logit normalisation and LS. If we examine \cref{eq:logitnorm}, we see that it resembles the softmax, however, the logits are raised to power $p$ rather than exponentiated. Crucially, whilst the softmax is invariant to uniform shifts in the logits, 
+\begin{equation}
+    \pi_k(\b v) = \frac{\exp v_k}{\sum_i \exp v_i} = \frac{\exp (v_k+\eta)}{\sum_i \exp (v_i+\eta)} = \pi_k(\b v + \eta\b 1), \quad \forall \eta \in \mathbb R~,
+\end{equation}
+this is not the case for $\b v'$. In fact, we have the following inequality for positive\footnote{Although this assumption may not necessarily hold, we find that in practice, $\pi_\text{max}$ and $v'_\text{max}$ are dominated by the larger \textit{positive} logits, meaning the behaviour discussed still occurs empirically (\cref{app:geqzero,fig:norm_bins}).} %Additional discussion in \cref{app:geqzero}.} 
+logits $\b v$:
+\begin{result}\label{res:logitnorm}
+    For all 
+    vectors $\b v\in\left(\mathbb{R}_{>0}\right)^K$ with at least two different values and $p\in [1, +\infty[$, the ratio of the $\infty$-norm and $p$-norm strictly decreases when summing $\b v$ with any uniform vector $\eta \b 1$, $\eta>0$:
+\begin{align}
+    v'_\text{max}(\b v) =||\b v||_\infty\big/||\b v||_p\quad >\quad ||\b v+ \eta \b1||_\infty\big/||\b v + \eta \b 1||_p=v'_\text{max}(\b v+ \eta \b1)~.
+\end{align}
+\end{result}
+\noindent The proof can be found in \cref{app:proof}. Recalling that $||\b v||_\infty = v_\text{max}$, \cref{res:logitnorm} thus implies that for a given softmax output $\b\pi(\b v) = \b\pi(\b v + \eta\b 1)$ and arbitrary corresponding $\b v$, the greater the value of $\eta$ and thus $v_\text{max}$, the lower the value of the \textit{normalised} max logit  $v'_\text{max}$. That is to say \textbf{logit normalisation increases uncertainty when the max logit $v_\text{max}$ is higher for the same softmax probabilities $\b \pi$}.
+Recall how in \cref{sec:ls_sc_exp} we show how imbalanced logit regularisation leads to degradation in SC. In particular \cref{fig:cond_max_logit} shows how LS leads to higher $v_\text{max}$ \textit{given} $\pi_\text{max}$ for errors \xmark~-- this implies that, independent of the value of $\pi_\text{max}$, information about $P_\text{error}$ has been encoded in $v_\text{max}$. We see now that logit normalisation will increase the uncertainty (ranking) of errors \xmark~ relative to correct predictions \cmark~ using the information in $v_\text{max}$, leading to improved SC for an LS model. That is to say \textbf{logit normalisation effectively reverses the effect of the imbalanced logit regularisation from LS, improving SC}.  We note that \citet{Cattelan2023ImprovingSC} find that models that are less confident (on both \cmark~and \xmark) tend to benefit more from logit normalisation, again pointing towards LS. Given our analysis and empirical results, \textbf{we strongly recommend logit normalisation for LS-trained models when performing SC}. On the other hand, \cref{fig:cond_max_logit} also shows that the distributions of $v_\text{max} $ given $\pi_\text{max}$ for correct \cmark~and incorrect \xmark~predictions are very similar for the CE model. This explains why for CE, logit-normalisation does not seem to help, as $v_\text{max}$ does not provide useful information about $P_\text{error}$ given $\pi_\text{max}$. 
+
+
+
+\section{Related work}
+
+
+\textbf{Prediction with rejection.}
+Selective classification falls into the broader problem setting of \textit{prediction with rejection}. In the case of SC, misclassifications are to be rejected \citep{ElYaniv2010OnTF}. The baseline approach is to use the MSP \citep{hendrycks17baseline, Geifman2017SelectiveCF} and there have been a number of proposed training \citep{Moon2020ConfidenceAwareLF, selfadapt, deep_gamblers,revisitconf} and architectural \citep{geifman2019selectivenet,failure} enhancements, however, recently the effectiveness of some of these enhancements has been called into question \citep{feng2023towards}.
+Another scenario is out-of-distribution (OOD) detection \citep{yang2021oodsurvey,hendrycks17baseline}, where data from outside of the training distribution are to be rejected. There is a plethora of research in this field~\citep{Xia2022OnTU,Sun2021ReActOD,liu2020energy,zhang2023openood,Liu_2023_CVPR,haoqi2022vim,hendrycks2019anomalyseg}. %extending to semantic segmentation~\citep{hariat2024learning, lis2019detecting, besnier2021triggering, grcic2022densehybrid, franchi2022muad}. 
+Recently, a combination of SC and OOD detection has been proposed, where the aim is to reject \textit{both} misclassifications \textit{and} OOD data \citep{failure_detection, Xia_2022_ACCV, Kim2021AUB}. Notably, Deep Ensembles \citep{Lakshminarayanan2017SimpleAS} have arisen as a reliable method to improve performance in all three scenarios \citep{Kim2021AUB,Xia_2023_ICCV,packed_ensembles, laurent2023symmetry}. We believe, given the results of this work, that extending the investigation of LS (and other training enhancements) to other scenarios involving prediction with rejection is an important avenue of future work.
+
+\textbf{Mixup.} 
+Mixup~\citep{zhang2018mixup} and its variants~\citep{cutmix,franchi2021robust,pinto2022using,liu2022automix,bouniot2023tailoring} are a set of regularisation techniques that involve interpolating between random pairs of samples at training time, modifying both inputs and targets. They are commonly found in many ImageNet training recipes \citep{efficientnetv2,liu2021Swin,liu2021swinv2} and are often used in conjunction with label smoothing~\citep{wightman2021resnet,deit, Liu_2022_convnext}. %
+Research into how Mixup affects SC is a particularly salient avenue of future work as \citep{revisitconf} also observe empirically that it can have a negative impact.
+
+\textbf{Label smoothing.}
+Beyond prediction with rejection, LS is well-explored across various contexts. It has been shown to improve model calibration \citep{ls_help,empreg,focal,devil_margin} as well as accuracy when training under label noise \citep{ls_labelnoise}. Knowledge distillation \citep{hinton2015}, where soft labels are provided by a teacher network, is also commonly linked and combined with LS \citep{ls_help,ls_nmt,ls_kd3, ls_kd1,ls_kd2} due to their similarity. Interestingly, in a similar vein to our work, pre-training using LS has been shown to harm transfer learning \citep{transfer}.
+
+
+\section{Concluding remarks}
+
+In this work, we elucidate the effect of label smoothing (LS) on selective classification (SC). Our experiments across various tasks and architectures show that LS leads to consistent degradation in a model's ability to reject misclassifications, even if it improves accuracy. By analysing the logit-level gradients of the LS loss, we provide an explanation for this previously not understood behaviour -- LS regularises/suppresses the max logit more(less) the more likely a prediction will be correct(wrong), degrading a model's uncertainty ranking of correct \cmark~vs incorrect \xmark~predictions. We then investigate post-hoc logit normalisation as a method to improve the degraded SC performance caused by LS. We find it to be highly effective and shed light on why -- it reverses the effect of the aforementioned imbalanced regularisation by increasing the uncertainty when the max logit is higher. We hope that our work encourages more research into understanding how different training techniques may impact model performance in downstream applications such as uncertainty estimation. 
+
+\newpage
+
+
+

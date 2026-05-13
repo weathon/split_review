@@ -1,0 +1,256 @@
+\title{OmniKV: Dynamic Context Selection for Efficient Long-Context LLMs}
+
+\begin{abstract}
+During the inference phase of Large Language Models (LLMs) with long context, a substantial portion of GPU memory is allocated to the KV cache, with memory usage increasing as the sequence length grows. To mitigate the GPU memory footprint associate with KV cache, some previous studies have discarded less important tokens based on the sparsity identified in attention scores in long context scenarios. However, we argue that attention scores cannot indicate the future importance of tokens in subsequent generation iterations, because attention scores are calculated based on current hidden states. Therefore, we propose OmniKV, a token-dropping-free and training-free inference method, which achieves a 1.68x speedup without any loss in performance. It is well-suited for offloading, significantly reducing KV cache memory usage by up to 75% with it. The core innovative insight of OmniKV is: Within a single generation iteration, there is a high degree of similarity in the important tokens identified across consecutive layers. Extensive experiments demonstrate that OmniKV achieves state-of-the-art performance across multiple benchmarks, with particularly advantages in chain-of-thoughts scenarios. OmniKV extends the maximum context length supported by a single A100 for Llama-3-8B from 128K to 450K.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large Language Models (LLMs) have demonstrated their profound impact across a multitude of applications, such as chatbots (Achiam et al., 2023; Meta, 2024), agents (Wu et al., 2023; Chan et al., 2023; Liu et al., 2023b), and embodied robotics (Mai et al., 2023; Zhang et al., 2024b). These applications confirm the demand for LLMs with strong long context processing capabilities to tackle complex tasks based on prior interaction histories or given information materials. Currently, some studies have successfully extended the maximum context length of LLMs (Peng et al., 2023; Yang et al., 2024; Young et al., 2024; Meta, 2024; Chen et al., 2023).  
+
+In long-context scenarios, LLMs inference incurs more massive GPU memory usage. Particularly, a significant portion of this is attributed to the KV cache, which is proposed to accelerate LLMs generation and reduce redundant computation. Moreover, the memory occupied by the KV cache increases linearly with the sequence length. For instance, in the case of Llama-3-8B, with a batch size of 8 and a context length of 128K tokens, the KV cache alone occupies over 134GB of GPU memory, presenting a significant challenge to inference systems. To alleviate the high memory usage of the KV cache in long-context scenarios, previous studies (Zhang et al., 2024c; Li et al., 2024; Liu et al., 2024a) have attempted to identify and discard less important tokens based on sparsity in attention in long-context scenarios (Wang et al., 2021; Ribar et al., 2024). Tokens with lower cumulative attention scores are discarded, thereby reducing GPU memory occupation.  
+
+However, we argue that in multi-step reasoning scenarios, the important tokens vary depending on the reasoning step. This variation arises because attention scores are calculated based on the current hidden states, meaning that the attention scores of tokens only reflect their relevance to current reasoning step. Consequently, some tokens with low scores may be recalled as important and relevant tokens in subsequent reasoning steps as shown in Figure 1b. Discarding tokens may lead to the loss of crucial information for completing subsequent reasoning steps.  
+
+Motivated by this, we propose OmniKV, a novel inference method that retains the KV cache for all tokens. This approach not only achieves performance comparable to that of the original model but also accelerates decoding efficiency when context is longer than 32K. OmniKV is mainly built upon an innovative insight: For a specific context, the tokens with high attention scores are very similar across various layers. We refer to this phenomenon as Inter-Layer Attention Similarity. In other words, a similar set of tokens is identified as important across multiple layers.  
+
+Specifically, OmniKV offloads most layers’ KV cache to CPU memory when processing the input prompt (i.e., the prefill stage) but retains few “filter” layers’ entire KV cache. During the next token prediction (i.e., the decode stage), OmniKV first exploits the sparsity of attention map, selecting a few top-scoring tokens using top- $\cdot\mathbf{k}$ in these few “filter” layers. Next, other layers directly use the subset of tokens chosen by the preceding filter layers as context. This way, OmniKV only needs to load a small subset of tokens from CPU memory into GPU memory for attention computation. For a decoding iteration, since many layers share the same index of tokens, we only perform $\leq3$ transfers between GPU and CPU. By using asynchronous transfer to overlap computation with transfer time, the efficiency of decoding is unaffected even accelerated due to the shorter context computed in most layers.  
+
+We conducted extensive experiments on various LLMs, including Llama-3-8B-262K 2, Yi-9B-200K (Young et al., 2024) and Llama-3.1-70B (Meta, 2024) across benchmarks LongBench (Bai et al., 2023) and InfiniteBench (Zhang et al., 2024a). We tested both single-step reasoning and multistep reasoning (Chain of Thoughts) setups. The results showed that OmniKV achieved the best performance in both settings, especially in the multi-step reasoning setup. This demonstrates the necessity of drop-free and the effectiveness of dynamic context selection. Moreover, OmniKV can accelerate inference when context lengths exceed 32K. By using only a single A100 GPU, compared to the original model’s efficiency, OmniKV achieves a $1.7\mathbf{x}$ speedup with 128K context. When using three A100s for origin model to pipeline inference with $450\mathrm{K}$ context, OmniKV still achieves a $1.87\mathbf{x}$ speedup while using only a single A100.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+Token Dropping and Offloading. Most similar studies to ours focus on discarding unimportant tokens based on accumulated attention scores after the prefill stage. These tokens are then completely dropped in the decode stage (Zhang et al., 2024c; Liu et al., 2024a; Li et al., 2024; Ge et al., 2024a). However, these methods might discard tokens that could become important in future reasoning steps. To ensure the lossless of information, we dynamically select a sparse subset of the KV cache for each generation iteration to guarantee performance. In a related approach, Quest (Tang et al., 2024) recognizes the importance of dynamic selection. Nonetheless, it fails to reduce memory usage and may compromise recall. Due to representing a block with a single vector, Quest’s capacity to retrieve relevant tokens may be compromised.  
+
+Another type of similar works involves KV cache offloading. Many studies offload layers’ KV cache to CPU memory when VRAM is not sufficient (Sheng et al., 2023; Kwon et al., 2023b). However, these methods do not leverage sparsity in attention. The data transfer volume over PCIe is 10 times more than ours in long-context scenarios. InfLLM (Xiao et al., 2024a) similarly divides sequences into blocks, selecting a few representative vectors as retrieval keys for a block. Then offloads other data to CPU memory. However, the chosen few representative vectors may fail to fully capture the block’s information, resulting in a relatively low recall rate.  
+
+Other Efficient Methods. Considerable efforts have been made to minimize KV cache while incurring minimal performance loss to the model. One class of work compresses KV cache, such as ICAE (Ge et al., 2024b) and Gist (Mu et al., 2024), which utilize LLMs as auto-encoders to compress the context to a shorter sequence. Additionally, there are works that directly compress prompts at the language level, thereby indirectly compressing KV cache, such as LLMLingua (Jiang et al., 2023). Similar to model weight quantization, there are also attempts to quantize KV cache, such as KIVI (Liu et al., 2024b) and SmoothQuant (Xiao et al., 2023). These compression or quantization works are orthogonal to our method and can be used in conjunction.  
+
+108   
+109   
+110   
+111   
+112   
+113   
+114   
+115   
+116   
+117   
+118   
+119   
+120   
+121   
+122   
+123   
+124   
+125   
+126   
+127   
+128   
+129   
+130   
+131   
+132   
+133   
+134   
+135   
+136   
+137   
+138   
+139   
+140   
+141   
+142   
+143   
+144   
+145   
+146   
+147   
+148   
+149   
+150   
+151   
+152   
+153   
+154   
+155   
+156   
+157   
+158   
+159   
+160   
+161  
+
+Sparsity in LLMs. The sparsity of attention in long-context scenarios has been observed by previous studies (Liu et al., 2023a; Ribar et al., 2024; Wang et al., 2021). For example, Minference (Jiang et al., 2024b) has demonstrated that with a context of $128\mathbf{k}$ , only 4k tokens are required to accumulate $96.4\%$ of the total attention score. However, the tokens with high attention scores vary across different generation iterations, indicating that the sparse pattern is dynamic (Tang et al., 2024). This implies that it is necessary to compute the full attention in every generation iteration and every layer to determine the sparse pattern. Quest (Tang et al., 2024) and SparQ (Ribar et al., 2024) employed approximate attention methods to circumvent the computationally expensive full attention. Infini  
+
+Gen (Lee et al., 2024) introduced cross-layer similarity between consecutive two layers, leveraging this characteristic to pre-select the critical KV cache. However, the loading time may still exceed the computation time, resulting in GPU idleness. In contrast, we observe that the sparse patterns between different layers exhibit high similarity, and thus we only compute full attention for a few layers to obtain the sparse patterns for subsequent layers. To the best of our knowledge, we are the first to highlight this.  
+
+![](images/d8d9a4182337d5ab95df2ecd5fde17a7c38f4172f03f58af98cc2862219e8993.jpg)  
+Figure 1: Analysis of attention. (a) Inter-Layer Attention Similarity. This shows a high similarity of important tokens/sub-context between layers even 16 layers apart. (b) An example of a multihop question demonstrates the variation in important tokens across different generation iterations. (c) Analysis of variety in important tokens. We retained the set of important tokens, then calculated the cumulative attention scores of missing tokens.  
+
+Our work is grounded in three pivotal insights, which we verify through experiments utilizing popular models Llama-3-8B-Instruct, Yi-9B-200k, and Llama-3.1-70B-Instruct.  
+
+Intra-Layer Attention Sparsity. Studies have consistently revealed that attention matrices within LLMs layers exhibit sparsity (Wang et al., 2021; Deng et al., 2024). This characteristic implies that LLMs can generate nearly equivalent outputs by focusing on a reduced subset of tokens. Some studies have enhanced inference speed or reduced GPU memory requirements based on sparsity (Zhang et al., 2024c; Li et al., 2024; Tang et al., 2024). Due to the presence of sparsity, OmniKV utilizes only a small subset of tokens in most layers. In this way, we not only reduced computation but also decreased the communication volume between CPU and GPU.  
+
+Inter-Layer Attention Similarity. We introduce the concept of inter-layer attention similarity, which is defined as, a fixed subset of tokens that receive significant attention in a specific layer, maintains their prominence throughout successive layers. The value of similarity of a layer can also be viewed as “filter” ability of this layer, and is calculated as the mean of the summation of fixed tokens subset’s attention scores in subsequent layers. Figure 1a demonstrates that, beyond a certain shallow layer, the similarity for one layer to successive $n$ layers becomes exceptionally high. Although the overall similarity between layers is already high, some layers exhibit higher “filter” ability than others. We refer to these layers as “filter” layers. Subsequently, these layers function as context selectors within OmniKV, identifying crucial tokens for each generation iteration and thus facilitating sparse attention in subsequent layers.  
+
+![](images/728badce4ab48e53daaf66d5809d60f9407cb321957caaf1acb28fd72ca87bb8.jpg)  
+Figure 2: Overall Framework of OmniKV in decode stage. There are three types of layers in OmniKV. In prefill stage, all layers perform full attention and generate KV cache of context. Then OmniKV offloads the KV cache generated by green layers to CPU memory. In the decode stage, orange layers perform full attention because of lower sparsity or inference efficiency. Purple (filter) layers perform full attention and a) select important tokens using context selector based on attention scores calculated over observation window. Green layers b) load the subset of KV cache selected by preceding filter layers to GPU and perform sparse attention. c) Only the KV Cache on the GPU is visible to the LLM for generating next token.  
+
+Inter-Token Attention Variability. Intuitively, the important tokens should vary throughout the generative process of LLMs, particularly under multi-task or multi-reasoning scenarios such as the Chain of Thoughts (CoT) (Wei et al., 2023). As shown in Figure 1b, for a multi-hop question, we highlight 12 tokens with the highest attention scores for two decoding steps respectively in the CoT scenario. We can observe that, apart from the special BOS token, the other important tokens are entirely different. Meanwhile, as demonstrated in Figure 1c, empirical studies on the Multi-Hop QA task (Ho et al., 2020) also confirm this variability. For each generation iteration, we compute the cumulative attention scores for the missing tokens to a token set, which stores $25\%$ most pivotal tokens during the prefill stage (i.e. Heavy Hitters in H2O). The spikes observed in the figure indicate that some missing tokens have significant attention scores. This phenomenon substantiates our intuition that the subsets of critical tokens identified exhibit significant fluctuations across different generative steps. Motivated by this insight, OmniKV retains all KV cache to ensure that performance remains unaffected.  
+
+
+
+\section{4 METHOD  }
+
+
+Based on the aforementioned insights, we propose OmniKV, a token-dropping-free and training-free inference method. This design empowers OmniKV to sustain the performance of LLMs in multireasoning settings. As depicted in Figure 2, OmniKV comprises two pivotal modules: the Context Bank and the Context Selector.  
+
+The inference of auto-regressive LLMs can be divided into two stages: 1) Prefill, which encodes the intermediate computational state of the input prompt as KV cache K, V to circumvent redundant KV vector computations, and outputs the next token as the first input for decoding; 2) Decode, which takes the token predicted from the previous decode iteration as the current token, and predicts the next token.  
+
+During the prefill stage, OmniKV initialize the Context Bank to store most “non-filter” layers’ KV cache in CPU memory based on inter-layer attention similarity. In the decode phase, OmniKV adopts a plug-and-play Context Selector that dynamically identifies important subsets of KV cache K, V on a few “filter” layers. Then the Context Bank propagates the selections to the “non-filter” layers and load the corresponding subset of KV cache in a pack to GPU memory, since these layers share a same index of tokens. In this way, OmniKV reduces computation and data transfer costs.  
+
+
+
+\section{4.1 CONTEXT BANK  }
+
+
+The proposed Context Bank utilizes inter-layer attention similarity to prefetch important tokens. In scenarios of insufficient GPU memory, the Context Bank can also asynchronously preload the corresponding KV cache from CPU memory, thereby alleviating memory constraints.  
+
+For the sake of simplicity in analysis, we will ignore the batch size here. In the prefill phase, an $L$ - layer LLM creates KV caches, $\{\dot{\mathbf{K}}_{i},\mathbf{V}_{i}\}_{i=1}^{L}$ , by applying attention projection matrices $\dot{\mathbf{W}}_{i}^{k}$ and $\mathbf{W}_{i}^{v}$ to hidden states $\mathbf{h}_{i}^{p}$ , yielding tensors in $\dot{\mathbb{R}^{H}}\!\times\!N\!\times\!d$ for both keys and values. Here, $N$ represents the length of the tokenized prompt $p$ within the prefill context, $H$ signifies number of attention heads, and $d$ denotes the hidden size of per attention head.  
+
+Firstly, We need to determine which layers are more effective for identifying important tokens. These selected layers are referred to as “filter” layers. As illustrated in Figure 1a, although the similarity between adjacent 16 layers is high, a significant gap is observed between the mean similarities of 8 adjacent layers compared to 16 layers. To enhance performance by reducing the distance between “filter” layers, OmniKV utilizes a set of hyperparameters $\mathbb{L}$ , where the size $(m,m\leq3)$ . Compared to using a single “filter” layer, the sub-context used by “non-filter” layers theoretically exhibits a higher degree of similarity when using multiple “filter” layers.  
+
+Consequently, OmniKV performs full attention on the layers within $\mathbb{L}$ to identify a small subset of important tokens $\mathbf{T}_{i}$ , $\mathbf{\chi}(i\in\mathbb{L})$ ). Due to the shallow layers’ reduced sparsity, OmniKV also performs full attention without selection on preceding layers up to layer $\mathbb{L}_{0}$ ${\mathfrak{a}}_{0},\left(l<{\mathbb{L}}_{0}\right)$ . Then, OmniKV utilizes only these important tokens $\mathbf{T}_{i}$ as sub-context for the sparse attention layers $l$ , where $\mathbb{L}_{i}<l<\mathbb{L}_{i+1}$ . Here, $\mathbf{h}_{i}^{w}$ represents the hidden states of the observation window at layer $i$ . The context selector identifies important tokens that have significant attention scores over the observation window.  
+
+$$
+\mathbf{T}_{i}=\left\{{\begin{array}{l l}{\operatorname{ContextSelector}(\mathbf{h}_{i}^{w},\mathbf{K}_{i})}&{{\mathrm{if~}}i\in\mathbb{L}}\\ {\mathbf{T}_{i-1}}&{{\mathrm{otherwise}}}\end{array}}\right.\;{\mathrm{~for~}}i\geq\mathbb{L}_{0}
+$$  
+
+To avoid unnecessary GPU waiting when loading KV cache, OmniKV also performs full attention on the $\mathbb{L}$ -adjacent layers, denoted as $\{l+1\}_{l\in\mathbb{L}}$ . This interleaves data transfer with computation. Here, $\mathbf{h}_{i}^{l}$ represents the hidden states of the last token. Finally, the entire attention mechanism can be formulated as follows:  
+
+$$
+\mathrm{out}_{i}=\left\{\begin{array}{l l}{\mathrm{Attention}_{i}(\mathbf{h}_{i}^{l},\mathbf{K}_{i},\mathbf{V}_{i})}&{\mathrm{if~}i\in\mathbb{L}\mathrm{~or~}i-1\in\mathbb{L}\mathrm{~or~}i<\mathbb{L}_{0}}\\ {\mathrm{Attention}_{i}(\mathbf{h}_{i}^{l},\mathbf{K}_{i}[\mathbf{T}_{i}],\mathbf{V}_{i}[\mathbf{T}_{i}])}&{\mathrm{otherwise}}\end{array}\right.
+$$  
+
+OmniKV significantly reduces the sequence length to less than $10\%$ in sparse attention layers, which leads to a decrease in time complexity. Upon identifying the critical tokens $\mathbf{T}_{i}$ in $\mathbb{L}_{t}$ (where $\mathbb{L}_{t}=i\mathrm{~}$ , OmniKV retrieves the corresponding subset of KV caches $\mathbf{K}_{j}[\mathbf{T}_{i}],\mathbf{V}_{j}[\mathbf{T}_{i}]$ (where $\mathbb{L}_{t}+1<j<$ $\mathbb{L}_{t+1})$ for sparse layers as a sub-context from the CPU memory.  
+
+Packed Load. Since layers between “filter” layers share the same sub-context tokens’ index $\mathbf{T}$ , the KV cache for a series of consecutive sparse attention layers can be packed and loaded from the CPU to the GPU at the nearest preceding “filter” layer. Consequently, OmniKV conducts only $m,m\,\leq\,3$ loads, significantly reducing the slow PCIe transfer overheads compared to loading at each layer.  
+
+
+
+\section{4.2 CONTEXT SELECTOR  }
+
+
+As described in Section 4.1, OmniKV selects important tokens $\mathbf{T}_{i}$ in “filter” layers $\mathbb{L}$ . Inspired by previous works (Li et al., 2024; Xiao et al., 2024a), we propose a unified framework for token  
+
+selection. OmniKV selects important tokens based on a score vector $\mathbf{S}_{i}\,\in\,\mathbb{R}^{N}$ . The score $\mathbf{S}_{i}$ is calculated using a observation window $\mathbf{h}_{i}^{w}$ . Commencing with the local window as the query states, and the full context $\mathbf{h}_{i}^{c}$ as the key states, we compute the attention scores $\mathbf{A}_{i}$ :  
+
+$$
+\mathbf{Q}_{i}=\mathbf{W}_{i}^{q}\mathbf{h}_{i}^{w},\quad\mathbf{K}_{i}=\mathbf{W}_{i}^{k}\mathbf{h}_{i}^{c},\quad\quad\mathbf{A}_{i}=\mathrm{Softmax}\left(\frac{\mathbf{Q}_{i}\mathbf{K}_{i}^{\top}}{\sqrt{d}}\right),\quad\mathbf{A}_{i}\in\mathbb{R}^{H\times|\mathbf{h}_{i}^{w}|\times|\mathbf{h}_{i}^{c}|}
+$$  
+
+Next, to get the score $\mathbf{S}_{i}$ , we first apply reduce-max to obtain the maximum score across attention heads. Subsequently, a weighted vector $\alpha$ is utilized to perform a weighted summation on the attention scores. Finally, we leverage topk to identify the important tokens $\mathbf{T}_{i}$ on score $\mathbf{S}_{i}$ .  
+
+$$
+\mathbf{S}_{i}=\sum_{j=0}^{|\mathbf{h}_{i}^{w}|-1}\alpha_{j}\operatorname*{max}_{0\leq h<H}\mathbf{A}_{i}[h,j],\quad\mathbf{S}_{i}\in\mathbb{R}^{|\mathbf{h}_{i}^{c}|},\quad\quad\mathbf{T}_{i}=\underset{0\leq t<|\mathbf{h}_{i}^{c}|}{\arg\operatorname{top}\operatorname{k}}(\mathbf{S}_{i}),\quad\mathbf{T}_{i}\in\mathbb{R}^{k}
+$$  
+
+Different $\alpha$ values assign varying weights to local window tokens and yield distinct selection patterns. To further investigate which tokens of the observation window possess a stronger “filter” capability to identify important tokens $\mathbf{T}$ , this study explores three methods: 1) Uniform: $\alpha\;=\;\{1\}_{i=0}^{|{\bf h}_{i}^{w}|}$ . This approach implies that each token in the window produces equivalent contribution when weighted and summed attention scores. 2) Exponential: $\alpha=\{2^{i-|\mathbf{h}_{i}^{w}|}\}_{i=0}^{|\mathbf{h}_{i}^{w}|}$ . This approach implies that tokens closer to the end of the window produce higher contribution. 3) Last Token: concat $\mathbf{\chi}^{\prime}\alpha=\{0\}_{i=0}^{|\mathbf{h}_{i}^{w}|-1}$ , $\{1\})$ . This approach implies that we only consider the last token’s attention score in the window.  
+
+
+
+\section{5 EXPERIMENTS  }
+
+
+To demonstrate the effectiveness of OmniKV, we conducted extensive experiments on Llama-3- 8B-262K, Yi-9B-200K and Llama-3.1-70B-Instruct mainly using the datasets InfiniteBench (Zhang et al., 2024a) and LongBench (Bai et al., 2023). OmniKV demonstrated its effectiveness on 8B and 70B through experiments. Furthermore, we have explored its efficacy on Llama-3.1-405B, with the results presented in Sec D.8 Ablation studies and minor or detailed experiments can be found in Section D.  
+
+Implementation. For most tasks, we adopted greedy decoding. To prevent repetitive outputs, we employed top-p decoding with $\mathrm{{p}=\,0.95}$ , temperature $=0.8$ for summarization tasks in InfiniteBench. All performance and latency experiments were conducted on Nvidia A100 GPUs. Llama-3.1-70B utilized 4-bit weight quantization via bitsandbytes (Dettmers et al., 2021), while other models employed float16 formatting. We makes minor modifications based on Huggingface’s transformers (Wolf et al., 2020). For exponential and uniform context selectors, we set the local window size to 16. The “filter” layers $\mathbb{L}$ are set respectively $\{2,8,18\},\{6,11,30\},\{4,19,41\}$ for Llama-3-8B-262K, Yi-9B-200K and Llama-3.1-70B-Instruct.  
+
+To ensure fairness in comparison, we strictly set OmniKV to retain $\mathrm{Mem\%}$ of KV caches on GPU.   
+This means we dynamically adjust the token budget for sparse attention layers based on the length   
+of the context prompt length. $\mathrm{idem\%}$ consists of two parts: First, OmniKV retains all KV caches uieltKl  faVot trce ansntpi aobrnes  ele axlyapeyrreesrs, ss ewidsh  iascseh $\frac{2|\mathbb{L}|+\mathbb{L}_{0}}{L}$ e.K reVFf oocrr aeec,x htaehsm.e ai’css  htseoe tkf etonor $\frac{|\mathbf{T}|}{|p|}\,\%$ $\mathrm{Mem\%}$ $\begin{array}{r}{\frac{2|\mathbb{L}|+\tilde{\mathbb{L}_{0}}}{L}+\frac{|\mathbf{T}|}{|p|}\cdot(1-\frac{2|\mathbb{L}|+\mathbb{L}_{0}}{L})}\end{array}$ $\mathrm{Mem\%}$   
+$30\%$ and the memory usage of layers $\mathbb{L}$ is $25\%$ , then the token budget is set to $6.7\%$ .  
+
+Baselines. We employed three state-of-the-art methods for memory reduction as baselines, as well as Full Attention. For methods other than InfLLM and Full Attention, we strictly limited the KV cache size to $\mathrm{Mem\%}$ . Specific settings and implementations can be found in the Section C. 1) H2O (Zhang et al., $2024\mathrm{c})$ ), which discards tokens based on attention scores, has been proven to be superior in performance by previous work (Yuan et al., 2024). $^+$ indicates dropping tokens within each chunk in H2O due to incompatible with flash attention. 2) InfLLM (Xiao et al., 2024a), similar to our method, does not discard any tokens. It divides the sequence into blocks, then chooses a few  
+
+Table 1: Performance of single-step reasoning on LongBench (Bai et al., 2023). Italics indicate that the model uses full attention baseline. Bold indicates the best performance under the same model. $\sim$ refers to InfLLM’s KV cache memory budget being roughly set to a specific value due to its highly integrated implementation. $^+$ indicates dropping tokens within each chunk in H2O due to incompatible with flash attention. Detailed results for every sub-task can be found in Table 4 and 5.  
+
+![](images/dc8ac8efda21328f72681a402b30376bfab5206a4b160bb333c0d2aa472f9732.jpg)  
+
+important tokens in each block as retrieval keys, and retrieves several relevant blocks as context when decoding. 3) StreamingLLM (Xiao et al., 2024b) observes that the starting part of the input prompt tokens occupies a large portion of the attention scores, and thus, in addition to the sliding window approach, it retains an initial window as part of the context. 4) Full Attention (original model), which does not discard any tokens and uses all tokens as context, serves as the theoretical performance upper bound for comparison.  
+
+Datasets. To test OmniKV’s performance in single-step reasoning, we primarily used two widely applied benchmarks: 1) InfiniteBench (Zhang et al., 2024a) with an average length of 145.1K, covering multiple tasks. We uniformly adopted a 128K context for testing and truncated inputs exceeding 128K at the middle. 2) We tested LongBench’s 18 tasks across multiple categories, with most tasks’ average length ranging from 5K to 15K (Bai et al., 2023). During testing, all models supported a context length longer than the longest sample, eliminating the need for truncation.  
+
+To assess OmniKV’s performance in multi-step reasoning, we utilized 2WikiMQA (Ho et al., 2020) and HotpotQA (Yang et al., 2018) from LongBench. However, QA tasks may be biased, as questions often focus on special information, such as a person’s birthplace, birth date, or awards received. LLMs might prioritize this type of information during the prefill stage, potentially affecting the accurate evaluation of their long-text capabilities. Motivated by this, we propose a benchmark called 2StageRetr. This task consists of a dictionary and an equation adding two numbers. LLMs need to use the answer from the equation to search the dictionary, find the corresponding key, and output the value associated with that key. Example and details can be found in Section A.  
+
+
+
+\section{5.1 PERFORMANCE  }
+
+
+Table 2: Performance of single-step reasoning on InfiniteBench (Zhang et al., 2024a).   
+
+![](images/07dcc33bf5ca34b8e1e316e21b0a2353a5a936665dbcda0c23e70c9a34140e80.jpg)  
+
+Performance with Single-Step Reasoning. We demonstrate the effectiveness of OmniKV in the Single-Step Reasoning scenarios, which is the standard evaluation method for both benchmarks. In this format, the model receives an input and directly answers the question without providing intermediate reasoning steps. Results from LongBench and InfiniteBench are presented in Table 1 and 2, respectively. The results indicate that OmniKV achieves the best performance and consistently performs very close to the original full attention baseline across all tasks, showcasing OmniKV’s stability. Particularly in Llama-3.1-70B, OmniKV significantly outperforms the baselines. In some task categories, OmniKV even surpasses the baseline results. On InfiniteBench, although OmniKV’s performance on the Math.Find task is slightly lower than InfLLM, it remains very close to the original model. However, InfLLM performs poorly on the KV Retrieval task. Thus, the stability of OmniKV’s performance, compared to the original model, facilitates its direct application in realworld scenarios without the need for additional testing.  
+
+![](images/18d9b59b156cd23ed91325dd69d2e78b15fb36b52c468452ea674550c273048a.jpg)  
+Figure 3: Performance of multi-step reasoning with different token budget ratio of KV cache on three multi-hop tasks.  
+
+Performance with Multi-Step Reasoning. OmniKV dynamically selects the necessary context for attention computation. To demonstrate the necessity of drop-free and effectiveness of dynamic context selection, we tested models on three multi-step reasoning tasks and adopted the CoT output format to solve the problems. We use Exact Match as the metric, meaning that as long as the standard answer appears in the model’s output, it is considered correct. The reason for employing a simple metric is due to a more linear metric being better able to quantify performance gaps (Levy et al., 2024; Schaeffer et al., 2023). The results of Llama-3.1-70B are shown in Figure 3. Results show that OmniKV achieved the best performance under all budgets, demonstrating the effectiveness of dynamic context selection. In the 2StageRetr task, we observe that H2O’s accuracy cannot exceed its budget, indicating that without prior knowledge, H2O can only randomly retain key-value pairs in task dictionary. We also conducted experiments on the Yi-9B-200K, as detailed in Section D.4.  
+
+Choice of Context Selectors. In Section 4.2, three context selectors are proposed. From Table 1 and Figure 3, it is evident that in single-step reasoning settings, the exponential and last selectors perform better, while the uniform selector lags slightly but not significantly. In multi-step reasoning settings, the last selector exhibits the best performance, while the uniform selector performs somewhat poorly. The exponential selector can be viewed as an intermediate state between the last and uniform selectors. The fact that the last and exponential selectors outperform the uniform selector suggests that the last may be the most optimal context selector. Moreover, the last method aligns with the pretraining paradigm of LLMs, as the computation of context scores remains entirely consistent with the original model.  
+
+From an engineering practice and inference efficiency perspective, last is also the simplest and has the lowest latency, as this selector does not require maintaining cumulative scores for the window. Therefore, in subsequent analysis experiments, we primarily focus on the last context selector.  
+
+
+
+\section{5.2 LATENCY AND TRADE-OFF  }
+
+
+We evaluated the end-to-end inference latency of OmniKV using a single NVIDIA A100 80GB GPU and 12 cores of an Intel Xeon Platinum 8369B CPU at 2.90GHz. A 32-layer LLaMA-3-8B-262K model was utilized, with “filter” layers $\mathbb{L}=\{2,8,18\}$ , applying flash attention (Dao et al., 2022), and a batch size of 1. For different context length settings, the token budget for sparse attention was set to 2048. During decoding, 50 tokens were generated, and the mean latency per token was calculated over all decoding steps. In the prefill stage, we measured the Time To First Token (TTFT).  
+
+![](images/56c23eef0493ac7adfe7abd5ba3ab552bbabdbd2c4c89487829e4b8c31cad981.jpg)  
+Figure 4: End-to-end latency results. The left and right figures show the latency of the decode and prefill stages respectively. OOM indicates the maximum context length supported by some methods on a single A100 GPU.  
+
+The results are presented in Figure 4. The “Brutal Offload” approach refers to offloading all KV cache of the final 20 layers to CPU, and pre-loading all KV cache for each layer 4 layers in advance. InfLLM does not perform full attention during prefill, instead utilizing sparse attention in chunks. Consequently, it achieves better latency at 450K context. However, employing sparse attention in the prefill stage may impact the method’s performance (Yuan et al., 2024). OmniKV exhibits identical latency to full attention during the prefill stage, which is attributed to the offload process being covered by the full attention computation. We also tested the original model’s latency of 450K context with 3 A100s. Overall, our method demonstrates the best latency performance.  
+
+Notably, when GPU memory is sufficient, i.e., within a $128\mathbf{K}$ context for single A100, OmniKV can store the entire KV cache in VRAM. At this point, OmniKV can still perform sparse attention without offloading (OmniKV w/o offload), thus achieving a 1.68x decoding efficiency of 21.0 tokens/s at 128K context. Moreover, we observe that OmniKV achieves lower latency than Full Attention at 128K. This suggests that we can simply adopt a segmentation strategy for OmniKV to accelerate decoding speed at any context length longer than 32K.  
+
+Under settings that save $70\%$ of KV cache, we can run Llama-3-8B with a 450K context on a single A100 80G GPU at a speed of 7.5 tokens/s. We also validated the performance under $512\mathrm{K}$ ultra-long context on the Passkey task using Llama-3-8B-1048k, achieving perfect results as shown in Figure 7. Under $80\%$ memory reduction, we can run Llama-3.1-70B with a context of 150K tokens at a speed of 4.5 tokens/s.  
+
+![](images/b5a66b66bfadbc89d839ad3dbb7c8975ed10f7e7ceb8992d8d62280788afb125.jpg)  
+Figure 5: Trade-off on token budgets for sparse layers. Left axis shows the average score on InfiniteBench, and the right axis shows the latency of decoding.  
+
+Trade-off between Performance and Efficiency. The smaller the token budget used for sparse attention layers, the lower the latency caused by loading KV cache from CPU. We evaluated the trade-off between performance and efficiency on Llama-3-8B-262K for various token budgets on InfiniteBench with 128K context. The results are presented in Figure 5. Here, 6400 represents the token budget under $\mathrm{Mem}\%=30\%$ . This finding indicates that even retrieving only 128 relevant tokens per sparse layer as context can yield satisfactory average score 35.9 higher than $^{\mathrm{H}2\mathrm{O}+}$ . Furthermore, selecting 1024 tokens achieves a favorable balance between performance and latency. Detailed results could be found in Table 3.  
+
+
+
+\section{5.3 ANALYSIS  }
+
+
+As shown in Figure 1a, sparse patterns identified by some “filter” layers have higher similarity with subsequent layers than other layers. Naturally, we have the following two research questions: 1) Are these “filter” layers’ ability task-dependent or is this more of a model characteristics? 2) Which layers have a greater ability to identify genuinely important tokens? 3) Is the performance varied with “filter” capabilities?  
+
+![](images/6e65935d1837850b865908656fe921f64acd87fac8a815e33e1f035633a31cb6.jpg)  
+Figure 6: Analysis of “filter” ability in layers. For (a) and (b), left: Llama-3-8B-262K, right: Yi9B-200K. (a) The inter-layer attention similarity, also referred to as the “filter” capability of layers, displays similar trends across various tasks. (b) Varying capabilities to capture important tokens. (c) Varying performance on LongBench using Llama-3-8B-262K.  
+
+Task-Independent Filter Layers. To answer the first research question, we conducted experiments on different tasks to collect those layers’ “filter” characteristics. The results, shown in Figure 6a, display the trends of similarity values for Llama-3-8B and Yi-9B across various tasks. We can observe that these curves for different tasks generally follow same trends, suggesting that the strength of “filter” is not task-dependent. Instead, the “filter” ability is more likely an intrinsic characteristic of the layers themselves. This implies that once we select appropriate hyper-parameters $\mathbb{L}$ , our method can be adapted to any task.  
+
+Accuracy of Context Selection. We use the CLongEval dataset (Qiu et al., 2024) to test whether the layers can accurately assign higher attention scores to the context containing the answer. This dataset provides the reference chunk where the standard answer is located. Although this chunk covers a broad range, we can still compute the hit ratio as the proportion of important tokens within the reference chunk. The results are shown in Figure 6b. We observed that the layers with stronger “filter” ability demonstrate a higher hit ratio compared to neighboring layers. For example, the 8th layer in Llama3-8B exhibits a peak in both Figure 6a and 6b. Likewise, the 14th layer in Yi-9B displays similar characteristics. This suggests that certain layers develop a stronger capacity for important token retrieval after training.  
+
+Performance Vary with Filter Ability. We conduct experiments using Llama3-8B-262K on LongBench. As shown in Figure 6c, results indicate that layers 8, 10, 11, and 13 exhibit relatively superior performance, which corresponds well with the higher “filter” ability observed in these layers as shown in Figure 6a. Similarly, the sudden performance decline in layer 12 and the abrupt improvement in performance from layer 4 to layer 5 are also aligned in Figure 6a. Detail results can be found in Section D.6.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+This paper proposes OmniKV, a token-dropping-free and training-free inference method, delivering a $1.7\mathtt{X}$ improvement in inference efficiency without compromising performance in long-text scenarios. Moreover, OmniKV is highly compatible with offloading techniques, significantly reducing KV cache memory consumption. The method is simple to implement and has promising practical application prospects. In our future work, we plan to explore the integration of OmniKV with KV cache quantization techniques to further minimize the usage of KV cache and enhance efficiency.  
+
+
+

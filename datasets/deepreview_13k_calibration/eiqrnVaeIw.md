@@ -1,8 +1,8 @@
 # Persistent Pre-training Poisoning of LLMs
 
 - Decision: Accept
-- Avg Score: 4.11
-- Scores: 6, 6, 5, 6, 5, 5, 3, 1, 0
+- Avg Score: 5.75
+- Scores: 6, 6, 5, 6, 5, 5, 3, 10
 
 ## Abstract
 Large language models are pre-trained on uncurated text datasets consisting of trillions of tokens scraped from the Web.

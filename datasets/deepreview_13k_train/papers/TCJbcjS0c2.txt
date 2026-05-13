@@ -1,0 +1,361 @@
+\title{LASER: Linear Compression in Wireless Distributed Optimization}
+
+\begin{abstract}
+Data-parallel SGD is the de facto algorithm for distributed optimization, especially for large scale machine learning. Despite its merits, communication bottleneck is one of its persistent issues. Most compression schemes to alleviate this either assume noiseless communication links, or fail to achieve good performance on practical tasks. In this paper, we close this gap and introduce \textsc{LASER}: {\bf L}ine{\bf A}r Compre{\bf S}sion in Wir{\bf E}less Dist{\bf R}ibuted Optimization. \textsc{LASER} capitalizes on the inherent low-rank structure of gradients and transmits them efficiently over the noisy channels. Whilst enjoying theoretical guarantees similar to those of the classical SGD, \textsc{LASER} shows consistent gains over baselines on a variety of practical benchmarks. In particular, it outperforms the state-of-the-art compression schemes on challenging computer vision and GPT language modeling tasks. On the latter, we obtain $50$-$64 \%$ improvement in perplexity over our baselines for noisy channels.
+\looseness=-1
+
+
+\end{abstract}
+
+\section{Introduction}
+
+ 
+
+\label{sec:intro}
+
+Distributed optimization is one of the most widely used frameworks for training large scale deep learning models \citep{bottou2018optimization, dean2012large, tang2020communicationsurvey}. In particular, data-parallel SGD is the workhorse algorithm for this task. Underpinning this approach is the \emph{communication} of large gradient vectors between the workers and the central server which performs their \emph{aggregation}. While these methods harness the inherent parallelism to reduce the overall training time, their communication cost is a major bottleneck that limits scalability to large models. Design of communication-efficient distributed algorithms is thus a must for reaping the full benefits of distributed optimization \citep{xu2020compressedsurvey}.  
+
+Existing approaches to reduce the communication cost can be broadly classified into two themes: (i) compressing the gradients before transmission; or (ii) utilizing the communication link for native `over-the-air' aggregation (averaging) across workers. Along (i), a number of gradient compression schemes have been designed such as quantization \citep{bernstein2018signsgd,vargaftik2022eden}, sparsification \citep{aji2017sparse, isik2022sparse}, hybrid methods \citep{jiang2018sketchml, basu2019qsparse}, and low-rank compression \citep{wang2018atomo, vogels2019powersgd}. These methods show gains over the full-precision SGD in various settings (\citet{xu2020compressedsurvey} is a detailed survey). Notwithstanding the merits, their key shortcoming is that they assume a \emph{noiseless} communication link between the clients and the server. In settings such as federated learning with differential privacy or wireless communication, these links are noisy. Making them noiseless requires error-correcting codes which exacerbates the latency, as the server needs to wait till it receives the gradient from each worker before aggregating \citep{guo2020analog}.
+Under theme (ii), communication cost is reduced by harnessing the physical layer aspects of (noisy) communication. In particular, the superposition nature of wireless channels is exploited to perform over-the-air averaging of gradients across workers, which reduces the latency, see e.g.~\cite{shi2020communication} and the references therein. Notable works include \adsgd \cite{amiri2020machine}, analog-gradient-aggregation \cite{guo2020analog, zhu2019broadband}, channel aware quantization \cite{chang2020mac}, etc. However, to the best of our knowledge, the majority of these approaches are restricted to synthetic datasets and shallow neural networks (often single layer) and do not scale well to the practical neural network models (which we verify in \prettyref{sec:main_results}). This leads to a natural question:
+\emph{Can we design efficient and practical gradient compression schemes for noisy communication channels?}
+
+\begin{table*}
+  \centering
+  \small
+  \begin{minipage}[t]{0.52\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/llm-power-perplexity}
+      \put(-145,-2){\fontsize{8}{3}\selectfont Power budget}
+      \put(-250,87){\rotatebox[origin=t]{90}{\fontsize{8}{3}\selectfont Perplexity}}
+      \put(-80,157){\fontsize{6}{3}\selectfont LASER}
+      \put(-80,148){\fontsize{6}{3}\selectfont Z-SGD}
+      \put(-80,139){\fontsize{6}{3}\selectfont Sketching}
+      \put(-80,130){\fontsize{6}{3}\selectfont Random-K}    
+      \put(-80,121){\fontsize{6}{3}\selectfont Signum}
+      \put(-80,112){\fontsize{6}{3}\selectfont Noiseless SGD}
+    \captionof{figure}{Final test perplexity after 20k iterations \emph{(lower is better)} vs. power budget for \gptwo language modeling on \textsc{WikiText-103}. \miss consistently requires orders-of-magnitude less power than other methods for the same perplexity.}
+    \label{fig:llm}
+  \end{minipage}
+  \hspace{12pt}
+  \begin{minipage}[b]{0.42\textwidth}
+    \caption{Power required \emph{(lower is better)} to reach the target perplexity on \textsc{WikiText-103}. \ref{eq:awgn_sgd} sends the uncompressed gradients directly, while \miss sends a rank-4 approximation. \miss requires $16 \times $ less power than \textsc{Z-SGD} to achieve the target perplexity over a wide interval. In the very-high-power regime with perplexity close to that of the noiseless \ref{eq:sgd}, we see no power gains.}
+	\label{tab:llm-power-ratio}
+	\begin{tabularx}{\textwidth}{c c c c}
+    \toprule
+    \multirow{2}{*}{\bf Target} &
+    \multicolumn{2}{c}{\bf Power required} & 
+    \multirow{2}{*}{\bf Reduction} \\
+    
+    \cmidrule(lr){2-3}
+    
+      & \textsc{Z-SGD}  & \miss & \\
+    
+    \cmidrule(lr){1-1}\cmidrule(lr){2-3}\cmidrule(lr){4-4}
+    
+    $80$ &  $160\,\mathrm{K}$  & $10\,\mathrm{K}$ & $16\times$\\
+    $50$ & $640\,\mathrm{K}$ & $40\,\mathrm{K}$  & $16\times$\\
+    $40$ & $2560\,\mathrm{K}$ & $160\,\mathrm{K}$  & $16\times$\\
+    $35$ & $2560\,\mathrm{K}$ & $160\,\mathrm{K}$ & $16\times$\\
+    \bottomrule
+    \end{tabularx}
+  \end{minipage}
+\end{table*}
+
+In this work, we precisely address this and propose \miss, a principled gradient compression scheme for distributed training over wireless noisy channels. Specifically, we make the following contributions:
+\begin{itemize}
+    \item Capitalizing on the inherent low-rank structure of the gradients, \miss efficiently computes these low-rank factors and transmits them reliably over the noisy channel while allowing the gradients to be averaged in transit (\prettyref{sec:powercomm}). 
+    \item We show that \miss enjoys similar convergence rate as that of the classical SGD for both quasi-convex and non-convex functions, except for a small additive constant depending on the channel degradation (\prettyref{thm:main}).
+    \item 
+    We empirically demonstrate the superiority of \miss over the baselines on the challenging tasks of (i) language modeling with \gptwo $\rightarrow$ \wikileaks and (ii) image classification with \resnet $\rightarrow$ (\cifarten, \cifarhun) and \textsc{1-layer NN} $\rightarrow$ \mnist. With high gradient compression ($165 \times $), \miss achieves $50$-$64\%$ perplexity improvement in the low and moderate power regimes on \wikileaks. To the best of our knowledge, \miss is the first to exhibit such gains for GPT language modeling (\prettyref{sec:main_results}). 
+
+\end{itemize}
+
+
+
+{\bf Notation.} Euclidean vectors and matrices are denoted by bold letters $\bx, \by, \bM$, etc. $\| \cdot \| $ denotes the Frobenius norm for matrices and the $\ell_2$-norm for Euclidean vectors. $\mathcal{O}(\cdot)$ is an upper bound subsuming universal constants whereas $\tilde{\mathcal{O}}(\cdot)$ hides any logarithmic problem-variable dependencies.
+    
+    
+    
+    
+
+
+
+
+\section{Background}
+
+\label{sec:background}
+{\bf Distributed optimization}. Consider the (synchronous) data-parallel distributed setting where we minimize an objective $f:\reals^d \to \reals $ defined as the empirical loss on a global dataset $\calD=\{(\bx_j, y_j)\}_{j=1}^N $: 
+\looseness=-1
+\begin{align*}
+\min_{\btheta \in \reals^d} f(\btheta), \quad f(\btheta) \define \frac{1}{N} \sum_{j=1}^N \ell(\bx_j, y_j ;\btheta),
+\end{align*}
+where $\ell(\cdot)$ evaluates the loss for each data sample $(\bx_j, y_j)$ on model $\btheta$. In this setup, there are $k$ (data-homogeneous) training clients, where the $i^{\text{th}}$ client has access to a stochastic gradient oracle $\bg_i$, e.g. mini-batch gradient on a set of samples randomly chosen from $\calD$, such that $\Expect[\bg_i|\btheta] = \nabla f(\btheta)$ for all $\btheta \in \reals^d$. 
+In distributed SGD \citep{robbins1951stochastic, bottou2018optimization}, the server aggregates all $\bg_i$s and performs the following updates:
+\begin{equation}
+\label{eq:sgd}
+\tag{\textsc{SGD}}
+\begin{gathered}
+   \btheta_{t+1} = \btheta_t -  \gamma_t \cdot \frac{1}{k} \sum_{i=1}^k \bg_i^{(t)}, \\
+   \Expect[\bg_i^{(t)}|\btheta_t] = \nabla f(\btheta_t), \quad t \geq 0,
+  \end{gathered}
+\end{equation}
+where $\{\gamma_t \}_{t \geq 0}$ is a stepsize schedule. Implicit here is the assumption that the communication link between the clients and the server is noiseless, which we expound upon next.
+
+
+
+{\bf Communication model.} For the communication uplink from the clients to the server, we consider the standard wireless channel for over-the-air distributed learning \citep{amiri2020federated, guo2020analog, zhu2019broadband, chang2020mac, wei2022federated}: the \emph{additive slow-fading channel}, e.g., the classical multiple-access-channel \citep{nazer2007computation}.  The defining property of this family is the superposition of incoming wireless signals (enabling over-the-air computation) possibly corrupted together with an independent channel noise \citep{shi2020communication}. 
+Specifically, we denote the channel as a (random) mapping $\awgn_P(\cdot)$ that transforms the set of (time-varying) messages transmitted by the clients $\{\bx_i \}_{ i \in [k]} \subset \reals^d $ to its noisy version 
+$\by \in \reals^d$ received by the server:
+\begin{align}
+\begin{split}
+    \by &= \awgn_P(\setx) \define \sum_{i=1}^k \bx_i + \bZ,\\
+    &\hspace{5em}\norm{\bx_i}^2 \leq P_t, ~ \frac{1}{T}\sum_{t=0}^{T-1} P_t \leq P,
+\end{split} \label{eq:normal_awgn}
+\end{align}
+
+where the noise $\bZ \in \reals^d$ is independent of the channel inputs and has zero mean and unit variance per dimension, \ie $\Expect \norm{\bZ}^2=d$. The power constraint on each client $\norm{\bx_i}^2 \leq P_t$ at time $t$ serves as a communication cost (and budget), while the power policy $\{P_t\}$ allots the total budget $P$ over $T$ epochs as per the average power constraint \citep{wei2022federatedconvergence,amiri2020machine}.
+    A key metric that captures the channel degradation quality is the signal-to-noise ratio per coordinate ($\snr$), defined as the ratio between the average signal energy ($P$) and that of the noise ($d$), \ie $\snr \define P/d$. % (for signals of size $m\times n$, $\snr \define P/mn$).
+    The larger it is the better the signal fidelity. %; $\snr = \infty$ corresponds to the ideal scenario when there is no noise. 
+    The power budget $P$ encourages the compression of signals: if each client can transmit the same information $\bx_i$ via fewer entries (smaller $d$), they can utilize more power per entry (higher $\snr$) and hence a more faithful signal. 
+
+The downlink communication from the server to the clients is usually modeled as a standard broadcast channel \cite{Cover:1972}: for input ${\bx}$ with $\norm{\bx}^2 \leq P_b$, the output $\by_i = \bx + \bZ_i$, one for each of the clients. Usually in practice, $P_b \gg P$ and therefore we set $P_b = \infty$, though our results readily extend to finite $P_b$. 
+
+    
+In the rest of the paper by channel we mean the uplink channel. The channel model in \prettyref{eq:normal_awgn} readily generalizes to the fast fading setup as discussed in \prettyref{sec:main_results}.
+
+{\bf Gradient transmission over the channel.} In the distributed optimization setting the goal is to communicate the (time-varying) local gradients $\bg_i \in \reals^d$ to the central server over the noisy channel in \prettyref{eq:normal_awgn}. Here we set the messages $\bx_i$ as linear scaling of gradients (as we want to estimate the gradient average), \ie $\bx_i = a_i \, \bg_i$ with the scalars $a_i \in \reals$ enforcing the power constraints:
+\begin{align}
+    \label{eq:weightedgrad_awgn}
+    \by  =  \sum_{i=1}^k a_i \, \bg_i + \bZ, \quad \norm{a_i \, \bg_i}^2 \leq P_t.
+\end{align}
+Now the received signal is a weighted sum of the gradients corrupted by noise, whereas we need the sum of the gradients $\sum_i \bg_i$ (upto zero mean additive noise) for the model training. Towards this goal, a common mild technical assumption is that the gradient norms $\{ \norm{\bg_i} \}$ are known at the receiver at each communication round
+\citep{chang2020mac, guo2020analog} (can be relaxed in practice, \prettyref{sec:main_results}). The optimal scalars are then given by $a_i  =\sqrt{P_t}/(\max_j \norm{\bg_j}), \forall i \in [K]$, which are uniform across all the clients (\S~\ref{app:channel_transf}). 
+Now substituting this $a_i$ in \prettyref{eq:weightedgrad_awgn} and rearranging, the effective channel can be written as
+\begin{align}
+    \by = \tilde{\awgn}_{P}(\setg) \define \frac{1}{k} \sum_{i=1}^k \bg_i + \frac{\max_i \norm{\bg_i}}{k \sqrt{P_t}} \, \bZ.
+    \tag{noisy channel}
+    \label{eq:awgn_final}
+\end{align}
+Equivalently, we can assume this as the actual channel model where the server receives the gradient average corrupted by a zero mean noise proportional to the gradients. Note that the noise magnitude decays in time as gradients converge to zero.
+We denote $\tilde{\awgn}_{P}(\cdot)$ as simply $\awgn_P(\cdot)$ henceforth as these two mappings are equivalent.
+
+ 
+
+{\bf \textsc{Z-SGD}.} Recall that the \ref{eq:sgd} aggregates the uncompressed gradients directly. In the presence of the \ref{eq:awgn_final}, it naturally modifies to
+\begin{align}
+\btheta_{t+1} = \btheta_t - \gamma_t \, \awgnp(\{\bg_i^{(t)} \} ).
+    \tag{\textsc{Z-SGD}}
+    \label{eq:awgn_sgd}
+\end{align}
+Thus \gsgd is a canonical baseline to compare against. It has two sources of stochasticity: one stemming for the stochastic gradients and the other from the channel noise. While the gradient in the \gsgd update still has the same conditional mean as the noiseless case  (zero mean Gaussian in \ref{eq:awgn_final}), it has higher variance due to the Gaussian term. When $P = \infty$, \ref{eq:awgn_sgd} reduces to \ref{eq:sgd}. 
+
+
+
+\section{\miss: Novel linear compression cum transmission scheme}
+
+\label{sec:powercomm}
+
+\input{algo}
+
+\input{theory}
+
+
+
+\section{Experimental results}
+
+\label{sec:main_results} 
+
+We empirically demonstrate the superiority of \miss over state-of-the-art baselines on a variety of benchmarks, summarized in \prettyref{tab:tasks}.
+\begin{table}[t]
+\centering
+\caption{Benchmarks for evaluating \miss. Baseline refers to the  noiseless \ref{eq:sgd}.}
+    \small
+\label{tab:tasks}
+\begin{tabularx}{\linewidth}{l l l l}
+    \toprule
+    {\bf Model} &
+    {\bf Dataset} &
+    {\bf Metric} &
+    {\bf Baseline} \\
+    
+    \cmidrule(lr){1-1}\cmidrule(lr){2-2}\cmidrule(lr){3-4}
+
+    \textsc{GPT-2} ($123.6 \, \mathrm{M} $) &
+    \textsc{WikiText} &
+    Perplexity &
+    $19.2$ \\
+    
+    \cmidrule(lr){1-4}
+
+    \multirow{2}{*}{\resnet ($11.2 \, \mathrm{M} $)}&
+    \cifarten & \multirow{3}{*}{\shortstack{Top-1\\ accuracy}}
+    &
+    $93.0\%$ \\
+    & \cifarhun &
+     &
+    $ 73.1\% $ \\
+
+    \cmidrule(lr){1-1}\cmidrule(lr){2-2}\cmidrule(lr){4-4}
+    
+    $1$-\textsc{layer NN} ($7850$) & \mnist &   & $92.3\%$ \\
+
+    \bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.49\textwidth]{figures/cifar10-power-accuracy}
+      \put(-140,-2){\fontsize{8}{3}\selectfont Power budget}
+      \put(-238,80){\rotatebox[origin=t]{90}{\fontsize{8}{3}\selectfont Accuracy}}
+      \put(-74,62){\fontsize{6}{3}\selectfont LASER}
+      \put(-74,53.5){\fontsize{6}{3}\selectfont Z-SGD}
+      \put(-74,45){\fontsize{6}{3}\selectfont Sketching}
+      \put(-74,36.5){\fontsize{6}{3}\selectfont Random-K}    
+      \put(-74,28){\fontsize{6}{3}\selectfont Noiseless SGD}
+    \captionof{figure}{Test accuracy (\emph{higher the better}) for a given power budget on \textsc{Cifar-10} for different algorithms. \miss demonstrates consistent accuracy gains over the baselines over a wide range of power levels.}
+    \label{fig:cifar10}
+\end{figure}
+
+\begin{table}
+    \caption{Power required (\emph{lower the better}) to reach the given target accuracy on \textsc{Cifar-10}. \miss requires $16 \times $ lesser power than the \textsc{Z-SGD} to achieve the same targetaccuracy. Equivalently, \miss tolerates more channel noise than the \textsc{Z-SGD} for the same target accuracy as is partly supported by our theoretical analysis. }
+	\label{tab:power-ratio}
+    \centering
+	\begin{tabularx}{0.38\textwidth}{c c c c}
+    \toprule
+    \multirow{2}{*}{\bf Target} &
+    \multicolumn{2}{c}{\bf Power required} & 
+    \multirow{2}{*}{\bf Reduction} \\
+    
+    \cmidrule(lr){2-3}
+    
+      & \miss & \textsc{Z-SGD} & \\
+    
+    \cmidrule(lr){1-1}\cmidrule(lr){2-3}\cmidrule(lr){4-4}
+    
+    $88\%$ & $250$ & $4000$ & $16\times$\\
+    $89\%$ & $500$ & $8000$ & $16\times$\\
+    $90\%$ & $1000$ & $16000$ & $16\times$\\
+    $91\%$ & $2000$ & $32000$ & $16\times$\\
+    \bottomrule
+    \end{tabularx}
+\end{table}
+
+{\bf Setup.} We consider four challenging tasks of practical interest: (i) \gpt language modeling on \wikileaks, and (ii, iii, iv) image classification on \mnist, \cifarten and \cifarhun. For the language modeling, we use the \gptwo like architecture following \citet{pagliardini-llm} (\S~\ref{app:add_exp}). \resnet is used for the \textsc{Cifar} datasets. For \mnist, we use a $1$-hidden-layer network for a fair comparison with \citet{amiri2020machine}. For distributed training of these models, we consider $k=4$ clients for language modeling and $k=16$ for image classification. We simulate the noisy channel by sampling $\bZ \sim \calN(0, \id_d)$. To gauge the performance of algorithms over a wide range of noisy conditions, we vary the power $P$ geometrically in the range $[0.1, 10]$ for \mnist, $[250, 128000]$ for \cifarten and \cifarhun, and $[10000, 1024 \times 10000]$ for \wikileaks. The chosen ranges can be roughly split into low-moderate-high power regimes. Recall from \ref{eq:awgn_final} that the smaller the power, the higher the noise in the channel.
+
+{\bf Baselines.} We benchmark \miss against three different sets of baselines: (i) \ref{eq:awgn_sgd}, (ii) \signum, \randk, \sketch, and (iii) \adsgd. \gsgd sends the uncompressed gradients directly over the noisy channel and acts as a canonical baseline. The algorithms in (ii) are state-of-the-art distributed compression schemes for noiseless communication \citep{vogels2019powersgd}. \signum \citep{bernstein2018signsgd} transmits the gradient sign followed by the majority vote and \sketch \citep{rothchild2020fetchsgd,haddadpour2020fedsketch} uses a Count Mean Sketch to compress the gradients. We omit comparison with quantization methods \citep{vargaftik2022eden} given the difference in our objectives and the settings (\ref{eq:awgn_final}). \adsgd \citep{amiri2020machine} is a popular compression scheme for noisy channels, relying on Top-K and random sketching. However \adsgd does not scale to tasks of the size we consider and hence we benchmark against it only on \mnist. \ref{eq:sgd} serves as the noiseless baseline (\prettyref{tab:tasks}). All the compression algorithms use the error-feedback, and use the compression factor (compressed-gradient-size/original-size) $0.2$, the optimal in the range $[0.1, 0.8]$. We report the best results among $3$ independent runs for all the baselines (\S~\ref{app:add_exp}). 
+
+\subsection{Results on language modeling and image classification}
+\label{sec:specific_results}
+
+For \gpt language modeling, \prettyref{fig:llm} in \prettyref{sec:intro} highlights that \miss outperforms the baselines over a wide range of power levels. To the best of our knowledge, this is the first result of its kind to demonstrate gains for \gpt training over noisy channels. Specifically, we obtain $64\%$ improvement in perplexity over Z-SGD ($76$ vs. $212$) in the low power regime ($P = 10 \, \mathrm{K}$) and $50\%$ ($35$ vs. $71$) for the moderate one ($P=160\, \mathrm{K}$). This demonstrates the efficacy of \miss especially in the limited power environment. Indeed, \prettyref{tab:llm-power-ratio} illustrates that for a fixed target perplexity, \miss requires $16 \times$ less power than the second best, \ref{eq:awgn_sgd}. In the very high power regime, we observe no clear gains (as expected) compared to transmitting the uncompressed gradients directly via the \gsgd.
+
+We observe a similar trend for \cifarten classification, as \prettyref{fig:cifar10} and \prettyref{tab:power-ratio} demonstrate the superiority of \miss over other compression schemes; \randk does better than the other baselines till moderate power levels after which \gsgd dominates. \signum is considerably worse than others, as it hasn't converged yet after $150$ epochs, and hence omitted. With regards to power reduction, \prettyref{tab:power-ratio} highlights that \miss requires just $(1/16)^{\text{th}}$ the power compared to \gsgd to reach any target accuracy till $91\%$. We observe similar gains for \cifarhun (\S~\ref{app:add_exp}).
+\prettyref{tab:mnist} compares the performance of \miss against various compression algorithms on \mnist. In the very noisy regime ($P=0.1$), \randk is slightly better than   \miss and outperforms the other baselines, whereas in the moderate ($P=1$) and high power ($P=10$) regimes, \miss is slightly better than the other algorithms. On the other hand, we observe that \adsgd performs worse than even simple compression schemes like \randk in all the settings. 
+
+
+\begin{table*}
+  \centering
+  \small
+  \begin{minipage}[t]{0.52\textwidth}
+    \caption{Test accuracy (\emph{higher the better}) after $50$ epochs on \mnist for low, moderate, and high power regimes.}   \centering
+    \label{tab:mnist}%
+    \begin{tabularx}{1\linewidth}{Xlll}
+    \toprule
+    \multirow{2}{*}{\bf Algorithm} & \multicolumn{3}{c}{\bf Test accuracy} \\
+    
+    \cmidrule(lr){2-4}
+   & $P=0.1$ & $P=1$ & $P=10$ \\
+    \cmidrule(lr){1-1}\cmidrule(lr){2-4}
+    Z-SGD & $81.3\%$ & $87.9\%$ & $91.9\%$ \\
+    \cmidrule(lr){1-4}
+    \signum & $76.7\%$ & $83.2\%$ & $85.4\%$ \\
+    \randk & ${\bf 86.1\%}$  & $89.3\%$ & $91.5\%$ \\
+    \sketch & $81.9\%$ & $88.2\%$ & $91.7\%$ \\
+    \cmidrule(lr){1-4}
+    \adsgd & $81.6\%$ & $86.9\%$ & $87.3\%$ \\
+
+    \miss & $84.3\%$ & ${\bf 89.9 \% }$ & ${\bf 92.3\% }$ \\
+    
+    \bottomrule
+\end{tabularx}
+  \end{minipage}
+\hspace{12pt}
+  \begin{minipage}[t]{0.42\textwidth}
+    \caption{Communication cost (\emph{lower the better}) for \gpt language modeling on \wikileaks. \miss transmits the lowest volume of data during training.}
+    \centering 
+    \label{tab:complexity}
+    \begin{tabularx}{1\linewidth}{Xll}
+        \toprule
+        {\bf Algorithm} &
+        \multicolumn{2}{l}{\bf Data sent per iteration} \\
+        
+        \cmidrule(lr){1-3}
+
+        Z-SGD & $496\,\mathrm{MB}$ & {\color{gray}($1 \times$)} \\
+        \cmidrule(lr){1-3}
+        
+        \signum & $15\,\mathrm{MB}$  & {\color{gray}($33 \times$)} \\
+        \randk & $99\,\mathrm{MB}$ &  {\color{gray}($5 \times$)} \\
+        \sketch & $99\,\mathrm{MB}$ &  {\color{gray}($5 \times$)} \\
+        \cmidrule(lr){1-3}
+        \adsgd & $\mathrm{n/a}$ & $\mathrm{n/a}$ \\
+
+        \miss & ${\bf 3\,\mathrm{\bf MB} }$ &  {\color{gray}($165 \times$)} \\
+        
+        \bottomrule
+    \end{tabularx}
+  \end{minipage}
+\end{table*}
+
+\subsection{Power control: static vs. dynamic policies}
+\label{sec:power-policy}
+\begin{figure}[t]
+  \begin{center}
+ \includegraphics[width=0.49\textwidth]{figures/power-epoch-full-bw}
+    \put(-140,-2){\fontsize{7.5}{3}\selectfont Power budget $P$}
+    \put(-238,80){\rotatebox[origin=t]{90}{\fontsize{7.5}{3}\selectfont Accuracy after 150 epochs}}
+    \put(-72,71){\fontsize{6}{2}\selectfont LASER, constant}
+    \put(-72,62){\fontsize{6}{2}\selectfont LASER, linear}
+    \put(-72,53){\fontsize{6}{2}\selectfont LASER, step}
+    \put(-72,44){\fontsize{6}{2}\selectfont Z-SGD, constant}
+    \put(-72,35){\fontsize{6}{2}\selectfont Z-SGD, linear}
+    \put(-72,26){\fontsize{6}{2}\selectfont Z-SGD, step}
+ \end{center}
+     \caption{Accuracy vs. budget $P$ for various laws. Constant is the best for both \miss and \gsgd. }
+    \label{fig:power-policy}
+\end{figure}
+The formulation in \ref{eq:awgn_final} allows for any power control law $P_t$ as long as it satisfies the average power constraint: $\sum_t (P_t/T) \leq P$.
+This begs a natural question: \emph{what's the best power scheme for LASER?}
+To answer this, for \cifarten classification, under a fixed budget $P$ we consider different power policies  with both increasing and decreasing power across epochs: the constant, piecewise constant and linear schemes.
+\prettyref{fig:power-policy} illustrates the results for the decreasing power laws, while \prettyref{fig:power-policy-increasing} their increasing counterparts. These results highlight that the \emph{constant} power policy achieves the \emph{best} performance for both LASER and Z-SGD, compared to the time-varying ones. Further LASER attains significant accuracy gains over Z-SGD for all the power control laws. Interestingly LASER performs the \emph{same} with all the power schemes. We posit this behavior to the fact that the \ref{eq:awgn_final} already contains a time-varying noise due to the term $\frac{\max_i \|\| \boldsymbol{g}_i \|\| }{\sqrt{P_t}}$. Since the gradients decay over time, this inherently allows for an implicit power/SNR-control law even with a constant $P_t$, thus enabling the constant power scheme to fare as good as the others. Hence, without loss of generality, we consider the static power schedule for our theory and experiments. We refer to \S~\ref{app:power-policy} for a detailed discussion.
+
+
+
+
+
+ 
+\subsection{Computational complexity and communication cost}
+\label{sec:complexity}
+Recall from \prettyref{algo:miss_comm} that the two critical components of \miss are gradient compression and channel transmission. To gauge their efficacy we analyze them via two important metrics: (i) \emph{computational complexity} of compression and (ii) \emph{communication cost} of transmission. For (ii), recall from \prettyref{eq:normal_awgn} that the power constraint indirectly serves as a communication cost and encourages compression. \prettyref{tab:complexity} quantitatively measures the total data sent by clients for each training iteration (doesn't change with the power $P$) for \gpt language modeling on \wikileaks. As illustrated, \miss incurs the lowest communication cost among all the baselines with $165 \times$ cost reduction as compared to the Z-SGD, followed by \signum which obtains $33 \times$ reduction. Interestingly, \miss also achieves the best perplexity scores as highlighted in \prettyref{fig:llm}.  For these experiments, we let rank $r=4$ for \miss and the best compression factor $0.2$ for the baselines (as detailed earlier). \signum does not require any compression factor. For (i), since LASER relies on PowerSGD for the rank decomposition, it inherits the same low-complexity benefits: Tables $3$-$7$ of \citet{vogels2019powersgd} demonstrate that PowerSGD is efficient with significantly lower computational needs and has much smaller processing time/batch as compared to baselines without any accuracy drop. In fact, it is the core distributed algorithm behind the recent breakthrough DALL-E (\S~E in \citet{ramesh2021zero}).
+\looseness=-1
+
+
+
+{\bf Slow and fast fading channels.} The slow/non-fading model in \prettyref{eq:normal_awgn} readily generalizes to the popular fast fading channel \citep{guo2020analog, amiri2020federated}: $\by = \sum_i \gamma_i \bx_i + \bZ$, where $\gamma_i$ are the channel fading coefficients. A standard technique here in the literature is to assume that channel-state-information (CSI) is known in the form of fading coefficients or their statistics, which essentially reduces the problem to a non-fading one. Likewise LASER can be extended to the fast fading channel as well. 
+\looseness=-1
+
+
+{\bf Related work.} \textbf{(i) Compression schemes with noiseless communication.} Assuming a noiseless bit pipe from clients to the server, quantization methods \citep{dettmers20158,alistarh2017qsgd,horvoth2022natural,li2018network, wen2017terngrad,yu2019exploring, vargaftik2021drive} quantize each coordinate and send as fewer bits as possible. Sparsification techniques \citep{ivkin2019communication, stich2018sparsified, sun2019sparse,tsuzuku2018variance,wangni2018gradient} send a reduced number of coordinates, based on criteria such as Top/Random-K, as opposed to sending the full gradient directly. Hybrid methods \citep{dryden2016communication,lim20193lc} combine both. Rank compression methods \citep{yu2018gradiveq, cho2019gradzip, wang2018atomo} spectrally decompose gradient matrix (often via SVD) and transmit these factors. Since SVD is computationally prohibitive, we rely on the state-of-the-art light-weight compressor PowerSGD~\citep{vogels2019powersgd}. {\bf (ii) Compression schemes for noisy channels.}
+The main idea here is to enable over-the-air-aggregation of gradients via the superposition nature of wireless channels~\citep{nazer2007computation} thus reducing the communication latency and bandwidth. The popular \adsgd~\citep{amiri2020machine} relies on Top-K sparsification and random sketching. However, being memory intensive, \adsgd is restricted to \mnist with $1$-layer NN and doesn't scale beyond. \citet{guo2020analog} propose an analog-gradient-aggregation scheme but it is limited to shallow neural networks. \citet{chang2020mac} design a digital quantizer for training over Gaussian MAC channels. {\bf (iii) Power laws.} In the absence of explicit power constraints, \citet{wei2022federated} show that $\mathcal{O}(1/t^2)$ noise-decay ensures the standard $1/T$ convergence rate for noisy FED-AVG whereas \citet{saha2022} propose a $t^{0.8}$ increase in SNR for the decentralized setup.  
+\looseness=-1
+
+
+
+\section{Conclusion}
+
+\label{sec:concl}
+We propose a principled gradient compression scheme, \miss, for wireless distributed optimization over additive noise channels. LASER attains significant gains over its baselines on a variety of metrics such as accuracy/perplexity, complexity and communication cost. It is an interesting avenue of future research to extend LASER to channels with downlink noise and fast fading without CSI.% , etc. 
+
+
+

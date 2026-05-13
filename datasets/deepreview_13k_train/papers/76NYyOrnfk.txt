@@ -1,0 +1,200 @@
+\title{FastAttention: Extend FlashAttention2 to NPUs and Low-resource GPUs for Efficient Inference}
+
+\begin{abstract}
+FlashAttention series has been widely applied in the inference of large language models (LLMs). However, FlashAttention series only supports the high-level GPU architectures, e.g., Ampere and Hopper. At present, FlashAttention series is not easily transferrable to NPUs and low-resource GPUs. Moreover, FlashAttention series is inefficient for multi- NPUs or GPUs inference scenarios.   
+In this work, we propose FastAttention which pioneers the adaptation of FlashAttention series for NPUs and low-resource GPUs to boost LLM inference efficiency. Specifically, we take Ascend NPUs and Volta-based GPUs as representatives for designing our FastAttention. We migrate FlashAttention series to Ascend NPUs by proposing a novel two-level tiling strategy for runtime speedup, tiling-mask strategy for memory saving and the tiling-AllReduce strategy for reducing communication overhead, respectively. Besides, we adapt FlashAttention for Volta-based GPUs by redesigning the operands layout in shared memory and introducing a simple yet effective CPU-GPU cooperative strategy for efficient memory utilization. 
+On Ascend NPUs, our FastAttention can achieve a 10.7$\times$ speedup compared to the standard attention implementation. Llama-7B within FastAttention reaches up to 5.16$\times$ higher throughput than within the standard attention. 
+On Volta architecture GPUs, FastAttention yields 1.43$\times$ speedup compared to its equivalents in xformers. Pangu-38B within FastAttention brings 1.46$\times$ end-to-end speedup using FasterTransformer.
+Coupled with the propose CPU-GPU cooperative strategy, FastAttention supports a maximal input length of 256K on 8 V100 GPUs. All the codes will be made available soon.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Recent years have witnessed the impressive performance of transformer-based large language models (LLMs) (Zhao et al., 2023; Vaswani et al., 2017; Kaplan et al., 2020) in understanding and generative tasks (Ainslie et al., 2023; Viggiato & Bezemer, 2023; Peng et al., 2023; Beltagy et al., 2020). It’s noteworthy that the runtime and memory requirements of Transformer-based LLMs scale quadratically with the input sequence length. Dao et al. (2022) proposed FlashAttention series algorithms to reduce the runtime requirements and decrease memory usage from quadratic to linear complexity with regard to sequence lengths, of which FlashAttention2/3 (Dao, 2023; Shah et al., 2024) is widely used in the domain (Aminabadi et al., 2022; Shoeybi et al., 2020; NVIDIA, 2023b; Wu et al., 2023).  
+
+However, the FlashAttention series is typically designed for resource-rich Graphics Processing Units (GPUs) featuring high-level architectures, e.g., FlashAttention2 for Ampere and FlashAttention3 for Hopper (Jia & Van Sandt, 2021; Choquette, 2022). We identify three limitations of FlashAttention: 1) For architectures with lower capabilities, e.g., Volta (Choquette et al., 2018), and non-CUDA architectures, e.g., the architectures of Neural network Processing Units (NPUs), the existing FlashAttention project is not applicable. Additionally, xFormers implements the memory-efficient attention for V100 GPUs with suboptimal computational efficiency (Lefaudeux et al., 2022; Rabe & Staats, 2021). Moreover, a dedicated version of FlashAttention has been developed to support AMD GPUs (AMD, 2024). 2) The FlashAttention series exhibits inefficiency in distributed inference across multiple devices, arising from the communication overhead incurred by the AllReduce operations. 3) Under the constraints of limited device memory, FlashAttention can not enable inference with ultra-long sequences on a single node within multi-NPUs and multiple low-resource GPUs. The limitations are caused by the significant differences in architectures and instruction sets, which pose challenges to adapting the existing FlashAttention for NPUs and low-resource GPUs, as detailed in $\S\ 3$ . In particular, directly transferring the workflow of the FlashAttention series to NPUs is inefficient, which means the techniques used in FlashAttention, such as tiling and work partitioning, typically can only exploit partial capabilities of non-CUDA architectures. As shown in Table 2.  
+
+Given the numerous inference systems that rely on low-resource GPUs and economical NPUs, failing to deploy FlashAttention in these systems could have significant adverse impacts. To address the issues mentioned above, we propose FastAttention, a pioneering adaptation of FlashAttention series for NPUs and low-resource GPUs with more efficiency. Without loss of generality, we design FastAttention for Ascend NPUs, e.g., Ascend 910B, and Volta-based GPUs, e.g., V100, serving as examples of the FlashAttention extension for NPUs and low-resource GPUs. Our contributions are summarized as follows:  
+
+• On NPUs, We propose a generalizable two-level tiling strategy, tiling-mask strategy and tiling-AllReduce strategy to save memory and improve runtime speedup for the adaption of FlashAttention. Remarkably, to the best of our knowledge, we are the first to map FlashAttention series on NPUs.   
+• We provide the implementation of FlashAttention tailored for low-resource GPUs, alongside a fine-grained CPU-GPU cooperative strategy to scale up the maximum input sequence length.   
+• Experimental results demonstrate that FastAttention achieves a $10.7\times$ speedup over the standalone implementation and provides a $5.16\times$ higher throughput compared to not using it on Ascend NPUs. On Volta-based GPUs, FastAttention achieves up to $1.43\times$ speedup when compared to its equivalents in xformers, enabling a $1.46\times$ lower latency and supporting a maximal input length of 256K when using FasterTransformer on a single node.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+Large Transformers: Large Transformers, characterized by their extensive parameters and layers, are primarily employed for complex tasks such as natural language processing (NLP) and computer vision (Voulodimos et al., 2018). In these models, particularly in LLMs like GPT (Achiam et al., 2023), the attention mechanism plays a pivotal role, consuming a significant portion of computational resources. Although models such as Vision Transformers (ViT) and Diffusion Transformers (Spolaore & Wacziarg, 2009; Yuan et al., 2021) also incorporate attention mechanisms, the proportion of computation dedicated to attention in these models is relatively small. Consequently, the FlashAttention series is more specifically tailored to large transformer models, where attention computations are more prominent.  
+
+FlashAttention series algorithms: FlashAttention employs tiling and recomputation to minimize the number of memory access between the on-chip SRAM (a.k.a shared memory) and high bandwidth memory (HBM). It introduces frequent data flow via SRAM between Tensor Core and Cube Core (Choquette et al., 2021; Markidis et al., 2018). FlashAttention2 further optimizes the workflow of FlashAttention, exhibiting better parallelism and work partitioning. Based on the characters of newer GPU architectures, such as Hopper and Blackwell, FlashAttention3 hides the the nonGEMM operations under asynchronous General Matrix Multiplication (GEMM) with asynchronous instructions to further improve performance. However, FlashAttention2/3 only supports the resource-rich GPUs, neglecting low-resource GPUs and powerful NPUs. What’s more, FlashAttention series lacks the capability to reduce the memory occupied by attention mask and decrease the communication overhead introduced by AllReduce.  
+
+Ultra-long sequence inference: Limited device memory poses a significant constraint, rendering FlashAttention series incapable of supporting inference with ultra-long sequences (e.g., 256K) on a single node. Notably, the offloading is generally coupled with attention optimization for efficient memory utilization. For instance, both FlexGen (Sheng et al., 2023) and DeepSpeed-Inference (Aminabadi et al., 2022) design a classical offloading strategies that schedules data among GPUs, CPUs, and disks but lacks fine-grained pipeline design.  
+
+
+
+\section{3 NPUS AND LOW-RESOURCE GPUS  }
+
+
+Similarity between NPUs and GPUs: Most of the NPUs, such as Ascend NPUs, Hanguang NPUs, and Cambricon-series NPUs (Liao et al., 2021; Jiao et al., 2020; Song et al., 2023), are designed for high throughput and energy efficiency (Chen et al., 2020; Han & Yoo, 2023; Ahn et al., 2022). Taking Ascend NPUs as a representative, as shown in Figure 1, Ascend NPUs share similar design principles with GPUs, such as AI Cores corresponding to SMs in GPUs, Vector units corresponding to Cuda Cores and Cube units corresponding to Tensor Cores. Specifically, Cube units handle matrix computations while Vector units manage element-wise computations.  
+
+![](images/0db23ee7364df0bc7d55d66ac63a3d71680c06a07aa9551b90b91fe494346536.jpg)  
+Figure 1: The comparison of architectures between resource-rich GPUs and Ascend NPUs  
+
+Differences between NPUs and GPUs: 1) Decoupled architecture. Each AI Core in Ascend NPUs integrates Cube, Vector, and Scalar units. The Cube units are decoupled from the Vector units, facilitating data exchange through the L2 buffer and global memory (GM), while Tensor Cores in GPUs interface with CUDA Cores via the shared memory. Consequently, the frequent data flow between Tensor Cores and CUDA Cores can limit the beneftis of the decoupled architecture due to the synchronization overhead between the Cube and Vector units. In contrast, the decoupled architecture in Ascend NPUs enables seamless pipelining between Cube and Vector units, suggesting that the optimal programming model for Ascend NPUs follows a pipelined approach. This design allows element-wise computations by the Vector unit to overlap with matrix computations by the Cube unit, requiring a redesign of efficient attention mechanisms on NPUs from an overlapping perspective. 2) Memory hierarchy. In GPUs, Tensor Cores and Cuda Cores share access to the L2 cache, L1 cache, and register flies. In contrast, the Cube units in NPUs are equipped with L0 buffers, which are absent in the Vector units, and feature a larger L1 buffer compared to the latter. The tiling method employed in FlashAttention fails to fully leverage the L1 buffer. To maximize the performance of NPUs, a meticulously designed data flow is essential. 3) SDMA. Ascend NPUs support System Direct Memory Access (SDMA) (Huawei, 2023b), which enables them to execute computation and communication in parallel. It’s imperative to redesign FlashAttention algorithm to fully capitalize on SDMA, thereby reducing communication overhead and enhancing overall efficiency during inference.  
+
+Low-resource GPUs versus high-end GPUs: Low-resource GPUs exhibit similar architectures and memory hierarchies (HBM and SRAM) while different Tensor Cores for matrix computations compared to the resource-rich GPUs, resulting in distinct requirements for data layout in SRAM. This variation in data layout presents significant challenges when extending FlashAttention series to low-resource GPUs. Notably, high-level architectures like Ampere and Hopper already feature efficient attention implementations, i.e., FlashAttention series. GPUs with lower-level architectures than Volta do not possess Tensor Cores, which are essential for implementing various efficient attention mechanisms. For this reason, we take the Volta-based GPUs as representatives in our work.  
+
+Why we refer to FastAttention as an extension of FlashAttention: Due to the similarities between GPUs and NPUs, some basic ideas inside FlashAttention series, such as fused blocked GEMM and online softmax, can be also employed on NPUs with non-trivial implementation. However, significant differences in architecture, memory hierarchy, and SDMA necessitate a tailored redesign to fully leverage NPU capabilities. FlashAttention series is also not applicable for low-resource GPUs, as they require distinct data layouts and block partitioning strategies to utilize Tensor Cores. Moreover, FlashAttention is not optimized for multi-NPU or multi-low-resource GPU scenarios. In contrast, FastAttention incorporates only a few basic ideas from FlashAttention while introducing substantial novel techniques as detailed below, extending FlashAttention in both design techniques and applicability.  
+
+
+
+\section{4 METHODOLOGY  }
+
+
+We considers different application scenarios to design FastAttention: 1) In single-NPU scenarios, FastAttention features a two-level tiling strategy for the NPU’s computational power utilization and an architecture-independent tiling-mask strategy for memory saving. 2) In multi-NPU scenarios, building upon the prior method, FastAttention further integrates the tiling-AllReduce strategy to minimize the communication overhead. 3) For low-resource GPUs such as those with Volta architecture, FastAttention applies the standard FlashAttention2 kernel and redesigns the shared memory layout of operands in FlashAttention2 to adapt the instructions of Volta architectures. 4) In case GPU memory is insufficient for inference, FastAttention equips a fine-grained CPU-GPU cooperative strategy with the prior standard kernel to fully utilize the CPU’s computing power and memory.  
+
+![](images/cd48694053703783e6ebbf5639b2d023ff24ed92fba0d7afe28f6d27774085f7.jpg)  
+4.1 FASTATTENTION ON A SINGLE NPU  
+Figure 2: a) The unified tiling scheme with the fine-grained pipeline of Vector and Cube units; b) The two-level tiling strategy that employs the larger block size in the first level and maintains the smaller block size in the second level.  
+
+In this section, we delve into the redesign of the FlashAttention2 operator for Ascend NPUs. Initially, drawing upon the standard FlashAttention2 implementation for GPUs, we develop a standard FlashAttention2 kernel for Ascend NPUs, which employs the unified tiling strategy illustrated in the left of Figure 2. Specifically, considering the L1 buffer sizes in Ascend NPUs, we distribute the $Q$ matrix across the Ascend NPU’s AI Core units and split the input matrices $\kappa$ and $V$ along the sequence length (S dimension) into small blocks.  
+
+Pipeline: Each of these small tiling blocks follows computations sequentially executed by Cube and Vector units. This design allows Vector and Cube units to work in tandem, achieving a better pipeline for efficient parallel computation. For instance, when the block0 performs the $E x p$ calculation by the Vector unit, the block1 will perform the matrix multiplication of $Q*K^{T}$ by the Cube unit.  
+
+NPU-specific two-level tiling strategy: The unified tiling strategy employs small block size, leading to the frequent data flow between Cube unit and Vector unit via L2 buffer, which in turn introduces significant synchronization overhead. Additionally, the distinct computational characteristics and discrepancy in L1 buffer size between Cube and Vector units result in underutilization of the Cube’s L1 buffer. To address the issues, we propose a novel two-level tiling strategy. The two-level tiling strategy is depicted in the right of Figure 2. In the first level, we adopt larger block sizes than the former implementation for Cube unit, which can effectively decrease the number of synchronizations. Additionally, we optimize the pipeline parallelism of Vector and Cube by utilizing the doublebuffering technique on GM. Furthermore, this design allows the Cube unit to load larger continuous blocks for the utilization of memory bandwidth. Considering the limited L0 and L1 size, we split the large blocks into several small blocks along row dimension for Vector unit. This design provides a more refined pipeline over the multi-level memory of each computing unit. What’s more, we also apply the double-buffering technique to overlap the data transfer and computation in the second level.  
+
+Tiling-mask: Besides, we propose an architecture-agnostic tiling-mask strategy to eliminate the memory requirement for attention mask. Specifically, we implement an attention mask generator that uses a small mask matrix with the dimensions of $(2*M)*(\bar{2}*M)$ ( $M$ represents the maximal block size) to substitute the complete attention mask matrix with the dimensions of $S*S$ ( $S$ represents the sequence length). The complete attention mask matrix is a lower triangular matrix. Due to the tiling strategy implemented in FlashAttention2, the corresponding attention score blocks need to be masked by a smaller mask matrix (abbreviated as $B$ -mask) with the same block size dimension. It is important to note that the block size (abbreviated as $b$ ) of the B-mask should be less than $M$ .  
+
+The attention mask generator can generate the $B$ -mask matrices required for any attention score block by the mask matrix with dimensions of $(\dot{2}*M)*(2*M)$ (abbreviated as $M^{.}$ -mask). For instance, as depicted in Figure 3, a $M^{.}$ -mask matrix $(6*6)$ can be split into multiple $B$ -  
+
+![](images/234eeadb7783b0bd943b3777a13c0175bd16e50b44d374293fa2f54ec3a82c21.jpg)  
+
+masks when $b$ is 3. Each attention scoreFigure 3: In case $b=3,M=3$ , a $M$ -mask matrix can be block can search for the required $B$ -masksplit into $^{6\,B}$ -mask matrices required by any given blocks within the $M$ -mask matrix by employingthrough shifting.  
+
+mathematical transformations.  
+
+Furthermore, there are two particular scenarios: all values within the $B$ -mask are 0, and all values within the $B$ -mask are 1. In the first scenario, we can directly skip the computation for that block, saving approximately $50\%$ of the Cube computation. For the scenario where all values within the block are 1, we can directly skip the computation of $Q*K^{T}+m a s k$ , thereby reducing the calculation for the vector. Tiling-mask can significantly reduce memory consumption. For instance, the attention mask matrix requires 8GB GPU memory $(b a t c h s i z e=1$ , sequence length $\prime=64K$ ) while $M$ -mask $M=512$ ) only demands 256KB.  
+
+![](images/5af36574567e49ebfd91ba463026527684b294c82c49d4f84ef931b5fd1b720a.jpg)  
+4.2 FASTATTENTION IN MULTI-NPU SCENARIOS   
+Figure 4: The pipeline of FastAttention with tiling-AllReduce strategy using different block sizes. Tiling-AllReduce strategy for multi-NPUs: When each NPU completes the attention and Linear calculation in multi-NPU scenarios, AllReduce is employed to gather the computation results. Note that FlashAttention series accelerates the calculation of $\begin{array}{r}{x_{o}=S o f t m a x(\frac{Q K^{T}}{\sqrt{d}})V}\end{array}$ , the Linear calculation implys the multiplication of $x_{o}$ and the $W_{o}$ matrix. Building upon the prior work, we fuse the attention and Linear calculation into a more efficient kernel and employ the tiling-AllReduce strategy to reduce the communication overhead. Specifically, we split the AllReduce operation into multiple AllReduce operations (abbreviated as B-allreduce) on a per-block basis. The B-allreduce operations are overlapped with block calculations to improve performance.  
+
+As shown in Figure 4, we partition the input matrix Q with shape $B*S*N*D$ (batch size, sequence length, number of heads, and head dimension defined by B, S, N, D, respectively) into multiple blocks along the dimension $B*S$ on each Ascend NPU. For each independent block, FastAttention will sequentially complete the attention calculation, Linear calculation, and the B-allreduce communication. The B-allreduce in a block can be overlapped with the calculation of other blocks due to the SDMA supported by Ascend NPUs. In this way, except for the first block, the other blocks can efficiently reduce the communication overhead. In order to minimize the impact of the computation time of the first block, we assign smaller computation tasks to the first block. Moreover, the tiling method minimizes the data transferred per communication, leading to underutilization of bandwidth capacity. Therefore, we enlarge the block size to achieve better bandwidth utilization. The new tiling method is illustrated in the right of Figure 4.  
+
+
+
+\section{4.3 FASTATTENTION ON LOW-RESOURCE GPUS  }
+
+
+In this section, we provide a computation-efficient adaptation of FlashAttention2 for Volta-based GPUs. The main issue encountered in porting FlashAtention2 to the Volta-based GPUs is the hardcoded use of MMA (matrix multiply and accumulate) operations, which is supported only in Nvidia architectures above or equal to Ampere. The code assumes the use of the $\mathrm{m}16\mathrm{n}8\mathrm{k}16$ and $\mathrm{m}1\,6\,\mathrm{n}\,8\,\mathrm{k}\,8$ Tensor Core instructions, while the V100 supports only $\mathrm{m}8\,\mathrm{n}8\,\mathrm{k}4$ one. As shown in Figure 5, Volta architecture implements an MMA instruction where a group of 8 threads called a quadpair (QP) collaborate to share data and perform an $8\mathrm{x}8\mathrm{x}4$ MMA. In this figure, T stands for the index of the thread in a warp. Since a warp is 32 threads wide, it would perform an MMA across 4 QPs for a tile size of 16x16x4. While Ampere MMA instruction $\mathrm{m}16\,\mathrm{n}8\,\mathrm{k}16$ operates at the granularity of 1 Warp. Hence, these operations have completely different partitioning of the input data and the resulting output. Furthermore, the implementation of many FlashAttention2 methods, such as softmax, causal masking, and transposing the data layout, can only work for Ampere and above. For example, the function convert layout acc rowcol that transforms the layout cannot be used for Volta MMA.  
+
+![](images/adb5f2a65d47194484716167fd3501af9f159daa86e7c6d122cc3363717dc897.jpg)  
+Figure 5: An example of MMA instruction $\mathrm{m}8\,\mathrm{n}8\,\mathrm{k}4$ for Volta.  
+
+To address the issues, we carefully redesign the data layout in SRAM with the CuTe library (Nvidia, 2023) to accommodate Volta instruction sets. And we base on Volta $\mathrm{m}8\mathrm{n}8\mathrm{k}4$ instruction with FP16 accumulators to create a converter for the data layout redesign. Our codes are flexible and adaptable for any Volta-based GPU. The CuTe library typically focuses on new-generation GPUs and lacks the SRAM and HBM layouts examples for the Volta architecture. We delve extensively into the CuTe sources to redesign the data layout to eliminate bank conflicts (Nvidia, 2024) in SRAM access and make coalesced access to HBM. In the end, we successfully port the FlashAttention2 implementation on Volta-based GPUs, which provides better performance.  
+
+![](images/8fd4aad79f9eeb2f1371c4f545e4f8d83a16859079815d638c181fdf0fa8c4af.jpg)  
+4.4 FASTATTENTION FOR ULTRA-LONG SEQUENCES IN MULTIPLE LOW-RESOURCE GPUS SCENARIOS   
+Figure 6: The pipeline of the CPU-GPU collaborative strategy during preflil stage and decoding stage.  
+
+For inference on multiple low-resource GPUs, we propose a CPU-GPU cooperative strategy coupled with our efficient attention kernel to extend the maximal input sequence length and exhibit better performance than the classical offloading. The detailed description of this strategy is as follows: 1) In case the GPU memory is sufficient for inference, there is no need to employ the offloading method. 2) Otherwise, our strategy will manage the memory of CPUs and GPUs. The strategy calculates the value of $L_{C P U}$ and $L_{G P U}$ , which means the number of layers where the KV cache is stored on CPUs and the number of layers where the KV cache is stored on GPUs, respectively. The $L_{G P U}$ and $L_{C P U}$ can be computed by: $\begin{array}{r}{L_{G P U}\,=\,\frac{M_{G P U}-\frac{M_{w}}{n}-M_{m i d}-M_{v o c a b}}{M_{k v}}}\end{array}$ −Mnw M−Mmid−Mvocaband LCP U = L −LGP U. The MGP U refers to a single GPU memory. $M_{w}$ , $M_{k v}$ , $M_{v o c a b}$ and $M_{m i d}$ represent the memory occupied by model weights, KV cache of one layer, the vocabulary matrix and the intermediate results on a single GPU, respectively. The total number of transformer layers is denoted as $L$ , while the number of GPUs is $n$ . 3) As shown in the top of Figure 6, during the prefill stage, the KV cache of the pre- $.L_{C P U}$ layers will be asynchronously offloaded to the CPUs after the calculation of the KV matrix, which eliminates the offloading overhead. 4) During the decoding stage, as described in the bottom of Figure 6, our strategy offloads the QKV matrix of the $\mathrm{pre}L_{C P U}$ and uses CPUs to finish the attention calculation. It utilizes multi-threading and vectorized instructions, e.g., AVX512, to reduce the calculation latency using CPUs. The calculation results will be uploaded to GPUs and finish the FNN calculation. For the rest of $L_{G P U}$ layers, all the calculations will be completed by GPUs.  
+
+
+
+\section{5 PERFORMANCE EVALUATION  }
+
+
+
+
+\section{5.1 OVERVIEW  }
+
+
+We conduct extensive evaluations on our FastAtten tion. We use the closed-source PanGu-series and open-source LLaMA-series models (Zeng et al., 2021; Ren et al., 2023; Touvron et al., 2023b; Huawei, 2023a) to demonstrate the superior perfor mance and generalizability of FastAttention. Ta  
+
+![](images/47b6c8e6036c63092018d2fadc4a0009444bba76671e3f3c5b1dbf1e7cf2865a.jpg)  
+
+ble 1 elaborates the model configurations. We con-Table 1: The model configurations used for the duct the experiments on two types of hardware:model inference performance evaluation. Ascend 910B NPUs and Nvidia Tesla V100 GPUs.  
+
+First of all, we clarify the definition of standard attention: the naive implementation of matrix operations following the equation $S o f t m a x\{\frac{Q K^{T}}{\sqrt{d}}\}V$ without optimizations like operator fusion and online Softmax. These experiments show that FastAttention is $4.85–10.7\times$ faster than the standard attention implementation on an Ascend NPU and up to $1.40\times$ faster on 8 Ascend 910B. The system within FastAttention yields up to $5.1\times$ throughput compared to the baseline on an Ascend 910B, while demonstrating comparable latency and throughput on 8 Ascend 910B. Moreover, FastAttention achieves a speedup of $1.43\times$ than xformers’ FlashAttention implementation and $1.48\times$ over the classical offloading for ultra-long sequence inference on V100 GPUs. Furthermore, FastAttention extends the maximum input sequence length from 16K to 256K and reaches up to $1.46\times$ speedup compared to a baseline without FastAttention on a machine equipped with 8 V100 GPUs. None of our optimizations compromise accuracy and FastAttention is orthogonal to techniques such as quantization. Note that FlashAttention series is not applicable for Ascend NPUs and V100, making a direct comparison with FastAttention infeasible in these experiments.  
+
+![](images/5faa8f2adb4370545121b6d793ac05480e9f3c7157fb8ea940bcc7badbe15c12.jpg)  
+5.2 THE OPERATOR-LEVEL PERFORMANCE EVALUATION OF FASTATTENTION  
+5.2.1 FASTATTENTION ON A SINGLE ASCEND NPU  
+Figure 7: Performance comparison of FastAtten-tFiiognu raen d8 : xPfeorfromrmearnsc’ e FcloasmhpAatrtiesnotni oonf  wFiatsht Abtattecnhtion and standard attention with batch size 1 duringsize 8 and hidden dimension 2048 during the prefill stage on a V100.  
+
+We compare the latency of the FastAttention operator during the preflil stage with that of the standard attention implementation. We use PanGu-38B and PanGu-71B to evaluate the optimization effects of the FastAttention operator on an Ascend 910B. All experiments use a batch size (B) of 1, with  
+
+![](images/fe841b7c8a64eb5fcf296c10169a3a3aed59d8d8d2d5b6c41df986e247e162bb.jpg)  
+Figure 9: The latency comparison of FastAttention with different block sizes on an Ascend 910B across sequence lengths from 1K to 16K during the prefill stage.  
+
+![](images/aeabbd20213d0bdfa6766d838f376d3aaebb3668dd8c0c844ffebaa441ef4d94.jpg)  
+Figure 10: The performance of FastAttention on eight Ascend 910B NPUs with sequence length from 2K to 32K and batch size 1 during the prefill stage.  
+
+5 heads (N) and a head dimension (D) of 128 for PanGu-38B, and 4 heads and a head dimension of 128 for PanGu-71B. Figure 7 demonstrates the significant performance improvements using the FastAttention operator. Embedded in PanGu-38B and PanGu-71B, the FastAttention operator can achieve at most $10.7\times$ and $7.1\times$ speedup, respectively.  
+
+Furthermore, we conduct experiments to analyze the impact of the two-level tiling strategy on performance improvement. The experiments compare the latency of the FastAttention operator with different block sizes of the first level across multiple input sequence lengths on an Ascend 910B. The results for $B S=128$ ( $B S$ represents the basic block size) are treated as the baseline. Figure 9 shows that with the 4K input sequence length, the proposed strategy helps reduce latency by about $26\%$ and $37\%$ for PanGu-38B and PanGu-71B, respectively. Moreover, with the 8K and 16K input sequence length, the operator latency decreases by $33\%$ and $38\%$ for $\mathrm{PanGu}{-38}\mathrm{B}$ , and the reductions are $43\%$ and $45\%$ for PanGu-71B, respectively. These results demonstrate the efficiency of our optimization strategy, especially for long sequence lengths.  
+
+5.2.2 FASTATTENTION ON MULTI-NPUS   
+Table 2: Ablation study of proposed strategies on NPUs.   
+
+![](images/105bfd234da2ee823ea49ed5ca4fc6375822d14649305d526bf99834d7f150a2.jpg)  
+
+In these experiments, we compare the latency of FastAttention in terms of the total latency involved in the unfused FastAttention kernel (the implementation in $\S\,^{4.1},$ ), Linear operator, and the Allreduce operation. We conduct evaluations of the FastAttention using PanGu-38B, PanGu-71B and LLaMA2- 70B with varying sequence lengths on eight Ascend 910B NPUs. Batch size is 1 in all the experiments. Figure 10 demonstrates a significant speed improvement of our FastAttention. For PanGu-38B, our FastAttention achieves a speedup ranging from $1.16\times$ to $1.40\times$ across sequence lengths from 2K to 32K. For PanGu-71B, it can achieve a performance improvement of $7.4\%$ , $12.3\%$ , $24.2\%$ , $26.1\%$ , and $21.3\%$ for sequence lengths of 2K, 4K, 8K, 16K, and 32K, respectively. FastAttention achieves up to $1.3\times$ lower latency for LLaMA2-70B. Notably, as the sequence length increases, the FastAttention operator typically can achieve more performance improvement due to the increased proportion of overlapping time. Furthermore, we give the ablation study of FastAttention for Ascend NPUs in Table 2 to demonstrate the effectiveness of the proposed strategies. Note that the tiling-AllReduce strategy has to be built upon the two-level tiling strategy. Therefore, we don’t test the tiling-AllReduce strategy independently. With the two-level strategy, our FastAttention reaches up to $10.7\times$ speedups and realizes a maximum speedup of $15\times$ coupled with tiling-AllReduce strategy. FastAttention also demonstrates significant performance improvements for small Transformers, such as Vision Transformers.  
+
+
+
+\section{5.2.3 FASTATTENTION ON LOW-RESOURCE GPUS  }
+
+
+We measure the runtime of the FastAttention operator across different sequence lengths and compare it to the FlashAttention operator in xformers. We compare the two operators on a single V100 GPU under two settings: without and with causal masks. Benchmark settings are as follows: 1) sequence length varies from 2k to 16k, 2) batch size is set to 8, 3) hidden dimension to 2048, and 4) head dimension to 64. To calculate the FLOPs, we used the formula $4\cdot b a t c h s i z e\cdot s e q l e n^{2}$ · head dimension $\cdot$ number of heads. Figure 8 demonstrates that FastAttention always exhibits higher TFLOPs/s compared to the counterpart in xformers. Without causal mask, our operator achieves speedup of $1.03\times$ , $1.06\times$ , $1.12\times$ , and $1.17\times$ for sequence lengths of 2K, 4K, 8K, and 16K, respectively. With causal mask, as the sequence length increases, FastAttention can achieve a maximum speedup of $1.43\times$ . Additionally, we compare FastAttention with the vanilla implementation in Transformers (huggingface, 2024),achieving maximum speedups of $8.2\times$ and $2.2\times$ with and without causal mask, respectively.  
+
+5.2.4 FASTATTENTION WITH ULTRA-LONG SEQUENCE ON MULTIPLE LOW-RESOURCE GPUS Table 3: The performance comparison of our CPU-GPU strategy and classical offloading strategy.   
+
+![](images/2eba575dd925f2c3dc67564fd6e39d05715551ff7ceea665ddb5dc6cc365b467.jpg)  
+- represents that the system doesn’t necessitate offloading strategies. The data highlighted in the gray background section signifies the total latency required by attention calculation.  
+
+![](images/ef0308ff4c889e4b6e3200ed1a0936311c460ecc9ef6d2149f8d6363ad9f21d4.jpg)  
+
+Figure 11: Latency and throughput comparison of FasterTransformer with and without FastAttention for different models and sequence lengths on eight V100 GPUs.  
+
+We measure the latency of attention calculation using FastAttention integrated with our CPU-GPU cooperative strategy, as well as only using the classical offloading strategy, respectively. The classical offloading offloads the KV cache from GPUs to CPUs and uploads the KV cache to GPUs when necessary. We use PanGu-38B to conduct the experiments with different sequence lengths and batch size 1 on eight V100 GPUs. Table 3 shows the latency breakdown to the attention calculation of one transformer layer. For the classical offloading, Upload implies the latency of uploading KV cache to a GPU. For the FastAttention, CPU Calc time represents the latency of attention calculation using a CPU, Off Upload contains the latency of offloading QKV matrix and that of uploading the results. Both Total means the total latency of the attention calculation, and GPU Calc implies the latency of attention calculation using a GPU. Due to the same operators with different strategies applied, the values of GPU Calc in FastAttention and Classical Offloading are similar.  
+
+In Table 3, it can be observed that the sequence length can reach up to 256K using our strategy on eight V100 GPUs. For the pre- $.L_{C P U}$ layers, FastAttention using our strategy is $1.27\!-\!1.48\!\times$ faster than using classical offloading. For the rest $L_{G P U}$ layers, it’s up to $13.36\times$ faster than using classical offloading. Specifically, it is evident that Off Upload remains almost constant latency, as our strategy solely necessitates uploading results of fixed dimensions during the decoding phase. Employing our strategy, the CPU Calc latency is notably lower than the Upload in classical offloading. This discrepancy arises from the PCIe for data transfer on V100, which provides a mere theoretical bidirectional bandwidth of $32\mathrm{GB}/\mathrm{s}$ . Moreover, the real-world bandwidth is often affected by various factors, which may prevent it from reaching the theoretical peak.  
+
+5.3 THE END-TO-END PERFORMANCE OF FASTATTENTION   
+
+![](images/a8b34ebd520186cbf42817b7b494651869f14890387ef020d5267691886f7257.jpg)  
+N/A means that the sequence lengths surpass the model limitation or encounter some system errors during the experiments.  
+
+Table 4: End-to-end performance evaluation FastAttention on 8 Ascend 910B.  
+
+Table 5: End-to-end performance evaluation of Deepspeed on 8 V100.  
+
+We use two performance metrics: (i) latency, i.e., end-to-end time to generate one token for an input sequence, and (ii) token throughput, i.e., tokens-per-second processed. We measure the latency of generating one token with an input sequence of different lengths, which reflects the high computational efficiency of FastAttention. For throughput, we measure the performance with an input sequence of varying lengths while generating 50 tokens at a time.  
+
+Firstly, we measure the throughput with an input prompt of 512 tokens using LLaMa2-7B on an Ascend 910B, thereby demonstrating the performance of FastAttention on a single NPU. As shown in Table 6, the system within FastAttention achieves up to $5.16\times$ higher throughput. Then, we conduct the experiments with PanGu-38B and PanGu-71B on eight Ascend 910B NPUs. Table 4 demonstrates the excellent performance of FastAttention on 8 Ascend 910B. For an input sequence of varying lengths, it consistently demonstrates low latency and high throughput.  
+
+![](images/f164676058791e1bc10411d791a23894f2a56aa4bf5f0f8da41ccc529981d686.jpg)  
+
+Table 6: The throughput comparison within and without FastAttention using PyTorch for different batch sizes on an Ascend 910B.  
+
+Moreover, we measure the latency and throughput of PanGu-38B and PanGu-71B on eight V100 GPUs. Note that we evaluate the performance of FasterTransformer (FT) (NVIDIA, 2023a) with and without FastAttention, respectively. Figure 11 demonstrates the effectiveness of our optimization strategies. FT without FastAttention can only support sequences up to 16K in length, while it can handle up to 256K using FastAttention. This is attributed to the fine-grained CPU-GPU cooperative strategy. What’s more, for PanGu-38B, FT with FastAttention achieves a speedup of up to $1.46\times$ over FT without FastAttention while $1.28\times$ for PanGu-71B. FastAttention enables FT to surpass the GPU memory limitations and achieve superior performance. We also conduct experiments with OPT-30B (Zhang et al., 2022) and LLaMA-65B (Touvron et al., 2023a) using Deepspeed on eight V100 GPUs. As shown in Table 5, the torch-version DeepSpeed exhibits lower inference performance compared to FT. We analyze that torch-version Deepspeed doesn’t utilize asynchronous methods, such as CUDA graphs, introducing additional invocation overheads and driver overheads. Therefore, DeepSpeed was not selected for comparative experiments.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+In this paper, we propose FastAttention, an extension of FlashAttention2 for both NPUs and lowresource GPUs, enabling longer input sequence lengths and lower inference latency. FastAttention contains a series of insightful strategies and optimizations that are theoretically generalizable to all of the NPUs and low-resource GPUs with similar architectures. Extensive experiments have demonstrated the excellent efficiency and generalization of FastAttention on multiple LLMs. In future work, we will apply our FastAttention to other NPUs and low-resource GPUs if accessible. We will also focus on compilation to facilitate easy invocation of our methods by users.  
+
+
+
+\section{7 REPRODUCIBILITY STATEMENT.  }
+
+
+In this work, we ensure the reproducibility of our results through detailed descriptions of the approaches and experimental setups. Besides the closed-source PanGu-series models, the experiments were conducted using the publicly available LLaMA-series models, and we specify the exact batch sizes, and sequence lengths used in our evaluations. The hardware configuration, including the 8 Ascend 910B NPUs and V100 GPUs, is clearly described to facilitate replication of the experiments. The scripts used to generate all results and performance metrics presented in the paper will be made available soon.  
+
+
+

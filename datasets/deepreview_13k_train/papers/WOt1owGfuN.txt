@@ -1,0 +1,218 @@
+\title{Probe Pruning: Accelerating LLMs through Dynamic Pruning via Model-Probing}
+
+\begin{abstract}
+We introduce Probe Pruning (PP), a novel framework for online, dynamic, structured pruning of Large Language Models (LLMs) applied in a batch-wise manner. PP leverages the insight that not all samples and tokens contribute equally to the model's output, and probing a small portion of each batch effectively identifies crucial weights, enabling tailored dynamic pruning for different batches. It comprises three main stages: probing, history-informed pruning, and full inference. In the probing stage, PP selects a small yet crucial set of hidden states, based on residual importance, to run a few model layers ahead. During the history-informed pruning stage, PP strategically integrates the probing states with historical states. Subsequently, it structurally prunes weights based on the integrated states and the PP importance score, a metric developed specifically to assess the importance of each weight channel in maintaining performance. In the final stage, full inference is conducted on the remaining weights. A major advantage of PP is its compatibility with existing models, as it operates without requiring additional neural network modules or fine-tuning. Comprehensive evaluations of PP on LLaMA-2/3 and OPT models reveal that even minimal probing—using just 1.5% of FLOPs—can substantially enhance the efficiency of structured pruning of LLMs. For instance, when evaluated on LLaMA-2-7B with WikiText2, PP achieves a 2.56 times lower ratio of performance degradation per unit of latency reduction compared to the state-of-the-art method at a 40\% pruning ratio.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Large Language Models (LLMs) Vaswani et al. (2017); Zhang et al. (2022); Touvron et al. (2023); Diao et al. (2024) have recently achieved significant success, leading to the development of numerous applications OpenAI (2023); Anand et al. (2023). However, the inference for these models, often containing billions of parameters, presents challenges. These challenges primarily arise from the substantial computational demands and the risk of high latency Ma et al. (2023).  
+
+Structured pruning is a promising hardware-friendly approach to reduce computational consumption and accelerate inference Yuan et al. (2021). It removes complete structures from models, such as weight channels and attention heads. Compared with other methods like unstructured pruning Frantar & Alistarh (2023); Sun et al. (2023) and quantization Dettmers et al. (2022); Lin et al. (2023); Frantar et al. (2022), structured pruning reduces computational resources and speeds up inference without requiring specific hardware. However, when applied to LLMs, structured pruning often results in a performance gap compared to dense models Wang et al. (2024).  
+
+A major factor contributing to the performance gap in LLMs may be the emergence of significant outlier phenomena in internal representations Dettmers et al. (2022); Liu et al. (2024); Sun et al. (2024). Current advanced structured pruning methods typically utilize calibration datasets to assess the importance of weights using pruning metrics. For example, the FLAP method An et al. (2024) uses a calibration dataset to compute fluctuation metrics for each input feature and its corresponding channel in attention or MLP block weight matrices, specifically in the output projection (O) or fully connected layer 2 (FC2). Similarly, LLM-Pruner Ma et al. (2023) employs approximated secondorder Taylor expansions of the error function, calculated using a calibration dataset, to eliminate the least important coupled structures. Although the calibration dataset provides valuable insights for pruning by identifying non-critical weights, this approach overlooks the batch-dependent nature of outlier properties in LLMs Liu et al. (2023b); Song et al. (2023); Liu et al. (2024); Sun et al.  
+
+(2024), which vary across different input batches and cannot be accurately predicted prior to inference.3]. Consequently, pruning decisions based solely on calibration dataset may fail to address these dynamic outliers during real-time inference, resulting in suboptimal model performance. Fine-tuning can serve as a method to recover model performance Wang et al. (2024), but it is resource-intensive and may be impractical for certain real-world applications.  
+
+To effectively handle batch-dependent outliers and reduce the performance gap between pruned and dense models without extensive fine-tuning, we propose Probe Pruning (PP). PP is an online dynamic structured pruning framework that prunes the model during inference based on each batch’s hidden states. Notably, PP relies solely on the original model structure and hidden states, without requiring additional neural network modules or fine-tuning. We overcome two key challenges:  
+
+• Leveraging Calibration Dataset may Introduce Biases: Relying exclusively on the calibration dataset may introduce biases, as the pruned channels are entirely determined by the calibration dataset. For example, when FLAP used the WikiText2 validation set as a calibration dataset, it achieved a perplexity of 18.5 on the WikiText2 test set of LLaMA2-7B with a $40\%$ pruning ratio. In contrast, using the C4 dataset as a calibration dataset, the perplexity increased to 38.9 on the WikiText2 test set. We propose history-informed pruning with importance-scaled fusion to leverage the benefits of the calibration dataset while minimizing associated biases.  
+
+• Dynamic Pruning Without Access to Intermediate Hidden States: Deciding online which channels to prune during inference for each batch is challenging. Without gradients, calculating pruning metrics for attention and MLP blocks requires intermediate hidden states, which are the input tensors to the attention output projection and MLP’s FC2 layer. These states are unavailable when the input hidden states initially enter these blocks. Moreover, not all samples and tokens contribute equally to the model’s output, and large-magnitude outliers in LLMs often have a significant impact on the model’s behavior. Therefore, we propose a probing method that selects key samples and tokens from the input hidden states, runs a few model layers ahead, and obtains intermediate hidden state information. Without such probing, accessing intermediate hidden states requires significant computational costs.  
+
+Specifically, PP leverages a small yet crucial segment of hidden states to run a few model layers ahead and capture the probe’s intermediate hidden states, which contain essential information for guiding pruning decisions within the attention or MLP blocks of the current batch. By strategically integrating the probing states with historical states, we can dynamically determine which channels to prune. After pruning the weight channels, we run full inference on the remaining weights. Furthermore, our probing is minimal yet effective: for example, it operates with only $5\%$ of the samples and $50\%$ of the tokens, utilizing just $1.5\%$ of the floating point operations (FLOPs) of dense model inference, and yet it has proven effective. Experimental results confirm that this minimal probe effectively captures critical intermediate hidden state information.  
+
+
+
+\section{2 RELATED WORK  }
+
+
+Pruning with Calibration Dataset. Pruning methods can be broadly classified into two categories Yuan et al. (2021): unstructured pruning and structured pruning. Unstructured pruning LeCun et al. (1989); Hassibi et al. (1993); Han et al. (2015); Diao et al. (2023); Liu et al. (2023a) Li et al. (2024b;a); Dong et al. (2024) removes individual weights, whereas structured pruning Li et al. (2016); Liu et al. (2017); He et al. (2019); Fang et al. (2023) removes complete structures from the model, such as channels and attention heads. Pruning LLMs often involves calibration datasets due to the emergence of outliers in their internal representations. For unstructured pruning, SparseGPT Frantar & Alistarh (2023) uses synchronized second-order Hessian updates to solve row-wise weight reconstruction problems and update weights. Wanda Sun et al. (2023) introduces a pruning metric that considers both the magnitude of weights and activation values to determine which weights to prune. For structured pruning, FLAP An et al. (2024) introduces a fluctuation metric to decide which weight channels to prune. LLM-Pruner Ma et al. (2023) employs approximated second-order Taylor expansions of the error function to remove the least important coupled structures and then applies fine-tuning to recover model performance. LoRA-Prune Zhang et al. (2023) uses a LoRA Hu et al. (2021)-guided pruning metric that leverages the weights and gradients of LoRA to direct the iterative process of pruning and tuning. However, the fine-tuning process requires substantial computational resources Hoffmann et al. (2022), and we have found that fine-tuning might cause LLMs to lose their generalizability; for example, they may perform worse on certain downstream tasks, such as commonsense reasoning tasks.  
+
+![](images/331a916d0d0920b47b6912eb88b11628b78372dea3792ab94adeca7be7651439.jpg)  
+Figure 1: Probe Pruning (PP) is executed in four stages: (1) PP selects key samples and tokens from the layer-normalized hidden states, based on residual importance, to create a small yet crucial probe. (2) PP deploys this probe to run a few model layers ahead and obtains the probe’s intermediate hidden states. (3) PP integrates the probing states with historical states and uses the integrated states to calculate the pruning metric and prune weight channels. (4) PP performs full inference on the remaining weights.  
+
+Large-Magnitude Outliers of LLMs. Unlike small neural networks, LLMs exhibit largemagnitude outlier features Kovaleva et al. (2021); Dettmers et al. (2022; 2023); Schaeffer et al. (2024); Sun et al. (2024). LLM.int8() Dettmers et al. (2022) shows that these large-magnitude features begin to emerge when the size of LLMs exceeds 6.7 billion parameters, and these outlier features are concentrated in certain channels. The phenomenon of massive activations Sun et al. (2024); Liu et al. (2024) has been observed, where a few activations exhibit significantly larger values than others, potentially leading to the concentration of attention probabilities on their corresponding tokens. These emergent properties suggest the need to customize the pruning of channels for different batches to maintain model performance. This observation motivates us to propose Probe Pruning.  
+
+
+
+\section{3 NOTATIONS AND PRELIMINARIES  }
+
+
+An LLM $\mathcal{M}$ consists of $L$ blocks, each of which can be either an attention block or a Multi-Layer Perceptron (MLP) block. Each attention block is characterized by four linear projections: Query (Q), Key (K), Value (V), and Output (O). Similarly, each MLP block includes two linear layers: Fully Connected layer 1 (FC1) and Fully Connected layer 2 (FC2).  
+
+Each block $l$ transforms the input hidden state $\pmb{\ X}^{l}\in\mathbb{R}^{N\times S\times D}$ into the output hidden state $\pmb{\chi}^{l+1}\in$ $\mathbb{R}^{N\times S\times D}$ . Here, $N,\,S$ , and $D$ denote the batch size, sequence length, and feature dimension, respectively. The transformations in each block $l$ can be expressed as:  
+
+$$
+\pmb{\mathsf{X}}^{l+1}=\pmb{\mathsf{X}}^{l}+\mathcal{F}^{l}(\pmb{\mathsf{X}}^{l}),
+$$  
+
+where $\mathcal{F}^{l}$ encompasses all transformations within block $l$ . This function can be further decomposed as:  
+
+$$
+\mathcal{F}^{l}(\pmb{\mathsf{X}}^{l})=\pmb{\mathsf{X}}^{l,\mathrm{int}}(\pmb{W}^{l,\mathrm{final}})^{T},\quad\pmb{\mathsf{X}}^{l,\mathrm{int}}=\mathcal{T}^{l}(\pmb{\mathsf{X}}^{l}),
+$$  
+
+where $\mathcal{T}^{l}$ represents all intermediate transformations applied to the input hidden state $\pmb{X}^{l}$ , excluding the final weight matrix $W^{l,\mathrm{final}}\in\mathbb{R}^{C_{\mathrm{out}}\times C_{\mathrm{in}}}$ . The final weight matrix is either the Output projection (O) in an attention block or FC2 in an MLP block. The intermediate hidden state Xl,int ∈RN×S×Cin results from applying these intermediate transformations to $\pmb{X}^{l}$ . [Additionally, we define the residual importance as the $L^{2}$ norm of the input hidden states $\pmb{x}^{l}$ across specific dimensions, a concept further detailed in Section 4.2.]  
+
+In structured pruning of LLMs, entire coupled structures are pruned Ma et al. (2023); An et al. (2024). Specifically, in block $l$ , the preceding weight matrices are adjusted by pruning their output channels, which correspond one-to-one with the input channels pruned by the final weight matrix. For example, in an MLP block, the weight matrices are adjusted based on the set of unpruned channel indices $\mathbb{C}^{l}\subseteq\{1,2,\dots,C_{\mathrm{in}}\}$ as follows:  
+
+$$
+\begin{array}{r}{\tilde{\pmb{W}}^{l,\mathrm{FC1}}=\pmb{W}^{l,\mathrm{FC1}}[\mathbb{C}^{l},:],\quad\tilde{\pmb{W}}^{l,\mathrm{FC2}}=\pmb{W}^{l,\mathrm{FC2}}[:,\mathbb{C}^{l}],}\end{array}
+$$  
+
+where $\tilde{W}^{l,\mathrm{FC1}}\in\mathbb{R}^{|\mathbb{C}^{l}|\times C_{\mathrm{in}}}$ and $\tilde{W}^{l,\mathrm{FC2}}\in\mathbb{R}^{C_{\mathrm{out}}\times|\mathbb{C}^{l}|}$ . The notation $|\mathbb{C}^{l}|$ represents the cardinality of $\mathbb{C}^{l}$ . Similarly, in the attention block, attention heads can be treated as coupled structures Ma et al. (2023); An et al. (2024), and entire attention heads are pruned.  
+
+
+
+\section{4 METHODOLOGY  }
+
+
+The objective of Probe Pruning (PP) is to implement online dynamic structured pruning in a batchwise manner. The main idea of our work is illustrated in Figure 1. Our core strategy involves: (1)  
+
+Probing (Sections 4.1 and 4.2), which consists of two steps: first, generating a probe based on residual importance; second, using the probe to run the unpruned model to gather valuable intermediate hidden state information. (2) History-informed pruning (Section 4.3), which carefully merges the probing states with historical states using importance-scaled fusion to capture the essential characteristics of each batch. Afterward, we prune the model using a novel pruning metric (Section 4.4) that more effectively selects channels for pruning than existing metrics.  
+
+4.1 PROBING  
+
+We introduce a novel concept called probing, which leverages the existing model structure and hidden states to form a predictive mechanism. Specifically, when the input hidden states reach block $l$ , probing first utilizes residual importance to select key samples and tokens, forming the probe $\mathsf{\pmb{p}}^{l}$ from $\mathrm{LN}^{l}(\pmb{X}^{l})$ . $\mathrm{LN}^{l}$ represents the layer normalization at block l. The process of probe generation is detailed in the next section. It then runs the intermediate transformation in block $l$ , denoted by $\mathcal T^{l}(\pmb{\mathsf{P}}^{l})$ . Notably, effective probing consumes few computational resources and can obtain important intermediate-state information to guide pruning decisions.  
+
+Upper Bound of Probing. As an alternative, we can generate the probe by using all the input hidden states in the current batch, $\mathsf{P}^{l}=\mathrm{LN}^{l}(\pmb{\mathbf{X}}^{l})$ , a method we refer to as Full-Batch Probing. By utilizing the entire batch without reducing the dimensions $N$ or $S$ , Full-Batch Probing captures the complete intermediate hidden state information, which could potentially lead to optimal pruning performance. However, this approach significantly increases computational resource requirements and latency. Therefore, Full-Batch Probing serves as a theoretical upper bound for our method. Our aim for PP is to select pruning channels similar to those chosen by Full-Batch Probing. We believe that a higher proportion of common pruning channels between PP and Full-Batch Probing indicates better model performance and higher quality of the probe.  
+
+Why Does Probing Work? Probing is effective because not all samples and tokens contribute equally to the model’s output, and large-magnitude outliers in LLMs significantly influence the model’s behavior. In natural language sequences, certain tokens carry more semantic or syntactic significance than others Xiao et al. (2023); Sun et al. (2024); Liu et al. (2024). By selecting key samples and tokens based on residual importance, the probe focuses on the most informative parts within the batch. This targeted approach allows the probe to capture essential intermediate hidden state information that is most influential in determining which channels can be pruned. Consequently, even though the probe processes a reduced subset of the batch, it provides sufficient insight to guide pruning decisions, potentially achieving results comparable to Full-Batch Probing with significantly lower computational costs.  
+
+Computational Complexity. Only minimal computational complexity is required for probing. Specifically, for an LLM characterized by six linear transformations per attention and MLP block (Q/K/V/O and FC1/FC2) that incorporate weight transformations and the attention mechanism, the dense matrix computational complexity for an LLM totals $O(4N S C_{\mathrm{in}}C_{\mathrm{out}}+2N S^{2}C_{\mathrm{in}})$ . For probing, by reducing the batch size to $x\%$ and the sequence length to $y\%$ of their original sizes, the complexity reduces to $O(4x\%\cdot y\%\cdot N S C_{\mathrm{in}}C_{\mathrm{out}}+2x\%\cdot(y\%)^{2}\cdot N S^{2}C_{\mathrm{in}})$ .  
+
+4.2 PROBE GENERATION  
+
+PP measures the residual importance, [which is the $L^{2}\;\mathrm{norm}]$ of $\pmb{X}^{l}$ [across specific dimensions] to identify key samples and tokens. Once identified, these key samples and tokens are selected from $\mathrm{LN}^{l}(\pmb{X}^{l})$ to generate a probe for block $l$ , where $\mathrm{LN}^{l}$ denotes layer normalization at block l. We do  
+
+
+
+\section{6 RESULTS  }
+
+
+Main Results. We present the zero-shot performance, without fine-tuning, of four models on text generation and commonsense reasoning tasks, as shown in Tables 2 and 3. Probe Pruning (PP) consistently outperforms all baselines across various models and pruning ratios. For instance, on WikiText2 at a $40\%$ pruning ratio, PP achieves lower perplexities than competing methods: 16.8 with LLaMA-2-7B, 11.3 with LLaMA-2-13B, and 26.7 with OPT-13B. Moreover, PP attains significantly lower perplexities and higher reasoning task accuracies than both LLM-Pruner and LoRAPrune. For example, on LLaMA-2-13B at a $40\%$ pruning ratio, PP achieves an average accuracy of $61.0\%$ , significantly higher than $52.0\%$ for LLM-Pruner and $48.1\%$ for LoRAPrune. On LLaMA-3-8B, PP surpasses Wanda-sp and FLAP in nearly all tasks, confirming its effectiveness and robustness. For instance, at a $40\%$ pruning ratio, PP achieves an average accuracy of $58.9\%$ , outperforming  
+
+378 379 380 381 382 383 384 385 386 387 388 389 390 391 392 393 394 395 396 397 398 399 400 401 402 403 404 405 406 407 408 409 410 411 412 413 414 415 416 417 418 419 420 421 422 423 424 425 426 427 428 429 430 431   
+Table 2: Zero-shot performance of LLaMA-2-7B/13B and OPT-13B after pruning attention and MLP blocks without fine-tuning: PP demonstrates superior performance in nearly all scenarios.   
+
+![](images/9fa1b823f78fdd2810f6141169af6402911c3f7cd08b772a786df961708a1e35.jpg)  
+Table 3: Zero-shot performance of LLaMA-3-8B after pruning MLP blocks without fine-tuning: PP demonstrates superior performance in nearly all scenarios.  
+
+![](images/f80aae719b1cbb67d7dcdfec123f26cd76823c2b433b56ac036ee0fd6726a123.jpg)  
+
+Wanda-sp $(53.3\%)$ and FLAP $(53.6\%)$ . In Section 4.1, we stated that Full-Batch Probing represents the upper bound of PP. Experimental results confirm that Full-Batch Probing excels in all tested scenarios, supporting our hypothesis. Compared to Full-Batch Probing, which requires significant extra computational resources—more than dense model inference—PP achieves comparable results while utilizing minimal computational resources, only $1.5\%$ of the FLOPs compared to dense model inference. These results imply the effectiveness of PP and demonstrate that the probe’s intermediate hidden states can help identify the important weights for processing different batches.  
+
+![](images/49cc0cf8dd65561a287df63a37d57132b9218fe3eddd3ea2771f12d999e271ad.jpg)  
+Figure 2: Jaccard Index of common pruning channels: comparing PP and Full-Batch Probing, and comparing fix-pruned model (without PP) and Full-Batch Probing for each batch.   
+Jaccard Index of Common Pruning Channels. To verify our assumption in Section 4.1 that a greater overlap of pruning channels between PP and Full-Batch Probing correlates with enhanced model performance and probe quality, we measure the Jaccard Index Jaccard (1912) of common pruning channels in two comparisons: between PP and Full-Batch Probing, and between the fixpruned model (without PP) and Full-Batch Probing. The Jaccard Index is a statistical measure of the similarity between two sets, defined as the size of their intersection divided by the size of their union. We consistently apply the PPsp metric in all comparisons. As shown in Figure 2, PP consistently selects pruning channels more similar to those selected by Full-Batch Probing across almost all attention and MLP blocks, in contrast to the fix-pruned model (without PP). This increased alignment  
+
+432   
+433   
+434   
+435   
+436   
+437   
+438   
+439   
+440   
+441   
+442   
+443   
+444   
+445   
+446   
+447   
+448   
+449   
+450   
+451   
+452   
+453   
+454   
+455   
+456   
+457   
+458   
+459   
+460   
+461   
+462   
+463   
+464   
+465   
+466   
+467   
+468   
+469   
+470   
+471   
+472   
+473   
+474   
+475   
+476   
+477   
+478   
+479   
+480   
+481   
+482   
+483   
+484   
+485  
+
+of channels contributes to improved overall performance and indicates that the probe’s intermediate hidden states can help guide pruning decisions.  
+
+![](images/584575c1cb9242c8ee10c00632a74e46658e5ca61bbdf55aee1e15ae8a376616.jpg)  
+Figure 3: Performance of different probe combinations at a $40\%$ pruning ratio.  
+
+Table 4: Comparison of FLOPs between dense model inference and probing.   
+
+![](images/1834992c0d18cdd06201a01794a97351b58b88a299a2d48755e060a5c121a75b.jpg)  
+
+Effect of Probe Combinations on Performance. We find that even a small probe can improve model performance. The results are shown in Figure 3. We investigate how different probe sizes affect PP’s performance by varying the probe batch size from 1 to 20 (specifically, 1, 5, and 20) and the probe sequence ratio from 0.05 to 1.0 (specifically, 0.05, 0.1, 0.3, 0.5, 0.8, and 1.0). First, we observe that once we apply PP, even a small probe with a batch size of 1 and a probe sequence ratio of 0.05 can yield performance improvements. For example, for LLaMA-2-7B, the perplexity drops from 29.8 to 21.7; for OPT-13B, it drops from 35.4 to 27.7. Furthermore, we observe that increasing both the probe batch size and sequence ratio leads to improved performance. Interestingly, we find that the initial increase in sequence ratio from 0.05 to 0.3 brings the most rapid performance improvement. This indicates that sequence information becomes significantly effective for pruning once it exceeds a certain size threshold relative to the current batch’s sequence length.  
+
+Computational Cost and Inference Speed. We use the DeepSpeed package Rasley et al. (2020) to measure the FLOPs. The results in Table 4 show that the computational overhead of probing is approximating $1.5\%$ of the FLOPs of the dense model inference. This finding aligns with our analyzed computational complexity in Section 4.1. Additionally, we evaluate each block’s end-to-end runtime [across all batches of WikiText2] and the inference speedup at a $40\%$ pruning ratio on NVIDIA A100 GPUs, similar to previous  
+
+Table 5: Breakdown of inference runtime per batch[across all batches of WikiText2] at a $40\%$ pruning ratio. The speedup is calculated by dividing the dense model’s inference runtime by the methods’ inference runtime.   
+
+![](images/3be03bc9864fac8c12663a8bbd8851ea13e0db7aa50000fd5b4dd2e7df86c9e5.jpg)  
+
+studies Sun et al. (2023); Ma et al. (2023). The results for LLaMA-2-7B on WikiText2 are presented in Table 5. We find that the inference speeds of PP are comparable to those of other structured pruning baselines, yet it delivers superior performance. Specifically, in the attention block, PP achieves a speedup of $1.46\times$ , and in the MLP block, a speedup of $1.30\times$ . The slight delay observed in the MLP block can be attributed to inherent system costs, such as weight extraction. This gap narrows under conditions with larger batch sizes or longer sequence lengths, leading to comparable speeds between PP and the baselines.  
+
+Performance Runtime Ratio. To illustrate the trade-off between model performance and inference speed, we introduce Performance Runtime Ratio (PRR), which quantifies the ratio of performance degradation per unit of runtime reduction. Importantly, a smaller PRR value is preferable as it indicates minimal performance degradation per unit of runtime reduction. The metric is defined as:  
+
+$$
+\mathrm{PRR}=\frac{|\mathrm{Perf}_{\mathrm{dense}}-\mathrm{Perf}_{\mathrm{pruned}}|}{\mathrm{Runtime}_{\mathrm{dense}}-\mathrm{Runtime}_{\mathrm{pruned}}},
+$$  
+
+where $\mathrm{Perf_{pruned}}$ and Runtimepruned denote the performance and runtime of the pruned model, respectively, and $\mathrm{Perf_{dense}}$ and Runtimedense denote the performance and runtime of the dense model, respectively. As shown in Table 5, the PRR of PP is 37.37, indicating a increase of 37.37 in perplexity per second of runtime reduction on the attention and MLP block. In comparison, FLAP and Wanda-sp have PRR values of 95.65 and 106.48, respectively. PP’s PRR values are $2.56\times$ (95.65 compared to 37.37) and $2.85\times(106.48$ compared to 37.37) more efficient than those of FLAP and Wanda-sp, respectively, indicating a significantly lower rate of performance degradation.  
+
+Compared with Fine-tuned Baselines. Table 6 compares the performance of PP with finetuned baselines LoRAPrune and LLM-Pruner across different pruning ratios for text generation and commonsense reasoning tasks. Without fine-tuning, PP consistently outperforms or closely matches the fine-tuned models. At a $20\%$ pruning ratio, PP excels in both tasks across LLaMA-2-7B and LLaMA-2-13B models. At a $40\%$ pruning ratio, PP achieves comparable perplexity and significantly higher reasoning task accuracies. For example, PP achieves 61 on LLaMA-2-13B, while LoRAPrune achieves 55.5 and LLM-Pruner achieves 54.7.  
+
+Table 6: Comparison of PP with fine-tuned baselines on LLaMA-2-7B/13B models, with attention and MLP layers pruned: PP consistently outperforms across scenarios without fine-tuning.   
+
+![](images/30ce272ffd2b08e57610590d4ec6bf447ffe0f6c0107de85c930626699e482d1.jpg)  
+
+Importance-Scaled Fusion. We compare importance-scaled fusion to three fixed integration ratios—0.1, 0.5, and 0.9—which assign a fixed ratio to the probing states during integration with historical states. We conduct experiments on LLaMA-2-7B using the WikiText2 dataset at a $40\%$ pruning ratio, keeping the probe batch size fixed at 1. The results in Figure 4 demonstrate that importancescaled fusion can leverage the benefits of the calibration dataset while minimizing associated biases.  
+
+Pruning Metric. Our PPsp consistently outperforms both Wandasp and FLAP across various pruning scenarios. We conduct experiments on fix-pruned models, each uniquely generated by one of three evaluated metrics, using only the calibration dataset. we evaluated three metrics at a uniform $40\%$ pruning ratio across all blocks on the WikiText2 dataset. As shown in Table 7, PPsp significantly reduces perplexity, achieving the lowest scores of 29.7 and 35.5 on the LLaMA-2-7B and OPT-13B models, respectively, compared to FLAP’s 38.2 and 41.1, and Wanda-sp’s 43.8 and 42.7.  
+
+![](images/1429e3f637c0921d1c835e594a3cb8d908933971f2cb12ec7d190c1f92a3c081.jpg)  
+Figure 4: Importance-scaled fusion studies.  
+
+Table 7: Perplexity of WikiText2 across different metrics on models pruned by the calibration dataset, showing that PPsp performs best among the three metrics.   
+
+![](images/fc94466b738527cd7435ad955502f3f2ee86ba6d8939612658af6b5eb21fee1e.jpg)  
+
+
+
+\section{7 CONCLUSION  }
+
+
+In this paper, we propose Probe Pruning (PP), a novel online dynamic pruning framework that leverages a small yet crucial portion of hidden states to run the model and gain crucial pruning information that can guide full inference. Notably, PP only relies on the original model structure and hidden states, without requiring additional neural network modules, or fine-tuning. Furthermore, PP consistently surpasses all baselines, including those with fine-tuning in almost all experimental settings. Future research directions include refining probe generation and the probing process, as well as integrating probe pruning with advanced decoding techniques. This area presents a promising field for future research.  
+
+
+

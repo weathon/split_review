@@ -1,0 +1,325 @@
+\title{Varying Shades of Wrong: Aligning LLMs with Wrong Answers Only}
+
+\begin{abstract}
+In the absence of abundant reliable annotations for challenging tasks and contexts, how can we expand the frontier of LLM capabilities with potentially wrong answers? We focus on two research questions: (1) \emph{Can LLMs generate reliable preferences among wrong options?} And if so, (2) \emph{Would alignment with such wrong-over-wrong preferences be helpful?} We employ methods based on self-consistency, token probabilities, and LLM-as-a-judge to elicit wrong-over-wrong preferences, and fine-tune language models with preference optimization approaches using these synthesized preferences. Extensive experiments with seven LLMs and eight datasets demonstrate that (1) LLMs \emph{do} have preliminary capability in distinguishing various shades of wrong, achieving up to 20.9\% higher performance than random guess; (2) Alignment with wrong-over-wrong preferences helps LLMs to produce less wrong and sometimes even outright correct answers, while overall improving model calibration.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Post-training with preference optimization, a.k.a.~\emph{alignment}, has become a crucial part of the development of large language models (LLMs) \citep{touvron2023llama}. From online alignment with PPO \citep{schulman2017proximal} and RLHF \citep{ouyang2022training} algorithms, to recent developments in offline alignment with DPO \citep{rafailov2023direct}, LLMs improve by learning nuanced distinctions and separability between answers: a correct answer is preferred over an incorrect answer in reasoning problems \citep{wang2023making}, or a response that adequately completes a user instruction is preferred over a failing one \citep{dubois2023alpacafarm}, etc. This response ``correctness'' in alignment procedures and implementations typically comes from datasets with ground truth answers \citep{wang2023making}, human annotators \citep{ouyang2022training}, or even the model itself \citep{lee2023rlaif}, which are employed to produce preference pairs and/or reward model training data.
+
+To overcome the bottleneck of relying on high-quality expert-annotated data, in this work, we ask: \emph{what if there is no correct answer in the alignment process}? What if the task comes without annotated ground-truths, is prohibitively expensive for human annotators, and even state-of-the-art models are too poor to consistently provide correct answers? We see an increasing number of challenging benchmarks such as theorem proving \citep{welleck2021naturalproofs, zhou2024refactor} and reasoning in low-resource languages \citep{huang2024mindmerger} where correct answers are simply unavailable. As a result, existing alignment procedures relying on ``right-over-wrong'' separability might struggle to expand the frontier of model capabilities. In response, we propose \emph{wrong-over-wrong alignment}, where LLMs evaluate the ``wrongness'' of incorrect answers and align by learning to prefer less-wrong answers over more-wrong ones in the absence of correct responses. We focus on tasks with clear right-wrong distinctions and present the outline of our work in Figure~\ref{fig:intro}:
+
+RQ1: \emph{Can LLMs discriminate between varying shades of wrong and produce wrong-over-wrong preferences?} We employ four tasks where a reasonable ``proxy'' of wrongness exists, e.g., to find the shortest path in a network with a ground truth path length of 5, finding a path of length 8 is ``less wrong'' than a path of length 11 \citep{wang2023can}.\footnote{Wrongness proxies are by no means \emph{perfect}; they merely serve as objective and quantitative measures.} For each task, we sample multiple solutions to a problem, filter for incorrect answers, and employ LLMs to elicit wrong-over-wrong preferences via self-consistency \citep{wang2023selfconsistency}, token probabilities, pairwise comparison \citep{sun2024salmon}, and LLM-as-a-judge\citep{dubois2023alpacafarm}. We employ a quantitative proxy of wrongness in each task to help evaluate wrong-over-wrong preferences.
+
+RQ2: \emph{Is LLM alignment with wrong-over-wrong preferences helpful?} We fine-tune language models to align them using the synthesized wrong-over-wrong preferences. We hypothesize that wrong-over-wrong alignment will make models better calibrated, learning a better representation space for correct and incorrect responses. The models might produce more correct answers as determined by ground truth\footnote{We employ datasets with ground-truths but only for evaluation proposes.}, or even if the answers are still incorrect, they will be less wrong based on the proxy.
+
+Extensive experiments with seven open and proprietary models across eight datasets demonstrate the potential of wrong-over-wrong alignment: (1) LLMs \emph{do} have preliminary capabilities to provide wrong-over-wrong judgements, with an accuracy of up to 70.9\% across the four datasets spanning knowledge, factuality, commonsense, and structured data. We further identify that score-based methods together with margin filtering might be the best approach for preference elicitation and pairs of wrong answers with the \emph{larger} gaps in scores should be retained. 
+(2) Alignment with the elicited wrong-over-wrong preferences confirms the above hypotheses, demonstrating improvements across all three objectives: aligned LLMs are on average across datasets up to 9.0\% less wrong as evaluated by the proxy, up to 7.0\% of answers become correct post-alignment, while the Estimated Calibration Error (ECE) is reduced by up to 9.4\% across the four tasks. We envision wrong-over-wrong alignment as a complement to existing alignment procedures, with the unique potential to expand the frontier of model capabilities for tasks where correctness is not readily available.
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=1\linewidth]{images/IntroFig_green.pdf}
+    \caption{Two phases of aligning LLMs with wrong answers: \emph{eliciting wrong-over-wrong preferences} and \emph{wrong-over-wrong alignment}. In Phase 1, we employ four methods to elicit wrong-over-wrong preferences, based on answer consistency, logits-based confidence, and LLM-as-a-judge approaches. In Phase 2, we align LLMs with wrong-over-wrong preferences using DPO and expect to have less wrong, more correct, and better-calibrated answers.}
+    \label{fig:intro}
+\end{figure}
+
+
+\section{Methodology}
+
+
+\subsection{Eliciting Wrong-over-Wrong Preferences}
+
+When LLM-generated answers are incorrect, it is often possible that some answers are \emph{less wrong} than others. We term this ``varying shades of wrong'' and investigate whether LLMs could provide reliable wrong-over-wrong preferences if no reliable ground truths are available.
+
+Formally, given a question $\boldsymbol{q}$ and a pair of \emph{wrong} answers $(\boldsymbol{a}_1, \boldsymbol{a}_2)$, we aim to employ LLMs to approximate a ``ground-truth'' wrong-over-wrong preference function $f(\boldsymbol{a}_1 \succ  \boldsymbol{a}_2 \mid \boldsymbol{q}) \rightarrow \{1, 0, -1\}$, where $1$ indicates that $\boldsymbol{a}_1$ is less wrong and should be preferred over $\boldsymbol{a}_2$, $-1$ vice versa, and $0$ indicates the two answers are not separable due to ambiguity or uncertainty. Since the ground-truth preference function $f(\boldsymbol{a}_1 \succ \boldsymbol{a}_2 \mid \boldsymbol{q})$ is usually unavailable, we propose using a silver function $\hat{f}(\boldsymbol{a}_1 \succ \boldsymbol{a}_2 \mid \boldsymbol{q})$ to estimate $f$ and employ $\hat{f}$ for evaluation  (e.g., in the shortest path problem, a path of length 8 is less wrong than a path of length 11, when 5 is correct).
+Although using proxy functions to directly construct wrong-over-wrong preferences may seem more ideal, these proxies often rely on the availability of ground-truth answers or models trained on ground truth, which is against our setup. Moreover, not all datasets have well-defined proxies, and those that do vary vastly in format. Thus, we propose to elicit wrong-over-wrong preferences from an LLM, $f_{\textit{LLM}}(\boldsymbol{a}1 \succ \boldsymbol{a}2 \mid \boldsymbol{q}) \rightarrow \{1, 0, -1\}$. Given that LLMs are known to suffer from poor calibration in evaluation \citep{liu2024calibrating}, our first research question is: \emph{Can LLMs provide reliable wrong-over-wrong preferences}, or can any $f_{\textit{LLM}}$ be a good estimator of $\hat{f}$? We specifically explore five approaches including two that do not use LLMs  $f_{\textit{noLLM}}(\boldsymbol{a}1 \succ \boldsymbol{a}2 \mid \boldsymbol{q})$ for reference.
+
+\paragraph{Consistency-based} For multiple sampled responses, the frequency of various answers can be interpreted as a measure of confidence and reliability \citep{wang2023selfconsistency, manakul2023selfcheckgpt, miao2024selfcheck}. Given $m$ sampled answers $\{\boldsymbol{a}_i\}_{i=1}^m$, the \underline{s}ampling \underline{r}epetition score is calculated as $\mathrm{sr}(\boldsymbol{a}_i)=\frac{1}{m}\sum_{j=1}^{m}\mathbbm{1} (\boldsymbol{a}_i = \boldsymbol{a}_j)$, representing how frequently an answer is repeated across multiple samples. Based on the consistency scores, the preference function is defined as: $f_{\textit{noLLM}}^{(\textit{c)}}(\boldsymbol{a}_1 \succ \boldsymbol{a}_2 \mid \boldsymbol{q})=\mathrm{sgn}(\mathrm{sr}(\boldsymbol{a}_1) - \mathrm{sr}(\boldsymbol{a}_2))$, assuming that the more frequent answers are more likely to be correct \citep{cole2023selectively}. Note that $f^{(\textit{c)}}$ might not be applicable to open-ended generations where there is no fixed set of candidate answers.
+
+\paragraph{Logits-based} A well-calibrated LLM's token probabilities should reflect the reliability/trustworthiness of responses \citep{geng2024survey}, and a more probable answer is more likely to be correct. We employ Negative Log-Likelihood (NLL) to estimate the LLM’s confidence in each wrong answer, specifically $\mathrm{NLL}(\mathbf{a} \mid \mathbf{q}) = -\mathrm{log}(\prod_{t \in \mathbf{a}} p_t) = -\sum_{t \in \mathbf{a}} \mathrm{log}(p_t)$ where $t$ is a token in answer $\mathbf{a}$ and $p_t$ is its token probability. The logits-based preference function is then defined as: $f_{\textit{LLM}}^{(\textit{l})}(\boldsymbol{a}_1 \succ \boldsymbol{a}_2 \mid \boldsymbol{q})=\mathrm{sgn}(\mathrm{NLL}(\boldsymbol{a}_2 \mid \boldsymbol{q}) - \mathrm{NLL}(\boldsymbol{a}_1 \mid \boldsymbol{q}))$.
+
+\paragraph{Pairwise comparison} As increasingly employed in LLM-as-a-judge research \citep{dubois2023alpacafarm, bai2023benchmarking}, an LLM can directly compare two answers. We prompt an LLM to reason about which answer in $(\boldsymbol{a}_1$, $\boldsymbol{a}_2)$ is less wrong (e.g., \emph{``select the preferred AI model's output for a given instruction based on their correctness''} ). The result is denoted as $\mathrm{PC}(\boldsymbol{a}_1 \succ \boldsymbol{a}_2 \mid \boldsymbol{q}, \mathrm{LLM}) \rightarrow \{1, 0, -1\}$ and the full prompt text is in Table \ref{tab:prompt1}. 
+
+However, LLMs could be sensitive to answer order and suffer from positional biases \citep{wang2023large, zheng2023judging}. To mitigate this limitation, we employ consistency checks by flipping the order of answers, prompt the LLM to judge again, and disregard any inconsistent results.
+The final pairwise comparison preference function after filtering is:
+\begin{align*}
+    f_{\textit{LLM}}^{(\textit{p)}}(\boldsymbol{a}_1 \succ \boldsymbol{a}_2 \mid \boldsymbol{q}) = \frac{1}{2}\big( \mathrm{PC}(\boldsymbol{a}_1 \succ \boldsymbol{a}_2 \mid \boldsymbol{q}, \mathrm{LLM}) - \mathrm{PC}(\boldsymbol{a}_2 \succ \boldsymbol{a}_1 \mid \boldsymbol{q}, \mathrm{LLM})  \big)
+\end{align*}
+\paragraph{Score-based} Another strategy is to let an LLM assign a score to each answer, where higher scores represent ``less wrong'' and then compare the scores \citep{bansal2024peering}. We employ the prompt \emph{``grade the correctness of each response on a 5-point scale from 0 to 5''} to obtain the LLM's score for each answer $\boldsymbol{a}$: $\mathrm{score}(\boldsymbol{a} \mid \boldsymbol{q}, \mathrm{LLM})$. The full prompt text is in Table \ref{tab:prompt2}. This scoring mechanism allows for a more fine-grained measure than pairwise comparison. We identify two important factors in this scoring-based approach:
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Batch size}: We simultaneously include $b$ answers $\{\boldsymbol{a}_i\}_{i=1}^b$ to the same question $\boldsymbol{q}$ for the LLM to score in one prompt. Increasing $b$ allows the LLM to compare and contrast multiple answers simultaneously, potentially improving its ability to discern relative answer reliability. There is a trade-off between efficiency/calibration and context length.
+    \item \textbf{Score margin}: \emph{Margin} indicates the absolute score difference between a wrong-over-wrong answer pair. Specifically, we use the $m$-percentile $M_m$ of all score margins to filter out pairs with smaller differences, as larger score margins are more trustworthy indicators of wrongness disparity \citep{li2023self, yang2024rlcd, yuan2024self} (e.g., employing $M_{\textit{50}}$ indicates that only the wrong-over-wrong pairs with the top 50\% score gaps are retained.).
+\end{itemize}
+To sum up, the score-based preference function is defined as:
+\begin{align*}
+    f_{\textit{LLM}}^{(\textit{s)}}(\boldsymbol{a}_1 \succ \boldsymbol{a}_2 \mid \boldsymbol{q}) = \mathrm{sgn}(\mathrm{score}_{\textit{diff}}) \cdot \mathbbm{1}(\mid \mathrm{score}_{\textit{diff}} \mid > M_m) \big)
+\end{align*}
+where $\mathrm{score}_{\textit{diff}} = \mathrm{score}(\boldsymbol{a}_1 \mid \boldsymbol{q}, \mathrm{LLM}) - \mathrm{score}(\boldsymbol{a}_2 \mid \boldsymbol{q}, \mathrm{LLM})$ and $\mathbbm{1}(\cdot)$ is the indicator function.
+
+\paragraph{Heuristic} Research suggests that response length correlates with answer quality \citep{zhao2024long}, i.e., longer answers with detailed reasoning steps may be closer to a correct solution. We define this trivial heuristic preference function as: $f_{\textit{noLLM}}^{(\textit{h)}}(\boldsymbol{a}_1 \succ \boldsymbol{a}_2 \mid \boldsymbol{q})=\mathrm{sgn}(\mathrm{len}(\boldsymbol{a}_1) - \mathrm{len}(\boldsymbol{a}_2))$, where $\mathrm{sgn}$ is the sign function.
+
+\subsection{Wrong-over-Wrong Alignment} \label{sec:method_alignment}
+We hypothesize that there are valuable signals in wrong-over-wrong preferences, that LLMs could learn to distinguish answer reliability, improve model calibration, and more. In addition, the ease of producing large quantities of wrong answers makes it especially promising for generating synthetic training data. Despite being a contrived scenario, wrong-over-wrong alignment provides a controlled environment to study model behavior under the worst case when there are no correct answers at all. We also show that it is a good supplement to right-over-wrong alignment in \S \ref{sec:row}.
+
+To this end, we first synthesize a dataset $\mathcal{D}_{\textit{WoW}}$ through the following pipeline. First, given an original dataset $\mathcal{D}_{0} = \{(\boldsymbol{q}^{\textit{(i)}}, \boldsymbol{a}_{gt}^{\textit{(i)}})\}_{i=1}^n$, we sample $m$ answers from the LLM and simulate scenarios with wrong answers only by filtering out correct ones: $\{\boldsymbol{a}_j^{\textit{(i)}}\mid \boldsymbol{a}_{j}^{\textit{(i)}} \neq \boldsymbol{a}_{gt}^{\textit{(i)}}\}\}_{j=1}^m \sim \mathrm{LLM}(\boldsymbol{q}^{\textit{(i)}})$. Then we iterate over every combination $(\boldsymbol{a}_j^{\textit{(i)}}$, $\boldsymbol{a}_k^{\textit{(i)}})$ of $\{\boldsymbol{a}_j^{\textit{(i)}}\mid \boldsymbol{a}_{j}^{\textit{(i)}} \neq \boldsymbol{a}_{gt}^{\textit{(i)}}\}\}_{j=1}^m$, and judge the answers with $f_{\textit{LLM}}$ or $f_{\textit{noLLM}}$. The one considered less wrong is the \underline{c}hosen response $\boldsymbol{a}_c$ and the other is the \underline{r}ejected response $\boldsymbol{a}_r$. We ignore the cases where the LLM gives a tie ($f_{\textit{LLM}} = 0$). Full details of wrong-over-wrong dataset construction are available in Algorithm \ref{alg:WoW_generation}.
+
+With this dataset, we fine-tune an LLM using any preference optimization method \citep{azar2024general, hong2024orpo, wu2024self, calandriello2024human}. For example, the training objective of DPO can be expressed as: 
+\begin{align*}
+    \mathcal{L}_{\textit{DPO}}(\pi_\theta; \pi_{\textit{ref}}) = -\mathbb{E}_{(\boldsymbol{a}_c, \boldsymbol{a}_r, \boldsymbol{q}) \sim \mathcal{D}_{\textit{WoW}}} \left[ \log \sigma \left( \beta \log \frac{\pi_\theta(\boldsymbol{a}_c \mid \boldsymbol{q})}{\pi_{\textit{ref}}(\boldsymbol{a}_c \mid \boldsymbol{q})} - \log \frac{\pi_\theta(\boldsymbol{a}_r \mid \boldsymbol{q})}{\pi_{\textit{ref}}(\boldsymbol{a}_r \mid \boldsymbol{q})}\right) \right]
+\end{align*}
+where $\pi_\theta$ is the policy model and $\pi_{\textit{ref}}$ is the reference policy. To evaluate our hypothesis about the benefits of wrong-over-wrong alignment, we measure model performance from three aspects:
+
+\paragraph{Less wrong} We evaluate the wrongness of answers that are still wrong post-alignment based on $\hat{f}(\boldsymbol{a}_1 \succ  \boldsymbol{a}_2 \mid \boldsymbol{q})$. A reduction in wrongness indicates that LLMs are producing a better attempt at a challenging problem. As LLMs learn to separate varying shades of wrong in the alignment tuning process, we expect the answer distribution of LLMs to move towards less-wrong direction.
+
+\paragraph{More correct} We also evaluate the accuracy of models producing correct answers. An increase in accuracy demonstrates that surprisingly, training on wrong answers \emph{only} can guide models to produce correct answers. As the model refines its wrong-over-wrong separation, answers that were previously close-to-correct may be adjusted enough to align with the correct solution, even though the training process only employs incorrect answers.
+
+\paragraph{Better calibrated} By training the model to prefer less-wrong answers, it learns to make finer distinctions between varying shades of wrongness and its confidence estimation should become more reliable. We evaluate the calibration of models based on token probabilities.
+
+
+
+\section{Experiment Settings}
+
+
+\paragraph{Models} We employ three open and proprietary LLMs for experiments spanning different scales and access levels. First, we use \textsc{\textsc{LLaMA3-8B}} \citep{dubey2024llama}, \textsc{GPT-3.5}, and \textsc{GPT-4o} \citep{achiam2023gpt} to sample 10 answers per problem with random option orders for multiple-choice questions. We employ a temperature of 1.0 and a max generation length of 1024. LLMs employed in this stage are called \emph{generators}. We then elicit wrong-over-wrong preferences using the same LLMs with each of $f_{\textit{noLLM}}^{(\textit{\textit{h})}}$, $f_{\textit{noLLM}}^{(\textit{c})}$, $f_{\textit{LLM}}^{(\textit{l})}$, $f_{\textit{LLM}}^{(\textit{p})}$, and $f_{\textit{LLM}}^{(\textit{s})}$. LLMs employed in this stage are called \emph{evaluators}.
+
+Finally, we conduct QLoRA fine-tuning \citep{dettmers2023qlora} on \textsc{LLaMA3-8B} using the collected wrong-over-wrong preferences through DPO. We experiment on preferences elicited from 4 methods, respectively $f_{\textit{GPT-4o}}^{(\textit{p})}$ with consistency checks, $f_{\textit{GPT-4o}}^{(\textit{s})}$ with $M_{\textit{50}}$ and $M_{\textit{10}}$, and $\hat{f}$ as an oracle for reference. We sample 4000 wrong-over-wrong pairs for each experiment.
+
+\paragraph{Data} We employ datasets with a reasonable but not necessarily \emph{perfect} proxy correctness function $p(\boldsymbol{a} \mid \boldsymbol{q})$. Specifically, the proxy function gives a heuristic-based or model-based correctness score to each answer based on ground-truth. The silver ground-truth of wrong-over-wrong preference can then be calculated as: 
+\begin{align*} 
+    \hat{f}(\boldsymbol{a}_1 \succ \boldsymbol{a}_2 \mid \boldsymbol{q}) = \mathrm{sgn} \big(p(\boldsymbol{a}_1 \mid \boldsymbol{q}) - p(\boldsymbol{a}_2 \mid \boldsymbol{q})\big) 
+\end{align*} 
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Knowledge Crosswords (KC)} \citep{ding2023knowledge} is a multiple-choice structured knowledge reasoning benchmark where LLMs fill in 3 blanks of entities with structured factual constraints. The correctness proxy is $p^{(\textit{kc)}}(\boldsymbol{a} \mid \boldsymbol{q}) = \frac{\text{\# of correctly filled blanks}}{\text{\# of all blanks} (3)}$.
+    \item \textbf{NLGraph (NLG)} \citep{wang2023can} is a graph reasoning benchmark and we employ the shortest path subset, where LLMs find the shortest path between two nodes in a weighted undirected graph. The correctness proxy is $p^{(\textit{sp)}}(\boldsymbol{a} \mid \boldsymbol{q}) = 1-\frac{|w_{\boldsymbol{a}} - w_{\textit{gt}}|}{w_{\textit{worst}} - w_{\textit{gt}}}$, with $w_{\boldsymbol{a}}$ being the weight of the shortest path in $\boldsymbol{a}$, $w_{\textit{gt}}$ being ground truth, and $w_{\textit{worst}}$ being the weight of the longest simple path.
+    \item \textbf{Bio Generation (BG)} LLMs are asked to generate a biography of a named individual, and the correctness of the answer is evaluated via FActScore \citep{min2023factscore}, which computes the percentage of atomic facts supported by retrieved passages. The names and retrieved passages are sourced from Wikipedia. The proxy function is defined as $p^{(\textit{bg)}}(\boldsymbol{a} \mid \boldsymbol{q}) = \mathrm{FActScore}(\boldsymbol{a} \mid \boldsymbol{q}) \in [0,1]$.
+    \item \textbf{COM$^2$} \citep{fang2024complex} is a multiple-choice commonsense reasoning benchmark. We use Vera \citep{liu2023vera} to obtain the commonsense plausibility scores for each option. The proxy function is defined as $p^{(\textit{cs)}}(\boldsymbol{a} \mid \boldsymbol{q}) = \mathrm{Vera}(\boldsymbol{a} \mid \boldsymbol{q}) \in [0,1]$.
+\end{itemize}
+We sample 625, 625, 625, and 380 questions from each dataset, each split into training sets $\mathcal{D}_{\textit{train}}$, validation sets $\mathcal{D}_{\textit{val}}$, and test sets $\mathcal{D}_{\textit{test}}$ with an approximately 8:1:1 ratio. We then generate $\mathcal{D}_{\textit{WoW}}$ from $\mathcal{D}_{\textit{train}}$ employing the pipeline in \S\ref{sec:method_alignment}. $\mathcal{D}_{\textit{test}}$ is used for evaluation and $\mathcal{D}_{\textit{val}}$ for hyperparameter tuning.
+
+\paragraph{Evaluation and Metrics} 
+For the first research question of eliciting wrong-over-wrong preferences, we compare against the proxy ground-truth preferences $\hat{f}(\boldsymbol{a}_1 \succ \boldsymbol{a}_2 \mid \boldsymbol{q})$. The accuracy of LLM-generated wrong-over-wrong preferences is calculated as:
+\begin{align*}
+    \mathrm{Acc}_\textit{WoW} = \frac{1}{|\mathcal{D}_{\textit{WoW}}|}\sum\nolimits_{(\boldsymbol{q},\boldsymbol{a}_c,\boldsymbol{a}_r) \in \mathcal{D}_{\textit{WoW}}} \mathbbm{1} (\hat{f}(\boldsymbol{a}_c \succ \boldsymbol{a}_r \mid \boldsymbol{q}) = f_{\textit{(no)LLM}}(\boldsymbol{a}_c \succ \boldsymbol{a}_r \mid \boldsymbol{q}))
+\end{align*}
+For the second research question of wrong-over-wrong alignment, we evaluate improvements across three objectives after aligning with $\mathcal{D}_{\textit{WoW}}$:
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Less Wrong}: We employ the average proxy function scores of all wrong answers: $p_{\textit{wrong}} = \frac{1}{N_{\textit{wrong}}}\sum\nolimits_{ \mathcal{D}_{\textit{test}}} \sum\nolimits_{\boldsymbol{a}_i \neq \boldsymbol{a}_{\textit{gt}}} p(\boldsymbol{a}_i\mid \boldsymbol{q})$, where $N_{\textit{wrong}}$ is the number of wrong answers and $\boldsymbol{a}_{\textit{gt}}$ indicates the correct answer.
+    \item \textbf{More Correct}: We employ task accuracy: $\mathrm{Acc} = \frac{1}{N}\sum\nolimits_{ \mathcal{D}_{\textit{test}}} \sum\nolimits_{\boldsymbol{a}_i} \mathbbm{1}(\boldsymbol{a}_i = \boldsymbol{a}_{gt})$, where $N$ is the number of all answers.
+    \item \textbf{Better Calibration}: We extract the confidence of LLM answers with $\mathrm{exp}(\mathrm{NLL}(\mathbf{a} \mid \mathbf{q})) \in [0,1]$, create 10 bins of $[0.1i, 0.1(i+1)]$, and employ Expected Calibration Error (ECE) \citep{guo2017calibration} to measure the calibration quality.
+\end{itemize}
+
+
+\section{Results}
+
+
+\begin{table}[t]\centering
+\setlength{\tabcolsep}{1.5pt}
+\resizebox{0.9\textwidth}{!}{
+\begin{tabular}{lccccc|cccc|cccc|c}\toprule[1.5pt]
+\multirow{2}{*}{\textbf{Method}}& \multirow{2}{*}{\textbf{Margin}}&\multicolumn{4}{c}{\textsc{LLaMA3-8B}} &\multicolumn{4}{c}{\textsc{GPT-3.5}} &\multicolumn{4}{c}{\textsc{GPT-4o}} &\multirow{3}{*}{Overall} \\
+ & &KC &BG &COM$^2$ &NLG &KC &BG &COM$^2$ &NLG &KC &BG &COM$^2$ &NLG & \\
+\midrule[0.75pt]\multicolumn{15}{c}{\textit{\ \ \textbf{\textsc{Evaluator-Independent}}} }\\ \midrule[0.75pt] 
+\multirow{2}{*}{\textsc{Heuristic}} &$M_{\textit{50}}$ &.483 &.480 &.498 &.492 &.546 &.519 &.482 &.463 &.491 &.459 &.444 &.503 &.488 \\ 
+ &$M_{\textit{10}}$ &.502 &.425 &.492 &.514 &.589 &.568 &.489 &.420 &.500 &.408 &.380 &.533 &.474 \\
+\multirow{2}{*}{\textsc{Consistency}} &$M_{\textit{50}}$ &.500 & - &.505 &.582 &.526 & - &.470 &.605 &.434 & - &.565 &.548 &.559 \\
+&$M_{\textit{10}}$ &.447 & - &.441 &.578 &.506 & - &.556 &\textbf{.695} &.600 & - &.423 &.494 &.566 \\
+\midrule[0.75pt]\multicolumn{15}{c}{\textit{\ \ \textbf{\textsc{LLaMA3-8B as Evaluator}}} }\\ \midrule[0.75pt] 
+\multirow{2}{*}{\textsc{Pairwise}} &all &.498 &.492 &.455 &.486 &.481 &.488 &.530 &.533 &.509 &.499 &.468 &.503 &.496 \\
+&filter &.518 &.566 &.437 &.510 &.528 &.479 &.549 &.582 &.564 &.419 &.491 &.525 &.533 \\
+\multirow{2}{*}{\textsc{Logits}}&$M_{\textit{50}}$ &.541 &.568 &.524 &.505 &.570 &.531 &.482 &.464 &.566 &.491 &.419 &.577 &.532 \\
+&$M_{\textit{10}}$ &.559 &.669 &.432 &.528 &.571 &\underline{.649} &.496 &.427 &.400 &.444 &.310 &\underline{.630} &.582 \\
+\multirow{2}{*}{\textsc{Score}}&$M_{\textit{50}}$ &.621 &.552 &.493 &.554 &.643 &.502 &.574 &.580 &\underline{.604} &.514 &\underline{.626} &.424 &.546 \\
+&$M_{\textit{10}}$ &.654 &.551 &.458 &.579 &.701 &.485 &.659 &.524 &\textbf{.800} &\textbf{.632} &\textbf{.662} &.500 &.558 \\
+\midrule[0.75pt]\multicolumn{15}{c}{\textit{\ \ \textbf{\textsc{GPT-3.5 as Evaluator}} }}\\ \midrule[0.75pt] 
+\multirow{2}{*}{\textsc{Pairwise}}&all &.512 &.493 &.472 &.500 &.504 &.474 &.531 &.512 &.463 &.492 &.466 &.502 &.494 \\
+&filter &.531 &.631 &.502 &.231 &.520 &.500 &.493 &.531 &.387 &.437 &.433 &.400 &.536 \\
+\multirow{2}{*}{\textsc{Logits}}&$M_{\textit{50}}$ & - & - & - & - &.548 &.511 &.570 &.475 & - & - & - & - &.507 \\
+&$M_{\textit{10}}$ & - & - & - & - &.541 &.538 &.570 &.430 & - & - & - & - &.505 \\
+\multirow{2}{*}{\textsc{Score}} &$M_{\textit{50}}$ &.424 &.566 &.473 &.552 &.578 &.522 &.608 &.600 &.264 &.502 &.503 &.551 &.547 \\
+&$M_{\textit{10}}$ &.585 &.632 &.517 &.555 &.583 &.550 &\textbf{.718} &.575 &.200 &.546 &\textbf{.662} &.573 &.590 \\
+\midrule[0.75pt]\multicolumn{15}{c}{\textit{\ \ \textbf{\textsc{GPT-4o as Evaluator}}} }\\ \midrule[0.75pt] 
+\multirow{2}{*}{\textsc{Pairwise}} &all &.605 &.593 &.507 &.551 &.646 &.512 &.515 &.577 &.434 &.501 &.526 &.537 &.562 \\
+&filter &.691 &\underline{.689} &.533 &.602 &.712 &.536 &.558 &.661 &.417 &.490 &.604 &.549 &.624\\
+\multirow{2}{*}{\textsc{Logits}}&$M_{\textit{50}}$ & - & - & - & - & - & - & - & - &.491 &.539 &.486 &.572 &.544 \\
+&$M_{\textit{10}}$ & - & - & - & - & - & - & - & -&.200 &.584 &.507 &.591 &.574 \\
+\multirow{2}{*}{\textsc{Score}}&$M_{\textit{50}}$ &\underline{.733} &.677 &\textbf{.544} &\underline{.605} &\underline{.793} &.591 &.617 &.661 &.547 &.520 &.581 &\textbf{.639} &\underline{.641} \\
+&$M_{\textit{10}}$ &\textbf{.793} &\textbf{.795} &\underline{.534} &\textbf{.652} &\textbf{.835} &\textbf{.655} &\underline{.711} &\underline{.684} &.400 &\underline{.586} &.520 &.578 &\textbf{.709} \\
+\bottomrule[1.5pt]
+\end{tabular}
+}
+\caption[]{Accuracy of LLM-generated wrong-over-wrong preferences $Acc_\textit{WoW}$. The three LLMs across on top are employed to generate answers (\emph{generator}). Best results are in \textbf{bold}, second best are in \underline{underline}, and incompatible or unavailable results are denoted as ``-''.\footnotemark \ For pairwise comparison, margin ``all'' is without consistency checks and margin ``filter'' is with consistency checks. Overall accuracy is a weighted average across all datasets by the number of wrong-over-wrong pairs in each dataset. LLMs \emph{do} have preliminary capabilities to distinguish varying shades of wrong with up to $\mathrm{Acc}_{\textit{WoW}}$ = 0.709 achieved by the score-based approach, specifically $f_{\textit{GPT-4o}}^{(\textit{s})}$ with $M_{\textit{10}}$.}
+\label{tab:res_preference}
+\end{table}
+\footnotetext{Answers for Bio Generation questions are open-ended and we cannot compute repetition; \textsc{GPT-3.5} and \textsc{GPT-4o} are not open models for calculating logits and NLL.}
+
+\paragraph{Eliciting Wrong-over-Wrong Preferences} We present the accuracy of LLM-generated wrong-over-wrong preferences in Table \ref{tab:res_preference}.
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Eliciting wrong-over-wrong preference from LLMs is feasible.} Most (approach, LLM) combinations yield wrong-over-wrong preferences that are significantly better than random guess: the average $\mathrm{Acc}_\textit{WoW}$ is 0.553 across datasets, and the best $\mathrm{Acc}_\textit{WoW}$ is 0.709 achieved by $f_{\textit{GPT-4o}}^{(\textit{s})}$ with a margin of $M_{\textit{10}}$. This suggests that LLMs, with the right approach, \emph{do} possess preliminary capabilities to distinguish various shades of wrong.
+    \item \textbf{Knowledge-based tasks are easier while commonsense is most challenging.} The average $\mathrm{Acc}_{\textit{WoW}}$ across all methods for Knowledge Crosswords, Bio Generation, COM$^2$, and NLGraph are 0.578, 0.560, 0.522, and 0.540 respectively. This suggests that LLMs have varying wrong-over-wrong judgement capabilities across domains: performance is best on Knowledge Crosswords, a multi-hop knowledge QA dataset, while worst on COM$^2$, a commonsense reasoning task. The ability to determine wrong-over-wrong may be impacted by LLMs' base capability on respective task; Figure \ref{fig:corr1} shows a positive correlation between model accuracy on the task and $\mathrm{Acc}_{\textit{WoW}}$.
+    \item \textbf{Scored-based elicitation is the best method.} $f_{\textit{GPT-4o}}^{(\textit{s})}$ with $M_{\textit{10}}$ achieves the best $\mathrm{Acc}_{\textit{WoW}}$. The average $\mathrm{Acc}_{\textit{WoW}}$ across LLMs for consistency-based with $M_{\textit{10}}$, logits-based with $M_{\textit{10}}$, pairwise comparison with consistency checks, score-based with $M_{\textit{10}}$, and heuristic are 0.554, 0.566, 0.564, 0.619, and 0.474, indicating that the score-based method outperforms all other approaches by at least 9.4\%. This suggests that the token probabilities of aligned LLMs might not be well-calibrated \citep{sorensen2024roadmap, feng2024modular} for wrong-over-wrong contexts, while LLM-as-a-judge methodologies \citep{li2024generative} with score-based prompting offer the most promising solution.
+    \item \textbf{Consistency checks and score margins are helpful.} For the pairwise comparison method, we notice that LLMs are sensitive to response order and applying consistency checks by removing inconsistent judgements due to order-flipping improves 9.0\% $\mathrm{Acc}_{\textit{WoW}}$ on average. Employing score margins to only consider the most separable cases also improves $\mathrm{Acc}_{\textit{WoW}}$ for logits-based, consistency-based, and score-based methods, with average improvements across datasets from $M_{\textit{50}}$ to $M_{\textit{10}}$ being 2.1\%, 1.3\%, and 6.9\%, and from $M_{\textit{100}}$ to $M_{\textit{10}}$ being 5.8\%, 72.4\%, and 65.3\%. The significant improvement from $M_{\textit{100}}$ to $M_{\textit{10}}$ is due to prevalent cases where the LLM gives the same score for wrong answers with different levels of wrongness.
+    \item \textbf{Self-evaluation is subpar.} LLMs may not be good at producing accurate wrong-over-wrong preferences on their own generation. While \textsc{GPT-4o} provides good wrong-over-wrong preferences on answers generated by \textsc{LLaMA3-8B} and \textsc{GPT-3.5}, accuracy suffers for its own answers, with a 21.1\% and 19.7\% drop for score-based with $M_{10}$ and pairwise comparison with consistency checks on average across datasets. This echos findings that LLM self-critique and self-correction might not be satisfactory \citep{valmeekam2023can, west2023generative, huang2024large}. More interestingly, employing weak LLMs to evaluate strong LLMs may be helpful \citep{khan2024debating}, with \textsc{LLaMA3-8B} achieving 0.649 $\mathrm{Acc}_{\textit{wow}}$ on answers generated by \textsc{GPT-4o}.
+\end{itemize}
+\begin{table}[t]
+\centering
+\setlength{\tabcolsep}{1.3pt}
+\resizebox{0.9\textwidth}{!}{
+\begin{tabular}
+{lcccccccccccc}\toprule[1.5pt]
+\multirow{2}{*}{\textbf{Method}} &\multicolumn{3}{c}{KC} &\multicolumn{3}{c}{BG} &\multicolumn{3}{c}{COM$^2$} &\multicolumn{3}{c}{NLG} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}\cmidrule(lr){8-10}\cmidrule(lr){11-13}
+&$p_{\textit{wrong}\uparrow}$ &$\mathrm{Acc}_{\uparrow}$ &$\mathrm{ECE}_{\downarrow}$ &$p_{\textit{wrong}\uparrow}$ &$\mathrm{Acc}_{\uparrow}$ &$\mathrm{ECE}_{\downarrow}$ &$p_{\textit{wrong}\uparrow}$ &$\mathrm{Acc}_{\uparrow}$ &$\mathrm{ECE}_{\downarrow}$ &$p_{\textit{wrong}\uparrow}$ &$\mathrm{Acc}_{\uparrow}$ &$\mathrm{ECE}_{\downarrow}$ \\\midrule[0.75pt]
+\textsc{Original} &.466 &.555 &.235 &.532 &.027 &.576 &.312 &.669 &.053 &.750 &.142 &.649 \\ \midrule[0.75pt]
+\multicolumn{13}{c}{\textit{\ \ \textbf{\textsc{Self-Generator}}} }\\ \midrule[0.75pt]
+\textsc{Pairwise} filter &\cellcolor[HTML]{d4edda}.475 &\cellcolor[HTML]{d4edda}\textbf{.627} &\cellcolor[HTML]{d4edda}\textbf{.096} &\cellcolor[HTML]{d4edda}.670 &\cellcolor[HTML]{d4edda}.059 &\cellcolor[HTML]{d4edda}.500 &\cellcolor[HTML]{d4edda}.326 &\cellcolor[HTML]{d4edda}.690 &\cellcolor[HTML]{d4edda}.049 &\cellcolor[HTML]{d4edda}.806 &\cellcolor[HTML]{d4edda}.179 &\cellcolor[HTML]{d4edda}\underline{.493} \\
+\textsc{Score} $M_{\textit{50}}$ &\cellcolor[HTML]{d4edda}.529 &\cellcolor[HTML]{d4edda}\underline{.597} &.251 &\cellcolor[HTML]{d4edda}.661 &\cellcolor[HTML]{d4edda}.043 &.580 &\cellcolor[HTML]{d4edda}.325 &.660 &\cellcolor[HTML]{d4edda}\underline{.039} &\cellcolor[HTML]{d4edda}.800 &\cellcolor[HTML]{d4edda}.203 &\cellcolor[HTML]{d4edda}.551 \\
+\textsc{Score} $M_{\textit{10}}$ &\cellcolor[HTML]{d4edda}.532 &\cellcolor[HTML]{d4edda}.584 &.315 &\cellcolor[HTML]{d4edda}.682 &\cellcolor[HTML]{d4edda}.075 &\cellcolor[HTML]{d4edda}.561 &\cellcolor[HTML]{d4edda}\textbf{.357} &\cellcolor[HTML]{d4edda}.681 &\cellcolor[HTML]{d4edda}\textbf{.020} &\cellcolor[HTML]{d4edda}\textbf{.847} &\cellcolor[HTML]{d4edda}\underline{.292} &\cellcolor[HTML]{d4edda}.578 \\
+\textsc{oracle} &\cellcolor[HTML]{d4edda}.529 &\cellcolor[HTML]{d4edda}.576 &.279 &\cellcolor[HTML]{d4edda}\textbf{.695} &\cellcolor[HTML]{d4edda}\underline{.108} &\cellcolor[HTML]{d4edda}\textbf{.440} &\cellcolor[HTML]{d4edda}.330 &\cellcolor[HTML]{d4edda}.689 &.064 &\cellcolor[HTML]{d4edda}\underline{.846} &\cellcolor[HTML]{d4edda}.182 &\cellcolor[HTML]{d4edda}.596 \\\midrule[0.75pt]
+\multicolumn{13}{c}{\textit{\ \ \textbf{\textsc{Mix-Generator}}} }\\ \midrule[0.75pt]
+
+\textsc{Pairwise} filter &\cellcolor[HTML]{d4edda}\underline{.533} &\cellcolor[HTML]{d4edda}.574 &\cellcolor[HTML]{d4edda}.201 &\cellcolor[HTML]{d4edda}.634 &\cellcolor[HTML]{d4edda}.075 &\cellcolor[HTML]{d4edda}.535 &\cellcolor[HTML]{d4edda}\underline{.355} &\cellcolor[HTML]{d4edda}\textbf{.698} &\cellcolor[HTML]{d4edda}.048 &\cellcolor[HTML]{d4edda}.832 &\cellcolor[HTML]{d4edda}.192 &\cellcolor[HTML]{d4edda}.538 \\
+\textsc{Score} $M_{\textit{50}}$ &\cellcolor[HTML]{d4edda}.528 &\cellcolor[HTML]{d4edda}.590 &\cellcolor[HTML]{d4edda}\underline{.175} &\cellcolor[HTML]{d4edda}.619 &\cellcolor[HTML]{d4edda}.065 &\cellcolor[HTML]{d4edda}.523 &\cellcolor[HTML]{d4edda}.329 &.669 &.067 &\cellcolor[HTML]{d4edda}.827 &\cellcolor[HTML]{d4edda}.221 &\cellcolor[HTML]{d4edda}.585 \\
+\textsc{Score} $M_{\textit{10}}$ &\cellcolor[HTML]{d4edda}.520 &\cellcolor[HTML]{d4edda}.565 &.273 &\cellcolor[HTML]{d4edda}.687 &\cellcolor[HTML]{d4edda}\textbf{.129} &\cellcolor[HTML]{d4edda}.560 &\cellcolor[HTML]{d4edda}.346 &\cellcolor[HTML]{d4edda}.677 &.065 &\cellcolor[HTML]{d4edda}.843 &\cellcolor[HTML]{d4edda}\textbf{.303} &\cellcolor[HTML]{d4edda}.522 \\
+\textsc{oracle} &\cellcolor[HTML]{d4edda}\textbf{.537} &\cellcolor[HTML]{d4edda}.581 &\cellcolor[HTML]{d4edda}.185 &\cellcolor[HTML]{d4edda}\underline{.691} &\cellcolor[HTML]{d4edda}.086 &\cellcolor[HTML]{d4edda}\underline{.472} &\cellcolor[HTML]{d4edda}.328 &\cellcolor[HTML]{d4edda}\underline{.697} &.067 &\cellcolor[HTML]{d4edda}.832 &\cellcolor[HTML]{d4edda}.226 &\cellcolor[HTML]{d4edda}\textbf{.474} \\
+\bottomrule[1.5pt]
+\end{tabular}
+}
+\caption{Evaluation of wrong-over-wrong alignment on less wrong ($p_{\textit{wrong}}$), more correct ($\mathrm{Acc}$), and better calibration ($\mathrm{ECE}$). The best results are in \textbf{bold}, second best are in \underline{underline}, and \colorbox[HTML]{d4edda}{green background} indicates improvement over the original \textsc{LLaMA3-8B}. ``Self-Generator'' indicates that wrong-over-wrong pairs are generated from only \textsc{LLaMA3-8B} while ``Mix-Generator'' uses all 3 LLMs' answers. ``Oracle'' means aligning with proxy “ground-truth” wrong-over-wrong preference $\hat{f}$. Wrong-over-wrong alignment is helpful across the board, with up to 0.163, 0.161, and 0.175 improvement in reducing wrongness, increasing correct answers, and improving calibration.} 
+\label{tab:res_alignment}
+\end{table}
+
+\paragraph{Alignment with Wrong-over-Wrong Preferences} We present the evaluation of wrong-over-wrong alignment in Table \ref{tab:res_alignment}.
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Wrong-over-wrong alignment helps to reduce wrongness, produce correct answers, and improve calibration.} After wrong-over-wrong alignment, \textsc{LLaMA3-8B} improves on average across datasets on $\Delta p_{\textit{wrong}}$, $\Delta \mathrm{Acc}$, and $-\Delta \mathrm{ECE}$ by 0.074, 0.045, and 0.044. This validates that wrong-over-wrong alignment is moderately helpful across the three objectives. Even though we only align on wrong answers, we still magically end up making LLM generate 4.5\% more correct answers on average. This finding highlights the potential of alignment with wrong answers generated by LLMs that come in large quantities.
+    \item \textbf{Effect of wrong-over-wrong alignment varies across datasets.} We observe substantial improvement on Bio Generation and NLGraph with up to 0.163, 0.161, and 0.175 for $\Delta p_{\textit{wrong}}$, $\Delta \mathrm{Acc}$, and $-\Delta\mathrm{ECE}$. However, relatively less improvement is observed on Knowledge Crosswords and COM$^2$, with up to 0.071, 0.073, and 0.138 for $\Delta p_{\textit{wrong}}$, $\Delta \mathrm{Acc}$, and $-\Delta\mathrm{ECE}$. This may be because Bio Generation and NLGraph are \emph{open-ended} questions and there is more space for improvement compared to \emph{multiple-choice} questions in Knowledge Crosswords and COM$^2$ where wrong options are limited and LLMs are confined to pre-defined options.
+    \item \textbf{Score-based methods achieve the least wrong and most correct answers while pairwise comparison achieves the best calibration.} Score-based preferences with $M_{\textit{10}}$ on self-generated data achieve the best average improvement of $\Delta p_{\textit{wrong}}$ = 0.090 across datasets. $f_{\textit{GPT-4o}}^{(\textit{s})}$ with $M_{\textit{10}}$ on mix-generated data has the best average improvement of $\Delta \mathrm{Acc}$ = 0.070. This suggests that the score-based method has the best $\mathrm{Acc}_\textit{WoW}$ and is most helpful in reducing wrongness and producing correct answers. However, $f_{\textit{GPT-4o}}^{(\textit{p})}$ with consistency checks has the best average calibration improvement of $-\Delta\mathrm{ECE}$ = 0.094. We hypothesize that the margin used in score-based methods, while improving $\mathrm{Acc}_{\textit{WoW}}$ by avoiding cases with similar degrees of wrongness, also indicates the models' tendency to avoid challenging distinctions, which in turn harms calibration.
+\end{itemize}
+
+
+\section{Analysis}
+
+ 
+\begin{wrapfigure}{r}{0.4\linewidth}
+    \centering
+    \includegraphics[width=0.98\linewidth]{images/correlation1.pdf}
+    \caption{Correlation between task accuracy, confidence and $\mathrm{Acc}_{\textit{WoW}}$ of score-based eliciting with $M_{\textit{10}}$. Data points are from all 3 LLMs we used to elicit wrong-over-wrong preferences. $P$ stands for Pearson correlation coefficient. The ability to elicit wrong-over-wrong preferences is positively correlated with task ability but negatively correlated with confidence.}
+    \label{fig:corr1}
+\end{wrapfigure}
+
+\paragraph{Task Utility and Wrong-over-Wrong Judgement} We explore the impact of two factors on the reliability of wrong-over-wrong judgements: accuracy of the evaluator's generated answers (\emph{task accuracy}) and the evaluator's confidence in its generated answers (\emph{task confidence}). We visualize the correlations and present Pearson correlation coefficients \citep{sedgwick2012pearson} in Figure \ref{fig:corr1}.  We observe a positive correlation between task accuracy and $\mathrm{Acc}_{\textit{WoW}}$, but a negative correlation between task confidence and $\mathrm{Acc}_{\textit{WoW}}$. This suggests that models that perform well on the task are also good at distinguishing various shades of wrong, while over-confident and under-calibrated models harm wrong-over-wrong preferences.
+
+\paragraph{Preference Accuracy and Alignment Improvement} We examine how the quality of wrong-over-wrong judgements $\mathrm{Acc}_{\textit{WoW}}$ is related to improvements through wrong-over-wrong alignment. Figure \ref{fig:corr2} demonstrates a weak positive relationship between $\mathrm{Acc}_{\textit{WoW}}$ and improvement in $\Delta p_{\textit{wrong}}$, and no significant correlation between $\mathrm{Acc}_{\textit{WoW}}$ and improvement in $\Delta \mathrm{Acc}$ or $-\Delta \mathrm{ECE}$. Surprisingly, this suggests that improvement resulting from wrong-over-wrong alignment is nuanced and is not sensitive to the absolute accuracy of wrong-over-wrong preference data. There is also a clear positive relationship between  $\mathrm{Acc}_{\textit{WoW}}$ and $\Delta p_{\textit{wrong}}$, $\Delta \mathrm{Acc}$, and $\mathrm{ECE}$ on the Bio Generation dataset, indicating that sensitivity to wrong-over-wrong judgement quality varies by dataset.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1\linewidth]{images/correlation2.pdf}
+    \caption{Correlation between $\mathrm{Acc}_{\textit{WoW}}$ and improvement after wrong-over-wrong alignment in less wrong $\Delta p_{\textit{wrong}}$, more correct $\Delta \mathrm{Acc}$, and better calibration $-\Delta \mathrm{ECE}$. Data points are sourced from all 4 methods ($f_{\textit{GPT-4o}}^{(\textit{p})}$ with consistency checks, $f_{\textit{GPT-4o}}^{(\textit{s})}$ with $M_{\textit{50}}$ and $M_{\textit{10}}$, and oracle $\hat{f}$), and the oracle method is considered as $\mathrm{Acc}_{\textit{WoW}}$ = 1.0. The black line is the linear regression on all four datasets while the green line is the linear regression on Bio Generation dataset. Wrong-over-wrong alignment is not sensitive to the accuracy of wrong-over-wrong preference.}
+    \label{fig:corr2}
+\end{figure}
+
+\paragraph{Right-over-Wrong Alignment} \label{sec:row}We conduct experiments on right-over-wrong preferences and a 50:50 mix of right-over-wrong and wrong-over-wrong preferences. The results in Table \ref{tab:ana_row} reveal that: (1) Right-over-wrong alignment has the best average improvement in more correct $\Delta p_{\textit{wrong}}$ = 0.090 on mix-generated data, while on self-generated data, wrong-over-wrong alignment yields the best $\Delta p_{\textit{wrong}}$ = 0.068. Mixing generators is especially helpful to right-over-wrong alignment, with average $\Delta \mathrm{Acc}$ improved by 55.7\%. (2) Right-over-wrong alignment has the best average improvement in more correct $\Delta \mathrm{Acc}$ = 0.134, while a mixture of right-over-wrong and wrong-over-wrong preferences achieves the best average improvement in calibration $-\Delta \mathrm{ECE}$ = 0.107. This partly resolves the previous finding that alignment hurts calibration \citep{sorensen2024roadmap, feng2024modular}: we hypothesize that this is due to missing wrong-over-wrong preferences in alignment data that make LLMs unable to disentangle varying shades of wrong for fine-grained calibration.
+
+\begin{wraptable}{r}{0.5\linewidth}
+    \centering
+    \setlength{\tabcolsep}{1pt}
+    \resizebox{1\linewidth}{!}{
+    \begin{tabular}{lcccccccccc}\toprule[1.5pt]
+    \multirow{3}{*}{\textbf{Method}} &\multicolumn{3}{c}{\textbf{KC}} &\multicolumn{3}{c}{\textbf{COM$^2$}} &\multicolumn{3}{c}{\textbf{NLG}} \\
+    \cmidrule(lr){2-4}\cmidrule(lr){5-7}\cmidrule(lr){8-10}
+    &$p_{\textit{wrong}\uparrow}$ &$\mathrm{Acc}_{\uparrow}$ &$\mathrm{ECE}_{\downarrow}$ &$p_{\textit{wrong}\uparrow}$ &$\mathrm{Acc}_{\uparrow}$ &$\mathrm{ECE}_{\downarrow}$ &$p_{\textit{wrong}\uparrow}$ &$\mathrm{Acc}_{\uparrow}$ &$\mathrm{ECE}_{\downarrow}$ \\\midrule[.75pt]
+    \textsc{Original} &.466 &.555 &.235 &.312 &.669 &.053 &.750 &.142 &.649 \\
+    \textsc{Best W}&\cellcolor[HTML]{d4edda}.529 &\cellcolor[HTML]{d4edda}.597 &.251 &\cellcolor[HTML]{d4edda}.355 &\cellcolor[HTML]{d4edda}.698 &\cellcolor[HTML]{d4edda}.048 &\cellcolor[HTML]{d4edda}.847 &\cellcolor[HTML]{d4edda}.292 &\cellcolor[HTML]{d4edda}.578 \\
+    \midrule[.75pt]\multicolumn{10}{c}{\textit{\ \ \textbf{\textsc{Self-Generator}}} }\\ \midrule[.75pt]
+    \textsc{r+w (pairwise)} &\cellcolor[HTML]{d4edda}.493 &\cellcolor[HTML]{d4edda}.706 &\cellcolor[HTML]{d4edda}.065 &\cellcolor[HTML]{d4edda}.359 &\cellcolor[HTML]{d4edda}.705 &.057 &\cellcolor[HTML]{d4edda}.806 &\cellcolor[HTML]{d4edda}.179 &\cellcolor[HTML]{d4edda}.493 \\
+    \textsc{r+w (score $M_{\textit{50}}$)} &\cellcolor[HTML]{d4edda}.540 &\cellcolor[HTML]{d4edda}.690 &\cellcolor[HTML]{d4edda}.055 &\cellcolor[HTML]{d4edda}.335 &\cellcolor[HTML]{d4edda}.673 &\cellcolor[HTML]{d4edda}.037 &\cellcolor[HTML]{d4edda}.814 &.139 &.667 \\
+    \textsc{r+w (score $M_{\textit{10}}$)} &\cellcolor[HTML]{d4edda}.503 &\cellcolor[HTML]{d4edda}.665 &\cellcolor[HTML]{d4edda}.174 &\cellcolor[HTML]{d4edda}.340 &\cellcolor[HTML]{d4edda}.687 &.070 &\cellcolor[HTML]{d4edda}.815 &.137 &.650 \\
+    \textsc{r+w (oracle)} &\cellcolor[HTML]{d4edda}\textbf{.607} &\cellcolor[HTML]{d4edda}.785 &\cellcolor[HTML]{d4edda}.060 &\cellcolor[HTML]{d4edda}.357 &\cellcolor[HTML]{d4edda}.703 &.055 &\cellcolor[HTML]{d4edda}.760 &\cellcolor[HTML]{d4edda}.158 &\cellcolor[HTML]{d4edda}.549 \\
+    \textsc{r} &\cellcolor[HTML]{d4edda}.579 &\cellcolor[HTML]{d4edda}\textbf{.805} &\cellcolor[HTML]{d4edda}.079 &\cellcolor[HTML]{d4edda}.373 &\cellcolor[HTML]{d4edda}.692 &\cellcolor[HTML]{d4edda}\textbf{.029} &\cellcolor[HTML]{d4edda}.777 &\cellcolor[HTML]{d4edda}.153 &.652\\
+    \midrule[.75pt]\multicolumn{10}{c}{\textit{\ \ \textbf{\textsc{Mix-Generator}}} }\\ \midrule[.75pt]
+    \textsc{r+w (pairwise)} &\cellcolor[HTML]{d4edda}.530 &\cellcolor[HTML]{d4edda}.705 &\cellcolor[HTML]{d4edda}.053 &\cellcolor[HTML]{d4edda}.327 &.658 &.091 &\cellcolor[HTML]{d4edda}.825 &\cellcolor[HTML]{d4edda}.218 &\cellcolor[HTML]{d4edda}.493 \\
+    \textsc{r+w (score $M_{\textit{50}}$)} &\cellcolor[HTML]{d4edda}.536 &\cellcolor[HTML]{d4edda}.705 &\cellcolor[HTML]{d4edda}.094 &\cellcolor[HTML]{d4edda}.326 &\cellcolor[HTML]{d4edda}.716 &.070 &\cellcolor[HTML]{d4edda}.836 &\cellcolor[HTML]{d4edda}.263 &\cellcolor[HTML]{d4edda}.548 \\
+    \textsc{r+w (score $M_{\textit{10}}$)} &\cellcolor[HTML]{d4edda}.559 &\cellcolor[HTML]{d4edda}.711 &\cellcolor[HTML]{d4edda}.104 &\cellcolor[HTML]{d4edda}.343 &.655 &\cellcolor[HTML]{d4edda}.034 &\cellcolor[HTML]{d4edda}.842 &\cellcolor[HTML]{d4edda}\textbf{.308} &\cellcolor[HTML]{d4edda}.496 \\
+    \textsc{r+w (oracle)} &\cellcolor[HTML]{d4edda}.567 &\cellcolor[HTML]{d4edda}.740 &\cellcolor[HTML]{d4edda}\textbf{.025} &\cellcolor[HTML]{d4edda}.344 &\cellcolor[HTML]{d4edda}\textbf{.748} &.113 &\cellcolor[HTML]{d4edda}.826 &\cellcolor[HTML]{d4edda}.274 &\cellcolor[HTML]{d4edda}\textbf{.490} \\
+    \textsc{r} &\cellcolor[HTML]{d4edda}.568 &\cellcolor[HTML]{d4edda}.787 &\cellcolor[HTML]{d4edda}.110 &\cellcolor[HTML]{d4edda}\textbf{.374} &\cellcolor[HTML]{d4edda}.711 &.183 &\cellcolor[HTML]{d4edda}\textbf{.856} &\cellcolor[HTML]{d4edda}.268 &\cellcolor[HTML]{d4edda}.537 \\
+    
+    \bottomrule[1.5pt]
+    \end{tabular}
+    }
+    \caption{
+    Evaluation of right-over-wrong alignment on less wrong ($p_{\textit{wrong}}$), more correct ($\mathrm{Acc}$), and better calibration ($\mathrm{ECE}$). ``\textsc{w}'' and ``\textsc{r}'' stand for wrong-over-wrong and right-over-wrong data. Wrong-over-wrong alignment is a good supplement to existing right-over-wrong alignment and best employed in conjunction.
+    }
+    \label{tab:ana_row}
+\end{wraptable}
+
+\paragraph{Generalization to Unseen Data} We examine how wrong-over-wrong alignment can generalize to other unseen tasks in the same domain. We employ Hellaswag \citep{zellers2019hellaswag} and the maximum flow subtask in NLGraph \citep{wang2023can} as two unseen datasets while being in the same domain as the datasets employed for alignment tuning, COM$^2$ and shortest path. Results in Table \ref{tab:ana_indomain} demonstrate that wrong-over-wrong alignment could indeed generalize to unseen data, with an average improvement of 0.118, 0.002, and 0.029 on $\Delta p_{\textit{wrong}}$, $\Delta \mathrm{Acc}$, and $-\Delta \mathrm{ECE}$.
+
+\paragraph{Qualitative Examples} We present qualitative examples in Table \ref{tab:qualitative}, showing that WoW-aligned models could generate less wrong, more correct, and better calibrated answers.
+
+
+
+\section{Related Work}
+
+
+\paragraph{LLM Alignment} In recent years, aligning LLMs with human preferences has become an important research question, driven by the need for safety \citep{dai2023safe, qi2024fine, huang2024safedreamer}, honesty \citep{yang2023alignment, wen2024art}, factuality\citep{liang2024learning, lin2024flame}, diversity \citep{ding2024quality}, etc. The initial methods, such as Reinforcement Learning from Human Feedback (RLHF) \citep{ziegler2019fine, stiennon2020learning, ouyang2022training, munos2023nash, chakraborty2024parl}, leverage human preferences to train reward models and employ algorithms such as Proximal Policy Optimization (PPO) \citep{schulman2017proximal} for alignment.
+Recent alignment methods move away from explicit reward models, as seen in Direct Preference Optimization (DPO) \citep{rafailov2023direct}. Alongside this, Reinforcement Learning from AI Feedback (RLAIF) \citep{bai2022constitutional, lee2023rlaif} and LLM-as-a-Judge \citep{dubois2023alpacafarm, bai2023benchmarking} frameworks have introduced AI-driven feedback systems, allowing LLMs to give feedback and improve themselves with minimal human intervention. Techniques such as Self-Alignment \citep{li2023self, wang2024enabling, yuan2024self, sun2024salmon}, which involves models evaluating and aligning with their own outputs, represent a further step towards scalable oversight. Instead of alignment objective, we investigate an orthogonal research question to the improvement in alignment approaches and focus on the preference data: in challenging tasks and contexts when correct and high-quality answers are not readily available \citep{baheti2024leftover, agarwal2024onpolicy}, could LLMs distinguish various shades of wrong and align with wrong-over-wrong preferences? Prior work has also established the utility and representativeness of fine-grained and continuous preferences over categorical labels in uncertain \citep{lin2022teaching, tian2023just} and subjective contexts \citep{sorensen2024roadmap, feng2024modular}. 
+
+\begin{table}[t]
+\small
+\centering
+\resizebox{0.9\linewidth}{!}{
+\begin{tabularx}{\textwidth}{lX}
+\toprule[1.5pt]
+\textbf{Question} & In an undirected graph, the nodes are numbered from 0 to 4, and the edges are represented by (start node, end node, weight): (0, 2, 2), (0, 5, 4), (0, 3, 1), (0, 1, 3), (1, 2, 4), (1, 5, 1), (1, 4, 4), (2, 4, 3), (2, 3, 1), (3, 5, 2), (3, 4, 3), (4, 5, 2). Q: Give the shortest path from node 0 to node 1. Please also give the total weight of the shortest path. \textcolor{red}{[Correct answer: 4 (0 $\rightarrow$ 3 $\rightarrow$ 4).]}\\ \midrule
+\textbf{Original Answer} & [CoT steps]. The final answer is:  shortest path: 0 $\rightarrow$ 2 $\rightarrow$ 3 $\rightarrow$ 4; total weight: 6.  \\ \midrule
+\textbf{Less Wrong} & [CoT steps]. Therefore, the answer is: The shortest path from node 0 to node 4 is 0 $\rightarrow$ 3 $\rightarrow$ 2 $\rightarrow$ 4, with a total weight of 5.  \textcolor{red}{[The path found is shorter: 6 $\rightarrow$ 5.]} \\ \midrule
+\textbf{More Correct} & [CoT steps]. Final answer: The shortest path from node 0 to node 4 is Node 0 $\rightarrow$ Node 3 $\rightarrow$ Node 4, with a total weight of 4. \textcolor{red}{[Successfully find the shortest path.]} \\ \midrule
+\textbf{Better Calibrated} & [CoT steps]. The total weight of the shortest path is: 0 $\rightarrow$ 2 (weight 2), 2 $\rightarrow$ 3 (weight 1), 3 $\rightarrow$ 4 (weight 3). Total weight: 2 + 1 + 3 = 6. \textcolor{red}{[Even though the answer is equally wrong compared to the original answer, NLL increases from 0.255 $\rightarrow$ 0.373.]} \\
+\bottomrule[1.5pt]
+\end{tabularx}
+}
+\caption{Qualitative examples on NLGraph where WoW-aligned models become less wrong, more correct, and better calibrated on NLGraph. We provide explanations in \textcolor{red}{[red]}.}
+\label{tab:qualitative}
+\end{table}
+
+\begin{wraptable}{r}{0.5\linewidth}{
+\centering
+\resizebox{1\linewidth}{!}{
+\begin{tabular}{lcccccc}\toprule[1.5pt]
+\multirow{3}{*}{\textbf{Method}} &\multicolumn{3}{c}{\textbf{HellaSwag}} &\multicolumn{3}{c}{\textbf{Maximum Flow}} \\\cmidrule(lr){2-4}\cmidrule(lr){5-7}
+&$p_{\textit{wrong}\uparrow}$ &$\mathrm{Acc}_{\uparrow}$ &$\mathrm{ECE}_{\downarrow}$ &$p_{\textit{wrong}\uparrow}$ &$\mathrm{Acc}_{\uparrow}$ &$\mathrm{ECE}_{\downarrow}$  \\
+\midrule[0.75pt]
+\textsc{Original} &.230 &.737 &.089 &.112 &.069 &.663 \\
+\midrule[.75pt]
+\multicolumn{7}{c}{\textit{\ \ \textbf{\textsc{Self-Generator}}} }\\ \midrule[.75pt]
+\textsc{pairwise} &\cellcolor[HTML]{d4edda}.243 &.729 &.098 &\cellcolor[HTML]{d4edda}.344 &.066 &\cellcolor[HTML]{d4edda}\textbf{.567} \\
+\textsc{score} $M_{\textit{50}}$ &.220 &.679 &\cellcolor[HTML]{d4edda}.047 &\cellcolor[HTML]{d4edda}.330 &\cellcolor[HTML]{d4edda}.083 &\cellcolor[HTML]{d4edda}.637 \\
+\textsc{score} $M_{\textit{10}}$ &\cellcolor[HTML]{d4edda}.264 &.719 &\cellcolor[HTML]{d4edda}.068 &\cellcolor[HTML]{d4edda}.342 &\cellcolor[HTML]{d4edda}\textbf{.109} &.673 \\
+\textsc{oracle} &.227 &.729 &\cellcolor[HTML]{d4edda}{.023} &\cellcolor[HTML]{d4edda}.151 &.049 &\cellcolor[HTML]{d4edda}.659 \\
+\midrule[.75pt] \multicolumn{7}{c}{\textit{\ \ \textbf{\textsc{Mix-Generator}}} }\\ \midrule[.75pt]
+\textsc{pairwise} &\cellcolor[HTML]{d4edda}.247 &.706 &\cellcolor[HTML]{d4edda}.082 &\cellcolor[HTML]{d4edda}\textbf{.348} &\cellcolor[HTML]{d4edda}.094 &\cellcolor[HTML]{d4edda}.533 \\
+\textsc{score} $M_{\textit{50}}$ &.204 &.729 &.090 &\cellcolor[HTML]{d4edda}.346 &\cellcolor[HTML]{d4edda}.083 &\cellcolor[HTML]{d4edda}.621 \\
+\textsc{score} $M_{\textit{10}}$ &\cellcolor[HTML]{d4edda}.250 &\cellcolor[HTML]{d4edda}\textbf{.771} &.117 &\cellcolor[HTML]{d4edda}.326 &\cellcolor[HTML]{d4edda}.089 &\cellcolor[HTML]{d4edda}.627 \\
+\textsc{oracle} &\cellcolor[HTML]{d4edda}\textbf{.267} &\cellcolor[HTML]{d4edda}.753 &.099 &\cellcolor[HTML]{d4edda}.202 &\cellcolor[HTML]{d4edda}.074 &\cellcolor[HTML]{d4edda}.582 \\
+\bottomrule[1.5pt]
+\end{tabular}}
+\caption{Generalization to unseen datasets, from COM$^2$ to HellaSwag and from shortest path to maximum flow. While tuned only on COM$^2$ and shortest path, the aligned models improve on the two unseen datasets as well, with an average improvement of 0.118, 0.002, and 0.029 on $\Delta p_{\textit{wrong}}$, $\Delta \mathrm{Acc}$, and $-\Delta \mathrm{ECE}$.}
+\label{tab:ana_indomain}
+}
+\end{wraptable}
+
+\paragraph{Easy-to-Hard Generalization} Most of these advancements in alignment benefit from the availability of ``correct'' answers. In contrast, our work posits that ``correct'' answers are inevitably unavailable or unreliable for emerging and challenging tasks. \citet{bowman2022measuring} points out advanced models may engage in tasks that are beyond current evaluation capabilities. Easy-to-hard generalization \citep{burns2023weak, hase2024unreasonable, xu2024towards, sun2024easy} introduces a series of solutions hoping to improve LLMs on hard tasks by finetuning on easy in-domain tasks. Our work uniquely points out a new path for training future LLMs on hard tasks when correct answers are unavailable, arguing for wrong-over-wrong alignment based on synthetic preference data as a complementary training objective.
+
+
+
+\section{Conclusion}
+
+With the growing race towards bigger, better LLMs capable of solving a wider range of tasks, it becomes evident that the availability of carefully curated data is a major bottleneck. Our work investigates the potential to alleviate this limitation by eliciting preferences among wrong answers with an LLM and aligning with these wrong-over-wrong preferences. We empirically investigate wrong-over-wrong alignment with seven LLMs and eight datasets. We find that LLMs \emph{do} have preliminary capability to rank wrong answers and produce reliable wrong-over-wrong preferences. The strongest approach such as score-based LLM-as-a-judge achieves up to 70.9\% accuracy across datasets. In addition, alignment with such wrong-over-wrong preferences is helpful in calibrating the models, e.g., reducing answer ``wrongness'' by 9.0\%, producing 7.0\% more correct answers, and improving overall model calibration by 9.4\% on average. We envision future wrong-over-wrong alignment methods as an important addition to advance LLM capabilities on challenging tasks where correct answers or rich annotations are not readily available.
+
+
+

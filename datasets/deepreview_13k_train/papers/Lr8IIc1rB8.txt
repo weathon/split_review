@@ -1,0 +1,563 @@
+\title{Autoregressive Action Sequence Learning for Robotic Manipulation}
+
+\begin{abstract}
+
+Designing a universal policy architecture that performs well across diverse robots and task configurations remains a key challenge. In this work, we address this by representing robot actions as sequential data and generating actions through autoregressive sequence modeling. Existing autoregressive architectures generate end-effector waypoints sequentially as word tokens in language modeling, which are limited to low-frequency control tasks.
+Unlike language, robot actions are heterogeneous and often include continuous values---such as joint positions, 2D pixel coordinates, and end-effector poses—which are not easily suited for language-based modeling. Based on this insight, we introduce a straightforward enhancement: we extend causal transformers' single-token prediction to support predicting a variable number of tokens in a single step through our Chunking Causal Transformer (CCT). 
+This enhancement enables robust performance across diverse tasks of various control frequencies, greater efficiency by having fewer autoregression steps, and 
+lead to a hybrid action sequence design by mixing different types of actions and using a different chunk size for each action type. 
+Based on CCT, we propose the Autoregressive Policy (ARP) architecture, which solves manipulation tasks by generating hybrid action sequences. 
+We evaluate ARP across diverse robotic manipulation environments, including Push-T, ALOHA, and RLBench, and show that ARP, as a universal architecture, outperforms the environment-specific state-of-the-art in all tested benchmarks, while being more efficient in computation and parameter sizes.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+
+\label{sec:introduction}
+
+Autoregressive models are the basis of recent breakthroughs in natural language processing~\citep{min2023recent}. These models predict the next token in a sequence based on the previous tokens. Autoregressive models are implemented with causal transformers, where each token attends only to preceding ones, and they are trained with the single objective of maximizing the conditional likelihood of each token. Despite their simplicity, autoregressive models such as GPTs~\citep{mann2020gpt3} are shown to demonstrate a reasoning ability that can capture causal dependencies~\citep{prystawski2024stepbystep}. In this work, we explore the design of a universal autoregressive architecture that can be used for various robot manipulation tasks in diverse environments. 
+Decision Transformer (DT) and Trajectory Transformer (TT) are the pioneering approaches that use autoregressive models to solve control tasks~\citep{chen2021decisionT, janner2021trajT}. These methods learn to generate trajectories as $(R_1, s_1, a_1, \dots, R_T, s_T, a_T)$, where $R_t, s_t, a_t$ respectively denote the reward-to-go~\citep{tamar2016rewardtogo}, the state, and the action at time-step $t$. However, these methods are primarily applied to tasks with fully observed, low-dimensional states---a condition rarely met in robotics applications. Recent work focuses on applying autoregression only on action sequences, such as Gato~\citep{reed2022gato}, VIMA~\citep{jiang2022vima}, ManipLLM~\citep{li2024manipllm}. Despite the impressive results, these methods remain limited to low-frequency control tasks, as they represent robot actions with key end-effector waypoints and generate one action at a time, similar to word generation in language modeling. 
+
+
+However, unlike language, robot actions are heterogeneous and include continuous values---such as joint positions, 2D pixel coordinates, and effector poses. Additionally, in high-frequency control tasks, continuous actions are expected to maintain temporal smoothness---a requirement absent in language modeling.
+To adapt autoregressive models for robotic tasks, we propose the Chunking Causal Transformer (CCT), an improved version of the causal transformer used in standard autoregressive models. CCT introduces a simple modification: it predicts the future tokens, or a chunk of actions, from empty tokens rather than from the original sequence, as illustrated in Figure~\ref{fig:teacher-forcing}. In doing so, CCT extends the next-single-token prediction of causal transformer to \textit{chunking autoregression}---next-multi-token prediction in a single step. Despite the simplicity of our enhancement, chunking autoregression offers three key advantages:
+
+\begin{enumerate}
+    \item  Predicting multiple temporally correlated actions in a single step addresses the primary limitation of autoregressive models in high-frequency control tasks.
+    \item Chunking autoregression increases efficiency by reducing the inference passes required.
+    \item Variable chunk sizes enable a flexible action sequence design, such as mixing different types of actions and using a different chunk size for each type. For example, high-level actions, like sparse 2D waypoints, can be predicted first sequentially to guide the prediction of low-level actions, such as joint positions, in larger chunks. We show action sequence designs of our real robot task, Push-T, ALOHA, and RLBench in Figure~\ref{fig:seq-design}. 
+\end{enumerate}
+While action chunking has been previously introduced in the Action Chunking Transformer (ACT) by \citet{zhao2023aloha}, ACT is a one-step prediction model with a fixed chunk size. Instead, our approach supports variable chunk sizes for more powerful autoregressive models in generating hybrid action sequences. 
+Table~\ref{tab:cross-env} shows that our method outperforms ACT by a significant margin in all environments. Table~\ref{tab:generation-mode} shows that our chunking autoregression is the key factor behind the strong performance of the proposed model. We illustrate the essential difference between action chunking, standard autoregression, and our chunking autoregression in Figure~\ref{fig:comparison}. 
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\linewidth]{assets/images/keydiff.jpg}
+    \caption{\textbf{Existing Works versus Our Autoregressive Policy.} 
+    Action chunking models (left) predict all action tokens in a single step~\citep{zhao2023aloha, kim2024openvla, wu2023gr1}. Standard autoregression models (middle) generate one action token in each step, which is inefficient and unsuitable for high-frequency control tasks~\cite{chen2021decisionT, janner2021trajT, reed2022gato, jiang2022vima, li2024manipllm}. Our proposed chunking autoregression (right) generates a chunk of variable number of action tokens per step,
+    offering greater efficiency, strong performance across diverse tasks, and flexibility in designing hybrid action sequences. We compare the performance of these three action prediction strategies in Table~\ref{tab:generation-mode}.
+    Note all models use Model Predictive Control to predict $L$ actions, execute them, update the observation, and then predict actions again. 
+    Autoregressive generation is performed without executing actions or changing the current observation. 
+    }
+    \label{fig:comparison}
+\end{figure*}
+
+To summarize, our contributions are threefold. (1) We propose the Chunking Causal Transformer (CCT), which extends the single-token prediction of causal transformer to multi-token prediction, and therefore enables chunking autoregression. We also design a novel attention interleaving strategy that allows CCT to be trained efficiently with teacher-forcing, as shown in Figure~\ref{fig:teacher-forcing}. 
+(2) Based on our CCT, we present the Auto-regressive Policy (ARP), a model that learns to generate heterogeneous action sequences autoregressively for solving robotic manipulation tasks. The ARP architecture is summarized in Figure~\ref{fig:main}. (3) We evaluate the same ARP architecture across Push-T~\citep{chi2023diffp}, ALOHA~\citep{zhao2023aloha}, and RLBench~\citep{james2020rlbench}, three environments with diverse manipulation tasks and control modalities, as outlined in Figure~\ref{fig:env-intro}. Our study shows that ARP outperforms all environment-specific SoTAs, while being more efficient computationally and using smaller parameter sizes, as in Figure~\ref{fig:main-result}. In addition, we evaluate ARP with a real robot on a challenging, contact-rich nut-tightening task, as shown in Figure~\ref{fig:real-robot}.
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\linewidth]{assets/images/env-intro}
+    \caption{\textbf{Overview of the simulation environments.} We evaluate our technique on Push-T, ALOHA, and RLBench, three task suites with significantly different properties and requirements. Push-T~\citep{chi2023diffp} is a task that requires many steps to complete (long horizon) and where the same sub-goals can be reached in various ways (multi-modality). 
+    ALOHA~\citep{zhao2023aloha} has a high-dimensional action space (14 joints of two robot arms), a high control frequency (50Hz), and a short time limit (8 seconds). RLBench~\citep{james2020rlbench} has only the  gripper pose as an action but contains 18 different language-conditioned tasks.
+    }
+    \label{fig:env-intro}
+\end{figure}
+
+
+
+\section{Related Work}
+
+\label{sec:relatedwork}
+
+\textbf{Learning robotic manipulation from demonstrations.} Imitation learning enables robots to learn to perform tasks demonstrated by experts~\citep{zare2024ilsurvey}. Recently, 
+various methods have been developed for manipulation learning with different task constraints and control modalities. 
+Notably, \citet{chi2023diffp} proposed the Diffusion Policy (DP)  method for solving the Push-T task.
+\citet{zhao2023aloha} proposed the Action Chunking Transformer (ACT) for bi-manual manipulation tasks in the ALOHA environment. 
+\citet{goyal2024rvt2} proposed RVT-2 for language-conditioned tasks in the RLBench environment~\citep{james2020rlbench}. 
+We outline these environments and the corresponding state-of-the-art (SoTA) solutions in Figure~\ref{fig:env-intro} and Figure~\ref{fig:existing-sota}, respectively. 
+In contrast, our proposed autoregressive policy is a universal architecture that outperforms each environment-specific SoTA on Push-T, ALOHA, and RLBench. 
+
+
+\textbf{Autoregressive models for control tasks.} Besides the pioneering Decision Transformer and Trajectory Transformer, recent works such as VIMA~\citep{jiang2022vima}, Gato~\citep{reed2022gato}, GR1~\citep{wu2023gr1}, OpenVLA~\citep{kim2024openvla} and ManipLLM~\citep{li2024manipllm} have looked into designing autoregressive models for robotic tasks. 
+Despite the impressive results, these approaches are limited to low-frequency control tasks that rely on end-effector waypoints~\citep{kim2024openvla}. 
+GR1 and OpenVLA only use autoregression in their LLM backbones and do not apply autoregression to solve control tasks. 
+Most of the existing works require fine-tuning a large language model (LLM) such as LLaMA~\citep{li2024manipllm} to include target end-effector poses within text-based responses or predict poses from LLM's hidden features. 
+The reliance on resource-intensive LLMs leads to large computational overhead, even for tasks that could be addressed with lightweight models.
+Without these constraints, our autoregressive policy outperforms SoTAs in multiple environments while being more efficient in computation and parameter sizes.
+
+
+\textbf{Hierarchical policies.} Planning actions on multiple levels of abstraction is an important ability~\citep{pateria2021hiera-survey}. Existing methods 
+generally separate the designs of low-level and high-level policies, %as well as the interaction mechanism between policies
+ and uses different modules for the different levels of abstraction~\citep{le2018hiera-imi-rl, pateria2021hiera-survey, belkhale2023hydra, belkhale2024rth, chen2024hiera-diffu}. This complicated procedure prohibits a wider application. In contrast, our autoregressive policy is able to capture the underlying causal dependencies in robotic tasks by predicting a sequence of actions of different levels of abstraction by using a single model, as shown by our action sequence designs for diverse environments in Figure~\ref{fig:seq-design}.
+
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{assets/images/main-fig}
+    \caption{\textbf{Autoregressive Policy Architecture.} 
+    A sequence of past actions and a chunk of empty tokens are concatenated and projected into embeddings. The empty tokens correspond to future actions, which are unknown and need to be predicted. 
+    These embeddings are fed into our Chunking Causal Transformer (CCT) along with the vision features of the current observation. 
+    CCT alternates between self-attention within the input embeddings and cross-attention with the vision features. Self-attention is causal for the input actions and bidirectional among the empty tokens. 
+    Distributions of future actions are decoded from the updated embeddings of the empty tokens.
+    }
+    \label{fig:main}
+\end{figure}
+
+
+\section{Method}
+
+\label{sec:method}
+
+In this section, we present the Auto-regressive Policy (ARP), which predicts actions using the Chunking Causal Transformer (CCT).
+The architecture is summarized in Figure~\ref{fig:main}.
+
+\textbf{Action sequence modeling.} Unlike natural language, robot actions lack a universal vocabulary. 
+As shown in Figure~\ref{fig:env-intro}, different robot tasks may require drastically different types of actions.
+Therefore, we represent actions as structured sequences whose formats are tailored for each family of tasks. Figure~\ref{fig:seq-design} showcases the formats of the action sequences generated in our real robot experiment, Push-T, ALOHA, and RLBench tasks. 
+
+\textbf{Embedding and decoding heterogeneous actions.} Language models map each word to a continuous vector called word embedding. 
+The word embeddings of the input sentences are fed into a causal transformer. The distribution of the next word is decoded from the output embedding of the last word with a linear layer. Figure~\ref{fig:embed-a} and \ref{fig:decode-a} illustrate our embedding and decoding methods for robot actions.
+Discrete actions are embedded by a table lookup on a weight matrix and decoded into a categorical distribution with a linear layer, similar to words in language modeling. Continuous actions are embedded with a linear layer and decoded into the parameters of a Gaussian mixture distribution with another linear layer. Actions that are defined as pixel coordinates are embedded by retrieving the pointwise features at the coordinates on a visual feature map. The output spatial distribution is obtained by multiplying the output embedding with the visual feature map, and converting the result into a 2d heatmap with the upsampling operator from RAFT~\citep{teed2020raft}.
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{assets/images/seq-design2.jpg}
+    \caption{\textbf{Learned Action Sequences.} 
+    In Push-T, our model predicts a sequence of high-level waypoints, followed by a sequence of low-level positions that connect the waypoints together and form in the pushing trajectory, analogous to hierarchical planning~\citep{hafner2022hiera-plan}. 
+    In ALOHA, we predict the joint values and then the end-effector waypoints conditioned on the joint values, a process akin to forward kinematics~\citep{kucuk2006robot}. We bypass the waypoint generation during inference. 
+    In RLBench, we predict the target end-effector's position first, then the gripper rotation and state in that position. 
+    For our real robot experiment, we define a set of primitive actions, as detailed in section~\ref{sec:real-robot}. We predict the action type and then the continuous values of that action.
+    }
+    \label{fig:seq-design}
+\end{figure}
+
+\textbf{Chunking causal transformer.} Figure~\ref{fig:compare-cct-ct} illustrates the essential difference between a causal transformer and our CCT. A causal transformer modifies the token embedding with causal attention so that the last token becomes the next token. 
+Our CCT modifies the token embedding with
+causal attention for the action tokens $a_i$ (past actions) and bidirectional attention for the empty tokens $e_i$ (future actions). The empty
+tokens become the next tokens.
+This allows the prediction of a chunk of variable number of next tokens at once in a single forward pass by adding empty tokens, which enables action chunking during autoregressive generation.
+We study the impacts of our chunking autoregression in detail in Section~\ref{sec:experiment}.
+In ARP, CCT alternates between self-attention within the input embeddings and cross-attention with vision features, as in Figure~\ref{fig:main}. We extract vision features from a standard backbone identical to the ones used in SoTA methods, as detailed in section~\ref{sec:experiment}.
+\textbf{Train-time attention interleaving.} During training, a causal transformer is taught to predict each token in a given sequence by consuming all previous ground-truth tokens as input. This training strategy is named teacher-forcing~\citep{teacher-forcing}. As shown in Figure~\ref{fig:teacher-forcing}, only a single forward pass is required for training samples such as $a_1, a_2, a_3 \rightarrow a_4$ (predict $a_4$ from $a_1, a_2, a_3$),  $a_1, a_2 \rightarrow a_3$, and  $a_1 \rightarrow a_2$.
+Causal transformers are therefore efficiently trained with teacher-forcing. 
+We follow this teacher-forcing strategy. 
+However, training CCT yields separate forward passes per chunk. For example, the prediction of $a_4$ depends on $a_2, a_3$, as in $a_1, a_2, a_3, e_4 \rightarrow a_4$, but $a_2, a_3$ need to be replaced with $e_2, e_3$ to predict them from $a_1$, as in $a_1, e_2, e_3 \rightarrow a_2, a_3$. This prohibits the use of a single forward pass for both $a_1, a_2, a_3, e_4 \rightarrow a_4$ and $a_1, e_2, e_3 \rightarrow a_2, a_3$. Note $a_i$ denotes the $i$-th action and $e_i$ denotes the empty token for $i$-th action.
+This issue increases the training cost and drastically complicates the training procedure. 
+
+To resolve this, we first divide the attention into three categories: (1) causal attention within the action tokens, (2) bidirectional attention within the empty tokens, and (3) causal attention between the empty and the action tokens, as marked in Figure~\ref{fig:teacher-forcing}. 
+Figure~\ref{fig:attention-interleave} shows that 
+the causal attention within action tokens is computed repeatedly.
+We avoid this redundancy by precomputing the causal attentions for all action tokens and caching the results. 
+For the empty tokens, we combine their inner bidirectional attention and the causal attention toward cached action tokens. 
+This enables a single forward pass of all tokens in three attention operations, regardless of the number of tokens. 
+We name this procedure \textit{attention interleaving}.
+Figure~\ref{fig:attention-interleave} demonstrates the reduced MACs of training with attention interleaving.
+We implement attention interleaving as an internal acceleration mechanism of the transformer layer, which is transparent to other network modules.
+Note that attention interleaving is only used during training and incurs no additional inference cost.
+
+
+\textbf{Inference.} During the test rollouts, we extract vision tokens from the current observation and provide them as input to ARP, which then generates actions autoregressively by sampling from the decoded action distribution and appending the selected actions to the existing action sequence.
+This process of generating and executing actions is repeated until episode termination (success, failure, or reaching the time limit).
+Actions are generated according to the sequence formats shown in Figure~\ref{fig:seq-design}. 
+We manually set the chunk size for each type of action, and total sequence length for each task.
+
+
+
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{assets/images/teacher-forcing}
+    \caption{\textbf{Training Chunking Causal Transformer (CCT) with Teacher-forcing.} Causal transformers are trained efficiently with only a single forward pass for all tokens in a given sequence. However, suppose $a_2,a_3$ and $a_4$ are in separate chunks, the CCT forward passes of predicting $a_2,a_3$ and  $a_4$ cannot be merged directly. Naively running separate passes significantly increases computation costs, as in Figure~\ref{fig:attention-interleave}. With the proposed attention interleaving, we precompute and cache the causal attention results for all action tokens $a_1,a_2,a_3$. 
+    For the empty tokens $e_2,e_3,e_4$, 
+    we combine their bidirectional attention (\textcolor{lightgray}{lightgray}) and the causal attention towards action tokens (\textcolor{darkgreen}{green}, \textcolor{darkblue}{blue}). 
+    Since all the computations related to the action tokens are cached, we can update all the empty tokens in a single pass, regardless of the number of tokens. An example of attention interleaving is provided in the {\texttt{Video/attention-interleaving-tour.mp4}} in the supplementary.}
+    \label{fig:teacher-forcing}
+\end{figure}
+
+
+
+
+\section{Experiments}
+
+\label{sec:experiment}
+
+
+In this section, we investigate how the Auto-regressive Policy (ARP) performs compared to the existing methods that were designed specifically for each environment.  
+In addition, we examine whether auto-regression and action chunking are the primary contributors to the performance gains and evaluate how well existing methods perform across different environments.
+Further, we verify ARP on a challenging nut-tightening task with a real robot. 
+Finally, we demonstrate that ARP can estimate the likelihood of robot actions and predict actions based on human inputs. 
+\ifarxiv
+ A single-file implementation of our auto-regressive policy can be found at \texttt{arp.py}.
+\else
+All of our source code and the pre-trained models are included in the supplementary material and will be publicly released upon acceptance. A single-file implementation of our auto-regressive policy can be found at \texttt{Code/arp.py} in the supplementary material.
+\fi
+
+\subsection{Comparison with State-of-the-Art}
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{assets/images/result.jpg}
+    \caption{\textbf{Comparing our proposed Autoregressive Policy to the SoTA of each environment.} Our autoregressive policy (ARP) outperforms environment-specific SoTA and is more efficient in MACs (number of multiply-accumulate operations) and parameter sizes.
+    We report the results of the transformer version of the diffusion policy because of its overall better performance. 
+    The RVT-2~\citep{goyal2024rvt2} results are obtained without including timesteps in the input, similarly to ARP. 
+    All MACs and parameter sizes are measured using THOP~\citep{thop}.}
+    \label{fig:main-result}
+\end{figure}
+
+
+\textbf{Setup.} We compare the autoregressive policy (ARP) against the SoTA solutions in Push-T, ALOHA, and RLBench environments. Push-T is a single task. ALOHA consists of two tasks: insertion and cube transfer. RLBench includes 18 tasks, each with multiple language variants. These environments are illustrated in Figure~\ref{fig:env-intro} and Figure~\ref{fig:env-demo}. For Push-T and ALOHA, we train a separate policy for each task. For RLBench, a single policy is trained for all 18 tasks.
+In Push-T, the policy observes the last two $96\times 96$ RGB frames, and predicts a window of future 2-d pointer positions as actions. In ALOHA, the policy observes the current $480\times 640$ RGB frame and predicts a window of future 14-dimensional joint positions. In RLBench, the policy observes four RGBD $128\times 128$ images and predicts the next target end-effector pose and gripper states. 
+Existing SoTA techniques in these environments are outlined in Figure~\ref{fig:existing-sota}.
+We use the same vision backbones as the SoTA solutions to extract vision tokens, namely ResNet50~\citep{he2016identity} for Push-T and ALOHA, and Multi-View Transformer~\citep{goyal2023rvt} for RLBench. 
+We use the same training data, number of episodes, optimizer configuration, and evaluation frequency as the SoTA solutions. 
+Success rates for Push-T and RLBench are averaged over three independent runs. ALOHA's results are averaged over five runs.
+
+\textbf{Results.} Figure~\ref{fig:main-result} shows that our autoregressive policy (ARP) outperforms environment-specific SoTAs while being more computationally efficient. Table~\ref{tab:rlbench-per-task} compares the per-task success rates of our ARP and RVT-2~\citep{goyal2024rvt2}. In addition, we report the result of ARP$^+$, which shares the same network definition with ARP but has more layers. 
+The MACs / parameter sizes of RVT-2, ARP, ARP$^+$ are 72.1M/57.1G, 71.9M/56.2G, and 73.8M/57.4G, respectively. 
+Note that the originally reported success rate of RVT-2 was 81.6\%. This was achieved by using a logical time-step as an input. Many existing works have followed this convention (Shridhar et al., 2023; Goyal et al., 2023). We train all our RLBench models without the input time-step. Thus, our RLBench models are more robust to variations of task initialization in real applications. 
+
+
+\subsection{Analysis}
+\label{sec:analysis}
+
+\begin{table}\centering
+\caption{\textbf{Comparison of Action Prediction Strategies.} We compare the success rates of three action prediction strategies shown in Figure~\ref{fig:comparison} in Push-T and ALOHA. Action chunking and next-token autoregression are implemented by simply setting the chunk size to a constant of full sequence length or 1 in our ARP, while keeping other settings unchanged, such as action sequence design in Figure~\ref{fig:seq-design}. Our chunking autoregression supports variable chunk sizes and uses a different chunk size for each type of action token during generation.}\label{tab:generation-mode}
+\begin{tabular}{cccc}\toprule
+\multirow{2}{*}{Generation Mode} &\multirow{2}{*}{Push-T} &\multicolumn{2}{c}{ALOHA} \\\cmidrule{3-4}
+& &Cube Transfer  &Insertion \\\midrule
+SoTA & 78.8 & 80.8 & 20.8 \\
+Action Chunking &77.6 &81.2 &21.2 \\
+Single-token Autoregression &82.4 & 46 & 6.8 \\
+Chunking Autoregression (Ours) &\textbf{87.1} &\textbf{94} &\textbf{24.8} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{assets/images/existing-sota.jpg}
+    \caption{\textbf{Overview of SoTA solutions on Push-T, ALOHA, and RLBench.} Diffusion Policy (DP)~\citep{chi2023diffp} iteratively subtracts Gaussian noises from noisy actions. The transformer network predicts the Guassian noise at each step.
+    Action Chunking Transformer (ACT)~\citep{zhao2023aloha} is a VAE architecture that predicts actions directly from images and Gaussian noises. 
+    RVT-2~\citep{goyal2024rvt2} is a hybrid and more complex model, but it is trained directly with behavior cloning and it 
+    does not require a generative framework such as diffusion or VAE. }
+    \label{fig:existing-sota}
+\end{figure}
+\textbf{Does the performance gain come from chunking autoregression?} Our action sequence design incorporates additional inputs for Push-T and ALOHA, as shown in Figure~\ref{fig:seq-design}. These inputs are automatically extracted from the demonstration trajectories. In Push-T, the high-level waypoints are simply uniformly sampled down from the low-level trajectories and then discretized. In ALOHA, the pixel coordinates of the end-effector are computed from the joint values with the robot's forward kinematics and the camera parameters. It is possible that the performance gain of ARP originates from this extra information instead of our proposed architecture. 
+
+Table~\ref{tab:generation-mode} compares the success rates of action chunking, standard single-token autoregression, and our chunking autoregression in Push-T and ALOHA. 
+They share the same implementation, with action chunking models generating the entire sequence at once by setting the CCT chunk size to the full sequence length, and single-token autoregression setting the chunk size to 1.
+In contrast, our chunking autoregression uses different chunk sizes for each type of action. The results clearly show that our proposed chunking autoregression is the key factor behind the better performance.
+
+Our approach innovates action chunking to support variable chunk sizes in sequence generation. Without our improvement, the standard next-token autoregression performs poorly at ALOHA, a task suite that requires fine-grained control inputs. 
+Compared to one-step action chunking models, our intuition can be explained through an example: imagine task $B$ is difficult, but solving task $A$ first, followed by solving task $B|A$ (task $B$ given the result of task $A$), is much easier. An autoregressive model follows this sequential process, solving task $A$ first and then leveraging the result to make task $B$ more feasible. In contrast, a one-step model attempts to predict both tasks simultaneously, treating $A$ and $B$ as independent problems. While the one-step model may solve task $A$ implicitly as part of solving task $B$, it does not explicitly take advantage of the problem structure and is therefore prone to shortcuts. This phenomenon has been explored in more depth for NLP tasks by \citet{prystawski2024stepbystep}. 
+
+
+\begin{table}\centering
+\caption{\textbf{Evaluation of existing methods on various environments.} ACT, a VAE-based method, performs competitively across all environments, whereas Diffusion Policy struggles in ALOHA and RLBench. While we believe stronger diffusion-based architectures can be developed in the future, our results suggest that simpler architectures tend to be more robust across diverse tasks.}\label{tab:cross-env}
+\begin{tabular}{lccccc}\toprule
+\multirow{2}{*}{Method} &\multirow{2}{*}{PushT} &\multicolumn{2}{c}{ALOHA} &\multirow{2}{*}{RLBench} \\\cmidrule{3-4}
+& &Cube Transfer & Insertion & \\\midrule
+Diffusion Policy &78.8 &10 &1.6 &- \\
+ACT &77.5 &80.8 &20.8 &69.8 \\
+ARP (Ours) &\textbf{87.1} &\textbf{94} &\textbf{24.8} &\textbf{81.2} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Do existing methods work in different environments?} Table~\ref{tab:cross-env} shows how existing methods perform in different environments. 
+When testing in a new environment, we keep the same architecture but adapt the vision backbone and optimizer to the environment’s established setup.
+RVT-2 was not implemented for Push-T and ALOHA, as it is designed for sparse waypoint predictions, which are incompatible with the high-frequency actions required in these tasks. We did not implement the diffusion policy for RLBench, as it refines actions from gaussian noise, which conflicts with the common practice in RLBench of predicting actions in discrete spaces. While 3D Diffuser Actor~\citep{ke20243ddiffactor} reports competitive results on RLBench, it uses a completely different architecture.
+Table~\ref{tab:cross-env} reveals that ACT, a VAE-based method, performs competitively across all environments, whereas the diffusion policy struggles to deliver meaningful performance in ALOHA. This outcome is surprising, given the recent popularity of diffusion-based techniques. While we believe a strong diffusion architecture, like 3D Diffuser Actor on RLBench, could be developed for ALOHA, this suggests that simpler architectures could be more robust across a wider range of tasks and environments. 
+Our auto-regressive policy is trained with a single objective: to maximize the conditional likelihood of each action in a sequence. We believe this simplicity contributes to its robust performance across diverse environments.
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\linewidth]{assets/images/chunk-plot.jpg}
+    \caption{\textbf{Impact of chunk size on performance.} Our results suggest that the optimal chunk size depends on both the task and the action sequence design. Therefore, the ability of our chunking causal transformer to support variable chunk sizes is essential for maximizing performance. }
+    \label{fig:chunk-plot}
+\end{figure}
+\textbf{How does chunk size affect performance?} Instead of predicting only the next token, our chunking causal transformer (CCT) is able to predict a variable number of next tokens, that is, a chunk of actions. Figure~\ref{fig:chunk-plot} illustrates the relationship between chunk size and success rate. The first plot shows that larger chunks significantly improve policy performance, a trend also observed by ACT~\citep{zhao2023aloha}. This advantage of chunking actions seems generalizable to high-frequency control in short-horizon tasks.
+Interestingly, while larger chunk sizes for joint positions improve performance, one-shot predictions, where both end-effector waypoints and joint positions are predicted simultaneously, yield inferior results, as in Table~\ref{tab:generation-mode}.  
+The second plot indicates that for Push-T, policy performance is largely insensitive to the chunk size of low-level trajectories because the standard deviation of the success rate ranges between 1 and 2. In this case, a moderate chunk size can be a better choice, given the common practice of executing only the first few predicted actions and then rerunning the policy, a test-time technique reduces error accumulation. This technique benefits from a moderate chunk size through early termination of autoregressive generation without sacrificing performance or computational efficiency. 
+
+ 
+ 
+In the third plot, we explore a different action sequence format for Push-T, where we remove high-level waypoints and flatten the trajectories into a vector, as detailed in Figure~\ref{fig:seq-design-pusht2}. 
+This design yields a completely different trend, with the policy performing well only when the chunk size is 1.
+The fourth plot shows that increasing the chunk size for high-level waypoints improves policy performance. 
+These findings demonstrate that the optimal chunk size depends on both the task and the action sequence format.
+As a result, CCT's ability to flexibly adjust chunk sizes is essential for maximizing performance.
+Currently, chunk sizes are manually specified for each task, but a more principled approach to adaptively adjusting chunk size would be ideal, as discussed in section~\ref{sec:discussion}.
+
+
+\subsection{Real Robot Experiment}
+\label{sec:real-robot}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\linewidth]{assets/images/real-robot.jpg}
+    \caption{\textbf{Real robot experiment.} Our ARP learns to adaptively select high-level commands and generate low-level action values, including position adjustment after unsuccessful insertion. In doing so, we achieve a success rate of 8/10 in this nut-screwing task that requires a precise tool alignment. The bolt's position (\textcolor{blue}{blue}) and nut's height (\textcolor{darkyellow}{yellow}) are randomized at every episode.}
+    \label{fig:real-robot}
+\end{figure}
+\textbf{Setup.} We evaluate ARP on a challenging tight nut-screwing task using a real robot, which requires precise alignment between the nut and wrench with a tolerance of 2mm, as shown in Figure~\ref{fig:real-robot}. 
+In each episode, the bolt (\textcolor{blue}{blue}) is randomly placed on a 20$\times$20 cm$^2$ table, while the height of the nut (\textcolor{darkyellow}{yellow}) is randomized along the 6cm tall bolt. The orientations of both the bolt and nut are also randomized per episode. We define three primitive actions: reach, adjust, and bolt. At each step, our ARP predicts a high-level command to select the action and then generates corresponding low-level action values.
+For example, ARP first predicts the reach command and an insertion pose. Next, the robot attempts to insert the wrench. 
+After every unsuccessful attempt, the policy predicts the adjustment direction to adjust the wrench's position and reattempt insertion. 
+Once the insertion succeeds, the policy switches to the screw command and predicts a dense trajectory to follow in order to rotate the end-effector around the wrench.
+All commands are automatically predicted by the autonomous model instead of being manually specified. 
+An impedance controller stops unsuccessful insertions based on force feedback. We deploy this model on a Kuka LBR iiwa robot. We use $480\times 640$ RBG-D observations from a single RealSense D415 camera. We use MVT as the vision backbone. 
+To simplify the task, we assume the wrench is already grasped by the robot in a pre-defined position. An episode is considered successful if a screw action is completed after no more than three attempts to align the wrench on the nut. We trained ARP using 70 demonstrations collected from an expert policy. The expert policy uses Foundation Pose~\citep{wen2024foundationpose} to estimate insertion pose, with human operators providing fine-grained adjustments.
+
+
+\textbf{Results.} Figure~\ref{fig:real-robot} shows that ARP screws nuts successfully in 8 out of 10 episodes, while the expert policy only has 3 successes out of 10 without human interventions. Most episodes succeeded without any adjustments because we used the adjusted successful insertion pose as the label for the reach command during training. To test ARP's adaptive adjustment ability, we add a uniform noise ranging from -5mm and 5mm along the normal plane of the insertion pose. Despite the added noise, our ARP still succeeds in 6 out of 10 trials, with an average number of 1.6 adjustments per trial.  
+\subsection{Qualitative Visualization}
+
+We showcase all the evaluation tasks in Figure~\ref{fig:env-demo}. Video demonstrations of ARP in simulation and in the real world are available in the file \texttt{Video/demo.mp4} in the supplementary material. In this section, we show two key advantages of ARP: (1) estimating the likelihood of given robot actions, (2) and predicting actions conditioned on human input. 
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.7\linewidth]{assets/images/likelihood-vis.jpg}
+    \caption{\textbf{Trajectory Likelihood Estimation.} ARP generally assigns higher likelihoods to effective trajectories over futile ones, and demonstrates its understanding of action multi-modality as in subfigure (b). The likelihood inference ability of ARP can help identify model weaknesses and find defective demonstrations. All trajectories are human-drawn and are not part of the training set.} 
+    \label{fig:likelihood}
+\end{figure}
+\begin{figure}
+    \centering
+    \includegraphics[width=0.7\linewidth]{assets/images/human-guide.jpg}
+    \caption{\textbf{Trajectory Prediction based on Human Guidance.} We show predicted trajectories of ARP (\textcolor{blue}{blue}), conditioned on human-drawn trajectories (\textcolor{red}{red}). The correct guidance is given with the intention of completing the task, and the wrong guidance is aimed at failing the task. ARP performs as expected under correct guidance. Under wrong guidance, ARP recovers from failure in subfigure (g), avoids further mistakes in subfigure (h), and amplifies the errors in subfigure (e) and (f), which reflects out-of-distribution behavior, as the training set consists only of successful demonstrations.} 
+    \label{fig:human-guide}
+\end{figure}
+
+\textbf{Likelihood inference.} To generate the next token $a_n$, an auto-regressive model estimates the conditional probability $P(a_n|a_1,...,a_{n-1})$. Using the product rule, the model can estimate the joint probability $P(a_1, ..., a_n) = \prod_{i=2}^{n} P(a_i | a_1, \dots, a_{i-1}) P(a_1)$ for any given sequences, a capability that more advanced generative frameworks such as VAE and diffusion lack. Figure~\ref{fig:likelihood} shows  for different trajectories the likelihood estimated by ARP. All these trajectories are human demonstrations. ARP generally assigns higher likelihoods to effective trajectories and lower likelihoods to futile ones. For instance, in sub-figure (b), ARP assigns high likelihoods to two symmetrical trajectories around the T object, demonstrating its understanding of action multi-modality. However, some likelihood assignments are less intuitive. For example, trajectories \ding{202}, \ding{205}, and \ding{207} receive moderately high likelihoods, yet they may not bring the T-shape object closer to the green target, at least not better than the low-likelihood trajectories \ding{203} and \ding{204}. \ding{206} marks two similar trajectories, yet they have different likelihoods. We believe that this type of likelihood inference can help identify the model's weaknesses and eliminate defective demonstrations from the training data. 
+
+\textbf{Prediction with human guidance.} Auto-regressive models generate future tokens conditioned on the previous sequence. In Figure~\ref{fig:human-guide}, we illustrate examples of trajectories of ARP (\textcolor{blue}{blue}) in Push-T, predicted conditionally on human-drawn initial trajectories (\textcolor{red}{red}). The first row (\textcolor{darkgreen}{green}) shows predictions under correct guidance, where the intention is to complete the task successfully. The second row (\textcolor{pink}{pink}) is based on a wrong guidance with the intention of failing the task. ARP completes the trajectory correctly given a correct initial part. Given a wrong initiation, sub-figure (g) shows ARP's recovery from failure by correcting its initial trajectory. In sub-figures (e) and (f), however, ARP amplifies the initial error by pushing further in the wrong direction. This behavior likely reflects ARP’s out-of-distribution response, as the training set consists only of successful demonstrations.
+
+
+
+\section{Discussion}
+
+\label{sec:discussion}
+
+
+We have shown that ARP is a strong and universal architecture that can be trained to perform diverse manipulation tasks. In the following, we discuss its limitations and potential future directions.
+
+\textbf{Learning to plan.} 
+Planning is a key ability of intelligent agents. % to base current actions on future outcomes. 
+It requires the agent to reason not only about its actions but also their impacts on its environment~\citep{garrett2021tamp}. 
+Motivated by the reasoning capacity of auto-regressive models in NLP, a promising direction is to incorporate planning into ARP. 
+One possible solution is to predict sequences of both states and actions. 
+States in robotics are typically high-dimensional, such as images or point clouds. %However, states change continuously and have heavy redundancy with others in adjacent timesteps. 
+Therefore, it would be desirable to predict only key states instead of generating every frame in the future. 
+To solve this problem, ARP can be extended to generate future states by using recent hybrid architectures of auto-regression and diffusion, such as Diffusion Forcing~\citep{chen2024diffusionforcing}, 
+
+
+
+
+\textbf{Interactive robot learning.} Human-Robot collaboration improves efficiency by allowing the robot to recover from its errors~\citep{mukherjee2022survey, liu2023interactive}. One possible future direction is to integrate active learning techniques into ARP  to learn from immediate human feedback. The auto-regressive mechanism naturally supports conditioning action prediction on human input. 
+Moreover, ARP can estimate the likelihood of action sequences. Likelihood is a common measure for identifying the most informative samples in active learning~\citep{taylor2021active}. This can be used, for example, to prioritize demonstrations of tasks where the robot encounters more difficulties.
+
+ 
+
+\textbf{Adaptive action sequence learning.} Despite ARP's impressive performance, it still requires a manual design of action sequence formats and chunk sizes for each environment. Developing a general approach to automatically determine the optimal chunk size would not only improve ARP's performance, but also deepen our understanding of the action chunking techniques for robot imitation learning in general.
+Additionally, unlike natural language, robot actions lack a universal vocabulary. 
+A promising direction is to design a universal robot action language that is applicable across multiple environments, which would reduce the cost of defining new actions, unify training datasets, and improve generalization. %One potential approach is to adopt a visual approach to encode all robot actions in the image space~\citep{zhang2024vkt}.
+
+
+
+
+\begin{thebibliography}{38}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Belkhale et~al.(2023)Belkhale, Cui, and Sadigh]{belkhale2023hydra}
+Suneel Belkhale, Yuchen Cui, and Dorsa Sadigh.
+\newblock Hydra: Hybrid robot actions for imitation learning.
+\newblock In \emph{Conference on Robot Learning}, pp.\  2113--2133. PMLR, 2023.
+
+\bibitem[Belkhale et~al.(2024)Belkhale, Ding, Xiao, Sermanet, Vuong, Tompson, Chebotar, Dwibedi, and Sadigh]{belkhale2024rth}
+Suneel Belkhale, Tianli Ding, Ted Xiao, Pierre Sermanet, Quon Vuong, Jonathan Tompson, Yevgen Chebotar, Debidatta Dwibedi, and Dorsa Sadigh.
+\newblock Rt-h: Action hierarchies using language.
+\newblock \emph{arXiv preprint arXiv:2403.01823}, 2024.
+
+\bibitem[Chen et~al.(2024{\natexlab{a}})Chen, Monso, Du, Simchowitz, Tedrake, and Sitzmann]{chen2024diffusionforcing}
+Boyuan Chen, Diego~Marti Monso, Yilun Du, Max Simchowitz, Russ Tedrake, and Vincent Sitzmann.
+\newblock Diffusion forcing: Next-token prediction meets full-sequence diffusion.
+\newblock \emph{arXiv preprint arXiv:2407.01392}, 2024{\natexlab{a}}.
+
+\bibitem[Chen et~al.(2024{\natexlab{b}})Chen, Deng, Kawaguchi, Gulcehre, and Ahn]{chen2024hiera-diffu}
+Chang Chen, Fei Deng, Kenji Kawaguchi, Caglar Gulcehre, and Sungjin Ahn.
+\newblock Simple hierarchical planning with diffusion.
+\newblock \emph{arXiv preprint arXiv:2401.02644}, 2024{\natexlab{b}}.
+
+\bibitem[Chen et~al.(2021)Chen, Lu, Rajeswaran, Lee, Grover, Laskin, Abbeel, Srinivas, and Mordatch]{chen2021decisionT}
+Lili Chen, Kevin Lu, Aravind Rajeswaran, Kimin Lee, Aditya Grover, Misha Laskin, Pieter Abbeel, Aravind Srinivas, and Igor Mordatch.
+\newblock Decision transformer: Reinforcement learning via sequence modeling.
+\newblock \emph{Advances in neural information processing systems}, 34:\penalty0 15084--15097, 2021.
+
+\bibitem[Chi et~al.(2023)Chi, Feng, Du, Xu, Cousineau, Burchfiel, and Song]{chi2023diffp}
+Cheng Chi, Siyuan Feng, Yilun Du, Zhenjia Xu, Eric Cousineau, Benjamin Burchfiel, and Shuran Song.
+\newblock Diffusion policy: Visuomotor policy learning via action diffusion.
+\newblock \emph{arXiv preprint arXiv:2303.04137}, 2023.
+
+\bibitem[Garrett et~al.(2021)Garrett, Chitnis, Holladay, Kim, Silver, Kaelbling, and Lozano-P{\'e}rez]{garrett2021tamp}
+Caelan~Reed Garrett, Rohan Chitnis, Rachel Holladay, Beomjoon Kim, Tom Silver, Leslie~Pack Kaelbling, and Tom{\'a}s Lozano-P{\'e}rez.
+\newblock Integrated task and motion planning.
+\newblock \emph{Annual review of control, robotics, and autonomous systems}, 4\penalty0 (1):\penalty0 265--293, 2021.
+
+\bibitem[Goyal et~al.(2023)Goyal, Xu, Guo, Blukis, Chao, and Fox]{goyal2023rvt}
+Ankit Goyal, Jie Xu, Yijie Guo, Valts Blukis, Yu-Wei Chao, and Dieter Fox.
+\newblock Rvt: Robotic view transformer for 3d object manipulation.
+\newblock \emph{arXiv preprint arXiv:2306.14896}, 2023.
+
+\bibitem[Goyal et~al.(2024)Goyal, Blukis, Xu, Guo, Chao, and Fox]{goyal2024rvt2}
+Ankit Goyal, Valts Blukis, Jie Xu, Yijie Guo, Yu-Wei Chao, and Dieter Fox.
+\newblock Rvt-2: Learning precise manipulation from few demonstrations.
+\newblock \emph{arXiv preprint arXiv:2406.08545}, 2024.
+
+\bibitem[Hafner et~al.(2022)Hafner, Lee, Fischer, and Abbeel]{hafner2022hiera-plan}
+Danijar Hafner, Kuang-Huei Lee, Ian Fischer, and Pieter Abbeel.
+\newblock Deep hierarchical planning from pixels.
+\newblock \emph{Advances in Neural Information Processing Systems}, 35:\penalty0 26091--26104, 2022.
+
+\bibitem[Hazan et~al.(2019)Hazan, Kakade, Singh, and Soest]{hazan2019provablyefficientmaximumentropy}
+Elad Hazan, Sham~M. Kakade, Karan Singh, and Abby~Van Soest.
+\newblock Provably efficient maximum entropy exploration, 2019.
+\newblock URL \url{https://arxiv.org/abs/1812.02690}.
+
+\bibitem[He et~al.(2016)He, Zhang, Ren, and Sun]{he2016identity}
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+\newblock Identity mappings in deep residual networks.
+\newblock In \emph{Computer Vision--ECCV 2016: 14th European Conference, Amsterdam, The Netherlands, October 11--14, 2016, Proceedings, Part IV 14}, pp.\  630--645. Springer, 2016.
+
+\bibitem[James et~al.(2020)James, Ma, Arrojo, and Davison]{james2020rlbench}
+Stephen James, Zicong Ma, David~Rovick Arrojo, and Andrew~J Davison.
+\newblock Rlbench: The robot learning benchmark \& learning environment.
+\newblock \emph{IEEE Robotics and Automation Letters}, 5\penalty0 (2):\penalty0 3019--3026, 2020.
+
+\bibitem[Janner et~al.(2021)Janner, Li, and Levine]{janner2021trajT}
+Michael Janner, Qiyang Li, and Sergey Levine.
+\newblock Offline reinforcement learning as one big sequence modeling problem.
+\newblock \emph{Advances in neural information processing systems}, 34:\penalty0 1273--1286, 2021.
+
+\bibitem[Jiang et~al.(2022)Jiang, Gupta, Zhang, Wang, Dou, Chen, Fei-Fei, Anandkumar, Zhu, and Fan]{jiang2022vima}
+Yunfan Jiang, Agrim Gupta, Zichen Zhang, Guanzhi Wang, Yongqiang Dou, Yanjun Chen, Li~Fei-Fei, Anima Anandkumar, Yuke Zhu, and Linxi Fan.
+\newblock Vima: General robot manipulation with multimodal prompts.
+\newblock \emph{arXiv preprint arXiv:2210.03094}, 2\penalty0 (3):\penalty0 6, 2022.
+
+\bibitem[Ke et~al.(2024)Ke, Gkanatsios, and Fragkiadaki]{ke20243ddiffactor}
+Tsung-Wei Ke, Nikolaos Gkanatsios, and Katerina Fragkiadaki.
+\newblock 3d diffuser actor: Policy diffusion with 3d scene representations.
+\newblock \emph{arXiv preprint arXiv:2402.10885}, 2024.
+
+\bibitem[Kim et~al.(2024)Kim, Pertsch, Karamcheti, Xiao, Balakrishna, Nair, Rafailov, Foster, Lam, Sanketi, et~al.]{kim2024openvla}
+Moo~Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao, Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan Foster, Grace Lam, Pannag Sanketi, et~al.
+\newblock Openvla: An open-source vision-language-action model.
+\newblock \emph{arXiv preprint arXiv:2406.09246}, 2024.
+
+\bibitem[Kucuk \& Bingul(2006)Kucuk and Bingul]{kucuk2006robot}
+Serdar Kucuk and Zafer Bingul.
+\newblock \emph{Robot kinematics: Forward and inverse kinematics}.
+\newblock INTECH Open Access Publisher London, UK, 2006.
+
+\bibitem[Le et~al.(2018)Le, Jiang, Agarwal, Dud{\'\i}k, Yue, and Daum{\'e}~III]{le2018hiera-imi-rl}
+Hoang Le, Nan Jiang, Alekh Agarwal, Miroslav Dud{\'\i}k, Yisong Yue, and Hal Daum{\'e}~III.
+\newblock Hierarchical imitation and reinforcement learning.
+\newblock In \emph{International conference on machine learning}, pp.\  2917--2926. PMLR, 2018.
+
+\bibitem[Li et~al.(2024)Li, Zhang, Geng, Geng, Long, Shen, Zhang, Liu, and Dong]{li2024manipllm}
+Xiaoqi Li, Mingxu Zhang, Yiran Geng, Haoran Geng, Yuxing Long, Yan Shen, Renrui Zhang, Jiaming Liu, and Hao Dong.
+\newblock Manipllm: Embodied multimodal large language model for object-centric robotic manipulation.
+\newblock In \emph{Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition}, pp.\  18061--18070, 2024.
+
+\bibitem[Liu et~al.(2023)Liu, Chen, Zhu, Swaminathan, Kolobov, and Cheng]{liu2023interactive}
+Huihan Liu, Alice Chen, Yuke Zhu, Adith Swaminathan, Andrey Kolobov, and Ching-An Cheng.
+\newblock Interactive robot learning from verbal correction.
+\newblock \emph{arXiv preprint arXiv:2310.17555}, 2023.
+
+\bibitem[Mann et~al.(2020)Mann, Ryder, Subbiah, Kaplan, Dhariwal, Neelakantan, Shyam, Sastry, Askell, Agarwal, et~al.]{mann2020gpt3}
+Ben Mann, N~Ryder, M~Subbiah, J~Kaplan, P~Dhariwal, A~Neelakantan, P~Shyam, G~Sastry, A~Askell, S~Agarwal, et~al.
+\newblock Language models are few-shot learners.
+\newblock \emph{arXiv preprint arXiv:2005.14165}, 1, 2020.
+
+\bibitem[Min et~al.(2023)Min, Ross, Sulem, Veyseh, Nguyen, Sainz, Agirre, Heintz, and Roth]{min2023recent}
+Bonan Min, Hayley Ross, Elior Sulem, Amir Pouran~Ben Veyseh, Thien~Huu Nguyen, Oscar Sainz, Eneko Agirre, Ilana Heintz, and Dan Roth.
+\newblock Recent advances in natural language processing via large pre-trained language models: A survey.
+\newblock \emph{ACM Computing Surveys}, 56\penalty0 (2):\penalty0 1--40, 2023.
+
+\bibitem[Mukherjee et~al.(2022)Mukherjee, Gupta, Chang, and Najjaran]{mukherjee2022survey}
+Debasmita Mukherjee, Kashish Gupta, Li~Hsin Chang, and Homayoun Najjaran.
+\newblock A survey of robot learning strategies for human-robot collaboration in industrial settings.
+\newblock \emph{Robotics and Computer-Integrated Manufacturing}, 73:\penalty0 102231, 2022.
+
+\bibitem[Pateria et~al.(2021)Pateria, Subagdja, Tan, and Quek]{pateria2021hiera-survey}
+Shubham Pateria, Budhitama Subagdja, Ah-hwee Tan, and Chai Quek.
+\newblock Hierarchical reinforcement learning: A comprehensive survey.
+\newblock \emph{ACM Computing Surveys (CSUR)}, 54\penalty0 (5):\penalty0 1--35, 2021.
+
+\bibitem[Prystawski et~al.(2024)Prystawski, Li, and Goodman]{prystawski2024stepbystep}
+Ben Prystawski, Michael Li, and Noah Goodman.
+\newblock Why think step by step? reasoning emerges from the locality of experience.
+\newblock \emph{Advances in Neural Information Processing Systems}, 36, 2024.
+
+\bibitem[Reed et~al.(2022)Reed, Zolna, Parisotto, Colmenarejo, Novikov, Barth-Maron, Gimenez, Sulsky, Kay, Springenberg, et~al.]{reed2022gato}
+Scott Reed, Konrad Zolna, Emilio Parisotto, Sergio~Gomez Colmenarejo, Alexander Novikov, Gabriel Barth-Maron, Mai Gimenez, Yury Sulsky, Jackie Kay, Jost~Tobias Springenberg, et~al.
+\newblock A generalist agent.
+\newblock \emph{arXiv preprint arXiv:2205.06175}, 2022.
+
+\bibitem[Ross et~al.(2011)Ross, Gordon, and Bagnell]{ross2011reductionimitationlearningstructured}
+Stephane Ross, Geoffrey~J. Gordon, and J.~Andrew Bagnell.
+\newblock A reduction of imitation learning and structured prediction to no-regret online learning, 2011.
+\newblock URL \url{https://arxiv.org/abs/1011.0686}.
+
+\bibitem[Tamar et~al.(2016)Tamar, Di~Castro, and Mannor]{tamar2016rewardtogo}
+Aviv Tamar, Dotan Di~Castro, and Shie Mannor.
+\newblock Learning the variance of the reward-to-go.
+\newblock \emph{Journal of Machine Learning Research}, 17\penalty0 (13):\penalty0 1--36, 2016.
+
+\bibitem[Taylor et~al.(2021)Taylor, Berrueta, and Murphey]{taylor2021active}
+Annalisa~T Taylor, Thomas~A Berrueta, and Todd~D Murphey.
+\newblock Active learning in robotics: A review of control principles.
+\newblock \emph{Mechatronics}, 77:\penalty0 102576, 2021.
+
+\bibitem[Teed \& Deng(2020)Teed and Deng]{teed2020raft}
+Zachary Teed and Jia Deng.
+\newblock Raft: Recurrent all-pairs field transforms for optical flow.
+\newblock In \emph{Computer Vision--ECCV 2020: 16th European Conference, Glasgow, UK, August 23--28, 2020, Proceedings, Part II 16}, pp.\  402--419. Springer, 2020.
+
+\bibitem[Wen et~al.(2024)Wen, Yang, Kautz, and Birchfield]{wen2024foundationpose}
+Bowen Wen, Wei Yang, Jan Kautz, and Stan Birchfield.
+\newblock Foundationpose: Unified 6d pose estimation and tracking of novel objects.
+\newblock In \emph{Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition}, pp.\  17868--17879, 2024.
+
+\bibitem[Williams \& Zipser(1989)Williams and Zipser]{teacher-forcing}
+Ronald~J. Williams and David Zipser.
+\newblock A learning algorithm for continually running fully recurrent neural networks.
+\newblock \emph{Neural Computation}, 1\penalty0 (2):\penalty0 270--280, 1989.
+\newblock \doi{10.1162/neco.1989.1.2.270}.
+
+\bibitem[Wu et~al.(2023)Wu, Jing, Cheang, Chen, Xu, Li, Liu, Li, and Kong]{wu2023gr1}
+Hongtao Wu, Ya~Jing, Chilam Cheang, Guangzeng Chen, Jiafeng Xu, Xinghang Li, Minghuan Liu, Hang Li, and Tao Kong.
+\newblock Unleashing large-scale video generative pre-training for visual robot manipulation.
+\newblock \emph{arXiv preprint arXiv:2312.13139}, 2023.
+
+\bibitem[You et~al.(2019)You, Li, Reddi, Hseu, Kumar, Bhojanapalli, Song, Demmel, Keutzer, and Hsieh]{you2019lamb}
+Yang You, Jing Li, Sashank Reddi, Jonathan Hseu, Sanjiv Kumar, Srinadh Bhojanapalli, Xiaodan Song, James Demmel, Kurt Keutzer, and Cho-Jui Hsieh.
+\newblock Large batch optimization for deep learning: Training bert in 76 minutes.
+\newblock \emph{arXiv preprint arXiv:1904.00962}, 2019.
+
+\bibitem[Zare et~al.(2024)Zare, Kebria, Khosravi, and Nahavandi]{zare2024ilsurvey}
+Maryam Zare, Parham~M Kebria, Abbas Khosravi, and Saeid Nahavandi.
+\newblock A survey of imitation learning: Algorithms, recent developments, and challenges.
+\newblock \emph{IEEE Transactions on Cybernetics}, 2024.
+
+\bibitem[Zhao et~al.(2023)Zhao, Kumar, Levine, and Finn]{zhao2023aloha}
+Tony~Z Zhao, Vikash Kumar, Sergey Levine, and Chelsea Finn.
+\newblock Learning fine-grained bimanual manipulation with low-cost hardware.
+\newblock \emph{arXiv preprint arXiv:2304.13705}, 2023.
+
+\bibitem[Zhu()]{thop}
+Ligeng Zhu.
+\newblock Lyken17/pytorch-opcounter: Count the macs / flops of your pytorch model.
+
+\newblock (Accessed on 09/16/2024).
+
+\end{thebibliography}
+
+
+
+

@@ -1,0 +1,213 @@
+\title{Speeding Up Image Classifiers with Little Companions}
+
+\begin{abstract}
+  Scaling up neural networks has been a key recipe to the success of large language and vision models. However, in practice, up-scaled models can be disproportionately costly in terms of computations, providing only marginal improvements in performance; for example, EfficientViT-L3-384 achieves <2\% improvement on ImageNet-1K accuracy over the base L1-224 model, while requiring $14\times$ more multiply–accumulate operations (MACs). In this paper, we investigate scaling properties of popular families of neural networks for image classification, and find that scaled-up models mostly help with ``difficult'' samples. Decomposing the samples by difficulty, we develop a simple model-agnostic \textbf{two-pass} \OurMethod algorithm that first uses a light-weight ``little'' model to make predictions of all samples, and only passes the difficult ones for the ``big'' model to solve. Good little companions achieve drastic MACs reduction for a wide variety of model families and scales. Without loss of accuracy or modification of existing models, our \OurMethod models achieve MACs reductions of 76\% for EfficientViT-L3-384, 81\% for EfficientNet-B7-600, 71\% for DeiT3-L-384 on ImageNet-1K. \OurMethod also speeds up the InternImage-G-512 model by 62\% while achieving 90\% ImageNet-1K top-1 accuracy, serving both as a strong baseline and as a simple practical method for large model compression.
+  
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\input{figures/examples}
+\clearpage
+
+Advances in parallel computing hardware, such as GPUs, have made end-to-end single-pass parallel processing standard in computer vision models. Large vision datasets like ImageNet-1K~\cite{imagenet} made it possible for such deep vision models (e.g.Alexnet~\cite{alexnet}, ResNet~\cite{resnet} and ViT~\cite{dosovitskiy2020vit})  to learn general visual features at scale. While vision models surpassed human performance on ImageNet-1K a decade ago~\cite{googlenet}, researchers are in the perpetual pursuit of achieving improved performance by using a combination of two strategies: 1) developing more performant models and training techniques for a given compute budget, and 2) scaling up the models.
+While improved models from the former approach are often preferred in compute or memory-constrained applications, the latter has become increasingly popular, thanks to its success in large language models (LLMs)~\cite{touvron2023llama2}. However, despite architectural improvements, scaling up models remains expensive; we are often trading exponential compute cost for marginal gains in model accuracy (Table \ref{tab:scaling}). 
+
+In this work, we show that much of the inefficiency comes from our implicit preference for \textbf{single-pass} models and propose an embarrassingly simple \textbf{two-pass} algorithm to drastically speed up models with little companions.
+
+We summarize our work in response to two critical questions around model scaling and compression.
+
+\begin{enumerate}[leftmargin=0.9cm,itemsep=0pt,topsep=0pt,label=\textbf{\textlangle Q\arabic*\textrangle}]
+    \item \textit{Given a pair of \OurMethod models in the same model family, which incorrect predictions made by the Little model are fixed using the Big model?}\label{Q1}
+\end{enumerate}
+
+\begin{itemize}[leftmargin=*]
+\item Using ImageNet-1K as the test bed and binning the Little model's predictions by confidence, we find that, very often, mistakes made by the Little model correspond to low confidence (measured via maximum softmax probability) 
+\end{itemize}
+
+\begin{enumerate}[leftmargin=0.9cm,itemsep=0pt,topsep=0pt,label=\textbf{\textlangle Q\arabic*\textrangle}]
+    \setcounter{enumi}{1}
+    \item \textit{Without compromising accuracy, can we speed up a Big model by using a Little model to preprocess a proportion of samples in a distribution? }\label{Q2} 
+\end{enumerate}
+
+\begin{itemize}[leftmargin=*]
+\item We propose a two-pass Little-Big protocol where a light-weight \textbf{Little} model is used to make predictions (class and confidence) on all samples in the first pass, and a \textbf{Big} model performs a second pass on samples with low confidence from the first pass, achieving significant reduction in inference compute costs without compromising accuracy.
+
+\end{itemize}
+
+\begin{itemize}[leftmargin=*]
+\item Without any modification to existing models, we prescribe \OurMethod pairs that significantly reduce compute costs of models across types and scales, while not compromising accuracy: \OurMethod models achieves MACs reductions of 76\% for EfficientViT-L3-384, 81\% for EfficientNet-B7-600, 71\% for DeiT3-L-384 on ImageNet-1K. \OurMethod also speeds up the very large InternImage-G-512 model by 62\% while achieving 90\% ImageNet-1K top-1 accuracy, serving both as a strong baseline and as a practical approach for efficient deployment of large models.
+\end{itemize}
+
+\input{figures/scaling}
+
+\clearpage
+
+
+\section{Related Work}
+
+
+\subsection{Computer Vision Models}
+
+Since Alexnet \cite{alexnet}, single-pass neural classifiers trained end-to-end have dominated leaderboards of various vision tasks from image classification to video segmentation \cite{googlenet,resnet,imagenet,beyer2020real,xu2018youtube}. Most neural models originates from two families of neural architectures: convolutional neural networks (CNNs) and transformers. Core to CNNs are ``convolutions'' which apply the same compute across locations on a feature map. On the other hand, transformers, which first found success in sequence-to-sequence language models \cite{vaswani2017attention} and subsequently in vision~\cite{dosovitskiy2020vit}, embed a sequence of tokens (e.g., image patches) and utilize attention mechanism to model intra- and inter-token interactions. Finally, hybrid models like Swin \cite{liu2021swin} combine CNN priors and attention mechanisms to achieve good performance.
+
+\subsection{Scaling in Vision}
+
+Many neural classifiers can be expressed as a composition of layers \cite{alexnet,googlenet,resnet,touvron2022deit3}:
+\begin{equation}\label{eq:neural_classifier}
+    y = F(x) = f_{w_l} \cdot ... \cdot f_{w_1} \cdot f_{w_0}(x), 
+\end{equation}
+where $x \in \R^{C \times H \times H}$ denotes an input image (using square images for simplicity) and $y \in (0,1)^{N}$ denotes a $N$-dimensional softmax confidence score. To get a class prediction, one finds the class $n$ with the highest confidence. $f_{w_j} $ denotes the function of layer $j$ with its characteristic width $w_j$. The inference cost of a single sample $x$ with such a model $F(x)$ can be expressed as:
+\begin{equation}\label{eq:model_scaling}
+    MACs[F(x)] \approx C_{F} * H^2 * w^2 * l 
+\end{equation}
+where $C_{F}$ is a scaling coefficient that is a function of the model family. In turn, the average inference cost per sample over a (finite) distribution $D$ is given by:
+\begin{equation}\label{eq:macs}
+    \E_D \bigg(MACs[F]\bigg) = \frac{1}{|D|} \sum_{x \in D} MACs[{F}(x)] \approx C_{F} * H^2 * w^2 * l
+\end{equation}
+Complementing innovations in model architecture $F$ that make models more compute efficient, a straightforward way of improving performance is to scale up the model. Thanks to architectural improvements like the skip connections \cite{resnet}, normalization layers \cite{googlenet}, as well as better initialization and parameterization\cite{yang2021tensor}, scaling up a model by orders of magnitude has been made feasible. Furthermore, efficient scaling strategies such as compound scaling in model width and depth, as well as input resolution \cite{tan2019efficientnet} have also emerged. However, Equation \ref{eq:model_scaling} imposes a fundamental limitation on the prohibitive cost of scaling: doubling in $H$, $w$, and $l$ leads to $2^5-1=31 \times$ increase in model compute cost. The marginal accuracy gains associated with model scaling shown in Table \ref{tab:scaling} further make it unappealing for many practical use cases with limited compute budget. 
+
+\subsection{Model Compression} \label{sec:compression}
+
+It is well known that modern neural networks have significant redundancy, thus impacting both the \textbf{model size} (often measured by the number of parameters) and inference \textbf{compute cost} (often measured by MACs). This has motivated the design of compression strategies to reduce redundancy in the model. Many lines of research focus on improving the inference time \cite{yin2022avit}, reducing both model size and compute simultaneously \cite{yu2023xpruner}, or trading model size for speed \cite{rao2021dynamicvit}.
+
+Pruning is a popular way to reduce model compute cost by ablating weights that are deemed less essential for the prediction. For example, WDpruning \cite{yu2022wdpruning} reduces widths based on saliency scores, and X-pruner \cite{yu2023xpruner} measures a unit's importance by its contribution to predicting each target class. The implicit assumption is that the redundancy in size and compute are coupled, and one reduces compute by removing the units.
+
+Another way to achieve model speedup is through adaptive computation mechanisms that ideally spend just enough compute on each sample. They often adopt some form of ``early exit'' mechanisms that reduce $l$ in Equation \ref{eq:model_scaling}. DynamicViT \cite{rao2021dynamicvit} downsamples the number of tokens adaptively to reduce compute cost, A-ViT \cite{yin2022avit} introduces learned token halting for ViT models so that not all tokens are processed by the full depth of the model, thus effectively reducing the average depth of the compute graph during inference.
+
+\subsection{Human Vision}
+
+While parallel processing plays an essential role in making it possible to ingest gigabits/s of raw visual information and compress it to tens of bits/s to guide our behavior, human vision is \textbf{not a single-pass process}. Human eyes have two distinct information processing pathways that originate from two types of photoreceptors called rods and cones. While the visual acuity in the cone-rich fovea is $\sim 1$ arcmin,  it only covers $\sim 2 $ degrees, or $\sim 0.01\%$ of the visual field \cite{rosenholtz2016capabilities}. The rest of the $\sim 99.9\%$ of the visual field is mostly dominated by rods which provides much lower visual acuity ($\sim 10$ arcmin). A given small patch in the visual field either only gets processed in a single-pass by the low-acuity rod pathway, or followed by additional passes with high-acuity foveal vision if needed as directed by the saccade. Studies \cite{tang2018recurrent,torralba2009pixels} have shown that human visual classification performance adapts to variable compute budget.
+
+
+\section{Scaling Up Helps with ``Hard'' Samples}
+
+
+
+\input{figures/confidence}
+
+In answer to \ref{Q1}, we first define an axis of ``hardness'' along which we can break down the predictions of the Little models. In lieu of an objective notion of hardness, we use the model confidence $max(F_{small}(x_{i}))$ as a surrogate since it reflects model calibration, i.e., higher prediction confidence correspond to higher accuracy (Figure \ref{fig:confidence} left).
+
+Intuitively, there are 3 simple hypotheses on how scaled up ``Big'' models help correct the mistakes of base ``Little'' models: 
+
+\begin{enumerate}[leftmargin=2.9cm,itemsep=0pt,topsep=0pt,label=\textbf{\textlangle H\arabic*\textrangle}]
+    \item \textit{Big models uniformly help samples across difficulty,}\label{H1}
+\end{enumerate}
+
+\begin{enumerate}[leftmargin=2.9cm,itemsep=0pt,topsep=0pt,label=\textbf{\textlangle H\arabic*\textrangle}]
+    \setcounter{enumi}{1}
+    \item \textit{Big models preferentially help with ``hard'' samples,}\label{H2}
+\end{enumerate}
+
+\begin{enumerate}[leftmargin=2.9cm,itemsep=0pt,topsep=0pt,label=\textbf{\textlangle H\arabic*\textrangle}]
+    \setcounter{enumi}{2}
+    \item \textit{Big models preferentially help with ``easy'' samples.}\label{H3}
+\end{enumerate}
+Using the Pytorch \cite{pytorch} pretrained  EffcientNet family \cite{tan2019efficientnet} as an example, the right panel in Figure \ref{fig:confidence} visualizes prediction mistakes by Little model confidence (B0, B2, and B4) on the ImageNet-1K validation set. The mistakes made by Little models are divided into two categories, \textit{correctable} (solid bars) and \textit{non-correctable} (shaded bars) by the Big model. The full height of each bar (solid + shaded parts) sums up to the total number mistakes in the corresponding bin. 
+
+Quantitatively, the average confidence of \textit{correctable} mistakes for EfficientNet-B0+B7, EfficientNet-B2+B7, EfficientNet-B4+B7 pairs are $0.38$, $0.41$, and $0.30$ respectively. In fact, $90\%$ of correctable mistakes fall under confidence thresholds of $0.65$, $0.67$, $0.47$, respectively. This suggests \ref{H2} is the likely to be true and motivates the two-pass algorithm in the next section.
+
+
+\clearpage
+
+
+
+\section{Two-Pass \OurMethod Algorithm}
+
+
+\subsection{Speeding Up Big Models}
+
+To answer \ref{Q2}, when we allow a sample to be solved with more than one pass like human vision, a simple way is to have a Little-Big pair $G_{F_{Little},F_{Big}}(x,T)$ or shortly $G(x,T)$ for simplicity:
+\begin{equation}\label{eq:little_big}
+    G_{F_{Little},F_{Big}}(x,T) = 
+    \begin{cases}
+        F_{Little}(x),  \text{if } max(F_{Little}(x)) \geq T \\
+        F_{Big}(x). \\
+    \end{cases}
+    \qquad \text{\bf Little-Big}
+\end{equation}
+
+The essence of this Little-Big algorithm is to use a light-weight model to pre-screen samples and only pass hard samples to the Big model (see Algorithm). The average per-sample cost of inference over a dataset $D$ can then be expressed as:
+\begin{align}\label{eq:MACs_little_big}
+        \nonumber \E_D(MACs[G(x,T)]) & = \frac{1}{|D|} \bigg[\sum_{x \sim D} MACs[F_{Little}(x)] + \sum_{x \sim D^*} MACs[F_{Big}(x) ]\bigg] \\
+        & = MACs[F_{Little}(x)] + \frac{|D^*|}{|D|} MACs[F_{Big}(x)],
+\end{align}
+where $D^* \subseteq D $ is defined as the set of $x$ where $max(F_{Little}(x)) < T, \forall x \in D$. 
+
+Using EfficientNet-B7 \cite{pytorch} as an example Big model to speed up, the top left panel in Figure \ref{fig:efficientnet_b7} shows how the relative size $|D^*|/|D|$ varies as a function of threshold $T$ with Little models ranging from EfficientNet-B0 to B6. The shape of the curves correspond to the cumulative distribution of prediction confidence for each Little model. Equation \ref{eq:MACs_little_big} further links $|D^*|/|D|$ to the relative compute cost $\E_D(MACs[G(x,T)])/\E_D(MACs[F_{Big}(x)])$: the higher the threshold the more samples that get passed to the big model, thus increasing MACs. Since $|D^*|/|D| \leq 1$, the upper bound of relative MACs overhead in the worst case scenario is $MACs[F_{Little}(x)]/ MACs[F_{Big}(x)]$, which is usually no greater than $1$ with proper choices of the Little model. As shown in the top middle panel of Figure \ref{fig:efficientnet_b7}, the net effect of adding a pre-screening Little model to the Big model leads to significant reduction in compute cost for a wide range of $T$ across difference choices of Little models.
+
+\input{figures/efficientnet_b7}
+
+
+\subsection{Speeding Up Without Losing Accuracy } \label{sec:choose_T}
+
+\input{figures/algorithm}
+
+\paragraph{Accuracy-MACs trade-off} In addition to MACs, one is interested in how the accuracy of $G(x,T)$ changes as a function of $T$. While it is not surprising that the accuracy generally decreases with smaller $T$, eventually degenerating to the accuracy of the Little model at $T=0$, certain choices of $G(x,T)$ achieve very little accuracy drop or even slight accuracy boost across a wide range of $T$. The bottom left panel of Figure \ref{fig:efficientnet_b7} visualizes the accuracy-MACs trade-off on ImageNet-1K. One might immediately notice that \textbf{any point} on the curves is a valid $G(x,T)$ model, and adjusting $T$ allows traversal along the full curve. Many points on certain curves, such as $G_{B4,B7}(x,T)$, achieves new Pareto optima. A convenient way to pick an optimal operating point of $G(x,T)$ is to set up a target accuracy either in the form of absolute accuracy or tolerable accuracy loss $\Delta Acc$. Setting $\Delta Acc >= 0$, one can easily draw a horizontal line on the accuracy-MACs plot (dashed line in bottom row of Figure \ref{fig:efficientnet_b7}) and find the leftmost intersection point (blue star, $G_{B4,B7}(x,T=0.24)$), yielding the Little-Big pair with the least compute cost while satisfying the accuracy target, speeding up B7 by $81\%$. 
+
+\paragraph{Generalization beyond ImageNet-1K} To test whether the optimal $G$ determined on ImageNet-1K generalizes well, individual models as well as Little-Big pairs are evaluated two additional datasets: 1) ImageNet-ReaL \cite{beyer2020real} where the ground truth labels of the ImageNet-1K validation set are reassessed with an improved labeling protocol ((Figure \ref{fig:efficientnet_b7} bottom middle), and 2) ImageNet-V2 \cite{imagenetv2} where slightly ``harder'' validation images are collected (Figure \ref{fig:efficientnet_b7} bottom right). Comparing accuracy-MACs curves across the three datasets, one may notice that although the absolute accuracies and MACs varies, the shapes match qualitatively. Quantitatively, we find the optimal $G_{B4,B7}(x,T=0.24)$ found on ImageNet-1K performs well on ReaL and V2, with only marginal accuracy losses of $0.04\%$ and $0.07\%$, respectively, validating the generalizability of the optimal $G$.
+
+Evidently, the key to determining the optimal $G$ is estimating the accuracy-MACs trade-off curves on the target distribution $D$. In practice, however, one might only have access to a small subset of $D$ or a set $D'$ close to to $D$. We simulate this case by determining an optimal $G(x,T)$ on the smaller V2 (10000 samples) and test generalization performance on ImageNet-1K and ReaL (50000 samples).28)$), speeding up B7 by a similar $78\%$ on ImageNet-1K. This validates the robustness of such a process.
+\clearpage
+
+\subsection{Speeding Up Models Across Types And Scales}
+
+\input{figures/image_classification}
+
+Table \ref{tab:main} shows more examples the strong MACs compression with \OurMethod on a variety of model families including CNNs, transformers, and hybrid models, across scales from $1$ to $2700$ GMACs. Thanks to the model agnostic nature of \OurMethod, it allows pairing up models of different families (models in \textcolor{blue}{blue} in Table \ref{tab:main}). Large modes such as EfficientVit-L3-384 \cite{cai2023efficientvit}, DeiT3-L3-384 \cite{touvron2022deit3}, ViT-H-14-518 \cite{dosovitskiy2020vit} can be compressed without any loss of accuracy by $70\%$ to $80\%$.
+
+It is worth noting that the roles of Big and Little in the \OurMethod pair are \textbf{relative}. For example, DeiT3-L-384 performs well as Little model, efficiently speeding up the 3B-parameter InternImage-G-512 \cite{wang2022internimage} and 600M-parameter ViT-H-14-518 by 62\% and 80\%, respectively. However, it does not imply that DeiT3-L-384 itself cannot act as the Big model and be sped up by an even smaller model. In fact, Table \ref{tab:main} shows that it can be sped up by the EfficientViT-L2-288 by 71\%. Similarly, EfficientNet-B4 can serve as a strong Little model for compressing EfficientNet-B7, as well as a Big model to be compressed by the smaller EfficientNet-B2. Another important observation is that the speed up depends on the distribution $D$: Relative MACs reduction are consistently lower on the slightly harder ImageNet-V2 than on ImageNet-1K. This suggests that one may measure distribution shift by measuring average MACs with Little-Big.
+\clearpage
+\subsection{Comparison with Prior Art}
+
+\input{figures/comparison_pruning}
+
+As discussed in Section \ref{sec:compression}, many methods have been developed for model compression in various axis. We compare accuracy-MACs tradeoff of \OurMethod with many such methods in Table \ref{tab:comparison}. Typical pruning methods such as WDPruning \cite{yu2022wdpruning} and X-Pruner \cite{yu2023xpruner} selectively removes units that are less important to model accuracy, methods like SPViT (2024) \cite{he2024attentiontoconv} ``prune'' some attention layers into convolutional layers, effecitvely changing the model type.  Addtionally, distillation is used to retrain the network to achieve better performance.  We show that even with tricks that effectively retrained models, many pruning methods are not competitive, especially compared with modern baselines such as DeiT3 \cite{touvron2022deit3}, which in essence are better trained ViTs. For example, the best performing SPViT-DeiT-B with distillation failed to outperform a better trained DeiT3-S baseline in both accuracy, model size, and MACs. It remains to be seen whether these methods work with the improved baseline models. In contrast, the process of choosing $T$ for lossless compression with Little-Big in Section \ref{sec:choose_T} will yield $T=0$ which automatically suggests replacement of the Big with the more performant Little model. Adaptive compute may still be an interesting direction, however popular models such as A-ViT \cite{yin2022avit} also fail to match the performance of better trained baseline models or show that their adaptive models are really better than simply scaling down the model moderately to match the MACs of the adaptive counterparts. 
+
+
+
+\section{Discussion}
+
+
+A large corpus of literature in modern computer vision \cite{alexnet,googlenet,resnet,dosovitskiy2020vit,tan2019efficientnet,cai2023efficientvit,touvron2022deit3} has followed the norm of developing \textbf{single-pass} solutions trained \textbf{end-to-end} for a wide variety of vision tasks ranging from image/video classification to dense prediction. 
+
+While many multi-pass test-time augmentations (TTAs) \cite{shanmugam2021bettertta} that aggregate predictions of several augmented views of the same sample have been developed as a post-hoc add-on to improve performance, these methods go in the opposite direction of \OurMethod. Fundamentally, $K$-pass TTAs are \textit{multiplicative} methods that trades $K \times $ inference cost for slight improvement of accuracy. \OurMethod is a \textit{subtractive} multi-pass algorithm that relies on a good decomposition of problems and solve each part with the least compute, not unlike Speculative Decoding in languange modelling \cite{leviathan2023speculative}. What TTA and \OurMethod share in common is that both are post-hoc methods that do not require any modification to the original models. It is actually possible to combine both in the same inference pipeline much like human vision to make predictions adaptively.
+
+A potentially important contributing factor to the sub-optimal performance of popular adaptive compute models such as DynamicViT and A-ViT lies in their end-to-end training protocol. As the number of tokens decrease over depth, the deeper layers effectively ``see'' less pixels during training. This implicit coupling between the need to reduce compute cost at inference time and at training time due to the end-to-end training protocol may hinder the potential of adaptive methods. In contrast, \OurMethod decouples inference and training compute costs, and uses models individually trained on all pixels on full datasets.
+
+\paragraph{Limitations} It is worth noting that, while \OurMethod achieves drastic MACs reduction across model families and scales, the speed up is \textbf{not free}: since an additional Little model is needed to make the \OurMethod pair, the storage overhead is usually a small fraction of the storage requirement of the Big model. However, the storage overhead does not necessarily translate to memory overhead. Although the example Pytorch pseudo code keeps both Big and Little models in memory at the same time to minimize latency while increasing maximum memory usage, one can alternatively only load one model into the memory at a time so that there is no overhead on maximum memory usage. Batching predictions can further reduce the memory I/O overhead per sample.
+
+\paragraph{Extensions} It  possible to extend the same principles of \OurMethod to other tasks by re-examining and modifying Equation \ref{eq:neural_classifier}. For video classification,
+where the input $x$ is updated as a sequence of images with an added time dimension $t$, $x \in \R^{C \times W \times H \times t}$. The inference cost of a neural video classifier is given by:
+\begin{equation}\label{eq:video_scaling}
+    MACs[F(x)] \approx C_{F} * H^2 * t * w^2 * l, 
+\end{equation}
+which makes brute-force upscaling more costly because of the additional $t$ dimension. However, decomposition based on Equations \ref{eq:little_big} and \ref{eq:MACs_little_big} will most likely generalize to this task provided video classifiers are well calibrated and video samples are decomposable by some simple metrics like confidence. For dense image prediction tasks like semantic segmentation, the prediction $y$ becomes a map, where
+$y \in [0,1]^{W \times H \times N}$.
+In principle, one can continue perform decomposition on a per sample basis, but it may be more efficient to perform decomposition on a per pixel or per patch level. 
+
+
+
+\section{Conclusion}
+
+
+In summary, we investigate how scaled-up models help base models correct their mistakes, show that the former preferentially help with samples with low confidence predictions. Inspired by that, we propose a simple two-pass \OurMethod algorithm that selectively pass ``difficult'' samples to large models, achieving drastic MACs reduction of up to $80\%$ without sacrificing accuracy for a wide range of model families and sizes.
+
+The inefficiency in model scale-up and the effectiveness of \OurMethod in compressing the scaled-up models are two sides of the same coin, with effective decomposition of samples in a dataset being the key to connecting the two sides. Despite being embarrassingly simple and surprisingly effective, \OurMethod is considered as a lower bound on how much a model can be compressed without losing accuracy. More sophisticated ways to decompose the data distribution and better ways to use the Little models output are promising directions to further improve the performance of such subtractive multi-pass algorithms.
+
+
+
+\section{Acknowledgement}
+
+
+This work was performed under the auspices of the U.S. Department of Energy by the Lawrence Livermore National Laboratory under Contract No. DE-AC52-07NA27344. Supported by the LDRD Program under project 22-ERD-006. LLNL-JRNL-864664.
+
+{\clearpage
+\small
+
+
+
+

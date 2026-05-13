@@ -1,0 +1,181 @@
+# ProGO: Probabilistic Global Optimizer
+
+- Decision: Reject
+- Scores: 5, 3, 6, 3
+
+## Abstract
+In the field of global optimization, many existing algorithms face challenges posed by non-convex target functions and high computational complexity or unavailability of gradient information. These limitations, exacerbated by sensitivity to initial conditions, often lead to suboptimal solutions or failed convergence. This is true even for Metaheuristic algorithms designed to amalgamate different optimization techniques to improve their efficiency and robustness. To address these challenges, we develop a sequence of multidimensional integration-based methods that we show to converge to the global optima under some mild regularity conditions. Our probabilistic approach does not require the use of gradients and is underpinned by a mathematically rigorous convergence framework anchored in the nuanced properties of nascent optima distribution. In order to alleviate the problem of multidimensional integration, we develop a latent slice sampler that enjoys a geometric rate of convergence in generating samples from the nascent optima distribution, which is used to approximate the global optima. The proposed Probabilistic Global Optimizer (ProGO) provides a scalable unified framework to approximate the global optima of any continuous function defined on a domain of arbitrary dimension. Empirical illustrations of ProGO across a variety of popular non-convex test functions (having finite global optima) reveal that the proposed algorithm outperforms, by order of magnitude, many existing state-of-the-art methods, including gradient-based, zeroth-order gradient-free, and some Bayesian Optimization methods, in term regret value and speed of convergence. It is, however, to be noted that our approach may not be suitable for functions that are expensive to compute.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The paper proposes a gradient-free numerical algorithm to solve the global optimization problem. The algorithm is probabilistic, designed to sample from a sequence of probability distributions that converge to a distribution supported on the global minima set. The sequence of distributions $m_k(x)$ is constructed by weighing a uniform probability distribution by exponential of the objective function $\exp(-kf(x)$ for increasing $k$. The proposed algorithm is illustrated and compared on several numerical examples, demonstrating its efficiency and accuracy.
+
+### Strengths
+- The paper is nicely written with clear presentation and explanations of the contributions. 
+- The proposed algorithm is supported by theoretical asymptotic convergence results. 
+- The numerical experiments report strong support for the efficiency and accuracy of the algorithm in comparison with several approaches.
+
+### Weaknesses
+ - Although the algorithm is based on the convergence of m_k, the rationale behind the proposed sampling procedure for m_k is not clear. 
+ -There is no non-asymptotic analysis that relates the number of function evaluations with the optimality gap. 
+ - Although theoretical result is nice, it does not explain why this algorithm performs better than alternative approaches. As a result, two numerical experiments might not be sufficient to support the paper's claim. 
+ - The paper misses discussing model-based optimization algorithms as in [1]. Similar theoretical convergence results exists in this and other papers. For example, see Thm. 3 in [2]. The convergence holds under weaker assumptions for the objective function: lower-semicontinuous instead of continuous; and the strong separable condition seems to hold (see the discussion in Appendix C of [2]). 
+
+### Questions
+Please see my comments above.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The authors present a new probabilistic global optimization algorithm called ProGO, which relies on the theory of nascent minima distribution by Luo (2018) and the latent slice sampler. This method departs from traditional gradient-based approaches by ensuring reliable convergence to global optima without the need for gradient information, while still maintaining computational efficiency. They extend Lou’s framework to accommodate noncompact sets and demonstrate its global convergence. The ProGO algorithm is then developed based on this extended framework, and it incorporates a latent slice sampler to improve computational efficiency.
+
+### Strengths
+1)	Propose a novel derivative-free optimization algorithm for global optimization with convergence guarantee. 
+
+2)	Extend the framework proposed in Luo (2018) to non-compact constraint sets and analyze its global convergence.
+
+3)	Provide some promising experimental results.
+
+### Weaknesses
+1) In order to apply the proposed algorithm, the optimal function value $f^*$ is supposed to be known. The assumption is not true for many practical applications.
+
+2) The algorithm is only tested on two test instances, which can be efficiently solved by a number of existing derivative-free optimization algorithms. More experiments are expected to convince the performance benefit of the algorithm, for example, see “N. Hansen, A. Auger, R. Ros, O. Mersmann, T. Tušar, D. Brockhoff. COCO: A Platform for Comparing Continuous Optimizers in a Black-Box Setting, Optimization Methods and Software, 36(1), pp. 114-144, 2021” 
+
+3) The performance of the algorithm heavily depends on the efficiency of the latent slice sampler  applied to the nascent minima distribution $m_k$. This dependence is concerning, as the slice sampler's performance can degrade in high-dimensional spaces or with complex target distributions, potentially undermining the overall effectiveness of the proposed optimization method.
+
+### Questions
+1)	How to calculate the denominator of Equations (2) and (3) for a general black-box $f(x)$?
+
+2)	In Algorithm 2, why we don’t use only a single large value for $k$? In Line 3, is $x^{(0)}$ that same for every t-th iteration? I don’t see any interaction between iterations; that is, the information of $x^{(1)}, …, x^{(N)}$  is not reused in next steps. 
+
+3)	In Line 7 of Algorithm 2, $x$ is a vector, $x_j$ is a scalar, what does it mean by $x < x_j$? 
+
+4)	What is the impact of selecting $k$ in Eq. (3) on the solution quality? What should the appropriate value for $k$?
+
+5)	In Algorithm 2, why we need to fix $T = 200$?
+
+6)	What are stopping criteria for ProGO and other baseline methods used in Section 4?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper considers the problem of finding global minimums of non-convex functions. It proposed a new algorithm that does not require the computation of gradients, but rather it depends on sampling from a sequence of distributions $m_k(x)$ that is induced by the objective function $f$. The authors showed that the maximizer of each distribution $x_k^* = \mathrm{argmax} (m_k(x))$ converges asymptotically to a global minimum, under some separation conditions. In addition, $f(x_k)$ converges to $f^*$ even when the separation condition does not hold. The authors also performed experiments on some non-convex functions and showed that the proposed algorithm converges much faster than other algorithms, like gradient descent etc.
+
+### Strengths
+1. This paper is thoeretically interesting, in that it proposed a new type of optimization algorithms and constructs its (asymptotic) convergence theory. This algorithm provably converges to the global minimum of the objective. Interestingly, they showed that $\int f(x)m_k(x) dx \downarrow f^*$, where $m_k(x)$ is a probability measure constructed using $f$. Further, when $x_k^* = \mathrm{argmax} (m_k(x))$, it holds that $x^*_k \to x^*$ in $\ell_2$ distance. 
+2. This paper is written clearly and provides useful explanation and intuition.
+
+### Weaknesses
+1. The authors only provides convergence property when the iteration $k$ goes to infinity. It seems promising that the new method out-performs classic algorithms on some functions, but what about the worst-case upper bound? It would be more interesting (and practical) if we have some non-asymptotic results like how many iterations we need to approximate an global minimizer within error $\epsilon$. If, in the worst case, the algorithm needs $(1/\epsilon)^d$ calls of function value oracle to find a global min of a (say, lipschitz) function, then it is no better than a brute force search.
+
+
+### Questions
+1. How many samples does the LSS-ProGo algorithm need to approximate the distribution $m_k(x)$? Especially, in high-dimension scenerios? How accurate this approximation needs to be?
+2. I am wondering what would happen if we use Gaussian as $\pi(x)$ instead of uniform distribution. Will that bring us better results?
+3. In addition, when the set $\Omega$ is unbounded, like $R^d$, how to construct a uniform distribution on this set $\Omega$?
+
+### Soundness
+4 excellent
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The authors describe an optimization algorithm for continuous functions $f:\mathbb{R^d}\to \mathbb{R}$ that draws random samples from the search space using a Latent slice sampler and the probability density from which the samples are drawn is the product of a prior $\pi(x)$ and the exponentiated objective functions $\exp(-k\cdot f(x))$, i.e. an energy based model.
+
+The authors prove basic properties of the distribution and perform experiments against a range of comparable methods.
+
+### Strengths
+- well written, clear and easy to follow
+- the idea of using the objective function as energy in an energy based model together with an MCMC algorithm and varying temperature is is well justified (and unfortunately has been done extensively before)
+
+### Weaknesses
+ - using the objective as energy in an energy boltzmann distribution (also known as energy based models) for MCMC sampling is an old well established family of methods known as simulated annealing. This paper does not acknowledge simulated annealing nor cite any simulated annealing work (the prior work of Luo 2018 cites one paper for simulated annealing when discussing differential evolution). I feel the proposed framework is not novel. In the simulated annealing literature, $1/k$ is referred to as temperature $T$ and increasing $k$ or reducing $T$ over time is the “cooling schedule”, and as the algorithm "cools down", the sampler converges closer and closer to the minima (exactly as described by Theorem 1).
+
+- it is not clear if the methods are using the same number of objective function evaluations. If I understand Algorithm 1 correctly, the objective function is evaluated in line 5, in the condition of the while loop, hence the while loops and thus the number of objective function calls is not deterministic for each iteration of the algorithm. Comparing algorithms by number of iterations when algorithms call the objective a different number of times each is not a fair comparison.
+
+- the proofs are standard results, rewriting the minima distribution in exponential family form $m_k(x) = exp([-k, 1] \cdot [f(x), \log(pi(x))]) / Z$, Theorem 2 is a standard result for all exponential family distribution, the gradients with respect to the natural parameters yield moments of the distribution.
+
+- as the temperature of an energy based model is reduced, the distribution tends to delta function around the maximum is well known. In many generative models, increasing the “temperature” in sampling is synonymous with increasing variety in generated outputs, and decreasing temperature leads to deterministically generating maximum likelihood outputs.
+
+- in my view the framework of ProGO is not new. The use of this particular MCMC Latent Slice Sampler within an simulated annealing algorithm may be new. If so, Standard Metropolis Hasting with a Gaussian proposal and other MCMC methods should be baselines. Even so, a change of MCMC sampler is not sufficient for publication.
+
+### Questions
+- do all algorithms evaluate $f(x)$ exactly the same number of times per iteration? the results should plot total numebr of function $f(x)$ calls on the x axis.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+1 poor

@@ -1,8 +1,8 @@
 # Do Vision-Language Models Represent Space and How? Evaluating Spatial Frame of Reference under Ambiguities
 
 - Decision: Accept
-- Avg Score: 4.67
-- Scores: 1, 0, 8, 8, 6, 5
+- Avg Score: 7.40
+- Scores: 10, 8, 8, 6, 5
 
 ## Abstract
 \vspace*{-5pt}

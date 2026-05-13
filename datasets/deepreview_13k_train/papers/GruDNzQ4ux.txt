@@ -1,0 +1,499 @@
+\title{DreamSmooth: Improving Model-based Reinforcement Learning via Reward Smoothing}
+
+\begin{abstract}
+Model-based reinforcement learning (MBRL) has gained much attention for its ability to learn complex behaviors in a sample-efficient way: planning actions by generating imaginary trajectories with predicted rewards. Despite its success, we found that surprisingly, reward prediction is often a bottleneck of MBRL, especially for sparse rewards that are challenging (or even ambiguous) to predict. Motivated by the intuition that humans can learn from rough reward estimates, we propose a simple yet effective reward smoothing approach, \textit{DreamSmooth}, which learns to predict a temporally-smoothed reward, instead of the exact reward at the given timestep. We empirically show that DreamSmooth achieves state-of-the-art performance on long-horizon sparse-reward tasks both in sample efficiency and final performance without losing performance on common benchmarks, such as Deepmind Control Suite and Atari benchmarks. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+
+\begin{wrapfigure}{r}{0.55\textwidth}
+    \includegraphics[width=0.55\textwidth]{figures/task-samples/difficult-reward-prediction-7.png}
+    \caption{Predicting the exact sequence of rewards is extremely difficult. These examples show the sequences of image observations seen by the agent just before and after it receives a large reward. There is little to visually distinguish timesteps with a large reward from those without, which creates a significant challenge for reward prediction.}
+    \label{fig:teaser}
+\end{wrapfigure}
+Humans often plan actions with a rough estimate of future rewards, instead of the exact reward at the exact moment~\citep{fiorillo2008temporal, klein2011dissociable}. A rough reward estimate is mostly sufficient to learn a task, and predicting the exact reward is often challenging since it can be ambiguous, delayed, or not observable. Consider for instance the manipulation task illustrated in \Cref{fig:teaser}~(middle) of pushing a block on a table into a bin, where a large reward is given only on the timestep when the block first touches the bin. Using the same image observations as the agent, it is challenging even for humans to predict the correct sequence of rewards. Crucially, this issue is present in many environments, where states with no reward are almost indistinguishable from those with rewards.
+
+An accurate reward model is vital to model-based reinforcement learning (MBRL) -- reward estimates that are too high will cause an agent to choose actions that perform poorly in reality, and estimates that are too low will lead an agent to ignore high rewards. Despite its difficulty and importance, the reward prediction problem in MBRL has been largely overlooked. We find that even for the state-of-the-art MBRL algorithm, DreamerV3~\citep{hafner2023mastering}, reward prediction is not only challenging, but is also a performance bottleneck for many tasks. For instance, DreamerV3 fails to predict any reward for most objectives in the Crafter environment~\citep{hafner2022benchmarking} with similar failure modes observed on variants of the RoboDesk~\citep{kannan2021robodesk} and Shadow Hand~\citep{plappert2018multi} tasks. 
+
+Inspired by the human intuition that only a rough estimate of rewards is sufficient, we propose a simple yet effective solution, \textbf{DreamSmooth}, which learns to predict a temporally-smoothed reward rather than the exact reward at each timestep. This makes reward prediction much easier -- instead of having to predict rewards exactly, now the model only needs to produce an estimate of when large rewards are obtained, which is sufficient for policy learning. 
+
+Our experiments demonstrate that while extremely simple, this technique significantly improves performance of different MBRL algorithms on many sparse-reward environments. Specifically, we find that for DreamerV3~\citep{hafner2023mastering}, TD-MPC~\citep{hansen2022temporal}, and MBPO~\citep{janner2019mbpo}, our technique is especially beneficial in environments with the following characteristics: sparse rewards, partial observability, and stochastic rewards. Finally, we show that even on benchmarks where reward prediction is not a significant issue, DreamSmooth does not degrade performance, which indicates that our technique can be universally applied.
+
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+
+Model-based reinforcement learning (MBRL) leverages a dynamics model (i.e. world model) of an environment and a reward model of a desired task to plan a sequence of actions that maximize the total reward. The dynamics model predicts the future state of the environment after taking a specific action and the reward model predicts the reward corresponding to the state-action transition. With the dynamics and reward models, an agent can simulate a large number of candidate behaviors in imagination instead of in the physical environment, allowing MBRL to tackle many challenging tasks~\citep{silver2016mastering, silver2017mastering, silver2018general}.
+
+Instead of relying on the given dynamics and reward models, recent advances in MBRL have enabled learning a world model of high-dimensional observations and complex dynamics~\citep{ha2018world, schrittwieser2020mastering, hafner2019dream, hafner2020mastering, hafner2023mastering, hansen2022temporal}, as well as a temporally-extended world model~\citep{shi2022skimo}. Specifically, DreamerV3~\citep{hafner2023mastering} has achieved the state-of-the-art performance across diverse domains of problems, e.g., both with pixel and state observations as well as both with discrete and continuous actions. 
+
+For realistic imagination, MBRL requires an accurate world model. There have been significant efforts in learning better world models by leveraging human videos~\citep{mendonca2023structured}, by adopting a more performant architecture~\citep{deng2023facing}, and via representation learning, such as prototype-based~\citep{deng2022dreamerpro} and object-centric~\citep{singh2021structured} state representations, contrastive learning~\citep{okada2021dreaming}, and masked auto-encoding~\citep{seo2022masked, seo2023multi}.
+
+However, compared to the efforts on learning a better world model, learning an accurate reward model has been largely overlooked. \citet{babaeizadeh2020models} investigates the effects of various world model designs and shows that reward prediction is strongly correlated to task performance when trained on an offline dataset, while limited to dense-reward environments.
+In this paper, we point out that accurate reward prediction is crucial for MBRL, especially in sparse-reward tasks and partially observable environments, and propose a simple method to improve reward prediction in MBRL. 
+
+
+\section{Approach}
+
+\label{sec:approach}
+The main goal of this paper is to understand how challenging reward prediction is in model-based reinforcement learning (MBRL) and propose a simple yet effective solution, \textit{reward smoothing}, which makes reward prediction easier to learn. In this section, we first provide a background about MBRL in \Cref{sec:approach:background}, then present experiments demonstrating the challenge of predicting sparse reward signals in \Cref{sec:approach:reward_prediction}, and finally explain our approach, DreamSmooth, in \Cref{sec:approach:reward_smoothing}.
+\subsection{Background}
+\label{sec:approach:background}
+
+We formulate a problem as a partially observable Markov decision process (POMDP), which is defined as tuple $(\mathcal{O}, \mathcal{A}, P, R, \gamma)$. $\mathcal{O}$ is an observation space, $\mathcal{A}$ is an action space, $P(\vo_{t+1} \vert \vo_{\leq t}, \va_{\leq t})$ with timestep $t$ is a transition dynamics, $R$ is a reward function that maps previous observations and actions to a reward $r_{t} = R(\vo_{\leq t}, \va_{\leq t})$, and $\gamma \in [0, 1)$ is a discount factor~\citep{sutton2018reinforcement}. RL aims to find a policy $\pi(\va_{t} \,|\, \vo_{\leq t}, \va_{<t})$ that maximizes the expected sum of rewards $\mathbb{E}_{\pi}[\sum_{t=1}^{T}\gamma^{t-1} r_{t}]$.
+
+This paper focuses on MBRL algorithms that learn a world model $P_\theta(\vz_{t+1} \vert \vz_t, \va_t)$ and reward model $R_\theta(r_t \vert \vz_t)$ from agent experience, where $\vz_t$ is a learned latent state at timestep $t$. The learned world model and reward model can then generate imaginary rollouts $\{\vz_\tau, \va_\tau, r_\tau\}_{\tau=t}^{t+H-1}$ of the horizon $H$ starting from any $\vz_t$, which can be used for planning~\citep{argenson2021modelbased, hansen2022temporal} or policy optimization~\citep{ha2018world, hafner2019dream}. Specifically, we use the state-of-the-art algorithms, DreamerV3~\citep{hafner2023mastering} and TD-MPC~\citep{hansen2022temporal}.
+
+DreamerV3~\citep{hafner2023mastering} uses the predicted rewards for computing new value targets to train the critic. For learning a good policy, the reward model plays a vital role since the critic, from which the actor learns a policy, receives its training signal exclusively through the reward model. Note that the data collected from the environment is only used for training a world model and reward model.
+
+On the other hand, TD-MPC~\citep{hansen2022temporal} learns a state-action value function $Q(\vz_t, \va_t)$ directly from agent experience, not from predicted rewards. However, the reward model is still important for obtaining a good policy in TD-MPC because the algorithm uses both the reward model and value function to obtain the policy through online planning.
+\subsection{Reward Prediction is Difficult}
+\label{sec:approach:reward_prediction}
+\begin{figure}[b!]
+    \centering
+    \begin{subfigure}[t]{0.82\textwidth}
+        \includegraphics[width=\textwidth]{figures/trajectory_unsmooth_legend.pdf}
+    \end{subfigure}
+    \\
+    \begin{subfigure}[t]{0.49\textwidth}
+        \includegraphics[width=\textwidth]{figures/trajectories/desk/openl_rew_plot_24796456_c12daa47e19d3c5c03e7.plotly.json.pdf}
+        \caption{RoboDesk}
+        \label{fig:ep-reward-desk}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.49\textwidth}
+        \includegraphics[width=\textwidth]{figures/trajectories/hand/openl_rew_plot_20124500_c58e783e02fdceb32c6b.plotly.json.pdf} 
+        \caption{Hand}
+        \label{fig:ep-reward-hand}
+    \end{subfigure}
+    \\
+    \begin{subfigure}[t]{0.49\textwidth}
+        \includegraphics[width=\textwidth]{figures/trajectories/agx/openl_rew_plot_11996960_97811008d72d791fe486.plotly.json.pdf}
+        \caption{Earthmoving}
+        \label{fig:ep-reward-agx}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.49\textwidth}
+        \includegraphics[width=\textwidth]{figures/trajectories/crafter/openl_rew_plot_6324773_9de006955fda4665830e.plotly.json.pdf}
+        \caption{Crafter}
+        \label{fig:ep-reward-crafter}
+    \end{subfigure}
+    \caption{Ground truth rewards and DreamerV3's predicted rewards over an evaluation episode. The reward model misses many \textit{sparse} rewards, which is highlighted in yellow.}
+    \label{fig:ep-reward}
+\end{figure}
+Reward prediction is surprisingly challenging in many environments. \Cref{fig:teaser} shows sequences of frames right before and after sparse rewards are received in diverse environments. Even for humans, it is difficult to determine the exact timestep when the reward is received in all three environments. 
+
+We hypothesize that the mean squared error loss $\mathbb{E}_{(\vz, r) \sim \mathcal{D}}[(R_\theta(\vz) -r)^2]$, typically used for reward model training, deteriorates reward prediction accuracy when there exist \textit{sparse rewards}. This is because predicting a sparse reward a single step earlier or later results in a higher loss than simply predicting $0$ reward at every step. Thus, instead of trying to predict sparse rewards at the exact timesteps, a reward model minimizes the loss by entirely omitting sparse rewards from its predictions. 
+
+To verify this hypothesis, we plot the ground-truth and DreamerV3's predicted rewards in \Cref{fig:ep-reward}. On the four tasks described in \Cref{sec:experiments/tasks}, the reward models struggle at predicting exact rewards and simply ignore sparse rewards unless they are straightforward to predict. This hypothesis also holds in a deterministic and fully-observable environment, Crafter, which has $24$ sources of sparse rewards. The reward model fails to predict most of these reward sources (\Cref{fig:ep-reward-crafter}). 
+
+The difficulty of reward prediction can be further exacerbated by partial observability, ambiguous rewards, or stochastic dynamics of environments. As an example in the first (third) row in \Cref{fig:teaser}, the sparse rewards are given when the block (the rocks in the third example) first contacts the bin (the dumptruck). The exact moment of contact is not directly observable from the camera viewpoint, and this makes reward prediction ambiguous. Moreover, stochastic environment dynamics, e.g., contact between multiple rocks, can make predicting a future state and reward challenging. 
+\subsection{Reward Prediction is a Bottleneck of MBRL}
+
+The preceding section shows that reward prediction is challenging in many environments. More importantly, this poor reward prediction can be a bottleneck of policy learning, as shown in \Cref{fig:failure_modes}. In RoboDesk, where the reward model does not reliably detect the completion of the second task (\Cref{fig:ep-reward-desk}), the policy gets stuck at solving the first task and fails on subsequent tasks. In Earthmoving, where the reward model cannot capture rewards for successful dumping (\Cref{fig:ep-reward-agx}), the policy frequently drops the rocks outside the dumptruck. These consistent failure modes in reward prediction and policy learning in DreamerV3 suggest that poor reward prediction can be a bottleneck of MBRL.
+
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}[t]{0.495\textwidth}
+        \centering
+        \includegraphics[width=0.39\textwidth]{figures/task-samples/robodesk-failure-mode.png}
+        \ 
+        \includegraphics[width=0.55\textwidth]{figures/stuck/Robodesk.pdf}
+        \caption{RoboDesk}
+        \label{fig:desk-task-fail}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.495\textwidth}
+        \centering
+        \includegraphics[width=0.39\textwidth]{figures/task-samples/agx-failure-mode.png}
+        \ 
+        \includegraphics[width=0.55\textwidth]{figures/stuck/AGX-rocks-v3.pdf}
+        \caption{Earthmoving}
+        \label{fig:agx-dump-fail}
+    \end{subfigure}
+    \caption{The reward model's inability to predict sparse rewards for completing tasks leads to poor task performance. (a)~In RoboDesk, the agent gets stuck after learning the first task, and is unable to learn to perform the subsequent tasks. (b)~In Earthmoving, the policy often fails to dump the rocks accurately into the dumptruck. The learning curves are averaged over $3$ seeds.
+    }
+    \label{fig:failure_modes}
+\end{figure}
+
+\subsection{DreamSmooth: Improving MBRL via Reward Smoothing}
+\label{sec:approach:reward_smoothing}
+\begin{wrapfigure}{r}{0.53\textwidth}
+    \centering
+    \begin{subfigure}[t]{0.17\textwidth}
+        \includegraphics[width=\textwidth]{figures/smoothing-intro/gaussian.pdf}
+        \caption{Gaussian}
+        \label{fig:smoothing-gaussian}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.17\textwidth}
+        \includegraphics[width=\textwidth]{figures/smoothing-intro/uniform.pdf}
+        \caption{Uniform}
+        \label{fig:smoothing-uniform}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.17\textwidth}
+        \includegraphics[width=\textwidth]{figures/smoothing-intro/ema.pdf}
+        \caption{EMA}
+        \label{fig:smoothing-ema}
+    \end{subfigure}
+    \caption{Reward smoothing on sparse reward $1$ at $t=4$. $\sigma$, $\delta$, and $\alpha$ are smoothing hyperparameters.}
+    \label{fig:smoothing}
+\end{wrapfigure}
+To address the reward prediction problem, we propose a simple yet effective solution, \textbf{DreamSmooth}, which relaxes the requirement for the model to predict sparse rewards at the exact timesteps by performing temporal smoothing. Allowing the reward model to predict rewards that are off from the ground truth by a few timesteps makes learning easier, especially when rewards are ambiguous or sparse. 
+
+Specifically, DreamSmooth applies temporal smoothing to the rewards upon collecting each new episode. DreamSmooth can work with any smoothing function $f$ that preserves the sum of rewards: 
+\begin{equation}
+\label{eq:smoothing}
+    \tilde{r}_t \leftarrow f(r_{t-L:t+L}) = \sum_{i=-L}^{L} f_i \cdot r_{\text{clip}(t+i, 0, T)} \quad s.t. \quad \sum_{i=-L}^{L} f_i = 1,
+\end{equation}
+where $T$ and $L$ denote the episode and smoothing horizons, respectively. Episodes with the smoothed rewards are stored in the replay buffer and used to train the reward model. The agent learns only from the smoothed rewards, without ever seeing the original rewards. The smoothed rewards ease reward prediction by allowing the model to predict rewards several timesteps earlier or later, without incurring large losses.
+In this paper, we investigate three popular smoothing functions: Gaussian, uniform, and exponential moving average (EMA) smoothing, as illustrated in \Cref{fig:smoothing}.
+
+While the main motivation for smoothing is to make it easier to learn reward models, we note that reward smoothing in some cases preserves optimality -- \textit{an optimal policy under smoothed rewards $\tilde{r}$ is also optimal under the original rewards $r$}. In particular, we provide a proof in \Cref{sec:proofs} for the optimality of EMA smoothing (and any smoothing function where $\forall i>0, f_i = 0$) by augmenting the POMDP states with the history of past states. However, when future rewards are used for smoothing (e.g. Gaussian smoothing), the smoothed rewards are conditioned on policy, and we can no longer define an equivalent POMDP. In such cases, there is no theoretical guarantee. Even so, we empirically show that reward models can adapt their predictions alongside the changing policy, and achieve performance improvements.
+
+\Skip{Please note that DreamSmooth aims to provide a useful heuristic for MBRL, which implements the idea of learning from roughly estimated rewards rather than exact rewards predicted at the exact moments. Reward shaping via reward smoothing guarantees the optimal policy given the original reward $R$ by preserving the total reward. Especially, in \Cref{sec:proofs}, we provide a proof for the optimality of EMA smoothing under the assumption that a state includes the history of past states, which can be naturally addressed by recurrent state models. On the other hand, as in Gaussian smoothing, a smoothed reward function may require future rewards, which are conditioned on the current policy; so is the reward model. In such cases, there is no theoretical guarantee; but in our experiments, we empirically show that reward models can adapt their predictions along the changes in policies and thus, improve MBRL.}
+
+The implementation of DreamSmooth is extremely simple, requiring only one additional line of code to existing MBRL algorithms, as shown in \Cref{alg:dreamsmooth}. The overhead of reward smoothing is minimal, with time complexity $O(T \cdot L)$. More implementation details can be found in \Cref{sec:implementation_details}.
+
+\begin{algorithm}
+    \caption{\textsc{collect\_rollout}\,($\pi$: policy, $\mathcal{D}$: replay buffer) in \textsc{DreamSmooth}}
+    \label{alg:dreamsmooth}
+    \begin{algorithmic}
+        \State $\{(\vo_t, \va_t, r_t)_{t=1}^{T}\} \leftarrow \textsc{rollout}(\pi)$ 
+        \smallskip
+        \State $\color{red} \{r_t\}_{t=1}^{T} \leftarrow \textsc{gaussian}(\{r_t\}_{t=1}^{T}, \sigma) ~~ \texttt{or} ~~ \textsc{ema}(\{r_t\}_{t=1}^{T}, \alpha)$ \Comment{\textcolor{red}{\textbf{only one} line needs to be added.}} \smallskip
+        \State $\mathcal{D} \gets \mathcal{D} \cup \{(\vo_t, \va_t, r_t)_{t=1}^{T}\}$
+    \end{algorithmic}
+\end{algorithm}
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+In this paper, we propose a simple reward smoothing method, DreamSmooth, which facilitates reward prediction in model-based reinforcement learning (MBRL) and thus, improves the performance of existing MBRL methods. Through our experiments, we aim to answer the following questions: (1)~Does reward smoothing improve reward prediction? (2)~Does better reward prediction with reward smoothing lead to better sample efficiency and asymptotic performance of MBRL in sparse-reward tasks? (3)~Does MBRL with reward smoothing also work in common dense-reward tasks?
+\begin{figure}[b]
+    \centering
+    \begin{subfigure}[t]{0.16\textwidth}
+        \includegraphics[width=\textwidth]{figures/task-samples/robodesk-task.png}
+        \caption{RoboDesk}
+        \label{fig:tasks-robodesk}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.16\textwidth}
+        \includegraphics[width=\textwidth]{figures/task-samples/hand.png}
+        \caption{Hand}
+        \label{fig:tasks-hand}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.16\textwidth}
+        \includegraphics[width=\textwidth]{figures/task-samples/agx-task.png}
+        \caption{Earthmoving}
+        \label{fig:tasks-agx}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.16\textwidth}
+        \includegraphics[width=\textwidth]{figures/placeholders/crafter-task.png}
+        \caption{Crafter}
+        \label{fig:tasks-crafter}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.16\textwidth}
+        \includegraphics[width=\textwidth]{figures/placeholders/dmc-task.png}    
+        \caption{DMC}
+        \label{fig:tasks-dmc}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.16\textwidth}
+        \includegraphics[width=\textwidth]{figures/placeholders/atari-task.png}    
+        \caption{Atari}
+        \label{fig:tasks-atari}
+    \end{subfigure}
+    \caption{We evaluate DreamSmooth on four tasks with sparse subtask completion rewards (a-d). We also test on two popular benchmarks, (e)~DeepMind Control Suite and (f)~Atari.}
+    \label{fig:tasks}
+\end{figure}
+\subsection{Tasks}
+\label{sec:experiments/tasks}
+
+We evaluate DreamSmooth on four tasks with sparse subtask completion rewards and two common RL benchmarks. Earthmoving uses two $64\times64$ images as an observation while all other tasks use a single image. See \Cref{sec:environment_details} for environment details.
+
+\begin{itemize}[leftmargin=1em]
+    \item \textbf{RoboDesk:} We use a modified version of RoboDesk~\citep{kannan2021robodesk}, where a sequence of manipulation tasks (\texttt{flat\_block\_in\_bin, upright\_block\_off\_table, push\_green}) need to be completed in order (\cref{fig:tasks-robodesk}). We use the original dense rewards together with a large sparse reward for each task completed.
+
+    \item \textbf{Hand:} The Hand task~\citep{plappert2018multi} requires a Shadow Hand to rotate a block in hand into a specific orientation. We extend it to achieve a sequence of pre-defined goal orientations in order. In addition to the original dense rewards, we provide a large sparse reward for each goal. 
+
+    \item \textbf{Earthmoving:} The agent controls a wheel loader to pick up rocks and dump them in the dump truck (\cref{fig:tasks-agx}). Sparse rewards are given for picking up and dumping rocks, with dense rewards for moving rocks towards the dump truck. The environment is simulated using the AGX Dynamics physics engine~\citep{agx} with the AGX Terrain module~\citep{servin2021multiscale}.
+
+    \item \textbf{Crafter:} Crafter~\citep{hafner2022benchmarking} is a minecraft-like 2D environment, where the agent tries to collect, place, and craft items in order to survive. There are $22$ achievements in the environment (e.g.~collecting water, mining diamonds) with a sparse reward $1$ for obtaining each achievement for the first time. A small reward is given (or lost) for each health point gained (or lost).
+
+    \item \textbf{DMC:} We benchmark $7$ DeepMind Control Suite continuous control tasks~\citep{tassa2018deepmind}.
+
+    \item \textbf{Atari:} We benchmark $6$ Atari tasks~\citep{bellemare13arcade} at $100$K steps.
+\end{itemize}
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[t]{\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/trajectory_smooth_legend.pdf}
+    \end{subfigure}
+    \\
+    \begin{subfigure}[t]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/trajectories/desk/openl_rew_plot_24397856_3eb889d9779e6a8d3048.plotly.json.pdf}
+        \caption{RoboDesk}
+        \label{fig:ep_reward_smoothed_robodesk}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/trajectories/hand/openl_rew_plot_20174224_025861757d8428e33328.plotly.json.pdf}
+        \caption{Hand}
+        \label{fig:ep_reward_smoothed_hand}
+    \end{subfigure}
+    \\
+    \begin{subfigure}[t]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/trajectories/agx/openl_rew_plot_12392736_61e5b00c2912a779f94b.plotly.json.pdf}
+        \caption{Earthmoving}
+        \label{fig:ep_reward_smoothed_agx}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/trajectories/crafter/openl_rew_plot_6199654_800b4148117ef5f3c29f.plotly.json.pdf}
+        \caption{Crafter}
+        \label{fig:ep_reward_smoothed_crafter}
+    \end{subfigure}
+    \caption{We visualize the ground truth rewards, smoothed rewards with Gaussian smoothing, and predicted rewards by DreamerV3 trained on the smoothed rewards over an evaluation episode. In contrast to \Cref{fig:ep-reward}, the reward models with reward smoothing capture most of sparse rewards.}
+    \label{fig:ep_reward_smoothed}
+\end{figure}
+\subsection{Improved Reward Prediction with Reward Smoothing}
+\label{sec:experiments:reward_smoothing}
+\begin{wrapfigure}{r}{0.48\textwidth}
+    \centering
+    \includegraphics[width=0.45\textwidth]{figures/crafter_charts/prediction-accuracy_legend.pdf}
+    \\
+    \includegraphics[width=0.48\textwidth]{figures/crafter_charts/prediction-accuracy.pdf}
+    \caption{Reward prediction rates for $19$ achievements in Crafter. The other $3$ tasks have been never achieved by both methods. With reward smoothing, the prediction rates are better in $15/19$ tasks.}
+    \label{fig:crafter-prediction-rate}
+\end{wrapfigure}
+We first visualize the ground truth rewards, smoothed rewards (Gaussian smoothing), and reward prediction results of DreamerV3 trained with DreamSmooth in \Cref{fig:ep_reward_smoothed}. We observe that reward smoothing leads to a significant improvement in reward prediction: DreamSmooth successfully predicts most of the (smoothed) sparse rewards and no longer omits vital signals for policy learning or planning.
+
+The improvement is especially notable in Crafter. In \Cref{fig:crafter-prediction-rate}, we measure the accuracy of the reward model, (i.e. predicting a reward larger than half of the original or smoothed reward for DreamerV3 and DreamSmooth respectively) at the exact timesteps for each subtask. The vanilla DreamerV3's reward model (baseline) misses most of the sparse rewards while DreamSmooth predicts sparse rewards more accurately in $15/19$ subtasks.
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[t]{0.94\textwidth}
+        \includegraphics[width=\textwidth]{figures/learning_curve_legend.pdf}
+    \end{subfigure}
+    \\
+    \begin{subfigure}[t]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/desk-learning-curve/Robodesk.pdf}
+        \caption{RoboDesk}
+        \label{fig:main_results_robodesk}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/hand-learning-curve/Hand.pdf}
+        \caption{Hand}
+        \label{fig:main_results_hand}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/agx-learning-curve/AGX-rocks-v3.pdf}
+        \caption{Earthmoving}
+        \label{fig:main_results_agx}
+    \end{subfigure}
+    \\
+    \begin{subfigure}[t]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/crafter-learning-curve/crafter.pdf}
+        \caption{Crafter}
+        \label{fig:main_results_crafter}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/dmc-learning-curve/Aggregate.pdf}
+        \caption{DMC}
+        \label{fig:main_results_dmc}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.32\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/atari-learning-curve/Aggregate.pdf}
+        \caption{Atari}
+        \label{fig:main_results_atari}
+    \end{subfigure}
+    \caption{Comparison of learning curves of DreamSmooth (Gaussian, Uniform, EMA) and DreamerV3. The shaded regions in (a-d) show the maximum and minimum over $3$ seeds. For DMC~(e) and Atari~(f), we aggregate results over $7$ and $6$ tasks respectively, and display the standard deviation.}
+    \label{fig:main_results}
+\end{figure}
+\subsection{Results}
+\label{sec:experiments:results}
+
+We compare the vanilla DreamerV3~\citep{hafner2023mastering} with DreamSmooth, whose backbone is also DreamerV3. For DreamSmooth, we evaluate Gaussian, uniform, and EMA smoothing. The hyperparameters for DreamerV3 and smoothing functions can be found in \Cref{sec:implementation_details}. As shown in \Cref{fig:main_results}, DreamSmooth-Gaussian and DreamSmooth-Uniform significantly improve the performance as well as the sample efficiency of DreamerV3 on the Robodesk, Hand, and Earthmoving tasks. The only change between DreamerV3 and ours is the improved reward prediction, as shown in \Cref{sec:experiments:reward_smoothing}. This result suggests that \textit{reward prediction is one of major bottlenecks of the MBRL performance}. 
+While all smoothing methods lead to improvements over DreamerV3, Gaussian smoothing generally performs the best, except on Crafter, with uniform smoothing showing comparable performance. The better performance of Gaussian and uniform smoothing could be because it allows predicting rewards both earlier and later, whereas EMA smoothing only allows predicting rewards later.
+
+Despite the improved reward prediction accuracy, DreamSmooth-Gaussian and DreamSmooth-Uniform perform worse than the baseline in Crafter. This could be because the symmetric Gaussian and Uniform smoothing kernels require the reward models to anticipate future rewards, while EMA smoothing does not. We believe this leads to more false-positive reward predictions from the former, leading to poor policy learning in Crafter. More details can be found in \Cref{sec:crafter}.
+
+\begin{wrapfigure}{r}{0.56\textwidth}
+    \centering
+    \begin{subfigure}[t]{0.52\textwidth}
+        \includegraphics[width=\textwidth]{figures/mbpo/mbpo_main_legend.pdf}
+    \end{subfigure}
+    \\
+    \begin{subfigure}[t]{0.18\textwidth}
+        \includegraphics[width=\textwidth]{figures/hand-tdmpc-learning-curve/Pixels.pdf}
+        \caption{TD-MPC (Pixel)}
+        \label{fig:tdmpc_hand_pixel}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.18\textwidth}
+        \includegraphics[width=\textwidth]{figures/hand-tdmpc-learning-curve/State.pdf}
+        \caption{TD-MPC (State)}
+        \label{fig:tdmpc_hand_state}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.18\textwidth}
+        \includegraphics[width=\textwidth]{figures/mbpo/Main-Hand.pdf}
+        \caption{MBPO (State)}
+        \label{fig:mbpo_hand_state}
+    \end{subfigure}
+    \caption{Learning curves (median over 3 seeds) for TD-MPC and MBPO, with and without DreamSmooth, on the Hand task.}
+    \label{fig:tdmpc_learning_curves}
+\end{wrapfigure}
+
+In \Cref{fig:tdmpc_learning_curves}, DreamSmooth also improves the performance of TD-MPC~\citep{hansen2022temporal} and MBPO~\citep{janner2019mbpo}. In the Hand task, the vanilla algorithms are unable to consistently solve the first task, even with proprioceptive state observations. However, DreamSmooth enables both algorithms to complete the tasks, even learning on pixel observations with TD-MPC. This suggests that DreamSmooth can be useful in a broad range of MBRL algorithms that use a reward model. We only demonstrate the Hand task since TD-MPC and MBPO fail on other sparse-reward tasks, with MBPO requiring demonstrations to make progress on the Hand task (see \Cref{sec:mbpo} for details).
+\subsection{Ablation Studies}
+\label{sec:experiments:ablation}
+
+\begin{wrapfigure}{r}{0.43\textwidth}
+    \includegraphics[width=0.43\textwidth]{figures/desk-priority/priority.pdf}
+    \caption{Oversampling sparse rewards ($p=0.5$) improves DreamerV3 on RoboDesk, but still performs worse than DreamSmooth-Gaussian. The lines show median over 3 seeds, while shaded regions show maximum and minimum.}
+    \label{fig:priority-replay}
+\end{wrapfigure}
+
+\paragraph{Data Imbalance.} 
+One possible cause of poor reward predictions is data imbalance -- the reward model trains on few examples of sparse rewards due to their infrequency, potentially leading to poor predictions. To test this hypothesis, we conducted experiments with oversampling: with probability $0.5$, we sample a sequence containing sparse rewards; otherwise, we sample uniformly from all sequences in the buffer. As shown in \Cref{fig:priority-replay}, oversampling performs better than the baseline, but learns slower than DreamSmooth. This suggests that while data imbalance contributes to the difficulty of reward prediction, it is not the only factor hindering performance. Furthermore, this oversampling method requires domain knowledge about which reward signals are to be oversampled while DreamSmooth is agnostic to the scale and frequency of sparse rewards. 
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \centering
+    \begin{subfigure}[t]{0.43\textwidth}
+        \includegraphics[width=\textwidth]{figures/hand-rewmodel/rewmodel_legend.pdf}
+    \end{subfigure}
+    \\
+    \begin{subfigure}[t]{0.24\textwidth}
+        \includegraphics[width=\textwidth]{figures/desk-rewmodel/rewmodel.pdf}
+        \caption{RoboDesk}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.24\textwidth}
+        \includegraphics[width=\textwidth]{figures/hand-rewmodel/rewmodel.pdf}
+        \caption{Hand}
+    \end{subfigure}
+    \caption{Simply increasing the reward model size has negligible impact on performance. DreamerV3-$768$, $1024$, and $1280$ use $4$, $5$, $6$ layers of $768$, $1024$, $1280$ units, respectively.}
+    \label{fig:rewmodel-size}
+\end{wrapfigure}
+
+\paragraph{Reward Model Size.}
+Another hypothesis for poor reward predictions is that the reward model does not have enough capacity to capture sparse rewards. To test this hypothesis, we increase the size of the reward model from $4$ layers of $768$ units, which DreamSmooth uses, to $5$ layers of $1024$ units and $6$ layers of $1280$ units, while keeping the rest of the world model the same. We observe in \Cref{fig:rewmodel-size} that without smoothing, increasing reward model size has negligible impact, and DreamSmooth outperforms all the reward model sizes tested. This indicates that the reward prediction problem is not simply caused by insufficient model capacity.
+\begin{wrapfigure}{r}{0.62\textwidth}
+    \centering
+    \begin{subfigure}[t]{0.52\textwidth}
+        \includegraphics[width=\textwidth]{figures/desk-lossfn/lossfn_legend_main.pdf}
+    \end{subfigure}
+    \\
+    \begin{subfigure}[t]{0.2\textwidth}
+        \includegraphics[width=\textwidth]{figures/desk-lossfn/2-hot.pdf}
+        \caption{2-Hot}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.2\textwidth}
+        \includegraphics[width=\textwidth]{figures/desk-lossfn/L1.pdf}
+        \caption{L1}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.2\textwidth}
+        \includegraphics[width=\textwidth]{figures/desk-lossfn/L2.pdf}
+        \caption{L2}
+    \end{subfigure}
+    \caption{Learning curves (median over 3 seeds) of various loss functions for reward modeling on RoboDesk. Note that DreamerV3 and Dreamsmooth use the 2-Hot loss function.}
+    \label{fig:loss_ablation_main}
+\end{wrapfigure}
+
+\paragraph{Loss Functions.}
+We verify whether other formulations of reward regression could solve the reward prediction problem in RoboDesk. Following \citet{hafner2023mastering}, we take symlog of the prediction target for stable training regardless of the scale of rewards. We find in \Cref{fig:loss_ablation_main} that reward prediction remains a challenge when using common loss functions, such as L1 and L2, with L1 significantly degrading task performance on RoboDesk. On the other hand, applying reward smoothing improves performance for all three loss functions.
+\paragraph{Smoothing Parameter.}
+In \Cref{fig:param_sweep}, we analyze the impact of the smoothing parameters $\sigma$ and $\alpha$ for Gaussian and EMA, respectively, on RoboDesk and Hand. We observe that DreamSmooth is insensitive to the smoothing parameters, performing well across a wide range of values.
+
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}[t]{0.8\textwidth}
+        \includegraphics[width=\textwidth]{figures/gaussian-ablation-legend.pdf}
+    \end{subfigure}
+    \\
+    \begin{subfigure}[t]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{figures/desk-param/Gaussian.pdf}
+        \caption{Gaussian Smoothing on RoboDesk}
+        \label{fig:param_desk_gaussian}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{figures/hand-param/Gaussian.pdf}
+        \caption{Gaussian Smoothing on Hand}
+        \label{fig:param_hand_gaussian}
+    \end{subfigure}
+    \\
+    \begin{subfigure}[t]{0.8\textwidth}
+        \includegraphics[width=\textwidth]{figures/uniform-ablation-legend.pdf}
+    \end{subfigure}
+    \\
+    \begin{subfigure}[t]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{figures/desk-param/Uniform.pdf}
+        \caption{Uniform Smoothing on RoboDesk}
+        \label{fig:param_desk_uniform}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{figures/hand-param/Uniform.pdf}
+        \caption{Uniform Smoothing on Hand}
+        \label{fig:param_hand_uniform}
+    \end{subfigure}
+    \\
+    \begin{subfigure}[t]{0.8\textwidth}
+        \includegraphics[width=\textwidth]{figures/ema-ablation-legend.pdf}
+    \end{subfigure}
+    \\
+    \begin{subfigure}[t]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{figures/desk-param/Exponential.pdf}
+        \caption{EMA Smoothing on RoboDesk}
+        \label{fig:param_desk_exp}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{figures/hand-param/Exponential.pdf}
+        \caption{EMA Smoothing on Hand}
+        \label{fig:param_hand_exp}
+    \end{subfigure}
+    \caption{Parameter sweep over smoothing parameters $\sigma$, $\delta$, and $\alpha$. The lines show median task performance over 3 seeds, while shaded regions show maximum and minimum.}
+    \label{fig:param_sweep}
+\end{figure}
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+
+In this paper, we identify the reward prediction problem in MBRL and provide a simple yet effective solution: \textit{reward smoothing}. Our approach, DreamSmooth, demonstrates superior performance in sparse reward tasks where reward prediction is not trivial mainly due to the partial observability or stochasticity of the environments. Moreover, DreamSmooth shows comparable results on the commonly used benchmarks, DMC and Atari, showing its task-agnostic nature. Although we show that our simple reward smoothing approach mitigates the difficulty in reward prediction, the improved reward prediction does not always improve the task performance, e.g., in Crafter. This can be because more predicted task rewards can also result in more false positives. Further investigation on this trade-off is a promising direction for future work.
+
+\clearpage
+
+
+
+

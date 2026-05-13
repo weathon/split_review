@@ -1,0 +1,381 @@
+\title{Physics-Informed Neural Networks with Trust-Region Sequential Quadratic Programming}
+
+\begin{abstract}
+Physics-Informed Neural Networks (PINNs) represent a significant advancement in Scientific Machine Learning (SciML), which integrate physical domain knowledge into an empirical loss function as soft constraints and apply existing machine learning methods to train the model. 
+However, recent research has noted that PINNs may fail to learn relatively complex Partial Differential Equations (PDEs). This paper addresses the failure modes of PINNs by introducing a novel, hard-constrained deep learning method --- trust-region Sequential Quadratic Programming (trSQP-PINN). 
+In contrast to directly training the penalized soft-constrained loss as in PINNs, our method performs a linear-quadratic approximation of the hard-constrained loss, while leveraging the soft-constrained loss to adaptively adjust the trust-region~radius. 
+We only trust our model approximations and make updates within the trust region, and such an updating manner can overcome the ill-conditioning issue of PINNs.
+We also address the computational bottleneck of second-order SQP methods by employing quasi-Newton updates for second-order information, and~importantly, we introduce a simple pretraining step to further enhance training efficiency of our method. We demonstrate the effectiveness of trSQP-PINN through extensive~experiments. Compared to existing hard-constrained methods for PINNs, such as penalty methods and augmented Lagrangian methods, trSQP-PINN significantly improves the accuracy of the learned PDE solutions, achieving up to 1-3 orders of magnitude lower errors. 
+Additionally, our pretraining step is generally effective~for other hard-constrained methods, and experiments have shown the robustness of our method against both problem-specific parameters and algorithm tuning parameters.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Partial Differential Equations (PDEs) are essential mathematical tools used to model a variety of physical phenomena, including heat transfer, fluid dynamics, general relativity, and quantum mechanics. These equations are often derived from fundamental principles, such as the conservation of mass and energy, and describe how physical quantities change over space and time.
+However, deriving analytical solutions of PDEs in real-world applications is usually infeasible.~\mbox{Numerical}~\mbox{methods}~like~finite difference methods \citep{Thomas1995Numerical}, finite element methods \citep{Zienkiewicz2013finite}, and \mbox{pseudo-spectral} \mbox{methods} \citep{Fornberg1996Practical} are commonly employed to approximate solutions. These methods, though effective, require finer meshing of the domain and can be computationally intensive. With the advent of machine learning (ML), there has been a growing interest recently in applying ML methods to solve PDEs. Deep neural networks, known for their large capacity and expressivity, are particularly useful in learning nonlinear mappings between inputs (e.g., spatial/temporal coordinates) and outputs (e.g., measurements of physical quantities), thus leading the way in such applications.
+This emerging field, called \mbox{Scientific} Machine Learning (SciML), combines data-driven approaches (mostly neural network training) with traditional scientific modeling (i.e., PDEs/ODEs) to address the computational challenges of classical numerical methods and enhance solution accuracy \citep{Rueden2021Informed, Willard2020Integrating, Huang2022Partial}.
+	
+
+The Physics-Informed Neural Network (PINN) is a recent development that integrates domain-driven principles with data-driven ML methods for learning PDE solutions \citep{Cuomo2022Scientific, Hao2022Physics, Raissi2019Physics}. The idea behind PINN is simple: it incorporates PDEs into an empirical loss function as soft constraints, and then optimizes the soft-constrained loss towards zero using classical (unconstrained) ML methods (e.g., Adam and L-BFGS). PINN is generally applied within a supervised-learning framework, utilizing paired labeled datasets to define the loss. Unlike classical PDE solvers that require meshing, PINN is mesh-free, making it well-suited for large-scale problems with irregular domains.~PINN has been successfully employed~to~various~SciML~\mbox{applications},~including nano-optics materials \citep{Chen2020Physics}, biomedicine \citep{SahliCostabal2020Physics}, fluid~mechanics \citep{Raissi2020Hidden}, optimal control \citep{Mowlavi2023Optimal, BarryStraume2022Physics}, and inverse design \citep{Lu2021Physics, Wiecha2021Deep}.
+However, recent research has observed some negative results of PINN: it can fail to learn relatively complex PDEs despite employing deep neural network architectures with ample expressivity power \citep{Krishnapriyan2021Characterizing}. 
+This issue is largely attributed to optimization challenges, including ill-conditioning issue and complex loss landscape, stemming from the presence of differential operators in soft penalty terms within the loss function of PINN \citep{Krishnapriyan2021Characterizing, Rathore2024Challenges, Basir2022Investigating}. An imbalance between the empirical loss and the soft penalties can~skew training, favoring certain constraints, and thus reducing the accuracy and generalizability of PINN.~The~nonconvex loss landscape also makes PINN difficult for gradient-based methods to find the optimal~solution. Additionally, the complexity of  neural network models and their sensitivity to variations in PDEs, coupled with the reliance on fine tuning of hyperparameters, can lead to poor convergence and~physically infeasible solutions when applying PINN in practice. 
+
+To address the failure modes of PINNs, multiple strategies have recently been proposed, the majority of which attempt to alleviate the ill-conditioning issue and/or improve the loss landscape. For example, \cite{Krishnapriyan2021Characterizing} proposed two resolutions. In one approach, the authors suggested using curriculum regularization, where the penalty term starts from a simple PDE regularization and~becomes progressively more complex as neural network gets trained. Another approach~is~to~pose~the problem as a sequence-to-sequence learning task (via spatio-temporal decomposition), rather than learning to predict the entire domain at once. \cite{Liu2024Preconditioning} incorporated a preconditioner into the loss function to mitigate the condition number. \cite{Subramanian2022Adaptive} introduced an adaptive collection scheme that progressively collects more data points in the regions of high errors. \cite{Wang2021Understanding, Wang2022Respecting, Wang2022When} reformulated the loss function by reweighting or resampling to balance different regularization components in the loss. \cite{Rathore2024Challenges} developed a hybrid optimization method~by integrating Newton-CG with Adam and L-BFGS to better adapt to PINN's landscape.
+While the~aforementioned literature has demonstrated the effectiveness of their strategies in learning various PDEs under favorable conditions, they still primarily revolve around regularized, soft-constrained loss~functions, which may not yield feasible solutions regardless of how we assign weight to the penalty term. There exist simple examples that, for any finite weight, the soft-constrained loss cannot recover the solution to the hard-constrained problem\footnote{Consider $\min x, \; \text{s.t. } x=0$. The soft penalized loss $x+\mu x^2$ leads to the solution $x^\star = -0.5/\mu$, which cannot equal 0 for any finite $\mu>0$.}.
+Motivated by this concern, another series of literature aims to impose PDEs as hard constraints~and~apply constrained optimization methods to train the model. For example, \cite{Nandwani2019primal}~converted soft-constrained PINN problems into alternating min-max problems and applied gradient descent ascent methods to solve them. \cite{Dener2020Training} applied (stochastic) augmented Lagrangian methods to approximate the Fokker-Planck-Landau collision operator, using stochastic~gradient~descent to solve inner unconstrained minimization subproblems. 
+Subsequently, \cite{Lu2021Physics} proposed using penalty methods and augmented Lagrangian methods within the PINN framework for inverse design problems. 
+In contrast to dealing with the PINN loss directly, the above literature reverts~the soft-constrained \mbox{regularizations} back to hard constraints (aligning with our original goals of solving PDEs), and primarily applies either penalty methods\footnote{Penalty methods differ from vanilla PINN in that they gradually increase the penalty coefficient as needed.} or augmented Lagrangian methods to solve the resulting hard-constrained problems. 
+Although existing hard-constrained methods based on penalty methods and augmented Lagrangian methods have shown significant improvements over PINNs, these two methods have largely been supplanted by Sequential Quadratic Programming (SQP) methods in the numerical optimization literature, which typically exhibit superior convergence properties \citep{Gill2005SNOPT, Nocedal2006Numerical}. Compared to penalty methods, SQP does not regularize the loss in the search direction computation, so it preserves the problem structure (especially important for PDE and control problems) and does not suffer from ill-conditioning issues. 
+Compared to augmented Lagrangian methods, SQP is more robust to dual initialization, exhibits much faster convergence (quadratic/superlinear for SQP while linear for augmented Lagrangian), and produces solutions with fewer objective function and gradient evaluations \citep{Curtis2014adaptive,Dener2020Training,Hong2023Constrained}. These promising advantages motivate our study in this paper --- design an SQP-based method to leverage~recent~developments of PINNs for learning PDEs.
+In particular, we develop a trust-region SQP method called \texttt{\bf trSQP-PINN}. Following the literature \cite{Nandwani2019primal, Dener2020Training, Lu2021Physics}, we first formulate the PDE problem as a hard-constrained problem, where we minimize the empirical loss subject to nonlinear PDE~constraints. 
+Then, we apply a trust-region SQP method to impose hard constraints. At each step, we perform a quadratic approximation to the empirical loss and a linear approximation to the constraints. Inspired by the local natural of the approximation, we additionally introduce a trust-region constraint to the parameters. We only trust the approximation and make updates within the trust region. 
+Another~critical element of the method is the merit function, which is a scalar-valued function that indicates whether a new iterate is better or worse than the current iterate, in the sense of reducing optimality and~feasibility errors. We employ the soft-constrained loss as our merit function.
+The trust-region radius selection~and the step rejection mechanism are both based on the ratio between the actual reduction and the predicted reduction in the soft-constrained loss. If the ratio is large, indicating that our approximation is reliable, we accept the step and enlarge the radius; otherwise, we reject the step and reduce the radius.
+A major difference of trSQP-PINN compared to existing penalty and augmented Lagrangian methods is that the trust-region, linear-quadratic subproblem does not rely on any penalty coefficient, effectively avoiding the ill-conditioning issue. The soft-penalized loss is only used to determine whether or not accept the new update. 
+Two \textit{potential} computational bottlenecks when applying our method are (i) solving the trust-region subproblem, and (ii) obtaining the Hessian information of neural network models. For (i), we do not solve the trust-region subproblem exactly (which is still much easier than the ones in penalty and augmented Lagrangian methods), but instead obtain a point that is better than gradient descent (i.e. satisfying the \textit{Cauchy reduction}). For (ii), we employ quasi-Newton updates such as SR1 and (damped) BFGS to approximate the Hessian information. 
+
+To further enhance training efficiency and reduce data intensity, we introduce a simple pretraining step focused solely on minimizing the feasibility error. Throughout extensive experiments, we~demonstrate that trSQP-PINN significantly outperforms existing hard-constrained methods, improving the accuracy of learned PDE solutions by 1-3 orders of magnitude. Moreover, the improvement of our method is robust against both problem-specific parameters and algorithm tuning parameters, while our pretraining step is broadly effective for other methods as well.
+
+
+
+\section{From PINN Methods to Hard-Constrained Methods}
+
+
+In this section, we first introduce the PDE problem setup and the soft-constrained PINN method.~Then, we provide a brief overview of two hard-constrained methods: penalty method and augmented~Lagrangian method, and illustrate the motivation of designing a trust-region SQP method.
+
+\vskip2pt
+\textbf{Problem setup and PINN method.} 
+We consider an abstraction of the PDE problem with boundary conditions (BCs) and initial conditions (ICs) as follows:
+\begin{subequations}\label{nequ:1}
+\begin{align}
+\mathcal{F}(u(x, t)) & = 0, \quad (x,t) \in \Omega\times \mathcal{T}  \subseteq \mathbb{R}^d\times \mathbb{R}^+, \label{nequ:1a}\\
+\mathcal{B}(u(x, t)) & = 0, \quad (x,t) \in \partial\Omega\times \mathcal{T},  \label{nequ:1b}\\
+\mathcal{I}(u(x, 0)) & = 0, \quad x \in \Omega. \label{nequ:1c}
+\end{align}
+\end{subequations}
+Here, $(x,t)$ denotes spatial-temporal coordinates with domain $\Omega\times\mathcal{T}$, $\mathcal{F}$ denotes a differential~operator that can include multiple PDEs $\{\mathcal{F}_1, \dots, \mathcal{F}_n\}$, $\mathcal{B}$ is a general form of a boundary-condition operator, and $\mathcal{I}$ is an initial-condition operator. In the context of PDEs, $\mathcal{F}$ may be classified into parabolic,~hyperbolic, or elliptic differential operator, and its solution $u(x,t)$ models the change~in~\mbox{physical}~quantities over space and time. For many problems, the analytical solution is not accessible, and solving~\eqref{nequ:1} relies on classical numerical solvers such as finite differences or finite elements. 
+The recent data-driven approach, PINN, has become popular due to its mesh-free nature and powerful automatic differentiation techniques. In PINN, we apply neural networks to parameterize the solution
+\begin{equation*}
+u_\theta(x,t) = u(x, t),
+\end{equation*} 
+where $(x,t)$ are the NN inputs and $u_\theta(x,t)$ is the output, with $\theta\in\mR^p$ representing the NN parameters. Let us denote the labeled observations as $\{(x_i, t_i, u_i)\}_{i=1}^N$, so that we can define the empirical loss:
+\begin{equation}\label{nequ:2}
+\ell(\theta) = \frac{1}{N}\sum_{i=1}^{N}\rbr{u_i - u_{\theta}(x_i,t_i)}^2.
+\end{equation}
+To enforce constraints \eqref{nequ:1}, we also randomly sample three sets of \textit{unlabeled} points in the spatiotemporal domain $\Omega\times \mathcal{T}$: $\{(x_i^{\text{pde}}, t_i^{\text{pde}})\}_{i=1}^{M_{\text{pde}}}$ for PDE constraints \eqref{nequ:1a}, $\{(x_i^{\text{BC}}, t_i^{\text{BC}})\}_{i=1}^{M_\text{BC}}$ for BC constraints \eqref{nequ:1b}, and $\{(x_i^{\text{IC}}, 0)\}_{i=1}^{M_{\text{IC}}}$ for IC constraints \eqref{nequ:1c}. Then, we define the constraint function as
+\begin{equation}\label{nequ:3}
+\hskip -0.19cm c(\theta) = \left(\{\mathcal{F}(u_\theta(x_i^{\text{pde}}, t_i^{\text{pde}}))\}_i;\; \{\mathcal{B}(u_\theta(x_i^{\text{BC}}, t_i^{\text{BC}}))\}_i;\;  \{\mathcal{I}(u_\theta(x_i^{\text{IC}}, 0))\}_i \right )\in\mathbb{R}^{M_{\text{pde}}+M_{\text{BC}}+M_{\text{IC}} \eqqcolon M}.
+\end{equation}
+With the above setup, PINN solves Problem \eqref{nequ:1} by incorporating \eqref{nequ:3} into \eqref{nequ:2} as soft constraints:
+\begin{equation}\label{nequ:4}
+\min_\theta:\; \ell(\theta) + \mu \|c(\theta)\|^2,
+\end{equation} 
+and applies (unconstrained) gradient-based methods to obtain the solution. Here, $\mu>0$ is the penalty coefficient that balances between the empirical loss and the constraints. When $\mu$ is large, we penalize the constraint violations severely, thereby ensuring the feasibility of the solution. However, $\mu\rightarrow\infty$ also makes the optimization problem \eqref{nequ:4} ill-conditioned and difficult to converge to a minimum \citep{Krishnapriyan2021Characterizing}. 
+On the other hand, if $\mu$ is small, then the obtained solution will not~satisfy the considered PDEs, making it invalid and less useful in general. Our findings suggest that PINN struggles with PDEs with high coefficients. 
+It is worth mentioning that a more flexible formulation is to use different penalty coefficients for PDEs $\mF$, BCs $\mB$, and ICs $\mI$, while for simplicity, we unify them as $\mu$ in this paper.
+
+\vskip2pt
+\textbf{Hard-constrained methods.} 
+As introduced in Section \ref{sec:1}, researchers have developed different~hard-constrained methods to address the failure modes of PINNs, including penalty methods and augmented Lagrangian methods \citep{Nandwani2019primal, Dener2020Training, Lu2021Physics}. For this type of methods, we formulate Problem \eqref{nequ:1} as a constrained nonlinear optimization problem
+\begin{equation}\label{nequ:5}
+\min_\theta\; \ell(\theta)\quad \;\text{s.t. } \; c(\theta) = 0,
+\end{equation}
+$\bullet$ {\bf Penalty methods.} 
+Given $(\theta_k,\mu_k)$, we solve $\theta_{k+1} = \arg\min_{\theta} \ell(\theta) + \mu_k\|c(\theta)\|^2$ with warm~initialization at $\theta_k$, and then update $\mu_{k+1} = \rho\mu_k$ with a scalar $\rho>1$. Unlike the approach of PINN, penalty methods increase the penalty coefficient $\mu$ gradually and solve the subproblem with warm~initializations. However, similar to PINNs, a large $\mu$ leads to an ill-conditioned \mbox{subproblem} and slow convergence, and the gradient-based methods may get stuck at poor local minima. This~phenomenon~is observed in our experiments in Section \ref{sec:4} as well as in \cite{Lu2021Physics}.
+$\bullet$ {\bf Augmented Lagrangian methods.} 
+Given a triple $(\theta_k, \lambda_k, \mu_k)$, we solve $\theta_{k+1} = \arg\min_\theta \ell(\theta)+\lambda_k^Tc(\theta)+\mu_k\|c(\theta)\|^2$ with warm initialization at $\theta_k$, and then update $\lambda_{k+1} = \lambda_k + \mu_k c(\theta_k)$ and~$\mu_{k+1}\geq \mu_k$. Compared to penalty methods, $\mu_k$ here is not necessarily increased to infinity to converge to a feasible solution. We can determine whether to increase $\mu_k$ based on the feasibility error $\|c(\theta_k)\|$.~For example, we let $\mu_{k+1}=\rho\mu_k$ if the reduction in $\|c(\theta_k)\|$ is insufficient.
+
+$\bullet$ {\bf Motivation of Sequential Quadratic Programming (SQP) methods.} 
+The above hard-constrained methods, though effective for some cases, have a few limitations. First, they have complex nonlinear subproblems involving differential operators, and their quadratic term $\|c(\theta)\|^2$ can destroy the problem structure if any. Second, their convergence is slow. Augmented Lagrangian methods are faster than penalty methods, but only exhibit local linear convergence \citep{Rockafellar2022Convergence}.~In~\mbox{addition},~it~is~observed that augmented Lagrangian methods require a significant number of steps to get into the local region and are sensitive to dual initialization \citep{Curtis2014adaptive}. 
+In contrast, SQP is one~of~the~most effective methods for both small and large constrained problems. The subproblem of SQP is an inequality-constrained linear-quadratic program, which can be efficiently solved by numerous solvers (notably, we only have to solve it approximately). 
+The convergence rate of SQP matches that~of~Newton method, and is superlinear if the Hessian is approximated by quasi-Newton update and quadratic~if the Hessian is exact \citep[Chapters 17 and 18]{Nocedal2006Numerical}. 
+Most importantly, recent ML techniques, such as randomization, sketching, and subsampling, have been introduced into SQP~schemes, enabling further reduction of the computational cost of this method \citep{Hong2023Constrained, Na2022adaptive, Berahas2021Sequential}, and making it attractive to investigate in modern SciML problems.
+
+
+
+\section{Trust-Region Sequential Quadratic Programming--PINN}
+
+
+In this section, we introduce \textbf{trSQP-PINN}, the first SQP-based method designed for solving PDE problems in machine learning. The method has three steps: (i) obtain a linear-quadratic \mbox{approximation}, (ii) incorporate a trust-region constraint, and (iii) update the iterate and trust-region radius. We~also~introduce a pretraining step to further enhance the training efficiency that is also effective for other~methods.
+
+\textit{\textbf{Step 1: linear-quadratic approximation of Problem \eqref{nequ:5}.}} 
+Let us define the Lagrangian function of \eqref{nequ:5} as $\mL(\theta,\lambda) = \ell(\theta) + \lambda^Tc(\theta)$. Given a primal-dual pair $(\theta_k, \lambda_k)$, we denote $\nabla\mL_k = \nabla \mL(\theta_k, \lambda_k)$ and $c_k = c(\theta_k)$ (similar for $\nabla c_k$, $\nabla\ell_k$, etc.). Then, we construct a linear-quadratic approximation of the nonlinear problem \eqref{nequ:5} at $(\theta_k,\lambda_k)$ as: \vskip-0.55cm
+\begin{subequations}\label{nequ:6}
+\begin{align}
+\min_{\Delta\theta_k\in\mR^p} \;\;  &\nabla \ell_k^T\Delta\theta_k + \frac{1}{2}\Delta\theta_k^T H_k \Delta\theta_k, \label{nequ:6a}\\
+\text{s.t. }\;\; & c_k + \nabla c_k \Delta\theta_k = 0, \label{nequ:6b}
+\end{align}
+\end{subequations}\vskip-0.3cm
+\noindent where \eqref{nequ:6a} is a quadratic approximation of the empirical loss $\ell(\theta)$ and \eqref{nequ:6b} is a linear approximation of PDE constraints $c(\theta)$.~By using second-order methods, it is not surprising that the Hessian information in $H_k$ enables more significant per-iteration progress compared to first-order \mbox{methods}~and~better~escape from stationary points. Furthermore, the computation \eqref{nequ:6} does not involve any penalty coefficient, thereby avoiding ill-conditioning issues.
+However, when applied to PDE problems, the major concern is obtaining the Hessian matrix $H_k$. In SQP methods, $H_k$ corresponds to the Lagrangian Hessian $\nabla^2_{\theta}\mL_k$, instead of the objective Hessian $\nabla^2\ell_k$, to leverage curvature information of constraints. This even complicates the computation of $H_k$ due to the differential operators in PDE constraints. To get rid of second-order quantities~and~boil~down to first-order information, we perform quasi-Newton updates for $H_k$. We consider two schemes. 
+
+$\bullet$ {\bf Damped BFGS.} 
+Let $s_k \coloneqq \theta_k - \theta_{k-1}$ and $y_k\coloneqq \nabla_\theta\mL_k - \nabla_\theta\mL_{k-1}$. Both vanilla and limited-memory BFGS methods require a critical curvature condition $s_k^Ty_k>0$, which cannot hold in our case due to the saddle structure of the Lagrangian function. Thus, we consider a \textit{damped} version of BFGS. In particular, for a scalar $\delta\in(0,1)$, we define 
+\begin{equation*}
+r_k = \gamma_k y_k + (1-\gamma_k) H_{k-1}s_k \quad \quad \text{ with } \quad \quad \gamma_k = \begin{cases*}
+1 & \text{if } $s_k^Ty_k \geq \delta s_k^TH_{k-1}s_k$,\\
+\frac{(1-\delta)s_k^TH_{k-1}s_k}{s_k^TH_{k-1}s_k - s_k^Ty_k} & \text{otherwise}.
+\end{cases*}
+\end{equation*}
+Then, we compute $H_k$ as 
+\begin{equation*}
+H_k = H_{k-1} - \frac{H_{k-1}s_ks_k^TH_{k-1}}{s_k^TH_{k-1}s_k} + \frac{r_kr_k^T}{s_k^Tr_k}.
+\end{equation*}
+When $\gamma_k = 1$, the above updating scheme reduces to vanilla BFGS. When $\gamma_k=0$, $H_{k} = H_{k-1}$. We note that even if the curvature condition $s_k^Ty_k>0$ may not hold, we ensure $s_k^Tr_k \geq \delta s_k^TH_{k-1}s_k>0$, provided $H_{k-1}$ is positive definite (usually, $H_0 = I$). Common choices of $\delta$ in numerical optimization include $\delta=0.2$ \citep{Powell1978Algorithms, Goldfarb2020Practical} and $\delta=0.25$ \citep{Wang2017Stochastic}.
+
+$\bullet$ {\bf SR1.} Despite ensuring a modified curvature condition $s_k^Tr_k>0$, the fatal drawback of Damped BFGS is that it essentially employs a positive definite Hessian approximation ($H_{k-1}\succ0\Rightarrow H_k\succ0$). However, the exact Hessian $\nabla_\theta^2\mL_k$ cannot be positive definite when training deep neural networks, leading to inaccuracies in approximation. We have \vskip-0.28cm
+\begin{equation*}
+H_k = H_{k-1} + \frac{(y_k - H_{k-1}s_k)(y_k - H_{k-1}s_k)^T}{(y_k -H_{k-1}s_k)^Ts_k}.
+\end{equation*}
+The above scheme does not lead to $H_k\succ 0$ when $s_k^Ty_k<s_k^TH_{k-1}s_k$.
+\textit{\textbf{Step 2: trust-region constraint.}} 
+The linear-quadratic approximation \eqref{nequ:6} is intended to be of only local interest. This motivates us to restrict $\theta_k+\Delta\theta_k$ to remain within a trust region centered at $\theta_k$; that is, we incorporate the constraint \eqref{nequ:6b} along with an additional trust-region constraint ($\Delta_k$ is radius)
+\begin{equation}\label{nequ:7}
+\|\Delta\theta_k\| \leq \Delta_k.
+\end{equation}
+Constraint \eqref{nequ:7} offers several advantages. First, without \eqref{nequ:7}, the subproblem \eqref{nequ:6} is well-defined only if $H_k$ is positive definite in the null space $\text{Null}(\nabla c_k)$. This requires further regularizations of the quasi-
+
+Newton updates that cannot preserve the curvature information.
+Such regularizations are suppressed by \eqref{nequ:7}.
+Second, \eqref{nequ:7} serves as a hard regularization on parameters to prevent $\theta_k$ from moving to a worse point. As seen in \textbf{Step 3}, we may even skip updating $\theta_k$ if the new point is worse. Additionally, in PDE problems, the Jacobian $\nabla c_k$ tends to be singular since different (especially close) data points carry overlapping local information of PDE solutions. \eqref{nequ:7} \mbox{confines} the step within a small, reliable area, preventing excessive deviations from local information and mitigating singularity in Jacobians.
+However, constraint \eqref{nequ:7} may conflict with constraint \eqref{nequ:6b} and lead to
+\begin{equation*}
+\{\Delta\theta_k: c_k + \nabla c_k\Delta\theta_k = 0\} \cap \{\Delta\theta_k: \|\Delta\theta_k\|\leq \Delta_k\} = \emptyset.
+\end{equation*}
+To resolve this conflict, we employ the relaxation technique originally proposed in \cite{Omojokun1989Trust}. In particular, for a scalar $\nu\in(0, 1)$, we adjust \eqref{nequ:6} in two steps:
+\begin{equation*}
+\begin{aligned}
+\min_{\widetilde{\Delta\theta}_k\in\mR^p} \;\; & \|c_k + \nabla c_k \widetilde{\Delta\theta}_k\|^2,\\
+\text{s.t. }\;\;\;\; & \|\widetilde{\Delta\theta}_k\| \leq \nu\Delta_k,
+\end{aligned}
+\quad\quad\quad \text{ then } \quad\quad\quad
+\begin{aligned}
+\min_{\Delta\theta_k\in\mR^p} \;\;  &\nabla \ell_k^T\Delta\theta_k + \frac{1}{2}\Delta\theta_k^T H_k \Delta\theta_k, \\[-1pt]
+\text{s.t. }\;\; & \nabla c_k \Delta\theta_k = \nabla c_k \widetilde{\Delta\theta}_k ,\\[2.2pt]
+& \|\Delta\theta_k\| \leq \Delta_k.
+\end{aligned}
+\end{equation*}
+Intuitively, the solution of the left subproblem $\widetilde{\Delta\theta}_k\in\text{Span}(\nabla c_k^T)$ aims to satisfy the linearized constraint \eqref{nequ:6b} as much as possible within a shrunk radius of $\nu\Delta_k$, while the remaining radius is used to further reduce the quadratic loss \eqref{nequ:6a} by solving the right subproblem.~Although closed-form solutions of these subproblems may be computable via matrix decomposition~(cf.~\cite{Omojokun1989Trust},~(2.1.9)),~we only need approximate solutions that are not worse than the Cauchy step, i.e., the steepest descent step satisfying constraint \eqref{nequ:7} (cf. \cite{Nocedal2006Numerical}, Chapter~4).~To~achieve~this,~we~\mbox{employ}~the~dogleg method and projected conjugate gradient method to approximately solve the two subproblems.
+\textit{\textbf{Step 3: iterate and radius update.}} 
+With $\Delta\theta_k$, we then decide whether to accept the new iterate~$\theta_k+\Delta\theta_k$, depending on how accurate the model problem \eqref{nequ:6} approximates the original problem \eqref{nequ:5} and how much progress the new iterate has made towards a (local) solution of \eqref{nequ:5}. To do this, we leverage a non-smooth, soft-constrained loss, called the \textit{merit function}:
+\begin{equation}\label{nequ:8}
+\phi_\mu(\theta) = \ell(\theta) + \mu\|c(\theta)\|.
+\end{equation}
+Note that the empirical loss $\ell(\theta)$ alone is not suitable to justify the approximation quality since a step that decreases $\ell$ may severely violate the constraint $c$. We define the local model of $\phi_\mu(\theta)$ at $\theta_k$ as
+\begin{equation*}
+q_\mu^k(\Delta\theta) = \ell_k + \nabla\ell_k^T\Delta\theta + \frac{1}{2}\Delta\theta^TH_k\Delta\theta + \mu\|c_k+\nabla c_k\Delta\theta\|.
+\end{equation*}
+Then, we compute the predicted reduction and actual reduction as follows:
+\begin{align*}
+\text{Pred}_k \coloneqq q_\mu^k(0) - q_\mu^k(\Delta\theta_k)\quad\quad \text{and} \quad \quad \text{Ared}_k \coloneqq \phi_\mu(\theta_k) - \phi_\mu(\theta_k+\Delta\theta_k).
+\end{align*}
+Finally, we calculate the ratio $\eta_k \coloneqq \frac{\text{Ared}_k}{\text{Pred}_k}$. For two thresholds $0<\eta_{\text{low}}<\eta_{\text{upp}}<1$, if $\eta_k\geq \eta_{\text{upp}}$, then it suggests that our approximation is very accurate; we perform $\theta_{k+1} = \theta_k+\Delta\theta_k$, $\Delta_{k+1} = \rho\Delta_k$ for $\rho>1$, and $\lambda_{k+1} = \arg\min_\lambda\|\nabla\ell_{k+1} + \nabla c_{k+1}^T\lambda\|^2$. If $\eta_{\text{low}}\leq \eta_k< \eta_{\text{upp}}$, then our approximation is moderately accurate; we update $(\theta_k,\lambda_k)$ but preserve the radius $\Delta_{k+1} = \Delta_{k}$. If $\eta_k< \eta_{\text{low}}$,~we~reject the update and let $\theta_{k+1} = \theta_k$, $\lambda_{k+1} = \lambda_k$, and $\Delta_{k+1} = \Delta_k/\rho$.
+
+\vskip6pt 
+\begin{remark}
+We note that the soft-constrained loss \eqref{nequ:8} is only used in Step 3 to decide whether~to~accept the update, while it does not affect the step computation in Step 2; thus, effectively overcomes the~ill-conditioning issues in penalty and augmented Lagrangian methods. In fact, the coefficient~$\mu$~can~be~selected adaptively, instead of fine tuning it as a parameter. See \cite{Conn2000Trust} for more details.
+\end{remark}
+\textit{\textbf{Step 0: a pretraining technique.}} 
+Unlike typical ML problems, we restrict our NN parameters~to satisfy PDE constraints. Random initializations often fall away from the constraint manifold, complicating training and the search for the optimal solution of the hard-constrained problem. 
+To address this,~we develop a simple but effective pretraining step to first train the network using only the physical~domain information, allowing it to initialize closer to the feasible region. We apply L-BFGS to solve
+\begin{equation}\label{nequ:9}
+\theta_{\text{init}} \coloneqq \mathrm{argmin}_\theta\; \|c(\theta)\|^2.
+\end{equation}
+The pretraining step addresses the scalability concern of SQP. As observed in our experiments, we can use a different set of unlabeled data in the pretraining step (i.e., construct a different constraint function $\tilde c$). Then, $\theta_{\text{init}}$ will significantly reduce the number of PDE constraints required in the trSQP-PINN training. Using \eqref{nequ:9} for initialization is also beneficial for other hard-constrained methods. 
+
+
+
+
+\section{Experimental Results}
+
+
+We implement trSQP-PINN on three PDE systems: transport equation, reaction equation, and~reaction-diffusion equation. These systems may have simple analytical solutions or be solved by Fast Fourier Transform method. However, when increasing system coefficients, solving these systems becomes numerically challenging (see \cite{Krishnapriyan2021Characterizing}). We compare our trSQP method with two popular hard-constrained methods: penalty method and augmented Lagrangian method, to demonstrate the superiority of trSQP. We also vary algorithm tuning parameters to illustrate the~robustness~of the trSQP improvement.
+
+\subsection{Transport equation}\label{sec:4.1}
+
+We first consider a linear PDE called transport equation. This equation is commonly used to~model~phenomena in fluid dynamics and wave mechanics, and is applicable to scenarios like pollutant dispersion in rivers or air: \vskip-0.38cm
+\begin{equation*}
+\frac{\partial u}{\partial t} + \beta \frac{\partial u}{\partial x} = 0, \quad u(0, t) = u(2\pi, t), \quad u(x,0) = \sin(x), \quad (x,t) \in \Omega\times \mT.
+\end{equation*}
+Here, $\beta \in \mathbb{R}$ is the transport coefficient. The second equation is a periodic boundary condition,~and~the third equation is an initial condition. The analytical solution is given by $u(x,t) = \sin(x-\beta t)$.
+We vary the coefficient $\beta$ across a wide range of values in $\{\pm1, \pm10, \pm20, \pm30, \pm40, \pm50\}$. While previous experiments in \cite{Krishnapriyan2021Characterizing} have varied small $\beta$ ranging from $10^{-4}$ to $10^{-1}$, we are particularly interested in large $\beta$ where PINN fails. This exploration allows us to distinguish the performance of different hard-constrained methods in learning numerically challenging PDEs and resolving failure modes of PINN. All three methods (as well as PINN) can precisely learn the solution for $|\beta|\leq 0.1$ (cf. \cite{Krishnapriyan2021Characterizing}, Figure 1a).
+We plot the absolute errors and relative errors of the three hard-constrained methods in Figure \ref{fig:1a}. From the figure, we observe that although penalty and augmented Lagrangian methods achieve~low~enough errors when $|\beta|$ is small, trSQP-PINN still decreases the errors by 0.5 to one orders of magnitude.~Furthermore, trSQP-PINN distinctly outperforms the penalty and augmented Lagrangian methods when $|\beta|\geq 20$.~The performance gap becomes even more pronounced with the increasing problem~difficulty, where the latter two methods tend to have high errors while trSQP-PINN improves their~errors~by as much as one to two orders of magnitude for $|\beta| \geq 30$.
+Let us examine $\beta=30$ more closely. We present the solution heatmaps for the three methods~in~Figure \ref{fig:2a}. From the figure, we clearly see that both the penalty and augmented Lagrangian methods fail to capture the complete solution features, while trSQP-PINN successfully learns the periodic dynamics. More precisely, trSQP-PINN achieves an absolute error of 0.72\%, which is almost two orders of magnitude lower than the augmented Lagrangian method at 48.21\% and penalty method at 51.57\%.\;\;\;\;
+The above results of trSQP-PINN highlight its effectiveness in navigating through complex loss~landscapes to reach local optima and in mitigating notorious ill-conditioning issues. Its unique feature,~the incorporation of trust-region constraints and second-order approximation, significantly enhances the performance compared to other hard-constrained methods.
+
+
+\subsection{Reaction equation} \label{sec:4.2}
+
+We now consider a semi-linear PDE called reaction equation. This equation is used to describe~the~temporal dynamics of chemical reaction concentrations and is applicable to pharmacokinetics, such as modeling the concentration of drugs in the bloodstream over time: \vskip-0.38cm
+\begin{equation*}
+\frac{\partial u}{\partial t} - \alpha u (1-u) = 0, \quad u(0, t) = u(2\pi, t), \quad u(x,0) = e^{-\zeta(x-\pi)^2}, \quad (x,t) \in \Omega\times \mT.
+\end{equation*}
+Here, $\alpha \in \mathbb{R}$ is the reaction coefficient and $\zeta\in \mR$ is the initial condition coefficient. The \mbox{analytical}~solution is highly nonlinear and given by $u(x,t) = u(x,0)e^{\alpha t}/\cbr{u(x,0)e^{\alpha t} + 1-u(x,0)}$.
+Following the transport equation setup, we fix $\zeta=2$ and vary the reaction coefficient $\alpha$ in the~set~$\{\pm1,\\ \pm10, \pm20, \pm30, \pm40, \pm50\}$.~We plot the absolute and relative errors of the three hard-constrained methods in Figure \ref{fig:1b}. 
+While all three methods maintain low errors at small values of $|\alpha|$, as~the~problem difficulty increases with $|\alpha| \geq 20$, the advantage of trSQP-PINN grows significantly, exhibiting errors that are one to two orders of magnitude lower compared to the other methods.
+We should mention that the error gaps between trSQP-PINN and the other methods at $\alpha=-50$ to $-20$ are narrower than those at $\alpha = 20$ to $50$.
+
+\begin{figure}[t!]
+\centering
+\begin{subfigure}[b]{0.497\textwidth}
+\centering
+\includegraphics[width=0.493\linewidth]{Figures/Errors/transport.absolute_error}
+\hfill
+\includegraphics[width=0.493\linewidth]{Figures/Errors/transport.relative_error}
+\vspace*{-15pt}
+\caption{\textbf{Transport equation}}
+\label{fig:1a}
+\end{subfigure}
+\begin{subfigure}[b]{0.497\textwidth}
+\centering
+\includegraphics[width=0.493\linewidth]{Figures/Errors/reaction.absolute_error}
+\hfill
+\includegraphics[width=0.493\linewidth]{Figures/Errors/reaction.relative_error}
+\vspace*{-15pt}
+\caption{\textbf{Reaction equation}}
+\label{fig:1b}
+\end{subfigure}
+\vskip2pt
+\begin{subfigure}[b]{0.998\textwidth}
+\centering
+\includegraphics[width=0.245\linewidth]{Figures/Errors/reaction_diffusion_alpha.absolute_error}
+\hfill
+\includegraphics[width=0.245\linewidth]{Figures/Errors/reaction_diffusion_alpha.relative_error}
+\hfill
+\includegraphics[width=0.245\linewidth]{Figures/Errors/reaction_diffusion_tau.absolute_error}
+\hfill
+\includegraphics[width=0.245\linewidth]{Figures/Errors/reaction_diffusion_tau.relative_error}
+\vspace*{-15pt}
+\caption{\textbf{Reaction-diffusion equation}}
+\label{fig:1c}
+\end{subfigure}
+\includegraphics[width=0.8\linewidth]{Figures/Errors/legend}
+\setlength{\belowcaptionskip}{-0.2cm}
+\caption{\textbf{Absolute and relative errors of three hard-constrained methods for learning PDEs.} \textit{All three methods can learn PDE solutions well when the PDE coefficients $|\beta|$ and $|\alpha|$ are small,~with trSQP-PINN yielding the lowest errors in solving transport and reaction-diffusion equations. However, as the coefficients increase and the problems become more challenging, trSQP-PINN significantly outperforms the other methods.}}
+\label{fig:1}
+\end{figure}
+We take $\alpha=30$ as an illustrative example and draw the solution heatmaps for the three methods in Figure \ref{fig:2b}. From the figure, we see that trSQP-PINN excels in solving the reaction equation with high reaction coefficients. The method precisely captures the initial condition features,~\mbox{periodic} boundary features, as well as the sharp transition patterns. In terms of errors, trSQP-PINN achieves~a~\mbox{relative}~\mbox{error} of only 2.52\%, which is nearly two orders of magnitude lower than that of the penalty method and augmented Lagrangian method, which have relative errors of 62.62\% and 58.32\%, respectively.\;\;
+\subsection{Reaction-diffusion equation}\label{sec:4.3}
+
+Finally, we consider a parabolic semi-linear PDE called reaction-diffusion equation, which adds a second-order diffusion term to the reaction equation: \vskip-0.6cm
+\begin{equation*}
+\frac{\partial u}{\partial t} - \tau \frac{\partial^2 u}{\partial x^2} - \alpha u (1-u) = 0, \quad u(0, t) = u(2\pi, t), \quad u(x,0) = e^{-\zeta(x-\pi)^2}, \quad (x,t) \in \Omega\times \mT.
+\end{equation*}
+Here, $\alpha \in \mathbb{R}$ and $\tau > 0$ are the reaction and diffusion coefficients, and $\zeta \in \mathbb{R}$ is the~\mbox{initial}~\mbox{condition}~coefficient. The exact solution is solved by Fast Fourier Transform method \citep{Duhamel1990Fast}.\;\;
+We vary the reaction coefficient $\alpha$ in $\{\pm1, \pm10, \pm20, \pm 30, \pm 40, \pm 50\}$ while fixing $\tau=2$ and $\zeta=2$, and vary the diffusion coefficient $\tau$ in $\{2,4,6,8,10\}$ while fixing $\alpha=20$ and $\zeta=2$. The~absolute~and relative errors of the three methods are plotted in Figure \ref{fig:1c}. 
+While all three methods maintain low errors at small values of $|\alpha|$, trSQP-PINN still achieves lower errors than the other two methods due~to its ability to handle the high nonlinearity of the reaction-diffusion~equation. Furthermore,~as~$|\alpha|$~increases, trSQP-PINN significantly outperforms the other two methods.~Specifically, despite the~increased problem complexity and ill-conditioning issues introduced by the second-order diffusion~term, trSQP-PINN achieves an improvement of one to two orders of magnitude~in~both~\mbox{absolute} and relative errors for $\alpha \geq 20$. For $\alpha \leq -20$, trSQP-PINN even reduces the relative error by two to three orders of~magnitude.
+We also observe from Figure \ref{fig:1c} that the~improvement of trSQP-PINN~is~robust~across~different diffusion coefficients $\tau$. For example, even when $\tau$ is as large as $10$, only~trSQP-PINN achieves both absolute and relative errors below $10^{-2}$.
+
+\begin{figure}[t!]
+\centering
+\begin{subfigure}[b]{0.998\textwidth}
+\centering
+\includegraphics[trim={0.3cm 0cm 0.27cm 0.33cm},clip,width=0.245\linewidth]{Figures/Heatmaps/transport/with_pretrain_experiment_result/penalty}
+\hfill
+\includegraphics[trim={0.3cm 0cm 0.27cm 0.33cm},clip,width=0.245\linewidth]{Figures/Heatmaps/transport/with_pretrain_experiment_result/ALM}
+\hfill
+\includegraphics[trim={0.3cm 0cm 0.27cm 0.33cm},clip,width=0.245\linewidth]{Figures/Heatmaps/transport/with_pretrain_experiment_result/SQP}
+\hfill
+\includegraphics[trim={0.3cm 0cm 0.27cm 0.33cm},clip,width=0.245\linewidth]{Figures/Heatmaps/transport/True_sol_heatmap/True_sol}
+\vspace*{-15pt}
+\caption{\textbf{Transport equation ($\beta=30$)}}
+\label{fig:2a}
+\end{subfigure}
+\vskip2pt
+\begin{subfigure}[b]{0.998\textwidth}
+\centering
+\includegraphics[trim={0.3cm 0cm 0.28cm 0.3cm},clip,width=0.245\linewidth]{Figures/Heatmaps/reaction/with_pretrain_experiment_result/penalty.jpg}
+\hfill
+\includegraphics[trim={0.3cm 0cm 0.28cm 0.3cm},clip,width=0.245\linewidth]{Figures/Heatmaps/reaction/with_pretrain_experiment_result/ALM.jpg}
+\hfill
+\includegraphics[trim={0.3cm 0cm 0.28cm 0.3cm},clip,width=0.245\linewidth]{Figures/Heatmaps/reaction/with_pretrain_experiment_result/SQP.jpg}
+\hfill
+\includegraphics[trim={0.3cm 0cm 0.28cm 0.3cm},clip,width=0.245\linewidth]{Figures/Heatmaps/reaction/True_sol_heatmap/True_sol}
+\vspace*{-15pt}
+\caption{\textbf{Reaction equation ($\alpha=30$)}}
+\label{fig:2b}
+\end{subfigure}
+\vskip2pt
+\begin{subfigure}[b]{0.998\textwidth}
+\centering
+\includegraphics[trim={0.3cm 0cm 0.28cm 0.3cm},clip,width=0.245\linewidth]{Figures/Heatmaps/reaction_diffusion/with_pretrain_experiment_result/penalty}
+\hfill
+\includegraphics[trim={0.3cm 0cm 0.28cm 0.3cm},clip,width=0.245\linewidth]{Figures/Heatmaps/reaction_diffusion/with_pretrain_experiment_result/ALM}
+\hfill
+\includegraphics[trim={0.3cm 0cm 0.28cm 0.3cm},clip,width=0.245\linewidth]{Figures/Heatmaps/reaction_diffusion/with_pretrain_experiment_result/SQP}
+\hfill
+\includegraphics[trim={0.3cm 0cm 0.28cm 0.3cm},clip,width=0.245\linewidth]{Figures/Heatmaps/reaction_diffusion/True_sol_heatmap/True_sol}
+\vspace*{-15pt}
+\caption{\textbf{Reaction-diffusion equation ($\alpha=20, \tau=2$)}}
+\label{fig:2c}
+\end{subfigure}
+\setlength{\belowcaptionskip}{-0.5cm}
+\setlength{\abovecaptionskip}{-0.2cm}
+\caption{\textbf{Solutions of three hard-constrained methods for learning PDEs.} \textit{TrSQP-PINN can fully recover PDE solutions at high coefficients, including initial conditions, periodic boundary conditions, and sharp transition patterns. The other methods fail to capture the complete solution features.}}
+\label{fig:2}
+\end{figure}
+
+We plot the solution heatmaps for $\alpha=20$ and $\tau=2$ in Figure \ref{fig:2c}. We see that only \mbox{trSQP-PINN}~captures the initial condition and periodic boundary features, as well as sharp transition areas. In~particular, trSQP-PINN achieves an absolute error of 0.66\%, which is one order of magnitude lower than the penalty method at 6.84\% and the augmented Lagrangian method at 5.54\%.
+
+\subsection{Sensitivity to Tuning Parameters}\label{sec:4.4}
+
+We test the sensitivity of trSQP-PINN's performance to various tuning parameters, including the~depth and width of the neural networks, the number of pretraining and training data points, and the choice of quasi-Newton updating schemes (damped BFGS v.s. SR1 v.s. identity Hessians). We also implement 
+penalty and augmented Lagrangian methods for~\mbox{comparison}.
+
+In particular, we vary the number of training data points $N$ in the set $\{100,200,500,1000\}$. From~Figure \ref{fig:3}, we observe that trSQP-PINN consistently outperforms the penalty and augmented Lagrangian methods by achieving one to two orders of magnitude lower errors. This suggests the robustness~of trSQP-PINN's superiority across different sizes of training datasets and highlights its ability to extract more PDE system information from limited data.
+We employ either damped BFGS, SR1, or simply the identity matrix to approximate the Lagrangian Hessian in trSQP-PINN, with results presented in Table \ref{tab:1}. This experiment focuses exclusively on trSQP-PINN as other methods do not involve estimating the Hessian of the Lagrangian function. As~expected in Section \ref{sec:3}, SR1 achieves lower errors when learning more complex systems, such as reaction and reaction-diffusion equations, where the exact Hessian lacks positive definiteness. Moreover, when using identity Hessians, trSQP-PINN performs worse but still better than the penalty and augmented Lagrangian methods. This indicates that (i) the use of the trust-region technique can overcome the ill-conditioning issue and better learn PDE solutions, and (ii) \mbox{quasi-Newton}~updates~to~approximate second-order information can significantly boost the performance of trSQP-PINN.
+Overall, we observe that the superior performance of trSQP-PINN over other methods remains robust across all tuning parameters.g., $M=30$), indicating its ability to avoid suboptimal~solutions~resulting from poor initialization. Furthermore, even when reducing the depth and/or width of the~neural network, thereby restricting the expressive power of the network, trSQP-PINN still performs robustly. For example, using a single-layer network with 50 neurons or a 4-layer network with 10 neurons per layer, only trSQP-PINN successfully learns the considered PDE systems.
+
+\begin{table}[t]
+\centering
+\sisetup{round-mode=places, round-precision=3, scientific-notation=true}
+\caption{\textbf{Different Lagrangian Hessian approximation methods for trSQP-PINN.} 
+\textit{For each~problem, the smaller error between different updating schemes is bold. TrSQP-PINN with SR1 generally achieves lower absolute and relative errors than using damped BFGS. Using identity Hessians  would restricts the performance of trSQP-PINN.}}
+\vskip-0.4cm
+\resizebox{0.85\textwidth}{!}{
+\begin{tabular}{ccccc}
+\\
+\toprule\rowcolor{gray!50}
+\multicolumn{1}{c}{\textbf{Hessian Estimation Method}} & \multicolumn{1}{c}{\textbf{Error $(10^{-1})$}} & \multicolumn{1}{c}{\textbf{Transport} } & \multicolumn{1}{c}{\textbf{Reaction}} & \multicolumn{1}{c}{\textbf{Reaction-diffusion}}  \\
+\midrule
+\multirow{2}{*}{\large Damped BFGS} & Abs\_err  & \textbf{0.043} & 0.132 & 0.056 \\
+& Rel\_err & \textbf{0.148} & 0.257 & 0.138 \\
+\midrule
+\multirow{2}{*}{\large \textbf{SR1}} & Abs\_err & 0.072 & \textbf{0.121} & \textbf{0.026} \\
+& Rel\_err & 0.321 & \textbf{0.252} & \textbf{0.066} \\
+\midrule
+\multirow{2}{*}{\large Identity} & Abs\_err & 2.312 & 0.172 & 0.086 \\
+& Rel\_err & 5.663 & 0.323 & 0.206 \\
+\bottomrule
+\end{tabular}}
+\label{tab:1}
+\end{table}
+\begin{figure}[t!]
+\centering
+\vskip-0.2cm
+\includegraphics[width=0.74\linewidth]{Figures/robustness_experiment/Number_of_Training_Data.png}
+\setlength{\belowcaptionskip}{-0.5cm}
+\setlength{\abovecaptionskip}{-0.0cm}
+\caption{\textbf{Absolute and relative errors of three hard-constrained methods with varying number of training data points.} \textit{TrSQP-PINN consistently outperforms the other methods and maintains low errors even if it is trained on a small dataset.}}% \label{fig:app:4}
+\label{fig:3}
+\end{figure}
+
+
+\section{Conclusion and Future Work}
+
+\vskip-0.2cm
+We designed a direct, hard-constrained deep learning method --- trust-region Sequential Quadratic~Programming (trSQP-PINN) method --- to address the failure modes of PINNs for solving PDE problems. At each step, the method performs a linear-quadratic approximation to the original \mbox{nonlinear} PDE problem, and incorporates an additional trust-region constraint to respect the local nature of the~approximation. The method employs quasi-Newton updates to approximate second-order information and leverages a soft-constrained loss to adaptively update the trust-region radius. Compared to popular hard-constrained methods such as penalty methods and augmented Lagrangian methods, our extensive experiments have shown that trSQP-PINN robustly exhibits superior performance over a wide range of PDE coefficients, achieving 1-2 orders of magnitude lower errors.
+The enhanced performance stems from leveraging trust-region technique and second-order information, helping trSQP-PINN to mitigate ill-conditioning issues and navigate through complex loss landscapes efficiently.
+
+Future work includes exploring more numerical techniques for solving SciML problems and applying SQP-type methods to inverse problems and operators learning problems. For example, we can utilize Randomized Numerical Linear Algebra techniques (e.g., sketching or subsampling) to approximately solve trust-region subproblems to further reduce the computational cost of trSQP. \cite{Lu2021Physics} has demonstrated the effectiveness of penalty and augmented Lagrangian methods for solving inverse problems. Designing a suitable SQP-type method for such cases is also an important open direction.\;\;\;
+
+
+
+
+
+
+
+

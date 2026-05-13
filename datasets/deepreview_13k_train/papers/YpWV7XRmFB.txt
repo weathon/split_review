@@ -1,0 +1,458 @@
+\title{Decoding by Contrasting Knowledge: Enhancing LLMs' Confidence on Edited Facts}
+
+\begin{abstract}
+The knowledge within large language models (LLMs) may become outdated quickly.
+While in-context editing (ICE) is currently the most effective method for knowledge editing (KE), it is constrained by the black-box modeling of LLMs and thus lacks interpretability.
+Our work aims to elucidate the superior performance of ICE in KE by analyzing the impacts of in-context new knowledge on token-wise distributions.
+We observe that despite a significant boost in logits of the new knowledge, the performance of ICE is still hindered by stubborn knowledge. 
+Stubborn knowledge refers to facts that have gained excessive confidence during pretraining, making them hard to edit effectively.
+To address this issue and further enhance the performance of ICE, we propose a novel approach termed \textbf{De}coding by \textbf{C}ontrasting \textbf{K}nowledge ({DeCK}).
+DeCK derives the distribution of the next token by contrasting the logits obtained from the newly edited knowledge guided by ICE with those from the unedited parametric knowledge. 
+Our experiments consistently demonstrate that DeCK enhances the confidence of LLMs in edited facts. 
+For instance, it improves the performance of \llamac on \textsc{MQuAKE} by up to 219\%, demonstrating its capability to strengthen ICE in the editing of stubborn knowledge.
+DeCK can be easily integrated into any ICE method as a decoding component to enhance editing capabilities.
+Our work paves the way to develop both effective and accountable KE methods for LLMs.}
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+With the widespread deployment of large language models (LLMs)~\citep{chatgpt, openai2023gpt4, DBLP:journals/corr/abs-2302-13971, touvron2023llama, song2024fmint}, there is a rising demand for accessing accurate information through LLMs. 
+However, despite the extensive knowledge stored in LLMs, this information can become outdated due to changes in the real world. 
+This can potentially result in factual inaccuracies~\citep{chen2023combating} or false information~\citep{zhang2023sirens, huang2023survey}.  
+Unlike the high computational resource burden incurred by retraining from scratch, knowledge editing (KE) ~\citep{sinitsin2020editable, de2021editing, zhu2020modifying, mitchell2022memory, yao2023editing} has been proposed as an efficient means to update the knowledge of LLMs. 
+They aim to edit knowledge by incrementally injecting or modifying facts.
+
+As LLMs demonstrate increasingly powerful in-context learning capabilities, recent research~\citep{madaan2022memory, zhong2023mquake, zheng2023can, cohen2024evaluating, wang2024deepedit, mei2024slang} has delved into easier and efficient methods for in-context editing (ICE), aiming to directly guide frozen LLMs in generating text with new knowledge through contextual prompts.
+Figure \ref{fig:ICE_Example} (left) illustrates an example of successful editing using ICE.
+These ICE methods showcasing state-of-the-art performance without the need to alter internal model parameters, indicate the promising potential of modeling LLMs as black boxes for ICE guided by external contexts.
+
+\begin{figure}[t]
+    \centering
+
+    \includegraphics[width=\linewidth]{showcase.pdf}
+    \caption{Comparison between in-context editing (ICE) and our DeCK. DeCK successfully edits stubborn knowledge, whereas ICE handles only simple knowledge and fails with complex cases.}
+    \label{fig:ICE_Example}
+
+\end{figure}
+However, as illustrated in Figure \ref{fig:ICE_Example} (middle), there still exist deeply entrenched pieces of knowledge in LLMs that are difficult for ICE to modify, which we refer to as \textbf{stubborn knowledge}.
+We argue that LLMs, through extensive pre-training, have developed strong confidence in certain facts, making them difficult to alter solely through external contextual prompts~\citep{bi2024factuality}.
+Therefore, despite the fact that the sophisticated methods such as enhancing retrieval~\citep{shi2024retrieval}, checking conflict~\citep{zhong2023mquake}, and guiding reasoning~\citep{wang2024deepedit} can enhance the overall performance of ICE, relying on these external methods still cannot genuinely improve the foundational capability for editing individual stubborn knowledge.
+
+In this work, we focus on enhancing the state-of-the-art KE method, ICE, to reduce the negative impacts from the stubborn knowledge in LLMs.
+First, we observe the impact of the in-context new knowledge in ICE on LLMs from the perspective of LLMs' token-level distributions.
+We find that incorporating this new knowledge significantly increases the predicted probability of generating edited facts during the decoding process.
+A deeper exploration of the failed cases reveals the reasons why stubborn knowledge is difficult to edit. 
+Despite the significant improvement in the logits of new knowledge achieved by ICE, there persists a small gap between new knowledge and parametric knowledge, where parametric knowledge refers to the original unedited knowledge in LLMs.
+
+Building upon the insights gained from above observations, we introduce a new decoding technique called \textbf{De}coding by \textbf{C}ontrasting \textbf{K}nowledge (\textbf{DeCK}) to enhance LLMs' confidence in edited facts for better editing of stubborn knowledge.
+DeCK consists of two components: (1) an editing enhancement module that improves attention to new knowledge, thus preventing it from being filtered out during contrastive decoding, and (2) a contrastive decoding strategy that compares the logical distributions after in-context editing with the original parametric logical distributions to predict the next token.
+
+Overall, our contributions can be summarized by three points.
+First, as far as we know, we are the first to elucidate superior performance of ICE on the KE from a model interpretability perspective. 
+Second, we find that stubborn knowledge significantly impacts the performance of ICE, and we propose DeCK to boost confidence in editing facts, enhancing ICE to overcome it.
+Third, extensive experiments on \textsc{MQuAKE} indicate that our DeCK can effectively enhance the performance of ICE without altering the internal model or modifying external prompts.
+DeCK can be easily integrated into any ICE method as a decoding component to enhance editing capabilities.
+Our work paves the way to develop the both effective and accountable KE methods for LLMs.
+
+
+
+\section{Background}
+
+\paragraph{Decoding in LLMs.}
+The current objective of LLMs decoding is to predict the subsequent words within a given context sequence.
+Formally, given a sequence of tokens $\mathcal{X}=\{x_1,x_2,...,x_{t-1}\}$, the next token probability distribution is computed conditioned on the previous context:
+
+\begin{equation}
+     \text{I\kern-0.15em P}(x_t|x_{<t}) = 
+     \frac{\exp(\mathbf{h}_t^\top \mathbf{W}_{x_t} / \tau)}{\sum_{j \in \mathcal{V}} \exp(\mathbf{h}_t^\top\mathbf{W}_j / \tau)}
+\label{eq:model_decoding}
+\end{equation}
+
+where $\tau$ represents a temperature parameter regulating the precision of the subsequent-token distribution. 
+In text generation, the language model samples from the conditional distribution $\text{I\kern-0.15em P}(x_t|x_{<t})$ to generate the next token $x_t$, continuing this process until an end-of-sequence token is produced. 
+\paragraph{Knowledge Editing.}
+KE aims to transform the behavior of the original model $f_{base}$ into post-edit model $f_{e}$.
+Given an edit descriptor $z_e = (x_e, r_e, y_e)$, where $(x_e, r_e, y_e)$ represents a triplet such as (\textit{US}, \textit{President}, \textit{Joe Biden}) meaning Joe Biden is the president of US. 
+KE ensures that $f_{e}(x_e, r_e)=y_e$ while $f_{base}(x_e, r_e) \neq y_e$.
+A thorough edit not only modifies the corresponding knowledge but also all the knowledge within the multi-hop relations that are impacted by this edit.
+For example, consider a two-hop question like "Who is married to the British Prime Minister?" 
+The original answer would be "Carrie Johnson" and the associated knowledge could be represented: (\textit{UK}, \textit{Prime Minister}, \textit{Boris Johnson}), (\textit{Boris Johnson}, \textit{spouse}, \textit{Carrie Johnson}).
+With an edit $z_e = (\textit{UK}, \textit{Prime Minister}, \textit{Rishi Sunak})$ and existing knowledge $(\textit{Rishi Sunak}, \textit{spouse}, \textit{Akshata Murthy})$, $f_{e}$ should produce the updated response: "Akshata Murthy".
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{statics.pdf}
+    \caption{The changes of new knowledge and parametric knowledge before and after editing. We capture the first tokens of outputs to represent the corresponding knowledge and then record their original logits along with their ranks within the entire vocabulary.}
+    \label{fig:statics}
+\end{figure}
+
+
+
+\section{Deep Insights into ICE through Decoding Perspectives}
+
+
+With $\phi(\cdot)$ replacing the affine layer to predict the probability of the next token over the vocabulary set $\mathcal{V}$, we can obtain a simplified representation of Equation \eqref{eq:model_decoding}.
+Given a sequence of tokens $\mathcal{X}_E=\{x_1^{(E)},x_2^{(E)},...,x_{m-1}^{(E)}\}$, which includes guidance from an editing prompt, such as "\textit{Assume Tesla's CEO is Jack Ma}", we compute the probability of next token $x^{(E)}_m$ with editing guidance as follows:
+
+\begin{equation}
+    \text{I\kern-0.15em P}^E(x^{(E)}_m|x^{(E)}_{<m}) = \mathrm{softmax}(\phi(\mathbf{h}^{(E)}_m)), \quad x^{(E)}_m \in \mathcal{V}
+\label{eq:pe}
+\end{equation}
+
+We can also represent the parametric probability distribution $\text{I\kern-0.15em P}^B(x^{(B)}_n|x^{(B)}_{<n})$ by considering only the token sequence $\mathcal{X}_B$ containing the original question prompt without any editing content. 
+The distribution $\text{I\kern-0.15em P}^E(x^{(E)}_m|x^{(E)}_{<m})$ also reflects the feedback from the introduction of external knowledge, while $\text{I\kern-0.15em P}^B(x^{(B)}_n|x^{(B)}_{<n})$ solely represents the response of LLMs based on their parametric knowledge to the question.
+
+\subsection{How ICE Effectively Edits Knowledge in LLMs?}
+
+Although the ICE methods on LLMs~\citep{zhong2023mquake, cohen2024evaluating, wang2024deepedit} have demonstrated promising performance, they all rely on the black-box modeling of LLMs for editing, and the internal mechanisms behind their effectiveness remain unclear.
+In this subsection, we delve into the intrinsic reasons behind the superior performance of ICE on KE.
+
+We designed dedicated experiments to capture the logits output of knowledge that would be influenced by the edit.
+A striking observation in Figure \ref{fig:statics} is that the introduction of new knowledge through ICE leads to a significant rightward shift in the probability distribution of the new knowledge, while the logits for parametric knowledge remain largely unchanged or decrease to some extent. 
+This suggests that ICE significantly enhances the logits of new knowledge while having minimal impact on parametric knowledge.
+Additionally, the number of top-ranked positions for new knowledge significantly increases after ICE, with the majority surpassing that of parametric knowledge.
+This indicates that the in-context new knowledge can improve the confidence of LLMs in editing facts, thereby prompting responses with the edited answers.
+
+\subsection{Inherent Challenges of Stubborn Knowledge}
+
+While ICE has significantly boosted the confidence of LLMs in new knowledge, we find that there are still instances where certain new knowledge ranks prominently but not as the top-1, as illustrated in Figure \ref{fig:statics}.
+We term this phenomenon "\textbf{stubborn knowledge}", which refers to cases where editing fails due to either an excessive confidence in existing parametric knowledge or insufficient confidence in new knowledge. 
+The edit cases in Figure \ref{fig:observe} deeply reveals the failed pattern for ICE in addressing stubborn knowledge, which happens when there is still an extremely small gap compared to the parametric knowledge after editing, despite the significant increase in new knowledge logits induced by the editing prompt. 
+Taking the last case as an example, after editing, the new knowledge "English" lags behind the parametric knowledge "French" by only 0.516 in terms of logical distribution, illustrating how a minor gap leads to editing failure.
+This indicates the intrinsic reasons for the failure of black-box ICE methods to edit stubborn knowledge in LLMs in most cases.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{observe.pdf}
+    \caption{Edit cases with changes in the first token for both parametric and new knowledge. We obtained the case results by conducting ICE in the \llamaa model. `$\rightarrow$' indicates the knowledge change after incorporating editing prompts. `logits' and `rank' pertain to the first token of knowledge answer, reflecting the confidence of LLMs in the corresponding knowledge.}
+    \label{fig:observe}
+\end{figure}
+
+
+
+\section{DeCK: Enhancing LLMs’ Confidence on Edited Facts}
+
+
+Inspired by the observations in Section \ref{fig:observe}, we design our novel decoding strategy DeCK to enhance ICE in overcoming stubborn knowledge.
+Figure \ref{fig:DeCK} illustrates the process of using DeCK to handle the stubborn knowledge case shown in Figure \ref{fig:ICE_Example} (right).
+DeCK can be formalized as follows.
+Using $\text{I\kern-0.15em P}(x_t)$ to represent $\text{I\kern-0.15em P}(x_t|x_{<t})$ for notational brevity, we compute the probability of the next token by,
+
+\begin{equation}
+    \text{I\kern-0.15em P}^E_{\text{Enh}}(x^{(E)}_m) = \mathrm{Enh}(\text{I\kern-0.15em P}^E(x^{(E)}_m))
+\label{eq:pe_aug}
+\end{equation}
+\begin{equation}
+    \hat{\text{I\kern-0.15em P}}^E_{\text{Enh}}(x^{(E)}_m) = \mathrm{softmax}\left(\mathcal{F}\left(\text{I\kern-0.15em P}^E_{\text{Enh}}(x^{(E)}_m), \text{I\kern-0.15em P}^B(x^{(B)}_n)\right)\right)
+\label{eq:pe_F}
+\end{equation}
+Here, the function $\mathrm{Enh(\cdot)}$ in Equation \ref{eq:pe_aug} is improve the attention to edit facts, as detailed in Section \ref{sec:aug}. 
+The operator $\mathcal{F}(\cdot,\cdot)$ in Equation \ref{eq:pe_F} is used to contrast between the output distributions from enhanced new knowledge and parametric knowledge, as explained in Section \ref{sec:CD}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{DECK.pdf}
+    \caption{Illustration of DeCK enhancing ICE to edit the stubborn knowledge. During decoding, DeCK contrasts the enhanced ICE distribution with the original distribution to highlight new knowledge, inducing LLMs to generate edited facts using chain-of-though (CoT) \citep{wei2022chain} during the reasoning process for answering input questions.}
+    \label{fig:DeCK}
+\end{figure}
+
+\subsection{Editing Signal Enhancement}
+\label{sec:aug}
+
+To enhance the confidence of LLMs in edited knowledge, we design an editing enhancement function that minimizes the Knowledge Enhancement Divergence (KED) between the enhanced distribution and a target distribution.
+Assume that $\tilde{P}$ and $Q$ are discrete probability distributions over a finite vocabulary $V$, and that the weights $w_i$ are non-negative and sum to 1.
+
+\begin{definition}[Knowledge Enhancement Divergence]
+Let $\tilde{P}(x^{(E)}_m)$ be the enhanced probability distribution of the next token $x^{(E)}_m$ after incorporating edited knowledge, and let $Q$ be the target distribution that assigns higher probabilities to tokens related to the edited knowledge. The KED between $\tilde{P}(x^{(E)}_m)$ and $Q$ is defined as:
+\begin{equation}
+\text{KED}(\tilde{P} || Q) = \frac{1}{2} \sum_{i=1}^n w_i \left( \tilde{P}(v_i) \log \frac{\tilde{P}(v_i)}{M(v_i)} + Q(v_i) \log \frac{Q(v_i)}{M(v_i)} \right)
+\end{equation}
+where $M = \frac{1}{2} (\tilde{P} + Q)$ is the average distribution, and $w_i = s(v_i, E)$ is the weight assigned to the $i$-th token based on its semantic relevance score.
+\end{definition}
+
+We introduce a semantic relevance function $s : V \times E \to \mathbb{R}$ that measures the relevance of a token $v_i \in V$ to the edited knowledge represented by $E$, defined as:
+\[
+s(v_i, E) = \max_{e_j \in E} \text{sim}(v_i, e_j) \cdot \phi(v_i)
+\]
+where $\text{sim}(\cdot, \cdot)$ is a similarity function, such as cosine similarity, that measures the semantic similarity between two token embeddings, and $\phi : V \to \mathbb{R}$ is a frequency-based weighting function:
+\[
+\phi(v_i) = \log(\text{freq}(v_i) + \epsilon) \cdot \alpha
+\]
+Here, $\text{freq} : V \to \mathbb{N}$ denotes the frequency of a token in the edited descriptor $E$, $\epsilon > 0$ is a small constant to avoid taking the logarithm of zero, and $\alpha$ is a scaling factor.
+We also define an enhancement function $\text{Enh} : \mathbb{R}^n \times \mathbb{R}^n \to \mathbb{R}^n$ that takes the original logits $\phi(h^{(E)}_m) \in \mathbb{R}^n$ and the semantic relevance scores $s \in \mathbb{R}^n$ as inputs and produces the enhanced logits $\tilde{\phi}(h^{(E)}_m) \in \mathbb{R}^n$:
+\[
+\mathrm{Enh}(\phi(h^{(E)}_m), s) = \alpha \cdot \phi(h^{(E)}_m) + \beta \cdot s
+\]
+where $\alpha, \beta \in \mathbb{R}$ are scaling coefficients that control the balance between the original logits and the semantic relevance scores. Hence, the target distribution $Q$ over the vocabulary $V$ is constructed to assign higher probabilities to the tokens related to the edited knowledge:
+\[
+Q(v_i) = 
+\begin{cases}
+\frac{1}{m} & \text{if } v_i \in E \\
+\epsilon & \text{otherwise}
+\end{cases}
+\]
+where $\epsilon > 0$ is a small constant to ensure a valid probability distribution.
+
+
+
+\subsection{Decoding by Contrasting Knowledge}
+\label{sec:CD}
+The idea of Decoding by Contrasting Knowledge is to highlight the output probability increment of new knowledge by contrasting it with the parametric knowledge from the inherent knowledge of the LLMs.
+Given the ICE probability distribution $\text{I\kern-0.15em P}^E_{\text{Enh}}(x^{(E)}_m))$ after editing enhancement in Section \ref{sec:aug} and the original parametric probability distribution $\text{I\kern-0.15em P}^B(x^{(B)}_n))$, we aim to amplify the outputs of new knowledge during the generation process while downplaying the outputs of paprametric knowledge.
+
+Following the Contrastive Decoding approach from ~\citet{li-etal-2023-contrastive}.
+We subtract the original log probabilities of parametric outputs guided by knowledge question alone from those of the outputs guided by ICE with the in-context new knowledge. 
+Then, we use this resulting distribution as the next-word prediction for the generation guided by editing prompts. 
+Therefore, the operator $\mathcal{F}(\cdot,\cdot)$ in Equation \ref{eq:pe_F} can be expanded as follows:
+\begin{equation}
+\mathcal{F}(\text{I\kern-0.15em P}^E_{\text{Enh}}(x^{(E)}_m)), \text{I\kern-0.15em P}^B(x^{(B)}_n)) = \begin{cases} \log \dfrac{\text{I\kern-0.15em P}^E_{\text{Enh}}(x^{(E)}_m))}{\text{I\kern-0.15em P}^B(x^{(B)}_n)}, & \text { if } x^{(E)}_m \in \mathcal{V}_{\text {head }}(x^{(E)}_m|x^{(E)}_{<m}), \\
+-\infty , & \text { otherwise. }\end{cases} 
+\label{eq:F}
+\end{equation}
+
+The contrasting coefficient $\gamma$ is also introduced to adjust the proportion of the subtraction: $\log \text{I\kern-0.15em P}^E_{\text{Enh}}(x^{(E)}_m) - \gamma\log \text{I\kern-0.15em P}^B(x^{(B)}_n)$.
+And the subset $\mathcal{V}_{\text {head }}(x^{(E)}_m|x^{(E)}_{<m}) \in \mathcal{V}$ is defined as whether or not the token has high enough probabilities from the editing output,
+
+\begin{equation}
+    \mathcal{V}_{\text {head}}(x^{(E)}_m|x^{(E)}_{<m})= \left\{x^{(E)}_m \in \mathcal{V}: \text{I\kern-0.15em P}^E_{\text{Enh}}(x^{(E)}_m)) \geq \lambda \max _w \text{I\kern-0.15em P}^E_{\text{Enh}}(w)\right\}.
+\label{eq:filter}
+\end{equation}
+
+As adaptive plausibility constraint (APC) strategy proposed in ~\citet{li-etal-2023-contrastive}, we use $\mathcal{V}_{\text {head}}$ to filter out tokens with low probabilities in $\text{I\kern-0.15em P}^E_{\text{Enh}}(x^{(E)}_m)$ and considering only high-score tokens.
+Without APC, some extremely low-probability tokens could be excessively amplified by the softmax function after subtraction, leading to the generation of implausible words and severely impacting the performance of contrastive decoding.
+Specifically, the Editing Signal Enhancement module in Section \ref{sec:aug} cleverly avoids being filtered out in Equation \ref{eq:filter} by enhancing the new knowledge signal before contrastive processing, ensuring that DeCK can function effectively.
+
+The key to our contrastive decoding approach is the simultaneous maintenance of two token sequences' generation, which differs from previous methods~\citep{li-etal-2023-contrastive, chuang2023dola, zhang2023alleviating}.
+In iterative decoding, we predict the next token based on $\hat{\text{I\kern-0.15em P}}^E_{\text{Enh}}(x^{(E)}_m)$ in Equation \ref{eq:pe_F}.
+Then, a key step involves simultaneously concatenating the new token to two separate token sequences $\mathcal{X}_E$ and $\mathcal{X}_B$, which may have different lengths.
+This ensures that updates to both sequences are synchronized, preventing any implausible discrepancies in the log distribution during iteration.
+
+
+
+\section{Experiments}
+
+\subsection{Experimental setup}
+
+\paragraph{Datasets}
+We conducted extensive experiments using the \textsc{MQuAKE-3k} dataset~\citep{zhong2023mquake} and its derivatives, \textsc{MQuAKE-2002} and \textsc{MQuAKE-hard}, proposed by~\citet{wang2024deepedit}. 
+\textsc{MQuAKE} provides multi-hop knowledge questions containing extensively edited facts, which are used to evaluate KE on counterfactual edits.
+Additionally, we constructed corresponding \textsc{stubborn} datasets in \ref{sec:stubborn} to further evaluate the effectiveness of editing stubborn knowledge
+
+\paragraph{Models and Baselines}
+Our experiments examine three types of \textsc{LLaMA-chat} models (2-7b, 2-13b, 3-8b)~\citep{touvron2023llama} and also \Mistral~\citep{jiang2023mistral}.
+We employ the state-of-art in-context editing methods IKE~\citep{cohen2024evaluating} and MeLLo~\citep{zhong2023mquake}, alongside advanced model-editing techniques ROME~\citep{meng2022locating} as baseline approaches on the aforementioned open-source models. 
+IKE prompts LLMs to edit given knowledge by providing contextual demonstrations. 
+MeLLo edits multi-hop knowledge by decomposing sub-questions, prompting LLMs to generate answers, and retrieving contradictions from the edit memory.
+\paragraph{Implementation Details} We implement IKE with multi-hop question-answering demonstrations and chain-of-thought (COT) ~\citep{wei2022chain, li2024understanding} prompting to enhance its in-context editing performance. 
+Our decoding strategy DeCK is inherently deployed onto IKE and MeLLo to validate their enhancements without any additional adjustments. It simply requires providing the relevant factual guiding context before generating the edited answers.
+The model editing methods ROME in our baselines are deployed using EasyEdit~\citep{wang2023easyedit}. 
+\begin{table}[t!]
+\centering
+\small
+\renewcommand{\arraystretch}{1.05}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{llccc}
+\toprule
+\textbf{Model} & {\textbf{Method}} &  {\textbf{\textsc{MQuAKE-3k}}} &{\textbf{\textsc{MQuAKE-2002}}} & {\textbf{\textsc{MQuAKE-hard}}}\\
+\midrule
+\multirow{2}{*}{\textsc{LLaMA2-}} & ROME~\citep{meng2022locating} & 18.2 & 19.1 & 15.7 \\
+\multirow{2}{*}{\textsc{7B-chat}} & IKE~\citep{zheng2023can} & 85.4 & 85.1 & 88.9 \\
+& IKE w/ DeCK (ours) & \bf 91.3 & \bf 89.4 & \bf 98.6 \\
+\midrule
+\multirow{2}{*}{\textsc{LLaMA2-}} & ROME~\citep{meng2022locating} & 39.4 & 39.7 & 35.2\\
+\multirow{2}{*}{{\textsc{13B-chat}}} & IKE~\citep{zheng2023can} & 63.8 & 64.1 & 55.2\\
+& IKE w/ DeCK (ours) & \bf 84.6 & \bf 84.4 & \bf 89.7\\
+\midrule
+ \multirow{2}{*}{\textsc{LLaMA3-}} & ROME~\citep{meng2022locating} & 14.5 & 15.9 & 12.7\\
+  \multirow{2}{*}{{\textsc{8B-instruct}}} & IKE~\citep{zheng2023can} & 31.6 & 32.5 & 14.3\\
+  & IKE w/ DeCK (ours) & \bf 54.7 & \bf 55.9  & \bf 45.7\\
+  \midrule
+ \multirow{2}{*}{\textsc{Mistral-}}& ROME~\citep{meng2022locating} & 28.1 & 30.2 & \bf 26.3\\
+  \multirow{2}{*}{\textsc{7B-instruct}} & IKE~\citep{zheng2023can} &  34.1 &  35.6 &  15.6\\
+  & IKE w/ DeCK (ours) & \bf 46.7 & \bf 48.5 & 19.2\\
+\bottomrule
+\end{tabular}
+}
+\caption{Experimental results (accuracy; \%) across various models and datasets. We set the batch size of the edit memory to 1 to evaluate the foundational capability of directly editing knowledge. The best editing result on every LLM is highlighted in bold font.}
+\label{tab:direct}
+\end{table}
+\subsection{Main Results}
+
+We evaluate the foundational capability of KE methods in directly editing explicit new knowledge by considering multi-hop questions containing 1,000 instances and setting the batch size of the edit memory to 1.
+The batch size means the number of instances providing the edited facts for knowledge retrieval.
+Table \ref{tab:direct} displays the performance of different baselines and the enhanced in-context editing through our DeCK across various models and datasets.
+As with previous work, ICE methods exhibit superior performance in multi-hop KE tasks compared to model-editing methods ROME.
+Overall, IKE enhanced by our DeCK (IKE w/ DeCK) consistently exhibits the best performance, indicating that the DeCK can reliably improves the foundational KE capabilities of ICE for LLMs.
+Specifically, as the model parameters increase, LLMs tend to retain more stubborn knowledge, resulting in a decrease in the accuracy of ICE.
+For instance, the average accuracy of \llamab is 61\%, whereas that of \llamaa is 86\%.
+Additionally, although the parameters of llama3 are not extensive, its more refined pretraining and instruct tuning also may instill greater confidence in its acquired knowledge, resulting in poor performance in ICE.
+However, to our great surprise, our DeCK has significantly enhanced ICE's editing of these stubborn knowledge. 
+Notably, on the HARD dataset, DeCK has increased ICE's editing success rate in \llamab by an impressive 63\% and in \llamac by an amazing 219\%.
+
+
+In-context editing methods typically require retrieving edit demonstrations from the edit memory and then editing LLMs with the retrieved knowledge.
+Therefore, we follow the setup of previous work \citep{zheng2023can, zhong2023mquake, madaan2022memory} to conduct experiments for ICE methods with the full batch size edit memory.
+As shown in Table \ref{tab:retrieval}, the experimental results illustrate that DeCK enhances ICE methods to varying degrees in full batch experiments.
+The IKE methods does not exhibit consistent improvement in this regard, potentially constrained by its inherent editing accuracy.
+We ingeniously integrate our DeCK into MeLLo, aiding MeLLo in generating crucial edited answers during the reasoning process.
+We find that leveraging the foundational editing capabilities provided by DeCK consistently improves MeLLo's performance across all experiments.
+This indicates that our DeCK holds significant potential for real-world KE applications.
+
+\begin{table}[t!]
+\centering
+\small
+\renewcommand{\arraystretch}{1.2}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{llccc}
+\toprule
+\textbf{Model} & {\textbf{Method}} &  {\textbf{\textsc{MQuAKE-3k}}} &{\textbf{\textsc{MQuAKE-2002}}} & {\textbf{\textsc{MQuAKE-hard}}}\\
+\midrule
+   & IKE~\citep{zheng2023can} & 20.7 & \bf 20.6 & 2.3\\
+   {\textsc{LLaMA2-}} & IKE w/ DeCK (ours) & \bf 22.4 & 20.4 & \bf 3.8\\
+   \cmidrule(lr){2-5}
+   {\textsc{7B-chat}} & MeLLo~\citep{zhong2023mquake} & 32.6 & 40.8 & 5.1\\
+   & MeLLo w/ DeCK (ours) & \bf 43.1 & \bf 45.8 & \bf 5.8\\
+\midrule
+  & IKE~\citep{zheng2023can} & 19.4 & \bf 18.8 & 2.7\\
+  {\textsc{LLaMA2-}} & IKE w/ DeCK (ours) & \bf 20.6 & 18.4 & \bf 3.5\\
+  \cmidrule(lr){2-5}
+   {\textsc{13B-chat}}& MeLLo~\citep{zhong2023mquake} & 33.4 & 35.9 & 3.9\\
+   & MeLLo w/ DeCK (ours) & \bf 36.8 & \bf 38.2 & \bf 6.2\\
+\bottomrule
+\end{tabular}
+}
+\caption{Experimental results (accuracy; \%) using \textsc{LLaMA2-chat} models. We conduct the experiments with the full batch size edit memory to evaluate the performance of memory based KE.}
+\label{tab:retrieval}
+\end{table}
+
+\subsection{Metamorphosis of Stubborn Knowledge}
+\label{sec:stubborn}
+
+To further explore the reasons behind the significant improvement brought by DeCK to ICE, we conduct a statistical analysis of the ranking changes.
+Specifically, we sample the new knowledge with probability rankings between top 2-100 after the original ICE method, and examine the changes in their ranks after integrating DeCK. 
+The results in Table \ref{tab:rank} demonstrate that our DeCK effectively improves the ranking of new knowledge that failed to be edited by ICE, leading to a metamorphosis of stubborn knowledge.
+
+\begin{table*}[ht]
+\centering
+\renewcommand{\arraystretch}{1.2}
+\scalebox{1}{
+\begin{tabular}{lcccccc}
+\toprule
+    \textbf{Original Rank} & \textbf{2} & \textbf{3-5} & \textbf{6-10} & \textbf{11-20} & \textbf{21-50} & \textbf{51-100}\\
+    \midrule
+    {\llamaa} & $1.6${\tiny \bf ($\uparrow 0.4$)} & $2.7${\tiny \bf ($\uparrow 0.9$)} & $4.3${\tiny \bf ($\uparrow 3.6$)} & $4.6${\tiny \bf ($\uparrow 8.2$)} & $4.8${\tiny \bf ($\uparrow 24.3$)} & $6.1${\tiny \bf ($\uparrow 61.3$)}\\
+    {\llamab} & $1.4${\tiny \bf ($\uparrow 0.6$)} & $1.9${\tiny \bf ($\uparrow 1.9$)} & $2.2${\tiny \bf ($\uparrow 4.9$)} & $2.8${\tiny \bf ($\uparrow 13.4$)} & $4.1${\tiny \bf ($\uparrow 34.1$)} & $5.4${\tiny \bf ($\uparrow 72.7$)}\\
+    \bottomrule
+    \end{tabular}
+    }
+\caption{Improvement of new knowledge ranking by DeCK on \textsc{MQuAKE-3k}. Here, 'original rank' refers to the ranking of new knowledge after the original IKE w/o DeCK. The table shows the average ranking of new knowledge and the improvement after integrating DeCK.}
+\label{tab:rank}
+\end{table*} 
+
+We constructed corresponding \textsc{stubborn} datasets for different models to specifically evaluate ICE's performance on stubborn knowledge. 
+The stubborn datasets are categorized into different difficulty levels based on the proportion of correct answers when using ICE methods to edit the same knowledge multiple times with different knowledge questions.
+The experimental results on the \textsc{stubborn} datasets are presented in Table \ref{tab:stubborn}.
+We found that IKE's performance on \textsc{stubborn} significantly declined compared to other datasets, as shown in Table \ref{tab:direct}, and even fell below that of the model editing method ROME on \llamab.
+Our DeCK consistently brings about a dramatic improvement for IKE, with enhancements of up to 80\% on \llamab, ensuring that IKE w/ DeCK maintains the highest performance. 
+This suggests that DeCK brings about improvements by enhancing ICE methods' ability to edit stubborn knowledge.
+
+\begin{table}[ht]
+\centering
+\scalebox{1}{
+\begin{tabular}{llccc}
+\toprule
+\textbf{Model} & {\textbf{\textsc{stubborn}}} & \textbf{ROME} &{\textbf{IKE}} & {\textbf{IKE w/ DeCK (ours)}}\\
+\midrule
+ {\textsc{LLaMA2-}}& $>33\%$ & 17.7 & 56.4 & \bf 72.3\\
+ {\textsc{7B-chat}}& $>67\%$ & 19.3 & 37.8 & \bf 55.9\\
+\midrule
+  {\textsc{LLaMA2-}}& $>33\%$ & 42.5 & 38.9 & \bf 70.1\\
+ {\textsc{13B-chat}}& $>67\%$ & 40.2 & 29.4 & \bf 48.5\\
+\bottomrule
+\end{tabular}
+}
+\caption{Performance of \llamaa and \llamab on their respective \textsc{stubborn} datasets. `\textsc{stubborn} > 67\%' indicates instances from the \textsc{MQuAKE-3k} dataset where IKE failed to edit knowledge more than 67\% of the time. `\textsc{stubborn} > 33\%' follows the same criterion.}
+\label{tab:stubborn}
+\end{table}
+Figure \ref{fig:stubborn} reveals the underlying reasons why DeCK can effectively edit stubborn knowledge.
+ICE w/ DeCK has a higher distribution in the high-probability range, while ICE w/o DeCK is concentrated in the low-probability range.
+This further indicates that DeCK boosts the confidence of LLMs in low-confidence new knowledge, making them more likely to accept the edited facts.
+
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\linewidth]{stubborn.pdf}
+    \caption{Probability Statistics of New Knowledge for \llamaa on Stubborn Datasets. The probabilities are derived from softmax calculations.}
+    \label{fig:stubborn}
+\end{figure}
+
+\subsection{Ablation Study}
+We conduct ablation experiments on the key components of our DeCK.
+Table \ref{tab:coefficient} shows how the contrasting coefficient introduced in Equation \ref{eq:F} affects DeCK's performance.
+DeCK is highly sensitive to the contrasting coefficient. If $\gamma$ is too large, it can excessively amplify unreasonable token probabilities, significantly reducing DeCK's performance, even below that of the original ICE.
+Table \ref{tab:enhancement} demonstrates that the editing signal enhancement introduced in Section \ref{sec:aug} can consistently enhance DeCK's performance. This is because it ensures that the enhanced edited knowledge is not filtered out by Equation \ref{eq:filter}.
+\begin{table}[h]
+    \centering
+    \begin{minipage}[t]{0.44\textwidth}
+        \centering
+        \begin{tabular}{lccc}
+            \toprule
+             \textbf{Size} & \textbf{$\gamma=0.1$} &  \textbf{$\gamma=0.2$} &  \textbf{$\gamma=0.5$} \\
+            \midrule
+             \textsc{-7b} & 88.7 & \bf 91.3 & 80.2 \\
+             \textsc{-13b} & 76.1  & \bf 84.6 & 48.5 \\
+            \bottomrule
+        \end{tabular}
+        \caption{Ablation results on \textsc{MQuAKE-3k} with \textsc{LLaMA2-chat} models.}
+        \label{tab:coefficient}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.53\textwidth}
+        \centering
+        \begin{tabular}{lccc}
+            \toprule
+             \textbf{DeCK} & {\textsc{MQuAKE-3k}} &{\textsc{MQuAKE-2002}} &  \\
+            \midrule
+             w/o Enh & 89.1 & 87.3 \\
+             w/ Enh & \bf 91.3 & \bf 89.4 \\
+            \bottomrule
+        \end{tabular}
+        \caption{Ablation results of the editing signal enhancement component on the \llamaa model.}
+        \label{tab:enhancement}
+    \end{minipage}
+\end{table}
+
+
+
+\section{Related Work}
+
+
+\paragraph{Hallucinations and Misinformation}
+Hallucination \citep{kang2024comparing} is one of the main source of LLM-generated misinformation.
+In general, there are two lines of works on hallucination mitigation.
+In training stage, ~\citet{hu2023survey, pan2024unifying} has investigated training data curation or knowledge grounding methods to integrate more knowledge.
+In the inference stage, recent works have explored methods including confidence estimation ~\citep{huang2023look}, knowledge retrieval~\citep{feng2024retrieval, yang2024kg} and KE to improve accurate outputs.
+\paragraph{Contrast Decoding}
+The recent contrasting decoding method achieves the desired output by contrasting logical distribution during the decoding phase.
+CD~\citep{li-etal-2023-contrastive} compares powerful expert language models with weaker amateur language models to enhance fluency and coherence.
+DoLa~\citep{chuang2023dola} contrasts mature layers with premature layers, while ICD~\citep{zhang2023alleviating} compares with models injected with hallucinations, aiming to enhance the factual accuracy of the model.
+\paragraph{Model Editing and In-Context Editing}
+Model Editing is a type of effective technique for KE, altering the model's internal structure to modify its output regarding the edited content.
+Current model editing methods~\citep{meng2022locating, meng2022mass, mitchell2022memory, yao2023editing, xu2024editing} for LLMs involve integrating an auxiliary network with the original model or modifying and adding model parameters to manipulate the model's output.
+The emergent method of ICE~\citep{madaan2022memory, zhong2023mquake, zheng2023can},  demonstrates significant potential, enabling the editing of language models by prompting them with edited fact and retrieving editing demonstrations from the edit memory.
+
+
+\section{Conclusion and Limtations}
+
+In this paper, we introduce Decoding by Contrasting Knowledge (DeCK), a novel decoding strategy aimed at enhancing in-context editing in overcoming stubborn knowledge for LLMs.
+Based on observations at the token-level of edited knowledge, DeCK contrasts the logits of new knowledge with those from parametric knowledge to amplify the changes in model knowledge brought about by in-context editing.
+Experimental results show that DeCK significantly improves editing accuracy.  
+Overall, DeCK is a critical step in enhancing in-context editing to overcome stubborn knowledge.
+
+DeCK also has limitations; it requires the reception of input from two different token sequences during the generation process, resulting in approximately a 1.6X increase in latency compared to original decoding.
+This suggests that we can pursue further optimization within the transformers architecture or explore alternative, more cost-effective versions of DeCK.
+
+
+

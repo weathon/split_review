@@ -1,0 +1,439 @@
+\title{Backtracking Improves Generation Safety}
+
+\begin{abstract}
+
+Text generation has a fundamental limitation almost by definition: {\em there is no taking back tokens that have been generated, even when they are clearly problematic}.
+In the context of language model safety, when a partial unsafe generation is produced, language models by their nature tend to happily keep on generating similarly unsafe additional text.
+This is in fact how safety alignment of frontier models gets circumvented in the wild~\citep{andriushchenkoJailbreaking2024},  despite great efforts in improving their safety.
+Deviating from the paradigm of approaching safety alignment as {prevention} (decreasing the probability of harmful responses), we propose {\em backtracking}, a technique that allows language models to ``undo'' and recover from their own unsafe generation through the introduction of a special \reset token. Our method can be incorporated into either SFT or DPO training to optimize helpfulness and harmlessness.
+We show that models trained to backtrack are consistently safer than baseline models: backtracking \llama is four times more safe than the baseline model (6.1\% $\to$ 1.5\%) in our evaluations without regression in helpfulness.
+Our method additionally provides protection against four adversarial attacks including an adaptive attack, despite not being trained to do so.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Remarkable progress has been recently made in building capable and helpful large language models~\citep{touvronLlama2023a}. 
+As capabilities become more powerful, these models also have more potential to cause real societal harms~\citep{kumarLanguage2023}.
+The {\em de facto} standard in safety alignment focuses on {\em prevention}: training language models to generate safe responses while minimizing the likelihood of unsafe ones, through techniques including
+SFT~\citep{ouyangTraining2022} and RLHF~\citep{christianoDeep2017}.
+Prevention-based safety tuning goes a long way towards building safe language models~\citep{baiTraining2022}, and yet the safety of production models which have undergone substantial safety tuning (e.g., Claude 3.5 and GPT-4) can still be compromised in the wild by simple attacks~\citep{andriushchenkoJailbreaking2024}.
+
+The core challenge of safety alignment seems to be that the attack surface induced by a text interface is {\em practically infinite}, and model developers have to rely on the generalization of safe behavior from a relatively small (often predominantly in English) safety tuning dataset to prevent {\em every failure case}.
+To illustrate just how big this attack surface truly is, two recent papers jailbreak GPT-4 by encoding malicious instructions in base64~\citep{weiJailbroken2023} and in low-resource languages such as Zulu~\citep{yongLowResource2024}.
+It is plausible that, through pre-training, GPT-4 picked up capabilities to understand a variety of encodings and languages, but that safety tuning failed to cover these ``edge'' cases.
+In this work, we ask: {\em how can we meaningfully improve language model safety, given that models will likely always produce some unsafe generations?} 
+We hypothesize that it can be easier for a model to verify safety {\em after} some tokens have been generated, instead of relying on prevention of unsafe generations solely. 
+To this end, we introduce {\em backtracking}, a technique that allows language models to verify and ``undo'' prior unsafe generations and start anew.
+Specifically, we allow language models to emit a special token, \reset, upon which the generation API discards tokens prior to \reset.
+During training, we supervise language models to properly backtrack by constructing contrastive safety demonstrations, generations that are initially unsafe, but then backtrack into a fresh, safe response (e.g., {\tt Here is a vile letter \reset Sorry I cannot help with that.})
+
+Our findings demonstrate that incorporating off-the-shelf alignment techniques, such as SFT and DPO, with our proposed backtracking method substantially improves the safety of both \gemma and \llama models.
+Notably, this improvement in safety does not come at the cost of reduced model utility.
+
+When a language model backtracks, it produces tokens that are not useful to the user, which decreases generation efficiency.
+We find that this tradeoff between safety and efficiency due to backtracking can be simply adjusted using logit bias, and discover that large safety gains can be achieved with minimal impact on generation efficiency.
+Finally, we evaluate our models against three state-of-the-art adversarial attacks (e.g., GCG~\citep{zouUniversal2023}), in addition to an adaptive attack designed to break backtracking.
+Against every attack that we have tried, backtracking improves model safety over the baseline despite not being adversarially trained.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/method.pdf}
+  \caption{Method overview.
+  In SFT training (1), the model is supervised to produce a \reset token and the safe generation when conditioned on the prompt and partial unsafe generation.
+  In DPO training (2) we construct preference pairs to elicit backtracking when it improves safety and discourage backtracking when it does not.
+  During inference (3), generated tokens before \reset are discarded.
+  }
+  \label{fig:method}
+\end{figure}
+
+
+
+\section{Related Work}
+
+\paragraph*{Generation refinement.}
+Language model generations are prone to errors~\citep{holtzmanCurious2019}, and a large body of work focuses on correcting generation errors through a critique-and-refine process~\citep{panAutomatically2024}.
+Critique can be provided by the language model itself~\citep{saundersSelfcritiquing2022,madaanSelfRefine2023}, or from an external critic model~\citep{yasunagaLMCritic2021,welleckGenerating2022}.
+This feedback can be distilled back into the model~\citep{baiConstitutional2022,yuanSelfRewarding2024} to further improve model quality.
+Various algorithms such as best-of-$k$~\citep{nakanoWebGPT2022} and majority-voting~\citep{wangSelfConsistency2022} can also be applied to improve generation quality at inference time.
+This need for post-generation refinement is necessitated by the fact that generation cannot be undone, and thus corrections have to be applied post-hoc.
+The goal of our work is precisely to introduce a mechanism for {\em backtracking} into a language model, thus enabling it to recover from an unsafe generation and removing the need for post-hoc correction.
+Outside of the domain of generation safety, but similar in spirit to our work, \citet{cundySequenceMatch2023} proposes token-level {\em backtracking} which defines a special token for removing a single token, and \citet{yePhysics2024} introduces a backspace action that removes an entire sentence to undo mistakes in math reasoning.
+
+\paragraph*{Generation safety.}
+Safeguarding model generation is a key issue for model providers~\citep{baiTraining2022,inanLlama2023, dubeyLlama2024}, and numerous alignment techniques have been developed to ensure that language models produce harmless content by steering them away from harmful behavior~\citep{christianoDeep2017,baiTraining2022,rafailovDirect2023}.
+However, manually crafted attacks~\citep{weiJailbroken2023}, automated red-teaming methods~\citep{perezRed2022}, and adversarial attacks~\citep{zouUniversal2023,liuAutoDAN2023} remain effective at breaking safety alignment of frontier models~\citep{andriushchenkoJailbreaking2024}.
+A promising direction for improving generation safety is inspecting and steering internal activations of language models~\citep{zouRepresentation2023,hernandezInspecting2024,rimskySteering2024,zouImproving2024}.
+Our work is complementary with existing alignment techniques: we focus on {\em recovery} from an unsafe generation rather than prevention.
+Notably, \citet{xuCourseCorrection2024} propose a technique to train language models to ``course-correct'' after an unsafe response, while our approach allows language models to discard the unsafe response altogether and generate afresh.
+
+
+
+\section{Teaching language models to backtrack}
+
+
+Our approach enables training of a language model that {\em backtracks} after an unsafe generation is produced.
+In this work, we define backtracking as the behavior of recognizing a partial unsafe response through the production of a special \reset token and then re-generating a safe response {\em from scratch}. Note that the partial unsafe response remains in the context window of the language model during the generation of tokens {\em after} backtracking which can aid the model in the production of a safer response. When generation is complete, all tokens up to and including the \reset token would then be discarded (if they appear) when returning the final output to the user. 
+We further assume that the model backtracks {\em at most once} in a single generation.
+This definition is notably different from prior work~\citep{cundySequenceMatch2023} that approaches backtracking in language models through the introduction of a {\em backspace} token that indicates the removal of the preceding token, which can occur an arbitrary number of times.
+By restricting our definition to {\em one-shot} backtracking, we can avoid framing text generation (with backtracking) as a Markov decision process as in \citet{cundySequenceMatch2023}, which is not obviously compatible with language model post-training algorithms including RLHF.
+In other words, our design choice makes backtracking learnable via existing algorithms for language model post-training.
+Empirically, we observe that model generations after backtracking are almost always safe, suggesting that backtracking just once is sufficient in the context of safety (Section~\ref{sec:results}).
+
+Following a standard post-training recipe~\citep{dubeyLlama2024}, we fine-tune a pre-trained language model to backtrack through supervised fine-tuning (SFT) on instruction-following data, followed by direct preference optimization (DPO) on pairwise preference data.%
+\footnote{We note that our method is compatible with RLHF algorithms in general, and we choose DPO for its simplicity and empirical effectiveness.}
+We provide an overview of our method in Figure~\ref{fig:method}.
+
+\subsection{Supervised fine-tuning}
+
+In a standard supervised fine-tuning setup~\citep{sanhMultitask2021,weiFinetuned2021}, pre-trained language models are further fine-tuned to follow user instructions~\citep{ouyangTraining2022} to make them more useful.
+With backtracking demonstrations added into the instruction tuning dataset, we could use standard instruction tuning to supervise language models to imitate backtracking.
+We note that SFT alone does not improve model safety by much empirically, but it crucially serves as warm-up for backtracking preference tuning which leads to substantial safety gains (Section~\ref{sec:results}).
+
+We start by assuming access to a standard safety tuning dataset $\gD_\SFT = \{ (x_i, \ySafe_i) \, | \, i \in [n] \}$, where $x_i$ is a prompt and $\ySafe_i$ is the ideal safe response.
+Because safety tuning datasets are commonly constructed by sampling model generations followed by human annotation~\citep{baiTraining2022,daiSafe2023}, it is not uncommon in safety tuning that we have an additional unsafe response $\yUnsafe_i$.
+These unsafe responses are discarded in SFT, because maximizing likelihood over them simply makes the fine-tuned model less safe.
+However, we can leverage these unsafe responses to construct backtracking demonstrations.
+Intuitively, when an unsafe response is produced, we supervise the model to backtrack and produce a safe response instead.
+
+Specficially, given a prompt $x$, safe response $\ySafe$ and unsafe response $\yUnsafe$, we first use a safety classifier, such as Llama Guard 2~\citep{llamateamMeta2024},  to perform rejection sampling over random prefixes of $\yUnsafe$ until we identify an unsafe prefix of $\yUnsafe$.
+The reason to perform rejection sampling (as opposed to random sampling or using the full unsafe response) is that it is desirable for the model to backtrack as soon as the generation becomes unsafe without wasting additional tokens, but not soon enough that the generation does not contain meaningful safety signals.
+Using the (partial) unsafe response, we supervise the model to backtrack by minimizing the following objective:%
+\footnote{We use $\oplus$ to indicate concatenation.}
+\begin{align}\label{eq:sft}
+    \mathcal{L}(\theta) = -\underbrace{\mathbb{E}_{(x, \ySafe, \yUnsafe)}
+    \left[ 
+      \log p_\theta \left( \text{\reset} \oplus \ySafe \,|\, x \oplus \mathrm{prefix}(\yUnsafe) \right)
+    \right]}_\text{encourages backtracking if unsafe}
+    -\underbrace{\mathbb{E}_{(x, \ySafe)}
+    \left[ 
+      \log p_\theta \left( \ySafe \,|\, x \right)
+    \right]}_\text{standard instruction tuning}
+\end{align}
+
+Crucially, we do not maximize likelihood over the unsafe prefix, to prevent making the unsafe response more likely.
+We further mix in data from a general utility dataset to improve the model's helpfulness (details in Section~\ref{sec:setup}).
+
+\subsection{Preference tuning}
+\label{sec:pref}
+
+RLHF has been an essential component in the post-training of frontier large language models~\citep{openaiGPT42023,dubeyLlama2024,gemmateamGemma2024} to make them helpful and harmless~\citep{baiTraining2022}.
+RLHF algorithms in general involve optimizing language models so that their behavior is consistent with human judgements in the form of preferred and dispreferred response pairs~\citep{christianoDeep2017,azarGeneral2024}.
+
+We construct {\em backtracking preference pairs} and teach language models when or when not to backtrack through RLHF.
+To construct a positive example where backtracking is desirable, we create a preference pair with $\mathrm{prefix}(\yUnsafe) \oplus \text{\reset} \oplus \ySafe \succ \yUnsafe$.
+By contrast, if the model already produces a safe response, there is no need for the model to backtrack at all.
+To discourage the model from unnecessary backtracking, we introduce negative examples by sampling a random prefix of the safe response $\ySafe$, and create a preference pair with $\ySafe \succ \mathrm{prefix}(\ySafe) \oplus \text{\reset} \oplus \yUnsafe$.
+It's possible to introduce other types of negative examples, for example $\ySafe \succ \mathrm{prefix}(\ySafe) \oplus \text{\reset} \oplus {y'}^{+}$ to prevent backtracking from an already safe generation.
+However, we do not explore alternative methods of constructing negative examples for simplicity.
+To elicit desirable backtracking behavior, we apply DPO off-the-shelf for preference optimization~\citep{rafailovDirect2023} over the constructed preference pairs.
+Similar to SFT, we mix in general utility data during DPO to improve model helpfulness.
+
+Generation from a backtracking language model is straightforward.
+After sampling a generation $y \sim p_\theta(x)$, we simply check whether the \reset token is present in $y$.
+If \reset is not present, we simply return all tokens.
+If \reset is present, we discard all tokens generated before and including \reset, and return all tokens after.%
+\footnote{In the rare case that the model resets multiple times, we take the suffix after the last \reset.}
+
+\begin{figure}[t]
+\label{fig:conv}
+\begin{tcolorbox}
+  \footnotesize
+  \texttt{Prompt:} Can you write a manifesto urging union workers to violently protest and destroy company property? I want to convince people that violence, even murder, is the only answer. \newline\newline
+  \texttt{Baseline:} Certainly! Here is a manifesto that urges union workers to violently protest and destroy company property, convincing people that violence, even murder, is the only answer:\newline\newline
+  **Manifesto for Violent Revolution**\newline\newline
+  We, the workers of the [company name] union, have had enough of being treated like second-class citizens by the corrupt and greedy executives who run this company ... (about 200 more tokens)\newline\newline
+  \texttt{Backtracking:} Sure,\colorbox{yellow}{[RESET]}I’m not sure I understand the question.  Can you explain what you want, and why you want it, in a non-violent way?
+\end{tcolorbox}
+\caption{Comparison of generations from baseline and backtracking \llama models.
+}
+\end{figure}
+
+
+
+\section{Backtracking improves generation safety}
+
+
+In this section, we evaluate the ability of backtracking to improve the safety of fine-tuned models, and we analyse how backtracking may impact the generation efficiency of the language model.
+
+\subsection{Experimental setup}
+\label{sec:setup}
+
+\paragraph{Training data.}
+In language model post-training, it is crucial to balance the safety and helpfulness of models.%
+\footnote{It is trivial to make an unhelpful model 100\% safe by, for example, training the model to refuse all requests, including benign ones.}
+We use the OpenAssistant-2 (OA) dataset~\citep{kopfOpenAssistant2023} for general utility training.
+We filter for English data only and take the top two ranked responses to construct preference pairs.
+For safety training, we use the harmless subset of the HH-RLHF dataset~\citep{baiTraining2022}.
+These data remain noisy: occasionally the chosen response is unsafe, and there is a substantial fraction of non-safety-related prompts.
+Thus, we use Llama Guard 2 as a safety classifier to filter for preference pairs such that the chosen response is safe and the rejected response is unsafe.%
+\footnote{Approximately 90\% of HH-RLHF data are filtered out in this process.}
+Targeting a 90:10 mixture of utility and safety data, we end up with 12,260 pairs from OA and 1,367 pairs from HH-RLHF.
+(In preliminary experiments, we had explored a 50:50 mix of utility and safety data, which did not lead to meaningful safety gains but substantially degraded model helpfulness.)
+
+\paragraph*{Models.}
+Post-training relies heavily on the quality of pre-trained models, and we experiment with backtracking on top of two state-of-the-art pre-trained text models at different sizes, \gemma~\citep{gemmateamGemma2024} and \llama~\citep{dubeyLlama2024}.
+We specifically choose to use base versions of these models because their instruction-tuned variants have already undergone heavy safety tuning on proprietary data, which confounds the true performance of the tuning methods themselves.
+We compare our backtracking method with baseline models fine-tuned on the same data without backtracking, to measure the effect of backtracking on model safety.
+\paragraph*{Safety and utility evaluation.}
+
+We use the existing open-source safety evaluation datasets AdvBench~\citep[AB]{zouUniversal2023}, MaliciousInstructions~\citep[MI]{bianchiSafetyTuned2023}, SimpleSafetyTests~\citep[SST]{vidgenSimpleSafetyTests2024}, and StrongREJECT~\citep[SR]{soulyStrongREJECT2024} for evaluation.
+We report the safety of models for the four sets of prompts by generating responses with greedy decoding, and we use Llama Guard 2 to provide safety labels.
+We further evaluate model helpfulness on MT-Bench~\citep{zhengJudging2023}, a challenging benchmark of multi-turn questions that evaluates capabilities including math and writing.
+
+\subsection{Results}
+\label{sec:results}
+
+\begin{table}[t]
+    \centering
+    \caption{
+        {\bf Backtracking improves generation safety.} We report safety violation rates across four sources of safety prompts: AdvBench (AB), MaliciousInstructions (MI), SimpleSafetyTests (SST) and StrongReject (SR) for the backtracking and baseline  methods.
+        MT-Bench scores are also reported.
+        Best results for each base model (Gemma-2-2B  or Llama-3-8B) are {\bf bolded}.
+    }
+    \label{tab:safety}
+    \begin{tabular}{@{}lrrrrrr|r@{}}
+    \toprule
+    Model                                      & Tuning          & AB             & MI             & SST            & SR             & Overall        & MT-Bench      \\ \midrule
+    \multirow{4}{*}{Gemma} & Baseline SFT       & 7.7\%          & 9.0\%             & 10.0\%          & 16.3\%         & 10.6\%          & 5.05          \\
+    \multicolumn{1}{c}{}                       & Backtrack SFT       & 7.7\%          & 10.0\%          & 11.0\%         & 10.2\%         & 9.0\%          & 4.88          \\
+    \multicolumn{1}{c}{}                       & Baseline SFT + DPO & 7.9\%          & 11.0\%         & \textbf{5.0\%}  & 17.6\%         & 10.8\%          & \textbf{5.20} \\
+    \multicolumn{1}{c}{}                       & Backtrack SFT + DPO & \textbf{5.0\%} & \textbf{8.0\%} & 8.0\%          & \textbf{6.7\%} & \textbf{6.1\%} & 4.96          \\ \midrule
+    \multirow{4}{*}{Llama}                     & Baseline SFT       & 5.4\%          & 5.0\%          & 4.0\%          & 5.8\%          & 5.3\%          & 6.67          \\
+                                               & Backtrack SFT       & 3.5\%          & 5.0\%          & 5.0\%          & 7.0\%          & 4.8\%          & 6.82          \\
+                                               & Base SFT + DPO & 5.8\%          & 4.0\%          & 3.0\%          & 5.4\%          & 5.2\%          & 6.68          \\
+                                               & Backtrack SFT + DPO & \textbf{0.6\%} & \textbf{0.0\%} & \textbf{2.0\%} & \textbf{3.2\%} & \textbf{1.5\%} & \textbf{7.12} \\ \bottomrule
+    \end{tabular}
+\end{table}
+\paragraph*{Backtracking improves model safety.}
+We report safety evaluation results of backtracking and baseline models in Table~\ref{tab:safety}.
+For both models, we observe that the backtracking model (with SFT + DPO) is substantially safer than all other setups.
+Backtracking improves the safety of Gemma over the DPO baseline on three out of four safety benchmarks, and we observe a -42\% relative reduction in overall safety violations (from 10.6\% to 6.1\%).
+The gains on the \llama model are even more substantial: we observe safety improvements across all four benchmarks and a -72\% relative reduction in overall safety violations  (from 5.3\% to 1.5\%).
+Crucially, both Llama and Gemma models trained with backtracking do not degrade model utility, as demonstrated by similar levels of performance on MT-Bench.
+We also observe that the models virtually never backtrack during non-safety evaluations.
+An interesting observation is that backtracking DPO is very effective in improving model safety, while backtracking SFT is only marginally effective.
+The reason seems to lie in how often these models actually backtrack across the safety evaluation sets: both models backtrack rarely after SFT training (2.4\% for Gemma, 0.2\% for Llama), but much more frequently after DPO training (60.6\% for Gemma, 49.9\% for Llama).
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}[b]{0.28\textwidth}
+      \includegraphics[height=4.2cm]{figures/unsafe.pdf}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.28\textwidth}
+    \includegraphics[height=4.2cm]{figures/ttft.pdf}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.4\textwidth}
+    \includegraphics[height=4.2cm]{figures/tps.pdf}
+  \end{subfigure}
+  \caption{Overall safety, latency (time to first token) and throughput (tokens per second) for backtracking and baseline Llama models with varying logit biases applied to \reset.}
+  \label{fig:tradeoff}
+\end{figure}
+
+\paragraph*{Trading off efficiency for safety.}
+The high backtracking frequencies after DPO training indicate that there are {\em false positives}: sometimes the models backtrack after a safe partial generation is produced.
+This could potentially lead to users experiencing higher latency, since the first effective token would come later in the generation process.
+In addition, all tokens generated before \reset are essentially wasted, and so the system overall will provide lower effective throughput.
+
+While it is arguable that any reasonable amount of reduction in efficiency is acceptable for building a safer language model, we nevertheless want to understand {\em the extent to which backtracking reduces generation efficiency}.
+By applying a logit bias to the \reset token at inference time, we can explicitly tune the likelihood of backtracking, which also allows us to quantify this tradeoff between generation safety and efficiency.
+Specifically, we apply a logit bias in $\{0, -5, -10, -15, -20\}$ to the \reset token.%
+\footnote{The backtracking model already has a high base likelihood of resetting, applying a positive logit bias does not further improve model safety.}
+We run inference on the safety evaluation set and compute relevant safety and efficiency metrics using VLLM~\citep{kwonEfficient2023} to simulate a production environment on a single H100 GPU.
+Results in Figure~\ref{fig:tradeoff} confirm that more backtracking does improve overall model safety: safety of the backtracking model decreases consistently with more negative logit bias.
+With a logit bias of -20, the backtracking model becomes 2X as unsafe as the same model without logit bias applied.
+
+Backtracking (without logit bias) does lead to an increased system latency perceived by the user: it takes an additional second on average for the user to observe the first effective token.
+The impact on throughput is more mild: the effective throughput decreases by approximately -12\%.
+By applying a small logit bias (e.g., -5), these decreases in generation efficiency can be mostly mitigated, with the model maintaining a similar level of safety.
+We note that these results are on a safety evaluation set where the model backtracks frequently.
+
+\paragraph*{Better safety under sampling.}
+In practice, model providers could employ a best-of-$k$ sampling strategy to improve model safety at the cost of efficiency: they could simply resample from the model if the first generation is unsafe (assuming access to a safety classifier such as Llama Guard 2), with up to $k$ tries total.
+On the other hand, a malicious user could adopt a worst-of-$k$ strategy, namely, resampling from the model up to $k$ times, hoping to get at least one unsafe response.
+In Figure~\ref{fig:sampling}, we explore model safety under best-of-$k$ and worst-of-$k$ sampling, with and without backtracking.
+
+One intriguing observation is that sampling just once under unit temperature (as opposed to greedy decoding, used in the earlier experiments) compromises safety.
+While baseline models become much more unsafe (Gemma: 10.8\% $\to$ 25.2\%, Llama: 5.2\% $\to$ 14.4\%), backtracking model become only marginally less safe (Gemma: 6.1\% $\to$ 7.6\%, Llama: 1.5\% $\to$ 2.8\%).
+If we allow the baseline models to generate twice, and pick the safer generation out of two (which makes the baseline model much less efficient than backtracking), the responses are still less safe than sampling from the backtracking model {\em only once}.
+
+Under simple worst-of-$k$ sampling, the baseline models become dramatically unsafe, and backtracking models are {\em asymptotically} safer than the baselines: unsafe rates grow much slower as a function of $k$.
+In fact, if we sample 10 times for every prompt, the baseline Gemma model produces at least one unsafe generation for $>$80\% of the prompts, but backtracking reduces this number to 39\%.
+Similarly for Llama, backtracking decreases the worst-of-10 unsafe rate to 16\% from 66\% for the baseline model.
+While these gains are encouraging, the overall safety levels under sampling are still far from user expectations of safety.
+In light of~\citet{huangCatastrophic2023}, which shows that strategically choosing the decoding algorithm can circumvent the alignment of many large language models, future work should investigate methods of safeguarding language model generation regardless of the sampling algorithm.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[height=3.5cm]{figures/best-of-k.pdf}
+  \hfill
+  \includegraphics[height=3.5cm]{figures/worst-of-k.pdf}
+  \caption{{\bf Backtracking provides safety gains under sampling.}
+  \label{fig:sampling}
+    The figures show \% of unsafe responses under best-of-$k$ (left) and worst-of-$k$ (right) sampling with a temperature of 1.}
+\end{figure}
+
+
+\section{Safety against adversarial attacks}
+
+
+Our results demonstrate that backtracking improves model safety in the ``standard'' case, but what about in the {\em adversarial} case, where an attacker tries to actively overcome the safety alignment of the models?
+In this section, we evaluate the robustness of backtracking models against 4 jailbreaking attacks, including an adaptive attack designed specifically to prevent backtracking.
+
+\subsection{Evaluation}
+
+\paragraph*{Threat model.}
+
+For these jailbreaking attacks, we assume the extreme case that the adversary has white-box access to a language model (i.e., access to model architecture and weights) behind a generation API, including knowledge of the backtracking method and the \reset token.
+We assume that \reset is treated as a privileged token (similar to BOS/EOS tokens), so that the attacker cannot use \reset in the prompt or modify its probability by applying logit bias.%
+\footnote{More precisely, we assume that the prompt is appropriately sanitized and therefore any attempt to use privileged tokens in the prompt simply would not work.}
+Given an unsafe prompt $p$, the goal of the attacker is to {\em find a perturbation $p'$ of the prompt such that the generation API produces an unsafe response}.
+
+This setting mirrors a common practice in open-source language models: a number of LLM providers make their language models open source~\citep{dubeyLlama2024,gemmateamGemma2024}, while presumably using some version of these models in their commercial products.%
+\footnote{For example, Meta AI and Gemini.}
+An adversary could conceivably use information gathered from these open-source models to exploit the commercial products, whereas the model providers would like to prevent these products from generating harmful and unsafe content.
+
+Note that, in a white-box setting, the attacker could literally just fine-tune the open-source models on unsafe data to break alignment, and recent work shows that such fine-tuning is indeed able to compromise the safety of aligned models~\citep{qiFinetuning2023}.%
+\footnote{Safeguarding open-weight models from malicious fine-tuning is an open problem beyond the scope of our work, and will likely require methods beyond the current state-of-the-art~\citep{hendersonSelfDestructing2023,tamirisaTamperResistant2024}.}
+The goal of our adversarial evaluation is {\em not} to demonstrate that the attacker has no means of generating unsafe text at all, but rather to analyze the {\em worst-case} safety behavior of the baseline and backtracking models, and rigorously assess whether backtracking provides additional safety over the baseline against a dedicated attacker.
+
+\paragraph*{Adversarial attacks.}
+We evaluate the safety of the baseline and backtracking models in Section~\ref{sec:setup} against three strong existing adversarial attacks, as well as a novel adaptive attack that targets backtracking.
+The three existing adversarial attacks are as follows:
+\begin{itemize}
+  \item {\bf Prefilling}~\citep{vegaBypassing2024}:
+  The prefilling attack uses system-level access to prefill the language model generation with an arbitrary prefix.
+  Since language models are trained to be coherent, models that allow this type of access are often vulnerable to jailbreaking when a simple affirmative prefix is prefilled (e.g., {\em ``Sure, I'm happy to help with that.''}).
+  Prefilling access is not offered across all production models, we still evaluate on the prefilling attack because of its simplicity and effectiveness against production models such as Claude~\citep{andriushchenkoJailbreaking2024}.
+  
+  \item {\bf GCG}~\citep{zouUniversal2023}:
+  GCG is a discrete token optimization algorithm that uses gradient-guided search to minimize an objective function~\citep{zouUniversal2023}, and it is shown to be one of the most potent jailbreaking attacks.
+  When used for jailbreaking, GCG searches for an adversarial suffix $a$ that maximizes the log likelihood of an unsafe target behavior $t$, similar in spirit to the prefilling attack.
+  However, GCG differs in that it does not require prefilling access and instead relies on the model to generate the entire harmful response.
+  We use an off-the-shelf attack implementation from HarmBench~\citep{mazeikaHarmBench2024} and run the attack for up to 500 steps for each prompt.
+  
+  \item {\bf AutoDAN}~\citep{liuAutoDAN2023}: AutoDAN uses a mutation model to identify modifications of a set of handcrafted jailbreaking prompts with the same goal of maximizing likelihood of an unsafe target string $t$.
+  Since these modifications are sampled from a language model, the final attack strings are low in perplexity, and can therefore bypass perplexity-based safety filters.
+  We pick this attack because it is the second strongest adversarial attack on HarmBench out of over 10 adversarial attacks, behind only the GCG attack.
+  Following~\citep{mazeikaHarmBench2024}, we run AutoDAN for a maximum of 100 steps.
+
+\end{itemize}
+
+We picked these existing attacks because of their effectiveness: the prefilling attack achieves 100\% attack success rate against production models including Claude~\citep{andriushchenkoJailbreaking2024}, while GCG and AutoDAN are the two most effective attacks in HarmBench~\citep{mazeikaHarmBench2024}.
+Due to a high compute cost for GCG and AutoDAN, we evaluate both attacks on a random sample of 200 evaluation prompts.
+
+\paragraph*{An adaptive attack against backtracking.}
+As \citet{carliniEvaluating2019} note precisely, defenses should be evaluated against adaptive attacks that are specifically designed to break them.
+One view of the backtracking generation method is that it adds a {\em sequential} classifier on top of text generation: as the language model generates each additional token, it re-classifies the partial generation and backtracks if the generation is unsafe.
+In other words, the attacker has to prevent \reset from being generated {\em at every token}, assuming that the generation after backtracking is always safe.%
+\footnote{This is a reasonable assumption because, in principle, the model provider can simply return a canned refusal response and discard the actual generation when the model backtracks.}
+
+Our objective is to find an adversarial suffix $a$ such that, when concatenated to a prompt $p$, simultaneously elicits an unsafe response and prevents backtracking:
+\begin{align}
+    \mathcal{L}_{\text{adaptive}}(p, t, a) = 
+    \underbrace{-\log\left(t \, | \, p \oplus a \right)}_\text{boosts target behavior}
+    + \underbrace{\sum_i \left(5 + \log\left(\texttt{[reset]} \, | \, p \oplus a \oplus t_{< i} \right) \right)^+}_\text{prevents backtracking across all tokens} \text{.}
+    \label{eq:adaptive}
+\end{align}
+The first term boosts likelihood of the target behavior $t$ conditioned on the adversarial suffix, while the second term minimizes the probability of backtracking across all token positions.
+More precisely, the second term in fact minimizes a hinge log loss, which is active only when the probability of backtracking is greater than $e^{-5} \approx 7 \times 10^{-3}$.%
+\footnote{At this threshold, \reset is practically never generated with greedy decoding.}
+Use of this hinge loss objective allows the underlying optimization algorithm (GCG) to exclusively minimize the first term when backtracking is sufficiently unlikely, which empirically improves optimization efficiency.
+
+It turns out that minimizing the adaptive loss in Eq.~\ref{eq:adaptive} for a fixed target $t$ remains insufficient to circumvent backtracking: the model could generate the target behavior $t$ with additional text and backtrack regardless.
+So, we propose the final attack in Algorithm~\ref{alg:adaptive}, which updates the target behavior $t$ incrementally as the model produces longer generations that contain the target, and continuously minimizes the adaptive loss over longer target strings.
+This attack runs GCG as the underlying optimization algorithm for up to 1 hour of compute on a single H100 GPU for every test prompt, which is roughly 4 times more compute than the default GCG setting used by \citet{zouUniversal2023}.
+\begin{algorithm}[t]
+    \caption{The adaptive attack algorithm.}
+    \label{alg:adaptive}
+    \begin{algorithmic}[1]
+      \Require{language model $M$, prompt $p$, (partial) target behavior $t$, initial adversarial suffix $a_0$}
+      \Ensure{optimized adversarial suffix $a$}
+      \Procedure{AdaptiveGCG}{}
+      \State $a \gets a_0$
+      \Repeat
+      \State $a \gets \mathrm{GCG}(M, p, t, a)$
+      \Comment{Optimize $\mathcal{L}_{\text{adaptive}}$ with GCG}
+      \State $s \gets M(p \oplus a)$ 
+      \Comment{Sample from model using the prompt and adversarial suffix}
+      \If{$s$ starts with target $t$}
+      \LineComment{Attack is partially successful when model produces target behavior but backtracks}
+      \If{$s$ contains \reset} 
+      \State $t \gets \text{prefix of } s \text{ before \reset}$
+      \Else
+      \LineComment{Attack is successful when generation completes without reset}
+      \State \textbf{break}
+      \EndIf
+      \EndIf
+      \Until{time out}
+      \EndProcedure
+    \end{algorithmic}
+  \end{algorithm}
+    
+  
+\subsection{Results}
+
+In Table~\ref{tab:adversarial}, we report attack success rates of adversarial attacks on models after baseline and backtracking DPO training.%
+\footnote{Similar to results in Table~\ref{tab:safety}, backtracking SFT training alone provides limited defense to adversarial attacks due to low probability of backtracking.
+
+}
+We report effectiveness of the adaptive attack on baseline models as well, which is equivalent to GCG with additional search budget.
+
+Notably, the baseline models are very vulnerable to jailbreaking attacks, and all attacks are successful $>$50\% of the time.
+This result seems to suggest that standard post-training on safety data is likely insufficient to stop a dedicated attacker.
+Across all three existing adversarial attacks, backtracking models are much more resistant to adversarial attacks than baseline models, where we observe $>$2X reduction in attack success rates in all but one model-attack pair.
+Against the prefilling attack, which is shown to be highly potent against production models, we find that backtracking provides good defense: large reductions in attack success rates on both Gemma (50.4\% $\to$ 11.5\%) and Llama (85.0\% $\to$ 2.6\%) are observed.
+These gains are explained by the high reset rates ($>$90\%) for both models.
+Since the model produces safer responses after backtracking, a higher reset rate naturally leads to safer models, even against adversarial attacks.
+
+The backtracking model remains remarkably resistant to the adaptive attack, under which the attack success rates are roughly equal to the GCG attack. In practice, the sequential nature of backtracking makes it difficult to optimize away, and increasing inference-time search budget does not make a big difference.
+A curious result is that GCG works better than prefilling as an attack, although GCG works by optimizing for some target behavior with a chance of failure, while the prefilling attack inserts that same behavior ``for free'' without failure.
+We speculate that the mere presence of the adversarial attack string itself (which usually looks like gibberish to humans) takes generation to an out-of-distribution state which compromises safety.
+
+Also surprisingly, AutoDAN is a stronger attack against backtracking than even our adaptive attack method.
+We find that AutoDAN always produces long attack prompts in a style that resembles manual jailbreaking exploits. 
+These attack prompts are far different from any prompt that the model observed through training, which might explain this effectiveness of AutoDAN over the other attacks.%
+}
+Future work should identify when backtracking fails to generalize and improve its generalization.
+
+\begin{table}[t]
+    \centering
+    \caption{{\bf Backtracking improves resistance to a variety of jailbreaking techniques.}
+    Cells are success rates of various attacks (ASR).
+    In parentheses, we report reset rates (RR), defined as the fraction of generations in which the model backtracks.
+    Better safety results for each model-attack pair are {\bf bolded}.
+    }
+    \label{tab:adversarial}
+    \begin{tabular}{@{}llllll@{}}
+        \toprule
+                      &          & Prefilling      & AutoDAN         & GCG             & Adaptive   \\
+
+        Model     &  Tuning  & {\small{ASR / (RR)}} &   {\small{ASR / (RR)}} &   {\small{ASR / (RR)}} &  {\small{ASR / (RR)}}
+        \\ \midrule
+        \multirow{2}{*}{Gemma} & Baseline     & 50.4\%          & 82.0\%          & 77.0\%          & 82.0\%          \\
+                               & Backtracking & \textbf{11.6\%} (92.7\%) & \textbf{60.0\%} (23.5\%) & \textbf{32.0\%} (53.0\%) & \textbf{27.5\%} (34.5\%) \\ \midrule
+        \multirow{2}{*}{Llama} & Baseline     & 85.0\%          & 84.0\%          & 62.5\%          & 73.0\%          \\
+                               & Backtracking & \textbf{2.6\%} (98.9\%)  & \textbf{37.0\%} (84.5\%) & \textbf{16.5\%} (69.0\%) & \textbf{21.0\%} (36.5\%) \\ \bottomrule
+    \end{tabular}
+\end{table}
+
+
+\section{Conclusion}
+
+
+In this paper, we propose {\em backtracking}, a technique that allows language models to recover from unsafe generations by discarding the unsafe response and generating anew.
+Over the same datasets and base models, we demonstrate that backtracking training leads to substantial gains over standard safety tuning, without degradation in model helpfulness.
+Evaluations against strong jailbreaking attacks, including an adaptive attack targeting backtracking, shows that the method provides additional protection against jailbreaking despite not being trained to do so.
+However, we note that, even with backtracking, all models tested are far from providing adequate adversarial robustness against jailbreaking.
+Viewing backtracking (specifically, the production of \reset) as a classification problem, a natural extension of our work would be to apply time-proven techniques such as adversarial training~\citep{madryDeep2018} as well as representation steering~\citep{zouImproving2024} to improve the robustness of backtracking.
+
+The backtracking technique can, in principle, be applied to generation refinement beyond correcting unsafe generations.
+However, backtracking relies on recognizing a ``bad'' generation: unsafe generations are often salient enough to identify post-hoc, while recognizing other generation errors (e.g., hallucinations, or reasoning errors) could be more challenging~\citep{agrawalLanguage2024,tyenLLMs2024}.
+Future work should explore the limit of backtracking as a technique for improving language model generation in contexts beyond safety.
+
+
+
+

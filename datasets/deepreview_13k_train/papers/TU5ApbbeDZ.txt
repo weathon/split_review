@@ -1,0 +1,306 @@
+\title{Learning Loss Landscapes in Preference Optimization}
+
+\begin{abstract}
+We present an empirical study investigating how specific properties of preference datasets, such as mixed-quality or noisy data, affect the performance of Preference Optimization (PO) algorithms. Our experiments, conducted in MuJoCo environments, reveal several scenarios where state-of-the-art PO methods experience significant drops in performance. To address this issue, we introduce a novel PO framework based on mirror descent, which can recover existing methods like Direct Preference Optimization (DPO) and Odds-Ratio Preference Optimization (ORPO) for specific choices of the mirror map. Within this framework, we employ evolutionary strategies to discover new loss functions capable of handling the identified problematic scenarios. These new loss functions lead to significant performance improvements over DPO and ORPO across several tasks. Additionally, we demonstrate the generalization capability of our approach by applying the discovered loss functions to fine-tuning large language models using mixed-quality data, where they outperform ORPO.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Learning from human feedback is a paradigm that enables the alignment of complex agents to human preferences, and has been successfully applied to Large Language Models~\citep{team2023gemini, achiam2023gpt}. In particular, fine-tuning pretrained LLMs with human preferences has become a popular strategy to adapt them to specific tasks and to improve their safety and helpfulness. \looseness = -1
+
+
+Most LLM alignment pipelines begin with a supervised fine-tuning (SFT) step, which involves supervised next-token prediction on a dataset of high-quality responses and leads to a reference policy. The reference policy is further optimized using the human preference data, typically through either Reinforcement Learning from Human Feedback (RLHF) ~\citep{christiano2017deep} or Direct Preference Optimization (DPO) ~\citep{rafailov2024direct}, or one of their several variants. RLHF consists of learning a reward model consistent with human preferences and then using Reinforcement Learning (RL) techniques such as REINFORCE~\citep{sutton1999policy} and Proximal Policy Optimisation (PPO) ~\citep{schulman2017proximal} to maximize the total expected reward. In contrast, DPO and its variations, e.g.\ odds ratio preference optimization (ORPO) \citep{hong2024reference},  bypass explicit reward models entirely and optimize directly on preference data, implicitly learning the reward. \looseness = -1
+
+
+While RL-based methods offer stronger theoretical guarantees and often lead to higher performance~\citep{song2024importance, xu2024dpo}, offline approaches such as DPO have gained traction due to their simplicity and the ability to leverage preexisting high-quality datasets. In contrast to PPO, where data collection and labeling are performed iteratively after each update, DPO and its modifications allow for more efficient training, avoiding the high computational costs, need of additional sample labelling and complexity of RL methods. Specifically, PPO requires careful parameter tuning~\citep{yuan2023rrhf} and involves simultaneous training of multiple models (the reward model, language model, and critic), which can be prohibitive in most hardware setups.
+
+The performance of offline algorithms such as DPO, particularly on noisy or low-quality datasets, has been a subject of debate~\citep{chowdhury2024provably}, with limited empirical results available. In this work, we provide a comprehensive analysis of PO algorithms, examining their behavior on automatically generated preference datasets. We perform this analysis in MuJoCo environments~\citep{todorov2012mujoco}, where the underlying reward structure is well defined and offers a clear performance metric to compare agents. In particular, we focus on ORPO, as we have found that it largely outperforms DPO in all settings we have considered. Our findings indicate that ORPO exhibits distinct failure modes when applied to specific low-quality or noisy datasets.
+These failure modes are present in practical LLM applications, raising concerns about using mixed-quality datasets for PO. \looseness = -1
+
+To find algorithms that are capable of dealing with these more difficult settings, we introduce a novel framework for PO based on mirror descent~\citep{nemirovski1983problem}, which generalizes DPO and ORPO and allows to search for new Preference Optimization (PO) algorithms. We perform this search over the space of mirror maps using evolutionary strategies (ES), as they have been shown to be effective for discovering algorithms~\citep{lu2022discovered, jackson2023discovering}. 
+We outline our contributions in detail below.
+\begin{enumerate}
+    \item We perform a systematic analysis of ORPO on preference datasets with varying levels of data quality, noise levels, initial policy, and judge temperature.
+    \item We introduce a novel family of offline PO algorithms using mirror descent, which can be easily parameterized and which we explore via ES.
+    \item For each failure mode we identify, we find and describe an algorithm within our framework that outperforms ORPO. Additionally, we show that allowing losses to vary based on the percentage of training progress drastically boosts performance in some settings. 
+    \item We demonstrate that PO algorithms discovered on MuJoCo can generalize to LLM tasks. In particular, for a highlighted failure setting, we show that our discovered algorithm improves performance w.r.t.\ the ORPO baseline. This finding showcases the efficacy of analyzing PO algorithms in simpler, less computationally expensive environments, as it is possible to obtain insights relevant for LLM applications. 
+\end{enumerate}
+
+
+
+\section{Preliminaries}
+
+Let $\M=(\S,\A,P,r,T, \mu)$ denote an episodic Markov Decision Process, where $\S$ and $\A$ are respectively the state and action spaces, $P(s' \mid s,a)$ is the transition probability from state $s$ to $s'$ when taking action $a$, $r(s,a) \in [0,1]$ is the reward function, $T$ is the maximum episode length, and $\mu$ is a starting state distribution. 
+A policy $\pi \in (\Delta(\A))^{\S}$, where $\Delta(\A)$ is the probability simplex over $\A$, represents the behavior of an agent on an MDP, whereby at state $s \in \S$ the agents takes actions according to the probability distribution $\pi(\cdot \mid s)$. Let $\tau = \{(s_t,a_t)\}_{t=0}^{T-1}$ denote a trajectory of length $T$ and, with a slight overload of notation, let $\pi(\tau) = \prod_{t=0}^{T-1}\pi(a_t|s_t)$ and $r(\tau) = \sum_{t=0}^{T-1}r(s_t,a_t)$. Lastly, let $\pi(\cdot|\tau)$ be the product distribution of $\pi(\cdot|s_0), \dots, \pi(\cdot|s_{N-1})$.
+\looseness=-1
+
+Let $\D = \{(s_0^i,\tau_w^i, \tau_l^i)_{i=1}^{N}\}$ be a preference dataset, where each tuple $(s_0,\tau_w, \tau_l)$ consists of a starting state $s_0$ and two trajectories with starting state $s_0$. Each pair of trajectories is ranked by a judge, who determines a chosen trajectory $\tau_w$ (``win'') and a rejected trajectory $\tau_l$ (``lose''), based on the cumulative rewards $r(\tau_w)$ and $r(\tau_l)$. We assume the judge ranks trajectories according to the Bradley-Terry model~\citep{bradley1952rank}, whereby the probability of choosing $\tau_w$ over $\tau_l$ is defined as 
+\begin{equation}
+    \label{eq:judge}
+    \mathbb{P}(\tau_w \succ \tau_l) =\frac{\exp(r(\tau_w)/\eta)}{\exp(r(\tau_w)/\eta)+\exp(r(\tau_l)/\eta)} =\sigma((r(\tau_w)-r(\tau_l))/\eta),
+\end{equation}
+where $\sigma$ is the sigmoid function and $\eta$ is a temperature parameter. 
+Our objective is to exploit the dataset $\D$ to find a policy $\pi^\star$ that maximizes the expected cumulative reward of an episode, that is
+\begin{equation}
+    \label{eq:obj}
+    \pi^\star\in\argmax_\pi\E_{\tau\sim(\mu, \pi, P)}r(\tau):=\argmax_\pi\E_{s_0\sim\mu, a_t\sim \pi(\cdot|s_t), s_{t+1}\sim P(\cdot|s_t, a_t)}\sum_{t=0}^{T-1}r(s_t,a_t).
+\end{equation}
+We consider an offline setting, where we do not have access to either the transition probability $P$, the reward function $r$, or the MDP $\M$.
+
+\subsection{Preference optimization}
+There are several methods in the literature to optimize the objective in \eqref{eq:obj} using a preference dataset $\D$. We provide here a short review of the main pipelines~\citep{ouyang2022training}. Two common independent preliminary steps are reward modelling (RM) and supervised fine tuning (SFT). RM aims to obtain an estimate of the true reward function, and is usually framed as a maximum likelihood estimation problem for a Bradley-Terry preference model, i.e.\ find \looseness = -1
+\begin{equation}
+\label{eq:rm}
+    \widehat{r}\in\argmax_{r_\theta}\log\sigma(r_\theta(\tau_w)-r_\theta(\tau_l)/\eta),
+\end{equation}
+for a parametrized reward class $\{r_\theta: \theta\in\Theta\}$ and for $\eta\geq0$. SFT is an initial alignment phase, where the starting policy $\pi_0$ is trained to imitate high-quality demonstration data. In particular, the starting policy $\pi_0$ is updated to minimize the cross-entropy loss $\ell(\pi, (s_0,\tau_w, \tau_l)) = -\log(\pi(\tau_w))$, typically doing one epoch over the dataset. We call \emph{reference policy} $\pi_\text{ref}$ the policy obtained at the end of this procedure. The new objective we want to optimize is
+\begin{equation}
+    \label{eq:obj_kl}
+    \pi^\star\in\argmax_\pi\E_{s_0 \sim \D,\tau \sim (\pi, P)}\left[\sum_{t=0}^{T-1}\E_{a\sim\pi(\cdot|s_t)}[r(s_t, a)] -\beta D_{\KL}(\pi(\cdot|\tau), \pi_\text{ref}(\cdot|\tau))\right],
+\end{equation}
+where the $D_{\KL}$ represents the $\KL$-divergence and is introduced to prevent the policy from moving too far away from the dataset distribution. The expressions in~\eqref{eq:rm} and~\eqref{eq:obj_kl} can be optimized sequentially, first obtaining a reward estimate in~\eqref{eq:rm} and then optimizing~\eqref{eq:obj_kl} with PPO using the reward estimate in place of the true reward. Alternatively, the optimization problems in~\eqref{eq:rm} and~\eqref{eq:obj_kl} can be solved implicitly using DPO or ORPO. We proceed to discuss each of these methods.
+
+\paragraph{PPO} PPO is recognized as one of the preferred methods for optimizing  \eqref{eq:obj_kl} when the necessary computing resources are available, as demonstrated by its success in training state of the art models like GPT-4~\citep{achiam2023gpt} and Claude~\citep{Antropic2023}. However, it presents a complex pipeline where one needs to effectively train a reward model, perform SFT and then optimize \eqref{eq:obj_kl}, where each phase has a different set of hyper-parameters. Additionally, storing the reward model, the reference agent and the current agent in memory is impractical in most setups and often requires sacrificing other aspects, such as batch-size. Besides it computational costs, PPO is known to be prone to reward overoptimization~\citep{coste2024reward}.
+
+\paragraph{DPO}
+Direct Preference Optimization (DPO) bypasses the need for an explicit reward model by using the agent itself to implicitly represent the reward model. It consists in optimizing the objective 
+\begin{equation}
+    \label{eq:obj_dpo}
+    \pi^\star\in\argmax_\pi\E_{(s_0, \tau_w, \tau_l) \sim \D} \left[\log \sigma\left(\beta\left(\log \frac{\pi(\tau_w)}{\pi_{\mathrm{ref}}(\tau_w)}-\log \frac{\pi(\tau_l)}{\pi_{\mathrm{ref}}(\tau_l )}\right)\right)\right],
+\end{equation}  
+which is obtained by plugging the theoretical solution of~\eqref{eq:obj_kl} in the maximum likelihood problem in~\eqref{eq:rm}. Refer to \Cref{app:method} for details. Thanks to its simplicity, DPO has been widely adopted to fine-tune LLMs as an alternative to PPO \citep{yuan2024selfrewarding, jiang2024mixtral}. 
+
+A known issue of DPO is that it pushes probability mass away from the preference dataset and to unseen responses, which can cause the final policy to deviate significantly from the reference policy, even when the reference policy aligns well with human preferences. In contrast, PPO can leverage the generalization capabilities of the (learned) reward model to generate responses beyond the preference dataset distribution, while the $\KL$-divergence penalty can provide additional regularization. To mitigate the risks described above, DPO is usually only applied for a few epochs.
+\paragraph{ORPO} ORPO is a more recent algorithm that aims to further simplify the training pipeline and, concurrently, to address the distribution shift issue present in DPO. ORPO merges the SFT and DPO steps into one, which optimizes the unified objective
+\begin{equation}
+    \label{eq:obj_orpo}
+    \pi^\star \in\argmax_\pi \mathbb{E}_{(s_0, \tau_w, \tau_l) \sim \D}\left[\underbrace{\log \pi(\tau_w)}_{\text{SFT}}+\lambda\underbrace{\log \sigma\left(\log \left(\operatorname{odds}_\pi(\tau_w)\right)-\log \left(\operatorname{odds}_\pi(\tau_l)\right)\right)}_{\text{preference optimization}}\right]
+\end{equation} 
+where $\operatorname{odds}_\pi(\tau)=\pi(\tau)/(1-\pi(\tau))$. ORPO gets rid of the need for a reference model by adding an SFT term to the preference optimization objective function, which substitutes the role of the SFT step and of the reference model in preventing the optimized policy from moving too far away from the dataset distribution. Additionally, the SFT term prevents pushing probability mass away from the preference dataset, addressing the distribution shift issue present in DPO.
+\subsection{Mirror Maps}
+We review the concept of mirror map, which will be needed when describing our methodology. For a convex set $\X\subseteq\R^{|\A|}$, a \textit{mirror map} $h: \X \rightarrow \R$ is defined as a strictly convex, continuously differentiable and essentially smooth function\footnote{A function $h$ is \emph{essentially smooth} if $\lim_{x\rightarrow\partial\X}\lnorm{\nabla h(x)}_2 = +\infty$, where $\partial\X$ denotes the boundary of $\X$.} function that satisfies $\nabla h(\X)=\R^{|\A|}$. Essentially, a mirror map is a function whose gradient allows bijective mapping between the primal space $\X$ and the dual space $\R^{|\A|}$. The specific class of mirror maps that we are going to use is the $\omega$-potential mirror map class, to which most mirror maps considered in the literature belong.
+\begin{definition}[$\omega$-potential mirror map \cite{krichene2015efficient}]
+    \label{def:omega}
+    For $u\in(-\infty,+\infty]$, $\omega\leq0$, an \emph{$\omega$-potential} is defined as an increasing $C^1$-diffeomorphism $\phi:(-\infty,u)\rightarrow(\omega,+\infty)$ such that
+    \looseness = -1
+    \hspace{-.2in}
+    \[\lim_{x\rightarrow-\infty}\phi(x)=\omega,\; \lim_{x\rightarrow u}\phi(x)=+\infty,\; \int_0^{1}\phi^{-1}(x)dx\leq\infty.\]
+    \looseness=-1
+    For any $\omega$-potential $\phi$, we define the associated mirror map $h_\phi$ as 
+    \hspace{-.3in}
+    \[h_\phi(\pi(\cdot|s)) = \sum\nolimits_{a\in\A}\int_1^{\pi(a \mid s)}\phi^{-1}(x)dx.\]
+\end{definition}
+When $\phi(x) = e^{x-1}$ we recover the negative entropy mirror map, while we recover the $\ell_2$-norm when $\phi(x)= 2x$ (refer to \Cref{app:pots}). Mirror maps in this class are simple to implement in practice, where $\A$ is often large, as they can be parametrized by a scalar function instead of a multi-dimentional one. Additionally, the same $\omega$-potential $\phi$ can be used to generate mirror maps for different action spaces, allowing the insights obtained for one action space to easily generalize to others. 
+An $\omega$-potential mirror map $h_\phi$ induces a \emph{Bregman divergence} \citep{bregman1967relaxation}, which is defined as  \looseness = -1
+\[\D_{h_\phi}(\pi(\cdot|s), \pi'(\cdot|s)) := h_\phi(\pi(\cdot|s)) - h_\phi(\pi'(\cdot|s)) - \langle\nabla h_\phi(\pi'(\cdot|s)), \pi(\cdot|s) - \pi'(\cdot|s)\rangle,\]
+where $\D_{h_\phi}(\pi(\cdot|s), \pi'(\cdot|s))\geq 0$ for all $x,y\in \Y$. When $\phi(x) = e^{x-1}$, $\D_{h_\phi}$ is equivalent to the KL-divergence, while we recover the Euclidean distance when $\phi(x)= 2x$ (refer to \Cref{app:pots}). When the Bregman divergence is employed as a regularization term in optimization problems, tuning the mirror map allows us to control the geometry of the updates of the parameters to be optimized, determining when to take large or small updates based on the current value of the parameters. 
+
+
+
+\section{Methodology}
+
+We develop a new framework for preference optimization based on mirror maps, which generalizes DPO and ORPO. We start by replacing the $\KL$-divergence penalty term in the objective in \eqref{eq:obj_kl} with a more general Bregman divergence, that is, we aim to solve the problem
+\begin{equation}
+    \label{eq:obj_breg}
+    \pi^\star\in\argmax_\pi\E_{s_0 \sim \D,\tau \sim (\pi, P)}\left[\sum_{t=0}^{T-1}\E_{a\sim\pi(\cdot|s_t)}[r(s_t, a)] -\beta D_h(\pi(\cdot|\tau), \pi_\mathrm{ref}(\cdot|\tau))\right],
+\end{equation}
+where $D_h$ is the Bregman divergence induced by a mirror map $h$. This new objective allows us to enforce different types of regularization, which, as we show later in the paper, can be tailored to account for specific properties of the preference dataset. Following the same intuition used to obtain the DPO objective, we have the following result.
+
+\begin{theorem}
+\label{thm:main}
+    Let $h_\phi$ be a $0$-potential mirror map and $\pi^\star$ be a solution to the optimization problem in \eqref{eq:obj_breg}. If $\pi_\mathrm{ref}(a|s)>0$ for all $s\in\S, a\in\A$, we have that
+    \begin{equation}
+        \label{eq:thm}
+        r(\tau) = \phi^{-1}( \pi^\star(\tau)) -\phi^{-1}(\pi_{\mathrm{ref}}(\tau)) + c(s_0),
+    \end{equation}
+    where $c(s_0)$ is a normalization constant that depends only on $s_0$.
+\end{theorem}
+We provide a proof for \Cref{thm:main} in \Cref{app:method}. By plugging \eqref{eq:thm} in the maximum likelihood problem in \eqref{eq:rm}, we obtain the objective:
+\begin{equation}
+        \label{eq:obj_bdpo}
+        \pi^\star\in\argmax_\pi\E_\D\big[\log \sigma\big(\beta(\phi^{-1}( \pi(\tau_w)) -\phi^{-1}(\pi_{\mathrm{ref}}(\tau_w))-\phi^{-1}(\pi(\tau_l)) +\phi^{-1}(\pi_{\mathrm{ref}}(\tau_l ))\big)\big],
+    \end{equation} 
+where $\E_\D$ is equivalent to $\E_{(s_0, \tau_w, \tau_l) \sim \D}$. When $\phi = e^x$, the expression in \eqref{eq:obj_breg} recovers the DPO objective in \eqref{eq:obj_dpo}.
+Additionally, we can modify the expression in \eqref{eq:obj_breg} to include an SFT term in order to avoid the SFT step, in a manner similar to ORPO. Let $\psi$ be an $\omega$-potential and let $\pi_{\mathrm{ref}}$ be the uniform distribution, then the new objective we consider is
+\begin{equation}
+    \label{eq:obj_borpo}
+    \pi^\star\in\argmax_\pi\E_{(s_0, \tau_w, \tau_l) \sim \D} \left[\psi(\pi(\tau_w)) +\lambda\log \sigma\left(\phi^{-1}( \pi(\tau_w))-\phi^{-1}(\pi(\tau_l))\right)\right],
+\end{equation} 
+where the terms $-\phi^{-1}(\pi_{\mathrm{ref}}(\tau_w))$ and $\phi^{-1}(\pi_{\mathrm{ref}}(\tau_l ))$ do not appear as they have cancelled out. We note that setting $\pi_{\mathrm{ref}}$ to be the uniform distribution is equivalent to replacing the Bregman divergence penalty in~\eqref{eq:obj_breg} with the mirror map $h(\pi(\cdot|\tau))$, which enforces a form of entropy regularization. When $\psi(x) = \log(x)$ and $\phi^{-1}(x) = \log(x)-\log(1-x)$, \eqref{eq:obj_borpo} recovers the ORPO objective in \eqref{eq:obj_orpo}. 
+
+The objectives in \eqref{eq:obj_bdpo} and \eqref{eq:obj_borpo} allow us to implement a wide variety of preference optimization algorithms, while benefiting from a theoretical justification. In the following, we will show that taking into account the properties of the preference dataset when choosing $\psi$ and $\phi^{-1}$ can lead to a better performance of the trained policy.
+
+Following the intuition developed by \cite{jackson2023discovering}, we also allow our objective function, specifically $\psi$ and $\phi^{-1}$, to account for training progress. This is equivalent to changing the Bregman divergence penalty in \eqref{eq:obj_breg} during training and, as we shall discuss in the following section, helps in dealing with datasets with mixed-quality data.
+\subsection{Learning mirror maps}
+To search the space of PO algorithms we have defined, we employ a neural network parametrization for both $\psi$ and $\phi^{-1}$, which we optimize using evolutionary strategies.
+
+Similarly to \cite{alfano2024meta}, we parameterize both $\psi$ and $\phi^{-1}$ as a one layer neural network with 126 hidden units and non-negative kernels, where the activation functions are equally split among:
+\[x,\; (x)_+^2,\; x^3,\; (x)_+^{1/2}, \;(x)_+^{1/3},\; \log((x)_+) , \; e^x,\; \tanh(x), \;\log(\clip(x)/(1-\clip(x))), \]
+where $(x)_+ = \max(x, 0)$ and $\clip(x) = \max(\min(x,1),0)$. The non-negative kernels and the increasing activation functions guarantee the monotonicity of $\psi$ and $\phi^{-1}$, while the several different activation functions facilitate expressing complex functions. To ensure that we are able to recover the ORPO objective, we add $a\log(x)$ and $b\log(x)-b\log(1-x)$ to the final outputs of $\psi$ and $\phi^{-1}$, respectively, where $a,b\geq0$. In case we want to take into account training progress, we give a second input to the neural network, i.e.\ $x\cdot n/N$, where $n$ is the current epoch and $N$ is the total number of epochs through the dataset. To ensure that monotonicity is preserved, we lower bound the weights associated to the second input with the negative of the respective weights associated to the first input. \looseness = -1
+
+To search for the best $\psi$ and $\phi^{-1}$ within this class, we employ the OpenAI-ES strategy~\citep{salimans2017evolution}. Denote by $\zeta$ the parameters of $\psi$ and $\phi^{-1}$ and by $\pi^\zeta$ the final policy obtained optimizing the objective in~\eqref{eq:obj_borpo} when using the parametrized $\psi$ and $\phi^{-1}$. Lastly, let $F(\zeta)$ be the expected cumulative reward of $\pi^\zeta$, i.e.\ $F(\zeta) = \E_{\tau\sim(\mu, \pi^\zeta, P)} r(\tau)$. We estimate the gradient $\nabla_\zeta F(\zeta)$ as
+\[\E_{\epsilon \sim \mathcal{N}(0, I_d)} \left[
+        \frac{\epsilon}
+        {2\sigma} (\widehat{F}(\zeta + \sigma \epsilon) - \widehat{F}(\zeta - \sigma \epsilon))
+\right],\]
+where $\mathcal{N}(0, I_d)$ is the multivariate normal distribution, $d$ is the number of parameters, $\widehat{F}$ is an estimate of $F$, and $\sigma>0$ is a hyperparameter regulating the variance of the perturbations. We then use Adam~\citep{kingma2014adam} to update the parameters $\zeta$ using the estimated gradient.
+
+
+\section{Experiments}
+
+We carry out our experiments on continuous reinforcement learning tasks in MuJoCo and on LLM fine-tuning. In particular, due to computational efficiency constraints, we discover mirror maps in MuJoCo and report their performance when evaluated for an LLM finetuning task.  
+
+\subsection{Environments}
+We consider three different preference optimization settings which we describe below. Each setting includes a starting policy, a set of preference datasets with different properties and an evaluation method for the trained policy. We apply ES to the first two settings and test the discovered objectives on the last one.
+
+\paragraph{Hopper} Our objective in \texttt{Hopper} is to learn a policy from scratch, i.e.\ with a randomly initialised policy, using a preference dataset. On \texttt{Hopper}, we train four reference agents of different skill levels, specifically, of respective expected cumulative reward (or value) of 900, 1200, 1800, and 2100 (the expert agent). Each dataset consists of 5120 rows, each with two trajectories of length 1000 starting from the same state. We generate a dataset by comparing trajectories by the expert agent (average return 2100), with other trajectories by one of our reference agents. A Bradley-Terry judge ranks each pair of trajectories, based on their true reward. The trained policy is then evaluated on the standard \texttt{Hopper} environment. To test the efficacy and robustness of our loss functions, we analyse a few variations of these standard datasets that represent common issues of real world data.
+\begin{itemize}
+    \item \textbf{Base dataset}: we compare a trajectory from the expert agent with one of a reference agent.
+    \item \textbf{Noisy dataset}: we flip a varying portion of the rankings in the base dataset.
+    \item \textbf{Shuffled dataset}: the comparisons are not always between the expert agent and a second agent. Namely, $25\%$ of the comparisons are between two trajectories from the expert agent, $50\%$ of the comparisons are between a trajectory of the expert agent and one of a reference agent, and $25\%$ of the comparisons are between two trajectories of a reference agent.  
+    \item \textbf{Poor judge dataset}:  the judge is more likely to flip labels when the two trajectories have closer reward values. This is implemented as an increase in the temperature of the Bradley-Terry judge. \looseness = -1
+\end{itemize}
+
+\paragraph{Ant} To further investigate a scenario similar to fine-tuning a large language model (LLM), we examine a setting in which a pre-trained agent is required to modify its behavior to achieve its goal with a stylistic constraint. Specifically, in the \texttt{Ant} environment, we take an agent that has been pre-trained on the standard \texttt{Ant} goal of moving forward, and enforce the objective of avoiding the use of one of its legs. This is accomplished by introducing the \texttt{\texttt{Three-legged-ant}} (\texttt{TLA}) environment, a modified version of \texttt{Ant} where utilizing the fourth leg results in significant penalties. We train one agent in the original \texttt{Ant} environment, achieving a reward of 6000, and another in the \texttt{TLA} environment, which achieves a reward of 3900. For comparison, the agent trained in the original \texttt{Ant} environment achieves a reward of 1700 when evaluated in the \texttt{TLA} environment. The dataset generation follows the same protocol as described for the \texttt{Hopper} environment, where trajectories are collected from both the \texttt{Ant} and \texttt{TLA} agents. However, in this setting the number of rows for each dataset is 1280, to account for the fact that we do not want the agent to learn from scratch, but to adjust its policy to a new instruction. The trained policy is then evaluated on the \texttt{TLA} environment. \looseness = -1
+
+\paragraph{LLM tuning} Finally, we evaluate one of our discovered objective functions on a real-world LLM fine-tuning task. To simulate a scenario involving mixed data quality, we fine-tune the gemma-7b\footnote{https://huggingface.co/google/gemma-7b} model on a modified version of the dpo-mix-7k\footnote{https://huggingface.co/datasets/argilla/dpo-mix-7k} dataset, where half of the responses, selected at random, are replaced with responses generated by gemma-2b\footnote{https://huggingface.co/google/gemma-2b}, a model that typically produces lower-quality responses compared to those originally present in DPO-mix. This approach replicates the shuffled dataset described for the MuJoCo experiments, aiming to simulate the challenges of training with datasets of varying quality, a common issue in fine-tuning tasks where it is difficult and costly to ensure uniformly high-quality data.
+
+ We use the same hyper-parameters for all MuJoCo datasets, which have been tuned for ORPO using Weights and Biases\footnote{https://wandb.ai/site}. We report them in \Cref{app:hyper}, along the hyper-parameters for OpenES. For the LLM tuning, we modify the Alignment Handbook library \citep{Tunstall_The_Alignment_Handbook}, and use the default hyper-parameters.
+
+\subsection{Results: Mujoco}
+\begin{table}[]
+\caption{Results for \texttt{Hopper}. For each dataset, we report the average value and standard error of 25 agents trained using ORPO and the objective discovered for that dataset. When ranking two trajectories of value 2100 and 1800, a judge with low, medium, and high temperature provides the correct ranking 95\%, 85\% and 75\% of the time, respectively. \looseness = -1}
+\begin{tabular}{ccccccc}
+\multicolumn{1}{l}{Value agent 1} & \multicolumn{1}{l}{Value agent 2} & \multicolumn{1}{l}{Noise} & \multicolumn{1}{l}{Shuffled} & \multicolumn{1}{l}{Judge temp.} & \multicolumn{1}{l}{ORPO} & \multicolumn{1}{l}{Discovered} \\ \hline \\[-1.5ex]
+2100                              & 900                               & 0                         & No                           & Low                                   & 2003$\pm$20               & 2012$\pm$11               \\
+2100                              & 1200                              & 0                         & No                           & Low                                   & 2055$\pm$12                 & 2055$\pm$10               \\
+2100                              & 1800                              & 0                         & No                           & Low                                   & 2043$\pm$ 15                & 2073$\pm$12               \\
+2100                              & 2100                              & 0                         & No                           & Low                                   & 2070$\pm$12                 & 2098$\pm$11               \\
+2100                              & 900                               & 0.1                       & No                           & Low                                   & 1519$\pm$45                 & \textbf{1724$\pm$43}               \\
+2100                              & 1800                              & 0.1                       & No                           & Low                                   & 1936$\pm$25                 & 1945$\pm$25               \\
+2100                              & 2100                              & 0.1                       & No                           & Low                                   & 2112$\pm$9                  & 2094$\pm$13               \\
+2100                              & 900                               & 0.2                       & No                           & Low                                   & 662$\pm$49                  & \textbf{1127$\pm$45}               \\
+2100                              & 900                               & 0.3                       & No                           & Low                                   & 623$\pm$29                  & \textbf{698$\pm$26}                \\
+2100                              & 1800                              & 0                         & No                           & Medium                                & 1884$\pm$22                 & 1928$\pm$23               \\
+2100                              & 1800                              & 0                         & No                           & High                                  & 1858$\pm$32                 & 1895$\pm$14               \\
+2100                              & 900                               & 0                         & Yes                          & Low                                   & 975$\pm$51                  & \textbf{1099$\pm$35}              
+\end{tabular}
+\label{table:hopper}
+\end{table}
+
+\begin{table}[t]
+\caption{Results for \texttt{TLA}. For each dataset, we report the average value and standard error of 25 agents trained using ORPO and the objective discovered for that dataset. \looseness = -1}
+\centering 
+\begin{tabular}{cccccc}
+\multicolumn{1}{l}{Value agent 1} & \multicolumn{1}{l}{Value agent 2} & \multicolumn{1}{l}{Noise} & \multicolumn{1}{l}{Shuffled} & \multicolumn{1}{l}{ORPO} & \multicolumn{1}{l}{Discovered}  \\ \hline \\[-1.5ex]
+3900                              & 1700                              & 0                         & No                           & 3277$\pm$49                 & \textbf{3473$\pm$63}\\
+3900                              & 1700                              & 0                         & Yes                          & 2425$\pm$58                 & \textbf{3485$\pm$163}\\
+3900                              & 1700                              & 0.1                       & No                           & 2675$\pm$62                 & \textbf{3837$\pm$52}               
+\end{tabular}
+\label{table:ant}
+\end{table}
+\begin{table}[t]
+\caption{Results for temporally-aware objectives. For each dataset, we report the average value and standard error of 25 agents trained using ORPO and the temporally-aware objective discovered for that dataset. \looseness = -1}
+\begin{tabular}{ccccccc}
+\multicolumn{1}{l}{Value agent 1} & \multicolumn{1}{l}{Value agent 2} & \multicolumn{1}{l}{Env} & \multicolumn{1}{l}{Noise} & \multicolumn{1}{l}{Shuffled} & \multicolumn{1}{l}{ORPO} & \multicolumn{1}{l}{Discovered} \\ \hline \\[-1.5ex]
+2100                              & 900                               & \texttt{Hopper}                          & 0                         & Yes                          & 975$\pm$51                  & \textbf{2032$\pm$13}                            \\
+3900                              & 1700                              & \texttt{TLA}                             & 0                         & No                           & 3277$\pm$49                 & \textbf{3903$\pm$42}                             \\
+3900                              & 1700                              & \texttt{TLA}                             & 0                         & Yes                          & 2425$\pm$58                 & \textbf{3251$\pm$83}                            
+\end{tabular}
+\label{table:time}
+\end{table} 
+We provide the results of our experiments for MuJoCo in Tables~\ref{table:hopper},~\ref{table:ant}, and~\ref{table:time}, which report the performance of ORPO and our discovered objectives for \texttt{Hopper}, \texttt{TLA}, and the temporally aware case, respectively. To provide information on the behavior of these objectives as well as guidelines on how to design loss landscapes for the settings we have considered, we compare the landscapes of ORPO and of the discovered objectives in Figures~\ref{fig:base},~\ref{fig:noisy},~\ref{fig:shuffled}, and~\ref{fig:time}. In these figures, we report, in absolute value, the gradients of the objective with respect to $\log (\pi(\tau_w))$ and $\log (\pi(\tau_l))$, as well as a sampled training trajectory. We discuss the results below, by dataset type.   \looseness = -1 
+
+\paragraph{Base Dataset}
+For the base dataset, we observe different behaviors for the \texttt{Hopper} and \texttt{TLA} environments. For the \texttt{Hopper} dataset, we see that ORPO achieves the performance of the best reference agent in all cases and that it is not significantly outperformed by the learned objective. On the other hand, ORPO does not reach the performance of the best reference agent in the \texttt{TLA} dataset and is surpassed by the discovered objectives. Remarkably, the temporally aware objective achieves the performance of the best reference agent, presenting a $19\%$ improvement over ORPO. As shown by Figures~\ref{fig:base} and ~\ref{fig:time}, both the static and the temporally aware discovered objectives present a smaller gradient than ORPO, which means that they cause smaller updates. Additionally, for ORPO we have that if $\log (\pi(\tau_w)) < \log (\pi(\tau_l))$ then the gradients increases suddenly by half, while for the temporally aware discovered objective we can observe that the gradient increases more slowly. Essentially, this means that ORPO causes a large update when the agent mistakenly assigns more probability to the rejected trajectory, while the temporally aware discovered objective causes a large update only if the agent assigns significantly more probability to the rejected trajectory. 
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}
+        \centering
+        \includegraphics[width=0.49\textwidth]{figs2/basic/ant/loss_plot_3900vs6000_orpo.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}
+        \centering
+        \includegraphics[width=0.49\textwidth]{figs2/basic/ant/loss_plot_3900vs6000.pdf}
+    \end{subfigure}
+    \caption{The plots represent the gradients, in absolute value, of ORPO (left) and the objective discovered on the base \texttt{TLA} dataset (right). The dots represent a sampled training trajectory.}
+    \label{fig:base}
+\end{figure}
+
+
+\paragraph{Noisy Dataset}
+As expected, the performance of ORPO declines when the dataset contains randomly flipped labels, with the degradation becoming more pronounced as the percentage of flipped labels increases. While the performance degrades for our discovered objectives in \texttt{Hopper} as well, it happens more slowly and we show significant improvements over ORPO for all noise levels. In \texttt{TLA}, the discovered objective is capable of almost achieving the best reference agent value despite the noise. \Cref{fig:noisy} shows that the objective discovered in \texttt{Hopper} assigns a roughly constant value to the gradient w.r.t.\ the chosen logits, while the gradient w.r.t.\ the rejected logits increases as $\log (\pi(\tau_w)) -\log (\pi(\tau_l))$ decreases. Consequently, when the agent encounters a flipped label where $\log (\pi(\tau_w)) \ll\log (\pi(\tau_l))$, the agent does not take larger updates to increase the chosen logits, but only larger updates to decrease the rejected logit, thus mitigating the noise effects. On the other hand, the objective discovered in \texttt{TLA} manages to mitigate the influence of noise by reducing the gradient value and by taking larger updates only when the chosen logits are much larger than the rejected logits. \looseness = -1
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}
+        \centering
+        \includegraphics[width=0.49\textwidth]{figs2/noisy/hopper/loss_plot_2100vs900.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}
+        \centering
+        \includegraphics[width=0.49\textwidth]{figs2/noisy/ant/loss_plot_3900vs6000.pdf}
+    \end{subfigure}
+    \caption{The plots represent the gradients, in absolute value, of the objectives discovered on the noisy \texttt{Hopper} dataset (left) and on the noisy \texttt{TLA} dataset (right). The level of noise is 0.1 for both plots. The dots represent a sampled training trajectory.}
+    \label{fig:noisy}
+\end{figure}
+\paragraph{Shuffled Dataset}
+While effectively using the same data as the base dataset, the performance of ORPO significantly decreases in both the \texttt{Hopper} and \texttt{TLA} shuffled dataset, where low quality trajectories are selected as the preferred choice when compared to other low quality trajectories. In contrast, the discovered objectives achieve a value of the final policy close to the best reference agent. In particular, the value reached by the temporally aware objective for \texttt{Hopper} is more than double the value reached by ORPO. All discovered objectives present smaller gradients than ORPO, and therefore induce smaller updates, which prevents taking large updates when the chosen logits belong to a low-quality trajectory. As to the temporally aware objective discovered on \texttt{Hopper},~\Cref{fig:time} shows that it induces very small updates for the chosen logits when they are low, and therefore probably belong to a low-quality trajectory. Lastly, we note a decrease in the absolute value of the gradient at the top and right borders as training progresses, which induce smaller updates. 
+
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}
+        \centering
+        \includegraphics[width=0.49\textwidth]{figs2/shuffled/hopper/loss_plot_2100vs900.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}
+        \centering
+        \includegraphics[width=0.49\textwidth]{figs2/shuffled/ant/loss_plot_3900vs6000.pdf}
+    \end{subfigure}
+    \caption{The plots represent the gradients, in absolute value, of the objectives discovered on the shuffled \texttt{Hopper} dataset (left) and on the shuffled \texttt{TLA} dataset (right). The dots represent a sampled training trajectory.}
+    \label{fig:shuffled}
+\end{figure}
+
+\paragraph{Poor judge}
+As expected, we observe a decrease in performance for ORPO when we increase the temperature of the judge. However, since we compared trajectories from two high-quality reference agents, the drop in performance is small. This is also reflected in the discovered objectives, which do not manage to significantly outperform ORPO.
+
+\begin{figure}[h]
+    \centering
+    \begin{subfigure}
+        \centering
+        \includegraphics[width=0.49\textwidth]{figs2/shuffled/hopper/loss_plot_2100vs900_tp.pdf}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}
+        \centering
+        \includegraphics[width=0.49\textwidth]{figs2/basic/ant/loss_plot_3900vs6000_tp.pdf}
+    \end{subfigure}
+    \caption{The plots represent the gradients, in absolute value, of the temporally aware objectives discovered on the shuffled \texttt{Hopper} dataset (left) and on the base \texttt{TLA} dataset (right), for three different values of the training progress. For each row, the dots represent the respective third of a sampled training trajectory.}
+    \label{fig:time}
+\end{figure}
+\subsection{Results: Transfer}
+We show that PO objectives learnt with our methodology can transfer to other domains. In particular, the static objective discovered on the shuffled \texttt{TLA} dataset tranfers to both the shuffled \texttt{Hopper} dataset, where it obtains a final policy value of 1735$\pm$39, and to the LLM-tuning task with shuffled data defined above. We train the base LLM on the modified DPO-mix dataset with both ORPO and the discovered objective. We observe that the first methodology achieves 57\% accuracy on the test set while the latter achieves 62\%. Additionally, we compare the two trained models with AlpacaEval~\citep{alpaca_eval}, and obtain a 53\% winrate for the model trained with the discovered objective. \looseness =-1
+
+
+\section{Related Work}
+
+\paragraph{Automatic Discovery of Preference Optimization Loss Functions}  Several works in the literature have shown that it is possible to discover machine learning algorithms that outperform algorithms manually designed by researchers~\citep{oh2020discovering, lu2022discovered, jackson2023discovering, alfano2024meta}. An approach particularly relevant to our method is DiscoPOP by~\cite{lu2024discopop}, which leverages an LLM to discover objective functions for LLM tuning. They consider a different space of objective functions from us, as they replace the log-sigmoid in \eqref{eq:obj_dpo} with a generic loss function, following the framework built by~\cite{tang2024generalized}. Additionally, instead of searching over a space of parametrized functions, they ask the LLM to generate loss functions in code space. This distinction suggests that our approaches could be complementary, as the model discovered by DiscoPOP could be paired with our learned mirror map. Lastly, DiscoPOP optimizes its objective function directly on the final task, whereas we adopt a two-stage process—optimizing the loss function on a separate task (MuJoCo) and later transferring it to the LLM setting. This transferability underscores the broader applicability of our approach. 
+
+\paragraph{Generalisations of DPO} A generalization of DPO alternative to ours is $f$-DPO, developed by~\cite{wang2023reverseklgeneralizingdirect}, which consists in replacing the $\KL$-divergence in \eqref{eq:obj} with an $f$-divergence and then apply the same heuristic as DPO to obtain the final objective function. We note that the $\KL$-divergence is the only $f$-divergence to be also a Bregman divergence, and vice-versa. They empirically demonstrate that different $f$-divergences lead to different balances between alignment performance and generation diversity, highlighting the trade-offs inherent to this class of algorithms. \cite{huang2024correcting} further explore this class of PO algorithm and individuate an $f$-divergence for which $f$-DPO is robust to overoptimization.
+
+
+\section{Conclusion}
+
+We have introduced a novel framework for Policy Optimization algorithms, as well as a methodology for the automatic discovery of PO algorithms using evolution strategies. Through a systematic evaluation across diverse settings in MuJoCo environments, we demonstrated that our discovered objective functions consistently match or exceed the performance of existing methods, particularly in noisy and mixed-quality datasets where the ORPO baseline struggles. The introduction of temporally aware objective functions further improved performance, allowing the optimization process to vary and adapt during training.  Analysing the landscape of the discovered objectives, we give an intuition that justifies improved performance as well as guidance in the design of new PO algorithms. Our results also indicate that the discovered objectives generalize beyond simple reinforcement learning environments, showing promising performance when transferred to LLMs, thereby confirming the broader applicability of our approach.
+
+
+
+
+
+
+

@@ -1,0 +1,491 @@
+\title{Controllable Context Sensitivity and the Knob Behind It}
+
+\begin{abstract}
+When making predictions, a language model must trade off how much it relies on its context vs.\ its prior knowledge.
+Choosing how sensitive the model is to its context is a fundamental functionality, as it enables the model to excel at tasks like retrieval-augmented generation and question-answering. 
+In this paper, we search for a knob which controls this sensitivity, determining whether language models answer from the context or their prior knowledge.
+To guide this search, we design a task for \defn{controllable context sensitivity}. 
+In this task, we first feed the model a context (\contexttext{Paris is in England}) and a question (\querytext{Where is Paris?}); we then instruct the model to either use its prior or contextual knowledge and evaluate whether it generates the correct answer for both intents (either \answertext{France} or \answertext{England}).
+When fine-tuned on this task, instruction-tuned versions of Llama-3.1, Mistral-v0.3, and Gemma-2 can solve it with high accuracy (85-95\%). 
+Analyzing these high-performing models, we narrow down which layers may be important to context sensitivity using a novel linear time algorithm. 
+Then, in each model, we identify a 1-D subspace in a single layer that encodes whether the model follows context or prior knowledge.
+Interestingly, while we identify this subspace in a fine-tuned model, we find that the exact same subspace serves as an effective knob in not only that model but also non-fine-tuned instruct and base models of that model family.
+Finally, we show a strong correlation between a model's performance and how distinctly it separates context-agreeing from context-ignoring answers in this subspace.
+These results suggest a single subspace facilitates how the model chooses between context and prior knowledge, hinting at a simple fundamental mechanism that controls this behavior.
+\looseness=-1
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+
+Language models are often prompted with a query and preceding context, e.g., in settings of in-context learning, retrieval-augmented generation, or document analysis.
+In such scenarios, the language model needs to integrate information from both the context and its prior knowledge stored in its parameters.
+In some cases, we may prefer the model to rely more on the context, e.g., to avoid hallucinating responses that may be based on outdated prior knowledge \citep{zhang2023sirenssongaiocean}; however, in other cases, we may prefer the model to rely more on its prior knowledge, e.g., to avoid being misled by misinformation provided in the context \citep{hong-etal-2024-gullible}.
+As a motivating example, consider a document analysis setting in which a language model is asked to help understand an opinion article in a newspaper.
+It might first be asked to summarize, e.g., \querytext{What is the main argument of this article?}. 
+In this case, the model should rely heavily on the context, i.e., the text of the article.
+Then, one might ask: \querytext{What are some criticisms of this argument?}.
+To answer this, the model ought to be skeptical; an opinion article may be written very authoritatively as if its arguments are established fact, or it may make some misleading claims to support its argument. 
+To answer this critically, the language model must draw more upon its prior knowledge of the issue and related opinions than blindly following the context.
+More broadly, because the degree of context sensitivity depends highly on the use case, it would be desirable to be able to specify how much and whether the model should be influenced by the context versus its prior knowledge.\looseness=-1
+
+Studies on the tension between context and prior knowledge have primarily focused on the setting of \emph{knowledge conflicts} \citep{longpre_entity-based_2022}, in which a given context directly contradicts information assumed to be in a model's prior knowledge about a given query.
+For example, a language model trained on a sufficient amount of data should be able to reply to the query \querytext{What's the capital of France?} with \answertext{Paris}. 
+However, if the context \contexttext{The capital of France is London.} is prepended to the query, the model needs to decide whether to respond based on the context (\answertext{London}) or its prior knowledge (\answertext{Paris}).
+Prior studies \citep{longpre_entity-based_2022, du-etal-2024-context, monea-etal-2024-glitch, ortu-etal-2024-competition} have shown that models will prefer drawing from context for some questions and prior knowledge from others; however, the exact manner by means of which the model selects among the sources is not well-understood.
+
+To this question of \emph{how}, we hypothesize that there is a simple fundamental mechanism within the language model that facilitates the binary decision of whether to rely on the context or the prior knowledge.
+To guide our search for such a mechanism, we design and execute a structured recipe.
+First, we create the \defn{controllable context sensitivity (CCS)} task which augments the standard knowledge-conflict setting with an \emph{intent}, such as \intenttext{Ignore the context} or  \intenttext{Listen to the context}.
+By disambiguating whether the model should follow context or prior knowledge through a simple addition to the prompt, we are able to identify and evaluate its behavior in both modes for the same context--query pair.
+We adapt models for this task using \emph{fine-tuning} and \emph{in-context learning}, then evaluate them on in-domain and out-of-domain test sets to assess whether they have developed a deeper ability to choose between context and prior knowledge beyond surface-level heuristics.
+In our case study on the Llama-3.1-8B family \citep{dubey2024llama3herdmodels}, we find that both fine-tuning and in-context learning are moderately effective, with models excelling on in-domain test sets and significantly improving over zero shot baselines on out-of-domain test sets.\looseness=-1
+
+Armed with models that can perform the CCS task reasonably well, we then explore the mechanisms that facilitate their behavior in this task.
+We hypothesize that for a model to solve this task, it must execute at least three high-level steps (not in any particular order): extracting an answer from prior knowledge, extracting an answer from the context, and deciding to answer with the context answer or the prior answer. We then seek to identify layers that may contain the model's computations that are aligned with each step. 
+To do so, we develop an algorithm that uses tools from mechanistic interpretability to find a targeted subset of layers at which activation patching \citep{meng2022locating} can switch a model from preferring the answer in the context to preferring the answer in its prior knowledge and vice versa.
+Then, building on ideas from distributed alignment search \citep{geiger2024das}, we identify a knob for the model's decision between following context or prior in the form of a one-dimensional subspace.
+Despite locating such a knob on an instruction-tuned model fine-tuned on this task that states explicit intents, we show that it is even effective on non-finetuned and base models of the same family for prompts that do not state the intent.\looseness=-1
+
+Furthermore, we show strong evidence that for models good at the CCS task, the two intents correspond to two distinct values in that subspace, while bad models fail to exhibit this distinction. 
+We repeat this process for Gemma-2 9B and Mistral-v0.3 7B to find a similar story.
+Our results suggest that, across many types of large language models, one fundamental mechanism represented by a value in a one-dimensional subspace facilitates their ability to decide between following the context or its prior knowledge.
+These findings move toward developing more robust language models with controllable levels of reliance on context and prior knowledge.
+They further highlight how investigating models at a mechanistic level can yield high-quality interventions to control a model's behavior.
+
+
+
+\section{Context and Prior Knowledge}
+
+\label{sec:related-work}
+\mypar{Prior Knowledge in Language Models.}
+Many prior studies have noted that LMs exhibit remarkable capabilities at answering questions depending on prior knowledge, such as factual recall (e.g., \querytext{What's the capital of France?}). 
+When queried, language models tend to produce plausible answers suggesting they may encode some level of knowledge about these entities \citep{brown_language_2020, petroni_language_2019, roberts_how_2020, geva_transformer_2021}.
+This knowledge is encoded within the model's weights during training as the model is exposed to mentions of these entities in its pretraining data \citep{xu_does_2022, zhou_context-faithful_2023}.
+Pretraining can lead to not only learning facts, but also memorizing specific strings \citep{carlini2023quantifyingmemorizationneurallanguage, stoehr2024localizingparagraphmemorization}.
+\mypar{Influence of Context on Language Models: Promises and Perils.}
+\label{sec:why_need_controllable}
+Models might also be prompted with context in addition to the query.
+For many use cases, the information provided in the context is critical to the model solving the task effectively, such as in:
+\begin{inparaenum}[(a)]
+    \item \defn{In-context learning} \citep{brown_language_2020}, in which a user provides several demonstrations of a task in context, which the model uses to answer the user's query;
+    \item \defn{Retrieval-augmented generation} \citep{lewis2021retrievalaugmentedgenerationknowledgeintensivenlp} and \defn{open-book question-answering} \citep{mihaylov-etal-2018, kasai_realtime_2022}, in which potentially relevant information from documents is included in context to help the model answer a user's query;
+    \item \defn{Interactive dialogue/chat} \citep{vinyals2015neuralconversationalmodel, openai_gpt4_2023}, in which a user converses with a language model, often with several turns of dialogue; and
+    \item \defn{Text annotation} \citep{ss_annotation_2024}, in which a model is given a passage of text (e.g., a tweet) and asked to annotate the passage's sentiment, toxicity, coherence, \textit{inter alia}---possibly in relation to a specific entity mentioned in the passage.
+\end{inparaenum}
+
+However, other use cases may be better served by ignoring the context to some degree, i.e., in:
+\begin{inparaenum}[(a)]
+    \item combating \defn{jailbreaking} \citep{yu2024jailbreaking}, e.g., ignoring attempts by the user to override a model's built-in behaviors; and
+    \item resilience to \defn{misinformation} \citep{hong-etal-2024-gullible}, e.g., avoiding integrating potentially incorrect information provided in context when answering a user's query.
+\end{inparaenum}
+In all of the above settings, the model has two sources from which it can draw upon when formulating a response: the context, and its knowledge about the query encoded during training. 
+Being able to control a model's sensitivity to context in an application-dependent manner is key to their robust use.
+\mypar{Controlling Model Sensitivity to Context.}
+Several studies have proposed interventions to reduce dependency on prior knowledge and favor in-context information.
+These approaches include prompting 
+\citep{zhou_context-faithful_2023, onoe_can_2023}, modifying training data \citep{wang_causal_2023}, fine-tuning \citep{li_large_2022}, and activation-level interventions \citep{li2024inference, stoehr-etal-2024-activation} at inference time.
+While \citet{li_large_2022} further aims for some level of controllable context sensitivity, i.e., by attempting to ignore irrelevant context, they do not allow for any form of explicit controllability by the user.
+\citet{neeman_disentqa_2022} train a model to predict both an answer based on context and one on prior knowledge.
+\looseness=-1
+
+
+
+\section{Identifying Mechanisms in Neural Networks}
+
+\label{sec:background_mechinterp}
+According to the linear subspace hypothesis \citep{bolukbasi2016LSH, vargas-cotterell-2020-exploring, wang2023concept}, model representations can encode concepts as low-dimensional linear subspaces.
+Based on this hypothesis, much prior work has explored how various concepts including truthfulness \citep{marks2023geometry, li2024inference}, humor \citep{vonruette2024language}, sentiment \citep{tigges2023linear}, and refusal  \citep{arditi2024refusallanguagemodelsmediated} are encoded within model representations.
+Beyond identifying the subspace representations of these concepts, researchers have further intervened on those subspaces to control the model behavior, by using the subspace to additively steer (i.e., adding a vector to a model representation) \citep{panickssery2024steeringllama2contrastive,turner2023activation,zou2023representation,pmlr-v162-ravfogel22a}.
+Several methods can be used to identify a subspace representing a concept, including distributed alignment search \citep{geiger2024das}, LEACE \citep{belrose2023leaceperfectlinearconcept}, and difference in means \citep{marks2023geometry}.
+
+
+\section{How to Find the Knob Behind Context Sensitivity}
+
+\label{sec:controllable_ctx_sensitivity}
+
+\subsection{Designing the Task}
+\label{sec:task_setup}
+First, we define the task of controllable context sensitivity, which should include \emph{minimally contrastive} example pairs. Each pair has the same context $\context$ and query $\query$, differing only in whether the model should follow the context or prior knowledge. These pairs allow us to compare the model's internal states when it follows context versus prior knowledge, with all else equal.
+We formalize our setup for this task as follows.
+Consider a language model $\lm$ over an alphabet $\alphabet$, i.e., $\lm$ is a distribution over the Kleene closure $\alphabet^*$.
+Further, consider a distinguished subset $\queries \subset \alphabet^*$ corresponding to licit queries and a distinguished subset $\contexts \subset \alphabet^*$ corresponding to licit contexts. Let $\varepsilon$ be the empty string.
+For a given query $\query \in \queries$, e.g., \querytext{What is the capital of France?}, and context $\context \in \contexts$, e.g.,  \contexttext{The capital of France is London.}, let $\answerprior \in \alphabet^*$ be the answer to $\query$ when ignoring the context  (\answertext{Paris}) and $\answerctx \in \alphabet^*$ be the answer to $\query$ that agrees with context $\context$ (\answertext{London}), respectively.
+Let $\ctxweight \in \ctxweightdomain$ denote an  \defn{intent}, i.e., a signal for whether to agree with the context ($\ctxintent$) or the model's prior knowledge ($\priorintent$).
+Let $\formatprompt \colon \queries \times \contexts  \times \ctxweightdomain \rightarrow \alphabet^*$ be a \emph{formatting function} mapping from a query, context, and intent to a formatted prompt, e.g., ``\emph{Context: \contexttext{The capital of France is London}\slash n Instruction: \intenttext{Only listen to the context}\slash n Query: \querytext{What is the capital of France?}}''.
+Then, let $\QCtrn \subset \queries \times \contexts$ and $\QCtst \subset \queries \times \contexts$ be disjoint subsets of the queries and contexts to be used for training and testing, respectively. We train our models on the strings $\formatprompt\left(\query, \context, \priorintent\right)\cdot\answerprior$ and $\formatprompt\left(\query, \context, \ctxintent\right)\cdot\answerctx$, where $\left(\query, \context\right) \in \QCtrn$ and $\cdot$ means string concatenation.
+
+\subsection{Identifying Model Behavior}
+\mypar{Adapting a Model to this Task.}
+To inspect the mechanism behind the model behavior, we first need a model capable of controllably following the context or prior knowledge.
+As such, we adapt a language model to solve the task defined in \Cref{sec:task_setup} with two methods: first, we consider fine-tuning $\lm$ using a standard next-token prediction objective of negative log-likelihood on the training set $\Dtrn$, and second, we consider including samples from the training set as few-shot demonstrations for in-context learning.
+\looseness=-1
+
+\mypar{Evaluating Controllable Context Sensitivity.} 
+\label{sec:measuring_ctx_sens}
+We evaluate a model's ability to controllably choose between context and prior knowledge using \emph{pair-accuracy}. 
+An example is correct only if the model outputs the correct answer to a given query $\query$ and context $\context$ for both intents ($\ctxintent$ and $\priorintent$).
+That is, given a model $\lm$ and dataset $\mathcal{S}$,
+\begin{align}
+   &\mathrm{\pairacc}(\lm, \mathcal{S}) \\
+   &\quad = \frac{1}{\lvert \mathcal{S}\rvert}\sum_{(\query, \context) \in \mathcal{S}}  \mathbbm{1} \{\greedy_{\answerstr \in \Sigma^*} \lm(\answerstr \mid \formatprompt\left(\query, \context, \ctxintent\right)) = \answer(\query, \context) \} \mathbbm{1} \{\greedy_{\answerstr \in \Sigma^*}\lm(\answerstr \mid \formatprompt\left(\query, \context, \priorintent\right)) = \answer(\query, \varepsilon) \} \nonumber
+\end{align}
+where $\greedy_{\answerstr \in \Sigma^*}$ denotes the output of greedy decoding.
+
+\subsection{Identifying Important Layers}
+\label{sec:method_id_important_comps}
+Next, we need to identify layers in the model where the target behavior appears to emerge.
+Consistent with prior work \citep{jin2024cuttingheadendsconflict}, we posit that for a model to succeed at this task, it must be able to execute at least three steps (not necessarily in this order):
+\begin{inparaenum}[(i)]
+\item extract the answer from the model's prior knowledge; 
+\item extract the answer from the context; and 
+\item decide whether to answer according to the context or the prior knowledge according to the given intent.
+\end{inparaenum}
+Note that, under the framing of \cite{geiger2024das}, these would be considered causal variables in a high-level model. 
+Without specifying an exact causal graph, we posit these must be components in any reasonable one.
+We use tools from mechanistic interpretability to identify the layers at which the model appears to implement each of these steps.
+
+\mypar{Intervention-based Interpretability.}
+Intervention-based interpretability techniques like activation patching are commonly used to identify which activations in a model are critical for a given task \citep{meng2022locating}.
+Intuitively, the idea is that if intervening at some set of intermediate states can change a model's output behavior for a given task, then those intermediate states likely play some critical role in the model's ability in that task.
+Activation patching, specifically using interchange interventions \citep{geiger_causal_2023}, involves using two strings that differ only with respect to the task of interest. 
+For example, to identify intermediate activations that may encode the \intenttext{intent} of a prompt, we can consider two input strings that share the same \querytext{query} and \contexttext{context} but differ in their \intenttext{intent}. 
+For a given model, $\lm$, we define a source string, $\source \in \alphabet^*$, and a target string, $\target\in \alphabet^*$. 
+During the forward pass of $\forwardpass{\target}$, we replace a subset of intermediate activations with the corresponding activations from $\forwardpass{\source}$ and observe the resulting effect on model internals and the output distribution of the patched $\forwardpass{\target}$.
+We only patch at the last token because this has been shown in previous work to be most informative to determining the next token \citep{yu_characterizing_2023, jin2024cuttingheadendsconflict, stoehr-etal-2024-activation, monea-etal-2024-glitch}.
+
+We also only patch the outputs of the multi-head attention (MHA) components in a transformer block; the intuition behind this choice is that this component ought to integrate information from the context into the residual stream of the last token. Interchanging these output activations allows us to analyze what kind of information is written on the residual stream and whether it has a causal effect on the model internals and the output distribution.
+By searching over different subsets of intermediate activations, we can identify those with the greatest impact on task performance and thus facilitate critical functionality.
+
+\mypar{Iteratively Searching For Important Components.}
+However, searching for a small subset of MHA components at the last token position to patch is nontrivial because it is over an exponentially large space (i.e., $2^{\layers}$, where $\layers$ is the number of layers in the model).
+Thus, we use an iterative search algorithm to build up a subset of important components, which requires $O(L)$ forward passes.
+In this algorithm, we use the \emph{Token Identity Patchscope} (\patchscope) to observe the model behavior at intermediate states \citep{ghandeharioun2024patchscopes}.\footnote{\patchscope can interpret the information in a model's residual stream at intermediate layers by using the model to map from the residual stream at a given layer and token index to a distribution over tokens that best represents the information stored in that intermediate state.
+This approach can also be viewed as a variant of the SelfiE method \cite{chen2024selfie}.
+While other alternatives for interpreting intermediate states could also be used here (e.g., probing \citep{tenney-etal-2019-bert}, LogitLens \citep{logitlens}, and TunedLens \citep{belrose2023elicitinglatentpredictionstransformers}), we prefer \patchscope because it performs better than these other methods.}
+Specifically, we use it to identify the model's likelihood on the context and prior answers at intermediate layers and choose a subset of layers to patch that would push the model to prefer the desired answer.
+Given a dataset of source and target pairs, the algorithm has two main steps. 
+First, it identifies a continuous \emph{base range} of layers at which patching MHA components enables decoding the source answer from the residual stream. 
+Then, it finds \emph{inhibition layers}, which suppress the source answer at later layers, by iteratively patching MHA components at these layers until the source answer has a high probability.
+We provide Python-esque pseudocode for our search algorithm in \Cref{app:searchalgo}.
+
+\begin{table}
+\caption{\textbf{Patching Setup}: To investigate the model's internal mechanisms, we use three distinct patching setups ($\dswgt$, $\dsprior$, and $\dsctx$) to address our research questions. 
+For all datasets, an example consists of a source prompt $\source$, source answer $\sourceans$, target prompt $\target$, and target answer $\targetans$.
+$\dswgt$, has two subvariants: $\dswgt^{\context\rightarrow\prior}$ and $\dswgt^{\prior\rightarrow \context}$, which represent different directions of the intervention.
+}
+\resizebox{\textwidth}{!}
+{
+\begin{tabular}{l|l|l|l|l|l} \hline
+Dataset  & Question \& Description & $\source$ & $\sourceans$ & $\target$ & $\targetans$ \\
+\hline
+
+\begin{tabular}[c]{@{}l@{}} $\dswgt^{\prior\rightarrow\context}$ \\ \\ \\ $\dswgt^{\context\rightarrow\prior}$ \end{tabular}  & \begin{tabular}[c]{@{}l@{}} \textbf{Where is $\ctxweight$ computed?} \\ Only $\ctxweight$ differs \\ Source $\ctxweight=\priorintent$ \\ \\ Only $\ctxweight$ differs \\ Source $\ctxweight=\ctxintent$\end{tabular}           & \begin{tabular}[c]{@{}l@{}}\contexttext{The capital of France is London} \\ \intenttext{\textbf{\underline{Ignore}} the context}\\ \querytext{What is the capital of France?} \\\\ \contexttext{The capital of France is London} \\ \intenttext{\textbf{\underline{Only listen to}} the context}\\ \querytext{What is the capital of France?} \end{tabular} &  \answertext{\begin{tabular}[c]{@{}l@{}}\answertext{Paris} \\ \\ \\ \\ \answertext{London}\end{tabular}} & \begin{tabular}[c]{@{}l@{}}\contexttext{The capital of France is London}\\ \intenttext{\textbf{\underline{Only listen to}} the context}\\ \querytext{What is the capital of France?} \\ \\ \contexttext{The capital of France is London}\\ \intenttext{\textbf{\underline{Ignore}} the context}\\ \querytext{What is the capital of France?} \end{tabular} & \answertext{\begin{tabular}[c]{@{}l@{}}\answertext{London} \\ \\ \\ \\ \answertext{Paris}\end{tabular}}\\ \hline
+
+$\dsprior$ & \begin{tabular}[c]{@{}l@{}} \textbf{Where is $\answerprior$ computed?} \\  $\ctxweight=\priorintent$, different $\answerprior$ \end{tabular}& \begin{tabular}[c]{@{}l@{}}\contexttext{The capital of France is London} \\ \intenttext{Ignore the context}\\ \querytext{What is the capital of \textbf{\underline{France}}?}\end{tabular} & \answertext{Paris} & \begin{tabular}[c]{@{}l@{}}\contexttext{The capital of France is London}\\ \intenttext{Ignore the context}\\ \querytext{What is the capital of \textbf{\underline{Italy}}?}\end{tabular} & \answertext{Rome}\\ \hline
+
+$\dsctx$ & \begin{tabular}[c]{@{}l@{}} \textbf{Where is $\answerctx$ computed?} \\  $\ctxweight=\ctxintent$, different $\answerctx$ \end{tabular}           & \begin{tabular}[c]{@{}l@{}}\contexttext{The capital of France is \textbf{\underline{London}}} \\ \intenttext{Only listen to the context}\\ \querytext{What is the capital of France?}\end{tabular} & \answertext{London} & \begin{tabular}[c]{@{}l@{}}\contexttext{The capital of France is \textbf{\underline{Rome}}}\\ \intenttext{Only listen to the context}\\ \querytext{What is the capital of France?}\end{tabular} & \answertext{Rome}\\ \hline
+
+\end{tabular}
+}
+\label{tab:patchingsetup}
+\end{table}
+\mypar{Patching Setups Per Subquestion.} 
+We wish to address the three subquestions: 
+\begin{inparaenum}[(i)]
+    \item Where is the intent $\ctxweight$ computed?
+    \item Where is $\answerprior$ computed?
+    \item Where is $\answerctx$ computed?
+\end{inparaenum}
+Answering each subquestion will demand applying the search algorithm described above on a specific patching setup, i.e., dataset, per subquestion.
+Each patching setup consists of a tuple containing a source string, the answer associated with the source, a target string, and the answer associated with the target. The relationship between the source and target components of an example will depend on the question we aim to answer.
+Table \ref{tab:patchingsetup} outlines the specific patching setups for each subquestion.
+First, $\dswgt^{\context\rightarrow\prior}$ and $\dswgt^{\prior\rightarrow\context}$ hold the \contexttext{context} and \querytext{query} constant but vary the intent $\ctxweight$, enabling us to investigate how the model processes different intents. 
+We define $\dswgt^{\prior\rightarrow\context} =  \{\left(\formatprompt\left(\query, \context, \priorintent\right), \answerprior, \formatprompt\left(\query, \context, \ctxintent\right),\answerctx\right)\}_{\left(\query, \context\right) \in \QCtst}$ and $\dswgt^{\context\rightarrow\prior} =  \{(\formatprompt\left(\query, \context, \ctxintent\right), \answerctx, \formatprompt\left(\query, \context, \priorintent\right),\answerprior)\}_{\left(\query, \context\right) \in \QCtst}$.
+$\dsprior$ includes tuples where both the source and the target share the intent $\ctxweight=\priorintent$, but differ in the prior answer $\answerprior$ they suggest, $\dsprior=  \{(\formatprompt\left(\query, \context, \priorintent\right), \answerprior, \formatprompt\left(\altquery, \context, \priorintent\right),\answer\left(\altquery, \varepsilon\right))\}_{\left(\query, \context\right) \in \QCtst, \altquery \in \queries \setminus \{\query\}}$.
+This allows us to evaluate how patching alters the model's response with respect to $\answerprior$ and discern how the model computes $\answerprior$. 
+Similarly, in $\dsctx$ we explore how the model computes $\answerctx$, $\dsctx=  \{(\formatprompt\left(\query, \context, \ctxintent\right), \answerctx, \formatprompt\left(\query, \altcontext, \ctxintent\right),\answer\left(\query, \altcontext\right))\}_{\left(\query, \context\right) \in \QCtst, \altcontext \in \contexts \setminus \{\context\}}$.
+
+\looseness=-1
+
+\subsection{Identifying the context-controllability subspace 
+feature} 
+\label{sec:identifyingsubspace}
+
+\newcommand{\ressource} {\residual{\layer}{\source}}
+\newcommand{\restarget} {\residual{\layer}{\target}}
+\newcommand{\restargetIV} {\widetilde{\boldsymbol{h}}^{\layer}_{\target}}
+\newcommand{\patchedlm}{\widetilde{p}}
+
+\mypar{Learning the Context-versus-Prior Subspace.} 
+Once we determined a subset of model components that might contain the mechanism which facilitates the functionality of deciding between answering from the context or prior knowledge, we can zoom further in and search for whether this functionality can be encoded in a small-dimensional subspace in these components. 
+According to the linear subspace hypothesis \citep{bolukbasi2016LSH, vargas-cotterell-2020-exploring}, there exists a linear subspace $\subspace \subset \R^D$ which encodes the information about a specific concept.
+In our case, the concept of interest is whether the model follows the answer from the context or its prior knowledge.
+Since this is a simple binary concept, we hypothesize that a rank-1 subspace within the subset of model components found via methods described in the previous section encodes this concept.
+
+Let $\layer$ be the last layer in the \emph{base range} found by our search algorithm.
+Let $\residual{\layer}{} \in {\R}^D$ denote the activation at layer $\layer$.
+We learn a rank-1 orthogonal projection matrix $\proj \in \R^{D \times D}$ which is used to project $\residual{\layer}{} \in \R^D$ onto a one-dimensional subspace $\subspace$ of $\R^D$, encoding the intent. We parameterize $\proj=\uvec \uvec^{\top}$, where $\uvec \in \R^{D}$ is the basis of the subspace and the norm of $\uvec$ is forced to 1, see \cref{app:parametrizationP} for a more detailed explanation of the parameterization of $\proj$.
+
+Given a tuple $\left(\source, \sourceans, \target, \targetans \right) \in \dswgt^{\prior\rightarrow\context} \cup \dswgt^{\context\rightarrow\prior}$, we define $\ressource$ to be the last token residual stream after layer $\layer$ of the forward pass $\lm\left(\source\right)$, and similarly, $\restarget$ for $\lm\left(\target\right)$. To learn $\proj$, we freeze the parameters of $\lm$ and patch the forward pass of $\lm\left(\target\right)$ as follows:
+\begin{subequations}
+\begin{align}
+\label{eq:decompose_subspace}
+&& \restarget &= (\boldsymbol{I} - \proj)\restarget + \proj \restarget && \text{\emph{(normal decomposition)}} \\
+&& \restargetIV &\defequals (\boldsymbol{I} - \proj)\restarget + \proj \ressource && \text{\emph{(patched decomposition)}}
+\label{eq:patch_subspace}
+\end{align}
+\end{subequations}
+\looseness=-1
+\Cref{eq:decompose_subspace} expresses that we can decompose $\restarget$ into \begin{inparaenum}[(i)] 
+\item the sum of the component representing our concept of interest ($\proj\restarget $) and 
+\item its orthogonal complement, the component which represents other information ($(\boldsymbol{I} - \proj)\restarget$).
+\end{inparaenum}
+Then, in \Cref{eq:patch_subspace}, $\restargetIV$ is constructed by replacing the component in $\restarget$ representing our concept of interest ($\proj\restarget$) with the component in $\ressource$ representing the concept ($\proj\ressource$).
+Thus, if $\proj$ projects onto a subspace that encodes the concept, then the representation $\restargetIV$ encodes the \intenttext{intent} concept from $\ressource$ and all other aspects from $\restarget$. 
+
+We denote $\patchedlm_{\layer}(\cdot; \proj, \source)$ to be the language model with activation $\restarget$ replaced by $\restargetIV$ as defined in \Cref{eq:patch_subspace}. 
+We construct a training set $\{\left(\source_n, \boldsymbol{a}_{\source_n}, \target_n, \boldsymbol{a}_{\target_n} \right)\}_{n=1}^{N} \subset \dswgt^{\prior\rightarrow\context} \cup \dswgt^{\context\rightarrow\prior}$.
+As can be seen in \Cref{tab:patchingsetup}, this dataset contains matched pairs $\source_n, \target_n$ which differ only in the specified intent.
+Then, to learn $\proj$ which well-represents our concept,  we minimize the following objective over the training set:
+
+\begin{align}
+\label{eq:loss}
+\obj_{\layer}(\proj) = -\frac{1}{N}\sum_{n=1}^{N}\log \patchedlm_{\layer}(\boldsymbol{a}_{\source_n} \mid \target_n ; \proj, \source_n )
+\end{align}
+
+That is, we minimize the cross-entropy loss between the language model when patched with $\restargetIV$ and the label $\sourceans$. 
+Since $\source_n$ and $\target_n$ always have different intents $\ctxweight$, but share the same \contexttext{context} and \querytext{query}, we are effectively optimizing for a subspace where replacing the subspace component of $\target_n$ with the corresponding component of $\source_n$ leads to an answer that reflects the flipped intent.
+
+\mypar{Controlling Model Behavior Using the Context-versus-Prior Subspace.}
+After learning an orthogonal projection matrix $\proj$ to project a vector into the context-versus-prior subspace, we can control the model's behavior by setting the subspace component based on the input intent $\ctxweight$. To do this we define a \emph{function} $c : \ctxweightdomain \rightarrow \R$ that acts as a scalar for the basis $\uvec$ of $\subspace$ and returns a constant corresponding to one of the two intents.\footnote{$\proj$ is redundant in the second term of \Cref{eq:staticreft} since $\proj\uvec c(w) = \uvec \uvec^T\uvec c(w) = \uvec c(w)$, but is included for consistency.}
+\begin{align}
+\label{eq:staticreft}
+\restargetIV &\defequals (\boldsymbol{I} - \proj)\restarget + \proj\uvec     c\left(\ctxweight\right) 
+\end{align}
+ The function $\emph{c}$ represents the knob to steer which behavior to follow. A successful static intervention on a learned subspace $\subspace$ implies that we have not only identified a one-dimensional subspace representing intent but also determined how to manipulate it manually. 
+We evaluate the effectiveness of a static intervention using the \emph{pair-accuracy}.
+
+
+
+\section{Case Study: Llama-3.1 8B}
+
+\label{sec:experiments}
+We now describe detailed empirical results in executing the recipe to identify the mechanism behind controllable context sensitivity as described in \Cref{sec:controllable_ctx_sensitivity}.
+Results for other models can found in \Cref{sec:feature_generality} and \Cref{app:other_models}.
+
+\subsection{Task Setup}
+\label{sec:exp_setup}
+\mypar{Datasets.}
+Following the task formulation in \Cref{sec:task_setup}, we construct our intent-augmented datasets, \ccsbasefake, \ccsmhfake, and \ccsarithmetic, based on the query-context pairs in \basefake, \mhfake, and \arithmetic, respectively \citep{monea-etal-2024-glitch}.
+\basefake is a knowledge-conflict dataset from Wikipedia with queries across 23 relation types (e.g., \querytext{Norway's capital city} or \querytext{Mac Pro, a product created by}) and paragraphs generated by a large language model that directly provide counterfactual answers.
+\mhfake is similar to \basefake, but instead of the counterfactual answer being directly stated in the paragraph, it is implied via an extra hop of reasoning (e.g., \contexttext{London is the capital of France. Tunis is in the same country as London.} \querytext{What country is Tunis in?}).
+\arithmetic is a synthetically-generated dataset whose queries are simple arithmetic expressions using the operators $\{+, -, \times, \div, \exp\}$ and contexts are reassignments of subexpressions to another value which results in a counterfactual answer.
+For example, given the query \querytext{(5 + 1) / 2 =} and the context \contexttext{5 = 9}, the prior-agreeing answer would be \answertext{3}, while the context-agreeing answer would be \answertext{5}. In our experiments, we limit expressions to a depth of 2, i.e., two operators, with input and output numbers between 0 and 9.
+
+\mypar{Intent Format.} 
+We also format the intent $\ctxweight \in \{\ctxintent, \priorintent\}$ in two different ways in order to probe the model's robustness to different formulations of the same query, context, and intent.
+First, the \emph{instruction} intent format (\pointemoji) expresses the intent as a string instruction, e.g., \intenttext{Ignore the context in answering the query.} or \intenttext{Only consider the context in answering the query.}
+Second, the \emph{weight} intent format (\numberemoji) expresses the intent as a context weight, e.g., \intenttext{Context weight: 0.} or \intenttext{Context weight: 1.}
+
+\subsection{Adapting Models to the Task}
+\label{sec:adapt_models}
+
+\mypar{Training.} 
+We investigate the degree to which instruction-tuned Llama-3.1 8B \citep{dubey2024llama3herdmodels} can solve this task after adapting it in two ways.
+First, we fine-tune (FT) models on the \ccsbasefake train set for 2048 examples using QLoRA on the attention components of the full network.
+Second, we also use in-context learning (ICL) with 10 examples from \ccsbasefake prepended to the prompt.
+See \Cref{app:trainingparams} for more details on training hyperparameters.
+
+\mypar{Evaluation.}
+We are interested in two forms of generalization: first, robustness to different datasets, and second, robustness to different intent formats. 
+For the former, we evaluate whether a model trained on \ccsbasefake can perform well on test splits from \ccsbasefake, \ccsmhfake, and \ccsarithmetic.
+For the latter, we assess whether a model trained with one intent format, e.g., \pointemoji, performs well with prompts in another format, e.g., \numberemoji.
+
+\mypar{Results.}
+In \Cref{fig:generalization_results}, we present the results of our generalization studies for Llama-3.1-8B-Instruct. 
+From \Cref{fig:generalization_datasets}, the model achieves high pair accuracy on its in-domain test set with FT ($\approx 90$\%) and ICL ($\approx 88$\%). 
+However, performance drops significantly for ICL and mildly for FT on \ccsmhfake, which requires additional reasoning. 
+On \ccsarithmetic, both models show significant performance degradation, as the task is out-of-domain and requires reasoning beyond context extraction.
+\Cref{fig:generalization_ifs} shows that, for intent formats, the model: \begin{inparaenum}[(a)]
+    \item performs well when fine-tuned on either intent format,
+    \item generalizes well from the \numberemoji~to the \pointemoji~format, and 
+    \item struggles more when trained on the \pointemoji ~format but evaluated on \numberemoji.
+\end{inparaenum} 
+This result is intuitive as the Instruct model is tuned to follow natural language instructions such as \pointemoji, but may not be familiar with interpreting the \numberemoji~instruction.
+Overall, Llama-3.1-8B-Instruct: \begin{inparaenum}[(a)]
+    \item learns the task in-domain with high accuracy,
+    \item generalizes moderately well to other datasets, depending on the degree of difference, and
+    \item adapts reasonably well to other intent formats, especially if they are in natural language.
+\end{inparaenum}
+     
+\begin{figure*}[htbp]
+     \centering
+     \begin{subfigure}[b]{0.6\textwidth}
+         \centering           \includegraphics[width=\textwidth]{figures/Meta-Llama-3.1-8B-Instruct_generalization_dataset.png}
+         \caption{Generalization to Datasets.}
+         \label{fig:generalization_datasets}
+     \end{subfigure}
+     \begin{subfigure}[b]{0.36\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{figures/confusion_matrix_pair_accuracy.png}
+         \caption{Generalization to Intent Formats.}
+         \label{fig:generalization_ifs}
+     \end{subfigure}
+     \caption{(a) Pair accuracy of Llama-3.1-8B-Instruct when evaluated on \ccsbasefake, \ccsmhfake, and \ccsarithmetic datasets. For each dataset, we evaluate the model {\color{c5}zero-shot}, with 10 {\color{c8}{in-context learning}} examples from \ccsbasefake, and after {\color{c2}fine-tuning} on 2048 examples from \ccsbasefake. (b) Pair accuracy when trained and evaluated on different intent formats, where \numberemoji~and \pointemoji~mean the intent is expressed as a numerical context weight or as a string instruction, respectively.}
+     \label{fig:generalization_results}
+\end{figure*}
+
+\subsection{Identifying Important Components} 
+Focusing on  Llama-3.1-8B-Instruct fine-tuned using the instruction (\pointemoji) intent format, we apply the algorithm presented in \Cref{sec:method_id_important_comps} (using \patchscope and activation patching) to identify important layers which appear to facilitate the model's sensitivity to context. \looseness=-1
+First, we investigate where the intent $\ctxweight$ is computed by using tuples from  $\dswgt^{\prior\rightarrow\context}$ and  $\dswgt^{\context\rightarrow\prior}$ (described in \Cref{tab:patchingsetup}). Second, we investigate which layers compute the prior answer $\answerprior$ and context answer $\answerctx$.  If these layers are later than the ones identified in the first step then that could suggest that $\ctxweight$ is encoded in the residual stream and depending on its value, either $\answerctx$ or $\answerprior$ is retrieved.
+
+\subsubsection{Where is \texorpdfstring{$\ctxweight$ computed?}{w}}
+\label{sec:load_ctx_layer}
+
+We aim to identify where the model initially incorporates information about the intent and how this affects its predictions. 
+We use the algorithm described in \Cref{sec:method_id_important_comps} and \Cref{app:searchalgo} on both $\dswgt^{\context\rightarrow\prior}$ and $\dswgt^{\prior\rightarrow \context}$ and report the identified layers in \Cref{fig:FTI:cw:pc} and \Cref{fig:FTI:cw:cp}, respectively. 
+We observe that in both directions, patching the MHA outputs for layers 12 to 16 reliably switches the prediction from context-agreeing (CTX) to prior-agreeing (PRIOR) and vice versa. 
+This suggests two possible hypotheses: either these layers load the correct answer into the residual stream, or they encode the intent bit $\ctxweight$, which subsequently triggers the loading of the correct answer in later layers. 
+However, \Cref{fig:FTI:cw:cp} shows the model has a low probability of the context answer until after layer 24, supporting the latter hypothesis.
+\subsubsection{Where are \texorpdfstring{$\answerprior$}{a\_p} and \texorpdfstring{$\answerctx$}{a\_w} computed?}
+
+We further apply the same algorithm to $\dsprior$ and $\dsctx$ to better understand in which layers the prior answer $\answerprior$ and the context answer $\answerctx$ are loaded.
+For $\dsprior$, we patch activations from a source example (SRC PRI) into a target example (TGT PRI), where both examples have the same intent $\priorintent$ but differ in their prior answer $\answerprior$. For $\dsctx$, we patch from a source example (SRC CTX) into the forward pass of a target example (TGT CTX), where both examples have intent $\ctxintent$ but different context answers $\answerctx$. 
+\Cref{fig:FTI:ctx:24-31} indicates that the context answer can be fully replaced by layers after layer 24. 
+This observation aligns with our previous findings.
+For $\dsprior$, we identify a base range of layers 13-18, with layer 24 acting as an inhibition layer (Fig. \ref{fig:FTI:prior:14-18+24}).}
+Since the answers are loaded at different layers, this suggests that distinct mechanisms are responsible for each answer. 
+Further, layer 24 appears to play a crucial role in both processes.
+In \Cref{app:searching_more_plots}, ablation studies show that neither $\answerprior$ nor $\answerctx$ can be effectively patched without this layer (\Cref{fig:FTI:ctx:no24} and \Cref{fig:FTI:prior:no24}).
+We hypothesize that layer 24's role varies by intent, conditionally loading either the prior or context answer.
+Since the model's preference for context or prior answer stabilizes after layer 16, this suggests that the intent bit is encoded in the residual stream after this point and later layers such as layer 24 read it.
+Given the binary nature of the intent variable, we further hypothesize that we can modify its encoding to selectively trigger loading of either the context or prior answer.
+
+\begin{figure*}[htbp]
+     \centering
+     \begin{subfigure}[b]{0.49\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{figures/MI/Llama-3.1-8B-Instruct/PC-OL12-16_prob.pdf}
+         \caption{$\dswgt^{\prior\rightarrow\context}$: Patching L12-L16}
+         \label{fig:FTI:cw:pc}
+     \end{subfigure}
+     \begin{subfigure}[b]{0.49\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{figures/MI/Llama-3.1-8B-Instruct/CP-OL12-16_prob.pdf}
+         \caption{$\dswgt^{\context\rightarrow\prior}$: Patching L12-L16}
+         \label{fig:FTI:cw:cp}
+     \end{subfigure}
+     \begin{subfigure}[b]{0.49\textwidth}
+         \centering
+           \includegraphics[width=\textwidth]{figures/MI/Llama-3.1-8B-Instruct/PRIOR-OL13-18+24_prob.pdf}
+         \caption{$\dsprior$: Patching L14-L18 + L24}
+         \label{fig:FTI:prior:14-18+24}
+     \end{subfigure}
+     \begin{subfigure}[b]{0.49\textwidth}
+         \centering
+           \includegraphics[width=\textwidth]{figures/MI/Llama-3.1-8B-Instruct/CTX-OL24-31_prob.pdf}
+
+         \caption{$\dsctx$: Patching L24-31}
+         \label{fig:FTI:ctx:24-31}
+     \end{subfigure}
+         \caption{Answer probabilities per layer as determined by patchscope (\patchscope) for different patching settings on Llama 3.1 Instruct FT \pointemoji. 
+         The $x$-axis represents the layers, and the $y$-axis shows the answer probability under \patchscope. 
+         The first row of each plot visualizes which layers are patched. 
+         Each row of subplots aims to answer one subquestions. \underline{Top Row}: \textbf{Where is $\ctxweight$ computed?} Patching a source SRC PRI into a TGT CTX (left; \ref{fig:FTI:cw:pc}) and vice versa (right; \ref{fig:FTI:cw:cp}). \underline{Bottom Row}:  \textbf{Where is $\answerprior$ and $\answerctx$ computed?} Patching an source SRC PRI into a TGT PRI, using samples from $\dsprior$ (\ref{fig:FTI:prior:14-18+24}) and the same for CTX (\ref{fig:FTI:ctx:24-31}).}
+        \label{fig:actpatch}
+\end{figure*}
+\subsection{Identifying the Context-Controllability Subspace}
+Following the method in Section \ref{sec:identifyingsubspace}, we learn a rank-1 orthogonal  projection matrix $\proj$ to identify a subspace $\subspace_\ctxweight$ that encodes intent. 
+We search for this subspace in \emph{layer 16}, as this is the last layer in the \emph{base range} of influential layers found in \Cref{sec:load_ctx_layer} using the algorithm described in \Cref{sec:method_id_important_comps}.
+We train on the subset of $\dswgt^{\prior\rightarrow\context}\cup\dswgt^{\context\rightarrow\prior}$ of \ccsbasefake for which the model answers correctly for both intents.
+If this subspace indeed controls the choice between context and prior, then we should be able to remove the intent from the input and still steer the model to produce the intended output by setting the value of $c(\ctxweight)$ according to Equation \ref{eq:staticreft}.
+For these interventions, we choose $ c\left(\priorintent\right) = -6$ and $ c\left(\ctxintent\right) = 6$ based on performance on a validation set.
+For example, a model should be able to answer \contexttext{The capital of France is London.} \querytext{What is the capital of France?} with \answertext{London} when steered with $c(\ctxweight) = 6$ and \answertext{Paris} when $c(\ctxweight) = -6$. \looseness=-1
+
+Figure \ref{fig:feat_caus} demonstrates that the identified subspace strongly aligns with the causal variable for intent, as we are able to effectively steer the model using it. On the fine-tuned instruct model, we achieve $83\%$ \emph{PairAcc} using steering, compared to the $95\%$ baseline (very left; INSTR FT \pointemoji). This is a strong result, considering that we are only manipulating a one-dimensional subspace in a single layer.
+Additionally, the figure shows that this same subspace exhibits strong alignment across different model configurations. 
+We successfully transfer $\subspace_\ctxweight$ to both the non-fine-tuned Llama-3.1-8B-Instruct (INSTR) and the base Llama-3.1-8B (BASE) model. 
+The subspace performs particularly well on the base model in the In-Context Learning (ICL) setting, where \emph{PairAcc} significantly exceeds the baseline accuracy as well as the steered finetuned model.
+Moreover, we highlight the zero-shot (ZS) performance of the instruct model ($73\%$), significantly outperforming the baseline performance. However, the ZS performance on the base model results in $0\%$ \emph{PairAcc}, as the model lacks training for instruction-following tasks. 
+While the subspace intervention is relatively ineffective on the fine-tuned base model, we hypothesize that this is because the weights of this model are likely the furthest from those of the fine-tuned instruct model.
+\begin{figure*}[htbp]
+     \centering           \includegraphics[width=\textwidth]{figures/MI/llama_pair_acc.pdf}
+     \caption{The baseline accuracy ({\color{c4}yellow}) reflects the \emph{PairAcc} of a model when evaluated on \ccsbasefake without any steering. In contrast, {\color{c1}blue} represents the \emph{PairAcc} when we remove the explicit intent instruction from the inputs and instead manually set subspace $\subspace_\ctxweight$. While $\subspace_\ctxweight$ was learned for the Instruct FT with \pointemoji, it transfers well to other configurations, as can be seen by the blue bar approaching or exceeding the yellow bar for most model configurations.}
+    \label{fig:feat_caus}
+\end{figure*}
+
+
+\section{A Fundamental Subspace for Controllable Context Sensitivity}
+
+\label{sec:feature_generality}
+
+Due to the strong evidence for a high alignment of $\subspace_\ctxweight$ to the causal intent variable, we propose two hypotheses:
+\begin{inparaenum}[(i)]
+\item This subspace is fundamental to the model and different learning methods learn to set the value of this subspace.  \label{item:generality:h1}
+\item As a fundamental subspace to language models, a similar rank-1 subspace to encode choosing context or prior knowledge can be found in other language models too.\label{item:generality:h2} 
+\end{inparaenum} 
+
+We provide several pieces of evidence to support hypothesis (\ref{item:generality:h1}). 
+First, \Cref{fig:feat_caus} shows that setting the value of the subspace can recover or even surpass baseline performance in both fine-tuned and non-fine-tuned models. 
+Notably, the exceptional efficacy of the subspace intervention in the zero-shot evaluation of the instruct model---which has never seen this examples of this task---suggests that this capability is already present in the model and can be activated by setting $\subspace_\ctxweight$. 
+Second, \Cref{fig:llamaotherds} shows that the subspace generalizes to multiple out-of-domain datasets, with steering performance either competing with or surpassing the intent instruction baseline across different datasets.
+This holds for not only the fine-tuned instruct model, but also ZS evaluations on the instruct model and ICL on the base model.
+Finally, we find a strong, statistically significant correlation (0.908) between a model's performance and how well it distinguishes values in that subspace when the intent is $\priorintent$ or $\ctxintent$.
+As displayed in \Cref{fig:feat_distr}, the difference in subspace value when the intent is $\priorintent$ vs $\ctxintent$ tends to be higher for better models at this task.
+This suggests that well-performing models know to set this value in the subspace.
+\begin{figure*}[htbp]
+     \begin{subfigure}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/MI/generalization_llama_pair_acc.pdf}
+        \caption{Llama 3.1: Other Datasets}
+        \label{fig:llamaotherds}
+
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/MI/pair_acc_BF_models.pdf}
+        \caption{BaseFakepedia: Other Models}
+        \label{fig:bfothermodels}
+    \end{subfigure}
+          \caption{We compare pair accuracy of a {\color{c4} baseline model} (on examples with intent instructions) against the {\color{c1}steered model} (on examples without intent instructions).
+          In both plots, we consider baseline models of (a) the instruct model fine-tuned on \ccsbasefake, (b) the base model with 10 in-domain ICL demonstrations, and (c) the default instruct model.
+          Left:
+          Subspace steering on Llama 3.1 generalizes across datasets  (\basefake (BF), \mhfake (MF), and \arithmetic (AR)). 
+          Right: For multiple models (Llama 3.1 8b (\llamaemoji), Gemma 2 9b (\gemmaemoji), and Mistral 7b v0.3 (\mistralemoji)), a rank-1 subspace can be used for effective steering. 
+          \looseness=-1}
+    \label{fig:subspacegenerality}
+\end{figure*}
+We further identify the described subspace in Gemma-2 9B \citep{gemmateam2024gemma2improvingopen} and Mistral-v0.3 7B \citep{jiang2023mistral7b}, using the same methodology as for Llama-3.1. 
+\Cref{fig:bfothermodels} shows that, for each model family, their respective  subspaces are transferrable from the fine-tuned instruct-model to both the non-fine-tuned instruct-model and the base model.  In \Cref{app:other_models} we provide a more detailed study of the subspace in other models, including finding a similarly high correlation between model performance and subspace values. 
+
+\begin{figure*}[htbp]
+     \centering
+     \includegraphics[width=\textwidth]{figures/MI/llama_distribution.pdf}
+     \caption{Subspace $\subspace_\ctxweight$ value distributions of different model configurations (left) and baseline model performance on \ccsbasefake (right). 
+     We can observe a high correlation between the absolute difference between the means of the two groups ($\ctxintent$ and $\priorintent$) and the performances.}
+
+        \label{fig:feat_distr}
+\end{figure*}
+
+
+\section{Discussion and Limitations}
+
+\label{sec:discussion}
+While our study presents evidence that a model can be induced to controllably draw from context or prior knowledge in answering questions in these specific settings, it is important to characterize the nature of the exact model capability we are examining in this study.
+In particular, both fine-tuning and turning this knob for a model seem to be more effective when the model can directly copy the answer from the context (when the intent is $\ctxintent$).
+For example, in the \arithmetic task, a context might explicitly contain the answer, e.g., \contexttext{(5 + 1) / 2 = 7}, or it might only override a subproblem, e.g., \contexttext{5 + 1 = 8}.
+Generally, the models are better at producing the context-agreeing answer when it is explicitly stated in the context.
+More investigation is needed to understand to what extent a model can use information from context as part of an intermediate reasoning chain as opposed to direct copying.
+
+Zooming out, in this work, we highlight the importance of studying the fundamental functionality in language models of controllable context sensitivity.
+We show how tools from mechanistic interpretability can be useful toward both understanding how models implement this functionality and controlling the behavior; further, such an approach could further be useful for understanding mechanisms behind other functionalities.
+While more work to characterize different forms of reliance on context versus prior knowledge is necessary in the future, our work is an important step toward understanding how models implement this functionality.
+
+
+

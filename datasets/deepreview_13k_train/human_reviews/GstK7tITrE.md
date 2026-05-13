@@ -1,0 +1,157 @@
+# AniHead: Efficient and Animatable 3D Head Avatars Generation
+
+- Decision: Reject
+- Scores: 6, 5, 5
+
+## Abstract
+Recent advances in diffusion models have led to great progress in generating high-quality 3D shape with textual guidance, especially for 3D head avatars. In spite of the current achievements, the Score Distillation Sampling (SDS) training strategy is too time-consuming for real-time applications. Besides, the implicit representations make these methods generally unavailable in animation. To solve these problems, we present an efficient generalized framework called AniHead, which contains shape and texture modelling respectively for generating animatable 3D head avatars. We propose a novel one-stage shape predicting module driven by parametric FLAME model. As for texture modelling, a conditional diffusion model is finetuned based on the proposed mean texture token. We further introduce a data-free strategy to train our model without collecting large-scale training set. Extensive experiments are conducted to show that our proposed method is not only more efficient than trivial SDS-based methods, but also able to produce high-fidelity and animatable 3D head avatars. The generated assets can be smoothly applied to various downstream tasks such as video and audio based head animation.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+In this paper, the authors introduce a comprehensive pipeline for the generation of 3D heads. Their approach begins with the application of a Score Distillation Sampling (SDS) technique to create training data for FLAME-based models. Subsequently, they employ this paired dataset to train generators for both shape and texture. To evaluate the efficacy and efficiency of their method compared to baseline techniques, the authors conducted a series of experiments, the results of which are presented in the paper.
+
+### Strengths
+This innovative method presents a unique pipeline for text-to-3D head generation that distinguishes itself in several ways. Notably, it does not rely on annotated datasets for training, making it exceptionally versatile. Additionally, the utilization of FLAME as the 3D representation in this method contributes to faster inference times, setting it apart from other baseline approaches.
+
+### Weaknesses
+My apprehension revolves around the generative quality constrained by the use of FLAME. It appears that the resulting shape and texture may fall short of the realism achieved by DMTet-based or Nerf-based methods. Specifically, the limited expressiveness of the FLAME model, which is designed to capture the general structure of human heads, may not be able to represent the fine details and variations present in real-world heads. This is particularly noticeable in areas such as the ears, nose, and around the eyes, where subtle geometric nuances are often lost. Moreover, there seems to be a limitation in the ability to synthesize 3D hair components, which is a significant drawback for generating complete and realistic 3D head avatars.
+
+Furthermore, it's worth noting that the methods employed in this approach draw heavily from existing techniques. For instance, the process of generating the training dataset bears a resemblance to DreamFusion, albeit with the incorporation of the FLAME representation. While the adaptation of SDS for FLAME is a novel application, the core idea of using a score-based model for 3D generation is not entirely new. The reliance on existing methods raises questions about the overall novelty and impact of the proposed approach.
+
+### Questions
+I'd like to pose two questions:
+
+In Figure 4, I'm curious about how the model manages to synthesize 3D hair for "Taylor Swift." It seems like a noteworthy achievement, and I'm interested in understanding the underlying techniques.
+
+In Figure 2, during the training data preparation stage, there appears to be a differentiation in the input for Stable diffusion, involving both shader images and textured images. I'd like clarification on the purpose of these distinct inputs for various steps and how they relate to the rendering equation and the overall model.
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes a novel approach for text-guided 3D animatable head avatar generation where a 3D avatar with desired facial characteristics is generated based on input textual prompts. It draws inspiration from recent works on diffusion-based text-to-3D approaches such as DreamFusion. The authors propose learning shape parameters of a FLAME-based 3D head model using a pretrained CLIP text encoder. A pretrained Latent Diffusion model is fine-tuned using an additional mean-texture token for generalized learning of the facial texture. The proposed method adopts SDS technique to generate training data for training the shape and texture generator. The main contribution is the reduction of inference time complexity for 3D avatar generation. The proposed method also does not require 3D annotated data for training. Qualitative and quantitative comparison results are presented with state-of-the-art methods on text-to-3D methods.
+
+### Strengths
+1.	The proposed method claims the lowest test time complexity among existing test-to-3D models that can generate 3D faces. There is substantial reduction in inference time (1 min) compared to the most efficient method DreamFace, which takes around 5 mins for the optimization. However the texture resolution is lower than DreamFace.
+2.	Qualitative results denote decent quality of 3d faces.  The reconstructed avatar of celebrity faces are bearing resemblance to the real people.
+3.	The method supports specific prompts for tasks such as generating special characters (animation) and editing shape and style.
+
+### Weaknesses
+•	Novelty and Significance of contributions:
+The novelty of the proposed method appears slightly limited. Similar to DreamFace, pretrained CLIP and LDM models are used in the avatar generation with independent geometry(shape) and texture generators. The idea of using a mean texture token is novel, but similar to ideas have been explored in the form of pre-defined identity token in DreamBooth, and domain-specific prompt tuning in DreamFace, Introduction point 2 mentions challenges in animation due to implicit representations as limitation of existing text-to-3D methods. However DreamFace uses the ICT-FaceKit face model that can be integrated with existing animation pipelines, so the benefit obtained from using FLAME model in the current work is not clear. DreamFace also additional benefits of hair selection and video-driven animation generation. It is not evident from the paper how much the state-of-the-art in text-guided-3D face avatar generation will be advanced by the proposed method. Although the paper claims reduction in inference time, there are doubts about the generalization ability of the method in generating arbitrary high-fidelity avatars of varying age, skin colours etc, given that the training data consists of manually selected 50 training samples generated by SDS optimization
+Writing Issues:  
+•	Unclear writing: 
+o	(Page 2) “need for a cumbersome two-stage generation process” – what two-stage generation process.
+o	(Page 2) “meticulously crafted to encapsulate essential human head texture information.” - How
+o	(Page 3) “we further propose other specific design to generate high-quality animatable 3D head avatars” – what designs.
+o	“the renewed text prompts can contribute to fine-grained personalized characteristics with high fidelity of identity”- doesn’t make sense
+o	“common texture-wise features shared by human beings.”
+o	Epsilon is not defined in Equation 1.
+•	Typos: 
+	“our propose generalized shape”  in Page 5
+         Equation 2 \phi() needs to be replaced by e_\phi()
+
+•	Missing citations : 
+o	“Existing methodologies [??] typically leverage SDS” 
+o	 “remarkable strides achieved in diffusion-based text-to-3D models [??]”
+o	“While these [??] SDS-based approaches”
+o	“Leveraging readily available off the-shelf models [??]”
+o	“[Articulated Diffusion]”
+
+Experimental Results:
+•	3D view (other than frontal) should have been included similar to existing works such as DreamFace. In the absence of a supplementary video it is hard to assess the qualitative results.
+•	User Study needed to assess the perceptual quality of the generated results.
+•	More detailed ablation study should be presented, the significance of the mean texture token should be justified using quantitative metrics.
+•	Some failure cases should be present to illustrate limitations of the method.
+
+### Questions
+1.	The description “data-free” strategy appears ambiguous as it also mentioned that SDS is used to generate training data. More clarity is needed on the training strategy in Section 3.3. Is a pretrained stable diffusion model being finetuned for the training data preparation?  What kind of candidate text prompts are used for the geometry and UV texture generation (few examples) How is it ensured that the “training data” generated using SDS sufficiently accurate for generalized performance at inference time.
+2.	Which pre-trained LDM models are used for finetuning?
+3.	The significance of the mean-texture token is not clear from the results. How is the mean-texture token prompt obtained at test time?  
+4.	Is the mean-texture token sufficient to finetune a pretrained LDM (trained on diverse images) to the specific task of the Face UV texture generation. How is it ensured that the generated texture is consistent with face geometry? In the absence of UV texture ground truth to finetune pretrained LDM for texture how is the accuracy ensured at inference time?
+5.	The paper mentions “we set this parameter to a relatively low value and obtain more realistic, real-life outcomes.” Is there any ablation done on the guidance scale parameter to justify this statement?
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper studies the problem of text-guided 3D face generation and proposes a method to achieve 3D head generation with one feed-forward pass without test-time optimization.  Here 3D parametric head model and texture maps are used to represent 3D heads. This work first generates texture maps and shape parameters based on text prompts by optimizing the 3D head parameters and texture maps using standard SDS loss. In this way, a set of samples with text and corresponding 3D heads are generated. These samples are then used to train models to directly predict the 3D head representation from text. Here, the shape parameters are predicted by an MLP with CLIP text embedding as input, and the texture maps are generated by fine-tuning a stable diffusion model. This method achieves a better CLIP score and faster inference compared with prior art.
+
+### Strengths
+- The paper is well-written and easy to follow.
+
+- The proposed method is technically sound. Most design choices are well-motivated.
+
+### Weaknesses
+ - The baseline DreamFace seems to generate higher-quality results. Also, DreamFace considers 4K resolution texture maps while the proposed method only considers 256x256. 
+
+- All generations have the same skin color, e.g. Mark Zuckerberg and Morgen Freeman in Figure 8. 
+
+This paper’s results are qualitatively not as impressive as its baseline DreamFace,  with significantly lower resolution and skin color variation. I also have concerns regarding the fact that the training data selection step.
+
+### Questions
+Overall, this paper’s results are qualitatively not as impressive as its baseline DreamFace, with significantly lower resolution and skin color variation. I also have concerns regarding the fact that the training data selection step. My questions include:
+
+- Can the proposed method be used for 4K generation or is there any fundamental limitation?
+- Why do the generations have very limited skin color variations? 
+- The authors mention that they use SDS optimization to obtain 600 samples while selecting only 50 samples for training to “ensure a balance of gender, ethnicity, and age”. Why selection is needed, and why not just balancing the input text prompts? Also, 50 training samples sound very limited. Why not use more samples?
+- How does the proposed method compare with the SDS optimization pipeline which is used for training data generation?
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

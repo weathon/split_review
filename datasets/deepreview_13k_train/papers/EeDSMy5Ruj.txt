@@ -1,0 +1,237 @@
+\title{Synthetic Theorem Generation in Lean}
+
+\begin{abstract}
+The application of large language models (LLMs) to theorem proving presents a promising avenue for advancing formal mathematics. Interactive theorem provers, such as Lean, offer a rigorous framework within which these models can assist in or automate proof discovery, grounding their reasoning capabilities in a sound, verifiable formal system. However, the potential of LLMs in this domain is constrained by the limited availability of formal proof corpora for training. To address this limitation, we introduce a synthetic theorem generator capable of producing novel Lean theorems and their corresponding proofs. Our approach employs forward reasoning to synthesize new propositions from premises drawn from existing Lean libraries. We explore candidate reasoning steps using a search strategy that optimizes for diversity of output, apply them in a linear fashion that avoids irrelevant proof steps, and assess their effect by meta-programmatically executing corresponding Lean tactics. These methods enable the generation of an arbitrary number of new theorems and proofs across various mathematical domains, using common Lean proof tactics while ensuring the correctness of generated theorems by construction.  We demonstrate the efficacy of the generated theorems and training data by fine-tuning models on synthetic theorems and evaluating them on the miniF2F-test benchmark. Our results show improvements in theorem-proving capabilities, with accuracy increasing from 37.3% to 38.5% for the Falcon2-11B model trained solely on Mathlib, and from 38.1% to 39.3% for the same model trained on a mix of rich datasets. These improvements highlight the value of our diverse synthetic data in augmenting limited existing corpora of formal proofs, providing complementary information that enhances LLMs' performance on theorem-proving tasks even when combined with other datasets.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Interactive theorem proving (ITP) provides a foundation for mechanically certifiable formal mathematics and software verification. While many proof assistants, such as the Lean theorem prover (de Moura & Ullrich, 2021), offer tools to automate portions of common proof-writing tasks, formal proofs still frequently require considerable time, effort, and expertise. One exciting direction of research within ITP aims to address this issue by using large language models (LLMs) to assist in or automate the writing of formal proofs in languages like Lean (Yang et al., 2023). LLMs have proven useful for code generation (Chen et al., 2021), though they continue to exhibit hallucinations in code-writing tasks by producing subtle bugs (Ji et al., 2023). Unlike code generated in languages such as Python or C, however, the correctness of formal proofs can be automatically verified using proof assistants.  
+
+The use of LLMs for ITP depends upon the availability of large quantities of formal proofs from which to extract training data. Yet existing corpora of formalized mathematics remain relatively scarce. Formal theorem proving is often time-intensive and requires specialized knowledge of both the relevant mathematical domains and the tools used for formalization, limiting the rate at which formalized mathematics is produced. As of this writing, the Lean theorem prover’s mathematical library, Mathlib, is the primary existing corpus of Lean code, containing approximately 1.5 million lines of code and growing by just over 300,000 lines in the past year (The mathlib Community, 2024). Despite the sizable portion of modern mathematics contained in this library, it is significantly smaller than corpora available in other languages, which total hundreds of millions of lines (Chen et al., 2021).  
+
+To obtain sufficient data for training at large scales, therefore, it is often necessary to turn to synthetically generated data. Prior techniques for generating synthetic data in formal languages have been varied. Some use random sampling or LLM-based methods to generate conjectures, for which proofs are then generated using proof search (An et al., 2024; Xin et al., 2024; Ying et al., 2024; Zombori et al., 2021). Other techniques procedurally generate new theorems and their proofs simultaneously by successively applying inference rules to reason forward from existing theorems (Firoiu et al., 2021; Lample et al., 2022; Polu & Sutskever, 2020; Trinh et al., 2024; Wang & Deng, 2020).  
+
+We introduce a synthetic data generator for Lean based on a procedural forward-reasoning approach and distinguished by several key features. First, our initial hypotheses are drawn from proofs in existing Lean libraries, and our inference steps use LLM-based premise selection to identify relevant lemmas in Mathlib, resulting in theorems that reference definitions of interest in modern mathematics. Second, we generate proofs by applying commonly-used Lean tactics, producing proofs with reasoning steps similar to human-written proofs. Third, we ensure the diversity and quality of our generator’s output by using a search procedure optimized to produce dissimilar theorems and a linear generation strategy that precludes irrelevant proof steps.  
+
+
+
+\section{2 BACKGROUND  }
+
+
+Lean 4 is a dependently typed functional programming language and theorem prover based on the Calculus of Inductive Constructions (de Moura & Ullrich, 2021). It has been used to formalize a wide array of mathematics, notably in the community-driven Mathlib project (The mathlib Community, 2020), which contains formalizations of over 150,000 theorems across various mathematical fields (The mathlib Community, 2024).  
+
+Many proofs in Lean are written using Lean’s metaprogrammatic tactic system. Instead of providing an explicit proof term, users may specify a series of tactics that correspond to high-level reasoning steps. These tactics generate the underlying proof term that is checked by Lean.  
+
+Theorem proving in Lean is interactive. After each tactic step, Lean displays to the user the current goal and a list of hypotheses that have been added to the local context. By “hypotheses,” we mean not only the antecedents of the theorem statement that are assumed to be true within the proof, but also any propositions derived therefrom. Collectively, we refer to the goal and hypotheses as the proof state. Users can incrementally develop a proof, observing the effect of each tactic on the proof state in real time and receiving immediate feedback if a tactic does not succeed. Because the tactic system offers this flexibility and interactivity, and because of its ubiquity as a mode of interaction with the proof assistant, our work aims specifically to develop training data for tactic-based theorem proving.  
+
+
+
+\section{3 RELATED WORK  }
+
+
+3.1 SYNTHETIC FORMAL-PROOF GENERATION  
+
+Several techniques have previously been employed to generate synthetic data in Lean and other formal languages. Some approaches generate theorem statements independently of their proofs. Several such approaches use random sampling within a fixed domain—such as integer arithmetic or propositional logic—to generate known-true theorem statements (An et al., 2024; Zombori et al., 2021). Others use autoformalization: theorem statements in natural language are converted to formal statements by an LLM (Xin et al., 2024; Ying et al., 2024). In both cases, a separate proof search procedure is required to generate the corresponding proof. Moreover, when using techniques like autoformalization, it is possible that the proposed theorem statement is incorrect; Xin et al. (2024) address this eventuality by searching for proofs of both the proposed theorem statement and its negation.  
+
+Other data-generation techniques procedurally generate both new theorems and their proofs simultaneously through forward reasoning (Firoiu et al., 2021; Lample et al., 2022; Polu & Sutskever, 2020; Trinh et al., 2024; Wang & Deng, 2020). These techniques iteratively apply inference rules to existing theorems, the result of which is a theorem whose proof consists of the applied inference rules. Most such techniques involve either random sampling or exhaustion of available proof steps, though Wang & Deng (2020) train neural networks to identify desirable proof steps.  
+
+![](images/55ba8ad8cdd38fb74c11be18706d8d8fdf0abfbdfb0f5a7a74df9b7a8eb21ae2.jpg)  
+Figure 1: An overview of our synthetic theorem generator’s architecture. Starting from proof states extracted from an existing library, forward-reasoning tactics are iteratively executed, yielding theorems and corresponding tactic proofs that are exported as Lean modules.  
+
+
+
+\section{3.2 LLMS FOR LEAN  }
+
+
+LLMs have been applied to a variety of tasks related to theorem-proving in Lean. Han et al. (2022) train language models, using data extracted from both tactic commands and raw proof terms, on a range of tasks including predicting the next lemma to be applied in a proof and the types of partial and complete proof terms, demonstrating the importance of a rich dataset from which a variety of term- and tactic-level data can be extracted. More recently, as part of the LeanDojo project, Yang et al. (2023) introduced the ReProver model, a retrieval-augmented tactic generator for Lean. ReProver incorporates a Dense Passage Retriever-based (Karpukhin et al., 2020) premise retriever, which predicts library lemmas that may be relevant to the next step of a proof. While ReProver uses these predictions to enhance tactic prediction, premise selection is also applicable to the task of synthetic theorem generation; we discuss our generator’s use of ReProver in Section 4.4. Additionally, Xin et al. (2024) demonstrate the capacity of synthetic data to improve the performance of the DeepSeekMath 7B model on Lean theorem-proving tasks, though their synthetic data, unlike ours, was produced using autoformalization of theorem statements and proof search.  
+
+
+
+\section{4 APPROACH  }
+
+
+4.1 FORWARD REASONING WITH LEAN TACTICS  
+
+Like the other procedural approaches we discuss in Section 3, ours is based on forward reasoning. That is, we apply inference rules to existing hypotheses to conclude new ones. For example, from the hypotheses $x\leq y$ and $y\leq z$ , we can use the transitivity of the $\leq$ relation to conclude $x\leq z$ . Alternatively, we could apply the additivity of $\leq$ to these same hypotheses to conclude $x\!+\!y\leq y\!+\!z$ . This differs from backward reasoning, which reduces a predetermined goal to sufficient subgoals. Reasoning backward, we begin with the goal of proving $x\ \leq\ z$ and use the transitivity of $\leq$ to reduce this to proving $x\ \leq\ y$ and $y\ \leq\ z$ . As these examples demonstrate, forward reasoning, unlike backward reasoning, does not require a priori knowledge of the statement one aims to prove. This allows a forward reasoning-based search procedure to freely explore a variety of theorems to generate.  
+
+We opt for a forward-reasoning approach because of its efficiency, scalability, and adjustability. Unlike approaches that separately generate conjectures and their proofs, forward reasoning combines  
+
+162 theorem generation and proof search into a single procedure. This avoids proof-search failures and   
+163 precludes the generation of invalid conjectures by ensuring that all generated theorem statements   
+164 are correct by construction. Additionally, unlike approaches based on auto-formalization, a forward   
+165 reasoning-based approach like ours does not require access to an input corpus of natural-language   
+166 mathematics. Lastly, forward reasoning can be tailored to produce proofs of a certain length or of   
+167 a certain kind by adjusting the number and type of forward-reasoning steps taken during the search   
+168 procedure.   
+116790 iWmep ldeifmfeernet notiuart feo rouwra radp rperaosaocnhi ntog -fboarsweda rtdh eroeraesomn ignegn eirna tsoerv ienr aLl eraens,p ewchtisc. h Afesa tpurreevsi oa umsloyr en octoemd,p lwexe   
+171 proof system than those in which similar generators have been previously implemented, such as   
+172 Metamath (Wang & Deng, 2020). Additionally, we select the initial hypotheses for our forward   
+173 proofs by drawing on the hypotheses that arise in existing Lean proofs. Finally, rather than applying   
+174 individual inference rules of the underlying logic, we use Lean tactics that more closely replicate the   
+175 types of reasoning steps used in human-written proofs. An overview of our architecture is shown in   
+176 Figure 1.   
+177 Forward reasoning depends upon access to an initial collection of hypotheses from which to reason.   
+178 We obtain these by extracting the current proof state—which includes all available hypotheses at   
+179 the current point in the proof—from each step of tactic proofs in an existing library of Lean proofs,   
+180 such as Mathlib or Lean Workbook (Ying et al., 2024). Each extracted state is then used as the initial   
+181 proof state for proof synthesis, providing our pool of initial hypotheses.   
+182 We choose to sample from existing proof states in this manner for several reasons. First, because of   
+183 the breadth of libraries like Mathlib and Lean Workbook, this sampling allows us to generate a large   
+184 number of theorems across a wide array of mathematical disciplines. Second, because these libraries   
+185 comprise theorems of mathematical interest, their hypotheses are likely to entail mathematically   
+186 interesting propositions and are unlikely to be inconsistent, which would yield trivial theorems.   
+187 Finally, as we discuss in Section 4.4, because both libraries are based on definitions in Mathlib, we   
+188 are able to employ Mathlib’s sizable collection of lemmas in our forward reasoning.   
+189 Once the generator has extracted a proof state from an existing library, it applies a sequence of   
+190 forward-reasoning tactics to derive a new hypothesis that follows from the available ones. It con  
+191 tinues applying tactics until none succeed or a user-determined maximum proof length is reached.   
+192 Using Lean tactics allows us to produce proofs that better resemble human-written proofs, rather   
+193 than, for instance, raw proof terms that can be difficult to read and do not resemble most medium  
+194 or large-scale proofs written by human authors.   
+195 This approach is based on a method of metaprogrammatic tactic execution, simulating the process   
+196 of writing tactics as a user of Lean. When writing a proof in Lean, the current proof state is visible   
+197 in a panel in the user’s code editor; as the user enters new tactics into the open file, the proof state   
+198 updates to reflect the changes made by each tactic step. We simulate this process by syntactically   
+199 constructing tactics that correspond to candidate forward-reasoning steps, then executing these tac  
+200 tics in a metaprogrammatic environment that replicates Lean’s in-editor tactic execution. After each   
+201 tactic step, we assess whether the invoked tactic successfully introduced a new hypothesis into the   
+203 itetox.  etcBhueet ceradeu asasteo  enoaiucnrh g g scetanereprr.iaetdo ro iust  ddiruericntlgy  tehxee cguetnienrga ttiaocnti cp rcoocdeed, uirt ec sainm pprloyd ubcye  cao tnaccattiecn patrionogf  tehqeu itvaaclteicnst   
+205   
+206 Finally, once the generator has derived a final hypothesis $p$ from the hypotheses $h_{1},...,h_{n}$ in the   
+initial extracted proof state, it outputs the corresponding theorem $h_{1}\;\to\;\cdots\;\to\;h_{n}\;\to\;p$ . The   
+207   
+208 proof of this theorem, as noted above, is obtained from the forward-reasoning steps used to derive   
+$p$ . Figure 2 demonstrates how a theorem is synthesized in this manner. In the following sections, we   
+209 describe in greater detail the process of forward proof synthesis and theorem output.   
+210   
+211   
+12 4.2 PROOF SYNTHESIS ALGORITHM   
+213   
+214 To generate these proofs, we attempt to apply all possible tactic steps from an inventory (detailed   
+215 in Section 4.3) of allowable forward-reasoning tactics. For every successful tactic application, we  
+
+![](images/223f84c880766483e0f1c99076e574bb13404406ec55fce83d552bf31f6df53c.jpg)  
+
+Figure 2: An example of the process by which a theorem is synthesized starting from a Mathlib proof state. Note that the original goal $b\mid a$ is ignored during forward reasoning, which operates only on hypotheses.  
+
+![](images/f2c6deb6c4a0b2e598f3a873b818b75d5728b4679a0e46aa9f9c8c6648daaff5.jpg)  
+
+Figure 3: A comparison of naïve search and our algorithm assuming a minimum proof length of 1, maximum proof length of 2, and truncating after four theorems. Nodes in the tree correspond to proof states, and edges to successful tactic applications. Nodes visited by a naïve search are circled in red; those visited by our procedure are shaded blue. As shown, naïve post-order traversal yields proofs with significant overlap and leaves the rightmost subtree unexplored; our procedure produces proofs beginning with each possible initial tactic before re-visiting any subtree.  
+
+exponential increase in candidate proofs. Accordingly, when setting the desired number of tactics to higher values, it is often desirable to truncate the search prior to exhausting the search space.  
+
+However, using naïve depth-first search, such truncation leads to highly homogeneous output theorems. Since we prefer to generate proofs with as many tactic applications as possible up to the user-specified depth limit, a naïve depth-first approach performs a post-order traversal of the search tree (skipping nodes that do not meet a user-specified minimum depth). Truncating such a traversal yields nodes in tightly clustered subtrees of the search space—that is, proofs with the same initial subsequence of tactics that diverge only near the end of the proof. This is undesirable, as it limits the diversity of our synthetic proofs.  
+
+Instead of DFS, therefore, we employ a search algorithm that is optimized to find nodes with distant common ancestors—that is, proofs that diverge from one another as early as possible. Our algorithm iteratively performs a series of depth-first searches to find nodes at the desired depth; however, we start each search from the unexplored children of the shallowest remaining node. This allows us to traverse unexplored subtrees whose common ancestor with any we have already explored is as shallow as possible. Thus, our approach optimizes for finding theorems of greater length as well as for disjointness among generated theorems. Accordingly, unlike with DFS, a truncated search using our algorithm still yields diverse proof output, making it preferable for high-depth proof generation.  
+
+We include several additional optimizations in our search procedure to enhance both the diversity of our synthetic dataset and the performance of the generator. To promote a diverse dataset, we provide an option to prevent the generation of multiple proofs of the same theorem, which, given the limited inventory of tactics with which the generator operates, are likely to be similar to one another. We optionally apply deduplication to hypotheses as well, preventing the generation of multiple hypotheses corresponding to the same proposition, which could also lead to similar theorems as well as unnecessarily roundabout proofs. We also provide an option to prevent repeated applications of the same library lemma, which can lead to large, repetitive theorem statements. Additionally, to improve performance, we cache unsuccessful proof steps to avoid attempting to invoke tactics on hypotheses of a type to which they have previously failed to apply.  
+
+As our proof synthesis procedure proves new propositions, the generator can either output each individually as a distinct theorem or conjoin multiple propositions into a multi-part theorem statement. In the latter case, the proofs of each conjunct appear as discrete subproofs of the larger proof of the conjoined theorem statement. These examples compartmentalize complex proofs into distinct subtasks, demonstrating principles of higher-level proof organization and decomposition to an LLM trained on these data.  
+
+4.3 LINEAR TACTIC SELECTION  
+
+In order to perform this search procedure, we must have access to an inventory of tactics capable of reasoning forward from a given set of hypotheses. While many Mathlib tactics involve backward reasoning, a small subset are capable of operating strictly forward. We select several of these tactics to use in our forward generation procedure. These include:  
+
+• have, which introduces a new hypothesis using a lemma from the library;   
+• rewrite, which performs substitution of equal expressions in a given hypothesis;   
+• simp_arith, which simplifies a hypothesis using reductions, library-provided “simplification lemmas,” and arithmetic identities; and   
+• Normalization tactics for expressions involving ring operations (ring_nf) and numerals (norm_num1).  
+
+However, the tactic-execution procedure described in Section 4.1 is relatively agnostic to the specific tactics employed. Therefore, our generator is extensible with additional forward-reasoning tactics, which could be explored in future work to increase both the quantity and diversity of generated proofs.  
+
+During an iteration of our generation procedure, we attempt to apply every tactic above to each of the hypotheses in the current proof state. Each successful tactic application generates a new proof state to which we can apply additional tactics. If we have already applied the user-defined maximum number of tactics in a proof, or if we have applied at least the user-defined minimum number of tactics and no further tactics have succeeded in the current proof state, we cease our search from that proof state and output the theorem most recently yielded by our forward reasoning.  
+
+It is necessary, however, to restrict our candidate tactics so that the resulting proof does not contain unnecessary or irrelevant steps. This is because arbitrary tactic applications may yield proof steps that have no bearing on the chain of inferences used to arrive at the final theorem statement. For instance, a proof step might add a hypothesis to our context that we do not reference again for the remainder of the proof. Doing so would reduce the quality of training data obtained from our generator, as such steps are undesirable in and irrelevant to the proof of the resulting theorem statement. Therefore, we generate our tactic steps using a linear procedure, similar to the linear resolution scheme employed by Firoiu et al. (2021), that precludes such irrelevant steps. Specifically, we require that each tactic (after the first) make use of the hypothesis introduced or modified by the preceding tactic (though it may additionally use others). This ensures that every tactic we apply theorem ex (a b : N) (hab : a + $\mathrm{~\textit~{~2~}~}=\mathrm{~b~}+\mathrm{~5~}$ ) (ha : 10 ≤a) (ha' : a ≤50) : b ≤47 := by simp_arith at hab hab : $a=b+3$ rewrite [hab] at ha’ ha' : b + $3\leq~50$ rewrite [hab] at ha ha : $10\leq b+3$ simp_arith at ha’ ha' : b ≤47 exact ha’  
+
+Figure 4: An irrelevant tactic step, highlighted in yellow. The hypothesis ha, which this step rewrites, is not used in the final theorem. The actual proof, which omits the highlighted line, proceeds linearly by using the last-modified hypothesis at each step, as depicted by the arrows.  
+
+introduces or modifies a hypothesis that is used to arrive at our final conclusion. See Figure 4 for an example.  
+
+Lastly, we provide an option to enable proof minimization to reduce the likelihood of generating unnecessarily long proofs. Lean possesses several powerful backward-reasoning tactics that can sometimes elide many steps—or, occasionally, entire proofs—performed using the forward-reasoning tactics our generator employs. Such tactics include the omega tactic, which can prove equalities and inequalities of natural-number- and integer-valued expressions, and Aesop (Limperg & From, 2023), a general proof-search tactic. However, because these tactics are based on backward reasoning, they cannot be used as part of our forward generation procedure. Instead, we apply minimization as a post-processing step: after generating a forward proof, we attempt to replace a maximal terminal subsequence of the forward-reasoning tactics used in the original proof with a “finishing” tactic like omega or Aesop. If such a substitution succeeds, we output this shorter proof rather than the original, strictly forward one. These minimized proofs diversify the tactics appearing in our output proofs by demonstrating instances in which higher-level tactics can be used to quickly discharge a goal. They also produce training data that promotes the use of powerful proof automation in place of longer and potentially roundabout forward proofs. Nonetheless, we leave it as an optional setting due to the increased performance cost of checking proofs for minimizability as well as the potential for circumstances in which forward, more explicit proofs might be preferable to efficient but less verbose ones.  
+
+
+
+\section{4.4 PREMISE SELECTION INTEGRATION  }
+
+
+An important step in generating forward proofs is the selection of lemmas (or premises) that can be used to construct new hypotheses using the have tactic. We draw these premises from Lean’s mathematical library, Mathlib. However, given the large number of theorems in Mathlib, it is impractical to attempt to use all or even a significant fraction of those that are available. Instead, we select a limited pool of premises from Mathlib for use in a given round of theorem generation.  
+
+To ensure that we select a pool of premises that are relevant to the in-context data and hypotheses, we use the LeanDojo ReProver premise-selection model. This model is capable of identifying premises in Mathlib that are relevant for proving the current goal given the current proof state (Yang et al., 2023). During theorem generation, each initial proof state is passed to ReProver, which produces a list of relevant premises. These premises are then given as input to our tactic-generation procedure alongside the initial proof state. To add diversity to our pool of premises, we also allow some premises to be drawn at random from Mathlib, replacing a specified proportion of the model-selected premises from ReProver. The ratio of random to model-selected premises is a parameter of our generator, and we report its performance with various values of this parameter in Section 5.1.  
+
+To improve performance, premise selection runs as a server process distinct from the main generator. This modularity allows multiple generation jobs to run in parallel while maintaining only a single instance of the ReProver model in memory, and it facilitates the separation of the CPU-intensive generation pipeline from the GPU-intensive premise-selection task. Moreover, this modular architecture enables the potential substitution of other premise-selection models in place of ReProver. For instance, a model explicitly calibrated to the task of identifying premises capable of reasoning forward from hypotheses in a given proof state—rather than, like ReProver, selecting premises relevant to closing the proof state’s goal—is an avenue for future work that could improve the quality of premise selection in our generator.  
+
+Once we have selected an initial pool of premises, we repeatedly sample a random subset of this pool to attempt to apply at each stage of our search. This allows us to draw on a wider range of premises in the course of our search than would repeatedly attempting to apply the same collection of premises at every step. When attempting to apply a premise during generation, we exhaustively search the context for type-correct arguments to which the premise can be applied. We also attempt to synthesize any type-class instance arguments required by the premise by invoking Lean’s builtin type-class resolution. If a premise can be applied successfully to yield a new hypothesis, we produce a corresponding have tactic that adds the identified hypothesis to the context. Because we must construct these premise applications prior to generating the corresponding tactic syntax, have is the one tactic we do not directly metaprogrammatically execute; instead, we directly inject the synthesized hypothesis into the context.  
+
+
+
+\section{4.5 VERIFICATION AND ENVIRONMENT RECONSTRUCTION  }
+
+
+Once the generator has constructed a proof, the resulting theorem is written to a Lean file. The theorem statement is the type of the final hypothesis produced by our forward reasoning. Its proof is formed by concatenating the synthetic tactic steps applied by the generator. The resulting syntax tree—comprising a uniquely generated theorem name, theorem statement, and proof—is converted to raw syntax using Lean’s pretty-printer.  
+
+Because our objective is to automatically extract training data from these files, we must ensure not only that each theorem is syntactically correct, but also that the file to which it is written is runnable without human intervention. Because the syntax and tactic behavior we use are sensitive to their execution environment (e.g., the behavior of simp_arith changes depending on the available simplification lemmas), we must ensure that Lean reconstructs our synthetic execution environment—which is derived in part from that of the library module from which our initial proof state is taken—when evaluating the output file. We accomplish this using Lean’s metaprogramming framework to inspect the environment’s imports, open modules, and namespaces, based on which we generate corresponding commands in a prepopulated header in each output Lean file. To avoid frequent recompilation, we reuse the same environment when generating theorems from each tactic state extracted from the same library module. Even with these safeguards, however, some theorems may still fail to compile. This is because Lean has a rich and extensible notation system (Ullrich & de Moura, 2020), and the presence of userdefined or context-dependent notation further complicates the task of producing runnable code. As one of many examples, in-context hypotheses may contain type coercions whose target types are left implicit by the notation and cannot be inferred without the surrounding context. It is ultimately infeasible to account for every such possible notational complication that might arise, especially since modules may contain arbitrary user-defined notation. Accordingly, before the generator outputs a theorem, the candidate syntax string is evaluated as a Lean file would be: within the appropriate environment, the declaration is parsed and elaborated to ensure that the proposed theorem and proof are syntactically valid. Only after these checks succeed is the theorem written to the output file.  
+
+
+
+\section{5 EXPERIMENTS  }
+
+
+
+
+\section{5.1 PERFORMANCE OF SYNTHETIC THEOREM GENERATION  }
+
+
+We assessed the performance of our synthetic theorem generator by evaluating its throughput under various configurations of our deduplication and premise-selection procedures. For these throughput experiments, we selected input proof states from Mathlib due to its size and breadth. Our results are shown in Tables 1 and 2. These results do not reflect the maximum throughput of our generator and are instead intended to illustrate the relative effects of different configurations. Indeed, we are unable to compare the absolute throughput of our generator to that of other synthetic theorem generation approaches in Lean, such as those of Xin et al. (2024) and Ying et al. (2024), since those sources do not provide data regarding the time or computing resources required for generation.  
+
+As Table 1 demonstrates, the use of the ReProver model improves our generator’s performance. Theorem output increases with the proportion of premises selected using LLM-based premise selection. We also found that the length of these theorems grows similarly, indicating that LLM selection  
+
+![](images/cdb5857c8bf5310fd6909b98a15cf89b1e4b377d1ac89054348b77990329af8a.jpg)  
+
+Table 1: Throughput by varying the proportion of randomly- and LLM-selected premises.   
+
+![](images/7a632a2318227e05c61384c8f387d6e3c1a301c2204d561482566e042ba81c7f.jpg)  
+
+Table 2: Throughput by varying the number of premises sampled at each generation step.  
+
+facilitates longer chains of reasoning that may yield more complex theorems. These results are likely due to the fact that LLM-selected premises are relevant to in-context hypotheses, meaning that those hypotheses are more likely to satisfy the selected premises’ antecedents to admit a new hypothesis. In contrast, given Mathlib’s breadth, randomly selected premises are much less likely to be applicable to the hypotheses in a given proof state.  
+
+We found that the generator’s throughput is especially sensitive to the number of premises it samples. Increasing the number of sampled premises increases the likelihood of a successful proof step but also the computation time necessary to identify one. As shown in Table 2, using an optimal number of sampled premises significantly increased the generator’s throughput, even with the addition of deduplication to limit redundant outputs. This result, like that above, illustrates the critical role of successful premise applications in advancing synthetic proofs, even in the presence of other rewriting, simplification, and normalization tactics.  
+
+
+
+\section{5.2 IMPACT OF SYNTHETICALLY GENERATED THEOREMS  }
+
+
+To evaluate the impact of our synthetically generated theorems on LLMs’ theorem-proving capabilities, we fine-tuned the Falcon2-11B model (Malartic et al., 2024) using synthetic theorems and measured its performance on the miniF2F benchmark (Zheng et al., 2022). For these experiments, we obtained input proof states to our generator from the Lean Workbook dataset (Ying et al., 2024) due to its focus on competition-style math. We applied several rounds of processing to the original Lean Workbook dataset to obtain our final input corpus, including deduplication, removal of invalid theorems, and decontamination with respect to the benchmark dataset.  
+
+Our experiment involved fine-tuning different baseline models with and without synthetically generated data. We established two baseline models: M1, the original Falcon2-11B model, and M2, the Falcon2-11B model fine-tuned on a mixed dataset containing theorems and proof artifacts (Han et al., 2022) extracted from Mathlib, and Lean textbooks. The Mathlib dataset contains 208 million tokens, while the mixed dataset contains 2.8 billion tokens. We then further fine-tuned the models on the Mathlib dataset either without synthetic data or with our synthetically generated dataset (approximately 1 billion tokens). To generate training data from existing proofs in Mathlib and other sources, we traversed every tactic step in the corresponding Lean flies and recorded the following data at each step:  
+
+• GoalState: the proof state prior to applying this tactic.   
+• Tactic: the syntax of the current tactic.   
+• DeclUpToTactic: the syntax, up to this tactic, of the declaration in which this proof occurs.  
+
+To evaluate the performance of models trained on synthetic datasets, we developed a parallel proof search infrastructure for generating these proofs. This infrastructure enables concurrent querying of LLMs for tactics and Lean for the next proof state. Using this setup, we query the LLMs to generate tactics and apply them to a proof state using REPL (Leanprover-Community, 2024b), a communitydeveloped project capable of exporting and importing intermediate proof states. The order of tactics to search is determined by a best-first search strategy, where scores are based on the log probability of the LLM’s generation. We host one LLM server per GPU and run one REPL process per CPU. In our experiments, we employed 40 CPU processes for proof state generation and 8 GPU processes for tactic generation. The proof search terminates upon generating a successful sequence of tactics that proves the original problem or upon reaching a timeout of 10 minutes.  
+
+Table 3: Number of theorems from miniF2F-test successfully proved by models fine-tuned on synthetic data generated from Lean Workbook.   
+
+![](images/0747c93cee3996b3c9610c500ac7158e00570e564116f99771c92508a2819633.jpg)  
+
+We assessed the theorem-proving capabilities of our model variants by using them to generate proofs for 244 Lean theorems in the miniF2F-test dataset. The results of our experiments are shown in Table 3. These results demonstrate that the addition of synthetically generated datasets can significantly improve the performance of baseline models trained on different corpora. Specifically, for the model trained solely on the Mathlib dataset (M1), the synthetic data boosts theorem-solving performance from 91 to 94 theorems — an improvement that exceeds model performance by adding certain pre-existing datasets to train M2, which achieved 93 proved theorems. This indicates that our synthetic data not only matches but surpasses the value of existing datasets.  
+
+Additionally, when starting from a model trained on a mix of Mathlib and additional datasets (M2), fine-tuning with our synthetic data further improves performance, increasing the number of proved theorems from 93 to 96. This result highlights two key insights: (1) our synthetic data contains complementary information that enhances model performance even when existing data like Han et al. (2022) and textbook are already included, and (2) even for a model that has already achieved a strong baseline, incorporating our data leads to further gains, showing it can augment rather than replace or stagnate existing knowledge.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+In this work, we have introduced a synthetic theorem generator capable of producing correct-byconstruction theorems using forward reasoning in Lean. It achieves this through metaprogrammatic execution of forward-reasoning tactics, a search strategy optimized for diverse theorems that exclude irrelevant steps, and the integration of the ReProver LLM to select relevant premises.  
+
+We see several avenues to expand on the work we have presented. As noted in Section 4.3, our tactic execution procedure could be extended with additional forward-reasoning tactics, enabling the generation of proofs that use a greater variety of reasoning strategies. With a broader range of tactics from which to choose, the generator could additionally incorporate heuristics into tactic selection—beyond our existing premise selection—to more efficiently identify search paths likely to yield synthetic theorems of interest. Furthermore, as discussed in Section 4.4, a purpose-built premise-selection LLM might provide more effective suggestions of premises applicable to incontext hypotheses. Finally, because all theorems produced by our generator are correct by construction, our generator can be straightforwardly repurposed as a conjecture-generation tool simply by removing the proofs from the generator’s output. These theorem statements could then be given to a deterministic or LLM-based proof-search procedure to prove using backward as well as forward reasoning, facilitating the creation of a dataset representative of a broader variety of Lean tactic proofs.  
+
+The availability of large quantities of high-quality training data is key to advancing LLMs’ capabilities in formal theorem proving. To that end, with the goal of facilitating both the creation of new synthetic datasets and the furthering of this work, we release our synthetic theorem generator and other software including proof search code under the Apache 2.0 license.  
+
+
+

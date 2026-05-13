@@ -1,0 +1,365 @@
+\title{Towards Cheaper Inference in Deep Networks with Lower Bit-Width Accumulators}
+
+\begin{abstract}
+
+The majority of the research on the quantization of Deep Neural Networks (DNNs) is focused on reducing the precision of tensors visible by high-level frameworks (e.g., weights, activations, and gradients). However, current hardware still relies on high-accuracy core operations. Most significant is the operation of accumulating products. This high-precision accumulation operation is gradually becoming the main computational bottleneck. This is because, so far, the usage of low-precision accumulators led to a significant degradation in performance. In this work, we present a simple method to train and fine-tune high-end DNNs, to allow, for the first time, utilization of cheaper, $12$-bits accumulators, with no significant degradation in accuracy. Lastly, we show that as we decrease the accumulation precision further, using fine-grained gradient approximations can improve the DNN accuracy. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Deep Neural Networks (DNNs) quantization \citep{hubara2017quantized,sun2020ultra,banner2018scalable,nagel2022overcoming,chmiel2021logarithmic} have been generally successful at improving the efficiency of neural networks' computation without harming the accuracy of the network \cite{liang2021pruning}. The suggested methods aim to reduce the cost of the Multiply-And-Accumulate (MAC) operations for both training and inference. To this end, they quantize the weights, activations, and gradients. For applications utilizing such quantization methods, the cost of multiplications, commonly considered to be the computational bottleneck, can be substantially reduced. However, the accumulation of computed products is still performed with high-precision data types. Consequently, the cost of the accumulation, as a component of MAC operations, becomes increasingly dominant in performance breakdowns \citep{sakr2019accumulation, ni2020wrapnet, chmiel2021logarithmic}. 
+
+For example, when the weights and activations are in the common FP8 format, \citet{van2023fp8} showed the accumulation becomes a computational bottleneck. For example, they conducted experiments to estimate the raw gate count for various FP8 implementations (a first-order approximation for power and area) and observed a $2\times$ reduction in gate count when employing FP16 accumulators instead of FP32. Similarly, \cite{ni2020wrapnet} reported analogous findings for INT8, demonstrating that an 8-bit×8-bit multiplier consumes a comparable amount of power and silicon area to a 32-bit accumulator. 
+
+In this study, we focus on reducing the numerical precision of the accumulation operation in DNNs. Building our solution on top of the emerging FP8 format, which has gained prominence for both training and inference on the most prevalent hardware \cite{Andersch2022Hopper}, we aim to optimize such DNNs, to enable inference on hardware with Low Bit-width Accumulators (LBAs).
+
+Our main contributions are:
+\begin{itemize}
+    \item We propose a simple scheme for fine-tuning models with $12$-bit accumulators for a variety of tasks, and show this method can already achieve strong performance. For example, we show for the first time that $12$-bits accumulators can be used in ResNets on ImageNet, with no significant degradation in accuracy.
+    \item We examine more fine-grained approaches, in which, for the first time, we backpropagate through the entire accumulation-computation graph. Though much more expensive during training, such fine-grained backpropagation can be used to significantly improve the accuracy of DNNs with LBAs at lower bit-widths.
+\end{itemize}
+
+
+
+
+
+
+\section{Preliminaries: Quantized Neural Networks}
+
+\subsection{Quantized weights and activations}
+
+The quantization of neural networks is, by now, a standard practice for achieving efficient neural networks. Unlike traditional scientific computation, that often \citep{bailey2005high} requires high-precision floating point arithmetic (e.g., FP64) to achieve accurate results, it was observed \citep{gupta2015deep} that deep neural networks can maintain high accuracy when the weights and activations in the network are represented in low bit representation. As a result, training deep neural networks (DNNs) using half-precision (FP16) arithmetic became the default setup for modern Deep Learning applications \citep{brown2020language}. Lower precision representation (INT8, FP8, INT4, FP4, and Binary) \citep{sun2019hybrid,sun2020ultra,courbariaux2016binarized} is also used for a variety of deep learning applications, for either training or inference, albeit using them is more experimental and may result in lower model performance, depending on the specific application.
+
+Quantization of Weights and Activations (W/A) has two main benefits. 
+\begin{itemize}
+    \item \textit{Lower memory footprint}: By reducing the number of bits used for representation of each numerical value, W/A quantization can significantly reduce the memory required for storing and using a neural network. Consequently, W/A quantization enables storing larger models (with more parameters and activations) on DL accelerators with finite storage and improves the computation efficiency of smaller models by mitigating memory bottlenecks. 
+    \item \textit{Reduced complexity of multiplication operation}: Neural networks commonly compute multiplications of weight and activation pairs. When both weight and activation are represented at a lower precision, it is possible to perform the multiplication operation with cheaper hardware (smaller area, less energy). This allows us to do more multiplication operations per second, provided that the hardware was designed to support these lower-precision operations.
+\end{itemize}
+
+Numerical values are typically represented using either fixed, or floating point format. Methods for quantization of DNNs can be divided accordingly.
+
+\subsection{Fixed point Quantization}
+
+Given a full-precision value $x$, a fixed number of bits $B$, and an integer $b$ (exponent-bias), we define the fixed-point quantization of $x$ as:
+\begin{equation}\label{eq:Fixed_point}
+    \begin{array}{cc}
+    \begin{array}{c}
+    R_{\min}\equiv-2^{B-b-1}\\
+    R_{\max}\equiv2^{-b}\left(2^{B-1}-1\right)
+    \end{array} & Q_{B,b}^{\text{FIXED}}(x)\equiv\begin{cases}
+    R_{\min} & x\le R_{\min}\\
+    R_{\max} & x\ge R_{\max}\\
+    2^{-b}\text{Round}\left(x\cdot2^{b}\right) & \text{else}
+    \end{cases}\end{array}
+\end{equation}
+As we can see from \cref{eq:Fixed_point}, the process of fixed-point quantization involves two explicit changes to the value of $x$. First, we round $x\cdot2^{b}$ to an integer value. The rounding operation can be done using a variety of operations (such as Floor, Ceil, Nearest-Neighbour, or Stochastic Rounding \citep{wang2018training}), but will result in a loss of information either way, with a rounding error that decreases as we increase the parameter $b$: $\Delta \sim 2^{-b}$. If the value of $x$ is sufficiently small $|x|<2^{-b}$, the quantization noise will exceed the represented value ($\Delta > |x|$) and we have no way to accurately represent the value of $x$. We will refer to this event as \textit{underflow}. Second, we have a limited range for representation, that increases with the number of bits $B$ and decreases with $b$. We refer to the event when $x$ is outside the range $(R_{\min},R_{\max})$ as \textit{overflow}, noting that the quantization error in this case is unbounded.
+
+Integer quantization is a specific case of fixed-point quantization, where the exponent bias $b$ is set to $0$. While we defined the exponent-bias $b$ to be an integer, it is important to note that non-integer values could have worked mathematically just as well to define valid quantization operations. The main benefit of choosing $b$ to be an integer is the efficiency of computing power-of-two multiplications in hardware.
+
+The main advantage of fixed point quantization comes from its relative simplicity. Integer multiplication (and addition) are generally considered to be cheaper on hardware when compared with floating point operations. 
+\subsection{Floating point Quantization}\label{sec:FP_quant}
+Given a full-precision scalar value $x$, number of mantissa bits $M$, number of exponent bits $E$, and an integer $b$ (exponent-bias), we define the floating point \citep{dekker1971floating} quantization $M/E$:
+\begin{equation}\label{eq:floating-point}
+\begin{array}{cc}
+\begin{array}{c}
+s\equiv\frac{1}{2}\left(1-\text{sign}(x)\right),\quad e\equiv\left\lfloor \log_{2}(|x|)\right\rfloor \\
+m=2^{-M}\text{Round}\left(2^{M}\left(|x|2^{-e}-1\right)\right)\\
+R_{\text{OF}}\equiv2^{2^{E}-b-1}\left(2-2^{-M}\right),\quad R_{\text{UF}}=2^{-b}
+\end{array} & Q_{M,E,b}^{\text{FLOAT}}(x)\equiv\left(-1\right)^{s}\begin{cases}
+R_{\text{OF}} & |x|\ge R_{\text{OF}}\\
+0 & |x|<R_{\text{UF}}\\
+2^{e}\left(m+1\right) & \text{else}
+\end{cases}\end{array}
+\end{equation}
+Note that $1 \le |x|2^{-e} < 2$, due to the definition of $e$, which helps make sense of the quantization operation in \cref{eq:floating-point}. The total number of bits used for this representation is $B= M+E+1$: $1$ sign bit ($s$), $M$ mantissa bits ($m$) and $E$ exponent bits ($e$). As we can see, floating point representation can cover a larger range of values when compared with a fixed point representation that uses the same amount of bits and exponent bias, ($R_{\text{OF/UF}}$ depends on $2^{2^{\pm E}}$ while $R_{\max},R_{\min}$ depends on $2^{B}$), reducing the occurrence of overflow and underflow events.
+
+Unlike fixed-point representation, which had a fixed bound for quantization error ($\Delta \sim 2^{-b}$) within the represented range, the quantization error for floating point representation varies, depending on the magnitude of $x$: $\Delta \sim 2^{e-M}$. As a direct result, floating point's arithmetic also adds additional complexity, in the form of \textit{swamping} \cite{higham1993accuracy}. When performing an addition over two floating points values $\bar{z}=z_1 +_{\text{(FP)}} z_2\equiv Q_{M,E,b}^{\text{FLOAT}}(z_1+z_2)$, it is possible that the precision of $\bar{z}$ will not be sufficient for full-representation of its summands, causing the least significant bits to be swamped out --- resulting in a `noisy` addition operation. In the extreme case, denoted as \textit{Full-Swamping}, if $|z_1|> 2^{M+1}|z_2|$, $z_2$ is swamped out entirely, so $\bar{z}=z_1$ despite $z_2$ being non-zero. In contrast, fixed-point addition will always be exact, as long as the sum remains within the representation range (no overflow).
+
+\subsection{Low Bit-Width Accumulators}\label{sec:LBAs}
+When performing a general matrix multiplication (GEMM) operation, (e.g. matrix-multiplication, or convolution), each individual scalar computed during the operation can be expressed as the sum of product pairs
+\begin{equation}\label{eq:dotprod}
+    y= \sum_{i=0}^{N-1} x_{i} w_{i}.
+\end{equation}
+Here, $y$ is a scalar component of the output tensor of the GEMM operation, $N$ is the accumulations size (i.e., the number of summands used per scalar output), while $\left\{ x_{i}\right\}_{i=0}^{N-1}$ and $ \left\{ w_{i}\right\}_{i=0}^{N-1}$ are two series of scalar inputs used for the calculation of $y$. Due to the common structure of the multiply-accumulate operation, hardware implementations of GEMM operation often rely on the fundamental Fused Multiply-Add (FMA) operation, defined as $\text{FMA}(x,w,s) \equiv x \cdot  w + s$, with $x,w,s$ being scalars. Our goal in this work will be to decrease the cost of the FMA component. 
+
+Previous discussed methods, such as W/A quantization, have been helpful in reducing the cost of the multiplication of FMA. In contrast, the accumulation component of FMA has been studied to a much lesser extent. In \citep{wang2018training}, the authors show that training a neural network with FP16 accumulators can result in noisy training, with a modest loss of accuracy. To mitigate this, the paper recommends chunk-based accumulation and floating-point stochastic rounding. Chunk-based accumulation changes the order of accumulation, while stochastic rounding is a method where a small, random noise is added to the result of high-precision summation, before the result is cast to a low-precision representation. While successful at closing the gap (e.g., for ResNet18 on ImageNet), both methods may prove difficult to implement on modern hardware. Specifically, the order of accumulation on DL accelerators will usually depend on their block architecture and is not easily configured. Moreover, stochastic rounding requires an implicit addition operation, which is projected to increase the cost of hardware addition, negating the benefit of using LBAs. 
+\cite{sakr2019accumulation} examined the effect of low precision accumulators on training through the \textit{accumulation variance} statistic, which they theoretically derive, given several statistical assumptions on the distribution of the summands. In \cite{ni2020wrapnet}, the authors propose WrapNet, where the additions are performed with $8$ and $12$ integer accumulators with wrap-around. WrapNet is shown to perform complex inference tasks (e.g. ImageNet classification) with extreme quantization (e.g., $7$ bits activations, $2$ bit weights, and $12$ bits accumulators), but it does suffer a noticeable accuracy degradation in this setup, for tasks such as ImageNet classification. 
+
+Although mostly experimental, FP16 accumulation was integrated in the design of several commercial products \citep{agrawal20219}, including the tensor cores in the Hopper architecture (NVIDIA) \cite{Andersch2022Hopper}.
+
+
+
+\section{Fine-tuning Neural Networks with Low-Bit Accumulators}
+
+
+One key difference between W/A quantization and quantization of the accumulators is that accumulation is an internal FMA operation, which is not generally visible to the software user. To simulate the effect of quantized FMA component, we implement the GEMM operations (convolution/ matrix multiply) in CUDA, where the FMA operation is replaced with our custom FMAq operation: 
+\begin{equation}\label{eq:fmaq}
+    \text{FMAq}(x,w,s) \equiv Q_{\text{acc}}\left(Q_{\text{prod}}\left(x\cdot w\right)+s\right),
+\end{equation}
+as illustrated in \cref{fig:FMAq}. In all experiments, we use a constant chunk size of $16$, based on the sizes exposed to the user of NVIDIA's tensor cores. 
+\begin{figure*}[!htb]
+    \centering
+    \begin{subfigure}[]{0.49\textwidth}
+        \centering
+        \fbox{\includegraphics[height=2.0in,width=2.6in]{graphs/FMA.pdf}}
+
+    \end{subfigure} %
+    ~
+    \begin{subfigure}[]{0.49\textwidth}
+        \centering
+        \fbox{\includegraphics[height=2.0in,width=2.6in]{graphs/chunks4.pdf}}
+    \end{subfigure} %
+    \caption{Left: an illustration of quantized FMA component, as simulated in our work. Unlike the W/A quantization operations ($Q_W(w),Q_A(x)$) that can be efficiently performed in software, $Q_\text{prod}$ and $Q_\text{acc}$ are explicitly internal hardware operations, intended to simulate the logic of a cheaper hardware component. Right: Illustration of chunk-based accumulation, with chunk base of $n$. Chunk-based accumulation is useful for reducing error caused by swamping, but the chunk size is not easily configured and will usually depend on the architecture design of the systolic array.}
+    \label{fig:FMAq}
+\end{figure*}
+It is important to highlight that the product and accumulator quantization functions ($Q_{\text{prod}}$ and $Q_{\text{acc}}$) are intended to simulate the hardware, rather than suggest an implementation for it. Breaking down the FMA to components in hardware would, in practice, undermine its efficiency --- as it will no longer be `fused'. Taking this into account, $Q_{\text{prod}}$ and  $Q_{\text{acc}}$ must remain simple and computationally efficient. For example, `round to nearest' and stochastic rounding methods, which are taken for granted for W/A quantization, will not be available to us during inference, as their hardware implementation would still perform addition internally with a higher number of bits. Our quantization will instead rely on the simple `floor' operation, implemented in software via bit-mask. For Hardware analysis of our implementation, see \cref{apx:hardware_analysis}.
+As discussed in section \ref{sec:FP_quant}, floating point quantization can be broken down into $3$-distinct events: \textit{underflow}, \textit{overflow} and \textit{swamping}. Eventually, our low-precision model will have to handle all three events. We will, however, start by examining their individual properties, as displayed in \cref{tbl:FPQ_events}.
+
+\begin{table}[!htb]
+\begin{center}
+\begin{tabular}{| c  | c | c |  c | c |}
+\hline
+Event           &  Condition  & \makecell{Key \\Parameters} & \makecell{ Absolute Error (bound): \\ $\Delta=\left|Q(x)-x\right|$ }            &  Relative Error: $\frac{\Delta}{|x|}$  \\
+
+\hline
+Overflow (OF)        & $|x|\gtrsim2^{2^{E}-b}$            & $E,-b$    &   $\infty$  & $\left(0\%,\infty \right)$ \\
+\hline
+Underflow (UF)       & $|x|<2^{-b}$            & $E,b$    &  $2^{-b}$  & $100\%$  \\
+\hline
+Swamping    & No OF/UF            & $M$    &   $2^{\left\lfloor \log_{2}(|x|)\right\rfloor -M}$ & $\left[2^{-M-1},2^{-M}\right]$  \\
+\hline
+\end{tabular}
+\end{center}
+\caption{Properties of each type of floating-point quantization event.}
+\label{tbl:FPQ_events}
+\end{table}
+Our main insight from \cref{tbl:FPQ_events}, is that underflow events are expected to have the least significant effect over the network output (They have the lowest absolute error, since the default value for the exponent bias $b$, as used by the common FP32/FP16 definitions, is $b=2^{E-1}$.).  In \cref{fig:loss_landscape}, we evaluate the correctness of this claim, and show that the wide-scope loss-landscape of an LBA ResNet is barely affected when we ignore UF events. And yet, the large relative error induced during underflow (small elements are effectively replaced with zero), will cause significant optimization errors for gradient-based methods: During fine-tuning, we can expect the magnitude of the weight updates to be proportional to the magnitude of the corresponding weights, causing the underflow region to be particular hard region to `escape' from. Values that are stuck at underflow are effectively excluded from the training since the forced value of zero prevents them from learning meaningful correlations. (see \cref{apx:underflow} for more details.)
+
+\begin{figure*}[!htb]
+    \centering
+    \begin{subfigure}[]{0.32\textwidth}
+        \centering
+        \fbox{\includegraphics[height=1.2in,width=1.8in]{graphs/lba7_of_uf_quarter_train_loss_3dsurface.pdf}}
+    \caption{Baseline LBA}
+    \end{subfigure} %
+    ~
+    \begin{subfigure}[]{0.32\textwidth}
+        \centering
+        \fbox{\includegraphics[height=1.2in,width=1.8in]{graphs/no_uf_quarter_train_loss_3dsurface.pdf}}
+    \caption{Excluding UF}
+    \end{subfigure} %
+    ~
+    \begin{subfigure}[]{0.32\textwidth}
+        \centering
+        \fbox{\includegraphics[height=1.2in,width=1.8in]{graphs/no_swamping2_quarter_train_loss_3dsurface.pdf}}
+    \caption{Excluding Swamping}
+    \end{subfigure} %
+    \caption{Wide scope loss landscapes \cite{visualloss} of an LBA resnet50, using pre-trained ResNet50 weights (CIFAR10, FP32). Here, we compare the qualitative effect of different components in floating points quantization over the network output: In (a), we use a complete implementation of FP quantization during convolution accumulation, with $7$ Mantissa and $4$ Exponent bits. In (b), we repeat the previous experiment but ignore underflow events during quantization. For comparison, in (c), we repeat the original experiment, but add $16$ additional bits to the mantissa, greatly diminishing the effect of swamping, without affecting the role of underflow. All landscapes appear similar, but while the effect of excluding swamping events (c) is visible, the loss landscapes of networks with (a) and without (b) underflow are hardly distinguishable.}
+    \label{fig:loss_landscape}
+\end{figure*}
+
+Therefore, we propose the following method: Starting off with the weights of a pre-trained network (trained in full-precision), we will design a network that utilizes quantized FMA for forward-propagation, excluding underflow events, and perform a standard gradient-based optimization (i.e. Stochastic gradient decent, while keeping the backward implementation of each operation as it was with full-precision FMAs). Once we converge to some accuracy value, we will enable the underflow implementation and proceed with further fine-tuning.
+
+As seen in \cref{tbl:FPQ_events}, the exponent bias ($b$) can be configured to control underflow and overflow events, with a clear trade-off between the former and the latter. Previous works \cite{kuzmin2022fp8} have made the insight, that the default value $b= 2^{E-1}$ is not always suitable for neural networks. For our purposes, we note that the different quantization functions $\Qp$ and $\Qa$ as seen in \cref{fig:FMAq}, are likely to require different ranges for representation: Assuming the product terms $u_i=w_i x_i$ are i.i.d, the accumulator's value will follow the central limit theorem, and is therefore more likely to reach overflow, resulting unbounded quantization noise. To try and avoid this scenario, our setup will give a smaller exponent bias to the accumulator. In our experiments, we use a relative factor based on the chunk-size, so that $b_{\text{acc}}= b_{\text{prod}}- \frac12\log_2\left(\text{Chunk-Size} \right)$. Following the same reasoning, one may suggest that the exponent bias should depend on the sequence number in which the FMA is applied within every GEMM operation. Nevertheless, for the context of this work, we will treat all FMA units as homogeneous, with the same exponent bias.
+
+\subsection{Experiments: Image Classification}
+
+For our first set of experiments, we aim to check the effect low-bit accumulators have on residual neural networks \cite{he2016deep}. For each experiment, we use the standard ResNet architecture and replace each GEMM operation used during forward-propagation (convolution and matrix multiplication) with our custom implementation, as described in section \ref{sec:Finetuning}. With no adjustments, the effect of these changes on the network accuracy (zero-shot), can be severe, as we show in \cref{apx:zeroshot}. 
+
+For $\Qp, \Qa$, we used the same amount of mantissa and exponent bits, $M=7,E=4$, a setup we will denote as $M7E4$. For overflow, we used the exponent biases: $b_{\text{acc}}=10$, $b_{\text{prod}}=12$, but disabled underflow events for the first part of the experiment. After loading the networks with pre-trained weights, we proceed to train the network for $5$ epochs, using Adam optimizer with a learning rate of $\eta_0 = 10^{-6}$, and a cosine scheduler, so that $\eta_5 = 10^{-8}$). Then, we enable underflow events and run a fine-tuning again for a single epoch, using a reduced learning rate of $\eta_\text{UF} = 10^{-7}$. To evaluate the benefit of the two-staged fine-tuning, we also ran the same experiment with a single stage, where underflow is enabled for $10$ epochs. The baseline numbers were obtained by repeating the fine-tuning process in a non-LBA setup, which resulted in an improvement of up to $0.65\%$ over the zero-shot accuracy. The results of this experiment are presented in \cref{tbl:resnet_fp32}. 
+
+\begin{table}[!htb]
+\begin{center}
+\begin{tabular}{| c  | c | c |  c | c | c| c|}
+\hline
+	Model  & Baseline     & $1$-stage    & no UF*         &   no UF $\to$ with UF               \\
+\hline
+\hline
+ResNet18  &   $70.23\%$        & $69.94\%$	   &    $70.01\%$   &	$70.06\%$         \\
+\hline
+ResNet34  & $73.87\%$	& $73.64\%$    &	$73.61\%$   &	$73.45\%$                      \\
+\hline
+ResNet50  & $76.80\%$    &  $74.70\%$  &    $76.60\%$   &   $76.40\%$                          \\
+\hline
+
+\end{tabular}
+\end{center}
+\caption{Top-1 Accuracy results: Fine-tuning ResNets with low-bit accumulators for ImageNet classification.\\
+*Intermediate Stage: Both training and evaluation are done without underflow.}
+\label{tbl:resnet_fp32}
+\end{table}
+
+
+
+For LBA ResNets with full-precision W/A, our results indicate that the models we suggest can train surprisingly well even without a dedicated fine-tuning regime. The dual-stage approach (Training without UF first and enabling it later) only shows clear benefit, so far, in the case of the larger, ResNet50 model. That being said, scaling the method for larger models is important, and tasks will only become more difficult from now on.
+
+In order for a model with low-bit accumulators to be commercially viable, it is vital to show that quantized accumulation still works when the weights and activations are quantized. Therefore, our next set of experiments will test the feasibility of LBA ResNets in this setting. For weights and activations, we will use $8$-bit floating point representation \citep{wang2018training}. Following the results presented in \cite{kuzmin2022fp8}, we use $M4E3$ representation with flex-bias for both weights and activations, implemented using the \textit{qtorch} library \cite{zhang2019qpytorch}. For our flex-bias implementation, we evaluate the maximal exponent for each tensor during forward propagation, and use the maximal integer exponent bias that is sufficient to prevent overflows (single value per tensor). The results of fine-tuning LBA ResNets in this setup can be seen in \cref{tbl:resnet_fp8}, as well as a comparison of our results with previous works that also used lower-bit accumulators.
+
+We note that a direct comparison between the methods based on final accuracy alone will not be valid: the method presented in \cite{wang2018training} is intended for quantized training, and includes several more quantized components, as well as several methods that are projected to reduce hardware efficiency. Meanwhile, \cite{ni2020wrapnet} proposes the cheapest implementation (Fewer bits for Weights and activations, Integer quantization), sacrificing model accuracy for hardware efficiency. Nevertheless, when aiming for cheaper inference, our LBA models were the only models to achieve accuracy on par with non-LBA models, while providing a cheaper alternative compared to models with standard accumulation.
+
+
+					
+					
+
+\begin{table}[!htb]
+\begin{center}
+\begin{tabular}{| c  | c | c | c |  c | c |}
+\hline
+	Model &  Data Type & Weights  & Activations    & Accumulator         &  Top-1 Accuracy     \\
+\hline
+\hline
+\textbf{ResNet18} &  &   & &  &  \\
+Baseline & FP &  $32$ & $32$ & $32$ &  $70.23\%$  \\
+Baseline (FP8) & FP &  $8$ & $8$ & $32$ &  $69.90\%$  \\
+\cite{wang2018training} & FP  & $8$ & $8$ & $16$ & $66.95\%$ \\
+\cite{ni2020wrapnet} & INT  & $7$ & $2$ & $12$ & $63.84\%$ \\
+Ours (1-stage) & FP  & $8$ & $8$ & $12$ & $69.54\%$ \\
+Ours (dual-stage) & FP  & $8$ & $8$ & $12$ & $69.70\%$ \\
+\hline
+\textbf{ResNet34} &  &   & &  &  \\
+Baseline & FP &  $32$ & $32$ & $32$ & $73.87\%$  \\
+Baseline (FP8) & FP &  $8$ & $8$ & $32$ &  $73.49\%$  \\
+Ours (1-stage) & FP  & $8$ & $8$ & $12$ & $73.18\%$ \\
+Ours (dual-stage) & FP  & $8$ & $8$ & $12$ & $73.42\%$ \\
+\hline
+\textbf{ResNet50} &  &   & &  &  \\
+Baseline & FP &  $32$ & $32$ & $32$ & $76.80\%$  \\
+Baseline (FP8) & FP &  $8$ & $8$ & $32$ &  $76.25\%$  \\
+\cite{wang2018training} & FP  & $8$ & $8$ & $16$ & $71.72\%$ \\
+Ours (1-stage) & FP  & $8$ & $8$ & $12$ & $74.15\%$ \\
+Ours (dual-stage) & FP  & $8$ & $8$ & $12$ & $76.22\%$ \\
+\hline
+\end{tabular}
+\end{center}
+\caption{Top-1 Accuracy results: Fine-tuning ResNets with low-bit accumulators and FP8 weights and activations for ImageNet classification. Results are compared with similar models utilizing LBAs in the literature.}
+\label{tbl:resnet_fp8}
+\end{table}
+
+\subsection{Experiments: Language Models}
+
+To assess the capability of LBA language models, our next set of experiments will focus on the common Bert \citep{devlin2018bert} architecture, and the SQUAD (Question-Answering) task. In this case, fine-tuning a pre-trained model is already the standard. In contrast to our experience with residual networks, breaking down the fine-tuning process into separate phases was not, in general, beneficial for the accuracy of the larger models. The exponent biases we used for the different LBA models also had to be changed, to avoid overflow events. In table\ref{tbl:squad}, we compare the results of fine-tuning LBA Bert models with the results of fine-tuning non-LBA models, as described in \ref{apx:squad-impl}. While LBA Bert-small has a small ($\Delta_{f1}=0.37\%$) performance degradation compared with the non-LBA model, the gap is closed  completely for the Bert ($\Delta_{f1}=-0.09\%$) and Bert-Large  ($\Delta_{f1}=-0.26\%$).
+
+\begin{table}[!htb]
+    \centering
+    \begin{tabular}{|c|c|c|c|c|c|c|} \hline 
+         &  \multicolumn{2}{c|}{Baseline}&   \multicolumn{2}{c|}{\makecell{LBA ($M7E4$)\\$b_{\text{acc}}$,$b_{\text{prod}}$=7,9}} &   \multicolumn{2}{|c|}{\makecell{LBA ($M7E4$)\\$b_{\text{acc}}$,$b_{\text{prod}}$=8,10}} \\ \hline 
+ \hspace{0cm} Model \hspace{0cm} & Exact (\%)& f1 (\%)& Exact  (\%)&f1  (\%)& Exact  (\%)&f1  (\%) \\\hline \hline 
+         Bert-Small&  71.32&  80.96& 70.88& 80.24 & 71.35 & 80.59 \\ \hline 
+          Bert-Base& 79.84& 87.53& 79.60&87.62 & 79.80&87.52\\ \hline
+          Bert-Large& 83.22& 90.40& 82.97  & 89.97  & 83.25& 90.66\\ \hline
+    \end{tabular}
+    \caption{SQUAD v1 fine-tuning for LBA-Bert models.}
+    \label{tbl:squad}
+\end{table}
+
+Inspired by our LBA-Bert model results (which were favorable toward larger models), we tested our LBA-aware fine-tuning method on the LLama-v2-7B model \citep{touvron2023llama}. We used the same settings and scripts as QLoRA paper \citep{dettmers2023qlora}, which uses frozen 4-bit weights with an additional trainable low-rank matrix in BF16. To measure performance on a range of language understanding tasks, we used the MMLU (Massively Multitask Language Understanding) benchmark \cite{hendrycks2020measuring}, a multiple-choice benchmark covering 57 tasks. The fine-tuning was done over the Open Assistant (OASSA1) dataset \cite{kopf2023openassistant} using official training scripts found in the QLoRA code (i.e., llama2\_guanaco\_7b). We report 5-shot test accuracy in tabel \ref{tbl:llama}.
+
+\begin{table}[!htb]
+    \centering
+    \begin{tabular}{|c|c|c|c|c|} \hline 
+         Model & Baseline & $M10E5$ & $M6E5$ & $M7E4$*\\ \hline 
+         LLamma v2 (OASSA1) & 45.3 & 45.4 & 44.3 & 45.1  \\ \hline
+    \end{tabular}
+    \caption{MMLU 5-shot test accuracy with and without LBA, for QLORA+ LLama v2 (7B parameters).\\
+    * For runs with $4$ exponent bits, we used dynamic (per-layer) exponent-bias.}
+    \label{tbl:llama}
+\end{table}
+
+
+
+\section{Below $12$ bits: Fine-grained Gradient for Low Bit Accumulators}
+
+
+Thus far, we have shown that $12$ bits are sufficient for inference in a variety of deep neural networks. However, the simple methods described in section \ref{sec:Finetuning} are not sufficient for training neural networks with lower amounts of accumulation bits. 
+
+For example, a shallow fully-connected DNN trained over MNIST, will fail when using a $M4E3$ accumulator, even when excluding underflow events. The cause of the failure is known as it is similar to quantization failures in other areas of deep neural network: Quantization changes the output of the network during forward pass, and when the change is significant enough, it is no longer feasible to rely on the gradients of non-quantized operations for optimization. Of course, we cannot use the ``real'' gradients with respect to quantized operation, since they are zero almost everywhere.
+
+ The common solution to this problem, with relation to the quantization of weights and activations, is to replace the derivative of the quantized function with a Straight-Through-Estimator (STE). In our case, we would like to use the STE with respect to the derivatives of the quantizers $Q_{\text{acc}}$ and $Q_{\text{prod}}$ inside the FMAq operation from \cref{eq:fmaq}. So far in this work, we used the naive ``identity STE'' \citep{bengio2013estimating} which makes the replacement $``\frac{d}{dx}Q(x)"=1$ (we will use the quotation marks to denote an STE replacement of a derivative). However, the more common STE for quantization zeros out gradients outside of the representation range \citep{hubara2017quantized}. For the quantizers in \cref{eq:Fixed_point} and \cref{eq:floating-point}, we get: 
+\begin{equation}\label{eq:ste}
+   ``\frac{d}{dx}Q_{B,b}^{\text{FIXED}}(x)"= \boldsymbol{1}(R_{\min}<x<R_{\max})\quad ; \quad
+    ``\frac{d}{dx}Q_{M,E,b}^{\text{FLOAT}}(x)"=\boldsymbol{1}( |x|<R_{\text{OF}}),
+\end{equation}
+where we defined $\boldsymbol{1}(\cdot)$ as the indicator function which is equal 1 if its input is `true' and zero otherwise. Many alternative forms of STEs exist and have been studied in the context of W/A quantization. The implementation of STEs for LBA networks, on the other hand, has several additional difficulties.
+
+The first, most immediate problem, is that the values of the inputs of the quantization functions within the FMAq ($Q_{\text{acc}}$ and $Q_{\text{prod}}$) are not exposed to the software or stored in memory during forward propagation. Saving these internal values is generally not feasible, since the quantization operation occurs in each FMAq, and the number of FMAqs in DNNs typically exceeds the size of weights and activations by many orders of magnitude. However, if the hardware operation is deterministic and well-known, we found we are still able to use software for re-computation of the GEMM operation, to retrieve the required values during backpropagation ($1$ bit per operation). Such a re-computation operation is expensive (training time is doubled, at the very least), and so far feasible only in fully connected and attention layers (not convolutional layers). To the best our knowledge, this is the first time backpropagation is used on the full computational graph of the summation operation.
+
+Another possible problem for using standard STEs for the accumulation process stems from the recursive nature of the summation operation. The STE in equation \cref{eq:ste} sets the corresponding gradient of any overflowing value to zero. As explained in \cref{apx:advanced_grads}, if this STE is used for the accumulator's quantization function, each overflow event will eliminate the gradients of all previously accumulated product pairs. Lastly, another possible problem is that, for floating point summation, other events besides overflow can potentially be important when estimating the gradient. 
+
+ The different methods use different types of STE: \textit{OF} passes zero on overflow of $Q_{\text{acc}}$ (using \cref{eq:ste}, while \textit{DIFF} passes zero on overflow, underflow, and full-swamping events of the FMAq. We also distinguish between a method where we apply identity STE with respect to the partial sum $s$, and the non-identity STE over the product-pair $(x,w)$ (a.k.a \textit{Immediate}), to the standard method, where the STE is applied with respect to all inputs $(x,w,s)$ (a.k.a \textit{Recursive}). For example, defining $z\equiv\text{FMAq}(x,w,s)=Q_{\text{acc}}\left(Q_{\text{prod}}\left(x\cdot w\right)+s\right)$ and $\epsilon_1, \epsilon_2$ as some small constants, we get:
+\begin{equation}
+\text{Immediate / DIFF:} \quad ``\frac{dz}{ds}"= 1 \quad ; \quad  \frac{1}{w}``\frac{dz}{dx}"=\frac{1}{x}``\frac{dz}{dw}"= \boldsymbol{1}\left(\frac{|z-s|}{|x w| + \epsilon_1}>\epsilon_2\right),
+\end{equation}
+\begin{equation}
+\text{Recursive / OF:}   \quad\quad\, ``\frac{dz}{ds}"= \frac{1}{w}``\frac{dz}{dx}"=\frac{1}{x}``\frac{dz}{dw}"=    \boldsymbol{1}(|Q_{\text{prod}}\left(xw)+s|<R_{\text{OF}}\right) \,)
+\end{equation}
+In \cref{tbl:mnist}, we compare the accuracy achieved using the proposed STE variants over the MNIST dataset. We see that such fine-grained gradient methods can indeed enable high accuracy in models with only 8-bit accumulators.
+
+\begin{table}[!htb]
+\begin{center}
+\begin{tabular}{| c  | c| c|| c  | c | c|}
+\hline
+  \makecell{STE} &  Underflow      &  \makecell{ Accuracy\\  (Top-1, $\%$)}  & \makecell{STE } &  Underflow      & \makecell{ Accuracy \\  (Top-1, $\%$)}        \\
+\hline
+Baseline    &      -          & $98.65$ & Immediate / OF  &     Yes      & $98.47$   \\
+\hline
+Identity   &      Yes       & $18.28$ & Immediate / DIFF&     Yes       & $11.35$    \\
+\hline
+Identity   &      No        & $18.28$ & Immediate / DIFF&     No      & $97.67$   \\
+\hline
++Identity*
+ &      Yes        & $42.28$ & Recursive /  OF  &    Yes      & $98.47$   \\
+\hline
+\end{tabular}
+\end{center}
+\caption{Training a fully-connected NN with $8$-bit ($M4E3$) accumulators for MNIST classification. The reported accuracy matches the final accuracy of the experiment. The model's loss does not converge when using naive (Identity) STE for accumulation. \\
+*The mantissa for the accumulator was extended by $2$ additional bits in this run.}
+\label{tbl:mnist}
+\end{table}
+
+As we saw in the case of residual neural networks (\cref{tbl:resnet_fp32} and \ref{tbl:resnet_fp8}) with 1-stage training, successful implementation of LBA is not guaranteed to scale to larger models. To evaluate the quality of our estimated gradients, we would like to compare the optimization of the different approaches. To that end, we train a small LBA transformer from scratch for masked language modeling, over a modest-sized dataset ($200K$ rows), for $15$ epochs. In \cref{tbl:mlm}, we compare different STE variants for a variety of very-low precision accumulators. 
+
+\begin{table}[!htb]
+\begin{center}
+\begin{tabular}{| c   |c |c |c   | c|}
+\hline
+  Accumulator&  Identity (\%)&  \makecell{Recursive /\\ OF (\%)} & \makecell{Immediate /\\ OF (\%)} & \makecell{Immediate /\\ DIFF (\%)}\\
+\hline
+FP32&      $51.31$& -& - & -\\
+\hline
+$M3E3$&      $20.86$& $19.20$& $14.80$ & $\mathbf{24.60}$  \\
+\hline
+$M4E3$&      $13.88$& $39.57$& $37.23$ & $\mathbf{41.94}$  \\
+\hline
+$M5E3$&      $9.47$& $45.28$& $44.76$ & $\mathbf{50.12}$  \\
+\hline
+$M6E3$&      $14.71$& $46.17$& $46.13$ & $\mathbf{50.03}$  \\
+\hline
+$M3E4$&      $15.2$ & $15.15$& $15.43$ & $\mathbf{25.53}$  \\
+\hline
+$M4E4$&      $\mathbf{42.93}$ & $42.81$ & $42.81$ & $41.50$ \\
+\hline
+$M5E4$&      $47.87$ & $\mathbf{48.76}$& $\mathbf{48.76}$ & $47.93$  \\
+\hline
+\end{tabular}
+\end{center}
+\caption{Accuracy of LBA transformer for the task of Masked Language Modelling ($200K$ rows), when using different STEs for the accumulator operation.}
+\label{tbl:mlm}
+\end{table}
+
+Based on our results for training masked language models, using fine-grained STEs becomes crucial when the number of accumulation bits is decreased below $M=4$ or $E=4$ (hence, this includes all possible FP8 formats). While successful at improving the optimization, none of the STEs we have tried were successful at closing the gap with the baseline completely, when extreme accumulator quantization was applied. Out of the three proposed STEs, we recommend Immediate/ DIFF STE, which generally achieved better accuracy in the areas where naive, identity STE  was insufficient, despite its higher cost. The Immediate/ DIFF STE may also prove more suitable in cases where the exact behavior of the FMAq is unknown (i.e., 'black-box') since its definition is agnostic to the FMAq internals.
+
+
+
+\section{Discussion}
+
+
+The quantization of the accumulator in deep neural networks is a hard but necessary task in the effort to improve neural networks' efficiency, reduce cost, and cut down carbon footprint. Despite the many difficulties involving the training, the implementation, and the theoretical analysis of networks with low-bit-accumulators, our results show that LBA networks are surprisingly easy to fine-tune. By applying simple optimization methods over pre-trained networks, we show it is possible to adjust the models for inference with cheaper hardware, that utilizes $12$ bits accumulators. When the accumulators bit width is further reduced we alleviate the accuracy degradation by using fine-grained approaches for estimating the gradient.
+
+\ifthenelse{\boolean{blind}}
+{}
+{
+
+

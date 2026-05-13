@@ -1,0 +1,487 @@
+\title{Can We Further Elicit Reasoning in LLMs? Critic-Guided Planning with Retrieval-Augmentation for Solving Challenging Tasks}
+
+\begin{abstract}
+State-of-the-art large language models (LLMs) exhibit impressive problem-solving capabilities but {may} struggle with complex reasoning and factual correctness. Existing methods harness the strengths of chain-of-thought (CoT) and retrieval-augmented generation (RAG) to {decompose} a complex problem into simpler steps and apply retrieval to {improve factual correctness}. These methods work well on straightforward reasoning tasks but often falter on challenging tasks such as competitive programming and mathematics, due to frequent reasoning errors and irrelevant {knowledge} retrieval. {To address this,} we introduce \textbf{C}ritic-guided planning with \textbf{R}etrieval-augmentation, CR-Planner, a novel framework that leverages fine-tuned critic models to guide both reasoning and retrieval processes through planning.
+CR-Planner solves a problem by iteratively selecting and executing sub-goals. Initially, it identifies the most promising sub-goal from reasoning, query generation, and retrieval, guided by rewards given by a critic model {named sub-goal critic}.  It then executes this sub-goal through sampling and selecting the optimal output based on evaluations from another critic model {named execution critic}.
+This iterative process, informed by retrieved information and critic models, enables CR-Planner to effectively navigate the solution space towards the final answer.
+We employ Monte Carlo Tree Search (MCTS) to collect the data for training {the} critic models, allowing for a systematic exploration of action sequences and their long-term impacts.
+We validate CR-Planner on challenging domain-knowledge-intensive and reasoning-heavy tasks, including competitive programming, theorem-driven math reasoning, and complex domain retrieval problems. Our experiments demonstrate that CR-Planner significantly outperforms baselines, highlighting its effectiveness in addressing challenging problems by improving both reasoning and retrieval. \footnote{We will make our code and data publicly available.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+State-of-the-art large language models (LLMs), while demonstrating remarkable problem-solving capabilities \citep{openai2023gpt4, cheng2023gpt4}, still face two key challenges: reasoning for complex tasks \citep{huang2024olympicarena} and domain-specific knowledge \citep{zhao2023chatgptlike}.
+Existing approaches \citep{yao2023react, zhao2023verifyandedit, li2024cok} seek to harness the strengths of both chain-of-thought (CoT) reasoning  \citep{wei2023chainofthought} and retrieval-augmented generation (RAG) \citep{lewis2020retrieval} on knowledge-intensive 
+complex reasoning problems.
+Specifically, instead of invoking RAG solely at the initial stage, these methods {can potentially} apply RAG at each reasoning step. 
+This integrated approach enhances both retrieval and reasoning, as the insights gained from reasoning enable the retrieval of more relevant information, while the retrieved knowledge improves {the factuality of} the subsequent reasoning steps of the model.
+To better incorporate retrieval into reasoning, some methods, such as Self-RAG \citep{akari2024selfrag} and its variants \citep{yan2024correctivecrag,Shayekh-emnlp-24}, directly {finetune} LLMs to decide when to retrieve and whether to adopt the retrieved documents by adding special {reflection} tokens. %\shafiq{that are learned with finetuning}.
+
+While the above methods have shown prospects, they are generally limited to handling problems with {relatively simple} reasoning processes, such as answering {two-hop} questions like ``What year was the Argentine actor who directed El Tio Disparate born?''
+These methods often fail to solve \textbf{domain-knowledge-intensive} and \textbf{reasoning-heavy} problems, such as competitive programming problems \citep{olympiadprogramming} which require the model to possess rich algorithmic knowledge and strong reasoning capability. 
+Specifically, these methods often struggle with two significant types of errors, as shown in Figure \ref{fig:cok_intro} (a).
+The first is \textbf{reasoning error}. When presented with the problem ``Given a string $\mathbf{s}$, find the length of the longest substring without repeating characters in optimal time complexity,'' a CoT approach may incorrectly generate that ``The optimal time complexity is $O(n^2)$'' in its initial reasoning step. 
+This erroneous reasoning step then cascades through subsequent steps, leading to an incorrect final answer.
+The second type {of error} is \textbf{retrieving error}. 
+The effectiveness of the retrieval process depends on the accuracy of the generated search queries and the selection of the retrieved documents. If the preceding reasoning step is flawed, the query generator could be misguided, leading the retriever to return misinformation, as shown in Figure \ref{fig:cok_intro} (a).
+Additionally, the selection of retrieved documents could be erroneous. Thus, the subsequent reasoning will be grounded on a wrong prior.
+\begin{figure}[t]
+    \begin{center}
+        \includegraphics[width=\textwidth]{assets/PRAG_Intro_New.pdf}
+    \end{center}
+    \label{fig:cok_intro}
+    \caption{ 
+    Comparison between (a) {chain-of-thought reasoning \citep{wei2023chainofthought} with retrieval-augmented generation \citep{lewis2020retrieval}}
+    and (b) {critic-guided planning with retrieval-augmentation or CR-Planner} 
+    (this work).
+    \textbf{\textit{g($\cdot$)}} indicates the critic model {(or value function)} that assigns a reward {(or value)} to an action (see Equation \ref{eq:reward}).
+    Texts in (b) highlighted in \colorbox{introgreen}{green} are actions selected at each step.
+    For succinct presentation, only pivotal steps are shown in the figure. 
+    }
+\end{figure}
+To address these errors, we present {critic-guided planning with retrieval-augmentation (CR-Planner)},
+a framework designed to tackle reasoning-heavy problems requiring extensive domain knowledge. CR-Planner systematically plans both reasoning and retrieval processes with specially fine-tuned critic models.
+An example of CR-Planner in action is illustrated in Figure \ref{fig:cok_intro} (b), using the question mentioned above.
+CR-Planner begins with \textbf{Sub-Goal Selection}, where it selects a sub-goal from {three options:} \textsc{Reason} (generating rationales), \textsc{GenQuery} (generating search queries), and \textsc{Retrieve} (retrieving documents), based on reward scores estimated by a critic model, \emph{{the sub-goal critic}}.
+After choosing the sub-goal of \textsc{Reason} in Step 1, CR-Planner proceeds to \textbf{Execution Selection}, where it samples several candidate rationales for the next step. Another critic model, \emph{{the execution critic}} is then employed to select the optimal rationale, which in this case is ``The optimal time complexity is $O(n)$.''
+In Step 3, CR-Planner returns to sub-goal selection to determine the next best sub-goal.
+This iterative process of alternating between sub-goal selection and execution selection continues until the final answer is reached, with each step effectively guided by {the corresponding} critic model.
+Regarding the implementation, CR-Planner incorporates two types of LLMs: a large general generator model (\eg GPT-4)  and small critic models (\eg Llama-3-8B) fine-tuned with domain-specific {\emph{(critiquing)}} knowledge. Specifically, when executing a sub-goal, the generator model generates multiple candidate executions (\eg rationales or search queries, depending on the current sub-goal type). Then, an execution critic corresponding to the sub-goal type performs planning by selecting the most {prospective} option.
+Such a design allows CR-Planner to leverage the generation and reasoning strengths of large generalist LLMs and meanwhile, its small critic models are easier to train {with domain-specific \emph{(critiquing)} knowledge}. %and have a better domain decision-making capability. 
+
+{To optimize the planning performance for sub-goal and execution selection in each domain, we train the critic models separately. 
+The training process for these critic models requires the collection of reasoning and retrieval trajectories with step-wise reward labeling. However, the availability of such data is limited, and annotating it with humans poses significant costs \citep{lightman2024lets}. To address this data scarcity, we utilize Monte Carlo Tree Search (MCTS) \citep{mcts} for efficient data collection.
+MCTS estimates long-term {expected} rewards at each step by comparing simulated outcomes with gold labels and propagates the rewards back to the previous steps. By simulating multiple possible trajectories, we can get reliable rewards for each step, thereby effectively training the critic models to guide the reasoning and retrieval process at each step.
+} 
+
+
+In summary, our key contributions are: 
+(1) We introduce CR-Planner, a novel framework designed to tackle domain-knowledge-intensive and reasoning-heavy problems by employing specially fine-tuned critic models that guide both reasoning and retrieval processes through planning;
+(2) We propose using MCTS to effectively collect training data for the critic models, enhancing their ability to estimate the long-term impact of an action. 
+(3) We perform extensive experiments on challenging tasks that require domain knowledge and complex reasoning, including competitive programming, math reasoning, and complex retrieval.
+CR-Planner outperforms the baseline by 10.06\% on average.  
+
+
+
+
+
+\section{Critic-Guided Planning with Retrieval-Augmentation}
+
+
+We introduce the critic-guided planning with retrieval-augmentation framework (CR-Planner)
+{ to address challenging tasks that are both domain-knowledge-intensive and reasoning-heavy.}
+{ As shown in Figure \ref{fig:cok_method}, CR-Planner operates with two key components during inference: 
+\textbf{(1) Sub-Goal Selection}:  Given the current state, it employs a sub-goal critic model to determine the sub-goal among \textsc{Reason}, \textsc{GenQuery}, and \textsc{Retrieve} that leads towards the desired answer.
+\textbf{(2) Execution Selection}: Upon selecting a sub-goal, CR-Planner undertakes multiple {possible} executions to realize the sub-goal. For instance, it may generate multiple search queries to achieve the \textsc{GenQuery} sub-goal. Then, an execution critic model specifically designed {to assess the executions} for the sub-goal is employed to select the optimal execution among these candidates.}
+{In the above process, a general generator model collaborates with multiple specialized critic models to address the task effectively. We leverage the strengths of the generator model to generate initial plans, while the specialized critic models are fine-tuned to guide optimal routing.}
+To ensure that the training data for the critic models is comprehensive and represents global reward information, we employ Monte Carlo Tree Search (MCTS) to collect the training data.
+
+\begin{figure}[t]
+    \begin{center}
+        \includegraphics[width=\textwidth]{assets/PRAG_Method_Old.pdf}
+    \end{center}
+    \caption{\label{fig:cok_method}
+The retrieval-augmented and critic-guided planning (CR-Planner) framework.
+The figure illustrates training data collection via MCTS, critic model training, and inference. 
+For succinct presentation, \textsc{SubGoal} observations (\textsc{Reason}, \textsc{GenQuery}, and \textsc{Retrieve}) are shown as labeled rectangles and \textsc{Execution} observations (\textsc{Rationale}, \textsc{Query}, and \textsc{Doc}) as labeled circles.
+A state $s_t$ includes all preceding nodes (observations) and arrows (actions) up to the last node.
+}
+\end{figure}
+
+\subsection{Problem Formulation}
+\label{sec:problemformulation}
+
+
+
+
+
+ 
+
+
+We formally define the associated planning environment of CR-Planner as a Markov Decision Process (MDP) represented by the tuple $ (\mathcal{S}, \mathcal{A}_{s}, \mathcal{P}, \mathcal{R}, T)$, where:
+ \begin{itemize}[leftmargin=*]
+     \item $\mathcal{S}$ represents the state space. Specifically, the state at timestamp $t$, denoted by the random variable $s_{t}$, comprises a action-observation trajectory history $(o_0, a_0, ...,a_{t-1}, o_{t})$, where $a_{t-1}$ is the action taken at timestep $t-1$, and $o_t$ is the observation made after that. 
+     {The observation $o$ can be \textsc{Reason}, \textsc{GenQuery}, or \textsc{Retrieve} in sub-goal selection stage, and \textsc{Rationale}, \textsc{Query}, or \textsc{Doc} in execution selection stage. Additionally, a state is named after its last observation, \eg \textsc{Rationale} state $s_t$ means $o_t$ is a \textsc{Rationale}.} 
+
+     \item $\mathcal{A}_{s}$ represents the actions available at each state. For example, the actions available at the sub-goal selection stage, \ie at the    \texttt{Root} state or after observing an outcome of an execution selection are: \emph{reasoning}, \emph{querying}, and \emph{retrieving}. 
+     The possible actions available at the execution selection stage arise from the sampling for the corresponding sub-goal (\ie temperature sampling for  \textsc{Reason} and \textsc{GenQuery}, and top-k candidates for \textsc{Retrieve}). For example, Steps 1 and 2 in Figure \ref{fig:cok_intro} (b) illustrate the \textsc{Reason} and \textsc{Rationale} observations generated following the sub-goal selection and execution selection stages, respectively. 
+
+     \item  The state transition $\mathcal{P}$ defines how the states evolve after an action is taken. In our context, state transitions are determined and handled by different functions depending on the current state. 
+     During the execution selection stage, a \textsc{Reason} or \textsc{GenQuery} state transits to the respective \textsc{Rationale} or \textsc{Query} execution outcomes via the distribution defined by a large general generator model $f_{gen}(\cdot)$. Similarly, a \textsc{Retrieve} state transits to a \textsc{Doc} state via a retriever $f_{retr}(\cdot)$. 
+     During the sub-goal selection stage, the transition is more straightforward and done via a rule-based function $f_{rule}(\cdot)$, \eg selecting \emph{reasoning} action transits to a \textsc{Reason} state.
+
+     \item The reward function $\mathcal{R}(s_t, a)$ specifies the expected reward received after taking an action $a_t$ at state $s_t$. 
+In our context, fine-tuned critic models estimate the rewards and guide the decision-making process by encouraging actions that contribute the most towards solving the MDP. Details of the critic models are provided in Section \ref{sec:inference}.
+
+\item Lastly, $T$ represents the maximum number of steps that can occur within the MDP.
+\end{itemize}
+Solving the MDP requires generating an optimal plan in the form of a trajectory: $\tau* = (s_0, a_0, ..., s_t, a_t, ..., s_{T-1},a_{T-1},s_T)$ that maximizes the total expected rewards. %, where $a_t$ is the action taken at timestep $t$ and $s_{t+1}$ is the state that the agent observes after that.
+}
+
+
+
+
+
+
+\subsection{Inference of CR-Planner}
+\label{sec:inference}
+
+When tackling domain-knowledge-intensive and reasoning-heavy problems, errors may occur during the reasoning process, which can then propagate to subsequent steps. Therefore, ensuring accuracy at each step of the process from the very beginning is essential. Additionally, external information is not always necessary in the problem-solving process. In fact, deciding when to access external sources is a critical decision \citep{akari2024selfrag}. Furthermore, as highlighted by \citet{li2024cok}, a significant challenge in RAG is the accuracy of the retrieval process itself. Consequently, it is crucial to ensure both the quality of search queries and the selection of retrieved documents. To address these challenges, our method employs critic models at each time step to guide the decision-making process. Specifically, at time step $t$, given the current state $s_t$, the critic model $g$ assesses the available actions $\mathcal{A}_{s_t}$ and helps select an action $a_t$ that maximizes the expected reward.
+
+\paragraph{Action selection using the critic models.}
+At timestamp $t$, the policy model $\pi$ determines the next action as:
+\begin{equation} 
+    a_t = \pi(s_t) = \arg\max_{a \in \mathcal{A}_{s_t}} \mathcal{R}(s_t, a). 
+\end{equation}
+The action space $\mathcal{A}_{s_t}$ varies depending on $s_t$. 
+{As previously discussed in Section \ref{sec:problemformulation} and outlined in Table \ref{tab:actionspace}, for a state in the sub-goal stage, the action space leads to possible executions of that sub-goal, while for a state in the execution stage, the action space leads to the possible subsequent sub-goals.}
+$\mathcal{R}(s_t, a)$ is the expected reward when taking action $a$ in state $s_t$ and estimated by the critic models: 
+\begin{equation}
+\label{eq:reward}
+    \mathcal{R}(s_t, a) = 
+        \begin{cases}
+        g^e_{\textsc{Rationale}}(s_t, a), & \text{if } s_t = \textsc{Reason} \text{ state}\\
+            g^e_{\textsc{Query}}(s_t, a), & \text{if } s_t = \textsc{GenQuery} \text{ state}\\
+            g^e_{\textsc{Doc}}(s_t, a), & \text{if } s_t = \textsc{Retrieve} \text{ state}\\
+            g^g(s_t, a), & \text{otherwise.}
+        \end{cases}
+\end{equation}
+Specifically, distinct critic models are utilized for different state types: 
+$g^g(\cdot)$ is for determining the next sub-goal at the current execution state (\ie the inference Steps 1 in Figure \ref{fig:cok_method}), and $g^e(\cdot)$ is for evaluating different execution candidates at the current sub-goal state (\ie the inference Step 2 in Figure \ref{fig:cok_method}).
+Additionally, according to the sub-goal states, 
+$g^e(\cdot)$ has three variants $g^e_{\textsc{Rationale}}$, $g^e_{\textsc{Query}}$, and $g^e_{\textsc{Doc}}$, correspondingly evaluating rationales, queries and the retrieved documents.
+
+\paragraph{State transition with the selected action.}
+Once $a_t$ is determined and executed, the state is then transited from $s_t$ to $s_{t+1} = (s_t, a_t, o_{t+1})$, where
+\begin{equation}
+    o_{t+1} = 
+        \begin{cases}
+            f_{gen}(s_t, a_t), & \text{if } s_t = \textsc{Reason} \text{ or } \textsc{GenQuery} \text{ state}\\
+            f_{retr}(s_t, a_t), & \text{if } s_t = \textsc{Retrieve} \text{ state} \\
+            f_{rule}(s_t, a_t), & \text{otherwise.} \\
+        \end{cases}
+\end{equation}
+As mentioned in Section \ref{sec:problemformulation}, given the current state $s_t$ and action $a_t$, we employ three specific functions to generate different types of outcomes.
+The generator $f_{gen}(\cdot)$ generates either a \textsc{Rationale} or \textsc{Query}. The retriever $f_{retr}(\cdot)$ outputs a \textsc{Doc}.
+Last but not least, the rule-based function $f_{rule}(\cdot)$ outputs a \textsc{SubGoal}. 
+The \textsc{SubGoal} is a predefined natural language. For example, a \textsc{Reason} thought is ``The next step is to generate a rationale''.
+\paragraph{Termination conditions and the final answer.}
+This process continues until one of two conditions is met. The process ends at step $t$ if the observation $o_t$ includes the complete answer. 
+Otherwise, if $t$ equals $T$ and $o_t$ does not contain the final answer, an extra step occurs to force the model to conclude the answer. 
+In this case, a concluding answer is generated using an LLM.
+\subsection{The Critic Models}% \xww{Training of the Critic Models}}
+The CR-Planner framework relies heavily on its critic models as key components. These models evaluate actions and steer the overall process of sub-goal and execution selection. 
+To fulfill this role effectively, the critic models must accurately assess each action based on its potential contribution to the entire problem-solving process. 
+As such, the collection of training data for the critic models is crucial, for which we utilize Monte Carlo Tree Search (MCTS).
+MCTS is particularly well-suited for generating training data for the critic models due to its ability to explore the long-term impacts of potential actions while balancing exploration and exploitation. By simulating numerous possible action-observation trajectories, MCTS can provide a rich dataset of both successful and unsuccessful trajectories, helping the critic model learn to differentiate effective actions from suboptimal ones.
+
+\paragraph{Collecting data via MCTS.}
+As shown in Figure \ref{fig:cok_method}, MCTS consists of the four key steps:
+\textbf{(1) Selection.} 
+Starting from the \texttt{root} state $s_0$, the algorithm selects child node (with observation) recursively based on the Upper Confidence Bound (UCB1) that balances exploration and exploitation. 
+The UCB1 value for $o_i$ is computed as $\frac{v_i}{n_i} + c\sqrt{\frac{\ln n_p}{n_i}}$, where $v_i$ is the cumulative rewards of $o_i$, $n_i$ is the number of times $o_i$ has been visited, and $n_p$ denotes the number of visits to the parent thought of $o_i$.
+This process continues until it reaches a node that is not fully expanded or a terminal node.
+\textbf{(2) Expansion.}
+If the selected $o_i$ is not terminal and has unexplored child nodes, MCTS expands the tree by adding one or more of these unexplored child nodes. This represents exploring new actions available from the current action space $\mathcal{A}_{s_t}$.
+\textbf{(3) Simulation.}
+From the newly added observation, MCTS simulates a playthrough to a terminal state by employing a generative model $f_{gen}(\cdot)$ to generate the final answer based on existing observations. This simulation estimates the potential outcome from the observation.
+\textbf{(4) Backpropagation.}
+The result of the simulation is then propagated back up the tree. Each node along the path to the root updates its statistics, including visit counts and total reward, which informs future selection decisions by reflecting the observed outcomes.
+For each data point in the training dataset, we run MCTS for $N$ steps and collect pairwise data from the final state for each observation type.
+In particular, a chosen observation $o_i$ is the one with the highest score, while a rejected observation $o_i'$ is one of the observations sharing the same parent node but a lower score.
+For critic model $g^e_{\textsc{Rationale}}(\cdot)$, we collect $\mathcal{D}^{\textsc{Rationale}} = \{(O^{\textsc{Rationale}}_i, o_i, o_i')...\}$, where $O^{\textsc{Rationale}}_i$ represents previous \textsc{Rationale}s along the trajectory before the current \textsc{Rationale} $o_i$. 
+It is crucial to evaluate $o_i$ considering all prior rationales.
+The critic model $g^e_{\textsc{Query}}(\cdot)$ uses $\mathcal{D}^{\textsc{Query}} = \{(o^{\textsc{Rationale}}_i, o_i, o_i')...\}$, where $o^{\textsc{Rationale}}_i$ is one immediately preceding \textsc{Rationale} of \textsc{Query} $o_i$.
+For the critic model $g^e_{\textsc{Doc}}(\cdot)$, we have $\mathcal{D}^{\textsc{Doc}}_i = \{(o^{\textsc{Rationale}}_i, o^{\textsc{Query}}_i, o_i, o_i')...\}$, where $o^{\textsc{Rationale}}_i$ and $o^{\textsc{Query}}_i$ are the immediately preceding \textsc{Rationale} and \textsc{Query} of \textsc{Doc} $o_i$.
+Lastly, the \textsc{SubGoal} critic model $g^g(\cdot)$ uses $\mathcal{D}^{\textsc{SubGoal}} = \{(O_i, o_i, o_i')...\}$, where $O_i$ represents all previous observations of any type along the trajectory.
+
+\paragraph{Training.}
+For each of the collected training datasets described above, we train a dedicated critic model as shown in Figure \ref{fig:cok_method}. 
+Following \citet{rankingloss} and \citet{ouyang2022training}, we employ pairwise ranking loss to optimize the parameters.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Experiments}
+
+\label{sec:exps}
+\subsection{Setup}
+\paragraph{Models.}%\xww{Implementations?}
+In our experiments, we employ GPT-4 (\texttt{gpt-4o-2024-05-13}) as the black-box LLM for generation during both inference and training data collection.
+Since CR-Planner requires the sampling of diverse \textsc{Rationale} and \textsc{Query}, we set the decoding temperature to 0.7.
+To ensure training and inference efficiency, we limit the sampling to three instances due to cost concerns. 
+For the critic models, we fine-tune \texttt{Skywork-Reward-Llama-3.1-8B} \citep{skyworkreward} with LoRA \citep{hu2021lora}, which was trained as a sequence classifier with the Skywork Reward Data Collection and excels at scoring in complex scenarios, such as mathematics and coding.
+The first logit value of the model output is used as the reward score of our critic models.
+
+\paragraph{Baselines.}
+We compare CR-Planner with both commonly used baselines and state-of-the-art methods to offer a comprehensive evaluation:
+\textbf{(1) Standard prompting (Standard)} \citep{ouyang2022training}, which directly generates the answer. 
+\textbf{(2) Chain-of-Thought (CoT)} \citep{wei2023chainofthought}, which generates multiple rationales before the final answer to enhance the models' reasoning ability.
+\textbf{(3) Reflexion} \citep{reflexion}, a framework uses linguistic feedback to further improve models' reasoning.
+\textbf{(4) Standard retrieval-augmented generation (RAG)} \citep{lewis2020retrieval}, which retrieves relevant knowledge based on the problem itself and then lets the model to generate the final answer using both the problem and the retrieved knowledge.
+\textbf{(5) Chain-of-Knoweldge (CoK)} \citep{li2024cok}, a state-of-the-art CoT-based framework designed to enhance prediction accuracy by retrieving and post-editing rationale at each step.
+\footnote{We exclude Self-RAG as a baseline because it requires training the base model, which is not feasible in our setup. This further highlights the flexibility of CR-Planner.}
+All methods are zero-shot by default unless otherwise specified. 
+
+\subsection{Competitive Programming}
+\label{sec:usaco}
+\paragraph{USACO benchmark.}
+Computing {Olympiads} require complex algorithmic reasoning, puzzle-solving skills, and the ability to generate efficient code.
+Furthermore, retrieving knowledge from programming textbooks and similar problems from a problem bank can aid in solving these problems.
+In this sub-section, we employ the USACO benchmark \citep{olympiadprogramming}, which includes 307 problems from the USA Computing Olympiad, to evaluate the performance of CR-Planner and baseline methods in the domain of competitive programming.
+USACO problems are categorized into four difficulty levels (\ie 123 bronze, 100 silver, 63 gold, and 21 platinum problems) and test various core skills, including complete search, binary search, and segment tree implementation. 
+Typically, solving a USACO problem involves several steps: restating the problem in simple terms since many are framed within real-world contexts; retrieving relevant knowledge from textbooks or similar problems from a problem bank; conceptualizing the solution in plain English; drafting a pseudocode solution; and finally, producing the complete Python solution with comments. 
+Thus, the USACO benchmark is an ideal fit for evaluating both the complex reasoning and retrieval capabilities of the models, making it highly relevant to this paper.
+\paragraph{External knowledge.}
+Following the baseline methods outlined in the USACO benchmark \citep{olympiadprogramming}, we use both textbooks and a problem bank as external knowledge sources.
+The textbooks consist of 30 human-written chapters covering algorithmic concepts tailored specifically for the USA Computing Olympiad.
+The problem bank includes all other USACO problems except for the one currently being solved.
+Following \citet{olympiadprogramming}, we employ both textbooks and the problem bank as external sources for all methods.
+Additionally, we employ a BM25 retriever to execute the retrieval process, obtaining relevant information from external knowledge sources.
+\paragraph{Results and observations.}
+\begin{wraptable}{r}{0.55\textwidth}
+    \caption{Pass@1 performances on USACO. The \textit{Retrieval+Reflection*} result is from \citet{olympiadprogramming}.}
+    \label{tab:usaco}
+    \begin{center}
+    \resizebox{0.55\textwidth}{!}{
+\begin{tabular}{cccccc}
+\toprule
+\textbf{Method} & \textbf{Bronze} & \textbf{Silver} & \textbf{Gold} & \textbf{Platinum} & \textbf{Overall} \\ 
+\midrule
+Standard & 18.70 & 6.00 & 3.17 & 0.00 & 10.10  \\
+CoT & 21.95 & 8.00 & 4.76 & 0.00 & 12.38  \\
+RAG & 17.07 & 4.00 & 1.59 & 0.00 & 8.47  \\
+CoK & 15.45 & 5.00 & 1.59 & 0.00 & 8.14  \\
+CR-Planner & \textbf{26.02} & \textbf{10.00} & \textbf{14.29} & \textbf{14.29} & \textbf{17.59}  \\\midrule
+Reflexion & 23.58 & 9.00 & 4.76 & 0.00 & 13.36  \\
+\textit{Retrieval+Reflexion*} & - & - & - & - & \textit{18.05} \\
+CR-Planner+Reflexion & \textbf{34.15} & \textbf{16.00} & \textbf{14.29} & \textbf{14.29} & \textbf{22.80} \\
+\bottomrule
+\end{tabular}}
+    \end{center}
+\end{wraptable}
+\textbf{(1) CR-Planner outperforms all baselines consistently.}
+Table \ref{tab:usaco} presents the results for USACO using various methods. 
+CR-Planner significantly outperforms all baseline methods, achieving a 7.49\% improvement in overall performance {compared to standard prompting}.
+This highlights the effectiveness of CR-Planner.
+\textbf{(2) Reasoning-driven methods offer limited improvements.} 
+We observe that reasoning-driven methods like CoT and Reflexion do improve the performances of the standard prompting method on bronze, silver, and gold problems, reaffirming that intermediate rationales and critique-based reasoning aid in solving reasoning tasks \citep{wei2023chainofthought, reflexion}.
+However, the improvements are trivial, and these methods fail to improve performance on platinum-level problems.
+We attribute this to the model's limited knowledge of the tasks or the generation of faulty rationales and critiques.
+\textbf{(3) Faulty retrieval hinders performance.}
+We observe that both standard RAG and CoK perform worse than the standard prompting method, consistent with the findings of \citet{yao2023react} and \citet{olympiadprogramming}. 
+This decline in performance can be attributed to the quality of retrieval. As demonstrated in Figure \ref{fig:cok_intro}, if the retrieved example is irrelevant to the original problem, it may mislead the model into generating an incorrect answer.
+Additionally, we notice that CoK performs worse than RAG due to its reliance on multiple retrievals at individual steps, increasing the likelihood of misleading information being introduced and leading to a faulty final answer.
+\textbf{(4) CR-Planner improves harder problems.}
+CR-Planner notably boosts the performances on gold- and platinum-level problems. As aforementioned, while CoT offers minor improvements, it falls short on more difficult problems, and retrieval can hinder performance due to irrelevant knowledge.
+In contrast, CR-Planner employs critic models to guide both the reasoning and retrieval through the process, leading to non-trivial improvements at the two highest levels of programming problems.
+\textbf{(5) CR-Planner is orthogonal with other methods.}
+Reflexion executes the initially generated code and uses the execution results of a few test cases as linguistic feedback to revise the code. CR-Planner works orthogonal with such methods, leading to a significant improvement of 9.44\%, further highlighting the effectiveness of critic-guided planning with retrieval-augmentation.
+\subsection{Theorem-Driven Math Problems}
+\paragraph{TheoremQA-Maths.}
+When tackling a new theorem-driven math problem, people often reference solved problems with similar reasoning logic. 
+However, finding such problems can be challenging because even if two problems share similar reasoning logic, they might appear very different on the surface.
+Moreover, in theorem-driven math problems, the reasoning process is critical. A single flawed step in the logic can lead to wrong subsequent rationales and finally an incorrect final answer.
+In this sub-section, we use the rewritten Math set from TheoremQA \citep{theoremqa}, named TheoremQA-Math, as introduced in the BRIGHT dataset \citep{bright}. 
+TheoremQA-Math consists of 206 solvable questions that have been improved for fluency and coherence, with all questions requiring the application of math theorems (\eg the binomial theorems).
+To solve a problem in the TheoremQA-Math dataset, the process typically involves the following steps: understanding and restating the problem in simple terms; retrieving relevant knowledge from solved problems; conceptualizing the solution in plain English; and finally, generating the solution.
+Solving problems from TheoremQA-Math requires both complex reasoning and knowledge of Math theorems, making it pertinent to this paper.
+
+\paragraph{External knowledge.}
+Following the BRIGHT benchmark \citep{bright}, we employ a collection of processed documents sourced from high-quality STEM datasets, including GSM8K \citep{gsm8k}, GSM8K-RFT \citep{gsm8krft}, MATH \citep{math}, AQuA-RAT \citep{aquarat}, TheoremQA \citep{theoremqa} and CAMEL-MATH \citep{camelmath}.
+To ensure efficient retrieval during both the training data collection and inference stages, we opt for the term-based retrieval method BM25, similar to what is used in competitive programming.
+
+\paragraph{Results and observation.}
+\begin{wraptable}{r}{0.3\textwidth}
+    \caption{Results (accuracy) on TheoremQA-Math. %\bing{mention the metric somewehre}
+    }
+        \label{tab:theoremqamath}
+        \begin{center}
+        \resizebox{0.25\textwidth}{!}{
+            \begin{tabular}{cc}
+                \toprule
+                 \textbf{Method} & \textbf{TheoremQA-Math} \\
+                \midrule
+                Standard & 39.81 \\
+                CoT & 41.75 \\
+                Reflexion & 40.29 \\
+                RAG & 44.17 \\
+                CoK & 45.15 \\
+                CR-Planner & \textbf{53.40} \\
+                \bottomrule
+            \end{tabular}
+        }
+        \end{center}
+\end{wraptable}
+Similar to competitive programming, as shown in Table \ref{tab:theoremqamath}, we observe a notable performance improvement from CR-Planner, with 13.59\% on TheoremQA-Math compared to standard prompting method.
+This further demonstrates the effectiveness of CR-Planner in tasks requiring knowledge retrieval and complex reasoning.
+Furthermore, in contrast to their behavior in the USACO benchmark, retrieval methods, such as standard RAG and CoK, do enhance performance in this task.
+We attribute this to the shorter context of the retrieved documents in the math domain. With shorter retrieved documents, the base model is easier to determine which information to incorporate or discard. 
+Nevertheless, CR-Planner maximizes the benefits of both retrieval and reasoning, leading to the greatest performance improvement.
+
+\subsection{Reasoning-Heavy Domain Retrieval}
+\paragraph{StackBio and StackEcon.}
+\begin{wraptable}{r}{0.32\textwidth}
+    \caption{Results on complex domain retrieval.}
+        \label{tab:domainretrieval}
+        \begin{center}
+        \resizebox{0.32\textwidth}{!}{
+            \begin{tabular}{ccc}
+                \toprule
+                  & \textbf{StackBio} & \textbf{StackEcon} \\
+                \cmidrule(lr){2-2}
+                \cmidrule(lr){3-3}
+                \textbf{Method} & \textbf{nDCG@10} & \textbf{nDCG@10} \\
+                \midrule
+                BM25 & 19.20 & 14.90 \\
+                CoT & 21.06 & 16.33 \\
+                CoK & 20.82 & 17.45 \\
+                CR-Planner & \textbf{29.51} & \textbf{22.80} \\
+                \bottomrule
+            \end{tabular}
+        }
+        \end{center}
+\end{wraptable}
+Complex domain queries often demand in-depth reasoning to identify relevant documents that go beyond simple surface-level matching. 
+To evaluate models' ability in reasoning-heavy domain retrieval, we use biology- and economics-related queries from the BRIGHT benchmark \citep{bright}, specifically StackBio and StackEcon. 
+Both StackBio and StackEcon contain 103 questions sourced from StackExchange, with the gold labels being the documents cited in the answers.
+As the evaluation metric is nDCG@10, which requires the top 10 documents, we set the number of retrieved documents to 10 when PC-Planner performs the final retrieval.%\xww{\cchar{那你这里Doc critic是怎么使用呢，20里选top10？需要解释清楚一下}}
+
+\paragraph{External knowledge.}
+In line with the BRIGHT benchmark \citep{bright}, external sources can include any accessible web content such as articles, tutorials, news, blogs, and reports. 
+Since this information has already been gathered and incorporated into the benchmark, we employ BM25 for document retrieval to ensure efficiency.
+\paragraph{Results and observations.}
+As shown in Table \ref{tab:domainretrieval}, CR-Planner consistently improves over the standard BM25 method by 10.31\% and 7.9\% on StackBio and StackEcon, respectively.
+CoK improves the standard BM25 method, which indicates that reasoning before retrieval is crucial in such reasoning-heavy domain retrieval tasks.
+However, CoK does not consistently enhance performance; for instance, it performs worse than CoT on StackBio.
+We attribute this to the potential noise introduced by multiple suboptimal retrieval results.
+These observations further highlight the effectiveness of the critic models in RC-Planner.
+
+
+
+\section{Analysis}
+
+\subsection{Domain-Specific Critic Models}
+\begin{wrapfigure}{r}{0.35\textwidth}
+    \begin{center}
+        \includegraphics[width=0.35\textwidth]{assets/critic_compare.pdf}
+    \end{center}
+    \label{fig:critic}
+    \caption{Performances of different critic models vs. baseline.
+}
+\end{wrapfigure}
+The critic models play a key role in CR-Planner by guiding the selection of sub-goals and executions through inference. 
+Previous works often adopt proprietary LLMs as critic models (\eg GPT-4 and Claude), utilizing in-context learning to evaluate actions \citep{criticiclr, zhao2024autoarenallmsautomating}. 
+In this sub-section, we compare CR-Planner's performance when using either fine-tuned models or GPT-4 (\texttt{gpt-4o-2024-05-13}) as critics on the USACO and StackBio datasets. 
+The results are presented in Figure \ref{fig:critic}. 
+Although employing GPT-4 as the critic yields improvements over the baseline, CR-Planner consistently performs better with fine-tuned critic models. 
+Notably, the fine-tuned critic models lead to larger gains in tasks that require domain knowledge, such as StackBio. 
+This underscores the significance of domain-specific fine-tuning and the rationale behind CR-Planner's use of fine-tuned critic models.
+
+\subsection{Flexibility of Critic Models on Various Base Models}
+\begin{wraptable}{l}{0.3\textwidth}
+    \caption{CR-Planner with various base models.}
+    \label{tab:basemodel}
+    \begin{center}
+    \resizebox{0.3\textwidth}{!}{
+\begin{tabular}{cc}
+\toprule
+\textbf{Method} & \textbf{USACO} \\ 
+\midrule
+Claude-3.5 & 9.12 \\
+CR-Planner w/ Claude-3.5 & 13.68 \\\midrule
+Llama-3.1 & 7.49 \\
+CR-Planner w/ Llama-3.1 & 10.10 \\
+\bottomrule
+\end{tabular}}
+    \end{center}
+\end{wraptable}
+Compared to previous methods like Self-RAG \citep{akari2024selfrag}, CR-Planner does not require fine-tuning the base model. 
+This flexibility allows CR-Planner to be applied across various base models, whether open-source or closed-source. 
+In this subsection, we showcase the effectiveness of our critic models on another closed-source model, Claude-3.5 (\texttt{claude-3-5-sonnet}), and an open-source model, Llama-3.1 (\texttt{Llama-3.1-70B-Instruct}). 
+As demonstrated in Table \ref{tab:basemodel}, CR-Planner enhances both Claude-3.5 and Llama-3.1. 
+However, the improvements, 4.56\% for Claude-3.5 and 2.61\% for Llama-3.1, are smaller compared to the 7.49\% boost seen with GPT-4. 
+We believe this is due to the critic models being trained on data collected from GPT-4, making them more attuned to GPT-4 during inference and potentially less optimized for other models.
+Nonetheless, the plug-and-play nature of critic models in our CR-Planner presents a promising approach to distill planning capabilities from powerful LLMs. This planning ability can be utilized to directly guide smaller LLMs, which lack the strength to generate high-quality MCTS trajectories on their own.
+\subsection{Retrieve or Not to Retrieve}
+\begin{wraptable}{r}{0.3\textwidth}
+    \caption{CR-Planner with and without retrieval.}
+    \label{tab:retrieval}
+    \begin{center}
+    \resizebox{0.3\textwidth}{!}{
+\begin{tabular}{cc}
+\toprule
+\textbf{Method} & \textbf{USACO} \\ 
+\midrule
+Standard & 10.10 \\
+CR-Planner w/o Retrieval & 14.33 \\
+CR-Planner & 17.59 \\
+\bottomrule
+\end{tabular}}
+    \end{center}
+\end{wraptable}
+Tackling challenging domain-specific tasks such as competitive programming requires extensive reasoning as well as advanced algorithmic knowledge, which base models may not inherently possess. 
+In this section, we examine the importance of accurately retrieving external knowledge to assist in solving competitive programming problems. 
+We instruct the model to concentrate solely on reasoning, employing the reasoning critic model $g^g_{\textsc{Reason}}$ to select a rationale for each reasoning step. 
+As shown in Table \ref{tab:retrieval}, the performance without retrieval is lower. However, as discussed in Section \ref{sec:usaco} and by \citet{olympiadprogramming}, inaccurate retrieval could impair performance. This emphasizes the critical role of accurate retrieval and the overall effectiveness of CR-Planner.
+
+\subsection{Execution Sampling}
+\begin{wrapfigure}{r}{0.35\textwidth}
+    \begin{center}
+        \includegraphics[width=0.35\textwidth]{assets/sampling.pdf}
+    \end{center}
+    \label{fig:sampling}
+    
+    \caption{Performances of various execution sampling.
+}
+\end{wrapfigure}
+Throughout both the training and inference phases of CR-Planner, executing sub-goals involves sampling several possible candidates. 
+By increasing the number of candidates, the likelihood of identifying a better option may improve. 
+In this subsection, we study how changing the number of candidates sampled for sub-goal execution during inference affects performance. 
+However, due to cost concerns, we do not conduct ablation studies for the training phase.
+As illustrated in Figure \ref{fig:sampling}, the improvements on USACO are substantial when increasing from one to two, but converge around three. We believe this is due to the limitations of the generator model's reasoning capabilities and the retriever's accuracy. Without fine-tuning both generator and retriever models,
+further performance gains would be challenging to achieve.
+Therefore, to balance between performance and cost, we select three as the sampling number for the inference of main experiments.
+
+
+
+\section{Related Work}
+
+
+LLMs have demonstrated inherent reasoning capabilities, showing promising performance in most logical reasoning datasets~\citep{liu2023evaluatinglogicalreasoningability, qin-etal-2023-chatgpt}. However, using standard LLMs directly often fall short in complex reasoning tasks that require structured thinking or planning~\citep{huang-chang-2023-towards}. Therefore, researchers have been attempting to develop more sophisticated reasoning schemes.
+Chain-of-Thought (CoT) prompting~\citep{wei2023chainofthought} prompts LLMs to articulate the reasoning processes step by step, improving reasoning performances on complex tasks. Tree-of-Thought~\citep{yao2023tree} then generalizes further by breaking down a CoT into coherent units of ``thoughts'', thus enabling the LLM to consider multiple reasoning paths and self-evaluate to decide the next course of action. %Graph-of-Thought~\citep{Besta_2024} then expands the CoT into an arbitrary graph, where thoughts are vertices and edges correspond to dependencies between thoughts. It greatly improves accuracy and reduces costs compared to Tree-of-Thought.
+
+To further improve LLMs in planning-based reasoning, research finds that process supervision shows a promising way forward. 
+RAP~\citep{lightman2024lets} uses a world model to estimate future rewards of reasoning steps, providing step-wise guidance for reasoning processes.
+\citet{jiao2024learningplanningbasedreasoningtrajectories} learns planning-based reasoning through direct preference optimization (DPO)~\citep{rafailov2023direct} on collected trajectories, which are ranked according to synthesized process rewards. As a result, tuned 7B models can surpass GPT-3.5-Turbo.
+However, this method requires training the base model, which limits its applicability to larger and closed-source models. In comparison, CR-Planner trains external critic models, which offers flexibility for use with any base model.
+
+Besides reasoning improvements, retrieval augmented generation (RAG) can effectively reduce hallucinations~\citep{huang2023surveyhallucinationlargelanguage} by introducing external knowledge.
+Specifically, the RAG process can be divided into 3 sub-tasks: pre-retrieval analysis, query generation and rewriting, and document selection. Currently, most methods attempt to optimize the subtasks seperately. Self-ask~\citep{selfask} optimizes pre-retrieval analysis by breaking down the original problem into sub-problems. Chain of Knowledge~\citep{li2024cok} rewrites natural-language questions to database queries for more precise retrieval with structured knowledge. RePlug~\citep{shi2023replug} improves document selection with a fine-tuned retriever.
+As these methods optimize sub-tasks locally, the single-task improvements may not constitute the globally optimal solution. In comparison, CR-Planner trains the critic model by learning the rewards of each individual action for overall performance.
+
+
+\section{Conclusions}
+
+In this paper, we present critic-guided planning with retrieval-augmentation (CR-Planner), a novel framework for handling domain-knowledge-specific and reasoning-heavy tasks by leveraging fine-tuned critic models to guide both the reasoning and retrieval processes.
+We further employ the Monte Carlo Tree Search for systematic data collection to enhance the training of the critic models.
+Our approach, validated across challenging domains like competitive programming, math reasoning, and complex domain retrieval tasks, has shown substantial performance improvements over existing methods. 
+By combining the strengths of large generalist models with domain-specific fine-tuned critics, CR-Planner offers a flexible and scalable solution for solving problems that require both intricate reasoning and accurate knowledge retrieval. 
+
+
+
+
+
+

@@ -1,0 +1,198 @@
+\title{Multi-domain Distribution Learning for De Novo Drug Design}
+
+\begin{abstract}
+We introduce DrugFlow, a generative model for structure-based drug design that integrates continuous flow matching with discrete Markov bridges, demonstrating state-of-the-art performance in learning chemical, geometric, and physical aspects of three-dimensional protein-ligand data. We endow DrugFlow with an uncertainty estimate that is able to detect out-of-distribution samples. To further enhance the sampling process towards distribution regions with desirable metric values, we propose a joint preference alignment scheme applicable to both flow matching and Markov bridge frameworks. Furthermore, we extend our model to also explore the conformational landscape of the protein by jointly sampling side chain angles and molecules.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Small molecules are the predominant class of FDA-approved drugs with a share of $85\%$ , and more than $95\%$ of known drugs target human or pathogen proteins (Santos et al., 2017). At the same time, the cost and duration of the development of new drugs are skyrocketing (Simoens & Huys, 2021). This sparks increasing interest in the computational design of small molecular compounds that bind specifically to disease-associated proteins and thus reduce the amount of costly experimental testing.  
+
+In recent years, the machine learning community has contributed a plethora of generative tools addressing drug design from various angles (Du et al., 2024). Some methods directly optimize specific drug properties, using techniques such as reinforcement learning (Popova et al., 2018; Gottipati et al., 2020) or search-based approaches (Go´mez-Bombarelli et al., 2018; Swanson et al., 2024). However, these methods typically require careful tuning of the objective function to avoid exploiting imperfect computational oracles and overly maximizing one desired property (e.g. binding affinity) at the expense of another (e.g. oral bioavailability). Additionally, one often aims to design a suitable 3D binding pose along with the chemical structure of the molecule, which substantially increases the degrees of freedom. Many optimization algorithms struggle to efficiently navigate such vast design spaces.  
+
+Following a different approach, probabilistic generative models learn to generate drug-like molecules directly from data (Hoogeboom et al., 2022; Vignac et al., 2022). Here, the design objectives are implicitly encoded in the training data set. While these methods may not outperform direct optimization on isolated metrics, they are well suited for the multifaceted nature of drug design as they learn “what a drug looks like” in a more general way. Once trained on sufficient high-quality data, these models can capture a more holistic picture of the molecular space compared to models optimized for a limited set of target metrics.  
+
+The strength of generative modeling lies in its ability to reproduce patterns seen in the training data. However, many prior works on generative molecular design have focused on absolute metric values in baseline comparisons (e.g. identifying the best docking scores or synthetic accessibility estimates), even though the proposed models did not directly optimize these quantities. For example, Table 6 from the recent survey on generative structure-based drug design methods by Zhang et al. (2023b) highlights a common evaluation strategy used in this context. We argue that the evaluation of generative models for drug design should instead be centered around their ability to represent the training distribution accurately – analogous to how image generation methods are typically assessed (Heusel et al., 2017). Without additional fine-tuning or sampling strategies, it is unreasonable to expect a model to substantially improve any score compared to the training set.  
+
+![](images/ab639fa054f54e3a2a73e7528d773691fb62c990f66fa19c5cf9035c7d452228.jpg)  
+
+Figure 1: Method overview. DRUGFLOW operates on continuous ligand atom coordinates $x_{t}$ , discrete atom types $h_{t}$ , and bond types $e_{t}$ . Its extension FLEXFLOW additionally operates on continuous side chain angles $\chi_{t}$ . As shown on the left, coordinates and angles are sampled from a Gaussian prior in 3D and a uniform prior on the torus, respectively. Discrete types are sampled from categorical prior distributions (uniform or marginal). Denoising schemes for continuous and discrete data types are based on conditional flow matching (top) and Markov bridge models (bottom). As shown in the middle, at time step $t$ , we process the noisy data to obtain the 3D graph: side chain angles are transformed into vector features pointing to atom positions using NERF, and three types of edges are introduced using different distance cutoffs—edges between ligand atoms $e_{t}^{\mathrm{L}\triangleright\mathrm{L}}$ , edges between ligand and protein $\mathbf{C}_{\alpha}$ atoms $e_{t}^{\mathrm{P>L}}$ , and edges between protein $\mathbf{C}_{\alpha}$ atoms $e_{t}^{\mathrm{P>P}}$ . The graph is processed by a neural network $\theta$ which outputs velocities $\boldsymbol{v}_{\theta}(\boldsymbol{x}_{t},t)$ , $v_{\theta}(\chi_{t},t)$ and type predictions $\hat{h}_{t}$ , $\hat{e}_{t}$ which are fed into the generative modeling framework. The model can adapt the size of the molecule during sampling and label excessive atoms that will be eventually removed (shown as crosses on the right). Additionally, DRUGFLOW outputs per-atom uncertainty values $\hat{\sigma}_{\mathrm{tot}}$ .  
+
+In this work, we present DRUGFLOW, a new generative model for structure-based drug design, that simultaneously learns the distribution of protein-binding molecules in three data domains. DRUGFLOW generates discrete atom and bond types as well as atom coordinates in the Euclidean space. Its extended version, FLEXFLOW, additionally samples side chain configurations of the binding pocket represented as angles on a hypertorus. This allows us to sample probabilistic ensembles of possible binding modes and enables drug design for targets in unbound conformations. Both DRUGFLOW and FLEXFLOW are conditioned on fixed protein backbone coordinates and amino acid types, which are used as context for denoising. We further introduce a virtual node type to allow the model to dynamically add or remove atoms and thus learn about the distribution of ligand sizes rather than requiring it to be pre-specified. Finally, we add an uncertainty head to our model that is trained in an end-to-end fashion to identify out-of-distribution samples and rank molecules at inference time.  
+
+Based on our observations, we focus our evaluation primarily on the distribution learning capabilities of the proposed generative model, comparing it to established baselines. To this end, we assess molecular properties and structural features using distance functions between distributions derived from generated samples and training data points, and demonstrate that DRUGFLOW molecules closely match the data distribution across a broad range of metrics. This suggests that DRUGFLOW can be retrained on curated datasets to steer the generation of samples towards desired regions of the chemical space for various practical applications. However, recognizing that excessive filtering may lead to insufficient training data, we present an alignment strategy which allows us to update a pre-trained model based on user preferences.  
+
+We summarize the main contributions of this work as follows.  
+
+Conceptual novelty We present DRUGFLOW and FLEXFLOW, new generative models for structure-based drug design, and introduce three conceptually new features: (1) and end-to-end trained uncertainty estimate that successfully detects out-of-distribution samples, (2) an adaptive size selection method that discards excessive atoms during sampling, and (3) a protein conformation sampling module that samples realistic side chain rotamers.  
+
+Performance We propose to evaluate generative models in a way that better captures their training objective, and use the new benchmarking framework to show that DRUGFLOW is a state-of-the-art distribution learner for structure-based drug design.  
+
+Practical relevance Recognizing that medicinal chemists ultimately aim to optimize molecules for specific design objectives, we implement a preference alignment scheme that allows us to efficiently sample molecules with improved target properties.  
+
+
+
+\section{2 METHODS  }
+
+
+Our base model is a probabilistic model operating simultaneously on atom types, bond types and coordinates, thereby combining generative processes for discrete and continuous data types. We use Euclidean flow matching (Lipman et al., 2022) for ligand coordinates and combine it with Markov bridge models (Igashov et al., 2023) applied to atom and bond types to generate the discrete molecular graphs.1.  
+
+The backbone model is a heterogeneous graph neural network that has independent trainable weights for ligand and protein node types, as well as ligand, protein, and interaction edge types. Each protein node represents a whole residue but we include vector-valued input features to encode the locations of all atoms belonging to the residue. This allows us to reduce computational complexity while preserving full atomic detail. The neural network predicts several node-level and edge-level outputs required for sampling, including logits for atom and bond types and vectors for the coordinates. All trainable operations applied to geometric quantities are implemented as geometric vector perceptrons (GVPs) (Jing et al., 2020) to ensure that predicted vector fields transform equivariantly.5.  
+
+Below, we describe our conceptual novelties one by one, starting with uncertainty estimation in Section 2.1, followed by ligand size adaptation in Section 2.2 and protein flexibility in Section 2.3. Finally, we present a fine-tuning approach to align the general distribution learner with user specified preferences in Section 2.4. Our method is schematically depicted in Figure 1.  
+
+
+
+\section{2.1 UNCERTAINTY ESTIMATION  }
+
+
+To identify out-of-distribution (OOD) samples and endow DRUGFLOW with an intrinsic uncertainty estimate, we rely on a technique that has been successfully used for regression problems in the past (Nix & Weigend, 1994; Lakshminarayanan et al., 2017). We assume that the flow matching regression error is normally distributed with standard deviation $\sigma_{\theta}$ , and derive a loss function that maximises the likelihood of the true vector field under this uncertainty model,  
+
+$$
+\mathcal{L}_{\mathrm{FM-OOD}}=\mathbb{E}_{t,q(\mathbf{x}_{1}),p(\mathbf{x}_{0})}\,\,\frac{d}{2}\log\sigma_{\theta}^{2}(\mathbf{x}_{t},t)+\frac{1}{2\sigma_{\theta}^{2}(\mathbf{x}_{t},t)}\|{v}_{\theta}(\mathbf{x}_{t},t)-\dot{\mathbf{x}}_{t}\|^{2}+\frac{\lambda}{2}|\sigma_{\theta}^{2}(\mathbf{x}_{t},t)-1|^{2},
+$$  
+
+where $\pmb{v}_{\theta}(\pmb{x}_{t},t)\in\mathbb{R}^{d}$ and $\sigma_{\theta}(\mathbf{\boldsymbol{x}}_{t},t)\in\mathbb{R}$ are two output heads of the neural network and $\dot{\mathbf{x}}_{t}$ is the ground-truth conditional vector field.2.  
+
+A model trained in this way provides us with a per-atom uncertainty score in addition to the vector field for flow matching at every sampling step.3) as  
+
+$$
+\hat{\sigma}_{\mathrm{tot}}=\sqrt{\int_{0}^{1}\sigma_{\theta}^{2}(\mathbf{x}_{t},t)d t},
+$$  
+
+and assign this value to the resulting generated atom.  
+
+2.2 END-TO-END SIZE ESTIMATION  
+
+It is common practice to choose molecule sizes for diffusion and flow matching models in structurebased drug design a priori. The number of generated atoms is often either a user-specified hyperparameter, sampled from the empirical distribution of sizes in the training set (Hoogeboom et al., 2022; Schneuing et al., 2022; Guan et al., 2023a), or estimated by a separate neural network (Igashov et al., 2022). This approach, however, prevents the generative neural network from adapting to the context as the current sample evolves. For instance, if initially too many atoms are specified it might be impossible for the model to create a molecule without steric clashes with the surrounding protein atoms.  
+
+In order to also learn this aspect of the data distribution in an end-to-end manner, we aim to adapt the molecule size during the generative process, which effectively changes the dimension of the modeled system (Campbell et al., 2024). To do so, we introduce a virtual (“no atom”) node type the model can sample. All nodes of this type are treated as completely disconnected (i.e. all bonds of virtual nodes have “None” type) and will be removed at the end of sampling. During training, we add $n_{\mathrm{virt}}\sim U(0,N_{\mathrm{max}})$ virtual nodes to each training sample. In order to treat virtual nodes and atoms in the same way, we need to attach coordinates to them as well. While different design choices are possible, we find that placing them in the center of mass of the ligand works well in practice as it provides a clear reference point for the network to regress toward. Note that this approach still requires pre-specifying the number of nodes in the computational graph which serves as an upper bound for the number of atoms in the generated molecule.  
+
+
+
+\section{2.3 PROTEIN FLEXIBILITY  }
+
+
+Incorporating the dynamics and flexibility of protein structures is one of the key open challenges for structure-based drug design (Fraser & Murcko, 2024). As a first step to addressing scenarios in which the bound structure of the target protein is unknown or assuming a single static pocket configuration is too restrictive, we extend our base model to also generate side chain torsion angles for all pocket residues while sampling new ligands, thereby permitting full side chain flexibility.  
+
+To this end, we apply flow matching on the hypertorus that describes all torsion angles. Following the Riemannian Flow Matching framework of Chen & Lipman (2023), we approximate vector fields in the tangent space.1. Similar to related works on flow matching for angular domains (Yim et al., 2023a; Lee & Kim, 2024) we find a non-linear scheduler $\kappa(t)$ , which controls how quickly the geodesic distance between start and end point of a trajectories decreases, to be beneficial to sample quality. However, unlike these works we adopt a polynomial scheduler $\kappa(t)=(1-t)^{k}$ with $k=3$ . This has a similar effect on the sampling trajectories as the exponential scheduler $\dot{\kappa}(t)\,=\,e^{-c t}$ if $c\,=\,5$ but strictly fulfills the theoretical requirement on the boundary conditions: $\kappa(0)\,=\,1$ and $\kappa(1)\,=\,0$ . Using the exponential and logarithm maps associated with the manifold, we derive the following updated flow and vector fields:  
+
+$$
+\begin{array}{r l}&{\pmb{x}_{t}=\exp_{\pmb{x}_{0}}\left(\left(1-(1-t)^{k}\right)\log_{\pmb{x}_{0}}(\pmb{x}_{1})\right),}\\ &{\pmb{\dot{x}}_{t}=k(1-t)^{k-1}\log_{\pmb{x}_{0}}(\pmb{x}_{1}).}\end{array}
+$$  
+
+We use this scheduler both for training and sampling.  
+
+While the generative process is performed entirely in angular space to enforce physical plausibility, we present the full-atomic information more explicitly to the neural network and convert the side chain dihedral angles back to atom positions in every training and sampling step. This operation is performed efficiently using the Natural Extension Reference Frame (NERF) algorithm (Parsons et al., 2005; Alcaide et al., 2022) in parallel for each residue.  
+
+
+
+\section{2.4 MULTI-DOMAIN PREFERENCE ALIGNMENT  }
+
+
+Many real-world applications require generating molecules with properties underrepresented in the initial training data. To address this need, we employ an alignment scheme inspired by Direct Preference Optimization (DPO), a technique originally used to align large language models (Rafailov et al., 2023) and later adapted to diffusion models (Wallace et al., 2024).  
+
+Using a pre-trained reference model $\theta$ , we generate a synthetic dataset of preference pairs $\mathcal{D}=$ $\{(x_{i}^{w},x_{i}^{l})\}_{i}$ , where the winning samples $\boldsymbol{x}_{i}^{w}$ have more desirable molecular properties compared to the losing samples $\boldsymbol{x}_{i}^{l}$ (see Section 3.5 for details on our preference datasets). To align our method with these preferences, we introduce another (aligned) model $\varphi$ , initialised with the weights of the reference model $\theta$ . From now on, the reference model $\theta$ is no longer optimised, and further training is only performed on the new model $\varphi$ .  
+
+Table 1: Wasserstein distance between marginal distributions of continuous molecular data (bond distances and angles), drug-likeness (QED), synthetic accessibility (SA), lipophilicity (logP) and numbers of rotatable bonds (RB). The last column reports the Jensen-Shannon divergence between the joint distributions of four molecular properties (QED, SA, logP and Vina efficiency score). The best result is highlighted in bold, the second best is underlined.  
+
+![](images/eeded10454f5446cb7779ca5c0f9f3430db45ddc3ad69f0289603a47ea5b3247.jpg)  
+
+Table 2: Wasserstein distance between distributions of binding efficiency scores and normalized numbers of different protein-ligand interactions. The best result is highlighted in bold, the second best is underlined.   
+
+![](images/86910e082d2559e82a0691e2386f5bd091572f77d15603e9cd6a09a629af4cd6.jpg)  
+
+using the reference model $\theta$ with fixed parameters. Using individually weighted loss differences $\Delta_{c}^{w}\,{\bar{=}}\,\mathcal{L}_{c}^{w}(\varphi)-\mathcal{L}_{c}^{w}(\theta)$ and $\Delta_{c}^{l}=\mathcal{L}_{c}^{l}(\varphi)\dot{-}\mathcal{L}_{c}^{l}(\theta)$ , we define the multi-domain preference alignment (MDPA) loss as follows,  
+
+$$
+\mathcal{L}_{\mathrm{MDPA}}(\varphi)=-\log\sigma\bigg(-\beta_{t}\sum_{c}\lambda_{c}\big(\Delta_{c}^{w}-\Delta_{c}^{l}\big)\bigg)+\lambda_{w}\mathcal{L}^{w}(\varphi)+\lambda_{l}\mathcal{L}^{l}(\varphi),
+$$  
+
+where $\lambda_{c},\lambda_{w},\lambda_{l}$ are adjustable weights, and $\sigma$ is the sigmoid function. Note that we regularize training by adding the overall loss terms $\mathcal{L}^{w}(\varphi)$ and $\bar{\mathcal{L}^{l}(\varphi)}$ (Eq. 25) for the winning and losing samples, respectively. We find that such a regularization significantly enhances training stability.4.  
+
+
+
+\section{3 EXPERIMENTS  }
+
+
+3.1 MULTI-DOMAIN DISTRIBUTION LEARNING  
+
+In this work, we focus on the generative capabilities of our model, namely on its ability to learn the training data distribution. While a common trend in the community is to report absolute values of various molecular properties and docking scores, we stress that such an evaluation is relevant only for methods whose primary goal is property optimisation, such as preference alignment (Cheng et al., 2024) or optimisation in the latent space (Go´mez-Bombarelli et al., 2018). Unless stated specifically, DRUGFLOW does not optimise for any specific property and aims to learn the data distribution only. Therefore, instead of absolute values of molecular properties we measure the proximity of distributions of these properties computed on the generated samples and the training data. As we show in Section 3.5, absolute values of the target metrics can be increased by fine-tuning on relevant data or using the preference alignment scheme.  
+
+Metrics We compute Jensen-Shannon divergences for the categorical distributions of atom types, bond types and ring systems (Walters, 2022; 2021). We use the Wasserstein-1 distance for the bond length distributions of the three most common bond types (C–C, C–N and ${\mathrm{C}}{=}{\mathrm{C}})$ , the three most common bond angles ( $\mathrm{C-C=C}$ , C–C–C and C–C–O) as well as the number of rotatable bonds per molecule. We also apply the Wasserstein distance to computational scores relevant to applications in medicinal chemistry: Quantitative Estimate of Drug-likeness (QED) (Bickerton et al., 2012),  
+
+Synthetic Accessibility (SA) (Ertl & Schuffenhauer, 2009) and lipophilicity (logP) (Wildman & Crippen, 1999). Binding efficiency, defined as a computational binding affinity score divided by the number of atoms in the molecule, is assessed in the same manner. We report efficiency scores instead of affinity scores due to the high correlation of the latter with molecule size (Cremer et al., 2024). We use both Vina and Gnina docking scores (McNutt et al., 2021) as binding affinity oracles. Besides, we compare normalized counts of various types of non-covalent interactions as detected by ProLIF (Bouysset & Fiorucci, 2021). To do this, we divide the number of interactions by the number of atoms in each molecule and compute Wasserstein distances to compare the resulting distributions. Finally, we also employ the Fre´chet ChemNet Distance (FCD) (Preuer et al., 2018) to assess how well the model approximates the training data distribution.  
+
+Dataset & Baselines We use the CrossDocked dataset (Francoeur et al., 2020) with 100 000 protein-ligand pairs for training and 100 proteins for testing, following previous works (Luo et al., 2021; Peng et al., 2022). The data split was done by $30\%$ sequence identity using MMseqs2 (Steinegger & S¨oding, 2017). Ligands that do not pass all PoseBusters Buttenschoen et al. (2024) filters were removed from the training set. We compare DRUGFLOW with an autoregressive method, POCKET2MOL (Peng et al., 2022), and two diffusion-based methods, TARGETDIFF (Guan et al., 2023a) and DIFFSBDD (Schneuing et al., 2022). We generated 100 samples for each test set target with DRUGFLOW and selected only molecules that passed the RDKit validity filter.  
+
+Results The distances between sampling distributions measured on the various discrete and continuous characteristics of molecules and interactions are summarized in Tables 1, 2 and 3. DRUGFLOW shows convincing all-round performance and outperforms other methods in almost all aspects. POCKET2MOL achieves slightly better results on bond types and hydrophobic interactions. TARGETDIFF gets the best results on the lipophilicity metric. However, in these few cases DRUGFLOW consistently ranks a close second. Along with the  
+
+Table 3: Fre´chet ChemNet Distance and JensenShannon divergence between distributions of discrete molecular data. The best result is highlighted in bold, the second best is underlined.   
+
+![](images/c23cf62899827b19c80a54f22f3c7b2dc304940e1aa630470205e5631e681f3c.jpg)  
+
+marginal distributions of various geometric and chemo-physical characteristics, we compare joint distributions of the molecular properties. To do this, we created histograms of the joint distributions of QED, SA, $\mathrm{logP}$ and Vina efficiency scores (10 bins per score, Figure 21) and compute the Jensen-Shannon divergence between them. DRUGFLOW outperforms other methods by a large margin, as demonstrated by $\mathrm{JSD_{all}}$ in Table 1. Additionally, our method substantially outperforms other baselines in FCD. To further analyse this result, we applied Principal Component Analysis (PCA) to reduce the dimensionality of the ChemNet embeddings and visualized the first two principal components on a 2D plane.1. Additionally, we compute novelty, uniqueness, and overall quality of the samples using PoseBusters (Buttenschoen et al., 2024).10.  
+
+
+
+\section{3.2 OUT-OF-DISTRIBUTION DETECTION  }
+
+
+The uncertainty estimation technique described in Section 2.1 provides per-atom uncertainty scores, as shown in Figure 2A. Here, we showcase six molecules of the same size with the highest and lowest global (i.e. averaged over atoms) uncertainty scores.  
+
+To demonstrate the ability of our uncertainty score to detect out-of-distribution samples, we plotted histograms of several basic geometric properties of the generated molecules. The histogram bins are color-coded according to the average uncertainty values of the corresponding data points. As shown in Figure 2B, the model tends to assign high uncertainty to data points in the tails of the distributions, while sampling from the central regions (modes) with high confidence. The slight limitation is that most of the values fall within the range of 0.85 to 0.92. However this does not affect the discriminative ability of the score.  
+
+![](images/f9bd956889e8903d2c04125002aa5f14fe280765da9d685041370f5112e20deb.jpg)  
+Figure 2: Uncertainty estimate detects out-of-distribution samples and correlates with various molecule characteristics. (A) Examples of samples with the same size (30 heavy atoms) and high and low global uncertainties. Each atom is highlighted according to its local uncertainty score. (B) Distributions of top-3 bond angles and bond lengths in DRUGFLOW samples (histograms) and training data (dashed lines). The histogram bins are color-coded according to the average uncertainty values of the corresponding data points. In all cases, samples from the distribution tails have high uncertainty. Main modes of the distributions have lower uncertainty on average. The color bar is scaled for a better visibility. (C) Correlation of the global uncertainty score with Gnina efficiency score and size of the molecules. (D) Atoms clashing with the protein have higher uncertainty scores than non-clashing atoms.  
+
+Furthermore, our analysis reveals strong correlations between global uncertainty and both molecule size and docking efficiency, as shown in Figure 2C. While the correlation with molecule size is expected, the correlation with size-agnostic ligand efficiency scores is particularly interesting and has practical implications. We hypothesize that this correlation may be a byproduct of an efficient distribution learning process, wherein, among other data aspects, the model learns to avoid steric clashes between protein and ligand atoms. Indeed, as shown in Figure 2D, atoms sampled without clashes tend to have lower uncertainty values compared to clashing atoms.  
+
+3.3 DISTRIBUTION OF MOLECULES SIZES  
+
+As explained in Section 2.2, at every training step we add to the molecule a random number of virtual nodes sampled from $U(0,N_{\operatorname*{max}})$ . It means that on average the model was trained to label as virtual (i.e. to remove) $N_{\mathrm{max}}/2$ atoms per molecule. In our experiments, we set $N_{\mathrm{max}}=10$ , and therefore expect the model to remove on average 5 atoms during sampling. To test this hypothesis, we sampled molecules with ground-truth sizes and 5 atoms added on top. As shown in Figure 3C, the model indeed tends to remove about 5 atoms. The deviation from the uniform training distribution (shown in red) is evidence of the model’s ability to learn the conditional distribution of molecule sizes given pockets. CrossDocked pockets are defined based on a distance cutoff, which introduces a dependency between ligand and pocket sizes.  
+
+Next, we studied the ability of the model to minimise steric clashes with the pocket when a large number of (computational) nodes is provided. For different input sizes (between 17 and 67 atoms), we sampled 1000 molecules per each size value and measured the percentage of clashing atoms and numbers of atoms removed by the model. We repeated the same experiment with a similar model trained without virtual nodes. As shown in Figure 3A, the model produces minimum clashes as long as the number of excessive atoms does not exceed 10, the “bandwidth” the model was trained with. Higher numbers are out of the training distribution, and therefore the model fails to remove more, as shown in Figure 3B. We believe that scaling up the maximum number of virtual nodes during training will enable the model to operate in a fully adaptive size selection regime.  
+
+![](images/533eca7e8553bf87695addbc17f576282f5e9cc5deb02415bfd1d73c2d61b14a.jpg)  
+Figure 3: DRUGFLOW learns the conditional size distribution of molecules given protein pockets. (A) Our model effectively removes redundant atoms to avoid clashes. (B) Trained with maximum $N_{\mathrm{max}}=10$ virtual nodes, the model struggles to remove much more atoms. (C) Even though the training distribution of number of added virtual nodes is $U(0,N_{\mathrm{max}})$ , the distribution of the removed nodes during sampling suggests that the model learned the dependency between ligand and pocket sizes.  
+
+
+
+\section{3.4 LEARNING THE DISTRIBUTION OF SIDE CHAIN ROTAMERS  }
+
+
+Here we evaluate how well FLEXFLOW, the version of our model that simultaneously generates side chain conformations, recovers the distribution of bound side chain rotamers. Because all proteins in our test set are provided in ligand-bound form, we repacked their side chains in absence of the small molecule to approximate their unbound structures. We relaxed side chains with the Rosetta repack protocol (Conway et al., 2014) and achieved an RMSD of about $1.98\mathrm{\AA}$ for side chain heavy atoms (Figure 4A, middle).  
+
+Recovering bound configurations As a first test, we sampled 20 sets of side chain torsion angles per test set target with FLEXFLOW while keeping the ligand fixed. We achieve this by using the ground truth vector field and transition probabilities instead of the predicted quantities for all ligandrelated variables. Figure 4A shows that the model samples pocket structures close to the original bound conformations (with median side chain of RMSD 1.75 ˚A). This decrease in RMSD compared to the unbound pocket is expected because fixing the ligand binding pose constrains the space of feasible solutions. For comparison, we also include the distribution of RMSD values that results from simply taking random angles from the prior distribution (Figure 4, left). Distribution of side chain angles Next, we freely generate molecules and bound configurations of the protein-ligand complex and assess whether the resulting side chain rotamers are in accordance with the bound structures from the training set. Starting from a completely random prior, FLEXFLOW manages to recover the rotameric modes of the reference structures accurately. Figure 4B shows the distributions of the first two side chain torsion angles of three bulky amino acids.  
+
+3.5 PROPERTY OPTIMIZATION WITH PREFERENCE ALIGNMENT  
+
+We conduct preference alignment with respect to four molecular properties: QED, SA, Vina efficiency score, and Rapid Elimination of Swill (REOS) filters (Walters et al., 1998). REOS filters include various structural alerts designed to detect problematic compounds in screening libraries (Baell & Holloway, 2010; Hann et al., 1999; Pearce et al., 2006). For REOS, molecules are classified as either passing all REOS filters (winning) or failing at least one (losing). For continuous metrics, we set thresholds requiring the winning sample to outperform the losing one by at least 0.5 for SA, and 0.1 for both QED and Vina efficiency. In each pair, both molecules are generated for the same pocket. In addition, we curate a dataset where winning samples surpass losing samples across all four properties. To perform preference alignment, we initialize the model with the reference  
+
+Samples Training set A B ARG LYS TRP A   
+X   
+O   
+Prior iorinbounang undnerated -4-2024-4-2024-4-202 4 X1 (rad) X1 (rad) X1 (rad) Figure 4: FLEXFLOW samples realistic side chain conformations. (A) Side chain root-meansquare deviation (RMSD) for random samples from the model’s prior (left), relaxed pockets in absence of the ligand (middle), and FLEXFLOW-generated side chain conformers for a fixed ligand structure (right). (B) Distributions of $\chi_{1}$ and $\chi_{2}$ angles for Arginine, Lysine and Tryptophan. We compare FLEXFLOW samples to the bound pocket conformations from the training set.   
+DRUGFLOW model parameters and train until convergence of the loss $\mathcal{L}_{\mathrm{MDPA}}$ (Eq. 5). We then select a checkpoint using the validity metric on the validation set. To compare our preference alignment method against a simpler optimization strategy, we fine-tune the same reference model on the winning samples only.   
+Figure 5 shows the performance gains of the aligned and fine-tuned models compared to the training data and the reference model. Our results indicate that the preference-aligned models consistently exceed their fine-tuned counterparts across all metrics. Notably, the model optimised for all four properties at once demonstrates competitive results across all target metrics.   
+4 RELATED WORK   
+Generative models for molecule generation This paper builds on a large body of work on probabilistic models for molecule generation. Some of these models generate molecules unconditionally without knowledge of the target protein. They either create molecular graphs (Jo et al., 2022; Vignac et al., 2022), 3D atomic point clouds (Gebauer et al., 2019; Garcia Satorras et al., 2021; Hoogeboom et al., 2022) or both Vignac et al. (2023). More closely related to the work presented here, another family of models attempts to generate novel chemical matter conditioned on three-dimensional context, typically a structural model of a target protein. Among these, most of the models sample atom positions and types without providing explicit information about covalent bonds (Liu et al., 2022; Ragoza et al., 2022; Schneuing et al., 2022; Igashov et al., 2022; Guan et al., 2023a; Lin et al., 2022; Xu et al., 2023). Others generate the full molecular graph structure and binding pose jointly (Peng et al., 2022; Guan et al., 2023b; Zhang et al., 2023a). Notably, most recent 3D models belong to the family of diffusion probabilistic models (Schneuing et al., 2022; Guan et al., 2023a; Lin et al., 2022; Xu et al., 2023; Guan et al., 2023b; Weiss et al., 2023) or follow the related flow matching paradigm (Song et al., 2024; Dunn & Koes, 2024; Irwin et al., 2024). So far, it is uncommon for these models to handle varying dimensionality (i.e. molecule sizes) (Campbell et al., 2024) or incorporate protein flexibility although torsional flow matching has already been applied to protein side chain packing (Lee & Kim, 2024) and peptide design (Lin et al., 2024).   
+Confidence prediction Neural confidence estimates are crucial components of many popular methods for biomolecular applications (Jumper et al., 2021; Corso et al., 2022; Abramson et al., 2024). Typically, such estimates are obtained by training a separate neural network or auxiliary output head to approximate the prediction error of the main model either during training (Jumper et al., 2021; Abramson et al., 2024) or for samples from a trained model (Corso et al., 2022). Unlike our approach, this requires minimizing a separate secondary loss function. Furthermore, to enable this  
+
+form of confidence estimation based on final outputs during training, diffusion (or flow matching) models like AlphaFold 3 (Abramson et al., 2024) must perform expensive rollout schemes to regress their output errors directly. Here, we circumvent this by deriving a global uncertainty score from local, step-wise predictions.  
+
+![](images/82ee056f513250f0b76971e198b0273122ea28f108773723bc4a7b8381373da6.jpg)  
+Figure 5: Preference alignment improves target properties. Comparison of models across four molecular properties: REOS, QED, SA, and Vina efficiency. Bars represent the training set (gray), reference model (green), fine-tuned model (blue), preference-aligned model with combined preferences (dashed), and preference-aligned model for the metric specified above each plot (red). Preference-aligned models consistently outperform fine-tuning, with the best results in the metricspecific models. Results are based on 100 sampled molecules per target.  
+
+Preference alignment Generating molecules with desired properties is a critical step in applying generative models to biomolecules. Existing methods, such as reinforcement learning (RL)-based approaches (Zhou et al., 2019) or GANs (Maziarka et al., 2020), often involve a two-step process: first, to generate molecules, then optimize them. In contrast, preference alignment techniques allow generative models to directly produce outputs aligned with human or domain-specific preferences in a single step. DPO offers a key advantage over RL by eliminating the need to learn a reward function, making it a less exploitable way to optimize preferences (Rafailov et al., 2023). DPO has been applied to fine-tune chemical language models (Park et al., 2023) and its adaptation for diffusion models (Wallace et al., 2024) has already found applications in antibody design (Zhou et al., 2024) and structure-based drug design (Cheng et al., 2024; Gu et al., 2024). In DecompDPO (Cheng et al., 2024), molecules are decomposed into fragments, allowing preference optimization at both local and global levels, which helps resolve conflicting preferences between molecular substructures. In AliDiff (Gu et al., 2024), the DPO objective is decomposed across atom types and coordinates and rescaled according to reward differences in preference pairs. Our approach extends this by applying a preference alignment scheme simultaneously in different generative frameworks (continuous flow matching and discrete Markov bridge models).  
+
+
+
+\section{5 CONCLUSION  }
+
+
+In this work, we advocate for a distribution learning-centered evaluation of generative models for drug design. Methods that perform well in this framework, can later improve their task-specific performance through curated datasets, advanced sampling strategies, or fine-tuning to better align with user preferences. We introduce DRUGFLOW and demonstrate that it consistently achieves stateof-the-art distribution learning performance across various orthogonal metrics. DRUGFLOW also learns the distribution of molecular sizes and is able to detect out-of-distribution samples. Besides, its extension, FLEXFLOW, additionally operates on protein residues and learns the distribution of side chain conformations. Finally, we discuss a preference alignment strategy that allows us to sample molecules with improved properties, and show its effectiveness across four different metrics.  
+
+
+

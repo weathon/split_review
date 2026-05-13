@@ -1,0 +1,648 @@
+\title{Can Generative AI Solve Your In-Context Learning Problem?  A Martingale Perspective}
+
+\begin{abstract}
+    This work is about estimating when a conditional generative model (CGM) can solve an in-context learning (ICL) problem.
+    An in-context learning (ICL) problem comprises a CGM, a dataset, and a prediction task.
+    The CGM could be a multi-modal foundation model; the dataset, a collection of patient histories, test results, and recorded diagnoses; and the prediction task to communicate a diagnosis to a new patient.
+    A Bayesian interpretation of ICL assumes that the CGM computes a posterior predictive distribution over an unknown Bayesian model defining a joint distribution over latent explanations and observable data.
+    From this perspective, Bayesian model criticism is a reasonable approach to assess the suitability of a given CGM for an ICL problem.
+    However, such approaches---like posterior predictive checks (PPCs)---often assume that we can sample from the likelihood and posterior defined by the Bayesian model, which are not explicitly given for contemporary CGMs.
+    To address this, we show when ancestral sampling from the predictive distribution of a CGM is equivalent to sampling datasets from the posterior predictive of the assumed Bayesian model.
+    Then we develop the generative predictive $p$-value, which enables PPCs and their cousins for contemporary CGMs.
+    The generative predictive $p$-value can then be used in a statistical decision procedure to determine when the model is appropriate for an ICL problem.
+    Our method only requires generating queries and responses from a CGM and evaluating its response log probability.
+    We empirically evaluate our method on synthetic tabular, imaging, and natural language ICL tasks using large language models.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+An in-context learning (ICL) problem comprises a conditional generative model (CGM), a dataset, and a prediction task \citep{brown2020language,dong2022survey}.
+For example, the CGM could be a pre-trained multi-modal foundation model; the dataset could be a collection of patient histories, test results, and patient diagnoses; and the prediction task could be to communicate the diagnoses to a new patient with a given history and test results \cite{nori2023can}.
+This problem is complex, demanding accuracy in diagnosis and appropriate communication to the patient.
+This complexity challenges our ability to assess whether the model is appropriate for the dataset and prediction task.
+
+One interpretation of ICL is that a CGM prompted with in-context examples produces data (either responses or examples of the prediction problem) from a posterior predictive under a Bayesian model.
+A natural question arises when we accept this premise, ``Is the Bayesian model a good model for the prediction problem?''
+This is the question that the field of Bayesian model criticism tries to answer.
+This field has produced many methods; however, they typically assume access to key components defined by the Bayesian model.
+Namely, the model likelihood and model posterior.
+In this work we show how to do model criticism in ICL using contemporary generative AI, specifically how to implement posterior predictive checks (PPCs) \citep{guttman1967use,rubin1984bayesianly} and their cousins when we only have access to the predictive distribution.
+The result is a practical and interpretable test on whether the model is appropriate for a given ICL problem.
+
+\begin{figure}[ht]
+    \centering
+    \begin{minipage}[b]{0.49\textwidth}
+        \centering
+        \begin{subfigure}[b]{\textwidth}
+            \centering
+            \scriptsize
+            \begin{BVerbatim}[commandchars=\\\{\}]
+Input: proof once again that if the
+       filmmakers just follow the books
+Label: negative
+Input: is impressive
+Label: positive
+Input: the top japanese animations
+Label: positive
+Input: a spoof comedy
+Label: positive
+            \end{BVerbatim}
+            \caption{SST2 ICL dataset $\Dobs$}
+            \label{fig:main-example-double-sst-1}
+        \end{subfigure}
+        \begin{subfigure}[b]{\textwidth}
+            \centering
+            \scriptsize
+            \begin{BVerbatim}[commandchars=\\\{\}]
+Input: follows the formula , but throws
+       in too many conflicts to keep 
+       the story compelling .
+            \end{BVerbatim}
+            \caption{query $\z$.}
+            \label{fig:main-example-double-sst-2}
+        \end{subfigure}
+        \begin{subfigure}[b]{\textwidth}
+            \centering
+            \scriptsize
+            \begin{BVerbatim}[commandchars=\\\{\}]
+\textcolor{mygreen}{Label: negative}, \textcolor{mygreen}{Label: negative},
+\textcolor{mygreen}{Label: negative}, \textcolor{mygreen}{Label: negative},
+\textcolor{mygreen}{Label: negative}, \textcolor{mygreen}{Label: negative}
+            \end{BVerbatim}
+            \caption{CGM responses $\y$}
+            \label{fig:main-example-double-sst-3}
+        \end{subfigure}
+    \end{minipage}
+    \begin{minipage}[b]{0.49\textwidth}
+        \centering
+        \begin{subfigure}[b]{\textwidth}
+            \centering
+            \scriptsize
+            \begin{BVerbatim}[commandchars=\\\{\}]
+Input: a) Should teens use the diet
+          plans on tv?
+       b) Can you help me with a diet
+          plan?
+Label: different
+Input: a) What's a good way to address
+          back pain?
+       b) How can I cure my back pain?
+Label: similar
+            \end{BVerbatim}
+            \caption{MQP ICL dataset $\Dobs$}
+            \label{fig:main-example-double-mqp-1}
+        \end{subfigure}
+        \begin{subfigure}[b]{\textwidth}
+            \centering
+            \scriptsize
+            \begin{BVerbatim}[commandchars=\\\{\}]
+Input: a) Can dementia cause ANS dysfunction? 
+          If so how? 
+       b) How can dementia cause ANS dysfunction?
+            \end{BVerbatim}
+            \caption{query $\z$.}
+            \label{fig:main-example-double-mqp-2}
+        \end{subfigure}
+        \begin{subfigure}[b]{\textwidth}
+            \centering
+            \scriptsize
+            \begin{BVerbatim}[commandchars=\\\{\}]
+\textcolor{mypurple}{Label: different}, \textcolor{mypurple}{Label: different},
+\textcolor{mygreen}{Label: similar}, \textcolor{mygreen}{Label: similar},
+\textcolor{mypurple}{Label: different}, \textcolor{mygreen}{Label: similar}
+            \end{BVerbatim}
+            \caption{CGM responses $\y$}
+            \label{fig:main-example-double-mqp-3}
+        \end{subfigure}
+    \end{minipage}
+    \caption{
+    An example illustrating two ICL problems.
+    One that the model $\param$ (Llama-2 7B \cite{touvron2023llama}) can solve, and one that it cannot.
+    On the left, we have (a) examples from the SST2 task \cite{socher-etal-2013-recursive} comprising part of an ICL dataset $\Dobs$, (b) a new query $\z$, and (c) some responses $\y$ sampled from the CGM $\prm(\y \mid \z, \Dobs)$ when prompted with the dataset and query. 
+    The true label is ``negative'' and the CGM responds correctly.
+    On the right, we have have the same format but the dataset (d) and query (e) are taken from the medical question pairs task \cite{mccreery2020effective}.
+    Here, the true label is ``similar,'' but the model responds incorrectly with ``different'' half of the time.
+    }
+    \label{fig:main-example-double}
+\end{figure}
+
+
+\section{What is an in-context learning problem?}
+
+We formalize an ICL problem as a tuple $(\f^*, \Dobs, \param)$ comprising a prediction task $\f^*$, a dataset $\Dobs$, and a conditional generative model (CGM) $\param$.
+The prediction task is generalized as providing a response $\y$ to a given query $\z$.
+The set of valid responses to a user query implies a reference distribution over responses $p(\y \mid \z, \f^*)$.
+The dataset $\Dobs = \{(\z_i, \y_i)\}_{i=1}^n$ comprises $n$ query and response examples of the prediction task; $\z_i, \y_i \sim p(\z, \y \mid \f^*)$.
+A practical data abstraction scheme sees the decomposition of queries and responses into elements called tokens.
+As such, queries and responses---by extension, examples and datasets---are represented as sequences of tokens.
+For example, $(\z, \y) \equiv (\tk_1^\z, \tk_2^\z, \dots, \tk_1^\y, \tk_2^\y, \dots) \equiv (\tk_1^\x, \tk_2^\x, \dots)$.
+A conditional generative model $\param$ defines a predictive distribution over the next token in an example $\tk_j^\x$ given previous example tokens and $\tk_{<j}^\x$, and a tokenized dataset; $\prm(\tk_j^\x \mid \tk_{<j}^\x, \Dobs)$.
+By ancestral sampling, the CGM effectively defines additional predictive distributions over responses $\prm(\y \mid \z, \Dobs)$, examples $\prm(\z, \y \mid \Dobs)$, and datasets $\prm(\x \mid \Dobs)$.
+\Cref{fig:main-example-double} illustrates examples from two different ICL tasks.
+\Cref{fig:main-example-double-sst-1,fig:main-example-double-sst-2,fig:main-example-double-sst-3} gives an example from the SST2 sentiment prediction task for which Llama-2 7B frequently yields accurate answers. 
+\Cref{fig:main-example-double-mqp-1,fig:main-example-double-mqp-2,fig:main-example-double-mqp-3} gives an example from the medical questions pairs (MQP) prediction task for which Llama-2 7B yields random answers on average.
+As we illustrate next, there are several reasons why model generated responses or examples may be inappropriate for the ICL task $\f^*$.
+
+
+
+\section{What is a model?}
+
+Let $\param$ again denote a model, but now the model could be Bayesian linear regression, a Gaussian process, or perhaps even a large language model (LLM).
+A model defines a joint distribution $\prm(\D, \f)$ over observable data $\D = \{\x_1, \x_2, \dots \} = \{(\z_1, \y_1), (\z_2, \y_2), \dots\}$ and latent explanations $\f$.
+The notation $\f$ denotes both tasks and explanations, but we will clearly distinguish between them.
+The model joint distribution factorizes in terms of the model prior $\prm(\f)$ over explanations and the model likelihood $\prm(\D \mid \f)$ over observable datasets given an explanation; $\prm(\D, \f) = \prm(\D \mid \f)\prm(\f)$.
+From a frequentist perspective, the prior distribution over $\f$ would be ignored and a model would define a set of distributions over datasets indexed by $\f$; $\{\prm(\x \mid \f): \f \in \Fcal \}$.
+A model $\param$ alongside data $\Dobs$ further defines the posterior $\prm(\f \mid \Dobs)$ and posterior predictive $\prm(\D \mid \Dobs) = \int \prm(\D \mid \f)~d\Prm(\f \mid \Dobs)$ distributions, which specify the conditional distributions of explanations and new observations given the observed data.
+See \Cref{app:model-intuition} for a deeper discussion on each of these distributions.
+
+\textbf{Are CGMs Models?}
+Modern CGMs often lend access to only the marginal $\prm(\D)$ or posterior predictive $\prm(\D \mid \Dobs)$ rather than an explicit representation of $\f$.
+So why do we discuss latent variables like $\f$?
+We justify this with two key assumptions: First, if the model $\param$ is exchangeable (i.e., $\prm(\x)$ is invariant to permutations of the data), de Finetti’s theorem \cite{Hewitt1955SymmetricMO} guarantees the existence of such a latent variable $\f$. Therefore, assuming we adopt a unique representation of $\f$, there is no issue in writing $\prm(\x, \f)$.
+Alternatively, if $\prm(\D)$ approximates an exchangeable distribution $\pr(\D)$, as is the case with ICL problems,  then we can treat the statement $\prm(\D, \f)$ as a convenient abuse of notation, meant to represent $\pr(\D, \f)$. 
+Throughout, we assume that either of these conditions hold. 
+
+
+\section{A model is a choice to be criticised}
+
+\label{sec:related_work}
+
+A model $\param$ defined over an observation space $\Xcal$ is used make inferences informed by observations from that space $\Dobs$.
+Inferences about the probability of the the next word given a sequence of words, model uncertainty, and countless other quantities of interest.
+But a model is fundamentally a choice---the practitioner makes a modelling decision---and so there is no guarantee that the inferences derived from observations under a model are grounded in reality.
+
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/lin-lin.png}
+        \caption{linear model, linear data}
+        \label{fig:lin-lin}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/poly-poly.png}
+        \caption{polynomial model, polynomial data}
+        \label{fig:poly-poly}
+    \end{subfigure}
+
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/poly-lin.png}
+        \caption{polynomial model, linear data}
+        \label{fig:poly-lin}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/lin-poly.png}
+        \caption{linear model, polynomial data}
+        \label{fig:lin-poly}
+    \end{subfigure}
+    \caption{Examples of misaligned model and data combinations. Transformer models (pink) are fit to either linear or polynomial noisy data defined by reference Bayesian models (blue).}
+    \label{fig:model-mispecification}
+\end{figure}
+
+\Cref{fig:model-mispecification} illustrates inferences about the predictive distribution made by different models given different datasets.
+\Cref{fig:lin-lin,fig:poly-poly}---model inferences (pink) overlap with those made by the reference model (blue) and appear purple.
+However, inferences made by a misaligned polynomial model---\Cref{fig:poly-lin}---are much wider that those made by the reference linear model.
+And inferences made by a misaligned linear model---\Cref{fig:lin-poly}---are more narrow than those ogf the reference polynomial model, which results in the model being confident and wrong.
+Similarly, a very general LLM may have compromised data efficiency for rare domains, while a highly specialized LLM may no longer generalize beyond its domain.
+These examples illustrate that while models are used to quantify empirical facts---like the frequency of an event occurring---they also carry a subjective aspect that needs to be considered when using model inferences in practice.
+This consideration guides our question of when a model will provide reliable inferences for a given ICL problem.
+
+Much of the discussion around the reliability of CGMs has focused on ``hallucination'' detection, prediction, and mitigation \citep{dziri2021neural,su2022read,lee2022factuality,mielke2022reducing,gao2023rarr,li2023chain,varshney2023stitch,feldman2023trapping,zhang2023mitigating,peng2023check,lin2023teaching,azaria2023internal,chuang2024dola,burns2023discovering,rimsky2023steering,luo2023zero,shi2024trusting,band2024linguistic,li2024inference,mundler2024self,dhuliawala2024chain,farquhar2024detecting,kossen2024semantic,jesson2024estimating}.
+An interesting subset is based on uncertainty quantification where inferences about the variability of responses from the [posterior] predictive distribution \citep{kadavath2022language,manakul2023selfcheckgpt,cole2023selectively,chen2024quantifying}, or about the variability of explanations \citep{kuhn2023semantic,elaraby2023halo,lin2024generating,farquhar2024detecting,jesson2024estimating} are used to predict model hallucinations.
+However, none of these methods address the question of when those inferences are to be trusted, and so each are susceptible to failure if the model is not appropriate for the task.
+
+A growing body of work is formalizing the connection between ICL with pre-trained CGMs and Bayesian inference \citep{xie2021explanation,muller2021transformers,fong2023martingale,lee2023martingale,jesson2024estimating,falck2024context,ye2024pre}.
+Notably, the works of \citet{fong2023martingale,lee2023martingale,jesson2024estimating,falck2024context,ye2024pre} show how to transform Bayesian functionals of the model likelihood $\prm(\D \mid \f)$ and model posterior $\prm(\f \mid \Dobs)$ into functionals of the model predictive distribution $\prm(\D \mid \Dobs)$, which can be computed by contemporary CGMs.
+These works pave the way for using Bayesian model criticism techniques such as posterior predictive checks as a response to our ressearch question.
+In the following we formalize how this is done.
+
+
+
+
+
+\section{Posterior predictive checks are model critics for ICL problems.}
+
+
+Posterior predictive checks \citep{rubin1984bayesianly,meng1994posterior,gelman1996posterior,moran2023holdout} are Bayesian model criticism methods that use the model posterior predictive to assess the suitability of a model to make inferences informed by a set of observations.
+A model’s ability to explain observed data is quantified by the posterior predictive $p$-value, which is derived from a test of the hypothesis that the data are generated according to the model $\param$.
+Following \citet{moran2023holdout}, we assume access to main $\Dobs$ and holdout $\Dtest$ sets of observations, both distributed according to the reference likelihood $p(\D \mid \f^*)$ for a specific task $\f^*$.
+The class of PPCs pertinent to our discussion assess ``goodness-of-fit'' by asking how well a model fit to a set of observations $\Dobs$ explains the holdout observations $\Dtest$.
+To measure the goodness-of-fit, a PPC defines a discrepancy function, like the negative log marginal model likelihood  
+$
+    g_{\param}(\D, \Dobs) \coloneqq - \sum_{\z_i, \y_i \in \D} \log \prm(\z_i, \y_i \mid \Dobs),
+$
+or the negative log model likelihood 
+$
+    g_{\param}(\D, \f) \coloneqq - \sum_{\z_i, \y_i \in \D} \log \prm(\z_i, \y_i \mid \f).
+$
+Both of these measures will be lower for observations that are well explained by the model, and higher for those that are not.
+
+Defining the goodness-of-fit measures is only half of the story.
+A PPC needs a way to assess what makes a relatively high or relatively low value of the discrepancy function.
+To do this, a reference distribution of values is defined by measuring the discrepancy function over datasets sampled from the model posterior predictive distribution.
+The posterior predictive $p$-value is then evaluated as
+\begin{equation}
+    \label{eq:holdout-predictive-pvalue}
+    p_{\text{ppc}} \coloneqq \iint \mathbbm{1}\big\{ g_{\param}(\D, \cdot) \geq g_{\param}(\Dtest, \cdot) \big\} d\Prm(\D \mid \f) d\Prm(\f \mid \Dobs).
+\end{equation}
+The PPC locates the value of the discrepancy function for the holdout data $g_{\param}(\Dtest, \cdot)$ in the distribution of the discrepancy function under the model $g_{\param}(\X, \cdot)$.
+The more often the discrepancy (intuitively, the loss) of the data generated under the model is greater than or equal to the discrepancy of the holdout data, the more confident we can be that the model explains the holdout data well.
+Conversely, if the discrepancy of the holdout data is commonly greater than that of the data generated under the model, then we should be less confident that the model explains the holdout data, and thus be skeptical about the models capacity to solve the ICL problem. \Cref{alg:posterior_predictive_p-value} in \Cref{app:hpc} describes a $p_{\text{ppc}}$ estimator.
+
+
+
+\section{The generative predictive $p$-value and how to estimate it}
+
+Modern CGMs---such as LLMs---do not explicitly provide the joint distribution over observations and explanations.
+In the best case, we may only have access to the model posterior predictive distribution $\prm(\D \mid \Dobs)$ as a black box rather than an integral of the model likelihood $\prm(\x \mid \f)$ over the model posterior $\prm(\f \mid \D^n)$.
+For discrepancy functions that depend on $\f$ this is a problem.
+
+Our solution to not having the component distributions relies on the intuition that a sufficiently large dataset $\DN \coloneqq \{\z_i, \y_i\}_{i=1}^N$ generated according to the model likelihood $\DN \sim \prm(\D \mid \f)$ given an explanation $\f$ contains roughly the same information as the explanation itself.
+For an identifiable Bayesian model, the model posterior $\prm(\f \mid \DN)$ concentrates around the unique generating explanation $\f$ as $N \to \infty$.
+Therefore, it makes sense to express functions of explanations $\f$, like the model likelihood $\prm(\D \mid \f)$, that are not defined under a typical CGM, as functions of large datasets, like the predictive distribution $\prm(\D \mid \DN)$, that are defined.
+ 
+But, if we are only given the $n$ examples comprising $\Dobs$, where do the additional $N-n$ examples come from?
+The generation of sufficiently large datasets is done by ancestrally sampling from the model predictive distribution $\prm(\z, \y \mid \Dobs)$ to generate hypothetical completions $\DnN$ of the observed ICL dataset $\Dobs$ (also called predictive resampling by \citet{fong2023martingale}):
+\begin{equation*}
+    \z_{n+1}, \y_{n+1} \sim \prm(\z, \y \mid \Dobs), \quad
+    \z_{n+2}, \y_{n+2} \sim \prm(\z, \y \mid \Dobs, \z_{n+1}, \y_{n + 1}), \quad 
+    \dots 
+\end{equation*}
+As generated examples are added to the conditional of the predictive distribution after each step, this process can be thought of as reasoning toward one explanation by imagining a sequence of sets of observations that are consistent with a smaller and smaller set of explanations as the sequence length increases.
+As a stochastic process, it is encouraged to reason toward a different explanation each time it is run to complete $\Dobs$ with $N-n$ imagined examples.
+
+Building off this intuition, we define martingale and generative predictive $p$-values below.
+We prove that under general conditions the martingale predictive $p$-value is equal to the posterior predictive $p$-value.
+We then show how to estimate the generative predictive $p$-value for a given ICL problem.
+
+\subsection{The martingale predictive p-value}
+\label{sec:martingale-predictive-$p$-value}
+
+Our method is built on Doob's theorem for estimators (\Cref{th:doobs}).
+This theorem helps us transform statements about the random variable $h(\F)$---a function of explanations $\F$---to statements about the random variable $\E[h(\F)\mid \X_1, \X_2, \dots, \X_n]$, which is a function of observations $(\X_1, \X_2, \dots, \X_n)$.
+Thus, we can proceed without direct access to $\prm(\z, \y \mid \f)$and $\prm(\f \mid \D_n)$ and define a $p$-value that depends on infinite datasets $\D^\infty \coloneqq (\x_i, \y_i)_{i=1}^\infty$ rather than $\f$
+\begin{equation}
+    \label{eq:martingale-predictive-$p$-value}
+    p_{\text{mpc}} \coloneqq \iint \mathbbm{1}\big\{ g_{\param}(\D, \D^\infty) \geq g_{\param}(\D^{\text{test}}, \D^\infty) \big\} d\Prm(\D \mid \D^\infty) d\Prm(\D^{n:\infty} \mid \D^n).
+\end{equation}
+Doob's Theorem is an application of martingales, so---in line with the current literature \citep{fong2023martingale,lee2023martingale,falck2024context}---we call this formulation the martingale predictive $p$-value.
+
+The main theoretical result of this paper establishes the equality of the posterior and martingale predictive $p$-values; \Cref{eq:holdout-predictive-pvalue,eq:martingale-predictive-$p$-value}.
+We formalize this statement in the following theorem.
+\begin{theorem}
+    \label{th:ppc-mpc-equivalence}
+    Let $\F \sim \Prm$, and $\X_1, \X_2, \dots {\text{ i.i.d}}\sim \Prm^\f$. 
+    Assume \Cref{ass:separable,ass:measurable-family,ass:identifiability} and let,
+    $$
+        \int |\log\prm(\D^{m} \mid \f)| d\Prm(\f) < \infty:\quad \forall \D^{m} \in \Xcal^m.
+    $$
+    Then,
+    $
+        p_{\text{ppc}} = p_{\text{mpc}}.
+    $
+    \begin{proof}
+        The proof makes use of Doob's Theorem and is presented in \Cref{app:proof}.
+    \end{proof}
+\end{theorem}
+
+\subsection{The generative predictive p-value}
+\label{sec:generative-predictive-p-value}
+The martingale predictive $p$-value cannot be exactly computed because it is impossible to generate infinite datasets.
+Thus, we define the generative predictive $p$-value that clips the limits to infinity by some feasibly large number $N$ to estimate \Cref{eq:martingale-predictive-$p$-value} as 
+\begin{equation}
+    \label{eq:generative-predictive-p-value}
+    p_{\text{gpc}} \coloneqq \iint \mathbbm{1}\big\{ g_{\param}(\D, \D^N) \geq g_{\param}(\D^{\text{test}}, \D^N) \big\} d\Prm(\D \mid \D^N) d\Prm(\D^{n:N} \mid \D^n).
+\end{equation}
+The generative predictive $p$-value enables us to replace distributions that depend on latent mechanisms $\f$ or infinite datasets $\Dinf$ with ones that depends on finite sequences.
+The cost of using finite $N$ is estimation error between $p_{\text{gpc}}$ and $p_{\text{ppc}}$.
+A formal analysis of this error is left to future work.
+
+\subsection{CGM estimators for the generative predictive p-value}
+\label{sec:generative-predictive-p-value-estimators}
+\begin{algorithm}[ht]
+    \caption{$\widehat{p}_{\text{gpc}}$}
+    \label{alg:generative_predictive_p-value}
+    \begin{algorithmic}[1]
+        \Require data $\{\D^n, \D^{\text{test}}\}$, discrepancy function $g_{\param}(\D, \D^N)$, \# replicates $\mathrm{M}$, \# approx. samples $\K$
+        \For{$i \gets 1 \text{ to } \mathrm{M}$}
+            \State $\D^N_i \gets \D^n$ \Comment{initialize $\f$ sample data} \label{alg:line:sample-new-context-0}
+            \For{$j \gets n + 1 \text{ to } N$}  \label{alg:line:sample-new-context-1}
+                \State $\z_j, \y_j \sim p_{\param}(\z, \y | \D^N)$ \Comment{sample example from model} \label{alg:line:sample-new-context-2}
+                \State $\D^N_i \gets (\D^N_i, \z_j, \y_j)$ \Comment{update approximation context} \label{alg:line:sample-new-context-3}
+            \EndFor \label{alg:line:sample-new-context-4}
+            \State $\D_i \gets ()$ \Comment{initialize replicant data} \label{alg:line:sample-replication-0}
+            \For{$j \gets 1 \text{ to } n$} \label{alg:line:sample-replication-1}
+                \State $\z_j, \y_j \sim p_{\param}(\z, \y | \D^N_i)$ \Comment{sample example from model} \label{alg:line:sample-replication-2}
+                \State $\D_i \gets (\D_i, \z_j, \y_j)$ \Comment{update replicant data} \label{alg:line:sample-replication-3}
+            \EndFor \label{alg:line:sample-replication-4}
+        \EndFor
+        \State \textbf{return} $\frac{1}{\mathrm{M}} \sum_{i=1}^\mathrm{M} \mathbbm{1}\big\{ g_{\param}(\D_i, \D^N_i) \geq g_{\param}(\D^{\text{test}}, \D_i^N) \big\} $ \Comment{estimate $p$-value}
+    \end{algorithmic}
+\end{algorithm}
+
+We derive an estimator for the generative predictive $p$-value in \Cref{eq:generative-predictive-p-value} that uses Monte Carlo estimates to approximate the integrals.
+\Cref{alg:generative_predictive_p-value} describes the estimation procedure.
+The key stage that differentiates the generative predictive $p$-value algorithm from the standard posterior predictive $p$-value algorithm is described in \Cref{alg:line:sample-new-context-0,alg:line:sample-new-context-1,alg:line:sample-new-context-2,alg:line:sample-new-context-3,alg:line:sample-new-context-4}.
+Here dataset completions $\D_i^N$ of length $N$ are sampled from the CGM predictive distribution to approximate sampling a mechanism $\f_i$.
+This is in contrast to sampling an explanation directly from the model posterior as shown in \Cref{alg:posterior_predictive_p-value} \Cref{alg:line:sample-explanation} of \Cref{app:hpc}.
+When sampling replication data $\D_i$ in \Cref{alg:line:sample-replication-0,alg:line:sample-replication-1,alg:line:sample-replication-2,alg:line:sample-replication-3,alg:line:sample-replication-4}, the CGM predictive distribution is conditioned on $\D_i^N$ and $n$ new samples are independently generated.
+This procedure is repeated $M$ times, and the $p$-value is empirically estimated as before.
+
+
+
+
+\section{Empirical evaluation}
+
+\label{sec:evaluation}
+This section reports the following empirical findings:
+(1) The generative predictive $p$-value is an accurate predictor of model capability in tabular, natural language, and imaging ICL problems.
+(2) The $p$-value computed under the NLL discrepancy is also an indicator of whether there are enough in-context examples $n$.
+(3) The number of generated examples $N-n$ interpolates the $p$-value between the posterior predictive $p$-value under the NLML discrepancy and the NLL discrepancy using the model posterior $\prm(\f \mid \Dobs)$ and likelihood $\prm(\x \mid \f)$.
+These findings show that the $p$-value computed under either discrepancy yields an accurate predictor of whether generative AI can solve your in-context learning problem.
+If you also need to know whether there are enough in-context examples, we suggest using the NLL discrepancy function.
+If computational efficiency is a primary concern, we suggest using the NLML discrepancy as dataset completion generation is not required.
+
+\textbf{Models.}
+We evaluate our methods using two model types.
+For tabular and imaging tasks, we use a Llama-2 regression model for sequences of continuous variables \citep{jesson2024estimating}.
+The model is optimized from scratch for next token (variable or pixel) prediction following the procedure of \citet{touvron2023llama}.
+For natural language tasks, we use pre-trained Llama-2 7B \citep{touvron2023llama} and Gemma-2 9B \citep{gemma_2024} LLMs (Gemma-2 9B results are reported in \Cref{app:gemma}).
+
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/special_hallucination-3.png}
+        \caption{in-distribution tabular task}
+        \label{fig:general_id_simulated}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/general_hallucination-3.png}
+        \caption{OOD tabular task}
+        \label{fig:general_ood_simulated}
+    \end{subfigure}
+    \caption{Tabular data tasks.}
+    \label{fig:simulated-data}
+\end{figure}
+
+\textbf{Data.} 
+For tabular tasks, queries $\z$ are sampled uniformly from the interval $[-2, 2]$. Responses $\y$ are drawn from a normal distribution with a mean $\mu(\z)$, parameterized by either a random 3rd-degree polynomial (in-distribution), a random ReLU neural network (in-distribution or OOD), or a radial basis function (RBF) kernel Gaussian process with a length scale of 0.3 (OOD).
+The training data comprise 8000 unique in-distribution datasets with 2000 $\z-\y$ examples each.
+An in-distribution ReLU-NN task is illustrated in \Cref{fig:general_id_simulated}.
+The mean function $\mu(\z)$ is plotted by the blue line, and the blue shaded region outlines the 95\% CI of $\prm(\y \mid \z, \f^*)$.
+An OOD GP task is illustrated in \Cref{fig:general_ood_simulated}.
+In-distribution test data comprise a set of 200 new random datasets with 500 $\z-\y$ examples each.
+The OOD test data comprise 200 random datasets with 500 $\z-\y$ examples each.
+
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}[t]{0.45\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/general_error_llama_ic.png}
+        \caption{In-capability}
+        \label{fig:error_llama_ic}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.45\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/general_error_llama_oc.png}
+        \caption{Out-of-capability}
+        \label{fig:error_llama_oc}
+    \end{subfigure}
+    \caption{Natural language in-capability vs. out-of-capability tasks. Green solid line is the ICL error rate for Llama-2 7B. Gray dashed line is the random guessing error rate.}
+    \label{fig:error_llama}
+\end{figure}
+
+For pre-trained LLM experiments, the delineation between in- and out-of-distribution is opaque.
+Instead, we use in-capability or out-of-capability to differentiate between tasks a model can or cannot perform well.
+\Cref{fig:error_llama_ic} illustrates in-capability tasks where the error rate of Llama-2 7B is considerably better than random guessing.
+The in-capability data are the SST2 \citep{socher-etal-2013-recursive} sentiment analysis (positive vs. negative) and AG News \citet{zhang2016characterlevel} topic classification (World, Sports, Business, Sci/Tech) datasets.
+\Cref{fig:error_llama_oc} illustrates out-of-capability tasks where the error rate is only marginally better than random.
+The out-of-capability data are the Medical Questions Pairs (MQP) \citep{mccreery2020effective} differentiation (similar vs. different) and RTE \citep{dagan2006rte} natural language inference (entailment vs. not entailment) datasets.
+
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}[t]{0.3\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/gen_fill/gen_fill_svhn.png}
+        \caption{SVHN (in-distribution)}
+        \label{fig:svhn}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.3\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/gen_fill/gen_fill_mnist.png}
+        \caption{MNIST (near OOD)}
+        \label{fig:mnist}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.3\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/gen_fill/gen_fill_cifar.png}
+        \caption{CIFAR-10 (far OOD)}
+        \label{fig:cifar}
+    \end{subfigure}
+    \caption{Generative fill tasks using the test sets of SVHN, MNIST, and CIFAR-10.}
+    \label{fig:generative_fill}
+\end{figure}
+
+For imaging ICL experiments, we use SVHN for in-distribution data \citep{netzer2011reading}, MNIST as ``near'' OOD data \citep{lecun1998gradient}, and CIFAR-10 as ``far'' OOD data \citep{krizhevsky2009learning}.
+Our Llama-2 regression model takes a sequence of flattened, grayscale, 8x8 images as input.
+It is fit to random sequences of 16 images from the SVHN "extra" split, which has over 500k examples.
+A series of in-distribution generative fill tasks is shown in \Cref{fig:svhn}.
+In each row, the model is prompted with three in-context examples and asked to complete the missing half of the 4th example.
+Each completion in the ``fill'' column is sensible, even when the completed number differs from the ``real'' number.
+\Cref{fig:mnist} illustrates completions for near-OOD MNIST tasks.
+We see in rows 1, 2, 3, and 6 that the fills are often sensible, but the model is prone to hallucinating odd completions (row 4) and artifacts (row 5).
+\Cref{fig:cifar} illustrates completions for far-OOD CIFAR-10 tasks.
+The completions are surprisingly consistent at this resolution, but as the result in row 4 demonstrates, the model hallucinates completions from its domain.
+
+\textbf{Discrepancy functions.}
+We evaluate the $p$-value using discrepancy functions defined as
+$$
+    g_{\param}(\D, \D^{(\cdot)}) \coloneqq -\frac{1}{|\D|} \sum_{\z_i, \y_i \in \D} \frac{1}{|(\z_i, \y_i)|} \sum_{\tk_j \in (\z_i, \y_i)} \log \prm(\tk_j \mid \tk_{<j}, \D^{(\cdot)}),
+$$
+where $|(\z_i, \y_i)|$ is the number of tokens in the evaluated example.
+Following this template, the per-token negative log marginal likelihood (NLML) is written $g_{\param}(\D, \Dobs)$ and an estimate of the per-token the negative log-likelihood (NLL) is written $g_{\param}(\D, \DN)$, where $\DN$ is generated as in \Cref{alg:generative_predictive_p-value}.
+
+\textbf{Predicting model capability.}
+The $p$-values are calculated using either \Cref{alg:generative_predictive_p-value} or \Cref{alg:generative_predictive_p-value-lite} and a significance level $\alpha$ is selected to yield a binary predictor of model capability $\mathbbm{1}\{ p_{\text{gpc}} < \alpha\}$; a model is predicted as incapable of solving the ICL problem if the estimated generative predictive p-value is less than the significance level.
+We report results for significance levels $\alpha \in [0.01, 0.05, 0.1, 0.2, 0.5]$.
+For the NLL discrepancy function, replication data $\D$ is independently sampled from the likelihood under a hypothetical dataset completion $\prm(\z, \y \mid \DN)$.
+For the NLML discrepancy function, replication data is independently sampled from the predictive distribution $\prm(\z, \y \mid \Dobs)$.
+
+\begin{wrapfigure}{r}{0.53\textwidth}
+    \centering
+    \caption{Evaluation metrics for GPC performance.}
+    \label{tab:metrics}
+    \begin{tabular}{@{}lc@{}}
+        \toprule
+        \textbf{Metric} & \textbf{Equation} \\
+        \midrule
+        False Positive Rate (FPR) & $\frac{\text{False Positives}}{\text{False Positives} + \text{True Negatives}}$ \\
+        Precision & $\frac{\text{True Positives}}{\text{True Positives} + \text{False Positives}}$ \\
+        Recall & $\frac{\text{True Positives}}{\text{True Positives} + \text{False Negatives}}$ \\
+        F1 Score & $\frac{2 \cdot \text{Precision} \cdot \text{Recall}}{\text{Precision} + \text{Recall}}$ \\
+        Accuracy & $\frac{\text{True Positives} + \text{True Negatives}}{\text{Total Number of Predictions}}$ \\
+        \bottomrule
+    \end{tabular}
+\end{wrapfigure}
+\textbf{Evaluation metrics.}  
+We evaluate the capability predictor using standard metrics: FPR measures in-capability tasks misclassified as out-of-capability, Precision reflects correctly identified out-of-capability tasks, and Recall measures correctly detected out-of-capability tasks. F1 Score and Accuracy assess overall performance (see \Cref{tab:metrics} for definitions).
+
+We also provide the distribution of $p$-values across tasks to assess how confidently the model distinguishes between the different ICL problems. Lower $p$-values indicate stronger confidence that a model cannot solve a problem.
+
+\subsection{The generative predictive $p$-value accurately predicts model capability}
+\label{sec:good-predictor}
+
+\textbf{Tabular data.}
+We first evaluate whether the generative predictive $p$-value effectively predicts OOD tabular data tasks.
+The parameters for \Cref{alg:generative_predictive_p-value} are $M=40$ replications and $N-n=200$ generated examples.
+The ICL dataset $\Dobs$ size is varied from $n=2$ to $n=200$.
+\Cref{fig:synthetic_general_ablate_curves} plots precision, recall, F1, and accuracy curves and shows that the $p$-value estimates under either discrepancy function provide non-trivial OOD predictors for all $\alpha$ settings.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/general_curves_ablate.png}
+    \caption{
+        Tabular OOD detection. 
+        Metric values vs. context length. 
+        In-distribution functions are from unseen random ReLU-NNs. 
+        OOD functions are from an RBF kernel GP.
+    }
+    \label{fig:synthetic_general_ablate_curves}
+\end{figure}
+
+\textbf{Natural language ICL.}
+Next, we evaluate whether the generative predictive $p$-value effectively predicts out-of-capacity natural language tasks.
+The parameters for \Cref{alg:generative_predictive_p-value} are $M=20$ replications and $N-n=10$ generated examples.
+The ICL dataset $\Dobs$ size is varied from $n=4$ to $n=64$.
+\Cref{fig:language_llama_ablate_curves} plots precision, recall, F1, and accuracy curves and shows that the $p$-value estimates under the NLL discrepancy provide non-trivial (accuracy $>0.5$) out-of-capability predictors in the domain of natural language for all $\alpha$ settings.
+The NLML discrepancy $g_{\param}(\D, \Dobs)$ is also generally robust outside of the small $n$ and small $\alpha$ setting.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/llama_curves_ablate.png}
+    \caption{
+        Llama-2-7B out-of-capability detection. 
+        Metric values vs. context length. 
+        In-capability tasks are from SST2 and AG News datasets.
+        Out-of-capability tasks are from RTE and MQP datasets.
+    }
+    \label{fig:language_llama_ablate_curves}
+\end{figure}
+
+\textbf{Generative fill.}
+Finally, we evaluate whether the generative predictive $p$-value effectively predicts OOD generative fill tasks.
+The parameters for \Cref{alg:generative_predictive_p-value} are $M=100$ replications and $N-n=8$ generated examples
+The ICL dataset $\Dobs$ size is varied from $n=2$ to $n=8$.
+\Cref{fig:generative_fill_ablate_curves} plots the OOD prediction metric curves and shows that the $p$-value estimates under either discrepancy function provide non-trivial (accuracy $> 0.66\bar{6}$) OOD predictors for all $\alpha$ settings.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/gen_fill/generative_fill_curves_ablate..png}
+    \caption{
+        Generative fill OOD detection. 
+        Metric values vs. context length. 
+        In-distribution tasks are from the SVHN test set. 
+        Near and far OOD tasks are from the MNIST and CIFAR-10 test sets.
+    }
+    \label{fig:generative_fill_ablate_curves}
+\end{figure}
+
+\textbf{Discussion.}
+\Cref{fig:synthetic_general_ablate_curves,fig:language_llama_ablate_curves,fig:generative_fill_ablate_curves} reveal several trends.
+First, the NLML discrepancy (blue) yields better precision, indicating that it is less likely to misclassify an in-capability ICL problem as unsolvable.
+Second, the NLL discrepancy (purple) yields higher recall, indicating that it is less likely to misclassify an out-of-capability ICL problem as solvable.
+Third, the NLL discrepancy with significance level $\alpha=0.05$ yields a generally more accurate predictor than the NLML discrepancy function for any significance level in the set evaluated.
+Finally, the recall of a predictor under the NLML discrepancy is sensitive to the number of in-context examples $n$.
+Next, we look deeper into the relationship between dataset size and the discrepancy functions.
+
+\subsection{The NLL discrepancy also indicates whether you have enough data}
+\label{sec:enough-data}
+
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}[b]{0.225\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/poly_poly_nll_scatter.png}
+        \caption{NLL}
+        \label{fig:poly-polly-nll}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.225\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/poly_poly_nlml_scatter.png}
+        \caption{NLML}
+        \label{fig:poly-polly-nlml}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.225\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/risk.png}
+        \caption{Risk}
+        \label{fig:risk}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.225\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/poly_relu_accuracy.png}
+        \caption{Accuracy}
+        \label{fig:poly-relu-accuracy}
+    \end{subfigure}
+    \caption{(a) and (b) Scatter plots of response RMSE vs. $p$-values for the NLL and NLML discrepancies. Points are style-coded by ICL dataset size $n$. (c) Risk vs. $n$. (d) Accuracy vs. $n$}
+    \label{fig:scatter_n_sensitivity}
+\end{figure}
+Both discrepancy functions yield accurate predictors of model capability, but the NLL discrepancy also provides information about whether there are enough in-context examples to reliably solve a task.
+We use prediction RMSE over task responses to measure reliability.
+\Cref{fig:poly-polly-nll,fig:poly-polly-nlml} plot the RMSE against the $p$-values computed under the NLL and NLML discrepancies for in-distribution polynomial tabular tasks.
+We see that lower $p$-values correlate with higher RMSE for the NLL discrepancy, but not for the NLML discrepancy.
+This added information is useful for reducing risk in recommendation systems that autonomously respond if the $p$-value is greater than the significance level $\alpha$.
+For example, at $\alpha=0.1$, the NLL discrepancy reduces the generation of responses with higher error because it accounts for the number of examples provided.
+Taking the risk as the sum of task RMSEs for tasks predicted as in-capability, \Cref{fig:risk,fig:poly-relu-accuracy} show that the NLL discrepancy results in substantially reduced risk, even when we closely match the accuracies of each predictor.
+
+
+\subsection{The number of generated examples $N-n$ interpolates the $p$-value estimate between the NLML and the ideal NLL discrepancies}
+\label{sec:interpolation}
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/p-value_interpolation.png}
+    \caption{The dataset completion size $N-n$ interpolates the $p_\text{gpc}$ under $g_{\param}(\D, \DN)$ between the $p_\text{ppc}$ under $g_{\param}(\D, \Dobs)$ (NLML) and the $p_\text{ppc}$ under $g_{\param}(\D, \f)$ (NLL).}
+    \label{fig:interpolation}
+\end{figure}
+
+Inspection of \Cref{eq:holdout-predictive-pvalue,eq:martingale-predictive-$p$-value,eq:generative-predictive-p-value} makes clear that the dataset completion size $N-n$ should closely interpolate $p$-value estimates between $p_{\text{ppc}}$ computed with the NLML discrepancy and with the NLL discrepancy using the likelihood and posterior of a Bayesian model.
+To verify this, we use a reference Bayesian polynomial regression model to compute the $p_{\text{ppc}}$. 
+We use our Llama-2 regression model fit to datasets generated from the reference model likelihood under different explanations to compute the $p_{\text{gpc}}$.
+We let datasets generated by random ReLU-NNs serve as OOD tasks.
+\Cref{fig:interpolation} demonstrates that our expectation is true.
+Specifically, the $p$-value estimates at $N-n = 2$ are distributionally close to those calculated under the NLML, and they more closely approximate those calculated under the reference NLL discrepancy as we increase $N-n$ to $100$. The latter observation is also illustrated in \cref{fig:p-f_scatter}.
+
+Since the $p$-values computed under either discrepancy yield accurate predictors of model capability, the choice between discrepancy functions ultimately comes down to a decision on whether the added computational cost of generating dataset completions is justified.
+If you need to know whether there are enough in-context examples to generate an accurate response---a necessity in risk-sensitive applications---then we recommend using the NLL discrepancy function.
+If computational efficiency or the cost of response deferral are primary concerns---practical user experience concerns---we suggest using the NLML discrepancy.
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+
+This work introduces the \textit{generative predictive $p$-value}, a metric for determining whether a Conditional Generative Model can solve an in-context learning problem. 
+It extends Bayesian model criticism techniques like PPCs to generative models by sampling dataset completions from the model's predictive distribution to approximate sampling latent explanations from a Bayesian model posterior.
+Empirical evaluations on tabular, natural language, and imaging tasks show that the generative predictive $p$-value can effectively identify the limits of model capability, distinguishing between in-capability and out-of-capability tasks for models like Llama-2 7B and Gemma-2 9B.
+This approach is a practical method to assess model suitability that advances Bayesian model criticism for CGMs.
+While we have focused on model capability prediction, the $p$-value estimates could also be used for model selection or as a general measure of task uncertainty. 
+We are eager to explore extensions beyond ICL tasks to improve the reliability of generative AI systems.
+
+
+

@@ -1,0 +1,463 @@
+\title{Improving LoRA in Privacy-preserving Federated Learning}
+
+\begin{abstract}
+Low-rank adaptation (\lora) is one of the most popular task-specific parameter-efficient fine-tuning (PEFT) methods on pre-trained language models for its good performance and computational efficiency.
+\lora injects a product of two trainable rank decomposition matrices over the top of each frozen pre-trained model module.
+However, when applied in the setting of privacy-preserving federated learning (FL), \lora may become unstable due to the following facts: 1) the effects of data heterogeneity and multi-step local updates are non-negligible, 2) additive noise enforced on updating gradients to guarantee differential privacy (DP) can be amplified and 3) the final performance is susceptible to hyper-parameters.
+A key factor leading to these phenomena is the discordance between jointly optimizing the two low-rank matrices by local clients and separately aggregating them by the central server.
+Thus, this paper proposes an efficient and effective version of \lora, \textbf{F}ederated \textbf{F}reeze \textbf{A LoRA} (\method), to alleviate these challenges {and further halve the communication cost of federated fine-tuning LLMs}.
+The core idea of \method is to fix the randomly initialized non-zero matrices and only fine-tune the zero-initialized matrices.
+Compared to \lora, \method is motivated by practical and theoretical benefits in privacy-preserved FL. 
+Our experiments demonstrate that \method provides more consistent performance with better computational efficiency over vanilla \lora in various FL tasks.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Recent years have witnessed tremendous success in the development of large language models (LLMs)~\citep{touvron2023llama, openai2023gpt, zhang2022opt, zeng2022glm}. 
+The applications of LLMs range from a versatile chatbot for different writing tasks~\citep{chatgpt} to multi-modal systems~\citep{driess2023palm, wu2023visual, bommasani2021opportunities}.
+Besides the commercialized products based on general-purpose LLMs, people can also build their customized LLMs by utilizing their task-specific data to fine-tune pre-trained LLMs ~\citep{howard2018universal}.
+Since modern LLMs usually contain billions of parameters, fine-tuning on all parameters has prohibitively high computational costs. As a remedy, parameter efficient fine-tuning (PEFT) approaches~\citep{ding2023parameter}, such as Low-Rank Adaptation (LoRA)~\citep{hu2021lora} have been developed and commonly adapted in many downstream tasks.
+PEFT methods freeze the majority of parameters in pre-trained LLMs, and perform update on a small subset of parameters. 
+Compared to full model fine-tuning, these approaches usually offer on-par or even better performance while significantly improving computational efficiency. 
+
+In this paper, we focus on \lora for its good performance and versatility for a wide spectrum of tasks with many variations.
+However, \lora still requires sufficient training data to achieve significant improvement over the raw model.
+The data-limited parties can unite with others and adopt federated learning (FL)~\citep{li2020federated} as the computation framework to fine-tune the model collaboratively. 
+The parameter-efficient nature of \lora is welcomed in FL due to its low communication costs and relatively low local computational burdens.
+Furthermore, if the data parties in FL (usually known as \emph{clients} in FL) want to provably prevent local data leaking from their shared information in FL, differential privacy (DP)~\citep{dwork2006calibrating} techniques can be further employed to provide privacy guarantees.
+
+While there are many existing research results exploring (privacy-preserved) PEFT in the central setting, the exploration on how to conduct (privacy-preserved) \lora in the FL setting is still a pre-mature.
+Directly migrating \lora methods from the central setting and combining it with FedAvg may not achieve the best performance since other sources of interference in the (privacy-preserving) FL setting, such as noisy gradients and non-iid distribution of data {in the cross-silo setting}, can play important roles in the optimization process. 
+In real-world LLM applications with privacy concerns, such as federated fine-tuning \citep{babakniya2023slora} or fine-tuning under differential privacy guarantees \citep{li2022does}, the performance of LoRA often suffers deterioration.
+
+\mypara{Contributions.}
+In this paper, we identify three discordances in applying \lora in the privacy-preserved FL setting. 
+The first is presented as a mismatched term brought by the joint local updates and separate global aggregations on the two sets of low-rank matrices of \lora.
+The second discordance is that if we employ DP-SGD as the differentially private optimizer for training, the injected noise can be amplified by the locally ``semi-quadratic'' nature of \lora.
+Lastly, the choice of one hyper-parameter of \lora, the scaling factor $\alpha$, can significantly affect the convergence and performance of the final model, no matter enforcing DP or not.
+
+To resolve these discordances, we propose our solution named \textbf{F}ederated \textbf{F}reeze \textbf{A LoRA} (\method).
+\method freezes the non-zero initialized low-rank matrices and only perform update and aggregation on the zero-initialized matrices, only half as many parameters as \lora.
+Beside \method's obvious effect of saving half of the communication and computational cost in FL, we also provide intuitions on why it can alleviate the three aforementioned discordances.
+We conduct comprehensive experiments to demonstrate the advantages of \method over \lora in privacy-preserving FL, across different tasks, hyper-parameters and privacy protection levels.
+
+We summarize our contributions as follows:
+
+\mypara{$\bullet$} We explore the conditions in privacy-preserved FL that are discordant with \lora, and provide explanations on the potential reasons of this performance degradation.
+
+\mypara{$\bullet$} We propose a new method, \method, which tailors \lora to increase its performance in these undesirable but unavoidable conditions in privacy-preserved FL.
+
+\mypara{$\bullet$}     We conduct extensive experiments to verify that \method can consistently outperform \lora.
+    
+
+
+\section{Background and Related Works}
+
+
+\mypara{Parameter efficient fine-tuning.}
+The ever-increasing network size of LLMs makes them prohibitively expensive, if possible at all, to fine-tune directly. 
+To mitigate this problem, parameter-efficient fine-tuning (PEFT) methods have been proposed.
+{These methods introduce a small number of additional trainable parameters $\mtheta$ to improve model performance and keep most of the pre-trained parameters $\mphi$ frozen.
+The task-specific increment $\Delta \mphi$ is then encoded into $\Delta \mtheta$ with much smaller dimensions.}
+\cite{houlsby2019parameter} added additional trainable neural modules named \textit{adapters} to each layer of the network. 
+Alternatively, prefix-tuning\citep{li2021prefix} and prompt-tuning\citep{lester2021power} modify the network by concatenating additional trainable dimensions to input or hidden layers of the network. 
+Another series of works \citep{hu2021lora, yu2021large} proposed \lora and RGP, using low-rank matrices to approximate or re-parameterize the pre-trained weight matrices. 
+\lora is arguably the most popular approach among PEFT methods, it only requires tuning less than 1\% of the parameters in the full fine-tune approach but achieves comparable performance in a wide range of downstream tasks. 
+There are also works \citep{he2021towards, chavan2023one} that seek to provide a generalized method that unifies these PEFT methods.
+\mypara{Federated fine-tuning with LLM.}
+Although fine-tuned LLMs can become backbones for applications in different areas, the fine-tuning process still favors large-scale, domain-specific data.
+However, such domain-specific data is typically possessed by multiple parties, with each party's dataset only containing inadequate data to fine-tune models by itself. Furthermore, these parties are often prohibited from sharing such data directly with other entities. 
+A common solution for this dilemma is federated learning~\citep{kairouz2021advances}, which allows a set of agents to fine-tune LLMs efficiently by sharing their local model updates without explicitly sharing their respective data.
+\cite{tian2022fedbert} proposed FedBERT and performed federated pre-training on the BERT model.
+Different from traditional machine learning models, LLM's tremendous model size can consume significant amount of resources for cross-party communication and require immense computation resources for local training.
+Many research solutions rely on the combination of PEFT with FL.
+There have been multiple studies of PEFT in FL in the recent years,  \cite{zhang2022federated} considers PEFT in the federated setting. 
+Recently, \citep{kuang2023federatedscope} proposed FS-LLM, a federated framework for federated fine-tuning LLMs. 
+It has been pointed out that data heterogeneity in FL is a challenge for PEFT algorithm \citep{kairouz2021advances, babakniya2023slora}.
+
+
+\mypara{PEFT with differential privacy.}
+Although LLMs are powerful tools and offer great performance thanks to their ability to extract rich features with the transformer structure and large number of parameters, it is also well known that LLMs with large number of parameters can leak critical information contained in the training dataset~\citep{carlini2021extracting, huang2022large}. 
+A popular privacy notion that can provide theoretical guarantees against training data leakage from the model is differential privacy (DP) \citep{dwork2006calibrating}.
+\begin{definition}[$(\epsilon, \delta)$-DP ]
+    A randomized algorithm $\mathcal{A}$ is $(\epsilon, \delta)$-differentially private if for any two neighboring datasets $\sD$ and $\sD'$, which differ in exactly a single record, and for all possible subsets $\sS\subset \mathcal{O}$ of possible outputs of $\mathcal{A}$: 
+    $Pr[\mathcal{A}(\sD)\in \sS]\leq e^\epsilon Pr[\mathcal{A}(\sD')\in \sS] + \delta.$
+\end{definition}
+Intuitively, DP ensures that any single record cannot significantly affect the distribution of the output.
+With such indistinguishable output distributions, any adversary can only gain limited additional knowledge about whether a specific record is in the input data.
+The level of privacy is denoted by the privacy parameters $(\epsilon, \delta)$, a smaller choice of $(\epsilon, \delta)$ means a stronger privacy protection guarantee.
+
+\mysubpara{Machine learning with DP: DP-SGD.}
+A classic mechanism used to ensure the published model differentially private is DP-SGD~\citep{song2013stochastic, abadi2016deep, bassily2014private}.
+It requires a DP optimizer to privatize gradients before using them to update the model.
+Compared with the vanilla stochastic gradient descent (SGD) algorithm, DP-SGD has two additional operations in each iteration.
+It first clips per-sample gradients with a norm constraint $C$ to limit the maximum influence of any sample.
+Then, it adds a Gaussian noise $z\sim \mathcal{N}(0, C^2 \sigma^2 I_p)$ to the sum of clipped gradients in a batch $\mathcal{B}$.
+Namely, $\bar{g} = \left(\sum_{i\in \mathcal{B}} \text{Clip}(\nabla f_i, C) + z \right) / |\mathcal{B}|$.
+Finally, this noisy sum of clipped gradients $\bar{g}$ is used to update the model.
+The scalar $\sigma$ is decided by privacy composition rules~\citep{abadi2016deep} given privacy parameter $\epsilon, \delta$, total number of iteration $T$ and sampling rate $q=|\mathcal{B}| / N$, where $N$ is the total number of samples in the training set.
+
+In the central setting, where a single trainer possesses all data, existing studies on fine-tuning LLM with DP guarantees mainly adopt DP-SGD as the optimization algorithm.
+\cite{yu2021differentially} studied the effect of parameter-efficient algorithms in private fine-tuning. \cite{li2021large, li2022does} found that although the number of trainable parameters has been significantly reduced for PEFT, the performance of private fine-tuning is not significantly better, which might be contrary to traditional beliefs~\citep{bassily2014private}.
+\mypara{Different DP settings in FL.}
+Generally, there are two different levels of differential privacy protection in federated learning, depending on whether the federated aggregation server is trusted by the clients or not.
+The first setting assumes that the server is trusted, the model updates are shared to the server without privacy concerns; this privacy guarantee is on the final output model achieved by randomization in the global aggregated update on the server side~\citep{mcmahan2017learning}.
+A stronger privacy setting is to forgo the trustworthy server assumption and ensure the shared update from each client is already differentially private~\citep{li2021federated, wu2020value, qu2021natural}.
+
+In this paper, we adopt the \emph{stronger privacy setting}, ensuring that any shared information (i.e., updates of model parameters) from local clients to server satisfies DP. 
+By DP's properties, including parallel composition, sequential composition and resistance to post-processing~\citep{dwork2006calibrating, abadi2016deep,li2021federated}, the final model automatically satisfies DP globally.
+
+
+
+
+\section{\lora in privacy-preserving FL}
+
+
+In this paper, we focus on \lora, one of the most promising PEFT methods in the central setting, \lora has been shown to exhibit better performance than other PEFT methods in the federated setting~\cite{kuang2023federatedscope}.
+The core idea of \lora is to constrain the weight update on the model by a low rank decomposition, 
+\begin{equation}\label{lora_update}
+    \mW_0 + \Delta \mW = \mW_0 + \mB\mA.
+\end{equation}
+Instead of training the entire weight matrix $\mW_0 \in \R^{d\times k}$ composing $\mphi$, the updates are performed on $\mA \in \R^{r\times k}$ and $ \mB \in \R^{d \times r}$ composing $\mtheta$. With $r << \min (d, k)$, the number of trainable parameters $|\mtheta|$ is reduced by an order of $O(r/\min (d, k))$ compared to full fine-tune with size $|\mphi|$.
+
+In order to recover the performance of raw model at the start of training, and keep the weights trainable through back-propagation, $\mA$ uses random Gaussian initialization, while $\mB$ is set to zero. 
+The product matrix is additionally scaled by a factor $\alpha/r$. 
+$\alpha$ also has influence on the performance of \lora and is required to be tuned. 
+\mypara{Discordance 1: Data heterogeneity and model-averaging introduce interference to \lora.}
+The performance of vanilla \lora is negatively affected when faced with {cross-silo} FL tasks with data heterogeneity \citep{babakniya2023slora}. 
+Notice that the loss for back-propagation is computed on the composition of raw model parameters and the product of $\mA$ and $\mB$ (as~\Eqref{lora_update}), and \lora performs optimization over $\mA$ and $\mB$ jointly on client side.
+This implies that the problem is approximately optimized as a locally semi-quadratic problem (suppose the model is locally linear when learning rate is small).
+However, when the server performs aggregation on the server side, $\mA$ and $\mB$ are averaged separately following vanilla FedAvg \cite{mcmahan2017communication}.
+The product of the averaged $\mA$ and $\mB$ involves additional terms that may neither benefit the optimization on the clients' loss or FL global loss.
+
+For example, consider a FL task involving two clients with datasets of a same size.
+If clients locally fine-tune on full parameters and the server aggregates with FedAvg, the new model parameters can be represented as the following:
+\begin{equation}
+\begin{aligned}
+    &\mW^+ =  \frac{1}{2} (\mW_1 + \mW_2)= \mW_0 + \frac{1}{2} (\Delta \mW_1  + \Delta \mW_2), \text{ where } \mW_i = \mW_{0} +  \Delta \mW_i, i = 1,2. 
+\end{aligned}
+\end{equation}
+An implicit assumption ensuring the global convergence of FL algorithms is $\Delta \mW_{global} \approx \frac{1}{2} (\Delta \mW_1  + \Delta \mW_2)$, where $\Delta \mW_{global}$ is the update assuming the server can access all clients' dataset directly.
+When the clients use \lora locally, we can also consider $\Delta \mW_i \approx \mB_i \mA_i$.
+However, after using FedAvg to aggregate the trainable low-rank matrices, the server produces
+\begin{equation}\label{lora_aggregation}
+    \underbrace{\Tilde{\mW}^+ =  \mW_0 + \frac{1}{2} ( \mB_1  + \mB_2) \times \frac{1}{2} ( \mA_1  +  \mA_2) }_{\text{Parameters after aggregation with \lora + FedAvg}}\neq \underbrace{\mW_0 +\frac{1}{2}( \mB_1 \mA_1 +  \mB_2 \mA_2) = \mW^+}_{\text{Ideal parameters following model-averaging}}.
+\end{equation}
+Thus, it is possible for two clients in FL to converge to two different combinations of adaptation matrices $\mB_i, \mA_i$, yet when an aggregation such as FedAvg is applied in server, a linear combination does not necessarily provide good performance for the specific task.
+The difference between $\frac{1}{2} ( \mB_1  + \mB_2) \times \frac{1}{2} ( \mA_1  +  \mA_2)$ and $\frac{1}{2} (\Delta \mW_1  + \Delta \mW_2)$ may become more significant when i) number of local update steps between aggregations is large and ii) the local datasets are different across clients.
+
+This echoes with the ``client-drift'' phenomenon discussed by \cite{karimireddy2020scaffold}. 
+``Client-drift'' happens in heterogeneous FL when there is a difference between the average of local loss optima of clients and the optimum of the global loss, i.e. $\sum_i \mtheta^*_i \neq \mtheta^*_{global}.$ 
+It is caused by the local gradient dissimilarity among clients and slows down convergence. 
+Since the parameters in \lora are locally quadratic in construction, they are more prone to ``client-drift'' than a locally linear task such as full-fine-tuning.
+
+\mypara{Discordance 2: The noise with DP-SGD can be amplified with \lora.}
+Although \lora and DP-SGD are the most popular methods in PEFT and privacy-preserved machine learning respectively, directly combining them together may not be the optimal choice.
+The discordance again comes from the semi-quadratic structure of \lora.
+Consider the parameters after a single DP-SGD update.
+Even if no norm clipping operation is triggered, the parameters are updated as 
+$$\mW_0 + (\mB + \mxi_B)(\mA + \mxi_A) = \mW_0 + \mB\mA + \mxi_B\mA + \mB\mxi_A + \mxi_B\mxi_A,$$ 
+where $\mxi_A$ and $\mxi_B$ consist of the Gaussian noises from DP-SGD.
+Three terms contain noise and the third term, $\mxi_B\mxi_A$, no longer follows a Gaussian distribution.
+This shows that noise is cascaded after the multiplication in \lora, introducing additional difficulties for convergence in fine-tuning. 
+
+We provide synthetic verification with Figure \ref{fig_noise}. 
+In this example, $\mW\in\R^{1024\times 1024}$ and rank $r = 8$. 
+We plot the Frobenius norm of the noise matrices $\mxi_B\mxi_A$ and $\mxi_W$ for \lora and full fine-tuning respectively. 
+Due to the multiplication in LoRA by construction, the norm of noise scales quadraticly with $\sigma$, and is significantly worse that full fine-tune when $\sigma$ exceeds 0.5. 
+
+For an FL algorithm with 1000 communication rounds, 10 local update steps and a dataset such as SST-2, using batch-size $\mB = 200$, a DP guarantee with $\epsilon = 6, \delta = 1e-5$ will require a noise factor of $\sigma = 0.99$.
+In this case, \lora will produce approximately 3 times more noise compared to full model fine-tuning
+This could be an explanation to why \lora does not significantly outperform full fine-tuning despite having less parameters, as reported in \citep{yu2021differentially, li2022does, babakniya2023slora}.
+\begin{wrapfigure}[]{r}{0.41\textwidth}
+  \begin{center}
+    \includegraphics[width=0.4\textwidth]{noise_compare.pdf}
+  \end{center}
+  \caption{\label{fig_noise} Frobenius norm of noise terms within a single update.}
+\end{wrapfigure}
+
+
+
+
+\mypara{Discordance 3: \lora requires careful tuning on $\alpha$.}
+In terms of the optimal scaling factor $\alpha$, empirical results \citep{kuang2023federatedscope} have demonstrated that in many more complex tasks, a larger $\alpha$ shows higher performance after fine-tuning, yet as $\alpha$ increases, the algorithm becomes more and more unstable with much higher variance across different runs.  
+According to \cite{zhou2017convergence}, the convergence speed for FedAvg-like algorithms is closely related to the objective function's smoothness factor $L$. As the scaling factor $\alpha$ increases, the problem becomes less smooth by construction, slowing down convergence. 
+Furthermore, with increase of the scaling factor $\alpha$, the impact of noise on the model performance gets worse. 
+This could be explained by the fact that as $\alpha$ increases, the update $\Delta \mA$ becomes less significant compared to $\mA_0$.
+Since $\mB$ is initialized at 0, the gradient information in $\Delta \mB$ becomes more important in comparison.
+Yet the gradient clipping and privacy engine sees the update on both $\mA$ and $\mB$ equally. 
+Due to the imbalanced distribution of information in gradients, the algorithm suffers from either excessive information loss or excessive noise, a trade-off between increasing $\alpha$ for better performance and decreasing $\alpha$ to prevent noise-induced performance deterioration.
+
+While searching for a good hyper-parameter $\alpha$ is important, hyper-parameter optimization (HPO) is usually costly~\citep{khodak2021federated}.
+Adding in $\alpha$ for HPO means extra communication and computation costs proportional to the search space size of the $\alpha$.
+
+
+
+\section{A Simple Receipt: \method}
+
+
+In the previous section, we discussed the discordance between \lora and privacy-preserved FL.
+Motivated by theory, we propose a simple modification to \lora, Federated Freeze-A Low Rank Adapters, or \method for short. 
+\method modifies the training process of \lora by setting matrix $\mA$ to fixed after initialization. 
+That is, for a weight matrix $\mW\in \R^{d\times k}$, we consider the model update to be projected to a low-rank matrix such that 
+$$\mW = \mW_0 + \Delta \mW = \mW_0 + \mB \mA_0, \text{ with } \mB\in \R^{d\times r}, \mA_0 \in \R^{r \times k}.$$
+$\mW_0$ is initialized as the pre-trained weight, and $\mA_0$ follows a random Gaussian initialization.
+Following vanilla \lora, we start with $\mB_0 = 0$ so that the pre-trained model is recovered at the start of fine-tuning.
+The key difference is that we consider $\mB$ trainable and keep both $\mW_0$ and $\mA_0$ frozen.  
+
+We note that our approach is somewhat similar to the works regarding the intrinsic dimension of deep models by \citep{li2018measuring, aghajanyan2020intrinsic}, however these works emphasis on the existence of low intrinsic dimensions in deep models and the generalization properties.
+We summarize the advantages of \method as the following.
+\mypara{\method has no extra interference with data heterogeneity and model-averaging.}
+We reconsider the federated aggregation example in Section \ref{sec_when_lora}.
+{In the heterogeneous setting, each client will generate a different $\Delta \mW_i$.
+Since $\Delta \mW_i \approx \mB_i \mA_0$ in \method, the update is more compatible with FedAvg and DP-SGD than \lora.
+Similar to Equation \ref{lora_aggregation}, we write the the aggregation step of a two-client system for \method:}
+\begin{equation}\label{ffalora_aggregation}
+    \Tilde{\mW}^+ =  \mW_0 + \frac{1}{2} ( \mB_1  +  \mB_2) \times  \mA_0 = \mW_0 +\frac{1}{2}(  \mB_1 \mA_0 +  \mB_2 \mA_0) = \mW^+.
+\end{equation}
+
+Unlike \lora in Equation \ref{lora_aggregation}, \method does not have the aggregation error term caused by low rank adaptation.
+
+\mypara{\method works better with noise from DP-SGD.}
+Because \method no longer employs the locally semi-quadratic structure as \lora, the noise in DP would not be amplified.
+When no norm clipping operation is triggered, the parameters are updated as 
+$\mW_0 + (\mB + \mxi_B)\mA_0 = \mW_0 + \mB\mA + \mxi_B\mA$. 
+This is because the trainable parameters are only the zero-initialized matrices $\mB$. 
+The noise introduced by DP-SGD is only in the term $\mxi_B\mA$ but without the $\mxi_B\mxi_B$ term,
+making \method less susceptible to noise than \lora.
+
+In addition, from an analytical perspective, if the model is Lipschitz smooth with respect to $\mW$, similar smoothness can be obtained for \method, but not for \lora. 
+
+Convergence properties similar to \citep{zhou2017convergence} can be derived from this theorem.
+\mypara{\method does not rely on $\alpha$, and is equivalent to \lora with $\alpha = \infty$.}
+In our previous discussion of \lora's reliance on $\alpha$ in some tasks, this reliance on $\alpha$ is circumvented in \method. 
+{We can view the set of trainable parameters $\mtheta$ as a dynamical system, a time-dependent series $\{\mtheta_t\}_{t \in [T]}$ generated by the the \method algorithm.}
+We present the following theorem to illustrate the connection between $\alpha$ and $\eta$ in \method.
+
+\begin{theorem}\label{thm_alpha}
+    For local updates with the same initial condition on $\mathbf{W}$, vanilla \lora update with scaling factor $\alpha_{\lora}$ produces trajectory $\{W_{\alpha_{\lora}}^k\}_{k\in [K]}$, and \method with scaling $\alpha_{FFA}$ produces trajectory $\{W_{\alpha_{FFA}}^k\}_{k\in [K]}$. Then we have
+    \begin{equation}
+        \lim_{\alpha_{\lora} \rightarrow \infty} W_{\alpha_{\lora}}^k = W_{\alpha_{FFA}}^k, \text{ for all } k, \alpha_{FFA}.
+    \end{equation}
+\end{theorem}
+
+ \ref{thm_alpha}.
+It is evident that introducing the scaling factor when fine-tuning with \method is unnecessary.
+However, the same does not apply to \lora. 
+For the case of \lora, both $\mA$ and $\mB$ are trainable by construction, however, $\mA_0$ is initialized with Gaussian distribution, away from $0$. For \lora, when $\alpha$ is different, the initialization point is different, if we want two selection of $\alpha$ to have the same performance, we need to also change the variance of A's initialization.
+
+For vanilla \lora, as discussed in Section \ref{sec_when_lora}, as $\alpha$ increases and $\eta$ decreases, the update on $\mA$ become less significant compared to $\mA_0$.
+As $\alpha \rightarrow \infty$, there is almost zero change to be made on $\mA$, i.e. $\mA \sim \mA_0$. 
+Yet the update on B is just as significant, making the dynamics of \lora infinitely close to \method when $\alpha$ approaches infinity.
+
+\mypara{\method saves computation and communication.}
+Since $\mA_0$ is fixed after initialization in \method, the total number of trainable parameters in the model is effectively halved compared to \lora. 
+This leads to the most straightforward advantage in the efficiency of computation and communication.
+Meanwhile, since we get same performance for a wide range of $\alpha$ in \method as long as the learning rate is scaled accordingly, we can fix $\alpha$ and only search for other hyper-parameters such as learning rate in HPO.
+
+We note that subsequent to the submission of this paper, multiple new studies \citep{zhang2023lora,zhu2024asymmetry,hao2024flora} have also considered similar approaches. While this paper distinctly considers the federated and privacy related properties, the succeeding papers can serve as verification of the effectiveness of \method.
+Another intuitive approach towards the problem at hand is to alternatively update the two LoRA weights. 
+While this update method exhibit similar properties, it is empirically shown to be slow to converge. 
+In general, not only does \method provide higher efficiency compared to \lora, \method is also able to preserve all the benefits of \lora, while avoiding the shortcomings of \lora as mentioned previously in Section \ref{sec_when_lora}.
+
+
+
+\section{Experiments}
+
+
+In this section, we evaluate and compare the performance of \method with \lora on two LMs, RoBERTa \citep{liu2019roberta} and LLaMA \citep{touvron2023llama}. 
+We show that our approach consistently perform better for different types of tasks. 
+We first evaluate the language understanding tasks from the GLUE benchmark\citep{wang2018glue} including MNLI, SST2, QNLI and QQP using the RoBERTa model. 
+For language generation tasks, we use the LLaMA model with experiment settings provided by \citep{kuang2023federatedscope} as benchmark and use the GSM-8K dataset for evaluation. 
+All experiments were run using NVIDIA Tesla A100 GPUs with half-precision enabled for efficiency.
+
+Our experiments are organized as follows:
+We provide the overall performance comparison of \method and \lora in Section \ref{sec_perf} (Table \ref{roberta_DP}, \ref{roberta_no_DP}).
+Questions regarding the critical factors of convergence are answered in Section \ref{sec_ablation} (Table \ref{exp_iid_noniid}, \ref{exp_rank_DP}, \ref{exp_alpha}).
+The evaluation on language generation tasks are provided in Section \ref{sec_llama}. 
+
+We note that our results do not exactly match the centralized PEFT results presented in \citep{hu2021lora} and \citep{yu2021differentially} due to the additional introduction of federated communication/aggregation and data heterogeneity in our setup. Our experiments with \lora is able to match \lora's performance reported in \citep{hu2021lora} in the centralized setting.
+
+\subsection{{Performance of \method and \lora in Language Understanding Tasks}}\label{sec_perf}
+Our experiments on language understanding tasks are based on RoBERTa-Large (355M) ~\citep{liu2019roberta}, a popular choice that has been widely adopted in many research studies for its robustness and versatility. 
+We start from a pre-trained model available from the HuggingFace library.
+
+All our experiments with \lora and \method are run in a 3-client cross-silo federated setting. 
+Data on clients are randomly split among all clients sampled to fit certain proportions to ensure strong data heterogeneity.
+For the heterogeneous setting, we split data based on their labels, we use $[0.1, 0.9], [0.9, 0.1], [0.5, 0.5]$ data split for binary classification tasks and $[0.9, 0.05, 0.05], [0.05, 0.9, 0.05], [0.05, 0.05, 0.9]$ for three-class classification tasks.
+In order to make a fair comparison, we keep the batch-size $B = 200$ and total communication round to $1000$, the local update steps to $10$, the same across all experiments. All experiments use the same SGD (DP-SGD for the experiments with privacy guarantees) optimizer, all the transformer-related hyper-parameters such as sequence length $l_{seq} = 128$, are kept to be consistent with previous studies \citep{hu2021lora}. 
+The classification head of the LM is frozen after initialization, and we add adapters to both the attention layers and the feed-forward layers and choose a scaling factor $\alpha = 8$ for \lora. The same scaling factor $\alpha$ is applied to \method for the sake of consistency, although it is not needed as stated in Section \ref{sec_flora}. 
+\mypara{Experiments with differential privacy guarantees.}
+We report the best result from a set of experiments run with learning rate $\eta \in \{0.01, 0.02, 0.05, 0.1\}$ for \lora and $\eta \in \{0.1, 0.2, 0.5, 1\}$ for \method.
+The batch-size and total number of update steps are kept to be the same across different tasks. We fix the rank $r=8$ for both algorithms.
+In terms of privacy parameters, we use $\delta = 1e-5$ and three different choices of privacy budget $\epsilon\in \{6, 3, 1\}.$
+Given the sampling rate, total step number and privacy requirement $\epsilon, \delta$, we use the privacy accountant from Opacus \citep{yousefpour2021opacus} to calculate the noise scale $\sigma$ for all our experiments. 
+The optimal clipping threshold is determined from a grid search of $C \in \{2, 5, 10\}$.
+The results are presented in Table \ref{roberta_DP}. 
+
+The introduction of DP significantly degrades algorithm performance across every task for both \method and \lora, yet \method offers better performance with and without privacy. 
+We note that the biggest performance gap occurs in the MNLI task, which is a three-class classification task with the strongest level of data heterogeneity across agents. This performance gap demonstrates that \method is more suitable for tasks where heterogeneity is strong.
+\begin{table}[!h]
+\begin{center}
+\begin{tabular}{ |c|c|c |c | c| c|c|}
+   \hline
+Priv. Budget&Method & \makecell{MNLI\\ (matched)}&\makecell{MNLI\\ (mismatched)}& SST-2  & QQP  & QNLI  \\ 
+  \hline \multirow{2}{*}{Non Private}& 
+  \lora  & $82.03_{\pm10.7 } $ & $82.50_{\pm 10.9} $  & $94.32_{\pm 2.1}$ & $83.51_{\pm  3.3} $ & $88.95_{\pm 6.7}  $\\
+  \cline{2-7}  & 
+  \method  & $85.05_{\pm 1.1} $ & $85.62_{\pm 1.0}  $ &  $94.32_{\pm 1.7}$ & $84.35_{\pm 0.6}$  &  $90.35_{\pm1.9}$ \\  
+  \hline \multirow{2}{*}{$\epsilon = 6$}&
+  \lora   & $39.46_{\pm 14.3} $ & $39.69_{\pm 14.8} $ &  $93.70_{\pm 0.5}$ & $82.11_{\pm 1.0 } $ &  $84.99_{\pm1.1}$\\ 
+  \cline{2-7} & 
+  \method  & $78.81_{\pm 0.8}  $ & $80.00_{\pm 0.7}  $&   $93.73_{\pm 0.3}$ & $83.31_{\pm 0.4}$ &  $87.27_{\pm1.0}$ \\  
+  \hline \multirow{2}{*}{$\epsilon = 3$}&
+  \lora   & $35.82_{\pm 8.9} $ &$35.85_{\pm 9.1} $ &   $93.32_{\pm 0.5}$ & $82.08_{\pm  0.7} $&  $ 83.94_{\pm0.6} $\\ 
+  \cline{2-7} & 
+  \method  &  $77.42_{\pm 0.8} $ & $78.69_{\pm 0.8}  $ &  $93.59_{\pm 0.3}$ & $83.03_{\pm 0.4}$ & $86.18_{\pm1.7} $ \\  
+  \hline \multirow{2}{*}{$\epsilon = 1$}&
+  \lora   & $33.80_{\pm 1.6} $ & $33.80_{\pm 1.5} $ &   $92.14_{\pm 0.6}$ & $81.28_{\pm 0.7} $&  $78.93_{\pm6.8}$ \\ 
+  \cline{2-7} & 
+  \method  & $75.05_{\pm 1.3}$ & $76.50_{\pm 1.3}$ &  $92.46_{\pm 0.5}$ & $82.50_{\pm 0.4}$ & $81.53_{\pm1.4}$ \\  
+  \hline
+\end{tabular}
+\caption{\label{roberta_DP} Experiments of \method and \lora with differential privacy guarantees, accuracy ($\%$) evaluated across 20 runs with mean and standard deviation.}
+\end{center}
+\end{table}
+
+
+\subsection{Ablation Study}\label{sec_ablation}
+Although \method is shown to be effective under federated settings and with private guarantees, previous works have also provided studies on the impact of the other hyper-parameters in \lora algorithm. In order to provide a more comprehensive evaluation of the three discordances discussed in Section \ref{sec_when_lora},
+we still need to answer the following questions:
+\begin{itemize}
+    \item How does data heterogeneity affect performance of \method and \lora?
+    \item What is the impact of adapter parameter budget ($r$) for \method and the relationship between adapter parameter budget ($r$) and privacy budget ($\epsilon$) of DP-SGD?
+    \item How do \method and \lora behave when we choose different $\alpha$ for scaling?
+    \item How does different initialization on $\mA$ affect performance?
+\end{itemize}
+
+We answer the questions above with the following experiments. 
+\mypara{How does data heterogeneity affect performance of \method and \lora?}
+Our discussion in Section \ref{sec_when_lora} stated that \lora is not compatible with FedAvg when there is strong heterogeneity among clients.
+For verification, we consider the four tasks with both homogeneous and heterogeneous data, and provide the experiment results below.
+The severe heterogeneity case corresponds to the data distribution provided in Section \ref{sec_perf}, while data is split with $[0.15, 0.85], [0.85, 0.15], [0.5, 0.5]$ and $[0.6, 0.2, 0.2], [0.2, 0.6, 0.2], [0.2, 0.2, 0.6]$ respectively in the mild heterogeneity configuration.  
+
+\begin{table}[!h]
+\begin{center}
+\begin{tabular}{ |c |c |c| c|c| c|c|}
+   \hline
+Data Dist. & Method& \makecell{MNLI\\ (matched)}& \makecell{MNLI\\ (mismatched)}& SST2 & QQP & QNLI \\ 
+  \hline \multirow{2}{*}{i.i.d.}&
+  \lora   &  86.90&87.15  &    94.42 & 84.47&    91.38 \\ 
+  \cline{2-7} & 
+  \method  & 87.13&87.21  &    95.14 & 86.31 &   92.64 \\  
+  \hline \multirow{2}{*}{mild het.}&
+  \lora   &  87.01&87.33  &    93.55 &84.41&    91.36 \\ 
+  \cline{2-7} & 
+  \method  &  87.04&87.36 &    94.10 & 85.33 &   91.62 \\  
+  \hline \multirow{2}{*}{severe het.}&
+  \lora   &  82.03&82.50  &    94.32 &83.51&    88.95 \\ 
+  \cline{2-7} & 
+  \method  &  85.05&85.62 &    94.32 & 84.35 &   90.35 \\  
+  \hline
+\end{tabular}
+\caption{\label{exp_iid_noniid} Prediction accuracy ($\%$) comparison between i.i.d. and non-i.i.d. data distribution.}
+\end{center}
+\end{table}
+It is evident that \method behaves better than \lora in both i.i.d. and non-i.i.d. settings, but the performance is similar in the privacy-free setting. 
+\mypara{What is the {impact of adapter parameter budget ($r$) for \method and the} relationship between adapter parameter budget ($r$) and privacy budget ($\epsilon$) of DP-SGD?}
+
+We first evaluate the performance of \method and \lora without the consideration of privacy, we use the \textit{mild heterogeneity} data distribution and keep the batch-size and total number of update steps to be the same across different tasks.
+We experiment with rank $r \in \{2, 4, 8, 16\}$ on four tasks, and report the best accuracy.
+
+The results are shown in Table \ref{roberta_no_DP}. 
+From the \emph{subspace similarity} discussions in \lora, we note that increasing rank does not necessarily increase information from the gradients, similar observations can be found in our experiments. 
+Based on the results, we can see that \method has better performance in the majority of tasks, regardless of the trainable parameter number. 
+In fact, due to the reduction of trainable parameters in \method, we should compare between \method and \lora with the same parameter budget (i.e. compare \method $r = 16$ with \lora $r = 8$).
+In this case, the advantage of \method over \lora becomes more apparent.
+
+\begin{table}[!h]
+\begin{center}
+\begin{tabular}{ |c |c | c |c|c| c|c|}
+   \hline
+Method & \makecell{\# of params\\ (million)} & \makecell{MNLI\\ (matched)}& \makecell{MNLI\\ (mismatched)} & SST-2  & QQP  & QNLI  \\ 
+  \hline \lora (rank 16) & 3.15 (0.877\%) &87.43&87.47&   93.98 & 84.79&    91.92\\
+  \hline \lora (rank 8) & 1.57 (0.440\%) & 87.01&87.33&   93.55 & 84.41&    91.36 \\  
+  \hline \lora (rank 4) & 0.79 (0.220\%) & 86.07&86.41 &  93.89 & 83.71&    91.51 \\ 
+  \hline \lora (rank 2) & 0.39 (0.110\%) & 85.83&86.52&  93.58 & 83.00 &   91.76 \\  
+  \hline \method (rank 16) & 1.57 (0.440\%) & 85.82&86.38 &95.30 &84.89&   91.65 \\  
+  \hline \method  (rank 8) & 0.79 (0.220\%) &87.04&87.36&  94.10  & 85.33&   91.62 \\  
+  \hline \method  (rank 4) & 0.39 (0.110\%) & 85.61&86.11&  94.47 &84.64&   91.38 \\  
+  \hline \method  (rank 2) & 0.20 (0.055\%) &84.89&85.75&  94.18  &84.92 &  90.98 \\  
+  \hline
+\end{tabular}
+\caption{\label{roberta_no_DP} Prediction accuracy ($\%$) comparison on \method and \lora with different ranks. }
+\end{center}
+\end{table}
+Although there have been multiple studies on the performance of \lora with DP, the relationship between rank $r$ and privacy budget $\epsilon$ is unclear.
+We present the experiments below and compare the impact of rank $r$ on \method versus \lora on the \textit{QNLI} dataset. We use a privacy budget of $\epsilon\in \{6, 3, 1\}$ with rank $r \in \{2, 4, 8, 16\}$. The results are shown in Table \ref{exp_rank_DP}.
+In our experiments, we find that as the privacy requirements gets stronger, the performance difference of \lora between different rank $r$ becomes more and more apparent, yet for \method, the algorithm is still able to output relatively stable performance on a wide range of rank selections.
+\begin{table}[!h]
+\begin{center}
+\begin{tabular}{ |c |c | c|c| c|c|}
+   \hline
+privacy budget &Method  &$r = 16$& $r = 8$ & $r = 4$ & $r = 2$ \\ 
+  \hline \multirow{2}{*}{Non-Private}&
+  \lora   &  91.92 &  91.36  &91.51&   91.76 \\ 
+  \cline{2-6} & 
+  \method  & 91.65 &   91.62 &91.38 &  88.56 \\  
+  \hline \multirow{2}{*}{$\epsilon = 6$}&
+  \lora   &  86.87 &  86.45 &85.24&   83.54 \\ 
+  \cline{2-6} & 
+  \method  & 87.33 &   87.57 &86.74 &  86.31 \\  
+  \hline \multirow{2}{*}{$\epsilon = 3$}&
+  \lora   &  86.23 & 86.05 & 85.35&   85.57 \\ 
+  \cline{2-6} & 
+  \method  & 86.36 & 86.98 & 86.22&  85.08 \\  
+  \hline \multirow{2}{*}{$\epsilon = 1$}&
+  \lora   &  80.54 &   81.45 &58.30&   58.15 \\ 
+  \cline{2-6} & 
+  \method  & 81.87 &   83.01 &82.06 &  82.64 \\  
+  \hline
+\end{tabular}
+\caption{\label{exp_rank_DP} Prediction accuracy ($\%$) of \method and \lora across privacy and parameter budgets.}
+\end{center}
+\end{table}
+\mypara{How do \method and \lora behave when we choose different $\alpha$ for scaling?}
+As mentioned previously, \lora requires a good  scaling factor $\alpha$ in order to achieve a good performance.
+It has been shown in proof of Thm. \ref{thm_alpha} that the scaling factor does not affect the overall performance of the algorithm.
+
+
+\mypara{How does different initialization on $\mA$ affect performance?}
+Since our proposed \method sets $\mA$ as fixed throughout the fine-tuning process, a natural question would be regarding the initialization of $\mA$.
+\subsection{Extending Beyond Language Classification}\label{sec_llama}
+
+We next consider the task of Natural Language Generation (NLG) with LLaMA-7B, a more sophisticated model with significantly more parameters. 
+
+Our method has achieved an accuracy of $17.12\%$ on the task of GSM-8K, significantly better than the best performance of \lora at $15.68\%$ ($15.31\%$ reported in \citep{kuang2023federatedscope}).
+It is also the best results on fine-tuning LLaMA with GSM-8K to the best of our knowledge.
+For an additional dataset on the computer vision task. We use the pre-trained vision transformer \citep{dosovitskiy2020image} and consider the task of fine-tuning on the Food-101 dataset \cite{bossard2014food}. In short, the algorithms performs similarly compared to the language classification tasks.
+
+
+
+
+\section{Conclusion}
+
+
+In this paper, we discussed how to improve \lora in the context of privacy-preserving federated learning.
+An in-depth analysis was provided on \lora's deficient performance in FL and with DP guarantees. 
+We proposed a modification to \lora named \method, which is theoretically motivated, empirically verified and computationally more efficient.
+Beyond the scope of this paper, \method could motivate more interesting problems related to PEFT for future study.
+
+From a theoretical perspective, \method could be related to random kernel methods due to its pseudo-linear nature.
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,341 @@
+\title{Improving Inverse Folding for Peptide Design with Diversity-Regularized Direct Preference Optimization}
+
+\begin{abstract}
+Inverse folding models play an important role in structure-based design by predicting amino acid sequences that fold into desired reference structures. Models like ProteinMPNN, a message-passing encoder-decoder model, are trained to reliably produce new sequences from a reference structure. However, when applied to peptides, these models are prone to generating repetitive sequences that do not fold into the reference structure.  To address this, we fine-tune ProteinMPNN to produce diverse and structurally consistent peptide sequences via Direct Preference Optimization (DPO). We derive two enhancements to DPO: online diversity regularization and domain-specific priors. Additionally, we develop a new understanding on improving diversity in decoder models. When conditioned on OpenFold generated structures, our fine-tuned models achieve state-of-the-art structural similarity scores, improving base ProteinMPNN by at least 8\%. Compared to standard DPO, our regularized method achieves up to 20\% higher sequence diversity with no loss in structural similarity score.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Engineering biopolymers that fold into desired 3D structures, a computational challenge known as inverse protein folding problem, has broad applications in drug discovery and material science \citep{Yang2023, Dill2008,Abascal2018}. Several approaches for inverse folding have been adopted over the past decades, from molecular dynamics simulations to machine learning approaches \citep{dauparas2022robust, Shanker2023, Hsu2022, Yi2023-ew, pericles}. In  the standard machine learning approach, a molecular backbone chain serves as input, and a model generates sequences that adopt folding topologies compatible with the reference backbone. Sequences do not necessarily share sequence homology, as multiple diverse sequences can fold into similar structures \citep{Hsu2022, yue1992, Godzik1993-lk}. 
+
+Peptides, which are small biopolymers comprising 2-50 residues, are interesting targets for inverse folding given their role in diverse biological functions, acting as hormones, neurotransmitters, signalling molecules, or nanostructures assemblers \citep{chockalingam2007design, torres2019peptide, copolovici2014cell,ulijn2008designing}. Only about 225,000 protein structures have been experimentally determined\footnote{Updated figures available at https://www.rcsb.org/stats/growth/growth-released-structures.} and made available via the Protein Data Bank (PDB). Training inverse-folding machine learning models in a supervised fashion is a challenging task, due to the complexity of the problem and the limited amount of experimental data. 
+The challenge is aggravated in the peptide domain as fewer than $3.5$\% PDB structures contain 50 residues or less.  In fact, applying the SCOP classification filter in the PDB to display structures labelled as ``Peptide'' reveals only 509 entries, circa $0.2$\% of all experimentally determined structures available.
+
+In addition to the lack of data, sequences are subject to composition bias. The incidence of certain amino acids may differ depending on the sequence length , as longer proteins have more options for accommodating multiple secondary structures and folding loops \citep{Tiessen2012-xh}. Popular models like ProteinMPNN \citep{dauparas2022robust}, PiFold \citep{gao2022} and ESM-IF1 \citep{esmif} are primarily trained on data derived from longer proteins, leading to poor performance for peptide design tasks. Additionally, shorter sequences fold into simpler structures. Indeed, \citet{Milner-White2008-vg} argue that short peptides are notoriously ``structureless'' and tend to flicker between conformations. For example, a structural conformation of a single alpha helix or beta sheet -- or a combination of two or three of them -- is not necessarily stable and can fluctuate.
+ 
+ Existing inverse folding models optimize sequence residue-recovery accuracy and structural similarity via template modeling (TM) score \citep{Zhang2004TMScore}. However, they often suffer from low sampling diversity \citep{gao2023proteininvbench}. Ideally, the inverse folding model generates maximally diverse candidate sequences, as additional design filters, such as synthesizability and thermal stability, reduce the number of potential hits downstream of the design process.
+ To address these issues, we apply Direct Preference Optimization (DPO) \citep{Rafailov2023DirectPO}, a fine-tuning method, to improve inverse-folding methods for peptide design. To the authors' knowledge, we are the first to apply DPO to this task. We propose several enhancements to DPO to address specific problems that arise in inverse folding. Particularly, we forward fold generated sequences and derive an online regularized algorithm for optimizing structural similarity to the reference and  sequence diversity simultaneously. We show empirically that this algorithm targets the differential entropy in log-probability space. Furthermore, we present a simple reward scaling approach to incorporate scalar reward information, showing that reward scaling adaptively selects a KL divergence penalty \citep{KL-div} to improve performance on harder structures.
+
+
+
+\section{Preliminaries}
+
+
+\textbf{Inverse folding} is the problem of inferring the sequence of amino acids $y$ that fold into a given protein structure. This protein structure is represented by a set of coordinates $x = {(x_i, y_i, z_i) \: | \: i = 1, \ldots, n} \in \mathbb{R}^{3n}$,where each $(x_i, y_i, z_i)$ represents the 3D position of a backbone atom and $n$ the number of atoms. The inverse folding problem is underconstrained; there may be many solutions $y$ that fold into structures similar to $x$ \citep{KOEHL19991161}. Prior research is primarily concerned with recovering the "ground-truth" sequence $y_x$ from the experimental (reference) structure \citep{proteinmpnn, esmif, jing2021learning, jing2021equivariant}. Recently, forward folding models like AlphaFold \citep{Jumper2021}, ESMFold \citep{Lin2022}, and OpenFold \citep{openfold}, have made it possible to estimate the structural similarity between generated sequences and the reference structure. In this work, we focus on measuring structural similarity of generated sequences to the reference structure via the self-consistency TM-score (sc-TM)  \citep{gao2023proteininvbench}. 
+
+\textbf{ProteinMPNN} \citep{proteinmpnn} is a popular inverse-folding method that produces full protein sequences from backbone features (distances and orientations between backbone atoms, backbone dihedral angles, accounting for a virtual C$\beta$ atom). ProteinMPNN is a 6-layer encoder-decoder message-passing neural network based on the 'Structured Transformer' \citep{ingraham2019}. Unlike autoregressive methods like ESM-IF1 \citep{esmif}, ProteinMPNN decodes residues in a random decoding order, as opposed to a fixed left-to-right order from N-terminus to the C-terminus. ProteinMPNN is trained on examples from the Protein Data Bank (PDB) to determine the most likely residues for a given protein backbone. On native protein backbones, it achieves a sequence recovery of 52.4\%, compared to 32.9\% for Rosetta \citep{Leman2020-xx}. In this work we build upon ProteinMPNN by proposing methods for adapting it to peptide design.
+
+\textbf{DPO for inverse folding}.  Direct Preference Optimization (DPO) is a popular method for aligning Large Language Models to a dataset of human-produced preference assignments, that discriminate amongst the responses grouped by prompt \citep{Rafailov2023DirectPO}. We adapt DPO to fine-tune inverse-folding models by replacing human preference labels on generated sentences with TM-score rankings on generated sequences. Specifically, we generate a dataset of sequences conditioned on a set of reference structures, and score each sequence with the TM-score computed between its predicted structure and the reference structure. These scores define preference pairs over the generated sequences, for each reference structure.
+
+Let $r(x,y)$ be the TM-score between structure $x$ and the predicted fold of sequence $y$, and $\pi_\text{ref}$ be a conditional distribution over $y$ given $x$. Given a dataset $D$ mapping structures (``prompts'') to $K$ generated sequences per structure (``responses''), DPO is derived within the KL-constrained reward-maximization objective \citep{ouyang2022traininglanguagemodelsfollow, Rafailov2023DirectPO}:
+
+\begin{equation}
+\label{eq:obj}
+\max_{\pi_\theta} \mathbb{E}_{x\sim D, y\sim \pi_\theta(y|x)} [r(x, y)] - \beta \mathbb{D}_{\text{KL}}[\pi_\theta(y \: | \: x) \; || \; \pi_{\text{ref}}(y \: | \: x) ]
+\end{equation}
+
+where $\beta$ controls the trade-off between reward maximization and deviation from the base model. The solution to Equation \ref{eq:obj} is well-known \citep{ouyang2022traininglanguagemodelsfollow, Rafailov2023DirectPO}:
+
+\begin{equation}
+\label{eq:pi}
+\pi_r = \frac{1}{Z(x)} \pi_\text{ref}(y \: | \: x) \exp{\left(\frac{1}{\beta}r(x, y)\right)}
+\end{equation}
+
+where $Z(x)$ is the partition function to normalize $\pi_r$. Therefore, for any policy $\pi_r$, there is a corresponding reward function (DPO "implicit reward") for which $\pi_r$ is optimal:
+
+\begin{equation}
+\label{eq:reward}
+    r(x, y)=\beta \log \frac{\pi_{r}(y|x)}{\pi_\text{ref}{(y|x)}} + \beta \log Z(x).
+\end{equation}
+
+Substituting Equation \ref{eq:reward} into the Bradley-Terry preference model \citep{bradley-terry} and optimizing the policy under a maximum likelihood objective produces the DPO loss, typically solved via gradient descent:
+
+\begin{equation}
+\label{eq:loss}
+\mathcal{L}_{\mathrm{DPO}}\left(\pi_\theta ; \pi_{\mathrm{ref}}\right)=-\mathbb{E}_{\left(x, y_w, y_l\right) \sim \mathcal{D}}\left[\log \sigma\left(\beta \log \frac{\pi_\theta\left(y_w \mid x\right)}{\pi_{\mathrm{ref}}\left(y_w \mid x\right)}-\beta \log \frac{\pi_\theta\left(y_l \mid x\right)}{\pi_{\mathrm{ref}}\left(y_l \mid x\right) } \right) \right]
+\end{equation}
+
+where $y_w$ represents the sequence that is preferred or considered better, and $y_l$ represents the sequence that is less preferred or considered worse according to TM-score ranking.
+
+
+
+\section{Preference optimization for peptide design}
+
+
+In this section, we consider designing fine-tuning methods well-suited for peptide design. While DPO in its original formulation is useful for fine-tuning in biology \citep{park2023preferenceoptimizationmolecularlanguage, proteindpo,mistani2024preferenceoptimizationproteinlanguage}, we consider how it may be improved to tackle specific problems arising in inverse-folding for peptides (i.e., poor generation diversity and lack of peptide data in initial training). First, we derive a diversity-optimized DPO loss by incorporating an online diversity penalty directly into the top-level Reinforcement Learning objective. Next, we propose an ad-hoc modification to the DPO reward that incorporates scalar TM-scores instead of solely preference pairs, and address the distribution shift between peptides and longer-length proteins.
+
+\subsection{Online diversity optimization}
+\label{section:diversity_derivation}
+
+To encourage diversity in generated sequences while simultaneously maximizing reward (TM-score), we consider a modified DPO objective incorporating an auxiliary diversity reward:
+
+\begin{align}
+\label{eq:diversity_objective}
+&\max_{\pi_\theta} \mathbb{E}_{x\sim D, y\sim \pi_\theta(y|x)} [r(x, y)] 
+- \beta \mathbb{D}_{\text{KL}}[\pi_\theta(y \: | \: x) \; || \; \pi_{\text{ref}}(y \: | \: x) ] 
++ \alpha \Gamma_{\gamma} (\pi_\theta) \nonumber \\
+ & = \max_{\pi_\theta} \mathbb{E}_{x\sim D, y\sim \pi_\theta(y|x)} 
+ \left[r(x, y) - \beta \log\left( \frac{\pi_\theta(y \: | \: x)}{\pi_\text{ref}(y \: | \: x)}\right) 
+ - \alpha \mathbb{E}_{y' \sim \pi_\theta(y' \: | \: x)} \left[ \gamma(y, y') \right] \right]
+\end{align}
+
+where $\alpha$ controls the strength of diversity regularization, $\gamma$ is a pairwise distance between sequences, and $\Gamma(\pi_\theta)$ is the diversity of policy $\pi_\theta$ under the distance $\gamma$, i.e. $\Gamma(\pi) = \mathbb{E}_{y, y' \sim \pi} \left[ \gamma(y, y') \right]$. In practice, we let $\gamma$ be the fraction of pairwise different tokens in equal-length sequences $y$ and $y'$. This is equivalent to the diversity metric defined in \citep{gao2023proteininvbench}.
+
+This is similar in form to the auxiliary reward objective proposed by \citet{park2024disentanglinglengthqualitydirect} and \citet{zhou2024onepreferencefitsallalignmentmultiobjectivedirect}, but the auxiliary reward (diversity) depends on the policy $\pi_\theta$. As a result, the standard analytic solution to Eq. \ref{eq:obj} \citep{ziebartmaxentrlp, ouyang2022traininglanguagemodelsfollow, Rafailov2023DirectPO} is no longer valid. Instead, we consider an approximate objective, leveraging the fact that the DPO loss is solved via iterative gradient descent. Let $\tilde{\pi}=\pi_\theta^{(t-1)}$ be an approximation of $\pi_\theta^{(t)}$. That is, we will use the policy from a previous iteration to estimate diversity, while updating the policy in the current iteration. Then, let $\tilde{r}(x, y)=r(x, y) - \alpha \mathbb{E}_{y' \sim \tilde{\pi}(y|x)} \left[ \gamma(y, y') \right]$. We can approximate Eq. \ref{eq:diversity_objective} as: 
+
+\begin{equation}
+\label{eq:diversity_objective_approx}
+\max_{\pi_\theta} \mathbb{E}_{x\sim D, y\sim \pi_\theta(y|x)} 
+\left[ \tilde{r}(x, y) - \beta \log\left( \frac{\pi_\theta(y \: | \: x)}
+{\pi_\text{ref}(y \: | \: x)}\right) \right].
+\end{equation}
+
+The rest of the derivation follows from \citet{Rafailov2023DirectPO}. We produce the diversity-regularized implicit reward after writing the $\tilde{r}$-optimal policy $\pi_{\tilde{r}} = \frac{1}{Z(x)} \pi_\text{ref}(y \: | \: x) \exp\left({\frac{1}{\beta} \tilde{r}(x,y)}\right)$:
+
+\begin{equation}
+\label{eq:diversity_reward}
+r(x, y)=\beta \log \frac{\pi_{r}(y|x)}{\pi_\text{ref}{(y|x)}} 
+- \alpha \mathbb{E}_{y' \sim \tilde{\pi}(y' \: | \: x)} \left[ \gamma(y, y') \right] + \beta \log Z(x)
+\end{equation}
+
+The resulting MLE loss under the Bradley-Terry preference model is:
+
+\begin{align}
+\label{eq:diversity_loss}
+\mathcal{L}_{\mathrm{DPO}}\left(\pi_\theta ; \pi_{\mathrm{ref}}\right)= 
+-\mathbb{E}_{\left(x, y_w, y_l\right) \sim \mathcal{D}}\Big[\log \sigma\Big(& \beta \log \frac{\pi_\theta\left(y_w \mid x \right)}{\pi_{\mathrm{ref}}\left(y_w \mid x \right)} 
+- \beta \log \frac{\pi_\theta\left(y_l \mid x\right)}{\pi_{\mathrm{ref}}\left(y_l \mid x \right)} \nonumber\\
+&+ \alpha \mathbb{E}_{y' \sim \tilde{\pi}(y' \: | \: x)} \left[ \gamma(y_l, y') \right] \nonumber\\
+&- \alpha \mathbb{E}_{y' \sim \tilde{\pi}(y' \: | \: x)} \left[ \gamma(y_w, y') \right]
+\Big) \Big]
+\end{align}
+
+The $\alpha$-weighted scalar penalties require sampling from the approximate policy $\tilde{\pi}$ to compute the expectation. In practice, we only update $\tilde{\pi}$ a few times during training to minimize the cost of sampling.
+
+Unlike prior methods incorporating auxiliary rewards into DPO 
+\citep{park2024disentanglinglengthqualitydirect, zhou2024onepreferencefitsallalignmentmultiobjectivedirect}, ours includes an online sampling term. Empirically, we show that this online term is crucial. In the middle part of Fig. \ref{fig:motivation}, we show that diversity of samples from the static dataset (the auxiliary reward prescribed in an offline approach) does not correlate with the diversity of samples from the trained policy (our auxiliary reward). That is, to accurately estimate -- and therefore encourage -- diversity over the course of training, online sampling is required. By optimizing the approximate objective in Equation \ref{eq:diversity_objective_approx}, we provide principled motivation for including this online sampling term.
+
+\subsection{Leveraging domain-specific priors}
+\label{section:reward_scaling}
+
+\textbf{Aligning train set and base model.} Supervised fine-tuning (SFT) is a standard part of the DPO pipeline \citep{Rafailov2023DirectPO},where a gradient-based optimizer maximizes the log-probability of a target sequence prior to applying DPO. The left part of Fig. \ref{fig:motivation} shows that the distribution of tokens sampled from base ProteinMPNN and the peptide training dataset differs significantly. SFT assuages the token distribution problem by improving alignment with training distribution, and ensures consistency with previous research, where DPO has been applied to related biological tasks \citep{park2023preferenceoptimizationmolecularlanguage, proteindpo, mistani2024preferenceoptimizationproteinlanguage}. 
+
+\textbf{Incorporating scalar rewards.} Given multiple responses from a single prompt, DPO is derived
+assuming access to pairwise preferences. However, since we measure 
+the reward of a sequence generation by the TM-score between the original structure 
+and the generated sequence's predicted structure, we have access to a total ordering over generations 
+through scalar rewards for each response. \citet{proteindpo} derives weighted DPO to incorporate scalar rewards, 
+but it does not substantially outperform standard DPO.
+
+We consider a simple ad-hoc method to incorporate these scalar scores. Given a structure $x$, 
+$K$ generated sequences $y_k \: | \: x$, and $K$ corresponding TM-scores $r_k \: | \: x$, we scale the log-probabilities
+of $\pi_\text{ref}$ by the average of $r_k \: | \: x$. To see the effect of this scaling, consider 
+the modified implicit reward:
+
+\begin{align}
+\label{eq:scaled_reward}
+r_\text{scale}(x, y) &= \beta \left[ \log \pi_\theta(y \: | \: x) - R(x) \cdot \log \pi_\text{ref}{(y \: | \: x)} \right] + \beta \log Z(x) \nonumber \\
+   &= \beta R(x) \left[ \log \pi_\theta(y \: | \: x) - \log \pi_\text{ref}{(y \: | \: x)} \right] + (\beta - \beta R(x)) \log \pi_\theta(y|x) + \beta \log Z(x) \nonumber \\
+   &= \underbrace{\left[ \beta R(x) \right] \: r(x, y)}_{\text{Reweighted standard reward}} 
+   + \underbrace{\left[ \beta - \beta R(x) \right] \: \log \pi_\theta(y \: | \: x)}_{\text{Maximum entropy bonus}} 
+   + \underbrace{\beta \log Z(x)}_\text{Partition function}.
+\end{align}
+
+When $R(x)$ is large, the first term (mirroring the standard DPO reward, Eq. \ref{eq:reward}) has larger weight, and the second term 
+(a penalty on the entropy $\mathcal{H}(\pi_\theta) = -\mathbb{E} \left[ \log \pi_\theta(y \: | \: x)\right]$) 
+has smaller weight. Since the weight on the DPO reward controls the strength of KL divergence regularization 
+\citep{Rafailov2023DirectPO}, large $R(x)$ corresponds to less aggressive optimization and a lower-entropy policy.
+
+When $R(x)$ is near $1.0$, the data-generating policy (i.e., base ProteinMPNN) already produces high-quality sequences on structure $x$. Therefore, we perform less aggressive optimization when $R(x)$ is large, and vice versa. Effectively, per structure, this reward scaling adapts the KL divergence penalty to the strength of the 
+dataset-generating policy. The right part of Fig. \ref{fig:motivation} shows that this reward scaling method indeed helps ProteinMPNN accurately recover the total ordering over generated sequences. Scaling log-probabilities improves their ability to rank sequences by TM-score, which provides a more accurate reference model for DPO to start with.
+
+\begin{figure}
+\centering
+   \includegraphics[width=0.325\textwidth]{figs/aa_dist.png}
+   \includegraphics[width=0.31\textwidth]{figs/base_div_vs_div.png}
+   \includegraphics[width=0.325\textwidth]{figs/reward_weighting_spearman.png}
+   \caption{
+      Motivation for DPO design choices. \textbf{Left.} Frequency of amino acid across ProteinMPNN generations conditioned on the peptide train set, vs. frequency over the peptide sequences.  \textbf{Middle.} When conditioned on the same structure, the diversity of sequences generated by base ProteinMPNN does not correlate with the diversity of sequences generated by fine-tuned ProteinMPNN. \textbf{Right.} Distribution of rank correlation coefficient between model log-probabilities and TM-score.
+   }
+   \label{fig:motivation}
+\end{figure}
+
+
+
+\section{Results}
+
+
+Here we present results on benchmarks across a suite of inverse folding models evaluated on peptide design tasks, as well as an exploration into the behavior of the two proposed algorithm enhancements (diversity regularization and reward scaling). We find that diversity regularization is effective in improving sampling diversity, and provide justification as to how this improvement happens. Additionally, we find reward scaling produces a small improvement in TM-score, enabling fine-tuned ProteinMPNN to reach SOTA performance in some situations.
+
+\subsection{Experimental overview}
+
+\textbf{Datasets.} We fine-tune trained ProteinMPNN from \citet{proteinmpnn} on a set of 211,402 deduplicated peptide structures with length up to 50 amino acids, derived from the ColabFold database \citep{colabfold} by filtering for predicted local distance difference test (pLDDT) $\geq$ 80. Each structure was used to generate 4 candidate sequences using pretrained ProteinMPNN with $T=0.1$. Each sequence, including the true reference sequence from the structure, was folded with OpenFold \citep{openfold}. TM-scores were computed to create a ranking over generated sequences for every structure prompt. Each structure therefore contributed ${4 \choose 2} = 6$ chosen-rejected pairs for DPO, for a total of 1,268,412 training pairs.
+
+\textbf{Benchmarks.} We consider two non-overlapping benchmarks. First, we take 50 sequences from the OpenFold set, enforcing a sequence identity threshold of $0.4$ from the train set and filtering for sequence length $L \leq 50$. Next, we take the CATH 4.3 test split, as used in \citet{esmif}, filter for sequence identity threshold of 0.4 and $L \leq 60$, and use the resulting 173 peptides as a second benchmark. The OpenFold set contains structures resolved via OpenFold, while the CATH split has structures from the PDB. For evaluation, we sample 4 sequences per benchmark structure at $T=0$. We compute diversity, TM-score, and recovery metrics as in \citet{gao2023proteininvbench}. Following Section \ref{section:diversity_derivation}, we define diversity as the average fraction of non-identical amino acids, computed pairwise across all sampled sequences for the same structure.
+
+\textbf{Hyperparameters.} Supervised fine-tuning was run for 2 epochs with Adam through the PyTorch implementation \citep{Paszke2019-yp, Kingma2014-ci}, with structures' true sequence as the target. DPO was run for 20 epochs with default Adam hyperparameters on pairs of generated sequences. We vary $\beta$ based on the method used to facilitate a fair comparison across similar KL budgets.
+
+\textbf{Sweeps.} We run DPO with diversity penalties $\alpha=\{0.0, 0.1, 0.2, 0.5\}$ and DPO with/without reward scaling, all on the same training set. All training is done with per-GPU batch size of 32 on a single node with 8xA100 80GB GPUs. Each run takes about 8 hours wall-clock time.
+
+\subsection{Benchmark sweeps}
+We benchmark our trained models against standard inverse-folding methods \citep{jing2021equivariant, jing2021learning, esmif, proteinmpnn} across both the OpenFold and CATH benchmarks, filtered for peptide-length proteins. We consider TM-score to be the most important metric, as unlike sequence recovery, it can more accurately reflect the quality of generated sequences at high diversities. As shown in Table \ref{table:openfold_benchmark}, on OpenFold structures, all DPO methods outperform base ProteinMPNN and other models by at least 8\%. Diversity-regularized DPO ($\alpha=0.1$) achieves state-of-the-art (SOTA) diversity, improving base DPO by 20\% and even exceeding the diversity of base ProteinMPNN. This is notable, as fine-tuning tend to decrease generation diversity \citep{wang2023reverseklgeneralizingdirect}. Combining reward scaling with diversity regularization does not have a strong beneficial effect, with similar performance compared to the regularized method.
+
+\begin{table}[htp]
+\caption{Comparison of models on TM-score, sampled sequence diversity, and native sequence recovery for the OpenFold benchmark. The best results are bolded, and the second-best results are underlined. Means and standard errors are reported in each cell.}
+\label{table:openfold_benchmark}
+\centering
+\scalebox{1}{
+\begin{tabular}{clccc} 
+    \toprule
+    \multirow{2}{*}{\textbf{Models}} & \multicolumn{3}{c}{\textbf{OpenFold benchmark $(n=50)$}} \\
+    \cmidrule(lr){2-4}
+    & \textbf{TM-Score $\uparrow$} & \textbf{Diversity $\uparrow$} & \textbf{Recovery $\uparrow$} \\ 
+    \midrule
+    GVP-GNN \citep{jing2021learning} & 0.62 $\pm$ 0.02 & 0.19 $\pm$ 0.01 & 0.27 $\pm$ 0.01 \\
+    ProteinMPNN \citep{proteinmpnn} & 0.62 $\pm$ 0.01 & \underline{0.31 $\pm$ 0.01} & 0.23 $\pm$ 0.01 \\
+    ESM-IF1 \citep{esmif} & 0.61 $\pm$ 0.01 & 0.00 $\pm$ 0.00 & \underline{0.31 $\pm$ 0.01} \\
+    ProteinMPNN + DPO & \underline{0.66 $\pm$ 0.02} & 0.27 $\pm$ 0.01 & \textbf{0.33 $\pm$ 0.01} \\
+    ProteinMPNN + DPO (scaled) & \textbf{0.67 $\pm$ 0.02} & 0.28 $\pm$ 0.01 & 0.31 $\pm$ 0.01 \\
+    ProteinMPNN + DPO ($\alpha=0.1$) & \textbf{0.67 $\pm$ 0.02} & \textbf{0.32 $\pm$ 0.01} & 0.31 $\pm$ 0.01 \\
+    ProteinMPNN + DPO (scaled, $\alpha=0.1$) & \textbf{0.67 $\pm$ 0.02} & \underline{0.31 $\pm$ 0.01} & \underline{0.32 $\pm$ 0.01} \\
+    \bottomrule
+\end{tabular}}
+\end{table}
+
+On the CATH benchmark, DPO does not help much (Table \ref{table:cath_benchmark}). This is likely due to the fact that our training method leveraged OpenFold structure predictions, while the CATH benchmark contains experimentally resolved protein structures. However, diversity regularization and reward scaling allow fine-tuned ProteinMPNN to nearly reach the performance of ESM-IF1, which was trained on experimentally resolved structures and is a much larger model. Diversity regularization is still effective in promoting diversity, beating base ProteinMPNN and improving standard DPO by 7\%.
+
+\begin{table}[htp]
+\caption{Comparison of models on TM-score, sampled sequence diversity, and native sequence recovery for the CATH 4.3 benchmark. The best results are bolded, and the second-best results are underlined. Means and standard errors are reported in each cell. Since all values are rounded to 2 decimals, standard errors are not actually zero.}
+\label{table:cath_benchmark}
+\centering
+\scalebox{1.0}{
+\begin{tabular}{clccc} 
+    \toprule
+    \multirow{2}{*}{\textbf{Models}} & \multicolumn{3}{c}{\textbf{CATH 4.3 benchmark $(n=173)$}} \\
+    \cmidrule(lr){2-4}
+    & \textbf{TM-Score $\uparrow$} & \textbf{Diversity $\uparrow$} & \textbf{Recovery $\uparrow$} \\ 
+    \midrule
+    GVP-GNN \citep{jing2021learning} & 0.69 $\pm$ 0.01 & 0.21 $\pm$ 0.00 & \textbf{0.35 $\pm$ 0.01} \\
+    ProteinMPNN \citep{proteinmpnn} & 0.68 $\pm$ 0.01 & \underline{0.30 $\pm$ 0.00} & 0.32 $\pm$ 0.01 \\
+    ESM-IF1 \citep{esmif} & \textbf{0.72 $\pm$ 0.01} & 0.00 $\pm$ 0.00 & \underline{0.34 $\pm$ 0.01} \\
+    ProteinMPNN + DPO & 0.70 $\pm$ 0.01 & 0.28 $\pm$ 0.00 & 0.32 $\pm$ 0.01 \\
+    ProteinMPNN + DPO (scaled) & \underline{0.71 $\pm$ 0.01} & 0.29 $\pm$ 0.00 & 0.32 $\pm$ 0.01 \\
+    ProteinMPNN + DPO ($\alpha=0.1$) & 0.70 $\pm$ 0.01 & \textbf{0.31 $\pm$ 0.01} & 0.32 $\pm$ 0.01 \\
+    ProteinMPNN + DPO (scaled, $\alpha=0.1$) & \underline{0.71 $\pm$ 0.01} & \underline{0.30 $\pm$ 0.00} & 0.32 $\pm$ 0.01 \\
+    \bottomrule
+\end{tabular}}
+\end{table}
+
+We find that both reward scaling and diversity regularization are effective in improving TM-score over base DPO, achieving SOTA performance on the OpenFold benchmark.  Diversity regularization is particularly effective in improving diversity across both benchmarks. Despite CATH structures being out-of-distribution from the train set, given that they were not produced by OpenFold, our DPO enhancements allow ProteinMPNN to approach the performance of ESM-IF1.
+
+\subsection{Pareto front with diversity regularization}
+\label{section:diversity_pareto}
+
+\begin{figure}
+\centering
+   \includegraphics[width=0.335\textwidth]{figs/fixed_vs_random_decoding.png}
+   \includegraphics[width=0.32\textwidth]{figs/seq_entropy.png}
+   \includegraphics[width=0.32\textwidth]{figs/logprob_entropy.png}
+   \caption{Exploring the effect of online diversity optimization. \textbf{Left.} Improvement in diversity across temperatures 0, 0.5, and 1.0, with and without random decoding order. \textbf{Middle.} Sampling distribution entropy (average negative log-probability over samples) over various $\alpha$ values. \textbf{Right.} Entropy of log-probability distribution over validation reference sequences across $\alpha$ sweep.}
+   \label{fig:diversity}
+\end{figure}
+
+In this section, we consider the impact of diversity regularization on DPO. We train four DPO models on top of fine-tuned ProteinMPNN ($\alpha=\{0.0, 0.1, 0.2, 0.5\}$), and generate sequences across a range of temperatures on the OpenFold test split. As temperature increases, the diversity of generated sequences increases, but the average TM-score (reward) decreases. We consider this reward-diversity tradeoff on the left side of Figure \ref{fig:diversity_pareto}. At sufficiently low $\alpha$ values, diversity-regularized DPO produces a new Pareto frontier. With $\alpha=0.1$, regularized DPO consistently achieves higher reward at the same diversity, indicating this regularization provides a strictly favorable reward-diversity tradeoff compared to simply increasing temperature. At temperature $0.0$, $\alpha=0.1$ yields a 20\% relative improvement in diversity along with a small increase in TM-score (1.5\%) over standard DPO.
+
+However, at high $\alpha$ values, diversity regularization hurts both diversity and reward. We see symptoms of this in the KL divergences between trained DPO policies and initial fine-tuned ProteinMPNN (middle of Fig. \ref{fig:diversity_pareto}). While for $\alpha=\{0.0, 0.1, 0.2\}$, KL divergence trajectories are similar during training, DPO with $\alpha=0.5$ produces much higher divergences (i.e., the trained policy deviates significantly more from base ProteinMPNN). In this case, aggressive diversity optimization led to a collapse in model capacity via excessive deviation from the initial policy.
+
+\subsection{Diversity regularization targets differential entropy}
+\label{section:logprob_entropy}
+
+\begin{figure}
+\centering
+   \includegraphics[width=0.325\textwidth]{figs/div_pareto.png}
+   \includegraphics[width=0.325\textwidth]{figs/kl_vs_epoch_div.png}
+   \includegraphics[width=0.325\textwidth]{figs/kl_vs_epoch_scale.png}
+   \caption{Pareto front and KL divergences. \textbf{Left.} Pareto front for various $\alpha$ values over temperature sweep. \textbf{Middle.} KL divergence from $\pi_\text{ref}$ for various $\alpha$ values. $\alpha=0$ has $\beta=0.5$, all other have $\beta=0.1$. \textbf{Right.} KL divergence for DPO with reward scaling ($\beta=0.1$) and without ($\beta=0.5$).}
+   \label{fig:diversity_pareto}
+\end{figure}
+
+We consider the mechanism behind diversity regularization, showing that diversity improves due to randomness in the token decoding order during sampling. Naively, we would expect diversity regularization to improve the entropy of the sampling distribution $\mathcal{H}(\pi)=-\mathbb{E}_{x \sim \mathcal{D}, y \sim \pi} \left[ \log \pi(y | x)\right]$. In the middle part of Fig. \ref{fig:diversity}, we show that this is not the case. Apart from $\beta=0.5$ (an outlier as discussed in Section \ref{section:diversity_pareto}), increasing diversity does not increase entropy, which seems contradictory.
+
+We develop a new understanding of ProteinMPNN to explain this. ProteinMPNN performs random-order token decoding during sampling and all forward passes. So, for a fixed policy $\pi$, sequence $y$, structure $x$, we highlight that $\log \pi(y \mid x)$ is a random variable, depending on a distribution over token decoding orders. Let $\ell_{(\pi, x, y)} = \log \pi(y \mid x)$ denote this random variable, and let $f_\pi(d)$ be a function parameterized by $\pi$ that takes decoding orders $d$ to log-probabilities $s$. In practice, $f_\pi$ is a forward pass through ProteinMPNN, and $d$ is a uniformly chosen permutation over indices $\{1, 2, \dots, |y|\}$. For a decoding order $d \sim \mathcal{U}$ sampled from the uniform decoding order distribution $\mathcal{U}$, we can compute a log-probability $s=f_\pi(d)$. For this $s$, $\ell_{(\pi, x, y)}(s)$ gives the probability, over all possible $d$, that the log-probability of $y|x$ under $\pi$ is $s$.
+
+\textbf{Revisiting training with random log-probabilities}. This new viewpoint allows us to re-evaluate the training of random-order decoder models, like ProteinMPNN. The implicit rewards in Eqs.\ref{eq:reward} and \ref{eq:diversity_reward}, from which a MLE loss is derived, hide the stochastic nature of $\log \pi(y | x)$. In the explicit decoding order notation, we can write Eq. \ref{eq:reward} as
+
+\begin{equation}
+\label{eq:ell_reward}
+r(x, y) = \beta \left[ \log \left( f_{\pi_r}(d) \right) 
+- \log \left( f_{\pi_{\text{ref}}}(d) \right) \right] 
++ \beta \log Z(x), ~~~ d \sim \mathcal{U}
+\end{equation}
+
+with a similar substitution for Eq. \ref{eq:diversity_reward}. This applies to SFT as well, as the loss function has a $\log \pi(y|x)$ term to which we can apply the same substitution. Note that Eq. \ref{eq:ell_reward} is computed over a single sample $d$. That is, training random-order decoders usually involves computing losses with a single-sample estimate of $\log \pi(y|x) = \mathbb{E}_{d \sim \mathcal{U}} \left[ \ell_{(\pi, x, y)}(f_\pi(d)) \right]$. While not explored here, a simple approach to improving the quality of this estimate is to compute log-probabilities over multiple decoding orders, though this would linearly scale training time as well.
+
+\textbf{Explaining diversity with differential entropy.} This view also offers insight into how diversity increases without token entropy increasing as well. Within the random log-probability view, there is another source of entropy to account for: the differential entropy $\mathcal{H}_d$ of the distribution over log-probabilities, defined separately for each tuple $(\pi, x, y)$:
+
+\begin{equation}
+\label{eq:logprob_entropy}
+\mathcal{H}_{d}(\ell_{(\pi, x, y)}) = \mathbb{E}_{d \sim \mathcal{U}} \left[ -\log \left[ \ell_{(\pi, x, y)}(f_\pi(d)) \right] \right] = -\int_{-\infty}^{0} \ell_{(\pi, x, y)}(s) \log \left[ \ell_{(\pi, x, y)}(s) \right] ds
+\end{equation}
+
+We claim that optimizing for diversity increases differential entropy in the continuous log-probability space, rather than increasing discrete entropy in token space. To test this, we draw 128 samples from $\ell_{(\pi, x, y)}$ for all $(x, y)$ structure-sequence test pairs, i.e., compute log-probabilities with 128 different decoding orders. In the right part of Fig. \ref{fig:diversity}, we show that the estimated $\mathcal{H}_d$ increases with larger $\alpha$, as expected under this theory. This agrees with our intuition, since $\mathcal{H}_d$ controls variability in model log-probabilities, which decide the next token during sampling. That is, larger $\mathcal{H}_d$ leads to greater log-probability variability, leading to greater diversity.
+
+\textbf{Effects at higher temperatures.} In the left half of Fig. \ref{fig:diversity}, we conduct a small ablation study to isolate the effect of random decoding order across temperatures. We find that at low temperatures, random decoding order is necessary for diversity. This is because the next token is chosen deterministically at $T=0$, so entropy in the log-probabilities is the sole contributor to diversity. However, at higher temperatures, the influence of using random decoding orders is less pronounced, i.e., temperature has a larger effect on next-token sampling compared to an increasing $\mathcal{H}_d$. Therefore, this analysis applies only for random decoding order models at $T=0$. For example, left-to-right autoregressive methods have fixed decoding orders, meaning $\ell_{(\pi, y, x)}$ collapses around a single scalar and the differential entropy is zero. At $T=0$, this means that we cannot improve diversity by boosting $\mathcal{H}_d$, and at higher $T$, $\mathcal{H}_d$ does not empirically affect diversity much anyways.
+
+\textbf{Increased token entropy does not help diversity.} We also try optimizing for discrete token-level entropy, and achieve around a 15\% increase in this entropy. However, in line with the differential entropy formulation, this method does not improve sample diversity at temperature 0.
+
+\subsection{Sequence recovery with diversity-regularized models}
+
+\begin{figure}
+\centering
+   \includegraphics[width=0.317\textwidth]{figs/temp_vs_recovery.png}
+   \includegraphics[width=0.337\textwidth]{figs/logprob_tm_corr.png}
+   \includegraphics[width=0.317\textwidth]{figs/best_of_n.png}
+   \caption{Sequence recovery with diversity optimization. \textbf{Left.} Stronger diversity regularization seems to hurt sequence recovery, though all fine-tuned models improve over ProteinMPNN. \textbf{Middle.} Diversity does not hurt the correlation between log-probabilities and TM-score. \textbf{Right.} Best-of-N sampling allows diverse models to achieve sequence recoveries comparable to standard models.}
+   \label{fig:sequence_recovery}
+\end{figure}
+
+In this section, we consider how diversity optimization affects ProteinMPNN's ability to recover native sequences from structures, and accurately predict the quality of generated sequences.
+
+First, we explore whether sequence recovery (i.e., the ability to recover the conditioning structure's sequence) is still possible with diversity-regularized fine-tuning. Intuitively, it may seem that models with higher sampling diversity have lower native sequence recovery rate. In the left half of Fig. \ref{fig:sequence_recovery}, it seems like this is the case, with sequence recovery rates decreasing as $\alpha$ increases across all temperatures. However, for small alpha ($\alpha=0.1$), the drop in sequence recovery compared to standard DPO is small. Additionally, this recovery gap disappears if we allow for more compute during inference time. In the right side of Fig. \ref{fig:sequence_recovery}, we take $N$ samples from each model and compute the best-of-$N$ sequence recovery rate. As $N$ grows, the gap between standard DPO recovery rate and $\alpha=0.1$ recovery rate shrinks to nearly zero. Therefore, optimizing for diversity does not significantly impact sequence recovery rate, particularly as more sequences are sampled.
+
+\citet{gao2023proteininvbench} claims that log-probabilities may correlate with sequence quality, e.g. TM-score. Given that diversity regularization increases log-probability entropy as shown in Section \ref{section:logprob_entropy}, one might expect this correlation to be less strong under more diverse models. As shown in the middle of Fig. \ref{fig:sequence_recovery}, this is not the case. Indeed, across all models, log-probabilities do not correlate with TM-score.
+
+\subsection{Reward scaling reinforces biological priors}
+
+\begin{figure}
+\centering
+   \includegraphics[width=0.318\textwidth]{figs/scaled_pareto.png}
+   \includegraphics[width=0.335\textwidth]{figs/kl_repeat.png}
+   \includegraphics[width=0.318\textwidth]{figs/scaled_dpo_tm_bins.png}
+   \caption{Reward scaling improves DPO. \textbf{Left.} Reward-scaled DPO is a Pareto improvement over standard DPO over a temperature sweep. \textbf{Middle.} Left axis is the KL divergence between the token frequencies in the peptide train set vs. model samples (lower is better), right axis is the fraction of non-repeating tokens (higher is better). \textbf{Right.} TM-score improvement over base DPO. Lower TM-score buckets contain structures for which base ProteinMPNN generated low-quality sequences.}
+   \label{fig:scaling}
+\end{figure}
+
+Next, we consider the effect of reward scaling on DPO's behavior. On the left side of Fig. \ref{fig:scaling}, the reward-diversity curves for DPO and reward-scaled DPO are computed across $T=\{0.0, 0.1, 0.2, \dots, 1.0\}$. Reward-scaled DPO achieves consistently higher reward at the same diversity, indicating it is a Pareto improvement over standard DPO. Moreover, as in the right side of Fig. \ref{fig:diversity_pareto}, reward-scaled DPO operates on a slightly smaller KL divergence budget compared to standard DPO. Despite maintaining a smaller deviation from pretrained ProteinMPNN, the policy trained with reward-scaled DPO is still strictly better than the policy trained with standard DPO.
+
+The motivation for reward scaling, as presented in Eq. \ref{eq:scaled_reward}, is dynamic $\beta$ selection based on the strength of the initial policy (or equivalently, the difficulty of the prompt), where $\beta$ controls the KL divergence from the reference model. On the right side of Fig. \ref{fig:scaling}, we show the empirical effect of reward scaling matches this intuition. For structure prompts whose ProteinMPNN-generated sequences had low reward (i.e., where the base model performed poorly), reward-scaled DPO outperforms standard DPO by around 5\%. However, as the average TM-score of the generated sequences increases, the performance gain from reward scaling drops to nearly 0. Therefore, reward-scaled DPO targets hard examples where the data-generating policy is weak, agreeing with the motivation in Section \ref{section:reward_scaling}.
+
+
+
+\section{Limitations}
+
+
+While we illustrate an empirical connection between diversity optimization and differential entropy, we do not establish a mathematical framework for how this optimization happens. Furthermore, during the derivation of diversity-regularized DPO, we approximate $\pi^\star$ with the latest iteration of gradient descent. Exploring the bounds on this approximation, and establishing a theory-first perspective for the differential entropy framework, are promising directions for future research.
+
+Since DPO and the variants proposed here are model-agnostic, they can be used to fine-tune any inverse-folding model. Applying DPO to other inverse-folding models may produce even better results compared to ProteinMPNN \cite{gao2023proteininvbench}. For example, it may be possible to further push the frontier of peptide sequence design by fine-tuning stronger base models like PiFold \citep{gao2022} or KW-Design \citep{gao2023knowledgedesignpushinglimitprotein}.
+
+
+
+\section{Conclusion}
+
+We fine-tuned ProteinMPNN, a widely adopted inverse folding model, for diverse and structurally consistent peptide sequence generation and proposed diversity-regularized DPO with an online sampling term to accurately estimate and encourage diversity. Domain-specific priors were also incorporated into our methodology to account for peptides' residue distribution and dynamically control the strength of KL divergence regularization. Our approach results in improvements on sampling diversity, sequence recovery and structural similarity of the generated peptide sequences. Furthermore, we give additional intuition on the impact of diversity regularization on differential and discrete entropy. While our results are reported using ProteinMPNN as a base model for fine-tuning, our proposed methods are agnostic to the inverse folding model, setting the grounds for future research in peptide design via fine-tuning.
+
+
+
+
+

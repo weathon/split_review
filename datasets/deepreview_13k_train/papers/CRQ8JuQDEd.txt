@@ -1,0 +1,196 @@
+\title{Don’t Discard, but Keep It Small: Context-Preserving KV Cache Compression with Importance-Aware Adaptive Precision}
+
+\begin{abstract}
+As the length of input sequences in Large Language Models (LLMs) continues to grow, efficient key-value (KV) cache management has become essential for improving inference speed and throughput of autoregressive decoding.
+Although several approaches have been proposed to reduce memory usage by selectively retaining only the important KV pairs and discarding the rest, these eviction-based methods can lead to unintended consequences during the generation process.
+In this paper, we investigate the adverse effects of cache eviction methods and reveal that discarding KV pairs potentially introduces risks such as safety prompt breaches, hallucinations, and loss of critical contextual information.
+Interestingly, we find that preserving even a fraction of the information from evicted KV pairs through reduced precision quantization significantly mitigates these issues.
+On the other hand, we also observe that important KV pairs need to be maintained at higher precision to preserve generation quality.
+Based on these findings, we propose Mixed-precision KV cache (MiKV), a robust plug-and-play cache compression method that balances performance and memory efficiency.
+MiKV preserves lost contextual information by storing evicted KV pairs in low precision, while maintaining the essential KV pairs in higher precision to ensure generation quality. 
+Experimental results across multiple benchmarks and LLM architectures demonstrate that our method achieves a state-of-the-art balance between compression ratio and model performance, outperforming existing baselines.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Recent advancements in Natural Language Processing (NLP) have been largely driven by the emergent capabilities of Large Language Models (LLMs) (Brown et al., 2020; OpenAI et al., 2023; Touvron et al., 2023a;b) based on the Autoregressive Transformer (Vaswani et al., 2017) architecture. During autoregressive decoding, LLMs benefit from Key-Value (KV) Caching, a mechanism that caches intermediate key-value states from the previous context to effectively avoid redundant computations to accelerate generation. However, past KV pairs must be stored continuously in memory, leading to a memory footprint that increases linearly with both batch size and sequence length. As LLM inference is predominantly memory-bound (Kim et al., 2023; Park et al., 2024), the growing KV cache becomes a bottleneck, slowing down the generation process and excessively occupying the GPU memory, which is already constrained by the model weights. The ongoing trend of extending LLMs to handle longer contexts only exacerbates the problem, as the KV cache grows in direct proportion to context length. Consequently, this escalating memory demand poses a critical challenge for efficient deployment and acceleration of LLMs on modern GPUs, where memory capacity and bandwidth are highly constrained.  
+
+To address these challenges, recent methods have introduced KV cache eviction (Zhang et al., 2023; Liu et al., 2023b; Xiao et al., 2023; Jiang et al., 2023; Ge et al., 2024) as a strategy for improving inference efficiency. These approaches are based on the assumption that a subset of KVs, deemed important, is sufficient to sustain a successful generation phase. By leveraging past attention patterns to establish importance criteria, researchers propose evicting less critical KV pairs from the cache, reporting minimal performance degradation even when compressing the cache size by up to $20\%$ (evicting $80\%$ of KVs) (Zhang et al., 2023; Liu et al., 2023b). However, a thorough analysis of the risks associated with this compression strategy is still lacking. Since KV eviction removes intermediate states from the model, it is not always clear which information or context is lost during the eviction process. This could lead to the unintended loss of crucial details, such as the system prompt or valuable contextual elements, all without the user or service provider being fully aware. Moreover, even with well-designed importance criteria, it remains fundamentally challenging to predict which KV pairs will be necessary for future generation steps—particularly in complex tasks like multi-turn conversations, where future context requirements are difficult to anticipate.  
+
+![](images/8e5530dad3a19a6f1e5812b1f023c69182bab81e291b81bfeb49095f07eb1eb1.jpg)  
+Figure 1: Comparison of different KV cache compression strategies, including eviction and quantization. The proposed MiKV method employs adaptive precision to efficiently retain contextual details while reducing memory usage. The numbers within the blocks represent the bit-precision of each KV.  
+
+In this paper, we first investigate the risks associated with KV cache eviction through extensive observations. To the best of our knowledge, we are the first work empirically showing that evicting KV pairs leads to rapid degradation of critical details in the input context, resulting in contextual incoherence, hallucinatory responses, and the loss of essential information. Notably, cache eviction can also compromise critical elements, such as safety guardrail prompts embedded within the system, potentially triggering harmful responses that bypass intended safeguards. We hypothesize that these issues arise from the irreversible and exhaustive loss of information contained in the evicted KV pairs. To mitigate this, we explore an alternative approach: instead of evicting KV pairs entirely, we retain a minimal amount of information through low-precision quantization. Surprisingly, our findings reveal that even when KV pairs are preserved at reduced precision, much of the lost detail can be recovered, particularly when systematic outliers in keys and queries are effectively addressed.  
+
+Building on these insights, we propose Mixed-precision KV cache (MiKV), a robust yet efficient plug-and-play cache compression strategy. MiKV selectively stores evicted KV pairs in low precision while retaining important KV pairs in higher precision based on an importance criterion (Figure 1). Unlike eviction-based methods, MiKV preserves all KV cache entries, avoiding the loss of information typically caused by cache eviction. While quantization-based methods are commonly used to reduce the memory footprint of the entire KV cache (Liu et al., 2024), they suffer from significant performance drops when reducing to 4-bit precision or lower. To address this limitation, MiKV introduces an adaptive quantization technique based on the importance of KV pairs, ensuring optimal balance between memory efficiency and performance. In our investigation, we observe that systematic outliers in both queries and keys present challenges for effective low-bit quantization. By addressing these outliers, MiKV successfully preserves contextual details and maintains generation quality while achieving a high compression rate. We evaluate MiKV across a diverse set of LLM benchmarks, including tasks in natural language understanding, mathematics, coding, and detailed information retrieval. Our results demonstrate that MiKV can compress the KV cache with minimal performance degradation, even for compression ratios as high as $80\%$ .  
+
+Our major contributions in this work include the following: 1) We are the first to investigate the previously overlooked issue of context degradation caused by eviction-based cache compression. Our work demonstrates that retaining evicted KV pairs, even in low precision, can significantly recover lost contextual information, addressing a critical gap in the field. 2) We demonstrate that the lost context can be further recovered with appropriate measures to effectively quantize evicted KV pairs into low precision. 3) We introduce the Mixed-precision KV cache (MiKV), a novel compression strategy that preserves critical context and generation quality while reducing memory usage and improving inference speed during the generation phase.  
+
+
+
+\section{2 RELATED WORKS  }
+
+
+KV Cache Sharing. As batch sizes and input sequence lengths in serving LLMs continue to grow, considerable effort has been made to compress KV caches. Methods like Multi-Query Attention (MQA)(Shazeer, 2019) and Grouped Query Attention (GQA)(Ainslie et al., 2023), where multiple query heads share a single KV head, have emerged as promising methods for reducing the memory footprint of KV caches. These methods have been widely adopted in recent open-source LLMs, with MQA implemented in models such as Gemma (Team et al., 2024) model and GQA applied in the LLaMA (Dubey et al., 2024b) model family. While these methods effectively reduce the memory footprint of KV caches, they come with the trade-off of reduced model performance, balancing efficiency against accuracy. Additionally, the training of models using MQA and GQA introduces substantial computational overhead, which further complicates their deployment in practice.  
+
+KV Cache Quantization. There has been a surge of research on reducing the serving cost of LLMs via the quantization of weights and activations. Notably, Xiao et al. (2022); Liu et al. (2023a) have extended their focus beyond the quantization of weights and activations, demonstrating the feasibility of quantizing the query, key, and value to INT8. In contrast, Liu et al. (2024) focuses on quantizing the KV cache only. However, they do not consider token importance for compression, resulting in possible degradation in generation quality.  
+
+KV Cache Eviction. The memory footprint of the KV cache presents a significant bottleneck in LLM inference, motivating recent efforts to compress it through cache eviction strategies. These approaches prioritize preserving important KV pairs while evicting less critical ones, using various importance criteria such as locality (Xiao et al., 2023; Jiang et al., 2023), frequency (Zhang et al., 2023; Liu et al., 2023b), and attention structures (Ge et al., 2024; Li et al., 2024). For instance, preserving tokens that are local to the current sequence position is essential for maintaining generation quality, while methods like heavy-hitter token identification focus on retaining influential tokens. Despite the promise of these strategies, they come with inherent risks. Since eviction removes intermediate model states, predicting the future importance of tokens remains fundamentally uncertain, leading to inevitable context loss. Moreover, adaptive importance policies that adjust eviction criteria based on attention patterns (Ge et al., 2024) can still result in the exhaustive loss of crucial contextual information from the evicted KV pairs.  
+
+
+
+\section{3 CONTEXT DAMAGE FROM KV CACHE EVICTION  }
+
+
+In this section, we investigate the inherent risks posed by eviction-based KV cache compression. Specifically, we review recent eviction strategies that rely on importance criteria, and examine how the removal of KV pairs impacts contextual integrity. Through both qualitative and quantitative analyses, we assess the extent of context damage caused by these eviction mechanisms, highlighting their potential drawbacks in maintaining generation quality and overall model performance.  
+
+
+
+\section{3.1 CASE STUDY: WHAT HAPPENS WHEN KVS ARE EVICTED?  }
+
+
+Guardrail Prompt Breach. In language model deployment, post-training enhancements are often implemented through prompt engineering. System prompts, for instance, are designed to ensure safety by mitigating harmful content and reducing bias, thus preventing potential risks. However, as shown in Figure 2a, eviction strategies can accidentally remove crucial information from the KV cache, undermining these safety mechanisms and introducing significant risks to model reliability and performance.  
+
+Contextual Incoherency. The partial and inconsistent loss of context during KV cache eviction can significantly disrupt the coherence of the generated text. This is particularly evident when considering the temporal flow of information, where details from earlier parts of the sequence fade, while more recent information is retained. As a result, the model produces disjointed and unconnected sentences. Such incomplete retention leads to incoherent, and sometimes nonsensical, responses.  
+
+![](images/6fa2ea376f5b874dffdf271e9b79e2d18664f6ac981dacfbd1825893c278cb4a.jpg)  
+(b) Contextual hallucination on the GSM8k dataset.  
+
+Figure 2: Contextual damage including guardrail prompt breach and hallucinations resulting from $50\%$ KV cache eviction (H2O (Zhang et al., 2023)) in Llama-2-7b-chat.  
+
+Hallucination of Details. The eviction of KV pairs not only leads to information loss but also prompts the model to "hallucinate" missing segments of context. As shown in Figure 2b, during a mathematical reasoning task from the GSM8k dataset, the model struggles to accurately recall the details from the given problem question. Instead, it generates hallucinated or non-existent details, stemming from the lost context due to KV eviction (quantitative benchmark results are presented in Section 5.1). This phenomenon highlights the risk of generating irrelevant or fabricated content in the absence of complete contextual information.  
+
+
+
+\section{3.2 CONTROLLED STUDY: HOW DOES KV EVICTION DAMAGE THE CONTEXT?  }
+
+
+To quantitatively assess the impact of KV cache eviction on context retention, we conduct experiments in a controlled environment using the Line Retrieval task (Li et al., 2023a). Retrieval accuracy is measured across various cache compression ratios to evaluate the robustness of different eviction strategies. We compare the performance of an importance-based eviction strategy (Zhang et al., 2023) against a full cache baseline.  
+
+Unrecoverable Cache Miss. Figure 3a presents the accuracy of the Line Retrieval task as a function of KV cache size. Contrary to expectations, our findings demonstrate a sharp decline in performance with cache eviction. This contrasts with previous reports suggesting that up to $80\%$ of the KV cache could be evicted with minimal impact on performance (Zhang et al., 2023; Liu et al., 2023b). To investigate the reason behind this phenomenon, we observe how the model attends to the KVs during the generation phase. Figure 3b illustrates the actual attention scores in a retrieval task, highlighting issues that arise during the generation phase due to cache miss in eviction-based KV cache compression techniques. In this example, tokens located between positions 320 and 340 contain crucial information corresponding to the retrieval request, as indicated by the high values observed in the attention scores of the full cache during the generation phase. However, these tokens are not strongly attended during prefill phase as they are not important prior to generation. Thus, in eviction-based methods like H2O (Zhang et al., 2023), the importance calculation fails to recognize these tokens in advance, leading to their eviction. As a result, the model cannot reference this information when needed, resulting in lower retrieval accuracy. In contrast, our proposed MiKV method mitigates this issue by preserving these tokens, even in low-bit precision, ensuring that the necessary information remains accessible. This allows MiKV to achieve retrieval performance comparable to the baseline, demonstrating its effectiveness in preventing attention loss due to KV eviction. Building on the Line Retrieval task, we extend our experiments to examine the effects of KV cache eviction in a multi-turn setting, where responses are exchanged consecutively
+
+![](images/1a09a5e954adfe13bde83834d14a9bfaf12694bdd7d6be25941f30b4284fd8c7.jpg)  
+(a) Line retrieval accuracy.  
+
+![](images/eebe90d709245caeb61815581dd8ad4567a2a7850d409bfb355a73babfb2ed90.jpg)  
+(b) Accumulated attention score.  
+
+Figure 3: Analysis of the impact of KV cache eviction on the line retrieval task. (a) Line retrieval performance comparison among KV cache eviction (H2O), oracle eviction, and the proposed mixed-precision KV cache (MiKV) for Llama-2-7b-chat. (b) Accumulated attention scores obtained with full cache, evicted cache (H2O), and our proposed MiKV. The focus is on the attention scores of key tokens in the line retrieval task, highlighting that cache eviction struggles to preserve critical attention scores.  
+
+further highlighting the inherent risks of context loss associated with KV cache eviction. In the multi-turn scenario, the information loss due to eviction, based on the importance calculated during the prefill phase, becomes increasingly evident with each turn.  
+
+Intrinsic Issues of Sparsity. Additionally, we examine an oracle sparsity approach, where KV pairs are not evicted, but the attention map is first calculated with a full cache, followed by the imposition of top- $k$ sparsity. This method serves as an upper-bound proxy, simulating a scenario where the future importance of KVs is perfectly predicted. However, performance degradation is observed in the oracle sparsity scenario, even when the exact future importance of KVs is known. Thus, no matter how accurately we can predict the future importance of KVs, the loss of performance is inseparable with the process of eviction.  
+
+This quantitative analysis, together with the qualitative findings from the previous section, highlights the significant risks associated with KV cache eviction. It underscores the necessity for a more robust KV cache compression method that not only achieves high compression ratios but also reliably preserves essential contextual information, ensuring minimal degradation in model performance.  
+
+
+
+\section{4 MIXED-PRECISION KV CACHE COMPRESSION  }
+
+
+In this section, we introduce the Mixed-precision Key-Value (MiKV) Cache, a robust compression framework designed to address the issue of context damage through the use of mixed-precision quantization. As illustrated in Figure 4, MiKV consists of three core components: the preservation of evicted KV pairs via low-precision quantization to prevent context loss (Section 4.1), outlierawareness to operate under low precision regimes (Section 4.2), and maintaining important KVs in high-precision quantization (Section 4.3) to guarantee generation quality.  
+
+
+
+\section{4.1 RETAINING EVICTED KVS WITH QUANTIZATION  }
+
+
+To mitigate the context damage caused by KV cache eviction, we propose a method that preserves evicted KV pairs using low-bit quantization. To evaluate the effectiveness of this approach, we conduct experiments designed to assess how well low-bit preservation can recover performance in the line retrieval task (Li et al., 2023a). For the experiments, we employ the importance-based eviction strategy (Zhang et al., 2023; Liu et al., 2023b) alongside a conventional per-token asymmetric quantization method (Liu et al., 2023a). As shown in Table 1, retaining evicted KVs through lowprecision quantization across various eviction ratios significantly restores the lost performance. However, this comes with a trade-off: evicting KVs completely frees up memory, whereas low-bit preservation consumes a portion of the memory capacity, leading to a reduction in compression rates. Results demonstrate that although low-bit preservation effectively mitigates performance loss, it still consumes a certain amount of memory footprint. To enhance an effective compression rate, thus, the precision for the KVs intended for eviction needs to be reduced to a sufficiently low level. Nevertheless, performance recovery diminishes at very low precisions, such as INT2. Thus, a specialized low-precision quantization scheme tailored for KV caches is necessary to strike the optimal balance between compression and performance restoration.  
+
+![](images/d8e56902cfc7709290494fe261f015736b36a047d91c0ba7e9845c40650e39c0.jpg)  
+Figure 4: The figure illustrates the self-attention operation of MiKV during the generation phase. Left: selfattention operation of MiKV. Right: demonstration on how $K$ and $V$ are distinguished into important KVs and retained KVs for mixed-precision compression. Note that MiKV can utilize existing token importance policies (e.g., H2O, SnapKV, etc.) in a plug-and-play manner.  
+
+Table 1: Line retrieval accuracy comparison of KV cache eviction (H2O) and quantization. Compared to eviction, the accuracy is substantially recovered when the KVs to be evicted are preserved in low precision. For the very low precision regime (INT2), accuracy recovery is undermined.   
+
+![](images/aba181b32e0a8b05fa8c595d2f6c944580c6ae5cf78fb8696cc5824445af87f3.jpg)  
+
+4.2 MITIGATING CHANNEL OUTLIERS FOR LOW-PRECISION KVS  
+
+To further improve accuracy after low-precision quantization of KVs, we first examine the characteristics of the query, key, and value within the attention mechanism. As illustrated in Figure 5, systematic outliers, particularly in the query and key, can lead to significant quantization errors in low-precision settings (Dettmers et al., 2022). Note that the use of Rotary Positional Embeddings (RoPE) (Su et al., 2024) exacerbates this issue by duplicating outliers across channels, amplifying their effect.  
+
+Previous work on weight and activation quantization has addressed these outliers using techniques like per-channel quantization (Heo et al., 2023; Liu et al., 2024) and per-token quantization with outlier balancing (Xiao et al., 2022; Lin et al., 2023). In this paper, we adopt per-token quantization with outlier balancing to ensure a fair comparison with existing eviction methods, which also operate on a per-token basis. By using per-token quantization with outlier balancing, we aim to reduce the quantization error of low-bit precision keys while dynamically shifting the outlier burden to the full-precision queries. This approach effectively balances the outlier channels, minimizing errors and enhancing both accuracy and robustness during KV compression. During the prefill phase, we compute the maximum values for each channel of the query and key to construct a channel balancer $\mathbf{b}$ , for input prompt length $t$ , layer $l$ , head $h$ , and channel $c$ :  
+
+$$
+\mathbf{b}_{l h c}=\sqrt{\operatorname*{max}\left(\left|\mathbf{q}_{l h c}^{0:t-1}\right|\right)/\operatorname*{max}\left(\left|\mathbf{k}_{l h c}^{0:t-1}\right|\right)}.
+$$  
+
+![](images/bcb6c1bbdbbf6cf6252aa13b830f32bc1467431e414c8e906dd4e353f6bb3847.jpg)  
+Figure 5: Manifested outliers in both keys and queries in Llama-2-7b-chat.  
+
+![](images/3b776cc278c59050357462c05e0bd841da62a4dda6699be8ce8e5bd6bfa62a9b.jpg)  
+Table 2: Line retrieval accuracy with query-key outlier awareness for importance ratio $2\mathbf{0}\,\%$ . The accuracy is substantially recovered in the INT2 regime. The important KVs can also be quantized for further compression.  
+
+The channel balancer is then multiplied to the key before applying the quantizer $\mathcal{T}$ and divided from the query to compensate for the multiplication, resulting in the following inner product operation:  
+
+$$
+\hat{\mathbf{k}}_{l h c}^{t}\cdot\hat{\mathbf{q}}_{l h c}^{t}=\mathcal{T}\big(\mathbf{k}_{l h c}^{t}*\mathbf{b}_{l h c}\big)\cdot\big(\mathbf{q}_{l h c}^{t}/\mathbf{b}_{l h c}\big).
+$$  
+
+The process described above reduces the magnitude of key outlier channels while amplifying the key channels corresponding to the query outlier channels. Table 2 demonstrates that the outlier-aware measures effectively restore the performance, even at the extremely low INT2 precision.  
+
+4.3 REDUCING THE PRECISION OF IMPORTANT KVS  
+
+To maximize the compression ratio of the KV cache, we now focus on quantizing the important KV pairs. In our experimental setup, the importance cache comprises $20\%$ of the total KVs, while the retained cache operates at INT2 precision. We systematically reduce the precision of the important KVs and evaluate the corresponding impact on accuracy. As described in Table 2, reducing the precision of the important KVs enables a higher compression ratio while minimizing performance degradation. However, as expected, excessively low precision, such as INT2, results in severe degradation. These findings suggest that important KVs can be effectively compressed while maintaining reasonably high precision, allowing for effective compression without significantly compromising performance.  
+
+Combining the three parts, we propose Mixed-precision KV cache (MiKV) (Figure 4), which preserves lost contextual information by storing evicted KVs in low precision, while maintaining important KVs in higher precision to ensure generation quality.  
+
+
+
+\section{5 EXPERIMENTS  }
+
+
+In this section, we demonstrate the effectiveness of MiKV in terms of trade-off between compression ratio and generation quality by conducting extensive experiments on multiple LLM benchmarks (Section 5.1) and long context inputs (Section 5.2). Then, we conduct an ablation study on different importance policies (Section 5.3). Finally, we discuss the acceleration support for MiKV and analyze the latency speedup (Section 5.4). We also experiment on chatbot generation in Appendx I.  
+
+5.1 MAIN RESULTS  
+
+Setups. To comprehensively evaluate the performance of MiKV, we conduct experiments on four widely used benchmarks: GSM8k (Cobbe et al., 2021) and HumanEval (Chen et al., 2021) for generation quality, Line Retrieval (Li et al., 2023a) to assess detail preservation, and MMLU (Hendrycks et al., 2020), a multiple-choice benchmark designed to test general natural language understanding. Notably, MMLU allows us to measure the impact of compression immediately following the prefill stage. To ensure a controlled evaluation with minimal contextual redundancy, we assess GSM8k and MMLU in a 1-shot setting. For our experiments, we use four open-source LLMs with varying sizes and architectures: Llama-2 7b (Touvron et al., 2023b), Llama-3-8b (Dubey et al., 2024a), and Mistral-7b (Jiang et al., 2023). Note that both Llama-3-8b and Mistral-7b are equipped with  
+
+![](images/75dd009aa09625c234d41b604380695ce546b0726ed2d47499b7de32a2bc3388.jpg)  
+Figure 6: Performance results of MiKV compared to baselines on GSM8k, HumanEval, Line Retrieval, and MMLU. The $x$ axes represent the compressed KV cache size $(\%)$ . The $y$ axes represent the benchmark accuracy $(\%)$ . We compare our method (MiKV) with eviction (H2O, SnapKV) and quantization (RTN, KIVI).  
+
+GQA (Ainslie et al., 2023) to reduce KV cache memory footprint. As KV cache eviction baselines, we compare MiKV against H2O (Zhang et al., 2023) and SnapKV (Li et al., 2024). Furthermore, we evaluate MiKV against traditional uniform-precision, per-token asymmetric round-to-nearest quantization (RTN), as well as KIVI (Liu et al., 2024), a state-of-the-art, tuning-free KV quantization method. In all experiments, MiKV uses the H2O policy for determining KV importance. We further explore the effect of alternative importance policies in Section 5.3.  
+
+Results. Figure 6 illustrates the trade-off between generation quality and KV cache compression ratio. Across all benchmarks and backbone LLMs, MiKV consistently achieves superior compression rates while maintaining comparable generative performance to the full-cache model. Interestingly, the MMLU results indicate that KV eviction negatively impacts accuracy immediately after the preflil stage, underscoring the sensitivity of this benchmark to early-stage compression. For the Line Retrieval task, eviction methods exhibit rapid performance degradation, whereas MiKV maintains stable performance, demonstrating the efficacy of the low-precision retained cache in mitigating context loss. In more complex generation tasks like GSM8k and HumanEval, MiKV effectively preserves generation quality while reducing the KV cache size by up to $80\%$ , whereas uniformprecision quantization struggles to maintain the same level of performance. This result highlights the importance of an adaptive quantization scheme that balances compression ratio and accuracy. While KIVI achieves competitive accuracy compared to eviction methods, it falls short in achieving high compression ratios due to its reliance on FP16 residual KVs. In contrast, MiKV further compresses the important KVs, enabling even greater compression without sacrificing performance.  
+
+5.2 LONG CONTEXT UTILIZATION  
+
+To evaluate the robustness of MiKV under extended context inputs, we perform experiments on the RULER benchmark (Hsieh et al., 2024) using Longchat-7b (Li et al. We also provide results for LongBench (Bai et al. Table 3 highlights that for cache eviction strategies such as H2O, common-knowledge QA tasks, which can be addressed using the pre-trained knowledge of the  
+
+Table 3: RULER benchmark results.   
+
+![](images/2ea61858fc46a5f50f399364bf0d332ca70553fde80ca658d9e7c8b356fd883c.jpg)  
+
+LLM, exhibit minimal performance degradation. However, for synthetic tasks where the LLM cannot leverage its pre-trained knowledge and must depend entirely on the provided contextual information, there is a significant decline in performance. This demonstrates that KV cache eviction introduces significant risks in real-world long-context scenarios. In contrast, MiKV retains the KV pairs, ensuring robust accuracy even when handling extended contexts. Also, the uniform-precision scheme of KIVI lacks the flexibility to adjust compression rates. while MiKV enables adaptable compression rates achieving additional compression without compromising performance.  
+
+
+
+\section{5.3 ABLATION STUDY ON IMPORTANCE POLICIES  }
+
+
+One of the key advantages of MiKV is its flexibility to be seamlessly integrated with various importance policies in a plug-and-play manner. To demonstrate this, we conducted experiments using Mistral-7b on the GSM8K benchmark, employing two distinct importance policies from H2O (Zhang et al., 2023) and SnapKV (Li et al., 2024). As shown in Table 4, MiKV maintains compatibility with both policies, preserving accuracy effectively across tasks. This adaptability makes MiKV suitable for use with various importance policies, including methods designed for fused attention mechanisms like SnapKV, enhancing its efficiency in real-world applications.  
+
+Table 4: GSM8K performance with varying importance policies.   
+
+![](images/376eb59bc35148331ccd181c399cec4089b45ff959ed6675924f1fc8b82e2baa.jpg)  
+
+
+
+\section{5.4 LATENCY ANALYSIS  }
+
+
+In Figure 7, we evaluate the end-to-end token generation latency of MiKV using an on-the-fly dequantization kernel (Liu et al.7 for detailed settings). MiKV outperforms the FP16 full-cache model (cuBLAS) in terms of latency, with its speedup becoming more pronounced as the context length increases. Compared to KIVI, which uses a uniform bitwidth, MiKV—operating at an average precision of 3 bits (4-bit for important KVs, 2-bit for retained KVs)—achieves a practical speedup through adaptive quantization, balancing accuracy and compression. While H2O, an eviction-based approach, shows the lowest latency due to both eviction and skipping computations, its utility is limited by severe accuracy degradation at similar compression rates. Even when H2O relaxes the compression ratio to $50\%$ to preserve accuracy, it still lags behind MiKV in both accuracy and latency, making MiKV a more effective solution for maintaining performance while optimizing speed and memory usage.  
+
+![](images/6ed32e47378d6731f011b1f76f739ad56672e0332adae8c3f5a2329bc4aaa062.jpg)  
+Figure 7: End-to-end generation latency of MiKV compared to baselines.  
+
+
+
+\section{6 CONCLUSION  }
+
+
+In this paper, we presented Mixed-precision KV cache (MiKV), an effective strategy for KV cache compression through importance-based mixed-precision quantization. By retaining the unimportant KVs in low precision and protecting the important KVs in high precision, context damage involved in cache eviction is recovered while generation quality is maintained. Through experiments on multiple benchmarks, we validated the effectiveness of MiKV.  
+
+
+
+

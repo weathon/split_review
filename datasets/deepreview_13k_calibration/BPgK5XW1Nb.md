@@ -1,8 +1,8 @@
 # Spread Preference Annotation: Direct Preference Judgment for Efficient LLM Alignment
 
 - Decision: Accept
-- Avg Score: 4.25
-- Scores: 1, 0, 8, 8
+- Avg Score: 8.67
+- Scores: 10, 8, 8
 
 ## Abstract
 Aligning large language models (LLMs) with human preferences becomes a key component to obtaining state-of-the-art performance, but it yields a huge cost to construct a large human-annotated preference dataset. To tackle this problem, we propose a new framework, Spread Preference Annotation with direct preference judgment (SPA), that boosts the alignment of LLMs using only a very small amount of human-annotated preference data.

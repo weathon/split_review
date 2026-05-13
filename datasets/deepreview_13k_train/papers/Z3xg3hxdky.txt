@@ -1,0 +1,290 @@
+\title{DSP: Dynamic Sequence Parallelism for Multi-Dimensional Transformers}
+
+\begin{abstract}
+Scaling multi-dimensional transformers to long sequences is indispensable across various domains. However, the challenges of large memory requirements and slow speeds of such sequences necessitate sequence parallelism. All existing approaches fall under the category of embedded sequence parallelism, which are limited to shard along a single sequence dimension, thereby introducing significant communication overhead. However, the nature of multi-dimensional transformers involves independent calculations across multiple sequence dimensions. To this end, we propose Dynamic Sequence Parallelism (DSP) as a novel abstraction of sequence parallelism. DSP dynamically switches the parallel dimension among all sequences according to the computation stage with efficient resharding strategy. DSP offers significant reductions in communication costs, adaptability across modules, and ease of implementation with minimal constraints. Experimental evaluations demonstrate DSP's superiority over state-of-the-art embedded sequence parallelism methods by remarkable throughput improvements ranging from 32.2\% to 10x, with at least 50\% communication volume reduction.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Efficiently scaling multi-dimensional transformers to accommodate long sequences is necessary across diverse domains, including video generation \citep{MakeAVideoTG, StableVD, LatteLD}, image generation \citep{dalle, sd, llava}, protein structure prediction \citep{alphafold}, spatial-temporal information processing \citep{SpatialTemporalTF}, and beyond. The long length of sequences in these applications entails substantial activation memory costs and a notable slowdown in processing speeds, underscoring the need for employing sequence parallelism.
+
+Current methods for sequence parallelism, such as Megatron-SP \citep{megatron-sp}, DeepSpeed-Ulysses \citep{DeepSpeedUS}, and Ring-Attention \citep{Ring, liu2023ring} are all embedded sequence parallelism methods. As shown in Figure \ref{fig:dynamic}, these embedded methods shard along a single sequence dimension, which are tailored to the task-specific pattern of modules and introduce intricate communication and complex code modification. However, multi-dimensional neural networks often operate independent computations across multiple sequence dimensions. For instance, for video generation models like OpenSora \citep{Opensora} and Latte \citep{LatteLD}, Spatial-Temporal Attention \citep{Spatio-Temporal-Transformer} is favored over full Self-Attention \citep{attention}, facilitating separate attention computations for temporal and spatial dimensions.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.9\linewidth]{images/dynamic.pdf}
+  \caption{Comparison of Embedded and Dynamic Sequence Parallelism. Reshard means the communication to change sequence parallel layout. The blue arrow represents communication. The number and width of the arrows indicate the volume and frequency of communication, respectively.}
+  \label{fig:dynamic}
+\end{figure*}
+
+Therefore, there exists an explorable space for a general sequence parallelism abstraction. To adapt to the flexible patterns of multi-dimensional transformers, we introduce Dynamic Sequence Parallelism (DSP) as a novel abstraction of sequence parallelism, characterized by its elegance, high effectiveness, and excellent compatibility with popular transformers. Unlike embedded sequence parallelism, DSP dynamically switches the parallel dimension of sequences during the computation stage with an efficient resharding strategy, a process completely decoupled from the computation module. DSP offers several advantages over embedded sequence parallelism: 1) \textbf{Efficient Communication}: DSP incurs significantly lower communication costs due to its simplified communication patterns and reduced frequency of exchanges. 2) \textbf{Adaptability}: DSP seamlessly adapts to most modules without necessitating specific modifications and imposes few limitations on its usage.
+
+Our experiments yield promising results, showcasing DSP's superiority over state-of-the-art embedded sequence parallelism methods. It achieves an end-to-end throughput improvement ranging from 32.2\% to 10x and reduces communication volume by at least 75\%.
+
+We summarize our contributions as follows:
+
+\begin{itemize}
+\item We introduce DSP as a novel abstraction of sequence parallelism aimed at effectively scaling multi-dimensional transformers. DSP dynamically switches the parallel dimension of sequences during the computation stage, offering high effectiveness, elegant formalism, and excellent compatibility.
+\item By significantly reducing communication volume and frequency, DSP improves end-to-end throughput by 32.2\% to 10x and reduces communication volume by at least 50\% compared to state-of-the-art methods.
+\item DSP seamlessly integrates with various modifications without requiring specific modifications and imposes few limitations. Its ease of use is highlighted by the minimal code changes needed to incorporate it into existing frameworks with our high-level API.
+\end{itemize}
+
+
+\section{Background and Related Work}
+
+
+\begin{table}[h]
+  \centering % This centers the table
+  \caption{Meanings of the symbols that are used in this paper.} 
+  \begin{tabular}{l l|l l}
+  \toprule
+  $B$ & The number of batch sizes & $N$ & The number of GPUs \\
+  $C$ & The size of hidden states& $n$ & The $n$-th GPU \\
+  $S_i$ & The $i$-th sequence dimension & $\mathbf{X}$ & The a multi-dimensional sequence \\
+  $s_i$ & The status that sequence is sharded from  & & tensor \\
+   & dimension $S_i$  &  $\mathbf{X}_{p,n}$ & The partition of X assigned to GPU $n$ \\
+  $\hat{s}$ & The status that sequence is not sharded &  & for sequence parallel \\
+  $M$ & The volume of a sequence tensor &  &  \\
+  \bottomrule
+  \end{tabular}
+  \label{tab:symbol}
+\end{table}
+
+\subsection{Background}
+\noindent{\textbf{Transformer Architecture.}}
+Transformer \citep{attention} is a type of neural network architecture that has become highly influential in natural language processing \citep{bert, gpt, gemini} and other domains \citep{vit, alphafold, dit}. The Transformer is composed of a stack of layers, each consisting of a multi-head attention (MHA) and a position-wise feed-forward network (FFN). Specifically, the MHA comprises H independently parameterized attention heads, formulated as:
+\begin{equation}
+\mathrm{MHA}(x) = \mathrm{Concat}(\mathrm{head}_1, \dots, \mathrm{head}_H)\mathbf{W}^O, \quad \mathrm{head}_i = \mathrm{Att}(\mathbf{Q}_i, \mathbf{K}_i, \mathbf{V}_i),
+\end{equation}
+\begin{equation}
+\mathrm{Att}(\mathbf{Q}, \mathbf{K}, \mathbf{V}) = \mathrm{softmax}\left(\frac{\mathbf{Q}\mathbf{K}^\top}{\sqrt{d_k}}\right)\mathbf{V}, \quad x_\mathrm{MHA} = \mathrm{LayerNorm}(x + \mathrm{MHA}(x)),
+\end{equation}
+
+where $\mathrm{Att}(\cdot)$ denotes the scaled dot-product attention, $\mathbf{Q}, \mathbf{K}, \mathbf{V}$ are query, key, value projections, and LayerNorm is the layer normalization. The output $x_\mathrm{MHA}$ is fed into the FFN, which consists of two linear transformations with a ReLU activation in between, computed as:
+\begin{equation}
+\mathrm{FFN}(x) = \max(0, x\mathbf{W}_1 + \mathbf{b}_1)\mathbf{W}_2 + \mathbf{b}_2, \quad x_\mathrm{out} = \mathrm{LayerNorm}(x_\mathrm{MHA} + \mathrm{FFN}(x_\mathrm{MHA})),
+\end{equation}
+
+where $\mathbf{W}_1, \mathbf{W}_2, \mathbf{b}_1, \mathbf{b}_2$ are the parameters of the FFN.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.8\linewidth]{images/multidimension.pdf}
+  \caption{Illustration of Multi-Dimensional (2D) Transformer.}
+  \label{fig:mmt}
+\end{figure*}
+
+\textbf{Multi-Dimensional Transformer. } Multi-dimensional transformers \citep{AxialAttn, yang2022tubedetr} extend the self-attention mechanism of standard transformers to operate over multiple dimensions beyond just one sequence. An example of 2D-Transformer is shown in Figure \ref{fig:mmt}. Let the input multi-dimensional sequence be denoted as $\mathbf{X} \in \mathbb{R}^{[B,S_1,S_2,\dots,S_K,C]}$, where $B$ is the batch size, $S_1, S_2, \dots, S_K$ are the sequence lengths along $K$ different sequence dimensions, and $C$ is the hidden size. Multi-dimensional transformer can be formatted as:
+\begin{equation}
+\mathbf{X}_\mathrm{reshape} = \mathrm{Reshape}(\mathbf{X}, [B \times \prod_{j \neq i} S_j, S_i, C]).
+\end{equation}
+
+The transformer block operation is then applied along the $i$-th sequence dimension of $\mathbf{X}_{\mathrm{reshape}}$.
+\begin{equation}\label{equ:multi-dimen}
+\mathbf{X}_{\mathrm{out}} = \mathrm{transformer\_block}(\mathbf{X}_\mathrm{reshape}).
+\end{equation}
+
+After applying the transformer block operation along all $N$ dimensions, the final output tensor $\mathbf{X}_{\mathrm{out}}$ has the same shape as the input tensor $\mathbf{X}$. Multi-dimensional Transformer is widely used for applications with multi-dimensional inputs including video data \citep{xu2020spatial, he2021end, geng2022rstt, LatteLD}, 3D data \citep{zheng20213d, chen2023tempee}, protein structure prediction \citep{alphafold, mirdita2022colabfold}, time-series data \citep{pan2022short, huang2022spatial, deihim2023sttre} and beyond.
+
+\subsection{Related Work}
+
+In this section, we discuss the four main parallelism techniques employed in deep learning: data parallelism, tensor parallelism, pipeline parallelism, and sequence parallelism.
+
+Data parallelism \citep{dataparallel, pytorchdist} is one of the most widely adopted parallelism techniques. The input data is partitioned across devices, each processing a subset. Model parameters are replicated, and gradients are summed. ZeRO \citep{ZeRO, zeroinfi} optimizes memory by partitioning parameters, states, and gradients across devices, enabling the training of larger models. Tensor parallelism \citep{shazeer2018mesh, MegatronLMTM}, or model parallelism, partitions model parameters across devices. Different model parts are assigned to different devices. Pipeline parallelism \citep{gpipe, pipedream, ChimeraET, HanayoHW} partitions the model into stages executed in parallel across devices. Activations are passed between devices in a pipeline style.
+
+Unlike parameter parallelism discussed earlier, sequence parallelism is a technique specifically designed for distributing long sequences and activation across multiple devices. Here are three main methods of sequence parallelism:
+
+Ring Attention \citep{Ring} employs an innovative approach to partitioning the sequence dimension using a ring-style peer-to-peer (P2P) communication pattern to transfer keys and values across GPUs.  \citep{liu2023ring} enhance this method with an online softmax mechanism, allowing for the computation of attention scores without retaining the full sequence length. However, Ring Attention's reliance on P2P communication can be less efficient in high-latency environments.
+Megatron-SP \citep{megatron-sp} further optimizes activation usage in the attention based on tensor parallelism. To transit between tensor parallelism and sequence parallelism in the Transformer block, additional all-gather and reduce-scatter operations are introduced. And it's constrained by the number of attention heads, as self-attention relies on the parallelism of the head dimension of the sequence.
+DeepSpeed-Ulysses \citep{DeepSpeedUS} introduces an innovative approach for training long sequences by utilizing all-to-all collective communication. This method partitions the query, key, and value matrices across attention heads while preserving the original attention computation structure. The process is facilitated by two sets of all-to-all communications that alternate between sequence splitting and attention head splitting. Nevertheless, it is constrained by the number of attention heads as well.
+
+Moreover, these sequence parallelism methods are designed for parallelism within a single sequence dimension. For multi-dimensional transformers, this strategy becomes inefficient due to unnecessary communication. While specialized parallelism for multi-dimensional sequences has been explored in specific domains \citep{fastfold}, their applicability remains limited.
+
+
+\section{Dynamic Sequence Parallelism}
+
+\subsection{Overview}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=1\linewidth]{images/dsp_overview2.pdf}
+  \caption{System overview of Dynamic Sequence Parallelism.}
+  \label{fig:dsp_overview}
+\end{figure*}
+
+In the realm of multi-dimensional transformers, computation occurs independently for each sequence dimension. To harness this inherent feature, we introduce Dynamic Sequence Parallelism (DSP), an efficient, adaptive and ease-of-use sequence parallelism abstraction for multi-dimensional transformers. 
+
+To ensure correct computation logic with sequence parallelism, embedded methods typically require complex and time-consuming communications within computation modules to change the parallel dimension.
+However, as illustrated in Figure \ref{fig:dsp_overview}, the key feature of DSP is its dynamic switch of parallel dimension at the intersections of computation stages. By resharding only between computation stages dynamically, rather than within them, this approach allows DSP to remain independent of the computation logic within the module. Therefore, DSP eliminates numerous unnecessary communications within modules, and is able to utilize efficient all-to-all operations to switch parallelism dimensions for the intermediate sequence.
+
+For operations involving all sequence dimensions, including the beginning and end of the model, DSP handles them by split and gather operation.
+
+\subsection{Problem Definition}
+In sequence parallelism, the objective is to distribute activation computations across multiple GPUs to reduce the memory overhead caused by long sequences. This approach, however, incurs additional communication costs between GPUs. Our goal is to optimize this trade-off in the context of multi-dimensional transformers.
+
+Given a multi-dimensional sequence $\mathbf{X} \in \mathbb{R}^{[B,S_1,S_2,\dots,S_K,C]}$ and a set of $N$ GPUs, where $S_1, \dots, S_K$ are the sequence along $K$ different sequence dimensions, we aim to partition the computation such that the memory usage per GPU is under capacity while maintaining acceptable communication costs. Let $\mathbf{X}_{p,n}$ denote the partition of $\mathbf{X}$ assigned to GPU $n$, where $p$ represents the partition strategy. The optimization problem is formulated as:
+\begin{equation}
+\min_{p} \sum_{n=1}^{N}  \mathrm{CommCost}(\mathbf{X}_{p,n})\ \ s.t.\ \  \mathrm{Memory}(\mathbf{X}_{p,n}) < Capacity.
+\end{equation}
+Here, $\mathrm{Memory}(\mathbf{X}{p,n})$ denotes the memory usage of partition $\mathbf{X}_{p,n}$ on GPU $n$, $\mathrm{CommCost}(\mathbf{X}_{p,n})$ represents the communication cost. We aim to achieve a balance that minimizes the overall computational overhead while optimizing GPU resource utilization.
+
+\subsection{Dynamic Primitives}\label{sec:primi}
+
+\begin{table}[t]
+  \centering % This centers the table
+  \caption{Definition of Dynamic Primitives for DSP. \( s_i \) denotes the sequence sharded from dimension \( i \), while \( \hat{s} \) indicates the sequence is not sharded. \( M \) represents the sequence size, and \( N \) signifies the sequence parallel size.} 
+  \begin{tabular}{c|c|c|c|c|c}
+  \toprule
+  Source & Target & \multirow{2}{*}{Primitives} & Comm & Comm & \multirow{2}{*}{Freq} \\
+  Shard & Shard & & Operation & Volume & \\
+  \midrule
+  $ s_i $ & $ s_i $ & / & / & / & / \\
+  $ s_i $ & $ s_j $ & Switch & all-to-all& $ M/N $ & High  \\
+  $ \hat{s} $ & $ s_i $ & Split & / & $0$ & Low \\
+  $ s_i $ & $ \hat{s} $ & Gather & all-gather & $M$ & Low \\
+  \bottomrule
+  \end{tabular}
+  \label{tab:primitive}
+\end{table}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.6\linewidth]{images/dynamic_switch.pdf}
+  \caption{Illustration of dynamic switch.}
+  \label{fig:dynamic_switch}
+\end{figure*}
+
+In this section, we introduce the key dynamic primitives of DSP, as outlined in Table \ref{tab:primitive}. These three primitives form the cornerstone for implementing DSP across a spectrum of multi-dimensional transformers.
+
+The first condition is that when there is no need to alter sequence parallelism between computation stages, we maintain the shard status of the sequence. This approach significantly reduces unnecessary communication overhead. However, when it becomes necessary to transit parallelism between dimensions, we employ dynamic switch to efficiently transform parallelism. Specifically, as depicted in Figure \ref{fig:dynamic_switch}, dynamic switching adjusts the parallelism to a dimension unrelated to the ongoing computation, utilizing highly efficient all-to-all operations. 
+
+Assume $\mathbf{X} \in \mathbb{R}^{[B, S_1, \dots, S_i/N, \dots, S_j, \dots, S_K, C]}$ represents the input. The current parallel dimension is $i$ so its sequence length is $S_i/N$ on each device, where $N$ is sequence parallel size. If we want to switch the shard dimension from $i$ to $j$, the operation can be formulated as follows:
+\begin{equation}
+    \mathbf{Y} = \text{DynamicSwitch}(\mathbf{X}, i, j),
+\end{equation}
+
+where the resulting tensor $\mathbf{Y}$ has the shape $\mathbb{R}^{[B, S_1, \dots, S_i, \dots, S_j/N, \dots, S_K, C]}$. Furthermore, Split and Gather operations facilitate smooth transitions between sharded and non-sharded states. Although these operations may involve increased communication compared to Switch operations, they are primarily utilized at the onset and conclusion of most networks, and also for some global operations in very rare conditions, rendering their costs negligible.
+
+\subsection{Adaptability and Flexibility}\label{sec:flex}
+    
+
+Given its decoupling from the computation of modules, DSP exhibits remarkable adaptability, making it compatible with a wide array of transformer variants such as Cross Attention \citep{cs, LatteLD}; specialized kernels like FlashAttention \citep{FlashAttentionFA}; special attention mechanisms including multi-query attention \citep{mqa} and grouped-query attention \citep{gqa}; and even beyond like Mamba \citep{manba} and RWKV \citep{rwkv}. This inherent flexibility enables DSP to seamlessly integrate into diverse transformers without specific modification. Furthermore, while DeepSpeed-Ulysses and Megatron-LM necessitate attention head splitting, DSP's scalability is significantly better because it shards on sequence length, which much larger especially when scaling sequences.
+
+Moreover, DSP's adaptability extends beyond module compatibility to encompass various parallelism methodologies. From conventional data parallelism to more sophisticated approaches like ZeRO and pipeline parallelism, DSP effortlessly integrates with diverse parallel computing paradigms, thereby enhancing scalability and performance across distributed computing environments.
+
+ By calling just four functions without knowing the detailed implementation, DSP can be enabled on PyTorch and is compatible with various distributed frameworks, including FSDP \citep{FSDP}, Accelerate \citep{accelerate}, DeepSpeed \citep{deepspeed}, and Megatron-LM \citep{MegatronLMTM}.
+
+
+\section{Theoretical Analysis}
+
+
+We choose 2D-Transformer as described in Equation \ref{equ:multi-dimen} as our base model, which is widely employed in real-world applications. To be specific, we use the OpenSora \citep{Opensora} variant of 2D-Transformer, an open-source video generation model, where there are two transformer blocks for two sequence dimensions separately. We choose DeepSpeed-Ulysses \citep{DeepSpeedUS}, Megatron-SP \citep{megatron-sp} and RingAttention \citep{liu2023ring} as baselines, which represent the state-of-the-art sequence parallelism methods employed for processing long sequences with transformers.
+
+\subsection{Communication Analysis}
+
+The primary advantage of DSP lies in its ability to minimize communication costs and enable scalable communication operations. DSP exploits the inherent characteristics of multi-dimensional transformers to eliminate unnecessary communication, compared with embedded approaches such as Megatron-SP \citep{megatron-sp}, RingAttention \citep{liu2023ring} and DeepSpeed-Ulysses \citep{DeepSpeedUS}. Consider an activation size of $M$ and a sequence parallel size of $N$. In a 2D-Transformer, there is one transformer block for each sequence dimension per layer, resulting in two transformer blocks per layer.
+
+Both Megatron-LM and DeepSpeed-Ulysses require transforming sequence parallelism from a sequence-shard to a head-shard layout. Megatron-SP employs 2 all-gather operations to aggregate the entire sequence and 2 reduce-scatter operations to distribute results in the attention and MLP layers for one transformer block. This results in a total of 8 collective communication operations, leading to a total communication volume of $8M$. Conversely, DeepSpeed-Ulysses incurs 4 communication operations in temporal block for the query, key, value, and output layout transformations. Consequently, the communication volume transmitted per device for an all-to-all communication of size $M$ across $N$ GPUs is $4M/N$. Ring-Attention needs to communicate the entire key and value in the temporal as well, resulting in a total communication volume of $2M$.
+
+In contrast, DSP mitigates communication cost by employing only two all-to-all operations in total two blocks per layer. As shown in Table \ref{tab:compare}, it reduces the communication volume to $2M/N$, significantly outperforming other sequence parallelism techniques. Notably, with merely two all-to-all operations, DSP exhibits efficient scalability even in super-large clusters for training and inference on extremely long sequences because the communication volume decreases as the number of nodes increases, rendering DSP an exceptional choice for large-scale distributed training and inference tasks involving extreme long sequences.
+
+\begin{table}
+\centering % This centers the table
+\caption{Comparison of DSP with other sequence parallelism methods for 2D-Transformer architectures. $M$ denotes the activation size, and $N$ represents the number of devices. Communication volume refers to the per-layer volume.}
+
+\begin{tabular}{l|c|c|c|c}
+\toprule
+\multirow{2}{*}{Method} & Communication & Activation & Parameter & Ease \\
+ & Volume &  Memory &  Memory &  of Use \\
+\midrule
+Ring Attention & $2M$\ \ \,\,\,\,\,\,\, \faThumbsDown \,\,\, & \faThumbsOUp & \faThumbsOUp & \faThumbsDown\faThumbsDown \\
+Megatron-SP & $8M$\,\,\,\,\,\,\, \faThumbsDown\faThumbsDown & \faThumbsDown & \faThumbsOUp & \faThumbsDown \\
+DeepSpeed-Ulysses & $4M/N$\ \, \faThumbsOUp \,\,\, & \faThumbsOUp & \faThumbsOUp & \faThumbsOUp \\
+DSP (ours) & $2M/N$ \faThumbsOUp\faThumbsOUp & \faThumbsOUp\faThumbsOUp & \faThumbsOUp & \faThumbsOUp\faThumbsOUp \\
+\bottomrule
+\end{tabular}
+\end{table}\label{tab:compare}
+\subsection{Memory Analysis}
+
+Regarding activation memory, since we shard every tensor in the transformer, we are theoretically able to achieve the minimum activation cost, similar to DeepSpeed-Ulysses and Ring Attention. In practice, however, our approach requires less shape transformation and communication overhead, allowing us to further reduce intermediate activation memory compared to other methods. Megatron-SP, on the other hand, needs to hold the entire activation after the all-gather operation, resulting in higher memory requirements for hosting the activation.
+
+As for parameter memory, as discussed in Section \ref{sec:flex}, DSP is compatible with most parameter parallelism strategies. In this analysis, we utilize the ZeRO technique \citep{ZeRO} to evenly shard all parameters across different devices. Consequently, our parameter memory footprint can be kept low.
+
+
+
+\section{Experiments}
+
+Experiments are conducted on 128 NVIDIA H100 GPUs, interconnected via NVLink within nodes and InfiniBand across nodes. Our methods and implementations are not dependent on specific hardware architectures and can generalize to other devices, particularly those with less efficient interconnects. We follow the same baseline and settings as discussed in Section \ref{sec:setting}, utilizing 720M and 3B size Transformer-2D models in our experiments. Despite the existence of various 2D-Transformer variants, their architectures are fundamentally similar. Consequently, we select one base model similar to OpenSora \citep{Opensora}, an open-source video generation model, for our study.
+The code is implemented using PyTorch \citep{PyTorchAI}.
+
+In the following evaluations, we focus on addressing the following
+questions:
+1) How is DSP's end-to-end performance compared with other SOTA sequence parallelism?
+2) How is DSP's scaling ability when scale to many GPUs?
+3) What is DSP's memory consumption like in practice?
+
+\subsection{End-to-End Performance}
+
+In this section, we compare the end-to-end performance of different sequence parallelism methods on 128 NVIDIA H100 GPUs. We use a combination of sequence parallelism and data parallelism, with the sequence parallelism set to the minimum size for each method. We evaluate across different sequence lengths ranging from 0.5 million to 4 million tokens, which are common usages for video generation. As shown in Figure \ref{fig:e2e}, DSP is able to outperform DeepSpeed-Ulysses by 32\% to 75\%, and other methods by up to 10x due to its communication efficiency. As the sequence length becomes longer and the sequence parallel size increases, as DSP's communication volume decreases as the device number increases, our performance's advantage over the baselines becomes even more pronounced. When scaling from 0.5M to 4M tokens, our FLOPS drops by at most 23\%, while other methods experience at least a 40\% drop.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\linewidth]{images/e2e.pdf}
+  \caption{End-to-end performance comparison of different sequence parallel methods combined with data parallel on 128 NVIDIA H100 GPUs. The sequence parallel size is set to minimum for different method.}
+  \label{fig:e2e}
+\end{figure*}
+\subsection{Scaling Ability}
+This section evaluates the scaling ability of DSP from two perspectives: weak scaling and strong scaling. Weak scaling refers to scenarios where the computational workload per device remains constant while incrementally increasing the number of devices. This setup is analogous to the training stage, where the goal is to scale longer sequences over more GPUs. Strong scaling, on the other hand, is more challenging as it requires keeping the total computational workload constant while incrementally increasing the number of devices. In this case, the computation becomes more sparse on each device. Strong scaling is often employed when the objective is to infer an input sequence rapidly across many GPUs for low-latency applications. The experiments are divided into intra-node and inter-node evaluations due to the different interconnection conditions. Intra-node experiments leverage NVLink interconnect for communication, while inter-node experiments utilize a combination of NVLink and InfiniBand interconnect.
+
+\textbf{Weak Scaling.} In the weak scaling experiments, to maintain a consistent computational workload for each GPU, the batch size is linearly increased proportional to the number of GPUs, while the sequence length is fixed. As shown in Figures \ref{fig:scale-weak}, DSP significantly outperforms other methods by more than 80.7\%. Moreover, DSP can scale up to 64 GPUs without being limited by the number of attention heads, unlike DeepSpeed-Ulysses and Megatron-SP. Despite scaling to 64 GPUs, DSP maintains an almost linear throughput increase, with only a 15\% performance loss from 8 GPUs to 64 GPUs. Additionally, DSP can achieve super-linear scaling for intra-node setups due to reduced optimizer and gradient computation overhead, and its highly efficient performance within a single node.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\linewidth]{images/scaling-weak.pdf}
+  \caption{Weak scaling ability evaluation of different methods with sequence parallelism only. “×” denotes out of memory or head. Black boxes represent linear scaling.}
+  \label{fig:scale-weak}
+\end{figure*}
+
+\textbf{Strong Scaling.} In the strong scaling experiments, both the batch size and sequence length are fixed. As shown in Figure \ref{fig:scale-strong}, DSP can maintain linear scalability when scaling up to 8 GPUs for the 720 M model and 4 GPUs for the 3B model, which covers most practical scenarios. To evaluate the extreme performance capabilities of DSP, we further scale up to 64 GPUs with very little workload per device. Although there is an inevitable performance drop, DSP's throughput remains significantly better than the baselines, outperforming Ulysses by up to 62\%. As shown in Figure \ref{fig:latency}, we also compare the inference latency of all baselines with the same workload. DSP can speed up 29\% to 63\% compared with baselines.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\linewidth]{images/scaling-strong.pdf}
+  \caption{Strong scaling ability evaluation of different methods with sequence parallelism only. “×” denotes out of memory or head. Black boxes represent linear scaling.}
+  \label{fig:scale-strong}
+\end{figure*}
+
+\subsection{Memory Consumption}
+
+\begin{figure*}[t]
+
+\begin{minipage}[tb]{0.49\linewidth}
+  \centering  \includegraphics[width=1.\linewidth]{images/latency.pdf}
+  \caption{Inference latency comparison of different sequence parallelism methods.}
+  \label{fig:latency}
+\end{minipage}\hspace{3pt}
+\begin{minipage}[tb]{0.49\textwidth}
+  \centering  \includegraphics[width=1.\linewidth]{images/memory.pdf}
+  \caption{Memory comparison of different sequence parallelism methods.}
+  \label{fig:memory}
+\end{minipage}
+\end{figure*}
+Figure \ref{fig:memory} demonstrates the memory consumption comparison of different baselines in the weak scaling setting. The semi-transparent bar represents the cache memory, while the solid bar represents the allocated memory. The total memory usage is the sum of them. Our approach exhibits the lowest memory usage, scaling efficiently for longer sequences. Furthermore, DSP's memory usage is compact without excessive cache memory bloat, unlike Ring-Attention and Megatron-SP.
+
+
+
+
+\section{Conclusion and Discussion}
+
+In this work, we introduced Dynamic Sequence Parallelism (DSP), a novel sequence parallel abstraction for effectively scaling multi-dimensional transformers to long sequences. Unlike current embedded sequence parallelism methods that only shard on single sequence dimension and are tailored to specific tasks and patterns, DSP offers a general and elegant solution by dynamically switching the parallel dimension during computation, using an efficient resharding strategy decoupled from the computation module.
+The key advantages of DSP are: 1) substantially reduced communication costs, 2) adaptability across modules without specialized modifications, and 3) remarkable ease of implementation enabled by a simple high-level API. Our experiments demonstrated DSP's superiority, achieving from 32.2\% to 10x higher end-to-end throughput and at least 75\% lower communication volume compared to state-of-the-art methods.
+Its elegance and ease of use make it a promising solution for efficient sequence parallelism across a wide range of applications.
+
+One limitation of this work is that DSP is specifically designed for multi-dimensional transformers and may not adapt well to single-dimensional ones like language models. Additionally, while there are global operations that involve all sequence dimensions, which are rare in transformer, DSP may not be of optimal efficiency.
+
+In the future, DSP could expand its scope beyond transformer architectures to architectures including convolution, recurrent, and graph neural networks to utilize its potential across various tasks. Furthermore, automated optimization techniques could enable DSP to dynamically and autonomously determine the most effective switching strategy based on network analysis, thereby optimizing overall system efficiency and efficacy.
+
+
+

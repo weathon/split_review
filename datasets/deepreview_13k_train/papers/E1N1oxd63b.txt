@@ -1,0 +1,412 @@
+\title{ViDiT-Q: Efficient and Accurate Quantization of Diffusion Transformers for Image and Video Generation}
+
+\begin{abstract}
+\label{sec:abstract}
+Diffusion transformers have exhibited remarkable performance in visual generation tasks, such as generating realistic images or videos based on textual instructions. However, larger model sizes and multi-frame processing for video generation lead to increased computational and memory costs, posing challenges for practical deployment on edge devices. Post-Training Quantization (PTQ) is an effective method for reducing memory costs and computational complexity.
+When quantizing diffusion transformers, we find that applying existing diffusion quantization methods designed for U-Net faces challenges in preserving quality. After analyzing the major challenges for quantizing diffusion transformers, we design an improved quantization scheme: ViDiT-Q (\textbf{V}ideo \& \textbf{I}mage \textbf{Di}ffusion \textbf{T}ransformer \textbf{Q}uantization) to address these issues.
+Furthermore, we identify highly sensitive layers and timesteps hinder quantization for lower bit-widths. To tackle this, we improve ViDiT-Q with a novel metric-decoupled mixed-precision quantization method (ViDiT-Q-MP). 
+We validate the effectiveness of ViDiT-Q across a variety of text-to-image and video models. While baseline quantization methods fail at W8A8 and produce unreadable content at W4A8, ViDiT-Q achieves lossless W8A8 quantization. ViDiT-Q-MP achieves W4A8 with negligible visual quality degradation, resulting in a 2.5x memory optimization and a 1.5x latency speedup.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figs/failure_cases.pdf}
+    \caption{\textbf{The Challenges for existing diffusion quantization methods, and ViDiT-Q's solutions.} ViDiT-Q introduced improved quantization scheme tailored for DiT to achieve lossless W8A8, and metric decoupled mixed precision tailored for video generation to mitigate degradation for W4A8.}
+    \label{fig:failure_cases}
+\end{figure}
+
+\label{sec:intro}
+Diffusion Transformers~\cite{u-vit,dit} and video generation tasks~\cite{make-a-video,latte,open-sora} have garnered significant research interest since the impressive performance of SORA~\cite{sora}. 
+However, the increasing model size poses challenges for application and deployment on edge devices. 
+In the realm of video generation, processing multiple frames imposes a significant burden on both memory and computation.
+For example, the OpenSORA~\cite{open-sora} model consumes over 10 GB of GPU memory to generate a single 512$\times$512 resolution video with only 16 frames, taking about 50 seconds on an Nvidia A100 GPU.
+
+Model quantization~\cite{jacob_quantization,quant_white_paper} has proven to be an effective compression method.
+By compressing high bit-width floating-point (FP) data into lower bit-width integers, the computational and memory costs of the model can be effectively reduced.
+While many prior studies~\cite{q-diffusion,ptqd} have explored quantization for CNN (U-Net)-based diffusion models~\cite{ldm}, we empirically observe challenges when quantizing Diffusion Transformers (DiTs) for image and video generation.
+Specifically, as illustrated in ~\cref{fig:failure_cases}, the W8A8 quantized open-sora (STDiT~\cite{open-sora}) model experiences notable quality degradation (the turtle has multiple fins), and the W4A16 quantized model produces single-colored blank frames.
+
+By observing the data distribution (See \cref{fig:ditq_motivation}), we conclude the primary issue with DiT quantization is adopting the same set of fixed quantization parameters for highly variant values in 4 levels (See \cref{sec:challenges}): (1) Input-channel level, (2) Token level, (3) Timestep level, and (4) Classifier-free-guidance level. 
+Correspondingly, we design an improved quantization scheme: \textbf{``ViDiT-Q''}, tailored for DiTs, to address this challenge.
+This scheme includes timestep-aware channel balancing, token-wise and dynamic quantization.
+ViDiT-Q enables W8A8 quantization without visual degradation.
+
+Furthermore, in \cref{fig:failure_cases}, when we continue to explore lower-bit quantization with uniform bit-widths (W6A6 and W4A8), notable degradation is witnessed.
+Through investigation, we discover that the quantization sensitivity varies significantly across layers and timesteps.
+Certain layers exhibit high sensitivity, acting as ``bottlenecks'' for quantization.
+To address this issue, inspired by prior mixed precision research~\cite{practical_mixed_precision,haq,hawq,mixdq}, we adopt higher bit-widths to ``protect'' these sensitive layers.
+When assigning proper bit-width for each layer, we find that simple Mean Square Error with FP-generated videos~\cite{meta_q_diffusion} cannot adequately distinguish quantization's effects on various aspects of the video, such as quality~\cite{fvd,vqa}, text-video alignment~\cite{clipscore}, and temporal consistency~\cite{flow_score}.
+To overcome this, we propose to ``decouple'' these aspects by utilizing corresponding evaluation metrics, and introduce ``metric-decoupled'' quantization sensitivity estimation method to assist in mixed precision bit-width allocation.
+We summarize our contributions as follows:
+\begin{enumerate}
+    \item We conduct extensive analysis and identify challenges for DiT quantization and design a specialized quantization scheme, ``ViDiT-Q'', to address these issues.
+    \item We identify the quantization  ``bottlenecked'' in lower bit-widths and propose a metric-decoupled mixed-precision method to mitigate this problem.
+    \item  We validate the effectiveness of ``ViDiT-Q'' on extensive DiT models for both image and video generation. It achieves W8A8 with negligible metrics loss, and ``ViDiT-Q-MP'' achieves W4A8 with minimal visual degradation, resulting in 2-2.5x memory saving and 1.5x latency speedup.
+\end{enumerate}
+
+
+
+\section{Related Works}
+
+\label{sec:related_work}
+
+\subsection{Diffusion Transformers for Image and Video Generation}
+\label{sec:rw_dit}
+Diffusion Transformers (DiTs), which employ Transformers~\cite{transformer} to replace the CNN-based diffusion backbones (U-Net~\cite{unet}) in prior research~\cite{ldm,sdxl}, have achieved remarkable performance in visual generation.
+\textbf{Image Generation:} DiT \cite{dit} and UViT \cite{u-vit} pioneer the use of transformers as diffusion backbones. Subsequent research~\cite{hatamizadeh2023diffit,lu2024fit,zheng2024fast} makes further advancements in architecture design and training methods. PixArt-$\alpha$ \cite{pixart-alpha} explores text-to-image generation with DiTs, PixArt-$\Sigma$ \cite{pixart-sigma} extends generation resolution to 4K.
+\textbf{Video Generation:} Early video generation models \cite{vdm, imagen-video, animatediff} mainly adopted CNN backbones. Latte~\cite{latte} pioneer the use of transformers for text-to-video generation. The success of SORA \cite{sora} inspire the development of video diffusion transformers such as GenTron \cite{gentro}, and open-sora STDiT \cite{open-sora}. Both high-resolution image generation and multi-frame video generation add to hardware costs, \textbf{necessitating efficiency improvements}.
+
+\subsection{Image and Video Generation Evaluation Metrics}
+\label{sec:rw_eval}
+Visual generation can be evaluated from multiple aspects, and many metrics are introduced accordingly. 
+\textbf{Image Metrics:} FID \cite{heusel2017fid} and IS \cite{salimans2016is} are two commonly adopted metrics for measuring the Inception network feature difference between generated and reference images for quality and fidelity assessment. ClipScore \cite{clipscore} evaluates how well the generated image follows the prompt instruction (text-image alignment), while ImageReward \cite{imagereward}, HPS~\cite{hps} incorporates human preference by collecting actual user data to train the reward model. 
+\textbf{Video Metrics:} FVD extends the feature-based metric FID to the video domain. CLIPSIM \cite{clipsim} estimates the similarity between video and text instructions. CLIP-temp \cite{cliptemp} measures the semantic similarity between video frames. Flow-score is proposed as part of the video evaluation benchmark EvalCrafter \cite{evalcrafter} to assess motion quality. EvalCrafter also adopts DOVER \cite{vqa} for video quality assessment. These \textbf{metrics from multiple aspects should be considered} when evaluating the effect of quantization. 
+
+\subsection{Model Quantization}
+\label{sec:rw_quant}
+Post Training Quantization (PTQ) has proven to be an efficient and effective model compression method~\cite{quant_white_paper}. It converts the floating-point data into low-bit integers, the process could be represented as: $x_{q}=\text{round}(\text{clamp}((x-z)/s,-2^{B-1},2^{B-1}-1))$. The $s$ (scale) and $z$ (zero point) are quantization parameters, which are determined offline based on a set of calibration data with $S=\text{max}(\text{abs}(x)); z=(\text{max}+\text{min})/2$.
+\textbf{Diffusion Model:} Prior research Q-Diffusion~\cite{q-diffusion} and PTQD~\cite{ptqd} apply post training quantization for diffusion models. Other research~\cite{ptqd,meta_q_diffusion,tdq,tmpq_dm,eda-dm,diff_quant_cpu} continue to improve diffusion quantization from the unique timestep dimension. \textbf{Transformer:} Prior research has made advances in quantizing transformers for both the ViT~\cite{ptq4vit,ptq4vit_2,vvtq,fqvit} and language model quantization~\cite{zeroquant,llm_int8,smooth_quant,eval_quant_llm}. To the best of our knowledge, \textbf{no prior research has investigated the DiT quantization}. We identify the challenges of applying existing methods to DiT quantization, and design a novel specialized technique as a solution.  
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figs/method.pdf}
+    \caption{\textbf{The overall framework of ViDiT-Q.} We design quantization scheme tailored for DiT's unique challenges, and introduce mixed precision specialized for video generation.}
+    \label{fig:method}
+\end{figure}
+
+
+\section{Methods}
+
+\label{sec:method}
+
+The framework of the \textbf{ViDiT-Q} quantization method is illustrated in \cref{fig:method}. We start by analyzing the unique challenges for quantizing DiTs (Sec.~\ref{sec:challenges}). Then, we introduce an improved quantization scheme, ViDiT-Q, specialized for DiTs to address these challenges (Sec.~\ref{sec:ditq}). Further, we develop a metric-decoupled mixed-precision method to improve quantization under lower bit-widths (Sec.~\ref{sec:mixed_precision}). 
+\begin{figure}[t] 
+    \centering
+    \includegraphics[width=0.9\textwidth]{figs/ditq_motivation.pdf}
+    \caption{\textbf{The challenges of DiT quantization.} The key unique challenge of DiT quantization lies in the variance of data at multiple levels. The above figures depicts the distribution of activation along different dimensions for STDiT model's layer ``blocks.26.ffn.fc1''. }
+    \label{fig:ditq_motivation}
+\end{figure}
+
+\subsection{Challenges for DiT Quantization}
+\label{sec:challenges}
+
+As presented in Sec.~\ref{sec:intro} and \cref{fig:failure_cases}, directly applying existing diffusion quantization methods to DiTs leads to notable degradation for W8A8 and  produces blank images for W4A8. We delve into the reasons for these failures by examining the data distributions. As illustrated in \cref{fig:ditq_motivation}, we discover that the unique challenge for DiT quantization lies in the \textbf{data variance in multiple levels}. Existing methods use \textbf{fixed and coarse-grained quantization parameters}, which struggle to handle highly variant data. We summarize the data variance in \textbf{four levels} as follows:
+
+\begin{itemize}
+    \item \textbf{Token-wise Variance:} In DiTs, the activation consists of visual tokens, We observe notable difference exists between these tokens. 
+    \item \textbf{CFG-wise Variance:} For conditional generation, the classifier-free-guidance~\cite{classifier-free-guidance} (CFG) conducts two separate forwards with and without the control signal (often implemented with batch). We observe notable difference in activation range between the conditional part (red square) and the unconditional part (blue square).
+    \item \textbf{Timestep-wise Variance:} Diffusion method iterates the model for multiple timesteps. We observe notable variance in activation for the same layer across timesteps. 
+    \item \textbf{Input Channel-wise Variance:} For both the weight and activation, we witness significant difference across different input-channel.   
+\end{itemize}
+
+
+\subsection{ViDiT-Q: Improved DiT Quantization Scheme}
+\label{sec:ditq}
+
+\subsubsection{Token-wise Quantization}
+\label{sec:token_wise_quant}
+
+The primary distinction between DiT and previous UNet-based diffusion models lies in the feature extraction operator. While U-Net employs convolution layers for local pixel feature aggregation, DiT utilizes linear and attention layers for processing image tokens. Therefore, following prior literature on transformer-based Language Model (LM) quantization~\cite{smooth_quant, zeroq, eval_quant_llm}, we focus on quantizing linear layers. 
+
+In convolutions, neighboring pixel values are summed together. During quantization, these values need to share the same quantization parameters for practical acceleration~\cite{quant_white_paper}. Therefore, current CNN-based diffusion quantization methods primarily adopt tensor-wise quantization parameters. However, as discussed earlier, token values exhibit notable variation in DiT activation. Applying the same set of quantization parameters to them leads to large quantization errors. In contrast to convolution layers, linear layers do not require summation between tokens. Thus, \textbf{token-wise quantization parameter assignment} is applicable, which can mitigate \textbf{``token-wise variance''} challenge. We further analyze the extra cost of introducing token-wise quantization parameters. The token-wise quantization parameter size is negligible compared with the activation (around $1/1000$).
+
+
+\subsubsection{Dynamic Quantization}
+\label{sec:dynamic_quant}
+
+The ``CFG-wise variance'' and ``Timestep-wise variance'' present two unique challenges for diffusion models. To the best of our knowledge, no prior research addresses the CFG-wise variation. Regarding timestep-wise variance, prior diffusion quantization methods~\cite{tdq, efficientDM} tackle this issue by adopting timestep-wise quantization parameters through calibration or gradient-based optimization. However, such a process is costly and may encounter challenges when generalizing to unseen conditions.
+
+Inspired by recent advances in language model quantization~\cite{zeroquant, smooth_quant}, we adopt \textbf{dynamic quantization that calculates the quantization parameters online  for activation quantization}. We utilize the simple minmax quantization scheme, so the cost of obtaining quantization parameters online is acceptable (obtaining data's max and min).
+ Moreover, the cost could be further mitigated with kernel fusion techniques~\cite{kernel_fusion}. While dynamic quantization has been utilized for language models, we emphasize its importance for diffusion models due to the unique \textbf{``CFG-wise variance''} and \textbf{``timestep-wise variance''} challenges.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.88\textwidth]{figs/timestep_wise_channel_balance.pdf}
+    \caption{\textbf{The illustration of timestep-wise channel balancing.} Because the activation quantization difficulty changes across timesteps, we assign different $\alpha$ for each range to adjust the difficulty.}
+    \label{fig:method_time_channel_balance}
+\end{figure}
+
+\subsubsection{Timestep-aware Channel Balancing}
+\label{sec:timestep_channel_balancing}
+
+The above challenges exist in activation quantization only. However, for both weights and activations, there exists \textbf{input channel-wise variance}. A few channels have significantly larger values ($>100\times$) than others, leading to the majority of values being quantized to zero. Following prior channel balancing quantization methods~\cite{smooth_quant, awq}, we introduce a per-channel balancing mask $ s \in \mathcal{R}^{C_i} $. By dividing the activation with $s$ and multiplying $s$ with weights, it shifts the quantization difficulty from activation to weights, and vice versa. The channel balancing mask could be calculated as follows:
+
+\begin{equation}
+    Y = (X \text{diag}(s)^{-1}) \cdot ((\text{diag}(s)W)) = \hat{X}\cdot\hat{W};  \\
+    \quad s_i = \text{max}(|X_i|)^{\alpha} / \text{max}(|W_i|)^{1-\alpha},
+\end{equation}
+where $X,Y,W$ represents the inputactivation , output activation, and weights. The $s$ is the aforementioned channel-wise balancing mask, and $\alpha$ is a hyperparameter. 
+Channel balancing can effectively alleviate the input channel-wise variance. However, we empirically discover that it is very sensitive to $\alpha$ choices, and \textbf{still yields unsatisfactory performance}. We further investigate such limitations and observe that the activation distribution is notably different across timesteps. As shown in \cref{fig:method_time_channel_balance} for the blocks.27.ffn.fc2 layer, the outlier values are more prominent for later denoising steps (t=100).  \textbf{The ``quantization difficulty'' changes significantly across timesteps}. Therefore, employing the same alpha for earlier stages may shift too much difficulty from activations to weights, harming the weight quantization (especially for lower bit-width such as W4). For latter stages, the $\alpha$ is not big enough, and the activation quantization is not sufficiently compensated.
+
+To address this issue, as presented in \cref{fig:method_time_channel_balance}, we design a \textbf{timestep-aware channel balancing} that assigns different $\alpha$ for different timesteps. We empirically find that the distribution of most layers starts to become acute after halfway. To minimize the cost of $\alpha$ tuning, we equally divide the diffusion process into two halves. Specifically, it could be inferred from the distribution that the former $\alpha_1$ should be smaller than globally tuned $\alpha$, and vice versa for the latter $\alpha_2$. With the assistance of such prior, we can efficiently acquire a well-performing $\alpha$ within 20 PTQ processes ($<$ 1 GPU hour). 
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.87\textwidth]{figs/motivation_mixed_precision.pdf}
+    \caption{\textbf{The quantization ``bottleneck'' phenonmenon and the motivation of metric decoupled analysis.} Some highly sensitive layers hinder the quantization, and quantization's effect on multiple aspects needs decoupling for accurate sensitivity. The values in the lower-right heatmap are calculated by applying z-score normalization~\cite{z-score-normalization} to the metric changes when certain layer types are quantized.}
+    \label{fig:motivation_mixed_precision}
+\end{figure}
+ 
+
+\subsection{Metric Decoupled Mixed Precision Design}
+\label{sec:mixed_precision}
+
+\subsubsection{Arch-level and Timestep-level Mixed Precision}
+
+As seen in \cref{fig:failure_cases}, for lower bit-width settings (e.g., W6A6 and W4A8), quality degradation is still observed.
+When investigating the reasons for such failure, we find that some layers, despite having relatively low quantization error, could significantly affect quantization. As presented in \cref{fig:motivation_mixed_precision}, W4A16 quantization produces blank images, but simply skipping quantizing the ``blocks.27.ffn.fc2'' layer in the STDiT model results in output containing readable content. This reflects that \textbf{quantization is ``bottlenecked'' by some highly sensitive layers}. To address such ``bottleneck'' phenomenon, an intuitive solution is to assign higher bit-widths to ``protect'' these sensitive layers. We identify variance in quantization sensitivity across the layers and timesteps, and propose applying mixed precision in these two levels.
+
+\subsubsection{Metric Decoupled Sensitivity Analysis}
+
+The main challenge with mixed precision allocation lies in identifying the sensitive layers. 
+Prior literature measures quantization sensitivity by quantizing specific layers alone and then calculating the Mean Squared Error (MSE) with the floating-point output to indicate their sensitivity.
+However, video evaluation has multiple aspects, \textbf{the MSE error alone may not accurately reflect overall generation performance}. As illustrated in the upper-right part of \cref{fig:motivation_mixed_precision}, although the left video has a higher MSE error, it exhibits better visual quality than the right video, which fails to correctly generate birds but shows some white fractures (denoted with red squares). This underscores the necessity to enhance sensitivity analysis metrics for video generation.
+
+In exploring sensitivity analysis design, we find that \textbf{quantization's impact on various aspects of generation quality is strongly correlated with layer types}. As observed in the lower-right part of \cref{fig:motivation_mixed_precision}, cross-attention layers contribute significantly more than other layers to ``content change''. Similarly, ``visual quality'' is mainly affected by spatial attention and FFN layers, while ``temporal consistency'' is primarily influenced by temporal attention layers.
+Building upon this finding, we propose to \textbf{``disentangle'' the mixed influences of quantization on multiple aspects} of generation performance and develop a metric-decoupled sensitivity analysis method. We categorize layers into three groups based on their effects on different aspects and use the corresponding metrics as sensitivity measures. Subsequently, we identify layers with significantly higher relative sensitivity and adjust their bit-width accordingly. For timestep mixed precision, we divide the entire process into four equal ranges and quantize them separately to identify the most sensitive part. Following these principles, we design mixed-precision versions of ViDiT-Q for W6A6 and W4A8.
+\begin{table*}[t]
+\centering
+\renewcommand{\arraystretch}{1.25}
+\caption{\textbf{Performance of ViDiT-Q text-to-video generation on VBench evaluation benchmark suite.} The bit-width ``16'' represents FP16 without quantization. The ``ViDiT-Q-MP'' denotes quantization with mixed precision, which keeps a small portion of layers as W8A8.}
+\resizebox{0.96\linewidth}{!}{
+\label{tab:main_vbench}
+\begin{tabular}{cccccccccccc}
+\toprule[1pt]
+\multirow{2}{*}{\textbf{Model}} & \multirow{2}{*}{\textbf{Method}} & \textbf{Bit-width} & Imaging & Aesthetic & Motion & Dynamic & BG. & Subject & Scene & Overall \\
+ &  & (W/A) & Quality & Quality & Smooth. & Degree &  Consist. & Consist. & Consist. & Consist. \\ 
+\midrule \midrule
+\multirow{4}{*}{\textbf{\large STDiT}} & - & 16/16 & 63.68 & 57.12 & 96.28 & 56.94 & 96.13 & 90.28 & 39.61 & 26.21 \\
+ \cmidrule(lr){2-12}
+ & Naive PTQ & 8/8 & 56.52 & 53.64 & 95.85 & 69.44 & 93.54 & 85.30 & 29.28 & 25.42 &   \\
+(OpenSORA) & ViDiT-Q & 8/8 & 63.48 & 56.95 & 96.14 & 61.11 & 95.84 & 90.24 & 38.22 & 26.06 &   \\
+  \cmidrule(lr){2-12}
+  & ViDiT-Q-MP & 6/6 & 62.07 & 57.03 & 95.86 & 62.50 & 95.86 & 89.34 & 39.46 & 26.41   \\
+ & ViDiT-Q-MP & 4/8 & 61.07 & 55.37 & 95.69 & 58.33 & 95.23 & 88.72 & 36.19 & 25.94
+   \\
+\bottomrule[1pt]
+\end{tabular}}
+\end{table*}
+\begin{table}[t]
+\centering
+\renewcommand{\arraystretch}{1.25}
+\caption{\textbf{Performance of text-to-video generation on UCF-101 Dataset.}. The description of metrics is provided in Sec.~\ref{sec:exp_settings}, unless specified with $\downarrow$, higher metric values denote better performance.}
+\resizebox{0.96\linewidth}{!}{
+\label{tab:main_ucf}
+\begin{tabular}{ccccccccccc}
+\toprule[1pt]
+\multirow{2}{*}{\textbf{Model}} & \multirow{2}{*}{\textbf{Method}} & \textbf{Bit-width} & \multirow{2}{*}{\textbf{FVD($\downarrow$)}} & \multirow{2}{*}{\textbf{FVD-FP16($\downarrow$)}} & \multirow{2}{*}{\textbf{CLIPSIM}} &  \multirow{2}{*}{\textbf{CLIP-T}} & VQA- & VQA- & Flow & Temp.  \\
+ &  & (W/A) & & & & & \small{Aesthetic} & \small{Technical} & Score. & Flick.  \\
+\midrule \midrule
+\multirow{5}{*}{\textbf{\large STDiT}} & - & 16/16  & 136.87 & 0.00 & 0.1996 & 0.9978 & 41.63 & 56.64 & 2.24 & 97.53 \\
+ \cmidrule(lr){2-11}
+ & Naive PTQ & 8/8 & 154.92 & 50.72 & 0.1993 & 0.9968 & 27.52 & 35.50 & 2.61 & 97.02  \\
+ & ViDiT-Q & 8/8 & 141.13 & 15.52 & 0.1995 & 0.9978 & 43.59 & 55.36 & 2.32 & 97.45 \\
+ \cmidrule(lr){2-11}
+  & Naive PTQ & 4/8 & 544.34 & 637.02 & 0.1868 & 0.9982 & 0.16 & 0.13 & 1.61 & 99.90  \\
+  & ViDiT-Q-MP & 4/8 & 129.10 & 60.13 & 0.1995 & 0.9977 & 33.98 & 47.65 & 1.89 & 97.57 \\
+\midrule
+\multirow{5}{*}{\textbf{\large Latte}} & - & 16/16 & 99.90 & 0.00 & 0.1970 & 0.9963 & 36.33 & 91.23 & 3.37 & 96.22 \\
+ \cmidrule(lr){2-11}
+ & Naive PTQ & 8/8 & 98.75 & 73.82 & 0.1981 & 0.9950 & 27.62 & 50.52 & 3.53 & 95.35  \\
+ & ViDiT-Q & 8/8 & 110.96 & 20.83 & 0.1959 & 0.9962 & 30.26 & 80.32 & 3.14 & 95.95  \\
+ \cmidrule(lr){2-11}
+  & Naive PTQ & 4/8 & 183.52 & 239.08 & 0.1719 & 0.9929 & 5.62 & 0.41 & 66.06 & 65.14  \\
+  & ViDiT-Q & 4/8 & 95.04 & 79.11 & 0.1943 & 0.9971 & 21.76 & 32.17 & 2.84 & 95.57 \\
+\bottomrule[1pt]
+\end{tabular}}
+\end{table}
+
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+\subsection{Implementation Details and Experimental Settings}
+\label{sec:exp_settings}
+
+We evaluate the performance of ViDiT-Q on a variety of models, bit-widths and evaluation settings.
+
+\textbf{Quantization Scheme:} We adopt the simple minmax quantization scheme. 
+The quantization parameters for activation are dynamic and computed online with negligible overhead. The channel balancing $\alpha$ and the mixed precision plan are determined offline based on the calibration data. 
+
+\textbf{Mixed Precision Strategy} 
+For W6A6, we discover the FFN layers for blocks 6 and 26 are significantly more sensitive, since they account for < 1\% of the overall latency, we maintain  them as FP16, and keep the rest layers as W6A6. For W4A8, we witness notable higher sensitivity for most FFNs, for simplicity, we set all FFN layers (15$\%$ layers) as W8A8, and set the rest as W4A8. Also, we discover the first quarter of timesteps is more sensitive, and set them to W8A8. 
+
+\textbf{Video Genration Evaluation Settings:} We apply ViDiT-Q to Latte~\cite{latte} and STDiT (open-sora)~\cite{open-sora} and evaluate them in two settings. (1) \textbf{Benchmark suite:} We evaluate the quantized model on VBench~\cite{vbench} to provide comprehensive results  . Following prior research~\cite{consistI2V}, we select 8 major dimensions from Vbench. (2) \textbf{Multi-aspects metrics:} For more flexible evaluation, we select representative metrics for each aspect, and measure them on UCF-101~\cite{ucf101} and open-sora~\cite{open-sora} prompt sets. Following EvalCrafter~\cite{evalcrafter}, we select \textit{CLIPSIM} and \textit{CLIP-Temp} to measure the text-video alignment and temporal semantic consistency, and DOVER~\cite{vqa}'s video quality assessment (\textit{VQA}) metrics to evaluate the generation quality from aesthetic (high-level) and technical (low-level) perspectives, \textit{Flow-score} and \textit{Temporal Flickering} are used for evaluating the temporal consistency. The commonly adopted \textit{FVD}~\cite{fvd} is also provided. Specifically, due to the lack of ground-truth videos for prompt-only datasets, inspired by~\cite{progressive_quant_diffusion}, we also report \textit{FVD-FP16} which chooses the FP16 generated video as ground-truth. The above metrics are evaluated on 101 prompts (1 for each class) for UCF-101, and 10 example prompts for open-sora. We adopt the class-conditioned Latte model trained on UCF-101. 
+We use the 20-steps DDIM solver with CFG scale of 7.0 for Latte, and 100-steps DDIM with CFG scale of 4.0 for STDiT. 
+
+\textbf{Image Evaluation Settings:} We apply ViDiT-Q to PixArt-$\alpha$ and PixArt-$\Sigma$ model on the the first 1024 prompts of COCO annotations~\cite{coco}. We choose \textit{FID}~\cite{heusel2017fid} for fidelity evaluation, \textit{Clipscore}~\cite{clipscore} for text-image alignment, and \textit{ImageReward}~\cite{imagereward} for human preference in multiple aspects. Following the original code implementation, we use the 20-steps DPM-solver with CFG scale of 4.5. 
+
+\begin{table}[t]
+\centering
+\renewcommand{\arraystretch}{1.25}
+\caption{\textbf{Comparison of quantization methods on open-sora prompt set.} Due to the lack of existing DiT quantization method, we adapt baseline quantization methods to DiT.}
+\resizebox{0.8\linewidth}{!}{
+\label{tab:main_quant_comparison}
+\begin{tabular}{cccccccc}
+\toprule[1pt]
+\multirow{2}{*}{\textbf{Model}} & \multirow{2}{*}{\textbf{Method}} & \textbf{Bit-width} & \multirow{2}{*}{\textbf{CLIPSIM}} &  \multirow{2}{*}{\textbf{CLIP-Temp}} & VQA- & VQA- & Flow  \\
+ &  & (W/A) & & & \small{Aesthetic} & \small{Technical} & Score.  \\
+\midrule \midrule
+\multirow{13}{*}{\textbf{\large STDiT}} & - & 16/16 &  0.1797 & 0.9988 & 63.4014 & 50.4597 & 0.9751 \\
+ \cmidrule(lr){2-8}
+ & Naive PTQ & 8/8 & 0.1956 & 0.9988 & 48.2358 & 25.5961 & 0.6081  \\
+ & PTQ4DM~\cite{ptq4dm} & 8/8 & 0.1812 & 0.9984 & 50.0674 & 25.1344 & 0.6335  \\
+ & Q-Diffusion~\cite{q-diffusion} & 8/8 & 0.1781 & 0.9987 & 51.6834 & 38.2680 & 0.6473 \\
+ & ZeroQuant~\cite{zeroquant} & 8/8 & 0.1938 & 0.9988 & 58.3127 & 51.5312 & 0.6442  \\
+ & ViDiT-Q & 8/8 & 0.1950 & 0.9991 & 60.7025 & 54.6361 & 0.8865  \\
+\cmidrule(lr){2-8}
+  & Naive PTQ & 6/6 & 0.1912 & 0.9964 & 14.6374 & 10.6919 & 33.611  \\
+  & PTQ4DM~\cite{ptq4dm} & 6/6 & 0.1804 & 0.9977 & 20.9610 & 8.6566 & 0.7600  \\
+  & ViDiT-Q-MP & 6/6 & 0.1794 & 0.9983 & 60.8124 & 53.4413 & 1.2266\\
+ \cmidrule(lr){2-8}
+  & Naive PTQ & 4/8 & 0.2010 & 0.9986 & 0.1765 & 0.0863 & 1.5722  \\
+  & PTQ4DM~\cite{ptq4dm} & 4/8 & 0.1727 & 0.9981 & 0.4781 & 0.2672 & 1.5298  \\
+  & SmoothQuant~\cite{smooth_quant} & 4/8 & 0.1910 & 0.9989 & 31.9626 & 22.8467 & 0.5594 \\
+  & ViDiT-Q-MP & 4/8 & 0.1809 & 0.9989 & 60.6158 & 49.3838 & 1.1278  \\
+\bottomrule[1pt]
+\end{tabular}}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.54\textwidth}
+        \centering
+        \resizebox{1.0\linewidth}{!}{
+            \begin{tabular}{cccccc}
+            \toprule[1pt]
+            \multirow{2}{*}{\textbf{Model}} & \multirow{2}{*}{\textbf{Method}} & \textbf{Bit-width} & \multirow{2}{*}{\textbf{FID($\downarrow$)}} & \multirow{2}{*}{\textbf{CLIP($\uparrow$)}} & \multirow{2}{*}{\textbf{IR($\uparrow$)}} \\
+             &  & (W/A) & & & \\
+            \midrule \midrule
+            \multirow{5}{*}{\textbf{\large Pixart-$\alpha$}} & -      & 16/16 &  73.338 &  0.258 &  0.901 \\
+             \cmidrule(lr){2-6}
+            & \multirow{2}{*}{Naive}  & 8/8 & 115.14 & 0.226 & -0.953\\
+            & & 4/8 & 108.40 & 0.234 & -0.725\\
+             \cmidrule(lr){2-6}
+             & \multirow{2}{*}{ViDiT-Q} &  8/8 &  75.613 &  0.259 &  0.917\\
+            & & 4/8 & 74.326 & 0.257 & 0.887\\
+            \midrule
+            \multirow{5}{*}{\textbf{\large Pixart-$\Sigma$}} & -  & 16/16 & 72.699 & 0.262 & 0.929 \\
+             \cmidrule(lr){2-6}
+            & \multirow{2}{*}{Naive}  & 8/8 & 302.12 & 0.163 & -2.236\\
+            &  & 4/8 & 287.80 & 0.165 & -2.219\\
+             \cmidrule(lr){2-6}
+             &  \multirow{2}{*}{ViDiT-Q}  & 8/8 &   72.845 & 0.263 & 0.926 \\
+            &  & 4/8 & 71.936 & 0.264 & 0.944\\
+            \bottomrule[1pt]
+            \end{tabular}
+            }
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.40\textwidth}
+        \centering
+        \begin{subfigure}[b]{1.0\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{figs/qualitative_img.pdf}
+            \label{fig:hardware:b}
+        \end{subfigure}%
+    \end{minipage}
+    \caption{\textbf{Performance of ViDiT-Q text-to-image generation on COCO.} Left: The metric scores of PixArt-$\alpha$ and PixArt-$\Sigma$ quantization. Right: Generated image comparison of W8A8 quantization.}
+    \label{fig:main_images}
+\end{figure}
+
+\subsection{Main Results}
+
+ 
+
+ ViDiT-Q's W4A8 even outperforms baseline W8A8. It's worth noting that some abnormal scores are due to the baseline's failure to generate meaningful contents. Besides, having a flow-score that is either too high or too low than FP videos indicates degradation. Also, we discover that the FVD fluctuates heavily with less data (101 videos). We find that FVD-FP16 shows better correlation with visual perception. 
+
+\textbf{Comparison with other quantization methods:} We compare ViDiT-Q with other quantization methods in \cref{tab:main_quant_comparison}. Due to the lack of a baseline DiT quantization method, we adapt prior diffusion and transformer quantization methods to DiTs. For W8A8, ViDiT-Q outperforms other quantization methods and achieves similar metric scores to FP16. For the challenging W4A8, only SmoothQuant~\cite{smooth_quant} could prevent generation failure. ViDiT-Q with mixed precision further improves performance to be comparable with baseline W8A8 quantization. 
+
+\textbf{Text-to-image generation on COCO:} As presented in \cref{fig:main_images}, ViDiT-Q significantly improves generation quality from blurred and unreadable to almost identical to the FP generation. The metric scores are similar and even higher than FP16 baseline for W8A8 and W4A8.
+
+\textbf{Ablation Studies:} We conduct ablation studies by gradually incorporating ViDiT-Q's techniques to the challenging W4A8 quantization. As shown in \cref{tab:ablation}, the introduction of dynamic quantization marks the beginning of the generation meaningful content. The subsequent integration of channel balancing, along with its timestep-wise version, further improves generation quality. Nevertheless, we still observe significant degradation, underscoring the necessity for mixed precision strategies. 
+
+
+\subsection{Hardware Resource Savings}
+\label{sec:exp_hardware}
+
+\textbf{Memory footprint reduction.} Fig.~\ref{fig:hardware} (a) shows the GPU memory usage of ViDiT-Q and the FP16 baseline. ViDiT-Q can reduce the memory from two aspects: (1) Weight quantization reduces the allocated memory for storing model weights. (2) Activation quantization reduces allocated memory to store intermediate activations. Combining the two benefits, ViDiT-Q can effectively reduce the peak memory footprint by 2$\times$, 
+2.42$\times$ and 2.67$\times$ under the W8A8, W4A8-MP and W6A6-MP.
+\noindent
+\textbf{Latency speedup.} We present the latency speedup in Fig.~\ref{fig:hardware}-(b). Due to lack of W6A6/W4A8 or dynamic quantization kernels, we adopt the INT8 GPU kernels to estimate the latency speedup. Replacing FP16 layers with INT8 achieves $\sim2\times$ acceleration. Considering the unquantizable layers (norms, nonlinears, attention), and the FP to INT conversion cost, the overall speedup is 1.47$\times$. 
+ 
+
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Ablation studies of ViDiT-Q techniques.}. By gradually incorporating ViDiT-Q's techniques, W4A8 quantization improves from failure to acceptable.}
+\resizebox{1.0\linewidth}{!}{
+\label{tab:ablation}
+\begin{tabular}{ccccccccc}
+\toprule[1pt]
+\multicolumn{3}{c}{\textbf{Methods}} & \textbf{Bit-width} & \multirow{2}{*}{CLIPSIM} &  \multirow{2}{*}{CLIP-Temp} & VQA- & VQA- & Flow  \\
+ \cmidrule(lr){1-4}
+\small{Dynamic} & \small{Channel Balance} & \small{Timestep-aware CB} & (W/A) & & & \small{Aesthetic} & \small{Technical} & Score.  \\
+\midrule \midrule
+ - & - & - & 16/16 & 0.180 & 0.998 & 64.198 & 51.904 & 1.427 \\
+\midrule
+  - & - & -  & 4/8 & 0.201 & 0.997 & 0.178 & 0.086 & 1.572 \\ 
+ \checkmark & -  & - & 4/8 & 0.196 & 0.998 & 32.217 & 10.994 & 0.884 \\
+ \checkmark  & \checkmark & - & 4/8 & 0.191 & 0.999 & 31.963 & 22.847 & 1.117 \\ 
+ \checkmark & \checkmark & \checkmark & 4/8 & 0.199 & 0.999 & 51.823 & 23.215 & 1.189 \\ 
+\bottomrule[1pt]
+\end{tabular}}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.4\textwidth}
+        \centering
+        \resizebox{1.0\linewidth}{!}{
+        \begin{tabular}{cccc}
+            \toprule[1pt]
+            Bit-width & BitOps & Memory & \multirow{2}{*}{Latency} \\
+            (W/A) & Opt. & Opt. \\
+            \midrule \midrule
+            16/16 & 1.00$\times$ & 1.00$\times$ & 1.00$\times$ \\
+            8/8 & 4.00$\times$ & 1.99$\times$ & 1.47$\times$\\
+            6/6-MP & 7.11$\times$ & 2.67$\times$ & - \\
+            4/8-MP & 5.05$\times$ & 2.42$\times$ & - \\
+            \bottomrule[1pt]
+        \end{tabular}
+        }
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.59\textwidth}
+        \centering
+        \begin{subfigure}[b]{0.5\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{figs/memory.pdf}
+            \caption{}
+            \label{fig:hardware:a}
+        \end{subfigure}%
+        \begin{subfigure}[b]{0.5\linewidth}
+            \centering
+            \includegraphics[width=\linewidth]{figs/latency.pdf}
+            \caption{}
+            \label{fig:hardware:b}
+        \end{subfigure}%
+    \end{minipage}
+    \caption{\textbf{The illustration of ViDiT-Q's hardware resource savings.} Left: The comparison of efficiency and performance under different ViDiT-Q quantization configurations. Right: (a) ViDiT-Q's memory optimization, (b) ViDiT-Q's latency breakdown under W8A8. }
+    \label{fig:hardware}
+\end{figure}
+
+
+
+
+
+
+\section{Conclusion and Limitations}
+
+\label{sec:conclusion}
+
+We design ViDiT-Q, a quantization method tailored for DiTs. With the assistance of metric decoupled mixed precision, ViDiT-Q achieves W4A8 quantization with minimum visual degradation. Despite achieving good performance, it still faces the following limitations: the timestep-wise mixed precision requires additional system-level optimization, the efficiency and precision of quantization sensitivity analysis still needs improvement, lower activation bit-width is essential for fully utilizing the acceleration potential of 4-bit weight. We aim to address these issues and further improve ViDiT-Q. 
+
+
+

@@ -1,0 +1,439 @@
+\title{Learning Monotonic Attention in Transducer for Streaming Generation}
+
+\begin{abstract}
+Streaming generation models are increasingly utilized across various fields, with the Transducer architecture being particularly popular in industrial applications. However, its input-synchronous decoding mechanism presents challenges in tasks requiring non-monotonic alignments, such as simultaneous translation, leading to suboptimal performance in these contexts. In this research, we address this issue by tightly integrating Transducer's decoding with the history of input stream via a learnable monotonic attention mechanism. Our approach leverages the forward-backward algorithm to infer the posterior probability of alignments between the predictor states and input timestamps, which is then used to estimate the context representations of monotonic attention in training. This allows Transducer models to adaptively adjust the scope of attention based on their predictions, avoiding the need to enumerate the exponentially large alignment space. Extensive experiments demonstrate that our MonoAttn-Transducer significantly enhances the handling of non-monotonic alignments in streaming generation, offering a robust solution for Transducer-based frameworks to tackle more complex streaming generation tasks. Codes are publicly available in supplementary materials.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Streaming generation is a widely studied problem in fields such as speech recognition \citep{pmlr-v70-raffel17a,9053896,seide2024speechreallmrealtime}, simultaneous translation \citep{DBLP:journals/corr/ChoE16,gu-etal-2017-learning,seamless2023}, and speech synthesis \citep{ma-etal-2020-incremental,streamspeech,wang-etal-2024-streamvoice}. Unlike modern turn-based large language models, streaming models need to start generating the output before the input is completely read. This necessitates a careful balance between generation quality and latency.
+
+Popular streaming generation methods can be broadly divided into two categories: Attention-based Encoder-Decoder \citep[AED;][]{BahdanauCB14} and Transducer \citep{DBLP:journals/corr/abs-1211-3711}. Streaming AED models adapt the conventional sequence-to-sequence framework \citep{bahdanau2014neural} to support streaming generation. They often rely on an external policy module to determine the READ/WRITE actions in inference and to direct the scope of cross-attention in training. Examples include Wait-$k$ policy \citep{ma-etal-2019-stacl} and monotonic attention-based methods \citep{pmlr-v70-raffel17a, arivazhagan-etal-2019-monotonic, Ma2020Monotonic,ma2023efficient}. 
+On the other hand, Transducer models connect the encoder and predictor through a joiner rather than using cross-attention. As shown in Figure \ref{fig:transducer}, the joiner is designed to synchronize the encoder and predictor by expanding its output vocabulary to include a blank symbol $\epsilon$, which indicates a READ action. Due to the decoupling of the predictor state from the encoder state, READ/WRITE states in Transducer can be represented by a two-dimensional lattice. This allows for the computation of total probabilities using the forward-backward algorithm \citep{DBLP:journals/corr/abs-1211-3711}, facilitating end-to-end optimization. 
+Benefited from joint optimization of all potential policies during training, Transducer often demonstrates better performance compared to AED models \citep{xue22d_interspeech, wang23oa_interspeech}.
+
+During the decoding process of Transducer, each target token is explicitly aligned with a corresponding source token. This input-synchronous decoding property makes the architecture well-suited for tasks like speech recognition, where the input and output align monotonically. However, it poses challenges for non-monotonic alignment tasks such as simultaneous translation \citep{chuang-etal-2021-investigating, NEURIPS2022_35f805e6, ma-etal-2023-non}. Due to the decoupled design, Transducer models have limited ability to attend to the input stream history during decoding, making it hard to manage reorderings. To address this issue, recent research \citep{liu-etal-2021-cross, tang-etal-2023-hybrid} has started to explore the incorporation of cross-attention mechanism to enhance the capacity for handling complex non-monotonicity. Despite these efforts, the integration of cross-attention presents significant challenges. By integrating the predictor states with source history through attention, the representation of predictor states becomes relevant not only to the encoder states but also to the specific READ/WRITE path history \citep{tang-etal-2023-hybrid}. This results in an exponentially large state space for Transducer, hindering the application of the forward-backward algorithm for end-to-end training.
+
+\begin{figure}
+\centering
+\begin{subfigure}[b]{0.3\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/Transducer.pdf}
+\caption{Transducer}
+\label{fig:transducer}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.3\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/MonoAttn-Transducer-Train.pdf}
+\caption{MonoAttn-Transducer (train)}
+\label{fig:monoattn-transducer-train}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.3\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/MonoAttn-Transducer-Infer.pdf}
+\caption{MonoAttn-Transducer (infer)}
+\label{fig:monoattn-transducer-infer}
+\end{subfigure}
+\caption{Illustration of MonoAttn-Transducer. During inference, the predictor state can attend to all generated encoder states through cross-attention. During training, the scope of cross-attention is adjusted based on the posterior alignment $\pi_{u,t}$ derived from the model's prediction (Equation \ref{eq:posterior}).}
+\label{fig:overview}
+\end{figure}
+
+In this research, we present an efficient training algorithm for Transducer models to learn the monotonic cross-attention mechanism. This allows Transducer's predictor to access source history in real-time inference (Figure \ref{fig:monoattn-transducer-infer}), improving its ability to handle tasks with non-monotonic alignments. As illustrated in Figure \ref{fig:monoattn-transducer-train}, we leverage the forward-backward algorithm to infer the posterior probability of alignments between predictor and encoder states in training. This derived posterior alignment enables the estimation of context representation for each predictor state using expected soft attention. In this way, Transducer models adaptively adjust the scope of attention based on their predictions, avoiding the need to enumerate the exponentially large alignment space during training.
+
+ {We conduct experiments on both speech-to-text and speech-to-speech simultaneous translation to demonstrate the generality of our approach across various modalities.} MonoAttn-Transducer shows significant improvements in generation quality without a noticeable increase in latency in both \emph{ideal} and \emph{computation-aware} settings (\S \ref{sec:exp}). Further analysis reveals that MonoAttn-Transducer is particularly effective in handling samples with higher levels of non-monotonicity (\S \ref{sec:abs}).
+
+
+
+\section{Background}
+
+\subsection{Streaming Generation}
+Streaming generation models typically process a streaming input $\bm{x} = \{x_1,...,x_T \} $ and generate a target sequence $\bm{y} = \{y_1,...,y_U \}$ in a streaming manner. To measure the amount of source information utilized during generation, a monotonic non-decreasing function $g(u)$ is introduced to represent the number of observed source tokens at the time of generating $y_u$. 
+
+\subsection{Transducer}
+\label{bg:transducer}
+As shown in Figure \ref{fig:transducer}, Transducer model \citep{DBLP:journals/corr/abs-1211-3711} comprises three components: an encoder, a predictor, and a joiner. The encoder unidirectionally encodes the received input prefix ${x}_{1:t}$ into a context representation $h_t$. The predictor functions similarly to an autoregressive language model, encoding the dependencies between tokens in the generated prefix ${y}_{1:u}$ into $s_u$. The joiner makes predictions based on the current source representation $h_t$ and target representation $s_u$. If the model needs to READ more information to update the source representation for continued generation, a blank token $\epsilon$ is generated. Otherwise, a WRITE operation is performed, and the generated token is fed back into the predictor to obtain a new target representation. Each time $h_t$ or $s_u$ is updated, the joiner performs a prediction step until the entire source has been processed. The encoder and predictor are usually modeled using either a recurrent neural network \citep{DBLP:journals/corr/abs-1211-3711} or Transformer layers \citep{9053896}. The joiner is typically composed of a feed-forward network. 
+
+Since explicit alignment information for parallel pairs is not available during training, it is necessary to solve for the total probabilities of all READ/WRITE paths that can generate the target to perform maximum likelihood estimation. Given that the state space of Transducer form a two-dimensional lattice, the forward-backward algorithm can be utilized to compute the total probability. Define the forward and backward variables as:
+\begin{equation}
+\begin{aligned}
+    &\alpha(t,u) \coloneq \mathrm{Pr}({y}_{1:u} | {x}_{1:t})\\ &\beta(t,u) \coloneq \mathrm{Pr}({y}_{u+1:U} | {x}_{t:T})
+\end{aligned}   
+\end{equation}
+The forward and backward variables for all $ 1 \leq t \leq T $ and $ 0 \leq u \leq U $ can be calculated
+ recursively:
+ \begin{equation}
+ \begin{aligned}
+ \alpha(t,u) &=  \alpha(t-1,u) \mathrm{Pr}( \epsilon | t-1, u) +  \alpha(t,u-1)  \mathrm{Pr}( y_{u} | t, u-1) \\
+ \beta(t,u) &=  \beta(t+1,u) \mathrm{Pr}( \epsilon | t, u) +  \beta(t,u+1)  \mathrm{Pr}( y_{u+1} | t, u)
+ \end{aligned}
+ \end{equation}
+with initial condition $\alpha(1,0) = 1$ and $\beta(T,U) = \mathrm{Pr}( \epsilon | T, U)$. $\mathrm{Pr}( v | t, u)$ denotes the probability of generating token $v$ from $h_t$ and $s_u$, $v \in \mathcal{V} \cup \{\epsilon\}$. The total output probability is:
+\begin{equation}
+\label{eq:loss}
+\mathrm{Pr}(\bm{y} | \bm{x}) = \alpha(T,U)\mathrm{Pr}( \epsilon | T, U).
+\end{equation}
+By leveraging the forward-backward algorithm, Transducer models are trained to implicitly acquire the READ/WRITE policy from the data.
+
+
+
+\section{Method}
+
+
+\subsection{Overview}
+MonoAttn-Transducer works similarly to standard Transducer, with the key difference being that its predictor can attend to the encoder history using monotonic attention. During streaming generation, the scope of monotonic attention includes all source context representations that have already appeared. Formally, when the predictor encodes the $u$-th target state, it depends on the representations of previous target states and the existing source context:
+\begin{equation}
+    s_{u} = f_{\theta}(s_{0:u-1},h_{1:g(u)}),
+\end{equation}
+where $ 1 \leq u \leq U $ and $g(u)$ denotes the number of observed source tokens at the time of generating $y_u$. The edge case $s_{0}$ is defined as $
+    s_{0} = f_{\theta}(h_{1})
+$. In both Transducer and MonoAttn-Transducer, token $y_u$ is generated based on source representation $h_{g(u)}$ and target representation $s_{u-1}$. Given $s_{u-1}$ can only attend to source contexts up to $g(u-1)$ through monotonic attention, related information in ${x}_{g(u-1)+1:g(u)}$ should ideally be encoded within $h_{g(u)}$.%This property helps mitigate the issue of updating the predictor state redundantly when new source information arrives.
+
+\subsection{Training Algorithm}
+Training MonoAttn-Transducer is challenging as it exponentially expands Transducer's state space. To address this issue, we firstly leverage the forward-backward algorithm to compute the posterior probability of aligning target representation $s_u$ with source representation $h_t$ (i.e., the probability of generating token $y_u$ immediately after reading ${x}_{t}$). This posterior alignment is then used to estimate the expected context vector in the monotonic cross-attention for each predictor state in training. Detailed explanations are provided in the following.
+\subsubsection{Posterior Alignment}
+Suppose we have a probability lattice $\mathrm{Pr}( v | t, u)$, representing the probability of generating token $v$ from $h_t$ and $s_u$, for $ 1 \leq t \leq T $, $ 0 \leq u \leq U $, and $v \in \mathcal{V} \cup \{\epsilon\}$. The posterior probability of generating $y_u$ at the moment $x_t$ is read can be represented by:
+\begin{equation}
+\label{eq:posterior}
+\begin{aligned}
+    \pi_{u,t} = \dfrac{\mathrm{Pr}({y}_{1:u-1} | {x}_{1:t})  \mathrm{Pr}(y_u | t,u-1) \mathrm{Pr}({y}_{u+1:U} | {x}_{t:T}) }  {\mathrm{Pr}({y}_{1:U} | {x}_{1:T})}
+\end{aligned}
+\end{equation}
+with the edge case:
+\begin{equation}
+\pi_{0,t} = 
+\begin{cases}
+1& {t=1}\\
+0& {t \neq 1}
+\end{cases}
+\end{equation}
+which implies that the predictor state $s_0$ is generated immediately after the first source token arrives. Using the forward and backward variables introduced in Section \ref{bg:transducer}, Equation \ref{eq:posterior} can be concisely expressed as follows:
+\begin{equation}
+\label{eq:posterior-forward-backward}
+\begin{aligned}
+    &\pi_{u,t} = \dfrac{\alpha(t,u-1) \mathrm{Pr}(y_u | t,u-1) \beta(t,u)}  {\alpha(T,U)\mathrm{Pr}( \epsilon | T, U)}.
+\end{aligned}
+\end{equation}
+This guarantees that the posterior alignment probability for all pairs $(t,u)$ can be solved in $O(TU)$ time using the above forward-backward algorithm, facilitating the calculation of the expected context representation introduced later.
+
+\subsubsection{Monotonic Attention}
+The incorporation of monotonic attention makes the representation of predictor states relevant to specific READ/WRITE history, leading to a prohibitively large state space for enumerating alignments. Therefore, we turn to estimate the context vector in monotonic attention based on the posterior alignment probability during training. This approach enables the model to adaptively adjust the scope of cross-attention according to its prediction. Consequently, MonoAttn-Transducer learns a monotonic attention mechanism while maintaining the same time and space complexity as Transducer. 
+
+Formally, given the energy $e_{u,t}$ for the pair consisting of encoder state $h_t$ and predictor state $s_u$, as well as the posterior alignment probability $\pi_{u,t}$, the expected context representation $c_u$ for predictor state $s_u$ can be expressed as:
+\begin{equation}
+\label{eq:context-definition}
+    c_{u} = \sum_{t=1}^{T}{\pi_{u,t} \sum_{t'=1}^{t}{\frac{\exp{(e_{u,t'})}}{\sum_{t''=1}^{t}{\exp{(e_{u,t''})}}}h_{t'}}}.
+\end{equation}
+This indicates that the expected context representation $c_{u}$ is a weighted sum of context representations under various amount of source information, with the weights given by the posterior alignment probability $\pi_{u,t}$. The nested summation operations in Equation \ref{eq:context-definition} may lead to an increase in computational complexity. Fortunately, \citet{arivazhagan-etal-2019-monotonic} suggests that it can be rewritten as:
+\begin{equation}
+\label{eq:context-efficient}
+\begin{aligned}
+    \phi_{u,t} &= \sum_{t'=t}^{T} 
+    {\frac{\pi_{u,t'} \exp{(e_{u,t})}} {\sum_{t''=1}^{t'}{\exp{(e_{u,t''})}}} } \\
+    c_{u} &= \sum_{t=1}^{T} {\phi_{u,t} h_{t}}
+\end{aligned}
+\end{equation}
+Equation \ref{eq:context-efficient} can then be computed efficiently using cumulative sum operations \citep{arivazhagan-etal-2019-monotonic}.
+
+\subsubsection{Training with Prior Alignment}
+\label{sec:prior}
+The above algorithm facilitates MonoAttn-Transducer in learning monotonic cross-attention with posterior alignment probability. However, this presents a chicken-and-egg paradox: the posterior alignment is derived from an output probability lattice constructed using an estimated context representation, while the context vector is, in turn, estimated using a posterior alignment.
+We address this problem by using a prior alignment to construct a prior output probability lattice. This lattice is then used to infer the posterior alignment and train MonoAttn-Transducer's monotonic attention.
+
+There are several options for the prior alignment $p_{u,t}$. The simplest one is the uniform distribution, which assigns an equal probability of being generated at any timestep for all the target tokens:
+\begin{equation}
+    p_{u,t}^{\mathrm{uni}} = \frac{1}{T},\ 1 \leq t \leq T,\ 1 \leq u \leq U.
+\end{equation}
+The edge case $p_{0,t}^{\mathrm{uni}}$ is similar to the situation of $\pi_{0,t}$, where all the probability mass is concentrated at $t=1$. 
+
+However, it is preferable to select a more reasonable prior. An ideal prior alignment should ensure that the posterior alignment, derived from the lattice constructed using the prior, can accurately estimate the expected context representation. In streaming generation tasks, even though there may be reorderings in the mapping from source to target, a certain level of monotonic alignment is generally maintained. Therefore, we propose introducing a prior distribution $p_{u,t}^{\mathrm{dia}}$, which assumes that the number of tokens generated for each READ action is uniformly distributed:
+\begin{equation}
+\label{eq:dia-prior}
+\begin{aligned}
+    &w_{u,t} = \exp{(-|u-\frac{t \cdot U}{T}|)} \\
+    &p_{u,t}^{\mathrm{dia}} = \frac{w_{u,t}}{\sum_{t'=1}^{T}{w_{u,t'}}}
+\end{aligned}
+\end{equation}
+for $\ 1 \leq t \leq T,\ 1 \leq u \leq U$. The edge case $p_{0,t}^{\mathrm{dia}}$ is handled in the same manner as $p_{0,t}^{\mathrm{uni}}$. This prior assumes a uniform mapping between the source and target, such that each target token is most likely generated at the time its corresponding source token is read. The probability decreases as the time difference from this moment increases.
+
+In the following, we will use \( p_{0,t}^{\mathrm{dia}} \) as the default choice for prior alignment and compare the differences between using \( p_{0,t}^{\mathrm{uni}} \) and \( p_{0,t}^{\mathrm{dia}} \) in the ablation study (Section \ref{abs:prior-choice}). %The examples of \( p_{0,t}^{\mathrm{uni}} \) and \( p_{0,t}^{\mathrm{dia}} \) are presented in Figure \ref{}.
+
+\subsubsection{Chunk Synchronization}
+In speech audio, there often exists strong temporal dependencies between adjacent frames. Therefore, a chunk size $C$ is typically set, and the streaming model makes decisions only after receiving a speech chunk \citep{ma-etal-2020-simulmt}. In terms of Transducer models, when a READ action is taken, the source representation is updated after a new speech chunk is read. The new source representation is then set as the representation of the last frame in the chunk \citep{liu-etal-2021-cross, tang-etal-2023-hybrid}. In such a situation, the receptive field of MonoAttn-Transducer's cross-attention for predictor state $s_u$ encompasses all hidden states in the received chunks, i.e., $h_{1:C\cdot \Tilde{g}(u)}$, where $\Tilde{g}(u)$ denotes the number of received chunks when generating token $y_u$. To bridge the gap between training and inference, the posterior alignment probability utilized in training process is adjusted by transferring all the probability mass on encoder states within a chunk to the last state in the chunk:
+\begin{equation}
+\label{eq:chunk-sync}
+\begin{aligned}
+\Tilde{\pi}_{u,t} = 
+\begin{cases}
+\sum_{t'=(d-1)\cdot C + 1}^{d\cdot C}{{\pi}_{u,t'}}& {t = d\cdot C}\\
+0& {t \neq d\cdot C}
+\end{cases}
+\\\quad \mathrm{for} \quad d = 1,2,3, \ldots
+\end{aligned}
+\end{equation}
+The prior alignment probability is adjusted in the same manner. We detail the entire training process in Algorithm \ref{alg:train}.
+
+\begin{algorithm}[t]
+\caption{Training Algorithm of MonoAttn-Transducer}
+\label{alg:train}
+\textbf{Input}: Source $\bm{x}$, Target $\bm{y}$, Chunk Size $C$\\
+\textbf{Output}: Training Loss $\mathcal{L}$
+
+\begin{algorithmic}[1]
+    \STATE Compute prior alignment $p_{u,t}^{\mathrm{dia}}$ (Eq. \ref{eq:dia-prior})
+    \STATE Compute chunk-synchronized prior alignment $\Tilde{p}_{u,t}^{\mathrm{dia}}$ based on chunk size $C$  (Eq. \ref{eq:chunk-sync})
+    
+    \STATE Estimate context $c_{u}^{\mathrm{prior}}$ with $\Tilde{p}_{u,t}^{\mathrm{dia}}$ (Eq. \ref{eq:context-efficient})
+    \STATE Forward MonoAttn-Transducer with $c_{u}^{\mathrm{prior}}$
+    
+    \STATE Infer posterior alignment $\pi_{u,t}$ (Eq. \ref{eq:posterior-forward-backward})
+
+    \STATE Compute chunk-synchronized posterior alignment $\Tilde{\pi}_{u,t}$ based on chunk size $C$  (Eq. \ref{eq:chunk-sync})
+
+    \STATE Estimate context $c_{u}$ with $\Tilde{\pi}_{u,t}$ (Eq. \ref{eq:context-efficient})
+    \STATE Forward MonoAttn-Transducer with $c_{u}$
+    
+    \STATE Calculate total output probability $\mathcal{L}$ (Eq. \ref{eq:loss})
+
+\STATE \textbf{return} $\mathcal{L}$
+\end{algorithmic}
+\end{algorithm}
+
+
+\section{Related Work}
+
+\label{sec:related-work}
+\begin{table}
+\caption{Comparison of Transducer-based streaming models. \emph{Computational Complexity} refers to the number of forward passes executed by the predictor in inference. \emph{Memory Overhead} refers to the memory consumption of the attention module in training.}
+\label{tab:com_streaming}
+\begin{center}
+\small
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & \textbf{Merge Module} & \textbf{Computational Complexity} & \textbf{Memory Overhead}  \\
+\midrule
+Transducer \citep{DBLP:journals/corr/abs-1211-3711} & Joiner & $O(U)$ & N/A\\
+CAAT \citep{liu-etal-2021-cross}  & Joiner & $O(U)$ & $O(T)$ \\
+TAED \citep{tang-etal-2023-hybrid} & Predictor, Joiner & $O(U+T)$ & $O(T)$ \\
+MonoAttn-Transducer (Ours) & Predictor, Joiner & $O(U)$ & $O(1)$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+Our work is closely related to researches in designing cross-attention modules for Transducer models. \citet{prabhavalkar17_interspeech} pioneered the use of attention to link the predictor and encoder. However, their design requires the entire source to be available, limiting it to offline generation. For streaming generation, the receptive field of attention must synchronize with the input. This synchronization leads to an exponentially large state space, which significantly complicates the training process.
+To mitigate this issue, \citet{liu-etal-2021-cross} separated the predictor's cross-attention from its self-attention, ensuring that cross-attention occurs only after self-attention.
+This approach maintains the independence of predictor states from READ/WRITE path history, allowing for standard training methods. However, this separation limits the richness of the predictor's learned representations.
+Alternatively, \citet{tang-etal-2023-hybrid} proposed updating the representation of all predictor states whenever a new source token is received.
+While this method also preserves the independence of predictor states from READ/WRITE path history, it significantly increases both inference-time computational complexity and training-time memory requirements.
+It necessitates an additional $(T-1)$ forward passes of the predictor during decoding, which adversely affects latency-sensitive streaming generation. Furthermore, the GPU memory usage for attention during training increases from $O(1)$ to $O(T)$, leading to prohibitively high training costs and limiting the model’s scalability.
+In contrast to the above, the proposed MonoAttn-Transducer maintains the same time complexity and memory overhead as Transducer. A detailed comparison between these methods is summarized in Table \ref{tab:com_streaming}.
+
+Our work is also related to researches in designing attention modules for streaming AED models. These works often introduce Bernoulli variables to indicate READ/WRITE actions. The distribution of these variables is used to estimate monotonic alignment and to compute the expected context representation in training \citep{pmlr-v70-raffel17a}. Depending on the setting of attention window, these works can be classified into monotonic hard attention \citep{pmlr-v70-raffel17a}, monotonic chunkwise attention \citep[MoChA;][]{chiu*2018monotonic}, and monotonic infinite lookback attention \citep[MILk;][]{arivazhagan-etal-2019-monotonic}. \citet{Ma2020Monotonic} subsequently introduced the MILk mechanism to Transformer models, and \citet{ma2023efficientmonotonicmultiheadattention} further proposed a numerically-stable algorithm for estimating monotonic alignment.
+Unlike the aforementioned works, our approach learns monotonic attention based on the posterior alignment of Transducer, avoiding the use of unstable Bernoulli variables.
+
+
+
+\section{Experiments}
+
+\label{sec:exp}
+{We validate the performance of our MonoAttn-Transducer on two typical streaming generation tasks: speech-to-text and speech-to-speech simultaneous translation.} The differences in grammatical structures between the source and target languages often necessitate word reordering during generating translation. This property makes the simultaneous translation task well-suited for evaluating the ability of MonoAttn-Transducer in handling non-monotonic alignments.
+\subsection{Experimental Setup}
+
+\textbf{Datasets} We conduct experiments on two language pairs of MuST-C speech-to-text translation datasets: English to German (En$\rightarrow$De) and English to Spanish (En$\rightarrow$Es) \citep{di-gangi-etal-2019-must}. {For speech-to-speech experiments, we evaluate models on CVSS-C French to English (Fr$\rightarrow$En) dataset \citep{jia2022cvss}.}
+\hspace*{\fill} \\
+\textbf{Model Configuration}
+We use the open-source implementation of Transformer-Transducer \citep{9053896} from \citet{liu-etal-2021-cross} as baseline and build our MonoAttn-Transducer upon it. The speech encoder consists of two layers of causal 2D-convolution followed by 16 chunk-wise Transformer layers with pre-norm. Each convolution layer has a 3×3 kernel with 64 channels and a stride size of 2, resulting in a downsampling ratio of 4. In chunk-wise Transformer layers, the speech encoder can access states from all previous chunks and one chunk ahead of the current chunk \citep{wu20i_interspeech,9414560}. The chunk size is adjusted within the set $\{$320, 640, 960, 1280$\}$ms. Offline results are obtained by setting the chunk size longer than any utterance in the corpus. Both sinusoidal positional encoding \citep{NIPS2017_3f5ee243} and relative positional attention \citep{shaw-etal-2018-self} are incorporated into the speech encoder. Sinusoidal positional encoding is applied after the convolution layers. The predictor comprises two autoregressive Transformer layers with post-norm, utilizing only sinusoidal positional encoding. The monotonic attention is similar to standard cross-attention but differs in its receptive field. The joiner is implemented as a simple FFN. We incorporate the multi-step decision mechanism \citep{liu-etal-2021-cross} with a decision step of 4.
+All Transformer layers described above are configured with a 512 embedding dimension, 8 attention heads and a 2048 FFN dimension. The total number of parameters for the Transducer baseline and MonoAttn-Transducer are 65M and 67M, respectively.
+
+\hspace*{\fill} \\
+\textbf{Evaluation} We use SimulEval toolkit \citep{ma-etal-2020-simuleval} for evaluation. Translation quality is assessed using case-sensitive detokenized \texttt{BLEU} \citep{papineni-etal-2002-bleu, post-2018-call} and neural-based \texttt{COMET-22} score. Latency is measured by word-level Average Lagging \citep[\texttt{AL};][]{ma-etal-2019-stacl,ma-etal-2020-simulmt}. Notably, Table \ref{tab:computation-aware} presents a comparison of the \emph{computation-aware} latency metrics for \texttt{AL} and \texttt{LAAL} \citep{papi-etal-2022-generation} between the Transducer and MonoAttn-Transducer models.}} {For speech-to-speech experiments, translation quality is assessed using \texttt{ASR-BLEU} and latency is measured by delay of generated waveform chunks \citep{ma2022direct}.}
+
+\begin{figure}
+\centering
+\includegraphics[width=\textwidth]{figures/Case_167238.pdf}
+\caption{An example of diagonal prior and posterior alignment from MuST-C English-to-Spanish training corpus. The vertical axis represents the target subword sequence and the horizontal axis represents the speech waveform. Darker areas indicate higher alignment probabilities. Chunk size in this example is set to 640ms.}
+\label{fig:visualization}
+\end{figure}
+
+\begin{table}[t]
+\caption{Comparison of MonoAttn-Transducer and Transducer across various chunk size settings on MuST-C English to German and English to Spanish datasets.}
+\label{tab:main-results}
+\begin{center}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{ll|ccccc|ccccc}
+\toprule
+\multicolumn{2}{c}{} & \multicolumn{5}{c}{\textit{En-Es}} & \multicolumn{5}{c}{\textit{En-De}} \\
+\midrule
+& \textbf{Chunk Size ($ms$)} &  320  &   640  &    960  &    1280  &   $\infty$ & 320  &   640  &    960  &    1280  &  $\infty$ \\
+\midrule
+\multirow{3}*{Transducer} & \textbf{AL ($ms, \downarrow$)}  &   886 &  1193 & 1591 & 1997 & - &   1126 & 1434 &  1830 &  2215 & - \\
+& \textbf{BLEU ($\uparrow$)}  &  24.33  &  25.82  &  26.36  &  26.40 & 26.75 &  19.99  &  22.10  &  22.20 &  22.96  &  23.10\\
+& \textbf{COMET ($\uparrow$)}  &  67.94  &  69.92  &  70.48  & 70.65  & 71.14 &  62.81  &  65.01  &  65.75  &  66.26  &  67.03 \\
+\midrule
+\midrule
+& \textbf{AL ($ms, \downarrow$)}   &  997 & 1239 & 1606 & 1991   &  - &      1215  &   1470 &   1860  &  2215  &  - \\
+MonoAttn-Transducer & \textbf{BLEU ($\uparrow$)}   &      24.72 & 26.74 & 27.05 & 27.41  &   27.48 &      20.22	&    22.47	&   22.94  &    23.74  &    24.42 \\
+(\emph{Posterior}) & \textbf{COMET ($\uparrow$)}  &  68.98  &  70.71  &  71.21  & 71.90  & 72.24 &  64.24  &  67.06  & 68.22  &  68.54  &  69.82\\
+\midrule
+& \textbf{AL ($ms, \downarrow$)} & 932 & 1182 & 1599 &  1967 &  - & 1138  &  1413  &  1826  &  2191 &  - \\
+MonoAttn-Transducer & \textbf{BLEU ($\uparrow$)}  & 23.00 &	26.46 & 27.07 & 27.42 &	 27.48  & 19.26  & 22.62  &  23.51  &  24.01  & 24.42 \\
+(\emph{Prior}) & \textbf{COMET ($\uparrow$)}  &  68.24  &  70.45  &  71.33  & 71.99  & 72.24 & 63.85 &  67.63  &  68.65  &  69.27  &  69.82\\
+\bottomrule
+\end{tabular}}
+\end{center}
+\end{table}
+
+\begin{comment}
+\begin{figure*}[t]
+\centering
+\subfigure[En$\rightarrow$De]{
+\includegraphics[width=2.2in]{figures/MuST-C_EnDe.pdf}
+}\hspace{2.6mm}
+\subfigure[En$\rightarrow$Es]{
+\includegraphics[width=2.2in]{figures/MuST-C_EnEs.pdf}
+}
+\caption{Results of translation quality (\texttt{BLEU}) against latency (Average Lagging, \texttt{AL}) on MuST-C English to German and English to Spanish datasets.}
+\label{fig:main-s2t}
+\end{figure*}
+\end{comment}
+
+\begin{figure}[t]
+\centering
+\resizebox{\linewidth}{!}{
+\begin{subfigure}[b]{0.32\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/MuST-C_EnDe.pdf}
+\caption{En$\rightarrow$De}
+\label{fig:main-s2t-a}
+\end{subfigure}
+\begin{subfigure}[b]{0.32\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/MuST-C_EnEs.pdf}
+\caption{En$\rightarrow$Es}
+\label{fig:main-s2t-b}
+\end{subfigure}
+\begin{subfigure}[b]{0.32\textwidth}
+\centering
+\includegraphics[width=\textwidth]{figures/EnEs_monotonocity.pdf}
+\caption{En$\rightarrow$Es Subsets}
+\label{fig:diff}
+\end{subfigure}}
+\caption{\textbf{(a)}, \textbf{(b)}: Results of translation quality (\texttt{BLEU}) against latency (Average Lagging, \texttt{AL}) on MuST-C English to German and English to Spanish datasets. \textbf{(c)}: Performance on MuST-C English to Spanish test subsets categorized by non-monotonicity. In the figures above, \emph{MA-T} denotes MonoAttn-Transducer.}
+\label{fig:main-s2t}
+\end{figure}
+
+\subsection{Main Results}
+\label{sec:main-results}
+We evaluate the performance of MonoAttn-Transducer against Transducer baseline across various latency conditions obtained by varying the chunk size.
+In this comparison, we consider two configurations of MonoAttn-Transducer. The first, referred to as MonoAttn-Transducer-\emph{Posterior}, is trained strictly according to Algorithm \ref{alg:train}. The second, termed MonoAttn-Transducer-\emph{Prior}, is optimized directly using prior alignment, without inferring the posterior (calculate total output probability $\mathcal{L}$ using $c_{u}^{\mathrm{prior}}$). Results are shown in Table \ref{tab:main-results}.
+
+It can be observed that MonoAttn-Transducer-\emph{Posterior} significantly outperforms the Transducer baseline across various settings of chunk size in both translation directions. Specifically, in En-Es, it shows an average improvement of 0.75 BLEU or 0.95 COMET score in generation quality under different latency conditions. In En-De, it achieves an even more significant improvement, with an average increase of as much as 2.06 COMET score, while latency remains nearly unchanged. Further analysis reveals that the benefits of learning monotonic attention are more pronounced with a larger chunk size. Notably, in scenarios where latency exceeds 1.5s and during offline generation, the average improvement reaches 0.88 BLEU or 1.77 COMET score. 
+This can be attributed to MonoAttn-Transducer benefiting more from monotonic attention to handle reorderings when it has flexibility to wait for more source information.
+
+Moreover, we have observed some notable results of MonoAttn-Transducer-\emph{Prior}. With a larger chunk size, the performance of MonoAttn-Transducer-\emph{Prior} is comparable to that of MonoAttn-Transducer-\emph{Posterior}, and even slightly outperforming the latter in En-De. However, there exists a significant performance drop with a smaller chunk size. Specifically, with a chunk size of 320ms, MonoAttn-Transducer-\emph{Prior}'s generation quality is on average 1.03 BLEU lower than Transducer baseline under similar latency conditions. 
+This phenomenon highlights the importance of learning monotonic attention through inferring posterior alignment. From the chunk synchronization mechanism described in Equation \ref{eq:chunk-sync}, smaller chunk sizes require finer alignment granularity between the predictor and encoder states. This increased granularity necessitates more precise alignment to estimate the expected context representation during training. Figure \ref{fig:visualization} provides an example of diagonal prior and posterior alignment. While the diagonal prior generally captures the trend of the alignment information, it can be skewed by the uneven distribution of speech information and possible local reorderings. In contrast, the inferred posterior offers a more confident and accurate alignment probability. For instance, the diagonal prior assigns a high probability to aligning the word \emph{``si (if)"} with the timestep preceding the waveform of \emph{``if"}, while the inferred posterior corrects this misalignment. Therefore, learning monotonic attention with posterior alignment leads to a more accurate estimation of context representation and improved performance. A key observation is that as the alignment granularity becomes finer, the differences gradually increases.}
+In subsequent experiments, we represent MonoAttn-Transducer using the results of MonoAttn-Transducer-\emph{Posterior}.
+
+\subsection{Comparison with State-of-the-Art}
+\label{sec:compare-baseline}
+
+We compare MonoAttn-Transducer with state-of-the-art open-source approaches in simultaneous translation, %\footnote{Although TAED \citep{tang-etal-2023-hybrid} is highly relevant to our work, the authors have not open-sourced their code and the distilled data used for training. This prevents us from fairly comparing TAED with other models through reproduction. Nevertheless, we compare the performance of our MonoAttn-Transducer and TAED by comparing them against Transducer baselines within their respective experimental setups.} 
+including Wait-$k$ \citep{ma-etal-2020-simulmt}, RealTrans \citep{zeng-etal-2021-realtrans}, CAAT \citep{liu-etal-2021-cross}, MU-ST \citep{zhang-etal-2022-learning}, EDAtt \citep{papi-etal-2023-attention}, Seg2Seg \citep{NEURIPS2023_8df70595} and NAST \citep{ma-etal-2024-non}. Results are plotted in Figure \ref{fig:main-s2t-a} and \ref{fig:main-s2t-b}.
+We observe that learning monotonic attention significantly enhances the performance of Transducer, making it comparable to state-of-the-art models. Compared to CAAT, another Transducer-based model, MonoAttn-Transducer demonstrates superiority in scenarios with less stringent latency requirements. Under a latency of approximately 2s, it outperforms CAAT by 1.1 BLEU in En-De. This clearly demonstrates the advantage of MonoAttn-Transducer’s tightly coupled self-attention and cross-attention modules in the predictor, which facilitates the learning of richer representations. 
+As discussed in Section \ref{sec:related-work}, TAED is another Transducer-based model highly relevant to our work. However, the code and distilled data used to train TAED in \citet{tang-etal-2023-hybrid} have not been made publicly available. This lack of open access hinders a fair comparison of TAED with our MonoAttn-Transducer. Despite this, we attempt to analyze the performance by comparing each with Transducer baseline in their respective experimental settings. The comparison is shown in Table \ref{tab:taed-results}. We have observed that the improvement from TAED is more pronounced with smaller chunk sizes, which contrasts with the results of MonoAttn-Transducer. We speculate that this is because, in TAED, the representations of all generated predictor states are updated every time the encoder receives a new speech chunk. This helps TAED generate more accurate representations when the chunk size is small. However, this mechanism in TAED incurs an $O(T+U)$ forward propagation cost during simultaneous inference, which can significantly increase latency in practice due to heavy computational overhead when the chunk size is small. {In contrast, MonoAttn-Transducer maintains an $O(U)$ complexity as Transducer baseline. As shown in Table \ref{tab:computation-aware}, this property minimizes the gap between ideal and computation-aware latency, offering advantages in real-time applications. }
+
+\subsection{Results of Speech Generation}
+{Speech-to-speech simultaneous translation requires implicitly performing ASR, MT and TTS simultaneously, and also handling the non-monotonic alignments between languages, making it suitable to evaluate models on streaming speech generation. We adopted a \emph{textless} setup in our experiments, directly modeling the mapping between speech \citep{zhao2024textless}. Results are provided in Table \ref{tab:s2s-results}.}
+
+\begin{table}[t]
+\centering
+\begin{minipage}[t]{0.43\textwidth}
+\centering
+\caption{Performance on CVSS-C French to English speech-to-speech translation.}
+\label{tab:s2s-results}
+\scriptsize
+\begin{tabular}{ll|cc}
+\toprule
+& \textbf{Chunk Size ($ms$)} &  320  &    Offline \\
+\midrule
+\multirow{2}*{Ours} & \textbf{ASR-BLEU ($\uparrow$)}   &   18.3 & 19.3   \\
+& \textbf{AL ($ms, \downarrow$)}  & 118 & - \\
+\midrule
+\multirow{2}*{Transducer} & \textbf{ASR-BLEU ($\uparrow$)}  & 17.1 &  18.0 \\
+& \textbf{AL ($ms, \downarrow$)} & 153 & - \\
+\bottomrule
+\end{tabular}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.55\textwidth}
+\centering
+\caption{Performance of MonoAttn-Transducer with different choices of prior alignment.}
+\label{tab:ab-results}
+\scriptsize
+\begin{tabular}{ll|cccc}
+\toprule
+& \textbf{Chunk Size ($ms$)} &  320  &   640  &    960  &    1280 \\
+\midrule
+\multirow{2}*{$p^{\mathrm{dia}}$} & \textbf{BLEU ($\uparrow$)}   &      24.72 & 26.74 & 27.05 & 27.41 \\
+& \textbf{AL ($ms, \downarrow$)}  & 997 & 1239 & 1606 & 1991 \\
+\midrule
+\multirow{2}*{$p^{\mathrm{uni}}$} & \textbf{BLEU ($\uparrow$)}  & 24.89 &  26.68 & 27.26 &  27.11 \\
+& \textbf{AL ($ms, \downarrow$)} & 993 & 1249 & 1601 & 1983 \\
+\bottomrule
+\end{tabular}
+\end{minipage}
+
+\end{table}
+
+{The results demonstrate that MonoAttn-Transducer significantly reduces generation latency (\texttt{AL}). With a chunk size of 320ms, it achieves Transducer's offline generation quality, but reducing lagging to 118ms. For offline settings, our approaches further improves speech generation quality (19.3 vs. 18.0). These results highlight the effectiveness of our approach in achieving a better quality-latency trade-off also for streaming speech generation.}
+
+
+
+
+
+\section{Analysis}
+
+\label{sec:abs}
+\subsection{Choice of Prior Alignment}
+\label{abs:prior-choice}
+
+In Section \ref{sec:prior}, we introduced two choices for prior alignment: the uniform prior $p^{\mathrm{uni}}$, which assumes an equal probability of generation at each time step; and the diagonal prior $p^{\mathrm{dia}}$, which prefers ideal synchrony between the source and target. 
+We employed the diagonal prior $p^{\mathrm{dia}}$ as the default choice
+in the aforementioned experiments. In this section, we examine the impact of different choices.%We follow the previous experimental setup to train MonoAttn-Transducer using $p^{\mathrm{uni}}$.
+The results are displayed in Table \ref{tab:ab-results}. As shown, MonoAttn-Transducer's performance demonstrates robustness to the choice of prior alignment, with only minor impacts on both translation quality and latency across all chunk size settings. We have observed that, even with significant differences in the prior distribution, the posterior remains fairly robust when the chunk size is constant. This nice property reinforces the robustness of using the inferred posterior to train monotonic attention.
+
+
+\subsection{Handling Non-monotonicity}
+\label{sec:non-monotonicity}
+To illustrate MonoAttn-Transducer's capability in handling reorderings through learning monotonic attention, we evaluate its performance against the Transducer baseline across samples with varying levels of non-monotonicity. Intuitively, samples with a higher number of crosses in the alignments between source transcription and reference text pose greater challenges. 
+We therefore evenly partition the test set based on the number of cross-alignments, labeling them as easy, medium and hard.\footnote{The easy subset includes samples with a cross count of 1 or fewer. The medium subset contains samples with a cross count between 2 and 6. Samples with a cross count greater than 6 are classified as hard.} The results are presented in Figure \ref{fig:diff}. We observe that MonoAttn-Transducer shows a more substantial improvement over Transducer in the medium and hard subsets across most chunk size settings. However, with a chunk size of 320ms, the improvement is particularly notable in the easy subset. These findings highlight the unique capabilities of MonoAttn-Transducer in managing non-monotonic alignments. As analyzed in Section \ref{sec:main-results}, MonoAttn-Transducer benefits more from learning monotonic attention with a larger chunk size, and this enhanced ability is evident in subsets with higher levels of non-monotonicity. On the other hand, when the chunk size is extremely small, MonoAttn-Transducer has limited flexibility to wait for more source information before processing, thus showing more significant improvement in the easy subset under the condition.
+
+\subsection{Training Efficiency}
+{\indent \indent \textbf{Training Time}: 
+We analyze each step in Algorithm \ref{alg:train} to compare the training time differences between MonoAttn-Transducer and baseline. We observe that Lines 1, 2, 6 involve naive matrix computation without requiring gradients. The additional time overhead introduced by our method arises from Lines 3, 4, 5. Specifically, this includes an additional forward pass of the predictor and the computation for the posterior alignment. The overhead from the posterior calculation is approximately equivalent to that incurred during loss calculation, as both rely on the forward-backward algorithm. Empirically, we found MonoAttn-Trasducer is 1.33 times slower than Transducer baseline with the same configuration on Nvidia L40 GPU.}
+
+{\textbf{Memory Consumption}: Compared to baseline, the additional memory overhead of MonoAttn-Transducer comes solely from its monotonic attention module. The extra forward pass of the predictor is performed without requiring gradients, so it is excluded from the computation graph. Empirically, we observed that the peak memory usage of Transducer baseline is 28GB, while MonoAttn-Transducer exhibits a slightly higher peak usage of 32GB when the total number of source frames is fixed at 40,000 on a single Nvidia L40 GPU.}
+
+
+
+
+\section{Conclusion}
+
+In this paper, we propose an efficient algorithm for Transducer models to learn monotonic attention. Extensive experiments demonstrate that our MonoAttn-Transducer significantly improves the ability in handling non-monotonic alignments in streaming generation, offering a robust solution for Transducer-based frameworks to tackle more complex streaming generation tasks.
+
+
+
+
+
+
+
+
+
+
+
+

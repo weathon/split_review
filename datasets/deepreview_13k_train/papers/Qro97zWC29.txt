@@ -1,0 +1,328 @@
+\title{Near, far: Patch-ordering enhances vision foundation models' scene understanding}
+
+\begin{abstract}
+We introduce NeCo: Patch Neighbor Consistency, a novel self-supervised training loss that enforces patch-level nearest neighbor consistency across a student and teacher model. Compared to contrastive approaches that only yield binary learning signals, i.e. "attract" and "repel", this approach benefits from the more fine-grained learning signal of sorting spatially dense features relative to reference patches. Our method leverages differentiable sorting applied on top of pretrained representations, such as DINOv2-registers to bootstrap the learning signal and further improve upon them. This dense post-pretraining leads to superior performance across various models and datasets, despite requiring only 19 hours on a single GPU. This method generates high-quality dense feature encoders and establishes several new state-of-the-art results such as +5.5 % and +6% for non-parametric in-context semantic segmentation on ADE20k and Pascal VOC, +7.2% and +5.7% for linear segmentation evaluations on COCO-Things and -Stuff and improvements in the 3D understanding of multi-view consistency on SPair-71k, by more than 10%.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Dense self-supervised learning trains feature extractors to produce representations for every pixel or patch of an image without supervision. This field has seen substantial advancements in recent years, notably improving unsupervised semantic segmentation (Ziegler & Asano, 2022; Salehi et al., 2023; Araslanov et al., 2021; Stegmüller et al., 2023; Wang et al., 2021), object-centric representation learning (Zadaianchuk et al., 2023), and other dense downstream tasks like object tracking and object detection (Hénaff et al., 2021; 2022; Lebailly et al., 2023; Salehi et al., 2023).  
+
+One particularly interesting use-case of densely pretrained encoders was developed by Balazevic et al. (2023). They propose to solve semantic segmentation by posing it as a nearest-neighbor retrieval problem utilizing the features of the spatial patches. This non-parametric method not only mirrors in-context learning in large language models (LLMs) (Brown et al., 2020) but also delivers rapid and robust performance, especially with limited data.  
+
+Building on this idea, we propose an inverted approach: using nearest-neighbor retrieval not just for evaluation but as a training mechanism for encoders. This approach promises a more fine-grained learning signal, enabling the capture of intricate visual details. For instance, the features of a tire should be closely related to one another, as well as to those of a car body, while remaining distinct from features of an airplane.  
+
+Unlike contrastive losses, which offer a binary ‘attract’ or ‘repel’ signal, this provides a much richer, continuous learning signal. Additionally, it avoids the pitfalls of reconstruction-based methods like MAE (He et al., 2022), where low-level RGB patches that are visually similar may not carry similar semantics. By operating strictly in the deep feature space, learning is guided by higher-level semantics rather than superficial pixel-level similarities. As a result, this method promises to yield models with deeply semantic spatial features specifically tailored for in-context tasks, enhancing their adaptability and robustness. However, this approach, while promising, presents two main challenges.  
+
+The first is the source of supervision. In the case of evaluation, ground-truth labels are used, yet we are interested in obtaining better self-supervised representations. While previous works (Balazevic et al., 2023; Lebailly et al., 2023) address this by essentially converting dense learning to image-level learning via learnable pooling of patches, we offer a more practical and versatile solution. We simply  
+
+start from already image-level pretrained models and adapt them further. We term this stage dense post-pretraining and demonstrate that it is an effective and fast solution to this problem, taking only 19 hours on a single GPU for tuning for a ViT-S/16 model.   
+The second challenge is the discrete nature of nearest-neighbor retrieval, which does not yield gradients. To overcome this, we apply a differentiable sorting method proposed by Petersen et al. (2021), originally developed for ranking supervision, that we can use to backpropagate gradients. As we demonstrate empirically, this results in a more efficient and effective algorithm.   
+Our method enforces Patch Neighbor Consistency, so we term it NeCo. We show that it can be applied on top of image-level pretrained models such as DINO (Caron et al., 2021), and densely trained ones like iBOT (Zhou et al., 2022), Leopart (Ziegler & Asano, 2022), CrIBO (Lebailly et al., 2023) and DINOv2 (Oquab et al., 2023; Darcet et al., 2024) to obtain superior features for in-context scene understanding. Despite not being as close to our NeCo training task, our method also consistently excels on downstream benchmarks such as 3D understanding, unsupervised semantic segmentation and also full-finetuning semantic segmentation, where it even improves upon the state-of-the-art DINOv2-R model (Darcet et al., 2024).  
+
+Overall, our contributions can be summarized as follows:  
+
+• We propose a new post-pretraining adaptation that applies a dense, patch-sorting-based self-supervised objective, NeCo, applicable to any pretrained Vision Transformer • We demonstrate NeCo’s utility by applying it to six different backbones and evaluating it on five datasets and five evaluation protocols, achieving performance gains from $6\%$ to $16\%$ . • We set several new state-of-the-art performances, for example on the in-context segmentation benchmark of Balazevic et al. (2023), we outperform the previous methods such as CrIbo and DINOv2 on Pascal VOC and ADE20k by $4\%$ to $13\%$ across different metrics.  
+
+
+
+\section{2 RELATED WORKS  }
+
+
+Dense Self-supervised Learning. Dense self-supervised learning methods aim to generate categorizable representations at the pixel or patch level, rather than the image level. This field has gained significant attention (Salehi et al., 2023; Ziegler & Asano, 2022; Araslanov et al., 2021; Stegmüller et al., 2023; Lebailly et al., 2023; Balazevic et al., 2023; Hwang et al., 2019; Liu et al., 2020; Hénaff et al., 2022; Van Gansbeke et al., 2021; Hénaff et al., 2022; 2021; Yun et al., 2022) due to the observation that image-level self-supervised methods (Caron et al., 2018; Asano et al., 2019; Chen et al., 2020; Grill et al., 2020; Caron et al., 2021; Izacard et al., 2021; Oquab et al., 2023) do not necessarily produce expressive dense representations (Balazevic et al., 2023; Hénaff et al., 2022; He et al., 2019; Purushwalkam & Gupta, 2020).  
+
+CroC (Stegmüller et al., 2023) is a recent method that has proposed a dense self-supervised loss to address the issue. It applies joint clustering between different views, ensuring that cluster centers capturing the same object are similar. Leopart (Ziegler & Asano, 2022) improves dense representations by applying a dense clustering loss to pretrained models. Extending this concept, TimeTuning (Salehi et al., 2023) has demonstrated that finetuning pretrained backbones over the temporal dimension of unlabeled videos enhances dense reasoning capabilities. Recently, Hummingbird (Balazevic et al., 2023) has proposed a dense loss that leverages attention within and across images during training, showing strong in-context scene understanding during evaluation. CrIBo (Lebailly et al., 2023) takes this further by explicitly enforcing cross-image nearest neighbor consistency between image objects, achieving state-of-the-art results.  
+
+We similarly adopt nearest neighbor consistency due to its promising results in in-context scene understanding but with two major differences: (1) instead of using pooled versions of patches at either the image or object level, we directly apply it to patch features; (2) in addition to nearest neighbor consistency, we ensure that the order of neighbors for the same patches from different views is similar. These changes result in more semantic patch-level features, directly enhancing in-context scene understanding and stabilizing training, as there is no need to infer object-level features through clustering methods, which can be unstable during training.  
+
+Unsupervised Object Segmentation. Several works specifically target unsupervised object segmentation (Seitzer et al., 2022; Löwe et al., 2023; Bao et al., 2023; Siméoni et al., 2023; Zadaianchuk  
+
+ETneaccohdeerr ROI Align Pt (T1,T2) Differen Sorting Q EMA Forcing consistent neighbor ordering LNeCo Batch Images D (fg,f> T EStnucdoednetr $(\tau_{1},\tau_{2})$ n DiffSeorretinntiga F Figure 1: NeCo overview. Given an input image $I$ , two augmentations $\tau_{1}$ and $\tau_{2}$ are applied to create two different views, which are processed by the teacher and student encoders, $\phi_{t}$ and $\phi_{s}$ respectively. The teacher encoder is updated using Exponential Moving Average (EMA). The encoded features are then aligned using ROI Align and compared with reference features $F_{r}$ obtained by applying $\phi_{t}$ to aourttiehl ieczro ebdma tptcou htf eiodrm cuaesg inenesg.a  rcNeosestix nto,er  pdsaeiirmr ciwloiansriest iysd.ti esTtnahcneysc eea scd $D_{i j}$ ntbcheeets  wvaiereeew nt $F_{s}$ r asonourdgt $F_{r}$ ,hu esa isNn gwe eCdlilof  falesor sebsne.ttiwabeleen $F_{t}$ t ianngd $F_{r}$ , ista hen ed  sor and ross s th h t et al., 2023; Wang et al., 2023; Hamilton et al., 2022; Lan et al., 2023; Zadaianchuk et al., 2022). The goal of these works is not to learn semantic patch-level representations; instead, they often utilize tsheem eaxnitsitci nseg ginmfeonrtmataitoino.n  Fion rf irnoszteann cper,e tSreaiitnzeedr  ebta aclk. b(o2n0e2s2 )a tnrda itnr aai ns laont-oatthteern timoond eeln ctoo deexrp alincdit ldye csooldveer module (Locatello et al., 2020) to reconstruct DINO (Caron et al., 2021) pretrained features with a few slots for each input image. This process enables the creation of per-image object cluster maps, where each slot represents a distinct object or part of an object within the image, based on the features it predicts. Ians  cinotnetrramste, doiaurri aeps pfroora cdhe nlesaer tnass dkiss tliinkcet  fseeamtuarnetsi cf osre vgamrieonutsa toibojne.c tsT haensde e fmeaptluoryes sd ceanns et rheepnr ebsee nutsaetido tnos develop per-dataset cluster maps for semantic segmentation use cases. 3 PATCH NEIGHBOR CONSISTENCY The goal is to develop a feature space in which, for a given input, patches representing the same poAta htkceehry e tcsh.ha anAl lltetohn ogthue ogfshoe r p faar tsocehmlfe -sds ifufrfpoeerrmev itnsht eeod s bajmemecteth s oo(dbe j.iegnc. t t ha(i es.d gop.r gao) ,c cetashts)e  yias r med eaefyxi npsietniclgtl e tddh eet posi icbmte i dlmiafrofiteryre  esbniettm pwilaearert nst  oio mfe aatchghee Therefore, a learned dense feature space must provide an ordering of similarities to ensure that dTios ttahnics ees,n ad,n do fuor rcmientgh ao dc ownsoirsktes nbcyy  ebxettrwaecetinn tgh ed eonrdsee r foefa tnueraerse sotf  ntehieg hinbporust sw, ifthinidni na gb atthcehi ra pcraoirs-s wtiwsoe & Asano, 2022; Salehi et al., 2023) can be seen as potential substitutes for sorting in aligning positive views, they only enforce similarity without capturing the nuanced ordering constraints necessary for structured relationships. Moreover, they often rely on explicit negative samples, which limits their flexibility. In contrast, our sorting-based approach not only maintains relative similarities without the need for negatives but also prevents mode collapse by preserving subtle distinctions among patches, even within the same object. Figure 1 provides an overview of the method, which we describe in detail below.  
+
+Feature Extraction and Alignment. Given an input image $I$ , two augmentations specified by parameters $\tau_{1}$ and $\tau_{2}$ are applied to create two different views $V_{1}$ and $V_{2}$ . These views are then divided into $\begin{array}{r}{\bar{N}=\lfloor\frac{\bar{H}}{P}\rfloor\times\lfloor\frac{\bar{W}}{P}\rfloor}\end{array}$ separate patches, where $H$ and $W$ represent the height and width of the input image, and $P$ represents the patch size. The patches are represented as $V_{1}^{p}=\left[v_{1}^{1},\ldots,v_{N}^{1}\right]$ and $V_{2}^{p}=\left[v_{1}^{2},\ldots,v_{N}^{2}\right]$ , which are fed to the feature extractor.   
+We utilize the Vision Transformer (ViT) architecture (Dosovitskiy et al., 2020) as the backbone and employ a teacher-student framework, where the student and teacher models are denoted by $\phi_{s}$ and $\phi_{t}$ , respectively. The teacher’s weights are updated using the exponential moving average of the student’s weights.   
+As the generated views cover different parts of the input, the extracted features do not necessarily correspond to the same objects. To address this, we align the features by applying ROI-Align (He et al., 2017), adjusted according to the crop augmentation parameters. This process creates spatially aligned dense features for the teacher and student networks, represented by $F_{s}\in\mathbb{R}^{N^{\prime}\times d}$ and $F_{t}\in\mathbb{R}^{N^{\prime}\times d}$ . These features are then forced to maintain a consistent order of nearest neighbors, ensuring more robust and meaningful feature representations, as explained next.   
+Pairwise Distance Computation. To identify the nearest neighbors of the patches, it is necessary to extract features from other images in the batch and compute their distances with respect to $F_{s}$ and $F_{t}$ . To achieve this, all batch images are fed through the teacher network, $\phi_{t}$ , to obtain the  
+
+batch features $F_{B}\in\mathbb{R}^{B N\times d}$ . We sample a random fraction $f\ll1$ of these patches to obtain the $R=f B N$ reference patches $F_{r}\in\mathbb{R}^{r\times d}$ which we use to compare the nearest neighbors of our $F_{s}$ and $F_{t}$ features. To this end, we compute distances based on cosine similarities,  
+
+$$
+\begin{array}{r l}&{D_{s}(i,j)=1-\frac{\langle F_{s}^{i},F_{r}^{j}\rangle}{\|F_{s}^{i}\|\|F_{r}^{j}\|},}\\ &{D_{t}(i,j)=1-\frac{\langle F_{t}^{i},F_{r}^{j}\rangle}{\|F_{t}^{i}\|\|F_{r}^{j}\|},}\\ &{i\in(1,\ldots,N^{\prime}),\ j\in(1,\ldots,R),}\end{array}
+$$  
+
+Next, these distance matrices are sorted in a differentiable manner to produce a loss that enforces a similar sorting across the two views.  
+
+Differentiable Sorting of Distances. To determine the order of nearest neighbors from distance matrices, sorting is necessary. However, traditional sorting algorithms cannot propagate gradients because they use non-differentiable operations such as $d_{i}^{\prime}\gets\operatorname*{min}(d_{a},d_{b})$ and $d_{a}^{\prime}\gets\operatorname*{max}(d_{a},d_{b})$ to facilitate element swapping in the sequence for an ordering $a\ <\ b$ . Given a sequence $s=$ $\left(d_{1},\ldots,d_{R}\right)$ , where $R$ is the length of the sequence, We use relaxed, differentiable versions of these operations by defining their soft versions following recent work (Lee et al., 2017), as follows:  
+
+$$
+\begin{array}{r l}&{d_{a}^{\prime}=\mathrm{softmin}(d_{a},d_{b}):=d_{a}f(d_{b}-d_{a})+d_{b}f(d_{a}-d_{b}),}\\ &{d_{b}^{\prime}=\mathrm{softmax}(d_{a},d_{b}):=d_{a}f(d_{a}-d_{b})+d_{b}f(d_{b}-d_{a}),}\end{array}
+$$  
+
+where the function $\begin{array}{r}{f(x)\,=\,\frac{1}{\pi}\arctan(\beta x)+0.5.}\end{array}$ , and $\beta>0$ is an inverse temperature parameter, specifying the steepness of the operator. This function is sigmoid-shaped and centered around $x=0$ . As $\beta$ approaches infinity, the relaxation converges to the discrete swap operation. This operation can be defined in an approximate permutation matrix $P_{\mathrm{swap}}(d_{i},d_{j})\in\mathbb{R}^{2\times\dot{L}}$ , which is essentially an identity matrix except for the entries $P_{i i}$ , $P_{i j}$ , $P_{j i}$ , and $P_{j j}$ defined as  
+
+$$
+P_{i i}=P_{j j}=f(d_{j}-d_{i}),\qquad P_{i j}=P_{j i}=f(d_{i}-d_{j}),
+$$  
+
+such that one step of swapping the pair $(d_{i},d_{j})$ in the sequence is equivalent to multiplying $P$ with that sequence. The final permutation matrix for the entire sequence is determined by the sorting algorithm employed. For example, in the odd-even sorting algorithm, the permutation matrix $P_{t}$ for a step $t$ is defined as:  
+
+$$
+P_{t}=\prod_{i\in M}P_{\mathrm{swap}}(d_{i},d_{i+1}),
+$$  
+
+where $M$ is the set of odd indices if $t$ is odd and the set of even indices if $t$ is even. The overall permutation matrix $Q$ is obtained by multiplying the permutation matrices from all steps of the sorting algorithm, $\begin{array}{r}{Q=\prod_{t=1}^{L}P_{t}}\end{array}$ . As shown by (Petersen et al., 2021), $L=R$ of such steps are sufficient for efficient sorting.  In the discrete case, for each column $i$ , the permutation matrix has exactly one entry of 1, indicating the sequence element that should be placed in the $i$ -th column. In the relaxed version, column values represent a distribution over possible sequence elements. In our case, a row $i$ of the distance matrix $D_{s}$ shows the distance of the $i$ -th student feature to all the reference features.  
+
+With its sorting matrix $Q_{i}$ , the $(r,k)$ element of this matrix can be viewed as the probability of a reference feature $r$ being the $k$ -th nearest neighbor for the $i$ -th feature. Hence, to maintain the order of nearest neighbors for every ROI-aligned patch feature, we compute $Q_{i}$ for every row of $D_{s}$ and $D_{t}$ and force these to be similar. This results in final matrices $Q^{s}=[Q_{1}^{s},\dotsc,Q_{N^{\prime}}^{s}]$ and $Q^{t}=[Q_{1}^{t},\dots,Q_{N^{\prime}}^{t}]$ , which are used in the training loss.  
+
+Training Loss. After computing permutation matrices, we enforce similarity on the order of nearest neighbors for each of the aligned patch features using the cross-entropy loss. The loss for the permutation matrix of patch $i$ is defined as:  
+
+$$
+\mathcal{L}_{\mathrm{CE}}(Q_{i}^{t},Q_{i}^{s})=-\sum_{j,k}Q_{i}^{t}(j,k)\log(Q_{i}^{s}(j,k)),
+$$  
+
+To ensure robust nearest neighbor consistency, we compute the cross-entropy loss in both directions and sum the losses. The final training loss, incorporating both directions, for all the patches is:  
+
+$$
+\mathcal{L}_{\mathrm{NeCo}}=\sum_{i=1}^{N^{\prime}}\mathcal{L}_{\mathrm{CE}}(Q_{i}^{t},Q_{i}^{s})+\mathcal{L}_{\mathrm{CE}}(Q_{i}^{s},Q_{i}^{t})
+$$  
+
+This ensures, in a differentiable manner, that the order of nearest neighbors is consistent between the student and teacher features in both directions.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+4.1 SETUP  
+
+Benchmarked Methods. We compare our method against state-of-the-art dense self-supervised learning methods, including CrIBo (Lebailly et al., 2023), Hummingbird (Balazevic et al., 2023), TimeT (Salehi et al., 2023), Leopart (Ziegler & Asano, 2022), and CrOC (Stegmüller et al., 2023) as well as baselines such ad DINO (Caron et al., 2021), iBOT (Zhou et al., 2022). To provide a more comprehensive evaluation, We also include the performance of DINOv2 enhanced with registers, referred to as DINOv2R (Oquab et al., 2023; Darcet et al., 2024), as it has demonstrated strong dense capabilities. Additionally, we benchmark our method against leading unsupervised semantic segmentation approaches such as COMUS (Zadaianchuk et al., 2022), DINOSAUR (Seitzer et al., 2022), DeepSpectral (Melas-Kyriazi et al., 2022), and MaskContrast (Van Gansbeke et al., 2021).  
+
+Training. We run our experiments on ViT-Small and ViT-Base with a patch size of 14. We start from various pretrained backbones, and use DINOv2 with registers unless otherwise noted. We post-pretrain these models for 25 COCO epochs on a single NVIDIA RTX A6000-46GB GPU, taking around 19 hours.  
+
+Evaluation. In all our evaluations, we discard the projection head, following previous works (Caron et al., 2021; Ziegler & Asano, 2022; Salehi et al., 2023), and directly use the spatial tokens from the Vision Transformer backbone. Scores in all experiments are reported as mean intersection over union (mIoU). We conduct four types of evaluations: linear segmentation fine-tuning with a $1\times1$ convolution, end-to-end segmentation with the Segmenter head (Strudel et al., 2021), clustering and overclustering semantic segmentation (Ziegler & Asano, 2022; Salehi et al., 2023), and dense nearest neighbor retrieval (Balazevic et al., 2023). For clustering and overclustering, we apply K-Means to spatial tokens, setting $K$ to the number of ground truth objects and to high values like 300 and 500, as previously used (Ziegler & Asano, 2022; Salehi et al., 2023). We then extract object cluster maps and match them using Hungarian matching (Kuhn, 1955). For dense nearest neighbor retrieval, we follow the protocol from Balazevic et al. (2023), implemented in Pariza et al. (2024). For 3D understanding benchmark, We use the multiview feature consistency evaluation method proposed by El Banani et al. (2024), except all the images are resized to $224\times224$ .  
+
+![](images/6c782ee070a52f5eedc37c3061293541a99859c2e4a5bfafb110945ff84f7389.jpg)  
+
+Figure 2: In-context scene understanding benchmark. Dense nearest neighbor retrieval performance is reported across various training data proportions on two scene-centric datasets, Pascal VOC and ADE20k. The retrieved cluster maps are compared with the ground truth using Hungarian matching (Kuang et al., 2021), and their mIoU score is reported. For all models, ViT-S16 is used except for DINOv2R and $\scriptstyle\mathrm{N}\in\sum\mathrm{O}$ , where it is ViT-S14.3  
+
+Datasets. We train our model on ImageNet-100 (Tian et al., 2020), Pascal VOC12 (Everingham et al., 2010), and COCO (Lin et al., 2014) for ablations and use COCO as our primary training dataset for all state-of-the-art comparisons. For evaluations, we use the validation sets of Pascal VOC12 (Everingham et al., 2010), COCO (Lin et al., 2014), ADE20k (Zhou et al., 2017), and Pascal Context (Mottaghi et al., 2014). For finetuning and feature transferability evaluations on COCO (Caesar et al., 2018), we train using a $10\%$ split of the training set, while we use the full training splits of the other datasets. For the 3D understanding benchmark, we use Spair-71k (Min et al., 2019) dataset.  
+
+4.2 COMPARISON TO STATE-OF-THE-ART  
+
+In this section, we first compare the quality of frozen features learned through NeCo with stateof-the-art methods in in-context learning via nearest neighbor retrieval and unsupervised semantic segmentation tasks. Next, we demonstrate $\mathtt{N e C O}$ ’s versatility by applying it to five different pretraining models and show it improves their dense features consistently. We then evaluate the transferability of our learned dense representations to other datasets by using linear head semantic segmentation and end-to-end fine-tuning with Segmentor (Strudel et al., 2021). Finally, we show that NeCo improves the 3D understanding of different vision models, as proposed in El Banani et al. (2024), using the multiview consistency experiment.  
+
+Visual In-Context Learning Evaluation. We compare our approach to a recently proposed benchmark (Balazevic et al., 2023) that evaluates in-context reasoning in vision models. Unlike traditional linear segmentation methods, this evaluation does not require fine-tuning or end-to-end training. Instead, it creates validation segmentation maps by matching patch-level, feature-wise nearest neighbor similarities between validation images (queries) and training samples (keys). This method, inspired by NLP strategies, tests how well models learn tasks from a few examples. The results are presented in Figure 2. As shown, NeCo outperforms prior state-of-the-art methods such as CrIBo and DINOv2R by $4\%$ to $13\%$ on Pascal and ADE20k across different fractions. The performance gap between $\scriptstyle\mathrm{N}\in\sum\mathrm{O}$ and others increases, particularly in the data-efficiency regime. This improvement is due to our method’s explicit enforcement of patch-level nearest neighbor consistency, resulting in higher-quality patch-level representations that remain effective even with fewer images. In contrast, other methods that promote image-level (Balazevic et al., 2023) or object-level (Lebailly et al., 2023) consistency force consistency between a pooled vector of patches, potentially leading to inadequate semantic patch-level representations, particularly in smaller datasets. Our method’s ability to perform well with few images brings vision models one step closer to in-context learning style generalist reasoning.3.  
+
+Table 1: Frozen clustering-based evaluations. (a) We evaluate the models by running $K$ -means with various clustering granularities $K$ on the spatial features on two datasets. The resulting cluster maps are matched to the ground-truth by Hungarian matching, and the intersection is reported in mIoU. (b) Following previous works (Ziegler & Asano, 2022; Salehi et al., 2023), we post-process the resulting maps and report unsupervised semantic segmentation on Pascal VOC. Both tables use ViT-S with the patch size of 16, except for DINOv2R and NeCo, where it is 14.  
+
+(a) Clustering   
+(b) Semantic segmentation   
+
+![](images/6d05a1c7fe0991ae1ed0f891414624ca4268f71867afa96d24d7b06f47f1aca6.jpg)  
+
+Frozen Clustering-based Evaluations. Next, we evaluate the representation quality of our learned dense features across different objects in each dataset. Ideally, we expect that all patch features belonging to the same object, when clustered, will be assigned to the same cluster. If the learned representations are more fine-grained, such as learning object parts instead of whole objects (e.g., hands or faces instead of a person), they should consistently cover the same part across the entire dataset. To measure this, we extract dense features from all images and apply $K$ -means clustering with various $K$ values to create cluster maps for each image. These cluster maps are then matched with the ground truth using Hungarian matching (Kuhn, 1955), and their mIoU is reported. For the first scenario, $K$ matches the number of ground truth objects. Additionally, to account for the second scenario, we also report performance in overclustering setups.  
+
+The results in Table 1a show that $\mathtt{N e C O}$ passes state-of-the-art by CrIBo by $14.5\%$ on average across various datasets and metrics. Note that this gain is not due to the DINOv2R initialization, as it performs $4\%$ lower than CrIBo on average. In Table 1b, we report clustering performance when $K$ matches the number of ground truth objects, with clustering applied solely to foreground patches extracted by methods used in Ziegler & Asano (2022); Salehi et al. (2023). We outperform other methods by at least $5.1\%$ without relying on self-training, which requires training a separate segmentation head, as used in COMUS.  
+
+Linear Semantic Segmentation Evaluation. In this experiment, we keep the pretrained backbone frozen and train a linear layer on top of the spatial features to solve a supervised semantic segmentation task. Bilinear interpolation is used to match the spatial feature resolution to the image size, enabling the application of pixel-wise cross-entropy loss. This setup provides a better evaluation of the pretrained models compared to end-to-end finetuning, where all learned parameters are overwritten. The results, reported in Table 2, show that $\mathrm{N}{\in}\mathrm{CO}$ surpasses CrIBo on all datasets by at least $10\%$ and outperforms DINOv2R by $5\%$ to $7\%$ . These significant improvements demonstrate that patches representing the same object or object part have higher similarities in feature space compared to other methods, as a simple linear layer can utilize these features for strong semantic segmentation.  
+
+378   
+379   
+380   
+381   
+382   
+383   
+384   
+385   
+386   
+387   
+388   
+389   
+390   
+391   
+392   
+393   
+394   
+395   
+396   
+397   
+398   
+399   
+400   
+401   
+402   
+403   
+404   
+405   
+406   
+407   
+408   
+409   
+410   
+411   
+412   
+413   
+414   
+415   
+416   
+417   
+418   
+419   
+420   
+421   
+422   
+423   
+424   
+425   
+426   
+427   
+428   
+429   
+430   
+431  
+
+Table 2: Linear segmentation performance. A linear segmentation head is trained on top of the frozen spatial features obtained from different feature extractors. We report the mIoU scores achieved on the validation sets of 4 different datasets.   
+
+![](images/56da64c1910caa462cab74d7626994517c4dd11a182b775d54f169351917b9a4.jpg)  
+
+Compatibility with Differently Pretrained Backbones. As shown in Table 3, our method is generalizable across various self-supervised learning initialization, improving them by roughly $4\%$ to $30\%$ across different metrics and datasets. Surprisingly, $\mathtt{N e C O}$ even enhances the performance of methods specifically designed for dense tasks, such as CrIBo, TimeT, and Leopart. For instance, CrIBo demonstrates a performance increase of approximately $5\%$ in overclustering evaluations, which measures how fine-grained and semantic the representations learned during pretraining are. This indicates that NeCo applied to CrIBo can extract more discriminative features, leading to improved transfer performance, shown by $0.5\%$ and $3.7\%$ better linear classification performance on Pascal VOC and COCO-Things.  
+
+Table 3: NeCo starting from different pretrainings. We report frozen clustering and linear segmentation on Pascal VOC and COCO-Things. NeCo can considerably boost (↑) the performance of models with different initialization, showing our approach’s generality. The backbone is ViT-S16.   
+
+![](images/8088e9a8a209f3f5d5e6ce6253665b4c02928e99dda172fd85833c8cd2b6632f.jpg)  
+
+End-to-End Full-Finetuning Evaluation. One advantage of self-supervised pretraining is the ability to transfer learned general semantic features to specialized downstream tasks, improving performance in an end-to-end finetuning setup. We evaluate this capability of NeCo by adding a transformer-based decoder from Segmenter (Strudel et al., 2021) on top of the feature extractor and finetuning the entire network for semantic segmentation. The backbone’s spatial features are fed into a transformer decoder along with $K$ learnable class tokens. These class and spatial tokens are projected onto each other to obtain patch-level predictions, which are then upsampled to match the input image size, enforcing pixel-wise cross-entropy loss. We report the mIoU scores achieved on Pascal VOC, Pascal Context, COCO-Stuff, and ADE20k in Table 4. Despite all parameters being adapted, the results show that NeCo learns superior features, leading to better performance in downstream tasks, outperforming CrIBo by approximately $4\%$ . Notably, while DINOv2R has demonstrated strong transfer results in various tasks, including semantic segmentation, due to being trained on a massive dataset of 142M images and using a combination of dense and classification losses, NeCo surpasses even this. By training only 19 GPU-hours on COCO, which is a fraction of the original compute, we obtain consistent gains, setting a new state-of-the-art.  
+
+Multiview Feature Consistency Evaluation. This evaluation assesses the 3D understanding of models through geometric correspondence estimation, aiming to measure the consistency of feature  
+
+432 433 434 435 436 437 438 439 440 441 442 443 444 445 446 447 448 449 450 451 452 453 454 455 456 457 458 459 460 461 462 463 464 465 466 467 468 469 470 471 472 473 474 475 476 477 478 479 480 481 482 483 484 485   
+Table 4: Evaluation of Full Fine-Tuning with Segmenter. Various backbones pre-trained with different self-supervised learning methods are fine-tuned using Segmenter (Strudel et al., 2021). The table shows the mIoU scores obtained on validation sets across 4 different datasets.   
+
+![](images/bf500d58255ceef854c3d29dae9e68da2b2f092ed9bc7a1f728e2a0f87ccd6fd.jpg)  
+
+Table 5: Multiview feature consistency results on SPair-71k, Recall $@\mathbf{0.01}$ . We use the evaluation method proposed by El Banani et al. (2024). NeCo improves the results of DINO models by roughly $10\%$ for 3D understanding, measured by multiview feature consistency.  
+
+![](images/581cdd4dc7382fde5adad9aa247fb8a2824b92b7855c5ff1390ae019ddb9b0d7.jpg)  
+
+representations across multiple views of the same scene. By identifying matching points in different images without additional model training, it provides a direct evaluation of 3D feature quality (El Banani et al., 2024). The evaluation is done on a large-scale dataset called Spair-71k (Min et al., 2019). As Table 5 shows, NeCo can boost the performance of DINO models by roughly $10\%$ on average across different categories. This demonstrates that the proposed method extends beyond enhancing semantic segmentation and has a broader impact on vision foundation models by improving their overall spatial understanding  
+
+
+
+\section{4.3 ABLATION STUDIES  }
+
+
+Here, we examine the essential parameters of our method by training NeCo on Pascal VOC12 and ADE20k. We assess its ability to perform linear segmentation and in-context scene understanding using the frozen representations learned with each set of parameters. For in-context scene understanding evaluations, we use1128 fraction of the training data and reduce the spatial dimension to $448^{2}$ . The number of training epochs for linear segmentation evaluations is set to 20 epochs.  
+
+Patch Selection Approach. We demonstrate the effect of selecting patches from the foreground, background, or both in Table 6a. Foreground patches are selected using the attention map averaged across heads. Our results indicate that selecting patches from the foreground gives $1\%$ better results compared to the background selection in 3 out of 4 metrics. However, the performance peaks when we select patches from both locations. This improvement can be attributed to the use of scene-centric images for training, where the background often contains meaningful objects that contribute to enhanced performance.  
+
+Utilizing a Teacher. We ablate the role of teacher-student architecture in Table 6b. As shown, employing a teacher network updated by exponential moving average can significantly improve the performance across all the metrics by $8\%$ to $20\%$ . This is consistent with the previous works (Caron et al., 2021; Grill et al., 2020), which reported a more stable training process when the teacher-student architecture is employed.  
+
+Nearest Neighbor Selection Approach. We evaluate the influence of picking nearest neighbors from the same image (intra) or different batch images (inter) and find that selecting patches across images consistently boosts performance by roughly $0.4\%$ to $1\%$ across different metrics. The higher diversity  
+
+Table 6: Ablations of the key parameters of our method. We evaluate the models by training a linear layer on top of the frozen representations (Lin.) or using the in-context (IC) evaluation of Balazevic et al. (2023) using the validation images for PascalVOC12 and ADE20k.  
+
+(a) Patch selection   
+
+![](images/46f1408602c29559446c22bdc41fda0755f31fb9802f299083047557d96972d0.jpg)  
+
+(b) Use of EMA Teacher   
+
+![](images/fa171213652fa9a193630d78ddf7246825bfbe250bc823676f6dfbbfaaaf5bf9.jpg)  
+
+(c) Num Neighbors (d) Training dataset (e) Batch Size   
+
+![](images/6dff150185fc2574b7b3ea760395f5b7d7bc7be3b3f512b4cd2b611ad17036a6.jpg)  
+
+7 for full tables).  
+
+Training Dataset. Table 6d presents the impact of the training dataset based on the ImageNet-100, Pascal, and COCO datasets. ImageNet-100 comprises relatively simple images with few objects, whereas Pascal and COCO feature more complex scenes with multiple objects. Our method shows consistent improvements when trained on multi-object datasets, achieving a performance increase of $2\%$ to $7\%$ on COCO compared to ImageNet-100. This improvement is due to the greater quantity and diversity of objects per batch in multi-object scenes, which provide stronger learning signals by requiring discrimination against a higher number of objects. Notably, the additional performance boost we observe from finetuning DINOv2R on Pascal—despite it already being trained on this dataset (Oquab et al., 2023)—further underscores the efficacy of our proposed loss function.  
+
+Sorting Algorithm. We ablate the effect of changing the sorting algorithm and find that our method maintains strong performance across various approaches, achieving the best results with Bitonic sorting, which slightly outperforms the alternatives on average. Additionally, we investigate the absence of a sorting component, which leads to deteriorated performance.7, as our method is robust to variations in sorting parameters.  
+
+Batch Size. Table 6e examines how batch size affects performance. Smaller batch sizes provide marginal gains, but larger batch sizes show more significant improvements, indicating that performance could be further improved with batch sizes exceeding 64.  
+
+Number of Neighbors. As detailed in the method section, we use a differentiable sorting algorithm to compute and sort the distances between each patch and others. The ablation study in Table 6c evaluates selecting the top $K$ distances instead of all. Results show that incorporating more neighbors improves performance, but beyond a threshold (e.g., 32), the effect diminishes, indicating robustness against this hyperparameter.  
+
+
+
+\section{5 CONCLUSION  }
+
+
+In this work, we propose Patch Nearest Neighbor Consistency as a new method for dense postpretraining of self-supervised backbones. By applying our method to the many backbones including the DINOv2-registers model, we improve upon these models by a large margin for frozen clustering, semantic segmentation, full finetuning, and 3D understanding, setting several new state-of-the-art performances.  
+
+Nikita Araslanov, Simone Schaub-Meyer, and Stefan Roth. Dense unsupervised learning for video segmentation. NeurIPS, 2021. 1, 2   
+Yuki Markus Asano, Christian Rupprecht, and Andrea Vedaldi. Self-labelling via simultaneous clustering and representation learning. arXiv preprint arXiv:1911.05371, 2019. 2   
+Ivana Balazevic, David Steiner, Nikhil Parthasarathy, Relja Arandjelovic´, and Olivier Henaff. Towards in-context scene understanding. NeurIPS, 2023. 1, 2, 5, 6, 7, 10, 14, 15, 20   
+Zhipeng Bao, Pavel Tokmakov, Yu-Xiong Wang, Adrien Gaidon, and Martial Hebert. Object discovery from motion-guided tokens. In CVPR, 2023. 2   
+Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, et al. Language models are few-shot learners. NeurIPS, 2020. 1   
+Holger Caesar, Jasper Uijlings, and Vittorio Ferrari. Coco-stuff: Thing and stuff classes in context, 2018. 6, 14, 15, 26   
+Mathilde Caron, Piotr Bojanowski, Armand Joulin, and Matthijs Douze. Deep clustering for unsupervised learning of visual features. In ECCV, 2018. 2   
+Mathilde Caron, Ishan Misra, Julien Mairal, Priya Goyal, Piotr Bojanowski, and Armand Joulin. Unsupervised learning of visual features by contrasting cluster assignments. NeurIPS, 2020. 3   
+Mathilde Caron, Hugo Touvron, Ishan Misra, Hervé Jégou, Julien Mairal, Piotr Bojanowski, and Armand Joulin. Emerging properties in self-supervised vision transformers. In ICCV, 2021. 2, 3, 5, 8, 9, 14, 17, 19   
+Ting Chen, Simon Kornblith, Mohammad Norouzi, and Geoffrey Hinton. A simple framework for contrastive learning of visual representations. In ICML. PMLR, 2020. 2, 3   
+Marius Cordts, Mohamed Omran, Sebastian Ramos, Timo Rehfeld, Markus Enzweiler, Rodrigo Benenson, Uwe Franke, Stefan Roth, and Bernt Schiele. The cityscapes dataset for semantic urban scene understanding. In Proceedings of the IEEE conference on computer vision and pattern recognition, pp. 3213–3223, 2016. 18   
+Camille Couprie, Clément Farabet, Laurent Najman, and Yann LeCun. Indoor semantic segmentation using depth information. arXiv preprint arXiv:1301.3572, 2013. 18   
+Timothée Darcet, Maxime Oquab, Julien Mairal, and Piotr Bojanowski. Vision transformers need registers. In ICLR, 2024. 2, 5   
+Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, et al. An image is worth 16x16 words: Transformers for image recognition at scale. arXiv preprint arXiv:2010.11929, 2020. 4, 14   
+Mohamed El Banani, Amit Raj, Kevis-Kokitsi Maninis, Abhishek Kar, Yuanzhen Li, Michael Rubinstein, Deqing Sun, Leonidas Guibas, Justin Johnson, and Varun Jampani. Probing the 3d awareness of visual foundation models. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 21795–21806, 2024. 6, 9   
+M. Everingham, L. Van Gool, C. K. I. Williams, J. Winn, and A. Zisserman. The PASCAL Visual Object Classes Challenge 2012 (VOC2012) Results. http://www.pascalnetwork.org/challenges/VOC/voc2012/workshop/index.html. 15, 16, 26   
+Mark Everingham, Luc Van Gool, Christopher KI Williams, John Winn, and Andrew Zisserman. The pascal visual object classes (voc) challenge. International Journal of Computer Vision, 2010. 6, 15, 26   
+William Falcon and The PyTorch Lightning team. Pytorch lightning, 2019. 14   
+Jean-Bastien Grill, Florian Strub, Florent Altché, Corentin Tallec, Pierre Richemond, Elena Buchatskaya, Carl Doersch, Bernardo Avila Pires, Zhaohan Guo, Mohammad Gheshlaghi Azar, et al. Bootstrap your own latent-a new approach to self-supervised learning. NeurIPS, 2020. 2, 9, 14   
+Ruiqi Guo, Philip Sun, Erik Lindgren, Quan Geng, David Simcha, Felix Chern, and Sanjiv Kumar. Accelerating large-scale inference with anisotropic vector quantization. In ICML, 2020. URL https://arxiv.org/ abs/1908.10396. 15   
+Mark Hamilton, Zhoutong Zhang, Bharath Hariharan, Noah Snavely, and William T Freeman. Unsupervised semantic segmentation by distilling feature correspondences. arXiv preprint arXiv:2203.08414, 2022. 3   
+Kaiming He, Georgia Gkioxari, Piotr Dollár, and Ross Girshick. Mask r-cnn. In ICCV, 2017. 4, 14   
+Kaiming He, Ross Girshick, and Piotr Dollár. Rethinking imagenet pre-training. In ICCV, 2019. 2   
+Kaiming He, Xinlei Chen, Saining Xie, Yanghao Li, Piotr Dollár, and Ross Girshick. Masked autoencoders are scalable vision learners. In CVPR, 2022. 1   
+Olivier J Hénaff, Skanda Koppula, Jean-Baptiste Alayrac, Aaron Van den Oord, Oriol Vinyals, and João Carreira. Efficient visual pretraining with contrastive detection. In ICCV, 2021. 1, 2   
+Olivier J Hénaff, Skanda Koppula, Evan Shelhamer, Daniel Zoran, Andrew Jaegle, Andrew Zisserman, João Carreira, and Relja Arandjelovic´. Object discovery and representation networks. In ECCV. Springer, 2022. 1, 2   
+Dan Hendrycks and Kevin Gimpel. Gaussian error linear units (gelus). arXiv preprint arXiv:1606.08415, 2016. 14   
+Jyh-Jing Hwang, Stella X Yu, Jianbo Shi, Maxwell D Collins, Tien-Ju Yang, Xiao Zhang, and Liang-Chieh Chen. Segsort: Segmentation by discriminative sorting of segments. In ICCV, 2019. 2   
+Gautier Izacard, Mathilde Caron, Lucas Hosseini, Sebastian Riedel, Piotr Bojanowski, Armand Joulin, and Edouard Grave. Unsupervised dense information retrieval with contrastive learning. arXiv preprint arXiv:2112.09118, 2021. 2   
+Xu Ji, Joao F Henriques, and Andrea Vedaldi. Invariant information clustering for unsupervised image classification and segmentation. In ICCV, 2019. 15, 26   
+Jeff Johnson, Matthijs Douze, and Hervé Jégou. Billion-scale similarity search with gpus. IEEE Transactions on Big Data, 2019. 15   
+Diederik P Kingma and Jimmy Ba. Adam: A method for stochastic optimization, 2017. 14, 16   
+Alexander Kirillov, Kaiming He, Ross Girshick, Carsten Rother, and Piotr Dollar. Panoptic segmentation. In CVPR, 2019. 26   
+Haofei Kuang, Yi Zhu, Zhi Zhang, Xinyu Li, Joseph Tighe, Sören Schwertfeger, Cyrill Stachniss, and Mu Li. Video contrastive learning with global context. In ICCV, 2021. 6   
+Harold W Kuhn. The hungarian method for the assignment problem. Naval Research Logistics Quarterly, 1955. 6, 7, 15, 17   
+Mengcheng Lan, Xinjiang Wang, Yiping Ke, Jiaxing Xu, Litong Feng, and Wayne Zhang. Smooseg: smoothness prior for unsupervised semantic segmentation. NeurIPS, 2023. 3   
+Tim Lebailly, Thomas Stegmüller, Behzad Bozorgtabar, Jean-Philippe Thiran, and Tinne Tuytelaars. CrIBo: Self-supervised learning via cross-image object-level bootstrapping. In ICLR, 2023. URL https:// openreview.net/forum?id $=$ 3M0GXoUEzP. 1, 2, 5, 7, 8, 15, 16, 17   
+Hsin-Ying Lee, Jia-Bin Huang, Maneesh Singh, and Ming-Hsuan Yang. Unsupervised representation learning by sorting sequences. In ICCV, 2017. 4   
+Yanghao Li, Hanzi Mao, Ross Girshick, and Kaiming He. Exploring plain vision transformer backbones for object detection. In European conference on computer vision, pp. 280–296. Springer, 2022. 17   
+Tsung-Yi Lin, Michael Maire, Serge Belongie, James Hays, Pietro Perona, Deva Ramanan, Piotr Dollár, and C Lawrence Zitnick. Microsoft coco: Common objects in context. In ECCV. Springer, 2014. 6   
+Songtao Liu, Zeming Li, and Jian Sun. Self-emd: Self-supervised object detection without imagenet. arXiv preprint arXiv:2011.13677, 2020. 2   
+Francesco Locatello, Dirk Weissenborn, Thomas Unterthiner, Aravindh Mahendran, Georg Heigold, Jakob Uszkoreit, Alexey Dosovitskiy, and Thomas Kipf. Object-centric learning with slot attention. NeurIPS, 2020. 3   
+Sindy Löwe, Phillip Lippe, Francesco Locatello, and Max Welling. Rotating features for object discovery. NeurIPS, 2023. 2   
+ITC Markus Gerke. Use of the stair vision library within the isprs 2d semantic labeling benchmark (vaihingen). Use of the stair vision library within the isprs 2d semantic labeling benchmark (vaihingen), 2014. 18   
+Luke Melas-Kyriazi, Christian Rupprecht, Iro Laina, and Andrea Vedaldi. Deep spectral methods: A surprisingly strong baseline for unsupervised semantic segmentation and localization. In CVPR, 2022. 5   
+Juhong Min, Jongmin Lee, Jean Ponce, and Minsu Cho. Spair-71k: A large-scale benchmark for semantic correspondence. arXiv preprint arXiv:1908.10543, 2019. 6, 9, 26   
+MMSegmentation Contributors. OpenMMLab Semantic Segmentation Toolbox and Benchmark, 2020. 15, 26   
+Roozbeh Mottaghi, Xianjie Chen, Xiaobai Liu, Nam-Gyu Cho, Seong-Whan Lee, Sanja Fidler, Raquel Urtasun, and Alan Yuille. The role of context for object detection and semantic segmentation in the wild. In CVPR, 2014. 6   
+Maxime Oquab, Timothée Darcet, Théo Moutakanni, Huy Vo, Marc Szafraniec, Vasil Khalidov, Pierre Fernandez, Daniel Haziza, Francisco Massa, Alaaeldin El-Nouby, et al. Dinov2: Learning robust visual features without supervision. arXiv preprint arXiv:2304.07193, 2023. 2, 5, 10, 17   
+Valentinos Pariza, Mohammadreza Salehi, and Yuki Asano. Hummingbird evaluation for vision encoders, 2024. 6, 15   
+Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, et al. Pytorch: An imperative style, high-performance deep learning library. NeurIPS, 2019. 14   
+Felix Petersen, Christian Borgelt, Hilde Kuehne, and Oliver Deussen. Differentiable sorting networks for scalable sorting and ranking supervision. In ICML, 2021. 2, 5, 14   
+Senthil Purushwalkam and Abhinav Gupta. Demystifying contrastive self-supervised learning: Invariances, augmentations and dataset biases. NeurIPS, 2020. 2   
+Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry, Amanda Askell, Pamela Mishkin, Jack Clark, et al. Learning transferable visual models from natural language supervision. In ICML. PMLR, 2021. 18   
+Olga Russakovsky, Jia Deng, Hao Su, Jonathan Krause, Sanjeev Satheesh, Sean Ma, Zhiheng Huang, Andrej Karpathy, Aditya Khosla, Michael Bernstein, Alexander C Berg, and Li Fei-Fei. Imagenet large scale visual recognition challenge, 2015. 14, 26   
+Mohammadreza Salehi, Efstratios Gavves, Cees GM Snoek, and Yuki M Asano. Time does tell: Self-supervised time-tuning of dense image representations. In ICCV, 2023. 1, 2, 3, 5, 6, 7, 8, 17   
+Maximilian Seitzer, Max Horn, Andrii Zadaianchuk, Dominik Zietlow, Tianjun Xiao, Carl-Johann SimonGabriel, Tong He, Zheng Zhang, Bernhard Schölkopf, Thomas Brox, et al. Bridging the gap to real-world object-centric learning. arXiv preprint arXiv:2209.14860, 2022. 2, 3, 5   
+Oriane Siméoni, Chloé Sekkat, Gilles Puy, Antonín Vobecký, Éloi Zablocki, and Patrick Pérez. Unsupervised object localization: Observing the background to discover objects. In CVPR, 2023. 2   
+Thomas Stegmüller, Tim Lebailly, Behzad Bozorgtabar, Tinne Tuytelaars, and Jean-Philippe Thiran. Croc: Cross-view online clustering for dense visual representation learning. In CVPR, 2023. 1, 2, 5, 17   
+Robin Strudel, Ricardo Garcia, Ivan Laptev, and Cordelia Schmid. Segmenter: Transformer for semantic segmentation. In ICCV, 2021. 6, 8, 9, 15   
+Yonglong Tian, Dilip Krishnan, and Phillip Isola. Contrastive multiview coding. In ECCV. Springer, 2020. 6   
+Wouter Van Gansbeke, Simon Vandenhende, Stamatios Georgoulis, and Luc Van Gool. Unsupervised semantic segmentation by contrasting object mask proposals. In ICCV, 2021. 2, 5, 26   
+Xinlong Wang, Rufeng Zhang, Chunhua Shen, Tao Kong, and Lei Li. Dense contrastive learning for selfsupervised visual pre-training. In CVPR, 2021. 1   
+Ziyu Wang, Mike Zheng Shou, and Mengmi Zhang. Object-centric learning with cyclic walks between parts and whole. NeurIPS, 2023. 3   
+Yu Xiang, Roozbeh Mottaghi, and Silvio Savarese. Beyond pascal: A benchmark for 3d object detection in the wild. In IEEE Winter Conference on Applications of Computer Vision, pp. 75–82, 2014. doi: 10.1109/WACV.2014.6836101. 26   
+Sukmin Yun, Hankook Lee, Jaehyung Kim, and Jinwoo Shin. Patch-level representation learning for selfsupervised vision transformers. In CVPR, 2022. 2, 17   
+Andrii Zadaianchuk, Matthaeus Kleindessner, Yi Zhu, Francesco Locatello, and Thomas Brox. Unsupervised semantic segmentation with self-supervised object-centric representations. arXiv preprint arXiv:2207.05027, 2022. 3, 5   
+Andrii Zadaianchuk, Maximilian Seitzer, and Georg Martius. Object-centric learning for real-world videos by predicting temporal feature similarities. NeurIPS, 2023. 1, 2   
+Xiaohua Zhai, Basil Mustafa, Alexander Kolesnikov, and Lucas Beyer. Sigmoid loss for language image pretraining. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pp. 11975–11986, 2023. 18   
+Bolei Zhou, Hang Zhao, Xavier Puig, Sanja Fidler, Adela Barriuso, and Antonio Torralba. Scene parsing through ade20k dataset. In CVPR, 2017. 6, 15, 26   
+Jinghao Zhou, Chen Wei, Huiyu Wang, Wei Shen, Cihang Xie, Alan Yuille, and Tao Kong. ibot: Image bert pre-training with online tokenizer. ICLR, 2022. 2, 5, 8, 17   
+Adrian Ziegler and Yuki M Asano. Self-supervised learning of object parts for semantic segmentation. In CVPR, 2022. 1, 2, 3, 5, 6, 7, 8, 14, 15, 16, 25, 26  
+
+
+

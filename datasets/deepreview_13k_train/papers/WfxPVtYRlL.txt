@@ -1,0 +1,508 @@
+\title{Graph Neural Networks Gone Hogwild}
+
+\begin{abstract}
+  Message passing graph neural networks (GNNs) would appear to be powerful tools to learn distributed algorithms via gradient descent, but generate catastrophically incorrect predictions when nodes update asynchronously during inference.
+  This failure under asynchrony effectively excludes these architectures from many potential applications, such as learning local communication policies between resource-constrained agents in, e.g., robotic swarms or sensor networks.
+  In this work we explore why this failure occurs in common GNN architectures, and identify ``implicitly-defined'' GNNs as a class of architectures which is provably robust to partially asynchronous ``hogwild'' inference, adapting convergence guarantees from work in asynchronous and distributed optimization, e.g., \citet{bertsekas1982distributed, hogwild}. 
+  We then propose a novel implicitly-defined GNN architecture, which we call an \emph{energy GNN}. We show that this architecture outperforms other GNNs from this class on a variety of synthetic tasks inspired by multi-agent systems, and achieves competitive performance on real-world datasets.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\end{frontmatter}
+
+Message-passing graph neural networks (GNNs) compute embeddings for nodes in graph-structured data by using repeated message passing within nodal neighborhoods \citep{grlbook, gilmer2017neural, gcn, gat}. 
+This effectively produces a deep neural network architecture whose computation graph reflects the structure of the input graph.
+The inherent locality in the generation of node embeddings appears at first glance to lend itself to distributed and decentralized execution, which is desirable in a variety of contexts.
+
+Consider a group of agents (e.g., robots or ``motes'' in a sensor network) which need to collectively perform a task, but that might be unreliable, have limited range of communication, possess scarce local computational resources, and lack central control.
+GNNs are appealing as a way to learn local \textit{communication policies} that solve the distributed problem, where each agent corresponds to a node in the graph and each edge to a local communication channel.
+One could imagine learning an algorithm that enables a swarm of robots to localize themselves, or a collection of resource-constrained edge devices to collectively estimate environmental conditions.
+Another application where distributed computation is attractive is in GNN inference over large graphs, where nodes or node collections are managed on distinct machines (respecting the graph connectivity).
+This is especially relevant for GNN deployment on resource-constrained devices.
+Distributed inference may also facilitate privacy in settings where nodes correspond to entities such as individuals in a social network, by enabling local inference and precluding excessive data transmission. 
+
+There is a significant obstacle in applying GNNs in these kinds of applications: distributed and decentralized computation is often asynchronous, but most GNN architectures implicitly assume synchrony in the execution of message passing at inference time.
+When nodes update asynchronously, messages received from neighbors may be out of date, and the effective architecture of the GNN \textbf{diverges catastrophically} from the training architecture; this means the output of the GNN can exhibit arbitrarily large errors.
+Figure~\ref{fig:async_gnn} illustrates the issue on a toy problem.
+If it were possible to perform such ``hogwild'' inference (nodding to the asynchronous optimization work of \citet{hogwild}), then GNNs would unlock solutions for a significantly wider set of problem domains.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig1.png}
+\caption{\small Modifications to the computation graph of an $L$-layer message-passing GNN resulting from asynchronous, distributed, per-node inference. \textbf{(a)} An undirected linear graph with binary features written in the node body. \textbf{(b)} Synchronous per-layer execution of a 3-layer GNN on the graph from (a); all nodes update at the same time, using neighbor information from the previous layer. Arrows represent network weights. For demonstration, weights are all equal to 1, and the value of a node embedding at the next layer is the sum of incoming values. \textbf{(c)} Asynchronous inference of the GNN from (b). Nodes update at random times and can use neighbor information corresponding to the incorrect layer, which introduces modifications to the computation graph. Gray arrows correspond to connections that were removed from the original computation graph, and red arrows are unintended connections resulting from asynchrony. \textbf{(d)} To demonstrate the effect of asynchrony, we show the output of the GNN varies significantly over asynchronous runs with different node update orderings.}
+\label{fig:async_gnn}
+\end{figure*}
+In this work, we characterize a class of ``implicitly-defined'' GNNs which do not exhibit this catastrophic behavior under asynchronous inference. 
+In these GNNs, node embeddings are implicitly defined as the solution to an optimization problem \citep{ignn, eignn, implicit_vs_unfolded, unifiedopt, gsd, scarselli}.
+This is in contrast to GNNs in which node embeddings are computed as the output of a specific forward computation, such as graph attention networks (GAT, \citet{gat}) and graph convolutional networks (GCN, \citet{gcn}); we refer to these architectures as ``explicitly-defined''.
+Implicitly-defined GNNs are \textit{provably robust} to asynchrony given lenient assumptions on staleness and per-node update frequency, making them ideally suited to distributed, asynchronous inference. However, the diversity of existing implicitly-defined GNN architectures is limited.
+We contribute a novel architecture, which we call energy GNN, which exposes a rich parameterization of optimization problems by using input-convex neural networks defined on nodal neighborhoods.
+We show that energy GNNs outperform other implicitly-defined GNNs on a variety of synthetic tasks motivated by problems which are relevant to multi-agent systems, where synchronous inference may be undesirable. 
+We also achieve competitive performance on tasks with benchmark graph datasets, certifying the merit of our approach even as a stand-alone GNN architecture.
+
+Our contributions are as follows:
+\begin{itemize}
+    \item We present the first unified framework for GNNs which \textbf{can execute inference asynchronously}. We refer to this class of GNNs as being \emph{implicitly defined}, and articulate sufficient conditions that such architectures must satisfy. We then contextualize all major GNN architectures and identify which are implicitly defined, and which are not. 
+    
+    \item We propose a \textbf{novel implicitly defined architecture} called the energy GNN. Unlike existing implicitly-defined GNNs, energy GNNs 1) incorporate edge features, a crucial property in many applications, 2) enable the generation of neighbor-specific messages, 3) enable the utilization of neighborhood attention, and 4) use neural networks for generation of messages and embeddings.
+
+    \item We provide conditions under which there are \textbf{guarantees for the convergence} of our architecture under partially asynchronous inference, adapting classical results from the distributed optimization literature.
+    
+    \item We present several empirical studies which span synthetic datasets crafted to tease out important distinctions between GNNs which are/aren't amenable to asynchronous inference, and several widely used GNN benchmarks to assess performance in a cross-referenced manner with existing results published in the literature.
+\end{itemize}
+
+
+
+\section{Preliminaries}
+
+
+\subsection{Partially Asychronous Algorithms}
+\label{prelim_partially_async}
+Computational models for asynchronous algorithms vary depending on the constraints imposed on the sequencing or frequency of computation or communication. 
+We consider \textit{partial asynchronism} as defined by \citet{bertsekas1989parallel}, which, informally, places bounds on two key characteristics: the time between updates for each node, and the amount by which data retained at any node can be out of date from the perspective of some other node(s). 
+
+Concretely, consider a collection of $n$ nodes, which could be a set of processors carrying out a distributed computation.
+Each node has hidden state denoted~${\vh_i\in\mathbb{R}^k}$, which corresponds to one ``block'' (row) of the aggregate state~${\mH:=(\vh_1, \ldots, \vh_n)^T\in\mathbb{R}^{n \times k}}$.
+The distributed computation we aim to execute is an asynchronous iterative algorithm, where each node $i=1,2,\dots,n$ iteratively updates its state according to $\vh_i:=f^i(\mH)$ using some node-specific update function $f^i:\mathbb{R}^{n \times k}\to\mathbb{R}^k$. 
+
+Asynchrony in the execution of the algorithm is accounted for as follows. We are given a set~$T^i \subseteq \{0, 1, 2, \dots\}$ of times at which each node $i$ is updated.
+Additionally, for each~${t \in T^i}$ we are given variables $0\leq\tau_j^i(t)\leq t$ which represent the time of node~$j$'s last update from the perspective of node~$i$, at time~$t$.
+Note that~$\tau^i_j(t)\in T^j$.
+The quantities~${t - \tau_j^i(t) \in [0, t]}$ can then be interpreted as the amount (in time) by which information associated with node $j$ is outdated or ``stale'' when used in the update of $\vh_i$ at time $t$. 
+For instance, the state~${T^3 = \{0, 4, 7\}}$, ${T^1 = \{1, 2, 3\}}$, ${\tau_{1}^{3}(4)= 2}$ means that when node 3 executes its second update (at~${t = 4}$), it uses the stale value of node 1 that was computed at~${t = 2}$, rather than the most recent value at~${t = 3}$. 
+
+We can now describe the asynchronous algorithm using the following node update equations:
+\begin{align}
+\label{eqn:async_updates}
+\vh_i(t\!+\!1) &= \vh_i(t) \;\; \text{if} \; t \notin T^i, \\
+\vh_i(t\!+\!1) &= f^i(\vh_1(\tau_1^i(t)), \dots, \vh_n(\tau_n^i(t))) \;\;\text{if} \; t \in T^i \label{eqn:async_updates2}
+,
+\end{align}
+for~$t\geq 0$. 
+Partial asynchronism corresponds to the following assumptions:
+\begin{assumption}[Partial Asynchronism]
+(\citet{bertsekas1989parallel} Assumption 5.3)
+\label{assumption:bounded_time}
+There exists an integer~${B>0}$ such that:
+\begin{enumerate}[label=(\alph*)]
+\item (Bounded time to next update) For every node $i$ and for every $t \geq 0$, at least one of the elements of the set $\{t, t + 1, \dots, t + B -1\}$ belongs to $T^i$. 
+\item (Bounded staleness) There holds $t - B < \tau_j^i(t) \leq t$, 
+	for all $i,j$, and all $t \geq 0$ belonging to $T^i$. 
+\item There holds $\tau_i^i(t) = t$ for all $i=1,2,\dots,n$ and $t \in T^i$.
+\end{enumerate}
+\end{assumption}
+
+\subsection{Graph Neural Networks}
+\label{gnn_prelims}
+In this section, we provide a brief overview of GNNs.
+Consider a directed graph with a collection of $n$ vertices~${V = \{1,...,n\}}$, and edges ${E \subseteq V \times V}$.
+The connectivity of the graph is contained in its adjacency matrix $\mA \in \{0,1\}^{n \times n}$, where $\mA_{i,j} = 1$ if there is an edge from node $i$ to node $j$, and $0$ otherwise. 
+The graph may also have associated node and edge features~${\mX \in \mathbb{R}^{n \times p}}$ and~${\mE \in \mathbb{R}^{|E| \times r}}$, so we use $\gG = (\mA, \mX, \mE)$ to denote the graph (and its features). 
+We use $\mathcal{N}(i)$ to denote the set of neighbors of node $i$, and $|\gG|$ to denote the number of nodes in a graph $\gG$.
+
+We are given a dataset ${\mathcal{D} = \{(\gG, \mY)^q\}_{q=1}^{|\mathcal{D}|}}$, where each~$\gG^q$ is associated with a node-level prediction target~${\mY^q \in \mathbb{R}^{n_q \times J}}$, with~$n_q=|\gG^q|$.
+We focus on node-level predictions, since they often underlie graph-level predictions. 
+
+In a GNN, each node $i=1,\dots,n$ is associated with a $k$-vector embedding $\vh_i$ which is updated through iterations (or layers) of message passing; we use $\mH := (\vh_1, \dots, \vh_n)^T \in \mathbb{R}^{n \times k}$ to denote the aggregate embedding of nodes in the graph.
+The dimensionality~$k$ can vary across layers but, without loss of generality, we assume in this work that it is fixed.
+Each layer ${\ell \in \{1,...,L\}}$ in a GNN defines a parameterized embedding function~$f_\theta^\ell: \gG_i \times \mathbb{R}^{|\gG_i | \times k} \rightarrow \mathbb{R}^{k}$. $f_\theta^\ell$ is applied independently for each node $i=1,\dots,n$ and takes as argument a subgraph $\gG_i \subseteq \gG$ corresponding to the neighborhood of  node $i$ and the subgraph's node embeddings from the previous layer $\mH^{\ell - 1} \in \mathbb{R}^{|\gG_i| \times k}$,
+and returns an embedding $\vh^\ell_i$ for node $i$. 
+The new embeddings $\mH^\ell$ are used in the next layer.
+Typically, $\mH^0$ is initialized as the node features $\mX$.
+For convenience, we omit the layer index $\ell$ from $f_\theta^\ell$ in contexts where there is only one parameterized layer, or when referring generally to a message passing layer.
+
+A layer can be described as performing message passing, where each node $i$ constructs a ``message''~$\vm_{i}$ by aggregating information (e.g., embeddings from the previous layer and node/edge features) from nodes $j \in \mathcal{N}(i)$ in its local neighborhood,
+then uses this aggregate message to update its embedding.
+In the final layer, a readout function~${o_\phi: \mathbb{R}^k \rightarrow \mathbb{R}^J}$ is applied to each embedding, which results in node predictions~${\hat{\mY} = (o_\phi(\vh^L_1),...,o_\phi(\vh^L_n))^T \in \mathbb{R}^{n \times J}}$.
+
+ Different GNN architectures are distinguished by the parameterization of the update function $f_\theta$.
+In \cref{gnn_examples}, we describe GAT and GCN, two widely-used architectures.
+
+
+
+\section{Explicitly-defined vs. Implicitly-defined GNNs}
+
+\label{sec:gnn_async}
+In a conventional feed-forward message passing architecture that consists of~$L$ layers, it is assumed that all update functions for a given layer are applied in a synchronized manner.
+That is, each node embedding is derived from the previous layer embeddings.
+In distributed systems synchrony is either impossible or comes with substantial overhead.
+If nodes update asynchronously according to \cref{eqn:async_updates,eqn:async_updates2}, GNN architectures that assume synchronicity will \textbf{fail catastrophically and nondeterministically because the architecture at inference time is different than it was during training}.
+This effect is illustrated in \cref{fig:async_gnn}.
+
+This failure motivates us to distinguish between two types of GNN architectures: \emph{explicitly-defined} GNNs which specify a specific feed-forward layer-wise computation, and \emph{implicitly-defined} GNNs in which the layer-wise message passing updates correspond to iterations toward a fixed point.
+We further subdivide implicitly-defined GNNs into two types: \emph{fixed-point} GNNs and the important special case of \emph{optimization-based} GNNs.
+Explicitly-defined GNNs are widely-used but are susceptible to failure under asynchrony, while implicitly-defined GNNs are robust (as we discuss in \cref{gnn_inference_under_partial_asynchronism}).
+
+\subsection{Fixed-point GNNs} Fixed-point GNNs obtain node embeddings as the fixed point of a contractive message passing function. 
+Using~$\vh\in\mathbb{R}^{nk}$ to denote the unrolled embeddings~$\mH$ and taking~${F_\theta: \gG \times \mathbb{R}^{nk}\to\mathbb{R}^{nk}}$ to be the aggregate update of the hidden state from applying~$f_\theta$ to the neighborhood subgraph of each node $i=1,...n$ in a graph~$\gG$, a fixed-point GNN iterates $F_\theta$ until numerical convergence of node embeddings, i.e.,~${F_\theta(\vh)\approx\vh}$. 
+
+Convergence to a unique fixed point is guaranteed provided the update function $F_\theta$ is a contraction map with respect to the embeddings, i.e. $||F_\theta(\vh) - F_\theta(\vh')|| \leq \mu ||\vh - \vh'||$ holds for $0 < \mu < 1$ and $ \forall\vh, \vh' \in \mathbb{R}^{nk}$. 
+Since it is difficult to design non-trivial parameterizations of $F_\theta$ which are contractive by construction,
+existing fixed-point GNN architectures (e.g. IGNN \citep{ignn}, EIGNN \citep{eignn}, and APPNP \citep{appnp}) are limited in diversity. These architectures use linear transformations of the node embeddings to form messages $\vm_i$, where the parameters can easily be constrained such that $F_\theta$ is contractive.
+\cite{ignn} apply a component-wise non-expansive nonlinearity to compute updated node embeddings from these messages, while \cite{eignn, appnp} take $\vm_i$ as the node embeddings directly.
+
+The original `nonlinear GNN' proposed by \citet{scarselli}, in which $f_\theta$ contains general multi-layer neural networks operating on the input data, represents another approach to parameterizing a fixed-point GNN. 
+Their method \textit{encourages} rather than guarantees contraction via 
+a multi-objective problem that includes the norm of the Jacobian of the update function as a quantity to be minimized.
+This heuristic can work in practice, but the sequence of iterates does not definitively converge, particularly if node embeddings are initialized far from the fixed point (as the norm of the Jacobian is only penalized at the fixed point).
+We thus do not consider this non-linear GNN to be a true fixed-point GNN.
+\subsection{Optimization-based GNNs} 
+Optimization-based GNNs are an important special case of fixed-point GNNs, obtaining node embeddings by minimizing a convex scalar-valued graph function~${E_\theta: \gG \times \mathbb{R}^{n \times k}\to\mathbb{R}}$ with respect to the aggregate graph node embeddings $\mH$, where $\theta$ are parameters: 
+\begin{align}
+    \mH^* = \textstyle\argmin_{\mH} E_\theta(\gG, \mH).\label{eqn:energy_min}
+\end{align}
+In this work, we assume $E_\theta$ is separable per node, with each node computing its contribution to $E_\theta$ using local information. That is, $E_\theta$ can be expressed as: 
+\begin{align}
+    &E_\theta(\gG, \mH) = \textstyle\sum_{i=1}^n e_\theta\left(\vh_i, \vx_i, \{\vh_j,  \vx_j, \ve_{ij} \mid j \in \mathcal{N}(i)\}\right) = \textstyle\sum_{i=1}^n e^i_\theta.\label{graph_energy} 
+\end{align}
+Here~$e^i_\theta$ depends only on information from node~$i$'s neighborhood, and we further assume it is twice differentiable with a Hessian of bounded norm.
+Crucially, due to the dependence of each~$e^i_\theta$ on local information, gradient-based minimization of $E_\theta$ can be expressed per node via message passing:
+\begin{align}
+    \vh_i(t+1) &= \vh_i(t) - \alpha \textstyle\sum_{j \in \mathcal{N}(i) \cup \{i\}} 
+    \vg_{ji} (t) \\
+    \vg_{ji} (t) &:=\nabla_{\vh_i}
+    e^j_\theta (\vh_j(t), \{ \vh_{j'}(t) | j' \in \mathcal{N}(j)\}), \label{embedding_update}
+\end{align}
+where $\alpha \in \mathbb{R}_{>0}$, and node and edge features are omitted for clarity.
+We assume that at time $t$, node $i$ obtains the values $\vg_{ji}$ and $\vh_j$ (needed to compute~$\vg_{ii}$) from neighbors $j \in \mathcal{N}(i)$. The number of iterations is dictated by the convergence of the embeddings to a fixed point.
+
+Existing optimization-based GNNs \citep{implicit_vs_unfolded, unifiedopt, gsd} use an objective $E_\theta$ where node embeddings arise as:
+\begin{align}\label{gsd_eqn}
+\mH^* = \textstyle\argmin_{\mH} \gamma||\mH - g_\theta(\mX)||_F^2 + \beta \text{tr}(\mH^T\mL\mH), 
+\end{align}
+where~${g_\theta: \mathbb{R}^{n \times p} \rightarrow \mathbb{R}^{n \times k}}$, $\mL$ is a function of $\mA$ and can be viewed as a generalized incidence matrix (assumed to be symmetric and positive semi-definite), $\gamma$ and $\beta$ are constants, and $\text{tr}()$ is the trace.
+The first term drives node embeddings to approximate some function of the node features $\mX$, and the second term is a regularizer that rewards smoothness of neighboring node embeddings. 
+We refer to optimization-based GNNs which use this form of objective as GSDGNNs, since minimizing the objective can be interpreted as performing graph signal denoising (GSD).
+
+Previous work has shown that the node embeddings obtained by the fixed-point message passing scheme defined by APPNP \citep{appnp} and by EIGNN \citep{eignn} correspond directly to minimization of this form of objective \citep{gsd, implicit_vs_unfolded}.
+This correspondence between fixed-point GNNs and optimization-based GNNs does not always exist; while the node embeddings in optimization-based GNNs can always be expressed as satisfying a fixed-point equation (i.e., the gradient of the convex graph function is equal to zero at the solution), not all fixed-point equations correspond with convex optimization problems.
+For this reason, we distinguish between these two types of implicit GNNs.
+
+
+
+\section{Hogwild GNN Inference}
+
+\label{gnn_inference_under_partial_asynchronism}
+Executing the layer updates during GNN inference is typically performed synchronously, as depicted in Figure \ref{fig:async_gnn}; each node embedding is derived from the previous layer embeddings. 
+In this section, we discuss GNN inference under the asynchronous, ``hogwild'' \citep{hogwild} execution model presented in \cref{prelim_partially_async}.
+
+In the general asynchronous update in \Cref{eqn:async_updates2} it is assumed that node $i$ has access to all of the values $\vh_1,...\vh_n$ required for performing its update.
+In general these values could be obtained, for example, by providing nodes access to a shared memory structure which contains these values.
+However, in this work, we are interested in decentralized, distributed, and asynchronous GNN embedding updates, where neither centralized memory nor a centralized controller are used. 
+We assume that individual nodes store their own values $\vh_i$ (and $\vx_j$, $\ve_{ij}$), and if these values are needed by other nodes to perform their update, they must obtain them by communicating with neighbors.
+\textbf{Our aim in this section is to demonstrate that node updates can be performed \textit{only} using information that can be obtained through local communication.}
+
+\subsection{Explicitly-defined GNN and Fixed-point GNN Inference under Partial Asynchronism}
+\label{fp_gnn_partial_asynchronism}
+Without loss of generality, assume that the embedding dimension $k$ is fixed for all layers of parameterized node update functions.
+We do not write $f_\theta$ indexed by layer, but this is straightforwardly generalized to the case of layer-specific parameters and functions described in \Cref{gnn_prelims}. 
+Without loss of generality, assume the embedding update function $f_\theta$ is continuously differentiable, so that the following restriction can be stated:  
+\begin{align}
+\label{eq:nbr_dependence1}
+j \notin \mathcal{N}(i) \; \implies \frac{\partial  f_\theta}{ \partial \vh_j} (\vz) = 0 \quad  \forall \vz \in \mathbb{R}^k.
+\end{align}
+With this restriction, the general node update from \cref{eqn:async_updates2} can be adapted to describe partially asynchronous message passing, in which node updates are performed using only information from a node's local neighborhood. In particular, for node $i$ and for $t \geq 0$ and $t \in T^i$, the update equation is: 
+\begin{align}
+\label{eqn:fp_gnn_update}
+\vh_i(t+1) &= f_\theta(\vh_i(t), \{\vh_j(\tau_j^i(t)) \mid j \in \mathcal{N}(i)\})\,
+\end{align}
+where we omit node and edge features for clarity. 
+Note the crucial difference introduced by asynchrony: the neighbor data $\vh_j(\tau_j^{i}(t))$ may be out of date, corresponding to a different layer in the network. 
+For explicitly-defined GNNs such as GCN or GAT, the number of iterations $|T_i|$ executed by each node is fixed and equal to the number of layers $L$ in the GNN.
+For fixed point GNNs, the number of iterations is not pre-specified.
+
+Since explicitly-defined GNNs implement a specific feed-forward neural network architecture, partially asynchronous inference using \cref{eqn:fp_gnn_update} corrupts the computation performed by the network. 
+We illustrate this in Figure \ref{fig:async_gnn}, where partial asynchrony results in a (different) computation graph with some connections removed, and new connections that are not present in the original synchronous computation graph. 
+This means that there are no convergence guarantees under partial asynchrony, and in general the final node embeddings may vary significantly with respect to the particular node update sequence.
+
+In contrast, fixed-point GNN architectures in which $F_\theta$ is contractive with respect to node embeddings $\vh$ are provably robust to partially asynchronous inference.
+In particular, they satisfy the assumptions of the following proposition \citep{bertsekas1983distributed}.
+\begin{proposition}
+\label{prop:convergence_fp}
+If~$F_\theta: \gG \times \mathbb{R}^{nk} \rightarrow \mathbb{R}^{nk}$ is contractive with respect to node embeddings $\vh$, then under the bounded staleness conditions in \cref{assumption:bounded_time}, the fixed-point iteration of Equation~\ref{eqn:fp_gnn_update} converges.
+\end{proposition}
+\subsection{Optimization-based GNN Inference under Partial Asynchrony} 
+\label{opt_based_gnn_inference}
+In order to examine inference of optimization-based GNNs under partial asynchrony, we assume gradient-based optimization is used in computing node embeddings. 
+Recall that optimization-based GNNs are performing a minimization of a separable objective $E_\theta$, as defined in \cref{graph_energy}. 
+We thus state the following restriction, analogous to the restriction in \cref{eq:nbr_dependence1}:
+\begin{align}
+\label{eq:nbr_dependence2}
+j \notin \mathcal{N}(i) \implies \frac{\partial e^i_\theta}{\partial \vh_j}(\vz) = 0 \; \text{for all} \; \; \vz \in \mathbb{R}^{k}. 
+\end{align}
+We could then naively adapt the general node update equations from \cref{eqn:async_updates} to describe partially asynchronous, gradient-based minimization of $E_\theta$ as follows:
+\begin{align} 
+    \vh_i(t+1) &= \vh_i(t) - \alpha \textstyle\sum_{j \in \mathcal{N}(i) \cup \{i\}} 
+    \vg_{ji} (\tau^i_j(t)) \label{eqn:egnn_h_update}\\
+    \vg_{ji} (\tau^i_j(t)) &:=\nabla_{\vh_i}
+    e^j_\theta (\vh_j(\tau^i_j(t)), \{ \vh_{j'}(\tau^i_{j'}(t)) | j' \in \mathcal{N}(j)\}), \label{eqn:egnn_g_update1}
+\end{align}
+where $\alpha \in \mathbb{R}_{>0}$ is the step size, and node and edge features are omitted for clarity. 
+This formulation would allow us to directly cite a proof of convergence from \citet{bertsekas1989parallel}, as we did in \Cref{fp_gnn_partial_asynchronism} for partially asynchronous fixed-point GNN inference.
+
+However, recall that for a node to perform an update using only local communication, we previously assumed that $\vg_{ji}$ was obtained by node $i$ from its neighbor $j$. 
+With the formulation in Equations~\ref{eqn:egnn_h_update} and \ref{eqn:egnn_g_update1}, node $j$ cannot provide node $i$ with $\vg_{ji}$ since the value depends on node $i$'s view of the embeddings (and features) of the neighbors of node $j$, rather than deferring to node $j$'s view of its neighbors.
+That is, node $i$ needs access to information about its 2-hop neighbors in addition to its 1-hop neighbors. Since we assume communication is only possible with 1-hop neighbors, 2-hop neighbor information would need to be forwarded by direct neighbors of node $i$.
+This inflates the cost of communication, requiring a number of bits per transmission which is proportional to $|\mathcal{N}(j)|$
+Furthermore, as the number of neighbors that are shared between node $i$ and node $j$ increases, the contents of these messages become increasingly redundant. 
+ 
+Instead, we preserve fully local communication and fixed-size transmissions where neighbors $j$ send fixed-size packets containing only ($\vh_j$, $\vg_{ji}$) to node $i$ by defining $\vg_{ji}(\tau^i_j(t))$ as follows:
+\begin{align}
+\vg_{ji}(\tau^i_j(t)) &:= \nabla_{\vh_i} e^j_\theta(\vh_j(\tau^i_j(t)), \{\vh_{j'}(\tau^j_{j'}(\tau^i_j(t))) : j'\in\mathcal{N}(j)\}).\,\label{eqn:egnn_g_update2}
+\end{align}
+The crucial difference between equations \cref{eqn:egnn_g_update1} and \cref{eqn:egnn_g_update2} is that instead of $\vg_{ji}(\tau^i_j(t))$ depending on node $i$'s view of 2-hop neighbors $j'$ at time~$t$, it now depends on neighbor $j$'s view of its neighbors at time $\tau^i_j(t)$, the time corresponding to node $i$'s view of $j$ at time $t$.
+
+\begin{proposition}
+\label{prop:convergence}
+If~$E_\theta$ is strongly convex and separable per node, then for a sufficiently small step size and the bounded staleness conditions in \cref{assumption:bounded_time}, the optimization procedure of Equations~\ref{eqn:egnn_h_update} and~\ref{eqn:egnn_g_update2} will converge when executed in a distributed manner underp partial asynchrony.
+\end{proposition}
+
+
+
+\section{Energy GNNs}
+
+
+Under the assumptions of \Cref{prelim_partially_async}, implicit GNNs in which node embeddings are updated iteratively using local information are well suited for partially asynchronous, decentralized, and distributed inference. 
+However, as we discussed in \Cref{sec:gnn_async}, the diversity of existing implicit GNN architectures (both fixed-point and optimization-based) is limited. 
+Fixed-point GNNs employ simple message-passing schemes that can be enforced to be contractive, where $f_\theta$ consists of a linear function to compute messages $\vm_i$, possibly followed by the application of a component-wise non-decreasing non-linearity to compute updated embeddings. 
+Optimization-based GNNs use a restricted class of graph objectives $E_\theta$ as shown in \Cref{gsd_eqn}.
+One limitation with this objective is that it assumes informative node features exist, which may not be the case.
+Edge features are not easily incorporated, which may be present and relevant for prediction.
+Finally, smoothness across embeddings for neighboring nodes may be inappropriate for some datasets or tasks where neighboring nodes are expected to generate distinct embeddings.
+
+We propose a novel implicitly-defined, optimization-based GNN architecture which we call the \textit{energy GNN}.
+Energy GNNs compute node embeddings that minimize a parameterized, convex graph function $E_\theta$, which we refer to as the `energy' function. 
+In contrast to previous work on optimization-based GNNs, our energy function makes use of partially input-convex neural networks (PICNNs, \citet{icnn}).
+PICNNs are scalar-valued neural networks that constrain the parameters in such a way that the network is convex with respect to a specified subset of the inputs. 
+This exposes a rich and flexible class of convex energy functions $E_\theta$ of the form:
+\begin{align}
+    E_\theta(\gG, \mH) &= \textstyle\sum_{i=1}^n e^i_\theta \qquad \text{where}\\
+    e^i_\theta &= u\left(\vm_i, \vh_i, \vx_i ; \theta_u \right) + (\nicefrac{\beta}{2})||\vh_i||_2^2\,.\label{introduce_scalar_energy} \\
+    \vm_i &= \textstyle\sum_{j \in \mathcal{N}(i)} m(\vh_i, \vh_j, \vx_i, \vx_j, \ve_{ij} ; \theta_m) \label{energy_message} 
+\end{align}
+Here~$\vm_i$ is the aggregation of state from neighboring nodes, where $m$ is a function that is both convex and nondecreasing (in each dimension) with respect to~$\vh_j$ and~$\vh_i$.
+The function~$u$ is convex with respect to~$\vm_i$ and~$\vh_i$.
+These functions are both implemented as PICNNs and their composition is convex.
+Summing these functions along with the squared norm penalty results in~$E_\theta$ being strongly convex with respect to the node embeddings~$\mH$.
+This architecture for the energy can be described as a (single layer) partially input-convex GNN; we provide more details in \Cref{picgnns}.
+
+This formulation for $E_\theta$ offers significantly more flexibility than the architectures of other implicitly-defined GNNs. 
+Any combination of inputs to $m$ or $u$ are valid, provided that $E_\theta$ remains a convex function of $\mH$.
+This means that edge features are easily incorporated into the model, and neighbor-specific or neighbor agnostic messages can be used (e.g., $m$ can take in information from just a node's neighbor, or information pertaining to both a node and its neighbor); in our experiments in \Cref{experiments} we show that this translates empirically to improved performance on various tasks.
+Since the aggregation in \cref{energy_message} is only constrained to be a non-negative sum over neighbors, it can be replaced with, for example, a mean or a sum weighted by the entries of the symmetric renormalized adjacency matrix (as in GCNs, see \Cref{gnn_examples}).
+Alternatively, \cref{energy_message} can easily incorporate a neighbor attention mechanism (as in GATs), where neighbor contributions to the sum are scaled by neighbor-specific attention weights (see \Cref{picgnns}).
+The attention weights can depend on any of the non-convex inputs (i.e., the features). 
+
+
+
+\section{Experiments}
+
+
+\subsection{Synthetic Multi-Agent Tasks}
+We perform experiments on a number of synthetic datasets, motivated by tasks which are of interest for multi-agent systems and where distributed, asynchronous inference is desirable. 
+We describe each task and associated dataset below.
+
+\paragraph{Chains}
+
+The ability to communicate information across long distances in a group of agents is important when agent predictions depend on global information. 
+This communication is made more difficult in the absence of a central controller (as is the case for distributed, asynchronous inference). 
+
+The chains dataset, used in \cite{ignn, eignn}, is meant to evaluate the ability to capture long-range dependencies between nodes. 
+The dataset consists of $p$ undirected linear graphs with $l$ nodes, with each graph having a label $k \in \{1,...,p\}$.
+The task is node classification of the graph label, where class information is contained \textit{only} in the feature of the first node in the chain; the node feature matrix $\mX \in \mathbb{R}^{n \times p}$ for a graph with class $k$ has $\mX_{1, k}  = 1$ and zeros at all other indices. 
+Perfect classification accuracy indicates that information is successfully propagated from the first node to the final node in the chain. 
+For our dataset, we use chains with length $l=100$.
+
+\paragraph{Counting}
+
+Counting the number of agents in a group may be important in various multi-agent tasks.
+This value can be used, for example, to calculate means, or in agent decisions which rely on group size.
+We construct a dataset meant to evaluate the ability of GNNs to count in undirected chain graphs.
+Our dataset consists of $50$ graphs with $1$-$50$ nodes.
+Since no informative node features are present for this task, we set node features as one-hot embeddings of node degrees.
+The prediction target for each node in a given graph is the total number of nodes in that graph. 
+
+\paragraph{Sums}
+
+For this task, we consider summation, a basic functional building block relevant for many multi-agent tasks. 
+For instance, in reinforcement learning tasks, agents might aim to perform actions that optimize their collective rather than individual rewards, requiring each agent to sum the rewards associated with all other agents.
+Many distributed and asynchronous algorithms exist for summation \citep{kempe2003gossip}. 
+
+We construct a dataset to evaluate the ability of GNNs to perform binary sums in undirected chain graphs.
+Our data are $2000$ graphs with $50$ nodes each, with different instantiations of binary node features $\vx_i \in \{0, 1\}$. 
+The prediction target for each node in a given graph is $\hat{\vy}_i := \sum_{i} \vx_i$.
+
+\paragraph{Coordinates}
+
+ A common task for multi-agent collectives such as robot swarms is localization. 
+ This problem has previously been tackled in various ways that all employ a bespoke algorithm tailored for the task \citep{localization1, localization2, localization3}.
+ 
+ We test the ability of GNNs to solve this problem on static graphs. 
+ We construct a dataset where each node has a position in $\mathbb{R}^2$ and neighbors within some radius are connected by an edge. 
+ We do not assume a global coordinate system; instead, we focus on relative localization, where pairwise distances between nodes are maintained.
+Each node predicts a position in $\mathbb{R}^2$, and the objective is the mean squared error between true pairwise node distances, and distances between their predicted positions. 
+In order to break symmetries, each node has a unique ID which is one-hot encoded and used as the node feature. Distances to connected neighbors are provided as edge features.
+We generate $1500$ random graphs where all graphs consist of $20$ nodes.
+We sample uniformly in the unit square to get node positions and connect nodes by an edge if they are within a distance of 0.5. 
+
+\paragraph{MNIST ``Terrain"}
+
+The final synthetic task we consider is ``terrain'' classification. 
+Suppose a number of agents are placed in an environment where each agent performs some local measurement, and the agents must collectively make predictions about some global state of the environment using only local communication.
+For this experiment, we use MNIST images (those with 0/1 labels only) to represent the environment \citep{lecun2010mnist}. 
+Agents are placed at random locations in the image, and use the coordinates and pixel value at their location as their node features. 
+The prediction target for each agent is the image label.
+We resize the images to $10\times 10$ pixels, and sample 10 random pixels for agent locations. 
+Nodes share an edge if they are within 5 pixels of each other.
+
+Unlike the previous synthetic tasks, in which existing distributed algorithms can be applied, no bespoke algorithm exists for the MNIST terrain task.
+This is precisely the type of problem which motivates the development of GNNs which are robust to asynchronous and distributed inference.
+
+\subsection{Experimental Setup}
+For each synthetic task, we compare performance of energy GNNs to other implicitly-defined GNNs we identified in \cref{sec:gnn_async}.
+We employ three energy GNN architecture variants; node-wise, where messages are constructed using information from individual nodes, edge-wise, where messages are constructed using information pertaining to both nodes on an edge, including edge features, and edge-wise energy GNN with neighborhood attention. 
+In terms of other implicitly-defined GNNs, we focus on the fixed-point GNN architecture IGNN defined by \citet{ignn} which is described in \Cref{gnn_examples}, and against GSDGNN, an optimization-based GNN which uses the objective from \cref{gsd_eqn}.
+Two fixed point GNN architectures identified in \cref{sec:gnn_async} are excluded: EIGNN \citep{eignn} and the GNN proposed by \citet{scarselli}. 
+The former is excluded because the fixed point is solved for directly in the forward pass using global information rather than iteratively using local information; the latter is excluded because fixed point convergence may not be achieved.
+In addition to implicitly-defined GNNs, we also compare against two common explicitly-defined GNN architectures; GCN \citep{gcn}, and GAT \citep{gat}.
+
+The cost of the forward and backward pass (in terms of computation and/or memory) for implicitly-defined GNNs is variable, depending on the number of iterations required for convergence.
+We mitigate this cost during training in two ways.
+Since convergence for both fixed-point GNNs and optimization-based GNNs is guaranteed (since for fixed-point GNNs, $F_\theta$ is contractive and for optimization-based GNNs, $E_\theta$ is convex) implicit differentiation can be used to obtain gradients of the task-specific loss function $\mathcal{L}$ with respect to parameters~$\theta$.
+This avoids unrolling the fixed-point iterations in the backward pass, and requires a fixed amount of computation and memory.
+We derive the gradient in \cref{implicit_diff}.
+Furthermore, since the solution of the forward pass is unique (i.e. not dependent on the initialization of $\mH$), the number of iterations in the forward pass can be reduced by initializing $\mH$ to be the solution from the previous epoch of training.
+In our work we employ both of these strategies during training.
+
+We additionally perform experiments on benchmark datasets MUTAG \citep{mutag}, PROTEINS \citep{PROTEINS}, and PPI \citep{graphsage} for node and graph classification to evaluate energy GNNs as a synchronous GNN architecture.
+Although our objective is not performance in the synchronous setting, we show that they are nevertheless competitive on each dataset.
+
+
+\subsection{Results} \label{experiments}
+
+In \Cref{async_gnns}, we report synchronous performance of each GNN architecture on the synthetic tasks. 
+For regression tasks (counting, sums, coordinates) task performance is calculated as the root mean squared error over the test dataset normalized by the root mean value of the test dataset prediction targets. 
+For classification tasks (chains, MNIST) task performance is calculated as the mean test dataset classification error. 
+\Cref{async_gnns} reports performance for each task, with mean and standard deviation taken across 10 dataset folds and 5 random parameter seeds.
+
+The results of the synthetic experiments empirically demonstrate the superiority of our energy GNN architecture compared to other implicitly-defined GNNs. 
+The node-wise energy GNN architecture improves performance over IGNN and GSDGNN, which we attribute to the use of PICNNs.
+When edge-wise rather than node-wise information is used in constructing messages to neighbors, further improvements in performance are observed. 
+The strong performance on tasks requiring long-distance communication between nodes for correct predictions (chains, counting, and sums) shows that our architecture is capable of capturing long-range dependencies between node predictions. 
+
+\begin{table*}[ht]
+\caption{\small Task performance on test data, reported as percentage error (relative root mean squared error for COUNT, SUM, COORDINATES). Mean and standard deviation are across 10 random seeds and 5 train/test splits.  Although inference on these experiments is done synchronously, the poor performance of the explicitly-defined GCN and GAT can be attributed to their depth-limited ability to propagate information.}
+\label{async_gnns}
+\begin{center}
+\scalebox{1}{
+\begin{sc}
+\begin{tabular}{llllll}
+\toprule\\
+     [-1.5ex]
+      \multicolumn{1}{c}{\bf MODEL}  &\multicolumn{1}{c}{\bf CHAINS}  &\multicolumn{1}{c}{\bf COUNT}  & \multicolumn{1}{c}{\bf SUM} &\multicolumn{1}{c}{\bf COORDINATES} &\multicolumn{1}{c}{\bf MNIST} \\[0.7ex]
+    \hline \\[-1.5ex]
+    IGNN & $26.9 \pm 13.3$ & $40.2 \pm 5.5$ & $12.8 \pm 0.8$& $ 52.0 \pm 5.5$ & $30.4 \pm 0.7$\\
+    GSDGNN & $35.9 \pm 6.3$ & $40.3 \pm 0.6$ & $13.3 \pm 0.2$ & $ 44.0 \pm 1.0$ & $29.3 \pm 0.6$\\
+    Energy GNN node-wise & $15.8 \pm 17.9$ & $19.5 \pm 1.7$ & $12.2 \pm 0.7$ & $41.3 \pm 2.4$ & $13.8 \pm 0.8$ \\
+     Energy GNN edge-wise & $1.2 \pm 2.2$  & $4.0 \pm 3.6$ & $\mathbf{4.9 \pm 3.3}$ & $33.5 \pm 3.2$& $\mathbf{13.0 \pm 0.6}$\\
+     Energy GNN + attention & $\mathbf{0.25 \pm 0.5}$ & $\mathbf{3.6 \pm 3.8}$ & $6.0 \pm 4.0$ & $\mathbf{30.9 \pm 1.8}$ & $13.8 \pm 0.8$ \\
+     \hline \\[-1.5ex]
+      GCN & $47.0 \pm 0.0$ & $40.7 \pm 1.0$ & $13.1 \pm 0.3$ &  $53.2 \pm 0.9$ & $29.7 \pm 0.5$ \\
+      GAT & $47.0 \pm 0.0$ & $41.5 \pm 0.8$ & $12.9 \pm 0.5$ & $39.3 \pm 1.0$ & $15.3 \pm 3.2$ \\
+\bottomrule
+\end{tabular}
+\end{sc}
+}
+\end{center}
+\end{table*}
+
+\begin{table*}[ht]
+\caption{\small Decrease in task performance (decrease in accuracy for CHAINS, MNIST, and increase in relative RMSE for COUNT, SUM, COORDINATES) observed from switching from synchronous to asynchronous inference on sub-sample of test data (10 samples) using one trained model instance.
+Mean and standard deviation are across 5 asynchronous runs.
+The poor performance of GCN and GAT are consistent with the expected unreliability of explicitly-defined GNNs with asynchronous inference.
+}
+\label{async_gnns_deviation}
+\begin{center}
+\scalebox{1}{
+\begin{sc}
+\begin{tabular}{llllll}
+\toprule\\
+     [-1.5ex]
+      \multicolumn{1}{c}{\bf MODEL}  &\multicolumn{1}{c}{\bf CHAINS}  &\multicolumn{1}{c}{\bf COUNT}  & \multicolumn{1}{c}{\bf SUM} &\multicolumn{1}{c}{\bf COORDINATES} &\multicolumn{1}{c}{\bf MNIST} \\[0.7ex]
+    \hline \\[-1.5ex]
+    IGNN & $ 0.0 \pm 0.0$ & $ 0.0 \pm 0.0$ & $ 0.0 \pm 0.0$& $ 0.0 \pm 0.0$ & $ 0.0 \pm 0.0$\\
+    GSDGNN & $ 0.0 \pm 0.0$ & $ 0.0 \pm 0.0$ & $ 0.0 \pm 0.0$& $ 0.0 \pm 0.0$ & $ 0.0 \pm 0.0$\\
+    Energy GNN node-wise & $ 0.0 \pm 0.0$ & $ 0.0 \pm 0.0$ & $ 0.0 \pm 0.0$& $ 0.0 \pm 0.0$ & $ 0.0 \pm 0.0$\\
+     Energy GNN edge-wise & $ 0.0 \pm 0.0$ & $ 0.0 \pm 0.0$ & $ 0.0 \pm 0.0$& $ 0.0 \pm 0.0$ & $ 0.0 \pm 0.0$\\
+     Energy GNN + attention & $ 0.0 \pm 0.0$ & $ 0.0 \pm 0.0$ & $ 0.0 \pm 0.0$& $ 0.0 \pm 0.0$ & $ 0.0 \pm 0.0$\\
+    \hline \\[-1.5ex]
+      GCN & $38.8 \pm 3.3$ & $584.6 \pm 42.4$ & $2.6 \pm 0.2$ & $63.4 \pm 0.0$ & $37.4 \pm 10.3$ \\
+      GAT & $6.6 \pm 1.8$ & $250.3 \pm 58.6$ & $45.1 \pm 2.1$ & $97.0 \pm 34.4$ & $50.4 \pm 3.5$ \\
+\bottomrule
+\end{tabular}
+\end{sc}
+}
+\end{center}
+\end{table*}
+
+In \Cref{async_gnns_deviation}, we demonstrate empirically that the explicitly-defined architectures GCN and GAT perform poorly and unreliably under asynchrony, with task performance decreasing for all experiments.
+In our experiments, we simulate asynchronous inference; our algorithm is in \Cref{asynchronous_gnn_implementation}.
+In most cases the variance of the performance decrease is large as a result of inconsistent predictions under different random node update schedules.
+In cases where the variance is low, we observe that predictions for different random schedules collapse to the same/similar values due to non-linearities in the architecture. 
+We reiterate that explicitly-defined GNNs are not suitable for the tasks we consider, in which we assume asynchronous, distributed inference and aim for reliable predictions under this regime. 
+For implicitly-defined GNNs, the decrease in performance under asynchronous inference is less than 0.1\%, empirically confirming the convergence guarantees given by \cref{prop:convergence_fp} and \cref{prop:convergence}.
+
+
+
+\section{Related work}
+
+
+\paragraph{Asynchronous algorithms}
+Asynchronous algorithmic models (sometimes called \textit{chaotic relaxation} models) date back at least to the 1960s \citep{chazan1969chaotic}, and were explored extensively into the 1970s and 1980s \citep{donnelly1971periodic, miellou1975algorithmes, robert1975iterations, baudet1978asynchronous, bertsekas1982distributed, bertsekas1983distributed, bojanczyk1984optimal, mitra1987asynchronous, uresin1989sufficient}.
+In \cref{gnn_inference_under_partial_asynchronism} we study GNNs under \textit{partial asynchrony}, a model which imposes constraints on the sequencing of computations and frequency of communication between distributed elements. 
+Our analysis of partially asynchronous GNN inference draws directly from prior work which analyzes the sufficient conditions for convergence \citep{tsitsiklis1984problems, tsitsiklis1986distributed, bertsekas1989parallel}. 
+
+\paragraph{Asynchronous GNN training}
+There has been a plethora of work in distributed \textit{training} of GNNs, where data are computed on by separate workers \citep{besta2023parallel,shao2022distributed}. 
+In this regime, workers may not be operating on independent data, e.g., when data come from a single connected graph. 
+Since ignoring this dependence reduces performance, workers exchange embedding information associated with ``boundary vertices'' which are logically connected but delegated to different workers. 
+Some distributed training assumes workers operate asynchronously, using stale 
+embedding \citep{distGNN,sancus, pipeGCN} or gradient information \citep{dorylus} corresponding to previous training epochs.
+However, across all these frameworks, the forward pass is executed synchronously, and to our knowledge there is no work examining asynchronous GNN inference.
+
+\paragraph{GNNs applied to multi-agent tasks}
+Several works have identified GNNs as a useful tool in parameterizing decentralized policies for multi-agent systems, with applications including flock formation, target tracking, path planning, and channel allocation in wireless networks.  
+These works employ GNNs to generate neighborhood-aggregated state representations for agent control policies, which are optimized through imitation learning \citep{learning_gca, MAGNN-IL1, MAGNN-IL2} or multi-agent reinforcement learning \citep{MAGNN-RL1, MAGNN-RL2, MAGNN-RL3, MAGNN-RL4}.
+A pitfall of these works is that they do not consider asynchronous execution of the GNNs which generate state representations. 
+Consistent with the observations in our work, \citet{MAGNN-framework} show that performance of multi-agent policies that use GNNs suffer in real-world deployment where synchronous execution is not possible.
+
+
+
+\section{Conclusion}
+
+GNNs have the potential to provide learning frameworks for distributed systems, with applications to privacy, robotics, remote sensing, and other domains.
+However, most conventional GNN architectures are not compatible with asynchronous inference and this hinders their deployment on these applications.
+
+In this work, we characterize the class of implicitly-defined GNNs as being provably robust to partially asynchronous inference. 
+Motivated by the lack of diversity in this class of architectures, we contribute a novel addition in the form of energy GNNs.
+We show that energy GNNs achieve better performance than other implicitly-defined GNNs on a number of synthetic tasks motivated by decentralized and constrained multi-agent systems, where distributed, asynchronous inference is desirable.  
+In addition to its robustness to asynchrony, our method is comparable in generalization performance (on benchmarks) with other modern GNN architectures that do not offer these guarantees.
+
+The positive results of our synthetic experiments motivates additional work in applying GNN architectures to multi-agent related tasks.  
+A specific line of work which we expect to be interesting is real-time inference of \textit{dynamic} graphs, both because of the relevance to problems in, e.g., robotics, but also due to the ``anytime'' nature of implicitly-defined GNN architectures.
+Distributed and asynchronous inference over large graphs is another  application for implicitly-defined GNNs which should be explored.
+We are optimistic that the energy GNN framework itself, and implicitly-defined GNNs in general, will provide a path forward for ``learning to learn'' distributed, asynchronous algorithms.
+
+There are several limitations of this work.
+The forward pass in implicitly-defined GNNs is more involved computationally, and may require an amount of time that cannot be predetermined.
+The condition number of the PICNN has a significant effect on convergence rate and is difficult to control.
+The backward pass requires implicit gradients rather than simple backpropagation.
+Our model for partial asynchrony, although standard, makes assumptions that may not match real-world systems.
+Finally, operationalizing the theoretical results may require constants that are not readily available.
+
+
+

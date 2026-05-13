@@ -1,0 +1,162 @@
+# A Unified Causal View of Instruction Tuning
+
+- Decision: Reject
+- Scores: 6, 5, 6
+
+## Abstract
+Instruction tuning on a mixture of tasks has improved zero-shot capabilities in natural language processing (NLP) .  
+Nevertheless, existing methods often learn features that exhibit correlations between instruction-formatted samples and target labels, rather than causal relationships. 
+Termed as ``spurious correlation'' in statistics, such a correlation may change drastically in a new task, making the effect from the learned features to be misleading. 
+To this end, we develop a meta Structural Causal Model (meta-SCM) to integrate different NLP tasks under a single causal structure of the data.
+Specifically, the meta-SCM introduces multiple latent factors that represent properties of source context, only some of which causally influence the target labels for a specific task.
+The key idea is to learn task-required causal factors and only use those to make predictions for a given task.
+Theoretically, we prove the causal factor can be identified without mixing information from others. 
+Guided by the identifiability, we propose a Structural Instruction Tuning (SIT) method to learn the task-required causal representations that can mimic the causal factors for each task.  
+The utility of our approach is verified by improvements of zero-shot ability on a range of unseen datasets and tasks.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+1: You are unable to assess this paper and have alerted the ACs to seek an opinion from different reviewers.
+
+### Summary
+This paper proposes a causal framework to identify latent factors on the properties of a task, and only use these task-related factors to make predictions. It proposes a structural instruction tuning method to learn the representations for each task and demonstrate its effectiveness.
+
+### Strengths
+1. It is intuitively correct to consider the task-related factors and discard spurious correlations that might lead to vulnerable predictions
+
+### Weaknesses
+1. I don't fully understand the paper and cannot judge the weakness correctly. But, it looks like from the experimental setup, the scale of experiments being conducted is much smaller than the current NLP benchmarks on instruction tuning. The tasks are carefully chosen and the model tested is not a SOTA seq2seq model that widely adopted for Instruction Tuning.
+
+### Questions
+1. I don't have good questions for this paper and will inform the AC to seek information from other reviewers.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+2: You are willing to defend your assessment, but it is quite likely that you did not understand the central parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper tries to learn task-required causal factors and only use those to make predictions for a given task. The motivation is claimed to be that the causal factors of different tasks are spuriously correlated through the task variable $T$. The authors theoretically prove the causal factor can be identified without mixing information from others, then they propose a Structural Instruction Tuning (SIT) method to learn the task-required causal representations that can mimic the causal factors for each task.
+
+### Strengths
+1. Exploring causal LLMs is very important for both research and applications.
+
+2. This is a very novel work in this direction.
+
+### Weaknesses
+1. The organization of this paper is very hard to follow.
+
+2. The technical quality is poor. There are serious technical flaws in this paper. See the questions below.
+
+Q1. SCMs should be constructed from structual functions. Intuitive causal graphs are very informal and not relible. Equation 1 is not enough, because the structual functions should appear before the graphs. I think it would be better to illustrate Fig 1 with a specific example (i.e., what $L_i, X, Y$ and $T$ stands for in a specific task, and how the non-causal factors correlate with $Y_t$).
+
+Q2. The authors use different $L_i$ for different causal factors, and this is good. Nevertheless, I think $Y_t$ in Fig.1 should also be notated as different nodes for different $t$.
+
+Q3. The authors claim that "Causally speaking, there
+exist backdoor paths between the target labels and non-causal latent factors through the task
+variable T.". But when we are doing a task, the task variable is given. And in Fig.1, we have $L_i \perp L_j|T$. So, there must be a problem arising from either the claim itself or the causal graph. Considering question Q1, I think it is more likely the latter. I would appreciate it if the authors could provide a specific example to illustrate how the non-causal factors can correlate with $Y_t$ (e.g., the simplest text classification). This is one of the most important questions for me, and I'm looking forward to the authors' response.
+
+Q4. Following the above question, even if $T$ can act as a confounder and spurious correlations exist in the data, how does the traditional training process make the model learn the spurious correlations? This problem is also untouched, which makes the motivation informal and weak.
+
+Q5. It seems that the only confounder in this paper is the task $T$, I can hardly come up with any applications where different features are caused by the task but don't cause the target label.
+
+Q6. Section 3.2 is really hard to follow. How to alleviate the influence of the spurious correlations? By backdoor adjustment or introducing intervened data?
+
+Q7. The definition of identifiability is confusing. What's the identifiability of a SCM? When we say the identifiability, it usually refers to the causal quantity on two specific variables rather than a SCM. Also, the target of the UIC loss in Eq.6 is vague. What causal quantity do you want to measure?
+
+Q8. I guess the authors want to say that, if $L_i$ is identifiable, then it is the causal factor of $Y_t$. So, the UIC loss is used to promise the identifiability. There are two issues need to be addressed. One is why identifiable factors are causal ones, and another is why UIC can select identifiable factors. I'm not clear whether the second problem has been addressed by Section 3.2, since I think it's not well orangized. Nevertheless, I think the first problem is untouched.
+
+Q9. I'm not sure whether the baselines are advanced enough. The paper only compares with two simple baselines.
+
+### Questions
+Q1. SCMs should be constructed from structual functions. Intuitive causal graphs are very informal and not relible. Equation 1 is not enough, because the structual functions should appear before the graphs. I think it would be better to illustrate Fig 1 with a specific example (i.e., what $L_i, X, Y$ and $T$ stands for in a specific task, and how the non-causal factors correlate with $Y_t$).
+
+Q2. The authors use different $L_i$ for different causal factors, and this is good. Nevertheless, I think $Y_t$ in Fig.1 should also be notated as different nodes for different $t$. 
+
+Q3. The authors claim that "Causally speaking, there
+exist backdoor paths between the target labels and non-causal latent factors through the task
+variable T.". But when we are doing a task, the task variable is given. And in Fig.1, we have $L_i \perp L_j|T$. So, there must be a problem arising from either the claim itself or the causal graph. Considering question Q1, I think it is more likely the latter. I would appreciate it if the authors could provide a specific example to illustrate how the non-causal factors can correlate with $Y_t$ (e.g., the simplest text classification). This is one of the most important questions for me, and I'm looking forward to the authors' response.
+
+Q4. Following the above question, even if $T$ can act as a confounder and spurious correlations exist in the data, how does the traditional training process make the model learn the spurious correlations? This problem is also untouched, which makes the motivation informal and weak.
+
+Q5. It seems that the only confounder in this paper is the task $T$, I can hardly come up with any applications where different features are caused by the task but don't cause the target label.
+
+Q6. Section 3.2 is really hard to follow. How to alleviate the influence of the spurious correlations? By backdoor adjustment or introducing intervened data?
+
+Q7. The definition of identifiability is confusing. What's the identifiability of a SCM? When we say the identifiability, it usually refers to the causal quantity on two specific variables rather than a SCM. Also, the target of the UIC loss in Eq.6 is vague. What causal quantity do you want to measure?
+
+Q8. I guess the authors want to say that, if $L_i$ is identifiable, then it is the causal factor of $Y_t$. So, the UIC loss is used to promise the identifiability. There are two issues need to be addressed. One is why identifiable factors are causal ones, and another is why UIC can select identifiable factors. I'm not clear whether the second problem has been addressed by Section 3.2, since I think it's not well orangized. Nevertheless, I think the first problem is untouched.
+
+Q9. I'm not sure whether the baselines are advanced enough. The paper only compares with two simple baselines.
+
+### Soundness
+1 poor
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper presents a unified causal view of instruction tuning in natural language processing (NLP) tasks. The authors propose a meta Structural Causal Model (meta-SCM) that integrates different NLP tasks under a single causal structure. They introduce task-required causal factors and develop a Structural Instruction Tuning (SIT) method to learn the task-required causal representations. The effectiveness of their approach is demonstrated through improvements in zero-shot learning on unseen datasets and tasks.
+
+### Strengths
+1. The paper introduces a novel instruction tuning method based on a meta-SCM, which captures underlying causal relationships and enhances adaptability to domain transfer and new tasks.
+2. This paper proposes a novel Uniform Identifiability Condition (UIC) based on the topology of Structural Causal Model and the rationality of UIC is verified with a detailed mathematical proof.
+3. The paper provides detailed experimental results and comparisons with baselines, demonstrating the superior performance of the proposed method in terms of in-domain, out-of-domain, and cross-task datasets.
+
+### Weaknesses
+1. This paper should compare the performance of their methods with different baselines and backbones to comprehensively validate the effectiveness of proposed method.
+2. In the experiment, this paper should give some evidence that the model learn causal representations and task-oriented causal generative mechanisms.
+
+### Questions
+No questions.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good

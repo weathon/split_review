@@ -1,8 +1,8 @@
 # Navigating the Digital World as Humans Do: Universal Visual Grounding for GUI Agents
 
 - Decision: Accept
-- Avg Score: 4.40
-- Scores: 8, 8, 5, 1, 0
+- Avg Score: 7.75
+- Scores: 8, 8, 5, 10
 
 ## Abstract
 Multimodal large language models (MLLMs)

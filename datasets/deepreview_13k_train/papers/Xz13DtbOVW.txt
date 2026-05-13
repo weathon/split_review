@@ -1,0 +1,447 @@
+\title{Balancing Act: Constraining Disparate Impact in Sparse Models}
+
+\begin{abstract}
+Model pruning is a popular approach to enable the deployment of large deep learning models on edge devices with restricted computational or storage capacities. Although sparse models achieve performance comparable to that of their dense counterparts at the level of the entire dataset, they exhibit high accuracy drops for some data sub-groups. Existing methods to mitigate this disparate impact induced by pruning (i) rely on surrogate metrics that address the problem indirectly and have limited interpretability; or (ii) scale poorly with the number of protected sub-groups in terms of computational cost. We propose a constrained optimization approach that \textit{directly addresses the disparate impact of pruning}: our formulation bounds the accuracy change between the dense and sparse models, for each sub-group. This choice of constraints provides an interpretable success criterion to determine if a pruned model achieves acceptable disparity levels. Experimental results demonstrate that our technique scales reliably to problems involving large models and hundreds of protected sub-groups.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Current deep learning practice displays a trend towards larger architectures \citep{bommasani2021opportunities}, as exemplified by popular models such as GPT-4 \citep{openai2023gpt4}, Llama 2 \citep{touvron2023llama} and DALL-E 2 \citep{ramesh2022hierarchical}.
+Model compression techniques such as pruning \citep{gale2019state}, knowledge distillation \citep{hinton2015distilling}, or quantization \citep{gholami2021survey} are crucial towards enabling the deployment of large models across a wide range of platforms, including resource-constrained edge devices like smartphones.
+
+Despite achieving comparable performance at an aggregate level over the entire dataset, pruned models often exhibit significant accuracy reduction for some data sub-groups \citep{hooker2019compressed, hooker2020characterising, paganini2020prune}. 
+In particular, under-represented groups can suffer high performance degradation while the overall performance remains unaffected, thus exacerbating systemic biases in machine learning models. \cite{tran2022pruning} refer to this phenomenon as the \textit{disparate impact of pruning}. 
+
+Existing mitigation methods face challenges in terms of interpretability and scalability to a large number of sub-groups.
+\cite{tran2022pruning} introduce constraints aiming to equalize the loss of the sparse model across sub-groups. 
+However, their approach does not account for the unequal group-level performance of the dense model.
+Moreover, while the loss can be a useful surrogate for training, this method addresses the disparate impact issue indirectly as it focuses on controlling the loss, rather than group-level changes in accuracy.
+Alternatively, \cite{lin2022fairgrape} compute per-group importance scores for every model parameter to determine the weights to be pruned. This approach becomes prohibitively expensive when the model or the number of sub-groups is large.
+In this work, we characterize the disparate impact of pruning in terms of the group-level accuracy gaps between the dense and sparse models. 
+Additionally, we propose a problem \textit{formulation that directly addresses the disparate impact of pruning} by imposing constraints on the per-group excess accuracy gaps (\CEAG).
+A key advantage of our proposed formulation is that it \textit{enjoys interpretable semantics}: feasible solutions of our optimization problem correspond to models with low pruning-induced disparity.
+Finally, our approach introduces a \textit{negligible computational overhead} (\cref{app:computation}) compared to (disparity-agnostic) naive fine-tuning of the sparse model, making it applicable to problems with large numbers of groups, such as intersectional fairness tasks.
+
+\cref{fig:figure1} illustrates the reliability of our approach at mitigating the disparate impact of pruning. We measure disparity in terms of excess accuracy gaps (EAGs, \S \ref{sec:eag}). 
+Naive fine-tuning yields models that disproportionately affect group \textit{Others}, and while the equalized loss formulation mitigates the issue, \textit{our formulation consistently reduces the pruning-induced disparity}. 
+See \S \ref{sec:experiments} for further discussion.
+
+\begin{figure}[t]
+    \centering
+    \vspace*{-1.2cm}
+    \includegraphics[width=\textwidth]{iclr2024/figs/figure1.pdf}
+    \vspace*{-6mm}
+    \caption{
+    \textbf{Left:} A dense model is sparsified with GMP, and then subjected to either (i) naive fine-tuning (\NFT, using ERM), (ii) equalized loss constraints~\citep[\EL]{tran2022pruning}, or (iii) our approach (\CEAG). 
+    \textbf{Right:} Positive (resp. negative) excess accuracy gaps (EAGs, \S \ref{sec:eag}) indicate groups whose performance degraded more (resp. less) than the model's overall accuracy change. 
+    Models with low disparate impact have EAGs that concentrate around zero.
+    \textbf{\textcolor{ceagblue}{\CEAG} consistenly yields models with lower disparity ($\psipw$, \S \ref{sec:eag}) than 
+    \textcolor{nftgray}{\NFT} and \textcolor{elred}{\EL}.}
+    For example, \NFT \, yields a 10\% hyper-degradation (EAG, $\psi_g$) on group \textit{Others}.
+    \captioncomment{Results correspond to race prediction on UTKFace, with race as group attribute at 90\% sparsity. 
+    Metrics are measured on the training set and averaged over 5 seeds.}}
+    \label{fig:figure1}
+\end{figure}
+
+\begin{itemize}
+    \item We formulate a constrained optimization problem (\CEAG, \S \ref{sec:problem}) that directly controls disparate impact by bounding group-level accuracy gaps between the dense and sparse models. 
+    \item We propose an algorithm for solving constrained optimization problems with \textit{non-differentiable, stochastic constraints} (\S\ref{sec:solving}). 
+    We use proxy constraints \citep{cotter2019proxy} to address non-differentiablity; and introduce replay buffers (\S \ref{sec:buffers}) for handling noise in the estimation of constraints.
+    \item Our replay buffers improve the training dynamics of the equalized loss formulation proposed by \cite{tran2022pruning}. The improved dynamics lead to better models in terms of disparity. 
+    \item Our experiments demonstrate that we can reliably mitigate the disparate impact of pruning across multiple architectures, datasets, and sparsity levels (\S\ref{sec:experiments}). These results carry over to tasks with intersectional groups, and up to hundreds of constraints. 
+\end{itemize}
+
+Our experimental results indicate that \textit{all methods considered in this paper (including ours) fail to mitigate pruning-induced disparities on unseen data}. 
+To the best of our knowledge, we are the first to document this generalization challenge. 
+Despite this, our proposed method constitutes a step in the right direction since our approach is \textit{the only one} that reliably mitigates the disparate impact of pruning on the training set.
+We hope our empirical observations will motivate further research on improving the generalization properties of methods for mitigating the disparate impact of pruning. 
+
+
+
+\section{Related works}
+
+
+
+\textbf{Disparate Impact of Pruning.} \cite{hooker2019compressed, hooker2020characterising} and \cite{paganini2020prune} document the disparate impact of pruning where some classes experience a more significant performance degradation compared to others. 
+Existing methods to mitigate disparity involve fairness-aware pruning \citep{lin2022fairgrape} or formulating constraints on a surrogate metric such as the loss \citep{tran2022pruning}. 
+
+\cite{lin2022fairgrape} propose a pruning technique that removes weights based on a heuristic metric that relates parameters with their importance for predicting samples from each group. This approach scales poorly as it requires computing importance scores for each weight \textit{and} group.
+
+\citet{tran2022pruning} apply constraints to match the sparse model's \textit{loss} on each sub-group to the aggregate loss.
+These constraints are (i) agnostic to the performance of the \textit{dense} model on each group and (ii) are based on the loss, which is a surrogate metric for assessing the accuracy-based disparate impact.
+Since the disparate impact of pruning is measured with respect to a reference model, the equalized loss formulation addresses the problem indirectly. 
+Moreover, loss-based constraints lack the interpretability of the per-group accuracy changes between the sparse and dense models.
+
+\textbf{Fairness and Constraints.} Independent of model pruning, fairness in machine learning models is a well studied problem~\citep{dwork2012fairness, dieterich2016compas, verma2018fairness, mehrabi2021survey, pmlr-v28-zemel13, zhao2022inherent}. Enforcing fairness with constraints has mainly focused on imposing requirements such as demographic parity, equalized odds, equal opportunity~\citep{hardt2016equality}, accuracy parity~\citep{agarwal2018reductions, berk2021fairness}, or combinations of these properties~\citep{zafar2017parity, lowy2021stochastic, bakker2020fair, shui2022learning}. The \textit{disparate impact of pruning} is a fairness notion in the context of sparsity that aims to match the performance of a sparse model to that of a reference dense model.
+
+\textbf{Constrained Optimization.} Constrained formulations have gained popularity in different sub-fields of machine learning such as safe reinforcement learning \citep{stooke2020responsive},  active learning \citep{elenter2022lagrangian} and sparsity \citep{gallego2022controlled}.
+These constrained formulations lead to stochastic min-max optimization problems, which can be challenging to optimize due to their non-convexity \citep{lin2020gradient}.
+We make use of proxy constraints \citep{cotter2019proxy} to solve problems with interpretable but non-differentiable constraints.
+
+\textbf{Variance Reduction.} The stochasticity in gradient estimates introduces additional optimization challenges \citep{beznosikov2022stochastic}.  
+Variance reduction techniques \citep{gower2020variance} have been employed to improve convergence on stochastic optimization \citep{defazio2014saga}, and in min-max games \citep{chavdarova2019reducing}. 
+In this work, we leverage the idea of replay buffers \citep{mnih2013playing} to reduce the noise in the estimation of stochastic constraints.
+
+
+
+\section{Addressing the Disparate Impact of Pruning via Accuracy Gaps}
+
+\label{sec:problem}
+
+In this section, we propose using \textit{accuracy gaps} (AGs) to quantify the disparate impact induced by model pruning. AGs are group-level measurements that quantify changes in accuracy between the dense and sparse models. 
+As we will see, large discrepancies in AGs across groups correspond to scenarios where pruning-induced disparity is high. In \S \ref{sec:cmp}, we propose a problem formulation that yields models with low disparity by explicitly constraining deviations in the group accuracy gaps. 
+
+\subsection{Accuracy Gaps}
+\label{sec:eag}
+
+We consider a supervised learning problem on a dataset $\D = \{(\vx_i, y_i, g_i)\}_{i=1}^N$ of $N$ i.i.d tuples, each comprising features $\vx \in \X$, target class $y \in [K]$ and group membership $g \in \G$. The dataset can be partitioned into \textit{sub-groups} 
+$\D_g \triangleq \{(\vx_i,y_i, g_i) \in \D \, | \, g_i = g \}$ for every $g \in \G$.
+
+Let $h_{\vtheta}: \X \rightarrow \mathbb{R}^{K}$ be a predictor with parameters $\vtheta \in \Theta$. The accuracy of $h_{\vtheta}$ on a sample set $\mathcal{D}$ is
+$A(\vtheta | \mathcal{D}) \triangleq \frac{1}{|\mathcal{D}|} \sum_{(\vx, y, g) \in \mathcal{D}} \mathbbm{1} \{ \texttt{argmax} [h_{\vtheta} (\vx)] = y \}$.
+In particular, $A(\vtheta| \D)$ denotes the model accuracy on the entire dataset, while $A(\vtheta| \D_g)$ is the model accuracy on a specific sub-group $g$. 
+
+Given access to a dense pre-trained model, we are interested in the effect of pruning on the accuracy across sub-groups $\D_g$. 
+In realistic pruning applications the dense model may exhibit different accuracies across sub-groups, thus we do not aim to equalize the accuracy of the sparse model across groups.
+Therefore, \textbf{we argue that the accuracies after pruning should change (approximately) equally across sub-groups.}
+
+
+Let $\thetad$ and $\thetas$ denote the parameters of the dense and sparse models, respectively. We define the \textit{global accuracy gap} $\Delta \thetatuple$ and \textit{group accuracy gaps} $\Delta_g \thetatuple$ as:
+\begin{align}
+    \label{eq:gap}
+    \Delta \thetatuple &\triangleq A(\thetad | \D) -  A(\thetas | \D), \\
+    \Delta_g \thetatuple &\triangleq A(\thetad | \D_g) -  A(\thetas | \D_g) \qquad \forall g \in \G.
+\end{align}
+A \textit{positive gap} (resp. \textit{negative}) corresponds to a \textit{degradation} (resp. \textit{improvement}) in the performance of the sparse model with respect to that of the dense model. This correspondence holds both at the global $\Delta \thetatuple$ and group levels $\Delta_g \thetatuple$.
+\textbf{Disparate Impact of Pruning.} Following our discussion above, we say a sparse model $h_{\thetas}$ experiences low disparate impact (with respect to a dense model $h_{\thetad}$) if the changes in performance are similar across sub-groups, i.e. $\Delta_g \thetatuple \approx \Delta_{g'} \thetatuple, \forall g, g' \in \G$. 
+
+Due to the loss of model capacity caused by pruning, typically $\Delta \thetatuple > 0$. Thus, we consider $\Delta \thetatuple$ as the reference point for defining the group \textit{excess accuracy gaps} (EAGs):
+\begin{equation}
+    \label{eq:eag}
+   \psi_g \thetatuple \triangleq \Delta_g \thetatuple - \Delta \thetatuple, \qquad \forall g \in \G.
+\end{equation}
+If $\psi_g \thetatuple > 0 $, then $g$ is more negatively impacted by pruning than the overall dataset.
+Conversely, $\psi_{g'} \thetatuple < 0$ indicates that group $g'$ was less affected relative to the overall model degradation. 
+
+Note that if $\psi_g = 0, \forall g \in \G$, then it follows that $\Delta_g \thetatuple = \Delta_{g'} \thetatuple, \forall g, g' \in \G$, and there is no disparate impact. Thus, we quantify the disparate impact of pruning via:
+\begin{equation}
+    \label{eq:pairwise}
+    \Psi_{\text{P\textcolor{gray}{air}W\textcolor{gray}{ise}}} \thetatuple \triangleq \max_{g, g' \in \G} \, \psi_g \thetatuple -  \psi_{g'} \thetatuple  = \max_{g \in \G} \, \Delta_g \thetatuple - \min_{g' \in \G} \, \Delta_{g'} \thetatuple .
+\end{equation}
+Note that $\psipw \geq 0$ always. Moreover, $\psipw = 0$ if and only if we are in an ideal setting where the accuracy gaps are \textit{equal} across all groups. However, aiming to constraint $\psipw$ directly can be difficult in practice (see \cref{app:equal_acc_gaps}). Instead, we consider constraints on each individual group EAG.
+
+
+
+
+\subsection{Constrained Excess Accuracy Gaps Formulation}
+\label{sec:cmp}
+
+We propose to impose upper-bounds (with a tolerance level $\epsilon \ge 0$) on the values of $\psi_g \thetatuple \le \epsilon$. 
+Since $\epsilon \ge 0$, the constraints are effectively only enforced on
+$\psi_g \thetatuple > 0$, corresponding to groups experiencing hyper-degradation in performance (with respect to the average degradation)\footnote{Note that the set of hyper-degraded groups $\{g \in \G \,|\, \psi_g \thetatuple > 0\}$ depends directly on the parameters of the sparse model $\thetas$ and thus changes at every training step.}.
+Imposing a lower bound on group EAGs $\psi_g$ would allow for better control over the resulting disparate impact $\psipw$. 
+However, solving the problem with both of these bounds 
+is challenging due to the small size of the feasible region relative to the estimation noise in the constraints. 
+\cref{app:equal_acc_gaps} provides further discussion and motivation regarding the choice to constrain only positive $\psi_g$ values.
+This choice motivates an \textit{operational definition of disparate impact} which focuses on the group with the highest EAG, given by $\max_g \psi_g$. 
+Bounding this quantity can be achieved by imposing constraints on every EAG. This gives rise to the following optimization problem with per-group constraints:
+\begin{equation}
+    \label{eq:reduced_acc_gap}
+    (\text{\CEAG}) \hspace{0.5cm}
+    \underset{\thetas \in \Theta}{\text{argmin}}\,\,  L(\thetas|\D), \quad
+    \text{s.t.} \quad \psi_g \thetatuple = \Delta_g \thetatuple - \Delta \thetatuple \leq \epsilon, \quad \forall g \in \G 
+\end{equation}
+where $L(\vtheta | \mathcal{D})$ is the loss of $h_{\vtheta}$ on dataset $\mathcal{D}$, and the tolerance $\epsilon \geq 0$ is the maximum allowed EAG. 
+
+When $\Delta \thetatuple > 0$, the constraints require that the performance degradation for each group be at most the overall model degradation plus the tolerance. Conversely, if $\Delta \thetatuple < 0$, the constraints prescribe that all group accuracies must \textit{increase} by at least the overall improvement, except for an $\epsilon$. 
+
+\subsection{Discussion}
+
+By formulating constraints on EAGs, \CEAG \, directly addresses the disparate impact of pruning and has benefits in terms of interpretability, flexibility, and accountability. 
+See \cref{app:formulations} for alternative constrained formulations for addressing the disparate impact of pruning.
+\textbf{Tackling disparate impact.} 
+Existing methods aim to mitigate disparate impact by enforcing properties on the sparse model while being agnostic to the performance of the dense model.
+Since EAGs relate the per-group performance of the dense and sparse models, we argue that our approach \textit{actually} addresses pruning-induced disparity, rather than other fairness notions such as loss equalization as proposed by \cite{tran2022pruning}.
+
+\textbf{Interpretability.} 
+The choice of tolerance level $\epsilon$ directly translates to bounds on AGs. For example, setting $\epsilon=1\%$ implies the worst affected class may not lose beyond $1\%$ accuracy compared to the overall model change.
+In contrast, it is challenging to set interpretable tolerance levels for constraints based on losses.
+
+\textbf{Flexibility.}
+\CEAG \, allows for some slack in the disparity of the pruned model, as prescribed by the tolerance $\epsilon$.
+This flexibility allows incorporating application-specific requirements into the learning procedure. 
+For example, small tolerance values allow enforcing strict fairness regulations.
+Moreover, this flexibility may be necessary in practice since the reduced capacity of the sparse model can make it impossible to attain $\Delta_g \thetatuple = \Delta \thetatuple \, \forall g \in \G$.
+\textbf{Accountability.} Being a constrained approach, establishing feasibility with respect to \CEAG \, constitutes a clear success criterion to determine if a pruned model achieves acceptable disparity levels: a model is only admissible if it satisfies the constraints at a prescribed tolerance level. 
+
+
+
+\section{Solving the Constrained Excess Accuracy Gaps Problem}
+
+\label{sec:solving}
+
+A popular approach to solve constrained optimization problems such as \CEAG in \cref{eq:reduced_acc_gap} is to formulate its Lagrangian and optimize the resulting min-max problem:
+\begin{equation}
+    \label{eq:hard_lag}
+    \underset{\thetas \in \Theta}{\text{min}}\,\, \underset{\vlambda \geq 0}{\text{max}} \,\, \Lag(\thetas, \vlambda) \triangleq L(\thetas|\D) + \sum_{g \in \G} \lambda_g \left( \psi_g \thetatuple - \epsilon \right),
+\end{equation}
+where $\lambda_g \geq 0$ is the Lagrange multiplier associated with the constraint for group $g$ and $\vlambda = [\lambda_g]_{g\in \G}$. We refer to $\thetas$ as the \textit{primal} parameters, and to $\vlambda$ as the \textit{dual} parameters.
+
+Optimizing deep neural networks can be challenging, and generally requires carefully crafted procedures and extensive hyper-parameter tuning \citep{choi1910empirical}. 
+We are interested in re-using standard techniques for optimizing $\thetas$. Therefore, we consider a generic optimization protocol on $\thetas$ and gradient ascent on $\vlambda$, instead of specialized optimization approaches for min-max games such as extragradient \citep{gidel2018variational,korpelevich1976extragradient}. 
+\subsection{Optimization with Non-Differentiable Constraints}
+
+A natural next step is to optimize \cref{eq:hard_lag} with gradient-based updates. Unfortunately, this is not possible as the $\psi_g$ terms are not continuous (since they are accuracy gaps), and are non-differentiable with respect to $\thetas$. Therefore, we must resort to a surrogate $\tilde{\psi}_g$ for computing gradients with respect to $\thetas$.
+In contrast, \cref{eq:hard_lag} is differentiable with respect to $\vlambda$, with gradients corresponding to constraint violations. Thus, the dual variables can be updated using the non-differentiable constraints $\psi_g$. 
+This update scheme is inspired by the proxy-constraint technique introduced by \citet{cotter2019proxy}.
+\begin{align}
+    \label{eq:proxy_lagrangian}
+    \thetas^*, \vlambda^* \in \begin{cases}
+        \underset{\thetas \in \Theta}{\text{argmin}}\,\, \Lag_\theta(\thetas, \vlambda) \overset{\Delta}{=} L(\thetas | \D) + \sum_{g \in \G} \lambda_g  \tilde{\psi}_g \thetatuple  \\
+        \underset{\vlambda \geq 0}{\text{argmax}} \,\, \Lag_\lambda(\thetas, \vlambda) \overset{\Delta}{=} \sum_{g \in \G} \lambda_g \big( \psi_g \thetatuple - \epsilon \big),
+    \end{cases}
+\end{align}
+Specifically, we choose surrogates $\Tilde{\psi}_g$ given by the \textit{excess (negative) loss gaps}:
+$\Tilde{\psi}_g \thetatuple \triangleq - \big( L(\thetad | \D_g) - L(\thetas | \D_g) \big) +  \big( L(\thetad | \D) - L(\thetas | \D) \big)$. 
+Note that $\Tilde{\psi}_g$ has the same structure as $\psi_g$, but replaces accuracy measurements with \textit{negative} loss terms. This is a reasonable choice of surrogate function since \textit{drops} in accuracy for the sparse model correspond to \textit{increases} in loss. 
+
+\cref{eq:proxy_lagrangian} represents a two-player, non-zero-sum game. Rather than replacing the non-differentiable constraints with their surrogates everywhere, this approach only performs the replacement \textit{when necessary}, i.e., for computing gradients for the primal parameters. 
+Preserving the actual constraints on the dual objective $\Lag_\lambda(\thetas, \vlambda)$ is useful as it results in a problem closer to \cref{eq:hard_lag}. 
+
+\Cref{eq:proxy_lagrangian} can be optimized via gradient descent on $\thetas$ (based on $\Lag_\theta$) and gradient ascent on $\vlambda$ (based on $\Lag_\lambda$). Alternating gradient descent-ascent (Alt-GDA) updates yield:
+\begin{align}
+    \label{eq:alt-gda}
+    \lambda_g^{(t+1)} &=  \left[ \lambda_g^{(t)} + \eta_\lambda \left( \psi_g \thetatuplet - \epsilon \right) \right]_+ \\
+    \thetas^{(t+1)} &= \thetas^{(t)} - \eta_\theta \left[  \nabla_\theta L\left(\thetas^{(t)} | \D \right) + \sum_{g \in \G} \lambda_g^{(t+1)} \, \nabla_\theta \tilde{\psi}_g \thetatuplet  \right],
+\end{align}
+where $\eta_\theta$ and $\eta_\lambda$ are step-sizes and $[\, \cdot \,]_+ = \max(\cdot, 0)$.
+We initialize the Lagrange multipliers to $\vlambda^{(0)} = \boldsymbol{0}$. 
+\cref{app:const_opt} contains more details on non-convex constrained optimization.
+
+\begin{algorithm}
+    \setstretch{1.}
+    \caption{Constrained Excess Accuracy Gap (CEAG)}
+    \label{alg:ceag}
+    \begin{algorithmic}[1]
+    \Require $\theta$:~Initial model parameters, $\eta_\theta$:~Primal step-size, $\eta_\lambda$:~Dual step-size, $k$:~Memory size for replay buffer, $\epsilon$:~Tolerance hyper-parameter, $B$:~Batch size, $\textit{T}$:~Total number of iterations, $A_{\text{dense}}^g$:~Accuracy of the dense model on each group $g$, $A_{\text{dense}}$:~Aggregate accuracy of the dense model.
+    
+        \State $\lambda_g \gets 0, \;\;\;\; \forall g \in \G$
+        \Comment{Initialize dual parameters}
+        \State $\texttt{buf}_g \gets \texttt{queue}(k) , \;\;\;\; \forall g \in \G$
+        \Comment{Initialize replay buffer}
+        \For{ $\texttt{iter} = 1, \dots, \textit{T}$ }
+            \State $\vect{x}, \vect{y}, \vect{g} \gets$ Sample $\{(x_i, y_i, g_i)\}_{i=1}^B \sim \D$
+            \Comment{Sample batch from training set}
+            \State $\texttt{idx}_g \gets (\vect{g} == g), \;\;\;\; \forall g \in \G$
+            \Comment{Calculate sub-group indices for batch}
+            \State $\hat{\vect{y}} \gets h_\theta(\vect{x})$
+            \Comment{Compute forward-pass}
+            \State $\texttt{buf}_g \gets$ \Call{UpdateBuffer}{$\texttt{buf}_g, \hat{\vect{y}}, \vect{y}, \texttt{idx}_g$}$, \;\;\;\; \forall g \in \G$
+            \Comment{Update replay buffer}
+            \State $\psi_g \gets$ \Call{QueryBuffers}{$\{\texttt{buf}_g\}_{g=1}^{\G}, k, \{A_{\text{dense}}^g\}_{g=1}^{\G}, A_{\text{dense}}$} 
+            \Comment{Query replay buffers}
+            \State $\Tilde{\psi}_g \gets$ \Call{ComputeSurrogate}{$\hat{\vect{y}}, \vect{y}, \texttt{idx}_g$}$, \;\;\; \forall g \in \G$
+            \Comment{Compute surrogates}
+            \State $\lambda_g \gets \max\{0,\, \lambda_g + \eta_\lambda (\psi_g\ -\epsilon)\}, \;\;\;\; \forall g \in \G$ 
+            \Comment{Update dual params}         
+            \State $\texttt{grad}_{\theta} \gets \nabla_\theta \left[ L \left( \theta | (\vect{x}, \vect{y}) \right) + \sum_{g \in \G} \lambda_g \Tilde{\psi}_g \right] $
+            \Comment{Compute primal gradient}
+            \State $\theta \gets$ \textsc{PrimalOptimUpdate}{$\left( \eta_\theta, \texttt{grad}_{\theta} \right)$}
+            \Comment{Update model params}
+        \EndFor
+        \State \Return $\theta$
+    \end{algorithmic}
+\end{algorithm}
+
+\subsection{Stochastic Constraints and Replay Buffers}
+\label{sec:buffers}
+
+In practice, the problem in \cref{eq:reduced_acc_gap} is solved by using mini-batch samples from the dataset to estimate the objective function, the constraints, and their gradients.  
+This procedure can yield constraint estimates with high variance across mini-batches, especially for under-represented groups; or for all groups when the number of constraints is large. 
+In extreme cases, a mini-batch may contain very few samples from a given sub-group, leading to multiplier updates based on very noisy estimates.
+
+We overcome these issues by estimating constraints based on information across multiple mini-batches. 
+For calculating AGs, (i) we compute the performance of the dense model \textit{on the whole dataset} (once at the beginning of training), and (ii) we estimate the accuracy of the sparse model from per-sample accuracy measurements on the $k$ most recent datapoints of each group. 
+We refer to the data structure that stores historic accuracies as a \textit{replay buffer} (RB), given the analogy to the technique used in reinforcement learning \citep{mnih2013playing}.
+The choice of buffer size $k$ introduces a trade-off between reducing the variance of the constraints, and biasing estimates towards old measurements. 
+
+These adjustments reduce variance in the estimation of the constraints, thus yielding stable updates for the multipliers. This allows us to solve \cref{eq:reduced_acc_gap} in settings with large numbers of constraints relative to the choice of batch size. We do not apply variance reduction on the model updates. 
+For details on our implementation of replay buffers, see \cref{app:buffers}. 
+For experimental evidence on their benefits, see \S\ref{sec:intersectional_exp} and \cref{app:buffer_exps}.
+
+\subsection{Algorithmic Details}
+\label{sec:alg_details}
+
+\Cref{alg:ceag} presents our approach for solving \CEAG. Note that \cref{alg:ceag} is applicable to a broader class of constrained optimization problems with stochastic constraints, including the equalized loss formulation of \cite{tran2022pruning} (see \cref{app:equalized_loss} for details).
+\textbf{Computational Overhead.} The constrained approach in \cref{alg:ceag} represents a negligible computational overhead compared to fine-tuning the sparse model with empirical risk minimization. 
+An iteration of Alt-GDA (\cref{eq:alt-gda}) requires \textit{one forward pass and one backward pass} through the model since the same iterate of $\thetas$ is used for both the primal and dual updates. 
+This matches the cost of gradient descent for ERM, except for the minimal overhead associated with the evaluation of constraints after the forward pass. 
+Note that, given our choice of surrogate, the gradient of the Lagrangian with respect to $\thetas$ is a weighted average of the per-sample loss gradients, which autograd frameworks can compute as efficiently as $\nabla_\theta L\left(\thetas | \D \right)$.
+For empirical evidence supporting the claim that \CEAG\, has negligible computational overhead compared to ERM, see \cref{app:computation}.
+
+\textbf{Memory Cost.} The memory overhead of our approach is negligible in the context of training deep networks: storing the dual variables requires one float per constraint, and the replay buffers store only $|\G|$ booleans for each one of the $k$ slots in the buffer memory.
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+In this section, we present an empirical comparison between naive fine-tuning, equalized loss \citep{tran2022pruning}, and our proposed \CEAG\, approach. The main goal of our experiments is to train sparse models with low pruning-induced disparity.
+While low disparity may introduce a trade-off with aggregate performance, we aim to achieve comparable overall accuracy to mitigation-agnostic methods.
+We explore the reliability and accountability of our approach, along with the effect of replay buffers on the constrained optimization problem. 
+Our experiments demonstrate that our method successfully scales to problems with hundreds of groups. 
+\subsection{Experimental Setup}
+\label{sec:exp_setup}
+
+\textbf{Tasks and architectures.} 
+We carry out experiments on the FairFace \citep{fairface} and UTKFace \citep{utkface} datasets, following the works of \cite{lin2022fairgrape} and \cite{tran2022pruning}.
+Additionally, we perform experiments on CIFAR-100 \citep{cifar}, a task with a large number of sub-groups. The choice of target and group attributes for each dataset is specified in \cref{app:tasks}. The architectures for each task, and the source of our pre-trained models are presented in \cref{app:architectures,app:pre_training}, respectively. 
+
+\textbf{Baseline methods.} We compare with three baseline mitigation methods (i) \NFT: the last iterate when fine-tuning the sparse model via ERM, (ii) \NFTES: the best iterate of \NFT \, in terms of test accuracy (early stopping), and (iii) \ELGRB: our re-implementation of the equalized loss formulation proposed by \cite{tran2022pruning}, enhanced with replay buffers (see \cref{app:equalized_loss}).
+The optimization hyper-parameters employed for each mitigation method (including \CEAG) are described in \cref{app:hyper_params}.
+
+\textbf{Model pruning.} 
+Previous work has shown that gradual magnitude pruning (GMP) \citep{zhu2017prune} achieves SOTA aggregate performance on unstructured sparsity tasks \citep{blalock2020state}. 
+Because of this (and its simplicity), we employ unstructured GMP on all our tasks. 
+GMP gradually prunes the model by removing parameters with the smallest magnitude once every epoch. The remaining weights are fine-tuned in between pruning episodes. We carry out GMP during the first 15 epochs. \cref{app:imp} provides further details on our pruning protocol. 
+
+\textbf{Choice of sparsity levels.} For very high levels of unstructured sparsity (over 95\%), \cite{gale2019state} observe that pruning has a devastating impact on the overall performance of ResNet-50 models \citep{he2016deep}.
+In contrast, performance remains essentially unaffected for models with up to 85\% sparsity.
+These observations may not carry over to other architectures such as MobileNets \citep{sandler2018mobilenetv2}, or other ResNets.
+Nonetheless, our experiments stick to the [85\%, 95\%] range, except for FairFace experiments, where we consider 99\% sparsity, akin to FairGrape \citep{lin2022fairgrape}. 
+\textbf{Software.} Our implementations use PyTorch 1.13.0~\citep{pytorch} and the Cooper library for constrained optimization \citep{gallegoPosada2022cooper}.
+
+\textbf{Experimental uncertainty.} All metrics reported in our tables and plots follow the pattern \texttt{avg} $\pm$ \texttt{std}. Unless mentioned otherwise, all our experimental metrics are aggregated across 5 seeds.
+
+For comprehensive experimental results across multiple tasks and sparsity levels, see \cref{app:results}.
+
+\subsection{FairFace and UTKFace}
+\label{sec:fairface_exp}
+
+\textbf{ResNet-34 Models on FairFace.} 
+\cref{table:fairface_race_sparsity_main} includes results for FairFace classification at 99\% sparsity. 
+We compare the behavior of  \NFT, \NFTES, \ELGRB, { and} \CEAG. We quote the results reported for the FairGRAPE technique\footnote{We do not re-run FairGRAPE owing to its high computational cost, see discussion in \cref{app:fairgrape}}, aggregated over 3 seeds. 
+
+We observe that \CEAG\, attains a feasible model in training ($\max_g \psi_g \leq \epsilon$), as well as the smallest $\max_g \psi_g$ both in the training and test sets. This does not come at the cost of aggregate performance, as all methods achieve a comparable test accuracy of around 65\%. We observe that FairGRAPE's $\maxpsi$ and $\psipw$ are significantly higher than that of all other methods.  
+\input{iclr2024/tables/fairface/fairface_race_race_sparsity_table_main}
+\input{iclr2024/tables/utkface/utkface_race_intersectional_sparsity_table_main}
+
+\begin{figure}[H]
+     \centering
+    \includegraphics[scale=0.75]{iclr2024/figs/accuracy_vs_violation/utkface/utkface_race_race_sparsity.pdf}
+    \vspace*{-5mm}
+    \caption{Trade-off between disparity and accuracy for UTKFace race prediction with race as group attribute. 
+    \NFT \, and \ELGRB \, yield models with high disparity.
+    \textbf{In contrast, \CEAG \, consistently produces models that mitigate the disparate impact of pruning.} \CEAG's gains do not entail a degradation in overall test accuracy.  
+    \captioncomment{Vertical dashed lines indicate the tolerance ($\epsilon$) of our method, with colors corresponding to different sparsity levels.} 
+    }
+    \label{fig:utk_race}
+\end{figure}
+\textbf{MobileNet-V2 Models on UTKFace.}
+\cref{fig:utk_race} illustrates results for UTKFace with race as group attribute. \CEAG\, consistently attains feasible models in training, and the smallest values of $\max_g \psi_g$ in the test set. 
+\CEAG \, attains comparable performance to \NFT \, and \ELGRB \, in the test set.
+\cref{table:utkface_intersectional_sparsity_main} presents results for UTKFace with intersectional groups (race $\cap$ gender). 
+\NFT \, and \NFTES \, have very high disparity metrics. 
+In contrast, \CEAG \, attains a feasible $\max_g \psi_g$ and the smallest $\psipw$ in the training set, for all sparsities.
+Our approach has worse aggregate performance than \NFT \, and \ELGRB \, in the train set; however, the test accuracy of these three methods is comparable. 
+For \NFT, both \cref{fig:utk_race} and \cref{table:utkface_intersectional_sparsity_main} show significantly higher disparity metrics in training when compared to in test.
+This is an indicator that the sparse model achieves good performance in training by overfitting to the majority groups and losing a lot of performance on the under-represented groups.
+
+
+\subsection{Scaling to Large Numbers of Groups}
+\label{sec:intersectional_exp}
+
+\textbf{CifarResNet-56 models on CIFAR-100.} \cref{table:cifar100_sparsity_main} contains results for CIFAR-100 classification at 92.5\% sparsity.
+By having the groups correspond to class labels, constrained formulations for this experiment have 100 constraints. 
+We include two additional experiments to illustrate the importance of replay buffers: equalized loss (\EL), and \CEAG \, (no \GRB), both \textit{without replay buffers}.
+
+Disparity metrics for \EL \, and \CEAG \ are better when employing replay buffers, both on the train and test sets. This difference is more notable for \EL. 
+We also observe the \GRB s improve the training dynamics of the dual variables (\cref{app:buffer_exps}).
+\CEAG \, obtains the best disparity on the train set. 
+Nonetheless, all approaches have a significant generalization gap in terms of disparity measurements. We observe that the best accuracy and the smallest $\max_g \psi_g$ on the test set are obtained by \ELGRB.
+\input{iclr2024/tables/cifar100/cifar100_sparsity_table_main}
+
+
+
+
+
+\section{Discussion}
+
+
+It is important to develop techniques that reliably mitigate the disparate impact of pruning since deploying pruned models can have downstream consequences.
+We observe that \NFT \, is unsucessful at doing this, and \NFTES\, amplifies the disparity induced by pruning. 
+In contrast, \CEAG \, reduces disparity while achieving comparable aggregate performance to \NFT. 
+However, \textit{we observe that all mitigation approaches may fail to mitigate disparate impact on unseen data}. 
+
+\textbf{Mitigating the disparate impact of pruning.} 
+Unlike other mitigation methods, our approach consistently mitigates the disparate impact of pruning on the training set. We observe this across a wide range of tasks and architectures. 
+In contrast, other mitigation approaches generally yield worse maximum degradation $\max_g \psi_g$. 
+In particular, \NFTES \, yields models with very high disparity. 
+\textbf{Accuracy trade-off.} \CEAG \, may introduce a trade-off in terms of accuracy in order to satisfy the disparity requirements. 
+On the train set, we observe a small degradation in performance in comparison to \NFT, typically of at most 2\%; on the test set, \CEAG's accuracy is comparable to that of \NFT. 
+\textbf{Reliability.}
+Our approach reliably yields models within the requested disparity levels.
+Moreover, \CEAG \, results in the smallest variance of the $\max_g \psi_g$ and $\psipw$ metrics across seeds. 
+
+\textbf{Generalization.} 
+Although \CEAG \, reliably satisfies the constraints on the train set, this may not transfer to the test set. We highlight that (i) these generalization issues are present for other mitigation methods, and (ii) our approach generally achieves better test disparity than the baselines. 
+Improving the generalization of disparity mitigation methods is an important direction for future research.
+
+
+\section{Conclusion}
+
+
+In this paper, we explore mitigating the disparate impact of pruning. We formalize disparate impact in terms of accuracy gaps between the dense and sparse models, and propose a constrained optimization approach for mitigating it. Our formulation offers interpretable constraints and allows for algorithmic accountability. 
+Although other methods can indirectly reduce disparity, our approach reliably addresses the disparate impact of pruning across a wide range of tasks, while attaining comparable aggregate performance. 
+In particular, our method successfully scales to tasks with hundreds of sub-groups. 
+Despite the fact that current mitigation methods exhibit generalization issues,
+our approach represents a solid step towards mitigating the disparate impact of pruning. 
+
+
+
+\newpage
+
+\subsubsection*{Ethics Statement}
+\begin{itemize}
+    \item \textbf{Facial recognition.} Our paper makes use of datasets that contain face images. 
+    We focus on these datasets as they illustrate the disparate impact of pruning, and for comparisons with previous work.
+    We would like to highlight that although our method focuses on reducing the disparate impact across groups, we do not endorse the use of our algorithm in facial recognition systems.
+    \item \textbf{Data annotation.}  We use the UTKFace~\citep{utkface} and FairFace~\citep{fairface} datasets in this work. These datasets include annotations for sensitive demographic attributes such as race, gender, and age. However, it is essential to recognize that these annotations represent normative ways of perceiving gender, race, and age, and we do not endorse or promote these normative categorizations.
+    \item \textbf{Ethical sourcing of data.} We don’t endorse using datasets where the data may not have been ethically sourced or the workers/subjects involved in the data collection process are not fairly compensated.
+    \item \textbf{Fairness notions.} We explore a specific notion of fairness in this paper: the disparate impact of pruning. 
+    Our framework can be extended to other fairness notions by incorporating additional constraints. 
+    However, certain notions of fairness are incompatible with each other, and a ``fair'' model in one definition could be ``unfair'' with respect to another~\citep{impossibility}.
+    Therefore, our method should not be considered a solution to all notions of fairness.
+    \item \textbf{Disparate impact of pruning.} %
+    In this paper, we propose a constrained optimization technique that mitigates the disparate impact of pruning and successfully solve the problem on the training data. 
+    Unfortunately, like all other surveyed techniques, we observe significant challenges at mitigating disparate impact on unseen data.
+    We advise practitioners to consider the implications of these generalization challenges when deploying sparse models in real-world systems. 
+    \item \textbf{Deploying pruned models.} We hope our paper brings about an important discussion on the implications of deploying pruned deep learning models in edge devices. As shown in this work, despite the application of mitigation techniques, pruning can exacerbate systemic biases. In particular, given the generalization issues across mitigation methods, it could cause unintended consequences when used in commercial applications.
+\end{itemize}
+
+\subsubsection*{Reproducibility Statement}
+
+
+The pseudo-code of our algorithm is described in \cref{alg:ceag}. 
+Experimental details, as well as the hyper-parameters used in our experiments, are included in \cref{app:exp_setup}. 
+Our implementation uses the open-source libraries PyTorch~\citep{pytorch} and Cooper~\citep{gallegoPosada2022cooper}.
+
+\subsection*{Acknowledgements}
+This research was partially supported by an IVADO PhD Excellence Scholarship, the Canada CIFAR AI Chair program (Mila), a Google Excellence Award, and the Natural Sciences and Engineering Research Council of Canada (NSERC). Simon Lacoste-Julien is a CIFAR Associate Fellow in the Learning in Machines \& Brains program.
+
+This research was enabled in part by compute resources, software, and technical help by Mila. %
+
+We would like to thank Nazanin Sepahvand for support in the initial stages of the project. We would like to thank Christos Louizos for encouraging the pursuit of this research idea. Additionally, we would like to thank Marwa El-Halabi, Stefan Horoi and Albert Orozco Camacho for their feedback on the paper.
+
+
+
+
+
+
+\newpage
+
+
+
+

@@ -1,0 +1,290 @@
+\title{Q-Adapter: Customizing Pre-trained LLMs to New Preferences with Forgetting Mitigation}
+
+\begin{abstract}
+Large Language Models (LLMs), trained on a large amount of corpus, have demonstrated remarkable abilities. However, it may not be sufficient to directly apply open-source LLMs like Llama to certain real-world scenarios, since most of them are trained for \emph{general} purposes. Thus, the demands for customizing publicly available LLMs emerge, but are currently under-studied. In this work, we consider customizing pre-trained LLMs with new human preferences. Specifically, the LLM should not only meet the new preference but also preserve its original capabilities after customization. Drawing inspiration from the observation that human preference can be expressed as a reward model, we propose to cast LLM customization as optimizing the sum of two reward functions, one of which (denoted as $r_1$) was used to pre-train the LLM while the other (denoted as $r_2$) characterizes the new human preference. The obstacle here is that both reward functions are unknown, making the application of modern reinforcement learning methods infeasible. Thanks to the residual Q-learning framework, we can restore the customized LLM with the pre-trained LLM and the \emph{residual Q-function} without the reward function $r_1$. Moreover, we find that for a fixed pre-trained LLM, the reward function $r_2$ can be derived from the residual Q-function, enabling us to directly learn the residual Q-function from the new human preference data upon the Bradley-Terry model. We name our method \abbr as it introduces an adapter module to approximate the residual Q-function for customizing the pre-trained LLM towards the new preference. Experiments based on the Llama-3.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large Language Models (LLMs) have demonstrated remarkable capabilities in tasks such as natural language understanding~\citep{emergence}, reasoning~\citep{reasoning} and logic~\citep{logic}, and have already been successfully applied to diverse real-world scenarios including robotics~\citep{robotics}, healthcare assistants~\citep{healthcare} and scientific discovery~\citep{science}, to name a few. However, publicly available open-source LLMs, e.g., Llama 3~\citep{llama3} and Pythia~\citep{pythia}, frequently struggle in specialized domains which require expert knowledge~\citep{wu2024pmc} due to that they have been trained mainly on generic datasets. Further adaptation is therefore required to ensure that pre-trained LLMs excel in targeted use cases. Moreover, people often want to personalize the LLM by providing additional preferences and information~\citep{kirk2024benefits}. How to effectively customize pre-trained LLMs with downstream data is thus one of the common demands for expanding the application scope of LLMs~\citep{personalization, person_llm, customize_llm_peft}.
+
+Researchers and practitioners have explored various techniques to customize a pre-trained LLM to improve their performance on specific applications or domains. This includes methods like in-context learning~\citep{customize_llm_icl}, task-specific fine-tuning~\citep{customize_llm_peft}, and retrieval augmented generation~\citep{rag_survey}. In this paper, we consider customizing a pre-trained LLM with a task-specific preference dataset. Existing approaches to achieve this could be Supervised Fine-Tuning (SFT) on the preferred responses or Reinforcement Learning from Human Feedback (RLHF)~\citep{instruct_gpt}. However, the LLM may forget its capabilities after some rounds of fine-tuning~\citep{llm_forget, gpt4}, which is often not what we want. A natural question thus arises: \emph{How can we adapt the pre-trained LLM to downstream preferences while preserving its original knowledge and abilities, as demonstrated in \cref{fig:example}?}
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/example.pdf}
+    \caption{\textbf{An example of adapting a pre-trained LLM while preserving its original knowledge}. \textbf{Left}: Suppose that we have a pre-trained \emph{helpful} LLM. After adapting it to preference data of \emph{harmlessness}, we would like it to be both \emph{helpful} and \emph{harmless}. \textbf{Right}: A corresponding case. The customized LLM not only inherits helpful knowledge from the pre-trained LLM, but also be much more harmless by learning from preference data on harmlessness.}
+    \label{fig:example}
+\end{figure}
+
+In this paper, specifically, we focus our attention on LLMs that have been aligned with general human values via RLHF, like Llama~\citep{llama3} and Gemma~\citep{gemma2} series, which we refer to as ``pre-trained LLMs''. When it comes to customizing them, we notice that both the new human preference and general human values can be expressed as reward models~\citep{instruct_gpt}, inspiring us to unify the aforementioned two requirements into one objective that maximizes the sum of two reward functions (see~\cref{sec:obj}, one of which (denoted as $r_1$) models the general human values, while the other (denoted as $r_2$) characterizes the new human preference. Although both reward functions are unknown, this objective can be fulfilled by learning a residual Q-function without accessing the reward function $r_1$ (see~\cref{sec:rql} for a concise introduction to residual Q-learning~\citep{residualq}). Moreover, we observe that given a fixed pre-trained LLM, the reward function $r_2$ and the residual Q-function are interchangeable, enabling us to directly learn the residual Q-function from the new human preference data upon the classical Bradley-Terry model~\citep{bt}. Therefore, the customized LLM which learns the new human preference as well as inherits knowledge from the pre-trained LLM can be obtained by learning a residual Q-function \emph{without} the reward function $r_1$ or $r_2$.
+
+To summarize, our key contributions are as below:
+\begin{itemize}
+    \item We present a new objective that reframes LLM customization as a reward maximization problem, which considers both learning a new preference and anti-forgetting.
+    \item A new loss function for LLM customization is derived upon the residual Q-learning framework~\citep{residualq} and the Bradley-Terry model~\citep{bt}, which bypasses accessing or learning the reward functions $r_1$ and $r_2$.
+    \item Our experiments on the Domain-Specific Preference~\citep{dsp} dataset and the HH-RLHF~\citep{hh-rlhf} dataset show that \abbr built upon Llama-3.1 models~\citep{llama3} can effectively customize pre-trained LLMs to preserve existing knowledge and learn new preferences.
+\end{itemize}
+
+
+
+\section{Preliminaries}
+
+
+In this section, we will first formalize the language generation task as a token-level Markov Decision Process (MDP)~\citep{mdp}, helping us to see how we can apply modern Reinforcement Learning (RL) approaches~\citep{ppo, sac} to natural language processing problems. Then, we will present some basics of Reinforcement Learning from Human Feedback (RLHF). Finally, we will give a concise introduction to residual Q-learning~\citep{residualq}, which will serve as foundation for later derivation.
+
+\subsection{Language Generation as a Token-level MDP}
+
+Following \citet{llm_formalization}, we formalize the language generation task as an MDP, defined by a tuple $\mathcal{M} = \langle \mathcal{S}, \mathcal{V}, r, \mathcal{P}, \gamma, \rho, T\rangle$, where $\mathcal{S}$ denotes the state space and the action space $\mathcal{V}$ is a finite vocabulary set. $\gamma \in [0,1]$ is a discount factor. Let $\pi: \mathcal{S}\to \Delta_\mathcal{V}$ be the LLM\footnote{We use $\Delta_X$ to denote the set of distributions over $X$.} (or policy). At the beginning of each episode in the MDP $\mathcal{M}$, a prompt $x = (x_1, x_2, \cdots, x_m)$ of length $m$ is sampled from the initial state distribution $\rho$, with $m \in \mathbb{N}$ and $\forall i \in \qty{1,2,\cdots, m}, x_i \in \mathcal{V}$. We also call $x$ the initial state and denote it by $s_1\in \mathcal{S}$. At each time step $t \in \qty{1,2,\cdots,T}$, the LLM selects an action (or equivalently, a token) $a_t \in \mathcal{V}$ according to $\pi(\cdot|s_t)$. The environment then transits to the next state $s_{t+1} = (x, a_1, \cdots, a_t)$, rewarding the LLM with $r(s_t, a_t) \in R$. That is, the transition model $\mathcal{P}: \mathcal{S}\times\mathcal{V}\to \Delta_\mathcal{S}$ is deterministic. $\mathcal{P}(s_{t+1}|s_t,a_t)=1$ if and only if $s_{t+1} = s_t \oplus a_t$, where $\oplus$ means concatenation. The episode ends if an End-Of-Sentence (EOS) token is generated or the maximal length $T$ is reached. For notational simplicity, we assume that the length of any response is exactly $T$, with necessary padding occurring after the EOS token. The main objective in the MDP framework is to find an optimal policy which maximizes the expected cumulative sum of rewards.
+
+\subsection{Reinforcement Learning from Human Feedback}
+\label{subsec:rlhf}
+
+Learning the optimal LLM within the aforementioned MDP framework requires access to the ground-truth reward function, which can be infeasible for many language generation tasks. Classical RLHF methods, such as InstructGPT~\citep{instruct_gpt}, thus considers first learning a reward model from human preferences and then optimizing it with RL algorithms. Given a dataset $\mathcal{D} = \qty{x^{(i)}, y_w^{(i)}, y_l^{(i)}}_{i=1}^N$ containing $N$ preference pairs, where $x^{(i)}$ represents the prompt, $y_w^{(i) }$ and $y_l^{(i)}$ are two corresponding responses with $y_w^{(i)}$ being the preferred one, we can train a reward model $r_\phi(s, a)$ with learnable parameters $\phi$ based on the Bradley-Terry model~\citep{bt}, as demonstrated below:
+\begin{equation}\label{equ:bt}
+    \mathcal{L}(\phi, \mathcal{D}) = -\mathbb{E}_{(x, y_w, y_l)\sim \mathcal{D}}\bqty{\log \sigma \pqty{\sum_{t=1}^T r_\phi(s^{w}_t, a^{w}_t) - r_\phi(s^{l}_t, a^{l}_t)}}.
+\end{equation}
+Here, $(s_t^w, a_t^w)$ and $(s_t^l, a_t^l)$ are the state-action pairs at time step $t$ when generating $y_w$ and $y_l$, respectively; $\sigma$ is the sigmoid function. We can then optimize the LLM with RL methods like PPO~\citep{ppo} using the following objective:
+\begin{equation}\label{equ:rlhf}
+    \max_\pi \mathbb{E}_{s_1\sim \rho}\bqty{\sum_{t=1}^T \gamma^{t-1}\pqty{r_\phi(s_t,a_t)-\alpha\KL\pqty{\pi(\cdot|s_t)\|\pi_\text{ref}(\cdot|s_t)}}},
+\end{equation}
+where $\alpha>0$ is a hyper-parameter, called \emph{entropy weight}; $\pi_\text{ref}$ is a reference policy, which often results from SFT; $\KL$ is the Kullback-Leibler divergence (KL-divergence)~\citep{kld}, used for mitigating over-optimization of the reward model~\citep{instruct_gpt}.
+
+\begin{restatable}[]{proposition}{lemmmaxent}\label{lemm:maxent}
+\cref{equ:rlhf} is equivalent to 
+\begin{equation}\label{equ:maxent}
+    \max_\pi \mathbb{E}_{s_1\sim \rho}\bqty{\mathbb{E}_{a_1 \sim \pi(\cdot|s_1)}Q^\pi(s_1,a_1)+\alpha \mathcal{H}\pqty{\pi\pqty{\cdot|s_1}}},
+\end{equation}
+where $\mathcal{H}\pqty{\pi(\cdot|s_t)} = \mathbb{E}_{a_t\sim\pi(\cdot|s_t)}\bqty{-\log \pi(a_t|s_t)}$ is the entropy of $\pi$ at the state $s_t$, 
+\begin{equation*}
+    Q^\pi(s,a) = \mathbb{E}\bqty{r_\phi^\mathrm{KL}(s,a)+\sum_{t=2}^T\gamma^{t-1} \pqty{r_\phi^\text{KL}(s_t,a_t) + \alpha\mathcal{H}\pqty{\pi(\cdot|s_t)}}\Bigg|s_1=s,a_1=a}
+\end{equation*}
+is the soft Q-function of the LLM $\pi$ with the expectation being taken over the randomness of $\pi$ and $\mathcal{P}$, i.e, $a_t \sim \pi(\cdot|s_t)$, $s_{t+1}\sim\mathcal{P}\pqty{\cdot|s_t,a_t}$. The reward $r^\text{KL}_\phi(s_t,a_t) = r_\phi(s_t,a_t) + \alpha \log\pi_\text{ref}(a_t|s_t)$.
+\end{restatable}
+The proof is deferred to \cref{sec:proof_lemmmaent} due to space limitation. \cref{lemm:maxent} tells us that with the learned reward function, RLHF optimizes the LLM using the maximum entropy RL principle~\citep{sac}, based on which we will derive our method in the following parts.
+
+\subsection{Residual Q-learning}\label{sec:rql}
+
+Let $\pi_1^*$ be a policy that was trained to be optimal with maximum entropy RL using a reward function $r_1: \mathcal{S}\times\mathcal{V}\to \mathbb{R}$ and entropy weight $\alpha_1$. $r_2: \mathcal{S}\times\mathcal{V}\to \mathbb{R}$ is another reward function. The situation we currently face may be that while we can obtain $\pi_1^*$, we are unable to obtain $r_1$. For example, many large models have been open-sourced on Hugging Face\footnote{\url{https://huggingface.co/}}, but the reward functions used to train these models have almost never been made available. The Residual Q-Learning (RQL) framework~\citep{residualq} considers learning a policy $\tilde{\pi}^*$ to maximize the reward $\lambda r_1 + r_2$ with the policy $\pi_1^*$ and the reward function $r_2$, given that the reward function $r_1$ is \emph{unknown}. That is, $\tilde{\pi}^* \in \argmax_\pi \sum_{t=1}^T \gamma^{t-1}\pqty{\lambda r_1(s_t,a_t) + r_2(s_t,a_t) - \tilde{\alpha}\log\pi(a_t|s_t)}$, where $\lambda>0$ is a hyper-parameter controlling the weight of the reward function $r_1$. To get $\tilde{\pi}^*$ when $r_1$ is unknown, \citet{residualq} define the \emph{residual Q-function} as
+\begin{equation*}
+    \hat{Q}(s,a) = \tilde{Q}^*(s,a) - \lambda Q_1^*(s,a), \forall (s,a) \in \mathcal{S}\times\mathcal{V},
+\end{equation*}
+where $\tilde{Q}^*$ is the soft Q-function of $\tilde{\pi}^*$ with the reward function being $\lambda r_1 + r_2$; $Q_1^*$ is the soft Q-function of $\pi_1^*$ with the reward function being $r_1$. Moreover, the following proposition shows how to get $\tilde{\pi}^*$ when the reward function $r_1$ is unknown.
+\begin{restatable}[\citet{residualq}]{proposition}{lemmresidualq}\label{lemm:residualq}
+    The optimal customized policy $\tilde{\pi}^*$ can be represented as a function of the policy $\pi_1^*$ and the residual Q-function $\hat{Q}$. That is,
+    \begin{equation}\label{equ:pi}
+        \tilde{\pi}^*(a|s) = \frac{\exp\bqty{\frac{1}{\tilde{\alpha}}\pqty{\lambda\alpha_1\log\pi_1^*(a|s) + \hat{Q}(s,a)}}}{\sum_{a'\in\mathcal{V}}\exp\bqty{\frac{1}{\tilde{\alpha}}\pqty{\lambda\alpha_1\log\pi_1^*(a'|s) + \hat{Q}(s,a')}}}.
+    \end{equation}
+    Furthermore, given $r_2$ and $\pi_1^*$, we can start from any function $Q:\mathcal{S}\times\mathcal{A}\to\mathbb{R}$ and apply the update rule repeatedly
+    \begin{equation}\label{equ:rq}
+        Q(s,a) \gets r_2(s,a) + \gamma \mathbb{E}_{s'\sim\mathcal{P}(\cdot|s,a)}\bqty{\tilde{\alpha}\log\sum_{a'\in\mathcal{V}}\exp\pqty{\frac{1}{\tilde{\alpha}}\pqty{Q(s',a') + \lambda\alpha_1\log\pi_1^*(a'|s')}}},
+    \end{equation}
+    for all $(s, a)\in \mathcal{S}\times\mathcal{V}$, which will finally converge $Q$ to $\hat{Q}$.
+\end{restatable}
+For completeness, we also present the proof in \cref{sec:proof_lemmrq}. \cref{lemm:residualq} reveals that although $\tilde{\pi}^*$ is to maximize the reward function $\lambda r_1 + r_2$, we can obtain it without the reward function $r_1$ but via the policy $\pi_1^*$ (which we assume to be accessible, e.g., an open-source LLM) and the residual Q-function $\hat{Q}$ (which can be learned from the reward function $r_2$ and the policy $\pi_1^*$). An intuitive understanding of this result is that the policy $\pi_1^*$ contains sufficient information about $r_1$ since it is obtained by maximizing the reward function $r_1$.
+
+
+
+\section{LLM Customization as Reward Maximization}
+
+
+Recall that in our setting, the LLM $\pi_1^*$ to be customized has been pre-trained with RLHF using an unknown reward function $r_1$. Thus to preserve the knowledge of $\pi_1^*$ after customization, the customized LLM $\tilde{\pi}^*$ should maximize the reward function $r_1$ as well. Moreover, suppose that another reward function $r_2$ can characterize the new human preference, then learning the new preference indicates that the customized LLM $\tilde{\pi}^*$ should also maximize the reward $r_2$~\citep{instruct_gpt}. This inspires us to propose the following objective:
+\begin{equation}\label{equ:obj}
+    \max_\pi \mathbb{E}_{s_1 \sim \rho}\bqty{\sum_{t=1}^{T} \gamma^{t-1} \pqty{{\lambda 
+    r_1(s_t, a_t) + r_2(s_t, a_t)} + \tilde{\alpha} \mathcal{H}\pqty{\pi(\cdot|s_t)}}}.
+\end{equation}
+
+\paragraph{Comparison with Policy Regularization Methods} Existing methods, like PPO~\citep{ppo} and DPO~\citep{dpo}, learn from human preferences using the following reward function:
+\begin{equation}\label{equ:kld2}
+r_2(s,a) - \tilde{\alpha}\KL\pqty{\pi(\cdot|s)\|\pi_1^*(\cdot|s)} = \tilde{\alpha}\mathbb{E}_{a\sim\pi(\cdot|s)}\bqty{\log\pi_1^*(a|s)} + r_2(s,a) + \tilde{\alpha}\mathcal{H}\pqty{\pi(\cdot|s)}
+\end{equation}
+as shown in \cref{equ:rlhf}. Although the KL-divergence constraint is originally used to mitigate over-optimization of the reward $r_2$~\citep{instruct_gpt}, it can also help alleviate forgetting by constraining the customized LLM to the pre-trained LLM $\pi_1^*$. We can find that the only difference between \cref{equ:kld2} and \cref{equ:obj} is that \cref{equ:kld2} uses $\log\pi_1^*(a|s)$ while \cref{equ:obj} uses $r_1(s,a)$. We compare the anti-forgetting ability of KL-divergence constraint with ours in \cref{subsec:exp-dsp}, where we use PR to denote methods using KL-divergence constraint. We find that as the training process runs, PR exhibits more severe forgetting. It is reasonable because the term $\log\pi_1^*(a|s)$ is empirically optimized only with limited training samples.
+
+
+
+\section{\abbr}
+
+
+\begin{algorithm}[!t]
+    \caption{\abbr}
+    \label{alg:qadapter}
+    \begin{algorithmic}[1] %[1] enables line numbers
+        \STATE {\bfseries Input:} Preference dataset $\mathcal{D} = \qty{x^{(i)}, y_w^{(i)}, y_l^{(i)}}_{i=1}^N$, hyper-parameters $\alpha_0$, $\tilde{\alpha}$, $\beta$ and $\gamma$, pre-trained LLM $\pi_1^*$ and initial residual Q-function parameter $\theta$.
+        \FOR{$i=1,2,\cdots$}
+   \STATE Sample a batch of preference pairs $\mathcal{B}\sim \mathcal{D}$.
+   \STATE Update $Q_\theta$ on $\mathcal{B}$ via \cref{equ:qadapter}. 
+        \ENDFOR
+        \STATE Extract $\tilde{\pi}^*$ via \cref{equ:pi} with $\hat{Q}$ being approximated by $Q_\theta$.
+    \end{algorithmic}
+\end{algorithm}
+
+To solve \cref{equ:obj}, one can get inspiration from \cref{lemm:residualq} and propose to first learn the reward function $r_2$ from the dataset $\mathcal{D}$ of the new human preference, then learn the residual Q-function by applying the update rule in \cref{equ:rq}. However, learning the reward function $r_2$ from a dataset with a finite number of preference pairs may suffer from certain optimization error, which can subsequently lead to inaccurate $\hat{Q}$, not to mention that it will consume additional computational resources. A natural question thus arises: \emph{can we bypass learning the reward function $r_2$ and learn the residual Q-function directly from the data?} The following corollary holds, providing a positive answer to this question:
+\begin{corollary}\label{coro:rq}
+    There is a one-to-one correspondence between $\mathcal{R}$ and $\mathcal{Q}$, where $\mathcal{R}$ and $\mathcal{Q}$ are respectively the set of feasible $r_2$ and $\hat{Q}$.
+\end{corollary}
+
+\begin{proof}
+    From \cref{lemm:residualq}, we know that given the reward function $r_2$, we can learn the unique residual Q-function by applying the update rule in \cref{lemm:residualq}. Given a residual Q-function $Q$, we can restore the reward function $r_2$ as
+    \begin{equation}\label{equ:r}
+        r_2(s,a) = Q(s,a) - \gamma \mathbb{E}_{s'\sim\mathcal{P}(\cdot|s,a)}\bqty{\tilde{\alpha}\log\sum_{a'\in\mathcal{V}}\exp\pqty{\frac{1}{\tilde{\alpha}}\pqty{Q(s',a') + \lambda\alpha_1\log\pi_1^*(a'|s')}}}.
+    \end{equation}
+    This concludes the proof.
+\end{proof}
+
+\cref{coro:rq} indicates that for a fixed pre-trained LLM $\pi_1^*$, we can freely exchange between $r_2$ and $\hat{Q}$. Let $Q_\theta: \mathcal{S}\times\mathcal{V}\to \mathbb{R}$ be a function with learnable parameters $\theta$ (e.g., a learnable neural network) to approximate the residual Q-function $\hat{Q}$. The corresponding reward function $r_2$ can be computed as:
+\begin{equation}\label{equ:r2}
+    r_2(s,a; \theta) = Q_\theta(s,a) - \gamma \mathbb{E}_{s'\sim\mathcal{P}(\cdot|s,a)}\bqty{\tilde{\alpha}\log\sum_{a'\in\mathcal{V}}\exp\pqty{\frac{1}{\tilde{\alpha}}\pqty{Q_\theta(s',a') + \alpha_0\log\pi_1^*(a'|s')}}}.
+\end{equation}
+
+Recall that we can learn the reward function based on the Bradley-Terry model~\citep{bt}. We thus obtain the following loss to learn the residual Q-function directly from the data $\mathcal{D}$:
+\begin{equation}\label{equ:qadapter}
+    \mathcal{L}(\theta, \mathcal{D}) = -\mathbb{E}_{(x, y_w, y_l)\sim \mathcal{D}}\bqty{\log \sigma \pqty{\sum_{t=1}^T r_2(s^{w}_t, a^{w}_t; \theta) - r_2(s^{l}_t, a^{l}_t; \theta)} - \beta\|r_2(\cdot,\cdot;\theta)\|_2^2 },
+\end{equation}
+where $\beta>0$ is a hyper-parameter.  Given $(x, y_w, y_l)$ sampled from $\mathcal{D}$, $\|r_2(\cdot,\cdot;\theta)\|_2^2 = \sum_{t=1}^T \norm{r_2(s^w_t,a^w_t;\theta)}_2^2 + \norm{r_2(s^l_t,a^l_t;\theta)}_2^2$ is the L2 regularization to prevent unbounded $r_2(s,a; \theta)$.
+
+Following \citep{residualq}, we let $\alpha_0 = \lambda\alpha_1$ in \cref{equ:r2}. The reason why we do this is that the entropy weight $\alpha_1$ for training the LLM $\pi_1^*$ is unknown, but we know that $\alpha_1 > 0$. This means that $\alpha_0$ is positively correlated with $\lambda$, which determines how much importance we attach to anti-forgetting. By making $\alpha_0 = \lambda \alpha_1$, we bypass the need to obtain the value of $\alpha_1$. Moreover, the bigger $\alpha_0$ is, the more we care about anti-forgetting. \cref{alg:qadapter} illustrates the pseudo code of \abbr. During training, \abbr randomly samples a batch of preference pairs from the dataset $\mathcal{D}$ of the new preference in each iteration, which will then be used to update the learned residual Q-function $Q_\theta$. For inference, the optimal customized LLM $\tilde{\pi}^*$ can be extracted from the pre-trained LLM $\pi_1^*$ and the residual Q-function $\hat{Q}$, which is approximated by $Q_\theta$, via \cref{equ:pi}.
+
+
+
+\section{Experiment}
+
+
+In this section, we investigate whether \abbr can offer seamless customization without losing the existing capabilities of the pre-trained model. Specifically, we are curious about the performance of the customized LLM on both the reward function $r_1$ and the reward function $r_2$. In \cref{subsec:exp-setup}, we introduce our compared baselines and adopted metrics to evaluate $r_1$ and $r_2$ separately in different tasks. In \cref{subsec:exp-dsp} and \cref{subsec:exp-hh}, we conduct experiments with different customization paradigms to compare the performance of \abbr with baseline methods.
+
+\subsection{Experimental Setup}
+\label{subsec:exp-setup}
+
+\paragraph{Baselines} Various methods for fine-tuning LLMs to specific downstream tasks have emerged recently, with some demonstrating potential in mitigating the the well-documented issue of forgetting. Specifically, we choose three representative categories of baselines to compare with \abbr: 
+\begin{itemize}
+    \item \textbf{Supervised Fine-Tuning} (\textbf{SFT}). SFT serves as a simple yet effective fine-tuning approach that performs supervised learning over the ``ground-truth'' labels from the dataset. For a preference dataset in our setting, we select the preferred response in each sample as the ``ground-truth'' label to train the model while neglecting the unpreferred response. 
+    \item \textbf{Policy Regularization} (\textbf{PR}) methods. As demonstrated in the \cref{subsec:rlhf}, RLHF methods learning from preference datasets usually adopt KL-divergence constraint to prevent the policy deviating from the original policy, i.e., the reference policy. Though a major functionality of this regularization is to stabilize training, it also provides an effective way to alleviate the forgetting issue. We choose two prevalent instances in this category, DPO \citep{dpo} and PPO \citep{ppo, instruct_gpt}, and denote them as \textbf{PR~(DPO)} and \textbf{PR~(PPO)}, respectively. 
+    \item \textbf{Replay-based method} (\textbf{Replay}). Another effective way to tackle the forgetting issue is to replay the training data of the original model. Nevertheless, the training data of pre-trained models usually remain unknown to users. An alternative approach is to generate responses to the prompts in the training dataset with the pre-trained model and combine the generated data with the training dataset\footnote{The ``training dataset'' in this section means the data of the new human preference.} \citep{lin2024mitigating}, where performing SFT is expected to learn a policy with traits both from the pre-trained model and the downstream dataset.
+\end{itemize}
+
+\paragraph{Practical Implementation} We integrate the adapter module of \abbr using LoRA \citep{lora}, as our adapter is designed to complement the pre-trained model. This approach enhances training efficiency and significantly reduces inference costs, as the final policy is derived by combining the outputs of the base model, both with and without LoRA. To maintain consistency in trainable parameters, all baseline models also optimize parameters through a LoRA module. For the base model, we employ the \texttt{Meta-Llama-3.1-8B-Instruct} model, a state-of-the-art open-source LLM with superior benchmarking performance. Further details on the implementations of \abbr and the baselines are provided in \cref{app:baselines}.
+
+\paragraph{Evaluation Metrics} In order to evaluate the performance of the customized LLM on the reward function $r_1$ and the reward function $r_2$, i.e., capabilities inherited from the pre-trained LLM and capabilities related to the new preference, we use a hybrid of evaluation metrics which include
+\begin{itemize}
+    \item \textbf{Scores in popular benchmarks}. Benchmarks including MMLU~\citep{mmlu,ethics}, MMLU Pro~\citep{mmlupro}, GSM8k~\citep{gsm8k}, BBH~\citep{bbh}, and IFEval~\citep{ifeval} are selected, where MMLU and MMLU Pro measure the general knowledge of LLMs, GSM8k focuses on the math ability, BBH requires multi-reasoning, and IFEval evaluates the instruction following ability. Llama 3.1 models exhibit impressive performance on these benchmarks. Results on them are enough to reflect the \emph{general} capabilities of the customized LLMs. We use \texttt{lm-eval}~\citep{eval-harness} to compute the results.
+    \item \textbf{Judgments from LLMs}. To evaluate how the customized LLM learns the new preference, we adopt a strong LLM like GPT-4o~\citep{gpt4} as a judge. Specifically, we prompt GPT-4o to rank pairwise responses from SFT and the other methods, i.e., PR methods, Replay, and \abbr. We thus use the win rate against SFT as our considered metric. We use \texttt{alpaca-eval}~\citep{alpaca-eval} to compute the results.
+\end{itemize}
+It is worth noting that our results can be slightly different from those reported by the official Llama 3 paper due to different configurations. However, we make sure that comparisons are fair by evaluating all the methods under the same configuration. More details on evaluation are in \cref{app:eval}.
+\subsection{Customization to Domain-specific Datasets}
+\label{subsec:exp-dsp}
+
+\begin{table}[t]
+\centering
+\caption{\textbf{Evaluation on $r_1$ in DSP}: general benchmark scores of \abbr, SFT, Replay, PR (DPO), PR (PPO) fine-tuned in data from four specific domains in DSP. The scores represent accuracy in MMLU, MMLU Pro, flexible extraction accuracy in GSM8k, and average accuracy in IFEval over each level and matching. }
+\label{table:dsp-r1}
+\begin{tabular}{llccccc}
+\toprule
+Category & Method & MMLU & MMLU Pro & GSM8k & BBH & IFEval \\
+\midrule
+ & Base Model & 67.68 & 37.43 & 84.46 & 48.89 & 79.19 \\
+\midrule
+\multirow{5}{*}{\textbf{Academy}} & \abbr (Ours) & \textbf{66.40} & \textbf{36.37} & \textbf{77.86} & \textbf{47.34} & \textbf{68.14} \\
+& SFT & 63.49 & 30.98 & 71.65 & 42.63 & 60.60 \\
+& Replay & 63.85 & 34.07 & 75.51 & 46.42 & 65.94 \\
+& PR (DPO) & 62.11 & 32.71 & 72.93 & 45.77 & 63.66 \\
+& PR (PPO) & 65.93 & 34.60 & 72.18 & 47.23 & 65.93 \\
+\midrule
+\multirow{5}{*}{\textbf{Business}} & \abbr (Ours) & \textbf{66.81} & \textbf{35.01} & \textbf{78.32} & 45.76 & \textbf{71.60} \\
+& SFT & 61.64 & 31.39 & 70.43 & 45.89 & 59.23 \\
+& Replay & 64.27 & 33.64 & 76.19 & \textbf{45.99} & 64.11 \\
+& PR (DPO) & 59.84 & 28.42 & 72.63 & 45.71 & 66.41 \\
+& PR (PPO) & 55.19 & 13.69 & 23.06 & 30.21 & 10.49 \\
+\midrule
+\multirow{5}{*}{\textbf{Entertainment}} & \abbr (Ours) & \textbf{66.69} & \textbf{35.98} & \textbf{77.94} & \textbf{46.33} & \textbf{69.15} \\
+& SFT & 64.64 & 33.61 & 73.69 & 43.95 & 63.61 \\
+& Replay & 65.49 & 35.77 & 76.19 & 45.81 & 67.73 \\
+& PR (DPO) & 62.87 & 31.85 & 74.00 & 46.20 & 64.08 \\
+& PR (PPO) & 64.20 & 34.52 & 76.65 & 46.13 & 66.12 \\
+\midrule
+\multirow{5}{*}{\textbf{Literature}} & \abbr (Ours) & \textbf{66.31} & \textbf{36.70} & \textbf{77.41} & \textbf{46.06} & \textbf{67.63} \\
+& SFT & 64.29 & 31.38 & 75.89 & 43.38 & 66.19 \\
+& Replay & 65.70 & 34.38 & 77.25 & 44.66 & 63.59 \\
+& PR (DPO) & 62.21 & 25.96 & 76.19 & 45.17 & 60.24 \\
+& PR (PPO) & 63.19 & 32.99 & 76.27 & 42.53 & 65.60 \\
+\bottomrule
+\end{tabular}
+\vskip -0.1in
+\end{table}
+
+\begin{table}[t]
+    \centering
+    \caption{\textbf{Evaluation on $r_2$ in DSP}: win rates of \abbr, Replay, PR (DPO), PR (PPO) fine-tuned in data from four specific domains in DSP against the SFT baseline. }
+    \label{table:dsp-r2}
+    \begin{tabular}{lcccc}
+        \toprule
+        & \abbr & Replay & PR (DPO) & PR (PPO) \\
+        \midrule
+        \textbf{Academy}       & \textbf{55.59}  & 54.57  & 53.93  & 53.38  \\
+        \textbf{Business}      & \textbf{53.84}  & 49.61  & 52.59  & 42.48  \\
+        \textbf{Entertainment} & \textbf{63.77}  & 46.66  & 46.27  & 56.70  \\
+        \textbf{Literature}    & \textbf{58.20}  & 53.57  & 52.59  & 51.48  \\
+        \bottomrule
+    \end{tabular}
+    \vskip -0.1in
+\end{table}
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/mmlu_forgetting.pdf}
+    \caption{\textbf{Forgetting during training}. Curves are the MMLU scores of \abbr, Replay, and PR (DPO) under different training checkpoints.}
+    \label{fig:mmlu-forgetting}
+\end{wrapfigure}
+
+We first consider customizing pre-trained LLMs in domain-specific datasets. The Domain-Specific Preference (DSP) dataset \citep{dsp} is a promising dataset that filters and categorizes data from the 52K Alpaca training set~\citep{taori2023stanford} into four domains including \textit{academy}, \textit{business}, \textit{entertainment}, and \textit{literature}. Each category of data contains different instructions and answers in its corresponding style, forming four distinct downstream tasks with different preferences. We post-train the Llama-3.1 model in data of each domain and evaluate the performance of all methods.
+
+We use LLM benchmark scores to evaluate model capabilities in $r_1$ as a promising customized model should maintain its general performance without catastrophic forgetting. As shown in \cref{table:dsp-r1}, we find that \abbr generally outperforms other methods in these benchmark scores ranging from general knowledge, math, reasoning, and instruction following abilities. The results indicate that \abbr effectively alleviates the forgetting issue. Moreover, replay-based methods and policy regularization methods also show moderate performance while SFT performs the worst due to the lack of an anti-forgetting mechanism. We also report the performance of the base model, where we find the performance drop of \abbr in some benchmarks like MMLU, and BBH is less significant, well preserving the performance of the original model. To better illustrate the forgetting issue emerged in the fine-tuning process, we also evaluate the MMLU score of intermediate checkpoints in the academy domain data of DSP. As shown in \cref{fig:mmlu-forgetting}, we find that a significant performance drop can be observed in the training process of DPO and Replay. In contrast, \abbr keeps a relatively stable performance in the MMLU metric due to its advantage of maximizing $r_1$ in the objective and preserving the pre-trained LLM $\pi_1^*$ for inference.
+
+The second part of our evaluation is to assess the model capabilities in learning new preferences. As stated in \cref{subsec:exp-setup}, we adopt a strong LLM as the judgment to rank the generated responses of each method in the test dataset. Given an instruction, we first sample responses from all the methods. Then, we request LLM judgments through the OpenAI GPT-4o API to rank pairs of responses, one of which is from the model fine-tuned with SFT, while the other is from the model fine-tuned by \abbr, PR or Replay. Finally, we calculate and compare the win rates of each method. To alleviate the preference of GPT-4o on long responses, we adopt a length-controlled win rates proposed in \citet{alpaca-eval}. The result is illustrated in \cref{table:dsp-r2}. We can see that \abbr achieves the best performance among all the four categories. This verifies the superior effectiveness of \abbr in learning the new preference. We also showcase some generated responses in \cref{app:samples}.
+
+\subsection{Customization between Two Tasks}
+\label{subsec:exp-hh}
+
+To better illustrate the ability of \abbr in maximizing a mixture of rewards, we consider another form of customization applicable to \abbr, which is to customize a model learned in one domain to another. Real-world applications often require one LLM to satisfy different traits, while using \abbr enables us to add additional features to the LLM learned in one kind of tasks. We capsule this idea with HH-RLHF \citep{hh-rlhf}, a dataset containing human preference for building helpful and harmless chatbots. We firstly post-train a Llama-3.1 model in helpful data with DPO to make the model sufficiently aligned to a trait of helpfulness. Afterward, we utilize this model as the base model and further fine-tune it in harmless data using different methods. 
+
+As it is tricky to develop objective metrics to delineate the model performance in these datasets, we continue to adopt the win rates against an SFT model under LLM judgments for both the helpful and harmless properties. In this case, the win rate in helpful data represents a metric in $r_1$ and the win rate in harmless data represents a metric in $r_2$. We omit the PR (PPO) baseline since we find it is difficult to stabilize its training in harmless data. As shown in \cref{fig:hh-r1r2}, we find \abbr can behave well in both $r_1$ and $r_2$ indicated by the win rates. Besides, the result of Replay is also comparable since it directly learns from data with both traits while the policy regularization method DPO shows a less promising result in this customization paradigm. 
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[b]{0.48\linewidth}
+        \centering
+        \includegraphics[width=0.95\linewidth]{figures/hh-r1r2.pdf}
+        \caption{\textbf{Evaluation on $r_1$ \& $r_2$ in HH-RLHF}: Win rates of \abbr, Replay, and PR (DPO) against the SFT model in the helpful data ($r_1$) and the harmless data ($r_2$) from HH-RLHF.}
+        \label{fig:hh-r1r2}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.48\linewidth}
+        \centering
+        \includegraphics[width=0.9\linewidth]{figures/hh-alpha0.pdf}
+        \caption{\textbf{$r_1$ \& $r_2$ with different $\alpha_0$}: Win rates of \abbr against the SFT model with different choices of $\alpha_0$ in the helpful data ($r_1$) and the harmless data ($r_2$) from HH-RLHF.}
+        \label{fig:hh-alpha0}
+    \end{minipage}
+    \vskip -0.18in
+\end{figure}
+
+We can further utilize the HH-RLHF dataset to investigate a key hyper-parameter $\alpha_0$, which balances between optimized rewards from the base model $r_1$ and those from the downstream task $r_2$ according to \cref{equ:obj}. The hyper-parameter will also determine the inference policy. Therefore, we choose different values on $\alpha_0$ when customizing the model trained in helpful data to harmless data. Intuitively, a large $\alpha_0$ means more consideration on the base model, resulting in better performance in $r_1$, and vice versa. In \cref{fig:hh-alpha0}, we observe that a general tendency in obedience to this intuition occurs for $\alpha_0$ ranging from 0.03 to 0.001. An exception comes from a larger choice of $\alpha_0$ like 0.1, where we find training with large $\alpha_0$ can be unstable. We choose $\alpha_0=0.01$ for most of our experiments and note that the choice of $\alpha_0$ in a proper range will not be of great impact. We also conduct ablation studies to show the sensitivity of another hyper-parameter $\beta$ in \cref{app:beta}.
+
+
+
+\section{Related Work}
+
+
+\paragraph{Learning from Human Preferences} Humans excel at understanding the intentions and emotions behind language. Based on grammatical syntax, common sense, social norms, etc., we can provide ranked preferences for different responses, which can serve as learning signals for language models and autonomous agents~\citep{rlhumanpreference}. \citet{finetune_rlhf} propose to first use the Bradley-Terry (BT) model~\citep{bt} to learn a reward function from human preferences and then apply modern RL algorithms, such as, PPO~\citep{ppo}, to fine-tune the LLM. This Reinforcement Learning from Human Feedback (RLHF) paradigm successfully aligns the LLM to human values and improves the model's generalization~\citep{rlhfsurvey}. Some of the most widely used chatbots, such as OpenAI's ChatGPT~\citep{gpt4} and Anthropic's Claude~\citep{claude}, are trained by RLHF. To make RLHF more efficient, new variants have been proposed in subsequent works, including the replacement of PPO with REINFORCE~\citep{reinforce, remax} and the derivation of new training objective by incorporating Kahnerman and Tversky's prospect theory~\citep{kto, kto_theory}. Our work differs from the above methods in two main ways: First, we do not learn the reward function; second, in order not to deviate too much from the pre-trained LLM, they use the KL-divergence constraint~\citep{kld}, while we restrict the customized LLM to maximize the reward used for aligning the pre-trained LLM. Although being effective, the RLHF pipeline is sophisticated, involving training multiple LLMs and sampling from the LLM in the loop of training. DPO~\citep{dpo}, on the other hand, derives a simple classification loss but implicitly optimizes the same objective as existing RLHF algorithms, i.e., reward maximization with a KL-divergence constraint. Another method, IPL~\citep{ipl}, proposes an objective based on the Bellman operator~\citep{mdp} and BT model to directly learn the Q-function from preference data. Despite holding a different motivation from ours and mainly focusing on control tasks, IPL inspires the technical derivation of our method.
+
+\paragraph{Large Language Model Customization} Currently, there is a growing number of open-source LLMs on the Internet~\citep{hg}. However, most of these models are trained on generic datasets. To better apply pre-trained LLMs to downstream tasks, we need to further adapt them~\citep{kirk2024benefits}. As fully fine-tuning the LLMs may consume a significantly huge amount of computation resources, \citet{lora} propose LoRA which freezes the pre-trained model weights and adds trainable low-rank matrices into each layer of the Transformer architecture~\citep{transformer}. In our practical implementation, we also use LoRA (please refer to \cref{app:baselines} for more details). A commonly known issue with customization is that the LLM may forget its original knowledge and abilities. To alleviate this, a number of efforts have proposed different solutions. \citet{instruct_gpt} augment the reward with the KL-divergence between the customized and pre-trained LLMs. However, since the constraint is imposed only on the training data, the LLM can still forget a large part of its knowledge. Our approach is different in that we keep the pre-trained model intact and involve the pre-trained model in the inference process, ensuring that its knowledge is retained as much as possible. \citet{rehearsal} propose to generate data used to train the original LLM and replay it during customization. Nevertheless, the generated data may contain low-quality or unsafe responses, and training on them will exacerbate the LLM. \citet{lin2024mitigating} try to find optimal combination ratios for each model layer and LoRA layer. Nevertheless, with the ratios being solved on only a small dataset, they are prone to converging to local optimums.
+
+
+
+\section{Conclusion}
+
+
+We propose \abbr, which learns the residual Q-function directly from the data of the new human preference without learning a reward function. With the residual Q-function and the pre-trained LLM, we are able to generate responses that not only meet the preference in the dataset, but also inherit knowledge of the pre-trained LLM. The forgetting issue thus can be effectively alleviated, which was empirically verified by our experiments. In this age of increasingly open source LLMs, we believe that our work can better enable pre-trained LLMs to be applied to more specialized domains and tasks, while saving the cost of training LLMs from scratch.
+\paragraph{Limitation and Future Work} We acknowledge that this work has limitations. To derive the objective \cref{equ:qadapter} of \abbr, we assume that the LLM to be customized has been pre-trained with RLHF. However, there are many open-source LLMs that are trained using other methods such as SFT. Investigating how these models can be effectively customized is also an interesting direction to pursue. Moreover, in our experiments, we only performed one round of customization. But our framework also supports continuously customizing the LLM, which can be achieved by learning more adapters. Since the main focus of this paper is to effectively customize a pre-trained LLM with forgetting mitigation, we plan to leave the directions mentioned above as future work.
+
+
+

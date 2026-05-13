@@ -1,0 +1,479 @@
+\title{Improving Large Language Model Fine-tuning for Solving Math Problems}
+
+\begin{abstract}
+Despite their success in many natural language tasks, solving math problems remains a significant challenge for large language models (LLMs).
+A large gap exists between LLMs' pass-at-one and pass-at-N performance in solving math problems, suggesting LLMs might be close to finding correct solutions, motivating our 
+exploration of fine-tuning methods to unlock LLMs' performance.
+Using the challenging MATH dataset, we investigate three fine-tuning strategies:
+(1) solution fine-tuning, where we fine-tune to generate a detailed solution for a given math problem;
+(2) solution-cluster re-ranking, where the LLM is fine-tuned as a solution verifier/evaluator to choose among generated candidate solution clusters;
+(3) multi-task sequential fine-tuning, which integrates both solution generation and evaluation tasks together efficiently to enhance the LLM performance.
+With these methods, we present a thorough empirical study on a series of PaLM~2 models and find:
+(1)~The quality and style of the step-by-step solutions used for fine-tuning can make a significant impact on the model performance;
+(2)~While solution re-ranking and majority voting are both effective for improving the model performance when used separately, they can also be used together for an even greater performance boost;
+(3)~Multi-task fine-tuning that \emph{sequentially} separates the solution generation and evaluation tasks can offer improved performance compared with the solution fine-tuning baseline.
+Guided by these insights, we design a fine-tuning recipe that yields approximately 58.8\% accuracy on the MATH dataset with fine-tuned \palmLarge models, an 11.2\% accuracy improvement over the few-shot performance of pre-trained \palmLarge model with majority voting.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Solving mathematical problems is a challenging task for even the state-of-the-art large language models (LLMs), e.g., GPT-4~\citep{OpenAI2023GPT4TR} and PaLM 2~\citep{Anil2023PaLM2T}, since it requires the ability of creative thinking, mathematical reasoning and numerical calculation.
+However, LLMs are already showing potential of achieving better performance on this math problem solving task, as the likelihood of LLM's being able to find a correct answer is significantly higher when they are allowed to attempt the problem several times.
+For example, with greedy decoding, the pre-trained PaLM 2-L can achieve around 33.4\% accuracy. However, when sampling 64 solutions using temperature sampling, there is at least one correct solution (pass@64) 79.4\% of the time (Table~\ref{tab:cot-mle}).
+This large performance gap suggests that  LLMs can be capable of generating correct solutions while struggling to discriminate correct from incorrect solutions.
+
+Therefore, we study task-specific fine-tuning methods that can improve the LLM's solution generation and evaluation ability such that the aforementioned performance gap can be reduced.
+Specifically, we explore three fine-tuning methods:
+
+\noindent (1) \textbf{Supervised step-by-step solution fine-tuning (SSFT)}. 
+As a baseline method, we investigate whether the pre-trained LLMs can benefit from a supervised fine-tuning stage.
+To this end, we fine-tune the LLMs to generate the step-by-step solution and final answer as in \citet{Lightman2023LetsVS}.
+
+\noindent (2) \textbf{Solution-cluster Re-ranking (SCR)}.
+To enhance the LLM's solution evaluation ability, we continue fine-tuning the generator as a solution evaluator for candidate solution re-ranking.
+While such a solution sample-rank, or re-ranking, has been investigated in previous work~\citep{Cobbe2021TrainingVT}, we propose a new technique that can bring the benefits of both majority voting~\citep{wang2023selfconsistency} and re-ranking together, while reducing ranking costs.
+Specifically, we first group the candidate answers into different clusters according to their mathematical equivalence, which is an intermediate step in majority voting. 
+Then, we apply the solution evaluator to the solutions in the most-frequent clusters to gain further improvement over the majority voting results.
+
+\noindent (3) \textbf{Multi-task Sequential Fine-tuning}.
+Apart from the solution evaluation task, we are also interested in improving the LLM's performance on the solution generation task and exploring whether the training objective of solution evaluation can be beneficial to the solution generation model.
+To this end, we propose a \textit{sequential} multi-task learning setting for the generation model where the solution evaluation task is formatted in the form of a natural language generation task, such that its training objective can provide meaningful supervision signal to the solution generation model. 
+Concretely, we fine-tune the model in a sequential manner: fine-tuning (1) as a solution generator (SSFT), (2) as a solution evaluator (SCR), (3) as a generator (SSFT) again.
+
+
+We conduct comprehensive experiments on the challenging MATH~\citep{hendrycksmath2021} dataset with  \palmSmall and \palmLarge -- the small and large variants of PaLM 2  respectively \citep{Anil2023PaLM2T} -- which leads to these findings:
+\begin{itemize}
+\item For SSFT, the quality and the style of the step-by-step solutions can make a large impact on fine-tuned model, as they benefit more from fine-grained, well-formatted solutions.
+
+\item Re-ranking solutions in the most-frequent solution clusters can yield better performance than re-ranking all the solutions while simultaneously achieving better computational efficiency, which we believe can be a better standard practice for future work.
+
+\item Our proposed multi-task sequential fine-tuning can more effectively improve the solution generation model performance compared with supervised solution fine-tuning only, showing the benefit of training the model for both solution generation and evaluation tasks, presenting a successful attempt of leveraging learning signal of a binary evaluation task for a generation model.
+\end{itemize}
+
+
+
+\section{Background}
+
+Mathematical problem solving is an important task~\citep{hendryckstest2021, hendrycksmath2021, Cobbe2021TrainingVT} for measuring the LLMs' reasoning and numerical computation abilities.
+In this work, we focus on the MATH dataset~\citep{hendrycksmath2021}, which consists of problems collected from high school math competitions, along with the human-written solutions containing both natural language explanations and the final ground-truth solutions.
+MATH dataset is challenging to even the recent start-of-the-art large language models (LLMs), such as GPT-4~\citep{OpenAI2023GPT4TR} and PaLM 2~\citep{Anil2023PaLM2T}, since they can only achieve 42.5\% and 33.2\% pass-at-1 accuracy~\citep{Anil2023PaLM2T}.
+The accuracy is usually calculated through an automatic grading function $g$ checking the mathematical equivalence between the ground truth solution $A$ and the model solution $\tilde{A}$:
+\begin{equation}
+\label{eq:autograder}
+     g(A, \tilde{A}) =
+   \begin{cases}
+   1 & \text{ if } \tilde{A} \text{~is equivalent to~}  A, \\
+   0 & \text{ otherwise}.
+   \end{cases}
+\end{equation}
+Recent work has proposed various methods to improve LLM performance on the math problem solving task.
+In particular, majority voting, or self-consistency, can yield a significant improvement compared with the baseline performance of LLMs~\citep{lewkowycz2022solving, wang2023selfconsistency}.
+Throughout this work, we will use the model's pass-at-1, pass-at-N, and majority voting performance for model evaluation and comparison.
+The specific definitions are:
+
+\noindent (1) \textbf{Pass@1} (pass-at-1):
+the accuracy of the model's greedy-decoded solution $A_G$, i.e., $g(A, A_G)$.
+
+\noindent (2) \textbf{Pass@N} (pass-at-N):
+the oracle performance that always selects the correct solution when it is presented in $N$ \emph{temperature sampled} solutions, $\{\tilde{A}_1, \tilde{A}_2, ..., \tilde{A}_N\}$, i.e, $\max_{i \in \{1, 2, ..., N\}}g(A, \tilde{A}_i)$.
+
+\noindent (3) \textbf{Maj1@N} (majority-voting-at-N):
+$N$ sampled solutions are first clustered by their math equivalence, i.e., $g(\tilde{A}_i, \tilde{A}_j)$.
+Then, one solution $\tilde{A}^*$ from a most frequent cluster is selected for calculating the accuracy, $g(A, \tilde{A}^*)$.
+
+\noindent (4) \textbf{MajK@N}:
+Similar to Pass@N, we define an oracle that always selects the correct solution when it is presented in the top-K majority-voting clusters, $\{\tilde{A}^*_1, \tilde{A}^*_2, ..., \tilde{A}^*_K\}$, so its accuracy is $\max_{i \in \{1, 2, ..., K\}}g(A, \tilde{A}^*_i)$.
+Another line of work leverages external tools such as Python programs to enhance the LLMs' ability~\citep{chen2022program, wu2023empirical, yue2023mammoth, Zhou2023SolvingCM}.
+In this work, we focus on improving the LLMs' inherent ability to solve math problems without help from external tools.
+
+
+\section{Methods}
+
+
+
+\subsection{Supervised Solution Fine-tuning}
+\label{subsec:cot-sft}
+In \citet{hendrycksmath2021, Cobbe2021TrainingVT} models are fine-tuned to generate not only the final answer but also the step-by-step process for solving the math problem.
+\begin{equation}
+    S, A \leftarrow M(P),
+\end{equation}
+where $P$ is the math problem, $S$, $A$ are the ground-truth step-by-step solution and the final answer respectively, and $M$ is an LLM.
+In training, the solution $S$ and the final answer $A$ are concatenated into a single text sequence $X$, and the model is fine-tuned with the cross-entropy loss following the maximum likelihood estimation (MLE) paradigm:
+\begin{equation}
+\label{eq:xent-cot}
+    L_{\text{mle}} = - \log p_M(X|P),
+\end{equation}
+where $p_M$ is the probably distribution given by the auto-regressive language model $M$:
+\begin{equation}
+    p_M(X|P) = \prod_i p_M (x_i|X_{0, ...., i-1}, P).
+\end{equation}
+Here, $x_i$ is the $i$-th token in $X$, $X_{0, ...., i-1}$ is the prefix before $x_i$.
+
+To collect the ground-truth step-by-step solutions, we use two sources: (1) the original human-written solutions in the MATH dataset, (2) GPT-4 generated solutions provided in \citet{Lightman2023LetsVS} with the chain-of-thought prompting eliciting step-by-step solutions.
+Our preliminary analysis found that the original solutions in the MATH dataset are more abstract while the solutions generated by GPT-4 are more fine-grained and detailed. 
+
+\subsection{Solution-Cluster Re-ranking}
+\label{subsec:method-reranking}
+
+ We note that there are two significant gaps for LLMs' math problem solving performance in Table~\ref{tab:cot-mle}: (1) the gap between the model's greedy-decoding (Pass@1) and majority-voting (Maj1@N) results; (2) the gap between the model's majority-voting best-at-1 (Maj1@N) and best-at-K performance (MajK@N).
+To narrow these gaps, we fine-tune the pre-trained LLM as a solution verifier/evaluator, following \citet{Cobbe2021TrainingVT}. 
+However, unlike in the previous work where a large number (e.g., 1000) of candidate solutions are all reranked by the evaluator, we combine the strength of majority voting and re-ranking together by only re-ranking the top-K solution \textit{clusters}. 
+We believe this re-ranking strategy is both more robust and cost-efficient, as will be elaborated in the following section.
+To use the evaluator to score each candidate solution, we formulate the scoring task as a classification problem in a text completion format, inspired by related work on using LLMs for text evaluation~\citep{liu2023gpteval, fu2023gptscore}.
+Concretely, we define a mapping function $T$ converting the math problem $P$ and a candidate solution $\tilde{X}$ into a prompt $T(P, \tilde{X})$:
+``\texttt{Here is a math problem: $P$. Here is a candidate solution: $\tilde{X}$. The above candidate solution is }''.
+We then interpret the model-predicted probability of the word ``correct'' (or ``incorrect'') being the next token\footnote{We note that the tokenizer we used tokenizes the words ``correct'' and ``incorrect'' both into a single token.} as the probability of the solution being correct (or incorrect):
+\begin{equation}
+    p_{\text{cls}}(\textrm{``correct''}|\tilde{X}, P) = p_M(\textrm{``correct''}|T(P, \tilde{X})),
+\end{equation}
+\begin{equation}
+    p_{\text{cls}}(\textrm{``incorrect''}|\tilde{X}, P) = p_M(\textrm{``incorrect''}|T(P, \tilde{X})).
+\end{equation}
+We can then define the following normalized probability as the candidate solution score:
+\begin{equation}
+\label{eq:scoring-cls}
+    S_{\text{cls}}(\tilde{X}|P) = \frac{p_{\text{cls}}(\textrm{``correct''}|\tilde{X}, P)}{p_{\text{cls}}(\textrm{``correct''}|\tilde{X}, P) + p_{\text{cls}}(\textrm{``incorrect''}|\tilde{X}, P)}.
+\end{equation}
+
+With this scoring format, we investigate two training objectives:
+
+\noindent (1) \textbf{Margin loss for pairwise comparison}:
+\begin{equation}
+\label{eq:margin-loss-cls}
+    L_{\text{cls-margin}} = \max (0, \log S_{\text{cls}}(\tilde{X}_{\text{incorrect}}|P) - \log S_{\text{cls}}(\tilde{X}_{\text{correct}}|P) + \lambda),
+\end{equation}
+where $\tilde{X}_{\text{correct}}$ and $\tilde{X}_{\text{incorrect}}$ stand for a correct and an incorrect solution respectively, and $\lambda$ is a hyper-parameter for the margin. 
+
+\noindent (2) \textbf{Cross-entropy loss for classification}.
+The scoring format we designed is equivalent to a multi-class classification problem where ``correct'' and ``incorrect'' are the only valid options.
+Therefore, we can fine-tune the model using the cross-entropy loss for this classification task:
+\begin{equation}
+\label{eq:cls-loss}
+\begin{split}
+    L_{\text{cls-xent}} & = - \mathbbm{1}_{\{\tilde{X} \text{~is correct}\}}(\tilde{X}) \log p_{cls}(\textrm{``correct''}|\tilde{X}, P) \\
+    & + \mathbbm{1}_{\{\tilde{X} \text{~is incorrect}\}}(\tilde{X}) \log p_{cls}(\textrm{``incorrect''}|\tilde{X}, P)
+\end{split}
+\end{equation}
+\subsection{Multi-task Sequential Fine-tuning}
+\label{subsec:multi-finetune}
+The MLE-based training objective defined in Eq.~\ref{eq:xent-cot} is somewhat at odds with the ultimate binary evaluation target -- whether the final answer is correct or not.
+Related work has explored better aligning training with the task evaluation using a contrastive learning objective~\citep{edunov-etal-2018-classical, liu-etal-2022-brio, zhao2023calibrating}, which interprets the model-predicted probability of a candidate solution $\tilde{X}$ as its quality score
+and uses the margin loss to encourage the model to assign higher probabilities to better candidates:
+\begin{equation}
+\label{eq:margin-loss-seq}
+    L_{\text{seq}} = \max (0, \log p_{M}(\tilde{X}_{\text{incorrect}}|P) - \log  p_{M}(\tilde{X}_{\text{correct}}|P) + \lambda).
+\end{equation}
+Then, the model is fine-tuned with the MLE and contrastive training objectives jointly:
+\begin{equation}
+\label{eq:ctr-loss}
+    L_{\text{ctr}} = L_{\text{seq}} + \alpha_1 L_{\text{mle}},
+\end{equation}
+where $\alpha_1$ is a hyper-parameter.
+
+However, the contrastive learning objective may not be as suitable for the math problem solving task because of the binary nature of the task --
+ the objective requires the model to use the token likelihoods for two purposes: (1) predicting the next token, and (2) evaluating the quality of the entire text sequence.
+It can be a reasonable objective for natural language generation tasks such as text summarization where the next token prediction correctness is closely related to overall text quality.
+However, for math problem solving, the correctness of a solution might be decided by  just a few tokens, making the next-token prediction task more distant and incompatible with the solution evaluation task.
+Consequently, we combine the training objectives in \S\ref{subsec:cot-sft} (Eq.~\ref{eq:xent-cot}) and \S\ref{subsec:method-reranking} (Eq.~\ref{eq:margin-loss-cls} and Eq.~\ref{eq:cls-loss}), introducing a new learning setting that formulates both math problem solution generation and evaluation tasks as natural language generation tasks:
+\begin{equation}
+\label{eq:mul-margin}
+    L_{\text{mul-margin}} = L_{\text{cls-margin}} + \alpha_2 L_{\text{mle}},
+\end{equation}
+\begin{equation}
+\label{eq:mul-cls}
+    L_{\text{mul-xent}} = L_{\text{cls-xent}} + \alpha_3 L_{\text{mle}},
+\end{equation}
+where $\alpha_2$ and $\alpha_3$ are hyper-parameters.
+We believe we can better leverage the capacity of LLMs with this training setting since it is closer to the pre-training task (i.e., next-token prediction).
+In our preliminary experiments, we found that it is difficult to balance the two loss terms in Eq.~\ref{eq:mul-margin} and Eq.~\ref{eq:mul-cls} and the models start to overfit the MLE training objective very soon, possibly because of the limited size of the dataset.
+As the result, we optimize the multi-task objective in a \textit{sequential} manner -- instead of fine-tuning the model on both training objectives, we first fine-tuned the model 
+as a generator (Eq.~\ref{eq:margin-loss-cls} or Eq.~\ref{eq:cls-loss}), then  
+as an evaluator (Eq.~\ref{eq:xent-cot}), then finally as a generator again.
+
+
+
+\section{Experiments}
+
+
+\subsection{Experimental Setting}
+
+\begin{table}[ht]
+\caption{Number of examples in dataset splits and the average length in tokens of the math problems and solutions.}
+\begin{center}
+\begin{tabular}{lccccc}
+ Data Source & \# Training & \# Validation & \# Test & Problem Length & Solution Length \\
+\midrule
+MATH & 11000 & 1000 & 500 & 90.2 & 249.6 \\
+PRM800K & 6473 & 564 & 512 & 57.3 & 305.2 \\
+\end{tabular}
+\end{center}
+\label{tab:stats}
+\end{table}
+
+\paragraph{Datasets} Our experiments are conducted on the MATH dataset.
+5K original test examples are used for training and validation, and the remaining 500 test examples are used for model evaluation. 
+We leverage two sources of correct step-by-step solutions for the model training: 
+(1) the original human-written explanations provided in the MATH dataset;
+(2) the model-generated correct solutions provided in PRM800K~\citep{Lightman2023LetsVS}, which only covers a subset problems in the original MATH dataset.
+The dataset statistics are provided in Table~\ref{tab:stats}.
+
+\paragraph{Evaluation} We report the average solution accuracy (or correctness) for all the experiments.
+The correctness of the generated solution is compared against the ground-truth solution using the automatic grading script provided by \citet{Lightman2023LetsVS}.
+This script checks the mathematical equivalence instead of the simple textual equivalence.
+Two solution generation methods are mainly used to evaluate the model performance:
+(1) greedy decoding for the Pass@1 performance,
+(2) nucleus sampling~\citep{Holtzman2020The} for the majority voting performance (Maj1@N), where we used the same sampling hyper-parameters as in \citet{lewkowycz2022solving}.
+Specifically, the sampling temperature is set to 0.6, and the top-$p$ value is set to 0.95.
+
+\setcounter{mycounter}{1}
+\subsection{Experiment \Roman{mycounter}: Supervised Solution Fine-tuning}
+\label{subsec:exp-1}
+
+\begin{table}[]
+\caption{Results of supervised solution fine-tuning.
+Different training data sources are compared, which are the MATH dataset and the PRM800K dataset.
+}
+\begin{center}
+\begin{tabular}{lccccccc}
+& \multicolumn{3}{c}{\palmSmall} & & \multicolumn{3}{c}{\palmLarge} \\
+  &  Pass@1 &  Maj1@64 & Pass@64 &   & Pass@1 & Maj1@64 & Pass@64 \\
+\cmidrule{2-4} \cmidrule{6-8} 
+Few-shot & 17.4\% & 27.2\% & 67.8\% & & 33.4\% & 47.6\% & 79.4\% \\
+\cmidrule{2-4} \cmidrule{6-8} 
+MATH & 19.8\% & 32.4\% & 74.8\% &  & 32.8\% & 49.2\% & 82.2\% \\
+PRM800K & 20.8\% & 41.2\% & 73.8\% & & 34.8\% & 54.2\% & 83.4\% \\
+MATH + PRM800K & 22.6\% & 38.8\% & 72.6\% & & 35.6\% & 55.2\% & 82.8\% \\
+\end{tabular}
+\end{center}
+\label{tab:cot-mle}
+\end{table}
+
+We fine-tune \palmSmall and \palmLarge on the step-by-step solutions with the MLE training objective (Eq.~\ref{eq:xent-cot}).
+Three specific fine-tuning strategies are explored: (1) fine-tuning using the original MATH solutions only; (2) fine-tuning using the PRM800K GPT-4 solutions only; (3) fine-tuning on both MATH and PRM800K solutions.
+We used the model performance on the validation set for checkpoint selection, and all the fine-tuned models achieved the best performance within two epochs.
+The results are shown in Table~\ref{tab:cot-mle}, where the few-shot performance with the pre-trained PaLM 2 models are provided for comparison. 
+The few-shot results are obtained using a customized 4-shot prompt designed in \citet{lewkowycz2022solving}.
+
+We observe that the fine-tuning is generally helpful for the model to achieve better performance compared with the few-shot performance of the pre-trained checkpoints.
+Moreover, the quality and the style of the solutions can have a large impact on the model performance, since the models fine-tuned on PRM800K solutions achieve significantly better performance than the ones fine-tuned on the original MATH solutions.
+\stepcounter{mycounter}
+\subsection{Experiment \Roman{mycounter}: Solution-Cluster Re-ranking}
+\label{subsec:exp-2}
+\begin{table}[t]
+\caption{Results of solution-cluster re-ranking. Two loss functions are compared, i.e., \marginloss (Eq.~\ref{eq:margin-loss-cls}) and \xentloss (Eq.~\ref{eq:cls-loss}). Two re-ranking strategies are used: (1) re-ranking all the candidate solutions (RR.All), (2) re-ranking all solutions in the top-8 solution clusters (RR.Top-8). The baseline performance (Pass@1 and Maj1@64) are reported for comparison.}
+\begin{center}
+\begin{tabular}{lccccc}
+Model &  Loss Function & Pass@1 & Maj1@64 & RR.All & RR.Top-8 \\
+\midrule
+\multirow{2}{*}{\palmSmall} & \marginloss & 22.6\% & 38.8\% &   32.4\% &  36.6\% \\
+&   \xentloss & 22.6\% &  38.8\%  &   33.6\% &  35.4\% \\
+\midrule
+\multirow{2}{*}{\palmLarge} & \marginloss & 35.6\% & 55.2\%  &   57.0\% &  58.8\% \\
+&   \xentloss  & 35.6\% & 55.2\%  &   56.8\% &    58.8\% \\
+\end{tabular}
+\end{center}
+\label{tab:rerank} \end{table}
+
+In Table~\ref{tab:cot-mle}, we observe that there is a large performance gap between the model's Pass@1 and Pass@64 performance, indicating that the model already has the ability to search for correct solutions, but fails to differentiate its different search results. Therefore, we continue fine-tuning the models as \textit{solution evaluators} for the solution re-ranking task. % 
+
+We investigate two loss functions from \S\ref{subsec:method-reranking}, the margin loss (Eq.~\ref{eq:margin-loss-cls}) and the cross-entropy loss (Eq.~\ref{eq:cls-loss}) for the model training.
+For Eq.~\ref{eq:margin-loss-cls} we found that the model performance is not sensitive to the margin hyper-parameter $\lambda$, so we keep it fixed as $\log 2$ which intuitively requires the model to assign at least twice the probability to the correct solution. 
+The checkpoints from \S\ref{subsec:method-reranking} that are trained on both MATH and PRM800K solutions are used for this experiment, and the 64 candidate solutions are sampled from these checkpoints themselves for each problem.
+They are used to construct 10 training examples for the margin loss, and all of them are used for the cross-entropy loss.
+We observe all of the experiments converged within one epoch, possibly because of the redundancy in the training data.
+We make the following observations based on the results in Table~\ref{tab:rerank}:
+
+\noindent (1) For both \palmSmall and \palmLarge, the re-ranking result can outperform the Pass@1 performance of the baseline model.
+However, only the \palmLarge evaluator can outperform the robust majority-voting baseline, showing the re-ranking is a difficult task for relatively smaller models.
+
+\noindent (2) Re-ranking only the solutions in the top solution clusters are consistently better than re-ranking all the solutions for both PaLM 2-S and PaLM 2-L.
+This re-ranking strategy is also more computationally efficient since there are fewer solutions to rank.
+
+
+\stepcounter{mycounter}
+\subsection{Experiment \Roman{mycounter}:  Multi-task Sequential Fine-tuning}
+
+\begin{table}[t]
+\caption{Results of multi-task sequential fine-tuning.
+The model performance of the generator fine-tuned with the multi-task sequential setting is compared with the baseline generator trained with the MLE training objective only.
+Two model variants with different solution evaluation training objectives (\marginloss and \xentloss) are compared.
+All the model checkpoints are PaLM 2-L based.
+}
+\begin{center}
+\begin{tabular}{ccccc}
+Baseline & Evaluator Loss Function & Pass@1 & Maj1@64 & Pass@64 \\
+\midrule
+ Yes& - &  35.6\% & 55.2\% & 82.8\%  \\
+ No & \marginloss   & 37.6\% &   57.2\%  &   82.6\% \\
+ No  & \xentloss  & 36.2\%  &  56.6\% &   82.2\% \\
+\end{tabular}
+\end{center}
+\label{tab:ctr}
+\end{table}
+
+\begin{table}[h]
+\caption{Analysis of the effect of the reference solution style and quality on the few-shot performance of pre-trained models and zero-shot performance of fine-tuned models.}
+\begin{center}
+\addtolength{\tabcolsep}{-1pt}
+\begin{tabular}{lccccccc}
+& \multicolumn{3}{c}{PaLM 2-S*} & & \multicolumn{3}{c}{PaLM 2-L} \\
+  &  Pass@1 &  Maj1@64 & Pass@64 &   & Pass@1 & Maj1@64 & Pass@64 \\
+\cmidrule{2-4} \cmidrule{6-8} 
+MATH Few-shot & 17.4\% & 27.2\% & 67.8\% & & 33.4\% & 47.6\% & 79.4\% \\
+PRM800K Few-shot  &  19.2\% & 27.8\% & 70.0\% & & 31.4\% & 47.2\% & 82.4\% \\
+\end{tabular}
+\end{center}
+\addtolength{\tabcolsep}{1pt}
+\label{tab:cot-few}
+\end{table}
+
+Having shown that better performance can be gained by fine-tuning the LLMs as a solution evaluator, we now investigate whether the training objective for solution evaluation is also helpful for the models to become better solution \textit{generators}.
+To this end, we aim to use the multi-task sequential training objectives (Eq.~\ref{eq:mul-margin} and Eq.~\ref{eq:mul-cls}) we proposed in \S\ref{subsec:multi-finetune} for the model fine-tuning:
+(1) the first step is exactly the experiments in \S\ref{subsec:exp-1}, where the model is fine-tuned as a \textit{solution generator}; 
+(2) the model is then fine-tuned as a \textit{solution evaluator} as in \S\ref{subsec:exp-2};
+(3) the evaluator is fine-tuned again with the MLE training objective to regain its ability as a \textit{solution generator}.
+We note that in the last step the models are only trained for around 200 steps before they achieve the best performance.
+
+The results in Table~\ref{tab:ctr} show that the models fine-tuned with the multi-task learning objective can achieve better performance than models fine-tuned on the MLE training objective only (\S\ref{subsec:exp-1}).
+It indicates that the training objective of the solution \textit{evaluation} task can provide useful supervision signals to the solution \textit{generation} model.
+We believe this is because formulating the solution evaluation task as next-word prediction can better leverage the LLM's ability gained during pre-training.
+
+
+
+\section{Analysis}
+
+\label{sec:analysis}
+\subsection{Understanding the Effect of Step-by-step Solution Style}
+
+In \S\ref{subsec:exp-1}, we found that the models fine-tuned on the PRM800K solutions significantly outperform the ones fine-tuned on the original MATH solutions.
+We hypothesize this is because the PRM800K solutions are finer-grained and follows more closely to the step-by-step solution format (an example is shown in Figure \ref{fig:solution_comparison}).
+To investigate whether this difference can also affect the pre-trained models' few-shot performance, we rewrite the custom 4-shot prompt used in \citet{lewkowycz2022solving} by replacing the original MATH solution in the prompt with the PRM800K solution.
+The PRM800K solution is missing for one problem, which we replace with a similar problem with a valid solution.
+
+Table~\ref{tab:cot-few} shows that the few-shot performance is relatively invariant to the difference of the reference solutions, indicating that fine-tuning is necessary for the model to benefit from the potentially higher-quality solutions.
+We leave it as future work to investigate whether fine-tuning on the model's own generated solutions with the same style can achieve a similar effect~\citep{star}.
+
+\subsection{Evaluating the generalization ability of the solution evaluator}
+
+
+In \S\ref{subsec:exp-2}, the PaLM 2-L solution evaluator shows a strong performance at re-ranking the candidate solutions generated by the related PaLM 2-L fine-tuned solution generator.
+We now investigate whether this evaluator can also be used to re-rank solutions generated by other models.
+The results in Table~\ref{tab:rerank-analysis} prove the generalization ability of the fine-tuned PaLM 2-L evaluator.
+On the other hand, PaLM 2-S* is ineffective at re-ranking both the PaLM 2-L and PaLM 2-S* solutions, which suggests that solution evaluation is a non-trivial task that requires sufficiently large models.
+\begin{table}[]
+\caption{Generalization ability of the solution evaluator.
+The evaluators are tested on solutions generated from different models.
+The evaluator checkpoints are trained with \xentloss (Eq.~\ref{eq:cls-loss}).}
+\begin{center}
+\begin{tabular}{lccccc}
+Evaluator &  Solution Generator & Pass@1 & Maj1@64 & RR.All & RR.Top-8 \\
+\midrule
+\multirow{2}{*}{\palmSmall} & PaLM 2-S* & 22.6\% & 38.8\% &   32.4\% &  36.6\% \\
+&  PaLM 2-L & 35.6\% & 55.2\%   &   48.4\% &  50.6\% \\
+\midrule
+\multirow{2}{*}{PaLM 2-L} & PaLM 2-S* & 22.6\% &  38.8\%  &   46.0\% &  46.4\% \\
+&   PaLM 2-L  & 35.6\% & 55.2\%  &   56.8\% &    58.8\% \\
+\end{tabular}
+\end{center}
+\label{tab:rerank-analysis}
+\end{table}
+
+
+\subsection{Comparing Different Solution Re-ranking Strategies}
+
+\begin{table}[t]
+\caption{Comparison of different re-ranking strategies with the PaLM 2-L evaluator fine-tuned with \marginloss (Eq.~\ref{eq:margin-loss-cls}) and \xentloss (Eq.~\ref{eq:cls-loss}) respectively.
+The optimistic performance with the optimal hyper-parameter configuration is reported.
+}
+\begin{center}
+\begin{tabular}{lcccccc}
+Loss Function & RR.All & RR.MajK & W.RR & W.RR.MajK & Maj1 & Maj1.TopN \\
+\midrule
+\marginloss & 57.0\% & 59.4\% & 60.8\% & 60.8\% & 55.2\% & 59.4\% \\
+\xentloss & 56.8\% & 59.4\% & 60.8\% & 61.2\% & 55.2\% & 60.0\% \\
+\end{tabular}
+\end{center}
+\label{tab:rerank-compare}
+\end{table}
+
+\begin{figure}[htb]
+    \centering
+         \includegraphics[width=1.0\linewidth]{compare.pdf}
+ \caption{Analysis of different re-ranking strategies. In the left figure, the performance of different re-ranking methods are plotted against the hyper-parameters. In the right figure, the evaluator computation cost is computed. The PaLM 2-L evaluator trained with the \xentloss (Eq.~\ref{eq:cls-loss}) is used.}
+ \label{fig:compare}
+\end{figure}
+
+Previous work has proposed various re-ranking strategies for math problem candidate solutions.
+Therefore, we compare them using the fine-tuned PaLM 2-L evaluators with respect to their performance in re-ranked solution accuracy and efficiency.
+The re-ranking strategies compared are:
+
+1. Vanilla re-ranking (\textbf{RR.All}). The final solution $\tilde{X}^*$ is selected via
+\begin{equation}
+    \tilde{X}^* = \arg\max_{\tilde{X} \in \mathcal{\tilde{X}}}S_{cls}(\tilde{X}|P),
+\end{equation}
+where $S_{cls}$ is the scoring function parameterized by the solution evaluator (Eq.~\ref{eq:scoring-cls}), $P$ is a math problem, $\mathcal{\tilde{X}}$ is a set of candidate solutions.
+
+2. MajK re-ranking (\textbf{RR.MajK}). This is the strategy we used in \S\ref{subsec:exp-2}, which only re-ranks the set of solutions $\mathcal{\tilde{X}}_K$ in the top-K clusters from majority voting:
+\begin{equation}
+    \tilde{X}^* = \arg\max_{\tilde{X} \in \mathcal{\tilde{X}}_K} S_{cls}(\tilde{X}|P).
+\end{equation}
+3. Weighted re-ranking (\textbf{W.RR}). This strategy is proposed in \citet{li-etal-2023-making} and adopted by \citet{uesato2022solving}, re-ranking answer clusters according to the sum of the answer scores in each clusters:
+\begin{equation}
+    \tilde{X}^* = \arg\max_{\tilde{X} \in \mathcal{\tilde{X}}} \sum_{\hat{X} \in \mathcal{X}} g(\tilde{X}, \hat{X}) S_{cls}(\hat{X}|P),
+\end{equation}
+where $g$ is the auto-grader that assigns 1 when two answers are equivalent and 0 otherwise (Eq.~\ref{eq:autograder}).
+
+4. Weighted MajK re-ranking (\textbf{W.RR.MajK}). It combines re-ranking strategy 2 and 3 together:
+\begin{equation}
+    \tilde{X}^* = \arg\max_{\tilde{X} \in \mathcal{\tilde{X}}_K} \sum_{\hat{X} \in \mathcal{X}_K} g(\tilde{X}, \hat{X}) S_{cls}(\hat{X}|P).
+\end{equation}
+
+5. (Self-consistency) majority voting (\textbf{Maj1}) \citep{wang2023selfconsistency}:
+\begin{equation}
+    \tilde{X}^* = \arg\max_{\tilde{X} \in \mathcal{\tilde{X}}} \sum_{\hat{X} \in \mathcal{\tilde{X}}} g(\tilde{X}, \hat{X}).
+\end{equation}
+6. Majority voting of top-N solutions (\textbf{Maj1.TopN}). \citet{Cobbe2021TrainingVT} proposes a method that applies majority voting only on the top-N solutions $\mathcal{\tilde{X}}_N$ selected by the solution evaluator:
+\begin{equation}
+     \tilde{X}^* = \arg\max_{\tilde{X} \in \mathcal{\tilde{X}}_N} \sum_{\hat{X} \in \mathcal{\tilde{X}}_N} g(\tilde{X}, \hat{X}).
+\end{equation}
+In Table~\ref{tab:rerank-compare}, we show the \textit{optimistic} performance of each re-ranking strategy with the best hyper-parameter configuration using the PaLM 2-L re-rankers and 64 generated candidate solutions.
+In Figure~\ref{fig:compare} we provide a detailed analysis with respect to both the re-ranking performance and the computation efficiency.
+We found that the weighted re-ranking strategy (W.RR) has strong performance, and the modified version we proposed (W.RR.MajK) can achieve comparable performance while reducing the computational cost of the solution evaluator. 
+
+
+\section{Related Work}
+
+
+\citet{hendrycksmath2021} introduced the MATH dataset and fine-tuned GPT-2 \citep{gpt2} and smaller GPT-3 language models using (1) solution-and-answer and (2) answer-only as targets, but achieving less than 7\% test accuracy, demonstrating the difficulty of the task at the time. 
+Subsequently \citet{Cobbe2021TrainingVT} introduced GSM8K, a similar but easier, elementary-school math problem-solving dataset and showed that sampling followed by re-ranking using a trained verifier (or reward model) could improve performance significantly over a single sample. 
+
+Recent work has explored different methods for improving the LLMs' math solving ability.
+Specifically, \citet{lewkowycz2022solving} proposes to continue pre-training the LLMs on math-specific corpora, gaining a significant improvement from the original pre-trained models.
+\citet{uesato2022solving} extends outcome verifiers/reward-models (ORMs) to process reward models (PRMs) to judge solutions at the  step-level by collecting human-annotated labels. They report a negative result in reranking using PRMs compared to ORMs on GSM8K but use them successfully to tune models using reinforcement learning. \citet{Lightman2023LetsVS} in contrast scaled human annotation of process-level labels dramatically and achieved improved performance from reranking using PRMs on MATH with GPT-4 \citep{OpenAI2023GPT4TR} as the base model achieving state-of-the-art performance.
+
+Apart from training methods that directly improve the base model performance, inference-time, prompt-engineering techniques, such as chain-of-thought ~\citep{nye2021work,wei2022chain,kojima2022large} and self-consistency (majority voting) \citep{wang2023selfconsistency}, have also demonstrated their effectiveness with large language models such as PaLM/PaLM2 \citep{chowdhery2022palm, Anil2023PaLM2T} and GPT-3/4 \citep{gpt3, OpenAI2023GPT4TR}, to the point that state-of-the-art performance on GSM8K is nearing 100\%, and hence renewed focus on the harder MATH task.
+Some recent work~\citep{chen2022program, pmlr-v202-gao23f, wu2023empirical, yue2023mammoth} focuses on leveraging external tools, such as Python programs, to complement the LLM's ability, which shows further improvement over pure LLM-based methods. However we focus on the setting with no tools.
+
+\citet{star} shows that iteratively sampling and fine-tuning to the correct model solutions can improve mathematical performance (GSM8K). Although we do not employ this technique, it is orthogonal and conceivably may further improve performance.
+
+
+\section{Conclusion}
+
+
+In this work we investigated different fine-tuning methods to improve the LLMs' performance on math problem solving.
+Starting with supervised step-by-step fine-tuning, we first demonstrated the importance of step-by-step solutions for improving fine-tuned LLM performance.
+We then studied re-ranking methods for fine-tuning the LLMs as solution evaluators, and proposed a new re-ranking method which combines the benefit of majority voting and re-ranking together, simultaneously achieving better solution accuracy and computational efficiency.
+Lastly, we introduced a multi-task sequential fine-tuning method, aiming at improving the model's solution generation ability with the training objective of the solution evaluation.
+Our method outperforms the baseline fine-tuning method based on the solution generation training objective only, demonstrating its ability of improving a generation task using the supervision signal of the corresponding evaluation task.
+
+
+
+
+
+
+
+
+

@@ -1,8 +1,8 @@
 # SYMPOL: Symbolic Tree-Based On-Policy Reinforcement Learning
 
 - Decision: Accept
-- Avg Score: 4.50
-- Scores: 5, 5, 8, 1, 0, 8
+- Avg Score: 7.20
+- Scores: 5, 5, 8, 10, 8
 
 ## Abstract
 Reinforcement learning (RL) has seen significant success across various domains, but its adoption is often limited by the black-box nature of neural network policies, making them difficult to interpret. In contrast, symbolic policies allow representing decision-making strategies in a compact and interpretable way. However, learning symbolic policies directly within on-policy methods remains challenging.

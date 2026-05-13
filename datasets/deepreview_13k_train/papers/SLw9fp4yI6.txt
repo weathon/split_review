@@ -1,0 +1,418 @@
+\title{Controlled Text Generation via Language Model Arithmetic}
+
+\begin{abstract}
+    As Large Language Models (LLMs) are deployed more widely, customization with respect to vocabulary, style, and character becomes more important. In this work, we introduce model arithmetic, a novel inference framework for composing and biasing LLMs without the need for model (re)training or highly specific datasets. In addition, the framework allows for more precise control of generated text than direct prompting and prior controlled text generation (CTG) techniques. Using model arithmetic, we can express prior CTG techniques as simple formulas and naturally extend them to new and more effective formulations. Further, we show that speculative sampling, a technique for efficient LLM sampling, extends to our setting. This enables highly efficient text generation with multiple composed models with only marginal overhead over a single model. Our empirical evaluation demonstrates that model arithmetic allows fine-grained control of generated text while outperforming state-of-the-art on the task of toxicity reduction.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+In recent years, Large Language Models (LLMs) \citep{gpt3,palm,llama-2} have been increasingly recognized for their capabilities in handling a wide range of tasks \citep{codellama,instructgpt}.
+In many applications, such as chatbots interacting with diverse audiences like children, students, or customers, precise control and customization of attributes such as the employed vocabulary, linguistic style, and emotional expression are crucial.
+
+\paragraph{Controlling Language Models} 
+A common technique for this is prompting with natural language \citep{instructgpt}. While prompting is simple and makes it easy to condition the LLM to a broad attribute, the ambiguity of natural language makes it challenging to express how present that attribute should be in the generated text.
+Further, prompting also lacks the ability to effectively steer the model away from a certain attribute in a reliable manner, as mentioning a specific topic in the prompt can inadvertently increase the likelihood of the model generating text about it \citep{negative-prompts}, e.g. "do not mention cats" may increase the likelihood of the model referring to cats. One alternative is fine-tuning the model, but this requires highly specific training data for the desired attribute, which also has to implicitly encode the strength of the conditioning.
+Controlled Text Generation (CTG) techniques aim to solve this problem by steering the model during inference instead \citep{dexperts,pplm,fudge}: The model is conditioned on a particular attribute $a$ in a smoothly controllable way, by biasing the model's token distribution. Many CTG methods are inspired by Bayes rule $P(\text{text}|a) \propto P(a|\text{text}) P(\text{text})$, and utilize an auxiliary model, i.e. $P(a|\text{text})$, to condition the LLM, i.e., $P(\text{text})$, towards $a$.
+\paragraph{Key Challenge: Lack of Expressive and Efficient Control for Text Generation} These techniques, however, suffer from several drawbacks, including a lack of expressiveness, efficiency, and interpretability.
+First, to control the strength of the applied conditioning, a parameter $\lambda$ is introduced in an ad-hoc manner, i.e., as an exponential weight $P(a|\text{text})^\lambda$.
+However, introducing the strength in this way, while possible, quickly becomes unintuitive as it can no longer be interpreted in a Bayesian manner, e.g., when biasing away from attributes.
+Moreover, neither prompting nor CTG methods allow for the natural and controlled combination of multiple attributes or instructions with relative strength. This is due to the inherent ambiguity of natural language in prompting \citep{askmeanything,calibratebeforeuse}, and the absence of a theoretical foundation and intuitive semantics for the biasing strength $\lambda$ with CTG methods.
+Lastly, both CTG techniques and fine-tuning often require custom and highly specific training data for the desired attribute \citep{fudge,gedi,countergedi,critic-control} and can be resource-intensive \citep{langevin,mucoco} as multiple models are evaluated at inference time.
+
+\input{figures/overview_all}
+
+\paragraph{Fine-Grained Control via Model Arithmetic} 
+In this work, we address these challenges and introduce \textit{model arithmetic}, a principled and intuitive method to combine multiple models. Our method is orthogonal to prompting, fine-tuning, and simple CTG concepts, like the use of classifiers, and can naturally incorporate them. Model arithmetic enables us to blend multiple LLMs and attributes into a single precisely controlled, formula-based composite model.
+To illustrate our method, consider the simple example in \cref{fig:overview}, where we aim to write a magical, child-like fairy tale. We employ multiple models $M_a$, with different attributes $a$. On the top right, we see a prompted model $\V{M_\text{child}}$ that already generates a child-appropriate story. However, the resulting text is not child-like and we therefore subtract an adult-conditioned model, $\V{M_\text{adult}}$, with a weight of $0.6$ to generate a less adult-sounding story. Now, to again increase formality, we additionally bias with classifier $\V{C_\text{formal}}$. Lastly, we use a special $\union$ operator to obtain a model that emphasizes both magical and child-like language and use it to further bias generation and obtain our final result.
+This simple example cannot be precisely expressed with prior CTG approaches and showcases the flexibility of model arithmetic. That is, it allows us to compose models in a natural way, while precisely controlling the impact of each component.
+Further, we can naturally incorporate paradigms such as prompting or fine-tuning (for the individual $M$ and $C$) and even implement many prior CTG techniques (discussed in \cref{sec:prompt-arithmetic}) as simple formulas.
+
+\paragraph{Efficient Model Arithmetic via Generalized Speculative Sampling} 
+CTG methods, including model arithmetic, can lead to increased inference times as multiple models need to be evaluated in order to generate text.
+To counteract this, we generalize speculative sampling \citep{speculative} to model arithmetic.
+Speculative sampling is usually employed to reduce the latency of a single LLM by augmenting it with a smaller model that proposes tokens, which are then validated by the LLM. In contrast, we extend it in a way where we postpone the evaluation of more expensive model calls within model arithmetic formulas.
+This allows us to execute model formulas comprised of multiple models with only marginal overhead over a single model and reduces model calls by up to $64\%$. 
+The resulting inference speedup naturally extends to prior CTG techniques that can be expressed in model arithmetic  \citep{preadd,cfg,cognac,self-debias}.
+
+\newpage
+\paragraph{Key Contributions} Our core contributions include:
+\begin{itemize}
+    \item Model Arithmetic: A principled framework for fine-grained CTG, enabling precise control over multiple attributes. Our framework can express many prior CTG approaches (\cref{sec:prompt-arithmetic}).
+    \item  An extension of speculative sampling to model arithmetic, counteracting the overhead of CTG and enabling efficient inference, which naturally benefits CTG techniques expressible in model arithmetic (\cref{sec:speed}).
+    \item An extensive qualitative and quantitative evaluation of model arithmetic (\cref{sec:evaluation}). We show that it is more expressive than prior CTG work and outperforms them in toxicity reduction. We demonstrate that our extended speculative sampling reduces model calls by up to $64\%$.
+\end{itemize}
+
+
+
+
+\section{Background}
+
+
+We briefly introduce the required background and notation used in the remainder of the paper.
+
+\paragraph{Discrete Probability Distributions} A discrete probability distribution $P$ associates a probability $P(x)$ with every element $x$ in a finite set $T$. For language modeling, this finite set is usually a set of tokens (or subwords). We often want to compute the probability of a token $x_k$ given all previous tokens $x_1, ..., x_{k-1}$ in a sequence, which we denote as $P(x_k | x_{1:k-1})$.
+We use the Kullback-Leibler (KL) divergence to measure the similarity of two distributions $P$ and $Q$:%
+\begin{equation*}
+    \DKL(P || Q | x_{1:k-1}) = \sum_{x \in T} P(x|x_{1:k-1}) \log \frac{P(x|x_{1:k-1})}{Q(x|x_{1:k-1})},
+\end{equation*}
+where we append $| x_{1:k-1}$ to denote conditioning on a sequence of tokens $x_{1:k-1}$. If this is implied by the context, we will omit the conditioning on $x_{1:k-1}$ and simply write $\DKL(P || Q)$.
+
+\paragraph{Autoregressive Large Language Models} Large Language Models (LLMs) are trained to generate sequences of tokens. Most recently, successful LLMs are autoregressive, i.e., they generate output token-by-token by modeling the probability distribution $P(x_k | x_{1:k-1})$ and sampling one token at a time from that distribution. Whenever we refer to a language model $M$, we directly refer to this distribution and denote it as $M(x_k | x_{1:k-1})$.
+
+\paragraph{Controlled Text Generation} 
+As introduced in \cref{sec:intro}, CTG techniques aim to introduce a given attribute $a$ (e.g. style or topic) in the output of a language model $M$, by biasing its distribution with respect to $a$. Oftentimes, a strength parameter $\lambda$ controls the strength of this conditioning. 
+The conditioning model $P(a|\text{text})$ is modeled with a classifier \citep{fudge, fudge-2, critic-control,gedi,countergedi}, a smaller finetuned model \citep{dexperts}, or with the same model $M$ using a different prompt \citep{preadd,self-debias,cfg,cognac}. In the first two cases, the biasing models have to be trained ahead of time. %
+ Many of these approaches are based on (a variant of) Bayes rule \citep{cfg,dexperts,preadd,marco,fudge}.
+
+\paragraph{Speculative Sampling} Speculative sampling \citep{speculative} speeds up inference of autoregressive language models by using a small proposal model $m$ to generate several tokens $x_1, ..., x_k$ and then validates these tokens using a bigger, more capable model $M$. Due to the way the underlying transformer architecture of current LLMs \citep{vaswani2017attention} works, this validation call is significantly cheaper than generating the tokens with $M$ directly.
+
+Specifically, the entire sequence of proposed tokens $x_1, ..., x_k$ can be validated by a single, retroactive call to $M$. If token $x_i$ is rejected by $M$, all subsequent tokens $x_{i+1}, ..., x_k$ are discarded and $x_i$ is resampled. If all tokens are accepted, the next token $x_{k+1}$ can be directly sampled using the result of the same validation call to $M$. Thus, one can generate up to $k + 1$ tokens with just a single call to $M$. Importantly, this procedure of accepting and resampling tokens ensures that the resulting distribution is equivalent to drawing token samples directly from $M$.
+
+
+\section{Model Arithmetic}
+
+
+In this section we introduce model arithmetic, a principled approach for advanced CTG that enables the precise composition of language models, resulting in a distribution $P$ that can be sampled like a language model.
+This addresses the previously discussed drawbacks of prior CTG methods.%
+
+To this end, we first outline how an \emph{output} distribution $P$ is constructed from a set of \emph{input} distributions $Q_1, \ldots, Q_n$, by minimizing a linear combination of (weighted) KL-divergences $\DKL(P||Q_i)$. Then we show how model arithmetic can be used to describe these distributions in a natural way.
+
+
+
+
+
+\paragraph{(Weighted) KL-Optimality}
+The standard KL-divergence $\DKL(P||Q)$ attends to each token by an equal amount, which might not always be desirable in the CTG setting. Indeed, suppose $Q$ represents the distribution of a certain attribute $a$ that we want to introduce in the output distribution $P$. When certain tokens are generally more associated with the attribute $a$, we might give the term $\DKL(P||Q)$ more weight for these tokens, allowing to more strongly bias these specific tokens while reducing the bias for less important tokens. We therefore introduce the \textit{weighted KL-divergence} $\DKLf{f}$ as
+\begin{equation*}
+    \DKLf{f}(P || Q | x_{1:k-1}) = \sum_{x} P(x|x_{1:k-1}) f(x, x_{1:k-1}) \log \frac{P(x|x_{1:k-1})}{Q(x|x_{1:k-1})}
+\end{equation*}
+where $f \colon T \times T^{k-1} \to \mathbb{R}$ assigns a weight to each token $x \in T$, conditioned on $x_{1:k-1}$. We will later show how high-level constructs in model arithmetic map to particular choices of $f$.
+
+\cref{theorem:optimization} now defines and solves the problem of combining arbitrary probability distributions into a single output distribution by framing it as a minimization problem over a linear combination of weighted KL-divergences.
+
+\begin{theorem}[Weighted KL-Optimality]\label{theorem:optimization}
+    Let $T$ be the set of all tokens and $x_1, ..., x_{k-1}$ be a sequence of tokens such that $x_i \in T$. 
+
+    \begin{equation}\label{eq:optimization}
+        \argmin_{P} \sum_{i=1}^n \DKLf{f_i}(P || Q_i | x_{1:k-1})
+    \end{equation}
+    is given by
+    \begin{equation}\label{eq:solution}
+        P(x_k=x|x_{1:k-1}) = \sigma\left(\frac{1}{\sum_{i=1}^nf_i(x, x_{1:k-1})} \sum_{i=1}^n f_i(x, x_{1:k-1}) \log Q_i(x|x_{1:k-1})\right)
+    \end{equation}
+    where $\sigma$ is the softmax function.
+\end{theorem}
+We note that this result applies more broadly than the autoregressive setting. Instead of conditioning on $x_{1:k-1}$, one can condition on $x_{1:k-1}, x_{k+1:t}$ without otherwise modifying the theorem. 
+
+Further, we can write $f_i(x, x_{1:k-1}) = \lambda_i(x_{1:k-1}) f'_i(x, x_{1:k-1})$ where we factor $f_i$ into a part $\lambda_i$ that only depends on the context (i.e., the previous tokens) for scaling, and $f'_i(x, x_{1:k-1})$ that encodes token specific weights.
+
+\paragraph{Model Arithmetic} Distribution $P$, resulting from \cref{eq:solution}, is completely determined by $\lambda_i(x_{1:k-1})$, $f'_i(x, x_{1:k-1})$ and $\log Q_i(x | x_{1:k-1})$ for all $x \in T$ and $i \in \{1, \dots, n\}$. Since $T$ is a finite set, we can write $f'_i(x, x_{1:k-1})$ and $\log Q_i(x | x_{1:k-1})$ as vectors $\vfip := (f'_i(x, x_{1:k-1}))_{x \in T}$  and $\vQi := (\log Q_i(x|x_{1:k-1}))_{x \in T}$. Finally, since the normalization is completely determined by $\lambda_i$ and $\vfip$, we can drop this in our notation and write $F = \sum_{i=1}^n \lambda_i  \vfip \vQi$, where vector multiplication is element-wise. We drop $\lambda_i$ and $\V{f'_i}$ when they are $1$.
+
+This notation makes it possible to use simple arithmetic operations to combine different input prompts, attributes, language models, and classifiers. We thus call this notation \textit{model arithmetic}. 
+\begin{figure}[t]
+    \begin{minipage}{0.55\linewidth}
+        \centering
+        \footnotesize
+        \captionof{table}{Overview of \emph{Model Arithmetic} where $\mathcal{I}_1(x) := [Q_1(x) > Q_2(x)]$ and $\mathcal{I}_2(x) := 1 - \mathcal{I}_1(x)$, $\V{C}$ is a classifier and $U$ the uniform distribution.}\label{table:arithmatic}
+        \resizebox{\linewidth}{!}{
+            \begin{tabular}[]{@{}lll@{}}
+            \toprule
+            & \textbf{Model Arithmetic} & \textbf{Optimization Problem}\\
+            \midrule
+            
+             \makecell[l]{Linear\\Combination} & $\sum_i \lambda_i \vQi $ & $\sum_i \lambda_i \DKL(P || Q_i)$\\[2mm]
+            
+            Classifier & $\lambda \vC$ & $\lambda\Big(\DKL(P || Q_C) - \DKL(P || U )\Big) $\\[2mm]
+            Union & $\union(\vQ{1}, \vQ{2})$ & $\DKLf{\mathcal{I}_1}(P || Q_1) + \DKLf{\mathcal{I}_2}(P || Q_2)$ \\%[2mm]
+            \bottomrule
+            \end{tabular}
+        }
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.42\linewidth}
+    \centering
+    \footnotesize
+    \captionof{table}{Prompt arithmetic examples using Llama-2-Chat-13b.} \label{table:example_arithmetic}
+    \resizebox{\linewidth}{!}{
+        \begin{tabularx}{1.25\linewidth}{@{}>{\arraybackslash}X@{}}
+        \toprule
+        \textbf{Tell me something interesting about pandas.} \\
+        \midrule
+         $\V{M_\text{formal}}$\\
+         Certainly! Pandas are fascinating creatures, known for their distinct black and white markings \dots \\ 
+         \midrule
+        $2\V{M_\text{formal}} - \V{M}$\\
+        Certainly, user. The giant panda, scientifically known as Ailuropoda melanoleuca, is a intriguing and unique species of bear \dots \\
+        \bottomrule
+        \end{tabularx} 
+    }
+
+    \end{minipage}
+\end{figure}
+
+\paragraph{Linear Combinations} Many useful properties can be expressed as a linear combination of probability distributions $\sum_{i=1}^n \lambda_i \V{Q_i}$, with $\lambda_i \in \R$. Most commonly, linear formulas include the standard output of an LLM $M$ as $Q_1$ (with $\lambda_1 =1$) and additional distributions $Q_i$ are then used to bias the overall output towards (if $\lambda_i > 0$) or away from (if $\lambda_i < 0$) a certain attribute.  
+
+ \cref{table:example_arithmetic} show the results of linearly composing a non-conditioned model and a prompted \emph{formal} model using a negative coefficient. As shown, the resulting composite model generates much more formal output than  with standard prompting $\V{M_\text{formal}}$.
+\begin{wraptable}[11]{r}{0.4\linewidth}
+    \centering
+    \footnotesize
+    \caption{Example using the GPT2-XL model and a detector $\V{C_{\text{gpt2-detector}}}$ for it.} \label{table:example_classifier}
+    \resizebox{\linewidth}{!}{
+        \begin{tabularx}{1.212\linewidth}{@{}>{\arraybackslash}X@{}}
+        \toprule
+        \textbf{I like to}\\
+        \midrule
+        $\V{M_\text{gpt2}}$\\
+        think of myself as a pretty good cook. I've made a lot of food, and I've learned a lot about cooking. I've also learned a lot about the world of food, and the people who eat it.\\
+        \midrule
+        $\V{M_\text{gpt2}} - 4 \V{C_\text{gpt2-detector}}$\\
+        believe that I'm a pretty good judge of character. I watch a lot of TV - I'm a big fan of The Walking Dead, Game of Thrones and The Big Bang Theory \dots \\
+        \bottomrule
+        \end{tabularx} 
+    }
+\end{wraptable}
+\paragraph{Classifiers} Binary classifiers that associate a probability with an input text can also be used to guide the output distribution towards the classified attribute (cf. \citet{fudge,fudge-2}). These classifiers can express attributes that are not easily expressible in natural language, such as the reward model in RLHF \citep{instructgpt} or detection of AI-generated text \citep{openai-detector} as shown in \cref{table:example_classifier}. There, we generate text that resembles human content more closely by using a classifier that detects AI-generated text \citep{openai-detector} and bias away from it. 
+
+Classifiers do not output a token-level probability distribution and therefore do not permit the direct application of \cref{theorem:optimization}. However, to let a binary classifier $C \colon T^n \to [0, 1]$ guide the output distribution, we would want to minimize (or maximize) the expected cross-entropy of the classifier. Given $x_{1:k-1}$, the expected cross-entropy for $x_k$ under $P$ for the next token is given by
+\begin{equation}\label{eq:classifier_cross}
+    \mathbb{E}_{x_k \sim P}[- \log C(x_{1:k})] = - \sum_{x_k \in T} P(x_k | x_{1:k-1}) \log(C(x_{1:k})).
+\end{equation}
+ This allows us to include classifier guidance in the optimization problem. In our model arithmetic syntax we thus write $+\lambda \V{C}$ to denote the solution to the problem $\lambda(\DKL(P ||Q_C) - \DKL(P || U))$. 
+However, running the classifier on each token in $T$ is computationally infeasible. We therefore use a simple approximation to enable efficient generation. Specifically, given a probability distribution $Q_1$, we run the classifier only for the $k$ most likely tokens under $Q_1$. For all other tokens $x$, we approximate $C(x_{1:k-1}, x)$ as $C(x_{1:k-1})$.
+
+We can express prior approaches \citep{fudge,fudge-2,nado,critic-control} as $\V{M} + \lambda\V{C}$ (usually with $\lambda=1$) and note that these are restricted to top-k sampling due to the aforementioned computational infeasibility. 
+\paragraph{Union Operator}
+When tokens have very low likelihood under $Q_1$, the linear combination $\V{Q_1} + \lambda \V{Q_2}$ cannot assign a high probability to these tokens unless $\lambda$ is very high.
+To address this, we introduce the $\union$ operator, which allows a non-linear combination of two input distributions $Q_1$ and $Q_2$ that intuitively represents the union of the characteristics of both distributions, thereby enabling the introduction of uncommon or disparate attributes. 
+
+\begin{wraptable}[15]{r}{0.5\linewidth}
+    \centering
+    \footnotesize
+    \caption{\union example on Llama-2-Chat-13b.} \label{table:example_union}
+    \resizebox{\linewidth}{!}{
+        \begin{tabularx}{1.075\linewidth}{@{}>{\arraybackslash}X@{}}
+        \toprule
+        \textbf{What is a UFO?} \\
+        \midrule
+        $\V{M_\text{alien + human}}$\\
+        OH MY STARS! *giggle* As an alien, I can tell you that a UFO stands for "Unidentified Flying Object." It's when us space travelers, like me and my pet Gleeb, \dots\\
+        \midrule
+        $\V{M_\text{alien}} + \V{M_\text{human}}$\\
+        Oh my gosh, you know, like, a UFO? It's like, you know, a Unidentified Flying Object! It's like, a thing in the sky that we can't, like, identify, you know? It's like, maybe it's a bird, or a plane \dots \\ 
+        \midrule
+        $\union(\V{M_\text{human}}, \V{M_\text{alien}})$\\
+        Oh, hello there, fellow human! *giggle* UFO... you know, I've always been a bit curious about those. *wink* To me and my fellow beings from Earth-2294387523498,\dots\\
+        \bottomrule
+        
+        \end{tabularx} 
+    }
+\end{wraptable}
+
+To derive the $\union$ operator, we introduce the indicator functions $\mathcal{I}_1(x) := [Q_1(x) > Q_2(x)]$ and $\mathcal{I}_2(x) = 1 - \mathcal{I}_1(x)$, where $[\cdot]$ denotes Iverson Brackets\footnote{$[P]$ is $1$ if $P$ is true and $0$ else. See \url{https://en.wikipedia.org/wiki/Iverson_bracket}.}. Then, the $\union$ operator represents the optimization problem 
+$\DKLf{\mathcal{I}_1}(P || Q_1) + \DKLf{\mathcal{I}_2}(P || Q_2)$.
+Intuitively, if either $Q_1$ or $Q_2$ assigns a high probability to a token, the union operator will assign a high probability to this token as well. Indeed, the solution to the optimization problem is given by $\sigma(\max(\log Q_1, \log Q_2))$. Thus, the $\union$ operator applies the $\max$ operator on the token probability level.
+For example, \cref{table:example_union} showcases this by generating text that is both human-like and alien-like. The simple prompted version just collapses to an alien-like version, while the linear combination of the two models results in a text that is mostly human-like.
+However, with the $\union$ operator we can generate a text interpolating both attributes. 
+
+Conveniently, the $\union$ operator can also be used to limit the effect of biasing terms, by restricting the effect to only the relevant subset of tokens using the formula $\V{Q_1} - \lambda\union(\V{Q_1}, \V{Q_2})$. The resulting distribution only biases tokens $x \in T$ for which $Q_2(x) > Q_1(x)$, otherwise we recover the original distribution $Q_1$ (up to a normalization constant).
+This allows us to keep the resulting distribution as close as possible to the original distribution $Q_1$, while still biasing away from $Q_2$. This is impossible using the linear combination operator, as it will bias the entire distribution even if only a small subset of tokens are important for $Q_2$. In \cref{sec:evaluation} we show that this property of the $\union$ operator enables much better toxicity reduction of generated text.
+
+
+
+
+\section{Speculative Sampling}
+
+We now discuss our extension of speculative sampling \citep{speculative} to model arithmetic, which greatly mitigates the increased number of model calls required by complex formulas.
+
+For a formula $F = \sum_{i=1}^n \lambda_i \V{f_i'}\V{Q_i}$, we can naturally extend speculative sampling by choosing one, or multiple, of the terms in $F$ at each timestep as proposal models. This allows us to postpone the evaluation of more expensive terms until we have generated a speculative token sequence, which can eventually be validated by the full formula $F$. This approach is based on the following observation:
+\begin{lemma}\label{theorem:speculative_n}
+    Let $P_1, \dots, P_n$ be discrete distributions over $T$. Sampling $x \sim P_1$ and iteratively applying speculative sampling for $(P_1, P_2)$, ($P_2, P_3)$, $\dots, (P_{n-1}, P_n)$ produces a sample $x' \sim P_n$.
+\end{lemma}
+
+For the formula $F$ we define $P_t = \sum_{i=1}^t \lambda_i \V{f_i'}\V{Q_i}$ as partial sub-formulas. Thereby we use the distributions induced by sub-formulas of $F$ as proposal models and obtain $x' \sim P_n = P$, where $P$ is the distribution described by $F$.
+
+For control, we assign a \textit{speculative factor} $s_i \in \mathbb{Z}_{>0}$, to each term $\lambda_i \V{f_i'}\V{Q_i}$. This factor indicates the number of tokens we speculatively sample before actually computing the corresponding $\lambda_i \V{f_i'}\V{Q_i}$. Once we compute $\lambda_i \V{f_i'}\V{Q_i}$, we apply speculative validation to the distributions $P_{i-1}$ and $P_i$ for the $s_i$ new tokens. By following this procedure for each term, all new tokens will eventually be sampled from the distribution resulting from the full $F$. In practice, we do not evaluate model terms in order $i=1, \dots, n$, but rather rely on commutativity to reorder during inference, such that we only evaluate those required for validation at the current timestep.
+We can treat terms using the \union operator the same as linear terms, but classifier terms only permit $s_i = 1$ (no speculative sampling).
+ 
+
+\paragraph{Standard Speculative Sampling} We can use original speculative sampling \citep{speculative} directly in model arithmetic. For this, we introduce a '$\supersede$' operator, which operates on two models $M_1$ and $M_2$ and returns the first as long as the second one has not yet been computed. We can thus denote speculative sampling for a small model $m$ and large model $M$ as $ \supersede(\V{m}, \V{M})$.
+
+
+
+\section{Evaluation}
+
+
+We evaluate model arithmetic by showing that it outperforms prior CTG methods in toxicity reduction (\cref{sec:evaluation:toxicity}), provides fine-grained control over attributes (\cref{sec:evaluation:attributes}), and can significantly speed up inference with speculative sampling (\cref{sec:evaluation:speed}). 
+
+\subsection{Toxicity Reduction}\label{sec:evaluation:toxicity}
+\begin{table}%
+    \centering
+	\footnotesize
+	\caption{Toxicity and perplexity of various methods on the \pol dataset. $\V{M}$ and $\V{M_\text{toxic}}$ denote the model without conditioning and conditioning to toxicity respectively. $\V{C}$ is a toxicity classifier. Perplexity is measured with respect to $\V{M}$. Lower is better.}
+	\label{table:toxicity}
+    \scalebox{1.0}{
+	    \footnotesize
+        \begin{tabular}{@{}
+                l
+                x{1}{3}
+                x{2}{2}
+                x{1}{3}
+                x{2}{2}
+                x{1}{3}
+                x{2}{2}
+                @{}
+            }
+            \toprule
+            & \multicolumn{2}{c}{Llama-2-13b} & \multicolumn{2}{c}{Pythia-12b} & \multicolumn{2}{c}{MPT-7b} \\
+            \cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+            & {Tox.} & {Perpl.} & {Tox.} & {Perpl.} & {Tox.} & {Perpl.}\\
+            \midrule
+            $\V{M}$ & 0.28781312868049996 & 13.461886204244351 & 0.26356303974625 & 22.904103632315536 & 0.26892994499825 & 19.773691727965854 \\
+            \midrule
+            \selfdebias{} ($\lambda = 10$) & 0.2508292425517 & 15.523743078020452  & 0.23026551958745 & 27.74110647267523 & 0.2534534742624 & 22.517372161728918 \\
+            \fudge{} ($\V{M} + \V{C}$) & 0.23428959307345001 & 14.710375127871492 & 0.21210877721045 & 24.356956410278578 & 0.2405644853887 &  20.571755251751707 \\
+            \preadd{} ($\V{M} - 0.6 \V{M_\text{toxic}}$) & 0.20751357989225 & 12.731370622919671 & 0.1826843838355 & 32.38445116891699 & 0.18969402443985 & 23.071158628786648\\
+            \midrule
+            $\V{M} - 0.96 \cdot \union(\V{M_\text{toxic}}, \V{M})$ & 0.2014622639518 &  \bfseries  11.078353402312155 & 0.1702074087756 &  \bfseries 22.87052562004862 & 0.19345939548285  &  \bfseries 19.667209517495664  \\
+            $\V{M} - 0.99 \cdot \union(\V{M_\text{toxic}}, \V{M})$ & 0.18614473078765 &  12.053630436852684 & 0.17138050593874998 & 26.162126173796832 & 0.18750884556234998 &  24.145356715566056 \\
+            \midrule
+            $\V{M} - 0.96 \cdot \union(\V{M_\text{toxic}}, \V{M}) + 0.04\V{C}$ & 0.17177713709845 & 11.396371970163448 &  \bfseries 0.1478178452382 & 23.931991679374512 & \bfseries 0.1737395688082 & 20.326053920126817\\
+            $\V{M} - 0.99 \cdot \union(\V{M_\text{toxic}}, \V{M}) + 0.01\V{C}$ & \bfseries 0.1623 &  12.849688858092916 & 0.15039141467915 & 28.013757888107197 & \bfseries  0.17364665008625 &24.820937822666384 \\
+            \bottomrule
+        \end{tabular}
+    }
+\end{table}
+
+\begin{table}%
+    \centering
+	\footnotesize
+	\caption{Comparison of our method with \preadd{} ($\V{M} - 0.6 \V{M_\text{toxic}}$) using GPT-4. GPT-4 is asked to choose the best response in terms of toxicity and relevance. Win / Lose / Draw indicates the percentage of times our method wins, loses, or draws against \preadd{} respectively.}
+	\label{table:toxicity_gpt4}
+    \scalebox{1.0}{
+	    \footnotesize
+        \begin{tabular}{@{}
+                l
+                c
+                c
+                c
+                @{}
+            }
+            \toprule
+            & Llama-2-13b & Pythia-12b & MPT-7b \\
+            & Win / Lose / Draw & Win / Lose / Draw & Win / Lose / Draw \\
+            \midrule
+            $\V{M} - 0.96 \cdot \union(\V{M_\text{toxic}}, \V{M})$ & $\bold{0.40} / 0.38 / 0.23$ & $\bold{0.41} / 0.33 / 0.27$& $\bold{0.41} / 0.32 / 0.27$\\
+            $\V{M} - 0.96 \cdot \union(\V{M_\text{toxic}}, \V{M}) + 0.04\V{C}$ & $\bold{0.43} / 0.35 / 0.22$& $\bold{0.41} / 0.32 / 0.27$&$\bold{0.42} / 0.34 / 0.24$\\
+            \bottomrule
+        \end{tabular}
+    }
+\end{table}
+First, we assess the effectiveness of model arithmetic in reducing toxicity. %
+We use a subset of the \pol dataset \citep{pol-dataset}, a dataset of messages from the \lstinline|politically incorrect| sub-forum of the website \lstinline|4chan|. We randomly select 2000 toxic messages and apply different model arithmetic formulas to generate replies. 
+For each generated reply we assign a toxicity score using the Perspective API\footnote{\url{perspectiveapi.com}} and also measure perplexity with respect to the unbiased model, to ensure that the generated text remains fluent and coherent. We compare our approach against three baselines: \fudge{} \citep{fudge}, and \preadd{} \citep{preadd} and \selfdebias{} \citep{self-debias}. Furthermore, we include a preference analysis by GPT-4 \citep{gpt4} comparing our method against the best baseline, \preadd{}. 
+We evaluate each method on three models, showing results in \cref{table:toxicity} and \cref{table:toxicity_gpt4}.
+We find that our novel $\union$ operator significantly outperforms all baselines, especially as evaluated by GPT-4. The operator allows for much higher negative biasing strengths without degrading fluency, e.g., at biasing strength $0.6$, \preadd{} already exhibits higher perplexity than the $\union$ operator at $0.96$. This showcases the effectiveness of our $\union$ operator to selectively bias model distributions without degrading fluency. Only at the highest tested biasing strength, we observe a degradation in perplexity for the models. Further, model arithmetic enables the combination of several biasing techniques: $\union$ together with a classifier term achieves the lowest toxicity scores across all models, while also achieving similar or even lower perplexity values.
+
+\subsection{Fine-grained Control}\label{sec:evaluation:attributes}
+We now discuss and compare several techniques to introduce a certain attribute in the output of generated text and validate the central premise of model arithmetic, namely that it allows for fine-grained control over the presence of these attributes in the output without a notable decrease in fluency. 
+For this, we construct two complex formulas for a conversational model, combining several attributes in four distinct ways: linearly, using the $\union$ operator, using a classifier, and using a combination of the $\union$ operator and a negative linear bias:
+\begin{align*}
+    F_1 &=  \underbrace{\lambda_1 \V{M_\text{happy}}}_{\lambda_1\text{ controls sentiment}}  + \underbrace{\lambda_2 \V{M_\text{simple}}}_{\lambda_2\text{ controls simplicity}} + \underbrace{\lambda_3 \union(\V{M_\text{helpful}}, \V{M_\text{sports}}) + (1 - \lambda_3)\V{M_\text{helpful}}}_{\lambda_3\text{ controls sports}} \\
+    F_2 &= 
+    \V{M_\text{helpful}} + 
+    \underbrace{\lambda_4 \union(\V{M_\text{helpful}}, \V{M_\text{formal}})}_{\lambda_4\text{ controls formality}} + 
+    \underbrace{\lambda_5 \V{C_\text{educational}}}_{\lambda_5\text{ controls educational}} + 
+    \underbrace{\lambda_6 \V{M_\text{simple}}}_{\lambda_6\text{ controls simplicity}}
+\end{align*}
+Here, each $\V{M_a}$ is a model conditioned on the attribute $a$ using a fitting system prompt and $\V{C_\text{educational}}$ is a binary classifier for educational content \citep{twitter-classifier}. For \textit{sports}, we  use the $\union$ operator and a counterweighing $M_\text{helpful}$ bias. For the \textit{formality} attribute in $F_2$, we just use $\union$.
+To analyze these formulas, we vary the values of individual $\lambda_i$ while keeping all other $\lambda_j=1$ with $j\neq i$ fixed and complete 1000 input tasks from the Alpaca dataset \citep{alpaca}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.925\textwidth]{figures/formula2.pdf}
+    \caption{Attribute presence for several attributes and formulas. The dashed line indicates the value of the attribute when prompting the model to use the attribute.}
+    \label{fig:attributes}
+\end{figure}
+
+We depict results in \cref{fig:attributes} where the $x$-axis shows the value of $\lambda_i$ normalized by the sum of all $\lambda$ coefficients occurring in the resulting optimization problem and the $y$-axis shows attribute strength according to popular classifiers from the HuggingFace library \citep{huggingface}.
+The presence of an attribute indeed increases smoothly as the associated $\lambda_i$ increases. Interestingly, the curves,  except for the \textit{sports} attribute, suggest a linear relationship, indicating that the presence of the attribute increases predictably with the relative strength. This aligns with our interpretation of model arithmetic as (linear) operators in logit space. Further, these results show the intuitive semantics of model arithmetic extend to the characteristics of the generated output on a sequence level.
+Because of its formulation with a counterweight, the curve associated with $\lambda_3$ and the \textit{sports} attribute shows very different behavior. Indeed, the \textit{sports} attribute only gets a significant boost once its relative strength passes $1.0$. At this point the $(1-\lambda_3)$ coefficient, counterweighing $\V{M_\text{helpful}}$, biases away from any behavior that is not associated with $\union(\V{M_\text{helpful}}, \V{M_\text{sports}})$, emphasizing this term more than what would be possible under regular prompting. At this point, the presence of the \textit{sports} attribute increases even beyond the indicated value achieved by standard prompting (cf. \cref{fig:attributes}, top right).
+
+Finally, we note that this fine-grained control comes at very little cost with respect to perplexity. The highest perplexity across all formulas and attributes is $6.2$, which is only slightly higher than the highest perplexity of the 5 prompted models, namely $4.8$.
+
+\subsection{Speculative Sampling}\label{sec:evaluation:speed}
+\begin{wraptable}[13]{r}{0.6\textwidth}
+        \centering
+        \footnotesize
+        \caption{Evaluation of Llama-2-13b-Chat with speculative sampling where $F_1 = 0.2 \V{M_\text{formal}} + 0.5 \V{M_\text{happy}} + 0.05 \V{M_\text{sports}}$ and $F_2 = \V{M_\text{formal}} + 0.1 \V{M_\text{angry}} + 0.4 \V{M_\text{sports}}$.}
+        \label{table:speed}
+        \resizebox{1.0\linewidth}{!}{
+            \begin{tabular}{
+                    @{}
+                    l
+                    x{1}{2}
+                    x{1}{2}
+                    x{2}{1}
+                    x{2}{1}
+                    @{}
+                }
+                \toprule
+                \multirow{2}{*}{$\supersede(\V{A}, \V{M})$}  & \multicolumn{2}{c}{\textbf{Calls per Token}} & \multicolumn{2}{c}{\textbf{Time per Token [ms]}} \\
+                & {\textsc{No Spec.}}  & {\textsc{Spec.}} & {\textsc{No Spec.}}  & {\textsc{Spec.}} \\
+                \midrule
+                & 1 & \bfseries 0.8014871445776823  & 24.883752406564422 & \bfseries22.801977472271506 \\
+                $+0.5 \V{M_\text{formal}}$ & 2.0 & \bfseries1.0348794645191655 & 48.4023584905745 & \bfseries30.432601378073695 \\
+                $+0.5 \V{M_\text{happy}}$ & 2.0 & \bfseries1.0448951686417502 & 49.15089349786739 & \bfseries31.190228983827797
+                \\
+                $+0.5 \V{M_\text{sports}}$ & 2.0 & \bfseries1.0757110313406046 & 49.262453864134244 & \bfseries31.999939596160875 \\
+        
+                $+0.5 \V{M_\text{easy}}$ & 2.0 & \bfseries1.1000198918606123 & 49.20130198928818 & \bfseries32.749359688622356 \\
+                $+0.5 \V{M_\text{angry}}$ & 2.0 & \bfseries1.1197155069479294 & 49.28645662973551 & \bfseries33.01180023567522 \\
+                $+F_1$ & 4.0  & \bfseries1.3165171374500595 & 97.0255337245698 & \bfseries43.25989481778973 \\
+                $+F_2$ & 4.0& \bfseries1.4359129278944915 & 97.01921989899165 & \bfseries46.100464548583346 \\
+                \bottomrule
+            \end{tabular}
+        }
+\end{wraptable}
+Next, we show the effect of speculative sampling on the evaluation of model arithmetic expressions.
+ To evaluate the effect of the $\supersede$ operation in model arithmetic, we use an autocompletion model $A$, which statically predicts the most likely next token based on the previous and fitted on the Alpaca dataset \citep{alpaca}.
+
+\begin{wrapfigure}[11]{r}{0.3\textwidth}
+    \centering
+    \includegraphics[width=0.29\textwidth]{figures/calls_per_token_divergence.pdf}
+    \caption{Model calls per token with speculative sampling for $\V{M} + \lambda \V{M_a}$, $\lambda \in [0.1, 1.0]$.}
+    \label{fig:speed}
+\end{wrapfigure}
+
+In \cref{table:speed} we show that speculative sampling significantly reduces the number of model calls and increases inference speed. %
+Just $\supersede(\V{A}, \V{M})$ reduces the number of model calls by 20\% compared to $\V{M}$. Applying speculative sampling to larger formulas, we can reduce the number of model calls to at most $1.44$ per token, even in the presence of up to 4 constituent models, where this leads to a boost in inference speed by up $2.24$ times.%
+
+Further, for $F := \V{M} + \lambda \V{M_a}$, \cref{fig:speed} shows that the number model calls per token increases with $\lambda$. The reason for this is that as $\lambda$ increases the KL-divergence between the original model $\V{M}$ and the distribution described by $F$ increases, which in turn decreases acceptance probability in speculative sampling.
+
+
+
+\section{Related Work}
+
+We now briefly review related approaches related to model arithmetic.
+
+\paragraph{Controlled Text Generation} Several works have interpreted CTG from perspectives differing from Bayes rule, either through the minimization of the model loss under various hard constraints \citep{nado,mucoco,langevin}, by modifying the model output based on the gradients of a classifier model \citep{pplm}, or by reducing the mutual information between the output and the attribute \citep{uddia}. However, all these works either require costly gradient steps during the decoding phase or demand training data for the model. %
+We have discussed CTG without relying on any training data or expensive gradient steps in \cref{sec:background} and compared to them in \cref{sec:evaluation:toxicity}.
+
+\paragraph{Speculative Sampling} Recent work extends on speculative sampling to use multiple smaller models in a staged fashion \citep{staged-speculative} or by using multiple small models at once \citep{specinfer}. Moreover, both methods use a tree-based sampling approach to generate multiple proposal sequences of the smaller models at once. We note that these improvements can be incorporated orthogonally in our extension of speculative sampling as the $\supersede$ operator.
+
+
+
+
+
+\section{Conclusion}
+
+We introduced model arithmetic, a novel framework for composing multiple LLMs and controlled generation attributes, using a principled formula-based approach. Our method offers precise control over model output and can be used to express many prior controlled text generation (CTG) techniques.
+By leveraging this expressiveness and a novel model \union operator, model arithmetic subsumes prior approaches for CTG-based toxicity reduction and significantly outperforms them.
+Further, we derived a speculative sampling procedure for model arithmetic formulas, allowing us to heavily reduce the computational overhead typically associated with multi-model CTG.
+
+\newpage
+
+

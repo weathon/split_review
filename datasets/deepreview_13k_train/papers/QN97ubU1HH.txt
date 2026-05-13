@@ -1,0 +1,484 @@
+\title{Model Extrapolation Expedites Alignment}
+
+\begin{abstract}
+The open-source community is experiencing a surge in the release of large language models (LLMs) that are trained to follow instructions and align with human preference.
+However, further training to improve them still requires expensive computational resources and data annotations.
+\textit{Is it possible to bypass additional training and cost-effectively acquire better-aligned models?}
+Inspired by the literature on \textit{model interpolation}, we propose a simple method called \textbf{\methodname{}} to boost LLMs' alignment with human preference.
+Utilizing a model that has undergone alignment training (e.g., via DPO or RLHF) and its initial SFT checkpoint, \methodname{} directly obtains a better-aligned model by \textit{\textbf{ex}tra\textbf{po}lating} from the weights of the initial and the aligned models, which implicitly optimizes the alignment objective via first-order approximation. %
+Through experiments with twelve open-source LLMs on HuggingFace, we demonstrate that \methodname{} consistently improves off-the-shelf DPO/RLHF models, as evaluated on the mainstream LLM benchmarks AlpacaEval 2.0 and MT-Bench.
+Moreover, \methodname{} exhibits remarkable scalability across various model sizes (from 1.8B to 70B) and capabilities.
+Through controlled experiments and further empirical analyses, we shed light on the essence of \methodname{} amplifying the reward signal learned during alignment training.
+Our work demonstrates the efficacy of model extrapolation in expediting the alignment of LLMs with human preference, suggesting a promising direction for future research.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.95\linewidth]{figs/intro.pdf}
+  \caption{
+  With \textit{no additional training}, \methodname{} remarkably improves off-the-shelf DPO/RLHF models on HuggingFace across various model sizes and capabilities, as evaluated on two leading LLM benchmarks: AlpacaEval 2.0 \citep{alpacaeval} (left) and MT-Bench \citep{llm-as-a-judge} (right).
+  See Table~\ref{tab:alpacaeval} for full results.
+  }
+  \label{fig:intro}
+\end{figure}
+
+\label{sec:intro}
+
+Over the past year, the open-source community has witnessed explosive growth in large language models (LLMs).
+These powerful LLMs, typically with billions of parameters, are trained to follow instructions and align with human preference \citep{instructgpt, chatgpt, hh-rlhf}.
+Although the open weights of LLMs facilitate out-of-the-box use, further training to improve their performance usually requires expensive computational resources and additional data annotations.
+\textit{Is it possible to bypass additional training and cost-effectively acquire better-aligned models}?
+
+We draw inspiration from the literature on \textit{model interpolation}, also known as model/weight averaging.
+This technique merges different models fine-tuned from the same base model by interpolating between their weights \citep{utans1996weight, average-generalization, model-soups}, relying on the mode connectivity of neural networks \citep{mode-connectivity, linear-mode-connectivity}.
+Previous work observes that while model interpolation can integrate the respective strengths of different models to improve out-of-distribution generalization, it usually results in in-between performance compared to the original ones \citep{average-generalization, spurious-feature, model-soups}.
+We similarly observe this phenomenon when interpolating between a supervised fine-tuned (SFT) model and a model further trained by direct preference optimization (DPO) \citep{dpo} or reinforcement learning from human feedback (RLHF) \citep{rlhf}, as shown in Figure~\ref{fig:interpolation}.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.8\linewidth]{figs/interpolation_labeled.pdf}
+  \caption{
+  Calculating the reward scores (\S~\ref{subsec:setup}) on the UltraFeedback \citep{ultrafeedback} development set, we observe that \textit{model interpolation} usually gives trade-off performance between the two original models (e.g., an SFT model and a further-trained DPO/RLHF model).
+  This observation motivates our proposal of \methodname{}, which cheaply acquires a better-aligned (\textit{stronger}) model from a DPO/RLHF model and its initial SFT checkpoint (i.e., two relatively \textit{weaker} models) via \textit{model extrapolation}.
+  }
+  \label{fig:interpolation}
+\end{figure}
+
+Intrigued by the observations of model interpolation, we turn to another compelling but unexplored direction: 
+\textit{What if we consider a DPO/RLHF model as the interpolated result from the initial SFT model and a hypothetically better-aligned model?}
+If this hypothetical model exists, we can straightforwardly obtain its weights by reversely \textbf{extrapolating} from the weights of the SFT and the DPO/RLHF models, as indicated by the gray arrow in Figure~\ref{fig:interpolation}.
+This can potentially further improve many off-the-shelf DPO/RLHF-aligned LLMs without any additional training.
+
+Building upon the above assumption, we propose a simple method called \textbf{\methodname{}} (\textit{model \textbf{ex}tra\textbf{po}lation}) to boost LLMs' alignment with human preference (\S~\ref{sec:methodology}).
+Utilizing a model $\model_1$ that has undergone alignment training (e.g., via DPO or RLHF) and the SFT model $\model_0$ that initializes $\model_1$, \methodname{} directly extrapolates a better-aligned (\textit{stronger}) model $\model_2$ from the weights of the two relatively \textit{weaker} models $\model_1$ and $\model_0$.
+
+Despite its simplicity, we demonstrate the impressive efficacy of \methodname{} through extensive empirical experiments, as summarized in Figure~\ref{fig:intro}.
+Through experiments with twelve open-source LLMs on HuggingFace, we show that \methodname{} consistently improves off-the-shelf DPO/RLHF models, by up to 4.5\% on AlpacaEval 2.0 \citep{alpacaeval} and 0.66 on MT-Bench \citep{llm-as-a-judge} (\S~\ref{sec:off-the-shelf}).
+Moreover, \methodname{} also manifests remarkable scalability across various model sizes (from 1.8B to 70B) and capabilities.
+We further conduct controlled experiments to shed light on how \methodname{} amplifies the reward signal learned during $\model_1$'s alignment training, where we show that \methodname{} can boost models trained with less preference data (e.g., 10\% or 20\%) to compete and even outperform the fully-trained one (\S~\ref{sec:controlled}).
+Our work demonstrates model extrapolation as a promising method for expediting the alignment of LLMs with human preference, and we believe it deserves more exploration in future research.
+
+
+
+\section{Methodology}
+
+\label{sec:methodology}
+
+\subsection{Overview}
+\label{subsec:overview}
+
+Our proposed \methodname{} method is inspired by the observation in Figure~\ref{fig:interpolation} and the mode connectivity of neural networks \citep{mode-connectivity,linear-mode-connectivity, mergekit}.
+Formally, we denote that a language model $\model_1$ (parameterized by $\bmtheta_1$) has undergone training for human preference alignment (e.g., via DPO \citep{dpo} or RLHF \citep{rlhf}).
+We denote its corresponding SFT checkpoint as $\model_0$ (parameterized by $\bmtheta_0$), which is used for initializing $\model_1$.
+We denote the model's parameter space as $\bm{\Theta}$ and suppose that the alignment level can be quantified by a continuous scalar function $\Omega: \bm{\Theta} \to \mathbb{R}$, where higher $\Omega(\bmtheta)$ indicates better alignment with human preference.
+\methodname{} assumes that there exists a better-aligned model $\model_2$ (parameterized by $\bmtheta_2$) that satisfies $\Omega(\bmtheta_0) < \Omega(\bmtheta_1) < \Omega(\bmtheta_2)$, and an interpolation coefficient $\gamma \in [0, 1]$ such that $\bmtheta_1 = ( 1-\gamma ) \bmtheta_0 + \gamma \bmtheta_2$.
+Here, we consider the simplest form of uniform linear interpolation, as we find it can already work well.
+With the substitution of $\alpha = 1/\gamma - 1 \in [0, +\infty)$, \methodname{} obtains the assumed better-aligned (\textit{stronger}) model $\model_2$ by \textit{extrapolating} from the weights of the two (relatively \textit{weaker}) models $\model_1$ and $\model_0$ (i.e., \textit{weak-to-strong extrapolation}), formulated as follows:
+\begin{align}
+\label{equ:extrapolation}
+     \bmtheta_2 = (1+\alpha) \bmtheta_1 - \alpha \bmtheta_0 = \bmtheta_1 + \alpha (\bmtheta_1 - \bmtheta_0) = \bmtheta_1 + \textcolor{tab-orange}{ \alpha \deltatheta},
+\end{align}
+where the coefficient $\alpha$ serves as the hyperparameter that controls the extrapolation length.
+In practice, $\alpha$ can be easily tuned as a decoding hyperparameter (similar to the sampling temperature).
+This requires \textbf{only one 24GB GPU for 7B LLMs} (e.g., half-precision inference with \texttt{vllm} \citep{vllm}), which, however, is far from sufficient for model training.
+
+\subsection{Explanation and Insights}
+\label{subsec:explanation}
+
+\begin{wrapfigure}{R}{5.7cm}
+    \centering
+    \includegraphics[width=\linewidth]{figs/illustration_labeled.pdf}
+    \caption{
+    Illustrative 1D diagram of $\Omega(\bmtheta)$.
+    \methodname{} can be viewed as a ``global gradient update'' along $\textcolor{tab-blue}{ \deltatheta }$.
+    It essentially amplifies the reward signal learned during alignment training.
+    }
+    \label{fig:illustration}
+\end{wrapfigure}
+
+Theoretically, \methodname{} takes \textit{first-order approximation to implicitly optimize the alignment objective $\Omega(\bmtheta)$}.
+Note that alignment algorithms typically include the regularization term (e.g., the KL constraint in RLHF) that restricts $\bmtheta_1$ within the small vicinity of $\bmtheta_0$ (i.e., $|\deltatheta|$ is small), and we can also control $\alpha$ such that $|\alpha \deltatheta| \ll |\bmtheta_1|$.
+We can apply first-order Taylor Expansion and have:
+\begin{align}
+    \Omega ( \bmtheta_1 + \alpha \deltatheta ) \approx \Omega ( \bmtheta_1 ) + \alpha \nabla \Omega (\bmtheta_1) \cdot \deltatheta.
+\end{align}
+Therefore, $\Omega (\bmtheta_2) = \Omega ( \bmtheta_1 + \alpha \deltatheta ) > \Omega (\bmtheta_1)$ holds if the gradient of $\Omega$ at $\bmtheta_1$ has a positive component along $\deltatheta$ (as long as $\Omega$ is not locally maximum at $\bmtheta_1$).
+This can generally be satisfied, as we can reasonably assume $\Omega$ to monotonically increase from $\bmtheta_0$ to $\bmtheta_1$ during alignment training, as illustrated in Figure~\ref{fig:illustration}.
+
+The above assumption also implies that the alignment training from $\model_0$ to $\model_1$ is \textit{suboptimal}, as shown in Figure \ref{fig:illustration}.
+We conjecture this is very likely to occur in practice due to both the regularization in alignment algorithms (e.g., the KL constraint in RLHF) and \textit{the sparsity of reward signal}.
+For the latter, since it is intractable to directly optimize $\Omega(\bmtheta)$, the dominant practice is to first employ another reward model to assign preference labels (e.g., in DPO) or reward values (e.g., in RLHF) to the language model $\model$'s outputs, on which we then train $\model$.
+However, transmitting the reward signal through the intermediate discrete, textual outputs can make the learned reward signal noisy or \textit{sparse}, which consequently hinders the optimal alignment training.
+We will show in \S~\ref{sec:off-the-shelf} that the open-source DPO/RLHF models usually have significant room for further improvement by \methodname{}.
+
+Additionally, Figure~\ref{fig:illustration} provides a more intuitive illustration of \methodname{}.
+Specifically, \methodname{} can be viewed as a ``global gradient update'' along the weight change $\textcolor{tab-blue}{ \deltatheta }$.
+Note that starting from $\bmtheta_0$, $\deltatheta$ indicates a direction in the parameter space in which the alignment level $\Omega$ with human preference increases.
+Therefore, \methodname{} \textit{essentially amplifies the learned reward signal through the extrapolation $\textcolor{tab-orange}{\alpha \deltatheta}$}.
+This insight underscores the importance of the ``quality'' of $\deltatheta$, i.e., $\deltatheta$ should indicate a direction that truly improves the alignment with human preference.
+Otherwise, \methodname{} could also amplify the learned spurious features in $\deltatheta$.
+We will provide more empirical analyses in \S~\ref{sec:controlled} to show that the ``quality'' of $\deltatheta$ can vary depending on the training configuration for $\model_1$.
+
+\subsection{Highlights}
+
+We underline the following appealing properties of \methodname{}:
+\begin{itemize}[itemsep=1.5mm, parsep=0mm, leftmargin=5mm]
+    \item \textbf{Simplicity:}
+    \methodname{} is extremely simple and quick to implement.
+    It merely involves performing extrapolation based on the weights of two checkpoints $\model_0$ and $\model_1$, which can be implemented within just a few lines of code.
+    
+    \item \textbf{Efficiency:}
+    \methodname{} does not need any additional model training.
+    The only variable $\alpha$ is efficient to tune as a decoding hyperparameter, which requires much fewer computational resources than model training (e.g., \textbf{one 24GB GPU is enough for 7B LLMs}).
+    Moreover, we believe more efficient means of hyperparameter search can be developed in future work, as evidenced by the advances in adaptive model interpolation \citep{task-arithmetic, mitigating-alignment-tax}.
+    
+    \item \textbf{Scalability:}
+    \methodname{} is, in principle, applicable to various LLMs, including those of large sizes and those trained by advanced alignment algorithms like iterative DPO \citep{iterative-dpo, rlhflow}.
+    We will show in \S~\ref{sec:off-the-shelf} that \methodname{} can improve off-the-shelf models across various sizes and capabilities.
+\end{itemize}
+
+
+
+\section{\methodname{}
+
+\label{sec:off-the-shelf}
+
+In this section, we demonstrate the impressive efficacy of \methodname{} in improving \textit{off-the-shelf} LLMs from HuggingFace, utilizing their SFT and DPO/RLHF checkpoints.
+We particularly underscore the \textit{scalability} of \methodname{} across different model sizes and capabilities.
+
+\subsection{Experimental Setup}
+\label{subsec:setup}
+
+\paragraph{Models}
+When selecting open-source LLMs for experiments, we found that many well-known LLMs, such as LLaMA-2/3 \citep{llama2, llama3}, Gemma \citep{gemma}, and Qwen \citep{qwen}, only release the final DPO/RLHF checkpoints but not the corresponding SFT ones.
+Such an opacity hinders the feasibility of experimenting with these more representative models.
+To facilitate reproducible research%
+
+\begin{itemize}[itemsep=1.5mm, parsep=0mm, leftmargin=5mm]
+    \item \texttt{zephyr-7b-alpha/beta} \citep{zephyr}, two Mistral-based \citep{mistral} models developed by HuggingFace.
+    They are initialized from different SFT checkpoints and trained via \textbf{DPO} on UltraFeedback \citep{ultrafeedback}.
+    
+    \item \texttt{starling-7b-alpha/beta} \citep{starling}, two Mistral-based models.
+    They are initialized from different SFT versions of the OpenChat model \citep{openchat} and trained via the \textbf{RLHF} algorithm.
+    
+    \item \texttt{snorkel-7b} \citep{iterative-dpo}, a Mistral-based model.
+    It is initialized from the official SFT Mistral model and trained via the \textbf{iterative DPO} algorithm \citep{iterative-dpo} on the instructions of UltraFeedback.
+    
+    \item \texttt{llama3-8b-iter} \citep{rlhflow}, a LLaMA-3-based \cite{llama3} model developed by Salesforce.
+    It is trained via \textbf{iterative DPO} on open-source datasets.
+    
+    \item \texttt{internlm2-1.8/7/20b} \citep{internlm2}, a Chinese-English bilingual model suite developed by Shanghai AI Laboratory.
+    The three-sized models undergo the same SFT training and similar online \textbf{RLHF} training processes.
+
+    \item \texttt{tulu-2-dpo-7/13/70b} \citep{tulu}, a LLaMA-2-based model suite developed by the Allen Institute for AI.
+    The three-sized models undergo the same SFT and \textbf{DPO} training processes.
+    
+\end{itemize}
+We decide the optimal $\alpha$ in \methodname{} from [0.1, 0.2, 0.3, 0.4, 0.5] based on the model performance on the instructions of the UltraFeedback\footnote{\url{https://huggingface.co/datasets/HuggingFaceH4/ultrafeedback_binarized}} \citep{ultrafeedback} development set.
+The performance is measured by the expected reward score calculated by an open-source reward model\footnote{\url{https://huggingface.co/weqweasdas/RM-Mistral-7B}}.
+It ranks among the top on RewardBench\footnote{\url{https://huggingface.co/spaces/allenai/reward-bench}} \citep{rewardbench}, a leaderboard that assesses the performance of reward models.
+This reward model is also not involved in either preference annotation or RLHF training of all the models we experiment with in this work, thus reducing the risk of reward hacking.
+
+\paragraph{Benchmarks}
+We employ three mainstream LLM benchmarks for evaluation:
+\begin{itemize}[itemsep=1.5mm, parsep=0mm, leftmargin=5mm]
+    \item \textbf{AlpacaEval 2.0} \citep{alpacaeval}, a leading benchmark that assesses LLMs' instruction-following ability and the alignment with human preference.
+    It calculates the probability that an LLM-based evaluator (\texttt{gpt-4-1106-preview}) prefers the model's output over the GPT-4 baseline, which provides an affordable and replicable alternative to human preference annotation.
+    The \textbf{win rate} over the GPT-4 baseline is computed as the expected preference probability.
+    Recently, AlpacaEval 2.0 has introduced the new \textbf{length-controlled (LC) win rate} metric \citep{alpacaeval-lc}, which alleviates the length bias of the GPT-4 evaluator (i.e., the prior preference toward longer responses) \citep{disentangling-length}.
+    According to \citep{alpacaeval-lc}, \textit{the LC win rate metric currently has the highest correlation (a Spearman correlation of 0.98) with the real-world human evaluation on Chatbot Arena} \citep{llm-as-a-judge}.
+    
+    \item \textbf{MT-Bench} \citep{llm-as-a-judge}, another leading benchmark for assessing chat LLMs' general and multi-turn ability.
+    It contains a set of challenging multi-turn open-ended questions covering topics such as writing, role-playing, math, coding, and more.
+    The model-generated answers are judged by \texttt{gpt-4} via a scalar score (from 1 to 10), without any pairwise comparison.
+    
+    \item \textbf{Open LLM Leaderboard} \citep{open-llm-leaderboard}, a popular evaluation suite hosted by HuggingFace.
+    It consists of six benchmarks and assesses a variety of model abilities across commonsense reasoning \citep{hellaswag, winogrande}, math problem-solving \citep{gsm8k}, human falsehood mimicking \citep{truthfulqa}, and general knowledge \citep{arc, mmlu}.
+
+    
+\end{itemize}
+\subsection{Results}
+
+\begin{table}[htbp]
+  \centering
+  \caption{
+  AlpacaEval 2.0 (win rate and LC win rate) and MT-Bench evaluation results of off-the-shelf DPO/RLHF models.
+  The \textcolor{gray}{\textbf{gray models' scores}} are copied from the official leaderboard for reference.
+  }
+  \scalebox{0.9}{
+    \begin{tabular}{lcccccc}
+    \toprule
+       & \multicolumn{3}{c}{\textbf{Original}} & \multicolumn{3}{c}{\textbf{+ \methodname{}, \textit{no training}}} \\
+    \cmidrule(lr){2-4} \cmidrule(lr){5-7}
+    & \textbf{WR} & \textbf{LC WR} & \textbf{MT-B} & \textbf{Win Rate} & \textbf{LC Win Rate} & \textbf{MT-Bench} \\
+    \midrule
+    \small \textcolor{gray}{\texttt{llama2-7b}} & \textcolor{gray}{5.0\%} & \textcolor{gray}{5.4\%} & \textcolor{gray}{6.27} & - & - & - \\
+    \small \textcolor{gray}{\texttt{llama2-70b}} & \textcolor{gray}{13.9\%} & \textcolor{gray}{14.7\%} & \textcolor{gray}{6.86} & - & - & - \\
+    \small \textcolor{gray}{\texttt{mistral-7b-v0.2}} & \textcolor{gray}{14.7\%} & \textcolor{gray}{17.1\%} & \textcolor{gray}{7.60} & - & - & - \\
+    \small \textcolor{gray}{\texttt{claude-2.1}} & \textcolor{gray}{15.7\%} & \textcolor{gray}{25.3\%} & \textcolor{gray}{8.18} & - & - & - \\
+    \small \textcolor{gray}{\texttt{gpt-4-0314}} & \textcolor{gray}{22.1\%} & \textcolor{gray}{35.3\%} & \textcolor{gray}{8.96} & - & - & - \\
+    \midrule[0.8pt]
+    \small \texttt{zephyr-7b-alpha} & 6.7\% & 10.0\% & 6.85 & \textbf{10.6\% \textcolor{red}{\small (+3.8\%)}} & \textbf{13.6\% \textcolor{red}{\small (+3.6\%)}} & \textbf{6.87 \textcolor{red}{\small (+0.02)}} \\
+    \small \texttt{zephyr-7b-beta} & 10.2\% & 13.2\% & 7.02 & \textbf{11.1\% \textcolor{red}{\small (+0.9\%)}} & \textbf{14.0\% \textcolor{red}{\small (+0.8\%)}} & \textbf{7.06 \textcolor{red}{\small (+0.04)}} \\
+    \small \texttt{starling-7b-alpha} & 15.0\% & 18.3\% & 7.82 & \textbf{18.2\% \textcolor{red}{\small (+3.2\%)}} & \textbf{19.5\% \textcolor{red}{\small (+1.2\%)}} & \textbf{7.91 \textcolor{red}{\small (+0.09)}} \\
+    \small \texttt{starling-7b-beta} & 26.6\% & 25.8\% & 8.10 & \textbf{29.6\% \textcolor{red}{\small (+3.0\%)}} & \textbf{26.4\% \textcolor{red}{\small (+0.7\%)}} & \textbf{8.18 \textcolor{red}{\small (+0.08)}} \\
+    \small \texttt{snorkel-7b} & 24.7\% & 24.0\% & 7.63 & \textbf{28.8\% \textcolor{red}{\small (+4.1\%)}} & \textbf{26.4\% \textcolor{red}{\small (+2.4\%)}} & \textbf{7.69 \textcolor{red}{\small (+0.07)}} \\
+    \small \texttt{llama3-8b-iter} & 29.2\% & 36.0\% & 8.08 & \textbf{32.7\% \textcolor{red}{\small (+3.5\%)}} & \textbf{37.8\% \textcolor{red}{\small (+1.8\%)}} & \textbf{8.45 \textcolor{red}{\small (+0.37)}} \\
+    \midrule
+    \small \texttt{internlm2-1.8b} & 3.8\% & 4.0\% & 5.17 & \textbf{5.2\% \textcolor{red}{\small (+1.5\%)}} & \textbf{4.3\% \textcolor{red}{\small (+0.3\%)}} & \textbf{5.26 \textcolor{red}{\small (+0.08)}} \\
+    \small \texttt{internlm2-7b} & 20.5\% & 18.3\% & 7.14 & \textbf{28.1\% \textcolor{red}{\small (+7.6\%)}} & \textbf{22.7\% \textcolor{red}{\small (+4.4\%)}} & \textbf{7.80 \textcolor{red}{\small (+0.66)}} \\
+    \small \texttt{internlm2-20b} & 36.1\% & 24.9\% & 8.13 & \textbf{46.2\% \textcolor{red}{\small (+10.1\%)}} & \textbf{27.2\% \textcolor{red}{\small (+2.4\%)}} & \textbf{8.26 \textcolor{red}{\small (+0.13)}} \\
+    \midrule
+    \small \texttt{tulu-2-dpo-7b} & 8.5\% & 10.2\% & 6.35 & \textbf{11.5\% \textcolor{red}{\small (+3.0\%)}} & \textbf{11.7\% \textcolor{red}{\small (+1.5\%)}} & \textbf{6.38 \textcolor{red}{\small (+0.03)}} \\
+    \small \texttt{tulu-2-dpo-13b} & 11.2\% & 15.5\% & 7.00 & \textbf{15.6\% \textcolor{red}{\small (+4.3\%)}} & \textbf{17.6\% \textcolor{red}{\small (+2.1\%)}} & \textbf{7.26 \textcolor{red}{\small (+0.26)}} \\
+    \small \texttt{tulu-2-dpo-70b} & 15.4\% & 21.2\% & 7.79 & \textbf{23.0\% \textcolor{red}{\small (+7.6\%)}} & \textbf{25.7\% \textcolor{red}{\small (+4.5\%)}} & \textbf{8.03 \textcolor{red}{\small (+0.24)}} \\
+    \bottomrule
+    \end{tabular}%
+  }
+  \label{tab:alpacaeval}%
+\end{table}%
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{figs/openllm.pdf}
+    \caption{
+    Open LLM Leaderboard evaluation results of off-the-shelf DPO/RLHF models.
+    We report the average scores over the six tasks.
+
+    }
+    \label{fig:openllm}
+\end{figure}  
+
+In Table~\ref{tab:alpacaeval}, we demonstrate that \methodname{} consistently enhances the evaluated LLMs, with increases of up to 10.1\% basic win rate on AlpacaEval 2.0 (for \texttt{internlm2-20b}), 4.5\% LC win rate (for \texttt{tulu-2-dpo-70b}), and 0.66 on MT-Bench (for \texttt{internlm2-7b}).
+The improvements are made across LLMs of various sizes and capabilities, from the smallest \texttt{internlm2-1.8b} and the second weakest \texttt{zephyr-7b-alpha}, to the largest \texttt{tulu-2-dpo-70b} and the strongest \texttt{llama3-8b-iter} and \texttt{starling-7b-beta}, which demonstrates the remarkable scalability of \methodname{}.
+In Figure~\ref{fig:openllm}, we also show that \methodname{} overall slightly improves the Open LLM Leaderboard scores, indicating that \methodname{} generally does not impact the base model's capability.
+Overall, our extensive evaluation suggests that most open-source LLMs have not been trained optimally for human preference alignment, while \methodname{} enables further improvements for them without any additional training.
+
+
+
+\section{Controlled Experiments and Analyses}
+
+\label{sec:controlled}
+
+In this section, we conduct controlled experiments to give more insights into \methodname{}, where we fix the same $\model_0$ and adopt varying training configurations for $\model_1$, including training data sizes and hyperparameters.
+We also discuss the impact of model choices of $\model_0$ and $\model_1$ on the effectiveness of \methodname{}.
+We underscore that \methodname{} amplifies the reward signal learned during alignment training, but it can also amplify the learned spurious features such as the length bias.
+
+\subsection{Experimental Setup}
+\label{subsec:setup2}
+
+\paragraph{Models}
+
+We adopt their recipe for training the \texttt{zephyr-7b-sft} and \texttt{zephyr-7b-dpo} models, which are popularly used for controlled experiments in recent LLM alignment research \citep{spin, activerl, nca}.
+The recipe employs DPO for alignment training, where the SFT model \texttt{zephyr-7b-sft} is used as the reference model in DPO and also for initializing the policy models.
+
+We use \texttt{zephyr-7b-dpo} as the fully-trained baseline (i.e., using 100\% data).
+
+\paragraph{Data}
+We use the same preference dataset UltraFeedback \citep{ultrafeedback} for alignment training.
+It contains diverse instructions and response pairs with GPT-4-annotated preference labels and has been popularly used by the open-source community for training aligned LLMs \citep{tulu, zephyr, starling}.
+The preprocessed version on HuggingFace contains 61K and 1K preference data in the training and development sets, respectively.
+As in \S~\ref{sec:off-the-shelf}, we search the optimal $\alpha$ in \methodname{} based on the performance on the instructions of the \textit{development set}\footnote{
+One may be concerned that the development set (1K data) is used to select $\alpha$ in \methodname{} but not involved in improving the baselines where \methodname{} is not applied, which may lead to unfair comparison.
+
+}, as evaluated by the same open-source reward model.
+
+\subsection{Analysis of Training Data}
+\label{subsec:training_data}
+
+\begin{table}[htbp]
+  \centering
+  \caption{
+  AlpacaEval 2.0 evaluation results of models trained with varying sizes of preference data.
+  }
+  \scalebox{0.9}{
+    \begin{tabular}{lcccc}
+    \toprule
+       & \multicolumn{2}{c}{\textbf{Original}} & \multicolumn{2}{c}{\textbf{+ \methodname{}, \textit{no training}}} \\
+    \cmidrule(lr){2-3} \cmidrule(lr){4-5}       
+    & \textbf{Win Rate} & \textbf{LC Win Rate} & \textbf{Win Rate} & \textbf{LC Win Rate} \\
+    \midrule
+    SFT ($\model_0$) & 4.7\% & 8.7\% & -  & - \\
+    DPO (init from $\model_0$, 100\% data) & 14.7\% & 17.3\% & 18.0\% \textbf{\textcolor{red}{\small (+3.3\%)}} & 20.2\% \textbf{\textcolor{red}{\small (+2.8\%)}} \\
+    \midrule
+    DPO (init from $\model_0$, 5\% data) & 5.0\% & 9.1\% & 11.5\% \textbf{\textcolor{red}{\small (+6.5\%)}} & 14.7\% \textbf{\textcolor{red}{\small (+5.6\%)}} \\
+    DPO (init from $\model_0$, 10\% data) & 5.9\% & 10.4\% & 17.9\% \textbf{\textcolor{red}{\small (+12.0\%)}} & 16.3\% \textbf{\textcolor{red}{\small (+5.8\%)}} \\
+    DPO (init from $\model_0$, 20\% data) & 8.6\% & 12.9\% & \textbf{22.7\% \textcolor{red}{\small (+14.2\%)}} & \textbf{21.3\% \textcolor{red}{\small (+8.4\%)}} \\
+    DPO (init from $\model_0$, 40\% data) & 12.1\% & 14.6\% & 17.7\% \textbf{\textcolor{red}{\small (+5.6\%)}} & 16.6\% \textbf{\textcolor{red}{\small (+2.0\%)}} \\
+    \bottomrule
+    \end{tabular}%
+  }
+  \label{tab:less_data}%
+\end{table}%
+
+\begin{wrapfigure}{R}{5.5cm}
+\centering
+\includegraphics[width=0.9\linewidth]{figs/illustration_data.pdf}
+\caption{
+Illustrative 2D contour diagram of $\Omega(\bmtheta)$.
+The ``quality'' of $\deltatheta$ and the effectiveness of \methodname{} can vary depending on the training configurations for $\model_1$.
+Here, \textcolor{tab-red}{$\deltatheta$} indicates a \textit{superior} extrapolation direction to \textcolor{my-yellow}{$\deltatheta'$}.
+}
+\label{fig:illustration_data}
+\end{wrapfigure}
+
+We first study the impact of training data on the effectiveness of \methodname{}.
+We train multiple $\model_1$ from the same initial $\model_0$ (i.e., \texttt{zephyr-7b-sft}), but with varying data sizes (from 5\% to 40\%).
+In Table~\ref{tab:less_data}, we show their performance as well as the results of further applying \methodname{} to them.
+While training with less preference data usually results in lower-tier performance, \methodname{} boosts the performance to compete (10\% data, 16.3\%) and even surpass (20\% data, 21.3\%) the fully-trained model (17.3\%).
+We also observe that the model trained with 20\% data obtains a larger improvement than other data proportions.
+It implies that the former gives a superior extrapolation direction $\deltatheta$ (i.e., of a higher ``quality''), as illustrated in Figure~\ref{fig:illustration_data}.
+
+However, the ``quality'' of $\deltatheta$ is not simply correlated with the amount of data.
+As shown in Table~\ref{tab:less_data}, using 20\% data slightly outperforms using 100\% data when both applying \methodname{} (21.3\% vs. 20.2\%), while the gain from \methodname{} decreases when the used data increases to 40\%.
+In Figure~\ref{fig:varying_alpha}, we present the reward scores and output lengths on the UltraFeedback \textit{development set} versus varying $\alpha$ values.
+From the left part, we observe that the global optimal reward score (6.08) achieved by \methodname{} is obtained with a medium size (20\%) of training data, rather than the smaller (5\% or 10\%) or larger (40\%) ones.
+For the former (5\% and 10\% data), although \methodname{} still notably improves the performance (from the reward score 3.13 to 4.79, and 3.59 to 5.82, respectively), the limited data still cannot provide an accurate $\deltatheta$, thus capping the improvement after model extrapolation.
+For the latter (40\% data), we speculate that \textit{the model has learned the spurious features within the training data as shortcuts, especially the length bias}\footnote{
+The average lengths of the preferred and unpreferred responses in the UltraFeedback training set are 319 and 277 tokens, respectively.
+} \citep{disentangling-length} where the preferred responses are usually longer.
+As shown in the right part of Figure~\ref{fig:varying_alpha}, for the model trained with 40\% data, using a very small $\alpha$ results in a dramatic increase in the output length.
+However, this does not lead to sustained improvement in performance, where the optimal rewards typically correspond to moderate output lengths ranging between 500 and 600.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figs/varying_alpha.pdf}
+  \caption{
+  We train multiple $\model_1$ from the same initial $\model_0$, but with varying data sizes.
+  We plot the reward scores (\textbf{left}) and output lengths (\textbf{right}) on the instructions of the UltraFeedback \textit{development set} versus varying $\alpha$ values (x-axis).
+    Note that $\alpha=0$ indicates that \methodname{} is not applied.
+  }
+  \label{fig:varying_alpha}
+\end{figure}
+\subsection{Analysis of Training Hyperparameters}
+\label{subsec:training_hyper}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figs/varying_alpha_hyper.pdf}
+  \caption{
+    We train multiple $\model_1$ from the same initial $\model_0$ using the same 20\% preference data, but with larger learning rates or for more epochs.
+    We plot the reward scores (\textbf{left}) and output lengths (\textbf{right}) on the instructions of the UltraFeedback \textit{development set} versus varying $\alpha$ values (x-axis).
+    Note that $\alpha=0$ indicates that \methodname{} is not applied.
+  }
+  \label{fig:varying_alpha_hyper}
+\end{figure}
+
+As \methodname{} can be viewed as a ``global gradient update'' (\S~\ref{subsec:explanation}), we also compare with simply tuning the training hyperparameters.
+We use the same 20\% training data but increase the learning rate or training epochs, and train multiple $\model_1$ from the same initial $\model_0$.
+From the left part of Figure~\ref{fig:varying_alpha_hyper}, we observe that increasing the learning rate or training epochs indeed somewhat improves the original reward score.
+However, it is still inferior to the optimal reward score achieved by \methodname{} under the default configuration, and also notably impairs the gains from \methodname{} (the peak points are lower than that of the default configuration).
+This is probably because the model is \textit{overfitted} to the training data and similarly learns the spurious features (such as the length bias), thus failing to produce an accurate $\deltatheta$.
+The overfitting issue can also be evidenced by the right part of Figure~\ref{fig:varying_alpha_hyper}.
+The models trained with larger learning rates or for more epochs become prone to generating longer outputs with a small $\alpha$, but do not obtain noticeable reward improvement (the left part of Figure~\ref{fig:varying_alpha_hyper}).
+This suggests that $\deltatheta$ is very likely to contain the spurious length feature rather than the true human preference.
+\subsection{Discussion on Model Choices}
+\label{subsec:model_choices}
+
+Finally, we discuss the impact of model choices for $\model_0$ and $\model_1$ on the effectiveness of \methodname{}.
+In the experiments so far, we choose $\model_0$ as an SFT model and $\model_1$ as the model further trained for human preference alignment on top of $\model_0$.
+\textit{Can other types of model combination $\model_0$ and $\model_1$, such as a Base and an SFT model, or two separately-trained RLHF models, be able to produce meaningful extrapolated models?}
+We experiment with the following types of combinations:
+\begin{enumerate}[label={(\arabic*)}, itemsep=1.5mm, parsep=0mm, leftmargin=5mm]
+    \item \textbf{Base + SFT}: \texttt{mistral-7b-v0.1} \citep{mistral} as $\model_0$ and \texttt{mistral-7b-instruct-v0.1} as $\model_1$.
+    
+    \item \textbf{SFT 1 + SFT 2 (trained from different base models)}: \texttt{mistral-7b-instruct-v0.1} as $\model_0$ and \texttt{mistral-7b-instruct-v0.2} as $\model_1$.
+    
+    \item \textbf{SFT 1 + SFT 2 (same base)}: \texttt{openchat-3.5} \citep{openchat} as $\model_0$ and \texttt{openchat-3.5-0106} as $\model_1$.
+    
+    \item \textbf{RLHF 1 + RLHF 2 (same base)}: \texttt{gemma-7b-it} \citep{gemma} as $\model_0$ and \texttt{gemma-1.1-7b-it} as $\model_1$.
+    Note that it is not disclosed whether the two models are initialized from the same SFT model.
+\end{enumerate}
+\begin{figure}[htbp]
+  \centering
+  \begin{minipage}[ht]{0.53\linewidth}
+    \centering
+    \includegraphics[width=0.95\linewidth]{figs/varying_alpha_model.pdf}
+    \caption{
+    Reward scores of different model combinations on the instructions of the UltraFeedback \textit{development set}, with $\alpha$ (x-axis) varying from 0.1 to 0.5.
+    }
+    \label{fig:varying_alpha_model}
+  \end{minipage}
+  \hfill
+  \begin{minipage}[ht]{0.44\linewidth}
+    \centering
+    \includegraphics[width=0.9\linewidth]{figs/illustration_model.pdf}
+    \caption{
+    Extrapolation from two separately-trained models may not improve alignment, as their weight difference (\textcolor{tab-red}{$\deltatheta$}) usually cannot indicate a direction in which the reward signal can be amplified.
+    }
+    \label{fig:illustration_model}
+  \end{minipage}
+\end{figure}
+
+From Figure~\ref{fig:varying_alpha_model},
+(1) we find that extrapolating from two SFT models that are initialized from different base models can easily lead to the model collapse, due to that they do not satisfy the mode connectivity \citep{mode-connectivity, linear-mode-connectivity},
+(2) For the combination of Base and SFT, extrapolation degrades the performance, probably because training from Base to SFT does not naturally optimize for human preference and increase the alignment level $\Omega$.
+This is exactly why we need additional training for human preference alignment.
+(3\&4) For two separately-trained SFT or RLHF models, we find that they also fail to benefit from model extrapolation.
+We speculate that this occurs because when $\model_1$ is not initialized from $\model_0$, the alignment level $\Omega$ does not monotonously increase along the path in the parameter space from $\bmtheta_0$ to $\bmtheta_1$.
+Instead, $\Omega$ may first reach an intermediate peak point and then decrease, as illustrated in Figure~\ref{fig:illustration_model}.
+Therefore, $\deltatheta$ fails to indicate a direction in which the reward signal can be amplified, even if the alignment level $\Omega(\bmtheta_1)$ is higher than $\Omega(\bmtheta_0)$.
+Overall, our method \methodname{} is generally applicable to the combination of an SFT model $\model_0$ and a model $\model_1$ further trained on top of the former, which is a very realistic combination choice, as modern LLMs that are trained to align with human preference are almost all initialized from their SFT checkpoints.
+
+
+
+\section{Related Work}
+
+\label{sec:related}
+
+\paragraph{LLM Alignment}
+Modern LLMs are typically first pre-trained on massive textual corpora (resulting in a Base model) \citep{gpt3, llama2, llama3} and then trained to align with human expectations \citep{chatgpt, gpt4, llama2}.
+The alignment process generally contains two stages.
+In the first stage, an LLM is supervisedly fine-tuned (SFT) on \textit{demonstration outputs} and learns to follow human instructions \citep{self-instruct, alpaca, chat-templates}.
+In the second stage, the LLM is trained to learn \textit{human preference} and assign higher probabilities to human-preferred outputs over the disfavored ones.
+This is usually implemented in the fashion of reinforcement learning (RL) \citep{instructgpt, hh-rlhf} or contrastive learning \citep{slic, click, dpo}, as exemplified by the reinforcement learning from human feedback (RLHF) \citep{rlhf} and direct preference optimization (DPO) \citep{dpo} algorithms, respectively.
+However, as the model size increases (from 7B, 13B to 70B or larger), the computational resources required for alignment training also become extremely expensive.
+For instance, training a 7B model via DPO has commonly required 4 or 8 A100 80GB GPUs, which can be unaffordable for open-source community users.
+Our work proposes the \methodname{} method to boost the alignment of LLMs with human preference in a simple, efficient, and scalable manner. %
+
+\paragraph{Model Merging and Interpolation} 
+Model merging is a recent focal technique for building powerful LLMs based on existing ones \citep{evolutionary-merging, super-mario, mergekit}.
+It aims to integrate multiple models fine-tuned from the same base model into a unified one that retains the respective strengths.
+The simplest form of model merging is \textit{model interpolation}, also known as model/weight averaging \citep{average-generalization, spurious-feature, model-soups, mitigating-alignment-tax}, which builds upon the mode connectivity of neural networks \citep{mode-connectivity, linear-mode-connectivity}.
+Our work is inspired by the phenomenon that interpolation usually results in in-between performance compared to the original models, as observed in previous literature \citep{average-generalization, spurious-feature, model-soups} and our experiments in Figure~\ref{fig:interpolation}.
+The proposed \methodname{} method has a similar idea of blending model weights, but works under a distinct premise and goal.
+Rather than integrating the strengths of multiple strong models, \methodname{} starts from two relatively weaker models and aims to produce an overall stronger one.
+
+There is another line of work that improves text generation by blending the token prediction distributions of multiple language models during the inference time \citep{dexperts, contrastive-decoding, contrastive-modeling}.
+They share somewhat similar forms to model merging, but operate on output logits rather than model weights.
+Besides, they can suffer from decreased generation efficiency due to the interference with the inference process, and the increased exposure bias of different models.
+Our proposed \methodname{} method, as well as the work in model merging, bypasses these issues by producing a new single model.
+
+
+
+\section{Conclusion}
+
+\label{sec:conclusion}
+
+We present \methodname{}, a simple method to boost LLMs' alignment with human preference.
+By extrapolating from the weights of an aligned model and its initial SFT checkpoint, \methodname{} enables directly obtaining a better-aligned model without any additional training.
+We demonstrate the efficacy of \methodname{} in enhancing open-source LLMs across various model sizes (from 1.8B to 70B) and capabilities, suggesting significant improvement room for most open-source models.
+We also shed light on the essence of \methodname{} amplifying the reward signal learned in the alignment training through controlled experiments.
+Given its simplicity, efficiency, and scalability, we recommend \methodname{} as a promising approach for expediting the alignment of LLMs with human preference, which we believe deserves more future exploration.
+
+\paragraph{Limitations \& Future Work}
+Our work is limited by the public accessibility to the SFT and DPO/RLHF checkpoints.
+Thus unfortunately, we are unable to experiment with the more representative LLMs like LLaMA-2/3 \citep{llama2, llama3}, Gemma \citep{gemma}, and Qwen \citep{qwen}.
+We hope for more open-source efforts in increasing LLMs' transparency and accessibility.
+Outside the scope of our work, there are several problems that can potentially attract future research.
+First, since \methodname{} is currently based on the simplest uniform linear extrapolation (Equation~\ref{equ:extrapolation}, using the same $\alpha$ for all the model modules), future work can devise methods to adaptively search optimal $\alpha$ for different model modules.
+Second, although our work provides a basic explanation for \methodname{} (\S~\ref{subsec:explanation}) and empirically demonstrates its effectiveness, future work can establish more profound theoretical foundations for its underlying mechanisms.
+Third, while we currently rely on an external reward model for searching $\alpha$, future work may get rid of such reliance by resorting to the inherent capability of the models $\model_1$ and $\model_0$ themselves.
+Finally, it would also be interesting to apply \methodname{} to multi-modal LLMs like LLaVA \citep{llava} and other model architectures like Mamba \citep{mamba}.
+
+
+
+
+
+
+

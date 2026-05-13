@@ -1,0 +1,341 @@
+\title{Progressively Refined Differentiable Physics}
+
+\begin{abstract}
+The physics solvers employed for neural network training are primarily iterative, and hence, differentiating through them introduces a severe computational burden as iterations grow large. Inspired by works in bilevel optimization, we show that full accuracy of the network is achievable through physics significantly coarser than fully converged solvers. We propose *progressively refined differentiable physics* (PRDP), an approach that identifies the level of physics refinement sufficient for full training accuracy. By beginning with coarse physics, adaptively refining it during training, and stopping refinement at the level adequate for training, it enables significant compute savings without sacrificing network accuracy. Our focus is on differentiating iterative linear solvers for sparsely discretized differential operators, which are fundamental to scientific computing. PRDP is applicable to both unrolled and implicit differentiation. We validate its performance on a variety of learning scenarios involving differentiable physics solvers such as inverse problems, autoregressive neural emulators, and correction-based neural-hybrid solvers. In the challenging example of emulating the Navier-Stokes equations, we reduce training time by 62%.
+\end{abstract}
+
+\section{1 INTRODUCTION  }
+
+
+Differentiable Physics is a paradigm which allows neural networks to interact with classical physics solvers during training. This has proven effective across many domains, e.g., solving inverse problems (Bendsoe & Sigmund, 2013), for training neural networks to replace solvers (Bar-Sinai et al., 2019; Brandstetter et al., 2022), integrating physical constraints (Raissi et al., 2019; Li et al., 2024), and creating hybrid models that blend classical numerical techniques with learned components (Um et al., 2020; Kochkov et al., 2021; 2024). Despite their promise, neural-hybrid models for differential equations face limited adoption due to the computational cost of executing and differentiating through classical solvers during training. At the core of most classical solvers for differential equations are iterative processes that can be tuned for accuracy, typically by adjusting parameters such as step size or iteration count. Traditionally, these methods prioritize achieving the highest possible accuracy in the physics solver. In contrast, our work takes a novel approach, drawing inspiration from bi-level optimization (Pedregosa, 2016). Rather than focusing solely on maximum physics accuracy, we explore how numerical solvers can be strategically adjusted to substantially accelerate the training process without losing network accuracy.  
+
+Our work applies to training pipelines involving differentiable physics, as exemplified in figure 1. Repeatedly querying a solver with several iterations in the forward pass – and differentiating through its iterations in the backward pass – introduces a severe computational bottleneck during training. Since deep learning is inherently based on noisy gradient estimates, we show that neither the physics nor the physics’ Jacobian must be fully converged at training time to attain a good generalization. Using differentiable numerical solvers at a level significantly coarser than needed for tight tolerances and progressively refining it starting from an even coarser level is already sufficient to achieve full accuracy of the network.  
+
+![](images/95318a6b62b6c1891833a220105417d1fbd431e63c2053d83a629be66d6671e0.jpg)  
+
+Figure 1: Example of a neural network training pipeline that uses a differentiable physics solver $\mathcal{P}_{K}$ in the loop. Black arrows show the forward pass and red arrows represent the backward pass. As the number of solver iterations $K$ grows, the cost of passes through $\mathcal{P}_{K}$ becomes severe.  
+
+![](images/8276aa1bfba87baf0c05530f0c1912e023cf3a71e4738c4347e3834cc7cff417.jpg)  
+
+Figure 2: Progressively Refined Differentiable Physics (PRDP) reduces the training time of neural networks containing numerical solver components (c). The fidelity of iterative components is increased only if validation metrics plateau. This leads to savings by using fewer iterations in the beginning (PR savings in (b)) and by ending at a refinement level significantly below full fidelity (IC savings in (b)). The achieved validation error is identical (a).  
+
+Differentiable Physics can be understood as a type of bilevel optimization. In the context of hyperparameter optimization (a typical bilevel optimization problem), Pedregosa (2016) explored the idea of successively refining an inner solver to make increasingly accurate updates in an outer optimizer. Under strict assumptions of convexity, it was shown that with a summable sequence of refinement levels (in terms of increasingly tighter tolerances for both forward and backward solve), convergence in the low-dimensional hyperparameter space can be achieved. We build upon this work but instead, treat the nonconvex learning of neural network parameters as an outer problem. Our inner problem is the most elementary operation in any scientific computing, the solution of a linear system of equations from the discretization of a physical model. In this more general setting, we observe that we cumulatively reduce inner iterations not only by progressive refinement but also by ending the refinement at a level significantly coarser than needed for full physics convergence. This is possible because of the approximative nature of neural network training for which highly accurate gradients are not required. Similar approaches have been investigated for Deep Equilibrium Models (Bai et al., 2019), which have nonlinear root-finding with dense Jacobians as the inner problem, e.g., by (Shaban et al., 2019; Fung et al., 2021; Geng et al., 2021). In contrast, we focus on the sparse linear systems arising from the discretization of partial differential equations (PDEs) admitting special solution characteristics that have been unexplored in the context of deep learning. For realistically large and sparse linear systems of equations, the prevalent class of solution methods are iterative linear solvers (Saad, 2003). By controlling the number of iterations in these solvers (and during their backward passes), we can directly balance physics refinement and computational cost.  
+
+Reducing the cumulative number of solver iterations performed throughout the network training results in considerable compute savings since linear solves typically dominate run times. However, the optimal refinement schedule and the sufficient level of refinement are problem-dependent. To automatically determine them during the network training, we present a novel algorithm, Progressively Refined Differentiable Physics, in which the refinement of the physics is adaptively increased if a plateau in terms of validation metrics is encountered. This idea is visualized in figure 2.  
+
+Our experiments focus on efficiently training neural networks with differentiable linear solvers in the loop. We address unrolled as well as implicit differentiation methods, showing that PRDP applies effectively to both. The approach is tested on training tasks across a range of PDE problems, including Poisson, heat diffusion, Burgers, and Navier-Stokes equations. Empirical insights into PRDP’s behavior are presented for 1D problems, and its real-world performance is validated through more complex 2D and 3D time-stepping problems. We demonstrate its effectiveness in a variety of settings such as inverse problems, differentiable physics losses, and correction-based approaches.  
+
+In summary, our main contributions are the following.  
+
+• We empirically demonstrate that full network performance can be achieved with a coarse level of physics refinement, well below the typical refinement required for full convergence, leading to significant computational savings.  
+
+• We introduce the Progressively Refined Differentiable Physics (PRDP) algorithm, which adaptively identifies the optimal level of physics refinement during training. • We validate the effectiveness of PRDP across various differentiable physics learning scenarios, demonstrating its broad applicability.  
+
+
+
+\section{2 DIFFERENTIATING ITERATIVE LINEAR SOLVERS  }
+
+
+A theoretical understanding of differentiating iterations can be gained through the example of an inverse problem involving a parameterized linear system $A u_{h}\:=\:b_{h}$ . Such systems arise in the numerical solution of discretized PDEs, where $h$ refers to the spatial discretization width (Ames et al., 2014). For this, both system matrix $\pmb{A}$ and right-hand side $b_{h}$ arise from the assem$\{{\pmb u}_{h_{}}^{[0]},{\pmb u}_{h}^{[1]},\dots{\pmb u}_{h_{}}^{[K]}\}\ =\ \{\Phi^{k}({\pmb u}_{h}^{[0]};{\pmb A},{\pmb b}_{h})\}_{k=0}^{K}$ $\Lambda(\theta)$ $\beta(\theta)$ hich should c $\Phi$ verge to the analytical solution $\pmb{u}_{h}^{[K]}\,\approx\,\pmb{u}_{h}^{\ast}\,=\,\pmb{A}^{-1}\pmb{b}_{h}$ , up to a given tolerance $\epsilon$ . We denote the number of solver iterations required to achieve this tolerance by $K_{\epsilon}$ . Clearly, the set of parameters $\boldsymbol\theta\in\mathbb{R}^{P}$ affect the solution asnoldu triiognh to-fh atnhde  lsiindeea $\mathcal{P}_{K}$ eaqnuda ttihoenns $\pmb{u}_{h}^{[K]}$ lovyiai nfgir stth ea sisteermatbolirn tfhoer tsetmep sm. The inverse problem is solved by performing an optimization over the parameter space, aiming to minimize the discrepancy against a reference solution $\pmb{u}_{h}^{r}$ via  
+
+$$
+\operatorname*{min}_{\theta}\quad L(\theta)=l(u_{h}(\theta))=\frac{1}{2}\|u_{h}(\theta)-u_{h}^{r}\|_{2}^{2}\quad\mathrm{s.t.}\quad\Lambda(\theta)u_{h}=\beta(\theta).
+$$  
+
+This forms a bilevel problem where the outer optimization concerns minimizing the loss $L(\theta)$ , while the inner optimization pertains to solving the linear system $\mathcal{P}_{K}$ . Then, the loss function’s evaluation can be explicitly written as $L(\theta)=l(\mathcal{P}_{K}(\theta))$ .  
+
+Solving the outer optimization using a first-order method requires the gradient $\nabla_{\theta}L$ . We can differentiate this chained function using reverse-mode automatic differentiation (AD, Griewank & Walther (2008)) to find the (transposed) gradient as  
+
+$$
+(\nabla_{\theta}L)^{T}=\bar{\theta}^{T}=\left(\vec{1}^{T}\ \underbrace{J_{l}|_{\mathcal{P}_{K}(\theta)}}_{\mathrm{primal\;inacc.}}\right)\ \underbrace{J_{\mathcal{P}_{K}}|_{\theta}}_{\mathrm{adjoint\;inacc.}}.
+$$  
+
+Clearly, the quality of the gradient depends on the number of iterator steps $K$ . Inaccuracies in the physics operator $\mathcal{P}_{K}$ propagate to the loss gradient $\nabla_{\theta}L$ through two sources: primal inaccuracy, i.e., the Jacobian of the loss function $J_{l}$ evaluated at the approximate solution $\mathcal{P}_{K}(\theta)$ , and adjoint inaccuracy, i.e., the Jacobian $J_{\mathcal{P}_{K}}|_{\theta}$ of the (approximate) iterative solver itself.  
+
+
+
+\section{2.1 LINEAR SOLVER VJPS  }
+
+
+AD frameworks do not assemble the full Jacobian; rather, they employ vector-Jacobian products (VJP) to reverse-propagate the gradient information (Murphy, 2023; Blondel & Roulet, 2024). The programmatic implementation for the VJP of the loss function $\bar{\pmb{u}}_{h}^{T}=\vec{1}^{T}\,J_{l}|_{\mathcal{P}_{K}(\theta)}$ is straightforward to perform via AD. Conceptually, there are two approaches.  
+
+Implicit Differentiation The backpropagation over the iterative linear solve can be framed as the solution of another linear system in terms of an auxiliary variable $\lambda$ with $\pmb{A}^{T}\lambda=\bar{\pmb u}_{h}$ . This requires the transpose system matrix $A^{T}$ . Implicit differentiation over any kind of implicit relation gives rise to a linear solve with the system’s linearized form being transposed. It can be derived automatically with AD tools (Blondel et al., 2022). Having a linear solve in the primal execution as well is a special case, as the same system matrix appears in the forward as well as the backward pass. Hence, it is reasonable to employ the same iterator in the VJP as in the primal, but with the transposed system matrix and the different right-hand side $\Phi(\cdot\,;A^{T},{\bar{\mathbf{u}}}_{h})$ . The number of iterates required to converge can be different from the primal and provide a way to control the adjoint inaccuracy.  
+
+Unrolled Differentiation Unrolled differentiation applies AD directly to an iterative program, treating each iteration as an individual computational step. It thereby accesses the VJP through the iterator $\Phi$ and accumulates each iterate’s contribution. This inherently requires access to all primal iterates. Since the AD engine unrolls as many iterations as in the primal pass, the adjoint accuracy is naturally coupled with the primal accuracy.  
+
+
+
+\section{2.2 SCHEDULING INNER ITERATIONS  }
+
+
+Since the outer problem of equation 1 is solved iteratively, the gradient $\nabla_{\theta}L$ can be coarse at the beginning of the outer iterations and only requires the highest fidelity towards the end (Pedregosa, 2016). This fundamental idea was developed in the domain of hyperparameter optimization, and we demonstrate its application to physical inverse problems. Consider the Poisson equation, which is a prototypical elliptic partial differential equation found in many areas of science and engineering. Most discretization techniques lead to a linear system of equations with $N$ degrees of freedom (for an example discretization, refer to section D.1).  
+
+$$
+\Delta u(x)=-p(x,\theta),\ x\in\Omega\subset\mathbb{R}^{D}\quad\implies\quad A u_{h}=b_{h},\ u_{h},b_{h}\in\mathbb{R}^{N},A\in\mathbb{R}^{N\times N}
+$$  
+
+We consider a setting on the one-dimensional unit interval $\Omega=(0,1)$ with homogeneous Dirichlet boundary conditions, $u(0)\,=\,0\,=\,u(1)$ . Assuming the parameter space is one-dimensional, we design the right-hand side as $p(x,\theta)\ =\ \theta\sin(2\pi x)$ and discretize it on the domain. The outer optimization problem over $\theta\in\mathbb{R}$ can be exactly solved in this case.  
+
+We employ a Jacobi scheme to solve the linear system which converges to $\epsilon=$ $10^{-5}$ within $K_{\epsilon}=600$ iterations; so does its unrolled Jacobian. Under a gradient descent optimizer in the parameter space of $\theta$ , it requires a total of 125 outer iterations to bring the relative parameter suboptimality against $\theta^{r}$ also down to $10^{-5}$ . By using simple scheduling that starts the outer optimization at a coarse inner resolution of $K\,=\,25$ , and progressively increases the inner iterations by $\Delta K=6$ in every outer iteration, all the way to $K_{\epsilon}$ , we can reduce the overall computational cost of the optimization while achieving the same parameter suboptimality. These results are visualized in figure 3. Despite requiring slightly more outer iterations, fewer inner iterations are necessary. This results in an overall reduction of $2\bar{8}\%$ of the total num  
+
+![](images/9b16f3585ddb3cab9a60729b6a2f38f67d4731f1591a8d1cdc52ebf61acc1cea.jpg)  
+Figure 3: Progressively refining the differentiable physics during outer optimization of a Poisson inverse problem achieves full convergence of the parameter with fewer cumulative iterations of the physics solver, leading to progressive refinement (PR) savings.  
+
+ber of inner iterations. These savings represent one component of the final cost savings. As they are obtained due to scheduling fidelity of the physics solve, we denote them as progressive refinement (PR) savings.  
+
+
+
+\section{2.3 NETWORK TRAINING UNDER INCOMPLETELY CONVERGED DIFFERENTIABLE PHYSICS  }
+
+
+Going beyond simple convex inverse problems, more sophisticated compute graphs arise. For example, assume the linear system is assembled from a prior variable that is given as the output of a neural network $\pmb{g}_{h}:=\pmb{f}(\cdot\,;\theta)$ (ignoring the input to the network for now). In this case, we have $A\,=\,\Lambda({\pmb g}_{h})$ and $b_{h}\,=\,\beta(g_{h})$ . Hence, the optimization over $\theta$ turns into the nonconvex learning problem in the weight space of the neural network. The extended reverse-mode AD operation reads  
+
+$$
+(\nabla_{\theta}L)^{T}=\bar{\theta}^{T}=\left(\left(\vec{1}^{T}\:J_{l}|_{\mathcal{P}_{K}(f(\cdot\,;\theta))}\right)\:J_{\mathcal{P}_{K}}|_{f(\cdot\,;\theta)}\right)J_{f}|_{\theta}.
+$$  
+
+The approximate solution to the linear system of equations using $K$ steps and its differentiation remain the sources of gradient inaccuracy. Yet, the effect of the neural network alters the solution characteristics of the iterative linear solver through the assembly of the system matrix (influencing its spectrum) and right-hand side.  
+
+Conversely, we hypothesize that neural network training can also work under approximate gradients. To illustrate this, consider the one-dimensional heat equation on a periodic unit interval with a timeimplicit discretization  
+
+$$
+\frac{\partial u}{\partial t}=\nu\frac{\partial^{2}u}{\partial x^{2}},\;x\in(0,1)\implies(I-\nu\Delta t\,\mathcal{L}_{1})u_{h}^{[t+1]}=u_{h}^{[t]},
+$$  
+
+where ${\mathcal{L}}_{1}$ represents the matrix from the spatial discretization of the second derivative (see section D.2 for more details). The physics operator now advances from one step to the next $u_{h}^{[t+1]}=$ $\mathcal{P}(\pmb{u}_{h}^{[t]})^{1}$ . Consider the scenario in which a neural network performs a first prediction in time from an initial state, i.e., $\pmb{u}_{h}^{[1]}=\pmb{f}(\pmb{u}_{h}^{[0]};\pmb{\theta})$ , followed by the physics operator involving $K$ iterator steps which provides the second time step solution u[h2][K] = PK(u[h1 ]). The loss in equation 1 is computed against a reference given by applying the converged physics operator twice $\pmb{u}_{h}^{[2],r}\,=\,\mathcal{P}_{K_{\epsilon}}^{2}(\pmb{u}_{h}^{[0]})$ . Hence, the network is trained to emulate one application of $\mathcal{P}$ . We solve the linear system of equations using the Jacobi method (B.1), which converges within $K_{\epsilon}~=~25~\$ iterations. The implicit differentiation’s linear solve requires equally many iterations.  
+
+Figure 4 shows the results of multiple network training runs performed at different levels of physics refinement, i.e., different values of $K$ that are kept constant for each training run. We observe that beyond a refinement threshold $K_{\mathrm{max}}$ , no further improvements of the neural emulator’s performance on a validation metric are noticeable. Hence, we conclude that networks can attain a high level of accuracy, even when trained through incompletely converged (IC) physics. As explained in equation 2, this incomplete physics convergence subsumes coarseness of its Jacobian. In the example of the heat emulator, we obtain $K_{\mathrm{max}}\,=\,10$ , which reduces the number of physics solver iterations for training by $60\bar{\%}$ . We denote this second type of reductions as $I C$ savings.  
+
+![](images/5555ca52d64af83f8a6fcd39555d59a643ec03fed116660c227641bb9cf2dde5.jpg)  
+Figure 4: Network accuracy does not improve beyond a refinement level of differentiable physics $\left(K_{\operatorname*{max}}\right)$ significantly lower than full convergence $(K_{\epsilon})$ constituting incomplete convergence (IC) savings.  
+
+While we could not isolate a single cause   
+for these IC savings, we hypothesize that it is likely due to a combination of factors: (1) the more critical components of the gradient may converge more rapidly than less important ones, (2) the inherent noisiness of neural network training due to stochastic mini-batching, (3) the usage of momentumbased optimizers, and (4) the inherently approximative nature of machine learning models. Taken together, these factors presumably reduce the need for full convergence in the differentiable physics solver, resulting in very substantial cost savings.  
+
+
+
+\section{3 PROGRESSIVELY REFINED DIFFERENTIABLE PHYSICS  }
+
+
+The inner iterations saved by progressive refinement (PR) and incomplete convergence (IC) can greatly reduce training time without impeding accuracy. However, a suitable refinement schedule and $K_{\mathrm{max}}$ are unknown a priori. They depend on the PDE, its discretization (given by $\Lambda$ and $\beta$ ), the iterative linear solver, and the learning dynamics.  
+
+To arrive at a practical method, we automate the progressive refinement and the detection of $K_{\mathrm{max}}$ based on the observation that training progress in terms of a validation metric stagnates when the physics inaccuracy is too large. This stagnation corresponding to different physics refinement levels is exemplified in figures 3 and 4. Conversely, we track training progress over time to automatically  
+
+![](images/96ee00d120a52cbe60ee39ab9b2cea44d95baf957a47f05ebad5c58a7c21cacd.jpg)  
+
+Listing 1: A typical mixed-chain learning pipeline (figure 1) as used in our neural emulator learning experiments. Training begins with coarse physics, using, e.g., 1 solver iteration. The should refine function applies PRDP, determining when to refine and progressively increasing the inner solver iterations during training.  
+
+increase physics refinement by $\Delta K$ linear solver iterations when training plateaus. Typically PRDP starts at $K_{0}=1$ .  
+
+281   
+282   
+283   
+284   
+285   
+286   
+287   
+288   
+289   
+290   
+291   
+292   
+293   
+294   
+295   
+296   
+297   
+298   
+299   
+300   
+301   
+302   
+303   
+304   
+305   
+306   
+307   
+308   
+309   
+310   
+311   
+312   
+313   
+314   
+315   
+316   
+317   
+318   
+319   
+320   
+321   
+322   
+323  
+
+1. Validation metric plateaus: If the ratio of the latest validation error and the value of several grace intervals $\delta$ earlier, $r\,=\,\tilde{L}_{\mathrm{val}}^{[-1]}/\tilde{L}_{\mathrm{val}}^{[-\delta]}$ , is above a threshold $r\,>\,\tau_{\mathrm{step}}$ , it indicates that the network has achieved the highest possible accuracy at the current refinement level. Then, subject to the following checks, the refinement is increased by $\Delta K$ . We record the validation metric before refinement as a checkpoint $c\gets\tilde{L}_{\mathrm{val}}^{[-1]}$ . Identifying this trend leads to full utitilization of each refinement level and contributes the PR savings.  
+
+Controlling Refinement Given an exponentially smoothed history of validation metrics $\{\tilde{L}_{\mathrm{val}}^{[e]}\}_{e}$ after a representative training interval, for which we can either use epochs or a fixed number of update steps, we distinguish three trends:  
+
+![](images/aaf194545a863903e818846ecb86607b6392d750ff3f5b20dc3382cb78457f5b.jpg)  
+
+2. Adequate refinement is achieved: We compute the improvement of the current plateaued validation metric against the checkpoint, $r_{c}\,=\,\tilde{L}_{\mathrm{val}}^{[-1]}/c$ . If the stagnation is greater than its threshold, i.e., $r_{c}>\tau_{\mathrm{stop}}$ , the refinement level is retained This identifies the adequate level of refinement necessary, $K_{\mathrm{max}}$ , enabling the IC savings.  
+
+3. Initially divergent regime: For some scenarios, there is a minimum number of iterations $K_{\mathrm{min}}$ which if $K<K_{\operatorname*{min}}$ lead to the convergence of the network to a worse value than its initialization, e.g., for $K=1$ and $K=2$ in figure 4. To overcome this, we also refine if $r_{c}>1.0$ .  
+
+Figure 5: Top: the typical training progress of a neural network supported by PRDP, showing the ratios $r$ and $r_{c}$ . Bottom: a simplified flowchart representation of the PRDP control algorithm.  
+
+Figure 5 illustrates the basic concept of the PRDP control algorithm. The exact algorithm is detailed in pseudocode in Algorithm 4. Its implementation in a training pipeline that uses differentiable physics is represented by the should_refine function in listing 1.  
+
+Applying Refinement Intrinsically, PRDP pertains to refinement of the primal physics. As we showed in section 2.1, the adjoint refinement is controlled based on the kind of differentiation used. In implicit differentiation, an additional linear system solve is performed via a custom differentiation rule. This approach inherently decouples the convergence of the primal and its Jacobian. We maintain their coupling by using the same solver and number of inner iterations for the primal solve and the VJP solve. This setup ensures that adjustments to the number of inner iterations consistently affect the primal and the VJP. When using unrolled differentiation, progressive refinement of the primal trivially extends to progressive refinement of the Jacobian. This is because the number of iterations unrolled by the automatic differentiation engine is the same as that of the primal solve.  
+
+![](images/fd97dc0c037fcfdd82ebd0fb8ed19d818389686729b097a56eb5f7b2cd933a88.jpg)  
+Figure 6: PRDP achieves the same network accuracy as fully converged physics (baseline in dark purple). It does so by adjusting physics accuracy adaptively over the training if validation performance plateaus, which is particularly noticeable in Heat 2D.  
+
+
+
+\section{4 EXPERIMENTS  }
+
+
+To validate our approach across problems of varying complexities, a combination of different learning and physics scenarios are chosen. This includes the convex optimization of an exactly solvable inverse problem with the Poisson equation as described in section 2.2, the learning of autoregressive neural emulators in the spirit of Bar-Sinai et al. (2019) and Brandstetter et al. (2022) for the diffusion and Burgers equation but with a loss setup involving differentiable physics, and third, the learning of a neural-hybrid emulator in a setting similar to Um et al. (2020). When training neural networks, our results show the aggregation over ten different initialization seeds. The validation metric used is the normalized mean squared error (nMSE) over the validation dataset.  
+
+
+
+\section{4.1 LINEAR INVERSE PROBLEM  }
+
+
+In section 2.2, we demonstrated the potential progressive refinement savings on a doublyconvex inverse Poisson problem when employing a pre-defined linear scheduling of inner iterations across outer iterations. This schedule was hand-tuned based on exhaustive runs. PRDP is designed to be problem-independent and adjust the inner iterations adaptively. To confirm this, we apply PRDP in the same setting and achieve a saving of $33\%$ due to progressive refinement. This is slightly higher than the manually achieved $28\%$ .  
+
+Moreover, we extended this inverse problem to a three-dimensional parameter space, with each entry scaling the first three eigenmodes, and covered a combination of different setups, including the steepest descent solver (SD), and implicit differentiation (Impl) next to unrolled differentiation (Unr). The results presented in the table to the right show that PRDP universally applies to each combination and is, hence, agnostic to the linear solver  
+
+![](images/c5cf24f3968b4a6763d6d236dfe7f0de3ebe9b6bd313fb72266db204f0e7113e.jpg)  
+
+and the differentiation method. For brevity, we only list the PR savings achieved using PRDP by displaying the cost of optimization with $K_{\epsilon}$ and the corresponding reduction (Red.). Importantly, under the larger parameter space within each of the four setups, PRDP works equally well, achieving PR savings of $48\%$ and $4\bar{3}\%$ for the Jacobi method and the steepest descent solver, respectively.  
+
+378   
+379   
+380   
+381   
+382   
+383   
+384   
+385   
+386   
+387   
+388   
+389   
+390   
+391   
+392   
+393   
+394   
+395   
+396   
+397   
+398   
+399   
+400   
+401   
+402   
+403   
+404   
+405   
+406   
+407   
+408   
+409   
+410   
+411   
+412   
+413   
+414   
+415   
+416   
+417   
+418   
+419   
+420   
+421   
+422   
+423   
+424   
+425   
+426   
+427   
+428   
+429   
+430   
+431  
+
+4.2 LINEAR NEURAL EMULATOR LEARNING  
+
+We train a multilayer perceptron (outer problem) to function as an autoregressive emulator, i.e., a replacement for the numerical time stepper of a heat diffusion equation. Following the differential physics paradigm, the numerical heat equation solver (inner problem) is included in the gradient loop  
+
+![](images/172a4e286ee825eef3acbf17fada49200709c2454dfef76cb1cf0a107ecb907f.jpg)  
+Figure 7: Total Inner iters in Heat 1D, 2D & 3D.  
+
+during training. This training pipeline is depicted in figure 1. In section 2.3, using a 1D case of the same setup, we demonstrated that savings due to incomplete convergence are actually achievable, and that they are likely caused by the nature of the training in deep learning. We identified $K_{\mathrm{max}}$ based on an exhaustive search of different $K$ values. This is infeasible in practice. Hence, PRDP is designed to automatically find the upper refinement threshold and prevent further superfluous refinement. In figure 6(a), (b) & (c), this can be seen as its convergence follows certain refinement levels. We can confirm that the same $K_{\mathrm{max}}=10$ is found by PRDP constituting the aforementioned $60\%$ IC savings. Moreover, as figure 7(a) reveals, the total PRDP savings are $79\%$ against the fully converged run with $K_{\epsilon}=25$ because PRDP additionally contributes $19\bar{\%}$ savings due to progressive refinement. We repeated a similar experiment in two and three dimensional settings. In the 2D case, the difference between $K_{\epsilon}=43$ and $K_{\mathrm{max}}=12$ constitutes $72\%$ IC savings. Together with $14\%$ PR savings, this totals $86\%$ savings due to applying PRDP as visualized in figure 7. Similarly, training a ResNet (He et al., 2016) in the 3D case, the total savings due to PRDP were $81\%$ . This corresponded to a reduction in total training time by $24\%$ and $78\%$ in the 2D and 3D cases, respectively, which underscores PRDP’s potential for large computational savings in more difficult, higher-dimensional settings.  
+
+
+
+\section{4.3 NONLINEAR NEURAL EMULATOR LEARNING  }
+
+
+The preceding tests constituted inner problems where only the linear system’s right-hand side was dependent on the trainable parameters. We expect our PRDP algorithm to work equally well when training through inner problems with a non-constant matrix assembly function $\Lambda$ . To illustrate this, we train a ResNet to function as an autoregressive emulator for the one-dimensional Burgers equation on a periodic unit interval with a time-implicit upwinding discretization. Additionally, this yields a nonsymmetric matrix requiring the more sophisticated GMRES solver (Saad & Schultz, 1986). We use a linearization around the previous point in time, resulting in an Oseen problem (Turek, 1999). When training a ResNet under a similar mixed scenario as in section 4.2, we can again confirm the working of PRDP in this case. It amounts to $30\%$ savings by incomplete convergence reducing $K_{\epsilon}=23$ to $K_{\mathrm{max}}=16$ . An additional $29\%$ PR savings yield a total of $59\%$ PRDP savings. The Burgers emulation was particularly challenging, requiring us to set $K_{0}\,=\,4$ to overcome a strongly divergent regime if the physics is too coarse at the beginning of training. This is noticeable in the initial epochs in figure 6(c). This figure also shows that since the fanning between the different (convergent) refinement levels is not as strong as before, the IC savings are lower. However, we still see significant savings due to progressive refinement.  
+
+![](images/6439f47634bdf40e2f710158c7a8f57d3afc40c8abf1c56a94fa46843449664c.jpg)  
+Figure 8: Total inner iters in Burgers.  
+
+4.4 NEURAL-HYBRID EMULATOR FOR THE NAVIER-STOKES EQUATION  
+
+Tightly combining classical numerical solvers and neural networks is a promising research direction (Kochkov et al., 2021; Um et al., 2020). It differs from our previous experiments in that the solver is not just part of the training compute graph but will also be executed during the inference of the model.  
+
+We mimic the setup of Um et al. (2020) to have a neural component correct the discretization error of an incompressible Navier-Stokes solver by training it against a reference produced on a higher resolution of discretization.  
+
+The training and evaluation setups are shown in figure 9. The outer and inner problems correspond to the network training and the NavierStokes solver in the training loop, respectively. Similarly to the Burgers example, we choose an upwind-based discretization with the linearization around the previous step in time. The additional incompressibility constraint leads to a saddle point structure (Turek, 1999). We choose to solve it in a coupled form with the GMRES algorithm (Saad & Schultz, 1986).  
+
+![](images/3310aa34f7885153110331762802ec2f4db6e5a2a54f8a1e7214ed747efb56fa.jpg)  
+Figure 9: The training (top) and evaluation (bottom) pipelines for neural-hybrid emulator.  
+
+In this complex scenario, PRDP likewise gives substantial benefits: It is able to save $65\%$ inner iterations due to incomplete convergence and $16\%$ iterations in progressive refinement. Ultimately, reducing the number of iterations by a total of $81\%$ results in a reduction in wall clock training time by $62\%$ , as shown in figure 2(c). Since neural-hybrid approaches execute the fully converged physics solver during inference and consequently during validation, PRDP’s reliance on a validation metric necessitates this additional cost. In our experiments, we found that compared to training with fully converged physics without computing the validation loss, PRDP was still faster by $57\%$ .  
+
+![](images/f9712e3c32cfc65b9fe5e156135a5d7996f36174f8d650dd1ec163ddfdfd9523.jpg)  
+Figure 10: Total inner iters in Navier Stokes.  
+
+
+
+\section{5 RELATED WORK  }
+
+
+Differentiation through implicit relations Fischer (1991) established an implementation framework for unrolled differentiation and investigated the convergence of the derivative, focusing on linear solvers. Charles (1992) extended this work to a broader class of iterative processes. As an alternative to unrolled differentiation, Christianson (1998) derived the implicit differentiation rules over linear solves. Beyond linear systems, implicit differentiation has since gained prominence in the machine learning community, particularly for hyperparameter optimization (Bengio, 2000) and other bilevel optimization (BLO) applications that require differentiating through inner optimizations, such as deep equilibrium models (Bai et al., 2019) and meta-learning (Andrychowicz et al., 2016). We view differentiable physics (Thuerey et al., 2021) as another type of BLO with the specialty of sparse linear systems. The practicality of implicit differentiation is largely due to its reduced memory footprint and lower reverse-mode computational cost, especially as modern automatic differentiation (AD) tools can automatically handle the necessary propagation rules (Blondel et al., 2022). Additionally, implicit differentiation allows for the black-box use of solver implementations, enabling the integration of third-party components into differentiable computational graphs (Giles, 2008). However, unrolled differentiation remains an active research area, with work focusing on non-asymptotic analyses (Scieur et al., 2022) and other aspects (Maclaurin et al., 2015; Franceschi et al., 2017; Grazzi et al., 2020; Ji et al., 2021). Analysis and cost-reduction of bilevel optimization To address the computational cost of bilevel optimization, Fung et al. (2021) presented Jacobian-free backpropagation, where the Jacobian of the implicit solver is approximated as the identity, eliminating the need for adjoint linear solves. Geng et al. (2021) introduced phantom gradients, where the matrix inversion is replaced with an approximate inverse, and provided theoretical guarantees on the convergence of stochastic gradient descent as the outer problem. Lorraine et al. (2020) approximates the implicit linear solves with a reduced number of conjugate gradient steps. Moreover, Shaban et al. (2019) and recently Bolte et al. (2023) discuss unrolled differentiation through only a reduced number of iterations. All the aforementioned works consider (what we call) incomplete convergence (IC) savings, albeit in the setting of deep equilibrium models (Bai et al., 2019) or hyperparameter optimization (Feurer & Hutter, 2019). On the other hand, Pedregosa (2016) studied approximate hypergradients by adjusting the tolerances of inner primal and implicit linear solves following a pre-defined schedule. This work proves (what we call) progressive refinement (PR) savings. Prior to this, Domke (2012) investigated outer training with unrolled AD through incompletely converged iterations, specifically for gradient descent, heavy ball, and L-BFGS methods as inner optimizers. They note the advantage of implementing incomplete convergence using the number of inner iterations rather than inner tolerance. Our approach uniquely combines PR and IC savings – through both unrolled and implicit differentiation – targeting iterative solvers for sparse linear systems embedded within neural network training. To our knowledge, no prior work has applied these techniques in this context.  
+
+
+
+\section{6 LIMITATIONS AND OUTLOOK  }
+
+
+Limitations While PRDP is designed to work across a range of differentiable physics settings, there are, of course, way more potential linear systems that can arise, all with their specific characteristics. Albeit we believe that the approach using scheduling over iterations rather than scheduling via tolerances might be more generally applicable, it remains to be tested how PRDP applies to unstructured discretizations in higher dimensions potentially also involving multiple physics. PRDP is limited to settings that involve iterative linear solvers. As such, it can not be used for purely explicit numerical solvers (e.g., found in strongly hyperbolic problems) or when the linear systems are solved spectrally (Kochkov et al., 2024). However, most other simulations in science and engineering entail linear solvers either due to more efficient implicit time stepping or when solving steady-state problems. Moreover, whenever dynamics are constrained, e.g., the incompressible Navier-Stokes equations, even if purely explicit time stepping is used, iterative processes are required to resolve the constraints.  
+
+Outlook and Impact Progressively Refined Differentiable Physics (PRDP) provides a means to exploit both savings due to progressive refinement and incomplete convergence, thereby greatly reducing the cost of neural network training with differentiable physics. This could enable settings that so far have been infeasible due to prohibitive expenses like long temporal unrollings or differentiable physics on high resolutions or in three dimensions.  
+
+Our work opens up many interesting directions for future investigations, such as smoother relations between the achieved plateau ratio $r$ and the conducted iterations/prescribed tolerance. Potentially, those could be faster than the linear increments we used in this work. For neural-hybrid emulators IC savings via $K_{\mathrm{max}}$ might also extend to the inference stage. So far, PRDP couples primal and adjoint (in-)accuracy. One can use the unique properties of either unrolled or implicit differentiation for more sophisticated approaches. This can include an imbalanced number of iterations in the primal solve and implicit linear solve. For unrolled differentiation, one can unroll a different number of iterations either reversely following Bolte et al. (2023) or Shaban et al. (2019) or from the beginning. Other levels of refinement than by the number of iterations of a linear solver are likewise interesting directions for future work, e.g., using differences in spatial or temporal resolution together with resolution-agnostic neural emulators.  
+
+
+
+\section{7 CONCLUSION  }
+
+
+This work investigated neural network training through incompletely converged differentiable physics. Our objective was to reduce the cost of gradient computation without sacrificing training accuracy. Prevalent research on training with incompletely converged gradients focuses on bilevel optimization problems, primarily in meta-learning or hyperparameter optimization contexts. This work extends the research in the differentiable physics space, focusing on iterative linear system solves associated with discretized differential operators.  
+
+We have demonstrated that neural networks can be trained through differentiable physics solvers significantly coarser than full convergence. Our approach of Progressively Refined Differentiable Physics combines compute savings from both progressive refinement and incomplete convergence. This yielded favorable outcomes across all our test scenarios. It makes initial training progress cheap using coarse physics and carefully improves training accuracy using adaptive physics refinement over time, ending the training at a refinement significantly below primal convergence. In total, we achieve up to $86\%$ fewer cumulative number of physics solver iterations than training with fully converged physics, which corresponded to $78\%$ reduction in the training time. Our approach has the potential for numerous practical improvements in learning pipelines that involve differentiable numerical solvers and could facilitate integrating simulators into training that were previously considered computationally infeasible.  
+
+
+
+\section{8 REPRODUCIBILITY STATEMENT  }
+
+
+To ensure reproducibility, we detail all physics parameters, discretization schemes, boundary con  
+ditions, iterative solvers, network architectures, optimizers, learning rate schedules, data generation   
+ Additionally, the full source code for   
+our experiments is included in the supplemental material and will be made publicly available upon   
+acceptance.   
+
+

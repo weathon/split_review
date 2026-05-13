@@ -1,0 +1,197 @@
+# OKR-Agent: An Object and Key Results Driven Agent System with Hierarchical Self-Collaboration and Self-Evaluation
+
+- Decision: Reject
+- Scores: 5, 5, 6, 3
+
+## Abstract
+In this study, we introduce the concept of OKR-Agent, which is designed to enhance the capabilities of Large Language Models (LLMs) in task-solving. Our approach utilizes both self-collaboration and self-correction mechanisms, facilitated by hierarchical agents, to address the inherent complexities of target tasks. Our key observations are two-fold: first, effective task solving demands in-depth domain knowledge and intricate reasoning, for which deploying specialized agents for individual sub-tasks can markedly enhance LLM performance. Second, task solving intrinsically adheres to a hierarchical execution structure, comprising both high-level strategic planning and detailed task execution. Towards this end, our OKR-Agent paradigm aligns closely with this hierarchical structure, promising enhanced efficacy and adaptability across a wide range of scenarios. Specifically, our framework includes two novel modules, i.e., hierarchical \textbf{O}bjects and \textbf{K}ey \textbf{R}esults generation and multi-level evaluation, both contributing to more efficient and robust task-solving. In practice, hierarchical OKR generation decomposes objects into multiple sub-objects and assigns new agents based on key results and agent responsibilities. These agents subsequently elaborate on their designated tasks and may further decompose them as necessary. Such generation operates recursively and hierarchically, culminating in a comprehensive set of detailed solutions. The multi-level evaluation module of OKR-Agent refines the solution by leveraging feedback from all associated agents, optimizing each step of the process. This scheme ensures the solution is accurate, practical, and meets the requirements of intricate tasks, enhancing the overall reliability and quality of the outcome. Experimental results demonstrate that our method outperforms previous methods on several tasks. Code and demo are available at \url{https://okr-agent.io/}.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+In this paper, the authors propose a novel method to enhance the performance of LLMs in solving general, complex tasks. First, the main task is decomposed to subgoals (i.e. objectives); Then for each objective, a special agent (persona) and evaluation metrics are generated. In the solving stage, each objective specific agent will propose solutions and got reviewed by associated agents before an answer is accepted. The authors demonstrate that their proposed system can outperform DramaTron in storyboard generation tasks, and also can provide more detailed trip plans that ChatGPT for vacation plans.
+
+### Strengths
+1) The paper is novel in that it hierarchically decomposes the tasks into smaller objects and tackle these objectives with specialized agents. 
+2) The results seem impressive, i.e. that it can generate good stories that beat specialized models.
+
+### Weaknesses
+1) The biggest draw back of this paper is that, it is just not clearly written. I will be great to include code examples and intermediate solving results in the experiment session to help understanding. 
+2) If I understand correctly, for each key result the LLM has to be invoked at least multiple times during solution proposal and review. So overall this system seems costly and slow from an inference perspective. It will be great if the authors can compare with other methods from this perspective.
+
+### Questions
+Since the paper is not well written, I highly recommend the authors to consult with a professional proofreading service. Also, if will be great if the authors can help clarify the following questions in the next version:
+
+1) The proposed system will decompose an task into many hierarchies. So who is deciding the number of hierarchies needed? From algorithm 1 it looks like an hyper parameter.
+2) Since the task will be broken into many objectives, are there causal or temporal links between different objectives? For example, how objective 2 can be solved should depend on objective 1's solution. 
+3) If so, how can the different agents coordinate to solve the objectives in the correct order? From algorithm 2 it seems that each agent is just independently updating a portion of the final answer.
+4) What if one agent cannot give a satisfying answer? What will happen to the whole task? 
+5) Are there any "replannings" where certain objectives should be removed/reconsidered?
+
+### Soundness
+2 fair
+
+### Presentation
+1 poor
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+The paper proposes a way of using self-collaboration and self-correction mechanisms to enhance LLMs.  The idea is that in-depth knowledge is
+required for complex tasks, so using specialized agents will increase performance.  Solving the task requires high-level strategic planning and low level execution.  The proposed framework uses a hierarchical generation of objects which are assigned to different role-specific agents and produces a multi-level collaborative evaluation. Experimental results on three different tasks show that the proposed approach outperforms other methods.
+
+### Strengths
+The main idea proposed seems novel and makes sense. It can provide a valuable paradigm for evaluation of complex tasks that are to be solved by LLMs.
+
+### Weaknesses
+The paper does not include enough details to be able to reproduce the work. For instance, the examples of the sentences used for generation prompt in Section 3.1 might not work with other LLMs or even with the same one after some time since LLMs get updated.
+
+The examples shown do not use quantitative assessments. There are human subjects evaluations  but no indication of which differences are statistically significant, so saying the method proposed outperforms other methods does not seem to be strongly supported by the results presented.
+
+### Questions
+It is not clear to me that the method you proposed is easy to replicate.  Can you explain what is needed to replicate your results?
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper presents the OKR-Agent, an advanced task-solving system that incorporates a hierarchical and self-collaborative approach to improve upon existing Large Language Model (LLM)-based methodologies. The system functions by breaking down tasks into Objectives and Key Results, allocating these to specific agents based on their roles within a workflow. This structure facilitates a more organized and coherent execution of tasks.
+
+The contributions of the paper include:
+
+1. Introducing a hierarchical and self-collaborative model for task decomposition and execution, which enables more structured and coherent task management.
+2. Proposing a multi-level self-evaluation mechanism that allows agents to provide comprehensive evaluations from multiple perspectives, enhancing the accuracy and quality of outputs across strategic and executional levels.
+
+The OKR-Agent was evaluated on tasks such as storyboard generation, creative writing, and trip planning, demonstrating superior performance in global task planning and detail generation. The results indicate that OKR-Agent is a significant step forward in the field of artificial intelligence, providing robust solutions for complex, multifaceted task-solving scenarios.
+
+### Strengths
+The paper tackles a compelling set of problems with its innovative integration of language agents and structured prompting, employing the Objectives and Key Results (OKR) framework to enhance task-solving capabilities. The concept is both novel and promising, as it fuses the flexibility of language-based AI agents with the goal-oriented precision of OKRs. This synergy enables the OKR-Agent to effectively decompose complex tasks into manageable sub-tasks, demonstrating a sophisticated approach to task execution. The idea of leveraging hierarchical structures to improve the clarity and efficiency of problem-solving is an excellent contribution to the field, showcasing a significant step forward in how AI systems can be structured for better performance and more coherent output.
+
+### Weaknesses
+Limited Comparative Benchmarking: The paper's comparison with existing methods seems constrained. A more extensive benchmark, including a variety of state-of-the-art systems, would better position the OKR-Agent's performance relative to the current landscape.
+
+Heavy Reliance on Subjective Evaluation: The paper predominantly uses subjective evaluations for performance assessment. Objective metrics and statistical validation could provide a more balanced and reproducible evaluation framework.
+
+Weakness in Evaluation Depth and Diversity: The paper lacks a diverse set of evaluation metrics. It primarily relies on subjective assessments, which, while valuable, may not capture the full performance spectrum of the OKR-Agent. Objective metrics like precision, recall, F1-score, or BLEU score for language tasks could provide a more comprehensive picture. The absence of these metrics is a significant weakness, as they are critical for substantiating the model's effectiveness across different scenarios and for different use cases.
+
+Insufficient Ablation Studies: The paper does not present in-depth ablation studies. Ablation studies are critical for understanding which components of the proposed method contribute most significantly to its performance. By systematically removing or altering parts of the OKR-Agent, researchers can gain insights into the importance of each feature. This omission means that the reader has limited understanding of why the OKR-Agent works and which aspects are essential for its success.
+
+Lack of Error Analysis: There is no detailed error analysis provided. An error analysis would help in understanding the limitations of the OKR-Agent and in which situations it might fail or underperform. This kind of analysis is crucial for iterative improvement and for setting realistic expectations for the model's deployment.
+
+Weakness in Comparative Analysis Justification: The paper does not thoroughly justify the selection of systems used for comparative analysis. Understanding why certain systems were chosen as benchmarks and others were not is important for assessing the validity of the comparison. Without this justification, it's challenging to determine the relative standing of OKR-Agent in the broader field.
+
+No Discussion on Model Robustness and Generalizability: The evaluation does not robustly test the generalizability of the OKR-Agent. It's unclear how well the agent would perform on tasks that were not part of the initial evaluation set, which is a significant weakness for claims of versatility and adaptability.
+
+### Questions
+1. How does the OKR-Agent manage the computational complexity and resource allocation when scaling to more complex tasks and a larger number of agents?
+
+2. In cases of ambiguous or poorly defined tasks, what mechanisms does the OKR-Agent use to ensure effective decomposition into Objectives and Key Results?
+
+3. Could you provide insights into how the OKR-Agent might be adapted for use in highly specialized or technical domains that differ from those tested?
+
+4. Are there any plans to conduct ablation studies to pinpoint the most critical components of the OKR-Agent's architecture for its task-solving performance?
+
+5. How does the OKR-Agent interface with external data sources, and what strategies are implemented to ensure the integrity and applicability of this external data?
+
+### Soundness
+3 good
+
+### Presentation
+2 fair
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes a hierarchical agent-based system called OKR-Agent for complex task solving. It utilizes a multi-level decomposition of objectives and key results along with role-specific agents and self-evaluations. Experiments on storyboard, trip planning, and creative writing tasks demonstrate enhanced performance over simple prompting.
+
+### Strengths
+The idea of hierarchical task decomposition and role assignment is logical and aligns well with real-world collaborative workflows.
+Multi-level self-evaluations from different agent perspectives are interesting and help refine the solution.
+
+### Weaknesses
+ - One of my major concerns is the limited technical novelty. Apart from the cute prompting, I did not see many method improvements from both technical and theoretical perspectives.
+
+- Limited evaluation in a narrow domain with limited baselines. I would expect more complex open-world LLM-agent benchmarking results, and more language models to be tested. Currently, only simple comparisons with ChatGPT (not sure which model version as well) can not justify why the proposed prompting framework can be generalized to different models.
+
+- More analysis is needed on the agent objectives, key results, and evaluation criteria to provide insights into what is being learned.
+
+- Agent coordination details are lacking - how are dependencies managed?
+
+- Safety mechanisms to prevent unbounded generation of objectives/agents need to be addressed.
+
+- No comparison to hierarchical planning methods from classical AI is presented.
+
+### Questions
+- How does the performance scale with increasing levels of hierarchy? Is there a sweet spot?
+- Can the approach work for very open-ended creative tasks without clear sub-objectives?
+- Has the approach been tested on goal-driven tasks like process planning vs just content generation?
+- What techniques are used to elicit useful evaluation criteria from the agents?
+- How sensitive is performance to the quality of the initial user prompt?
+- How difficult is it to construct such initial prompts from ambiguous and general tasks?
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+1 poor

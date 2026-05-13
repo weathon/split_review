@@ -1,0 +1,359 @@
+\title{Enhancing Large Language Models' Situated Faithfulness to External Contexts}
+
+\begin{abstract}
+Large Language Models (LLMs) are often augmented with external information as contexts, but this external information can sometimes be inaccurate or even intentionally misleading. We argue that robust LLMs should demonstrate situated faithfulness, dynamically calibrating their trust in external information based on their confidence in the internal knowledge and the external context. To benchmark this capability, we evaluate LLMs across several QA datasets, including a newly created dataset called \textit{RedditQA} featuring in-the-wild incorrect contexts sourced from Reddit posts. We show that when provided with both correct and incorrect contexts, both open-source and proprietary models tend to overly rely on external information, regardless of its factual accuracy. To enhance situated faithfulness, we propose two approaches: \textit{Self-Guided Confidence Reasoning} (SCR) and \textit{Rule-Based Confidence Reasoning} (RCR). SCR enables models to self-access the confidence of external information relative to their own internal knowledge to produce the most accurate answer. RCR, in contrast, extracts explicit confidence signals from the LLM and determines the final answer using predefined rules. 
+Our results show that for LLMs with strong reasoning capabilities, such as GPT-4o and GPT-4o mini, SCR outperforms RCR, achieving improvements of up to 24.2\% over a direct input augmentation baseline. Conversely, for a smaller model like Llama-3-8B, RCR outperforms SCR. Fine-tuning SCR with our proposed Confidence Reasoning Direct Preference Optimization (CR-DPO) method improves performance on both seen and unseen datasets, yielding an average improvement of 8.9\% on Llama-3-8B. In addition to quantitative results, we offer insights into the relative strengths of SCR and RCR. Our findings highlight promising avenues for improving situated faithfulness in LLMs. The data\footnote{\url{https://huggingface.git}} are released.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure*}[t]
+\includegraphics[width=\textwidth]{figures/system.png}
+\caption{Concept illustration of Self-guided Confidence Reasoning and Rule-based Confidence Reasoning. The goal is to enable the model to generate correct answers, regardless of input context accuracy, in contrast to direct input augmentation, which often blindly follows the context.}
+\label{fig:system}
+\end{figure*}
+
+Large Language Models (LLMs) can be enhanced by incorporating relevant external context~\citep{chen-etal-2017-reading,LewisPPPKGKLYR020} provided by automated retrieval systems, tools, users, or another model~\citep{MialonDLNPRRSDC23}. However, external information can often be unreliable, containing errors due to online misinformation, intentional disinformation stemming from malice~\citep{zou2024poisonedrag}, noisy human inputs, and outdated data~\citep{kasai2023realtime}. Prior research has demonstrated that LLMs can be too faithful to the external context, making them susceptible to being misled by unreliable contexts~\citep{petroni2020context,Xie2023AdaptiveCO,pmlr-v202-shi23a,shaier-etal-2024-desiderata}. 
+
+Instead of blindly following external information, a robust LLM should exhibit \textbf{situated faithfulness}, dynamically balancing its reliance on internal knowledge and external context. This means the model should trust its internal knowledge when it is correct or when external information is unreliable, while conversely leaning on external data when uncertain or when the external evidence is convincing. The key objective is to maximize the accuracy of the model's responses, irrespective of whether the external context is correct or incorrect. To achieve this, it requires strong reading comprehension skills to interpret and extract accurate information as well as \textbf{confidence reasoning}—the capacity to self-reflect on the confidence about the model's own internal knowledge, and contrast it with the external context to arrive at the most accurate final answer.
+
+We benchmark the current LLM's ability to perform situated faithful reasoning on several question-answering tasks, including FreshQA~\citep{Vu2023FreshLLMsRL}, NaturalQA~\citep{kwiatkowski-etal-2019-natural}, TriviaQA~\citep{joshi-etal-2017-triviaqa}, PopQA~\citep{mallen-etal-2023-trust}. These datasets reflect a diverse set of world knowledge across domains. To simulate both scenarios in which internal knowledge outperforms external evidence or vice versa, we pair each question with a correct context retrieved online and an incorrect context synthesized by LLMs. Besides leveraging automatically generated contexts of various kinds, we further examine how LLMs handle human-written incorrect contexts using \textit{RedditQA}---a new dataset that we create by sourcing incorrect contexts from Reddit posts containing real-world factual mistakes that lead to incorrect answers to corresponding questions. Concurrent work, ClashEval~\citep{Wu2024ClashEvalQT}, FaithEval~\citep{Ming2024FaithEvalCY} and DynamicQA~\citep{Marjanovic2024DYNAMICQATI} benchmark a similar problem but don't focus on solutions.
+
+We identify two classes of LLM-based approaches for confidence reasoning to improve situated faithfulness (\autoref{fig:system}):
+\textit{self-guided confidence reasoning} (SCR) and \textit{rule-based confidence reasoning} (RCR). In SCR, the model is informed that external information might be incorrect and is allowed to reason either implicitly or explicitly via chain-of-thought to arrive at the final conclusion. In contrast, RCR first extracts model's confidence signals regarding the internal knowledge and the external context, and then applies predefined rules to choose a source. 
+Our experiments show that: 1) For the model with strong reasoning abilities like GPT-4o and GPT-4o-mini, SCR outperforms RCR, while for a weaker model like Llama-3-8B, RCR performs better. 2) RCR's performance is limited by the noises and biases introduced during confidence extraction and rule design.
+3) The effectiveness of SCR can be further enhanced through our novel method, \textit{Confidence Reasoning Direct Preference Optimization} (CR-DPO), which enables the model to self-sample both correct and incorrect confidence reasoning paths and learn to prefer the optimal one using reinforcement learning. CR-DPO also improves generalizability to unseen data, boosting Llama-3-8B by +8.9\% on average. Our study benchmarks this problem, introducing robust methods and insights, making the enhancement of LLMs’ situated faithfulness a promising research direction.
+
+
+
+\section{Related Work}
+
+Language models with input augmentation~\citep{LewisPPPKGKLYR020,asai2024reliable} are valuable for many application scenarios but are susceptible to noisy contexts~\citep{petroni2020context,pmlr-v202-shi23a}.
+Past research have explored tailoring LMs to utilize only relevant contexts~\citep{li-etal-2023-large,weston2023system,yoran2024making}.
+These approaches however do not account for contexts that are relevant but contradict LLMs' parametric knowledge. While \cite{pan-etal-2023-risk} touch on the issue of directly incorrect contexts, their focus remains on the RAG setup and lacks a dedicated exploration of the LLM’s internal behavior.
+
+Facing such knowledge conflicts\citep{Xu2024KnowledgeCF}, LLMs exhibit enigmatic behaviors. They can be too receptive to external evidence~\citep{Xie0CL024, tan-etal-2024-blinded} and over-reliant on parametric knowledge~\citep{longpre-etal-2021-entity, jin-etal-2024-tug} at the same time. 
+\citet{shi-etal-2024-trusting} propose a fusion-in-decoder approach to trust context when sources are known to be reliable. \citet{yu-etal-2024-truth} resolve knowledge conflict by training a separate classifier with in-distribution data to remove untruthful information from context as a pre-processing step. However, it relies on in-distribution data and the model’s hidden states, limiting its practical use. Moreover, Doing so at the level of surface forms fails to consider various semantic granularities. Concurrent to our work, ClashEval~\citep{Wu2024ClashEvalQT}, FaithEval~\citep{Ming2024FaithEvalCY} and DynamicQA~\citep{Marjanovic2024DYNAMICQATI} also benchmark this problem but don't focus on providing an effective solution. 
+
+
+It has been shown that LLMs are capable of estimating the confidence in the correctness of their own response~\citep{kadavath2022language, Xiong2023CanLE}.
+In-context knowledge conflicts additionally require the model to corroborate the external with the internal to make reasoned comparisons to the final conclusion.
+Sharing perhaps the most similar idea to ours, concurrent work AstuteRAG~\citep{Wang2024AstuteRO} proposes to iteratively consolidate internal and external knowledge while considering source reliability. Their major setup leverages actual results from a commercial search engine, which presents an arbitrary mixture of correct, incorrect, and irrelevant evidence in a single context.
+Focusing on a clean evaluation of LLMs' ability to handle a specific context, our setup controls the type of evidence the model sees at an instance level. We further explore various methods, including confidence-based, self-evaluation-based, and DPO methods, to elicit models' ability to resolve knowledge conflicts--all of which perform effectively. Another concurrent work, KnowPO \citep{Zhang2024KnowPOKP},  also employs DPO to teach models how to resolve knowledge conflicts. However, their approach uses preference pairs based solely on final answers, while our CR-DPO method extends this by incorporating COT reasoning before the final answer. This not only enhances the model’s reasoning ability but also provides explainability regarding its final decision.
+
+
+
+\section{Problem Set-Up}
+
+\subsection{Formulation}
+Let $\mathcal{M}$ represent a QA model built on top of an LLM $\mathcal{G}$ (i.e. $\mathcal{M}$ can be either a standalone LLM or an LLM-based pipeline). Given a QA instance $x = (q, c)$, where $q$ denotes a question and $c$ denotes a context that contains an answer to $q$,%
+\footnote{We assume that $c$ always contains an answer to $q$, which can be correct or incorrect.}
+the model $\mathcal{M}$ generates an answer $a = \mathcal{M}(q, c)$.
+
+We define the correctness of the model’s answer $a$ with the function $y(a) \in \{0, 1\}$, where $y(a) = 1$ indicates that the answer $a$ is correct (e.g., an exact match with the ground truth) and $y(a) = 0$ indicates that the answer is incorrect. Let $a_c$ be the answer entailed by the context $c$, we define the correctness of the context $c$ with respect to the question $q$ using $y(c, q) \in \{0, 1\}$, where $y(c, q) = 1$ when $y(a_c)=1$, $y(c, q) = 0$ when $y(a_c)=0$. Similarly, let $a_{in}$ be the internal answer from the base LLM $\mathcal{G}$ without any context, where $a_{in}=\mathcal{G}(q)$. 
+
+\textbf{Situated Faithfulness} refers to the ability of the model $\mathcal{M}$ to provide a correct answer regardless of whether the external context $c$ is correct or incorrect.
+Therefore, improving situated faithfulness means maximizing the accuracy of the model’s answer, regardless of whether the context is correct or not. Specifically, this involves maximizing the following probabilities:
+\begin{itemize}
+    \item $\Pr(y(a) = 1 \mid y(c, q) = 1, y(a_{in})=1)$: The probability of providing a correct answer when both the context and the model’s internal answer are correct.
+    \item  $\Pr(y(a) = 1 \mid y(c, q) = 1, y(a_{in})=0)$: The probability of providing a correct answer when the context is correct, but the model’s internal answer is incorrect.
+    \item $\Pr(y(a) = 1 \mid y(c, q) = 0, y(a_{in})=1)$ The probability of providing a correct answer when the context is incorrect, but the model’s internal answer is correct.
+    \item $\Pr(y(a) = 1 \mid y(c, q) = 0, y(a_{in})=0)$: The probability of providing a correct answer when both the context and the internal answer are incorrect, which is unlikely to improve.
+\end{itemize}
+Following \cite{yu-etal-2024-truth}, we quantify situated faithfulness with metrics:
+
+\begin{itemize}
+\item \textbf{Accuracy Given True Contexts (Acc$_{t}$)}: the probability that the model outputs a correct answer given a correct context: $\Pr(y(a) = 1 \mid y(c, q) = 1)$ $\in [0, 1]$
+
+\item \textbf{Accuracy Given False Contexts (Acc$_f$)}: the probability that the model outputs a correct answer despite context being wrong: $\Pr(y(a) = 1 \mid y(c, q) = 0)$ $\in [0, \Pr(y(a_{in})=1)]$
+
+\item \textbf{Overall Situated Faithfulness}:  $SF=\frac{Acc_t+Acc_f}{2}$ $\in [0, \frac{\Pr(y(a_{in})=1)+1}{2}]$
+\end{itemize}
+The upper bound of Acc$_t$ is 100\%, as the model could theoretically achieve perfect accuracy when all contexts are correct. In contrast, Acc$_f$ is limited by the model’s internal accuracy, since additional wrong contexts can't help the model solve questions that it cannot answer. For overall situated faithfulness, the upper bound is the average of 100\% and the model’s internal accuracy.
+\subsection{Datasets}
+To comprehensively benchmark the situated faithfulness problem, we select a diverse set of question-answering datasets across various domains. Each question is tested twice, paired with both a correct and an incorrect context, incorporating contexts generated by both language models and humans.
+
+\subsubsection{RedditQA}
+While many QA datasets are accompanied with correct human-generated documents containing valuable supporting evidence, no existing dataset focuses on human-written documents with inaccuracies, raising questions on how models react to natural false contexts.
+To fill in this gap, we contribute a new dataset sourced from existing Reddit posts, which often contain unverified, inaccurate claims. Concretely, we first apply a claim detector to Reddit post summaries~(\citep{volske-etal-2017-tl}),
+filtering out those without significant factual claims. Then, GPT-4o evaluates whether the claims may contain inaccuracies. For claims flagged as incorrect or uncertain, GPT-4o generates a self-contained, multiple-choice world-knowledge question, providing the correct answer, a wrong answer, and two plausible alternatives. Next, we use a natural language inference model to check if the incorrect post indeed provides the wrong answer to the question. 
+
+Following the automated process, we conduct a human evaluation to ensure the validity of each question by verifying the following criteria: 1) Is the question concise, self-contained, and asking for verifiable factual information based on world knowledge? 2) Is the answer confirmed by reputable sources, such as authoritative websites (e.g., government websites, Wikipedia) or textbooks? 3) Does the Reddit post contain inaccuracies that lead to an incorrect answer? 4) Are the other plausible answer choices clearly wrong and potentially misleading? 5) Is verified evidence from online sources correctly paired with the context for the QA instance? If any of these criteria are not met, annotators attempt to correct the errors. For non-correctable data points, annotators will discard them.
+\subsubsection{Other QAs}
+We benchmark the ability of current LLMs to perform situated faithful reasoning across several question-answering tasks, covering diverse domains and varying difficulty levels.
+\begin{itemize}
+    \item \textbf{NaturalQA}~\citep{kwiatkowski-etal-2019-natural}: An open-domain dataset designed to simulate real-world search processes by focusing on naturally occurring questions.
+    \item\textbf{TriviaQA}~\citep{joshi-etal-2017-triviaqa}: Another open-domain dataset that consists of relatively easy questions, as the required knowledge is already memorized by most LLMs.
+    \item\textbf{PopQA}~\citep{mallen-etal-2023-trust}: Features open-domain questions of varying popularity, including low-popularity questions that models might not have memorized.
+    \item\textbf{FreshQA}~\citep{Vu2023FreshLLMsRL}: Contains questions with varying levels of time sensitivity  and different complexity, assessing both factuality and reasoning. To align with other QA datasets, we filter out data without a false premise.
+    \item\textbf{ClashEval}~\citep{Wu2024ClashEvalQT}: a contemporary dataset with world knowledge questions from multiple domains, each paired with both correct and perturbed incorrect contexts. This dataset was available at the time of writing this paper, and we have included it as part of our evaluation.
+\end{itemize}
+For TriviaQA, NaturalQA, and FreshQA, we retrieve correct contexts from relevant websites and verify them with a natural language inference model. If needed, GPT-4o generates supporting contexts. Wrong contexts are created by having GPT-4o modify correct contexts to lead to incorrect answers. For PopQA, we use ConflictQA contexts with preprocessing to filter noise. 
+
+
+
+\section{Methods}
+
+\label{sec:methods}
+
+We examine two sets of approaches to enhance LLMs’ situated faithfulness. The first is self-guided confidence reasoning (SCR), where the LLM is aware that the external context may be incorrect and estimates the confidence of both its internal knowledge and the provided context, reasoning through to the final answer. In contrast, the second approach, rule-based confidence reasoning (RCR), also involves estimating confidence for internal and external knowledge, but the final decision is made according to predefined external rules rather than the model’s own reasoning.
+
+\subsection{Self-Guided Confidence Reasoning}
+
+\textbf{Implicit Self-Guided Confidence Reasoning (ImplicitSCR)} The model is prompted that the provided context may be incorrect and must rely on its own judgment to assess the reliability of the context before providing a final answer. To encourage the use of internal knowledge, the context is presented after the question. After that, the model implicitly reasons about confidence during the decision-making process and outputs only the final answer. 
+
+\textbf{Explicit Self-Guided Confidence Reasoning-Explicit (ExplicitSCR)}
+the model first generates separate answers based on its internal knowledge (\S\ref{prompt: internal}) and completely faithful to the provided context. (\S\ref{prompt: complete}). The model then performs verbalized confidence reasoning using a chain-of-thought process. It begins by evaluating the confidence in its internal answer, reflecting on how it derived this answer based on known facts. Next, it assesses the reliability of the external context by cross-referencing it with the facts supporting its internal answer. The final answer is chosen by reasoning through both perspectives, balancing internal and contextual confidence. (See \S\ref{prompt: escr} for the details of the prompt.) 
+
+\textbf{Confidence Reasoning Preference Optimization (CR-DPO)} We train the model to learn verbalized confidence reasoning by optimizing its preferences between a pair of self-sampled reasoning paths. First, when the model’s internal answer is incorrect, we provide it with a correct external context and ask it to reason why the context is correct and its internal answer is wrong, resulting in a chosen reasoning path. Conversely, we lie to the model by telling it the context is incorrect and its internal answer is right, asking it to reason accordingly, generating a rejected reasoning path. When the model’s internal answer is correct, we repeat the same process, comparing correct internal reasoning with external context. (See \S\ref{prompt: sample} Prompts for these two processes)This approach allows the model to learn preferences between reasoning paths through direct preference optimization~\citep{Rafailov2023DirectPO}. Additionally, to encourage diversity in reasoning, we use dual sampling: for each instance, we sample two pairs of reasoning paths using different prompts and in-context examples. Following \cite{Pang2024IterativeRP}, we apply negative log-likelihood to DPO loss to improve the optimization of the reasoning process
+\subsection{Rule-based Confidence Reasoning}
+In this set of approaches, we define different types of confidence estimations for both LLMs' internal and context-based answers. The confidence estimation can be represented by a numerical score or a self-evaluation result. The reasoning process is then carried out by predefined heuristics, which determine the final answer by comparing these confidence estimates. All methods here follow the same procedure of 1) generate an internal answer and a context answer (completely faithful to the contexts even if it's wrong) separately; 2) they estimate confidence for each answer; 3) and utilize rules to select. 
+
+\textbf{Internal Evaluation (InternalEval)} The LLM self-evaluates the correctness of its internal answer with the prompt in \S\ref{prompt: internal eval}. If the self-evaluation suggests the answer is correct, the internal answer is selected; otherwise, the context-based answer is used.
+\textbf{Context Evaluation (ContextEval)}
+The model assesses the correctness of the context relative to the question (See \S\ref{prompt: context eval} for the prompt). If the context is deemed correct, the context-based answer is used; otherwise, the internal answer is selected.
+
+\textbf{Internal Confidence Thresholding (InternalConf)} The LLM evaluates its internal confidence in the internal answer. The reasoning rule here is that: if this confidence exceeds a predefined threshold, the internal answer is selected; otherwise, the model defaults to the context-based answer. The threshold could be prefined as 0.5, or it could be further tuned on a calibration set from the dev split of the same dataset if available. The confidence score could be sequence probability or other confidence elicitation methods like self-consistency. 
+\textbf{Context Confidence Thresholding (ContextConf)} The LLM assesses the reliability of the external context. If the confidence in the context surpasses a specified threshold, the context-based answer is chosen; otherwise, the internal answer is used. The threshold could be determined in the same way as Internal Conf. The confidence score could be estimated by the sequence probability of the answer when given the context or self-consistency as well.
+\textbf{(Calibrated) Token Probability Correction (TPC)} \citep{Wu2024ClashEvalQT} compares the confidence scores (mean token probabilities) between the model’s internal answer and the context answer, selecting the one with the higher score as the final answer—referred to as token probability correction. Since internal answer probabilities are generally more uniform, while context-based probabilities tend to be right-skewed, this method can be further improved by comparing percentiles of the confidence scores, rather than the raw values, resulting in calibrated token probability correction.
+
+\subsection{Other Baselines}
+\textbf{Direct Input Augmentation}
+The simplest and yet common implementation of RAG systems is directly concatenating a question with the corresponding contexts.
+We follow the same structure of the generative prompt described in \cite{yu-etal-2024-truth} where a simple instruction is inputted first, following the external context concatenated with the question, forming a prompt that is then provided to the model. The model is instructed to leverage the external context in generating the answer. We utilize 3-shot to make sure the answer is in the right format. (See \S\ref{prompt: dia} for the prompt)
+
+\textbf{Truth-aware Context Selection}
+Similar to context evaluation, Truth-aware context selection~\citep{yu-etal-2024-truth} filters out incorrect parts of the context at a granular sentence or token level using a classifier. Unlike rule-based methods that choose between internal and context-based answers, this approach feeds the filtered context back into the LLM to generate the final answer. However, it relies on hidden states, which are not accessible in proprietary models like GPT-4, and requires in-distribution training data, making it less comparable to methods that do not. Therefore, we adopt an alternative: LMs remove the untruthful sentences (TACS-LR) (See \S\ref{prompt: filter doc} for the prompt), and the refined context is used to produce the final answer.
+
+
+
+\section{Results}
+
+
+
+\setlength{\tabcolsep}{4pt}
+\begin{table*}[t!]
+\tiny
+\centering
+\begin{tabular}{l|ccc|ccc|ccc|ccc|ccc|ccc|c}
+\toprule
+\textbf{GPT-4o-m}& \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{RedditQA}} & \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{FreshQA}} & \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{ClashEval}} & \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{TriviaQA}}& \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{PopQA}}& \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{NaturalQA}} & \multicolumn{1}{c}{\cellcolor{gray!15}\textbf{Total}}\\
+Method & TR & FA & OV & TR & FA & OV & TR & FA & OV & TR & FA & OV & TR & FA & OV & TR & FA & OV & OV \\ 
+\midrule
+Closed-book &  &  & 80.7 &  &  & 53.0 &  &  & 20.0 &  &  & 81.7 &  &  & 56.7 &  &  & 62.0 & 59.0 \\
+DIA & 96.0 & 12.5 & 54.3 & 96.3 & 2.3 & 49.3 & 85.3 & 12.0 & 48.7 & 96.0 & 12.3 & 54.2 & 97.7 & 11.0 & 54.4 & 88.7 & 10.3 & 49.5 & 51.7 \\
+TACS (LR) & 93.8 & 16.5 & 55.2 & 86.3 & 4.6 & 45.5 & 76.3 & 14.3 & 45.3 & 92.3 & 16.0 & 54.2 & 76.3 & 14.3 & 45.3 & 86.0 & 15.7 & 50.9 & 49.4 \\
+\midrule
+\multicolumn{20}{c}{\cellcolor[HTML]{EFEFEF}\textit{Rule-based Confidence Reasoning (Evaluation-based)}} \\
+ContextEval & 90.3 & 53.4 & 71.9 & 77.3 & 35.7 & 56.5 & 86.7 & 11.7 & 49.2 & 92.3 & 47.4 & 69.9 & 91.0 & 53.0 & {\ul 72.0} & 86.6 & 36.3 & 61.5 & 63.5 \\
+InternalEval & 88.6 & 77.2 & 82.9 & 83.3 & 30.0 & 56.7 & 67.0 & 17.0 & 42.0 & 88.7 & 71.7 & 80.2 & 78.0 & 48.3 & 63.2 & 72.3 & 57.3 & 64.8 & 65.0 \\
+\midrule
+\multicolumn{20}{c}{\cellcolor[HTML]{EFEFEF}\textit{Rule-based Confidence Reasoning (Confidence-based)}} \\
+TPC & 92.0 & 25.6 & 58.8 & 88.7 & 22.7 & 55.7 & 82.7 & 20.3 & {\ul 51.5} & 94.7 & 39.7 & 67.2 & 95.0 & 17.7 & 56.4 & 87.0 & 34.3 & 60.7 & 58.4 \\
+ContextConf & 93.8 & 13.1 & 53.5 & 82.3 & 16.3 & 49.3 & 80.0 & 16.7 & 48.4 & 93.0 & 19.7 & 56.4 & 94.0 & 14.6 & 54.2 & 85.0 & 30.6 & 57.8 & 53.2 \\
+InternalConf & 82.3 & 79.5 & 80.9 & 83.6 & 38.3 & {\ul 61.0} & 64.6 & 20.6 & 42.6 & 89.6 & 77.0 & \textbf{83.3} & 84.0 & 50.0 & 67.0 & 84.0 & 49.3 & \textbf{66.7} & 66.9 \\
+\midrule
+\multicolumn{20}{c}{\cellcolor[HTML]{EFEFEF}\textit{Self-guided Confidence Reasoning}} \\
+ImplicitSCR & 91.5 & 79.0 & \textbf{85.3} & 93.7 & 26.3 &  60.0 & 89.3 & 25.3 & \textbf{57.3} & 96.3 & 48.0 & 72.2 & 97.0 & 48.3 & \textbf{72.7} & 82.0 & 50.0 & {\ul 66.0} & {\ul 68.9} \\
+ExplicitSCR & 92.0 & 73.9 & {\ul 83.0} & 82.7 & 47.0 & \textbf{64.9} & 82.0 & 17.0 & 49.5 & 92.3 & 71.3 & {\ul 81.8} & 93.0 & 51.0 & {\ul 72.0} & 80.3 & 51.0 & 65.7 & \textbf{69.5}
+\\
+\bottomrule
+\\
+\toprule
+\textbf{GPT-4o}& \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{RedditQA}} & \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{FreshQA}} & \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{ClashEval}} & \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{TriviaQA}}& \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{PopQA}}& \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{NaturalQA}} & \multicolumn{1}{c}{\cellcolor{gray!15}\textbf{Total}}\\
+Method & TR & FA & OV & TR & FA & OV & TR & FA & OV & TR & FA & OV & TR & FA & OV & TR & FA & OV & OV \\ 
+\midrule
+Closed-book &  &  & 84.1 &  &  & 63.3 &  &  & 39.0 &  &  & 90.7 &  &  & 81.0 &  &  & 66.7 & 70.8 \\
+DIA & 94.9 & 12.5 & 53.7 & 93.7 & 5.7 & 49.7 & 84.7 & 24.7 & 54.7 & 96.0 & 23.3 & 59.7 & 97.3 & 12.3 & 54.8 & 88.7 & 12.7 & 50.7 & 53.9 \\
+TACS (LR) & 96.0 & 17.0 & 56.5 & 81.3 & 9.3 & 45.3 & 82.7 & 25.7 & 54.2 & 96.0 & 26.7 & 61.4 & 96.7 & 21.3 & 59.0 & 88.3 & 20.7 & 54.5 & 55.1 \\
+\midrule
+\multicolumn{20}{c}{\cellcolor[HTML]{EFEFEF}\textit{Rule-based Confidence Reasoning (Evaluation Based)}} \\
+ContextEval & 92.6 & 66.5 & 79.6 & 87.7 & 44.0 & 65.9 & 81.3 & 23.0 & 52.2 & 94.3 & 71.3 & 82.8 & 96.7 & 73.3 & 85.0 & 86.7 & 51.3 & 69.0 & 72.4 \\
+InternalEval & 87.5 & 81.3 & 84.4 & 81.3 & 40.0 & 60.7 & 76.7 & 30.0 & 53.4 & 95.0 & 85.7 & {\ul 90.4} & 88.7 & 70.3 & 79.5 & 74.3 & 60.3 & 67.3 & 72.6 \\
+\midrule
+\multicolumn{20}{c}{\cellcolor[HTML]{EFEFEF}\textit{Rule-based Confidence Reasoning (Confidence Based)}} \\
+TPC & 94.3 & 71.6 & 83.0 & 87.0 & 39.7 & 63.4 & 77.0 & 39.0 & 58.0 & 94.3 & 75.3 & 84.8 & 96.7 & 66.7 & 81.7 & 84.0 & 50.3 & 67.2 & 73.0 \\
+ContextConf & 93.8 & 60.2 & 77.0 & 78.7 & 37.0 & 57.9 & 70.7 & 30.0 & 50.4 & 94.6 & 43.0 & 68.8 & 95.7 & 26.3 & 61.0 & 78.7 & 36.7 & 57.7 & 62.1 \\
+InternalConf & 89.8 & 78.9 & 84.4 & 83.7 & 50.0 & 66.9 & 61.6 & 40.6 & 51.1 & 93.0 & 88.0 & \textbf{90.5} & 88.7 & 78.7 & 83.7 & 78.6 & 59.6 & 69.1 & 74.3 \\
+\midrule
+\multicolumn{20}{c}{\cellcolor[HTML]{EFEFEF}\textit{Self-guided Confidence Reasoning}} \\
+ImplicitSCR & 92.6 & 75.6 & 84.1 & 82.0 & 54.0 & {\ul 68.0} & 86.0 & 44.3 & \textbf{65.2} & 94.7 & 85.7 & 90.2 & 96.0 & 76.7 & \textbf{86.4} & 83.3 & 66.7 & \textbf{75.0} & \textbf{78.1} \\
+EplicitSCR & 93.8 & 77.2 & \textbf{85.5} & 85.3 & 55.3 & \textbf{70.3} & 83.0 & 33.3 & 58.2 & 94.7 & 84.3 & 89.5 & 92.7 & 78.0 & {\ul 85.4} & 78.7 & 60.0 & {\ul 69.4} & {\ul 76.4}
+\\
+\bottomrule
+
+\end{tabular}
+
+\caption{Main Results of GPT-4o mini and GPT-4o. ``TR'' represents accuracy given all correct contexts, ``FA'' represents accuracy given all wrong contexts, and ``OV'' represents the overall situated faithfulness, the main metric we focus on. The best number is \textbf{bold} and the second best is \underline{underlined}.
+The main findings are: 1) SCR methods generally outperform other methods across datasets 2) RCR methods also outperform basic baselines, but worse than SCR.
+}
+\label{table:main_results_gpt-4o-mini}
+\end{table*}
+
+\subsection{Experimental Set-Up}
+We conduct experiments using three models: GPT-4o mini, GPT-4o, and Llama-3 8B. Our baselines include Direct input augmentation (DIA), Truth-Aware Context Selection (TACS).
+We compare these baselines with both implicit and explicit self-guided confidence reasoning (ImplicitSCR and ExplicitSCR), and a suite of rule-based methods including Token Probability Correction (TPC), Internal Confidence Thresholding (InternalCnf), Context Confidence Thresholding (ContextConf), Internal Evaluation (InternalEval), and Context Evaluation (ContextEval).  
+
+We also report the results of a closed-book method (i.e., internal answer accuracy) to provide insight into the model’s inherent performance on different datasets. We note that this evaluation does not assess the model’s situated faithfulness.
+
+\setlength{\tabcolsep}{4pt}
+\begin{table*}[htbp]
+\tiny
+\centering
+\begin{tabular}{l|ccc|ccc|ccc|ccc|ccc|ccc|c}
+\toprule
+ &\multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{RedditQA}} & \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{FreshQA}} & \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{ClashEval}} & \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{TriviaQA}}& \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{PopQA}}& \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{NaturalQA}} & \multicolumn{1}{c}{\cellcolor{gray!15}\textbf{Total}}\\
+Method & TR & FA & OV & TR & FA & OV & TR & FA & OV & TR & FA & OV & TR & FA & OV & TR & FA & OV & OV \\ 
+\midrule
+Closed-book &  &  & 76.7 &  &  & 32.7 &  &  & 19.3 &  &  & 69.7 &  &  & 43.0 &  &  & 42.7 & 47.4 \\
+DIA & 89.8 & 9.7 & 49.8 & 91.3 & 2.7 & 47.0 & 88.0 & 10.7 & 49.4 & 96.0 & 12.0 & 54.0 & 98.3 & 14.3 & 56.3 & 87.3 & 12.0 & 49.7 & 51.0 \\
+TACS(LR) & 81.0 & 8.7 & 44.9 & 71.7 & 3.0 & 37.4 & 76.3 & 12.3 & 44.3 & 90.3 & 13.3 & 51.8 & 93.7 & 16.7 & 55.2 & 81.0 & 8.7 & 44.9 & 46.4 \\
+\midrule
+\multicolumn{20}{c}{\cellcolor[HTML]{EFEFEF}\textit{Rule-based Confidence Reasoning (Evaluation-based)}} \\
+ContextEval & 85.2 & 42.0 & 63.6 & 50.0 & 26.7 & 38.4 & 71.3 & 11.3 & 41.3 & 84.0 & 42.0 & 63.0 & 89.0 & 40.7 & {\ul 64.9} & 68.0 & 27.3 & 47.7 & 53.1 \\
+InternalEval & 84.7 & 66.5 & 75.6 & 55.7 & 24.0 & 39.9 & 53.3 & 16.7 & 35.0 & 79.0 & 61.7 & 70.4 & 69.0 & 40.0 & 54.5 & 60.3 & 38.7 & 49.5 & 54.1 \\
+\midrule
+\multicolumn{20}{c}{\cellcolor[HTML]{EFEFEF}\textit{Rule-based Confidence Reasoning}} \\
+TPC & 88.6 & 28.4 & 58.5 & 78.0 & 15.0 & 46.5 & 76.6 & 17.6 & 47.1 & 92.6 & 27.6 & 60.1 & 94.0 & 20.7 & 57.4 & 80.7 & 21.6 & 51.2 & 53.5 \\
+ContextConf & 89.8 & 23.9 & 56.9 & 68.7 & 16.3 & 42.5 & 65.7 & 17.7 & 41.7 & 91.7 & 19.0 & 55.3 & 93.3 & 18.3 & 55.8 & 75.0 & 21.0 & 48.0 & 50.0 \\
+InternalConf & 79.5 & 75.0 & {\ul 77.3} & 69.3 & 23.7 & 46.5 & 68.0 & 21.3 & 44.7 & 83.0 & 64.6 & \textbf{73.8} & 75.0 & 42.0 & 58.5 & 69.6 & 33.0 & {\ul 51.3} & {\ul 58.7} \\
+\midrule
+\multicolumn{20}{c}{\cellcolor[HTML]{EFEFEF}\textit{Self-guided Confidence Reasoning}} \\
+ImplicitSCR & 83.2 & 47.1 & 65.2 & 89.3 & 11.0 & \textbf{50.2} & 79.0 & 15.7 & {\ul 47.4} & 90.0 & 23.3 & 56.7 & 94.7 & 33.0 & 63.9 & 82.0 & 19.7 & 50.9 & 55.7 \\
+ExplictSCR & 86.4 & 43.8 & 65.1 & 66.0 & 19.0 & 42.5 & 79.0 & 11.3 & 45.2 & 86.7 & 34.0 & 60.4 & 82.7 & 33.7 & 58.2 & 76.3 & 23.0 & 49.7 & 53.5 \\
+CR-DPO & 87.5 & 71.6 & {\color[HTML]{333333} \textbf{79.6}} & 70.0 & 29.3 & {\ul 49.7} & 86.3 & 13.3 & \textbf{49.8} & 85.3 & 61.0 & {\ul 73.2} & 89.3 & 42.7 & \textbf{66.0} & 76.3 & 36.0 & \textbf{56.2} & \textbf{62.4}
+\\
+\bottomrule
+
+\end{tabular}
+
+\caption{Main Result Llama-3-8B. The SCR methods don't perform well compared to InternalConf. However, CR-DPO brings significant improvement to ExplicitSCR.   The best number is \textbf{bold} and the second best is \underline{underlined}.
+}
+\label{table:main_results_llama}
+\end{table*}
+
+\subsection{LLMs can Do Both Self-Guided and Rule-Based Confidence Reasoning}
+
+\textbf{Self-Guided Confidence Reasoning (SCR) Excels on GPT-4o and GPT-4o mini:}
+As shown in Table \ref{table:main_results_gpt-4o-mini}, SCR methods consistently achieve the top-2 accuracies across most datasets for both GPT-4o mini and GPT-4o, outperforming direct input augmentation by significant margins (+17.8 for GPT-4o mini, +24.2 for GPT-4o), as well as TACS and other rule-based methods. This highlights LLMs’ ability to evaluate and compare internal knowledge with external context for accurate answers. TACS performs poorly because LLMs struggle to filter context effectively, requiring in-distribution training data and limiting its use as an out-of-the-box solution.
+
+\textbf{LLMs Perform Well with Rule-Based Confidence Reasoning}
+Rule-based methods also show substantial improvements over direct input augmentation. Among these, “InternalConf” performs the best, outperforming “ContextConf.” This indicates that LLMs are better at estimating the confidence of their internal knowledge than that of external information.
+
+\textbf{Enhancing SCR Through CR-DPO:}
+While SCR generally outperforms RCR methods on the GPT-4 series, it underperforms “InternalConf” on Llama-3-8B in Table \ref{table:main_results_llama}. The most significant declines are in Acc$_f$, particularly in TriviaQA (64.6\% → 34.0\%) and RedditQA (75\% → 43.8\%). This indicates that while Llama-3-8B demonstrates some internal confidence estimation, it tends to favor external context when it is available. We attribute this bias in part to the model’s weaker reasoning abilities. As shown in Figure \ref{fig:example}, when presented with misleading context, the ExplicitSCR model correctly lists the specific years Richard Daley served in Chicago. However, it acknowledges that it lacks information about him being mayor in another city. If the model possessed strong reasoning abilities, it should recognize that, regardless of whether Daley was mayor in another city, his 21-year tenure as mayor of Chicago makes Chicago the correct answer. By applying our proposed Confidence Reasoning Preference Optimization (CR-DPO) method, the model is able to detect the deceptive context and correctly identify the answer. CR-DPO significantly improves the model’s SCR performance, boosting it by +8.
+
+\begin{figure*}[h]
+\includegraphics[width=\textwidth]{figures/example.png}
+\centering
+\caption{An example where SCR fails to maintain situated faithfulness, but CR-DPO succeeds. In this case, the model’s internal answer is correct, but the context is misleading. Before training with CR-DPO, the model is misled despite correctly listing factual details. After training, it successfully arrives at the correct answer.}
+\label{fig:example}
+\end{figure*}
+\subsection{What Limits Rule-based Confidence Reasoning?}
+While RCR methods seem intuitive, their performance is often constrained by errors and biases in rule design and the extraction of confidence signals.
+\setlength{\tabcolsep}{4pt}
+\begin{table*}[htbp]
+\tiny
+\centering
+\begin{tabular}{l|ccc|ccc|ccc|ccc|ccc|ccc|c}
+\toprule
+& \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{RedditQA}} & \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{FreshQA}} & \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{ClashEval}} & \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{TriviaQA}}& \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{PopQA}}& \multicolumn{3}{c|}{\cellcolor{gray!15}\textbf{NaturalQA}} & \multicolumn{1}{c}{\cellcolor{gray!15}\textbf{Total}}\\
+\textbf{Method} & TR & FA & OV & TR & FA & OV & TR & FA & OV & TR & FA & OV & TR & FA & OV & TR & FA & OV & OV \\ 
+TPC & 88.6 & 28.4 & 58.5 & 78.0 & 15.0 & 46.5 & 76.6 & 17.6 & 47.1 & 92.6 & 27.6 & 60.1 & 94.0 & 20.7 & 57.4 & 80.7 & 21.6 & 51.2 & 53.5 \\
+\rowcolor[HTML]{EFEFEF} 
++PercentCab & 82.3 & 70.4 & {\color[HTML]{009901} 76.4} & 75.3 & 15.7 & {\color[HTML]{CB0000} 45.5} & 59.0 & 19.7 & {\color[HTML]{CB0000} 39.4} & 92.0 & 29.0 & {\color[HTML]{009901} 60.5} & 85.0 & 37.0 & {\color[HTML]{009901} 61.0} & 72.3 & 34.6 & {\color[HTML]{009901} 53.5} & {\color[HTML]{009901} 56.0} \\
+ContextConf & 89.8 & 23.9 & 56.9 & 68.7 & 16.3 & 42.5 & 65.7 & 17.7 & 41.7 & 91.66 & 19.0 & 55.3 & 93.3 & 18.3 & 55.8 & 75.0 & 21.0 & 48.0 & 50.0 \\
+\rowcolor[HTML]{EFEFEF} 
++ThresholdT & 88.1 & 28.4 & {\color[HTML]{009901} 58.3} & 72.0 & 16.0 & {\color[HTML]{009901} 44.0} & 70.0 & 16.3 & {\color[HTML]{009901} 43.2} & 85.7 & 30.0 & {\color[HTML]{009901} 57.9} & 93.0 & 18.3 & {\color[HTML]{CB0000} 55.7} & 75.0 & 21.0 & {\color[HTML]{009901}48.0} & {\color[HTML]{009901} 51.2} \\
+InternalConf & 79.5 & 75.0 & 77.3 & 69.3 & 23.7 & 46.5 & 68.0 & 21.3 & 44.7 & 83.0 & 64.6 & 73.8 & 75.0 & 42.0 & 58.5 & 69.6 & 33.0 & 51.3 & 58.7 \\
+\rowcolor[HTML]{EFEFEF} 
++ThresholdT & 83.5 & 69.9 & {\color[HTML]{CB0000} 76.7} & 84.0 & 18.0 & {\color[HTML]{009901} 51.0} & 74.0 & 19.0 & {\color[HTML]{009901} 46.5} & 83.0 & 64.6 & {\color[HTML]{CB0000} 73.8} & 90.0 & 35.0 & {\color[HTML]{009901} 62.5} & 76.3 & 29.7 & {\color[HTML]{009901}53.0} & {\color[HTML]{009901} 60.6} \\
+\rowcolor[HTML]{EFEFEF} 
++ECECab & 83.5 & 69.9 & {\color[HTML]{CB0000} 76.7} & 84.0 & 18.0 & {\color[HTML]{009901} 51.0} & 86.7 & 12.7 & {\color[HTML]{009901} 49.7} & 76.3 & 67.0 & {\color[HTML]{CB0000} 71.7} & 90.0 & 35.0 & {\color[HTML]{009901} 62.5} & 80.3 & 26.7 & {\color[HTML]{009901}53.5} & {\color[HTML]{009901} 60.8} \\
+\rowcolor[HTML]{EFEFEF} 
++SC & 76.7 & 75.6 & {\color[HTML]{CB0000} 76.2} & 57.0 & 28.0 & {\color[HTML]{CB0000} 42.5} & 56.3 & 20.3 & {\color[HTML]{CB0000} 38.3} & 78.0 & 67.3 & {\color[HTML]{CB0000} 72.7} & 67.3 & 41.7 & {\color[HTML]{CB0000} 54.5} & 60.0 & 39.7 & {\color[HTML]{CB0000}49.9} & {\color[HTML]{CB0000} 55.7} \\
+\rowcolor[HTML]{EFEFEF} 
++SC+TT & 77.2 & 74.4 & {\color[HTML]{CB0000} 75.8} & 79.3 & 21.0 & {\color[HTML]{009901} 50.2} & 77.0 & 18.3 & {\color[HTML]{009901} 49.7} & 78.0 & 67.3 & {\color[HTML]{CB0000} 72.7} & 81.0 & 41.6 & {\color[HTML]{009901} 61.3} & 79.0 & 30.7 & {\color[HTML]{009901}54.9} & {\color[HTML]{009901} 60.7} \\
+\bottomrule
+
+\end{tabular}
+
+\caption{Enhancing RCR Methods Using Additional Calibration Sets (Llama-3-8b): Methods with a grey background represent attempts to improve upon the original RCR methods. Improvements over the base method are highlighted in \textcolor{darkgreen}{green}, while declines are shown in \textcolor{red}{red}. “Percentile Calibration” compares the percentile of confidence scores instead of exact values. ``ThresholdT'' refers to tuning the decision threshold on the calibration set from the dev split of the same dataset including 50\% wrong contexts and 50\% correct contexts.
+``ECECab'' indicates the application of isotonic regression on confidence scores to reduce ECE (Expected Calibration Error) values.
+``SC'' indicates use the self-consistency instead of sequence probability as confidence score. ``SC+TT'' self-consistency combined with Threshold Tuning. ``SC'' perform badly but can be improved with threshold tuning.
+}
+\label{table: RCR}
+\end{table*}
+\textbf{Rules can be biased or flawed:} For ContextConf and InternalConf, the decision rule—selecting an answer based on whether the confidence score exceeds a fixed threshold—can be optimized through threshold tuning on a dedicated calibration set. As shown in Table \ref{table: RCR} , tuning the threshold improves ContextConf and InternalConf performance in partial datasets. Similarly, Token Probability Correction (TPC) rule can be refined by comparing the percentile of the confidence scores rather than the raw values, resulting in a calibrated token probability correction (CTPC) approach. This adjustment also leads to performance gains, as evidenced in most datasets (Table \ref{table: RCR}).
+While these improved rules boost the performance of RCR methods, they still struggle with limited generalizability across datasets and continue to underperform compared to SCR on GPT-4o series, even with the advantage of using a calibration set (Table~\ref{table:full_results_gpt-4o}). This is partly due to the new biases introduced by the updated rules. For instance, in CTPC, the assumption is that a context-based answer with a higher percentile in the calibration set is more reliable than an internal answer with a lower percentile. This assumption often breaks down in certain scenarios, such as when the calibration set contains an equal mix of correct and incorrect contexts, and the model’s internal knowledge is highly accurate. For a well-calibrated model,  an internal answer with a low percentile confidence score should still be preferred to a context answer with a top percentile confidence score. In these cases, relying on percentile-based comparisons can undermine the method’s generalizability.
+
+\textbf{Confidence signal can misalign with the rule} Improving the confidence signal itself, such as by calibrating confidence scores InternalConf using isotonic regression, reduces expected calibration error. However, this doesn’t always translate to better performance on situated faithfulness as shown in Table \ref{table: RCR}(e.g. TriviaQA, RedditQA). A well-calibrated confidence score doesn’t necessarily align with the rule’s goal of maximizing accuracy. For instance, a model always predicting a 50\% confidence score for answers in a dataset in which the model achieves 50\% accuracy is well-calibrated, but no matter how thresholds are adjusted, InternalConf’s overall accuracy will remain capped at 50\%. Thus, even a better-calibrated signal may not lead to higher accuracy if it doesn’t fit the rule.
+
+\textbf{Confidence signal can be noisy and biased} For InternalEval and ContextEval, the rules are directly aligned with the confidence signal --- the correctness of the internal or context-based answer. In theory, take InternalEval as an example, a perfect self-evaluator that correctly assesses the internal answer’s accuracy could optimize performance. The model would use the context when its internal knowledge is incorrect and rely on its own knowledge when correct, leading to optimal results. However, in practice, self-evaluation is noisy and biased.
+
+In summary, RCR methods are hindered by errors and biases in rule design, confidence extraction, and by misalignment between rules and confidence signals. In contrast, SCR avoids these pitfalls by inherently performing confidence estimation and reasoning directly in the text space, where the model operates more effectively.
+\begin{table*}[t]
+\scriptsize
+\centering
+\begin{tabular}{l|c|c|c|c|c|c}
+\toprule
+ & \multicolumn{1}{l|}{\cellcolor[HTML]{EFEFEF}TriviaQA} & \multicolumn{1}{c|}{\cellcolor[HTML]{EFEFEF}PopQA} & \multicolumn{1}{c|}{\cellcolor[HTML]{EFEFEF}NaturalQA} & \multicolumn{1}{c|}{\cellcolor[HTML]{EFEFEF}RedditQA} & \multicolumn{1}{c|}{\cellcolor[HTML]{EFEFEF}FreshQA} & \multicolumn{1}{c}{\cellcolor[HTML]{EFEFEF}ClashEval} \\
+ExplicitSCR & 60.4 & 58.2 & 49.7 & 65.1 & 42.5 & 45.2 \\
+CR-DPO & \cellcolor[HTML]{F1FEF1}73.2 & \cellcolor[HTML]{F1FEF1}66.0 & \cellcolor[HTML]{F1FEF1}56.2 & \cellcolor[HTML]{F1FEF1}79.6 & \cellcolor[HTML]{FFFFF0}49.7 & \cellcolor[HTML]{FFFFF0}49.8 \\
+\midrule
+CR-DPO-ST & \cellcolor[HTML]{F1FEF1}68.4 & \cellcolor[HTML]{F1FEF1}65.4 & \cellcolor[HTML]{F1FEF1}54.9 & \cellcolor[HTML]{F1FEF1}76.7 & \cellcolor[HTML]{FFFFF0}53.4 & \cellcolor[HTML]{FFFFF0}50.4 \\
+\rowcolor[HTML]{F1FEF1} 
+\cellcolor[HTML]{EFEFEF}-COT & {\color[HTML]{009901} 71.2(+2.8)} & {\color[HTML]{CB0000} 60.5(-4.9)} & {\color[HTML]{CB0000} 38.7(-16.2)} & {\color[HTML]{CB0000} 72.8(-3.9)} & \cellcolor[HTML]{FFFFF0}{\color[HTML]{CB0000} 34.2(-19.2)} & \cellcolor[HTML]{FFFFF0}{\color[HTML]{CB0000} 47.0(-3.4)} \\
+\rowcolor[HTML]{F1FEF1} 
+\cellcolor[HTML]{EFEFEF}-DPO & {\color[HTML]{CB0000} 59.4(-9.0)} & {\color[HTML]{CB0000} 53.7(-11.7)} & {\color[HTML]{CB0000} 48.2(-6.7)} & {\color[HTML]{009901} 76.8(+0.1)} & \cellcolor[HTML]{FFFFF0}{\color[HTML]{CB0000} 52.2(-1.2)} & \cellcolor[HTML]{FFFFF0}{\color[HTML]{CB0000} 46.0(-4.4)} \\
+\cellcolor[HTML]{EFEFEF}-1 task & \cellcolor[HTML]{F1FEF1}{\color[HTML]{009901} 72.2(+3.8)} & \cellcolor[HTML]{F1FEF1}{\color[HTML]{009901} 66.4(+1.0)} & \cellcolor[HTML]{F1FEF1}{\color[HTML]{009901} 57.7(+2.8)} & \cellcolor[HTML]{FFFFF0}{\color[HTML]{CB0000} 75.3(-1.4)} & \cellcolor[HTML]{FFFFF0}{\color[HTML]{CB0000} 50.9(-2.5)} & \cellcolor[HTML]{FFFFF0}{\color[HTML]{CB0000} 47.9(-2.5)} \\
+\rowcolor[HTML]{FFFFF0} 
+\cellcolor[HTML]{EFEFEF}-3 tasks & \cellcolor[HTML]{F1FEF1}{\color[HTML]{009901} 68.5(+0.1)} & {\color[HTML]{CB0000} 64.5(-0.9)} & {\color[HTML]{CB0000} 47.9(-7.0)} & {\color[HTML]{CB0000} 69.3(-7.4)} & {\color[HTML]{CB0000} 43.7(-9.7)} & {\color[HTML]{CB0000} 48.3(-2.1)} \\
+\rowcolor[HTML]{FFFFF0} 
+\cellcolor[HTML]{EFEFEF}-3 tasks, SS & \cellcolor[HTML]{F1FEF1}{\color[HTML]{009901} 68.7(+0.3)} & {\color[HTML]{CB0000} 62.5(-2.9)} & {\color[HTML]{CB0000} 46.3(-8.6)} & {\color[HTML]{CB0000} 67.9(-8.8)} & {\color[HTML]{CB0000} 41.2(-12.2)} & {\color[HTML]{CB0000} 45.4(-5.0)} \\
+\bottomrule
+\end{tabular}
+
+\caption{CR-DPO Ablation Study. ``ESCR'' refers to the baselines without training. ``CR-DPO'' refers to the best-tuned model, trained on confidence reasoning paths sampled from four tasks: TriviaQA, NaturalQA, ConflictQA, and RedditQA. Results within \textcolor{yellow}{yellow} cells represent performance on out-of-distribution (OOD) tasks, while results in  \textcolor{green}{green} represent in-distribution tasks. ``CR-DPO-ST'' refers to a variant of CR-DPO that uses only a single pair of chosen and rejected answers for each instance, whereas CR-DPO uses two pairs. The methods below, shown with a grey background, are ablation studies compared to CR-DPO-ST: ``-CoT'' removes the explicit chain-of-thought confidence reasoning, making it equivalent to Direct Preference Optimization (DPO) applied to Implicit SCR (DPO-ISCR). ``-DPO'' replaces DPO with Supervised Fine-Tuning (SFT). ``-1 Task'' removes one training task (RedditQA). ``-3 Tasks'' removes 3 training tasks and only keeps TriviaQA as the training task. “-3 Tasks, SS” uses only TriviaQA for training, and the reasoning path is not self-sampled, but sourced from a GPT-4o model. The numbers highlighted in \textcolor{darkgreen}{dark green} indicate improvements, while those in \textcolor{red}{red} represent decreases, relative to the performance of “CR-DPO-ST.”
+}
+\label{table: CRPO ablation}
+\end{table*}
+
+\subsection{Confidence Reasoning Preference Optimization Enhances SCR}
+\label{sec: improve scr}
+SCR can be further improved with CR-DPO. As shown in Table \ref{table:main_results_llama}, Llama-3 8B's ExplicitSCR is significantly improved not only in distribution tasks (+10.4\% on average) but also generalized to out-of-distribution tasks (+5.9\%) including FreshQA and ClashEval. 
+
+CR-DPO allows the model to do better SCR for the following reason:
+
+\textbf{CoT enables better confidence reasoning learning} CR-DPO allows the model to explicitly learn how to reason through confidence assessments by leveraging CoT. Since the model verbalizes its reasoning process, it learns to identify what constitutes effective confidence reasoning. 
+In contrast, when we remove the explicit COT confidence reasoning (``-COT'' in Table \ref{table: CRPO ablation}), which is equivalent to applying DPO to Implicit SCR (DPO-ISCR), where the model directly learns to predict the final answer without an explicit reasoning chain, the results were suboptimal (-7.5\% in average). The absence of a clearly articulated reasoning process forces the model to infer the reasoning principles solely from outcomes, making learning less effective and prone to error. This leads to a more challenging and inefficient learning process—similar to relying on inductive guesswork without being able to observe the reasoning steps.
+\textbf{CR-DPO encourages LLM to explore various reasoning paths} CR-DPO allows the model to learn from the preference between different paths through reinforcement learning instead of over-fitting to one single reasoning path. In contrast, supervised fine-tuning on Explicit SCR (``-DPO'' in Table \ref{table: CRPO ablation}) leads to a large performance drop (-5.5\% in average) because it overfits the model to one correct reasoning path. The CR-DPO can be enhanced by sampling more pairs of chosen and rejected reasoning paths for each question-context pair. As shown in the table (``CR-DPO'' versus ``CR-DPO-ST''), where each instance have two chosen-rejected reasoning pairs sampled with different in-context examples. The performance on the in-distribution datasets are improved (+2.2\%) with a slight sacrifice on the out-of-distribution performance (-0.5\%).
+\textbf{Multitask training helps OOD generalization}
+Shown in Table \ref{table: CRPO ablation}, if we remove the RedditQA dataset from training, the performance drops on two unseen datasets (i.e., FreshQA, ClashEval), despite an increase on the in-domain tasks. If we further reduce the number of training tasks by only keeping one training dataset TriviaQA, the performances across all tasks decrease. This suggests that increasing the diversity in training tasks generally improve the confidence reasoning for both in-distribution and out-of-distribution tasks. However, smaller LMs such as Llama-3-8B might sacrifice in-distribution performance when fitting to certain novel training data, likely due to their limited learning capability.
+\textbf{Self-sampled reasoning paths are better than reasoning paths from a stronger model}
+Contrary to the common belief that using training data from stronger models leads to better performance \citep{li-etal-2023-symbolic}, in confidence reasoning, learning from the model’s own reasoning paths yields better results. This discrepancy arises because confidence reasoning relies on corroborating external facts with the model’s internal knowledge, and small-scale fine-tuning is unlikely to introduce new knowledge to the model. The comparison between ``-3 Tasks, SS'' (where reasoning paths are sampled from GPT-4o) and ``-3 Tasks'' (which uses self-sampled reasoning paths) in Table \ref{table: CRPO ablation} shows a performance drop across most tasks when using reasoning traces from GPT-4o. Since GPT-4o does not share knowledge with Llama-3-8B, the reasoning paths generated by the stronger model inadvertently cause the smaller model to hallucinate or make incorrect inferences, hurting performance.
+
+
+
+\section{Conclusion}
+
+
+In this work, we address the challenge of making LLMs situated faithful to external contexts. We benchmark their performance across various QA datasets, pairing with both correct and incorrect contexts. Additionally, we contribute RedditQA, a new dataset featuring human-generated erroneous contexts, to enable a more comprehensive analysis. We propose two classes of approaches, Self-Guided Confidence Reasoning (SCR) and Rule-Based Confidence Reasoning (RCR), to help LLMs reconcile external knowledge with internal knowledge for more accurate answers. Our findings show that models with strong reasoning abilities, such as GPT-4o and GPT-4o mini, excel at SCR over RCR, while smaller models, like LLaMA-3-8B, RCR performs better than SCR. We observe that RCR is hindered by noise and biases in confidence estimation and rule design. Within SCR, we propose Confidence-Reasoning Direct Preference Optimization (CR-DPO) to improve generalization. Our work provides valuable benchmarks, robust experiments, and insights for advancing LLMs’ situated faithfulness for future research.
+
+
+
+\section{Acknowledgements}
+
+We thank members of the NLP group at Duke University for fruitful discussions.
+This work was supported by NSF award IIS-2211526.
+
+
+
+
+
+
+
+

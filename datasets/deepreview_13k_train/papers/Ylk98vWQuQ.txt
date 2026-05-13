@@ -1,0 +1,335 @@
+\title{Learning 3D Perception from Others' Predictions}
+
+\begin{abstract}
+Accurate 3D object detection in real-world environments requires a huge amount of annotated data with high quality. Acquiring such data is tedious and expensive, and often needs repeated effort when a new sensor is adopted or when the detector is deployed in a new environment.
+We investigate a new scenario to construct 3D object detectors: \textit{learning from the predictions of a nearby unit that is equipped with an accurate detector.} For example, when a self-driving car enters a new area, it may learn from other traffic participants whose detectors have been optimized for that area.
+This setting is label-efficient, sensor-agnostic, and communication-efficient: nearby units only need to share the predictions with the ego agent (\eg, car).
+Naively using the received predictions as ground-truths to train the detector for the ego car, however, leads to inferior performance.  
+We systematically study the problem and identify viewpoint mismatches and mislocalization (due to synchronization and GPS errors) as the main causes, which unavoidably result in false positives, false negatives, and inaccurate pseudo labels.
+We propose a distance-based curriculum, first learning from closer units with similar viewpoints and subsequently improving the quality of other units' predictions via self-training. We further demonstrate that an effective pseudo label refinement module can be trained with a handful of annotated data, largely reducing the data quantity necessary to train an object detector.
+We validate our approach on the recently released real-world collaborative driving dataset, using reference cars' predictions as pseudo labels for the ego car. Extensive experiments including several scenarios (\eg, different sensors, detectors, and domains) demonstrate the effectiveness of our approach toward label-efficient learning of 3D perception from other units' predictions.\footnote{Project website: \textbf{\texttt{\url{https://jinsuyoo.info/rnb-pop}}}}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\label{sec:intro}
+
+Accurate detection of mobile objects (\eg, vehicles, humans) in 3D is essential for an intelligent agent (\eg, self-driving car, service robot) to operate safely and reliably~\citep{lang2019pointpillars, shi2019pointrcnn, wang2019pseudo, shi2020pvrcnn}. Constructing such a 3D object detector is never easy --- it requires a huge amount of high-quality \emph{labeled} data. Acquiring them is laborious and expensive, and is seldom a once-and-for-all effort. 
+Whenever an agent enters a new environment and encounters new objects, its detector needs adaptation to remain accurate. Whenever a new sensor is adopted (\eg, for energy or space efficiency), the different patterns in sensor data (\eg, LiDAR point cloud style and density) necessitate the detector to be retrained. All these updates to the detector imply yet another round of tedious labeled data acquisition.
+
+\emph{Could we bypass or, at least, reduce the repeated labeling effort?} In this paper, we investigate the scenario in which there are other nearby agents equipped with accurate 3D object detectors (but not necessarily with the same sensor configuration). This scenario is realistic and promising. For example, self-driving taxis {(\eg, Waymo, Baidu)} or local facilities (\eg, surveillance systems, roadside units) are likely to be equipped with optimized detectors for their specific geo-fenced areas.
+While it may be infeasible for these local ``experts'' to directly share their raw sensor data or detectors (\eg, due to data size and format; commercial and intellectual properties; implementation incompatibility), the \emph{predictions} (\eg, detected 3D bounding boxes) are more lightweight and standardized. Several recent works also show that sharing predictions would benefit each participating agent's perception accuracy~\citep{xu2023v2v4real, xu2022v2x, yu2022dair, chen2019f, xu2022cobevt, wang2020v2vnet, lu2024heal, hong2024multi, hu2024communication}, further incentifying such a collaborative scenario. Last but not least, sharing predictions implies that there is no need for all the agents to use the same sensors. An agent adopting a new sensor or entering an unfamiliar environment thus could borrow the predictions made by other agents, potentially equipped with higher-end sensors, as labels to train its detector. (Please see~\autoref{sec:feasibility} for a feasibility and practicality discussion of our setting.)
+
+In this paper, we thus investigate a new scenario to construct a 3D object detector: \textit{learning from the predictions of a nearby agent equipped with an accurate detector.} We use the real-world collaborative driving dataset~\citep{xu2023v2v4real} as the testbed. For each 3D road scene, this dataset records two LiDAR point clouds from two nearby cars distancing between $0\sim 100$ meters and offers object labels separately for each point cloud. We use one of the cars as the reference agent, equipped with an accurate 3D detector, to provide predicted labels from which the other (ego) car can learn. 
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=.75\linewidth]{figures/fig1_task_v2.pdf}
+\caption{\textbf{Research problem of \textit{learning from others' predictions}.} 
+We study the scenario where an agent (\eg, ego car) leverages the predictions made by another agent (\eg, a high-end reference car) as supervision to train its own 3D object detector. We observe two challenges: (1) viewpoint mismatch between two cars and (2) mislocalization due to synchronization/GPS errors.
+}
+\vskip -5pt
+\label{fig:scenario}
+\end{figure*}
+
+At first glance, this research problem may appear trivially as a standard supervised learning problem --- using another agent's predictions as labels to train the detector for the ego car. However, our preliminary attempt showed that this straightforward approach results in poor performance. We identify two major challenges (\autoref{fig:scenario}). First, in real-world applications, inaccuracies such as GPS errors and synchronization delays between agents are common. For example, a minor delay of just 0.1 seconds can cause a discrepancy of several meters in localization for a vehicle traveling at 60 mph. Second, the viewpoints of the two agents can vary significantly. An object visible to one agent might be obscured or out of range for the other due to occlusion or distance, leading to false positives and negatives in the predictions. Training with such \textit{mislocalized} and \textit{viewpoint-mismatched} labels inevitably results in suboptimal performance for the new 3D detector of the ego car. 
+
+To address these challenges, we propose a learning pipeline termed as \textit{\textbf{R}efining \textbf{\&} Discovering \textbf{B}oxes for 3D \textbf{P}erception from \textbf{O}thers' \textbf{P}redictions} (\oursit). 
+For mislocalization, we train a box refinement module to rank the noisy candidates and correct their locations. Notably, this module requires very few human labels (1\% or less), or even no human labels if simulation data are available. 
+We also develop a coarse-to-fine approach to search for high-quality candidates around the predicted object locations efficiently, tackling large localization errors. 
+For viewpoint mismatch that results in false negatives in the ego car's perspective, we present an effective self-training strategy empowered by a novel distance-based curriculum, enabling the detector to first learn from a subset of high-quality labels and in turn fill in the missing labels for the model to continually learn from.
+With these approaches, we significantly improve the quality of pseudo labels and, consequently, produce a much more accurate 3D detector for the ego car, with very limited human labeling --- the Average Precision (AP) at IoU 0.5 increases from 22\% to 56.5\% using only $40$ labeled frames! 
+
+In summary, we introduce a novel research problem that learns 3D perception for a new agent with reference agent's predictions. We identify the main challenges about the label quality and propose corresponding solutions. With extensive experiments, we demonstrate the applicability of the new learning scenario as well as the improvements achieved by our designs. 
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+
+\mypara{3D object detection} serves an important role in real-world applications such as autonomous driving. The detector takes 3D signals (\eg, LiDAR points) as input, and predicts the existence and the location of objects of interest. Notable development has been made thanks to the recently curated large datasets~\citep{geiger2012kitti, caesar2020nuscenes, sun2020waymo, yu2022dair, xu2023v2v4real}. The existing approaches can be categorized as voxel-based (or pillar-based) methods~\citep{zhou2018voxelnet, yan2018second, lang2019pointpillars}, which subdivide irregular 3D point space into regular space, and point-based methods~\citep{zhao2021point, yang2018ipod}, which directly extract discriminative point-wise features from the given point clouds.
+Regardless of approaches, these methods require manually annotated data of high-quality to achieve satisfactory performance. In this study, we aim to bypass such a labeling cost and demonstrate our new label-efficient learning method with representative 3D detectors~\citep{lang2019pointpillars, yan2018second}. 
+
+\mypara{Label-efficient learning.}
+Self-supervised learning is a promising way to bypass extensive label annotation~\citep{chen2021exploring, he2020momentum, chen2020simple, hjelm2018learning}. Pre-trained with abundant, easily collectible unlabeled data, the detector backbone is shown to largely reduce the labeled data for fine-tuning~\citep{pan2024gpc, yin2022proposalcontrast, xie2020pointcontrast}. Label-free 3D object detection from point clouds has gained attention due to its effective data utilization~\citep{you2022hindsight, you2022modest, luo2023drift, najibi2022motion, zhang2023oyster, choy20194d, baur2024liso, seidenschwarz2024semoli, yang2021st3d} and generalization beyond specific class information during training~\citep{najibi2023unsupervised}. 
+Orthogonally, we study a new scenario to learn the detector in a label-efficient way by considering \textit{beyond a single source of information}. Specifically, the predictions from well-trained detectors of reference units near the ego car are leveraged as (pseudo) labels.
+
+\mypara{Domain adaptation.} 
+Our setting is related to domain adaptation (DA), as we aim to improve an object detector in a new environment (\eg, a new location or data pattern). Existing studies~\citep{wang2020germany, chen2024diffubox, yang2021st3d, yang2022st3d++} mostly focus on the generic, single-agent unsupervised DA setting, while a few leverage application-specific cues, \eg, repetitions~\citep{you2022rotada}, to facilitate adaptation. Our setting belongs to the second branch, in which we explore a multi-agent scenario. Our goal is not to compete with the generic setting. Instead, generic DA techniques, \eg, advanced self-training~\citep{peng2023cl3d, wang2023ssda3d, hegde2023source, tsai2023ms3d}, can be compatible with our setting to further boost the performance.
+
+\mypara{Curriculum learning.}
+Many studies have shown that properly ordering the data to progressively add harder samples during training leads to superior performance. The so-called ``curriculum learning'' \citep{bengio2009curriculum} has also been explored in object detection~\citep{li2017multiple, sangineto2018self}. For LiDAR-based 3D detection, researchers have applied the concept for better data augmentation during training~\citep{yang2021st3d, zhu2023curricular}.
+We investigate the task-specific characteristics from the data and discover a meaningful correlation between the label quality and the ego-car-reference-car distance. We then apply this observation to design an effective training curriculum.
+
+\mypara{Collaborative perception.}
+To mitigate limited detection range and occlusion, self-driving researchers have recently focused on integrating nearby detectors' information~\citep{chen2019f, xu2022v2x, xu2022cobevt, xu2023v2v4real, yu2022dair, wang2020v2vnet, lu2024heal, hong2024multi, hu2024communication}. During inference, more than one detector communicates with each other and shares their information (\eg, input signal, feature, or predicted boxes) to detect objects better. While also leveraging other cars' information, our research focus is different --- we investigate a new label-efficient learning scenario, using other (expert) cars' predictions as supervision to build the ego car's detector offline. 
+
+
+\section{Learning 3D Perception from Others' Predictions}
+
+\label{sec:proposed}
+
+We study a novel research problem in autonomous driving: training a 3D detector using bounding boxes supplied by a nearby agent. This scenario, while unexplored, can reduce or even eliminate labeling efforts. We identify the key challenges and propose the learning pipeline to address them.
+
+\subsection{Problem definition and feasibility}
+\label{sec:feasibility}
+
+\mypara{Problem setup.}
+Without loss of generality, we assume that around the ego car (\ie, \egocar), there is a reference car (\ie, \refcar) equipped with an accurate 3D object detector $f_{R}$. \egocar\ and \refcar\ are both equipped with 3D sensors (\eg, LiDAR) and collect their point clouds (\ie, $X_E$ and $X_R$) in the same road scene. Notice that $X_E$ and $X_R$ can have different patterns due to variations in hardware. \refcar, the car that \egocar\ learns from, share 3D bounding boxes of foreground objects in the global coordinate from its detector, \ie, $Y_{R} = f_{R}(X_{R})$.
+Our goal is to train a 3D detector $f_{E}$ that works with $X_E$, by using $Y_{R}$. 
+
+\mypara{Feasibility and practicality.} Before proceeding, we consider two critical questions, ``Why can nearby agents obtain accurate detectors?'' and ``Why can they not directly share their detectors?'' 
+Besides the examples mentioned in~\autoref{sec:intro} (\eg, self-driving taxis), we emphasize that these nearby agents need not be ``omniscient.'' Instead, they only need to be experts in geo-fenced areas where the ego agent passes by and can even be static, making training their detectors easier and much more label-efficient, \eg, using the repetition or background cues~\citep{you2022modest, you2022hindsight, dao2024label}. 
+
+Regarding ``why these agents cannot just share their detectors,'' we note that while open-sourcing is common in the research community, there are many considerations and constraints when it comes to practical scenarios. First, the ego and the reference agents do not need to have the same sensors. Indeed, they may not even perceive the environment from the same views, \eg, the reference agent can be a roadside unit placed six meters high and facing down \citep{yang2023bevheight, dao2024label}. This discrepancy makes the direct deployment of the reference agent's model to the ego agent suboptimal. Second, the two agents may be equipped with different computational platforms, \eg, the reference one is equipped with GPUs while the ego one with FPGA boards and hardware acceleration code~\citep{hao2019hybrid, hao2021software}, making direct deployment more challenging. Last but not least, reference agents' detectors may be specifically designed and trained, \eg, using private data. Sharing them thus raises intelligent property or privacy concerns. 
+Putting things together, we argue that our setting is realistic and has significant practical implications. 
+
+\subsection{Challenge}
+\label{sec:challenge}
+
+\mypara{First attempt.}
+We use the recently released real-world collaborative driving dataset~\citep{xu2023v2v4real} as the testbed. For each 3D road scene (with a time tag), the dataset provides LiDAR point clouds and ground-truth 3D bounding boxes from each agent's perspective. (We keep the data and experimental details in~\autoref{sec:experiments}.)
+We begin by employing $Y_R$ (\ie, \refcar’s predictions) directly as labels for \egocar\ to train $f_E$, after transforming $Y_R$ into \egocar’s coordinate system. To establish an upper bound, we also train a detector using \egocar's ground-truth labels. The result shows that the detector performance by naively using $Y_R$ is way much worse than the upper bound (AP at IoU 0.5: \ding{192} 22.0 \vs\ \ding{168} 58.4 in \autoref{tab:main_results}). 
+
+At first glance, such a gap, with no doubt, must come from reference car \refcar's prediction errors.
+To eliminate the effect, we use \refcar's ground-truths as labels (\ie, \refcar’s GT) to train another detector for the ego car \egocar. To our surprise, using \refcar's GT can hardly improve the detector's performance, suggesting the existence of other, more fundamental factors in the real-world environment.
+
+\input{tables/fig3_and_tab1}  
+
+\mypara{Key challenges.}
+To search for the root cause of the poor detector performance, we visualize the point clouds and ground-truth bounding boxes of the two cars in \autoref{fig:ego_ref_data}. We identify two major sources of errors: viewpoint mismatch and mislocalization. Viewpoint mismatch occurs when objects are obscured from \emph{one} sensor's view due to occlusion or field of view limitations, while mislocalization results from GPS inaccuracies and synchronization delays. For instance, a communication delay of 0.1 seconds in a car traveling at 60 mph can result in a localization discrepancy of 2.7 meters. 
+These errors can significantly degrade the quality of the learned detector $f_E$ for the ego car \egocar\ --- the training labels are simply \emph{noisy}.
+To further dive into these challenges, we measure the precision and recall of $Y_R$ \vs~the ego car \egocar's ground-truth labels to assess label quality, as shown in \autoref{tab:label_quality}. Even after applying basic filtering commonly used in autonomous driving (\eg, removing distant boxes or those with few points that are beyond \egocar's field of view), the label quality remains unsatisfactory (\autoref{tab:label_quality} \ding{193}). In the following sections, we introduce our pipeline \ours\ to tackle these challenges.
+
+\subsection{Label-efficient box refinement}
+\label{sec:3.1}
+
+\mypara{Preliminaries.} 
+We conduct a detailed analysis of the localization discrepancies in each coordinate (x forward, y leftward, z upward) between \refcar's and \egocar's overlapping ground-truth boxes, as illustrated in \autoref{fig:misloc}. Notice that a mere 0.5-meter discrepancy in the x and y coordinates can drastically reduce the IoU from 100\% to 30\%. Training with such inaccurate pseudo labels inevitably leads to suboptimal performance in \egocar's 3D detector. 
+A refinement module for the labels is thus necessary!
+\begin{wrapfigure}{R}{0.31\textwidth}
+    \centering
+    \vskip-15pt
+    \minipage{\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/l1_err_refcar_gt.pdf} 
+    \endminipage
+    \vskip-10pt
+    \caption{\footnotesize \textbf{Mislocalization} between \egocar's and \refcar's GT.}
+    \vskip-14pt
+    \label{fig:misloc}
+\end{wrapfigure}
+
+\mypara{Baseline approach with heuristics.}
+To begin with, we adopt the algorithm proposed in \citet{luo2023drift}, which refines boxes using heuristics. Specifically, multiple boxes are sampled around the initial noisy boxes, and the optimal boxes are selected based on the best alignment of edges and sizes between the boxes and point clouds. However, this method requires certain conditions to achieve satisfactory performance, such as multiple trajectories at the same location, potentially limiting the applicability. %in our proposed learning scenario. 
+As in~\autoref{tab:main_results}, adapting it to our problem brings marginal gains, especially for the high IoU of 0.7 (AP \ding{192} 4.2 \vs~\ding{194} 10.3). 
+
+\mypara{Label-efficient box ranker.}\label{para:ranker}
+To address this limitation, we propose to train a \textit{box ranker} that evaluates the localization quality of given bounding boxes. Instead of predicting a 3D box from scratch (\ie, a typical detection problem), learning to select and adjust among noisy candidates is a much easier task. \emph{We thus expect learning such a ranker needs much fewer labeled data!}
+To investigate this idea, we sample a handful of \egocar's point clouds with ground-truths to train the ranker. 
+We randomly sample multiple boxes around each annotated object box and crop point clouds outlined by those sampled boxes (with expansion). 
+The training objective is dual: to regress the IoU between a sampled box and the annotated box, serving as the indicator of localization quality, and to estimate the offset to the annotated box, further refining its location. During inference, we use $Y_R$ as initial boxes and sample $N$ boxes around each. The top-ranked boxes are selected among all candidates to construct $Y'_R$ as pseudo labels for training the 3D detector $f_E$ for~\egocar\ (see \autoref{fig:ranker}). We adopt a neural network similar to PointNet~\citep{qi2017pointnet} for the ranker for its simplicity. Please see the supplementary for details.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/fig6_ranker.pdf}
+\caption{\textbf{Box ranker for refining localization error.} With a few annotated frames (or boxes), we train a ranker that can estimate the quality of a given box. During inference for pseudo labels, we sample multiple candidates near the initial noisy box and choose the one with the best IoU.}
+\vskip-14pt
+\label{fig:ranker}
+\end{figure*}
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+    \centering
+    \vskip-16pt
+    \minipage{1\linewidth}
+    \centering
+    \includegraphics[width=1.\linewidth]{figures/fig6_c2f.pdf} 
+    \endminipage
+    \vskip-12pt
+    \caption{\footnotesize \textbf{Sampling methods for box refinement.} Proposed C2F is more effective in large mislocalization.}
+    \vskip-7pt
+    \label{fig:c2f}
+\end{wrapfigure}
+
+\mypara{Coarse-to-fine (C2F) refinement.}
+As previously discussed, minor time delays can result in large discrepancies of several meters. 
+To address this and expand the search region, thereby increasing the number of high-quality bounding box candidates for our ranker, we employ a two-stage approach during  \textit{inference}, as illustrated in \autoref{fig:c2f}. 
+In the first stage, we generate $\frac{N}{2}$ candidate boxes for each initial box by sampling translations from a wider range using a uniform distribution, while keeping the scale and pose of the boxes fixed. 
+In the second stage, we select the top-$K$ boxes from the first stage to serve as new initials and sample another $\frac{N}{2}$ total new boxes around them, this time considering all degrees of freedom (\ie, translation, scale, and pose) but from a narrower range using normal distributions. This coarse-to-fine (C2F) strategy effectively bridges the large localization gap and enhances the refinement quality of $Y'_R$. 
+With the box ranker and C2F, we raise the label quality from a recall of 55.3 to 65.2 and a precision of 71.4 to 79.0 upon basic filtering, as shown in \autoref{tab:label_quality} \ding{193} \vs \ding{194}, \emph{using only \textbf{40} labeled frames}.
+Consequently, the performance of $f_E$ also shows a significant gain from 22.0\% to 38.0\% in AP at IoU 0.5, as reported in \autoref{tab:main_results} \ding{192} \vs \ding{195}. 
+
+\mypara{Ranker-based filtering.} 
+The trained ranker not only refines the given boxes but also estimates their IoU with ground-truth boxes. Applying a threshold on predicted IoU effectively removes false positives, thus improving detection performance as shown in~\autoref{tab:ablation_selftrain_fp}.
+
+\subsection{Distance-based curriculum}
+\label{sec:curriculum}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig3_pipeline_v2.pdf}
+\caption{\textbf{Overall pipeline of \ours.} The ego car first receives reference's predictions which contain inherent noises (\autoref{sec:proposed}). It refines their localization with proposed box ranker (\autoref{sec:3.1}). Then, it creates high-quality pseudo labels by distance-based curriculum for self-training (\autoref{sec:curriculum}).}
+\vskip-13pt
+\label{fig:pipeline}
+\end{figure*}
+
+Viewpoint mismatch introduces false positives (\ie, objects should not be visible from \egocar's perspective) and negatives (\ie, objects should be visible to \egocar\ but are not provided by \refcar) in $Y_R$. While false positives can be removed by filtering (\eg, basic and ranker-based filtering), false negatives are much harder to be recovered. It becomes necessary to discover new boxes from \egocar’s perspective. 
+\begin{wrapfigure}{R}{0.35\textwidth}
+    \centering
+    \minipage{1\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/dist_recall.pdf} 
+    \endminipage
+    \caption{
+    \footnotesize \textbf{Quality of pseudo labels from \refcar's predictions } drops when two cars are farther apart.
+    }
+    \label{fig:dist_recall}
+\end{wrapfigure}
+
+\mypara{Box discovery from the ego car \egocar's view.} Inspired by the previous work~\citep{you2022modest}, self-training~\citep{lee2013pseudo, xie2020self} is a popular technique to propagate labels to unlabeled data. This method typically employs high-quality labels to train the base detector and subsequently uses its predictions to generate new pseudo labels for further fine-tuning cycles.
+However, as discussed in previous sections, our initial (pseudo) labels are inherently noisy, which can hinder the efficacy of self-training. This leads to a pivotal question:  \textit{How to ensure the quality of pseudo labels for effective self-training?}
+
+\mypara{Key observation about distance.} We find out that there exists a unique property in our learning scenario --- the extent of viewpoint mismatch is correlated with the distance between \egocar\ and \refcar. Specifically, discrepancies are typically reduced when the two are closer and increased when they are distant (\autoref{fig:dist_recall}). This intuition leads us to use the distance of two cars as an indicator of the quality of pseudo labels provided by \refcar. Building on this observation, we develop two distance-based methods in the following.  
+
+\mypara{Distance-based curriculum for self-training.}
+We create a high-quality subset of pseudo labels by applying a simple distance threshold $T_{E{\text-}R}$ to all frames, meaning that we trust pseudo labels from \refcar\ when two cars are close enough. In the first round of self-training, the 3D detector $f_E$ is exclusively trained on this high-quality subset. In later rounds, we fine-tune on \textit{all frames} with pseudo labels predicted by $F_E$. This approach propagates labels learned from confident frames to unconfident ones. 
+
+\mypara{Distance-based filtering.}
+Self-training needs a filtering mechanism to select high-quality predictions by the current detector, which are then treated as true labels to supervise the next round of detector training. Normally, this is done by setting a fixed threshold $T_c$ in prediction confidence\footnote{We note that the detector's confidence is not the same as the IoU predicted by the ranker in~\autoref{sec:3.1}.}.
+Here, we employ a distance-based threshold, inspired by our self-training procedure.
+Specifically, since we trust frames with smaller ego-car-to-reference-car distances and train the detector with them
+in the first round, the detector will inherently be overly confident in these frames. As such, a higher threshold shall be assigned when selecting pseudo labels from them.
+We implement this idea by increasing the confidence threshold with a negative linear function of the distance (\ie, $T_c + \lambda / distance(\egocar, \refcar)$). 
+
+Put together, these two distance-based approaches not only uncover boxes that should be visible to \egocar\ but also preserve the quality of pseudo labels for self-training. As shown in \autoref{tab:label_quality} \ding{195}, self-training with distance-based curriculum further improves label quality from 79.0\% to 87.7\% in precision and 65.2\% to 74.4\% in recall, resulting in an enhancement of $f_E$’s performance from AP of 38.0\% to 56.5\%, as detailed in \autoref{tab:main_results} \ding{195} \vs \ding{201}. 
+As a reference, we show the predicted label quality on $X_E$ using $f_{R}$ in \autoref{tab:label_quality} \ding{196}, simulating the ideal case where the object detector can be shared. 
+Our~\ours~achieves similar label quality, demonstrating the applicability of our setting for learning high-quality detectors from others' predictions. 
+
+\subsection{Overall pipeline}
+
+Putting everything together, our overall \emph{offline} pipeline involves the following steps (\autoref{fig:pipeline}). 
+        
+\textbf{Step 0. Ranker training} with few annotated labels (\autoref{sec:3.1}).
+
+\textbf{Step 1. First-round self-training:} Preparing pseudo labels after receiving~\refcar's predictions (applying basic filtering), further improving labels with ranker + C2F and ranker-thresholding (\autoref{sec:3.1}), and then training the detector~$f_E$ with closer frames (\autoref{sec:curriculum}).
+
+\textbf{Step 2. Second-round self-training:} 
+Preparing pseudo labels after receiving~$f_{E}$'s prediction (applying distance-filtering in~\autoref{sec:curriculum}), 
+further improving labels with ranker + C2F and ranker-thresholding (\autoref{sec:3.1}), and then training the detector~$f_E$ with all frames.
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+\subsection{Experimental setups}
+\label{subsec4_1:experimental_setups}
+
+\mypara{Datasets.}
+To validate the effectiveness of our method, we conduct experiments primarily on the V2V4Real dataset~\citep{xu2023v2v4real}, which consists of 40 clips with a total of 18k frames by driving two cars, Tesla and Honda, together within 100m. LiDAR points are acquired with a Velodyne VLP-32 LiDAR sensor. The dataset provides annotations for different types of vehicles, such as cars and trucks.
+(Please see additional results on the OPV2V dataset~\citep{xu2022opv2v} in the supplementary.)
+
+\begin{wrapfigure}{R}{0.45\textwidth}
+    \centering
+    \minipage{1\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/fig8_data_split.pdf} 
+    \endminipage
+    \caption{\textbf{Dataset split.} We re-split V2V4Real \citep{xu2023v2v4real} for our setting.}
+    \vskip-8pt
+    \label{fig:data_split}
+\end{wrapfigure}
+
+To align with our research purpose, we re-split the original data into three portions: "\refcar~pretraining", "\refcar~prediction/\egocar~training", and "\egocar~validation/test"~(\autoref{fig:data_split}). Specifically, we split them into two subsets containing 20 clips and use the first subset to pre-train~\refcar's detector $f_R$. Then we inference on the second subset to provide pseudo labels $Y_R$ for training \egocar's detector $f_E$ together with \egocar's point clouds. We validate and test the \egocar's performance on the first subset by splitting it into 20\% and 80\%. Our re-split gives 4,488 frames for~\refcar~pretraining, 4,463$\times$2 frames for~\egocar~training, and 870 and 3,618 frames for~\egocar~validation/test respectively. The performance in the paper is reported on \egocar's test set. 
+
+\mypara{Evaluation.}
+We follow~\citet{xu2023v2v4real} to merge different types of vehicles (\eg, cars, trucks) into a single category
+\footnote{We note that V2V4Real~\citep{xu2023v2v4real} does not label objects beyond vehicles and the data distributions across different types of vehicles are largely imbalanced. Thus, it is infeasible to study multi-class vehicle detection. 
+That said, extending our approach to a multi-class setup would be straightforward if a suitable dataset is available. The key is to make the ranker category aware. Please refer to our experiments on extending the ranker to a multi-class setting in the supplementary.}.
+We report the average precision (AP) of detectors in the bird's-eye view with IoU thresholds of 0.5 and 0.7. Specifically, we set the region of interest to [-80, 80]m for the heading direction and [-40, 40]m for the direction perpendicular to the moving direction. We also report the AP on different depth ranges [0-30, 30-50, 50-80, 0-80]m following~\citet{luo2023drift}. 
+
+\mypara{Implementation.}
+We conduct experiments with PointPillars~\citep{lang2019pointpillars} as a default \textbf{detector}. We train it with 60 epochs and a batch size of 64 on 8 NVIDIA Tesla P100 GPUs. We use Adam optimizer and an initial learning rate of 2e-3 dropped to 2e-5 by cosine annealing decaying strategy~\citep{loshchilov2017decoupled}.
+For training the \textbf{box ranker}, a PointNet~\citep{qi2017pointnet} specified in the supplementary, we use 40 annotated frames ($<1\%$ of training data) to generate 11k samples. 
+In the \emph{offline} ranker inference, we sample $N=512$ boxes around each prediction provided by the reference car.
+We first sample 256 boxes in the coarse stage, select top-3 boxes, and then sample the remaining 256 boxes near the selected boxes in the fine stage.
+For curriculum learning, we set $T_{E\text{-}R}$ to 40m. Also, we set the ranker threshold to 0.5, and $\lambda$ for the distance-based threshold to 1 with a fixed confidence threshold $T_c$ of 0.2.
+Please refer to the supplementary material for more details.
+
+\subsection{Experimantal results}
+
+\input{tables/tabx_main_results_v2}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=1\linewidth]{figures/fig9_qualitative.pdf}
+\caption{\textbf{Qualitative results.} The quality of pseudo labels is gradually improved with the proposed \ours. Our ranker successfully fixes mislocalization errors, and distance-based curriculum further discovers new objects from \egocar's view.}
+\label{fig:qualitative}
+\end{figure*}
+
+We first demonstrate our scenario, \textit{learning with others' predictions}, with a basic setup:~\refcar~and~\egocar~both have 32-beam sensors with PointPillars~\citep{lang2019pointpillars}, but only \refcar's detector was pre-trained. \autoref{tab:main_results} compares different methods for pseudo labels, including baselines such as standard self-training~\citep{you2022modest} and heuristic-based label refinement~\citep{luo2023drift}. For fair comparisons, we note that we only utilize annotated boxes from 40 frames to train our ranker, not to train the detector. For the heuristic-based refinement~\citep{luo2023drift}, as our dataset has no repeated traversal to estimate movable objects, we use RANSAC~\citep{fischler1981random} instead.
+
+Firstly, our ranker brings a notable gain over heuristics-based refinement (\ding{194} 10.3 \vs\ \ding{195} 22.9, \ding{197} 8.9 \vs\ \ding{198} 28.0, and \ding{200} 11.0 \vs\ \ding{201} 32.6 on AP at IoU 0.7), demonstrating its effectiveness to address  mislocalization.
+Secondly, our distance-based curriculum consistently improves the performance over the standard self-training (\ding{196}-\ding{198} 32.4/35.4/45.0 \vs \ding{199}-\ding{201} 42.5/43.2/56.5), demonstrating the necessity of using higher-quality samples for self-training. 
+Finally, by comparing with detectors trained with~\egocar's ground-truth, our method achieves on par with the upper bound (\ding{201} 56.5/32.6 \vs \ding{168} 58.4/36.3).
+
+\autoref{fig:qualitative} visualizes the improvement of pseudo labels with our method. The ranker successfully refines mislocalized pseudo labels provided by~\refcar. Moreover, our distance-based curriculum discovers new bounding boxes that~\egocar~couldn't receive from ~\refcar's perception, without introducing many false positives.
+
+\subsubsection{Ablation study}
+
+\input{tables/tabx_ablation_ranker}
+
+\input{tables/tabx_ablation_selftrain}
+
+\mypara{Analysis on ranker training.}
+We first check the performance of the ranker trained with different number of annotated frames (\ie, 20, 40, and 80) in~\autoref{tab:ablation_ranker_num_annotations}. Notably, we observe a performance boost when the ranker is trained with 40 frames compared to 20 frames, and the performance gain diminishes with more than 40 frames. This demonstrates that the ranker already perform well with very few labeled data (\ie, 1\% of total).
+Moreover, we train our ranker with 21k samples generated by CARLA simulator~\citep{xu2022opv2v} and achieves on par performance, exploring to remove the need of human labels. 
+
+\mypara{Analysis on ranker inference.}
+We investigate the impact of inference strategies for the refinement on the final detection performance in~\autoref{tab:ablation_ranker_inference}. The results indicate that sampling boxes (\ding{192} 28.5 \vs \ding{193} 30.7) and coarse-to-fine refinement (\ding{193} 30.7 \vs \ding{194} 32.6) contribute to superior performance, especially for the fine-grained quality of IoU 0.7. We also observe the benefit of using predicted offsets to further refine box locations (\ding{195} 31.0 \vs \ding{194} 32.6). This demonstrates the effectiveness of our sophisticated box refinement strategies.  
+
+\mypara{Analysis on curriculum for self-training.}
+In our method, we split the training data into two subsets with the threshold $T_{E\text{-}R}$ of 40m. 
+We train the detector on different combinations of subsets and check its performance~(\autoref{tab:ablation_selftrain_range}). We observe that using initial low-quality frames to train the model gives significantly lower performance (\ding{195} 33.5 \vs \ding{196} 56.5). Also, we see that the performance escalates as we utilize more high-quality frames during the next self-training stage (\ding{193} 50.3, \ding{194} 51.1 \vs \ding{196} 56.5), verifying the effectiveness of our curriculum choice.
+
+\mypara{Analysis on box filtering for self-training.}
+To prevent the model from introducing false positive boxes during the self-training, we design a distance-based confidence threshold and ranker-based filtering. As shown in~\autoref{tab:ablation_selftrain_fp}, the detector improves with our strategies. This indicates a good balance between recall and precision provided by our method, resulting in better detection performance.
+
+\input{tables/tabx_different_scenarios}
+
+\subsubsection{Applications to different scenarios}
+
+\ours\ can also be used when \egocar\ and \refcar\ have different detectors and hardware sensors, and are across different domains. This section evidences the flexibility of our method.
+
+\mypara{Different sensors.}
+To show that our pipeline can be trained on facilities with different sensors, we conduct experiments with synthesized 16- and 8-beam LiDAR point clouds with the beam-dropping algorithm~\citep{wei2022lidar}. Specifically, we assume~\refcar~has either 8-, 16-, and 32-beam, respectively, and the detector architecture is fixed to PointPillars~\citep{lang2019pointpillars}. 
+As shown in ~\autoref{tab:different_sensor}, the detection performance does not drop when using less advanced sensors (\ie, fewer beams). This indicates the flexibility of our algorithm in different sensor configurations.
+
+\mypara{Different detectors.}
+We conduct experiments to demonstrate the effectiveness of our pipeline on different detectors, \eg, PointPillars~\citep{lang2019pointpillars} and SECOND~\citep{yan2018second}, by using various combinations in~\autoref{tab:different_detector}.
+The results show that the detector performance of ~\egocar\ does not rely on~\refcar's detector, which implies~\egocar~tends to learn agnostically to~\refcar's setups. Together with the experiments for different sensors, this highlights the general flexibility of our method.  
+
+\mypara{Different domains.}
+We explore our algorithm's applicability to the domain adaptation scenario with a synthetic to real case. In doing so, we assume that~\egocar's detector has been pre-trained on simulation data \citep{xu2022opv2v}. As shown in~\autoref{tab:ablation_domain_adaptation}, the performance of~\egocar's pre-trained detector improves with adaptation to real domains (via self-training). Notably, we compare adaptation with and without using~\refcar's predictions and observe that leveraging the predicted boxes from~\refcar~is beneficial.
+
+\subsubsection{Additional empirical studies}
+
+We leave additional results in the supplementary, including the ideal scenario where the object detector can be shared, analysis on ranker and self-training, and extension to another dataset.
+
+
+\section{Conclusion and Discussion}
+
+\label{sec:conclusion}
+
+In this work, we have introduced \textit{learning with others' predictions}, a new way to train a 3D detector with the predictions of reference units. We have systematically identified the inevitable task-specific problems: false positive, false negative, and noisy boxes due to either viewpoint mismatch or synchronization/GPS errors. Next, we have proposed to improve the quality of pseudo labels by two solutions: A box ranker and distance-based curriculum self-training. We have demonstrated a wide applicability of our learning scenario with different detectors, sensors, and domains.
+
+\mypara{Limitations and future work.} 
+The ego car’s detector can benefit from other reference units, such as roadside units in smart cities. In our future work, we plan to investigate more diverse scenarios. Moreover, the ego car and the reference car using different modalities would be a direction to explore further. We believe that our findings and approach have set the foundation for it. At a high level, our approach is sensor and modality-agnostic. Regardless of the type of sensors and detectors (camera-based or LiDAR-based) used, if we aim at 3D perception, they will produce 3D bounding boxes as pseudo labels. Our method does not necessitate a specific model for providing the pseudo labels and can be easily adapted to various sensor types. We leave this extension to future work.
+
+
+
+
+
+

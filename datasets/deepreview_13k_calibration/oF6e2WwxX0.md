@@ -1,8 +1,8 @@
 # TIS-DPO: Token-level Importance Sampling for Direct Preference Optimization With Estimated Weights
 
 - Decision: Accept
-- Avg Score: 3.80
-- Scores: 8, 1, 0, 5, 5
+- Avg Score: 7.00
+- Scores: 8, 10, 5, 5
 
 ## Abstract
 Direct Preference Optimization (DPO) has been widely adopted for preference alignment of Large Language Models (LLMs) due to its simplicity and effectiveness. 

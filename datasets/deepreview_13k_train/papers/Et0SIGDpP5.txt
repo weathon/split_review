@@ -1,0 +1,343 @@
+\title{Long-context Protein Language Model}
+
+\begin{abstract}
+Self-supervised training of language models (LMs) has seen great success for protein sequences in learning meaningful representations and for generative drug design. 
+Most protein LMs are based on the Transformer architecture trained on individual proteins with short context lengths. Such protein LMs cannot extrapolate to longer proteins and protein complexes well. They also fail to account for the underlying biological mechanisms carried out by biomolecular interactions and dynamics i.e., proteins often interact with other proteins, molecules, and pathways in complex biological systems. 
+In this work, we propose \themodel based on an alternative protein LM architecture, \themodels, built off selective structured state-space models, to learn high-quality universal protein representations at the amino acid token level using masked language modeling. We also introduce its graph-contextual variant, \themodelg, which contextualizes protein-protein interaction (PPI) graphs for a second stage of training. \themodel demonstrates favorable neural scaling laws, better length extrapolation capability, and a 7\% to 34\% improvement on protein downstream tasks than Transformer-based ESM-2. \themodelg further trained within the context of PPI graphs shows promising results on protein structure and function prediction tasks. Our study demonstrates the benefit of increasing the context size with computationally efficient LM architecture (e.g. structured state space models) in learning universal protein representations and incorporating molecular interaction context contained in biological graphs.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Most biological sequences are derived from genomes, which are long DNA sequences: human chromosomes range from 50 to 300 million base pairs. The protein-coding regions, which can be considered as the translated substrings of the genome, are relatively shorter (the majority are < 3,000 amino acids), albeit with a few exceptions, such as Titin, composed of 34K amino acids. The prevalent protein language models (pLMs), e.g. ESM-2 \citep{lin2023evolutionary}, choose 1024 as the context length as it fits 97.4\% of proteins. However, it does not natively support tasks that require long-range context windows to reason over multiple related sequences, such as genomic interactions, protein-protein interactions (PPI), protein function prediction, and 3D structure prediction of long proteins and protein complexes. Another challenge for modeling long-range biological contexts lies in their non-sequential nature. For instance, the useful context for genomic interactions and PPIs often span across regions from different chromosomes, and capturing information within an LM of such interactions usually requires biomedical knowledge graphs for good performance on these tasks \citep{kovacs2019network, sousa2024explaining}.
+
+Large LMs including those trained on protein sequences, are predominantly based on the Transformer \citep{vaswani2017attention} with multi-head attention. Despite its state-of-the-art performance on virtually all types of data modalities (texts, vision, audio, etc.), it suffers from quadratic time and space complexity due to the lengths of the input sequences. 
+Additionally, transformer models are known to have poor length extrapolation quality and do not achieve the same level of performance when evaluated on sequences longer than seen during pretraining. Recent work in alternative architectures such as convolutional (e.g.~Hyena \citep{poli2023hyena}) and selective structured state space models (SSMs) (e.g.~Mamba \citep{gu2024mambalineartimesequencemodeling}) have demonstrated competitive performance and preferable scaling properties on long context compared to Transformers and extensions including linear attention approximation variants \citep{katharopoulos2020transformers,zhai2021attention,peng2023rwkv}.
+Although recent studies have leveraged these novel architectures to train LMs for DNA sequences \citep{nguyen2024hyenadna,nguyen2024sequence,schiff2024caduceus}, studies examining their feasibility as protein LMs are limited. There is also a research gap on how to effectively leverage the long-context capability of these architectures to model graphs of sequences i.e., how to leverage PPI graphs to improve LM's ability to reason across interacting (related) proteins. 
+
+\begin{wrapfigure}{r}{0.65\textwidth} % 'r' for right, 'l' for left, 0.5\textwidth for width
+  \centering
+  \includegraphics[width=\linewidth]{figs/graphical.pdf}
+  \caption{Our model enables long-context capability, length extrapolation ability, better neural scaling law, and interaction context-aware inference.}
+  \label{fig:abs}
+\end{wrapfigure}
+
+In this work, we explore alternative architectures based on Mamba to improve the long-context capability of pLMs. We train a long-context pLM (\themodel) using bidirectional Mamba with shared projection layers (\themodels) on protein sequences from \texttt{UniRef50} with masked language modeling (MLM) objective. Results show favorable neural scaling laws, length extrapolation properties on \texttt{UniRef90}, and better downstream task performance on \texttt{TAPE} \citep{rao2019evaluating} and \texttt{ProteinGym} \citep{notin2024proteingym} than its Transformer counterpart, namely ESM-2. Such long-context and length extrapolation properties facilitate and improve structure prediction of long proteins and protein complexes from \texttt{CASP14}, \texttt{CASP15-multimers}, and \texttt{Benchmark2}. Next, we train a graph-contextualized variant \themodelg, which uses a proposed novel second-stage training strategy to leverage the long-context capabilities of \themodels to encode useful information from interaction graphs (e.g., PPI). Trained on sampled random walks that are composed of sequences of proteins, \themodelg improves performance on remote homology prediction, node-level protein function prediction (\texttt{ogbn-proteins}), and link-level PPI prediction (\texttt{ogbl-ppa}) \citep{hu2020open}. 
+Our contributions can be summarized into three folds as follows:
+\begin{itemize}
+    \item We develop a long-context pLM (\themodel) with an alternative architecture based on a more sample \& compute-efficient bidirectional Mamba architecture with shared projection layers (\themodels) pretrained on \texttt{UniRef50} with MLM objective.
+    \item We demonstrate that \themodel has improved length extrapolation capabilities, favorable scaling laws, and achieved a 7\% to 34\% improvement on downstream tasks (e.g.~protein structure prediction (\texttt{CASP15-multimers}, \texttt{CASP14}, \texttt{Benchmark2}), tasks in \texttt{TAPE} and \texttt{ProteinGym}) compared to ESM-2, especially for longer proteins and protein complexes.
+    \item To encode biological interaction information, we propose a novel second-stage training based on random walks over graphs to extend the long-context capabilities of \themodel to leverage the PPI graph context. We demonstrate its effectiveness in capturing graph-contextual information on remote homology detection (\texttt{TAPE}), protein function prediction (\texttt{ogbn-proteins}), and PPI link prediction (\texttt{ogbl-ppa}). 
+\end{itemize}
+
+
+
+\section{Related Works}
+
+
+\subsection{Long-context LMs and State Space Models}
+
+Since their introduction, Transformers \citep{vaswani2017attention} with multi-head attention have been successfully applied in many different applications in natural language and computer vision. 
+However, while being relatively straightforward to scale the number of parameters, Transformer models have a quadratic dependence on the context length during training and are linear at inference time, making them expensive to scale to long context. 
+Alternative to Transformers, Recurrent Neural Networks (RNNs) \citep{bengioRNN, LSTMs1997} scale more favorably with context length and have linear dependency at training time and constant at inference time. However, generic non-linear RNNs cannot be parallelized on modern hardware due to the sequential nature of their gradient update rule \citep{bengioRNN}. 
+
+To improve RNNs scalability on modern hardware, recent works on SSMs \citep{gu2021efficiently, fu2022hungry, gu2024mambalineartimesequencemodeling} propose to linearize RNNs dynamics and use efficient hardware-aware algorithms. A notable example is Mamba \citep{gu2024mambalineartimesequencemodeling}, which leverages the associative scan to efficiently process arbitrarily long sequences in linear time, and Mamba-2 \citep{dao2024transformers} that greatly improves over Mamba by implementing SSM layers using structured matrix multiplications to better leverage modern Tensor cores. 
+
+To further harvest the benefits of SSM and Transformer primitives, hybrid models have been proposed in \cite{zancato2024b, lieber2024jamba, arora2024simple, de2024griffinmixinggatedlinear, botev2024recurrentgemma, waleffe2024empirical}.
+There are also efforts trying to extend Mamba models to graph data \citep{wang2024graphmambalongrangegraphsequence, behrouz2024graphmambalearninggraphs}. However, unlike our \themodelg, which learns token-level protein representations within graph context from the graph of sequences, they focus on learning node/graph-level representations that only work for generic graph tasks where nodes do not contain sequences (see \Cref{tab:sum}).
+
+
+
+\begin{table}[h!]
+\centering
+\begin{adjustbox}{width=0.99\linewidth, center}
+\begin{tabular}{l c c c c c}
+\toprule
+\textbf{Method}  & \textbf{Universality} & \makecell{\textbf{Fine} \\ \textbf{granularity}} & \makecell{\textbf{Long-context capability} \\ \textit{Handleability} \& \textit{Performance} } & \makecell{\textbf{Graph} \\ \textbf{context}} & \makecell{\textbf{Large-scale} \\ \textbf{model}} \\
+\midrule
+ProtGPT (\citeyear{ferruz2022protgpt2}) & \ding{51} & \ding{51} & \ding{55} ~~~~~~~~~~~~~~~~~~~~~ \ding{55} & \ding{55} & \ding{55} \\
+ESM-2 (\citeyear{lin2023evolutionary}) & \ding{51} & \ding{51} & \ding{55} ~~~~~~~~~~~~~~~~~~~~~ \ding{55} & \ding{55} & \ding{51} \\
+CARP (\citeyear{yang2024convolutions}) & \ding{51} & \ding{51} & \ding{51} ~~~~~~~~~~~~~~~~~~~~~ \ding{55} & \ding{55} & \ding{51} \\
+ProtHyena (\citeyear{zhang2024prothyena}) & \ding{51} & \ding{51} & \ding{51} ~~~~~~~~~~~~~~~~~~~~~ \ding{55} & \ding{55} & \ding{55} \\
+PoET (\citeyear{truong2024poet}) & \ding{55} & \ding{51} & \ding{55} ~~~~~~~~~~~~~~~~~~~~~ \ding{55} & \ding{55} & \ding{55} \\
+ProtMamba (\citeyear{sgarbossa2024protmamba}) & \ding{55} & \ding{51} & \ding{51} ~~~~~~~~~~~~~~~~~~~~~ \ding{55} & \ding{55} & \ding{55} \\
+PTM-Mamba (\citeyear{peng2024ptm}) & \ding{55} & \ding{51} & \ding{51} ~~~~~~~~~~~~~~~~~~~~~ \textbf{--} & \ding{55} & \ding{51} \\
+\midrule
+Graph-Mamba (\citeyear{wang2024graphmambalongrangegraphsequence}) & \ding{55} & \ding{55} & \ding{51} ~~~~~~~~~~~~~~~~~~~~~ \textbf{--} & \ding{51} & \ding{55} \\
+GMN (\citeyear{behrouz2024graphmambalearninggraphs}) & \ding{55} & \ding{55} & \ding{51} ~~~~~~~~~~~~~~~~~~~~~ \textbf{--} & \ding{51} & \ding{55} \\
+\midrule
+\themodel & \ding{51} & \ding{51} & \ding{51} ~~~~~~~~~~~~~~~~~~~~~ \ding{51} & \ding{55} & \ding{51} \\
+\themodelg & \ding{51} & \ding{51} & \ding{51} ~~~~~~~~~~~~~~~~~~~~~ \ding{51} & \ding{51} & \ding{51} \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\caption{Comparison of \themodel and \themodelg to other protein LMs and graph SSMs in terms of enabling universal representations, AA token-level fine granularity, long-context capability, graph contextual information, large model size, and a large number of pretrained tokens.}
+\label{tab:sum}
+\end{table}
+\subsection{Long-context LMs for biological sequences}
+
+To model the long-range interactions without sacrificing single nucleotide level resolution, long-context capable LM architectures have been developed for DNA sequences, including HyenaDNA \citep{nguyen2024hyenadna}, Evo \citep{nguyen2024sequence}, and Caduceus \citep{schiff2024caduceus}. These studies have shown that alternative architectures based on SSMs exhibit better scaling laws than Transformers on genomic data and DNA-specific tasks.  
+Protein sequence LMs with alternative architectures have also been explored to improve computational efficiency and enable the modeling of longer protein sequences. For instance, CARP \citep{yang2024convolutions} is a protein LM with dilated convolution layers. Pretrained with MLM objective, CARP achieved comparable pretraining scaling properties with its Transformer counterpart ESM-1b \citep{rives2021biological} and scales better on long sequences. ProtHyena \citep{zhang2024prothyena} is a small 1.6M parameter decoder-only LM based on the Hyena operator pretrained on protein sequences and has demonstrated some improvement over ProtGPT \citep{ferruz2022protgpt2} with comparable model sizes. 
+
+Some works exploit the long-context capability of LMs to model sets of homologous protein sequences such as those in multiple sequence alignment (MSA), which further organize a set of protein sequences by aligning evolutionary conserved amino acids across the set of sequences. PoET \citep{truong2024poet} proposed a tiered variant of Transformer to model the invariant relationships between multiple protein sequences from MSAs, whereas ProtMamba \citep{sgarbossa2024protmamba} trains a Mamba-based protein LM using concatenated sequences from MSAs with causal language modeling and infilling objective. PTM-Mamba \citep{peng2024ptm} addresses post-translational modifications (PTM) of protein sequences introducing PTM tokens to amino acid tokens and subsequently trains a bidirectional Mamba model with these PTM tokens. We provide additional discussion on other pLMs and related variants in \Cref{app:plm}. 
+
+Instead of training protein sequences from very specific types of data like MSAs or PTMs, we emphasize that \textbf{our work} focuses on long-context modeling of individual protein sequences and related protein sequences within biomedical graphs, which learns universal AA token-level protein representations that are more generalizable and can encode information from biological interactions (see \Cref{tab:sum} for a detailed comparison).
+\subsection{Protein LMs trained on graphs}
+
+Graphs are ubiquitous in biomedical domains as they are suitable for organizing and representing complex biological systems, such as gene regulatory networks and PPI graphs \citep{wang2022graph}. The relationships among proteins embedded in biomedical graphs have also been used to train pLMs. The common strategies for incorporating graph information include pretraining LMs with graph-specific objectives in addition to self-supervised LM objectives. The graph-specific objective can be link-prediction on homogeneous graphs \citep{yasunaga2022linkbert,mcdermott2023structure}, knowledge graph embedding (KGE) objectives \citep{zhang2022ontoprotein} or contrastive loss \citep{wang2023biobridge} on heterogeneous graphs. One limitation of such approaches is the inability to jointly model the implicit token-wise interactions beyond a pair of sequences. After all, link-prediction and KGE only take two sequences as input. In our work, we use homogeneous PPI graphs and exploit the long-context capability of SSM-based LM to model token-wise interactions beyond two sequences. 
+
+
+
+\section{Preliminaries}
+
+
+\paragraph{Structured State Space Models}
+Modern Structured SSMs are derived from first-order differential equations that map the input sequence $x(t)$ to the output sequence $y(t)$ through hidden state $h(t)$:
+\begin{align}
+    \mathbf{h'}(t) &= \mathbf{A} \mathbf{h}(t) + \mathbf{B} x(t), \quad y(t) = \mathbf{C} \mathbf{h}(t) \label{eq:ssm1}
+\end{align}
+where $\mathbf{A} \in \mathbb{R}^{N \times N}$, $\mathbf{B} \in \mathbb{R}^{N \times D}$ and $\mathbf{C} \in \mathbb{R}^{D \times N}$. The variables $N$ and $D$ refer to the state dimension and the (expanded) input dimension respectively. The continuous dynamical system characterized by $\mathbf{A}$, $\mathbf{B}$ can be discretized to $\bar{\mathbf{A}}, \bar{\mathbf{B}}$ by zero-order holding and time sampling at intervals of $\Delta$, defined as follows:
+\begin{align}
+    \bar{\mathbf{A}} &= \exp(\Delta \mathbf{A}), \quad \bar{\mathbf{B}} = (\Delta \mathbf{A})^{-1} (\exp(\Delta \mathbf{A}) - \mathbf{I}) \cdot \Delta \mathbf{B}. \label{eq:ssm2}
+\end{align}
+The formula of a discretized SSM can then be written as:
+\begin{align}
+    \mathbf{h}_k &= \bar{\mathbf{A}} \mathbf{h}_{k-1} + \bar{\mathbf{B}} x_k, \quad y_k = \mathbf{C} \mathbf{h}_k \label{eq:ssm3}
+\end{align}
+
+The main benefit of discretized SSMs \citep{gu2021efficiently} over their continuous counterpart is that they can be trained efficiently using their parallel convolutional representation and can be efficiently deployed at inference time with their recurrent form. However, the ability to model long-range interactions of SSMs is limited by the impulse response of the discrete dynamical system they implement, the S4 model \citep{gu2020hippo, gu2021efficiently} mitigates such limitation by introducing the HIPPO Matrix to the initialization of $\mathbf{A}$.
+
+\paragraph{Selection Mechanism and Mamba}
+
+The main limitation of the SSMs described so far is that they cannot model complex input-varying interactions across the sequence dimension. Thus, Mamba \citep{gu2024mambalineartimesequencemodeling} parameterizes the matrices $\mathbf{B}$, $\mathbf{C}$ and $\Delta$ in an input-dependent (data-driven) manner, introducing a selection mechanism into the S4 model. However, introducing such data dependency makes the parallelizable convolutional representation unfeasible, hence, Mamba uses a novel hardware-aware parallel computing algorithm (based on the associative scan) to ensure the efficient training of the model and leading to linear computational complexity and outstanding capabilities in modeling long-term dependencies.
+A Mamba model (\textit{selective} SSM) that enables dependence of the parameters $\mathbf{B}$, $\mathbf{C}$ and $\Delta$ on the input $x(t)$ can be formulated as:
+\begin{align}
+    \mathbf{B}_t &= \text{Linear}_\mathbf{B}(x_t) \quad \mathbf{C}_t = \text{Linear}_\mathbf{C}(x_t) \\
+    \Delta_t &= \text{softplus}(\text{Linear}_\Delta(x_t)), \label{eq:selective_ssm}
+\end{align}
+where $\text{Linear}(\cdot)$ represents a linear projection and $\text{softplus}(\cdot) = \log(1 + \exp(\cdot))$.
+
+
+\section{\themodel: Long Context Protein Language Model}
+
+
+In this section, we first introduce the design choice of using bidirectional Mamba (\themodelb) with shared projection layers (\themodels) for building up the model architecture of \themodel, and then we discuss how we develop the two-stage training recipe to obtain high-quality universal protein representations using MLM and encode biologically meaningful interaction information with a novel graph context-aware training approach.
+
+\subsection{\themodels: Bidirectional Mamba with Shared Projection Layers}
+\begin{wrapfigure}{r}{0.4\textwidth} 
+    \centering
+    \includegraphics[width=0.9\linewidth]{figs/bimamba-s2.pdf}
+    \caption{\themodels block. The forward and reverse modules share the linear projection layers. The normalized input will be reversed along the sequence dimension before being fed in. The output of the reversed will be flipped back and then added to the forward's output.}
+    \label{fig:bimamba}
+\end{wrapfigure}
+
+\themodelb is an extension from standard Mamba block and has been applied in various domains, e.g. time-series forecasting \citep{liang2024bi}, audio representation learning \citep{erol2024audio}, visual representation learning \citep{zhu2024vision}, DNA modeling \citep{schiff2024caduceus}, and graph learning \citep{behrouz2024graphmambalearninggraphs}. The following reasons suggest we consider \themodelb as the design choice: 
+(i) Mamba is good at {\emph{capturing long-range dependencies}} and {\emph{extrapolating on even longer sequences}}, which benefit a lot of downstream tasks on protein complexes and PPI graphs.
+(ii) standard Mamba only does unidirectional (associative) scans for causal modeling of sequential data. To {\emph{perform MLM to learn high-quality universal protein representations}}, we introduce a modified bidirectional scan to capture information from both ends.
+
+In general, the $l$-th \themodelb block takes in an input sequence of tokens $\mathbf{T}_{l-1} \in \mathbb{R}^{B \times S \times D}$ and output $\mathbf{T}_{l} \in \mathbb{R}^{B \times S \times D}$ where $B, S, D$ represent the batch size, the input dimension, and the hidden state dimension. Then a residual connection adds the input and output together to get $\mathbf{T}_l$. After going through $L \times$ \themodelb blocks, the output $\mathbf{T}_L$ will be normalized first and then fed into a prediction head to get final scores. This procedure can be formulated as follows:
+\begin{align}
+    &\mathbf{T}_l = \text{BiMamba}\left( \mathbf{T}_{l-1} \right) + \mathbf{T}_{l-1} \\ &\hat{p} = \text{PredictionHead}\left( \text{Norm} \left(\mathbf{T}_{L}\right) \right)
+\end{align}
+
+Specifically, in one \themodelb block, the input sequence $\mathbf{T}_{l-1}$ and the flipped $\hat{\mathbf{T}}_{l-1}$ will be first normalized and then linearly projected to $\mathbf{X}_{l-1} \in \mathbb{R}^{B \times S \times E}$ and $\mathbf{Z}_{l-1} \in \mathbb{R}^{B \times S \times E}$. $\mathbf{X}_{l-1}$ and the flipped $\hat{\mathbf{X}}_{l-1}$ will be fed into the forward and inverse Mamba block respectively for a bidirectional scan. In each Mamba block, $\mathbf{X}_{l-1}$ and $\hat{\mathbf{X}}_{l-1}$ will be first passed through a 1-D convolution layer and a SiLU activation \citep{nwankpa2018activation}, and then linearly projected to $ \mathbf{B}_{l-1} \in \mathbb{R}^{B \times S \times N}, \mathbf{C}_{l-1} \in \mathbb{R}^{B \times S \times N}, \Delta_{l-1} \in \mathbb{R}^{B \times S \times E}$ and $ \hat{\mathbf{B}}_{l-1}, \hat{\mathbf{C}}_{l-1}, \hat{\Delta}_{l-1}$, where $\Delta_{l-1}$ and $\hat{\Delta}_{l-1}$ transform $\mathbf{A}_{l-1}, \mathbf{B}_{l-1}$ and $\hat{\mathbf{A}}_{l-1}, \hat{\mathbf{B}}_{l-1}$ to $\bar{\mathbf{A}}_{l-1} \in \mathbb{R}^{B \times S \times E \times N}, \bar{\mathbf{B}}_{l-1} \in \mathbb{R}^{B \times S \times E \times N}$ and $\hat{\bar{\mathbf{A}}}_{l-1}, \hat{\bar{\mathbf{B}}}_{l-1}$. A standard SSM block will be then applied to obtain $\mathbf{Y}_{l-1} \in \mathbb{R}^{B \times S \times E}$ and $\hat{\mathbf{Y}}_{l-1}$, which later will be gated by $\mathbf{Z}_{l-1}$ and added together to get the candidate output. Lastly, a residual connection will be applied on a linear projection of the candidate output and input sequence $\mathbf{T}_{l-1}$ to get the final output $\mathbf{T}_l$. We provide an algorithmic block and a detailed and itemized procedure in \Cref{app:pseudo}.
+
+\paragraph{Shared Projection Layers}
+To explore a more efficient implementation of \themodelb, we propose to use the shared linear projection layers for the forward input $\mathbf{T}_{l-1}$ and the flipped $\hat{\mathbf{T}}_{l-1}$. This design choice helps make the entire model $2\times$ deeper with almost the same parameter counts \citep{schiff2024caduceus}. We refer to this building block as \themodels (illustrated in \Cref{fig:bimamba}). Note that this is different from the inner \themodelb block used in \cite{zhang2024mamba,zhu2024vision}, where they just flipped the linearly projected hidden states. We also find that, empirically, the deeper model using \themodels shows superiority in terms of sample \& compute efficiency (4.5\% improvement on evaluation loss) and performance gain on downstream tasks (an average of 4.1\% improvement on TM score of structure prediction) as we expected. More results and details are shown in \Cref{exp:weight}.
+
+\paragraph{Untied Input \& Output Embeddings}
+Notably, we opt to use untied input and output embeddings for the \themodels encoder. Empirically we find that untied embeddings yield better evaluation loss during MLM training compared to tied embeddings, despite the latter being the standard practice. This finding aligns with previous research \citep{gao2019representation,ethayarajh2019contextual}, which highlights that tying input and output embeddings leads to \textit{anisotropic} word embeddings in contextualized pretrained models, significantly constraining their expressiveness.
+
+\subsection{Two-stage Training Recipe}
+Our training procedure can be decomposed into two stages: (i) long-context protein language modeling and (ii) protein language modeling within graph context. The first stage will enforce \themodel to learn the universal token-level representations of individual proteins and the second stage will put the protein sequences into the related graph context and \themodelg will learn to capture biologically meaningful interaction information.
+
+\paragraph{Long-context Protein Language Modeling}
+\themodel is trained with \themodels on individual protein sequences where it can leverage the power of SSM modules to effectively capture long-range dependencies within sequences. Specifically, treating the protein sequences as a collection of amino acid (AA) tokens, the model learns fine granular and universal token-level representations using MLM, which can be generalized across different types of protein sequences. For the masking strategy, we follow BERT \citep{devlin2018bert} in which 15\% of AA tokens in a protein sequence will be "masked". Of the ‘masked’ tokens, 80\% are replaced with  \texttt{[MASK]}, 10\% are replaced with a random token from the vocabulary, and 10\% are left unchanged.
+
+\begin{figure}[h]
+\begin{center}
+\includegraphics[width=1\textwidth]{figs/sec.pdf}
+\end{center}
+\caption{The illustration of graph-contextual protein language modeling (\themodelg). The positive paths are sampled with random walks on the graph and the same number of negative paths are sampled from disconnected node pairs randomly. The sampled paths will be transformed into multi-protein sequences composed of AA tokens and special graph identifier tokens. The \themodels encoder is trained using MLM, the same as in the first-stage training.}
+\label{fig:graphmamba}
+\end{figure}
+
+\paragraph{Graph-contextual Protein Language Modeling}
+
+To encode biologically meaningful interaction information into protein representations, we propose the second-stage training within a graph context where a node represents an individual protein sequence and an edge indicates the existence of PPI. We refer to this graph-contextually trained model variant as \themodelg. \citet{wang2022graph} and \citet{behrouz2024graphmambalearninggraphs} propose to tokenize the graph into either flattened node sequences with prioritization strategy (e.g., node degree) or induced subgraphs. However, the former discards the graph topology information and the latter only provides non-Euclidean subgraph tokens that cannot be used as the input of language models. Therefore, we propose to construct the graph-contextual input via random walks \citep{perozzi2014deepwalk, grover2016node2vec}, which can both effectively capture the graph topology and provide 1-D sequences. Consider an undirected, unweighted, PPI graph $\mathcal{G}=(V, E)$. Formally, a random walk of length $l$ can be simulated by
+\begin{equation}
+    P(n_i = v \mid n_{i-1} = u) = 
+    \begin{cases} 
+    \frac{\pi_{uv}}{Z} & \text{if } (v, u) \in E \\ 
+    0 & \text{otherwise} 
+    \end{cases}
+\end{equation}
+where $n_i$ denotes the $i$th node in the walk, $\pi_{uv}$ is the unnormalized transition probability between nodes $(u, v)$, and $Z$ is the normalizing constant. We also set two parameters $p$ and $q$ as in \cite{grover2016node2vec} to interpolate the behavior of random walker in between breath-first and depth-first search (see \Cref{app:sampling}). Then, the nodes in each random walk will be expanded as a sequence of proteins composed of AA tokens. We also sample a sequence of disconnected nodes of the same length $l$ as the negative paths. 
+
+Although this gives us a principled way to form input multi-protein sequences for language models within graph context, the input still needs special identifiers to let the language model precept the graph topological information and be aware of which protein each AA token belongs to. Thus, we design four new tokens (\texttt{[BON]}, \texttt{[EON]}, \texttt{[EDGE]}, \texttt{[NO\_EDGE]}) to help encode such graph context information, where the first two indicate the begin and end of a node and the last two represent if there exists an edge. We provide a visual illustration of this graph-contextual training regime in \Cref{fig:graphmamba}.
+
+
+\section{Experiments}
+
+ We conduct experiments to evaluate the effectiveness of \themodel and \themodelg and their building block \themodels. We will address the following research questions. \textbf{(RQ1)} What is the scaling behavior of \themodel? How does it compare with its Transformer-based counterpart ESM-2?
+\textbf{(RQ2)} Does \themodel show stronger length extrapolation capability than ESM-2?
+\textbf{(RQ3)} Will \themodels architecture be more effective in long-context protein language modeling?
+\textbf{(RQ4)} Does long-range dependencies help with protein structure prediction?
+\textbf{(RQ5)} Does \themodelg learn graph-contextual (relational) information?
+\textbf{(RQ6)} Does \themodelg with biological interaction information learned in the second-stage training help with common downstream tasks?
+\textbf{(RQ7)} Does \themodelg improve protein function prediction and link prediction on the PPI graph?
+We provide the experimental setup, dataset description, and task definition in \Cref{app:data,app:exp}.
+
+\begin{figure}[htbp]
+\centering
+\begin{minipage}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/scaling4.png}
+    \caption{Evaluation loss across different model sizes for \themodel and ESM-2, showing that \themodel has a better scaling behavior when increasing parameter size.}
+    \label{fig:scaling}
+\end{minipage}%
+\hfill
+\begin{minipage}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/wt2.png}
+    \caption{Evaluation loss comparison between \themodel with \themodelb and \themodels at different training steps.}
+    \label{fig:weight}
+\end{minipage}
+\end{figure}
+\subsection{\textbf{(RQ1)} Exploring the Scaling Law}
+We train \themodel on 20B \texttt{UniRef90} sequences and evaluate it on a held-out set of 250K \texttt{UniRef90} sequences. We test four different model sizes for both \themodel and ESM-2. The model sizes for \themodel are 130M, 370M, 790M, and 1.4B parameters to accommodate \themodels architecture, while for ESM-2, they are 150M, 300M, 650M, and 1B. The results demonstrated that \themodel not only achieved better evaluation loss with a similar model size (with an average of 13.5\% improvement) compared to ESM-2 but also exhibited superior scaling behavior (sharper slope) when increasing the model size, as shown in \Cref{fig:scaling}. This aligns with the discovery in \cite{gu2024mambalineartimesequencemodeling} that Mamba has better neural scaling law compared to Transformers in language modeling. This may also be due to the useful long-range dependencies in protein sequences captured by \themodel and the deeper architecture achieved with \themodels.
+
+\begin{wrapfigure}{r}{0.59\textwidth}
+    \centering
+    \includegraphics[width=1.02\linewidth]{figs/len_extra3.png}
+    \caption{Length extrapolation results comparing \themodel versus ESM-2 on evaluation loss across different sequence lengths. \themodel can achieve consistent performance when extrapolating on longer sequences.}
+    \label{fig:len_extra}
+\end{wrapfigure}
+
+\subsection{\textbf{(RQ2)} Length Extrapolation Evaluation}
+We split the UniRef90 sequences into 7 bins w.r.t. the sequence length (i.e. 0-128, 128-256, 256-512, 512-1024, 1024-2048, 2048-4096, and 4096-8192). We train three sizes of \themodel (130M, 370M, 790M) and ESM-2 (150M, 300M, 650M) on the bin of 128-256 and then evaluate them on all bins (including a held-out set of 128-256). Our findings show that \themodel maintains low evaluation loss across sequence lengths, while ESM-2 struggles with both shorter and longer sequences, especially when the lengths are underrepresented in the training set. This concludes that \themodel can extrapolate better with length due to the stronger length extrapolation capability of \themodels \citep{gu2024mambalineartimesequencemodeling} compared to ESM-2, which uses RoPE \citep{su2024roformer} to extend context beyond pretraining. The results are shown in \Cref{fig:len_extra}.
+\subsection{\textbf{(RQ3)} The Effectiveness of \themodels} \label{exp:weight}
+Using shared linear projection layers in \themodels allows for $2\times$ deeper models with similar parameter counts. In our analysis, we compare the evaluation loss of our 790M model with \themodels and its \themodelb counterpart that halves the depth. The training set is \texttt{UniRef50} and the evaluation set is a held-out set of 250K \texttt{UniRef90} sequences, the same as in the scaling law experiments. Our results show that this parameter-efficient approach to increasing the model depth effectively improves evaluation loss by 4.5\%, as shown in \Cref{fig:weight}. We also verify the effectiveness of \themodels on structure prediction in \Cref{tab:sp}, where the deeper model improves by 6.7\% on \texttt{CASP15-multimers}, 4.6\% on \texttt{CASP14}, and 1.5\% on \texttt{Benchmark2}. This empirical evidence matches the theory that more hidden layers in deep neural networks can benefit from more representation power gain, proposed in \citep{telgarsky2016benefits}. This also suggests a potentially better scaling strategy for training pLMs with the fixed parameter count, i.e. stacking more layers instead of having more hidden units.
+
+\subsection{\textbf{(RQ4)} Protein Structure Prediction with LMFold}
+
+We also evaluate \themodel’s ability to predict protein’s 3-D structures. It has been shown that protein LMs capture various levels of protein structure information \citep{rives2021biological, rao2020transformer,lin2023evolutionary}, despite being trained on primary sequences alone. Inspired by the ESMFold \citep{lin2023evolutionary} architecture, which uses the residue-level embeddings and, optionally, attention maps as features to predict the 3-D structures directly without MSA\footnote{We disable attention maps in our experiments since (i) there is no attention map in \themodels and (ii) ESMFold \citep{lin2023evolutionary} also demonstrate that attention maps provide no performance gain during training.}, we developed a protein folding model named LMFold, which generalizes ESMFold’s Folding Trunk and Structure Module to work with protein LMs with decoder-only and encoder-decoder architectures. Briefly, LMFold takes the residue-level embeddings for a given protein sequence as features to predict the all-atom coordinates of the protein structure. To further simplify LMFold, we only use 1 folding block of the structure module. Note that the goal of this task is not to develop the state-of-the-art protein folding model, but rather to quantify the potential of pretrained protein LMs for their learned structural information. To train LMFold, we use the \emph{Frame Aligned Point Error (FAPE)} and \emph{distogram} losses introduced in AlphaFold2 \citep{jumper2021highly}, as well as heads for predicting \emph{LDDT} and the \emph{pTM score}. We weigh these 4 loss terms using the default constants proposed in OpenFold \citep{ahdritz2024openfold}.
+
+\begin{table}[h!]
+\centering
+\begin{adjustbox}{width=0.99\linewidth, center}
+\begin{tabular}{l c c c}
+\toprule
+\textbf{Model (\#Tokens trained)} & \textbf{CASP15-multimers} & \textbf{CASP14} & \textbf{Benchmark2} \\
+\midrule
+ESM-2-650M (100B)    & $0.4228 \pm 0.0065$  & $0.3531 \pm 0.0076$  & $0.4859 \pm 0.0119$  \\
+\themodel-790M w/ \themodelb (100B)    & \cellcolor{gray!15}$0.4787 \pm 0.0013$  & \cellcolor{gray!15}$0.3973 \pm 0.0019$  & \cellcolor{gray!15}$0.6199 \pm 0.0151$  \\
+\themodel-790M w/ \themodels (100B)  & \cellcolor{gray!30}$\mathbf{0.5109 \pm 0.0070}$  & \cellcolor{gray!30}$\mathbf{0.4154 \pm 0.0080}$  & \cellcolor{gray!30}$\mathbf{0.6290 \pm 0.0071}$  \\
+\midrule
+ESM-2-650M-public (1T)\tablefootnote{The public ESM-2 model is provided for reference only. We highlight the best results for models trained with the same number of tokens and similar sizes. The tables below follow the same approach.}  & ${0.5031 \pm 0.0094}$  & ${0.4359 \pm 0.0033}$  & ${0.6743 \pm 0.0067}$  \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\caption{Structure prediction performance (\emph{TM score}) on \texttt{CASP15-multimers}, \texttt{CASP14}, and \texttt{Benchmark2}. We perform 3 runs using different seeds and report the mean and standard deviation.}
+\label{tab:sp}
+\end{table}
+
+For the training set, we down-sample 1.5\% of protein chains used in OpenFold \citep{ahdritz2024openfold}, leading to 7,872 chains, with at most 1 protein chain from each cluster. The aggressive down-sampling is supported by the fact that training a protein folding model with as few as 1,000 protein chains achieved a decent performance \citep{ahdritz2024openfold}. The down-sampled protein chains have lower than 40\% sequence identity to each other. We use 95\% and 5\% as data splitting for training and validation sets. For held-out test sets, we use \texttt{CASP15-multimers} (52 protein complexes), \texttt{CASP14} (37 protein structures), and \texttt{Benchmark2} (17 heterodimers structures) \citep{ghani2021improved}. We compare our 790M \themodel (with \themodelb or \themodels) against 650M ESM-2, all pretrained on 100B tokens from \texttt{UniRef50}. \themodel outperforms ESM-2 across all test sets by a large margin (20.8\% on \texttt{CASP15-multimers}, 17.6\% on \texttt{CASP14}, and 29.5\% on \texttt{Benchmark2}). \themodel also achieves comparable performance to 650M public ESM-2 model trained on 10$\times$ more tokens (1T), with 1.6\% improvement on \texttt{CASP15-multimers}. These results demonstrate the powerful long-context capability of \themodels on modeling longer proteins and protein complexes. This also suggests that, even for average-length protein sequences, long-range dependencies would be useful information and an important feature for protein structure prediction.
+
+\begin{wrapfigure}{r}{0.62\textwidth}  % 'r' for right placement, '0.5\textwidth' for width of the figure
+    \centering
+    \begin{subfigure}[b]{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/tsne_combine_avg_louvain_1.png}
+        \caption{\themodel}
+        \label{fig:tsne_avg_louvain}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/tsne_combine_edge_louvain_1.png}
+        \caption{\themodelg}
+        \label{fig:tsne_edge_louvain}
+    \end{subfigure}
+    \caption{Comparison of t-SNE visualizations on protein-level representations obtained from \themodel and \themodelg with the corresponding community labels detected by the Louvain algorithm on the PPI graph. Embeddings from \themodelg recapitulate the topological information.}
+    \label{fig:tsne_louvain}
+\end{wrapfigure}
+
+\subsection{\textbf{(RQ5)} \themodelg Encodes Graph Relational Information}
+
+To evaluate if \themodelg encodes graph relational information, we first conduct the graph-contextual protein language modeling on the PPI graph provided by \texttt{ogbn-proteins} dataset \cite{hu2020open}, which contains proteins from 8 species, to get a well-trained \themodelg. After training, we sample the same number of proteins from each species and obtain their representations using both \themodel and \themodelg. Since we sampled a subset of proteins (nodes) from the dataset, we can use them to construct a subgraph as well. We then use the Louvain algorithm \citep{de2011generalized} to detect 8 communities (corresponding to 8 species) in this subgraph. Next, we use t-SNE \citep{van2008visualizing} to reduce the dimensionality of both sets of protein embeddings obtained from \themodel and \themodelg and label each data point using its community membership. As shown in \Cref{fig:tsne_louvain}, the embeddings from \themodelg captures the graph topology much better than \themodel, which aligns with the community detection results. This suggests that our proposed graph context-aware second-stage training captures the topological information in PPI graphs as expected.
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{l c c c}
+\toprule
+\textbf{Model (\#Tokens trained)} & \textbf{PPI graph} & \textbf{Remote Homology} & \textbf{Secondary Structure} \\
+\midrule
+ESM-2-650M (100B) &  None  & $26.57 \pm 0.49 $  & $79.86 \pm 0.09$ \\
+ESM-2-G-650M (100B) & ogbn-proteins & $25.60 \pm 0.77 $  & $79.76 \pm 0.24 $ \\
+ESM-2-G-650M (100B) & ogbl-ppa & $27.18 \pm 0.63 $  & $79.91 \pm 0.24 $ \\
+\midrule
+\themodel-790M (100B) & None & $35.14 \pm 1.69 $  & \cellcolor{gray!30}$\mathbf{85.07 \pm 0.03} $ \\
+\themodelg-790M (100B) & ogbn-proteins & \cellcolor{gray!30}$\mathbf{35.74 \pm 0.93}$  & \cellcolor{gray!15}$85.02 \pm 0.11$ \\
+\themodelg-790M (100B) & ogbl-ppa & \cellcolor{gray!15}$35.60 \pm 1.45$  & $85.01 \pm 0.03$ \\
+\midrule
+CARP-640M-public & None & $28.0 \pm 0.8$  & $83.0 \pm 0.1$  \\
+ESM-2-650M-public (1T)  & None & $33.43 \pm 0.35 $  & $84.30 \pm 0.15$  \\
+\bottomrule
+\end{tabular}
+\caption{Evaluation on TAPE tasks in supervised fine-tuning setting. We report the \emph{top-1 accuracy} for the Remote Homology fold-level test set, and \emph{accuracy} for the 3-class secondary structure prediction on the CB513 test set, respectively. Values for CARP are taken from \citet{yang2024convolutions}. We perform 3 runs using different seeds to report the mean and standard deviation.
+}
+\label{tab:tape}
+\end{table}
+
+\subsection{\textbf{(RQ6)} Interaction Information Helps Downstream Tasks}
+
+\paragraph{TAPE} Here we ask whether the graph relational information is helpful for common downstream tasks. We first use the remote homology detection and secondary structure prediction tasks from \texttt{TAPE} \citep{rao2019evaluating}, which represent protein-level and residue-level tasks, respectively. Our results in \Cref{tab:tape} show that \themodel achieves significantly better performance in both tasks compared to ESM-2 pretrained with the same number of tokens. Remarkably, \themodel and \themodelg even outperformed the public ESM-2 pretrained with 1T tokens, underscoring the sample efficiency of \themodels-based model architecture can translate to downstream tasks in a supervised fine-tuning setting. The marginal improvement of \themodelg over \themodel in remote homology tasks also suggests the information from the PPI graph helps determine protein's remote homologs, while not helpful in predicting their secondary structures at the AA level.  
+
+\paragraph{ProteinGym} Next, we evaluate the predicted fitness landscape on zero-shot mutation effect prediction. It has been shown that pretrained pLMs can capture the fitness landscape of proteins without any further training \citep{meier2021language}. We use 217 deep mutational scan (DMS) datasets collected in \texttt{ProteinGym} \citep{notin2024proteingym}, which collectively measure the effects of 2.5 million substitution mutations to parent protein sequences. In \Cref{tab:proteingym}, we demonstrate \themodel achieved significantly better alignment with protein fitness compared to ESM-2 pretrained with the same number of tokens. Interestingly, we note that the graph-contextual training hurts the fitness landscapes of ESM-2 models, while \themodelg retained their zero-shot capabilities for protein fitness prediction. We hypothesize that the long graph context degrades the representation space of ESM-2, not for \themodelg. This highlights \themodels as a superior architectural design choice, demonstrating robustness in maintaining performance across various tasks while excelling in those that benefit from interaction information learned through graph-contextualized training, possibly due to its preferable context-length extrapolation property.
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{l c c c}
+\toprule
+\textbf{Model (\#Tokens trained)} & \textbf{PPI graph} & \textbf{Spearman} & \textbf{NDCG} \\
+\midrule
+ESM-2-650M (100B) & None & $0.295 \pm 0.013$ & $0.695 \pm 0.008$ \\
+ESM-2-G-650M (100B) & ogbn-proteins & $0.109 \pm 0.013$ & $0.642 \pm 0.008$ \\
+ESM-2-G-650M (100B) & ogbl-ppa & $0.131 \pm 0.014$ & $0.644 \pm 0.007$ \\
+\midrule
+\themodel-790M (100B) & None & \cellcolor{gray!15}$0.378 \pm 0.008$ & \cellcolor{gray!30}$\mathbf{0.735 \pm 0.005}$ \\
+\themodelg-790M (100B) & ogbn-proteins & \cellcolor{gray!30}$\mathbf{0.380 \pm 0.008}$ & \cellcolor{gray!15}$0.734 \pm 0.006$ \\
+\themodelg-790M (100B) & ogbl-ppa & \cellcolor{gray!30}$\mathbf{0.380 \pm 0.008}$ & \cellcolor{gray!15}$0.734 \pm 0.006$ \\
+\midrule
+ESM-2-650M-public (1T) & None & $0.414 \pm 0.011$ & $0.747 \pm 0.005$ \\
+ESM-2-3B-public (1T) & None & $0.406 \pm 0.011$ & $0.755 \pm 0.004$ \\
+\bottomrule
+\end{tabular}
+\caption{Evaluation on ProteinGym DMS substitutions benchmark. We report \emph{Spearman's correlation coefficient} and \emph{normalized discounted cumulative gain (NDCG)} between the log odds ratio and the experimentally measured protein fitness scores for each DMS assay.}
+\label{tab:proteingym}
+\end{table}
+
+\subsection{(\textbf{RQ7}) Protein Function Prediction and Link Prediction on PPI Graph}
+We evaluate \themodelg on two tasks: protein function prediction (\texttt{ogbn-proteins}) and PPI link prediction (\texttt{ogbl-ppa}). On \texttt{ogbn-proteins}, \themodelg achieves an \emph{accuracy} of 0.8925 $\pm$ 0.001, outperforming the state-of-the-art by 2.6\%. For \texttt{ogbl-ppa}, we leverage the learned embeddings from both \themodel and \themodelg to initialize the node attributes for GCN and GraphSAGE, evaluating these model variants. The results confirm that the embeddings improve performance. We conduct similar experiments on \texttt{ogbn-proteins}, further validating the effectiveness of capturing graph-contextual information. Additional details are provided in \Cref{app:graphdownstream}.
+
+
+\section{Conclusion, Discussion, and Future Work}
+
+
+In this work, we explored \themodel and \themodelg based on \themodels. We demonstrate \themodel's favorable neural scaling laws and length extrapolation property than Transformer-based ESM-2. We found that this length extrapolation property can facilitate the 3-D structure prediction of longer proteins and protein complexes. Specifically, \themodel achieved 7\% to 34\% better performance on various downstream tasks. We also found that after training within graph context using random walk sampling, \themodelg can capture relational structure encoded in protein-protein interactions and improve remote homology prediction by more than 35\% compared to ESM-2. 
+
+\themodel not only demonstrates superior performance on longer protein sequences but also outperforms ESM-2 on shorter protein sequences, highlighting a significant performance gap between SSMs and Transformers in protein language modeling. We hypothesize that this advantage may be attributed to the relatively small vocabulary size of protein sequences ($\sim$ 20 tokens), which allows SSMs to more effectively learn compressed state representations compared to natural languages, where the vocabulary size typically exceeds 50k tokens.
+
+It is also possible that ESM-2 could incorporate more advanced architectural designs within its Transformer-based framework to narrow the performance gap, given the rapid advancements in text modeling and Transformer architectures. There are also emerging techniques that may further assist ESM-2 in bridging the gap in long-context modeling capability compared to \themodel.
+
+In future work, we aim to (i) explore hybrid architectures that integrate multi-head attention with SSMs, (ii) investigate more advanced self-supervised training strategies to enhance the incorporation of graph-contextual information during the later stages of pre-training, e.g., contrastive learning using \emph{(positive, negative)} pairs of random walk paths to reinforce locality relationships, and (iii) develop more principled approaches for negative sampling to better contrast with \emph{positive} random walk paths. Some other directions include (i) approximate permutation-invariant graph context learning for pLMs, e.g. using permutation group \citep{huang2022going}, (ii) explore other graph context extraction methods instead of random walk, e.g. graph skeleton tree \citep{huang2023growing}.
+
+We also think it deserves to expand the application scope of \themodel across several key areas: (i) understanding viral protein sequences, which are characterized by extended sequence lengths; (ii) enhancement of protein co-regulation and functional prediction capabilities \citep{hwang2024genomic}; and (iii) advanced protein design tasks requiring expanded contextual understanding, such as protein inpainting. We anticipate that \themodel's capabilities will enable novel applications beyond these identified domains, presenting significant opportunities for further exploration in the field of protein modeling and design.
+
+
+
+

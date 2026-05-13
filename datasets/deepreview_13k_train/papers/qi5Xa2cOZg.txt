@@ -1,0 +1,313 @@
+\title{Learning with Language-Guided State Abstractions}
+
+\begin{abstract}
+We describe a framework for using natural language to design state abstractions for imitation learning.
+Generalizable policy learning in high-dimensional observation spaces is facilitated by well-designed state representations, which can surface important features of an environment and hide irrelevant ones.
+These state representations are typically manually specified, or derived from other labor-intensive labeling procedures.
+Our method, LGA (\textit{language-guided abstraction}), uses a combination of natural language supervision and background knowledge from language models (LMs) to automatically build state representations tailored to unseen tasks.
+In LGA, a user first provides a (possibly incomplete) description of a target task in natural language; next, a pre-trained LM translates this task description into a state abstraction function that masks out irrelevant features; finally, an imitation policy is trained using a small number of demonstrations and LGA-generated abstract states. 
+Experiments on simulated robotic tasks show that LGA yields state abstractions similar to those designed by humans, but in a fraction of the time, and that these abstractions improve generalization and robustness in the presence of spurious correlations and ambiguous specifications.
+We illustrate the utility of the learned abstractions on mobile manipulation tasks with a Spot robot.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+
+In unstructured environments with many objects, distractors, and possible goals, learning generalizable policies from scratch using a small number of demonstrations is challenging \citep{bobu2023aligning,correia2023survey}. Consider the demonstration in Fig.~\ref{fig:lga}A, which shows a Spot robot executing a specific maneuver to perform a desired task. Which task is demonstrated here---grabbing an object, grabbing an orange, or giving an orange to a user? Here, the observations do not provide enough evidence to meaningfully disentangle which features are relevant for downstream learning.
+
+In humans, \emph{abstraction} is essential for generalizable learning \citep{mccarthy2021connecting}. When learning (and planning), humans reason over simplified representations of environment states that hide details and distinctions not needed for action prediction \citep{ho2022people}.
+Useful abstractions are task-dependent, and a growing body of evidence supports the conclusion that humans flexibly and dynamically construct such representations to learn new tasks \citep{ho2023rational,huey2023visual}.
+Importantly, this process of abstraction does not begin with a blank slate---instead, experience, common-sense knowledge, and direct instruction provide rich sources of prior knowledge about which features matter for which tasks \citep{fan2020pragmatic}. In Fig.~\ref{fig:lga}A, learning that the demonstrated skill involves a \emph{fruit} combined with prior knowledge about which objects are fruits makes clear that the object's identity (\emph{orange}) is likely important. Meanwhile, the demonstration provides complementary information (about the desired movement speed, goal placement, etc.) that is hard to specify in language and not encapsulated by the utterance \emph{bring me a fruit} alone. In other words, \textit{actions} also contain valuable information that is necessary to complement the abstraction.
+
+What would it take to build autonomous agents that can leverage both demonstrations and background knowledge to reason about tasks and representations? State abstraction has been a major topic of research from the very earliest days of research on sequential decision-making, with significant research devoted to both unsupervised representation learning \citep{coates2012learning,bobu2023SIRL,higgins2017beta,lee2021pebble} and human-aided design \citep{abel2018state,cakmak2012designing,bobu2021ferl,abel2016near}. However, there are currently few tools for autonomously incorporating human prior knowledge for constructing state abstractions in unseen, unstructured environments.
+
+In this paper, we propose to use \emph{natural language} as a source of information for constructing state abstractions. Our approach, \textbf{Language-Guided Abstraction (LGA)} (Fig.~\ref{fig:lga}B), begins by querying humans for high-level task descriptions, then uses a pre-trained language model (LM) to translate these descriptions into task-relevant state abstractions. Importantly, LGA requires only natural language annotations for state features.
+Unlike most recent work applying LMs to sequential decision-making tasks, it does not depend on pre-trained skills \citep{ahn2022can,huang2022inner}, environment interaction \citep{du2023guiding}, large multitask datasets \citep{karamcheti2023language,shridhar2022cliport}, or even the ability to describe behavior in language \citep{kwon2023reward}. It complements traditional supervised learning methods like behavior cloning (BC), without relying on additional assumptions about the data labeling process. Experiments comparing LGA to BC (and stronger variants of BC) show that LGA-generated abstractions improve sample efficiency and distributional robustness in both single- and multi-task settings. They match the performance of human-designed state abstractions while requiring a fraction of the human effort.
+
+In summary, we \textbf{(1)} introduce LGA, a method for using text descriptions and language models to build state abstractions for skill learning; \textbf{(2)} show that LGA produces state abstractions similar (and similarly effective) to those manually designed by human annotators with significantly less time; \textbf{(3)} show that LGA-constructed state abstractions enable imitation learning that is more robust to the presence of observational covariate shift and ambiguous linguistic utterances; and \textbf{(4)} demonstrate LGA's utility in real world mobile manipulation tasks with a Spot robot.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\textwidth]{figures/lga_front.pdf}
+    \label{fig:lga}
+\end{figure}
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+
+\textbf{Language-Aided Reward Design.}
+Large language models, trained on large amounts of text data, contain commonsense information about object properties, functions, and their salience/relevance to various tasks.
+Several works \citep{goyal2019using,kwon2023reward,sumers2021learning,carta2022eager} leverage this to shape or learn reward models by training a policy to complete intermediate or higher-level tasks and asking the LM to annotate resulting behavior. Language feedback can then be incorporated as a way to \textit{guide} the policy during training \citep{mu2022improving,du2023guiding}. However, just as with any reinforcement learning method, these works assume continuous environment access during the training process as the policy gradually improves with the updated reward \citep{shinn2023reflexion}. In contrast, we instead leverage LMs to produce state abstractions for learning skills via \textit{imitation learning}, which does not require continuous environment interaction or access to rewards.
+
+\textbf{Language-Aided Planning.}
+In parallel, a great deal of work has leveraged LMs to output plans directly, i.e.~generate primitives or high-level action sequences~\citep{sharma-etal-2022-skill,ahn2022can,huang2022language,huang2022inner}.=
+These approaches use priors embedded in LMs to produce better \textit{instruction following} models, or in other words, better compose pre-existing skills to generate more complex behavior \citep{zeng2023socratic,li2023lampp,ahn2022can,wang2023voyager}. Such methods can be thought of as performing \textit{action abstraction} and require access to a library of pre-trained (often text annotated) skills. In contrast, we use LMs to perform \textit{state abstraction} for learning better skills \textit{from scratch}, and can therefore also sit upstream of any instruction following method.
+
+\textbf{State Abstractions in Learning.} There is substantial evidence to suggest much of the flexibility of human learning and planning can be attributed to information filtering of task-relevant features \citep{mccarthy2021learning,huey2023visual,ho2022people,chater2003simplicity}.
+This suggests flexibly creating task-conditioned abstractions is important for generalizable downstream learning, particularly in low-data regimes \citep{mu2022improving,bobu2023aligning}. While state abstraction has been explored in sequential decision-making \citep{thomas2011conjugate}, existing methods often assume pre-defined hierarchies over the state-action space of the given environment or hand defined primitives \citep{abel2016near,diuk2008object}. In this work, we explore a method to \textit{autonomously} construct state abstractions from RGB observations with only a text specification of the task.
+
+Perhaps the closest comparison to our work is \citet{misra-etal-2018-mapping}, which conditions on language and raw visual observations to create a \textit{binary goal mask}, specifying goal location within an observation. However, our approach is much more flexible (our approach can learn any demonstrated behavior, not just goal navigation) and more personalizable (our approach allow humans to interact with the system, enabling them to refine the representation based on individual preference).
+
+
+\section{Problem Statement}
+
+\label{sec:problem}
+
+\textbf{Preliminaries.} We formulate our tasks as Markov Decision Processes (MDPs)~\citep{puterman2014markov} %$\mathcal{M}$, 
+defined by tuples $\langle \mathcal{S}, \mathcal{A}, \mathcal{T}, \mathcal{R} \rangle$ where $\mathcal{S}$ is the state space, $\mathcal{A}$ the action space, $\mathcal{T}:\mathcal{S} \times \mathcal{A} \times \mathcal{S} \rightarrow [0,1]$ the transition probability distribution, and $\mathcal{R}:\mathcal{S} \times \mathcal{A} \rightarrow \mathbb{R}$ the reward function. 
+A policy is denoted as $\pi_\psi:\mathcal{S} \rightarrow \mathcal{A}$. 
+
+In \textbf{behavioral cloning (BC)}, we assume access to a set of expert demonstrations $D_\text{train} = \{\ensuremath{\tau}^i\}_{i=0}^n = \{(s_0^i, a_0^i, s_1^i, a_1^i,...s_t^i, a_t^i)\}_{i=0}^{n}$ from which we ``clone'' a policy $\pi_\psi$ \citep{pomerleau1988alvinn} by minimizing:
+\begin{equation}
+\begin{aligned}
+\mathcal{L}_{\mathrm{BC}} = 
+    \mathbb{E}_{(s_t^i,a_t^i)~\sim D_{\mathrm{train}}}[\|\pi_{\psi}(s_t^i)-a^i_t\|^2_2] ~ .
+\end{aligned}
+\label{eq_bc}
+\end{equation}
+In \textbf{goal-conditioned behavioral cloning (GCBC)}, policies additionally condition on goals $\ensuremath{\ell}$ \citep{co2018guiding}. Motivated by the idea that natural language is a flexible, intuitive interface for humans to communicate, we specify the goal through language instruction $\ensuremath{\ell}\in \mathcal{L}$, resulting in:
+\begin{equation}
+\begin{aligned}
+\mathcal{L}_{\mathrm{GCBC}} = 
+    \mathbb{E}_{(s_t^i,a_t^i,\mathbin{\textcolor{red}{\ensuremath{\ell}^i}})~\sim D_{\mathrm{train}}}[\|\pi_{\psi}(s_t^i, \mathbin{\textcolor{red}{\ensuremath{\ell}^i}})-a^i_t\|^2_2] ~ .
+\end{aligned}
+\label{eq_gcbc}
+\end{equation}
+Above we have highlighted differences from BC in red.
+
+A (GC)BC policy $\pi(s^i_t,\ensuremath{\ell}^i)$ must generalize to novel commands $\ensuremath{\ell}^i$ and contextualize them against potentially novel states $s^i_t$.
+Due to difficulties with sampling representative data and expense of collecting a large number of expert demonstrations, systematic biases may be present in both the training demonstrations $(s^i_0,a^i_0,\cdots)$ for a goal, or the commands $\ensuremath{\ell}^i$ describing the goal.
+This can result in brittle policies which fail to generalize \citep{ross2011reduction}.
+
+We study two sources of covariate shift: (1) out-of-distribution observations $s^i$, or (2) out-of-distribution utterances $\ensuremath{\ell}^i$.
+Training a policy $\pi$ to be robust to both types requires a wealth of task-specific training data that can be expensive for humans to annotate and produce \citep{peng2023diagnosis}. Below, we offer a more efficient way to do so by constructing a task-specific state abstraction.
+\newpage
+
+
+\section{Language-Guided Abstraction (LGA)}
+
+\label{sec:approach}
+
+Traditional (GC)BC forces the behavioral policy to learn a joint distribution over language, observations, and actions---effectively requiring the robot to develop both language and perceptual scene understanding simultaneously, and to ground language in the current observation.
+Our approach instead \emph{offloads} contextual language understanding to a LM which identifies task-relevant features in the perceptual state. Unlike other recent methods that offload language understanding to LMs~\citep{ahn2022can}, we do not rely on libraries of pre-trained language-annotated skills, which may be insufficient when there are key behaviors indescribable in language. 
+Instead, we introduce a \emph{state abstraction function} that takes the raw perceptual inputs and language-specified goal, and outputs a set of task-relevant features. 
+Intuitively, LGA can be seen as a form of language-guided attention \citep{bahdanau2014jointly}: it conditions the robot's observations on language, removing the burden of language understanding from the policy. We describe our general framework below, which we will instantiate in~\Cref{sec:experiments}.
+
+\subsection{State Abstraction Function}
+\label{subsec:abstraction_function_abstract}
+Formally, we define a \emph{state abstraction function} $\hat{f}$ that produces task-relevant state representations: $\hat{f}: \mathcal{S} \times \mathcal{L} \to \hat{\mathcal{S}}$, consisting of three steps:
+
+\textbf{Textualization ($s\to \phi$).} First, similar to other LM-assisted methods \citep{huang2022inner, ahn2022can} the raw perceptual input $s$ is transformed into a text-based feature set $\phi$, representing a set of features (described in natural language) that encapsulate the agent's full perceptual inputs.\footnote{In the general case, this could be implemented via segmentation \citep{kirillov2023segment} and a captioner.} This text representation may include common visual attributes of the observation like objects in the scene, which are extractable via segmentation models \citep{kirillov2023segment}. In~\Cref{fig:lga}B, for example, textualization transforms observations to a feature set of object names and pixel locations.
+
+\textbf{Feature abstraction ($\phi\to \hat{\phi}$).}
+Given a feature set $\phi$, we achieve \textbf{abstraction} by using an LM to select the subset of features from $\phi$ relevant to the task $\ensuremath{\ell}$: $(\phi, \ensuremath{\ell}) \to \hat{\phi}$. In~\Cref{fig:lga}B, abstraction removes distractor objects from the feature set, in this case preserving only the target object (\textit{orange}).
+
+\textbf{Instantiation ($\hat{\phi}\to \hat{s}$).} 
+As a last step, we transform the 
+abstracted feature set back into an 
+(abstracted) 
+perceptual input with 
+only relevant features on display:
+$\hat{\phi} \to \hat{s}$. 
+This step is required for rendering the abstracted feature set in a form usable by a policy. In~\Cref{fig:lga}B, for example, this step transforms the abstracted feature set into an observation showing only the relevant object.
+
+\subsection{Abstraction-Conditioned Policy Learning}
+\label{subsec:aapl_abstract}
+After receiving an abstract state $\hat{s}$ from the state abstraction function, we learn a policy mapping from the abstract state to actions, yielding $\pi_{\hat{\psi}}: \hat{\mathcal{S}} \to \mathcal{A}$.\footnote{LGA can also be used to \emph{augment} the original observation, in which case a policy is learned over the concatenated original and abstracted state-spaces, e.g.,  $\pi_{\hat{\psi}}: \hat{\mathcal{S}} \times \mathcal{S} \to \mathcal{A}$. This is a more conservative approach, allowing the policy to observe both the original and abstracted states.}
+$\pi_{\hat{\psi}}$ is trained to minimize the loss:
+
+\begin{equation}
+\begin{aligned}
+\mathcal{L}_{\mathrm{LGA}} = 
+    \mathbb{E}_{(s_t^i,a_t^i,\ensuremath{\ell^i})~\sim D_{\mathrm{train}}}[||\textcolor{red}{\pi_{\hat{\psi}}}( \mathbin{\textcolor{red}{\hat{f}(s_t^i, \ensuremath{\ell}^i)}})-a^i_t||^2_2],
+\end{aligned}
+\label{eq_lga}
+\end{equation}
+
+with the differences from GCBC (Eq.~\ref{eq_gcbc}) highlighted in red. The LGA policy $\pi_{\hat{\psi}}$ never sees the language input $\ensuremath{\ell}$; instead, it operates over the language-conditioned state representation, $\hat{s}$. Consequently, it can exhibit non-trivial generalization capabilities relative to Eqs.~\ref{eq_bc} and ~\ref{eq_gcbc}, which given a single goal seen at training and test, collapse to the same non-generalizable policy.
+
+LGA offers several appealing properties relative to traditional (GC)BC. First, it mitigates spurious correlations during training because all goal information is highlighted in semantic maps rather than raw pixels. Second, the LM can help resolve ambiguous goals present at test by converting the language utterance and test observation into an unambiguous abstract state --- effective even if LGA has only seen a single unambiguous task at training. Therefore, using LMs confer valuable generalization capabilities at test-time, as LMs can ``intercede'' to determine only the contextually-appropriate task-relevant features for policy input.
+
+\begin{wrapfigure}{R}{0.4\textwidth}
+\centering
+\includegraphics[width=0.36\textwidth]{figures/tasks.pdf}
+\caption{\small \label{fig:tasks} We evaluate on three task settings in VIMA. \textbf{A}: Pick-and-place. \textbf{B}: Rotate. \textbf{C}: Sweep while avoid. Red bounding boxes depict task-relevant features which must be accounted for in the abstraction.} 
+\end{wrapfigure}
+
+\newpage
+
+
+\section{Experimental Setup}
+
+\label{sec:experiments}
+
+\subsection{Environment and Feature Space}
+\label{sec:environment}
+We generate robotic control tasks from VIMA \citep{jiang2022vima}, a vision-based manipulation environment. 
+We study three types of tasks:
+\textit{pick-and-place} of an object onto a goal location, \textit{rotation} of an object to a pre-specified degree, and \textit{sweep} of an object while avoiding a potential obstacle.
+The environment consists of a large feature space (29 objects, e.g. \textit{bowl}, and 81 colors/textures, e.g. \textit{wooden}) of various semantic meaning. Observations are top-down RGB images and actions are continuous pick-and-place or sweep poses each consisting of a 2D coordinate and a rotation expressed as a quaternion. Success is determined by executing the correct action on the target object within radius $\epsilon$ of the goal.
+
+VIMA is an appealing domain for evaluation due to (1) its combinatorially large feature space for assessing policy generalization and (2) the presence of tasks that require behaviors that are difficult to specify in language (e.g. velocity, rotation, etc.).
+The latter means we cannot deploy an instruction-following method with a library of language-annotated, pre-trained skills.
+
+The task-relevant feature set $\hat{\phi}$ is specified via a JSON containing the set of possible task-relevant objects and colors. For \textbf{pick-and-place/rotate}, this feature set includes the target object; for \textbf{sweep}, this feature set parameterizes both the target object and the object to be avoided. Because the feature space can be combinatorially large, constructing abstractions that preserve only task-relevant features of an ambiguously specified objective, e.g. \textit{something that holds water}, is challenging.
+
+\subsection{LGA Implementation}
+\label{subsec:abstraction_function}
+
+\textbf{Textualization.} 
+We first extract a structured feature set $\phi$ by obtaining the ground truth state segmentation mask and object descriptions from the simulator.
+
+\textbf{Feature abstraction.} 
+We use two versions of LGA for defining relevant feature sets $\hat{\phi}$. \textbf{LGA} uses GPT4~\citep{openai2023gpt4} to specify a relevant feature set.\footnote{We use the \texttt{gpt-4-0613} version of GPT4. GPT4 provides a binary response indicating whether the object type or feature should be included in the abstraction. \textbf{LGA-HILL} extends this by placing a human in the loop. The human is shown the proposed abstraction and can refine it by adding or removing features (see  \Cref{subsec:comparisons} for details).
+
+\textbf{Instantiation.} 
+As described in~\Cref{sec:environment}, the abstract state representation consists of a distribution over \textit{object types} and \textit{object colors}, including both target objects and relevant obstacles.
+Given a specified task-relevant object type and color, we use an image editor to identify all salient objects in the observation.
+In particular, the image editor produces a ``goal mask'', a pixel mask where the relevant objects are converted to ones and everything else is zeroed out.
+\footnote{Here, we produce a simple binary pixel mask highlighting relevant objects. In general, however, it may be fruitful to experiment with more general scalar cost maps, such as highlighting areas that should be avoided.}
+In our setting, the simulator provides the ground-truth scene segmentation which we use to produce the goal mask $\hat{s}$.
+
+\textbf{Abstraction-Augmented Policy Learning}
+We instantiate the abstraction-augmented policy procedure, described in~\Cref{subsec:aapl_abstract}, in our environment.
+We assume access to ground truth demonstrations generated by an oracle. LGA learns a policy from scratch via imitation learning on these demonstrations, using $\hat{s}$. We implement a CNN architecture that processes abstract states into embeddings, which we then feed through a MLP for action prediction.
+
+\subsection{Training and Test Tasks}
+
+\textbf{Training Tasks.}
+We are interested in studying how well different methods perform task-relevant feature selection, i.e.~specify $\hat{\phi}$ given a single language description of the task.
+We evaluate the quality of abstractions by using them to construct a \textit{training distribution} for each task (on which we perform imitation learning).
+We want methods which construct a \textit{minimal} abstraction $\hat{\phi}$ that \textit{contains features necessary} for the task.
+If these abstractions do not contain all features necessary for completion of the task, then the policy will not succeed; if these abstractions are not minimal, then learning will be less data-efficient. Thus, we evaluate both \textit{data efficiency} and \textit{task performance}; good abstractions will result in the policy achieving higher success with fewer demonstrations.
+
+We construct this distribution by placing a uniform probability over the set of task-relevant features specified in $\hat{\phi}$. 
+To create a task, we sample an object and texture from this distribution as the ``target'' object and place it randomly in the environment. For example, for \textit{something that can hold water}, we sample an object from \{\textit{pan, bowl, container}\} and sample a color from the universe of all colors. In the \textit{sweep} task, we perform this same process, but for possible obstacles.
+We then generate a random distractor object. Distractors, target objects, and obstacles are randomly placed in one of four discretized state locations. Last, for pick-and-place, we place a fixed goal object (pallet) in the state as the ``place'' goal. We generate corresponding training demonstrations via an oracle.
+
+\textbf{Test Tasks.} In practice, we do not have access to ground-truth distributions -- this specification must come from the end user. However, for our experiments, the first three authors defined ``true'' distributions from which we sampled starting states for each task. 
+
+\subsection{Comparisons}
+\label{subsec:comparisons}
+We analyze our approach (\textbf{LGA} and \textbf{LGA-HILL}) against three baselines and two ablations. 
+
+\textbf{Human (Baseline).} The first baseline explores having users (instead of LMs) manually specify task-relevant features $\hat{\phi}$ in the feature abstraction stage, to isolate the effect of LM-aided specification. All other components remain the same as in LGA. The features are fed to the same CNN architecture as for LGA and the policy is again learned over the generated state abstractions. 
+
+\textbf{GCBC-DART (Baseline)}: Our second baseline is (goal-conditioned) behavior cloning, described in Eq.~\ref{eq_gcbc}. Because imitation learning is notoriously brittle to distribution shift, we implement a stronger variant (DART) \citep{laskey2017dart} by injecting Gaussian noise (swept from $\mu$ = 0.0 to 0.2, $\beta = 0.5$) into the collected demonstrations, sampling 5 noisy demonstrations per true demonstration.
+We implement goal-conditioning by concatenating an LM embedding of the goal utterance with a CNN embedding of the state and then learning a policy over the joint representation. We generate language embeddings using Sentence-BERT \citep{reimers2019sentence}.
+
+\textbf{GCBC-SEG (Baseline):} To study the impact of object segmentation, our third baseline implements goal-conditioning on the segmentation mask in addition to the observation. We independently process the two observations via CNNs, and concatenate the embeddings as a joint representation.
+
+\textbf{LGA-S (Ablation):} We explore the effect of training with both the raw observation $s$ in addition to $\hat{s}$ to study the impact of discarding the original observation. The two observations are independently processed via CNNs, then concatenated as a joint representation.
+
+\textbf{LGA-L (Ablation):} We implement a variant of abstraction where we condition only on the language embedding of the relevant features $\hat{\phi}$ rather than on the state abstraction $\hat{s}$.
+
+\textbf{Human Data Collection.} For comparisons that require human data (\textbf{LGA-HILL} and \textbf{Human}), we conducted a computer-based in-person user study to assess the ability of humans to specify task-relevant features $\hat{\phi}$ in the \textit{feature abstraction} step, both with and without an LM. We recruited 18 participants (67\% male, aged 22-44) from the greater MIT community. We paid each participant \$30 for their time. Our study received institutional IRB approval and all user data was anonymized. 
+
+We first introduce the user to the environment and full feature space $\phi$. To additionally help participants, we provide both a text and visual representation of features (the latter of which the LM does not see). We also walk the user through an example task specification. In the \textbf{Human} condition, we introduce task objectives (detailed in \Cref{sec:experiments}) sequentially to the user and ask for them to specify $\hat{\phi}$ by typing their selected features into a task design file (we provide the full feature list for easy access). In the \textbf{LGA-HILL} condition, we show the same objectives, but with LM answers prefilled as the ``raw'' $\hat{\phi}$. To minimize ordering bias, we randomly assign half of our participants to begin with each condition. For both conditions, we measure the time each user spent specifying the feature set.
+
+
+\section{Results}
+
+\label{sec:human_experiments}
+
+\subsection{Q1: Improving ease and policy performance of task specification}
+\label{subsec:q1}
+We begin by evaluating both LGA and LGA-HILL against the baseline methods on nine scenarios from pick-and-place, two from rotate, and two from sweep. Each scenario  demonstrates varied feature complexity, where the ground truth task distributions may be combinatorially large. Each method learns a single-task policy from scratch for each of the tasks.
+
+\textbf{Metrics.} We report two metrics: \textit{task performance vs.~\# of demonstrations} and \textit{user time}. Task performance is assessed as the success rate of the policy on 20 sampled test states. We plot this with respect to the number of training demonstrations an agent sees. User specification time is measured as the time (in seconds) each user spent specifying the task-relevant feature set for each task.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.85\linewidth]{figures/q1.pdf}
+    \label{fig:q1}
+\end{figure}
+
+\textbf{Task Objectives.} 
+For pick-and-place, we construct nine scenarios with a wide range of target objects:
+\textit{red heart}, \textit{heart}, \textit{letter}, \textit{tiger-colored object}, \textit{letter from the word letter}, \textit{consonant with a warm color}, \textit{vowel with multiple colors}, \textit{something to drink water out of}, and \textit{something from a typical kitchen}. We chose these tasks to 1) test the ability of the LM in LGA to semantically reason over which target objects and features satisfy human properties, e.g., \textit{to drink water out of}, and 2) explore how potentially laborious performing manual feature specification from large feature sets can be for human users. For rotate, we construct two scenarios: \textit{rotate block}, \textit{rotate something I can put food in}, to illustrate LGA's ability to learn behaviors that are difficult to specify in language (e.g., rotate an object 125 degrees), but easy to specify for task-relevance (e.g., pan). For sweep, we construct two scenarios: \textit{sweep the block without touching the pan} and \textit{sweep the block without touching the line} to illustrate LGA's ability to identify task-relevant features that are both target objects and obstacles.
+
+\textbf{Results.} We vary the number of demonstrations that each policy is trained on from 10 to 50. We visualize the resulting policy performance in Figure~\ref{fig:q1} (A). In Figure~\ref{fig:q1} (B), we visualize how much time users spent specifying the task-relevant features for each method.\footnote{While we assign zero time spent specifying features for GCBC in our experiments, in practice, user time would be instead spent specifying initial state configurations for generating every demonstration, which only disadvantages naive GCBC even more when compared to methods that specify features.} From these results, it is clear that the feature-specification methods (i.e.~LGA, LGA-HILL, and Human) are more sample-efficient than baselines with consistently higher performance at each number of training demonstrations. Furthermore, LGA methods require significantly less user time than the Human baseline ($p < 0.001$ using a paired t-test for all tasks). We note that despite comparable task performance between LGA and LGA-HILL, the latter remains a valuable instantiation for tasks that require human input, such as high-stakes decision-making scenarios or personalization to individual user preferences.
+
+\textbf{\textit{Summary.}} \textit{LGA requires significantly less human time than manually specifying features, but still leads to more sample-efficient performance compared to baselines.}
+
+\subsection{Q2: Improving policy robustness to observational covariate shift}
+\label{subsec:q2}
+
+We have shown that LGA enables faster feature specification when compared to hand-engineering features from scratch, and also leads to more sample-efficient policies when compared to traditional imitation learning. We now ask how the different design choices taken in LGA handle state covariate shift compared to GCBC+DART, which is a stronger imitation learning baseline designed to help mitigate covariate shift by synthetically broadening the demonstrations data with injected noise.
+
+\textbf{Task Objectives.} We evaluate on four previously defined scenarios in Q1: \textit{heart} (pick-and-place), \textit{letter} (pick-and-place), \textit{bowl} (rotate), and \textit{block} (sweep while avoid). For each task, we now construct state covariate shifts designed to test policy robustness.
+
+For all tasks, we define a training distribution where the task-relevant features contain some subset of the feature list, e.g., \textit{red} and \textit{blue}. At test time, we evaluate by sampling tasks from a distribution where either 1) task-relevant textures change (e.g., objects are now \textit{pink}) or 2) a sampled distractor is added to the scene. These tasks are intended to evaluate LGA's flexibility in including (and excluding) appropriate task-relevant features relative to imitation learning over raw observations.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.85\linewidth]{figures/q23.pdf}
+    \label{fig:results}
+\end{figure}
+
+\textbf{Results.} For each method, we train on 50 demonstrations from the train distribution then evaluate on 20 tasks from the test distribution. As shown in Fig. \ref{fig:results}A, policies trained with either of the LGA methods are more robust to state covariate shifts than those trained with GCBC+DART. Notably, we observe that LGA-L (our ablation where we provide the language abstraction only) underperforms the variants that operate over state abstractions. This makes sense considering observations (even if masked) contain information that directly grounds task-relevant information for the policy to operate over into the environment. This confirms our hypothesis that providing a non-ambiguous state abstraction that already precludes non-relevant task features from the state result in policies that are less brittle to spuriously correlated state features.
+
+\textbf{\textit{Summary.}} \textit{Policies trained with LGA state abstractions (with or without raw observations) are more robust to observational shift than GCBC+DART.}
+
+\subsection{Q3: Improving multi-task policy robustness to linguistic ambiguity}
+\label{subsec:q3}
+
+The previous experiments have focused on evaluating LGA in single-task settings where each policy corresponds to a singular language specification. We now evaluate how LGA performs in the multi-task case where test time environments allow for multiple task specifications, and conditioning on language is necessary to resolve the ambiguity. 
+
+\textbf{Task Objectives.} 
+We now define three new tasks: \textit{pick up fruit} (pick-and-place), \textit{put food in} (rotate), and \textit{avoid utensil} (sweep). For each task, we train a multi-task policy.
+We define our training distribution as states that contain a single object from each specification (e.g., a \textit{tomato} or \textit{apple}). At test time, we present the policy with states that now contain both objects. We condition the policy on both the linguistic utterances it has seen before: e.g., ``Bring me a tomato.'' or ``Bring me an apple'', and as well as one it has not: e.g., ``Bring me a fruit.'' We now evaluate LGA's zero-shot generalization performance on both seen and unseen linguistic goal utterances.
+
+\textbf{Results.} For each method, we train on 50 demonstrations sampled from the train distribution for each task, then evaluate on 20 task instances from the test distribution. We visualize the averaged results in Figure~\ref{fig:results}B. These results demonstrate LGA's ability to flexibly construct state abstractions \textit{even if the language utterance was previously unseen}.
+
+\textbf{\textit{Summary.}} \textit{Multi-task policies trained with LGA can better resolve task ambiguity compared to GCBC+DART as they can flexibly adapt new language specifications to the observation.}
+
+
+\section{Real-World Robotics Tasks}
+
+\label{sec:spot}
+
+We highlight LGA's real world applicability on a Spot robot performing mobile manipulation tasks.
+
+\textbf{Robot Platform.}
+Spot
+\footnote{Our Spot's name is Moana.} 
+is a mobile manipulation legged robot equipped with six RGB-D cameras (one in gripper, two in front, one on each side, one in back), each producing an observation of size 480$\times$640. For our demonstrations, we only use observations taken from the robot's front camera.
+
+\textbf{Tasks and Data Collection.}
+We collected demonstrations of a human operator teleoperating the robot while performing two mobile manipulation tasks with various household objects: \textit{bring fruit} and \textit{throw away object}. The manipulation action space consists of the following three actions along with their parameters: (\textit{xy, grasp}), (\textit{xy, move}), (\textit{drop}) while the navigation action space consists of a SE(3) group denoting navigation waypoints. For \textit{bring fruit}, the robot is tasked with picking up fruit on a table, bringing it to a user at a specified location, and dropping it in their hand. For \textit{throw away drink}, the robot is tasked with picking up a drink from a table, moving to a specified location, and dropping it into a recycling bin. Both tasks include possible distractors like brushes and drills on the table. For each task, we collected a single demonstration of the robot successfully performing the task (e.g., throwing away a soda can). The full action sequence is recorded for training.
+
+\textbf{Training and Test Procedure.}
+First, we extract a segmented image using Segment Anything \citep{kirillov2023segment} and captioner Dedic \citep{zhou2022detecting}; second, we query the feature list along with the linguistic specification (e.g., \textit{throw away drink}) to construct our abstract feature list; last, we map the abstract feature list back into the original observation as an abstracted state. We train a policy to map from the abstracted state into the action sequence.\footnote{For latency purposes and ease of data generation, we perform imitation learning over the full trajectory rather than each state (i.e. predict a sequence of actions from an initial observation only).} For test, we then change the scene (e.g., with a new target object like a water bottle instead of a soda can, along with distractors) and predict the action sequence from the new observation.
+
+\textbf{Takeaway.}
+LGA produced policies capable of successfully completing both tasks consistently. The failures we did observe were largely due to captioning errors (e.g., the segmentation model detected the object but was unable to produce a good text description).
+
+
+\section{Discussion \& Conclusion}
+
+\label{sec:discussion}
+
+We proposed LGA to leverage LMs to learn generalizable policies on state abstractions produced for task-relevant features. Our results confirmed that LGA produces state abstractions similarly effective to those manually designed by human annotators while requiring significantly less user time than manual specification. Furthermore, we showed that these abstractions yield policies robust to observational covariate shift and ambiguous language in both single-task and multi-task settings.
+
+\textbf{Limitations.}
+We assume state abstractions for training good policies can be captured by visual features present in individual scenes. An exciting direction for future work would be to learn how to build state abstractions for trajectory-relevant features. We also assume features are a) segmentable and b) expressible in language, i.e.~a LM (or human) can understand how each feature may or may not relate to the task. In more complex scenarios, many real-world tasks may be dependent on features that are less expressible in text, e.g. relative position, and are difficult to encapsulate in an abstraction. Although there is evidence to suggest even ungrounded LMs can learn grounded concepts such as spatial relations \citep{patel2021mapping}, we did not rigorously test this. We are excited to explore additional feature representations (perhaps multimodal visualization interfaces in addition to language representations) that can be jointly used to construct state abstractions.
+
+
+\section{Acknowledgements}
+
+
+We thank the Boston Dynamics AI Institute for providing robotic hardware resources used in this project, as well as Nishanth Kumar for help in running (late-night) demonstration videos. We thank members of the Language and Intelligence and Interactive Robotics Groups for helpful feedback and discussions. Andi Peng is supported by the NSF Graduate Research Fellowship and Open Philanthropy. Belinda Li and Theodore Sumers are supported by National Defense Science and Engineering Graduate Fellowships. Ilia Sucholutsky is supported by a NSERC Fellowship (567554-2022). This work was supported by the National Science Foundation under grant IIS-2238240.
+
+\clearpage
+
+
+
+

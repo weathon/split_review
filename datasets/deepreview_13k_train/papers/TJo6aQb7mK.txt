@@ -1,0 +1,499 @@
+\title{Surprising Effectiveness of pretraining Ternary  Language Model at Scale}
+
+\begin{abstract}
+
+Rapid advancements in GPU computational power has outpaced memory capacity and bandwidth growth, creating bottlenecks in Large Language Model (LLM) inference. Post-training quantization is the leading method for addressing memory-related bottlenecks in LLM inference, but it suffers from significant performance degradation below 4-bit precision. This paper addresses these challenges by investigating the pretraining of low-bitwidth models specifically {\em Ternary Language Models (TriLMs)} as an alternative to traditional floating-point models (FloatLMs) and their post-training quantized versions (QuantLMs). We present {\em Spectra LLM suite}, the first open suite of LLMs spanning multiple bit-widths, including FloatLMs, QuantLMs, and TriLMs, ranging from 99M to 3.9B parameters trained on 300B tokens. Our comprehensive evaluation demonstrates that TriLMs offer superior scaling behavior in terms of model size (in bits). Surprisingly, at scales exceeding one billion parameters, TriLMs consistently outperform their QuantLM and FloatLM counterparts for a given bit size across various benchmarks. Notably, the 3.9B parameter TriLM matches the performance of the FloatLM 3.9B across all benchmarks, despite having fewer bits than FloatLM 830M. Overall, this research provides valuable insights into the feasibility and scalability of low-bitwidth language models, paving the way for the development of more efficient LLMs.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+   \begin{figure}[h]
+        \centering
+        \begin{adjustbox}{width=0.8\textwidth}
+        \begin{subfigure}{0.45\textwidth}
+            \centering            \includegraphics[width=0.91\linewidth, height=0.21\textheight ]{figures/commonsense_and_reasoning_across_size.pdf}
+            \caption{C\&R: acc vs size}
+            \label{fig:commonsense_and_reasoning_across_size}
+        \end{subfigure}
+        \begin{subfigure}{0.45\textwidth}
+            \centering
+            \includegraphics[width=0.91\linewidth,  height=0.21\textheight ]{figures/commonsense_and_reasoning_across_params.pdf}
+            \caption{C\&R: acc vs parameters}
+            \label{fig:commonsense_and_reasoning_across_params}
+        \end{subfigure}
+        \end{adjustbox}
+        \vskip\baselineskip
+        \begin{adjustbox}{width=0.8\textwidth}
+        \begin{subfigure}{0.45\textwidth}
+            \centering
+            \includegraphics[width=0.91\linewidth, height=0.21\textheight ]{figures/LAMBADA_acc_across_size.pdf}
+            \caption{LAMBADA: acc vs size}
+            \label{fig:LAMBADA_acc_across_size}
+        \end{subfigure}
+        \begin{subfigure}{0.45\textwidth}
+            \centering
+            \includegraphics[width=0.91\linewidth, height=0.21\textheight]{figures/LAMBADA_acc_across_params.pdf}
+            \caption{LAMBADA: acc vs parameters}
+            \label{fig:LAMBADA_acc_across_params}
+        \end{subfigure}
+        \end{adjustbox}
+        \caption{\footnotesize{Common Sense and Reasoning (C\&R) \& LAMBADA Accuracy for ternary TriLM, FP16 FloatLM and quantized QuantLM models across different model sizes, in bits and number of parameters. C\&R scores are averaged across 6 benchmarks. At 3B+ scales, TriLMs demonstrate better performance for their size than QuantLM and competitive performance to FloatLM of the same parameters. See Tables \ref{tab:evaluation_spectra_suite_part1.a}, \ref{tab:evaluation_spectra_suite_part1.b} and \ref{tab:evaluation_spectra_suite_part2} for details.}}  
+        \label{fig:commonsense_reasoning_comparisons}
+    \end{figure}
+
+    
+    
+   
+
+    
+    The computational power of GPUs, measured in FLOPs, is increasing exponentially, doubling approximately every 1.26 years. In contrast, memory capacity and bandwidth are growing at a slower pace, doubling every 2 and 2.9 years, respectively \citep{gholami2024aimemorywall}. This disparity highlights that computing capabilities are outpacing advances in memory technology. In Large Language Models (LLMs) inference, the primary bottlenecks are caused by model size (bits), which affects memory usage (memory capacity) and data transfer to processors (memory bandwidth). These issues are becoming more critical than the growing number of model parameters which affect the computational limits (FLOPs). For instance, state-of-the-art LLMs such as 340B  Nemotron  4 \citep{nvidia2024nemotron4340btechnicalreport} have sizes (in bits) exceeding the memory capacity of data center GPUs, such as 8xH100s. Token generation speed, or latency,  is now limited by memory bandwidth \citep{kim2024squeezellm}. Addressing these bottlenecks requires more expensive training, exceeding Chinchilla's compute-optimal regime \citep{hoffmann2022trainingcomputeoptimallargelanguage}, with less than 10B parameter models being trained on up to 15 trillion tokens \citep{llama2_paper, llama3modelcard, gemmateam2024gemmaopenmodelsbased}. Another widely used technique is post-training quantization during deployment \citep{zhu2023surveymodelcompressionlarge}; however, we demonstrate in Section \S\ref{results} that this approach is sub-optimal.
+In post-training quantization, LLMs initially trained using 16-bit floating point precision (referred to as FloatLMs) undergo parameter quantization, and the resulting models are termed QuantLMs.
+ These models use optimized kernels for deployment, offering speedups nearly proportional to the compression factor \citep{frantar2024marlin}. However, quantizing to very low bitwidths creates a significant mismatch between the representations of pretrained FloatLM and the deployable QuantLM, resulting in undesired behavior and quality degradation \citep{li2024evaluatingquantizedlargelanguage, huang2024goodlowbitquantizedllama3}. Some state-of-the-art methods  \citep{gptq,egiazarian2024extremecompressionlargelanguage} mitigate this issue by using calibration and re-training data from target domains; however, this approach increases sensitivity to the calibration data. For instance, seemingly simple choices, like whether to length-normalize the calibration data, can significantly impact QuantLM's performance \citep{malinovskii2024pvtuningstraightthroughestimationextreme}. Other works have observed that QuantLM at 4 bits (4-bit QuantLMs) have about 65\% lower knowledge capacity per parameter compared to trained and aligned FloatLMs \citep{allenzhu2024physicslanguagemodels33}.
+    
+    An alternate approach to reducing model bitsize while maintaining parameter count involves training neural networks with low effective bitwidths \citep{zhou2018dorefanettraininglowbitwidth}. This approach offers compression benefits beyond post-training quantization without its associated drawbacks.  While low-bitwidth approaches typically employ binary (1-bit) or ternary quantization (1.
+    In contrast, ternary modeling can match performance while significantly reducing memory requirements (as we demonstrate in section \S\ref{results}). 
+    Nevertheless, \emph{the relative performance of pretrained low-bitwidth language models compared to QuantLMs across similar sizes (in bits) and similar parameter counts remains unclear}. This is a crucial unanswered question, given the high inference costs during the deployment of very large-scale LLMs. Moreover, \emph{the training dynamics and scaling law of these low-bitwidth models are also poorly understood, partly due to the lack of publicly available systematic suites and associated comparative studies}. 
+    
+
+    Motivated by these challenges, we make the following contributions in this paper:
+
+    
+    \paragraph{Feasibility and Scalability of Training Ternary Language Models (TriLMs)} We discuss the deployment advantages (in section \ref{subsec:memory_bottleneck}) and theoretical feasibility (in section \ref{subsec:lowbit_entropy}) of training low-bitwidth models at scale. We then introduce ternary language models (TriLMs) and systematically study their scaling laws compared to FloatLMs. Our analysis reveals that TriLMs offer better scaling behavior in terms of model size, measured in bits (refer to Section \ref{subsec:scaling_law}). Moreover, as the number of parameters increases, the difference in validation loss between TriLMs and FloatLMs becomes insignificant, indicating TriLM's competitive performance at scale.
+    
+    
+
+    \paragraph{Spectra LLM suite.} We present \textbf{Spectra}, the first open suite of LLMs spanning many bit-widths. This suite includes FloatLMs, the corresponding  QuantLMs at 3, 4, 6, and 8 bits, and ternary LLMs (TriLMs). The latter uses ternary weights \{-1, 0, +1\}.  The suite features 9 models ranging from 99M to 3.9B parameters, all trained on the same 300B token dataset, totalling 54 models. We believe that the Spectra LLM suite makes a valuable contribution to the LLM research community by facilitating comparative studies, exploring the scalability and efficiency of ternary modeling, and improving interpretability from neuronal to connection levels.
+    
+
+   
+
+    \paragraph{Evaluation and comparative analysis of TriLMs, FloatLMs, and QuantLMs at different scales.} We evaluate TriLMs, FloatLMs, and QuantLMs across multiple benchmarks, spanning commonsense, reasoning, knowledge capacity and toxicity. 
+    At the billion parameter scale, TriLMs consistently outperform their QuantLM and FloatLM counterparts of the same bit-size across all the aforementioned benchmarks (see Figure \ref{fig:commonsense_reasoning_comparisons}).
+    Surprisingly, TriLM 3.9B matches the performance of FloatLM 3.9B across all benchmarks, despite getting a higher perplexity and being $5.9$ times smaller in bitsize.
+
+    
+    However, we also note that certain challenges remain in TriLMs. For instance, TriLM 3.9B exhibits the same level of toxicity and stereotyping as FloatLM 3.9B, significantly higher than a similarly sized FloatLM 830M when measured in bits.  
+    While TriLM 3.9B and FloatLM 3.9B show similar validation perplexity on some datasets, such as  Penn Tree Bank and Lambada, a gap persists at this scale on web corpora, both in-domain (i.e., on a test subset of SlimPajama, the same domain used to train the models) and out-of-domain (e.g., on Dolma, C4 and RefinedWeb datasets).
+
+
+\section{Motivation for Low-Bitwidt Models}
+
+
+ 
+
+    
+
+
+  \subsection{Memory Bottlenecks and Language Model Deployment} \label{subsec:memory_bottleneck} 
+
+\textbf{Experimental Setup:} First, we, explore the impact of training low-bitwidth language models on deployment focussing on addressing memory bottlenecks.
+ Our analysis includes transformer configurations from the LLaMa family \citep{llama1_paper,llama2_paper}. As larger vocabularies in LLMs are becoming increasingly common for efficient multilingual modeling, we use a vocabulary size of 128k from LLaMa 3 \citep{llama3modelcard} for our analysis. We assume the Embedding and LM Head weights are retained in Half-Precision across all bitwidths for these analyses.
+
+\begin{figure}[htbp]
+    \centering
+    \begin{adjustbox}{width=0.8\textwidth}
+    \begin{subfigure}[b]{0.5\textwidth}
+        \includegraphics[width=1.05\textwidth]{figures/model_size_growth_across_bitwidths.pdf}
+        \caption{Model Size growth at various BitWidths}
+        \label{fig:model_size_growth_at_scale_across_bitwidth}
+    \end{subfigure}%
+    \begin{subfigure}[b]{0.49\textwidth}
+        \includegraphics[width=0.94\textwidth]{figures/maximum_speedup_at_scale_across_bitwidth.pdf}
+        \caption{Maximum Possible Speedup at different BitWidths}
+        \label{fig:maximum_speedup_at_scale_across_bitwidth}
+    \end{subfigure}
+    \end{adjustbox}
+    \caption{\footnotesize{Expected gains from low bitwidth modeling. TriLMs can fit over 300B parameters on a single H100 and achieve up to a theoretical maximum of 10x faster autoregressive decoding compared to FloatLM.}}
+    \label{fig:model_growth_and_speedup_trends}
+\end{figure}
+\paragraph{Memory Capacity of GPGPUs and Model Size (in Bits):}
+
+ This gap is further exacerbated by advanced computational techniques like Ampere sparse or FP8. As shown in Figure \ref{fig:model_size_growth_at_scale_across_bitwidth}, the model sizes (in GB) for TriLM, QuantLM 4-Bit, and FloatLM scale differently with parameter counts. For simplicity, the figure excludes overhead from KV Cache, activations, and compilation during model deployment. FloatLM reaches the memory capacity of a single H100 at 34B parameters, with larger models exceeding the capacity of multiple GPUs. In contrast, QuantLM 4-Bit supports up to 300B parameters on a single MI300X. TriLMs, with over 300B parameters and appropriate packing, can fit on a single H100, making them not only efficient for GPU deployment but also ideal for edge devices.
+
+  
+
+
+\paragraph{Memory bandwidth of GPGPUs and model inference speedup:}
+ This trend, indicating a downward slope, aligns with \cite{kim2024squeezellm}'s establishment of the memory wall in autoregressive LLM computation. They found that the speed of token generation is bottlenecked by the rate at which data is fed from memory to processors, rather than the processing speed of the hardware. Consequently, the autoregressive decoding of LLM inference can theoretically achieve speedup proportional to its compression factor. Figure \ref{fig:maximum_speedup_at_scale_across_bitwidth} illustrates the maximum possible speedup for QuantLM 4-Bit and TriLM compared to FP16 at different parameter counts. Even at 7 billion parameters, TriLMs can be more than 4 times faster at autoregressive decoding than FloatLM and 2 times faster than QuantLM 4-bit. While QuantLM 4-Bit plateaus at a maximum possible speedup factor of 4x, TriLMs plateau much higher at 10x for FloatLM.
+
+    
+
+
+\subsection{Low bits can capture weight variance effectively at scale}\label{subsec:lowbit_entropy}
+In this section, we use information theory to support our hypothesis: \emph{as the number of parameters increases, training language models with low-bitwidth can effectively capture the necessary weight variance without significant information loss}. Assuming a fixed training dataset, we base this hypothesis on analyzing weight distributions in FloatLMs ranging from 99M to 3.9B parameters.
+
+\begin{figure}[h]
+    \centering
+    \begin{minipage}{0.48\linewidth}
+        \includegraphics[width=0.98\linewidth]{figures/Shannon_Entropy_vs_Number_of_Bins.pdf}
+        \caption{\footnotesize{Shannon entropy (in bits) of discretized weight distribution with increasing number of bins.}}
+        \label{fig:shannon}
+    \end{minipage} \hspace{0.02\textwidth}
+    \begin{minipage}{0.48\linewidth}
+        \includegraphics[width=0.98\linewidth]{figures/differential_entropy_vs_model_parameters.pdf}
+        \caption{\footnotesize{Differential entropy of Gaussian fits on weight distributions across different scales.}}
+        \label{fig:differential_entropy}
+    \end{minipage}
+\end{figure}
+
+ The differential entropy is calculated using the expression: $H(W) = \frac{1}{2} \log_2(2\pi e \sigma_{W}^2)$
+where \(\sigma_{W}\) is the standard deviation of the weights \citep{papoulis2002probability}. As shown in Figure \ref{fig:differential_entropy}, differential entropy decreases with an increase in the number of parameters. This decrease indicates that the weights become more concentrated around the mean as the model size increases, suggesting higher predictability and less variability \citep{mackay2003information}. This reduced variability is due to overparameterization, which leads to redundancy in the weights \cite{zhang2017understanding, neyshabur2018role}. 
+
+Additionally, we also use Shannon entropy, calculated by discretizing the weight distribution into (\(N\)) bins and computing $H_{Shannon} = -\sum_{i=1}^{N} p_i \log_2 p_i$, where \(p_i\) is the probability of the weights falling into the \(i\)-th bin. The probability is given by the normalized frequency of weights within each bin. Discretization allows us to apply discrete entropy measures to continuous data, with the number of bins determining the representation granularity. Shannon entropy measures the average minimum number of bits needed to encode the weight values based on their distribution, providing a quantifiable measure of their "information content" \citep{shannon1948mathematical}. Lower Shannon entropy indicates a more predictable, less diverse distribution that can be effectively encoded using fewer bits. Examining Shannon entropy across scales and bin sizes, we validate our finding that larger models require fewer bits for effective representation. As plotted in Figure \ref{fig:shannon}, there is a general trend of decreasing Shannon entropy with increasing parameter count for a given number of bins.
+
+These analyses support the potential of low-bitwidth models to match full-precision performance, especially as model sizes grow. In Section \ref{subsec:scaling_law}, we further substantiate this by analyzing the scaling behavior of our low-bitwidth TriLMs compared to FloatLMs.
+\subsection{Selecting the Appropriate Low-Bitwidth Model}
+Selecting the appropriate quantization level is crucial when training low-bitwidth models, as it significantly impacts both computational efficiency and model performance. Binary models quantize weights to \{-1, 1\}, simplifying multiplication operations in neural networks to XOR operations. Such operations are highly efficient on digital hardware due to their basic logic gate implementation \citep{courbariaux2016binaryconnect}. XOR operations, which can be executed rapidly and with lower power consumption than traditional multiplications, make binary models especially appropriate for resource-constrained environments \citep{hubara2017binarized}. Ternary models extend this concept by incorporating a zero state, allowing weights to be \{-1, 0, +1\}. This modification not only maintains computational simplicity by replacing multiplications with additions and subtractions \citep{li2016ternary} but also leverages the sparsity of neural networks to enhance computational efficiency by eliminating calculations where weights are zero \citep{zhu2017trained}.
+
+In contrast, models quantized to 2, 3, or 4 bits involve more complex arithmetic operations, including full multiplications, which are computationally more demanding than those required for binary and ternary models \citep{zhou2016dorefanet}. While these higher bitwidth models offer more detailed weight representations, they do so at the expense of greater computational resource usage. Therefore, this work only considers binary and ternary language models for further analysis.
+
+While binary quantization minimizes computational complexity, it often results in significant performance degradation, failing to meet the standards of practical applications \citep{rastegari2016xnor}. In contrast, ternary quantization introduces a zero state that more accurately approximates weight distributions without substantially increasing computational demands \citep{li2016ternary}. This capability makes ternary models particularly advantageous, as they maintain performance levels closer to those of full-precision models while still achieving significant efficiency gains \citep{zhu2017trained}. As a result, this work primarily focuses on the TriLM model, which we describe in the following section.
+
+
+
+\section{TriLM: Ternary Language Model}
+
+
+In this section, we present the architectural and optimization details of the TriLM (Ternary Language Model). We discuss the training and inference processes, as well as the optimization schedule.
+
+        
+    \subsection{Architecture} \label{section:TriLMs_and_FloatLMs::subsection:Architecture}
+    
+
+    \begin{figure}[h]
+            \centering
+            \includegraphics[width=\linewidth]{figures/TriLM_Architecture.pdf}
+            \caption{ \footnotesize{The computational flow of forward, backward, and inference processes in TriLM's linear layer with N-Way model parallelism.}}
+            \label{fig:compute_flow_diagram}
+    \end{figure}
+
+    
+    TriLM is a LLaMa-style \citep{llama1_paper} autoregressive transformers \citep{attention_is_all_you_need} model with RMSNorm \citep{rmsnorm_paper}, SwiGLU Gated MLP \citep{glu_variants_improve_transformer}, Rotary Position Embedding (RoPE) \citep{rope_rotary_position_embedding_paper}, Multi-Headed Attention and no bias terms. In TriLMs, we represent the weights of all the linear layers in one of three possible ternary states $\{-1, 0, 1\}$, along with an additional floating-point number called `scale value' shared across the matrix. During training, we maintain the \textit{latent} (or master) weights in floating point precision, allowing for the accumulation of small updates over iterations that eventually contribute to a transition in the estimated ternary state of a parameter. As shown in Figure \ref{fig:compute_flow_diagram}, during the forward pass, we ternarize the floating point latent weights on-the-fly. This process involves calculating the scale value to the absolute mean of the latent weights. After scaling, we estimate the ternary state of each parameter by rounding off to the nearest ternary state. In the backward pass, we use a straight-through estimator to compute gradients of the floating point latent weights \citep{bengio2013estimating}. Since we only need the scale values and the ternarized states during inference, we achieve a significant reduction in both model size and inference time at larger scales compared to FloatLMs. We represent the embedding and language model head in half-precision floating point across all our experiments.
+
+    Since, training of TriLMs requires on-the-fly computation of scale values, synchronizing for a single scalar across devices in model parallel training \citep{megatron_paper} can cause significant communication overhead. To address this, we allow each device to independently compute these scale values over its own matrix shard. This approach introduces additional artifacts, where the number of scalar values for each matrix is the same as the degree of model parallelism used during training (see section \ref{section:TriLMs_and_FloatLMs::subsection:Implementation_Artifacts}). However, the impact on modelsize is negligible, for matrices with millions of parameters, we only add $6$ scalar values each. 
+
+    Concurrent research on low-bit LLMs, like BitNet 1.58 \citep{bitnet_b1.58}, also demonstrates the feasibility of training LLMs with ternary weights. Our experiments demonstrate that TriLM’s architecture not only outperforms BitNet b1.58 but is also simpler and more stable. Moreover, both the larger BitNet 1.3B model presented in their paper and our replication of the BitNet 1.1B model underperform compared to our TriLM 1.1B on commonsense and reasoning benchmarks. 
+
+        
+
+        Table \ref{table:trilm_vs_floatlm_equations} shows the equations for TriLM, BiLM (Binary Langauge Model) and FloatLM for forward pass, backward pass and inference.
+            
+            \begin{table}[h]
+                \centering
+                \begin{adjustbox}{width=\textwidth}
+                \begin{tabular}{cccc}
+                    \toprule
+                    Type & Forward Pass & Backward Pass & Inference \\
+                    \midrule
+                    FloatLM & $Y=XW^T$ & 
+                        \begin{tabular}{@{}c@{}}
+                            $\frac{\partial L}{\partial X} = \frac{\partial L}{\partial Y} W$ \\
+                            $\frac{\partial L}{\partial W} = \frac{\partial L}{\partial Y}^T X$
+                        \end{tabular} 
+                     & $Y = X W^T$ \\
+                    \midrule
+                    TriLM & 
+                        \begin{tabular}{@{}c@{}}
+                            $\gamma = \epsilon + \frac{1}{nm} \sum_{i=1}^{n}\sum_{j=1}^{m}|W_{ij}|$ \\
+     $\widehat{W_{ij}} = \text{round}\left(\min\left(\max\left(\frac{W_{ij}}{\gamma}, -1\right), 1\right)\right)$ \\
+                            $\widetilde{W_{ij}} = \gamma \widehat{W_{ij}}$ \\
+                            $Y = X \widetilde{W}^T$
+                        \end{tabular} &
+                        \begin{tabular}{@{}c@{}}
+                            $\frac{\partial L}{\partial X} = \frac{\partial L}{\partial Y} \widetilde{W}$ \\
+                            $\frac{\partial L}{\partial W} = \frac{\partial L}{\partial Y}^T X$
+                        \end{tabular} &
+                        \begin{tabular}{@{}c@{}}
+                            Compute $\widehat{W}$ and $\gamma$ once and cache  \\
+                            $\widetilde{W_{ij}} = \gamma \widehat{W_{ij}}$ \\
+                            $Y = X \widetilde{W}^T$
+                        \end{tabular} \\
+                    \midrule
+                    BiLM & 
+                    \begin{tabular}{@{}c@{}}
+                        $\alpha = \frac{1}{nm} \sum_{i=1}^{n}\sum_{j=1}^{m}|W_{ij}|$ \\
+                        $\widehat{W_{ij}} = \text{sign}(W_{ij} - \frac{1}{nm} \sum_{i=1}^{n}\sum_{j=1}^{m}W_{ij})$ \\
+                        $\widetilde{W_{ij}} = \alpha \widehat{W_{ij}}$ \\
+                        $Y = X \widetilde{W}^T$
+                    \end{tabular} &
+                    \begin{tabular}{@{}c@{}}
+                        $\frac{\partial L}{\partial X} = \frac{\partial L}{\partial Y} \widetilde{W}$ \\
+                        $\frac{\partial L}{\partial W} = \frac{\partial L}{\partial Y}^T X$
+                    \end{tabular} &
+                    \begin{tabular}{@{}c@{}}
+                        Compute $\widehat{W}$ and $\alpha$ once and cache \\
+                        $\widetilde{W_{ij}} = \alpha \widehat{W_{ij}}$ \\
+                        $Y = X \widetilde{W}^T$
+                    \end{tabular} \\
+                \bottomrule
+            \end{tabular}
+                \end{adjustbox}
+                \caption{\footnotesize{Equations in the Linear Layer of TriLMs and FloatLMs.}}
+                \label{table:trilm_vs_floatlm_equations}
+            \end{table}
+
+        \paragraph{Reason for restricting the quantization approach to linear weights in TriLMs.} 
+        In developing extremely large language models like TriLMs, a key architectural strategy is to quantize only the linear layer weights while keeping the embedding layers and language model head in higher precision. This is driven by the need to reduce model size while maintaining performance. Linear layers (dense layers) hold the bulk of the parameters in transformer models \citep{attention_is_all_you_need}. Quantizing these weights to ternary states significantly reduces the model size, facilitating deployment on memory-constrained hardware. However, the embedding layers and language model head remain in higher precision (e.g., half-precision floating point) to preserve critical functions in language understanding and generation. Embedding layers encode important semantic and syntactic information, and quantizing them would degrade performance \citep{mikolov2013efficientestimationwordrepresentations}. Similarly, the language model head, which maps internal representations to the vocabulary space, requires high precision to maintain prediction quality \citep{press2017usingoutputembeddingimprove}
+    \subsection{Optimization Schedule}\label{section:TriLMs_and_FloatLMs::subsection:Optimization_Schedule}
+      
+             Optimization of low bitwidth neural networks (such as in Quantization Aware Training) \citep{llm_qat, pb_llm, binary_nn_from_scratch, binary_vit} requires a set of considerations like higher initial learning rate and reduced weight decay. Our optimization schedule for TriLM closely follows that of BitNet \citep{bitnet_b1.58} consisting of two interventions in a vanilla linear decay learning rate scheduling with warmup and weight decay (L2 Regularization). (1) \textit{Peak LR} - at roughly the halfway point, we reduce the peak learning rate. (2) \textit{L2 Reg.} - at roughly two-thirds of the training, we remove the weight decay regularization as ternarization provides sufficient regularization \citep{courbariaux2016binaryconnecttrainingdeepneural}. Figure \ref{fig:learning_schedule_ablation_training_loss_across_steps} demonstrates the ablation run performed for a 1.1B parameter model on 100B tokens with both, only one and neither of these interventions. 
+
+            \begin{wrapfigure}{l}{0.5\textwidth}
+                \centering
+                    \includegraphics[width=0.85\linewidth]{figures/learning_schedule_ablation_training_loss_across_steps.pdf}
+                \caption{\footnotesize{Training loss for a 1.1B parameter TriLM, across different optimization schedules.}}
+                \label{fig:learning_schedule_ablation_training_loss_across_steps}
+        \end{wrapfigure}  
+
+
+Among the four experimental runs, we observed that the lowest final training loss occurred when both L2 regularization and peak learning rate (LR) adjustments were implemented. This was closely followed by the scenario in which only L2 regularization was adjusted, and subsequently by the condition where only peak LR was modified.  Notably, discontinuing the peak learning rate at the midpoint of training resulted in a significant and rapid decline in training loss.  Similar phenomena have been documented in training schedules characterized by brief periods of rapid learning rate decay, such as those described in MiniCPM\citep{hu2024minicpmunveilingpotentialsmall}.  Conversely, the removal of L2 regularization, or weight decay, led to an accelerated convergence rate, which can produce effects analogous to reducing the peak learning rate, also resulting in a swift decrease in loss. These relative training loss observation at 100B tokens also go hand in hand with relative downstream performance across commonsense and reasoning tasks, which are listed in Table \ref{tab:commonsense1_scores_evaluation_ablation_part1} and \ref{tab:commonsense1_scores_evaluation_ablation_part2}. Consequently, we have established a fixed optimization schedule for the TriLM, which entails dropping the peak learning rate at the halfway point while removing weight decay at the two-thirds mark.
+            
+        
+
+
+
+
+
+\section{Spectra suite: Spanning Parameters and Bitwidths}
+
+    The Spectra suite includes comprehensive families of Large language models designed to span different parameter counts and bit-widths. This suite includes three main model families: \textit{TriLMs}, \textit{FloatLMs}, and \textit{QuantLMs} (3, 4, 6, and 8 bits). Drawing inspiration from established model suites such as those by \citep{biderman2023pythia, liu2023llm360, groeneveld2024olmoacceleratingsciencelanguage}, Spectra aims to facilitate scientific research on low-bitwidth LLMs. 
+    
+
+    \subsection{Overview of Spectra Suite}
+                
+The Spectra suite stands out with the following key properties:
+
+        \begin{enumerate}
+            \item \textbf{Scale:} The suite spans a broad spectrum of scales across parameter count (99M to 3.9B), sizes ($9*10^8$ to $6.4*10^{10}$ bits) and bitwidths (1.58 bits to 16 bits). 
+            
+            \item \textbf{Uniform Training:} All the TriLMs and FloatLMs are trained on a identical data sequences, specifically a 300B subset of Slim Pajama \citep{slimpajama_dataset} dataset, ensuring training consistency. Data ordering and batch sizes are also kept consistent within each model family to support reproducibility and comparability in research.   QuantLMs undergo quantization using the same calibration data, maintaining uniformity in model quantization procedures.
+            
+            \item \textbf{Public Accessibility:} The training data and intermediate checkpoints are publicly available for study.
+            \item \textbf{Consistent Model Size Mapping:} All models across the families maintain a consistent one-to-one mapping for parameter count.
+        \end{enumerate}
+        
+        Figure \ref{fig:spectra_lm_suite_spans_across_parameters_and_bits} demonstrates the Spectra LM suite spanning across two dimensions - size (bits) and parameters. For each parameter count, we have 6 models across different bitwidths. Due to availability of FloatLM, Spectra can easily be extended with new QuantLMs by using different Post Training Quantization methods. 
+
+\begin{wrapfigure}{r}
+        {0.45\textwidth}
+        \centering
+        \includegraphics[width=0.8\linewidth]{figures/spectra_lm_suite_spans_across_parameters_and_bits.pdf}
+        \caption{\footnotesize{The Spectra Suite spans across two dimensions of parameters and scale. Each point corresponds to a LLM in the spectra suite.}} 
+\label{fig:spectra_lm_suite_spans_across_parameters_and_bits}
+\end{wrapfigure}
+
+        \subsection{FloatLMs and QuantLMs}
+        \textbf{Family of FloatLMs.} We utilize  LLaMa-style \citep{llama1_paper} architecture akin to TriLM. In FloatLMs, parameters in the weight matrices of linear layers are represented as floating-point numbers (FP16/BF16). The optimization schedule for FloatLM follows a cosine decay scheduling with weight decay and includes a learning rate warmup. This methodology is consistent with the practices established in models such as Pythia, OLMo, LLM360.
+
+    
+        \textbf{Family of QuantLMs.}
+        Recently, data-aware quantisation techniques like GPTQ \citep{gptq} have emerged as efficient solutions for near-lossless weight quantization down to 4-bit precision \citep{dettmers2023case_for_4_bit_precision}.  In our work, we implemented GPTQ post-training quantization to FloatLM, creating the QuantLM family of models across 3, 4, 6, and 8 bits. We quantized all transformer layer weights. For 3-bit and 4-bit quantization, we employ a group size of 128, which results in effective bit rates of 3.25 and 4.25 bits per parameter, respectively. We've refined our approach by incorporating best practices from recent research \citep{malinovskii2024pvtuningstraightthroughestimationextreme}, particularly in terms of calibration data and scaling it to a million tokens for improved reconstruction. To ensure a fair comparison with TriLM, we maintain certain components in their original precision. Specifically, we do not quantize the embedding, language model head, or activations. Additionally, we use symmetric quantization (without zero offset) as it is simpler, is supported by fast inference kernels \citep{frantar2024marlin} and offers similar performance to assymmetric quantization (with separate zero offsets in addition to scale for each group). It also offers consistency and a fairer comparison with TriLMs. It's worth noting that our Spectra suite is designed with flexibility in mind, allowing for easy extension to other quantization methods as needed.
+
+    
+    \subsection{Training Dynamics and Scaling Laws}
+    
+      \label{subsec:scaling_law}
+    
+        \begin{figure}[h]
+            \centering
+            \begin{subfigure}{0.4\textwidth}
+                \centering
+                \includegraphics[width=\linewidth, height=0.73\textwidth]{figures/trilm_training_loss.pdf}
+                \caption{\footnotesize{Training loss over time for TriLMs.}}
+                \label{fig:trilm_training_loss}
+            \end{subfigure} 
+            \hspace{0.03\textwidth}
+            \begin{subfigure}{0.4\textwidth}
+                \centering
+                \includegraphics[width=\linewidth, height=0.73\textwidth]{figures/trilm_vs_floatlm_zoomed_comparison_training_loss.pdf}
+                \caption{\footnotesize{Training loss of TriLM vs FloatLM.}}
+    \label{fig:trilm_vs_floatlm_zoomed_comparison_training_loss}
+            \end{subfigure}
+            \caption{\footnotesize{Training Cross Entropy Loss across steps for the TriLM family of models. At the halfway point (150B tokens) when we lower the peak learning rate, we observe a sudden drop in training loss. In the two-third way, removing weight decay leads to faster convergence.}}
+        \end{figure}
+            
+        \paragraph{Training Dynamics.} Figure \ref{fig:trilm_training_loss} illustrates the training loss curves for all the TriLMs trained and Figure \ref{fig:trilm_vs_floatlm_zoomed_comparison_training_loss} shows the relative training loss of a TriLM in comparison to two smaller FloatLMs. The loss curves demonstrate a continuous and consistent improvement in TriLMs with an increase in parameter count. During training, we make several key observations. First, minor spikes and drops in training loss occurred consistently across different TriLM scales at the same token counts, as all models were trained on identical data with the same ordering. Notably, the two largest models—TriLM 2.4B and TriLM 3.9B—each experienced a large loss spike in the first half of training. Second, adjusting the learning rate at the midpoint led to a sharp decline in training loss over a few hundred million tokens, though its impact varied by model size: for the larger models (2.4B and 3.9B), the rate of loss reduction returned to the prior pace after the initial sharp drop, while for smaller models (1.1B and 1.5B), the loss reduction plateaued, and models below 1B parameters saw an increase in training loss. Lastly, the removal of weight decay at the two-thirds mark accelerated convergence for all models, with the effect being most pronounced in the largest TriLM models. 
+
+      \begin{figure}[h]
+            \centering
+            \begin{subfigure}{0.48\textwidth}
+                \centering
+                \includegraphics[width=\linewidth, height=0.62\textwidth]{figures/scaling_law_fits_main_bit.pdf}
+                \caption{\footnotesize{Scaling laws - perplexity across size (bits).}}
+                \label{fig:validation_perplexity_across_size}
+            \end{subfigure}
+            \hspace{0.5mm}
+            \begin{subfigure}{0.48\textwidth}
+                \centering
+                \includegraphics[width=\linewidth, height=0.62\textwidth]{figures/scalin_law_fits_main.pdf}
+                \caption{\footnotesize{Scaling laws - perplexity across parameters.}}
+                \label{fig:validation_perplexity_vs_parameters}
+            \end{subfigure}
+            \caption{\footnotesize{Final validation loss across sizes (in bits) and parameters. TriLMs with increasing size offer better performance than FloatLMs of the same number of bits; and the gap in validation perplexity closes at scale.}}
+        \end{figure}
+
+        \paragraph{Scaling Laws.}Figures \ref{fig:validation_perplexity_across_size} and \ref{fig:validation_perplexity_vs_parameters} illustrate the final validation loss across different model size in terms of bits and number of parameters ($N$) respectively. In terms of effective model size in bits (\ref{fig:validation_perplexity_across_size}), which is crucial during inference, TriLMs exhibit significantly better scaling than FloatLMs. Notably, TriLM 3.9B validation error matches with FloatLMs 1.1B, which is nearly 1.7 times larger in terms of effective bit size.
+
+\begin{equation}
+\mathcal{L}_{\text{type}}(N) = \frac{A_{\text{type}} }{ N^{ {\alpha}_{\text{type}}}} + \epsilon_{\text{type}}, \text{ where }
+\begin{cases} 
+A_{\text{TriLM}} = 185, &\alpha_{\text{TriLM}} = 0.26, \hspace{1.7em}\epsilon_{\text{TriLM}} = 1.76 \\
+A_{\text{FloatLM}} = 159, &\alpha_{\text{FloatLM}} = 0.26, \hspace{1em}\epsilon_{\text{FloatLM}} = 1.67
+\end{cases}
+\end{equation}
+
+We employ the Levenberg-Marquardt algorithm (\cite{Levenberg1944, Marquardt1963}) for efficient non-linear least squares fitting. Both FloatLM and TriLM share the scaling exponent \(\alpha = 0.26\), indicating similar scaling behavior with the number of parameters \(N\). However, the offset terms \(\epsilon_{\text{TriLM}} = 1.76\) and \(\epsilon_{\text{FloatLM}} = 1.67\) reveal that their validation losses converge as \(N\) increases. Although TriLM starts with a higher coefficient \(A = 185\), suggesting greater initial validation loss than FloatLM (\(A = 159\)), this difference becomes insignificant with larger $N$, aligning their performance at asymptotic scales as shown in Figure \S\ref{fig:validation_perplexity_vs_parameters}.
+
+\begin{wrapfigure}{r}{0.46\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/params_percent_validation.pdf}
+    \caption{\footnotesize{Comparison of Power Law and Power Law-with-offset Fits for TriLM and FloatLM.}}
+    \label{fig:params_percent_validation}
+\end{wrapfigure}
+As shown in Figure \ref{fig:params_percent_validation}, using the scaling equations for TriLMs and FloatLMs, we derive the relationship between parameter count and the percentage difference in validation loss relative to FloatLMs. We observe that at 330B and 15.6B parameters, the validation losses for TriLMs are within $6\%$ and $7\%$ of FloatLMs' validation losses, respectively. This indicates that TriLMs are likely to closely match the performance of FloatLMs at larger scales. 
+
+Despite the observed differences in validation loss at the scale of models considered in this work, we demonstrate in Section \ref{results} that at 3.9B parameters, TriLM offers competitive downstream performance compared to a FloatLM of the same parameter count across a variety of benchmarks in commonsense reasoning and knowledge-based tasks. However, the gap in perplexity is observed in overlapping web-based datasets like Dolma and RefinedWeb.
+
+    
+    
+    
+    
+
+        
+
+
+
+\section{Results}
+
+\label{results}
+    We evaluate the families of LLMs on three aspects - commonsense \& reasoning tasks, knowledge-based tasks, and toxicity, all of which are crucial measures of their downstream performance.
+    \paragraph{Commonsense and Reasoning.}
+        We evaluate Spectra Suite models using eight distinct commonsense and reasoning benchmarks consisting of tasks from logical and reasoning questions to grounded and physical commonsense tasks: Arc Easy, Arc Challenge \citep{ARC}, BoolQ \citep{boolq}, HellaSWAG \citep{hellaswag}, WinoGrande \citep{winogrande}, PIQA \citep{piqa}, LAMBADA \citep{lambada}, LogiQA \citep{logiqa}, all under zero-shot settings. Figures \ref{fig:commonsense_and_reasoning_across_size} and \ref{fig:commonsense_and_reasoning_across_params} display the average performance of the LLMs on the first six benchmarks across size in bits and number of params. Figures \ref{fig:LAMBADA_acc_across_size} and \ref{fig:LAMBADA_acc_across_params} present the performance for the LAMBADA dataset. The results show that TriLMs consistently demonstrate superior performance for their size across all benchmarks at the $2.4$B and $3.9$B parameter scales. At the largest scale of $3.9$B, TriLM surpasses FloatLM on LAMBADA and achieves competitive average scores across six benchmarks. Additionally, TriLMs at the largest scales consistently outperform 4-bit QuantLMs of equivalent parameter count. However, across the considered scales, all LLMs show poor performance on LogiQA, making it difficult to identify a clear performance trend. For detailed benchmarking across all datasets \textendash see Tables \ref{tab:evaluation_spectra_suite_part1.a}, \ref{tab:evaluation_spectra_suite_part1.b} and \ref{tab:evaluation_spectra_suite_part2}.
+
+    \paragraph{Knowledge.}\label{section:Evaluation::subsection:Commonsense_and_Reasoning}
+        \begin{figure}[h]
+            \centering
+            \begin{subfigure}{0.25\textwidth}
+                \centering
+                \includegraphics[width=\linewidth]{figures/SciQ_Acc_Norm_across_size.pdf}
+                \caption{\tiny{vs. Size in SciQ}}
+                \label{fig:SciQ_Acc_Norm_across_size}
+            \end{subfigure}
+            \hfill
+            \begin{subfigure}{0.26\textwidth}
+                \centering
+                \includegraphics[width=\linewidth]{figures/SciQ_Acc_Norm_across_params.pdf}
+                \caption{\tiny{vs. Params in SciQ}}
+                \label{fig:SciQ_Acc_Norm_across_params}
+            \end{subfigure}
+            \hfill
+            \begin{subfigure}{0.23\textwidth}
+                \centering
+                \includegraphics[width=\linewidth]{figures/TriviaQA_exact_match_across_size.pdf}
+                \caption{\tiny{vs. Size in TriviaQA}}
+                \label{fig:TriviaQA_exact_match_across_size}
+            \end{subfigure}
+            \hfill
+            \begin{subfigure}{0.24\textwidth}
+                \centering
+                \includegraphics[width=\linewidth]{figures/TriviaQA_exact_match_across_params.pdf}
+                \caption{\tiny{vs. Params in TriviaQA}}
+                \label{fig:TriviaQA_exact_match_across_params}
+            \end{subfigure}
+            \caption{\footnotesize{Performance of ternary TriLM, FloatLM and quantized QuantLM (3-bit \& 4-bit) models on SciQ and TriviaQA tasks across Size (Bits) and Parameters. Refer to Tables \ref{tab:evaluation_spectra_suite_part2} and \ref{tab:evaluation_spectra_suite_part3} for details.}}
+            \label{fig:knowledge_performance}
+        \end{figure}
+        Several downstream practical uses of LLMs require them to have knowledge about common subjects like science or politics. To evaluate the performance of LLMs on these subjects, we use SciQ \citep{sciq}, TriviaQA \citep{triviaqa} and MMLU \citep{mmlu} benchmarks in zero-shot settings. Figures \ref{fig:SciQ_Acc_Norm_across_size} and \ref{fig:SciQ_Acc_Norm_across_params} show the accuracy of the Spectra suite LLMs on SciQ across size in bits and parameter counts. Figures \ref{fig:TriviaQA_exact_match_across_size} and \ref{fig:TriviaQA_exact_match_across_params} depict the accuracy for TriviaQA, while \ref{fig:MMLU_across_size} and \ref{fig:MMLU_across_params} do the same for MMLU. Across both benchmarks, at large 2.4B+ scales, TriLMs offer the best performance at a given size (bits). Surprisingly, despite having fewer bits, the knowledge capacity of TriLM does not have any significant degradation as observed in the case of QuantLMs \citep{allenzhu2024physicslanguagemodels33}. This indicates that low-bitwidth LLMs like TriLMs have similar knowledge capacity to FloatLMs, indicating that knowledge capacity is parameterized via the presence and nature of a connection (+1 or -1), rather than its strength. Tables \ref{tab:evaluation_spectra_suite_part2} and \ref{tab:evaluation_spectra_suite_part3} expand on these results.
+        
+    \begin{figure}[h]
+        \centering
+        \begin{subfigure}{0.24\textwidth}
+            \centering
+            \includegraphics[width=\linewidth]{figures/MMLUs/MMLU_across_size.pdf}
+            \caption{\tiny{Vs. Size (Bits)- Avg}}
+            \label{fig:MMLU_across_size}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{0.24\textwidth}
+            \centering
+            \includegraphics[width=\linewidth]{figures/MMLUs/MMLU_across_params.pdf}
+            \caption{\tiny{Vs. Parameters- Avg}}
+            \label{fig:MMLU_across_params}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{0.24\textwidth}
+            \centering
+            \includegraphics[width=\linewidth]{figures/MMLUs/MMLU_Stem_across_size.pdf}
+            \caption{\tiny{Vs. Size- STEM}}
+            \label{fig:MMLU_Stem_across_size}
+        \end{subfigure}
+        \hfill
+        \begin{subfigure}{0.24\textwidth}
+            \centering
+            \includegraphics[width=\linewidth]{figures/MMLUs/MMLU_Stem_across_params.pdf}
+            \caption{\tiny{Vs. Parameters- STEM}}
+            \label{fig:MMLU_Stem_across_params}
+        \end{subfigure}
+        \caption{\footnotesize{MMLU Accuracy for ternary TriLM, FloatLM and quantized QuantLM (3-bit \& 4-bit) models across Size and Parameters. Please refer to Table \ref{tab:evaluation_spectra_mmlu} for details.}}
+        \label{fig:MMLU_comparisons}
+    \end{figure}
+
+    \paragraph{Toxicity.}
+        We evaluate the Spectra suite across various safety and toxicity benchmarks of TruthfulQA \citep{truthfulqa}, Big Bench BBQ Lite \citep{bbq} and CrowsPairs \citep{crows_pairs}. We observe that none of the LLMs, even those with up to 3.9 billion parameters and trained on 300 billion tokens, perform significantly better than random guessing on the TruthfulQA benchmark. For the other two datasets, there is a noticeable correlation between the occurrence of toxicity and stereotypes and the LLMs' performance on various tasks. In particular, TriLMs with fewer than one billion parameters exhibit less stereotyping than FloatLMs with a similar parameter count. However, this difference diminishes as the scale increases, with TriLM 2.4B and TriLM 3.9B exhibiting biases comparable to those of FloatLM 2.4B and FloatLM 3.9B, respectively, on these benchmarks. This suggests that, although TriLMs initially show reduced bias compared to similarly sized FloatLMs, their performance aligns with FloatLMs of equivalent parameter counts at larger scales. This also highlights that TriLMs exhibit considerably more stereotyping than FloatLMs of comparable size (measured in bits), yet perform comparably to FloatLMs with similar parameter counts. 
+
+    \paragraph{Perplexity on other datasets
+
+     We measure perplexity using TriLM 3.9B and FloatLM 3.9B across various other corpora than SlimPajama, which was used for training. These corpora include OpenAI Lambada, Penn Tree Bank, C4, Cosmopedia, Dolma, S2Orc, Wikipedia, and RefinedWeb. A portion of Wikipedia, C4 is included in Slim Pajama. Some other corpora like Dolma and RefinedWeb, may also have overlaps from C4, Wikipedia as well as Common Crawl. Figure \ref{fig:perplexity_across_non_training_datasets} demonstrates that while TriLM 3.9B is similar or better than FloatLM 3.9B on PTB and Lambada, across the other datasets, with potential overlaps with SlimPajama, it's performance is consistently worse - indicating lower capability to memorize training data as well as worse in-distribution performance, despite competitive out of distribution performance.
+     
+  \begin{figure}[h]
+    \centering
+        \includegraphics[width=0.8\linewidth]{figures/perplexity_across_non_training_datasets.pdf}
+        \caption{\footnotesize{Cross-entropy (log perplexity) comparison between TriLM and FloatLM (both 3.9B parameters) across various datasets apart from SlimPajama.}}
+    \label{fig:perplexity_across_non_training_datasets}
+\end{figure}
+
+\paragraph{Illustrative examples. Our results show that the TriLM 3.9B model is able to generate cohesive and correct responses with randomly sampled examples.
+
+
+
+\section{Related Work}
+
+
+\paragraph{Quantization of Large Language Models after Training.}
+
+ Post-training quantization (PTQ) algorithms convert a pretrained high-precision model (FP32 / FP16 / BF16) into a lower precision format without requiring the original training process \citep{cai2020zeroqnovelzeroshot, hubara2020improvingposttrainingneural, choukroun2019lowbitquantizationneuralnetworks}. These methods can be either data-independent or need a small calibration dataset. Additionally, PTQ for LLMs presents unique challenges due to numerical outliers in both weights and activations \citep{bondarenko2021understandingovercomingchallengesefficient}. GPTQ \citep{gptq} is a state-of-the-art one-shot weight quantization method aimed at finding a matrix of quantized weights (say $\hat{W}$) that minimizes the squared error relative to the full precision layer output. By leveraging second-order information, GPTQ derives a closed-form solution to this optimization problem, making it scalable to large LLMs. Other methods \citep{dettmers2023spqrsparsequantizedrepresentationnearlossless, lin2024awqactivationawareweightquantization, lee2024owqoutlierawareweightquantization} emphasize the importance of outlier weights that correspond to high-magnitude activations. Some recent methods also quantized activation along with the weights \citep{xiao2024smoothquantaccurateefficientposttraining,yao2022zeroquantefficientaffordableposttraining, yao2023zeroquantv2exploringposttrainingquantization}. \cite{ahmadian2023intriguingpropertiesquantizationscale} demonstrate that large activation outliers can be effectively mitigated at scale by making appropriate optimization decisions during the pretraining phase.
+ 
+\paragraph{Training Language Models At Lower Precision.}
+    Several prominent language models such as GPT \citep{brown2020languagemodelsfewshotlearners}, NeoX \citep{black2022gptneox20bopensourceautoregressivelanguage}, Llama and Pythia families have been traditionally trained using mixed precision (FP32/FP16 or FP32/BF16) \citep{micikevicius2018mixedprecisiontraining} or half-precision (FP16/BF16) \citep{kalamkar2019studybfloat16deeplearning}. Recently, \cite{tao-etal-2022-compression} introduced QuantGPT, a model that incorporates contrastive and logit distillation from a full-precision teacher to a quantized student model during pretraining. Further developments, such as BitNet \citep{bitnet_b1} and BitNet b1.58 \citep{bitnet_b1.58},  have specifically focused on quantization-aware training for extremely low-bitwidth networks in transformer-based models. In their work, models are trained at low ``effective'' precision of binary and ternary respectively - where the latent (or master) weights during training are maintained in higher precision like FP16. The model weights are binarized or ternarized on the fly during the forward pass and gradients are backpropagated for the latent weights using the straight-through estimator \citep{courbariaux2016binaryconnecttrainingdeepneural}. Prior works emphasize the importance of maintaining latent (or master) weights at high precision to allow accumulation of small updates during training - for example, \cite{peng2023fp8lmtrainingfp8large} observed a significant performance drop on the language model when the latent (or master) model weights were switch from 16-bits (FP16/BF16) to 8-bits (FP8) during training. Concurrent architectural improvements such as Flash Attention \citep{dao2022flashattentionfastmemoryefficientexact, dao2023flashattention2fasterattentionbetter}, the mixture of experts \citep{zoph2022stmoedesigningstabletransferable},  xLSTM \cite{beck2024xlstm} and state space models \citep{gu2024mambalineartimesequencemodeling, dao2024transformersssmsgeneralizedmodels, gu2022efficiently} complement these advancements in lower precision modeling.
+
+
+
+\section{Conclusion and Future Work}
+
+
+In this work, we address memory limitations in large language model (LLM) deployment by exploring both post-training quantization and direct low-bitwidth training. We introduce the Spectra LLM suite, featuring 54 models ranging from 99 million to 3.9 billion parameters, trained on 300 billion tokens. This suite includes Float16 LLMs (FloatLMs), quantized QuantLMs (3–8 bits), and our proposed ternary LLMs (TriLMs). Our findings reveal that TriLMs scale better than their half-precision Float16 counterparts in terms of effective model bit size, and they can achieve comparable validation loss when scaled to a large number of parameters. Additionally, our results demonstrate that TriLMs surpass other models in bit-size efficiency and achieve performance comparable to FloatLMs at 3 billion+ parameters across multiple benchmarks.
+
+Future work should address the remaining challenges of toxicity, stereotyping, and performance gaps on web corpora associated with low-bitwidth models. Investigating scaling laws across different data regimes for various low-bitwidth architectures can provide deeper insights into their behavior and limitations. Additionally, combining these models with state-space architectures like Mamba \cite{gu2024mambalineartimesequencemodeling} could further enhance efficiency and performance without sacrificing accuracy. These research directions hold promise in advancing efficient language modeling further.
+
+
+\section{Broader Impact}
+
+
+    \paragraph{Interpretability Beyond Neuron Level:} While several efforts have been made to understand how language models work and means to steer them without training, these methods have mostly focussed on intervening at neuron level. TriLMs opens a new degree of interpretability - at the connection level. Here, the connections between any two neurons in a layer are in one of the three states - 0 (no connection), -1 (negative connection) and +1 (positive connection), each with equal strength. This is in sharp contrast to FloatLMs, where these connections can be of varying strengths, making it harder to study interpretability beyond neuron level. By releasing the checkpoints across our training runs, we facilitate research along these directions.
+
+    \paragraph{Environmental Benefits and Resource Efficiency:} The open release of our models mitigates future emissions by allowing others to bypass the need for pretraining models from scratch. Moreover, TriLMs much lesser resource to deploy, and can perform the autoregressive generation as a faster pace - making them critical to scenarios demanding strict latency. Additionally, TriLMs represent a substantial advancement in enhancing performance on resource-constrained edge devices, including smartphones, laptops, and automobiles.
+
+    \paragraph{Impact on Specialised Hardware:} While TriLMs offers significant memory reduction and latency improvements on General Purpose GPUs like H100 and RTX4090, certain specialized hardware benefits more from ternary modeling. Hardware (like Cerabras\footnote{https://www.cerebras.net/product-chip/}) that support high byte-to-flop ratio computations, can leverage the sparsity stemming from ternarization for speedup in both training as well as inference. On the other hand, hardware with limited Memory/SRAM (like Groq\footnote{https://groq.
+
+    \paragraph{Reduced Training Costs:} The Chinchilla scaling laws established that for training compute optimality, it may be recommended to train larger LLMs for lesser tokens than smaller LLMs for more tokens for achieving the desired model performance. However, memory requirements and latency associated with deployment of larger models, has motivated costlier training runs that go far beyond Chinchilla optimality. For example a LLaMa 3 model with only 8B parameter was trained for 15T tokens. Since, TriLM and ternary models in general can reduce the memory requirements and latency, this can motivate a shift inparameter-token tradeoff for efficient training runs towards Chinchilla's compute-optimal regime.
+
+
+        
+
+        
+
+

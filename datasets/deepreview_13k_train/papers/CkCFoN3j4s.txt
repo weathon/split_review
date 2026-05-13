@@ -1,0 +1,603 @@
+\title{Locret: Enhancing Eviction in Long-Context LLM Inference with Trained Retaining Heads}
+
+\begin{abstract}
+Large language models (LLMs) have shown remarkable advances in supporting long-context comprehension and processing tasks. 
+However, scaling the generation inference of LLMs to such long contexts incurs significant additional computation load, and demands a substantial GPU memory footprint to maintain the key-value (KV) cache of transformer-based LLMs. 
+Existing KV cache compression methods, such as quantization, face memory bottlenecks as context length increases, while static-sized caches, such as selective eviction, suffer from inefficient policies. 
+These limitations restrict deployment on consumer-grade devices like a single Nvidia 4090 GPU. 
+To overcome this, we propose \name, an efficient framework for long-context LLM inference that introduces \textit{retaining heads} to evaluate the causal importance of KV cache units, allowing for more accurate eviction within a fixed cache size.
+\name~is fine-tuned on top of the frozen backbone LLM using a minimal amount of data from standard long-context SFT datasets. 
+During inference, we evict low-importance cache units along with a chunked prefill pattern, significantly reducing peak GPU memory usage.
+We conduct an extensive empirical study to evaluate \name, where the experimental
+results show that \name~outperforms the recent popular and competitive approaches, including \textsc{InfLLM}, Quantization, \textsc{SirLLM}, and \textsc{MInference}, in terms of memory efficiency and the quality of generated contents --- \name~achieves over a $20\times$ and $8\times$ KV cache compression ratio compared to the full KV cache for \texttt{Phi-3-mini-128K} and \texttt{Llama-3.1-8B-instruct}. 
+Additionally, \name~can be combined with other efficient inference methods, such as quantization and token merging.
+To the best of our knowledge, \name~is the first framework capable of deploying \texttt{Llama-3.1-8B} or similar models on a single Nvidia 4090 GPU, enabling 128K long-context inference without compromising generation quality, and requiring little additional system optimizations
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Large language models (LLMs) have revolutionized AI development and deployment~\citep{zhao2023survey, minaee2024large}. 
+Recent advancements in LLMs’ ability to handle long-context tasks have further unlocked the potential of generative AI. 
+State-of-the-art LLMs now support significantly extended context lengths, with GPT-4o~\citep{gpt4o} and Llama-3.1~\citep{dubey2024llama3} handling 128K tokens, Yi~\citep{young2024yi} and Claude-3~\citep{claude3} supporting 200K tokens, and Gemini-1.5~\citep{reid2024gemini} reaching 10 million tokens. 
+These advances enable LLMs to tackle complex tasks like multi-hop reasoning~\citep{li2024making, schnitzler2024morehopqa}, solving needle-in-a-haystack problems~\citep{guerreiro2022looking, wang2024multimodal}, and powering advanced LLM agents~\citep{qin2023tool, wang2024survey} and AI-driven operating systems~\citep{mei2024aios}. 
+However, \textit{deploying generative inference under long-context settings on consumer-grade GPUs requires innovative algorithmic and system optimizations to handle this new paradigm efficiently}.
+
+
+
+Compared to traditional short-context LLM inference, long-context LLM inference shifts the computing paradigm in two key ways: 
+i) \textit{increased computational overhead for attention mechanisms}: as context length grows, the computation required for obtaining attention scores increases quadratically, which results in a higher ratio of the computational budget in a transformer block;
+ii) \textit{higher memory footprint for key-value (KV) caching}: longer contexts require larger KV caches, which dramatically increases the peak memory usage.
+These shifts demand innovative techniques to mitigate computational costs and manage memory usage effectively for long-context LLM inference. 
+
+Although various efforts have been made to overcome the 
+bottleneck 
+in LLM inference, these approaches fail to enable long-context inference on consumer-grade GPUs. 
+Models with compact architectures, e.g. \texttt{MiniCPM-128K}~\citep{hu2024minicpm} and \texttt{Phi-3-mini-128K}~\citep{abdin2024phi}, reduce the computational load and memory usage, but cannot alleviate the KV cache burden in long-context scenarios.
+Similarly, techniques like LLM model weight quantization~\citep{frantar2022gptq, lin2024awq, ma2024era}, activation quantization~\citep{dettmers2022gpt3, xiao2023smoothquant, zhang2024exploring}, or sparsification~\citep{liu2023deja, zhang2022moefication} also fall short in effectively reducing the memory usage to a level supported by consumer-grade GPUs.
+
+Recently, some specific optimizations have been proposed for long-context LLM inference. 
+For example, sparse attention mechanisms~\citep{jiang2024minference, ge2023model, lou2024sparser} attempt to reduce runtime memory
+through conduct selected few calculation,
+and KV cache quantization~\citep{liu2024kivi, hooper2024kvquant, zandieh2024qjl} reduces cache size by applying low-bit storage.
+These methods can only offer limited compression rate, of which 
+the core issue is that \textit{the KV cache grows linearly with sequence length}, and the above methods do not adequately address this problem. 
+On the contrary, combining chunked prefill with token-dropping techniques~\citep{xiao2023efficient, yang2024pyramidinfer} could offer a more effective solution, as it maintains a static-sized cache where the memory usage can be bounded.
+However, current token-dropping and cache eviction methods~\citep{zhang2024h2o, liu2024scissorhands, yao2024sirllm}, whose token importance manually designed according to the inner statistics, 
+suffer from accuracy loss and performance degradation due to inaccuracies in estimating token importance --- The weakening correlation between local and global importance as sequences grow exacerbates this issue.
+To address these limitations, we propose a \textit{lightweight training-based paradigm} that provides more accurate token importance scoring to tackle the long-context LLM inference problem. We highlight our contributions below:
+
+
+\underline{\textbf{Contribution 1:}} 
+We propose a lightweight training-based paradigm for selective KV cache eviction for long-context LLM inference, with an offline training cost $<$1 GPU hours.
+We tackle the problem of KV cache eviction by a learning based approach. 
+We introduce the \textit{retaining heads}, with a small number of additional parameters, fine-tuned on top of the frozen backbone LLM using a minimal amount of data from standard long-context SFT datasets to estimate the causal importance of each cache unit.
+Such a training paradigm is able to provide accurate token importance scoring prediction and can be integrated with other efficient inference algorithms, e.g., quantization and token merging.
+\underline{\textbf{Contribution 2:}} 
+We provide an efficient inference system implementation for \name. 
+We integrate the retaining head mechanism into a chunked prefill inference framework, where we maintain a static-size cache set through evicting cache units with low predicted importance to limit the GPU memory usage. 
+\name~is able to preserve the most important cache units with the trained retaining heads, enabling precise attention approximation without compromising the inference latency. 
+\name~is also applicable to all transformer-based LLMs and various hardware, as it requires minimal modifications to the model's inference process and only utilizes dense operators.
+
+\underline{\textbf{Contribution 3:}} 
+We conduct an extensive evaluation of \name, which illustrates that \name~can not only obtain a comparable performance but also maintain inference efficiency. 
+\name~achieves over a $20\times$ and $8\times$ KV cache compression ratio 
+for \texttt{Phi-3-mini-128K} and \texttt{Llama-3.1-8B-instruct}, enabling full comprehension of long contexts on consumer-grade devices. 
+{To the best of our knowledge, \name~is the first framework capable of deploying \texttt{Llama-3.1-8B} or similar models on a single Nvidia 4090 GPU, enabling 128K long-context inference without compromising generation quality, and requiring little extra system optimizations.}
+
+
+
+
+
+
+
+
+
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+\label{sec:related_work_compression}
+
+Efforts in long-context LLM inference can be categorized by algorithm and system optimizations: 
+
+\textbf{Algorithm optimizations.} Optimizations aimed at reducing the size of the KV cache can generally be classified into three categories: {quantization-based methods}, {token dropping methods}, and {sparsity-based methods}. Quantization-based methods~\citep{liu2024kivi, hooper2024kvquant, zandieh2024qjl, zhang2024kv}, which store the KV cache in low-bit representations, require hardware support for these formats and may slow down inference due to the overhead of dequantization. Token dropping methods typically follow two main strategies: eviction or the use of an attention pool. Eviction-based approaches, such as H$_2$O~\citep{zhang2024h2o}, ScissorHands~\citep{liu2024scissorhands}, and \textsc{SirLLM}~\citep{yao2024sirllm}, rank tokens by certain statistical metrics to identify the most influential ones, discarding others to reduce memory usage. Attention pool-based methods~\citep{nawrot2024dynamic, rajput2024infer}, such as StreamingLLM~\citep{xiao2023efficient} and \textsc{LoCoCo}~\citep{cai2024lococo}, compress multiple adjacent KV cache units into a single unit using a specially designed transformation. Sparsity-based methods~\citep{ge2023model, jiang2024minference, yang2024pyramidinfer, lou2024sparser, lv2024critiprefill} focus on leveraging the sparsity patterns of attention heads to reduce both computation and I/O. The combination of these approaches can be further enhanced by identifying specific attention patterns for each head and layer~\citep{ge2023model}. For surveys of these methods, please refer to~\citep{yuan2024kv, kang2024gear, luohe2024keep}.
+
+
+\textbf{System optimizations.} The challenge of long-context inference can also be alleviated from a system-level perspective. Offloading-based methods~\citep{sheng2023flexgen, xiao2024infllm, wu2024offload, lee2024infinigen} store the KV cache in CPU memory, retrieving only the most relevant chunks to the GPU before computing a new chunk. This approach reduces peak GPU memory usage, though at the cost of slower inference. Hardware-aware algorithms, such as flash attention~\citep{dao2022flashattention, dao2023flashattention2, shah2024flashattention} and page attention~\citep{kwon2023efficient}, exploit GPU architecture~\citep{ghorpade2012gpgpu} to enable more efficient runtime memory management. In addition, reimplementing inference infra-structure in a more efficient programming language~\citep{llamacpp, llama2c, rustformers}, or adopting disaggregated inference~\citep{jianghexgen, zhong2024distserve, qin2024mooncake, hu2024inference}, can greatly enhance inference efficiency. Algorithmic optimizations can be seamlessly integrated into such systems~\citep{agrawal2023sarathi, lee2024infinigen}. For instance, KTransformers~\citep{ktransformers} adopts the chunked offloading technique from \textsc{InfLLM}~\citep{xiao2024infllm}. However, system optimizations primarily focus on extending context length by leveraging hardware resources, rather than directly reducing the size of the KV cache.
+
+
+
+
+
+
+
+
+\section{\name~}
+
+
+\subsection{Preliminaries}
+
+\textbf{Transformer architecture.} 
+We define the model inference of transformer-based LLMs as follows. 
+Given a token sequence $t_1, t_2, \cdots, t_n$, we denote the output hidden state of layer $i$ as $\textbf{H}^{(i)}$ and $\textbf{H}^{(0)}$ is the embeddings. 
+Each transformer layer consists of an attention layer and an MLP layer.
+We assume the model follows a grouped-query attention (GQA) architecture~\citep{ainslie2023gqa}, with $h$ query heads and a group size of $g$. 
+For multi-head attention (MHA), $g$ is set to 1. 
+The attention score of layer $i$'s head $j$ is calculated by
+$\mathbf{A}_j^{(i)} = \text{softmax}\left(\mathbf{Q}_j^{(i)}{\mathbf{K}_{\lceil {j/g}\rceil}^{(i)T}}/\sqrt{d_m}\right)\cdot \mathbf{V}_{\lceil{j/g}\rceil}^{(i)}$,
+where $d_m$ represents the hidden size for each head and 
+$\left[\mathbf{Q}_j^{(i)}, \mathbf{K}_j^{(i)}, \mathbf{V}_j^{(i)}\right] = \mathbf{H}^{(i-1)}\cdot\left[{\mathbf{W}_j^{Q(i)}}, {\mathbf{W}_j^{K(i)}}, {\mathbf{W}_j^{V(i)}}\right]$.
+Next, we compute 
+$\mathbf{A}^{(i)} = \left[\mathbf{A}_1^{(i)}, \cdots, \mathbf{A}_h^{(i)}\right]\cdot\mathbf{W}^{O(i)}$, finally followed by 
+$\mathbf{H}^{(i)} = \text{MLP}(\mathbf{A}^{(i)})$.
+
+
+\textbf{KV cache and chunked prefill.} 
+During the prefill stage, all prompt tokens are processed in a single forward pass, where {$\mathbf{Q}^{(i)}$}, {$\mathbf{K}^{(i)}$}, and {$\mathbf{V}^{(i)}$} each have a sequence length of $n$. In the decoding stage, only a single token is processed across layers, utilizing the KV cache units to reduce computation. Chunked prefill is a method for reducing peak memory consumption by processing tokens in chunks over multiple passes, with the assistance of the KV cache. Taking both KV cache and chunked prefill into account, the attention calculation can be modified as Equation~\ref{eq:attn_decode}, where $B$ represents the number of tokens processed in a single model pass. For decoding, {$B=1$}, while for chunked prefill, $B$ corresponds to the chunk size. We denote the attention output for tokens {$n+1, n+2, \cdots, n+B$} as {$\mathbf{A}[n+1\colon n+B]$}, and the attention output for the $k$-th token as {$\mathbf{A}[k]$}.
+{\small
+\begin{align}
+    \label{eq:attn_decode}
+    \mathbf{A}{[n+1\colon n+B]}_j^{(i)} = \text{softmax}\left(\frac{\mathbf{Q}{[n+1\colon n+B]}_j^{(i)}{\mathbf{K}{[1\colon n+B]}_{\lceil {j/g}\rceil}^{(i)T}}}{\sqrt{d_m}}\right)\cdot \mathbf{V}{[1\colon n+B]}_{\lceil{j/g}\rceil}^{(i)}.
+\end{align}
+}
+\textbf{Cache eviction.}
+Cache eviction in long-context inference is defined as follows. 
+Here, we slightly abuse the notation of heads and layers, and treat the key-value vector pair of a single token within one head as the smallest cache unit.
+We denote the cache unit for the $k$-th token as $c_k=(\mathbf{K}[k], \mathbf{V}[k])$. 
+Assume a memory budget $b$, representing the maximum number of cache units that can be stored in GPU memory at any given time. 
+The abstract form of attention can then be written as $c_k = f(c_1, c_2, \cdots, c_{k-1})$. 
+With limited cache capacity, this calculation can only be approximated by $\tilde c_k = f(\tilde c_{p_1}, \tilde c_{p_2}, \cdots, \tilde c_{p_{b'}})$, where $b' \leq b$, and $p_1, p_2 \cdots, p_{b'} \in \{1, 2, \cdots, k-1\}$.
+Intuitively, the number of prior cache units involved cannot exceed the memory budget.
+When $b' = b$, indicating the cache is full, one cache unit must be evicted. 
+We select the unit to be evicted using a policy $p_v = \text{Policy}(\tilde c_{p_1}, \cdots, \tilde c_{p_b}; \tilde c_k)$. 
+In such stated problem, the key challenge of cache eviction is to develop an effective policy function that minimizes the approximation error $\| \tilde c_k - c_k \|$.
+
+\begin{figure}[t]
+\begin{center}
+\includegraphics[width=0.8\linewidth]{pattern.png}
+\end{center}
+\caption{The framework of \name. ``$\mathbf{R}$'' represents the retaining head. $\text{P}_i$ and $\text{A}_i$ correspond to the $i$-th prompt token and answer token. ``t'' represents the time step in chunked prefill, ``$b$'' represents the budget size, and ``$n_{s}$'' represents the length of the stabilizers.}
+\label{fig:framework}
+\end{figure}
+
+\subsection{\name~ Framework}
+
+\name~is a training-based KV cache compression framework that works in conjunction with chunked prefill. 
+As illustrated in Figure~\ref{fig:framework}, \name~operates in two stages: training and inference. 
+In the training stage, we modify the original LLM by appending a retaining head $\mathbf{R}$ to each attention module. 
+We then train the retaining heads $\mathbf{R}$ while keeping the LLM backbone frozen. 
+During chunked prefill inference, the retaining heads $\mathbf{R}$ are used to calculate the importance of each cache unit in the chunk. 
+We retain the cache units with higher scores, along with stabilizers (i.e., the last tokens), in the cache pool located in GPU memory. 
+
+
+From a mathematical perspective, cache eviction is performed by assigning each cache unit an importance score that reflects its influence on the calculation of subsequent tokens. 
+We refer to this estimation as the \textit{causal importance score (CIS)} since it is computed in a causal manner. 
+The CIS of cache unit $k$ is calculated as $s_k = S(c_1, c_2, \cdots, c_k)$. 
+By applying top-$b$ sparse attention based on the CIS, we can ensure that the trace (i.e. retaining and eviction) of each cache unit can be fit within a cache with a given memory budget.
+
+
+However, since not all tokens can be stored in the cache simultaneously, calculating the actual CIS on-chip is impractical. 
+Instead, we use a heuristic approximation for CIS, defined as follows:
+$\tilde s_k = S(\tilde c_{p_1}, \tilde c_{p_2}, \cdots, \tilde c_{p_{b'}})$,
+where $b$ is the cache budget, all $\tilde c_{p_i}$ are approximated cached units, and $b' \leq b$. 
+We hypothesize that if the scoring function for causal importance is sufficiently accurate, it will consistently select the most critical cache units, resulting in a negligible difference between the heuristic and the actual score. 
+Thus, we use the terms \textit{heuristic CIS} and \textit{actual CIS} interchangeably.
+\subsection{Training the Retaining Heads}
+
+In this section, we introduce \name's model architecture modifications and the corresponding training recipe. 
+We add additional parameters to compute the CIS $s_k$ (or $\tilde s_k$ for on-chip inference) with respect to all previous cache units. 
+Specifically, we inject a retaining head, consisting of a small MLP, into each layer. 
+The retaining head predicts the CIS for each head of the corresponding layer based on the concatenation of {$[\mathbf{Q}, \mathbf{K}, \mathbf{V}]$}. 
+Formally, with a slight abuse of notation, let the retaining head for layer $i$ be denoted as $\mathbf{R}$. The CIS at head $j$ of layer $i$ is then calculated as:
+$\mathbf{\tilde S} = \mathbf{R}([\mathbf{Q}, \mathbf{K}, \mathbf{V}]) = \sigma([\mathbf{Q}, \mathbf{K}, \mathbf{V}]\mathbf{W}_1)\mathbf{W}_2$.
+In this equation, {$\mathbf{W}_1 \in \mathbb{R}^{(d_m + 2d_{kv}) \times d_{\mathbf{R}}}$} and {$\mathbf{W}_2 \in \mathbb{R}^{d_{\mathbf{R}} \times \frac{h}{g}}$} are the tunable parameters of $\mathbf{R}$, $\sigma$ is the activation function and {$\mathbf{\tilde S}[k]_j$} is the predicted CIS of the $k$-th token at head $j$ of layer $i$. 
+This architecture implies that the importance estimation for a single head is not performed in isolation but rather considers all heads together.
+Note that for GQA models, there are only $h/g$ output values corresponding to the number of heads in the KV cache.
+
+We train the retaining head $\mathbf{R}$s on a small Question-Answer (QA) supervised fine-tuning (SFT) dataset, where each entry consists of a single prompt and one answer.
+We define the CIS $s_k$ for the $k$-th token as the maximum attention score, before softmax, from all the answer tokens toward the $k$-th token. 
+Formally, for the $k$-th token at head $j$ of layer $i$, we approximate the predicted value {$\mathbf{\tilde S}[k]_j^{(i)}$} to the ground truth {$\mathbf{S}[k]_j^{(i)} := \max_p\left(\mathbf{Q}_j^{(i)}\mathbf{K}_{j}^{(i)T}\right)_{p, k}$}, where {$n_q(d) \leq p \leq n_q(d) + n_a(d)$}, and {$n_q(d)$} and {$n_a(d)$} represent the lengths of the prompt and answer in data $d$, respectively. For an MHA model with $L$ layers and $h$ heads, the training objective is described in Equation~\ref{eq:obj}. 
+For GQA models, we take the maximum attention score before softmax across different query heads within the same group as the ground truth for the corresponding KV head.
+{\small
+\begin{align}
+    \label{eq:obj}
+    \argmin_{\mathbf{W}_1^{(i)}, \mathbf{W}_2^{(i)}, i=1, 2\cdots, L} \mathbb{E}_{d\in \mathcal{D}}\left[\sum_{i=1}^{L}\sum_{j=1}^{h}\sum_{k=1}^{n_q(d)}\mathcal{L}\left(\mathbf{\tilde S}[k]_j^{(i)}, 
+    \mathbf{S}[k]_j^{(i)}
+    \right)\right]
+\end{align}
+}
+
+
+The training loss consists of a regression loss and a smoothing loss. 
+We apply the Smooth-$\mathcal{L}_1$ norm between the predicted values and the ground truth. 
+Since important segments in natural language typically consist of adjacent tokens, we also apply the $\mathcal{L}_2$ norm between each pair of adjacent predicted values to enforce smoothness. 
+The complete training loss for \name~is given by Equation~\ref{eq:loss}.
+{\small
+\begin{align}
+    \label{eq:loss}
+    \mathcal{L}\left(\mathbf{\tilde S}[k]_j^{(i)}, \mathbf{S}[k]_j^{(i)}\right) = \text{Smooth-}\mathcal{L}_1\left(\mathbf{\tilde S}[k]_j^{(i)}, \mathbf{S}[k]_j^{(i)}\right) + \alpha \mathcal{L}_2\left(\mathbf{\tilde S}[k]_j^{(i)}, \mathbf{\tilde S}[k+1]_j^{(i)}\right)
+\end{align}
+}
+
+
+\begin{figure}[h]
+    \begin{center}
+    \begin{minipage}[c]{0.45\linewidth}  % 调整宽度
+        \centering
+        \begingroup
+        \includegraphics[width=0.8\linewidth]{intermediate.pdf}
+        \caption{L-Eval scores with different intermediate size of retaining head $d_{\mathbf{R}}$.}
+        \label{fig:intermediate}
+        \endgroup
+    \end{minipage}
+    \hspace{0.05\linewidth}  % 调整图表之间的间距
+    \begin{minipage}[c]{0.45\linewidth}  % 调整宽度
+        \centering  
+        \begingroup
+            \captionof{table}{L-Eval scores of \name~trained on various datasets.}
+            \scalebox{0.75}{
+            \begin{tabular}{l|ccc}
+            \toprule
+            Dataset & LongAlpaca & LongAlign & Anti-Haystack \\
+            \midrule
+            L-Eval & 21.33 & 22.00 & 20.72 \\
+            \bottomrule
+            \end{tabular}
+            \label{tab:data-insensitivity}
+            }
+        \endgroup
+    \end{minipage}
+    \end{center}
+\end{figure}
+
+From our observations, the training of \name~exhibits strong robustness. 
+The performance variations shown in Figure~\ref{fig:intermediate} and Table~\ref{tab:data-insensitivity} are minimal, despite changes in $d_{\mathbf{R}}$ and the dataset. 
+
+
+\subsection{Inference Implementation of \name}
+\begin{algorithm}[t]
+    \small
+    \DontPrintSemicolon
+    \caption{\name~Inference}
+    \label{alg:infer}
+    \KwIn{Model $\mathbf{M}$, Prompt tokens $x$, Local length $n_{loc}$, Stablizer length $n_s$, Budget $b$, Chunk size $B$}
+    \KwOut{Generated tokens $x_{gen}$}
+    \tcp{Leave the last $n_{loc}$ out to make sure they are not evicted.}
+    chunk\_positions $\leftarrow$ split\_chunk($0$, $x$.length() $-n_{loc}$, $B$)\;
+    K\_cache, V\_cache, score\_cache $\leftarrow$ [], [], []\;
+    
+    \For {\rm{chunk} $\in$ \rm{chunk\_positions}}{
+        begin\_pos, end\_pos $\leftarrow$ chunk.begin\_pos, chunk.end\_pos\;
+        K\_chunk, V\_chunk, score\_chunk $\leftarrow \mathbf{M}(x[\text{begin\_pos:end\_pos}], \text{K\_cache, V\_cache})$\;
+        K\_cache $\leftarrow$ Concat(K\_cache, K\_chunk)\;
+        V\_cache $\leftarrow$ Concat(V\_cache, V\_chunk)\;
+        score\_cache $\leftarrow$ Concat(score\_cache, score\_chunk)\;
+        \If{\rm{chunk} is not the last chunk}{
+        \tcp{Keep the last $n_s$ caches to maintain higher context continuity.}
+        score\_cache[score\_cache.length()-$n_s$:score\_cache.length()] $\leftarrow +\infty$\;}
+        indices $\leftarrow$ top-$b$(score\_cache).indices\;
+        K\_cache, V\_cache, score\_cache = K\_cache[indices], V\_cache[indices], score\_cache[indices]\;
+    
+    }
+    K\_cache, V\_cache, score\_cache $\leftarrow \mathbf{M}$($x$[$x$.length()$-n_{loc}$:$x$.length()], K\_cache, V\_cache)\;
+    $x_{gen}\leftarrow \mathbf{M}$.generate(K\_cache, V\_cache)\;
+    \Return $x_{gen}$\;
+\end{algorithm}
+
+During the inference stage, we use the chunked prefill pattern and perform cache eviction based on the predicted CIS. 
+Since the predicted value {$\mathbf{\tilde S}[k]_j^{(i)}$} depends solely on {$\mathbf{Q}[k]_j^{(i)}$, $\mathbf{K}[k]_j^{(i)}$}, and {$\mathbf{V}[k]_j^{(i)}$}, and because attention in decoder-only models is causal, {$\mathbf{\tilde S}[k]_j^{(i)}$} remains consistent once calculated. 
+Thus, we store the KV cache units along with their corresponding causal importance values. 
+When the cache is full, we evict the units with lower causal importance values, as they are deemed less useful for future computations. 
+Cache eviction introduces context discontinuity, meaning some cache units at certain positions may be absent. 
+This can degrade generation quality and increase the error between the predicted and accurate CIS, as LLMs are typically not trained on such contexts. 
+To mitigate this, we retain the last tokens of the current chunk at each step of the chunked prefill process, ensuring a local and continuous context to minimize errors. 
+To demonstrate the effectiveness of this design, we perform an ablation study on the length of stabilizers $n_s$, shown in Figure~\ref{fig:stabilizer}. 
+Smaller $n_s$ results in severe performance degradation, and the model fails entirely when stabilizers are absent, as context discontinuity leads to instability in CIS prediction, causing errors in cache eviction and amplifying errors in hidden states. 
+
+
+\begin{figure}[h]
+\begin{center}
+\subfloat[]{\label{fig:stabilizer_a}\includegraphics[width=0.315\linewidth]{stable.pdf}}
+\subfloat[]{\label{fig:stabilizer_b}\includegraphics[width=0.34\linewidth]{hidden_delta.pdf}}
+\subfloat[]{\label{fig:stabilizer_c}\includegraphics[width=0.34\linewidth]{cis_err.pdf}}
+\end{center}
+\caption{R.Number with different stabilizer lengths $n_s$. (a) Task accuracy under different $n_s$. (b) Maximum absolute error of the last hidden state. (c) Mean absolute error of the predicted CIS. We conduct this experiment on entries 101-120 of R.Number using the \texttt{Phi-3-mini-128K} backbone.}
+\label{fig:stabilizer}
+\end{figure}
+
+We maintain a cache pool with a capacity of $b$ cache units, discarding units that exceed this limit. 
+For each chunk, the model processes the chunked input tokens alongside the current cache pool. 
+The newly generated KV pairs and their predicted scores are then concatenated with the existing cache. 
+Once the cache pool is full, only the $b$ cache units with the highest CIS values are retained. 
+At each chunked prefill step, except for the final step, we retain the stabilizers, i.e. the last $n_s$ cache units. 
+Additionally, we do not compress the last $n_{loc}$ tokens of the prompt, as they are critical for maintaining high generation quality due to their strong correlation with the query. 
+Finally, the answer is generated according to the compressed KV cache. 
+Algorithm~\ref{alg:infer} provides the pseudocode for \name, where we formally describe the \name~inference process.
+
+The GPU memory usage during \name~inference can be effectively bounded. 
+GPU memory for KV cache storage is limited to {$\mathcal{O}(b + n_{loc})$}, and the runtime memory usage of the attention mechanism is bounded by {$\mathcal{O}(B \times (b + B + n_{loc}))$}. 
+For comparison, while processing an input with $n$ tokens, full attention prefill requires {$\mathcal{O}(n)$} for KV cache storage and {$\mathcal{O}(n^2)$} for runtime memory, whereas chunked prefill requires {$\mathcal{O}(n)$} for KV cache storage and {$\mathcal{O}(nB)$} for runtime memory consumption.
+
+
+\section{Experiments}
+
+
+In this section, we present the experiments conducted to evaluate the proposed framework, \name, aiming to address the following questions:
+
+\:(\underline{\textbf{Q1}}) Can \name~obtain better end-to-end task performance compared to popular and competitive long-conetext inference approaches within similar or less peak memory? 
+
+\:(\underline{\textbf{Q2}}) Can \name~improve inference speed compared to other approaches?
+
+\:(\underline{\textbf{Q3}}) Can \name~be combined with other efficient inference methods? 
+
+\subsection{Experimental Setup}
+\label{sec:setup}
+
+\textbf{Models and training dataset.} 
+We evaluate \name~on two long-context LLMs: \texttt{Phi-3-mini-128K}~\citep{abdin2024phi} and \texttt{Llama-3.1-8B-instruct}~\citep{dubey2024llama3}. 
+Both models can process up to 128K context tokens and follow MHA and GQA architectures, respectively. 
+\texttt{Phi-3-mini-128K} has 3.8B parameters, while \texttt{Llama-3.1-8B-instruct} contains 8B parameters, making both suitable for deployment on consumer-grade devices. 
+We inject retaining heads $\mathbf{R}$ into each layer, setting the intermediate size $d_{\mathbf{R}}$ to 1024 for both models. 
+The retaining heads are trained on the LongAlpaca dataset~\citep{chen2023longlora} for 3000 steps.
+Training \name~is lightweight, with the tunable parameters comprising 8\% and 2.5\% of the total for the two models, respectively. 
+The complete training process takes 0.47 and 0.80 GPU hours on a single A800 GPU for each corresponding model.
+The cache budget $b$ is set to 6000 for \texttt{Phi-3-mini-128K} and 16384 for \texttt{Llama-3.1-8B-instruct}. 
+
+
+\textbf{Benchmarks.} 
+We evaluate \name~on selected subsets of $\infty$Bench~\citep{zhang2024infty} and L-Eval~\citep{an2023eval}. 
+For $\infty$Bench, we select R.PassKey, R.Number, E.Sum, E.QA, E.MC, Z.QA, E.Dia, C.Debug, and M.Find. 
+All selected subsets, except Z.QA, have an average length of approximately 100K tokens, while Z.QA has a longer average length of around 2000K tokens. 
+We exclude R.KV because it can be easily handled by calling a Python interpreter. 
+We also exclude C.Run and M.Calc due to their complexity for all methods, including full attention inference. 
+For L-Eval, we filter out all tasks with an average length shorter than 16384 tokens and evaluate on CodeU, NQ, CUAD, NarrativeQA, QMSum, and SPACE. 
+L-Eval has a relatively shorter context length compared to $\infty$Bench, allowing us to assess the effectiveness of \name~across different context lengths. 
+ 
+We also report the peak memory usage, i.e. the average peak memory measured for the first entry of each task in the corresponding dataset, for reference.
+
+\textbf{Baselines.} 
+As discussed in Section~\ref{sec:related_work}, existing algorithms for memory-efficient long-context inference can be categorized into offloading-based, quantization-based, token-dropping, and sparsity-based methods. 
+For each category, we select one representative method as the baseline. 
+We compare \name~against full attention inference (denoted as {FullAttn}), \textsc{InfLLM}~\citep{xiao2024infllm}, KV cache quantization~\citep{hf-quant}, \textsc{SirLLM}~\citep{yao2024sirllm}, and \textsc{MInference}~\citep{jiang2024minference}. 
+For quantization, we use Hugging Face Quanto~\citep{quanto} implementation, referring to the 2-bit quantization method as \textsc{HF-2bits}. 
+We omit \textsc{HF-4bits} and benchmark this combination in Section~\ref{sec:quant}. 
+We do not include attention pool-based token-dropping methods in this benchmark, as they are orthogonal to our approach; further discussion is provided in Section~\ref{sec:pool}. 
+ 
+
+
+\subsection{End-to-end Benchmark}
+\label{sec:benchmark}
+
+We compare our method with the baselines on both $\infty$Bench and L-Eval to address \underline{\textbf{Q1}}. 
+As shown in Table~\ref{tab:results}, \name~outperforms all baselines in terms of end-to-end performance.
+
+In the $\infty$Bench tests, while all methods experience performance degradation compared to FullAttn inference, \name, \textsc{InfLLM}, and \textsc{MInference} exhibits better performance than other methods, with only a modest drop in performance given the reduced memory usage. 
+Quantization, on the other hand, shows significant degradation and fails on all tasks. 
+\textsc{SirLLM} performs well on comprehensive tasks such as E.Sum and E.MC, but struggles with tasks that require precise memory, such as R.PassKey and R.Number. 
+\name~not only excels in context retrieval tasks but also achieves strong results in comprehensive tasks, earning the highest overall score among all competitors.
+
+In the L-Eval tests, all methods show some degree of performance degradation. 
+Nevertheless, \name~achieves the best overall result, obtaining the highest score on most tasks. 
+L-Eval is a shorter but more complex dataset, where \textsc{SirLLM} performs particularly well. 
+Quantization fails on most tasks, resulting in the lowest overall score. 
+Both \textsc{InfLLM} and MInference suffer significant performance drops compared to FullAttn inference. 
+\name~consistently surpasses all competitors.
+
+We also report memory consumption in Figure~\ref{fig:memory_statics}. 
+In the extreme long-context scenario ($\infty$Bench), \name~uses relatively less memory while achieving the best overall performance. 
+\textsc{InfLLM} performs well with limited GPU memory usage, but it requires a significant amount of CPU memory to store the full KV cache. 
+Quantization and \textsc{SirLLM} can achieve low memory consumption in some settings, but quantization introduces severe performance degradation. 
+\textsc{MInference} employs sparse attention patterns but does not compress the KV cache. 
+As a result, its minimum memory requirement equals the sum of the model weights and the full KV cache. 
+In the shorter context scenario (L-Eval), a similar phenomenon is observed. 
+For \texttt{Phi-3-mini-128K}, which has a larger KV cache, \textsc{InfLLM} and \textsc{MInference} exhibit higher memory consumption due to the need to store the full KV cache. 
+Other methods have similar memory footprints, with \name~achieving the best overall performance while using the least memory. 
+For \texttt{Llama-3.1-8B-instruct}, whose full KV cache is smaller, the memory bottleneck shifts to runtime computational memory for attention and other calculations. 
+All methods exhibit similar memory footprints, with \name~delivering the best overall performance. 
+Our experiments demonstrate that \name~is both effective and efficient, outperforming all baselines on multiple datasets and models while using less GPU memory.
+
+\begin{figure}[h]
+\begin{center}
+\includegraphics[width=0.49\linewidth]{memory_acc_infty_bench.pdf}
+\includegraphics[width=0.49\linewidth]{memory_acc_L-Eval.pdf}
+\end{center}
+\caption{Memory Statistics vs. Task Performance. The red lines correspond to the theoretical size of the model weights, while the blue lines represent the total theoretical size of the model weights and the full KV cache without any compression. The purple lines indicate the accuracies of FullAttn. ``Total Memory'' represents the total memory usage of both GPU and CPU memory.}
+\label{fig:memory_statics}
+\end{figure}
+
+
+\begin{table}[t]
+\small
+\caption{The experimental results of \name~compared with all the baselines on $\infty$Bench and L-Eval, where higher score represents better performance. ``Avg.'' represents the average score across all tasks. The highest score in each column is marked in \textbf{bold}, and the second highest is \underline{underlined}. \name~achieves the highest overall score among all competitors in every setting.}
+\label{tab:results}
+\begin{subtable}{1\textwidth}
+\centering
+\scalebox{0.8}{
+\begin{tabular}{l|ccccccccc|c}
+\toprule
+Method & R.PassKey & R.Number & E.Sum & E.QA & E.MC & Z.QA & E.Dia & C.Debug & M.Find & Avg.$\uparrow$\\
+\midrule
+\multicolumn{11}{c}{\texttt{Phi-3-mini-128K} on $\infty$Bench} \\ \midrule
+FullAttn & 98.64 & 97.12 & 17.92 & 11.16 & 55.46 & 14.83 & 8.00 & 23.10 & 17.43 & 38.18\\ \midrule
+{\textsc{InfLLM}}
+& \textbf{100.00} & \underline{97.12} & 14.35 & 4.97 & 38.86 & 11.04 & 3.50 & \underline{25.38} & 15.14 & \underline{34.48}\\ 
+\textsc{HF-2bits} & 0.00 & 0.00 & 13.80 & 1.44 & 1.75 & 0.20 & 0.50 & 0.00 & 0.57 & 2.03 \\
+\textsc{SirLLM} & 3.39 & 3.39 & \textbf{21.06} & 6.32 & \underline{44.98} & \textbf{11.99} & 5.00 & 22.34 & \underline{21.71} & 15.58\\
+\textsc{MInference} & \underline{99.32} & 95.93 & 14.44 & \textbf{8.11} & 40.61 & 10.60 & \underline{9.00} & 15.48 & 15.43 & 32.25\\
+\textbf{\name~} & \textbf{100.00} & \textbf{97.46} & \underline{16.82} & \underline{7.61} & \textbf{46.29} & \underline{11.31} & \textbf{10.00} & \textbf{27.92} & \textbf{29.71} & \textbf{34.73}\\ \midrule
+\multicolumn{11}{c}{\texttt{Llama-3.1-8B-instruct} on $\infty$Bench} \\
+\midrule
+
+FullAttn & 100.00 & 99.32 & 26.79 & 15.06 & 68.12 & 13.40 & 17.00 & 20.56 & 34.00 & 43.81\\ \midrule
+\textsc{InfLLM} & \textbf{100.00} & \textbf{100.00} & 24.24 & 14.21 & 51.97 & 10.76 & 11.00 & \underline{26.25} & \textbf{35.71} & 41.57\\ 
+\textsc{HF-2bits} & 36.78 & 6.95 & 8.77 & 4.05 & 27.95 & 3.09 & 5.50 & 13.20 & 22.00 & 14.25 \\
+\textsc{SirLLM} & 1.69 & 1.69 & \underline{25.60} & 8.95 & 55.46 & 10.38 & 9.50 & 23.10 & 3.71 & 15.56\\
+{\textsc{MInference}} & \textbf{100.00} & 98.47 & 20.64 & \underline{14.35} & \textbf{59.83} & \textbf{12.20} & \textbf{20.50} & 25.89 & \underline{35.43} & \underline{43.03}\\
+\textbf{\name~} & \textbf{100.00} & \underline{99.49} & \textbf{27.28} & \textbf{20.90} & \underline{58.82} & \underline{11.85} & \underline{13.00} & \textbf{27.16} & 32.86 & \textbf{43.48}\\
+\bottomrule
+\end{tabular}
+}
+\end{subtable}
+
+\begin{subtable}{1\textwidth}
+\centering
+\scalebox{0.8}{
+\begin{tabular}{l|cccccc|c}
+\multicolumn{8}{c}{}\\
+\toprule
+Method & CodeU & NQ & CUAD & NarrativeQA & QMSum & SPACE & Avg.$\uparrow$\\
+\midrule
+\multicolumn{8}{c}{\texttt{Phi-3-mini-128K} on L-Eval} \\
+\midrule
+
+FullAttn & 8.89 & 59.14 & 30.34 & 17.59 & 16.05 & 14.51 & 24.42\\ \midrule
+\textsc{InfLLM} & 5.56 & 34.32 & 14.53 & 14.80 & 13.31 & \underline{14.81} & 16.22\\ 
+\textsc{HF-2bits} & 0.00 & 1.69 & 6.40 & 2.04 & 2.73 & 3.34 & 2.70\\
+{\textsc{SirLLM}} & \textbf{8.89} & \underline{37.92} & 20.89 & 14.51 & 13.70 & 14.46 & \underline{18.40} \\
+\textsc{MInference} & \underline{7.78} & 25.21 & \textbf{26.64} & \underline{15.14} & \textbf{15.78} & \textbf{14.87} & 17.57\\
+\textbf{\name~} & \textbf{8.89} & \textbf{51.49} & \underline{22.23} & \textbf{16.42} & \textbf{14.86} & 14.06 & \textbf{21.33}\\
+\midrule
+\multicolumn{8}{c}{\texttt{Llama-3.1-8B-instruct} on L-Eval} \\
+
+\midrule
+FullAttn & 10.0 & 66.84 & 38.91 & 23.11& 18.76 & 16.86 & 29.08 \\ 
+
+\midrule
+\textsc{InfLLM} & 6.67 & 54.77 & 33.76 & 20.35 & 17.62 & 16.73 & 24.98 \\ 
+\textsc{HF-2bits} & 1.11 & 29.79 & 18.98 & 9.46 & 14.02 & 13.73 & 14.52\\ 
+{\textsc{SirLLM}} & 5.56 & \underline{58.00} & 35.41 & \underline{21.21} & 17.32 & 16.44 & \underline{25.66} \\
+\textsc{MInference} & \underline{7.78} & 31.80 & \underline{36.93} & 19.44 & \underline{18.14} & \underline{16.76} & 21.81\\
+\textbf{\name~} & \textbf{8.89} & \textbf{63.03} & \textbf{37.21} & \textbf{23.59} & \textbf{18.17} & \textbf{16.87} & \textbf{27.96}\\
+\bottomrule
+\end{tabular}
+}
+\end{subtable}
+
+\end{table}
+
+\subsection{Speed Test on Real Consumer-Grade Devices}
+\label{sec:speed_test}
+
+In this section, we examine the processing speed to demonstrate that \name~achieves its strong performance without compromising inference speed, addressing question \underline{\textbf{Q2}}. We evaluate the inference speed on the R.PassKey task from $\infty$Bench and compare \name~against all the baselines introduced in Section \ref{sec:setup}, using a single Nvidia 4090 GPU with 24GB of memory, which is typical for consumer-grade AI devices. 
+We report the inference speed as the total number of tokens in the input and output sequences divided by the processing time, along with the accuracy of the measured task. 
+Since the original settings of some algorithms might lead to Out Of Memory (OOM) errors, we remove some tokens from the middle of the input sequence in those cases, marking these settings with $^*$, and report the valid context length in such scenario. 
+For settings without $^*$, we maximize the chunk size for higher speed when the method utilizes the chunked prefill pattern.
+
+R.PassKey is a task where the model retrieves a 5-digit number from a large amount of irrelevant text, a task we believe to be relatively simple for humans. 
+Thus, we consider the task to have failed if the accuracy falls below 95\%. 
+As shown in Table~\ref{tab:speed-test}, aside from the settings that fail on this task, \name~achieves the highest inference speed among all methods that can correctly process R.PassKey. 
+Due to its MHA architecture, \texttt{Phi-3-mini-128K} has a larger KV cache, which leads to failures for both \textsc{HF-2bits} and \textsc{MInference}. 
+Storing the full KV cache on a single 4090 GPU is infeasible, as it requires 48GB of memory. 
+Although the quantized KV cache is reduced to 6GB, the converting processes between representations requires significant GPU memory for intermediate states, resulting in the failure of \textsc{HF-2bits}. 
+While \textsc{InfLLM} can run in memory-limited scenarios, its offloading process slows down inference, with I/O becoming the bottleneck in attention calculation. 
+\textsc{SirLLM} fails due to its inaccurate eviction policy, which cannot correctly identify the 5-digit number.
+In the GQA model (\texttt{Llama-3.1-8B-instruct}), which has a smaller KV cache, the quantized cache can fit within the GPU memory. 
+However, the quantization and dequantization processes become the bottleneck, leading to significantly slower speeds. 
+The performance of \textsc{InfLLM}, \textsc{SirLLM}, and \textsc{MInference} is similar to that seen with \texttt{Phi-3-mini-128K}. 
+Although \textsc{MInference} benefits from faster encoding speeds, it fails on this task because it cannot process the entire input sequence at once. 
+\name~strikes a balance between inference speed and performance, making it a far more suitable solution for long-context scenarios on consumer-grade devices.
+
+\begin{table}[ht]
+\small
+\caption{Executing R.PassKey on an Nvidia 4090. ``tok/s'' represents the inference speed, ``C.Len'' stands for the context length after truncation, and ``Acc.'' represents task accuracy. ``Success'' shows whether a setting has $\geq$95\% accuracy. The highest score among 128K context is marked in \textbf{bold}.}
+\label{tab:speed-test}
+\begin{center}
+\scalebox{0.76}{
+\begin{tabular}{cl|cccccc|cc}
+\toprule
+\multicolumn{2}{c|}{Method} & FullAttn & \textsc{InfLLM} & \textsc{HF-2bits} & \textsc{SirLLM} &  \textsc{MInference} &  \textbf{\name} & \textsc{HF-2bits}$^*$ & \textsc{MInference}$^*$ \\ \midrule
+
+\multirow{4}{*}{\makecell{Phi-3-\\mini-128K}} & tok/s$\uparrow$ & - & 2276.38 & - & 2352.20 & - & \textbf{5080.85} & 1098.51 & 4099.92\\
+
+& C.Len.$\uparrow$ & 128K & 128K & 128K & 128K & 128K & \textbf{128K} & 30K  & 14K\\
+& Acc.$\uparrow$ & OOM & 99.83 & OOM & 1.69 & OOM & \textbf{100.00} & 0.00 & 13.56\\
+& Success & \ding{55} & \ding{51} & \ding{55} & \ding{55} & \ding{55} & \ding{51} & \ding{55} & \ding{55}\\\midrule
+
+\multirow{3}{*}{\makecell{Llama-3.1-\\8B-instruct}} & tok/s$\uparrow$ & -&  2287.66 & 1365.51 & 1589.75& -  & \textbf{3209.10}  & 3680.06 & {5135.74} \\
+& C.Len.$\uparrow$ & 128K & 128K & 128K & 128K & 128K & \textbf{128K} & 30K & 25K\\
+& Acc.$\uparrow$ & OOM & 100.00 & 35.59 & 1.69 & OOM & \textbf{100.00} & 26.78 & 20.34\\
+& Success & \ding{55} & \ding{51} & \ding{55} & \ding{55} & \ding{55} & \ding{51} & \ding{55} & \ding{55}\\\bottomrule
+
+\end{tabular}
+}
+\end{center}
+\end{table}
+
+\subsection{Orthogonality to Other Methods}
+
+We evaluate the combination of \name~with quantization and token merging to address \underline{\textbf{Q3}}. 
+
+\label{sec:quant}
+\label{sec:pool}
+\begin{figure}[t]
+    \begin{center}
+    \begin{minipage}[t]{0.45\linewidth}  % 调整宽度
+        \centering  
+        \begingroup
+            \captionof{table}{Quantization with FullAttn and \name. ``M'' represents Method and ``$-\Delta$'' represents the gap of average L-Eval score.}
+            \scalebox{0.8}{
+            \begin{tabular}{l|cc|c}
+            \toprule
+            Setting & M & M-4bits & $-\Delta$ \\\midrule
+            M=FullAttn & 29.08 & 28.52 & 0.56 \\
+            M=\name & 27.96 & 27.11& 0.85 \\\bottomrule
+            \end{tabular}
+            \label{tab:quant_degradation}
+            }
+        \endgroup
+    \end{minipage}
+    \hspace{0.02\linewidth}  % 调整图表之间的间距
+    \begin{minipage}[t]{0.45\linewidth}  % 调整宽度
+        \centering  
+        \begingroup
+            \captionof{table}{The average L-Eval scores of \textsc{LoCoCo}, \name, and the combination of  \textsc{LoCoCo} and \name. }
+            \scalebox{0.8}{
+            \begin{tabular}{l|ccc}
+            \toprule
+            Method & \textsc{LoCoCo} & \name & \textbf{Combination} \\\midrule
+            L-Eval & 26.01 & 27.96 & \textbf{28.70} \\\bottomrule
+            \end{tabular}
+            \label{tab:lococo}
+            }
+        \endgroup
+    \end{minipage}
+    \end{center}
+\end{figure}
+
+
+\textbf{KV cache quantization.} According to~\citet{zhang2024q}, eviction-based methods like H$_2$O struggle with compatibility when combined with KV cache quantization. 
+Quantization introduces significant disturbance in the estimation of heavy-hitters, leading to severe performance degradation.
+However, \name~is not affected by such issues and can be combined with quantization while maintaining most of its performance. 
+Here, we compare the performance degradation caused by quantization on \name~with that of the full attention method using the same metrics. 
+We use Quanto as the quantization backend and report the average L-Eval score with \texttt{Llama-3.1-8B-instruct} as the model backbone. 
+Table~\ref{tab:quant_degradation} shows that the performance drop caused by quantization on \name~is only slightly higher than that observed with the full attention method, indicating that \name~is a quantization-friendly approach.
+
+\textbf{Token merging.} As described in Section \ref{sec:related_work_compression}, token dropping can also be implemented through an attention pool. 
+Attention pool-based methods~\citep{xiao2023efficient, cai2024lococo, mu2024learning, munkhdalai2024leave} merge adjacent tokens or cache units into an attention pool, maintaining a static cache size. 
+These methods are orthogonal to \name~, as the evicted tokens can be merged into a small cache pool and retained in GPU memory. 
+We conduct the following experiment to demonstrate that \name~can serve as an effective plug-in scoring function within such frameworks, enhancing performance without increasing memory budget.
+We select \textsc{LoCoCo}~\citep{cai2024lococo} as a representative of the latest attention pool-based methods. 
+\textsc{LoCoCo} maintains a cache set consisting of two parts: the heavy hitters and the convolved non-heavy hitters. 
+During each chunked prefill step, \textsc{LoCoCo} first identifies a set of heavy hitters according to H$_2$O~\citep{zhang2024h2o}, then applies 1-D convolution to the non-heavy hitters to compress them into a static size. 
+By replacing H$_2$O's heavy-hitter scoring function with \name, we retain the cache units with high CIS and convolve the others. 
+We compare this combination with standalone \textsc{LoCoCo} and \name~on L-Eval using the \texttt{Llama-3.1-8B-instruct} backbone and report the average score across all selected tasks. 
+As shown in Table~\ref{tab:lococo}, \name~achieves a higher score than \textsc{LoCoCo}, and the combined algorithm outperforms both standalone methods. 
+This suggests that \name~provides a more accurate scoring function compared to H$_2$O, and the two methods complement each other, demonstrating their orthogonality.
+
+
+
+
+
+
+
+\section{Conclusion}
+
+
+We propose \name, a lightweight training-based method that enables memory-efficient inference of long contexts on consumer-grade devices. 
+\name~introduces a few additional parameters (retaining heads) to predict the CIS of each cache unit during chunked prefill and performs cache eviction based on the predicted CIS. 
+We conduct extensive experiments across different models and multiple datasets to compare \name~with major efficient inference techniques, including offloading, quantization, eviction, and sparse attention. 
+Results show that \name~outperforms all baselines, using less GPU memory and without requiring offloading to CPU memory. 
+Furthermore, \name~can be combined with other efficient inference methods, such as KV cache quantization and attention pool-based token dropping. 
+\name~maintains high inference throughput on consumer-grade devices and demonstrates robustness to variations in the intermediate size of retaining heads and training data. 
+The complete framework of \name, including both training and inference, highlights its suitability for low-resource computing scenarios. 
+\name~can be applied to various application scenarios, such as end-side multi-modal model inference and context compression during disaggregated inference, which we plan to explore in future work. 
+We also aim to test \name~on additional model architectures, including multi-latent models and models of varying sizes. 
+Additionally, we are highly interested in integrating \name~into end-side deployment infra-structures to enhance inference efficiency, particularly for devices like smartphones and personal computers.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

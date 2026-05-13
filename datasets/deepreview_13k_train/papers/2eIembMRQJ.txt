@@ -1,0 +1,343 @@
+\title{Active Teacher Selection for Reinforcement Learning from Human Feedback}
+
+\begin{abstract}
+
+  Reinforcement learning from human feedback (RLHF) enables machine learning systems to learn objectives from human feedback. A core limitation of these systems is their assumption that all feedback comes from a single human teacher, despite querying a range of distinct teachers. We propose the \textit{Hidden Utility Bandit} (HUB) framework to model differences in teacher rationality, expertise, and costliness, formalizing the problem of learning from multiple teachers. We develop a variety of solution algorithms and apply them to two real-world domains: paper recommendation systems and COVID-19 vaccine testing. We find that the \textit{Active Teacher Selection} (ATS) algorithm outperforms baseline algorithms by actively selecting when and which teacher to query. The HUB framework and ATS algorithm demonstrate the importance of leveraging differences between teachers to learn accurate reward models, facilitating future research on active teacher selection for robust reward modeling. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+    Specifying objective functions for machine learning systems is challenging, and misspecified objectives can be hacked~\cite{Pan2022-lw, Skalse2022-rg} or incentivise degenerate behavior~\cite{Zhuang2020-jx, Thomas2020-cq, Krakovna2020-vx}. Techniques such as \textit{reinforcement learning from human feedback} (RLHF) enable ML systems to instead \textit{learn} appropriate objectives from human feedback~\cite{Christiano2017-et, Lee2021-mj, Stiennon2020-wf}. These techniques are widely used to finetune large language models~\cite{gpt4, claude, llama, bard} and to train reinforcement learning agents to perform complex maneuvers in continuous control environments~\cite{Christiano2017-et, Lee2021-mj}. However, while RLHF is relied upon to ensure that these systems are safe, helpful, and harmless~\cite{bai2022training}, it still faces many limitations and unsolved challenges~\cite{casper2023open}.
+
+    In particular, RLHF systems typically rely on the assumption that all feedback comes from a single human teacher, despite gathering feedback from a range of teachers with varying levels of rationality and expertise. For example, \citet{Stiennon2020-wf}, \citet{bai2022training} and \citet{Ouyang2022-qs} assume that all feedback comes from a single teacher, but find that annotators and researchers actually disagree 23\% to 37\% of the time. Reward learning has been shown to be highly sensitive to incorrect assumptions about the process that generates feedback~\cite{hong2022sensitivity, Freedman2021-df, Skalse2022-np, Milli2020-fz}, so this single-teacher assumption exposes these systems to dangerous failures~\cite{Daniels-Koch2022-me}. Ideally, RLHF systems should consider the differences between each teacher to improve their safety and reliability.
+
+    To leverage multiple teachers in RLHF, we introduce a novel problem called a \textit{Hidden Utility Bandit (HUB)}, illustrated in Figure~\ref{fig:front}. In a HUB, the learning agent must choose between pulling an arm to earn utility (as in a standard multi-armed bandit) and querying a teacher for feedback to learn the utility function (as in RLHF). Optimal HUB solutions must therefore actively select \textit{which} teachers to query \textit{when} so as to maximize the expected discounted sum of utilities.
+
+     In this paper, we begin by formalizing the HUB framework and proposing a naive baseline solution (Section~\ref{sec:HUB}). We then develop an \textit{Active Teacher Selection} (ATS) method that selects \textit{which} teachers to query \textit{when} to maximize cumulative discounted utility (Section~\ref{sec:ats}). Since there are no existing solutions to the novel HUB problem, we introduce multiple families of baseline methods and evaluate these against ATS variations on a realistic paper recommendation task (Section~\ref{sec:recommender}). ATS outperforms methods with fixed exploration windows, demonstrating the usefulness of selecting \textit{when} to query teachers, and ATS with specific teacher selection outperforms general teacher selection, underscoring the usefulness of selecting \textit{which} teacher to query. As a proof-of-concept, we also demonstrate how this framework can be applied to the real-world problem of evaluating COVID-19 vaccines with noisy tests (Section~\ref{sec:vax}).} that demonstrate the importance of leveraging differences between teachers to learn accurate reward models. These will facilitate and benchmark improved methods, ultimately leading to scalable reward learning algorithms that learn accurate, robust and value-aligned models.
+     
+    \begin{figure}
+         \centering
+         \includegraphics[width=0.95\linewidth]{figs/front3.png}
+         \caption{A simple \emph{Hidden Utility Bandit (HUB)} with two arms and two teachers. The agent pulls the first arm, observes an apple, and receives the apple's utility of $8$ without observing it. The agent then pulls the second arm, observes a banana, and receives the banana's utility of $2$ without observing it. Because these utilities are hidden, the agent foregoes the opportunity for utility on the third timestep to ask the expert teacher which fruit is better. The expert replies that apples are better than bananas, so the agent pulls the first arm to maximize apples for all remaining timesteps.}
+         \label{fig:front}
+     \end{figure}
+
+
+
+\section{Hidden Utility Bandits}
+
+
+    We design the \textit{Hidden Utility Bandit} (HUB) framework to formalize the problem of reward learning from multiple teachers. Formally, a HUB is a stochastic multi-armed bandit problem where the utilities received from pulling arms are hidden from the agent solving the problem. To learn these utilities, the agent asks for feedback from human teachers who directly observe them but only provide noisy feedback. Following an existing standard in work on RLHF~\cite{Lee2021-mj}, a HUB models each teacher as Boltzmann-rational with its noisiness modulated by a \emph{rationality parameter} $\beta\in[0,\infty)$. In particular, the probability that a teacher with rationality parameter $\beta$ prefers item $i$ to $j$ is below:
+        \begin{equation}\label{eq:bolt}
+            \Pr(i \succ j; \beta,\mathcal{U}) = \frac{\exp(\beta \mathcal{U}(i))}{\exp(\beta \mathcal{U}(i)) + \exp(\beta \mathcal{U}(j))},
+        \end{equation}
+    where $\mathcal{U} : \mathcal{I}\rightarrow\mathbb{R}$ gives the true utility of all items in set $\mathcal{I}$. 
+
+    At each timestep of the HUB problem, the agent chooses between pulling a bandit arm, receiving a hidden utility sampled from that arm's distribution, or querying a teacher, receiving feedback modulated by that teacher's rationality parameter but incurring that teacher's query cost. Its objective is to maximize the expected discounted sum of utilities, so it must balance querying costly teachers to learn about the utility function with pulling arms to earn utility. We turn to a formal description of the HUB problem below.
+    
+    \begin{definition}
+        A \textbf{\textit{hidden-utility bandit} (HUB)} is a tuple $\langle \mathcal{I},\mathcal{U},\mathcal{C},\beta,F,Q,\gamma \rangle$:
+        \begin{itemize}
+            \item $\mathcal{I}$ is a set of $N$ \textit{items}, each associated with a hidden utility.
+            \item $\mathcal{U} : \mathcal{I}\rightarrow [u_\mword{min},u_\mword{max}]$ is a \textit{utility function} over $\mathcal{I}$, where $\mathbb{U}$ is the utility function space.
+             \item $\mathcal{C} = \{c^1,c^2,\ldots,c^K\}$ is a set of $K$ \textit{arm choices}, each associated with an \textit{arm distribution} $\mathcal{D}^k: \mathcal{I} \rightarrow [0, 1]$ giving the probability of returning each item in $\mathcal{I}$, where $\mathbb{D} = \mathbb{D}^1 \times \mathbb{D}^2 \times \dots \times \mathbb{D}^K$ is the joint arm distribution space over all arm choices $\mathcal{C}$.
+            \item $\beta=\{\beta^1,\beta^2,\ldots,\beta^M\}$ is a set of $M$ \textit{teacher rationality parameters}.
+            \item $F=\{f^1,f^2,\ldots,f^M\}$ is a set of $M$ \textit{teacher query costs}.
+            \item $Q : \mathcal{I}\times\mathcal{I}\rightarrow[0,1]$ is a \textit{query profile} that gives probabilities of picking queries in ${\mathcal{I} \choose 2}$.
+            \item $\gamma$ is a discount factor.
+        \end{itemize}
+    \end{definition}
+    
+    \noindent Here, the agent can observe $\mathcal{I}$, $\mathcal{C}$, $\beta$, $F$, $Q$, and $\gamma$ but cannot observe the utility function $\mathcal{U}$ or the arm distributions $\mathcal{D}$. At each timestep $t$, the agent can select an arm choice $c_t \in \mathcal{C}$ or a teacher rationality parameter $\beta_t \in \beta$. If the agent pulls an arm choice $c_t \in \mathcal{C}$, it observes an item $i_t$ sampled from the arm distribution $\mathcal{D}^{c_t}$ and receives but does \textit{not} observe the utility $u_t = \mathcal{U}(i_t)$. Conversely, if the agent queries a teacher with rationality parameter $\beta_t \in \beta$, it receives and observes an item pair $(i, j)$ sampled from the query profile $Q$, a preference $p_t$ sampled from $\mword{Bernoulli}(P)$ given the probability $P = \Pr(i \succ j; \beta_t, \mathcal{U})$ in Equation~\ref{eq:bolt}, and the teacher query cost $u_t = f^{\beta_t}$.
+
+    Since the agent's objective is to maximize the expected discounted sum of utilities $\mathbb{E}[\Sigma_{t=0}^\infty\gamma^tu_t]$, it must balance querying teachers to learn about the utility function with selecting bandit arms to earn utility. Standard RLHF systems alternate between fitting a reward model to teacher feedback and learning a policy using the reward model on a predefined schedule. However, the HUB framework allows the agent to interweave these processes to optimize performance.
+
+    \subsection{Naive HUB Inference}
+
+        We propose a naive HUB inference baseline in Algorithm~\ref{alg:naive}. This allows the agent to infer the hidden information: the joint arm distribution $\mathcal{D}^\mathcal{C} = (\mathcal{D}^{1},\mathcal{D}^{2},\ldots,\mathcal{D}^{K})$ (common to stochastic multi-armed bandit problems) and utility function $\mathcal{U}$ (unique to the HUB). 
+        
+        In Algorithm~\ref{alg:naive}, the agent randomly pulls arms and queries a preselected teacher for a fixed number of timesteps and then uses sample means to approximate the true joint arm distribution and true teacher preference probabilities. Using these approximate teacher preference probabilities, the \textit{difference} in utility values for items $i$ and $j$, $\Delta_{ij} = \mathcal{U}(i) - \mathcal{U}(j)$, can be calculated in the following way:
+        \begin{equation}\label{eq:pref-diff}
+            \Pr(i\succ j;\beta^m,\mathcal{U}) = \frac{1}{1+\mathrm{exp}(-\beta^m\Delta_{ij})} \implies \Delta_{ij} = -\frac{1}{\beta^m} \ln \left[ \frac{1}{\Pr(i\succ j;\beta^m,\mathcal{U})} - 1 \right].
+        \end{equation}
+        Thereafter, the utility values of individual items $i$ and $j$ can be calculated from these differences $\Delta_{ij}$ using the maximum and minimum values of $\mathcal{U}$. After deriving these estimates, the agent simply selects the arm with the highest expected utility for the remainder of the episode.
+
+        \begin{algorithm}[t]
+            \renewcommand{\algorithmicensure}{\textbf{Initialize:}}
+
+            \caption{$\textsc{NaiveHUBInference}(\cdot)$}\label{alg:naive}
+            \begin{algorithmic}[1]
+                \Require HUB $\langle \mathcal{I},\mathcal{U},\mathcal{C},\beta,F,Q,\gamma\rangle$, $u_\mword{min}$, $u_\mword{max}$, $T$ samples, $\beta^m$ of selected teacher
+                \Ensure $\mword{frequency}[c]$, $\mword{frequency}[c][i]$, $\mword{frequency}[b][q]$, $\mword{preferences}[b][q]$
+                \For {$t=1,\ldots,T$} 
+                    \If{\texttt{sampleUniformly}(\{\textsc{True}, \textsc{False}\})}
+                        \State sample $c\sim\mathcal{C}$ \Comment{Sample arm uniformly at random}
+                        \State sample $i\sim \mathcal{D}^c$ \Comment{Sample item from (unobserved) arm distribution}
+                        \State $\mword{frequency}[c] \leftarrow \mword{frequency}[c]+1$
+                        \State $\mword{frequency}[c][i]\leftarrow \mword{frequency}[c][i]+1$
+                    \Else
+                        \State sample $b\sim\beta$ \Comment{Sample teacher uniformly at random}
+                        \State sample $q = (i, j) \sim Q$ \Comment{Sample query from query profile}
+                        \State sample $p\sim \mword{Bernoulli}(\Pr(i \succ j;b,\mathcal{U}))$ \Comment{Sample preference given Equation~\ref{eq:bolt}}
+                        \State $\mword{frequency}[b][q] \leftarrow \mword{frequency}[b][q]+1$
+                        \State $\mword{preferences}[b][q] \leftarrow \mword{preferences}[b][q]+p$
+                    \EndIf
+                \EndFor
+                \State $\hat{D}^c(i) \leftarrow \frac{\mword{frequency}[c][i]}{\mword{frequency}[c]}\quad\forall c\in\mathcal{C},\,i\in\mathcal{I}$   \Comment{Estimate arm distributions}
+                \State $\hat{P}(b,q) \leftarrow \frac{\mword{preferences}[b][q]}{\mword{frequency}[b][q]}\quad\forall b\in\beta,\,q\in Q$ \Comment{Estimate preference probabilities}
+                \State $\Delta_{ij} = -\frac{1}{\beta^m} \ln \left[ \frac{1}{\hat{P}(\beta^m,\, q=(i, j))} - 1 \right] \quad\forall i,j\in\mathcal{I}$ \Comment{Calculate using Equation~\ref{eq:pref-diff}}
+                \State $(x, y) \leftarrow \mathrm{argmax}_{x, y} \left[ \Delta_{xy} \right]$ \Comment{Find indices of maximum element}
+                \State $\hat{\mathcal{U}}(y) \leftarrow u_\mword{min},\quad\hat{\mathcal{U}}(i) \leftarrow \left[\frac{u_\mword{max}}{u_\mword{max}-u_\mword{min}}\right] \Delta_{iy} + u_\mword{min}\quad\forall i\in\mathcal{I}\setminus\{y\}$ \Comment{Estimate utilities}
+            \end{algorithmic}
+        \end{algorithm}
+
+        Despite the simplicity of Algorithm~\ref{alg:naive}, it is possible to prove that it converges to the true $\mathcal{U}^*$ and $\mathcal{D}^{\mathcal{C}*}$ in the limit of infinite queries
+ 
+        \begin{theorem}\label{the:convergence}
+            If the predicted utility function $\hat{\mathcal{U}}$ and the predicted arm distribution $\hat{\mathcal{D}^{\mathcal{C}}}$ are estimated by executing Algorithm~\ref{alg:naive} with $T$ samples, then $\hat{\mathcal{U}}\rightarrow\mathcal{U}^*$ and $\hat{\mathcal{D}^{\mathcal{C}}}\rightarrow\mathcal{D}^{\mathcal{C}*}$ as $T\rightarrow\infty$.
+        \end{theorem}
+
+        However, exploring randomly for a fixed number of timesteps and querying a fixed teacher may be suboptimal. By maintaining and updating an internal belief over the hidden information, the agent can query teachers only when teacher feedback is necessary to update its belief. 
+
+
+
+\section{Active Teacher Selection}
+
+
+    The \textit{Active Teacher Selection (ATS)} algorithm solves the HUB problem efficiently by maintaining a belief over the utility function and arm distributions, and choosing when to query teachers. This allows it to only query teachers when required for decision-relevant belief updates. ATS can also actively select \textit{which} teacher to query. When teachers are ``noisy'' ($\beta<\infty$), the preference probability $\Pr(i \succ j; \beta,\mathcal{U})$ correlates with the difference in utility between $i$ and $j$, so it will sometimes be more informative for ATS to select teachers with \textit{lower} $\beta$ values~\cite{Michaud2020-ba, Barnett2023-um}. Importantly, this removes the need to set the problem-specific hyperparameters in Algorithm~\ref{alg:naive} for exploration ($T$) and teacher selection ($\beta^m$).
+    
+    \subsection{ATS Algorithm} \label{sec:POMDP}
+
+        The ATS algorithm has two general steps: the HUB is first converted to a simplified partially observable Markov decision process (POMDP)~\cite{Littman1995-cp} and then solved using a Monte Carlo POMDP solver with custom rollout policies. 
+
+        \paragraph{Constructing the HUB-POMDP}
+
+        The HUB-POMDP state contains the HUB utility function and arm distributions. Since these are fixed for a given HUB, the state does not change over time, making the HUB-POMDP simpler than a traditional POMDP. The HUB-POMDP reward function gives the \textit{expected} utility of each arm according to this state.
+        
+            \begin{definition}
+                A \textbf{hidden utility bandit POMDP (HUB-POMDP)} is a tuple $\langle \mathcal{S},\mathcal{A},\mathcal{T},\mathcal{R},\Omega,\mathcal{O}\rangle$:
+                \begin{itemize}
+                    \item $\mathcal{S} = \mathbb{U}\times\mathbb{D}$ is the state space: the state $s \in \mathcal{S}$ is a tuple $\langle\mathcal{U},\mathcal{D}^\mathcal{C}\rangle$ that is fixed.
+                    \item $\mathcal{A} = \mathcal{C}\cup\beta$ is the action space: the arm choices $\mathcal{C}$ and teachers $\beta$.
+                    \item $\mathcal{T}:\mathcal{S}\times\mathcal{A}\rightarrow\mathcal{S}$ is the stationary transition function: $\mathcal{T}(s,a)=s\;\forall_{s\in\mathcal{S}}\;\forall_{a\in\mathcal{A}}$.
+                    \item $\mathcal{R}:\mathcal{S}\times\mathcal{A}\rightarrow\mathbb{R}$ is the reward function:
+                        \[
+                            \mathcal{R}(s,a) = 
+                            \begin{cases}
+                            \Sigma_{i\in\mathcal{I}}\mathcal{U}(i)\mathcal{D}^a(i) & \text{if $a\in\mathcal{C}$} \\
+                            f^a & \text{if $a\in\beta$} \\
+                            \end{cases}
+                        \]
+            
+                    \item $\Omega:\mathcal{I}\cup\mathbb{P}$ is the observation space: the items $\mathcal{I}$ and query-preferences $\mathbb{P}=\mathcal{I}\times\mathcal{I}\times\{0,1\}$.
+                    \item $\mathcal{O}:\mathcal{A}\times\Omega\rightarrow[0,1]$ is the observation function:
+                        \[
+                            \mathcal{O}(a, \omega) =
+                            \begin{cases}
+                                \mathcal{D}^a(i) & \text{if $a\in\mathcal{C}$}  \\ Q(i,j)\Pr(i \succ j;\beta^m=a,\mathcal{U}) & \text{if $a\in\beta$}
+                            \end{cases}
+                        \]
+                \end{itemize}
+            \end{definition}
+
+            Teacher selection can be \textit{general} or \textit{specific}. Under specific selection, the agent chooses which teacher to query. The HUB-POMDP's action space contains all $M$ teachers, $\mathcal{A}=\mathcal{C}\cup\beta$, as shown in the HUB-POMDP above. Under general selection, the agent chooses \textit{when} to query a teacher, but not \textit{which} teacher to query. The HUB-POMDP's action space is modified to contain a single general teacher selection action, $\mathcal{A}=\mathcal{C}\cup\{\beta^g\}$. These alternatives offer a tradeoff: general selection reduces the state space size, and thus the computational complexity, while specific selection provides the agent with additional control over its feedback. Our experimental results (reported in Section~\ref{sec:recommender}) indicate that specific greatly outperforms general teacher selection, so we will use ATS with specific teacher selection unless otherwise specified.
+
+        \paragraph{Solving the POMDP}
+
+            While exact POMDP solutions are typically intractable, approximate POMDP algorithms often perform well. \textit{Partially observable Monte Carlo planning (POMCP)} algorithms produce time-efficient online solvers that form a belief tree of fixed depth and use rollouts to estimate leaf node values~\cite{Silver2010-fq}. \textit{POMCP with observation widening (POMCPOW)} uses a weighted particle filter to efficiently produce approximate solutions for problems with large state spaces~\cite{Sunberg2017-wq}. ATS with the custom \textit{best arm} rollout policy performs best, so we use that rollout policy for our experiments.
+
+    \subsection{Teacher Noise Inference in ATS} \label{sec:beta}
+
+        RLHF systems typically assume that the teacher rationality parameters $\beta$ are known. However, if $\beta$ is unknown, we show in Theorem~\ref{the:beta} that it can be estimated from preference data prior to running ATS. Specifically, given $\Pr(i\succ j;\beta_m,\mathcal{U})$, it is possible to analytically calculate $\beta_m \in \beta$ to within a scaling factor $a$ based on the difference $\Delta_{ij} = \mathcal{U}(i) - \mathcal{U}(j)$. The full procedure involves gathering preference data using an exploration policy or real-world data sources, then estimating $\hat{\beta}_m$, calculating $\beta_m=a\cdot\hat{\beta}_m$ if $\Delta_{ij}$ is known, and finally running ATS using the result.\footnote{Note that it is also possible to directly add $\beta$ to the state space of the HUB-POMDP and then solve it, but this increases the size of the state space and makes the problem less tractable.
+        
+        \begin{theorem}\label{the:beta}
+            Given two items $i, j \in \mathcal{I}$ where $\mathcal{U}(i)<\mathcal{U}(j)$, the preference probability $P = \Pr(i\succ j;\beta_m,\mathcal{U})$ from Equation~\ref{eq:bolt}, and the scaling factor $a = -\Delta_{ij}^{-1}$, we can calculate $\beta_m$ as follows:
+            \begin{equation}\label{eq:infer_beta}
+                \beta_m = a \cdot \mathrm{ln} \Big( \frac{1}{P} -1 \Big).
+            \end{equation}
+        \end{theorem}
+
+        The scaling factor $a$ is determined by the item pair $(i, j)$, so if the same item pair is used to evaluate each teacher, all rationality estimates $\hat{\beta}_m$ will be on the same scale. As we show in our experiments, this scaling factor can be computed directly if $\mathcal{U}$ is known. In addition, we evaluate this procedure in simulation by setting $\beta = \{0.01, 1.0\}$, running a random policy for $1000$ timesteps, estimating $\{\hat{\beta}_1,\hat{\beta}_2\}$, and scaling the estimate so that the greatest value is equal to $1.0$. After $100$ simulations, we observe a mean squared error of only $0.061$, indicating that this procedure is accurate.
+
+    \begin{figure}[t]
+        \centering
+        \includegraphics[height=65pt]{figs/recommendation_HUB.png}
+        \caption{Paper recommendation as a HUB problem. Paper categories (Application, Benchmark, Theory) are items ($\mathcal{I})$, professors are teachers with rationality ($\beta$) and cost ($F$) parameters, conferences are arms with distributions ($\mathcal{D})$, and relevance scores are utilities ($\mathcal{U}$). The goal is to recommend the most relevant conferences to read papers from.}
+        \label{fig:conf}
+    \end{figure}
+    
+
+
+\section{Experiments}
+
+
+    We apply the HUB framework to two real-world domains: \textit{paper recommendations} and \textit{COVID-19 vaccine testing}. The more complex vaccine domain provides a proof-of-concept, using the HUB framing to address an urgent problem and demonstrating how $\beta$ values can be estimated from real-world data. We find that the HUB framework captures both problems well, that the ATS algorithm outperforms all baselines in comprehensive testing in the recommendation domain, and that ATS is the best-performing algorithm that also identifies the best vaccine in the vaccine domain proof-of-concept.
+
+    \paragraph{Algorithms} We fix ATS to use \textit{specific} teacher selection and the \textit{best arm} rollout policy unless otherwise specified. To our knowledge, the HUB problem is novel and has no solutions in prior literature, so we construct multiple families of baseline methods (\emph{naive} and \emph{random}) for comparison. \textit{Naive} algorithms choose randomly amongst pulling arms and querying the selected teacher for $T$ timesteps, use these observations to estimate the arm distributions and utility function (using Algorithm~\ref{alg:naive}), and then pull the arm with the highest estimated expected utility at each subsequent timestep. Naive algorithms require problem-specific hyperparameters $\beta^m$ and $T$, so for these experiments we select the intermediate of 3 teachers ($\beta^m=\beta^2$) and test a range of exploration horizons ($T\in[50,100,200]$). \textit{Random} algorithms select actions uniformly at random from a given set. We evaluate a random algorithm that selects actions from the entire action space, as well as one that selects only arms.
+
+    \subsection{Conference Recommendation Domain}\label{sec:recommender}
+    
+        In the recommendation domain, the system recommends AI conferences from which to read relevant papers. There are three paper categories (Application, Benchmark, Theory) with specified relevance scores, and three conferences (ICLR, ICML, AAAI) with different paper category compositions\footnote{Example relevance scores and paper category compositions were selected arbitrarily.}. The recommender cannot directly observe the relevance scores, so it must learn them by asking professors, whose judgements vary from completely random ($\beta^1=0$) to highly accurate ($\beta^3=50$). In these experiments, query costs are always $0$.) Each day, the system recommends one conference, a paper is sampled from that conference's distribution, and the system earns a hidden utility score representing that paper's category's relevance. Alternatively, the system queries a professor who provides a preference over a pair of paper categories. Applying the HUB framework, paper categories are the item set $\mathcal{I}=\{A, B, T\}$, relevance scores are the hidden utility function $\mathcal{U}$, conferences are arm choices $\mathcal{C}=\{c^1=\mathrm{ICLR}, \,c^2=\mathrm{ICML}, \,c^3=\mathrm{AAAI}\}$, and professors are teachers with rationality $\beta = \{\beta^1 = 0,\beta^2 = 0.01,\beta^3 = 50\}$. 
+        
+        Figure~\ref{fig:conf} shows an example paper recommendation problem in which it will sometimes be more informative to query the noisy Professor 2 over the more rational Professor 3. This is because the frequency with which a noisy teacher prefers a lower-reward item over a higher-reward one gives information about the difference between the rewards, and in this example the recommender must learn \textit{how much} more relevant Application papers are than Benchmark papers. Without this information, the system cannot distinguish between cases where $\mathcal{U}(A)=8$ (indicating that the expected relevance of ICLR is greater than ICML) and where $\mathcal{U}(A)=6$ (indicating the reverse).
+
+        \paragraph{Experiments}
+        
+            We evaluate all algorithms for 25 runs of 1000 timesteps on 20 different paper recommendation tasks. Each task is a HUB with $\mathcal{I}$, $\mathcal{C}$, and $\beta$ as described above and a unique tuple $\langle\mathcal{U},\mathcal{D}^\mathcal{C}\rangle$. $\mathbb{U}$ and $\mathbb{D}$ are discretized, and each task's  $\langle\mathcal{U},\mathcal{D}^\mathcal{C}\rangle$ is chosen such that $c^1$ has the highest expected relevance ($\mathbb{E}[\mathcal{U}(i\sim c^1)]>\mathbb{E}[\mathcal{U}(i\sim c^2)]\geq\mathbb{E}[\mathcal{U}(i\sim c^3)]$) and all paper distributions are different and non-deterministic ($\mathcal{D}^{j}\neq\mathcal{D}^{k}\,\,\forall_{j,k\in\mathcal{C}}$ and $\mathcal{D}^{c}(i)\neq1.0\,\,\forall_{i\in\mathcal{I},c\in\mathcal{C}}$).
+    
+        \paragraph{Results} \label{sec:results}
+
+            While all non-random algorithms successfully identify the most relevant conference in expectation (Figure~\ref{fig:arm}), ATS with specific teacher selection best balances querying teachers with recommending papers, achieving the highest average discounted cumulative reward (Figure~\ref{fig:reward}), and most accurately learning relevance scores (Figure~\ref{fig:est}).
+
+            \begin{figure}
+                \centering
+                \begin{subfigure}[b]{0.31\textwidth}
+                    \centering
+                    \includegraphics[width=1\linewidth]{figs/perf_all.png}
+                    \caption{Discounted cumulative reward}
+                    \label{fig:reward}
+                \end{subfigure}\hfill
+                \begin{subfigure}[b]{0.31\textwidth}
+                    \centering
+                    \includegraphics[width=1\linewidth]{figs/freq_best.png}
+                    \caption{Frequency of pulling best arm}
+                    \label{fig:arm}
+                \end{subfigure}\hfill
+                \begin{subfigure}[b]{0.31\textwidth}
+                    \centering
+                    \includegraphics[width=1\linewidth]{figs/freq_teach.png}
+                    \caption{Frequency of querying teacher}
+                    \label{fig:teach}
+                \end{subfigure}
+                \caption{Comparison of ATS, naive and random algorithms. ATS best maximizes discounted reward (a) and identifies the highest-reward arm more often than most baselines and comparably with Naive[100] and Naive[200], which explore more and earn less reward (b). ATS initially queries teachers less often than naive baselines, but continues querying teachers throughout the episode (c). All data is averaged across 25 runs on 20 HUB problems and smoothed over 10 steps.}
+            \end{figure}
+
+            \begin{figure}[t]
+                \centering
+                \begin{subfigure}[b]{0.495\textwidth}
+                    \centering
+                    \includegraphics[width=1\linewidth]{figs/acc_u.png}
+                    \caption{$L2$ loss of $\mathcal{U}$ estimate}
+                \end{subfigure}\hfill
+                \begin{subfigure}[b]{0.495\textwidth}
+                    \centering
+                    \includegraphics[width=1\linewidth]{figs/acc_arm.png}
+                    \caption{$L2$ loss of arm reward estimate}
+                \end{subfigure}
+                \caption{Accuracy of reward learning using ATS (with specific and general teacher selection) and naive algorithms (with exploration parameters of 50, 100, and 200). ATS with specific teacher selection learns both the underlying utility function (a) and the expected rewards of each arm (b) much more accurately than ATS with general teacher selection and naive algorithms. Accuracy is measured as L2 loss, aggregated across 25 runs on 20 HUB problems. The middle line is the median, the boxes are the IQR, the whiskers are $1.5$ times the IQR, and the diamonds are outliers.}
+                \label{fig:est}
+            \end{figure}
+
+            Figure~\ref{fig:arm} shows how often each algorithm learns to pull the best HUB arm and therefore recommend the most relevant conference over the course of training. All HUB solution methods (ATS, Naive[50], Naive[100], Naive[200]) successfully identify the most relevant conference, recommending it about three times as often as they would if they were behaving randomly (``Random" baseline, light green line) and about twice as often as if they were blindly recommending conferences (``Random Arms" baseline, dark green line). This indicates that the HUB formalism can be used to accurately represent the paper recommendation problem. 
+
+            While all solution methods identify the best arm, ATS does so most efficiently, querying teachers sparingly even at the start of the task (Figure~\ref{fig:teach}) and best optimizing the HUB objective of expected discounted cumulative reward (Figure~\ref{fig:reward}). Moreover, ATS forms the most accurate estimates of the utility function and expected conference relevance scores (Figure~\ref{fig:est}) after 1000 timesteps, while continuing to explore and potentially improve this estimate by occasionally querying teachers and recommending other conferences (Figure~\ref{fig:act-specific}). In contrast, Naive algorithms stop learning after their hand-specified exploration horizon (Figure~\ref{fig:act-naive}), and Random algorithms never learn at all (Figure~\ref{fig:act-random}). This demonstrates the benefits of actively selecting when to query teachers, as in ATS, rather than following a predefined schedule, as in standard RLHF.
+
+            \begin{figure}
+                \centering
+                \begin{subfigure}{0.33\textwidth}
+                    \centering
+                    \includegraphics[width=1\linewidth]{figs/act_ats.png}
+                    \caption{ATS}
+                    \label{fig:act-specific}
+                \end{subfigure}\hfill
+                \begin{subfigure}{0.33\textwidth}
+                    \centering
+                    \includegraphics[width=1\linewidth]{figs/act_n50.png}
+                    \caption{Naive[50]}
+                    \label{fig:act-naive}
+                \end{subfigure}\hfill
+                \begin{subfigure}{0.33\textwidth}
+                    \centering
+                    \includegraphics[width=1\linewidth]{figs/act_rand.png}
+                    \caption{Random}
+                    \label{fig:act-random}
+                \end{subfigure}\hfill
+                \caption{Mean action frequencies for various algorithms. $c$ actions are arm pulls and $\beta$ actions are teacher queries. Data is averaged across 25 runs of 20 HUB problems and smoothed over 10 steps.}
+                \label{fig:action}
+            \end{figure}
+
+            Figure~\ref{fig:comparison_spec_gen} compares ATS with specific and general teacher selection. Standard RLHF systems do not allow the agent to select which teacher to query and are most akin to general selection. However, we show that the additional control afforded by specific selection allows ATS to make more informative queries. Figure~\ref{fig:specific/general} shows that ATS with specific teacher selection earns higher expected reward than ATS with general teacher selection, and Figure~\ref{fig:act-general} shows that ATS with general teacher selection queries all arms roughly equally, failing to identify the one with highest expected reward.
+        
+            \begin{figure}[t]
+                \centering
+                \begin{subfigure}[b]{0.33\textwidth}
+                    \centering
+                    \includegraphics[width=1\linewidth]{figs/perf_spec_gen.png}
+                    \caption{Specific teacher selection outperforms general teacher selection.}
+                    \label{fig:specific/general}
+                \end{subfigure}%
+                \hspace{0.1\linewidth}
+                \begin{subfigure}{0.33\textwidth}
+                    \centering
+                    \includegraphics[width=1\linewidth]{figs/act_gen.png}
+                    \caption{ATS with general teacher selection doesn't identify the best arm.}
+                    \label{fig:act-general}
+                \end{subfigure}
+                \caption{Performance of ATS with specific and general teacher selection. All data is averaged across 25 runs on 20 HUB problems, smoothed over 10 steps, and discounted with $\gamma=0.99$.}
+                \label{fig:comparison_spec_gen}
+            \end{figure}
+
+    \subsection{COVID-19 Vaccine Testing Domain}\label{sec:vax}
+    
+        \begin{figure}
+            \centering
+            \includegraphics[height=65pt]{figs/covid_HUB.png}
+            \caption{COVID-19 vaccine testing as a HUB problem. Symptoms (None, Cough, Fever) are items ($\mathcal{I}$), tests are teachers with rationality ($\beta$) and cost ($F$) parameters, and vaccines are arms ($\mathcal{C})$ with the specified distributions over patient symptoms ($\mathcal{D}$).}
+            \label{fig:covid}
+        \end{figure}
+        
+        Bandit problems are commonly used to model medical treatment investigation, so as a proof-of-concept we apply the HUB framework to a real-world medical problem: evaluating vaccines for the 2019 Novel Coronavirus (COVID-19). This task is complicated by the difficulty of evaluating whether a patient is infected: many infections are asymptomatic, and other common illnesses cause similar symptoms. There are a variety of ways to test whether patients have COVID-19, including symptom surveys, antigen tests, and RT-PCR tests, but these vary widely in accuracy and cost. 
+        
+        The HUB framework directly models these challenges. Let the item set be easily observable patient symptoms, $\mathcal{I} = \{\mathrm{None}, \mathrm{Cough}, \mathrm{Fever}\}$. The ``arms'' are vaccine candidates, $\mathcal{C}=\{c^1=\mathrm{Vaccine A}, c^2=\mathrm{Vaccine B}, c^3=\mathrm{No Vaccine}\}$, and the ``teachers'' are COVID-19 test types, $\{\mathrm{Survey}, \mathrm{Antigen}, \mathrm{RT\text{-}PCR}\}$. Surveys are the least accurate but least expensive, while RT-PCR tests are the most accurate and most expensive. We estimate the US dollar cost of surveys at \$1.20 (accounting for 10 minutes of time at the US federal minimum wage of \$7.25), antigen tests at \$42, and RT-PCR tests at \$62 (median prices reported by~\cite{Lo_Amin_Telesford_Dawson_Kates_2023}), then scale these costs by 0.05. We estimate $\beta$ by gathering real-world data on the sensitivity of COVID-19 symptom surveys~\cite{rufino2023using}, antigen tests~\cite{harmon2021validation}, and RT-PCR tests~\cite{binny2023sensitivity}, interpret this sensitivity as the probability $P$ of the test ``preferring'' a patient with no COVID-19 ($\mathcal{U}=u_{max}$) to a patient with definite COVID-19 ($\mathcal{U}=u_{min}$), and calculate $\beta_m$ using Equation~\ref{eq:infer_beta}. We construct arm distributions where patients display the most frequent and severe symptoms with no vaccination, and the least symptoms with Vaccine A, and a utility function where symptoms that have a greater chance of indicating COVID-19 infection have lower scores. These values are reported in Figure~\ref{fig:covid}.
+ 
+        \paragraph{Experiments}
+            We evaluate all algorithms for 25 runs of 1000 timesteps on this COVID-19 task. $\mathbb{U}$ and $\mathbb{D}$ are more finely discretized than in the recommendation HUB in order to allow for more realistic values, so the resulting HUB-POMDP has 5 times more states and is more challenging to solve. While the recommendation experiments averaged results over many problem parameters, here we fix the parameters to the values reported in Figure~\ref{fig:covid}, since they are derived from real-world data and realistic estimates.
+
+        \paragraph{Results}
+
+            Figure~\ref{fig:covid_comparison} summarises the results. Several algorithms perform well: ATS, Random Arms, and Naive[50] (Figure~\ref{fig:covid_perf}). The Random Arms baseline that randomly administers vaccines without testing for COVID-19 performs surprisingly well due to the high cost of reliable testing. However, in this domain, we care not only about vaccinating as many people as possible during the trial, but also about identifying which vaccine performs best. ATS clearly identifies the best vaccine, using it increasingly frequently during the trial (Figure~\ref{fig:covid_act}). The Naive algorithms also identify the best vaccine, but conduct more costly tests than necessary, leading to poorer overall performance.
+
+            \begin{figure}
+                \centering
+                \begin{subfigure}[b]{0.35\textwidth}
+                    \centering
+                    \includegraphics[width=1\linewidth]{figs/perf_all_manual.png}
+                    \caption{Discounted cumulative reward}
+                    \label{fig:covid_perf}
+                \end{subfigure}%
+                \hspace{0.1\linewidth}
+                \begin{subfigure}[b]{0.35\textwidth}
+                    \centering
+                    \includegraphics[width=1\linewidth]{figs/act_ats_manual.png}
+                    \caption{ATS action frequencies}
+                    \label{fig:covid_act}
+                \end{subfigure}\hfill
+                \caption{Performance of all algorithms and ATS action frequencies on the COVID-19 vaccine testing problem. Random Arms and ATS both earn high reward from frequently vaccinating participants (a), though only ATS additionally identifies the most effective vaccine (b). Data is averaged across 25 runs and smoothed across 10 steps.}
+                \label{fig:covid_comparison}
+            \end{figure}
+
+
+
+\section{Related Work}
+
+
+    \paragraph{Multi-Armed Bandits} \textit{Multi-armed bandits} (MAB) are stateless sequential decision-making problems~\cite{Robbins1952-wj,slivkins2019introduction}. At each timestep $h=1,2,\ldots,H$, the agent chooses one of $K$ arms, each with a distribution over utilities. When the agent pulls arm $k\in K$, it receives utility sampled from arm $k$'s distribution $u\sim \mathcal{D}^k$. The agent's goal is to maximize its expected cumulative utility. Our framework is similarly structured, though arm utilities are hidden (as in many real-life applications), and the agent must learn about them from teacher preferences (as in RLHF).
+    
+    \paragraph{Inverse Reinforcement Learning} \textit{Inverse reinforcement learning} (IRL) is a reward learning technique in which the agent infers a reward function given behavioral samples from an optimal policy~\cite{ng2000algorithms, abbeel2004apprenticeship} or a noisy teacher~\cite{Ziebart2010-jr}. It is similar to RLHF in that reward information comes from a teacher rather than the environment, but distinct in that it requires teachers to perform the task well themselves~\cite{Milli2020-fz}. RLHF and the HUB framework are most useful in domains such as those presented in Section~\ref{sec:exp}, where the teacher can distinguish good performance, but does not know how to produce it themselves.
+    \paragraph{Cooperative Inverse Reinforcement Learning} \textit{Cooperative inverse reinforcement learning} (CIRL) extends the IRL framework to allow cooperation and collaboration between the agent and the teacher~\cite{hadfield2016cooperative, malik2018efficient}. HUB problems can be viewed as a specific class of CIRL games in which there are multiple humans, but they can only act (by providing feedback) when the agent requests it (by querying them). However, CIRL problems are DEC-POMDPS, which are NEXP-complete and thus functionally intractable~\cite{bernstein2002complexity}. By fixing the human policy and arm distributions, the HUB framework reduces the problem to a POMDP with a stationary transition function, which is much more tractable. Optimal agent solutions to the CIRL game balance inference and control to produce several qualitatively valuable behaviors, such as only asking the human questions when necessary~\cite{shah2020benefits}. The algorithm that best solves the HUB problem, ATS, demonstrates similarly conservative querying behavior.
+        
+
+
+\section{Conclusion}
+
+
+    We formalized the teacher selection problem in reward learning and proposed a solution method that expresses this problem as a POMDP. Our empirical results underscore the applicability of this framework to real-world problems, as well as the importance of modeling human teachers as distinct entities and actively choosing \textit{when} and \textit{which} teacher to query. 
+    
+    The purpose of this paper is to investigate the novel problem of selecting teachers in RLHF, so the experimental domains focus on tasks where learning the utility function is more challenging than optimizing it. However, real-world RLHF systems often use large deep learning models to tackle challenging problems. Future work will scale insights gained from working with the HUB formalism to reward modeling for large language modeling and deep reinforcement learning systems.
+
+
+
+
+
